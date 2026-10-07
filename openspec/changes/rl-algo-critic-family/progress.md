@@ -88,3 +88,16 @@ Miles `train.py`（c35702e）:118-126 的 critic 训练顺序：`values = critic
 1. **4.2 生产 strict-avg 未接线**：ports 的 `StrictAvgSync` 经 `StrictRlBridge` 与 syncer 只交换 LoRA `CanonicalLoraState`（actor）。把全参数 critic 纳入 strict-avg 需要：(a) 第二条 syncer 通道（design D4"沿用 SAO 双 layout/双 syncer"，launcher 需为 critic 起第二个 syncer 与端口），或扩展单个 syncer 的 layout 同时容纳 LoRA actor 与全参数 critic；(b) Miles critic 进程内的 critic 张量导出/写回插件（全参数、可能经 distributed optimizer 分片）；(c) 两条通道之间的"同轮两者都成功才提交"——现有 syncer 每条通道各自提交，跨通道原子提交需要协议层（`TwoRoleStrictAvg` 只是该语义的 CPU 参照实现）。这超出 tasks 4.2 的 CPU 粒度，且选择 (a)/(b) 影响 launcher 与 syncer，故暂停。
 2. **4.3 生产 checkpoint 未接线**：`RoundCutCheckpoint`/`MilesTrainerGroup.save_cut` 只存 actor LoRA+优化器分片。critic 需同样的 Miles 进程内保存/恢复（全参数 + 优化器状态 + 调度器），并在 pointer 中记录 critic 轮次；`CriticCheckpointStore` 提供了存储格式与轮次一致性校验，但 critic 张量的取得依赖第 1 点 (b)。另：design 写"elastic checkpoint store"，而 critic 与 elastic 已在 2.3 互斥；实际可用的是 `--rl-elastic-checkpoint-store` 驱动的 round-cut（单岛无 sync 也可用），建议在 design 中改述。
 3. 4.1 的"critic layout 不一致时拒绝"目前在 `check_critic_layouts`/`TwoRoleStrictAvg` 中实现并测试；生产外层同步中的强制检查随第 1 点接线。
+
+### 第 5 组 CPU 部分（5.1、5.2 已实现、CPU 已验证；5.3 GPU 未执行）
+
+实现：新模块 `yeto/rl/critic_warmup.py`。
+- `warmup_stage_argv(main_argv, spec, actor_checkpoint, critic_save)`：从主阶段（ports）argv 派生阶段 W argv：去掉 ports driver 专属钩子（rollout sample filter、all-samples hook、buffer filter）与 eval 参数、原有 critic 调度/检查点参数，追加 `--num-rollout N --num-critic-only-steps N --critic-load <初始 actor> --critic-save <产物目录> --save-interval N`（N=warmup_steps；Miles train.py 中 rollout_id < N 时不训练、不保存 actor）。只接受 `init=copy_actor_backbone` 且 warmup_steps>0 的 critic 规格。
+- 主阶段：`critic_argv` 一律 `--num-critic-only-steps 0`，`config.critic_load_argv` 用 run config 的产物路径给出 `--critic-load`；产物哈希经 `runtime_attrs.yeto_rl_critic_init_sha256` 进入 `rl_critic_round` receipt。
+- `checkpoint_sha256`（目录内容哈希，排除 manifest）；`finish_warmup`（阶段 W 后校验初始 actor 检查点哈希未变，计算 critic 哈希，原子写 `critic-warmup.json`）；`load_product`（校验 schema、算法哈希、warmup_steps、初始 actor 哈希、critic 内容哈希）；`ensure_warmup`（以 sha256(算法哈希:初始 actor 哈希) 为键，产物存在且有效则复用，否则只跑一次阶段 W）；`python -m yeto.rl.critic_warmup --dry-run` 输出两阶段 argv。
+
+验证：`tests/test_rl_critic_warmup.py` 9 项：主阶段 critic-only 步数为 0 且加载产物；从完整主阶段 argv 派生的阶段 W argv（钩子/eval 去除、模型/批次/算法参数与主阶段一致）；非 warm 规格拒绝；dry-run 两阶段快照；目录哈希按内容；两岛复用同一产物（阶段 W 只跑 1 次）；warm-up 中 actor 被改动时拒绝；篡改/异算法/异 actor 产物拒绝；主阶段 runtime attr 携带产物哈希。
+
+**设计备注**：1.2 复核时发现 Miles :3210-3212 的"rebuild 模式要求 num_critic_only_steps==0"位于 `--rematerialize-param-from-master-weight` 的校验函数内（该模式不支持 LoRA），ports（LoRA）并不传该参数。design D5 所述"ports 走 rebuild 所以不能 critic-only"的理由在 c35702e 上不成立；真正的约束是 yeto 驱动每轮都训练并发布 actor（门槛、梯度不变量、发布），在 ports 循环内跳过 actor 需要另设计。独立阶段 W 的方案仍成立，建议更正 D5 的理由表述（未改 design，留给主 agent/用户）。
+**未验证（GPU 5.3）**：阶段 W argv 在真实 Miles train.py 上能否启动（去掉的钩子集合是否足够/过多）、critic 保存目录结构、主阶段 `--critic-load` 能否加载阶段 W 产物。
+- 回归：全量 `69 failed` 中唯一新增项 `test_provenance::test_production_tree_has_no_unsafe_torch_load` 由组 4 的 `critic_state.py` 引入（torch.load 未加 weights_only），本提交已修复并复测通过；其余失败集合与 /tmp/base2.sorted 相同。

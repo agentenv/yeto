@@ -35,8 +35,8 @@
 
 ## 5. critic warm-up 初始化
 
-- [ ] 5.1 实现阶段 W 编排：非 rebuild 单次启动，`--critic-load` 指向初始 actor、`--num-critic-only-steps=warmup_steps`，只产出 critic checkpoint 并计算内容哈希；主阶段 `--num-critic-only-steps=0`、`--critic-load` 指向产物（design D5）。验证：dry-run argv 快照两阶段；单测确认主阶段在 rebuild 下 critic-only 步数为 0。
-- [ ] 5.2 校验与复用：warm-up 前后 actor 哈希一致校验；两岛共用同一产物（按哈希复用，不重复跑）。验证：fake 单测。
+- [x] 5.1 实现阶段 W 编排：非 rebuild 单次启动，`--critic-load` 指向初始 actor、`--num-critic-only-steps=warmup_steps`，只产出 critic checkpoint 并计算内容哈希；主阶段 `--num-critic-only-steps=0`、`--critic-load` 指向产物（design D5）。验证：dry-run argv 快照两阶段；单测确认主阶段在 rebuild 下 critic-only 步数为 0。
+- [x] 5.2 校验与复用：warm-up 前后 actor 哈希一致校验；两岛共用同一产物（按哈希复用，不重复跑）。验证：fake 单测。
 - [ ] 5.3 GPU G1：warm-up 50 步 + 主阶段 2 轮，1×H100。**需用户批准预算与机型**，估 ~1 h，≈$4（上限 $8）；可与 3.3 合并在同一容器以省冷启动。验证：actor 哈希不变、主阶段 receipt 含产物哈希、warm-up 后 EV 高于随机初始化对照的首轮（记录数值，不设硬阈值）。
 
 ## 6. fork 共享 GAE 扩展点（需用户同意 fork 提交）
