@@ -367,6 +367,44 @@ def test_mirror_tito_counters_uses_gateway_board_semantics():
         adapter.mirror_tito_counters({"tito_chain_breaks": {"made_up": 1}}, hb)
 
 
+def test_mirror_tito_counters_awaits_remote_board_calls_in_order(monkeypatch, capsys):
+    """S14/A19 (FINAL-REPORT-S7 §6.1, A-T3-7 leftovers): record_session_mismatch /
+    record_chain_break on an actor board were fire-and-forget; each call is now
+    resolved in issue order, and a remote failure never fails the trajectory."""
+
+    class _Ref:  # stands in for ray.ObjectRef
+        def __init__(self, value):
+            self.value = value
+
+    _Ref.__name__ = "ObjectRef"
+    order: list[tuple[str, tuple[Any, ...]]] = []
+    resolved: list[Any] = []
+    monkeypatch.setattr("yeto.rl.engine.tool_wait._resolve", lambda ref: resolved.append(ref) or ref.value)
+
+    class _RemoteBoard:
+        def __init__(self):
+            self.record_session_mismatch = SimpleNamespace(
+                remote=lambda *a: order.append(("record_session_mismatch", a)) or _Ref(None))
+            self.record_chain_break = SimpleNamespace(
+                remote=lambda *a: order.append(("record_chain_break", a)) or _Ref(None))
+
+    metrics = {"tito_session_mismatch": 2, "tito_chain_breaks": {"retry_fork": 1, "history_rewrite": 3}}
+    assert adapter.mirror_tito_counters(metrics, _RemoteBoard()) == {"chain_break_reason": "retry_fork"}
+    assert order == [("record_session_mismatch", (2,)), ("record_chain_break", ("retry_fork", 1)),
+                     ("record_chain_break", ("history_rewrite", 3))]
+    assert len(resolved) == len(order)  # every remote call was awaited, in issue order
+
+    class _FailingBoard:
+        def __init__(self):
+            self.record_session_mismatch = SimpleNamespace(
+                remote=lambda *a: (_ for _ in ()).throw(RuntimeError("board down")))
+            self.record_chain_break = SimpleNamespace(
+                remote=lambda *a: (_ for _ in ()).throw(RuntimeError("board down")))
+
+    assert adapter.mirror_tito_counters(metrics, _FailingBoard()) == {"chain_break_reason": "retry_fork"}
+    assert "harness board record_session_mismatch failed: RuntimeError: board down" in capsys.readouterr().err
+
+
 def test_subprocess_rejection_counters_reach_the_board_and_abort(monkeypatch, tmp_path):
     hb = HarnessBoard()
     provider = _provider(tmp_path)

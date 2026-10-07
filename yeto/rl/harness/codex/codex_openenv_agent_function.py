@@ -364,9 +364,30 @@ def mirror_tito_counters(metrics: dict[str, Any] | None, harness_board: Any) -> 
 
 
 def _board_call(target: Any, method: str, *args: Any) -> Any:
+    """Call a board method and wait for it (A-T3-7 follow-up, S14/A19).
+
+    The island boards are Ray actors with ``max_concurrency=64``: a
+    fire-and-forget ``record_session_mismatch`` / ``record_chain_break`` may
+    land after the round's ``snapshot()`` (counter missing from the rollout it
+    belongs to) and any error it raises is an unhandled actor error instead of
+    this trajectory's. Resolving the ObjectRef here keeps the calls in issue
+    order, like the tool-wait board's enter/exit. A failure of the remote
+    bookkeeping is logged and never fails the trajectory; a local board's own
+    exception (e.g. an unknown chain-break reason) propagates as before."""
+    import sys
+
+    from yeto.rl.engine.tool_wait import _resolve
+
     fn = getattr(target, method)
     remote = getattr(fn, "remote", None)
-    return remote(*args) if callable(remote) else fn(*args)
+    if not callable(remote):
+        return fn(*args)
+    try:
+        return _resolve(remote(*args))
+    except Exception as exc:  # noqa: BLE001 - never fail a trajectory on telemetry
+        print(f"[codex-harness] harness board {method} failed: {type(exc).__name__}: {exc}",
+              file=sys.stderr)
+        return None
 
 
 def trajectory_fields(trajectory_id: str) -> dict[str, Any]:
