@@ -25,6 +25,7 @@ torch / megatron / miles are imported lazily; importing this module is cheap.
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
@@ -974,8 +975,153 @@ def critic_state_summary(actor: Any) -> dict[str, Any]:
             key = f"{index}:{name}"
             specs.append((key, list(parameter.shape), str(parameter.dtype)))
             tensors[key] = parameter.detach()
-    rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
-    return {"rank": rank, "specs": specs, "weights_sha256": critic_weights_sha256(tensors)}
+    return {"rank": _rank(), "specs": specs, "weights_sha256": critic_weights_sha256(tensors)}
+
+
+EXPORT_CRITIC_TENSORS = f"{_PLUGIN_MODULE}.export_critic_tensors"
+IMPORT_CRITIC_TENSORS = f"{_PLUGIN_MODULE}.import_critic_tensors"
+SAVE_CRITIC_CUT = f"{_PLUGIN_MODULE}.save_critic_cut"
+RESTORE_CRITIC_CUT = f"{_PLUGIN_MODULE}.restore_critic_cut"
+
+
+def _critic_parameters(actor: Any) -> dict[str, Any]:
+    """``index:name`` -> trainable critic parameter of this rank (same keys as
+    critic_state_summary)."""
+
+    out = {}
+    for index, chunk in enumerate(actor.model):
+        for name, parameter in chunk.named_parameters():
+            if parameter.requires_grad:
+                out[f"{index}:{name}"] = parameter
+    return out
+
+
+def _rank() -> int:
+    import torch
+
+    return torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+
+
+def _export_critic_tensors(actor: Any) -> dict[str, Any]:
+    """Plugin (critic process, 4.2.2): this rank's full-parameter critic tensors
+    (fp32 CPU copies) with their content hash, for the critic syncer channel."""
+
+    import torch
+
+    from yeto.rl.critic_state import critic_weights_sha256
+
+    with torch.no_grad():
+        tensors = {k: p.detach().to("cpu", torch.float32).clone()
+                   for k, p in _critic_parameters(actor).items()}
+    return {"rank": _rank(), "tensors": tensors, "weights_sha256": critic_weights_sha256(tensors)}
+
+
+def _import_critic_tensors(actor: Any, *, by_rank: dict[int, dict[str, Any]]) -> dict[str, Any]:
+    """Plugin (critic process, 4.2.2): ``by_rank[rank] = {"tensors", "sha256"}``;
+    write the averaged critic tensors of this rank back into the critic parameters, then re-hash the written parameters
+    (cast back to fp32) against ``expect_sha256``.
+
+    A name/shape mismatch is refused before any write; a hash mismatch after the
+    write is returned as a refusal (the caller treats the critic as dirty and
+    rolls back to the last committed round)."""
+
+    import torch
+
+    from yeto.rl.critic_state import critic_weights_sha256
+
+    rank = _rank()
+    if rank not in by_rank:
+        return {"refused": f"no critic tensors for rank {rank}", "rank": rank}
+    tensors, expect_sha256 = by_rank[rank]["tensors"], by_rank[rank]["sha256"]
+    params = _critic_parameters(actor)
+    if set(params) != set(tensors):
+        return {"refused": f"critic tensor names differ: missing {sorted(set(params) - set(tensors))[:4]}, "
+                           f"unexpected {sorted(set(tensors) - set(params))[:4]}"}
+    for key, value in tensors.items():
+        if tuple(value.shape) != tuple(params[key].shape):
+            return {"refused": f"critic tensor {key} shape {tuple(value.shape)} != {tuple(params[key].shape)}"}
+    if critic_weights_sha256(tensors) != expect_sha256:
+        return {"refused": "incoming critic tensors differ from their announced hash"}
+    with torch.no_grad():
+        for key, value in tensors.items():
+            params[key].copy_(value.to(params[key].device, params[key].dtype))
+        written = {k: p.detach().to("cpu", torch.float32) for k, p in params.items()}
+    got = critic_weights_sha256(written)
+    if got != expect_sha256:
+        # e.g. bf16 parameters cannot hold the fp32 average exactly
+        return {"refused": f"written critic hash {got[:12]} != expected {expect_sha256[:12]}",
+                "rank": _rank(), "weights_sha256": got}
+    return {"rank": _rank(), "weights_sha256": got}
+
+
+def _save_critic_cut(actor: Any, *, directory: str, round_id: int) -> dict[str, Any]:
+    """Plugin (critic process, 4.3): this rank's critic weights + optimizer +
+    LR-scheduler state into ``directory/rank-<r>/`` via CriticCheckpointStore
+    (manifest committed last)."""
+
+    import torch
+
+    from yeto.rl.critic_state import CriticCheckpointStore
+
+    rank = _rank()
+    with torch.no_grad():
+        weights = {k: p.detach().to("cpu") for k, p in _critic_parameters(actor).items()}
+    scheduler = getattr(actor, "opt_param_scheduler", None)
+    manifest = CriticCheckpointStore(os.path.join(directory, f"rank-{rank}")).save(
+        round_id=int(round_id), weights=weights,
+        optimizer={"optimizer": actor.optimizer.state_dict(),
+                   "scheduler": scheduler.state_dict() if scheduler is not None else None},
+    )
+    return {"rank": rank, **manifest}
+
+
+def _restore_critic_cut(actor: Any, *, directory: str, actor_round: int,
+                       critic_round: int) -> dict[str, Any]:
+    """Plugin (critic process, 4.3): load this rank's critic round (refuses a
+    critic round != actor round and a manifest mismatch) and re-hash."""
+
+    import torch
+
+    from yeto.rl.critic_state import CriticCheckpointStore, CriticStateError, critic_weights_sha256
+
+    rank = _rank()
+    try:
+        weights, state = CriticCheckpointStore(os.path.join(directory, f"rank-{rank}")).restore(
+            actor_round=int(actor_round), critic_round=int(critic_round))
+    except CriticStateError as error:
+        return {"refused": str(error), "rank": rank}
+    params = _critic_parameters(actor)
+    if set(params) != set(weights):
+        return {"refused": "critic checkpoint tensor names differ from the running critic", "rank": rank}
+    with torch.no_grad():
+        for key, value in weights.items():
+            params[key].copy_(value.to(params[key].device, params[key].dtype))
+    actor.optimizer.load_state_dict(state["optimizer"])
+    scheduler = getattr(actor, "opt_param_scheduler", None)
+    if scheduler is not None and state.get("scheduler") is not None:
+        scheduler.load_state_dict(state["scheduler"])
+    return {"rank": rank, "weights_sha256": critic_weights_sha256(
+        {k: p.detach().to("cpu") for k, p in params.items()})}
+
+
+def export_critic_tensors(actor: Any) -> dict[str, Any]:
+    with trainer_resident(actor):
+        return _export_critic_tensors(actor)
+
+
+def import_critic_tensors(actor: Any, **kwargs: Any) -> dict[str, Any]:
+    with trainer_resident(actor):
+        return _import_critic_tensors(actor, **kwargs)
+
+
+def save_critic_cut(actor: Any, **kwargs: Any) -> dict[str, Any]:
+    with trainer_resident(actor):
+        return _save_critic_cut(actor, **kwargs)
+
+
+def restore_critic_cut(actor: Any, **kwargs: Any) -> dict[str, Any]:
+    with trainer_resident(actor):
+        return _restore_critic_cut(actor, **kwargs)
 
 
 def install_critic_recorders(actor: Any) -> bool:

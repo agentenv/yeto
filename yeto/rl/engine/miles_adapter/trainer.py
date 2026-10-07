@@ -429,6 +429,96 @@ class MilesTrainerGroup:
             explained_variance=metrics.get("critic/explained_variance"),
         )
 
+    # -- rl-algo-critic-family 4.2.2 / 4.3: critic tensors and critic cut ---------------
+
+    def critic_layout(self) -> str:
+        """critic_layout_hash over every critic rank's trainable specs (same as the receipt)."""
+        receipt = self.critic_round_receipt(0)  # only the layout hash is read
+        if receipt is None:
+            raise TrainStepError("no critic in this trainer")
+        return receipt.critic_layout_hash
+
+    def export_critic_state(self) -> dict[str, Any]:
+        """All critic ranks' full-parameter tensors (fp32 CPU), keyed ``r<rank>:<index>:<name>``."""
+        from .state_plugin import EXPORT_CRITIC_TENSORS
+        from yeto.rl.critic_state import critic_weights_sha256
+
+        if self._critic is None:
+            raise TrainStepError("no critic in this trainer")
+        out: dict[str, Any] = {}
+        for part in self._run(self._critic.run_plugin(EXPORT_CRITIC_TENSORS, {})):
+            if critic_weights_sha256(part["tensors"]) != part["weights_sha256"]:
+                raise TrainStepError(f"critic rank {part['rank']} export fails its hash")
+            out.update({f"r{part['rank']}:{k}": v for k, v in part["tensors"].items()})
+        if not out:
+            raise TrainStepError("critic exported no tensors")
+        return out
+
+    def import_critic_state(self, tensors: Mapping[str, Any]) -> str:
+        """Write ``export_critic_state``-shaped tensors back to every critic rank; each
+        rank re-hashes what it wrote. Returns the combined content hash."""
+        from .state_plugin import IMPORT_CRITIC_TENSORS
+        from yeto.rl.critic_state import CriticStateError, critic_weights_sha256
+
+        if self._critic is None:
+            raise TrainStepError("no critic in this trainer")
+        by_rank: dict[int, dict[str, Any]] = {}
+        for key, value in tensors.items():
+            prefix, _, rest = key.partition(":")
+            if not prefix.startswith("r") or not rest:
+                raise CriticStateError(f"critic tensor key {key!r} has no rank prefix")
+            by_rank.setdefault(int(prefix[1:]), {}).setdefault("tensors", {})[rest] = value
+        for entry in by_rank.values():
+            entry["sha256"] = critic_weights_sha256(entry["tensors"])
+        results = list(self._run(self._critic.run_plugin(IMPORT_CRITIC_TENSORS, {"by_rank": by_rank})))
+        refused = [r["refused"] for r in results if "refused" in r]
+        if refused:
+            raise CriticStateError("critic write-back refused: " + "; ".join(sorted(set(refused))))
+        if sorted(r["rank"] for r in results) != sorted(by_rank):
+            raise CriticStateError(f"critic ranks {sorted(r['rank'] for r in results)} != {sorted(by_rank)}")
+        return critic_weights_sha256(dict(tensors))
+
+    def _save_critic_cut(self, directory: Any, round_id: int) -> dict[str, Any] | None:
+        if self._critic is None:
+            return None
+        from .state_plugin import SAVE_CRITIC_CUT
+
+        ranks = sorted((dict(r) for r in self._run(self._critic.run_plugin(
+            SAVE_CRITIC_CUT, {"directory": str(directory), "round_id": int(round_id)}))),
+            key=lambda r: r["rank"])
+        if not ranks:
+            raise TrainStepError("critic saved no cut shard")
+        # the pointer records the critic round next to the actor's policy_version
+        return {"round": int(round_id), "directory": "critic",
+                "ranks": [{k: r[k] for k in ("rank", "weights_sha256", "optimizer_sha256")} for r in ranks]}
+
+    def _restore_critic_cut(self, directory: Any, manifest: Any) -> None:
+        from ..cut import CutError
+
+        pointer = (manifest.runtime or {}).get("critic")
+        if self._critic is None:
+            if pointer is not None:
+                raise CutError("the cut carries critic state but this trainer has no critic")
+            return
+        if pointer is None:
+            raise CutError("this trainer has a critic but the cut carries no critic state")
+        actor_round = int(manifest.progress.policy_version)
+        if int(pointer["round"]) != actor_round:
+            raise CutError(f"cut actor round {actor_round} != critic round {pointer['round']}; "
+                           "actor and critic must come from the same committed round")
+        from .state_plugin import RESTORE_CRITIC_CUT
+
+        results = {r["rank"]: dict(r) for r in self._run(self._critic.run_plugin(
+            RESTORE_CRITIC_CUT, {"directory": str(directory), "actor_round": actor_round,
+                                 "critic_round": int(pointer["round"])}))}
+        refused = [r["refused"] for r in results.values() if "refused" in r]
+        if refused:
+            raise CutError("critic restore refused: " + "; ".join(sorted(set(refused))))
+        saved = {r["rank"]: r["weights_sha256"] for r in pointer["ranks"]}
+        got = {rank: r["weights_sha256"] for rank, r in results.items()}
+        if got != saved:
+            raise CutError(f"restored critic weights differ from the cut (ranks {sorted(saved)} vs {sorted(got)})")
+
     def _reshard_guard(self, batch: RolloutBatchHandle) -> None:
         """After a DP change: refuse a batch the fork would split on its unscheduled path (4.6 review M2)."""
         plan = getattr(self, "_reshard_plan", None)
@@ -604,6 +694,11 @@ class MilesTrainerGroup:
                     if (s["coord"]["tp"], s["coord"]["pp"], s["coord"].get("ep", 0)) == key:
                         s["has_optimizer_state"] = False
                 problems.append(f"tp{key[0]}/pp{key[1]}/ep{key[2]}: no optimizer state for {missing or 'any adapter'}")
+        if problems:
+            raise CutError("refusing an incomplete cut: " + "; ".join(problems))
+        critic = self._save_critic_cut(directory / "critic", context.progress.policy_version)
+        if critic is not None:  # 4.3; absent for every critic-free trainer (manifest unchanged)
+            runtime = {**runtime, "critic": critic}
         manifest = CutManifest(
             cut_id=cut_id,
             epoch=int(epoch),
@@ -712,6 +807,7 @@ class MilesTrainerGroup:
                                    f"after_load->reexport {r.get('optimizer_after_load_vs_reexport')}; "
                                    f"rank diff {r.get('diff')}; "
                                    f"differing components ({len(differ)}): {differ[:40]}")
+        self._restore_critic_cut(cut_dir(root, cut_id) / "critic", manifest)
         return manifest
 
     def restore_cut_resharded(self, cut_id: str, *, epoch: int, root: str, expect: Any, plan: Any,
@@ -733,6 +829,8 @@ class MilesTrainerGroup:
         from ..cut import CutError, cut_dir, verify_cut
         from .cut_plugin import RANK_COORDS, RESTORE_RESHARDED_SHARD
         from .reshard import ReshardRefused, reshard_problems, rng_mapping
+        if getattr(self, "_critic", None) is not None:  # rl-algo-critic-family 4.3 (critic excludes elastic)
+            raise CutError("a resharded (DP-change) restore with a critic is not supported")
 
         problems = reshard_problems(plan, args=self._args, spec=self._spec, certified=certified)
         if not shared_filesystem:

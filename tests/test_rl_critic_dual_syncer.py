@@ -76,3 +76,124 @@ def test_island_env_carries_the_critic_syncer_address():
     assert task.envs["CRITIC_SYNCER_ADDR"] == f"10.0.0.5:{launcher.CRITIC_SYNCER_PORT}"
     assert launcher.critic_syncer_address("$SYNCER_ADDR") == "$CRITIC_SYNCER_ADDR"
 
+
+
+# -- 4.2.2 critic full-parameter export / write-back plugin (CPU fake ranks) ---------
+
+
+import asyncio  # noqa: E402
+import importlib  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+
+from yeto.rl import critic_state as cs  # noqa: E402
+from yeto.rl.engine.miles_adapter import state_plugin as sp  # noqa: E402
+from yeto.rl.engine.miles_adapter.trainer import MilesTrainerGroup  # noqa: E402
+
+H = "a" * 64
+
+
+class _Sched:
+    def __init__(self):
+        self.num_steps = 0
+
+    def state_dict(self):
+        return {"num_steps": self.num_steps}
+
+    def load_state_dict(self, state):
+        self.num_steps = state["num_steps"]
+
+
+def _rank_actor(seed, dtype=torch.float32):
+    torch.manual_seed(seed)
+    body = torch.nn.Module()
+    body.embedding = torch.nn.Linear(4, 3)
+    body.output_layer = torch.nn.Linear(3, 1, bias=False)  # value head [1, hidden]
+    body = body.to(dtype)
+    body.embedding.bias.requires_grad_(False)  # frozen tensors are not critic state
+    opt = torch.optim.Adam([p for p in body.parameters() if p.requires_grad], lr=1e-3)
+    return SimpleNamespace(model=[body], optimizer=opt, opt_param_scheduler=_Sched())
+
+
+class _CriticRanks:
+    """A fake Miles critic TrainGroup: run_plugin calls the plugin on every rank."""
+
+    def __init__(self, ranks):
+        self.ranks = ranks
+
+    async def run_plugin(self, fn_path, kwargs=None):
+        module, _, name = fn_path.rpartition(".")
+        fn = getattr(importlib.import_module(module), name)
+        out = []
+        saved = sp._rank
+        try:
+            for rank, actor in enumerate(self.ranks):
+                sp._rank = lambda r=rank: r
+                out.append(fn(actor, **(kwargs or {})))
+        finally:
+            sp._rank = saved
+        return out
+
+
+def _critic_trainer(ranks):
+    return MilesTrainerGroup(
+        args=SimpleNamespace(num_steps_per_rollout=1), actor_model=SimpleNamespace(),
+        learner_id=0, learner_generation=0, parameter_layout_hash=lambda: H,
+        algorithm="ppo", spec=PPO, critic_model=_CriticRanks(ranks))
+
+
+def _step(actor):
+    params = [p for p in actor.model[0].parameters() if p.requires_grad]
+    loss = sum((p.float() ** 2).sum() for p in params)
+    loss.backward()
+    actor.optimizer.step()
+    actor.optimizer.zero_grad()
+    actor.opt_param_scheduler.num_steps += 8
+
+
+def test_critic_tensors_round_trip_through_fragments():
+    ranks = [_rank_actor(0), _rank_actor(1)]
+    trainer = _critic_trainer(ranks)
+    state = trainer.export_critic_state()
+    assert sorted(state) == ["r0:0:embedding.weight", "r0:0:output_layer.weight",
+                             "r1:0:embedding.weight", "r1:0:output_layer.weight"]
+    layout = trainer.critic_layout()
+    before = cs.critic_weights_sha256(state)
+    fragments = cs.critic_fragments(state, layout_sha256=layout, max_fragment_bytes=48)
+    assert len(fragments) > 1  # 12-float weights cut by the 48-byte budget
+    specs = [(k, list(v.shape), str(v.dtype)) for k, v in state.items()]
+    back = cs.assemble_critic_fragments(fragments, layout_sha256=layout, expected_specs=specs)
+    assert cs.critic_weights_sha256(back) == before
+    # write a different (averaged) state back, then re-export: same hash
+    other = _critic_trainer([_rank_actor(5), _rank_actor(6)]).export_critic_state()
+    avg = {k: (state[k] + other[k]) / 2 for k in state}
+    assert trainer.import_critic_state(avg) == cs.critic_weights_sha256(avg)
+    assert cs.critic_weights_sha256(trainer.export_critic_state()) == cs.critic_weights_sha256(avg)
+
+
+def test_fragment_refusals():
+    state = _critic_trainer([_rank_actor(0)]).export_critic_state()
+    fragments = cs.critic_fragments(state, layout_sha256=H, max_fragment_bytes=1 << 20)
+    with pytest.raises(cs.CriticLayoutMismatch):
+        cs.assemble_critic_fragments(fragments, layout_sha256="b" * 64)
+    bad = [cs.CriticFragment(f.index, f.layout_sha256, f.names,
+                             {n: t + 1 for n, t in f.tensors.items()}, f.sha256) for f in fragments]
+    with pytest.raises(cs.CriticStateError, match="content hash"):
+        cs.assemble_critic_fragments(bad, layout_sha256=H)
+    with pytest.raises(cs.CriticStateError, match="complete"):
+        cs.assemble_critic_fragments(fragments + fragments, layout_sha256=H)
+    with pytest.raises(cs.CriticLayoutMismatch, match="specs"):
+        cs.assemble_critic_fragments(fragments, layout_sha256=H, expected_specs=[("x", [1], "torch.float32")])
+
+
+def test_write_back_refusals():
+    trainer = _critic_trainer([_rank_actor(0)])
+    state = trainer.export_critic_state()
+    with pytest.raises(cs.CriticStateError, match="names differ"):
+        trainer.import_critic_state({"r0:0:extra": torch.zeros(1), **state})
+    with pytest.raises(cs.CriticStateError, match="shape"):
+        trainer.import_critic_state({k: torch.zeros(2, 2) for k in state})
+    # bf16 parameters cannot hold an arbitrary fp32 average: the post-write hash check refuses
+    bf16 = _critic_trainer([_rank_actor(0, torch.bfloat16)])
+    odd = {k: v + 1e-4 for k, v in bf16.export_critic_state().items()}
+    with pytest.raises(cs.CriticStateError, match="written critic hash"):
+        bf16.import_critic_state(odd)
