@@ -37,6 +37,7 @@ from yeto.rl.tbench_outcome import (
 
 from . import agent as legacy
 from . import codex_harness_agent as harness
+from . import compaction_bridge
 from .environment import TerminalEnvironment, TrustedVerifier
 from .pins import OPENENV_BACKEND_PROFILE
 
@@ -128,19 +129,34 @@ async def drive_untrusted(
     scoped_env = _ToolWaitEnvironment(env, tool_wait)
     episode = {"episode_id": job["episode_id"], "prompt": job["prompt"]}
     codex = binary if binary is not None else harness._attest_runtime()
-    try:
-        status = await asyncio.wait_for(
-            harness._drive_codex(
-                codex,
-                job["base_url"],
-                scoped_env,
-                episode,
-                dict(job.get("request_kwargs") or {}),
-                metrics,
-                max_seq_len=job.get("max_seq_len"),
-            ),
-            timeout=_max_rollout_seconds(),
+    segment_urls = job.get(compaction_bridge.SEGMENT_URLS_KEY)
+    if compaction_bridge.compactionrl_enabled():
+        if not isinstance(segment_urls, list) or not all(isinstance(u, str) for u in segment_urls):
+            raise harness.CodexHarnessError("CompactionRL job has no pre-created segment sessions")
+        driving = compaction_bridge.drive_codex_compactionrl(
+            codex,
+            job["base_url"],
+            scoped_env,
+            episode,
+            dict(job.get("request_kwargs") or {}),
+            metrics,
+            max_seq_len=job.get("max_seq_len"),
+            segment_base_urls=segment_urls,
         )
+    elif segment_urls is not None:
+        raise harness.CodexHarnessError("segment sessions supplied without CompactionRL")
+    else:
+        driving = harness._drive_codex(
+            codex,
+            job["base_url"],
+            scoped_env,
+            episode,
+            dict(job.get("request_kwargs") or {}),
+            metrics,
+            max_seq_len=job.get("max_seq_len"),
+        )
+    try:
+        status = await asyncio.wait_for(driving, timeout=_max_rollout_seconds())
     except asyncio.TimeoutError:
         metrics.timed_out = 1
         status = "timeout"
@@ -155,7 +171,65 @@ async def drive_untrusted(
 
 
 def _metrics_dict(metrics: legacy.AgentMetrics) -> dict[str, Any]:
-    return {**asdict(metrics), **harness.tito_counters(metrics)}
+    # compaction_counters is {} unless the CompactionRL bridge ran.
+    return {**asdict(metrics), **harness.tito_counters(metrics), **compaction_bridge.compaction_counters(metrics)}
+
+
+# --- CompactionRL segment sessions (trusted side; design D8) ----------------
+_SESSION_FIELDS = ("temperature", "top_p", "top_k")
+
+
+def split_session_url(base_url: str) -> tuple[str, str]:
+    """``{router}/sessions/{id}`` -> (router, id)."""
+    head, sep, session_id = base_url.rstrip("/").rpartition("/sessions/")
+    if not sep or not head or not session_id or "/" in session_id:
+        raise ValueError(f"not a session-server session URL: {base_url!r}")
+    return head, session_id
+
+
+def segment_session_body(request_kwargs: dict[str, Any]) -> dict[str, Any]:
+    """``CreateSessionRequest`` body with the rollout's own sampling defaults."""
+    body: dict[str, Any] = {"evaluation": False}
+    for key in _SESSION_FIELDS:
+        value = request_kwargs.get(key)
+        if value is not None:
+            body[key] = int(value) if key == "top_k" else float(value)
+    return body
+
+
+async def _post_json(url: str, body: dict[str, Any]) -> dict[str, Any]:
+    import aiohttp
+
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120)) as session:
+        async with session.post(url, json=body) as response:
+            if response.status != 200:
+                raise RuntimeError(f"session server returned HTTP {response.status}")
+            return await response.json()
+
+
+async def create_segment_sessions(
+    base_url: str,
+    request_kwargs: dict[str, Any],
+    count: int,
+    *,
+    post: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
+) -> tuple[list[str], list[str]]:
+    """Pre-create one session per allowed compaction; returns (ids, agent base URLs).
+
+    Created here, in the trusted layer, so the untrusted worker can only use
+    sessions this rollout owns; ``codex_openenv_generate`` collects (and so
+    deletes) every listed session, used or not.
+    """
+    router, _ = split_session_url(base_url)
+    body = segment_session_body(request_kwargs)
+    ids: list[str] = []
+    for _ in range(count):
+        reply = await (post or _post_json)(f"{router}/sessions", dict(body))
+        session_id = reply.get("session_id") if isinstance(reply, dict) else None
+        if not isinstance(session_id, str) or not session_id or "/" in session_id:
+            raise RuntimeError("session server returned no session_id")
+        ids.append(session_id)
+    return ids, [f"{router}/sessions/{session_id}" for session_id in ids]
 
 
 async def finish_trusted(
@@ -290,6 +364,13 @@ async def run(
         "max_seq_len": metadata.get("max_seq_len"),
     }
     try:
+        segments = await prepare_segment_sessions(job)
+    except Exception as exc:  # noqa: BLE001 - session-server failures are infrastructure
+        return {
+            **infrastructure_metadata(f"segment sessions: {type(exc).__name__}: {exc}", episode_id=episode_id),
+            **trajectory_fields(trajectory_id),
+        }
+    try:
         untrusted = await drive_untrusted(job, environment, tool_wait=tool_wait)
     except (harness.CodexHarnessError, legacy.EpisodeClientError, OSError) as exc:
         metrics = getattr(exc, "metrics", None)
@@ -298,10 +379,32 @@ async def run(
             **infrastructure_metadata(f"{type(exc).__name__}: {exc}", episode_id=episode_id, metrics=metrics),
             **trajectory_fields(trajectory_id),
             **tito,
+            **segments,
         }
     tito = mirror_tito_counters(untrusted.get("metrics"), harness_board)
     signed = await finish_trusted(untrusted, verifier, task_id=task_id, sample_id=sample_id)
-    return {**signed, **trajectory_fields(trajectory_id), **tito}
+    return {**signed, **trajectory_fields(trajectory_id), **tito, **segments}
+
+
+async def prepare_segment_sessions(
+    job: dict[str, Any],
+    *,
+    post: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    """CompactionRL only: add segment URLs to ``job``; return the trusted metadata.
+
+    Returns ``{}`` (and leaves ``job`` untouched) when CompactionRL is off.
+    """
+    if not compaction_bridge.compactionrl_enabled():
+        return {}
+    if job.get("max_seq_len") is None:
+        raise harness.CodexHarnessError("CompactionRL requires max_seq_len")
+    cfg = compaction_bridge.compaction_config(int(job["max_seq_len"]))
+    ids, urls = await create_segment_sessions(
+        job["base_url"], dict(job.get("request_kwargs") or {}), cfg.max_compactions, post=post
+    )
+    job[compaction_bridge.SEGMENT_URLS_KEY] = urls
+    return {compaction_bridge.SESSIONS_METADATA_KEY: ids}
 
 
 def hmac_key_env_names() -> tuple[str, ...]:
