@@ -340,6 +340,10 @@ def test_modal_retries_zero_or_no_island_relaunch_disables_the_launcher_relaunch
     assert effective_recover_timeout(_parsed(("--modal-retries", "0"))) == 0
     assert effective_recover_timeout(_parsed(("--no-island-relaunch",))) == 0
     assert effective_recover_timeout(_parsed(("--recover-timeout", "60"))) == 60
+    # kill/resume tests: Modal never re-runs the container, the launcher still relaunches
+    assert effective_recover_timeout(_parsed(("--modal-retries", "0", "--modal-launcher-relaunch"))) == 1200
+    assert effective_recover_timeout(_parsed(("--modal-retries", "0", "--modal-launcher-relaunch",
+                                              "--no-island-relaunch"))) == 0
     # the controller built with that budget never relaunches a failed island
     ops = FakeOps()
     ops.status_seq["l0"] = [RUNNING, FAILED]

@@ -345,6 +345,29 @@ def test_two_islands_actor_and_critic_hashes_agree(tmp_path):
         applies = [c for c in e.calls if c[0] in ("apply", "critic_apply")]
         # initial + 2 committed rounds, critic applied before the actor each time
         assert [c[0] for c in applies] == ["critic_apply", "apply"] * 3
+    # G3 evidence: per committed version, both islands record the same applied critic
+    import json
+
+    tapes = [[json.loads(line) for line in (tmp_path / f"i{i}.jsonl").read_text().splitlines()]
+             for i in range(2)]
+    per = [{e["policy_version"]: (e["sync/global_critic_hash"], e["rl/critic/applied_weights_sha256"])
+            for e in t if e.get("event") == "rl_critic_apply"} for t in tapes]
+    assert sorted(per[0]) == [0, 1, 2] and per[0] == per[1]
+    assert per[0][2][1] == critic[0]
+
+
+def test_modal_island_config_swaps_the_critic_syncer_address():
+    from yeto import launcher
+    from yeto.gpu_spec import parse_gpu_spec
+
+    args = _two_island_args(PPO)
+    spec = parse_gpu_spec(args.gpu)[0]
+    task = launcher.make_miles_island_task(args, spec, 0, 2, "10.0.0.5:29400")
+    task.envs = {**task.envs, "CRITIC_SYNCER_ADDR": launcher.critic_syncer_address("10.0.0.5:29400")}
+    args.rl_image = "ghcr.io/x/miles@sha256:" + "a" * 64
+    cfg = launcher.build_modal_island_config(args, spec, 0, task, "203.0.113.7:29400")
+    assert cfg.envs["SYNCER_ADDR"] == "203.0.113.7:29400"
+    assert cfg.envs["CRITIC_SYNCER_ADDR"] == f"203.0.113.7:{launcher.CRITIC_SYNCER_PORT}"
 
 
 def test_critic_channel_failure_rolls_back_both_roles(tmp_path):

@@ -580,6 +580,9 @@ class ModalIslandOps:
             print(f"[modal] relaunch of {name} failed: {exc}", file=sys.stderr)
             return None
         self.calls[name] = call_id
+        # The call id is the handle for `modal.FunctionCall.from_id(..).cancel()`
+        # (kill/resume tests) and for reading one island's logs.
+        print(f"[modal] {name}: function call {call_id}", flush=True)
         return call_id
 
     def down(self, name: str) -> None:
