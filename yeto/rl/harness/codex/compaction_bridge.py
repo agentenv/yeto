@@ -177,7 +177,7 @@ class CompactionRLBridge(harness._ResponsesBridge):
         retained = self._atomic_steps[-retained_step_count:] if retained_step_count else []
         bounds = self._step_bounds[-retained_step_count:] if retained_step_count else []
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": harness.BASE_INSTRUCTIONS},
+            {"role": "system", "content": harness.base_instructions()},
             {"role": "user", "content": RESUME_TEMPLATE.format(summary=self._resume_summary)},
         ]
         for assistant, tool in retained:
@@ -194,7 +194,7 @@ class CompactionRLBridge(harness._ResponsesBridge):
 
     def _choose_kept_steps(self, summary: str) -> int:
         """Eq. 9: largest k <= cfg.k whose rebuilt context does not trigger again."""
-        head = _message_bound({"role": "system", "content": harness.BASE_INSTRUCTIONS}) + _message_bound(
+        head = _message_bound({"role": "system", "content": harness.base_instructions()}) + _message_bound(
             {"role": "user", "content": RESUME_TEMPLATE.format(summary=summary)}
         )
         for k in range(min(self._cfg.keep_recent_steps, len(self._atomic_steps)), 0, -1):

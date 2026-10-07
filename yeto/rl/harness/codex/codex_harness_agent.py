@@ -209,6 +209,44 @@ def _sha256_json(value: Any) -> str:
 
 
 BASE_INSTRUCTIONS_SHA256 = hashlib.sha256(BASE_INSTRUCTIONS.encode()).hexdigest()
+
+# 2026-10-07 (S15 stage 2): Terminal-Bench 2 tasks get their own system prompt.
+# The legacy text above is a security-testing/CTF prompt (TARGET_URL, flags,
+# "no shell for the scored target"); in TB2 the shell *is* the scored task
+# container.  Selected per episode by the TB2 environment provider through
+# ``YETO_CODEX_INSTRUCTIONS_FAMILY=tb2`` plus the signed
+# ``YETO_CODEX_TB2_BASE_INSTRUCTIONS_SHA256`` (worker env); every other path
+# keeps BASE_INSTRUCTIONS and its unchanged hash.
+TB2_BASE_INSTRUCTIONS = """You are an autonomous terminal agent solving a
+Terminal-Bench task. You have a shell inside the task container: the container
+is the environment that will be graded, and your working directory is the task
+workdir. Read the task statement in the user message, then complete the task by
+calling the `terminal.exec` tool (one shell command per call; inspect files,
+edit, install, build and run tests as needed). Do not merely describe commands:
+call `terminal.exec`. Do not invent tool results. Verify your work in the
+container. When the task is complete, call `submit` exactly once with a short
+JSON evidence string describing what you did and how you verified it. The
+`submit` call is terminal: make no further model or tool calls. The grader runs
+the task's hidden tests against the container state after you submit or run out
+of turns."""
+TB2_BASE_INSTRUCTIONS_SHA256 = hashlib.sha256(TB2_BASE_INSTRUCTIONS.encode()).hexdigest()
+INSTRUCTIONS_FAMILY_ENV = "YETO_CODEX_INSTRUCTIONS_FAMILY"
+TB2_INSTRUCTIONS_SHA_ENV = "YETO_CODEX_TB2_BASE_INSTRUCTIONS_SHA256"
+TB2_INSTRUCTIONS_FAMILY = "tb2"
+
+
+def base_instructions() -> str:
+    """System prompt for this process: legacy unless the TB2 family is signed in."""
+    family = os.getenv(INSTRUCTIONS_FAMILY_ENV, "").strip()
+    if not family:
+        return BASE_INSTRUCTIONS
+    if family != TB2_INSTRUCTIONS_FAMILY:
+        raise CodexHarnessError(f"{INSTRUCTIONS_FAMILY_ENV}={family!r} is not a signed instructions family")
+    if hashlib.sha256(TB2_BASE_INSTRUCTIONS.encode()).hexdigest() != TB2_BASE_INSTRUCTIONS_SHA256 or not hmac.compare_digest(
+        os.getenv(TB2_INSTRUCTIONS_SHA_ENV, ""), TB2_BASE_INSTRUCTIONS_SHA256
+    ):
+        raise CodexHarnessError(f"{TB2_INSTRUCTIONS_SHA_ENV} does not match the signed TB2 instructions")
+    return TB2_BASE_INSTRUCTIONS
 TERMINAL_EXEC_TOOL_SCHEMA_SHA256 = _sha256_json(TERMINAL_EXEC_TOOL)
 SUBMIT_TOOL_SCHEMA_SHA256 = _sha256_json(SUBMIT_TOOL)
 DYNAMIC_TOOLS_SCHEMA_SHA256 = _sha256_json(DYNAMIC_TOOLS)
@@ -485,7 +523,7 @@ _EXPECTED_RESPONSE_TOOLS = [_response_tool(tool) for tool in DYNAMIC_TOOLS]
 def _validate_codex_request(body: Any, expected_model: str) -> list[dict[str, Any]]:
     if not isinstance(body, dict):
         raise CodexHarnessError("Codex Responses request is not an object")
-    if body.get("model") != expected_model or body.get("instructions") != BASE_INSTRUCTIONS:
+    if body.get("model") != expected_model or body.get("instructions") != base_instructions():
         raise CodexHarnessError("Codex model or base instructions drifted")
     if body.get("stream") is not True or body.get("store") is not False:
         raise CodexHarnessError("Codex must use one non-persistent stream")
@@ -745,7 +783,7 @@ def _sse_response(
         "status": "completed",
         "error": None,
         "incomplete_details": None,
-        "instructions": BASE_INSTRUCTIONS,
+        "instructions": base_instructions(),
         "max_output_tokens": None,
         "max_tool_calls": None,
         "model": request["model"],
@@ -1058,7 +1096,7 @@ class _ResponsesBridge:
                     if history != expected:
                         raise CodexHarnessError("Codex mutated the initial task history")
                     self._messages = [
-                        {"role": "system", "content": BASE_INSTRUCTIONS},
+                        {"role": "system", "content": base_instructions()},
                         {"role": "user", "content": self._prompt},
                     ]
                 elif history != self._expected_input:
@@ -1164,7 +1202,7 @@ class _ResponsesBridge:
             raise CodexHarnessError("compaction resume summary is missing")
         retained = self._atomic_steps[-retained_step_count:] if retained_step_count else []
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": BASE_INSTRUCTIONS},
+            {"role": "system", "content": base_instructions()},
             {
                 "role": "user",
                 "content": COMPACTION_RESUME_TEMPLATE.format(summary=self._resume_summary),
@@ -1815,7 +1853,7 @@ class _AppServerDriver:
                 "model": BACKEND_MODEL,
                 "modelProvider": "miles",
                 "cwd": self._isolated_home.name,
-                "baseInstructions": BASE_INSTRUCTIONS,
+                "baseInstructions": base_instructions(),
                 "developerInstructions": None,
                 "dynamicTools": copy.deepcopy(DYNAMIC_TOOLS),
                 "environments": [],

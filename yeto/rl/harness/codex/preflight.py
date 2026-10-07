@@ -171,6 +171,22 @@ def island_boards(miles_args: Any) -> tuple[Any, Any]:
     return LazyBoardActor(learner_id), LazyBoardActor(learner_id, factory=harness_board_actor)
 
 
+def assert_task_prompts(miles_args: Any, provider: Any) -> None:
+    """2026-10-07 (S15 stage 2): every row must resolve to a real task statement.
+    Runs when the provider exposes its TB2 ``tasks_dir`` and the prompt data file
+    is readable here; the launch script's PLAN_ONLY runs the same check locally."""
+    tasks_dir = getattr(provider, "tasks_dir", None)
+    data = getattr(miles_args, "prompt_data", None)
+    if tasks_dir is None or not isinstance(data, str) or not Path(data).is_file():
+        return
+    from .tb2_provider import TaskPromptPreflightError, preflight_task_prompts
+
+    try:
+        preflight_task_prompts(Path(data), Path(tasks_dir))
+    except TaskPromptPreflightError as exc:
+        raise PreflightError(str(exc)) from exc
+
+
 def harness_preflight(miles_args: Any, launch: Any, *, env: Mapping[str, str] | None = None) -> None:
     """IR-1 hook body. Raises ``PreflightError``/``MilesConfigError`` before any allocation."""
     del launch  # identity / binary / key checks do not depend on the launch args
@@ -183,6 +199,7 @@ def harness_preflight(miles_args: Any, launch: Any, *, env: Mapping[str, str] | 
     preflight_codex_openenv(env)
     assert_compactionrl_consistent(miles_args, env)
     provider = resolve_environment_provider(miles_args, env)
+    assert_task_prompts(miles_args, provider)
     from . import codex_openenv_subprocess_agent_function as subprocess_agent
 
     tool_wait_board, harness_board = island_boards(miles_args)
@@ -250,6 +267,7 @@ def configure_rollout_worker(env: Mapping[str, str] | None = None) -> bool:
         yeto_rl_cell_id=env.get(MEMBER_CELL_ENV) or None,
     )
     provider = resolve_environment_provider(miles_args, env)
+    assert_task_prompts(miles_args, provider)
     from . import codex_openenv_subprocess_agent_function as subprocess_agent
 
     tool_wait_board, harness_board = island_boards(miles_args)
