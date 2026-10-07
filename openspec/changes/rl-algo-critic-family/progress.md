@@ -117,7 +117,6 @@ Miles `train.py`（c35702e）:118-126 的 critic 训练顺序：`values = critic
 - 定向回归（GAE/loss 相关文件 + tests/test_chunked_gae.py）：基线 039471508 13 failed/99 passed，新 13 failed/121 passed，失败集合完全相同（megatron.core 缺失等环境原因）。未跑 tests/fast/ray 全量（会启动 Ray，线程上限）。
 - yeto 全量回归：log /home/michael/work/infra-drafts/critic-gae-pytest.log，68 failed/26 errors，与 /tmp/base2.sorted 按用例 id 比对集合相同，新增失败 0。
 
-<<<<<<< HEAD
 ## S13 7.1 VAPO 参数（2026-10-07，待用户确认）
 
 出处：VAPO, arXiv 2504.05118v3（11 Apr 2025），取自 arXiv HTML 版（https://arxiv.org/html/2504.05118v3）。
@@ -161,7 +160,7 @@ yeto（/home/michael/work/s13-vapo，分支 s13-vapo）：
 - 哈希不变：`evidence/hash_compare.py` 在 d398d443（`git archive` 到 /tmp/vapo-base）与本分支输出 `evidence/hash-vapo-base.txt` / `evidence/hash-vapo.txt` 17 行逐字节相同，且与第 2 组 `hash-critic.txt` 相同。
 
 **未验证（需 GPU 7.3）**：fork 正例 LM loss 在真实 Megatron/FSDP 训练中的 flags 传递（get_batch 键）、CP>1 下的归约；PPO 下 `rollout_data["rewards"]` 是否为原始标量奖励（未核实 reward 后处理对阈值语义的影响）；GAE 变体在真实 critic 下的数值；yeto pin 尚未指向包含 ce96fc060+cbf8c4737 的 fork 提交（loss_variants 的 FORK_COMMITS 式 pin 门控未为 VAPO 实现，目前仅靠未声明机制拦截）。
-=======
+
 ## S13 8.x SAO（2026-10-07，分支 s13-sao / fork yeto-sao；8.1–8.3 CPU 已实现并 CPU 验证，8.4 GPU 未执行）
 
 ### 8.1 源码来源（核对结论：任务里写的 ae475060 不是 SAO 源码）
@@ -183,4 +182,3 @@ yeto（/home/michael/work/s13-vapo，分支 s13-vapo）：
 ### 未验证 / 遗留
 - fork decoupled+length_adaptive 与上游 `gae_adaptive`（含 terminal reward 落在最后 action token、跨 observation 桥接）未数值对拍；fork 缺 `--num-critic-epochs`、critic attention 冻结；value_reward_range/sigma 为翻译常量，不在 spec 哈希内。
 - 第二 syncer（4.2）不在本组；`sao_role_contract` 只是声明，未接线到 launcher。
->>>>>>> s13-sao
