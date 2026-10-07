@@ -39,7 +39,7 @@ R0（`rl-engine-ports`）把 yeto 与 Miles 之间的算法边界收敛成了 `A
   - grpo/gspo 配 `placement=reward` 属于无效组合，拒绝，并提示改用 `placement=loss`。
   - 旧 v1 `kl_coef` 的解析规则见 design。
 - **拒绝矩阵**：以下组合在启动前拒绝，报错里给出替代方案：
-  - critic 类算法（提示改用 legacy）；
+  - critic 类算法（提示改用 legacy；rl-algo-critic-family 2.4 已改为说明真实原因：未声明 critic、需单卡 G1 后声明）；
   - 互斥参数，例如 TIS 与 `use_rollout_logprobs`、`kl_coef` 与 `kl_loss_coef`；
   - 缺少必需参数，例如 GSPO 未显式给出 clip；
   - 奖励类型不匹配的机制。
@@ -84,7 +84,7 @@ R0（`rl-engine-ports`）把 yeto 与 Miles 之间的算法边界收敛成了 `A
 | MaxRL / MAPO / GDPO | yeto 的 reward 后处理插件 | 插件哈希、"二值奖励"拒绝规则 | 同上（P2） | ⚙ |
 | CISPO / SAPO-Qwen / GMPO | 无；需 custom loss 或改 fork | `loss.variant` 字段 | `rl-algo-loss-variants`（P2，另需决策） | ⚙ |
 | `kl_coef>0` + grpo/gspo | Miles 会丢弃该 KL | 拒绝，并提示改用 `placement=loss` | 本 change | ⛔ |
-| PPO / VAPO / SAO / CompactionRL | Miles 有 critic | `needs_critic` 要求不满足则拒绝，提示改用 legacy | 暂缓：需要 critic 状态和外层归属 | ⛔ |
+| PPO / VAPO / SAO / CompactionRL | Miles 有 shared actor/critic PPO；GAE 变体、正例 LM loss、SAO 数学、`--critic-updates-per-step` 在 fork `yeto-critic-family`（ffe769c1e，未 push，未进镜像） | `needs_critic` + critic 组字段、`[critic_*]` 拒绝规则、`critic_shared_ppo` 启动检查；ports 仍声明 `execution.critic=false` | `rl-algo-critic-family`（2026-10-07 状态：可表达未开放，仅 CPU 验证；单岛无同步可经 `--rl-allow-unverified-mechanism` 放行；两岛被拒；GPU 全部未验证，见 docs/MILES_RL.md "Critic family"） | ⚙ |
 | 异步目标（staleness>0） | TIS ≈ 截断版解耦 PPO | `max_policy_staleness` 与执行能力的匹配 | 暂缓：需另立独立算法契约 change；rl-infra-spec 2.3 不擅自开放 one-step-off-policy，其 partitioned-overlap 只在已认证契约内重叠（alignment.md A6） | ⛔ |
 | OTB / GiGPO / ARPO / SAPO-Gensyn | 无 | — | 暂缓：OTB 要改 fork，GiGPO 依赖 agent，ARPO 要改 SGLang，SAPO-Gensyn 是外层协议 | — |
 | Training-free GRPO | — | — | 不做：不更新权重 | — |
@@ -104,7 +104,8 @@ R0（`rl-engine-ports`）把 yeto 与 Miles 之间的算法边界收敛成了 `A
 | 1b | `rl-algo-grpo-knobs/` | `specs/rl-grpo-variants/spec.md` | clip-higher、dual-clip、token 级聚合、Dr.GRPO（≈RLOO）、KL loss、entropy、超采样、overlong 塑形与过滤；yeto 统一的 reward 后处理分派器 | 0 | 1 卡冒烟；两岛 strict-avg，每岛 1 卡 |
 | 2a | `rl-algo-seq-and-adv/` | `specs/rl-advantage-and-sequence-variants/spec.md` | GSPO、REINFORCE++ / baseline、MaxRL、MAPO、GDPO | 0；1b 的 reward 分派器 | 1 卡冒烟；两岛 strict-avg，每岛 1 卡 |
 | 2b | `rl-algo-loss-variants/` | `specs/rl-loss-variants/spec.md` | CISPO、SAPO-Qwen、GMPO | 0；**用户决定**走 custom loss 还是改 fork | 1 卡冒烟；两岛 strict-avg，每岛 1 卡 |
-| — | 暂未立项 | — | critic 家族（PPO/VAPO/SAO/CompactionRL）、异步目标（staleness>0）、全参数训练上的算法、OTB、GiGPO、ARPO、SAPO-Gensyn | 见"算法能力一览" | — |
+| 3 | `rl-algo-critic-family/` | `specs/rl-critic-algorithms/spec.md` | critic 家族：PPO、VAPO、SAO、CompactionRL（critic 状态契约、双 syncer、warm-up 两阶段、fork GAE 扩展点） | 0；fork `yeto-critic-family`（push 需用户同意） | 1 卡 G1；两岛 strict-avg 每岛 1 卡（均需批准，未执行） |
+| — | 暂未立项 | — | 异步目标（staleness>0）、全参数训练上的算法、OTB、GiGPO、ARPO、SAPO-Gensyn | 见"算法能力一览" | — |
 
 派活规则：
 - 1a 与 1b 可以并行；2a 必须在 1b 的分派器完成后开始；2b 必须在用户做出路线决策后开始。
