@@ -156,6 +156,38 @@ HARNESS_MISMATCH_SCHEMA: dict[str, type] = {
 }
 
 
+# -- rl-fn-codex-rollout 1.0: per-trajectory rewards (``rl_trajectory_reward``) --
+# Observe-only: one event per trained sample with its Terminal-Bench task_id and
+# the reward the trainer saw, so a tape can show which task scored (the judge's
+# ``--known-scorable``). ``reward`` None = non-finite; ``success`` None = no signed verdict.
+TRAJECTORY_REWARD_EVENT = "rl_trajectory_reward"
+TRAJECTORY_REWARD_MAX_PER_ROUND = 256
+TRAJECTORY_REWARD_SCHEMA: dict[str, tuple[type, ...]] = {
+    "rollout_id": (int,),
+    "policy_version": (int,),
+    "sample_index": (int,),
+    "group_index": (int,),
+    "task_id": (str,),
+    "trajectory_id": (str,),
+    "reward": (float, type(None)),
+    "success": (bool, type(None)),
+    "aborted": (bool,),
+}
+
+
+def validate_trajectory_reward(record: Mapping[str, object]) -> list[str]:
+    """Schema check of one ``rl_trajectory_reward`` payload (labels excluded)."""
+    problems = []
+    for key, types in TRAJECTORY_REWARD_SCHEMA.items():
+        if key not in record:
+            problems.append(f"missing trajectory reward key {key!r}")
+            continue
+        value = record[key]
+        if (int in types and isinstance(value, bool)) or not isinstance(value, types):
+            problems.append(f"trajectory reward key {key!r} is {type(value).__name__}")
+    return problems
+
+
 def validate_harness_mismatch(record: Mapping[str, object]) -> list[str]:
     """Schema check of one ``rl_harness_mismatch`` payload (labels excluded)."""
     problems = []

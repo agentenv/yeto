@@ -320,6 +320,13 @@ def build_metadata(
         payload["tool_wait_seconds"] = tool_wait
     if trained_samples and batch_summary_enabled(args):
         payload["batch_summary"] = batch_summary(args, trained_samples)
+    if trained_samples and batch_summary_enabled(args):
+        # rl-fn-codex-rollout 1.0 (observe only): one record per trained sample
+        # (task_id / trajectory_id / reward / signed success) so the tape can
+        # tell *which* task scored (``rl_trajectory_reward``). Absent on the
+        # default path (old key set kept).
+        payload[TRAJECTORY_REWARDS_KEY] = trajectory_reward_records(
+            args, all_samples, trained, limit=trajectory_records_limit(args))
     harness = harness_counters(all_samples)
     if harness:  # IR-3/IR-4: absent when no sample reported any (old key set kept)
         payload.update(harness)
@@ -464,6 +471,53 @@ def harness_mismatch_records(
                     "detail": detail,
                     "truncated": bool(cut_e or cut_a or cut_d),
                 })
+    return out
+
+
+TRAJECTORY_REWARDS_KEY = "trajectory_rewards"
+TRAJECTORY_RECORDS_ENV = "YETO_RL_TRAJECTORY_TAPE_MAX"
+TRAJECTORY_RECORDS_DEFAULT = 256
+
+
+def trajectory_records_limit(args: Any = None) -> int:
+    return _limit_from(args, "yeto_rl_trajectory_tape_max", TRAJECTORY_RECORDS_ENV, TRAJECTORY_RECORDS_DEFAULT)
+
+
+def trajectory_reward_records(
+    args: Any, all_samples: Iterable[Sequence[Any]], trained: Any = None, *, limit: int,
+) -> list[dict[str, Any]]:
+    """rl-fn-codex-rollout 1.0 (observe only): per-sample reward records of the
+    trained groups (every group when ``trained`` is None): Miles sample/group
+    index, ``metadata["task_id"]`` (Terminal-Bench task), ``metadata["trajectory_id"]``
+    (or ``sample.rollout_id``: siblings of one trajectory share a reward, R-D5a),
+    the reward the trainer sees, the signed ``metadata["success"]`` bit (None =
+    no verdict) and the aborted flag; at most ``limit`` records in sample order."""
+    out: list[dict[str, Any]] = []
+    if limit <= 0:
+        return out
+    for group in all_samples:
+        samples = _flat(group)
+        if not samples or (trained is not None and _group_key(group) not in trained):
+            continue
+        for s in samples:
+            if len(out) >= limit:
+                return out
+            meta = getattr(s, "metadata", None)
+            meta = meta if isinstance(meta, dict) else {}
+            reward = _reward(args, s)
+            success = meta.get("success")
+            trajectory = meta.get("trajectory_id")
+            if trajectory is None:
+                trajectory = getattr(s, "rollout_id", None)
+            out.append({
+                "sample_index": _int_or(getattr(s, "index", None), -1),
+                "group_index": _int_or(getattr(s, "group_index", None), -1),
+                "task_id": "" if meta.get("task_id") is None else str(meta.get("task_id")),
+                "trajectory_id": "" if trajectory is None else str(trajectory),
+                "reward": float(reward) if math.isfinite(reward) else None,
+                "success": success if isinstance(success, bool) else None,
+                "aborted": _status(s) == "aborted",
+            })
     return out
 
 

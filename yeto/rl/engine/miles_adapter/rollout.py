@@ -439,6 +439,9 @@ def handle_from_metadata(
             tuple(payload["tito_session_mismatch_records"])
             if payload.get("tito_session_mismatch_records") else None
         ),
+        trajectory_rewards=(
+            tuple(payload["trajectory_rewards"]) if payload.get("trajectory_rewards") else None
+        ),
     )
 
 

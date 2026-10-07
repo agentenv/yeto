@@ -679,3 +679,57 @@ def test_tool_wait_board_calls_are_awaited_in_order_and_never_fail_the_trajector
     subprocess_agent.configure(provider=_Provider(env), tool_wait_board=_FailingBoard(), harness_board=None, member="m0")
     assert tbench_outcome.MAC_KEY in _run(subprocess_agent.run("http://miles", "p", {}, _metadata()))
     subprocess_agent.configure(provider=None)
+
+
+# ---------------------------------------------------------------- rl-fn-codex-rollout 1.0: runtime backend profile
+
+def test_openenv_profile_pin_relaxed_to_allowlist(monkeypatch):
+    from yeto.rl import codex_backend as cb
+    from yeto.rl.harness.codex import pins
+
+    assert adapter.IMAGE_BACKEND_PROFILE_NAME == pins.OPENENV_BACKEND_PROFILE == "qwen35_08b"
+    assert set(pins.OPENENV_BACKEND_PROFILES) == {"qwen35_08b", "qwen38_next", "qwen38_next_4layer"}
+    # the identity derives from the selected profile (codex_backend allowlist), per profile
+    assert adapter.profile_identity("qwen35_08b") == (cb.QWEN35_08B_MODEL, cb.QWEN35_08B_REVISION)
+    assert adapter.profile_identity("qwen38_next_4layer") == (cb.QWEN38_NEXT_4LAYER_MODEL, cb.QWEN38_NEXT_4LAYER_REVISION)
+    assert adapter.profile_identity("qwen38_next") == (cb.QWEN38_NEXT_MODEL, cb.QWEN38_NEXT_REVISION)
+    with pytest.raises(ValueError, match="requires backend profile"):
+        adapter.profile_identity("qwen35")
+    with pytest.raises(ValueError, match="requires backend profile"):
+        adapter.profile_identity("deepseekv4")
+    # drift of an allowlisted profile is still refused
+    drifted = dict(cb.stock_codex_backend_profile("qwen38_next_4layer"), model_revision="0" * 40)
+    monkeypatch.setattr(adapter, "stock_codex_backend_profile", lambda name: drifted)
+    with pytest.raises(RuntimeError, match="profile drifted"):
+        adapter.profile_identity("qwen38_next_4layer")
+
+
+def test_openenv_runtime_profile_resolution():
+    from yeto.rl.codex_backend import stock_codex_backend_contract
+
+    # the launch declaration the learner publishes (YETO_CODEX_CHAT_TEMPLATE) names the profile
+    for name in adapter.OPENENV_BACKEND_PROFILES:
+        assert stock_codex_backend_contract(name, 1)["chat_template"] == name
+        assert adapter.resolve_backend_profile(env={adapter.RUNTIME_PROFILE_ENV: name}) == name
+        assert adapter.resolve_backend_profile(name, env={}) == name
+    assert adapter.resolve_backend_profile(env={}) == "qwen35_08b"
+    assert adapter.resolve_backend_profile(env={adapter.RUNTIME_PROFILE_ENV: "deepseekv4"}) == "qwen35_08b"
+    with pytest.raises(ValueError, match="requires backend profile"):
+        adapter.resolve_backend_profile("qwen35", env={})
+    # the image record is independent of the runtime profile
+    assert adapter._OPENENV_IDENTITY_ENV["YETO_CODEX_OPENENV_BACKEND_PROFILE"] == "qwen35_08b"
+    assert adapter._OPENENV_IDENTITY_ENV["YETO_CODEX_OPENENV_MODEL_ID"] == "Qwen/Qwen3.5-0.8B"
+
+
+def test_legacy_preflight_accepts_fn_profiles_against_image_env():
+    env = dict(adapter._OPENENV_IDENTITY_ENV)  # the container env the image line bakes (qwen35_08b record)
+    for name in ("qwen38_next_4layer", "qwen38_next", "qwen35_08b"):
+        preflight.forward_legacy_openenv_preflight(None, name, env)
+    with pytest.raises(ValueError, match="requires backend profile"):
+        preflight.forward_legacy_openenv_preflight(None, "qwen38", env)
+    # the image record is still enforced for the FN profile
+    with pytest.raises(ValueError, match="environment drifted"):
+        preflight.forward_legacy_openenv_preflight(
+            None, "qwen38_next_4layer", {**env, "YETO_CODEX_OPENENV_BACKEND_PROFILE": "qwen38_next_4layer"})
+    with pytest.raises(ValueError, match="environment drifted"):
+        preflight.forward_legacy_openenv_preflight(None, "qwen38_next_4layer", {k: v for k, v in env.items() if "MODEL_ID" not in k})

@@ -189,21 +189,29 @@ def _stock_codex_append_roles_or_none(reason: str) -> _Check:
         agent = getattr(config, "agent", None)
         try:
             from yeto.rl import SIGNED_CODEX_AGENTS
-            from yeto.rl.codex_backend import stock_codex_backend_profile
+            from yeto.rl.codex_backend import (
+                stock_codex_backend_profile,
+                stock_codex_profiles_for_tito_model,
+            )
         except ImportError:  # pragma: no cover - defensive
             return reason
         if getattr(agent, "custom_agent_function_path", None) not in SIGNED_CODEX_AGENTS:
             return reason
         if not getattr(agent, "tito_model", None):
             return reason
-        try:
-            profile = stock_codex_backend_profile(str(agent.tito_model))
-        except (KeyError, ValueError):
+        # ``tito_model`` is the Miles tokenizer family, not the profile name
+        # (``qwen35`` happened to be both; ``qwen4exp`` serves the Flash-Next
+        # profiles, rl-fn-codex-rollout 1.0): the roles are fixed by every
+        # profile of that family, which the launcher already matched to the
+        # declared ``--codex-backend-profile`` (``validate_stock_codex_fields``).
+        names = stock_codex_profiles_for_tito_model(str(agent.tito_model))
+        if not names:
             return reason
-        if list(value) != list(profile["tito_allowed_append_roles"]):
+        fixed = {tuple(stock_codex_backend_profile(n)["tito_allowed_append_roles"]) for n in names}
+        if len(fixed) != 1 or tuple(value) != next(iter(fixed)):
             return (
-                f"stock Codex profile {agent.tito_model!r} fixes the append roles to "
-                f"{profile['tito_allowed_append_roles']} (got {list(value)})"
+                f"stock Codex profiles {list(names)} (tito-model {agent.tito_model!r}) fix the "
+                f"append roles to {sorted(list(r) for r in fixed)} (got {list(value)})"
             )
         return None
 

@@ -1058,6 +1058,22 @@ class IslandDriver:
                       policy_version=int(getattr(batch, "policy_version", rollout_id)),
                       t=self.clock(), **self._labels(), **fields)
 
+    def _emit_trajectory_rewards(self, rollout_id: int, batch: Any) -> None:
+        """rl-fn-codex-rollout 1.0 (observe only): one ``rl_trajectory_reward`` per
+        trained sample the rollout reported (task_id + reward), capped per round."""
+        records = getattr(batch, "trajectory_rewards", None)
+        if not records:
+            return
+        from .timeline import (TRAJECTORY_REWARD_EVENT, TRAJECTORY_REWARD_MAX_PER_ROUND,
+                               TRAJECTORY_REWARD_SCHEMA)
+
+        for record in tuple(records)[:TRAJECTORY_REWARD_MAX_PER_ROUND]:
+            fields = {k: record.get(k) for k in TRAJECTORY_REWARD_SCHEMA
+                      if k not in ("rollout_id", "policy_version")}
+            self.emit(TRAJECTORY_REWARD_EVENT, rollout_id=rollout_id,
+                      policy_version=int(getattr(batch, "policy_version", rollout_id)),
+                      t=self.clock(), **self._labels(), **fields)
+
     def _is_final_round(self, rollout_id: int) -> bool:
         probe = getattr(self.sync, "is_final_round", None)
         return bool(probe(self, rollout_id=rollout_id)) if callable(probe) else False
@@ -1212,6 +1228,7 @@ class IslandDriver:
         if self.observe:
             self._emit_round_labels(rollout_id, batch, metrics)
             self._emit_harness_mismatches(rollout_id, batch)
+            self._emit_trajectory_rewards(rollout_id, batch)
         # Zero-LR invariant: a non-final round must not commit a zero update.
         require_nonzero_learning_rate(stats, final_round=self._is_final_round(rollout_id))
         self.phase("sync", rollout_id=rollout_id)

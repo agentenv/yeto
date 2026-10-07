@@ -123,6 +123,10 @@ class RolloutBatchHandle:
     # reported (default path). The driver tapes them as ``rl_harness_mismatch``.
     tito_session_mismatch_records: tuple[Mapping[str, Any], ...] | None = field(
         default=None, compare=False)
+    # rl-fn-codex-rollout 1.0 (observe only): per-sample reward records
+    # (rollout_meta_hook.trajectory_reward_records: task_id/trajectory_id/reward/
+    # success); None = not reported. The driver tapes them as ``rl_trajectory_reward``.
+    trajectory_rewards: tuple[Mapping[str, Any], ...] | None = field(default=None, compare=False)
 
     def mismatched_groups(self, expected_token: str) -> tuple[GroupMetadata, ...]:
         return tuple(g for g in self.groups if g.policy_token != expected_token)

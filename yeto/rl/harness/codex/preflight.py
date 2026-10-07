@@ -303,8 +303,13 @@ def forward_legacy_openenv_preflight(args: Any, profile_name: str, env: Mapping[
     "environment drifted".
     """
     del args  # the adapter no longer lives under miles_root
-    if profile_name != adapter.BACKEND_PROFILE_NAME:
-        raise ValueError("the Codex OpenEnv adapter requires backend profile qwen35_08b")
+    # rl-fn-codex-rollout 1.0: the runtime profile only has to be an allowlisted
+    # OpenEnv profile with a declared HF identity (``adapter.profile_identity``);
+    # ``learner._preflight_codex_harness`` has already matched it against
+    # ``--model`` / ``--model-revision`` (``validate_stock_codex_fields``).  The
+    # identity env below is the image's build-time record and is compared as
+    # such, so a new profile needs no image rebuild.
+    adapter.profile_identity(profile_name)
     live = adapter.codex_openenv_harness_identity()
     expected = {
         name.removeprefix("YETO_CODEX_OPENENV_").lower(): value
