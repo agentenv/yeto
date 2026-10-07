@@ -266,8 +266,8 @@ class CriticCheckpointStore:
             )
         target = self.root / f"round-{critic_round}"
         manifest = json.loads((target / self.MANIFEST).read_text())
-        weights = torch.load(target / "weights.pt")
-        optimizer = torch.load(target / "optimizer.pt")
+        weights = torch.load(target / "weights.pt", weights_only=True)
+        optimizer = torch.load(target / "optimizer.pt", weights_only=True)
         if manifest["round"] != critic_round:
             raise CriticRoundMismatch(f"manifest round {manifest['round']} != {critic_round}")
         if critic_weights_sha256(weights) != manifest["weights_sha256"] or \
