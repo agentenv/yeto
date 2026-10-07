@@ -72,6 +72,23 @@ class GatewayConfig:
     harness_board: Any = None  # tool_wait.HarnessBoard (local or actor handle), IR-2/IR-4
     member: str | None = None  # admission key of the rollout member this gateway targets
 
+    @classmethod
+    def from_codex_profile(cls, profile_name: str, signed_sampling: dict[str, Any], **overrides: Any) -> "GatewayConfig":
+        """Build a config whose ``model`` / ``allowed_append_roles`` / ``keeps_history_reasoning``
+        come from the signed codex backend profile (rl-fn-codex-rollout D2, upstream 5.1).
+
+        ``keeps_history_reasoning`` cannot be overridden: it is the profile's
+        declaration about its fixed TITO template, not a runtime knob.
+        """
+        if "keeps_history_reasoning" in overrides:
+            raise ValueError("keeps_history_reasoning is declared by the codex profile")
+        from yeto.rl.codex_backend import stock_codex_backend_profile, stock_codex_keeps_history_reasoning, stock_codex_tito_model
+
+        profile = stock_codex_backend_profile(profile_name)
+        overrides.setdefault("model", stock_codex_tito_model(profile_name))
+        overrides.setdefault("allowed_append_roles", tuple(profile["tito_allowed_append_roles"]))
+        return cls(signed_sampling=signed_sampling, keeps_history_reasoning=stock_codex_keeps_history_reasoning(profile_name), **overrides)
+
 
 class Gateway:
     def __init__(self, config: GatewayConfig, backend: SessionBackend) -> None:

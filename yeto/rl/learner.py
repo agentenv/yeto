@@ -1038,6 +1038,11 @@ def _preflight_codex_harness(args) -> None:
             else "attention"
         ),
         expert_full_count=getattr(args, "expert_full_count", 0),
+        lora_expert_rank=(
+            int(getattr(args, "rl_lora_expert_rank", None) or 0)
+            if getattr(args, "parameter_mode", "lora") == "lora"
+            else 0
+        ),
     )
     if contract.get("backend") != expected_backend:
         raise ValueError("stock Codex backend/TITO identity drifted")

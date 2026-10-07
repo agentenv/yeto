@@ -278,3 +278,58 @@ def test_gateway_mirrors_counters_and_sessions_on_the_harness_board_and_honours_
     hb.open_admission(["m0"])
     run(gw3.handle("chat", {"messages": first}, trajectory_id="v"))
     assert backend3.sessions == ["s0"]
+
+
+# ------------------------------------------- rl-fn-codex-rollout 0.5 (upstream 5.2): template_drops_reasoning
+
+def _dropped(message: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in message.items() if k != "reasoning_content"}
+
+
+def test_template_drops_reasoning_breaks_once_with_generated_mask_one():
+    # keeps_history_reasoning=False: the harness replays the history minus the reasoning the
+    # template dropped. The divergence sits on a *generated* message -> BREAK(template_drops_reasoning),
+    # the generated reasoning segment keeps mask=1 on the parent chain, the new chain is all mask-0 prompt.
+    reply = tool_reply("c1", "x", "{}", reasoning="deep")
+    gw, backend = gateway([reply, {"role": "assistant", "content": "e"}], keeps_history_reasoning=False)
+    run(gw.handle("chat", {"messages": [U]}, trajectory_id="q"))
+    run(gw.handle("chat", {"messages": [U, _dropped(reply), T("c1", "o")]}, trajectory_id="q"))
+    reg = gw.registry("q")
+    snap = reg.snapshot()
+    assert snap["tito_chain_breaks"] == {"template_drops_reasoning": 1}
+    assert snap["tito_session_mismatch"] == 0 and backend.sessions == ["s0", "s1"]
+    parent, child = reg.chains
+    assert parent.generated == [False, True] and parent.messages[1]["reasoning_content"] == "deep"
+    assert child.break_reason is ChainBreakReason.template_drops_reasoning and child.parent_chain == 0 and child.fork_index == 1
+    assert child.generated == [False, False, False, True]  # replayed prompt mask 0, new generation mask 1
+
+
+def test_template_drops_reasoning_is_the_only_reason_when_only_reasoning_differs():
+    reg = ChainRegistry(keeps_history_reasoning=False)
+    reply = tool_reply("c1", "x", "{}", reasoning="deep")
+    chain = reg.open_chain("s0", [U], reg.locate([U]))
+    reg.record_generation(chain, reply)
+    located = reg.locate([U, _dropped(reply), T("c1", "o")])
+    assert located.kind is LocateKind.break_ and located.reason is ChainBreakReason.template_drops_reasoning
+    # anything beyond a dropped reasoning field is an ordinary retry fork, not a template drop
+    edited = {**_dropped(reply), "content": "changed"}
+    assert reg.locate([U, edited, T("c1", "o")]).reason is ChainBreakReason.retry_fork
+
+
+@pytest.mark.parametrize("profile_name", ["qwen38_next", "qwen38_next_4layer"])
+def test_fn_profile_declares_true_so_template_drops_reasoning_count_stays_zero(profile_name):
+    # D2: FN's fixed template keeps history reasoning, so the gateway built from the profile must never
+    # classify a divergence as template_drops_reasoning. A harness replay that *does* drop reasoning is
+    # then a retry_fork; the counter staying 0 is what the GPU判据 "tito_chain_breaks{template_drops_reasoning}=0" reads.
+    reply = tool_reply("c1", "x", "{}", reasoning="deep")
+    backend = FakeBackend([reply] + [{"role": "assistant", "content": "e"}] * 3)
+    gw = Gateway(GatewayConfig.from_codex_profile(profile_name, SIGNED), backend)
+    assert gw.config.keeps_history_reasoning is True and gw.config.model == "qwen4exp"
+    run(gw.handle("chat", {"messages": [U]}, trajectory_id="fn"))
+    for i in range(1, 4):
+        run(gw.handle("chat", {"messages": [U, _dropped(reply), T("c1", "o")]}, trajectory_id="fn"))
+        assert gw.snapshot("fn")["tito_chain_breaks"].get("template_drops_reasoning", 0) == 0
+        assert gw.snapshot("fn")["tito_chain_breaks"] == {"retry_fork": i}  # each replay forks off a chain that already generated
+    # the faithful replay (reasoning intact) continues the chain with no break at all
+    run(gw.handle("chat", {"messages": [U, reply, T("c1", "o")]}, trajectory_id="fn"))
+    assert gw.snapshot("fn")["tito_chain_breaks"] == {"retry_fork": 3} and gw.snapshot("fn")["tito_session_mismatch"] == 0

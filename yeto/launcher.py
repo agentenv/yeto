@@ -2047,6 +2047,7 @@ def _prepare_rl_args(
             codex_reasoning_effort=codex_reasoning_effort,
             lora_targets=str(args.lora_targets),
             expert_full_count=int(getattr(args, "expert_full_count", 0)),
+            lora_expert_rank=int(getattr(args, "rl_lora_expert_rank", None) or 0),
         )
     elif codex_reasoning_effort is not None or codex_backend_profile is not None:
         raise ValueError(
