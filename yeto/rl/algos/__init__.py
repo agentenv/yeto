@@ -20,4 +20,5 @@ EXTENSION_MODULES: tuple[str, ...] = (
     "yeto.rl.algos.mismatch_correction",  # rl-algo-mismatch-correction
     "yeto.rl.algos.loss_variants",  # rl-algo-loss-variants
     "yeto.rl.algos.critic",  # rl-algo-critic-family
+    "yeto.rl.algos.sao",  # rl-algo-critic-family 8.3
 )
