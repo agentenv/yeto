@@ -26,3 +26,4 @@
 - KL 0.022 在 v0（未训练）即存在、两轮不变、与失配数无关 → 引擎与训练端数值差异，非训练漂移；建议重新标定门限。
 - 已修（分支 s15-fncodex-l3）：7e22c37f 任务说明取 `instruction.md`，无法解析时 fail closed；dad2fd57 `rl_trajectory_reward` 增加 exit_status/turns/testsh_rc 等可选字段。单测通过，未上卡。
 - 详见 `infra-drafts/FNCODEX-STAGE2-ANALYSIS.md`。下一步：TB2 专用系统提示（待裁定）、16384 上下文、1 轮全尺寸复跑（估 $55–65，需追加预算）。
+- 2026-10-07 为 TB2 更换系统提示（d449ef37 起）：TB2 专用签名系统提示、任务说明 preflight、judge kl_max 0.03；r2 脚本 `s1-runs/s15-fncodex-full-modal-r2.sh`（1 轮、最坏 $54.4），PLAN_ONLY 通过，6 个任务首条用户消息均为 instruction.md 原文。见 REVIEW §13。

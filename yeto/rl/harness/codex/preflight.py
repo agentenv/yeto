@@ -177,12 +177,12 @@ def assert_task_prompts(miles_args: Any, provider: Any) -> None:
     is readable here; the launch script's PLAN_ONLY runs the same check locally."""
     tasks_dir = getattr(provider, "tasks_dir", None)
     data = getattr(miles_args, "prompt_data", None)
-    if tasks_dir is None or not isinstance(data, str) or not Path(data).is_file():
+    if tasks_dir is None or not isinstance(data, str) or not Path(data).expanduser().is_file():
         return
     from .tb2_provider import TaskPromptPreflightError, preflight_task_prompts
 
     try:
-        preflight_task_prompts(Path(data), Path(tasks_dir))
+        preflight_task_prompts(Path(data).expanduser(), Path(tasks_dir))
     except TaskPromptPreflightError as exc:
         raise PreflightError(str(exc)) from exc
 
