@@ -17,12 +17,15 @@ Two explicit synchronization presets are available:
 Selecting `decoupled` is intentional. The launcher never infers it from the
 model, island count, or generic DiLoCo flags.
 
-> **Status:** `strict-avg` has real-model GPU and recovery evidence. The
-> `decoupled` source implementation and automated protocol/oracle coverage are
-> present, and `MILES_COMMIT` pins the reviewed stop-capable Miles commit.
-> Release use additionally requires that commit to be available from the
-> configured Miles repository and the real GPU matrix in the design to pass.
-> The runtime verifier deliberately rejects a dirty or mismatched checkout.
+> **Status (audited against integ-decl `d3a202c4`, 2026-10-07).** The default
+> engine is `ports` (see "Engine selection"); `legacy` is deprecated.
+> `strict-avg` has real-model GPU and recovery evidence on both engines. The
+> `decoupled` preset has source and automated protocol/oracle coverage and a
+> fixed LR schedule (`fix-decoupled-lr-schedule`); its GPU re-run (task 3.2 of
+> that change: legacy vs ports, two islands) has **not** been done, so it is
+> **not** release-usable. Per-mechanism GPU status of the algorithm families is
+> collected in "Algorithm status matrix"; anything not marked GPU-verified there
+> is **unverified** and must not be read as supported.
 
 ## Supported Boundary
 
@@ -33,10 +36,10 @@ The supported model and runtime contract is deliberately narrow:
 | model | causal language model |
 | tuning | LoRA only |
 | learner | pinned Miles with Megatron-Core |
-| rollout | colocated SGLang |
-| optimization | GRPO; one optimizer step per rollout/train cycle |
+| rollout | colocated SGLang (ports also offers `--rl-placement fixed-partition` for LoRA, used by the multi-node and elastic paths) |
+| optimization | GRPO plus the declared GRPO-family mechanisms (see "Algorithm status matrix"); critic algorithms (PPO, VAPO, SAO, CompactionRL) are single-island G1 only |
 | island size | one or more nodes and one or more GPUs per node |
-| parallelism | TP = PP = CP = 1; dense EP = 1; MoE EP may divide the island world size when LoRA tensors remain replicated |
+| parallelism | legacy path: TP = PP = CP = 1; on `ports` the recipe sets TP/PP (the multi-node and Flash-Next profiles use TP > 1; multi-island outer sync with TP > 1 LoRA is not verified here); dense EP = 1; MoE EP may divide the island world size when LoRA tensors remain replicated |
 | membership | fixed logical island IDs `0..M-1`, `M >= 1` |
 | wire format | f32 |
 | global weighting | complete roster, equal learner weight |
@@ -50,7 +53,7 @@ fallback.
 
 The following remain outside this boundary:
 
-- full-parameter, actor/critic, or diffusion RL;
+- full-parameter (legacy path only), critic LoRA (`critic.param_mode=lora` is refused) or diffusion RL;
 - TP>1 or PP>1 LoRA gather/scatter;
 - expert-sharded LoRA tensors;
 - trajectory migration across policy snapshots;
@@ -58,12 +61,14 @@ The following remain outside this boundary:
 - RDA, IsoLoCo, HeLoCo, delta correction, or broadcast blending;
 - optimizer-moment federation;
 - Miles' experimental fault-tolerant actor path;
-- a new dashboard, a cross-island controller, a storage system, or a generic
-  recovery framework. An island-local, yeto-side reconfiguration controller is
+- a cross-island controller, a storage system, or a generic recovery
+  framework. (The read-only fleet dashboard, `docs/DASHBOARD.md`, exists and is
+  not part of the RL contract.) An island-local, yeto-side reconfiguration controller is
   allowed (rl-infra-spec design D1): it drives the island's own port verbs
   (rollout pool resize, `TrainerGroup.save_cut`/`restore_cut`/same-shape
   rebuild) at safe points and journals them; it does not control other islands
-  and is not a general recovery framework.
+  and is not a general recovery framework. It is opt-in (`--rl-elastic`, see
+  "Elastic reconfiguration").
 
 Local PPO and CyberGym-specific features are separate from this integration.
 Miles custom generation and reward callables can still use existing tool or
@@ -362,6 +367,47 @@ Add the following for decoupled synchronization:
 
 The initial validation configuration is `P=8`, `tau=2`, `H=4`; it is not
 claimed to be optimal for every model.
+
+### Clouds, controller and images
+
+- **Controller.** `--controller head` (default) hands the run to one small
+  on-demand head VM that hosts the syncer and the fleet controller; `--controller
+  local` runs a detached worker on this machine plus a separate syncer VM (this
+  machine must stay up). `--rl-single-island-no-sync` (ports only) launches
+  exactly one island with no syncer and no outer sync and requires
+  `--controller local`; such a run ends with launcher rc 2 by design (no syncer
+  checkpoint), and a G1 judgment is made from the island tape.
+- **Clouds** (details in `docs/CLOUDS.md`). Modal is the default GPU cloud for
+  RL runs: a `modal:` island is a Modal function (`yeto/modal_runner.py`), not a
+  sky cluster; pin the model with `H100!:N`-style entries (`--modal-gpu-exact`)
+  and assert the GPU name. Modal RL runs can serve model snapshots from a Modal
+  Volume (`--modal-model-volume`, read-only at `/mnt/yeto-models`), set
+  `--modal-memory-gib/--modal-cpu`, and the launcher fails the run (exit 7) and
+  stops the app if the island's container id changes. Nebius (sky cloud) hosts
+  the CPU-only head/syncer VM and GPU islands; per `docs/CLOUDS.md` H100x8 exists
+  only in `eu-north1`, and a capacity shortage shows as a STOPPED instance with
+  `Reconciling`. Verda has no sky `open_ports`, so it cannot host a head or
+  syncer yet, and Verda RL-island validation is still pending
+  (`add-nebius-verda-modal-clouds` 8.3). Modal (serverless) cannot host the head
+  either. A Modal island needs a syncer address reachable from Modal (head
+  public IP, or `--syncer-public-addr` under `--controller local`).
+- **Images and pins** (`yeto/rl/__init__.py`). `--rl-engine ports` (default)
+  uses `MILES_NEXT_IMAGE` = `ghcr.io/michaellchung/yeto-miles-ports@sha256:37ac689e...`
+  (tag `c35702e-4e4148f`, linux/amd64, **private**: credentials go through
+  `SKYPILOT_DOCKER_*`), which extends the public `radixark/miles` image with the
+  pinned forks: Miles `MILES_NEXT_COMMIT` = `c35702ee` (michaellchung/miles
+  `yeto/ports` line) and SGLang `SGLANG_NEXT_COMMIT` = `4e4148f1`;
+  `/opt/yeto/image-manifest.json` records every SHA. `--rl-image` overrides the
+  digest. On Nebius a baked VM image holding these layers is used when the
+  digest matches exactly (`NEBIUS_BAKED_IMAGES`; its speed-up is not
+  GPU-validated).
+- **Fork overlay.** Critic-family Miles flags are not in `c35702e`. With
+  `--rl-miles-overlay auto` (default) the island setup applies the sha256-checked
+  patch `yeto/rl/overlays/miles-critic-c357.patch` (fork commit `6574a9c8`, not
+  pushed) over the image's own `c35702e` checkout, only when the algorithm spec
+  uses a fork-only Miles flag; `critic-c357` forces it, `off` never applies it.
+  The run manifest then reports "image c35702e + overlay <sha256>" and the image
+  manifest no longer describes the running code.
 
 ### Variance-aware GRPO sampling
 
@@ -746,7 +792,7 @@ The legacy path is deprecated and is removed after task 7.2 of the
 | path | engine source | who owns the island loop |
 | --- | --- | --- |
 | `legacy` (explicit, deprecated) | `agentenv/miles` fork at `MILES_COMMIT`, installed from the bundled git bundle | Miles `train.py`; Yeto plugs in through the external policy sync callback (`MilesPolicySync`) |
-| `ports` (default) | `michaellchung/miles` at `MILES_NEXT_COMMIT` and `michaellchung/sglang` at `SGLANG_NEXT_COMMIT`, fetched directly (no bundle) | Yeto's `IslandDriver` (`yeto/rl/engine/driver.py`); upstream Miles is used as a library through role ports |
+| `ports` (default) | `michaellchung/miles` at `MILES_NEXT_COMMIT` (`c35702ee`) and `michaellchung/sglang` at `SGLANG_NEXT_COMMIT` (`4e4148f1`), baked into `MILES_NEXT_IMAGE` (no bundle) | Yeto's `IslandDriver` (`yeto/rl/engine/driver.py`); upstream Miles is used as a library through role ports |
 
 Each path pins and verifies its own source (repository, commit, clean detached
 checkout, import path) before any model is loaded; changing one pin group never
@@ -1279,8 +1325,9 @@ enters the algorithm hash. Each round emits `rl_advantage_transform`
 > **Status: expressible, not opened.** Route B (user decision 2026-09-30):
 > the computation is a variant branch in the Miles fork (`michaellchung/miles`
 > `yeto/ports`, `--policy-loss-variant`); yeto only describes, translates and
-> validates. The pin `yeto.rl.MILES_NEXT_COMMIT` is fork commit 5c1b49eb
-> (listed in `yeto.rl.algos.loss_variants.FORK_COMMITS`; on any other pin a
+> validates. The variants arrived in fork commit 5c1b49eb; the current
+> `MILES_NEXT_COMMIT` (c35702ee) descends from it and is listed in
+> `yeto.rl.algos.loss_variants.FORK_COMMITS` (on any pin outside that set a
 > launch is refused). The Miles adapter does **not** declare `losses:cispo` /
 > `losses:sapo` / `losses:gmpo` until their GPU smoke passes; only the
 > single-island `--rl-allow-unverified-mechanism losses:<v>` entry can run
@@ -1358,7 +1405,7 @@ python3 -m yeto.rl.engine.miles_adapter.algorithm_flags --dry-run \
   --extra "--policy-loss-variant sapo" --rl-allow-unverified-mechanism losses:sapo
 # verdict "accepted"; miles_argv ends with
 #   --policy-loss-variant sapo --sapo-tau-pos 1.0 --sapo-tau-neg 1.05
-# and "launch_warnings" is empty on the 5c1b49eb pin (on a pin outside
+# and "launch_warnings" is empty on a pin in FORK_COMMITS (on a pin outside
 # FORK_COMMITS it lists "[loss_variants] ... Expressible but not opened")
 python3 -m yeto.rl.engine.miles_adapter.algorithm_flags --dry-run \
   --extra "--policy-loss-variant gmpo --sapo-tau-pos 1.2" \
@@ -1376,32 +1423,42 @@ and the image digest (this makes the single-island
 
 ### Critic family (`rl-algo-critic-family`): PPO, VAPO, SAO, CompactionRL
 
-> **Status: expressible, not declared; no GPU run yet.** Every critic mechanism
-> below is CPU-tested only (unit tests, fork function-level tests and dry-run
-> snapshots). The Miles adapter declares `execution.critic=false`
-> (`entry.py`, `fake.py`), so a critic algorithm runs only as a single-island
-> smoke without outer sync, with `--rl-allow-unverified-mechanism` naming
-> `advantage_estimators:ppo`, `execution:critic` and each fork feature it uses.
-> GPU tasks 3.3, 4.5, 5.3, 6.4, 7.3, 8.4, 9.4 and 9.5 have not run; nothing in
-> this section is GPU-verified, and no effect (EV, reward, pass@k) is claimed.
-> Status labels used here: **CPU-verified** = unit/fork CPU tests pass;
-> **unverified** = no GPU evidence; **in progress (not merged)** = work on a
-> side branch that is not on this branch yet.
+> **Status: not declared; single-island G1 GPU runs passed for PPO, warm-up,
+> GAE variants, VAPO and SAO; no two-island (G3) run has passed.** The Miles
+> adapter still declares `execution.critic=false` (`entry.py`, `fake.py`): a
+> critic algorithm launches only as a single-island run without outer sync
+> (`--rl-single-island-no-sync`), with `--rl-allow-unverified-mechanism` naming
+> `advantage_estimators:ppo`, `execution:critic` and each fork feature it uses,
+> and every two-island critic run is refused (`check_unverified_allowance`).
+> G1 results (Modal 1xH100, 2026-10-07; they show only that the path runs and
+> yields finite values, no learning effect is claimed): PPO and stage-W warm-up
+> (`s13-g1-modal-20261007c`), GAE `length_adaptive` and `cross_segment`
+> (`gae-la-20261007b`, `gae-cs-20261007b`, the latter on synthetic two-segment
+> data), full VAPO (`vapo-20261007e`), SAO on Qwen3.5-0.8B for 12 rounds
+> (`s14-forkg1-sao-20261007a`, after the `[value_num_bins, hidden]` value-head
+> receipt fix `fb9a366f`); see `openspec/changes/rl-algo-critic-family/progress.md`.
+> Still **unverified**: all G3 tasks (4.5, 7.3, 8.4 G3, 9.5), CompactionRL on any
+> GPU (9.4/9.5), a real Codex/Terminal-Bench compaction rollout, and the effect
+> (EV, reward, pass@k) of any of these. Status labels: **CPU-verified** =
+> unit/fork CPU tests pass; **G1** = single-island GPU run finished with finite
+> metrics; **unverified** = no GPU evidence.
 
 All four algorithms are the Miles shared actor/critic PPO (`--advantage-estimator
 ppo`; Miles derives `use_critic`) and differ only in the GAE variant, the value
 loss and a few loss terms. Yeto declares, validates, translates and orchestrates;
 the math lives in Miles or in the fork (`michaellchung/miles`).
 
-**Fork pin.** The GAE variants, the positive-example LM loss, the SAO math and
-`--critic-updates-per-step` exist only in the fork branch `yeto-critic-family`
-(local commits, not pushed). `yeto/rl/algos/critic_fork.py` pins it as
-`CRITIC_FORK_PIN = ffe769c1e` (`FORK_COMMITS`). This is a declaration pin only:
-the ports image still runs `MILES_NEXT_COMMIT` c35702e, which does not have
-these flags, and no launch gate checks the image against `CRITIC_FORK_PIN` yet.
-Moving `MILES_NEXT_COMMIT` and the image (task 6.3) needs the user's approval
-to push the fork. Until then a real Miles launch of any fork flag fails at
-Miles argument parsing.
+**Fork pin and overlay.** The GAE variants, the positive-example LM loss, the SAO
+math, the tied-embedding critic value head and `--critic-updates-per-step` exist
+only in the fork branch `yeto-critic-c357` (rebased on c35702e, local, not
+pushed). `yeto/rl/algos/critic_fork.py` pins it as
+`CRITIC_FORK_PIN = 6574a9c8` (`FORK_COMMITS`) and the spec-level
+`*_not_at_pin` rejections check it. The ports image itself still runs
+`MILES_NEXT_COMMIT` c35702e without these flags; they reach the island only
+through the setup-time overlay (`--rl-miles-overlay auto`, patch
+`yeto/rl/overlays/miles-critic-c357.patch`, see "Clouds, controller and images").
+Moving `MILES_NEXT_COMMIT` and the image (task 6.3, open) would need the user's
+approval to push the fork.
 
 #### Spec fields and defaults
 
@@ -1475,12 +1532,11 @@ checkpoint with a new value head. `critic.warmup_steps=N > 0` adds stage W:
 2. **Main stage** (ports): `--num-critic-only-steps 0 --critic-load <stage-W
    product>`; the product hash enters the receipt (`CriticRunConfig.init_sha256`).
 
-Stage W argv and manifest checks are CPU-verified. Launching stage W on a
-cluster is **in progress (not merged)** (warm-up wiring); whether stage W starts
-on real Miles and whether the main stage loads its product are **unverified**
-(GPU 5.3). Before the main stage the warm-up is judged by an explicit success
-check on return fit, calibration and explained variance
-(**in progress, not merged**; thresholds and wording are set there).
+Stage W argv and manifest checks are CPU-verified. A G1 run (task 5.3,
+`s13-g1-modal-20261007c`, Modal 1xH100) ran a 50-step stage W with the actor
+hash unchanged and a main stage whose receipt carried the stage-W product hash;
+the explained-variance outcome is a recorded observation, not a threshold.
+Two-island warm-up reuse is **unverified**.
 
 ```bash
 python3 -m yeto.rl.critic_warmup --dry-run \
@@ -1496,11 +1552,11 @@ python3 -m yeto.rl.critic_warmup --dry-run \
 
 | variant | meaning | used by | status |
 | --- | --- | --- | --- |
-| `vanilla` (default) | Miles GAE, element-wise unchanged | PPO | Miles native; ports PPO unverified (GPU 3.3) |
-| `length_adaptive` (`lambd_mode`) | lambda = 1 - 1/(alpha*l), l = response length | VAPO (alpha 0.05), SAO and CompactionRL (alpha 1.5) | CPU-verified (fork tests vs `tests/rl_gae_reference.py`); GPU unverified |
-| `decoupled` | advantage uses the policy lambda, value target = GAE(`critic_lambd`) + V | VAPO, SAO | CPU-verified; GPU unverified; not compared numerically with the upstream SAO `gae_adaptive` |
-| `cross_segment` -> fork `cross_segment_per_sample` | each compaction segment is its own sample, reward at each segment end, bootstrap 0; local GAE times (gamma*lambda)^N_{>s} (paper eq. 13-15) | CompactionRL | CPU-verified; GPU unverified |
-| fork `cross_segment` (old) | whole rollout as one sample with per-token `segment_ids`; earlier segments carry no terminal reward | -- | kept in the fork unchanged; refused by yeto today; to be kept as an explicit control mode (**in progress, not merged**) |
+| `vanilla` (default) | Miles GAE, element-wise unchanged | PPO | Miles native; ports PPO G1 passed (3.3), G3 unverified |
+| `length_adaptive` (`lambd_mode`) | lambda = 1 - 1/(alpha*l), l = response length | VAPO (alpha 0.05), SAO and CompactionRL (alpha 1.5) | CPU-verified (fork tests vs `tests/rl_gae_reference.py`); G1 passed (`gae-la-20261007b`, VAPO and SAO runs) |
+| `decoupled` | advantage uses the policy lambda, value target = GAE(`critic_lambd`) + V | VAPO, SAO | CPU-verified; G1 passed (VAPO, SAO runs); not compared numerically with the upstream SAO `gae_adaptive` |
+| `cross_segment` -> fork `cross_segment_per_sample` | each compaction segment is its own sample, reward at each segment end, bootstrap 0; local GAE times (gamma*lambda)^N_{>s} (paper eq. 13-15) | CompactionRL | CPU-verified; G1 passed only on synthetic two-segment data (`gae-cs-20261007b`); real compaction rollouts unverified |
+| fork `cross_segment` (old) | whole rollout as one sample with per-token `segment_ids`; earlier segments carry no terminal reward | -- | kept in the fork unchanged as the explicit control mode `--gae-variant cross_segment_whole_rollout`; the ambiguous name `cross_segment` is refused by yeto |
 
 #### Outer sync, round-cut, ledger
 
@@ -1512,11 +1568,9 @@ python3 -m yeto.rl.critic_warmup --dry-run \
   is applied (`CrossChannelCommitError`). CPU-verified with fake islands.
 - **fp32 master weights** (user decision): the critic channel averages and
   writes back the fp32 master weights; the critic optimizer state is kept
-  across rounds (the actor's is reset as before). The fp32-master write-back
-  and opening the two-island gate are **in progress (not merged)**; on this
-  branch writing an fp32 average into bf16 parameters fails the post-write
-  hash check, and `check_unverified_allowance` still refuses any critic run
-  with outer sync.
+  across rounds (the actor's is reset as before). The write-back is
+  CPU-verified only; `check_unverified_allowance` still refuses any critic run
+  with outer sync until a G3 passes (task 4.5 is open; no G3 result is recorded).
 - **Round-cut checkpoint**: `save_cut` stores critic weights, optimizer and
   scheduler state under `<cut>/critic/`; `restore_cut` refuses a critic round
   that differs from the actor round, a missing pointer, or tampered weights;
@@ -1529,7 +1583,7 @@ python3 -m yeto.rl.critic_warmup --dry-run \
 #### Algorithms
 
 **PPO.** `advantage.estimator=ppo`, `execution.needs_critic=true`; defaults
-above. Status: CPU-verified; GPU G1/G3 unverified.
+above. Status: CPU-verified; G1 passed; G3 unverified.
 
 ```bash
 M="python3 -m yeto.rl.engine.miles_adapter.algorithm_flags"
@@ -1559,14 +1613,14 @@ User decisions (2026-10-07):
 - the positive-example NLL is normalised by the number of positive-example
   tokens (paper eq. 9).
 
-The last two are **in progress (not merged)**: on this branch the fork loss
-uses the PG-loss normalisation (effective weight ~ mu x positive-token share)
-and the threshold `reward > 0.0` (`--positive-example-reward-threshold 0.0`).
-Differences from the paper: value model initialised from the actor, not from
+The last two are in the fork overlay (fork `70e3d7761`: positives come from the
+reward function's explicit boolean success field, NLL normalised by the global
+positive-token count; the `--positive-example-reward-threshold 0.0` argv is kept
+as the fallback). Differences from the paper: value model initialised from the actor, not from
 the reward model; success predicate defined by yeto; value_clip (0.2), KL (0)
 and the warm-up schedule are not given by the paper; group sampling (16 per
 prompt, 512 prompts) is a run setting, not part of the hash. Status:
-CPU-verified; GPU 7.3 unverified.
+CPU-verified; G1 passed (`vapo-20261007e`, plus a warm-up-0 variant `vapo-w0`); G3 (7.3) unverified.
 
 ```bash
 $M --dry-run --extra "--advantage-estimator ppo --gae-variant decoupled --gae-lambd-mode length_adaptive \
@@ -1591,7 +1645,7 @@ CPU-verified against the upstream source (agentenv/miles
 `feat/sao-tbench21-e2e-validation@16a9bea4`). Not ported: re-forwarding the
 updated value to the actor, offline value pretrain; `critic_freeze_attention`
 is in the fork but not in the spec. The old SAO streaming entry is unchanged
-and stays the supported way to run SAO. SAO on ports: GPU 8.4 unverified.
+and stays the supported way to run SAO. SAO on ports: G1 passed (12 rounds, `s14-forkg1-sao-20261007a`); G3 (8.4) unverified.
 
 **CompactionRL** (`yeto/rl/algos/compactionrl.py::compactionrl_spec()`,
 arXiv 2607.05378, spec sha256 `506b4ba4...c932`). Rollout side
@@ -1604,11 +1658,11 @@ segment is one sample with the shared reward and metadata `tokens_after`
 whole rollout** (all segments share one lambda); alpha = 1.5; gamma = 1; KL 0;
 token-level loss; critic lr 3e-6; 2 critic updates per policy update; 50-step
 warm-up; the critic target is the **uncorrected local return** (local
-advantage + V); the old one-sample implementation stays as an explicit control
-(**in progress, not merged**; refused on this branch). Hooking compaction into
-the Codex / Terminal-Bench rollout path is **in progress (not merged)**; the
-9-section summary template is a yeto draft (the paper gives no section names).
-Status: CPU-verified; GPU 9.4/9.5 unverified.
+advantage + V); the old one-sample implementation stays as the explicit control
+`cross_segment_whole_rollout`. Hooking compaction into the Codex /
+Terminal-Bench rollout path is **unverified** on GPU (the `yeto/rl/compaction.py`
+rollout side is CPU-tested); the 9-section summary template is a yeto draft (the
+paper gives no section names). Status: CPU-verified; GPU 9.4/9.5 unverified.
 
 ```bash
 $M --dry-run --extra "--advantage-estimator ppo --gae-variant cross_segment_per_sample \
@@ -1629,13 +1683,13 @@ $M --dry-run --extra "--advantage-estimator ppo --gae-variant cross_segment_per_
 | mechanism | CPU | GPU |
 | --- | --- | --- |
 | spec fields, hash, absorb/translate, rejections | verified | n/a |
-| PPO single island (G1, 3.3) | fake engine verified | **unverified** |
-| stage W warm-up + main stage (5.3) | argv/manifest verified; launch wiring in progress | **unverified** |
-| GAE length_adaptive / decoupled / cross_segment_per_sample (6.4) | fork tests vs reference verified | **unverified** |
-| dual syncer + atomic commit, round-cut critic state (4.5) | fake islands verified; fp32 master write-back in progress | **unverified** |
-| VAPO (7.3) | verified (paper-normalised NLL and success predicate in progress) | **unverified** |
-| SAO on ports (8.4) | verified | **unverified** (the old SAO streaming path has its own 2026-08-26 validation) |
-| CompactionRL (9.4/9.5) | verified (control mode and Codex hookup in progress) | **unverified** |
+| PPO single island (G1, 3.3) | verified | **G1 passed** (`s13-g1-modal-20261007c`) |
+| stage W warm-up + main stage (5.3) | verified | **G1 passed** (same run) |
+| GAE length_adaptive / cross_segment_per_sample (6.4) | fork tests vs reference verified | **G1 passed** (`gae-la-20261007b`; cross_segment on synthetic data `gae-cs-20261007b`) |
+| dual syncer + atomic commit, round-cut critic state (4.5) | fake islands verified | **unverified** (G3 not passed) |
+| VAPO (7.3) | verified | **G1 passed** (`vapo-20261007e`); G3 unverified |
+| SAO on ports (8.4) | verified | **G1 passed** (`s14-forkg1-sao-20261007a`); G3 unverified (the old SAO streaming path has its own 2026-08-26 validation) |
+| CompactionRL (9.4/9.5) | verified | **unverified** |
 | critic LoRA (10.x) | not implemented (refused) | -- |
 
 ### Port responsibilities
@@ -1656,16 +1710,26 @@ exactly that policy, the ports equivalent of legacy's completed-group queue
 filtering. Outer synchronization reuses the legacy `strict-avg` and `decoupled`
 state machines and island checkpoint formats (`yeto/rl/engine/bridges.py`).
 
-### The one Miles-side patch
+### Miles-side changes carried by the fork
 
-`ports` needs a single generic entry point in Miles: `run_plugin(fn_path,
-kwargs)` on the train actor and a pass-through on the trainer group
-(`TrainerController`), which loads `fn_path` and calls it with the actor on
-every rank. The trainable-state export/apply and grad-norm plugins themselves
-live in Yeto. The patch is carried as one commit on `michaellchung/miles`
-`yeto/ports` and proposed upstream. Until `MILES_NEXT_COMMIT` points at a commit
-carrying it, `--rl-engine ports` refuses to start (before any Miles component
-or model is created) with an error naming the pin.
+`ports` needs a generic entry point in Miles: `run_plugin(fn_path, kwargs)` on
+the train actor and a pass-through on the trainer group (`TrainerController`),
+which loads `fn_path` and calls it with the actor on every rank. The
+trainable-state export/apply and grad-norm plugins live in Yeto. This and the
+other compatibility changes (elastic M1-M6 verbs, loss variants, Qwen3.8-Next
+LoRA layout, engine-failure propagation) are carried as commits on
+`michaellchung/miles` `yeto/ports`; they are **not** proposed upstream
+(radixark/miles). `MILES_NEXT_COMMIT` must name a commit carrying them,
+otherwise `--rl-engine ports` refuses to start (before any Miles component or
+model is created) with an error naming the pin.
+
+**Colocated publish order.** With a colocated trainer and `offload_train`, the
+driver offloads the trainer after the optimizer step and before the weight
+publication (the upstream Miles `train.py` order;
+`MilesTrainerGroup.publish_offloaded`, commit `fd7aabbd`). Publishing first kept
+the trainer resident and ran the 8xH200 Flash-Next single island out of GPU
+memory in round 2; with the fix the same run completed round 2 (see
+"Flash-Next (Qwen3.8-Flash-Next) path").
 
 ### Dry-run examples
 
@@ -1733,12 +1797,16 @@ and, for the correcting mechanisms, by a run that made the branch fire (tasks
 `opsm_rollout` and `mis` (truncate/clip) are not declared. Any other mechanism fails at startup with a
 list of the supported ones. For a single-island smoke only,
 `--rl-single-island-no-sync --rl-allow-unverified-mechanism corrections:<name>`
-(and `features:<name>` where needed) admits them. The two-island run (G3) has not
-been done.
+(and `features:<name>` where needed) admits them. Two-island strict-avg runs (G3)
+passed for TIS and IcePop (`rl-algo-mismatch-correction` evidence
+`2026-09-29-g3c`, `2026-09-29-g3d`).
 
-Limits of that GPU evidence: no clipping or masking branch fired on GPU (every
-ratio stayed inside the bounds, so `tis_clipfrac`, the IcePop and MIS mask
-fractions were all 0). With one optimizer step per round, OPSM cannot trigger by
+Limits of that GPU evidence: in the plain G1 runs no clipping or masking branch
+fired (every ratio stayed inside the bounds, so `tis_clipfrac`, the IcePop and
+MIS mask fractions were all 0). The follow-up trigger runs
+(`evidence/2026-09-29-trigger`, deliberately narrow intervals) made the TIS,
+IcePop and MIS-mask branches fire (fractions > 0) and OPSM fire with 2 optimizer
+steps; these are the evidence behind the declarations. With one optimizer step per round, OPSM cannot trigger by
 construction, because pi_theta = pi_old. For the same reason `ess_ratio` and `ois`
 are always 1: they are pi_theta/pi_old statistics and do not reflect the
 train/inference mismatch. Nothing here claims a training benefit.
@@ -1842,6 +1910,79 @@ it is rejected as undeclared without the allowances and accepted with them.
                 "sha256": "f75f86c302edb7563ae8026b3bf4dda992217d9eed23b5c7ad0ae93936fd9096"}}}
 ```
 
+## Algorithm status matrix
+
+"Declared" means the Miles adapter (`yeto/rl/engine/miles_adapter/entry.py`,
+`MILES_DECLARED`) accepts the mechanism without
+`--rl-allow-unverified-mechanism`, which requires GPU evidence that it takes
+effect. Declarations say nothing about training gains. G1 = single island on
+GPU, G3 = two-island strict-avg on GPU. Evidence directories are under
+`openspec/changes/<change>/evidence/`.
+
+| family (change) | mechanisms | declared | GPU status |
+| --- | --- | --- | --- |
+| baseline GRPO (R0) | GRPO, `strict-avg`, `decoupled` | yes | R0 smoke and strict-avg runs; `decoupled` GPU re-run **not done** |
+| GRPO knobs (`rl-algo-grpo-knobs`) | `eps_clip` / `clip_higher`, token aggregation, Dr.GRPO constant denominator and no-std, KL loss (k3, ref model), entropy bonus, over-sampling, overlong filter, overlong soft penalty | yes (those that passed G1; some only on Miles pins in `MILES_DECLARED_PINS`, which includes c35702e) | G1 passed (`rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1*`); G3 combination (8.4) **not run**; dual-clip **not declared** |
+| sequence ratio / advantage (`rl-algo-seq-and-adv`) | GSPO, REINFORCE++, REINFORCE++-baseline, MaxRL, MAPO, GDPO | yes | G1 passed (`evidence/g1`); G3 passed for MaxRL only (`evidence/g3/rerun`) |
+| mismatch correction (`rl-algo-mismatch-correction`) | observe-only, TIS, IcePop, OPSM (trainer source), MIS mask | yes | G1 passed, branches fired in `evidence/2026-09-29-trigger`; G3 passed for TIS and IcePop; `opsm_rollout` and MIS truncate/clip **not declared** |
+| loss variants (`rl-algo-loss-variants`) | CISPO, SAPO, GMPO | **no** (expressible via the fork flag only) | CPU only; GPU smoke (6.x) paused, **unverified** |
+| critic family (`rl-algo-critic-family`) | PPO, stage-W warm-up, GAE variants, VAPO, SAO | **no** (`execution.critic=false`) | G1 passed (see "Critic family"); G3 **not passed** |
+| CompactionRL | `cross_segment_per_sample` GAE, compaction rollout | **no** | CPU; only a synthetic-data GAE G1; real rollouts **unverified** |
+| Codex / agentic harness (`rl-codex-harness-rollout`) | rollout harness for Codex-style agents | n/a | partly CPU; multi-turn TITO consistency GPU run is partial (9.2); agentic drain acceptance (3.3) and sandbox broker (8.x) **not done** |
+
+## Flash-Next (Qwen3.8-Flash-Next) path
+
+The Flash-Next profile lives in `yeto/rl/profiles/qwen3_8_next.py`
+(profile `qwen3_8_next_4layer_lora`; full model `Qwen/Qwen3.8-Flash-Next`,
+4-layer CI variant `CharyZeng/Qwen3.8-Flash-Next-4layer`, LoRA over the
+linear-attention projections via the fork's Qwen3.8-Next LoRA layout). It runs
+on `ports` only, and needs a Megatron `torch_dist` checkpoint of the base model
+(the HF-to-torch_dist conversion is a separate step, not done at launch). Verified so
+far (evidence names; numbers are in the files, not repeated here):
+
+- 4-layer variant, LoRA GRPO learning signal on GPU: Nebius 8xH100
+  (`s13-h100-20261007b`, `FN-A-RESULT.md`) and the Modal H100 M4 runs
+  (`rl-infra-spec/progress.md` section M4).
+- Full model HF to `torch_dist` conversion on Modal 4xH200
+  (`s13-fnconv-modal-20261007c`): output `yeto-fn-models:/torch_dist/qwen3.8-flash-next_torch_dist`
+  (TP1 PP4, 234.4 GiB, re-sliced at load); HF weights in the same Modal Volume
+  `yeto-fn-models:/hf/Qwen3.8-Flash-Next/de4b8e4d/`, mounted with
+  `--modal-model-volume yeto-fn-models`.
+- Full model single island on Modal 8xH200, LoRA GRPO, two rounds trained,
+  judgment **PASS** (`s14-fnsmoke-modal-20261007a`, `FN-MODAL-SMOKE-REVIEW.md`
+  section 11), launcher rc 2 = no-sync design. This run depends on the colocated
+  publish order fix described under "Miles-side changes carried by the fork";
+  the earlier run without it hit GPU OOM in round 2.
+
+**Unverified / not done:** more than two rounds on the full model, the planned
+4x8 H200 formal training (deferred: H200 capacity, budget; plan in
+`FN-TRAIN-PLAN.md`), multi-island Flash-Next with outer sync, Flash-Next elastic
+edges (`FN-ELASTIC-GPU-PLAN.md`), and any reward improvement claim.
+
+## Elastic reconfiguration
+
+`--rl-elastic` (off by default; ports, fixed partition; resources manifest
+`--rl-elastic-resources`, initial config, rollout cells) enables the island-local
+controller of `rl-infra-spec`. What exists today:
+
+- **E1, manual rollout add/remove/drain** with journalled transactions, expected
+  epoch, deadlines and a watchdog; the controller restarts the learner in place
+  with `--rl-elastic-restart-attempts`. GPU chains (Nebius, 4xL40S and 8xH100)
+  passed the L1-L8 criteria incl. kill and restart (`rl-infra-spec/progress.md`,
+  `gpu-plan-v2.md` section 9.24); two-island X6 (task 3.8) and the full fault
+  matrix (4.5) are **not done**, and some E2 criteria (C2/C3') rest on CPU
+  evidence by user ruling (2026-10-04).
+- **E2, same-shape cut/restore** (`TrainerGroup.save_cut/restore_cut`, journal,
+  checkpoint store for multi-node rebuilds): rejection paths GPU-checked
+  (`evidence/infra-e2/4.2-4.5`); no automatic re-entry of lost ranks.
+- **Trainer DP change / role transfer** (`--rl-elastic-trainer-edges`): the
+  DP1<->2 reshard study (4.6) and the edge (4.7) are **not done**; treat the flag
+  as unverified.
+- **D1/D2 recommendation and auto mode** exist in code with auto off by default;
+  the single measured edge (H100 single node) has no net gain, so auto stays
+  disabled (`rl-infra-spec/design.md`).
+- Fleet-level control across islands is out of scope (see Supported Boundary).
+
 ## Benchmark
 
 [`scripts/benchmark_rl.py`](../scripts/benchmark_rl.py) runs up to four local,
@@ -1890,7 +2031,7 @@ Island JSONL records include:
 
 The syncer tape remains authoritative for outer step, fragment, exact base,
 round attempt, full responder roster, Nesterov update norm, merge time, and
-layout fingerprint. No dashboard is enabled by this feature.
+layout fingerprint. The read-only fleet dashboard (`yeto dashboard serve/export`, `docs/DASHBOARD.md`) reduces these tapes, the syncer tape, controller journals and the head's `fleet.jsonl` into one view; it is not a data source and changes no run state. Its browser check with screenshots (`yeto-fleet-dashboard` 4.1/7.1) and native syncer quorum events (6.1) are not done.
 
 Payload traffic counts PUSH, ordinary BCAST, and ordinary final-cut fragment
 tensors. It intentionally excludes message headers, framing, chunks, and
@@ -1912,9 +2053,10 @@ multi-island f32 parity, process and retained-disk syncer recovery, session/tool
 rollouts, standard PEFT load/generation, and the Qwen3.6-27B equal-hardware H200
 benchmark summarized in [BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md).
 
-The decoupled preset must not be described as release-usable until its pinned
-Miles commit and required real causal-LM GPU matrix, including a cross-machine
-run and failure run, have completed. Diffusion RL is outside the contract and
+The decoupled preset must not be described as release-usable until the required
+real causal-LM GPU matrix, including a cross-machine run, a failure run and the
+legacy-vs-ports two-island LR comparison (`fix-decoupled-lr-schedule` 3.2), has
+completed. Diffusion RL is outside the contract and
 is not part of that matrix.
 
 ## Development Guide
