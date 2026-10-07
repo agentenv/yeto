@@ -109,8 +109,7 @@ def test_fork_argv():
 
 def test_rejections():
     spec = sao.sao_algorithm_spec("coding")
-    problems = " ".join(spec.rejections())
-    assert "sao_dis" in problems and "streaming entry" in problems  # not at the ports pin
+    assert spec.rejections() == []  # critic fork pin carries SAO (critic_fork.py, e07e51c07)
     stray = AlgorithmSpec(loss={"sao_dis_eps_low": 0.3})
     assert any("only apply" in p for p in stray.rejections())
     no_critic = AlgorithmSpec(loss={"policy_objective": "sao_dis", "sao_dis_eps_low": 0.3,

@@ -73,7 +73,7 @@ def critic_argv(spec: AlgorithmSpec) -> list[str]:
         argv += ["--critic-lr", _num(c.critic_lr)]
     if c.critic_lr_warmup is not None:
         argv += ["--critic-lr-warmup-iters", str(c.critic_lr_warmup)]
-    if c.critic_updates_per_step != 1:  # pending fork flag (CompactionRL, change 9.3)
+    if c.critic_updates_per_step != 1:  # fork e07e51c07 (alias of --num-critic-epochs)
         argv += ["--critic-updates-per-step", str(c.critic_updates_per_step)]
     argv += ["--num-critic-only-steps", "0"]
     if c.init == "load":
@@ -86,9 +86,9 @@ def critic_argv(spec: AlgorithmSpec) -> list[str]:
 FORK_FLAGS = frozenset({
     "--gae-variant", "--gae-lambd-mode", "--gae-length-alpha", "--gae-critic-lambd",
     "--positive-example-lm-loss-coef", "--positive-example-reward-threshold",
-    # CompactionRL (change 9.3): 2 critic updates per policy update. NOT in any fork
-    # commit yet -- requested fork change; the mechanism stays undeclared until then.
-    "--critic-updates-per-step",
+    # CompactionRL 2 / SAO 2 critic updates per policy update: fork e07e51c07
+    # (yeto-critic-family), one dest; the mechanism stays undeclared until GPU G1.
+    "--critic-updates-per-step", "--num-critic-epochs",
 })
 
 
@@ -189,6 +189,10 @@ register_mechanism("features", "critic_multi_update",
                    lambda s: s.execution.needs_critic
                    and s.critic.critic_updates_per_step not in (None, 1))
 register_flag(FlagMapping("--critic-updates-per-step", "critic.critic_updates_per_step", False,
+                          _int, lambda v: [("critic.critic_updates_per_step", v)], _none))
+# SAO's spelling of the same fork dest (e07e51c07); critic_argv emits the
+# --critic-updates-per-step spelling.
+register_flag(FlagMapping("--num-critic-epochs", "critic.critic_updates_per_step", False,
                           _int, lambda v: [("critic.critic_updates_per_step", v)], _none))
 register_flag(FlagMapping("--positive-example-lm-loss-coef", "loss.positive_lm_coef", False,
                           _float, lambda v: [("loss.positive_lm_coef", v)], positive_lm_argv))

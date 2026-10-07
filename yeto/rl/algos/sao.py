@@ -40,11 +40,13 @@ from yeto.rl.engine.algorithm import (
     AlgorithmSpec,
     AlgorithmSpecError,
     register_field,
+    register_mechanism,
     register_rejection,
 )
 from yeto.rl.engine.miles_adapter.algorithm_flags import (
     FlagMapping,
     _float,
+    _int,
     _num,
     register_flag,
 )
@@ -69,9 +71,10 @@ HL_GAUSS_SIGMA_RATIO = 0.75
 VALUE_REWARD_RANGE = (0.0, 1.0)
 
 # Commits of michaellchung/miles carrying --policy-objective sao_dis and the
-# classification value loss. Empty: yeto-sao 6b5bd88c is local (not pushed,
-# not in an image), so the ports pin cannot run SAO yet.
-FORK_COMMITS: frozenset[str] = frozenset()
+# classification value loss: the critic-family fork pin (yeto-critic-family
+# e07e51c07 = yeto-sao 6b5bd88c merged with GAE variants, VAPO and
+# --num-critic-epochs). Local, not pushed, not in an image (critic_fork.py).
+from yeto.rl.algos.critic_fork import CRITIC_FORK_PIN, FORK_COMMITS  # noqa: E402
 
 
 # --------------------------------------------------------------------------
@@ -231,11 +234,51 @@ def sao_fork_argv(spec: AlgorithmSpec) -> list[str]:
 
 
 register_flag(FlagMapping("--policy-objective", "loss.policy_objective", False, str,
-                          lambda v: [("loss.policy_objective", v)], sao_fork_argv))
+                          lambda v: [("loss.policy_objective", v)]
+                          # DIS compares against the rollout policy (fork forces
+                          # use_rollout_logprobs), as sao_algorithm_spec declares.
+                          + ([("execution.needs_rollout_logprobs", True)] if v == SAO_DIS else []),
+                          sao_fork_argv))
 register_flag(FlagMapping("--sao-dis-eps-low", "loss.sao_dis_eps_low", False, _float,
                           lambda v: [("loss.sao_dis_eps_low", v)], lambda spec: []))
 register_flag(FlagMapping("--sao-dis-eps-high", "loss.sao_dis_eps_high", False, _float,
                           lambda v: [("loss.sao_dis_eps_high", v)], lambda spec: []))
+
+
+# Value-head flags (fork 6b5bd88c). sao_fork_argv emits them for an hl_gauss
+# critic; absorbing them keeps a raw --value-loss-type from bypassing the spec.
+# --value-reward-range takes two values and is a translation constant
+# (VALUE_REWARD_RANGE): adapter-owned, never absorbed (algorithm_flags._UNMAPPED).
+def _value_loss_type(raw: str) -> str:
+    if raw not in ("mse", "classification"):
+        raise AlgorithmSpecError(f"expected mse or classification, got {raw!r}")
+    return raw
+
+
+def _hl_gauss_target(raw: str) -> str:
+    if raw != "hl_gauss":
+        raise AlgorithmSpecError(f"only hl_gauss is expressible (critic.value_loss), got {raw!r}")
+    return raw
+
+
+def _sigma_ratio(raw: str) -> float:
+    value = _float(raw)
+    if value != HL_GAUSS_SIGMA_RATIO:
+        raise AlgorithmSpecError(
+            f"the HL-Gauss sigma ratio is the translation constant {HL_GAUSS_SIGMA_RATIO}, got {raw!r}")
+    return value
+
+
+register_flag(FlagMapping(
+    "--value-loss-type", "critic.value_loss", False, _value_loss_type,
+    lambda v: [("critic.value_loss", "hl_gauss" if v == "classification" else "mse")],
+    lambda spec: []))
+register_flag(FlagMapping("--value-num-bins", "critic.hl_gauss_bins", False, _int,
+                          lambda v: [("critic.hl_gauss_bins", v)], lambda spec: []))
+register_flag(FlagMapping("--value-target-type", "critic.value_loss", False, _hl_gauss_target,
+                          lambda v: [], lambda spec: []))
+register_flag(FlagMapping("--hl-gauss-sigma-ratio", "critic.value_loss", False, _sigma_ratio,
+                          lambda v: [], lambda spec: []))
 
 
 # --------------------------------------------------------------------------
@@ -264,9 +307,7 @@ def _reject_sao_dis(s: AlgorithmSpec) -> str | None:
 def _reject_sao_not_at_pin(s: AlgorithmSpec) -> str | None:
     if s.loss.policy_objective != SAO_DIS:
         return None
-    from yeto.rl import MILES_NEXT_COMMIT
-
-    if MILES_NEXT_COMMIT in FORK_COMMITS:
+    if CRITIC_FORK_PIN in FORK_COMMITS:
         return None
     return (
         "loss.policy_objective='sao_dis' needs the Miles fork SAO port (yeto-sao, not yet "
@@ -277,3 +318,10 @@ def _reject_sao_not_at_pin(s: AlgorithmSpec) -> str | None:
 
 register_rejection("sao_dis_fields", _reject_sao_dis)
 register_rejection("sao_not_at_pin", _reject_sao_not_at_pin)
+
+# Fork-only SAO mechanisms (e07e51c07): undeclared by the Miles adapter until GPU
+# G1 (task 8.4), so a run needs --rl-allow-unverified-mechanism for each.
+register_mechanism("features", "sao_dis",
+                   lambda s: getattr(s.loss, "policy_objective", None) == SAO_DIS)
+register_mechanism("features", "value_hl_gauss",
+                   lambda s: s.execution.needs_critic and s.critic.value_loss == "hl_gauss")
