@@ -113,6 +113,11 @@ class Tb2Task:
     workdir: str
     agent_timeout_s: float
     verifier_timeout_s: float
+    # Task statement from ``instruction.md`` (the Terminal-Bench prompt).  The
+    # smoke datasets carry only ``task_id`` and a generic system message, so
+    # this is the only place the model can learn what to do (S15 stage 2: all
+    # 48 trajectories ran without it and scored 0).
+    instruction: str | None = None
 
     @property
     def tests_dir(self) -> Path:
@@ -150,7 +155,15 @@ def resolve_task(task_ref: str, tasks_dir: Path) -> Tb2Task:
         workdir=_dockerfile_workdir(task_dir / "environment" / "Dockerfile"),
         agent_timeout_s=float(config.get("agent", {}).get("timeout_sec", 900.0)),
         verifier_timeout_s=float(config.get("verifier", {}).get("timeout_sec", 900.0)),
+        instruction=_read_instruction(task_dir / "instruction.md"),
     )
+
+
+def _read_instruction(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    text = path.read_text(errors="replace").strip()
+    return text or None
 
 
 def _dockerfile_workdir(dockerfile: Path) -> str:

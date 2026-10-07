@@ -463,3 +463,50 @@ def test_modal_provider_fails_closed_without_an_importable_modal_client(monkeypa
     with pytest.raises(RuntimeError, match="importable `modal` client"):
         tb2_provider.modal_provider(None)
     assert tb2_provider.InjectedCreateFailure.injected_fault is True
+
+
+# ---------------------------------------------------------------- task statement (S15 stage-2 root cause)
+
+
+SMOKE6_PROMPT = [{"role": "system", "content": "You are an autonomous terminal agent solving a Terminal-Bench task."}]
+
+
+def test_resolve_task_reads_instruction_md(tmp_path):
+    tasks_dir = _make_task(tmp_path / "tb2")
+    assert tb2_provider.resolve_task("fix-git", tasks_dir).instruction is None
+    (tasks_dir / "fix-git" / "instruction.md").write_text("\nFind my lost changes and merge them into master.\n")
+    assert tb2_provider.resolve_task("fix-git", tasks_dir).instruction == "Find my lost changes and merge them into master."
+
+
+def test_task_prompt_precedence_and_fail_closed():
+    lease = SimpleNamespace(task=SimpleNamespace(instruction="TASK STATEMENT"))
+    no_task = SimpleNamespace(task=None)
+    assert subprocess_agent.task_prompt({"prompt": "explicit"}, SMOKE6_PROMPT, lease) == "explicit"
+    # the smoke6 row shape: system-only chat prompt, no metadata prompt -> instruction.md
+    assert subprocess_agent.task_prompt({"task_id": "fix-git"}, SMOKE6_PROMPT, lease) == "TASK STATEMENT"
+    assert subprocess_agent.task_prompt({}, "plain", no_task) == "plain"
+    chat = SMOKE6_PROMPT + [{"role": "user", "content": "do it"}]
+    assert subprocess_agent.task_prompt({}, chat, no_task) == "do it"
+    with pytest.raises(subprocess_agent.TaskPromptMissing):
+        subprocess_agent.task_prompt({"task_id": "fix-git"}, SMOKE6_PROMPT, no_task)
+
+
+def test_subprocess_run_sends_instruction_md_not_the_stringified_chat_prompt(monkeypatch, tmp_path):
+    provider = _provider(tmp_path)
+    (provider.tasks_dir / "fix-git" / "instruction.md").write_text("Find my lost changes and merge them into master.\n")
+    _configure(monkeypatch, provider)
+    seen: dict[str, Any] = {}
+    original = subprocess_agent._drive_worker
+
+    async def spy(job, *args, **kwargs):
+        seen["prompt"] = job["prompt"]
+        return await original(job, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess_agent, "_drive_worker", spy)
+    metadata = _metadata(["echo ok > fixed.txt"])
+    del metadata["prompt"]
+    result = _run(subprocess_agent.run("http://miles", SMOKE6_PROMPT, {}, metadata))
+    assert seen["prompt"] == "Find my lost changes and merge them into master."
+    assert "'role'" not in seen["prompt"]
+    assert tbench_outcome.verified_outcome(result)[1] == 1.0
+    assert provider.destroyed == 1 and provider.live == {}

@@ -251,6 +251,49 @@ async def _drive_worker(
         await _terminate(process)
 
 
+class TaskPromptMissing(ValueError):
+    """No task statement could be resolved for the episode (fail closed)."""
+
+
+def _last_user_text(prompt: Any) -> str | None:
+    if not isinstance(prompt, list):
+        return None
+    for message in reversed(prompt):
+        if isinstance(message, dict) and message.get("role") == "user":
+            content = message.get("content")
+            if isinstance(content, str) and content.strip():
+                return content
+    return None
+
+
+def task_prompt(metadata: dict[str, Any], prompt: Any, lease: Any) -> str:
+    """The task statement Codex receives as its first user message.
+
+    Precedence: explicit ``metadata["prompt"]`` string; the provider task's
+    ``instruction.md``; a plain-string Miles prompt; the last user message of a
+    chat-format prompt.  A chat prompt without a user message (e.g. only a
+    generic system message) is refused instead of being stringified -- S15
+    stage 2 sent ``str([{'role': 'system', ...}])`` to every trajectory, so the
+    model never saw the task and all 48 rewards were 0.
+    """
+    explicit = metadata.get("prompt")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit
+    task = getattr(lease, "task", None)
+    instruction = getattr(task, "instruction", None)
+    if isinstance(instruction, str) and instruction.strip():
+        return instruction
+    if isinstance(prompt, str) and prompt.strip():
+        return prompt
+    user = _last_user_text(prompt)
+    if user is not None:
+        return user
+    raise TaskPromptMissing(
+        f"no task statement for task {metadata.get('task_id')!r}: metadata has no prompt, "
+        "the environment task has no instruction.md and the Miles prompt has no user message"
+    )
+
+
 async def run(
     base_url: str,
     prompt: Any,
@@ -295,7 +338,7 @@ async def run(
             lease_open = True
         job = {
             "base_url": base_url,
-            "prompt": metadata.get("prompt") if isinstance(metadata.get("prompt"), str) else str(prompt),
+            "prompt": task_prompt(metadata, prompt, lease),
             "request_kwargs": dict(request_kwargs or {}),
             "episode_id": episode_id,
             "max_seq_len": metadata.get("max_seq_len"),
