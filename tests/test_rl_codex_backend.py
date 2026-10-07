@@ -444,3 +444,32 @@ def test_legacy_profiles_default_to_attention_and_zero_expert_rank():
         _validate_qwen38(lora_expert_rank=8)
     with pytest.raises(ValueError, match="Qwen3.5 model identity"):
         _validate_qwen35(lora_targets="all-linear")
+
+
+# ----------------------------------------------------------- rl-fn-codex-rollout 0.2 (5.1)
+
+from yeto.rl.codex_backend import _PROFILES, stock_codex_keeps_history_reasoning  # noqa: E402
+from yeto.rl.harness.gateway import GatewayConfig  # noqa: E402
+
+
+def test_every_profile_declares_keeps_history_reasoning():
+    for name in _PROFILES:
+        assert stock_codex_keeps_history_reasoning(name) is True, name
+    with pytest.raises(ValueError, match="unsupported"):
+        stock_codex_keeps_history_reasoning("qwen")
+
+
+def test_gateway_config_reads_keeps_history_reasoning_from_profile(monkeypatch):
+    cfg = GatewayConfig.from_codex_profile("qwen38_next", {"temperature": 1.0})
+    assert cfg.model == "qwen4exp"
+    assert cfg.allowed_append_roles == ("tool", "user")
+    assert cfg.keeps_history_reasoning is True
+    assert GatewayConfig.from_codex_profile("qwen35_08b", {}).model == "qwen35"
+    with pytest.raises(ValueError, match="declared by the codex profile"):
+        GatewayConfig.from_codex_profile("qwen35", {}, keeps_history_reasoning=False)
+    # A profile that forgets the declaration fails closed instead of defaulting.
+    broken = copy.deepcopy(_PROFILES["qwen35"])
+    del broken["keeps_history_reasoning"]
+    monkeypatch.setitem(_PROFILES, "qwen35_broken", broken)
+    with pytest.raises(ValueError, match="does not declare keeps_history_reasoning"):
+        GatewayConfig.from_codex_profile("qwen35_broken", {})

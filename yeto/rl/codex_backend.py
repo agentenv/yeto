@@ -111,6 +111,9 @@ def _fn_profile(variant: str, model: str, revision: str) -> dict[str, Any]:
         "identity_label": _FN_MODEL_NAMES[variant],
         "lora_targets": "all-linear",
         "lora_expert_rank": 8,
+        # ``qwen3.8_small_and_flash_next_fixed.jinja`` renders every assistant
+        # <think> block when ``preserve_thinking`` is undefined or true.
+        "keeps_history_reasoning": True,
     }
 
 
@@ -127,6 +130,7 @@ _PROFILES: dict[str, dict[str, Any]] = {
             "drop_thinking": False,
         },
         "tito_allowed_append_roles": ["tool", "user"],
+        "keeps_history_reasoning": True,
     },
     "qwen38": {
         "model": "qwen38",
@@ -143,6 +147,7 @@ _PROFILES: dict[str, dict[str, Any]] = {
         "model_identifier": QWEN38_MODEL,
         "model_revision": QWEN38_REVISION,
         "identity_label": "Qwen3.8",
+        "keeps_history_reasoning": True,
     },
     "qwen35": {
         "model": "qwen35",
@@ -157,6 +162,9 @@ _PROFILES: dict[str, dict[str, Any]] = {
         "model_identifier": QWEN35_MODEL,
         "model_revision": QWEN35_REVISION,
         "identity_label": "Qwen3.5",
+        # ``qwen3.5_fixed.jinja`` + ``preserve_thinking: True`` keeps every
+        # historical <think> block (rl-fn-codex-rollout D2 / upstream 5.1).
+        "keeps_history_reasoning": True,
     },
     # This is a distinct, closed model identity while deliberately reusing
     # Miles' model-family-level Qwen3.5 TITO implementation.  The profile name
@@ -174,12 +182,33 @@ _PROFILES: dict[str, dict[str, Any]] = {
         "model_revision": QWEN35_08B_REVISION,
         "identity_label": "Qwen3.5-0.8B",
         "tito_model": "qwen35",
+        "keeps_history_reasoning": True,
     },
     "qwen38_next": _fn_profile("full", QWEN38_NEXT_MODEL, QWEN38_NEXT_REVISION),
     "qwen38_next_4layer": _fn_profile(
         "4layer", QWEN38_NEXT_4LAYER_MODEL, QWEN38_NEXT_4LAYER_REVISION
     ),
 }
+
+
+def stock_codex_keeps_history_reasoning(profile_name: str) -> bool:
+    """5.1: whether the profile's fixed TITO template keeps historical reasoning.
+
+    Every supported profile must declare it explicitly; the gateway's
+    ``ChainRegistry`` is initialised from this value, so a missing declaration
+    is a profile bug, not a default.
+    """
+
+    profile = stock_codex_backend_profile(profile_name)
+    try:
+        value = profile["keeps_history_reasoning"]
+    except KeyError as exc:
+        raise ValueError(
+            f"stock Codex profile {profile_name!r} does not declare keeps_history_reasoning"
+        ) from exc
+    if not isinstance(value, bool):
+        raise ValueError("keeps_history_reasoning must be a bool")
+    return value
 
 
 def stock_codex_lora_layout(profile_name: str) -> tuple[str, int]:
