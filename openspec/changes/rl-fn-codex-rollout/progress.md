@@ -7,3 +7,9 @@
 - 已知可得分样例：smoke-11/12 全零奖励，历史无任何 smoke6 任务得分；judge 以 `fix-git` 为候选（`--known-scorable fix-git`，标注非"已知"），且 tbench_reward 无逐轨迹日志，`known_scorable_passed` 预计恒 null，需另加逐轨迹奖励日志/tape 才能验证。
 - 脚本修正：`CONTAINER_MARK` 需匹配 `requested H100!:1, got`（已改）。
 - 证据：`s1-runs/s15-fncodex-4layer-modal-20261007a/`、`infra-drafts/FNCODEX-PRELAUNCH-REVIEW.md` §8–9、`infra-drafts/gpu-spend.md`。
+
+## 阶段 1 第 2 跑（2026-10-07，S14 子 agent L2，分支 s14-fncodex-l2，基线 9ac476f9）
+- 1.0 已实现并提交（8bacb90d）：OpenEnv adapter 运行时 profile 取 `YETO_CODEX_CHAT_TEMPLATE`，允许集合 {qwen35_08b, qwen38_next, qwen38_next_4layer}，镜像 identity env 视为构建记录不重建；逐轨迹奖励 `rl_trajectory_reward` tape 事件 + judge 读取；design D3 SGL_MEM_FRAC 0.6。
+- run `s15-fncodex-4layer-modal-20261007b`：**INCOMPLETE**，0 轮，rc=4，≈$0.40。preflight 通过，但 `check_config_mapped` 拒绝 `agent.tito_allowed_append_roles`（tito 家族 qwen4exp 不是 profile 名）。已修 da62e264（按 tito 家族解析），PLAN_ONLY 加 CPU 等价检查。详见 REVIEW §10。
+- 第 3 跑 `s15-fncodex-4layer-modal-20261007c` 预登记后启动。
+
