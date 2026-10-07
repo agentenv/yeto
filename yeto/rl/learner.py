@@ -12,6 +12,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Sequence
 from decimal import Decimal, DecimalException
 from pathlib import Path
@@ -1876,6 +1877,34 @@ def _syncer_address(value: str) -> tuple[str, int]:
     return host, int(port)
 
 
+def probe_syncers(args, *, connect=None, attempts: int = 10, delay: float = 3.0,
+                  timeout: float = 5.0, sleep=time.sleep) -> list[tuple[str, int]]:
+    """Island-side TCP probe of every syncer this learner will dial (actor
+    --syncer, critic --critic-syncer), printed with the addresses, before any
+    model/Miles work. s13-g3-modal-20261007b: both Modal islands sat 15 min in
+    the client's silent redial; this fails in ~30 s and names the address."""
+    import socket
+
+    connect = connect or socket.create_connection
+    addrs = [_syncer_address(v) for v in (getattr(args, "syncer", None),
+                                          getattr(args, "critic_syncer", None)) if v]
+    for host, port in addrs:
+        last = "not tried"
+        for i in range(max(1, attempts)):
+            try:
+                connect((host, port), timeout=timeout).close()
+                print(f"[rl] syncer probe: {host}:{port} reachable (attempt {i + 1})", flush=True)
+                break
+            except OSError as error:
+                last = f"{type(error).__name__}: {error}"
+            if i + 1 < attempts:
+                sleep(delay)
+        else:
+            raise ConnectionError(
+                f"syncer {host}:{port} unreachable from this island after {attempts} attempt(s): {last}")
+    return addrs
+
+
 EXTERNAL_ROUTER_ENV = "YETO_RL_EXTERNAL_ROUTER"
 
 
@@ -2806,6 +2835,7 @@ def main(argv=None) -> None:
             ),
         )
     _preflight_codex_harness(args)
+    probe_syncers(args)
 
     from miles.utils.misc import load_function
 

@@ -795,6 +795,12 @@ def tcp_probe(host: str, port: int = SYNCER_PORT, *, expect: bytes | None = None
     return False, f"{host}:{port} unreachable after {attempts} attempt(s): {last}"
 
 
+def island_syncer_addrs(envs) -> str:
+    """The syncer address(es) an island dials, for launch.log (no credentials)."""
+    envs = envs or {}
+    return " ".join(f"{k}={envs[k]}" for k in ("SYNCER_ADDR", "CRITIC_SYNCER_ADDR") if k in envs) or "no syncer"
+
+
 def probe_syncer_ports(args, host: str, *, probe=None) -> list[str]:
     """Fail fast, before any island is started, unless every syncer port
     (actor 29400 and, for a critic algorithm, critic 29401) accepts a TCP
@@ -6264,10 +6270,12 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             task = task_factory(args, spec, m, num_learners, syncer_addr)
             if spec.cloud == "modal":
                 cfg = build_modal_island_config(args, spec, m, task, modal_addr)
+                print(f"[launcher] {name} dials {island_syncer_addrs(cfg.envs)}", flush=True)
                 tasks[name] = cfg
                 modal_cfgs[name] = cfg
                 continue
             tasks[name] = task
+            print(f"[launcher] {name} dials {island_syncer_addrs(getattr(task, 'envs', None))}", flush=True)
             alloc = (rl_island_spec(args, spec) if getattr(args, "training_mode", "sft") == "rl"
                      else spec)
             print(f"[launcher] launching learner {m} on {spec} as {name}"
