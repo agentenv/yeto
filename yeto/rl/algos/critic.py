@@ -352,3 +352,44 @@ def critic_run_problems(spec: AlgorithmSpec, values: Mapping[str, Any]) -> list[
 
 register_launch_check("critic_shared_ppo", critic_run_problems)
 register_island_check("critic_shared_ppo", critic_run_problems)
+
+
+def critic_lr_warmup_problems(spec: AlgorithmSpec, values: Mapping[str, Any]) -> list[str]:
+    """``critic.critic_lr_warmup`` must stay below the critic's LR decay steps.
+
+    Miles model.py (fork 6e7365b60:88-103) sizes the critic scheduler as
+    ``train_iters = num_rollout * rollout_batch_size * n_samples * num_critic_epochs
+    // global_batch_size``, ``lr_decay_iters`` defaulting to ``train_iters`` (an
+    explicit ``--lr-decay-iters`` is shared with the actor); Megatron then asserts
+    ``lr_warmup_steps < lr_decay_steps`` at critic init (S13 G1 SAO: warmup 10,
+    decay 3). Checked only when every input is known and not overridden by
+    extra argv.
+    """
+
+    warmup = spec.critic.critic_lr_warmup if spec.execution.needs_critic else None
+    if not warmup:
+        return []
+    argv = tuple(values.get("extra_argv", ()))
+    overridden = ("--lr-decay-iters", "--lr-warmup-fraction", "--num-rollout", "--global-batch-size",
+                  "--n-samples-per-prompt", "--rollout-batch-size", "--critic-lr-warmup-iters")
+    if any(_flag_values(argv, f) for f in overridden):
+        return []
+    try:
+        rounds, groups = int(values["num_rollout"]), int(values["rollout_batch_size"])
+        samples, gbs = int(values["n_samples_per_prompt"]), int(values["global_batch_size"])
+    except (KeyError, TypeError, ValueError):
+        return []
+    if rounds <= 0 or gbs <= 0:
+        return []
+    decay = values.get("lr_decay_iters")
+    if decay is None:
+        epochs = spec.critic.critic_updates_per_step or 1
+        decay = rounds * groups * samples * epochs // gbs
+    if warmup >= decay:
+        return [f"critic.critic_lr_warmup={warmup} must be < the critic's LR decay iters ({decay}); "
+                "Megatron asserts lr_warmup_steps < lr_decay_steps at critic init. Lower the "
+                "warmup or run more rounds"]
+    return []
+
+
+register_launch_check("critic_lr_warmup", critic_lr_warmup_problems)

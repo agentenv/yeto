@@ -25,7 +25,10 @@ image) merges the critic-family fork branches onto yeto/ports 039471508:
 
 S13 rebase (progress "S13 fork rebase c35702e + overlay"): the seven commits
 above were cherry-picked onto the image's Miles c35702e as branch
-``yeto-critic-c357`` (local, not pushed); HEAD 6e7365b60 is the pin. The
+``yeto-critic-c357`` (local, not pushed); HEAD 6e7365b60. S13 tied fix:
+6574a9c82 on ``yeto-critic-c357-tied`` (critic value head replaces
+``language_model.output_layer`` of multimodal bridge wrappers, so tied
+Qwen3.5 critics need no ``lm_head.weight``) is the pin. The
 losses.py / math_utils.py conflicts keep c35702e's ``--policy-loss-variant``
 dispatch (cispo/sapo/gmpo) under the non-SAO branch; ``sao_dis`` with a
 non-default variant is refused by the fork.
@@ -43,9 +46,10 @@ from __future__ import annotations
 # Full SHAs of fork commits carrying every critic-family flag above.
 FORK_COMMITS: frozenset[str] = frozenset({
     "6e7365b602ecf5d83d16169e87f4d78f4daf5f86",  # yeto-critic-c357 (local, on c35702e)
+    "6574a9c82edeed17f4b00bc64db6c7cd6b45cb39",  # yeto-critic-c357-tied: + critic value head on language_model (Qwen3.5 tied)
 })
 
-CRITIC_FORK_PIN = "6e7365b602ecf5d83d16169e87f4d78f4daf5f86"
+CRITIC_FORK_PIN = "6574a9c82edeed17f4b00bc64db6c7cd6b45cb39"
 
 
 def fork_carries_critic_family(commit: str | None = None) -> bool:

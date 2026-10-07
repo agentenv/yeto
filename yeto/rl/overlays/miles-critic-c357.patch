@@ -70,6 +70,72 @@ index d3990015c..0782e12b3 100644
  
          self._heartbeat.bump()
          values = None
+diff --git a/miles/backends/megatron_utils/checkpoint.py b/miles/backends/megatron_utils/checkpoint.py
+index 8087f799f..5cfbc11e6 100644
+--- a/miles/backends/megatron_utils/checkpoint.py
++++ b/miles/backends/megatron_utils/checkpoint.py
+@@ -17,6 +17,7 @@ from miles.utils import megatron_bridge_utils
+ from miles_plugins.models.deepseek_v4.arguments import assert_checkpoint_is_current, is_dsv4_model
+ 
+ from .lora.utils import is_lora_enabled, is_lora_model, load_lora_adapter, save_lora_checkpoint
++from .critic_head import iter_value_heads
+ from .model_provider import LinearForLastLayer
+ 
+ try:
+@@ -196,10 +197,7 @@ def _is_megatron_checkpoint(path: str | Path) -> bool:
+ @contextmanager
+ def _hide_critic_value_head_from_hf_load(ddp_model):
+     value_heads = [
+-        (chunk, name, head)
+-        for chunk in unwrap_model(ddp_model)
+-        for name, head in chunk.named_children()
+-        if isinstance(head, LinearForLastLayer)
++        head for chunk in unwrap_model(ddp_model) for head in iter_value_heads(chunk, LinearForLastLayer)
+     ]
+     for chunk, name, _ in value_heads:
+         delattr(chunk, name)
+diff --git a/miles/backends/megatron_utils/critic_head.py b/miles/backends/megatron_utils/critic_head.py
+new file mode 100644
+index 000000000..7f143906c
+--- /dev/null
++++ b/miles/backends/megatron_utils/critic_head.py
+@@ -0,0 +1,36 @@
++"""Where a critic's value head goes (no megatron imports; unit-testable on CPU).
++
++Bridge-built multimodal wrappers (e.g. ``Qwen3VLModel`` for Qwen3.5) keep the
++LM head on ``model.language_model.output_layer``; the wrapper's forward never
++reads a top-level ``output_layer``.  Assigning the value head on the wrapper
++leaves the vocab head live, so the critic predicts logits, and the HF load maps
++``language_model.output_layer.weight -> lm_head.weight`` -- which a tied
++checkpoint (``tie_word_embeddings=true``) does not contain because the critic
++provider disables ``share_embeddings_and_output_weights``.
++"""
++
++from __future__ import annotations
++
++from collections.abc import Iterator
++
++import torch
++
++
++def critic_head_owner(model: torch.nn.Module) -> torch.nn.Module:
++    """Module whose ``output_layer`` the value head must replace."""
++    inner = getattr(model, "language_model", None)
++    if isinstance(inner, torch.nn.Module) and hasattr(inner, "output_layer"):
++        return inner
++    return model
++
++
++def iter_value_heads(chunk: torch.nn.Module, head_cls: type) -> Iterator[tuple[torch.nn.Module, str, torch.nn.Module]]:
++    """(parent, attr, head) for each ``head_cls`` child of ``chunk`` or of its ``language_model``."""
++    owners = [chunk]
++    owner = critic_head_owner(chunk)
++    if owner is not chunk:
++        owners.append(owner)
++    for parent in owners:
++        for name, head in list(parent.named_children()):
++            if isinstance(head, head_cls):
++                yield parent, name, head
 diff --git a/miles/backends/megatron_utils/model.py b/miles/backends/megatron_utils/model.py
 index 68844cb54..1d8781b91 100644
 --- a/miles/backends/megatron_utils/model.py
@@ -116,18 +182,19 @@ index 68844cb54..1d8781b91 100644
              ],
              args.data_pad_size_multiplier,
 diff --git a/miles/backends/megatron_utils/model_provider.py b/miles/backends/megatron_utils/model_provider.py
-index 1ee603cdb..f23f2a760 100644
+index 1ee603cdb..111f37a1a 100644
 --- a/miles/backends/megatron_utils/model_provider.py
 +++ b/miles/backends/megatron_utils/model_provider.py
-@@ -20,6 +20,7 @@ from megatron.training.arguments import core_transformer_config_from_args
+@@ -20,6 +20,8 @@ from megatron.training.arguments import core_transformer_config_from_args
  from miles.utils.audit_utils.witness.module import install_witness
  from miles.utils.function_registry import load_function
  from miles.utils.replay_base import routing_replay_manager
 +from miles.backends.training_utils.critic_freeze import freeze_attention_parameters
++from miles.backends.megatron_utils.critic_head import critic_head_owner
  
  logger = logging.getLogger(__name__)
  
-@@ -104,6 +105,19 @@ def _apply_bridge_runtime_config(provider, args: argparse.Namespace) -> None:
+@@ -104,6 +106,19 @@ def _apply_bridge_runtime_config(provider, args: argparse.Namespace) -> None:
  
  
  # Adapt from https://github.com/volcengine/verl/blob/c3b20575d2bc815fcccd84bddb4c0401fc4b632b/verl/models/llama/megatron/layers/parallel_linear.py#L82
@@ -147,7 +214,7 @@ index 1ee603cdb..f23f2a760 100644
  class LinearForLastLayer(torch.nn.Linear):
      def __init__(
          self,
-@@ -160,8 +174,9 @@ def get_model_provider_func(
+@@ -160,8 +175,9 @@ def get_model_provider_func(
              # Apply critic output layer if needed
              if post_process and role == "critic":
                  model.output_layer = LinearForLastLayer(
@@ -158,18 +225,20 @@ index 1ee603cdb..f23f2a760 100644
              _maybe_install_witness(args, model)
              return model
  
-@@ -193,8 +208,9 @@ def get_model_provider_func(
+@@ -192,9 +208,10 @@ def get_model_provider_func(
+                 provider._pg_collection = pg_collection
              model = provider.provide(pre_process=pre_process, post_process=post_process, vp_stage=vp_stage)
              if post_process and role == "critic":
-                 model.output_layer = LinearForLastLayer(
+-                model.output_layer = LinearForLastLayer(
 -                    input_size=model.config.hidden_size, output_size=1, config=model.config
++                critic_head_owner(model).output_layer = LinearForLastLayer(
 +                    input_size=model.config.hidden_size, output_size=_value_head_output_size(args), config=model.config
                  )
 +            _maybe_freeze_critic_attention(args, model, role)
              assert not getattr(args, "enable_witness", False), "Witness is not supported yet in this mode"
              # Gemma-4 forward returns (logits, loss_mask); keep logits only.
              _bridge_forward = model.forward
-@@ -338,7 +354,10 @@ def get_model_provider_func(
+@@ -338,7 +355,10 @@ def get_model_provider_func(
              model = GPTModel(**kwargs)
  
          if post_process and role == "critic":
@@ -1273,6 +1342,100 @@ index a28146bf9..01109414d 100644
      if args.use_rollout_logprobs:
          assert not args.use_tis, "use_rollout_logprobs and use_tis cannot be set at the same time."
  
+diff --git a/tests/fast/backends/megatron_utils/test_critic_head_owner.py b/tests/fast/backends/megatron_utils/test_critic_head_owner.py
+new file mode 100644
+index 000000000..b87d8ad24
+--- /dev/null
++++ b/tests/fast/backends/megatron_utils/test_critic_head_owner.py
+@@ -0,0 +1,88 @@
++"""Critic value head placement for bridge-built multimodal wrappers (Qwen3.5 tied).
++
++Regression: the critic put ``LinearForLastLayer`` on the ``Qwen3VLModel``
++wrapper, leaving ``language_model.output_layer`` (vocab head) live and making
++the HF load demand ``lm_head.weight``, absent in tied checkpoints.
++"""
++
++from tests.ci.ci_register import register_cpu_ci
++
++register_cpu_ci(est_time=10, suite="stage-a-cpu", labels=[])
++
++import torch
++
++from miles.backends.megatron_utils.critic_head import critic_head_owner, iter_value_heads
++
++
++class _Head(torch.nn.Linear):
++    pass
++
++
++class _GPT(torch.nn.Module):
++    def __init__(self):
++        super().__init__()
++        self.embedding = torch.nn.Linear(2, 2)
++        self.output_layer = torch.nn.Linear(2, 5)
++
++
++class _VL(torch.nn.Module):
++    def __init__(self):
++        super().__init__()
++        self.vision_model = torch.nn.Linear(2, 2)
++        self.language_model = _GPT()
++
++
++def _names(m):
++    return sorted(n for n, _ in m.named_parameters())
++
++
++def test_plain_gpt_owner_is_model_itself():
++    m = _GPT()
++    assert critic_head_owner(m) is m
++
++
++def test_vl_wrapper_owner_is_language_model():
++    m = _VL()
++    assert critic_head_owner(m) is m.language_model
++
++
++def test_vl_without_head_or_none_language_model_falls_back():
++    m = _VL()
++    del m.language_model.output_layer
++    assert critic_head_owner(m) is m
++    m2 = torch.nn.Module()
++    m2.language_model = None
++    assert critic_head_owner(m2) is m2
++
++
++def _hide(chunk):
++    heads = list(iter_value_heads(chunk, _Head))
++    for parent, name, _ in heads:
++        delattr(parent, name)
++    return heads
++
++
++def test_vl_value_head_replaces_vocab_head_and_hides_fully():
++    m = _VL()
++    critic_head_owner(m).output_layer = _Head(2, 1)
++    assert m.language_model.output_layer.out_features == 1
++    before = _names(m)
++    heads = _hide(m)
++    # No output_layer parameter left -> bridge needs no lm_head.weight mapping.
++    assert not any("output_layer" in n for n in _names(m))
++    for parent, name, head in heads:
++        setattr(parent, name, head)
++    assert _names(m) == before
++
++
++def test_plain_gpt_hide_matches_legacy_top_level_behaviour():
++    m = _GPT()
++    m.output_layer = _Head(2, 1)
++    legacy = [(m, n, h) for n, h in m.named_children() if isinstance(h, _Head)]
++    assert [(p, n) for p, n, _ in iter_value_heads(m, _Head)] == [(p, n) for p, n, _ in legacy]
++
++
++def test_actor_vocab_head_never_hidden():
++    m = _VL()
++    assert list(iter_value_heads(m, _Head)) == []
++    assert list(iter_value_heads(_GPT(), _Head)) == []
 diff --git a/tests/fast/backends/training_utils/_gae_orig_039471508.py b/tests/fast/backends/training_utils/_gae_orig_039471508.py
 new file mode 100644
 index 000000000..fe0ffcb5e
