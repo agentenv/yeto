@@ -35,6 +35,7 @@ case $CASE in
   gae-la) MECH="--rl-allow-unverified-mechanism features:gae_length_adaptive" ;;
   gae-cs) MECH="--rl-allow-unverified-mechanism features:critic_multi_update --rl-allow-unverified-mechanism features:gae_cross_segment --rl-allow-unverified-mechanism features:gae_length_adaptive"; REWARD=yeto.rl.synthetic_segments:score ;;
   vapo) STEPS=3; MECH="--rl-allow-unverified-mechanism features:gae_decoupled --rl-allow-unverified-mechanism features:gae_length_adaptive --rl-allow-unverified-mechanism features:positive_example_lm_loss" ;;
+  vapo-w0) STEPS=3; MECH="--rl-allow-unverified-mechanism features:gae_decoupled --rl-allow-unverified-mechanism features:gae_length_adaptive --rl-allow-unverified-mechanism features:positive_example_lm_loss" ;;
   sao) STEPS=3; MECH="--rl-allow-unverified-mechanism features:critic_multi_update --rl-allow-unverified-mechanism features:gae_decoupled --rl-allow-unverified-mechanism features:gae_length_adaptive --rl-allow-unverified-mechanism features:sao_dis --rl-allow-unverified-mechanism features:value_hl_gauss"; MODEL=$QWEN35 ;;
   *) echo "abort: unknown CASE $CASE"; exit 65 ;;
 esac

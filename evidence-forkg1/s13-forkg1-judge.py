@@ -15,7 +15,7 @@ import json, math, re, sys
 from pathlib import Path
 
 R = Path(sys.argv[1]); CASE = sys.argv[2]; EXPECT_GPU = sys.argv[3] if len(sys.argv) > 3 else "H100"
-N = {"gae-la": 2, "gae-cs": 2, "vapo": 3, "sao": 3}[CASE]
+N = {"gae-la": 2, "gae-cs": 2, "vapo": 3, "vapo-w0": 3, "sao": 3}[CASE]
 LOG = (R / "launch.log").read_text(errors="replace") if (R / "launch.log").is_file() else ""
 
 
@@ -32,8 +32,8 @@ def tape(name):
     # fallback: echoed events in launch.log
     out = []
     for line in LOG.splitlines():
-        at = line.find('{"event": ')
-        if at >= 0 and "YETO_RL_EVENT" in line:
+        at = line.find('{"', line.find("YETO_RL_EVENT")) if "YETO_RL_EVENT" in line else -1
+        if at >= 0:
             try:
                 out.append(json.loads(line[at:]))
             except ValueError:
@@ -90,7 +90,7 @@ if not any(EXPECT_GPU in l for l in gpu):
 product = None
 if CASE == "vapo":
     for line in LOG.splitlines():
-        at = line.find('{"event": "rl_critic_warmup_product"')
+        at = line.find('{"') if "rl_critic_warmup_product" in line else -1
         if at >= 0:
             try:
                 product = json.loads(line[at:])
