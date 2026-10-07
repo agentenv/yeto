@@ -241,6 +241,15 @@ def stock_codex_tito_model(profile_name: str) -> str:
     return str(profile.get("tito_model", profile["model"]))
 
 
+def stock_codex_profiles_for_tito_model(tito_model: str) -> tuple[str, ...]:
+    """Names of every allowlisted profile whose Miles tokenizer family is
+    ``tito_model`` (``--tito-model``), in allowlist order.  A tokenizer family
+    is not a profile name: ``qwen35`` serves ``qwen35`` and ``qwen35_08b``,
+    ``qwen4exp`` serves the Flash-Next profiles (rl-fn-codex-rollout 1.0)."""
+
+    return tuple(name for name in _PROFILES if stock_codex_tito_model(name) == tito_model)
+
+
 def stock_codex_backend_contract(
     profile_name: str,
     max_tokens: int,
