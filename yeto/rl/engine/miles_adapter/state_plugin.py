@@ -524,6 +524,13 @@ def merge_pp_stage_exports(stages: Sequence[Mapping[str, Any]], *, num_layers: i
     return merged
 
 
+def _torch_group(group: Any) -> Any:
+    """The registered torch ProcessGroup behind a Miles ``ReloadableProcessGroup``."""
+
+    inner = group.__dict__.get("group") if hasattr(group, "__dict__") else None
+    return inner if inner is not None else group
+
+
 def _pp_gather_default(local: dict[str, Any] | None, is_main: bool) -> list[dict[str, Any] | None] | None:
     """Gather each PP stage's export to the main rank over the PP group.
 
@@ -541,7 +548,9 @@ def _pp_gather_default(local: dict[str, Any] | None, is_main: bool) -> list[dict
 
     if mpu.get_pipeline_model_parallel_world_size() <= 1:
         return [local] if is_main else None
-    group = mpu.get_pipeline_model_parallel_group()
+    # Miles wraps groups in ReloadableProcessGroup; torch's gather_object resolves
+    # ``dst`` through the group registry, which only knows the inner group.
+    group = _torch_group(mpu.get_pipeline_model_parallel_group())
     size = dist.get_world_size(group)
     flags: list[Any] = [None] * size
     dist.all_gather_object(flags, (bool(is_main), dist.get_rank()), group=group)

@@ -278,3 +278,21 @@ def test_merge_pp_stage_exports_validates():
     with pytest.raises(sp.StatePluginError, match="missing a stage"):
         sp._export_flash_next(_actor(), policy_version=0, exporter=_stage_exporter([2, 3]),
                               pp_gather=lambda local, is_main: [None, local])
+
+
+def test_pp_gather_unwraps_miles_reloadable_process_group():
+    """s13-h100-20261007a: gather_object(dst=...) rejected Miles' ReloadableProcessGroup
+    wrapper ("is not registered"); the export must hand torch the inner group."""
+    from yeto.rl.engine.miles_adapter.state_plugin import _torch_group
+
+    class Reloadable:  # mirrors miles.utils.reloadable_process_group.ReloadableProcessGroup
+        def __init__(self, group):
+            self.group = group
+
+        def __getattr__(self, name):
+            return getattr(self.group, name)
+
+    inner = object()
+    assert _torch_group(Reloadable(inner)) is inner
+    plain = object()
+    assert _torch_group(plain) is plain
