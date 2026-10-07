@@ -854,3 +854,6 @@ def test_head_env_credentials_and_registry_login_travel_as_secrets(fake_sky, mon
     for task in (head_task, job_task):
         assert not set(task.envs or {}) & {"MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET", "SKYPILOT_DOCKER_PASSWORD"}
         assert "as-1" not in (task.run or "") + (task.setup or "")
+    # the head runs yeto under its own Python >= 3.11 (stock Nebius image: 3.10)
+    assert head_task.setup.index(cli.HEAD_PYTHON_STEP) < head_task.setup.index("pip install")
+    assert cli.HEAD_USE_PYTHON in job_task.run
