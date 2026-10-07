@@ -188,6 +188,16 @@ TRAJECTORY_REWARD_OPTIONAL: dict[str, tuple[type, ...]] = {
     "max_seq_len_hit": (int,),
     "timed_out": (int,),
     "testsh_rc": (int, type(None)),
+    # S15 r2 follow-up: why Codex stopped and the shape of its last reply.
+    "end_reason": (str,),
+    "last_finish_reason": (str,),
+    "last_content_chars": (int,),
+    "last_reasoning_chars": (int,),
+    "last_tool_calls": (int,),
+    "last_tool_names": (str,),
+    "last_completion_tokens": (int, type(None)),
+    "last_content_head": (str,),
+    "last_reasoning_tail": (str,),
 }
 
 

@@ -193,6 +193,25 @@ SUBMIT_TOOL = {
 
 DYNAMIC_TOOLS = [TERMINAL_EXEC_TOOL, SUBMIT_TOOL]
 
+# 2026-10-07 (S15 r2 follow-up): the legacy tool descriptions above are CTF
+# wording ("attack the scored TARGET_URL", "evidence from the scored target").
+# The TB2 family keeps names and input schemas and only rewords descriptions.
+TB2_TERMINAL_EXEC_TOOL = {
+    **TERMINAL_EXEC_TOOL,
+    "description": (
+        "Execute one shell command in the task container (the graded "
+        "environment), starting in the task workdir. Returns exit code and output."
+    ),
+}
+TB2_SUBMIT_TOOL = {
+    **SUBMIT_TOOL,
+    "description": (
+        "Finish the episode after the task is done and verified. The hidden "
+        "tests then grade the container state. Call exactly once."
+    ),
+}
+TB2_DYNAMIC_TOOLS = [TB2_TERMINAL_EXEC_TOOL, TB2_SUBMIT_TOOL]
+
 
 def _canonical_json(value: Any) -> bytes:
     return json.dumps(
@@ -219,17 +238,29 @@ BASE_INSTRUCTIONS_SHA256 = hashlib.sha256(BASE_INSTRUCTIONS.encode()).hexdigest(
 # keeps BASE_INSTRUCTIONS and its unchanged hash.
 TB2_BASE_INSTRUCTIONS = """You are an autonomous terminal agent solving a
 Terminal-Bench task. You have a shell inside the task container: the container
-is the environment that will be graded, and your working directory is the task
-workdir. Read the task statement in the user message, then complete the task by
-calling the `terminal.exec` tool (one shell command per call; inspect files,
-edit, install, build and run tests as needed). Do not merely describe commands:
-call `terminal.exec`. Do not invent tool results. Verify your work in the
-container. When the task is complete, call `submit` exactly once with a short
-JSON evidence string describing what you did and how you verified it. The
-`submit` call is terminal: make no further model or tool calls. The grader runs
-the task's hidden tests against the container state after you submit or run out
-of turns."""
-TB2_BASE_INSTRUCTIONS_SHA256 = hashlib.sha256(TB2_BASE_INSTRUCTIONS.encode()).hexdigest()
+is the environment that will be graded, and the shell starts in the task
+workdir. The task statement is the user message.
+
+Reply format (strict, every reply): think briefly, then make exactly ONE tool
+call and write no other visible text. A reply with prose, no tool call or
+several tool calls ends the episode with no credit.
+- `terminal.exec`: run one shell command (inspect, edit, install, build, test).
+- `submit`: finish the episode; arguments {"evidence": "<what you did and how
+  you verified it>"}.
+
+Budget: about ten model calls and a small context window; long thinking or
+long outputs end the episode early. Act from the first reply, prefer compact
+commands (write files with a heredoc, limit output with head/tail), verify the
+result, then call `submit`. The grader runs the task's hidden tests against the
+container state when the episode ends."""
+def _tb2_surface_sha256() -> str:
+    """Signed TB2 surface: system prompt + model/Codex-facing tool definitions."""
+    return hashlib.sha256(
+        TB2_BASE_INSTRUCTIONS.encode() + b"\0" + _canonical_json(TB2_DYNAMIC_TOOLS)
+    ).hexdigest()
+
+
+TB2_BASE_INSTRUCTIONS_SHA256 = _tb2_surface_sha256()
 INSTRUCTIONS_FAMILY_ENV = "YETO_CODEX_INSTRUCTIONS_FAMILY"
 TB2_INSTRUCTIONS_SHA_ENV = "YETO_CODEX_TB2_BASE_INSTRUCTIONS_SHA256"
 TB2_INSTRUCTIONS_FAMILY = "tb2"
@@ -242,11 +273,39 @@ def base_instructions() -> str:
         return BASE_INSTRUCTIONS
     if family != TB2_INSTRUCTIONS_FAMILY:
         raise CodexHarnessError(f"{INSTRUCTIONS_FAMILY_ENV}={family!r} is not a signed instructions family")
-    if hashlib.sha256(TB2_BASE_INSTRUCTIONS.encode()).hexdigest() != TB2_BASE_INSTRUCTIONS_SHA256 or not hmac.compare_digest(
+    if _tb2_surface_sha256() != TB2_BASE_INSTRUCTIONS_SHA256 or not hmac.compare_digest(
         os.getenv(TB2_INSTRUCTIONS_SHA_ENV, ""), TB2_BASE_INSTRUCTIONS_SHA256
     ):
         raise CodexHarnessError(f"{TB2_INSTRUCTIONS_SHA_ENV} does not match the signed TB2 instructions")
     return TB2_BASE_INSTRUCTIONS
+
+
+def _tb2_selected() -> bool:
+    return base_instructions() is TB2_BASE_INSTRUCTIONS
+
+
+def dynamic_tools() -> list[dict[str, Any]]:
+    """Codex dynamic tools for this process (TB2 wording when TB2 is signed in)."""
+    return TB2_DYNAMIC_TOOLS if _tb2_selected() else DYNAMIC_TOOLS
+
+
+def _miles_tools_for(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "terminal.exec" if tool["name"] == "terminal_exec" else tool["name"],
+                "description": tool["description"],
+                "parameters": tool["inputSchema"],
+            },
+        }
+        for tool in tools
+    ]
+
+
+def miles_tools() -> list[dict[str, Any]]:
+    """Model-facing tools sent to Miles (``terminal.exec`` / ``submit``)."""
+    return _MILES_TOOLS if not _tb2_selected() else _miles_tools_for(TB2_DYNAMIC_TOOLS)
 TERMINAL_EXEC_TOOL_SCHEMA_SHA256 = _sha256_json(TERMINAL_EXEC_TOOL)
 SUBMIT_TOOL_SCHEMA_SHA256 = _sha256_json(SUBMIT_TOOL)
 DYNAMIC_TOOLS_SCHEMA_SHA256 = _sha256_json(DYNAMIC_TOOLS)
@@ -545,7 +604,7 @@ def _validate_codex_request(body: Any, expected_model: str) -> list[dict[str, An
         "submit",
     ]:
         raise CodexHarnessError("Codex-side tool surface drifted")
-    if tools[1:] != _EXPECTED_RESPONSE_TOOLS:
+    if tools[1:] != [_response_tool(tool) for tool in dynamic_tools()]:
         raise CodexHarnessError("Codex dynamic tool schemas drifted")
     update_plan = tools[0]
     if update_plan.get("type") != "function" or not isinstance(
@@ -1329,7 +1388,7 @@ class _ResponsesBridge:
             payload["tools"] = []
             payload["tool_choice"] = "none"
         else:
-            payload["tools"] = copy.deepcopy(_MILES_TOOLS)
+            payload["tools"] = copy.deepcopy(miles_tools())
             payload["tool_choice"] = "auto"
         started = time.monotonic()
         try:
@@ -1389,6 +1448,7 @@ class _ResponsesBridge:
         choice = choices[0]
         if not isinstance(choice, dict):
             raise CodexHarnessError("Miles returned an invalid sample")
+        _note_last_completion(self._metrics, choice, completion)
         if choice.get("finish_reason") == "length":
             raise CodexSequenceLimit("Miles returned a truncated sample")
         message = choice.get("message")
@@ -1444,6 +1504,33 @@ class _ResponsesBridge:
                 "arguments": raw_arguments,
             },
         ]
+
+
+LAST_COMPLETION_HEAD_CHARS = 200
+
+
+def _note_last_completion(metrics: Any, choice: dict[str, Any], completion: dict[str, Any]) -> None:
+    """Observe only (S15 r2 follow-up): shape of the latest model reply, so a
+    tape can tell thinking exhaustion from prose / missing tool calls."""
+    message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+    content = message.get("content") if isinstance(message.get("content"), str) else ""
+    reasoning = message.get("reasoning_content") if isinstance(message.get("reasoning_content"), str) else ""
+    calls = message.get("tool_calls") if isinstance(message.get("tool_calls"), list) else []
+    usage = completion.get("usage") if isinstance(completion.get("usage"), dict) else {}
+    names = []
+    for call in calls:
+        function = call.get("function") if isinstance(call, dict) else None
+        names.append(str(function.get("name"))[:32] if isinstance(function, dict) else "?")
+    metrics.last_completion = {  # type: ignore[attr-defined]
+        "finish_reason": str(choice.get("finish_reason"))[:16],
+        "content_chars": len(content),
+        "reasoning_chars": len(reasoning),
+        "tool_calls": len(calls),
+        "tool_names": ",".join(names)[:96],
+        "completion_tokens": usage.get("completion_tokens") if isinstance(usage.get("completion_tokens"), int) else None,
+        "content_head": content[:LAST_COMPLETION_HEAD_CHARS],
+        "reasoning_tail": reasoning[-LAST_COMPLETION_HEAD_CHARS:],
+    }
 
 
 def _toml_string(value: str) -> str:
@@ -1830,9 +1917,11 @@ class _AppServerDriver:
     async def drive(self) -> str:
         try:
             return await self._drive_protocol()
-        except CodexSequenceLimit:
+        except CodexSequenceLimit as exc:
+            self._metrics.end_reason = f"{type(exc).__name__}: {exc}"[:160]  # type: ignore[attr-defined]
             return "max_seq_len"
-        except (CodexTurnLimit, CodexModelFailure):
+        except (CodexTurnLimit, CodexModelFailure) as exc:
+            self._metrics.end_reason = f"{type(exc).__name__}: {exc}"[:160]  # type: ignore[attr-defined]
             return "max_turns"
 
     async def _drive_protocol(self) -> str:
@@ -1855,7 +1944,7 @@ class _AppServerDriver:
                 "cwd": self._isolated_home.name,
                 "baseInstructions": base_instructions(),
                 "developerInstructions": None,
-                "dynamicTools": copy.deepcopy(DYNAMIC_TOOLS),
+                "dynamicTools": copy.deepcopy(dynamic_tools()),
                 "environments": [],
                 "ephemeral": True,
                 "approvalPolicy": "never",

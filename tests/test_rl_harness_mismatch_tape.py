@@ -275,3 +275,15 @@ def test_driver_tapes_optional_trajectory_diagnostics(tmp_path):
     got = [e for e in got if e["event"] == tl.TRAJECTORY_REWARD_EVENT]
     assert [(e["exit_status"], e["turns"], e["testsh_rc"]) for e in got] == [("max_turns", 12, 1)]
     assert "terminal_calls" not in got[0]
+
+
+def test_trajectory_reward_records_carry_end_reason_and_last_completion():
+    s = _tsample(3, 1, "regex-log", 0.0, False, "t3")
+    s.metadata.update({"exit_status": "max_seq_len", "agent_metrics": {
+        "turns": 1, "end_reason": "CodexSequenceLimit: Miles returned a truncated sample",
+        "last_completion": {"finish_reason": "length", "content_chars": 0, "reasoning_chars": 15000, "tool_calls": 0,
+                            "tool_names": "", "completion_tokens": 4096, "content_head": "", "reasoning_tail": "x" * 500}}})
+    rec = hook.trajectory_reward_records(None, [[s]], None, limit=8)[0]
+    assert rec["end_reason"].startswith("CodexSequenceLimit") and rec["last_finish_reason"] == "length"
+    assert rec["last_reasoning_chars"] == 15000 and rec["last_completion_tokens"] == 4096 and len(rec["last_reasoning_tail"]) == 200
+    assert tl.validate_trajectory_reward({**rec, "rollout_id": 0, "policy_version": 0}) == []

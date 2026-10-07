@@ -524,9 +524,17 @@ def test_legacy_instructions_hash_unchanged_and_tb2_prompt_pinned(monkeypatch):
     assert harness.BASE_INSTRUCTIONS_SHA256 == rl_config.CODEX_BASE_INSTRUCTIONS_SHA256 == (
         "1c183656ca1319142cba9e76baa199b7ab59f770a51a76660622a087e74ba846")
     assert harness.codex_harness_identity()["base_instructions_sha256"] == rl_config.CODEX_BASE_INSTRUCTIONS_SHA256
-    assert hashlib.sha256(harness.TB2_BASE_INSTRUCTIONS.encode()).hexdigest() == rl_config.CODEX_TB2_BASE_INSTRUCTIONS_SHA256
-    for ctf in ("TARGET_URL", "flag", "DEBUG_URL", "security"):
-        assert ctf not in harness.TB2_BASE_INSTRUCTIONS
+    assert harness._tb2_surface_sha256() == harness.TB2_BASE_INSTRUCTIONS_SHA256 == rl_config.CODEX_TB2_BASE_INSTRUCTIONS_SHA256
+    # input schemas are kept verbatim (optional "flag" property); prompt + descriptions are reworded
+    tb2_text = harness.TB2_BASE_INSTRUCTIONS + " ".join(t["description"] for t in harness.TB2_DYNAMIC_TOOLS)
+    for ctf in ("TARGET_URL", "flag", "DEBUG_URL", "security", "attack", "scored target"):
+        assert ctf not in tb2_text, ctf
+    # the prompt names the model-facing tools and requires submit
+    for needle in ("`terminal.exec`", "`submit`", "exactly ONE tool"):
+        assert needle in " ".join(harness.TB2_BASE_INSTRUCTIONS.split())
+    # legacy surface unchanged: legacy tools / Miles tools
+    assert harness.dynamic_tools() is harness.DYNAMIC_TOOLS and harness.miles_tools() is harness._MILES_TOOLS
+    assert harness._miles_tools_for(harness.DYNAMIC_TOOLS) == harness._MILES_TOOLS
     # compaction head bound was sized for the legacy prompt
     assert len(harness.TB2_BASE_INSTRUCTIONS) <= len(harness.BASE_INSTRUCTIONS)
 
@@ -535,6 +543,12 @@ def test_tb2_instructions_require_the_signed_hash(monkeypatch):
     for name, value in tb2_provider.tb2_instructions_env().items():
         monkeypatch.setenv(name, value)
     assert harness.base_instructions() == harness.TB2_BASE_INSTRUCTIONS
+    # TB2 keeps tool names and input schemas; only descriptions change
+    tb2_tools = harness.miles_tools()
+    assert [t["function"]["name"] for t in tb2_tools] == ["terminal.exec", "submit"]
+    assert [t["function"]["parameters"] for t in tb2_tools] == [t["function"]["parameters"] for t in harness._MILES_TOOLS]
+    assert harness.dynamic_tools() is harness.TB2_DYNAMIC_TOOLS
+    assert [t["name"] for t in harness.dynamic_tools()] == [t["name"] for t in harness.DYNAMIC_TOOLS]
     with pytest.raises(harness.CodexHarnessError, match="base instructions drifted"):
         harness._validate_codex_request({"model": "m", "instructions": harness.BASE_INSTRUCTIONS}, "m")
     monkeypatch.setenv(harness.TB2_INSTRUCTIONS_SHA_ENV, "0" * 64)
@@ -586,3 +600,17 @@ def test_harness_preflight_task_prompt_hook(tmp_path):
     pf.assert_task_prompts(SimpleNamespace(prompt_data=str(tmp_path / "absent.jsonl")), provider)  # not readable here
     (tasks_dir / "fix-git" / "instruction.md").write_text("x\n")
     pf.assert_task_prompts(SimpleNamespace(prompt_data=str(data)), provider)
+
+
+def test_last_completion_and_end_reason_reach_the_metrics(monkeypatch):
+    metrics = harness.legacy.AgentMetrics()
+    choice = {"finish_reason": "stop", "message": {"role": "assistant", "content": "I will run ls." * 30,
+              "reasoning_content": "think", "tool_calls": [{"id": "c", "function": {"name": "terminal.exec", "arguments": "{}"}}]}}
+    harness._note_last_completion(metrics, choice, {"usage": {"completion_tokens": 77}})
+    metrics.end_reason = "CodexModelFailure: DSV4 mixed prose with the required tool call"
+    d = adapter._metrics_dict(metrics)
+    assert d["end_reason"].startswith("CodexModelFailure") and d["last_completion"]["tool_calls"] == 1
+    assert d["last_completion"]["content_chars"] == len("I will run ls." * 30)
+    assert len(d["last_completion"]["content_head"]) == harness.LAST_COMPLETION_HEAD_CHARS
+    assert d["last_completion"]["completion_tokens"] == 77
+    assert "end_reason" not in adapter._metrics_dict(harness.legacy.AgentMetrics())
