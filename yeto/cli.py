@@ -1023,6 +1023,13 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="Modal islands: function timeout in seconds (default: 24 h); the Modal-side "
         "hard stop of a run",
     )
+    infra.add_argument(
+        "--modal-launcher-relaunch",
+        action="store_true",
+        help="with --modal-retries 0: Modal never re-runs a failed island container, but "
+        "the launcher still relaunches it (same learner id, within --recover-timeout); "
+        "for kill/resume tests. --no-island-relaunch still wins",
+    )
     infra.add_argument("--disk-size", type=int, default=512, help="learner disk (GB)")
     infra.add_argument(
         "--learner-cpus",

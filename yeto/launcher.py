@@ -4403,6 +4403,10 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
     rl = getattr(args, "training_mode", "sft") == "rl"
     envs = dict(getattr(task, "envs", None) or {})
     envs["SYNCER_ADDR"] = syncer_addr
+    if "CRITIC_SYNCER_ADDR" in envs and syncer_addr != "none":
+        # The critic syncer shares the actor syncer's host: swap it too, or a
+        # Modal island behind --syncer-public-addr dials the private address.
+        envs["CRITIC_SYNCER_ADDR"] = critic_syncer_address(syncer_addr)
     if rl and getattr(args, "rl_engine", "ports") != "ports":
         # Legacy Miles' own router launch misses its 30 s deadline on Modal's
         # CPUs (see yeto.rl.learner.start_external_sglang_router).  Upstream
@@ -5046,7 +5050,9 @@ def effective_recover_timeout(args) -> float:
     stops. Otherwise ``--recover-timeout`` unchanged (all clouds share this
     loop: sky islands relaunch through the same FleetController).
     """
-    if getattr(args, "no_island_relaunch", False) or getattr(args, "modal_retries", None) == 0:
+    if getattr(args, "no_island_relaunch", False):
+        return 0
+    if getattr(args, "modal_retries", None) == 0 and not getattr(args, "modal_launcher_relaunch", False):
         return 0
     return args.recover_timeout
 

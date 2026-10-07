@@ -329,8 +329,18 @@ class _CriticDriverView:
         # The critic keeps its own optimizer state across rounds (saved by the round
         # cut, 4.3); only the weights are replaced by the committed average.
         del optimizer, local_step
-        self.driver.trainer.import_critic_state(
+        written = self.driver.trainer.import_critic_state(
             {k[len(self.PREFIX):]: v for k, v in state.to_lora().tensors.items()})
+        # Evidence of the applied average (both hashes over FP32 values): the
+        # channel's canonical critic state, and the critic masters as written
+        # back (import_critic_state re-hashes them; bf16 params are checked
+        # against their master casts there).
+        self.driver.emit(
+            "rl_critic_apply",
+            policy_version=state.policy_version,
+            **{"sync/global_critic_hash": state.policy_tensor_hash(),
+               "rl/critic/applied_weights_sha256": written},
+        )
         return state
 
     def phase(self, name: str, **fields: Any) -> None:
