@@ -4652,8 +4652,9 @@ def wait_for_tapes(collectors: dict, names, threads, limit: float, *,
         sleep(poll)
 
 
-def _tail_modal(modal_ops, call_id: str, prefix: str, collector=None) -> int:
-    """Stream a Modal island's container logs (the Modal twin of _tail)."""
+def _tail_modal(modal_ops, call_id: str, prefix: str, collector=None, guard=None) -> int:
+    """Stream a Modal island's container logs (the Modal twin of _tail).
+    `guard` (modal_runner.ContainerIdGuard) sees every line to catch container changes."""
     while True:
         try:
             for line in modal_ops.stream_logs(call_id):
@@ -4662,6 +4663,8 @@ def _tail_modal(modal_ops, call_id: str, prefix: str, collector=None) -> int:
                     print(f"[{prefix}] {part.rstrip()}", flush=True)
                 if collector is not None:
                     collector.feed(line)
+                if guard is not None:
+                    guard.feed(line)
             return 0
         except Exception as e:  # transient stream drops: reconnect
             print(f"[{prefix}] log stream error: {e}; retrying", flush=True)
@@ -5047,6 +5050,11 @@ ISLAND_FAILED_EXIT = 4
 FAILED_RUN_DRAIN_S = 20.0
 # Modal app not confirmed stopped (state stopped, 0 tasks) after teardown.
 TEARDOWN_UNVERIFIED_EXIT = 5
+# Modal moved an island to a different container mid-run (preempted/rescheduled and the
+# run script re-ran): the run is failed and the Modal app stopped. Registered exit codes:
+# 1 failed, 2 artifact not fetchable, 3 incomplete tape, 4 island failed, 5 teardown
+# unverified, 6 stalled, 7 Modal container id changed.
+CONTAINER_CHANGED_EXIT = 7
 MODAL_STOP_VERIFY_ATTEMPTS = 5
 MODAL_STOP_VERIFY_DELAY_S = 5.0
 
@@ -6399,8 +6407,13 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                         events_dir / f"{name}.jsonl", fresh=False
                     )
             if modal_ops is not None and name in modal_cfgs:
+                from .modal_runner import ContainerIdGuard
+
+                guard = ContainerIdGuard(on_change=on_container_change)
+                container_guards.append(guard)
                 thread = threading.Thread(
-                    target=_tail_modal, args=(modal_ops, job_id, label, collector), daemon=True
+                    target=_tail_modal, args=(modal_ops, job_id, label, collector), kwargs={"guard": guard},
+                    daemon=True
                 )
             else:
                 thread = threading.Thread(
@@ -6411,6 +6424,25 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
 
         tail_threads: list[threading.Thread] = []
         event_collectors: dict[str, EventCollector] = {}
+        container_guards: list = []
+
+        def on_container_change(message: str) -> None:
+            print(f"[launcher] ERROR: {message}; failing the run (exit {CONTAINER_CHANGED_EXIT}) "
+                  "and stopping the Modal app", file=sys.stderr, flush=True)
+            if events_dir is not None:
+                try:
+                    with open(Path(events_dir) / "launcher-errors.jsonl", "a") as fh:
+                        fh.write(json.dumps({"event": "modal_container_changed", "level": "error",
+                                             "message": message, "time": time.time()}) + "\n")
+                except OSError:
+                    pass
+            try:
+                modal_ops.stop_app()
+            except Exception as e:  # noqa: BLE001 - teardown verification reports the rest
+                print(f"[launcher] modal app stop failed: {e}", file=sys.stderr, flush=True)
+
+        def container_changed() -> bool:
+            return any(g.tripped for g in container_guards)
 
         if syncer_cluster is not None:
             spawn_tail(syncer_cluster, syncer_job)
@@ -6484,7 +6516,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             print(f"[launcher] ERROR: {error}; stopping the run (exit {RUN_STALLED_EXIT})",
                   file=sys.stderr)
             drain_tapes(min(NO_SYNC_EVENT_DRAIN_S, FAILED_RUN_DRAIN_S))
-            return RUN_STALLED_EXIT
+            return CONTAINER_CHANGED_EXIT if container_changed() else RUN_STALLED_EXIT
         except FixedRosterIslandAbandoned as error:
             # A fixed-roster island failed for good: the run cannot finish.
             # Secure the tapes (bounded), then the finally block tears every
@@ -6497,8 +6529,18 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             if no_sync_incomplete:
                 print(f"[launcher] event tape incomplete for {no_sync_incomplete} "
                       "(expected after an island failure)", file=sys.stderr)
-            return ISLAND_FAILED_EXIT
+            return CONTAINER_CHANGED_EXIT if container_changed() else ISLAND_FAILED_EXIT
+        except Exception as error:
+            if not container_changed():
+                raise
+            # the app stop that follows a container change makes the controller error out
+            print(f"[launcher] controller ended after a Modal container change: {error}",
+                  file=sys.stderr)
+            drain_tapes(min(NO_SYNC_EVENT_DRAIN_S, FAILED_RUN_DRAIN_S))
+            return CONTAINER_CHANGED_EXIT
         drain_tapes()
+        if container_changed():
+            return CONTAINER_CHANGED_EXIT
         failed = [n for n, s in exit_codes.items() if "SUCCEEDED" not in s]
         if no_sync_incomplete:
             print(

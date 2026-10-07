@@ -573,3 +573,45 @@ def test_modal_multinode_prelude_keeps_ib_on():
 
     assert "NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-0}" in launcher.multinode_env_prelude("modal", 2)
     assert "NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1}" in launcher.multinode_env_prelude("nebius", 2)
+
+
+# --- container id change guard (exit 7) ------------------------------------------------
+
+
+def test_island_main_prints_its_container_id(monkeypatch, capsys):
+    monkeypatch.setattr(mr.subprocess, "call", lambda cmd, env=None: 0)
+    monkeypatch.setenv("MODAL_TASK_ID", "ta-01ABC")
+    mr.island_main(_cfg().to_json())
+    assert "[modal-island 1] rank 0 container ta-01ABC" in capsys.readouterr().out
+
+
+def test_container_guard_trips_only_on_a_different_id():
+    seen = []
+    g = mr.ContainerIdGuard(on_change=seen.append)
+    g.feed("[modal-island 0] rank 0 container ta-A\nother line")
+    g.feed("[modal-island 0] rank 0 container ta-A")  # stream replay: same id
+    g.feed("[modal-island 0] rank 1 container ta-B")  # other rank: own baseline
+    assert not g.tripped and seen == []
+    g.feed("[modal-island 0] rank 0 container ta-C")
+    assert g.tripped and len(seen) == 1 and "ta-A -> ta-C" in seen[0]
+
+
+def test_tail_modal_feeds_the_guard():
+    import yeto.launcher as launcher
+
+    class Ops:
+        def stream_logs(self, call_id):
+            yield "[modal-island 0] rank 0 container ta-A"
+            yield "[modal-island 0] rank 0 container ta-B"
+
+    g = mr.ContainerIdGuard()
+    launcher._tail_modal(Ops(), "fc-1", "x", None, g)
+    assert g.tripped
+
+
+def test_container_change_exit_code_is_registered_and_unique():
+    import yeto.launcher as launcher
+
+    codes = [launcher.ISLAND_FAILED_EXIT, launcher.TEARDOWN_UNVERIFIED_EXIT,
+             launcher.RUN_STALLED_EXIT, launcher.NO_SYNC_INCOMPLETE_EXIT]
+    assert launcher.CONTAINER_CHANGED_EXIT == 7 and 7 not in codes
