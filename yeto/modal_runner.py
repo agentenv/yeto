@@ -199,9 +199,12 @@ class ModalIslandConfig:
     # Request exactly `gpu` ("H100!" -- no H200 upgrade) and fail the
     # container at start-up unless nvidia-smi reports that type.
     gpu_exact: bool = False
-    # Pull image_ref with the SKYPILOT_DOCKER_* login from the launching
-    # process's environment (ports engine; legacy pulls unchanged).
+    # Pull image_ref with a private-registry login: ``registry_creds`` (the
+    # SKYPILOT_DOCKER_* triple launcher.registry_login_for resolved) when
+    # given, else -- with ``registry_login`` -- the launching process's
+    # environment.  Default: anonymous pull (public image).
     registry_login: bool = False
+    registry_creds: dict[str, str] | None = None
     timeout_s: int = DEFAULT_TIMEOUT_S
     retries: int = DEFAULT_RETRIES
     workdir: str = str(REPO_ROOT)
@@ -282,7 +285,11 @@ class ModalIslandConfig:
                 raise ValueError(f"extra_mounts source {source} does not exist")
 
     def to_json(self) -> str:
-        return json.dumps(asdict(self), sort_keys=True)
+        # The JSON travels into the container (fn.spawn): the registry login
+        # stays with the launching process, it only feeds the image build.
+        data = asdict(self)
+        data.pop("registry_creds", None)
+        return json.dumps(data, sort_keys=True)
 
     @classmethod
     def from_json(cls, text: str) -> "ModalIslandConfig":
@@ -618,7 +625,9 @@ class ModalOps:
     def build_image(self, cfg: ModalIslandConfig):
         modal = self._modal()
         if cfg.training_mode == "rl":
-            creds = registry_credentials(cfg.image_ref, os.environ) if cfg.registry_login else None
+            creds = cfg.registry_creds or (
+                registry_credentials(cfg.image_ref, os.environ) if cfg.registry_login else None
+            )
             if creds:  # private registry (e.g. MILES_NEXT_IMAGE on ghcr.io)
                 image = modal.Image.from_registry(
                     cfg.image_ref,
