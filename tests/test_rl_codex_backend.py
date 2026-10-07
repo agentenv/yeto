@@ -217,3 +217,122 @@ def test_existing_deepseek_v4_stock_codex_profile_is_unchanged():
         },
         "tito_allowed_append_roles": ["tool", "user"],
     }
+
+
+# ----------------------------------------------------------- rl-fn-codex-rollout 0.1 (D1)
+
+from yeto.rl.codex_backend import (  # noqa: E402
+    QWEN38_NEXT_4LAYER_MODEL,
+    QWEN38_NEXT_4LAYER_REVISION,
+    QWEN38_NEXT_MODEL,
+    QWEN38_NEXT_REVISION,
+    stock_codex_lora_layout,
+)
+from yeto.rl.profiles import qwen3_8_next as fn  # noqa: E402
+
+FN_PROFILES = {
+    "qwen38_next": (QWEN38_NEXT_MODEL, QWEN38_NEXT_REVISION, "Qwen3.8-Flash-Next"),
+    "qwen38_next_4layer": (
+        QWEN38_NEXT_4LAYER_MODEL,
+        QWEN38_NEXT_4LAYER_REVISION,
+        "Qwen3.8-Flash-Next-4layer",
+    ),
+}
+
+
+def _validate_fn(profile_name: str, **overrides):
+    model, revision, _ = FN_PROFILES[profile_name]
+    values = {
+        "tito_model": "qwen4exp",
+        "codex_backend_profile": profile_name,
+        "rl_model_recipe": "generic",
+        "model": model,
+        "model_revision": revision,
+        "rollout_model": None,
+        "rollout_model_revision": None,
+        "apply_chat_template_kwargs": copy.deepcopy(QWEN38_KWARGS),
+        "tito_allowed_append_roles": ["tool", "user"],
+        "codex_reasoning_effort": "xhigh",
+        "lora_targets": "all-linear",
+        "expert_full_count": 0,
+        "lora_expert_rank": 8,
+    }
+    values.update(overrides)
+    return validate_stock_codex_fields(**values)
+
+
+def test_fn_profiles_pin_identity_from_the_qwen3_8_next_profile_module():
+    assert QWEN38_NEXT_MODEL == fn.HF_REPO_FULL == "Qwen/Qwen3.8-Flash-Next"
+    assert QWEN38_NEXT_REVISION == fn.HF_REVISION_FULL
+    assert QWEN38_NEXT_4LAYER_MODEL == fn.HF_REPO_4LAYER
+    assert QWEN38_NEXT_4LAYER_REVISION == fn.HF_REVISION_4LAYER
+    for name, (model, revision, label) in FN_PROFILES.items():
+        profile = stock_codex_backend_profile(name)
+        assert profile["model"] == "qwen4exp" and profile["tito_model"] == "qwen4exp"
+        assert profile["model_identifier"] == model
+        assert profile["model_revision"] == revision
+        assert profile["identity_label"] == label
+        assert profile["rl_model_recipe"] == "generic"
+        assert profile["chat_template_kwargs"] == QWEN38_KWARGS
+        assert profile["tito_allowed_append_roles"] == ["tool", "user"]
+        assert profile["lora_targets"] == "all-linear"
+        assert profile["lora_expert_rank"] == 8
+        assert stock_codex_lora_layout(name) == ("all-linear", 8)
+        assert stock_codex_backend_contract(name, 4096)["tito_model"] == "qwen4exp"
+
+
+@pytest.mark.parametrize("profile_name", sorted(FN_PROFILES))
+def test_fn_full_lora_configuration_passes_validation(profile_name):
+    # Scenario: FN 全尺寸 LoRA 配置通过校验 (and the 4-layer twin).
+    profile = _validate_fn(profile_name)
+    assert profile["chat_template_kwargs"] == QWEN38_KWARGS
+    assert profile["identity_label"] == FN_PROFILES[profile_name][2]
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"lora_targets": "attention"},
+        {"lora_expert_rank": 0},
+        {"lora_expert_rank": 16},
+        {"model": QWEN38_MODEL},
+        {"model_revision": QWEN38_NEXT_4LAYER_REVISION},
+        {"expert_full_count": 1},
+    ],
+)
+def test_fn_lora_target_drift_is_rejected_with_identity_label(overrides):
+    # Scenario: LoRA 目标漂移被拒.
+    with pytest.raises(ValueError, match="Qwen3.8-Flash-Next model identity drifted"):
+        _validate_fn("qwen38_next", **overrides)
+
+
+def test_fn_profile_requires_the_qwen4exp_tito_family():
+    with pytest.raises(ValueError, match="Miles TITO family"):
+        _validate_fn("qwen38_next", tito_model="qwen38")
+
+
+def test_legacy_profiles_keep_attention_zero_layout():
+    # Scenario: 旧 profile 不受影响.
+    for name in ("deepseekv4", "qwen38", "qwen35", "qwen35_08b"):
+        assert stock_codex_lora_layout(name) == ("attention", 0)
+        assert "lora_targets" not in stock_codex_backend_profile(name)
+    assert _validate_qwen35()["model_identifier"] == QWEN35_MODEL
+    assert _validate_qwen35(lora_expert_rank=0)["model_identifier"] == QWEN35_MODEL
+    assert validate_stock_codex_fields(
+        tito_model="qwen35",
+        codex_backend_profile="qwen35_08b",
+        rl_model_recipe="generic",
+        model=QWEN35_08B_MODEL,
+        model_revision=QWEN35_08B_REVISION,
+        rollout_model=None,
+        rollout_model_revision=None,
+        apply_chat_template_kwargs=copy.deepcopy(QWEN35_KWARGS),
+        tito_allowed_append_roles=["tool", "user"],
+        codex_reasoning_effort="xhigh",
+        lora_targets="attention",
+        expert_full_count=0,
+    )["identity_label"] == "Qwen3.5-0.8B"
+    with pytest.raises(ValueError, match="Qwen3.5 model identity"):
+        _validate_qwen35(lora_expert_rank=8)
+    with pytest.raises(ValueError, match="Qwen3.8 model identity"):
+        _validate_qwen38(lora_targets="all-linear")
