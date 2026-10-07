@@ -601,6 +601,14 @@ class MilesTrainerGroup:
             return gmpo_clip_fraction(step_losses)
         return _mean_clipfrac(step_losses)
 
+    @property
+    def publish_offloaded(self) -> bool:
+        """Upstream train.py order: ``offload_train()`` (actor ``sleep``) runs *before*
+        ``update_weights`` and the engines' ``onload_kv``; ``update_weights`` reads the
+        host backups while asleep. The driver offloads before publishing when set."""
+        return bool(getattr(self._args, "colocate", False)) and bool(
+            getattr(self._args, "offload_train", False))
+
     def onload(self) -> None:
         # Upstream wake_up asserts --offload-train; without it the actor stays resident.
         if getattr(self._args, "offload_train", False):
