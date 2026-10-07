@@ -367,6 +367,12 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     rl.add_argument("--rl-lora-expert-rank", type=int, default=None, metavar="R",
                     help="ports Qwen3.8-Flash-Next: routed-expert LoRA rank r_e (0 <= r_e <= "
                     "--lora-r; default the profile's 8)")
+    rl.add_argument("--rl-island-pre-run", default=None, metavar="FILE",
+                    help="ports, single island no-sync: a local bash snippet embedded into the island "
+                    "run script and executed on the node (inside the island image, GPUs idle) "
+                    "BEFORE the island's Ray starts; a non-zero exit fails the job. For node-side "
+                    "preparation the launcher has no flag for, e.g. an HF -> torch_dist conversion "
+                    "on a cloud that cannot mount a prepared model volume (Verda G0)")
     rl.add_argument("--rl-megatron-ref-load", default=None, metavar="DIR",
                     help="ports: absolute node-side Megatron torch_dist checkpoint for --ref-load "
                     "(required by the Qwen3.8-Flash-Next raw recipe, e.g. "

@@ -242,6 +242,37 @@ _DETECT_IFACE = (
 
 # Megatron-LM checkout inside the radixark/miles-based ports images.
 PORTS_MEGATRON_PATH = "/root/Megatron-LM"
+# --rl-island-pre-run: the snippet runs in the island run script right after
+# `cd ~/sky_workdir` (image environment, HOME=/root, GPUs idle, before Ray).
+ISLAND_PRE_RUN_START = "[yeto-island] pre-run start"
+ISLAND_PRE_RUN_DONE = "[yeto-island] pre-run done"
+ISLAND_PRE_RUN_FAILED = "[yeto-island] pre-run FAILED"
+
+
+def read_island_pre_run(path) -> str:
+    """The --rl-island-pre-run snippet: a readable, non-empty local file."""
+    p = Path(path).expanduser()
+    if not p.is_file():
+        raise ValueError(f"--rl-island-pre-run: {path} is not a file")
+    text = p.read_text(encoding="utf-8")
+    if not text.strip():
+        raise ValueError(f"--rl-island-pre-run: {path} is empty")
+    return text if text.endswith("\n") else text + "\n"
+
+
+def island_pre_run_block(script: str | None) -> str:
+    """Run-script lines for the pre-run snippet ("" when none): a subshell so
+    the snippet's own `set -e` failures surface as one FAILED line + exit 1."""
+    if not script:
+        return ""
+    return (
+        f'echo "{ISLAND_PRE_RUN_START} $(date -u +%FT%TZ)"\n'
+        "(\nset -e\n" + script + ")\n"
+        '_pre_rc=$?\n'
+        '[ "$_pre_rc" = 0 ] || { echo "' + ISLAND_PRE_RUN_FAILED + ' rc=$_pre_rc $(date -u +%FT%TZ)" >&2; exit 1; }\n'
+        f'echo "{ISLAND_PRE_RUN_DONE} $(date -u +%FT%TZ)"\n'
+    )
+
 
 
 def multinode_env_prelude(cloud: str, num_nodes: int) -> str:
@@ -1622,6 +1653,11 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
     if getattr(args, "rl_boot_only", False) and (
             rl_engine != "ports" or not getattr(args, "rl_single_island_no_sync", False)):
         raise ValueError("--rl-boot-only needs --rl-engine ports and --rl-single-island-no-sync")
+    pre_run = getattr(args, "rl_island_pre_run", None)
+    if pre_run is not None:
+        if rl_engine != "ports" or not getattr(args, "rl_single_island_no_sync", False):
+            raise ValueError("--rl-island-pre-run needs --rl-engine ports and --rl-single-island-no-sync")
+        args.rl_island_pre_run_script = read_island_pre_run(pre_run)
     if getattr(args, "rl_deterministic_trainer", False) and rl_engine != "ports":
         raise ValueError("--rl-deterministic-trainer only applies to --rl-engine ports")
     given = [flag for name, flag in _ELASTIC_LAUNCH_FLAGS + _ELASTIC_PAUSE_FLAGS
@@ -3731,6 +3767,7 @@ def make_miles_island_task(
             f"{store_env}"
             "set -e\n"
             "cd ~/sky_workdir\n"
+            f"{island_pre_run_block(getattr(args, 'rl_island_pre_run_script', None))}"
             f"{multinode_env_prelude(spec.cloud, spec.num_nodes)}"
             'MASTER_ADDR=$(echo "$SKYPILOT_NODE_IPS" | head -n1)\n'
             # The island's Ray lives in its own temp dir so that cleanup can

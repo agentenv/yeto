@@ -112,3 +112,47 @@ def test_verda_candidates_know_rtx_6000_ada():
     types_ = types_ if isinstance(types_, list) else types_["instance_types"]
     cands = verda_candidates("RTX-6000-Ada", 1, types_, {"FIN-01": ["1RTX6000ADA.10V"], "FIN-02": []})
     assert [c["instance_type"] for c in cands] == ["1RTX6000ADA.10V"] and cands[0]["region"] == "FIN-01"
+
+
+def test_island_pre_run_is_embedded_before_ray(monkeypatch, tmp_path):
+    from test_rl_launcher import _Resources, _Storage, _StorageMode, _Task, _args, _prepare_rl_args
+
+    monkeypatch.setitem(sys.modules, "sky", types.SimpleNamespace(
+        Task=_Task, Resources=_Resources, Storage=_Storage, StorageMode=_StorageMode))
+    for k in ("SKYPILOT_DOCKER_USERNAME", "SKYPILOT_DOCKER_PASSWORD", "SKYPILOT_DOCKER_SERVER", "HF_TOKEN"):
+        monkeypatch.delenv(k, raising=False)
+    snippet = tmp_path / "pre.sh"
+    snippet.write_text('echo "[g0-arch] probe"\nbash scripts/convert_qwen3_8_next.sh --variant 4layer')
+    args = _args(("--gpu", "verda:1xrtx-pro-6000@FIN-01", "--rl-engine", "ports", "--no-island-relaunch",
+                  "--total-steps", "1", "--rl-single-island-no-sync", "--rl-island-pre-run", str(snippet)))
+    args.model_revision = "a" * 40; args.data_revision = "b" * 40
+    args.source_sha256 = "c" * 64; args.reward_sha256 = "d" * 64
+    _prepare_rl_args(args)
+    task = launcher.make_miles_island_task(args, parse_gpu_spec(args.gpu)[0], 0, 1, "127.0.0.1:29400")
+    run = task.run
+    # the snippet runs inside the container run script, after cd, before the island Ray and the learner
+    i_cd = run.index("cd ~/sky_workdir")
+    i_start = run.index(launcher.ISLAND_PRE_RUN_START)
+    i_body = run.index("convert_qwen3_8_next.sh --variant 4layer")
+    i_done = run.index(launcher.ISLAND_PRE_RUN_DONE)
+    assert i_cd < i_start < i_body < i_done < run.index("ray start --head") < run.index("-m yeto.rl.learner")
+    assert launcher.ISLAND_PRE_RUN_FAILED in run and "exit 1" in run[i_body:i_done]
+    assert run.index(launcher.ISLAND_PRE_RUN_START) > run.index("YETO_ISLAND_RUN_EOF")  # inside the in-VM heredoc
+    # the island resources/image are unchanged by the flag
+    assert task.resources.accelerators == "RTX-PRO-6000:1" and task.resources.infra == "verda/FIN-01"
+
+
+def test_island_pre_run_needs_no_sync_and_a_file(tmp_path):
+    from test_rl_launcher import _args, _prepare_rl_args
+
+    base = ("--gpu", "verda:1xrtx-pro-6000@FIN-01", "--rl-engine", "ports", "--total-steps", "1")
+    args = _args(base + ("--rl-island-pre-run", str(tmp_path / "missing.sh"), "--rl-single-island-no-sync"))
+    with pytest.raises(ValueError, match="not a file"):
+        _prepare_rl_args(args)
+    f = tmp_path / "pre.sh"; f.write_text("echo hi\n")
+    args = _args(base + ("--rl-island-pre-run", str(f)))
+    with pytest.raises(ValueError, match="rl-single-island-no-sync"):
+        _prepare_rl_args(args)
+    args = _args(base)
+    _prepare_rl_args(args)
+    assert launcher.island_pre_run_block(getattr(args, "rl_island_pre_run_script", None)) == ""
