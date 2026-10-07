@@ -3690,7 +3690,8 @@ def make_miles_island_task(
             '  RAY_ADDRESS="$MASTER_ADDR:6379" '
             f"PYTHONPATH={island_pythonpath}$HOME/sglang/python:$HOME/sky_workdir{island_megatron_path}"
             "${PYTHONPATH:+:$PYTHONPATH} "
-            f"{getattr(args, 'rl_learner_launch_prefix', '')}python3 -m yeto.rl.learner{flags}\n"
+            f"{getattr(args, 'rl_learner_launch_prefix', '')}python3 -m yeto.rl.learner{flags}"
+            f"{_island_post_cmd(args)}\n"
             "else\n"
             # rl-multinode-island D1: the trap is armed before the join loop so a
             # worker killed while joining still cleans its Miles Ray; the join is
@@ -5971,6 +5972,27 @@ def launch_verda_island(sky, task, name: str, spec, args, *, sleep=None):
         sig._fetch_availability,
         lambda avail, demoted: verda_launch_candidates(spec, args, avail, demoted),
         sleep=sleep,
+    )
+
+
+def _island_post_cmd(args) -> str:
+    """``--rl-island-post-cmd``: shell appended to the rank-0 learner line.
+
+    The learner's exit code is captured with ``|| LRC=$?`` (so ``set -e``
+    does not end the script first), the command runs with its output in
+    ``~/yeto-output/post-cmd.txt`` (the Modal tape mirror picks ``.txt`` up),
+    and the script exits with the learner's code, so the island verdict is
+    unchanged.  Empty when the flag is unset (every other run unchanged).
+    """
+    cmd = getattr(args, "rl_island_post_cmd", None)
+    if not cmd:
+        return ""
+    return (
+        " || LRC=$?\n"
+        "  mkdir -p \"$HOME/yeto-output\"\n"
+        f"  ( set +e; {cmd} ) > \"$HOME/yeto-output/post-cmd.txt\" 2>&1; "
+        "echo \"[yeto-island] post-cmd rc=$?\"\n"
+        "  exit ${LRC:-0}"
     )
 
 

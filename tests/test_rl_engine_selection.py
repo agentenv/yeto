@@ -630,3 +630,17 @@ def test_explicit_fixed_partition_is_a_ports_combination():
     assert ports_rejections(placement="fixed-partition", rollout_num_gpus=2) == []
     assert "needs --rollout-num-gpus" in " ".join(ports_rejections(placement="fixed-partition"))
     assert ports_rejections(placement="elastic")
+
+
+def test_island_post_cmd_runs_after_the_learner_and_keeps_its_exit_code(monkeypatch):
+    args = _cli()
+    _prepare_rl_args(args)
+    assert "post-cmd" not in _island_task(args, monkeypatch).run  # default: unchanged
+    args = _cli(("--rl-island-post-cmd", "nvidia-smi -L; echo done"))
+    _prepare_rl_args(args)
+    run = _island_task(args, monkeypatch).run
+    learner = next(l for l in run.splitlines() if "-m yeto.rl.learner" in l)
+    assert learner.endswith(" || LRC=$?")
+    after = run.split(learner, 1)[1]
+    assert '( set +e; nvidia-smi -L; echo done ) > "$HOME/yeto-output/post-cmd.txt" 2>&1' in after
+    assert "exit ${LRC:-0}" in after.split("else", 1)[0]
