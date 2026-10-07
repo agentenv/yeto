@@ -375,13 +375,16 @@ def needs_warmup_stage(spec: AlgorithmSpec | None, critic_load: str | None) -> b
 
 def stage_w_command(main_argv: Sequence[str], spec: AlgorithmSpec, *, actor_checkpoint: str,
                     critic_save: str, miles_root: str, python: str = sys.executable) -> list[str]:
-    """``python3 <miles>/train.py <stage-W argv>`` (plain Miles, no ports driver)."""
+    """``python3 -m yeto.rl.stage_w_entry <miles>/train.py <stage-W argv>``: plain
+    Miles (no ports driver), but connected to the island's Ray with the ports
+    driver's job ``runtime_env`` (PYTHONPATH incl. /root/Megatron-LM) so its
+    actors import what the ports path's do (s13-g1-modal-20261007b)."""
 
     argv = warmup_stage_argv(main_argv, spec, actor_checkpoint=actor_checkpoint,
                              critic_save=critic_save)
     if argv and argv[0] == "train.py":
         argv = argv[1:]
-    return [python, str(Path(miles_root) / "train.py"), *argv]
+    return [python, "-m", "yeto.rl.stage_w_entry", str(Path(miles_root) / "train.py"), *argv]
 
 
 def run_ports_warmup(spec: AlgorithmSpec, *, main_argv: Sequence[str], actor_checkpoint: str,

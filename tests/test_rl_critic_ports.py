@@ -270,3 +270,69 @@ def test_critic_round_receipt_from_the_critic_processes():
         args=SimpleNamespace(num_steps_per_rollout=1), actor_model=_Group("actor", log),
         learner_id=0, learner_generation=0, parameter_layout_hash=lambda: H)
     assert grpo.critic_round_receipt(0) is None
+
+
+def test_value_metrics_recorder_reports_step_level_ev_at_micro_batch_1(monkeypatch):
+    """s13-g1-modal-20261007b: at --micro-batch-size 1 with PPO gamma=lambd=1 every
+    micro-batch holds one sample whose returns are one constant (Var(G)=0), so a
+    per-micro-batch EV is always None. The recorder pools the step's micro-batches
+    and the step-loss record carries the step-level explained_variance."""
+
+    import sys
+    import types
+
+    from yeto.rl.engine.miles_adapter import state_plugin as sp
+
+    losses_mod = types.ModuleType("miles.backends.training_utils.loss_hub.losses")
+    model_mod = types.ModuleType("miles.backends.megatron_utils.model")
+
+    def value_loss_function(args, batch, logits, sum_of_sample_mean):
+        return torch.tensor(1.0), {"value_loss": torch.tensor(0.5)}
+
+    losses_mod.value_loss_function = value_loss_function
+    micro = [  # (returns, old values, mask): one sample each, constant returns
+        (torch.full((3,), 1.0), torch.tensor([0.2, 0.4, 0.6]), torch.tensor([1, 1, 0])),
+        (torch.full((2,), -1.0), torch.tensor([-0.5, 0.1]), torch.tensor([1, 1])),
+    ]
+
+    def train_one_step(*args, **kwargs):
+        reported = {}
+        for returns, values, mask in micro:
+            batch = {"returns": [returns], "values": [values], "loss_masks": [mask]}
+            _, reported = losses_mod.value_loss_function(None, batch, None, None)
+            assert "explained_variance" not in reported  # loss dict unchanged
+        return reported, 1.25
+
+    model_mod.train_one_step = train_one_step
+    pkg = {name: types.ModuleType(name) for name in (
+        "miles", "miles.backends", "miles.backends.training_utils",
+        "miles.backends.training_utils.loss_hub", "miles.backends.megatron_utils")}
+    pkg["miles.backends.training_utils.loss_hub"].losses = losses_mod
+    pkg["miles.backends.megatron_utils"].model = model_mod
+    for name, module in {**pkg, losses_mod.__name__: losses_mod,
+                         model_mod.__name__: model_mod}.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    for name in ("_STEP_GRAD_NORMS", "_STEP_APPLIED_LRS", "_STEP_LOSSES", "_EV_STATS"):
+        monkeypatch.setattr(sp, name, [])  # module-level per-step records: test-local
+    monkeypatch.setattr(sp, "_RECORDER_INSTALLED", False)
+    monkeypatch.setattr(sp, "_VALUE_METRICS_INSTALLED", False)
+    monkeypatch.setattr(sp, "_record_applied_lr", lambda *a: None)
+    monkeypatch.setattr(sp, "_arm_grad_audit", lambda *a: None)
+    assert sp.install_critic_recorders(None)
+
+    model_mod.train_one_step(optimizer=None)
+    for returns, _, _ in micro:  # each micro-batch alone has no defined EV
+        assert explained_variance(returns, returns * 0) is None
+    (record,) = sp.step_losses(None)
+    expected = explained_variance(torch.tensor([1.0, 1.0, -1.0, -1.0]),
+                                  torch.tensor([0.2, 0.4, -0.5, 0.1]))
+    assert record["metrics"]["explained_variance"] == pytest.approx(expected)
+    assert record["metrics"]["value_loss"] == pytest.approx(0.5)
+    from yeto.rl.engine.miles_adapter.trainer import critic_round_metrics
+
+    metrics = critic_round_metrics([record], 1.25)
+    assert metrics["critic/explained_variance"] == pytest.approx(expected)
+
+    model_mod.train_one_step(optimizer=None)  # stats reset per optimizer step
+    (again,) = sp.step_losses(None)
+    assert again["metrics"]["explained_variance"] == pytest.approx(expected)

@@ -187,7 +187,8 @@ def test_run_ports_warmup_runs_plain_train_py_once_then_reuses(tmp_path):
     product = cw.run_ports_warmup(WARM, main_argv=main, actor_checkpoint=actor,
                                   cache_root=tmp_path / "cache", miles_root="/m", run=fake_run)
     (command, cwd), = calls
-    assert cwd == "/m" and command[1] == "/m/train.py" and "train.py" not in command[2:]
+    assert cwd == "/m" and command[1:4] == ["-m", "yeto.rl.stage_w_entry", "/m/train.py"]
+    assert "train.py" not in command[4:]
     assert _values(command, "--critic-load") == [actor]
     assert _values(command, "--num-critic-only-steps") == ["50"]
     assert product.critic_sha256 == cw.checkpoint_sha256(product.critic_checkpoint)
@@ -217,3 +218,48 @@ def test_baseline_learner_argv_has_own_state_and_cold_spec():
     assert "--rl-single-island-no-sync" in argv and _values(argv, "--model") == ["m"]
     with pytest.raises(cw.CriticWarmupError):
         cw.baseline_learner_argv(LEARNER, WARM, rounds=0, spec_path="/b.json")
+
+
+def test_stage_w_entry_pins_island_ray_before_running_train_py(tmp_path, monkeypatch):
+    """s13-g1-modal-20261007b: stage W connects like the ports driver (job
+    runtime_env with the learner's PYTHONPATH) before plain train.py runs."""
+
+    import sys
+
+    from yeto.rl import stage_w_entry
+
+    order = []
+    monkeypatch.setattr(sys, "argv", list(sys.argv))
+    monkeypatch.setattr(sys, "path", list(sys.path))
+
+    def connect(environ):
+        order.append(("connect", environ.get("RAY_ADDRESS")))
+
+    def run_path(script, run_name):
+        order.append(("run", script, run_name, list(sys.argv), sys.path[0]))
+
+    monkeypatch.setenv("RAY_ADDRESS", "10.0.0.1:6379")
+    stage_w_entry.main([str(tmp_path / "train.py"), "--critic-lr", "3e-06"],
+                       connect=connect, run_path=run_path)
+    assert order == [("connect", "10.0.0.1:6379"),
+                     ("run", str(tmp_path / "train.py"), "__main__",
+                      [str(tmp_path / "train.py"), "--critic-lr", "3e-06"], str(tmp_path))]
+
+
+def test_connect_island_ray_forwards_megatron_pythonpath_to_actors():
+    from yeto.rl.engine.miles_adapter.entry import connect_island_ray
+
+    seen = {}
+
+    class FakeRay:
+        @staticmethod
+        def is_initialized():
+            return False
+
+        @staticmethod
+        def init(address, runtime_env):
+            seen.update(address=address, runtime_env=runtime_env)
+
+    env = {"RAY_ADDRESS": "a:6379", "PYTHONPATH": "/root/miles:/w:/root/Megatron-LM"}
+    connect_island_ray(environ=env, ray_module=FakeRay)
+    assert seen["runtime_env"]["env_vars"]["PYTHONPATH"].endswith("/root/Megatron-LM")

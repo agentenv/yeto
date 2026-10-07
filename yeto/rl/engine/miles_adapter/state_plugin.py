@@ -880,6 +880,7 @@ def install_grad_norm_recorder() -> bool:
     def train_one_step(*args: Any, **kwargs: Any):
         _record_applied_lr(original, args, kwargs)
         _arm_grad_audit(original, args, kwargs)
+        _EV_STATS.clear()
         result = original(*args, **kwargs)
         try:
             norm = result[1]
@@ -895,6 +896,42 @@ def install_grad_norm_recorder() -> bool:
 
 
 _VALUE_METRICS_INSTALLED = False
+# Explained-variance sufficient statistics over every micro-batch of the
+# current optimizer step (critic process): n, sum G, sum G^2, sum R, sum R^2
+# with R = G - v.  Per-micro-batch EV is undefined at the default
+# --micro-batch-size 1 under PPO with gamma = lambd = 1 and no KL reward: one
+# sample's returns are one constant, Var(G) = 0 (s13-g1-modal-20261007b, every
+# round's explained_variance missing).  Reset on entry to train_one_step.
+_EV_STATS: list[float] = []
+
+
+def _accumulate_ev_stats(returns: Any, values: Any, mask: Any = None) -> None:
+    returns = returns.detach().double().flatten()
+    values = values.detach().double().flatten()
+    if mask is not None:
+        keep = mask.detach().flatten().bool()
+        returns, values = returns[keep], values[keep]
+    residual = returns - values
+    add = [float(returns.numel()), float(returns.sum()), float((returns * returns).sum()),
+           float(residual.sum()), float((residual * residual).sum())]
+    if not _EV_STATS:
+        _EV_STATS.extend([0.0] * 5)
+    for i, value in enumerate(add):
+        _EV_STATS[i] += value
+
+
+def step_explained_variance(stats: list[float] | None = None) -> float | None:
+    """EV over all tokens of the step's micro-batches (population variances);
+    None without >= 2 tokens or when Var(G) is 0."""
+
+    n, sg, sg2, sr, sr2 = (stats if stats is not None else _EV_STATS) or [0.0] * 5
+    if n < 2:
+        return None
+    var_g = sg2 / n - (sg / n) ** 2
+    if var_g <= 0.0:
+        return None
+    var_r = max(sr2 / n - (sr / n) ** 2, 0.0)
+    return 1.0 - var_r / var_g
 
 
 def explained_variance(returns: Any, values: Any, mask: Any = None) -> float | None:
@@ -922,13 +959,12 @@ def explained_variance(returns: Any, values: Any, mask: Any = None) -> float | N
 
 
 def install_value_metrics_recorder() -> bool:
-    """Wrap upstream ``value_loss_function`` to add explained variance (3.2).
+    """Wrap upstream ``value_loss_function`` to collect explained variance (3.2).
 
-    The metric joins the loss dict Miles reports (next to ``value_loss`` and
-    ``value_clipfrac``), so it reaches ``train_one_step``'s result and the
-    step-loss records like every other loss-dict scalar. Per micro-batch;
-    how Miles reduces loss-dict scalars across micro-batches applies to it
-    unchanged (GPU G1 checks the value is finite).
+    Each micro-batch adds its (masked) returns / old values to the step's
+    sufficient statistics; ``_record_step_losses`` writes the step-level
+    ``explained_variance`` into the step-loss record next to ``value_loss``.
+    Per-rank (no data-parallel reduction); the loss dict is left unchanged.
     """
 
     global _VALUE_METRICS_INSTALLED
@@ -948,13 +984,11 @@ def install_value_metrics_recorder() -> bool:
             import torch
 
             masks = batch.get("loss_masks")
-            ev = explained_variance(
+            _accumulate_ev_stats(
                 torch.cat(batch["returns"], dim=0),
                 torch.cat(batch["values"], dim=0),
                 torch.cat(masks, dim=0) if masks else None,
             )
-            if ev is not None:
-                reported = {**reported, EXPLAINED_VARIANCE_KEY: torch.tensor(ev)}
         except (KeyError, RuntimeError, TypeError, ValueError):
             pass
         return loss, reported
@@ -1243,6 +1277,9 @@ def _record_step_losses(result: Any) -> None:
             scalars[str(key)] = float(raw.item() if hasattr(raw, "item") else raw)
         except (TypeError, ValueError):
             continue
+    ev = step_explained_variance()
+    if ev is not None:
+        scalars[EXPLAINED_VARIANCE_KEY] = ev
     _STEP_LOSSES.append({"pg_clipfrac": clipfrac, "loss_tokens": None, "metrics": scalars})
 
 
