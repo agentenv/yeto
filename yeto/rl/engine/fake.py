@@ -202,6 +202,10 @@ class FakeRolloutPool:
 
 
 class FakeTrainerGroup:
+    # Miles --offload-train publishes from host backups while asleep; the fake
+    # keeps the stricter default (a test opts in by setting this True).
+    publish_offloaded = False
+
     def __init__(self, engine: FakeEngine) -> None:
         self.engine = engine
         if not engine.grad_norm_reported:
@@ -356,7 +360,7 @@ class FakePublisher:
     def publish(self, state: TrainableState) -> PublicationResult:
         e = self.engine
         e.calls.append(("publish", state.policy_version))
-        if not e.trainer_resident:
+        if not e.trainer_resident and not getattr(e.trainer, "publish_offloaded", False):
             raise RuntimeError("publish reads weights from an offloaded trainer")
         digest = state.policy_tensor_hash()
         payload = b"".join(

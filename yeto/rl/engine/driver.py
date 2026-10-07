@@ -392,6 +392,12 @@ class IslandDriver:
         self.eval_interval = eval_interval
         self.max_rollouts = max_rollouts
         self.colocated = False
+        # Colocated trainers that can publish while offloaded (Miles --offload-train:
+        # upstream train.py sleeps the actor *before* update_weights) are offloaded
+        # right after the sync boundary, so the publication and the engines' KV
+        # resume never share the GPU with the resident training state (S13 FN OOM).
+        self.publish_offloaded = bool(getattr(trainer, "publish_offloaded", False))
+        self._trainer_offloaded = False
         self.expected_token: str | None = None
         self.published_version: int | None = None
         self.rounds_completed = 0
@@ -742,6 +748,11 @@ class IslandDriver:
                       recovery_id=pending.get("recovery_id"), config_epoch=self.config_epoch,
                       members=sorted(self.rollout.members()))
 
+    def _offload_trainer(self, rollout_id: int) -> None:
+        self.phase("offload", rollout_id=rollout_id)
+        self.trainer.offload()
+        self._trainer_offloaded = True
+
     def _generate(self, rollout_id: int) -> RolloutBatchHandle:
         if self.published_version != rollout_id or self.expected_token is None:
             raise PublicationError(
@@ -750,9 +761,8 @@ class IslandDriver:
         if self.controller is not None and not self.controller.admission_open:
             # 3.3 admission fence: no new batch while a reconfiguration holds it.
             raise DriverError(f"generation of rollout {rollout_id} refused: admission fenced")
-        if self.colocated:
-            self.phase("offload", rollout_id=rollout_id)
-            self.trainer.offload()
+        if self.colocated and not self._trainer_offloaded:
+            self._offload_trainer(rollout_id)
         if self.eval_overlap is not None:
             self.eval_overlap.before_generate(rollout_id)
         if self._gated:
@@ -1097,6 +1107,7 @@ class IslandDriver:
         if self.colocated:
             self.phase("onload", rollout_id=rollout_id)
             self.trainer.onload()
+            self._trainer_offloaded = False
         if self._gated:
             # Every group carries the published token (checked in _generate);
             # the batch is one complete, single-policy batch.
@@ -1177,6 +1188,8 @@ class IslandDriver:
         if self.ledger is not None:
             self.ledger.outer_recorded(rollout_id, next_policy_version=rollout_id + 1)
         self._join_eval()
+        if self.colocated and self.publish_offloaded:
+            self._offload_trainer(rollout_id)
         self.publish(boundary.state, rollout_id=rollout_id + 1)
         self._close_span()
         self.rounds_completed += 1
