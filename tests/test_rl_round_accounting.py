@@ -371,3 +371,37 @@ def test_load_sampler_first_sample_before_interval_and_survives_probe_error():
         assert done.wait(3.0)
     assert calls[0] - t0 < 0.15  # first delay, not the full interval
     assert emitted and emitted[0][0] == "rl_load_sample" and emitted[0][1]["rollout_id"] == 7
+
+
+def test_load_sampler_emits_terminal_probe_after_generate(tmp_path):
+    """S15 evidence-window lesson: after generate returns, one final probe is
+    emitted with ``terminal=True`` even when the interval never ticked."""
+    import json
+
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+    from yeto.rl.engine.bridges import LocalOnlySync
+    from yeto.rl.engine.driver import EventTape, IslandDriver
+    from yeto.rl.engine.execution_profile import ExecutionProfile
+    from yeto.rl.engine.fake import FakeEngine, fake_capabilities
+    import torch
+
+    engine = FakeEngine(tensors={"base_model.model.layer.lora_A.weight": torch.zeros(1, 2)},
+                        step_delta=1.0, placement_kind="fixed-partition")
+    calls = []
+    engine.rollout.load_sample = lambda: (calls.append(1), {"active_requests": 0, "workers": 1, "cordoned": 0})[1]
+    profile = ExecutionProfile(name="p", execution_mode="partitioned-serial",
+                               outer_protocol="none").bind_algorithm(AlgorithmSpec())
+    driver = IslandDriver(learner_id=0, rollout=engine.rollout, trainer=engine.trainer,
+                          policy_state=engine.policy_state, publisher=engine.publisher,
+                          placement=engine.placement,
+                          capabilities=fake_capabilities(execution_modes={"partitioned-serial"}),
+                          algorithm=AlgorithmSpec(), sync=LocalOnlySync(1),
+                          events=EventTape(tmp_path / "e.jsonl", 0), profile=profile, observe=True)
+    driver.load_sample_interval_s = 60.0  # never ticks during the fake generate
+    driver.load_sample_first_delay_s = 60.0
+    driver.run()
+    samples = [json.loads(l) for l in (tmp_path / "e.jsonl").read_text().splitlines()
+               if '"rl_load_sample"' in l]
+    assert samples, "terminal probe must emit even without interval ticks"
+    assert all(s.get("terminal") is True for s in samples)
+    assert len(calls) == len(samples)
