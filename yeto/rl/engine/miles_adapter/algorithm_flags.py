@@ -254,6 +254,11 @@ _UNMAPPED = [
     "--sapo-tau-neg",
     "--gmpo-log-clip-low",
     "--gmpo-log-clip-high",
+    # Miles fork SAO port (yeto-sao; rl-algo-critic-family 8.2/8.3): mapped by
+    # yeto.rl.algos.sao.
+    "--policy-objective",
+    "--sao-dis-eps-low",
+    "--sao-dis-eps-high",
 ]
 
 MAPPINGS: dict[str, FlagMapping] = {row.flag: row for row in _builtin_rows()}

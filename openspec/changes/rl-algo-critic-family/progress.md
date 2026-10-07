@@ -116,3 +116,25 @@ Miles `train.py`（c35702e）:118-126 的 critic 训练顺序：`values = critic
 - 测试（/home/michael/work/miles-next-venv）：`test_ppo_gae_variants.py` 22 passed（对拍拷贝的参考实现；缺省/显式 vanilla 与冻结的原实现 `torch.equal` 逐元素一致，fp32/fp64、chunked/非 chunked、带掩码）；`test_segment_ids_conversion.py` 2 passed。
 - 定向回归（GAE/loss 相关文件 + tests/test_chunked_gae.py）：基线 039471508 13 failed/99 passed，新 13 failed/121 passed，失败集合完全相同（megatron.core 缺失等环境原因）。未跑 tests/fast/ray 全量（会启动 Ray，线程上限）。
 - yeto 全量回归：log /home/michael/work/infra-drafts/critic-gae-pytest.log，68 failed/26 errors，与 /tmp/base2.sorted 按用例 id 比对集合相同，新增失败 0。
+
+## S13 8.x SAO（2026-10-07，分支 s13-sao / fork yeto-sao；8.1–8.3 CPU 已实现并 CPU 验证，8.4 GPU 未执行）
+
+### 8.1 源码来源（核对结论：任务里写的 ae475060 不是 SAO 源码）
+- `ae475060fa670145aef75d678809039ae999cb97` 只存在于 yeto 的 vendored bundle `yeto/rl/vendor/miles-qwen38.bundle`（GitHub API 422、`upload-pack: not our ref`）。从 bundle 取出后：提交信息 "fix(trainable_state): expose fp32 masters without resetting grad accumulators"，仅改 `trainable_state.py` 与其测试；树内无 `sao_dis`/`hl_gauss`/`sao.py`。它是 legacy 流水的 `MILES_COMMIT`，不是 SAO 数学的来源。
+- 实际来源：`agentenv/miles` 分支 `feat/sao-tbench21-e2e-validation` @ `16a9bea409de61549e233dda8a684e8cdd1f7448`（SAO 数学引入于 `e25048edd` "feat(rl): add SAO value and online training"，后续 `d5eb5e82a`、`eb33e9e2e`、`ca1390beb`、`79bc3ad89`）。只读 fetch 到 /home/michael/work/miles-sao 的 `refs/remotes/agentenv/*`（未 push）。
+- 文档核对：该分支的 `docs/TBENCH21_SAO_QWEN35_08B_VALIDATION_20260826.md` 与 yeto 同名文档只差测试计数一段（yeto 版补了"Yeto 65 Python + 83 Rust"），其余一致；文档声明的 Feature branch 即此分支。
+- 文件清单（相对 merge-base 7da1079a）：`miles/backends/training_utils/sao.py`（recipe、DIS 数据校验、attention 冻结）、`loss_hub/math_utils.py`（`compute_sao_dis_policy_loss`）、`loss_hub/losses.py`（sao_dis 分支、`_hl_gauss_target_distribution`、`_two_hot_target_distribution`、classification value loss）、`loss_hub/logit_processors.py`（`_value_support`、`predict_values_from_logits`、`apply_temperature`）、`loss_hub/gae_adaptive.py`、`loss_hub/advantages.py`、`megatron_utils/model_provider.py`（`_value_head_output_size`）、`utils/arguments.py`、`megatron_utils/actor.py`。
+
+### 8.2 fork 移植（miles-sao，分支 yeto-sao，基于 ce96fc060，提交 6b5bd88c，未 push）
+- 逐字移植：`compute_sao_dis_policy_loss`；`--policy-objective {ppo,sao_dis}`、`--sao-dis-eps-low/high`（sao_dis 时强制 use_rollout_logprobs、与 TIS/OPSM/mismatch 互斥）；`--value-loss-type {mse,classification}`、`--value-num-bins 51`、`--value-reward-range 0 1`、`--value-target-type {hl_gauss,two_hot}`、`--hl-gauss-sigma-ratio 0.75`；critic 头输出维度 = bins；value 预测走 softmax·support 且不乘温度。缺省（ppo + MSE）路径代码未改。
+- 未移植：`gae_adaptive.py`（fork 已有 ce96fc06 的 `--gae-variant decoupled` + `--gae-lambd-mode length_adaptive`，二者语义对应，**但未与上游 gae_adaptive 数值对拍**）、`--num-critic-epochs`（fork 无，SAO 需 2）、`critic_freeze_attention`、离线 value pretrain、EV 统计、compaction 校验。
+- 测试（miles-next-venv，`tests/fast/backends/training_utils/test_sao_ports.py`，参考实现用 python math，不 import 被测代码）：DIS 两档对拍 + 严格拒绝 + 梯度含 ratio；HL-Gauss 7 个目标值对拍；51-bin CE 损失对拍；分类 value 期望且跳过温度；MSE 缺省路径不变；CLI 缺省不变。13 passed；连同 `test_ppo_gae_variants.py` 35 passed。`tests/fast/backends/training_utils/loss_hub/*` 因 conftest 需 megatron.core 在本环境无法收集（环境原因，改前同样）。
+
+### 8.3 yeto 声明（s13-sao）
+- 新模块 `yeto/rl/algos/sao.py`（加入 EXTENSION_MODULES）：loss 扩展字段 `policy_objective`/`sao_dis_eps_low`/`sao_dis_eps_high`（None 时不入规范 JSON）；`sao_algorithm_spec(domain)`（ppo+needs_critic、γ=1、λ_critic=1、length_adaptive α=1.5、decoupled、hl_gauss 51、critic_lr 5e-6、warmup 10 iters、critic_updates_per_step=num_critic_epochs=2、warmup_steps 0、full）；`recipe_settings`；`sao_role_contract`（actor/critic 两 role、分开 layout、每 role 一个 syncer、lockstep 成对 fragment、critic 步数=actor×epochs）；`sao_fork_argv`；拒绝 `sao_dis_fields`、`sao_not_at_pin`（FORK_COMMITS 为空，ports 运行 SAO 仍被拒，旧 streaming 入口照常）。`algorithm_flags._UNMAPPED` 加三个 fork flag（与 loss_variants 同法）。旧入口 `sao_streaming_runtime.py` 未改。
+- 测试 `tests/test_rl_sao_spec.py` 8 passed：两档 recipe 与冻结的上游 `apply_sao_online_recipe`（`tests/sao_recipe_reference.py`，逐字拷贝）逐键相等（spec 不持有的 lr/critic_freeze_attention/kl_loss_coef 显式列出）；规格哈希稳定/往返；role 合同的步数被旧入口 `_validate_miles_runtime` 接受、错误步数被拒；fork argv 快照；拒绝；缺省规格不含新字段。
+- 回归：`evidence/hash_compare.py` 在 integ-decl(d398d443) 与本分支输出逐行相同，且与 `evidence/hash-critic.txt` 哈希相同；定向集（argv_snapshot、critic_spec、algorithm_flags、sao_streaming_runtime、miles_sao_streaming、tbench21 合同、critic_warmup、critic_ports、miles_config、loss_variants）本分支 7 failed/140 passed，基线失败集合相同（均为 test_rl_miles_sao_streaming 缺 pytest-asyncio）。`tests/test_rl_argv_snapshot.py` 未改且通过。
+
+### 未验证 / 遗留
+- fork decoupled+length_adaptive 与上游 `gae_adaptive`（含 terminal reward 落在最后 action token、跨 observation 桥接）未数值对拍；fork 缺 `--num-critic-epochs`、critic attention 冻结；value_reward_range/sigma 为翻译常量，不在 spec 哈希内。
+- 第二 syncer（4.2）不在本组；`sao_role_contract` 只是声明，未接线到 launcher。
