@@ -378,3 +378,27 @@ worktree `/home/michael/work/s13-tbcompact`，分支 `s13-tbcompact`（基于 in
 - 未验证：真实 Miles v1 session server 上的摘要回合（user 追加、`tools=[]` 对 TITO 的影响）、`POST /sessions` 预建与 `collect_samples` 对空 session 的返回（按 pin 源码 `OpenAIEndpointTracer` 编写，未实跑）；v1 路径下 custom generate 返回多 sample 列表能否被 rollout/`train_data_conversion` 正确接收（R-D5a 设计上允许兄弟段，未在真实 Miles 跑）；真实 tokenizer 下的触发时机与 k；Codex 自带压缩在运行时的有效默认阈值；GPU。
 - 已知遗留：预建 session 在 worker 崩溃且 agent function 未返回元数据、或预建中途失败、或 `finish_trusted` 抛异常时会泄漏（无人 collect）；`CODEX_OPENENV_AGENT_MODULES`（`yeto/rl/__init__.py`）未列入新模块 `compaction_bridge.py`；env 透传到 rollout worker/容器未接线；R-D5a 的 GPU 硬判据 `chains_total==1` 在开启压缩时不再成立，需改判据；preflight/launcher 仍只拒 legacy `YETO_CODEX_COMPACTION_ENABLED`，对新开关无门控。
 - 待用户确认：(1) 每段一 session 方案（替代 v2 session server 树形）；(2) 摘要采用 `tools=[]`（stock 行为）还是保留同一工具表；(3) 触发计数用"精确 usage + 工具输出字节上界"是否可接受；(4) 是否需要把新开关接入 compactionrl 规格/launcher 与 preflight 门控；(5) 预建 3 个 session/rollout 的开销与泄漏处理是否可接受。
+
+## S13 Codex 压缩接线（2026-10-07，CPU；未上 GPU、未启动 Ray、未 push）
+
+worktree `/home/michael/work/s13-tbwire`，分支 `s13-tbwire`（基于 integ-decl e401d5fe）。用户已确认：每段一个独立 session；触发用"精确 token 用量 + 工具输出字节上界"（可偏早）；现在接开关。
+
+### 改动
+- **规格→开关**（`yeto/rl/algos/compactionrl.py` 新增 `check_rollout_compaction`/`compaction_switch`/常量）：`advantage.gae_variant=cross_segment_per_sample` ⇔ 必须开 `YETO_CODEX_COMPACTIONRL`，且 harness 必须是 Codex OpenEnv agent（唯一能压缩的）；其它 gae_variant 开开关拒绝；`YETO_CODEX_COMPACTIONRL_T_COMP` 无开关时拒绝、非正整数拒绝。**对照臂 `cross_segment_whole_rollout` 在 Codex harness 上一律拒绝**（不论开关）：桥的每段是独立 session、以重建上下文为条件，无法拼成该模式要求的单个 sample；不开压缩则没有段可做对照。非 Codex harness 上该对照臂行为不变（未接任何压缩 rollout）。
+- **launcher**（`yeto/launcher.py`：`rl_gae_variant`、`compactionrl_launch_env`，在 `codex_harness_launch` 开头调用）：CompactionRL 规格时容器 env 加 `YETO_CODEX_COMPACTIONRL=1`（启动环境若有 T_COMP 一并透传）；岛 preflight `worker_runtime_env` 已按前缀 `YETO_CODEX_` 转发给 Ray rollout worker（未改）。启动环境显式 `=0` 与 CompactionRL 规格矛盾时拒绝；CompactionRL 规格但 agent 不是 `CODEX_OPENENV_AGENT`（含 legacy 签名 Codex agent 与非 Codex 运行）拒绝。非 CompactionRL 规格且未设开关时返回 {}，env 不变。
+- **岛 preflight**（`harness/codex/preflight.py::assert_compactionrl_consistent`，`harness_preflight` 中调用）：按 Miles `--gae-variant`（`miles_args.gae_variant`）核对开关，同上规则，失败 `PreflightError`。
+- **模块表**：`yeto/rl/__init__.py::CODEX_OPENENV_AGENT_MODULES` 与 `preflight.required_pin_updates()` 同步加入 `compaction_bridge.py`。该表只有文件名，无逐模块哈希 pin（`CODEX_HARNESS_AGENT_SHA256` 只 pin `codex_harness_agent.py`，未改动），故无需更新哈希。
+- **预建 session 泄漏**：`create_segment_sessions` 中途失败时删除已建的；新 `delete_segment_sessions`（尽力 `DELETE {router}/sessions/{id}`，pin `miles/rollout/session/sessions.py` 返回 204，404 视为已删；不抛异常以免掩盖原错误）、`release_unreturned_segments`。subprocess 与 in-process `run`：元数据未随返回值交给 `codex_openenv_generate`（worker 抛非 harness 异常、取消、`finish_trusted` 抛异常）时在 finally 删除；`CodexHarnessError` 路径与成功路径照旧把 session 列表交给 wrapper 收集。关闭压缩时 `segments={}`，路径不变。
+- **R-D5a 判据**：仓库内没有现成的 `chains_total==1` 判据脚本（只写在 `openspec/changes/rl-codex-harness-rollout/design.md` R-D5a 与 9.2 文字中）。新增 `yeto/rl/harness/codex/chain_judge.py::judge_chain_counts(metas, compaction_enabled)`：关闭时每条轨迹恰 1 个 sample 且 `chains_total==1`（不变）；开启时每条轨迹 `chains_total==num_segments==compactions+1==sample 数`、`chain_index/segment_index`=0..n−1、非首段 `chain_break_reason=compaction_window`，中止轨迹（单 sample 无段键）按 `chains_total==1`。design 文字同步更新。
+- **摘要工具表**：行为不变（`tools=[]`、`tool_choice="none"`），做成显式常量 `compaction_bridge.SUMMARY_REQUEST_TOOLS=()`/`SUMMARY_REQUEST_TOOL_CHOICE="none"`，测试核对线上请求体与常量一致；design D8 注明理由与"待 GPU 核实 TITO 前缀复用"风险。
+
+### 验证（`PYTHONPATH=.:tests /tmp/yeto-venv/bin/python -m pytest -p no:cacheprovider`，OMP/OPENBLAS/MKL=1，单进程，未启动 Ray）
+- 新 `tests/test_codex_compaction_wiring.py` 25 passed（launcher 注入/T_COMP/矛盾/默认不变/对照臂/非压缩 harness；preflight 10 组合；半途预建失败删除；best-effort 删除；in-process 与 subprocess 的 worker 崩溃、finish_trusted 异常删除、成功与 CodexHarnessError 交接；judge 开/关；常量与模块表）。`test_codex_bridge_compaction.py` 加工具表常量断言。
+- 定向 14 文件（含未改动的 `test_rl_argv_snapshot.py`、launcher/codex bundle/codex openenv/compactionrl/vapo/gateway 等）298 passed/2 skipped，log `/tmp/s13-tbwire-pytest.log`。
+- 更大批次（引用 harness.codex/codex_openenv/launcher 的其余测试文件，排除 5 个可能起 Ray 的文件）1054 passed/23 skipped/38 failed；38 个失败全在 `test_diffusion.py`/`test_island_backend.py`/`test_wandb_plumbing.py`，在 e401d5fe 的 git archive（/tmp/s13-tbwire-base）上失败集合相同，非新增。log `/tmp/s13-tbwire-pytest2.log`。
+- `hash_compare.py` 输出与 `evidence/hash-critic.txt` 无差异（17 个既有规格哈希不变）。
+
+### 未验证 / 待确认
+- 未验证：真实 Miles session server 上 `DELETE /sessions/{id}`（按 pin 源码编写，CPU 用 aiohttp 假服务器）；Ray rollout worker 实际收到开关（只验证了 `worker_runtime_env` 转发函数）；Miles 实际解析出的 `miles_args.gae_variant` 属性名（按 `--gae-variant` 推断）；摘要 `tools=[]` 对 TITO 前缀复用的影响；`chain_judge` 尚未接入任何 GPU 采集脚本（GPU 9.2/9.4 时需对采到的 sample metadata 调用）；GPU 全部。
+- 仍可能泄漏：agent function 已返回元数据但 Miles 上游在调用 wrapper 收集前失败（不在 yeto 控制内）；进程被 SIGKILL 时 finally 不执行。
+- 待确认：(1) 对照臂在 Codex 上一律拒绝（含不开压缩）是否符合预期；(2) 启动环境显式 `YETO_CODEX_COMPACTIONRL=1` 而规格为 CompactionRL 时允许（冗余但一致）。

@@ -3000,6 +3000,57 @@ def codex_container_env(contract: dict) -> dict[str, str]:
     return env
 
 
+def rl_gae_variant(args) -> str | None:
+    """``advantage.gae_variant`` of the prepared RL algorithm spec (None if absent)."""
+    raw = getattr(args, "rl_algorithm_spec_json", None)
+    if getattr(args, "training_mode", "sft") != "rl" or not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    value = ((payload or {}).get("advantage") or {}).get("gae_variant")
+    return None if value is None else str(value)
+
+
+def compactionrl_launch_env(args, environ, harness_compacts: bool) -> dict[str, str]:
+    """Rollout-worker env for CompactionRL (design D8; progress "S13 Codex 压缩接线").
+
+    A ``cross_segment_per_sample`` spec switches ``YETO_CODEX_COMPACTIONRL=1`` on
+    (and forwards ``YETO_CODEX_COMPACTIONRL_T_COMP`` from the launching
+    environment when set); the island preflight forwards every ``YETO_CODEX_*``
+    to the Ray rollout workers.  Any other spec returns {} (env unchanged).
+    Raises when spec, harness and the launching environment disagree
+    (``compactionrl.check_rollout_compaction``)."""
+    from .rl.algos import compactionrl as crl
+
+    variant = rl_gae_variant(args)
+    raw_switch = environ.get(crl.COMPACTION_SWITCH_ENV)
+    t_comp = environ.get(crl.COMPACTION_T_COMP_ENV)
+    if variant is None and not raw_switch and not t_comp:
+        return {}
+    try:
+        explicit = crl.compaction_switch(raw_switch)
+        wanted = variant == crl.COMPACTED_GAE_VARIANT
+        if raw_switch not in (None, "") and explicit != wanted:
+            if wanted:
+                raise ValueError(
+                    f"{crl.COMPACTION_SWITCH_ENV}={raw_switch!r} in the launching environment "
+                    f"contradicts the CompactionRL spec ({crl.COMPACTED_GAE_VARIANT})"
+                )
+        crl.check_rollout_compaction(
+            variant, wanted or explicit, harness_compacts=harness_compacts, t_comp=t_comp
+        )
+    except ValueError as error:
+        raise ValueError(f"CompactionRL launch: {error}") from error
+    if not wanted:
+        return {}
+    env = {crl.COMPACTION_SWITCH_ENV: "1"}
+    if t_comp:
+        env[crl.COMPACTION_T_COMP_ENV] = str(t_comp).strip()
+    return env
+
+
 def codex_harness_launch(args, environ=None) -> tuple[str, dict[str, str], dict[str, str]] | None:
     """(learner flags, container envs, file_mounts) for a signed Codex agent on
     the ports engine, or None when the run is not a Codex run.
@@ -3012,6 +3063,7 @@ def codex_harness_launch(args, environ=None) -> tuple[str, dict[str, str], dict[
 
     environ = os.environ if environ is None else environ
     custom_agent = getattr(args, "custom_agent_function_path", None)
+    compaction_env = compactionrl_launch_env(args, environ, custom_agent == CODEX_OPENENV_AGENT)
     if custom_agent not in SIGNED_CODEX_AGENTS:
         return None
     if getattr(args, "rl_engine", "ports") != "ports":
@@ -3047,6 +3099,7 @@ def codex_harness_launch(args, environ=None) -> tuple[str, dict[str, str], dict[
         for name, value in environ.items():
             if name.startswith(HARNESS_PASSTHROUGH_ENV_PREFIXES) and value:
                 envs[name] = value
+    envs.update(compaction_env)  # {} unless the spec is CompactionRL
     mounts = {CODEX_CONTAINER_DIR: str(Path(bundle_dir).expanduser().resolve())}
     return flags, envs, mounts
 

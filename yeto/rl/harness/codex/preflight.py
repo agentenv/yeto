@@ -63,6 +63,28 @@ def assert_compaction_disabled(env: Mapping[str, str]) -> None:
         raise PreflightError("compaction tuning without support: " + ", ".join(extra))
 
 
+def assert_compactionrl_consistent(miles_args: Any, env: Mapping[str, str]) -> None:
+    """CompactionRL switch vs the trainer's ``--gae-variant`` (progress "S13 Codex 压缩接线").
+
+    This hook only runs for the Codex OpenEnv agent, which can compact, so:
+    ``cross_segment_per_sample`` requires ``YETO_CODEX_COMPACTIONRL`` on; any
+    other variant requires it off; ``cross_segment_whole_rollout`` (control arm)
+    is rejected outright (per-segment sessions cannot form one sample).
+    """
+    from yeto.rl.algos import compactionrl as crl
+
+    try:
+        switch = crl.compaction_switch(env.get(crl.COMPACTION_SWITCH_ENV))
+        crl.check_rollout_compaction(
+            getattr(miles_args, "gae_variant", None),
+            switch,
+            harness_compacts=True,
+            t_comp=env.get(crl.COMPACTION_T_COMP_ENV),
+        )
+    except ValueError as exc:
+        raise PreflightError(f"CompactionRL: {exc}") from exc
+
+
 def assert_no_scripted_driver(env: Mapping[str, str]) -> None:
     if env.get(SCRIPTED_DRIVER_ENV):
         raise PreflightError(f"{SCRIPTED_DRIVER_ENV} must not be set in a training process")
@@ -159,6 +181,7 @@ def harness_preflight(miles_args: Any, launch: Any, *, env: Mapping[str, str] | 
     if agent != EXPECTED_AGENT_FUNCTION:
         raise PreflightError(f"custom_agent_function_path={agent!r}; the Codex harness preflight expects {EXPECTED_AGENT_FUNCTION}")
     preflight_codex_openenv(env)
+    assert_compactionrl_consistent(miles_args, env)
     provider = resolve_environment_provider(miles_args, env)
     from . import codex_openenv_subprocess_agent_function as subprocess_agent
 
@@ -313,6 +336,7 @@ def required_pin_updates() -> dict[str, Any]:
         "CODEX_OPENENV_AGENT": "yeto.rl.harness.codex.codex_openenv_subprocess_agent_function.run",
         "CODEX_OPENENV_AGENT_MODULES": (
             "codex_openenv_subprocess_agent_function.py", "codex_openenv_agent_worker.py", "codex_openenv_agent_function.py",
+            "compaction_bridge.py",
         ),
         "CODEX_OPENENV_IDENTITY_ENV": dict(adapter._OPENENV_IDENTITY_ENV),
     }

@@ -213,6 +213,7 @@ async def create_segment_sessions(
     count: int,
     *,
     post: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
+    delete: Callable[[str], Awaitable[None]] | None = None,
 ) -> tuple[list[str], list[str]]:
     """Pre-create one session per allowed compaction; returns (ids, agent base URLs).
 
@@ -223,13 +224,69 @@ async def create_segment_sessions(
     router, _ = split_session_url(base_url)
     body = segment_session_body(request_kwargs)
     ids: list[str] = []
-    for _ in range(count):
-        reply = await (post or _post_json)(f"{router}/sessions", dict(body))
-        session_id = reply.get("session_id") if isinstance(reply, dict) else None
-        if not isinstance(session_id, str) or not session_id or "/" in session_id:
-            raise RuntimeError("session server returned no session_id")
-        ids.append(session_id)
+    try:
+        for _ in range(count):
+            reply = await (post or _post_json)(f"{router}/sessions", dict(body))
+            session_id = reply.get("session_id") if isinstance(reply, dict) else None
+            if not isinstance(session_id, str) or not session_id or "/" in session_id:
+                raise RuntimeError("session server returned no session_id")
+            ids.append(session_id)
+    except BaseException:
+        # Pre-creation failed half-way: nobody will collect the ones already made.
+        await delete_segment_sessions(base_url, ids, delete=delete)
+        raise
     return ids, [f"{router}/sessions/{session_id}" for session_id in ids]
+
+
+async def _delete_session(url: str) -> None:
+    import aiohttp
+
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
+        async with session.delete(url) as response:
+            # Pinned session server (miles/rollout/session/sessions.py): 204 on
+            # success; an already collected/deleted session is a 404.
+            if response.status not in (200, 204, 404):
+                raise RuntimeError(f"session server returned HTTP {response.status}")
+
+
+async def delete_segment_sessions(
+    base_url: str,
+    session_ids: Any,
+    *,
+    delete: Callable[[str], Awaitable[None]] | None = None,
+) -> list[str]:
+    """Best-effort ``DELETE {router}/sessions/{id}`` for every id; returns the failures.
+
+    Used when pre-created segment sessions will not reach
+    ``codex_openenv_generate`` (which otherwise collects and so deletes them).
+    Never raises: a cleanup failure must not mask the original error.
+    """
+    if not isinstance(session_ids, (list, tuple)) or not session_ids:
+        return []
+    try:
+        router, _ = split_session_url(base_url)
+    except ValueError:
+        return [str(session_id) for session_id in session_ids]
+    failed: list[str] = []
+    for session_id in session_ids:
+        try:
+            await (delete or _delete_session)(f"{router}/sessions/{session_id}")
+        except Exception:  # noqa: BLE001 - keep deleting the rest
+            failed.append(str(session_id))
+    return failed
+
+
+async def release_unreturned_segments(
+    base_url: str,
+    segments: dict[str, Any],
+    *,
+    delete: Callable[[str], Awaitable[None]] | None = None,
+) -> list[str]:
+    """Delete the sessions listed in ``segments`` (the trusted metadata from
+    :func:`prepare_segment_sessions`) when it is not being returned."""
+    return await delete_segment_sessions(
+        base_url, segments.get(compaction_bridge.SESSIONS_METADATA_KEY), delete=delete
+    )
 
 
 async def finish_trusted(
@@ -370,26 +427,34 @@ async def run(
             **infrastructure_metadata(f"segment sessions: {type(exc).__name__}: {exc}", episode_id=episode_id),
             **trajectory_fields(trajectory_id),
         }
+    handed_off = False  # True once ``segments`` rides in the returned metadata
     try:
-        untrusted = await drive_untrusted(job, environment, tool_wait=tool_wait)
-    except (harness.CodexHarnessError, legacy.EpisodeClientError, OSError) as exc:
-        metrics = getattr(exc, "metrics", None)
-        tito = mirror_tito_counters(metrics, harness_board)
-        return {
-            **infrastructure_metadata(f"{type(exc).__name__}: {exc}", episode_id=episode_id, metrics=metrics),
-            **trajectory_fields(trajectory_id),
-            **tito,
-            **segments,
-        }
-    tito = mirror_tito_counters(untrusted.get("metrics"), harness_board)
-    signed = await finish_trusted(untrusted, verifier, task_id=task_id, sample_id=sample_id)
-    return {**signed, **trajectory_fields(trajectory_id), **tito, **segments}
+        try:
+            untrusted = await drive_untrusted(job, environment, tool_wait=tool_wait)
+        except (harness.CodexHarnessError, legacy.EpisodeClientError, OSError) as exc:
+            metrics = getattr(exc, "metrics", None)
+            tito = mirror_tito_counters(metrics, harness_board)
+            handed_off = True
+            return {
+                **infrastructure_metadata(f"{type(exc).__name__}: {exc}", episode_id=episode_id, metrics=metrics),
+                **trajectory_fields(trajectory_id),
+                **tito,
+                **segments,
+            }
+        tito = mirror_tito_counters(untrusted.get("metrics"), harness_board)
+        signed = await finish_trusted(untrusted, verifier, task_id=task_id, sample_id=sample_id)
+        handed_off = True
+        return {**signed, **trajectory_fields(trajectory_id), **tito, **segments}
+    finally:
+        if segments and not handed_off:
+            await release_unreturned_segments(job["base_url"], segments)
 
 
 async def prepare_segment_sessions(
     job: dict[str, Any],
     *,
     post: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
+    delete: Callable[[str], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     """CompactionRL only: add segment URLs to ``job``; return the trusted metadata.
 
@@ -401,7 +466,7 @@ async def prepare_segment_sessions(
         raise harness.CodexHarnessError("CompactionRL requires max_seq_len")
     cfg = compaction_bridge.compaction_config(int(job["max_seq_len"]))
     ids, urls = await create_segment_sessions(
-        job["base_url"], dict(job.get("request_kwargs") or {}), cfg.max_compactions, post=post
+        job["base_url"], dict(job.get("request_kwargs") or {}), cfg.max_compactions, post=post, delete=delete
     )
     job[compaction_bridge.SEGMENT_URLS_KEY] = urls
     return {compaction_bridge.SESSIONS_METADATA_KEY: ids}

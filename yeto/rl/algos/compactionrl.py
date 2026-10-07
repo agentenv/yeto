@@ -87,3 +87,80 @@ def compactionrl_spec(**overrides: Any) -> AlgorithmSpec:
     for group, values in overrides.items():
         groups.setdefault(group, {}).update(values)
     return AlgorithmSpec(**groups)
+
+
+# --- Rollout-side switch (progress.md "S13 Codex 压缩接线") ------------------------
+# The trainer-side gae variant decides whether rollouts must be compacted:
+# ``cross_segment_per_sample`` (this spec) needs one sample per compaction
+# segment, which only the Codex bridge (``harness.codex.compaction_bridge``,
+# switched on by ``YETO_CODEX_COMPACTIONRL``) produces.  The control arm
+# ``cross_segment_whole_rollout`` needs the whole rollout as ONE sample with
+# per-token segment ids; the bridge runs every segment in its own session-server
+# session with a rebuilt context, so its segments cannot be concatenated into
+# one forward pass -> that arm is rejected on the Codex harness (with or
+# without the switch: without compaction there are no segments to ablate).
+COMPACTION_SWITCH_ENV = "YETO_CODEX_COMPACTIONRL"
+COMPACTION_T_COMP_ENV = "YETO_CODEX_COMPACTIONRL_T_COMP"
+COMPACTED_GAE_VARIANT = "cross_segment_per_sample"
+WHOLE_ROLLOUT_CONTROL_GAE_VARIANT = "cross_segment_whole_rollout"
+_SWITCH_FALSE = frozenset({"", "0", "false", "no", "off"})
+_SWITCH_TRUE = frozenset({"1", "true", "yes", "on"})
+
+
+def compaction_switch(raw: Any) -> bool:
+    """Parse ``YETO_CODEX_COMPACTIONRL`` (same vocabulary as the bridge)."""
+    value = "" if raw is None else str(raw).strip().lower()
+    if value in _SWITCH_FALSE:
+        return False
+    if value in _SWITCH_TRUE:
+        return True
+    raise ValueError(f"{COMPACTION_SWITCH_ENV} must be a boolean flag, got {raw!r}")
+
+
+def check_t_comp(raw: Any) -> None:
+    if raw is None or str(raw).strip() == "":
+        return
+    text = str(raw).strip()
+    if not text.isdigit() or int(text) <= 0:
+        raise ValueError(f"{COMPACTION_T_COMP_ENV} must be a positive integer, got {raw!r}")
+
+
+def check_rollout_compaction(
+    gae_variant: Any,
+    switch_on: bool,
+    *,
+    harness_compacts: bool,
+    t_comp: Any = None,
+) -> None:
+    """Fail closed unless spec, harness and switch agree.
+
+    ``gae_variant``: the spec's ``advantage.gae_variant`` (= Miles ``--gae-variant``);
+    ``harness_compacts``: the run's agent can compact (the Codex OpenEnv agent).
+    """
+    if gae_variant == WHOLE_ROLLOUT_CONTROL_GAE_VARIANT and harness_compacts:
+        raise ValueError(
+            f"gae_variant {WHOLE_ROLLOUT_CONTROL_GAE_VARIANT} (CompactionRL control arm) is not "
+            "supported on the Codex harness: its compaction runs one session (one sample) per "
+            "segment on a rebuilt context, which cannot be concatenated into the single sample "
+            "this mode needs"
+        )
+    if gae_variant == COMPACTED_GAE_VARIANT:
+        if not harness_compacts:
+            raise ValueError(
+                f"gae_variant {COMPACTED_GAE_VARIANT} (CompactionRL) needs compacted rollouts; "
+                "only the Codex OpenEnv harness can compact"
+            )
+        if not switch_on:
+            raise ValueError(
+                f"gae_variant {COMPACTED_GAE_VARIANT} (CompactionRL) requires "
+                f"{COMPACTION_SWITCH_ENV}=1 on the rollout workers"
+            )
+    elif switch_on:
+        raise ValueError(
+            f"{COMPACTION_SWITCH_ENV} is on but gae_variant is {gae_variant!r}; rollout "
+            f"compaction is only valid with {COMPACTED_GAE_VARIANT} (CompactionRL)"
+        )
+    if t_comp is not None and str(t_comp).strip() != "":
+        if not switch_on:
+            raise ValueError(f"{COMPACTION_T_COMP_ENV} is set without {COMPACTION_SWITCH_ENV}")
+        check_t_comp(t_comp)

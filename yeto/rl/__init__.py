@@ -164,6 +164,9 @@ CODEX_OPENENV_AGENT_MODULES = (
     "codex_openenv_subprocess_agent_function.py",
     "codex_openenv_agent_worker.py",
     "codex_openenv_agent_function.py",
+    # CompactionRL bridge (opt-in, YETO_CODEX_COMPACTIONRL); imported by
+    # codex_openenv_agent_function.  Name list only: no per-module hash pin.
+    "compaction_bridge.py",
 )
 CODEX_OPENENV_IDENTITY_ENV = {
     "YETO_CODEX_OPENENV_BACKEND_PROFILE": "qwen35_08b",
