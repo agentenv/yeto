@@ -70,12 +70,16 @@ def critic_layout_hash(
     value_head: str,
     param_mode: str = "full",
     lora: Mapping[str, Any] | None = None,
+    value_bins: int = 1,
 ) -> str:
     """Identity of the critic layout.
 
     ``specs``: ``(name, shape, dtype)`` of every trainable critic parameter
     (the backbone copied from the actor plus the value head); ``value_head``
-    names the value-head parameter, whose shape must end in 1 output.
+    names the value-head parameter, whose shape is ``[value_bins, hidden]``:
+    1 output for a scalar (MSE) critic, ``value_num_bins`` for a classification
+    (HL-Gauss / two-hot) critic. The bins count is part of the identity;
+    ``value_bins=1`` keeps the historical payload (and hash) byte-for-byte.
     ``lora`` is the reserved D9 shape (rank / alpha / target modules) and is
     part of the identity once ``param_mode='lora'`` exists.
     """
@@ -88,9 +92,13 @@ def critic_layout_hash(
     names = [r[0] for r in rows]
     if not rows or len(set(names)) != len(names):
         raise ValueError("critic layout needs unique parameter names")
+    value_bins = int(value_bins)
+    if value_bins < 1:
+        raise ValueError(f"value_bins must be >= 1, got {value_bins}")
     head = {r[0]: r[1] for r in rows}.get(value_head)
-    if head is None or not head or head[0] != 1:
-        raise ValueError(f"value head {value_head!r} must be a [1, hidden] parameter of the layout")
+    if head is None or not head or head[0] != value_bins:
+        raise ValueError(
+            f"value head {value_head!r} must be a [{value_bins}, hidden] parameter of the layout")
     payload = {
         "schema": 1,
         "param_mode": param_mode,
@@ -98,6 +106,8 @@ def critic_layout_hash(
         "value_head": value_head,
         "specs": rows,
     }
+    if value_bins != 1:  # scalar heads keep the schema-1 payload unchanged
+        payload["value_bins"] = value_bins
     data = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(CRITIC_LAYOUT_DOMAIN + data).hexdigest()
 
