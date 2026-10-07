@@ -230,6 +230,7 @@ _UNMAPPED = [
     "--gae-critic-lambd",
     "--positive-example-lm-loss-coef",
     "--positive-example-reward-threshold",
+    "--critic-updates-per-step",  # pending fork flag (CompactionRL 9.3)
     "--ref-update-interval",
     "--disable-compute-advantages-and-returns",
     "--use-rollout-entropy",

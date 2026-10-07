@@ -1600,15 +1600,13 @@ def _reject_critic_not_at_pin(s: AlgorithmSpec) -> str | None:
         return None
     a, c = s.advantage, s.critic
     pending = []
-    # decoupled / length_adaptive run on the fork's --gae-variant / --gae-lambd-mode
-    # (yeto-gae-variant ce96fc060, change 6.2); cross_segment needs segment metadata
-    # from a CompactionRL rollout (group 9) first.
-    if a.gae_variant not in ("vanilla", "decoupled"):
-        pending.append(f"advantage.gae_variant={a.gae_variant!r}")
+    # decoupled / length_adaptive / cross_segment run on the fork's --gae-variant /
+    # --gae-lambd-mode (yeto-gae-variant ce96fc060, change 6.2). cross_segment and
+    # critic_updates_per_step != 1 (CompactionRL, change 9.3) are translated but stay
+    # undeclared mechanisms (features:gae_cross_segment / critic_multi_update) until
+    # GPU G1 (9.4); --critic-updates-per-step is a pending fork flag.
     if c.value_loss != "mse":
         pending.append(f"critic.value_loss={c.value_loss!r}")
-    if c.critic_updates_per_step != 1:
-        pending.append(f"critic.critic_updates_per_step={c.critic_updates_per_step}")
     if pending:
         return (
             f"{pending} need the fork's GAE / value-loss extension point "

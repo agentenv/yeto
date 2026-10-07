@@ -102,7 +102,7 @@ def test_decoupled_fills_the_critic_lambda_explicitly():
 
 @pytest.mark.parametrize("spec, message", [
     (lambda: _ppo(advantage={"critic_lambd": 0.9}), "critic_lambd"),
-    (lambda: _ppo(advantage={"gae_variant": "cross_segment"}), "cross_segment"),
+    (lambda: _ppo(critic={"value_loss": "hl_gauss"}), "hl_gauss"),
     (lambda: _ppo(loss={"positive_lm_coef": 0.1}), "positive_lm_reward_threshold"),
     (lambda: _ppo(loss={"positive_lm_reward_threshold": 0.0}), "only applies"),
     (lambda: AlgorithmSpec(advantage={"gae_variant": "decoupled"}), "only apply to critic"),

@@ -160,3 +160,46 @@ yeto（/home/michael/work/s13-vapo，分支 s13-vapo）：
 - 哈希不变：`evidence/hash_compare.py` 在 d398d443（`git archive` 到 /tmp/vapo-base）与本分支输出 `evidence/hash-vapo-base.txt` / `evidence/hash-vapo.txt` 17 行逐字节相同，且与第 2 组 `hash-critic.txt` 相同。
 
 **未验证（需 GPU 7.3）**：fork 正例 LM loss 在真实 Megatron/FSDP 训练中的 flags 传递（get_batch 键）、CP>1 下的归约；PPO 下 `rollout_data["rewards"]` 是否为原始标量奖励（未核实 reward 后处理对阈值语义的影响）；GAE 变体在真实 critic 下的数值；yeto pin 尚未指向包含 ce96fc060+cbf8c4737 的 fork 提交（loss_variants 的 FORK_COMMITS 式 pin 门控未为 VAPO 实现，目前仅靠未声明机制拦截）。
+
+## S13 9.x CompactionRL（2026-10-07，CPU；GPU 9.4/9.5 未执行）
+
+出处：CompactionRL, arXiv 2607.05378v1（https://arxiv.org/html/2607.05378v1，经 WebFetch 摘取，未逐字核对 PDF）。
+
+| 项 | 论文值 | 出处 | yeto |
+|---|---|---|---|
+| 触发 | `C−|h_t|<T_comp`，T_comp=10,240 | §4.1 式 (7) | `compaction.should_compact` |
+| C | GLM-4.7-Flash 64k、GLM-4.5-Air-SFT 80k | §5.1 | `CompactionConfig.context_budget`（运行配置） |
+| 摘要 | 同一策略 `S_t~π(·|h_t⊕q_sum)`；需保留原目标、已完成动作、重要观察、未解决错误、当前状态、下一步 | §4.1 式 (8) | 9 节模板为 **yeto 草稿**（论文未给出节名、`<analysis>` 文本、u_resume 文本） |
+| 重建 | `h̄_t=s⊕u_resume(S_t)⊕(z_{t−k+1..t})`，k=2，必要时减小；z=(a,o) 原子 | 式 (6)(9) | `rebuild_context`：k 减到重建后不再触发为止（yeto 对"必要时"的解读） |
+| 压缩上限 | 每条 3 次 | §5.1 | `max_compactions=3`；用尽后跑到上下文满即标 truncated（yeto 选择，论文未给出） |
+| 回报 | 终局回报给每个可训练段（段尾），无摘要质量奖励 | §4.2 | 每段 sample `reward` 相同 |
+| GAE | 段内局部 GAE ×(γλ)^{N_{>s}}，N_{>s}=后续段优化 token 数 | 式 (13)–(15) | `advantage.gae_variant=cross_segment` |
+| 归一化 | token 级（全部被优化 token） | 式 (12) | `loss.aggregation=token` |
+| α | 1.5（λ=1−1/(αl)） | §5.1 | `advantage.alpha=1.5` |
+| critic | lr 3e-6；每批 2 次 value 更新对 1 次策略更新；由策略 ckpt 初始化，50 步预训练 | §5.1 | `critic_lr/critic_updates_per_step/warmup_steps`，init=copy_actor_backbone |
+| 运行设置 | actor lr 2e-6（Adam）、global batch 128、group size 1、单次回复上限 10,240 | §5.1 | `PAPER_RUN_SETTINGS`（不入哈希） |
+
+论文未给出：γ（design D8 取 1.0）、KL（design 取 0，即 kl.placement=none）、clip ε 数值、value_clip、length-adaptive 的 l 按段还是按整条、训练时 turn 上限（评测 250）、batch 128 的单位。
+
+### 9.1 复用清单与缺口
+- Miles `examples/experimental/terminus-compaction`（fork worktree miles-gae）只有 `run.py`（启动参数）与 README，**不含压缩/摘要代码**：压缩由外部 Harbor `harbor-miles-v0.20.0` 的 Terminus 2（`HARBOR_TERMINUS_2_ENABLE_SUMMARIZE/LINEAR_HISTORY`）完成，Miles session server v2 按轨迹树每叶返回一个 Sample，后处理给兄弟样本相同终局回报与 rollout id、屏蔽共享前缀。
+- 可复用：(1) "每段一个 Sample + 共享 rollout id + 共享回报" 的数据形态与 session server v2 后处理思路；(2) README 的核查指标（`rollout/num_training_samples`、episode 级 reward/长度）；(3) `--use-session-server v2`、`agentic_tool_call.generate` 生成入口。
+- 不可复用/缺口：Terminus 的摘要提示、触发阈值、k、上限均不是论文配置，且该例是 GRPO（无 critic、无 segment GAE）；Harbor 不在本机。
+- yeto 接入点：Terminal-Bench 路径是 `yeto/rl/harness/codex/codex_openenv_generate.generate`（包 Miles `agentic_tool_call`）→ Codex CLI agent；回合循环在 Codex 内部，yeto 无法直接插入压缩。可选接入：(a) 在 session server / TITO 层按 `should_compact` 拦截并注入 q_sum、重建上下文；(b) 换成 yeto 自管回合循环的 agent（`yeto.rl.compaction.run_episode` 的 policy/env 接口）。**均未实现，需定方案**。
+- **关键缺口（fork）**：fork ce96fc060 的 cross_segment 把整条 rollout 当一个 sample、按 `metadata.segment_ids` 分段，奖励只在末段段尾。但压缩后各段的条件上下文不同（重建上下文），不能拼成一个 sample 做前向；论文也是每段独立优化、每段段尾都放终局回报。正确形态是每段一个 sample，GAE 用 Miles 原生"样本末 token 放 reward、末尾 bootstrap 0"的局部 GAE，再乘 `(γλ)^{tokens_after}`。数学上与 fork 单 sample 形态在 R 项上不同（fork 前段不含 R）。
+
+### 9.2 rollout（`yeto/rl/compaction.py`）
+- `CompactionConfig`（C、T_comp=10,240、k=2、上限 3）、`should_compact`、`SUMMARY_PROMPT`（`<analysis>`/`<summary>` 9 节）、`extract_summary`（丢弃 analysis；无 summary 标签时记 ok=False）、`rebuild_context`、`run_episode(policy, env, prompt, cfg)`。
+- 输出：`CompactionEpisode.samples()` 每段一个 sample，metadata `rollout_id/segment_index/num_segments/segment_tokens/tokens_after(N_{>s})/compactions/truncated`，reward 共享；摘要 token 计入所在段的可训练 token；`segment_ids()` 给出 fork 单 sample 形态的逐 token 段号。
+- 测试 `tests/test_rl_compaction.py` 10 passed（假模型/假环境：触发边界、无压缩、段编号与 N_{>s}、共享回报、重建=系统提示+u_resume(S)+最近 2 步且不含 analysis、k 自动减小、最多 3 次后 truncated、上限 0、缺 summary 标签、模板 9 节）。
+
+### 9.3 声明与翻译
+- `yeto/rl/algos/compactionrl.py::compactionrl_spec()`，sha256 `506b4ba4…c932`。argv：`--calculate-per-token-loss --gamma 1.0 --lambd 1.0 --value-clip 0.2 --critic-lr 3e-06 --critic-updates-per-step 2 --num-critic-only-steps 0 --gae-variant cross_segment --gae-lambd-mode length_adaptive --gae-length-alpha 1.5`；阶段 W `--num-critic-only-steps 50`。
+- `algorithm.py` `critic_not_at_pin` 放行 cross_segment 与 critic_updates_per_step≠1（hl_gauss 仍拒）；`critic.py` 加 cross_segment 翻译、`--critic-updates-per-step` 行（≠1 才发出，普通 PPO/VAPO argv 不变）、机制 `features:gae_cross_segment`、`features:critic_multi_update`（未声明，需 `--rl-allow-unverified-mechanism`）；`--critic-updates-per-step` 入 `FORK_FLAGS` 与 `_UNMAPPED`。
+- **`--critic-updates-per-step` 不存在于任何 fork 提交**：是向 fork 提的需求（并入 6.2 流程）；在 fork 实现前即使放行未声明机制，Miles 解析也会报错退出。
+- `tests/test_rl_vapo.py` 的拒绝用例 cross_segment 改为 hl_gauss（cross_segment 不再被拒）。
+- 测试 `tests/test_rl_compactionrl.py` 7 passed（参数、翻译快照、dry-run 拒绝/放行快照与吸收哈希相等、阶段 W、哈希区分、消融臂只少 cross_segment、普通 PPO/VAPO 不变）。定向批次 16 文件 526 passed/6 skipped（含未改动的 `test_rl_argv_snapshot.py`），另 critic_ports/seq_adv_miles 12 passed/1 skipped；log /tmp/s13-compact-pytest.log。未跑会启动 Ray 的测试。
+- 哈希不变：`evidence/hash-compactionrl-base.txt`（HEAD 5f940576 git archive）与 `hash-compactionrl.txt` 17 行逐字节相同，且与 `hash-vapo.txt` 相同。
+
+**fork 需求**：(1) `--critic-updates-per-step N`（每批 N 次 critic 更新、1 次 actor 更新）；(2) cross_segment 的每段一 sample 形态：读 `sample.metadata["tokens_after"]`，局部 GAE 后乘 `(γλ)^{tokens_after}`（λ 用该样本 length_adaptive λ 还是整条的，待定）；(3) `train_data_conversion` 透传 `tokens_after`。
+**未验证**：真实 tokenizer 下的触发与重建；与 Codex/TB 路径的接入；fork 侧上述需求；GPU 9.4/9.5。
