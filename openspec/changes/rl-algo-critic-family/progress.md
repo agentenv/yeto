@@ -485,3 +485,50 @@ critic/sao/overlay/adapter/algorithm 相关 30 个文件：基线 7 failed/521 p
 
 SAO 重跑：需用新 overlay（sha256 64f69bbf…）+ `--lora-targets attention` + 让 critic warmup < decay
 （如 rounds 足够或降低 critic_lr_warmup）。GPU 上 critic 值头位置正确性尚未验证。
+
+## S13 fork G1 结果（2026-10-07，Modal 1×H100!，单岛 no-sync；未 push；tasks.md 未改勾选，是否声明机制由主 agent 决定）
+
+- worktree：`/home/michael/work/s13-forkg1`，分支 `s13-forkg1`。
+- 脚本：`evidence-forkg1/s13-forkg1-modal.sh`；判定：`s13-forkg1-judge.py`；复核：`infra-drafts/CRITIC-FORK-G1-PRELAUNCH-REVIEW.md`；原始数据：`/home/michael/work/s1-runs/<run-id>/`（launch.log、tape-direct、judgment.json）。
+- 公共配置：镜像 37ac689e（Miles c35702e）+ critic overlay；Qwen3-0.6B@c1899de2，LoRA r16；gsm8k@0cbd9f31；4×8 样本；seed 17。
+- 所有 run 的容器都报告 `NVIDIA H100 80GB HBM3`。
+- 成功的 run 返回 rc=2，这是 launcher 对 Modal no-sync 的设计行为（不拉取 ~/yeto-output），learner 状态为 SUCCEEDED。
+
+### overlay 实测
+- 补丁 7cbc0a42 在真实镜像上通过了全部检查：REFUSING 四项均未触发，sha256sum --check OK，git apply 成功（只有一条 "new blank line at EOF" 警告），并打印了 applied 行。
+- **缺陷（已修，f1da1454）**：learner 的 `verify_miles_revision` 要求 ~/miles 干净，overlay 之后必然 dirty，导致 a 轮三个 run 全部退出（"Miles checkout is not clean"）。
+- 修复后只在以下条件全部满足时接受 dirty 的 ~/miles：存在 overlay 记录、patch sha 相同、base 为 c35702e，且整个 worktree（含未跟踪文件）的 tree 等于 fork 结果 tree。已有单测；在本地 c35702e clone 上做过正例和反例验证。
+- 该修复已随 e378d124 合入 integ-decl。
+
+### 结果
+| 条目 | run-id | 判定 | 关键指标（逐轮） |
+|---|---|---|---|
+| 6.4 length_adaptive（规格 d97f64a9；Miles argv：gae_lambd_mode=length_adaptive，α=1.5） | s13-forkg1-gae-la-20261007b | **PASS**（2 轮，全部有限） | value_loss 15.665/12.962；pg_loss −2.658/−2.196；grad_norm 2.179/2.078；EV −31.70/−48.86 |
+| 6.4 cross_segment_per_sample，人造两段（规格 29e0b8db；argv gae_variant=cross_segment_per_sample，num_critic_epochs 2） | s13-forkg1-gae-cs-20261007b | **PASS**（2 轮，全部有限） | value_loss 15.181/12.439；pg_loss −2.281/−1.879；grad_norm 1.737/1.675；EV −0.243/−0.334 |
+| 7.3 G1 VAPO 部分验证（warmup_steps=0，规格 7a7688a1） | s13-forkg1-vapo-w0-20261007c | **PASS（部分）** | value_loss 21.35/17.62/12.77；pg_loss −0.176/−0.193/−0.155；grad_norm 1.544/1.417/1.192；positive_lm_loss 0.262/0.281/0.455；EV 未产出（None） |
+| 7.3 G1 VAPO 完整版（规格 5e9b38ed，W 50 步 + 3 轮，代码 e378d124） | s13-forkg1-vapo-20261007e | **PASS** | W 产物 critic 6dc8cd4b…，actor 9cfcabeb…；3 轮 receipt 的 critic_init_sha256 都等于产物哈希；value_loss 0.320/0.433/0.545；pg_loss −0.010/0.021/0.028；grad_norm 0.256/0.242/0.222；positive_lm_loss 0.262/0.258/0.469；EV −6.83/−0.68/−1.59 |
+| 8.4 G1 SAO（Qwen3.5-0.8B） | b/c/d | **INCOMPLETE**（阻断，未训练任何一轮） | 见下 |
+
+- gae-cs 的段是人造的：新增测试用奖励 `yeto.rl.synthetic_segments:score`，gsm8k 分数与 success 不变，偶数 index 设 tokens_after=64，奇数设 0。
+  - launcher 只在 cross_segment_per_sample 且没有 custom agent 时接受它。
+  - fork 在缺少 tokens_after 时会抛 ValueError，2 轮训练通过说明元数据确实到达了 GAE。
+  - 这个结果不代表真实压缩场景。
+- VAPO 的 argv 已核对：gae_variant=decoupled、gae_lambd_mode=length_adaptive、α=0.05、gae_critic_lambd=1.0、eps_clip 0.2/0.28、positive_example_lm_loss_coef 0.1、source=success。奖励函数为 `yeto.rl.gsm8k_reward:score`。
+- VAPO 与论文的偏离：8 样本/prompt（论文 16），LoRA actor。
+- EV 只记录、不设阈值。完整版中 W 后首轮 EV 为 −6.83；gae-la 用随机 value head，首轮 EV 为 −31.70，但两者的任务和规格都不同，不能直接对比。
+
+### SAO 阻断经过（8.4）
+1. b（07:51）：all-linear LoRA 被拒。Qwen3.5 的 q/k/v 带 attention_output_gate，CanonicalLoRA 无法表示；ports 也不支持 full。之后改为 `--lora-targets attention`，对 gated 模型等价于 o_proj + GDN out_proj。
+2. c（08:05）：SAO 的 critic_lr_warmup=10 大于 3 轮对应的 decay 3，Megatron OptimizerParamScheduler 断言失败。
+3. d（08:13，12 轮）：critic 从 HF 加载 tied-embedding 的 Qwen3.5 时报 `missing mapped parameter language_model.output_layer.weight -> lm_head.weight`。
+- 主 agent 已在 b996392b 修复：fork 6574a9c82，overlay 64f69bbf，并加了 warmup<decay 预检。
+- 重跑计划：规格 e0716499 不变，12 轮，`--lora-targets attention`；本地预检确认 3 轮和 6 轮会被拒、12 轮通过。按指示**等待 FN 8×H200 冒烟结束后再启动**。
+
+### 其他发现
+- `--modal-retries 0` 不能阻止 Modal 换容器。vapo-w0-b 首个容器的日志停在 07:56:20 的 actor wake_up，约 08:01:47 起了新容器（container list 与 exec 均可确认），但本地 launcher 看不到新容器的日志，也没有任何报错。该 run 已手动 stop 并判为不可用。建议 launcher 检测 container id 变化后 fail-closed。
+- 费用：本组 run 合计约 **$8.5**，按 Modal app 时间 × $4.39/h 估算，未查账单，明细见 gpu-spend.md。
+
+### 未验证
+- SAO 的全部 GPU 行为。
+- 8.4 与旧路径的 EV 对比（旧路径 +0.1365）。
+- G3（两岛）部分按指示未跑。
