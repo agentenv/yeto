@@ -70,6 +70,7 @@ def test_compaction_segments_numbering_and_shared_reward():
     assert {s["reward"] for s in samples} == {0.5}
     n = [s["metadata"]["segment_tokens"] for s in samples]
     assert [s["metadata"]["tokens_after"] for s in samples] == [sum(n[i + 1:]) for i in range(len(n))]
+    assert {s["metadata"]["gae_length"] for s in samples} == {sum(n)}  # one lambda per rollout
     ids = ep.segment_ids()
     assert ids == sorted(ids) and [ids.count(i) for i in range(len(n))] == n
     # the summary is trainable and closes every segment but the last

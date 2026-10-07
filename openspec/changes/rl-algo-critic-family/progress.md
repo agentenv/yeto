@@ -266,3 +266,35 @@ yeto（/home/michael/work/s13-vapo，分支 s13-vapo）：
 - `critic.py`（改动很小）：注释更新；`--num-critic-epochs` 行映射到 `critic.critic_updates_per_step`（critic_argv 仍只发 `--critic-updates-per-step`，≠1 时）；FORK_FLAGS 加 `--num-critic-epochs`；`algorithm_flags._UNMAPPED` 同步。
 - 测试：新 `tests/test_rl_critic_fork_pin.py` 14 passed（VAPO/CompactionRL/SAO 两档无 pin 拒绝；SAO dry-run 无放行时因未声明机制拒绝、放行后 accepted 且哈希与声明相同、无剩余 argv；非 fork pin 仍拒；非 SAO hl_gauss 仍拒；别名同哈希、冲突值拒绝；越界 value flag 与裸 `--value-reward-range` 拒绝）；`test_rl_sao_spec.py::test_rejections` 改为期望无拒绝。定向 32 文件（含未改动的 `test_rl_argv_snapshot.py`）796 passed/9 skipped，log /tmp/s13-fork-pytest.log。`hash_compare.py` 输出与 `evidence/hash-critic.txt` 17 行相同。
 - 已知遗留：SAO argv 中 GAE flag 由 critic_argv 与 sao_fork_argv 各发一次（值相同，既有行为，未改）；SAO 的 `critic_freeze_attention` 仍不在 spec/argv 中（fork 已支持，待决定是否进 spec）；cross_segment 每段一 sample 未做（等用户决定）。
+
+## S13 cross_segment 每段 sample（2026-10-07，CPU；未上 GPU、未启动 Ray、未 push）
+
+用户决定：CompactionRL 的 cross_segment GAE 按论文"每段单独优化"实现（每段独立 sample，各段段尾放终局回报，局部 GAE ×(γλ)^{N_{>s}}），目的是把奖励传到正确的压缩 action。
+
+### 论文核对（arXiv 2607.05378v1 HTML，WebFetch 摘录，未对 PDF 逐字核对）
+- §4.2 式 (13)：`A^loc_{s,i}=∑_{ℓ=0}^{n_s−i}(γλ)^ℓ δ_{s,i+ℓ}`，"For a segment σ_s with n_s optimized tokens"。
+- N_{>s}："Let N_{>s}=∑_{j>s} n_j be the number of optimized tokens generated after segment σ_s in the same rollout."（只计被优化 token）
+- 式 (14)：`Â_{s,i}=(γλ)^{N_{>s}} A^loc_{s,i}`（"trajectory-position correction"）——确认乘 (γλ)。
+- 式 (15)：终局回报在"each independently optimized segment"末 token 时，奖励项折扣为 `(γλ)^{N_{>s}+n_s−i}`，与拼接轨迹中到终局的距离一致；§4.1 "We assign this rollout-level reward to all trainable segments"；"Since each segment is optimized independently"。
+- 段尾 bootstrap：论文只在 §3 式 (3) 给出终态 `V(x_{T+1})=0`，式 (13) 的求和止于段尾，**未明说**段边界 V 取 0 还是下一段的值。实现取 0（与"每段独立 sample"一致）——**待确认**。
+- λ：§5.1 "λ=1−1/(αl) and α=1.5, where l denotes the response length"——**未说明** l 按段还是整条。
+- critic 目标用校正后还是局部优势：论文只说 "standard PPO value regression loss"——**未说明**。γ、per-token r_{s,i} 也未给出。
+
+### fork（/home/michael/work/miles-critic，分支 yeto-critic-family，`ffe769c1e`，基于 e07e51c07，本地未 push）
+- 方案：新增 `--gae-variant cross_segment_per_sample`（新取值而非改写 `cross_segment`，旧取值语义逐元素不变、可审计）。每个 sample 普通局部 GAE（终局回报在本 sample 末个可训练 token、其后 bootstrap 0，掩码 token 不是转移），优势 ×`(γλ_i)^{tokens_after_i}`；returns = **局部**优势 + V（未校正）；length_adaptive 时 l = `metadata.gae_length`（若有）否则本 sample 响应长度。缺 tokens_after 或负值报错。
+- 改动：math_utils.py（`get_advantages_and_returns_batch` 新 kwargs `tokens_after_list/gae_length_list`）、advantages.py（仅该取值时传）、loss.py（传 `rollout_data["tokens_after"/"gae_length"]`）、train_data_conversion.py（metadata→train data，int64 ndarray ValueSpec，入分片；gae_length 缺省填本 sample response_length）、arguments.py（choices/help，标注旧 cross_segment 已废弃）。
+- 测试（miles-next-venv，OMP/OPENBLAS/MKL=1）：`test_ppo_gae_variants.py` 新 10 例（对拍拷贝的独立参考 `gae_cross_segment_per_sample`，掩码/固定与自适应 λ/有无 gae_length；把一条 rollout 切成段 sample 后 V=0 时优势 = R·(γλ)^{T−1−t}（式 15）；tokens_after=0 等于 vanilla；缺失/负值报错；kwargs 只在该取值时转发），`test_segment_ids_conversion.py` 新 2 例。合计 37 passed。定向集（loss/、sao_ports、gae_variants、gae_masks、cp_advantages、critic_updates_per_step）：新 13 failed/130 passed；基线 e07e51c07（git archive /tmp/perseg-base）13 failed/119 passed，失败集合 diff 为空。log /tmp/s13-perseg-fork.log、/tmp/s13-perseg-base.log。
+
+### 旧模式关系
+- 旧 `cross_segment`（整条 rollout 一个 sample + segment_ids）：前段不含终局回报，只靠末段的 δ 经 ×(γλ)^{N_{>s}} 不会把 R 传到前段（前段局部 GAE 里没有 R）；与论文式 (15) 不符。fork 保留不动（不影响缺省），**建议废弃**；yeto 吸收 `--gae-variant cross_segment` 时拒绝，`CompactionEpisode.segment_ids()` 降为诊断用途。且压缩后各段条件上下文不同，本也无法拼成一个 sample 前向。
+
+### yeto（/home/michael/work/s13-perseg，分支 s13-perseg，基于 cd760f3d）
+- 规格值 `advantage.gae_variant=cross_segment` 不变（哈希 506b4ba4… 不变），`critic.gae_variant_argv` 翻译为 `--gae-variant cross_segment_per_sample`；`--gae-variant` 吸收：`cross_segment_per_sample`→`cross_segment`，`cross_segment` 拒绝（提示改用新值）。
+- `compaction.py`：每段 metadata 加 `gae_length = 整条 rollout 被优化 token 数`（同一 rollout 各段共用 λ，保持式 15；yeto 选择，待确认）。
+- pin：`critic_fork.py` `CRITIC_FORK_PIN/FORK_COMMITS` → `ffe769c1eb8ad65e42954ebb31285120bc2d9040`。
+- 参考与测试：`tests/rl_gae_reference.py` 加 `gae_cross_segment_per_sample`、`split_rollout_into_segment_samples`；`test_rl_gae_reference.py` +3（手算、式 15 距离且旧模式前段为 0、tokens_after=0 等于 vanilla）；`test_rl_compactionrl.py` 快照改新值 + 旧值拒绝用例；`test_rl_compaction.py` 检查 gae_length；`test_rl_critic_fork_pin.py` PIN 更新。
+- 结果：定向 26 文件 600 passed/5 skipped/7 failed，7 个失败全在 `test_rl_miles_sao_streaming.py`，在未改动的 /home/michael/work/integ-decl（同 HEAD cd760f3d）同样 7 failed，非新增（注：git archive 到 /tmp 时该文件通过，疑与工作目录/环境相关，未深究）。`test_rl_argv_snapshot.py` 未改且通过。`hash_compare.py` 输出与 `evidence/hash-critic.txt` 17 行相同。log /tmp/s13-perseg-pytest.log。
+
+### 未验证 / 待确认
+- 未验证：真实 Miles 训练路径（loss.py 需 megatron，仅 CPU 函数级测试）、Ray 序列化下新键传输（只测了 split_train_data_by_dp_raw）、GPU 9.4/9.5。
+- 待用户确认：(1) 段尾 bootstrap 取 0；(2) l 取整条 rollout 被优化 token 数（备选：段长）；(3) critic 目标用局部优势（备选：校正后优势，会使前段目标趋近 V）；(4) 旧 fork `cross_segment` 是否从 fork 删除。

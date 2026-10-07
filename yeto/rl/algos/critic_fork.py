@@ -11,7 +11,10 @@ image) merges the critic-family fork branches onto yeto/ports 039471508:
 * yeto-sao 6b5bd88c -- ``--policy-objective sao_dis``, ``--sao-dis-eps-*``,
   ``--value-loss-type classification`` (HL-Gauss / two-hot value bins);
 * e07e51c07 -- ``--num-critic-epochs`` (alias ``--critic-updates-per-step``) and
-  ``--critic-freeze-attention`` (SAO agentenv/miles 16a9bea4 semantics).
+  ``--critic-freeze-attention`` (SAO agentenv/miles 16a9bea4 semantics);
+* ffe769c1e -- ``--gae-variant cross_segment_per_sample`` (CompactionRL, one
+  sample per compaction segment; reads ``metadata.tokens_after`` /
+  ``gae_length``).
 
 The spec-level ``*_not_at_pin`` rejections check :data:`CRITIC_FORK_PIN`
 against :data:`FORK_COMMITS` (the loss_variants precedent). This is a
@@ -24,10 +27,10 @@ from __future__ import annotations
 
 # Full SHAs of fork commits carrying every critic-family flag above.
 FORK_COMMITS: frozenset[str] = frozenset({
-    "e07e51c07f5e38a32dfb31d98eebd3d6e6daa4b8",  # yeto-critic-family (local)
+    "ffe769c1eb8ad65e42954ebb31285120bc2d9040",  # yeto-critic-family (local)
 })
 
-CRITIC_FORK_PIN = "e07e51c07f5e38a32dfb31d98eebd3d6e6daa4b8"
+CRITIC_FORK_PIN = "ffe769c1eb8ad65e42954ebb31285120bc2d9040"
 
 
 def fork_carries_critic_family(commit: str | None = None) -> bool:

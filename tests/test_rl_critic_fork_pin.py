@@ -12,7 +12,7 @@ from yeto.rl.engine.miles_adapter import algorithm_flags as af
 
 load_extensions()
 
-PIN = "e07e51c07f5e38a32dfb31d98eebd3d6e6daa4b8"
+PIN = "ffe769c1eb8ad65e42954ebb31285120bc2d9040"
 SAO_UNDECLARED = ("advantage_estimators:ppo", "execution:critic", "features:critic_multi_update",
                   "features:gae_decoupled", "features:gae_length_adaptive", "features:sao_dis",
                   "features:value_hl_gauss")

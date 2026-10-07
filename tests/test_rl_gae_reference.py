@@ -5,6 +5,8 @@ import torch
 
 from tests.rl_gae_reference import (
     gae_cross_segment,
+    gae_cross_segment_per_sample,
+    split_rollout_into_segment_samples,
     gae_decoupled,
     gae_length_adaptive,
     gae_vanilla,
@@ -97,3 +99,37 @@ def test_cross_segment_three_segments_factor():
     # segment 1 last token local = -1, N_{>1} = 3
     assert adv[2].item() == pytest.approx(-1 * 0.5**3)
     assert math.isfinite(adv.sum().item())
+
+
+def test_per_sample_hand_computed():
+    # one segment sample n_s=2, R at its end, N_{>s}=3
+    r, v = _t([0.0, 1.0]), _t([0.1, 0.2])
+    g, l = 0.9, 0.8
+    w = g * l
+    d1 = 1.0 - 0.2
+    d0 = g * 0.2 - 0.1
+    adv, ret = gae_cross_segment_per_sample(r, v, 3, g, l)
+    assert torch.allclose(adv, _t([(d0 + w * d1) * w**3, d1 * w**3]))
+    assert torch.allclose(ret, _t([d0 + w * d1 + 0.1, d1 + 0.2]))  # local target
+
+
+def test_per_sample_eq15_reward_discount_matches_concatenated_distance():
+    # V = 0, only the shared reward R: reward term in segment s, token i is
+    # R * (gamma*lambda)^{N_{>s} + n_s - 1 - i}  (eq. 15, 0-indexed i)
+    g, l, R = 1.0, 0.7, 2.0
+    seg = [0, 0, 0, 1, 1, 2, 2, 2, 2]
+    T = len(seg)
+    samples = split_rollout_into_segment_samples(torch.zeros(T, dtype=D), torch.zeros(T, dtype=D), seg, R)
+    flat = torch.cat([gae_cross_segment_per_sample(r, v, n, g, l)[0] for r, v, n in samples])
+    exp = _t([R * (g * l) ** (T - 1 - t) for t in range(T)])
+    assert torch.allclose(flat, exp)
+    # legacy layout drops R from every non-final segment
+    legacy, _ = gae_cross_segment(torch.tensor([0.0] * (T - 1) + [R], dtype=D), torch.zeros(T, dtype=D), seg, g, l)
+    assert torch.all(legacy[:5] == 0) and torch.allclose(legacy[5:], exp[5:])
+
+
+def test_per_sample_zero_after_equals_vanilla():
+    r, v = _t([0.1, 0.0, -0.3, 1.0]), _t([0.5, 0.4, 0.3, 0.2])
+    a, ret = gae_cross_segment_per_sample(r, v, 0, 0.95, 0.9)
+    av, rv = gae_vanilla(r, v, 0.95, 0.9)
+    assert torch.allclose(a, av) and torch.allclose(ret, rv)

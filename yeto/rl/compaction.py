@@ -188,6 +188,9 @@ class CompactionEpisode:
                     "num_segments": len(self.segments),
                     "segment_tokens": n[s],
                     "tokens_after": sum(n[s + 1:]),
+                    # l for length-adaptive lambda: the whole rollout's optimised
+                    # length, so every segment shares one lambda (keeps eq. 15).
+                    "gae_length": sum(n),
                     "compactions": self.compactions,
                     "truncated": self.truncated,
                 },
@@ -197,9 +200,10 @@ class CompactionEpisode:
     def segment_ids(self) -> list[int]:
         """Per optimised token segment ids over the concatenated rollout.
 
-        The layout fork ce96fc060 reads from ``sample.metadata['segment_ids']``
-        (one sample per rollout); see progress.md "S13 9.x" for why per-segment
-        samples are needed instead.
+        Diagnostic only. This is the legacy fork ``--gae-variant cross_segment``
+        layout (one sample per rollout), which yeto refuses; training uses
+        :meth:`samples` with ``--gae-variant cross_segment_per_sample``
+        (progress.md "S13 cross_segment 每段 sample").
         """
 
         return [s for s, seg in enumerate(self.segments) for _ in range(seg.trainable_tokens)]

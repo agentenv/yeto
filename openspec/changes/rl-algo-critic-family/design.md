@@ -71,6 +71,8 @@ Miles arguments.py:3212 的约束只在 `--rematerialize-param-from-master-weigh
 - `decoupled`：critic 目标与 actor 优势用不同 λ（VAPO）。
 - `cross_segment`：段内局部 GAE `A^loc_{s,i}=∑_{ℓ=0}^{n_s−i}(γλ)^ℓ δ_{s,i+ℓ}`，再乘 `(γλ)^{N_{>s}}`，`N_{>s}=∑_{j>s} n_j`；终局回报放在最后一段段尾，不跨压缩边界自举（CompactionRL）。
 - 段边界作为样本元数据（每 token 的 segment id）随 batch 传入；无边界时退化为 vanilla。缺省参数下逐元素等于原实现。
+- **用户决定（2026-10-07）：cross_segment 按论文"每段单独优化"实现**，目的是把奖励传到正确的压缩 action。每段是独立 sample，各段段尾都放共享终局回报，段尾 bootstrap 0，局部 GAE（式 13）再乘 `(γλ)^{N_{>s}}`（式 14），使奖励项折扣等于其在拼接轨迹中到终局的距离（式 15）。fork 新取值 `--gae-variant cross_segment_per_sample`（yeto-critic-family ffe769c1e）：按 sample 读 `metadata.tokens_after`（=N_{>s}），可选 `metadata.gae_length` 作为 length-adaptive 的 l；critic 目标取局部优势+V（论文未写，待确认）。yeto 规格值仍为 `advantage.gae_variant=cross_segment`（规格哈希不变），翻译为 `cross_segment_per_sample`；yeto 的 compaction rollout 令 `gae_length=整条 rollout 被优化 token 数`，同一 rollout 各段共用一个 λ（论文"l 为响应长度"未说明按段还是整条，此为 yeto 选择，待确认）。
+- fork 旧取值 `cross_segment`（整条 rollout 一个 sample + 每 token segment_ids，前段不含终局回报）与论文不符：fork 中保留不动（缺省与旧语义逐元素不变），yeto 吸收 `--gae-variant cross_segment` 时拒绝。
 - 先用 yeto 仓库内独立 torch 参考实现（不 import 被测代码）对拍，仿照 rl-algo-loss-variants D3。
 
 ### D7 VAPO 与 SAO
@@ -81,7 +83,7 @@ Miles arguments.py:3212 的约束只在 `--rematerialize-param-from-master-weigh
 
 ### D8 CompactionRL（决策 5）
 - rollout 侧（yeto/agent 路径）：剩余上下文 `C−|h_t| < T_comp`（10,240）时触发；同一策略按 `<analysis>/<summary>` 9 节模板生成摘要；重建 `h̄_t = s ⊕ u_resume(S_t) ⊕ 最近 k=2 步`；每条最多 3 次压缩；摘要段与任务共享回报；每段输出 segment 元数据。尽量复用 Miles `examples/experimental/terminus-compaction` 的 rollout 代码。
-- 训练侧：PPO clip、token 级归一化（批内全部被优化 assistant token 平均）、KL=0、每提示 1 条 rollout、critic lr 3e-6、每批 2 次 critic 更新对 1 次策略更新（`critic_updates_per_step=2`）、50 步 warm-up（D5）、cross_segment GAE + length_adaptive λ（D6）。
+- 训练侧：PPO clip、token 级归一化（批内全部被优化 assistant token 平均）、KL=0、每提示 1 条 rollout、critic lr 3e-6、每批 2 次 critic 更新对 1 次策略更新（`critic_updates_per_step=2`）、50 步 warm-up（D5）、cross_segment GAE + length_adaptive λ（D6）。按用户决定（2026-10-07）走每段一 sample 形态：`yeto/rl/compaction.py::CompactionEpisode.samples()` 每段一个 sample（共享 reward、metadata `tokens_after`/`gae_length`），fork `--gae-variant cross_segment_per_sample` 训练；旧单 sample + segment_ids 形态拒绝（见 D6）。
 - 消融验收：关掉 cross_segment（退回 vanilla）作为对照臂，只在用户另批预算时跑。
 
 ### D9 critic LoRA 开发计划（决策 2，首轮不实现）

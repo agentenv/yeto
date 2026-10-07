@@ -21,7 +21,18 @@ Variants
                     is 0 (no bootstrapping across a compaction boundary) and the
                     terminal reward sits at the end of the last segment; then
                     A_{s,i} = (gamma*lambda)^{N_{>s}} * A^loc_{s,i},  N_{>s} = sum_{j>s} n_j.
-                    Returns R = A + V.
+                    Returns R = A + V.  LEGACY one-sample-per-rollout layout (fork
+                    ``--gae-variant cross_segment``): earlier segments see no terminal
+                    reward, which does not match the paper (each segment is optimised
+                    individually with the shared reward at its own end).
+- cross_segment_per_sample (CompactionRL, arXiv 2607.05378 sec. 4.2 eq. 13-15, user
+                    decision 2026-10-07): every segment is its own sample whose last
+                    token carries the shared terminal reward R; local GAE with
+                    bootstrap 0 after the segment (eq. 13), then
+                    A = (gamma*lambda)^{N_{>s}} * A^loc (eq. 14).  Critic target
+                    R_t = A^loc_t + V_t (local, uncorrected; paper unspecified).
+                    lambda: if length-adaptive, l = whole rollout's optimised length
+                    (yeto choice so all segments share one lambda, keeping eq. 15).
 """
 
 from __future__ import annotations
@@ -69,3 +80,23 @@ def gae_cross_segment(rewards, values, segment_ids, gamma: float, lambd: float):
         n_after = sum(seg.count(o) for o in order[si + 1 :])
         adv[pos] = local * (gamma * lambd) ** n_after
     return adv, adv + values
+
+
+def gae_cross_segment_per_sample(rewards, values, tokens_after: int, gamma: float, lambd: float):
+    """One segment sample: rewards already contain R at the last token."""
+    local, _ = gae_vanilla(rewards, values, gamma, lambd)
+    return local * (gamma * lambd) ** int(tokens_after), local + values
+
+
+def split_rollout_into_segment_samples(rewards, values, segment_ids, terminal_reward: float):
+    """Paper layout from a concatenated rollout: one (r, v, tokens_after) per segment, R at every segment end."""
+    seg = [int(s) for s in segment_ids]
+    order = list(dict.fromkeys(seg))
+    out = []
+    for si, s in enumerate(order):
+        pos = [t for t, x in enumerate(seg) if x == s]
+        r = rewards[pos].clone()
+        r[-1] += terminal_reward
+        n_after = sum(seg.count(o) for o in order[si + 1 :])
+        out.append((r, values[pos].clone(), n_after))
+    return out

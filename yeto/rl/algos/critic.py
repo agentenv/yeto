@@ -103,7 +103,10 @@ def gae_variant_argv(spec: AlgorithmSpec) -> list[str]:
     if a.gae_variant == "decoupled":
         argv += ["--gae-variant", "decoupled", "--gae-critic-lambd", _num(a.critic_lambd)]
     elif a.gae_variant == "cross_segment":
-        argv += ["--gae-variant", "cross_segment"]
+        # CompactionRL per the paper (user decision 2026-10-07): one sample per
+        # compaction segment, local GAE x (gamma*lambda)^{tokens_after}. The fork's
+        # legacy ``cross_segment`` (one sample per rollout + segment_ids) is not used.
+        argv += ["--gae-variant", "cross_segment_per_sample"]
     if a.lambd_mode == "length_adaptive":
         argv += ["--gae-lambd-mode", "length_adaptive", "--gae-length-alpha", _num(a.alpha)]
     return argv
@@ -137,7 +140,26 @@ register_flag(FlagMapping("--num-critic-only-steps", "critic.warmup_steps", Fals
 register_flag(FlagMapping("--critic-load", "critic.load", False, _str,
                           lambda v: [("critic.init", "load"), ("critic.load", v)], _none))
 
-register_flag(FlagMapping("--gae-variant", "advantage.gae_variant", False, _str,
+# Fork value -> spec value. The fork's legacy ``cross_segment`` (one sample per
+# rollout, earlier segments see no terminal reward) does not match CompactionRL
+# (arXiv 2607.05378 sec. 4.2) and is refused; spec ``cross_segment`` translates
+# to ``cross_segment_per_sample`` (fork ffe769c1e).
+_GAE_VARIANT_FROM_FORK = {"cross_segment_per_sample": "cross_segment", "cross_segment": None}
+
+
+def _parse_gae_variant(raw: str) -> str:
+    if raw in _GAE_VARIANT_FROM_FORK:
+        mapped = _GAE_VARIANT_FROM_FORK[raw]
+        if mapped is None:
+            raise _af.AlgorithmSpecError(
+                "--gae-variant cross_segment (legacy one-sample-per-rollout layout) is refused: "
+                "CompactionRL optimises each segment as its own sample; use "
+                "--gae-variant cross_segment_per_sample (spec advantage.gae_variant=cross_segment)")
+        return mapped
+    return raw
+
+
+register_flag(FlagMapping("--gae-variant", "advantage.gae_variant", False, _parse_gae_variant,
                           lambda v: [("advantage.gae_variant", v)], _none))
 register_flag(FlagMapping("--gae-lambd-mode", "advantage.lambd_mode", False, _str,
                           lambda v: [("advantage.lambd_mode", v)], _none))

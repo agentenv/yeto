@@ -19,12 +19,12 @@ CRL_ARGV = [
     "--calculate-per-token-loss",
     "--gamma", "1.0", "--lambd", "1.0", "--value-clip", "0.2", "--critic-lr", "3e-06",
     "--critic-updates-per-step", "2", "--num-critic-only-steps", "0",
-    "--gae-variant", "cross_segment",
+    "--gae-variant", "cross_segment_per_sample",
     "--gae-lambd-mode", "length_adaptive", "--gae-length-alpha", "1.5",
 ]
 CRL_SHA = "506b4ba45c0d2bcbee74513b321afe967a3b1f0bef4a2ca68a0233772492c932"
 CRL_EXTRA = (
-    "--advantage-estimator ppo --gae-variant cross_segment --gae-lambd-mode length_adaptive "
+    "--advantage-estimator ppo --gae-variant cross_segment_per_sample --gae-lambd-mode length_adaptive "
     "--gae-length-alpha 1.5 --calculate-per-token-loss --critic-lr 3e-6 "
     "--critic-updates-per-step 2 --num-critic-only-steps 50"
 )
@@ -85,7 +85,7 @@ def test_hash_distinguishes_the_components():
 
 def test_ablation_arm_without_cross_segment_drops_only_that_flag():
     argv = af.algorithm_argv(compactionrl_spec(advantage={"gae_variant": "vanilla"}))
-    assert argv == [t for t in CRL_ARGV if t not in ("--gae-variant", "cross_segment")]
+    assert argv == [t for t in CRL_ARGV if t not in ("--gae-variant", "cross_segment_per_sample")]
 
 
 def test_single_update_and_plain_ppo_argv_unchanged():
@@ -94,3 +94,13 @@ def test_single_update_and_plain_ppo_argv_unchanged():
         "--gamma", "1.0", "--lambd", "1.0", "--value-clip", "0.2", "--num-critic-only-steps", "0"]
     assert "--critic-updates-per-step" not in af.algorithm_argv(vapo_spec())
     assert "--critic-updates-per-step" in critic.FORK_FLAGS
+
+
+def test_legacy_fork_cross_segment_is_refused():
+    # fork --gae-variant cross_segment = one sample per rollout + segment_ids
+    # (earlier segments get no terminal reward): not CompactionRL, refused.
+    flags = [x for name in UNDECLARED for x in ("--rl-allow-unverified-mechanism", name)]
+    legacy = CRL_EXTRA.replace("cross_segment_per_sample", "cross_segment")
+    result = af.dry_run(["--dry-run", "--extra", legacy, *flags])
+    assert result["verdict"] == "rejected"
+    assert "cross_segment_per_sample" in result["error"]
