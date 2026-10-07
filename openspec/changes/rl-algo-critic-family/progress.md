@@ -532,3 +532,11 @@ SAO 重跑：需用新 overlay（sha256 64f69bbf…）+ `--lora-targets attentio
 - SAO 的全部 GPU 行为。
 - 8.4 与旧路径的 EV 对比（旧路径 +0.1365）。
 - G3（两岛）部分按指示未跑。
+
+## S13 GPU G1 结果汇总（主 agent，2026-10-07）
+- 3.3 + 5.3：s13-g1-modal-20261007c（Modal 1×H100，代码 e378d124）。对照 3 轮 value_loss 21.6→17.7→11.5、EV −294/−32.5/−277（步级 EV，各 rank 本地）、pg_loss/grad_norm 有限；阶段 W 50 步产物 critic f97a5d78…（finish_warmup 强制 actor 哈希前后一致）；主阶段 2 轮 receipt critic_init_sha256=f97a5d78…，EV 首轮 −2.70 > 对照首轮 −294；value_loss 0.20/0.32。判定脚本只因 Modal 布局无 run.log 缺 warmup_product 行（该行在 launch.log:22276）→ 视为通过，判定脚本待适配。
+- 6.4：gae-la-20261007b、gae-cs-20261007b PASS（cs 为人造两段）。
+- 7.3：G1 完整 VAPO（vapo-20261007e）PASS；G3 未跑 → 7.3 不勾。
+- 8.4：SAO 3 次训练前失败（LoRA 目标、warmup>decay、tied embedding），已修 b996392b，待重跑。
+- 4.5：G3 改为 Nebius 无卡 VM 跑 controller+syncer，进行中。
+- 机制正式声明（entry.py/fake.py critic=True 等）尚未做，待 G3 通过后由主 agent 统一处理。

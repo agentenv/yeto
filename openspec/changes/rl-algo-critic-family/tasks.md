@@ -23,7 +23,7 @@
 
 - [x] 3.1 放开 `entry.py:245-262` receipt family（新增 ppo family）、`entry.py:1590-1592`、`trainer_rebuild.py:253,358`，`selection.py:45,68` 不再把 ppo 路由到 legacy（design D3）。验证：fake engine 单测：未放行拒绝、带 `--rl-allow-unverified-mechanism` 单岛可启动；dry-run argv 快照含 `--advantage-estimator ppo` 与 critic 参数。
 - [x] 3.2 `local_learner.py` 角色表增加 ppo→{actor,critic}；指标管线透传 value_loss 与 explained variance。验证：fake 运行的指标中出现这两项。
-- [ ] 3.3 GPU G1：PPO 1×H100 单岛 3 轮（0.5B 级小模型），对齐 Miles `test_qwen3_4B_ppo` 的指标项（value_loss、EV 有限；policy loss、grad_norm 有限）。**需用户批准预算与机型**，估 ~1 h，≈$4（上限 $8）。验证：运行 ID、指标摘要、GPU 名写入 progress.md；通过后 `entry.py:236`、`fake.py:70` 正式声明 critic=True。
+- [x] 3.3 GPU G1：PPO 1×H100 单岛 3 轮（0.5B 级小模型），对齐 Miles `test_qwen3_4B_ppo` 的指标项（value_loss、EV 有限；policy loss、grad_norm 有限）。**需用户批准预算与机型**，估 ~1 h，≈$4（上限 $8）。验证：运行 ID、指标摘要、GPU 名写入 progress.md；通过后 `entry.py:236`、`fake.py:70` 正式声明 critic=True。
 
 ## 4. critic 状态契约与两岛 G3
 
@@ -40,14 +40,14 @@
 
 - [x] 5.1 实现阶段 W 编排：非 rebuild 单次启动，`--critic-load` 指向初始 actor、`--num-critic-only-steps=warmup_steps`，只产出 critic checkpoint 并计算内容哈希；主阶段 `--num-critic-only-steps=0`、`--critic-load` 指向产物（design D5）。验证：dry-run argv 快照两阶段；单测确认主阶段在 rebuild 下 critic-only 步数为 0。
 - [x] 5.2 校验与复用：warm-up 前后 actor 哈希一致校验；两岛共用同一产物（按哈希复用，不重复跑）。验证：fake 单测。
-- [ ] 5.3 GPU G1：warm-up 50 步 + 主阶段 2 轮，1×H100。**需用户批准预算与机型**，估 ~1 h，≈$4（上限 $8）；可与 3.3 合并在同一容器以省冷启动。验证：actor 哈希不变、主阶段 receipt 含产物哈希、warm-up 后 EV 高于随机初始化对照的首轮（记录数值，不设硬阈值）。
+- [x] 5.3 GPU G1：warm-up 50 步 + 主阶段 2 轮，1×H100。**需用户批准预算与机型**，估 ~1 h，≈$4（上限 $8）；可与 3.3 合并在同一容器以省冷启动。验证：actor 哈希不变、主阶段 receipt 含产物哈希、warm-up 后 EV 高于随机初始化对照的首轮（记录数值，不设硬阈值）。
 
 ## 6. fork 共享 GAE 扩展点（需用户同意 fork 提交）
 
 - [x] 6.1 新建 `tests/rl_gae_reference.py`：独立 torch 参考实现 vanilla、length_adaptive、decoupled、cross_segment GAE（注明论文公式），不 import 被测代码。验证：手算 3–5 个元素自检。
 - [x] 6.2 fork `yeto/ports` 在 math_utils.py 加 `--gae-variant` 分派与 segment id 输入，arguments.py 加参数，缺省逐元素不变（design D6）。验证：fork CPU 测试对拍参考实现，覆盖无段边界退化、两段修正 (γλ)^{n_2}、α=1.5 λ 值；原有 fork 测试全过；结果写 progress.md。
 - [ ] 6.3 经用户确认 push、更新 `MILES_NEXT_COMMIT` pin 与镜像；yeto 映射表登记新参数。验证：pin 指向新提交、镜像 digest 记录；parse_args 解析通过。
-- [ ] 6.4 GPU G1：length_adaptive 与 cross_segment（人造两段数据）各 1×H100 2 轮，可同容器串行。**需用户批准预算与机型**，估 ~1 h，≈$4（上限 $8）。验证：指标有限，通过后正式声明。
+- [x] 6.4 GPU G1：length_adaptive 与 cross_segment（人造两段数据）各 1×H100 2 轮，可同容器串行。**需用户批准预算与机型**，估 ~1 h，≈$4（上限 $8）。验证：指标有限，通过后正式声明。
 
 ## 7. VAPO
 
