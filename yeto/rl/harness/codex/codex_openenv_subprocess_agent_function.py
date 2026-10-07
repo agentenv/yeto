@@ -305,6 +305,10 @@ async def run(
             **{k: metadata[k] for k in ("script", "final_status", "hang_seconds") if k in metadata},
         }
         try:
+            segments = await adapter.prepare_segment_sessions(job)
+        except Exception as exc:  # noqa: BLE001 - session-server failures are infrastructure
+            return {**adapter.infrastructure_metadata(f"segment sessions: {type(exc).__name__}: {exc}", episode_id=episode_id), **fields}
+        try:
             untrusted = await asyncio.wait_for(
                 _drive_worker(job, trajectory_id, _tool_wait_board, getattr(lease, "worker_env", None)),
                 timeout=lease.deadline_seconds,
@@ -314,11 +318,11 @@ async def run(
         except adapter.harness.CodexHarnessError as exc:
             metrics = getattr(exc, "metrics", None)
             tito = adapter.mirror_tito_counters(metrics, board)
-            return {**adapter.infrastructure_metadata(str(exc), episode_id=episode_id, metrics=metrics), **fields, **tito}
+            return {**adapter.infrastructure_metadata(str(exc), episode_id=episode_id, metrics=metrics), **fields, **tito, **segments}
         tito = adapter.mirror_tito_counters(untrusted.get("metrics"), board)
         signed = await adapter.finish_trusted(untrusted, lease.verifier, task_id=task_id, sample_id=sample_id)
         signed["expected_policy_version"] = expected_version
-        return {**signed, **fields, **tito}
+        return {**signed, **fields, **tito, **segments}
     finally:
         try:
             if lease is not None:
