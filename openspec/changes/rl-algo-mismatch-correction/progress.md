@@ -173,3 +173,5 @@
 
 - features:mismatch_metrics：保持未声明。原因是“use_tis=False、只开该标志”的对照运行无法表达（P0 对 custom 函数总是输出 `--use-tis`），而且 CORRECTION_COMPANIONS 已由各修正机制认领该标志。
 - mis（truncate/clip）：保持未声明，本轮不做触发验证。
+
+- 2026-10-07 S14：用户裁定接受 5.2 vendor 副本（偏离 D6 获批），tasks 5.2 勾选。

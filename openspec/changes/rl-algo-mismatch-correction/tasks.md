@@ -51,8 +51,9 @@
 
 - [x] 5.1 在运行镜像（R0 冒烟所用镜像）中核实 `examples/infra_features/train_infer_mismatch_helper/mis.py` 能否 import，并核实 Miles 仓库许可证。验证：命令与输出写入 `progress.md`，关闭 design Open Question 2。此项只需 CPU 容器，不需要 GPU。
   - 完成记录（已实现）：镜像中 `import examples.infra_features.train_infer_mismatch_helper.mis` 成功，见 `evidence/2026-09-29-g1/five_one.log`；Miles LICENSE 为 Apache-2.0，Open Question 2 已关闭。
-- [ ] 5.2 若不能 import：vendor 到 `yeto/rl/algos/vendor/miles_mis.py`，文件头记录来源仓库、commit `9e4260d`、原路径、许可证，只允许改 import。验证：CPU 测试比对副本与 Miles 原文件在相同输入上的输出一致；PluginRef 哈希取副本。能 import 时跳过本项并在 `progress.md` 说明。
-  - 复审撤销勾选（未完成，偏离原文）：原文写“能 import 时跳过本项”，而 5.1 已证实可以 import。仍保留 vendor 副本的原因是 P0 插件命名空间只允许 yeto./miles.；是否接受这一偏离需用户批准（见 progress 待批准）。
+- [x] 5.2 若不能 import：vendor 到 `yeto/rl/algos/vendor/miles_mis.py`，文件头记录来源仓库、commit `9e4260d`、原路径、许可证，只允许改 import。验证：CPU 测试比对副本与 Miles 原文件在相同输入上的输出一致；PluginRef 哈希取副本。能 import 时跳过本项并在 `progress.md` 说明。
+  - S14 用户裁定（2026-10-07）：接受 vendor 副本（偏离 D6 获批），据此勾选。
+  - 复审撤销勾选（历史记录，偏离原文）：原文写“能 import 时跳过本项”，而 5.1 已证实可以 import。仍保留 vendor 副本的原因是 P0 插件命名空间只允许 yeto./miles.；是否接受这一偏离需用户批准（见 progress 待批准）。
   - 2026-10-06 核实（任务 C，worktree mis-corr）：vendor 副本 `# Do not edit below this line` 之后的正文与 `git -C /home/michael/work/miles-2b show 9e4260d:examples/infra_features/train_infer_mismatch_helper/mis.py` 逐字节一致（diff 无输出；连 import 都未改）；`tests/test_rl_mismatch_observe.py::test_vendored_mis_is_verbatim` / `test_vendored_mis_matches_original` 已覆盖。副本被 `yeto/rl/algos/mismatch_correction.py` 使用，不能按“不适用”删除；技术工作完成，仍只差用户对“偏离 D6（能 import 仍 vendor）”的批准，故保持未勾选。
   - 完成记录（CPU 通过，偏离 D6）：虽然原文件可以 import，但 P0 D7 只允许 `yeto.`/`miles.` 插件命名空间，所以仍用 vendor 副本（待批准，见 progress）。副本正文与原文件逐字相同，输出比对在 18 种组合上 `torch.equal`，PluginRef 取副本哈希。
 - [x] 5.3 MIS 字段与翻译：`mis_mode`（截断/屏蔽、几何平均变体，以 `mis.py` 实际提供为准）与显式阈值，翻译为 custom-tis 路径及其参数；屏蔽变体按屏蔽类判定零梯度。验证：单测覆盖翻译、缺阈值被拒、零梯度判定；upstream `parse_args` 解析通过。

@@ -66,4 +66,6 @@
 - Q2 范围：阶段一 4.x/5.x **全做**。
 - Q3 pin 更新与 critic-family 6.3 合并做（fork push 授权仍沿用"overlay 补丁代替 push"，除非用户另说）。
 - Q4 critic G3 排在算法阶段一之后。
-- Q5/Q6：待用户看完解释后裁定。
+- Q5 mismatch 5.2：用户接受 vendor 副本（已勾）。
+- Q6 loss-variants 3.1–3.4：用户同意在 GPU 冒烟 6.1–6.4 通过后标关闭（待 S14 G1 结果）。
+- 自有集群 spec（rl-local-cluster-deploy）：用户决定先放着，等 FN RL 能力（infra+algo）实现后再做，切 PR 时同步更新 spec。
