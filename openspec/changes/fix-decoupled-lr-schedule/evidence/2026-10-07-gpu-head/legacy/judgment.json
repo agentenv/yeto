@@ -1,0 +1,22 @@
+{
+ "verdict": "INCOMPLETE",
+ "run": "s14-dlr-legacy-20261007a",
+ "events": 0,
+ "rc": "rc=1 (2 yeto-head-job michael 2 mins ago 2 mins ago 2m 17s 1x[CPU:1+] FAILED ~/sky_logs/sky-2026-10-07-12-03-30-614790 - )",
+ "islands": {},
+ "syncer_global_delta_norm": {},
+ "gpu_lines": [],
+ "problems": [
+  "rc: rc=1 (2 yeto-head-job michael 2 mins ago 2 mins ago 2m 17s 1x[CPU:1+] FAILED ~/sky_logs/sky-2026-10-07-12-03-30-614790 - )"
+ ],
+ "missing": [
+  "island 0: no events",
+  "island 1: no events",
+  "syncer tape (head/yeto-output/yeto-tape.jsonl) absent or empty",
+  "fewer than 2 container GPU confirmations containing 'H100'"
+ ],
+ "notes": [
+  "launch.log has 1 Traceback(s)"
+ ],
+ "compare": null
+}
