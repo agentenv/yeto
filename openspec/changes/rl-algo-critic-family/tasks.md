@@ -64,9 +64,9 @@
 
 ## 9. CompactionRL
 
-- [ ] 9.1 核对 Miles `examples/experimental/terminus-compaction` 可复用部分与 yeto agent/Terminal-Bench rollout 路径的接入点。验证：progress.md 记录复用清单与缺口。
-- [ ] 9.2 rollout 侧实现压缩触发（`C−|h_t|<T_comp`，10,240）、`<analysis>/<summary>` 9 节摘要、重建上下文（k=2）、最多 3 次压缩、segment id 输出、共享回报（design D8）。验证：CPU 单测用假模型：触发、上限、段编号、重建内容。
-- [ ] 9.3 yeto 声明 compactionrl 并翻译（cross_segment、α=1.5、γ=1、kl=0、critic lr 3e-6、critic_updates_per_step=2、warm-up 50、token 级归一化、每提示 1 条 rollout）。验证：翻译单测与 dry-run 快照；若 critic 每步 2 次更新需 fork 改动，并入 6.2 流程。
+- [x] 9.1 核对 Miles `examples/experimental/terminus-compaction` 可复用部分与 yeto agent/Terminal-Bench rollout 路径的接入点。验证：progress.md 记录复用清单与缺口。
+- [x] 9.2 rollout 侧实现压缩触发（`C−|h_t|<T_comp`，10,240）、`<analysis>/<summary>` 9 节摘要、重建上下文（k=2）、最多 3 次压缩、segment id 输出、共享回报（design D8）。验证：CPU 单测用假模型：触发、上限、段编号、重建内容。
+- [x] 9.3 yeto 声明 compactionrl 并翻译（cross_segment、α=1.5、γ=1、kl=0、critic lr 3e-6、critic_updates_per_step=2、warm-up 50、token 级归一化、每提示 1 条 rollout）。验证：翻译单测与 dry-run 快照；若 critic 每步 2 次更新需 fork 改动，并入 6.2 流程。
 - [ ] 9.4 GPU G1：1×H100 小模型 agent 环境 3 轮（数据集/环境待选定）。**需用户批准预算与机型**，估 ~2 h，≈$8（上限 $16）。验证：出现至少一次压缩、段编号与优势修正可在样本中核对、指标有限。
 - [ ] 9.5 GPU G3：1+1×H100 3 轮。**需用户批准预算与机型**，估 ~2 h×2 卡，≈$16（上限 $30）。验证：两岛哈希一致。消融臂（去掉 cross-segment）只在用户另批预算时执行。
 
