@@ -224,3 +224,23 @@ yeto（/home/michael/work/s13-vapo，分支 s13-vapo）：
 
 **fork 需求**：(1) `--critic-updates-per-step N`（每批 N 次 critic 更新、1 次 actor 更新）；(2) cross_segment 的每段一 sample 形态：读 `sample.metadata["tokens_after"]`，局部 GAE 后乘 `(γλ)^{tokens_after}`（λ 用该样本 length_adaptive λ 还是整条的，待定）；(3) `train_data_conversion` 透传 `tokens_after`。
 **未验证**：真实 tokenizer 下的触发与重建；与 Codex/TB 路径的接入；fork 侧上述需求；GPU 9.4/9.5。
+
+## S13 fork 合流（2026-10-07，CPU；未上 GPU、未启动 Ray）
+
+### fork（/home/michael/work/miles-critic，分支 yeto-critic-family，本地提交，未 push）
+- `85a571cde` 合入 yeto-vapo `cbf8c4737`（无冲突）；`feb485461` 合入 yeto-sao `6b5bd88c`（`loss_hub/losses.py` 冲突：`_positive_example_lm_loss` 与 HL-Gauss/two-hot/classification value loss 两组新函数，两边全保留；arguments.py 自动合并）。
+- `e07e51c07`：按上游 SAO（agentenv/miles feat/sao-tbench21-e2e-validation@16a9bea4，miles-sao 只读查看）语义移植：
+  - `--num-critic-epochs N`（别名 `--critic-updates-per-step`，同一 dest `num_critic_epochs`，缺省 1，<1 报错）：critic 每个 rollout 批（=每个 actor 步）在固定的 value 目标上做 N 次优化器更新；第 2 次起重建已消耗的 data iterator（`megatron_utils/actor.py::_train_critic`）；critic 的调度器 `train_iters` 乘 N（`model.py::get_optimizer_param_scheduler(..., role)`）。两拼写语义相同，只保留一份实现；argparse 下后出现者生效，yeto 侧两拼写给不同值时拒绝。
+  - `--critic-freeze-attention`（缺省关）：critic 中名字含 attention/attn/self_attention 等组件的模块参数 requires_grad=False（`training_utils/critic_freeze.py`，在三种 model provider 的 critic 分支调用）。
+  - 顺带修复：原生 megatron provider 的 critic 头此前固定 output_size=1，改为 `_value_head_output_size(args)`（mse 时仍为 1；classification 时为 bins，SAO 端口此处遗漏）。
+  - 未移植（缺口）：上游 sao_dis 在 critic 更新后再前向一次、把新 value 送给 actor（`actor.py` 740 行后）；`full_parameter_state.py` 中按 epochs 计数的 critic 状态；离线 value pretrain。
+- 测试（miles-next-venv，OMP/OPENBLAS/MKL=1）：新增 `tests/fast/backends/training_utils/test_critic_updates_per_step.py` 6 passed（缺省 1、无新 dest；两拼写同 dest；冻结只触及 attention；无匹配报错）。定向集（`loss/`、`test_sao_ports.py`、`test_ppo_gae_variants.py`、`test_ppo_gae_masks.py`、`test_ppo_cp_advantages.py`、新测试）：合流后 13 failed/119 passed；基线 ce96fc060（git archive 到 /tmp/critbase，无 sao 测试）13 failed/92 passed，失败用例集合完全相同（cp2 一致性、loss snapshot、logprob reuse，环境原因）。
+- **未验证**：actor.py/model.py/model_provider.py 需 megatron，CPU venv 无法 import，仅 py_compile；N 次更新循环、调度器步数、冻结在真实模型上的效果均未运行验证（需 GPU）。
+
+### yeto（/home/michael/work/s13-fork，分支 s13-fork，基于 81645702）
+- 新 `yeto/rl/algos/critic_fork.py`：`CRITIC_FORK_PIN = e07e51c07…`、`FORK_COMMITS`（loss_variants 先例）。这是声明层 pin：ports 镜像仍跑 `MILES_NEXT_COMMIT` c35702e（不含这些 flag，且 yeto-critic-family 基于其祖先 039471508，缺 c35702e 的 A27/M3 改动），未加 launch 门控。
+- `sao.py`：`FORK_COMMITS` 指向 critic_fork；`sao_not_at_pin` 改查 `CRITIC_FORK_PIN`；新增 flag 行 `--value-loss-type/--value-num-bins/--value-target-type/--hl-gauss-sigma-ratio`（只接受 spec 可表达的值），`--value-reward-range` 入 `_UNMAPPED`（双值、翻译常量）；`--policy-objective sao_dis` 吸收时同时置 `execution.needs_rollout_logprobs`；新未声明机制 `features:sao_dis`、`features:value_hl_gauss`。
+- `algorithm.py` `critic_not_at_pin`：hl_gauss 仅在 pin 携带且 `policy_objective=sao_dis` 时放行（非 SAO 的 hl_gauss 无翻译，仍拒）。
+- `critic.py`（改动很小）：注释更新；`--num-critic-epochs` 行映射到 `critic.critic_updates_per_step`（critic_argv 仍只发 `--critic-updates-per-step`，≠1 时）；FORK_FLAGS 加 `--num-critic-epochs`；`algorithm_flags._UNMAPPED` 同步。
+- 测试：新 `tests/test_rl_critic_fork_pin.py` 14 passed（VAPO/CompactionRL/SAO 两档无 pin 拒绝；SAO dry-run 无放行时因未声明机制拒绝、放行后 accepted 且哈希与声明相同、无剩余 argv；非 fork pin 仍拒；非 SAO hl_gauss 仍拒；别名同哈希、冲突值拒绝；越界 value flag 与裸 `--value-reward-range` 拒绝）；`test_rl_sao_spec.py::test_rejections` 改为期望无拒绝。定向 32 文件（含未改动的 `test_rl_argv_snapshot.py`）796 passed/9 skipped，log /tmp/s13-fork-pytest.log。`hash_compare.py` 输出与 `evidence/hash-critic.txt` 17 行相同。
+- 已知遗留：SAO argv 中 GAE flag 由 critic_argv 与 sao_fork_argv 各发一次（值相同，既有行为，未改）；SAO 的 `critic_freeze_attention` 仍不在 spec/argv 中（fork 已支持，待决定是否进 spec）；cross_segment 每段一 sample 未做（等用户决定）。

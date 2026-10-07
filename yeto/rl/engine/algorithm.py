@@ -1604,14 +1604,22 @@ def _reject_critic_not_at_pin(s: AlgorithmSpec) -> str | None:
     # --gae-lambd-mode (yeto-gae-variant ce96fc060, change 6.2). cross_segment and
     # critic_updates_per_step != 1 (CompactionRL, change 9.3) are translated but stay
     # undeclared mechanisms (features:gae_cross_segment / critic_multi_update) until
-    # GPU G1 (9.4); --critic-updates-per-step is a pending fork flag.
-    if c.value_loss != "mse":
+    # GPU G1 (9.4). --critic-updates-per-step (= --num-critic-epochs) and the
+    # classification value loss are in the critic fork pin (algos/critic_fork.py,
+    # yeto-critic-family e07e51c07). hl_gauss is translated only by the SAO fork
+    # argv (sao.sao_fork_argv), so it stays refused without policy_objective=sao_dis.
+    from yeto.rl.algos.critic_fork import fork_carries_critic_family
+
+    if c.value_loss != "mse" and not (
+        fork_carries_critic_family()
+        and getattr(s.loss, "policy_objective", None) == "sao_dis"
+    ):
         pending.append(f"critic.value_loss={c.value_loss!r}")
     if pending:
         return (
-            f"{pending} need the fork's GAE / value-loss extension point "
-            "(rl-algo-critic-family design D6, group 6), which the pinned Miles does not "
-            "have yet; use the vanilla PPO defaults"
+            f"{pending} need the fork's value-loss extension point; the critic fork pin "
+            "translates it only with loss.policy_objective='sao_dis' (SAO); use the "
+            "vanilla PPO defaults"
         )
     stray = []
     if a.alpha is not None and a.lambd_mode != "length_adaptive":
