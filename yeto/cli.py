@@ -2325,12 +2325,15 @@ def _cloud_probe(cluster: str):
 DOWN_VERIFY_SLEEP = time.sleep  # patched out in tests
 
 
-def _down_and_verify(cluster: str) -> bool:
+def _down_and_verify(cluster: str, num_nodes: int = 1) -> bool:
     """Down a cluster this machine's sky knows and confirm it at the cloud.
 
     The probe is captured before the down (down deletes the record it needs).
     Without a probe we fall back to sky's own answer: a clean down or "does
-    not exist" counts, any other error does not."""
+    not exist" counts, any other error does not. A multi-node island
+    (``num_nodes`` > 1) takes the launcher's per-node confirmation path
+    (rl-multinode-island D10): every node instance must be confirmed gone at
+    the cloud, sky's own answer is never trusted for more than one node."""
     from .launcher import terminate_and_verify
 
     probe = _cloud_probe(cluster)
@@ -2342,7 +2345,30 @@ def _down_and_verify(cluster: str) -> bool:
         probe=probe,
         down=lambda: _sky_down_cluster(cluster),
         sleep_fn=DOWN_VERIFY_SLEEP,
+        num_nodes=int(num_nodes or 1),
     )
+
+
+def run_nodes_by_cluster(meta: dict) -> dict[str, int]:
+    """``{learner cluster: node count}`` of a recorded run, computed from its
+    launch args exactly as the launcher does (``parse_gpu_spec`` +
+    ``learner_cluster_names``), so ``yeto down`` confirms a multi-node island
+    per node without a new registry field (older runs included). Unparseable
+    or missing args -> {} (every cluster is then treated as single-node)."""
+    from .launcher import learner_cluster_names, parse_gpu_spec
+
+    args = meta.get("args") or {}
+    gpu, prefix = args.get("gpu"), args.get("cluster_prefix") or meta.get("name")
+    if not gpu or not prefix:
+        return {}
+    try:
+        specs = parse_gpu_spec(gpu)
+        return {name: int(spec.num_nodes) for name, spec in
+                zip(learner_cluster_names(prefix, specs), specs)}
+    except Exception as e:  # noqa: BLE001 - best effort: fall back to single-node
+        print(f"[yeto] could not derive node counts from the recorded --gpu {gpu!r}: {e}",
+              file=sys.stderr)
+        return {}
 
 
 def _modal_app_stopped(run_name: str) -> tuple[bool, str]:
@@ -2467,9 +2493,10 @@ def cmd_down(args) -> int:
         print(f"[yeto] learner clusters torn down from {head_cluster}: {', '.join(on_head)}")
 
     results: dict[str, bool] = {}
+    nodes_by_cluster = run_nodes_by_cluster(meta)
 
     def _down_one(cluster: str) -> None:
-        results[cluster] = _down_and_verify(cluster)
+        results[cluster] = _down_and_verify(cluster, nodes_by_cluster.get(cluster, 1))
         if results[cluster]:
             print(f"[yeto] {cluster}: down")
         else:
