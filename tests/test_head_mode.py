@@ -835,9 +835,11 @@ def test_head_env_credentials_and_registry_login_travel_as_secrets(fake_sky, mon
     monkeypatch.setenv("HOME", str(fake_home))
     monkeypatch.setenv("MODAL_TOKEN_ID", "ak-1")
     monkeypatch.setenv("MODAL_TOKEN_SECRET", "as-1")
-    for var in ("SKYPILOT_DOCKER_USERNAME", "SKYPILOT_DOCKER_SERVER"):
-        monkeypatch.delenv(var, raising=False)
-    monkeypatch.setenv("SKYPILOT_DOCKER_PASSWORD", "pw-1")
+    # a complete SKYPILOT_DOCKER_* login for the --rl-image registry (ghcr.io)
+    # travels to the head job; with none set (public image) nothing does
+    for var, value in (("SKYPILOT_DOCKER_USERNAME", "u-1"), ("SKYPILOT_DOCKER_PASSWORD", "pw-1"),
+                       ("SKYPILOT_DOCKER_SERVER", "ghcr.io")):
+        monkeypatch.setenv(var, value)
     monkeypatch.setattr(launcher, "prepare_launch_args", lambda args: None)
     args = cli.parse_args([
         "--gpu", "modal:1xh100", "--syncer-region", "nebius/eu-north1", "--model", "gemma4",
@@ -850,10 +852,31 @@ def test_head_env_credentials_and_registry_login_travel_as_secrets(fake_sky, mon
     assert "~/.modal.toml" not in head_task.file_mounts
     assert head_task.secrets == {"MODAL_TOKEN_ID": "ak-1", "MODAL_TOKEN_SECRET": "as-1"}
     assert job_task.secrets == {"MODAL_TOKEN_ID": "ak-1", "MODAL_TOKEN_SECRET": "as-1",
-                                "SKYPILOT_DOCKER_PASSWORD": "pw-1"}
+                                "SKYPILOT_DOCKER_USERNAME": "u-1", "SKYPILOT_DOCKER_PASSWORD": "pw-1",
+                                "SKYPILOT_DOCKER_SERVER": "ghcr.io"}
     for task in (head_task, job_task):
         assert not set(task.envs or {}) & {"MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET", "SKYPILOT_DOCKER_PASSWORD"}
         assert "as-1" not in (task.run or "") + (task.setup or "")
     # the head runs yeto under its own Python >= 3.11 (stock Nebius image: 3.10)
     assert head_task.setup.index(cli.HEAD_PYTHON_STEP) < head_task.setup.index("pip install")
     assert cli.HEAD_USE_PYTHON in job_task.run
+
+
+def test_head_public_image_sends_no_registry_login(fake_sky, monkeypatch, tmp_path):
+    fake_home = tmp_path / "home"
+    (fake_home / ".nebius").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("MODAL_TOKEN_ID", "ak-1")
+    monkeypatch.setenv("MODAL_TOKEN_SECRET", "as-1")
+    for var in ("SKYPILOT_DOCKER_USERNAME", "SKYPILOT_DOCKER_PASSWORD", "SKYPILOT_DOCKER_SERVER"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(launcher, "prepare_launch_args", lambda args: None)
+    args = cli.parse_args([
+        "--gpu", "modal:1xh100", "--syncer-region", "nebius/eu-north1", "--model", "gemma4",
+        "--model-revision", "a" * 40, "--data", "org/ds", "--data-revision", "b" * 40,
+        "--cluster-prefix", "hs",
+    ])
+    assert cli.cmd_launch_head(args) == 0
+    (_, job_task), = fake_sky["execs"]
+    assert job_task.secrets == {"MODAL_TOKEN_ID": "ak-1", "MODAL_TOKEN_SECRET": "as-1"}
+    assert not any(k.startswith("SKYPILOT_DOCKER") for k in (job_task.envs or {}))

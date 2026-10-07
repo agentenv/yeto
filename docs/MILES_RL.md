@@ -393,8 +393,9 @@ claimed to be optimal for every model.
   public IP, or `--syncer-public-addr` under `--controller local`).
 - **Images and pins** (`yeto/rl/__init__.py`). `--rl-engine ports` (default)
   uses `MILES_NEXT_IMAGE` = `ghcr.io/michaellchung/yeto-miles-ports@sha256:37ac689e...`
-  (tag `c35702e-4e4148f`, linux/amd64, **private**: credentials go through
-  `SKYPILOT_DOCKER_*`), which extends the public `radixark/miles` image with the
+  (tag `c35702e-4e4148f`, linux/amd64, **public** since 2026-10-07: pulled
+  anonymously; a private `--rl-image` takes its login from `SKYPILOT_DOCKER_*`
+  or `--rl-image-private`, see `launcher.registry_login_for`), which extends the public `radixark/miles` image with the
   pinned forks: Miles `MILES_NEXT_COMMIT` = `c35702ee` (michaellchung/miles
   `yeto/ports` line) and SGLang `SGLANG_NEXT_COMMIT` = `4e4148f1`;
   `/opt/yeto/image-manifest.json` records every SHA. `--rl-image` overrides the

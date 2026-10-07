@@ -2762,6 +2762,66 @@ def in_vm_docker_run(rl_image: str, setup: str, run: str, env_names, learner_id:
     )
 
 
+def docker_config_login(image_ref: str | None, path: str | Path | None = None) -> dict[str, str] | None:
+    """The ``~/.docker/config.json`` ``auths`` entry for ``image_ref``'s
+    registry as a SKYPILOT_DOCKER_* triple, or None when the file or the
+    entry is missing (credential helpers are not consulted)."""
+    from .modal_runner import DOCKER_LOGIN_ENV_VARS, registry_host
+
+    if not image_ref:
+        return None
+    path = Path(path) if path else Path.home() / ".docker" / "config.json"
+    try:
+        auths = json.loads(path.read_text(encoding="utf-8")).get("auths") or {}
+    except (OSError, ValueError):
+        return None
+    host = registry_host(image_ref)
+    entry = next((auths[k] for k in (host, f"https://{host}", f"https://{host}/v1/") if isinstance(auths.get(k), dict)), None)
+    if not entry or not entry.get("auth"):
+        return None
+    import base64
+
+    try:
+        user, password = base64.b64decode(entry["auth"]).decode().split(":", 1)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not user or not password:
+        return None
+    return dict(zip(DOCKER_LOGIN_ENV_VARS, (user, password, host)))
+
+
+def registry_login_for(args, environ=None) -> dict[str, str] | None:
+    """The private-registry login a launch injects for ``--rl-image``, or
+    None (the default: a public image, nothing injected anywhere -- not the
+    island task secrets, not the Modal pull secret, not the head job).
+
+    Injection happens only when (a) the SKYPILOT_DOCKER_* variables for
+    the image's registry are in ``environ`` (ports engine only, as before),
+    or (b) ``--rl-image-private`` was given: then the environment login is
+    used if present, else the registry's ``~/.docker/config.json`` entry;
+    neither being available is an error rather than a silent public pull."""
+    from .modal_runner import registry_credentials
+
+    from .rl import default_rl_image
+
+    environ = os.environ if environ is None else environ
+    engine = getattr(args, "rl_engine", "ports") or "ports"
+    # before prepare_launch_args (the head CLI) --rl-image may still be unset
+    image = getattr(args, "rl_image", None) or default_rl_image(engine)
+    explicit = bool(getattr(args, "rl_image_private", False))
+    if not explicit and engine != "ports":
+        return None
+    login = registry_credentials(image, environ)
+    if login is None and explicit:
+        login = docker_config_login(image)
+        if login is None:
+            raise ValueError(
+                f"--rl-image-private: no registry login for {image!r}: set "
+                "SKYPILOT_DOCKER_USERNAME/PASSWORD/SERVER or add the registry to ~/.docker/config.json"
+            )
+    return login
+
+
 def _sky_docker_login_config(login: dict[str, str]):
     """SkyPilot's DockerLoginConfig for a SKYPILOT_DOCKER_* triple."""
     from sky.provision.docker_utils import DockerLoginConfig
@@ -3310,7 +3370,6 @@ def make_miles_island_task(
     import sky
 
     from .datasource import learner_data_arg, learner_file_mounts
-    from .modal_runner import registry_credentials
     from .models import resolve
     from .provenance import is_local_reference
 
@@ -3629,20 +3688,16 @@ def make_miles_island_task(
     island_megatron_path = (
         f":{PORTS_MEGATRON_PATH}" if getattr(args, "rl_engine", "ports") == "ports" else ""
     )
-    # Private --rl-image (MILES_NEXT_IMAGE is private on ghcr.io): the
-    # SKYPILOT_DOCKER_* login goes into the task SECRETS, SkyPilot's supported
+    # Private --rl-image (registry_login_for: SKYPILOT_DOCKER_* in the
+    # environment, or --rl-image-private): the login goes into the task SECRETS, SkyPilot's supported
     # form: every Task load re-derives the DockerLoginConfig from them
     # (sky/task.py _with_docker_login_config). A DockerLoginConfig placed in
     # Resources does not survive sky 0.13's YAML round trip (Resources.
     # from_yaml_config keeps a dict, the next to_yaml_config calls
     # dataclasses.asdict on it: "asdict() should be called on dataclass
     # instances"; B1 nsmoke). SkyPilot exports secrets into setup/run, so both
-    # scripts unset them first. Ports engine only; read:packages token only.
-    registry_login = (
-        registry_credentials(args.rl_image, os.environ)
-        if getattr(args, "rl_engine", "ports") == "ports"
-        else None
-    )
+    # scripts unset them first. Default (public image): nothing injected.
+    registry_login = registry_login_for(args)
     login_unset = DOCKER_LOGIN_UNSET if registry_login else ""
     setup_script = login_unset + "\n".join(setup_steps)
     run_script = (
@@ -4482,6 +4537,7 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
     )
 
     rl = getattr(args, "training_mode", "sft") == "rl"
+    registry_login = registry_login_for(args) if rl else None
     envs = dict(getattr(task, "envs", None) or {})
     envs["SYNCER_ADDR"] = syncer_addr
     if "CRITIC_SYNCER_ADDR" in envs and syncer_addr != "none":
@@ -4537,7 +4593,8 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         envs={k: str(v) for k, v in envs.items() if v is not None},
         region=spec.region,
         gpu_exact=bool(getattr(args, "modal_gpu_exact", False)),
-        registry_login=rl and getattr(args, "rl_engine", "ports") == "ports",
+        registry_login=bool(registry_login),
+        registry_creds=registry_login,
         image_ref=image_ref_from_rl_image(args.rl_image) if rl else None,
         setup_script=str(getattr(task, "setup", "") or "") if rl else None,
         pip_requirements=requirements,

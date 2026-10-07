@@ -113,6 +113,16 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         ),
     )
     rl.add_argument(
+        "--rl-image-private",
+        action="store_true",
+        help=(
+            "pull --rl-image with a registry login: SKYPILOT_DOCKER_USERNAME/"
+            "PASSWORD/SERVER from the environment, else the registry's "
+            "~/.docker/config.json entry (error if neither). Default: anonymous "
+            "pull; a login is injected only when those variables are set"
+        ),
+    )
+    rl.add_argument(
         "--rl-model-recipe",
         choices=["generic", "deepseek-v4-flash"],
         default="generic",
@@ -1991,13 +2001,13 @@ def cmd_launch_head(args) -> int:
     # The controller job is a separate sky job: the provisioning task's
     # secrets are not in its environment. Env-carried cloud credentials
     # (e.g. MODAL_TOKEN_ID/SECRET when no ~/.modal.toml is present) and the
-    # private-registry login the Modal image build reads (SKYPILOT_DOCKER_*)
+    # private-registry login the Modal image build reads (if any)
     # go to it as sky secrets, so they never land in a file on the head.
     _mounts, cred_envs = launcher.head_cloud_credentials(launcher.fleet_clouds(args))
     secrets = dict(cred_envs)
-    for env_name in ("SKYPILOT_DOCKER_USERNAME", "SKYPILOT_DOCKER_PASSWORD", "SKYPILOT_DOCKER_SERVER"):
-        if os.environ.get(env_name):
-            secrets[env_name] = os.environ[env_name]
+    # Private --rl-image only (SKYPILOT_DOCKER_* set, or --rl-image-private);
+    # a public image sends no registry login at all.
+    secrets.update(launcher.registry_login_for(args) or {})
     job_task = sky.Task(
         name="yeto-head-job",
         run=(
