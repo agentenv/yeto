@@ -45,4 +45,4 @@
 
 ## 7. 集成检查
 
-- [ ] 7.1 [D；依赖1-4] 以一份真实 ports 多岛运行磁带（由其他已批准实验产生，本 change 不另起 GPU）执行 serve 与 export，核对训练曲线非空、round 表、告警与成本面板；验收：记录结果与截图。 CPU 替代已做：s9-m4x1-20261005aa（单岛 ports、node_lost→RECOVERY_REQUIRED）导出 `infra-drafts/tmp-logs/dashboard-s9-m4x1.html`，reward/grad_norm/tok/s 曲线非空、RECOVERY_REQUIRED 严重告警、E1 面板与派生 cell 表；无 syncer/fleet.jsonl 故 round 表与成本为“无数据”。**未做：多岛 ports 运行与截图。**
+- [ ] 7.1 [D；依赖1-4] 以一份真实 ports 多岛运行磁带（由其他已批准实验产生，本 change 不另起 GPU）执行 serve 与 export，核对训练曲线非空、round 表、告警与成本面板；验收：记录结果与截图。 CPU 替代已做：s9-m4x1-20261005aa（单岛 ports、node_lost→RECOVERY_REQUIRED）导出 `infra-drafts/tmp-logs/dashboard-s9-m4x1.html`，reward/grad_norm/tok/s 曲线非空、RECOVERY_REQUIRED 严重告警、E1 面板与派生 cell 表；无 syncer/fleet.jsonl 故 round 表与成本为“无数据”。**未做：多岛 ports 运行与截图。** S14 补做：2 岛真实磁带（s13-g3-modal-20261007f，0 轮）+ 3 份真实单岛 Modal 磁带 export/serve 核对，见 progress.md S14；仍无带 syncer/round 事件的真实多岛磁带，故未勾。
