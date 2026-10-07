@@ -298,3 +298,17 @@ yeto（/home/michael/work/s13-vapo，分支 s13-vapo）：
 ### 未验证 / 待确认
 - 未验证：真实 Miles 训练路径（loss.py 需 megatron，仅 CPU 函数级测试）、Ray 序列化下新键传输（只测了 split_train_data_by_dp_raw）、GPU 9.4/9.5。
 - 待用户确认：(1) 段尾 bootstrap 取 0；(2) l 取整条 rollout 被优化 token 数（备选：段长）；(3) critic 目标用局部优势（备选：校正后优势，会使前段目标趋近 V）；(4) 旧 fork `cross_segment` 是否从 fork 删除。
+
+## S13 critic fp32 主权重同步（worktree `/home/michael/work/s13-fp32`，分支 `s13-fp32`，基于 03d0197c；仅 CPU，未启动 Ray）
+
+实现：
+- `state_plugin.py`：新 `_critic_masters`（复用 `full_masters`：DistributedOptimizer 分片 main shard 经 DP 组 all-reduce 拼全 / 完整 `main_param` / fp32 参数自身）、`_write_critic_masters`（复用 `write_masters` 写主权重，再把低精度模型参数设为主权重的 cast）。`_export_critic_tensors` 导出 fp32 主权重；`_import_critic_tensors` 写主权重→生成模型参数→按主权重重哈希，并核对每个低精度参数等于其主权重 cast，否则拒绝；`_save_critic_cut` 存主权重；`_restore_critic_cut` 先 load 优化器/调度器、再写主权重并生成模型参数（主权重优先于优化器 load），哈希按主权重。低精度参数无主权重时拒绝（不再有损写 bf16）。注释写明 critic 优化器状态每轮保留为第一版选择。
+- 门控：`algorithm.py` 新 `CRITIC_STRICT_AVG_ALLOWANCES`（advantage_estimators:ppo、execution:critic、critic_multi_update、gae_*、positive_example_lm_loss、value_hl_gauss、sao_dis）；`check_unverified_allowance(..., sync_preset=None)`：strict-avg 且全部属该集合并含 execution:critic 时多岛/外层同步放行；仍须显式放行参数。`launcher.py`（传 `rl_sync_preset`）、`learner.py`（传 `sync_preset`）各加一行。decoupled+critic 仍由 `critic_run_problems` 拒绝。
+- design.md D4 补充上述三点。
+
+验证（`PYTHONPATH=.:tests /tmp/yeto-venv/bin/python -m pytest`，OMP/OPENBLAS/MKL=1）：
+- 新 `tests/test_rl_critic_fp32_masters.py` 7 passed：fake DistOpt（bf16 参数 + fp32 shard、step=shard Adam + main→model cast）两岛平均写回后主权重哈希逐位一致、bf16 参数=主权重 cast、无拒绝；写回后一次 step 等于"主权重即平均值"的参考、不等于旧主权重路径；DP=2 线程模拟 all-reduce 拼全/各 rank 写回本段；无主权重 bf16 拒绝、fp32 自身读写；round-cut 存/恢复哈希=通道哈希、优化器矩与调度器恢复、轮次不符拒绝；门控 strict-avg 放行、decoupled/None/dense-full/非 critic 机制/无 execution:critic/未知名拒绝；launcher 两岛 PPO strict-avg+放行通过、无放行拒绝、decoupled 拒绝。
+- `tests/test_rl_critic_dual_syncer.py` 原"bf16 写后哈希拒绝"用例改为"无 fp32 主权重拒绝"，12 passed。
+- 回归：critic*/algorithm*/loss_variants_spec/seq_adv/state_plugin*/trainer_cut*/cut*/argv_snapshot/sao_spec/vapo*/compaction* 629 passed 5 skipped（/tmp/s13-fp32-pytest.log）；learner*/launcher*/launch*/driver*/selection* 209 passed 1 skipped（/tmp/s13-fp32-pytest2.log）。`hash_compare.py` 与 `hash-critic.txt` 17 项一致；`test_rl_argv_snapshot.py` 未改并通过。
+
+未验证（需 GPU 4.5）：真实 Megatron DistributedOptimizer 下 critic 参数的 gbuf_ranges/main shard 读写与 DP 组 all-reduce；直接 cast 写 bf16 param buffer 与 Megatron `_copy_main_params_to_model_params` 逐位一致；Megatron `optimizer.load_state_dict` 是否改写主权重（已用"load 后再写主权重"规避，但未实测）；TP/PP 下 critic 参数键与分片；precision-aware optimizer（拒绝）。`critic_state_summary`（4.1/4.4 tape）仍按模型参数哈希，与通道口径不同，未改。

@@ -1002,24 +1002,76 @@ def _rank() -> int:
     return torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
 
 
+# rl-algo-critic-family (user decision 2026-10-07): the critic's two-island
+# state is its FP32 optimizer masters, not the (bf16) model parameters.
+# Export reads the masters (Megatron DistributedOptimizer: this rank's main
+# shard, gathered over the owning DP group by ``full_masters``; complete
+# ``main_param``; or the FP32 parameter itself when it is its own master).
+# Write-back writes the masters (``write_masters``) and regenerates every
+# low-precision model parameter from them (the cast the optimizer's
+# main->model copy does after a step), so the next optimizer step continues
+# from the average instead of overwriting it with the stale masters. Hashes
+# (syncer channel, write-back check, round-cut) are over the FP32 masters.
+# A low-precision parameter without any FP32 master is refused.
+#
+# Critic optimizer state (moments, step counts, LR scheduler) is kept across
+# strict-avg rounds -- only the weights are replaced; the actor's optimizer is
+# reset every round. This is the first-version choice (design D4).
+
+
+def _critic_masters(actor: Any, params: Mapping[str, Any]) -> dict[str, Any]:
+    """``key -> FP32 master`` (parameter shape) for the sorted critic keys.
+
+    Collective over the DP group when masters are DistributedOptimizer
+    shards: every rank calls it with the same keys in the same order.
+    """
+
+    keys = sorted(params)
+    masters = full_masters(getattr(actor, "optimizer", None), [params[k] for k in keys])
+    return dict(zip(keys, masters, strict=True))
+
+
+def _write_critic_masters(actor: Any, params: Mapping[str, Any], targets: Mapping[str, Any]) -> None:
+    """Write FP32 ``targets`` into the critic masters, then set each
+    low-precision model parameter from its master."""
+
+    import torch
+
+    keys = sorted(params)
+    plist = [params[k] for k in keys]
+    tlist = [targets[k].to(device=params[k].device, dtype=torch.float32) for k in keys]
+    write_masters(getattr(actor, "optimizer", None), plist, tlist)
+    for param, target in zip(plist, tlist, strict=True):
+        if param.dtype != torch.float32:
+            # complete-master params: write_masters only set the master;
+            # sharded ones were already set (idempotent cast).
+            param.data.copy_(target.to(dtype=param.dtype))
+
+
+def _masters_cpu(masters: Mapping[str, Any]) -> dict[str, Any]:
+    import torch
+
+    return {k: m.detach().to("cpu", torch.float32).contiguous().clone() for k, m in masters.items()}
+
+
 def _export_critic_tensors(actor: Any) -> dict[str, Any]:
-    """Plugin (critic process, 4.2.2): this rank's full-parameter critic tensors
-    (fp32 CPU copies) with their content hash, for the critic syncer channel."""
+    """Plugin (critic process, 4.2.2): this rank's full-parameter critic FP32
+    masters (CPU copies) with their content hash, for the critic syncer channel."""
 
     import torch
 
     from yeto.rl.critic_state import critic_weights_sha256
 
     with torch.no_grad():
-        tensors = {k: p.detach().to("cpu", torch.float32).clone()
-                   for k, p in _critic_parameters(actor).items()}
+        tensors = _masters_cpu(_critic_masters(actor, _critic_parameters(actor)))
     return {"rank": _rank(), "tensors": tensors, "weights_sha256": critic_weights_sha256(tensors)}
 
 
 def _import_critic_tensors(actor: Any, *, by_rank: dict[int, dict[str, Any]]) -> dict[str, Any]:
     """Plugin (critic process, 4.2.2): ``by_rank[rank] = {"tensors", "sha256"}``;
-    write the averaged critic tensors of this rank back into the critic parameters, then re-hash the written parameters
-    (cast back to fp32) against ``expect_sha256``.
+    write the averaged critic tensors of this rank into the FP32 masters,
+    regenerate the model parameters from them, then re-hash the masters
+    against ``sha256`` and check every model parameter equals its master cast.
 
     A name/shape mismatch is refused before any write; a hash mismatch after the
     write is returned as a refusal (the caller treats the critic as dirty and
@@ -1042,22 +1094,30 @@ def _import_critic_tensors(actor: Any, *, by_rank: dict[int, dict[str, Any]]) ->
             return {"refused": f"critic tensor {key} shape {tuple(value.shape)} != {tuple(params[key].shape)}"}
     if critic_weights_sha256(tensors) != expect_sha256:
         return {"refused": "incoming critic tensors differ from their announced hash"}
-    with torch.no_grad():
-        for key, value in tensors.items():
-            params[key].copy_(value.to(params[key].device, params[key].dtype))
-        written = {k: p.detach().to("cpu", torch.float32) for k, p in params.items()}
+    try:
+        with torch.no_grad():
+            _write_critic_masters(actor, params, tensors)
+            masters = _critic_masters(actor, params)
+            written = _masters_cpu(masters)
+            stale = [k for k, p in params.items() if p.dtype != torch.float32
+                     and not torch.equal(p.detach(), masters[k].to(p.dtype).view(p.shape))]
+    except StatePluginError as error:
+        return {"refused": f"critic masters: {error}", "rank": rank}
     got = critic_weights_sha256(written)
     if got != expect_sha256:
-        # e.g. bf16 parameters cannot hold the fp32 average exactly
         return {"refused": f"written critic hash {got[:12]} != expected {expect_sha256[:12]}",
-                "rank": _rank(), "weights_sha256": got}
-    return {"rank": _rank(), "weights_sha256": got}
+                "rank": rank, "weights_sha256": got}
+    if stale:
+        return {"refused": f"critic model parameters not regenerated from masters: {stale[:4]}",
+                "rank": rank, "weights_sha256": got}
+    return {"rank": rank, "weights_sha256": got}
 
 
 def _save_critic_cut(actor: Any, *, directory: str, round_id: int) -> dict[str, Any]:
-    """Plugin (critic process, 4.3): this rank's critic weights + optimizer +
+    """Plugin (critic process, 4.3): this rank's critic FP32 masters + optimizer +
     LR-scheduler state into ``directory/rank-<r>/`` via CriticCheckpointStore
-    (manifest committed last)."""
+    (manifest committed last). The weights hash is over the FP32 masters, the
+    same as the critic syncer channel."""
 
     import torch
 
@@ -1065,7 +1125,7 @@ def _save_critic_cut(actor: Any, *, directory: str, round_id: int) -> dict[str, 
 
     rank = _rank()
     with torch.no_grad():
-        weights = {k: p.detach().to("cpu") for k, p in _critic_parameters(actor).items()}
+        weights = _masters_cpu(_critic_masters(actor, _critic_parameters(actor)))
     scheduler = getattr(actor, "opt_param_scheduler", None)
     manifest = CriticCheckpointStore(os.path.join(directory, f"rank-{rank}")).save(
         round_id=int(round_id), weights=weights,
@@ -1078,7 +1138,9 @@ def _save_critic_cut(actor: Any, *, directory: str, round_id: int) -> dict[str, 
 def _restore_critic_cut(actor: Any, *, directory: str, actor_round: int,
                        critic_round: int) -> dict[str, Any]:
     """Plugin (critic process, 4.3): load this rank's critic round (refuses a
-    critic round != actor round and a manifest mismatch) and re-hash."""
+    critic round != actor round and a manifest mismatch), load the optimizer
+    state, then write the saved FP32 masters (after the optimizer load, so they
+    win) and regenerate the model parameters; re-hash the masters."""
 
     import torch
 
@@ -1093,15 +1155,17 @@ def _restore_critic_cut(actor: Any, *, directory: str, actor_round: int,
     params = _critic_parameters(actor)
     if set(params) != set(weights):
         return {"refused": "critic checkpoint tensor names differ from the running critic", "rank": rank}
-    with torch.no_grad():
-        for key, value in weights.items():
-            params[key].copy_(value.to(params[key].device, params[key].dtype))
     actor.optimizer.load_state_dict(state["optimizer"])
     scheduler = getattr(actor, "opt_param_scheduler", None)
     if scheduler is not None and state.get("scheduler") is not None:
         scheduler.load_state_dict(state["scheduler"])
-    return {"rank": rank, "weights_sha256": critic_weights_sha256(
-        {k: p.detach().to("cpu") for k, p in params.items()})}
+    try:
+        with torch.no_grad():
+            _write_critic_masters(actor, params, weights)
+            written = _masters_cpu(_critic_masters(actor, params))
+    except StatePluginError as error:
+        return {"refused": f"critic masters: {error}", "rank": rank}
+    return {"rank": rank, "weights_sha256": critic_weights_sha256(written)}
 
 
 def export_critic_tensors(actor: Any) -> dict[str, Any]:
