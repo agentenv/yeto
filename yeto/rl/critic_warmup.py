@@ -14,7 +14,14 @@ receipts (``CriticRunConfig.init_sha256``).
 This module builds the stage-W argv, hashes checkpoints, writes / validates
 the product manifest (actor unchanged across the warm-up, critic hash) and
 reuses one product for every island (keyed by algorithm + initial actor).
-Launching stage W on a cluster is not wired here (GPU G1, task 5.3).
+The ports learner runs stage W itself before its main stage
+(``run_ports_warmup``: ``python3 <miles>/train.py <stage-W argv>`` on the
+island's Ray cluster) when the algorithm has a warm-up and no product was
+given (``--rl-critic-load``). ``baseline_learner_argv`` builds the optional
+no-warm-up baseline run (``--rl-critic-baseline-rounds``): the same learner
+and algorithm with ``warmup_steps=0`` (value head randomly initialized), its
+own event tape and completed-groups path, so the first-round explained
+variance with and without the warm-up can be compared.
 """
 
 from __future__ import annotations
@@ -24,6 +31,8 @@ import hashlib
 import json
 import os
 import shlex
+import subprocess
+import sys
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -40,7 +49,7 @@ SCHEMA = "yeto-rl-critic-warmup-v1"
 # run under the ports driver (stage W has no driver, publisher or eval).
 _STAGE_W_VALUE_FLAGS = (
     "--num-rollout", "--num-critic-only-steps", "--critic-load", "--critic-save",
-    "--save", "--save-interval", "--rollout-sample-filter-path",
+    "--save", "--save-interval", "--lr-decay-style", "--rollout-sample-filter-path",
     "--rollout-all-samples-process-path", "--buffer-filter-path", "--eval-interval",
     "--n-samples-per-eval-prompt", "--eval-max-response-len", "--eval-top-p",
     "--eval-temperature", "--eval-max-context-len", "--eval-max-prompt-len",
@@ -83,20 +92,38 @@ def _strip(argv: Sequence[str]) -> list[str]:
     return out
 
 
+STAGE_SAVE_SUFFIX = ".stage-w-save"
+
+
+def stage_save_dir(critic_save: str) -> str:
+    """Stage W's ``--save``: Miles requires ``--save`` with ``--save-interval``
+    (arguments.py:3504-3505) and the rollout data source writes its state there;
+    the actor itself is never saved (train.py:87-88). A sibling of the product
+    directory, so it never enters the product hash."""
+
+    return str(critic_save).rstrip("/") + STAGE_SAVE_SUFFIX
+
+
 def warmup_stage_argv(main_argv: Sequence[str], spec: AlgorithmSpec, *,
                       actor_checkpoint: str, critic_save: str) -> list[str]:
     """Stage-W Miles argv derived from the main-stage (ports) argv.
 
     Same model, data, batch and algorithm flags as the main stage; the critic
-    schedule and checkpoint flags are stage W's own.
+    schedule and checkpoint flags are stage W's own. The LR schedule is
+    constant: the main stage's linear decay horizon is its own global rounds
+    (``--lr-decay-iters``), and the critic inherits the base schedule (Miles
+    critic overrides only lr / lr_warmup_iters, megatron_config.py:265-274), so
+    a 50-step warm-up under a 2-round horizon would train at LR 0 after step 2.
     """
 
     steps = _require_warmup(spec)
     return _strip(main_argv) + [
+        "--lr-decay-style", "constant",
         "--num-rollout", str(steps),
         "--num-critic-only-steps", str(steps),
         "--critic-load", str(actor_checkpoint),
         "--critic-save", str(critic_save),
+        "--save", stage_save_dir(critic_save),
         "--save-interval", str(steps),
     ]
 
@@ -219,6 +246,123 @@ def ensure_warmup(spec: AlgorithmSpec, *, actor_checkpoint: str, cache_root: str
     run_stage(str(out))
     return finish_warmup(spec, actor_checkpoint=actor_checkpoint,
                          actor_sha256_before=actor_sha, critic_checkpoint=str(out))
+
+
+# --------------------------------------------------------------------------
+# the ports learner's stage W and no-warm-up baseline
+# --------------------------------------------------------------------------
+
+
+def needs_warmup_stage(spec: AlgorithmSpec | None, critic_load: str | None) -> bool:
+    """A copied critic with a warm-up and no stage-W product given."""
+
+    return (spec is not None and spec.execution.needs_critic
+            and spec.critic.init == "copy_actor_backbone" and bool(spec.critic.warmup_steps)
+            and critic_load is None)
+
+
+def stage_w_command(main_argv: Sequence[str], spec: AlgorithmSpec, *, actor_checkpoint: str,
+                    critic_save: str, miles_root: str, python: str = sys.executable) -> list[str]:
+    """``python3 <miles>/train.py <stage-W argv>`` (plain Miles, no ports driver)."""
+
+    argv = warmup_stage_argv(main_argv, spec, actor_checkpoint=actor_checkpoint,
+                             critic_save=critic_save)
+    if argv and argv[0] == "train.py":
+        argv = argv[1:]
+    return [python, str(Path(miles_root) / "train.py"), *argv]
+
+
+def run_ports_warmup(spec: AlgorithmSpec, *, main_argv: Sequence[str], actor_checkpoint: str,
+                     cache_root: str | os.PathLike, miles_root: str,
+                     run: Callable[..., Any] = subprocess.run) -> WarmupProduct:
+    """Stage W for the ports learner: reuse a valid product, else run plain Miles
+    once on the island's Ray cluster and validate it (actor hash before/after)."""
+
+    def run_stage(critic_save: str) -> None:
+        command = stage_w_command(main_argv, spec, actor_checkpoint=actor_checkpoint,
+                                  critic_save=critic_save, miles_root=miles_root)
+        print("[rl] critic warm-up stage W: " + shlex.join(command), flush=True)
+        run(command, cwd=miles_root, check=True)
+
+    cache = Path(cache_root).expanduser()
+    product = ensure_warmup(spec, actor_checkpoint=actor_checkpoint, cache_root=cache,
+                            run_stage=run_stage)
+    print(json.dumps({"event": "rl_critic_warmup_product", **asdict(product)}, sort_keys=True),
+          flush=True)
+    return product
+
+
+# learner flags the baseline run rewrites or drops
+_BASELINE_DROP_VALUE = ("--rl-critic-baseline-rounds", "--rl-critic-load",
+                        "--rl-critic-init-sha256", "--rl-algorithm-spec",
+                        "--rl-expected-algorithm-sha256", "--global-rounds",
+                        "--total-fragment-steps", "--completed-groups-path", "--event-tape")
+BASELINE_SUFFIX = ".critic-baseline"
+
+
+def _flag_value(argv: Sequence[str], flag: str) -> str | None:
+    value = None
+    tokens = list(argv)
+    for i, token in enumerate(tokens):
+        name, eq, rest = token.partition("=")
+        if name == flag:
+            value = rest if eq else (tokens[i + 1] if i + 1 < len(tokens) else None)
+    return value
+
+
+def _with_suffix(path: str) -> str:
+    head, dot, ext = path.rpartition(".")
+    if dot and "/" not in ext:
+        return f"{head}{BASELINE_SUFFIX}.{ext}"
+    return path + BASELINE_SUFFIX
+
+
+def baseline_spec(spec: AlgorithmSpec) -> AlgorithmSpec:
+    """The same algorithm without the warm-up (value head randomly initialized)."""
+
+    _require_warmup(spec)
+    payload = spec.to_dict()
+    payload["critic"] = {**payload["critic"], "warmup_steps": 0}
+    return AlgorithmSpec.from_dict(payload)
+
+
+def baseline_learner_argv(learner_argv: Sequence[str], spec: AlgorithmSpec, *, rounds: int,
+                          spec_path: str) -> tuple[list[str], AlgorithmSpec]:
+    """Learner argv of the no-warm-up baseline run (``--rl-critic-baseline-rounds``).
+
+    Same learner flags except: the algorithm (``warmup_steps=0``, written to
+    ``spec_path`` by the caller), ``rounds`` global rounds, and its own event
+    tape and completed-groups path (``.critic-baseline`` suffix), so the main
+    run never resumes the baseline's state.
+    """
+
+    if type(rounds) is not int or rounds < 1:
+        raise CriticWarmupError(f"baseline rounds must be a positive int (got {rounds!r})")
+    tape = _flag_value(learner_argv, "--event-tape")
+    groups = _flag_value(learner_argv, "--completed-groups-path")
+    fragments = int(_flag_value(learner_argv, "--fragments") or 1)
+    if tape is None or groups is None:
+        raise CriticWarmupError("baseline needs --event-tape and --completed-groups-path")
+    base = baseline_spec(spec)
+    kept: list[str] = []
+    tokens = list(learner_argv)
+    i = 0
+    while i < len(tokens):
+        name = tokens[i].split("=", 1)[0]
+        if name in _BASELINE_DROP_VALUE:
+            i += 1 if "=" in tokens[i] else 2
+        else:
+            kept.append(tokens[i])
+            i += 1
+    kept += [
+        "--rl-algorithm-spec", str(spec_path),
+        "--rl-expected-algorithm-sha256", base.sha256(),
+        "--global-rounds", str(rounds),
+        "--total-fragment-steps", str(rounds * fragments),
+        "--completed-groups-path", _with_suffix(groups),
+        "--event-tape", _with_suffix(tape),
+    ]
+    return kept, base
 
 
 # --------------------------------------------------------------------------

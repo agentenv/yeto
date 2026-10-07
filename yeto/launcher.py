@@ -1336,8 +1336,37 @@ def _prepare_ports_algorithm(args, rl_engine: str) -> None:
         )
     except (AlgorithmSpecError, CapabilityMismatch) as error:
         raise ValueError(str(error)) from error
+    _check_critic_warmup_options(args, spec)
     args.rl_algorithm_spec_json = spec.canonical_json()
     args.rl_expected_algorithm_sha256 = spec.sha256()
+
+
+def _check_critic_warmup_options(args, spec) -> None:
+    """--rl-critic-load/--rl-critic-init-sha256/--rl-critic-baseline-rounds (5.3)."""
+
+    load = getattr(args, "rl_critic_load", None)
+    digest = getattr(args, "rl_critic_init_sha256", None)
+    rounds = getattr(args, "rl_critic_baseline_rounds", 0) or 0
+    if load is None and digest is None and not rounds:
+        return
+    if (load is None) != (digest is None):
+        raise ValueError("--rl-critic-load and --rl-critic-init-sha256 go together")
+    if digest is not None and not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError("--rl-critic-init-sha256 must be a lowercase hex SHA256")
+    critic = spec.critic
+    warm = (spec.execution.needs_critic and critic.init == "copy_actor_backbone"
+            and bool(critic.warmup_steps))
+    if not warm:
+        raise ValueError(
+            "--rl-critic-load/--rl-critic-baseline-rounds need a critic algorithm with "
+            "critic.init='copy_actor_backbone' and critic.warmup_steps > 0"
+        )
+    if type(rounds) is not int or rounds < 0:
+        raise ValueError(f"--rl-critic-baseline-rounds must be >= 0 (got {rounds!r})")
+    if rounds and (load is not None or not getattr(args, "rl_single_island_no_sync", False)):
+        raise ValueError(
+            "--rl-critic-baseline-rounds needs --rl-single-island-no-sync and no --rl-critic-load"
+        )
 
 
 _ELASTIC_LAUNCH_FLAGS = (
@@ -1787,6 +1816,13 @@ def _ports_algorithm_flags(args) -> tuple[str, str]:
     allowed = list(getattr(args, "rl_allow_unverified_mechanism", None) or ())
     for name in allowed:
         flags += f" --rl-allow-unverified-mechanism {shlex.quote(name)}"
+    # rl-algo-critic-family 5.3: critic warm-up options, forwarded only when set
+    # (every other argv is unchanged).
+    if getattr(args, "rl_critic_load", None):
+        flags += (f" --rl-critic-load {shlex.quote(args.rl_critic_load)}"
+                  f" --rl-critic-init-sha256 {shlex.quote(args.rl_critic_init_sha256)}")
+    if getattr(args, "rl_critic_baseline_rounds", 0):
+        flags += f" --rl-critic-baseline-rounds {int(args.rl_critic_baseline_rounds)}"
     infra_prelude, infra_flags = _ports_infra_flags(args)
     return prelude + infra_prelude, flags + infra_flags
 
