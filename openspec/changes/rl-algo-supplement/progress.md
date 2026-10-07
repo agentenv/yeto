@@ -60,3 +60,10 @@
 ### 验证
 - `openspec validate rl-algo-supplement`（含 `--strict`，openspec 1.13.2）：valid。
 - 未跑测试（本次只改 openspec 文件）。
+
+## S14 用户裁定（2026-10-07）
+- Q1 卡型：能用便宜卡就用便宜卡（A10G 优先），万不得已再开贵卡（H100!）。
+- Q2 范围：阶段一 4.x/5.x **全做**。
+- Q3 pin 更新与 critic-family 6.3 合并做（fork push 授权仍沿用"overlay 补丁代替 push"，除非用户另说）。
+- Q4 critic G3 排在算法阶段一之后。
+- Q5/Q6：待用户看完解释后裁定。
