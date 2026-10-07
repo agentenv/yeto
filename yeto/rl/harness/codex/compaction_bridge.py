@@ -58,6 +58,16 @@ SESSIONS_METADATA_KEY = "codex_compaction_sessions"
 # Codex 0.145.0 accepts this key under --strict-config (checked against the
 # pinned binary: a string value fails with "expected i64").
 CODEX_AUTO_COMPACT_DISABLED = "model_auto_compact_token_limit=9223372036854775807"
+# Summary request tool table (design D8 "摘要请求工具表"): explicit choice to
+# send NO tool table -- exactly the stock ``codex_harness_agent._sample_miles
+# (summary=True)`` payload (tools=[], tool_choice="none") -- so the policy
+# cannot call a tool while summarising.  Risk, unverified until GPU: the
+# execution turns carry the Codex tool table, so the summary prompt renders a
+# different system/tools prefix and TITO prefix reuse on the session server may
+# break or re-tokenise.  Changing this needs a stock-sampler change; tests pin
+# that the wire payload matches these constants.
+SUMMARY_REQUEST_TOOLS: tuple[Any, ...] = ()
+SUMMARY_REQUEST_TOOL_CHOICE = "none"
 SUMMARY_PROMPT_TOKEN_RESERVE = len(SUMMARY_PROMPT.encode("utf-8")) + 256
 _MESSAGE_TOKEN_OVERHEAD = 256
 _FALSE = frozenset({"", "0", "false", "no", "off"})
@@ -205,6 +215,7 @@ class CompactionRLBridge(harness._ResponsesBridge):
         summary_messages = copy.deepcopy(self._messages)
         summary_messages.append({"role": "user", "content": SUMMARY_PROMPT})
         try:
+            # summary=True -> SUMMARY_REQUEST_TOOLS / SUMMARY_REQUEST_TOOL_CHOICE (see above).
             completion = await self._sample_miles(messages=summary_messages, summary=True)
         except harness._CompactionContextDoesNotFit as exc:
             raise harness.CodexSequenceLimit("compaction summary does not fit") from exc

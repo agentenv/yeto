@@ -152,6 +152,9 @@ def test_trigger_summary_rebuild_and_new_session(monkeypatch):
     assert summary_req["messages"][:-1] == second["messages"] + summary_req["messages"][len(second["messages"]):-1]
     assert summary_req["messages"][-1] == {"role": "user", "content": SUMMARY_PROMPT}
     assert summary_req["tool_choice"] == "none" and summary_req["model"] == second["model"]
+    # Explicit D8 choice: the summary request carries no tool table (execution turns do).
+    assert summary_req["tools"] == list(cb.SUMMARY_REQUEST_TOOLS) == []
+    assert summary_req["tool_choice"] == cb.SUMMARY_REQUEST_TOOL_CHOICE and second["tools"]
     assert all(not k.lower().startswith("x-miles-compaction") for _s, _b, h in server.requests for k in h)
     # Rebuilt context = system + u_resume(summary without <analysis>) + last k=2 atomic steps, in S1.
     resumed = sessions["S1"][0]["messages"]
