@@ -15,7 +15,7 @@ import json, math, re, sys
 from pathlib import Path
 
 R = Path(sys.argv[1]); CASE = sys.argv[2]; EXPECT_GPU = sys.argv[3] if len(sys.argv) > 3 else "H100"
-N = {"gae-la": 2, "gae-cs": 2, "vapo": 3, "vapo-w0": 3, "sao": 3}[CASE]
+N = {"gae-la": 2, "gae-cs": 2, "vapo": 3, "vapo-w0": 3, "sao": int(__import__("os").environ.get("SAO_STEPS", "12"))}[CASE]
 LOG = (R / "launch.log").read_text(errors="replace") if (R / "launch.log").is_file() else ""
 
 

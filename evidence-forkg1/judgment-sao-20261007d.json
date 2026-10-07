@@ -1,0 +1,22 @@
+{
+ "case": "sao",
+ "ev_by_round": [],
+ "gpu": [
+  "[s13-forkg1-sao-20261007d-l0-modal] [modal-island 0] requested H100!:1, got ['NVIDIA H100 80GB HBM3']"
+ ],
+ "missing": [
+  "0 trained rounds < 12",
+  "no rl_learner_finalized"
+ ],
+ "notes": [
+  "legacy-path EV +0.1365 (Terminal-Bench, mixed-label forward-only gate); here gsm8k in-training EV; recorded only"
+ ],
+ "overlay_applied": [
+  "[yeto-setup] miles overlay applied: image miles c35702e + overlay 7cbc0a42c4880931f2dc1b2285b49907f7c67295d15774c0b885ddd50c6f766c (= fork 6e7365b602ecf5d83d16169e87f4d78f4daf5f86, not pushed; image manifest no longer matches the code)"
+ ],
+ "problems": [],
+ "rounds": [],
+ "tape": "/home/michael/work/s1-runs/s13-forkg1-sao-20261007d/tape-direct/yeto-s13-forkg1-sao-20261007d/l0/rank0/rl-island-0.jsonl",
+ "verdict": "INCOMPLETE",
+ "warmup_product": null
+}

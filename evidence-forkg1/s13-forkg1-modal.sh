@@ -36,11 +36,11 @@ case $CASE in
   gae-cs) MECH="--rl-allow-unverified-mechanism features:critic_multi_update --rl-allow-unverified-mechanism features:gae_cross_segment --rl-allow-unverified-mechanism features:gae_length_adaptive"; REWARD=yeto.rl.synthetic_segments:score ;;
   vapo) STEPS=3; MECH="--rl-allow-unverified-mechanism features:gae_decoupled --rl-allow-unverified-mechanism features:gae_length_adaptive --rl-allow-unverified-mechanism features:positive_example_lm_loss" ;;
   vapo-w0) STEPS=3; MECH="--rl-allow-unverified-mechanism features:gae_decoupled --rl-allow-unverified-mechanism features:gae_length_adaptive --rl-allow-unverified-mechanism features:positive_example_lm_loss" ;;
-  sao) STEPS=3; MECH="--rl-allow-unverified-mechanism features:critic_multi_update --rl-allow-unverified-mechanism features:gae_decoupled --rl-allow-unverified-mechanism features:gae_length_adaptive --rl-allow-unverified-mechanism features:sao_dis --rl-allow-unverified-mechanism features:value_hl_gauss"; MODEL=$QWEN35 ;;
+  sao) STEPS=${SAO_STEPS:-12}; MECH="--rl-allow-unverified-mechanism features:critic_multi_update --rl-allow-unverified-mechanism features:gae_decoupled --rl-allow-unverified-mechanism features:gae_length_adaptive --rl-allow-unverified-mechanism features:sao_dis --rl-allow-unverified-mechanism features:value_hl_gauss"; MODEL=$QWEN35; LORA_OVERRIDE="--tuning lora --lora-r 16 --lora-targets attention" ;;
   *) echo "abort: unknown CASE $CASE"; exit 65 ;;
 esac
 ALLOW="$ALLOW $MECH ${EXTRA_ALLOW:-}"
-LORA="--tuning lora --lora-r 16 --lora-targets all-linear"
+LORA=${LORA_OVERRIDE:-"--tuning lora --lora-r 16 --lora-targets all-linear"}
 CRITIC="--rl-algorithm-spec $SPECDIR/spec.json $ALLOW --rl-miles-overlay ${OVERLAY:-auto}"
 MODALX="--modal-gpu-exact --modal-retries 0 --modal-timeout-s $MODAL_TIMEOUT $TAPEX"
 ARGS="launch --controller local --training-mode rl --rl-engine ports --rl-single-island-no-sync --on-demand --gpu modal:1xh100 --cluster-prefix $P --no-island-relaunch $MODALX --rl-image $IMAGE $MODEL --data zhuzilin/gsm8k --data-revision 0cbd9f31d91ac21a7613dcbc7fef992adac459ae --reward-function $REWARD $LORA --fragments 1 --pipeline 1 --rollout-batch-size 4 --n-samples-per-prompt 8 --rollout-max-response-len 384 --seq-len 1024 --inner-lr 1e-5 --seed 17 --apply-chat-template-kwargs '{\"enable_thinking\": false}' --trust-remote-code --total-steps $STEPS $CRITIC"

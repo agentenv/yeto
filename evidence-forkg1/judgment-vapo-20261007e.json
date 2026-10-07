@@ -1,0 +1,77 @@
+{
+ "case": "vapo",
+ "ev_by_round": [
+  -6.82546334673574,
+  -0.6810833067638145,
+  -1.5910937029025312
+ ],
+ "gpu": [
+  "[s13-forkg1-vapo-20261007e-l0-modal] [modal-island 0] requested H100!:1, got ['NVIDIA H100 80GB HBM3']"
+ ],
+ "missing": [],
+ "notes": [],
+ "overlay_applied": [
+  "[yeto-setup] miles overlay applied: image miles c35702e + overlay 7cbc0a42c4880931f2dc1b2285b49907f7c67295d15774c0b885ddd50c6f766c (= fork 6e7365b602ecf5d83d16169e87f4d78f4daf5f86, not pushed; image manifest no longer matches the code)"
+ ],
+ "problems": [],
+ "rounds": [
+  {
+   "critic_init_sha256": "6dc8cd4bdbfb016624dfe13055b8e9bfd024b98ae97aea5dfb0e3a6342c0ef14",
+   "explained_variance": -6.82546334673574,
+   "extra_metrics": {
+    "critic/value_clipfrac": 0.0,
+    "critic/value_loss": 0.3195869899757078,
+    "entropy_loss": 0.0,
+    "pg_clipfrac": 0.0,
+    "positive_lm_loss": 0.26232441556202013
+   },
+   "grad_norm": 0.255737841129303,
+   "pg_loss": -0.010156044804432112,
+   "rollout_id": 0,
+   "value_loss": 0.3195869899757078
+  },
+  {
+   "critic_init_sha256": "6dc8cd4bdbfb016624dfe13055b8e9bfd024b98ae97aea5dfb0e3a6342c0ef14",
+   "explained_variance": -0.6810833067638145,
+   "extra_metrics": {
+    "critic/value_clipfrac": 0.0,
+    "critic/value_loss": 0.43283770902444474,
+    "entropy_loss": 0.0,
+    "pg_clipfrac": 0.0,
+    "positive_lm_loss": 0.2578195535640763
+   },
+   "grad_norm": 0.24158595502376556,
+   "pg_loss": 0.021456345985910886,
+   "rollout_id": 1,
+   "value_loss": 0.43283770902444474
+  },
+  {
+   "critic_init_sha256": "6dc8cd4bdbfb016624dfe13055b8e9bfd024b98ae97aea5dfb0e3a6342c0ef14",
+   "explained_variance": -1.5910937029025312,
+   "extra_metrics": {
+    "critic/value_clipfrac": 0.0,
+    "critic/value_loss": 0.5454301672899186,
+    "entropy_loss": 0.0,
+    "pg_clipfrac": 0.0,
+    "positive_lm_loss": 0.4688676316619543
+   },
+   "grad_norm": 0.22160691022872925,
+   "pg_loss": 0.02756166881443911,
+   "rollout_id": 2,
+   "value_loss": 0.5454301672899186
+  }
+ ],
+ "tape": "/home/michael/work/s1-runs/s13-forkg1-vapo-20261007e/tape-direct/yeto-s13-forkg1-vapo-20261007e/l0/rank0/rl-island-0.jsonl",
+ "verdict": "PASS",
+ "warmup_product": {
+  "actor_checkpoint": "/root/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca",
+  "actor_sha256": "9cfcabebdd07e02f77fabe1a03acf19e84000bbf6a62d750fd1cfd9bb68b5bff",
+  "algorithm_sha256": "5e9b38edb3eec5e160d221c7f62275e6ebd4a9e163d743ddca94a9b406922113",
+  "critic_checkpoint": "/root/yeto-rl/critic-warmup/df3b6d9e231755a86423f530f3ac4e3393e00c1ad3b9aaba7b5f3aecf564990e",
+  "critic_sha256": "6dc8cd4bdbfb016624dfe13055b8e9bfd024b98ae97aea5dfb0e3a6342c0ef14",
+  "event": "rl_critic_warmup_product",
+  "schema": "yeto-rl-critic-warmup-v1",
+  "value_quality": null,
+  "warmup_steps": 50
+ }
+}
