@@ -74,6 +74,10 @@ def _pinned_template(name: str) -> tuple[Path, Path] | None:
 
 
 def _render(root: Path, template: str, messages, **kwargs) -> str:
+    # Importing the fork helper (even when it fails on a missing sglang) leaves fork
+    # `miles*` packages in sys.modules; later tests then resolve `miles.utils.types.Sample`
+    # to the fork instead of their string fallback. Snapshot and restore both.
+    before = {k: v for k, v in sys.modules.items() if k == "miles" or k.startswith("miles.")}
     try:
         sys.path.insert(0, str(root))
         from miles.utils.test_utils.chat_template_verify import get_standard_result  # fork helper
@@ -84,6 +88,10 @@ def _render(root: Path, template: str, messages, **kwargs) -> str:
         return rendered[0]
     finally:
         sys.path.remove(str(root))
+        for k in [k for k in sys.modules if k == "miles" or k.startswith("miles.")]:
+            if k not in before:
+                del sys.modules[k]
+        sys.modules.update(before)
     return get_standard_result(template, messages, tools=TOOLS, **kwargs)
 
 
