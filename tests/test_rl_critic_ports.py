@@ -132,8 +132,9 @@ def _handle():
 
 
 class _Group:
-    def __init__(self, role, log, *, losses=(), outcome="NORMAL"):
+    def __init__(self, role, log, *, losses=(), outcome="NORMAL", head_rows=1):
         self.role, self.log, self.losses, self.outcome = role, log, losses, outcome
+        self.head_rows = head_rows
 
     async def train(self, rollout_id, pack, external_data=None):
         self.log.append((self.role, "train", rollout_id, pack, external_data))
@@ -146,7 +147,8 @@ class _Group:
         if fn_path == CRITIC_RECORDERS:
             return [True]
         if fn_path == CRITIC_STATE_SUMMARY:
-            return [{"rank": 1, "specs": [["0:module.output_layer.weight", [1, 4], "bf16"]],
+            return [{"rank": 1, "specs": [["0:module.output_layer.weight",
+                                           [self.head_rows, 4], "bf16"]],
                      "weights_sha256": "1" * 64},
                     {"rank": 0, "specs": [["0:module.embedding.weight", [8, 4], "bf16"]],
                      "weights_sha256": "0" * 64}]
@@ -270,6 +272,27 @@ def test_critic_round_receipt_from_the_critic_processes():
         args=SimpleNamespace(num_steps_per_rollout=1), actor_model=_Group("actor", log),
         learner_id=0, learner_generation=0, parameter_layout_hash=lambda: H)
     assert grpo.critic_round_receipt(0) is None
+
+
+def test_critic_round_receipt_accepts_hl_gauss_value_head():
+    # S14 8.4 G1 blocker: SAO HL-Gauss critic has a [value_num_bins, hidden] head
+    # (fork model_provider._value_head_output_size); the receipt must find it.
+    log, released = [], []
+    critic = _Group("critic", log, losses=[{"metrics": {"value_loss": 0.4}}], head_rows=51)
+    trainer = _trainer(log, critic, released)
+    trainer._args.value_loss_type = "classification"
+    trainer._args.value_num_bins = 51
+    trainer.train_step(_handle())
+    receipt = trainer.critic_round_receipt(3)
+    assert len(receipt.critic_layout_hash) == 64 and receipt.critic_layout_hash != H
+    # scalar args against a binned head (or vice versa) still refuse, with the bins named
+    trainer._args.value_loss_type = "mse"
+    with pytest.raises(ValueError, match=r"\[1, hidden\]"):
+        trainer.critic_round_receipt(3)
+    trainer._args.value_loss_type = "classification"
+    critic.head_rows = 1
+    with pytest.raises(ValueError, match=r"\[51, hidden\]"):
+        trainer.critic_round_receipt(3)
 
 
 def test_value_metrics_recorder_reports_step_level_ev_at_micro_batch_1(monkeypatch):

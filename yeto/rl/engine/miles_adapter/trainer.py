@@ -409,8 +409,9 @@ class MilesTrainerGroup:
                            key=lambda s: s["rank"])
         specs = [(f"r{s['rank']}:{name}", shape, dtype)
                  for s in summaries for name, shape, dtype in s["specs"]]
+        bins = self._value_head_bins()
         heads = [name for name, shape, _ in specs
-                 if name.endswith("output_layer.weight") and shape and shape[0] == 1]
+                 if name.endswith("output_layer.weight") and shape and shape[0] == bins]
         critic = getattr(self._spec, "critic", None)
         param_mode = getattr(critic, "param_mode", None) or "full"
         weights = hashlib.sha256(
@@ -420,7 +421,8 @@ class MilesTrainerGroup:
             rollout_id=rollout_id,
             actor_layout_hash=self._layout_hash(),
             critic_layout_hash=critic_layout_hash(
-                specs, value_head=heads[0] if heads else "", param_mode=param_mode),
+                specs, value_head=heads[0] if heads else "", param_mode=param_mode,
+                value_bins=bins),
             critic_param_mode=param_mode,
             critic_init=getattr(critic, "init", None) or "copy_actor_backbone",
             critic_init_sha256=getattr(self._args, "yeto_rl_critic_init_sha256", None),
@@ -428,6 +430,14 @@ class MilesTrainerGroup:
             value_loss=metrics.get("critic/value_loss"),
             explained_variance=metrics.get("critic/explained_variance"),
         )
+
+    def _value_head_bins(self) -> int:
+        """Rows of the critic value head: 1 (scalar / MSE) or Miles' ``value_num_bins``
+        when ``value_loss_type='classification'`` (HL-Gauss / two-hot; fork
+        model_provider.py ``_value_head_output_size``)."""
+        if getattr(self._args, "value_loss_type", "mse") == "classification":
+            return int(getattr(self._args, "value_num_bins", 51) or 51)
+        return 1
 
     # -- rl-algo-critic-family 4.2.2 / 4.3: critic tensors and critic cut ---------------
 

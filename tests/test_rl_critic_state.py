@@ -51,6 +51,26 @@ def test_critic_layout_hash_is_separate_and_shape_sensitive():
         critic_layout_hash(SPECS, value_head="output_layer.weight", param_mode="lora")
 
 
+def test_critic_layout_hash_scalar_head_is_pinned_and_bins_are_identity():
+    # [1, hidden] payload must stay byte-for-byte (G1 PASS critic hashes must not drift).
+    pinned = [("embed.weight", [4, 4], "bf16"), ("output_layer.weight", [1, 4], "bf16")]
+    expected = "5939fb770a1c4a440b1c1f7d8d0da7cadd03f2104979f151226e6ebb16c72868"
+    assert critic_layout_hash(pinned, value_head="output_layer.weight") == expected
+    assert critic_layout_hash(pinned, value_head="output_layer.weight", value_bins=1) == expected
+    # HL-Gauss / classification head: [bins, hidden] accepted only when bins matches.
+    binned = [SPECS[0], ("output_layer.weight", (51, 4), "torch.float32")]
+    h51 = critic_layout_hash(binned, value_head="output_layer.weight", value_bins=51)
+    assert len(h51) == 64 and h51 != critic_layout_hash(SPECS, value_head="output_layer.weight")
+    assert h51 == critic_layout_hash(list(reversed(binned)), value_head="output_layer.weight",
+                                     value_bins=51)
+    with pytest.raises(ValueError, match=r"\[1, hidden\]"):
+        critic_layout_hash(binned, value_head="output_layer.weight")
+    with pytest.raises(ValueError, match=r"\[51, hidden\]"):
+        critic_layout_hash(SPECS, value_head="output_layer.weight", value_bins=51)
+    with pytest.raises(ValueError, match="value_bins"):
+        critic_layout_hash(SPECS, value_head="output_layer.weight", value_bins=0)
+
+
 def test_receipt_has_both_layout_hashes_mode_and_init_source():
     event = receipt(critic_init_sha256="c" * 64).to_event()
     assert event["rl/critic/actor_layout_hash"] == A
