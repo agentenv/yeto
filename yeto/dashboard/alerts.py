@@ -48,7 +48,7 @@ def heartbeat(cards: list[dict], th: dict) -> list[dict]:
     out = []
     for c in cards:
         age = c["last_event_age_s"]
-        if c["status"] == "done" or age is None:
+        if c["status"] == "done" or c.get("finalized") or age is None:
             continue
         if age > th["heartbeat_severe_s"]:
             sev = 0

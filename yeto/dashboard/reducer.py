@@ -121,6 +121,9 @@ def classify(record: dict) -> str:
     return "other"
 
 
+HOST_SAMPLE_EVENT = "modal_host_sample"
+
+
 def _iid(value: Any) -> str | None:
     if value is None:
         return None
@@ -137,7 +140,7 @@ def _new_island(iid: str) -> dict:
         "price_key": None, "first_ts": None, "last_event_ts": None, "last_heartbeat_ts": None,
         "heartbeat_seen": False, "round": None, "rollout_id": None, "policy_version": None,
         "phase": None, "finalized": False, "fleet_state": None, "ready_ts": None, "stop_ts": None,
-        "lost_ts": None, "open_ts": None, "closed_s": 0.0, "points": {}, "nonfinite": [], "resource": None, "staleness": None,
+        "lost_ts": None, "open_ts": None, "closed_s": 0.0, "points": {}, "nonfinite": [], "resource": None, "host": None, "staleness": None,
         "contribution": None, "reconfig": [], "cells": None, "cells_source": None,
         "transactions": {}, "tx_order": [], "recovery_required": [], "source_lost": None,
         "recent": deque(maxlen=50), "events_by_type": {},
@@ -179,6 +182,8 @@ class Reducer:
             self.offsets[source] = offset
         if not isinstance(record, dict):
             return False
+        if record.get("event") == HOST_SAMPLE_EVENT:
+            return self._feed_host(record, island)
         kind = classify(record)
         self.counts[kind] += 1
         ts = record_ts(record)
@@ -192,6 +197,34 @@ class Reducer:
                                         else ("syncer_merge" if kind == "syncer" else "unknown"))
         self.events.append({"seq": self.event_seq, "ts": ts, "island": iid, "type": etype,
                             "source": source, "stream": kind, "record": record})
+        return True
+
+    def _feed_host(self, r: dict, island: str | None) -> bool:
+        """``modal_host_sample`` has no island_id: attach it to the island the
+        source resolved (path ``l<N>/rank<R>``); otherwise ignore (never a "?" island)."""
+        self.counts["other"] += 1
+        iid = _iid(r.get("island_id")) or island
+        if iid is None:
+            return True
+        isl = self.island(iid)
+        ts = record_ts(r)
+        used, total = finite(r.get("meminfo_used")), finite(r.get("meminfo_total"))
+        cur = finite(r.get("cgroup_current"))
+        cur = cur if cur is not None else used
+        host = isl["host"] or {"peak_bytes": None, "samples": 0}
+        if cur is not None:
+            host["peak_bytes"] = cur if host["peak_bytes"] is None else max(host["peak_bytes"], cur)
+        peak = finite(r.get("cgroup_peak"))
+        if peak is not None:
+            host["peak_bytes"] = peak if host["peak_bytes"] is None else max(host["peak_bytes"], peak)
+        gm = [finite(x) for x in r.get("gpu_mem_used_mib") or []]
+        prev = host.get("gpu_mem_used_mib_peak") or []
+        peaks = [max(a or 0, b or 0) for a, b in zip(gm + [0] * (len(prev) - len(gm)),
+                                                    prev + [0] * (len(gm) - len(prev)))]
+        host.update({"samples": host["samples"] + 1, "ts": ts, "current_bytes": cur, "total_bytes": total,
+                     "gpu_mem_used_mib": gm, "gpu_mem_used_mib_peak": peaks})
+        isl["host"] = host
+        self._touch(isl, ts)
         return True
 
     def feed_many(self, records: Iterable[dict], **kw: Any) -> None:
@@ -219,7 +252,7 @@ class Reducer:
     def _feed_learner(self, r: dict, iid: str | None, ts: float | None) -> None:
         event = r["event"]
         if iid is None:
-            iid = "?"
+            return  # no island identity: never fabricate a "?" island
         isl = self.island(iid)
         self._touch(isl, ts)
         isl["events_by_type"][event] = isl["events_by_type"].get(event, 0) + 1
@@ -310,7 +343,8 @@ class Reducer:
             self.island(_iid(m))
 
     def _feed_journal(self, r: dict, iid: str | None, ts: float | None) -> None:
-        iid = iid or "?"
+        if iid is None:
+            return
         isl = self.island(iid)
         ts = finite(r.get("wall_time")) or ts
         self._touch(isl, None)
@@ -418,7 +452,9 @@ class Reducer:
         if event == "cost_tick":
             self.cost_ticks.append(r)
             return
-        iid = iid or _iid(r.get("island")) or "?"
+        iid = iid or _iid(r.get("island"))
+        if iid is None:
+            return
         isl = self.island(iid)
         for key in ("cloud", "region", "gpu", "gpus", "price_key"):
             if r.get(key) is not None:
@@ -513,13 +549,15 @@ class Reducer:
             status = "ok"
         return {
             "id": isl["id"], "name": isl["name"], "cloud": isl["cloud"], "region": isl["region"],
-            "gpu": isl["gpu"], "gpus": isl["gpus"], "status": status,
+            "gpu": isl["gpu"], "gpus": isl["gpus"], "status": status, "finalized": bool(isl["finalized"]),
             "last_event_age_s": _r(age), "heartbeat_age_s": _r(hb_age),
             "heartbeat_seen": isl["heartbeat_seen"], "round": isl["round"],
             "rollout_id": isl["rollout_id"], "policy_version": isl["policy_version"],
             "phase": isl["phase"], "staleness": isl["staleness"], "contribution": isl["contribution"],
             "gpu_util_pct": res.get("util_pct"), "mem_pct": res.get("mem_pct"),
             "resource_available": res.get("available") if res else None,
+            "host_mem_peak_bytes": (isl["host"] or {}).get("peak_bytes"),
+            "host_mem_current_bytes": (isl["host"] or {}).get("current_bytes"),
             "reward": last.get("reward"), "tok_s": last.get("tok_s"),
             "source_lost": isl["source_lost"],
         }
@@ -592,7 +630,7 @@ class Reducer:
         txs = [isl["transactions"][k] for k in isl["tx_order"]]
         return {
             "card": self._island_card(isl, now), "series": self.series(isl),
-            "resource": isl["resource"], "cells": isl["cells"], "cells_source": isl["cells_source"],
+            "resource": isl["resource"], "host": isl["host"], "cells": isl["cells"], "cells_source": isl["cells_source"],
             "transactions": txs, "reconfigurations": isl["reconfig"],
             "recovery_required": isl["recovery_required"],
             "recent_events": list(isl["recent"])[-20:], "events_by_type": isl["events_by_type"],
