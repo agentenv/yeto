@@ -1755,10 +1755,36 @@ def resolve_ports_algorithm(args: Any, *, rl_engine: str) -> "AlgorithmSpec | No
     return spec
 
 
+# rl-algo-critic-family (user decision 2026-10-07): the critic mechanisms may be
+# allowed (still explicitly, via --rl-allow-unverified-mechanism) on several
+# islands / with outer sync, but only under the strict-avg preset, whose
+# critic channel is the second syncer (DualStrictAvgSync, design D4).
+# decoupled + critic stays refused (critic_run_problems). Every other
+# unverified mechanism keeps D11 as written.
+CRITIC_STRICT_AVG_ALLOWANCES = frozenset({
+    "advantage_estimators:ppo",
+    "execution:critic",
+    "features:critic_multi_update",
+    "features:gae_length_adaptive",
+    "features:gae_decoupled",
+    "features:gae_cross_segment",
+    "features:positive_example_lm_loss",
+    "features:value_hl_gauss",
+    "features:sao_dis",
+})
+
+
 def check_unverified_allowance(
-    names: Iterable[str], *, islands: int, outer_sync: bool
+    names: Iterable[str], *, islands: int, outer_sync: bool,
+    sync_preset: str | None = None,
 ) -> tuple[str, ...]:
     """D11 as written: refused with multiple islands *or* any outer sync.
+
+    Exception (critic family, design D4): when ``sync_preset == "strict-avg"``
+    and every name is in :data:`CRITIC_STRICT_AVG_ALLOWANCES` (with
+    ``execution:critic`` among them), the allowance is accepted on several
+    islands / with outer sync. ``sync_preset=None`` (caller does not know the
+    preset) keeps D11 as written.
 
     Names are qualified ``dimension:name`` mechanisms.
     """
@@ -1773,6 +1799,9 @@ def check_unverified_allowance(
             f"(known: {sorted(allowance_names())})"
         )
     if islands != 1 or outer_sync:
+        if (sync_preset == "strict-avg" and "execution:critic" in names
+                and set(names) <= CRITIC_STRICT_AVG_ALLOWANCES):
+            return names
         raise AlgorithmSpecError(
             f"--rl-allow-unverified-mechanism {list(names)} is only allowed on a "
             f"single-island run without outer sync (this run: {islands} island(s), "

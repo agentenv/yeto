@@ -53,6 +53,9 @@
   - 跨通道原子提交：同一轮 v→v+1，actor 与 critic 两条通道都拿到 v+1 的平均结果后，才对 trainer 应用并写 round-cut；任一通道失败/超时，两者都不应用，回退到上一已提交轮（语义同 `TwoRoleStrictAvg`）。
   - Miles 进程内需要 critic 全参数张量导出/写回插件（按 critic layout 切 fragment，写回后校验哈希）。
   - decoupled 外层遇 critic 直接拒绝（后续探索）。
+  - **critic 同步以 fp32 主权重为准（用户决定 2026-10-07）**：插件导出读优化器 fp32 主权重（DistributedOptimizer 按 DP 分片读本 rank 的 main shard 并在 DP 组内拼全；完整 `main_param`；fp32 参数自身即主权重），写回先写主权重、再由主权重 cast 生成模型低精度参数（同 optimizer step 后 main→model 拷贝），通道/写回校验/round-cut 的哈希均按 fp32 主权重；低精度参数无任何 fp32 主权重时拒绝。
+  - **critic 优化器状态每轮保留（第一版选择）**：strict 轮只替换 critic 权重，优化器矩/步数与学习率调度器跨轮保留（actor 每轮 reset）。
+  - 门控：`check_unverified_allowance` 在 `sync_preset=strict-avg` 且所有放行名都属 critic 家族（`CRITIC_STRICT_AVG_ALLOWANCES`，须含 `execution:critic`）时，允许多岛/外层同步；仍须显式 `--rl-allow-unverified-mechanism`；其它未验证机制与其它 preset 维持 D11 原文。
   - 备选 b（单 syncer layout 同时容纳 actor LoRA 与 critic 全参数）：否决，改 syncer 协议/layout 影响面大。备选 c（只平均 actor）：违背决策 1。
 - checkpoint/恢复：critic 与 elastic 互斥，故使用 ports 的 round-cut checkpoint（`MilesTrainerGroup.save_cut/restore_cut`），经 critic 句柄保存 critic 权重、优化器与学习率调度器状态；pointer 记录 critic 轮次，复用 `CriticCheckpointStore` 轮次一致性校验，actor/critic 不同轮则拒绝恢复。
 - tape/ledger：每轮记录 critic 权重哈希、value_loss、explained variance。

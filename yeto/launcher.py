@@ -1318,6 +1318,7 @@ def _prepare_ports_algorithm(args, rl_engine: str) -> None:
                 getattr(args, "rl_allow_unverified_mechanism", None) or (),
                 islands=islands,
                 outer_sync=not no_sync,  # a launched run has a syncer unless no-sync
+                sync_preset=getattr(args, "rl_sync_preset", "strict-avg"),
             )
         )
         from .rl.engine.miles_adapter.entry import miles_capabilities, with_partitioned_serial

@@ -508,6 +508,7 @@ def _check_ports_algorithm_options(args, *, outer_sync: bool = True) -> None:
         getattr(args, "rl_allow_unverified_mechanism", None) or (),
         islands=int(getattr(args, "num_learners", 1) or 1),
         outer_sync=outer_sync,
+        sync_preset=getattr(args, "sync_preset", "strict-avg"),
     )
 
 

@@ -24,7 +24,7 @@ def _two_island_args(spec=None):
     args.controller = "local"
     _prepare_rl_args(args)
     if spec is not None:
-        # prepare refuses an unverified critic on two islands before G3 (check_unverified_allowance);
+        # prepare refuses an undeclared critic without --rl-allow-unverified-mechanism execution:critic;
         # the launcher plumbing is exercised on the prepared args directly.
         args.rl_algorithm_spec_json = spec.canonical_json()
         args.rl_expected_algorithm_sha256 = spec.sha256()
@@ -192,11 +192,11 @@ def test_write_back_refusals():
         trainer.import_critic_state({"r0:0:extra": torch.zeros(1), **state})
     with pytest.raises(cs.CriticStateError, match="shape"):
         trainer.import_critic_state({k: torch.zeros(2, 2) for k in state})
-    # bf16 parameters cannot hold an arbitrary fp32 average: the post-write hash check refuses
+    # the channel is over FP32 optimizer masters (test_rl_critic_fp32_masters.py); a bf16
+    # critic whose optimizer holds no FP32 master is refused instead of written lossily
     bf16 = _critic_trainer([_rank_actor(0, torch.bfloat16)])
-    odd = {k: v + 1e-4 for k, v in bf16.export_critic_state().items()}
-    with pytest.raises(cs.CriticStateError, match="written critic hash"):
-        bf16.import_critic_state(odd)
+    with pytest.raises(sp.StatePluginError, match="no FP32 optimizer master"):
+        bf16.export_critic_state()
 
 
 # -- 4.3 round-cut critic checkpoint (weights + optimizer + scheduler) ------------------
