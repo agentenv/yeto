@@ -123,3 +123,4 @@
 | fix-decoupled-lr-schedule | 3.2 | 两岛 decoupled legacy vs ports 各一次，学习率逐位一致 | GPU G3 | ≈$6（1+1 短跑） | 与 6.1 同批（同为 1+1 两岛） |
 | rl-algo-seq-and-adv | 3.6 | rpp 梯度规则"收紧"分支依赖 KL 大小上报，记为已知限制（progress.md:50,144） | 已知限制 | $0 | 阶段二不处理；若要补证据并入 4.5 KL 批次 |
 | rl-algo-seq-and-adv / rl-algorithm-capabilities | — | tasks 全勾，无汇入 | — | — | — |
+| rl-fn-codex-rollout（新，S14 10-07） | 0.1–3.3 | FN 以 codex harness 为 rollout/奖励源：阶段 0 CPU（FN profile、5.1/5.2、A16、9.2 失配根因）→ 阶段 1 四层 1×H100! → 阶段 2 全尺寸 8×H200 两轮 → 阶段 3 并入 FN-TRAIN-PLAN | CPU+GPU | ≈$2–3 + $46–70（上限 $100） | 独立 change，需用户拍板 Q1–Q5（其 design Open Questions） |
