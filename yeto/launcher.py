@@ -4435,6 +4435,14 @@ def modal_tape_subdir(cluster_prefix: str, learner_id: int) -> str:
     return f"{modal_app_name(cluster_prefix)}/l{learner_id}"
 
 
+def _modal_tape_run_dir(args):
+    # A module-level import: `run()` binds `runs` only part-way through, and
+    # its finally block (where the tape is pulled) also runs on early failures.
+    from . import runs as _runs
+
+    return _runs.run_dir(args.cluster_prefix)
+
+
 def pull_modal_tapes(modal_ops, modal_cfgs: dict, run_dir) -> dict[str, str]:
     """Copy each Modal island's tape Volume subdir into
     ``<run_dir>/modal-tape/<island>/``; returns {island: "ok" | error}.
@@ -6045,6 +6053,9 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     run_started_unix = time.time()  # Modal rows created after this are this run's app
     verda_names = [n for n, sp in zip(learner_names, specs) if sp.cloud == "verda"]
     verda = prepare_verda_islands(verda_names, on_instance_ids) if verda_names else None
+    # Read by the finally block (Modal stop / tape pull) even on an early failure.
+    modal_ops = None
+    modal_cfgs: dict[str, object] = {}
 
     try:
         # 1. Syncer: a subprocess on this host (head mode) or its own VM.
@@ -6143,7 +6154,6 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             if getattr(args, "training_mode", "sft") == "rl"
             else make_learner_task
         )
-        modal_cfgs: dict[str, object] = {}
         modal_addr = None
         if no_sync:
             modal_addr = syncer_addr  # nothing to reach
@@ -6441,7 +6451,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         if modal_ops is not None and modal_cfgs:
             # Containers commit their tape every 30 s and at exit; pulled
             # here (before the app stop) and again after it below.
-            pull_modal_tapes(modal_ops, modal_cfgs, runs.run_dir(args.cluster_prefix))
+            pull_modal_tapes(modal_ops, modal_cfgs, _modal_tape_run_dir(args))
         if args.keep:
             print(f"[launcher] keeping clusters: {remaining}")
         else:
@@ -6473,7 +6483,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                     teardown_unverified = True
                 if modal_cfgs:
                     # The final at-exit commits land once the containers are gone.
-                    pull_modal_tapes(modal_ops, modal_cfgs, runs.run_dir(args.cluster_prefix))
+                    pull_modal_tapes(modal_ops, modal_cfgs, _modal_tape_run_dir(args))
             if unverified:
                 # The head must NOT self-terminate: it is the only thing that
                 # can still reach these orphaned learner clusters via sky.
