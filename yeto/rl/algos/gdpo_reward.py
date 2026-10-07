@@ -11,6 +11,8 @@
 
 The components go to ``sample.metadata["yeto_reward_components"]`` (design
 D6); the scalar return value (correctness) is only used for metrics/logs.
+Both entry points also set ``sample.metadata["success"]`` = correctness (the
+format component never counts as success).
 """
 
 from __future__ import annotations
@@ -37,7 +39,11 @@ def components(response: str, label) -> dict[str, float]:
 async def correctness_reward(args, sample, **kwargs) -> float:
     """Binary {0,1} correctness only (the ``correctness`` component), for MaxRL/MAPO/GSPO/rpp G1."""
 
-    return components(sample.response or "", sample.label)["correctness"]
+    from yeto.rl.math_reward import set_success
+
+    value = components(sample.response or "", sample.label)["correctness"]
+    set_success(sample, value == 1.0)
+    return value
 
 
 async def reward_func(args, sample, **kwargs) -> float:
@@ -45,4 +51,5 @@ async def reward_func(args, sample, **kwargs) -> float:
     if not isinstance(sample.metadata, dict):
         sample.metadata = {}
     sample.metadata[REWARD_COMPONENTS_KEY] = values
+    sample.metadata["success"] = values["correctness"] == 1.0
     return values["correctness"]

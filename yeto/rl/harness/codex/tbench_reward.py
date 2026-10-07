@@ -3,7 +3,9 @@
 - ``reward_func``: only HMAC-authenticated ``tbench_outcome`` rewards (first of
   the three verification points, design D7).  An unsigned infrastructure marker
   marks the sample ABORTED and returns the numeric 0.0 Miles requires; the
-  group filter never lets it into training.
+  group filter never lets it into training.  A verified outcome also sets
+  ``sample.metadata["success"]`` to the signed ``passed`` bit (all
+  Terminal-Bench tests passed); aborted samples get no flag.
 - ``check_group``: authenticates every sample again, drops groups with aborted
   members, and enforces R-D5a: samples of one trajectory (siblings) share one
   reward and are counted once (``rollout_id``/``trajectory_id``).
@@ -42,8 +44,12 @@ def is_infrastructure(sample: Any) -> bool:
 def _sample_reward(sample: Any) -> float:
     if is_infrastructure(sample):
         _mark_aborted(sample)
+        _metadata(sample).pop("success", None)  # no verdict: never a positive
         return 0.0
-    _outcome, value = verified_outcome(_metadata(sample))
+    metadata = _metadata(sample)
+    outcome, value = verified_outcome(metadata)
+    # Full success = the signed pass bit (every test passed), not reward > 0.
+    metadata["success"] = outcome["passed"] is True
     return value
 
 
