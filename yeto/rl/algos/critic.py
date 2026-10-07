@@ -33,8 +33,11 @@ import yeto.rl.algos.seq_adv  # noqa: F401  (owns advantage.gamma / --gamma; loa
 from yeto.rl.engine import algorithm as _alg
 from yeto.rl.engine.algorithm import (
     AlgorithmSpec,
+    register_field,
     register_island_check,
     register_launch_check,
+    register_mechanism,
+    register_rejection,
 )
 from yeto.rl.engine.miles_adapter import algorithm_flags as _af
 from yeto.rl.engine.miles_adapter.algorithm_flags import (
@@ -73,7 +76,41 @@ def critic_argv(spec: AlgorithmSpec) -> list[str]:
     argv += ["--num-critic-only-steps", "0"]
     if c.init == "load":
         argv += ["--critic-load", c.load]
+    return argv + gae_variant_argv(spec)
+
+
+# Fork-only Miles flags (not in upstream c35702e): yeto-gae-variant ce96fc060
+# (--gae-*) and yeto-vapo cbf8c4737 (--positive-example-*).
+FORK_FLAGS = frozenset({
+    "--gae-variant", "--gae-lambd-mode", "--gae-length-alpha", "--gae-critic-lambd",
+    "--positive-example-lm-loss-coef", "--positive-example-reward-threshold",
+})
+
+
+def gae_variant_argv(spec: AlgorithmSpec) -> list[str]:
+    """Fork GAE extension flags (yeto-gae-variant ce96fc060, design D6).
+
+    Empty for vanilla GAE with a fixed lambda, so plain PPO argv is unchanged.
+    """
+
+    a = spec.advantage
+    argv: list[str] = []
+    if a.gae_variant == "decoupled":
+        argv += ["--gae-variant", "decoupled", "--gae-critic-lambd", _num(a.critic_lambd)]
+    if a.lambd_mode == "length_adaptive":
+        argv += ["--gae-lambd-mode", "length_adaptive", "--gae-length-alpha", _num(a.alpha)]
     return argv
+
+
+def positive_lm_argv(spec: AlgorithmSpec) -> list[str]:
+    """VAPO positive-example LM loss (fork cbf8c4737); empty when unset."""
+
+    coef = getattr(spec.loss, "positive_lm_coef", None)
+    if coef is None:
+        return []
+    return ["--positive-example-lm-loss-coef", _num(coef),
+            "--positive-example-reward-threshold",
+            _num(spec.loss.positive_lm_reward_threshold)]
 
 
 def _none(spec: AlgorithmSpec) -> list[str]:
@@ -92,6 +129,57 @@ register_flag(FlagMapping("--num-critic-only-steps", "critic.warmup_steps", Fals
                           lambda v: [("critic.warmup_steps", v)], _none))
 register_flag(FlagMapping("--critic-load", "critic.load", False, _str,
                           lambda v: [("critic.init", "load"), ("critic.load", v)], _none))
+
+register_flag(FlagMapping("--gae-variant", "advantage.gae_variant", False, _str,
+                          lambda v: [("advantage.gae_variant", v)], _none))
+register_flag(FlagMapping("--gae-lambd-mode", "advantage.lambd_mode", False, _str,
+                          lambda v: [("advantage.lambd_mode", v)], _none))
+register_flag(FlagMapping("--gae-length-alpha", "advantage.alpha", False, _float,
+                          lambda v: [("advantage.alpha", v)], _none))
+register_flag(FlagMapping("--gae-critic-lambd", "advantage.critic_lambd", False, _float,
+                          lambda v: [("advantage.critic_lambd", v)], _none))
+
+# --------------------------------------------------------------------------
+# VAPO positive-example LM loss (change 7.2; VAPO arXiv 2504.05118 sec. 4.3 eq. 9-10)
+# --------------------------------------------------------------------------
+
+
+def _positive_coef(path: str, value: Any) -> float | None:
+    return _alg._number(path, value, low=0.0, low_open=True)
+
+
+register_field("loss", "positive_lm_coef", default=None, parse=_positive_coef)
+register_field("loss", "positive_lm_reward_threshold", default=None,
+               parse=lambda path, v: _alg._number(path, v))
+
+
+def _reject_positive_lm(spec: AlgorithmSpec) -> str | None:
+    coef = spec.loss.positive_lm_coef
+    threshold = spec.loss.positive_lm_reward_threshold
+    if coef is not None and threshold is None:
+        return (
+            "loss.positive_lm_coef needs loss.positive_lm_reward_threshold (a sample is a "
+            "positive example when its reward is strictly greater); set it explicitly so "
+            "both islands hash the same definition of 'correct'"
+        )
+    if coef is None and threshold is not None:
+        return "loss.positive_lm_reward_threshold only applies with loss.positive_lm_coef"
+    return None
+
+
+register_rejection("positive_lm_threshold", _reject_positive_lm)
+register_mechanism("features", "positive_example_lm_loss",
+                   lambda s: s.loss.positive_lm_coef is not None)
+# Fork-only GAE variants: undeclared by the Miles adapter until GPU G1 (task 7.3).
+register_mechanism("features", "gae_decoupled",
+                   lambda s: s.advantage.gae_variant == "decoupled")
+register_mechanism("features", "gae_length_adaptive",
+                   lambda s: s.advantage.lambd_mode == "length_adaptive")
+register_flag(FlagMapping("--positive-example-lm-loss-coef", "loss.positive_lm_coef", False,
+                          _float, lambda v: [("loss.positive_lm_coef", v)], positive_lm_argv))
+register_flag(FlagMapping("--positive-example-reward-threshold",
+                          "loss.positive_lm_reward_threshold", False, _float,
+                          lambda v: [("loss.positive_lm_reward_threshold", v)], _none))
 
 # --gamma: seq_adv's row emits it for REINFORCE++; critic_argv owns it under a critic.
 _gamma_row = _af.MAPPINGS["--gamma"]

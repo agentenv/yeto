@@ -116,3 +116,47 @@ Miles `train.py`（c35702e）:118-126 的 critic 训练顺序：`values = critic
 - 测试（/home/michael/work/miles-next-venv）：`test_ppo_gae_variants.py` 22 passed（对拍拷贝的参考实现；缺省/显式 vanilla 与冻结的原实现 `torch.equal` 逐元素一致，fp32/fp64、chunked/非 chunked、带掩码）；`test_segment_ids_conversion.py` 2 passed。
 - 定向回归（GAE/loss 相关文件 + tests/test_chunked_gae.py）：基线 039471508 13 failed/99 passed，新 13 failed/121 passed，失败集合完全相同（megatron.core 缺失等环境原因）。未跑 tests/fast/ray 全量（会启动 Ray，线程上限）。
 - yeto 全量回归：log /home/michael/work/infra-drafts/critic-gae-pytest.log，68 failed/26 errors，与 /tmp/base2.sorted 按用例 id 比对集合相同，新增失败 0。
+
+## S13 7.1 VAPO 参数（2026-10-07，待用户确认）
+
+出处：VAPO, arXiv 2504.05118v3（11 Apr 2025），取自 arXiv HTML 版（https://arxiv.org/html/2504.05118v3）。
+
+| 组件 | 论文值 | 出处 | yeto 规格字段 / Miles 参数 |
+|---|---|---|---|
+| 基座 | Qwen2.5-32B base | Abstract、图 1、§5.1 | 运行配置 |
+| γ | 1.0 | §5.1 basic PPO | `advantage.gamma` / `--gamma` |
+| Value-Pretraining | 固定策略采样、MC 回报训练 value 至 value loss/EV 足够低；50 步 | §4.1 步骤 1–3；§5.1 第 1 条 | `critic.warmup_steps=50`（阶段 W，D5） |
+| value 初始化 | 由奖励模型初始化 | §4.1、§5.1 | **不一致**：yeto `copy_actor_backbone`（无 RM） |
+| Decoupled GAE | critic 目标 λ=1.0，policy 用另一 λ | §4.1；§5.1 第 2 条 | `advantage.gae_variant=decoupled`、`critic_lambd=1.0` / `--gae-variant decoupled --gae-critic-lambd 1.0` |
+| Length-adaptive GAE | λ_policy=1−1/(α·l)，**α=0.05** | §4.2 式 (4)(5)；§5.1 第 3 条 | `lambd_mode=length_adaptive, alpha=0.05` / `--gae-lambd-mode length_adaptive --gae-length-alpha 0.05` |
+| Clip-Higher | ε_low=0.2、ε_high=0.28 | §4.3 式 (8)；§5.1 第 4 条 | `loss.eps_clip/eps_clip_high` |
+| Token-level loss | 批内全部 token 等权 | §4.2 式 (7)；§5.1 第 5 条 | `loss.aggregation=token` / `--calculate-per-token-loss` |
+| Positive-example LM loss | L=L_PPO+μ·L_NLL，L_NLL 对正确样本 token 平均，μ=0.1 | §4.3 式 (9)(10)；§5.1 第 6 条 | `loss.positive_lm_coef=0.1` / `--positive-example-lm-loss-coef 0.1`（fork 新增） |
+| Group-Sampling | 每 prompt 16 次，512 prompts/采样，mini-batch 512 | §4.3；§5.1 第 7 条 | 运行配置（n_samples_per_prompt 等，非算法哈希） |
+| 学习率 | actor 1e-6、critic 2e-6，AdamW，warmup-constant | §5.1 basic PPO | `critic.critic_lr=2e-6`；actor lr 为运行配置 |
+| 评测 | AIME24 avg@32，top_p=0.7，temperature=1.0 | §5.1 | — |
+| 消融（AIME24） | Vanilla PPO 5；w/o Value-Pretraining 11；w/o Decoupled-GAE 33；w/o Length-adaptive 45；w/o Clip-Higher 46；w/o Token-level 53；w/o Pos-LM 54；w/o Group-Sampling 55；VAPO 60 | 表 1 | — |
+
+论文未给出：value_clip（yeto 用 Miles 缺省 0.2）、KL（VAPO 未述；Miles shared PPO 要求 kl_coef=0）、lr warmup 步数、正确样本的奖励阈值（yeto 取 reward>0.0）、mini-batch 512 的单位（prompt 还是样本）、critic/actor 每批更新次数、max response length。basic PPO 基线的 λ=0.95、sample-level loss、ε=0.2、8192 prompts×1 为对照设置，非 VAPO 值。
+**注意**：design D6 / fork `--gae-length-alpha` 缺省 α=1.5 来自 SAO；VAPO 论文值为 0.05（l=100 时 λ=0.8），`vapo_spec` 显式写 0.05。
+
+## S13 7.2 VAPO 实现（CPU；GPU 7.3 未执行）
+
+缺失判断（fork yeto-vapo 基于 ce96fc060）：decoupled / length-adaptive GAE 已有（6.2）；clip-higher（`--eps-clip-high`）、token-level loss（`--calculate-per-token-loss`）、group sampling（`--n-samples-per-prompt`）为既有参数；value-pretraining 由 D5 阶段 W 覆盖。**唯一缺失：positive-example LM loss**。
+
+fork（/home/michael/work/miles-vapo，分支 yeto-vapo，本地提交 `cbf8c4737`，未 push）：
+- `arguments.py`：`--positive-example-lm-loss-coef`（缺省 0 关闭）、`--positive-example-reward-threshold`（缺省 0.0，reward 严格大于阈值为正例）。
+- `loss.py`：coef≠0 时在 `compute_advantages_and_returns` 由 rewards 生成每样本 `positive_example_flags`；`megatron_utils/model.py`、`fsdp_utils/actor.py` 的 get_batch 键表加入该键（缺失时为 None）。
+- `loss_hub/losses.py`：`_positive_example_lm_loss` 用正例掩码构造与 PG loss 同一归约（`get_sum_of_sample_mean`，per-token 或 per-sample），loss += μ·NLL，指标 `positive_lm_loss`。
+- 测试（miles-next-venv，OMP=1）：`tests/fast/backends/training_utils/loss/test_positive_example_lm_loss.py` 8 passed（独立参考：logits 上 log_softmax 重算 token logprob，per-sample/per-token 两种归约对拍 NLL 与总 loss；无正例时 loss/grad 不变；coef=0 时 loss/grad 逐元素相等且指标键不变；缺 flags 报错；flags 生成；rollout_data 只在启用时加键）。定向回归（loss/ + gae variants/masks + true_on_policy_loss_metrics）：基线 ce96fc060 13 failed/96 passed，新 13 failed/104 passed，失败集合相同（环境原因）。未启动 Ray。
+- **与论文的偏差（需确认）**：论文式 (9) 按正例 token 总数归一；fork 实现沿用 PG loss 的归一（per-token 模式下除以批内全部 token 数，per-sample 模式下按样本均值再除 batch size），即 NLL 实际权重 ≈ μ×正例 token 占比。按正例 token 全局归一需跨 micro-batch/DP 的额外 all-reduce，未做。
+
+yeto（/home/michael/work/s13-vapo，分支 s13-vapo）：
+- `algorithm.py`：新扩展字段 `advantage.critic_lambd`（gae_variant=decoupled 时自动填 1.0 进入哈希）；`critic_not_at_pin` 放行 `gae_variant=decoupled` 与 `lambd_mode=length_adaptive`（cross_segment、hl_gauss、critic_updates_per_step≠1 仍拒绝）；critic_lambd 只能配 decoupled。
+- `algos/critic.py`：`gae_variant_argv`（接在 `critic_argv` 尾部，vanilla+fixed 时为空，普通 PPO argv 不变）、flag 行 `--gae-variant/--gae-lambd-mode/--gae-length-alpha/--gae-critic-lambd`、字段 `loss.positive_lm_coef/positive_lm_reward_threshold`（二者必须同时给出）与 `--positive-example-*` 行；机制 `features:gae_decoupled`、`features:gae_length_adaptive`、`features:positive_example_lm_loss`（Miles 适配器不声明，需 `--rl-allow-unverified-mechanism`，正式声明待 G1）；`FORK_FLAGS`。
+- `algorithm_flags.py` `_UNMAPPED` 加入 6 个 fork flag（使其为 adapter-owned，不能裸透传）；`tests/test_rl_algorithm_flags_upstream.py` 的 pending 并入 `critic.FORK_FLAGS`（上游 c35702e 无这些参数）。
+- `algos/vapo.py`：`vapo_spec()`、`PAPER_PARAMETERS`（带出处）、`PAPER_RUN_SETTINGS`、`NOT_IN_PAPER`。vapo 规格 sha256 `7ee1dde4…386f`。
+- 测试：`tests/test_rl_vapo.py`（论文值、翻译快照、dry-run 快照与 extra argv 吸收等价、未放行拒绝、阶段 W 50 步且 GAE 参数与主阶段一致、哈希区分、decoupled 自动填 λ、拒绝矩阵、普通 PPO/GRPO argv 不变）；两批定向运行（critic/algorithm/flags/capabilities/seq_adv/loss_variants/selection/adapter config 等）合计 760 passed / 14 skipped（含未改动的 `test_rl_argv_snapshot.py`）。
+- 哈希不变：`evidence/hash_compare.py` 在 d398d443（`git archive` 到 /tmp/vapo-base）与本分支输出 `evidence/hash-vapo-base.txt` / `evidence/hash-vapo.txt` 17 行逐字节相同，且与第 2 组 `hash-critic.txt` 相同。
+
+**未验证（需 GPU 7.3）**：fork 正例 LM loss 在真实 Megatron/FSDP 训练中的 flags 传递（get_batch 键）、CP>1 下的归约；PPO 下 `rollout_data["rewards"]` 是否为原始标量奖励（未核实 reward 后处理对阈值语义的影响）；GAE 变体在真实 critic 下的数值；yeto pin 尚未指向包含 ce96fc060+cbf8c4737 的 fork 提交（loss_variants 的 FORK_COMMITS 式 pin 门控未为 VAPO 实现，目前仅靠未声明机制拦截）。

@@ -75,6 +75,8 @@ Miles arguments.py:3212 的约束只在 `--rematerialize-param-from-master-weigh
 
 ### D7 VAPO 与 SAO
 - VAPO = PPO + length_adaptive + decoupled GAE + value pretrain（复用 D5 阶段 W）+ 论文中的其它组件；具体变体参数为开放问题，不影响结构。
+- **VAPO 参数补充（7.1，待用户确认）**：出处 arXiv 2504.05118v3（HTML 版）§4.1–4.3、§5.1、表 1；全表见 progress.md "S13 7.1 VAPO 参数"。论文值：γ=1.0；decoupled GAE，critic 目标 λ=1.0；policy λ=1−1/(α·l)，**α=0.05**（注意 D6 的缺省 α=1.5 来自 SAO，不是 VAPO 值）；ε_low=0.2、ε_high=0.28；token 级 PG loss；positive-example LM loss 权重 μ=0.1；value warm-up 50 步；critic lr 2e-6、actor lr 1e-6（warmup-constant）；group sampling 每 prompt 16 次、512 prompts/采样、mini-batch 512。与论文不一致/论文未给出（需确认）：论文 value 模型由奖励模型初始化，yeto 用 `copy_actor_backbone`（D5）；"正确样本"判据论文只说 correct answers，yeto 取 reward>0.0；value_clip、KL、warm-up 调度长度论文未给出。
+- VAPO 声明（7.2）：`yeto/rl/algos/vapo.py::vapo_spec()`；新增 `advantage.critic_lambd`（decoupled 时填 1.0）、`loss.positive_lm_coef/positive_lm_reward_threshold`；fork `yeto-vapo` cbf8c4737 实现 `--positive-example-lm-loss-coef`。三项 fork 专有机制 `features:gae_decoupled/gae_length_adaptive/positive_example_lm_loss` 在 G1（7.3）前不声明。
 - SAO 迁移：把 `sao_streaming_runtime.py` 的 recipe 翻译为 AlgorithmSpec（sao_dis、α=1.5、γ/λ=1/1、HL-Gauss 51-bin、critic 步数=actor×num_critic_epochs），保留双 layout、双 syncer、lockstep 成对 fragment 语义。SAO 特有数学（HL-Gauss value loss、sao_dis）需从 agentenv/miles ae475060 移植到 `yeto/ports`；该源码本地未查到，第一步是取得并核对。迁移完成前现有 SAO streaming 入口保持可用。
 
 ### D8 CompactionRL（决策 5）

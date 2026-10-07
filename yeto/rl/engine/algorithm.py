@@ -78,6 +78,7 @@ CRITIC_ADVANTAGE_DEFAULTS = (
     ("lambd", 1.0), ("lambd_mode", "fixed"), ("gae_variant", "vanilla"),
 )
 LENGTH_ADAPTIVE_ALPHA = 1.5
+DECOUPLED_CRITIC_LAMBD = 1.0  # VAPO / VC-PPO value-target lambda
 HL_GAUSS_BINS = 51
 # Execution requirements a single-island G1 smoke may allow with
 # --rl-allow-unverified-mechanism (they are not registered mechanisms).
@@ -969,9 +970,13 @@ register_field("advantage", "lambd_mode", default=None,
 register_field("advantage", "alpha", default=None, parse=_critic_alpha)
 register_field("advantage", "gae_variant", default=None,
                parse=lambda path, v: _optional_choice(path, v, GAE_VARIANTS))
+# VAPO decoupled GAE (change 7.2): lambda of the critic's value target; the
+# policy advantage keeps ``lambd`` / ``lambd_mode``. Filled (1.0) only when
+# gae_variant='decoupled'.
+register_field("advantage", "critic_lambd", default=None, parse=_critic_unit)
 # ``advantage.gamma`` is shared with REINFORCE++ and owned by
 # ``yeto.rl.algos.seq_adv`` (default 1.0, not emitted); a critic spec uses it.
-CRITIC_ADVANTAGE_FIELDS = ("lambd", "lambd_mode", "alpha", "gae_variant")
+CRITIC_ADVANTAGE_FIELDS = ("lambd", "lambd_mode", "alpha", "gae_variant", "critic_lambd")
 
 _V1_FIELDS = (
     "advantage_estimator",
@@ -1104,6 +1109,9 @@ class AlgorithmSpec:
             mode = filled.get("lambd_mode", self.advantage.lambd_mode)
             if mode == "length_adaptive" and self.advantage.alpha is None:
                 filled["alpha"] = LENGTH_ADAPTIVE_ALPHA
+            variant = filled.get("gae_variant", self.advantage.gae_variant)
+            if variant == "decoupled" and self.advantage.critic_lambd is None:
+                filled["critic_lambd"] = DECOUPLED_CRITIC_LAMBD
             if filled:
                 s(self, "advantage", self.advantage.with_ext(**filled))
             s(self, "critic", self.critic.with_defaults())
@@ -1592,10 +1600,11 @@ def _reject_critic_not_at_pin(s: AlgorithmSpec) -> str | None:
         return None
     a, c = s.advantage, s.critic
     pending = []
-    if a.gae_variant != "vanilla":
+    # decoupled / length_adaptive run on the fork's --gae-variant / --gae-lambd-mode
+    # (yeto-gae-variant ce96fc060, change 6.2); cross_segment needs segment metadata
+    # from a CompactionRL rollout (group 9) first.
+    if a.gae_variant not in ("vanilla", "decoupled"):
         pending.append(f"advantage.gae_variant={a.gae_variant!r}")
-    if a.lambd_mode != "fixed":
-        pending.append(f"advantage.lambd_mode={a.lambd_mode!r}")
     if c.value_loss != "mse":
         pending.append(f"critic.value_loss={c.value_loss!r}")
     if c.critic_updates_per_step != 1:
@@ -1609,6 +1618,8 @@ def _reject_critic_not_at_pin(s: AlgorithmSpec) -> str | None:
     stray = []
     if a.alpha is not None and a.lambd_mode != "length_adaptive":
         stray.append("advantage.alpha (only with lambd_mode='length_adaptive')")
+    if a.critic_lambd is not None and a.gae_variant != "decoupled":
+        stray.append("advantage.critic_lambd (only with gae_variant='decoupled')")
     if c.hl_gauss_bins is not None and c.value_loss != "hl_gauss":
         stray.append("critic.hl_gauss_bins (only with value_loss='hl_gauss')")
     if stray:

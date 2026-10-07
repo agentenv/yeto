@@ -222,6 +222,14 @@ _UNMAPPED = [
     "--critic-load",
     "--critic-lr",
     "--critic-lr-warmup-iters",
+    # fork-only (yeto-gae-variant ce96fc060, yeto-vapo cbf8c4737): rows registered by
+    # yeto.rl.algos.critic (rl-algo-critic-family 7.2, VAPO); critic.FORK_FLAGS
+    "--gae-variant",
+    "--gae-lambd-mode",
+    "--gae-length-alpha",
+    "--gae-critic-lambd",
+    "--positive-example-lm-loss-coef",
+    "--positive-example-reward-threshold",
     "--ref-update-interval",
     "--disable-compute-advantages-and-returns",
     "--use-rollout-entropy",
