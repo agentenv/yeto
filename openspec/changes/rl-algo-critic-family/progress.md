@@ -434,3 +434,54 @@ worktree `/home/michael/work/s13-tbwire`，分支 `s13-tbwire`（基于 integ-de
 - yeto：critic_fork.py pin → 6e7365b60（FORK_COMMITS 只含它）；新增 tests/test_rl_miles_overlay.py（13 例：补丁 sha 与 pin、flag 集合、auto 开关、setup 追加顺序 sha→check→apply、legacy 拒绝、run manifest 字段、非 c35702e 仓库时 setup 拒绝且不写记录、runtime manifest 标注）；更新 tests/test_rl_critic_fork_pin.py 的 PIN。CPU 端到端：本地 clone c35702eef 当作 ~/miles、伪造 image-manifest，执行生成的 setup → 应用成功，`git write-tree` 与 fork HEAD 6e7365b60 的 tree 完全相同。
 - 验证：17 个既有规格哈希 `hash_compare.py | diff - hash-critic.txt` 为空；tests/test_rl_argv_snapshot.py 未改、通过。全量 `pytest --continue-on-collection-errors`（单进程）：69 failed/4240 passed/28 errors；基线 d26111d4（git archive /tmp/s13-base）70 failed/4226 passed/28 errors；失败集合唯一差异是基线多 1 个（test_a100_kernel_benchmark git index，archive 无 .git），无新增失败。4 个收集错误改前同样存在。log /tmp/s13-overlay-yeto.log、/tmp/s13-overlay-yeto-base.log。
 - 尚未验证：真实镜像容器中的 setup（镜像 ~/miles 是否带 .git、`git apply` 在镜像 git 版本下的行为、editable 安装下新模块 import）；fork 新参数在 GPU 上的数值行为（G1）；fork Megatron/FSDP 路径（本环境无 megatron.core，loss_hub/* 测试无法收集）。tasks.md 未改勾选。
+
+## S13 SAO tied embedding 修复
+
+GPU G1 SAO（Qwen3.5-0.8B，`s1-runs/s13-forkg1-sao-20261007d/launch.log:4843`）critic HF 加载报
+`missing mapped parameter language_model.output_layer.weight -> lm_head.weight`。
+
+根因（已实现 / CPU 已验证 / GPU 未验证）：
+- Qwen3.5 由 bridge 构建为 `Qwen3VLModel` 外壳，LM 头在 `model.language_model.output_layer`
+  （mbridge `qwen35_bridge.py:192` 映射 `language_model.output_layer.weight -> lm_head.weight`；
+  `qwen35_vl_bridge.py:195` 按 `tie_word_embeddings` 设 share）。
+- critic provider 关闭共享（fork 6e7365b60 `model_provider.py:191-192`），并把 `LinearForLastLayer`
+  挂在外壳 `model.output_layer`（`:209-212`）——外壳 forward 不读它（`modelling_qwen3_vl/model.py:910`
+  直接调 `language_model`）。于是真正的词表头仍是参数且不共享，`checkpoint.py:197-210`
+  `_hide_critic_value_head_from_hf_load` 只隐藏外壳上的 value head，bridge 仍要求 `lm_head.weight`，
+  tied checkpoint 没有 → 报错。另外即便非 tied 的 VL 模型能加载，critic 也在输出词表 logits（静默错误）。
+- actor 不报：share=True，bridge 过滤 output_layer 参数（`model_bridge.py` "Filter out output_layer ... if tied"）。
+
+修复（fork 分支 `yeto-critic-c357-tied` @ 6574a9c82，基于 6e7365b60，worktree
+`/home/michael/work/miles-critic-c357-tied`；原 `yeto-critic-c357` 分支未动）：新增
+`miles/backends/megatron_utils/critic_head.py`（无 megatron import）：`critic_head_owner` 对有
+`language_model.output_layer` 的外壳返回 `language_model`，否则返回 model 本身；bridge provider critic
+分支改为 `critic_head_owner(model).output_layer = LinearForLastLayer(...)`；隐藏逻辑改为
+`iter_value_heads`（外壳 + language_model 两层）。普通 GPTModel critic 与所有 actor 行为不变；
+影响面 = 多模态外壳上的 critic（tied 与非 tied 都改，非 tied 原先是静默错误）。custom provider /
+LoRA bridge 路径未改。
+- 测试：`tests/fast/backends/megatron_utils/test_critic_head_owner.py` 6 passed（假 nn.Module）；
+  定向文件基线对比无新增失败（11 passed/2 skipped/5 errors 两侧相同，5 errors 为既有 fixture 问题）。
+  注意：曾跑整个 `tests/fast/backends tests/fast/utils` 会拉起本地 Ray，已中止，不再跑。
+
+overlay：补丁 `git diff --binary c35702eef..6574a9c82` sha256
+`64f69bbf8815eeed7ad1b02f783f8ed903d3c5b2aa5b6e2a3c7e537961bdca3b`；结果 tree
+`d65bda3de776a5701e9d0d2fc2bd51cc254779bd`（在 c35702e 干净 worktree 上 apply 后 write-tree 实测一致）；
+`miles_overlay.py` RESULT_COMMIT/TREE/SHA256、`critic_fork.py` pin（FORK_COMMITS 保留 6e7365b60）同步。
+
+SAO 规格调整（GPU 试跑所得）：
+1. Qwen3.5 的 q/k/v 带 attention_output_gate，all-linear LoRA 被拒，需 `--lora-targets attention`
+   （运行级参数，仅记录，未加规则）。
+2. `critic_lr_warmup`（SAO 默认 10）必须 < critic LR decay iters。已实现启动预检
+   `critic_lr_warmup`（`yeto/rl/algos/critic.py`，register_launch_check）：decay =
+   显式 `lr_decay_iters`（lr_schedule，actor/critic 共用）或
+   `num_rollout*rollout_batch_size*n_samples*critic_updates_per_step//global_batch_size`
+   （镜像 Miles `model.py:88-103`），warmup >= decay 拒绝；extra argv 覆盖相关 flag 时跳过。
+   值由 `translate_run_config` 传入（岛上翻译期，Miles 启动前）；launcher 预检缺 rounds，未接。
+   G1 情形（warmup 10、decay 3）被拒。测试 `tests/test_rl_critic_lr_warmup_check.py` 4 passed。
+
+验证：17 规格哈希不变（hash_compare 与 hash-critic.txt 无 diff）；`test_rl_argv_snapshot.py` 未改且通过；
+critic/sao/overlay/adapter/algorithm 相关 30 个文件：基线 7 failed/521 passed，新 7 failed/525 passed
+（7 个为既有失败，无新增）。
+
+SAO 重跑：需用新 overlay（sha256 64f69bbf…）+ `--lora-targets attention` + 让 critic warmup < decay
+（如 rounds 足够或降低 critic_lr_warmup）。GPU 上 critic 值头位置正确性尚未验证。

@@ -654,6 +654,12 @@ def translate_run_config(
         "actor_num_nodes": config.parallel.actor_num_nodes,
         "actor_num_gpus_per_node": config.parallel.actor_num_gpus_per_node,
         "elastic": bool(config.use_miles_router),  # set iff --rl-elastic (run_config)
+        # critic_lr_warmup: the critic scheduler's decay length (Miles model.py)
+        "num_rollout": 0 if config.batch.eval_only else config.batch.global_rounds,
+        "n_samples_per_prompt": config.batch.samples_per_group,
+        "global_batch_size": config.batch.global_batch,
+        "lr_decay_iters": (config.algorithm.lr_schedule.decay_iters
+                           if config.algorithm.lr_schedule is not None else None),
     })
     if problems:
         raise MilesConfigError("algorithm spec rejected for this run: " + "; ".join(problems))
