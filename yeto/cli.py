@@ -507,6 +507,17 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         ),
     )
     rl.add_argument(
+        "--rl-miles-overlay",
+        choices=("auto", "off", "critic-c357"),
+        default="auto",
+        help=(
+            "ports only: apply the critic-family Miles patch (fork yeto-critic-c357, "
+            "not pushed) over the image's Miles c35702e at island setup. auto (default): "
+            "only when the algorithm spec uses a fork-only Miles flag; recorded in the "
+            "run manifest as 'image + overlay <sha256>'"
+        ),
+    )
+    rl.add_argument(
         "--rl-allow-unverified-mechanism",
         action="append",
         default=None,

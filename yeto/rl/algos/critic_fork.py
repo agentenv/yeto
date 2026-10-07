@@ -20,22 +20,32 @@ image) merges the critic-family fork branches onto yeto/ports 039471508:
   by the global positive-token count of the optimizer step (VAPO eq. 9); the
   legacy one-sample-per-rollout ``cross_segment`` renamed to the explicit control
   mode ``cross_segment_whole_rollout`` (ambiguous ``cross_segment`` refused).
+* 5182e37f0 -- SAO: with ``sao_dis`` the critic re-runs a forward after its
+  update so the shipped values are post-update (agentenv/miles 16a9bea4).
+
+S13 rebase (progress "S13 fork rebase c35702e + overlay"): the seven commits
+above were cherry-picked onto the image's Miles c35702e as branch
+``yeto-critic-c357`` (local, not pushed); HEAD 6e7365b60 is the pin. The
+losses.py / math_utils.py conflicts keep c35702e's ``--policy-loss-variant``
+dispatch (cispo/sapo/gmpo) under the non-SAO branch; ``sao_dis`` with a
+non-default variant is refused by the fork.
 
 The spec-level ``*_not_at_pin`` rejections check :data:`CRITIC_FORK_PIN`
-against :data:`FORK_COMMITS` (the loss_variants precedent). This is a
-declaration pin only: the ports image still runs ``yeto.rl.MILES_NEXT_COMMIT``
-(c35702e), which does not carry these flags, and the mechanisms stay
-undeclared (``--rl-allow-unverified-mechanism``) until GPU G1.
+against :data:`FORK_COMMITS` (the loss_variants precedent). The ports image
+still ships ``yeto.rl.MILES_NEXT_COMMIT`` (c35702e); a run gets the pinned code
+only through the island-setup overlay (:mod:`yeto.rl.miles_overlay`, patch
+c35702e..pin, sha256-checked, recorded as "image c35702e + overlay <sha256>").
+The mechanisms stay undeclared (``--rl-allow-unverified-mechanism``) until GPU G1.
 """
 
 from __future__ import annotations
 
 # Full SHAs of fork commits carrying every critic-family flag above.
 FORK_COMMITS: frozenset[str] = frozenset({
-    "70e3d77618841235330fee2f4634b1ddd6b924da",  # yeto-critic-family (local)
+    "6e7365b602ecf5d83d16169e87f4d78f4daf5f86",  # yeto-critic-c357 (local, on c35702e)
 })
 
-CRITIC_FORK_PIN = "70e3d77618841235330fee2f4634b1ddd6b924da"
+CRITIC_FORK_PIN = "6e7365b602ecf5d83d16169e87f4d78f4daf5f86"
 
 
 def fork_carries_critic_family(commit: str | None = None) -> bool:

@@ -2734,8 +2734,12 @@ def _sky_docker_login_config(login: dict[str, str]):
     return DockerLoginConfig.from_env_vars(login)
 
 
-def _miles_source_setup(rl_engine: str = "ports") -> tuple[str, str]:
-    """Return the (miles_setup, sglang_setup) remote steps for ``rl_engine``."""
+def _miles_source_setup(rl_engine: str = "ports", overlay: str | None = None) -> tuple[str, str]:
+    """Return the (miles_setup, sglang_setup) remote steps for ``rl_engine``.
+
+    ``overlay`` (ports only, default None = off): a :mod:`yeto.rl.miles_overlay`
+    patch applied to the image's ~/miles after the checkout checks.
+    """
 
     from .rl import (
         MILES_BASE_COMMIT,
@@ -2754,7 +2758,10 @@ def _miles_source_setup(rl_engine: str = "ports") -> tuple[str, str]:
         SGLANG_REPOSITORY,
     )
 
+    if overlay is not None and rl_engine != "ports":
+        raise ValueError("a Miles overlay needs the ports engine")
     if rl_engine == "ports":
+        from .rl.miles_overlay import overlay_setup
 
         def checkout(
             path: str, repository: str, commit: str, refreshed_flag: str = ""
@@ -2836,7 +2843,8 @@ def _miles_source_setup(rl_engine: str = "ports") -> tuple[str, str]:
             "else\n"
             "python3 -m pip install -q --no-deps -e ~/miles "
             f"'peft=={MILES_PEFT_VERSION}'\n"
-            "fi",
+            "fi"
+            + (f"\n{overlay_setup(overlay)}" if overlay else ""),
             f"if {sglang_in_image}; then\n"
             f"ln -sfn {image_root} ~/sglang\n"
             f"echo '[yeto-setup] image provides sglang {SGLANG_NEXT_COMMIT}'\n"
@@ -3412,8 +3420,10 @@ def make_miles_island_task(
             " --initial-adapter-sha256 "
             f"{shlex.quote(args.rl_initial_adapter_sha256)}"
         )
+    from .rl.miles_overlay import resolve_overlay
+
     miles_setup, sglang_setup = _miles_source_setup(
-        getattr(args, "rl_engine", "ports")
+        getattr(args, "rl_engine", "ports"), resolve_overlay(args)
     )
     model = resolve(args.model)
     if is_local_reference(model):
@@ -6533,6 +6543,17 @@ def _echoes_events(args, spec) -> bool:
     # that a later non-zero exit is a shutdown error, not an island failure
 
 
+def _miles_overlay_manifest(args, engine: str) -> dict:
+    """``miles_overlay`` for the run manifest; absent (old manifests unchanged) when off."""
+
+    if engine != "ports":
+        return {}
+    from .rl.miles_overlay import overlay_record, resolve_overlay
+
+    record = overlay_record(resolve_overlay(args))
+    return {"miles_overlay": record} if record else {}
+
+
 def _write_run_manifest(args) -> dict | None:
     """Record the engine pins actually used (launch.log + <run dir>/run_manifest.json)."""
 
@@ -6549,10 +6570,14 @@ def _write_run_manifest(args) -> dict | None:
         "sglang_commit": getattr(_rl, "SGLANG_NEXT_COMMIT", None) if engine == "ports" else None,
         "source_sha256": getattr(args, "source_sha256", None),
         "cluster_prefix": args.cluster_prefix,
+        **_miles_overlay_manifest(args, engine),
         "written_unix": time.time(),
     }
     print(f"[launcher] RL engine {engine}: image {manifest['rl_image']}, "
           f"miles {manifest['miles_commit']}, sglang {manifest['sglang_commit']}", flush=True)
+    if manifest.get("miles_overlay"):
+        print(f"[launcher] Miles code = {manifest['miles_overlay']['summary']} "
+              "(image manifest does NOT match the running Miles code)", flush=True)
     try:
         path = runs.run_dir(args.cluster_prefix) / "run_manifest.json"
         path.parent.mkdir(parents=True, exist_ok=True)

@@ -1,0 +1,2623 @@
+diff --git a/miles/backends/fsdp_utils/actor.py b/miles/backends/fsdp_utils/actor.py
+index 50aa05403..e59ca4896 100644
+--- a/miles/backends/fsdp_utils/actor.py
++++ b/miles/backends/fsdp_utils/actor.py
+@@ -537,6 +537,7 @@ class FSDPTrainRayActor(TrainRayActor):
+                             "returns",
+                             "ref_log_probs",
+                             "rollout_log_probs",
++                            "positive_example_lm_weights",
+                             *sampling_mask_keys,
+                         ],
+                         self.args.data_pad_size_multiplier,
+diff --git a/miles/backends/megatron_utils/actor.py b/miles/backends/megatron_utils/actor.py
+index d3990015c..0782e12b3 100644
+--- a/miles/backends/megatron_utils/actor.py
++++ b/miles/backends/megatron_utils/actor.py
+@@ -18,6 +18,7 @@ from miles.backends.megatron_utils.update_weight.hf_weight_iterator import get_h
+ from miles.backends.training_utils.weight_update.hf_weight_iterator import WeightUpdatePlacement
+ from miles.backends.training_utils.weight_update.snapshot_publisher import SnapshotPublisher
+ from miles.backends.training_utils.weight_update.updater import WeightUpdater
++from miles.backends.training_utils.sao_critic import refresh_values_after_critic_update
+ from miles.dashboard import hooks as dashboard_hooks
+ from miles.ray.rollout.inference_controller import UpdatableEngines
+ from miles.ray.specs.train import compute_trainer_pool_id
+@@ -633,17 +634,36 @@ class MegatronTrainRayActor(TrainRayActor):
+         compute_advantages_and_returns(self.args, rollout_data)
+ 
+         self.args.loss_type = "value_loss"
+-        train_step_outcome: TrainStepOutcome = train(
+-            rollout_id,
+-            self.model,
+-            self.optimizer,
+-            self.opt_param_scheduler,
+-            data_iterator,
+-            num_microbatches,
+-            get_num_rollouts(self.args, rollout_data, len(num_microbatches)),
+-            witness_info=None,
+-            attempt=0,
+-        )
++        # --num-critic-epochs (alias --critic-updates-per-step): value targets are fixed
++        # for this rollout; each extra update rebuilds the consumed iterator (SAO 16a9bea4).
++        for critic_epoch in range(getattr(self.args, "num_critic_epochs", 1)):
++            if critic_epoch > 0:
++                data_iterator, num_microbatches = get_data_iterator(self.args, self.model, rollout_data)
++            train_step_outcome: TrainStepOutcome = train(
++                rollout_id,
++                self.model,
++                self.optimizer,
++                self.opt_param_scheduler,
++                data_iterator,
++                num_microbatches,
++                get_num_rollouts(self.args, rollout_data, len(num_microbatches)),
++                witness_info=None,
++                attempt=0,
++            )
++
++        if refresh_values_after_critic_update(self.args, rollout_id):
++            # SAO (16a9bea4): ship values from the updated critic; returns/targets above stay fixed.
++            data_iterator, num_microbatches = get_data_iterator(self.args, self.model, rollout_data)
++            rollout_data.update(
++                forward_only(
++                    get_values,
++                    self.args,
++                    self.model,
++                    data_iterator,
++                    num_microbatches,
++                    rollout_id=rollout_id,
++                )
++            )
+ 
+         self._heartbeat.bump()
+         values = None
+diff --git a/miles/backends/megatron_utils/model.py b/miles/backends/megatron_utils/model.py
+index 68844cb54..1d8781b91 100644
+--- a/miles/backends/megatron_utils/model.py
++++ b/miles/backends/megatron_utils/model.py
+@@ -69,7 +69,9 @@ from .fp32_param_utils import enforce_marked_param_dtypes
+ from .lora.bridge import _ensure_model_list, _setup_lora_model_via_bridge  # noqa: F401
+ 
+ 
+-def get_optimizer_param_scheduler(args: Namespace, optimizer: MegatronOptimizer) -> OptimizerParamScheduler | None:
++def get_optimizer_param_scheduler(
++    args: Namespace, optimizer: MegatronOptimizer, role: str = "actor"
++) -> OptimizerParamScheduler | None:
+     """Create and configure the optimizer learning-rate/weight-decay scheduler.
+ 
+     This configures iteration-based schedules derived from the global batch size
+@@ -83,7 +85,11 @@ def get_optimizer_param_scheduler(args: Namespace, optimizer: MegatronOptimizer)
+         OptimizerParamScheduler: Initialized scheduler bound to ``optimizer``.
+     """
+     # Iteration-based training.
+-    args.train_iters = args.num_rollout * args.rollout_batch_size * args.n_samples_per_prompt // args.global_batch_size
++    # The critic takes --num-critic-epochs optimizer steps per rollout batch (SAO 16a9bea4).
++    updates_per_batch = getattr(args, "num_critic_epochs", 1) if role == "critic" else 1
++    args.train_iters = (
++        args.num_rollout * args.rollout_batch_size * args.n_samples_per_prompt * updates_per_batch
++    ) // args.global_batch_size
+     if args.lr_decay_iters is None:
+         args.lr_decay_iters = args.train_iters
+     lr_decay_steps = args.lr_decay_iters * args.global_batch_size
+@@ -241,7 +247,7 @@ def setup_model_and_optimizer(
+ 
+         setup_optimizer_state_streaming(args, optimizer)
+ 
+-    opt_param_scheduler = get_optimizer_param_scheduler(args, optimizer)
++    opt_param_scheduler = get_optimizer_param_scheduler(args, optimizer, role)
+     return model, optimizer, opt_param_scheduler
+ 
+ 
+@@ -488,6 +494,7 @@ def run_forward_backward_pass(
+                 "loss_weights",
+                 "target_tokens",
+                 "sample_indices",
++                "positive_example_lm_weights",
+                 *sampling_mask_keys,
+             ],
+             args.data_pad_size_multiplier,
+diff --git a/miles/backends/megatron_utils/model_provider.py b/miles/backends/megatron_utils/model_provider.py
+index 1ee603cdb..f23f2a760 100644
+--- a/miles/backends/megatron_utils/model_provider.py
++++ b/miles/backends/megatron_utils/model_provider.py
+@@ -20,6 +20,7 @@ from megatron.training.arguments import core_transformer_config_from_args
+ from miles.utils.audit_utils.witness.module import install_witness
+ from miles.utils.function_registry import load_function
+ from miles.utils.replay_base import routing_replay_manager
++from miles.backends.training_utils.critic_freeze import freeze_attention_parameters
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -104,6 +105,19 @@ def _apply_bridge_runtime_config(provider, args: argparse.Namespace) -> None:
+ 
+ 
+ # Adapt from https://github.com/volcengine/verl/blob/c3b20575d2bc815fcccd84bddb4c0401fc4b632b/verl/models/llama/megatron/layers/parallel_linear.py#L82
++
++def _maybe_freeze_critic_attention(args: argparse.Namespace, model: torch.nn.Module, role: str) -> None:
++    if role != "critic" or not getattr(args, "critic_freeze_attention", False):
++        return
++    tensors, elements = freeze_attention_parameters(model)
++    logger.info("Froze critic attention parameters: tensors=%d elements=%d", tensors, elements)
++
++
++def _value_head_output_size(args: argparse.Namespace) -> int:
++    if getattr(args, "value_loss_type", "mse") == "classification":
++        return getattr(args, "value_num_bins", 51)
++    return 1
++
+ class LinearForLastLayer(torch.nn.Linear):
+     def __init__(
+         self,
+@@ -160,8 +174,9 @@ def get_model_provider_func(
+             # Apply critic output layer if needed
+             if post_process and role == "critic":
+                 model.output_layer = LinearForLastLayer(
+-                    input_size=model.config.hidden_size, output_size=1, config=model.config
++                    input_size=model.config.hidden_size, output_size=_value_head_output_size(args), config=model.config
+                 )
++            _maybe_freeze_critic_attention(args, model, role)
+             _maybe_install_witness(args, model)
+             return model
+ 
+@@ -193,8 +208,9 @@ def get_model_provider_func(
+             model = provider.provide(pre_process=pre_process, post_process=post_process, vp_stage=vp_stage)
+             if post_process and role == "critic":
+                 model.output_layer = LinearForLastLayer(
+-                    input_size=model.config.hidden_size, output_size=1, config=model.config
++                    input_size=model.config.hidden_size, output_size=_value_head_output_size(args), config=model.config
+                 )
++            _maybe_freeze_critic_attention(args, model, role)
+             assert not getattr(args, "enable_witness", False), "Witness is not supported yet in this mode"
+             # Gemma-4 forward returns (logits, loss_mask); keep logits only.
+             _bridge_forward = model.forward
+@@ -338,7 +354,10 @@ def get_model_provider_func(
+             model = GPTModel(**kwargs)
+ 
+         if post_process and role == "critic":
+-            model.output_layer = LinearForLastLayer(input_size=config.hidden_size, output_size=1, config=config)
++            model.output_layer = LinearForLastLayer(
++                input_size=config.hidden_size, output_size=_value_head_output_size(args), config=config
++            )
++        _maybe_freeze_critic_attention(args, model, role)
+ 
+         _maybe_install_witness(args, model)
+ 
+diff --git a/miles/backends/training_utils/critic_freeze.py b/miles/backends/training_utils/critic_freeze.py
+new file mode 100644
+index 000000000..806d684f1
+--- /dev/null
++++ b/miles/backends/training_utils/critic_freeze.py
+@@ -0,0 +1,25 @@
++"""Critic attention freeze (ported from agentenv/miles SAO 16a9bea4); megatron-free for CPU tests."""
++
++import torch
++
++_ATTENTION_COMPONENTS = frozenset(
++    {"attention", "attn", "cross_attention", "cross_attn", "self_attention", "self_attn"}
++)
++
++
++def freeze_attention_parameters(model: torch.nn.Module) -> tuple[int, int]:
++    """Freeze parameters owned by attention modules, once per shared tensor (SAO 16a9bea4).
++
++    Returns (tensors, elements) frozen.
++    """
++    parameters: dict[int, torch.nn.Parameter] = {}
++    for module_name, module in model.named_modules():
++        if not set(module_name.lower().split(".")) & _ATTENTION_COMPONENTS:
++            continue
++        for parameter in module.parameters(recurse=True):
++            parameters[id(parameter)] = parameter
++    if not parameters:
++        raise RuntimeError("critic attention freeze matched no parameters")
++    for parameter in parameters.values():
++        parameter.requires_grad_(False)
++    return len(parameters), sum(parameter.numel() for parameter in parameters.values())
+diff --git a/miles/backends/training_utils/loss.py b/miles/backends/training_utils/loss.py
+index 81a3eee83..19ca01daa 100644
+--- a/miles/backends/training_utils/loss.py
++++ b/miles/backends/training_utils/loss.py
+@@ -107,6 +107,9 @@ def compute_advantages_and_returns(
+         response_lengths=response_lengths,
+         max_seq_lens=max_seq_lens,
+         values=values,
++        segment_ids=rollout_data.get("segment_ids"),
++        tokens_after=rollout_data.get("tokens_after"),
++        gae_length=rollout_data.get("gae_length"),
+     )
+ 
+     # Apply on-policy distillation KL penalty to advantages (orthogonal to advantage estimator)
+@@ -123,6 +126,17 @@ def compute_advantages_and_returns(
+ 
+     rollout_data["advantages"] = advantages
+     rollout_data["returns"] = returns
++    if getattr(args, "positive_example_lm_loss_coef", 0.0):
++        flags = positive_example_flags_from_rollout(args, rollout_data, rewards)
++        mask_sums = [float(m.sum()) for m in loss_masks]
++        rollout_data["positive_example_lm_weights"] = positive_example_lm_weights(
++            flags,
++            mask_sums,
++            step_groups=_local_step_groups(args, rollout_data),
++            per_token=args.calculate_per_token_loss,
++            num_rollouts=_step_num_rollouts(args, rollout_data),
++            all_reduce_sum=_dp_all_reduce_sum,
++        )
+ 
+ 
+ def loss_function(
+@@ -246,3 +260,108 @@ def log_train_advantage_computation_event(rollout_data: RolloutBatch) -> None:
+         ),
+         print_log=False,
+     )
++
++
++def positive_example_flags(rewards: list[float], threshold: float) -> list[float]:
++    """Per-sample 1.0 / 0.0: reward > threshold (only for --positive-example-source reward)."""
++    return [1.0 if float(r) > threshold else 0.0 for r in rewards]
++
++
++def positive_example_flags_from_rollout(args: Namespace, rollout_data: RolloutBatch, rewards) -> list[float]:
++    """VAPO positive judgement. Default: explicit success field; reward threshold only when declared binary."""
++    source = getattr(args, "positive_example_source", "success")
++    if source == "reward":
++        threshold = getattr(args, "positive_example_reward_threshold", None)
++        return positive_example_flags(rewards, 0.0 if threshold is None else float(threshold))
++    if source != "success":
++        raise ValueError(f"unknown --positive-example-source {source!r}")
++    success = rollout_data.get("positive_example_success")
++    if success is None:
++        raise ValueError(
++            "--positive-example-source success needs sample.metadata['success'] (or 'is_correct') from the "
++            "reward function; none of the samples carries it. Use --positive-example-source reward only if a "
++            "positive reward always means complete success."
++        )
++    success = [int(x) for x in success]
++    missing = [i for i, x in enumerate(success) if x not in (0, 1)]
++    if missing:
++        raise ValueError(f"samples {missing[:8]} lack the boolean success field (metadata 'success'/'is_correct')")
++    return [float(x) for x in success]
++
++
++def positive_example_lm_weights(
++    flags: list[float],
++    mask_sums: list[float],
++    *,
++    step_groups: list[list[int]],
++    per_token: bool,
++    num_rollouts: list[int] | None,
++    all_reduce_sum=None,
++) -> list[float]:
++    """Per-sample weights w_i so that sum_i w_i * sum_t(-logp) after Miles' own loss normalization equals
++    VAPO eq. 9: sum over positive tokens / P, with P the global positive-token count of the optimizer step.
++
++    Miles divides the summed loss by the step's global normalizer D: the global token count
++    (sum_i max(mask_i.sum(), 1), as in ``loss_function``'s ``num_tokens``) under --calculate-per-token-loss,
++    else the step's rollout count (``num_rollouts``). Hence w_i = flag_i * D / P (0 when P == 0).
++    ``step_groups`` lists the local sample indices of each optimizer step; ``all_reduce_sum`` sums a
++    float64 tensor over the effective DP group in place (None = single rank).
++    """
++    n_steps = len(step_groups)
++    stats = torch.zeros(n_steps, 2, dtype=torch.float64)
++    for k, group in enumerate(step_groups):
++        for i in group:
++            stats[k, 0] += flags[i] * mask_sums[i]
++            stats[k, 1] += max(mask_sums[i], 1.0)
++    if all_reduce_sum is not None:
++        all_reduce_sum(stats)
++    weights = [0.0] * len(flags)
++    for k, group in enumerate(step_groups):
++        positive_tokens = float(stats[k, 0])
++        if positive_tokens <= 0:
++            continue
++        if per_token:
++            denominator = float(stats[k, 1])
++        else:
++            if num_rollouts is None:
++                raise ValueError("per-sample loss needs the per-step rollout count")
++            denominator = float(num_rollouts[k])
++        for i in group:
++            weights[i] = flags[i] * denominator / positive_tokens
++    return weights
++
++
++def _local_step_groups(args: Namespace, rollout_data: RolloutBatch) -> list[list[int]]:
++    """Local sample indices per optimizer step, matching ``get_data_iterator``."""
++    num_local = len(rollout_data["total_lengths"])
++    if "micro_batch_indices" in rollout_data:
++        groups, cursor = [], 0
++        indices = rollout_data["micro_batch_indices"]
++        for num_mbs in rollout_data["num_microbatches"]:
++            groups.append([i for mb in indices[cursor : cursor + num_mbs] for i in mb])
++            cursor += num_mbs
++        return groups
++    dp_size = get_parallel_state().effective_dp.size
++    global_batch_size = rollout_data.get("dynamic_global_batch_size", args.global_batch_size)
++    local_gbs = global_batch_size // dp_size
++    return [list(range(k * local_gbs, (k + 1) * local_gbs)) for k in range(num_local // local_gbs)]
++
++
++def _step_num_rollouts(args: Namespace, rollout_data: RolloutBatch) -> list[int] | None:
++    if args.calculate_per_token_loss:
++        return None
++    from miles.backends.training_utils.data import get_num_rollouts
++
++    return list(get_num_rollouts(args, rollout_data, len(_local_step_groups(args, rollout_data))))
++
++
++def _dp_all_reduce_sum(stats: torch.Tensor) -> None:
++    import torch.distributed as dist
++
++    if not (dist.is_available() and dist.is_initialized()):
++        return
++    group = get_parallel_state().effective_dp.group
++    device = torch.cuda.current_device() if torch.cuda.is_available() else "cpu"
++    reduced = stats.to(device)
++    dist.all_reduce(reduced, op=dist.ReduceOp.SUM, group=group)
++    stats.copy_(reduced.cpu())
+diff --git a/miles/backends/training_utils/loss_hub/advantages.py b/miles/backends/training_utils/loss_hub/advantages.py
+index 1f4bd7781..189f63a7e 100644
+--- a/miles/backends/training_utils/loss_hub/advantages.py
++++ b/miles/backends/training_utils/loss_hub/advantages.py
+@@ -13,6 +13,26 @@ from miles.backends.training_utils.parallel import get_parallel_state
+ from miles.utils.distributed_utils import distributed_masked_whiten
+ 
+ 
++def _gae_variant_kwargs(args: Namespace, segment_ids, tokens_after=None, gae_length=None) -> dict:
++    """Extra GAE-variant kwargs; empty (original call) when the variant is left at its defaults."""
++    variant = getattr(args, "gae_variant", "vanilla")
++    mode = getattr(args, "gae_lambd_mode", "fixed")
++    if variant == "vanilla" and mode == "fixed":
++        return {}
++    return dict(
++        gae_variant=variant,
++        gae_lambd_mode=mode,
++        gae_length_alpha=getattr(args, "gae_length_alpha", 1.5),
++        gae_critic_lambd=getattr(args, "gae_critic_lambd", 1.0),
++        segment_ids_list=segment_ids,
++        **(
++            dict(tokens_after_list=tokens_after, gae_length_list=gae_length)
++            if variant == "cross_segment_per_sample"
++            else {}
++        ),
++    )
++
++
+ def compute_advantages(
+     args: Namespace,
+     kl: list[torch.Tensor],
+@@ -23,6 +43,9 @@ def compute_advantages(
+     response_lengths: list[int],
+     values: list[torch.Tensor] | None = None,
+     max_seq_lens: list[int] | None = None,
++    segment_ids: list | None = None,
++    tokens_after: list | None = None,
++    gae_length: list | None = None,
+ ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+     """Dispatch to the configured advantage estimator.
+ 
+@@ -74,6 +97,7 @@ def compute_advantages(
+             loss_masks=loss_masks,
+             gamma=args.gamma,
+             lambd=args.lambd,
++            **_gae_variant_kwargs(args, segment_ids, tokens_after, gae_length),
+         )
+ 
+     elif args.advantage_estimator == "reinforce_plus_plus":
+diff --git a/miles/backends/training_utils/loss_hub/logit_processors.py b/miles/backends/training_utils/loss_hub/logit_processors.py
+index e9c113d32..618ce4450 100644
+--- a/miles/backends/training_utils/loss_hub/logit_processors.py
++++ b/miles/backends/training_utils/loss_hub/logit_processors.py
+@@ -19,6 +19,7 @@ def _iter_response_chunks(
+     response_lengths: list[int],
+     max_seq_lens: list[int] | None = None,
+     include_response_indices: bool,
++    apply_temperature: bool = True,
+ ) -> Iterator[tuple[torch.Tensor, torch.Tensor, Sequence[int]]]:
+     """Yield response logits, tokens, and original response indices per sample.
+ 
+@@ -58,7 +59,7 @@ def _iter_response_chunks(
+         logits = logits.view(-1, logits.size(-1))
+ 
+     if args.true_on_policy_mode:
+-        if logits.size(-1) > 1 and args.rollout_temperature > 0 and args.rollout_temperature != 1.0:
++        if apply_temperature and logits.size(-1) > 1 and args.rollout_temperature > 0 and args.rollout_temperature != 1.0:
+             logits = logits.div(args.rollout_temperature)
+         if getattr(args, "bf16", False):
+             logits = logits.to(torch.bfloat16)
+@@ -159,6 +160,23 @@ def _iter_response_chunks(
+         yield logits_chunk, tokens_chunk, response_indices
+ 
+ 
++
++def _value_support(args: Namespace, device: torch.device) -> torch.Tensor:
++    """Return the scalar support represented by a categorical value head."""
++    low, high = args.value_reward_range
++    return torch.linspace(low, high, args.value_num_bins, dtype=torch.float32, device=device)
++
++
++def predict_values_from_logits(logits: torch.Tensor, args: Namespace) -> torch.Tensor:
++    """Convert scalar or categorical value-head output to scalar predictions."""
++    if getattr(args, "value_loss_type", "mse") == "classification":
++        assert logits.size(-1) == args.value_num_bins, f"{logits.shape}"
++        return logits.float().softmax(dim=-1) @ _value_support(args, logits.device)
++    assert logits.size(-1) == 1, f"{logits.shape}"
++    # upcast (no-op for fp32) so value-head outputs stay fp32 even when logits arrive bf16
++    return logits.squeeze(-1).float()
++
++
+ def get_responses(
+     logits: torch.Tensor,
+     *,
+@@ -167,6 +185,7 @@ def get_responses(
+     total_lengths: list[int],
+     response_lengths: list[int],
+     max_seq_lens: list[int] | None = None,
++    apply_temperature: bool = True,
+ ) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
+     """Yield response-aligned `(logits_chunk, tokens_chunk)` pairs per sample."""
+     for logits_chunk, tokens_chunk, _ in _iter_response_chunks(
+@@ -177,6 +196,7 @@ def get_responses(
+         response_lengths=response_lengths,
+         max_seq_lens=max_seq_lens,
+         include_response_indices=False,
++        apply_temperature=apply_temperature,
+     ):
+         yield logits_chunk, tokens_chunk
+ 
+@@ -326,10 +346,9 @@ def get_values(
+         total_lengths=total_lengths,
+         response_lengths=response_lengths,
+         max_seq_lens=max_seq_lens,
++        apply_temperature=False,
+     ):
+-        assert logits_chunk.size(-1) == 1, f"{logits_chunk.shape}"
+-        # upcast (no-op for fp32) so value-head outputs stay fp32 even when logits arrive bf16
+-        value_list.append(logits_chunk.squeeze(-1).float())
++        value_list.append(predict_values_from_logits(logits_chunk, args))
+ 
+     res = {
+         "values": value_list,
+diff --git a/miles/backends/training_utils/loss_hub/losses.py b/miles/backends/training_utils/loss_hub/losses.py
+index 12b50ee9d..0fd1686f2 100644
+--- a/miles/backends/training_utils/loss_hub/losses.py
++++ b/miles/backends/training_utils/loss_hub/losses.py
+@@ -10,7 +10,12 @@ from miles.backends.training_utils.cp_utils import (
+     get_sum_of_sample_mean,
+ )
+ from miles.backends.training_utils.loss_hub.corrections import vanilla_tis_function
+-from miles.backends.training_utils.loss_hub.logit_processors import get_log_probs_and_entropy, get_values
++from miles.backends.training_utils.loss_hub.logit_processors import (
++    _value_support,
++    get_log_probs_and_entropy,
++    get_responses,
++    get_values,
++)
+ from miles.backends.training_utils.loss_hub.math_utils import (
+     compute_approx_kl,
+     compute_ess_ratio_contribution,
+@@ -20,6 +25,7 @@ from miles.backends.training_utils.loss_hub.math_utils import (
+     compute_opsm_mask,
+     compute_policy_loss,
+     compute_sapo_loss,
++    compute_sao_dis_policy_loss,
+ )
+ from miles.backends.training_utils.parallel import get_parallel_state
+ from miles.backends.training_utils.sampling_mask import get_rollout_sampling_masks
+@@ -94,6 +100,9 @@ def policy_loss_function(
+         are enabled.
+     """
+     parallel_state = get_parallel_state()
++    policy_objective = getattr(args, "policy_objective", "ppo")
++    if policy_objective == "sao_dis" and not batch.get("rollout_log_probs"):
++        raise ValueError("SAO DIS requires per-token rollout_log_probs")
+     advantages_list = [advantage.detach() for advantage in batch["advantages"]]
+     advantages = torch.cat(advantages_list, dim=0)
+     rollout_old_log_probs = (
+@@ -211,34 +220,47 @@ def policy_loss_function(
+         advantages.new_zeros(()),
+     )
+ 
+-    if variant == "policy_loss":
+-        pg_loss, pg_clipfrac = compute_policy_loss(
+-            ppo_kl, advantages, args.eps_clip, args.eps_clip_high, getattr(args, "eps_clip_c", None)
+-        )
+-    elif variant == "cispo":
+-        pg_loss, pg_clipfrac = compute_cispo_loss(
+-            ppo_kl, torch.where(active_tokens, log_probs, 0.0), advantages, args.eps_clip, args.eps_clip_high
+-        )
+-    elif variant == "sapo":
+-        pg_loss, pg_clipfrac = compute_sapo_loss(ppo_kl, advantages, args.sapo_tau_pos, args.sapo_tau_neg)
+-    elif variant == "gmpo":
+-        full_advantages = [
+-            all_gather_with_cp(adv, total_length, response_length)
+-            for adv, total_length, response_length in zip(
+-                advantages_list, total_lengths, response_lengths, strict=False
+-            )
+-        ]
+-        pg_loss, pg_clipfrac, gmpo_clip_stats = compute_gmpo_loss(
+-            full_log_probs,
+-            full_old_log_probs,
+-            full_advantages,
+-            batch["loss_masks"],
+-            list(torch.split(advantages, [a.numel() for a in advantages_list])),
+-            args.gmpo_log_clip_low,
+-            args.gmpo_log_clip_high,
++    dis_ratio = dis_below = dis_above = None
++    if policy_objective == "sao_dis":
++        if variant != "policy_loss":
++            raise ValueError(f"--policy-objective sao_dis is incompatible with --policy-loss-variant {variant}")
++        rollout_log_probs = torch.cat(rollout_old_log_probs, dim=0)
++        pg_loss, dis_ratio, pg_clipfrac, dis_below, dis_above = compute_sao_dis_policy_loss(
++            log_probs,
++            rollout_log_probs,
++            advantages,
++            args.sao_dis_eps_low,
++            args.sao_dis_eps_high,
+         )
+     else:
+-        raise ValueError(f"Unknown --policy-loss-variant: {variant}")
++        if variant == "policy_loss":
++            pg_loss, pg_clipfrac = compute_policy_loss(
++                ppo_kl, advantages, args.eps_clip, args.eps_clip_high, getattr(args, "eps_clip_c", None)
++            )
++        elif variant == "cispo":
++            pg_loss, pg_clipfrac = compute_cispo_loss(
++                ppo_kl, torch.where(active_tokens, log_probs, 0.0), advantages, args.eps_clip, args.eps_clip_high
++            )
++        elif variant == "sapo":
++            pg_loss, pg_clipfrac = compute_sapo_loss(ppo_kl, advantages, args.sapo_tau_pos, args.sapo_tau_neg)
++        elif variant == "gmpo":
++            full_advantages = [
++                all_gather_with_cp(adv, total_length, response_length)
++                for adv, total_length, response_length in zip(
++                    advantages_list, total_lengths, response_lengths, strict=False
++                )
++            ]
++            pg_loss, pg_clipfrac, gmpo_clip_stats = compute_gmpo_loss(
++                full_log_probs,
++                full_old_log_probs,
++                full_advantages,
++                batch["loss_masks"],
++                list(torch.split(advantages, [a.numel() for a in advantages_list])),
++                args.gmpo_log_clip_low,
++                args.gmpo_log_clip_high,
++            )
++        else:
++            raise ValueError(f"Unknown --policy-loss-variant: {variant}")
+ 
+     if getattr(args, "dump_details", None) is not None:
+         from miles.backends.training_utils.debug_dump import maybe_dump_policy_loss_debug
+@@ -378,6 +400,17 @@ def policy_loss_function(
+         if args.kl_loss_coef != 0:
+             loss = loss + args.kl_loss_coef * kl_loss
+ 
++    positive_lm_loss = None
++    positive_lm_coef = getattr(args, "positive_example_lm_loss_coef", 0.0)
++    if positive_lm_coef:
++        positive_lm_loss = _positive_example_lm_loss(
++            args=args,
++            batch=batch,
++            log_probs=torch.where(active_tokens, log_probs, log_probs.new_zeros(())),
++            max_seq_lens=max_seq_lens,
++        )
++        loss = loss + positive_lm_coef * positive_lm_loss
++
+     # make sure the gradient could backprop correctly; fp32 sum avoids fp16 inf -> nan
+     if log_probs.numel() == 0:
+         loss += 0 * logits.sum(dtype=torch.float32)
+@@ -416,6 +449,15 @@ def policy_loss_function(
+         "ppo_kl": ppo_kl.clone().detach(),
+         "ess_ratio": ess_ratio_sum.squeeze(),
+     }
++    if policy_objective == "sao_dis":
++        reported_loss.update(
++            {
++                "sao_dis_ratio": sum_of_sample_mean(dis_ratio).clone().detach(),
++                "sao_dis_rejectfrac": pg_clipfrac.clone().detach(),
++                "sao_dis_low_rejectfrac": sum_of_sample_mean(dis_below).clone().detach(),
++                "sao_dis_high_rejectfrac": sum_of_sample_mean(dis_above).clone().detach(),
++            }
++        )
+ 
+     if gmpo_clip_num is not None:
+         reported_loss["gmpo_clip_num"] = gmpo_clip_num.detach()
+@@ -429,6 +471,9 @@ def policy_loss_function(
+     if args.use_kl_loss:
+         reported_loss["kl_loss"] = kl_loss.clone().detach()
+ 
++    if positive_lm_loss is not None:
++        reported_loss["positive_lm_loss"] = positive_lm_loss.clone().detach()
++
+     if args.get_mismatch_metrics or args.use_tis:
+         # Aggregate mismatch/TIS/RS related metrics with the *pre-RS* masks.
+         # See comment above where `sum_of_sample_mean_for_mismatch_metrics` is defined.
+@@ -449,6 +494,111 @@ def policy_loss_function(
+     return loss, reported_loss
+ 
+ 
++def _positive_example_lm_loss(
++    *, args: Namespace, batch: RolloutBatch, log_probs: torch.Tensor, max_seq_lens: list[int] | None
++) -> torch.Tensor:
++    """VAPO positive-example LM loss (eq. 9): NLL summed over positive-sample response tokens.
++
++    Each sample carries a precomputed weight w_i = flag_i * D / P (see
++    ``loss.positive_example_lm_weights``), so after Miles divides the summed loss by the step's global
++    normalizer D the term equals sum over positive tokens / P, P = global positive-token count of the step.
++    """
++    weights = batch.get("positive_example_lm_weights")
++    if weights is None:
++        raise ValueError("--positive-example-lm-loss-coef needs batch['positive_example_lm_weights']")
++    positive_masks = [mask * float(w) for mask, w in zip(batch["loss_masks"], weights, strict=True)]
++    positive_reducer = get_sum_of_sample_mean(
++        batch["total_lengths"],
++        batch["response_lengths"],
++        positive_masks,
++        True,  # plain weighted token sum; the normalization lives in the weights
++        args.qkv_format,
++        max_seq_lens,
++    )
++    return -positive_reducer(log_probs)
++
++
++def _two_hot_target_distribution(targets: torch.Tensor, support: torch.Tensor) -> torch.Tensor:
++    """Linearly project scalar targets onto their two adjacent support bins."""
++    num_bins = support.shape[0]
++    low, high = support[0].item(), support[-1].item()
++    positions = (targets.float().clamp(low, high) - low) / (high - low) * (num_bins - 1)
++    lower = positions.floor().long()
++    upper = positions.ceil().long()
++    upper_weight = positions - lower.float()
++    distribution = torch.zeros((*targets.shape, num_bins), dtype=torch.float32, device=targets.device)
++    distribution.scatter_add_(-1, lower.unsqueeze(-1), (1.0 - upper_weight).unsqueeze(-1))
++    distribution.scatter_add_(-1, upper.unsqueeze(-1), upper_weight.unsqueeze(-1))
++    return distribution
++
++
++def _hl_gauss_target_distribution(
++    targets: torch.Tensor,
++    support: torch.Tensor,
++    sigma_ratio: float = 0.75,
++) -> torch.Tensor:
++    """Project scalar targets using Gaussian CDF mass over each support bin.
++
++    Ported from agentenv/miles feat/sao-tbench21-e2e-validation (16a9bea4).
++    """
++    bin_width = support[1] - support[0]
++    sigma = sigma_ratio * bin_width
++    bin_lo = support - bin_width / 2
++    bin_hi = support + bin_width / 2
++    mu = targets.float().clamp(support[0], support[-1]).unsqueeze(-1)
++    normalizer = sigma * 1.4142135623730951
++    probs = 0.5 * (torch.erf((bin_hi - mu) / normalizer) - torch.erf((bin_lo - mu) / normalizer))
++    return probs / probs.sum(dim=-1, keepdim=True).clamp(min=1e-8)
++
++
++def _get_value_logits_list(logits: torch.Tensor, args: Namespace, batch: RolloutBatch) -> list[torch.Tensor]:
++    return [
++        logits_chunk
++        for logits_chunk, _ in get_responses(
++            logits,
++            args=args,
++            unconcat_tokens=batch["unconcat_tokens"],
++            total_lengths=batch["total_lengths"],
++            response_lengths=batch["response_lengths"],
++            max_seq_lens=batch.get("max_seq_lens", None),
++            apply_temperature=False,
++        )
++    ]
++
++
++def _classification_value_loss(
++    args: Namespace,
++    batch: RolloutBatch,
++    logits: torch.Tensor,
++    sum_of_sample_mean: Callable[[torch.Tensor], torch.Tensor],
++) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
++    """Categorical (HL-Gauss / two-hot) cross-entropy value loss."""
++    returns = torch.cat(batch["returns"], dim=0)
++    num_bins = args.value_num_bins
++    raw_logits = torch.cat(
++        [chunk.reshape(-1, num_bins) for chunk in _get_value_logits_list(logits, args, batch)],
++        dim=0,
++    )
++    support = _value_support(args, raw_logits.device)
++    values = raw_logits.float().softmax(dim=-1) @ support
++    if getattr(args, "value_target_type", "hl_gauss") == "hl_gauss":
++        target_dist = _hl_gauss_target_distribution(returns, support, getattr(args, "hl_gauss_sigma_ratio", 0.75))
++    else:
++        target_dist = _two_hot_target_distribution(returns, support)
++    log_probs = torch.nn.functional.log_softmax(raw_logits.float(), dim=-1)
++    loss = sum_of_sample_mean(-(target_dist * log_probs).sum(dim=-1))
++    if values.numel() == 0:
++        loss += 0 * raw_logits.sum()
++    probs = log_probs.exp()
++    reported_loss = {
++        "value_loss": loss.clone().detach(),
++        "value_accuracy": sum_of_sample_mean((raw_logits.argmax(dim=-1) == target_dist.argmax(dim=-1)).float()).detach(),
++        "value_entropy": sum_of_sample_mean(-(probs * log_probs).sum(dim=-1)).detach(),
++        "value_confidence": sum_of_sample_mean(probs.max(dim=-1).values).detach(),
++    }
++    return loss, reported_loss
++
++
+ def value_loss_function(
+     args: Namespace,
+     batch: RolloutBatch,
+@@ -472,6 +622,9 @@ def value_loss_function(
+         Tuple of `(loss, metrics)` where `loss` is a scalar tensor and
+         `metrics` contains detached scalars "value_loss" and "value_clipfrac".
+     """
++    if getattr(args, "value_loss_type", "mse") == "classification":
++        return _classification_value_loss(args, batch, logits, sum_of_sample_mean)
++
+     old_values = torch.cat(batch["values"], dim=0)
+ 
+     values = get_values(
+diff --git a/miles/backends/training_utils/loss_hub/math_utils.py b/miles/backends/training_utils/loss_hub/math_utils.py
+index 8f8f1e1c7..1fb48e21d 100644
+--- a/miles/backends/training_utils/loss_hub/math_utils.py
++++ b/miles/backends/training_utils/loss_hub/math_utils.py
+@@ -358,6 +358,37 @@ def compute_gmpo_loss(
+     return torch.cat(losses, dim=0), torch.cat(clipfracs, dim=0), clip_stats
+ 
+ 
++@torch.compile(dynamic=True)
++def compute_sao_dis_policy_loss(
++    log_probs: torch.Tensor,
++    rollout_log_probs: torch.Tensor,
++    advantages: torch.Tensor,
++    eps_low: float,
++    eps_high: float,
++) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
++    """Compute SAO Direct Double-Sided Importance Sampling (DIS).
++
++    Ported verbatim from agentenv/miles feat/sao-tbench21-e2e-validation
++    (16a9bea4, introduced in e25048ed). The behavior model is the policy that
++    generated each token (recorded rollout log probabilities). Tokens at or
++    outside the strict trust-region bounds are removed rather than clipped.
++
++    Returns per-token ``(loss, ratio, rejected, below, above)`` tensors. The
++    ratio intentionally remains in the autograd graph: the published
++    objective contains ``f(r(theta)) * A * log pi_theta``.
++    """
++    log_ratio = _safe_clamp_log_ratio(log_probs - rollout_log_probs)
++    ratio = log_ratio.exp()
++    lower = 1.0 - eps_low
++    upper = 1.0 + eps_high
++    below = ratio <= lower
++    above = ratio >= upper
++    accepted = ~(below | above)
++    calibrated_ratio = torch.where(accepted, ratio, torch.zeros_like(ratio))
++    loss = -calibrated_ratio * advantages * log_probs
++    return loss, ratio, (~accepted).float(), below.float(), above.float()
++
++
+ def compute_log_probs(
+     logits: torch.Tensor,
+     tokens: torch.Tensor,
+@@ -714,10 +745,47 @@ def get_advantages_and_returns_batch(
+     gamma,
+     lambd,
+     chunked: bool = True,
++    gae_variant: str = "vanilla",
++    gae_lambd_mode: str = "fixed",
++    gae_length_alpha: float = 1.5,
++    gae_critic_lambd: float = 1.0,
++    segment_ids_list=None,
++    tokens_after_list=None,
++    gae_length_list=None,
+ ):
+     """
+     Batched GAE with CP support, computed over trainable tokens only.
+ 
++    GAE variants (``gae_variant``; the default reproduces the original
++    vanilla/chunked GAE element-wise):
++      - ``vanilla``: standard GAE with ``lambd``.
++      - ``length_adaptive``: per-sample ``lambda = 1 - 1/(alpha * l)``, ``l`` the
++        response length (VAPO). Equivalent to ``gae_lambd_mode="length_adaptive"``,
++        which can be combined with ``decoupled`` / ``cross_segment_*``.
++      - ``decoupled``: advantages use the policy lambda, returns (critic targets)
++        use ``gae_critic_lambd`` (VAPO).
++      - ``cross_segment_whole_rollout`` (control/ablation mode, formerly
++        ``cross_segment``): CompactionRL. ``segment_ids_list[i]`` (shape ``[R_i]``,
++        non-decreasing) gives each response token's segment. GAE is local to
++        each segment (bootstrap 0 at every segment end, no bootstrapping across
++        a compaction boundary; terminal reward stays at the last trainable
++        token) and the local advantage is multiplied by ``(gamma*lambda)^{N_{>s}}``
++        with ``N_{>s}`` the number of trainable tokens in later segments.
++        Without segment ids (or a single segment) it equals vanilla.
++        Legacy one-sample-per-rollout layout: earlier segments see no terminal
++        reward. CompactionRL (arXiv 2607.05378 sec. 4.2) optimises every segment
++        as its own sample instead; use ``cross_segment_per_sample``.
++      - ``cross_segment_per_sample``: CompactionRL, one sample per compaction
++        segment. Each sample runs ordinary local GAE (terminal reward at its last
++        trainable token, bootstrap 0 after it), i.e. eq. 13; the advantage is then
++        multiplied by ``(gamma*lambda)^{tokens_after_list[i]}`` (eq. 14,
++        ``N_{>s}`` = optimised tokens of later segments of the same rollout).
++        Returns (critic targets) are the *local* advantage plus values
++        (uncorrected; the paper only says "standard PPO value regression").
++        For length-adaptive lambda, ``l = gae_length_list[i]`` when given (e.g.
++        the whole rollout's optimised length, so all segments of a rollout share
++        one lambda), else the sample's response length.
++
+     Semantics:
+       - Masked tokens (`loss_mask == 0`, e.g. tool/env observations in
+         multi-turn rollouts) are not MDP transitions. GAE runs on the
+@@ -817,9 +885,70 @@ def get_advantages_and_returns_batch(
+                 packed_rewards[i, :K] = full_rewards_list[i][idx]
+                 packed_rewards[i, K - 1] += terminal_rewards[i]
+ 
++        if gae_variant == "cross_segment":
++            raise ValueError(
++                "gae_variant 'cross_segment' is ambiguous and no longer accepted; use "
++                "'cross_segment_per_sample' (CompactionRL eq. 13-15, one sample per segment) or "
++                "'cross_segment_whole_rollout' (control mode: one sample per rollout, earlier segments "
++                "get no terminal reward)"
++            )
++        if gae_variant not in GAE_VARIANTS:
++            raise ValueError(f"unknown gae_variant {gae_variant!r}; expected one of {GAE_VARIANTS}")
++        if gae_lambd_mode not in GAE_LAMBD_MODES:
++            raise ValueError(f"unknown gae_lambd_mode {gae_lambd_mode!r}; expected one of {GAE_LAMBD_MODES}")
++        length_adaptive = gae_variant == "length_adaptive" or gae_lambd_mode == "length_adaptive"
++        extended = gae_variant != "vanilla" or length_adaptive
++
+         if max_len == 0:
+             packed_advantages = torch.zeros(B, 0, device=device, dtype=dtype)
+             packed_returns = torch.zeros(B, 0, device=device, dtype=dtype)
++        elif extended:
++            per_sample = gae_variant == "cross_segment_per_sample"
++            if per_sample:
++                if tokens_after_list is None:
++                    raise ValueError("cross_segment_per_sample needs per-sample tokens_after (sample.metadata)")
++                assert B == len(tokens_after_list)
++                if any(int(n) < 0 for n in tokens_after_list):
++                    raise ValueError("tokens_after must be >= 0")
++            if length_adaptive:
++                lengths = list(response_lengths)
++                if per_sample and gae_length_list is not None:
++                    assert B == len(gae_length_list)
++                    lengths = [response_lengths[i] if gae_length_list[i] is None else int(gae_length_list[i])
++                               for i in range(B)]
++                lam_list = [length_adaptive_lambda(lengths[i], gae_length_alpha) for i in range(B)]
++            else:
++                lam_list = [float(lambd)] * B
++            lam_actor = torch.tensor(lam_list, device=device, dtype=dtype)
++
++            packed_segments = None
++            if gae_variant == "cross_segment_whole_rollout" and segment_ids_list is not None:
++                assert B == len(segment_ids_list)
++                packed_segments = torch.zeros(B, max_len, device=device, dtype=torch.long)
++                for i in range(B):
++                    K = trainable_lengths[i]
++                    if K > 0:
++                        seg = torch.as_tensor(segment_ids_list[i], device=device, dtype=torch.long)
++                        seg = seg[: response_lengths[i]][trainable_indices[i]]
++                        if K > 1 and bool((seg[1:] < seg[:-1]).any()):
++                            raise ValueError(f"segment ids of sample {i} must be non-decreasing")
++                        packed_segments[i, :K] = seg
++                        packed_segments[i, K:] = seg[-1]
++            valid = torch.zeros(B, max_len, device=device, dtype=dtype)
++            for i in range(B):
++                valid[i, : trainable_lengths[i]] = 1
++
++            packed_advantages = segmented_gae(packed_rewards, packed_values, gamma, lam_actor, packed_segments, valid)
++            if gae_variant == "decoupled":
++                lam_critic = torch.full((B,), float(gae_critic_lambd), device=device, dtype=dtype)
++                critic_adv = segmented_gae(packed_rewards, packed_values, gamma, lam_critic, packed_segments, valid)
++                packed_returns = critic_adv + packed_values
++            else:
++                packed_returns = packed_advantages + packed_values
++            if per_sample:
++                n_after = torch.tensor([float(n) for n in tokens_after_list], device=device, dtype=dtype)
++                factor = torch.pow(gamma * lam_actor, n_after)
++                packed_advantages = packed_advantages * factor[:, None]
+         elif not chunked:
+             packed_advantages, packed_returns = vanilla_gae(
+                 rewards=packed_rewards,
+@@ -872,6 +1001,52 @@ def get_advantages_and_returns_batch(
+     return advantages_list, returns_list
+ 
+ 
++GAE_VARIANTS = ("vanilla", "length_adaptive", "decoupled", "cross_segment_whole_rollout", "cross_segment_per_sample")
++GAE_LAMBD_MODES = ("fixed", "length_adaptive")
++
++
++def length_adaptive_lambda(response_length: int, alpha: float = 1.5) -> float:
++    """VAPO length-adaptive lambda ``1 - 1/(alpha * l)``, clamped to ``[0, 1]``."""
++    if response_length <= 0:
++        return 0.0
++    return min(1.0, max(0.0, 1.0 - 1.0 / (alpha * response_length)))
++
++
++def segmented_gae(
++    rewards: torch.Tensor,
++    values: torch.Tensor,
++    gamma: float,
++    lambd: torch.Tensor,
++    segment_ids: torch.Tensor | None,
++    valid: torch.Tensor,
++) -> torch.Tensor:
++    """GAE with per-row lambda and optional CompactionRL segment structure.
++
++    rewards/values/valid: [B, T]; lambd: [B]; segment_ids: [B, T] long or None.
++    Returns advantages [B, T]. With ``segment_ids=None`` this is vanilla GAE.
++    """
++    B, T = rewards.shape
++    w = gamma * lambd  # [B]
++    last = torch.zeros(B, device=rewards.device, dtype=rewards.dtype)
++    seg_cnt = torch.zeros(B, device=rewards.device, dtype=rewards.dtype)
++    later = torch.zeros(B, device=rewards.device, dtype=rewards.dtype)
++    adv_rev = []
++    for t in reversed(range(T)):
++        if t == T - 1:
++            is_end = torch.ones(B, device=rewards.device, dtype=torch.bool)
++        elif segment_ids is None:
++            is_end = torch.zeros(B, device=rewards.device, dtype=torch.bool)
++        else:
++            is_end = segment_ids[:, t + 1] != segment_ids[:, t]
++        next_value = torch.where(is_end, torch.zeros_like(last), values[:, min(t + 1, T - 1)])
++        delta = rewards[:, t] + gamma * next_value - values[:, t]
++        last = delta + w * torch.where(is_end, torch.zeros_like(last), last)
++        later = torch.where(is_end, later + seg_cnt, later)
++        seg_cnt = torch.where(is_end, torch.zeros_like(seg_cnt), seg_cnt) + valid[:, t]
++        adv_rev.append(last * torch.pow(w, later) if segment_ids is not None else last)
++    return torch.stack(adv_rev[::-1], dim=1)
++
++
+ def vanilla_gae(
+     rewards: torch.Tensor,
+     values: torch.Tensor,
+diff --git a/miles/backends/training_utils/sao_critic.py b/miles/backends/training_utils/sao_critic.py
+new file mode 100644
+index 000000000..6d4f86ae4
+--- /dev/null
++++ b/miles/backends/training_utils/sao_critic.py
+@@ -0,0 +1,13 @@
++"""SAO faster value update (ported from agentenv/miles SAO 16a9bea4); megatron-free for CPU tests."""
++
++
++def refresh_values_after_critic_update(args, rollout_id: int) -> bool:
++    """True when the critic must re-predict values after its update(s) for the actor.
++
++    Upstream SAO (``train_critic``, policy_objective == "sao_dis"): the actor consumes
++    values from the just-updated critic, not the stale predictions used to build this
++    rollout's fixed value targets. Critic-only warmup steps train no actor, so no refresh.
++    """
++    if getattr(args, "policy_objective", "ppo") != "sao_dis":
++        return False
++    return rollout_id >= getattr(args, "num_critic_only_steps", 0)
+diff --git a/miles/ray/rollout/train_data_conversion.py b/miles/ray/rollout/train_data_conversion.py
+index 822140b1f..a1771a831 100644
+--- a/miles/ray/rollout/train_data_conversion.py
++++ b/miles/ray/rollout/train_data_conversion.py
+@@ -17,6 +17,7 @@ ROLLOUT_DATA_TENSOR_DTYPES = {
+     "tokens": "int32",
+     "target_tokens": "int32",
+     "loss_masks": "int32",
++    "segment_ids": "int32",
+     "rollout_log_probs": "float32",
+     "rollout_sampling_mask_ids": "int32",
+     "rollout_sampling_mask_offsets": "int64",
+@@ -34,6 +35,9 @@ ROLLOUT_DATA_VALUE_SPEC: dict[str, ValueSpec] = {
+     "rewards": ValueSpec(codec="ndarray", dtype="float32"),
+     "truncated": ValueSpec(codec="ndarray", dtype="int64"),
+     "round_number": ValueSpec(codec="ndarray", dtype="int64"),
++    "tokens_after": ValueSpec(codec="ndarray", dtype="int64"),
++    "gae_length": ValueSpec(codec="ndarray", dtype="int64"),
++    "positive_example_success": ValueSpec(codec="ndarray", dtype="int64"),
+     "sample_indices": ValueSpec(codec="ndarray", dtype="int64"),
+     "rollout_ids": ValueSpec(codec="ndarray", dtype="int64"),
+     "rollout_mask_sums": ValueSpec(codec="ndarray", dtype="int64"),
+@@ -101,6 +105,33 @@ def convert_samples_to_train_data(
+         loss_masks.append(sample.loss_mask)
+     train_data["loss_masks"] = loss_masks
+ 
++    # CompactionRL per-token segment ids (cross-segment GAE); only emitted when a sample provides them.
++    if any(s.metadata and "segment_ids" in s.metadata for s in samples):
++        segment_ids = []
++        for sample in samples:
++            seg = (sample.metadata or {}).get("segment_ids")
++            if seg is None:
++                seg = [0] * sample.response_length
++            assert len(seg) == sample.response_length, (
++                f"segment_ids length {len(seg)} != response length {sample.response_length}"
++            )
++            segment_ids.append(list(seg))
++        train_data["segment_ids"] = segment_ids
++
++    # CompactionRL one-sample-per-segment layout (--gae-variant cross_segment_per_sample):
++    # tokens_after = N_{>s}; gae_length = optional length l for length-adaptive lambda.
++    if any(s.metadata and "tokens_after" in s.metadata for s in samples):
++        train_data["tokens_after"] = [int((s.metadata or {}).get("tokens_after", 0)) for s in samples]
++    if any(s.metadata and "gae_length" in s.metadata for s in samples):
++        train_data["gae_length"] = [
++            int((s.metadata or {}).get("gae_length") or s.response_length) for s in samples
++        ]
++
++    # VAPO positive-example LM loss: explicit success judgement from the reward function
++    # (sample.metadata['success'] / 'is_correct'); 1 / 0, -1 = missing (error at use).
++    if any(s.metadata and (SUCCESS_KEYS[0] in s.metadata or SUCCESS_KEYS[1] in s.metadata) for s in samples):
++        train_data["positive_example_success"] = [sample_success_flag(s.metadata) for s in samples]
++
+     train_data["rollout_mask_sums"] = _compute_rollout_mask_sums(train_data["rollout_ids"], loss_masks)
+ 
+     # overwriting the raw reward
+@@ -176,6 +207,29 @@ def convert_samples_to_train_data(
+     return train_data
+ 
+ 
++SUCCESS_KEYS = ("success", "is_correct")
++
++
++def sample_success_flag(metadata: dict | None) -> int:
++    """1 / 0 from the boolean metadata success field; -1 when absent. Non-boolean values are rejected."""
++    metadata = metadata or {}
++    found = []
++    for key in SUCCESS_KEYS:
++        if key in metadata and metadata[key] is not None:
++            value = metadata[key]
++            if isinstance(value, bool):
++                found.append(int(value))
++            elif isinstance(value, int) and value in (0, 1):
++                found.append(int(value))
++            else:
++                raise ValueError(f"sample.metadata[{key!r}] must be a boolean success flag, got {value!r}")
++    if not found:
++        return -1
++    if len(set(found)) != 1:
++        raise ValueError(f"sample.metadata success/is_correct disagree: {found}")
++    return found[0]
++
++
+ def _compute_rollout_mask_sums(rollout_ids: list[int], loss_masks: list[list[int]]) -> list[int]:
+     """Whole-rollout loss-mask total per sample: every sibling of one rollout carries
+     the sum over all of that rollout's samples, so the loss reducer reconstructs one
+@@ -378,6 +432,10 @@ def _package_shards(args, data: dict[str, Any], partitions) -> list[dict[str, An
+             "rewards",
+             "truncated",
+             "loss_masks",
++            "segment_ids",
++            "tokens_after",
++            "gae_length",
++            "positive_example_success",
+             "round_number",
+             "sample_indices",
+             "rollout_ids",
+diff --git a/miles/utils/arguments.py b/miles/utils/arguments.py
+index a28146bf9..01109414d 100644
+--- a/miles/utils/arguments.py
++++ b/miles/utils/arguments.py
+@@ -1615,6 +1615,21 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
+                 default=0,
+                 help="number of iterations to linearly warmup for critic model.",
+             )
++            parser.add_argument(
++                "--num-critic-epochs",
++                "--critic-updates-per-step",
++                dest="num_critic_epochs",
++                type=int,
++                default=1,
++                help="Critic optimizer updates per rollout batch (one actor step), reusing the fixed value "
++                "targets. --critic-updates-per-step is an alias (CompactionRL: 2; SAO: --num-critic-epochs 2).",
++            )
++            parser.add_argument(
++                "--critic-freeze-attention",
++                action="store_true",
++                default=False,
++                help="Freeze critic attention modules while keeping its value head and non-attention blocks trainable.",
++            )
+ 
+             parser.add_argument("--eps-clip", type=float, default=0.2, help="PPO clip range")
+             parser.add_argument("--eps-clip-high", type=float, default=None, help="PPO clip upper range")
+@@ -1646,6 +1661,58 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
+                 "--gmpo-log-clip-high", type=float, default=0.4, help="GMPO log-space clip: upper bound is +value"
+             )
+             parser.add_argument("--value-clip", type=float, default=0.2, help="the clip for value loss")
++            parser.add_argument(
++                "--policy-objective",
++                choices=["ppo", "sao_dis"],
++                default="ppo",
++                help="Policy-gradient objective. sao_dis uses current/rollout ratios and strict rejection.",
++            )
++            parser.add_argument(
++                "--sao-dis-eps-low",
++                type=float,
++                default=0.3,
++                help="SAO DIS lower deviation; the strict lower ratio bound is 1-eps-low.",
++            )
++            parser.add_argument(
++                "--sao-dis-eps-high",
++                type=float,
++                default=5.0,
++                help="SAO DIS upper deviation; the strict upper ratio bound is 1+eps-high.",
++            )
++            parser.add_argument(
++                "--value-loss-type",
++                type=str,
++                default="mse",
++                choices=["mse", "classification"],
++                help="Scalar MSE or categorical value prediction.",
++            )
++            parser.add_argument(
++                "--value-num-bins",
++                type=int,
++                default=51,
++                help="Number of support bins for classification value prediction.",
++            )
++            parser.add_argument(
++                "--value-reward-range",
++                type=float,
++                nargs=2,
++                default=[0.0, 1.0],
++                metavar=("LOW", "HIGH"),
++                help="Categorical value support range.",
++            )
++            parser.add_argument(
++                "--value-target-type",
++                type=str,
++                default="hl_gauss",
++                choices=["two_hot", "hl_gauss"],
++                help="Projection from scalar returns to categorical targets.",
++            )
++            parser.add_argument(
++                "--hl-gauss-sigma-ratio",
++                type=float,
++                default=0.75,
++                help="HL-Gauss sigma divided by categorical bin width.",
++            )
+             parser.add_argument(
+                 "--kl-coef",
+                 type=float,
+@@ -1728,6 +1795,54 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
+             parser.add_argument("--entropy-coef", type=float, default=0.0, help="Entropy loss coef")
+             parser.add_argument("--gamma", type=float, default=1.0, help="PPO GAE gamma")
+             parser.add_argument("--lambd", type=float, default=1.0, help="PPO GAE lambd")
++            parser.add_argument(
++                "--gae-variant",
++                type=str,
++                choices=["vanilla", "length_adaptive", "decoupled", "cross_segment_whole_rollout", "cross_segment_per_sample"],
++                default="vanilla",
++                help="PPO GAE variant. cross_segment_per_sample (CompactionRL, one sample per compaction "
++                "segment) runs local GAE per sample and multiplies the advantage by (gamma*lambda)^tokens_after "
++                "from sample.metadata['tokens_after'] (optional metadata 'gae_length' sets l for length-adaptive "
++                "lambda). cross_segment_whole_rollout is an explicit CONTROL mode (one sample per rollout "
++                "with per-token sample.metadata['segment_ids']; earlier segments get no terminal reward, "
++                "which differs from CompactionRL eq. 15). The ambiguous value cross_segment is rejected.",
++            )
++            parser.add_argument(
++                "--gae-lambd-mode",
++                type=str,
++                choices=["fixed", "length_adaptive"],
++                default="fixed",
++                help="Policy lambda: fixed (--lambd) or length_adaptive (1 - 1/(alpha * response_len)).",
++            )
++            parser.add_argument("--gae-length-alpha", type=float, default=1.5, help="alpha for length-adaptive lambda")
++            parser.add_argument(
++                "--gae-critic-lambd", type=float, default=1.0, help="critic-target lambda for --gae-variant decoupled"
++            )
++            parser.add_argument(
++                "--positive-example-lm-loss-coef",
++                type=float,
++                default=0.0,
++                help="VAPO positive-example LM loss weight mu (paper eq. 9-10): adds mu * NLL over the response "
++                "tokens of positive samples, normalized by the global (all micro-batches and DP ranks of the "
++                "optimizer step) count of positive-sample tokens (0 disables).",
++            )
++            parser.add_argument(
++                "--positive-example-source",
++                type=str,
++                choices=["success", "reward"],
++                default="success",
++                help="How a sample is judged positive. success (default): the explicit boolean "
++                "sample.metadata['success'] (or 'is_correct') set by the reward function; a missing field is an "
++                "error. reward: reward > --positive-example-reward-threshold; only valid when the reward is a "
++                "binary success signal (a positive reward always means complete success).",
++            )
++            parser.add_argument(
++                "--positive-example-reward-threshold",
++                type=float,
++                default=None,
++                help="With --positive-example-source reward: a sample is positive when reward > this (default 0.0). "
++                "Rejected with --positive-example-source success.",
++            )
+             parser.add_argument("--normalize-advantages", action="store_true", default=False)
+             parser.add_argument(
+                 "--disable-grpo-std-normalization",
+@@ -2982,6 +3097,22 @@ def _compute_custom_inference_engine_provider_path(args: argparse.Namespace) ->
+ _DEPLOY_INSTANCE_ID_PATTERN = re.compile(DNS_LABEL_PATTERN)
+ 
+ 
++def validate_positive_example_args(args: argparse.Namespace) -> None:
++    """VAPO positive-example LM loss: the positive judgement must be explicit (success field) unless the
++    reward is declared to be a binary success signal (--positive-example-source reward)."""
++    source = getattr(args, "positive_example_source", "success")
++    threshold = getattr(args, "positive_example_reward_threshold", None)
++    if source not in ("success", "reward"):
++        raise ValueError(f"--positive-example-source must be success or reward, got {source!r}")
++    if source == "success" and threshold is not None:
++        raise ValueError(
++            "--positive-example-reward-threshold is only valid with --positive-example-source reward "
++            "(declares that a reward above the threshold always means complete success)"
++        )
++    if getattr(args, "positive_example_lm_loss_coef", 0.0) < 0:
++        raise ValueError("--positive-example-lm-loss-coef must be >= 0")
++
++
+ def _validate_deploy_component(args: argparse.Namespace) -> None:
+     component = DeployComponent(args.deploy_component)
+ 
+@@ -3520,6 +3651,27 @@ def miles_validate_args(args):
+             "require advantage normalization. Please add `--normalize-advantages` to your command."
+         )
+ 
++    if args.policy_objective == "sao_dis":
++        if not 0 <= args.sao_dis_eps_low < 1:
++            raise ValueError("--sao-dis-eps-low must be in [0, 1)")
++        if args.sao_dis_eps_high <= 0:
++            raise ValueError("--sao-dis-eps-high must be positive")
++        if args.use_tis or args.get_mismatch_metrics or args.use_opsm:
++            raise ValueError("SAO DIS cannot be combined with TIS, mismatch correction, or OPSM")
++        # DIS directly compares the current learner with the policy that
++        # generated each token. Avoid the redundant old-policy scoring pass.
++        args.use_rollout_logprobs = True
++    if getattr(args, "num_critic_epochs", 1) < 1:
++        raise ValueError("--num-critic-epochs/--critic-updates-per-step must be positive")
++    validate_positive_example_args(args)
++    if args.value_loss_type == "classification":
++        if args.value_num_bins < 2:
++            raise ValueError("classification value loss requires --value-num-bins >= 2")
++        if len(args.value_reward_range) != 2 or args.value_reward_range[0] >= args.value_reward_range[1]:
++            raise ValueError("--value-reward-range must satisfy LOW < HIGH")
++        if args.hl_gauss_sigma_ratio <= 0:
++            raise ValueError("--hl-gauss-sigma-ratio must be positive")
++
+     if args.use_rollout_logprobs:
+         assert not args.use_tis, "use_rollout_logprobs and use_tis cannot be set at the same time."
+ 
+diff --git a/tests/fast/backends/training_utils/_gae_orig_039471508.py b/tests/fast/backends/training_utils/_gae_orig_039471508.py
+new file mode 100644
+index 000000000..fe0ffcb5e
+--- /dev/null
++++ b/tests/fast/backends/training_utils/_gae_orig_039471508.py
+@@ -0,0 +1,343 @@
++"""Frozen pre-change GAE (yeto/ports 039471508, math_utils.py) for the default-unchanged test."""
++import torch
++import torch.nn.functional as F
++from miles.backends.training_utils.cp_utils import all_gather_with_cp, slice_log_prob_with_cp
++from miles.backends.training_utils.parallel import get_parallel_state
++
++
++def get_advantages_and_returns_batch(
++    total_lengths,
++    response_lengths,
++    values_list,
++    rewards_list,
++    terminal_rewards,
++    qkv_format,
++    max_seq_lens,
++    loss_masks,
++    gamma,
++    lambd,
++    chunked: bool = True,
++):
++    """
++    Batched GAE with CP support, computed over trainable tokens only.
++
++    Semantics:
++      - Masked tokens (`loss_mask == 0`, e.g. tool/env observations in
++        multi-turn rollouts) are not MDP transitions. GAE runs on the
++        subsequence of trainable tokens, so masked tokens carry no reward
++        (including KL shaping), contribute no value delta, and the GAE carry
++        crosses them without extra `gamma * lambd` decay.
++      - The terminal reward is added at the last trainable token, not the last
++        response token.
++      - Fully masked samples get zero advantages and returns; their terminal
++        reward is dropped.
++      - Truncated sequences use the same zero bootstrap as terminated ones:
++        the value after the last trainable token is taken as 0 and the
++        observed terminal reward is still applied.
++      - This function outputs zero advantages and returns at masked positions.
++        Downstream transforms may still shift these entries to nonzero values
++        (advantage whitening applies its affine transform to every position,
++        and the on-policy distillation KL penalty is added per token), but the
++        whitening statistics themselves are mask-weighted, so the injected
++        zeros do not bias them. Correctness relies on the policy and value
++        losses masking these positions out (the policy loss re-zeros
++        advantages at inactive tokens and all loss reducers weight by
++        `loss_mask`), so masked positions never receive gradient.
++
++    C_i is the length of values_list[i] and rewards_list[i] on the current CP rank.
++    Input:
++        total_lengths:     list[int], each sample's total_len
++        response_lengths:  list[int], each sample's response_len
++        values_list:       list[Tensor], each current-CP-rank tensor has shape [C_i]
++        rewards_list:      list[Tensor], same shape as values_list
++        terminal_rewards:  list[float], one scalar sequence reward per sample
++        qkv_format:        str, sequence layout used to split tensors across CP ranks
++        max_seq_lens:      list[int] of BSHD padded lengths, or None for THD
++        loss_masks:        list[Tensor], full-response masks, each has shape [R_i]
++    Output:
++        advantages_list:   list[Tensor], each current-CP-rank tensor has shape [C_i]
++        returns_list:      list[Tensor], same shape
++    """
++
++    with torch.no_grad():
++        B = len(response_lengths)
++        assert B == len(values_list)
++        assert B == len(rewards_list)
++        assert B == len(terminal_rewards)
++        assert B == len(loss_masks)
++
++        cp_size = get_parallel_state().cp.size
++        if cp_size > 1 and qkv_format == "bshd":
++            assert max_seq_lens is not None, "max_seq_lens is required for BSHD with CP"
++            assert B == len(max_seq_lens)
++            max_seq_lens_per_sample = max_seq_lens
++        else:  # qkv_format == "thd" or cp_size == 1
++            max_seq_lens_per_sample = [None] * B
++
++        device = values_list[0].device
++        dtype = values_list[0].dtype
++
++        if cp_size > 1:
++            full_values_list = []
++            full_rewards_list = []
++
++            for total_len, resp_len, v, r, max_seq_len in zip(
++                total_lengths,
++                response_lengths,
++                values_list,
++                rewards_list,
++                max_seq_lens_per_sample,
++                strict=False,
++            ):
++                full_v = all_gather_with_cp(v, total_len, resp_len, qkv_format=qkv_format, max_seq_len=max_seq_len)
++                full_r = all_gather_with_cp(r, total_len, resp_len, qkv_format=qkv_format, max_seq_len=max_seq_len)
++                full_values_list.append(full_v)
++                full_rewards_list.append(full_r)
++
++            # full_values_list[i].shape = [resp_len_i]
++        else:
++            full_values_list = values_list
++            full_rewards_list = rewards_list
++
++        # Compress each sample to its trainable positions so that masked
++        # tokens do not act as MDP transitions in the GAE recursion.
++        trainable_indices = [
++            loss_masks[i][: response_lengths[i]].to(device).nonzero(as_tuple=True)[0] for i in range(B)
++        ]
++        trainable_lengths = [idx.numel() for idx in trainable_indices]
++
++        # pad to max_len for batched GAE
++        max_len = max(trainable_lengths)
++
++        packed_values = torch.zeros(B, max_len, device=device, dtype=dtype)
++        packed_rewards = torch.zeros(B, max_len, device=device, dtype=dtype)
++
++        for i in range(B):
++            K = trainable_lengths[i]
++            if K > 0:
++                idx = trainable_indices[i]
++                packed_values[i, :K] = full_values_list[i][idx]
++                packed_rewards[i, :K] = full_rewards_list[i][idx]
++                packed_rewards[i, K - 1] += terminal_rewards[i]
++
++        if max_len == 0:
++            packed_advantages = torch.zeros(B, 0, device=device, dtype=dtype)
++            packed_returns = torch.zeros(B, 0, device=device, dtype=dtype)
++        elif not chunked:
++            packed_advantages, packed_returns = vanilla_gae(
++                rewards=packed_rewards,
++                values=packed_values,
++                gamma=gamma,
++                lambd=lambd,
++            )
++        else:
++            packed_advantages, packed_returns = chunked_gae(
++                rewards=packed_rewards,
++                values=packed_values,
++                gamma=gamma,
++                lambd=lambd,
++            )
++
++        advantages_list = []
++        returns_list = []
++
++        for i in range(B):
++            resp_len = response_lengths[i]
++            K = trainable_lengths[i]
++
++            adv_full = torch.zeros(resp_len, device=device, dtype=dtype)
++            ret_full = torch.zeros(resp_len, device=device, dtype=dtype)
++            if K > 0:
++                idx = trainable_indices[i]
++                adv_full[idx] = packed_advantages[i, :K]
++                ret_full[idx] = packed_returns[i, :K]
++
++            if cp_size > 1:
++                max_seq_len = max_seq_lens_per_sample[i]
++                adv_full = slice_log_prob_with_cp(
++                    adv_full,
++                    total_lengths[i],
++                    resp_len,
++                    qkv_format=qkv_format,
++                    max_token_len=max_seq_len,
++                )
++                ret_full = slice_log_prob_with_cp(
++                    ret_full,
++                    total_lengths[i],
++                    resp_len,
++                    qkv_format=qkv_format,
++                    max_token_len=max_seq_len,
++                )
++
++            advantages_list.append(adv_full)
++            returns_list.append(ret_full)
++
++    return advantages_list, returns_list
++
++
++def vanilla_gae(
++    rewards: torch.Tensor,
++    values: torch.Tensor,
++    gamma: float,
++    lambd: float,
++):
++    B, T = rewards.shape
++    device = rewards.device
++    dtype = rewards.dtype
++
++    lastgaelam = torch.zeros(B, device=device, dtype=dtype)
++    adv_rev = []
++
++    for t in reversed(range(T)):
++        next_value = values[:, t + 1] if t < T - 1 else 0.0
++        delta = rewards[:, t] + gamma * next_value - values[:, t]
++        lastgaelam = delta + gamma * lambd * lastgaelam
++        adv_rev.append(lastgaelam)
++
++    full_advantages = torch.stack(adv_rev[::-1], dim=1)  # [B, max_len]
++    full_returns = full_advantages + values  # [B, max_len]
++    return full_advantages, full_returns
++
++
++def chunked_gae(
++    rewards: torch.Tensor,
++    values: torch.Tensor,
++    gamma: float,
++    lambd: float,
++    chunk_size: int = 128,
++):
++    """
++    Compute Generalized Advantage Estimation (GAE) using a FlashLinearAttention-
++    inspired algorithm: parallel prefix scan within chunks and recurrent state
++    propagation across chunks.
++
++    This reduces the sequential dependency length from O(T) to O(T / chunk_size),
++    while keeping chunk computations fully parallelizable (O(C^2) per chunk).
++
++    Args:
++        rewards (Tensor): [B, T] reward sequence.
++        values (Tensor):  [B, T] value predictions. The next-value of the final
++                          step is assumed to be zero (standard PPO convention).
++        gamma (float): discount factor.
++        lam (float): GAE lambda.
++        chunk_size (int): sequence chunk length for parallel scan.
++
++    Returns:
++        advantages (Tensor): [B, T] computed advantages.
++        returns (Tensor):    [B, T] advantages + values.
++    """
++
++    # -------------------------------------------------------------------------
++    # Validate inputs
++    # -------------------------------------------------------------------------
++    assert rewards.ndim == 2 and values.ndim == 2
++    B, T = rewards.shape
++    assert values.shape == (B, T)
++
++    device = rewards.device
++    dtype = rewards.dtype
++
++    # -------------------------------------------------------------------------
++    # Build δ_t = r_t + γ * V_{t+1} - V_t   with V_{T} = 0
++    # -------------------------------------------------------------------------
++    next_values = torch.cat(
++        [values[:, 1:], torch.zeros(B, 1, device=device, dtype=dtype)],
++        dim=1,
++    )
++    deltas = rewards + gamma * next_values - values
++
++    # Reformulate backward GAE as a forward scan on the reversed sequence:
++    #   S[i] = Δ[i] + w * S[i - 1],   w = γλ
++    w = gamma * lambd
++    deltas_rev = torch.flip(deltas, dims=[1])  # [B, T]
++
++    # -------------------------------------------------------------------------
++    # Pad to a multiple of chunk_size
++    # -------------------------------------------------------------------------
++    if T % chunk_size != 0:
++        pad = chunk_size - (T % chunk_size)
++        deltas_rev = F.pad(deltas_rev, (0, pad))
++    else:
++        pad = 0
++
++    B, T_pad = deltas_rev.shape
++    n_chunks = T_pad // chunk_size
++
++    deltas_chunks = deltas_rev.view(B, n_chunks, chunk_size)
++
++    # -------------------------------------------------------------------------
++    # Construct the intra-chunk parallel scan kernel M
++    #
++    # For a chunk Δ[0..C-1], we want:
++    #   S_local[t] = sum_{k=0..t} w^(t-k) * Δ[k]
++    #
++    # This is implemented as:
++    #   S_local = Δ @ M
++    #
++    # where:
++    #   M[i, j] = w^(j - i)    if j >= i
++    #             0            otherwise
++    # -------------------------------------------------------------------------
++    idx = torch.arange(chunk_size, device=device)
++    row = idx[:, None]
++    col = idx[None, :]
++    diff = col - row
++
++    M = torch.zeros(chunk_size, chunk_size, device=device, dtype=dtype)
++    mask = diff >= 0
++
++    if w == 0.0:
++        M[mask & (diff == 0)] = 1.0
++    else:
++        M[mask] = w ** diff[mask].to(dtype)
++
++    # pow_vec[t] = w^(t+1), used to inject the recurrent state s_prev
++    if w == 0.0:
++        pow_vec = torch.zeros(chunk_size, device=device, dtype=dtype)
++    else:
++        pow_vec = w ** torch.arange(1, chunk_size + 1, device=device, dtype=dtype)
++
++    # -------------------------------------------------------------------------
++    # Parallel compute local chunk results (assuming initial state = 0)
++    # -------------------------------------------------------------------------
++    deltas_flat = deltas_chunks.reshape(B * n_chunks, chunk_size)
++    S_local_flat = deltas_flat @ M
++    S_local_chunks = S_local_flat.view(B, n_chunks, chunk_size)
++
++    # Effective length of each chunk (the last chunk may be padded)
++    lengths = [chunk_size] * n_chunks
++    if pad > 0:
++        lengths[-1] = chunk_size - pad
++
++    # -------------------------------------------------------------------------
++    # Recurrent propagation between chunks
++    #
++    # Each chunk contributes:
++    #   S_global[t] = S_local[t] + w^(t+1) * s_prev
++    #
++    # And updates:
++    #   s_prev = S_global[last_t]
++    # -------------------------------------------------------------------------
++    S_rev = deltas_rev.new_zeros(B, T_pad)
++    s_prev = torch.zeros(B, device=device, dtype=dtype)
++
++    for c in range(n_chunks):
++        Lc = lengths[c]
++        start = c * chunk_size
++        end = start + Lc
++
++        S_local = S_local_chunks[:, c, :Lc]
++        S_global = S_local + s_prev.unsqueeze(1) * pow_vec[:Lc]
++
++        S_rev[:, start:end] = S_global
++        s_prev = S_global[:, -1]  # state for next chunk
++
++    # Remove padding and flip back to original time order
++    if pad > 0:
++        S_rev = S_rev[:, :T]
++
++    advantages = torch.flip(S_rev, dims=[1])
++    returns = advantages + values
++
++    return advantages, returns
++
+diff --git a/tests/fast/backends/training_utils/loss/test_positive_example_lm_loss.py b/tests/fast/backends/training_utils/loss/test_positive_example_lm_loss.py
+new file mode 100644
+index 000000000..703fc7295
+--- /dev/null
++++ b/tests/fast/backends/training_utils/loss/test_positive_example_lm_loss.py
+@@ -0,0 +1,224 @@
++"""VAPO positive-example LM loss (--positive-example-lm-loss-coef).
++
++The reference below is independent of the code under test: it recomputes
++log pi(a_t|s_t) from the logits with plain torch.log_softmax and applies the
++VAPO paper's eq. (9)-(10) NLL term: the sum over positive-sample tokens divided by
++the global positive-token count P of the optimizer step. Miles divides the summed
++loss by the step's global normalizer D afterwards, so the term returned by the
++policy loss must equal D * eq9.
++"""
++
++import pytest
++import torch
++
++from miles.backends.training_utils.cp_utils import get_sum_of_sample_mean
++from miles.backends.training_utils.loss import (
++    compute_advantages_and_returns,
++    positive_example_flags,
++    positive_example_flags_from_rollout,
++    positive_example_lm_weights,
++)
++from miles.ray.rollout.train_data_conversion import sample_success_flag
++from miles.utils.arguments import validate_positive_example_args
++from miles.backends.training_utils.loss_hub.losses import policy_loss_function
++
++from .loss_test_utils import deep_clone, make_batch, make_inputs, make_parallel_state, make_rollout_data
++from .loss_test_utils import make_args as _make_args
++
++PROMPTS = [3, 2, 4, 2]
++RESPONSES = [5, 3, 6, 4]
++VOCAB = 11
++# policy_loss_function attributes the shared loss-test defaults predate
++_EXTRA = dict(observe_training_entropy=False)
++
++
++def make_args(**overrides):
++    return _make_args(**{**_EXTRA, **overrides})
++
++
++def _run(args, inputs, weights):
++    make_parallel_state()
++    batch = make_batch(inputs, "policy_loss")
++    if weights is not None:
++        batch["positive_example_lm_weights"] = weights
++    logits = deep_clone(inputs["policy_logits"])
++    logits.requires_grad_(True)
++    som = get_sum_of_sample_mean(
++        batch["total_lengths"], batch["response_lengths"], batch["loss_masks"], args.calculate_per_token_loss
++    )
++    loss, metrics = policy_loss_function(args, batch, logits, som)
++    loss.backward()
++    return loss.detach(), metrics, logits.grad.clone()
++
++
++def _ref_positive_logp(inputs, prompts, responses):
++    """Per sample: (sum of log pi over masked response tokens, mask token count), via plain log_softmax."""
++    logits = inputs["policy_logits"][0]
++    out, offset = [], 0
++    for p, r, tokens, mask in zip(prompts, responses, inputs["unconcat_tokens"], inputs["loss_masks"], strict=True):
++        # token at position i is predicted by the logits at position i-1
++        lp = torch.log_softmax(logits[offset + p - 1 : offset + p + r - 1].double(), dim=-1)
++        token_lp = lp.gather(-1, tokens[p : p + r].unsqueeze(-1)).squeeze(-1)
++        out.append(((token_lp * mask.double()).sum(), float(mask.sum())))
++        offset += p + r
++    return out
++
++
++def _eq9(per_sample, flags):
++    num = -sum(lp for (lp, _), f in zip(per_sample, flags, strict=True) if f)
++    den = sum(n for (_, n), f in zip(per_sample, flags, strict=True) if f)
++    return num / den
++
++
++def _weights(flags, inputs, per_token, groups=None, num_rollouts=None, reduce=None):
++    mask_sums = [float(m.sum()) for m in inputs["loss_masks"]]
++    groups = groups or [list(range(len(flags)))]
++    return positive_example_lm_weights(flags, mask_sums, step_groups=groups, per_token=per_token,
++                                       num_rollouts=num_rollouts, all_reduce_sum=reduce)
++
++
++@pytest.mark.parametrize("per_token", [False, True])
++def test_matches_eq9_reference(per_token):
++    args = make_args(entropy_coef=0.0, calculate_per_token_loss=per_token)
++    inputs = make_inputs(0, 4, PROMPTS, RESPONSES, VOCAB, args)
++    flags = [1.0, 0.0, 1.0, 0.0]
++    base, _, base_grad = _run(args, inputs, None)
++    mu = 0.1
++    args_mu = make_args(entropy_coef=0.0, calculate_per_token_loss=per_token, positive_example_lm_loss_coef=mu)
++    weights = _weights(flags, inputs, per_token, num_rollouts=[4])
++    loss, metrics, grad = _run(args_mu, inputs, weights)
++    per_sample = _ref_positive_logp(inputs, PROMPTS, RESPONSES)
++    D = sum(max(n, 1.0) for _, n in per_sample) if per_token else 4.0
++    ref = _eq9(per_sample, flags) * D
++    torch.testing.assert_close(metrics["positive_lm_loss"].double(), ref, rtol=1e-5, atol=1e-5)
++    torch.testing.assert_close(loss.double(), base.double() + mu * ref, rtol=1e-5, atol=1e-5)
++    assert not torch.equal(grad, base_grad)
++
++
++@pytest.mark.parametrize("per_token", [False, True])
++def test_global_count_across_microbatches_and_ranks(per_token):
++    """2 DP ranks x 2 micro-batches x 2 samples, one optimizer step: summing every micro-batch's term and
++    dividing by the step's global normalizer D gives eq. 9 over all 8 samples (P counted globally)."""
++    args = make_args(entropy_coef=0.0, calculate_per_token_loss=per_token, positive_example_lm_loss_coef=0.1)
++    shapes = [([3, 2], [5, 3]), ([4, 2], [6, 4]), ([2, 3], [4, 7]), ([3, 3], [2, 5])]
++    mbs = [make_inputs(10 + k, 2, p, r, VOCAB, args) for k, (p, r) in enumerate(shapes)]
++    flags = [[1.0, 0.0], [1.0, 1.0], [0.0, 0.0], [0.0, 1.0]]
++    ranks = [[0, 1], [2, 3]]  # micro-batch ids per rank
++
++    def rank_inputs(rank):
++        return {"loss_masks": [m for k in ranks[rank] for m in mbs[k]["loss_masks"]]}
++
++    def rank_flags(rank):
++        return [f for k in ranks[rank] for f in flags[k]]
++
++    local_stats = []
++    for rank in range(2):  # pass 1: record each rank's local stats (what all_reduce would sum)
++        _weights(rank_flags(rank), rank_inputs(rank), per_token, groups=[[0, 1, 2, 3]], num_rollouts=[8],
++                 reduce=lambda t: local_stats.append(t.clone()))
++    total = local_stats[0] + local_stats[1]
++    term = 0.0
++    for rank in range(2):
++        w = _weights(rank_flags(rank), rank_inputs(rank), per_token, groups=[[0, 1, 2, 3]], num_rollouts=[8],
++                     reduce=lambda t: t.copy_(total))
++        for j, k in enumerate(ranks[rank]):
++            _, metrics, _ = _run(args, mbs[k], w[2 * j : 2 * j + 2])
++            term += metrics["positive_lm_loss"].double()
++    per_sample = [x for k, (p, r) in enumerate(shapes) for x in _ref_positive_logp(mbs[k], p, r)]
++    all_flags = [f for fl in flags for f in fl]
++    D = sum(max(n, 1.0) for _, n in per_sample) if per_token else 8.0
++    torch.testing.assert_close(term / D, _eq9(per_sample, all_flags), rtol=1e-5, atol=1e-6)
++
++
++def test_weights_per_step_groups_independent():
++    w = positive_example_lm_weights([1.0, 0.0, 1.0, 1.0], [2.0, 3.0, 4.0, 0.0], step_groups=[[0, 1], [2, 3]],
++                                    per_token=True, num_rollouts=None)
++    assert w == pytest.approx([5.0 / 2.0, 0.0, 5.0 / 4.0, 5.0 / 4.0])  # step 2: D = 4 + max(0, 1) = 5, P = 4
++    w = positive_example_lm_weights([1.0, 0.0], [2.0, 3.0], step_groups=[[0, 1]], per_token=False, num_rollouts=[6])
++    assert w == pytest.approx([3.0, 0.0])
++    assert positive_example_lm_weights([0.0], [2.0], step_groups=[[0]], per_token=True, num_rollouts=None) == [0.0]
++
++
++def test_no_positive_samples_adds_nothing():
++    args = make_args(entropy_coef=0.0)
++    inputs = make_inputs(1, 4, PROMPTS, RESPONSES, VOCAB, args)
++    base, _, base_grad = _run(args, inputs, None)
++    weights = _weights([0.0] * 4, inputs, False, num_rollouts=[4])
++    loss, metrics, grad = _run(make_args(entropy_coef=0.0, positive_example_lm_loss_coef=0.1), inputs, weights)
++    assert metrics["positive_lm_loss"].item() == 0.0
++    torch.testing.assert_close(loss, base)
++    torch.testing.assert_close(grad, base_grad)
++
++
++def test_default_unchanged():
++    """coef absent / 0: identical loss, metrics keys and gradients; weights ignored."""
++    args = make_args()
++    inputs = make_inputs(2, 4, PROMPTS, RESPONSES, VOCAB, args)
++    base, base_metrics, base_grad = _run(args, inputs, None)
++    loss, metrics, grad = _run(make_args(positive_example_lm_loss_coef=0.0), inputs, [1.0] * 4)
++    assert torch.equal(loss, base) and torch.equal(grad, base_grad)
++    assert set(metrics) == set(base_metrics) and "positive_lm_loss" not in metrics
++
++
++def test_missing_weights_raises():
++    args = make_args(positive_example_lm_loss_coef=0.1)
++    inputs = make_inputs(3, 4, PROMPTS, RESPONSES, VOCAB, args)
++    with pytest.raises(ValueError, match="positive_example_lm_weights"):
++        _run(args, inputs, None)
++
++
++def test_flags_from_rewards():
++    assert positive_example_flags([1.0, 0.0, -1.0, 0.5], 0.0) == [1.0, 0.0, 0.0, 1.0]
++    assert positive_example_flags([1.0, 0.5], 0.5) == [1.0, 0.0]
++
++
++def test_success_source_is_default_and_strict():
++    args = make_args(positive_example_lm_loss_coef=0.1)
++    assert getattr(args, "positive_example_source", "success") == "success"
++    rewards = [1.0, 1.0, 0.0]
++    assert positive_example_flags_from_rollout(args, {"positive_example_success": [1, 0, 0]}, rewards) == [1.0, 0.0, 0.0]
++    with pytest.raises(ValueError, match="success"):  # no field at all: no silent reward fallback
++        positive_example_flags_from_rollout(args, {}, rewards)
++    with pytest.raises(ValueError, match="lack"):
++        positive_example_flags_from_rollout(args, {"positive_example_success": [1, -1, 0]}, rewards)
++    reward_args = make_args(positive_example_source="reward", positive_example_reward_threshold=0.5)
++    assert positive_example_flags_from_rollout(reward_args, {}, [1.0, 0.5, 0.6]) == [1.0, 0.0, 1.0]
++    reward_default = make_args(positive_example_source="reward", positive_example_reward_threshold=None)
++    assert positive_example_flags_from_rollout(reward_default, {}, [1.0, 0.0]) == [1.0, 0.0]
++
++
++def test_validate_args():
++    validate_positive_example_args(make_args(positive_example_source="success", positive_example_reward_threshold=None))
++    validate_positive_example_args(make_args(positive_example_source="reward", positive_example_reward_threshold=0.0))
++    with pytest.raises(ValueError, match="only valid"):
++        validate_positive_example_args(make_args(positive_example_source="success",
++                                                 positive_example_reward_threshold=0.0))
++    with pytest.raises(ValueError):
++        validate_positive_example_args(make_args(positive_example_source="bogus",
++                                                 positive_example_reward_threshold=None))
++
++
++def test_sample_success_flag():
++    assert sample_success_flag({"success": True}) == 1
++    assert sample_success_flag({"is_correct": False}) == 0
++    assert sample_success_flag({"success": 1, "is_correct": True}) == 1
++    assert sample_success_flag({}) == -1 and sample_success_flag(None) == -1
++    with pytest.raises(ValueError):
++        sample_success_flag({"success": 0.7})
++    with pytest.raises(ValueError):
++        sample_success_flag({"success": True, "is_correct": False})
++
++
++@pytest.mark.parametrize("coef", [0.0, 0.1])
++def test_rollout_data_weights_only_when_enabled(coef):
++    make_parallel_state()
++    args = make_args(positive_example_lm_loss_coef=coef, positive_example_source="reward",
++                     positive_example_reward_threshold=0.0, global_batch_size=4)
++    inputs = make_inputs(4, 4, PROMPTS, RESPONSES, VOCAB, args)
++    rollout_data = make_rollout_data(inputs)
++    compute_advantages_and_returns(args, rollout_data)
++    if coef:
++        flags = [1.0 if r > 0 else 0.0 for r in inputs["rewards"]]
++        expected = _weights(flags, inputs, args.calculate_per_token_loss, num_rollouts=[4])
++        assert rollout_data["positive_example_lm_weights"] == pytest.approx(expected)
++    else:
++        assert "positive_example_lm_weights" not in rollout_data
+diff --git a/tests/fast/backends/training_utils/rl_gae_reference.py b/tests/fast/backends/training_utils/rl_gae_reference.py
+new file mode 100644
+index 000000000..fd579bdb8
+--- /dev/null
++++ b/tests/fast/backends/training_utils/rl_gae_reference.py
+@@ -0,0 +1,102 @@
++"""Copied verbatim from yeto tests/rl_gae_reference.py (s13-perseg). Independent torch reference implementation of the GAE variants (design D6).
++
++This module MUST NOT import Miles / fork code; it is the oracle used to
++cross-check the fork's ``--gae-variant`` dispatch (tasks.md 6.1/6.2).
++
++All functions operate on one trajectory (1-D tensors of length T, already
++restricted to trainable tokens) with zero bootstrap after the last token:
++    delta_t = r_t + gamma * V_{t+1} - V_t,   V_T = 0
++    A_t     = sum_l (gamma*lambda)^l delta_{t+l}               (Schulman et al. 2016)
++
++Variants
++- vanilla:          A as above, returns R_t = A_t + V_t.
++- length_adaptive:  lambda = 1 - 1/(alpha * l), l = response length,
++                    alpha default 1.5 (VAPO, Yue et al. 2025, Eq. "length-adaptive GAE").
++- decoupled:        policy advantages use lambda_policy, value targets use
++                    lambda_critic (VAPO "decoupled GAE", typically lambda_critic = 1):
++                    A = GAE(lambda_policy), R = GAE(lambda_critic) + V.
++- cross_segment_whole_rollout (control mode, formerly cross_segment): CompactionRL.  For segment s with n_s tokens,
++                    A^loc_{s,i} = sum_{l=0}^{n_s-i} (gamma*lambda)^l delta_{s,i+l},
++                    where the bootstrap value after the last token of every segment
++                    is 0 (no bootstrapping across a compaction boundary) and the
++                    terminal reward sits at the end of the last segment; then
++                    A_{s,i} = (gamma*lambda)^{N_{>s}} * A^loc_{s,i},  N_{>s} = sum_{j>s} n_j.
++                    Returns R = A + V.  LEGACY one-sample-per-rollout layout (fork
++                    ``--gae-variant cross_segment``): earlier segments see no terminal
++                    reward, which does not match the paper (each segment is optimised
++                    individually with the shared reward at its own end).
++- cross_segment_per_sample (CompactionRL, arXiv 2607.05378 sec. 4.2 eq. 13-15, user
++                    decision 2026-10-07): every segment is its own sample whose last
++                    token carries the shared terminal reward R; local GAE with
++                    bootstrap 0 after the segment (eq. 13), then
++                    A = (gamma*lambda)^{N_{>s}} * A^loc (eq. 14).  Critic target
++                    R_t = A^loc_t + V_t (local, uncorrected; paper unspecified).
++                    lambda: if length-adaptive, l = whole rollout's optimised length
++                    (yeto choice so all segments share one lambda, keeping eq. 15).
++"""
++
++from __future__ import annotations
++
++import torch
++
++
++def deltas(rewards: torch.Tensor, values: torch.Tensor, gamma: float) -> torch.Tensor:
++    nxt = torch.cat([values[1:], values.new_zeros(1)])
++    return rewards + gamma * nxt - values
++
++
++def gae_vanilla(rewards, values, gamma: float, lambd: float):
++    d = deltas(rewards, values, gamma)
++    T = d.numel()
++    adv = torch.zeros_like(d)
++    for t in range(T):
++        adv[t] = sum((gamma * lambd) ** k * d[t + k] for k in range(T - t))
++    return adv, adv + values
++
++
++def length_adaptive_lambda(response_length: int, alpha: float = 1.5) -> float:
++    return 1.0 - 1.0 / (alpha * response_length)
++
++
++def gae_length_adaptive(rewards, values, gamma: float, response_length: int, alpha: float = 1.5):
++    return gae_vanilla(rewards, values, gamma, length_adaptive_lambda(response_length, alpha))
++
++
++def gae_decoupled(rewards, values, gamma: float, lambd_policy: float, lambd_critic: float):
++    adv, _ = gae_vanilla(rewards, values, gamma, lambd_policy)
++    adv_c, _ = gae_vanilla(rewards, values, gamma, lambd_critic)
++    return adv, adv_c + values
++
++
++def gae_cross_segment(rewards, values, segment_ids, gamma: float, lambd: float):
++    seg = [int(s) for s in segment_ids]
++    assert seg == sorted(seg), "segment ids must be non-decreasing"
++    order = list(dict.fromkeys(seg))
++    adv = torch.zeros_like(values)
++    for si, s in enumerate(order):
++        pos = [t for t, x in enumerate(seg) if x == s]
++        r, v = rewards[pos], values[pos]
++        local, _ = gae_vanilla(r, v, gamma, lambd)  # bootstrap 0 at segment end
++        n_after = sum(seg.count(o) for o in order[si + 1 :])
++        adv[pos] = local * (gamma * lambd) ** n_after
++    return adv, adv + values
++
++
++def gae_cross_segment_per_sample(rewards, values, tokens_after: int, gamma: float, lambd: float):
++    """One segment sample: rewards already contain R at the last token."""
++    local, _ = gae_vanilla(rewards, values, gamma, lambd)
++    return local * (gamma * lambd) ** int(tokens_after), local + values
++
++
++def split_rollout_into_segment_samples(rewards, values, segment_ids, terminal_reward: float):
++    """Paper layout from a concatenated rollout: one (r, v, tokens_after) per segment, R at every segment end."""
++    seg = [int(s) for s in segment_ids]
++    order = list(dict.fromkeys(seg))
++    out = []
++    for si, s in enumerate(order):
++        pos = [t for t, x in enumerate(seg) if x == s]
++        r = rewards[pos].clone()
++        r[-1] += terminal_reward
++        n_after = sum(seg.count(o) for o in order[si + 1 :])
++        out.append((r, values[pos].clone(), n_after))
++    return out
+diff --git a/tests/fast/backends/training_utils/test_critic_updates_per_step.py b/tests/fast/backends/training_utils/test_critic_updates_per_step.py
+new file mode 100644
+index 000000000..11b6a81ec
+--- /dev/null
++++ b/tests/fast/backends/training_utils/test_critic_updates_per_step.py
+@@ -0,0 +1,65 @@
++"""--num-critic-epochs / --critic-updates-per-step and --critic-freeze-attention (SAO 16a9bea4 port)."""
++
++import argparse
++
++import pytest
++import torch
++
++from miles.backends.training_utils.critic_freeze import freeze_attention_parameters
++from miles.utils.arguments import get_miles_extra_args_provider
++
++
++def _parse(argv):
++    parser = argparse.ArgumentParser()
++    get_miles_extra_args_provider()(parser)
++    ns, _ = parser.parse_known_args(argv)
++    return ns
++
++
++def test_defaults_unchanged():
++    ns = _parse([])
++    assert ns.num_critic_epochs == 1
++    assert ns.critic_freeze_attention is False
++    assert not hasattr(ns, "critic_updates_per_step")
++
++
++@pytest.mark.parametrize("flag", ["--num-critic-epochs", "--critic-updates-per-step"])
++def test_alias_shares_one_dest(flag):
++    assert _parse([flag, "2"]).num_critic_epochs == 2
++
++
++def test_last_flag_wins_single_implementation():
++    assert _parse(["--num-critic-epochs", "2", "--critic-updates-per-step", "3"]).num_critic_epochs == 3
++
++
++class _Attn(torch.nn.Module):
++    def __init__(self):
++        super().__init__()
++        self.linear_qkv = torch.nn.Linear(4, 12)
++
++
++class _Layer(torch.nn.Module):
++    def __init__(self):
++        super().__init__()
++        self.self_attention = _Attn()
++        self.mlp = torch.nn.Linear(4, 4)
++
++
++class _Model(torch.nn.Module):
++    def __init__(self):
++        super().__init__()
++        self.layers = torch.nn.ModuleList([_Layer(), _Layer()])
++        self.output_layer = torch.nn.Linear(4, 1)
++
++
++def test_freeze_attention_only_touches_attention():
++    m = _Model()
++    tensors, elements = freeze_attention_parameters(m)
++    assert tensors == 4 and elements == 2 * (4 * 12 + 12)
++    for name, p in m.named_parameters():
++        assert p.requires_grad == ("self_attention" not in name), name
++
++
++def test_freeze_attention_rejects_no_match():
++    with pytest.raises(RuntimeError):
++        freeze_attention_parameters(torch.nn.Linear(2, 2))
+diff --git a/tests/fast/backends/training_utils/test_ppo_gae_variants.py b/tests/fast/backends/training_utils/test_ppo_gae_variants.py
+new file mode 100644
+index 000000000..c91e3ddd0
+--- /dev/null
++++ b/tests/fast/backends/training_utils/test_ppo_gae_variants.py
+@@ -0,0 +1,267 @@
++"""--gae-variant dispatch: cross-check against the independent yeto reference
++(rl_gae_reference.py, copied verbatim) and default-unchanged guarantees."""
++
++import argparse
++
++import pytest
++import torch
++
++from miles.backends.training_utils.loss_hub import advantages as adv_mod
++from miles.backends.training_utils.loss_hub.math_utils import (
++    get_advantages_and_returns_batch,
++    length_adaptive_lambda,
++    vanilla_gae,
++)
++from miles.backends.training_utils.parallel import GroupInfo, ParallelState, set_parallel_state
++from tests.fast.backends.training_utils import rl_gae_reference as ref
++from tests.fast.backends.training_utils import _gae_orig_039471508 as _orig
++
++D = torch.float64
++
++
++@pytest.fixture(autouse=True)
++def _trivial_parallel_state() -> None:
++    g = GroupInfo(rank=0, size=1, group=None)
++    set_parallel_state(
++        ParallelState(intra_dp=g, intra_dp_cp=g, cp=g, tp=g, pp=g, ep=g, etp=g, indep_dp=g)
++    )
++
++
++def _batch(seed=0, lengths=(5, 9, 1, 7), dtype=D, masked=False):
++    gen = torch.Generator().manual_seed(seed)
++    values = [torch.randn(n, generator=gen, dtype=dtype) for n in lengths]
++    rewards = [0.1 * torch.randn(n, generator=gen, dtype=dtype) for n in lengths]
++    term = [float(x) for x in torch.randn(len(lengths), generator=gen)]
++    if masked:
++        masks = [(torch.rand(n, generator=gen) > 0.3).int() for n in lengths]
++    else:
++        masks = [torch.ones(n, dtype=torch.int) for n in lengths]
++    return values, rewards, term, masks
++
++
++def _run(values, rewards, term, masks, gamma, lambd, **kw):
++    lens = [v.numel() for v in values]
++    return get_advantages_and_returns_batch(
++        total_lengths=lens, response_lengths=lens, values_list=values, rewards_list=rewards,
++        terminal_rewards=term, qkv_format="thd", max_seq_lens=None, loss_masks=masks,
++        gamma=gamma, lambd=lambd, **kw,
++    )
++
++
++def _ref_inputs(v, r, t, m):
++    idx = m.nonzero(as_tuple=True)[0]
++    rr = r[idx].clone()
++    if idx.numel():
++        rr[-1] += t
++    return idx, rr, v[idx]
++
++
++# ---------------- default unchanged (element-wise) ----------------
++
++@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
++@pytest.mark.parametrize("masked", [False, True])
++@pytest.mark.parametrize("chunked", [True, False])
++def test_default_and_explicit_vanilla_are_elementwise_original(dtype, masked, chunked):
++    values, rewards, term, masks = _batch(1, dtype=dtype, masked=masked)
++    a0, r0 = _run(values, rewards, term, masks, 0.97, 0.9, chunked=chunked)
++    a1, r1 = _run(values, rewards, term, masks, 0.97, 0.9, chunked=chunked, gae_variant="vanilla",
++                  gae_lambd_mode="fixed", segment_ids_list=[[0] * v.numel() for v in values])
++    for i in range(len(values)):
++        assert torch.equal(a0[i], a1[i]) and torch.equal(r0[i], r1[i])
++    # and it is bit-identical to the pre-change implementation (frozen copy of
++    # get_advantages_and_returns_batch + kernels from yeto/ports 039471508)
++    lens = [v.numel() for v in values]
++    oa, orr = _orig.get_advantages_and_returns_batch(
++        total_lengths=lens, response_lengths=lens, values_list=values, rewards_list=rewards,
++        terminal_rewards=term, qkv_format="thd", max_seq_lens=None, loss_masks=masks,
++        gamma=0.97, lambd=0.9, chunked=chunked,
++    )
++    for i in range(len(values)):
++        assert torch.equal(a0[i], oa[i]) and torch.equal(r0[i], orr[i])
++
++
++def test_compute_advantages_default_args_pass_no_variant_kwargs(monkeypatch):
++    seen = {}
++
++    def fake(**kw):
++        seen.update(kw)
++        return [torch.zeros(1)], [torch.zeros(1)]
++
++    monkeypatch.setattr(adv_mod, "get_advantages_and_returns_batch", fake)
++    args = argparse.Namespace(advantage_estimator="ppo", kl_coef=0.0, qkv_format="thd", gamma=1.0, lambd=1.0)
++    adv_mod.compute_advantages(args, kl=[torch.zeros(1)], rewards=[1.0], log_probs=None,
++                               loss_masks=[torch.ones(1)], total_lengths=[1], response_lengths=[1],
++                               values=[torch.zeros(1)])
++    assert not any(k.startswith("gae_") or k == "segment_ids_list" for k in seen)
++    args.gae_variant, args.gae_lambd_mode = "vanilla", "fixed"
++    seen.clear()
++    adv_mod.compute_advantages(args, kl=[torch.zeros(1)], rewards=[1.0], log_probs=None,
++                               loss_masks=[torch.ones(1)], total_lengths=[1], response_lengths=[1],
++                               values=[torch.zeros(1)])
++    assert not any(k.startswith("gae_") for k in seen)
++    args.gae_variant = "cross_segment_whole_rollout"
++    seen.clear()
++    adv_mod.compute_advantages(args, kl=[torch.zeros(1)], rewards=[1.0], log_probs=None,
++                               loss_masks=[torch.ones(1)], total_lengths=[1], response_lengths=[1],
++                               values=[torch.zeros(1)], segment_ids=[[0]])
++    assert seen["gae_variant"] == "cross_segment_whole_rollout" and seen["segment_ids_list"] == [[0]]
++
++
++def test_arguments_defaults():
++    from miles.utils import arguments
++    src = open(arguments.__file__).read()
++    for flag in ("--gae-variant", "--gae-lambd-mode", "--gae-length-alpha", "--gae-critic-lambd"):
++        assert flag in src
++
++
++# ---------------- cross-check vs reference ----------------
++
++@pytest.mark.parametrize("masked", [False, True])
++def test_length_adaptive_matches_reference(masked):
++    values, rewards, term, masks = _batch(2, masked=masked)
++    for kw in ({"gae_variant": "length_adaptive"}, {"gae_lambd_mode": "length_adaptive"}):
++        a, r = _run(values, rewards, term, masks, 0.99, 0.123, gae_length_alpha=1.5, **kw)
++        for i, (v, rw, t, m) in enumerate(zip(values, rewards, term, masks)):
++            idx, rr, vv = _ref_inputs(v, rw, t, m)
++            if not idx.numel():
++                continue
++            ea, er = ref.gae_length_adaptive(rr, vv, 0.99, v.numel(), alpha=1.5)
++            assert torch.allclose(a[i][idx], ea, atol=1e-12) and torch.allclose(r[i][idx], er, atol=1e-12)
++
++
++def test_length_adaptive_lambda_value():
++    assert length_adaptive_lambda(100, 1.5) == pytest.approx(1 - 1 / 150)
++    assert length_adaptive_lambda(100, 1.5) == pytest.approx(ref.length_adaptive_lambda(100, 1.5))
++
++
++def test_decoupled_matches_reference():
++    values, rewards, term, masks = _batch(3, masked=True)
++    a, r = _run(values, rewards, term, masks, 1.0, 0.95, gae_variant="decoupled", gae_critic_lambd=1.0)
++    for i, (v, rw, t, m) in enumerate(zip(values, rewards, term, masks)):
++        idx, rr, vv = _ref_inputs(v, rw, t, m)
++        if not idx.numel():
++            continue
++        ea, er = ref.gae_decoupled(rr, vv, 1.0, 0.95, 1.0)
++        assert torch.allclose(a[i][idx], ea, atol=1e-12) and torch.allclose(r[i][idx], er, atol=1e-12)
++
++
++def test_decoupled_with_length_adaptive_policy_lambda():
++    values, rewards, term, masks = _batch(4)
++    a, r = _run(values, rewards, term, masks, 1.0, 0.5, gae_variant="decoupled",
++                gae_lambd_mode="length_adaptive", gae_critic_lambd=1.0)
++    for i, (v, rw, t, m) in enumerate(zip(values, rewards, term, masks)):
++        idx, rr, vv = _ref_inputs(v, rw, t, m)
++        ea, er = ref.gae_decoupled(rr, vv, 1.0, ref.length_adaptive_lambda(v.numel()), 1.0)
++        assert torch.allclose(a[i][idx], ea, atol=1e-12) and torch.allclose(r[i][idx], er, atol=1e-12)
++
++
++@pytest.mark.parametrize("masked", [False, True])
++@pytest.mark.parametrize("lambd_mode", ["fixed", "length_adaptive"])
++def test_cross_segment_matches_reference(masked, lambd_mode):
++    values, rewards, term, masks = _batch(5, lengths=(6, 10, 3, 8), masked=masked)
++    segs = [[0, 0, 1, 1, 1, 2], [0] * 3 + [1] * 4 + [2] * 3, [0, 0, 0], [0, 1, 1, 1, 2, 2, 3, 3]]
++    a, r = _run(values, rewards, term, masks, 0.95, 0.9, gae_variant="cross_segment_whole_rollout",
++                gae_lambd_mode=lambd_mode, segment_ids_list=segs)
++    for i, (v, rw, t, m) in enumerate(zip(values, rewards, term, masks)):
++        idx, rr, vv = _ref_inputs(v, rw, t, m)
++        if not idx.numel():
++            continue
++        lam = ref.length_adaptive_lambda(v.numel()) if lambd_mode == "length_adaptive" else 0.9
++        seg = torch.tensor(segs[i])[idx].tolist()
++        ea, er = ref.gae_cross_segment(rr, vv, seg, 0.95, lam)
++        assert torch.allclose(a[i][idx], ea, atol=1e-12) and torch.allclose(r[i][idx], er, atol=1e-12)
++        assert torch.all(a[i][m == 0] == 0)
++
++
++def test_cross_segment_two_segments_factor_n2():
++    # spec scenario: front segment advantage = local GAE * (gamma*lambda)^{n_2}
++    values, rewards, term, masks = _batch(6, lengths=(7,))
++    seg = [[0, 0, 0, 1, 1, 1, 1]]
++    g, l = 0.9, 0.8
++    a, _ = _run(values, rewards, term, masks, g, l, gae_variant="cross_segment_whole_rollout", segment_ids_list=seg)
++    local, _ = vanilla_gae(rewards[0][None, :3], values[0][None, :3], g, l)
++    assert torch.allclose(a[0][:3], local[0] * (g * l) ** 4, atol=1e-12)
++
++
++def test_cross_segment_degenerates_to_vanilla():
++    values, rewards, term, masks = _batch(7, masked=True)
++    base_a, base_r = _run(values, rewards, term, masks, 0.97, 0.9, chunked=False)
++    for segs in (None, [[3] * v.numel() for v in values]):
++        a, r = _run(values, rewards, term, masks, 0.97, 0.9, gae_variant="cross_segment_whole_rollout", segment_ids_list=segs)
++        for i in range(len(values)):
++            assert torch.allclose(a[i], base_a[i], atol=1e-12) and torch.allclose(r[i], base_r[i], atol=1e-12)
++
++
++def test_cross_segment_rejects_decreasing_ids_and_unknown_variant():
++    values, rewards, term, masks = _batch(8, lengths=(4,))
++    with pytest.raises(ValueError):
++        _run(values, rewards, term, masks, 1.0, 1.0, gae_variant="cross_segment_whole_rollout", segment_ids_list=[[1, 1, 0, 0]])
++    with pytest.raises(ValueError):
++        _run(values, rewards, term, masks, 1.0, 1.0, gae_variant="bogus")
++
++
++def test_ambiguous_cross_segment_value_rejected():
++    values, rewards, term, masks = _batch(8, lengths=(4,))
++    with pytest.raises(ValueError, match="cross_segment_per_sample.*cross_segment_whole_rollout"):
++        _run(values, rewards, term, masks, 1.0, 1.0, gae_variant="cross_segment", segment_ids_list=[[0, 0, 1, 1]])
++
++
++# ---------------- cross_segment_per_sample (CompactionRL, one sample per segment) ----------------
++
++@pytest.mark.parametrize("masked", [False, True])
++@pytest.mark.parametrize("lambd_mode", ["fixed", "length_adaptive"])
++@pytest.mark.parametrize("with_gae_length", [False, True])
++def test_per_sample_matches_reference(masked, lambd_mode, with_gae_length):
++    values, rewards, term, masks = _batch(11, lengths=(6, 10, 3, 8), masked=masked)
++    after = [13, 0, 4, 1]
++    glen = [40, 10, 25, None] if with_gae_length else None
++    a, r = _run(values, rewards, term, masks, 0.95, 0.9, gae_variant="cross_segment_per_sample",
++                gae_lambd_mode=lambd_mode, tokens_after_list=after, gae_length_list=glen)
++    for i, (v, rw, t, m) in enumerate(zip(values, rewards, term, masks)):
++        idx, rr, vv = _ref_inputs(v, rw, t, m)
++        if not idx.numel():
++            continue
++        l_len = glen[i] if (glen and glen[i] is not None) else v.numel()
++        lam = ref.length_adaptive_lambda(l_len) if lambd_mode == "length_adaptive" else 0.9
++        ea, er = ref.gae_cross_segment_per_sample(rr, vv, after[i], 0.95, lam)
++        assert torch.allclose(a[i][idx], ea, atol=1e-12) and torch.allclose(r[i][idx], er, atol=1e-12)
++        assert torch.all(a[i][m == 0] == 0) and torch.all(r[i][m == 0] == 0)
++
++
++def test_per_sample_segments_of_one_rollout_reproduce_eq15():
++    # split one rollout into per-segment samples (R at every segment end); V = 0
++    g, l, R = 1.0, 0.7, 2.0
++    seg = [0, 0, 0, 1, 1, 2, 2, 2, 2]
++    T = len(seg)
++    parts = ref.split_rollout_into_segment_samples(torch.zeros(T, dtype=D), torch.zeros(T, dtype=D), seg, R)
++    values = [p[1] for p in parts]
++    rewards = [torch.zeros_like(p[1]) for p in parts]
++    masks = [torch.ones(p[1].numel(), dtype=torch.int) for p in parts]
++    a, _ = _run(values, rewards, [R] * len(parts), masks, g, l, gae_variant="cross_segment_per_sample",
++                tokens_after_list=[p[2] for p in parts])
++    flat = torch.cat(a)
++    assert torch.allclose(flat, torch.tensor([R * (g * l) ** (T - 1 - t) for t in range(T)], dtype=D), atol=1e-12)
++
++
++def test_per_sample_zero_after_equals_vanilla_and_requires_tokens_after():
++    values, rewards, term, masks = _batch(12, masked=True)
++    base_a, base_r = _run(values, rewards, term, masks, 0.97, 0.9, chunked=False)
++    a, r = _run(values, rewards, term, masks, 0.97, 0.9, gae_variant="cross_segment_per_sample",
++                tokens_after_list=[0] * len(values))
++    for i in range(len(values)):
++        assert torch.allclose(a[i], base_a[i], atol=1e-12) and torch.allclose(r[i], base_r[i], atol=1e-12)
++    with pytest.raises(ValueError):
++        _run(values, rewards, term, masks, 0.97, 0.9, gae_variant="cross_segment_per_sample")
++    with pytest.raises(ValueError):
++        _run(values, rewards, term, masks, 0.97, 0.9, gae_variant="cross_segment_per_sample",
++             tokens_after_list=[-1] * len(values))
++
++
++def test_compute_advantages_forwards_tokens_after_only_for_per_sample():
++    args = argparse.Namespace(gae_variant="cross_segment_whole_rollout", gae_lambd_mode="fixed")
++    assert "tokens_after_list" not in adv_mod._gae_variant_kwargs(args, None, [1], [2])
++    args.gae_variant = "cross_segment_per_sample"
++    kw = adv_mod._gae_variant_kwargs(args, None, [1], [2])
++    assert kw["tokens_after_list"] == [1] and kw["gae_length_list"] == [2]
++    args.gae_variant = "vanilla"
++    assert adv_mod._gae_variant_kwargs(args, None, [1], [2]) == {}
+diff --git a/tests/fast/backends/training_utils/test_sao_ports.py b/tests/fast/backends/training_utils/test_sao_ports.py
+new file mode 100644
+index 000000000..1b03f6afe
+--- /dev/null
++++ b/tests/fast/backends/training_utils/test_sao_ports.py
+@@ -0,0 +1,185 @@
++"""SAO port (sao_dis + HL-Gauss categorical value loss) CPU parity tests.
++
++Reference math is written independently with python ``math`` and does not
++import the code under test. Source of the ported implementation:
++agentenv/miles feat/sao-tbench21-e2e-validation @ 16a9bea4 (introduced in
++e25048ed "feat(rl): add SAO value and online training").
++"""
++
++import argparse
++import math
++
++import pytest
++import torch
++
++from miles.backends.training_utils.parallel import GroupInfo, ParallelState, set_parallel_state
++
++
++@pytest.fixture(autouse=True)
++def _trivial_parallel_state() -> None:
++    g = GroupInfo(rank=0, size=1, group=None)
++    set_parallel_state(ParallelState(intra_dp=g, intra_dp_cp=g, cp=g, tp=g, pp=g, ep=g, etp=g, indep_dp=g))
++
++
++# ---------------- independent references ----------------
++def ref_dis(logp, rollout_logp, adv, eps_low, eps_high):
++    out = []
++    for lp, rlp, a in zip(logp, rollout_logp, adv, strict=True):
++        r = math.exp(max(min(lp - rlp, 20.0), -20.0))
++        rejected = r <= 1 - eps_low or r >= 1 + eps_high
++        out.append((0.0 if rejected else -r * a * lp, r, float(rejected)))
++    return out
++
++
++def ref_hl_gauss(target, low, high, bins, sigma_ratio):
++    width = (high - low) / (bins - 1)
++    sigma = sigma_ratio * width
++    mu = min(max(target, low), high)
++    mass = []
++    for k in range(bins):
++        c = low + k * width
++        mass.append(0.5 * (math.erf((c + width / 2 - mu) / (sigma * math.sqrt(2))) - math.erf((c - width / 2 - mu) / (sigma * math.sqrt(2)))))
++    z = sum(mass)
++    return [m / z for m in mass]
++
++
++def ref_ce(logits_row, target_dist):
++    m = max(logits_row)
++    lse = m + math.log(sum(math.exp(x - m) for x in logits_row))
++    return -sum(t * (x - lse) for t, x in zip(target_dist, logits_row, strict=True))
++
++
++# ---------------- tests ----------------
++def test_sao_dis_matches_reference_and_rejects_strictly():
++    from miles.backends.training_utils.loss_hub.math_utils import compute_sao_dis_policy_loss
++
++    gen = torch.Generator().manual_seed(0)
++    rollout = -torch.rand(64, generator=gen, dtype=torch.float64) * 3
++    logp = rollout + torch.randn(64, generator=gen, dtype=torch.float64) * 0.8
++    adv = torch.randn(64, generator=gen, dtype=torch.float64)
++    for eps_low, eps_high in [(0.8, 3.0), (0.3, 5.0)]:
++        loss, ratio, rejected, below, above = compute_sao_dis_policy_loss(logp, rollout, adv, eps_low, eps_high)
++        ref = ref_dis(logp.tolist(), rollout.tolist(), adv.tolist(), eps_low, eps_high)
++        torch.testing.assert_close(loss, torch.tensor([r[0] for r in ref], dtype=torch.float64))
++        torch.testing.assert_close(ratio, torch.tensor([r[1] for r in ref], dtype=torch.float32))  # ratio is fp32 by design (_safe_clamp_log_ratio)
++        torch.testing.assert_close(rejected, torch.tensor([r[2] for r in ref], dtype=torch.float32))
++        torch.testing.assert_close(rejected, below + above)
++        assert 0 < rejected.sum() < 64
++
++
++def test_sao_dis_gradient_keeps_ratio_in_graph():
++    from miles.backends.training_utils.loss_hub.math_utils import compute_sao_dis_policy_loss
++
++    lp = torch.tensor([-1.0], dtype=torch.float64, requires_grad=True)
++    loss, *_ = compute_sao_dis_policy_loss(lp, torch.tensor([-1.2], dtype=torch.float64), torch.tensor([2.0], dtype=torch.float64), 0.3, 5.0)
++    loss.sum().backward()
++    r = math.exp(0.2)
++    # d/dlp [-r(lp) * A * lp] = -A * r * (lp + 1)
++    assert lp.grad.item() == pytest.approx(-2.0 * r * (-1.0 + 1.0), abs=1e-6)
++    lp2 = torch.tensor([-0.5], dtype=torch.float64, requires_grad=True)
++    loss, *_ = compute_sao_dis_policy_loss(lp2, torch.tensor([-1.0], dtype=torch.float64), torch.tensor([2.0], dtype=torch.float64), 0.3, 5.0)
++    loss.sum().backward()
++    r = math.exp(0.5)
++    assert lp2.grad.item() == pytest.approx(-2.0 * r * (-0.5 + 1.0), rel=1e-6)
++
++
++@pytest.mark.parametrize("target", [0.0, 0.013, 0.5, 0.731, 1.0, 1.7, -0.4])
++def test_hl_gauss_projection_matches_reference(target):
++    from miles.backends.training_utils.loss_hub.losses import _hl_gauss_target_distribution
++
++    support = torch.linspace(0.0, 1.0, 51, dtype=torch.float32)
++    got = _hl_gauss_target_distribution(torch.tensor([target]), support, 0.75)[0]
++    torch.testing.assert_close(got, torch.tensor(ref_hl_gauss(target, 0.0, 1.0, 51, 0.75), dtype=torch.float32), atol=1e-6, rtol=1e-5)
++
++
++def _args(**kw):
++    base = dict(
++        qkv_format="thd", true_on_policy_mode=False, rollout_temperature=0.7, context_parallel_size=1,
++        allgather_cp=False, value_clip=0.2, value_loss_type="mse",
++    )
++    base.update(kw)
++    return argparse.Namespace(**base)
++
++
++def _batch(lengths, out_dim, seed=1):
++    gen = torch.Generator().manual_seed(seed)
++    prompt = 3
++    total = [prompt + n for n in lengths]
++    logits = torch.randn(1, sum(total), out_dim, generator=gen)
++    returns = [torch.rand(n, generator=gen) for n in lengths]
++    batch = {
++        "unconcat_tokens": [torch.zeros(t, dtype=torch.long) for t in total],
++        "total_lengths": total,
++        "response_lengths": lengths,
++        "returns": returns,
++        "values": [torch.rand(n, generator=gen) for n in lengths],
++        "loss_masks": [torch.ones(n) for n in lengths],
++    }
++    return logits, batch
++
++
++def _response_rows(logits, lengths, prompt=3):
++    rows, off = [], 0
++    flat = logits[0]
++    for n in lengths:
++        t = prompt + n
++        rows.append(flat[off + t - n - 1 : off + t - 1])
++        off += t
++    return rows
++
++
++def test_classification_value_loss_matches_reference():
++    from miles.backends.training_utils.loss_hub.losses import value_loss_function
++
++    lengths = [4, 2, 5]
++    logits, batch = _batch(lengths, 51)
++    args = _args(value_loss_type="classification", value_num_bins=51, value_reward_range=[0.0, 1.0],
++                 value_target_type="hl_gauss", hl_gauss_sigma_ratio=0.75)
++    mean = lambda x: x.sum() / x.numel()  # noqa: E731
++    loss, metrics = value_loss_function(args, batch, logits, mean)
++    rows = torch.cat(_response_rows(logits, lengths)).tolist()
++    rets = torch.cat(batch["returns"]).tolist()
++    ref = sum(ref_ce(r, ref_hl_gauss(t, 0.0, 1.0, 51, 0.75)) for r, t in zip(rows, rets, strict=True)) / len(rets)
++    assert loss.item() == pytest.approx(ref, rel=1e-5)
++    assert set(metrics) == {"value_loss", "value_accuracy", "value_entropy", "value_confidence"}
++
++
++def test_get_values_classification_is_expectation_and_skips_temperature():
++    from miles.backends.training_utils.loss_hub.logit_processors import get_values
++
++    lengths = [3, 2]
++    logits, batch = _batch(lengths, 51)
++    args = _args(value_loss_type="classification", value_num_bins=51, value_reward_range=[-1.0, 1.0], true_on_policy_mode=True)
++    vals = torch.cat(get_values(logits, args=args, unconcat_tokens=batch["unconcat_tokens"],
++                                total_lengths=batch["total_lengths"], response_lengths=lengths)["values"])
++    ref = []
++    for row in torch.cat(_response_rows(logits, lengths)).tolist():
++        m = max(row); e = [math.exp(x - m) for x in row]; z = sum(e)
++        ref.append(sum(ei / z * (-1.0 + 2.0 * k / 50) for k, ei in enumerate(e)))
++    torch.testing.assert_close(vals, torch.tensor(ref), atol=1e-5, rtol=1e-5)
++
++
++def test_default_mse_value_path_unchanged():
++    from miles.backends.training_utils.loss_hub.losses import value_loss_function
++
++    lengths = [4, 2]
++    logits, batch = _batch(lengths, 1)
++    mean = lambda x: x.sum() / x.numel()  # noqa: E731
++    loss, metrics = value_loss_function(_args(), batch, logits, mean)
++    v = torch.cat(_response_rows(logits, lengths))[:, 0]
++    old = torch.cat(batch["values"]); ret = torch.cat(batch["returns"])
++    clipped = old + (v - old).clamp(-0.2, 0.2)
++    ref = torch.max((clipped - ret) ** 2, (v - ret) ** 2).mean()
++    torch.testing.assert_close(loss, ref)
++    assert set(metrics) == {"value_loss", "value_clipfrac"}
++
++
++def test_cli_defaults_unchanged():
++    from miles.utils.arguments import get_miles_extra_args_provider
++
++    parser = argparse.ArgumentParser()
++    get_miles_extra_args_provider()(parser)
++    ns, _ = parser.parse_known_args([])
++    assert ns.policy_objective == "ppo"
++    assert ns.value_loss_type == "mse"
++    assert ns.value_num_bins == 51 and ns.value_target_type == "hl_gauss"
+diff --git a/tests/fast/backends/training_utils/test_sao_value_refresh.py b/tests/fast/backends/training_utils/test_sao_value_refresh.py
+new file mode 100644
+index 000000000..aafe0d525
+--- /dev/null
++++ b/tests/fast/backends/training_utils/test_sao_value_refresh.py
+@@ -0,0 +1,52 @@
++"""SAO faster value update decision (port of agentenv/miles 16a9bea4 train_critic)."""
++
++import ast
++import itertools
++from pathlib import Path
++from types import SimpleNamespace
++
++from miles.backends.training_utils.sao_critic import refresh_values_after_critic_update
++
++ACTOR = Path(__file__).resolve().parents[4] / "miles/backends/megatron_utils/actor.py"
++
++
++def _reference(args, rollout_id):
++    # upstream: sao_faster_value_update and not offline_value_pretraining and rollout_id >= num_critic_only_steps
++    # (this fork has no offline value pretraining)
++    return getattr(args, "policy_objective", "ppo") == "sao_dis" and rollout_id >= args.num_critic_only_steps
++
++
++def test_matches_reference_grid():
++    for objective, only, rid in itertools.product(["ppo", "sao_dis", None], [0, 1, 3], range(5)):
++        args = SimpleNamespace(num_critic_only_steps=only)
++        if objective is not None:
++            args.policy_objective = objective
++        assert refresh_values_after_critic_update(args, rid) == _reference(args, rid)
++
++
++def test_default_ppo_never_refreshes():
++    assert not refresh_values_after_critic_update(SimpleNamespace(num_critic_only_steps=0), 0)
++    assert not refresh_values_after_critic_update(SimpleNamespace(), 7)
++
++
++def _critic_body():
++    tree = ast.parse(ACTOR.read_text())
++    for node in ast.walk(tree):
++        if isinstance(node, ast.FunctionDef) and node.name == "_train_critic":
++            return node
++    raise AssertionError("_train_critic missing")
++
++
++def test_refresh_runs_after_updates_and_before_shipping_values():
++    body = _critic_body().body
++    kinds = []
++    for stmt in body:
++        src = ast.unparse(stmt)
++        if isinstance(stmt, ast.For) and "train(" in src:
++            kinds.append("train_loop")
++        elif isinstance(stmt, ast.If) and "refresh_values_after_critic_update" in src:
++            assert "forward_only" in src and "get_values" in src and "get_data_iterator" in src
++            kinds.append("refresh")
++        elif "object_store" in src or (isinstance(stmt, ast.If) and "is_pp_last_stage" in src):
++            kinds.append("ship")
++    assert kinds == ["train_loop", "refresh", "ship"], kinds
+diff --git a/tests/fast/ray/rollout/test_segment_ids_conversion.py b/tests/fast/ray/rollout/test_segment_ids_conversion.py
+new file mode 100644
+index 000000000..15d9237bc
+--- /dev/null
++++ b/tests/fast/ray/rollout/test_segment_ids_conversion.py
+@@ -0,0 +1,62 @@
++"""segment_ids (CompactionRL cross-segment GAE) flow from Sample.metadata into train shards. No Ray needed."""
++
++from miles.ray.rollout.train_data_conversion import convert_samples_to_train_data, split_train_data_by_dp_raw
++from tests.fast.ray.rollout.conftest import make_args, make_sample
++
++
++def _convert(samples):
++    args = make_args()
++    return args, convert_samples_to_train_data(args, samples, {}, None, None)
++
++
++def test_no_segment_ids_key_when_absent():
++    _, data = _convert([make_sample(index=0), make_sample(index=1)])
++    assert "segment_ids" not in data
++
++
++def test_segment_ids_emitted_and_sharded():
++    a = make_sample(index=0, response_length=4)
++    a.metadata = {"segment_ids": [0, 0, 1, 1]}
++    b = make_sample(index=1, response_length=3)
++    _, data = _convert([a, b])
++    assert data["segment_ids"] == [[0, 0, 1, 1], [0, 0, 0]]
++    args = make_args(balance_data=False)
++    shards = split_train_data_by_dp_raw(args, data, dp_size=1)
++    assert shards[0]["segment_ids"] == [[0, 0, 1, 1], [0, 0, 0]]
++
++
++def test_tokens_after_and_gae_length_emitted_and_sharded():
++    a = make_sample(index=0, response_length=4)
++    a.metadata = {"tokens_after": 7, "gae_length": 11}
++    b = make_sample(index=1, response_length=3)
++    b.metadata = {"tokens_after": 0}
++    _, data = _convert([a, b])
++    assert data["tokens_after"] == [7, 0]
++    assert data["gae_length"] == [11, 3]  # missing -> own response length
++    assert "segment_ids" not in data
++    args = make_args(balance_data=False)
++    shards = split_train_data_by_dp_raw(args, data, dp_size=1)
++    assert shards[0]["tokens_after"] == [7, 0] and shards[0]["gae_length"] == [11, 3]
++
++
++def test_no_tokens_after_key_when_absent():
++    _, data = _convert([make_sample(index=0)])
++    assert "tokens_after" not in data and "gae_length" not in data
++
++
++def test_positive_example_success_emitted_and_sharded():
++    a = make_sample(index=0)
++    a.metadata = {"success": True}
++    b = make_sample(index=1)
++    b.metadata = {"is_correct": False}
++    c = make_sample(index=2)  # missing -> -1, rejected when the LM loss uses it
++    _, data = _convert([a, b, c])
++    assert data["positive_example_success"] == [1, 0, -1]
++    args = make_args(balance_data=False)
++    shards = split_train_data_by_dp_raw(args, data, dp_size=1)
++    assert shards[0]["positive_example_success"] == [1, 0, -1]
++
++
++def test_no_positive_example_success_key_when_absent():
++    _, data = _convert([make_sample(index=0)])
++    assert "positive_example_success" not in data

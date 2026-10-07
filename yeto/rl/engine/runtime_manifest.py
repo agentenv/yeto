@@ -143,9 +143,18 @@ def collect(*, image: str | None) -> dict[str, Any]:
             # only source. Recorded as such, together with the version string.
             commits[name] = image_manifest[name]["commit"]
             commit_source[name] = "image-manifest"
+    from yeto.rl.miles_overlay import read_applied_record
+
+    # S13: a critic-family overlay patches ~/miles after the image was built, so
+    # neither git HEAD nor the image build manifest describes the running code.
+    miles_overlay = read_applied_record()
+    if miles_overlay is not None:
+        commit_source["miles"] = f"{commit_source['miles']}+overlay"
     return {
         "schema": MANIFEST_SCHEMA,
         "image": image,
+        **({"miles_overlay": miles_overlay,
+            "image_manifest_matches_code": False} if miles_overlay is not None else {}),
         "python": sys.version.split()[0],
         "import_paths": {k: (str(v) if v else None) for k, v in roots.items()},
         "commits": commits,
