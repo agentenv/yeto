@@ -1675,6 +1675,19 @@ HEAD_SETUP_PIP = (
     "pip install -q torch --index-url https://download.pytorch.org/whl/cpu && "
     "pip install -q cloudpickle transformers==5.13.0"
 )
+# yeto needs Python >= 3.11 at runtime (typing.Self in the Codex harness the
+# launcher imports); stock images ship older (Nebius: miniconda 3.10). Setup
+# then gives the head its own 3.12 venv, and every head job puts it first on
+# PATH, so pip, the sky patch hook, the controller and sky's API server all
+# share one interpreter.
+HEAD_VENV = "~/yeto-head-py"
+HEAD_PYTHON_STEP = (
+    "if ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))'; then "
+    "command -v ~/.local/bin/uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh -s -- -q; "
+    f"[ -x {HEAD_VENV}/bin/python3 ] || ~/.local/bin/uv venv -q --seed --python 3.12 {HEAD_VENV}; fi\n"
+    f"if [ -x {HEAD_VENV}/bin/python3 ]; then export PATH={HEAD_VENV}/bin:$PATH; fi"
+)
+HEAD_USE_PYTHON = f"if [ -x {HEAD_VENV}/bin/python3 ]; then export PATH={HEAD_VENV}/bin:$PATH; fi"
 HEAD_WAIT_READY = (
     f"for i in $(seq 1 180); do [ -f {HEAD_READY_MARKER} ] && break; sleep 5; done; "
     f"[ -f {HEAD_READY_MARKER} ] || {{ echo 'head setup never completed' >&2; exit 1; }}"
@@ -1759,11 +1772,14 @@ def _make_head_task(args, extra_mounts: dict | None = None):
         setup=(
             "set -e\n"
             f"{WAN_TUNING}\n"
+            f"{HEAD_PYTHON_STEP}\n"
             f"{head_pip}\n"
             f"{SYNCER_REMOTE_BUILD}\n"
             f"touch {HEAD_READY_MARKER}"
         ),
-        envs=head_envs or None,
+        # Env-carried cloud credentials travel as sky secrets (redacted in
+        # sky's logs, request records and dashboard), never as plain envs.
+        secrets=head_envs or None,
         workdir=str(REPO_ROOT),
         file_mounts=file_mounts,
     )
@@ -1934,14 +1950,25 @@ def cmd_launch_head(args) -> int:
         # The head authenticates its own event-tape run and re-exports the
         # key onto every learner cluster it launches.
         envs["WANDB_API_KEY"] = os.environ["WANDB_API_KEY"]
+    # The controller job is a separate sky job: the provisioning task's
+    # secrets are not in its environment. Env-carried cloud credentials
+    # (e.g. MODAL_TOKEN_ID/SECRET when no ~/.modal.toml is present) and the
+    # private-registry login the Modal image build reads (SKYPILOT_DOCKER_*)
+    # go to it as sky secrets, so they never land in a file on the head.
+    _mounts, cred_envs = launcher.head_cloud_credentials(launcher.fleet_clouds(args))
+    secrets = dict(cred_envs)
+    for env_name in ("SKYPILOT_DOCKER_USERNAME", "SKYPILOT_DOCKER_PASSWORD", "SKYPILOT_DOCKER_SERVER"):
+        if os.environ.get(env_name):
+            secrets[env_name] = os.environ[env_name]
     job_task = sky.Task(
         name="yeto-head-job",
         run=(
-            f"{HEAD_WAIT_READY}; "
+            f"{HEAD_WAIT_READY}; {HEAD_USE_PYTHON}; "
             "cd ~/sky_workdir && PYTHONPATH=~/sky_workdir "
             f"python3 -m yeto.cli _head {shlex.quote(json.dumps(args_dict))}"
         ),
         envs=envs,
+        secrets=secrets or None,
     )
     job_id = _sky_exec_head(job_task, head_cluster)
     runs.update_run(name, state=runs.SUBMITTED, head_job_id=job_id)
