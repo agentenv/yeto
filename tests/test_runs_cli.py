@@ -666,3 +666,48 @@ def test_modal_ops_app_status_parses_modal_app_list_json(monkeypatch):
     )
     with pytest.raises(RuntimeError, match="modal app list failed"):
         modal_runner.ModalOps("yeto-td2").app_status()
+
+
+def test_down_confirms_a_multi_node_island_per_node(monkeypatch, capsys):
+    """S14/A19 (T4-S7 §7): the `yeto down` CLI path passed no num_nodes, so a
+    multi-node island was confirmed like a single node; it now derives the node
+    count from the recorded --gpu and takes the launcher's per-node path."""
+    args = make_args_dict("d6")
+    args["gpu"] = "nebius:2x8xh100@eu-north1"
+    runs.create_run("d6", args)
+    meta = runs.load_run("d6")
+    assert cli.run_nodes_by_cluster(meta) == {"d6-l0-eu-north1": 2}
+    runs.update_run("d6", pid=None, clusters=["d6-syncer", "d6-l0-eu-north1"])
+    downed = []
+    monkeypatch.setattr(cli, "_sky_down_cluster", downed.append)
+    live = {"d6-l0-eu-north1": [["i-n0", "i-n1"], ["i-n1"], []], "d6-syncer": [[], []]}
+
+    def fake_probe(cluster):
+        reports = live[cluster]
+        return lambda: reports.pop(0) if len(reports) > 1 else reports[0]
+
+    monkeypatch.setattr(cli, "_cloud_probe", fake_probe)
+    monkeypatch.setattr(cli, "DOWN_VERIFY_SLEEP", lambda s: None)
+    assert cli.main(["down", "d6"]) == 0
+    assert downed.count("d6-l0-eu-north1") == 2  # retried until both node instances were gone
+    err = capsys.readouterr().err
+    assert "d6-l0-eu-north1: 1 node instance(s) still live (i-n1)" in err
+    assert runs.load_run("d6")["state"] == "DOWN"
+
+
+def test_down_multi_node_island_without_a_probe_is_not_confirmed(monkeypatch, capsys):
+    args = make_args_dict("d7")
+    args["gpu"] = "nebius:2x8xh100@eu-north1"
+    runs.create_run("d7", args)
+    runs.update_run("d7", pid=None, clusters=["d7-l0-eu-north1"])
+    monkeypatch.setattr(cli, "_sky_down_cluster", lambda c: None)
+    monkeypatch.setattr(cli, "_cloud_probe", lambda cluster: None)
+    assert cli.main(["down", "d7"]) == 1  # a 2-node island is never trusted on sky's word alone
+    assert runs.load_run("d7")["state"] == runs.TEARDOWN_INCOMPLETE
+    assert "2-node island cannot be cloud-verified" in capsys.readouterr().err
+
+
+def test_run_nodes_by_cluster_falls_back_to_single_node(capsys):
+    assert cli.run_nodes_by_cluster({"name": "x", "args": {}}) == {}
+    assert cli.run_nodes_by_cluster({"name": "x", "args": {"gpu": "nonsense::", "cluster_prefix": "x"}}) == {}
+    assert "could not derive node counts" in capsys.readouterr().err

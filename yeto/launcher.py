@@ -4679,8 +4679,9 @@ def _recover_echo_tape(cluster: str, collector, *, run=None, timeout: float = EC
     island's own tape files (``~/yeto-output/rl-island-*.jsonl``, the source
     the echo mirrors) over the ssh alias sky wrote and complete the local tape
     from them. The S1 2x1 L40S runs (2026-10-03/04) showed ``sky.tail_logs``
-    delivering the setup lines but no run-phase line at all, so the stream
-    alone cannot be the only source. Returns whether the tape is finalized;
+    delivering the setup lines but no run-phase line at all (root cause: the
+    heartbeat ``None`` ended ``_tail``'s loop, see there; fixed, kept as the
+    fallback), so the stream alone cannot be the only source. Returns whether the tape is finalized;
     any fetch failure leaves it incomplete (fail closed) and is printed."""
     import tempfile
 
@@ -4705,15 +4706,91 @@ def _recover_echo_tape(cluster: str, collector, *, run=None, timeout: float = EC
         return complete
 
 
+def settle_echo_tapes(collectors: dict, names, modal_cfgs, events_dir, *,
+                      recover_sky=None, modal_tape_dir=None) -> list[str]:
+    """Judge every expected island's echoed tape after the run: close it (fail
+    closed: nothing is written afterwards) and, when the log stream did not
+    deliver the ``rl_learner_finalized`` record, complete it from the island's
+    own tape file before calling it incomplete. Returns the names whose tape is
+    still incomplete (``.incomplete`` marker written) -- the launcher's exit 3.
+
+    S14/A19 (FINAL-REPORT-S7 §6.1, -5r1 r7): a SUCCEEDED job ended with exit 3
+    because ``sky.tail_logs`` stopped delivering lines part-way (58 of 146
+    records, stream silent after a learner restart) and that run predated the
+    island-file recovery. The island file is now consulted for every unfinalized
+    tape: a streamed-but-cut one, one that never streamed at all (previously
+    marked incomplete without looking), and a Modal island's tape pulled from
+    its Volume (``modal_tape_dir/<island>/**/rl-island-*.jsonl``). A tape whose
+    island file also lacks the finalized record stays incomplete."""
+    recover_sky = recover_sky or _recover_echo_tape
+    incomplete: list[str] = []
+    for name in sorted(set(names) | set(collectors)):
+        collector = collectors.get(name)
+        streamed = collector is not None
+        if collector is None:  # never streamed: nothing received over the log stream
+            collector = EventCollector(Path(events_dir) / f"{name}.jsonl", fresh=False)
+        complete = collector.close()
+        if streamed:
+            print(
+                f"[launcher] {name}: {collector.count} event(s) -> {collector.path}; "
+                f"{collector.discarded} malformed prefixed line(s) discarded"
+            )
+        else:
+            print(f"[launcher] {name}: no log stream line received; tape judged from the "
+                  f"island's own tape file", file=sys.stderr)
+        if not complete:
+            if name in modal_cfgs:
+                files = (sorted(Path(modal_tape_dir, name).rglob("rl-island-*.jsonl"))
+                         if modal_tape_dir is not None else [])
+                if not files:
+                    print(f"[launcher] {name}: no pulled Modal tape file to recover from",
+                          file=sys.stderr)
+                before = collector.count
+                for f in files:
+                    try:
+                        complete = collector.recover_from_file(f) or complete
+                    except Exception as e:  # noqa: BLE001 - unreadable file: stay incomplete
+                        print(f"[launcher] {name}: tape recovery from {f} failed ({e})",
+                              file=sys.stderr)
+                if files:
+                    print(f"[launcher] {name}: tape recovered from {[f.name for f in files]}: "
+                          f"+{collector.count - before} record(s), finalized={complete}")
+            else:
+                # sky island: the tape file itself is reachable, complete from it
+                complete = recover_sky(name, collector)
+        if not complete:
+            incomplete.append(name)
+            print(
+                f"[launcher] WARN: {name} event tape has no rl_learner_finalized "
+                f"record; marked {collector.incomplete_marker}",
+                file=sys.stderr,
+            )
+    return incomplete
+
+
 def _tail(cluster: str, job_id: int, prefix: str, collector=None) -> int:
+    """Stream a sky job's log into the launcher output (and the tape collector).
+
+    Root cause of "sky.tail_logs delivers the setup lines but no run-phase
+    line" (S1 2x1 L40S 2026-10-03/04; -5r1 r7 stream silent after the learner
+    restart), read from skypilot 0.13.0: the API server's ``log_streamer``
+    appends a ``<heartbeat></heartbeat>`` control payload after every 30 s
+    without a new log line (sky/server/stream_utils.py, ``_HEARTBEAT_INTERVAL``),
+    and the client's ``decode_rich_status`` (sky/utils/rich_utils.py) yields
+    ``None`` for EVERY control payload when it runs off the main thread --
+    which this tail thread does. The sdk docstring says ``None`` means "the log
+    has been completely streamed", so the old loop broke on the first quiet
+    30 s (model load, generation) and the thread ended silently while the job
+    ran on. The end of the stream is the iterator being exhausted; ``None`` is
+    a control message and is skipped."""
     import sky
 
     while True:
         try:
             it = sky.tail_logs(cluster, job_id, follow=True, preload_content=False)
             for line in it:
-                if line is None:
-                    break
+                if line is None:  # rich-status/heartbeat control payload, not the end
+                    continue
                 print(f"[{prefix}] {line.rstrip()}", flush=True)
                 if collector is not None:
                     collector.feed(line)
@@ -6496,28 +6573,15 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 # The island's last events (finalization) must be on disk before
                 # teardown: the log streams end when the island exits; bounded wait.
                 wait_for_tapes(event_collectors, echo_names, tail_threads, limit)
-                # Fail closed: stop writing (a stream still alive after the bounded
-                # wait can no longer touch the tape) and mark unfinalized tapes.
-                for name, collector in event_collectors.items():
-                    complete = collector.close()
-                    print(
-                        f"[launcher] {name}: {collector.count} event(s) -> {collector.path}; "
-                        f"{collector.discarded} malformed prefixed line(s) discarded"
-                    )
-                    if not complete and name not in modal_cfgs:
-                        # sky island: the tape file itself is reachable, complete from it
-                        complete = _recover_echo_tape(name, collector)
-                    if not complete:
-                        no_sync_incomplete.append(name)
-                        print(
-                            f"[launcher] WARN: {name} event tape has no rl_learner_finalized "
-                            f"record; marked {collector.incomplete_marker}",
-                            file=sys.stderr,
-                        )
-                for name in sorted(echo_names):
-                    if name not in event_collectors:  # never streamed: nothing received
-                        no_sync_incomplete.append(name)
-                        EventCollector(events_dir / f"{name}.jsonl", fresh=False).close()
+                modal_tape_dir = None
+                if modal_ops is not None and any(n in modal_cfgs for n in echo_names):
+                    # Modal islands: the tape Volume (committed every 30 s and at
+                    # exit) is the island-side source the echo mirrors.
+                    modal_tape_dir = _modal_tape_run_dir(args) / "modal-tape"
+                    pull_modal_tapes(modal_ops, modal_cfgs, _modal_tape_run_dir(args))
+                no_sync_incomplete.extend(settle_echo_tapes(
+                    event_collectors, echo_names, modal_cfgs, events_dir,
+                    modal_tape_dir=modal_tape_dir))
 
         try:
             exit_codes = controller.run()

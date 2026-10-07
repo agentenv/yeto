@@ -101,6 +101,26 @@ for multi-node islands only on `RDMA_CLOUDS` (all in
 Record each run's syncer-tape summary and the exact command here when a
 row changes.
 
+### Log streaming: sky heartbeats are not the end of the stream
+
+The launcher follows every sky job with `sky.tail_logs(..., follow=True,
+preload_content=False)` from a tail thread (`launcher._tail`), and the RL
+event tape is echoed over that stream. Observed on real machines (S1 2x1
+L40S 2026-10-03/04; -5r1 r7): the stream delivered the setup lines, or the
+lines up to a quiet phase, and then nothing while the job ran on; the
+echoed tape stayed incomplete (launcher exit 3). Root cause, read from
+skypilot 0.13.0 source (CPU-confirmed, not a sky bug report): the API
+server's `log_streamer` appends a `<heartbeat></heartbeat>` control payload
+after every 30 s without a new log line (`sky/server/stream_utils.py`,
+`_HEARTBEAT_INTERVAL = 30`), and the client's `decode_rich_status`
+(`sky/utils/rich_utils.py`) yields `None` for every control payload when it
+runs off the main thread. The sdk docstring describes `None` as "the log has
+been completely streamed", so the old loop broke on the first quiet 30 s
+(model load, generation). `None` is now skipped; the end of the stream is
+the iterator being exhausted. The island-file recovery of the tape
+(`_recover_echo_tape` / `settle_echo_tapes`) stays as the fallback.
+Re-verifying the fix needs a real sky run (not reproducible on CPU).
+
 ### Run log
 
 **Nebius SFT island, 2026-09-23 (task 8.1).** Head controller on Nebius

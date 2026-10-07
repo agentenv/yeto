@@ -225,6 +225,19 @@ def test_restart_after_commit_recovers_committed_members(tmp_path):
     ev = [e for e in _events(tmp_path) if e["event"] == "rl_reconfiguration"]
     assert [e["result"] for e in ev] == [SUCCEEDED, "RECOVERED"]
     assert ev[1]["members"] == sorted(FOUR) and ev[1]["recovery_id"] == rid
+    # S14/A19 (FINAL-REPORT-S7 §6.1): the recovered epoch's membership view is on
+    # this incarnation's tape too, with the same fields a COMMITTED tx writes.
+    mem = [e for e in _events(tmp_path) if e["event"] == "rl_membership"]
+    assert [m["kind"] for m in mem] == ["up", "recovered"]  # "up" is the first incarnation's
+    rec = mem[1]
+    assert rec["config_epoch"] == e.config_epoch == 1
+    assert rec["members"] == sorted(FOUR)
+    assert rec["tx_id"] == e.last_tx_id == mem[0]["tx_id"]
+    assert rec["kind"] == "recovered" and rec["round"] == 0 and rec["recovery_id"] == rid
+    # the tape's rl_membership follows RECOVERED (a consumer reading in order sees
+    # the reconfiguration result before the membership it re-serves)
+    order = [x["event"] for x in _events(tmp_path) if x["event"] in ("rl_reconfiguration", "rl_membership")]
+    assert order[-2:] == ["rl_reconfiguration", "rl_membership"]
     assert ctl.status("up")["phase"] == SUCCEEDED
     ctl.close()
 
