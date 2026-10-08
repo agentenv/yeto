@@ -23,6 +23,28 @@ pub const MSG_FINAL_ACK: u8 = 12;
 pub const MSG_FINAL_FRAGMENT: u8 = 13;
 /// Benchmark-only report that one learner has frozen at its exact budget.
 pub const MSG_BUDGET_DONE: u8 = 14;
+// Elastic inter-island scheduling messages (change rl-inter-island-scheduling,
+// D-S1/D-S2/D-S4). Only an elastic-mode server may accept them; the legacy
+// learner loop keeps rejecting every type it does not know. Each payload
+// carries syncer_epoch first and a trailing HMAC-SHA256 (see elastic.rs).
+pub const MSG_JOIN: u8 = 15;
+pub const MSG_JOIN_ACK: u8 = 16;
+pub const MSG_LEAVE: u8 = 17;
+pub const MSG_LEASE_HEARTBEAT: u8 = 18;
+pub const MSG_SAMPLE_INDEX: u8 = 19;
+/// Elastic metadata-only delta arrival (base version and merge-weight
+/// inputs); tensor payloads are not carried by this message yet.
+pub const MSG_DELTA_READY: u8 = 20;
+/// Elastic: island seeds the initial flat f32 parameters (first one wins).
+pub const MSG_ELASTIC_INIT: u8 = 21;
+/// Elastic: island update θ − base (flat f32) plus merge-weight inputs.
+pub const MSG_DELTA_TENSOR: u8 = 22;
+/// Elastic: coordinator broadcasts the published base after each step.
+pub const MSG_ELASTIC_BASE: u8 = 23;
+/// Elastic: coordinator verdict for a SAMPLE_INDEX entry.
+pub const MSG_SAMPLE_VERDICT: u8 = 24;
+/// Elastic: run finished (final outer_version + base policy hash).
+pub const MSG_FINISHED: u8 = 25;
 
 /// Version of the final-artifact handshake carried inside FINAL_MANIFEST and
 /// FINAL_ACK. Keeping this in the payload makes incompatible peers fail with
@@ -297,6 +319,11 @@ mod tests {
         assert_eq!(MSG_FINAL_ACK, 12);
         assert_eq!(MSG_FINAL_FRAGMENT, 13);
         assert_eq!(MSG_BUDGET_DONE, 14);
+        assert_eq!(
+            [MSG_JOIN, MSG_JOIN_ACK, MSG_LEAVE, MSG_LEASE_HEARTBEAT, MSG_SAMPLE_INDEX, MSG_DELTA_READY,
+             MSG_ELASTIC_INIT, MSG_DELTA_TENSOR, MSG_ELASTIC_BASE, MSG_SAMPLE_VERDICT, MSG_FINISHED],
+            [15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]
+        );
     }
 
     #[tokio::test]
