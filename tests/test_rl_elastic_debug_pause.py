@@ -172,6 +172,9 @@ def test_link_pause_longer_than_lease_rejoins_against_real_rust_syncer(tmp_path,
         later = [r for r in rows[idx:] if r.get("kind") == "outer_step"]
         w1 = [[x[2] for x in (r.get("weights") or []) if x[0] == 1] for r in later]
         assert any(v and v[0] > 0 for v in w1), later
+        # S17 M1: the re-JOINed island also takes part in the LAST outer step (it ends on the
+        # syncer's final version, not on its local round count)
+        assert any(x[0] == 1 for x in (later[-1].get("raw_weights") or [])), later[-1]
         assert names.count("elastic_finished") <= 1
     finally:
         if syncer.poll() is None:
