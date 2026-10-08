@@ -497,3 +497,17 @@ def test_modal_commit_goes_through_the_runner_interpreter(tmp_path, monkeypatch)
     monkeypatch.setenv("YETO_MODAL_SYSPATH", str(tmp_path / "nothing"))
     with pytest.raises(RuntimeError, match="runner interpreter failed"):
         store.commit()
+
+
+def test_resume_wiring_carries_the_runtime_fingerprint(tmp_path):
+    """G2 A: the cut refused 'runtime: backend_fingerprint missing' -- the wiring must
+    hand the island's runtime fingerprint to the round-cut controller."""
+    from yeto.rl.adapters.miles.entry import resume_wiring_for
+
+    cfg = {"store": str(tmp_path / "store"), "state_dir": str(tmp_path / "state"), "every": 2,
+           "keep": 2, "allow_config_change": False, "stop_after": None}
+    with pytest.raises(ValueError, match="runtime fingerprint"):
+        resume_wiring_for(SimpleNamespace(yeto_rl_resume=dict(cfg)), sync=LocalOnlySync(3), environ={})
+    w = resume_wiring_for(SimpleNamespace(yeto_rl_resume={**cfg, "runtime_fingerprint": "miles@abc"}),
+                          sync=LocalOnlySync(3), environ={})
+    assert w.controller.runtime_fingerprint == "miles@abc" and w.every == 2 and w.ledger is not None

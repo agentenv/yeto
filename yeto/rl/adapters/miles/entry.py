@@ -869,6 +869,8 @@ def resume_wiring_for(miles_args: Any, *, sync: Any, environ: Any = None) -> Res
     from yeto.rl.engine.ledger import BatchLedger
     from yeto.rl.engine.resume import ResumeController, store_for
 
+    if not config.get("runtime_fingerprint"):
+        raise ValueError("--rl-resume-store: no runtime fingerprint (a cut without it is refused)")
     store = store_for(config["store"], environ=environ)
     controller = ResumeController(state_dir=config["state_dir"], store=store,
                                   runtime_fingerprint=str(config.get("runtime_fingerprint") or ""),
@@ -1732,6 +1734,10 @@ def run_ports_island(
         miles_args, launch, algorithm, yeto_policy_sync=yeto_policy_sync,
         harness_preflight=harness_preflight,
     )  # contract preflight(...) + harness preflight: before connect_island_ray()
+    if getattr(miles_args, "yeto_rl_resume", None):
+        # the round cut's backend fingerprint (the elastic controller gets the same one;
+        # G2 A: a cut without it is refused "runtime: backend_fingerprint missing")
+        miles_args.yeto_rl_resume["runtime_fingerprint"] = fingerprint
     from .e2_harness import load_plan as load_e2_harness_plan
 
     e2_plan = load_e2_harness_plan()  # TEST ONLY: None unless an E2 harness snapshot
