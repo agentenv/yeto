@@ -15,4 +15,4 @@
 
 ## 4. 待补
 
-- [ ] 4.1 `deepseek-v4-flash` recipe 目前只有 `_prepare_rl_args` 层的测试，没有针对该 recipe 岛环境表的断言。本 change 未新增——移除 `envs.pop` 后该分支的环境表已由 2.2 的通用断言覆盖，但一条显式的 recipe 级断言更稳妥
+- [x] 4.1 `deepseek-v4-flash` recipe 目前只有 `_prepare_rl_args` 层的测试，没有针对该 recipe 岛环境表的断言。本 change 未新增——移除 `envs.pop` 后该分支的环境表已由 2.2 的通用断言覆盖，但一条显式的 recipe 级断言更稳妥（2026-10-08 补：`tests/test_rl_launcher.py::test_deepseek_recipe_island_env_table` 以 deepseek-v4-flash recipe 构造岛任务，断言三个 `NVTE_*_ATTN` 不在环境表、`CUDA_DEVICE_MAX_CONNECTIONS=1`、recipe 的 SGLang 变量存在；本机 miles-next-venv 单测通过）

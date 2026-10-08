@@ -784,6 +784,74 @@ def test_rl_accepts_two_node_deepseek_model_parallel_island():
     assert args.sglang_deterministic_inference is False
 
 
+def test_deepseek_recipe_island_env_table(monkeypatch):
+    """fix-sky-island-tp-env 4.1: the deepseek-v4-flash island task keeps
+    CUDA_DEVICE_MAX_CONNECTIONS=1, carries no NVTE_*_ATTN pin (Megatron sets
+    them from --attention-backend), and adds the recipe's SGLang variables."""
+    monkeypatch.setitem(
+        sys.modules,
+        "sky",
+        types.SimpleNamespace(
+            Task=_Task,
+            Resources=_Resources,
+            Storage=_Storage,
+            StorageMode=_StorageMode,
+        ),
+    )
+    args = _args(
+        (
+            "--gpu",
+            "aws:2x8xh100@us-east-1",
+            "--rollout-model",
+            "/data/models/deepseek-v4-flash-fp8",
+            "--rollout-model-revision",
+            "7eb21d27aee405755da5251f4458e9fff87c047b",
+            "--rl-model-recipe",
+            "deepseek-v4-flash",
+            "--lora-targets",
+            "attention-routed-experts",
+            "--tensor-parallel",
+            "8",
+            "--pipeline-parallel",
+            "2",
+            "--expert-parallel",
+            "8",
+            "--rollout-num-gpus-per-engine",
+            "8",
+            "--sglang-tp-size",
+            "8",
+            "--sglang-ep-size",
+            "8",
+            "--sglang-attention-backend",
+            "dsv4",
+            "--no-sglang-deterministic-inference",
+            "--sglang-page-size",
+            "256",
+            "--use-rollout-routing-replay",
+        )
+    )
+    args.model_revision = "a" * 40
+    args.data_revision = "b" * 40
+    args.source_sha256 = "c" * 64
+    args.reward_sha256 = "d" * 64
+    _prepare_rl_args(args)
+    from yeto.gpu_spec import parse_gpu_spec
+
+    task = make_miles_island_task(
+        args,
+        parse_gpu_spec(args.gpu)[0],
+        0,
+        1,
+        "127.0.0.1:29400",
+    )
+    for name in ("NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN"):
+        assert name not in task.envs
+    assert task.envs["CUDA_DEVICE_MAX_CONNECTIONS"] == "1"
+    assert task.envs["SGLANG_DSV4_FP4_EXPERTS"] == "0"
+    assert task.envs["SGLANG_SKIP_CHECKPOINT_LOAD_CHECK"] == "1"
+    assert "NVTE_GROUPED_LINEAR_SINGLE_PARAM" not in task.envs
+
+
 def test_rl_accepts_attested_sixteen_expert_full_deepseek_recipe():
     args = _args(
         (

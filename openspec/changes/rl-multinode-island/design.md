@@ -87,6 +87,15 @@
 ### D8 Flash-Next recipe 并行度表达与"最少节点"
 - `parallel` 段新增 `ep`（已在 `PARALLEL_DIMS` 则沿用）与 `sglang: {tp, ep, dp}`；recipe 通过 `--rl-model-recipe` 给出默认值（LoRA：按 NEXT-WEEK-PLAN 的 TP2/PP1/EP?，SGLang TP8/EP8；精确值须对照 pin 的 Miles `scripts/models/*flash-next*` 核对——本机 `~/miles` 无该文件，待实现阶段从镜像内 Miles 读取）。
 - 最少节点推导：`min_nodes = ceil((trainer_min_gpus + rollout_min_gpus + standby) / gpus_per_node)`，其中 `trainer_min_gpus = tp*cp*ep*pp`（模型并行最小副本；用户裁定 2026-10-04 后它可跨节点——大于一节点时须为整节点倍数，小于等于一节点时无整除要求；节点内组 `tp*cp` 另须 ≤ `gpus_per_node` 且整除之，`multinode.min_nodes(node_parallel=)`），`rollout_min_gpus = sglang.tp`。Flash-Next LoRA：trainer 8 + rollout 8 → 2 节点；全参按 32 卡 recipe → 4 节点。
+- **D8 并行度表（任务 0.2，2026-10-08 补）**。来源一：Miles `scripts/run_qwen3_8_next.py` 第 78–94 行，在 c35702e（main 当时的钉）与 8bc52237a（S16 方案 A 钉）两个版本中该文件逐字相同；Miles 自己的脚本是同卡混布。来源二：yeto 真机实跑 `s16-rawlora-fn2x8-long-20261008a/args.txt`（训推分离）。
+
+  | 配置 | 总卡数 | 训练 TP | 训练 PP | 训练 EP（ETP） | CP | SGLang TP / EP（每引擎卡数） | 来源 |
+  |---|---|---|---|---|---|---|---|
+  | FN 全尺寸（Miles 脚本） | 32（断言 ==32） | 2 | 8 | 32/8=4（1） | 1 | 8 / 8 | Miles run_qwen3_8_next.py:80-94 |
+  | FN 4 层变体（Miles 脚本） | 4 或 8（断言） | 2 | 2 | 卡数/2，即 2 或 4（1） | 1 | 4 / 4 | 同上 :83-94 |
+  | FN 全尺寸 LoRA 训推分离（yeto 实跑） | 2×8 | 2 | 4 | 2（1） | 1 | 8（一个引擎，节点 1） | s1-runs/s16-rawlora-fn2x8-long-20261008a/args.txt；FN2X8-MODAL-PRELAUNCH-REVIEW.md:7 |
+
+  按上面最少节点公式：训推分离 LoRA 训练 8 + 推理 8 → 2 节点（8 卡节点），与实跑一致。
 - "每 learner 先起最少节点"：launcher 默认 `num_nodes = min_nodes`，更大需显式 `--gpu N x`。
 
 ### D9 故障域与恢复语义

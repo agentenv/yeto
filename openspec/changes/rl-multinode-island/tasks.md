@@ -6,7 +6,7 @@
 
 - [x] 0.1 用户裁定 design §3 Q1–Q6，并把结论回写 design.md（每项一行"裁定：…/日期"）。验证：design.md 无未裁定项；`openspec validate rl-multinode-island --strict` 通过。
   - 完成记录（2026-10-01，CPU 通过）：Q1–Q6 取主 agent 默认并回写 design §3（标『待用户复核』）。
-- [ ] 0.2 从镜像内 pin 的 Miles 读取 Flash-Next 全参 recipe（`scripts/models/*flash-next*` 或等价）与 4 层变体的 TP/PP/EP/SGLang TP/EP 值，写入 design D8 表格；标明来源 commit。验证：表格每个数值带来源。
+- [x] 0.2 从镜像内 pin 的 Miles 读取 Flash-Next 全参 recipe（`scripts/models/*flash-next*` 或等价）与 4 层变体的 TP/PP/EP/SGLang TP/EP 值，写入 design D8 表格；标明来源 commit。验证：表格每个数值带来源。（2026-10-08 已写入 design D8 表，来源为 Miles c35702e/8bc52237a 的 `scripts/run_qwen3_8_next.py`（两版本该文件相同）与 yeto 实跑 s16-rawlora-fn2x8-long-20261008a；本机直接读 Miles 工作区，未进镜像读取。）
 
 ## 1. CPU 单测（schema / 映射 / plan 生成）
 
