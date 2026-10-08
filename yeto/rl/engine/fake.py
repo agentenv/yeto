@@ -33,7 +33,7 @@ from yeto.rl.core import CanonicalLoraState, canonical_state
 from yeto.tensor_io import apply_fragment, pack_fragment, pack_tensor, unpack_fragment
 
 from .algorithm import BOUNDED_NONZERO_STD_FILTER
-from .capabilities import EngineCapabilities, ExecutionCapabilities
+from .capabilities import BackendTraits, EngineCapabilities, ExecutionCapabilities
 from .driver import TrainStepMetrics, policy_token
 from .ports import (
     GroupMetadata,
@@ -43,6 +43,7 @@ from .ports import (
 )
 from .trainable_state import TrainableState
 
+FAKE_WEIGHT_TRANSPORTS = {"same-device-ipc": "cuda-ipc", "collective-broadcast": "nccl-broadcast"}
 MODEL_REVISION = "a" * 40
 LORA_CONFIG_HASH = "b" * 64
 
@@ -69,6 +70,9 @@ def fake_capabilities(**overrides) -> EngineCapabilities:
         execution=ExecutionCapabilities(
             critic=False, max_policy_staleness=0, rollout_logprobs=True
         ),
+        # Recorded transport names as the Miles adapter declares them, so fake
+        # tapes keep the pre-decoupling labels (decoupling 2.6).
+        traits=BackendTraits(weight_transport_names=FAKE_WEIGHT_TRANSPORTS),
     )
     values.update(overrides)
     # rl-algo-grpo-knobs 8.3: the fake declares what the Miles adapter declares for

@@ -143,7 +143,7 @@ def test_standby_placement_describes_m1_roles_and_detects_rewrites():
     assert d.trainer_gpus == ("bundle0", "bundle1")
     assert d.rollout_gpus == ("bundle2", "bundle3")
     assert d.extra["standby_gpus"] == ("bundle4", "bundle5")
-    assert d.extra["weight_transport"] == "nccl-broadcast"
+    assert d.extra["weight_transport"] == "collective-broadcast"  # neutral (decoupling 2.6)
     with pytest.raises(PlacementRewriteError, match="placement map"):
         check_placement_not_rewritten(req, _part_args())  # Miles dropped the map
     # physical M1 output: actor holds trainer bundles only, standby separate

@@ -103,9 +103,11 @@ _MODE_PLACEMENT = {
     "partitioned-serial": "fixed-partition",
     "partitioned-overlap": "fixed-partition",
 }
-# Upstream weight transport by placement (miles protocol.py:73-89): colocate
-# uses CUDA IPC; a LoRA fixed partition must use NCCL broadcast.
-_DEFAULT_TRANSPORT = {"colocated": "cuda-ipc", "fixed-partition": "nccl-broadcast"}
+# Neutral weight transport by placement when the placement does not name one
+# (decoupling 2.6): colocated shares on the device, a fixed partition
+# broadcasts. The recorded label is the backend's name for it
+# (EngineCapabilities.traits.weight_transport_names).
+_DEFAULT_TRANSPORT = {"colocated": "same-device-ipc", "fixed-partition": "collective-broadcast"}
 # Timeline role per driver phase (execution_profile.TASK_ROLE vocabulary).
 _PHASE_ROLE = {
     "generate": "rollout",
@@ -572,10 +574,10 @@ class IslandDriver:
                 "gradient invariant cannot be checked"
             )
         self.colocated = description.kind == "colocated"
-        self.weight_transport = str(
+        self.weight_transport = self.capabilities.traits.transport_label(str(
             description.extra.get("weight_transport")
             or _DEFAULT_TRANSPORT.get(description.kind, "unknown")
-        )
+        ))
         extra_start: dict[str, Any] = {}
         if self.profile is not None and self.observe:
             # observe=False keeps rl_driver_start byte-identical to R0 (1.7).
