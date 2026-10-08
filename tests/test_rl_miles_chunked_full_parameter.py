@@ -16,6 +16,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+# CI has no miles image; skip these tests when miles is absent.
+pytest.importorskip("miles")
+
 bridge_stub = types.ModuleType("yeto.rl.deepseek_v4_bridge")
 bridge_stub.ensure_deepseek_v4_bridge = lambda: None
 sys.modules.setdefault("yeto.rl.deepseek_v4_bridge", bridge_stub)
