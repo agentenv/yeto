@@ -16,6 +16,7 @@ from tests.rl_reshard_fakes import GBS, MBS, default_args, gathered, make_world,
 from yeto.rl.elastic_benchmark.capabilities import ResourceConfig, attestation_from_dict
 from yeto.rl.engine.cut import AlgorithmIdentity, CutProgress, RestoreExpectation
 from yeto.rl.engine.miles_adapter import LoopRunner
+from yeto.rl.engine.miles_adapter.reshard import reshard_problems
 from yeto.rl.engine.miles_adapter.trainer import CutContext, MilesTrainerGroup
 from yeto.rl.engine.miles_adapter.trainer_rebuild import SwappableActor
 from yeto.rl.engine.miles_adapter.trainer_resize import MilesTrainerOps
@@ -58,9 +59,20 @@ def _spec(estimator="grpo"):
 def _plan(src="T2R2", dst="T1R3", **kw):
     base = dict(configs=CONFIGS, attestation=_attestation(), source=src, target=dst, expected_config_epoch=3,
                 spec=_spec(), args=default_args(CONFIGS[src].trainer), global_batch_size=GBS,
-                micro_batch_size=MBS)
+                micro_batch_size=MBS, trainer=_MILES_RESHARD)
     base.update(kw)
     return plan_trainer_edge(**base)
+
+
+# CuttableTrainer.reshard_problems as MilesTrainerGroup provides it (decoupling 2.2)
+_MILES_RESHARD = SimpleNamespace(reshard_problems=reshard_problems)
+
+
+def test_plan_refuses_trainer_without_reshard_problems():
+    with pytest.raises(TrainerEdgeRejected, match="does not advertise reshard_problems"):
+        _plan(trainer=None)
+    with pytest.raises(TrainerEdgeRejected, match="does not advertise reshard_problems"):
+        _plan(trainer=SimpleNamespace())
 
 
 def test_plan_role_transfer_both_directions():

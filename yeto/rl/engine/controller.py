@@ -1349,6 +1349,7 @@ class IslandController:
         try:
             return plan_trainer_edge(
                 member_gpus=member_gpus,
+                trainer=ctx.get("trainer", getattr(ctx.get("ops"), "trainer", None)),
                 configs=self.configs, attestation=self.attestation, source=source, target=target,
                 expected_config_epoch=expected_epoch, spec=ctx["spec"], args=ctx["args"],
                 global_batch_size=ctx["global_batch_size"], micro_batch_size=ctx["micro_batch_size"])

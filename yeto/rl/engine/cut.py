@@ -381,6 +381,25 @@ def load_manifest(root: str | os.PathLike[str], cut_id: str) -> CutManifest:
 
 
 @dataclass(frozen=True)
+class CutContext:
+    """What the caller (driver/executor) contributes to a cut besides the trainer shards.
+
+    Backend-neutral (moved from ``miles_adapter.trainer``, decoupling 2.2);
+    handed to :meth:`~yeto.rl.engine.ports.CuttableTrainer.save_cut`.
+    """
+
+    root: str
+    cut_id: str
+    backend_fingerprint: str
+    progress: Any  # yeto.rl.engine.cut.CutProgress
+    algorithm: Any  # yeto.rl.engine.cut.AlgorithmIdentity
+    data: Mapping[str, Any]  # rollout data cursor
+    ledger: Mapping[str, Any]
+    outer: Mapping[str, Any]
+    shared_filesystem: bool = True
+
+
+@dataclass(frozen=True)
 class RestoreExpectation:
     """What the restoring run is; every field is compared with the manifest."""
 
