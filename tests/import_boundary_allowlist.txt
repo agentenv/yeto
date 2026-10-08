@@ -9,7 +9,6 @@ yeto/launcher.py	yeto.rl.engine.miles_adapter	# A8 launcher.py:455,1389,1640,179
 yeto/rl/stage_w_entry.py	yeto.rl.engine.miles_adapter	# A9 stage_w_entry.py:31 connect_island_ray
 #
 # --- 引擎核心（E1-E9）
-yeto/rl/engine/driver.py	yeto.rl.miles	# E3 :278 _append_rl_event（任务 2.3）
 yeto/rl/engine/bridges.py	yeto.rl.miles	# E6 :26 旧版进度格式（任务 2.4）
 yeto/rl/engine/runtime_manifest.py	yeto.rl.miles_overlay	# E9 :146 read_applied_record（任务 2.5）
 #
@@ -22,7 +21,7 @@ yeto/rl/critic_warmup.py	yeto.rl.engine.miles_adapter	# A1 :492
 yeto/rl/algos/reducers.py	megatron	# A3 :35,41 —— 暂不动（任务 4.8，归约器不迁）
 yeto/rl/algos/vendor/miles_mis.py	miles	# A3 :350 cp_utils —— 暂不动（任务 4.8）
 yeto/rl/grad_audit.py	megatron	# A3 :209,320 —— 暂不动（任务 4.8）
-yeto/rl/algos/reward_pipeline.py	yeto.rl.miles	# A4 :384 _append_rl_event（同 E3）
+yeto/rl/algos/reward_pipeline.py	yeto.rl.miles	# A4 :384 _append_rl_event（同 E3；改此文件会改插件源码哈希，挪到阶段 3 随 D8 纯函数化一起做）
 yeto/rl/teacher_forcing.py	yeto.rl.engine.miles_adapter	# A5 :118 current_policy_token
 yeto/rl/teacher_forcing.py	yeto.rl.miles	# A5 :129 _policy_token_for_rollout
 #

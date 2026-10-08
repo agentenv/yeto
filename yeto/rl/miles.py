@@ -406,23 +406,8 @@ def _validate_rollout_policy_versions(data: list[list[Any]], expected: str) -> N
                     )
 
 
-def _append_rl_event(args, event: dict[str, Any]) -> None:
-    path = Path(args.yeto_rl_event_tape).expanduser()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    event = {
-        "island_id": int(args.yeto_rl_learner_id),
-        "time_unix": time.time(),
-        **event,
-    }
-    from .event_echo import append_record
-
-    append_record(path, event)  # echoed when YETO_RL_ECHO_EVENTS=1
-    # The tape is the island's telemetry; W&B is a second reader of it, not
-    # a second instrumentation pass. Writing the file first keeps the tape
-    # authoritative when the network is not.
-    from .wandb_rl import tee as _wandb_tee
-
-    _wandb_tee(args, event)
+# Tape writer moved to the engine core (decoupling 2.3); same object re-exported.
+from .engine.events import append_tape_event as _append_rl_event  # noqa: E402
 
 
 def _require_training_progress(stats: LocalRoundStats) -> None:

@@ -275,9 +275,9 @@ class EventTape:
         from yeto.rl.event_echo import append_record
 
         if self.args is not None:
-            from yeto.rl.miles import _append_rl_event
+            from .events import write_event
 
-            _append_rl_event(self.args, dict(event))
+            write_event(self.args, dict(event))
             return
         record = {"island_id": self.island_id, "time_unix": time.time(), **event}
         append_record(self.path, record)
