@@ -85,3 +85,29 @@ def test_no_rejoin_keeps_the_old_round_count(tmp_path):
 def test_base_jumping_to_final_stops_early(tmp_path):
     client, sync, _ = _run(tmp_path, [3])  # a late island whose first delta lands after the final step
     assert client.deltas == [0] and sync.base_version == 3
+
+
+def test_events_carry_the_syncer_outer_version_next_to_the_local_counter(tmp_path):
+    """Cross-island comparisons (hash checks, lateness, dashboard) must key on the syncer's
+    version: after the rejoin the local policy_version runs one ahead (s17-g1-island, M1 run a)."""
+    _, _, ev = _run(tmp_path, [1, 1, 2, 3])
+    applies = [e for e in ev if e.get("event") == "rl_policy_apply"]
+    assert [e["policy_version"] for e in applies] == [0, 1, 2, 3, 4]  # local counter (publication/ledger)
+    assert [e["sync/outer_version"] for e in applies] == [0, 1, 1, 2, 3]  # syncer version
+    pubs = [e for e in ev if e.get("event") == "rl_publication"]
+    assert [e["sync/outer_version"] for e in pubs] == [0, 1, 1, 2, 3]
+    rounds = [e for e in ev if e.get("event") == "rl_local_round"]
+    assert [e["sync/base_outer_version"] for e in rounds] == [0, 1, 1, 2]
+
+
+def test_dashboard_keys_island_applies_by_outer_version():
+    from yeto.dashboard.reducer import Reducer
+
+    red = Reducer()
+    for iid, versions in ((0, [(1, 1), (2, 2)]), (1, [(1, 1), (2, 1), (3, 2)])):
+        for local, outer in versions:
+            red.feed({"event": "rl_policy_apply", "island_id": iid, "policy_version": local,
+                        "sync/outer_version": outer, "time_unix": 1.0})
+    assert red.applies[1] == {"0", "1"} or red.applies[1] == {0, 1}
+    assert red.applies[2] == {"0", "1"} or red.applies[2] == {0, 1}
+    assert 3 not in red.applies

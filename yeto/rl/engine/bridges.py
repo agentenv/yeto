@@ -403,7 +403,8 @@ class ElasticAvgSync:
         self.base, self.base_version = list(base.params), base.outer_version
         state = unflatten_state(self.base, rollout_id, self.template, self.specs)
         return driver.apply_policy(TrainableState.from_lora(state), optimizer="reset",
-                                   local_step=rollout_id * self.config.local_optimizer_steps)
+                                   local_step=rollout_id * self.config.local_optimizer_steps,
+                                   outer_version=int(base.outer_version))
 
     def start(self, driver: IslandDriver) -> SyncStart:
         from yeto.rl.bridge import flatten_state
@@ -523,7 +524,8 @@ class ElasticAvgSync:
         if delay > 0:  # 0.25 test switch (heartbeats continue on their own thread)
             driver.phase("elastic_debug_delay", rollout_id=rollout_id, delay_s=delay)
             self._sleep(delay)
-        driver.emit("rl_local_round", **_elastic_local_round_fields(stats, sent_on, 4 * len(update)))
+        driver.emit("rl_local_round", **_elastic_local_round_fields(stats, sent_on, 4 * len(update)),
+                    **{"sync/base_outer_version": sent_on})
         from yeto.rl.elastic_client import ElasticFinished
 
         self.client.inner_step += self.config.local_optimizer_steps
