@@ -229,6 +229,7 @@ async def drive_untrusted(
         status = await asyncio.wait_for(driving, timeout=_max_rollout_seconds())
     except asyncio.TimeoutError:
         metrics.timed_out = 1
+        metrics.end_kind = harness.END_KIND_TIMEOUT  # type: ignore[attr-defined]
         status = "timeout"
     except harness.CodexHarnessError as exc:
         # The rejection counters (G6a) must survive the failure: the trusted
@@ -245,7 +246,10 @@ def _metrics_dict(metrics: legacy.AgentMetrics) -> dict[str, Any]:
     extra: dict[str, Any] = {}
     # Observe only (S15 r2 follow-up): why the Codex episode ended and the shape
     # of the last model reply; set by the stock driver, absent otherwise.
-    for name in ("end_reason", "last_completion"):
+    # S17 C9: finer end reason and per-turn lengths (model reply tokens, context
+    # tokens after the reply, tool-result bytes).
+    for name in ("end_reason", "last_completion", "end_kind", "turn_completion_tokens",
+                 "turn_context_tokens", "turn_tool_output_bytes"):
         value = getattr(metrics, name, None)
         if value is not None:
             extra[name] = value
