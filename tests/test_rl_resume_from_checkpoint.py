@@ -312,8 +312,9 @@ def test_local_only_sync_stop_after_and_final_cut():
     finally:
         br._local_state = real
         br.asdict = dataclasses.asdict
+    driver.at_safe_point = False  # as after run_round
     sync.finish(driver)
-    assert (3, True) in calls and ("check", 1) in calls
+    assert (3, True) in calls and ("check", 1) in calls and driver.at_safe_point is True
 
 
 # ---------------------------------------------------------------- elastic store copy hashes

@@ -136,6 +136,10 @@ class LocalOnlySync:
         cut, so a later launch continues from exactly here."""
         version = getattr(driver, "published_version", None)
         if self.round_cuts is not None and version is not None:
+            # after the last round's boundary + publish the island is at a round-boundary
+            # safe point (nothing in flight); the cut requires it settled (G2 A: refused
+            # "the outer commit of this cut is not settled" without this)
+            driver.at_safe_point = True
             self.at_safe_point(driver, rollout_id=int(version), final=True)
 
     def close(self) -> None:
