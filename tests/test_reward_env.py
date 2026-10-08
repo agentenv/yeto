@@ -207,7 +207,14 @@ def test_prebaked_backend(tmp_path, fake_modal, prebake):
     ops = fake_modal["image"].ops
     assert ops[0] == ("from_registry", "org/img:1")
     if prebake:
-        assert ops[1][0] == "run_commands" and "pytest --version" in ops[1][1][0]
+        assert ops[1][0] == "run_commands" and len(ops[1][1]) == 1
+        run = ops[1][1][0]
+        assert "\n" not in run and run.startswith("echo ")  # one Dockerfile RUN line (S17 G3)
+        import base64
+
+        script = base64.b64decode(run.split()[1]).decode()
+        assert script == rt.prebake_script(rt.prebake_from_test_sh(UVX_TEST_SH, "org/img:1"))
+        assert "pytest --version" in script
         assert fake_modal["tags"]["yeto-prebake"] == rt.prebake_from_test_sh(UVX_TEST_SH, "org/img:1").digest()[:16]
     else:
         assert len(ops) == 1 and fake_modal["tags"]["yeto-prebake"] == "none"
