@@ -32,7 +32,9 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
-from yeto.rl.engine.miles_adapter.config import check_harness_reward_scope
+from yeto.rl.engine.members import MEMBER_PREFIX, member_id
+from yeto.rl.engine.tool_wait import LazyBoardActor, harness_board_actor
+from yeto.rl.harness.reward_scope import check_harness_reward_scope
 from yeto.rl.tbench_outcome import validate_hmac_key_source
 
 from . import codex_harness_agent as harness
@@ -164,15 +166,12 @@ def resolve_environment_provider(miles_args: Any, env: Mapping[str, str]) -> Any
 
 def island_boards(miles_args: Any) -> tuple[Any, Any]:
     """``(tool_wait_board, harness_board)``: the island's named actors, looked up lazily."""
-    from yeto.rl.engine.miles_adapter.elastic_wiring import LazyBoardActor
-    from yeto.rl.engine.tool_wait import harness_board_actor
-
     learner_id = int(getattr(miles_args, "yeto_rl_learner_id", 0) or 0)
     return LazyBoardActor(learner_id), LazyBoardActor(learner_id, factory=harness_board_actor)
 
 
 def harness_preflight(miles_args: Any, launch: Any, *, env: Mapping[str, str] | None = None) -> None:
-    """IR-1 hook body. Raises ``PreflightError``/``MilesConfigError`` before any allocation."""
+    """IR-1 hook body. Raises ``PreflightError``/``HarnessConfigError`` before any allocation."""
     del launch  # identity / binary / key checks do not depend on the launch args
     env = os.environ if env is None else env
     # 7.1: a per-segment reward scope must not start (IR-1 path, same check as validate_parsed_args).
@@ -272,8 +271,6 @@ def resolve_member(miles_args: Any, env: Mapping[str, str] | None = None) -> str
     (no source) keeps the global admission key, which single-island smoke
     runs rely on.
     """
-    from yeto.rl.engine.miles_adapter.rollout import MEMBER_PREFIX, member_id
-
     env = os.environ if env is None else env
     member = getattr(miles_args, "yeto_rl_member_id", None)
     if member is not None and str(member) != "":

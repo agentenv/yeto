@@ -24,7 +24,6 @@ yeto/rl/teacher_forcing.py	yeto.rl.engine.miles_adapter	# A5 :118 current_policy
 yeto/rl/teacher_forcing.py	yeto.rl.miles	# A5 :129 _policy_token_for_rollout
 #
 # --- harness（A6、A7、R4-R7、R14）
-yeto/rl/harness/codex/preflight.py	yeto.rl.engine.miles_adapter	# A6 :35,167,275
 yeto/rl/harness/codex/codex_openenv_generate.py	yeto.rl.engine.miles_adapter	# A7 :27 rollout_meta_hook
 yeto/rl/harness/codex/codex_openenv_subprocess_agent_function.py	yeto.rl.engine.miles_adapter	# A7 :36
 yeto/rl/harness/codex/codex_openenv_agent_function.py	yeto.rl.engine.miles_adapter	# A7 :421

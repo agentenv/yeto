@@ -68,17 +68,8 @@ def policy_token(rollout_id: int, policy_hash: str) -> str:
     return policy_snapshot_token(rollout_id, policy_hash)
 
 
-MEMBER_PREFIX = "engine:"
-
-
-def member_id(cell_id: Any) -> str:
-    return f"{MEMBER_PREFIX}{cell_id}"
-
-
-def cell_of(member: str) -> str:
-    if not isinstance(member, str) or not member.startswith(MEMBER_PREFIX):
-        raise ValueError(f"{member!r} is not a rollout member id")
-    return member[len(MEMBER_PREFIX):]
+# Member id rule lives in the core (decoupling 3.5); same objects re-exported.
+from ..members import MEMBER_PREFIX, cell_of, member_id  # noqa: E402
 
 
 def cells_of(members: Any) -> list[str]:

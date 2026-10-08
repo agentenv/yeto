@@ -229,7 +229,7 @@ def _must_be_false(reason: str) -> _Check:
 AGENTIC_TOOL_CALL_GENERATE = "miles.rollout.generate_hub.agentic_tool_call.generate"
 # IR-1 (codex-harness 7.1): reward is attributed per trajectory; a per-segment
 # scope would make sibling segments pose as independent GRPO samples.
-HARNESS_REWARD_SCOPES = ("trajectory",)
+from yeto.rl.harness.reward_scope import HARNESS_REWARD_SCOPES, reward_scope_problem  # noqa: E402
 # Upstream rule the session-server / partial-rollout exclusion quotes.
 SESSION_SERVER_PARTIAL_ROLLOUT_RULE = (
     'miles/utils/arguments.py:3240 "--use-session-server does not support --partial-rollout"'
@@ -262,13 +262,9 @@ def check_session_server_partial_rollout(use_session_server: Any, partial_rollou
 
 def check_harness_reward_scope(scope: Any) -> None:
     """IR-1 (codex-harness 7.1): only ``trajectory`` (or unset) starts."""
-    if scope is None:
-        return
-    if str(scope) not in HARNESS_REWARD_SCOPES:
-        raise MilesConfigError(
-            f"harness reward_scope={scope!r} is not supported; segments share the "
-            f"trajectory reward (allowed: {', '.join(HARNESS_REWARD_SCOPES)})"
-        )
+    problem = reward_scope_problem(scope)  # rule in the core (decoupling 3.5)
+    if problem is not None:
+        raise MilesConfigError(problem)
 
 
 def _check_parameter_mode(value, _config):

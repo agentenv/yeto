@@ -34,7 +34,8 @@
 - [x] 3.3 codex 奖励：验签逻辑不动，"中止"改为返回奖励结果，由 Miles 包装翻成 `Sample.Status.ABORTED` / `DynamicFilterOutput`（R4、R5，`codex/reward.py:159-162,222-224,268`、`tbench_reward.py:32,101`）。验收：codex 奖励现有测试全过；新增"验签失败→中止"对照测试。
   - 完成情况：`codex/reward.py` 新增中立 `secrlenv_reward`、`tbench_reward.py` 新增中立 `tbench_reward`，"中止"以 `RewardResult(aborted=True)` 返回，原入口翻成 `Sample.Status.ABORTED`；验签逻辑未动。入口模块路径进 argv/标准样本，故留原位，白名单 R4/R5 条目不变（`check_group` 仍用 `DynamicFilterOutput`）。
 - [ ] 3.4 核心轮次元数据/策略令牌/计数器接口，算法扩展与 harness 改用它（A2 `seq_adv.py:438,463`、A5 `teacher_forcing.py:118,129`、A7 `codex_openenv_*`）；Miles 实现仍在 `rollout_meta_hook`。验收：标准样本一致；白名单删对应条目。
-- [ ] 3.5 codex 预检中成员 ID 规则、奖励作用域检查、看板句柄改经核心接口（A6，`preflight.py:35,167,275`）。验收：预检测试通过；白名单删条。
+- [x] 3.5 codex 预检中成员 ID 规则、奖励作用域检查、看板句柄改经核心接口（A6，`preflight.py:35,167,275`）。验收：预检测试通过；白名单删条。
+  - 完成情况：成员 ID 规则移入 `yeto/rl/engine/members.py`、看板句柄 `LazyBoardActor` 移入 `yeto/rl/engine/tool_wait.py`（原位置转发同一对象）、奖励作用域规则移入 `yeto/rl/harness/reward_scope.py`（Miles 侧仍抛 `MilesConfigError`，`entry.preflight_stage` 在调用 harness 预检前先做 Miles 版检查，报错类型与文字不变）。白名单删 `preflight.py` 条目：27→26。
 - [ ] 3.6 Miles 专用 harness 胶水（`codex/generate.py` 全文件、`codex_openenv_generate.py:52,64,130-142` 收样本段、`tool_wait_workload.py:72-73`）移入 Miles 适配层（此时可暂放 `engine/miles_adapter/harness_glue/`，阶段 4 随整体搬），轨迹记账（`:42-127`）留中立。验收：`test_harness_codex_openenv` 等 codex CPU 测试通过。
 - [ ] 3.7 改名不改行为：`codex_harness_agent.py` 中 `miles` 相关名、`compaction_bridge.py` 的 `miles_base_url`、`tb2_provider.py:686-700` 的 `miles_args`（R9–R11）；tape 字段 `tito_session_mismatch` 不改。验收：codex harness 测试通过；标准样本一致。
 - [ ] 3.8 会话服务协议文档 + 测试替身（R8，`codex_openenv_agent_function.py:252-345`；路径以 Miles pin 的 `sessions.py` 为准核实）。验收：用替身跑 codex harness CPU 测试通过；协议文档写明哪些路径已核实。
