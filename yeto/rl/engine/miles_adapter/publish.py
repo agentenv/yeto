@@ -59,6 +59,7 @@ from yeto.rl.contracts import InferencePublicationManifest
 
 from ..ports import PublicationCause, PublicationResult
 from ..trainable_state import TrainableState
+from ..policy_digest import is_resident
 from . import LoopRunner
 from .rollout import cells_of, member_id, policy_token, running_members
 
@@ -215,6 +216,13 @@ class RayTargetLiveness:
                   flush=True)
             raise InjectedBlockProbeError(f"liveness probe failed: {exc!r}") from exc
         return "alive"
+
+
+def _payload_of(state: Any) -> tuple[str, int]:
+    """rl-publish-fastpath: a trainer-resident state carries the payload digest the
+    trainer computed (same definition as :func:`payload_digest`)."""
+
+    return state.payload_digest if is_resident(state) else payload_digest(state)
 
 
 def payload_digest(state: TrainableState) -> tuple[str, int]:
@@ -375,16 +383,28 @@ class MilesPublisher:
         # or restore it exactly (None); wired by compose_island
         self.perturb_trainer: Any = None
 
-    def publish(self, state: TrainableState, *, token_rollout_id: int | None = None) -> PublicationResult:
+    def _check_trainer_holds(self, state: Any) -> str:
+        """The trainer must still hold the policy being published (same check as
+        before). rl-publish-fastpath: for a trainer-resident state the trainer re-hashes
+        its current weights in place and only the digest crosses Ray."""
+
         tensor_hash = state.policy_tensor_hash()
-        if self._export is not None:
-            current = self._export()
-            if current.policy_tensor_hash() != tensor_hash:
-                raise PublicationError("trainer weights differ from the state requested for publication")
+        if is_resident(state):
+            current = state.recheck().policy_tensor_hash
+        elif self._export is not None:
+            current = self._export().policy_tensor_hash()
+        else:
+            return tensor_hash
+        if current != tensor_hash:
+            raise PublicationError("trainer weights differ from the state requested for publication")
+        return tensor_hash
+
+    def publish(self, state: TrainableState, *, token_rollout_id: int | None = None) -> PublicationResult:
+        tensor_hash = self._check_trainer_holds(state)
+        payload_hash, payload_bytes = _payload_of(state)
         token = policy_token(
             state.policy_version if token_rollout_id is None else token_rollout_id, tensor_hash
         )
-        payload_hash, payload_bytes = payload_digest(state)
         members, checksums = self._runner.run(self._publish(token))
         self.last_engine_checksums = checksums
         bodies = list((checksums or {}).values())
@@ -501,9 +521,7 @@ class MilesPublisher:
             raise PublicationError("member publication needs at least one member")
         if bool(getattr(self._args, "offload_rollout", False)):
             raise PublicationError("member publication needs a partitioned rollout (no offload)")
-        tensor_hash = state.policy_tensor_hash()
-        if self._export is not None and self._export().policy_tensor_hash() != tensor_hash:
-            raise PublicationError("trainer weights differ from the state requested for publication")
+        tensor_hash = self._check_trainer_holds(state)
         token = policy_token(
             state.policy_version if token_rollout_id is None else token_rollout_id, tensor_hash
         )
@@ -513,7 +531,7 @@ class MilesPublisher:
             raise PublicationError(
                 f"no verified payload reference for {token}: publish it fully first"
             )
-        payload_hash, payload_bytes = payload_digest(state)
+        payload_hash, payload_bytes = _payload_of(state)
         cells = cells_of(members)
         checksums = self._runner.run(self._publish_members(token, cells, epoch))
         manifest_hash = hashlib.sha256(

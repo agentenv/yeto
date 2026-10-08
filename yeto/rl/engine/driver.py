@@ -627,6 +627,21 @@ class IslandDriver:
     def export_local(self) -> TrainableState:
         return self.policy_state.export()
 
+    def export_local_resident(self, *, policy_version: int):
+        """rl-publish-fastpath: the local policy as a trainer-resident handle (digests
+        only, tensors stay in the trainer), or None when the policy state cannot hash
+        in place (fakes, other backends) or the fast path is turned off
+        (``YETO_RL_PUBLISH_FASTPATH=0``); callers then fall back to :meth:`export_local`."""
+
+        import os
+
+        if os.environ.get("YETO_RL_PUBLISH_FASTPATH", "1").strip().lower() in {"0", "false", "no", "off"}:
+            return None
+        export_digest = getattr(self.policy_state, "export_digest", None)
+        if not callable(export_digest):
+            return None
+        return export_digest(policy_version=int(policy_version))
+
     # -- per-round steps -------------------------------------------------
     def publish(self, state: TrainableState, *, rollout_id: int) -> None:
         if state.policy_version != rollout_id:

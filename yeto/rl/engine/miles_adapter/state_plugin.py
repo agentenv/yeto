@@ -37,6 +37,8 @@ OPTIMIZER_MODES = ("preserve", "reset")
 
 _PLUGIN_MODULE = "yeto.rl.engine.miles_adapter.state_plugin"
 EXPORT_STATE = f"{_PLUGIN_MODULE}.export_state"
+# rl-publish-fastpath: export + hash on the trainer, return only the digests.
+EXPORT_DIGEST = f"{_PLUGIN_MODULE}.export_digest"
 APPLY_STATE = f"{_PLUGIN_MODULE}.apply_state"
 GRAD_NORM = f"{_PLUGIN_MODULE}.grad_norm"
 APPLIED_LRS = f"{_PLUGIN_MODULE}.applied_lrs"
@@ -448,6 +450,35 @@ def export_state(actor: Any, *, policy_version: int) -> dict[str, Any] | None:
     install_grad_norm_recorder()
     with trainer_resident(actor):
         return _export_state(actor, policy_version=policy_version)
+
+
+def export_digest(
+    actor: Any, *, policy_version: int, base_model_revision: str, lora_config_hash: str,
+) -> dict[str, Any] | None:
+    """rl-publish-fastpath: :func:`export_state` on the trainer, but return only the
+    publication digests (policy tensor hash, payload hash/bytes, specs) instead of
+    the tensors.  The hash definitions are those of ``yeto.rl.core.policy_tensor_hash``
+    and ``publish.payload_digest`` (see ``policy_digest``); only where they run moves."""
+
+    from ..policy_digest import digest_canonical_tensors, layout_hash_of
+
+    import time
+
+    started = time.monotonic()
+    exported = export_state(actor, policy_version=policy_version)
+    export_seconds = round(time.monotonic() - started, 3)
+    if exported is None:
+        return None
+    tensors = exported["tensors"]
+    specs = [(name, tuple(int(d) for d in value.shape)) for name, value in sorted(tensors.items())]
+    digest = digest_canonical_tensors(
+        tensors,
+        base_model_revision=base_model_revision,
+        lora_config_hash=lora_config_hash,
+        layout_hash=layout_hash_of(specs),
+    )
+    return {"policy_version": int(policy_version), "digest": digest.to_wire(),
+            "export_seconds": export_seconds}
 
 
 def is_native_flash_next(actor: Any) -> bool:

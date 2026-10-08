@@ -512,6 +512,15 @@ class _Actor:
                 {"policy_version": kwargs["policy_version"], "tensors": {NAME: self.tensor.clone()}},
                 None,
             ]
+        if fn_path == state_plugin.EXPORT_DIGEST:  # rl-publish-fastpath
+            from yeto.rl.engine.policy_digest import digest_canonical_tensors, layout_hash_of
+
+            tensors = {NAME: self.tensor.clone()}
+            specs = [(NAME, tuple(self.tensor.shape))]
+            digest = digest_canonical_tensors(
+                tensors, base_model_revision=kwargs["base_model_revision"],
+                lora_config_hash=kwargs["lora_config_hash"], layout_hash=layout_hash_of(specs))
+            return [{"policy_version": kwargs["policy_version"], "digest": digest.to_wire()}, None]
         if fn_path == state_plugin.APPLY_STATE:
             self.tensor = kwargs["tensors"][NAME].clone()
             self.calls.append(("apply", kwargs["policy_version"], kwargs["optimizer"]))
@@ -611,9 +620,12 @@ def test_ports_composition_root_over_stubbed_upstream(tmp_path, monkeypatch):
         ),
     )
     final = driver.run()
+    # rl-publish-fastpath: the final policy stays in the trainer (digest handle);
+    # read its tensors (a full export) while the loop runner is still open.
+    final_tensors = final.tensors
     runner.close()
 
-    assert torch.equal(final.tensors[NAME], torch.full((2, 4), 2.0))
+    assert torch.equal(final_tensors[NAME], torch.full((2, 4), 2.0))
     assert [c for c in actor.calls if c[0] == "train"] == [("train", 0), ("train", 1)]
     assert len(released) == 2
     events = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()]

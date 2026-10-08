@@ -17,7 +17,7 @@ from typing import Any
 
 from ..trainable_state import LAYOUT_LORA, TrainableState, require_supported_layout
 from . import LoopRunner
-from .state_plugin import APPLY_STATE, EXPORT_STATE, OPTIMIZER_MODES
+from .state_plugin import APPLY_STATE, EXPORT_DIGEST, EXPORT_STATE, OPTIMIZER_MODES
 
 
 class PolicyStateError(RuntimeError):
@@ -109,6 +109,73 @@ class MilesPolicyState:
         version = self._export_version(policy_version)
         results = await self._aplugin(EXPORT_STATE, {"policy_version": version})
         return self._export_result(version, results)
+
+    def export_digest(self, *, policy_version: int | None = None):
+        """rl-publish-fastpath: the trainer exports and hashes; only the digests cross
+        Ray.  Returns a :class:`TrainerResidentState` whose tensors stay in the trainer
+        (``materialize`` falls back to :meth:`export`)."""
+
+        import time
+
+        version = self._export_version(policy_version)
+        started = time.monotonic()
+        results = self._plugin(EXPORT_DIGEST, self._digest_kwargs(version))
+        state = self._digest_result(version, results)
+        export_s = next((r.get("export_seconds") for r in results if r is not None), None)
+        # Timing for the next GPU run (log only; no tape field changes): total plugin
+        # round trip vs the trainer-side hashing part.
+        print(f"[rl] publish-fastpath digest export v{version}: "
+              f"total={time.monotonic() - started:.1f}s trainer_export={export_s}s "
+              f"hash={state.digest.hash_seconds:.1f}s bytes={state.digest.payload_bytes}", flush=True)
+        return state
+
+    def _digest_kwargs(self, version: int) -> dict[str, Any]:
+        return {"policy_version": version, "base_model_revision": self._revision,
+                "lora_config_hash": self._config_hash}
+
+    def _current_digest(self, version: int):
+        import time
+
+        from ..policy_digest import PolicyDigest
+
+        started = time.monotonic()
+        results = [r for r in self._plugin(EXPORT_DIGEST, self._digest_kwargs(version)) if r is not None]
+        if len(results) != 1:
+            raise PolicyStateError(f"expected exactly one main-rank digest, got {len(results)}")
+        digest = PolicyDigest.from_wire(results[0]["digest"])
+        print(f"[rl] publish-fastpath recheck v{version}: total={time.monotonic() - started:.1f}s "
+              f"trainer_export={results[0].get('export_seconds')}s hash={digest.hash_seconds:.1f}s", flush=True)
+        return digest
+
+    def _digest_result(self, version: int, results: list[Any]):
+        from ..policy_digest import PolicyDigest, TrainerResidentState, layout_hash_of
+
+        results = [r for r in results if r is not None]
+        if len(results) != 1:
+            raise PolicyStateError(f"expected exactly one main-rank digest, got {len(results)}")
+        (result,) = results
+        if result.get("policy_version") != version:
+            raise PolicyStateError("exported policy version mismatch")
+        digest = PolicyDigest.from_wire(result["digest"])
+        layout_hash = layout_hash_of(digest.specs)
+        if self._expected_layout_hash is not None and layout_hash != self._expected_layout_hash:
+            raise ValueError(
+                f"canonical LoRA layout hash changed: exported {len(digest.specs)} tensors "
+                f"(expected layout hash {self._expected_layout_hash}, got {layout_hash})")
+        if self._expected_layout_hash is None:
+            self._expected_layout_hash = layout_hash
+            print(f"[rl] learned LoRA layout from first digest export: {len(digest.specs)} tensors, "
+                  f"hash={layout_hash}", flush=True)
+        return TrainerResidentState(
+            layout=self.layout,
+            base_model_revision=self._revision,
+            config_hash=self._config_hash,
+            layout_hash=layout_hash,
+            policy_version=version,
+            digest=digest,
+            materialize_fn=lambda v: self.export(policy_version=v),
+            recheck_fn=lambda: self._current_digest(version),
+        )
 
     def _export_version(self, policy_version: int | None) -> int:
         return self.policy_version if policy_version is None else int(policy_version)
