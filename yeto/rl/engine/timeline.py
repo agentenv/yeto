@@ -207,6 +207,9 @@ TRAJECTORY_REWARD_OPTIONAL: dict[str, tuple[type, ...]] = {
     "turn_completion_tokens": (list,),
     "turn_context_tokens": (list,),
     "turn_tool_output_bytes": (list,),
+    # S17 N13: seconds the trusted verifier spent grading this trajectory
+    # (absent when grading was skipped, e.g. timeout).
+    "evaluate_time": (float,),
 }
 
 

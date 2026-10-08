@@ -553,6 +553,9 @@ def trajectory_diagnostics(meta: dict[str, Any]) -> dict[str, Any]:
         reason = metrics.get("end_reason")
         if isinstance(reason, str) and reason:
             out["end_reason"] = reason[:160]
+        etime = metrics.get("evaluate_time")  # S17 N13: seconds spent grading
+        if isinstance(etime, (int, float)) and not isinstance(etime, bool) and etime >= 0:
+            out["evaluate_time"] = round(float(etime), 3)
         kind = metrics.get("end_kind")  # S17 C9
         if isinstance(kind, str) and kind:
             out["end_kind"] = kind[:32]
