@@ -17,7 +17,8 @@
 
 - [x] 2.1 `RecoveryRequired` 移入核心异常模块（E2，`trainer_transition.py:342`），Miles 适配层改 import 核心版本。验收：`test_rl_engine_ports` 等现有测试通过；白名单删对应条目。
 - [x] 2.2 `CutContext` 移进 ports/核心，可选方法升级为 `CuttableTrainer` 协议（E21，`ports.py:205-213`）；`ReshardPlan` 提到核心，重分片可行性改经 `reshard_problems` 可选方法（E1，`trainer_transition.py:42,162-163`）。验收：假引擎与 Miles 适配层都通过重分片测试；白名单删 E1 条。
-- [ ] 2.3 核心事件写入器（后端注入实现），替换 `driver.py:278` 与 `reward_pipeline.py:384` 对 `_append_rl_event` 的调用（E3、A4）。验收：标准样本 tape 片段逐字节一致；白名单删两条。
+- [x] 2.3 核心事件写入器（后端注入实现，`yeto/rl/engine/events.py`），驱动器侧替换 `driver.py:278` 对 `_append_rl_event` 的调用（E3）。验收：标准样本 tape 片段逐字节一致；白名单删驱动器条目。
+  - 2.3 拆分（用户 2026-10-08 确认）：`reward_pipeline.py:384` 侧（A4）移到阶段 3 任务 4.10。原因：`reward_pipeline.py` 是 Miles 插件，改其 import 会改插件源码哈希，从而改 `AlgorithmSpec.sha256()`，应与 4.6 纯函数化一起换哈希并记入对照表。
 - [x] 2.4 strict/decoupled 进度格式与 `_record_local_round/_record_final_payload/_save_progress` 抽到核心进度模块，旧版引擎反过来 import（E6，`bridges.py:26,519-521`）。验收：标准样本进度文件逐字节一致；读旧进度文件的测试通过。
 - [x] 2.5 运行时清单：探针表、版本模块表、镜像清单与 commit 来源、补丁记录由适配层提供（E7–E9，`runtime_manifest.py:34-57,98,132-188,146-157`）；Miles 下字段名 `miles_overlay` 保留。验收：`test_rl_runtime_manifest` 通过，Miles 清单与改动前字段与值相同。
 - [x] 2.6 权重传输中立名（E4/V2，`driver.py:108`、`miles_adapter/placement.py:357`），由适配层声明并翻译；tape 中旧值保持。验收：标准样本一致；新增单测验证中立名到 Miles 名的映射。
@@ -49,6 +50,7 @@
 - [ ] 4.7 中立逐词元损失参考函数（以 `tests/rl_loss_variant_reference.py` 为蓝本：PPO clip/dual-clip、CISPO、SAPO、KL k1/k2/low_var_kl、TIS/IcePop 权重与掩码），只用于 CPU 对照 Miles fork 函数；不改 fork。验收：CPU 上与 fork 对应函数逐位一致，不一致项列表写入文档；测试在未安装 Miles 时跳过而非失败。
 - [ ] 4.8 归约器与 megatron 依赖（A3，`reducers.py:35,41`、`vendor/miles_mis.py:350`、`grad_audit.py:209,320`）本 change 不迁，只确认在白名单并注明"暂不动"。验收：白名单条目带注释。
 - [ ] 4.9 中立 `--deterministic` 开关，各后端×设备给环境变量（P4，`cli.py:226,381`、`miles_adapter/entry.py:1046`）。验收：Miles×NVIDIA 下环境变量与改动前相同。
+- [ ] 4.10 `reward_pipeline.py:384` 改用核心事件写入器（原 2.3 的 A4 部分，移入原因见 2.3 注记），与 4.6 同一批换插件哈希。验收：标准样本 tape 片段一致；新哈希写入对照表；白名单删 A4 条目。
 
 ## 5. 阶段 4：Miles 代码归位
 
