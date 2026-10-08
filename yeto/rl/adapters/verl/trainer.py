@@ -183,6 +183,12 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
     trainer.logger = Tracking(project_name=trainer.config.trainer.project_name,
                               experiment_name=trainer.config.trainer.experiment_name,
                               default_backend=trainer.config.trainer.logger, config=cfg)
+    from verl.utils.tracking import DapoFilteredRewardTableLogger, ValidationGenerationsLogger
+
+    names = dict(project_name=trainer.config.trainer.project_name,
+                 experiment_name=trainer.config.trainer.experiment_name)
+    trainer.validation_generations_logger = ValidationGenerationsLogger(**names)
+    trainer.dapo_filtered_reward_logger = DapoFilteredRewardTableLogger(**names)
     trainer.global_steps = 1
     SkipManager.set_step(1)
     # attributes verl's fit() sets before its loop (profiling off on the yeto path)
