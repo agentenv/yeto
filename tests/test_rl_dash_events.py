@@ -14,12 +14,12 @@ from test_rl_driver_profiles import _driver, _engine, _events
 from test_rl_miles_adapter_trainer_publish import _rank_actor_draining_state_plugin, handle, trainer
 from yeto.rl.engine import telemetry
 from yeto.rl.engine.driver import BATCH_SUMMARY_KEYS
-from yeto.rl.engine.miles_adapter import rollout_meta_hook as rmh
+from yeto.rl.adapters.miles import rollout_meta_hook as rmh
 
 
 # ---------------------------------------------------------------- 1.1 step_metrics
 def _train_with_losses(losses):
-    from yeto.rl.engine.miles_adapter import state_plugin
+    from yeto.rl.adapters.miles import state_plugin
 
     state_plugin._STEP_LOSSES.clear()
     for item in losses:
@@ -45,7 +45,7 @@ def test_step_metrics_fill_round_means_from_loss_dict():
 
 
 def test_step_metrics_without_kl_key_is_none_and_mean_over_steps():
-    from yeto.rl.engine.miles_adapter.trainer import mean_step_metrics
+    from yeto.rl.adapters.miles.trainer import mean_step_metrics
 
     steps = [{"metrics": {"loss": 1.0, "pg_loss": 2.0}}, {"metrics": {"loss": 3.0, "pg_loss": 4.0}}]
     assert mean_step_metrics(steps) == {"loss": 2.0, "pg_loss": 3.0}
@@ -256,7 +256,7 @@ def test_learner_switch_defaults(monkeypatch):
                     rl_resource_sample_interval=None)
         ns = SimpleNamespace(**{**base, **kw})
         miles = SimpleNamespace()
-        monkeypatch.setattr("yeto.rl.engine.miles_adapter.elastic_hook.apply_recommend_flags",
+        monkeypatch.setattr("yeto.rl.adapters.miles.elastic_hook.apply_recommend_flags",
                             lambda a, m: None)
         apply_ports_infra_switches(ns, miles, environ={})
         return vars(miles)

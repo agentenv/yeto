@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Protocol
 
-from yeto.rl.engine.miles_adapter import rollout_meta_hook
+from yeto.rl.adapters.miles import rollout_meta_hook
 from yeto.rl.engine.tool_wait import _call as _board_call
 from yeto.rl.engine.tool_wait import _resolve as _board_resolve
 

@@ -162,7 +162,7 @@ def parse_args(argv=None):
     # else off (0 disables explicitly).
     parser.add_argument("--rl-heartbeat-interval", type=float, default=None)
     parser.add_argument("--rl-resource-sample-interval", type=float, default=None)
-    from .engine.miles_adapter.elastic_hook import add_recommend_arguments
+    from .adapters.miles.elastic_hook import add_recommend_arguments
     add_recommend_arguments(parser)  # D2 elastic hook
     # ports LoRA training-time dropout (default 0 = unchanged argv)
     parser.add_argument("--rl-lora-dropout", type=float, default=None)
@@ -342,8 +342,8 @@ def build_ports_launch(args, run_config, extra_argv=()):
     import dataclasses
 
     from .engine.algorithm import resolve_ports_algorithm
-    from .engine.miles_adapter.algorithm_flags import absorb_extra_argv
-    from .engine.miles_adapter.config import translate_run_config
+    from .adapters.miles.algorithm_flags import absorb_extra_argv
+    from .adapters.miles.config import translate_run_config
 
     base_algorithm = resolve_ports_algorithm(args, rl_engine="ports")
     absorbed, _, _ = absorb_extra_argv(base_algorithm, tuple(extra_argv))
@@ -394,7 +394,7 @@ def _check_ports_infra_switches(args) -> None:
         given.append("--rl-elastic-accept-rebind")
     if getattr(args, "rl_observe_timeline", False) and not ports:
         raise ValueError("--rl-observe-timeline only applies to --rl-engine ports")
-    from .engine.miles_adapter.elastic_hook import check_recommend_flags
+    from .adapters.miles.elastic_hook import check_recommend_flags
     check_recommend_flags(args)
     if getattr(args, "rl_elastic_declare_cells", False) and not getattr(args, "rl_elastic", False):
         raise ValueError("--rl-elastic-declare-cells needs --rl-elastic")
@@ -444,10 +444,10 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
             if value < 0:
                 raise ValueError(f"--{flag.replace('_', '-')} must be >= 0")
             setattr(miles_args, attr, value)
-    from .engine.miles_adapter.elastic_hook import apply_recommend_flags
+    from .adapters.miles.elastic_hook import apply_recommend_flags
     apply_recommend_flags(args, miles_args)
     if getattr(args, "rl_deterministic_trainer", False):
-        from .engine.miles_adapter.entry import DETERMINISM_ENV
+        from .adapters.miles.entry import DETERMINISM_ENV
 
         (os.environ if environ is None else environ).update(DETERMINISM_ENV)
     # ruling 2026-10-04 v2: the rollout bind path (bind_members) reads the engine opt-in
@@ -483,7 +483,7 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
     # The attribute covers the driver process; the env var reaches Ray workers
     # (where the metadata hook runs) through connect_island_ray's job-level
     # runtime_env, since workers inherit the raylet's env, not the driver's.
-    from .engine.miles_adapter.rollout_meta_hook import ELASTIC_METADATA_ENV
+    from .adapters.miles.rollout_meta_hook import ELASTIC_METADATA_ENV
 
     miles_args.yeto_rl_elastic_metadata = True
     (os.environ if environ is None else environ)[ELASTIC_METADATA_ENV] = "1"
@@ -1359,7 +1359,7 @@ def _legacy_miles_argv(config) -> list[str]:
         RECIPE_QWEN3_5,
         RECIPE_QWEN3_8_NEXT,
     )
-    from .engine.miles_adapter.lr_schedule import lr_schedule_argv
+    from .adapters.miles.lr_schedule import lr_schedule_argv
 
     if config.model_recipe.name == RECIPE_QWEN3_8_NEXT:
         # The native Flash-Next recipe (raw torch_dist, qwen4_exp provider, per-expert
@@ -2012,7 +2012,7 @@ def print_attestation_fingerprint(args, ports_launch, out=None) -> bool:
     ``run_ports_island`` uses -- as one JSON line; True when printed."""
     if not getattr(args, "rl_print_attestation_fingerprint", False):
         return False
-    from .engine.miles_adapter.entry import ports_runtime_fingerprint
+    from .adapters.miles.entry import ports_runtime_fingerprint
 
     print(json.dumps({
         "event": "rl_attestation_fingerprint",
@@ -2046,7 +2046,7 @@ def write_boot_only_marker(args, ports_launch, run_config, ref_probe, *,
     """``--rl-boot-only`` (S11 fnboot): every torch_dist-free check passed (provider
     view, Miles argv built + parsed, algorithm verified); record it and return so the
     learner exits 0 without training."""
-    from .engine.miles_adapter.entry import ports_runtime_fingerprint
+    from .adapters.miles.entry import ports_runtime_fingerprint
 
     present = bool(ref_probe and ref_probe["present"])
     record = {
@@ -2094,7 +2094,7 @@ def run_miles(
         install_event_echo()
     if rl_engine == "ports":
         _require_ports_supported(args, extra_argv)
-        from .engine.miles_adapter.state import require_run_plugin
+        from .adapters.miles.state import require_run_plugin
 
         require_run_plugin()
     parameter_mode = getattr(args, "parameter_mode", "lora")
@@ -2278,7 +2278,7 @@ def run_miles(
     if rl_engine == "ports":
         # Same engine-agnostic RLRunConfig as legacy; only the translation
         # differs (design D8).
-        from .engine.miles_adapter.config import parse_miles_args
+        from .adapters.miles.config import parse_miles_args
         from .engine.run_config import resolve_rl_run_config
 
         boot_only = bool(getattr(args, "rl_boot_only", False))
@@ -2621,7 +2621,7 @@ def _reject_lr_schedule_overrides(extra_argv: Sequence[str]) -> None:
     ports and could trip or defeat the zero-LR invariant.
     """
 
-    from .engine.miles_adapter.lr_schedule import LR_SCHEDULE_FLAGS
+    from .adapters.miles.lr_schedule import LR_SCHEDULE_FLAGS
 
     for token in extra_argv:
         flag = str(token).split("=", 1)[0]
@@ -2691,7 +2691,7 @@ def _configure_grad_audit(args, miles_args, rl_engine: str) -> bool:
 
 def _ports_spec(args, extra_argv: Sequence[str] = ()):
     from .engine.algorithm import resolve_ports_algorithm
-    from .engine.miles_adapter.algorithm_flags import absorb_extra_argv
+    from .adapters.miles.algorithm_flags import absorb_extra_argv
 
     spec, _, _ = absorb_extra_argv(resolve_ports_algorithm(args, rl_engine="ports"),
                                    tuple(extra_argv))
@@ -2781,7 +2781,7 @@ def _run_ports(
     """
 
     from .core import canonical_layout_hash, canonical_lora_config_hash
-    from .engine.miles_adapter.entry import run_ports_island
+    from .adapters.miles.entry import run_ports_island
 
     lora_config_hash = canonical_lora_config_hash(
         rank=args.lora_r, target_modules=canonical_targets

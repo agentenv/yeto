@@ -24,7 +24,7 @@ from __future__ import annotations
 import dataclasses
 from typing import Any, Awaitable, Callable
 
-from yeto.rl.engine.miles_adapter import rollout_meta_hook
+from yeto.rl.adapters.miles import rollout_meta_hook
 
 from .alignment import AlignmentError, assert_sample_alignment
 from .tbench_reward import INFRASTRUCTURE_KEY

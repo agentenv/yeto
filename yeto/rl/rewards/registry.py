@@ -8,7 +8,7 @@ module's source file (same rule as ``AlgorithmSpec`` plugin refs), so editing
 the reward's source changes its identity.
 
 Backend adapters turn a loaded reward into their own callable (Miles:
-``yeto.rl.engine.miles_adapter.rewards``).  An unknown name fails with the list
+``yeto.rl.adapters.miles.rewards``).  An unknown name fails with the list
 of registered names, before anything is launched.
 """
 

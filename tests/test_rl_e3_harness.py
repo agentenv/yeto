@@ -20,10 +20,10 @@ import pytest
 import torch
 
 from tests.rl_reshard_fakes import GBS, MBS, ShardedBackend, default_args, make_world, train_step
-from yeto.rl.engine.miles_adapter import LoopRunner
-from yeto.rl.engine.miles_adapter import e3_probe
-from yeto.rl.engine.miles_adapter.reshard import scheduled_partitions
-from yeto.rl.engine.miles_adapter.trainer import MilesTrainerGroup
+from yeto.rl.adapters.miles import LoopRunner
+from yeto.rl.adapters.miles import e3_probe
+from yeto.rl.adapters.miles.reshard import scheduled_partitions
+from yeto.rl.adapters.miles.trainer import MilesTrainerGroup
 
 TOOLS = Path(__file__).resolve().parents[1] / "tools" / "probes" / "e3_reshard"
 sys.path.insert(0, str(TOOLS))
@@ -111,7 +111,7 @@ def _merge(states):
 
 
 def _load(path):
-    from yeto.rl.engine.miles_adapter.cut_plugin import from_safe
+    from yeto.rl.adapters.miles.cut_plugin import from_safe
 
     return from_safe(torch.load(path, map_location="cpu", weights_only=True))
 
@@ -449,9 +449,9 @@ class _Sink:
 
 def test_gen_phase_runs_the_production_round_components_in_driver_order(monkeypatch):
     miles_backend = importlib.import_module("miles_backend")
-    from yeto.rl.engine.miles_adapter import publish as publish_mod
-    from yeto.rl.engine.miles_adapter import rollout as rollout_mod
-    from yeto.rl.engine.miles_adapter import state as state_mod
+    from yeto.rl.adapters.miles import publish as publish_mod
+    from yeto.rl.adapters.miles import rollout as rollout_mod
+    from yeto.rl.adapters.miles import state as state_mod
 
     log = _Log()
     controller, executor, actor, args = _fake_miles_world(log)
@@ -486,7 +486,7 @@ def test_gen_phase_runs_the_production_round_components_in_driver_order(monkeypa
     backend._close = lambda: log.rec("close")
     released = []
     monkeypatch.setattr(miles_backend, "_release_refs", lambda a, p: released.append(p), raising=False)
-    from yeto.rl.engine.miles_adapter import trainer as trainer_mod
+    from yeto.rl.adapters.miles import trainer as trainer_mod
 
     monkeypatch.setattr(trainer_mod, "_default_release", lambda a, p: released.append(p))
     backend.generate_frozen(2, identity={"layout_hash": "L"}, metadata_sink=_Sink(log))
@@ -502,7 +502,7 @@ def test_gen_phase_runs_the_production_round_components_in_driver_order(monkeypa
 
 
 def policy_token_for(rid):
-    from yeto.rl.engine.miles_adapter.rollout import policy_token
+    from yeto.rl.adapters.miles.rollout import policy_token
 
     return policy_token(rid, "a" * 64)
 
@@ -621,7 +621,7 @@ def test_pull_packed_copies_verifies_and_releases(tmp_path):
 
 
 def test_resized_args_sets_world_size_with_the_trainer_size():
-    from yeto.rl.engine.miles_adapter.trainer_rebuild import resized_args
+    from yeto.rl.adapters.miles.trainer_rebuild import resized_args
 
     base = SimpleNamespace(actor_num_nodes=1, actor_num_gpus_per_node=2, world_size=2, lr=1e-5)
     new = resized_args(base, 1)
@@ -633,7 +633,7 @@ def test_resized_args_sets_world_size_with_the_trainer_size():
 
 def test_a8_determinism_env_equals_production_and_precedes_ray():
     modal_run = importlib.import_module("modal_run")
-    from yeto.rl.engine.miles_adapter.entry import DETERMINISM_ENV
+    from yeto.rl.adapters.miles.entry import DETERMINISM_ENV
 
     assert modal_run.DETERMINISM_ENV == DETERMINISM_ENV
     script = modal_run.container_script("a8")

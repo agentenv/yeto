@@ -13,8 +13,8 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from yeto.rl.core import canonical_state  # noqa: E402
-from yeto.rl.engine.miles_adapter.publish import MilesPublisher, PublicationError  # noqa: E402
-from yeto.rl.engine.miles_adapter.rollout import (  # noqa: E402
+from yeto.rl.adapters.miles.publish import MilesPublisher, PublicationError  # noqa: E402
+from yeto.rl.adapters.miles.rollout import (  # noqa: E402
     MembershipPlanError,
     MilesRolloutPool,
     cell_of,
@@ -243,8 +243,8 @@ def test_member_publish_needs_a_verified_reference_of_the_same_policy():
 
 # ---------------------------------------------------------------- data cursor / ledger / 4.4 / entry
 def test_hook_reports_data_cursor_and_buffer_length():
-    from yeto.rl.engine.miles_adapter.rollout import handle_from_metadata
-    from yeto.rl.engine.miles_adapter.rollout_meta_hook import METADATA_SCHEMA, data_cursor
+    from yeto.rl.adapters.miles.rollout import handle_from_metadata
+    from yeto.rl.adapters.miles.rollout_meta_hook import METADATA_SCHEMA, data_cursor
 
     src = SimpleNamespace(sample_offset=12, epoch_id=0, sample_group_index=3, sample_index=24,
                           buffer=[], get_buffer_length=lambda: 0)
@@ -355,13 +355,13 @@ def test_compose_island_with_elastic_wiring(tmp_path, monkeypatch, mode):
     from yeto.rl.engine.driver import EventTape
     from yeto.rl.engine.execution_profile import ExecutionProfile
     from yeto.rl.engine.journal import read_journal
-    from yeto.rl.engine.miles_adapter import LoopRunner
-    from yeto.rl.engine.miles_adapter import rollout_meta_hook as hook
-    from yeto.rl.engine.miles_adapter.elastic_placement import ElasticPlacement
-    from yeto.rl.engine.miles_adapter.elastic_wiring import build_elastic
-    from yeto.rl.engine.miles_adapter.entry import compose_island, miles_capabilities
-    from yeto.rl.engine.miles_adapter.placement import MilesPlacement, PlacementRequest
-    from yeto.rl.engine.miles_adapter.rollout import DirMetadataSource
+    from yeto.rl.adapters.miles import LoopRunner
+    from yeto.rl.adapters.miles import rollout_meta_hook as hook
+    from yeto.rl.adapters.miles.elastic_placement import ElasticPlacement
+    from yeto.rl.adapters.miles.elastic_wiring import build_elastic
+    from yeto.rl.adapters.miles.entry import compose_island, miles_capabilities
+    from yeto.rl.adapters.miles.placement import MilesPlacement, PlacementRequest
+    from yeto.rl.adapters.miles.rollout import DirMetadataSource
 
     sink = tmp_path / "sink"
     monkeypatch.setenv(hook.META_SINK_ENV, f"dir:{sink}")
@@ -464,8 +464,8 @@ def test_default_metadata_is_unchanged_without_elastic(tmp_path, monkeypatch):
     import json as _json
 
     from tests.test_rl_miles_adapter_rollout import Call, Sample, Span
-    from yeto.rl.engine.miles_adapter import rollout_meta_hook as hook
-    from yeto.rl.engine.miles_adapter.rollout import DirMetadataSource, handle_from_metadata
+    from yeto.rl.adapters.miles import rollout_meta_hook as hook
+    from yeto.rl.adapters.miles.rollout import DirMetadataSource, handle_from_metadata
 
     monkeypatch.delenv(hook.ELASTIC_METADATA_ENV, raising=False)
     source = SimpleNamespace(sample_offset=4, epoch_id=0, sample_group_index=2, sample_index=4,

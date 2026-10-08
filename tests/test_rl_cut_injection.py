@@ -10,9 +10,9 @@ import pytest
 import torch
 
 from tests.rl_cut_fakes import make_rank, params, train_step
-from yeto.rl.engine.miles_adapter import cut_injection as ci
-from yeto.rl.engine.miles_adapter import cut_plugin
-from yeto.rl.engine.miles_adapter.trainer_rebuild import inject_rebuild_failures
+from yeto.rl.adapters.miles import cut_injection as ci
+from yeto.rl.adapters.miles import cut_plugin
+from yeto.rl.adapters.miles.trainer_rebuild import inject_rebuild_failures
 
 
 class Killed(BaseException):
@@ -135,7 +135,7 @@ def test_state_summary_and_determinism_readouts(monkeypatch):
 
 
 def test_cursor_shift_refused_without_a_live_cursor(tmp_path, monkeypatch):
-    from yeto.rl.engine.miles_adapter.trainer_rebuild import _inject_cursor_shift
+    from yeto.rl.adapters.miles.trainer_rebuild import _inject_cursor_shift
 
     monkeypatch.setenv(ci.CURSOR_SHIFT_ENV, "1")
     args = SimpleNamespace(load=str(tmp_path), start_rollout_id=0)

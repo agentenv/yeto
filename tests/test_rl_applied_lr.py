@@ -266,8 +266,8 @@ def test_legacy_decoupled_round_exhausting_the_budget_is_final(tmp_path):
 @pytest.mark.parametrize("flag", ["--lr-decay-style", "--lr-decay-iters", "--lr-warmup-iters", "--min-lr"])
 @pytest.mark.parametrize("form", ["split", "equals"])
 def test_legacy_rejects_lr_schedule_overrides_like_ports(flag, form):
-    from yeto.rl.engine.miles_adapter import config as mc
-    from yeto.rl.engine.miles_adapter.lr_schedule import LR_SCHEDULE_FLAGS
+    from yeto.rl.adapters.miles import config as mc
+    from yeto.rl.adapters.miles.lr_schedule import LR_SCHEDULE_FLAGS
     from yeto.rl.learner import _reject_lr_schedule_overrides
 
     extra = [flag, "5"] if form == "split" else [f"{flag}=5"]

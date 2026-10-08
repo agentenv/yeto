@@ -9,10 +9,10 @@ from yeto.rl.engine.algorithm import AlgorithmSpec
 import pytest
 
 from yeto.rl.contracts import InferencePublicationManifest, LocalStepReceipt
-from yeto.rl.engine.miles_adapter.publish import MilesPublisher, PublicationError
-from yeto.rl.engine.miles_adapter.rollout import PolicyTokenMismatch, policy_token
-from yeto.rl.engine.miles_adapter.state_plugin import APPLIED_LRS, GRAD_NORM, STEP_LOSSES
-from yeto.rl.engine.miles_adapter.trainer import MilesTrainerGroup, TrainStepError, batch_hash
+from yeto.rl.adapters.miles.publish import MilesPublisher, PublicationError
+from yeto.rl.adapters.miles.rollout import PolicyTokenMismatch, policy_token
+from yeto.rl.adapters.miles.state_plugin import APPLIED_LRS, GRAD_NORM, STEP_LOSSES
+from yeto.rl.adapters.miles.trainer import MilesTrainerGroup, TrainStepError, batch_hash
 from yeto.rl.engine.ports import GroupMetadata, Publisher, RolloutBatchHandle, TrainerGroup
 
 H = "a" * 64
@@ -293,7 +293,7 @@ def test_step_metrics_reports_applied_lrs_per_optimizer_step():
     t.train_step(handle())
     assert t.step_metrics().applied_lrs == (2e-5,)
     # a step count mismatch or rank disagreement is a failed train step
-    from yeto.rl.engine.miles_adapter.trainer import TrainStepError
+    from yeto.rl.adapters.miles.trainer import TrainStepError
 
     for lrs in (((),()), ((1e-5, 0.0), (1e-5, 0.0)), ((1e-5,), (0.0,))):
         with pytest.raises(TrainStepError):
@@ -309,8 +309,8 @@ def test_gspo_clip_fraction_reaches_step_metrics_from_miles_train_one_step_resul
     import types
 
     from yeto.rl.engine.algorithm import AdvantageSpec, AlgorithmSpec
-    from yeto.rl.engine.miles_adapter import state_plugin
-    from yeto.rl.engine.miles_adapter.state_plugin import STEP_LOSSES
+    from yeto.rl.adapters.miles import state_plugin
+    from yeto.rl.adapters.miles.state_plugin import STEP_LOSSES
 
     # loss dict keys exactly as Miles aggregates them (algo-2a G1 attempt6
     # gspo_s2 log line minus the "train/" prefix log_train_step adds)
@@ -368,7 +368,7 @@ def test_one_output_per_worker_of_the_single_cell_at_dp2():
 
 
 def _rank_actor_draining_state_plugin():
-    from yeto.rl.engine.miles_adapter import state_plugin
+    from yeto.rl.adapters.miles import state_plugin
 
     class RankActor(FakeActorGroup):
         async def run_plugin(self, fn_path, kwargs=None):
@@ -383,7 +383,7 @@ def _rank_actor_draining_state_plugin():
 def test_default_grpo_drains_step_losses_every_round_so_save_cut_is_not_refused(tmp_path):
     """Integ-s2 finding 1: default GRPO never consumed _STEP_LOSSES, so the list
     grew per round and save_cut refused with "per-step records not drained"."""
-    from yeto.rl.engine.miles_adapter import cut_plugin, state_plugin
+    from yeto.rl.adapters.miles import cut_plugin, state_plugin
 
     state_plugin._STEP_LOSSES.clear()
     actor = _rank_actor_draining_state_plugin()
@@ -410,8 +410,8 @@ def test_gspo_and_gmpo_clip_fraction_unchanged_by_unconditional_drain(variant, m
     import types
 
     from yeto.rl.engine.algorithm import AdvantageSpec, AlgorithmSpec
-    from yeto.rl.engine.miles_adapter import state_plugin
-    from yeto.rl.engine.miles_adapter.trainer import CLIPFRAC_LOSS_VARIANTS
+    from yeto.rl.adapters.miles import state_plugin
+    from yeto.rl.adapters.miles.trainer import CLIPFRAC_LOSS_VARIANTS
 
     fake = types.ModuleType("yeto.rl.algos.seq_adv")
     fake.clipfrac_from_losses = lambda steps, tokens=None: steps[0]["pg_clipfrac"]

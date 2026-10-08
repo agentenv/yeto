@@ -15,8 +15,8 @@ from yeto.rl.engine.bridges import LocalOnlySync
 from yeto.rl.engine.driver import EventTape, IslandDriver
 from yeto.rl.engine.execution_profile import ExecutionProfile
 from yeto.rl.engine.fake import FakeEngine, fake_capabilities
-from yeto.rl.engine.miles_adapter import rollout_meta_hook as hook
-from yeto.rl.engine.miles_adapter.rollout import handle_from_metadata
+from yeto.rl.adapters.miles import rollout_meta_hook as hook
+from yeto.rl.adapters.miles.rollout import handle_from_metadata
 
 KEY = hook.TITO_SESSION_MISMATCH_KEY
 RKEY = hook.TITO_SESSION_MISMATCH_RECORDS_KEY

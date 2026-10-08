@@ -11,14 +11,14 @@ from types import SimpleNamespace
 import pytest
 
 from yeto.rl.engine import run_config as rc
-from yeto.rl.engine.miles_adapter import lr_schedule as lrs
+from yeto.rl.adapters.miles import lr_schedule as lrs
 from yeto.rl.engine.algorithm import (
     BOUNDED_NONZERO_STD_FILTER,
     STOCK_NONZERO_STD_FILTER,
     AlgorithmSpec,
 )
-from yeto.rl.engine.miles_adapter import config as mc
-from yeto.rl.engine.miles_adapter.placement import PlacementRewriteError
+from yeto.rl.adapters.miles import config as mc
+from yeto.rl.adapters.miles.placement import PlacementRewriteError
 
 
 def make_config(*, colocated: bool = True, with_eval: bool = False, with_moe: bool = False, **top):
@@ -306,8 +306,8 @@ def test_default_cell_count_without_miles():
 
 def test_import_is_cheap():
     code = (
-        "import sys, yeto.rl.engine.miles_adapter as m\n"
-        "from yeto.rl.engine.miles_adapter import config, rollout, rollout_meta_hook, trainer,"
+        "import sys, yeto.rl.adapters.miles as m\n"
+        "from yeto.rl.adapters.miles import config, rollout, rollout_meta_hook, trainer,"
         " state, state_plugin, publish, placement\n"
         "bad=[k for k in ('torch','ray','miles','megatron','sglang') if k in sys.modules]\n"
         "assert not bad, bad\n"
@@ -504,7 +504,7 @@ def test_stock_codex_append_roles_resolve_by_tito_family(tito_model, ok):
     from types import SimpleNamespace
 
     from yeto.rl import CODEX_OPENENV_AGENT
-    from yeto.rl.engine.miles_adapter.config import LEAF_POLICY
+    from yeto.rl.adapters.miles.config import LEAF_POLICY
 
     check = LEAF_POLICY["agent.tito_allowed_append_roles"]
     agent = SimpleNamespace(custom_agent_function_path=CODEX_OPENENV_AGENT, tito_model=tito_model)

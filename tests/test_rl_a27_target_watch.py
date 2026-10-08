@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from yeto.rl.engine.miles_adapter.publish import (
+from yeto.rl.adapters.miles.publish import (
     MilesPublisher,
     PublicationError,
     RayTargetLiveness,

@@ -216,8 +216,8 @@ def test_run_miles_fn8s_reaches_ports_argv_without_megatron(snapshots):
         from fp_fn import fnrun_cli
         from yeto.rl import learner
         from yeto.rl.engine import run_config
-        from yeto.rl.engine.miles_adapter import config as mac
-        from yeto.rl.engine.miles_adapter import state as mas
+        from yeto.rl.adapters.miles import config as mac
+        from yeto.rl.adapters.miles import state as mas
 
         mp = _m.MonkeyPatch()
         run = island_run(tuple(fnrun_cli("fn8s")), mp)

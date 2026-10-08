@@ -68,8 +68,8 @@ def spec_fork_flags(spec_json: str | None) -> list[str]:
     if not spec_json:
         return []
     from yeto.rl.engine.algorithm import AlgorithmSpec
-    from yeto.rl.engine.miles_adapter import algo_flag_rows as rows
-    from yeto.rl.engine.miles_adapter.algorithm_flags import algorithm_argv
+    from yeto.rl.adapters.miles import algo_flag_rows as rows
+    from yeto.rl.adapters.miles.algorithm_flags import algorithm_argv
 
     spec = AlgorithmSpec.from_dict(json.loads(spec_json))
     argv = (algorithm_argv(spec) + rows.critic_argv(spec)

@@ -19,7 +19,7 @@ from types import SimpleNamespace
 import pytest
 
 import reward_equivalence_cases as cases
-from yeto.rl.engine.miles_adapter import rewards as miles_rewards
+from yeto.rl.adapters.miles import rewards as miles_rewards
 from yeto.rl.rewards import FilterDecision, RewardResult, Trajectory, builtin, registry
 
 REPO = Path(__file__).resolve().parents[1]
@@ -64,7 +64,7 @@ def test_rewards_package_imports_no_framework():
                 names = [node.module]
             for name in names:
                 assert name.split(".")[0] not in {"miles", "verl", "megatron", "sglang", "torch"}, path
-                assert not name.startswith(("yeto.rl.engine.miles_adapter", "yeto.rl.miles")), path
+                assert not name.startswith(("yeto.rl.adapters.miles", "yeto.rl.miles")), path
 
 
 # -- 3.2 equivalence with the pre-refactor entry points --------------------------
@@ -211,7 +211,7 @@ def test_custom_reward_via_miles_equals_direct_call():
 
     assert "ends_with_label" in registry.registered_names()
     path = miles_rewards.miles_custom_rm_path("ends_with_label")
-    assert path == "yeto.rl.engine.miles_adapter.rewards.ends_with_label"
+    assert path == "yeto.rl.adapters.miles.rewards.ends_with_label"
     by_ref = miles_rewards.miles_custom_rm_path("examples.custom_reward.reward:ends_with_label")
     for p in (path, by_ref):
         module, _, attr = p.rpartition(".")  # what Miles' load_function does

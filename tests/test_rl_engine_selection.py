@@ -326,7 +326,7 @@ def test_run_miles_rejects_ports_before_loading_anything(extra_argv, reason, mon
 
 
 def test_run_miles_ports_refuses_a_miles_pin_without_run_plugin(monkeypatch):
-    from yeto.rl.engine.miles_adapter.state import PolicyStateError
+    from yeto.rl.adapters.miles.state import PolicyStateError
 
     group = types.ModuleType("miles.ray.train.group")
     group.TrainerController = type("TrainerController", (), {})
@@ -504,7 +504,7 @@ class _Actor:
         self.calls = []
 
     async def run_plugin(self, fn_path, kwargs=None):
-        from yeto.rl.engine.miles_adapter import state_plugin
+        from yeto.rl.adapters.miles import state_plugin
 
         kwargs = kwargs or {}
         if fn_path == state_plugin.EXPORT_STATE:
@@ -556,11 +556,11 @@ def test_ports_composition_root_over_stubbed_upstream(tmp_path, monkeypatch):
     from yeto.rl.engine.algorithm import AlgorithmSpec
     from yeto.rl.engine.bridges import LocalOnlySync
     from yeto.rl.engine.driver import EventTape
-    from yeto.rl.engine.miles_adapter import LoopRunner
-    from yeto.rl.engine.miles_adapter import rollout_meta_hook as hook
-    from yeto.rl.engine.miles_adapter.entry import compose_island, miles_capabilities
-    from yeto.rl.engine.miles_adapter.placement import MilesPlacement, PlacementRequest
-    from yeto.rl.engine.miles_adapter.rollout import DirMetadataSource
+    from yeto.rl.adapters.miles import LoopRunner
+    from yeto.rl.adapters.miles import rollout_meta_hook as hook
+    from yeto.rl.adapters.miles.entry import compose_island, miles_capabilities
+    from yeto.rl.adapters.miles.placement import MilesPlacement, PlacementRequest
+    from yeto.rl.adapters.miles.rollout import DirMetadataSource
     from tests.test_rl_miles_adapter_rollout import Call, Sample, Span
     from yeto.rl.core import canonical_state
 
@@ -644,7 +644,7 @@ def test_ports_composition_root_over_stubbed_upstream(tmp_path, monkeypatch):
 
 
 def test_run_miles_ports_never_starts_the_legacy_external_router(monkeypatch):
-    from yeto.rl.engine.miles_adapter.state import PolicyStateError
+    from yeto.rl.adapters.miles.state import PolicyStateError
 
     group = types.ModuleType("miles.ray.train.group")
     group.TrainerController = type("TrainerController", (), {})

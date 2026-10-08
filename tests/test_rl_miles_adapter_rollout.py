@@ -9,8 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from yeto.rl.engine.miles_adapter import rollout_meta_hook as hook
-from yeto.rl.engine.miles_adapter.rollout import (
+from yeto.rl.adapters.miles import rollout_meta_hook as hook
+from yeto.rl.adapters.miles.rollout import (
     DirMetadataSource,
     MilesRolloutPool,
     PolicyTokenMismatch,
@@ -226,7 +226,7 @@ def test_generate_publishes_token_for_rollout_side_filter(tmp_path, monkeypatch)
 
 
 def test_ports_argv_installs_the_buffer_filter():
-    from yeto.rl.engine.miles_adapter import config as mc
+    from yeto.rl.adapters.miles import config as mc
 
     assert "--buffer-filter-path" in mc.ADAPTER_OWNED_FLAGS
     assert mc.POLICY_BUFFER_FILTER_PATH.endswith("rollout_meta_hook.policy_buffer_filter")

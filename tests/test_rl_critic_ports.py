@@ -14,18 +14,18 @@ from yeto.rl.engine.bridges import LocalOnlySync
 from yeto.rl.engine.capabilities import CapabilityMismatch
 from yeto.rl.engine.driver import EventTape, IslandDriver
 from yeto.rl.engine.fake import FakeEngine, fake_capabilities
-from yeto.rl.engine.miles_adapter import algorithm_flags as af
-from yeto.rl.engine.miles_adapter.entry import miles_capabilities, receipt_role_family
-from yeto.rl.engine.miles_adapter.rollout import policy_token
-from yeto.rl.engine.miles_adapter.state_plugin import (
+from yeto.rl.adapters.miles import algorithm_flags as af
+from yeto.rl.adapters.miles.entry import miles_capabilities, receipt_role_family
+from yeto.rl.adapters.miles.rollout import policy_token
+from yeto.rl.adapters.miles.state_plugin import (
     CRITIC_RECORDERS,
     CRITIC_STATE_SUMMARY,
     GRAD_NORM,
     STEP_LOSSES,
     explained_variance,
 )
-from yeto.rl.engine.miles_adapter.trainer import MilesTrainerGroup, TrainStepError
-from yeto.rl.engine.miles_adapter.trainer_rebuild import SwappableActor, swap_critic
+from yeto.rl.adapters.miles.trainer import MilesTrainerGroup, TrainStepError
+from yeto.rl.adapters.miles.trainer_rebuild import SwappableActor, swap_critic
 from yeto.rl.engine.ports import GroupMetadata, RolloutBatchHandle
 from yeto.rl.local_learner import ComponentIdentity, ParameterLayout, ParameterSpec
 
@@ -304,7 +304,7 @@ def test_value_metrics_recorder_reports_step_level_ev_at_micro_batch_1(monkeypat
     import sys
     import types
 
-    from yeto.rl.engine.miles_adapter import state_plugin as sp
+    from yeto.rl.adapters.miles import state_plugin as sp
 
     losses_mod = types.ModuleType("miles.backends.training_utils.loss_hub.losses")
     model_mod = types.ModuleType("miles.backends.megatron_utils.model")
@@ -351,7 +351,7 @@ def test_value_metrics_recorder_reports_step_level_ev_at_micro_batch_1(monkeypat
                                   torch.tensor([0.2, 0.4, -0.5, 0.1]))
     assert record["metrics"]["explained_variance"] == pytest.approx(expected)
     assert record["metrics"]["value_loss"] == pytest.approx(0.5)
-    from yeto.rl.engine.miles_adapter.trainer import critic_round_metrics
+    from yeto.rl.adapters.miles.trainer import critic_round_metrics
 
     metrics = critic_round_metrics([record], 1.25)
     assert metrics["critic/explained_variance"] == pytest.approx(expected)

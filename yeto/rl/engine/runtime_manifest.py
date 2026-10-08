@@ -62,7 +62,7 @@ class RuntimeDescription:
 # Backend name -> "module:attribute" of its RuntimeDescription, resolved by name so
 # the core never imports an adapter (the command line keeps Miles as its default).
 BACKENDS: Mapping[str, str] = {
-    "miles": "yeto.rl.engine.miles_adapter.runtime_manifest:MILES_RUNTIME",
+    "miles": "yeto.rl.adapters.miles.runtime_manifest:MILES_RUNTIME",
 }
 DEFAULT_BACKEND = "miles"
 

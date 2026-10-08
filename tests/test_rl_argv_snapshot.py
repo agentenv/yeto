@@ -26,9 +26,9 @@ import pytest
 
 from yeto.rl import learner as rl_learner
 from yeto.rl.engine import run_config as rc
-from yeto.rl.engine.miles_adapter import lr_schedule as lrs
+from yeto.rl.adapters.miles import lr_schedule as lrs
 from yeto.rl.engine.algorithm import AlgorithmSpec
-from yeto.rl.engine.miles_adapter import config as mc
+from yeto.rl.adapters.miles import config as mc
 
 import test_rl_launcher as launcher_tests
 

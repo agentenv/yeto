@@ -452,7 +452,7 @@ def rl_island_layout(args, spec) -> tuple[int, int, dict[str, tuple[int, ...]]] 
     slots = getattr(args, "rl_elastic_initial_placement_slots", None)
     if slots is None or getattr(args, "rl_placement", "colocated") != "fixed-partition":
         return None
-    from .rl.engine.miles_adapter.placement import PlacementRequest
+    from .rl.adapters.miles.placement import PlacementRequest
     from .rl.engine.multinode import Topology, TopologyError, trainer_layout
 
     rollout = int(getattr(args, "rollout_num_gpus", 0) or 0)
@@ -1587,7 +1587,7 @@ def _prepare_ports_algorithm(args, rl_engine: str) -> None:
                 sync_preset=getattr(args, "rl_sync_preset", "strict-avg"),
             )
         )
-        from .rl.engine.miles_adapter.entry import miles_capabilities, with_partitioned_serial
+        from .rl.adapters.miles.entry import miles_capabilities, with_partitioned_serial
 
         partitioned = getattr(args, "rl_placement", "colocated") == "fixed-partition"
         capabilities = miles_capabilities(
@@ -1838,7 +1838,7 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
     sample_s = getattr(args, "rl_resource_sample_interval", None)
     if sample_s is not None and (rl_engine != "ports" or sample_s < 0):
         raise ValueError("--rl-resource-sample-interval needs --rl-engine ports and a value >= 0")
-    from yeto.rl.engine.miles_adapter.elastic_hook import check_recommend_flags
+    from yeto.rl.adapters.miles.elastic_hook import check_recommend_flags
     check_recommend_flags(args)
     dropout = getattr(args, "rl_lora_dropout", None)
     if dropout is not None and (rl_engine != "ports" or not 0.0 <= dropout < 1.0):
@@ -1989,7 +1989,7 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         flags += " --rl-observe-timeline"
     if getattr(args, "rl_resource_sample_interval", None) is not None:
         flags += f" --rl-resource-sample-interval {float(args.rl_resource_sample_interval)!r}"
-    from yeto.rl.engine.miles_adapter.elastic_hook import recommend_flags
+    from yeto.rl.adapters.miles.elastic_hook import recommend_flags
     flags += recommend_flags(args)
     if getattr(args, "rl_deterministic_trainer", False):
         flags += " --rl-deterministic-trainer"
@@ -2037,7 +2037,7 @@ def _ports_infra_flags(args) -> tuple[str, str]:
                 flags += f" {flag} {value!r}"
         delay = getattr(args, "rl_test_inject_start_delay_s", None)
         if delay is not None:
-            from .rl.engine.miles_adapter.rollout import INJECT_START_DELAY_ENV
+            from .rl.adapters.miles.rollout import INJECT_START_DELAY_ENV
 
             prelude += f"export {INJECT_START_DELAY_ENV}={float(delay)!r}\n"
         for name, _flag, env in _ELASTIC_TEST_EXPORTS:
@@ -2052,7 +2052,7 @@ def _ports_infra_flags(args) -> tuple[str, str]:
             args.rl_learner_launch_prefix = "yeto_rl_restart_loop "
         block = getattr(args, "rl_test_inject_update_weights_block_s", None)
         if block is not None:
-            from .rl.engine.miles_adapter.publish import INJECT_UPDATE_BLOCK_ENV
+            from .rl.adapters.miles.publish import INJECT_UPDATE_BLOCK_ENV
 
             prelude += f"export {INJECT_UPDATE_BLOCK_ENV}={float(block)!r}\n"
         if getattr(args, "rl_elastic_attestation_json", None):

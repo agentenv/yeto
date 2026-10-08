@@ -10,9 +10,9 @@ import torch
 
 from tests.rl_cut_fakes import GBS, make_rank, params, train_step
 from yeto.rl.engine.cut import AlgorithmIdentity, CutError, CutProgress, RestoreExpectation
-from yeto.rl.engine.miles_adapter import LoopRunner
-from yeto.rl.engine.miles_adapter.trainer import CutContext, MilesTrainerGroup
-from yeto.rl.engine.miles_adapter.trainer_rebuild import (
+from yeto.rl.adapters.miles import LoopRunner
+from yeto.rl.adapters.miles.trainer import CutContext, MilesTrainerGroup
+from yeto.rl.adapters.miles.trainer_rebuild import (
     RecoveryRequired,
     SwappableActor,
     rebuild_preconditions,
@@ -103,7 +103,7 @@ def test_missing_data_cursor_is_refused(tmp_path):
 def test_restore_checks_every_rank_digest(tmp_path, monkeypatch):
     rank = _trained_rank()
     _trainer(RankGroup([rank])).save_cut(epoch=1, context=_context(tmp_path))
-    from yeto.rl.engine.miles_adapter import cut_plugin
+    from yeto.rl.adapters.miles import cut_plugin
 
     real = cut_plugin._restore
     monkeypatch.setattr(cut_plugin, "_restore", lambda *a, **k: {**real(*a, **k), "state_digest": "x"})
@@ -282,7 +282,7 @@ def test_context_is_checked_before_any_rank_writes(tmp_path):
 
 
 def test_missing_optimizer_coverage_is_refused(tmp_path, monkeypatch):
-    from yeto.rl.engine.miles_adapter import cut_plugin
+    from yeto.rl.adapters.miles import cut_plugin
 
     real = cut_plugin._save
     monkeypatch.setattr(cut_plugin, "_save", lambda *a, **k: {**real(*a, **k), "optimizer_names": ["lora_A"]})
@@ -328,7 +328,7 @@ def test_swappable_actor_forwards():
 def test_digest_mismatch_names_the_differing_components(tmp_path, monkeypatch):
     rank = _trained_rank()
     _trainer(RankGroup([rank])).save_cut(epoch=1, context=_context(tmp_path))
-    from yeto.rl.engine.miles_adapter import cut_plugin
+    from yeto.rl.adapters.miles import cut_plugin
 
     real = cut_plugin._snapshot
     calls = []
@@ -347,7 +347,7 @@ def test_digest_mismatch_names_the_differing_components(tmp_path, monkeypatch):
 def test_rank_diff_reports_leaf_values(tmp_path, monkeypatch):
     rank = _trained_rank()
     _trainer(RankGroup([rank])).save_cut(epoch=1, context=_context(tmp_path))
-    from yeto.rl.engine.miles_adapter import cut_plugin
+    from yeto.rl.adapters.miles import cut_plugin
 
     fresh = make_rank(1)
     real_load = fresh._yeto_cut_backend.load_optimizer
@@ -364,7 +364,7 @@ def test_rank_diff_reports_leaf_values(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("where", ["load", "after"])
 def test_optimizer_diff_splits_load_from_later_changes(tmp_path, where, monkeypatch):
-    from yeto.rl.engine.miles_adapter.cut_plugin import RESTORE_DIAGNOSTICS_ENV
+    from yeto.rl.adapters.miles.cut_plugin import RESTORE_DIAGNOSTICS_ENV
 
     monkeypatch.setenv(RESTORE_DIAGNOSTICS_ENV, "1")
     rank = _trained_rank()
@@ -410,7 +410,7 @@ def test_reading_a_fresh_optimizer_must_not_break_the_restore(tmp_path, side_eff
     fresh = make_rank(1)
     fresh._yeto_cut_backend = LazyStateDistOptBackend(side_effect_free=side_effect_free)
     group = RankGroup([fresh])
-    from yeto.rl.engine.miles_adapter.cut_plugin import state_summary
+    from yeto.rl.adapters.miles.cut_plugin import state_summary
 
     state_summary(fresh)  # e.g. the harness' "state unchanged" read on the fresh trainer
     trainer = _trainer(group)
@@ -424,7 +424,7 @@ def test_reading_a_fresh_optimizer_must_not_break_the_restore(tmp_path, side_eff
 
 
 def test_after_load_diagnostics_are_opt_in(tmp_path, monkeypatch):
-    from yeto.rl.engine.miles_adapter.cut_plugin import RESTORE_DIAGNOSTICS_ENV
+    from yeto.rl.adapters.miles.cut_plugin import RESTORE_DIAGNOSTICS_ENV
 
     monkeypatch.delenv(RESTORE_DIAGNOSTICS_ENV, raising=False)
     rank = _trained_rank()

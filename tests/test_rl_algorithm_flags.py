@@ -16,8 +16,8 @@ from yeto.rl.engine.algorithm import (
     PluginRef,
     SamplingSpec,
 )
-from yeto.rl.engine.miles_adapter import algorithm_flags as af
-from yeto.rl.engine.miles_adapter import config as mc
+from yeto.rl.adapters.miles import algorithm_flags as af
+from yeto.rl.adapters.miles import config as mc
 from test_rl_miles_adapter_config import make_config, sub
 
 REF = PluginRef.from_path("yeto.rl.engine.algorithm.plugin_source_sha256")

@@ -57,7 +57,7 @@ def test_dry_run_writes_every_run_in_plan_order(tmp_path, monkeypatch):
 
 
 def test_harness_plan_is_valid_for_the_in_learner_harness():
-    from yeto.rl.engine.miles_adapter.e2_harness import plan_problems
+    from yeto.rl.adapters.miles.e2_harness import plan_problems
 
     for run in tool.plan_runs():
         if run.harness:

@@ -309,7 +309,7 @@ class LrSchedule:
 
 
 # The Miles/Megatron flags of a schedule (``--lr-decay-style`` ...) are the
-# Miles adapter's translation: yeto.rl.engine.miles_adapter.lr_schedule
+# Miles adapter's translation: yeto.rl.adapters.miles.lr_schedule
 # (decoupling 4.1). The schedule decision itself stays here.
 
 

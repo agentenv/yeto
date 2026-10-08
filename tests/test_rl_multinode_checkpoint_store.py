@@ -186,7 +186,7 @@ def test_store_flag_flows_from_cli_to_the_learner_and_needs_elastic(tmp_path, mo
 def test_build_elastic_passes_the_store_to_the_controller(tmp_path):
     from test_rl_infra_switches import _elastic_files
 
-    from yeto.rl.engine.miles_adapter.elastic_wiring import build_elastic
+    from yeto.rl.adapters.miles.elastic_wiring import build_elastic
 
     res, _ = _elastic_files(tmp_path)
     wiring = build_elastic(state_dir=tmp_path / "state", resources=res, attestation=None, profile=None,

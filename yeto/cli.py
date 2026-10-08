@@ -405,7 +405,7 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     rl.add_argument("--rl-resource-sample-interval", type=float, default=None, metavar="SECONDS",
                     help="ports: NVML rl_resource_sample period forwarded to the learner "
                     "(default: learner default, 60 s with --rl-observe-timeline; 0 = off)")
-    from yeto.rl.engine.miles_adapter.elastic_hook import add_recommend_arguments
+    from yeto.rl.adapters.miles.elastic_hook import add_recommend_arguments
     add_recommend_arguments(rl)  # D2 elastic hook (elastic-ops.md)
     rl.add_argument("--rl-elastic-tool-wait-board", action="store_true",
                     help="--rl-elastic: feed the island's tool-wait board into the drain check "
