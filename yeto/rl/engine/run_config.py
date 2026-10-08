@@ -483,23 +483,16 @@ def select_gdn_recipe(provider) -> GdnRecipe:
     )
 
 
+def _rules():
+    """Backend-specific checks of the run (decoupling 4.2): Miles -> adapters/miles/run_config_rules."""
+    from . import backends
+
+    return backends.module("run_config_rules", backends.DEFAULT_BACKEND)
+
+
 def _resolve_ref_load(args, model_path) -> str:
-    configured = getattr(args, "megatron_ref_load", None)
-    if configured is None:
-        return str(model_path)
-    configured_path = Path(configured).expanduser()
-    if not configured_path.is_absolute():
-        raise ValueError("--megatron-ref-load must be an absolute local path")
-    if configured_path.is_symlink() or not configured_path.is_dir():
-        raise ValueError("--megatron-ref-load must be a real local directory")
-    release_marker = configured_path / "latest_checkpointed_iteration.txt"
-    try:
-        marker = release_marker.read_text(encoding="utf-8").strip()
-    except OSError as exc:
-        raise ValueError("--megatron-ref-load has no readable release marker") from exc
-    if release_marker.is_symlink() or marker != "release":
-        raise ValueError("--megatron-ref-load is not a release checkpoint")
-    return str(configured_path.resolve())
+    """Reference-model path; the checkpoint-format rules belong to the backend (4.2)."""
+    return _rules().resolve_ref_load(args, model_path)
 
 
 def _validate_callable_spec(spec: str) -> None:
@@ -580,16 +573,15 @@ def resolve_rl_run_config(
     tensor_parallel = getattr(args, "tensor_parallel", 1)
     pipeline_parallel = getattr(args, "pipeline_parallel", 1)
     model_parallel = tensor_parallel * pipeline_parallel
-    if tensor_parallel <= 0 or pipeline_parallel <= 0 or actor_gpus % model_parallel:
-        raise ValueError("Miles actor world must be divisible by TP*PP")
+    rules = _rules()
+    rules.check_trainer_parallel(actor_gpus, tensor_parallel, pipeline_parallel)
     is_moe = getattr(provider, "num_moe_experts", None) is not None
     expert_parallel = getattr(args, "expert_parallel", None) or (
         actor_gpus if is_moe else 1
     )
     if not is_moe and expert_parallel != 1:
         raise ValueError("EP>1 requires a MoE model")
-    if actor_gpus % expert_parallel:
-        raise ValueError("expert parallelism must divide Miles actor world size")
+    rules.check_expert_parallel(actor_gpus, expert_parallel)
     fn_variant = qwen3_8_next_variant(args, provider)
     # the native Flash-Next plugin shards routed-expert LoRA by EP itself
     if fn_variant is None and is_moe and expert_parallel > 1 and args.lora_targets == "all-linear":
@@ -679,8 +671,7 @@ def resolve_rl_run_config(
     ref_load = (_resolve_ref_load(args, model_path) if verify_ref_load
                 else (getattr(args, "megatron_ref_load", None) or str(model_path)))
     global_batch = args.groups_per_round * args.samples_per_group // args.optimizer_steps
-    if global_batch % data_parallel:
-        raise ValueError("Miles global batch must divide evenly across DP ranks")
+    rules.check_global_batch(global_batch, data_parallel)
 
     if recipe == RECIPE_DEEPSEEK_V4_FLASH:
         expected_lora_targets = "attention" if expert_full else "attention-routed-experts"

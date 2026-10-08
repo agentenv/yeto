@@ -102,3 +102,23 @@ def test_cli_rl_backend_flag_and_launcher_refuses_unregistered():
     launcher.resolve_default_rl_image(args)
     assert launcher._rl_backend_module(args, "placement").__name__ == \
         "yeto.rl.adapters.miles.placement"
+
+
+def test_miles_only_run_config_checks_live_in_the_adapter():
+    """4.2: ref-load release marker and TP*PP / EP / DP divisibility are Miles rules."""
+    from pathlib import Path
+
+    import yeto.rl.engine.run_config as rc
+    from yeto.rl.adapters.miles import run_config_rules as rules
+
+    core = Path(rc.__file__).read_text()
+    for text in ("release marker", "Miles actor world must be divisible",
+                 "expert parallelism must divide Miles", "Miles global batch must divide"):
+        assert text not in core and text in Path(rules.__file__).read_text()
+    with pytest.raises(ValueError, match="TP\\*PP"):
+        rules.check_trainer_parallel(6, 4, 1)
+    with pytest.raises(ValueError, match="expert parallelism"):
+        rules.check_expert_parallel(8, 3)
+    with pytest.raises(ValueError, match="global batch"):
+        rules.check_global_batch(10, 4)
+    assert rules.resolve_ref_load(argparse.Namespace(megatron_ref_load=None), "/m") == "/m"
