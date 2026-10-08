@@ -153,6 +153,52 @@ def prepare_data(data: str, revision: str | None, root: Path, *, val_rows: int =
     return out["train"], out["test"]
 
 
+MIN_RAY_CPUS = 32  # logical scheduling slots verl needs on one GPU (TQ storage units, agent/reward workers, ...)
+
+
+def _ray_resources(address: str) -> dict:
+    code = ("import json, ray; ray.init(address=%r, logging_level='ERROR'); "
+            "print('YETO_RAY_RES ' + json.dumps(ray.cluster_resources())); ray.shutdown()" % address)
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=180).stdout
+    for line in out.splitlines():
+        if line.startswith("YETO_RAY_RES "):
+            return json.loads(line[len("YETO_RAY_RES "):])
+    return {}
+
+
+def ensure_ray_cpus(min_cpus: int = MIN_RAY_CPUS) -> dict:
+    """verl needs more Ray CPU slots than a small container reports.
+
+    S17 V2 a: the island-local Ray the launcher starts saw 8 CPUs on one Modal host
+    and 24 on another; with 8, verl's transfer-queue storage units took every slot and
+    the trainer workers never scheduled (GPU 0/1 used, no error).  Ray CPUs are only
+    scheduling tokens here, so when the cluster reports fewer than ``min_cpus`` the
+    island-local Ray (the launcher's, same temp dir, single node) is restarted with
+    ``--num-cpus min_cpus``.  Only inside a Modal container (no SkyPilot runtime Ray
+    there); elsewhere it is reported, not changed.
+    """
+    address = os.environ.get("RAY_ADDRESS")
+    if not address:
+        return {"skipped": "no RAY_ADDRESS"}
+    before = _ray_resources(address)
+    info = {"before": before}
+    if before.get("CPU", 0) >= min_cpus:
+        return info
+    if not os.environ.get("MODAL_TASK_ID"):
+        info["skipped"] = "not a Modal container; Ray left as is"
+        return info
+    host, _, port = address.rpartition(":")
+    temp = os.path.expanduser("~/miles-ray")
+    subprocess.run(f'pkill -f "{temp}/"; sleep 3; pkill -KILL -f "{temp}/"; sleep 1', shell=True)
+    gpus = int(before.get("GPU", 0))
+    cmd = (f'ray start --head --node-ip-address={host} --port={port} --num-cpus={min_cpus} '
+           f'--num-gpus={gpus} --include-dashboard=false --temp-dir={temp}')
+    info["restart"] = cmd
+    info["restart_rc"] = subprocess.run(cmd, shell=True).returncode
+    info["after"] = _ray_resources(address)
+    return info
+
+
 def main(argv=None) -> int:
     args, ignored = parse_args(sys.argv[1:] if argv is None else argv)
     OUTPUT.mkdir(parents=True, exist_ok=True)
@@ -168,6 +214,13 @@ def main(argv=None) -> int:
     if manifest["problems"]:
         print(f"[yeto-verl] runtime check failed: {manifest['problems']}", file=sys.stderr, flush=True)
         return 2
+
+    ray_info = ensure_ray_cpus()
+    (OUTPUT / f"verl-ray-{lid}.json").write_text(json.dumps(ray_info, indent=1))
+    print(f"[yeto-verl] island {lid} ray {json.dumps(ray_info)}", flush=True)
+    if ray_info.get("after") is not None and ray_info["after"].get("CPU", 0) < MIN_RAY_CPUS:
+        print("[yeto-verl] Ray restart did not give enough CPU slots", file=sys.stderr, flush=True)
+        return 3
 
     from huggingface_hub import snapshot_download
 

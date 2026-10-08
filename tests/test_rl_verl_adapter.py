@@ -363,3 +363,17 @@ def test_verl_capabilities_accept_default_and_tis_specs_only():
     with pytest.raises(CapabilityMismatch):
         caps.check(layout="lora", placement="fixed-partition", execution_mode="colocated-serial",
                    algorithm=AlgorithmSpec())
+
+
+def test_ray_cpu_guard_only_acts_inside_modal(monkeypatch):
+    from yeto.rl.adapters.verl import island_entry
+
+    monkeypatch.delenv("RAY_ADDRESS", raising=False)
+    assert island_entry.ensure_ray_cpus() == {"skipped": "no RAY_ADDRESS"}
+    monkeypatch.setenv("RAY_ADDRESS", "127.0.0.1:6379")
+    monkeypatch.delenv("MODAL_TASK_ID", raising=False)
+    monkeypatch.setattr(island_entry, "_ray_resources", lambda address: {"CPU": 8.0, "GPU": 1.0})
+    out = island_entry.ensure_ray_cpus()
+    assert out["skipped"].startswith("not a Modal container") and "restart" not in out
+    monkeypatch.setattr(island_entry, "_ray_resources", lambda address: {"CPU": 64.0, "GPU": 1.0})
+    assert "skipped" not in island_entry.ensure_ray_cpus() and "restart" not in island_entry.ensure_ray_cpus()
