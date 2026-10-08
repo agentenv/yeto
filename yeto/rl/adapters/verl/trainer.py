@@ -255,4 +255,5 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
               "final_policy_tensor_hash": state.policy_tensor_hash(),
               "seconds": time.time() - t0}
     tape.append({"event": "rl_verl_island_done", **result})
+    tape.append({"event": "rl_learner_finalized"})  # launcher: a complete island tape ends with this
     return result

@@ -22,7 +22,7 @@ import sys
 import ray
 
 PLAN_ENV = "YETO_VERL_PLAN"
-FORWARD_ENV_PREFIXES = ("YETO_", "HF_", "PYTHONPATH", "SYNCER_ADDR")
+FORWARD_ENV_PREFIXES = ("YETO_", "HF_", "VERL_FILE_LOGGER", "PYTHONPATH", "SYNCER_ADDR")
 
 
 @ray.remote(num_cpus=1)

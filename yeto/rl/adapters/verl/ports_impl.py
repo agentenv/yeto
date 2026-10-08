@@ -199,10 +199,12 @@ class VerlRolloutPool:
         batch = t._balance_batch(batch, metrics=metrics)
         gen_seconds = time.monotonic() - started
         data = tq.kv_batch_get(keys=batch.keys, partition_id=batch.partition_id,
-                               select_fields=["uid", "rm_scores", "response_mask"])
+                               select_fields=["uid", "rm_scores", "response_mask", "prompts"])
         mask_nested = data["response_mask"]
         padded = data.to_padded_tensor()
         uids = [str(u) for u in padded.pop("uid").tolist()]
+        prompt_sha = hashlib.sha256(padded["prompts"].cpu().numpy().tobytes()).hexdigest()
+        gen_steps = sorted({int(tag.get("global_steps", -1)) for tag in batch.tags})
         rewards = padded["rm_scores"].float().sum(-1).tolist()
         lengths = padded["response_mask"].float().sum(-1).tolist()
         del mask_nested
@@ -231,7 +233,9 @@ class VerlRolloutPool:
         isl.append_jsonl(f"verl-rollout-{isl.learner_id}.jsonl", {
             "rollout_id": rollout_id, "policy_token": token, "groups": len(metas),
             "samples": len(uids), "reward_mean": float(np.mean(rewards)) if rewards else None,
-            "gen_seconds": gen_seconds, "expected_policy_version": expected_policy_version})
+            "gen_seconds": gen_seconds, "expected_policy_version": expected_policy_version,
+            "prompts_sha256": prompt_sha, "sample_submit_global_steps": gen_steps,
+            "trainer_global_step": t.global_steps, "rewards": rewards, "uids": uids})
         return RolloutBatchHandle(
             rollout_id=rollout_id, policy_version=version, policy_hash=digest,
             groups=tuple(metas), completed=len(metas), aborted=0, payload=batch,
@@ -448,13 +452,11 @@ def criteria_from_trainer_batch(isl: VerlIsland, kv_batch) -> None:
         except mismatch_criteria.Uncalibrated as exc:
             crit["alarms"] = None
             crit["uncalibrated"] = str(exc)
-        dump_dir = isl.out / "dump"
-        dump_dir.mkdir(exist_ok=True)
         torch.save({"step": step, "old_log_probs": train_lp.float().cpu(),
                     "rollout_log_probs": infer_lp.float().cpu(),
                     "response_mask": mask.cpu(), "responses": padded["responses"].cpu(),
                     "dtypes": [str(train_lp.dtype), str(infer_lp.dtype)]},
-                   dump_dir / f"step{step:03d}.pt")
+                   isl.out / f"verl-dump-{isl.learner_id}-step{step:03d}.pt")  # top level: synced by the tape
     except Exception as exc:  # noqa: BLE001 - reported as a failed criterion, training continues
         crit = {"error": f"{type(exc).__name__}: {exc}", "alarms": ["criteria_unavailable"]}
     crit["global_step"] = step
