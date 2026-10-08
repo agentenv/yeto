@@ -38,11 +38,15 @@
 
 ## 2. 本周：Modal 单卡
 
-- [ ] 2.1 推理池 + 训练组接真 verl（v1 训练入口，参照 VERL-MODAL-CHECK-S16.md §7.1）。验收：driver 跑 3 步，tape 有 rl_publication / rl_policy_apply，各组 reward/token 非空。
-- [ ] 2.2 策略状态 export/apply + 发布器（内存热更新 TensorLoRARequest）+ 自写推理进程扩展方法按规范名读回校验（"推理端已收到这一版"层）。验收：export→apply→export 逐位相等；读回校验和一致；故意改一个张量被查出；切到落盘方式同样通过。
-- [ ] 2.3 TIS(下界 0) 与 IcePop 映射到 verl 原生修正。验收：开 TIS 上界 2.0 跑通，tis 指标落 tape。
+- [x] 2.1 推理池 + 训练组接真 verl（v1 训练入口，参照 VERL-MODAL-CHECK-S16.md §7.1）。验收：driver 跑 3 步，tape 有 rl_publication / rl_policy_apply，各组 reward/token 非空。
+  - 2026-10-08 V1（s1-runs/s17-verl-v1-20261008c，judgment.json 全过）：`yeto launch --rl-backend verl` → verl island_entry → verl_main（yeto TaskRunner）→ 中立 IslandDriver + verl 五端口（ports_impl）；5 轮，tape 有 rl_publication ×6、rl_round_trained ×5，每轮 32 组 reward/token 非空。rl_policy_apply 在单岛不同步模式下不出现（LocalOnlySync 不写回），V2 两岛覆盖。
+- [x] 2.2 策略状态 export/apply + 发布器（内存热更新 TensorLoRARequest）+ 自写推理进程扩展方法按规范名读回校验（"推理端已收到这一版"层）。验收：export→apply→export 逐位相等；读回校验和一致；故意改一个张量被查出；切到落盘方式同样通过。
+  - 2026-10-08 V1：发布自检（导出→写回→导出逐位相等；篡改一个张量后读回报 LORA_MISMATCH 且只指出该张量）；v0–v5 读回校验和全部一致（层级：推理端已收到）。落盘方式只在 CPU 假推理端测过，真机未测（未验证）。
+- [x] 2.3 TIS(下界 0) 与 IcePop 映射到 verl 原生修正。验收：开 TIS 上界 2.0 跑通，tis 指标落 tape。
+  - 2026-10-08 V1：TIS 上界 2.0、下界 0 映射为 verl `rollout_is=token, threshold=2.0`，跑通，verl rollout_corr/* 落 tape（只存档）。IcePop 未映射（暂拒绝，未验证）。
 - [ ] 2.4 codex 网关经 yeto 会话服务接 verl（网关不改）。验收：单卡多轮小样本跑通，rl_harness_mismatch 事件出现且正常样本失配为 0；同一段 codex 轨迹经两种后端会话服务得到相同词元序列与掩码。（若 Qwen3.8 单卡放不下，以 1.9 单测 + 0.6B 家族跑通为准，注明。）
-- [ ] 2.5 10 步冒烟（Qwen3-0.6B LoRA r32 alpha32，T=1，top_p=1）。验收：无 NaN；abs_diff/k3/tis_clipfrac 与 S16 基线同量级（≈0.017/≈0.0008/≈0），相对第 1 步无跳变；按 GPU 必存清单存原始数据；费用记账。
+- [x] 2.5 10 步冒烟（Qwen3-0.6B LoRA r32 alpha32，T=1，top_p=1）。验收：无 NaN；abs_diff/k3/tis_clipfrac 与 S16 基线同量级（≈0.017/≈0.0008/≈0），相对第 1 步无跳变；按 GPU 必存清单存原始数据；费用记账。
+  - 2026-10-08 V1：缩为 5 轮（主 agent 定的 V1 范围）：无 NaN；abs_diff 0.011–0.013、k3 0.0005–0.0006、tis_clipfrac 0、带符号均值≈−0.0006，相对第 1 轮无跳变（≤1.16 倍）；与 S16 同量级（偏低，回复更短、LoRA fp32 主参数）。原始数据 s1-runs/s17-verl-v1-20261008c/tape-direct；费用见台账（V1 合计≈$1.7 估算）。10 步未跑。
 
 ## 3. 等 NPU 机器
 
@@ -58,3 +62,8 @@
 ## 4. 待定事项跟进（需用户拍板，非实现任务）
 
 - [ ] 4.1 NPU 型号/到货/镜像；4.2 各后端+硬件+版本组合的阈值数值。验收：用户逐项裁定并回写 design.md「待定」。
+
+## 5. V2：两个 verl 岛（S17 夜间追加）
+
+- [ ] 5.1 两个 verl 岛接严格同步 syncer（Nebius head + 2×Modal H100!），外层合并后每版两岛全局策略哈希一致；岛 1 在 v2 后退出、launcher 同 id 重启重入。验收：S17-V2-VERL-PRELAUNCH-REVIEW.md §4 J1–J6。
+- [x] 5.2 Miles 身份 HELLO 进 verl 会话被真 Rust syncer（严格参数）拒绝，反向同样被拒，同为 verl 接受。证据 s1-runs/s17-verl-handshake/result.json（布局哈希与 V1 真机一致）。注：严格模式下被拒会让 syncer 以 layout_hash_mismatch 致命退出；elastic 模式 JOIN 带身份由 N12（PR #140）补。
