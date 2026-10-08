@@ -44,9 +44,10 @@ DP change without a recorded mapping is refused.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
 from fractions import Fraction
 from typing import Any
+
+from ..reshard_plan import ReshardPlan  # noqa: F401 - re-exported (moved to the core, decoupling 2.2)
 
 FIXED_DIMS = ("tp", "pp", "cp", "ep")
 RNG_POLICIES = ("exact", "keep_on_dp_change")
@@ -56,24 +57,6 @@ UNCERTIFIED_VARIANTS = frozenset({"gspo", "gmpo", "cispo", "sapo", "sapo_qwen"})
 
 class ReshardRefused(ValueError):
     """The DP edge is not supported; nothing has been written."""
-
-
-@dataclass(frozen=True)
-class ReshardPlan:
-    source: Mapping[str, int]  # trainer_layout(): world/tp/pp/cp/ep/dp
-    target: Mapping[str, int]
-    global_batch_size: int
-    micro_batch_size: int
-    rng_policy: str = "keep_on_dp_change"
-
-    @property
-    def dp_changes(self) -> bool:
-        return int(self.source["dp"]) != int(self.target["dp"])
-
-    def to_dict(self) -> dict[str, Any]:
-        return {"source": dict(self.source), "target": dict(self.target),
-                "global_batch_size": self.global_batch_size, "micro_batch_size": self.micro_batch_size,
-                "rng_policy": self.rng_policy}
 
 
 def layout_problems(source: Mapping[str, int], target: Mapping[str, int]) -> list[str]:

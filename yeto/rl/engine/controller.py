@@ -88,7 +88,7 @@ REBUILD_OLD = "REBUILD_OLD"
 REBUILT_OLD = "REBUILT_OLD"
 RECOVERY_REQUIRED = "RECOVERY_REQUIRED"
 STORE_MANIFEST = "STORE-MANIFEST.json"  # Q4 (C5): written last by sync_checkpoint_store
-STORE_ROUND_CUTS = "round-cuts"  # M4: round cuts live in the store itself (miles_adapter.round_cut)
+STORE_ROUND_CUTS = "round-cuts"  # M4: round cuts live in the store itself (written by the adapter)
 LAYOUT_KEYS = ("tp", "pp", "cp", "ep", "trainer", "nodes", "gpus_per_node", "bundle_map",
                "cross_node_tp", "cross_node_engine_tp")
 # 4.4: same-shape trainer rebuild behind the ports (cut saved, trainer being
@@ -170,7 +170,7 @@ def island_layout(cfg: Any, topology: tuple[int, int],
     """Normalized parallel layout of a multi-node island (Q4, C5): ``tp/pp/cp/ep``
     (startup config dims), ``trainer`` GPUs, ``nodes`` x ``gpus_per_node`` and the
     role -> logical bundle ``bundle_map`` (None = leading-bundle layout). ``given``
-    overrides any key (the entry passes the Megatron args / placement it launched)."""
+    overrides any key (the entry passes the trainer args / placement it launched)."""
     dims = dict(getattr(cfg, "dims", {}) or {})
     layout: dict[str, Any] = {d: int(dims.get(d, 1) or 1) for d in ("tp", "pp", "cp", "ep")}
     layout["trainer"] = int(getattr(cfg, "trainer", 0) or 0)
@@ -357,7 +357,7 @@ class IslandController:
         self._committing = False
         # E3 (4.7): None keeps trainer edges refused. Otherwise returns
         # {"spec", "args", "global_batch_size", "micro_batch_size", "ops"} where
-        # ops is a trainer_transition.TrainerOps (miles_adapter.trainer_resize.MilesTrainerOps).
+        # ops is a trainer_transition.TrainerOps implemented by the backend adapter.
         self._trainer_edges = trainer_edges
         # rl-multinode-island Q4 (C5): an off-island copy of the state dir (journal,
         # epochs, cuts, ledger) kept by sync_checkpoint_store() after every commit
@@ -576,7 +576,7 @@ class IslandController:
     def layout_rejection(self) -> str | None:
         """Why this incarnation's layout (tp/pp/cp/ep, trainer shape, bundle map) differs
         from the journal baseline (None when equal, or without topology/baseline). A
-        rebuild from a consistent checkpoint must be same-shape: a Megatron cut written
+        rebuild from a consistent checkpoint must be same-shape: a trainer cut written
         under another parallel layout is not restorable without conversion."""
         if self.layout is None:
             return None
@@ -1361,6 +1361,7 @@ class IslandController:
         try:
             return plan_trainer_edge(
                 member_gpus=member_gpus,
+                trainer=ctx.get("trainer", getattr(ctx.get("ops"), "trainer", None)),
                 configs=self.configs, attestation=self.attestation, source=source, target=target,
                 expected_config_epoch=expected_epoch, spec=ctx["spec"], args=ctx["args"],
                 global_batch_size=ctx["global_batch_size"], micro_batch_size=ctx["micro_batch_size"])

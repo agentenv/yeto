@@ -46,15 +46,9 @@ from dataclasses import dataclass, field
 from collections.abc import Mapping
 from typing import Any, Literal, Protocol
 
+from ..errors import RecoveryRequired  # noqa: F401 - re-exported (moved to the core, decoupling 2.1)
+
 Outcome = Literal["RESTORED", "REBUILD_OLD", "RECOVERY_REQUIRED"]
-
-
-class RecoveryRequired(RuntimeError):
-    """The trainer cannot be brought back from the cut; stop data consumption."""
-
-    def __init__(self, message: str, *, attempts: list[dict[str, Any]]) -> None:
-        super().__init__(message)
-        self.attempts = attempts
 
 
 class SwappableActor:

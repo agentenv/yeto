@@ -15,14 +15,14 @@
 
 ## 2. 阶段 1：引擎核心切断反向依赖
 
-- [ ] 2.1 `RecoveryRequired` 移入核心异常模块（E2，`trainer_transition.py:342`），Miles 适配层改 import 核心版本。验收：`test_rl_engine_ports` 等现有测试通过；白名单删对应条目。
-- [ ] 2.2 `CutContext` 移进 ports/核心，可选方法升级为 `CuttableTrainer` 协议（E21，`ports.py:205-213`）；`ReshardPlan` 提到核心，重分片可行性改经 `reshard_problems` 可选方法（E1，`trainer_transition.py:42,162-163`）。验收：假引擎与 Miles 适配层都通过重分片测试；白名单删 E1 条。
+- [x] 2.1 `RecoveryRequired` 移入核心异常模块（E2，`trainer_transition.py:342`），Miles 适配层改 import 核心版本。验收：`test_rl_engine_ports` 等现有测试通过；白名单删对应条目。
+- [x] 2.2 `CutContext` 移进 ports/核心，可选方法升级为 `CuttableTrainer` 协议（E21，`ports.py:205-213`）；`ReshardPlan` 提到核心，重分片可行性改经 `reshard_problems` 可选方法（E1，`trainer_transition.py:42,162-163`）。验收：假引擎与 Miles 适配层都通过重分片测试；白名单删 E1 条。
 - [ ] 2.3 核心事件写入器（后端注入实现），替换 `driver.py:278` 与 `reward_pipeline.py:384` 对 `_append_rl_event` 的调用（E3、A4）。验收：标准样本 tape 片段逐字节一致；白名单删两条。
-- [ ] 2.4 strict/decoupled 进度格式与 `_record_local_round/_record_final_payload/_save_progress` 抽到核心进度模块，旧版引擎反过来 import（E6，`bridges.py:26,519-521`）。验收：标准样本进度文件逐字节一致；读旧进度文件的测试通过。
-- [ ] 2.5 运行时清单：探针表、版本模块表、镜像清单与 commit 来源、补丁记录由适配层提供（E7–E9，`runtime_manifest.py:34-57,98,132-188,146-157`）；Miles 下字段名 `miles_overlay` 保留。验收：`test_rl_runtime_manifest` 通过，Miles 清单与改动前字段与值相同。
-- [ ] 2.6 权重传输中立名（E4/V2，`driver.py:108`、`miles_adapter/placement.py:357`），由适配层声明并翻译；tape 中旧值保持。验收：标准样本一致；新增单测验证中立名到 Miles 名的映射。
-- [ ] 2.7 "睡眠时能否发布"等改为能力声明字段，核心注释改中立措辞（E5、E17、E18、E20）；切点后端私有部分放 `backend_state`（E17，Miles 下序列化不变）。验收：标准样本一致；能力声明测试覆盖新字段。
-- [ ] 2.8 假引擎改为"能力参数化"（E22），能用同一套中立测试跑不同能力组合。验收：驱动器测试在 Miles 能力与"仅五端口"能力两种参数下都通过；在未安装 Miles 的环境导入核心成功。
+- [x] 2.4 strict/decoupled 进度格式与 `_record_local_round/_record_final_payload/_save_progress` 抽到核心进度模块，旧版引擎反过来 import（E6，`bridges.py:26,519-521`）。验收：标准样本进度文件逐字节一致；读旧进度文件的测试通过。
+- [x] 2.5 运行时清单：探针表、版本模块表、镜像清单与 commit 来源、补丁记录由适配层提供（E7–E9，`runtime_manifest.py:34-57,98,132-188,146-157`）；Miles 下字段名 `miles_overlay` 保留。验收：`test_rl_runtime_manifest` 通过，Miles 清单与改动前字段与值相同。
+- [x] 2.6 权重传输中立名（E4/V2，`driver.py:108`、`miles_adapter/placement.py:357`），由适配层声明并翻译；tape 中旧值保持。验收：标准样本一致；新增单测验证中立名到 Miles 名的映射。
+- [x] 2.7 "睡眠时能否发布"等改为能力声明字段，核心注释改中立措辞（E5、E17、E18、E20）；切点后端私有部分放 `backend_state`（E17，Miles 下序列化不变）。验收：标准样本一致；能力声明测试覆盖新字段。
+- [x] 2.8 假引擎改为"能力参数化"（E22），能用同一套中立测试跑不同能力组合。验收：驱动器测试在 Miles 能力与"仅五端口"能力两种参数下都通过；在未安装 Miles 的环境导入核心成功。
 
 ## 3. 阶段 2：奖励 / 过滤 / harness 中立化
 

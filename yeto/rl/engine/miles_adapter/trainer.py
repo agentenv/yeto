@@ -22,11 +22,11 @@ import json
 import math
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
 from typing import Any
 
 from yeto.rl.contracts import LocalStepReceipt
 
+from ..cut import CutContext  # noqa: F401 - re-exported (moved to the core, decoupling 2.2)
 from ..ports import RolloutBatchHandle
 from . import LoopRunner
 from .rollout import policy_token, require_policy_tokens
@@ -752,6 +752,13 @@ class MilesTrainerGroup:
             "shard_schema": "yeto.cut_shard/v1",
         }
 
+    def reshard_problems(self, plan: Any, *, args: Any = None, spec: Any = None,
+                         spec_sha256: str | None = None, certified: Any = None) -> list[str]:
+        """``CuttableTrainer.reshard_problems``: the Miles DP-change checks (:func:`.reshard.reshard_problems`)."""
+        from .reshard import reshard_problems
+
+        return reshard_problems(plan, args=args, spec=spec, spec_sha256=spec_sha256, certified=certified)
+
     def actual_layout(self) -> dict[str, int]:
         """Layout read back from the running ranks (not from args)."""
         from .cut_plugin import RANK_COORDS
@@ -912,18 +919,3 @@ def trainer_layout(args: Any) -> dict[str, int]:
     if world % (tp * pp * cp):
         raise TrainStepError(f"world size {world} is not divisible by tp*pp*cp={tp * pp * cp}")
     return {"world": world, "tp": tp, "pp": pp, "cp": cp, "ep": ep, "dp": world // (tp * pp * cp)}
-
-
-@dataclass(frozen=True)
-class CutContext:
-    """What the caller (driver/executor) contributes to a cut besides the trainer shards."""
-
-    root: str
-    cut_id: str
-    backend_fingerprint: str
-    progress: Any  # yeto.rl.engine.cut.CutProgress
-    algorithm: Any  # yeto.rl.engine.cut.AlgorithmIdentity
-    data: Mapping[str, Any]  # rollout data cursor
-    ledger: Mapping[str, Any]
-    outer: Mapping[str, Any]
-    shared_filesystem: bool = True

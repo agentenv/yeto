@@ -20,7 +20,7 @@ outer progress). Terminal states besides ``outer_recorded``:
 * ``engine_discarded`` -- groups the engine drew (data cursor advanced) and
   threw away for a known engine reason, not an algorithm decision: groups
   still in flight when the batch filled are aborted and dropped with
-  ``partial_rollout`` off (cut-audit §3, Miles ``sglang_rollout.py:420-437``).
+  ``partial_rollout`` off (cut-audit §3; Miles: ``sglang_rollout.py:420-437``).
   Counted, never lost, never ``filtered``, never consumed. (Completed groups
   beyond ``rollout_batch_size`` under over-sampling are ``filtered`` as task
   3.6 names them: an algorithm-configured surplus.)
@@ -169,8 +169,8 @@ class BatchLedger:
 
         None when there is nothing to restore (restart at 0) or the record
         carries no cursor (the caller decides whether that is acceptable).
-        Miles' group ids are its data source's monotonic ``sample_group_index``
-        which a restarted rollout process resets to 0: without seeking the
+        Group ids are the data source's monotonic group index (Miles:
+        ``sample_group_index``), which a restarted rollout process resets to 0: without seeking the
         source back to this cursor the restarted run re-draws trained groups
         and ``prepare`` refuses them (GPU evidence a4s8-2r2 r6)."""
         if start_rollout_id <= 0:
@@ -254,7 +254,7 @@ class BatchLedger:
             self._journal.append(
                 "engine_discarded", rollout_id=rid, attempt=attempt, groups=int(aborted),
                 reason="aborted in flight when the batch filled (partial_rollout off)",
-                mechanism="miles generate_rollout abort",
+                mechanism=getattr(batch, "abort_mechanism", None) or "engine abort (mechanism not reported)",
             )
             self._replay(self._journal.records[-1])  # visible to cut_summary() before a reopen
         carried = getattr(batch, "carried_over", None)

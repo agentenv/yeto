@@ -52,6 +52,11 @@ RESERVED_PORT_VERBS = frozenset(
 )
 _FINGERPRINT = re.compile(r"sha256:[0-9a-f]{64}")
 
+# Neutral weight-transport names (decoupling 2.6, audit E4/V2): same-device
+# inter-process sharing, collective broadcast, files on disk. The backend (x
+# device family) translates them to its own implementation name.
+WEIGHT_TRANSPORTS = frozenset({"same-device-ipc", "collective-broadcast", "disk"})
+
 
 class CapabilityMismatch(ValueError):
     """Requested configuration is outside the declared engine capabilities."""
@@ -99,6 +104,35 @@ class ExecutionCapabilities:
         )
 
 
+@dataclass(frozen=True)
+class BackendTraits:
+    """Backend behaviour the core branches on, declared by the adapter (decoupling 2.6/2.7).
+
+    Runtime-only: not part of the attestation (``to_attestation_dict`` is
+    unchanged), so declarations and their hashes keep their bytes.
+
+    ``weight_transport_names``: neutral transport name -> the name the backend
+    records (tape ``weight_transport`` label); a missing entry records the
+    neutral name.
+    ``publish_while_offloaded``: a colocated trainer of this backend can publish
+    its policy while offloaded (asleep), so the driver offloads it right after
+    the sync boundary when the trainer reports ``publish_offloaded`` for this
+    run (Miles: ``--offload-train``). Default False: publish while resident.
+    """
+
+    weight_transport_names: Mapping[str, str] = field(default_factory=dict)
+    publish_while_offloaded: bool = False
+
+    def __post_init__(self) -> None:
+        unknown = sorted(set(self.weight_transport_names) - WEIGHT_TRANSPORTS)
+        if unknown:
+            raise ValueError(f"unknown neutral weight transports {unknown} (known: {sorted(WEIGHT_TRANSPORTS)})")
+
+    def transport_label(self, transport: str) -> str:
+        """Recorded name of a transport; a backend-specific name passes through unchanged."""
+        return self.weight_transport_names.get(transport, transport)
+
+
 def _names(values: Iterable[str], allowed: Iterable[str] | None, what: str) -> frozenset[str]:
     if isinstance(values, str):
         raise TypeError(f"{what} must be a collection of strings")
@@ -136,6 +170,8 @@ class EngineCapabilities:
     # attestation so every artifact shows it contains unverified mechanisms.
     unverified_mechanisms: frozenset[str] = frozenset()
     extra: Mapping[str, Any] = field(default_factory=dict, compare=False)
+    # Adapter-declared behaviour (decoupling 2.6/2.7); runtime-only, not serialized.
+    traits: BackendTraits = field(default_factory=BackendTraits, compare=False)
 
     def __post_init__(self) -> None:
         if not self.engine:

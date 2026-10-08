@@ -354,7 +354,7 @@ class MilesPlacement:
                     "gpus_per_engine": request.gpus_per_engine,
                     "logical": logical,
                     "standby_gpus": standby,
-                    "weight_transport": "nccl-broadcast",
+                    "weight_transport": "collective-broadcast",  # neutral; Miles: nccl-broadcast
                 },
             )
             return

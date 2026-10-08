@@ -443,10 +443,14 @@ def dumps(payload: Any) -> str:
     return json.dumps(payload, indent=1, sort_keys=True, ensure_ascii=False) + "\n"
 
 
+REPO_TOKEN = "<REPO>"
+
+
 def render_all() -> dict[str, str]:
+    """Samples as text; the checkout path is replaced by ``<REPO>`` so any worktree compares equal."""
     files = {f"{c.name}.json": dumps(record_config(c)) for c in CONFIGS}
     files["fake_engine_tapes.json"] = dumps(record_tapes())
-    return files
+    return {name: text.replace(str(REPO), REPO_TOKEN) for name, text in files.items()}
 
 
 def main(argv: list[str]) -> int:

@@ -28,6 +28,7 @@ from typing import Any
 
 from ..algorithm import BOUNDED_NONZERO_STD_FILTER, STOCK_NONZERO_STD_FILTER, AlgorithmSpec
 from ..capabilities import R0_MECHANISMS, EngineCapabilities, ExecutionCapabilities
+from .traits import MILES_TRAITS
 from . import LoopRunner
 from .config import MilesConfigError
 
@@ -238,6 +239,7 @@ def miles_capabilities(
         execution=ExecutionCapabilities(
             critic=False, max_policy_staleness=0, rollout_logprobs=True
         ),
+        traits=MILES_TRAITS,
         **declared_by_dimension(),
     )
     if unverified_mechanisms:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import threading
 from types import SimpleNamespace
 
@@ -45,6 +46,7 @@ from yeto.rl.engine.driver import (
     RoundFailedError,
 )
 from yeto.rl.engine.fake import (
+    FAKE_PROFILES,
     LORA_CONFIG_HASH,
     MODEL_REVISION,
     FakeDecoupledSyncer,
@@ -60,12 +62,24 @@ def _events(path):
     return [json.loads(line) for line in path.read_text().splitlines()]
 
 
+# decoupling 2.8: every driver test runs against both fake capability profiles
+# (what the Miles adapter declares, and the bare five ports).
+PROFILE = "miles-like"
+
+
+@pytest.fixture(autouse=True, params=FAKE_PROFILES)
+def capability_profile(request, monkeypatch):
+    monkeypatch.setattr(sys.modules[__name__], "PROFILE", request.param)
+    return request.param
+
+
 def _engine(delta=1.0, **kwargs):
+    kwargs.setdefault("capability_profile", PROFILE)
     return FakeEngine(tensors={NAME: torch.zeros(1, 2)}, step_delta=delta, **kwargs)
 
 
 def _driver(engine, sync, tmp_path, *, name="events.jsonl", **kwargs):
-    kwargs.setdefault("capabilities", fake_capabilities())
+    kwargs.setdefault("capabilities", fake_capabilities(PROFILE))
     return IslandDriver(
         learner_id=kwargs.pop("learner_id", 0),
         rollout=engine.rollout,
@@ -894,6 +908,12 @@ def test_colocated_publish_offloaded_sleeps_before_publish(tmp_path):
     engine.trainer.publish_offloaded = True
     driver = _driver(engine, LocalOnlySync(2), tmp_path)
     final = driver.run()
+    if PROFILE == "ports-only":
+        # not declared by the backend (traits.publish_while_offloaded): publish resident
+        calls = _engine_calls(engine)
+        assert not any(a == ("offload",) and b[0] == "publish" for a, b in zip(calls, calls[1:]))
+        assert final.policy_version == 2
+        return
 
     expected = [("publish", 0), ("offload",), ("generate", 0), ("onload",), ("train", 0)]
     expected += [("offload",), ("publish", 1), ("generate", 1), ("onload",), ("train", 1),

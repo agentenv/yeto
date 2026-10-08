@@ -101,7 +101,7 @@
   "200",
   "--rl-elastic",
   "--rl-elastic-resources",
-  "/home/michael/work/s16-decouple-p0/tests/multinode_gpu/resources-fn-2x8.json",
+  "<REPO>/tests/multinode_gpu/resources-fn-2x8.json",
   "--rl-placement",
   "fixed-partition",
   "--rl-rollout-gpus",

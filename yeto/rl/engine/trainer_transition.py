@@ -9,7 +9,8 @@ transaction, the journal and the epochs; it hands ``trainer-dp`` and
   ``IslandController.plan``: the edge must be certified in the attestation
   for the running ``algorithm_spec_sha256`` (A4), keep TP/PP/CP/EP, the pool
   size and the engine shape, move exactly the GPUs that change role, and
-  pass :func:`.miles_adapter.reshard.reshard_problems`. Nothing is written.
+  pass the trainer's ``reshard_problems`` (:class:`~yeto.rl.engine.ports.CuttableTrainer`;
+  Miles: ``miles_adapter.reshard.reshard_problems``). Nothing is written.
 * :class:`TrainerTransition` -- executed at a quiescent safe point, phases of
   design D4 recorded through the controller's journal::
 
@@ -39,7 +40,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from .miles_adapter.reshard import ReshardPlan, reshard_problems
+from .errors import RecoveryRequired
+from .reshard_plan import ReshardPlan
 
 TRAINER_EDGE_KINDS = frozenset({"trainer-dp", "role-transfer"})
 
@@ -100,12 +102,15 @@ def plan_trainer_edge(
     global_batch_size: int,
     micro_batch_size: int,
     member_gpus: Mapping[str, Any] | None = None,
+    trainer: Any = None,
 ) -> TrainerEdgePlan:
     """Validate a trainer edge; raise :class:`TrainerEdgeRejected` with every problem.
 
     ``member_gpus`` (serving engine member -> its GPU ids, from the pool) is
     required when engines must be removed: the removed engines are exactly
     those serving on the moved GPUs, never chosen by name order.
+    ``trainer`` supplies the backend feasibility check through its optional
+    ``reshard_problems`` method; without one the edge is refused.
     """
     problems: list[str] = []
     if source not in configs or target not in configs:
@@ -160,7 +165,11 @@ def plan_trainer_edge(
             problems.append(f"{len(remove_members)} engines serve on the moved GPUs {list(moved)}, "
                             f"the edge removes {n_remove}")
     reshard = ReshardPlan(_layout(src), _layout(dst), int(global_batch_size), int(micro_batch_size))
-    problems += reshard_problems(reshard, args=args, spec=spec, spec_sha256=sha, certified=certified)
+    check = getattr(trainer, "reshard_problems", None)
+    if callable(check):
+        problems += check(reshard, args=args, spec=spec, spec_sha256=sha, certified=certified)
+    else:
+        problems.append("the trainer does not advertise reshard_problems; DP changes are not supported")
     if problems:
         raise TrainerEdgeRejected(f"trainer edge {source}->{target} refused: " + "; ".join(problems))
     return TrainerEdgePlan(
@@ -339,8 +348,6 @@ class TrainerTransition:
             if problems:
                 raise TrainerTransitionFailed("VERIFYING", "; ".join(problems))
         except Exception as exc:  # noqa: BLE001
-            from .miles_adapter.trainer_rebuild import RecoveryRequired
-
             if isinstance(exc, RecoveryRequired):
                 self._record("trainer_recovery_required", tx_id=self.tx_id, error=str(exc))
                 return TransitionResult("RECOVERY_REQUIRED", cut_id=cut_id, error=str(exc))

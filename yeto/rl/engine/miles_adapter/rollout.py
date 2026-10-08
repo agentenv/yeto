@@ -31,6 +31,7 @@ from collections.abc import Mapping
 from types import SimpleNamespace
 
 from ..ports import GroupMetadata, RolloutBatchHandle
+from .traits import MILES_ABORT_MECHANISM
 from . import LoopRunner
 from .rollout_meta_hook import (
     DEFAULT_SINK_ACTOR,
@@ -425,6 +426,7 @@ def handle_from_metadata(
         buffer_length=payload.get("buffer_length"),
         submitted_groups=payload.get("submitted_groups"),
         aborted_in_flight_groups=payload.get("aborted_in_flight_groups"),
+        abort_mechanism=MILES_ABORT_MECHANISM,
         tool_wait_seconds=(
             float(payload["tool_wait_seconds"]) if "tool_wait_seconds" in payload else None
         ),

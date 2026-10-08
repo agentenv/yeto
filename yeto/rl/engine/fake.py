@@ -18,6 +18,7 @@ import hashlib
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import Any
 
 import torch
 
@@ -33,7 +34,7 @@ from yeto.rl.core import CanonicalLoraState, canonical_state
 from yeto.tensor_io import apply_fragment, pack_fragment, pack_tensor, unpack_fragment
 
 from .algorithm import BOUNDED_NONZERO_STD_FILTER
-from .capabilities import EngineCapabilities, ExecutionCapabilities
+from .capabilities import BackendTraits, EngineCapabilities, ExecutionCapabilities
 from .driver import TrainStepMetrics, policy_token
 from .ports import (
     GroupMetadata,
@@ -43,11 +44,34 @@ from .ports import (
 )
 from .trainable_state import TrainableState
 
+FAKE_WEIGHT_TRANSPORTS = {"same-device-ipc": "cuda-ipc", "collective-broadcast": "nccl-broadcast"}
 MODEL_REVISION = "a" * 40
 LORA_CONFIG_HASH = "b" * 64
 
 
-def fake_capabilities(**overrides) -> EngineCapabilities:
+# Capability profiles (decoupling 2.8, audit E22): the same neutral tests run
+# against different backend capability combinations.
+#   "miles-like"  declares what the Miles adapter declares (the historical fake);
+#   "ports-only"  only the five ports with the R0 mechanisms, no optional verbs
+#                 (no cut/reshard, no publish-while-offloaded) and neutral names.
+FAKE_PROFILES = ("miles-like", "ports-only")
+
+
+def fake_capabilities(profile: str = "miles-like", **overrides) -> EngineCapabilities:
+    if profile not in FAKE_PROFILES:
+        raise ValueError(f"unknown fake capability profile {profile!r} (known: {FAKE_PROFILES})")
+    if profile == "ports-only":
+        values: dict = dict(
+            engine="fake-ports-only",
+            runtime_fingerprint="sha256:" + "0" * 64,
+            parameter_layouts={"lora"},
+            placements={"colocated", "fixed-partition"},
+            advantage_estimators={"grpo"},
+            dynamic_sampling_filters={BOUNDED_NONZERO_STD_FILTER},
+            execution_modes={"colocated-serial"},
+        )
+        values.update(overrides)
+        return EngineCapabilities(**values)
     values = dict(
         engine="fake",
         runtime_fingerprint="sha256:" + "0" * 64,
@@ -69,6 +93,9 @@ def fake_capabilities(**overrides) -> EngineCapabilities:
         execution=ExecutionCapabilities(
             critic=False, max_policy_staleness=0, rollout_logprobs=True
         ),
+        # Recorded transport names as the Miles adapter declares them, so fake
+        # tapes keep the pre-decoupling labels (decoupling 2.6).
+        traits=BackendTraits(weight_transport_names=FAKE_WEIGHT_TRANSPORTS, publish_while_offloaded=True),
     )
     values.update(overrides)
     # rl-algo-grpo-knobs 8.3: the fake declares what the Miles adapter declares for
@@ -116,6 +143,8 @@ class FakeEngine:
     # "ppo"); the critic trains first each round and reports value metrics.
     critic: bool = False
     critic_tensors: dict[str, torch.Tensor] = field(default_factory=dict)
+    # decoupling 2.8: "ports-only" builds a trainer without the optional verbs.
+    capability_profile: str = "miles-like"
 
     def __post_init__(self) -> None:
         self.tensors = {k: v.detach().clone().float() for k, v in self.tensors.items()}
@@ -126,7 +155,10 @@ class FakeEngine:
         self.published_tensors: dict[str, torch.Tensor] | None = None
         self._last_metrics: TrainStepMetrics | None = None
         self.rollout = FakeRolloutPool(self)
-        self.trainer = FakeTrainerGroup(self)
+        if self.capability_profile not in FAKE_PROFILES:
+            raise ValueError(f"unknown fake capability profile {self.capability_profile!r}")
+        self.trainer = (FakeTrainerGroup if self.capability_profile == "miles-like"
+                        else FakePortsOnlyTrainerGroup)(self)
         self.policy_state = FakePolicyState(self)
         self.publisher = FakePublisher(self)
         self.placement = FakePlacement(self)
@@ -274,6 +306,30 @@ class FakeTrainerGroup:
             parameter_layout_hash=e.canonical(0).layout_hash,
         )
 
+    def reshard_problems(self, plan: Any, *, args: Any = None, spec: Any = None,
+                         spec_sha256: str | None = None, certified: Any = None) -> list[str]:
+        """``CuttableTrainer.reshard_problems`` for the fake (decoupling 2.2): neutral rules only.
+
+        Only DP may change, ``world == tp*pp*cp*dp`` in both layouts, the global
+        batch splits evenly over dp x micro batch, and the spec hash must be
+        certified when a certification list is given.
+        """
+        out = []
+        for name, lay in (("source", plan.source), ("target", plan.target)):
+            tp, pp, cp, dp = (int(lay.get(k, 1)) for k in ("tp", "pp", "cp", "dp"))
+            if tp * pp * cp * dp != int(lay.get("world", 0)):
+                out.append(f"{name} layout: world != tp*pp*cp*dp")
+            if plan.global_batch_size % (dp * plan.micro_batch_size):
+                out.append(f"{name}: global batch not divisible by dp x micro batch")
+        for dim in ("tp", "pp", "cp", "ep"):
+            if int(plan.source.get(dim, 1)) != int(plan.target.get(dim, 1)):
+                out.append(f"{dim} changes (only DP may change)")
+        if certified is not None:
+            sha = spec_sha256 or (spec.sha256() if callable(getattr(spec, "sha256", None)) else None)
+            if sha not in frozenset(certified):
+                out.append("algorithm_spec_sha256 is not certified for this DP edge")
+        return out
+
     def step_metrics(self) -> TrainStepMetrics:
         return self.engine._last_metrics
 
@@ -322,6 +378,12 @@ class FakeTrainerGroup:
             value_loss=metrics.get("critic/value_loss"),
             explained_variance=metrics.get("critic/explained_variance"),
         )
+
+
+class FakePortsOnlyTrainerGroup(FakeTrainerGroup):
+    """The five-port trainer: no optional verbs (decoupling 2.8)."""
+
+    reshard_problems = None  # type: ignore[assignment]  # not advertised -> trainer edges refused
 
 
 class FakePolicyState:

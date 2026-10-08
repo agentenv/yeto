@@ -106,6 +106,9 @@ class RolloutBatchHandle:
     # aborted in flight; None = unknown (see rollout_meta_hook.submitted_groups).
     submitted_groups: int | None = None
     aborted_in_flight_groups: int | None = None
+    # Engine mechanism that aborted them, recorded in the ledger's
+    # ``engine_discarded`` entry (adapter-supplied, decoupling 2.7/E18).
+    abort_mechanism: str | None = field(default=None, compare=False)
     # rl-infra-spec 4.2 CutContext.data: the rollout data source position
     # after this rollout drew its prompts ({sample_offset, epoch_id,
     # sample_group_index, sample_index}) and its reuse-buffer length (0 on the
@@ -200,20 +203,36 @@ class TrainerGroup(Protocol):
     def train_step(self, batch: RolloutBatchHandle) -> LocalStepReceipt: ...
     def onload(self) -> None: ...
     def offload(self) -> None: ...
-    # E2 (optional; advertised via EngineCapabilities.port_verbs, not part of
-    # the R0 protocol so R0 fakes stay conforming). Types: yeto.rl.engine.cut,
-    # miles_adapter.trainer.CutContext (rl-infra-spec 4.2, cut-audit.md):
-    # def layout(self) -> dict[str, int]: ...          # from args
-    # def actual_layout(self) -> dict[str, int]: ...   # read back from the ranks
-    # def save_cut(self, *, epoch: int, context: CutContext) -> str: ...  # cut id
-    # def restore_cut(self, cut_id: str, *, epoch: int, root: str,
-    #                 expect: RestoreExpectation, shared_filesystem: bool = True) -> CutManifest: ...
-    #   restore_cut is only for a freshly built trainer; any exception from it
-    #   means RECOVERY_REQUIRED (never resume on that trainer).
-    # Same-shape rebuild (4.3) is miles_adapter.trainer_rebuild.rebuild_same_shape
-    # over a SwappableActor: the driver keeps its port objects (no rebind) and
-    # re-publishes through IslandDriver.rebuild_trainer (4.4).
-    # E3 (reserved): data-parallel resize / role transfer via Placement.reconfigure.
+    # E2/E3 verbs are optional: see :class:`CuttableTrainer` (advertised via
+    # EngineCapabilities.port_verbs, not part of the R0 protocol so R0 fakes
+    # stay conforming).
+
+
+@runtime_checkable
+class CuttableTrainer(TrainerGroup, Protocol):
+    """Optional trainer verbs for cuts and resharding (rl-infra-spec 4.2/4.6; decoupling 2.2).
+
+    Types are core types: :class:`~yeto.rl.engine.cut.CutContext`,
+    :class:`~yeto.rl.engine.cut.RestoreExpectation`,
+    :class:`~yeto.rl.engine.cut.CutManifest`,
+    :class:`~yeto.rl.engine.reshard_plan.ReshardPlan`.
+
+    ``restore_cut`` is only for a freshly built trainer; any exception from it
+    means RECOVERY_REQUIRED (never resume on that trainer). Same-shape rebuild
+    (4.3) goes through the backend's rebuild helper over a swappable actor: the
+    driver keeps its port objects (no rebind) and re-publishes through
+    ``IslandDriver.rebuild_trainer`` (4.4). ``reshard_problems`` answers whether
+    the backend can execute a DP change (empty list = feasible); a trainer
+    without it cannot take trainer edges.
+    """
+
+    def layout(self) -> dict[str, int]: ...  # from the launch config
+    def actual_layout(self) -> dict[str, int]: ...  # read back from the ranks
+    def save_cut(self, *, epoch: int, context: Any) -> str: ...  # cut id
+    def restore_cut(self, cut_id: str, *, epoch: int, root: str, expect: Any,
+                    shared_filesystem: bool = True) -> Any: ...
+    def reshard_problems(self, plan: Any, *, args: Any = None, spec: Any = None,
+                         spec_sha256: str | None = None, certified: Any = None) -> list[str]: ...
 
 
 @runtime_checkable
