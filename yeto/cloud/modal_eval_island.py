@@ -289,7 +289,11 @@ def eval_island_body(config: Mapping[str, Any]) -> dict[str, Any]:
     want = config.get("assert_gpu_name")
     if want and not all(want in n for n in names):
         raise RuntimeError(f"eval island asked for {want}, got {names}")
-    run_dir = Path(config["store"]) / "runs" / str(config.get("island_id", "eval-0"))
+    # Logs and GPU samples stay on local disk while the servers run: a Modal
+    # Volume refuses reload() while files on it are open. Copied over at the end.
+    final_dir = Path(config["store"]) / "runs" / str(config.get("island_id", "eval-0"))
+    run_dir = Path(config.get("local_run_dir") or "/tmp/yeto-eval-run")
+    run_dir.mkdir(parents=True, exist_ok=True)
     infer = dict(config.get("infer") or {})
     infer.setdefault("log_dir", str(run_dir / "logs"))
     timings: dict[str, float] = {}
@@ -312,6 +316,9 @@ def eval_island_body(config: Mapping[str, Any]) -> dict[str, Any]:
         stop.set()
         sampler.join(timeout=10)
         (run_dir / "body.json").write_text(json.dumps({"gpu_names": names, **timings}, sort_keys=True))
+        import shutil
+
+        shutil.copytree(run_dir, final_dir, dirs_exist_ok=True)
         if config.get("volume"):
             _volume(config["volume"]).commit()  # logs, gpu samples, body.json survive a crash
     return {**summary, **timings, "gpu_names": names, "container": os.environ.get("MODAL_TASK_ID"),

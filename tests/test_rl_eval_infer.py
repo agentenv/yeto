@@ -376,3 +376,29 @@ def test_shipped_eval_and_train_jsonl_match_their_sha_record():
     tr = {json.loads(x)["metadata"]["task_id"] for x in (REPO / "data/tb2/tb2-train.jsonl").read_text().splitlines()}
     assert ev == {i["task_id"] for i in hold["items"]} and not ev & tr
     assert {e["task_id"] for e in hold["excluded"]} <= tr  # smoke-6: out of the eval pool, still trainable
+
+
+def test_eval_island_body_keeps_logs_off_the_volume_until_the_end(tmp_path, monkeypatch):
+    import subprocess
+
+    from yeto.cloud import modal_eval_island as mei
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="NVIDIA H100 80GB HBM3\n"))
+    seen = {}
+
+    def fake_main(config):
+        seen["infer"] = config["infer"]
+        Path(config["infer"]["log_dir"]).mkdir(parents=True)
+        (Path(config["infer"]["log_dir"]) / "sglang.log").write_text("up")
+        return {"evaluated": [0], "loads": []}
+
+    monkeypatch.setattr(mei, "island_main", fake_main)
+    out = mei.eval_island_body({"store": str(tmp_path / "vol"), "island_id": "e1", "assert_gpu_name": "H100",
+                                "local_run_dir": str(tmp_path / "local"), "infer": {"base_model": "B"}})
+    assert out["evaluated"] == [0] and out["gpu_names"] == ["NVIDIA H100 80GB HBM3"]
+    assert seen["infer"]["log_dir"].startswith(str(tmp_path / "local"))
+    assert (tmp_path / "vol/runs/e1/logs/sglang.log").read_text() == "up"
+    assert (tmp_path / "vol/runs/e1/body.json").is_file()
+    with pytest.raises(RuntimeError, match="asked for A100"):
+        mei.eval_island_body({"store": str(tmp_path / "vol"), "assert_gpu_name": "A100",
+                              "local_run_dir": str(tmp_path / "l2")})
