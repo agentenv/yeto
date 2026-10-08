@@ -26,6 +26,7 @@ import pytest
 
 from yeto.rl import learner as rl_learner
 from yeto.rl.engine import run_config as rc
+from yeto.rl.engine.miles_adapter import lr_schedule as lrs
 from yeto.rl.engine.algorithm import AlgorithmSpec
 from yeto.rl.engine.miles_adapter import config as mc
 
@@ -98,7 +99,7 @@ CASES = {
 def _strip_lr_schedule(argv: list[str]) -> list[str]:
     out, it = [], iter(argv)
     for item in it:
-        if item in rc.LR_SCHEDULE_FLAGS:
+        if item in lrs.LR_SCHEDULE_FLAGS:
             next(it)
             continue
         out.append(item)
@@ -108,7 +109,7 @@ def _strip_lr_schedule(argv: list[str]) -> list[str]:
 def _lr_schedule_values(argv) -> dict[str, str]:
     argv = list(argv)
     return {
-        flag: argv[argv.index(flag) + 1] for flag in rc.LR_SCHEDULE_FLAGS if flag in argv
+        flag: argv[argv.index(flag) + 1] for flag in lrs.LR_SCHEDULE_FLAGS if flag in argv
     }
 
 
@@ -140,7 +141,7 @@ def test_legacy_argv_is_identical_to_pre_split_snapshot(name, tmp_path):
         legacy = _lr_schedule_values(argv)
         # Same RLRunConfig through the ports translation: identical schedule.
         config = rc.resolve_rl_run_config(*args[:1], **kwargs)
-        assert legacy == _lr_schedule_values(rc.lr_schedule_argv(config.algorithm.lr_schedule))
+        assert legacy == _lr_schedule_values(lrs.lr_schedule_argv(config.algorithm.lr_schedule))
         try:
             ports = mc.translate_run_config(config, AlgorithmSpec()).argv
         except mc.UnmappedConfigError:
@@ -166,7 +167,7 @@ def test_legacy_argv_is_identical_to_pre_split_snapshot(name, tmp_path):
     assert stripped == PRE_LR_FIX_GOLDEN[name]
     assert records == GOLDEN[name]
     for entry in compared:
-        assert set(entry) == set(rc.LR_SCHEDULE_FLAGS)
+        assert set(entry) == set(lrs.LR_SCHEDULE_FLAGS)
 
 
 @pytest.mark.parametrize(
@@ -208,7 +209,7 @@ def test_legacy_and_ports_emit_identical_lr_schedule(overrides, expected):
     if expected is None:
         assert _lr_schedule_values(legacy) == {}
     else:
-        assert [_lr_schedule_values(legacy)[f] for f in rc.LR_SCHEDULE_FLAGS] == expected
+        assert [_lr_schedule_values(legacy)[f] for f in lrs.LR_SCHEDULE_FLAGS] == expected
 
 
 def _captured_args():

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from yeto.rl.engine import run_config as rc
+from yeto.rl.engine.miles_adapter import lr_schedule as lrs
 from yeto.rl.engine.algorithm import (
     BOUNDED_NONZERO_STD_FILTER,
     STOCK_NONZERO_STD_FILTER,
@@ -488,7 +489,7 @@ def test_strict_lr_schedule_rejects_rounds_that_are_not_optimizer_steps():
 
 
 def test_lr_schedule_flags_are_adapter_owned():
-    for flag in rc.LR_SCHEDULE_FLAGS:
+    for flag in lrs.LR_SCHEDULE_FLAGS:
         with pytest.raises(mc.MilesConfigError):
             mc.check_extra_argv((flag, "1"))
 

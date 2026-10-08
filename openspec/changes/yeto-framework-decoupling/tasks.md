@@ -49,18 +49,30 @@
 
 ## 4. 阶段 3：配置与算法扩展中立化
 
-- [ ] 4.1 学习率计划保留在核心，"翻译成 Miles/Megatron 旗标"一步移入 Miles 适配层（E11，`run_config.py:244-352`）。验收：标准样本命令行一致；`decoupled` 学习率相关测试通过。
+- [x] 4.1 学习率计划保留在核心，"翻译成 Miles/Megatron 旗标"一步移入 Miles 适配层（E11，`run_config.py:244-352`）。验收：标准样本命令行一致；`decoupled` 学习率相关测试通过。
+  - 完成情况（s17-decouple-p3）：`LR_SCHEDULE_FLAGS`、`lr_schedule_argv` 原样移到 `yeto/rl/engine/miles_adapter/lr_schedule.py`；`resolve_lr_schedule`/`LrSchedule` 留核心。调用方（ports `config.py`、旧版 `learner.py`、测试）改 import。标准样本命令行逐字节一致；`test_rl_applied_lr`、`test_rl_argv_snapshot`、`test_rl_decoupled` 通过。
 - [ ] 4.2 `RunConfig` 拆中立部分与 Miles 部分（E10、E12，`run_config.py:37,53-60,394-395,439,498-512,595-603,648`）。验收：标准样本一致；Miles 专有校验（ref-load release、TP×PP 整除）只在 Miles 部分出现。
+  - 本轮未做（改动面大：`resolve_run_config` 的校验顺序与旧版共用，需单独一轮）。
 - [ ] 4.3 算法扩展只注册中立字段 + 校验 + 默认值，"字段→Miles 旗标"表搬进 Miles 适配层（A1，`seq_adv.py:47`、`critic.py:42-43`、`sao.py:46`、`loss_variants.py:46`、`critic_warmup.py:492`、`miles_overlay.py:72`）；argv 生成离开 `algorithm.py`（E14，`:1394-1404,1584-1678`）；`selection.py:68-71` 随之（E15）。验收：`test_rl_algorithm_flags*`、`test_rl_algorithm_spec_v2` 通过；标准样本命令行与哈希一致；白名单删 A1 各条。
+  - 部分完成（s17-decouple-p3）：seq_adv、loss_variants、critic、sao 四个扩展模块的 Miles 旗标行与"规格→Miles 命令行"函数原样移到 `yeto/rl/engine/miles_adapter/algo_flag_rows.py`，按原导入顺序注册（`MAPPINGS` 顺序不变，标准样本命令行逐字节一致）；算法扩展只剩中立字段/校验/默认值；白名单删 critic、sao、loss_variants 三条（seq_adv 仍因 A2 保留）。未做：`critic_warmup.py:492`（阶段 W 干跑命令行工具，属 Miles 专用，建议阶段 4 随 critic 胶水整体搬）、`miles_overlay.py:72` 已改调新模块但文件本身属阶段 4 搬迁；`algorithm.py:1394-1404,1584-1678` 的 argv 生成与 `selection.py:68-71`（E14、E15）未动。
 - [ ] 4.4 过滤器/插件中立名 + 旧名规范化映射（E13，`algorithm.py:48,103`，D6）。验收：所有已知旧名都能规范化为新名的单测；新旧名得到同一个新哈希；`hash-migration.md` 对照表覆盖全部标准样本配置（旧哈希、新哈希、CPU 逐位一致结果）；新旧版本岛混跑与旧哈希检查点续训被拒的单测。
+  - 本轮未做。
 - [ ] 4.4a 训练端绑定核对（D6a，启动前执行，不一致即启动失败）：①映射后 Miles 命令行与改名前逐字相同；②加载的插件模块路径、函数限定名、源码哈希与改名前相同；③固定输入经映射路径实际调用一次插件，与改名前路径调用结果逐位相同；结果写入运行时清单。验收：标准样本全部配置三项都通过；人为把一个中立名映射到另一函数、或改一个参数拼写，各自导致启动失败并指出哪一项；verl 映射表的同类核对留接口与待实现测试桩。
-- [ ] 4.5 后端能力声明加"支持的算法字段"；启用不支持字段时启动前拒绝。验收：用"仅五端口"假后端声明的单测正反例。
+  - 本轮未做（依赖 4.4）。`tests/decoupling_bitwise_check.py` 可作为第③项"CPU 实调逐位一致"的雏形。
+- [x] 4.5 后端能力声明加"支持的算法字段"；启用不支持字段时启动前拒绝。验收：用"仅五端口"假后端声明的单测正反例。
+  - 完成情况：`EngineCapabilities.algorithm_fields`（None=未声明、不限制，现有后端与声明 JSON 字节不变）；`AlgorithmSpec.set_fields()` 给出偏离默认值的字段路径；`check()` 启动前拒绝声明集合外的字段。正反例单测在 `tests/test_rl_engine_capabilities.py`（"仅五端口"假后端）。
 - [ ] 4.6 奖励/优势变换拆纯函数（`reward_pipeline.grpo_default`、`seq_adv` 的 MaxRL/MAPO/GDPO、超长惩罚、超长过滤），Miles 插件改薄包装（RL-ALGO-LOCATION §4 A1）。验收：`test_rl_reward_pipeline_equivalence`、`test_rl_seq_adv_miles`、`test_rl_seq_adv` 保持 `torch.equal`；插件源码哈希前后值与书面论证写入文档（**待确认**沿用 GPU 证据）。
+  - 部分完成：`reward_pipeline.grpo_group_normalize`、`seq_adv.gdpo_group_values` 抽成纯函数，插件改薄包装；MaxRL/MAPO（`maxrl_values`/`mapo_values`）与超长惩罚（`overlong_penalty_value`）原本已是纯函数；超长过滤未动。新旧逐位对照 `tests/decoupling_bitwise_check.py` 20 例全部 `torch.equal`。**未在本机验证** `test_rl_reward_pipeline_equivalence`、`test_rl_seq_adv_miles`（需 import Miles，本机屏蔽）；`test_rl_seq_adv` 通过。插件哈希前后值写入 `hash-migration.md`。
 - [ ] 4.7 中立逐词元损失参考函数（以 `tests/rl_loss_variant_reference.py` 为蓝本：PPO clip/dual-clip、CISPO、SAPO、KL k1/k2/low_var_kl、TIS/IcePop 权重与掩码），只用于 CPU 对照 Miles fork 函数；不改 fork。验收：CPU 上与 fork 对应函数逐位一致，不一致项列表写入文档；测试在未安装 Miles 时跳过而非失败。
-- [ ] 4.8 归约器与 megatron 依赖（A3，`reducers.py:35,41`、`vendor/miles_mis.py:350`、`grad_audit.py:209,320`）本 change 不迁，只确认在白名单并注明"暂不动"。验收：白名单条目带注释。
-- [ ] 4.9 中立 `--deterministic` 开关，各后端×设备给环境变量（P4，`cli.py:226,381`、`miles_adapter/entry.py:1046`）。验收：Miles×NVIDIA 下环境变量与改动前相同。
-- [ ] 4.10 （原 2.3 的 reward_pipeline 侧已移到此处）`reward_pipeline.py:384` 改用核心事件写入器（原 2.3 的 A4 部分，移入原因见 2.3 注记），与 4.6 同一批换插件哈希。验收：标准样本 tape 片段一致；新哈希写入对照表；白名单删 A4 条目。
+  - 本轮未做。
+- [x] 4.8 归约器与 megatron 依赖（A3，`reducers.py:35,41`、`vendor/miles_mis.py:350`、`grad_audit.py:209,320`）本 change 不迁，只确认在白名单并注明"暂不动"。验收：白名单条目带注释。
+  - 完成情况：白名单 `reducers.py`、`vendor/miles_mis.py`、`grad_audit.py` 三条已带"暂不动（任务 4.8）"注释，确认保留。
+- [x] 4.9 中立 `--deterministic` 开关，各后端×设备给环境变量（P4，`cli.py:226,381`、`miles_adapter/entry.py:1046`）。验收：Miles×NVIDIA 下环境变量与改动前相同。
+  - 完成情况：核心 `yeto/rl/engine/determinism.py` 表（目前只有 miles×nvidia 一行，原值原序搬入；昇腾等未实测的行不填、查询即报"未标定"）；`miles_adapter/entry.DETERMINISM_ENV` 改为查表结果；`--deterministic` 作为 `--rl-deterministic-trainer` 的中立别名（同一 dest，启动器转发不变）。`cut_plugin.py:971` 另有一份同值副本（插件文件，改动会动其哈希），本轮未动。单测 `tests/test_rl_determinism_env.py`。
+- [x] 4.10 （原 2.3 的 reward_pipeline 侧已移到此处）`reward_pipeline.py:384` 改用核心事件写入器（原 2.3 的 A4 部分，移入原因见 2.3 注记），与 4.6 同一批换插件哈希。验收：标准样本 tape 片段一致；新哈希写入对照表；白名单删 A4 条目。
+  - 完成情况：`reward_pipeline.emit_event` 改调核心 `yeto.rl.engine.events.write_event`（默认写入器即原函数）；与 4.6 同批换插件哈希（seq_adv_maxrl，见 `hash-migration.md`）；白名单删 A4 条目。标准样本中假引擎 tape 片段不变。
 - [ ] 4.11 （原 3.4，S16 末挪入阶段 3）核心轮次元数据/策略令牌/计数器接口，算法扩展与 harness 改用它（A2 `seq_adv.py:438,463`、A5 `teacher_forcing.py:118,129`、A7 `codex_openenv_*`）；Miles 实现仍在 `rollout_meta_hook`；改 `seq_adv` 等插件即接受新哈希（记入 `hash-migration.md`）。**推理进程里由谁注入核心接口先出方案写进 design，由用户拍板后再实现。** 验收：标准样本除已登记的新哈希外一致；白名单删对应条目。
+  - 本轮只交付方案：design D11（候选 A–D，建议 A：环境变量 `YETO_RL_BACKEND` + 后端名注册表，未设时默认 miles），**待用户拍板，未实现**；A2/A5/A7 白名单条目保持。
 
 ## 5. 阶段 4：Miles 代码归位
 

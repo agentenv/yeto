@@ -308,20 +308,9 @@ class LrSchedule:
             raise ValueError("LR decay horizon must be a positive step count")
 
 
-LR_SCHEDULE_FLAGS = ("--lr-decay-style", "--lr-decay-iters", "--lr-warmup-iters", "--min-lr")
-
-
-def lr_schedule_argv(schedule: "LrSchedule | None") -> tuple[str, ...]:
-    """Miles/Megatron flags for ``schedule``; shared verbatim by both engines."""
-
-    if schedule is None:
-        return ()
-    return (
-        "--lr-decay-style", schedule.decay_style,
-        "--lr-decay-iters", str(schedule.decay_iters),
-        "--lr-warmup-iters", "0",
-        "--min-lr", "0",
-    )
+# The Miles/Megatron flags of a schedule (``--lr-decay-style`` ...) are the
+# Miles adapter's translation: yeto.rl.engine.miles_adapter.lr_schedule
+# (decoupling 4.1). The schedule decision itself stays here.
 
 
 def resolve_lr_schedule(
