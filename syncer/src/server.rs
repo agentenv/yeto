@@ -105,6 +105,18 @@ pub struct Config {
     /// Fail closed unless HELLO carries and matches this Config's canonical
     /// semantic profile hash. Disabled by default for legacy/non-SAO clients.
     pub require_profile_binding: bool,
+    /// Inter-island scheduling mode. Legacy (default) adds nothing to the
+    /// semantic profile hash and changes no server behavior.
+    pub island_scheduling: crate::elastic::IslandSchedulingMode,
+    /// HMAC-SHA256 key for elastic-only message types (never hashed into
+    /// the profile; legacy messages are not authenticated).
+    pub island_hmac_key: Option<Vec<u8>>,
+    /// elastic: membership lease (seconds without heartbeat before removal).
+    pub island_lease_s: f64,
+    /// elastic: fencing token of this coordinator incarnation.
+    pub syncer_epoch: u64,
+    /// elastic: final grace window after total_steps; None = soft deadline.
+    pub elastic_final_grace_s: Option<u64>,
 }
 
 const SEMANTIC_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-semantic-profile-v1\0";
@@ -142,6 +154,7 @@ impl Config {
             LearnerWeight::Equal => 1,
         });
         encoded.push(u8::from(self.require_profile_binding));
+        self.island_scheduling.encode_contract(&mut encoded);
         Sha256::digest(encoded).into()
     }
 }
@@ -793,6 +806,41 @@ fn validate_resumed_policy_sweep(cfg: &Config, st: &GlobalState) -> Result<()> {
 
 pub async fn run(cfg: Config) -> Result<()> {
     validate_config(&cfg)?;
+    if let crate::elastic::IslandSchedulingMode::Elastic(params) = cfg.island_scheduling {
+        // Elastic control plane (membership, capacity-weighted stepping,
+        // soft deadline, leases, tape). Tensor merge for elastic rounds is
+        // not wired yet; legacy never reaches this branch.
+        let listener = TcpListener::bind(("0.0.0.0", cfg.port))
+            .await
+            .with_context(|| format!("bind elastic syncer port {}", cfg.port))?;
+        let version = crate::elastic_server::run(
+            listener,
+            crate::elastic_server::ElasticServerConfig {
+                params,
+                key: cfg
+                    .island_hmac_key
+                    .clone()
+                    .context("elastic mode requires an island HMAC key")?,
+                syncer_epoch: cfg.syncer_epoch,
+                lease_s: cfg.island_lease_s,
+                total_steps: cfg.total_steps,
+                event_tape: cfg.event_tape.clone(),
+                tick: std::time::Duration::from_millis(50),
+                outer_lr: cfg.outer_lr,
+                outer_momentum: cfg.outer_momentum,
+                final_grace: std::time::Duration::from_secs(
+                    cfg.elastic_final_grace_s.unwrap_or(params.soft_deadline_s),
+                ),
+                checkpoint_path: cfg.checkpoint_path.clone(),
+                checkpoint_every: cfg.checkpoint_every,
+                resume: cfg.resume,
+            },
+        )
+        .await?
+        .0;
+        info!(outer_version = version, "elastic syncer finished");
+        return Ok(());
+    }
     if cfg.resume {
         let path = cfg
             .checkpoint_path
@@ -3997,6 +4045,11 @@ mod tests {
             max_base_lag: Some(0),
             learner_weight: LearnerWeight::Equal,
             require_profile_binding: false,
+            island_scheduling: Default::default(),
+            island_hmac_key: None,
+            island_lease_s: 30.0,
+            syncer_epoch: 0,
+            elastic_final_grace_s: None,
         }
     }
 
@@ -4036,6 +4089,95 @@ mod tests {
         assert_eq!(config.semantic_profile_hash(), original);
         config.pipeline = 3;
         assert_ne!(config.semantic_profile_hash(), original);
+    }
+
+    #[test]
+    fn elastic_profile_hash_matches_the_python_canonical_vector() {
+        // Same inputs as semantic_profile_hash_matches_the_python_canonical_vector
+        // plus elastic defaults; Python: tests/test_rl_inter_island_contract.py.
+        let mut config = round_test_config(8);
+        config.learners = 2;
+        config.quorum = 2;
+        config.grace_gamma = 0.8;
+        config.grace_tau = 2.0;
+        config.pipeline = 2;
+        config.sync_interval_steps = 24.0;
+        config.quorum_timeout_s = 900;
+        config.final_ack_timeout_s = 900;
+        config.outer_lr = 0.7;
+        config.outer_momentum = 0.9;
+        config.checkpoint_path = Some(std::path::PathBuf::from("/ignored/actor.ckpt"));
+        config.checkpoint_every = 1;
+        config.resume = true;
+        config.mark_final_checkpoint = true;
+        config.require_profile_binding = true;
+        config.island_scheduling = crate::elastic::IslandSchedulingMode::Elastic(
+            crate::elastic::ElasticParams {
+                quorum_theta: 0.75,
+                carry_gamma: 0.5,
+                soft_deadline_s: 900,
+                q_min: 1,
+                max_carry_lag: 2,
+            },
+        );
+        let digest = config
+            .semantic_profile_hash()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest,
+            "4b61bb37c3dfafce169058a26f4e76dd1fcaad257c115ea468133916a24560b8"
+        );
+    }
+
+    #[test]
+    fn island_scheduling_mode_is_bound_into_the_profile_hash() {
+        use crate::elastic::{ElasticParams, IslandSchedulingMode};
+        let mut config = round_test_config(8);
+        let legacy = config.semantic_profile_hash();
+        // An explicit legacy mode and an HMAC key leave the hash untouched.
+        config.island_scheduling = IslandSchedulingMode::Legacy;
+        config.island_hmac_key = Some(b"secret".to_vec());
+        assert_eq!(config.semantic_profile_hash(), legacy);
+        let base = ElasticParams {
+            quorum_theta: 0.75,
+            carry_gamma: 0.5,
+            soft_deadline_s: 900,
+            q_min: 1,
+            max_carry_lag: 2,
+        };
+        config.island_scheduling = IslandSchedulingMode::Elastic(base);
+        let elastic = config.semantic_profile_hash();
+        assert_ne!(elastic, legacy, "legacy HELLO must not match an elastic server");
+        let variants = [
+            ElasticParams { quorum_theta: 0.5, ..base },
+            ElasticParams { carry_gamma: 0.25, ..base },
+            ElasticParams { soft_deadline_s: 60, ..base },
+            ElasticParams { q_min: 2, ..base },
+            ElasticParams { max_carry_lag: 3, ..base },
+        ];
+        for v in variants {
+            config.island_scheduling = IslandSchedulingMode::Elastic(v);
+            assert_ne!(config.semantic_profile_hash(), elastic, "{v:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn elastic_mode_requires_an_hmac_key() {
+        let mut config = round_test_config(1);
+        config.port = 0;
+        config.island_scheduling = crate::elastic::IslandSchedulingMode::Elastic(
+            crate::elastic::ElasticParams {
+                quorum_theta: 0.75,
+                carry_gamma: 0.5,
+                soft_deadline_s: 900,
+                q_min: 1,
+                max_carry_lag: 2,
+            },
+        );
+        let err = run(config).await.unwrap_err();
+        assert!(format!("{err:#}").contains("HMAC key"));
     }
 
     fn sweep_test_config(fragments: u32, total_steps: u64) -> Config {

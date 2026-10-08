@@ -1,3 +1,5 @@
+mod elastic;
+mod elastic_server;
 mod iso_worker;
 mod merge;
 mod protocol;
@@ -120,6 +122,40 @@ struct Args {
     /// this is explicitly enabled.
     #[arg(long, default_value_t = false)]
     require_profile_binding: bool,
+    /// Inter-island scheduling mode: legacy (default, unchanged behavior)
+    /// or elastic (change rl-inter-island-scheduling).
+    #[arg(long, default_value = "legacy")]
+    island_scheduling_mode: String,
+    /// elastic: capacity fraction that must arrive before an outer step (θ).
+    #[arg(long, default_value_t = elastic::DEFAULT_QUORUM_THETA)]
+    quorum_theta: f64,
+    /// elastic: per-step discount of a late (carried-over) delta (γ).
+    #[arg(long, default_value_t = elastic::DEFAULT_CARRY_GAMMA)]
+    carry_gamma: f64,
+    /// elastic: soft deadline in seconds; defaults to --quorum-timeout-s.
+    #[arg(long)]
+    soft_deadline_s: Option<u64>,
+    /// elastic: minimum arrived islands for a step.
+    #[arg(long, default_value_t = elastic::DEFAULT_Q_MIN)]
+    q_min: u32,
+    /// elastic: largest base lag still carried over; larger is rejected.
+    #[arg(long, default_value_t = elastic::DEFAULT_MAX_CARRY_LAG)]
+    max_carry_lag: u32,
+    /// elastic: HMAC-SHA256 key for the elastic message types; falls back
+    /// to the YETO_ISLAND_HMAC_KEY environment variable.
+    #[arg(long)]
+    island_hmac_key: Option<String>,
+    /// elastic: membership lease in seconds (no heartbeat -> removed).
+    #[arg(long, default_value_t = 30.0)]
+    island_lease_s: f64,
+    /// elastic: fencing token of this syncer incarnation; bump on every
+    /// restart (D-S6 will persist it in the checkpoint).
+    #[arg(long, default_value_t = 0)]
+    syncer_epoch: u64,
+    /// elastic: after total_steps keep answering FINISHED for this many
+    /// seconds (or until every member left); defaults to the soft deadline.
+    #[arg(long)]
+    final_grace_s: Option<u64>,
 }
 
 impl Args {
@@ -170,6 +206,25 @@ fn main() -> anyhow::Result<()> {
         device: args.iso_worker_device,
     }
     .with_pool(devices, args.iso_worker_queue_capacity)?;
+    let island_scheduling = elastic::IslandSchedulingMode::parse(
+        &args.island_scheduling_mode,
+        args.quorum_theta,
+        args.carry_gamma,
+        args.soft_deadline_s.unwrap_or(args.quorum_timeout_s),
+        args.q_min,
+        args.max_carry_lag,
+    )?;
+    let island_hmac_key = args
+        .island_hmac_key
+        .clone()
+        .or_else(|| std::env::var("YETO_ISLAND_HMAC_KEY").ok())
+        .filter(|k| !k.is_empty())
+        .map(String::into_bytes);
+    if matches!(island_scheduling, elastic::IslandSchedulingMode::Elastic(_))
+        && island_hmac_key.is_none()
+    {
+        anyhow::bail!("elastic mode requires --island-hmac-key or YETO_ISLAND_HMAC_KEY");
+    }
     let cfg = server::Config {
         port: args.port,
         learners: args.learners,
@@ -198,6 +253,11 @@ fn main() -> anyhow::Result<()> {
         max_base_lag: args.max_base_lag,
         learner_weight,
         require_profile_binding: args.require_profile_binding,
+        island_scheduling,
+        island_hmac_key,
+        island_lease_s: args.island_lease_s,
+        syncer_epoch: args.syncer_epoch,
+        elastic_final_grace_s: args.final_grace_s,
     };
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -257,5 +317,32 @@ mod tests {
         .unwrap();
         assert_eq!(sweep.policy_sweep_fragments, Some(4));
         assert_eq!(sweep.total_steps, 8);
+    }
+
+    #[test]
+    fn island_scheduling_defaults_to_legacy_and_soft_deadline_inherits() {
+        let a = Args::try_parse_from(["yeto-syncer", "--learners", "2", "--total-steps", "8"])
+            .unwrap();
+        assert_eq!(a.island_scheduling_mode, "legacy");
+        assert_eq!((a.quorum_theta, a.carry_gamma, a.q_min, a.max_carry_lag), (0.75, 0.5, 1, 2));
+        assert_eq!(a.soft_deadline_s, None);
+        let e = Args::try_parse_from([
+            "yeto-syncer", "--learners", "2", "--total-steps", "8",
+            "--island-scheduling-mode", "elastic", "--quorum-theta", "0.6",
+            "--carry-gamma", "0.25", "--soft-deadline-s", "30", "--q-min", "2",
+            "--max-carry-lag", "3",
+        ])
+        .unwrap();
+        let mode = elastic::IslandSchedulingMode::parse(
+            &e.island_scheduling_mode, e.quorum_theta, e.carry_gamma,
+            e.soft_deadline_s.unwrap_or(e.quorum_timeout_s), e.q_min, e.max_carry_lag,
+        )
+        .unwrap();
+        assert_eq!(
+            mode,
+            elastic::IslandSchedulingMode::Elastic(elastic::ElasticParams {
+                quorum_theta: 0.6, carry_gamma: 0.25, soft_deadline_s: 30, q_min: 2, max_carry_lag: 3,
+            })
+        );
     }
 }
