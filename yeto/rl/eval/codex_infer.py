@@ -150,17 +150,22 @@ class InferConfig:
         return out
 
 
-def resolve_parsers(tito_model: str) -> tuple[str | None, str | None]:
-    """SGLang (reasoning, tool-call) parsers for the TITO family -- the same Miles
-    resolver the training config uses for ``--sglang-reasoning-parser`` /
-    ``--sglang-tool-call-parser`` (``yeto.rl.adapters.miles.config``)."""
-    from miles.utils.chat_template_utils import resolve_reasoning_and_tool_call_parser
+def resolve_serving(tito_model: str) -> dict[str, Any]:
+    """What the training island derives from ``--tito-model`` (Miles' own resolvers):
+    the SGLang reasoning / tool-call parsers (``yeto.rl.adapters.miles.config`` adds
+    them as ``--sglang-*-parser``) and the family's fixed chat template + kwargs
+    (``miles.utils.arguments``: ``chat_template_path`` for the session server,
+    ``--sglang-chat-template`` for SGLang)."""
+    from miles.utils.chat_template_utils import resolve_fixed_chat_template, resolve_reasoning_and_tool_call_parser
 
-    return resolve_reasoning_and_tool_call_parser(tito_model)
+    reasoning, tool_call = resolve_reasoning_and_tool_call_parser(tito_model)
+    template, kwargs = resolve_fixed_chat_template(tito_model)
+    return {"reasoning_parser": reasoning, "tool_call_parser": tool_call,
+            "chat_template_path": template, "chat_template_kwargs": dict(kwargs)}
 
 
 def sglang_argv(cfg: InferConfig, *, rank: int, targets: list[str], python: str = sys.executable,
-                parsers: tuple[str | None, str | None] = (None, None)) -> list[str]:
+                serving: Mapping[str, Any] | None = None) -> list[str]:
     argv = [python, "-m", "sglang.launch_server", "--model-path", cfg.base_model,
             "--host", cfg.host, "--port", str(cfg.sglang_port), "--trust-remote-code",
             "--context-length", str(cfg.context_length), "--mem-fraction-static", str(cfg.mem_fraction_static),
@@ -168,22 +173,31 @@ def sglang_argv(cfg: InferConfig, *, rank: int, targets: list[str], python: str 
             "--max-loaded-loras", "2", "--max-loras-per-batch", "1"]
     if cfg.revision and not Path(cfg.base_model).exists():
         argv += ["--revision", cfg.revision]
-    reasoning, tool_call = parsers
-    if reasoning is not None:
-        argv += ["--reasoning-parser", reasoning]
-    if tool_call is not None:
-        argv += ["--tool-call-parser", tool_call]
+    serving = serving or {}
+    if serving.get("reasoning_parser") is not None:
+        argv += ["--reasoning-parser", serving["reasoning_parser"]]
+    if serving.get("tool_call_parser") is not None:
+        argv += ["--tool-call-parser", serving["tool_call_parser"]]
+    if serving.get("chat_template_path") is not None:
+        argv += ["--chat-template", serving["chat_template_path"]]
     return argv + list(cfg.sglang_extra_args)
 
 
-def session_server_config(cfg: InferConfig, *, rank: int) -> dict[str, Any]:
+def session_server_config(cfg: InferConfig, *, rank: int, serving: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """``miles.rollout.session.config.SessionServerConfig`` fields, as the training island sets them
     (``compute_session_server_config``) for a LoRA codex run without replay / speculative decoding."""
+    serving = serving or {}
+    kwargs = dict(cfg.chat_template_kwargs)
+    for key, value in (serving.get("chat_template_kwargs") or {}).items():
+        if key in kwargs and kwargs[key] != value:  # miles.utils.arguments: conflicting values are invalid
+            raise ValueError(f"chat template kwarg {key}={kwargs[key]!r} conflicts with the {cfg.tito_model} "
+                             f"family's fixed {value!r}")
+        kwargs[key] = value
     return {
         "host": cfg.host, "port": cfg.session_port, "instance_id": "eval-island",
         "backend_url": cfg.sglang_url, "timeout": 1800.0, "hf_checkpoint": cfg.base_model,
-        "chat_template_path": None, "tito_model": cfg.tito_model,
-        "apply_chat_template_kwargs": dict(cfg.chat_template_kwargs),
+        "chat_template_path": serving.get("chat_template_path"), "tito_model": cfg.tito_model,
+        "apply_chat_template_kwargs": kwargs,
         "use_rollout_routing_replay": False, "use_rollout_indexer_replay": False,
         "use_sampling_support_replay": False, "sglang_speculative_algorithm": None,
         "num_layers": None, "moe_router_topk": None, "save_debug_trajectory_data": None,
@@ -207,9 +221,9 @@ class SglangSessionLoader:
     def __init__(self, cfg: InferConfig, *, popen: Callable[..., Any] = subprocess.Popen,
                  http: Callable[..., tuple[int, Any]] = _http, sleep: Callable[[float], None] = time.sleep,
                  clock: Callable[[], float] = time.monotonic, emit: Callable[..., None] | None = None,
-                 parsers: Callable[[str], tuple[str | None, str | None]] = resolve_parsers) -> None:
+                 serving: Callable[[str], Mapping[str, Any]] = resolve_serving) -> None:
         self.cfg = cfg
-        self.parsers = parsers
+        self.serving = serving
         self.popen = popen
         self.http = http
         self.sleep = sleep
@@ -244,15 +258,14 @@ class SglangSessionLoader:
             self.sleep(2.0)
 
     def _start(self, rank: int, targets: list[str]) -> dict[str, float]:
-        parsers = self.parsers(self.cfg.tito_model)
-        self._spawn("sglang", sglang_argv(self.cfg, rank=rank, targets=targets, parsers=parsers))
+        serving = dict(self.serving(self.cfg.tito_model))
+        self._spawn("sglang", sglang_argv(self.cfg, rank=rank, targets=targets, serving=serving))
         sglang_s = self._wait("sglang", f"{self.cfg.sglang_url}/health_generate")
         self._spawn("session-server", [sys.executable, "-c", SESSION_SERVER_BOOT,
-                                       json.dumps(session_server_config(self.cfg, rank=rank))])
+                                       json.dumps(session_server_config(self.cfg, rank=rank, serving=serving))])
         session_s = self._wait("session-server", f"{self.cfg.session_url}/health")
-        self.served = {"rank": rank, "targets": list(targets), "parsers": list(parsers)}
-        return {"sglang_start_s": sglang_s, "session_server_start_s": session_s,
-                "reasoning_parser": parsers[0], "tool_call_parser": parsers[1]}
+        self.served = {"rank": rank, "targets": list(targets)}
+        return {"sglang_start_s": sglang_s, "session_server_start_s": session_s, "serving": serving}
 
     def load(self, manifest: Mapping[str, Any], files_dir: Path) -> str:
         version = int(manifest["policy_version"])

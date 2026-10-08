@@ -69,13 +69,19 @@ def test_write_peft_dir_checks_tensor_hash(tmp_path):
 
 def test_sglang_argv_and_session_config_match_training():
     cfg = ci.InferConfig(base_model="/models/q", revision="r", sglang_extra_args=("--x", "1"))
-    argv = ci.sglang_argv(cfg, rank=16, targets=["o_proj", "out_proj"], python="py",
-                          parsers=("qwen3", "qwen3_coder"))
+    serving = {"reasoning_parser": "qwen3", "tool_call_parser": "qwen3_coder", "chat_template_path": "/t.jinja",
+               "chat_template_kwargs": {"enable_thinking": True}}
+    argv = ci.sglang_argv(cfg, rank=16, targets=["o_proj", "out_proj"], python="py", serving=serving)
     joined = " ".join(argv)
-    assert "--reasoning-parser qwen3 --tool-call-parser qwen3_coder" in joined
+    assert "--reasoning-parser qwen3 --tool-call-parser qwen3_coder --chat-template /t.jinja" in joined
     assert "parser" not in " ".join(ci.sglang_argv(cfg, rank=16, targets=["o_proj"], python="py"))
     assert "--enable-lora --max-lora-rank 16 --lora-target-modules o_proj out_proj" in joined
     assert "--context-length 8192" in joined and argv[-2:] == ["--x", "1"]
+    sc2 = ci.session_server_config(cfg, rank=16, serving=serving)
+    assert sc2["chat_template_path"] == "/t.jinja"
+    assert sc2["apply_chat_template_kwargs"] == {"clear_thinking": False, "enable_thinking": True}
+    with pytest.raises(ValueError, match="conflicts"):
+        ci.session_server_config(cfg, rank=16, serving={"chat_template_kwargs": {"clear_thinking": True}})
     assert "--revision" not in argv or not Path("/models/q").exists()
     sc = ci.session_server_config(cfg, rank=16)
     assert sc["tito_model"] == "qwen35" and sc["apply_chat_template_kwargs"] == {"clear_thinking": False}
@@ -133,7 +139,9 @@ def _loader(monkeypatch, tmp_path, *, rank=16, targets=("o_proj",), refuse=False
     loader = ci.SglangSessionLoader(ci.InferConfig(base_model="B", work_dir=str(tmp_path)), popen=popen,
                                     http=http, sleep=lambda s: None,
                                     emit=lambda e, **f: events.append((e, f)),
-                                    parsers=lambda tito: ("qwen3", "qwen3_coder"))
+                                    serving=lambda tito: {"reasoning_parser": "qwen3",
+                                                          "tool_call_parser": "qwen3_coder",
+                                                          "chat_template_path": "/t.jinja"})
     return loader, spawned, http, events
 
 
@@ -150,7 +158,8 @@ def test_loader_starts_once_then_swaps_adapter(monkeypatch, tmp_path):
     load_bodies = [c[2] for c in http.calls if c[1].endswith("/load_lora_adapter")]
     assert {b["lora_name"] for b in load_bodies} == {ci.SERVED_LORA_NAME}
     assert [e for e, _ in events] == ["rl_eval_policy_load"] * 2 and "sglang_start_s" in events[0][1]
-    assert events[0][1]["tool_call_parser"] == "qwen3_coder"
+    assert events[0][1]["serving"]["tool_call_parser"] == "qwen3_coder"
+    assert json.loads(spawned[1][-1])["chat_template_path"] == "/t.jinja"
     loader.close()
     assert all(p is not None for p in loader.procs.values())
 
