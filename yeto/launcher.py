@@ -4033,6 +4033,7 @@ def make_miles_island_task(
             f"{worker_model_fetch}"
             "  for _ in $(seq 1 150); do "
             'ray start --address="$MASTER_ADDR:6379" --temp-dir="$MILES_RAY_DIR"'
+            f"{_worker_node_ip_flag(spec.cloud)}"
             f"{rl_island_ray_gpus(args, spec)} && break; "
             "sleep 2; done\n"
             "  ray status --address=\"$MASTER_ADDR:6379\" >/dev/null 2>&1 "
@@ -6490,6 +6491,17 @@ def launch_verda_island(sky, task, name: str, spec, args, *, sleep=None):
         lambda avail, demoted: verda_launch_candidates(spec, args, avail, demoted),
         sleep=sleep,
     )
+
+
+def _worker_node_ip_flag(cloud: str) -> str:
+    """Modal only (CLOUD-OPTIONS-S16 A.5 item 4): a Modal container has both an
+    i6pn IPv6 and an IPv4 interface, so a worker lets Ray pick and may register an
+    unreachable address.  Pin it to this rank's IPv4 from SKYPILOT_NODE_IPS
+    (modal_runner maps the IPv4 list, rank order).  Other clouds: unchanged argv."""
+    if cloud != "modal":
+        return ""
+    return (' --node-ip-address="$(echo "$SKYPILOT_NODE_IPS" '
+            '| sed -n "$((SKYPILOT_NODE_RANK + 1))p")"')
 
 
 def _island_post_cmd(args) -> str:
