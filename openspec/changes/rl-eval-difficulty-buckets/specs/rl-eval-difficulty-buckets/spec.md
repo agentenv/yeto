@@ -59,3 +59,10 @@
 #### Scenario: 评测口径变化
 - **WHEN** 两次评测的 `eval/set_sha256` 或 `eval/sampling` 不同
 - **THEN** 展示端可据此断线显示，而不是把两者连成一条曲线
+
+### Requirement: 训练批次按难度分桶统计
+每轮训练批次 SHALL 按与评测集相同的难度口径查桶（查不到标 `unknown`），在 rollout 进程现有的批次汇总处按桶给出 reward 均值、截断率、回答长度与题数，随 `rl_rollout` 事件送到驱动；该统计 SHALL 只读样本标量，不读词元或张量。
+
+#### Scenario: 每轮训练有分桶汇总
+- **WHEN** 一轮训练生成结束、样本交给训练之前
+- **THEN** `rl_rollout` 事件带 `batch_summary_by_bucket`，各桶题数之和等于本轮训练题数

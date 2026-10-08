@@ -33,5 +33,5 @@
 ## 5. 对接与以后
 
 - [ ] 5.1 把 D8 的接口需求交给 WP4（yeto-fleet-dashboard）
-- [ ] 5.2 （可选，待用户定）训练批次按难度分桶统计（D4.4）
+- [ ] 5.2 训练批次按难度分桶统计（D4.4，用户已定要做）：构建工具在训练数据行写 `bucket`；`rollout_meta_hook.build_metadata` 里按桶调用 `batch_summary`，写入 `rl_rollout` 事件 `batch_summary_by_bucket`；CPU 单测 + 真机核对开销
 - [ ] 5.3 codex/TB2 评测集方案另开 change（D7）
