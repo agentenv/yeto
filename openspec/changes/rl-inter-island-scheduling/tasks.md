@@ -35,11 +35,15 @@
 - [x] 0.11 [CPU] 慢岛降级建议：`pause_advice.slow_island_advice`（某岛每轮耗时超过其它岛中位数的 2 倍即出建议，`target_resource_intent={action:"rollout_only", requires_human_confirmation: true}`，不是否决、不给暂停预算、不执行）；假岛在 elastic 下把建议写进 tape（`timeline` 的 `pause_advice` 事件），legacy 不出建议。云价再分配只保留字段接口。
 - [x] 0.12 [CPU] 对象存储样本池：索引格式 `SampleIndexEntry`（schema `yeto.rl.sample-index/v1`）、`SamplePoolIndex`（组不跨岛、按 syncer 记录判定筛选、清理旧索引）与 driver 接口草案 `CrossIslandSampleSource.fetch`（未实现下载）；design 新增一节；单测 `tests/test_rl_inter_island_sample_pool.py`。
 
+- [x] 0.28 [RS][CPU] 带宽埋点：elastic 同步服务对每个收到的 ELASTIC_INIT / DELTA_TENSOR 帧和每个发出的 ELASTIC_BASE 帧，在事件磁带写一条 `{"kind":"transfer","syncer_epoch","direction":"recv|send","msg":"elastic_init|delta_tensor|elastic_base","island_id","bytes","seconds","outer_version"}`（bytes 含 13 字节帧头；接收耗时从读完帧头到读完载荷，发送耗时为写入套接字的时间），同时打一行日志。直接写磁带文件、不进协调器内部事件表，因此检查点格式和 Python 账本对照用例不变；legacy 路径未改。实现：`syncer/src/elastic_server.rs`（`Shared::record_transfer`、`serve_conn`）。验证：新增 Rust 单测 `tensor_frames_record_transfer_bytes_and_seconds`（字节数与编码帧逐一相等、岛号与 epoch 正确、耗时非空），`cargo test` 139 通过（2026-10-08）。真机未验证。
+
 ## 1. 阶段 1：两岛小模型真机（≈$30，待批，不预登记）
 
 - [x] 1.1 [CPU] prelaunch review + 脚本（两岛小模型，中途 kill/拉起一岛，跨岛样本 ACCEPT_IS、P4 carried_over、P6 降级 advice）；θ/γ 在此校准。依赖：0.8、rl-infra-spec 3.8/X6。
 - [x] 1.0 [GPU] legacy 回归（待批）：两岛小模型真机用 legacy 模式跑一次，与历史两岛结果对比（外层合并次数、reward、权重哈希），确认旧模式未变。
 - [ ] 1.2 [GPU] 执行；判据：成员变化不触发退出码 4/6、catch-up 首轮零权重在 syncer tape 可见、reward 不劣于无跨岛样本基线、带宽实测入档。
+  - 补充（2026-10-08，用户要求）：下次上卡必须采集带宽——同步服务对每次张量传输记录字节数和耗时并写入事件磁带（实现见 0.28），带宽由这些记录计算后入档。此前各次 1.2 运行的磁带与同步服务日志均无传输字节数和耗时，无法事后补算。
+  - 已裁定（2026-10-08）：断开期间用旧基座训出的增量，重新加入后按迟到增量并入（design"用户裁定记录"第 11 条）；judge 的 C4 按 v2 口径（catch-up 条目为 0 + 迟到增量记为信息）。
 
 ## 2. 阶段 2：FN 2×8（待批）
 
