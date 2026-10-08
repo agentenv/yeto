@@ -87,6 +87,8 @@
 
 在用户拍板前，4.11 只交付本方案，`seq_adv`/`teacher_forcing`/codex 的 A2/A5/A7 白名单条目保持。
 
+**拍板与实施（2026-10-08 夜，主 agent 代拍板第 2 条）**：采用方案 A，变量未设时默认 miles（细节 1 选 (a)）。实现：`yeto/rl/engine/backends.py`（与 5.4 同一张注册表，按角色查模块）、`yeto/rl/engine/rollout_meta.py`；Miles 适配层在 `connect_island_ray` 的 Ray 作业环境里设 `YETO_RL_BACKEND=miles`（codex 子进程经环境继承）。哈希：seq_adv_maxrl 换新算法哈希；codex_harness 只有插件源码哈希变，算法哈希与契约哈希不变（hash-migration.md「阶段 4 记录」）。到 verl 落地后再议是否改为必须显式设置。
+
 ## Risks / Trade-offs
 
 - [搬迁改动 import 面大，易漏] → 转发模块 + 边界检查 + 标准样本三重兜底；每阶段只搬一类文件。
