@@ -114,6 +114,8 @@ SWE-bench Verified：`task_id` = 官方 `instance_id`（如 `django__django-1109
   |---|---|---|---|
   | Modal（GPU 本来就是可抢占价） | 官方价目 $36.3/h；台账实际口径 $46.0/h（含 CPU/内存等） | $110–160 | $220–320 |
   | AWS spot p5en/p5e（us-east-2） | 7 天中位 $28.6–32.0/h | $85–110 | $170–220 |
+  | Nebius 可抢占（eu-north1） | sky 目录静态价 $19.6/h（10-08 起改动态价，以计费计算器实时报价为准） | $60–70 | $120–140 |
+  | Verda spot | 官方价目 H200 $2.54/卡/时 → 8 卡约 $20.3/h（8 卡 spot 是否有货未知） | $60–70 | $120–140 |
   | 自有集群 | 未知 | 未知 | 未知 |
 - 另加判分沙箱（Modal CPU）：WP6 估 SWE 每次约 $2；TB2 未估。
 - 评测岛与训练并行（D11），**不再拖慢训练**；上表即全部额外花费。被回收的重跑损失按 D11.3 只损失进行中的那几条。
@@ -154,11 +156,35 @@ SWE-bench Verified：`task_id` = 官方 `instance_id`（如 `django__django-1109
 
 **D11.4 与训练并行还是串行**：并行。训练驱动只负责"在评测版本把 adapter 写到持久存储并登记待评任务"，**不等评测**。评测岛按队列逐个评；若上一版本还没评完、新的评测版本又到了，新版本排队（不丢弃，队列长度和滞后轮数写进事件）。训练结束后评测岛把最后一版评完再退出。同卡单岛小规模验证时仍可用现有串行评测。
 
-**D11.5 卡源与价格**（已查，2026-10-08）：
-- **Modal**：官方文档（modal.com/docs/guide/preemption）写明"所有 Modal Function 默认可被抢占"，"`nonpreemptible` 不支持 GPU Function"，非抢占只对 CPU/内存加 3 倍价。也就是说 **Modal GPU 本来就是可抢占的价格，没有更便宜的 spot 档**。价目（modal.com/pricing）H200 $0.001261/秒 ≈ $4.54/卡/时，8 卡 ≈ $36.3/h；我们台账的实际口径是 $46.01/h（8×H200，含 CPU/内存等，FNCODEX-STAGE2-ANALYSIS §5）。被抢占时 Modal 发中断信号并在同一输入上重启，宽限期长度文档没写（**未知**）。
-- **AWS spot**（CLOUD-OPTIONS-S16 §B，已核）：p5en/p5e（8×H200）us-east-2 七天中位 $28.6–32.0/h（按需 $63.3）；近 30 天回收频率 p5en us-east-2 5–10%；**放置分数全部为 1（很难拿到）**；P 类 spot 配额 us-east-2 384 vCPU，够 2 台。评测岛只要 1 台，配额够；能否拿到是主要风险。
-- **自有集群**：约 10-10 到货，型号、价格、是否可抢占**未知**；到货后作为评测岛首选候选（边际成本可能最低）。
-- 推荐顺序：先 Modal（已接好、价格与训练相同但不拖慢训练）；AWS spot 能拿到时更便宜约 25–40%；自有集群到货后再评估。
+**D11.5 多云卡源：怎么拿、多少钱**（用户 S17 裁定：Modal 与 AWS、Verda、Nebius 的 spot 都可以试；评测成本可接受）。评测岛是单节点 8×H200（FN 推理 SGLang TP8），只需出站网络（读存储、调 Modal 判分沙箱、写结果），不需要对外开端口。
+
+| 云 | 怎么拿可抢占卡（现有代码） | 价格（8×H200/时） | 可用性怎么探 | 已知问题 |
+|---|---|---|---|---|
+| Modal | `yeto/modal_runner.py`（GPU 函数本来就可抢占，无需额外参数）；价格 `providers.modal_node_price_per_hour` | 官方价目 $4.54/卡 → $36.3；台账实际 $46.0 | 无容量接口；账户上限 50 卡 | 官方文档（modal.com/docs/guide/preemption）：GPU 函数默认可抢占、`nonpreemptible` 不支持 GPU，所以没有更便宜的档；抢占后在同一输入上重启，宽限期长度文档未写（未知） |
+| AWS | sky 启动 spot（launcher 默认 spot）；`yeto/shape/providers.py` 的 `AwsProviders`：spot 放置分数（`get_spot_placement_scores`）、"All P Spot" 配额与已用量 | p5en/p5e us-east-2 七天中位 $28.6–32.0（按需 $63.3；CLOUD-OPTIONS-S16 §B，已核） | 放置分数 + 配额（us-east-2 384 vCPU，一台 192） | **放置分数全部为 1**，很可能拿不到；回收提前约 2 分钟通知是 AWS 惯例（未核，仓库里没有代码读它）；模型权重不在 AWS（CLOUD-OPTIONS G4），新机器要从 HF 下载 |
+| Nebius | sky 启动 preemptible；`providers.NebiusSignals`（Capacity API resource-advice 按 preemptible 档报可起数量；计费计算器报实时可抢占价）；`/home/michael/work/tools/nebius_capacity_poll.py --once`（只读） | sky 目录静态 spot 价 $19.6（按需 $36.0）；10-08 起可抢占价改动态，以计费计算器为准 | Capacity Advisor 的 `preemptible.available`；实例 STOPPED + Reconciling 即无货 | 只有 eu-north1 可用；已有 Nebius 共享盘与模型存放（`--model-store`） |
+| Verda | `yeto/sky_patches/verda.py`、`providers.VerdaSignals`（`use_spot`、读 `spot_price`）、`launch_with_verda_candidates`（按候选位置依次试，`VerdaCapacityExhausted` 即换下一家）、`yeto/verda_ops.py` | 官方价目 H200 spot $2.54/卡（按需 $5.07）→ 8 卡约 $20.3；8 卡 spot 是否提供未知 | `/instance-availability` 接口（VerdaSignals） | **常抢不到机器**：台账 10-04 1RTX6000ADA 全区无货、10-07 FIN-02 1×H200 按需 4 次尝试均无库存；sky 在 Verda 不开端口（head 放不了 Verda），评测岛不需要入站端口，不受影响 |
+| 自有集群 | 尚无 provider | 未知 | — | 约 10-10 到货，型号与是否可抢占未知 |
+
+**D11.6 评测岛按价格与可用性依次尝试**：每个评测版本登记后，评测调度器（新增，跑在驱动 / head 侧）：
+1. 并行只读探测：Nebius Capacity Advisor 的 preemptible 可起数量 ≥1；Verda `/instance-availability` 有 8×H200 spot；AWS spot 放置分数与配额余量；Modal 视为总是可用。
+2. 有货者按"单价 + 准备成本"排序。准备成本主要看基座权重是否已在该云（Nebius 共享盘 / Modal Volume 已有；AWS、Verda 要拉约 360 GB，估计 20–60 分钟，未测）。默认顺序：Nebius → Verda → AWS → Modal。
+3. 依次开机；某云失败（无货、超时）或 15 分钟内未就绪即换下一家，兜底 Modal。每次尝试写 `rl_eval_island` 事件（云、区域、单价、等待时间、失败原因），并按规则预登记台账。
+4. 被回收：按 D11.3 续跑，重新从第 1 步选云（不必回同一朵云）。
+5. 同时只跑一个评测岛，队列由它依次消化；排队超过 2 个版本才允许开第 2 个（上限 2，开关默认关，需用户批准）。
+
+**D11.7 持久存储：几朵云都要能读**
+
+| 方案 | 谁能读 | 现状 | 优点 | 缺点 |
+|---|---|---|---|---|
+| a. AWS S3 桶 | 四朵云都能（boto3/awscli 出站访问） | 已有 `--rl-checkpoint-store s3://…` 与桶 yeto-rl-ckpt-ddde6f79（eu-north-1）；`VERIFIED_SPOT_STORAGE_CLOUDS` 只含 aws（`yeto/shape/catalog.py:82`）；Modal 岛**不挂载** S3（CLOUD-OPTIONS-S16 A.5，已核） | 通用、已在用 | 跨云下载付 AWS 出站流量（公开价约 $0.09/GB，未核）：一份 adapter 11.2 GB 约 $1/版本；桶在 eu-north-1，AWS 配额在 us-east-2 |
+| b. Modal Volume | Modal 内挂载；其他云只能经 Modal API/CLI 下载 | 已用于 Modal 上的 torch_dist | Modal 内最快 | 外部云读不方便；Modal 出口 $0.04/GiB（CLOUD-OPTIONS-S16 引 Modal 价格页） |
+| c. Nebius 共享盘 | 只 Nebius 机器 | 已有，放模型权重 | Nebius 内最快 | 其他云读不到 |
+| d. Nebius 对象存储（S3 兼容） | 四朵云都能 | 未使用；价格与出站费**未查** | 与 a 一样通用 | 新接入，未验证 |
+
+**推荐**：a（S3）做权威存放处，只放小而关键的：评测版本 adapter + manifest、逐条评测结果、评测队列。评测岛**启动时用 boto3 主动下载并校验 sha256**，不依赖各云的存储挂载（避开"Modal 不挂 S3"与"只有 AWS 验证过 spot 挂载"）。基座权重（约 360 GB）按云就近缓存：Nebius 共享盘、Modal Volume；AWS/Verda 首次从 HF 拉（或放同区 S3，待定）。
+
+**与检查点续训对齐**：存储选择与 rl-resume-from-checkpoint（另一子 agent，分支 s17-resume-ckpt）是同一个问题，**以那边为准**。截至本次修改（2026-10-08）该分支仍在 dcde202e、尚无这个 change 的文档，所以这里先写推荐；那边定稿后若不同，本节改为跟随。评测侧只要求三点：四朵云都能主动下载、sha256 校验、逐条结果可追加写。
 
 ## Risks / Trade-offs
 
@@ -171,9 +197,10 @@ SWE-bench Verified：`task_id` = 官方 `instance_id`（如 `django__django-1109
 
 ## Open Questions（需用户拍板）
 
-已定：TB2 + SWE-bench Verified（组织版 78f471bf）为主；TB2 先排除冒烟 6 题再留出 30（分层）；SWE-bench Verified 只评测；SWE-Gym 暂不采用；不用 Qwen3-32B 通过率；每 10 轮评一次；训练批次按基准难度字段分桶；评测放便宜的可中断卡。
+已定：TB2 + SWE-bench Verified（组织版 78f471bf）为主；TB2 先排除冒烟 6 题再留出 30（分层）；SWE-bench Verified 只评测；SWE-Gym 暂不采用；不用 Qwen3-32B 通过率；每 10 轮评一次；训练批次按基准难度字段分桶；评测放便宜的可中断卡；评测成本接受；卡源 Modal 与 AWS/Verda/Nebius spot 都可试。
 
-1. 评测成本（D7：Modal 每次约 $110–160，第 0 轮约 $220–320；AWS spot 约便宜 25–40%）是否接受，或减量？
-2. 评测岛卡源先用 Modal，还是先试 AWS spot（放置分数 1，可能拿不到）？
-3. 评测版本额外把 adapter 写到持久存储（D11.2b），用哪个存储（Modal Volume / S3 / Nebius 共享盘）？
-4. 数学固定评测集（D9 可选，不分桶）要不要启用？
+1. 评测岛选云默认顺序 Nebius → Verda → AWS → Modal（D11.6）是否同意？
+2. 持久存储用 S3 做权威存放处（D11.7a），是否同意？最终以 rl-resume-from-checkpoint 为准。
+3. AWS/Verda 上基座权重怎么放：每次从 HF 拉，还是放同区 S3？
+4. 是否允许同时开第 2 个评测岛（D11.6 第 5 条，默认关）？
+5. 数学固定评测集（D9 可选，不分桶）要不要启用？

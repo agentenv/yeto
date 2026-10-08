@@ -35,6 +35,8 @@
 - [ ] 5.4 逐条结果按 (`policy_version`, `task_id`, `trial`) 追加写持久存储；重启后跳过已完成、去重；被回收的进行中轨迹记 `preempted` 不计入
 - [ ] 5.5 版本排队（不丢弃），事件记队列长度、滞后轮数、`eval/preemptions`
 - [ ] 5.6 CPU 单测：模拟回收续跑结果与一次跑完逐位一致
+- [ ] 5.7 评测岛选云调度（D11.6）：复用 `providers.NebiusSignals`/`VerdaSignals`/`AwsProviders` 探针与 `launch_with_verda_candidates`，按价格+准备成本排序、失败换下一家、兜底 Modal；写 `rl_eval_island` 事件；CPU 单测用假探针
+- [ ] 5.8 持久存储（D11.7）：评测岛启动时主动下载 adapter 并校验 sha256，逐条结果追加写；存储方案与 rl-resume-from-checkpoint 对齐后定稿
 
 ## 6. 上卡准备与对接
 
