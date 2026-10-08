@@ -1,142 +1,141 @@
 # Design：按难度分桶的固定评测集
 
+（第 3 版，2026-10-08，按 S17 用户裁定改：评测集以 Terminal-Bench 2 留出集与 SWE-bench Verified 为主；不用 Qwen3-32B 通过率；数学降为可选。上一版的数学分桶方案与调研保留在 D9，供以后参考。）
+
 ## Context
 
-- 现有评测通路：驱动 `_maybe_eval`（`yeto/rl/engine/driver.py` 约 1098 行）每 `eval_interval` 轮调一次 `evaluate`，发 `rl_eval` 事件（字段 `policy_version`、`rl/policy_token`、`eval/<k>`）。训推分离 + `--yeto-rl-overlap-eval` 时走 `overlap.py`：评测在下一轮生成之后启动、在下一次发布之前收尾，评的一定是刚发布的那个版本。
-- ports 路径的 `evaluate`（`miles_adapter/entry.py` 约 1682 行）调 Miles `EvalDispatcher.dispatch`，**不返回数值**。Miles 自己按数据集名记 `eval/<名>`（reward 均值）、`eval/<名>-truncated_ratio`、`eval/<名>-none_reward_ratio`、可选 pass@k（`miles/ray/rollout/metrics.py`），只进 Miles 日志/W&B。`yeto/rl/loss_curve.py` 已能从日志里解析 `eval/<名>-pass@1` 与 `-truncated_ratio`，数据集名必须是短字母数字串（`_SAFE_DATASET`）。
-- Miles 的 `--eval-prompt-data` 接受多组"名字 路径"，每组单独出指标。**所以"每桶一个评测数据集"不需要改 Miles。**
-- S16 实测（FN 2×8，`FN2X8-MODAL-PRELAUNCH-REVIEW.md` §9）：64 个回答的生成约 155 s，推理卡忙约 24%；KV 池 1,005,184 词元；回答上限 8192 时截断率 0.56–0.95。2×8 H200 价格 $87.93/h（`s1-runs/.../cost-params.txt`），单节点约 $44/h。
+- 现有评测通路：驱动 `_maybe_eval`（`yeto/rl/engine/driver.py` 约 1098 行）每 `eval_interval` 轮调一次 `evaluate`，发 `rl_eval` 事件；初始发布后会以 `force=start.rollout_id == 0` 调一次（约 1556 行），即第 0 轮基座评测已有。训推分离 + `--yeto-rl-overlap-eval` 时走 `overlap.py`，评测与训练并行且评的一定是刚发布的版本。
+- ports 路径的 `evaluate`（`miles_adapter/entry.py` 约 1682 行）调 Miles `EvalDispatcher.dispatch` 后**返回空字典**，数值只进 Miles 日志，`rl_eval` 事件里没有。
+- codex 训练数据行现在的形状（`codex-bundle/data/tbench2_smoke6.jsonl`）：`{"prompt": [...], "metadata": {"task_id": "fix-git"}}`。训练批次的逐条奖励已有 `rl_trajectory_reward` 事件（task_id/trajectory_id/reward/success，`rollout_meta_hook.trajectory_reward_records`），训练批次汇总在 `rollout_meta_hook.build_metadata` 里（约 321 行）。
+- 判分环境：TB2 在 Modal 常驻沙箱 yeto-tbench2，每任务判分 2.5–4 分钟（FNCODEX-STAGE2-ANALYSIS.md）；SWE-bench Verified 的沙箱**由 WP6 在 Modal 上做**，本 change 只写接口需求（D6）。
+- 参考耗时（S15 FN codex 实测，FNCODEX-STAGE2-ANALYSIS.md §5）：8×H200（$46.01/h），6 任务 × 4 样本 = 24 条轨迹，单轮"生成 + 训练"约 35 分钟，上下文 8192。
 
 ## Goals / Non-Goals
 
 **Goals：**
-- 一份固定、钉哈希、与训练集不重叠的数学评测集，按难度 5 桶。
-- 第 0 轮 + 每 10 轮 + 最后一轮用当前策略评测，分桶记录 reward 与截断率，逐题原始结果落盘。
-- 评测数值进 `rl_eval` 事件，dashboard（WP4）可直接读。
-- 字段对 harness 中立，codex/TB2 以后可复用。
+- agentic 固定评测集：TB2 留出 30 个任务 + SWE-bench Verified 按官方耗时分档抽题；钉名单与哈希；与训练集有交集即拒绝启动。
+- 第 0 轮 + 每 10 轮 + 最后一轮评测；分桶记录通过率、截断（上下文用尽/回合用尽）比例、轨迹长度；逐条原始结果落盘；进 `rl_eval` 事件。
+- 训练批次按同一套难度字段分桶统计。
+- 字段对 harness 中立。
 
 **Non-Goals：**
-- 不改训练目标、不按难度做课程学习或采样加权（以后可基于本数据再提）。
-- 不做 AIME/MATH-500 等外部公开基准（可以以后作为额外数据集挂上，同一接口）。
-- 不实现 dashboard 页面（WP4）；不定 codex/TB2 的最终分桶。
+- 不实现判分沙箱（WP6）、dashboard（WP4）。
+- 不按难度做课程学习或采样加权。
 - 本 change 不改代码、不上卡。
 
 ## Decisions
 
-### D1 难度从哪来（调研比较）
+### D1 难度从哪来
 
-| 方案 | 现状/依据 | 优点 | 缺点 |
+用**基准自带的官方难度字段**，不用任何外部模型打分（用户裁定：先不用 Qwen3-32B 通过率）：
+
+| 基准 | 字段 | 分布（已核） | 来源 |
 |---|---|---|---|
-| A. 数据集自带字段 | `zhuzilin/dapo-math-17k` 只有 `prompt`、`label`；原版 `BytedTsinghua-SIA/DAPO-Math-17k` 有 `data_source`（全是 `math_dapo`）、`ability`（全是 `MATH`）、`extra_info.index`（只是编号） | 零成本 | **没有难度信息，不可用** |
-| B. 公开的模型通过率 | `qgallouedec/DAPO-Math-17k-Processed-Scored`（钉 b9e6dd45，16,374 行，由 open-r1 的去重版加工）有 `Qwen3-32B_solve_rate`（0–1）。HF 统计：均值 0.566、中位数 0.75；分布两头大：<0.1 共 4,477 题，≥0.9 共 6,171 题，中间各段 600–1,400 题；0.4–0.5 段为 0，说明是少量采样的离散值（每题几次采样、思考模式与否，数据卡**没写**） | 免费、现成、事先固定，不受我们训练影响 | 模型不是我们的基座（Qwen3.8-Flash-Next）；打分方法与许可证未写明；需按题目文本对回 zhuzilin 版本（匹配率未验证） |
-| C. 用我们的基座离线采样估通过率 | 自己跑：候选题 × 每题 8 个回答 | 口径正是我们的基座 | 要上卡：以 800 候选题 × 8 = 6,400 个回答估，按 S16 吞吐外推约 3 小时、约 $130（**估计**）；还要和本轮"不上卡"冲突 |
-| D. 题目来源/竞赛级别标签 | DAPO 题来自 AoPS 等竞赛网站，但发布的数据里**没有**来源/年级字段；其他数据集（如 Big-Math）有来源标签但不是同一批题 | — | 本数据集拿不到 |
+| Terminal-Bench 2.0（89 任务，Apache-2.0） | 每任务 `task.toml` 的 `difficulty` | easy 4 / medium 55 / hard 30 | 本地 tb2-data commit 2fd12b8 |
+| SWE-bench Verified（500 题） | HF 数据 `princeton-nlp/SWE-bench_Verified` 的 `difficulty` 列（OpenAI 人工标注修复耗时） | `<15 min fix` 194 / `15 min - 1 hour` 261 / `1-4 hours` 42 / `>4 hours` 3 | HF datasets-server 统计，2026-10-08 |
 
-**用户已定（S17）**：5 桶 × 40 题、每题 4 个回答（第 0 轮 8 个）；评测题必须从训练集删除；训练批次也按难度分桶统计（D4.4）。**未定**：B 能否用（许可证不明），因此下面保留两种方案。
+第 0 轮评测得到的"基座通过率"也逐题入档，作第二口径（离线分析用，不改桶）。
 
-- **方案甲（B 可用时，推荐）**：分桶用 B，第 0 轮评测顺带得到 C 口径，两者都入档（下述）。
-- **方案乙（B 不可用时）**：先上卡用基座做离线采样。评测集分桶只需对候选题采样：从全集随机取约 800 题 × 每题 8 个回答，按基座通过率分 5 桶再每桶抽 40 题（约 3 小时、约 $130，**估计**）。但 D4.4 的训练批次分桶要求**全部训练题**都有难度，17,198 题（17,398 − 200）× 8 ≈ 13.8 万个回答，按同一吞吐外推约 $3,000（**估计**），超出总预算，不可行。乙方案下训练批次分桶只能退而求其次：只对上述约 800 个已采样题（其中 600 个留在训练集）标桶，其余标 `unknown`；按每轮 256 样本（64 题×4，假设每题 4 个回答）、600/17,198≈3.5% 估算，每轮只有约 2 题能标上桶，统计意义很弱。
+### D2 评测集组成、每档题数、每题评几次
 
-**方案甲的具体做法：B 作分桶口径 + 第 0 轮评测顺带得到 C 的口径。**
-- 分桶用 B（外部、固定、免费），桶的划分在训练开始前就定死，不会被训练结果反向影响。
-- 第 0 轮（基座、训练前）评测每题采 8 个回答，记下"基座每题通过率"。这就是方案 C 的数据，但只花在 200 题上、并入训练运行本身，不另开任务（估计第 0 轮评测约 40–50 分钟，见 D6）。
-- 两个口径都入档：若基座口径与 B 口径差异大（例如 B 的"简单桶"里基座通过率很低），可在离线分析里按基座口径重新分组，原始逐题数据都在，不需要重跑。
-- 依据：B 是唯一现成的逐题难度；A、D 无数据；C 单独做要上卡且贵，而第 0 轮评测本来就要做。
+**TB2 留出 30 个任务**（只评测、永远不训练；训练用其余 59 个）：按官方难度分层，easy 2 / medium 18 / hard 10（easy 全集只有 4 个，只能取 2）。桶：`tb2-easy`、`tb2-medium`、`tb2-hard`；easy 只有 2 题，单独显示但不看趋势，dashboard 默认与 medium 合并显示为"easy+medium"。
 
-### D2 分桶与每桶题数
-
-按 `Qwen3-32B_solve_rate`（记为 r）分 5 桶：
-
-| 桶 | 条件 | 含义 | 全量题数（HF 直方图粗估） |
+**SWE-bench Verified（只做评测，全部不进训练）**，3 桶：
+| 桶 | 官方档 | 全集 | 抽取 |
 |---|---|---|---|
-| b0 | r = 0 | 32B 一次都没做对：极难或标准答案有问题 | ≤4,477（<0.1 段，含 0） |
-| b1 | 0 < r < 0.4 | 难 | 约 1,500–2,000 |
-| b2 | 0.4 ≤ r < 0.8 | 中等 | 约 2,200 |
-| b3 | 0.8 ≤ r < 1 | 偏易 | 约 2,000 |
-| b4 | r = 1 | 32B 全对：易；主要用来发现"学坏了/遗忘" | ≤6,171 |
+| `swev-lt15m` | `<15 min fix` | 194 | 30 |
+| `swev-15m-1h` | `15 min - 1 hour` | 261 | 30 |
+| `swev-ge1h` | `1-4 hours` + `>4 hours` | 42 + 3 | 全部 45 |
+（>4 小时只有 3 题，单独成桶没有统计意义，并入 ≥1 小时。各桶内按仓库分层抽，避免 django（全集 231 题）占满；固定种子。）
 
-（各桶准确题数要在实现时按真实数据统计，上表只是由直方图粗估。）
-
-- **每桶 40 题、共 200 题**，每题评测时采 4 个回答（第 0 轮 8 个）。每桶每次 160 个回答；只看采样噪声，reward 均值的标准误最多约 0.04（0.5/√160）；题与题之间相关会更大，所以实际按"按题自助重采样"算标准误报告，不用这个上界。
-- 抽题：每桶内用固定随机种子抽，题目编号 = 规范化题干的 sha256 前 16 位；记录种子。
-- b0 中可能混有标准答案错的题：第 0 轮后人工抽查 b0 里基座 8 次全错的前 10 题，确认答案有问题的标记"可疑"，统计时单列，不删题（删题会改评测集哈希）。
-- 从训练数据剔除这 200 题（按规范化题干匹配），生成新的训练文件并记新哈希；同时剔除与这 200 题题干几乎相同的变体（规范化后完全相同即剔除；近似重复只记录数量，不做模糊匹配）。
+**每题评几次**：
+- 第 0 轮（基座）：TB2 每任务 4 次，SWE 每题 2 次——同时得到基座通过率。
+- 之后每次：TB2 每任务 2 次（30×2=60 条），SWE 每题 1 次（105 条）。共 165 条轨迹/次。
+- 噪声（只算采样噪声的上界）：TB2 每次 60 条，通过率标准误 ≤0.065；SWE 每桶 30–45 条，≤0.09。跨版本比较用"同题配对差"，噪声比这小；仍偏大，D7 给加量选项。
 
 ### D3 评测时机与采样设置
 
-- 第 0 轮（第一次训练前，评基座）、之后每 10 轮（`eval_interval=10`，`rollout_id % 10 == 0`）、以及最后一轮（`force=True`，驱动已有）。
-- 采样参数与训练一致并在整个运行固定：温度 1、top_p 1、top_k −1、回答上限与训练相同（WP2 定，预计 12288）。评测参数写进运行配置并进入 `rl_eval` 事件，任何一次评测参数变了即视为另一把尺子，dashboard 不连线。
-- 训推分离时默认打开"评测与训练并行"（`--yeto-rl-overlap-eval`，已有），减少额外时间；同卡模式串行。
+- 第 0 轮、每 10 轮（`eval_interval=10`）、最后一轮。
+- 采样参数与训练一致且全程固定（温度、top_p、上下文上限、reasoning effort、最大回合数）。任何一项变化 = 另一把尺子，运行报错停止。
+- 训推分离时评测与训练并行（`--yeto-rl-overlap-eval`）；同卡串行。
 
 ### D4 分开"题目难度"与"策略变化"
 
-1. 固定题：同一批 200 题、同样采样设置，跨版本的变化只能来自策略（加采样噪声，用标准误表示）。
-2. 分桶看：不同难度的变化不再在一个平均数里互相抵消（例如 b4 下降 = 遗忘，b1 上升 = 学到东西）。
-3. 相对第 0 轮：每桶报告"本次 − 第 0 轮"及其标准误（同题配对计算，噪声更小）。
-4. **训练批次分桶统计（用户要求做）**：训练题按同一难度口径（甲方案为 B 的 r，乙方案见 D1）查桶，每轮按 5 桶 + `unknown` 统计训练 reward 均值、截断率、回答长度、题数，用来解释"这一轮训练 reward 低是不是因为抽到难题"。注意：训练批次的分桶数是"训练时的策略在这些题上的表现"，每轮题不同、每桶题数少（256 样本/5 桶≈每桶 50 个回答、约 13 题），只作解释用，**不能替代固定评测集**。
+1. 固定题、固定设置：跨版本变化只来自策略。
+2. 按官方难度分桶看，不同难度的变化不互相抵消。
+3. 相对第 0 轮的同题配对差值及标准误（按题自助重采样）。
+4. 训练批次分桶（D5）用来解释训练奖励起伏，不替代评测。
 
-   **会不会拖慢推理或训练（查代码 + 本机实测）**：
-   - 记账位置：现有的训练批次汇总 `batch_summary()`（`yeto/rl/engine/miles_adapter/rollout_meta_hook.py` 228 行）在 Miles rollout 进程里、`build_metadata()`（约 321 行）中执行，时机是一轮生成全部结束之后、样本交给训练之前；只读每个样本的 reward/长度/状态这些标量，不碰词元、logprob、张量；结果作为一个小 JSON 经元数据通道（Ray actor `yeto_rollout_meta`）送到驱动，驱动写进 `rl_rollout` 事件的 `batch_summary`。分桶统计就加在同一处：按题查桶 → 每桶调一次同样的汇总。
-   - 它与推理并不重叠（推理已结束），也不在训练进程里，所以只会在"生成结束→训练开始"之间加一段 CPU 时间。
-   - 本机 CPU 微基准（2026-10-08，`infra-drafts/wp3-bucket-overhead-bench.py`，假样本，Python 单线程，不起 Ray）：查桶表（17,398 项、以规范化题干 sha256 前 16 位为键）建表 0.056 s（启动时一次）；**每轮 256 个样本：分桶查表 + 6 桶汇总约 1.0 ms**（现有不分桶的 `batch_summary` 约 0.3 ms）；1024 个样本约 4.3 ms；送到驱动的数据约 1.2 KB/轮。桶表 JSON 约 0.45 MB，随 rollout 进程启动加载一次。
-   - 对比 S16 实测每轮约 660 s、生成约 155 s：额外约 1 ms 占每轮 <0.001%，可忽略。实现时如果改用"数据行号 → 桶"直接查（构建工具在训练数据行里写 `bucket` 字段），连题干哈希都不用算，开销更小。
-   - 真机开销**未验证**；实现后用 `rl_rollout` 事件时间戳核对一次。
+### D5 训练批次按难度分桶统计
 
-### D5 事件与落盘字段（harness 中立）
+- 口径：训练数据行 `metadata` 里的 `difficulty`（TB2 训练用的 59 个任务取其 `task.toml` 的官方难度；以后的 SWE-Gym 等训练来源**没有官方难度**，标 `unknown`，见 D8）。
+- 位置：`rollout_meta_hook.build_metadata` 里现有训练批次汇总处，按 `difficulty` 分组，每组给 reward 均值、成功率、截断比例、轨迹长度、条数，写进 `rl_rollout` 事件 `batch_summary_by_bucket`。
+- **开销（查代码 + 本机实测）**：该处在 Miles rollout 进程里，时机是一轮生成全部结束之后、样本交给训练之前，只读样本标量（不碰词元、张量）。本机 CPU 微基准（`infra-drafts/wp3-bucket-overhead-bench.py`，假样本、单线程、不起 Ray）：每轮 256 个样本分组 + 汇总约 1.0 ms（含按题干算 sha256 查表；直接读 `metadata.difficulty` 会更少），1024 个约 4.3 ms，送驱动约 1.2 KB/轮。codex 每轮条数远少于 256（S15 为 24 条），每轮数十分钟，开销可忽略。真机**未验证**。
 
-**评测样本行**（评测集文件每行）新增：`eval_item_id`、`bucket`（如 `b0`…`b4`）、`difficulty_source`（如 `qwen3-32b-solve-rate@b9e6dd45`）、`difficulty_value`。
+### D6 接口需求（判分环境由 WP6 在 Modal 沙箱实现）
 
-**`rl_eval` 事件**扩展（现有字段不变）：
-- `eval/set_id`、`eval/set_sha256`、`eval/bucket_def_sha256`、`eval/sampling`（温度、top_p、top_k、回答上限、每题回答数）
-- 每桶：`eval/<桶>/reward_mean`、`/reward_se`、`/truncated_ratio`、`/resp_len_p50`、`/resp_len_p95`、`/none_reward_ratio`、`/n_items`、`/n_samples`
-- 全体：`eval/all/…` 同上
-- 相对第 0 轮：`eval/<桶>/delta_vs_v0`、`/delta_vs_v0_se`（第 0 轮自身不发）
-- `eval/items_path`、`eval/items_sha256`：逐题文件
-- `eval/wall_s`、`eval/overlapped`（是否与训练并行）
+**a. 每题的难度字段**（训练与评测数据行都带，放 `metadata`）：
+```json
+{"metadata": {"task_id": "fix-git", "benchmark": "tb2", "benchmark_version": "tb2@2fd12b8",
+              "difficulty": "medium", "difficulty_source": "tb2-task.toml",
+              "eval_bucket": "tb2-medium"}}
+```
+SWE-bench Verified：`task_id` = 官方 `instance_id`（如 `django__django-11099`），`benchmark`=`swebench-verified`，`benchmark_version` = HF 数据集修订号，`difficulty` 为官方原文（如 `15 min - 1 hour`），`eval_bucket` 为 D2 的桶名。训练行可没有 `eval_bucket`；没有官方难度的训练来源写 `"difficulty": "unknown"`。
 
-**逐题文件**（每次评测一个 jsonl，放运行目录 `eval/v<版本>.jsonl`）：每行 `eval_item_id`、`bucket`、`policy_version`、每个回答的 `reward`、`truncated`、`resp_len`、`finish_reason`；不存回答全文（太大），全文需要时另开开关。
+**b. 留出名单文件格式**（构建工具生成，进仓库 `data/eval/`，运行配置钉其 sha256）：
+```json
+{"schema": "yeto-eval-holdout/1",
+ "benchmark": "tb2", "benchmark_version": "tb2@2fd12b8",
+ "seed": 20261008, "rule": "stratified by difficulty: easy 2 / medium 18 / hard 10",
+ "items": [{"task_id": "...", "difficulty": "hard", "eval_bucket": "tb2-hard"}]}
+```
+每个基准一份（`tb2-holdout.json`、`swebench-verified-eval.json`）；SWE 的文件 `rule` 写明"全部只评测"。另生成评测数据文件 jsonl（行格式同 a），sha256 也钉进运行配置。
 
-**取数方式**：ports 路径的 `evaluate` 需要把 Miles 评测结果带回驱动。两个候选（实现时选，倾向 a）：
-- a. 在 yeto 的 rollout 包装处（`yeto/rl/miles.py` 的 `generate_rollout(..., evaluation=True)`）拿到评测样本，自己按 `bucket` 算指标并写逐题文件，经 Ray 返回驱动——不改 Miles，指标口径在 yeto，符合去耦合"数学在 yeto"原则，verl 以后也能复用。
-- b. 每桶一个 Miles 数据集名（如 `dapob0`…`dapob4`，满足 `_SAFE_DATASET`），解析 Miles 的 `eval/<名>`、`-truncated_ratio`——最省事，但拿不到逐题数据和标准误，只作为后备/交叉核对。
+**c. "训练集与评测集有交集就拒绝启动"的检查**（驱动启动时、在任何上卡动作之前，CPU 上做）：
+1. 读训练数据所有行的 `task_id`，与所有留出/评测名单的 `task_id` 求交集，非空即拒绝，报出交集个数与前 5 个。
+2. 对 SWE 类：再按 `(repo, base_commit)` 与 `problem_statement` 规范化后（去空白、小写）的 sha256 各比一次——不同数据集可能给同一个 issue 不同编号。
+3. 留出名单 sha256 与运行配置不符、评测数据中有名单外的题、名单中的题在评测数据里缺失，都拒绝启动。
+4. 检查结果（训练行数、各名单题数、交集 0、各文件 sha256）写进 `rl_driver_start` 事件。
 
-### D6 成本估计（全部为**估计，未验证**）
+**d. 判分结果回传**（WP6 实现，供本 change 读）：每条评测轨迹至少给 `task_id`、`trajectory_id`、`policy_version`、`reward`、`success`、`end_reason`（completed/max_turns/max_seq_len/timed_out/infra_error）、`turns`、`tokens`；判分基础设施出错（沙箱起不来等）记 `infra_error`，**不计入通过率**，单列比例。
 
-- 每次评测 200 × 4 = 800 个回答；第 0 轮 1,600 个。
-- 推理吞吐外推：S16 64 个回答约 155 s 且推理卡只忙 24%；KV 池约 100 万词元，回答 12288 时约可并发 80 条。粗算每批 80 条、每批约 150–200 s，800 条约 10 批 ≈ 25–35 分钟；第 0 轮约 50–70 分钟。真实值取决于回答长度分布，首次运行后用 `eval/wall_s` 校正。
-- 钱：推理节点约 $44/h。与训练并行时额外时间主要是评测比训练段长出来的部分；串行（同卡）时整岛空等。按 S16 每轮约 11 分钟（WP1 若提速到约 4.5 分钟则比例更高），10 轮约 110 分钟，评测约 30 分钟，**串行额外约 25%**，并行时明显更少。全量 256 样本/轮、DP2 的布局卡数会变，需按 WP2 结论重算。
-- 若嫌贵的降档：每题 2 个回答（标准误约 ×1.4）或每桶 32 题；评测频率由用户已定 10 轮，不在此降。
+### D7 评测成本（全部为**估计，未验证**）
 
-### D7 以后 codex / TB2 怎么分桶
+- 锚点：S15 实测 24 条轨迹的"生成 + 训练"约 35 分钟（上下文 8192；WP6 计划 16384 会更长）。假设一台 8×H200 推理节点能同时跑约 24–32 条轨迹（未测），每波约 30 分钟。
+- 每次常规评测 165 条 ≈ 6–7 波 ≈ **3–3.5 小时、约 $140–160**（8×H200 $46/h）；第 0 轮 330 条（TB2 120 + SWE 210）约翻倍，约 **$280–320**。另加 Modal CPU 沙箱费用（判分，未估）。
+- 相对训练：codex 每轮约 35 分钟，10 轮约 6 小时；评测串行时多约 50%，**很贵**。缓解：(1) 评测与训练并行（训推分离）；(2) 评测按"可中断性 I2"放 spot/便宜推理卡；(3) 减量：SWE 每桶 20 题（共 85 题）或 TB2 每任务 1 次。是否接受由用户定。
+- 第一次真机运行后用 `eval/wall_s` 校正本节。
 
-- 本地 `tb2-data`（commit 2fd12b8）89 个任务的 `task.toml` 有官方 `difficulty`：easy 4、medium 55、hard 30，另有 `expert_time_estimate_min`、`junior_time_estimate_min`、`category`。
-- 问题：(1) easy 只有 4 个，桶太偏；(2) **rl-fn-codex-rollout 计划用 TB2 全量做训练数据**，若评测也用 TB2 就是训练题当考题，需另留出不训练的任务；(3) 每个任务判分 2.5–4 分钟、要沙箱，评测很贵。
-- **"另外留出一部分任务"是什么意思**：和数学评测集从训练集删除是同一个意思——从 TB2 的 89 个任务里固定挑出一部分，**只用来评测、永远不进训练数据**；其余任务才给 codex 训练用。否则训练过的任务又拿来考，分数上升分不清是学会了本事还是记住了这几道题。
-- **留出比例建议**：留出 30 个（约 1/3），训练留 59 个。按官方难度分层抽：easy 2 / medium 18 / hard 10（与全集 4/55/30 的比例大致一致，easy 太少只能取 2）。理由：30 个任务 × 每任务 4 次 = 120 次试验，通过率标准误最多约 0.046（只算采样噪声），再少噪声太大；再多则训练任务不够。另一条路：TB2 全部 89 个只做评测，训练改用别的任务来源（见 本目录 agentic-bench-survey.md（副本在 infra-drafts/AGENTIC-BENCH-SURVEY-S17.md）），这样评测最干净，但要先有训练任务来源。
-- agentic 评测基准调研与推荐见 本目录 agentic-bench-survey.md（副本在 infra-drafts/AGENTIC-BENCH-SURVEY-S17.md）（τ²-bench、SWE-bench Verified、Terminal-Bench、BFCL、AppWorld 比较）。
-- 建议（待定）：codex 用"留出的 TB2 任务"做评测集，分桶首选第 0 轮基座策略每任务 4 次的通过率（0 / 部分 / 全对），官方 `difficulty` 与专家耗时作为第二口径；评测频率可能要比数学低。接口与 D5 相同（`bucket`、`difficulty_source`），本 change 不实现。
+### D8 训练数据来源与 SWE-bench Verified 是否重叠
 
-### D8 dashboard 接口需求（WP4 实现）
+- SWE-bench Verified 只评测。训练候选 SWE-Gym（`SWE-Gym/SWE-Gym`，2,438 条，HF 数据卡 MIT）：仓库为 pandas 737、moto 343、MONAI 374、mypy 257、dvc 225、dask 145、modin 107、pydantic 83、conan 75、hydra 66、bokeh 26；SWE-bench Verified 的 12 个仓库是 django、sympy、sphinx、matplotlib、scikit-learn、astropy、xarray、pytest、pylint、requests、seaborn、flask。**按仓库名比对两者无交集**（2026-10-08 用 HF 统计核对）。
+- 核对方法（实现时由构建工具执行并入档）：① `instance_id` 求交集；② `repo` 求交集；③ `(repo, base_commit)`；④ `problem_statement` 规范化 sha256；⑤ 补丁涉及的文件路径 + 仓库（防同一仓库的近似题）。任一非空则从训练集剔除并记录；结果写进复核文档。SWE-smith 等其他来源同样处理（SWE-smith 的仓库与 SWE-bench 是否重叠**未核**）。
+- SWE-Gym 没有官方难度字段，训练批次分桶对它只能标 `unknown`；以后可用第 0 轮或首次出现时的组内通过率另行分组，但那是策略相关口径，单列不混。
 
-- 读 `rl_eval` 事件：横轴策略版本（轮），每桶一条线 + 标准误带；桶色固定顺序 b0→b4；点数 <5 不连线（与 §9 改版规则一致）。
-- 第二张图：每桶截断率；第三张：每桶"相对第 0 轮"的差值。与现有训练 reward 图共用悬停竖线联动。
-- 表格：最新一次评测各桶数值、评测耗时、是否与训练并行、评测集哈希前 8 位。
-- `eval/sampling` 或 `eval/set_sha256` 变化时断线并提示"评测口径变更"。
-- 多岛：评测只在一个指定岛上跑，事件带岛编号，dashboard 不跨岛平均。
+### D9 数学（dapo-math-17k）：降为可选，不分桶
+
+- 理由：(1) 用户定先不用 Qwen3-32B 通过率，而 dapo-math-17k 本身没有难度或来源字段（上一版已核：zhuzilin 版只有 `prompt`/`label`，原版 `data_source`、`ability` 全同值）；(2) 自己用基座离线采样分桶约 $130（估计），给训练批次分桶要覆盖全部训练题约 $3,000（估计），超预算；(3) agentic 是后续主线。
+- 但 FN 全量训练的数据目前仍是 dapo-math，**完全不评也不行**。可选做法（零额外采样成本）：随机留出 200 题从训练集删除，作为不分桶的固定数学评测集（每题 4 次，第 0 轮 8 次）；第 0 轮结束后按基座逐题通过率（0 / 部分 / 全对）事后分组，组别在第 0 轮后冻结。不做训练批次分桶。是否启用由用户定；接口与 D6 相同（`benchmark`=`dapo-math-17k`）。
+
+### D10 dashboard 接口需求（WP4 实现）
+
+- 读 `rl_eval`：横轴版本（轮），每桶一条线 + 标准误带；TB2 与 SWE 分两张图；点数 <5 不连线。
+- 每桶截断/回合用尽比例、`infra_error` 比例；相对第 0 轮差值。
+- 训练批次 `batch_summary_by_bucket`：按难度堆叠的训练成功率。
+- `eval/set_sha256`、`eval/sampling` 变化时断线提示。多岛时事件带岛编号，不跨岛平均。
 
 ## Risks / Trade-offs
 
-- B 口径来自另一个模型、打分方法未公开 → 用第 0 轮基座口径兜底并都入档。
-- 数据卡无许可证 → 只用它的数值做分桶、不再分发；需用户确认可用。
-- 题目文本对不上（不同版本提示词前缀不同）→ 规范化题干（去掉提示前缀与空白）匹配，实现时统计匹配率，对不上的题不进评测集。
-- 剔除 200 题改变训练数据哈希 → 与旧运行不可逐位对照，需在复核文档里写明。
-- 评测拖慢训练 → 默认并行；串行时成本按 D6 预登记。
-- 与 WP7 阶段 3 文件交叠（`driver.py`、`entry.py`）→ 实现排在其后。
+- 评测成本高（D7），可能需要减量或放便宜卡。
+- TB2 留出后训练只剩 59 个任务，训练任务偏少；SWE-Gym 等补训练来源需另做接入。
+- SWE-bench Verified 的 HF 数据卡未写许可证（代码仓库 MIT）。
+- 官方难度是人工估计，METR 发现部分 `<15 min` 题实际耗时远超 15 分钟——所以第 0 轮基座通过率作为第二口径一起入档。
+- 实现会碰 `driver.py`、`entry.py`、`rollout_meta_hook.py`，排在 WP7 阶段 3 之后。
 
 ## Open Questions（需用户拍板）
 
-已定（S17）：5 桶 × 40 题 × 每题 4 个回答（第 0 轮 8 个）；评测题从训练集删除；训练批次按难度分桶统计。
+已定：TB2 + SWE-bench Verified 为主；TB2 留出 30（分层）；SWE-bench Verified 只评测；不用 Qwen3-32B 通过率；每 10 轮评一次；训练批次按基准难度字段分桶。
 
-1. 公开 `Qwen3-32B_solve_rate`（数据卡未写许可证）能否用？能用走方案甲；不能用走方案乙（约 $130 离线采样，且训练批次分桶只能覆盖约 3.5% 的题）。
-2. TB2 留出 30 个任务（easy 2 / medium 18 / hard 10）只做评测，训练用其余 59 个，是否同意？还是 TB2 全部只做评测、训练另找任务来源？
-3. agentic 评测基准选哪个（推荐见调研文档）。
+1. 评测成本（D7 估计每次约 $140–160，第 0 轮约 $300）是否接受？还是减量（SWE 每桶 20 题 / TB2 每任务 1 次）或放 spot？
+2. 数学固定评测集（D9 可选，不分桶）要不要启用？
+3. SWE-Gym 作为训练来源是否采用（需另开接入工作）？

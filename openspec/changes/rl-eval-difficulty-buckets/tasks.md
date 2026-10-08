@@ -1,37 +1,36 @@
 # Tasks：rl-eval-difficulty-buckets
 
-（实现排在 WP7 去耦合阶段 3 之后；开工前用户需先拍板 design.md 的 Open Questions。）
+（实现排在 WP7 去耦合阶段 3 之后；判分沙箱由 WP6 实现。）
 
-## 1. 评测集构建（离线，不上卡）
+## 1. 名单与评测数据构建（离线，不上卡）
 
-- [ ] 1.1 `tools/build_eval_buckets.py`：下载并钉 `zhuzilin/dapo-math-17k@2e656129` 与 `qgallouedec/DAPO-Math-17k-Processed-Scored@b9e6dd45`；规范化题干（去提示前缀、空白）后匹配，输出匹配率
-- [ ] 1.2 按 design D2 分 5 桶，统计各桶真实题数；固定种子每桶抽 40 题，写评测集 jsonl（含 `eval_item_id`、`bucket`、`difficulty_source`、`difficulty_value`、`prompt`、`label`）与分桶定义文件，记 sha256
-- [ ] 1.3 生成剔除评测题后的训练数据文件，记新 sha256 与剔除题数
-- [ ] 1.4 CPU 单测：可复现（同种子同哈希）、无交集、桶边界（r=0、r=1、0.4、0.8）
+- [ ] 1.1 `tools/build_eval_holdout.py`：读 tb2-data（钉 commit）各任务 `task.toml` 的 `difficulty`，固定种子分层抽 30 个（easy 2 / medium 18 / hard 10），写 `data/eval/tb2-holdout.json` 与评测 jsonl，记 sha256
+- [ ] 1.2 同工具：读 `princeton-nlp/SWE-bench_Verified`（钉修订号）`difficulty`，按 design D2 分 3 桶、桶内按仓库分层抽（30/30/全部 45），写 `data/eval/swebench-verified-eval.json` 与评测 jsonl
+- [ ] 1.3 生成 TB2 训练数据（其余 59 个任务），行 `metadata` 带 D6.a 字段
+- [ ] 1.4 训练来源（SWE-Gym 等）与 SWE-bench Verified 重叠核对（D8 五项），结果写复核文档
+- [ ] 1.5 CPU 单测：同种子同哈希、分层题数、名单与 jsonl 一致
 
-## 2. 运行配置与启动检查
+## 2. 启动检查与配置
 
-- [ ] 2.1 `EvalConfig`（`yeto/rl/engine/run_config.py`）加 `set_sha256`、`bucket_def_sha256`、首轮回答数（8）；启动时校验评测集哈希
-- [ ] 2.2 启动检查训练数据与评测集交集为空
-- [ ] 2.3 第 0 轮评测：驱动在初始发布后已调用 `_maybe_eval(start.rollout_id, force=start.rollout_id == 0)`（driver.py 约 1556 行）；补上第 0 轮每题 8 个回答（其余 4 个）的参数切换，单测覆盖
-- [ ] 2.4 采样参数固定检查；单测覆盖"参数被改即停"
+- [ ] 2.1 `EvalConfig` 加名单与评测数据 sha256、每题次数（第 0 轮/常规）；启动校验哈希
+- [ ] 2.2 训练集与评测集交集检查（D6.c），结果进 `rl_driver_start`；CPU 单测覆盖 `task_id` 交集与 `(repo, base_commit)` 交集
+- [ ] 2.3 第 0 轮次数切换（TB2 4 / SWE 2），常规（2 / 1）；设置固定检查，单测"设置被改即停"
 
-## 3. 指标回传与事件
+## 3. 评测结果回传与事件
 
-- [ ] 3.1 在 yeto rollout 包装（`yeto/rl/miles.py` 的 `generate_rollout(..., evaluation=True)`）取评测样本，按 `bucket` 算 D5 指标、按题自助重采样算标准误、写逐题 jsonl
-- [ ] 3.2 ports 路径 `evaluate`（`miles_adapter/entry.py`）把 3.1 的结果返回驱动；`rl_eval` 事件加 D5 字段（现有字段不变）
-- [ ] 3.3 相对第 0 轮的配对差值与标准误
-- [ ] 3.4 后备核对：每桶一个 Miles 数据集名时，用 `loss_curve.py` 解析的 `eval/<名>`、`-truncated_ratio` 与 3.1 结果对照，一致性写进测试
-- [ ] 3.5 CPU 单测：假样本 → 指标、事件字段、逐题文件哈希
+- [ ] 3.1 与 WP6 约定判分回传字段（D6.d），写进 harness 契约
+- [ ] 3.2 yeto 侧按 `eval_bucket` 算通过率、自助重采样标准误、配对差、截断/回合用尽/`infra_error` 比例，写逐条 jsonl
+- [ ] 3.3 ports 路径 `evaluate`（`miles_adapter/entry.py`）回传 3.2 结果；`rl_eval` 事件加字段（现有字段不变）
+- [ ] 3.4 CPU 单测：假轨迹 → 指标、事件字段、逐条文件哈希
 
-## 4. 训练脚本与复核
+## 4. 训练批次分桶
 
-- [ ] 4.1 FN 训练脚本加 `--eval-interval 10`、`--n-samples-per-eval-prompt 4`、评测集路径与哈希、训推分离时 `--yeto-rl-overlap-eval`
-- [ ] 4.2 复核文档写入评测成本预估（D6，按 WP2 定的布局重算）并台账预登记
-- [ ] 4.3 首次真机运行后用 `eval/wall_s` 校正 D6 估计；人工抽查 b0 可疑题（D2）
+- [ ] 4.1 `rollout_meta_hook.build_metadata` 按 `metadata.difficulty` 分组汇总，写 `batch_summary_by_bucket`；CPU 单测
+- [ ] 4.2 真机核对开销（用 `rl_rollout` 时间戳），校正 design D5
 
-## 5. 对接与以后
+## 5. 上卡准备与对接
 
-- [ ] 5.1 把 D8 的接口需求交给 WP4（yeto-fleet-dashboard）
-- [ ] 5.2 训练批次按难度分桶统计（D4.4，用户已定要做）：构建工具在训练数据行写 `bucket`；`rollout_meta_hook.build_metadata` 里按桶调用 `batch_summary`，写入 `rl_rollout` 事件 `batch_summary_by_bucket`；CPU 单测 + 真机核对开销
-- [ ] 5.3 codex/TB2 评测集方案另开 change（D7）
+- [ ] 5.1 训练脚本加评测参数；复核文档写 D7 成本估计并台账预登记
+- [ ] 5.2 首次真机后用 `eval/wall_s` 校正 D7
+- [ ] 5.3 D10 接口需求交 WP4
+- [ ] 5.4 （可选，待用户定）数学固定评测集（D9）
