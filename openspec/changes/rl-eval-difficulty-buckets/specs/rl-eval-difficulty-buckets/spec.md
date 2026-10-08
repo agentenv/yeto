@@ -55,3 +55,18 @@
 #### Scenario: 每轮有分组汇总
 - **WHEN** 一轮生成结束、样本交给训练之前
 - **THEN** `rl_rollout` 事件带 `batch_summary_by_bucket`，各组条数之和等于本轮训练条数
+
+### Requirement: 评测岛可中断续跑
+评测 SHALL 能在单独的只推理评测岛上运行，不参与训练与合并；评测岛 SHALL 从持久存储加载评测版本的 adapter 并在校验 `policy_tensor_hash` 与 `rl/policy_token` 后开评；逐条结果 SHALL 以（`policy_version`、`task_id`、`trial`）为单位持久化，重启后跳过已完成单位并去重；训练驱动 SHALL 不等待评测完成。
+
+#### Scenario: 评测岛被回收后续跑
+- **WHEN** 评测岛在评某版本时被回收并重启
+- **THEN** 已完成的单位不重算，被中断的轨迹记 `preempted` 不计入，全部完成后才发该版本的 `rl_eval`，指标与一次跑完的结果一致
+
+#### Scenario: 评测慢于训练
+- **WHEN** 上一评测版本尚未评完，新的评测版本已发布
+- **THEN** 训练继续不等待，新版本排队，事件记录队列长度与滞后轮数
+
+#### Scenario: adapter 哈希不符
+- **WHEN** 评测岛加载的 adapter 哈希与 manifest 不一致
+- **THEN** 拒绝评测该版本并报错
