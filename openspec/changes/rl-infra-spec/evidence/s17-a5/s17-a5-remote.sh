@@ -4,7 +4,7 @@
 #   CASE=base   : no requests, 6 rounds
 #   CASE=switch : island 0 up (train r1) -> down (train r3) -> up during the last round (train r5, finalization must refuse)
 #   CASE=quorum : quorum 120 s, pause margin 2.0, 150 s start_cells delay; island 0 up (train r1, deadline 230 s), 4 rounds
-#   A sidecar (s17-a5-prep/sidecar.py) is exec'd into every island container: triggers (island 0), GPU / router samplers,
+#   Requests are delivered from this machine by s17-a5-deliver.py (modal container exec into island 0, readback, confirm taken, else teardown).
 #   elastic-state snapshots; all files land in ~/yeto-output -> tape volume.
 # usage: s17-a5-remote.sh <run_id>   env: CASE, PLAN_ONLY=1, HARD (s), THREAD_MAX
 set -u
@@ -22,12 +22,16 @@ case $CASE in
   base)   STEPS=6; EXTRA=""; TRIG='{"triggers": []}' ;;
   switch) STEPS=6; EXTRA=""; TRIG='{"triggers": [["train",1,"up1",{"target":"T1R2S0","expected_config_epoch":0,"deadline_s":600}],["train",3,"dn1",{"target":"T1R1S1","expected_config_epoch":1,"deadline_s":600}],["train",5,"fin1",{"target":"T1R2S0","expected_config_epoch":2,"deadline_s":600}]]}' ;;
   quorum) STEPS=4; EXTRA="--rl-elastic-quorum-timeout-s 120 --rl-elastic-pause-margin 2.0 --rl-test-inject-start-delay-s 150"; TRIG='{"triggers": [["train",1,"up1",{"target":"T1R2S0","expected_config_epoch":0,"deadline_s":230}]]}' ;;
-  merged) STEPS=6; EXTRA="--rl-elastic-attestation a5-attestation.json --rl-elastic-quorum-timeout-s 120 --rl-elastic-pause-margin 4.0 --rl-test-inject-start-delay-s 150"; TRIG='{"triggers": [["train",1,"up1",{"target":"T1R2S0","expected_config_epoch":0,"deadline_s":450}],["train",3,"dn1",{"target":"T1R1S1","expected_config_epoch":1,"deadline_s":600}],["train",5,"fin1",{"target":"T1R2S0","expected_config_epoch":2,"deadline_s":600}]]}' ;;
+  merged) STEPS=6; EXTRA="--rl-elastic-attestation a5-attestation.json --rl-elastic-quorum-timeout-s 120 --rl-elastic-pause-margin 4.0 --rl-test-inject-start-delay-s 150"; TRIG='{"triggers": [["train",1,"up1",{"target":"T1R2S0","expected_config_epoch":0,"deadline_s":450}],["train",3,"dn1",{"target":"T1R1S1","expected_config_epoch":1,"deadline_s":450}],["train",5,"fin1",{"target":"T1R2S0","expected_config_epoch":2,"deadline_s":450}]]}' ;;
   *) echo "bad CASE"; exit 64 ;;
 esac
 if [ "${PLAN_ONLY:-0}" = 1 ]; then R=/tmp/$P-plan; rm -rf $R; fi
 [ -e $R/start_utc.txt ] && { echo "abort: $R already used"; exit 67; }
 mkdir -p $R/home $R/runs $R/yeto $R/head
+Q=$(echo "$EXTRA" | grep -oP -- '--rl-elastic-quorum-timeout-s \K\S+'); M=$(echo "$EXTRA" | grep -oP -- '--rl-elastic-pause-margin \K\S+')
+/usr/bin/python3 $B/reconfig_request_preflight.py --triggers "$TRIG" --resources $PREP/resources-3.json \
+  $(echo "$EXTRA" | grep -q -- --rl-elastic-attestation && echo --attestation $PREP/attestation-a5.json) \
+  ${Q:+--quorum-timeout-s $Q} ${M:+--pause-margin $M} --expect-refused fin1 --out $R/preflight.json || { echo "abort: request preflight failed ($R/preflight.json)"; exit 66; }
 for d in .sky .ssh .nebius .cache .huggingface .config; do [ -e /home/michael/$d ] && ln -sfn /home/michael/$d $R/home/$d; done
 git -C $REPO archive ${SHA:-HEAD} | tar x -C $R/yeto
 cp /home/michael/work/gpu-default-modal/yeto/gsm8k_reward.py $R/yeto/; touch $R/yeto/yeto-rl-echo-events
@@ -80,24 +84,8 @@ echo $! > $R/watchdog.pid
 cd $R/yeto
 ( eval "timeout $HARD $PY -m yeto.cli $(cat $R/args.txt)" 2>&1 | tee $R/launch.stream.log | awk '{ print strftime("%FT%TZ", systime(), 1) " " $0; fflush() }' > $R/launch.ts.log; echo "rc=${PIPESTATUS[0]}" > $R/submit_rc.txt ) &
 SUB=$!
-# arm the sidecar in each island container once it exists (from this machine; Modal token from the real HOME)
-(
-  export HOME=/home/michael; armed=""; b64=$(base64 -w0 $R/sidecar.py); tb=$(printf '%s' "$TRIG" | base64 -w0)
-  for i in $(seq 1 240); do
-    ids=$(cd /tmp && timeout 60 $PY -m modal container list --json 2>/dev/null | /usr/bin/python3 -c "
-import json,sys
-for c in json.load(sys.stdin):
-    if '$APP' in json.dumps(c): print(c.get('Container ID') or c.get('container_id'))" 2>/dev/null)
-    for id in $ids; do
-      case " $armed " in *" $id "*) continue ;; esac
-      (cd /tmp && timeout 120 $PY -m modal container exec $id -- sh -c "mkdir -p /root/yeto-rl /root/yeto-output && echo $b64 | base64 -d > /root/yeto-rl/s17sidecar.py && (nohup python3 /root/yeto-rl/s17sidecar.py \"\$(echo $tb | base64 -d)\" > /root/yeto-output/s17-sidecar.log 2>&1 &) ; sleep 2; ps -eo pid,args | grep [s]17sidecar") >> $R/arm.log 2>&1 \
-        && { armed="$armed $id"; echo "armed $id $(date -u +%FT%TZ)" >> $R/arm.log; }
-    done
-    [ $(echo $armed | wc -w) -ge 2 ] && break
-    kill -0 $SUB 2>/dev/null || break; sleep 15
-  done
-  echo "arm done: $armed" >> $R/arm.log
-) &
+# deliver requests from this machine (S17 c: no in-container resident process); aborts the run if a request is not taken
+( /usr/bin/python3 $B/s17-a5-deliver.py $R $APP "$TRIG" > $R/deliver.out 2>&1 ) &
 wait $SUB
 JOB=$(grep -oP "submitted: job \K\d+" $R/launch.stream.log 2>/dev/null | head -1); echo "head_job=$JOB" > $R/head_job.txt
 if [ -n "$JOB" ]; then
@@ -118,7 +106,7 @@ fi
 [ -s $R/launch.log ] || cp $R/launch.stream.log $R/launch.log
 bash $R/teardown.sh final
 mkdir -p $R/tape-direct; (cd /tmp && timeout 600 $PY -m modal volume get --force $TAPEVOL $APP $R/tape-direct) > $R/tape-direct.out 2>&1
-for f in $R/tape-direct/*/l*/rank0/s17-elastic-state-*.b64.txt; do [ -f "$f" ] && base64 -d "$f" | tar xz -C $(dirname $f); done
+last=$(ls $R/es-snapshots/*.tgz 2>/dev/null | sort | tail -1); D0=$(ls -d $R/tape-direct/*/l0/rank0 2>/dev/null | head -1); [ -n "$last" ] && [ -n "$D0" ] && tar xzf $last -C $D0
 echo "rc=$(cat $R/submit_rc.txt 2>/dev/null)" > $R/rc.txt
 kill $(cat $R/watchdog.pid) 2>/dev/null
 echo "done $P"
