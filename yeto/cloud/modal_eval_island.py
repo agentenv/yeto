@@ -292,6 +292,15 @@ def eval_island_body(config: Mapping[str, Any]) -> dict[str, Any]:
     run_dir = Path(config["store"]) / "runs" / str(config.get("island_id", "eval-0"))
     infer = dict(config.get("infer") or {})
     infer.setdefault("log_dir", str(run_dir / "logs"))
+    timings: dict[str, float] = {}
+    base = str(infer.get("base_model") or "")
+    if base and infer.get("revision") and not Path(base).exists():
+        # one pinned snapshot for SGLang and the session server's tokenizer
+        from huggingface_hub import snapshot_download
+
+        t = time.time()
+        infer["base_model"] = snapshot_download(base, revision=str(infer["revision"]))
+        timings["model_download_s"] = round(time.time() - t, 3)
     config = {**config, "infer": infer}
     stop = threading.Event()
     sampler = threading.Thread(target=_gpu_sampler, args=(run_dir / "gpu.jsonl", stop), daemon=True)
@@ -302,7 +311,10 @@ def eval_island_body(config: Mapping[str, Any]) -> dict[str, Any]:
     finally:
         stop.set()
         sampler.join(timeout=10)
-    return {**summary, "gpu_names": names, "container": os.environ.get("MODAL_TASK_ID"),
+        (run_dir / "body.json").write_text(json.dumps({"gpu_names": names, **timings}, sort_keys=True))
+        if config.get("volume"):
+            _volume(config["volume"]).commit()  # logs, gpu samples, body.json survive a crash
+    return {**summary, **timings, "gpu_names": names, "container": os.environ.get("MODAL_TASK_ID"),
             "wall_s": round(time.time() - t0, 3)}
 
 
@@ -312,7 +324,7 @@ def eval_seed_body(config: Mapping[str, Any]) -> dict[str, Any]:
     import subprocess
     import sys
 
-    for mod, pin in (("peft", "peft==0.17.1"), ("accelerate", "accelerate")):
+    for mod, pin in (("peft", "peft"), ("accelerate", "accelerate")):
         try:
             importlib.import_module(mod)
         except ImportError:

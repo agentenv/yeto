@@ -4,9 +4,9 @@
 
 ## 1. 名单与评测数据构建（离线，不上卡）
 
-- [ ] 1.1 `tools/build_eval_holdout.py`：读 tb2-data（钉 commit）各任务 `task.toml` 的 `difficulty`，先排除 S15 冒烟 6 题（`codex-bundle/data/tbench2_smoke6.jsonl`），再固定种子分层抽 30 个（easy 2 / medium 18 / hard 10），名单写 `excluded`；与 WP6 #129 的 `tools/reward_env/holdout.py` 对齐（加 `exclude=`），写 `data/eval/tb2-holdout.json` 与评测 jsonl，记 sha256。**部分**：名单用 #131 的 `tools/reward_env/holdout.py` 生成 `data/eval/tb2-holdout.json`（30 题，排除冒烟 6 题，sha256 `28d6730a…`，与 #131 记录一致）；`tools/build_eval_holdout.py` 未单独写（#131 工具已覆盖），**评测 jsonl 未生成**（S17 N9，分支 s17-eval-island）
+- [x] 1.1 `tools/build_eval_holdout.py`：读 tb2-data（钉 commit）各任务 `task.toml` 的 `difficulty`，先排除 S15 冒烟 6 题（`codex-bundle/data/tbench2_smoke6.jsonl`），再固定种子分层抽 30 个（easy 2 / medium 18 / hard 10），名单写 `excluded`；与 WP6 #129 的 `tools/reward_env/holdout.py` 对齐（加 `exclude=`），写 `data/eval/tb2-holdout.json` 与评测 jsonl，记 sha256。**部分**：名单用 #131 的 `tools/reward_env/holdout.py` 生成 `data/eval/tb2-holdout.json`（30 题，排除冒烟 6 题，sha256 `28d6730a…`，与 #131 记录一致）；`tools/build_eval_holdout.py` 未单独写（#131 工具已覆盖），评测 jsonl 由 S17 N11 补上：`tools/build_eval_data.py` 写 `data/eval/tb2-holdout-eval.jsonl`（30 行，sha256 `e4fc253e…`），sha256 记在 `data/eval/tb2-data.sha256.json`（S17 N9/N11，分支 s17-eval-island / s17-eval-infer）
 - [ ] 1.2 同工具：读 `SWE-bench/SWE-bench_Verified@78f471bf`（组织版，与 #129 一致）`difficulty`，按 design D2 分 3 桶、桶内按仓库分层抽（30/30/全部 45），写 `data/eval/swebench-verified-eval.json` 与评测 jsonl
-- [ ] 1.3 生成 TB2 训练数据（其余 59 个任务），行 `metadata` 带 D6.a 字段
+- [x] 1.3 生成 TB2 训练数据（其余 59 个任务），行 `metadata` 带 D6.a 字段。`tools/build_eval_data.py` 写 `data/tb2/tb2-train.jsonl`（59 行 = 89 − 留出 30，含冒烟 6 题：它们只是不进评测池，仍可训练；不带 `eval_bucket`），与留出集交集为 0（`assert_disjoint`），sha256 `aafdf12b…`；单测 `tests/test_rl_eval_infer.py`（S17 N11，分支 s17-eval-infer）
 - [ ] 1.5 CPU 单测：同种子同哈希、分层题数、名单与 jsonl 一致
 
 ## 2. 启动检查与配置
@@ -29,9 +29,9 @@
 
 ## 5. 评测岛（第一版只用 Modal，D11）
 
-- [ ] 5.1 新增"只推理的评测岛"角色：启动器与岛账本区分它与训练岛（不进合并池、不交增量）。**部分**：评测岛是独立进程（`yeto/rl/eval/island.py`），事件带 `role=eval`、`source=eval_island`，不调用 syncer、不进岛账本；**启动器与岛账本里没有加"评测岛"角色字段**（第一版评测岛不经 launcher 启动，由 `yeto/cloud/modal_eval_island.py` 直接起）（S17 N9，分支 s17-eval-island）
+- [x] 5.1 新增"只推理的评测岛"角色：启动器与岛账本区分它与训练岛（不进合并池、不交增量）。**部分**：评测岛是独立进程（`yeto/rl/eval/island.py`），事件带 `role=eval`、`source=eval_island`，不调用 syncer、不进岛账本；S17 N11 补最小实现：`yeto/launcher.py` 加 `ISLAND_ROLES=(train, eval)` 与 `island_role_env`（容器变量 `YETO_RL_ISLAND_ROLE`），评测岛 Modal 函数带 `eval`；`CrossIslandLedger.join(role=...)` 对非 train 角色直接拒绝（不进合并池、不交增量）；单测覆盖（S17 N9/N11）
 - [x] 5.2 训练驱动在评测版本把 adapter + manifest 写到持久存储并登记待评任务，不等评测。`yeto/rl/eval/export.py` `StoreEvalExporter` 挂在 `IslandDriver.eval_export`：第 0 轮、每 N 轮（`YETO_RL_EVAL_STORE_INTERVAL`，默认 10）、最后一轮写 canonical 张量 + 身份 + manifest（每个文件 sha256、policy_tensor_hash、rl/policy_token、采样设置）再登记队列，不等评测；发 `rl_eval_export` 事件（S17 N9，分支 s17-eval-island）
-- [ ] 5.3 评测岛加载基座 + adapter，校验 `policy_tensor_hash` 与 `rl/policy_token` 后开评。**部分**：评测岛先核对每个文件 sha256、采样设置与计划一致，加载后要求服务端 token 等于 manifest；`verify_policy_tensor_hash` 从存下的文件回算 policy_tensor_hash（CPU 单测用 torch 验过）。真实"加载基座 + adapter 到推理引擎"未实现（只有 loader 端口）（S17 N9，分支 s17-eval-island）
+- [ ] 5.3 评测岛加载基座 + adapter，校验 `policy_tensor_hash` 与 `rl/policy_token` 后开评。**部分**：评测岛先核对每个文件 sha256、采样设置与计划一致，加载后要求服务端 token 等于 manifest；`verify_policy_tensor_hash` 从存下的文件回算 policy_tensor_hash（CPU 单测用 torch 验过）。S17 N11：`yeto/rl/eval/codex_infer.py` `SglangSessionLoader` 回算 policy_tensor_hash 后写 PEFT 目录，起 SGLang（开 LoRA）并以训练用名字 `miles_lora` 加载，下一版只换 adapter（先卸后载），加载失败即拒绝（S17 N9/N11）
 - [x] 5.4 逐条结果按 (`policy_version`, `task_id`, `trial`) 追加写持久存储；重启后跳过已完成、去重；被回收的进行中轨迹记 `preempted` 不计入。`EvalStore` 逐条日志：每次尝试前写 start、后写 result；只有 start 没有 result 的记为被回收（计入 `eval/preemptions`、不计分、重跑）；同一单位多条 result 保留第一条（S17 N9，分支 s17-eval-island）
 - [x] 5.5 版本排队（不丢弃），事件记队列长度、滞后轮数、`eval/preemptions`。评测岛按版本从旧到新消化队列，不丢弃；`rl_eval` 带 `eval/queue_len`、`eval/lag_rounds`、`eval/preemptions`；训练结束标记文件出现后再查一次队列才退出（S17 N9，分支 s17-eval-island）
 - [x] 5.6 CPU 单测：模拟回收续跑结果与一次跑完逐位一致。`test_preempted_resume_equals_one_shot`：两次模拟回收后续跑，逐条结果哈希与一次跑完相同，`rl_eval` 除回收次数外逐字段相同（S17 N9，分支 s17-eval-island）
