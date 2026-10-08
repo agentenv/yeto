@@ -69,8 +69,11 @@ def test_write_peft_dir_checks_tensor_hash(tmp_path):
 
 def test_sglang_argv_and_session_config_match_training():
     cfg = ci.InferConfig(base_model="/models/q", revision="r", sglang_extra_args=("--x", "1"))
-    argv = ci.sglang_argv(cfg, rank=16, targets=["o_proj", "out_proj"], python="py")
+    argv = ci.sglang_argv(cfg, rank=16, targets=["o_proj", "out_proj"], python="py",
+                          parsers=("qwen3", "qwen3_coder"))
     joined = " ".join(argv)
+    assert "--reasoning-parser qwen3 --tool-call-parser qwen3_coder" in joined
+    assert "parser" not in " ".join(ci.sglang_argv(cfg, rank=16, targets=["o_proj"], python="py"))
     assert "--enable-lora --max-lora-rank 16 --lora-target-modules o_proj out_proj" in joined
     assert "--context-length 8192" in joined and argv[-2:] == ["--x", "1"]
     assert "--revision" not in argv or not Path("/models/q").exists()
@@ -129,7 +132,8 @@ def _loader(monkeypatch, tmp_path, *, rank=16, targets=("o_proj",), refuse=False
     http = _Http(refuse_load=refuse)
     loader = ci.SglangSessionLoader(ci.InferConfig(base_model="B", work_dir=str(tmp_path)), popen=popen,
                                     http=http, sleep=lambda s: None,
-                                    emit=lambda e, **f: events.append((e, f)))
+                                    emit=lambda e, **f: events.append((e, f)),
+                                    parsers=lambda tito: ("qwen3", "qwen3_coder"))
     return loader, spawned, http, events
 
 
@@ -137,6 +141,7 @@ def test_loader_starts_once_then_swaps_adapter(monkeypatch, tmp_path):
     loader, spawned, http, events = _loader(monkeypatch, tmp_path)
     assert loader.load({"policy_version": 0, "rl/policy_token": "yeto:0:h"}, tmp_path) == "yeto:0:h"
     assert len(spawned) == 2 and "sglang.launch_server" in spawned[0]
+    assert spawned[0][spawned[0].index("--tool-call-parser") + 1] == "qwen3_coder"
     assert any(c[1].endswith("/health_generate") for c in http.calls)
     assert loader.load({"policy_version": 10, "rl/policy_token": "yeto:10:h"}, tmp_path) == "yeto:10:h"
     assert len(spawned) == 2  # no restart
@@ -145,6 +150,7 @@ def test_loader_starts_once_then_swaps_adapter(monkeypatch, tmp_path):
     load_bodies = [c[2] for c in http.calls if c[1].endswith("/load_lora_adapter")]
     assert {b["lora_name"] for b in load_bodies} == {ci.SERVED_LORA_NAME}
     assert [e for e, _ in events] == ["rl_eval_policy_load"] * 2 and "sglang_start_s" in events[0][1]
+    assert events[0][1]["tool_call_parser"] == "qwen3_coder"
     loader.close()
     assert all(p is not None for p in loader.procs.values())
 

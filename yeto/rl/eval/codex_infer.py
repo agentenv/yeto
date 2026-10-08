@@ -150,7 +150,17 @@ class InferConfig:
         return out
 
 
-def sglang_argv(cfg: InferConfig, *, rank: int, targets: list[str], python: str = sys.executable) -> list[str]:
+def resolve_parsers(tito_model: str) -> tuple[str | None, str | None]:
+    """SGLang (reasoning, tool-call) parsers for the TITO family -- the same Miles
+    resolver the training config uses for ``--sglang-reasoning-parser`` /
+    ``--sglang-tool-call-parser`` (``yeto.rl.adapters.miles.config``)."""
+    from miles.utils.chat_template_utils import resolve_reasoning_and_tool_call_parser
+
+    return resolve_reasoning_and_tool_call_parser(tito_model)
+
+
+def sglang_argv(cfg: InferConfig, *, rank: int, targets: list[str], python: str = sys.executable,
+                parsers: tuple[str | None, str | None] = (None, None)) -> list[str]:
     argv = [python, "-m", "sglang.launch_server", "--model-path", cfg.base_model,
             "--host", cfg.host, "--port", str(cfg.sglang_port), "--trust-remote-code",
             "--context-length", str(cfg.context_length), "--mem-fraction-static", str(cfg.mem_fraction_static),
@@ -158,6 +168,11 @@ def sglang_argv(cfg: InferConfig, *, rank: int, targets: list[str], python: str 
             "--max-loaded-loras", "2", "--max-loras-per-batch", "1"]
     if cfg.revision and not Path(cfg.base_model).exists():
         argv += ["--revision", cfg.revision]
+    reasoning, tool_call = parsers
+    if reasoning is not None:
+        argv += ["--reasoning-parser", reasoning]
+    if tool_call is not None:
+        argv += ["--tool-call-parser", tool_call]
     return argv + list(cfg.sglang_extra_args)
 
 
@@ -191,8 +206,10 @@ class SglangSessionLoader:
 
     def __init__(self, cfg: InferConfig, *, popen: Callable[..., Any] = subprocess.Popen,
                  http: Callable[..., tuple[int, Any]] = _http, sleep: Callable[[float], None] = time.sleep,
-                 clock: Callable[[], float] = time.monotonic, emit: Callable[..., None] | None = None) -> None:
+                 clock: Callable[[], float] = time.monotonic, emit: Callable[..., None] | None = None,
+                 parsers: Callable[[str], tuple[str | None, str | None]] = resolve_parsers) -> None:
         self.cfg = cfg
+        self.parsers = parsers
         self.popen = popen
         self.http = http
         self.sleep = sleep
@@ -227,13 +244,15 @@ class SglangSessionLoader:
             self.sleep(2.0)
 
     def _start(self, rank: int, targets: list[str]) -> dict[str, float]:
-        self._spawn("sglang", sglang_argv(self.cfg, rank=rank, targets=targets))
+        parsers = self.parsers(self.cfg.tito_model)
+        self._spawn("sglang", sglang_argv(self.cfg, rank=rank, targets=targets, parsers=parsers))
         sglang_s = self._wait("sglang", f"{self.cfg.sglang_url}/health_generate")
         self._spawn("session-server", [sys.executable, "-c", SESSION_SERVER_BOOT,
                                        json.dumps(session_server_config(self.cfg, rank=rank))])
         session_s = self._wait("session-server", f"{self.cfg.session_url}/health")
-        self.served = {"rank": rank, "targets": list(targets)}
-        return {"sglang_start_s": sglang_s, "session_server_start_s": session_s}
+        self.served = {"rank": rank, "targets": list(targets), "parsers": list(parsers)}
+        return {"sglang_start_s": sglang_s, "session_server_start_s": session_s,
+                "reasoning_parser": parsers[0], "tool_call_parser": parsers[1]}
 
     def load(self, manifest: Mapping[str, Any], files_dir: Path) -> str:
         version = int(manifest["policy_version"])
@@ -244,7 +263,7 @@ class SglangSessionLoader:
                                   "rank": adapter["rank"], "targets": adapter["targets"]}
         if self.served is None:
             record.update(self._start(adapter["rank"], adapter["targets"]))
-        elif (adapter["rank"], adapter["targets"]) != (self.served["rank"], self.served["targets"]):
+        elif [adapter["rank"], adapter["targets"]] != [self.served["rank"], self.served["targets"]]:
             raise RuntimeError(f"v{version}: LoRA shape {adapter['rank']}/{adapter['targets']} differs from the "
                                f"served {self.served}; restart the island")
         else:
