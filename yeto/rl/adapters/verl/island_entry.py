@@ -59,6 +59,7 @@ def parse_args(argv):
     p.add_argument("--rl-algorithm-spec", default=None)
     p.add_argument("--rl-island-scheduling", default="legacy")
     p.add_argument("--rl-syncer-epoch", type=int, default=0)
+    p.add_argument("--rl-echo-events", action="store_true")
     args, ignored = p.parse_known_args(argv)
     return args, ignored
 
@@ -230,6 +231,10 @@ def main(argv=None) -> int:
     workdir = str(Path(__file__).resolve().parents[4])
     env["PYTHONPATH"] = workdir + (":" + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     env["YETO_VERL_PLAN"] = str(plan_path)
+    if args.rl_echo_events:  # tape lines also on stdout (head launcher / relaunch-proof copy)
+        from yeto.rl.event_echo import ECHO_ENV
+
+        env[ECHO_ENV] = "1"
     env["YETO_VERL_READBACK_DIR"] = str(readback)
     env["VERL_FILE_LOGGER_PATH"] = str(OUTPUT / f"verl-file-logger-{lid}.jsonl")
     readback.mkdir(parents=True, exist_ok=True)
