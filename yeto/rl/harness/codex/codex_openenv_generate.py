@@ -24,14 +24,14 @@ from __future__ import annotations
 import dataclasses
 from typing import Any, Awaitable, Callable
 
-from yeto.rl.adapters.miles import rollout_meta_hook
+from yeto.rl.engine import rollout_meta
 
 from .alignment import AlignmentError, assert_sample_alignment
 from .tbench_reward import INFRASTRUCTURE_KEY
 
 UPSTREAM_PATH = "miles.rollout.generate_hub.agentic_tool_call.generate"
-POLICY_AGE_KEY = rollout_meta_hook.POLICY_AGE_VIOLATION_KEY  # "policy_age_violation"
-EXPECTED_VERSION_KEY = rollout_meta_hook.EXPECTED_POLICY_VERSION_KEY
+POLICY_AGE_KEY = rollout_meta.POLICY_AGE_VIOLATION_KEY  # "policy_age_violation"
+EXPECTED_VERSION_KEY = rollout_meta.EXPECTED_POLICY_VERSION_KEY
 ACTUAL_VERSIONS_KEY = "policy_versions_actual"
 
 
@@ -42,7 +42,7 @@ class PolicyVersionMissing(RuntimeError):
 def expected_policy_version(input_sample: Any) -> str | None:
     """IR-3 target token for ``input_sample`` (metadata first, else the driver sink)."""
     try:
-        return rollout_meta_hook.expected_policy_version(input_sample)
+        return rollout_meta.expected_policy_version(input_sample)
     except Exception:  # noqa: BLE001 - unreachable sink == nothing published
         meta = getattr(input_sample, "metadata", None)
         return str(meta[EXPECTED_VERSION_KEY]) if isinstance(meta, dict) and meta.get(EXPECTED_VERSION_KEY) else None

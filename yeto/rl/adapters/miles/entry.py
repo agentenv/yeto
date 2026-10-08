@@ -1005,7 +1005,8 @@ def connect_island_ray(*, environ=None, ray_module=None, miles_args=None) -> str
     so they resolve the same address as the driver.  ``PYTHONPATH`` travels
     with it so actors import the pinned Miles checkout, not the image's;
     ``YETO_RL_ELASTIC_METADATA`` (only when ``--rl-elastic`` set it) so the
-    rollout metadata hook in the workers reports the data cursor.
+    rollout metadata hook in the workers reports the data cursor;
+    ``YETO_RL_BACKEND=miles`` so neutral rollout-side code finds this adapter.
     """
 
     environ = os.environ if environ is None else environ
@@ -1019,7 +1020,11 @@ def connect_island_ray(*, environ=None, ray_module=None, miles_args=None) -> str
             "Ray was initialized before the ports island pinned RAY_ADDRESS; "
             "its actors could resolve the wrong Ray instance"
         )
-    env_vars = {"RAY_ADDRESS": address}
+    from yeto.rl.engine.backends import BACKEND_ENV
+
+    # Decoupling 4.11 (design D11 方案 A): the rollout actors and codex
+    # subprocesses look up the backend's rollout-metadata port by this name.
+    env_vars = {"RAY_ADDRESS": address, BACKEND_ENV: "miles"}
     from yeto.rl.event_echo import ECHO_ENV
 
     if environ.get(ECHO_ENV):

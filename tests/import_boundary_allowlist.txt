@@ -4,25 +4,16 @@
 # 规则与约定见 yeto/rl/engine/README.md。初始 31 条（2026-10-08，基于 agentenv/main 62cec689）。
 #
 # --- 云层/启动层 import Miles 适配层（A8、A9）
-yeto/cli.py	yeto.rl.adapters	# A8 cli.py:405
-yeto/launcher.py	yeto.rl.adapters	# A8 launcher.py:455,1389,1640,1791,1836,1851
-yeto/rl/stage_w_entry.py	yeto.rl.adapters	# A9 stage_w_entry.py:31 connect_island_ray
 #
 # --- 引擎核心（E1-E9）
 #
 # --- 算法扩展（A1-A5）
-yeto/rl/algos/seq_adv.py	yeto.rl.adapters	# A2 :436,461 record_round_metadata（A1 register_flag 已移到 miles_adapter/algo_flag_rows.py，任务 4.3）
-yeto/rl/critic_warmup.py	yeto.rl.adapters	# A1 :492
 yeto/rl/algos/reducers.py	megatron	# A3 :35,41 —— 暂不动（任务 4.8，归约器不迁）
 yeto/rl/algos/vendor/miles_mis.py	miles	# A3 :350 cp_utils —— 暂不动（任务 4.8）
 yeto/rl/grad_audit.py	megatron	# A3 :209,320 —— 暂不动（任务 4.8）
-yeto/rl/teacher_forcing.py	yeto.rl.adapters	# A5 :118 current_policy_token
 yeto/rl/teacher_forcing.py	yeto.rl.miles	# A5 :129 _policy_token_for_rollout
 #
 # --- harness（A6、A7、R4-R7、R14）
-yeto/rl/harness/codex/codex_openenv_generate.py	yeto.rl.adapters	# A7 :27 rollout_meta_hook
-yeto/rl/harness/codex/codex_openenv_subprocess_agent_function.py	yeto.rl.adapters	# A7 :36
-yeto/rl/harness/codex/codex_openenv_agent_function.py	yeto.rl.adapters	# A7 :421
 yeto/rl/harness/codex/reward.py	miles	# R4 :159,222 Sample.Status / DynamicFilterOutput
 yeto/rl/harness/codex/reward.py	yeto.rl.miles	# R4 :224,268
 yeto/rl/harness/codex/tbench_reward.py	miles	# R5 :32,101

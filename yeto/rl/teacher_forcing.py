@@ -115,7 +115,7 @@ def _index() -> ReplayIndex:
 
 def _ports_policy_token() -> str | None:
     try:
-        from yeto.rl.adapters.miles.rollout_meta_hook import current_policy_token
+        from yeto.rl.engine.rollout_meta import current_policy_token
 
         return current_policy_token()
     except Exception:  # noqa: BLE001 - legacy env has no sink

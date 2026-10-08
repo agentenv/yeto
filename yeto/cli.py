@@ -92,6 +92,13 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     )
     rl.add_argument("--rl-runtime", choices=["miles"], default="miles")
     rl.add_argument(
+        "--rl-backend",
+        choices=["miles", "verl"],
+        default="miles",
+        help="training backend adapter (yeto/rl/engine/backends.py; default miles). "
+        "A backend without a registered adapter is refused before launch.",
+    )
+    rl.add_argument(
         "--rl-engine",
         choices=["legacy", "ports"],
         default="ports",
@@ -405,8 +412,8 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     rl.add_argument("--rl-resource-sample-interval", type=float, default=None, metavar="SECONDS",
                     help="ports: NVML rl_resource_sample period forwarded to the learner "
                     "(default: learner default, 60 s with --rl-observe-timeline; 0 = off)")
-    from yeto.rl.adapters.miles.elastic_hook import add_recommend_arguments
-    add_recommend_arguments(rl)  # D2 elastic hook (elastic-ops.md)
+    from yeto.rl.engine import backends as _rl_backends
+    _rl_backends.module("elastic_hook", _rl_backends.DEFAULT_BACKEND).add_recommend_arguments(rl)  # D2 elastic hook (elastic-ops.md)
     rl.add_argument("--rl-elastic-tool-wait-board", action="store_true",
                     help="--rl-elastic: feed the island's tool-wait board into the drain check "
                     "(3.3; needs a workload that records tool waits)")

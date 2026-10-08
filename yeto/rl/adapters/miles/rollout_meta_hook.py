@@ -354,10 +354,14 @@ def build_metadata(
 
 # IR-3/IR-4 sample-metadata keys written by agentic generate code (codex-harness
 # codex_openenv_generate): summed per rollout into the metadata payload.
-EXPECTED_POLICY_VERSION_KEY = "expected_policy_version"
-POLICY_AGE_VIOLATION_KEY = "policy_age_violation"
-TITO_SESSION_MISMATCH_KEY = "tito_session_mismatch"
-TITO_CHAIN_BREAKS_KEY = "tito_chain_breaks"
+# Neutral names and values live in the core port (decoupling 4.11); re-exported.
+from yeto.rl.engine.rollout_meta import (  # noqa: E402
+    EXPECTED_POLICY_VERSION_KEY,
+    POLICY_AGE_VIOLATION_KEY,
+    TITO_CHAIN_BREAKS_KEY,
+    TITO_SESSION_MISMATCH_KEY,
+    counter_value,
+)
 
 
 def expected_policy_version(sample: Any = None, sink: str | None = None) -> str | None:
@@ -372,29 +376,6 @@ def expected_policy_version(sample: Any = None, sink: str | None = None) -> str 
     if isinstance(meta, dict) and meta.get(EXPECTED_POLICY_VERSION_KEY):
         return str(meta[EXPECTED_POLICY_VERSION_KEY])
     return current_policy_token(sink)
-
-
-def counter_value(value: Any) -> int:
-    """A per-sample counter as an int.
-
-    Upstream Miles' session server writes ``tito_session_mismatch`` into the
-    same sample-metadata key as a *list* of mismatch records
-    (``compute_session_mismatch`` -> ``list[dict]``, empty when the replayed
-    tokens match), while the harness bridge writes an int; both count
-    mismatches (A-T3-6, codex-smoke-20261003-10 failed the rollout on
-    ``int(list)``).  Dicts count their non-zero entries, None/"" count 0.
-    """
-    if value is None or value == "":
-        return 0
-    if isinstance(value, bool):
-        return int(value)
-    if isinstance(value, (int, float)):
-        return int(value)
-    if isinstance(value, (list, tuple, set)):
-        return len(value)
-    if isinstance(value, dict):
-        return sum(1 for v in value.values() if v)
-    return int(value)
 
 
 TITO_SESSION_MISMATCH_RECORDS_KEY = "tito_session_mismatch_records"
@@ -658,6 +639,22 @@ def put_policy_token(token: str, sink: str | None = None) -> None:
         ray.get(ray.get_actor(target or DEFAULT_SINK_ACTOR).set_token.remote(token))
         return
     raise ValueError(f"unknown rollout metadata sink {sink!r}")
+
+
+def sink_available() -> bool:
+    """Whether a metadata sink is reachable here (neutral port, decoupling 4.11).
+
+    An explicit ``YETO_ROLLOUT_META_SINK`` counts; otherwise the default Ray
+    actor sink needs an initialised Ray in this process.
+    """
+
+    if os.environ.get(META_SINK_ENV):
+        return True
+    try:
+        import ray
+    except ImportError:
+        return False
+    return bool(ray.is_initialized())
 
 
 def current_policy_token(sink: str | None = None) -> str | None:

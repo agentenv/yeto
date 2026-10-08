@@ -28,7 +28,9 @@ def main(argv: list[str] | None = None, *, connect=None, run_path=runpy.run_path
         raise SystemExit("usage: python3 -m yeto.rl.stage_w_entry <miles>/train.py [argv...]")
     script = argv[0]
     if connect is None:
-        from yeto.rl.adapters.miles.entry import connect_island_ray as connect
+        from yeto.rl.engine import backends
+
+        connect = backends.module("entry").connect_island_ray  # $YETO_RL_BACKEND, default miles
     connect(environ=os.environ)
     sys.argv = [script, *argv[1:]]
     sys.path.insert(0, os.path.dirname(os.path.abspath(script)))  # as `python3 train.py` would

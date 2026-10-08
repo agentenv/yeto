@@ -22,14 +22,12 @@ class UnsupportedPortsCombination(ValueError):
     """The requested run is only supported by the legacy engine path."""
 
 
-def _flag_value(argv: Sequence[str], flag: str) -> str | None:
-    tokens = list(argv)
-    for index, token in enumerate(tokens):
-        if token == flag and index + 1 < len(tokens):
-            return tokens[index + 1]
-        if token.startswith(flag + "="):
-            return token.split("=", 1)[1]
-    return None
+def _extra_argv_facts(extra_argv: Sequence[str]):
+    """Facts read from pass-through backend argv by the Miles adapter (decoupling 4.3, E15)."""
+
+    from . import backends
+
+    return backends.module("selection_argv", backends.DEFAULT_BACKEND).extra_argv_facts(extra_argv)
 
 
 def ports_rejections(
@@ -50,11 +48,12 @@ def ports_rejections(
     """Reasons the combination is outside the R0 ports matrix (empty = OK)."""
 
     reasons: list[str] = []
+    facts = _extra_argv_facts(extra_argv)
     if model_kind != "causal-lm":
         reasons.append(f"model kind {model_kind!r} (ports supports causal LMs only)")
     if tuning != "lora" or parameter_mode != "lora" or sync_preset == "dense-full":
         reasons.append("full-parameter / dense-full training")
-    if "sao" in str(sync_preset) or any(str(t).startswith("--sao") for t in extra_argv):
+    if "sao" in str(sync_preset) or facts.streaming_compaction:
         reasons.append("SAO (streaming compaction)")
     elif sync_preset not in PORTS_SYNC_PRESETS and sync_preset != "dense-full":
         reasons.append(f"sync preset {sync_preset!r}")
@@ -64,18 +63,18 @@ def ports_rejections(
         or int(expert_full_count or 0) > 0
     ):
         reasons.append("DeepSeek V4 recipe (clone/expert-full LoRA)")
-    estimator = _flag_value(extra_argv, "--advantage-estimator") or advantage_estimator
+    estimator = facts.advantage_estimator or advantage_estimator
     # rl-algo-critic-family 3.1: PPO (shared actor/critic, Miles derives
     # use_critic from the estimator) is not routed to legacy any more; the
     # algorithm spec, the capability check and the critic rejections decide.
     # ``--use-critic`` is not an upstream Miles flag (legacy fork only).
-    if "--use-critic" in extra_argv or estimator not in ("grpo", "ppo") or (
+    if facts.critic_flag or estimator not in ("grpo", "ppo") or (
         use_critic and estimator != "ppo"
     ):
         reasons.append(f"critic / non-GRPO advantage estimator ({estimator})")
     if placement not in ("colocated", "fixed-partition"):
         reasons.append(f"placement {placement!r}")
-    if _flag_value(extra_argv, "--rollout-num-gpus"):
+    if facts.rollout_gpus_flag:
         reasons.append("fixed partition via --rollout-num-gpus in extra argv (use --rl-placement fixed-partition)")
     if placement == "fixed-partition":
         # rl-infra-spec 2.1: LoRA fixed partition (partitioned-serial driver).

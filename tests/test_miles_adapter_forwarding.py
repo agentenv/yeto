@@ -9,12 +9,14 @@ from pathlib import Path
 import pytest
 
 NEW = Path(__file__).resolve().parents[1] / "yeto" / "rl" / "adapters" / "miles"
-MODULES = sorted(p.stem for p in NEW.glob("*.py") if p.stem != "__init__")
+OLD = NEW.parents[1] / "engine" / "miles_adapter"
+# Modules that existed at the move; modules added later live only at the new path.
+MODULES = sorted(p.stem for p in OLD.glob("*.py") if p.stem != "__init__")
 
 
-def test_every_adapter_module_has_a_forwarder():
-    old = NEW.parents[1] / "engine" / "miles_adapter"
-    assert sorted(p.stem for p in old.glob("*.py") if p.stem != "__init__") == MODULES
+def test_every_forwarder_has_a_moved_module():
+    assert len(MODULES) == 28
+    assert all((NEW / f"{m}.py").is_file() for m in MODULES)
 
 
 @pytest.mark.parametrize("name", MODULES)
