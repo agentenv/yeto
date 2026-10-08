@@ -25,7 +25,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from . import export as export_mod
 from .reducer import Reducer
-from .sources import TapeSource, discover
+from .sources import TapeSource, discover, operator_stops_near
 
 LOOPBACK_NAMES = ("localhost",)
 
@@ -63,6 +63,8 @@ class DashboardState:
         with self.lock:
             for src in self.sources.values():
                 n += src.pump(self.reducer)
+            for rec in operator_stops_near(self.paths):  # appears mid-run when we stop the app
+                self.reducer.feed_operator_stop(rec)
             self.last_poll = time.time()
         return n
 

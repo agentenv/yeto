@@ -70,7 +70,7 @@ function chart(key){var W=720,H=260,L=48,B=20,T=10,ser=OV.series,ids=OV.islands.
  return o+'</svg>'}
 function draw(){el("big").innerHTML=chart(cur.m);[].forEach.call(document.querySelectorAll("#tabs button"),function(b){b.setAttribute("aria-pressed",b.dataset.m==cur.m)})}
 
-function status(s){return {ok:'<span class="ok">健康</span>',stale:'<span class="bad">掉线疑似</span>',lost:'<span class="bad">已丢失</span>',recovery:'<span class="bad">RECOVERY_REQUIRED</span>',done:'<span class="muted">已结束</span>',starting:'<span class="warn">启动中</span>',unknown:ND}[s.status]||esc(s.status)}
+function status(s){return {ok:'<span class="ok">健康</span>',stale:'<span class="bad">掉线疑似</span>',lost:'<span class="bad">已丢失</span>',recovery:'<span class="bad">RECOVERY_REQUIRED</span>',done:'<span class="muted">已结束</span>',starting:'<span class="warn">启动中</span>',stopped:'<span class="muted">已停止</span>',unknown:ND}[s.status]||esc(s.status)}
 function cards(){if(!OV.islands.length){el("cards").innerHTML='<div class="empty">无数据</div>';return}
  el("cards").innerHTML=OV.islands.map(function(s){var bad=s.status=="stale"||s.status=="lost"||s.status=="recovery";
   var hb=s.heartbeat_seen?(s.heartbeat_age_s!=null?Math.round(s.heartbeat_age_s)+'s 前':ND):'<span class="nd">无数据（磁带无 rl_heartbeat）</span>';

@@ -122,6 +122,7 @@ def classify(record: dict) -> str:
 
 
 HOST_SAMPLE_EVENT = "modal_host_sample"
+STOP_SLACK_S = 5.0
 # Events only written once driver.run() is going (older tapes may lack rl_driver_start).
 DRIVER_RUNNING_EVENTS = frozenset({"rl_driver_phase", "rl_heartbeat", "rl_local_round", "rl_round_trained",
                                    "rl_resource_sample", "rl_publication"})
@@ -176,6 +177,7 @@ class Reducer:
         self.min_ts: float | None = None
         self.counts = {"learner": 0, "syncer": 0, "journal": 0, "fleet": 0, "other": 0}
         self.sources_seen: list[str] = []
+        self.operator_stops: list[dict] = []  # our own stop of the run (sources.operator_stops_near)
         self._run_meta_cache: tuple | None = None
 
     # -- feeding ----------------------------------------------------------------
@@ -251,6 +253,35 @@ class Reducer:
             isl["nodes"][rank] = nd
         self._touch(isl, ts)
         return True
+
+    def feed_operator_stop(self, rec: dict) -> bool:
+        """Record that WE stopped the run's cloud app (gate / early / watchdog).
+        Idempotent per (path, time). The earliest stop wins."""
+        key = (rec.get("path"), rec.get("time_unix"), rec.get("cause"))
+        if any((x.get("path"), x.get("time_unix"), x.get("cause")) == key for x in self.operator_stops):
+            return False
+        self.operator_stops.append(dict(rec))
+        self.operator_stops.sort(key=lambda x: x.get("time_unix") or 0)
+        ts = finite(rec.get("time_unix"))
+        self.event_seq += 1
+        self.events.append({"seq": self.event_seq, "ts": ts, "island": None, "type": "operator_stop",
+                            "source": rec.get("path") or "-", "stream": "other", "record": rec})
+        return True
+
+    def operator_stop(self) -> dict | None:
+        return self.operator_stops[0] if self.operator_stops else None
+
+    def stopped_by_us(self, isl: dict) -> bool:
+        """True when we issued a stop and the island's first failure (RECOVERY_REQUIRED
+        or fleet island_lost) is not earlier than it (5 s slack for clock skew between
+        this machine and the container): the failure is a consequence of our stop."""
+        stop = self.operator_stop()
+        if stop is None or stop.get("time_unix") is None:
+            return False
+        fails = [x["ts"] for x in isl["recovery_required"] if x.get("ts") is not None]
+        if isl["lost_ts"] is not None:
+            fails.append(isl["lost_ts"])
+        return not fails or min(fails) >= stop["time_unix"] - STOP_SLACK_S
 
     def feed_many(self, records: Iterable[dict], **kw: Any) -> None:
         for r in records:
@@ -570,7 +601,11 @@ class Reducer:
             age = now - ref
         startup_s = (now - min(t for t in (isl["ready_ts"], isl["first_ts"]) if t is not None)
                      if starting and (isl["ready_ts"] is not None or isl["first_ts"] is not None) else None)
-        if isl["recovery_required"] and not _recovered_after(isl):
+        stopped = self.stopped_by_us(isl)
+        if stopped and not isl["finalized"]:
+            status = "stopped"
+            starting = False
+        elif isl["recovery_required"] and not _recovered_after(isl):
             status = "recovery"
         elif isl["fleet_state"] == "lost":
             status = "lost"
@@ -587,7 +622,7 @@ class Reducer:
         return {
             "id": isl["id"], "name": isl["name"], "cloud": isl["cloud"], "region": isl["region"],
             "gpu": isl["gpu"], "gpus": isl["gpus"], "status": status, "finalized": bool(isl["finalized"]),
-            "starting": starting, "startup_s": _r(startup_s), "driver_started": isl["driver_started"],
+            "stopped_by_us": stopped, "starting": starting, "startup_s": _r(startup_s), "driver_started": isl["driver_started"],
             "nodes": [isl["nodes"][k] for k in sorted(isl["nodes"], key=lambda x: int(x) if x.isdigit() else 0)],
             "last_event_age_s": _r(age), "heartbeat_age_s": _r(hb_age),
             "heartbeat_seen": isl["heartbeat_seen"], "round": isl["round"],
@@ -635,8 +670,11 @@ class Reducer:
         alerts = alerts_mod.evaluate(self, now=now, rounds=rounds, cost=cost, cards=cards)
         n_bad = sum(1 for c in cards if c["status"] in ("stale", "lost", "recovery"))
         sev0 = sum(1 for a in alerts if a["sev"] == 0)
+        stop = self.operator_stop()
         if not cards:
             global_status = {"level": "muted", "text": "无数据"}
+        elif stop and all(c["status"] in ("stopped", "done") for c in cards):
+            global_status = {"level": "muted", "text": f"已停止（我方停机：{stop.get('cause')}）"}
         elif n_bad:
             global_status = {"level": "bad", "text": f"{n_bad} 岛异常"}
         elif sev0:
@@ -647,7 +685,7 @@ class Reducer:
             global_status = {"level": "ok", "text": "全部健康"}
         run, inferred = self.run_name()
         return {
-            "run": run, "run_inferred": inferred, "run_kind": self.run_kind(),
+            "run": run, "run_inferred": inferred, "operator_stop": stop, "run_kind": self.run_kind(),
             "mode": "live" if live else "offline", "now": now,
             "data_ts": self.max_ts, "first_ts": self.min_ts, "global_status": global_status,
             "alerts": alerts, "cost": cost, "islands": cards,

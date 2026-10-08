@@ -52,7 +52,7 @@ def heartbeat(cards: list[dict], th: dict) -> list[dict]:
     out = []
     for c in cards:
         age = c["last_event_age_s"]
-        if c["status"] == "done" or c.get("finalized") or age is None:
+        if c["status"] in ("done", "stopped") or c.get("finalized") or age is None:
             continue
         if c.get("starting"):
             warn, severe = th["startup_warn_s"], th["startup_severe_s"]
@@ -182,8 +182,9 @@ def budget(cost: dict, th: dict) -> list[dict]:
 def recovery(reducer) -> list[dict]:
     out = []
     for iid in reducer.island_ids():
-        rr = reducer.islands[iid]["recovery_required"]
-        if not rr:
+        isl = reducer.islands[iid]
+        rr = isl["recovery_required"]
+        if not rr or reducer.stopped_by_us(isl):  # failure caused by our own stop of the app
             continue
         last = rr[-1]
         tx = f"，E1 {last['tx_id']}" if last.get("tx_id") else ""
