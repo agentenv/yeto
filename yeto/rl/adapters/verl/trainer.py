@@ -58,22 +58,27 @@ def _fingerprint(cfg: dict) -> str:
 
 
 class _TestExitPublisher:
-    """TEST ONLY (V2 leave/rejoin): end this island's process after it published ``version``,
-    on the first incarnation only (a relaunched island starts above that version)."""
+    """TEST ONLY (V2 leave/rejoin): end this island's process right after it published
+    ``version``.  Armed only on a first incarnation (its first publication is policy
+    version 0); a relaunched island starts from the syncer's committed version > 0 and
+    never exits again."""
 
     def __init__(self, inner, version: int | None, tape):
         self.inner, self.version, self.tape = inner, version, tape
-        self.armed = version is not None
+        self.armed: bool | None = None if version is not None else False
 
     def publish(self, state):
         result = self.inner.publish(state)
-        if self.armed and int(state.policy_version) == self.version:
+        published = int(state.policy_version)
+        if self.armed is None:
+            self.armed = published == 0
+            self.tape.append({"event": "rl_test_exit_armed", "armed": self.armed,
+                              "first_published_version": published, "exit_after_version": self.version})
+        if self.armed and published == self.version:
             self.tape.append({"event": "rl_test_island_exit", "policy_version": self.version,
                               "time_unix": time.time()})
             print(f"[yeto-verl] TEST exit after publishing v{self.version}", flush=True)
             os._exit(17)
-        if int(state.policy_version) > (self.version or 0):
-            self.armed = False
         return result
 
 
@@ -105,6 +110,57 @@ def check_asserted(asserted: dict, cfg: dict) -> dict:
     if bad:
         raise RuntimeError("verl 初始化断言失败: " + "; ".join(bad))
     return report
+
+
+def publish_selftest(island, publisher, policy_state, specs) -> dict:
+    """rl-verl-backend 2.2 acceptance, before the first real publication:
+
+    1. export -> apply -> export is bitwise equal;
+    2. tamper: the trainer holds the exported tensors with one tensor shifted, the
+       publisher claims the untampered state -> the read-back must report exactly
+       that tensor (LORA_MISMATCH); the tensors are restored and the replicas put
+       back to sleep (the driver's first publication expects them asleep).
+    """
+    import dataclasses
+
+    import torch
+
+    from yeto.rl.core import canonical_state
+    from yeto.rl.engine.trainable_state import TrainableState
+
+    t0 = time.time()
+    first = policy_state.export()
+    policy_state.apply(first, optimizer="preserve", local_step=0)
+    again = policy_state.export()
+    names = list(first.tensor_names)
+    bitwise = all(torch.equal(first.tensors[n], again.tensors[n]) for n in names)
+    target = names[len(names) // 2]
+    tampered = {n: first.tensors[n].clone() for n in names}
+    tampered[target] = tampered[target] + 0.01
+    tamper_state = TrainableState.from_lora(canonical_state(
+        0, tampered, base_model_revision=island.base_model_revision,
+        lora_config_hash=island.lora_config_hash, layout_hash=island.layout_hash,
+        expected_specs=island.expected_specs))
+    policy_state.apply(tamper_state, optimizer="preserve", local_step=0)
+    claimed = TrainableState.from_lora(dataclasses.replace(first.to_lora(), policy_version=999999))
+    strict, publisher.strict = publisher.strict, False
+    try:
+        publisher.publish(claimed)
+    finally:
+        publisher.strict = strict
+    record = {}
+    path = island.out / f"verl-publish-{island.learner_id}.jsonl"
+    for line in path.read_text().splitlines():
+        rec = json.loads(line)
+        if rec.get("policy_version") == 999999:
+            record = rec
+    policy_state.apply(first, optimizer="preserve", local_step=0)
+    island.trainer.checkpoint_manager.sleep_replicas()
+    island.published = None
+    detected = record.get("status") == "LORA_MISMATCH" and record.get("mismatched") == [target]
+    return {"export_apply_export_bitwise": bitwise, "tampered_tensor": target,
+            "tamper_status": record.get("status"), "tamper_mismatched": record.get("mismatched"),
+            "tamper_detected": detected, "seconds": time.time() - t0}
 
 
 def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
@@ -181,6 +237,9 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
         publisher=_TestExitPublisher(publisher, plan.get("test_exit_after_version"), tape),
         placement=VerlPlacement(), capabilities=_capabilities(_fingerprint(cfg)), algorithm=spec,
         sync=sync, events=tape)
+    if plan.get("publish_selftest"):
+        tape.append({"event": "rl_verl_publish_selftest",
+                     **publish_selftest(island, publisher, VerlPolicyState(island), specs)})
     state = driver.run()
     result = {"learner_id": learner_id, "rounds_completed": driver.rounds_completed,
               "final_policy_version": state.policy_version,

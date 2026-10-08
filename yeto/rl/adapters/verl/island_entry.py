@@ -203,6 +203,11 @@ def main(argv=None) -> int:
         raise SystemExit("--syncer is required unless --rl-single-island-no-sync")
     test = json.loads(TEST_FILE.read_text()) if TEST_FILE.is_file() else {}
     exit_after = (test.get("exit_after_version") or {}).get(str(lid))
+    env_exit = os.environ.get("YETO_VERL_TEST_EXIT_AFTER", "")  # TEST ONLY "ISLAND:VERSION[,...]"
+    for item in filter(None, env_exit.split(",")):
+        island, _, version = item.partition(":")
+        if int(island) == lid:
+            exit_after = int(version)
     readback = work / "readback"
     plan = {
         "learner_id": lid, "sync": sync, "syncer": args.syncer, "global_rounds": args.global_rounds,
@@ -213,7 +218,8 @@ def main(argv=None) -> int:
         "thresholds_key": ["verl", "fsdp2", "vllm-" + str(manifest["versions"].get("vllm")),
                            "H100" if "H100" in manifest["nvidia_smi"] else manifest["nvidia_smi"]],
         "algorithm_spec": spec_dict, "syncer_epoch": args.rl_syncer_epoch,
-        "test_exit_after_version": exit_after, "run_config": run.to_dict(), "overrides": overrides,
+        "test_exit_after_version": exit_after,
+        "publish_selftest": os.environ.get("YETO_VERL_PUBLISH_SELFTEST") == "1", "run_config": run.to_dict(), "overrides": overrides,
         "asserted": {k: _override_value(overrides, k) for k in vconf.ASSERTED_KEYS},
         "versions": manifest["versions"],
     }

@@ -21,6 +21,7 @@ import modal
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
+sys.path.insert(0, "/root/sky_workdir")  # inside the container (mounted below)
 
 from yeto.rl.adapters.verl import image as verl_image  # noqa: E402
 

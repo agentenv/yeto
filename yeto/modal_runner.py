@@ -255,7 +255,8 @@ class ModalIslandConfig:
     def validate(self) -> None:
         validate_modal_shape(self.gpu, self.gpus_per_node, self.num_nodes)
         if self.training_mode == "rl":
-            if not self.image_ref or not re.fullmatch(r"[^\s@]+@sha256:[0-9a-fA-F]{64}", self.image_ref):
+            if not self.image_ref or not (re.fullmatch(r"[^\s@]+@sha256:[0-9a-fA-F]{64}", self.image_ref)
+                                          or ENGINE_BUILT_IMAGE_RE.fullmatch(self.image_ref)):
                 raise ValueError(
                     "RL islands on Modal must pin the Miles image by digest "
                     "(<repository>@sha256:<64 hex>), the same digest --rl-image gives sky"
