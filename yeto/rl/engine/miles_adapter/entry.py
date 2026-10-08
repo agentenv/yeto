@@ -176,6 +176,9 @@ _PINS_0AF62F4D_PLUS = frozenset({
     # utils/workers/worker_handle.py -- engine-failure propagation only, no loss path
     # (evidence .../evidence/ports-image/2026-10-02-m3a27b).
     "c35702eefcf2862cee155e46870e6ad30568d2c6",
+    # 8bc52237a = c35702e + s16-raw-lora-disagg (weight_update/protocols/broadcast.py placement +
+    # megatron_utils/actor.py guard + update_weight/hf_weight_iterator.py comment): no loss path.
+    "8bc52237a1102306abd8f89a2ea2090aa2df6850",
 })
 MILES_DECLARED_PINS: dict[str, frozenset[str]] = {
     # before 0af62f4d the LoRA bridge ignored calculate_per_token_loss (g1c:
