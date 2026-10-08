@@ -122,6 +122,9 @@ def classify(record: dict) -> str:
 
 
 HOST_SAMPLE_EVENT = "modal_host_sample"
+# Events only written once driver.run() is going (older tapes may lack rl_driver_start).
+DRIVER_RUNNING_EVENTS = frozenset({"rl_driver_phase", "rl_heartbeat", "rl_local_round", "rl_round_trained",
+                                   "rl_resource_sample", "rl_publication"})
 
 
 def _iid(value: Any) -> str | None:
@@ -137,7 +140,8 @@ def _iid(value: Any) -> str | None:
 def _new_island(iid: str) -> dict:
     return {
         "id": iid, "name": None, "cloud": None, "region": None, "gpu": None, "gpus": None,
-        "price_key": None, "first_ts": None, "last_event_ts": None, "last_heartbeat_ts": None,
+        "price_key": None, "cpus": None, "memory_gib": None, "driver_started": False,
+        "nodes": {}, "first_ts": None, "last_event_ts": None, "last_heartbeat_ts": None,
         "heartbeat_seen": False, "round": None, "rollout_id": None, "policy_version": None,
         "phase": None, "finalized": False, "fleet_state": None, "ready_ts": None, "stop_ts": None,
         "lost_ts": None, "open_ts": None, "closed_s": 0.0, "points": {}, "nonfinite": [], "resource": None, "host": None, "staleness": None,
@@ -171,11 +175,16 @@ class Reducer:
         self.max_ts: float | None = None
         self.min_ts: float | None = None
         self.counts = {"learner": 0, "syncer": 0, "journal": 0, "fleet": 0, "other": 0}
+        self.sources_seen: list[str] = []
+        self._run_meta_cache: tuple | None = None
 
     # -- feeding ----------------------------------------------------------------
     def feed(self, record: Any, *, source: str = "-", offset: int | None = None,
-             island: str | None = None) -> bool:
+             island: str | None = None, node: str | None = None) -> bool:
         """Fold one record. Returns False when skipped as already consumed."""
+        if source not in self.sources_seen and source != "-":
+            self.sources_seen.append(source)
+            self._run_meta_cache = None
         if offset is not None:
             if offset <= self.offsets.get(source, -1):
                 return False
@@ -183,7 +192,7 @@ class Reducer:
         if not isinstance(record, dict):
             return False
         if record.get("event") == HOST_SAMPLE_EVENT:
-            return self._feed_host(record, island)
+            return self._feed_host(record, island, node)
         kind = classify(record)
         self.counts[kind] += 1
         ts = record_ts(record)
@@ -199,7 +208,7 @@ class Reducer:
                             "source": source, "stream": kind, "record": record})
         return True
 
-    def _feed_host(self, r: dict, island: str | None) -> bool:
+    def _feed_host(self, r: dict, island: str | None, node: str | None = None) -> bool:
         """``modal_host_sample`` has no island_id: attach it to the island the
         source resolved (path ``l<N>/rank<R>``); otherwise ignore (never a "?" island)."""
         self.counts["other"] += 1
@@ -224,6 +233,22 @@ class Reducer:
         host.update({"samples": host["samples"] + 1, "ts": ts, "current_bytes": cur, "total_bytes": total,
                      "gpu_mem_used_mib": gm, "gpu_mem_used_mib_peak": peaks})
         isl["host"] = host
+        rank = _iid(r.get("node_rank")) or node
+        if rank is not None:
+            # Per-node view: a disaggregated island's rollout node is only
+            # visible here (rl_resource_sample covers the driver's node only).
+            utils = [finite(x) for x in r.get("gpu_util_pct") or []]
+            utils = [u for u in utils if u is not None]
+            nd = isl["nodes"].get(rank) or {"samples": 0, "gpu_mem_used_mib_peak": [], "gpu_util_pct_max": None}
+            npk = nd["gpu_mem_used_mib_peak"]
+            nd["gpu_mem_used_mib_peak"] = [max(a or 0, b or 0) for a, b in zip(
+                gm + [0] * (len(npk) - len(gm)), npk + [0] * (len(gm) - len(npk)))]
+            util = round(sum(utils) / len(utils), 1) if utils else None
+            if util is not None:
+                nd["gpu_util_pct_max"] = util if nd["gpu_util_pct_max"] is None else max(nd["gpu_util_pct_max"], util)
+            nd.update({"node": rank, "samples": nd["samples"] + 1, "ts": ts, "gpu_mem_used_mib": gm,
+                       "gpu_util_pct": util, "host_mem_bytes": cur, "host_mem_total_bytes": total})
+            isl["nodes"][rank] = nd
         self._touch(isl, ts)
         return True
 
@@ -261,6 +286,8 @@ class Reducer:
                 "rl_policy_apply", "rl_publication", "rl_driver_phase", "rl_heartbeat",
                 "rl_round_cut", "rl_member_publication"):
             isl["policy_version"] = r.get("policy_version")
+        if event == "rl_driver_start" or (event in DRIVER_RUNNING_EVENTS and r.get("phase") != "startup"):
+            isl["driver_started"] = True
         if event == "rl_driver_phase":
             isl["phase"] = r.get("phase")
         elif event == "rl_heartbeat":
@@ -456,7 +483,7 @@ class Reducer:
         if iid is None:
             return
         isl = self.island(iid)
-        for key in ("cloud", "region", "gpu", "gpus", "price_key"):
+        for key in ("cloud", "region", "gpu", "gpus", "price_key", "cpus", "memory_gib"):
             if r.get(key) is not None:
                 isl[key] = r[key]
         if r.get("island") is not None:
@@ -535,12 +562,22 @@ class Reducer:
         age = (now - last_any) if last_any is not None else None
         hb_age = (now - isl["last_heartbeat_ts"]) if isl["last_heartbeat_ts"] is not None else None
         res = isl["resource"] or {}
+        starting = not isl["driver_started"] and not isl["finalized"] and isl["fleet_state"] not in ("lost", "stop")
+        if starting and isl["ready_ts"] is not None:
+            # A container that is still loading weights may have written nothing yet:
+            # count the startup age from island_ready as well.
+            ref = max(t for t in (last_any, isl["ready_ts"]) if t is not None)
+            age = now - ref
+        startup_s = (now - min(t for t in (isl["ready_ts"], isl["first_ts"]) if t is not None)
+                     if starting and (isl["ready_ts"] is not None or isl["first_ts"] is not None) else None)
         if isl["recovery_required"] and not _recovered_after(isl):
             status = "recovery"
         elif isl["fleet_state"] == "lost":
             status = "lost"
         elif isl["finalized"] or isl["fleet_state"] == "stop":
             status = "done"
+        elif starting and age is not None:
+            status = "stale" if age > self.thresholds["startup_warn_s"] else "starting"
         elif age is not None and age > self.thresholds["heartbeat_warn_s"]:
             status = "stale"
         elif age is None:
@@ -550,6 +587,8 @@ class Reducer:
         return {
             "id": isl["id"], "name": isl["name"], "cloud": isl["cloud"], "region": isl["region"],
             "gpu": isl["gpu"], "gpus": isl["gpus"], "status": status, "finalized": bool(isl["finalized"]),
+            "starting": starting, "startup_s": _r(startup_s), "driver_started": isl["driver_started"],
+            "nodes": [isl["nodes"][k] for k in sorted(isl["nodes"], key=lambda x: int(x) if x.isdigit() else 0)],
             "last_event_age_s": _r(age), "heartbeat_age_s": _r(hb_age),
             "heartbeat_seen": isl["heartbeat_seen"], "round": isl["round"],
             "rollout_id": isl["rollout_id"], "policy_version": isl["policy_version"],
@@ -585,6 +624,7 @@ class Reducer:
                 "command": f"ssh -L {port}:localhost:8265 {host}"}
 
     def cost(self, now: float) -> dict:
+        self.apply_run_host_shape()
         return cost_mod.cost_view(self, now)
 
     def overview(self, *, live: bool = False, now: float | None = None) -> dict:
@@ -605,8 +645,10 @@ class Reducer:
             global_status = {"level": "warn", "text": f"{len(alerts)} 条告警"}
         else:
             global_status = {"level": "ok", "text": "全部健康"}
+        run, inferred = self.run_name()
         return {
-            "run": self.run, "mode": "live" if live else "offline", "now": now,
+            "run": run, "run_inferred": inferred, "run_kind": self.run_kind(),
+            "mode": "live" if live else "offline", "now": now,
             "data_ts": self.max_ts, "first_ts": self.min_ts, "global_status": global_status,
             "alerts": alerts, "cost": cost, "islands": cards,
             "metrics": [[k, label] for k, label, _ in METRICS],
@@ -615,6 +657,42 @@ class Reducer:
                             for r in rounds],
             "counts": dict(self.counts), "events_total": self.event_seq,
         }
+
+    def _run_meta(self) -> tuple:
+        if self._run_meta_cache is None:
+            from .sources import infer_run_name, run_meta_near
+
+            meta = next((m for m in (run_meta_near(s) for s in self.sources_seen) if m), None)
+            names = [isl["name"] for isl in self.islands.values() if isl["name"]]
+            self._run_meta_cache = (meta, infer_run_name(self.sources_seen, names))
+        return self._run_meta_cache
+
+    def run_name(self) -> tuple[str | None, bool]:
+        """(name, inferred): ``--run`` wins; otherwise inferred from the tapes (8.3)."""
+        if self.run:
+            return self.run, False
+        name = self._run_meta()[1]
+        return name, name is not None
+
+    def run_kind(self) -> str:
+        """single_island: no syncer tape and at most one island; else multi_island (D-UI2)."""
+        return "single_island" if self.counts["syncer"] == 0 and len(self.islands) <= 1 else "multi_island"
+
+    def apply_run_host_shape(self) -> None:
+        """Fill Modal islands' missing cpus/memory_gib from the run's meta.json
+        args (``--gpu modal:NxGxTYPE``, ``--modal-cpu``, ``--modal-memory-gib``;
+        defaults per GPU as in modal_runner) for tapes written before
+        island_ready carried them."""
+        meta = self._run_meta()[0]
+        if not meta:
+            return
+        shape = modal_host_shape(meta.get("args") or {})
+        if not shape:
+            return
+        for isl in self.islands.values():
+            if (isl["cloud"] or "").lower() == "modal" and isl["cpus"] is None and isl["memory_gib"] is None:
+                isl["cpus"], isl["memory_gib"] = shape["cpus"], shape["memory_gib"]
+                isl["host_shape_source"] = "meta.json"
 
     def island_ids(self) -> list[str]:
         def key(i: str):
@@ -670,6 +748,21 @@ class Reducer:
             "fleet": self.fleet_view(live=live, now=now),
             "events": {"events": evs, "cursor": evs[-1]["seq"] if evs else 0, "more": False},
         }
+
+
+def modal_host_shape(args: dict) -> dict | None:
+    """Requested host cpus/memory for a ``--gpu modal:[N x]GxTYPE`` run."""
+    import re
+
+    m = re.fullmatch(r"modal:(?:(\d+)x)?(\d+)x([A-Za-z0-9!]+)", str(args.get("gpu") or ""))
+    if not m:
+        return None
+    nodes, per = int(m.group(1) or 1), int(m.group(2))
+    from ..modal_runner import MODAL_CPU_CORES_PER_GPU, MODAL_MEMORY_GIB_PER_GPU
+
+    cpu = args.get("modal_cpu") or MODAL_CPU_CORES_PER_GPU * per
+    mem = args.get("modal_memory_gib") or MODAL_MEMORY_GIB_PER_GPU * per
+    return {"cpus": cpu * nodes, "memory_gib": mem * nodes}
 
 
 def _recovered_after(isl: dict) -> bool:

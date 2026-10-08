@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from .cost import load_prices, price_per_gpu_h
+from .cost import island_rate, load_prices
 
 _ISLAND_INDEX = re.compile(r"-l(\d+)(?:-|$)")
 
@@ -28,7 +28,8 @@ def island_id_of(name: str) -> int | None:
 
 
 def meta_from_task(task: Any) -> dict:
-    """cloud/region/gpu/gpus of a sky Task (defensive: any shape -> partial dict)."""
+    """cloud/region/gpu/gpus (+ requested host cpus/memory_gib when known) of a
+    sky Task or ModalIslandConfig (defensive: any shape -> partial dict)."""
     meta: dict[str, Any] = {"cloud": None, "region": None, "gpu": None, "gpus": None}
     try:
         # Modal islands are not sky Tasks: the launcher keeps a ModalIslandConfig
@@ -39,7 +40,13 @@ def meta_from_task(task: Any) -> dict:
             meta["cloud"] = "modal"
             meta["region"] = getattr(task, "region", None)
             meta["gpu"] = task.gpu.rstrip("!")
-            meta["gpus"] = task.gpus_per_node * (nodes if isinstance(nodes, int) and nodes > 0 else 1)
+            n = nodes if isinstance(nodes, int) and nodes > 0 else 1
+            meta["gpus"] = task.gpus_per_node * n
+            cpu, mem_mib = getattr(task, "cpu_request", None), getattr(task, "memory_request_mib", None)
+            if isinstance(cpu, (int, float)):
+                meta["cpus"] = cpu * n
+            if isinstance(mem_mib, (int, float)):
+                meta["memory_gib"] = mem_mib / 1024 * n
             return meta
         resources = getattr(task, "resources", None)
         if resources is None:
@@ -84,9 +91,7 @@ class FleetLog:
 
     def rate(self, name: str) -> float | None:
         m = self.meta.get(name, {})
-        unit = price_per_gpu_h(self.prices, m.get("cloud"), m.get("gpu"), m.get("price_key"))
-        gpus = m.get("gpus")
-        return unit * gpus if unit is not None and isinstance(gpus, (int, float)) else None
+        return island_rate(self.prices, m)["rate_usd_h"]
 
     def event(self, kind: str, name: str, **fields: Any) -> dict:
         now = self.clock()
@@ -98,7 +103,8 @@ class FleetLog:
             self.closed_s[name] += now - self.open_since.pop(name)
         m = self.meta[name]
         rec = {"event": kind, "time_unix": now, "island": name, "island_id": island_id_of(name),
-               **{k: m.get(k) for k in ("cloud", "region", "gpu", "gpus", "price_key")}, **fields}
+               **{k: m.get(k) for k in ("cloud", "region", "gpu", "gpus", "price_key")},
+               **{k: m[k] for k in ("cpus", "memory_gib") if m.get(k) is not None}, **fields}
         self._write(rec)
         return rec
 
@@ -118,7 +124,7 @@ class FleetLog:
         priced = [r["cost_usd"] for r in rows if r["cost_usd"] is not None]
         rec = {"event": "cost_tick", "time_unix": now, "islands": rows,
                "total_usd": sum(priced) if priced else None, "budget_usd": self.budget_usd,
-               "estimate": "价目表 x GPU 数 x 墙钟；非账单"}
+               "estimate": "价目表 x (GPU + CPU + 内存) x 墙钟；非账单"}
         self._write(rec)
         return rec
 

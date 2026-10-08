@@ -483,13 +483,32 @@ def _host_mem_used_bytes() -> dict:
     return out
 
 
-class HostMemSampler:
-    """Opt-in (env YETO_MODAL_HOSTMEM_SAMPLE_S): append host memory and
-    nvidia-smi memory.used every interval to a .jsonl in the tape dir (so the
-    tape Volume carries it home) and print the peaks at exit."""
+HOSTMEM_DEFAULT_MULTINODE_S = 30.0
 
-    def __init__(self, interval_s: float, path: str):
+
+def hostmem_interval_s(cfg) -> float | None:
+    """Sampling interval: env YETO_MODAL_HOSTMEM_SAMPLE_S wins ("0" disables);
+    otherwise every node of a multi-node island is sampled by default."""
+    raw = (cfg.envs or {}).get("YETO_MODAL_HOSTMEM_SAMPLE_S")
+    if raw is not None and str(raw).strip() != "":
+        v = float(raw)
+        return v if v > 0 else None
+    return HOSTMEM_DEFAULT_MULTINODE_S if cfg.num_nodes > 1 else None
+
+
+class HostMemSampler:
+    """Append host memory and nvidia-smi memory.used / utilization.gpu every
+    interval to a .jsonl in the tape dir (so the tape Volume carries it home)
+    and print the peaks at exit. Opt-in via env YETO_MODAL_HOSTMEM_SAMPLE_S;
+    on by default for multi-node islands (``hostmem_interval_s``), because the
+    driver's ``rl_resource_sample`` only covers the node the driver runs on
+    and a disaggregated island's rollout node would otherwise go unsampled.
+    Starts at container start, so the startup phase (weight load, Ray, engine
+    init) is covered too."""
+
+    def __init__(self, interval_s: float, path: str, node_rank: int | None = None):
         self.interval_s, self.path = max(1.0, interval_s), path
+        self.node_rank = node_rank
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.peak_host = 0
@@ -497,12 +516,18 @@ class HostMemSampler:
 
     def sample(self) -> dict:
         rec = {"event": "modal_host_sample", "time_unix": time.time(), **_host_mem_used_bytes()}
+        if self.node_rank is not None:
+            rec["node_rank"] = self.node_rank
         try:
-            res = subprocess.run(["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+            res = subprocess.run(["nvidia-smi", "--query-gpu=memory.used,utilization.gpu",
+                                  "--format=csv,noheader,nounits"],
                                  capture_output=True, text=True, timeout=20)
-            rec["gpu_mem_used_mib"] = [int(x) for x in res.stdout.split()]
+            rows = [[x.strip() for x in line.split(",")] for line in res.stdout.splitlines() if line.strip()]
+            rec["gpu_mem_used_mib"] = [int(r[0]) for r in rows]
+            rec["gpu_util_pct"] = [int(r[1]) if len(r) > 1 and r[1].isdigit() else None for r in rows]
         except Exception:  # noqa: BLE001
             rec["gpu_mem_used_mib"] = None
+            rec["gpu_util_pct"] = None
         used = max(v or 0 for v in (rec.get("meminfo_used"), rec.get("cgroup_current")))
         self.peak_host = max(self.peak_host, used)
         for i, v in enumerate(rec["gpu_mem_used_mib"] or []):
@@ -562,9 +587,10 @@ def island_main(cfg_json: str) -> int:
             _volume_commit(cfg.tape_volume_name),
         )
     hostmem = None
-    if cfg.envs.get("YETO_MODAL_HOSTMEM_SAMPLE_S"):
-        hostmem = HostMemSampler(float(cfg.envs["YETO_MODAL_HOSTMEM_SAMPLE_S"]),
-                                 f"{TAPE_SOURCE_DIR}/modal-hostmem-rank{rank}.jsonl")
+    interval = hostmem_interval_s(cfg)
+    if interval is not None:
+        hostmem = HostMemSampler(interval, f"{TAPE_SOURCE_DIR}/modal-hostmem-rank{rank}.jsonl",
+                                 node_rank=rank)
         hostmem.start()
     try:
         return _island_body(cfg, rank, ips, all_ips, env, tape)

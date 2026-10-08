@@ -33,7 +33,7 @@ function header(){var o=OV,c=o.cost,gs=o.global_status||{};
  var cost;if(c.total_usd==null)cost='<span class="k">成本 </span>'+ND;
  else{var cls=costCls(c.budget_pct);cost='<span style="min-width:170px"><span class="k">成本（估算） </span><span class="num '+cls+'">$'+c.total_usd.toFixed(1)+(c.budget_usd?' / $'+c.budget_usd.toFixed(0):'')+'</span>'+(c.budget_pct!=null?bar(c.budget_pct,cls):'')+'</span>'}
  var age=o.data_ts!=null?Math.max(0,o.now-o.data_ts):null;
- el("title").textContent="Syncer 总览 · "+(o.run||"未命名运行");
+ el("title").textContent=(o.run_kind=="single_island"?"单岛总览 · ":"Syncer 总览 · ")+(o.run||"未命名运行")+(o.run_inferred?"（由磁带推断）":"");
  el("hdr").innerHTML='<span class="mono">run: '+esc(o.run||"-")+'</span> '+mode+
   ' <span class="chip" style="background:var(--'+(gs.level=="muted"?"chip":gs.level)+');color:'+(gs.level=="muted"?"var(--muted)":"var(--panel)")+'">全局：'+esc(gs.text)+'</span> '+cost+
   ' <span class="k">数据更新于 '+ts(o.data_ts)+(age!=null?'（'+Math.round(age)+'s 前）':'')+'</span>'}
@@ -70,7 +70,7 @@ function chart(key){var W=720,H=260,L=48,B=20,T=10,ser=OV.series,ids=OV.islands.
  return o+'</svg>'}
 function draw(){el("big").innerHTML=chart(cur.m);[].forEach.call(document.querySelectorAll("#tabs button"),function(b){b.setAttribute("aria-pressed",b.dataset.m==cur.m)})}
 
-function status(s){return {ok:'<span class="ok">健康</span>',stale:'<span class="bad">掉线疑似</span>',lost:'<span class="bad">已丢失</span>',recovery:'<span class="bad">RECOVERY_REQUIRED</span>',done:'<span class="muted">已结束</span>',unknown:ND}[s.status]||esc(s.status)}
+function status(s){return {ok:'<span class="ok">健康</span>',stale:'<span class="bad">掉线疑似</span>',lost:'<span class="bad">已丢失</span>',recovery:'<span class="bad">RECOVERY_REQUIRED</span>',done:'<span class="muted">已结束</span>',starting:'<span class="warn">启动中</span>',unknown:ND}[s.status]||esc(s.status)}
 function cards(){if(!OV.islands.length){el("cards").innerHTML='<div class="empty">无数据</div>';return}
  el("cards").innerHTML=OV.islands.map(function(s){var bad=s.status=="stale"||s.status=="lost"||s.status=="recovery";
   var hb=s.heartbeat_seen?(s.heartbeat_age_s!=null?Math.round(s.heartbeat_age_s)+'s 前':ND):'<span class="nd">无数据（磁带无 rl_heartbeat）</span>';

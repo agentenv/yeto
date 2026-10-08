@@ -81,6 +81,7 @@ class TapeSource:
         self.island = island if island is not None else (
             island_hint(self.path) if "journal" in self.path.name
             else host_island_hint(self.path) if "hostmem" in self.path.name else None)
+        self.node = node_hint(self.path)
         self.offset = 0
         self.bad_lines = 0
 
@@ -116,7 +117,7 @@ class TapeSource:
     def pump(self, reducer) -> int:
         n = 0
         for off, rec in self.read_new():
-            if reducer.feed(rec, source=self.name, offset=off, island=self.island):
+            if reducer.feed(rec, source=self.name, offset=off, island=self.island, node=self.node):
                 n += 1
         return n
 
@@ -143,3 +144,55 @@ def run_sources(run: str) -> list[str]:
     if syncer.exists():
         out.append(str(syncer))
     return [p for p in out if Path(p).exists()]
+
+
+_RUN_FROM_TAPE_DIR = re.compile(r"^yeto-(.+)$")
+_RUN_FROM_ISLAND = re.compile(r"^(.+?)-l\d+(?:-[a-z0-9]+)?(?:\.jsonl)?$")
+
+
+def run_meta_near(path: str | os.PathLike, max_up: int = 4) -> dict | None:
+    """``meta.json`` of the ``~/.yeto/runs/<run>/`` directory a tape lives in
+    (looked up at most ``max_up`` parents), or None."""
+    p = Path(path)
+    for d in [p, *list(p.parents)[:max_up]]:
+        m = d / "meta.json"
+        if m.is_file():
+            try:
+                data = json.loads(m.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                return None
+            if isinstance(data, dict) and isinstance(data.get("name"), str):
+                return data
+    return None
+
+
+def infer_run_name(sources: list[str], island_names: list[str] | None = None) -> str | None:
+    """Run name when ``--run`` was not given (tasks 8.3): the run directory's
+    meta.json, else a ``yeto-<run>`` Modal tape dir, else an island name /
+    learner tape file ``<run>-l<N>[-<cloud>]``. None when nothing matches."""
+    for s in sources:
+        meta = run_meta_near(s)
+        if meta:
+            return meta["name"]
+    for s in sources:
+        for part in Path(s).parts:
+            m = _RUN_FROM_TAPE_DIR.match(part)
+            if m:
+                return m.group(1)
+    for name in list(island_names or []) + [Path(s).name for s in sources]:
+        m = _RUN_FROM_ISLAND.match(name or "")
+        if m and not m.group(1).startswith(("rl-island", "modal-hostmem")):
+            return m.group(1)
+    return None
+
+
+_NODE_RE = re.compile(r"^rank(\d+)$")
+
+
+def node_hint(path: Path) -> str | None:
+    """Node rank of a per-node stream (``.../rank<R>/...``)."""
+    for part in reversed(path.parts):
+        m = _NODE_RE.match(part)
+        if m:
+            return m.group(1)
+    return None
