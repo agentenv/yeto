@@ -150,7 +150,7 @@ def test_record_trained_groups_applies_policy(monkeypatch):
     from yeto.rl.engine.miles_adapter import rollout_meta_hook as hook
 
     monkeypatch.setattr("yeto.rl.algos.sample_filters.apply_sample_filters", lambda a, d: None)
-    monkeypatch.setattr(rlm, "_load_tokenizer", _loader)
+    monkeypatch.setattr(hook, "_load_miles_tokenizer", _loader)
     s = _sample()
     hook.record_trained_groups(_exclude_args(), [[s]])
     assert s.loss_mask[:2] == [0, 0] and s.metadata["reasoning_in_loss"] is False

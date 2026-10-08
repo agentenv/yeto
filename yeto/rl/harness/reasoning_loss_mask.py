@@ -111,9 +111,12 @@ _MARKER_CACHE_ATTR = "_yeto_reasoning_marker_ids"
 
 
 def _load_tokenizer(args: Any) -> Any:
-    from miles.utils.processing_utils import load_tokenizer  # cached by Miles
-
-    return load_tokenizer(args.hf_checkpoint, trust_remote_code=True)
+    # Neutral core must not import the engine (import boundary, decoupling D4):
+    # the engine adapter passes its tokenizer loader in
+    # (miles_adapter/rollout_meta_hook.py ``_load_miles_tokenizer``).
+    raise ReasoningMarkerError(
+        "reasoning-loss policy needs a tokenizer_loader from the engine adapter"
+    )
 
 
 def apply_from_args(args: Any, data: Iterable[Any], *, tokenizer_loader: Any = None) -> int | None:
