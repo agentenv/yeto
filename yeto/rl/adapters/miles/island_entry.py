@@ -204,6 +204,8 @@ def parse_args(argv=None):
     # 3.8 strict pause budget inputs (defaults: syncer 900 s, margin 0.5).
     # rl-inter-island-scheduling 0.13 (launcher forwards only "elastic")
     parser.add_argument("--rl-island-scheduling", choices=("legacy", "elastic"), default="legacy")
+    # S17 N16: LR schedule choice (yeto.rl.engine.run_config.resolve_lr_schedule)
+    parser.add_argument("--rl-lr-schedule", choices=("auto", "linear", "constant"), default="auto")
     parser.add_argument("--rl-syncer-epoch", type=int, default=0)
     parser.add_argument("--rl-elastic-quorum-timeout-s", type=float, default=None)
     parser.add_argument("--rl-elastic-idle-flow-timeout-s", type=float, default=None)

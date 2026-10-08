@@ -2018,6 +2018,8 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         flags += " --rl-print-attestation-fingerprint"
     if getattr(args, "rl_boot_only", False):
         flags += " --rl-boot-only"
+    if (getattr(args, "rl_lr_schedule", None) or "auto") != "auto":  # auto adds nothing
+        flags += f" --rl-lr-schedule {args.rl_lr_schedule}"
     if island_scheduling_mode(args) == "elastic":  # legacy adds nothing
         flags += (" --rl-island-scheduling elastic"
                   f" --rl-syncer-epoch {island_syncer_epoch(args)}")

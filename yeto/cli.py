@@ -458,6 +458,11 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
                     help="legacy (default): existing syncer behaviour, fixed members, every "
                     "island must arrive; elastic: inter-island scheduling (capacity-weighted "
                     "stepping, late deltas carried over with a discount, join/leave)")
+    rl.add_argument("--rl-lr-schedule", choices=("auto", "linear", "constant"), default="auto",
+                    help="island optimizer LR schedule: auto (default) = constant for decoupled "
+                    "and elastic islands, linear decay over global_rounds x optimizer_steps "
+                    "otherwise; constant = fixed LR in every mode (single island included); "
+                    "linear is refused for decoupled/elastic")
     rl.add_argument("--rl-quorum-theta", type=float, default=None, metavar="F",
                     help="elastic: step when arrived capacity >= F x total (default 0.75)")
     rl.add_argument("--rl-carry-gamma", type=float, default=None, metavar="F",
