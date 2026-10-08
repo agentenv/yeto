@@ -175,6 +175,7 @@ class MilesFullParameterDenseSync:
             policy_rounds=self.config.wire.policy_rounds,
             learner_generations=self.config.roster,
             training_contract_hash=self.config.training_contract_hash,
+            backend_identity_sha256=_legacy_identity_sha256(),  # decoupling 6.2
         )
         client = SyncerClient(
             self.config.wire.syncer_addr,
@@ -613,3 +614,10 @@ def create_miles_full_parameter_dense_sync(args) -> MilesFullParameterDenseSync:
     if not isinstance(config, MilesDenseFullParameterConfig):
         raise TypeError("Miles dense full-parameter configuration is missing")
     return MilesFullParameterDenseSync(args, config)
+
+
+def _legacy_identity_sha256() -> str:
+    """Full-parameter runs use the legacy Miles engine (ports refuses them)."""
+    from yeto.rl.adapters.miles.identity import backend_identity
+
+    return backend_identity("legacy").sha256()

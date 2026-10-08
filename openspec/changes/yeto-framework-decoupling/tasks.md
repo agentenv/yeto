@@ -98,8 +98,10 @@
 
 ## 6. 阶段 5：后端身份进契约
 
-- [ ] 6.1 `BackendIdentity{engine, engine_commit, device_family, param_map_sha256}` 与独立哈希；Miles 适配层给固定值（E23，`execution_profile.py:237-239`、`algorithm.py:1230`）。验收：旧两种哈希等于标准样本；身份哈希同配置两次相同、改任一字段即变。
-- [ ] 6.2 岛握手比较身份哈希，不同即拒绝；`local_learner.py` 与 `sao_streaming_runtime.py:203,642` 的训练契约输入引用该身份哈希。验收：单测——Miles 与模拟 verl 身份握手被拒并报双方身份；两个 Miles 岛握手不受影响（标准样本一致）。
+- [x] 6.1 `BackendIdentity{engine, engine_commit, device_family, param_map_sha256}` 与独立哈希；Miles 适配层给固定值（E23，`execution_profile.py:237-239`、`algorithm.py:1230`）。验收：旧两种哈希等于标准样本；身份哈希同配置两次相同、改任一字段即变。
+  - 已实现（s17-decouple-p4，S17 夜间 N1）：`yeto/rl/engine/backend_identity.py`（`BackendIdentity` + 独立 sha256，schema `yeto-backend-identity-v1`）；Miles 固定值在 `adapters/miles/identity.py`（engine=miles、ports 用 `MILES_NEXT_COMMIT`/legacy 用 `MILES_COMMIT`、device_family=nvidia、参数名映射=恒等映射的哈希），注册表角色 `identity`。标准样本新增 `backend_identity` 字段（ports 身份哈希 `9d5696a3d3b6…`），算法哈希与契约哈希不变。已验证：`tests/test_rl_backend_identity.py`（同配置两次相同、改任一字段即变、标准样本两种旧哈希不含身份）。
+- [x] 6.2 岛握手比较身份哈希，不同即拒绝；`local_learner.py` 与 `sao_streaming_runtime.py:203,642` 的训练契约输入引用该身份哈希。验收：单测——Miles 与模拟 verl 身份握手被拒并报双方身份；两个 Miles 岛握手不受影响（标准样本一致）。
+  - 已实现（s17-decouple-p4）：岛与 syncer 的 HELLO 会话契约由"布局指纹"改为"布局指纹 + 后端身份哈希"（`backend_identity.session_contract_hash`，`BridgeConfig`/`DecoupledBridgeConfig` 新字段 `backend_identity_sha256`，Miles 岛入口填入）；syncer 只接纳会话契约逐字节相同的岛（`syncer/src/server.rs` `SessionSpec` 相等比较），所以 Miles 与 verl（或不同 Miles 钉）的岛握手被拒；能拿到双方身份的地方用 `check_identity_match` 报双方身份。dense（`local_learner.dense_sweep_session_contract_hash` 新参数）与 SAO（`sao_role_stream_session_contract_hash`）的契约输入引用 legacy Miles 身份哈希。已验证：单测（Miles vs 模拟 verl 被拒并报双方身份；两个 Miles 岛契约相同；HELLO 帧带新契约）。**未验证**：真 Rust syncer 端到端（本机 `cargo build` 在基线就失败，`test_rl_integration` 12 例基线即报错）；真机多岛。**版本边界**：新旧代码的岛不能混跑（会话契约不同）；阶段 5 之前写下的 syncer 检查点因会话契约不同不能续跑。
 
 ## 7. 阶段 6：硬件层（可与 verl 并行）
 

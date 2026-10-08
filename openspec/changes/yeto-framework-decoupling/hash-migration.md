@@ -119,3 +119,9 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
 ### 未验证
 - 新哈希与新插件路径没有真机证据（本轮不上 GPU），由下一次本来要开的卡顺带取得。
 - 需 import Miles 的等价测试（`test_rl_reward_pipeline_equivalence`、`test_rl_seq_adv_miles`、`test_rl_algorithm_flags_upstream`）本机屏蔽未跑。
+
+## 阶段 5 记录（同分支 s17-decouple-p4，2026-10-08 夜）
+
+- `algorithm_sha256`、契约哈希、Miles 命令行：8 个标准样本全部不变（身份哈希是并列的第三个哈希，不并入前两个）。
+- 标准样本新增字段 `backend_identity`：Miles ports 身份 `{engine: miles, engine_commit: 8bc52237…, device_family: nvidia, param_map_sha256: 36c37d69…}`，哈希 `9d5696a3d3b6e6d802115ef3deb970b5e4d9206d1751d71f9075a849d2909f8d`。
+- 运行时变化（离线样本记不到）：RL 岛发给 syncer 的会话契约从"布局指纹"改为"布局指纹 + 身份哈希"的 sha256；dense 与 SAO 的会话契约输入加入 legacy Miles 身份哈希。新旧版本岛混跑会被 syncer 拒绝；阶段 5 之前的 syncer 检查点不能续跑。未取得真 syncer 与真机证据。

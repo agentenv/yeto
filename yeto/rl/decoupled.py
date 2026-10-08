@@ -37,6 +37,8 @@ class DecoupledBridgeConfig:
     canonical_layout_hash: str
     wan_streams: int = 4
     learner_budget_steps: int | None = None
+    # Decoupling 6.2 (design D7): see yeto.rl.bridge.BridgeConfig.
+    backend_identity_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if self.num_fragments < 2:
@@ -131,6 +133,7 @@ class DecoupledRlBridge:
             self.layout,
             dtype=DTYPE_F32,
             num_streams=config.wan_streams,
+            session_contract_hash=_session_contract(self.layout, config.backend_identity_sha256),
             max_reconnects=(None if config.learner_budget_steps is not None else 0),
         )
         count = self.layout.num_fragments
@@ -601,3 +604,13 @@ class DecoupledRlBridge:
             layout_hash=self.config.canonical_layout_hash,
             expected_specs=self.config.expected_specs,
         )
+
+
+def _session_contract(layout, identity_sha256: str | None) -> bytes | None:
+    """HELLO session contract (decoupling 6.2): layout fingerprint bound to the backend identity."""
+    if identity_sha256 is None:
+        return None
+    from yeto.protocol import layout_fingerprint
+    from yeto.rl.engine.backend_identity import session_contract_hash
+
+    return session_contract_hash(layout_fingerprint(layout), identity_sha256)
