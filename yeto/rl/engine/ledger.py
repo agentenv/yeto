@@ -180,6 +180,13 @@ class BatchLedger:
             return None
         return dict(batch.data_cursor)
 
+    def next_rollout_id(self) -> int:
+        """0.21: the round after the newest rollout whose optimizer step was applied
+        (``optimizer_applied`` or ``outer_recorded``); 0 for an empty ledger. Its
+        groups are consumed, so a restart must not start at or below it."""
+        done = [r for r, b in self._batches.items() if b.state in ("optimizer_applied", "outer_recorded")]
+        return max(done) + 1 if done else 0
+
     def cut_summary(self) -> dict[str, Any]:
         """``CutContext.ledger`` (4.2): what a cut must treat as unconsumed."""
         ready = [gid for r in self.unconsumed() for gid in self._batches[r].group_ids]

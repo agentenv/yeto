@@ -840,3 +840,140 @@ class StrictRlBridge:
         from .event_echo import append_record
 
         append_record(path, event)  # echoed when YETO_RL_ECHO_EVENTS=1
+
+
+# ----------------------------------------------------------------------------- elastic
+def flatten_state(state: CanonicalLoraState, specs) -> list[float]:
+    """Flat f32 vector in canonical spec order (elastic wire format)."""
+    parts = [state.tensors[spec.name].detach().to(torch.float32).reshape(-1) for spec in specs]
+    return torch.cat(parts).tolist() if parts else []
+
+
+def unflatten_state(values, version: int, template: CanonicalLoraState, specs) -> CanonicalLoraState:
+    flat = torch.tensor(values, dtype=torch.float32)
+    tensors, off = {}, 0
+    for spec in specs:
+        tensors[spec.name] = flat[off:off + spec.numel].reshape(spec.shape).clone()
+        off += spec.numel
+    if off != flat.numel():
+        raise StrictRlInvariantError("layout_hash_mismatch",
+                                     f"elastic base has {flat.numel()} values, layout needs {off}")
+    return canonical_state(version, tensors, base_model_revision=template.base_model_revision,
+                           lora_config_hash=template.lora_config_hash,
+                           layout_hash=template.layout_hash, expected_specs=specs)
+
+
+class ElasticRlBridge:
+    """Island loop for ``--rl-island-scheduling elastic`` (tasks 0.14).
+
+    Parameters travel as one flat f32 vector (no layout fragments, no multi-
+    stream frames, no wire compression). Flow, following syncer elastic.rs /
+    elastic_server.rs:
+
+    1. JOIN (capacity, incarnation) -> JOIN_ACK (catch_up, base_version); the
+       server also sends ELASTIC_BASE right away when a base exists.
+    2. No base yet: send ELASTIC_INIT with the island's initial parameters (the
+       first one received wins) and wait for ELASTIC_BASE.
+    3. Each round: apply the base, run a local round, send DELTA_TENSOR
+       (theta - base, c_tokens, c_steps), then wait for a newer ELASTIC_BASE.
+       A base that advanced while this island was training is applied right
+       away; the late delta is carried over by the server with its discount.
+    4. A heartbeat thread renews the lease every lease_s/3; LEAVE on exit.
+    """
+
+    def __init__(self, runtime: IslandRuntime, config: BridgeConfig, client, *,
+                 base_wait_s: float = 3600.0) -> None:
+        self.runtime = runtime
+        self.config = config
+        self.client = client
+        self.base_wait_s = base_wait_s
+        self.base_version: int | None = None
+        self.catch_up: bool | None = None
+        self.template = runtime.initialize()
+        self.specs = tuple(getattr(config, "expected_specs", ()) or ()) or tuple(
+            self.template.specs)
+        self._base: list[float] | None = None
+
+    def _append_event(self, event: dict) -> None:
+        path = Path(self.config.event_tape)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"time_unix": time.time(), **event}, sort_keys=True) + "\n")
+
+    def _apply(self, base) -> None:
+        self._base = list(base.params)
+        self.base_version = base.outer_version
+        self.runtime.apply_global_policy(
+            unflatten_state(self._base, base.outer_version, self.template, self.specs))
+
+    def _wait_base(self, newer_than: int | None):
+        base = self.client.wait_base(newer_than=newer_than, timeout_s=self.base_wait_s)
+        if base is None:
+            raise StrictRlInvariantError("elastic_base_timeout",
+                                         f"no ELASTIC_BASE newer than {newer_than} "
+                                         f"within {self.base_wait_s}s; errors: {self.client.errors}")
+        return base
+
+    def run(self) -> int:
+        """Run ``global_rounds`` local rounds; returns the last applied base version."""
+        ack = self.client.join()
+        self.catch_up = ack.catch_up
+        self._append_event({"event": "rl_elastic_join", "island_id": self.config.learner_id,
+                            "base_version": ack.base_version, "catch_up": ack.catch_up,
+                            "membership_epoch": ack.membership_epoch})
+        failed = False
+        try:
+            base = self.client.wait_base(newer_than=None, timeout_s=1.0)
+            if base is None:
+                self.client.elastic_init(flatten_state(self.template, self.specs))
+                base = self._wait_base(None)
+            self._apply(base)
+            for _ in range(self.config.global_rounds):
+                t0 = time.monotonic()
+                stats = self.runtime.run_local_round(
+                    expected_policy_version=self.base_version,
+                    groups=self.config.groups_per_round,
+                    samples_per_group=self.config.samples_per_group,
+                    optimizer_steps=self.config.local_optimizer_steps,
+                )
+                local = flatten_state(self.runtime.export_local_policy(), self.specs)
+                update = [a - b for a, b in zip(local, self._base)]
+                self.client.inner_step += self.config.local_optimizer_steps
+                self.client.round_wall_s = time.monotonic() - t0
+                sent_on = self.base_version
+                self.client.delta_tensor(base_version=sent_on, c_tokens=int(stats.action_tokens),
+                                         c_steps=self.config.local_optimizer_steps, update=update)
+                self.runtime.record_local_round(stats)
+                self._append_event({"event": "rl_elastic_delta", "island_id": self.config.learner_id,
+                                    "base_version": sent_on, "c_tokens": int(stats.action_tokens),
+                                    "c_steps": self.config.local_optimizer_steps,
+                                    "round_wall_s": self.client.round_wall_s})
+                self._apply(self._wait_base(sent_on))
+            return self.base_version
+        except BaseException:
+            failed = True
+            raise
+        finally:
+            try:
+                self.client.leave()
+                self._append_event({"event": "rl_elastic_leave", "island_id": self.config.learner_id,
+                                    "after_error": failed, "errors": list(self.client.errors)})
+            finally:
+                self.client.close()
+                self.runtime.shutdown()
+
+
+def make_island_bridge(runtime: IslandRuntime, config: BridgeConfig, *,
+                       island_scheduling: str = "legacy", elastic_client=None, **elastic_kw):
+    """legacy (default): exactly ``StrictRlBridge(runtime, config)``.
+    elastic: :class:`ElasticRlBridge` with an :class:`ElasticIslandClient`."""
+    if island_scheduling == "legacy":
+        return StrictRlBridge(runtime, config)
+    if island_scheduling != "elastic":
+        raise ValueError(f"island scheduling must be legacy|elastic, got {island_scheduling!r}")
+    if elastic_client is None:
+        from .elastic_client import ElasticClientConfig, ElasticIslandClient, hmac_key_from_env
+
+        elastic_client = ElasticIslandClient(
+            ElasticClientConfig(config.syncer_addr, config.learner_id), hmac_key_from_env())
+    return ElasticRlBridge(runtime, config, elastic_client, **elastic_kw)

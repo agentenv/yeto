@@ -443,6 +443,40 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
                     help="--rl-elastic: declare the --rl-elastic-cells names to the fork as its "
                     "rollout engine cells (placement map rollout_cells: started on the rollout "
                     "GPUs, then stopped on standby GPUs, then stopped unbound; needs fork F-R1)")
+    # rl-inter-island-scheduling 0.13: explicit old/new outer-scheduling choice.
+    rl.add_argument("--rl-island-scheduling", choices=("legacy", "elastic"), default="legacy",
+                    help="legacy (default): existing syncer behaviour, fixed members, every "
+                    "island must arrive; elastic: inter-island scheduling (capacity-weighted "
+                    "stepping, late deltas carried over with a discount, join/leave)")
+    rl.add_argument("--rl-quorum-theta", type=float, default=None, metavar="F",
+                    help="elastic: step when arrived capacity >= F x total (default 0.75)")
+    rl.add_argument("--rl-carry-gamma", type=float, default=None, metavar="F",
+                    help="elastic: discount per outer step for a late delta (default 0.5)")
+    rl.add_argument("--rl-soft-deadline-s", type=int, default=None, metavar="S",
+                    help="elastic: soft deadline of an outer round (default: the quorum "
+                    "timeout, syncer default 900)")
+    rl.add_argument("--rl-elastic-debug-delay-s", default=None, metavar="ISLAND:S[,ISLAND:S]",
+                    help="elastic TEST switch: the given island(s) wait S seconds before "
+                    "submitting each round's delta (bare S = every island); used to trigger "
+                    "the soft deadline and carried_over on real hardware")
+    rl.add_argument("--rl-elastic-debug-pause", default=None, metavar="ISLAND:AFTER_V:S[,...]",
+                    help="elastic TEST switch: after the island applied outer version >= AFTER_V "
+                    "its link to the syncer goes silent for S seconds (no heartbeats, sends and "
+                    "received frames held; training continues) to exercise lease expiry and "
+                    "automatic re-JOIN on real hardware")
+    rl.add_argument("--rl-final-grace-s", type=int, default=None, metavar="S",
+                    help="elastic: after total steps the syncer keeps answering FINISHED for "
+                    "this long so late islands end cleanly (default: the soft deadline)")
+    rl.add_argument("--rl-island-lease-s", type=float, default=None, metavar="S",
+                    help="elastic: island lease on the syncer (--island-lease-s); an island "
+                    "silent this long is removed. Default 300 (well above a 60-90 s local round)")
+    rl.add_argument("--rl-q-min", type=int, default=None, metavar="N",
+                    help="elastic: minimum arrived islands for a step (default 1)")
+    rl.add_argument("--rl-syncer-epoch", type=int, default=None, metavar="N",
+                    help="elastic: syncer term (incremented on each syncer restart); passed to "
+                    "the syncer as --syncer-epoch and to every island for JOIN (default 0)")
+    rl.add_argument("--rl-max-carry-lag", type=int, default=None, metavar="N",
+                    help="elastic: oldest late delta still carried over, in outer steps (default 2)")
     rl.add_argument("--rl-elastic-quorum-timeout-s", type=int, default=None, metavar="S",
                     help="--rl-elastic: syncer --quorum-timeout-s, also the island's strict "
                     "pause budget input (default: syncer default 900)")
@@ -2014,6 +2048,10 @@ def cmd_launch_head(args) -> int:
     # Private --rl-image only (SKYPILOT_DOCKER_* set, or --rl-image-private);
     # a public image sends no registry login at all.
     secrets.update(launcher.registry_login_for(args) or {})
+    if args.training_mode == "rl":
+        # 0.20: the head's LocalSyncer and the islands it launches read the
+        # island HMAC key from this secret env (elastic only; {} in legacy).
+        secrets.update(launcher.island_hmac_secret(args))
     job_task = sky.Task(
         name="yeto-head-job",
         run=(

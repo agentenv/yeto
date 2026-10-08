@@ -550,6 +550,16 @@ def build_sync(miles_args: Any, *, yeto_policy_sync: bool) -> tuple[Any, Any]:
     if getattr(miles_args, "yeto_rl_sync_preset", "strict-avg") == "decoupled":
         return DecoupledSync(miles_args), DecoupledIslandProgress(miles_args)
     progress = StrictIslandProgress(miles_args)
+    if getattr(miles_args, "yeto_rl_island_scheduling", "legacy") == "elastic":
+        # rl-inter-island-scheduling 0.15: absent attribute = legacy (unchanged below).
+        from ..bridges import ElasticAvgSync
+
+        if getattr(miles_args, "use_critic", False):
+            raise ValueError("--rl-island-scheduling elastic does not support a critic yet")
+        return ElasticAvgSync(miles_args.yeto_rl_bridge_config, progress=progress,
+                              syncer_epoch=int(getattr(miles_args, "yeto_rl_syncer_epoch", 0)),
+                              groups_per_round=int(getattr(miles_args, "rollout_batch_size", 0) or 0) or None,
+                              ), progress
     critic_syncer = getattr(miles_args, "yeto_rl_critic_syncer_addr", None)
     if critic_syncer is not None:
         # rl-algo-critic-family 4.2.3 (design D4 plan a): second syncer channel for the
@@ -1122,6 +1132,9 @@ def elastic_wiring_for(miles_args: Any, *, profile: Any, fingerprint: str):
         **({"pool_gpus": manifest_pool_gpus(config["resources"])}
            if config.get("trainer_edges") else {}),
         **_elastic_timeouts(config),
+        # rl-inter-island-scheduling 0.13: absent = legacy
+        **({"island_scheduling": config["island_scheduling"]}
+           if config.get("island_scheduling") else {}),
     )
 
 

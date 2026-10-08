@@ -626,6 +626,201 @@ def _syncer_quorum_timeout(args) -> str:
     return f" --quorum-timeout-s {int(value)}"
 
 
+_ISLAND_SCHEDULING_PARAMS = (
+    ("rl_quorum_theta", "--rl-quorum-theta"),
+    ("rl_carry_gamma", "--rl-carry-gamma"),
+    ("rl_soft_deadline_s", "--rl-soft-deadline-s"),
+    ("rl_q_min", "--rl-q-min"),
+    ("rl_max_carry_lag", "--rl-max-carry-lag"),
+    ("rl_syncer_epoch", "--rl-syncer-epoch"),
+    ("rl_island_lease_s", "--rl-island-lease-s"),
+    ("rl_final_grace_s", "--rl-final-grace-s"),
+)
+
+ELASTIC_DEBUG_DELAY_ENV = "YETO_RL_ELASTIC_DEBUG_DELAY"
+
+
+def elastic_debug_delay_env(args) -> dict[str, str]:
+    """0.25 test switch: islands delay each DELTA_TENSOR (soft deadline / carried_over
+    on real hardware). Elastic only; {} by default."""
+    spec = getattr(args, "rl_elastic_debug_delay_s", None)
+    if not spec:
+        return {}
+    if island_scheduling_mode(args) != "elastic":
+        raise ValueError("--rl-elastic-debug-delay-s needs --rl-island-scheduling elastic")
+    from .rl.elastic_client import parse_elastic_debug_delay
+
+    parse_elastic_debug_delay(spec)
+    return {ELASTIC_DEBUG_DELAY_ENV: str(spec)}
+
+
+ELASTIC_DEBUG_PAUSE_ENV = "YETO_RL_ELASTIC_DEBUG_PAUSE"
+
+
+def elastic_debug_pause_env(args) -> dict[str, str]:
+    """Test switch: the given island's link to the syncer goes silent (no heartbeat,
+    sends/receives held) for S seconds after base AFTER_V; the process keeps running.
+    Used to exercise lease expiry -> "rejoin required" -> automatic re-JOIN on real
+    hardware. Elastic only; {} by default."""
+    spec = getattr(args, "rl_elastic_debug_pause", None)
+    if not spec:
+        return {}
+    if island_scheduling_mode(args) != "elastic":
+        raise ValueError("--rl-elastic-debug-pause needs --rl-island-scheduling elastic")
+    from .rl.elastic_client import parse_elastic_debug_pause
+
+    parse_elastic_debug_pause(spec)
+    return {ELASTIC_DEBUG_PAUSE_ENV: str(spec)}
+
+
+DEFAULT_ISLAND_LEASE_S = 300.0  # 0.22: 1b expired a 30 s lease during a 60-90 s round
+
+
+def island_lease_s(args) -> float:
+    value = getattr(args, "rl_island_lease_s", None)
+    value = DEFAULT_ISLAND_LEASE_S if value is None else float(value)
+    if not value > 0:
+        raise ValueError("--rl-island-lease-s must be > 0")
+    return value
+
+
+def island_syncer_epoch(args) -> int:
+    value = getattr(args, "rl_syncer_epoch", None)
+    value = 0 if value is None else int(value)
+    if value < 0:
+        raise ValueError("--rl-syncer-epoch must be >= 0")
+    return value
+
+
+def syncer_status_reader(*, local_tape: str | None = None, ssh_host: str | None = None):
+    """0.17: a zero-argument reader of the elastic syncer's status.json (next to its
+    --event-tape): a local file on a head node, else ``ssh <syncer cluster> cat``.
+    Returns the parsed snapshot, or None when absent / not the elastic schema."""
+    from .rl.engine.island_status import read_syncer_status, STATUS_SCHEMA
+
+    if local_tape is not None:
+        return lambda: read_syncer_status(os.path.expanduser(local_tape))
+
+    remote = RL_SYNCER_EVENT_TAPE.rsplit("/", 1)[0] + "/status.json"
+
+    def read() -> dict | None:
+        try:
+            out = subprocess.run(["ssh", "-o", "BatchMode=yes", ssh_host, f"cat {remote}"],
+                                 capture_output=True, text=True, timeout=30)
+            raw = json.loads(out.stdout) if out.returncode == 0 else None
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            return None
+        return raw if isinstance(raw, dict) and raw.get("schema") == STATUS_SCHEMA else None
+    return read
+
+
+def resolve_island_syncer_epoch(args, read_status, *, timeout_s: float = 120.0,
+                                poll_s: float = 2.0, sleep=time.sleep, clock=time.monotonic) -> int:
+    """0.17: elastic without an explicit --rl-syncer-epoch takes the term the running
+    syncer reports in status.json (and records it on ``args`` so every island
+    command carries it). Unreadable within ``timeout_s``: keep 0 with a warning.
+    Legacy, or an explicit value: unchanged, nothing is read."""
+    if island_scheduling_mode(args) != "elastic" or getattr(args, "rl_syncer_epoch", None) is not None:
+        return island_syncer_epoch(args)
+    deadline = clock() + timeout_s
+    while True:
+        status = read_status()
+        epoch = status.get("syncer_epoch") if status else None
+        if isinstance(epoch, int) and not isinstance(epoch, bool) and epoch >= 0:
+            args.rl_syncer_epoch = epoch
+            print(f"[launcher] syncer_epoch {epoch} read from the syncer's status.json")
+            return epoch
+        if clock() >= deadline:
+            print("[launcher] WARN: could not read syncer_epoch from the syncer's status.json "
+                  f"within {timeout_s:.0f}s; islands JOIN with syncer_epoch 0")
+            return 0
+        sleep(poll_s)
+
+
+def island_scheduling_mode(args) -> str:
+    """``--rl-island-scheduling`` (rl-inter-island-scheduling 0.13); legacy unless
+    elastic is given explicitly. Elastic-only parameters with legacy are refused."""
+    mode = getattr(args, "rl_island_scheduling", None) or "legacy"
+    if mode not in ("legacy", "elastic"):
+        raise ValueError(f"--rl-island-scheduling must be legacy|elastic, got {mode!r}")
+    if mode == "legacy":
+        given = [f for n, f in _ISLAND_SCHEDULING_PARAMS if getattr(args, n, None) is not None]
+        if given:
+            raise ValueError(", ".join(given) + " need --rl-island-scheduling elastic")
+    return mode
+
+
+ISLAND_HMAC_KEY_ENV = "YETO_ISLAND_HMAC_KEY"
+
+
+def island_hmac_secret(args) -> dict[str, str]:
+    """elastic only (0.20): ``{YETO_ISLAND_HMAC_KEY: key}`` read from the launching
+    environment, to be shipped as a secret (sky ``secrets=``, Modal ``cfg.envs`` which
+    becomes a ``modal.Secret``) -- never spliced into a command line, log or
+    process list. ``{}`` in legacy."""
+    if island_scheduling_mode(args) == "legacy":
+        return {}
+    key = os.environ.get(ISLAND_HMAC_KEY_ENV, "")
+    if not key:
+        raise ValueError(f"--rl-island-scheduling elastic needs {ISLAND_HMAC_KEY_ENV} "
+                         "in the launching environment (island message HMAC key)")
+    return {ISLAND_HMAC_KEY_ENV: key}
+
+
+def _syncer_island_hmac_export(args) -> str:
+    """elastic only: fail fast in the syncer's shell when the secret did not reach
+    it. The value itself arrives as a secret env (island_hmac_secret) and the
+    syncer reads the env var. "" in legacy, so the legacy line is unchanged."""
+    if not island_hmac_secret(args):
+        return ""
+    return f': "${{{ISLAND_HMAC_KEY_ENV}:?island HMAC key secret missing}}" && '
+
+
+def _syncer_island_scheduling(args) -> str:
+    """Syncer flags for the island-scheduling mode: "" in legacy, so the legacy
+    command line is byte-for-byte the previous one. The syncer folds these into
+    its session contract hash (the Python side does not compute that hash)."""
+    if island_scheduling_mode(args) == "legacy":
+        return ""
+    from .rl.engine.island_ledger import (DEFAULT_GAMMA, DEFAULT_MAX_CARRY_LAG,
+                                          DEFAULT_QUORUM_MIN, DEFAULT_THETA)
+
+    theta = getattr(args, "rl_quorum_theta", None)
+    gamma = getattr(args, "rl_carry_gamma", None)
+    soft = getattr(args, "rl_soft_deadline_s", None)
+    if soft is None:
+        soft = getattr(args, "rl_elastic_quorum_timeout_s", None) or 900
+    q_min = getattr(args, "rl_q_min", None)
+    lag = getattr(args, "rl_max_carry_lag", None)
+    theta = DEFAULT_THETA if theta is None else float(theta)
+    gamma = DEFAULT_GAMMA if gamma is None else float(gamma)
+    q_min = DEFAULT_QUORUM_MIN if q_min is None else int(q_min)
+    lag = DEFAULT_MAX_CARRY_LAG if lag is None else int(lag)
+    if not 0.0 < theta <= 1.0 or not 0.0 <= gamma <= 1.0 or q_min < 1 or lag < 0:
+        raise ValueError("--rl-quorum-theta in (0,1], --rl-carry-gamma in [0,1], "
+                         "--rl-q-min >= 1, --rl-max-carry-lag >= 0")
+    if float(soft) != int(soft) or int(soft) <= 0:
+        raise ValueError("--rl-soft-deadline-s must be positive whole seconds")
+    return (" --island-scheduling-mode elastic"
+            f" --quorum-theta {theta!r}"
+            f" --carry-gamma {gamma!r}"
+            f" --soft-deadline-s {int(soft)}"
+            f" --q-min {q_min}"
+            f" --max-carry-lag {lag}"
+            f" --syncer-epoch {island_syncer_epoch(args)}"
+            f" --island-lease-s {island_lease_s(args)!r}"
+            f" --final-grace-s {_final_grace_s(args, int(soft))}")
+
+
+def _final_grace_s(args, soft_deadline_s: int) -> int:
+    """0.26: the syncer's FINISHED window (whole seconds); default the soft deadline."""
+    value = getattr(args, "rl_final_grace_s", None)
+    value = soft_deadline_s if value is None else int(value)
+    if value < 0:
+        raise ValueError("--rl-final-grace-s must be >= 0")
+    return value
+
+
 def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer",
                    critic: bool | None = None) -> str:
     """The syncer invocation shared by the syncer-cluster task (local
@@ -644,6 +839,7 @@ def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer",
         )
         return (
             "mkdir -p ~/yeto-output && "
+            + _syncer_island_hmac_export(args)
             + critic_prefix
             + f"{binary}"
             f" --port {SYNCER_PORT}"
@@ -657,6 +853,7 @@ def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer",
             f" --delta-correction {args.delta_correction}"
             f" --total-steps {total_steps}"
             f"{_syncer_quorum_timeout(args)}"
+            f"{_syncer_island_scheduling(args)}"
             f" --outer-lr {args.outer_lr}"
             f" --outer-momentum {args.outer_momentum}"
             " --max-base-lag 0 --learner-weight equal"
@@ -665,6 +862,8 @@ def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer",
             f" {_resume_if_exists('~/yeto-output/yeto-state.ckpt')}"
             f" --event-tape {RL_SYNCER_EVENT_TAPE}"
         )
+    if island_scheduling_mode(args) != "legacy":
+        raise ValueError("--rl-island-scheduling elastic only applies to --training-mode rl")
     return (
         f"{binary}"
         f" --port {SYNCER_PORT}"
@@ -871,6 +1070,7 @@ def make_syncer_task(args, num_learners: int):
             run=tape_run + syncer_command(args, num_learners),
             workdir=str(REPO_ROOT),
             envs=tape_envs,
+            secrets=island_hmac_secret(args) or None,
         )
         infra = args.syncer_region if "/" in args.syncer_region else f"aws/{args.syncer_region}"
         task.set_resources(
@@ -899,6 +1099,7 @@ def make_syncer_task(args, num_learners: int):
         # cross-build path already uses.
         workdir=str(REPO_ROOT) if getattr(args, "wandb", False) else None,
         envs=tape_envs,
+        secrets=island_hmac_secret(args) or None,
     )
     # --syncer-region accepts "region" (AWS assumed) or "cloud/region".
     infra = args.syncer_region if "/" in args.syncer_region else f"aws/{args.syncer_region}"
@@ -1802,6 +2003,9 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         flags += " --rl-print-attestation-fingerprint"
     if getattr(args, "rl_boot_only", False):
         flags += " --rl-boot-only"
+    if island_scheduling_mode(args) == "elastic":  # legacy adds nothing
+        flags += (" --rl-island-scheduling elastic"
+                  f" --rl-syncer-epoch {island_syncer_epoch(args)}")
     if getattr(args, "rl_elastic", False):
         prelude += (
             "mkdir -p ~/yeto-rl && printf '%s' "
@@ -3698,6 +3902,8 @@ def make_miles_island_task(
             envs[name] = os.environ[name]
     if codex_launch is not None:
         envs.update(codex_envs)
+    envs.update(elastic_debug_delay_env(args))  # 0.25 ({} unless the test switch is given)
+    envs.update(elastic_debug_pause_env(args))  # link-pause test switch ({} by default)
     if getattr(args, "wandb", False):
         # RL islands join the same fleet group as the syncer's tape run.
         envs["YETO_RUN_GROUP"] = args.cluster_prefix
@@ -3841,12 +4047,14 @@ def make_miles_island_task(
         # and run execute inside `docker run` of the same pinned image.
         setup_script, run_script = (
             in_vm_docker_setup(args.rl_image, login=bool(registry_login)),
-            in_vm_docker_run(args.rl_image, setup_script, run_script, envs.keys(), learner_id),
+            in_vm_docker_run(args.rl_image, setup_script, run_script,
+                             [*envs.keys(), *island_hmac_secret(args).keys()], learner_id),
         )
+    island_secrets = {**dict(registry_login or {}), **island_hmac_secret(args)}
     task = sky.Task(
         name=f"yeto-rl-island-{learner_id}",
         setup=setup_script,
-        **({"secrets": dict(registry_login)} if registry_login else {}),
+        **({"secrets": island_secrets} if island_secrets else {}),
         run=run_script,
         envs=envs,
         num_nodes=spec.num_nodes,
@@ -4618,6 +4826,8 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         if not sep or not key:
             raise ValueError(f"--modal-env takes KEY=VALUE, got {item!r}")
         envs[key] = value
+    if rl:  # 0.20: Modal ships cfg.envs as a modal.Secret
+        envs.update(island_hmac_secret(args))
     token_path = os.path.expanduser(HF_TOKEN_PATH)
     if "HF_TOKEN" not in envs and os.path.isfile(token_path):
         with open(token_path, encoding="utf-8") as f:
@@ -4890,6 +5100,50 @@ def settle_echo_tapes(collectors: dict, names, modal_cfgs, events_dir, *,
     return incomplete
 
 
+_ISLAND_NAME_RE = re.compile(r"-l(\d+)-")
+
+
+def syncer_pool_departures(tape_path, offset: int = 0) -> dict[int, str]:
+    """Elastic islands the syncer formally removed from the pool and never re-admitted.
+
+    Reads the syncer event tape (from ``offset``: this run's part only) and returns
+    ``{island_id: reason}`` for every island whose last pool record is ``pool_leave``
+    (``lease_expired``, ``requested``, ...). User ruling S16 §6.6: such an island owes no
+    ``rl_learner_finalized`` record; the run summary reports it as a mid-run departure
+    instead of the launcher's exit 3. Unreadable tape -> {} (fail closed: exit 3 stays)."""
+    last: dict[int, tuple[str, str]] = {}
+    try:
+        with open(tape_path, encoding="utf-8") as handle:
+            handle.seek(offset)
+            for line in handle:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                kind = rec.get("kind")
+                if kind in ("pool_join", "pool_leave") and isinstance(rec.get("island_id"), int):
+                    last[rec["island_id"]] = (kind, str(rec.get("reason") or "unknown"))
+    except OSError:
+        return {}
+    return {i: reason for i, (kind, reason) in last.items() if kind == "pool_leave"}
+
+
+def excuse_departed_islands(incomplete: list[str], departures: dict[int, str]) -> tuple[list[str], list[dict]]:
+    """Split the unfinalized island tapes into those still owing ``rl_learner_finalized``
+    (exit 3) and those the syncer removed from the pool (reported, not an error)."""
+    still, left = [], []
+    for name in incomplete:
+        m = _ISLAND_NAME_RE.search(name)
+        island = int(m.group(1)) if m else None
+        if island is not None and island in departures:
+            left.append({"island": island, "name": name, "reason": departures[island]})
+        else:
+            still.append(name)
+    return still, left
+
+
 def _tail(cluster: str, job_id: int, prefix: str, collector=None) -> int:
     """Stream a sky job's log into the launcher output (and the tape collector).
 
@@ -5100,6 +5354,16 @@ class LocalSyncer:
         if strict_failure is not None:
             return strict_failure
         return f"syncer subprocess exited with code {code}"
+
+    def finished(self) -> bool:
+        """0.26: the syncer ended its run normally (exit 0, or its elastic
+        status.json says state=finished)."""
+        if self.proc is not None and self.proc.poll() == 0:
+            return True
+        from .rl.engine.island_status import read_syncer_status
+
+        status = read_syncer_status(self.event_tape)
+        return bool(status) and status.get("state") == "finished"
 
     def _strict_failure(self) -> "_RlStrictFailure | None":
         try:
@@ -5405,6 +5669,10 @@ class FleetController:
         on_rename=None,
         fleet_log=None,
         keep_abandoned: bool = False,
+        syncer_finished_probe=None,
+        left_pool_probe=None,
+        elastic: bool = False,
+        no_island_relaunch: bool = False,
     ):
         """`learners` maps cluster name -> (task, job_id); `syncer` is
         (name, task, job_id) for a cluster syncer, or None with
@@ -5412,6 +5680,14 @@ class FleetController:
         `on_relaunch(name, new_job_id)` is called after every successful
         cluster relaunch (production spawns a new log tail)."""
         self.ops = sky_ops
+        # 0.26: () -> bool, the syncer finished its run (no island is relaunched
+        # after that; a late island's failure then counts as a normal end).
+        self.syncer_finished_probe = syncer_finished_probe
+        # 0.27: name -> bool, the island left the elastic pool for good (re-JOIN
+        # exhausted, learner exit 7); elastic only.
+        self.left_pool_probe = left_pool_probe
+        self.elastic = elastic
+        self.no_island_relaunch = no_island_relaunch
         # B12: True (--keep-abandoned) leaves an abandoned learner's cluster up for
         # post-mortem instead of tearing it down; the final teardown still honors --keep.
         self.keep_abandoned = keep_abandoned
@@ -5587,6 +5863,25 @@ class FleetController:
                 rec["exit"] = f"SUCCEEDED (finalized; shutdown ended as {status})"
                 print(f"[launcher] WARN: {rec['name']} finalized, then {verdict}; "
                       "counted as succeeded, no recovery", file=sys.stderr)
+            elif not is_syncer and self._syncer_finished():
+                rec["state"] = DONE  # 0.26: the run is over; a late island's error is not a failure
+                rec["exit"] = f"SUCCEEDED (syncer finished; island ended as {status})"
+                self._fleet("island_done", rec["name"], reason="syncer finished")
+                print(f"[launcher] {rec['name']}: {verdict} after the syncer finished; "
+                      "counted as a normal end, not relaunched", file=sys.stderr)
+            elif not is_syncer and self.elastic and self._left_pool(rec):
+                # 0.27: re-JOIN exhausted (exit 7): the island left the elastic pool.
+                # Not the fixed-roster abandon path (exit 4): relaunch unless
+                # --no-island-relaunch, and the run goes on without it.
+                self._fleet("island_lost", rec["name"], reason="left elastic pool (re-JOIN exhausted)")
+                if self.no_island_relaunch:
+                    rec["state"] = DONE
+                    rec["exit"] = f"LEFT_POOL (re-JOIN exhausted; {status})"
+                    print(f"[launcher] {rec['name']}: left the elastic pool (re-JOIN exhausted); "
+                          "--no-island-relaunch: not relaunched", file=sys.stderr)
+                else:
+                    rec["left_pool"] = True
+                    self._enter_recovering(rec, "left the elastic pool (re-JOIN exhausted)", is_syncer)
             elif not is_syncer and self._await_finalized(rec):
                 return  # grace: the finalized record may still be in the log stream
             else:
@@ -5598,6 +5893,25 @@ class FleetController:
                 self._enter_recovering(rec, verdict, is_syncer)
         elif rec["state"] == RECOVERING:
             self._drive_recovery(rec, is_syncer)
+
+    def _syncer_finished(self) -> bool:
+        if self.syncer is not None and self.syncer["state"] == DONE \
+                and "SUCCEEDED" in str(self.syncer.get("exit", "")):
+            return True
+        if self.syncer_finished_probe is None:
+            return False
+        try:
+            return bool(self.syncer_finished_probe())
+        except Exception:
+            return False
+
+    def _left_pool(self, rec) -> bool:
+        if self.left_pool_probe is None:
+            return False
+        try:
+            return bool(self.left_pool_probe(rec["name"]))
+        except Exception:
+            return False
 
     def _check_stall(self) -> None:
         if self.progress_probe is None or self.stall_timeout <= 0:
@@ -5715,6 +6029,11 @@ class FleetController:
         self._drive_recovery(rec, is_syncer)
 
     def _drive_recovery(self, rec, is_syncer: bool) -> None:
+        if not is_syncer and self._syncer_finished():
+            rec["state"] = DONE  # 0.26: never relaunch an island into a finished run
+            rec["exit"] = "SUCCEEDED (syncer finished during recovery; not relaunched)"
+            print(f"[launcher] {rec['name']}: the syncer finished; recovery stopped", file=sys.stderr)
+            return
         attempt = rec["attempt"]
         if attempt is not None and attempt.finished:
             rec["attempt"] = None
@@ -5756,7 +6075,7 @@ class FleetController:
                 file=sys.stderr,
             )
         elapsed = self.ops.now() - rec["failed_at"]
-        if self.fixed_roster and not is_syncer:
+        if self.fixed_roster and not is_syncer and not rec.get("left_pool"):
             elapsed += rec.get("recovering_s", 0.0)  # this window only
             if rec.get("failures", 0) > FIXED_ROSTER_MAX_RELAUNCHES:
                 self._abandon(rec, elapsed)
@@ -5862,7 +6181,7 @@ class FleetController:
             print(f"[launcher] keeping abandoned cluster {rec['name']} (--keep-abandoned)")
         else:
             self._down(rec["name"])
-        if self.fixed_roster:
+        if self.fixed_roster and not rec.get("left_pool"):  # 0.27: elastic pool leave is not 4
             message = (
                 f"fixed-roster learner {rec['name']} could not recover"
                 f"{' (' + reason + ')' if reason else ''} "
@@ -6459,6 +6778,12 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             syncer_addr = f"{syncer_handle.head_ip}:{SYNCER_PORT}"
             print(f"[launcher] syncer up at {syncer_addr}")
             probe_syncer_ports(args, str(syncer_handle.head_ip))
+        if not no_sync and island_scheduling_mode(args) == "elastic" \
+                and getattr(args, "rl_syncer_epoch", None) is None:
+            # 0.17: the islands JOIN with the term the syncer actually runs.
+            resolve_island_syncer_epoch(args, syncer_status_reader(
+                local_tape=syncer_event_tape(args) if head_mode else None,
+                ssh_host=None if head_mode else syncer_cluster))
 
         if external:
             for x in range(external):
@@ -6710,6 +7035,13 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             instance_guard=verda["guard"] if verda else None,
             on_rename=_rename_hook(clusters, on_clusters, [] if head_mode else [syncer_cluster]),
             fleet_log=_dashboard_fleet_log(args, tasks, results),
+            syncer_finished_probe=local_syncer.finished if head_mode else None,
+            left_pool_probe=(
+                (lambda name: name in event_collectors and event_collectors[name].left_pool)
+                if echo_names else None
+            ),
+            elastic=island_scheduling_mode(args) == "elastic",
+            no_island_relaunch=bool(getattr(args, "no_island_relaunch", False)),
         )
         def drain_tapes(limit: float = NO_SYNC_EVENT_DRAIN_S) -> None:
             if echo_names:
@@ -6757,6 +7089,24 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         drain_tapes()
         if container_changed():
             return CONTAINER_CHANGED_EXIT
+        if (no_sync_incomplete and head_mode and island_scheduling_mode(args) == "elastic"):
+            # S16 §6.6: an island the syncer removed from the pool (lease expiry,
+            # requested leave) owes no rl_learner_finalized; report it, do not exit 3.
+            departures = syncer_pool_departures(
+                local_syncer.event_tape, getattr(local_syncer, "_event_offset", 0))
+            still, left = excuse_departed_islands(no_sync_incomplete, departures)
+            no_sync_incomplete[:] = still
+            for item in left:
+                print(f"[launcher] run summary: island {item['island']} ({item['name']}) "
+                      f"left the pool mid-run (syncer pool_leave reason={item['reason']}); "
+                      "no rl_learner_finalized required", file=sys.stderr)
+            if left:
+                try:
+                    from . import runs as _runs
+                    _runs.update_run(args.cluster_prefix, islands_left_pool=left)
+                except Exception as e:  # noqa: BLE001 - summary is best effort
+                    print(f"[launcher] WARN: could not record islands_left_pool ({e})",
+                          file=sys.stderr)
         failed = [n for n, s in exit_codes.items() if "SUCCEEDED" not in s]
         if no_sync_incomplete:
             print(
