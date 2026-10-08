@@ -1,0 +1,45 @@
+# 静态边界检查白名单（yeto-framework-decoupling 任务 1.2，design D4）
+# 格式：文件路径<TAB>被禁模块<TAB># 审计编号与说明（infra-drafts/YETO-DECOUPLING-AUDIT-S16.md）
+# 只减不增：修掉一条就删一条，并把 tests/test_import_boundaries.py 的 ALLOWLIST_CAP 同步减小。
+# 规则与约定见 yeto/rl/engine/README.md。初始 31 条（2026-10-08，基于 agentenv/main 62cec689）。
+#
+# --- 云层/启动层 import Miles 适配层（A8、A9）
+yeto/cli.py	yeto.rl.engine.miles_adapter	# A8 cli.py:405
+yeto/launcher.py	yeto.rl.engine.miles_adapter	# A8 launcher.py:455,1389,1640,1791,1836,1851
+yeto/rl/stage_w_entry.py	yeto.rl.engine.miles_adapter	# A9 stage_w_entry.py:31 connect_island_ray
+#
+# --- 引擎核心（E1-E9）
+yeto/rl/engine/trainer_transition.py	yeto.rl.engine.miles_adapter	# E1 :42 ReshardPlan/reshard_problems；E2 :342 RecoveryRequired（阶段 1 任务 2.1/2.2）
+yeto/rl/engine/driver.py	yeto.rl.miles	# E3 :278 _append_rl_event（任务 2.3）
+yeto/rl/engine/bridges.py	yeto.rl.miles	# E6 :26 旧版进度格式（任务 2.4）
+yeto/rl/engine/runtime_manifest.py	yeto.rl.miles_overlay	# E9 :146 read_applied_record（任务 2.5）
+#
+# --- 算法扩展（A1-A5）
+yeto/rl/algos/seq_adv.py	yeto.rl.engine.miles_adapter	# A1 :47 register_flag；A2 :438,463 record_round_metadata
+yeto/rl/algos/critic.py	yeto.rl.engine.miles_adapter	# A1 :42-43
+yeto/rl/algos/sao.py	yeto.rl.engine.miles_adapter	# A1 :46
+yeto/rl/algos/loss_variants.py	yeto.rl.engine.miles_adapter	# A1 :46
+yeto/rl/critic_warmup.py	yeto.rl.engine.miles_adapter	# A1 :492
+yeto/rl/algos/reducers.py	megatron	# A3 :35,41 —— 暂不动（任务 4.8，归约器不迁）
+yeto/rl/algos/vendor/miles_mis.py	miles	# A3 :350 cp_utils —— 暂不动（任务 4.8）
+yeto/rl/grad_audit.py	megatron	# A3 :209,320 —— 暂不动（任务 4.8）
+yeto/rl/algos/reward_pipeline.py	yeto.rl.miles	# A4 :384 _append_rl_event（同 E3）
+yeto/rl/teacher_forcing.py	yeto.rl.engine.miles_adapter	# A5 :118 current_policy_token
+yeto/rl/teacher_forcing.py	yeto.rl.miles	# A5 :129 _policy_token_for_rollout
+#
+# --- harness（A6、A7、R4-R7、R14）
+yeto/rl/harness/codex/preflight.py	yeto.rl.engine.miles_adapter	# A6 :35,167,275
+yeto/rl/harness/codex/codex_openenv_generate.py	yeto.rl.engine.miles_adapter	# A7 :27 rollout_meta_hook
+yeto/rl/harness/codex/codex_openenv_subprocess_agent_function.py	yeto.rl.engine.miles_adapter	# A7 :36
+yeto/rl/harness/codex/codex_openenv_agent_function.py	yeto.rl.engine.miles_adapter	# A7 :421
+yeto/rl/harness/codex/reward.py	miles	# R4 :159,222 Sample.Status / DynamicFilterOutput
+yeto/rl/harness/codex/reward.py	yeto.rl.miles	# R4 :224,268
+yeto/rl/harness/codex/tbench_reward.py	miles	# R5 :32,101
+yeto/rl/harness/codex/generate.py	miles	# R6 :67,113 agentic_tool_call.generate
+yeto/rl/harness/codex/codex_openenv_generate.py	miles	# R7 :52,64,130
+yeto/rl/tool_wait_workload.py	miles	# R14 :72-73
+yeto/rl/harness/codex/tb2_provider.py	modal	# 审计未列（扫描新发现）：:362,368,679 tb2 环境用 Modal 沙箱；云层接口时再定归属
+#
+# --- 奖励与过滤（R1-R3）
+yeto/rl/math_reward.py	miles	# R1 :24 math_utils —— 保留（D9c，运行时 math 奖励需装 Miles）
+yeto/rl/filters.py	miles	# R3 :30 DynamicFilterOutput
