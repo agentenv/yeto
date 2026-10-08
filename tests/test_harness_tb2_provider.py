@@ -627,6 +627,9 @@ def test_verifier_log_tail_reaches_the_trajectory_metadata_and_tape(monkeypatch,
     assert "YETO_TB2_REWARD=0" in result["verifier_log"]
     diag = hook.trajectory_diagnostics(result)
     assert diag["verifier_log"] == result["verifier_log"] and diag["testsh_rc"] == 1
+    # S17 M1: observe-only timing line (verifier wall time, agent phase times, per-turn shapes)
+    timing = json.loads(result["verifier_log"].rsplit("YETO_TIMING ", 1)[1])
+    assert timing["verify_s"] >= 0
     long = "x" * 5000 + "TAIL"
     excerpt = tb2_provider.verifier_log_excerpt(long)
     assert len(excerpt) == tb2_provider.VERIFIER_LOG_CHARS and excerpt.endswith("TAIL")
