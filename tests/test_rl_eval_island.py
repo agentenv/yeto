@@ -498,7 +498,7 @@ def test_island_main_with_dotted_fakes(tmp_path, monkeypatch):
     out = mei.island_main({"store": str(tmp_path / "vol"), "holdout": str(hold), "task_ids": ["a", "b"],
                            "trials_v0": 1, "loader": "fake_eval_ports:loader",
                            "attempt": "fake_eval_ports:attempt"}, env={})
-    assert out == {"evaluated": [0]}
+    assert out == {"evaluated": [0], "loads": []}
     tape = [json.loads(x) for x in (tmp_path / "vol/events/eval-0.jsonl").read_text().splitlines()]
     assert tape[0]["event"] == "rl_eval" and tape[0]["eval/units"] == 2
 

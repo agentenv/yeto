@@ -157,6 +157,7 @@ class EvalIsland:
             "trajectory_id": out.get("trajectory_id"), "seconds": round(seconds, 3),
             "island": self.island_id,
             **({"error": str(out["error"])[:500]} if out.get("error") else {}),
+            **({"timing": dict(out["timing"])} if out.get("timing") else {}),
         }
 
     def run_version(self, version: int) -> dict[str, Any] | None:
