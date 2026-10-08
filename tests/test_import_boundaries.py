@@ -30,7 +30,7 @@ REPO = Path(__file__).resolve().parents[1]
 ALLOWLIST = REPO / "tests" / "import_boundary_allowlist.txt"
 README = "yeto/rl/engine/README.md"
 # Upper bound of allowlist entries; may only go down (D4).
-ALLOWLIST_CAP = 29
+ALLOWLIST_CAP = 28
 
 FRAMEWORKS = ("miles", "miles_plugins", "megatron", "sglang", "verl", "vllm", "torch_npu")
 ADAPTERS = ("yeto.rl.engine.miles_adapter", "yeto.rl.adapters")

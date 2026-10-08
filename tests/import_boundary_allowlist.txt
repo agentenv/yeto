@@ -9,7 +9,6 @@ yeto/launcher.py	yeto.rl.engine.miles_adapter	# A8 launcher.py:455,1389,1640,179
 yeto/rl/stage_w_entry.py	yeto.rl.engine.miles_adapter	# A9 stage_w_entry.py:31 connect_island_ray
 #
 # --- 引擎核心（E1-E9）
-yeto/rl/engine/bridges.py	yeto.rl.miles	# E6 :26 旧版进度格式（任务 2.4）
 yeto/rl/engine/runtime_manifest.py	yeto.rl.miles_overlay	# E9 :146 read_applied_record（任务 2.5）
 #
 # --- 算法扩展（A1-A5）

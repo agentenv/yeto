@@ -9,8 +9,9 @@ What this module replaces is ``yeto.rl.miles.MilesPolicySync`` /
 ``driver.apply_policy``) and the ``Publisher`` port (via ``driver.publish``).
 
 Island progress checkpoints keep the legacy on-disk formats (strict schema 3,
-decoupled schema 4) by importing the legacy helpers from ``yeto.rl.miles``;
-they never contain LoRA tensors or optimizer state.
+decoupled schema 4) through the core progress module
+(:mod:`yeto.rl.engine.progress`, shared with the legacy engine); they never
+contain LoRA tensors or optimizer state.
 """
 
 from __future__ import annotations
@@ -23,7 +24,6 @@ from typing import Any
 
 import torch
 
-from yeto.rl import miles as legacy
 from yeto.rl.bridge import BridgeConfig, StrictRlBridge
 from yeto.rl.core import (
     CanonicalLoraState,
@@ -34,6 +34,7 @@ from yeto.rl.core import (
     policy_tensor_hash,
 )
 
+from . import progress as legacy_progress
 from .pause_audit import PAUSABLE_PHASE
 from .driver import IslandDriver, SyncBoundary, SyncStart
 from .trainable_state import TrainableState
@@ -138,19 +139,19 @@ class StrictIslandProgress:
         payload = self._load()
         if (
             payload is not None
-            and payload.get("schema_version") == legacy._ISLAND_CHECKPOINT_SCHEMA
+            and payload.get("schema_version") == legacy_progress._ISLAND_CHECKPOINT_SCHEMA
             and payload.get("policy_version") == rollout_id
-            and payload.get("config") == legacy._island_checkpoint_config(self.args)
+            and payload.get("config") == legacy_progress._island_checkpoint_config(self.args)
             and isinstance(payload.get("rollout_metrics"), Mapping)
             and payload["rollout_metrics"]
             and payload.get("completed_groups")
         ):
             return
-        legacy._atomic_save_island_checkpoint(
+        legacy_progress._atomic_save_island_checkpoint(
             self.path,
             {
-                "schema_version": legacy._ISLAND_CHECKPOINT_SCHEMA,
-                "config": legacy._island_checkpoint_config(self.args),
+                "schema_version": legacy_progress._ISLAND_CHECKPOINT_SCHEMA,
+                "config": legacy_progress._island_checkpoint_config(self.args),
                 "local_round_id": rollout_id + 1,
                 "policy_version": rollout_id,
                 "rollout_metrics": {k: float(v) for k, v in metrics.items()},
@@ -161,7 +162,7 @@ class StrictIslandProgress:
 
     def commit_round(self, stats: LocalRoundStats) -> None:
         # Same contract as legacy ``_BridgeRuntime.record_local_round``.
-        legacy._BridgeRuntime(None, self.args).record_local_round(stats)
+        legacy_progress.record_strict_local_round(self, stats)
 
 
 class _PortsStrictRuntime:
@@ -461,7 +462,7 @@ class DecoupledIslandProgress:
         self.args = args
 
     def after_generate(self, *, rollout_id, policy_token, metrics) -> None:
-        payload = legacy._load_decoupled_checkpoint(self.args)
+        payload = legacy_progress._load_decoupled_checkpoint(self.args)
         if (
             payload is None
             or payload.get("next_rollout_id") != rollout_id
@@ -470,7 +471,7 @@ class DecoupledIslandProgress:
             raise RuntimeError("decoupled RL progress changed during rollout")
         if payload.get("rollout_metrics"):
             return  # written by the rollout process with its group queue
-        legacy._save_decoupled_checkpoint(
+        legacy_progress._save_decoupled_checkpoint(
             self.args,
             snapshot=PolicySnapshot(
                 rollout_id, tuple(payload["fragment_versions"]), payload["policy_hash"]
@@ -516,9 +517,9 @@ class DecoupledSync:
     def _append_event(self, event: dict[str, Any]) -> None:
         self._driver.events.append(event)
 
-    _record_local_round = legacy.DecoupledMilesPolicySync._record_local_round
-    _record_final_payload = legacy.DecoupledMilesPolicySync._record_final_payload
-    _save_progress = legacy.DecoupledMilesPolicySync._save_progress
+    _record_local_round = legacy_progress.DecoupledProgress._record_local_round
+    _record_final_payload = legacy_progress.DecoupledProgress._record_final_payload
+    _save_progress = legacy_progress.DecoupledProgress._save_progress
 
     def _apply(self, state: CanonicalLoraState, *, reset: bool) -> CanonicalLoraState:
         self._driver.apply_policy(
@@ -566,7 +567,7 @@ class DecoupledSync:
             parent_hash = policy_tensor_hash(initial)
         checkpoint_error = None
         try:
-            checkpoint = legacy._load_decoupled_checkpoint(args)
+            checkpoint = legacy_progress._load_decoupled_checkpoint(args)
         except RuntimeError as error:
             checkpoint, checkpoint_error = None, error
         if checkpoint is not None:
