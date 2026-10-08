@@ -13,8 +13,8 @@ Which backend is active:
   ``miles``, exactly today's behaviour (主 agent 代拍板 2026-10-08 第 2 条;
   revisit once verl lands -- design D11 suggests requiring it then).
 
-A name that is not in the table raises :class:`UnknownBackend` ("未注册"), e.g.
-``verl`` until its adapter registers here (rl-verl-backend).
+A name that is not in the table raises :class:`UnknownBackend` ("未注册").
+``verl`` is registered since rl-verl-backend group 1.
 """
 
 from __future__ import annotations
@@ -54,10 +54,12 @@ class BackendEntry:
     #   run_config_rules  backend-only checks of resolve_rl_run_config (ref-load format, divisibility)
     #   binding       neutral name -> backend binding check (4.4a)
     #   identity      BackendIdentity of this adapter (phase 5)
+    #   image         Modal-built engine image recipe (verl: ``verl-build:<commit>``)
     roles: Mapping[str, str] = field(default_factory=dict)
 
 
 _MILES = "yeto.rl.adapters.miles"
+_VERL = "yeto.rl.adapters.verl"
 _REGISTRY: dict[str, BackendEntry] = {
     "miles": BackendEntry("miles", _MILES, {
         "rollout_meta": f"{_MILES}.rollout_meta_hook",
@@ -73,6 +75,19 @@ _REGISTRY: dict[str, BackendEntry] = {
         "run_config_rules": f"{_MILES}.run_config_rules",
         "binding": f"{_MILES}.binding",
         "identity": f"{_MILES}.identity",
+    }),
+    # rl-verl-backend: first step FSDP2 + vLLM, one GPU per island (roles the
+    # neutral code needs; codex/elastic-pool roles are not provided yet and
+    # fail with "没有提供" when asked for).
+    "verl": BackendEntry("verl", _VERL, {
+        "rollout_meta": f"{_VERL}.rollout_meta_hook",
+        "entry": f"{_VERL}.entry",
+        "elastic_hook": f"{_VERL}.elastic_hook",
+        "launch_flags": f"{_VERL}.launch_flags",
+        "run_config_rules": f"{_VERL}.run_config_rules",
+        "binding": f"{_VERL}.binding",
+        "identity": f"{_VERL}.identity",
+        "image": f"{_VERL}.image",
     }),
 }
 
