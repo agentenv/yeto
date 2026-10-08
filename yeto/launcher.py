@@ -436,7 +436,7 @@ def rl_colocated_engine_check(args, spec) -> list[dict[str, int]]:
 
 def rl_cross_node_flags(args) -> str:
     tp, engine = rl_cross_node_switches(args)
-    return (" --rl-allow-cross-node-tp" if tp else "") + (" --rl-allow-cross-node-engine-tp" if engine else "")
+    return _rl_backend_module(args, "launch_flags").cross_node_flags(tp, engine)
 
 
 def rl_island_layout(args, spec) -> tuple[int, int, dict[str, tuple[int, ...]]] | None:
@@ -507,9 +507,7 @@ def rl_island_bundle_map_flag(args, spec) -> str:
     counts = tuple(len(bundle_map[r]) for r in ("trainer", "rollout", "standby"))
     if bundle_map == leading_bundle_map(*counts):
         return ""
-    payload = json.dumps({k: list(v) for k, v in bundle_map.items()}, sort_keys=True,
-                         separators=(",", ":"))
-    return f" --rl-island-bundle-map {shlex.quote(payload)}"
+    return _rl_backend_module(args, "launch_flags").bundle_map_flag(bundle_map)
 
 
 def rl_min_nodes(args, spec) -> int:

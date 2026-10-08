@@ -50,6 +50,7 @@ class BackendEntry:
     #   algorithm_flags  AlgorithmSpec -> backend argv (critic warmup)
     #   selection_argv   facts read from pass-through backend argv (--rl-engine matrix)
     #   harness_glue  codex OpenEnv generate: upstream generate, aborted status, session collect
+    #   launch_flags  island-entry flag spellings of the neutral layout (launcher)
     #   binding       neutral name -> backend binding check (4.4a)
     #   identity      BackendIdentity of this adapter (phase 5)
     roles: Mapping[str, str] = field(default_factory=dict)
@@ -67,6 +68,7 @@ _REGISTRY: dict[str, BackendEntry] = {
         "algorithm_flags": f"{_MILES}.algorithm_flags",
         "selection_argv": f"{_MILES}.selection_argv",
         "harness_glue": f"{_MILES}.harness_glue.codex_openenv",
+        "launch_flags": f"{_MILES}.launch_flags",
         "binding": f"{_MILES}.binding",
         "identity": f"{_MILES}.identity",
     }),
