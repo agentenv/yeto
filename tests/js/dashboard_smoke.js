@@ -1,35 +1,48 @@
-// Minimal DOM stub: runs the dashboard page script against an exported HTML
-// file and exercises render, alert focus, island drill-down and metric tabs.
+// Minimal DOM stub: runs the dashboard page script (section 9 redesign) against an
+// exported HTML file: render, layout switch, metric tab, linked hover, keyboard.
 // Usage: node dashboard_smoke.js page.html  -> prints JSON with rendered HTML.
 const fs = require("fs");
 const html = fs.readFileSync(process.argv[2], "utf8");
 const dataM = html.match(/<script type="application\/json" id="yeto-data">([\s\S]*?)<\/script>/);
 const appM = html.match(/<script>\n([\s\S]*?)\n<\/script>/);
 const els = {};
-function mk(id) {
-  return els[id] || (els[id] = { id, innerHTML: "", textContent: dataM && id === "yeto-data" ? dataM[1] : "",
-    checked: false, dataset: {}, classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
-    scrollIntoView() {}, offsetTop: 0, scrollTop: 0, onclick: null, onchange: null });
+function node(id) {
+  const n = { id, innerHTML: "", textContent: "", hidden: false, style: {}, dataset: {}, children: [], attrs: {},
+    listeners: {}, offsetWidth: 200, offsetHeight: 120,
+    classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
+    setAttribute(k, v) { this.attrs[k] = String(v); }, removeAttribute(k) { delete this.attrs[k]; },
+    appendChild(c) { this.children.push(c); return c; },
+    addEventListener(t, fn) { (this.listeners[t] = this.listeners[t] || []).push(fn); },
+    getBoundingClientRect() { return { left: 0, top: 0, width: 560, height: 400 }; },
+    querySelectorAll() { return []; } };
+  return n;
 }
-let clickHandler = null;
+function mk(id) {
+  if (!els[id]) { els[id] = node(id); if (id === "yeto-data" && dataM) els[id].textContent = dataM[1]; }
+  return els[id];
+}
+const svgNodes = [];
 global.document = {
+  documentElement: node("html"),
   getElementById: (id) => (id === "yeto-data" && !dataM ? null : mk(id)),
+  createElementNS: () => { const n = node(null); svgNodes.push(n); return n; },
   querySelectorAll: () => [],
-  addEventListener: (t, fn) => { if (t === "click") clickHandler = fn; },
+  title: "",
 };
 global.navigator = {};
+global.localStorage = { getItem() { return null; }, setItem() {} };
 global.setInterval = () => 0;
 global.setTimeout = () => 0;
-function target(ds) { return { dataset: ds, closest() { return this; }, classList: { contains() { return false; } } }; }
 eval(appM[1]);
-setImmediate(async () => {
-  const out = { header: els.hdr.innerHTML, alerts: els.alerts.innerHTML, chart: els.big.innerHTML,
-    cards: els.cards.innerHTML, eff: els.eff.innerHTML, rounds: els.rounds.innerHTML };
-  if (els.alerts.innerHTML.includes('data-a="0"')) clickHandler({ target: target({ a: "0" }) });
-  const card = els.cards.innerHTML.match(/data-k="([^"]+)"/);
-  if (card) clickHandler({ target: target({ k: card[1] }) });
-  clickHandler({ target: target({ m: "grad_norm" }) });
-  await new Promise((r) => setImmediate(r));
-  out.drill = els.drill.innerHTML; out.chart_grad = els.big.innerHTML;
-  process.stdout.write(JSON.stringify(out));
-});
+const out = { title: els.title.innerHTML, kpis: els.kpis.innerHTML, islands: els.islands.innerHTML,
+  cost: els.costBox.innerHTML, events: els.evs.innerHTML, folds: els.foldBox.innerHTML,
+  metric: els.cMetric.innerHTML, svg_nodes: svgNodes.length, wall_hidden: els.islandWall.hidden };
+// hover a timeline/duration segment with a mousemove handler -> tooltip
+const hov = svgNodes.find((n) => n.listeners.mousemove && n.attrs["class"] === "tseg");
+if (hov) { hov.listeners.mousemove[0]({ clientX: 10, clientY: 10 }); out.tip = els.tip.innerHTML; }
+// keyboard: right arrow on the rounds panel
+const kd = (els.rounds.listeners.keydown || [])[0];
+if (kd) { kd({ key: "ArrowRight", preventDefault() {} }); out.tip_key = els.tip.innerHTML; }
+els.layoutBtn.onclick();
+out.title_after_switch = els.title.innerHTML; out.wall_hidden_after_switch = els.islandWall.hidden; out.wall = els.wall.innerHTML;
+process.stdout.write(JSON.stringify(out));

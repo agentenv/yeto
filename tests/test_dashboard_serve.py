@@ -142,9 +142,8 @@ def test_old_tape_renders_no_data_in_the_page(tmp_path):
                          capture_output=True, text=True, timeout=60)
     assert res.returncode == 0, res.stderr
     page = json.loads(res.stdout)
-    assert "无数据" in page["cards"]  # no heartbeat / resource samples on these tapes
-    assert "无数据" in page["eff"]  # no fleet.jsonl
-    assert "<svg" in page["chart"] and "<polyline" in page["chart"]
-    assert "岛 3" in page["rounds"] and "3/4" in page["rounds"]
-    assert "岛明细" in page["drill"] and "待 infra 就绪" in page["drill"]
-    assert "grad_norm" in page["chart_grad"]
+    assert "多岛总览" in page["title"] and page["wall_hidden"] is False  # run_kind multi_island
+    assert "无" in page["islands"] and "无" in page["kpis"]  # no fleet.jsonl / resource samples: "无", never 0
+    assert "岛 3" in page["wall"] and page["svg_nodes"] > 0
+    assert "第 0 轮" in page["tip_key"] and "岛 1" in page["tip_key"]  # keyboard -> per-island tooltip rows
+    assert "单岛总览" in page["title_after_switch"] and page["wall_hidden_after_switch"] is True

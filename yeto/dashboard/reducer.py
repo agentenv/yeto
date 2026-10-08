@@ -60,6 +60,9 @@ EXTRA_SERIES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("lr", ("lr", "applied_lr")),
     ("ess", ("ess_ratio", "train_metrics.ess_ratio")),
     ("trunc", ("truncated_frac",)),
+    ("reward_p50", ("reward_p50",)),
+    ("resp_p95", ("resp_len_p95",)),
+    ("logprob_diff", ("train_metrics.train_rollout_logprob_abs_diff", "train/train_rollout_logprob_abs_diff")),
     ("train_step", ("train_step",)),
 )
 
@@ -123,6 +126,10 @@ def classify(record: dict) -> str:
 
 HOST_SAMPLE_EVENT = "modal_host_sample"
 STOP_SLACK_S = 5.0
+NODE_SERIES_MAX = 20000
+NODE_SERIES_POINTS = 300
+# rl_timeline_span task -> page phase: R 推理生成 / T 训练 / S 训练后同步 / P 发布
+SPAN_PHASES = {"generate": "R", "train": "T", "outer_sync": "S", "publish": "P"}
 # Events only written once driver.run() is going (older tapes may lack rl_driver_start).
 DRIVER_RUNNING_EVENTS = frozenset({"rl_driver_phase", "rl_heartbeat", "rl_local_round", "rl_round_trained",
                                    "rl_resource_sample", "rl_publication"})
@@ -142,7 +149,7 @@ def _new_island(iid: str) -> dict:
     return {
         "id": iid, "name": None, "cloud": None, "region": None, "gpu": None, "gpus": None,
         "price_key": None, "cpus": None, "memory_gib": None, "driver_started": False,
-        "nodes": {}, "first_ts": None, "last_event_ts": None, "last_heartbeat_ts": None,
+        "nodes": {}, "node_series": {}, "spans": [], "pubs": {}, "first_ts": None, "last_event_ts": None, "last_heartbeat_ts": None,
         "heartbeat_seen": False, "round": None, "rollout_id": None, "policy_version": None,
         "phase": None, "finalized": False, "fleet_state": None, "ready_ts": None, "stop_ts": None,
         "lost_ts": None, "open_ts": None, "closed_s": 0.0, "points": {}, "nonfinite": [], "resource": None, "host": None, "staleness": None,
@@ -251,6 +258,9 @@ class Reducer:
             nd.update({"node": rank, "samples": nd["samples"] + 1, "ts": ts, "gpu_mem_used_mib": gm,
                        "gpu_util_pct": util, "host_mem_bytes": cur, "host_mem_total_bytes": total})
             isl["nodes"][rank] = nd
+            if ts is not None and gm:
+                ser = isl["node_series"].setdefault(rank, deque(maxlen=NODE_SERIES_MAX))
+                ser.append([ts, round(sum(x or 0 for x in gm) / len(gm) / 1024, 2), util])
         self._touch(isl, ts)
         return True
 
@@ -317,6 +327,8 @@ class Reducer:
                 "rl_policy_apply", "rl_publication", "rl_driver_phase", "rl_heartbeat",
                 "rl_round_cut", "rl_member_publication"):
             isl["policy_version"] = r.get("policy_version")
+        if event == "rl_driver_start" and isl.get("driver_start_ts") is None:
+            isl["driver_start_ts"] = ts
         if event == "rl_driver_start" or (event in DRIVER_RUNNING_EVENTS and r.get("phase") != "startup"):
             isl["driver_started"] = True
         if event == "rl_driver_phase":
@@ -328,6 +340,12 @@ class Reducer:
             isl["phase"] = r.get("phase", isl["phase"])
             if r.get("rollout_id") is not None:
                 isl["rollout_id"] = r["rollout_id"]
+        elif event == "rl_timeline_span":
+            self._span(isl, r)
+        elif event == "rl_publication":
+            pv = r.get("policy_version")
+            if isinstance(pv, int) and ts is not None:
+                isl["pubs"][pv] = ts
         elif event == "rl_resource_sample":
             isl["resource"] = _resource(r, ts)
         elif event in ("rl_local_round", "rl_round_trained"):
@@ -360,6 +378,76 @@ class Reducer:
                 elif event == "rl_pull_resend":
                     self.resends[step] = self.resends.get(step, 0) + 1
 
+    def _span(self, isl: dict, r: dict) -> None:
+        """Keep phase spans on the wall clock. ``start``/``end`` are the driver's
+        monotonic seconds; the record's ``time_unix`` is written at ``end``."""
+        task = SPAN_PHASES.get(r.get("task"))
+        a, b, t = finite(r.get("start")), finite(r.get("end")), finite(r.get("time_unix"))
+        if task is None or a is None or b is None or t is None:
+            return
+        off = t - b
+        isl["spans"].append({"phase": task, "rollout_id": r.get("rollout_id"), "start": a + off, "end": b + off})
+
+    def round_records(self, isl: dict) -> list[dict]:
+        """Per-round record for the page (tasks 9.4): metrics + phase spans + time split.
+        A publish span has no rollout_id: it belongs to the round whose sync it follows
+        (it publishes policy rollout_id+1). Missing values stay None."""
+        rounds: dict[int, dict] = {}
+        pubs = sorted((s for s in isl["spans"] if s["phase"] == "P"), key=lambda s: s["start"])
+        for sp in isl["spans"]:
+            rid = sp["rollout_id"]
+            if sp["phase"] != "P" and isinstance(rid, int):
+                rounds.setdefault(rid, {})[sp["phase"]] = [sp["start"], sp["end"]]
+        for rid, ph in rounds.items():
+            after = max(v[1] for v in ph.values())
+            nxt = [p for p in pubs if p["start"] >= after - 1]
+            if nxt:
+                ph["P"] = [nxt[0]["start"], nxt[0]["end"]]
+        pts = isl["points"]
+        ids = sorted(set(rounds) | {x - 1 for x in pts})
+        out = []
+        for rid in ids:
+            pt, ph = pts.get(rid + 1, {}), rounds.get(rid, {})
+            out.append({
+                "round": rid, "policy_version": rid,
+                "published_version": rid + 1 if (rid + 1) in isl["pubs"] else None,
+                "reward": pt.get("reward"), "reward_std": pt.get("reward_std"),
+                "p10": pt.get("reward_p10"), "p50": pt.get("reward_p50"), "p90": pt.get("reward_p90"),
+                "trunc": pt.get("trunc"), "logprob_diff": pt.get("logprob_diff"),
+                "resp_mean": pt.get("resp_len"), "resp_p95": pt.get("resp_p95"), "tok_s": pt.get("tok_s"),
+                "grad_norm": pt.get("grad_norm"), "kl": pt.get("kl"),
+                "phases": ph, "dur": {k: round(v[1] - v[0], 1) for k, v in ph.items()},
+            })
+        return out
+
+    def node_series(self, isl: dict) -> dict:
+        out = {}
+        for rank, ser in isl["node_series"].items():
+            rows = list(ser)
+            step = max(1, len(rows) // NODE_SERIES_POINTS)
+            out[rank] = rows[::step]
+        return out
+
+    def page_view(self, *, live: bool = False, now: float | None = None) -> dict:
+        """Everything the redesigned page (section 9) draws, in one object."""
+        now = self.now(live) if now is None else now
+        ov = self.overview(live=live, now=now)
+        isl_extra = {}
+        for iid in self.island_ids():
+            isl = self.islands[iid]
+            starts = [e["ts"] for e in isl["recent"] if e["type"] == "rl_driver_start"]
+            isl_extra[iid] = {
+                "rounds": self.round_records(isl), "node_series": self.node_series(isl),
+                "first_ts": isl["first_ts"], "ready_ts": isl["ready_ts"],
+                "driver_start_ts": isl.get("driver_start_ts") or (starts[0] if starts else None),
+                "cells": len(isl["cells"] or []),
+                "transactions": len(isl["tx_order"]), "ray_embed": self.ray_embed(isl, self.island_ids().index(iid)),
+            }
+        usage = {"syncer": self.counts["syncer"] > 0, "journal": self.counts["journal"] > 0,
+                 "cells": any(v["cells"] for v in isl_extra.values()),
+                 "transactions": any(v["transactions"] for v in isl_extra.values())}
+        return {"overview": ov, "islands": isl_extra, "rounds_syncer": self.rounds(), "usage": usage}
+
     def _round_metrics(self, isl: dict, r: dict, event: str) -> None:
         if event == "rl_local_round":
             x = r.get("local_round_id")
@@ -374,13 +462,16 @@ class Reducer:
         isl["round"] = x if isl["round"] is None else max(isl["round"], x)
         values = {key: first_finite(r, paths) for key, _label, paths in METRICS}
         values.update({key: first_finite(r, paths) for key, paths in EXTRA_SERIES})
-        if values.get("tok_s") is None:
+        if values.get("tok_s") is None and isl["points"].get(x, {}).get("tok_s_derived") is not False \
+                and isl["points"].get(x, {}).get("tok_s") is None:
             toks = finite(r.get("action_tokens"))
             secs = sum(v for v in (finite(r.get("rollout_seconds")), finite(r.get("train_seconds")))
                        if v is not None)
             if toks is not None and secs > 0:
                 values["tok_s"] = toks / secs
                 values["tok_s_derived"] = True
+        elif values.get("tok_s") is not None:
+            values["tok_s_derived"] = False  # measured tok_per_s wins over the derived estimate
         if nonfinite_seen(r, ("grad_norm", "train_metrics.grad_norm", "loss", "pg_loss")):
             isl["nonfinite"].append(x)
         self._point(isl, x, values)
@@ -784,6 +875,7 @@ class Reducer:
             "islands": {i: self.island_view(i, live=live, now=now) for i in self.island_ids()},
             "rounds": self.rounds(),
             "fleet": self.fleet_view(live=live, now=now),
+            "page": self.page_view(live=live, now=now),
             "events": {"events": evs, "cursor": evs[-1]["seq"] if evs else 0, "more": False},
         }
 

@@ -107,6 +107,8 @@ class _Handler(BaseHTTPRequestHandler):
             if path in ("/", "/index.html"):
                 body = export_mod.render_page(None).encode("utf-8")
                 return self._send(200, body, "text/html; charset=utf-8")
+            if path == "/api/view":  # everything the page draws (section 9)
+                return self._json(r.page_view(live=self.live))
             if path == "/api/overview":
                 return self._json(r.overview(live=self.live))
             if path.startswith("/api/islands/"):
