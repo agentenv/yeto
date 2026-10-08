@@ -172,11 +172,17 @@ pub fn open<'a>(key: &[u8], msg_type: u8, payload: &'a [u8]) -> Result<&'a [u8]>
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ElasticMsg {
+    /// Body: syncer_epoch u64 | island_id u32 | incarnation u64 |
+    /// capacity f64 | backend_identity [32] (yeto-framework-decoupling 6.2a:
+    /// sha256 of the island's BackendIdentity; all zero = not declared).
+    /// The 32-byte field was added in s17-elastic-identity; older JOIN frames
+    /// (28-byte body) are refused, so old and new islands/syncers cannot mix.
     Join {
         syncer_epoch: u64,
         island_id: u32,
         incarnation: u64,
         capacity: f64,
+        backend_identity: [u8; 32],
     },
     JoinAck {
         syncer_epoch: u64,
@@ -303,10 +309,11 @@ impl ElasticMsg {
         let mut b = Vec::new();
         b.extend_from_slice(&self.syncer_epoch().to_le_bytes());
         match self {
-            Self::Join { island_id, incarnation, capacity, .. } => {
+            Self::Join { island_id, incarnation, capacity, backend_identity, .. } => {
                 b.extend_from_slice(&island_id.to_le_bytes());
                 b.extend_from_slice(&incarnation.to_le_bytes());
                 b.extend_from_slice(&capacity.to_bits().to_le_bytes());
+                b.extend_from_slice(backend_identity);
             }
             Self::JoinAck {
                 learner_slot,
@@ -391,6 +398,11 @@ impl ElasticMsg {
                 island_id: r.u32()?,
                 incarnation: r.u64()?,
                 capacity: f64_(&mut r)?,
+                backend_identity: r
+                    .take(32)
+                    .context("JOIN without backend identity (island older than the syncer?)")?
+                    .try_into()
+                    .context("backend identity")?,
             },
             MSG_JOIN_ACK => Self::JoinAck {
                 syncer_epoch,
@@ -1342,7 +1354,7 @@ mod tests {
     #[test]
     fn all_frames_roundtrip_and_reject_tampering_and_wrong_key() {
         let msgs = vec![
-            ElasticMsg::Join { syncer_epoch: 3, island_id: 1, incarnation: 7, capacity: 2.5 },
+            ElasticMsg::Join { syncer_epoch: 3, island_id: 1, incarnation: 7, capacity: 2.5, backend_identity: [0xab; 32] },
             ElasticMsg::JoinAck {
                 syncer_epoch: 3,
                 learner_slot: 1,
@@ -1399,13 +1411,44 @@ mod tests {
         assert!(ElasticMsg::decode(b"k1", MSG_HEARTBEAT, &seal(b"k1", MSG_HEARTBEAT, vec![0; 8])).is_err());
     }
 
+    /// Golden JOIN frame (key b"k1"), the bytes the Python client
+    /// (tests/test_rl_inter_island_elastic_client.py RUST_GOLDEN[15]) must
+    /// produce; and the pre-identity 28-byte JOIN body is refused.
+    #[test]
+    fn join_frame_with_backend_identity_golden_and_old_format_refused() {
+        let m = ElasticMsg::Join {
+            syncer_epoch: 3,
+            island_id: 1,
+            incarnation: 7,
+            capacity: 2.5,
+            backend_identity: [0xab; 32],
+        };
+        let (t, p) = m.encode(b"k1");
+        assert_eq!(t, MSG_JOIN);
+        println!("JOIN_GOLDEN {}", hex(&p));
+        assert_eq!(hex(&p), JOIN_GOLDEN_HEX);
+        let mut old = Vec::new();
+        old.extend_from_slice(&3u64.to_le_bytes());
+        old.extend_from_slice(&1u32.to_le_bytes());
+        old.extend_from_slice(&7u64.to_le_bytes());
+        old.extend_from_slice(&2.5f64.to_bits().to_le_bytes());
+        let err = ElasticMsg::decode(b"k1", MSG_JOIN, &seal(b"k1", MSG_JOIN, old)).unwrap_err();
+        assert!(format!("{err:#}").contains("without backend identity"), "{err:#}");
+    }
+
+    const JOIN_GOLDEN_HEX: &str = "03000000000000000100000007000000000000000000000000000440abababababababababababababababababababababababababababababababab3d2faaa5418d42914e93471c8f79f008699aee2190bd1d505af97476e9ec21a7";
+
+    fn hex(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    }
+
     #[test]
     fn stale_syncer_epoch_is_fenced() {
         let mut c = ElasticCoordinator::new(params(), 30.0, 5).unwrap();
-        let old = ElasticMsg::Join { syncer_epoch: 4, island_id: 1, incarnation: 0, capacity: 1.0 };
+        let old = ElasticMsg::Join { syncer_epoch: 4, island_id: 1, incarnation: 0, capacity: 1.0, backend_identity: [0; 32] };
         assert!(format!("{:#}", c.apply(&old, 0.0).unwrap_err()).contains("fenced"));
         assert!(!c.is_member(1));
-        let cur = ElasticMsg::Join { syncer_epoch: 5, island_id: 1, incarnation: 0, capacity: 1.0 };
+        let cur = ElasticMsg::Join { syncer_epoch: 5, island_id: 1, incarnation: 0, capacity: 1.0, backend_identity: [0; 32] };
         assert!(matches!(c.apply(&cur, 0.0).unwrap(), Some(ElasticMsg::JoinAck { syncer_epoch: 5, .. })));
         let hb = ElasticMsg::LeaseHeartbeat { syncer_epoch: 4, island_id: 1, membership_epoch: 1, inner_step: 0, round_wall_s: 0.0 };
         assert!(c.apply(&hb, 1.0).is_err());

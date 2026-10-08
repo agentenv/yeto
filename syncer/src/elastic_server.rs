@@ -50,7 +50,17 @@ pub struct ElasticServerConfig {
     pub resume: bool,
 }
 
-const SERVER_STATE_MAGIC: &[u8; 8] = b"YELSRV1\0";
+/// v2 (s17-elastic-identity) adds the pinned backend identity; v1
+/// checkpoints are refused (version boundary, see hash-migration.md).
+const SERVER_STATE_MAGIC: &[u8; 8] = b"YELSRV2\0";
+const SERVER_STATE_MAGIC_V1: &[u8; 8] = b"YELSRV1\0";
+
+fn hex32(h: &[u8; 32]) -> String {
+    if h.iter().all(|b| *b == 0) {
+        return "<not declared>".into();
+    }
+    h.iter().map(|b| format!("{b:02x}")).collect()
+}
 
 fn put_f32s(b: &mut Vec<u8>, v: &[f32]) {
     b.extend_from_slice(&(v.len() as u64).to_le_bytes());
@@ -89,6 +99,11 @@ type Outbox = mpsc::UnboundedSender<(u8, Vec<u8>)>;
 
 struct Shared {
     coord: ElasticCoordinator,
+    /// yeto-framework-decoupling 6.2a: backend identity hash pinned by the
+    /// first accepted JOIN (like the strict HELLO session contract); every
+    /// later JOIN must carry the same 32 bytes. Kept for the whole run and in
+    /// the checkpoint, so a Miles session never admits a verl island.
+    backend_identity: Option<[u8; 32]>,
     flushed: usize,
     round_started: Instant,
     tape: Option<std::fs::File>,
@@ -170,6 +185,13 @@ impl Shared {
 
     fn encode_checkpoint(&self) -> Vec<u8> {
         let mut b = SERVER_STATE_MAGIC.to_vec();
+        match &self.backend_identity {
+            Some(h) => {
+                b.push(1);
+                b.extend_from_slice(h);
+            }
+            None => b.push(0),
+        }
         let coord = self.coord.encode_state();
         b.extend_from_slice(&(coord.len() as u64).to_le_bytes());
         b.extend_from_slice(&coord);
@@ -203,7 +225,18 @@ impl Shared {
     /// Restore coordinator, base, momentum and carried tensors.
     fn restore(&mut self, bytes: &[u8], lease_s: f64, now: f64) -> Result<()> {
         let mut r = Reader(bytes);
-        ensure!(r.take(8)? == SERVER_STATE_MAGIC, "not an elastic syncer checkpoint");
+        let magic = r.take(8)?;
+        ensure!(
+            magic != SERVER_STATE_MAGIC_V1,
+            "elastic syncer checkpoint predates the backend identity field (YELSRV1); \
+             it cannot be resumed by this syncer (version boundary s17-elastic-identity)"
+        );
+        ensure!(magic == SERVER_STATE_MAGIC, "not an elastic syncer checkpoint");
+        self.backend_identity = match r.u8()? {
+            0 => None,
+            1 => Some(r.take(32)?.try_into().context("backend identity")?),
+            v => bail!("invalid backend identity flag {v} in elastic checkpoint"),
+        };
         let n = usize::try_from(r.u64()?)?;
         self.coord = ElasticCoordinator::decode_state(self.coord.params, lease_s, r.take(n)?, now)?;
         if r.u8()? == 1 {
@@ -358,6 +391,19 @@ impl Shared {
             ElasticMsg::DeltaReady { .. } if self.params.is_some() => {
                 bail!("DELTA_READY carries no tensor; use DELTA_TENSOR once a base exists")
             }
+            ElasticMsg::Join { island_id, backend_identity, .. } => {
+                if let Some(pinned) = &self.backend_identity {
+                    ensure!(
+                        pinned == backend_identity,
+                        "backend identity mismatch, JOIN refused: island {island_id} declares {} \
+                         but this elastic session is pinned to {} by its first JOIN; islands with a \
+                         different training backend (e.g. Miles vs verl), engine commit, device \
+                         family or parameter-name map cannot be merged",
+                        hex32(backend_identity),
+                        hex32(pinned)
+                    );
+                }
+            }
             _ => {}
         }
         let result = self.coord.apply(&msg, now);
@@ -368,7 +414,8 @@ impl Shared {
         }
         let reply = result?;
         match &msg {
-            ElasticMsg::Join { island_id, .. } => {
+            ElasticMsg::Join { island_id, backend_identity, .. } => {
+                self.backend_identity.get_or_insert(*backend_identity);
                 self.outboxes.insert(*island_id, outbox.clone());
                 replies.extend(reply.map(|m| m.encode(&self.key)));
                 replies.extend(self.base_msg());
@@ -522,6 +569,7 @@ pub async fn run(listener: TcpListener, cfg: ElasticServerConfig) -> Result<(u64
     };
     let shared = Arc::new(Mutex::new(Shared {
         coord: ElasticCoordinator::new(cfg.params, cfg.lease_s, cfg.syncer_epoch)?,
+        backend_identity: None,
         flushed: 0,
         round_started: Instant::now(),
         tape,
@@ -611,18 +659,20 @@ mod tests {
     use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 
     const KEY: &[u8] = b"test-key";
+    const MILES_ID: [u8; 32] = [0x11; 32];
 
     struct Island {
         id: u32,
         epoch: u64,
         rd: OwnedReadHalf,
         wr: OwnedWriteHalf,
+        identity: [u8; 32],
     }
 
     impl Island {
         async fn connect(port: u16, id: u32, epoch: u64) -> Self {
             let (rd, wr) = TcpStream::connect(("127.0.0.1", port)).await.unwrap().into_split();
-            Self { id, epoch, rd, wr }
+            Self { id, epoch, rd, wr, identity: MILES_ID }
         }
         async fn send(&mut self, m: ElasticMsg) {
             let (t, p) = m.encode(KEY);
@@ -638,6 +688,7 @@ mod tests {
                 island_id: self.id,
                 incarnation: 0,
                 capacity: 1.0,
+                backend_identity: self.identity,
             })
             .await;
             let (t, p) = self.recv().await;
@@ -754,7 +805,7 @@ mod tests {
 
         // Fencing: an older syncer_epoch is refused with MSG_ERROR.
         let mut stale = Island::connect(port, 9, 6).await;
-        stale.send(ElasticMsg::Join { syncer_epoch: 6, island_id: 9, incarnation: 0, capacity: 1.0 }).await;
+        stale.send(ElasticMsg::Join { syncer_epoch: 6, island_id: 9, incarnation: 0, capacity: 1.0, backend_identity: MILES_ID }).await;
         let (t, p) = stale.recv().await;
         assert_eq!(t, MSG_ERROR);
         assert!(String::from_utf8_lossy(&p).contains("fenced"));
@@ -1021,8 +1072,10 @@ mod tests {
         assert_close(&p.unwrap(), 5.0);
         let saved = std::fs::read(&ckpt).unwrap();
         let mut sh = ElasticCoordinator::new(mk(0, false).params, 30.0, 0).unwrap();
-        let n = u64::from_le_bytes(saved[8..16].try_into().unwrap()) as usize;
-        sh = ElasticCoordinator::decode_state(sh.params, 30.0, &saved[16..16 + n], 0.0).unwrap();
+        // magic 8 | identity flag 1 + 32 | coordinator length u64 | coordinator
+        assert_eq!((saved[8], &saved[9..41]), (1, &MILES_ID[..]));
+        let n = u64::from_le_bytes(saved[41..49].try_into().unwrap()) as usize;
+        sh = ElasticCoordinator::decode_state(sh.params, 30.0, &saved[49..49 + n], 0.0).unwrap();
         assert_eq!((sh.syncer_epoch, sh.outer_version), (1, 2));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1169,7 +1222,7 @@ mod tests {
         let (t, p) = b.recv().await;
         expect_finished(t, &p);
         let mut c = Island::connect(port, 3, 0).await;
-        c.send(ElasticMsg::Join { syncer_epoch: 0, island_id: 3, incarnation: 0, capacity: 1.0 }).await;
+        c.send(ElasticMsg::Join { syncer_epoch: 0, island_id: 3, incarnation: 0, capacity: 1.0, backend_identity: MILES_ID }).await;
         let (t, p) = c.recv().await;
         expect_finished(t, &p);
         let status = std::fs::read_to_string(dir.join("status.json")).unwrap();
@@ -1182,6 +1235,84 @@ mod tests {
         assert_eq!(v, 1);
         assert_eq!(p.unwrap(), vec![1.0; 4], "late delta must not be merged");
         assert!(started.elapsed() < Duration::from_secs(20), "exited on all-left, not grace");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// yeto-framework-decoupling 6.2a: the first JOIN pins the backend
+    /// identity; a JOIN with another identity (a "verl" island in a Miles
+    /// session) gets MSG_ERROR naming both hashes and is not admitted, a
+    /// second island with the same identity joins as before. The pin is in
+    /// the checkpoint (survives --resume) and a pre-identity YELSRV1
+    /// checkpoint is refused.
+    #[tokio::test]
+    async fn backend_identity_pinned_by_first_join_refuses_other_backend() {
+        let dir = std::env::temp_dir().join(format!("elastic-ident-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ckpt = dir.join("elastic.ckpt");
+        let _ = std::fs::remove_file(&ckpt);
+        let verl: [u8; 32] = [0x22; 32];
+        let mk = |total_steps, resume| ElasticServerConfig {
+            params: ElasticParams { quorum_theta: 0.5, carry_gamma: 0.5, soft_deadline_s: 60, q_min: 1, max_carry_lag: 2 },
+            key: KEY.to_vec(),
+            syncer_epoch: 0,
+            lease_s: 30.0,
+            total_steps,
+            event_tape: None,
+            tick: Duration::from_millis(20),
+            outer_lr: 1.0,
+            outer_momentum: 0.0,
+            final_grace: Duration::ZERO,
+            checkpoint_path: Some(ckpt.clone()),
+            checkpoint_every: 1,
+            resume,
+        };
+        let expect_refused = |t: u8, p: &[u8]| {
+            assert_eq!(t, MSG_ERROR);
+            let text = String::from_utf8_lossy(p).to_string();
+            assert!(text.contains("backend identity mismatch, JOIN refused"), "{text}");
+            assert!(text.contains(&"22".repeat(32)) && text.contains(&"11".repeat(32)), "{text}");
+            assert!(text.contains("Miles vs verl"), "{text}");
+        };
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(run(listener, mk(3, false)));
+        let mut a = Island::connect(port, 1, 0).await;
+        assert!(matches!(a.join().await, ElasticMsg::JoinAck { .. }));
+        a.init(vec![0.0; 4]).await;
+        a.next_base().await;
+        let mut v = Island::connect(port, 2, 0).await;
+        v.identity = verl;
+        v.send(ElasticMsg::Join { syncer_epoch: 0, island_id: 2, incarnation: 0, capacity: 1.0, backend_identity: verl }).await;
+        let (t, p) = v.recv().await;
+        expect_refused(t, &p);
+        let mut b = Island::connect(port, 3, 0).await;
+        assert!(matches!(b.join().await, ElasticMsg::JoinAck { .. }), "same backend must join as before");
+        b.next_base().await;
+        a.update(0, 1.0).await; // 1/2 >= 0.5 -> v1, checkpoint written before the broadcast
+        assert_eq!(a.next_base().await.0, 1);
+        server.abort();
+        let bytes = std::fs::read(&ckpt).unwrap();
+        assert_eq!(&bytes[..8], SERVER_STATE_MAGIC);
+        assert_eq!(bytes[8], 1);
+        assert_eq!(&bytes[9..41], &MILES_ID);
+
+        // Resume keeps the pin: the verl island is still refused.
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(run(listener, mk(3, true)));
+        let mut v = Island::connect(port, 2, 1).await;
+        v.send(ElasticMsg::Join { syncer_epoch: 1, island_id: 2, incarnation: 0, capacity: 1.0, backend_identity: verl }).await;
+        let (t, p) = v.recv().await;
+        expect_refused(t, &p);
+        server.abort();
+
+        // A v1 (pre-identity) checkpoint is refused with a clear message.
+        let mut old = SERVER_STATE_MAGIC_V1.to_vec();
+        old.extend_from_slice(&bytes[41..]);
+        std::fs::write(&ckpt, &old).unwrap();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let err = run(listener, mk(3, true)).await.unwrap_err();
+        assert!(format!("{err:#}").contains("predates the backend identity field"), "{err:#}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

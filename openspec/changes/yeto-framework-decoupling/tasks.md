@@ -103,6 +103,13 @@
 - [x] 6.2 岛握手比较身份哈希，不同即拒绝；`local_learner.py` 与 `sao_streaming_runtime.py:203,642` 的训练契约输入引用该身份哈希。验收：单测——Miles 与模拟 verl 身份握手被拒并报双方身份；两个 Miles 岛握手不受影响（标准样本一致）。
   - 已实现（s17-decouple-p4）：岛与 syncer 的 HELLO 会话契约由"布局指纹"改为"布局指纹 + 后端身份哈希"（`backend_identity.session_contract_hash`，`BridgeConfig`/`DecoupledBridgeConfig` 新字段 `backend_identity_sha256`，Miles 岛入口填入）；syncer 只接纳会话契约逐字节相同的岛（`syncer/src/server.rs` `SessionSpec` 相等比较），所以 Miles 与 verl（或不同 Miles 钉）的岛握手被拒；能拿到双方身份的地方用 `check_identity_match` 报双方身份。dense（`local_learner.dense_sweep_session_contract_hash` 新参数）与 SAO（`sao_role_stream_session_contract_hash`）的契约输入引用 legacy Miles 身份哈希。已验证：单测（Miles vs 模拟 verl 被拒并报双方身份；两个 Miles 岛契约相同；HELLO 帧带新契约）。**未验证**：真 Rust syncer 端到端（本机 `cargo build` 在基线就失败，`test_rl_integration` 12 例基线即报错）；真机多岛。**版本边界**：新旧代码的岛不能混跑（会话契约不同）；阶段 5 之前写下的 syncer 检查点因会话契约不同不能续跑。
 
+- [x] 6.2a elastic 模式补上身份比较（6.2 只覆盖了严格同步的 HELLO）。验收：Miles 岛和 verl 岛 JOIN 互拒并报双方身份；同后端同提交的岛行为不变；帧与 HMAC 两边逐字节一致。
+  - 已实现（s17-elastic-identity，base s17-decouple-p4）：elastic JOIN 正文加 32 字节后端身份哈希（`syncer/src/elastic.rs` `ElasticMsg::Join.backend_identity`；`yeto/rl/elastic_client.py` `Join.backend_identity`、`ElasticClientConfig.backend_identity_sha256`）；`bridge.make_island_bridge` 与 `engine/bridges.ElasticAvgSync` 把 `BridgeConfig.backend_identity_sha256` 传进 JOIN。syncer（`elastic_server.rs`）用第一个被接纳的 JOIN 钉住身份（和严格模式第一个 HELLO 定会话契约一样），之后身份不同的 JOIN 回 MSG_ERROR："backend identity mismatch, JOIN refused: island N declares <哈希> but this elastic session is pinned to <哈希> …"，不入池；钉住的身份写进检查点（`YELSRV2`），续跑后照样拒。
+  - 已验证：`cargo test` 141 过（基线 139 + 黄金帧/旧帧拒绝 1 + 服务端钉身份/续跑/旧检查点拒绝 1）；Python 单测（`tests/test_rl_elastic_backend_identity.py` 新增 5 例，`test_rl_inter_island_elastic_client.py` 黄金帧 15 更新）；elastic/inter_island/bridge/decoupled 相关 312 例全过。真 Rust syncer（release 构建）本地三假岛端到端：Miles 岛 1 加入并播种，verl 岛 2 被拒（错误里有双方哈希），Miles 岛 3 正常加入，岛 1、3 合并一步得 2.0（`test_real_syncer_refuses_verl_island_in_miles_session`，需 `YETO_TEST_ELASTIC_SYNCER`）。
+  - 本机 cargo：`cargo` 在 `~/.cargo/bin`，非登录 shell 的 PATH 里没有，直接敲 `cargo` 报 command not found；`export PATH=$HOME/.cargo/bin:$PATH` 后基线 5fac05f7 `cargo build` 成功、`cargo test` 139 过（N6 的 145 = 139 + 它 PR #134 加的 6 例）。所以 6.2 记录里的"本机 cargo build 在基线就失败"实为找不到 cargo，不是代码编不过。
+  - **版本边界**：见 hash-migration.md "阶段 5 补"——新旧岛/syncer 不能混用，`YELSRV1` 检查点不能续跑。
+  - **未验证**：真机多岛（不上 GPU）；Ray 驱动的岛（本机不跑 Ray，只用假岛）；与 PR #134 合并后的 cargo test（两边改动不重叠，未实际合并跑）。
+
 ## 7. 阶段 6：硬件层（可与 verl 并行）
 
 - [ ] 7.1 `yeto/hw/device.py` 设备族表（NVIDIA、昇腾；AMD/TPU/摩尔线程预留行标"未核实"），以 `accel.py:22-30` 为起点；`accel.py` 改读此表（H1、V1）。验收：`accel.py` 现有用法测试通过；表单测。
