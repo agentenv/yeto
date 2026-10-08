@@ -976,6 +976,22 @@ class IslandDriver:
         finally:
             stop.set()
             thread.join(timeout=self.load_sample_interval_s + 5)
+            # S15 evidence-window lesson: one terminal probe after generate so a
+            # round whose loads mostly land after the last tick still leaves a
+            # final ``rl_load_sample`` (``terminal=True``). Observe only.
+            try:
+                sample = probe()
+            except Exception as exc:  # noqa: BLE001 - observation must not kill the round
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "yeto terminal load_sample probe raised %s: %s", type(exc).__name__, exc)
+                sample = None
+            if sample is not None:
+                self.emit("rl_load_sample", rollout_id=rollout_id, **dict(sample),
+                          t=self.clock(), profile_hash=self.profile_hash,
+                          epoch=self.config_epoch,
+                          weight_transport=self.weight_transport, terminal=True)
 
     def _emit_round_labels(self, rollout_id, batch, metrics) -> None:
         """A5: per-round algorithm metrics carry the same profile/epoch/transport labels."""
