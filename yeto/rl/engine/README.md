@@ -7,7 +7,7 @@
 1. 中立核心——`yeto/rl/engine/`（适配层除外）、`yeto/rl/rewards/`、`yeto/rl/harness/`、`yeto/rl/algos/`，以及暂时还放在 `yeto/rl/` 下的奖励/过滤/算法扩展/harness 文件（清单见测试中的 `CORE_FILES`）——不得 import：
    - 训练或推理框架：`miles`、`miles_plugins`、`megatron`、`sglang`、`verl`、`vllm`、`torch_npu`；
    - 后端适配层：`yeto.rl.engine.miles_adapter`、`yeto.rl.adapters.*`；
-   - 旧版 Miles 引擎与补丁模块：`yeto.rl.miles`、`yeto.rl.miles_overlay`、`yeto.rl.overlays`、`yeto.rl.learner`、`yeto.rl.miles_full_parameter*` 等；
+   - 旧版 Miles 引擎与补丁模块：`yeto.rl.adapters.miles.legacy.engine`、`yeto.rl.adapters.miles.overlay`、`yeto.rl.adapters.miles.overlays`、`yeto.rl.adapters.miles.island_entry`、`yeto.rl.adapters.miles.models.full_parameter*` 等；
    - 云库：`sky`、`modal`、`yeto.modal_runner`、`yeto.shape.providers`。
 2. 各后端适配层之间不得互相 import。
 3. 云层/启动层（`launcher.py`、`modal_runner.py`、`cli.py`、`stage_w_entry.py`、`yeto/shape/`、以后的 `yeto/cloud/`）不得 import 后端适配层。

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from yeto.rl.miles_full_parameter_continuation_probe import (
+from yeto.rl.adapters.miles.models.full_parameter_continuation_probe import (
     MilesFullParameterContinuationProbeSync,
 )
 
@@ -236,7 +236,7 @@ def test_two_step_probe_preserves_moments_and_advances_two_global_cuts(
     evidence = tmp_path / "continuation.json"
     _configure(monkeypatch, evidence)
     monkeypatch.setattr(
-        "yeto.rl.miles_full_parameter_continuation_probe._hardware_identity",
+        "yeto.rl.adapters.miles.models.full_parameter_continuation_probe._hardware_identity",
         lambda: {"gpu_count": 2},
     )
     group = ContinuationGroup()
@@ -292,7 +292,7 @@ def test_two_step_probe_rejects_unchanged_local_payload(monkeypatch, tmp_path):
     evidence = tmp_path / "continuation.json"
     _configure(monkeypatch, evidence)
     monkeypatch.setattr(
-        "yeto.rl.miles_full_parameter_continuation_probe._hardware_identity",
+        "yeto.rl.adapters.miles.models.full_parameter_continuation_probe._hardware_identity",
         lambda: {"gpu_count": 2},
     )
     group = ContinuationGroup(mutate=False)
@@ -316,7 +316,7 @@ def test_two_step_probe_rejects_optimizer_state_mutation_during_apply(
     evidence = tmp_path / "continuation.json"
     _configure(monkeypatch, evidence)
     monkeypatch.setattr(
-        "yeto.rl.miles_full_parameter_continuation_probe._hardware_identity",
+        "yeto.rl.adapters.miles.models.full_parameter_continuation_probe._hardware_identity",
         lambda: {"gpu_count": 2},
     )
     group = ContinuationGroup(mutate_moments_on_apply=True)

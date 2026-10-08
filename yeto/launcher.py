@@ -3101,7 +3101,7 @@ def _sky_docker_login_config(login: dict[str, str]):
 def _miles_source_setup(rl_engine: str = "ports", overlay: str | None = None) -> tuple[str, str]:
     """Return the (miles_setup, sglang_setup) remote steps for ``rl_engine``.
 
-    ``overlay`` (ports only, default None = off): a :mod:`yeto.rl.miles_overlay`
+    ``overlay`` (ports only, default None = off): a :mod:`yeto.rl.adapters.miles.overlay`
     patch applied to the image's ~/miles after the checkout checks.
     """
 
@@ -3261,7 +3261,7 @@ def _miles_source_setup(rl_engine: str = "ports", overlay: str | None = None) ->
 # ``_codex_harness_contract`` the SSH harness uses, mounts the directory at
 # ``CODEX_CONTAINER_DIR`` (sky file_mounts / Modal add_local_dir) and injects
 # the ``YETO_CODEX_*`` environment the container preflights check
-# (``yeto.rl.learner._preflight_codex_harness`` expected_env and
+# (``yeto.rl.adapters.miles.island_entry._preflight_codex_harness`` expected_env and
 # ``codex_harness_agent._attest_runtime``); every value comes from the contract.
 CODEX_BUNDLE_DIR_ENV = "YETO_CODEX_BUNDLE_DIR"
 CODEX_CONTAINER_DIR = "/opt/yeto/codex"
@@ -4049,7 +4049,7 @@ def make_miles_island_task(
             '  RAY_ADDRESS="$MASTER_ADDR:6379" '
             f"PYTHONPATH={island_pythonpath}$HOME/sglang/python:$HOME/sky_workdir{island_megatron_path}"
             "${PYTHONPATH:+:$PYTHONPATH} "
-            f"{getattr(args, 'rl_learner_launch_prefix', '')}python3 -m yeto.rl.learner{flags}"
+            f"{getattr(args, 'rl_learner_launch_prefix', '')}python3 -m yeto.rl.adapters.miles.island_entry{flags}"
             f"{_island_post_cmd(args)}\n"
             "else\n"
             # rl-multinode-island D1: the trap is armed before the join loop so a
@@ -4852,7 +4852,7 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         envs["CRITIC_SYNCER_ADDR"] = critic_syncer_address(syncer_addr)
     if rl and getattr(args, "rl_engine", "ports") != "ports":
         # Legacy Miles' own router launch misses its 30 s deadline on Modal's
-        # CPUs (see yeto.rl.learner.start_external_sglang_router).  Upstream
+        # CPUs (see yeto.rl.adapters.miles.island_entry.start_external_sglang_router).  Upstream
         # Miles (ports) launches its router as a Ray worker with a 120 s
         # budget and has no external router mode.
         envs["YETO_RL_EXTERNAL_ROUTER"] = "1"
@@ -7431,7 +7431,7 @@ def dry_run_plan(args) -> dict:
                 args, spec, learner_id, len(specs) + external, "$SYNCER_ADDR"
             )
             entry["learner_command"] = next(
-                (line.strip() for line in task.run.splitlines() if "yeto.rl.learner" in line),
+                (line.strip() for line in task.run.splitlines() if "yeto.rl.adapters.miles.island_entry" in line),
                 None,
             )
         islands.append(entry)

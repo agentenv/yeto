@@ -36,7 +36,14 @@ FRAMEWORKS = ("miles", "miles_plugins", "megatron", "sglang", "verl", "vllm", "t
 ADAPTERS = ("yeto.rl.engine.miles_adapter", "yeto.rl.adapters")
 LEGACY = ("yeto.rl.miles", "yeto.rl.miles_overlay", "yeto.rl.overlays", "yeto.rl.learner",
           "yeto.rl.miles_full_parameter", "yeto.rl.miles_full_parameter_dense",
-          "yeto.rl.miles_chunked_full_parameter", "yeto.rl.miles_sao_streaming")
+          "yeto.rl.miles_chunked_full_parameter", "yeto.rl.miles_sao_streaming",
+          # phase 4 forwarders (old paths of modules moved under yeto/rl/adapters/miles/)
+          "yeto.rl.flash_next_provider", "yeto.rl.deepseek_v4_bridge",
+          "yeto.rl.deepseek_v4_clone_lora", "yeto.rl.deepseek_v4_expert_clone",
+          "yeto.rl.deepseek_v4_expert_full", "yeto.rl.deepseek_v4_expert_full_runtime",
+          "yeto.rl.sglang_deepseek_v4_clone", "yeto.rl.dense_sweep_wire",
+          "yeto.rl.miles_full_parameter_probe", "yeto.rl.miles_full_parameter_manifest_probe",
+          "yeto.rl.miles_full_parameter_continuation_probe")
 CLOUD = ("sky", "modal", "yeto.modal_runner", "yeto.shape.providers")
 
 CORE_FORBIDDEN = FRAMEWORKS + ADAPTERS + LEGACY + CLOUD

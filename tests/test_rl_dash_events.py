@@ -249,7 +249,7 @@ def test_resource_sampler_without_nvml_writes_one_record(tmp_path):
 
 
 def test_learner_switch_defaults(monkeypatch):
-    from yeto.rl.learner import apply_ports_infra_switches
+    from yeto.rl.adapters.miles.island_entry import apply_ports_infra_switches
 
     def run(**kw):
         base = dict(rl_observe_timeline=False, rl_heartbeat_interval=None,

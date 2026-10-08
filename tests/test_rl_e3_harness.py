@@ -252,11 +252,11 @@ def test_stall_watchdog_kills_a_silent_phase(tmp_path):
 
 def test_learner_flags_are_taken_from_the_dry_run_plan():
     build_flags = importlib.import_module("build_flags")
-    plan = {"island_requests": [{"learner_command": "RAY_ADDRESS=x python3 -m yeto.rl.learner "
+    plan = {"island_requests": [{"learner_command": "RAY_ADDRESS=x python3 -m yeto.rl.adapters.miles.island_entry "
                                                      "--learner-id 0 --rl-single-island-no-sync"}]}
     assert build_flags.learner_flags(plan) == "--learner-id 0 --rl-single-island-no-sync"
     with pytest.raises(ValueError):
-        build_flags.learner_flags({"island_requests": [{"learner_command": "python3 -m yeto.rl.learner --x"}]})
+        build_flags.learner_flags({"island_requests": [{"learner_command": "python3 -m yeto.rl.adapters.miles.island_entry --x"}]})
 
 
 ARGV = ["--global-batch-size", str(GBS), "--micro-batch-size", "1", "--lora-dropout", "0"]

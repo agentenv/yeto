@@ -1,6 +1,6 @@
 """``--rl-engine ports`` composition root (tasks 5.1, design D2).
 
-``run_ports_island`` is what ``yeto.rl.learner.run_miles`` calls on the ports
+``run_ports_island`` is what ``yeto.rl.adapters.miles.island_entry.run_miles`` calls on the ports
 path, after the legacy-shared validation has produced the parsed upstream Miles
 namespace (with the ``yeto_rl_*`` attributes the bridges read):
 
@@ -1240,7 +1240,7 @@ def refuse_partial_island_preflight(elastic: Any, topology: Any, miles_args: Any
         return
     error = getattr(controller, "recovery_required", None) or f"island topology: {why}"
     try:
-        from yeto.rl.miles import _append_rl_event
+        from yeto.rl.adapters.miles.legacy.engine import _append_rl_event
 
         epochs = getattr(getattr(controller, "journal", None), "epochs", None)
         _append_rl_event(miles_args, {
@@ -1298,7 +1298,7 @@ def reconcile_gpu_pool_preflight(elastic: Any, topology: Any, miles_args: Any, *
 
     def refuse(error: str) -> None:
         try:
-            from yeto.rl.miles import _append_rl_event
+            from yeto.rl.adapters.miles.legacy.engine import _append_rl_event
 
             epochs = getattr(getattr(controller, "journal", None), "epochs", None)
             _append_rl_event(miles_args, {
@@ -1601,7 +1601,7 @@ def run_ports_island(
     """
 
     from yeto.rl import MILES_NEXT_COMMIT
-    from yeto.rl.miles import _append_rl_event
+    from yeto.rl.adapters.miles.legacy.engine import _append_rl_event
 
     from .state import require_run_plugin
 

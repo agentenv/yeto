@@ -2,7 +2,7 @@
 
 Pure Python; no torch/ray/miles imports. The spec is translated to engine
 arguments only by adapters (the legacy mapping used by
-``yeto.rl.learner.build_miles_argv`` is documented by
+``yeto.rl.adapters.miles.island_entry.build_miles_argv`` is documented by
 ``miles_adapter.algorithm_flags.legacy_algorithm_argv``, decoupling 4.3/E14).
 
 Structure (change ``rl-algorithm-capabilities``, design D1/D2/D7):

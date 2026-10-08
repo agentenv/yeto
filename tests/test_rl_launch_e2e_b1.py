@@ -295,7 +295,7 @@ def test_injection_and_restart_switches_reach_the_island(tmp_path, monkeypatch):
         "--rl-test-inject-stop-failures", "1", "--rl-test-kill-learner-at", "COMMITTED",
         "--rl-test-inject-undrain-fail", "1"),
         monkeypatch)
-    assert "yeto_rl_restart_loop python3 -m yeto.rl.learner" in run
+    assert "yeto_rl_restart_loop python3 -m yeto.rl.adapters.miles.island_entry" in run
     args, env = learner_from_run(run, tmp_path / "home")
     assert args.rl_elastic_state_dir == "/vol/elastic"
     assert env["YETO_RL_TEST_INJECT_LORA_PERTURB"] == "0.01"

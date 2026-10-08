@@ -9,8 +9,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-import yeto.rl.deepseek_v4_clone_lora as clone_lora
-from yeto.rl.deepseek_v4_clone_lora import (
+import yeto.rl.adapters.miles.models.deepseek_v4.clone_lora as clone_lora
+from yeto.rl.adapters.miles.models.deepseek_v4.clone_lora import (
     assert_original_expert_lora_zero,
     configure_clone_only_grouped_lora,
     wrap_clone_only_lora,

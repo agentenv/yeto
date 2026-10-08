@@ -99,7 +99,7 @@ def _deepseek_v4_clone_expert_lora_specs(
     geometry, making those canonical tensor names and shapes deterministic.
     """
 
-    from .deepseek_v4_expert_clone import (
+    from yeto.rl.adapters.miles.models.deepseek_v4.expert_clone import (
         NUM_LAYERS,
         ORIGINAL_EXPERTS,
         TOTAL_EXPERTS,

@@ -2631,7 +2631,7 @@ def rl_island_shape(args):
     """The fixed island the RL launcher will build from these flags, for
     the planner to price: actor GPUs plus dedicated rollout GPUs in the
     disjoint (full-parameter) mode, on one node; colocated (lora) mode
-    may span nodes. Mirrors the placement branch in yeto/rl/learner.py."""
+    may span nodes. Mirrors the placement branch in yeto/rl/adapters/miles/island_entry.py."""
     from .shape.plan import IslandShape
 
     if getattr(args, "training_mode", "sft") != "rl":

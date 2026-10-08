@@ -130,7 +130,7 @@ def test_ports_is_forwarded_to_learner_and_source_setup(monkeypatch):
     args = _cli(("--rl-engine", "ports"))
     _prepare_rl_args(args)
     task = _island_task(args, monkeypatch)
-    assert "python3 -m yeto.rl.learner" in task.run and "--rl-engine ports" in task.run
+    assert "python3 -m yeto.rl.adapters.miles.island_entry" in task.run and "--rl-engine ports" in task.run
     assert launcher._miles_source_setup("ports")[0] in task.setup
 
 
@@ -680,7 +680,7 @@ def test_island_post_cmd_runs_after_the_learner_and_keeps_its_exit_code(monkeypa
     args = _cli(("--rl-island-post-cmd", "nvidia-smi -L; echo done"))
     _prepare_rl_args(args)
     run = _island_task(args, monkeypatch).run
-    learner = next(l for l in run.splitlines() if "-m yeto.rl.learner" in l)
+    learner = next(l for l in run.splitlines() if "-m yeto.rl.adapters.miles.island_entry" in l)
     assert learner.endswith(" || LRC=$?")
     after = run.split(learner, 1)[1]
     assert '( set +e; nvidia-smi -L; echo done ) > "$HOME/yeto-output/post-cmd.txt" 2>&1' in after

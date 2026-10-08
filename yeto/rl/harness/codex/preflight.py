@@ -303,7 +303,7 @@ def resolve_member(miles_args: Any, env: Mapping[str, str] | None = None) -> str
 # ---------------------------------------------------------------------------
 # Task 2.2: legacy preflight forwarding (injectable; legacy modules are not edited here)
 #
-# ``yeto/rl/learner.py::_preflight_codex_openenv_adapter`` and
+# ``yeto/rl/adapters/miles/island_entry.py::_preflight_codex_openenv_adapter`` and
 # ``yeto/rl/tbench_direct_preflight.py::_attest_adapter`` currently import the
 # adapter from ``<miles_root>/examples/experimental/openenv`` and compare it
 # against ``yeto.rl.CODEX_OPENENV_IDENTITY_ENV`` (image-line pins).  Once the

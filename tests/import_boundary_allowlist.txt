@@ -11,11 +11,11 @@
 yeto/rl/algos/reducers.py	megatron	# A3 :35,41 —— 暂不动（任务 4.8，归约器不迁）
 yeto/rl/algos/vendor/miles_mis.py	miles	# A3 :350 cp_utils —— 暂不动（任务 4.8）
 yeto/rl/grad_audit.py	megatron	# A3 :209,320 —— 暂不动（任务 4.8）
-yeto/rl/teacher_forcing.py	yeto.rl.miles	# A5 :129 _policy_token_for_rollout
+yeto/rl/teacher_forcing.py	yeto.rl.adapters	# A5 :129 _policy_token_for_rollout（旧版引擎路径；原 yeto.rl.miles，阶段 4 随 legacy 搬到 adapters/miles/legacy/engine.py，条目改名不增）
 #
 # --- harness（A6、A7、R4-R7、R14）
 yeto/rl/harness/codex/reward.py	miles	# R4 :159,222 Sample.Status / DynamicFilterOutput
-yeto/rl/harness/codex/reward.py	yeto.rl.miles	# R4 :224,268
+yeto/rl/harness/codex/reward.py	yeto.rl.adapters	# R4 :244,288 SecRLEnv 旧版引擎清理（原 yeto.rl.miles，阶段 4 随 legacy 搬家，条目改名不增）
 yeto/rl/harness/codex/tbench_reward.py	miles	# R5 :32,101
 yeto/rl/harness/codex/generate.py	miles	# R6 :67,113 agentic_tool_call.generate
 yeto/rl/harness/codex/codex_openenv_generate.py	miles	# R7 :52,64,130

@@ -64,7 +64,7 @@ def test_rewards_package_imports_no_framework():
                 names = [node.module]
             for name in names:
                 assert name.split(".")[0] not in {"miles", "verl", "megatron", "sglang", "torch"}, path
-                assert not name.startswith(("yeto.rl.adapters.miles", "yeto.rl.miles")), path
+                assert not name.startswith(("yeto.rl.adapters.miles", "yeto.rl.adapters.miles.legacy.engine")), path
 
 
 # -- 3.2 equivalence with the pre-refactor entry points --------------------------

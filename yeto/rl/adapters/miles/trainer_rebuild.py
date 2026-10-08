@@ -27,7 +27,7 @@ state file exists there). Whatever a (custom) load does, the data cursor is
 read through ``data_cursor()`` (``RolloutPool.data_cursor``; E1 interface)
 before disposal and after the rebuild: any difference -> RECOVERY_REQUIRED.
 yeto's ports engine never reads ``args.start_rollout_id`` (review L3: only the
-legacy non-ports ``yeto/rl/miles.py`` and other runtimes do).
+legacy non-ports ``yeto/rl/adapters/miles/legacy/engine.py`` and other runtimes do).
 
 Failure semantics (fork ``TrainerRebuildError``: no automatic rollback):
 

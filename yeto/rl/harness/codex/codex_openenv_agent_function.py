@@ -3,7 +3,7 @@
 REWRITE, not a move: the legacy ``codex_openenv_*`` modules lived in a private
 ``agentenv/miles`` ``examples/experimental/openenv`` copy and were never found
 (CODEX-PROGRESS §1.3).  The interface below is the one the yeto consumers
-expect (``yeto/rl/learner.py``, ``yeto/rl/tbench_direct_preflight.py``,
+expect (``yeto/rl/adapters/miles/island_entry.py``, ``yeto/rl/tbench_direct_preflight.py``,
 ``tests/test_rl_codex_schema.py``): ``stock``, ``_OPENENV_IDENTITY_ENV``,
 ``codex_openenv_harness_identity()`` and a module-level ``run``.
 

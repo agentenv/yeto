@@ -16,7 +16,7 @@ spec.loader.exec_module(tool)
 
 
 def test_pin_check_is_against_plan_v6(tmp_path):
-    init = tmp_path / "yeto" / "rl" / "__init__.py"
+    init = tmp_path / "yeto" / "rl" / "adapters" / "miles" / "pins.py"
     init.parent.mkdir(parents=True)
     init.write_text(f'MILES_NEXT_COMMIT = "{tool.MILES_COMMIT}"\nX = "{tool.IMAGE_DIGEST.split(":")[1]}"\n')
     assert tool.PLAN_VERSION == "plan-v6" and tool.check_pins(tmp_path) == []

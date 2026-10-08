@@ -51,7 +51,7 @@ def _exercise_optimizer(
 ) -> dict[str, object]:
     """Run real forward/backward and an AdamW update through clone slices."""
 
-    from yeto.rl.deepseek_v4_clone_lora import assert_original_expert_lora_zero
+    from yeto.rl.adapters.miles.models.deepseek_v4.clone_lora import assert_original_expert_lora_zero
 
     trainable = [
         parameter
@@ -199,17 +199,17 @@ def main() -> None:
             "and at least 128 tokens"
         )
 
-    from yeto.rl.deepseek_v4_bridge import ensure_deepseek_v4_bridge
+    from yeto.rl.adapters.miles.models.deepseek_v4.bridge import ensure_deepseek_v4_bridge
 
     ensure_deepseek_v4_bridge()
 
     from megatron.bridge import AutoBridge
     from miles.backends.megatron_utils import trainable_state
     from miles.backends.megatron_utils.lora_utils import create_lora_instance
-    from yeto.rl.deepseek_v4_clone_lora import assert_original_expert_lora_zero
-    from yeto.rl.deepseek_v4_expert_clone import contract_from_config
+    from yeto.rl.adapters.miles.models.deepseek_v4.clone_lora import assert_original_expert_lora_zero
+    from yeto.rl.adapters.miles.models.deepseek_v4.expert_clone import contract_from_config
     from yeto.rl.export import derive_peft_lora_specs
-    from yeto.rl.learner import megatron_adapter_targets
+    from yeto.rl.adapters.miles.island_entry import megatron_adapter_targets
     from transformers import AutoConfig
 
     bridge = AutoBridge.from_hf_pretrained(args.model, trust_remote_code=True)

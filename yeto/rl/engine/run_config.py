@@ -4,7 +4,7 @@
 model provider into an immutable :class:`RLRunConfig`.  All validation and
 derivation that does not depend on a particular RL engine lives here; each
 engine then owns a pure translation of the config into its own launch
-arguments (legacy: ``yeto.rl.learner.build_miles_argv``; ports:
+arguments (legacy: ``yeto.rl.adapters.miles.island_entry.build_miles_argv``; ports:
 ``miles_adapter/config.py``).  Both paths start from the same resolved config,
 so equivalence runs are guaranteed identical inputs.
 

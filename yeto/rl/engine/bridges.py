@@ -2,7 +2,7 @@
 
 The strict-avg and decoupled protocol state machines are reused unchanged:
 ``yeto.rl.bridge.StrictRlBridge`` and ``yeto.rl.decoupled.DecoupledRlBridge``.
-What this module replaces is ``yeto.rl.miles.MilesPolicySync`` /
+What this module replaces is ``yeto.rl.adapters.miles.legacy.engine.MilesPolicySync`` /
 ``DecoupledMilesPolicySync``: every call into Miles internals (actor
 ``apply_trainable_state``/``export_trainable_state``, SGLang
 ``update_weight_version``) goes through the ``PolicyState`` port (via

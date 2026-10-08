@@ -39,7 +39,7 @@ from yeto.rl.core import (
     policy_hash,
     tensors_from_flat,
 )
-from yeto.rl.learner import parse_args as parse_learner_args
+from yeto.rl.adapters.miles.island_entry import parse_args as parse_learner_args
 from yeto.rl.ssh_harness import (
     HarnessError,
     _container_name,
@@ -2403,11 +2403,11 @@ def test_syncer_and_node_scripts_use_fixed_roster_and_ray_topology():
     assert "--include-dashboard=true" in head
     assert 'HEAD_IP="$NODE_IP"' in head
     assert '--node-ip-address="$NODE_IP"' in head
-    assert "python3 -m yeto.rl.learner" in head
+    assert "python3 -m yeto.rl.adapters.miles.island_entry" in head
     assert "--gpus '\"device=0,1,2,3\"'" in head
     assert "ray start --address=a0:6379" in worker
     assert '--node-ip-address="$NODE_IP"' in worker
-    assert "python3 -m yeto.rl.learner" not in worker
+    assert "python3 -m yeto.rl.adapters.miles.island_entry" not in worker
     setup = _host_setup_script(plan, 4)
     assert SGLANG_REPOSITORY in setup
     assert SGLANG_COMMIT in setup

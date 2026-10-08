@@ -19,7 +19,7 @@ LEGACY_SOURCE_COMMIT = "5bfc011"
 
 # Build-time default backend profile of the Codex OpenEnv adapter.  This is the
 # value the image line bakes into the container as
-# ``YETO_CODEX_OPENENV_BACKEND_PROFILE`` (``yeto/rl/__init__.py``
+# ``YETO_CODEX_OPENENV_BACKEND_PROFILE`` (``yeto/rl/adapters/miles/pins.py``
 # CODEX_OPENENV_IDENTITY_ENV) and is a *record of the image build*, not the
 # profile a launch must use.  rl-fn-codex-rollout 1.0: the runtime profile is
 # declared per launch (``--codex-backend-profile``) and only has to belong to

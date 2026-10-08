@@ -126,7 +126,7 @@ def _legacy_policy_token(args: Any) -> str | None:
     version = getattr(args, "yeto_rl_policy_version", None)
     if version is None:
         return None
-    from yeto.rl.miles import _policy_token_for_rollout
+    from yeto.rl.adapters.miles.legacy.engine import _policy_token_for_rollout
 
     return _policy_token_for_rollout(args, version)
 
