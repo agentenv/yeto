@@ -110,6 +110,16 @@
   - **版本边界**：见 hash-migration.md "阶段 5 补"——新旧岛/syncer 不能混用，`YELSRV1` 检查点不能续跑。
   - **未验证**：真机多岛（不上 GPU）；Ray 驱动的岛（本机不跑 Ray，只用假岛）。另：与 PR #134（s17-x1-syncer-modes）试合并无冲突，合并树 cargo test 147 过（139+6+2）。
 
+- [x] 6.2b 严格同步模式下，契约不一致的 HELLO 只拒这一条连接，不再让 syncer 退出（S17 N14，分支 s17-strict-reject，base s17-elastic-identity）。起因：N10 本机握手（`s1-runs/s17-verl-handshake/result.json`）显示 verl 会话里来一个 Miles 岛，syncer 以 `layout_hash_mismatch` 致命退出，等于一个连错的岛能停掉整场。验收：两个 verl 岛同步途中插进一个 Miles 岛，它被拒、错误帧写明双方哈希；syncer 与两个 verl 岛照常完成全部轮次。
+  - 两种情况：
+    - 会话还没建立：第一个 HELLO 定下会话契约，不变。
+    - 会话已建立后来了契约不一致的 HELLO：回 MSG_ERROR（`session mismatch (HELLO refused, session keeps running): expected session_contract_hash=… layout_fingerprint=… dtype=… fragments=…, got …`），只关这条连接；不登记、不顶替同编号的已接纳岛，会话不变。syncer 语义配置（profile）不一致的 HELLO 同样只拒这一条（以前严格模式下也是致命退出）。
+    - 不变的部分：`--resume` 时检查点与第一个 HELLO 对不上仍是致命的 `layout_hash_mismatch`（那是会话本身建不起来）。
+  - 实现：`syncer/src/server.rs` 新 `admit_session`（拆出原来的比较逻辑，拒绝消息带双方哈希），`handle_connection` 去掉严格模式下发 `Event::Fatal` 的分支（参数 `strict_layout` 随之删除）。Python：`yeto/protocol.py` 新 `SessionRejectedError`（按 MSG_ERROR 前缀识别），`SyncerClient.check_health` 把它转成 `StrictRlInvariantError`（metric `layout_hash_mismatch` / `syncer_profile_mismatch`），走现有的严格失败路径：bridge 打 `[yeto-rl-strict-failure]`，进程退出码 1，launcher/modal 按日志里的 `StrictRlInvariantError:` 归为严格失败（确定性配置错误，不当作断线去重连，也不被当成 syncer 崩溃）。客户端收到拒绝后不重连（原本 `_protocol_failed` 就是终态）。
+  - 已验证：`cargo test` 142 过（141 + 新增 `first_hello_establishes_session_and_mismatch_is_refused_without_reset`）。pytest `tests/test_rl_strict_session_reject.py` 2 例：真 Rust syncer（debug 构建，`--max-base-lag 0`，3 轮）+ 两个 verl 身份假岛 + 第 1 轮后插进的 Miles 身份假岛（子进程，learner id 1）——Miles 岛退出码 1、stderr 有 `StrictRlInvariantError: syncer refused this island` 和双方契约哈希；syncer 不退出，两个 verl 岛完成第 2、3 轮并 FINAL_ACK，syncer 退出码 0，事件带里没有 `rl_strict_failure`；另一例确认其他 MSG_ERROR 仍归为原来的 "syncer connection failed"。连同 protocol_finalization / reconnect / elastic_backend_identity 共 24 过 1 跳过。证据：`s1-runs/s17-strict-reject/pytest.log`、`s1-runs/s17-strict-reject/tmp/test_mismatched_hello_is_refus0/`（syncer.log、miles.stderr、syncer.jsonl）。
+  - 注意：launcher 在固定名单模式下，岛的严格失败仍会让 launcher 停掉整场（`launcher.py` `_strict_failure` → `RuntimeError`）——这是 launcher 现有语义（launcher 自己配错了岛属于配置错误），本次没改；syncer 和其他岛本身不再受影响。`tests/test_rl_integration.py` 的 `_start` 带 `--resume` 而检查点不存在，基线上就起不来（如 `test_terminal_replacement_receives_final_policy` 在 base 上同样失败），新测试自带不带 `--resume` 的 `_start`；那批旧用例没修。
+  - **未验证**：真 verl/Miles 引擎岛（只用 `SyncerClient` 假岛，契约用 N10 结果里的真实身份哈希）；完整 bridge 进程里打出 `[yeto-rl-strict-failure]` 的那一步（只验证了 `check_health` 抛 `StrictRlInvariantError` 且子进程退出码 1）；真机多岛；Ray 驱动。
+
 ## 7. 阶段 6：硬件层（可与 verl 并行）
 
 - [ ] 7.1 `yeto/hw/device.py` 设备族表（NVIDIA、昇腾；AMD/TPU/摩尔线程预留行标"未核实"），以 `accel.py:22-30` 为起点；`accel.py` 改读此表（H1、V1）。验收：`accel.py` 现有用法测试通过；表单测。
