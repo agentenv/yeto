@@ -49,7 +49,7 @@ from typing import Any
 
 from .execution_profile import ExecutionProfile, ReadinessSnapshot, quiescent_cut_blockers
 from .driver import RebuildNotStarted
-from .journal import EpochState, Journal, read_epochs, read_journal
+from .journal import EpochState, Journal, read_epochs, read_journal, replay_pool
 from .pause_audit import DEFAULT_MARGIN, DEFAULT_QUORUM_TIMEOUT_S, PAUSABLE_PHASE, pause_decision
 from .ports import ElasticRolloutPool, MemberPublisher, PlacementDescription, ReconfigurablePlacement
 try:  # E3 (4.7) module; absent until infra-e3 is integrated -> trainer edges refused
@@ -253,6 +253,21 @@ class IslandStatus:
     last_result: Mapping[str, Any] | None = None
     recovery: Mapping[str, Any] | None = None  # 3.7 restart recovery awaiting confirm
     incarnation: Mapping[str, Any] | None = None
+    # rl-inter-island-scheduling (design Q1): scheduling fields. Filled only
+    # from an existing source (journal pool_* records, scheduling_probe); None
+    # otherwise -- never estimated.
+    pool_epoch: int | None = None
+    round_wall_s: float | None = None
+    tok_per_s: float | None = None
+    staleness_outer: int | None = None
+    pause_budget_s: float | None = None
+    cloud: str | None = None
+    region: str | None = None
+    price_per_hour: float | None = None
+
+
+SCHEDULING_FIELDS = ("round_wall_s", "tok_per_s", "staleness_outer", "pause_budget_s",
+                     "cloud", "region", "price_per_hour")
 
 
 class IslandController:
@@ -282,10 +297,19 @@ class IslandController:
         node_probe: Callable[[], Any] | None = None,
         layout: Mapping[str, Any] | None = None,
         checkpoint_store: str | Path | None = None,
+        scheduling_probe: Callable[[], Mapping[str, Any]] | None = None,
+        island_scheduling: str = "legacy",
+        pause_advice_source: Callable[[], Any] | None = None,
     ) -> None:
         if initial_config not in configs:
             raise Rejected(f"initial config {initial_config!r} is unknown")
         self.state_dir = Path(state_dir).expanduser()
+        self.scheduling_probe = scheduling_probe
+        from .island_ledger import parse_mode
+        self.island_scheduling = parse_mode(island_scheduling)
+        # rl-inter-island-scheduling 0.9: advice from the coordinator (lease
+        # budget / veto). Consulted only in elastic mode; legacy ignores it.
+        self.pause_advice_source = pause_advice_source
         self.configs = dict(configs)
         self.initial_config = initial_config
         self.attestation = attestation
@@ -1201,7 +1225,19 @@ class IslandController:
                 "recovery_id": self.recovery_pending["recovery_id"],
                 "members": sorted(self.recovery_pending["members"])},
             incarnation=dict(self.incarnation),
+            pool_epoch=replay_pool(self.journal.records, self.island_scheduling).pool_epoch,
+            **self._scheduling_fields(),
         )
+
+    def _scheduling_fields(self) -> dict[str, Any]:
+        if self.scheduling_probe is None or self.island_scheduling.value == "legacy":
+            return {}
+        try:
+            raw = dict(self.scheduling_probe() or {})
+        except Exception:  # a broken probe must not break a read-only inspect
+            logging.getLogger(__name__).warning("scheduling_probe failed; scheduling fields left None", exc_info=True)
+            return {}
+        return {k: raw[k] for k in SCHEDULING_FIELDS if raw.get(k) is not None}
 
     def status(self, request_id: str) -> dict[str, Any]:
         return request_status(self.journal.records, request_id)
@@ -1269,11 +1305,21 @@ class IslandController:
         return replace(plan, expected_pause_s=pause_s, pause_budget_s=decision.budget_s)
 
     def _pause_decision(self, outer_phase: str, pause_s: float) -> Any:
-        return pause_decision(
+        local = pause_decision(
             self.profile, outer_phase=outer_phase, expected_pause_s=pause_s,
             budget_mode=self.budget_mode, quorum_timeout_s=self.quorum_timeout_s,
             margin=self.pause_margin, idle_flow_timeout_s=self.idle_flow_timeout_s,
         )
+        if self.island_scheduling.value != "elastic" or self.pause_advice_source is None:
+            return local
+        from .pause_advice import merge_pause
+        try:
+            advice = list(self.pause_advice_source() or ())
+        except Exception as exc:  # unreadable advice: fail closed (advice only tightens)
+            from .pause_audit import PauseDecision
+            return PauseDecision(False, f"pause advice unavailable: {exc}", None,
+                                 local.stalls_peers, local.profile_hash)
+        return merge_pause(local, advice, now=self._wall(), expected_pause_s=pause_s)
 
     def enter_finalization(self, *, rollout_id: int) -> list[str]:
         """3.8/X6: the run is finalizing (stop boundary reached). Cancel the

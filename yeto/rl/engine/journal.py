@@ -231,3 +231,69 @@ class Journal:
         _fsync_dir(self.dir)
         self.epochs = new
         return new
+
+
+# -- pool_* events (rl-inter-island-scheduling, f-design §1.4) ---------------------
+POOL_TX_KINDS = ("pool_join", "pool_leave", "pool_epoch")
+POOL_KIND = "pool"
+
+
+@dataclass(frozen=True)
+class PoolState:
+    pool_epoch: int | None = None
+    members: tuple[str, ...] = ()
+    membership_epoch: int | None = None
+
+
+def _is_legacy(mode) -> bool:
+    return mode is None or str(getattr(mode, "value", mode)) == "legacy"
+
+
+def replay_pool(records, mode="legacy") -> PoolState:
+    """Rebuild (pool_epoch, members) from journal records; non-pool records are ignored.
+
+    In legacy island-scheduling mode pool records are ignored entirely (empty state).
+    """
+    if _is_legacy(mode):
+        return PoolState()
+    epoch: int | None = None
+    mepoch: int | None = None
+    members: set[str] = set()
+    for r in records:
+        if r.get("kind") != POOL_KIND:
+            continue
+        tx = r.get("tx_kind")
+        if tx == "pool_join":
+            members.add(r["island_id"])
+        elif tx == "pool_leave":
+            members.discard(r["island_id"])
+        elif tx != "pool_epoch":
+            raise JournalCorrupt(f"unknown pool tx_kind {tx!r} at seq {r.get('seq')}")
+        if r.get("pool_epoch") is not None:
+            epoch = int(r["pool_epoch"])
+        if r.get("membership_epoch") is not None:
+            mepoch = int(r["membership_epoch"])
+    return PoolState(epoch, tuple(sorted(members)), mepoch)
+
+
+def append_pool_event(journal: "Journal", tx_kind: str, *, pool_epoch: int,
+                      island_id: str | None = None, membership_epoch: int | None = None,
+                      mode="legacy", **fields: Any) -> dict[str, Any]:
+    """Durably append one pool_* record; pool_epoch may not go backwards.
+
+    Refused in legacy island-scheduling mode (pool records are read-only there).
+    """
+    if _is_legacy(mode):
+        raise JournalError("pool_* records are not written in legacy island-scheduling mode")
+    if tx_kind not in POOL_TX_KINDS:
+        raise JournalError(f"tx_kind {tx_kind!r} is not one of {POOL_TX_KINDS}")
+    if tx_kind in ("pool_join", "pool_leave") and not island_id:
+        raise JournalError(f"{tx_kind} needs island_id")
+    current = replay_pool(journal.records, "elastic")
+    if current.pool_epoch is not None and pool_epoch < current.pool_epoch:
+        raise EpochConflict(f"pool_epoch may not go backwards ({current.pool_epoch} -> {pool_epoch})")
+    if (membership_epoch is not None and current.membership_epoch is not None
+            and membership_epoch < current.membership_epoch):
+        raise EpochConflict("membership_epoch may not go backwards")
+    return journal.append(POOL_KIND, tx_kind=tx_kind, pool_epoch=pool_epoch,
+                          island_id=island_id, membership_epoch=membership_epoch, **fields)
