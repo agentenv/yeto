@@ -3470,6 +3470,33 @@ def codex_harness_launch(args, environ=None) -> tuple[str, dict[str, str], dict[
     return flags, envs, mounts
 
 
+HEAD_CODEX_BUNDLE_PATH = "~/yeto-codex-bundle"
+
+
+def codex_head_staging(args, environ=None) -> tuple[dict[str, str], dict[str, str]]:
+    """(head file_mounts, head-job secret envs) for a signed Codex run under
+    ``--controller head`` (S17 M1).
+
+    The head VM replays the launch and builds every island itself, so it needs
+    what ``codex_harness_launch`` reads on the submitter: the bundle directory
+    (staged at ``HEAD_CODEX_BUNDLE_PATH``; the caller points
+    ``args.codex_bundle_dir`` there) and the harness env (provider, TB2 knobs,
+    reward HMAC key, Modal token).  The env goes as sky secrets (redacted),
+    never as plain envs.  Returns ({}, {}) for a non-Codex run; fails closed
+    exactly like ``codex_harness_launch`` (attests the local bundle first).
+    """
+    environ = os.environ if environ is None else environ
+    if codex_harness_launch(args, environ) is None:
+        return {}, {}
+    bundle_dir = getattr(args, "codex_bundle_dir", None) or environ.get(CODEX_BUNDLE_DIR_ENV)
+    mounts = {HEAD_CODEX_BUNDLE_PATH: str(Path(bundle_dir).expanduser().resolve())}
+    secrets = {name: environ[name] for name in (HARNESS_PREFLIGHT_ENV, *HARNESS_PASSTHROUGH_ENV)
+               if environ.get(name)}
+    secrets.update({name: value for name, value in environ.items()
+                    if name.startswith(HARNESS_PASSTHROUGH_ENV_PREFIXES) and value})
+    return mounts, secrets
+
+
 def _json_compact(value) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
