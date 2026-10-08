@@ -108,7 +108,7 @@
   - 已验证：`cargo test` 141 过（基线 139 + 黄金帧/旧帧拒绝 1 + 服务端钉身份/续跑/旧检查点拒绝 1）；Python 单测（`tests/test_rl_elastic_backend_identity.py` 新增 5 例，`test_rl_inter_island_elastic_client.py` 黄金帧 15 更新）；elastic/inter_island/bridge/decoupled 相关 312 例全过。真 Rust syncer（release 构建）本地三假岛端到端：Miles 岛 1 加入并播种，verl 岛 2 被拒（错误里有双方哈希），Miles 岛 3 正常加入，岛 1、3 合并一步得 2.0（`test_real_syncer_refuses_verl_island_in_miles_session`，需 `YETO_TEST_ELASTIC_SYNCER`）。
   - 本机 cargo：`cargo` 在 `~/.cargo/bin`，非登录 shell 的 PATH 里没有，直接敲 `cargo` 报 command not found；`export PATH=$HOME/.cargo/bin:$PATH` 后基线 5fac05f7 `cargo build` 成功、`cargo test` 139 过（N6 的 145 = 139 + 它 PR #134 加的 6 例）。所以 6.2 记录里的"本机 cargo build 在基线就失败"实为找不到 cargo，不是代码编不过。
   - **版本边界**：见 hash-migration.md "阶段 5 补"——新旧岛/syncer 不能混用，`YELSRV1` 检查点不能续跑。
-  - **未验证**：真机多岛（不上 GPU）；Ray 驱动的岛（本机不跑 Ray，只用假岛）；与 PR #134 合并后的 cargo test（两边改动不重叠，未实际合并跑）。
+  - **未验证**：真机多岛（不上 GPU）；Ray 驱动的岛（本机不跑 Ray，只用假岛）。另：与 PR #134（s17-x1-syncer-modes）试合并无冲突，合并树 cargo test 147 过（139+6+2）。
 
 ## 7. 阶段 6：硬件层（可与 verl 并行）
 
