@@ -351,8 +351,10 @@ def required_pin_updates() -> dict[str, Any]:
         "SECRLENV_AGENT": "yeto.rl.harness.codex.agent.run",
         "SECRLENV_REWARD": "yeto.rl.harness.codex.reward:reward_func",
         "SECRLENV_GROUP_FILTER": "yeto.rl.harness.codex.reward.check_group",
-        "SECRLENV_GENERATE": "yeto.rl.harness.codex.generate.generate",
-        "SECRLENV_GENERATE_SHA256": sha("generate.py"),
+        "SECRLENV_GENERATE": "yeto.rl.adapters.miles.harness_glue.codex_generate.generate",
+        "SECRLENV_GENERATE_SHA256": hashlib.sha256(  # decoupling 5.7: glue lives in the adapter
+            (here.parents[1] / "adapters" / "miles" / "harness_glue" / "codex_generate.py").read_bytes()
+        ).hexdigest(),
         "CODEX_HARNESS_AGENT": "yeto.rl.harness.codex.codex_harness_agent.run",
         "CODEX_HARNESS_AGENT_PATH": "yeto/rl/harness/codex/codex_harness_agent.py",
         "CODEX_HARNESS_AGENT_SHA256": sha("codex_harness_agent.py"),

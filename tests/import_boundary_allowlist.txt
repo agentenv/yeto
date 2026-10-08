@@ -17,9 +17,6 @@ yeto/rl/teacher_forcing.py	yeto.rl.adapters	# A5 :129 _policy_token_for_rollout�
 yeto/rl/harness/codex/reward.py	miles	# R4 :159,222 Sample.Status / DynamicFilterOutput
 yeto/rl/harness/codex/reward.py	yeto.rl.adapters	# R4 :244,288 SecRLEnv 旧版引擎清理（原 yeto.rl.miles，阶段 4 随 legacy 搬家，条目改名不增）
 yeto/rl/harness/codex/tbench_reward.py	miles	# R5 :32,101
-yeto/rl/harness/codex/generate.py	miles	# R6 :67,113 agentic_tool_call.generate
-yeto/rl/harness/codex/codex_openenv_generate.py	miles	# R7 :52,64,130
-yeto/rl/tool_wait_workload.py	miles	# R14 :72-73
 yeto/rl/harness/codex/tb2_provider.py	modal	# 审计未列（扫描新发现）：:362,368,679 tb2 环境用 Modal 沙箱；云层接口时再定归属
 #
 # --- 奖励与过滤（R1-R3）

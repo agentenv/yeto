@@ -66,7 +66,7 @@ def test_ir1_agent_flags_pass_through_with_agentic_generate():
     ("custom_agent_function_path", "a.b.c"),
     ("agent_max_seq_len", 4096),
 ])
-@pytest.mark.parametrize("generate", [None, "yeto.rl.tool_wait_workload.generate"])
+@pytest.mark.parametrize("generate", [None, "yeto.rl.adapters.miles.harness_glue.tool_wait.generate"])
 def test_ir1_agent_flags_need_agentic_generate(field, value, generate):
     c = sub(make_config(), "agent", custom_generate_function_path=generate, **{field: value})
     with pytest.raises(cfg.UnmappedConfigError) as err:

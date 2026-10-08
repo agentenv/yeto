@@ -322,7 +322,7 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     rl.add_argument("--rl-test-tool-delay-s", type=float, default=None, metavar="S",
                     help="ports, TEST ONLY: every training trajectory waits S seconds on a fake "
                     "tool call (needs --custom-generate-function-path "
-                    "yeto.rl.tool_wait_workload.generate); off by default")
+                    "yeto.rl.adapters.miles.harness_glue.tool_wait.generate); off by default")
     rl.add_argument("--rl-elastic-state-dir", default=None, metavar="ISLAND_PATH",
                     help="--rl-elastic: controller journal/ledger/cut dir ON THE ISLAND (e.g. a "
                     "persistent volume mount); default ~/yeto-rl/elastic-state")

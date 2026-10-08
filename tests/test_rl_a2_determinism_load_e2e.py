@@ -162,7 +162,7 @@ def test_cli_deterministic_trainer_reaches_every_ray_worker_with_the_te_switch(
 
 
 # ------------------------------------------------------------------ A2+ / 1.7 load samples
-TOOL = ("--custom-generate-function-path", "yeto.rl.tool_wait_workload.generate",
+TOOL = ("--custom-generate-function-path", "yeto.rl.adapters.miles.harness_glue.tool_wait.generate",
         "--rl-test-tool-delay-s", "5", "--rl-observe-timeline")
 
 

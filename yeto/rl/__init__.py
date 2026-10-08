@@ -44,9 +44,10 @@ SECRLENV_AGENT_SHA256 = (
 SECRLENV_AGENT = "yeto.rl.harness.codex.agent.run"
 SECRLENV_REWARD = "yeto.rl.harness.codex.reward:reward_func"
 SECRLENV_GROUP_FILTER = "yeto.rl.harness.codex.reward.check_group"
-SECRLENV_GENERATE = "yeto.rl.harness.codex.generate.generate"
+# Moved to the Miles adapter (yeto-framework-decoupling 5.7); was yeto.rl.harness.codex.generate.
+SECRLENV_GENERATE = "yeto.rl.adapters.miles.harness_glue.codex_generate.generate"
 SECRLENV_GENERATE_SHA256 = (
-    "1c79b0e678b8681b5bd6221b5a4bbc6adbe7a1413b688e248cb930eb3e456cca"
+    "1df1ded9c6c81404a6101e1821aefc3129d207a3150241980306d6494ee4a2be"
 )
 SECRLENV_ZERO_VARIANCE_REPLACEMENTS = 0
 SECRLENV_INFRASTRUCTURE_REPLACEMENTS = 1

@@ -201,7 +201,7 @@ def test_declare_cells_needs_names(tmp_path):
 
 
 # ---------------------------------------------------------------- item 4: tool-wait workload
-TOOL = ("--custom-generate-function-path", "yeto.rl.tool_wait_workload.generate",
+TOOL = ("--custom-generate-function-path", "yeto.rl.adapters.miles.harness_glue.tool_wait.generate",
         "--rl-test-tool-delay-s", "30")
 
 
@@ -213,7 +213,7 @@ def test_tool_workload_reaches_the_learner_and_every_ray_worker(tmp_path, monkey
 
     run = island_run(BASE + TOOL, monkeypatch)
     args, env = learner_from_run(run, tmp_path / "home")
-    assert args.custom_generate_function_path == "yeto.rl.tool_wait_workload.generate"
+    assert args.custom_generate_function_path == "yeto.rl.adapters.miles.harness_glue.tool_wait.generate"
     assert env[TOOL_DELAY_ENV] == "30.0" and tool_delay_s(env) == 30.0
     seen = {}
     ray = SimpleNamespace(init=lambda **kw: seen.update(kw), is_initialized=lambda: False)

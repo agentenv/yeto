@@ -48,10 +48,15 @@ def expected_policy_version(input_sample: Any) -> str | None:
         return str(meta[EXPECTED_VERSION_KEY]) if isinstance(meta, dict) and meta.get(EXPECTED_VERSION_KEY) else None
 
 
-def _load_upstream() -> Callable[[Any], Awaitable[Any]]:
-    from miles.rollout.generate_hub.agentic_tool_call import generate as upstream
+def _glue():
+    """Backend glue: upstream generate, aborted status, session collection (decoupling 5.7)."""
+    from yeto.rl.engine import backends
 
-    return upstream
+    return backends.module("harness_glue")
+
+
+def _load_upstream() -> Callable[[Any], Awaitable[Any]]:
+    return _glue().load_agentic_upstream()
 
 
 def _samples_of(output: Any) -> list[Any]:
@@ -61,10 +66,8 @@ def _samples_of(output: Any) -> list[Any]:
 
 def _mark_aborted(sample: Any, reason: str) -> None:
     try:
-        from miles.utils.types import Sample
-
-        sample.status = Sample.Status.ABORTED
-    except ImportError:
+        sample.status = _glue().aborted_status()
+    except ImportError:  # backend not installed (CPU tests)
         sample.status = "ABORTED"
     metadata = sample.metadata if isinstance(getattr(sample, "metadata", None), dict) else {}
     metadata.pop("tbench_trusted_outcome", None)
@@ -126,20 +129,8 @@ SegmentCollector = Callable[[Any, str, str], Awaitable[tuple[list[Any], dict[str
 
 
 async def collect_segment_session(input: Any, router: str, session_id: str) -> tuple[list[Any], dict[str, Any]]:
-    """Collect (and delete) one extra session exactly like upstream's tracer does."""
-    from miles.rollout.generate_utils.openai_endpoint_utils import (
-        COMPUTED_FIELDS,
-        ROLLOUT_SAMPLING_MASK_FIELDS,
-        OpenAIEndpointTracer,
-        should_return_sampling_mask,
-    )
-
-    fields = COMPUTED_FIELDS
-    if should_return_sampling_mask(input.args, input.sampling_params, evaluation=input.evaluation):
-        fields += ROLLOUT_SAMPLING_MASK_FIELDS
-    tracer = OpenAIEndpointTracer(router_url=router, session_id=session_id, samples_wire_fields=fields)
-    reply = await tracer.collect_samples(input.sample, max_seq_len=getattr(input.args, "max_seq_len", None))
-    return list(reply.samples), dict(reply.session_metadata or {})
+    """Collect (and delete) one extra session exactly like upstream's tracer does (backend glue)."""
+    return await _glue().collect_segment_session(input, router, session_id)
 
 
 def _optimized_tokens(sample: Any) -> int:
