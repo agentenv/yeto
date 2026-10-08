@@ -201,6 +201,9 @@ def parse_args(argv=None):
     # rl-multinode-island Q6: accept a changed GPU uuid pool (rebind) at startup
     parser.add_argument("--rl-elastic-accept-rebind", action="store_true")
     # 3.8 strict pause budget inputs (defaults: syncer 900 s, margin 0.5).
+    # rl-inter-island-scheduling 0.13 (launcher forwards only "elastic")
+    parser.add_argument("--rl-island-scheduling", choices=("legacy", "elastic"), default="legacy")
+    parser.add_argument("--rl-syncer-epoch", type=int, default=0)
     parser.add_argument("--rl-elastic-quorum-timeout-s", type=float, default=None)
     parser.add_argument("--rl-elastic-idle-flow-timeout-s", type=float, default=None)
     parser.add_argument("--rl-elastic-pause-margin", type=float, default=None)
@@ -468,6 +471,8 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
         miles_args.yeto_rl_elastic["accept_rebind"] = True
     if getattr(args, "rl_elastic_checkpoint_store", None):
         miles_args.yeto_rl_elastic["checkpoint_store"] = str(args.rl_elastic_checkpoint_store)
+    if getattr(args, "rl_island_scheduling", "legacy") == "elastic":
+        miles_args.yeto_rl_elastic["island_scheduling"] = "elastic"
     for name in _ELASTIC_PAUSE:
         if getattr(args, name, None) is not None:
             miles_args.yeto_rl_elastic[name.removeprefix("rl_elastic_")] = float(getattr(args, name))
@@ -2545,6 +2550,10 @@ def run_miles(
                 audit_dir=args.audit_dir,
                 send_initial_params=not getattr(args, "eval_only", False),
             )
+            if getattr(args, "rl_island_scheduling", "legacy") == "elastic":
+                # rl-inter-island-scheduling 0.15 (legacy sets nothing)
+                miles_args.yeto_rl_island_scheduling = "elastic"
+                miles_args.yeto_rl_syncer_epoch = int(getattr(args, "rl_syncer_epoch", 0))
             # 4.2.1: the critic syncer (second channel); its BridgeConfig needs
             # the critic specs/layout, built by build_sync once Miles created it.
             miles_args.yeto_rl_critic_syncer_addr = (
@@ -2915,5 +2924,24 @@ def main(argv=None) -> None:
     )
 
 
+def _rejoin_exhausted(error: BaseException | None) -> bool:
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if type(error).__name__ == "ElasticRejoinError":
+            return True
+        error = error.__cause__ or error.__context__
+    return False
+
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BaseException as error:  # noqa: BLE001
+        if _rejoin_exhausted(error):
+            # 0.22: the island gave up re-joining the elastic pool (not 4/6).
+            from .elastic_client import ELASTIC_REJOIN_FAILED_EXIT
+
+            print(f"[yeto-island] elastic re-JOIN exhausted: {error}", file=sys.stderr)
+            raise SystemExit(ELASTIC_REJOIN_FAILED_EXIT) from error
+        raise

@@ -132,6 +132,7 @@ class TapeCollector:
         self.count = 0
         self.discarded = 0
         self.finalized = False
+        self.left_pool = False  # 0.27: elastic_left_pool seen (re-JOIN exhausted)
         self.closed = False
 
     @property
@@ -178,8 +179,11 @@ class TapeCollector:
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(raw + "\n")
         self.count += 1
-        if json.loads(raw).get("event") == FINALIZED_EVENT:
+        event = json.loads(raw).get("event")
+        if event == FINALIZED_EVENT:
             self.finalized = True
+        elif event == "elastic_left_pool":
+            self.left_pool = True
 
     def recover_from_file(self, tape_file) -> bool:
         """Complete the tape from the island's own tape file (raw tape lines, the

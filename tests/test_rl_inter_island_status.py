@@ -155,3 +155,59 @@ def test_slow_island_advice_is_suggestion_only():
     assert merge_pause(ok, adv, now=1.0) == ok  # does not change any pause decision
     assert slow_island_advice({"a": 1.0, "b": 1.5}, now=0.0) == []
     assert slow_island_advice({"only": 9.0}, now=0.0) == []
+
+
+# ----------------------------------------------------------------- 0.18 syncer status.json
+def _write_status(d, **over):
+    import json
+
+    raw = {"schema": "yeto.syncer.elastic-status/v1", "syncer_epoch": 4, "membership_epoch": 2,
+           "outer_version": 7, "policy_hash": "ab" * 32, "cap_arrived": 1.0, "cap_total": 2.0,
+           "soft_deadline_remaining_s": 3.0, "pending_count": 1, "carried_over_count": 0,
+           "dropped_uncommitted_count": 0, "sample_index_count": 0,
+           "islands": {"1": {"capacity": 2.5, "joined_at": 0, "catch_up": False,
+                             "round_wall_ema_s": 11.5, "lease_remaining_s": 20.0,
+                             "arrival_history": [True, False], "pending": True,
+                             "carried_over_lag": None}}}
+    raw.update(over)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "status.json").write_text(json.dumps(raw))
+
+
+def test_status_json_fills_inspect(tmp_path):
+    from yeto.rl.engine.island_status import scheduling_probe_from_status
+
+    _write_status(tmp_path / "syncer")
+    probe = scheduling_probe_from_status(tmp_path / "syncer" / "tape.jsonl", island_id=1)  # --event-tape path
+    st = _controller(tmp_path, island_scheduling="elastic", scheduling_probe=probe).inspect()
+    assert (st.capacity, st.round_wall_ema_s, st.lease_remaining_s) == (2.5, 11.5, 20.0)
+    assert st.arrival_history == (True, False) and st.pending is True and st.carried_over_lag is None
+    assert (st.syncer_epoch, st.outer_version, st.policy_hash) == (4, 7, "ab" * 32)
+    assert st.round_wall_s is None  # different field: not estimated from the EMA
+
+
+def test_status_json_missing_wrong_schema_or_unknown_island(tmp_path):
+    from yeto.rl.engine.island_status import read_syncer_status, scheduling_probe_from_status
+
+    d = tmp_path / "syncer"
+    assert read_syncer_status(d / "status.json") is None
+    probe = scheduling_probe_from_status(d, island_id=1)
+    st = _controller(tmp_path, island_scheduling="elastic", scheduling_probe=probe).inspect()
+    assert all(getattr(st, f) is None for f in SCHEDULING_FIELDS)
+    _write_status(d, schema="yeto.syncer.elastic-status/v0")
+    assert read_syncer_status(d) is None and probe() == {}
+    (d / "status.json").write_text("{half")
+    assert read_syncer_status(d) is None
+    _write_status(d)
+    other = scheduling_probe_from_status(d, island_id=9)()
+    assert "capacity" not in other and other["syncer_epoch"] == 4
+
+
+def test_status_json_not_read_under_legacy(tmp_path):
+    calls = []
+
+    def probe():
+        calls.append(1)
+        return {"capacity": 1.0}
+    st = _controller(tmp_path, scheduling_probe=probe).inspect()  # default legacy
+    assert st.capacity is None and calls == []

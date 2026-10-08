@@ -46,6 +46,9 @@ def build_elastic(
     trainer_edges: Any = None,
     max_recovery_attempts: int | None = None,
     checkpoint_store: str | Path | None = None,
+    island_scheduling: str = "legacy",
+    syncer_status: str | Path | None = None,
+    island_number: int | None = None,
 ) -> ElasticWiring:
     """``on_watchdog(tx_id, phase)`` runs on the watchdog thread when the absolute
     transaction deadline passes while a step is still blocked. Default
@@ -64,6 +67,7 @@ def build_elastic(
     from yeto.rl.elastic_benchmark.capabilities import load_attestation, parse_configs
 
     from ..controller import CommandInbox, IslandController, Timeouts
+    from ..island_status import scheduling_probe_from_status
     from ..ledger import BatchLedger
 
     if isinstance(on_watchdog, str) and on_watchdog != "kill-target-generation":
@@ -87,6 +91,13 @@ def build_elastic(
         **({} if max_recovery_attempts is None else {"max_recovery_attempts": int(max_recovery_attempts)}),
         # rl-multinode-island Q4 (C5): --rl-elastic-checkpoint-store (None = node0-local)
         **({} if not checkpoint_store else {"checkpoint_store": checkpoint_store}),
+        # rl-inter-island-scheduling 0.13 (--rl-island-scheduling, default legacy)
+        island_scheduling=island_scheduling,
+        # 0.18: scheduling fields from the syncer's status.json (elastic only;
+        # the controller never calls the probe under legacy)
+        **({"scheduling_probe": scheduling_probe_from_status(syncer_status, island_id=island_number)}
+           if syncer_status is not None and island_number is not None and island_scheduling == "elastic"
+           else {}),
         # 3.8: the strict pause budget is min(margin x the syncer's
         # --quorum-timeout-s, measured idle-flow timeout); None keeps the
         # audited defaults (syncer default 900 s, margin 0.5).

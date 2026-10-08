@@ -128,6 +128,8 @@ IslandStatus 是否够表达"可被调度"：不够。本 change 增加 Optional
 - 仅 elastic 编入的参数：`quorum_theta`（θ，到齐算力比例门槛）、`carry_gamma`（γ，迟到增量每晚一步的折扣）、`soft_deadline_s`（软截止秒数）。
 - 消息里的任期字段：`syncer_epoch`（u64，syncer 每次重启加 1，用于拒收旧实例的消息）。
 Python 侧 `island_ledger.contract_fields(mode, theta=, gamma=, soft_deadline_s=)` 按这些名字输出。
+- 契约哈希字节（与 syncer `elastic.rs::encode_contract` 一致，小端）：legacy 不追加任何字节（原哈希不变）；elastic 在原语义配置编码末尾追加 `"yeto-syncer-island-scheduling-v1\0"` | u8 长度 + `"island_scheduling_mode"` | u8 长度 + `"elastic"` | f64 quorum_theta | f64 carry_gamma | u64 soft_deadline_s | u32 q_min | u32 max_carry_lag。Python 侧在 `yeto/syncer_profile.py` 实现，黄金值见 progress.md。
+- syncer 命令行（launcher 生成）：elastic 时追加 `--island-scheduling-mode elastic --quorum-theta --carry-gamma --soft-deadline-s --q-min --max-carry-lag`；岛间消息校验密钥（HMAC，用共享密钥给消息签名以防伪造）通过环境变量 `YETO_ISLAND_HMAC_KEY` 下发：launcher 从启动环境读取，在 syncer 命令前 `export`，不走命令行参数以免进入 shell 历史；elastic 缺少该变量时 launcher 拒绝启动。legacy 下命令行与原来逐字相同。
 
 Python 侧现状：`island_ledger.IslandSchedulingMode`（默认 LEGACY）、`CrossIslandLedger(mode=...)`、`journal.append_pool_event/replay_pool(mode=...)`（默认 legacy）、`IslandController(island_scheduling=...)`、`run_fake_islands(mode=...)` 均已按模式分支；launcher/driver 的命令行参数尚未接线（tasks 0.13）。
 
@@ -141,6 +143,14 @@ Python 侧现状：`island_ledger.IslandSchedulingMode`（默认 LEGACY）、`Cr
 索引字段（`yeto/rl/engine/sample_pool.py: SampleIndexEntry`，格式名 `yeto.rl.sample-index/v1`）：island_id、outer_version、inner_step、policy_hash、group_id、prompt_id、n、uri（只允许 `s3://`、`modal-volume://`、`nebius-os://`）、size_bytes、sha256、has_behavior_logprob（是否带产生时的对数概率）、advantage_included（必须为真）、created_at。
 约束：同一个 group_id 只能来自一个岛；同一组重复登记内容必须相同。`SamplePoolIndex.select` 按 syncer 记录的判定筛选，旧版本优先；`prune_below` 清掉过旧的索引。
 driver 接口：`CrossIslandSampleSource.fetch(selected)`（只定义形状，未实现下载与接入 batch）。legacy 模式下判定一律拒收跨岛样本，因此 select 结果为空。
+
+## 岛侧 elastic 客户端（tasks 0.14）
+
+谁做什么：岛的桥接层在 elastic 下改用 `ElasticRlBridge`（`yeto/rl/bridge.py`，经 `make_island_bridge(..., island_scheduling="elastic")` 选择；legacy 仍是原 `StrictRlBridge`，代码未改动，legacy 也不会导入新模块）。消息编解码在 `yeto/rl/elastic_client.py`，字节布局以 syncer `elastic.rs` 为准：每帧正文首字段是 `syncer_epoch`（u64），末尾 32 字节是 HMAC-SHA256（覆盖消息号 + 正文，密钥取环境变量 `YETO_ISLAND_HMAC_KEY`）。
+
+流程：连上 syncer 发 JOIN（岛号、算力、化身号）→ 收 JOIN_ACK（是否首轮零权重、当前基版本）；syncer 已有基版本时会紧接着发 ELASTIC_BASE；没有时岛发 ELASTIC_INIT 提交初始参数（先到者生效），再等 ELASTIC_BASE。之后每轮：应用基版本 → 本地训练 → 发 DELTA_TENSOR（增量、c_tokens、c_steps）→ 等更新的 ELASTIC_BASE；训练期间基版本已前进则直接用新的，晚到的增量由 syncer 打折扣并入。后台线程每 lease_s/3 发一次心跳（LEASE_HEARTBEAT），退出时发 LEAVE 并停止心跳。以 syncer 的记录为准；收到 MSG_ERROR（例如被 epoch 拒收）时 JOIN 立即失败。
+
+接入（tasks 0.15）：ports 引擎路径由 `entry.build_sync` 按模式选择，elastic 用 `bridges.ElasticAvgSync`（会话接口与 StrictAvgSync 相同，不走 StrictRlBridge 的分片接口）；驱动里的轮次号仍是本岛本地轮次，syncer 的外层版本另行记录（迟到的岛可能看到版本跳跃）。旧的 Miles 桥接路径（`yeto/rl/miles.py`）只支持 legacy，elastic 下启动即报错并提示改用 ports 引擎。syncer 任期号由 launcher `--rl-syncer-epoch` 显式给出（默认 0），同时传给 syncer 的 `--syncer-epoch` 与各岛；syncer 重启后需由操作者把该值加 1 再启动（尚未自动从 syncer 状态读取）。
 
 ## 阶段划分
 
@@ -170,4 +180,11 @@ driver 接口：`CrossIslandSampleSource.fetch(selected)`（只定义形状，�
 
 ## 仍待用户裁定
 
-（无。阶段 1 两岛真机开卡时间另批。）
+1. elastic 模式的参数传输与合并质量：elastic 下参数是一条扁平 f32 向量（新增消息 21 ELASTIC_INIT 提交初始参数、22 DELTA_TENSOR 提交"本地参数减基版本"的增量、23 ELASTIC_BASE 由 syncer 在每次外层合并后广播新基版本），不使用旧路径的分片/多流传输，不做 RDA、ISO、HeLoCo 等合并修正，也不做 q4 线上压缩。首版接受这一差距（只用 Nesterov 外层更新）；**待用户裁定**是否要在 elastic 下对齐 legacy 的合并质量（属两岛内部通信/合并优化，本 change 原定排除）。
+
+（阶段 1 两岛真机开卡时间另批。）
+
+## 阶段 1 真机观察记录（2026-10-08，仅记录，未改）
+- 两岛同一 rollout 的样本批哈希相同：两岛用同一 seed 和同一数据源，一直在训同一批题。legacy 模式同样如此（证据：run s15-island1b-20261008b 的 trained_sample_ids_sha256）。是否按岛错开数据切片（例如按岛号偏移或分片），待用户裁定。
+- 1a（legacy/strict）重启后数据游标同样回到 0，已由 tape 证实；按代码推断（未逐条核对 1a 参数）原因与 0.23 同类：没开 `--rl-elastic` 时驱动没有批次账本，`_run` 跳过 `_restore_data_cursor`。0.23 只修了 elastic 路径，legacy 路径未改。
+- rl_local_round 比 rl_round_trained 少一条（run s15-island1b-20261008c，已核实）：岛 0 被杀的那一代在 1791399970 写了 rollout 2 的 rl_round_trained 和 export_push 阶段事件，kill.json 的 kill_unix 为 1791399970.25，进程死在导出参数期间。rl_round_trained 由驱动在优化步完成后立即写入，rl_local_round 则在边界里导出参数（以及测试延迟）之后、提交增量之前才写，所以在这段窗口内被杀，就只有 round_trained 没有 local_round。重启那一代从 rollout 2 重训，两条记录又都齐了。不是数据丢失，也不需要改。

@@ -264,10 +264,22 @@ class IslandStatus:
     cloud: str | None = None
     region: str | None = None
     price_per_hour: float | None = None
+    # 0.18: from the elastic syncer's status.json (island_status.py); None if absent.
+    capacity: float | None = None
+    round_wall_ema_s: float | None = None
+    lease_remaining_s: float | None = None
+    arrival_history: tuple[bool, ...] | None = None
+    pending: bool | None = None
+    carried_over_lag: int | None = None
+    syncer_epoch: int | None = None
+    outer_version: int | None = None
+    policy_hash: str | None = None
 
 
 SCHEDULING_FIELDS = ("round_wall_s", "tok_per_s", "staleness_outer", "pause_budget_s",
-                     "cloud", "region", "price_per_hour")
+                     "cloud", "region", "price_per_hour",
+                     "capacity", "round_wall_ema_s", "lease_remaining_s", "arrival_history",
+                     "pending", "carried_over_lag", "syncer_epoch", "outer_version", "policy_hash")
 
 
 class IslandController:

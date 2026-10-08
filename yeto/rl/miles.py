@@ -1914,6 +1914,9 @@ class MilesPolicySync:
         self.rollout_manager = rollout_manager
         initial = self._canonical_state(await actor_model.export_trainable_state())
         runtime = _BridgeRuntime(initial, self.args)
+        if getattr(self.args, "yeto_rl_island_scheduling", "legacy") == "elastic":
+            raise RuntimeError("--rl-island-scheduling elastic runs on --rl-engine ports "
+                               "(ElasticAvgSync); the legacy Miles bridge path is strict only")
         self.bridge = StrictRlBridge(runtime, self.args.yeto_rl_bridge_config)
         del initial
         self.bridge.start()
