@@ -17,39 +17,34 @@ format component never counts as success).
 
 from __future__ import annotations
 
-REWARD_COMPONENTS_KEY = "yeto_reward_components"
-COMPONENTS = ("correctness", "format")
+# Neutral forms: yeto.rl.rewards.builtin.gdpo_reward / gdpo_correctness_reward
+# (decoupling 3.2); this module keeps the Miles entry points and signatures.
+from yeto.rl.rewards.builtin import GDPO_COMPONENTS as COMPONENTS
+from yeto.rl.rewards.builtin import REWARD_COMPONENTS_KEY
+from yeto.rl.rewards.builtin import gdpo_components, gdpo_correct as _correct
+from yeto.rl.rewards.builtin import gdpo_correctness_result, gdpo_result
 
-
-def _correct(response: str, label) -> bool:
-    from yeto.rl.math_reward import score
-
-    # GSM8K-style labels carry the reasoning before "#### <answer>".
-    truth = None if label is None else str(label).split("####")[-1].strip().replace(",", "")
-    return score(response, truth) == 1.0
+__all__ = ["COMPONENTS", "REWARD_COMPONENTS_KEY", "components", "correctness_reward",
+           "reward_func"]
 
 
 def components(response: str, label) -> dict[str, float]:
-    answer = response.split("</think>")[-1]
-    has_box = "\\boxed{" in answer
-    correct = has_box and _correct(response, label)
-    return {"correctness": 1.0 if correct else 0.0, "format": 1.0 if has_box else 0.0}
+    # ``_correct`` is looked up at call time (tests replace it).
+    return gdpo_components(response, label, correct=_correct)
+
+
+def _apply(sample, result) -> float:
+    if not isinstance(sample.metadata, dict):
+        sample.metadata = {}
+    sample.metadata.update(result.metadata)
+    return result.value
 
 
 async def correctness_reward(args, sample, **kwargs) -> float:
     """Binary {0,1} correctness only (the ``correctness`` component), for MaxRL/MAPO/GSPO/rpp G1."""
 
-    from yeto.rl.math_reward import set_success
-
-    value = components(sample.response or "", sample.label)["correctness"]
-    set_success(sample, value == 1.0)
-    return value
+    return _apply(sample, gdpo_correctness_result(components(sample.response or "", sample.label)))
 
 
 async def reward_func(args, sample, **kwargs) -> float:
-    values = components(sample.response or "", sample.label)
-    if not isinstance(sample.metadata, dict):
-        sample.metadata = {}
-    sample.metadata[REWARD_COMPONENTS_KEY] = values
-    sample.metadata["success"] = values["correctness"] == 1.0
-    return values["correctness"]
+    return _apply(sample, gdpo_result(components(sample.response or "", sample.label)))

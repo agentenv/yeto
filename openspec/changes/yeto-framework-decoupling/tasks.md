@@ -27,16 +27,21 @@
 
 ## 3. 阶段 2：奖励 / 过滤 / harness 中立化
 
-- [ ] 3.1 新建中立轨迹、奖励结果、过滤决定类型与 `yeto/rl/rewards/` 目录（审计 §2）。验收：类型单测；边界检查覆盖新目录。
-- [ ] 3.2 math/gsm8k/length/gdpo 奖励与非零方差过滤器改为中立形式，Miles 包装保留原签名（R2、R3、R15，`math_reward.py:51`、`filters.py:19-62`、`gsm8k_reward.py:35`、`length_reward.py:34`、`algos/gdpo_reward.py:39,49`）；过滤状态由过滤器对象持有。验收：录制样本集上包装前后数值、状态、元数据、保留与原因全部相同（新对照测试）；`test_rl_math_reward` 通过。
-- [ ] 3.3 codex 奖励：验签逻辑不动，"中止"改为返回奖励结果，由 Miles 包装翻成 `Sample.Status.ABORTED` / `DynamicFilterOutput`（R4、R5，`codex/reward.py:159-162,222-224,268`、`tbench_reward.py:32,101`）。验收：codex 奖励现有测试全过；新增"验签失败→中止"对照测试。
+- [x] 3.1 新建中立轨迹、奖励结果、过滤决定类型与 `yeto/rl/rewards/` 目录（审计 §2）。验收：类型单测；边界检查覆盖新目录。
+  - 完成情况：`yeto/rl/rewards/types.py`（`Trajectory`、`RewardResult`、`FilterDecision`）；`yeto/rl/rewards/` 已在边界检查 `CORE_DIRS` 内，`test_rl_neutral_rewards.py` 另查该目录不 import 框架。
+- [x] 3.2 math/gsm8k/length/gdpo 奖励与非零方差过滤器改为中立形式，Miles 包装保留原签名（R2、R3、R15，`math_reward.py:51`、`filters.py:19-62`、`gsm8k_reward.py:35`、`length_reward.py:34`、`algos/gdpo_reward.py:39,49`）；过滤状态由过滤器对象持有。验收：录制样本集上包装前后数值、状态、元数据、保留与原因全部相同（新对照测试）；`test_rl_math_reward` 通过。
+  - 完成情况：中立形式在 `yeto/rl/rewards/builtin.py`；gsm8k/length/gdpo 入口与 `filters.bounded_nonzero_reward_std` 改为薄包装（原模块、原签名），过滤状态由 `BoundedNonzeroStdFilter` 对象持有，`args._yeto_bounded_filter_state` 仍是同一状态字典（Miles 轮次钩子按轮置空的语义保持）。偏差：`math_reward.py` 一字未改——其源码哈希在标准样本 fn_2x8 内，改动即破坏标准样本；中立 `math_reward` 复用其纯函数 `score`。对照：`tests/golden/rewards/miles_entry_points.json` 由改动前代码录制，`test_rl_neutral_rewards.py` 逐项比对相同。
+- [x] 3.3 codex 奖励：验签逻辑不动，"中止"改为返回奖励结果，由 Miles 包装翻成 `Sample.Status.ABORTED` / `DynamicFilterOutput`（R4、R5，`codex/reward.py:159-162,222-224,268`、`tbench_reward.py:32,101`）。验收：codex 奖励现有测试全过；新增"验签失败→中止"对照测试。
+  - 完成情况：`codex/reward.py` 新增中立 `secrlenv_reward`、`tbench_reward.py` 新增中立 `tbench_reward`，"中止"以 `RewardResult(aborted=True)` 返回，原入口翻成 `Sample.Status.ABORTED`；验签逻辑未动。入口模块路径进 argv/标准样本，故留原位，白名单 R4/R5 条目不变（`check_group` 仍用 `DynamicFilterOutput`）。
 - [ ] 3.4 核心轮次元数据/策略令牌/计数器接口，算法扩展与 harness 改用它（A2 `seq_adv.py:438,463`、A5 `teacher_forcing.py:118,129`、A7 `codex_openenv_*`）；Miles 实现仍在 `rollout_meta_hook`。验收：标准样本一致；白名单删对应条目。
 - [ ] 3.5 codex 预检中成员 ID 规则、奖励作用域检查、看板句柄改经核心接口（A6，`preflight.py:35,167,275`）。验收：预检测试通过；白名单删条。
 - [ ] 3.6 Miles 专用 harness 胶水（`codex/generate.py` 全文件、`codex_openenv_generate.py:52,64,130-142` 收样本段、`tool_wait_workload.py:72-73`）移入 Miles 适配层（此时可暂放 `engine/miles_adapter/harness_glue/`，阶段 4 随整体搬），轨迹记账（`:42-127`）留中立。验收：`test_harness_codex_openenv` 等 codex CPU 测试通过。
 - [ ] 3.7 改名不改行为：`codex_harness_agent.py` 中 `miles` 相关名、`compaction_bridge.py` 的 `miles_base_url`、`tb2_provider.py:686-700` 的 `miles_args`（R9–R11）；tape 字段 `tito_session_mismatch` 不改。验收：codex harness 测试通过；标准样本一致。
 - [ ] 3.8 会话服务协议文档 + 测试替身（R8，`codex_openenv_agent_function.py:252-345`；路径以 Miles pin 的 `sessions.py` 为准核实）。验收：用替身跑 codex harness CPU 测试通过；协议文档写明哪些路径已核实。
-- [ ] 3.9 math 判分工具只作测试用：把 Miles `math_utils` 的 `extract_answer/grade_answer_mathd/grade_answer_sympy` 拷到 `tests/vendor/miles_math_utils.py`，文件头写"许可证待核实、不进 main"；运行时 math 奖励仍需装 Miles，白名单保留 `math_reward.py:24`（R1，D9c）。验收：边界检查确认 `yeto/` 下无对该测试文件的 import；无 Miles 环境下用拷贝版跑 math 奖励对照测试，与装 Miles 时逐例相同。
-- [ ] 3.10 用户自定义奖励环境接口（D9b）：中立奖励注册/加载（中立名或 `模块:函数`，源码哈希进插件身份）、Miles 自动包装、示例 `examples/custom_reward/`（最小自定义奖励 + 测试）。验收：示例奖励不 import 任何框架即可经 Miles 包装被调用，结果与直接调用中立函数相同；未注册名报错；源码改动后插件身份哈希变化。
+- [x] 3.9 math 判分工具只作测试用：把 Miles `math_utils` 的 `extract_answer/grade_answer_mathd/grade_answer_sympy` 拷到 `tests/vendor/miles_math_utils.py`，文件头写"许可证待核实、不进 main"；运行时 math 奖励仍需装 Miles，白名单保留 `math_reward.py:24`（R1，D9c）。验收：边界检查确认 `yeto/` 下无对该测试文件的 import；无 Miles 环境下用拷贝版跑 math 奖励对照测试，与装 Miles 时逐例相同。
+  - 完成情况：`tests/vendor/miles_math_utils.py` 为 pin 提交原文件逐字节拷贝（整文件，含三函数及其依赖），文件头注明许可证待核实；本机 Miles 包被屏蔽，"装 Miles 时"以 pin 提交的原文件（从本地 Miles 仓库 git 取出）代替，逐例相同；白名单 `math_reward.py` 条目保留。
+- [x] 3.10 用户自定义奖励环境接口（D9b）：中立奖励注册/加载（中立名或 `模块:函数`，源码哈希进插件身份）、Miles 自动包装、示例 `examples/custom_reward/`（最小自定义奖励 + 测试）。验收：示例奖励不 import 任何框架即可经 Miles 包装被调用，结果与直接调用中立函数相同；未注册名报错；源码改动后插件身份哈希变化。
+  - 完成情况：`yeto/rl/rewards/registry.py`（注册/加载、插件身份含源码 sha256）、`yeto/rl/engine/miles_adapter/rewards.py`（通用 Miles 包装；`miles_custom_rm_path()` 校验并给出 `--custom-rm-path` 值）、`examples/custom_reward/`。未接入命令行/启动器（不新增旗标，保持 argv 不变），启动前校验需调用方调用 `miles_custom_rm_path`。
 
 ## 4. 阶段 3：配置与算法扩展中立化
 

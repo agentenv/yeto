@@ -17,19 +17,21 @@ shorter and properly terminated answers score higher. Launch with
 
 from __future__ import annotations
 
-CHAR_CAP = 1024
+# Neutral form: yeto.rl.rewards.builtin.length_reward (decoupling 3.2); this
+# module keeps the Miles entry point and its signature.
+from yeto.rl.rewards.builtin import LENGTH_CHAR_CAP as CHAR_CAP
+from yeto.rl.rewards.builtin import length_reward, length_score as score
+from yeto.rl.rewards.types import Trajectory
+
+__all__ = ["CHAR_CAP", "score", "reward_func"]
 
 
-def _finished(sample) -> float:
+def _status_text(sample) -> str:
     status = getattr(sample, "status", None)
     name = getattr(status, "name", None) or getattr(status, "value", None) or str(status or "")
-    return 1.0 if str(name).upper().endswith("COMPLETED") else 0.0
-
-
-def score(response: str, finished: float) -> float:
-    n = min(len(response or ""), CHAR_CAP)
-    return 0.5 * float(finished) + 0.5 * (1.0 - n / CHAR_CAP)
+    return str(name)
 
 
 async def reward_func(args, sample, **kwargs) -> float:
-    return score(sample.response or "", _finished(sample))
+    traj = Trajectory(response=sample.response or "", status=_status_text(sample))
+    return length_reward(traj).value
