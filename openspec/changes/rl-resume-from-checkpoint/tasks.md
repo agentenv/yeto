@@ -31,7 +31,7 @@
 - [x] 5.2 用假训练进程（CPU）跑"存 → 杀 → 续"，比对状态哈希
 
 ## 6. GPU 验证（交统一 GPU 表，用户批后再跑；上卡前复核 + 台账预登记）
-- [ ] 6.1 Qwen3-0.6B LoRA，Modal 1×H100：
+- [x] 6.1 Qwen3-0.6B LoRA，Modal 1×H100（S17 G2 已跑，判据 1/2/3/5/6 通过；判据 4 B 通过、C 不通过，见下）：
   - A：不中断 6 轮；A'：同配置再跑一次不中断 6 轮（量噪声基线）；
   - B：3 轮 → 我方停 → 续 3 轮；C：3 轮后在第 4 轮中途用 `modal container stop` 模拟抢占 → 自动续训；
   - 判据：恢复后状态哈希 = 中断前（必须）；续训第 4–6 轮学习率、题号与 A 逐位一致（必须）；loss/reward/梯度范数与 A 的差 ≤ A 与 A' 的差（或开确定性推理后逐位一致）；记录保存/恢复耗时与字节数、卷写速度。
@@ -47,4 +47,9 @@
 - 2.5 说明：信号处理器只写 `preempt-notices/*.json`；Modal 的停止信号能否传到 learner 进程未验证（G2 C 顺带看）。"回收时保存"未实现（默认关，等实测保存时间）。
 - 部分：4.2 只做了 Modal tape 镜像按容器分文件（`.inc<k>`，不覆盖旧容器）；mismatch 目录写法未改（见 design §9）。4.3 只做了 dashboard 数据层。
 - 未做：1.4、2.6、3.3（多岛岛内状态：切点仍只在 LocalOnlySync 上挂；多岛需要每岛切点 + syncer 检查点进 store + 外层版本比对，见 design §4.7、§6）。
-- 6.1：见 `infra-drafts/S17-G2-PRELAUNCH-REVIEW.md` §7（结果）。
+- 6.1（S17 G2，2026-10-08，≈$7.1）：详见 `infra-drafts/S17-G2-PRELAUNCH-REVIEW.md` §7；判读 `evidence/g2/s17-g2-judge.json`（脚本 `evidence/g2/judge.py`，原始数据 `s1-runs/s17-g2-*/`）。
+  - A 与 A' 6 轮逐位相同（噪声 0）。
+  - B（3 轮我方停 → 续 3 轮）：恢复哈希、版本、学习率、题号、reward/loss/grad_norm 与 A **逐位相同**。
+  - C（Modal `container stop` → 改派新容器 → 自动续训）：做了三次（C 停在结束时、C2 停在第 5 轮中途、C3 停在第 4 轮中途并丢弃已训完的 rollout 2）；恢复哈希、版本、学习率、题号逐位相同；但改派容器里续训第一步训练数值差约 2e-4（ppo_kl 3–4e-10，A/B 为 0），之后轨迹分叉 → 判据 4 对 C **不通过**，原因未查明（不是状态没恢复：LoRA 哈希、第一轮生成都相同）。未验证：开 `--rl-deterministic-trainer` 后是否逐位一致。
+  - 实测：切点 142 MB、保存 3.7–5.3 s、v1 commit 3–20 s（一次 162 s）、恢复 8–11 s、改派 12–22 s。
+  - 上卡中修掉的三个问题（A 暴露）：非 elastic 切点缺运行指纹；最后一轮切点不在安全点；learner 进程不能 import Modal 客户端（commit 改走 runner 解释器）。
