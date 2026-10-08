@@ -119,3 +119,7 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
 ### 未验证
 - 新哈希与新插件路径没有真机证据（本轮不上 GPU），由下一次本来要开的卡顺带取得。
 - 需 import Miles 的等价测试（`test_rl_reward_pipeline_equivalence`、`test_rl_seq_adv_miles`、`test_rl_algorithm_flags_upstream`）本机屏蔽未跑。
+
+## C6b 评测岛（分支 s17-eval-island，基于 s17-decouple-p4 f7fe923e，2026-10-08 夜）
+
+只变一处：`yeto/rl/adapters/miles/rollout_meta_hook.py` 加了训练批次按难度分桶（rl-eval-difficulty-buckets 4.1），8 个标准样本里该插件的 `source_sha256` 由 `af10161a148d3059148342896778fec5b915c90ed96258ccab1754f1805cda61` 改为 `605e0ee1e23444cd4710350fe64f59808658605ef0096ccad03d4e7a61585fca`。该哈希不进 `AlgorithmSpec.sha256()`，8 个配置的算法哈希、契约哈希不变；`fake_engine_tapes.json` 逐字节不变。与阶段 5 合并时如两边都改了 rollout_meta_hook，以合并后源码重新生成（`python tests/decoupling_golden.py --write`）。
