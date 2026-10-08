@@ -191,15 +191,22 @@ HOLDOUT_SCHEMA = "yeto-eval-holdout/1"
 
 
 def build_holdout(adapter: BenchmarkAdapter, quotas: dict[str, int | None], *, seed: int, rule: str,
-                  task_ids: Iterable[str] | None = None, exclude: Iterable[str] = ()) -> dict[str, Any]:
+                  task_ids: Iterable[str] | None = None,
+                  exclude: Iterable[str] | dict[str, str] = ()) -> dict[str, Any]:
     """Stratified, reproducible hold-out list in the WP3 D6b JSON shape.
+
+    ``exclude`` removes tasks from the pool *before* stratified sampling (WP3
+    D2: the S15 smoke tasks were trained on).  Pass a mapping ``task_id ->
+    reason`` to record reasons; a plain iterable records ``"excluded"``.  When
+    non-empty the file carries ``excluded: [{task_id, reason}]`` (sorted).
 
     ``quotas`` maps ``eval_bucket`` -> number of tasks (``None`` = all of that
     bucket).  Within a bucket tasks are ranked by sha256(f"{seed}/{task_id}"),
     so the result does not depend on input order.  A bucket with fewer tasks
     than its quota fails closed.
     """
-    excluded = set(exclude)
+    reasons = dict(exclude) if isinstance(exclude, dict) else {t: "excluded" for t in exclude}
+    excluded = set(reasons)
     specs = [adapter.task_spec(t) for t in (task_ids if task_ids is not None else adapter.task_ids())
              if t not in excluded]
     by_bucket: dict[str, list[TaskSpec]] = {}
@@ -216,9 +223,13 @@ def build_holdout(adapter: BenchmarkAdapter, quotas: dict[str, int | None], *, s
         chosen = pool if quota is None else pool[:quota]
         items += [{"task_id": s.task_id, "difficulty": s.difficulty, "eval_bucket": bucket}
                   for s in sorted(chosen, key=lambda s: s.task_id)]
-    return {"schema": HOLDOUT_SCHEMA, "benchmark": adapter.name,
-            "benchmark_version": versions.pop() if len(versions) == 1 else sorted(versions),
-            "seed": seed, "rule": rule, "items": items}
+    holdout: dict[str, Any] = {"schema": HOLDOUT_SCHEMA, "benchmark": adapter.name,
+                               "benchmark_version": versions.pop() if len(versions) == 1 else sorted(versions),
+                               "seed": seed, "rule": rule}
+    if reasons:
+        holdout["excluded"] = [{"task_id": t, "reason": reasons[t]} for t in sorted(reasons)]
+    holdout["items"] = items
+    return holdout
 
 
 def holdout_sha256(holdout: dict[str, Any]) -> str:
