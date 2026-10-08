@@ -237,6 +237,34 @@ def build_holdout(adapter: BenchmarkAdapter, quotas: dict[str, int | None], *, s
     return holdout
 
 
+TRAIN_SPLIT_SCHEMA = "yeto-train-split/1"
+
+
+def build_train_split(adapter: Any, holdout: dict[str, Any], *,
+                      exclude: dict[str, str] | None = None,
+                      task_ids: Iterable[str] | None = None) -> dict[str, Any]:
+    """Training task list = all tasks - hold-out items - ``exclude`` (task_id -> reason).
+
+    Hold-out *exclusions* that are not in ``exclude`` (e.g. the S15 smoke-6,
+    which left only the eval pool) stay in training.  The file pins the
+    hold-out sha256 so a training run can prove which list it was cut against.
+    """
+    held = set(holdout_ids(holdout))
+    reasons = dict(exclude or {})
+    ids = sorted(t for t in (task_ids if task_ids is not None else adapter.task_ids())
+                 if t not in held and t not in reasons)
+    specs = [adapter.task_spec(t) for t in ids]
+    split: dict[str, Any] = {"schema": TRAIN_SPLIT_SCHEMA, "benchmark": adapter.name,
+                             "benchmark_version": holdout.get("benchmark_version"),
+                             "holdout_sha256": holdout_sha256(holdout)}
+    if reasons:
+        split["excluded"] = [{"task_id": t, "reason": reasons[t]} for t in sorted(reasons)]
+    split["items"] = [{"task_id": s.task_id, "difficulty": s.difficulty, "eval_bucket": s.eval_bucket}
+                      for s in specs]
+    assert_disjoint(ids, held)
+    return split
+
+
 def holdout_sha256(holdout: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(holdout, sort_keys=True, ensure_ascii=False,
                                      separators=(",", ":")).encode()).hexdigest()
