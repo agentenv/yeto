@@ -519,3 +519,12 @@ def test_stock_codex_append_roles_resolve_by_tito_family(tito_model, ok):
     cfg.agent.custom_agent_function_path = "x:y"
     assert check(("tool", "user"), cfg) is not None
 
+
+
+def test_elastic_island_lr_schedule_is_constant():
+    """S17 M1: an elastic island runs until the syncer's final outer version (a re-JOINed
+    island needs extra local rounds), so a linear horizon could reach 0 before it ends."""
+    assert rc.resolve_lr_schedule(**_schedule_args(sync_preset="strict-avg", global_rounds=6),
+                                  island_scheduling="elastic") == rc.LrSchedule("constant", 6)
+    assert rc.resolve_lr_schedule(**_schedule_args(sync_preset="strict-avg", global_rounds=6),
+                                  island_scheduling="legacy") == rc.LrSchedule("linear", 6)

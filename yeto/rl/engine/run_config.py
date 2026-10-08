@@ -322,6 +322,7 @@ def resolve_lr_schedule(
     rollout_batch_size: int,
     n_samples_per_prompt: int,
     global_batch: int,
+    island_scheduling: str = "legacy",
 ) -> LrSchedule | None:
     """The island's LR schedule, decided by the sync mode (design D1-D3).
 
@@ -332,7 +333,10 @@ def resolve_lr_schedule(
     if eval_only:
         return None
     horizon = global_rounds * optimizer_steps
-    if sync_preset == "decoupled":
+    if sync_preset == "decoupled" or island_scheduling == "elastic":
+        # S17 M1: an elastic island also runs until the syncer's final outer
+        # version (a re-JOINed island needs extra local rounds), so a linear
+        # horizon could reach zero before it ends -- same rule as decoupled.
         # Run-until-stop: the local step count is unknown up front.
         # decay_iters only satisfies Megatron's ``lr_decay_steps > 0``; a
         # constant schedule never reads it.
@@ -906,6 +910,7 @@ def resolve_rl_run_config(
                 rollout_batch_size=args.groups_per_round,
                 n_samples_per_prompt=args.samples_per_group,
                 global_batch=global_batch,
+                island_scheduling=getattr(args, "rl_island_scheduling", "legacy") or "legacy",
             ),
             seed=args.seed,
             critic=resolve_critic_run_config(args),
