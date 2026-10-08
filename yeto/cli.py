@@ -113,6 +113,16 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         ),
     )
     rl.add_argument(
+        "--rl-image-private",
+        action="store_true",
+        help=(
+            "pull --rl-image with a registry login: SKYPILOT_DOCKER_USERNAME/"
+            "PASSWORD/SERVER from the environment, else the registry's "
+            "~/.docker/config.json entry (error if neither). Default: anonymous "
+            "pull; a login is injected only when those variables are set"
+        ),
+    )
+    rl.add_argument(
         "--rl-model-recipe",
         choices=["generic", "deepseek-v4-flash"],
         default="generic",
@@ -217,6 +227,33 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
             "sends each island its canonical form and expected hash"
         ),
     )
+    # rl-algo-critic-family 5.3 (design D5): critic warm-up stage on the island
+    rl.add_argument(
+        "--rl-critic-load",
+        default=None,
+        metavar="DIR",
+        help=(
+            "ports critic with a warm-up: an existing stage-W product directory on the "
+            "island (with --rl-critic-init-sha256); without it the island runs stage W "
+            "itself before the main stage"
+        ),
+    )
+    rl.add_argument(
+        "--rl-critic-init-sha256",
+        default=None,
+        metavar="HEX",
+        help="content SHA256 of --rl-critic-load (critic_warmup.checkpoint_sha256)",
+    )
+    rl.add_argument(
+        "--rl-critic-baseline-rounds",
+        type=int,
+        default=0,
+        metavar="N",
+        help=(
+            "ports critic with a warm-up, --rl-single-island-no-sync: first run N rounds "
+            "of the same algorithm without the warm-up (explained-variance baseline)"
+        ),
+    )
     rl.add_argument(
         "--rl-placement",
         choices=["colocated", "fixed-partition"],
@@ -319,12 +356,23 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
                     "prints the attestation runtime_fingerprint as one JSON line and exits "
                     "before Ray/GPU work. NOTE: the launcher still provisions the island as declared, "
                     "so pass CPU-only resources to avoid paying for GPUs")
+    rl.add_argument("--rl-boot-only", action="store_true",
+                    help="ports, single island no-sync: the learner runs every check that needs no "
+                    "torch_dist (model provider view, Miles argv build + parse, --rl-megatron-ref-load "
+                    "probe), writes ~/yeto-rl/boot_only.json + a FN_BOOT_ONLY_OK line and exits 0 "
+                    "WITHOUT training, so the job SUCCEEDS and --keep keeps the cluster (S11 fnboot)")
     rl.add_argument("--rl-lora-dropout", type=float, default=None, metavar="P",
                     help="ports LoRA: training-time LoRA dropout (default 0). Trainer DP-change "
                     "edges refuse dropout > 0; same-shape rebuild restores its RNG")
     rl.add_argument("--rl-lora-expert-rank", type=int, default=None, metavar="R",
                     help="ports Qwen3.8-Flash-Next: routed-expert LoRA rank r_e (0 <= r_e <= "
                     "--lora-r; default the profile's 8)")
+    rl.add_argument("--rl-island-pre-run", default=None, metavar="FILE",
+                    help="ports, single island no-sync: a local bash snippet embedded into the island "
+                    "run script and executed on the node (inside the island image, GPUs idle) "
+                    "BEFORE the island's Ray starts; a non-zero exit fails the job. For node-side "
+                    "preparation the launcher has no flag for, e.g. an HF -> torch_dist conversion "
+                    "on a cloud that cannot mount a prepared model volume (Verda G0)")
     rl.add_argument("--rl-megatron-ref-load", default=None, metavar="DIR",
                     help="ports: absolute node-side Megatron torch_dist checkpoint for --ref-load "
                     "(required by the Qwen3.8-Flash-Next raw recipe, e.g. "
@@ -351,6 +399,9 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
                     "dataset state advanced by GROUPS where rollout_executor.load reads it")
     rl.add_argument("--rl-observe-timeline", action="store_true",
                     help="ports: record per-round timeline labels (rl-infra-spec 1.7); off by default")
+    rl.add_argument("--rl-resource-sample-interval", type=float, default=None, metavar="SECONDS",
+                    help="ports: NVML rl_resource_sample period forwarded to the learner "
+                    "(default: learner default, 60 s with --rl-observe-timeline; 0 = off)")
     from yeto.rl.engine.miles_adapter.elastic_hook import add_recommend_arguments
     add_recommend_arguments(rl)  # D2 elastic hook (elastic-ops.md)
     rl.add_argument("--rl-elastic-tool-wait-board", action="store_true",
@@ -469,6 +520,29 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help=(
             "ports only: launch exactly one island with no syncer and no outer "
             "sync (the G1 smoke entry for --rl-allow-unverified-mechanism)"
+        ),
+    )
+    rl.add_argument(
+        "--rl-miles-overlay",
+        choices=("auto", "off", "critic-c357"),
+        default="auto",
+        help=(
+            "ports only: apply the critic-family Miles patch (fork yeto-critic-c357, "
+            "not pushed) over the image's Miles c35702e at island setup. auto (default): "
+            "only when the algorithm spec uses a fork-only Miles flag; recorded in the "
+            "run manifest as 'image + overlay <sha256>'"
+        ),
+    )
+    rl.add_argument(
+        "--rl-island-post-cmd",
+        default=None,
+        metavar="CMD",
+        help=(
+            "ports single-island smoke only: shell command run on the island's "
+            "rank 0 after the learner exits (whatever its exit code), with "
+            "stdout+stderr in ~/yeto-output/post-cmd.txt (mirrored into the Modal "
+            "tape Volume); the learner's exit code is preserved (S14 A17: run the "
+            "fork's Ray tests in the same container)"
         ),
     )
     rl.add_argument(
@@ -966,12 +1040,56 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "runner's 10); acceptance runs use 0 so a learner exit is final",
     )
     infra.add_argument(
+        "--modal-tape-volume",
+        default=None,
+        metavar="NAME",
+        help="Modal islands: mirror each container's ~/yeto-output tape files into this "
+        "Modal Volume (subdir <app>/l<learner>/rank<r>, committed every 30 s and at exit) "
+        "and pull them into the local run dir (modal-tape/) when the run ends; default off",
+    )
+    infra.add_argument(
+        "--modal-model-volume",
+        default=None,
+        metavar="NAME",
+        help="Modal RL islands: mount this Modal Volume read-only at /mnt/yeto-models (the "
+        "model-store path) and serve --model@--model-revision from its hf/<name>/<rev[:8]>/ "
+        "snapshot (MANIFEST.json must carry that revision and all_ok); default off",
+    )
+    infra.add_argument(
+        "--modal-memory-gib",
+        type=int,
+        default=None,
+        metavar="GIB",
+        help="Modal islands: container memory request = limit in GiB (default 32 GiB per GPU)",
+    )
+    infra.add_argument(
+        "--modal-cpu",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Modal islands: container CPU cores (default 4 per GPU)",
+    )
+    infra.add_argument(
+        "--modal-env",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Modal islands: extra container environment (repeatable), e.g. NCCL_DEBUG=INFO",
+    )
+    infra.add_argument(
         "--modal-timeout-s",
         type=int,
         default=None,
         metavar="S",
         help="Modal islands: function timeout in seconds (default: 24 h); the Modal-side "
         "hard stop of a run",
+    )
+    infra.add_argument(
+        "--modal-launcher-relaunch",
+        action="store_true",
+        help="with --modal-retries 0: Modal never re-runs a failed island container, but "
+        "the launcher still relaunches it (same learner id, within --recover-timeout); "
+        "for kill/resume tests. --no-island-relaunch still wins",
     )
     infra.add_argument("--disk-size", type=int, default=512, help="learner disk (GB)")
     infra.add_argument(
@@ -1018,6 +1136,10 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     )
     infra.add_argument("--cluster-prefix", default="yeto", help="cluster name prefix; also the run's name")
     infra.add_argument("--keep", action="store_true", help="do not tear down clusters at the end")
+    infra.add_argument(
+        "--keep-abandoned", action="store_true",
+        help="leave a learner cluster up when the controller abandons it (default: tear it down, even with --keep)",
+    )
     infra.add_argument(
         "--retry-until-up",
         action="store_true",
@@ -1607,6 +1729,19 @@ HEAD_SETUP_PIP = (
     "pip install -q torch --index-url https://download.pytorch.org/whl/cpu && "
     "pip install -q cloudpickle transformers==5.13.0"
 )
+# yeto needs Python >= 3.11 at runtime (typing.Self in the Codex harness the
+# launcher imports); stock images ship older (Nebius: miniconda 3.10). Setup
+# then gives the head its own 3.12 venv, and every head job puts it first on
+# PATH, so pip, the sky patch hook, the controller and sky's API server all
+# share one interpreter.
+HEAD_VENV = "~/yeto-head-py"
+HEAD_PYTHON_STEP = (
+    "if ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))'; then "
+    "command -v ~/.local/bin/uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh -s -- -q; "
+    f"[ -x {HEAD_VENV}/bin/python3 ] || ~/.local/bin/uv venv -q --seed --python 3.12 {HEAD_VENV}; fi\n"
+    f"if [ -x {HEAD_VENV}/bin/python3 ]; then export PATH={HEAD_VENV}/bin:$PATH; fi"
+)
+HEAD_USE_PYTHON = f"if [ -x {HEAD_VENV}/bin/python3 ]; then export PATH={HEAD_VENV}/bin:$PATH; fi"
 HEAD_WAIT_READY = (
     f"for i in $(seq 1 180); do [ -f {HEAD_READY_MARKER} ] && break; sleep 5; done; "
     f"[ -f {HEAD_READY_MARKER} ] || {{ echo 'head setup never completed' >&2; exit 1; }}"
@@ -1691,11 +1826,14 @@ def _make_head_task(args, extra_mounts: dict | None = None):
         setup=(
             "set -e\n"
             f"{WAN_TUNING}\n"
+            f"{HEAD_PYTHON_STEP}\n"
             f"{head_pip}\n"
             f"{SYNCER_REMOTE_BUILD}\n"
             f"touch {HEAD_READY_MARKER}"
         ),
-        envs=head_envs or None,
+        # Env-carried cloud credentials travel as sky secrets (redacted in
+        # sky's logs, request records and dashboard), never as plain envs.
+        secrets=head_envs or None,
         workdir=str(REPO_ROOT),
         file_mounts=file_mounts,
     )
@@ -1775,8 +1913,8 @@ def _stream_head_logs(cluster: str, job_id: int, follow: bool = True) -> None:
     """Print a head job's log lines; KeyboardInterrupt passes through to
     the caller — Ctrl-C means "stop streaming", never "stop the run"."""
     for line in _sky_tail_logs(cluster, job_id, follow):
-        if line is None:
-            break
+        if line is None:  # sky rich-status/heartbeat control payload, not the end (see launcher._tail)
+            continue
         sys.stdout.write(line if line.endswith("\n") else line + "\n")
         sys.stdout.flush()
 
@@ -1866,14 +2004,25 @@ def cmd_launch_head(args) -> int:
         # The head authenticates its own event-tape run and re-exports the
         # key onto every learner cluster it launches.
         envs["WANDB_API_KEY"] = os.environ["WANDB_API_KEY"]
+    # The controller job is a separate sky job: the provisioning task's
+    # secrets are not in its environment. Env-carried cloud credentials
+    # (e.g. MODAL_TOKEN_ID/SECRET when no ~/.modal.toml is present) and the
+    # private-registry login the Modal image build reads (if any)
+    # go to it as sky secrets, so they never land in a file on the head.
+    _mounts, cred_envs = launcher.head_cloud_credentials(launcher.fleet_clouds(args))
+    secrets = dict(cred_envs)
+    # Private --rl-image only (SKYPILOT_DOCKER_* set, or --rl-image-private);
+    # a public image sends no registry login at all.
+    secrets.update(launcher.registry_login_for(args) or {})
     job_task = sky.Task(
         name="yeto-head-job",
         run=(
-            f"{HEAD_WAIT_READY}; "
+            f"{HEAD_WAIT_READY}; {HEAD_USE_PYTHON}; "
             "cd ~/sky_workdir && PYTHONPATH=~/sky_workdir "
             f"python3 -m yeto.cli _head {shlex.quote(json.dumps(args_dict))}"
         ),
         envs=envs,
+        secrets=secrets or None,
     )
     job_id = _sky_exec_head(job_task, head_cluster)
     runs.update_run(name, state=runs.SUBMITTED, head_job_id=job_id)
@@ -2204,12 +2353,15 @@ def _cloud_probe(cluster: str):
 DOWN_VERIFY_SLEEP = time.sleep  # patched out in tests
 
 
-def _down_and_verify(cluster: str) -> bool:
+def _down_and_verify(cluster: str, num_nodes: int = 1) -> bool:
     """Down a cluster this machine's sky knows and confirm it at the cloud.
 
     The probe is captured before the down (down deletes the record it needs).
     Without a probe we fall back to sky's own answer: a clean down or "does
-    not exist" counts, any other error does not."""
+    not exist" counts, any other error does not. A multi-node island
+    (``num_nodes`` > 1) takes the launcher's per-node confirmation path
+    (rl-multinode-island D10): every node instance must be confirmed gone at
+    the cloud, sky's own answer is never trusted for more than one node."""
     from .launcher import terminate_and_verify
 
     probe = _cloud_probe(cluster)
@@ -2221,7 +2373,30 @@ def _down_and_verify(cluster: str) -> bool:
         probe=probe,
         down=lambda: _sky_down_cluster(cluster),
         sleep_fn=DOWN_VERIFY_SLEEP,
+        num_nodes=int(num_nodes or 1),
     )
+
+
+def run_nodes_by_cluster(meta: dict) -> dict[str, int]:
+    """``{learner cluster: node count}`` of a recorded run, computed from its
+    launch args exactly as the launcher does (``parse_gpu_spec`` +
+    ``learner_cluster_names``), so ``yeto down`` confirms a multi-node island
+    per node without a new registry field (older runs included). Unparseable
+    or missing args -> {} (every cluster is then treated as single-node)."""
+    from .launcher import learner_cluster_names, parse_gpu_spec
+
+    args = meta.get("args") or {}
+    gpu, prefix = args.get("gpu"), args.get("cluster_prefix") or meta.get("name")
+    if not gpu or not prefix:
+        return {}
+    try:
+        specs = parse_gpu_spec(gpu)
+        return {name: int(spec.num_nodes) for name, spec in
+                zip(learner_cluster_names(prefix, specs), specs)}
+    except Exception as e:  # noqa: BLE001 - best effort: fall back to single-node
+        print(f"[yeto] could not derive node counts from the recorded --gpu {gpu!r}: {e}",
+              file=sys.stderr)
+        return {}
 
 
 def _modal_app_stopped(run_name: str) -> tuple[bool, str]:
@@ -2346,9 +2521,10 @@ def cmd_down(args) -> int:
         print(f"[yeto] learner clusters torn down from {head_cluster}: {', '.join(on_head)}")
 
     results: dict[str, bool] = {}
+    nodes_by_cluster = run_nodes_by_cluster(meta)
 
     def _down_one(cluster: str) -> None:
-        results[cluster] = _down_and_verify(cluster)
+        results[cluster] = _down_and_verify(cluster, nodes_by_cluster.get(cluster, 1))
         if results[cluster]:
             print(f"[yeto] {cluster}: down")
         else:

@@ -91,3 +91,9 @@ def test_guard_retries_an_empty_image_answer(tmp_path, monkeypatch):
     assert tool.main(["--root", str(tmp_path), "--yeto-sha", "abc1234", "--prefix", "p"]) == 0
     puller = (tmp_path / "p-c1" / "puller.sh").read_text()
     assert '[ ! -s $R/pulled/image.txt ] && [ "$tries" -lt 12 ]' in puller
+
+
+def test_image_digest_matches_miles_next_image():
+    from yeto import rl
+
+    assert rl.MILES_NEXT_IMAGE.endswith("@" + tool.IMAGE_DIGEST)

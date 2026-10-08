@@ -1,0 +1,9 @@
+PASS trainable
+PASS lora_check
+PASS rollouts
+PASS finite
+PASS rewards
+PASS logprob_diff
+PASS load_keys
+verdict PASS
+judge rc=0

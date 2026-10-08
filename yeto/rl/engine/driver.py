@@ -392,6 +392,12 @@ class IslandDriver:
         self.eval_interval = eval_interval
         self.max_rollouts = max_rollouts
         self.colocated = False
+        # Colocated trainers that can publish while offloaded (Miles --offload-train:
+        # upstream train.py sleeps the actor *before* update_weights) are offloaded
+        # right after the sync boundary, so the publication and the engines' KV
+        # resume never share the GPU with the resident training state (S13 FN OOM).
+        self.publish_offloaded = bool(getattr(trainer, "publish_offloaded", False))
+        self._trainer_offloaded = False
         self.expected_token: str | None = None
         self.published_version: int | None = None
         self.rounds_completed = 0
@@ -557,6 +563,9 @@ class IslandDriver:
                 else {}
             ),
         )
+        critic_problems = self._critic_run_problems()
+        if critic_problems:
+            raise DriverError("algorithm spec rejected for this run: " + "; ".join(critic_problems))
         if not callable(getattr(self.trainer, "step_metrics", None)):
             raise DriverError(
                 "trainer group does not report grad_norm; the per-round "
@@ -735,9 +744,27 @@ class IslandDriver:
                       error=str(error), config_epoch=self.config_epoch)
             raise DriverError(f"island is RECOVERY_REQUIRED: {error}") from error
         if pending is not None:
+            members = sorted(self.rollout.members())
             self.emit("rl_reconfiguration", rollout_id=rollout_id, result="RECOVERED",
                       recovery_id=pending.get("recovery_id"), config_epoch=self.config_epoch,
-                      members=sorted(self.rollout.members()))
+                      members=members)
+            # S14/A19: a restart recovery re-serves the committed membership of an
+            # epoch whose ``rl_membership`` record went on the *previous*
+            # incarnation's tape (or never, when the learner died right at
+            # COMMITTED). Re-emit it here so a tape-only consumer gets the
+            # membership view of this epoch; the journal (epochs.json /
+            # ``recovery verified``) is unchanged and stays authoritative.
+            journal = getattr(self.controller, "journal", None)
+            epochs = getattr(journal, "epochs", None)
+            config_epoch = pending.get("config_epoch", self.config_epoch)
+            self.emit("rl_membership", config_epoch=config_epoch, members=members,
+                      tx_id=getattr(epochs, "last_tx_id", None), kind="recovered",
+                      round=rollout_id, recovery_id=pending.get("recovery_id"))
+
+    def _offload_trainer(self, rollout_id: int) -> None:
+        self.phase("offload", rollout_id=rollout_id)
+        self.trainer.offload()
+        self._trainer_offloaded = True
 
     def _generate(self, rollout_id: int) -> RolloutBatchHandle:
         if self.published_version != rollout_id or self.expected_token is None:
@@ -747,9 +774,8 @@ class IslandDriver:
         if self.controller is not None and not self.controller.admission_open:
             # 3.3 admission fence: no new batch while a reconfiguration holds it.
             raise DriverError(f"generation of rollout {rollout_id} refused: admission fenced")
-        if self.colocated:
-            self.phase("offload", rollout_id=rollout_id)
-            self.trainer.offload()
+        if self.colocated and not self._trainer_offloaded:
+            self._offload_trainer(rollout_id)
         if self.eval_overlap is not None:
             self.eval_overlap.before_generate(rollout_id)
         if self._gated:
@@ -905,6 +931,10 @@ class IslandDriver:
         return {"mismatch": values, **{f"label/{k}": v for k, v in self._labels().items()}}
 
     load_sample_interval_s = 5.0
+    #: first load sample this many seconds into generate (None: min(1 s, interval)).
+    #: fnA try27: generate lasted ~5 s == interval, so a first sample at +interval
+    #: mostly landed after generate finished -> 0 rl_load_sample.
+    load_sample_first_delay_s: float | None = None
     # fleet-dashboard 2.1/2.2 (opt-in; None = not started, tape unchanged).
     heartbeat_interval_s: float | None = None
     resource_sample_interval_s: float | None = None
@@ -953,9 +983,22 @@ class IslandDriver:
 
         stop = threading.Event()
 
+        interval = self.load_sample_interval_s
+        first = self.load_sample_first_delay_s
+        first = min(1.0, interval) if first is None else first
+
         def loop() -> None:
-            while not stop.wait(self.load_sample_interval_s):
-                sample = probe()
+            delay = first
+            while not stop.wait(delay):
+                delay = interval
+                try:
+                    sample = probe()
+                except Exception as exc:  # noqa: BLE001 - observation must not kill the sampler
+                    import logging
+
+                    logging.getLogger(__name__).warning(
+                        "yeto load_sample probe raised %s: %s", type(exc).__name__, exc)
+                    continue
                 sampler = getattr(self, "_resource_sampler", None)
                 if sample is not None and sampler is not None:
                     # 2.2: peaks come from the resource sampler's NVML probe
@@ -976,6 +1019,22 @@ class IslandDriver:
         finally:
             stop.set()
             thread.join(timeout=self.load_sample_interval_s + 5)
+            # S15 evidence-window lesson: one terminal probe after generate so a
+            # round whose loads mostly land after the last tick still leaves a
+            # final ``rl_load_sample`` (``terminal=True``). Observe only.
+            try:
+                sample = probe()
+            except Exception as exc:  # noqa: BLE001 - observation must not kill the round
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "yeto terminal load_sample probe raised %s: %s", type(exc).__name__, exc)
+                sample = None
+            if sample is not None:
+                self.emit("rl_load_sample", rollout_id=rollout_id, **dict(sample),
+                          t=self.clock(), profile_hash=self.profile_hash,
+                          epoch=self.config_epoch,
+                          weight_transport=self.weight_transport, terminal=True)
 
     def _emit_round_labels(self, rollout_id, batch, metrics) -> None:
         """A5: per-round algorithm metrics carry the same profile/epoch/transport labels."""
@@ -997,6 +1056,39 @@ class IslandDriver:
             values.update({str(k): v for k, v in dict(extra() or {}).items()})
         self.emit("rl_round_labels", rollout_id=rollout_id, t=self.clock(), **self._labels(),
                   **values)
+
+    def _emit_harness_mismatches(self, rollout_id: int, batch: Any) -> None:
+        """S14-M1 (observe only): one ``rl_harness_mismatch`` per TITO session
+        mismatch record the rollout reported (rollout_meta_hook truncated and
+        capped them; the cap is re-applied here for engines that do not)."""
+        records = getattr(batch, "tito_session_mismatch_records", None)
+        if not records:
+            return
+        from .timeline import (HARNESS_MISMATCH_EVENT, HARNESS_MISMATCH_MAX_PER_ROUND,
+                               HARNESS_MISMATCH_SCHEMA)
+
+        for record in tuple(records)[:HARNESS_MISMATCH_MAX_PER_ROUND]:
+            fields = {k: record.get(k) for k in HARNESS_MISMATCH_SCHEMA
+                      if k not in ("rollout_id", "policy_version")}
+            self.emit(HARNESS_MISMATCH_EVENT, rollout_id=rollout_id,
+                      policy_version=int(getattr(batch, "policy_version", rollout_id)),
+                      t=self.clock(), **self._labels(), **fields)
+
+    def _emit_trajectory_rewards(self, rollout_id: int, batch: Any) -> None:
+        """rl-fn-codex-rollout 1.0 (observe only): one ``rl_trajectory_reward`` per
+        trained sample the rollout reported (task_id + reward), capped per round."""
+        records = getattr(batch, "trajectory_rewards", None)
+        if not records:
+            return
+        from .timeline import (TRAJECTORY_REWARD_EVENT, TRAJECTORY_REWARD_MAX_PER_ROUND,
+                               TRAJECTORY_REWARD_SCHEMA)
+
+        for record in tuple(records)[:TRAJECTORY_REWARD_MAX_PER_ROUND]:
+            fields = {k: record.get(k) for k in TRAJECTORY_REWARD_SCHEMA
+                      if k not in ("rollout_id", "policy_version")}
+            self.emit(TRAJECTORY_REWARD_EVENT, rollout_id=rollout_id,
+                      policy_version=int(getattr(batch, "policy_version", rollout_id)),
+                      t=self.clock(), **self._labels(), **fields)
 
     def _is_final_round(self, rollout_id: int) -> bool:
         probe = getattr(self.sync, "is_final_round", None)
@@ -1077,6 +1169,7 @@ class IslandDriver:
         if self.colocated:
             self.phase("onload", rollout_id=rollout_id)
             self.trainer.onload()
+            self._trainer_offloaded = False
         if self._gated:
             # Every group carries the published token (checked in _generate);
             # the batch is one complete, single-policy batch.
@@ -1143,12 +1236,15 @@ class IslandDriver:
             **({"data_cursor": dict(batch.data_cursor)}
                if getattr(batch, "data_cursor", None) else {}),
         )
+        self._emit_critic_round(rollout_id)
         self.local_step += (
             int(self.profile.optimizer_steps_per_round) if self.profile is not None else 1
         )
         stats = self._stats(rollout_id, batch, metrics, rollout_seconds, train_seconds)
         if self.observe:
             self._emit_round_labels(rollout_id, batch, metrics)
+            self._emit_harness_mismatches(rollout_id, batch)
+            self._emit_trajectory_rewards(rollout_id, batch)
         # Zero-LR invariant: a non-final round must not commit a zero update.
         require_nonzero_learning_rate(stats, final_round=self._is_final_round(rollout_id))
         self.phase("sync", rollout_id=rollout_id)
@@ -1156,6 +1252,8 @@ class IslandDriver:
         if self.ledger is not None:
             self.ledger.outer_recorded(rollout_id, next_policy_version=rollout_id + 1)
         self._join_eval()
+        if self.colocated and self.publish_offloaded:
+            self._offload_trainer(rollout_id)
         self.publish(boundary.state, rollout_id=rollout_id + 1)
         self._close_span()
         self.rounds_completed += 1
@@ -1384,6 +1482,33 @@ class IslandDriver:
             )
         self.emit("rl_data_cursor_restored", rollout_id=start_rollout_id,
                   data_cursor=dict(landed))
+
+    def _emit_critic_round(self, rollout_id: int) -> None:
+        """rl-algo-critic-family 4.4: per-round critic record on the tape (layout
+        hashes, param mode, init source, critic weight hash, value metrics).
+        Nothing for a critic-free algorithm, so its tape is unchanged."""
+
+        execution = getattr(self.algorithm, "execution", None)
+        probe = getattr(self.trainer, "critic_round_receipt", None)
+        if execution is None or not execution.needs_critic or not callable(probe):
+            return
+        receipt = probe(rollout_id)
+        if receipt is not None:
+            self.emit("rl_critic_round", **receipt.to_event())
+
+    def _critic_run_problems(self) -> list[str]:
+        """rl-algo-critic-family 2.3: critic run-level rejections of the
+        composition root (before any engine verb)."""
+
+        execution = getattr(self.algorithm, "execution", None)
+        if execution is None or not execution.needs_critic:
+            return []
+        from yeto.rl.algos.critic import critic_run_problems
+
+        return critic_run_problems(self.algorithm, {
+            "elastic": self.elastic_hook is not None,
+            "sync_preset": getattr(self.sync, "OUTER_SYNC_KIND", None),
+        })
 
     def run(self) -> TrainableState:
         with self._telemetry_threads():

@@ -125,3 +125,21 @@
 ### ALGO-2b-T4 结果（2026-09-30）
 - 4.4 已勾（GPU 容器内完整 parse_args 通过；无训练、无权重）。run1 失败（`modal run` 在容器内 import 驱动脚本，读凭据文件 FileNotFoundError）；run2 被 run1 的前缀 watchdog 误停；两次均在修复后才重跑。run3 PASS：三个变体通过完整 parse_args + validate_parsed_args，8 个拒绝组合全部被拒，miles HEAD 5c1b49eb，T4。
 - 云资源：app ap-z00PQUsU90bkkq0UVMqKq4、ap-EEOUsOKydYiZAicXEClFyy、ap-CwXDZTPSL1AoyMskEPagWU（algo2b-t4-parse，owner ALGO-2b-T4，用途 4.4 解析）均 stopped；watchdog 已退出。费用：已入账 $0.0701，run3 估约 $0.03，合计约 $0.10（单独记账，上限 $2）。证据 `evidence/2026-09-30-t4-parse/`。
+
+## S14 GPU 冒烟（G1/G1b，2026-10-07）
+授权：主 agent，Modal 1×H100!，cap $10；6.3 两岛未授权，未做。镜像 `yeto-miles-ports@sha256:37ac689e…`，fork c35702ee（无 overlay），Qwen3-0.6B LoRA r16 gsm8k，4 组×8 样本，3 轮，seed 17，单岛 colocated，`--rl-single-island-no-sync --rl-allow-unverified-mechanism losses:<v>`（rc=2 为 no-sync 的设计行为）。复核文档 `infra-drafts/LOSSVAR-G-PRELAUNCH-REVIEW.md`；judge `s1-runs/s14-lossvar-judge.py`；run 目录 `s1-runs/s14-lossvar-<case>-20261007a/judgment.json`。四个 run 均读到 `NVIDIA H100 80GB HBM3`（driver 580.95.05；grpo 容器 610.57.04），miles_commit = c35702ee，`rl/algorithm_spec` 含变体名与参数。
+
+| 臂 | 判定 | 3 轮 pg_loss | 3 轮 grad_norm | 其它 |
+|---|---|---|---|---|
+| cispo | PASS | −0.00849 / −0.06321 / −0.08449 | 0.2286 / 0.4154 / 0.2844 | pg_clipfrac 全 0（有限，判据 f 过） |
+| sapo | PASS | −0.00964 / −0.02438 / −0.02587 | 0.4499 / 0.4892 / 0.3644 | tau_pos 1.0 / tau_neg 1.05 |
+| gmpo | PASS | ≈ −1.9e-9 / 1.9e-9 / −7.5e-9（序列级几何平均，数值近 0，属预期量级） | 0.4499 / 0.4892 / 0.2523 | gmpo_clip_num 0/0/0，den 20.84/132.19/164.41，clip_fraction 0（判据 e 过） |
+| grpo（对照） | **INCOMPLETE**（rc=6，0 轮） | — | — | 见下 |
+
+- 判据 (a)(b)(c)(e)(f) 对三变体均满足，problems/missing 为空。(d)（变体 vs 同 seed GRPO 第 1 轮不相等）**未取得**：对照臂 0 轮。（旁证，非判据：sapo 与 gmpo 第 1 轮 grad_norm 同为 0.4499274790287018，第 1 轮 ppo_kl≈5e-10 即 ratio≈1，此时两者梯度理论上相等，属预期；cispo 不同 0.2286。）
+- grpo 失败原因：不是 loss 问题，是环境。第 1 轮 publish 前 SGLang 的 HTTP 服务绑定 `172.20.0.127:20000` 失败（`[Errno 98] address already in use`，11:51:02，post-warmup freeze_gc connection refused），导致 `PublicationError: no rollout engines are eligible for publication`（publish.py:443），learner 崩溃但 launcher 未及时退出，直到 stall timeout 900 s（12:04:53）才以 exit 6 终止，tape 仅 3 事件（rl_engine_selected、rl_driver_start、publish phase）。同配置的 cispo 在同时刻另一容器内正常，说明是端口竞争的偶发问题；按"同配置失败不重试"规则未重试。未解决：端口 20000 被谁占用未查明；如需 (d) 的对照需另行授权重跑。
+- A17：grpo 容器内的 post-cmd 在 learner 崩溃后启动，但被 teardown 截断，只有 47 个通过点、无汇总（`tape-direct/.../a17-pytest.txt`），不能作结论。另有 CPU Modal 的独立运行 `s1-runs/s14-a17-cpu-20261007a/a17-pytest.txt`：test_cell.py + test_group.py **120 passed, 1 failed**（1493 s），失败项 `test_group.py::TestUpdateWeightsExternalFailure::test_an_engine_side_failure_keeps_the_cell_and_is_not_retried`；用户已决定不追查。
+- 费用（估算，launcher 起止窗口 × $4.39/h）：grpo 11:43:39–12:05:06 ≈ 21.5 min ≈ $1.57；cispo 11:43:59–11:53:26 ≈ 9.5 min ≈ $0.69；sapo 12:05:27–12:13:53 ≈ 8.4 min ≈ $0.62；gmpo 12:05:48–12:15:45 ≈ 10.0 min ≈ $0.73；合计 ≈ $3.6（< cap $10）。
+- 6.4 残留：`modal app list` 4 个 `yeto-s14-lossvar-*` 均 stopped（Tasks 0）；仅有他任务的 deployed app `s14-a17-cpu`。
+- 状态区分：已实现+已 GPU 冒烟验证 = CISPO/SAPO/GMPO（CP=1，单岛，3 轮）；未验证 = (d) 对照方向、6.3 两岛 strict-avg、GMPO CP>1、TIS 组合冒烟、adapter 正式声明（entry.MILES_DECLARED 未改）。
+- 任务处置：6.1 勾（以主 agent 授权为准）；6.2 暂不勾（见上，(d) 缺失 + 声明未做）；6.3 未做；6.4 勾（G1 范围）。3.1–3.4（路线 A）不勾，tasks.md 标注「S14 关闭：已被路线 B（fork 实现，4.3/4.4）取代，GPU 冒烟见 6.x」（用户裁定）。

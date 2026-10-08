@@ -62,9 +62,9 @@ MILES_NEXT_BASE_IMAGE = (
 # SGLANG_NEXT_COMMIT at /sgl-workspace/sglang, both the base's editable
 # installs (pure-Python overlay, scripts/build_miles_ports_image.sh;
 # docker/miles-ports/Dockerfile).  /opt/yeto/image-manifest.json records
-# every SHA.  PRIVATE (ghcr.io/michaellchung): launches pass registry
-# credentials via SKYPILOT_DOCKER_{USERNAME,PASSWORD,SERVER} (ports only; use
-# a read:packages-only token).
+# every SHA.  PUBLIC on ghcr.io/michaellchung since 2026-10-07 (anonymous
+# pull); a private image needs SKYPILOT_DOCKER_{USERNAME,PASSWORD,SERVER} or
+# --rl-image-private (yeto.launcher.registry_login_for; read:packages token).
 # Tag c35702e-4e4148f; linux/amd64 only.
 MILES_NEXT_IMAGE = (
     "docker:ghcr.io/michaellchung/yeto-miles-ports@sha256:"
@@ -94,9 +94,9 @@ def default_rl_image(rl_engine: str) -> str:
 
     Legacy keeps the agentenv fork image (private ghcr.io/agentenv).  Ports
     uses MILES_NEXT_IMAGE: upstream Miles' image with the pinned
-    michaellchung forks preinstalled, private on ghcr.io/michaellchung --
-    Modal and SkyPilot pull it with the SKYPILOT_DOCKER_* credentials
-    (see yeto.modal_runner.registry_credentials).
+    michaellchung forks preinstalled, public on ghcr.io/michaellchung (a
+    registry login is injected only via SKYPILOT_DOCKER_* or
+    --rl-image-private; see yeto.launcher.registry_login_for).
     """
 
     return MILES_NEXT_IMAGE if rl_engine == "ports" else MILES_IMAGE
@@ -164,6 +164,9 @@ CODEX_OPENENV_AGENT_MODULES = (
     "codex_openenv_subprocess_agent_function.py",
     "codex_openenv_agent_worker.py",
     "codex_openenv_agent_function.py",
+    # CompactionRL bridge (opt-in, YETO_CODEX_COMPACTIONRL); imported by
+    # codex_openenv_agent_function.  Name list only: no per-module hash pin.
+    "compaction_bridge.py",
 )
 CODEX_OPENENV_IDENTITY_ENV = {
     "YETO_CODEX_OPENENV_BACKEND_PROFILE": "qwen35_08b",

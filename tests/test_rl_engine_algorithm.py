@@ -39,7 +39,7 @@ def test_unknown_and_invalid_rejected():
     with pytest.raises(AlgorithmSpecError, match="schema"):
         AlgorithmSpec.from_dict({"schema": "v0"})
     with pytest.raises(AlgorithmSpecError, match="grpo"):
-        AlgorithmSpec(advantage_estimator="ppo")
+        AlgorithmSpec(advantage_estimator="gspo")  # ppo: v1 since rl-algo-critic-family
     with pytest.raises(AlgorithmSpecError):
         AlgorithmSpec(dynamic_sampling_filter="x.y")
     with pytest.raises(AlgorithmSpecError, match="requires"):

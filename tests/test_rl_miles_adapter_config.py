@@ -245,6 +245,8 @@ def test_leaf_policy_matches_run_config_fields():
     cfg = make_config(with_eval=True, with_moe=True)
     leaves = {path for path, _ in mc.iter_config_leaves(cfg)}
     leaves |= {"eval", "geometry.moe", "algorithm.lr_schedule"}  # the None variants
+    # rl-algo-critic-family 2.4: critic run config (None here) and its leaves
+    leaves |= {"algorithm.critic", "algorithm.critic.critic_load", "algorithm.critic.init_sha256"}
     assert leaves == set(mc.LEAF_POLICY)
 
 
@@ -489,3 +491,30 @@ def test_lr_schedule_flags_are_adapter_owned():
     for flag in rc.LR_SCHEDULE_FLAGS:
         with pytest.raises(mc.MilesConfigError):
             mc.check_extra_argv((flag, "1"))
+
+
+# ---------------------------------------------------------------- rl-fn-codex-rollout 1.0: append roles by tokenizer family
+
+@pytest.mark.parametrize("tito_model,ok", [("qwen35", True), ("qwen4exp", True), ("qwen38", True), ("deepseekv4", True),
+                                           ("nosuchfamily", False)])
+def test_stock_codex_append_roles_resolve_by_tito_family(tito_model, ok):
+    """``--tito-model`` is a tokenizer family (``qwen4exp`` for Flash-Next), not a
+    profile name; the s15 4-layer smoke failed with UnmappedConfigError here."""
+    from types import SimpleNamespace
+
+    from yeto.rl import CODEX_OPENENV_AGENT
+    from yeto.rl.engine.miles_adapter.config import LEAF_POLICY
+
+    check = LEAF_POLICY["agent.tito_allowed_append_roles"]
+    agent = SimpleNamespace(custom_agent_function_path=CODEX_OPENENV_AGENT, tito_model=tito_model)
+    cfg = SimpleNamespace(agent=agent)
+    assert check(None, cfg) is None
+    if ok:
+        assert check(("tool", "user"), cfg) is None
+        assert "fix the append roles" in check(("tool",), cfg)
+    else:
+        assert "upstream Miles has no --tito-allowed-append-roles" in check(("tool", "user"), cfg)
+    # an unsigned agent is still refused
+    cfg.agent.custom_agent_function_path = "x:y"
+    assert check(("tool", "user"), cfg) is not None
+

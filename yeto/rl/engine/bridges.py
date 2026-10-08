@@ -236,6 +236,12 @@ class StrictAvgSync:
         return rollout_id + 1 >= self.config.global_rounds
 
     def boundary(self, driver, *, rollout_id, stats) -> SyncBoundary:
+        self._submit(driver, rollout_id=rollout_id, stats=stats)
+        return self._commit(driver, self._await(driver, rollout_id=rollout_id))
+
+    # boundary = _submit -> _await -> _commit; DualStrictAvgSync (rl-algo-critic-family
+    # 4.2.3) interleaves the actor and critic channels between the three steps.
+    def _submit(self, driver, *, rollout_id, stats) -> None:
         if self.current is None or self.permit is None:
             raise RuntimeError("strict sync called outside an active round")
         if rollout_id != self.current.policy_version:
@@ -246,8 +252,12 @@ class StrictAvgSync:
         self.bridge.submit_local_state(self.permit, self.current, local, stats)
         self.bridge.release_current(rollout_id)
         self.current = None
+
+    def _await(self, driver, *, rollout_id) -> CanonicalLoraState:
         driver.phase("wait_global", policy_version=rollout_id + 1)
-        current = self.bridge.wait_for_global_policy(rollout_id + 1)
+        return self.bridge.wait_for_global_policy(rollout_id + 1)
+
+    def _commit(self, driver, current: CanonicalLoraState) -> SyncBoundary:
         state = self._apply(driver, current)
         self.current = current
         stop = current.policy_version >= self.config.global_rounds
@@ -280,6 +290,165 @@ class StrictAvgSync:
     def close(self) -> None:
         if self.bridge is not None:
             self.bridge.client.close()
+
+
+# ---------------------------------------------------------------------------
+# Strict-avg with a critic: two syncer channels, one atomic commit
+# (rl-algo-critic-family 4.2.3, design D4 plan a)
+# ---------------------------------------------------------------------------
+class CrossChannelCommitError(RuntimeError):
+    """The actor or critic channel did not reach v+1: neither role was applied."""
+
+
+class _CriticDriverView:
+    """What StrictAvgSync needs from a driver, for the critic role: export and
+    apply go to the trainer's critic (full-parameter tensors, critic layout)."""
+
+    def __init__(self, driver: IslandDriver, identity: tuple[str, str]) -> None:
+        # identity: (base model revision, critic_layout_hash). The critic layout
+        # hash (value head, param_mode, real dtypes) rides as the channel's config
+        # hash; the channel's tensor layout hash is the canonical fp32 one.
+        self.driver = driver
+        self.base_model_revision, self.critic_layout_hash = identity
+
+    PREFIX = "critic."
+
+    def critic_state(self, version: int, tensors=None) -> CanonicalLoraState:
+        tensors = self.driver.trainer.export_critic_state() if tensors is None else tensors
+        return canonical_state(
+            version,
+            {self.PREFIX + k: v for k, v in tensors.items()},
+            base_model_revision=self.base_model_revision,
+            lora_config_hash=self.critic_layout_hash,
+        )
+
+    def export_local(self) -> TrainableState:
+        return TrainableState.from_lora(self.critic_state(0))
+
+    def apply_policy(self, state: TrainableState, *, optimizer: str, local_step: int) -> TrainableState:
+        # The critic keeps its own optimizer state across rounds (saved by the round
+        # cut, 4.3); only the weights are replaced by the committed average.
+        del optimizer, local_step
+        written = self.driver.trainer.import_critic_state(
+            {k[len(self.PREFIX):]: v for k, v in state.to_lora().tensors.items()})
+        # Evidence of the applied average (both hashes over FP32 values): the
+        # channel's canonical critic state, and the critic masters as written
+        # back (import_critic_state re-hashes them; bf16 params are checked
+        # against their master casts there).
+        self.driver.emit(
+            "rl_critic_apply",
+            policy_version=state.policy_version,
+            **{"sync/global_critic_hash": state.policy_tensor_hash(),
+               "rl/critic/applied_weights_sha256": written},
+        )
+        return state
+
+    def phase(self, name: str, **fields: Any) -> None:
+        self.driver.phase(f"critic_{name}", **fields)
+
+
+class DualStrictAvgSync:
+    """Strict-avg of actor (LoRA, actor syncer) + critic (full parameters, critic
+    syncer). Round v -> v+1 is applied to the trainer only when BOTH channels
+    returned v+1; otherwise neither is applied, ``CrossChannelCommitError`` is
+    raised and the island stays at the last committed round v (in memory when
+    ``keep_committed``; durably through the round cut, whose critic round must
+    equal the actor round, 4.3)."""
+
+    OUTER_SYNC_KIND = "strict"
+
+    def __init__(self, config: BridgeConfig, *, critic_syncer_addr: tuple[str, int],
+                 progress: StrictIslandProgress | None = None,
+                 client_factory: Callable[[StrictRlBridge], Any] | None = None,
+                 critic_client_factory: Callable[[StrictRlBridge], Any] | None = None,
+                 keep_committed: bool = False) -> None:
+        self.config = config
+        self.critic_syncer_addr = critic_syncer_addr
+        self.actor = StrictAvgSync(config, progress=progress, client_factory=client_factory)
+        self.critic: StrictAvgSync | None = None
+        self.critic_client_factory = critic_client_factory
+        self.view: _CriticDriverView | None = None
+        self.keep_committed = keep_committed
+        self.committed: tuple[int, TrainableState, dict] | None = None
+        self.committed_version: int | None = None
+
+    def _critic_config(self, driver: IslandDriver) -> BridgeConfig:
+        layout = driver.trainer.critic_layout()
+        self.view = _CriticDriverView(driver, (self.config.base_model_revision, layout))
+        initial = self.view.critic_state(0)
+        tape = Path(self.config.event_tape)
+        return replace(
+            self.config,
+            syncer_addr=self.critic_syncer_addr,
+            expected_specs=initial.specs,
+            lora_config_hash=layout,
+            layout_hash=initial.layout_hash,
+            event_tape=str(tape.with_name(tape.stem + "-critic" + tape.suffix)),
+            audit_dir=None,
+        )
+
+    def _remember(self, driver: IslandDriver, version: int) -> None:
+        self.committed_version = version
+        if self.keep_committed:
+            self.committed = (version, driver.export_local(), driver.trainer.export_critic_state())
+
+    def start(self, driver: IslandDriver) -> SyncStart:
+        self.critic = StrictAvgSync(self._critic_config(driver), client_factory=self.critic_client_factory)
+        critic = self.critic.start(self.view)
+        start = self.actor.start(driver)
+        if critic.rollout_id != start.rollout_id or critic.finished != start.finished:
+            raise CrossChannelCommitError(
+                f"actor channel starts at round {start.rollout_id}, critic channel at {critic.rollout_id}")
+        self._remember(driver, start.rollout_id)
+        return start
+
+    def is_final_round(self, driver, *, rollout_id: int) -> bool:
+        return self.actor.is_final_round(driver, rollout_id=rollout_id)
+
+    def boundary(self, driver, *, rollout_id, stats) -> SyncBoundary:
+        target = rollout_id + 1
+        try:
+            # push both channels before waiting on either (no cross-channel wait cycle)
+            self.actor._submit(driver, rollout_id=rollout_id, stats=stats)
+            self.critic._submit(self.view, rollout_id=rollout_id, stats=stats)
+            actor = self.actor._await(driver, rollout_id=rollout_id)
+            critic = self.critic._await(self.view, rollout_id=rollout_id)
+            if actor.policy_version != target or critic.policy_version != target:
+                raise CrossChannelCommitError(
+                    f"channels returned actor v{actor.policy_version} / critic v{critic.policy_version}, "
+                    f"expected v{target}")
+        except Exception as error:
+            self._rollback(driver)
+            raise CrossChannelCommitError(
+                f"round {target} not committed: {error}; neither actor nor critic applied, "
+                f"the island stays at committed round {self.committed_version}") from error
+        self.critic._commit(self.view, critic)
+        boundary = self.actor._commit(driver, actor)
+        self._remember(driver, target)
+        driver.phase("dual_commit", policy_version=target)
+        return boundary
+
+    def _rollback(self, driver: IslandDriver) -> None:
+        if self.committed is None:
+            return  # durable rollback: restore the last round cut (critic round == actor round)
+        version, actor, critic = self.committed
+        driver.apply_policy(actor, optimizer="reset", local_step=version * self.config.local_optimizer_steps)
+        driver.trainer.import_critic_state(critic)
+
+    def published(self, driver, *, rollout_id, policy_hash) -> None:
+        pass
+
+    def outer_phase(self, driver, *, rollout_id: int) -> str:
+        return self.actor.outer_phase(driver, rollout_id=rollout_id)
+
+    def finish(self, driver) -> None:
+        self.actor.finish(driver)
+        self.critic.finish(self.view)
+
+    def close(self) -> None:
+        self.actor.close()
+        if self.critic is not None:
+            self.critic.close()
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +490,9 @@ class DecoupledSync:
     is the legacy implementation (called unbound, it only needs
     ``_append_event`` and ``snapshot``).
     """
+
+    # read by the driver handshake (rl-algo-critic-family 2.3: no critic here)
+    OUTER_SYNC_KIND = "decoupled"
 
     def __init__(
         self,

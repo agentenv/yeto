@@ -34,6 +34,24 @@ def island_hint(path: Path) -> str | None:
     return None
 
 
+_HOST_RE = re.compile(r"^l(\d+)$")
+
+
+def host_island_hint(path: Path) -> str | None:
+    """Island for a ``modal-hostmem-*.jsonl`` (no island_id): the ``l<N>`` path
+    component next to ``rank<R>``, else a sibling ``rl-island-<N>.jsonl``."""
+    parts = path.parts
+    for i in range(len(parts) - 2, 0, -1):
+        if parts[i].startswith("rank") and _HOST_RE.match(parts[i - 1]):
+            return _HOST_RE.match(parts[i - 1]).group(1)
+    siblings = sorted(path.parent.glob("rl-island-*.jsonl"))
+    if len(siblings) == 1:
+        m = _ISLAND_RE[0].search(siblings[0].name)
+        if m:
+            return m.group(1)
+    return None
+
+
 def discover(paths: list[str], max_depth: int = 2) -> list[Path]:
     """Files given directly plus ``*.jsonl`` up to ``max_depth`` below each dir."""
     out: list[Path] = []
@@ -61,7 +79,8 @@ class TapeSource:
         self.path = Path(path)
         self.name = str(self.path)
         self.island = island if island is not None else (
-            island_hint(self.path) if "journal" in self.path.name else None)
+            island_hint(self.path) if "journal" in self.path.name
+            else host_island_hint(self.path) if "hostmem" in self.path.name else None)
         self.offset = 0
         self.bad_lines = 0
 

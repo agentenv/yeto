@@ -63,6 +63,28 @@ def assert_compaction_disabled(env: Mapping[str, str]) -> None:
         raise PreflightError("compaction tuning without support: " + ", ".join(extra))
 
 
+def assert_compactionrl_consistent(miles_args: Any, env: Mapping[str, str]) -> None:
+    """CompactionRL switch vs the trainer's ``--gae-variant`` (progress "S13 Codex 压缩接线").
+
+    This hook only runs for the Codex OpenEnv agent, which can compact, so:
+    ``cross_segment_per_sample`` requires ``YETO_CODEX_COMPACTIONRL`` on; any
+    other variant requires it off; ``cross_segment_whole_rollout`` (control arm)
+    is rejected outright (per-segment sessions cannot form one sample).
+    """
+    from yeto.rl.algos import compactionrl as crl
+
+    try:
+        switch = crl.compaction_switch(env.get(crl.COMPACTION_SWITCH_ENV))
+        crl.check_rollout_compaction(
+            getattr(miles_args, "gae_variant", None),
+            switch,
+            harness_compacts=True,
+            t_comp=env.get(crl.COMPACTION_T_COMP_ENV),
+        )
+    except ValueError as exc:
+        raise PreflightError(f"CompactionRL: {exc}") from exc
+
+
 def assert_no_scripted_driver(env: Mapping[str, str]) -> None:
     if env.get(SCRIPTED_DRIVER_ENV):
         raise PreflightError(f"{SCRIPTED_DRIVER_ENV} must not be set in a training process")
@@ -159,6 +181,7 @@ def harness_preflight(miles_args: Any, launch: Any, *, env: Mapping[str, str] | 
     if agent != EXPECTED_AGENT_FUNCTION:
         raise PreflightError(f"custom_agent_function_path={agent!r}; the Codex harness preflight expects {EXPECTED_AGENT_FUNCTION}")
     preflight_codex_openenv(env)
+    assert_compactionrl_consistent(miles_args, env)
     provider = resolve_environment_provider(miles_args, env)
     from . import codex_openenv_subprocess_agent_function as subprocess_agent
 
@@ -221,7 +244,10 @@ def configure_rollout_worker(env: Mapping[str, str] | None = None) -> bool:
         yeto_harness_environment_provider=None,
         yeto_rl_learner_id=int(env.get(LEARNER_ID_ENV) or 0),
         yeto_rl_member_id=None,
-        yeto_rl_cell_id=None,
+        # A16 (D5): the island entry exports its cell (publish_member_cell) and
+        # worker_runtime_env forwards it; read it back into the field so the
+        # worker resolves the same member key as the driver.
+        yeto_rl_cell_id=env.get(MEMBER_CELL_ENV) or None,
     )
     provider = resolve_environment_provider(miles_args, env)
     from . import codex_openenv_subprocess_agent_function as subprocess_agent
@@ -277,8 +303,13 @@ def forward_legacy_openenv_preflight(args: Any, profile_name: str, env: Mapping[
     "environment drifted".
     """
     del args  # the adapter no longer lives under miles_root
-    if profile_name != adapter.BACKEND_PROFILE_NAME:
-        raise ValueError("the Codex OpenEnv adapter requires backend profile qwen35_08b")
+    # rl-fn-codex-rollout 1.0: the runtime profile only has to be an allowlisted
+    # OpenEnv profile with a declared HF identity (``adapter.profile_identity``);
+    # ``learner._preflight_codex_harness`` has already matched it against
+    # ``--model`` / ``--model-revision`` (``validate_stock_codex_fields``).  The
+    # identity env below is the image's build-time record and is compared as
+    # such, so a new profile needs no image rebuild.
+    adapter.profile_identity(profile_name)
     live = adapter.codex_openenv_harness_identity()
     expected = {
         name.removeprefix("YETO_CODEX_OPENENV_").lower(): value
@@ -313,6 +344,7 @@ def required_pin_updates() -> dict[str, Any]:
         "CODEX_OPENENV_AGENT": "yeto.rl.harness.codex.codex_openenv_subprocess_agent_function.run",
         "CODEX_OPENENV_AGENT_MODULES": (
             "codex_openenv_subprocess_agent_function.py", "codex_openenv_agent_worker.py", "codex_openenv_agent_function.py",
+            "compaction_bridge.py",
         ),
         "CODEX_OPENENV_IDENTITY_ENV": dict(adapter._OPENENV_IDENTITY_ENV),
     }

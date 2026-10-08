@@ -80,6 +80,29 @@ SGLANG_LORA_LEAVES = frozenset(
 )
 EXPECTED_LORA_KEYS_4LAYER = 54
 
+# HF tensors per layer from Miles c35702e ``export_qwen3_8_next_lora_hf_chunks``
+# (the trainer-side full-model export, gathered over PP by yeto): GDN 5
+# projections x A/B = 10, QSA q/k/v/o x A/B = 8, shared expert gate/up/down x
+# A/B = 6, routed experts gate_up/down x A/B = 4; every layer is MoE.
+NATIVE_EXPORT_TENSORS_PER_LAYER = {"linear_attention": 10 + 6 + 4, "full_attention": 8 + 6 + 4}
+# config.json layer_types for the 4-layer checkpoint (see the HF note above).
+LAYER_TYPES = {"4layer": ("linear_attention",) * 3 + ("full_attention",)}
+
+
+def expected_native_export_tensors(variant: str = "4layer", layer_types: Sequence[str] | None = None) -> int:
+    """Full-model (all PP stages) native LoRA export tensor count: 4layer -> 78.
+
+    The full variant's layer_types are not pinned here; pass them explicitly.
+    """
+
+    if layer_types is None:
+        if variant not in LAYER_TYPES:
+            raise ValueError(f"layer_types not pinned for variant {variant!r}; pass them explicitly")
+        layer_types = LAYER_TYPES[variant]
+    if len(layer_types) != NUM_LAYERS[variant]:
+        raise ValueError(f"{variant} has {NUM_LAYERS[variant]} layers, got {len(layer_types)} layer_types")
+    return sum(NATIVE_EXPORT_TENSORS_PER_LAYER[kind] for kind in layer_types)
+
 # M3 acceptance #1: trainable LoRA parameters for the 4-layer variant,
 # rank r (attention / shared / GDN) and r_e (routed experts).
 _GDN_PARAMS_PER_RANK = 35424  # per GDN layer, x3 layers
@@ -178,6 +201,12 @@ def model_args(variant: str = "4layer") -> tuple[str, ...]:
     return tuple(text.split())
 
 
+# full-model trainer PP per GPU count (TP2, EP = GPUs/PP): 32 -> PP8 (upstream 4x8
+# recipe), 16 -> PP4 (12 layers/stage, aligned with the TP1 PP4 torch_dist conversion;
+# TP1 PP4 EP1 -> TP2 PP4 EP2 re-shard verified on Modal 8xH200 2026-10-07).
+FULL_LAYOUT_PP = {32: 8, 16: 4}
+
+
 @dataclasses.dataclass(frozen=True)
 class Qwen38NextLoraProfile:
     """Everything the one-command launcher needs, with the Miles CI 4-layer defaults."""
@@ -235,8 +264,11 @@ class Qwen38NextLoraProfile:
         total = self.num_nodes * self.num_gpus_per_node
         if self.variant == "4layer" and total not in (4, 8):
             raise ValueError(f"the 4-layer layout is validated on 4 or 8 GPUs, got {total}")
-        if self.variant == "full" and total != 32:
-            raise ValueError(f"the full-model layout is validated on 32 GPUs, got {total}")
+        # full: 32 GPUs = run_qwen3_8_next.py 4x8 layout (TP2 PP8); 16 GPUs = the 2x8 formal
+        # shape (user decision 2026-10-07), trainer TP2 PP4 EP2 as passed on Modal 8xH200
+        # (FN-MODAL-SMOKE-REVIEW §11).
+        if self.variant == "full" and total not in FULL_LAYOUT_PP:
+            raise ValueError(f"the full-model layout is validated on 16 or 32 GPUs, got {total}")
 
     # ---- derived paths -------------------------------------------------
     @property
@@ -263,7 +295,7 @@ class Qwen38NextLoraProfile:
     @property
     def parallel(self) -> dict[str, int]:
         num_gpus = self.num_nodes * self.num_gpus_per_node
-        pp, engine = (8, 8) if self.variant == "full" else (2, 4)
+        pp, engine = (FULL_LAYOUT_PP[num_gpus], 8) if self.variant == "full" else (2, 4)
         return {
             "tp": 2,
             "pp": pp,
@@ -502,18 +534,21 @@ def flash_next_elastic_declaration(*, nodes: int = 4, gpus_per_node: int = 8,
                                    trainer_gpus: int = 16, gpu: str = "H200") -> dict:
     """Candidate fixed configs + declared rollout edges for the full model.
 
-    The trainer keeps the validated full-model layout (TP2 PP8 EP=trainer/PP, ETP1)
+    The trainer keeps the validated full-model layout (TP2, PP = ``FULL_LAYOUT_PP``
+    of a pool that is twice the trainer: 16 -> PP8, 8 -> PP4; EP=trainer/PP, ETP1)
     on ``trainer_gpus``; rollout engines are 8-GPU SGLang TP8/EP8 replicas; the
     rest of the pool is standby.  Edges only add/remove whole engine replicas
-    (same trainer, same engine shape, same pool size), both directions.
+    (same trainer, same engine shape, same pool size), both directions.  The 2x8
+    shape (``nodes=2, trainer_gpus=8``) has one config, FN-T8R8S0, and no edges.
     """
     from yeto.rl.elastic_benchmark.capabilities import ResourceConfig
 
     total = nodes * gpus_per_node
     engine = 8
-    pp, tp = 8, 2
-    if trainer_gpus % (tp * pp) or trainer_gpus >= total:
-        raise ValueError("trainer_gpus must be a multiple of TP*PP=16 and leave rollout GPUs")
+    tp = 2
+    pp = FULL_LAYOUT_PP.get(2 * trainer_gpus)
+    if pp is None or trainer_gpus % (tp * pp) or trainer_gpus >= total:
+        raise ValueError("trainer_gpus must be 8 (TP2 PP4) or 16 (TP2 PP8) and leave rollout GPUs")
     parallel = (("tp", tp), ("pp", pp), ("cp", 1), ("ep", trainer_gpus // pp))
     configs = {}
     for engines in range(1, (total - trainer_gpus) // engine + 1):

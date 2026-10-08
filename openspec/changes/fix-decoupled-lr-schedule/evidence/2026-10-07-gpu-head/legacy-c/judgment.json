@@ -1,0 +1,20 @@
+{
+ "verdict": "INCOMPLETE",
+ "run": "",
+ "events": 0,
+ "rc": "rc=1 ()",
+ "islands": {},
+ "syncer_global_delta_norm": {},
+ "gpu_lines": [],
+ "problems": [
+  "rc: rc=1 ()"
+ ],
+ "missing": [
+  "island 0: no events",
+  "island 1: no events",
+  "syncer tape (head/yeto-output/yeto-tape.jsonl) absent or empty",
+  "fewer than 2 container GPU confirmations containing 'H100'"
+ ],
+ "notes": [],
+ "compare": null
+}

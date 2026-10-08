@@ -129,6 +129,80 @@ HARNESS_METRIC_KEYS = (
     "policy_age_violation",
 )
 
+# -- S14-M1: per-record TITO session mismatches (``rl_harness_mismatch``) -----
+# Observe-only (``--rl-observe-timeline``): one event per mismatch record that
+# upstream Miles' session server stored in ``sample.metadata["tito_session_mismatch"]``
+# (list[dict] from ``TokenSeqComparator.compare_sequences``), capped per round and
+# with the texts truncated, so the tape can tell *which* kind/segment/text
+# mismatched instead of only how many. observe=False emits nothing.
+HARNESS_MISMATCH_EVENT = "rl_harness_mismatch"
+HARNESS_MISMATCH_MAX_PER_ROUND = 64
+HARNESS_MISMATCH_TEXT_MAX = 512
+HARNESS_MISMATCH_KINDS = (
+    "assistant_text", "non_assistant_text", "special_token_count", "special_token_type",
+)
+HARNESS_MISMATCH_SCHEMA: dict[str, type] = {
+    "rollout_id": int,          # training round (driver rollout_id)
+    "policy_version": int,      # batch policy version
+    "sample_index": int,        # Miles Sample.index (-1 when the sample has none)
+    "group_index": int,         # Miles Sample.group_index (-1 when absent)
+    "record_index": int,        # position inside the sample's mismatch list
+    "kind": str,                # upstream ``type`` (HARNESS_MISMATCH_KINDS or other)
+    "segment_index": int,       # upstream segment_index (-1 = structural)
+    "expected_text": str,       # truncated to HARNESS_MISMATCH_TEXT_MAX chars
+    "actual_text": str,
+    "detail": str,
+    "truncated": bool,          # any text was cut
+}
+
+
+# -- rl-fn-codex-rollout 1.0: per-trajectory rewards (``rl_trajectory_reward``) --
+# Observe-only: one event per trained sample with its Terminal-Bench task_id and
+# the reward the trainer saw, so a tape can show which task scored (the judge's
+# ``--known-scorable``). ``reward`` None = non-finite; ``success`` None = no signed verdict.
+TRAJECTORY_REWARD_EVENT = "rl_trajectory_reward"
+TRAJECTORY_REWARD_MAX_PER_ROUND = 256
+TRAJECTORY_REWARD_SCHEMA: dict[str, tuple[type, ...]] = {
+    "rollout_id": (int,),
+    "policy_version": (int,),
+    "sample_index": (int,),
+    "group_index": (int,),
+    "task_id": (str,),
+    "trajectory_id": (str,),
+    "reward": (float, type(None)),
+    "success": (bool, type(None)),
+    "aborted": (bool,),
+}
+
+
+def validate_trajectory_reward(record: Mapping[str, object]) -> list[str]:
+    """Schema check of one ``rl_trajectory_reward`` payload (labels excluded)."""
+    problems = []
+    for key, types in TRAJECTORY_REWARD_SCHEMA.items():
+        if key not in record:
+            problems.append(f"missing trajectory reward key {key!r}")
+            continue
+        value = record[key]
+        if (int in types and isinstance(value, bool)) or not isinstance(value, types):
+            problems.append(f"trajectory reward key {key!r} is {type(value).__name__}")
+    return problems
+
+
+def validate_harness_mismatch(record: Mapping[str, object]) -> list[str]:
+    """Schema check of one ``rl_harness_mismatch`` payload (labels excluded)."""
+    problems = []
+    for key, typ in HARNESS_MISMATCH_SCHEMA.items():
+        if key not in record:
+            problems.append(f"missing mismatch key {key!r}")
+            continue
+        value = record[key]
+        if typ is int and isinstance(value, bool) or not isinstance(value, typ):
+            problems.append(f"mismatch key {key!r} is {type(value).__name__}, expected {typ.__name__}")
+    for key in ("expected_text", "actual_text", "detail"):
+        if isinstance(record.get(key), str) and len(record[key]) > HARNESS_MISMATCH_TEXT_MAX:
+            problems.append(f"mismatch key {key!r} longer than {HARNESS_MISMATCH_TEXT_MAX}")
+    return problems
+
 
 def validate_load_sample(sample: Mapping[str, object]) -> list[str]:
     """Schema check of one load payload: unknown keys, wrong types and unknown

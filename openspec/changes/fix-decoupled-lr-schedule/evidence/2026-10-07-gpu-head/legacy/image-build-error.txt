@@ -1,0 +1,6 @@
+(yeto-head-job, pid=2878) time="2026-10-07T12:05:45Z" level=fatal msg="initializing source docker://ghcr.io/michaellchung/yeto-miles-ports@sha256:37ac689e29caeecf9faf8587a3ad58c154ecffc7798711d5bd59d792d002b9f9: unable to retrieve auth token: invalid username/password: unauthorized"
+(yeto-head-job, pid=2878) time="2026-10-07T12:05:45Z" level=fatal msg="initializing source docker://ghcr.io/michaellchung/yeto-miles-ports@sha256:37ac689e29caeecf9faf8587a3ad58c154ecffc7798711d5bd59d792d002b9f9: unable to retrieve auth token: invalid username/password: unauthorized"
+(yeto-head-job, pid=2878) Terminating task due to error: command skopeo copy docker://ghcr.io/michaellchung/yeto-miles-ports@sha256:37ac689e29caeecf9faf8587a3ad58c154ecffc7798711d5bd59d792d002b9f9 oci:... had exit status: 1
+(yeto-head-job, pid=2878) Terminating task due to error: command skopeo copy docker://ghcr.io/michaellchung/yeto-miles-ports@sha256:37ac689e29caeecf9faf8587a3ad58c154ecffc7798711d5bd59d792d002b9f9 oci:... had exit status: 1
+(yeto-head-job, pid=2878)     raise ImageBuildError(msg, image_id)
+(yeto-head-job, pid=2878) modal.exception.ImageBuildError: Image build for im-5B3Q5Ok9tTrbb8ZIZLL8nn failed.

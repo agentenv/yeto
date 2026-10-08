@@ -279,7 +279,7 @@ async def run(
         # IR-2: admission closed (drain of this member) -> infrastructure, not a reward.
         return {**adapter.infrastructure_metadata(ADMISSION_CLOSED, episode_id=None), **fields}
     lease: EnvironmentLease | None = None
-    session_open = lease_open = False
+    session_open = lease_open = handed_off = False
     try:
         if board is not None:
             _board_kwcall(board, "enter_session", trajectory_id, _member)
@@ -305,20 +305,33 @@ async def run(
             **{k: metadata[k] for k in ("script", "final_status", "hang_seconds") if k in metadata},
         }
         try:
-            untrusted = await asyncio.wait_for(
-                _drive_worker(job, trajectory_id, _tool_wait_board, getattr(lease, "worker_env", None)),
-                timeout=lease.deadline_seconds,
-            )
-        except asyncio.TimeoutError:
-            untrusted = {"status": "timeout", "metrics": {"timed_out": 1}, "episode_id": episode_id}
-        except adapter.harness.CodexHarnessError as exc:
-            metrics = getattr(exc, "metrics", None)
-            tito = adapter.mirror_tito_counters(metrics, board)
-            return {**adapter.infrastructure_metadata(str(exc), episode_id=episode_id, metrics=metrics), **fields, **tito}
-        tito = adapter.mirror_tito_counters(untrusted.get("metrics"), board)
-        signed = await adapter.finish_trusted(untrusted, lease.verifier, task_id=task_id, sample_id=sample_id)
-        signed["expected_policy_version"] = expected_version
-        return {**signed, **fields, **tito}
+            segments = await adapter.prepare_segment_sessions(job)
+        except Exception as exc:  # noqa: BLE001 - session-server failures are infrastructure
+            return {**adapter.infrastructure_metadata(f"segment sessions: {type(exc).__name__}: {exc}", episode_id=episode_id), **fields}
+        try:
+            try:
+                untrusted = await asyncio.wait_for(
+                    _drive_worker(job, trajectory_id, _tool_wait_board, getattr(lease, "worker_env", None)),
+                    timeout=lease.deadline_seconds,
+                )
+            except asyncio.TimeoutError:
+                untrusted = {"status": "timeout", "metrics": {"timed_out": 1}, "episode_id": episode_id}
+            except adapter.harness.CodexHarnessError as exc:
+                metrics = getattr(exc, "metrics", None)
+                tito = adapter.mirror_tito_counters(metrics, board)
+                handed_off = True
+                return {**adapter.infrastructure_metadata(str(exc), episode_id=episode_id, metrics=metrics), **fields, **tito, **segments}
+            tito = adapter.mirror_tito_counters(untrusted.get("metrics"), board)
+            signed = await adapter.finish_trusted(untrusted, lease.verifier, task_id=task_id, sample_id=sample_id)
+            signed["expected_policy_version"] = expected_version
+            handed_off = True
+            return {**signed, **fields, **tito, **segments}
+        finally:
+            # Worker crash (any non-harness exception), cancellation or a
+            # finish_trusted error: the metadata never reaches
+            # codex_openenv_generate, so delete the pre-created sessions here.
+            if segments and not handed_off:
+                await adapter.release_unreturned_segments(base_url, segments)
     finally:
         try:
             if lease is not None:

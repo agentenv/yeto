@@ -1,0 +1,61 @@
+{
+ "verdict": "INCOMPLETE",
+ "run": "",
+ "events": 0,
+ "rc": "rc=1 ()",
+ "islands": {},
+ "syncer_global_delta_norm": {},
+ "gpu_lines": [],
+ "problems": [
+  "rc: rc=1 ()",
+  "island 0: applied_lrs differ from s14-dlr-ports-20261007a",
+  "island 1: applied_lrs differ from s14-dlr-ports-20261007a"
+ ],
+ "missing": [
+  "island 0: no events",
+  "island 1: no events",
+  "syncer tape (head/yeto-output/yeto-tape.jsonl) absent or empty",
+  "fewer than 2 container GPU confirmations containing 'H100'"
+ ],
+ "notes": [],
+ "compare": {
+  "0": {
+   "equal": false,
+   "this": [],
+   "other": [
+    "[1e-05]",
+    "[1e-05]",
+    "[1e-05]",
+    "[1e-05]",
+    "[1e-05]",
+    "[1e-05]",
+    "[1e-05]",
+    "[1e-05]",
+    "[1e-05]",
+    "[1e-05]",
+    "[1e-05]",
+    "[1e-05]",
+    "[1e-05]"
+   ]
+  },
+  "1": {
+   "equal": false,
+   "this": [],
+   "other": [
+    "[1e-05]",
+    "[1e-05]",
+    "[1e-05]",
+    "[1e-05]",
+    "[1e-05]",
+    "[1e-05]",
+    "[1e-05]",
+    "[1e-05]",
+    "[1e-05]",
+    "[1e-05]",
+    "[1e-05]",
+    "[1e-05]",
+    "[1e-05]"
+   ]
+  }
+ }
+}

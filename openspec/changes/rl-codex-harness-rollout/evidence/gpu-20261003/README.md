@@ -11,3 +11,6 @@ Root causes fixed on the way (all yeto-side, Miles pin e3a11ab3 and image 12fcd9
 A-T3-3 0581bb95 (gated q/k/v LoRA), A-T3-4 bb5bd832 (rollout-worker configure), A-T3-5 d74665cb/1b97b570/b94c4ddb (Modal client in island + provider-outage fail-fast),
 A-T3-6 56c34191 (tito_session_mismatch list), A-T3-7 9cc2b621 (ordered tool-wait board calls; landed after -12, CPU-tested only).
 A-T3-8: `--attention-backend flash` (qwen3_5 recipe) uses flash_attn cute (FA4) kernels that fail on L40S/Ada -> training needs H100 (hardware, not code).
+
+S14 re-read (2026-10-07, no new GPU): `launcher.log` of run -12 (local `/home/michael/work/gpu-b1-runs/codex-smoke-20261003-12/runs/codex-smoke-20261003-12/launcher.log`) carries the 9.2 criterion data the tapes lack:
+`rollout/tito_session_mismatch_rate/v1` step1 0.1667 (assistant_text 0.125, special_token_count 0.0417), step2 0.0 (lines 7409, 10131); `train/tis_clipfrac` 0.0 both steps, `train/train_rollout_logprob_abs_diff` 0.0173/0.0186 (lines 7613, 10225).

@@ -30,7 +30,13 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from ..algorithm import AlgorithmSpec, AlgorithmSpecError, PluginRef, load_extensions
+from ..algorithm import (
+    CRITIC_ESTIMATORS,
+    AlgorithmSpec,
+    AlgorithmSpecError,
+    PluginRef,
+    load_extensions,
+)
 
 Assignment = tuple[str, Any]  # (spec field path, value)
 
@@ -170,10 +176,17 @@ def _correction_rows() -> list[FlagMapping]:
     ]
 
 
+def _estimator_absorb(value: str) -> list[Assignment]:
+    pairs: list[Assignment] = [("advantage.estimator", value)]
+    if value in CRITIC_ESTIMATORS:  # Miles: use_critic = estimator == "ppo" (:3591)
+        pairs.append(("execution.needs_critic", True))
+    return pairs
+
+
 def _builtin_rows() -> list[FlagMapping]:
     return [
         FlagMapping("--advantage-estimator", "advantage.estimator", False, _str,
-                    lambda v: [("advantage.estimator", v)], lambda spec: [],
+                    _estimator_absorb, lambda spec: [],
                     emitted_by_config=True),
         _value_row("--eps-clip", "loss.eps_clip", _float, emit=_num),
         _value_row("--eps-clip-high", "loss.eps_clip_high", _float, emit=_num),
@@ -201,12 +214,25 @@ def _builtin_rows() -> list[FlagMapping]:
 # Objective-changing upstream flags that the spec cannot express yet (Miles
 # arguments.py algo / rollout / reward groups at MILES_NEXT_COMMIT).
 _UNMAPPED = [
+    # critic flags: rows registered by yeto.rl.algos.critic (rl-algo-critic-family)
     "--gamma",
     "--lambd",
     "--value-clip",
     "--num-critic-only-steps",
     "--critic-load",
     "--critic-lr",
+    "--critic-lr-warmup-iters",
+    # fork-only (yeto-gae-variant ce96fc060, yeto-vapo cbf8c4737): rows registered by
+    # yeto.rl.algos.critic (rl-algo-critic-family 7.2, VAPO); critic.FORK_FLAGS
+    "--gae-variant",
+    "--gae-lambd-mode",
+    "--gae-length-alpha",
+    "--gae-critic-lambd",
+    "--positive-example-lm-loss-coef",
+    "--positive-example-reward-threshold",
+    "--positive-example-source",
+    "--critic-updates-per-step",  # fork e07e51c07 (CompactionRL 9.3)
+    "--num-critic-epochs",  # same fork dest (SAO spelling)
     "--ref-update-interval",
     "--disable-compute-advantages-and-returns",
     "--use-rollout-entropy",
@@ -239,6 +265,16 @@ _UNMAPPED = [
     "--sapo-tau-neg",
     "--gmpo-log-clip-low",
     "--gmpo-log-clip-high",
+    # Miles fork SAO port (yeto-sao; rl-algo-critic-family 8.2/8.3): mapped by
+    # yeto.rl.algos.sao.
+    "--policy-objective",
+    "--sao-dis-eps-low",
+    "--sao-dis-eps-high",
+    "--value-loss-type",
+    "--value-num-bins",
+    "--value-target-type",
+    "--hl-gauss-sigma-ratio",
+    "--value-reward-range",  # two values; translation constant, never absorbed
 ]
 
 MAPPINGS: dict[str, FlagMapping] = {row.flag: row for row in _builtin_rows()}
@@ -382,7 +418,7 @@ def absorb_extra_argv(
             pairs = []  # --use-tis + --custom-tis-function-path = correction.method custom
         for path, new in pairs:
             current = spec.get_path(path)
-            default = AlgorithmSpec.default_at(path)
+            default = spec.effective_default_at(path)
             shown = new.path if isinstance(new, PluginRef) else new
             if current != default and current is not None and not _values_equal(current, new):
                 shown_current = current.path if isinstance(current, PluginRef) else current
@@ -411,7 +447,7 @@ def absorb_extra_argv(
         if isinstance(value, PluginRef):
             value = value.to_dict()
         if tail:
-            payload[head][tail] = value
+            payload.setdefault(head, {})[tail] = value
         else:
             payload[head] = value
     # Placement switched to loss: a reward KL coefficient already in the spec

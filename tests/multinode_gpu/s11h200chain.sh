@@ -15,13 +15,21 @@
 #   (set PREFER_L40S=0 D1_GPU=h100 to stay on the H100 path). Then lp, c17/c29, fn as usual.
 # A failed run whose launcher tore the cluster down (job FAILED -> recovery teardown, even with --keep) no longer stops the chain:
 #   the next step re-provisions (cost of the dead cluster folded into ACC); lp runs after the re-provisioning c17 in that case.
-# usage: s11h200chain.sh <prefix>     env: START_AT (sweep|e1|fn), PREFER_L40S (1), CAP_USD (150; stage total $300), FN_ENABLE (1), FNA_EST_USD (50), D1_GPU (h200|h100), FALLBACK_H200 (1), FN_GPU (h200|h100), FN_CONV (1; 0 when FN_GPU=h100), FNCONV_EST_USD (50), HARD (3000), HARD_FNBOOT, HARD_FNA
+# usage: s11h200chain.sh <prefix>     env: START_AT (sweep|e1|fn), PREFER_L40S (1), CAP_USD (150; stage total $300), FN_ENABLE (1), FNA_EST_USD (50), D1_GPU (h200|h100), FALLBACK_H200 (1), FN_GPU (h200|h100), FN_CONV (1; 0 when FN_GPU=h100), FNCONV_EST_USD (50), HARD (3000), HARD_FNBOOT, HARD_FNA,
+#        FNA_CASE (fn8s | fn8r: fnboot+fna case; fn8r = dense length reward, judge_fn_learning_signal.py), FNA_SKIP (0; 1 = fnboot -> fnprep -> fnconv
+#        only, no fna: H200 full-model conversion), FN_PLAN_ONLY (1 = print the resolved fn plan and exit 0 before any cloud call)
 set -u
 P=$1; D=$(cd "$(dirname "$0")" && pwd); REPO=$(cd $D/../.. && pwd); B=${RUN_ROOT:-/home/michael/work/s1-runs}; export HOME=/home/michael
 SKY=/home/michael/work/gpu-head/venv/bin/sky; CAP=${CAP_USD:-150}; LOG=$B/$P.chain.log; mkdir -p $B
 CLL=$P-l-l0-eu-north1; CLH=$P-h-l0-eu-north1; RATE_L=9.14
 G=${D1_GPU:-h200}; FG=${FN_GPU:-h200}
 for g in $G $FG; do case $g in h100|h200) ;; *) echo "abort: D1_GPU/FN_GPU must be h100|h200 (got $g)"; exit 64;; esac; done
+FC=${FNA_CASE:-fn8s}; case $FC in fn8s|fn8r) ;; *) echo "abort: FNA_CASE must be fn8s|fn8r (got $FC)"; exit 64;; esac
+FSKIP=${FNA_SKIP:-0}; case $FSKIP in 0|1) ;; *) echo "abort: FNA_SKIP must be 0|1 (got $FSKIP)"; exit 64;; esac
+FCONV=${FN_CONV:-$( [ $FG = h100 ] && echo 0 || echo 1 )}
+[ $FSKIP = 1 ] && [ $FCONV != 1 ] && { echo "abort: FNA_SKIP=1 leaves only fnconv, but fnconv is disabled (FN_CONV=$FCONV, FN_GPU=$FG)"; exit 64; }
+FNJ="--num-gpus 8 --rollouts 6 --rank 16 --expert-rank 8"   # FN-A-RESULT section 2: judge defaults (rank 32) mis-judged try27 trainable
+[ "${FN_PLAN_ONLY:-0}" = 1 ] && { echo "fnplan case=$FC skip_fna=$FSKIP fnconv=$FCONV fn_gpu=$FG segs=fnboot,fnprep$( [ $FSKIP = 1 ] || echo ,fna)$( [ $FCONV = 1 ] && echo ,fnconv) judge=\"$FNJ\"$( [ $FC = fn8r ] && echo ' signal=judge_fn_learning_signal.py')"; exit 0; }
 rate() { [ $1 = h100 ] && echo 30.8 || echo 36.0; }               # nebius eu-north1 8-GPU on-demand $/h [sky catalog 2026-10-05]
 sku() { echo gpu-$1-sxm_8gpu-128vcpu-1600gb; }
 hest() { [ $1 = h100 ] && echo 7 || echo 8; }                       # $ per warm run (H200 8; scaled by 30.8/36 for h100)
@@ -116,8 +124,11 @@ sw c29 $EST T1R3S0 29
 fi
 # seg 3 (chain tail): Flash-Next stage A on its OWN H200 cluster <P>-f (the model store FS is attached only at provision time, so the
 # sweep cluster -- launched without --model-store -- cannot be reused). The sweep cluster is downed first.
-#   fnboot: fnrun fn8s launch (--keep) to provision the FS-attached node; with no torch_dist yet the learner refuses the ref-load
-#           (fail-fast, expected) -- if torch_dist already exists it simply IS the fnA run.
+#   fnboot: fnrun fn8s launch (--keep) with BOOT_ONLY=1 (--rl-boot-only) to provision the FS-attached node: the learner runs every
+#           torch_dist-free check (provider view, Miles argv build+parse, ref-load probe), writes ~/yeto-rl/boot_only.json +
+#           "FN_BOOT_ONLY_OK ref_load_present=<bool>" and exits 0 -> job SUCCEEDED -> --keep keeps the cluster (a FAILED job is
+#           abandoned and torn down regardless of --keep: try22 "fn cluster not UP after fnboot").  fnboot NEVER trains, even if
+#           torch_dist already exists; training happens only in fna.  fnboot OK = marker seen AND cluster UP, else stop with reason.
 #   fnprep: s11fnprep.sh (populate 4layer snapshot + convert torch_dist; df gates; never deletes) -> fnprep.json
 #   fna   : fnrun fn8s again (warm), STEPS=6; judge_qwen3_8_next_lora_log.py on run.log
 #   fnconv: s11fnconv.sh (B0-2 full -> torch_dist, TP2 PP4 nproc 8; df/marker/no-retry gates) -> fnconv.json
@@ -126,35 +137,44 @@ if [ $H = 1 ]; then down $CLH H; else down $CLL L; fi
 CLF=$P-f-l0-eu-north1; CL=$CLF; CP=$P-f; H=1; N=0; export NODES=1; RATE_H=$(rate $FG); export FN_GPU=$FG   # sweep cluster already folded into ACC
 log "fn SKU: $(sku $FG) \$$RATE_H/h"
 s=$(spent); python3 -c "import sys;sys.exit(0 if $s+${FNA_EST_USD:-50}<=$CAP else 1)" || { log "budget guard: fn est \$${FNA_EST_USD:-50} + \$$s > \$$CAP -> fn not executed"; exit 4; }
-(cd $REPO && /tmp/yeto-venv/bin/python $D/fp_fn.py $REPO fn8s --seed 17 --total-steps 6 > $B/$P-fp_fn8s.json 2>$B/$P-fp_fn8s.err); log "fp_fn fn8s steps6: $(tail -1 $B/$P-fp_fn8s.json | python3 -c 'import json,sys;print(json.load(sys.stdin).get("fp"))' 2>/dev/null)"
-fnrun() {  # fnrun <name> <hard>
+(cd $REPO && /tmp/yeto-venv/bin/python $D/fp_fn.py $REPO $FC --seed 17 --total-steps 6 > $B/$P-fp_$FC.json 2>$B/$P-fp_$FC.err); log "fp_fn $FC steps6: $(tail -1 $B/$P-fp_$FC.json | python3 -c 'import json,sys;print(json.load(sys.stdin).get("fp"))' 2>/dev/null)"
+fnrun() {  # fnrun <name> <hard> [boot_only 0|1]
   local t0; t0=$(date +%s)
-  env STEPS=6 CLUSTER_PREFIX=$CP RUN_ROOT=$B $D/s1run.sh fn8s $P-$1 $2 $(( $2 + 600 )) > $B/$P-$1.out 2>&1
+  env STEPS=6 BOOT_ONLY=${3:-0} CLUSTER_PREFIX=$CP RUN_ROOT=$B $D/s1run.sh $FC $P-$1 $2 $(( $2 + 600 )) > $B/$P-$1.out 2>&1
   kill $(cat $B/$P-$1/watchdog.pid 2>/dev/null) 2>/dev/null
   [ $UP_H = 0 ] && [ ! -f $B/$P-$1/provision_failed.txt ] && UP_H=$t0
   post $B/$P-$1
   grep -iE "lora|rank|expected_lora_keys|trainable" $B/$P-$1/pulled/run.log > $B/$P-$1/lora.txt 2>/dev/null
   grep -iE "ref.load|torch_dist|load.*checkpoint|loaded" $B/$P-$1/pulled/run.log > $B/$P-$1/torchdist-load.txt 2>/dev/null
-  (cd $REPO && timeout 300 python3 scripts/judge_qwen3_8_next_lora_log.py $B/$P-$1/pulled/run.log > $B/$P-$1/judge-fn.out 2>&1; echo "judge rc=$?" >> $B/$P-$1/judge-fn.out)
+  (cd $REPO && timeout 300 python3 scripts/judge_qwen3_8_next_lora_log.py $B/$P-$1/pulled/run.log $FNJ > $B/$P-$1/judge-fn.out 2>&1; echo "judge rc=$?" >> $B/$P-$1/judge-fn.out)
+  [ $FC = fn8r ] && [ "${3:-0}" = 0 ] && (cd $REPO && timeout 120 python3 scripts/judge_fn_learning_signal.py $B/$P-$1/pulled/rl-island-0.jsonl --json $B/$P-$1/judge-signal.json > $B/$P-$1/judge-signal.out 2>&1; echo "signal judge rc=$?" >> $B/$P-$1/judge-signal.out)
+  timeout 120 ssh -o StrictHostKeyChecking=no $CL 'cat ~/yeto-rl/boot_only.json 2>/dev/null' > $B/$P-$1/boot_only.json 2>/dev/null
   timeout 120 ssh -o StrictHostKeyChecking=no $CL 'cat ~/yeto-rl/terminal.json 2>/dev/null; echo; df -h /mnt/yeto-models | tail -1; nvidia-smi --query-gpu=index,memory.used --format=csv' > $B/$P-$1/terminal.txt 2>&1
   log "$1 $(cat $B/$P-$1/rc.txt 2>/dev/null) rounds=$(grep -c rl_round_trained $B/$P-$1/pulled/rl-island-0.jsonl 2>/dev/null) spent~\$$(spent)"
 }
-fnrun fnboot ${HARD_FNBOOT:-3000}
+fnrun fnboot ${HARD_FNBOOT:-3000} 1
 [ -f $B/$P-fnboot/provision_failed.txt ] && { log "fn $FG provision failed -> fn not executed (capacity)"; exit 8; }
-if [ "$(grep -c rl_round_trained $B/$P-fnboot/pulled/rl-island-0.jsonl 2>/dev/null)" -ge 6 ]; then log "fnboot already trained 6 rounds (torch_dist existed) -> it is the fnA run"; exit 0; fi
-timeout 120 $SKY status $CL 2>/dev/null | grep -q ' UP ' || { log "fn cluster not UP after fnboot -> stop"; exit 2; }
+fb=$(grep -hoE "FN_BOOT_ONLY_OK ref_load_present=(true|false)" $B/$P-fnboot/pulled/run.log $B/$P-fnboot/launch.log 2>/dev/null | tail -1)
+[ -z "$fb" ] && grep -q '"marker": "FN_BOOT_ONLY_OK"' $B/$P-fnboot/boot_only.json 2>/dev/null && fb="FN_BOOT_ONLY_OK ref_load_present=$(python3 -c 'import json,sys;print(str(json.load(open(sys.argv[1]))["ref_load_present"]).lower())' $B/$P-fnboot/boot_only.json 2>/dev/null)"
+fbup=0; timeout 120 $SKY status $CL 2>/dev/null | grep -q ' UP ' && fbup=1
+log "fnboot boot-only: marker='${fb:-none}' cluster_up=$fbup"
+[ -n "$fb" ] || { log "fnboot: no FN_BOOT_ONLY_OK marker (learner failed before the boot-only exit; see $B/$P-fnboot/pulled/run.log) -> stop (EXIT trap downs the fn cluster)"; exit 2; }
+[ $fbup = 1 ] || { log "fn cluster not UP after fnboot (marker seen: launcher/watchdog tore it down?) -> stop"; exit 2; }
 s=$(spent); python3 -c "import sys;sys.exit(0 if $s+30<=$CAP else 1)" || { log "budget guard before fnprep (\$$s) -> fnprep/fna not executed"; exit 4; }
 $D/s1reset.sh $CL $B/$P-fnprep.reset.txt || { log "reset NOT CLEAN before fnprep -> stop"; exit 3; }
 mkdir -p $B/$P-fnprep; git -C $REPO archive HEAD | (rm -rf $B/$P-fnprep/yeto && mkdir -p $B/$P-fnprep/yeto && tar x -C $B/$P-fnprep/yeto)
 $D/s11fnprep.sh $CL $B/$P-fnprep $B/$P-fnprep/yeto > $B/$P-fnprep.out 2>&1; log "fnprep $(tail -1 $B/$P-fnprep.out) $(cat $B/$P-fnprep/fnprep.json 2>/dev/null | tr -d '\n ' | cut -c1-300)"
 grep -q FNPREP_OK $B/$P-fnprep.out || { log "fnprep failed -> fnA not executed"; exit 6; }
+if [ $FSKIP = 1 ]; then log "fna skipped (FNA_SKIP=1: fnboot -> fnprep -> fnconv only)"; else
 s=$(spent); python3 -c "import sys;sys.exit(0 if $s+25<=$CAP else 1)" || { log "budget guard before fna (\$$s) -> fnA not executed"; exit 4; }
 $D/s1reset.sh $CL $B/$P-fna.reset.txt || { log "reset NOT CLEAN before fna -> stop"; exit 3; }
 fnrun fna ${HARD_FNA:-3600}
+[ $FC = fn8r ] && log "fna signal $(grep -h verdict $B/$P-fna/judge-signal.out 2>/dev/null | tail -1)"
+fi
 # seg 3d fnconv (B0-2, user-approved 10-06): full HF -> torch_dist on the same FS cluster, after fnA (chain tail; never re-run on failure:
 # a partial output dir makes s11fnconv.sh FAIL instead of retrying). Est $22-50 [speculative; conversion time never measured] -> guard
 # uses FNCONV_EST_USD (50) inside the same CAP. FN_CONV=0 skips. fnA failing does not block it (independent of the 4layer run).
-[ "${FN_CONV:-$( [ $FG = h100 ] && echo 0 || echo 1 )}" = 1 ] || { log "fnconv disabled (FN_CONV=0; default 0 on FN_GPU=h100: TP2 PP4 ~45GB/rank + HF-load peak unverified on 80GB)"; exit 0; }
+[ $FCONV = 1 ] || { log "fnconv disabled (FN_CONV=0; default 0 on FN_GPU=h100: TP2 PP4 ~45GB/rank + HF-load peak unverified on 80GB)"; exit 0; }
 timeout 120 $SKY status $CL 2>/dev/null | grep -q ' UP ' || { log "fn cluster not UP before fnconv -> stop"; exit 2; }
 s=$(spent); python3 -c "import sys;sys.exit(0 if $s+${FNCONV_EST_USD:-50}<=$CAP else 1)" || { log "budget guard before fnconv (\$$s + \$${FNCONV_EST_USD:-50} > \$$CAP) -> fnconv not executed"; exit 4; }
 $D/s1reset.sh $CL $B/$P-fnconv.reset.txt || { log "reset NOT CLEAN before fnconv -> stop"; exit 3; }

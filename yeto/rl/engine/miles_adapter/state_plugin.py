@@ -25,6 +25,8 @@ torch / megatron / miles are imported lazily; importing this module is cheap.
 
 from __future__ import annotations
 
+import os
+import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -39,6 +41,9 @@ APPLY_STATE = f"{_PLUGIN_MODULE}.apply_state"
 GRAD_NORM = f"{_PLUGIN_MODULE}.grad_norm"
 APPLIED_LRS = f"{_PLUGIN_MODULE}.applied_lrs"
 STEP_LOSSES = f"{_PLUGIN_MODULE}.step_losses"
+# rl-algo-critic-family 3.2: run in the critic's processes before its train.
+CRITIC_RECORDERS = f"{_PLUGIN_MODULE}.install_critic_recorders"
+EXPLAINED_VARIANCE_KEY = "explained_variance"
 
 
 class StatePluginError(RuntimeError):
@@ -445,10 +450,197 @@ def export_state(actor: Any, *, policy_version: int) -> dict[str, Any] | None:
         return _export_state(actor, policy_version=policy_version)
 
 
+def is_native_flash_next(actor: Any) -> bool:
+    """Qwen3.8-Flash-Next (qwen4_exp) trains through Miles' native LoRA plugin.
+
+    The pinned Megatron-Bridge has no qwen4_exp bridge, so ``adapter_bindings``
+    cannot resolve its adapters; the learner marks the run explicitly
+    (``yeto_rl_native_lora_export``) and this module dispatches on that.
+    """
+
+    return getattr(getattr(actor, "args", None), "yeto_rl_native_lora_export", None) == "qwen3_8_next"
+
+
+def _flash_next_exporter() -> Callable[[Any], Iterable[Any]]:
+    from miles_plugins.models.qwen3_8_next.lora import export_qwen3_8_next_lora_hf_chunks
+
+    return export_qwen3_8_next_lora_hf_chunks
+
+
+_FN_LAYER_RE = re.compile(r"\.layers\.(\d+)\.")
+# Tensors per layer emitted by Miles c35702e ``export_qwen3_8_next_lora_hf_chunks``:
+# GDN attention 5 projections x A/B, QSA q/k/v/o x A/B, shared expert
+# gate/up/down x A/B, routed experts gate_up/down x A/B (every layer is MoE).
+_FN_ATTN_TENSORS = {"linear_attn": 10, "self_attn": 8}
+_FN_MLP_TENSORS = {"mlp.shared_expert": 6, "mlp.experts": 4}
+
+
+def _fn_layer(name: str) -> int:
+    match = _FN_LAYER_RE.search(name)
+    if match is None:
+        raise StatePluginError(f"Flash-Next LoRA tensor {name!r} has no layer index")
+    return int(match.group(1))
+
+
+def merge_pp_stage_exports(stages: Sequence[Mapping[str, Any]], *, num_layers: int | None = None) -> dict[str, Any]:
+    """Merge per-PP-stage Flash-Next exports (stage order) into one full-model dict.
+
+    Miles names adapters with Megatron's global ``layer_number - 1``, so names
+    are already global: nothing is renumbered.  Refuses duplicate names across
+    stages, overlapping / out-of-order stage layer ranges, missing layers and
+    layers whose tensor count is not GDN/QSA attention + shared + routed experts.
+    """
+
+    merged: dict[str, Any] = {}
+    previous_max = -1
+    for index, stage in enumerate(stages):
+        if not stage:
+            raise StatePluginError(f"Flash-Next PP stage {index} exported no LoRA tensors")
+        layers = {_fn_layer(name) for name in stage}
+        if min(layers) <= previous_max:
+            raise StatePluginError(
+                f"Flash-Next PP stage {index} layers {sorted(layers)} overlap or precede earlier stages "
+                f"(max {previous_max}); names must carry global layer indices")
+        previous_max = max(layers)
+        for name, value in stage.items():
+            if name in merged:
+                raise StatePluginError(f"duplicate Flash-Next LoRA tensor {name!r} across PP stages")
+            merged[name] = value
+    per_layer: dict[int, list[str]] = {}
+    for name in merged:
+        per_layer.setdefault(_fn_layer(name), []).append(name)
+    expected_layers = range(num_layers) if num_layers else range(max(per_layer) + 1)
+    missing = sorted(set(expected_layers) - set(per_layer))
+    extra = sorted(set(per_layer) - set(expected_layers))
+    if missing or extra:
+        raise StatePluginError(f"Flash-Next LoRA export missing layers {missing} / unexpected layers {extra}")
+    for layer, names in sorted(per_layer.items()):
+        attention = [kind for kind in _FN_ATTN_TENSORS if any(f".{kind}." in n for n in names)]
+        if len(attention) != 1:
+            raise StatePluginError(f"Flash-Next layer {layer} has attention kinds {attention}")
+        want = _FN_ATTN_TENSORS[attention[0]] + sum(_FN_MLP_TENSORS.values())
+        if len(names) != want:
+            raise StatePluginError(f"Flash-Next layer {layer} exported {len(names)} tensors, expected {want}")
+    return merged
+
+
+def _torch_group(group: Any) -> Any:
+    """The registered torch ProcessGroup behind a Miles ``ReloadableProcessGroup``."""
+
+    inner = group.__dict__.get("group") if hasattr(group, "__dict__") else None
+    return inner if inner is not None else group
+
+
+def _pp_gather_default(local: dict[str, Any] | None, is_main: bool) -> list[dict[str, Any] | None] | None:
+    """Gather each PP stage's export to the main rank over the PP group.
+
+    Only the PP group that contains the main rank carries tensors (one tiny
+    flag all-gather per group decides); others send ``None``.  Returns the
+    stage-ordered list on the main rank, ``None`` elsewhere.  Without PP (or
+    without torch.distributed) the local export is the whole model.
+    """
+
+    import torch.distributed as dist
+
+    if not (dist.is_available() and dist.is_initialized()):
+        return [local] if is_main else None
+    from megatron.core import mpu
+
+    if mpu.get_pipeline_model_parallel_world_size() <= 1:
+        return [local] if is_main else None
+    # Miles wraps groups in ReloadableProcessGroup; torch's gather_object resolves
+    # ``dst`` through the group registry, which only knows the inner group.
+    group = _torch_group(mpu.get_pipeline_model_parallel_group())
+    size = dist.get_world_size(group)
+    flags: list[Any] = [None] * size
+    dist.all_gather_object(flags, (bool(is_main), dist.get_rank()), group=group)
+    mains = [rank for flag, rank in flags if flag]
+    if not mains:
+        return None
+    if len(mains) != 1:
+        raise StatePluginError(f"multiple Flash-Next main ranks in one PP group: {mains}")
+    gathered: list[Any] | None = [None] * size if is_main else None
+    dist.gather_object(local, gathered, dst=mains[0], group=group)
+    return gathered  # PP group ranks are in stage order
+
+
+def _export_flash_next(actor: Any, *, policy_version: int, exporter=None, pp_gather=None) -> dict[str, Any] | None:
+    """Fingerprint export for the no-sync Flash-Next island (S11 try24 fix).
+
+    Uses Miles' own collective HF export (every rank must call it: TP/EP
+    gathers inside one PP stage). Names are Miles' SGLang adapter names
+    (``model.language_model.layers.N...lora_{A,B}.weight`` with global N, q/k/v
+    share one A, expert tensors padded to ``--lora-rank``) under the canonical
+    prefix; values are the bf16 model copies upcast to fp32.  Miles only covers
+    the local PP stage, so every stage's export is gathered over the PP group
+    to the main rank (last stage) and merged into the full model.  The layout is
+    learned from the first export (MilesPolicyState with
+    ``expected_layout_hash=None``) and pinned after.  The state is never applied
+    back (``apply_state`` refuses Flash-Next).
+    """
+
+    import torch
+
+    exporter = exporter or _flash_next_exporter()
+    pp_gather = pp_gather or _pp_gather_default
+    is_main = _is_main_rank(actor)
+    # Miles' TP/EP gathers leave stage-complete tensors on every rank; keep
+    # them only on the main rank's PP peers (same TP/DP coordinates).
+    retain = is_main or _tp_ep_leader(actor)
+    tensors: dict[str, Any] = {}
+    with torch.no_grad():
+        for chunk in exporter(actor.model):
+            for raw_name, value in chunk:
+                name = _canonical(raw_name)
+                if name in tensors:
+                    raise StatePluginError(f"duplicate Flash-Next LoRA tensor {name!r}")
+                tensors[name] = (
+                    value.detach().to(device="cpu", dtype=torch.float32).contiguous().clone()
+                    if retain
+                    else None
+                )
+    if not tensors:
+        raise StatePluginError("Flash-Next native LoRA export produced no tensors")
+    stages = pp_gather(tensors if retain else None, is_main)
+    if not is_main:
+        return None
+    if not stages or any(stage is None for stage in stages):
+        raise StatePluginError("Flash-Next PP gather is missing a stage export")
+    num_layers = getattr(getattr(actor, "args", None), "num_layers", None)
+    merged = merge_pp_stage_exports(stages, num_layers=int(num_layers) if num_layers else None)
+    print(
+        "[rl] Flash-Next native LoRA export: per-PP-stage tensors "
+        f"{[len(stage) for stage in stages]}, merged {len(merged)}",
+        flush=True,
+    )
+    for name, value in merged.items():
+        if not torch.isfinite(value).all().item():
+            raise StatePluginError(f"{name!r} contains NaN or Inf")
+    return {"policy_version": int(policy_version), "tensors": dict(sorted(merged.items()))}
+
+
+def _tp_ep_leader(actor: Any) -> bool:
+    """Miles' main-rank test minus the last-stage clause: the main rank's PP peers."""
+
+    try:
+        import torch.distributed as dist
+        from megatron.core import mpu
+    except ImportError:  # pragma: no cover
+        return False
+    if not (dist.is_available() and dist.is_initialized()):
+        return False
+    return (
+        mpu.get_tensor_model_parallel_rank() == 0
+        and mpu.get_data_parallel_rank(with_context_parallel=True) == 0
+    )
+
+
 def _export_state(actor: Any, *, policy_version: int) -> dict[str, Any] | None:
 
     import torch
 
+    if is_native_flash_next(actor):
+        return _export_flash_next(actor, policy_version=policy_version)
     bindings = adapter_bindings(actor)
     params = [b.parameter for b in bindings]
     tensors: dict[str, Any] = {}
@@ -606,6 +798,10 @@ def _apply_state(
 
     if optimizer not in OPTIMIZER_MODES:
         raise StatePluginError(f"optimizer mode must be one of {OPTIMIZER_MODES}")
+    if is_native_flash_next(actor):
+        # The no-sync Flash-Next island never applies a state; its export is a
+        # lossy (bf16, tied q/k/v A, padded) fingerprint, not an apply contract.
+        raise StatePluginError("Flash-Next native LoRA has no apply_state contract (no-sync only)")
     bindings = adapter_bindings(actor)
     params = [b.parameter for b in bindings]
     local = {b.name for b in bindings}
@@ -684,6 +880,7 @@ def install_grad_norm_recorder() -> bool:
     def train_one_step(*args: Any, **kwargs: Any):
         _record_applied_lr(original, args, kwargs)
         _arm_grad_audit(original, args, kwargs)
+        _EV_STATS.clear()
         result = original(*args, **kwargs)
         try:
             norm = result[1]
@@ -696,6 +893,356 @@ def install_grad_norm_recorder() -> bool:
     megatron_model.train_one_step = train_one_step
     _RECORDER_INSTALLED = True
     return True
+
+
+_VALUE_METRICS_INSTALLED = False
+# Explained-variance sufficient statistics over every micro-batch of the
+# current optimizer step (critic process): n, sum G, sum G^2, sum R, sum R^2
+# with R = G - v.  Per-micro-batch EV is undefined at the default
+# --micro-batch-size 1 under PPO with gamma = lambd = 1 and no KL reward: one
+# sample's returns are one constant, Var(G) = 0 (s13-g1-modal-20261007b, every
+# round's explained_variance missing).  Reset on entry to train_one_step.
+_EV_STATS: list[float] = []
+
+
+def _accumulate_ev_stats(returns: Any, values: Any, mask: Any = None) -> None:
+    returns = returns.detach().double().flatten()
+    values = values.detach().double().flatten()
+    if mask is not None:
+        keep = mask.detach().flatten().bool()
+        returns, values = returns[keep], values[keep]
+    residual = returns - values
+    add = [float(returns.numel()), float(returns.sum()), float((returns * returns).sum()),
+           float(residual.sum()), float((residual * residual).sum())]
+    if not _EV_STATS:
+        _EV_STATS.extend([0.0] * 5)
+    for i, value in enumerate(add):
+        _EV_STATS[i] += value
+
+
+def step_explained_variance(stats: list[float] | None = None) -> float | None:
+    """EV over all tokens of the step's micro-batches (population variances);
+    None without >= 2 tokens or when Var(G) is 0."""
+
+    n, sg, sg2, sr, sr2 = (stats if stats is not None else _EV_STATS) or [0.0] * 5
+    if n < 2:
+        return None
+    var_g = sg2 / n - (sg / n) ** 2
+    if var_g <= 0.0:
+        return None
+    var_r = max(sr2 / n - (sr / n) ** 2, 0.0)
+    return 1.0 - var_r / var_g
+
+
+def explained_variance(returns: Any, values: Any, mask: Any = None) -> float | None:
+    """``1 - Var(returns - values) / Var(returns)`` over the (masked) tokens.
+
+    ``values`` are the critic's pre-update predictions (``batch["values"]``),
+    ``returns`` the GAE returns Miles computed (``batch["returns"]``); yeto
+    computes no return or advantage itself. None when Var(returns) is 0 or
+    there are fewer than two tokens.
+    """
+
+    import torch
+
+    returns = returns.detach().float().flatten()
+    values = values.detach().float().flatten()
+    if mask is not None:
+        keep = mask.detach().flatten().bool()
+        returns, values = returns[keep], values[keep]
+    if returns.numel() < 2:
+        return None
+    variance = torch.var(returns, unbiased=False)
+    if float(variance) == 0.0:
+        return None
+    return float(1.0 - torch.var(returns - values, unbiased=False) / variance)
+
+
+def install_value_metrics_recorder() -> bool:
+    """Wrap upstream ``value_loss_function`` to collect explained variance (3.2).
+
+    Each micro-batch adds its (masked) returns / old values to the step's
+    sufficient statistics; ``_record_step_losses`` writes the step-level
+    ``explained_variance`` into the step-loss record next to ``value_loss``.
+    Per-rank (no data-parallel reduction); the loss dict is left unchanged.
+    """
+
+    global _VALUE_METRICS_INSTALLED
+    if _VALUE_METRICS_INSTALLED:
+        return True
+    try:
+        from miles.backends.training_utils.loss_hub import losses
+    except ImportError:
+        return False
+    original = getattr(losses, "value_loss_function", None)
+    if original is None:
+        return False
+
+    def value_loss_function(args, batch, logits, sum_of_sample_mean):
+        loss, reported = original(args, batch, logits, sum_of_sample_mean)
+        try:
+            import torch
+
+            masks = batch.get("loss_masks")
+            _accumulate_ev_stats(
+                torch.cat(batch["returns"], dim=0),
+                torch.cat(batch["values"], dim=0),
+                torch.cat(masks, dim=0) if masks else None,
+            )
+        except (KeyError, RuntimeError, TypeError, ValueError):
+            pass
+        return loss, reported
+
+    losses.value_loss_function = value_loss_function
+    _VALUE_METRICS_INSTALLED = True
+    return True
+
+
+CRITIC_STATE_SUMMARY = f"{_PLUGIN_MODULE}.critic_state_summary"
+
+
+def critic_state_summary(actor: Any) -> dict[str, Any]:
+    """Plugin (critic process): this rank's trainable critic parameter specs and
+    the content hash of their values (rl-algo-critic-family 4.1/4.4).
+
+    The colocated critic is asleep (memory paused) between its train steps;
+    reading paused parameters fails with ``CUDA error: invalid argument``
+    (s13-g1-modal-20261007a), so wake it like the other plugins."""
+
+    with trainer_resident(actor):
+        return _critic_state_summary(actor)
+
+
+def _critic_state_summary(actor: Any) -> dict[str, Any]:
+    from yeto.rl.critic_state import critic_weights_sha256
+
+    tensors: dict[str, Any] = {}
+    specs = []
+    for index, chunk in enumerate(actor.model):
+        for name, parameter in chunk.named_parameters():
+            if not parameter.requires_grad:
+                continue
+            key = f"{index}:{name}"
+            specs.append((key, list(parameter.shape), str(parameter.dtype)))
+            tensors[key] = parameter.detach()
+    return {"rank": _rank(), "specs": specs, "weights_sha256": critic_weights_sha256(tensors)}
+
+
+EXPORT_CRITIC_TENSORS = f"{_PLUGIN_MODULE}.export_critic_tensors"
+IMPORT_CRITIC_TENSORS = f"{_PLUGIN_MODULE}.import_critic_tensors"
+SAVE_CRITIC_CUT = f"{_PLUGIN_MODULE}.save_critic_cut"
+RESTORE_CRITIC_CUT = f"{_PLUGIN_MODULE}.restore_critic_cut"
+
+
+def _critic_parameters(actor: Any) -> dict[str, Any]:
+    """``index:name`` -> trainable critic parameter of this rank (same keys as
+    critic_state_summary)."""
+
+    out = {}
+    for index, chunk in enumerate(actor.model):
+        for name, parameter in chunk.named_parameters():
+            if parameter.requires_grad:
+                out[f"{index}:{name}"] = parameter
+    return out
+
+
+def _rank() -> int:
+    import torch
+
+    return torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+
+
+# rl-algo-critic-family (user decision 2026-10-07): the critic's two-island
+# state is its FP32 optimizer masters, not the (bf16) model parameters.
+# Export reads the masters (Megatron DistributedOptimizer: this rank's main
+# shard, gathered over the owning DP group by ``full_masters``; complete
+# ``main_param``; or the FP32 parameter itself when it is its own master).
+# Write-back writes the masters (``write_masters``) and regenerates every
+# low-precision model parameter from them (the cast the optimizer's
+# main->model copy does after a step), so the next optimizer step continues
+# from the average instead of overwriting it with the stale masters. Hashes
+# (syncer channel, write-back check, round-cut) are over the FP32 masters.
+# A low-precision parameter without any FP32 master is refused.
+#
+# Critic optimizer state (moments, step counts, LR scheduler) is kept across
+# strict-avg rounds -- only the weights are replaced; the actor's optimizer is
+# reset every round. This is the first-version choice (design D4).
+
+
+def _critic_masters(actor: Any, params: Mapping[str, Any]) -> dict[str, Any]:
+    """``key -> FP32 master`` (parameter shape) for the sorted critic keys.
+
+    Collective over the DP group when masters are DistributedOptimizer
+    shards: every rank calls it with the same keys in the same order.
+    """
+
+    keys = sorted(params)
+    masters = full_masters(getattr(actor, "optimizer", None), [params[k] for k in keys])
+    return dict(zip(keys, masters, strict=True))
+
+
+def _write_critic_masters(actor: Any, params: Mapping[str, Any], targets: Mapping[str, Any]) -> None:
+    """Write FP32 ``targets`` into the critic masters, then set each
+    low-precision model parameter from its master."""
+
+    import torch
+
+    keys = sorted(params)
+    plist = [params[k] for k in keys]
+    tlist = [targets[k].to(device=params[k].device, dtype=torch.float32) for k in keys]
+    write_masters(getattr(actor, "optimizer", None), plist, tlist)
+    for param, target in zip(plist, tlist, strict=True):
+        if param.dtype != torch.float32:
+            # complete-master params: write_masters only set the master;
+            # sharded ones were already set (idempotent cast).
+            param.data.copy_(target.to(dtype=param.dtype))
+
+
+def _masters_cpu(masters: Mapping[str, Any]) -> dict[str, Any]:
+    import torch
+
+    return {k: m.detach().to("cpu", torch.float32).contiguous().clone() for k, m in masters.items()}
+
+
+def _export_critic_tensors(actor: Any) -> dict[str, Any]:
+    """Plugin (critic process, 4.2.2): this rank's full-parameter critic FP32
+    masters (CPU copies) with their content hash, for the critic syncer channel."""
+
+    import torch
+
+    from yeto.rl.critic_state import critic_weights_sha256
+
+    with torch.no_grad():
+        tensors = _masters_cpu(_critic_masters(actor, _critic_parameters(actor)))
+    return {"rank": _rank(), "tensors": tensors, "weights_sha256": critic_weights_sha256(tensors)}
+
+
+def _import_critic_tensors(actor: Any, *, by_rank: dict[int, dict[str, Any]]) -> dict[str, Any]:
+    """Plugin (critic process, 4.2.2): ``by_rank[rank] = {"tensors", "sha256"}``;
+    write the averaged critic tensors of this rank into the FP32 masters,
+    regenerate the model parameters from them, then re-hash the masters
+    against ``sha256`` and check every model parameter equals its master cast.
+
+    A name/shape mismatch is refused before any write; a hash mismatch after the
+    write is returned as a refusal (the caller treats the critic as dirty and
+    rolls back to the last committed round)."""
+
+    import torch
+
+    from yeto.rl.critic_state import critic_weights_sha256
+
+    rank = _rank()
+    if rank not in by_rank:
+        return {"refused": f"no critic tensors for rank {rank}", "rank": rank}
+    tensors, expect_sha256 = by_rank[rank]["tensors"], by_rank[rank]["sha256"]
+    params = _critic_parameters(actor)
+    if set(params) != set(tensors):
+        return {"refused": f"critic tensor names differ: missing {sorted(set(params) - set(tensors))[:4]}, "
+                           f"unexpected {sorted(set(tensors) - set(params))[:4]}"}
+    for key, value in tensors.items():
+        if tuple(value.shape) != tuple(params[key].shape):
+            return {"refused": f"critic tensor {key} shape {tuple(value.shape)} != {tuple(params[key].shape)}"}
+    if critic_weights_sha256(tensors) != expect_sha256:
+        return {"refused": "incoming critic tensors differ from their announced hash"}
+    try:
+        with torch.no_grad():
+            _write_critic_masters(actor, params, tensors)
+            masters = _critic_masters(actor, params)
+            written = _masters_cpu(masters)
+            stale = [k for k, p in params.items() if p.dtype != torch.float32
+                     and not torch.equal(p.detach(), masters[k].to(p.dtype).view(p.shape))]
+    except StatePluginError as error:
+        return {"refused": f"critic masters: {error}", "rank": rank}
+    got = critic_weights_sha256(written)
+    if got != expect_sha256:
+        return {"refused": f"written critic hash {got[:12]} != expected {expect_sha256[:12]}",
+                "rank": rank, "weights_sha256": got}
+    if stale:
+        return {"refused": f"critic model parameters not regenerated from masters: {stale[:4]}",
+                "rank": rank, "weights_sha256": got}
+    return {"rank": rank, "weights_sha256": got}
+
+
+def _save_critic_cut(actor: Any, *, directory: str, round_id: int) -> dict[str, Any]:
+    """Plugin (critic process, 4.3): this rank's critic FP32 masters + optimizer +
+    LR-scheduler state into ``directory/rank-<r>/`` via CriticCheckpointStore
+    (manifest committed last). The weights hash is over the FP32 masters, the
+    same as the critic syncer channel."""
+
+    import torch
+
+    from yeto.rl.critic_state import CriticCheckpointStore
+
+    rank = _rank()
+    with torch.no_grad():
+        weights = _masters_cpu(_critic_masters(actor, _critic_parameters(actor)))
+    scheduler = getattr(actor, "opt_param_scheduler", None)
+    manifest = CriticCheckpointStore(os.path.join(directory, f"rank-{rank}")).save(
+        round_id=int(round_id), weights=weights,
+        optimizer={"optimizer": actor.optimizer.state_dict(),
+                   "scheduler": scheduler.state_dict() if scheduler is not None else None},
+    )
+    return {"rank": rank, **manifest}
+
+
+def _restore_critic_cut(actor: Any, *, directory: str, actor_round: int,
+                       critic_round: int) -> dict[str, Any]:
+    """Plugin (critic process, 4.3): load this rank's critic round (refuses a
+    critic round != actor round and a manifest mismatch), load the optimizer
+    state, then write the saved FP32 masters (after the optimizer load, so they
+    win) and regenerate the model parameters; re-hash the masters."""
+
+    import torch
+
+    from yeto.rl.critic_state import CriticCheckpointStore, CriticStateError, critic_weights_sha256
+
+    rank = _rank()
+    try:
+        weights, state = CriticCheckpointStore(os.path.join(directory, f"rank-{rank}")).restore(
+            actor_round=int(actor_round), critic_round=int(critic_round))
+    except (CriticStateError, OSError, KeyError, ValueError) as error:
+        return {"refused": f"{type(error).__name__}: {error}", "rank": rank}
+    params = _critic_parameters(actor)
+    if set(params) != set(weights):
+        return {"refused": "critic checkpoint tensor names differ from the running critic", "rank": rank}
+    actor.optimizer.load_state_dict(state["optimizer"])
+    scheduler = getattr(actor, "opt_param_scheduler", None)
+    if scheduler is not None and state.get("scheduler") is not None:
+        scheduler.load_state_dict(state["scheduler"])
+    try:
+        with torch.no_grad():
+            _write_critic_masters(actor, params, weights)
+            written = _masters_cpu(_critic_masters(actor, params))
+    except StatePluginError as error:
+        return {"refused": f"critic masters: {error}", "rank": rank}
+    return {"rank": rank, "weights_sha256": critic_weights_sha256(written)}
+
+
+def export_critic_tensors(actor: Any) -> dict[str, Any]:
+    with trainer_resident(actor):
+        return _export_critic_tensors(actor)
+
+
+def import_critic_tensors(actor: Any, **kwargs: Any) -> dict[str, Any]:
+    with trainer_resident(actor):
+        return _import_critic_tensors(actor, **kwargs)
+
+
+def save_critic_cut(actor: Any, **kwargs: Any) -> dict[str, Any]:
+    with trainer_resident(actor):
+        return _save_critic_cut(actor, **kwargs)
+
+
+def restore_critic_cut(actor: Any, **kwargs: Any) -> dict[str, Any]:
+    with trainer_resident(actor):
+        return _restore_critic_cut(actor, **kwargs)
+
+
+def install_critic_recorders(actor: Any) -> bool:
+    """Plugin: the per-step recorders in a critic process (idempotent)."""
+
+    del actor
+    return install_grad_norm_recorder() and install_value_metrics_recorder()
 
 
 def _record_applied_lr(original: Any, args: tuple, kwargs: dict) -> float | None:
@@ -730,6 +1277,9 @@ def _record_step_losses(result: Any) -> None:
             scalars[str(key)] = float(raw.item() if hasattr(raw, "item") else raw)
         except (TypeError, ValueError):
             continue
+    ev = step_explained_variance()
+    if ev is not None:
+        scalars[EXPLAINED_VARIANCE_KEY] = ev
     _STEP_LOSSES.append({"pg_clipfrac": clipfrac, "loss_tokens": None, "metrics": scalars})
 
 

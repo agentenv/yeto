@@ -1,0 +1,67 @@
+{
+ "case": "vapo-w0",
+ "ev_by_round": [
+  null,
+  null,
+  null
+ ],
+ "gpu": [
+  "[s13-forkg1-vapo-w0-20261007c-l0-modal] [modal-island 0] requested H100!:1, got ['NVIDIA H100 80GB HBM3']"
+ ],
+ "missing": [],
+ "notes": [],
+ "overlay_applied": [
+  "[yeto-setup] miles overlay applied: image miles c35702e + overlay 7cbc0a42c4880931f2dc1b2285b49907f7c67295d15774c0b885ddd50c6f766c (= fork 6e7365b602ecf5d83d16169e87f4d78f4daf5f86, not pushed; image manifest no longer matches the code)"
+ ],
+ "problems": [],
+ "rounds": [
+  {
+   "critic_init_sha256": null,
+   "explained_variance": null,
+   "extra_metrics": {
+    "critic/value_clipfrac": 0.0,
+    "critic/value_loss": 21.347624385196738,
+    "entropy_loss": 0.0,
+    "pg_clipfrac": 0.0,
+    "positive_lm_loss": 0.26232441556202013
+   },
+   "grad_norm": 1.5438957214355469,
+   "pg_loss": -0.17643368770430962,
+   "rollout_id": 0,
+   "value_loss": 21.347624385196738
+  },
+  {
+   "critic_init_sha256": null,
+   "explained_variance": null,
+   "extra_metrics": {
+    "critic/value_clipfrac": 0.0,
+    "critic/value_loss": 17.621597782258064,
+    "entropy_loss": 0.0,
+    "pg_clipfrac": 0.0,
+    "positive_lm_loss": 0.28120892098205397
+   },
+   "grad_norm": 1.4173696041107178,
+   "pg_loss": -0.19289743050499678,
+   "rollout_id": 1,
+   "value_loss": 17.621597782258064
+  },
+  {
+   "critic_init_sha256": null,
+   "explained_variance": null,
+   "extra_metrics": {
+    "critic/value_clipfrac": 0.0,
+    "critic/value_loss": 12.773442123875473,
+    "entropy_loss": 0.0,
+    "pg_clipfrac": 0.0,
+    "positive_lm_loss": 0.45507991675174597
+   },
+   "grad_norm": 1.1924207210540771,
+   "pg_loss": -0.1554068507570209,
+   "rollout_id": 2,
+   "value_loss": 12.773442123875473
+  }
+ ],
+ "tape": "/home/michael/work/s1-runs/s13-forkg1-vapo-w0-20261007c/tape-direct/yeto-s13-forkg1-vapo-w0-20261007c/l0/rank0/rl-island-0.jsonl",
+ "verdict": "PASS",
+ "warmup_product": null
+}

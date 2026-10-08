@@ -18,6 +18,20 @@ OUT=$FS/torch_dist/qwen3.8-flash-next_torch_dist; YD=${YD:-$HOME/yeto-fnconv}; C
 echo "T_START $(date -u +%FT%TZ)"; echo "DF0 $(df -B1 --output=size,used,avail $FS | tail -1)"
 [ "${DRY:-0}" = 1 ] || mountpoint -q $FS || { echo "FNCONV_FAIL $FS not mounted"; exit 1; }
 [ -f $MARK ] && [ -d $SNAP ] || { echo "FNCONV_FAIL no completed HF snapshot ($MARK)"; exit 1; }
+PY=; for p in /opt/sglang/bin/python python3; do $p -c "import torch" 2>/dev/null && { PY=$p; break; }; done
+# runtime preflight (try23: non-login ssh has no torchrun on PATH -> "torchrun: command not found"). Put the image venv first on
+# PATH, resolve Miles/Megatron roots, and fail fast (before any long step) if the converter cannot start.
+RT=$(dirname "$(command -v $PY)"); export PATH=$RT:$PATH
+MR=${YETO_Q38N_MILES_ROOT:-/root/miles}; MP=${YETO_Q38N_MEGATRON_PATH:-/root/Megatron-LM}
+[ -d "$MP/megatron" ] || MP=$($PY -c "import megatron,os;print(os.path.dirname(os.path.dirname(os.path.abspath(megatron.__file__))))" 2>/dev/null)
+export YETO_Q38N_MILES_ROOT=$MR YETO_Q38N_MEGATRON_PATH=$MP
+echo "RUNTIME py=$PY python3=$(command -v python3) torchrun=$(command -v torchrun) miles=$MR megatron=$MP"
+[ "${DRY:-0}" = 1 ] || {
+  command -v torchrun >/dev/null || { echo "FNCONV_FAIL preflight: no torchrun"; exit 1; }
+  [ -f $MR/tools/convert_hf_to_torch_dist.py ] || { echo "FNCONV_FAIL preflight: $MR/tools/convert_hf_to_torch_dist.py missing"; exit 1; }
+  PYTHONPATH=$MR:$MP $PY -c "import megatron.core, miles_plugins.models.qwen3_8_next.qwen3_8_next" > ~/preflight-import.log 2>&1 || { tail -15 ~/preflight-import.log; echo "FNCONV_FAIL preflight: import megatron.core / qwen3_8_next plugin"; exit 1; }
+  echo "PREFLIGHT_OK"
+}
 if [ -f $OUT/latest_checkpointed_iteration.txt ] && grep -qx release $OUT/latest_checkpointed_iteration.txt; then
   echo "CONVERT already release"
 else

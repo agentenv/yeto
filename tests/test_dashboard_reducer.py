@@ -152,3 +152,36 @@ def test_ray_embed_per_island_kind():
     r.feed({"event": "rl_resource_sample", "island_id": 1, "time_unix": T0, "available": False})
     assert r.island_view("1")["resource"]["available"] is False
     assert r.island_view("1")["card"]["gpu_util_pct"] is None
+
+
+def test_host_sample_attaches_to_island_from_path_no_phantom(tmp_path):
+    d = tmp_path / "tape" / "l3" / "rank0"
+    d.mkdir(parents=True)
+    h = d / "modal-hostmem-rank0.jsonl"
+    rows = [{"event": "modal_host_sample", "time_unix": T0 + i, "meminfo_total": 100 << 30,
+             "meminfo_used": (i + 1) << 30, "cgroup_current": None, "cgroup_peak": None,
+             "gpu_mem_used_mib": [4 + i, 4]} for i in range(3)]
+    h.write_text("\n".join(json.dumps(x) for x in rows) + "\n")
+    (d / "rl-island-3.jsonl").write_text(json.dumps(
+        {"event": "rl_learner_finalized", "island_id": 3, "time_unix": T0}) + "\n")
+    r = Reducer(run="x")
+    load_all(r, [str(d)])
+    assert r.island_ids() == ["3"]
+    v = r.island_view("3", now=T0 + 100000)
+    assert v["host"]["peak_bytes"] == 3 << 30 and v["host"]["gpu_mem_used_mib_peak"] == [6, 4]
+    assert v["card"]["host_mem_peak_bytes"] == 3 << 30
+    assert v["card"]["status"] == "done"
+    from yeto.dashboard import alerts as A
+    assert not [a for a in A.heartbeat([v["card"]], r.thresholds)]
+    # finalized island never alerts, even if card status were otherwise stale
+    assert not A.heartbeat([dict(v["card"], status="stale")], r.thresholds)
+
+
+def test_host_sample_without_resolvable_island_is_ignored(tmp_path):
+    h = tmp_path / "modal-hostmem-rank0.jsonl"
+    h.write_text(json.dumps({"event": "modal_host_sample", "time_unix": T0, "meminfo_used": 1}) + "\n")
+    r = Reducer(run="x")
+    load_all(r, [str(h)])
+    assert r.island_ids() == []
+    r.feed({"event": "rl_heartbeat", "time_unix": T0})
+    assert "?" not in r.islands

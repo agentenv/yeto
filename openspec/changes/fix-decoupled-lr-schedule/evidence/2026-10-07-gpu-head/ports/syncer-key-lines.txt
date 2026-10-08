@@ -1,0 +1,16 @@
+{"step": 1, "fragment": 0, "sync/base_version": 0, "sync/global_delta_norm": 0.016904009297019223, "sync/responders": 2, "sync/rejected_stale_updates": 0, "gnorm": 0.016904009297019223}
+{"step": 2, "fragment": 1, "sync/base_version": 0, "sync/global_delta_norm": 0.019526150103390594, "sync/responders": 2, "sync/rejected_stale_updates": 0, "gnorm": 0.019526150103390594}
+{"step": 3, "fragment": 2, "sync/base_version": 0, "sync/global_delta_norm": 0.022542686964332877, "sync/responders": 2, "sync/rejected_stale_updates": 0, "gnorm": 0.022542686964332877}
+{"step": 4, "fragment": 3, "sync/base_version": 0, "sync/global_delta_norm": 0.025284166540088658, "sync/responders": 2, "sync/rejected_stale_updates": 0, "gnorm": 0.025284166540088658}
+{"step": 5, "fragment": 0, "sync/base_version": 1, "sync/global_delta_norm": 0.013213822411525975, "sync/responders": 2, "sync/rejected_stale_updates": 0, "gnorm": 0.013213822411525975}
+{"step": 6, "fragment": 1, "sync/base_version": 2, "sync/global_delta_norm": 0.013095061785329867, "sync/responders": 2, "sync/rejected_stale_updates": 0, "gnorm": 0.013095061785329867}
+{"step": 7, "fragment": 2, "sync/base_version": 3, "sync/global_delta_norm": 0.011910036760202681, "sync/responders": 2, "sync/rejected_stale_updates": 0, "gnorm": 0.011910036760202681}
+{"step": 8, "fragment": 3, "sync/base_version": 4, "sync/global_delta_norm": 0.014588542998993776, "sync/responders": 2, "sync/rejected_stale_updates": 0, "gnorm": 0.014588542998993776}
+{"step": 9, "fragment": 0, "sync/base_version": 5, "sync/global_delta_norm": 0.011552469953103276, "sync/responders": 2, "sync/rejected_stale_updates": 0, "gnorm": 0.011552469953103276}
+{"step": 10, "fragment": 1, "sync/base_version": 6, "sync/global_delta_norm": 0.011021540856531682, "sync/responders": 2, "sync/rejected_stale_updates": 0, "gnorm": 0.011021540856531682}
+{"step": 11, "fragment": 2, "sync/base_version": 7, "sync/global_delta_norm": 0.010939862641465976, "sync/responders": 2, "sync/rejected_stale_updates": 0, "gnorm": 0.010939862641465976}
+{"step": 12, "fragment": 3, "sync/base_version": 8, "sync/global_delta_norm": 0.009526002874153615, "sync/responders": 2, "sync/rejected_stale_updates": 0, "gnorm": 0.009526002874153615}
+{"step": 13, "fragment": 0, "sync/base_version": 9, "sync/global_delta_norm": 0.00890202325721634, "sync/responders": 2, "sync/rejected_stale_updates": 0, "gnorm": 0.00890202325721634}
+{"step": 14, "fragment": 1, "sync/base_version": 10, "sync/global_delta_norm": 0.008868444855429935, "sync/responders": 2, "sync/rejected_stale_updates": 0, "gnorm": 0.008868444855429935}
+{"step": 15, "fragment": 2, "sync/base_version": 11, "sync/global_delta_norm": 0.00925157809174843, "sync/responders": 2, "sync/rejected_stale_updates": 0, "gnorm": 0.00925157809174843}
+{"step": 16, "fragment": 3, "sync/base_version": 12, "sync/global_delta_norm": 0.008987127566754842, "sync/responders": 2, "sync/rejected_stale_updates": 0, "gnorm": 0.008987127566754842}

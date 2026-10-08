@@ -1,0 +1,9 @@
+[36m(yeto-rl-island-0, pid=3393)[0m   ckpt_format ..................................... torch_dist
+[36m(yeto-rl-island-0, pid=3393)[0m   critic_load ..................................... /mnt/yeto-models/torch_dist/qwen3.8-flash-next-4layer_torch_dist
+[36m(yeto-rl-island-0, pid=3393)[0m   load ............................................ /mnt/yeto-models/torch_dist/qwen3.8-flash-next-4layer_torch_dist
+[36m(yeto-rl-island-0, pid=3393)[0m   min_offloaded_tensor_size ....................... 1048576
+[36m(yeto-rl-island-0, pid=3393)[0m   ref_load ........................................ /mnt/yeto-models/torch_dist/qwen3.8-flash-next-4layer_torch_dist
+[36m(yeto-rl-island-0, pid=3393)[0m   sglang_max_loaded_loras ......................... None
+[36m(yeto-rl-island-0, pid=3393)[0m   sglang_weight_loader_prefetch_checkpoints ....... False
+[36m(yeto-rl-island-0, pid=3393)[0m {"event": "rl_boot_only", "learner_id": 0, "marker": "FN_BOOT_ONLY_OK", "miles_argc": 220, "model_recipe": "qwen3_8_next", "ref_load": {"configured": "/mnt/yeto-models/torch_dist/qwen3.8-flash-next-4layer_torch_dist", "present": true, "reason": null, "resolved": "/mnt/yeto-models/torch_dist/qwen3.8-flash-next-4layer_torch_dist"}, "ref_load_present": true, "runtime_fingerprint": "sha256:f70d5baffa871590366c1eb4164ea682b9947a050d79a6c2f9fc306dd61517e3"}
+[36m(yeto-rl-island-0, pid=3393)[0m FN_BOOT_ONLY_OK ref_load_present=true recipe=qwen3_8_next

@@ -441,3 +441,177 @@ def test_island_image_skips_agent_worktrees_and_nested_caches():
     ignore = mr.MODAL_WORKDIR_IGNORE
     assert ".claude" in ignore and ".git" in ignore and ".venv" in ignore
     assert "**/__pycache__" in ignore and "**/*.pyc" in ignore
+
+
+# --- multi-node addresses and the event tape Volume ------------------------------------
+
+
+def test_cluster_ips_prefer_ipv4():
+    info = types.SimpleNamespace(rank=1, container_ips=["fdaa::1", "fdaa::2"],
+                                 container_ipv4_ips=["10.0.0.1", "10.0.0.2"])
+    assert mr.cluster_rank_and_ips(info) == (1, ["10.0.0.1", "10.0.0.2"])
+    old = types.SimpleNamespace(rank=0, container_ips=["10.0.0.9"])  # SDK without ipv4 list
+    assert mr.cluster_rank_and_ips(old) == (0, ["10.0.0.9"])
+
+
+def test_tape_config_rules():
+    _cfg(tape_volume_name="t", tape_subdir="yeto-run/l1").validate()
+    with pytest.raises(ValueError, match="go together"):
+        _cfg(tape_volume_name="t").validate()
+    with pytest.raises(ValueError, match="relative"):
+        _cfg(tape_volume_name="t", tape_subdir="../x").validate()
+    with pytest.raises(ValueError, match="differ"):
+        _cfg(tape_volume_name="t", tape_subdir="a", volume_name="t", volume_mount="/root/ck").validate()
+    cfg = _cfg(tape_volume_name="t", tape_subdir="a/l1")
+    assert mr.ModalIslandConfig.from_json(cfg.to_json()) == cfg
+    assert mr.ModalIslandConfig.from_json(_cfg().to_json()).tape_volume_name is None
+
+
+def test_tape_sync_copies_changed_files_and_commits(tmp_path):
+    src, dst = tmp_path / "out", tmp_path / "vol" / "run" / "rank0"
+    src.mkdir()
+    commits = []
+    sync = mr.TapeSync(str(src), str(dst), lambda: commits.append(1), interval_s=3600,
+                       extra={"modal-node.json": '{"rank": 0}\n'})
+    (src / "rl-island-0.jsonl").write_text('{"e": 1}\n')
+    (src / "big.bin").write_text("x")  # not a tape suffix
+    assert sync.sync_once() == 1
+    assert (dst / "rl-island-0.jsonl").read_text() == '{"e": 1}\n'
+    assert (dst / "modal-node.json").exists() and not (dst / "big.bin").exists()
+    assert sync.sync_once() == 0  # unchanged
+    with open(src / "rl-island-0.jsonl", "a") as f:
+        f.write('{"e": 2}\n')
+    sync.start()
+    sync.stop()  # final sync on stop
+    assert (dst / "rl-island-0.jsonl").read_text().count("\n") == 2
+    assert len(commits) == sync.syncs >= 3 and not sync.errors
+
+
+def test_tape_sync_errors_never_raise(tmp_path):
+    def boom():
+        raise OSError("volume gone")
+
+    sync = mr.TapeSync(str(tmp_path / "none"), str(tmp_path / "d"), boom, interval_s=3600)
+    sync.start()
+    sync.stop()
+    assert len(sync.errors) == 2
+
+
+def test_island_main_mirrors_tape_into_the_volume(monkeypatch, tmp_path):
+    fake_modal(monkeypatch)
+    monkeypatch.setattr(mr, "TAPE_SOURCE_DIR", str(tmp_path / "out"))
+    monkeypatch.setattr(mr, "TAPE_MOUNT", str(tmp_path / "vol"))
+    commits = []
+    monkeypatch.setattr(mr, "_volume_commit", lambda name: (lambda: commits.append(name)))
+    monkeypatch.setattr(mr, "visible_gpu_names", lambda: ["NVIDIA H100 80GB HBM3"] * 8)
+    sys.modules["modal.experimental"].get_cluster_info = lambda: types.SimpleNamespace(
+        rank=1, container_ips=["fdaa::1", "fdaa::2"], container_ipv4_ips=["10.1.0.1", "10.1.0.2"])
+    seen = {}
+
+    def fake_call(cmd, env=None):
+        seen["env"] = env
+        (tmp_path / "out" / "rl-island-0.jsonl").write_text('{"kind": "x"}\n')
+        return 0
+
+    monkeypatch.setattr(mr.subprocess, "call", fake_call)
+    cfg = _cfg(num_nodes=2, gpu_exact=True, tape_volume_name="tapes", tape_subdir="yeto-run/l1")
+    assert mr.island_main(cfg.to_json()) == 0
+    assert seen["env"]["SKYPILOT_NODE_IPS"] == "10.1.0.1\n10.1.0.2"
+    rank_dir = tmp_path / "vol" / "yeto-run" / "l1" / "rank1"
+    assert (rank_dir / "rl-island-0.jsonl").read_text() == '{"kind": "x"}\n'
+    node = __import__("json").loads((rank_dir / "modal-node.json").read_text())
+    assert node["rank"] == 1 and node["container_ips"] == ["fdaa::1", "fdaa::2"]
+    assert node["gpu_names"][0].startswith("NVIDIA H100")
+    assert commits and set(commits) == {"tapes"}
+    # the run script failing still commits the tape
+    commits.clear()
+    monkeypatch.setattr(mr.subprocess, "call", lambda cmd, env=None: 4)
+    with pytest.raises(RuntimeError, match="exited with 4"):
+        mr.island_main(cfg.to_json())
+    assert commits
+
+
+def test_define_mounts_the_tape_volume(monkeypatch):
+    state = fake_modal(monkeypatch)
+    mr.ModalOps("yeto-run").define(_cfg(num_nodes=2, gpu_exact=True,
+                                        tape_volume_name="tapes", tape_subdir="yeto-run/l1"))
+    _fn, kwargs = state["functions"]["island-1"]
+    assert kwargs["volumes"] == {mr.TAPE_MOUNT: ("volume", "tapes")}
+    assert kwargs["gpu"] == "H100!:8" and state["clustered"] == (2, True)
+
+
+def test_pull_modal_tapes(tmp_path):
+    from yeto import launcher
+
+    class Ops:
+        def __init__(self):
+            self.calls = []
+
+        def pull_tape(self, vol, remote, local):
+            self.calls.append((vol, remote))
+            p = __import__("pathlib").Path(local) / "l0" / "rank0"
+            p.mkdir(parents=True)
+            (p / "rl-island-0.jsonl").write_text("{}\n")
+
+    ops = Ops()
+    cfgs = {"run-l0-modal": _cfg(tape_volume_name="tapes", tape_subdir="yeto-run/l0"),
+            "run-l1-modal": _cfg(learner_id=2)}
+    assert launcher.pull_modal_tapes(ops, cfgs, tmp_path) == {"run-l0-modal": "ok"}
+    assert ops.calls == [("tapes", "yeto-run/l0")]
+    assert (tmp_path / "modal-tape" / "run-l0-modal" / "l0" / "rank0" / "rl-island-0.jsonl").exists()
+
+    class Bad:
+        def pull_tape(self, *a):
+            raise RuntimeError("no such volume")
+
+    assert launcher.pull_modal_tapes(Bad(), cfgs, tmp_path)["run-l0-modal"].startswith("error")
+    assert launcher.modal_tape_subdir("run", 0) == "yeto-run/l0"
+
+
+def test_modal_multinode_prelude_keeps_ib_on():
+    from yeto import launcher
+
+    assert "NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-0}" in launcher.multinode_env_prelude("modal", 2)
+    assert "NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1}" in launcher.multinode_env_prelude("nebius", 2)
+
+
+# --- container id change guard (exit 7) ------------------------------------------------
+
+
+def test_island_main_prints_its_container_id(monkeypatch, capsys):
+    monkeypatch.setattr(mr.subprocess, "call", lambda cmd, env=None: 0)
+    monkeypatch.setenv("MODAL_TASK_ID", "ta-01ABC")
+    mr.island_main(_cfg().to_json())
+    assert "[modal-island 1] rank 0 container ta-01ABC" in capsys.readouterr().out
+
+
+def test_container_guard_trips_only_on_a_different_id():
+    seen = []
+    g = mr.ContainerIdGuard(on_change=seen.append)
+    g.feed("[modal-island 0] rank 0 container ta-A\nother line")
+    g.feed("[modal-island 0] rank 0 container ta-A")  # stream replay: same id
+    g.feed("[modal-island 0] rank 1 container ta-B")  # other rank: own baseline
+    assert not g.tripped and seen == []
+    g.feed("[modal-island 0] rank 0 container ta-C")
+    assert g.tripped and len(seen) == 1 and "ta-A -> ta-C" in seen[0]
+
+
+def test_tail_modal_feeds_the_guard():
+    import yeto.launcher as launcher
+
+    class Ops:
+        def stream_logs(self, call_id):
+            yield "[modal-island 0] rank 0 container ta-A"
+            yield "[modal-island 0] rank 0 container ta-B"
+
+    g = mr.ContainerIdGuard()
+    launcher._tail_modal(Ops(), "fc-1", "x", None, g)
+    assert g.tripped
+
+
+def test_container_change_exit_code_is_registered_and_unique():
+    import yeto.launcher as launcher
+
+    codes = [launcher.ISLAND_FAILED_EXIT, launcher.TEARDOWN_UNVERIFIED_EXIT,
+             launcher.RUN_STALLED_EXIT, launcher.NO_SYNC_INCOMPLETE_EXIT]
+    assert launcher.CONTAINER_CHANGED_EXIT == 7 and 7 not in codes

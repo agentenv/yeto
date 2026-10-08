@@ -189,21 +189,29 @@ def _stock_codex_append_roles_or_none(reason: str) -> _Check:
         agent = getattr(config, "agent", None)
         try:
             from yeto.rl import SIGNED_CODEX_AGENTS
-            from yeto.rl.codex_backend import stock_codex_backend_profile
+            from yeto.rl.codex_backend import (
+                stock_codex_backend_profile,
+                stock_codex_profiles_for_tito_model,
+            )
         except ImportError:  # pragma: no cover - defensive
             return reason
         if getattr(agent, "custom_agent_function_path", None) not in SIGNED_CODEX_AGENTS:
             return reason
         if not getattr(agent, "tito_model", None):
             return reason
-        try:
-            profile = stock_codex_backend_profile(str(agent.tito_model))
-        except (KeyError, ValueError):
+        # ``tito_model`` is the Miles tokenizer family, not the profile name
+        # (``qwen35`` happened to be both; ``qwen4exp`` serves the Flash-Next
+        # profiles, rl-fn-codex-rollout 1.0): the roles are fixed by every
+        # profile of that family, which the launcher already matched to the
+        # declared ``--codex-backend-profile`` (``validate_stock_codex_fields``).
+        names = stock_codex_profiles_for_tito_model(str(agent.tito_model))
+        if not names:
             return reason
-        if list(value) != list(profile["tito_allowed_append_roles"]):
+        fixed = {tuple(stock_codex_backend_profile(n)["tito_allowed_append_roles"]) for n in names}
+        if len(fixed) != 1 or tuple(value) != next(iter(fixed)):
             return (
-                f"stock Codex profile {agent.tito_model!r} fixes the append roles to "
-                f"{profile['tito_allowed_append_roles']} (got {list(value)})"
+                f"stock Codex profiles {list(names)} (tito-model {agent.tito_model!r}) fix the "
+                f"append roles to {sorted(list(r) for r in fixed)} (got {list(value)})"
             )
         return None
 
@@ -379,6 +387,10 @@ LEAF_POLICY: dict[str, _Check] = {
     "algorithm.lr_schedule.decay_iters": _ok,
     "algorithm.seed": _ok,
     "algorithm.rollout_seed": _ok,
+    # rl-algo-critic-family 2.4: translated with the AlgorithmSpec (critic_load_argv)
+    "algorithm.critic": _ok,
+    "algorithm.critic.critic_load": _ok,
+    "algorithm.critic.init_sha256": _ok,
     "eval": _ok,
     **{
         f"eval.{name}": _ok
@@ -588,6 +600,40 @@ def check_extra_argv(extra_argv: Sequence[str], algorithm: AlgorithmSpec | None 
         raise MilesConfigError(str(exc)) from exc
 
 
+def critic_load_argv(config: Any, algorithm: AlgorithmSpec) -> list[str]:
+    """rl-algo-critic-family D5: ``--critic-load`` of the ports main stage.
+
+    A copied critic with a warm-up (``critic.init='copy_actor_backbone'``,
+    ``warmup_steps > 0``) loads the warm-up stage product given by the run
+    config; without a warm-up Miles copies the actor checkpoint itself
+    (``critic_load`` defaults to ``--load``, arguments.py:3607-3608).
+    ``critic.init='load'`` is translated by the spec (``critic_argv``).
+    """
+
+    critic = getattr(config.algorithm, "critic", None)
+    given = critic is not None and critic.critic_load is not None
+    if not algorithm.execution.needs_critic:
+        if given:
+            raise MilesConfigError("algorithm.critic.critic_load is set but the algorithm has no critic")
+        return []
+    spec = algorithm.critic
+    if spec.init == "copy_actor_backbone" and spec.warmup_steps:
+        if not given:
+            raise MilesConfigError(
+                f"critic.warmup_steps={spec.warmup_steps}: the main stage loads the warm-up "
+                "stage product (run config algorithm.critic.critic_load); run the warm-up "
+                "stage first (rl-algo-critic-family design D5)"
+            )
+        return ["--critic-load", critic.critic_load]
+    if given:
+        raise MilesConfigError(
+            "algorithm.critic.critic_load is the warm-up product, used only with "
+            f"critic.init='copy_actor_backbone' and warmup_steps > 0 (spec: init={spec.init!r}, "
+            f"warmup_steps={spec.warmup_steps})"
+        )
+    return []
+
+
 def translate_run_config(
     config: Any,
     algorithm: AlgorithmSpec,
@@ -611,6 +657,17 @@ def translate_run_config(
         "rollout_max_response_len": config.batch.rollout_max_response_len,
         "context_parallel_size": 1,  # ports emits --context-parallel-size 1
         "multi_lora": any(t.split("=", 1)[0] == "--multi-lora" for t in extra_argv),
+        # rl-algo-critic-family 2.3: critic GPU counts / deploy-component / indep-dp
+        "extra_argv": tuple(extra_argv),
+        "actor_num_nodes": config.parallel.actor_num_nodes,
+        "actor_num_gpus_per_node": config.parallel.actor_num_gpus_per_node,
+        "elastic": bool(config.use_miles_router),  # set iff --rl-elastic (run_config)
+        # critic_lr_warmup: the critic scheduler's decay length (Miles model.py)
+        "num_rollout": 0 if config.batch.eval_only else config.batch.global_rounds,
+        "n_samples_per_prompt": config.batch.samples_per_group,
+        "global_batch_size": config.batch.global_batch,
+        "lr_decay_iters": (config.algorithm.lr_schedule.decay_iters
+                           if config.algorithm.lr_schedule is not None else None),
     })
     if problems:
         raise MilesConfigError("algorithm spec rejected for this run: " + "; ".join(problems))
@@ -785,6 +842,7 @@ def translate_run_config(
     # Non-default AlgorithmSpec v2 fields (empty for every v1 spec, so the
     # default GRPO argv is byte-identical to R0).
     values.extend(algorithm_argv(algorithm))
+    values.extend(critic_load_argv(config, algorithm))
 
     evaluation = config.eval
     if evaluation is not None:
@@ -955,7 +1013,13 @@ def translate_run_config(
         argv=tuple(values),
         placement=request,
         algorithm_sha256=algorithm.sha256(),
-        runtime_attrs=dict(algorithm.to_legacy_runtime_attrs()),
+        runtime_attrs={
+            **algorithm.to_legacy_runtime_attrs(),
+            # rl-algo-critic-family 4.1: receipt init source (warm-up product)
+            **({"yeto_rl_critic_init_sha256": config.algorithm.critic.init_sha256}
+               if getattr(config.algorithm, "critic", None) is not None
+               and algorithm.execution.needs_critic else {}),
+        },
         algorithm=algorithm,
         absorbed_flags=dict(absorbed),
     )

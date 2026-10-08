@@ -502,3 +502,111 @@ def test_ports_miles_setup_falls_back_to_the_editable_install_without_manifest(t
     assert pip.splitlines() == [
         f"-m pip install -q --no-deps -e {tmp_path / 'home' / 'miles'} peft=={rl.MILES_PEFT_VERSION}"
     ]
+
+
+# ------------------------------------------------- optional login injection
+# MILES_NEXT_IMAGE is public since 2026-10-07: by default NO registry login
+# is injected anywhere (island task secrets, Modal pull secret, head job).
+# It is injected only when SKYPILOT_DOCKER_* is set or --rl-image-private asks.
+
+
+def _docker_config(tmp_path, host="ghcr.io", auth="user:not-a-real-token"):
+    import base64
+
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"auths": {host: {"auth": base64.b64encode(auth.encode()).decode()}}}))
+    return path
+
+
+def test_registry_login_for_defaults_to_none_for_public_image(monkeypatch, no_login):
+    for engine in ("ports", "legacy"):
+        args = _cli(("--rl-engine", engine))
+        _prepare_rl_args(args)
+        assert args.rl_image_private is False
+        assert launcher.registry_login_for(args, {}) is None
+        task = _island_task(args, monkeypatch)
+        assert not hasattr(task, "secrets")
+        assert "unset SKYPILOT_DOCKER" not in (task.setup or "")
+
+
+def test_registry_login_for_uses_environment_login(no_login):
+    args = _cli()
+    _prepare_rl_args(args)
+    assert launcher.registry_login_for(args, LOGIN) == LOGIN
+    legacy = _cli(("--rl-engine", "legacy"))
+    _prepare_rl_args(legacy)
+    assert launcher.registry_login_for(legacy, LOGIN) is None  # legacy: env ignored as before
+
+
+def test_rl_image_private_prefers_env_then_docker_config(monkeypatch, no_login, tmp_path):
+    args = _cli(("--rl-image-private",))
+    _prepare_rl_args(args)
+    assert launcher.registry_login_for(args, LOGIN) == LOGIN
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".docker").mkdir()
+    _docker_config(tmp_path / ".docker")
+    assert launcher.registry_login_for(args, {}) == LOGIN
+    # explicit private pull of a legacy-engine image also injects
+    legacy = _cli(("--rl-engine", "legacy", "--rl-image", rl.MILES_NEXT_IMAGE, "--rl-image-private"))
+    _prepare_rl_args(legacy)
+    assert launcher.registry_login_for(legacy, {}) == LOGIN
+
+
+def test_rl_image_private_without_any_login_is_an_error(monkeypatch, no_login, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))  # no ~/.docker/config.json
+    args = _cli(("--rl-image-private",))
+    _prepare_rl_args(args)
+    with pytest.raises(ValueError, match="--rl-image-private"):
+        launcher.registry_login_for(args, {})
+
+
+def test_docker_config_login_parsing(tmp_path):
+    path = _docker_config(tmp_path)
+    assert launcher.docker_config_login(rl.MILES_NEXT_IMAGE, path) == LOGIN
+    assert launcher.docker_config_login("docker:docker.io/radixark/miles@sha256:" + "a" * 64, path) is None
+    assert launcher.docker_config_login(rl.MILES_NEXT_IMAGE, tmp_path / "missing.json") is None
+    assert launcher.docker_config_login(None, path) is None
+    https = _docker_config(tmp_path / "h", host="https://ghcr.io") if (tmp_path / "h").mkdir() is None else None
+    assert launcher.docker_config_login(rl.MILES_NEXT_IMAGE, https) == LOGIN
+    (tmp_path / "bad.json").write_text("{not json")
+    assert launcher.docker_config_login(rl.MILES_NEXT_IMAGE, tmp_path / "bad.json") is None
+
+
+def test_rl_image_private_from_docker_config_reaches_sky_secrets_and_modal(monkeypatch, no_login, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".docker").mkdir()
+    _docker_config(tmp_path / ".docker")
+    args = _cli(("--rl-image-private",))
+    _prepare_rl_args(args)
+    task = _island_task(args, monkeypatch)
+    assert task.secrets == LOGIN
+    assert "not-a-real-token" not in (task.setup or "") + (task.run or "")
+    assert task.setup.startswith("unset SKYPILOT_DOCKER_USERNAME")
+    from yeto.gpu_spec import parse_gpu_spec
+
+    args.cluster_prefix = "img-test"
+    cfg = build_modal_island_config(args, parse_gpu_spec("modal:1xh100")[0], 0, task, "1.2.3.4:5")
+    assert cfg.registry_login and cfg.registry_creds == LOGIN
+    assert "not-a-real-token" not in cfg.to_json()  # the container never sees it
+    assert mr.ModalIslandConfig.from_json(cfg.to_json()).registry_creds is None
+    state = fake_modal(monkeypatch)
+    mr.ModalOps("img-test").define(cfg)  # the Modal build no longer needs the env
+    assert state["images"][0].calls[0] == (
+        "from_registry",
+        (cfg.image_ref,),
+        {"secret": ("secret", {"REGISTRY_USERNAME": "user", "REGISTRY_PASSWORD": "not-a-real-token"})},
+    )
+
+
+def test_modal_public_image_config_has_no_login(monkeypatch, no_login):
+    args = _cli()
+    _prepare_rl_args(args)
+    task = _island_task(args, monkeypatch)
+    from yeto.gpu_spec import parse_gpu_spec
+
+    args.cluster_prefix = "img-test"
+    cfg = build_modal_island_config(args, parse_gpu_spec("modal:1xh100")[0], 0, task, "1.2.3.4:5")
+    assert cfg.registry_login is False and cfg.registry_creds is None
+    state = fake_modal(monkeypatch)
+    mr.ModalOps("img-test").define(cfg)
+    assert state["images"][0].calls[0] == ("from_registry", (cfg.image_ref,), {})

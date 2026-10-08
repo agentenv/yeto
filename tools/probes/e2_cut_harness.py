@@ -30,10 +30,33 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 PLAN_VERSION = "plan-v6"
-IMAGE_DIGEST = "sha256:2cc5cc52de2444e59ddefba4f9546d1aaa13f9807ab441f56e2c70a7e7936eff"
+def _current_image_digest() -> str:
+    """Single source: MILES_NEXT_IMAGE in yeto/rl/__init__.py (not a hard-coded copy)."""
+    import re
+
+    text = (Path(__file__).resolve().parents[2] / "yeto" / "rl" / "__init__.py").read_text(encoding="utf-8")
+    m = re.search(r'^MILES_NEXT_IMAGE = \(\s*"[^"]*@sha256:"\s*"([0-9a-f]{64})"', text, re.M)
+    if not m:
+        raise RuntimeError("cannot find MILES_NEXT_IMAGE digest in yeto/rl/__init__.py")
+    return "sha256:" + m.group(1)
+
+
+IMAGE_DIGEST = _current_image_digest()
+
+
+def _current_miles_commit() -> str:
+    """Single source: MILES_NEXT_COMMIT in yeto/rl/__init__.py."""
+    import re
+
+    text = (Path(__file__).resolve().parents[2] / "yeto" / "rl" / "__init__.py").read_text(encoding="utf-8")
+    m = re.search(r'^MILES_NEXT_COMMIT = "([0-9a-f]{40})"', text, re.M)
+    if not m:
+        raise RuntimeError("cannot find MILES_NEXT_COMMIT in yeto/rl/__init__.py")
+    return m.group(1)
+
 IMAGE = f"ghcr.io/michaellchung/yeto-miles-ports@{IMAGE_DIGEST}"
-MILES_COMMIT = "e3a11ab38cbb7fd911b23fdd62a4eb6dfbb1c841"
-IMAGE_TAG = "e3a11ab-9f29303"
+MILES_COMMIT = _current_miles_commit()
+IMAGE_TAG = f"{MILES_COMMIT[:7]}@{IMAGE_DIGEST[7:15]}"  # label only; the digest is the pin
 MODELS = {
     "Qwen/Qwen3-0.6B": "c1899de289a04d12100db370d81485cdf75e47ca",
     "Qwen/Qwen3-1.7B": "70d244cc86ccca08cf5af4e1e306ecf908b1ad5e",

@@ -15,6 +15,9 @@ from ..fragments import MERGE_AVG, Fragment, FragmentLayout
 from ..protocol import layout_fingerprint
 
 _PEFT_LORA_NAME = re.compile(r"\.lora_(?:A|B)\.weight\Z")
+# rl-algo-critic-family 4.2.3: full-parameter critic tensors on the critic syncer
+# channel ("critic." + the trainer's ``r<rank>:<chunk>:<name>`` key).
+_CRITIC_FULL_NAME = re.compile(r"^critic\.[A-Za-z0-9_.:\-]+\Z")
 _CLONE_EXPERT_FULL_NAME = re.compile(
     r"^base_model\.model\.model\.layers\.(?:[0-9]|[1-3][0-9]|4[0-2])\."
     r"mlp\.experts\.(?:25[6-9]|26[0-9]|27[0-9]|28[0-7])\."
@@ -63,6 +66,7 @@ class CanonicalTensorSpec:
         if not self.name or not (
             _PEFT_LORA_NAME.search(self.name)
             or _CLONE_EXPERT_FULL_NAME.fullmatch(self.name)
+            or _CRITIC_FULL_NAME.fullmatch(self.name)
         ):
             raise ValueError(f"not a canonical PEFT LoRA tensor name: {self.name!r}")
         if not self.shape or any(dim <= 0 for dim in self.shape):

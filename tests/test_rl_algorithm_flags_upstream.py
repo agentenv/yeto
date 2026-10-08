@@ -62,6 +62,9 @@ def test_objective_and_mapped_flags_exist_upstream():
     from yeto.rl.algos import loss_variants
 
     pending = frozenset() if loss_variants.fork_supports_variants() else loss_variants.FORK_FLAGS
+    from yeto.rl.algos import critic  # rl-algo-critic-family 7.2: fork-only GAE / VAPO flags
+
+    pending |= critic.FORK_FLAGS
     missing = sorted(af.objective_flags() - options - pending)
     assert not missing, f"not in the upstream Miles parser: {missing}"
 

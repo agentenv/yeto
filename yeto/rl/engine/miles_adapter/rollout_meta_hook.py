@@ -320,9 +320,24 @@ def build_metadata(
         payload["tool_wait_seconds"] = tool_wait
     if trained_samples and batch_summary_enabled(args):
         payload["batch_summary"] = batch_summary(args, trained_samples)
+    if trained_samples and batch_summary_enabled(args):
+        # rl-fn-codex-rollout 1.0 (observe only): one record per trained sample
+        # (task_id / trajectory_id / reward / signed success) so the tape can
+        # tell *which* task scored (``rl_trajectory_reward``). Absent on the
+        # default path (old key set kept).
+        payload[TRAJECTORY_REWARDS_KEY] = trajectory_reward_records(
+            args, all_samples, trained, limit=trajectory_records_limit(args))
     harness = harness_counters(all_samples)
     if harness:  # IR-3/IR-4: absent when no sample reported any (old key set kept)
         payload.update(harness)
+    if harness.get(TITO_SESSION_MISMATCH_KEY) and batch_summary_enabled(args):
+        # S14-M1 (observe only): the per-record mismatches, truncated and capped,
+        # so the driver can tape them as ``rl_harness_mismatch``. Absent on the
+        # default path and when there is nothing to report (old key set kept).
+        records = harness_mismatch_records(
+            all_samples, limit=mismatch_records_limit(args), text_limit=mismatch_text_limit(args))
+        if records:
+            payload[TITO_SESSION_MISMATCH_RECORDS_KEY] = records
     return payload
 
 
@@ -369,6 +384,141 @@ def counter_value(value: Any) -> int:
     if isinstance(value, dict):
         return sum(1 for v in value.values() if v)
     return int(value)
+
+
+TITO_SESSION_MISMATCH_RECORDS_KEY = "tito_session_mismatch_records"
+MISMATCH_RECORDS_MAX_ENV = "YETO_RL_MISMATCH_TAPE_MAX"
+MISMATCH_TEXT_MAX_ENV = "YETO_RL_MISMATCH_TEXT_MAX"
+
+
+def _limit_from(args: Any, attr: str, env: str, default: int) -> int:
+    value = getattr(args, attr, None)
+    if value is None:
+        value = os.environ.get(env)
+    try:
+        return max(0, int(value)) if value not in (None, "") else default
+    except (TypeError, ValueError):
+        return default
+
+
+def mismatch_records_limit(args: Any = None) -> int:
+    """Per-round cap on taped mismatch records (``args.yeto_rl_mismatch_tape_max``
+    or ``YETO_RL_MISMATCH_TAPE_MAX``; default HARNESS_MISMATCH_MAX_PER_ROUND)."""
+    from ..timeline import HARNESS_MISMATCH_MAX_PER_ROUND
+
+    return _limit_from(args, "yeto_rl_mismatch_tape_max", MISMATCH_RECORDS_MAX_ENV,
+                       HARNESS_MISMATCH_MAX_PER_ROUND)
+
+
+def mismatch_text_limit(args: Any = None) -> int:
+    """Per-field text cap (``args.yeto_rl_mismatch_text_max`` or
+    ``YETO_RL_MISMATCH_TEXT_MAX``; default HARNESS_MISMATCH_TEXT_MAX)."""
+    from ..timeline import HARNESS_MISMATCH_TEXT_MAX
+
+    return _limit_from(args, "yeto_rl_mismatch_text_max", MISMATCH_TEXT_MAX_ENV,
+                       HARNESS_MISMATCH_TEXT_MAX)
+
+
+def _clip(value: Any, limit: int) -> tuple[str, bool]:
+    text = "" if value is None else str(value)
+    return (text[:limit], True) if len(text) > limit else (text, False)
+
+
+def _int_or(value: Any, default: int) -> int:
+    try:
+        return default if value is None or isinstance(value, bool) else int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def harness_mismatch_records(
+    all_samples: Iterable[Sequence[Any]], *, limit: int, text_limit: int,
+) -> list[dict[str, Any]]:
+    """S14-M1: the per-record ``tito_session_mismatch`` dicts of every sample
+    (upstream ``Mismatch.to_dict``: type/segment_index/expected_text/actual_text/
+    detail), flattened in sample order, texts cut to ``text_limit`` chars and at
+    most ``limit`` records. Int / bool / dict values of the key (harness bridge
+    counters) carry no records and are skipped."""
+    out: list[dict[str, Any]] = []
+    if limit <= 0:
+        return out
+    for group in all_samples:
+        for s in _flat(group):
+            meta = getattr(s, "metadata", None)
+            if not isinstance(meta, dict):
+                continue
+            value = meta.get(TITO_SESSION_MISMATCH_KEY)
+            if not isinstance(value, (list, tuple)):
+                continue
+            for i, rec in enumerate(value):
+                if len(out) >= limit:
+                    return out
+                if not isinstance(rec, dict):
+                    rec = {"detail": repr(rec)}
+                expected, cut_e = _clip(rec.get("expected_text"), text_limit)
+                actual, cut_a = _clip(rec.get("actual_text"), text_limit)
+                detail, cut_d = _clip(rec.get("detail"), text_limit)
+                kind = rec.get("type", rec.get("kind"))
+                kind = getattr(kind, "value", kind)
+                out.append({
+                    "sample_index": _int_or(getattr(s, "index", None), -1),
+                    "group_index": _int_or(getattr(s, "group_index", None), -1),
+                    "record_index": i,
+                    "kind": "" if kind is None else str(kind),
+                    "segment_index": _int_or(rec.get("segment_index"), -1),
+                    "expected_text": expected,
+                    "actual_text": actual,
+                    "detail": detail,
+                    "truncated": bool(cut_e or cut_a or cut_d),
+                })
+    return out
+
+
+TRAJECTORY_REWARDS_KEY = "trajectory_rewards"
+TRAJECTORY_RECORDS_ENV = "YETO_RL_TRAJECTORY_TAPE_MAX"
+TRAJECTORY_RECORDS_DEFAULT = 256
+
+
+def trajectory_records_limit(args: Any = None) -> int:
+    return _limit_from(args, "yeto_rl_trajectory_tape_max", TRAJECTORY_RECORDS_ENV, TRAJECTORY_RECORDS_DEFAULT)
+
+
+def trajectory_reward_records(
+    args: Any, all_samples: Iterable[Sequence[Any]], trained: Any = None, *, limit: int,
+) -> list[dict[str, Any]]:
+    """rl-fn-codex-rollout 1.0 (observe only): per-sample reward records of the
+    trained groups (every group when ``trained`` is None): Miles sample/group
+    index, ``metadata["task_id"]`` (Terminal-Bench task), ``metadata["trajectory_id"]``
+    (or ``sample.rollout_id``: siblings of one trajectory share a reward, R-D5a),
+    the reward the trainer sees, the signed ``metadata["success"]`` bit (None =
+    no verdict) and the aborted flag; at most ``limit`` records in sample order."""
+    out: list[dict[str, Any]] = []
+    if limit <= 0:
+        return out
+    for group in all_samples:
+        samples = _flat(group)
+        if not samples or (trained is not None and _group_key(group) not in trained):
+            continue
+        for s in samples:
+            if len(out) >= limit:
+                return out
+            meta = getattr(s, "metadata", None)
+            meta = meta if isinstance(meta, dict) else {}
+            reward = _reward(args, s)
+            success = meta.get("success")
+            trajectory = meta.get("trajectory_id")
+            if trajectory is None:
+                trajectory = getattr(s, "rollout_id", None)
+            out.append({
+                "sample_index": _int_or(getattr(s, "index", None), -1),
+                "group_index": _int_or(getattr(s, "group_index", None), -1),
+                "task_id": "" if meta.get("task_id") is None else str(meta.get("task_id")),
+                "trajectory_id": "" if trajectory is None else str(trajectory),
+                "reward": float(reward) if math.isfinite(reward) else None,
+                "success": success if isinstance(success, bool) else None,
+                "aborted": _status(s) == "aborted",
+            })
+    return out
 
 
 def harness_counters(all_samples: Iterable[Sequence[Any]]) -> dict[str, Any]:

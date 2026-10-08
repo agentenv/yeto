@@ -738,6 +738,7 @@ def _validate_codex_harness(value: Any, learner: dict[str, Any]) -> None:
             codex_reasoning_effort=learner.get("codex_reasoning_effort"),
             lora_targets=str(learner.get("lora_targets", "")),
             expert_full_count=int(learner.get("expert_full_count", 0)),
+            lora_expert_rank=int(learner.get("rl_lora_expert_rank") or 0),
         )
     except (TypeError, ValueError) as exc:
         raise HarnessError("stock Codex model profile drifted") from exc

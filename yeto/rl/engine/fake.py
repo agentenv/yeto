@@ -112,6 +112,10 @@ class FakeEngine:
     # do not move) -- the decayed-to-zero schedule of fix-decoupled-lr-schedule.
     zero_lr_rounds: set[int] = field(default_factory=set)
     lr: float = 1e-5
+    # rl-algo-critic-family 3.2: a shared actor/critic trainer (receipt family
+    # "ppo"); the critic trains first each round and reports value metrics.
+    critic: bool = False
+    critic_tensors: dict[str, torch.Tensor] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.tensors = {k: v.detach().clone().float() for k, v in self.tensors.items()}
@@ -198,6 +202,10 @@ class FakeRolloutPool:
 
 
 class FakeTrainerGroup:
+    # Miles --offload-train publishes from host backups while asleep; the fake
+    # keeps the stricter default (a test opts in by setting this True).
+    publish_offloaded = False
+
     def __init__(self, engine: FakeEngine) -> None:
         self.engine = engine
         if not engine.grad_norm_reported:
@@ -213,6 +221,17 @@ class FakeTrainerGroup:
 
     def train_step(self, batch: RolloutBatchHandle) -> LocalStepReceipt:
         e = self.engine
+        self.critic_metrics = {}
+        if e.critic:
+            e.calls.append(("critic_train", batch.rollout_id))
+            for name in sorted(e.critic_tensors):
+                e.critic_tensors[name] = e.critic_tensors[name] + 0.5
+            # deterministic, finite stand-ins for Miles' value_loss and the
+            # state plugin's explained variance
+            self.critic_metrics = {
+                "critic/value_loss": 1.0 / (batch.rollout_id + 2),
+                "critic/explained_variance": 1.0 - 1.0 / (batch.rollout_id + 2),
+            }
         e.calls.append(("train", batch.rollout_id))
         if not e.trainer_resident:
             raise RuntimeError("train step on an offloaded trainer")
@@ -242,7 +261,7 @@ class FakeTrainerGroup:
         tokens = sum(g.token_count for g in batch.groups)
         ids = tuple(s for g in batch.groups for s in g.sample_ids)
         return LocalStepReceipt(
-            algorithm="grpo",
+            algorithm="ppo" if e.critic else "grpo",
             learner_id=0,
             learner_generation=0,
             base_policy_version=batch.policy_version,
@@ -257,6 +276,52 @@ class FakeTrainerGroup:
 
     def step_metrics(self) -> TrainStepMetrics:
         return self.engine._last_metrics
+
+    def round_metrics(self) -> dict[str, float]:
+        return dict(getattr(self, "critic_metrics", None) or {})
+
+    # rl-algo-critic-family 4.2: the critic channel's export / write-back
+    def critic_layout(self) -> str:
+        return self.critic_round_receipt(0).critic_layout_hash
+
+    def export_critic_state(self) -> dict[str, torch.Tensor]:
+        e = self.engine
+        e.calls.append(("critic_export",))
+        return {n: t.detach().clone().float() for n, t in e.critic_tensors.items()}
+
+    def import_critic_state(self, tensors) -> str:
+        from yeto.rl.critic_state import critic_weights_sha256
+
+        e = self.engine
+        if set(tensors) != set(e.critic_tensors):
+            raise ValueError("critic tensor names differ")
+        e.calls.append(("critic_apply",))
+        e.critic_tensors = {n: t.detach().clone() for n, t in tensors.items()}
+        return critic_weights_sha256(e.critic_tensors)
+
+    def critic_round_receipt(self, rollout_id: int):
+        e = self.engine
+        if not e.critic:
+            return None
+        from yeto.rl.critic_state import (
+            CriticRoundReceipt,
+            critic_layout_hash,
+            critic_weights_sha256,
+        )
+
+        tensors = e.critic_tensors or {"output_layer.weight": torch.zeros(1, 2)}
+        metrics = getattr(self, "critic_metrics", None) or {}
+        return CriticRoundReceipt(
+            rollout_id=rollout_id,
+            actor_layout_hash=e.canonical(0).layout_hash,
+            critic_layout_hash=critic_layout_hash(
+                [(n, tuple(t.shape), str(t.dtype)) for n, t in tensors.items()],
+                value_head="output_layer.weight"),
+            critic_param_mode="full", critic_init="copy_actor_backbone",
+            critic_weights_sha256=critic_weights_sha256(tensors),
+            value_loss=metrics.get("critic/value_loss"),
+            explained_variance=metrics.get("critic/explained_variance"),
+        )
 
 
 class FakePolicyState:
@@ -295,7 +360,7 @@ class FakePublisher:
     def publish(self, state: TrainableState) -> PublicationResult:
         e = self.engine
         e.calls.append(("publish", state.policy_version))
-        if not e.trainer_resident:
+        if not e.trainer_resident and not getattr(e.trainer, "publish_offloaded", False):
             raise RuntimeError("publish reads weights from an offloaded trainer")
         digest = state.policy_tensor_hash()
         payload = b"".join(

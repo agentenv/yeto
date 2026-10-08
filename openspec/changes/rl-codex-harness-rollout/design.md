@@ -199,6 +199,7 @@ agentic profile 默认开启截断重要性采样，吸收引擎的数值差异�
 - **归属规则**：A、B 属于同一 `trajectory_id`，设置相同 `group_index` 与 `rollout_id`（兄弟段），携带同一份签名 outcome → 共享最终奖励；每个生成事件恰好出现在一条 sample 的 mask=1 区间中（重建上下文里的历史文本是 prompt，mask=0），**不重复训练**；`train_data_conversion` 对该 rollout 只计一次基线，**不冒充独立 GRPO 样本**。metadata 增加 `chain_index`、`chains_total`、`chain_break_reason`，`reward_scope=trajectory`。
 - **真正独立分支**：定义为"拥有各自环境终态与各自 verifier outcome"的执行（例如 harness 在不同容器各跑一次）。它们是不同 `trajectory_id`、不同 `rollout_id`，各自归因、各算一个 GRPO 组成员。同一容器内的"重试分叉"（D5 情况 2）在 Codex 路径被 legacy bridge 的指纹去重与历史相等校验拒绝（协议违规 → 轨迹作废，不签名、不计 0 奖励）；对其他 harness 的处理留到首批之后，默认选项是"被放弃分支作为同一 trajectory 的兄弟段共享奖励"，但需单独批准。
 - **首批断言**：Codex 路径每条轨迹 chain 数恒为 1（compaction 关闭、重试被拒）；GPU 9.2 把 `chains_total==1` 作为硬判据，多 chain 代码路径只在 CPU 用 fake harness 验收。
+  - **CompactionRL 例外（S13，2026-10-07）**：仅当 `YETO_CODEX_COMPACTIONRL` 开启时，判据改为按段核对：每条轨迹 `chains_total == num_segments == compactions+1 == 该轨迹 sample 数`，`chain_index/segment_index` 为 0..n−1，非首段 `chain_break_reason=compaction_window`；中止轨迹保留单个 sample 时按 `chains_total==1`。关闭时判据不变。实现：`yeto/rl/harness/codex/chain_judge.py::judge_chain_counts`（CPU 测试 `tests/test_codex_compaction_wiring.py`）。
 - 原 D5a 中"奖励归属见 D9"是笔误（D9 是沙箱代理）；归属规则以本段为准。
 
 ### R-D9. 沙箱代理接口补充（主 agent 已批 2026-10-01，用户边界见 SESSION6-HANDOFF §7.4）
@@ -258,5 +259,5 @@ agentic profile 默认开启截断重要性采样，吸收引擎的数值差异�
 ### R-GPU. 冒烟预算（主 agent 已批 2026-10-01，用户边界见 SESSION6-HANDOFF §7.4；合计 ≤ $50，同一租期）
 - 资源：1×H100（Nebius，≈$2.95/GPU·h，SkyPilot `--down` + autostop + 独立 watchdog 按实例 ID 终止；需要 docker 跑 TB2 任务容器，Modal serverless 不满足）；或 1×L40S（Modal ≈$1.95/h）仅当 TB2 容器可在 Modal 沙箱内运行——待确认，默认前者。费用按租期 wall time 计，含镜像拉取、预热、空闲。
 - 9.1 A 路径冒烟（≤ $30 ≈ 10 h 上限，计划 6 h）：目标 = 1 个 rollout 步（6 任务 × n=4）+ 1 个训练步。通过条件 = preflight 通过；每条 sample 满足 4.3 断言；HMAC 三处验签通过；`tool_wait`/`env_live` 结束后归零；R-TB 覆盖矩阵全部出现；≥1 个非零 std 组且一次有效更新（或记录合法否定结论）。停机条件 = 费用达 $30、租期达 10 h、preflight 失败、任一对齐断言失败（立即停、拉日志）。
-- 9.2 多轮 TITO 一致性（≤ $20 ≈ 6.5 h 上限，计划 3 h，与 9.1 同租期顺序执行）：目标 = `qwen35_08b` ≥20 条多轮轨迹。通过条件 = `chains_total==1` 全部成立；`tito_session_mismatch==0`；`tito_chain_breaks` 全零；trainer 重算 logprob 与 rollout logprob 差异落入 TIS 截断范围的比例 ≥99%。停机条件 = 费用达 $20、租期总计达 16.5 h、断链率>0（停并记录原因）。
+- 9.2 多轮 TITO 一致性（≤ $20 ≈ 6.5 h 上限，计划 3 h，与 9.1 同租期顺序执行）：目标 = `qwen35_08b` ≥20 条多轮轨迹。通过条件 = `chains_total==1` 全部成立（压缩开启时改按 R-D5a "CompactionRL 例外"逐段核对，`chain_judge.judge_chain_counts` 无违规）；`tito_session_mismatch==0`；`tito_chain_breaks` 全零；trainer 重算 logprob 与 rollout logprob 差异落入 TIS 截断范围的比例 ≥99%。停机条件 = 费用达 $20、租期总计达 16.5 h、断链率>0（停并记录原因）。
 - 单价为估算，下单前核对当日价格；两项合计硬上限 $50，超出即 `sky down <cluster>` 并核实释放。

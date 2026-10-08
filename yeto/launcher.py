@@ -40,6 +40,10 @@ from .gpu_spec import ClusterSpec, parse_gpu_spec
 from .models import MODEL_WEIGHT_GB
 
 SYNCER_PORT = 29400
+# rl-algo-critic-family 4.2.1 (design D4 plan a): a critic algorithm runs a
+# second syncer beside the actor's, on its own port, checkpoint and tape; its
+# layout is the critic layout (critic_layout_hash), never the actor LoRA one.
+CRITIC_SYNCER_PORT = 29401
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # WAN transport tuning applied to every node at setup: BBR keeps throughput
@@ -227,6 +231,7 @@ GPU_MEM_GB = {"A100": 40, "A100-80GB": 80, "H100": 80, "H200": 141, "B200": 180,
 # truncated as "network-interfa"; "eth0" made gloo fail with "Unable to find
 # address for: eth0" in the SGLang scheduler).  "" leaves NCCL/gloo to their
 # own detection.  NCCL_SOCKET_IFNAME in the environment always wins.
+MULTINODE_IB_CLOUDS = frozenset({"modal"})
 MULTINODE_SOCKET_IFNAME = {"nebius": "auto", "aws": "", "gcp": "", "ssh": ""}
 _DETECT_IFACE = (
     "YETO_IFACE=${NCCL_SOCKET_IFNAME:-$(for d in /sys/class/net/*; do n=$(basename \"$d\"); "
@@ -235,11 +240,49 @@ _DETECT_IFACE = (
 )
 
 
+# Megatron-LM checkout inside the radixark/miles-based ports images.
+PORTS_MEGATRON_PATH = "/root/Megatron-LM"
+# --rl-island-pre-run: the snippet runs in the island run script right after
+# `cd ~/sky_workdir` (image environment, HOME=/root, GPUs idle, before Ray).
+ISLAND_PRE_RUN_START = "[yeto-island] pre-run start"
+ISLAND_PRE_RUN_DONE = "[yeto-island] pre-run done"
+ISLAND_PRE_RUN_FAILED = "[yeto-island] pre-run FAILED"
+
+
+def read_island_pre_run(path) -> str:
+    """The --rl-island-pre-run snippet: a readable, non-empty local file."""
+    p = Path(path).expanduser()
+    if not p.is_file():
+        raise ValueError(f"--rl-island-pre-run: {path} is not a file")
+    text = p.read_text(encoding="utf-8")
+    if not text.strip():
+        raise ValueError(f"--rl-island-pre-run: {path} is empty")
+    return text if text.endswith("\n") else text + "\n"
+
+
+def island_pre_run_block(script: str | None) -> str:
+    """Run-script lines for the pre-run snippet ("" when none): a subshell so
+    the snippet's own `set -e` failures surface as one FAILED line + exit 1."""
+    if not script:
+        return ""
+    return (
+        f'echo "{ISLAND_PRE_RUN_START} $(date -u +%FT%TZ)"\n'
+        "(\nset -e\n" + script + ")\n"
+        '_pre_rc=$?\n'
+        '[ "$_pre_rc" = 0 ] || { echo "' + ISLAND_PRE_RUN_FAILED + ' rc=$_pre_rc $(date -u +%FT%TZ)" >&2; exit 1; }\n'
+        f'echo "{ISLAND_PRE_RUN_DONE} $(date -u +%FT%TZ)"\n'
+    )
+
+
+
 def multinode_env_prelude(cloud: str, num_nodes: int) -> str:
     """Shell exports every island node runs before Ray starts; "" on one node."""
     if num_nodes <= 1:
         return ""
-    lines = ["export NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1}",
+    # Modal clustered islands request RDMA (ModalIslandConfig.rdma): leave
+    # NCCL's IB transport on there; other clouds run NCCL over TCP.
+    ib_default = 0 if cloud in MULTINODE_IB_CLOUDS else 1
+    lines = [f"export NCCL_IB_DISABLE=${{NCCL_IB_DISABLE:-{ib_default}}}",
              "export NCCL_DEBUG=${NCCL_DEBUG:-WARN}"]
     iface = MULTINODE_SOCKET_IFNAME.get(cloud, "")
     if iface == "auto":
@@ -511,6 +554,44 @@ def build_syncer_binary() -> Path:
 # runs put it under the output dir they collect, so it varies by mode.
 SYNCER_EVENT_TAPE = "~/yeto-tape.jsonl"
 RL_SYNCER_EVENT_TAPE = "~/yeto-output/yeto-tape.jsonl"
+RL_CRITIC_SYNCER_EVENT_TAPE = "~/yeto-output/yeto-critic-tape.jsonl"
+RL_CRITIC_SYNCER_CHECKPOINT = "~/yeto-output/yeto-critic-state.ckpt"
+
+
+def rl_needs_critic(args) -> bool:
+    """True iff the prepared RL algorithm spec trains a critic (execution.needs_critic)."""
+    if getattr(args, "training_mode", "sft") != "rl":
+        return False
+    raw = getattr(args, "rl_algorithm_spec_json", None)
+    if not raw:
+        return False
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        return False
+    return bool(((payload or {}).get("execution") or {}).get("needs_critic"))
+
+
+def critic_syncer_address(syncer_addr: str) -> str:
+    """The critic syncer runs on the actor syncer's host, on CRITIC_SYNCER_PORT."""
+    if syncer_addr == "$SYNCER_ADDR":
+        return "$CRITIC_SYNCER_ADDR"
+    host, _, _port = syncer_addr.rpartition(":")
+    if not host:
+        raise ValueError(f"syncer address {syncer_addr!r} has no host:port")
+    return f"{host}:{CRITIC_SYNCER_PORT}"
+
+
+def critic_syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> str:
+    """The critic channel: the same strict RL syncer invocation as the actor's
+    (rounds, quorum, outer optimizer), with its own port, checkpoint and tape."""
+    return (
+        syncer_command(args, num_learners, binary=binary, critic=False)
+        .replace(f" --port {SYNCER_PORT}", f" --port {CRITIC_SYNCER_PORT}", 1)
+        .replace("~/yeto-output/yeto-state.ckpt", RL_CRITIC_SYNCER_CHECKPOINT)
+        .replace(f" --event-tape {RL_SYNCER_EVENT_TAPE}", f" --event-tape {RL_CRITIC_SYNCER_EVENT_TAPE}", 1)
+        .replace("mkdir -p ~/yeto-output && ", "", 1)
+    )
 
 
 def syncer_event_tape(args) -> str:
@@ -545,15 +626,26 @@ def _syncer_quorum_timeout(args) -> str:
     return f" --quorum-timeout-s {int(value)}"
 
 
-def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> str:
+def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer",
+                   critic: bool | None = None) -> str:
     """The syncer invocation shared by the syncer-cluster task (local
     controller mode) and the head-node subprocess (head controller mode).
-    --resume makes any restart pick up from the on-disk checkpoint."""
+    --resume makes any restart pick up from the on-disk checkpoint.
+
+    A critic algorithm (4.2.1) backgrounds the critic syncer first; the actor
+    syncer stays the foreground process (the job's health)."""
     if getattr(args, "training_mode", "sft") == "rl":
         total_steps = getattr(args, "rl_total_fragment_steps", args.total_steps)
+        if critic is None:
+            critic = rl_needs_critic(args)
+        critic_prefix = (
+            f"{{ {critic_syncer_command(args, num_learners, binary=binary)} & }} && "
+            if critic else ""
+        )
         return (
             "mkdir -p ~/yeto-output && "
-            f"{binary}"
+            + critic_prefix
+            + f"{binary}"
             f" --port {SYNCER_PORT}"
             f" --learners {num_learners}"
             f" --quorum {args.quorum}"
@@ -678,7 +770,9 @@ def syncer_cloud(args) -> str:
 
 def syncer_ports(args) -> list[int] | None:
     """`ports=` for the syncer/head resources; None where sky can't open them."""
-    return None if syncer_cloud(args) in NO_OPEN_PORTS_CLOUDS else [SYNCER_PORT]
+    if syncer_cloud(args) in NO_OPEN_PORTS_CLOUDS:
+        return None
+    return [SYNCER_PORT, CRITIC_SYNCER_PORT] if rl_needs_critic(args) else [SYNCER_PORT]
 
 
 def ufw_setup(port: int = SYNCER_PORT) -> str:
@@ -730,6 +824,36 @@ def tcp_probe(host: str, port: int = SYNCER_PORT, *, expect: bytes | None = None
         if i + 1 < attempts:
             sleep(delay)
     return False, f"{host}:{port} unreachable after {attempts} attempt(s): {last}"
+
+
+def island_syncer_addrs(envs) -> str:
+    """The syncer address(es) an island dials, for launch.log (no credentials)."""
+    envs = envs or {}
+    return " ".join(f"{k}={envs[k]}" for k in ("SYNCER_ADDR", "CRITIC_SYNCER_ADDR") if k in envs) or "no syncer"
+
+
+def probe_syncer_ports(args, host: str, *, probe=None) -> list[str]:
+    """Fail fast, before any island is started, unless every syncer port
+    (actor 29400 and, for a critic algorithm, critic 29401) accepts a TCP
+    connection from this machine. On clouds where sky opens the ports
+    (security groups, e.g. Nebius) this is the only check that the rule
+    really took effect: s13-g3-modal-20261007b spent the 900 s stall timeout
+    with both islands silently redialing a Nebius syncer that never saw a
+    connection. A pass here does not prove the islands' egress (Modal), only
+    that the head side is open."""
+    probe = probe or tcp_probe
+    ports = [SYNCER_PORT, CRITIC_SYNCER_PORT] if rl_needs_critic(args) else [SYNCER_PORT]
+    details = []
+    for port in ports:
+        ok, detail = probe(host, port)
+        if not ok:
+            raise RuntimeError(
+                f"syncer port {port} not reachable from outside {syncer_cloud(args)} ({detail}); "
+                "no island was started"
+            )
+        print(f"[launcher] syncer probe: {detail}", flush=True)
+        details.append(detail)
+    return details
 
 
 def make_syncer_task(args, num_learners: int):
@@ -1238,6 +1362,9 @@ def _prepare_ports_algorithm(args, rl_engine: str) -> None:
             "rollout_max_response_len": getattr(args, "rollout_max_response_len", None),
             "context_parallel_size": 1,  # ports emits --context-parallel-size 1
             "multi_lora": False,
+            # rl-algo-critic-family 2.3 (critic run-level rejections)
+            "sync_preset": getattr(args, "rl_sync_preset", "strict-avg"),
+            "elastic": bool(getattr(args, "rl_elastic", False)),
         })
         if problems:
             raise AlgorithmSpecError("algorithm spec rejected: " + "; ".join(problems))
@@ -1256,6 +1383,7 @@ def _prepare_ports_algorithm(args, rl_engine: str) -> None:
                 getattr(args, "rl_allow_unverified_mechanism", None) or (),
                 islands=islands,
                 outer_sync=not no_sync,  # a launched run has a syncer unless no-sync
+                sync_preset=getattr(args, "rl_sync_preset", "strict-avg"),
             )
         )
         from .rl.engine.miles_adapter.entry import miles_capabilities, with_partitioned_serial
@@ -1274,8 +1402,37 @@ def _prepare_ports_algorithm(args, rl_engine: str) -> None:
         )
     except (AlgorithmSpecError, CapabilityMismatch) as error:
         raise ValueError(str(error)) from error
+    _check_critic_warmup_options(args, spec)
     args.rl_algorithm_spec_json = spec.canonical_json()
     args.rl_expected_algorithm_sha256 = spec.sha256()
+
+
+def _check_critic_warmup_options(args, spec) -> None:
+    """--rl-critic-load/--rl-critic-init-sha256/--rl-critic-baseline-rounds (5.3)."""
+
+    load = getattr(args, "rl_critic_load", None)
+    digest = getattr(args, "rl_critic_init_sha256", None)
+    rounds = getattr(args, "rl_critic_baseline_rounds", 0) or 0
+    if load is None and digest is None and not rounds:
+        return
+    if (load is None) != (digest is None):
+        raise ValueError("--rl-critic-load and --rl-critic-init-sha256 go together")
+    if digest is not None and not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError("--rl-critic-init-sha256 must be a lowercase hex SHA256")
+    critic = spec.critic
+    warm = (spec.execution.needs_critic and critic.init == "copy_actor_backbone"
+            and bool(critic.warmup_steps))
+    if not warm:
+        raise ValueError(
+            "--rl-critic-load/--rl-critic-baseline-rounds need a critic algorithm with "
+            "critic.init='copy_actor_backbone' and critic.warmup_steps > 0"
+        )
+    if type(rounds) is not int or rounds < 0:
+        raise ValueError(f"--rl-critic-baseline-rounds must be >= 0 (got {rounds!r})")
+    if rounds and (load is not None or not getattr(args, "rl_single_island_no_sync", False)):
+        raise ValueError(
+            "--rl-critic-baseline-rounds needs --rl-single-island-no-sync and no --rl-critic-load"
+        )
 
 
 _ELASTIC_LAUNCH_FLAGS = (
@@ -1477,6 +1634,9 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
                            eval_uses_snapshots=UNKNOWN)
     if getattr(args, "rl_observe_timeline", False) and rl_engine != "ports":
         raise ValueError("--rl-observe-timeline only applies to --rl-engine ports")
+    sample_s = getattr(args, "rl_resource_sample_interval", None)
+    if sample_s is not None and (rl_engine != "ports" or sample_s < 0):
+        raise ValueError("--rl-resource-sample-interval needs --rl-engine ports and a value >= 0")
     from yeto.rl.engine.miles_adapter.elastic_hook import check_recommend_flags
     check_recommend_flags(args)
     dropout = getattr(args, "rl_lora_dropout", None)
@@ -1490,6 +1650,14 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
                                  or any(c.isspace() for c in ref_load)):
         raise ValueError("--rl-megatron-ref-load needs --rl-engine ports and an absolute path "
                          "without whitespace")
+    if getattr(args, "rl_boot_only", False) and (
+            rl_engine != "ports" or not getattr(args, "rl_single_island_no_sync", False)):
+        raise ValueError("--rl-boot-only needs --rl-engine ports and --rl-single-island-no-sync")
+    pre_run = getattr(args, "rl_island_pre_run", None)
+    if pre_run is not None:
+        if rl_engine != "ports" or not getattr(args, "rl_single_island_no_sync", False):
+            raise ValueError("--rl-island-pre-run needs --rl-engine ports and --rl-single-island-no-sync")
+        args.rl_island_pre_run_script = read_island_pre_run(pre_run)
     if getattr(args, "rl_deterministic_trainer", False) and rl_engine != "ports":
         raise ValueError("--rl-deterministic-trainer only applies to --rl-engine ports")
     given = [flag for name, flag in _ELASTIC_LAUNCH_FLAGS + _ELASTIC_PAUSE_FLAGS
@@ -1618,6 +1786,8 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         flags += " --rl-overlap-eval"
     if getattr(args, "rl_observe_timeline", False):
         flags += " --rl-observe-timeline"
+    if getattr(args, "rl_resource_sample_interval", None) is not None:
+        flags += f" --rl-resource-sample-interval {float(args.rl_resource_sample_interval)!r}"
     from yeto.rl.engine.miles_adapter.elastic_hook import recommend_flags
     flags += recommend_flags(args)
     if getattr(args, "rl_deterministic_trainer", False):
@@ -1630,6 +1800,8 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         flags += f" --megatron-ref-load {shlex.quote(args.rl_megatron_ref_load)}"
     if getattr(args, "rl_print_attestation_fingerprint", False):
         flags += " --rl-print-attestation-fingerprint"
+    if getattr(args, "rl_boot_only", False):
+        flags += " --rl-boot-only"
     if getattr(args, "rl_elastic", False):
         prelude += (
             "mkdir -p ~/yeto-rl && printf '%s' "
@@ -1715,6 +1887,13 @@ def _ports_algorithm_flags(args) -> tuple[str, str]:
     allowed = list(getattr(args, "rl_allow_unverified_mechanism", None) or ())
     for name in allowed:
         flags += f" --rl-allow-unverified-mechanism {shlex.quote(name)}"
+    # rl-algo-critic-family 5.3: critic warm-up options, forwarded only when set
+    # (every other argv is unchanged).
+    if getattr(args, "rl_critic_load", None):
+        flags += (f" --rl-critic-load {shlex.quote(args.rl_critic_load)}"
+                  f" --rl-critic-init-sha256 {shlex.quote(args.rl_critic_init_sha256)}")
+    if getattr(args, "rl_critic_baseline_rounds", 0):
+        flags += f" --rl-critic-baseline-rounds {int(args.rl_critic_baseline_rounds)}"
     infra_prelude, infra_flags = _ports_infra_flags(args)
     return prelude + infra_prelude, flags + infra_flags
 
@@ -1904,6 +2083,7 @@ def _prepare_rl_args(
             codex_reasoning_effort=codex_reasoning_effort,
             lora_targets=str(args.lora_targets),
             expert_full_count=int(getattr(args, "expert_full_count", 0)),
+            lora_expert_rank=int(getattr(args, "rl_lora_expert_rank", None) or 0),
         )
     elif codex_reasoning_effort is not None or codex_backend_profile is not None:
         raise ValueError(
@@ -2618,6 +2798,66 @@ def in_vm_docker_run(rl_image: str, setup: str, run: str, env_names, learner_id:
     )
 
 
+def docker_config_login(image_ref: str | None, path: str | Path | None = None) -> dict[str, str] | None:
+    """The ``~/.docker/config.json`` ``auths`` entry for ``image_ref``'s
+    registry as a SKYPILOT_DOCKER_* triple, or None when the file or the
+    entry is missing (credential helpers are not consulted)."""
+    from .modal_runner import DOCKER_LOGIN_ENV_VARS, registry_host
+
+    if not image_ref:
+        return None
+    path = Path(path) if path else Path.home() / ".docker" / "config.json"
+    try:
+        auths = json.loads(path.read_text(encoding="utf-8")).get("auths") or {}
+    except (OSError, ValueError):
+        return None
+    host = registry_host(image_ref)
+    entry = next((auths[k] for k in (host, f"https://{host}", f"https://{host}/v1/") if isinstance(auths.get(k), dict)), None)
+    if not entry or not entry.get("auth"):
+        return None
+    import base64
+
+    try:
+        user, password = base64.b64decode(entry["auth"]).decode().split(":", 1)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not user or not password:
+        return None
+    return dict(zip(DOCKER_LOGIN_ENV_VARS, (user, password, host)))
+
+
+def registry_login_for(args, environ=None) -> dict[str, str] | None:
+    """The private-registry login a launch injects for ``--rl-image``, or
+    None (the default: a public image, nothing injected anywhere -- not the
+    island task secrets, not the Modal pull secret, not the head job).
+
+    Injection happens only when (a) the SKYPILOT_DOCKER_* variables for
+    the image's registry are in ``environ`` (ports engine only, as before),
+    or (b) ``--rl-image-private`` was given: then the environment login is
+    used if present, else the registry's ``~/.docker/config.json`` entry;
+    neither being available is an error rather than a silent public pull."""
+    from .modal_runner import registry_credentials
+
+    from .rl import default_rl_image
+
+    environ = os.environ if environ is None else environ
+    engine = getattr(args, "rl_engine", "ports") or "ports"
+    # before prepare_launch_args (the head CLI) --rl-image may still be unset
+    image = getattr(args, "rl_image", None) or default_rl_image(engine)
+    explicit = bool(getattr(args, "rl_image_private", False))
+    if not explicit and engine != "ports":
+        return None
+    login = registry_credentials(image, environ)
+    if login is None and explicit:
+        login = docker_config_login(image)
+        if login is None:
+            raise ValueError(
+                f"--rl-image-private: no registry login for {image!r}: set "
+                "SKYPILOT_DOCKER_USERNAME/PASSWORD/SERVER or add the registry to ~/.docker/config.json"
+            )
+    return login
+
+
 def _sky_docker_login_config(login: dict[str, str]):
     """SkyPilot's DockerLoginConfig for a SKYPILOT_DOCKER_* triple."""
     from sky.provision.docker_utils import DockerLoginConfig
@@ -2625,8 +2865,12 @@ def _sky_docker_login_config(login: dict[str, str]):
     return DockerLoginConfig.from_env_vars(login)
 
 
-def _miles_source_setup(rl_engine: str = "ports") -> tuple[str, str]:
-    """Return the (miles_setup, sglang_setup) remote steps for ``rl_engine``."""
+def _miles_source_setup(rl_engine: str = "ports", overlay: str | None = None) -> tuple[str, str]:
+    """Return the (miles_setup, sglang_setup) remote steps for ``rl_engine``.
+
+    ``overlay`` (ports only, default None = off): a :mod:`yeto.rl.miles_overlay`
+    patch applied to the image's ~/miles after the checkout checks.
+    """
 
     from .rl import (
         MILES_BASE_COMMIT,
@@ -2645,7 +2889,10 @@ def _miles_source_setup(rl_engine: str = "ports") -> tuple[str, str]:
         SGLANG_REPOSITORY,
     )
 
+    if overlay is not None and rl_engine != "ports":
+        raise ValueError("a Miles overlay needs the ports engine")
     if rl_engine == "ports":
+        from .rl.miles_overlay import overlay_setup
 
         def checkout(
             path: str, repository: str, commit: str, refreshed_flag: str = ""
@@ -2727,7 +2974,8 @@ def _miles_source_setup(rl_engine: str = "ports") -> tuple[str, str]:
             "else\n"
             "python3 -m pip install -q --no-deps -e ~/miles "
             f"'peft=={MILES_PEFT_VERSION}'\n"
-            "fi",
+            "fi"
+            + (f"\n{overlay_setup(overlay)}" if overlay else ""),
             f"if {sglang_in_image}; then\n"
             f"ln -sfn {image_root} ~/sglang\n"
             f"echo '[yeto-setup] image provides sglang {SGLANG_NEXT_COMMIT}'\n"
@@ -2891,6 +3139,57 @@ def codex_container_env(contract: dict) -> dict[str, str]:
     return env
 
 
+def rl_gae_variant(args) -> str | None:
+    """``advantage.gae_variant`` of the prepared RL algorithm spec (None if absent)."""
+    raw = getattr(args, "rl_algorithm_spec_json", None)
+    if getattr(args, "training_mode", "sft") != "rl" or not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    value = ((payload or {}).get("advantage") or {}).get("gae_variant")
+    return None if value is None else str(value)
+
+
+def compactionrl_launch_env(args, environ, harness_compacts: bool) -> dict[str, str]:
+    """Rollout-worker env for CompactionRL (design D8; progress "S13 Codex 压缩接线").
+
+    A ``cross_segment_per_sample`` spec switches ``YETO_CODEX_COMPACTIONRL=1`` on
+    (and forwards ``YETO_CODEX_COMPACTIONRL_T_COMP`` from the launching
+    environment when set); the island preflight forwards every ``YETO_CODEX_*``
+    to the Ray rollout workers.  Any other spec returns {} (env unchanged).
+    Raises when spec, harness and the launching environment disagree
+    (``compactionrl.check_rollout_compaction``)."""
+    from .rl.algos import compactionrl as crl
+
+    variant = rl_gae_variant(args)
+    raw_switch = environ.get(crl.COMPACTION_SWITCH_ENV)
+    t_comp = environ.get(crl.COMPACTION_T_COMP_ENV)
+    if variant is None and not raw_switch and not t_comp:
+        return {}
+    try:
+        explicit = crl.compaction_switch(raw_switch)
+        wanted = variant == crl.COMPACTED_GAE_VARIANT
+        if raw_switch not in (None, "") and explicit != wanted:
+            if wanted:
+                raise ValueError(
+                    f"{crl.COMPACTION_SWITCH_ENV}={raw_switch!r} in the launching environment "
+                    f"contradicts the CompactionRL spec ({crl.COMPACTED_GAE_VARIANT})"
+                )
+        crl.check_rollout_compaction(
+            variant, wanted or explicit, harness_compacts=harness_compacts, t_comp=t_comp
+        )
+    except ValueError as error:
+        raise ValueError(f"CompactionRL launch: {error}") from error
+    if not wanted:
+        return {}
+    env = {crl.COMPACTION_SWITCH_ENV: "1"}
+    if t_comp:
+        env[crl.COMPACTION_T_COMP_ENV] = str(t_comp).strip()
+    return env
+
+
 def codex_harness_launch(args, environ=None) -> tuple[str, dict[str, str], dict[str, str]] | None:
     """(learner flags, container envs, file_mounts) for a signed Codex agent on
     the ports engine, or None when the run is not a Codex run.
@@ -2903,6 +3202,15 @@ def codex_harness_launch(args, environ=None) -> tuple[str, dict[str, str], dict[
 
     environ = os.environ if environ is None else environ
     custom_agent = getattr(args, "custom_agent_function_path", None)
+    from .rl.synthetic_segments import SYNTHETIC_SEGMENTS_REWARD
+
+    # TEST ONLY (task 6.4 G1): the synthetic two-segment reward stands in for a
+    # compacting harness; it is accepted only with cross_segment_per_sample.
+    synthetic = getattr(args, "reward_function", None) == SYNTHETIC_SEGMENTS_REWARD
+    if synthetic and rl_gae_variant(args) != "cross_segment_per_sample":
+        raise ValueError(f"{SYNTHETIC_SEGMENTS_REWARD} is only valid with gae_variant cross_segment_per_sample")
+    compaction_env = compactionrl_launch_env(
+        args, environ, custom_agent == CODEX_OPENENV_AGENT or (synthetic and custom_agent is None))
     if custom_agent not in SIGNED_CODEX_AGENTS:
         return None
     if getattr(args, "rl_engine", "ports") != "ports":
@@ -2938,6 +3246,7 @@ def codex_harness_launch(args, environ=None) -> tuple[str, dict[str, str], dict[
         for name, value in environ.items():
             if name.startswith(HARNESS_PASSTHROUGH_ENV_PREFIXES) and value:
                 envs[name] = value
+    envs.update(compaction_env)  # {} unless the spec is CompactionRL
     mounts = {CODEX_CONTAINER_DIR: str(Path(bundle_dir).expanduser().resolve())}
     return flags, envs, mounts
 
@@ -3016,6 +3325,32 @@ def model_store_env(model, revision, mount=MODEL_STORE_MOUNT):
     )
 
 
+def modal_volume_store_env(model, revision, mount=MODEL_STORE_MOUNT, cache="/root/yeto-hub"):
+    """Shell: serve ``model@revision`` from a Modal model Volume mounted at
+    ``mount`` (``hf/<name>/<rev[:8]>/`` + MANIFEST.json, written by
+    infra-drafts/fn-modal/dl_hf.py) through a symlinked HF hub cache, so the
+    learner's snapshot_download finds every file locally.  Never fails: on a
+    mismatch it WARNs and leaves the Hub download path untouched."""
+    if not revision or len(revision) != 40:
+        return (f"echo '[yeto-model-volume] WARNING: needs a full 40-hex --model-revision; "
+                f"downloading {model} from the Hub' >&2")
+    snap = f"{mount}/hf/{model.split('/')[-1]}/{revision[:8]}"
+    repo_dir = f"{cache}/models--{model.replace('/', '--')}"
+    check = (f"python3 -c \"import json,sys; m=json.load(open(sys.argv[1])); "
+             f"sys.exit(0 if m.get('revision')==sys.argv[2] and m.get('repo')==sys.argv[3] and m.get('all_ok') else 1)\" "
+             f"{shlex.quote(snap + '/MANIFEST.json')} {revision} {shlex.quote(model)}")
+    return (
+        f"if [ -f {shlex.quote(snap + '/MANIFEST.json')} ] && {check}; then "
+        f"mkdir -p {shlex.quote(repo_dir)}/snapshots {shlex.quote(repo_dir)}/refs && "
+        f"ln -sfn {shlex.quote(snap)} {shlex.quote(repo_dir + '/snapshots/' + revision)} && "
+        f"echo {revision} > {shlex.quote(repo_dir + '/refs/main')} && "
+        f"export HF_HUB_CACHE={cache} YETO_MODEL_STORE_HIT=1 && "
+        f"echo '[yeto-model-volume] serving {model}@{revision} from {snap}' >&2; "
+        f"else echo '[yeto-model-volume] WARNING: {snap} has no matching MANIFEST; "
+        "downloading from the Hub' >&2; fi"
+    )
+
+
 def nebius_baked_image_id(image, cloud, region, baked=None):
     """``image_id`` for an RL island: the docker image alone, or on Nebius a
     ``{region: computeimage-..., "docker": image}`` dict when a VM image with
@@ -3059,6 +3394,23 @@ def rl_island_cpus(args, cloud: str | None = None):
     return RL_ISLAND_MIN_CPUS
 
 
+def island_uses_ports_megatron(args) -> bool:
+    """Whether the island image ships the editable Megatron-LM at
+    PORTS_MEGATRON_PATH: the ports engine always (its default and any
+    override are ports images), the legacy engine only when it is pointed at
+    the ports image (MILES_NEXT_IMAGE) instead of its own MILES_IMAGE."""
+    if getattr(args, "rl_engine", "ports") == "ports":
+        return True
+    from .rl import MILES_NEXT_IMAGE
+
+    image = (getattr(args, "rl_image", None) or "").strip()
+
+    def strip(ref):
+        return ref[len("docker:"):] if ref.startswith("docker:") else ref
+
+    return bool(image) and strip(image) == strip(MILES_NEXT_IMAGE)
+
+
 def make_miles_island_task(
     args,
     spec: ClusterSpec,
@@ -3071,7 +3423,6 @@ def make_miles_island_task(
     import sky
 
     from .datasource import learner_data_arg, learner_file_mounts
-    from .modal_runner import registry_credentials
     from .models import resolve
     from .provenance import is_local_reference
 
@@ -3091,6 +3442,7 @@ def make_miles_island_task(
             " --rl-single-island-no-sync"
             if getattr(args, "rl_single_island_no_sync", False)
             else " --syncer $SYNCER_ADDR"
+            + (" --critic-syncer $CRITIC_SYNCER_ADDR" if rl_needs_critic(args) else "")
         )
         + (" --rl-echo-events" if _echoes_events(args, spec) else "")
         + " --learner-id $LEARNER_ID"
@@ -3249,8 +3601,10 @@ def make_miles_island_task(
             " --initial-adapter-sha256 "
             f"{shlex.quote(args.rl_initial_adapter_sha256)}"
         )
+    from .rl.miles_overlay import resolve_overlay
+
     miles_setup, sglang_setup = _miles_source_setup(
-        getattr(args, "rl_engine", "ports")
+        getattr(args, "rl_engine", "ports"), resolve_overlay(args)
     )
     model = resolve(args.model)
     if is_local_reference(model):
@@ -3294,6 +3648,8 @@ def make_miles_island_task(
         file_mounts.update(codex_mounts)
     envs = {
         "SYNCER_ADDR": syncer_addr,
+        **({"CRITIC_SYNCER_ADDR": critic_syncer_address(syncer_addr)}
+           if rl_needs_critic(args) and syncer_addr != "none" else {}),
         "LEARNER_ID": str(learner_id),
         "HF_HUB_ENABLE_HF_TRANSFER": "1",
         # Megatron refuses TP>1 or CP>1 without this; it is exported before
@@ -3359,7 +3715,12 @@ def make_miles_island_task(
         setup_steps.append(MODAL_CLIENT_SETUP)
     store_fs = model_store_filesystem(getattr(args, "model_store", None), spec.cloud, spec.region)
     store_env = ""
-    if store_fs and not is_local_reference(model):
+    if (spec.cloud == "modal" and getattr(args, "modal_model_volume", None)
+            and not is_local_reference(model)):
+        store_env = modal_volume_store_env(model, args.model_revision) + "\n"
+        setup_steps.append(store_env.rstrip("\n"))
+        prefetch = f'[ -n "$YETO_MODEL_STORE_HIT" ] || {prefetch}'
+    elif store_fs and not is_local_reference(model):
         store_env = model_store_env(model, args.model_revision) + "\n"
         setup_steps.append(store_env.rstrip("\n"))
         prefetch = f'[ -n "$YETO_MODEL_STORE_HIT" ] || {prefetch}'
@@ -3369,20 +3730,36 @@ def make_miles_island_task(
     island_pythonpath = (
         "$HOME/miles:" if getattr(args, "rl_engine", "ports") == "ports" else ""
     )
-    # Private --rl-image (MILES_NEXT_IMAGE is private on ghcr.io): the
-    # SKYPILOT_DOCKER_* login goes into the task SECRETS, SkyPilot's supported
+    # Ports images install Megatron-LM with `pip install -e .`, whose editable
+    # finder maps only megatron.core and megatron.training; megatron.
+    # post_training (imported by megatron.training.get_model whenever
+    # nvidia-modelopt is importable, i.e. every raw/native-provider run such
+    # as Flash-Next) is then unresolvable (S11 try25 fnA).  Miles' own
+    # launchers always put the checkout on PYTHONPATH; do the same, after
+    # our own sources so it shadows nothing of ours.  The driver's
+    # PYTHONPATH reaches every Ray actor through the job runtime_env.
+    # S14 G4/G5 (s14-dlr-legacy-20261007b/c): the legacy engine run in the
+    # ports image (--rl-image MILES_NEXT_IMAGE) needs the same checkout on
+    # PYTHONPATH, so it is added whenever the island image is the ports
+    # image, whatever the engine; legacy in its own MILES_IMAGE is unchanged.
+    # Necessary but NOT sufficient for legacy there: agentenv/miles imports
+    # megatron.training.tokenizer.tokenizer._vocab_size_with_padding, which
+    # the image's Megatron-LM (core 0.19, used by the ports fork via
+    # megatron.core.tokenizers.utils.build_tokenizer) no longer has (run c
+    # failed identically with the path present).  Legacy needs MILES_IMAGE.
+    island_megatron_path = (
+        f":{PORTS_MEGATRON_PATH}" if island_uses_ports_megatron(args) else ""
+    )
+    # Private --rl-image (registry_login_for: SKYPILOT_DOCKER_* in the
+    # environment, or --rl-image-private): the login goes into the task SECRETS, SkyPilot's supported
     # form: every Task load re-derives the DockerLoginConfig from them
     # (sky/task.py _with_docker_login_config). A DockerLoginConfig placed in
     # Resources does not survive sky 0.13's YAML round trip (Resources.
     # from_yaml_config keeps a dict, the next to_yaml_config calls
     # dataclasses.asdict on it: "asdict() should be called on dataclass
     # instances"; B1 nsmoke). SkyPilot exports secrets into setup/run, so both
-    # scripts unset them first. Ports engine only; read:packages token only.
-    registry_login = (
-        registry_credentials(args.rl_image, os.environ)
-        if getattr(args, "rl_engine", "ports") == "ports"
-        else None
-    )
+    # scripts unset them first. Default (public image): nothing injected.
+    registry_login = registry_login_for(args)
     login_unset = DOCKER_LOGIN_UNSET if registry_login else ""
     setup_script = login_unset + "\n".join(setup_steps)
     run_script = (
@@ -3390,6 +3767,7 @@ def make_miles_island_task(
             f"{store_env}"
             "set -e\n"
             "cd ~/sky_workdir\n"
+            f"{island_pre_run_block(getattr(args, 'rl_island_pre_run_script', None))}"
             f"{multinode_env_prelude(spec.cloud, spec.num_nodes)}"
             'MASTER_ADDR=$(echo "$SKYPILOT_NODE_IPS" | head -n1)\n'
             # The island's Ray lives in its own temp dir so that cleanup can
@@ -3429,9 +3807,10 @@ def make_miles_island_task(
             # first and otherwise sky's /tmp/ray/ray_current_cluster file.
             f"{algorithm_prelude}"
             '  RAY_ADDRESS="$MASTER_ADDR:6379" '
-            f"PYTHONPATH={island_pythonpath}$HOME/sglang/python:$HOME/sky_workdir"
+            f"PYTHONPATH={island_pythonpath}$HOME/sglang/python:$HOME/sky_workdir{island_megatron_path}"
             "${PYTHONPATH:+:$PYTHONPATH} "
-            f"{getattr(args, 'rl_learner_launch_prefix', '')}python3 -m yeto.rl.learner{flags}\n"
+            f"{getattr(args, 'rl_learner_launch_prefix', '')}python3 -m yeto.rl.learner{flags}"
+            f"{_island_post_cmd(args)}\n"
             "else\n"
             # rl-multinode-island D1: the trap is armed before the join loop so a
             # worker killed while joining still cleans its Miles Ray; the join is
@@ -4221,14 +4600,24 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
     )
 
     rl = getattr(args, "training_mode", "sft") == "rl"
+    registry_login = registry_login_for(args) if rl else None
     envs = dict(getattr(task, "envs", None) or {})
     envs["SYNCER_ADDR"] = syncer_addr
+    if "CRITIC_SYNCER_ADDR" in envs and syncer_addr != "none":
+        # The critic syncer shares the actor syncer's host: swap it too, or a
+        # Modal island behind --syncer-public-addr dials the private address.
+        envs["CRITIC_SYNCER_ADDR"] = critic_syncer_address(syncer_addr)
     if rl and getattr(args, "rl_engine", "ports") != "ports":
         # Legacy Miles' own router launch misses its 30 s deadline on Modal's
         # CPUs (see yeto.rl.learner.start_external_sglang_router).  Upstream
         # Miles (ports) launches its router as a Ray worker with a 120 s
         # budget and has no external router mode.
         envs["YETO_RL_EXTERNAL_ROUTER"] = "1"
+    for item in getattr(args, "modal_env", None) or []:
+        key, sep, value = str(item).partition("=")
+        if not sep or not key:
+            raise ValueError(f"--modal-env takes KEY=VALUE, got {item!r}")
+        envs[key] = value
     token_path = os.path.expanduser(HF_TOKEN_PATH)
     if "HF_TOKEN" not in envs and os.path.isfile(token_path):
         with open(token_path, encoding="utf-8") as f:
@@ -4267,7 +4656,8 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         envs={k: str(v) for k, v in envs.items() if v is not None},
         region=spec.region,
         gpu_exact=bool(getattr(args, "modal_gpu_exact", False)),
-        registry_login=rl and getattr(args, "rl_engine", "ports") == "ports",
+        registry_login=bool(registry_login),
+        registry_creds=registry_login,
         image_ref=image_ref_from_rl_image(args.rl_image) if rl else None,
         setup_script=str(getattr(task, "setup", "") or "") if rl else None,
         pip_requirements=requirements,
@@ -4276,6 +4666,13 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         codex_dir=codex_dir,
         codex_mount=CODEX_CONTAINER_DIR if codex_dir else None,
         extra_mounts=extra_mounts,
+        tape_volume_name=getattr(args, "modal_tape_volume", None) or None,
+        model_volume_name=(getattr(args, "modal_model_volume", None) or None) if rl else None,
+        model_volume_mount=MODEL_STORE_MOUNT if rl and getattr(args, "modal_model_volume", None) else None,
+        cpu_override=getattr(args, "modal_cpu", None),
+        memory_gib_override=getattr(args, "modal_memory_gib", None),
+        tape_subdir=(modal_tape_subdir(args.cluster_prefix, learner_id)
+                     if getattr(args, "modal_tape_volume", None) else None),
         workdir=str(REPO_ROOT),
         # Opt-in overrides (default: Modal runner defaults, 10 retries / 24 h).
         # Acceptance runs pass --modal-retries 0 so a learner exit is final
@@ -4291,6 +4688,43 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         **({"timeout_s": int(args.modal_timeout_s)}
            if getattr(args, "modal_timeout_s", None) is not None else {}),
     )
+
+
+def modal_tape_subdir(cluster_prefix: str, learner_id: int) -> str:
+    """Per-run, per-island directory of the Modal tape Volume."""
+    from .modal_runner import modal_app_name
+
+    return f"{modal_app_name(cluster_prefix)}/l{learner_id}"
+
+
+def _modal_tape_run_dir(args):
+    # A module-level import: `run()` binds `runs` only part-way through, and
+    # its finally block (where the tape is pulled) also runs on early failures.
+    from . import runs as _runs
+
+    return _runs.run_dir(args.cluster_prefix)
+
+
+def pull_modal_tapes(modal_ops, modal_cfgs: dict, run_dir) -> dict[str, str]:
+    """Copy each Modal island's tape Volume subdir into
+    ``<run_dir>/modal-tape/<island>/``; returns {island: "ok" | error}.
+    Never raises: a missing tape is reported, not fatal to teardown."""
+    out: dict[str, str] = {}
+    for name, cfg in modal_cfgs.items():
+        vol, sub = getattr(cfg, "tape_volume_name", None), getattr(cfg, "tape_subdir", None)
+        if not vol or not sub:
+            continue
+        dest = Path(run_dir) / "modal-tape" / name
+        try:
+            modal_ops.pull_tape(vol, sub, str(dest))
+            files = sorted(str(p.relative_to(dest)) for p in dest.rglob("*") if p.is_file())
+            out[name] = "ok" if files else "empty"
+            print(f"[launcher] Modal tape of {name}: {vol}:{sub} -> {dest} ({len(files)} file(s))")
+        except Exception as e:  # noqa: BLE001
+            out[name] = f"error: {e}"
+            print(f"[launcher] WARN: could not pull the Modal tape of {name} from "
+                  f"{vol}:{sub}: {e}", file=sys.stderr)
+    return out
 
 
 def require_modal_for_gpu_exact(args, specs: list[ClusterSpec]) -> None:
@@ -4340,8 +4774,9 @@ def wait_for_tapes(collectors: dict, names, threads, limit: float, *,
         sleep(poll)
 
 
-def _tail_modal(modal_ops, call_id: str, prefix: str, collector=None) -> int:
-    """Stream a Modal island's container logs (the Modal twin of _tail)."""
+def _tail_modal(modal_ops, call_id: str, prefix: str, collector=None, guard=None) -> int:
+    """Stream a Modal island's container logs (the Modal twin of _tail).
+    `guard` (modal_runner.ContainerIdGuard) sees every line to catch container changes."""
     while True:
         try:
             for line in modal_ops.stream_logs(call_id):
@@ -4350,6 +4785,8 @@ def _tail_modal(modal_ops, call_id: str, prefix: str, collector=None) -> int:
                     print(f"[{prefix}] {part.rstrip()}", flush=True)
                 if collector is not None:
                     collector.feed(line)
+                if guard is not None:
+                    guard.feed(line)
             return 0
         except Exception as e:  # transient stream drops: reconnect
             print(f"[{prefix}] log stream error: {e}; retrying", flush=True)
@@ -4364,8 +4801,9 @@ def _recover_echo_tape(cluster: str, collector, *, run=None, timeout: float = EC
     island's own tape files (``~/yeto-output/rl-island-*.jsonl``, the source
     the echo mirrors) over the ssh alias sky wrote and complete the local tape
     from them. The S1 2x1 L40S runs (2026-10-03/04) showed ``sky.tail_logs``
-    delivering the setup lines but no run-phase line at all, so the stream
-    alone cannot be the only source. Returns whether the tape is finalized;
+    delivering the setup lines but no run-phase line at all (root cause: the
+    heartbeat ``None`` ended ``_tail``'s loop, see there; fixed, kept as the
+    fallback), so the stream alone cannot be the only source. Returns whether the tape is finalized;
     any fetch failure leaves it incomplete (fail closed) and is printed."""
     import tempfile
 
@@ -4390,15 +4828,91 @@ def _recover_echo_tape(cluster: str, collector, *, run=None, timeout: float = EC
         return complete
 
 
+def settle_echo_tapes(collectors: dict, names, modal_cfgs, events_dir, *,
+                      recover_sky=None, modal_tape_dir=None) -> list[str]:
+    """Judge every expected island's echoed tape after the run: close it (fail
+    closed: nothing is written afterwards) and, when the log stream did not
+    deliver the ``rl_learner_finalized`` record, complete it from the island's
+    own tape file before calling it incomplete. Returns the names whose tape is
+    still incomplete (``.incomplete`` marker written) -- the launcher's exit 3.
+
+    S14/A19 (FINAL-REPORT-S7 §6.1, -5r1 r7): a SUCCEEDED job ended with exit 3
+    because ``sky.tail_logs`` stopped delivering lines part-way (58 of 146
+    records, stream silent after a learner restart) and that run predated the
+    island-file recovery. The island file is now consulted for every unfinalized
+    tape: a streamed-but-cut one, one that never streamed at all (previously
+    marked incomplete without looking), and a Modal island's tape pulled from
+    its Volume (``modal_tape_dir/<island>/**/rl-island-*.jsonl``). A tape whose
+    island file also lacks the finalized record stays incomplete."""
+    recover_sky = recover_sky or _recover_echo_tape
+    incomplete: list[str] = []
+    for name in sorted(set(names) | set(collectors)):
+        collector = collectors.get(name)
+        streamed = collector is not None
+        if collector is None:  # never streamed: nothing received over the log stream
+            collector = EventCollector(Path(events_dir) / f"{name}.jsonl", fresh=False)
+        complete = collector.close()
+        if streamed:
+            print(
+                f"[launcher] {name}: {collector.count} event(s) -> {collector.path}; "
+                f"{collector.discarded} malformed prefixed line(s) discarded"
+            )
+        else:
+            print(f"[launcher] {name}: no log stream line received; tape judged from the "
+                  f"island's own tape file", file=sys.stderr)
+        if not complete:
+            if name in modal_cfgs:
+                files = (sorted(Path(modal_tape_dir, name).rglob("rl-island-*.jsonl"))
+                         if modal_tape_dir is not None else [])
+                if not files:
+                    print(f"[launcher] {name}: no pulled Modal tape file to recover from",
+                          file=sys.stderr)
+                before = collector.count
+                for f in files:
+                    try:
+                        complete = collector.recover_from_file(f) or complete
+                    except Exception as e:  # noqa: BLE001 - unreadable file: stay incomplete
+                        print(f"[launcher] {name}: tape recovery from {f} failed ({e})",
+                              file=sys.stderr)
+                if files:
+                    print(f"[launcher] {name}: tape recovered from {[f.name for f in files]}: "
+                          f"+{collector.count - before} record(s), finalized={complete}")
+            else:
+                # sky island: the tape file itself is reachable, complete from it
+                complete = recover_sky(name, collector)
+        if not complete:
+            incomplete.append(name)
+            print(
+                f"[launcher] WARN: {name} event tape has no rl_learner_finalized "
+                f"record; marked {collector.incomplete_marker}",
+                file=sys.stderr,
+            )
+    return incomplete
+
+
 def _tail(cluster: str, job_id: int, prefix: str, collector=None) -> int:
+    """Stream a sky job's log into the launcher output (and the tape collector).
+
+    Root cause of "sky.tail_logs delivers the setup lines but no run-phase
+    line" (S1 2x1 L40S 2026-10-03/04; -5r1 r7 stream silent after the learner
+    restart), read from skypilot 0.13.0: the API server's ``log_streamer``
+    appends a ``<heartbeat></heartbeat>`` control payload after every 30 s
+    without a new log line (sky/server/stream_utils.py, ``_HEARTBEAT_INTERVAL``),
+    and the client's ``decode_rich_status`` (sky/utils/rich_utils.py) yields
+    ``None`` for EVERY control payload when it runs off the main thread --
+    which this tail thread does. The sdk docstring says ``None`` means "the log
+    has been completely streamed", so the old loop broke on the first quiet
+    30 s (model load, generation) and the thread ended silently while the job
+    ran on. The end of the stream is the iterator being exhausted; ``None`` is
+    a control message and is skipped."""
     import sky
 
     while True:
         try:
             it = sky.tail_logs(cluster, job_id, follow=True, preload_content=False)
             for line in it:
-                if line is None:
-                    break
+                if line is None:  # rich-status/heartbeat control payload, not the end
+                    continue
                 print(f"[{prefix}] {line.rstrip()}", flush=True)
                 if collector is not None:
                     collector.feed(line)
@@ -4735,6 +5249,11 @@ ISLAND_FAILED_EXIT = 4
 FAILED_RUN_DRAIN_S = 20.0
 # Modal app not confirmed stopped (state stopped, 0 tasks) after teardown.
 TEARDOWN_UNVERIFIED_EXIT = 5
+# Modal moved an island to a different container mid-run (preempted/rescheduled and the
+# run script re-ran): the run is failed and the Modal app stopped. Registered exit codes:
+# 1 failed, 2 artifact not fetchable, 3 incomplete tape, 4 island failed, 5 teardown
+# unverified, 6 stalled, 7 Modal container id changed.
+CONTAINER_CHANGED_EXIT = 7
 MODAL_STOP_VERIFY_ATTEMPTS = 5
 MODAL_STOP_VERIFY_DELAY_S = 5.0
 
@@ -4821,7 +5340,9 @@ def effective_recover_timeout(args) -> float:
     stops. Otherwise ``--recover-timeout`` unchanged (all clouds share this
     loop: sky islands relaunch through the same FleetController).
     """
-    if getattr(args, "no_island_relaunch", False) or getattr(args, "modal_retries", None) == 0:
+    if getattr(args, "no_island_relaunch", False):
+        return 0
+    if getattr(args, "modal_retries", None) == 0 and not getattr(args, "modal_launcher_relaunch", False):
         return 0
     return args.recover_timeout
 
@@ -4883,6 +5404,7 @@ class FleetController:
         instance_guard=None,
         on_rename=None,
         fleet_log=None,
+        keep_abandoned: bool = False,
     ):
         """`learners` maps cluster name -> (task, job_id); `syncer` is
         (name, task, job_id) for a cluster syncer, or None with
@@ -4890,6 +5412,9 @@ class FleetController:
         `on_relaunch(name, new_job_id)` is called after every successful
         cluster relaunch (production spawns a new log tail)."""
         self.ops = sky_ops
+        # B12: True (--keep-abandoned) leaves an abandoned learner's cluster up for
+        # post-mortem instead of tearing it down; the final teardown still honors --keep.
+        self.keep_abandoned = keep_abandoned
         # Path of the run's STOP flag file (``runs.stop_flag_path``; ``yeto stop-run``
         # writes it): once it exists no island is relaunched any more.
         self.stop_flag = stop_flag
@@ -5310,7 +5835,8 @@ class FleetController:
                 # Abandoned while this attempt was in flight, but the
                 # relaunch re-provisioned the cluster anyway: tear it back
                 # down so nothing is left running unattended.
-                self._down(target, force=True)
+                if not self.keep_abandoned:
+                    self._down(target, force=True)
 
         thread = self.thread_cls(target=_run, daemon=True)
         attempt.thread = thread
@@ -5332,7 +5858,10 @@ class FleetController:
                 print(f"[launcher] WARN: relaunch of {rec['name']} still in flight after "
                       f"{RELAUNCH_JOIN_S:.0f}s; verify the provider for leftovers",
                       file=sys.stderr)
-        self._down(rec["name"])
+        if self.keep_abandoned:
+            print(f"[launcher] keeping abandoned cluster {rec['name']} (--keep-abandoned)")
+        else:
+            self._down(rec["name"])
         if self.fixed_roster:
             message = (
                 f"fixed-roster learner {rec['name']} could not recover"
@@ -5644,6 +6173,27 @@ def launch_verda_island(sky, task, name: str, spec, args, *, sleep=None):
     )
 
 
+def _island_post_cmd(args) -> str:
+    """``--rl-island-post-cmd``: shell appended to the rank-0 learner line.
+
+    The learner's exit code is captured with ``|| LRC=$?`` (so ``set -e``
+    does not end the script first), the command runs with its output in
+    ``~/yeto-output/post-cmd.txt`` (the Modal tape mirror picks ``.txt`` up),
+    and the script exits with the learner's code, so the island verdict is
+    unchanged.  Empty when the flag is unset (every other run unchanged).
+    """
+    cmd = getattr(args, "rl_island_post_cmd", None)
+    if not cmd:
+        return ""
+    return (
+        " || LRC=$?\n"
+        "  mkdir -p \"$HOME/yeto-output\"\n"
+        f"  ( set +e; {cmd} ) > \"$HOME/yeto-output/post-cmd.txt\" 2>&1; "
+        "echo \"[yeto-island] post-cmd rc=$?\"\n"
+        "  exit ${LRC:-0}"
+    )
+
+
 def _rename_hook(clusters: list, on_clusters, fixed: list):
     """FleetController on_rename: keep the teardown list, the Verda id guard
     and the run registry on the island's new cluster name."""
@@ -5881,6 +6431,9 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     run_started_unix = time.time()  # Modal rows created after this are this run's app
     verda_names = [n for n, sp in zip(learner_names, specs) if sp.cloud == "verda"]
     verda = prepare_verda_islands(verda_names, on_instance_ids) if verda_names else None
+    # Read by the finally block (Modal stop / tape pull) even on an early failure.
+    modal_ops = None
+    modal_cfgs: dict[str, object] = {}
 
     try:
         # 1. Syncer: a subprocess on this host (head mode) or its own VM.
@@ -5905,14 +6458,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             clusters.append(syncer_cluster)
             syncer_addr = f"{syncer_handle.head_ip}:{SYNCER_PORT}"
             print(f"[launcher] syncer up at {syncer_addr}")
-            if syncer_ports(args) is None:
-                ok, detail = tcp_probe(str(syncer_handle.head_ip), SYNCER_PORT)
-                if not ok:
-                    raise RuntimeError(
-                        f"syncer port not reachable from outside {syncer_cloud(args)} ({detail}); "
-                        "no island was started"
-                    )
-                print(f"[launcher] syncer probe: {detail}")
+            probe_syncer_ports(args, str(syncer_handle.head_ip))
 
         if external:
             for x in range(external):
@@ -5979,7 +6525,6 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             if getattr(args, "training_mode", "sft") == "rl"
             else make_learner_task
         )
-        modal_cfgs: dict[str, object] = {}
         modal_addr = None
         if no_sync:
             modal_addr = syncer_addr  # nothing to reach
@@ -5996,10 +6541,12 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             task = task_factory(args, spec, m, num_learners, syncer_addr)
             if spec.cloud == "modal":
                 cfg = build_modal_island_config(args, spec, m, task, modal_addr)
+                print(f"[launcher] {name} dials {island_syncer_addrs(cfg.envs)}", flush=True)
                 tasks[name] = cfg
                 modal_cfgs[name] = cfg
                 continue
             tasks[name] = task
+            print(f"[launcher] {name} dials {island_syncer_addrs(getattr(task, 'envs', None))}", flush=True)
             alloc = (rl_island_spec(args, spec) if getattr(args, "training_mode", "sft") == "rl"
                      else spec)
             print(f"[launcher] launching learner {m} on {spec} as {name}"
@@ -6088,8 +6635,13 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                         events_dir / f"{name}.jsonl", fresh=False
                     )
             if modal_ops is not None and name in modal_cfgs:
+                from .modal_runner import ContainerIdGuard
+
+                guard = ContainerIdGuard(on_change=on_container_change)
+                container_guards.append(guard)
                 thread = threading.Thread(
-                    target=_tail_modal, args=(modal_ops, job_id, label, collector), daemon=True
+                    target=_tail_modal, args=(modal_ops, job_id, label, collector), kwargs={"guard": guard},
+                    daemon=True
                 )
             else:
                 thread = threading.Thread(
@@ -6100,6 +6652,25 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
 
         tail_threads: list[threading.Thread] = []
         event_collectors: dict[str, EventCollector] = {}
+        container_guards: list = []
+
+        def on_container_change(message: str) -> None:
+            print(f"[launcher] ERROR: {message}; failing the run (exit {CONTAINER_CHANGED_EXIT}) "
+                  "and stopping the Modal app", file=sys.stderr, flush=True)
+            if events_dir is not None:
+                try:
+                    with open(Path(events_dir) / "launcher-errors.jsonl", "a") as fh:
+                        fh.write(json.dumps({"event": "modal_container_changed", "level": "error",
+                                             "message": message, "time": time.time()}) + "\n")
+                except OSError:
+                    pass
+            try:
+                modal_ops.stop_app()
+            except Exception as e:  # noqa: BLE001 - teardown verification reports the rest
+                print(f"[launcher] modal app stop failed: {e}", file=sys.stderr, flush=True)
+
+        def container_changed() -> bool:
+            return any(g.tripped for g in container_guards)
 
         if syncer_cluster is not None:
             spawn_tail(syncer_cluster, syncer_job)
@@ -6134,6 +6705,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             stall_timeout=float(
                 getattr(args, "rl_stall_timeout", None) or DEFAULT_RL_STALL_TIMEOUT_S
             ) if getattr(args, "rl_stall_timeout", None) != 0 else 0.0,
+            keep_abandoned=bool(getattr(args, "keep_abandoned", False)),
             no_recover=verda["no_recover"] if verda else (),
             instance_guard=verda["guard"] if verda else None,
             on_rename=_rename_hook(clusters, on_clusters, [] if head_mode else [syncer_cluster]),
@@ -6144,28 +6716,15 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 # The island's last events (finalization) must be on disk before
                 # teardown: the log streams end when the island exits; bounded wait.
                 wait_for_tapes(event_collectors, echo_names, tail_threads, limit)
-                # Fail closed: stop writing (a stream still alive after the bounded
-                # wait can no longer touch the tape) and mark unfinalized tapes.
-                for name, collector in event_collectors.items():
-                    complete = collector.close()
-                    print(
-                        f"[launcher] {name}: {collector.count} event(s) -> {collector.path}; "
-                        f"{collector.discarded} malformed prefixed line(s) discarded"
-                    )
-                    if not complete and name not in modal_cfgs:
-                        # sky island: the tape file itself is reachable, complete from it
-                        complete = _recover_echo_tape(name, collector)
-                    if not complete:
-                        no_sync_incomplete.append(name)
-                        print(
-                            f"[launcher] WARN: {name} event tape has no rl_learner_finalized "
-                            f"record; marked {collector.incomplete_marker}",
-                            file=sys.stderr,
-                        )
-                for name in sorted(echo_names):
-                    if name not in event_collectors:  # never streamed: nothing received
-                        no_sync_incomplete.append(name)
-                        EventCollector(events_dir / f"{name}.jsonl", fresh=False).close()
+                modal_tape_dir = None
+                if modal_ops is not None and any(n in modal_cfgs for n in echo_names):
+                    # Modal islands: the tape Volume (committed every 30 s and at
+                    # exit) is the island-side source the echo mirrors.
+                    modal_tape_dir = _modal_tape_run_dir(args) / "modal-tape"
+                    pull_modal_tapes(modal_ops, modal_cfgs, _modal_tape_run_dir(args))
+                no_sync_incomplete.extend(settle_echo_tapes(
+                    event_collectors, echo_names, modal_cfgs, events_dir,
+                    modal_tape_dir=modal_tape_dir))
 
         try:
             exit_codes = controller.run()
@@ -6173,7 +6732,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             print(f"[launcher] ERROR: {error}; stopping the run (exit {RUN_STALLED_EXIT})",
                   file=sys.stderr)
             drain_tapes(min(NO_SYNC_EVENT_DRAIN_S, FAILED_RUN_DRAIN_S))
-            return RUN_STALLED_EXIT
+            return CONTAINER_CHANGED_EXIT if container_changed() else RUN_STALLED_EXIT
         except FixedRosterIslandAbandoned as error:
             # A fixed-roster island failed for good: the run cannot finish.
             # Secure the tapes (bounded), then the finally block tears every
@@ -6186,8 +6745,18 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             if no_sync_incomplete:
                 print(f"[launcher] event tape incomplete for {no_sync_incomplete} "
                       "(expected after an island failure)", file=sys.stderr)
-            return ISLAND_FAILED_EXIT
+            return CONTAINER_CHANGED_EXIT if container_changed() else ISLAND_FAILED_EXIT
+        except Exception as error:
+            if not container_changed():
+                raise
+            # the app stop that follows a container change makes the controller error out
+            print(f"[launcher] controller ended after a Modal container change: {error}",
+                  file=sys.stderr)
+            drain_tapes(min(NO_SYNC_EVENT_DRAIN_S, FAILED_RUN_DRAIN_S))
+            return CONTAINER_CHANGED_EXIT
         drain_tapes()
+        if container_changed():
+            return CONTAINER_CHANGED_EXIT
         failed = [n for n, s in exit_codes.items() if "SUCCEEDED" not in s]
         if no_sync_incomplete:
             print(
@@ -6274,6 +6843,10 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         # the syncer after a total loss) are skipped — even with --keep.
         downed = controller.downed_clusters if controller is not None else set()
         remaining = [c for c in clusters if c not in downed]
+        if modal_ops is not None and modal_cfgs:
+            # Containers commit their tape every 30 s and at exit; pulled
+            # here (before the app stop) and again after it below.
+            pull_modal_tapes(modal_ops, modal_cfgs, _modal_tape_run_dir(args))
         if args.keep:
             print(f"[launcher] keeping clusters: {remaining}")
         else:
@@ -6303,6 +6876,9 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 if not _verify_modal_app_stopped(modal_ops, args,
                                                  run_started_unix=run_started_unix):
                     teardown_unverified = True
+                if modal_cfgs:
+                    # The final at-exit commits land once the containers are gone.
+                    pull_modal_tapes(modal_ops, modal_cfgs, _modal_tape_run_dir(args))
             if unverified:
                 # The head must NOT self-terminate: it is the only thing that
                 # can still reach these orphaned learner clusters via sky.
@@ -6357,6 +6933,17 @@ def _echoes_events(args, spec) -> bool:
     # that a later non-zero exit is a shutdown error, not an island failure
 
 
+def _miles_overlay_manifest(args, engine: str) -> dict:
+    """``miles_overlay`` for the run manifest; absent (old manifests unchanged) when off."""
+
+    if engine != "ports":
+        return {}
+    from .rl.miles_overlay import overlay_record, resolve_overlay
+
+    record = overlay_record(resolve_overlay(args))
+    return {"miles_overlay": record} if record else {}
+
+
 def _write_run_manifest(args) -> dict | None:
     """Record the engine pins actually used (launch.log + <run dir>/run_manifest.json)."""
 
@@ -6373,10 +6960,14 @@ def _write_run_manifest(args) -> dict | None:
         "sglang_commit": getattr(_rl, "SGLANG_NEXT_COMMIT", None) if engine == "ports" else None,
         "source_sha256": getattr(args, "source_sha256", None),
         "cluster_prefix": args.cluster_prefix,
+        **_miles_overlay_manifest(args, engine),
         "written_unix": time.time(),
     }
     print(f"[launcher] RL engine {engine}: image {manifest['rl_image']}, "
           f"miles {manifest['miles_commit']}, sglang {manifest['sglang_commit']}", flush=True)
+    if manifest.get("miles_overlay"):
+        print(f"[launcher] Miles code = {manifest['miles_overlay']['summary']} "
+              "(image manifest does NOT match the running Miles code)", flush=True)
     try:
         path = runs.run_dir(args.cluster_prefix) / "run_manifest.json"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -6457,6 +7048,15 @@ def dry_run_plan(args) -> dict:
         "external_learners": external,
         "total_gpus": sum(s.total_gpus for s in specs),
         "syncer": None if no_sync else ("head VM" if head else f"{args.cluster_prefix}-syncer"),
+        # 4.2.1: present only for a critic algorithm, so every critic-free plan is unchanged
+        **({"critic_syncer": {
+            "port": CRITIC_SYNCER_PORT,
+            "address": "$CRITIC_SYNCER_ADDR",
+            "layout": "critic_layout_hash",
+            "command": critic_syncer_command(args, len(specs) + external),
+            "checkpoint": RL_CRITIC_SYNCER_CHECKPOINT,
+            "event_tape": RL_CRITIC_SYNCER_EVENT_TAPE,
+        }} if rl and not no_sync and rl_needs_critic(args) else {}),
         "outer_sync": not no_sync,
         "algorithm_spec_sha256": getattr(args, "rl_expected_algorithm_sha256", None),
         "algorithm_spec": getattr(args, "rl_algorithm_spec_json", None),

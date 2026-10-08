@@ -80,6 +80,7 @@ function cards(){if(!OV.islands.length){el("cards").innerHTML='<div class="empty
   '<div class="hr"><span class="k">round / policy</span><span class="num">'+f(s.round)+' / '+f(s.policy_version)+'</span></div>'+
   '<div class="hr"><span class="k">staleness / 贡献</span><span class="num">'+f(s.staleness)+' / '+f(s.contribution)+'</span></div>'+
   '<div class="hr"><span class="k">GPU util / 显存</span><span class="num">'+(s.gpu_util_pct!=null?s.gpu_util_pct+'%':ND)+' / '+(s.mem_pct!=null?s.mem_pct+'%':ND)+'</span></div>'+
+  (s.host_mem_peak_bytes!=null?'<div class="hr"><span class="k">主机内存 峰值 / 当前</span><span class="num">'+(s.host_mem_peak_bytes/1073741824).toFixed(1)+' / '+(s.host_mem_current_bytes!=null?(s.host_mem_current_bytes/1073741824).toFixed(1):ND)+' GiB</span></div>':'')+
   (s.gpu_util_pct!=null?'<div class="bar" style="margin-top:4px"><i style="width:'+s.gpu_util_pct+'%;background:'+color(s.id)+'"></i></div>':'')+'</div>'}).join("")}
 
 function eff(){var c=OV.cost;

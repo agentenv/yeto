@@ -73,6 +73,16 @@ class MilesPolicyState:
         self._run = (runner or LoopRunner()).run
         self.policy_version = policy_version
 
+    @property
+    def layout_hash(self) -> str:
+        """The pinned layout hash: predicted at start-up, or learned from the
+        first export (Flash-Next). Reading it before that export is an error,
+        never a placeholder."""
+
+        if self._expected_layout_hash is None:
+            raise PolicyStateError("LoRA layout hash requested before the first trainable-state export")
+        return self._expected_layout_hash
+
     @staticmethod
     def _checked(path: str, results: Any) -> list[Any]:
         if not isinstance(results, list) or not results:
@@ -130,6 +140,11 @@ class MilesPolicyState:
             ) from exc
         if self._expected_layout_hash is None:
             self._expected_layout_hash = lora.layout_hash
+            print(
+                f"[rl] learned LoRA layout from first export: {len(lora.tensors)} tensors, "
+                f"hash={lora.layout_hash}",
+                flush=True,
+            )
         return TrainableState.from_lora(lora)
 
     def apply(self, state: TrainableState, *, optimizer: str, local_step: int) -> None:

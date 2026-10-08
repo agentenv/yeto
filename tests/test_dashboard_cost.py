@@ -112,6 +112,19 @@ def test_island_id_and_task_meta():
     assert meta_from_task(object())["gpu"] is None
 
 
+def test_meta_from_modal_island_config_shape():
+    # real Modal runs (s13-fnsmoke/g1) logged cloud/gpu/gpus = null before this
+    class Cfg:
+        gpu = "H200"
+        gpus_per_node = 8
+        num_nodes = 1
+        region = None
+
+    assert meta_from_task(Cfg()) == {"cloud": "modal", "region": None, "gpu": "H200", "gpus": 8}
+    Cfg.gpu, Cfg.gpus_per_node, Cfg.num_nodes = "H100!", 1, 2
+    assert meta_from_task(Cfg()) == {"cloud": "modal", "region": None, "gpu": "H100", "gpus": 2}
+
+
 def test_fleet_controller_writes_lifecycle(tmp_path):
     from test_controller import RUNNING, SUCCEEDED, FakeOps, make_controller
 

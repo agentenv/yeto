@@ -289,7 +289,7 @@ def test_required_mechanisms_default_grpo():
 
 def test_v1_constructor_keeps_r0_validation():
     with pytest.raises(AlgorithmSpecError, match="grpo"):
-        AlgorithmSpec(advantage_estimator="ppo")
+        AlgorithmSpec(advantage_estimator="gspo")  # ppo: v1 since rl-algo-critic-family
     with pytest.raises(AlgorithmSpecError, match="unknown algorithm spec fields"):
         AlgorithmSpec.from_dict({"advantage_estimator": "grpo", "eps_clip": 0.2})
 

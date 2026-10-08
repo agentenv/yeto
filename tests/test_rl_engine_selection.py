@@ -30,6 +30,13 @@ def test_supported_r0_combinations_pass():
         assert ports_rejections(sync_preset=preset, lora_targets="attention") == []
 
 
+def test_ppo_is_not_routed_to_legacy():
+    # rl-algo-critic-family 3.1: the critic is decided by the algorithm spec,
+    # the capability declaration and the critic rejections, not by routing.
+    assert ports_rejections(extra_argv=("--advantage-estimator", "ppo")) == []
+    assert ports_rejections(use_critic=True, advantage_estimator="ppo") == []
+
+
 @pytest.mark.parametrize(
     "kwargs, reason",
     [
@@ -42,7 +49,7 @@ def test_supported_r0_combinations_pass():
         (dict(expert_full_count=4), "DeepSeek V4"),
         (dict(use_critic=True), "critic"),
         (dict(extra_argv=("--use-critic",)), "critic"),
-        (dict(extra_argv=("--advantage-estimator", "ppo")), "critic"),
+        (dict(extra_argv=("--advantage-estimator", "gspo")), "non-GRPO"),
         (dict(rollout_num_gpus=4), "fixed partition"),
         (dict(extra_argv=("--rollout-num-gpus", "4")), "fixed partition"),
         (dict(model_kind="diffusion"), "causal"),
@@ -176,10 +183,36 @@ def test_ports_island_puts_the_pinned_miles_checkout_first(monkeypatch):
     ports_run = _island_task(ports, monkeypatch).run
     # The upstream image's /root/miles is on its PYTHONPATH; ours shadows it.
     assert (
-        "PYTHONPATH=$HOME/miles:$HOME/sglang/python:$HOME/sky_workdir${PYTHONPATH:+:$PYTHONPATH} "
-        in ports_run
+        "PYTHONPATH=$HOME/miles:$HOME/sglang/python:$HOME/sky_workdir:/root/Megatron-LM"
+        "${PYTHONPATH:+:$PYTHONPATH} " in ports_run
     )
     assert 'RAY_ADDRESS="$MASTER_ADDR:6379"' in ports_run
+
+
+def test_legacy_island_in_the_ports_image_gets_the_megatron_checkout(monkeypatch):
+    from yeto.rl import MILES_IMAGE, MILES_NEXT_IMAGE
+
+    # S14 G4/G5 (s14-dlr-legacy-20261007b/c): legacy in MILES_NEXT_IMAGE
+    # needs the image's editable Megatron-LM checkout on PYTHONPATH too (the
+    # run still fails there: that Megatron dropped megatron.training.tokenizer,
+    # which agentenv/miles imports; legacy belongs in MILES_IMAGE).
+    legacy = _cli(("--rl-engine", "legacy", "--rl-image", MILES_NEXT_IMAGE))
+    _prepare_rl_args(legacy)
+    assert launcher.island_uses_ports_megatron(legacy)
+    run = _island_task(legacy, monkeypatch).run
+    assert (
+        "PYTHONPATH=$HOME/sglang/python:$HOME/sky_workdir:/root/Megatron-LM"
+        "${PYTHONPATH:+:$PYTHONPATH} " in run
+    )
+    assert "PYTHONPATH=$HOME/miles:" not in run  # legacy pip -e installs ~/miles
+    own = _cli(("--rl-engine", "legacy"))
+    _prepare_rl_args(own)
+    assert own.rl_image == MILES_IMAGE
+    assert not launcher.island_uses_ports_megatron(own)
+    assert "/root/Megatron-LM" not in _island_task(own, monkeypatch).run
+    other = _cli(("--rl-engine", "legacy", "--rl-image", "docker:example/miles@sha256:" + "e" * 64))
+    _prepare_rl_args(other)
+    assert not launcher.island_uses_ports_megatron(other)
 
 
 def test_modal_ports_island_does_not_request_the_external_router():
@@ -276,7 +309,7 @@ def test_learner_parser_rejects_unsupported_ports_runs(extra, capsys):
     "extra_argv, reason",
     [
         (("--use-critic",), "critic"),
-        (("--advantage-estimator", "ppo"), "critic"),
+        (("--advantage-estimator", "gspo"), "non-GRPO"),
         (("--sao-compaction",), "SAO"),
         (("--rollout-num-gpus", "4"), "fixed partition"),
     ],
@@ -623,3 +656,17 @@ def test_explicit_fixed_partition_is_a_ports_combination():
     assert ports_rejections(placement="fixed-partition", rollout_num_gpus=2) == []
     assert "needs --rollout-num-gpus" in " ".join(ports_rejections(placement="fixed-partition"))
     assert ports_rejections(placement="elastic")
+
+
+def test_island_post_cmd_runs_after_the_learner_and_keeps_its_exit_code(monkeypatch):
+    args = _cli()
+    _prepare_rl_args(args)
+    assert "post-cmd" not in _island_task(args, monkeypatch).run  # default: unchanged
+    args = _cli(("--rl-island-post-cmd", "nvidia-smi -L; echo done"))
+    _prepare_rl_args(args)
+    run = _island_task(args, monkeypatch).run
+    learner = next(l for l in run.splitlines() if "-m yeto.rl.learner" in l)
+    assert learner.endswith(" || LRC=$?")
+    after = run.split(learner, 1)[1]
+    assert '( set +e; nvidia-smi -L; echo done ) > "$HOME/yeto-output/post-cmd.txt" 2>&1' in after
+    assert "exit ${LRC:-0}" in after.split("else", 1)[0]

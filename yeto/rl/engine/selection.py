@@ -65,7 +65,13 @@ def ports_rejections(
     ):
         reasons.append("DeepSeek V4 recipe (clone/expert-full LoRA)")
     estimator = _flag_value(extra_argv, "--advantage-estimator") or advantage_estimator
-    if use_critic or "--use-critic" in extra_argv or estimator != "grpo":
+    # rl-algo-critic-family 3.1: PPO (shared actor/critic, Miles derives
+    # use_critic from the estimator) is not routed to legacy any more; the
+    # algorithm spec, the capability check and the critic rejections decide.
+    # ``--use-critic`` is not an upstream Miles flag (legacy fork only).
+    if "--use-critic" in extra_argv or estimator not in ("grpo", "ppo") or (
+        use_critic and estimator != "ppo"
+    ):
         reasons.append(f"critic / non-GRPO advantage estimator ({estimator})")
     if placement not in ("colocated", "fixed-partition"):
         reasons.append(f"placement {placement!r}")

@@ -1,0 +1,16 @@
+{
+ "rc": 0,
+ "ok": true,
+ "fail": null,
+ "snapshot_bytes": "30520078752",
+ "populate_s": "0",
+ "convert_s": "0",
+ "df0": "1099511627776 399152648192 700358979584",
+ "df1": "1099511627776 399152648192 700358979584",
+ "df2": "1099511627776 399152648192 700358979584",
+ "tracker": "release",
+ "torchdist_bytes": "23390890947\t/mnt/yeto-models/torch_dist/qwen3.8-flash-next-4layer_torch_dist",
+ "fstype": "virtiofs filesystem-skypilot-1",
+ "fs_size_g0": "1024",
+ "fs_size_g1": null
+}

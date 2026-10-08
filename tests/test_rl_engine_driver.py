@@ -883,3 +883,36 @@ def test_failure_on_single_node_island_never_polls_or_sleeps(tmp_path):
         driver.run()
     assert slept == []
     assert ctl.polls == 1  # only the per-round _probe_nodes before round 0; no failure-path poll
+
+
+def test_colocated_publish_offloaded_sleeps_before_publish(tmp_path):
+    """Miles --offload-train order (train.py): the actor sleeps before update_weights
+    and the engines' KV resume, so the publication never shares the GPU with the
+    resident training state (S13 FN smoke OOM). The next generate does not offload
+    again; the export/apply at the sync boundary still sees the resident trainer."""
+    engine = _engine()
+    engine.trainer.publish_offloaded = True
+    driver = _driver(engine, LocalOnlySync(2), tmp_path)
+    final = driver.run()
+
+    expected = [("publish", 0), ("offload",), ("generate", 0), ("onload",), ("train", 0)]
+    expected += [("offload",), ("publish", 1), ("generate", 1), ("onload",), ("train", 1),
+                 ("offload",), ("publish", 2)]
+    assert _engine_calls(engine) == expected
+    assert final.policy_version == 2
+    events = _events(tmp_path / "events.jsonl")
+    phases = [e["phase"] for e in events if e["event"] == "rl_driver_phase"]
+    assert phases[:9] == [
+        "publish", "offload", "generate", "onload", "train", "sync", "offload", "publish", "generate",
+    ]
+    assert phases.count("offload") == 3
+
+
+def test_miles_trainer_group_publish_offloaded_follows_offload_train():
+    from types import SimpleNamespace
+    from yeto.rl.engine.miles_adapter.trainer import MilesTrainerGroup
+
+    prop = MilesTrainerGroup.publish_offloaded
+    assert prop.fget(SimpleNamespace(_args=SimpleNamespace(colocate=True, offload_train=True)))
+    assert not prop.fget(SimpleNamespace(_args=SimpleNamespace(colocate=True, offload_train=False)))
+    assert not prop.fget(SimpleNamespace(_args=SimpleNamespace(colocate=False, offload_train=True)))

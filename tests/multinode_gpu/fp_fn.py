@@ -1,7 +1,7 @@
-"""Flash-Next (fnrun.sh fn32s / fn32b / fn8s) variant of fp_local22.py: the ports-path Miles
+"""Flash-Next (fnrun.sh fn32s / fn32b / fn8s / fn8r) variant of fp_local22.py: the ports-path Miles
 argv + attestation ``runtime_fingerprint`` for the 4x8 H200 cases, on CPU.
 
-usage: python fp_fn.py <repo> <fn32s|fn32b|fn8s> [--seed N] [--total-steps N] [extra cli args]
+usage: python fp_fn.py <repo> <fn32s|fn32b|fn8s|fn8r> [--seed N] [--total-steps N] [extra cli args]
 
 The fingerprint is the pinned Miles commit + the FULL Miles argv, so it changes
 with seed / total-steps / any flag: an E1 attestation is valid only for the exact
@@ -32,8 +32,9 @@ FN_4L_SNAPSHOT = (f"{os.environ.get('FN_4L_HUB', FS_HUB)}/models--CharyZeng--Qwe
 
 def fnrun_cli(case: str, *, seed: int | None = None, total_steps: int | None = None,
               extra: tuple[str, ...] = ()) -> list[str]:
-    """fnrun.sh's launch tokens (no cloud call), minus ``launch``, with overrides."""
-    env = {k: v for k, v in os.environ.items() if k not in ("ATTEST", "COSTS", "IMAGE")}
+    """fnrun.sh's launch tokens (no cloud call), minus ``launch``, with overrides.
+    BOOT_ONLY is dropped: the fingerprint is always the training (fna) argv."""
+    env = {k: v for k, v in os.environ.items() if k not in ("ATTEST", "COSTS", "IMAGE", "BOOT_ONLY")}
     if total_steps is not None:
         env["STEPS"] = str(total_steps)
     out = subprocess.run(["bash", os.path.join(HERE, "fnrun.sh"), case], env=env, check=True,
@@ -77,7 +78,7 @@ def fn_fingerprint(repo: str, case: str, *, seed: int | None = None,
     from yeto.rl.engine import run_config
     from yeto.rl.profiles import qwen3_8_next as q
 
-    small = case == "fn8s"
+    small = case in ("fn8s", "fn8r")
     mp = _m.MonkeyPatch()
     try:
         run = island_run(tuple(fnrun_cli(case, seed=seed, total_steps=total_steps, extra=extra)), mp)

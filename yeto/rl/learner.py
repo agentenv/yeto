@@ -12,6 +12,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Sequence
 from decimal import Decimal, DecimalException
 from pathlib import Path
@@ -55,6 +56,8 @@ def parse_args(argv=None):
     parser.add_argument("--eval-max-context-len", type=int, default=None)
     # Required unless --rl-single-island-no-sync (checked after parsing).
     parser.add_argument("--syncer", default=None)
+    # rl-algo-critic-family 4.2.1: the critic channel's syncer (critic algorithms only).
+    parser.add_argument("--critic-syncer", default=None)
     parser.add_argument(
         "--rl-echo-events",
         action="store_true",
@@ -167,6 +170,7 @@ def parse_args(argv=None):
     # Print the attestation runtime_fingerprint (same Miles argv as the island)
     # and exit before Ray/GPU (ports only).
     parser.add_argument("--rl-print-attestation-fingerprint", action="store_true")
+    parser.add_argument("--rl-boot-only", action="store_true")
     # E2 plan-v2 §0 determinism: Megatron --deterministic-mode + DETERMINISM_ENV
     # in the learner and every Ray worker; off by default.
     parser.add_argument("--rl-deterministic-trainer", action="store_true")
@@ -262,6 +266,23 @@ def parse_args(argv=None):
         metavar="NAME",
         help="single-island smoke: admit an expressible but undeclared mechanism (ports)",
     )
+    # rl-algo-critic-family D5: the critic warm-up stage product the main stage loads
+    parser.add_argument("--rl-critic-load", default=None, metavar="DIR",
+                        help="critic warm-up checkpoint (ports main stage --critic-load)")
+    parser.add_argument("--rl-critic-init-sha256", default=None, metavar="HEX",
+                        help="content SHA256 of --rl-critic-load (critic_warmup.checkpoint_sha256)")
+    # rl-algo-critic-family 5.3: without --rl-critic-load, a critic algorithm with
+    # a warm-up runs stage W itself before the main stage (critic_warmup.run_ports_warmup)
+    parser.add_argument("--rl-critic-warmup-dir", default="~/yeto-rl/critic-warmup",
+                        metavar="DIR",
+                        help="stage-W product cache (one product per algorithm + initial actor)")
+    parser.add_argument("--rl-critic-baseline-run", action="store_true",
+                        help=argparse.SUPPRESS)  # set by run_critic_baseline: no tape echo
+    parser.add_argument("--rl-critic-baseline-rounds", type=int, default=0, metavar="N",
+                        help="critic warm-up: first run N rounds of the same algorithm without "
+                             "the warm-up (randomly initialized value head) as the explained-"
+                             "variance baseline (own event tape / completed-groups path; "
+                             "--rl-single-island-no-sync only)")
     parser.add_argument("--miles-source-sha256", default=None)
     parser.add_argument("--megatron-ref-load", default=None)
     parser.add_argument("--trust-remote-code", action="store_true")
@@ -283,6 +304,18 @@ def parse_args(argv=None):
             _require_ports_supported(args)
         except ValueError as error:
             parser.error(str(error))
+    if (args.rl_critic_load is None) != (args.rl_critic_init_sha256 is None):
+        parser.error("--rl-critic-load and --rl-critic-init-sha256 go together")
+    if args.rl_critic_baseline_rounds < 0:
+        parser.error("--rl-critic-baseline-rounds must be >= 0")
+    if args.rl_critic_baseline_run and not getattr(args, "rl_single_island_no_sync", False):
+        parser.error("--rl-critic-baseline-run needs --rl-single-island-no-sync")
+    if args.rl_critic_baseline_rounds and not (
+        args.rl_engine == "ports" and getattr(args, "rl_single_island_no_sync", False)
+        and args.rl_critic_load is None
+    ):
+        parser.error("--rl-critic-baseline-rounds needs --rl-engine ports, "
+                     "--rl-single-island-no-sync and no --rl-critic-load")
     try:
         _check_ports_infra_switches(args)
         _check_single_island_no_sync(args)
@@ -500,6 +533,7 @@ def _check_ports_algorithm_options(args, *, outer_sync: bool = True) -> None:
         getattr(args, "rl_allow_unverified_mechanism", None) or (),
         islands=int(getattr(args, "num_learners", 1) or 1),
         outer_sync=outer_sync,
+        sync_preset=getattr(args, "sync_preset", "strict-avg"),
     )
 
 
@@ -584,6 +618,9 @@ def verify_ports_algorithm(args, miles_args, launch) -> None:
         "base_model_revision": getattr(args, "model_revision", None),
         "base_model": getattr(args, "model", None),
         "ref_load_override": getattr(args, "megatron_ref_load", None),
+        # rl-algo-critic-family 2.3 (critic run-level rejections)
+        "sync_preset": getattr(args, "sync_preset", "strict-avg"),
+        "elastic": bool(getattr(args, "rl_elastic", False)),
     })
     if problems:
         _append_ports_event(args, miles_args, {
@@ -1001,6 +1038,11 @@ def _preflight_codex_harness(args) -> None:
             else "attention"
         ),
         expert_full_count=getattr(args, "expert_full_count", 0),
+        lora_expert_rank=(
+            int(getattr(args, "rl_lora_expert_rank", None) or 0)
+            if getattr(args, "parameter_mode", "lora") == "lora"
+            else 0
+        ),
     )
     if contract.get("backend") != expected_backend:
         raise ValueError("stock Codex backend/TITO identity drifted")
@@ -1840,6 +1882,34 @@ def _syncer_address(value: str) -> tuple[str, int]:
     return host, int(port)
 
 
+def probe_syncers(args, *, connect=None, attempts: int = 10, delay: float = 3.0,
+                  timeout: float = 5.0, sleep=time.sleep) -> list[tuple[str, int]]:
+    """Island-side TCP probe of every syncer this learner will dial (actor
+    --syncer, critic --critic-syncer), printed with the addresses, before any
+    model/Miles work. s13-g3-modal-20261007b: both Modal islands sat 15 min in
+    the client's silent redial; this fails in ~30 s and names the address."""
+    import socket
+
+    connect = connect or socket.create_connection
+    addrs = [_syncer_address(v) for v in (getattr(args, "syncer", None),
+                                          getattr(args, "critic_syncer", None)) if v]
+    for host, port in addrs:
+        last = "not tried"
+        for i in range(max(1, attempts)):
+            try:
+                connect((host, port), timeout=timeout).close()
+                print(f"[rl] syncer probe: {host}:{port} reachable (attempt {i + 1})", flush=True)
+                break
+            except OSError as error:
+                last = f"{type(error).__name__}: {error}"
+            if i + 1 < attempts:
+                sleep(delay)
+        else:
+            raise ConnectionError(
+                f"syncer {host}:{port} unreachable from this island after {attempts} attempt(s): {last}")
+    return addrs
+
+
 EXTERNAL_ROUTER_ENV = "YETO_RL_EXTERNAL_ROUTER"
 
 
@@ -1946,6 +2016,52 @@ def print_attestation_fingerprint(args, ports_launch, out=None) -> bool:
     return True
 
 
+BOOT_ONLY_MARKER = "FN_BOOT_ONLY_OK"
+BOOT_ONLY_PATH = "~/yeto-rl/boot_only.json"
+
+
+def probe_ref_load(args, model_path) -> dict:
+    """``--rl-boot-only``: the --megatron-ref-load check result, recorded, never raised."""
+    from .engine.run_config import _resolve_ref_load
+
+    configured = getattr(args, "megatron_ref_load", None)
+    if configured is None:
+        return {"configured": None, "present": False, "reason": "not configured"}
+    try:
+        return {"configured": configured, "present": True,
+                "resolved": _resolve_ref_load(args, model_path), "reason": None}
+    except ValueError as exc:
+        return {"configured": configured, "present": False, "reason": str(exc)}
+
+
+def write_boot_only_marker(args, ports_launch, run_config, ref_probe, *,
+                           path=None, out=None) -> dict:
+    """``--rl-boot-only`` (S11 fnboot): every torch_dist-free check passed (provider
+    view, Miles argv built + parsed, algorithm verified); record it and return so the
+    learner exits 0 without training."""
+    from .engine.miles_adapter.entry import ports_runtime_fingerprint
+
+    present = bool(ref_probe and ref_probe["present"])
+    record = {
+        "event": "rl_boot_only",
+        "marker": BOOT_ONLY_MARKER,
+        "learner_id": getattr(args, "learner_id", None),
+        "model_recipe": getattr(getattr(run_config, "model_recipe", None), "name", None),
+        "ref_load": ref_probe,
+        "ref_load_present": present,
+        "miles_argc": len(ports_launch.argv),
+        "runtime_fingerprint": ports_runtime_fingerprint(ports_launch),
+    }
+    target = Path(os.path.expanduser(path or BOOT_ONLY_PATH))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
+    stream = out or sys.stdout
+    print(json.dumps(record, sort_keys=True), file=stream, flush=True)
+    print(f"{BOOT_ONLY_MARKER} ref_load_present={str(present).lower()} "
+          f"recipe={record['model_recipe']}", file=stream, flush=True)
+    return record
+
+
 def run_miles(
     args,
     *,
@@ -1964,7 +2080,10 @@ def run_miles(
     _check_ports_algorithm_options(args, outer_sync=yeto_policy_sync)
     if rl_engine == "ports" and (
         getattr(args, "rl_single_island_no_sync", False) or getattr(args, "rl_echo_events", False)
-    ):
+    ) and not getattr(args, "rl_critic_baseline_run", False):
+        # The critic baseline run (run_critic_baseline) keeps its records in its
+        # own tape file only: its rl_learner_finalized must not reach the
+        # launcher's log-stream tape while this island's main run is still ahead.
         install_event_echo()
     if rl_engine == "ports":
         _require_ports_supported(args, extra_argv)
@@ -2075,50 +2194,79 @@ def run_miles(
 
         ensure_deepseek_v4_bridge()
 
-    from megatron.bridge import AutoBridge
+    from . import flash_next_provider as flash_next
 
-    model_bridge = AutoBridge.from_hf_pretrained(
-        model_path,
-        trust_remote_code=args.trust_remote_code,
-    )
-    provider = model_bridge.to_megatron_provider(load_weights=False)
-    provider.finalize()
-    attention_specs = () if dense_full else derive_peft_lora_specs(
-        model_path,
-        None,
-        rank=args.lora_r,
-        targets=args.lora_targets,
-        trust_remote_code=args.trust_remote_code,
-    )
-    specs = tuple(attention_specs)
-    if expert_full:
-        from transformers import AutoConfig
+    native_lora_export = None
+    if flash_next.is_flash_next(args, model_path):
+        # try24: no predicted LoRA layout (specs == ()); the ports state plugin
+        # exports through Miles' native qwen3_8_next exporter and the layout
+        # hash is learned from the first export (_run_ports).
+        native_lora_export = "qwen3_8_next"
+        # try22: megatron.bridge AutoBridge cannot parse qwen4_exp (transformers
+        # 5.12.1 has no such model type).  Miles registers the HF alias and
+        # trains through its own plugin, so build a read-only provider view
+        # from the aliased AutoConfig instead (FN-IMAGE-PLAN option (c)).
+        if rl_engine != "ports":
+            raise ValueError("Qwen3.8-Flash-Next runs only on the ports engine")
+        if dense_full or expert_full or clone_only_lora:
+            raise ValueError("the Qwen3.8-Flash-Next recipe is native-LoRA only")
+        if yeto_policy_sync:
+            raise ValueError(
+                "Qwen3.8-Flash-Next needs --rl-single-island-no-sync: the Yeto "
+                "policy-sync LoRA layout contract is not derivable for qwen4_exp"
+            )
+        model_bridge = None
+        provider = flash_next.flash_next_provider(
+            args, model_path, trust_remote_code=args.trust_remote_code
+        )
+        attention_specs = specs = ()
+        canonical_targets = flash_next.target_modules()
+        miles_targets = []
+    else:
+        from megatron.bridge import AutoBridge
 
-        config = AutoConfig.from_pretrained(
+        model_bridge = AutoBridge.from_hf_pretrained(
             model_path,
             trust_remote_code=args.trust_remote_code,
         )
-        specs = tuple(
-            sorted(
-                specs
-                + expert_full_specs(
-                    config,
-                    expert_count=args.expert_full_count,
-                    expected_selection_sha256=args.expert_selection_sha256,
-                    expected_selection_contract_sha256=(
-                        args.expert_selection_contract_sha256
-                    ),
+        provider = model_bridge.to_megatron_provider(load_weights=False)
+        provider.finalize()
+        attention_specs = () if dense_full else derive_peft_lora_specs(
+            model_path,
+            None,
+            rank=args.lora_r,
+            targets=args.lora_targets,
+            trust_remote_code=args.trust_remote_code,
+        )
+        specs = tuple(attention_specs)
+        if expert_full:
+            from transformers import AutoConfig
+
+            config = AutoConfig.from_pretrained(
+                model_path,
+                trust_remote_code=args.trust_remote_code,
+            )
+            specs = tuple(
+                sorted(
+                    specs
+                    + expert_full_specs(
+                        config,
+                        expert_count=args.expert_full_count,
+                        expected_selection_sha256=args.expert_selection_sha256,
+                        expected_selection_contract_sha256=(
+                            args.expert_selection_contract_sha256
+                        ),
+                    )
                 )
             )
+        canonical_targets = [] if dense_full else adapter_targets(attention_specs)
+        miles_targets = [] if dense_full else megatron_adapter_targets(
+            attention_specs,
+            model_bridge,
+            standard_grouped_experts=clone_only_lora,
+            pipeline_parallel=getattr(args, "pipeline_parallel", 1),
+            attention_output_gate=bool(getattr(provider, "attention_output_gate", False)),
         )
-    canonical_targets = [] if dense_full else adapter_targets(attention_specs)
-    miles_targets = [] if dense_full else megatron_adapter_targets(
-        attention_specs,
-        model_bridge,
-        standard_grouped_experts=clone_only_lora,
-        pipeline_parallel=getattr(args, "pipeline_parallel", 1),
-        attention_output_gate=bool(getattr(provider, "attention_output_gate", False)),
-    )
     ports_launch = ports_algorithm = None
     if rl_engine == "ports":
         # Same engine-agnostic RLRunConfig as legacy; only the translation
@@ -2126,6 +2274,8 @@ def run_miles(
         from .engine.miles_adapter.config import parse_miles_args
         from .engine.run_config import resolve_rl_run_config
 
+        boot_only = bool(getattr(args, "rl_boot_only", False))
+        ref_probe = probe_ref_load(args, model_path) if boot_only else None
         run_config = resolve_rl_run_config(
             args,
             model_path=model_path,
@@ -2138,7 +2288,12 @@ def run_miles(
             # mapping upstream.
             target_modules=canonical_targets,
             yeto_policy_sync=yeto_policy_sync,
+            # boot-only: the ref-load was probed (and recorded) above; a
+            # missing torch_dist must not stop the argv build.
+            verify_ref_load=not boot_only,
         )
+        if not boot_only and not getattr(args, "rl_print_attestation_fingerprint", False):
+            run_config = _run_critic_warmup_stage(args, run_config, extra_argv)
         ports_launch = build_ports_launch(args, run_config, extra_argv)
         ports_algorithm = ports_launch.algorithm
         miles_argv = list(ports_launch.argv)
@@ -2146,6 +2301,9 @@ def run_miles(
         verify_ports_algorithm(args, miles_args, ports_launch)
         if print_attestation_fingerprint(args, ports_launch):
             return  # CPU entry: nothing below (Ray, GPU, sync) runs
+        if boot_only:
+            write_boot_only_marker(args, ports_launch, run_config, ref_probe)
+            return  # boot-only: exit 0 before Ray/GPU work; no training
     else:
         miles_argv = build_miles_argv(
             args,
@@ -2387,6 +2545,12 @@ def run_miles(
                 audit_dir=args.audit_dir,
                 send_initial_params=not getattr(args, "eval_only", False),
             )
+            # 4.2.1: the critic syncer (second channel); its BridgeConfig needs
+            # the critic specs/layout, built by build_sync once Miles created it.
+            miles_args.yeto_rl_critic_syncer_addr = (
+                _syncer_address(args.critic_syncer)
+                if getattr(args, "critic_syncer", None) else None
+            )
 
     if yeto_policy_sync:
         _configure_applied_lr(
@@ -2408,6 +2572,7 @@ def run_miles(
             specs=specs,
             canonical_targets=canonical_targets,
             yeto_policy_sync=yeto_policy_sync,
+            native_lora_export=native_lora_export,
         )
         # Last tape record: a rebuilt (no-sync) tape without it is incomplete.
         _append_ports_event(args, miles_args, {"event": "rl_learner_finalized"})
@@ -2496,6 +2661,79 @@ def _configure_grad_audit(args, miles_args, rl_engine: str) -> bool:
     return True
 
 
+def _ports_spec(args, extra_argv: Sequence[str] = ()):
+    from .engine.algorithm import resolve_ports_algorithm
+    from .engine.miles_adapter.algorithm_flags import absorb_extra_argv
+
+    spec, _, _ = absorb_extra_argv(resolve_ports_algorithm(args, rl_engine="ports"),
+                                   tuple(extra_argv))
+    return spec
+
+
+def _run_critic_warmup_stage(args, run_config, extra_argv: Sequence[str] = ()):
+    """rl-algo-critic-family 5.3 (design D5): stage W before the ports main stage.
+
+    Only for a critic copied from the actor with ``warmup_steps > 0`` and no
+    ``--rl-critic-load``; every other run config is returned unchanged. The
+    stage-W argv is the main-stage argv (built with a placeholder product)
+    minus the driver hooks; the initial actor is the main stage's ``--ref-load``
+    (Miles' ``critic_load`` default in bridge mode, arguments.py:3485-3487/3607).
+    """
+
+    import dataclasses
+
+    from .critic_warmup import needs_warmup_stage, run_ports_warmup
+    from .engine.run_config import CriticRunConfig
+
+    spec = _ports_spec(args, extra_argv)
+    if not needs_warmup_stage(spec, getattr(args, "rl_critic_load", None)):
+        return run_config
+    def with_critic(critic):
+        return dataclasses.replace(
+            run_config, algorithm=dataclasses.replace(run_config.algorithm, critic=critic)
+        )
+
+    placeholder = with_critic(
+        CriticRunConfig(critic_load="<stage-W product>", init_sha256="0" * 64)
+    )
+    main_argv = build_ports_launch(args, placeholder, extra_argv).argv
+    product = run_ports_warmup(
+        spec,
+        main_argv=main_argv,
+        actor_checkpoint=str(run_config.ref_load),
+        cache_root=args.rl_critic_warmup_dir,
+        miles_root=str(Path(args.miles_root).expanduser().resolve()),
+    )
+    args.rl_critic_load = product.critic_checkpoint
+    args.rl_critic_init_sha256 = product.critic_sha256
+    return with_critic(product.critic_run_config())
+
+
+def run_critic_baseline(args, learner_argv: Sequence[str],
+                        run=subprocess.run) -> None:
+    """``--rl-critic-baseline-rounds N``: the no-warm-up baseline learner run
+    (critic_warmup.baseline_learner_argv) before this run's stage W."""
+
+    from .critic_warmup import baseline_learner_argv
+
+    rounds = int(getattr(args, "rl_critic_baseline_rounds", 0) or 0)
+    if not rounds:
+        return
+    spec = _ports_spec(args)
+    spec_path = Path("~/yeto-rl/critic-baseline/algorithm_spec.json").expanduser()
+    argv, base = baseline_learner_argv(learner_argv, spec, rounds=rounds,
+                                       spec_path=str(spec_path))
+    spec_path.parent.mkdir(parents=True, exist_ok=True)
+    spec_path.write_text(base.canonical_json())
+    command = [sys.executable, "-m", "yeto.rl.learner", *argv, "--rl-critic-baseline-run"]
+    print("[rl] critic baseline run (no warm-up, %d rounds, spec %s): %s"
+          % (rounds, base.sha256(), " ".join(command)), flush=True)
+    from .event_echo import ECHO_ENV
+
+    env = {k: v for k, v in os.environ.items() if k != ECHO_ENV}
+    run(command, check=True, env=env)
+
+
 def _run_ports(
     args,
     miles_args,
@@ -2505,21 +2743,40 @@ def _run_ports(
     specs,
     canonical_targets,
     yeto_policy_sync: bool,
+    native_lora_export: str | None = None,
 ) -> None:
-    """Ports path: yeto's IslandDriver over upstream Miles (design D2)."""
+    """Ports path: yeto's IslandDriver over upstream Miles (design D2).
+
+    ``native_lora_export`` (Flash-Next, S11 try24): the LoRA layout is not
+    predictable on the CPU side, so no hash is pinned here; the policy state
+    learns it from the first export (before any receipt) and pins it after.
+    """
 
     from .core import canonical_layout_hash, canonical_lora_config_hash
     from .engine.miles_adapter.entry import run_ports_island
 
-    layout_hash = canonical_layout_hash(specs)
     lora_config_hash = canonical_lora_config_hash(
         rank=args.lora_r, target_modules=canonical_targets
     )
-    print(
-        f"[rl] expected LoRA layout: {len(specs)} tensors, hash={layout_hash}: "
-        + ", ".join(f"{s.name}{list(s.shape)}" for s in specs[:400]),
-        flush=True,
-    )
+    if native_lora_export is not None:
+        if specs:
+            raise ValueError("native LoRA export must not carry predicted specs")
+        if yeto_policy_sync:
+            raise ValueError("native LoRA export runs only without Yeto policy sync")
+        layout_hash = None
+        miles_args.yeto_rl_native_lora_export = native_lora_export
+        print(
+            f"[rl] LoRA layout: learned from the first {native_lora_export} "
+            f"native export (no predicted specs); targets={list(canonical_targets)}",
+            flush=True,
+        )
+    else:
+        layout_hash = canonical_layout_hash(specs)
+        print(
+            f"[rl] expected LoRA layout: {len(specs)} tensors, hash={layout_hash}: "
+            + ", ".join(f"{s.name}{list(s.shape)}" for s in specs[:400]),
+            flush=True,
+        )
     # The event tape and island identity are needed even without outer sync.
     miles_args.yeto_rl_event_tape = args.event_tape
     miles_args.yeto_rl_learner_id = args.learner_id
@@ -2544,6 +2801,7 @@ def _run_ports(
 
 
 def main(argv=None) -> None:
+    learner_argv = list(sys.argv[1:] if argv is None else argv)
     args = parse_args(argv)
     from ..provenance import (
         is_immutable_commit,
@@ -2582,6 +2840,7 @@ def main(argv=None) -> None:
             ),
         )
     _preflight_codex_harness(args)
+    probe_syncers(args)
 
     from miles.utils.misc import load_function
 
@@ -2643,6 +2902,8 @@ def main(argv=None) -> None:
                 **columns,
             )
         )
+    if getattr(args, "rl_critic_baseline_rounds", 0):
+        run_critic_baseline(args, learner_argv)
     run_miles(
         args,
         model_path=model_path,

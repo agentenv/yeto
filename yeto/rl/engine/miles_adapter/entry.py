@@ -246,20 +246,22 @@ def receipt_role_family(algorithm: AlgorithmSpec) -> str:
     """``LocalStepReceipt.algorithm``: the TRAINING ROLE FAMILY, not the estimator.
 
     It must equal ``ParameterLayout.algorithm`` (``local_learner.py`` checks
-    both; the layout hash covers it), whose families are grpo / sao. Every
+    both; the layout hash covers it), whose families are grpo / sao / ppo. Every
     critic-free estimator (grpo, gspo, reinforce_plus_plus[_baseline]) trains
     the single actor role -> ``"grpo"``; the estimator itself is identified by
-    ``algorithm_spec_sha256``. Critic estimators (ppo) have no family in the
-    layout contract and are refused.
+    ``algorithm_spec_sha256``. A critic algorithm (estimator ppo with
+    ``execution.needs_critic``) trains actor + critic -> ``"ppo"``
+    (rl-algo-critic-family D4).
     """
     from ..algorithm import CRITIC_ESTIMATORS
 
     estimator = algorithm.advantage_estimator
     if estimator in CRITIC_ESTIMATORS:
-        raise ValueError(
-            f"advantage estimator {estimator!r} needs a critic role family, which the "
-            "receipt/layout contract does not define"
-        )
+        if not getattr(getattr(algorithm, "execution", None), "needs_critic", False):
+            raise ValueError(
+                f"advantage estimator {estimator!r} needs execution.needs_critic=true"
+            )
+        return "ppo"
     return "grpo"
 
 
@@ -450,6 +452,34 @@ def resolve_harness_preflight(miles_args: Any, environ: Any = None) -> HarnessPr
     return hook
 
 
+# A16 / D5 (rl-fn-codex-rollout 0.6): the island publishes its own INFRA member cell
+# so the Codex harness admits sessions under ``rollout.member_id(cell_id)`` instead
+# of the global key.  Single-island (--rl-single-island-no-sync) islands publish 0.
+MEMBER_CELL_ENV = "YETO_RL_CELL_ID"
+
+
+def publish_member_cell(miles_args: Any, learner_id: int | None = None, environ: Any = None) -> str:
+    """Set ``miles_args.yeto_rl_cell_id`` and export ``YETO_RL_CELL_ID``; return the cell id.
+
+    Source, in order: an explicit ``miles_args.yeto_rl_cell_id`` (INFRA may pre-set it),
+    ``learner_id`` (the island number the launcher already assigns; ``island_id`` in the
+    ``rl_engine_selected`` event), ``miles_args.yeto_rl_learner_id``, else 0.  The env
+    export reaches rollout-worker subprocesses through ``worker_runtime_env`` and
+    ``preflight.configure_rollout_worker``; ``preflight.resolve_member`` then yields
+    ``engine:<cell>`` (``engine:0`` on a single island).
+    """
+    environ = os.environ if environ is None else environ
+    cell = getattr(miles_args, "yeto_rl_cell_id", None)
+    if cell is None or str(cell) == "":
+        if learner_id is None:
+            learner_id = getattr(miles_args, "yeto_rl_learner_id", None)
+        cell = int(learner_id or 0)
+    cell = str(cell)
+    miles_args.yeto_rl_cell_id = cell
+    environ[MEMBER_CELL_ENV] = cell
+    return cell
+
+
 def preflight_stage(
     miles_args: Any,
     launch: Any,
@@ -464,6 +494,7 @@ def preflight_stage(
     preflight (IR-1) runs last, after the contract preflight and the elastic
     wiring checks; a failure here means no allocate call ever happens.
     """
+    publish_member_cell(miles_args)  # A16: member cell before the harness preflight resolves it
     fingerprint = ports_runtime_fingerprint(launch)
     capabilities = with_partitioned_serial(
         miles_capabilities(
@@ -519,6 +550,17 @@ def build_sync(miles_args: Any, *, yeto_policy_sync: bool) -> tuple[Any, Any]:
     if getattr(miles_args, "yeto_rl_sync_preset", "strict-avg") == "decoupled":
         return DecoupledSync(miles_args), DecoupledIslandProgress(miles_args)
     progress = StrictIslandProgress(miles_args)
+    critic_syncer = getattr(miles_args, "yeto_rl_critic_syncer_addr", None)
+    if critic_syncer is not None:
+        # rl-algo-critic-family 4.2.3 (design D4 plan a): second syncer channel for the
+        # critic, one atomic commit for both roles.
+        from ..bridges import DualStrictAvgSync
+
+        return DualStrictAvgSync(miles_args.yeto_rl_bridge_config, critic_syncer_addr=critic_syncer,
+                                 progress=progress), progress
+    if getattr(miles_args, "use_critic", False):
+        raise ValueError("strict-avg with a critic needs the critic syncer (--critic-syncer); "
+                         "the actor syncer alone would leave the critics unaveraged")
     return StrictAvgSync(miles_args.yeto_rl_bridge_config, progress=progress), progress
 
 
@@ -533,7 +575,7 @@ def compose_island(
     learner_id: int,
     base_model_revision: str,
     lora_config_hash: str,
-    layout_hash: str,
+    layout_hash: str | None,
     sync: Any,
     progress: Any,
     metadata: Any,
@@ -551,8 +593,13 @@ def compose_island(
     observe: bool = False,
     elastic: Any = None,
     evaluate_start: Callable[[int], Any] | None = None,
+    critic_model: Any = None,
 ):
     """Wire the adapter ports into an ``IslandDriver`` (no upstream imports).
+
+    ``critic_model`` (rl-algo-critic-family 3.1): the upstream critic
+    ``TrainGroup`` of a critic algorithm (shared actor/critic PPO), trained
+    before the actor in every round; None for every critic-free algorithm.
 
     ``elastic`` (:class:`.elastic_wiring.ElasticWiring`, rl-infra-spec 3.x):
     declared rollout cells for the E1 membership verbs, the reconfiguration
@@ -611,9 +658,10 @@ def compose_island(
             actor_model=actor_model,
             learner_id=learner_id,
             learner_generation=0,
-            parameter_layout_hash=lambda: layout_hash,
+            parameter_layout_hash=lambda: policy_state.layout_hash,
             algorithm=receipt_role_family(algorithm),
             spec=algorithm,
+            critic_model=critic_model,
             release_refs=release_refs,
             runner=runner,
         ),
@@ -1518,7 +1566,7 @@ def run_ports_island(
     learner_id: int,
     base_model_revision: str,
     lora_config_hash: str,
-    layout_hash: str,
+    layout_hash: str | None,
     yeto_policy_sync: bool,
     harness_preflight: HarnessPreflight | None = None,
 ):
@@ -1536,6 +1584,7 @@ def run_ports_island(
     require_run_plugin()  # before any upstream component or model exists
     from ..overlap import loop_eval_starter
 
+    publish_member_cell(miles_args, learner_id)  # A16 (D5): island cell -> harness member key
     fingerprint, capabilities, profile, elastic = preflight_stage(
         miles_args, launch, algorithm, yeto_policy_sync=yeto_policy_sync,
         harness_preflight=harness_preflight,
@@ -1588,8 +1637,13 @@ def run_ports_island(
         controller, executor, _ = await create_rollout_components(miles_args)
         disposer.add(controller, executor)
         actor, critic = await create_training_models(miles_args, executor)
-        if critic is not None:
-            raise RuntimeError("the ports engine does not drive a critic")
+        # rl-algo-critic-family 3.1: Miles creates a critic iff use_critic
+        # (estimator ppo); it must agree with the AlgorithmSpec.
+        if (critic is not None) != bool(algorithm.execution.needs_critic):
+            raise RuntimeError(
+                f"Miles created {'a' if critic is not None else 'no'} critic but the algorithm "
+                f"spec says needs_critic={algorithm.execution.needs_critic}"
+            )
         # rl-infra-spec 4.3/4.4: one swappable handle shared by trainer,
         # policy state, publisher and the eval dispatcher (EvalDispatcher keeps
         # self.actor_model and resolves methods per call, so the proxy is
@@ -1599,13 +1653,16 @@ def run_ports_island(
 
         actor = SwappableActor(actor)
         disposer.add(actor)
+        if critic is not None:
+            critic = SwappableActor(critic)
+            disposer.add(critic)
         dispatcher = EvalDispatcher(miles_args, actor, executor)
         disposer.add(dispatcher.drain)
-        return controller, executor, actor, dispatcher
+        return controller, executor, actor, critic, dispatcher
 
     error: BaseException | None = None
     try:
-        controller, executor, actor, dispatcher = runner.run(init())
+        controller, executor, actor, critic, dispatcher = runner.run(init())
         if not callable(getattr(actor, "run_plugin", None)):
             raise RuntimeError("upstream actor group exposes no run_plugin")
 
@@ -1641,6 +1698,7 @@ def run_ports_island(
                 else None
             ),
             elastic=elastic,
+            critic_model=critic,
         )
         # fleet-dashboard 2.1/2.2: opt-in heartbeat / resource sampler periods
         driver.heartbeat_interval_s = getattr(miles_args, "yeto_rl_heartbeat_interval_s", None)

@@ -72,8 +72,10 @@ def test_profile_defaults_match_miles_ci_4layer_shape():
 def test_profile_rejects_invalid_shapes_and_ranks():
     with pytest.raises(ValueError, match="4 or 8 GPUs"):
         q.Qwen38NextLoraProfile(num_gpus_per_node=6)
-    with pytest.raises(ValueError, match="32 GPUs"):
+    with pytest.raises(ValueError, match="16 or 32 GPUs"):
         q.Qwen38NextLoraProfile(variant="full")
+    with pytest.raises(ValueError, match="16 or 32 GPUs"):
+        q.Qwen38NextLoraProfile(variant="full", num_nodes=3)
     with pytest.raises(ValueError, match="r_e <= lora_rank"):
         q.Qwen38NextLoraProfile(lora_rank=8, lora_expert_rank=16)
     with pytest.raises(ValueError, match="positive"):
@@ -82,6 +84,10 @@ def test_profile_rejects_invalid_shapes_and_ranks():
         q.Qwen38NextLoraProfile(variant="8layer")
     full = q.Qwen38NextLoraProfile(variant="full", num_nodes=8, num_gpus_per_node=4)
     assert full.parallel["pp"] == 8 and full.parallel["ep"] == 4
+    # 2x8 formal shape (2026-10-07): 16 GPUs -> PP4, the torch_dist conversion split
+    full16 = q.Qwen38NextLoraProfile(variant="full", num_nodes=2)
+    assert full16.parallel["pp"] == 4 == full16.parallel["ep"] and full16.parallel["tp"] == 2
+    assert full16.parallel["rollout_num_gpus_per_engine"] == 8
     assert q.Qwen38NextLoraProfile(lora_expert_rank=0).effective_expert_rank == 32
 
 
@@ -335,7 +341,7 @@ def _fake_log(num_gpus: int = 4, rounds: int = 5, *, diff_jump: float = 1.0, lor
 def test_judge_accepts_a_conforming_log(tmp_path):
     log = tmp_path / "g3.log"
     log.write_text(_fake_log(4, 5))
-    out = _run([sys.executable, str(JUDGE_PY), str(log), "--num-gpus", "4", "--rollouts", "5",
+    out = _run([sys.executable, str(JUDGE_PY), str(log), "--num-gpus", "4", "--rollouts", "5", "--rank", "32", "--expert-rank", "8",
                 "--eval-min", "1", "--adapter-restart", "--json", str(tmp_path / "j.json")])
     assert "verdict PASS" in out
     j = json.loads((tmp_path / "j.json").read_text())
@@ -349,20 +355,21 @@ def test_judge_accepts_a_conforming_log(tmp_path):
     folded.insert(0, f"[rank] native LoRA applied: rank=32 expert_rank=8 alpha=64 trainable={s1}")
     folded.insert(1, f"[rank] native LoRA applied: rank=32 expert_rank=8 alpha=64 trainable={s0} [repeated 3x across cluster]")
     (tmp_path / "folded.log").write_text("\n".join(folded) + "\n")
-    out = _run([sys.executable, str(JUDGE_PY), str(tmp_path / "folded.log"), "--num-gpus", "4", "--json", str(tmp_path / "f.json")])
+    out = _run([sys.executable, str(JUDGE_PY), str(tmp_path / "folded.log"), "--num-gpus", "4", "--rank", "32", "--expert-rank", "8", "--json", str(tmp_path / "f.json")])
     assert "verdict PASS" in out
     fj = json.loads((tmp_path / "f.json").read_text())["trainable"]
     assert fj["dedup_repeats"] == 2 and not fj["exact_count"]
     log8 = tmp_path / "g3-8.log"
     log8.write_text(_fake_log(8, 5))
-    assert "verdict PASS" in _run([sys.executable, str(JUDGE_PY), str(log8), "--num-gpus", "8"])
+    assert "verdict PASS" in _run([sys.executable, str(JUDGE_PY), str(log8), "--num-gpus", "8", "--rank", "32", "--expert-rank", "8"])
 
 
 def test_judge_rejects_wrong_rank_count_lora_check_and_logprob_jump(tmp_path):
     def run(text: str) -> dict:
         log = tmp_path / "x.log"
         log.write_text(text)
-        p = subprocess.run([sys.executable, str(JUDGE_PY), str(log), "--num-gpus", "4", "--json", str(tmp_path / "j.json")],
+        p = subprocess.run([sys.executable, str(JUDGE_PY), str(log), "--num-gpus", "4", "--rank", "32", "--expert-rank", "8",
+                            "--json", str(tmp_path / "j.json")],
                            capture_output=True, text=True, env={**os.environ, "PYTHONPATH": str(ROOT)})
         assert p.returncode == 1, p.stdout
         return json.loads((tmp_path / "j.json").read_text())
@@ -372,3 +379,19 @@ def test_judge_rejects_wrong_rank_count_lora_check_and_logprob_jump(tmp_path):
     assert not run(_fake_log(4, 5, diff_jump=50.0))["logprob_diff"]["pass"]
     assert not run(_fake_log(4, 3))["rollouts"]["pass"]
     assert not run(_fake_log(4, 5).replace("'train/loss': 0.01", "'train/loss': nan"))["finite"]["pass"]
+
+
+def test_judge_requires_rank_and_reports_rank_mismatch(tmp_path):
+    log = tmp_path / "g.log"
+    log.write_text(_fake_log(4, 5))
+    env = {**os.environ, "PYTHONPATH": str(ROOT)}
+    p = subprocess.run([sys.executable, str(JUDGE_PY), str(log), "--num-gpus", "4"],
+                       capture_output=True, text=True, env=env)
+    assert p.returncode == 2 and "--rank" in p.stderr  # no silent default
+    p = subprocess.run([sys.executable, str(JUDGE_PY), str(log), "--num-gpus", "4", "--rank", "16",
+                        "--expert-rank", "8", "--json", str(tmp_path / "j.json")],
+                       capture_output=True, text=True, env=env)
+    assert p.returncode == 1
+    t = json.loads((tmp_path / "j.json").read_text())["trainable"]
+    assert t["seen"] == {} and t["rank_mismatch"] == {"rank=32 expert_rank=8": 4}
+    assert "rank=32 expert_rank=8" in p.stdout and "given rank=16" in p.stdout

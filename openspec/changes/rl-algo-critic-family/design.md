@@ -1,0 +1,141 @@
+# Design
+
+## Context
+
+动机见 proposal.md（Why）。以下只列决定实现方式的现状与约束（已核实，行号以当前工作树与 Miles c35702e 为准）。
+
+**yeto 侧现状**
+- `yeto/rl/engine/algorithm.py`：`ADVANTAGE_ESTIMATORS` 已含 ppo（:58-64），`CRITIC_ESTIMATORS={"ppo"}`（:65），但 v1 只接受 grpo（:51）；`ExecutionSpec.needs_critic`（:818）；`_reject_critic`（:1363，注册于 :1413）；`AdvantageSpec` 无 gamma/lambd（:653-670）。
+- `algorithm_flags.py` `_UNMAPPED`（:200-209）中 `--gamma/--lambd/--value-clip/--num-critic-only-steps/--critic-load/--critic-lr` 出现即拒绝。
+- `capabilities.py` `execution.critic`（:69），不匹配时报 "only --rl-engine legacy"（:321-324），文案不实：legacy `learner.py:1443` 写死 `--advantage-estimator grpo`，critic 只能经 :2245 extra_argv 透传。
+- ports：`entry.py:236` 与 `fake.py:70` 声明 critic=False；阻断点 `entry.py:245-262`（`receipt_role_family` 遇 ppo raise）、`entry.py:1590-1592`、`trainer_rebuild.py:253,358`；`selection.py:45,68` 把 use_critic/非 grpo 路由到 legacy；`run_config.py` 无 critic 字段。
+- 外层：strict-avg、decoupled（`yeto/rl/decoupled.py`）、trainable_state、run_config、elastic checkpoint store、tape/ledger 均未建模 critic；LayoutHash/receipt 只有 grpo 与 sao 两个 family。
+- SAO（现有独立路径）：`local_learner.py:20-21` `_ROLES_BY_ALGORITHM={grpo:{actor}, sao:{actor,critic}}`；`miles_sao_streaming.py:3-7,148-173` actor/critic 独立 syncer 端口与 layout、lockstep 成对 fragment；`sao_streaming_runtime.py:508-509,562-598`（use_critic、`num_critic_only_steps==0`、`--sao-online-recipe`、critic 步数=actor×num_critic_epochs）；提交 60b61b3c、5bfc011a；验证见 docs/TBENCH21_SAO_QWEN35_08B_VALIDATION_20260826.md（EV≈+0.136，pass@k 无提升；actor→critic 经 Gloo/CPU）。SAO 算法本体在 legacy fork agentenv/miles feat/sao-tbench21-e2e-validation@16a9bea409de（SAO 数学引入于 e25048edd；原写 ae475060 有误，那是 legacy MILES_COMMIT），本地未查到源码。
+
+**Miles c35702e（ports 镜像）**
+- 参数：`--critic-num-nodes/gpus`（arguments.py:270-273）、`--num-critic-only-steps`（:1597）、`--critic-load/save/lr/lr-warmup`（:1603-1613）、`--value-clip=0.2`（:1648）、`--gamma/--lambd` 默认 1.0（:1729-1730）；估计器有 ppo 无 vapo（:1682-1690）；`use_critic` 由 estimator=="ppo" 推导（:3591）。
+- Shared Actor/Critic 约束：不支持 indep_dp、只 megatron、kl_coef==0（:3592-3604）；critic GPU 数被赋值为 actor 的值（:3605-3606，静默覆盖而非断言，1.2 复核）；critic_load/lr 默认继承 actor（:3607-3610），强制 offload_train（:3708-3716）；rebuild 模式要求 `num_critic_only_steps==0`（:3212）；`--deploy-component trainer` 禁 critic（:3058）。
+- 实现：placement_group.py:320,338 共卡；model_provider.py:340-341 1 维 value head；actor.py:227,604,635 value_loss；loss_hub/math_utils.py:647,705 GAE 入口、:875 vanilla_gae、:899 chunked_gae；losses.py:452 value loss；LoRA 下 critic 仍全参数（test_lora_model_branches.py:122-130）。示例 examples/ppo/、tests/e2e/megatron/test_qwen3_4B_ppo.py:76-86、test_shared_ppo_lifecycle.py。
+- 没有：vapo、sao、hl_gauss、length_adaptive、decoupled_gae、value_pretrain、cross-segment GAE。CompactionRL 只有 rollout 侧 examples/experimental/terminus-compaction。
+
+**约束**：不重复实现引擎（数学放 Miles/fork，yeto 只声明、校验、翻译、编排）；fork 改动只进 `michaellchung/miles` `yeto/ports`（先例 rl-algo-loss-variants 路线 B）；新机制先经 `--rl-allow-unverified-mechanism` 做 G1（1 卡），通过后才在 adapter 正式声明，G3 两岛 strict-avg 只用正式声明。
+
+## Goals / Non-Goals
+
+**Goals:**
+- 用一套 critic 状态契约（layout family、receipt、外层同步、checkpoint、tape/ledger）覆盖 PPO、VAPO、SAO、CompactionRL，四个算法只在 GAE 与 value loss 变体上不同。
+- GAE 变体在 fork 上只有一个扩展点，VAPO、SAO、CompactionRL 共用。
+- critic LoRA 的接口与契约在首轮就预留，后续实现时不改契约结构。
+
+**Non-Goals:**
+- 不做 critic 与 actor 分卡/弹性分配、不做独立 critic DiLoCo（决策 1、4，后续探索）。
+- 首轮不实现 critic LoRA（只出开发计划，见 D9）。
+- 不在 yeto 中实现任何 GAE/value loss 数学。
+
+## Decisions
+
+### D1 critic 字段放在 AlgorithmSpec 的新 `critic` 组与 `advantage` 组
+- `advantage` 组增加 `gamma`、`lambd`、`lambd_mode`（`fixed`|`length_adaptive`，带 `alpha`）、`gae_variant`（`vanilla`|`decoupled`|`cross_segment`）。
+- 新 `critic` 组：`value_clip`、`critic_lr`、`critic_lr_warmup`、`critic_updates_per_step`、`value_loss`（`mse`|`hl_gauss`，后者带 bins）、`init`（`copy_actor_backbone`|`load`）、`warmup_steps`、`param_mode`（首轮只接受 `full`，`lora` 保留，见 D9）。
+- 只有 `needs_critic` 为真时这些字段才进入规范化与算法哈希；grpo 默认哈希不变（P0 golden 用例不改即可通过）。`--gamma` 等从 `_UNMAPPED` 移入映射表，并做吸收与冲突检测。
+- 备选：继续 extra argv 透传。否决：不进入哈希，两岛无法证明同一算法，也无法校验。
+
+### D2 PPO 直接复用 Miles shared PPO
+翻译为 `--advantage-estimator ppo` 及对应 `--gamma/--lambd/--value-clip/--critic-lr...`，`kl_coef=0`、colocated 共卡、offload_train 按 Miles 强制项生成。yeto 在启动前复刻 Miles 的 shared 约束（indep_dp、kl_coef、critic GPU 数、`--deploy-component trainer`），在 fake 组合根中先失败，不等 Miles 在 GPU 进程里报错。修正 capabilities.py:321-324 的文案为实际原因。
+- 备选：分离式 critic（独立 GPU）。否决：Miles c35702e 未提供，违背决策 4。
+
+### D3 ports 放开顺序：单岛 colocated 优先
+先放开 `entry.py:245-262` 的 receipt family、`entry.py:1590-1592`、`trainer_rebuild.py:253,358` 与 `selection.py` 路由，并在单岛下用 `--rl-allow-unverified-mechanism execution:critic` 跑 G1；G1 通过后 `entry.py:236` 正式声明 `critic=True`，fake.py 同步。两岛只在 D4 的状态契约完成后开放。
+
+### D4 critic 状态契约：critic 作为与 actor 并列的第二个 role
+- LayoutHash：新增 `ppo_family`（actor+critic），沿用 SAO 的双 layout 思路：critic layout 由 backbone layout + value head 形状决定，与 actor layout 分开哈希，receipt 中同时记录两者与 `critic.param_mode`。
+- 外层同步（决策 1，用户已定方案 a：双 syncer）：critic 走第二条 syncer 通道，沿用 SAO 的双 layout/双 syncer 路径。launcher 为 critic 起第二个 syncer 进程与独立端口，layout 用 `critic_layout_hash`；actor 仍走原 LoRA syncer 通道。
+  - 跨通道原子提交：同一轮 v→v+1，actor 与 critic 两条通道都拿到 v+1 的平均结果后，才对 trainer 应用并写 round-cut；任一通道失败/超时，两者都不应用，回退到上一已提交轮（语义同 `TwoRoleStrictAvg`）。
+  - Miles 进程内需要 critic 全参数张量导出/写回插件（按 critic layout 切 fragment，写回后校验哈希）。
+  - decoupled 外层遇 critic 直接拒绝（后续探索）。
+  - **critic 同步以 fp32 主权重为准（用户决定 2026-10-07）**：插件导出读优化器 fp32 主权重（DistributedOptimizer 按 DP 分片读本 rank 的 main shard 并在 DP 组内拼全；完整 `main_param`；fp32 参数自身即主权重），写回先写主权重、再由主权重 cast 生成模型低精度参数（同 optimizer step 后 main→model 拷贝），通道/写回校验/round-cut 的哈希均按 fp32 主权重；低精度参数无任何 fp32 主权重时拒绝。
+  - **critic 优化器状态每轮保留（第一版选择）**：strict 轮只替换 critic 权重，优化器矩/步数与学习率调度器跨轮保留（actor 每轮 reset）。
+  - 门控：`check_unverified_allowance` 在 `sync_preset=strict-avg` 且所有放行名都属 critic 家族（`CRITIC_STRICT_AVG_ALLOWANCES`，须含 `execution:critic`）时，允许多岛/外层同步；仍须显式 `--rl-allow-unverified-mechanism`；其它未验证机制与其它 preset 维持 D11 原文。
+  - 备选 b（单 syncer layout 同时容纳 actor LoRA 与 critic 全参数）：否决，改 syncer 协议/layout 影响面大。备选 c（只平均 actor）：违背决策 1。
+- checkpoint/恢复：critic 与 elastic 互斥，故使用 ports 的 round-cut checkpoint（`MilesTrainerGroup.save_cut/restore_cut`），经 critic 句柄保存 critic 权重、优化器与学习率调度器状态；pointer 记录 critic 轮次，复用 `CriticCheckpointStore` 轮次一致性校验，actor/critic 不同轮则拒绝恢复。
+- tape/ledger：每轮记录 critic 权重哈希、value_loss、explained variance。
+- 备选：把 critic 当 actor 的附属张量一起哈希。否决：critic LoRA（D9）与 SAO 双 syncer 都需要独立 role。
+
+### D5 warm-up 初始化与 rebuild 模式冲突的解法（决策 3）
+Miles arguments.py:3212 的约束只在 `--rematerialize-param-from-master-weight` 下生效，ports 不用该开关，因此它不是真正的阻碍；真正的阻碍是 yeto 外层每轮都训练并发布 actor，无法在主循环内插入不动 actor 的 critic-only 步。解法：把 warm-up 拆成 yeto 编排的独立阶段。
+1. 阶段 W（critic-only）：用非 rebuild 的单次 Miles 启动（与 Miles 原生 PPO 示例相同模式），`--critic-load` 指向初始 actor checkpoint（复制 backbone，value head 由 model_provider 新建），`--num-critic-only-steps=warmup_steps`，跑完 warm-up 后只保存 critic checkpoint，actor 权重不变（校验 actor 哈希前后一致）。
+2. 主阶段：ports rebuild 模式，`--num-critic-only-steps=0`，`--critic-load` 指向阶段 W 的输出。
+3. 阶段 W 产物以内容哈希进入 receipt（`critic.init=load` + 来源哈希）；两岛共用同一 W 产物，只做一次。
+- 备选 a：放宽 fork 上 :3212 约束。否决：rebuild 下 critic-only 步与 actor 同步节奏未定义，改动面大。备选 b：主阶段前若干轮把 actor lr 置 0。否决：仍会走 rollout 权重同步与优化器状态，哈希与成本都不干净。
+
+- **价值质量检查（用户决定 B，2026-10-07）**：50 步只是起点，阶段 W 结束必须看价值质量而非只看步数。`yeto/rl/critic_warmup.py::value_quality(values, returns)` 定义：回报拟合 `mse=mean((v−G)²)`、`relative_error=√mse/√mean(G²)`；explained variance `1−Var(G−v)/Var(G)`（Var(G)=0 时为 None）；校准：按 v 排序等量分 10 箱，每箱 |mean v − mean G|，`calibration_error`=按样本数加权平均、`calibration_max_gap`=最大值、`calibration_bins` 全记录。结果写入阶段 W 产物 manifest（`WarmupProduct.value_quality`，ledger 即该 manifest）。可选门控：spec 扩展字段 `critic.warmup_max_value_mse / warmup_max_value_rel_error / warmup_max_calibration_error / warmup_min_explained_variance`（缺省 None=只记录不拦截；None 时不进规范 JSON，17 个既有规格哈希不变；仅 critic 且 warmup_steps>0 时允许）；`finish_warmup` 不达标即报错且不写 manifest，`load_product` 复用时重查（设了阈值但无指标也拒绝）。**接线点（未实现，需 GPU 路径）**：阶段 W 需导出最后若干 warm-up rollout 的逐 token value 与 GAE 价值目标（returns），由 `run_stage` 返回 `{"values","returns"}`；fork 目前不导出。
+
+### D6 fork 上唯一的 GAE 扩展点
+在 `yeto/ports` 分支 math_utils.py 现有 vanilla/chunked GAE 旁加一个按 `--gae-variant` 分派的入口：
+- `length_adaptive`：λ=1−1/(α·l)，l 为序列响应长度（VAPO、SAO、CompactionRL 共用，α 默认 1.5）。
+- `decoupled`：critic 目标与 actor 优势用不同 λ（VAPO）。
+- `cross_segment`：段内局部 GAE `A^loc_{s,i}=∑_{ℓ=0}^{n_s−i}(γλ)^ℓ δ_{s,i+ℓ}`，再乘 `(γλ)^{N_{>s}}`，`N_{>s}=∑_{j>s} n_j`；终局回报放在最后一段段尾，不跨压缩边界自举（CompactionRL）。
+- 段边界作为样本元数据（每 token 的 segment id）随 batch 传入；无边界时退化为 vanilla。缺省参数下逐元素等于原实现。
+- **用户决定（2026-10-07）：cross_segment 按论文"每段单独优化"实现**，目的是把奖励传到正确的压缩 action。每段是独立 sample，各段段尾都放共享终局回报，段尾 bootstrap 0，局部 GAE（式 13）再乘 `(γλ)^{N_{>s}}`（式 14），使奖励项折扣等于其在拼接轨迹中到终局的距离（式 15）。fork 新取值 `--gae-variant cross_segment_per_sample`（yeto-critic-family ffe769c1e）：按 sample 读 `metadata.tokens_after`（=N_{>s}），可选 `metadata.gae_length` 作为 length-adaptive 的 l；critic 目标取局部优势+V（论文未写，待确认）。yeto 规格值仍为 `advantage.gae_variant=cross_segment`（规格哈希不变），翻译为 `cross_segment_per_sample`；yeto 的 compaction rollout 令 `gae_length=整条 rollout 被优化 token 数`，同一 rollout 各段共用一个 λ（论文"l 为响应长度"未说明按段还是整条，此为 yeto 选择，待确认）。
+- fork 旧取值 `cross_segment`（整条 rollout 一个 sample + 每 token segment_ids，前段不含终局回报）与论文不符。**用户决定（2026-10-07 更正）**：不删除，改名为显式对照模式 `cross_segment_whole_rollout`（help 注明与式 15 不同；数值与旧实现逐元素相同），含糊取值 `cross_segment` 在 fork（argparse choices + math_utils）与 yeto（spec 字段解析、`--gae-variant` 吸收）均报错并提示两个明确取值。yeto spec `advantage.gae_variant` 取值相应改为 `cross_segment_per_sample` / `cross_segment_whole_rollout`，与 fork 同名直译（fork 70e3d7761）。
+- 先用 yeto 仓库内独立 torch 参考实现（不 import 被测代码）对拍，仿照 rl-algo-loss-variants D3。
+
+### D7 VAPO 与 SAO
+- VAPO = PPO + length_adaptive + decoupled GAE + value pretrain（复用 D5 阶段 W）+ 论文中的其它组件；具体变体参数为开放问题，不影响结构。
+- **VAPO 参数补充（7.1，用户已确认 2026-10-07）**：出处 arXiv 2504.05118v3（HTML 版）§4.1–4.3、§5.1、表 1；全表见 progress.md "S13 7.1 VAPO 参数"。论文值：γ=1.0；decoupled GAE，critic 目标 λ=1.0；policy λ=1−1/(α·l)，**α=0.05**（注意 D6 的缺省 α=1.5 来自 SAO，不是 VAPO 值）；ε_low=0.2、ε_high=0.28；token 级 PG loss；positive-example LM loss 权重 μ=0.1；value warm-up 50 步；critic lr 2e-6、actor lr 1e-6（warmup-constant）；group sampling 每 prompt 16 次、512 prompts/采样、mini-batch 512。与论文不一致/论文未给出（需确认）：论文 value 模型由奖励模型初始化，yeto 用 `copy_actor_backbone`（D5）；"正确样本"判据论文只说 correct answers，yeto 取 reward>0.0；value_clip、KL、warm-up 调度长度论文未给出。
+- VAPO 声明（7.2）：`yeto/rl/algos/vapo.py::vapo_spec()`；新增 `advantage.critic_lambd`（decoupled 时填 1.0）、`loss.positive_lm_coef/positive_lm_reward_threshold`；fork `yeto-vapo` cbf8c4737 实现 `--positive-example-lm-loss-coef`。三项 fork 专有机制 `features:gae_decoupled/gae_length_adaptive/positive_example_lm_loss` 在 G1（7.3）前不声明。
+- **用户决定（2026-10-07）**：
+  - A. α 保持论文 0.05。
+  - B. critic 初始化沿用"actor 主干 + 阶段 W warm-up"适配方案，warm-up 结束检查价值质量（见 D5 末条，缺省只记录）。
+  - C. 正例判定：缺省用奖励函数给出的显式布尔成功字段（`sample.metadata["success"]` 或 `"is_correct"`）；spec `loss.positive_lm_source="success"`（VAPO 缺省）/ fork `--positive-example-source success`（fork 缺省）；缺失即报错，不回退到 reward。只有 spec 声明 `positive_lm_source="reward"`（即"正奖励必然意味着完整成功"）时才允许 `positive_lm_reward_threshold`（reward 严格大于阈值）。VAPO 规格哈希 7ee1dde4…→5e9b38ed…（不在 17 个既有规格中）。
+  - D. 正例 LM loss 按论文式 9 归一：项 = Σ_正例 token (−log π) / P，P = 该 optimizer step 全部 micro-batch 与 DP rank 的正例 token 总数，μ=0.1。实现（fork 70e3d7761）：Miles 自身会把求和 loss 除以 step 的全局归一量 D（per-token：Σ max(mask_i,1) 全局 token 数，与 `loss_function` 的 num_tokens 一致，由 Megatron 跨 micro-batch/DP 累加；per-sample：该 step 的 rollout 数），因此在 `compute_advantages_and_returns` 里按 step 分组（与 `get_data_iterator` 同一切分）统计本地 (P, D)，在 effective-DP 组 all_reduce 求和，给每个样本权重 w_i = flag_i·D/P，loss 中加 μ·Σ_i w_i Σ_t mask·(−log π)。coef=0 时不走该路径（逐元素不变）。
+  - E. 与论文不同/论文未给出的配置清单（`yeto/rl/algos/vapo.py::DEVIATIONS`，逐项值/来源/差异）：
+    | 项 | yeto 值 | 来源 | 与论文 |
+    |---|---|---|---|
+    | critic.init | actor 主干 + 50 步阶段 W + 价值质量记录 | D5、决定 B | 不同：论文由奖励模型初始化（本栈无 RM） |
+    | 正例判定 | 显式 success 字段，缺失报错 | 决定 C | 论文只说"正确答案"，未给机制 |
+    | 正例 NLL 归一 | 除以 step 全局正例 token 数 | 式 9、决定 D | 一致；"批"取 Miles 一个 optimizer step |
+    | value_clip | 0.2 | Miles 缺省（工程基线） | 论文未给出 |
+    | KL | none（kl_coef 0） | Miles shared PPO 要求（工程基线） | 论文未给出 |
+    | advantage.lambd | 1.0（length_adaptive 下不用） | 规格填充 | 不适用 |
+    | α | 0.05 | 论文 §5.1（决定 A） | 一致；不同于 fork 缺省 1.5 |
+    | lr warmup 步数 / mini-batch 512 单位 / 每批更新次数 / 最大响应长度 | 运行配置或 Miles 缺省（1/1） | — | 论文未给出 |
+- SAO 迁移：把 `sao_streaming_runtime.py` 的 recipe 翻译为 AlgorithmSpec（sao_dis、α=1.5、γ/λ=1/1、HL-Gauss 51-bin、critic 步数=actor×num_critic_epochs），保留双 layout、双 syncer、lockstep 成对 fragment 语义。SAO 特有数学（HL-Gauss value loss、sao_dis）需从 agentenv/miles feat/sao-tbench21-e2e-validation@16a9bea409de（SAO 数学引入于 e25048edd；原写 ae475060 有误，那是 legacy MILES_COMMIT） 移植到 `yeto/ports`；该源码本地未查到，第一步是取得并核对。迁移完成前现有 SAO streaming 入口保持可用。
+
+### D8 CompactionRL（决策 5）
+- rollout 侧（yeto/agent 路径）：剩余上下文 `C−|h_t| < T_comp`（10,240）时触发；同一策略按 `<analysis>/<summary>` 9 节模板生成摘要；重建 `h̄_t = s ⊕ u_resume(S_t) ⊕ 最近 k=2 步`；每条最多 3 次压缩；摘要段与任务共享回报；每段输出 segment 元数据。尽量复用 Miles `examples/experimental/terminus-compaction` 的 rollout 代码。
+- 训练侧：PPO clip、token 级归一化（批内全部被优化 assistant token 平均）、KL=0、每提示 1 条 rollout、critic lr 3e-6、每批 2 次 critic 更新对 1 次策略更新（`critic_updates_per_step=2`）、50 步 warm-up（D5）、cross_segment GAE + length_adaptive λ（D6）。按用户决定（2026-10-07）走每段一 sample 形态：`yeto/rl/compaction.py::CompactionEpisode.samples()` 每段一个 sample（共享 reward、metadata `tokens_after`/`gae_length`），fork `--gae-variant cross_segment_per_sample` 训练；旧单 sample + segment_ids 形态拒绝（见 D6）。
+- **已确认（用户 2026-10-07）**：策略优势 = 段内局部 GAE（段尾 V=0，不跨压缩边界自举）× 论文跨段衰减 (γλ)^{N_{>s}}；length-adaptive 的 l = 整条 rollout 被优化 token 总数（同一 rollout 各段共用 λ）；α=1.5；critic 目标 = 未做跨段校正的局部 return（局部优势 + V）；rollout 侧 9 节摘要模板（yeto 草稿）与"3 次压缩用完后继续跑到上下文满再截断"。spec 值 `advantage.gae_variant=cross_segment_per_sample`（原含糊值 `cross_segment`；compactionrl 规格哈希 506b4ba4…c932 → 16fb68d5…c4f）。
+- 消融验收：关掉 cross_segment（退回 vanilla）作为对照臂；另可用显式对照模式 `compactionrl_whole_rollout_control_spec()`（`cross_segment_whole_rollout`，整条 rollout 一个 sample，前段无终局回报；机制 `features:gae_cross_segment_whole_rollout` 未声明）作为 9.5 消融臂。只在用户另批预算时跑；对照臂的 rollout 侧（`CompactionEpisode.segment_ids()` 拼成单 sample）未接线。
+- **Codex 桥接线（S13，用户已确认 2026-10-07）**：每段一个独立 session-server session；触发用"session server 精确 token 用量 + 未观测工具输出字节上界"（可偏早）。规格驱动开关：`advantage.gae_variant=cross_segment_per_sample` 时 launcher 自动给 rollout worker 设 `YETO_CODEX_COMPACTIONRL=1`（`YETO_CODEX_COMPACTIONRL_T_COMP` 可选透传），island preflight 按 Miles `--gae-variant` 核对开关；非 CompactionRL 规格开开关、或 CompactionRL 规格用不能压缩的 harness 均拒绝。对照臂 `cross_segment_whole_rollout` 在 Codex harness 上拒绝：桥的每段在各自 session、以重建上下文为条件，无法拼成该模式需要的单个 sample。
+- **摘要请求工具表（显式选择）**：摘要请求不带工具表（`tools=[]`、`tool_choice="none"`，常量 `compaction_bridge.SUMMARY_REQUEST_TOOLS/SUMMARY_REQUEST_TOOL_CHOICE`，即 stock `_sample_miles(summary=True)` 行为）。理由：摘要回合不应调用工具，且沿用 stock 采样路径、不改被 pin 的 `codex_harness_agent.py`。风险（**待 GPU 核实**）：执行回合带 Codex 工具表，摘要回合的渲染前缀（system/tools 段）不同，session server 的 TITO 前缀复用可能失效或重新分词，影响摘要段 logprob/掩码对齐；GPU 上需核对摘要段 `tito_session_mismatch` 与前缀复用情况。
+
+### D9 critic LoRA 开发计划（决策 2，首轮不实现）
+- 接口预留（首轮实现）：`critic.param_mode ∈ {full, lora}`，`lora` 下 `critic.lora_rank/alpha/target_modules`；首轮校验阶段对 `lora` 明确拒绝并提示"计划中"；receipt 与 critic layout 中写入 param_mode 与 LoRA 形状，使后续不改契约结构。
+- fork 需要改的（后续阶段）：Miles 当前在 LoRA 下跳过 critic 的 LoRA 设置（test_lora_model_branches.py:122-130）。需在 model_provider/LoRA 包装处让 critic 也挂 adapter，并决定 value head 是否全参数（开放问题，默认全参数可训练）；critic checkpoint 只存 adapter+value head；critic-only warm-up 与 offload 路径兼容 adapter。
+- yeto 需要改的：strict-avg 对 critic 只平均 adapter+value head；layout hash 区分 full/lora；checkpoint 存储与恢复按 adapter 粒度；`init=copy_actor_backbone` 下 backbone 冻结共享，可考虑与 actor 共用一份 backbone 权重（省显存，需单独评估）。
+- 验证：CPU 上 fork 单测（critic LoRA 参数数、冻结掩码、value head 可训练）；dry-run argv 快照；G1 1 卡对比 full critic 的 EV 曲线；G3 两岛 strict-avg 只平均 adapter 后哈希一致。
+- 备选：首轮直接做 LoRA critic。否决：Miles 无现成实现，先用全参数确立基线（决策 2）。
+
+## Risks / Trade-offs
+
+- [共卡 + offload_train 导致显存与时长翻倍] → G1 用 0.5B 级小模型；记录每轮时长作为后续分卡决策依据。
+- [strict-avg 平均 critic 与 value head 可能使 value 估计偏移] → G3 记录平均前后两岛 EV；明显下降时作为外层探索课题，不阻塞首轮。
+- [阶段 W 使用非 rebuild 启动，代码路径与主阶段不同] → 阶段 W 结束时校验 actor 哈希不变、critic 产物可被 rebuild 模式 `--critic-load` 加载（CPU dry-run + G1）。
+- [SAO 源码在 ae475060，本地未查到] → 迁移任务第一步取得源码，取不到则 SAO 迁移暂停，不影响其它组。
+- [CompactionRL 无官方代码，复现偏差] → 公式级参考实现对拍；超参数严格按论文；结果标注"复现，未与论文数值对齐"直到实测。
+- [fork pin 更新引入回归] → 缺省参数逐元素不变测试 + 原有 fork 测试全过才更新 pin。
+- [elastic 与 critic 不能共存] → 校验阶段明确拒绝并给出原因（决策 4）。
+
+## Migration Plan
+
+1. 字段与翻译先落地，默认 grpo 哈希与 argv 快照不变；critic 算法在 adapter 正式声明前只能经 unverified 放行在单岛使用。
+2. 每个 fork 改动经用户同意后 push 到 `yeto/ports`，更新 `MILES_NEXT_COMMIT` 与镜像；回滚 = 回退 pin 到上一提交。
+3. SAO 迁移期间旧 streaming 入口保留，新路径 G3 通过后再标记旧入口弃用（不删除，删除另议）。
+
+## Open Questions
+
+- VAPO 的具体变体参数（decoupled λ 取值、是否含 positive-example LM loss 等）在 VAPO 组开始前按论文核定，不影响结构。
+- critic LoRA 下 value head 是否全参数（默认全参数），在 D9 后续阶段 CPU 原型时定。
+- CompactionRL 的数据集与 agent 环境（Terminal-Bench 子集或其它）在该组 GPU 报批时选定。
+- critic LoRA 是否与 actor 共享冻结 backbone 以节省显存，待后续评估。

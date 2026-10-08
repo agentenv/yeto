@@ -48,7 +48,7 @@ STOCK_NONZERO_STD_FILTER = (
     "miles.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std"
 )
 # v1 (R0) vocabulary: what the flat v1 fields can express.
-SUPPORTED_ADVANTAGE_ESTIMATORS = frozenset({"grpo"})
+SUPPORTED_ADVANTAGE_ESTIMATORS = frozenset({"grpo", "ppo"})  # ppo: rl-algo-critic-family 2.2
 SUPPORTED_LOSSES = frozenset({"policy_loss"})
 SUPPORTED_FILTERS = frozenset({BOUNDED_NONZERO_STD_FILTER})
 
@@ -63,6 +63,30 @@ ADVANTAGE_ESTIMATORS = (
     "ppo",
 )
 CRITIC_ESTIMATORS = frozenset({"ppo"})
+# rl-algo-critic-family (design D1/D9): critic vocabulary. Expressible is not
+# supported -- what the pinned Miles cannot run is refused by the rejection
+# matrix (``critic_not_at_pin``) until the fork's GAE extension point (group 6).
+# CompactionRL (design D8): ``cross_segment_per_sample`` = the paper's form (one
+# sample per compaction segment, eq. 13-15); ``cross_segment_whole_rollout`` =
+# explicit control mode (one sample per rollout + per-token segment ids; earlier
+# segments see no terminal reward). The ambiguous ``cross_segment`` is refused.
+GAE_VARIANTS = ("vanilla", "decoupled", "cross_segment_per_sample", "cross_segment_whole_rollout")
+LAMBD_MODES = ("fixed", "length_adaptive")
+CRITIC_VALUE_LOSSES = ("mse", "hl_gauss")
+CRITIC_INITS = ("copy_actor_backbone", "load")
+CRITIC_PARAM_MODES = ("full", "lora")
+# Concrete values a critic spec carries when the user leaves them unset (Miles
+# c35702e defaults: --gamma/--lambd 1.0 arguments.py:1729-1730, --value-clip
+# 0.2 :1648); they enter the hash explicitly so two islands agree on them.
+CRITIC_ADVANTAGE_DEFAULTS = (
+    ("lambd", 1.0), ("lambd_mode", "fixed"), ("gae_variant", "vanilla"),
+)
+LENGTH_ADAPTIVE_ALPHA = 1.5
+DECOUPLED_CRITIC_LAMBD = 1.0  # VAPO / VC-PPO value-target lambda
+HL_GAUSS_BINS = 51
+# Execution requirements a single-island G1 smoke may allow with
+# --rl-allow-unverified-mechanism (they are not registered mechanisms).
+EXECUTION_ALLOWANCES = frozenset({"execution:critic"})
 # Estimators whose advantage drops a reward-side KL (Miles loss_hub/advantages.py).
 REWARD_KL_DROPPING_ESTIMATORS = frozenset({"grpo", "gspo"})
 # Estimators that define a sequence-level ratio: clip range must be explicit.
@@ -551,6 +575,13 @@ def mechanism_names() -> frozenset[str]:
     return frozenset(f"{m.dimension}:{m.name}" for m in registered_mechanisms())
 
 
+def allowance_names() -> frozenset[str]:
+    """Names --rl-allow-unverified-mechanism accepts: mechanisms plus
+    :data:`EXECUTION_ALLOWANCES` (``execution:critic``)."""
+
+    return mechanism_names() | EXECUTION_ALLOWANCES
+
+
 _EXTENSIONS_LOADED = False
 
 
@@ -834,6 +865,84 @@ class ExecutionSpec(_Group):
         self._normalize_ext()
 
 
+def _optional_choice(path: str, value: Any, allowed: Iterable[str]) -> str | None:
+    return None if value is None else _choice(path, value, allowed)
+
+
+@dataclass(frozen=True)
+class CriticSpec(_Group):
+    """rl-algo-critic-family D1/D9: the critic role of a critic algorithm.
+
+    Every field defaults to None ("not given"). A spec with
+    ``execution.needs_critic`` gets the concrete defaults filled in
+    (:meth:`with_defaults`), so the group enters the canonical JSON only for
+    critic algorithms; on any other algorithm a non-None field is rejected.
+    ``critic_lr=None`` on a critic spec means "inherit the actor lr" (Miles
+    arguments.py:3609-3610). ``param_mode='lora'`` and the ``lora_*`` fields
+    are the reserved D9 interface (refused in this round).
+    """
+
+    GROUP = "critic"
+    value_clip: float | None = None
+    critic_lr: float | None = None
+    critic_lr_warmup: int | None = None
+    critic_updates_per_step: int | None = None
+    value_loss: str | None = None
+    hl_gauss_bins: int | None = None
+    init: str | None = None
+    load: str | None = None
+    warmup_steps: int | None = None
+    param_mode: str | None = None
+    lora_rank: int | None = None
+    lora_alpha: float | None = None
+    lora_target_modules: tuple[str, ...] | None = None
+    ext: tuple = ()
+
+    def __post_init__(self) -> None:
+        s = object.__setattr__
+        s(self, "value_clip", _number("critic.value_clip", self.value_clip, low=0.0, low_open=True))
+        s(self, "critic_lr", _number("critic.critic_lr", self.critic_lr, low=0.0, low_open=True))
+        s(self, "lora_alpha", _number("critic.lora_alpha", self.lora_alpha, low=0.0, low_open=True))
+        s(self, "critic_lr_warmup", _integer("critic.critic_lr_warmup", self.critic_lr_warmup))
+        s(self, "critic_updates_per_step",
+          _integer("critic.critic_updates_per_step", self.critic_updates_per_step, low=1))
+        s(self, "hl_gauss_bins", _integer("critic.hl_gauss_bins", self.hl_gauss_bins, low=2))
+        s(self, "warmup_steps", _integer("critic.warmup_steps", self.warmup_steps))
+        s(self, "lora_rank", _integer("critic.lora_rank", self.lora_rank, low=1))
+        s(self, "value_loss", _optional_choice("critic.value_loss", self.value_loss,
+                                               CRITIC_VALUE_LOSSES))
+        s(self, "init", _optional_choice("critic.init", self.init, CRITIC_INITS))
+        s(self, "param_mode", _optional_choice("critic.param_mode", self.param_mode,
+                                               CRITIC_PARAM_MODES))
+        if self.load is not None and (not isinstance(self.load, str) or not self.load):
+            raise AlgorithmSpecError("critic.load must be a non-empty path string")
+        modules = self.lora_target_modules
+        if modules is not None:
+            if isinstance(modules, str) or not all(isinstance(m, str) and m for m in modules):
+                raise AlgorithmSpecError("critic.lora_target_modules must be a list of names")
+            s(self, "lora_target_modules", tuple(modules))
+        self._normalize_ext()
+
+    def with_defaults(self) -> "CriticSpec":
+        from dataclasses import replace
+
+        def pick(value, default):
+            return default if value is None else value
+
+        value_loss = pick(self.value_loss, "mse")
+        return replace(
+            self,
+            value_clip=pick(self.value_clip, 0.2),
+            critic_updates_per_step=pick(self.critic_updates_per_step, 1),
+            value_loss=value_loss,
+            hl_gauss_bins=(pick(self.hl_gauss_bins, HL_GAUSS_BINS)
+                           if value_loss == "hl_gauss" else self.hl_gauss_bins),
+            init=pick(self.init, "load" if self.load is not None else "copy_actor_backbone"),
+            warmup_steps=pick(self.warmup_steps, 0),
+            param_mode=pick(self.param_mode, "full"),
+        )
+
+
 _GROUPS: dict[str, type] = {
     "advantage": AdvantageSpec,
     "loss": LossSpec,
@@ -841,7 +950,46 @@ _GROUPS: dict[str, type] = {
     "correction": CorrectionSpec,
     "sampling": SamplingSpec,
     "execution": ExecutionSpec,
+    "critic": CriticSpec,
 }
+
+
+def _critic_unit(path: str, value: Any) -> float | None:
+    value = _number(path, value, low=0.0)
+    if value is not None and value > 1.0:
+        raise AlgorithmSpecError(f"{path} must be in [0, 1], got {value!r}")
+    return value
+
+
+def _critic_alpha(path: str, value: Any) -> float | None:
+    return _number(path, value, low=0.0, low_open=True)
+
+
+# rl-algo-critic-family D1: advantage-side critic fields (registered extension
+# fields: absent from the canonical JSON while None, i.e. on every non-critic
+# spec; a critic spec fills CRITIC_ADVANTAGE_DEFAULTS).
+register_field("advantage", "lambd", default=None, parse=_critic_unit)
+register_field("advantage", "lambd_mode", default=None,
+               parse=lambda path, v: _optional_choice(path, v, LAMBD_MODES))
+register_field("advantage", "alpha", default=None, parse=_critic_alpha)
+def _gae_variant(path: str, value: Any) -> str | None:
+    if value == "cross_segment":
+        raise AlgorithmSpecError(
+            f"{path}='cross_segment' is ambiguous and no longer accepted: use "
+            "'cross_segment_per_sample' (CompactionRL eq. 13-15, one sample per segment) or "
+            "'cross_segment_whole_rollout' (control/ablation mode, one sample per rollout)")
+    return _optional_choice(path, value, GAE_VARIANTS)
+
+
+register_field("advantage", "gae_variant", default=None, parse=_gae_variant)
+# VAPO decoupled GAE (change 7.2): lambda of the critic's value target; the
+# policy advantage keeps ``lambd`` / ``lambd_mode``. Filled (1.0) only when
+# gae_variant='decoupled'.
+register_field("advantage", "critic_lambd", default=None, parse=_critic_unit)
+# ``advantage.gamma`` is shared with REINFORCE++ and owned by
+# ``yeto.rl.algos.seq_adv`` (default 1.0, not emitted); a critic spec uses it.
+CRITIC_ADVANTAGE_FIELDS = ("lambd", "lambd_mode", "alpha", "gae_variant", "critic_lambd")
+
 _V1_FIELDS = (
     "advantage_estimator",
     "loss",
@@ -873,6 +1021,7 @@ class AlgorithmSpec:
     execution: ExecutionSpec = field(default_factory=ExecutionSpec)
     entropy_coef: float = 0.0
     plugins: tuple[PluginRef, ...] = ()
+    critic: CriticSpec = field(default_factory=CriticSpec)
 
     def __init__(
         self,
@@ -884,6 +1033,7 @@ class AlgorithmSpec:
         execution: ExecutionSpec | Mapping | None = None,
         entropy_coef: float = 0.0,
         plugins: Iterable[PluginRef | Mapping] = (),
+        critic: CriticSpec | Mapping | None = None,
         *,
         advantage_estimator: str | None = None,
         kl_coef: float | None = None,
@@ -903,6 +1053,10 @@ class AlgorithmSpec:
                     "advantage_estimator; other estimators use advantage.estimator)"
                 )
             advantage = AdvantageSpec(estimator=advantage_estimator)
+            if advantage_estimator in CRITIC_ESTIMATORS and execution is None:
+                # v1 ppo (rl-algo-critic-family 2.2): Miles derives use_critic
+                # from the estimator (arguments.py:3591); the spec says it.
+                execution = ExecutionSpec(needs_critic=True)
         if v1_loss is not None:
             if v1_loss not in SUPPORTED_LOSSES:
                 raise AlgorithmSpecError(
@@ -941,7 +1095,7 @@ class AlgorithmSpec:
         # ---- v2 groups ------------------------------------------------------
         for name, value in (
             ("advantage", advantage), ("loss", loss), ("kl", kl), ("correction", correction),
-            ("sampling", sampling), ("execution", execution),
+            ("sampling", sampling), ("execution", execution), ("critic", critic),
         ):
             group = _GROUPS[name]
             if value is None:
@@ -958,6 +1112,21 @@ class AlgorithmSpec:
         if len({r.path for r in refs}) != len(refs):
             raise AlgorithmSpecError("plugins lists the same path twice")
         s(self, "plugins", tuple(sorted(refs, key=lambda r: r.path)))
+        if self.execution.needs_critic:
+            load_extensions()  # advantage.gamma is an extension field (seq_adv)
+            # rl-algo-critic-family D1: critic fields enter the identity only
+            # for critic algorithms, always with explicit values.
+            filled = {name: default for name, default in CRITIC_ADVANTAGE_DEFAULTS
+                      if getattr(self.advantage, name) is None}
+            mode = filled.get("lambd_mode", self.advantage.lambd_mode)
+            if mode == "length_adaptive" and self.advantage.alpha is None:
+                filled["alpha"] = LENGTH_ADAPTIVE_ALPHA
+            variant = filled.get("gae_variant", self.advantage.gae_variant)
+            if variant == "decoupled" and self.advantage.critic_lambd is None:
+                filled["critic_lambd"] = DECOUPLED_CRITIC_LAMBD
+            if filled:
+                s(self, "advantage", self.advantage.with_ext(**filled))
+            s(self, "critic", self.critic.with_defaults())
 
     # -- v1 compatible accessors ------------------------------------------
     @property
@@ -991,6 +1160,7 @@ class AlgorithmSpec:
             )
             and (self.sampling.filter is None or self.sampling.filter in SUPPORTED_FILTERS)
             and self.execution.is_default()
+            and self.critic.is_default()
             and self.entropy_coef == 0.0
             and not self.plugins
         )
@@ -1012,7 +1182,12 @@ class AlgorithmSpec:
 
         return {
             "schema": ALGORITHM_SPEC_SCHEMA_V2,
-            **{name: getattr(self, name).to_dict() for name in _GROUPS},
+            **{name: getattr(self, name).to_dict() for name in _GROUPS if name != "critic"},
+            # rl-algo-critic-family D1: absent unless the algorithm has a critic
+            # (or a stray critic field the rejection matrix will refuse), so
+            # every pre-existing v2 hash is unchanged.
+            **({"critic": self.critic.to_dict()}
+               if self.execution.needs_critic or not self.critic.is_default() else {}),
             "entropy_coef": self.entropy_coef,
             "plugins": [p.to_dict() for p in self.plugins],
         }
@@ -1034,6 +1209,18 @@ class AlgorithmSpec:
         if tail in core:
             return core[tail]
         return _FIELDS[head][tail].default
+
+    def effective_default_at(self, path: str) -> Any:
+        """:meth:`default_at`, except the critic defaults a critic spec fills in
+        (rl-algo-critic-family D1): a filled value is not a user choice."""
+
+        if self.execution.needs_critic:
+            head, _, tail = path.partition(".")
+            filled = AlgorithmSpec(advantage={"estimator": self.advantage.estimator},
+                                   execution={"needs_critic": True})
+            if head == "critic" or (head == "advantage" and tail in CRITIC_ADVANTAGE_FIELDS):
+                return filled.get_path(path)
+        return self.default_at(path)
 
     def canonical_json(self) -> str:
         return json.dumps(
@@ -1364,8 +1551,115 @@ def _reject_critic(s: AlgorithmSpec) -> str | None:
     if s.advantage.estimator in CRITIC_ESTIMATORS and not s.execution.needs_critic:
         return (
             f"advantage estimator {s.advantage.estimator!r} needs a critic; set "
-            "execution.needs_critic=true (only the legacy engine drives a critic: "
-            "--rl-engine legacy)"
+            "execution.needs_critic=true"
+        )
+    if s.execution.needs_critic and s.advantage.estimator not in CRITIC_ESTIMATORS:
+        return (
+            f"execution.needs_critic=true but advantage estimator {s.advantage.estimator!r} "
+            f"trains no critic (critic estimators: {sorted(CRITIC_ESTIMATORS)})"
+        )
+    return None
+
+
+_CRITIC_CORE_FIELDS = tuple(f.name for f in fields(CriticSpec) if f.name != "ext")
+
+
+def _reject_critic_fields_without_critic(s: AlgorithmSpec) -> str | None:
+    if s.execution.needs_critic:
+        return None
+    stray = [f"advantage.{n}" for n in CRITIC_ADVANTAGE_FIELDS
+             if getattr(s.advantage, n) is not None]
+    stray += [f"critic.{n}" for n in _CRITIC_CORE_FIELDS if getattr(s.critic, n) is not None]
+    stray += [f"critic.{n}" for n, _ in s.critic.ext]
+    if stray:
+        return (
+            f"{stray} only apply to critic algorithms (advantage.estimator in "
+            f"{sorted(CRITIC_ESTIMATORS)} with execution.needs_critic=true); this spec uses "
+            f"advantage.estimator={s.advantage.estimator!r} without a critic. Drop them"
+        )
+    return None
+
+
+def _reject_critic_reward_kl(s: AlgorithmSpec) -> str | None:
+    # Miles c35702e arguments.py:3598-3603 asserts kl_coef == 0 for shared PPO.
+    if s.execution.needs_critic and s.kl.placement == "reward" and s.kl.coef:
+        return (
+            f"kl.placement='reward' with kl.coef={s.kl.coef} and a critic: Miles shared "
+            "actor/critic PPO trains the critic before the actor without ref log probs, so "
+            "its value targets would exclude the reward KL; use kl.coef=0 or "
+            "kl.placement='loss' (--use-kl-loss)"
+        )
+    return None
+
+
+def _reject_critic_lora(s: AlgorithmSpec) -> str | None:
+    c = s.critic
+    if c.param_mode == "lora":
+        return (
+            "critic.param_mode='lora' is planned (rl-algo-critic-family design D9) but not "
+            "implemented yet: Miles trains the critic full-parameter (it skips the critic's "
+            "LoRA setup). Use critic.param_mode='full'"
+        )
+    stray = [f"critic.{n}" for n in ("lora_rank", "lora_alpha", "lora_target_modules")
+             if getattr(c, n) is not None]
+    if stray:
+        return f"{stray} only apply to critic.param_mode='lora'; drop them"
+    return None
+
+
+def _reject_critic_not_at_pin(s: AlgorithmSpec) -> str | None:
+    if not s.execution.needs_critic:
+        return None
+    a, c = s.advantage, s.critic
+    pending = []
+    # decoupled / length_adaptive / cross_segment_* run on the fork's --gae-variant /
+    # --gae-lambd-mode (yeto-gae-variant ce96fc060, change 6.2). cross_segment_* and
+    # critic_updates_per_step != 1 (CompactionRL, change 9.3) are translated but stay
+    # undeclared mechanisms (features:gae_cross_segment / critic_multi_update) until
+    # GPU G1 (9.4). --critic-updates-per-step (= --num-critic-epochs) and the
+    # classification value loss are in the critic fork pin (algos/critic_fork.py,
+    # yeto-critic-family e07e51c07). hl_gauss is translated only by the SAO fork
+    # argv (sao.sao_fork_argv), so it stays refused without policy_objective=sao_dis.
+    from yeto.rl.algos.critic_fork import fork_carries_critic_family
+
+    if c.value_loss != "mse" and not (
+        fork_carries_critic_family()
+        and getattr(s.loss, "policy_objective", None) == "sao_dis"
+    ):
+        pending.append(f"critic.value_loss={c.value_loss!r}")
+    if pending:
+        return (
+            f"{pending} need the fork's value-loss extension point; the critic fork pin "
+            "translates it only with loss.policy_objective='sao_dis' (SAO); use the "
+            "vanilla PPO defaults"
+        )
+    stray = []
+    if a.alpha is not None and a.lambd_mode != "length_adaptive":
+        stray.append("advantage.alpha (only with lambd_mode='length_adaptive')")
+    if a.critic_lambd is not None and a.gae_variant != "decoupled":
+        stray.append("advantage.critic_lambd (only with gae_variant='decoupled')")
+    if c.hl_gauss_bins is not None and c.value_loss != "hl_gauss":
+        stray.append("critic.hl_gauss_bins (only with value_loss='hl_gauss')")
+    if stray:
+        return f"{stray}: drop them"
+    return None
+
+
+def _reject_critic_init(s: AlgorithmSpec) -> str | None:
+    c = s.critic
+    if not s.execution.needs_critic:
+        return None
+    if c.init == "load" and c.load is None:
+        return "critic.init='load' needs critic.load (the critic checkpoint)"
+    if c.init == "copy_actor_backbone" and c.load is not None:
+        return (
+            "critic.load is set but critic.init='copy_actor_backbone' builds the critic "
+            "from the initial actor; use critic.init='load' to load a critic checkpoint"
+        )
+    if c.init == "load" and c.warmup_steps:
+        return (
+            "critic.warmup_steps > 0 is the warm-up of a critic copied from the actor "
+            "(critic.init='copy_actor_backbone', design D5); a loaded critic is not warmed up"
         )
     return None
 
@@ -1411,6 +1705,11 @@ def _builtin_rejections() -> None:
     register_rejection("sequence_ratio_without_clip", _reject_sequence_ratio_without_clip)
     register_rejection("binary_reward_required", _reject_binary_reward)
     register_rejection("critic_estimator", _reject_critic)
+    register_rejection("critic_fields_without_critic", _reject_critic_fields_without_critic)
+    register_rejection("critic_reward_kl", _reject_critic_reward_kl)
+    register_rejection("critic_param_mode", _reject_critic_lora)
+    register_rejection("critic_not_at_pin", _reject_critic_not_at_pin)
+    register_rejection("critic_init", _reject_critic_init)
     register_rejection("policy_staleness", _reject_staleness)
     register_rejection("kl_loss_zero_coef", _reject_kl_loss_zero)
     register_rejection("rpp_requires_whiten", _reject_rpp_without_whiten)
@@ -1468,10 +1767,36 @@ def resolve_ports_algorithm(args: Any, *, rl_engine: str) -> "AlgorithmSpec | No
     return spec
 
 
+# rl-algo-critic-family (user decision 2026-10-07): the critic mechanisms may be
+# allowed (still explicitly, via --rl-allow-unverified-mechanism) on several
+# islands / with outer sync, but only under the strict-avg preset, whose
+# critic channel is the second syncer (DualStrictAvgSync, design D4).
+# decoupled + critic stays refused (critic_run_problems). Every other
+# unverified mechanism keeps D11 as written.
+CRITIC_STRICT_AVG_ALLOWANCES = frozenset({
+    "advantage_estimators:ppo",
+    "execution:critic",
+    "features:critic_multi_update",
+    "features:gae_length_adaptive",
+    "features:gae_decoupled",
+    "features:gae_cross_segment",
+    "features:positive_example_lm_loss",
+    "features:value_hl_gauss",
+    "features:sao_dis",
+})
+
+
 def check_unverified_allowance(
-    names: Iterable[str], *, islands: int, outer_sync: bool
+    names: Iterable[str], *, islands: int, outer_sync: bool,
+    sync_preset: str | None = None,
 ) -> tuple[str, ...]:
     """D11 as written: refused with multiple islands *or* any outer sync.
+
+    Exception (critic family, design D4): when ``sync_preset == "strict-avg"``
+    and every name is in :data:`CRITIC_STRICT_AVG_ALLOWANCES` (with
+    ``execution:critic`` among them), the allowance is accepted on several
+    islands / with outer sync. ``sync_preset=None`` (caller does not know the
+    preset) keeps D11 as written.
 
     Names are qualified ``dimension:name`` mechanisms.
     """
@@ -1479,13 +1804,16 @@ def check_unverified_allowance(
     names = tuple(sorted(set(names)))
     if not names:
         return ()
-    unknown = sorted(set(names) - mechanism_names())
+    unknown = sorted(set(names) - allowance_names())
     if unknown:
         raise AlgorithmSpecError(
             f"--rl-allow-unverified-mechanism: unknown mechanism(s) {unknown} "
-            f"(known: {sorted(mechanism_names())})"
+            f"(known: {sorted(allowance_names())})"
         )
     if islands != 1 or outer_sync:
+        if (sync_preset == "strict-avg" and "execution:critic" in names
+                and set(names) <= CRITIC_STRICT_AVG_ALLOWANCES):
+            return names
         raise AlgorithmSpecError(
             f"--rl-allow-unverified-mechanism {list(names)} is only allowed on a "
             f"single-island run without outer sync (this run: {islands} island(s), "

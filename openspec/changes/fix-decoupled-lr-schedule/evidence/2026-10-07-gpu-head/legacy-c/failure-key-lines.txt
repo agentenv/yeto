@@ -1,0 +1,11 @@
+56:2026-10-07T13:56:35Z [36m(yeto-head-job, pid=2854)[0m [s14-dlr-legacy-20261007c-l0-modal] [modal-island 0] requested H100!:1, got ['NVIDIA H100 80GB HBM3']
+77:2026-10-07T13:56:44Z [36m(yeto-head-job, pid=2854)[0m [s14-dlr-legacy-20261007c-l1-modal] [modal-island 1] requested H100!:1, got ['NVIDIA H100 80GB HBM3']
+302:2026-10-07T13:59:14Z [36m(yeto-head-job, pid=2854)[0m [s14-dlr-legacy-20261007c-l0-modal] from megatron.training.tokenizer.tokenizer import _vocab_size_with_padding
+304:2026-10-07T13:59:14Z [36m(yeto-head-job, pid=2854)[0m [s14-dlr-legacy-20261007c-l0-modal] ModuleNotFoundError
+306:2026-10-07T13:59:14Z [36m(yeto-head-job, pid=2854)[0m [s14-dlr-legacy-20261007c-l0-modal] No module named 'megatron.training.tokenizer'
+325:2026-10-07T13:59:30Z [36m(yeto-head-job, pid=2854)[0m [launcher] s14-dlr-legacy-20261007c-l0-modal: job ended as FAILED; starting recovery (timeout 1800s)
+456:2026-10-07T13:59:48Z [36m(yeto-head-job, pid=2854)[0m [s14-dlr-legacy-20261007c-l1-modal] from megatron.training.tokenizer.tokenizer import _vocab_size_with_padding
+458:2026-10-07T13:59:48Z [36m(yeto-head-job, pid=2854)[0m [s14-dlr-legacy-20261007c-l1-modal] ModuleNotFoundError
+460:2026-10-07T13:59:48Z [36m(yeto-head-job, pid=2854)[0m [s14-dlr-legacy-20261007c-l1-modal] No module named 'megatron.training.tokenizer'
+462:2026-10-07T14:00:00Z [36m(yeto-head-job, pid=2854)[0m [launcher] s14-dlr-legacy-20261007c-l0-modal recovered: relaunched as job fc-01M4BAK0XAPD5CQFB92R7P7NX1
+465:2026-10-07T14:00:01Z [36m(yeto-head-job, pid=2854)[0m [s14-dlr-legacy-20261007c-l0-modal] [modal-island 0] requested H100!:1, got ['NVIDIA H100 80GB HBM3']

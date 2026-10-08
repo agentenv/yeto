@@ -31,6 +31,16 @@ def meta_from_task(task: Any) -> dict:
     """cloud/region/gpu/gpus of a sky Task (defensive: any shape -> partial dict)."""
     meta: dict[str, Any] = {"cloud": None, "region": None, "gpu": None, "gpus": None}
     try:
+        # Modal islands are not sky Tasks: the launcher keeps a ModalIslandConfig
+        # (gpu "H100!" = exact, no upgrade; gpus_per_node x num_nodes).
+        if getattr(task, "resources", None) is None and isinstance(getattr(task, "gpu", None), str) \
+                and isinstance(getattr(task, "gpus_per_node", None), int):
+            nodes = getattr(task, "num_nodes", 1)
+            meta["cloud"] = "modal"
+            meta["region"] = getattr(task, "region", None)
+            meta["gpu"] = task.gpu.rstrip("!")
+            meta["gpus"] = task.gpus_per_node * (nodes if isinstance(nodes, int) and nodes > 0 else 1)
+            return meta
         resources = getattr(task, "resources", None)
         if resources is None:
             return meta

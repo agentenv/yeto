@@ -1,0 +1,49 @@
+{
+ "case": "gae-la",
+ "ev_by_round": [
+  -31.69805335998535,
+  -48.857696533203125
+ ],
+ "gpu": [
+  "[s13-forkg1-gae-la-20261007b-l0-modal] [modal-island 0] requested H100!:1, got ['NVIDIA H100 80GB HBM3']"
+ ],
+ "missing": [],
+ "notes": [],
+ "overlay_applied": [
+  "[yeto-setup] miles overlay applied: image miles c35702e + overlay 7cbc0a42c4880931f2dc1b2285b49907f7c67295d15774c0b885ddd50c6f766c (= fork 6e7365b602ecf5d83d16169e87f4d78f4daf5f86, not pushed; image manifest no longer matches the code)"
+ ],
+ "problems": [],
+ "rounds": [
+  {
+   "critic_init_sha256": null,
+   "explained_variance": -31.69805335998535,
+   "extra_metrics": {
+    "critic/value_clipfrac": 0.0,
+    "critic/value_loss": 15.665450096130371,
+    "entropy_loss": 0.0,
+    "pg_clipfrac": 0.0
+   },
+   "grad_norm": 2.1787798404693604,
+   "pg_loss": -2.657865047454834,
+   "rollout_id": 0,
+   "value_loss": 15.665450096130371
+  },
+  {
+   "critic_init_sha256": null,
+   "explained_variance": -48.857696533203125,
+   "extra_metrics": {
+    "critic/value_clipfrac": 0.0,
+    "critic/value_loss": 12.962499618530273,
+    "entropy_loss": 0.0,
+    "pg_clipfrac": 0.0
+   },
+   "grad_norm": 2.078035831451416,
+   "pg_loss": -2.1958820819854736,
+   "rollout_id": 1,
+   "value_loss": 12.962499618530273
+  }
+ ],
+ "tape": "/home/michael/work/s1-runs/s13-forkg1-gae-la-20261007b/tape-direct/yeto-s13-forkg1-gae-la-20261007b/l0/rank0/rl-island-0.jsonl",
+ "verdict": "PASS",
+ "warmup_product": null
+}
