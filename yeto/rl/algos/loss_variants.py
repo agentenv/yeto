@@ -87,6 +87,9 @@ FORK_COMMITS: frozenset[str] = frozenset({
     # c35702e = ab904f43a + fork-a27-worker-loss 857fc9592 (A27-2: actor/cell/group/
     # updater/worker_handle external-failure handling); still no loss_hub file.
     "c35702eefcf2862cee155e46870e6ad30568d2c6",
+    # 8bc52237a = c35702e + s16-raw-lora-disagg (weight_update/protocols/broadcast.py placement +
+    # megatron_utils/actor.py guard + update_weight/hf_weight_iterator.py comment): no loss path.
+    "8bc52237a1102306abd8f89a2ea2090aa2df6850",
 })
 
 MECHANISMS = {name: ("losses", name) for name in VARIANTS}

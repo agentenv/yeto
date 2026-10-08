@@ -107,3 +107,7 @@
 - [x] 4.1 `docs/MILES_RL.md` 增加"多节点岛"一节（拓扑图、cfg 示例、约束、故障域）。
   - 完成记录（2026-10-01）：`docs/MILES_RL.md` 新增 "Multi-node islands" 一节（拓扑与放置规则、cfg 示例、节点故障域与运维要点、逐节点回收确认）。
 - [x] 4.2（2026-10-04 收尾段已写）progress.md 收尾：分支/HEAD/未提交/测试命令结果/证据路径/费用/待批准。
+- [x] 4.3（S16 方案 A，2026-10-08 补登记）训练与推理分节点放置时 LoRA 走 raw 模式的 Miles 改动与 yeto 镜像钉。
+  - Miles：agentenv/miles 分支 `s16-raw-lora-disagg` @ 8bc52237a（= c35702e + 1 个提交 "broadcast LoRA: gather the adapter across PP onto one sender; allow raw mode for distributed LoRA"）：broadcast 传输在开 LoRA 时要求 PP 聚合、由 PP0 单个发送方整份发出；`megatron_utils/actor.py` 对非同卡 LoRA 放行 `--megatron-to-hf-mode raw`。原因与备选方案见 infra-drafts/MILES-RAW-LORA-DISAGG-S16.md（§1 断言原因、§4 方案 A）。
+  - yeto：`MILES_NEXT_COMMIT` 改钉 8bc52237a，加入损失路径白名单（该提交不碰损失计算）；默认镜像改为 `ghcr.io/michaellchung/yeto-miles-ports:8bc5223-4e4148f`（sha256:4aeafd77…，公开；agentenv 下同摘要副本为私有）；构建记录 `openspec/changes/rl-engine-ports/evidence/ports-image/2026-10-08-s16-rawlora/`。
+  - 真机证据：`s16-rawlora-fn2x8-long-20261008a`（Modal 2×8 H200，节点 0 训练 TP2 PP4 EP2、节点 1 SGLang TP8）5 轮 v0→v4 跨容器发布全部成功、逐张量校验和通过；见 infra-drafts/FN2X8-MODAL-PRELAUNCH-REVIEW.md §9。未验证：v5（停机等待 300 s 短于发布约 420 s）。

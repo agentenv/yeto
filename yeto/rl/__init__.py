@@ -40,7 +40,9 @@ MILES_NEXT_UPSTREAM_COMMIT = "9e4260de047a704208535c0e90c531929879ab40"
 # rendezvous --update-weight-group-timeout-s; A27-2 ExternalFailureError /
 # RolloutEngineJoinError: an engine-side failure no longer kills the trainer]
 # on yeto/ports e3a11ab38).
-MILES_NEXT_COMMIT = "c35702eefcf2862cee155e46870e6ad30568d2c6"
+# s16-raw-lora-disagg (8bc52237a = c35702e + broadcast LoRA gathers the adapter across PP onto one sender,
+# actor allows --megatron-to-hf-mode raw for non-colocated LoRA; MILES-RAW-LORA-DISAGG-S16.md plan A).
+MILES_NEXT_COMMIT = "8bc52237a1102306abd8f89a2ea2090aa2df6850"
 # sgl-project/sglang ``sglang-miles`` head when radixark/miles@9e4260d was
 # committed (upstream's Dockerfile follows that branch unpinned).
 SGLANG_NEXT_REPOSITORY = "https://github.com/michaellchung/sglang"
@@ -65,10 +67,10 @@ MILES_NEXT_BASE_IMAGE = (
 # every SHA.  PUBLIC on ghcr.io/michaellchung since 2026-10-07 (anonymous
 # pull); a private image needs SKYPILOT_DOCKER_{USERNAME,PASSWORD,SERVER} or
 # --rl-image-private (yeto.launcher.registry_login_for; read:packages token).
-# Tag c35702e-4e4148f; linux/amd64 only.
+# Tag 8bc5223-4e4148f; ghcr.io/michaellchung (public; same digest also at ghcr.io/agentenv, private); linux/amd64 only.
 MILES_NEXT_IMAGE = (
     "docker:ghcr.io/michaellchung/yeto-miles-ports@sha256:"
-    "37ac689e29caeecf9faf8587a3ad58c154ecffc7798711d5bd59d792d002b9f9"
+    "4aeafd7789dbcc02d71f0068c449477e8ab5f6d5bdb037d6d34e8fbf12a5b039"
 )
 MILES_NEXT_IMAGE_MANIFEST = "/opt/yeto/image-manifest.json"
 # Nebius VM images whose /var/lib/docker already holds a docker image's

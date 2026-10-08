@@ -45,7 +45,7 @@ def login(monkeypatch):
 def test_ports_image_is_the_private_digest_pinned_fork_image():
     assert rl.default_rl_image("ports") == rl.MILES_NEXT_IMAGE
     assert re.fullmatch(
-        r"docker:ghcr\.io/michaellchung/yeto-miles-ports@sha256:[0-9a-f]{64}",
+        r"docker:ghcr\.io/(michaellchung|agentenv)/yeto-miles-ports@sha256:[0-9a-f]{64}",
         rl.MILES_NEXT_IMAGE,
     )
     assert rl.MILES_NEXT_BASE_IMAGE.startswith("docker:docker.io/radixark/miles@sha256:")
@@ -78,7 +78,7 @@ def test_build_inputs_match_the_pins():
 def test_commits_and_digest_are_pinned_together_with_the_build_record():
     """Commit pins, tag, Dockerfile ARGs and the image digest move together:
     the latest build record must name exactly the pinned commits and digest."""
-    record_dir = REPO / "openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-02-m3a27b"
+    record_dir = REPO / "openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-08-s16-rawlora"
     record = json.loads((record_dir / "build-record.json").read_text())
     assert record["miles_commit"] == rl.MILES_NEXT_COMMIT
     assert record["sglang_commit"] == rl.SGLANG_NEXT_COMMIT
