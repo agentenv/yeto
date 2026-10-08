@@ -360,6 +360,7 @@ EXPECTED_MILES_DECLARED = {
     "corrections:mismatch_observe",
     "corrections:icepop",
     "corrections:mis_mask",
+    "corrections:mis",
     "features:eps_clip",
     "features:no_grpo_std_normalization",
     "loss_aggregations:token",
