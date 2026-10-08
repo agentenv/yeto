@@ -36,25 +36,30 @@ def main(argv=None):
     if cfg not in configs:
         rows.append({"request_id": None, "fail": [f"initial config {cfg} not in resources"]}); ok_all = False
     for t in trig:
-        req, body = t[2], t[3]
-        tgt = body.get("target")
+        req, body = t[2], t[3]; verb = t[4] if len(t) > 4 else "request"
+        tgt = body.get("target") if verb == "request" else cfg
         fails = []
+        if verb not in ("request", "rebuild"):
+            fails.append(f"unknown verb {verb}")
+        if verb == "rebuild" and body.get("kind") != "trainer-rebuild":
+            fails.append("rebuild body needs kind=trainer-rebuild")
         if body.get("expected_config_epoch") != epoch:
             fails.append(f"epoch chain: expected_config_epoch {body.get('expected_config_epoch')} != {epoch}")
         if budget is not None and float(body.get("deadline_s", 0)) > budget:
             fails.append(f"deadline {body.get('deadline_s')} s > pause budget {budget} s")
         if tgt not in configs:
             fails.append(f"target {tgt} not in resources configs {sorted(configs)}")
-        if (cfg, tgt) not in declared:
-            fails.append(f"edge {cfg}->{tgt} not declared in resources")
-        if att is None:
-            fails.append("no --rl-elastic-attestation: every transition is refused")
-        elif (cfg, tgt) not in attested:
-            fails.append(f"edge {cfg}->{tgt} not certified by the attestation")
+        if verb == "request":  # a same-shape trainer rebuild is not an edge and needs no attestation
+            if (cfg, tgt) not in declared:
+                fails.append(f"edge {cfg}->{tgt} not declared in resources")
+            if att is None:
+                fails.append("no --rl-elastic-attestation: every transition is refused")
+            elif (cfg, tgt) not in attested:
+                fails.append(f"edge {cfg}->{tgt} not certified by the attestation")
         rows.append({"request_id": req, "trigger": t[:2], "from": cfg, "to": tgt, "epoch": epoch,
                      "deadline_s": body.get("deadline_s"), "budget_s": budget, "fail": fails})
         ok_all &= not fails
-        if req not in refused:
+        if req not in refused and verb == "request":
             cfg, epoch = tgt, epoch + 1
     out = {"ok": ok_all, "budget_s": budget, "fingerprint": (att or {}).get("runtime_fingerprint"), "requests": rows}
     for r in rows:
