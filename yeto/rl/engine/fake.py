@@ -72,7 +72,7 @@ def fake_capabilities(**overrides) -> EngineCapabilities:
         ),
         # Recorded transport names as the Miles adapter declares them, so fake
         # tapes keep the pre-decoupling labels (decoupling 2.6).
-        traits=BackendTraits(weight_transport_names=FAKE_WEIGHT_TRANSPORTS),
+        traits=BackendTraits(weight_transport_names=FAKE_WEIGHT_TRANSPORTS, publish_while_offloaded=True),
     )
     values.update(overrides)
     # rl-algo-grpo-knobs 8.3: the fake declares what the Miles adapter declares for

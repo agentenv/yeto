@@ -106,6 +106,9 @@ class RolloutBatchHandle:
     # aborted in flight; None = unknown (see rollout_meta_hook.submitted_groups).
     submitted_groups: int | None = None
     aborted_in_flight_groups: int | None = None
+    # Engine mechanism that aborted them, recorded in the ledger's
+    # ``engine_discarded`` entry (adapter-supplied, decoupling 2.7/E18).
+    abort_mechanism: str | None = field(default=None, compare=False)
     # rl-infra-spec 4.2 CutContext.data: the rollout data source position
     # after this rollout drew its prompts ({sample_offset, epoch_id,
     # sample_group_index, sample_index}) and its reuse-buffer length (0 on the

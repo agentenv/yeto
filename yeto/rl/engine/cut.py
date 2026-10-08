@@ -7,11 +7,13 @@ A cut is a directory written once and then only read::
 
 A cut without ``manifest.json`` does not exist. The manifest lists every
 file with its size and sha256, the progress counters, the algorithm
-identity (alignment A3), the data cursor and the ledger summary. It is
-separate from Miles' default checkpoint path (``--save``/``--load`` stay
-unused by the ports engine; its ``--no-save-optim/--no-load-optim/
---no-save-rng/--no-load-rng`` flags are untouched): the cut is saved and
-restored only through explicit port verbs.
+identity (alignment A3), the data cursor and the ledger summary, plus an
+optional ``backend_state`` section for state only one backend understands
+(written only when non-empty, so manifests without it keep their bytes;
+decoupling 2.7/E17). It is separate from the backend's own checkpoint path
+(Miles: ``--save``/``--load`` stay unused by the ports engine; its
+``--no-save-optim/--no-load-optim/--no-save-rng/--no-load-rng`` flags are
+untouched): the cut is saved and restored only through explicit port verbs.
 
 :func:`verify_cut` rejects a missing/truncated/corrupted file, a manifest
 whose own hash does not match, missing required state, progress counters
@@ -167,7 +169,7 @@ class CutProgress:
     """Counters that must agree (4.2: step mismatch is refused)."""
 
     local_step: int  # optimizer steps applied by this island
-    scheduler_samples: int  # Megatron opt_param_scheduler.num_steps (in samples)
+    scheduler_samples: int  # trainer LR-scheduler progress in samples (Megatron opt_param_scheduler.num_steps)
     global_batch_size: int
     next_rollout_id: int
     policy_version: int
@@ -203,12 +205,14 @@ class CutManifest:
     runtime: Mapping[str, Any]  # backend fingerprint, layout, precision, rng policy
     progress: CutProgress
     algorithm: AlgorithmIdentity
-    data: Mapping[str, Any]  # rollout data cursor (Miles RolloutDataSource state)
+    data: Mapping[str, Any]  # rollout data cursor (the backend data source position)
     ledger: Mapping[str, Any]  # 3.6 summary: carried_over, ready_unconsumed, counts
     outer: Mapping[str, Any]  # outer protocol position; settled must be True (D5)
     files: tuple[CutFile, ...]
     rank_summaries: tuple[Mapping[str, Any], ...] = ()
     schema: str = CUT_SCHEMA
+    # Backend-private state (decoupling 2.7/E17); serialized only when non-empty.
+    backend_state: Mapping[str, Any] = field(default_factory=dict)
 
     def body(self) -> dict[str, Any]:
         return {
@@ -223,6 +227,7 @@ class CutManifest:
             "outer": _jsonable(self.outer),
             "files": [f.to_dict() for f in sorted(self.files, key=lambda f: f.path)],
             "rank_summaries": [_jsonable(s) for s in self.rank_summaries],
+            **({"backend_state": _jsonable(self.backend_state)} if self.backend_state else {}),
         }
 
     def digest(self) -> str:
@@ -254,6 +259,7 @@ class CutManifest:
                 outer=raw["outer"],
                 files=tuple(CutFile.from_dict(f) for f in raw["files"]),
                 rank_summaries=tuple(raw.get("rank_summaries") or ()),
+                backend_state=raw.get("backend_state") or {},
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise CutError(f"malformed cut manifest: {exc}") from exc
@@ -308,11 +314,11 @@ def context_problems(
         if not isinstance(data.get(key), int):
             out.append(f"data: cursor field {key!r} missing")
     if data.get("buffer_length") not in (None, 0):
-        out.append(f"data: Miles data buffer holds {data.get('buffer_length')} groups (not carried by a cut)")
+        out.append(f"data: engine data buffer holds {data.get('buffer_length')} groups (not carried by a cut)")
     if ledger.get("carried_over") != 0:
-        # 4.1 audit: on the ports path Miles returns no reusable leftover
-        # (partial rollout refused, surplus groups dropped, buffer not saved).
-        out.append(f"ledger: carried_over must be 0 on the Miles ports path, got {ledger.get('carried_over')!r}")
+        # 4.1 audit: a first-version cut carries no reusable leftover (Miles ports
+        # path: partial rollout refused, surplus groups dropped, buffer not saved).
+        out.append(f"ledger: carried_over must be 0 for a first-version cut, got {ledger.get('carried_over')!r}")
     if ledger.get("ready_unconsumed") != 0:
         out.append("ledger: first-version cut requires no ready-unconsumed group (quiescent cut)")
     if outer.get("settled") is not True:

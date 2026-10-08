@@ -73,7 +73,7 @@ from yeto.rl.core import (
 )
 
 from .algorithm import AlgorithmSpec
-from .capabilities import EngineCapabilities
+from .capabilities import BackendTraits, EngineCapabilities
 from .execution_profile import (
     ExecutionProfile,
     ProfileError,
@@ -317,7 +317,7 @@ def _dynamic_filter_counts(batch: RolloutBatchHandle) -> dict[str, int]:
     generated groups that were not trained this round (dynamic-filter drops
     and over-sampling leftovers; whether leftovers are reused -- A2/F5
     ``carried_over`` -- is audited in 4.1). ``replacement_attempts`` is a PROXY
-    (Miles does not report its resample count); ``rl_round_trained`` records
+    (the engine does not report its resample count); ``rl_round_trained`` records
     the source of each value. Unknown (None) keeps the defaults.
     """
     filtered = getattr(batch, "filtered", None)
@@ -394,11 +394,14 @@ class IslandDriver:
         self.eval_interval = eval_interval
         self.max_rollouts = max_rollouts
         self.colocated = False
-        # Colocated trainers that can publish while offloaded (Miles --offload-train:
-        # upstream train.py sleeps the actor *before* update_weights) are offloaded
-        # right after the sync boundary, so the publication and the engines' KV
-        # resume never share the GPU with the resident training state (S13 FN OOM).
-        self.publish_offloaded = bool(getattr(trainer, "publish_offloaded", False))
+        # Colocated trainers that can publish while offloaded (declared by the
+        # backend: traits.publish_while_offloaded, and enabled for this run by the
+        # trainer's publish_offloaded) are offloaded right after the sync boundary,
+        # so the publication and the engines' KV resume never share the GPU with
+        # the resident training state (S13 FN OOM).
+        self.traits = getattr(capabilities, "traits", None) or BackendTraits()
+        self.publish_offloaded = bool(self.traits.publish_while_offloaded
+                                      and getattr(trainer, "publish_offloaded", False))
         self._trainer_offloaded = False
         self.expected_token: str | None = None
         self.published_version: int | None = None
@@ -574,7 +577,7 @@ class IslandDriver:
                 "gradient invariant cannot be checked"
             )
         self.colocated = description.kind == "colocated"
-        self.weight_transport = self.capabilities.traits.transport_label(str(
+        self.weight_transport = self.traits.transport_label(str(
             description.extra.get("weight_transport")
             or _DEFAULT_TRANSPORT.get(description.kind, "unknown")
         ))
@@ -1212,7 +1215,7 @@ class IslandDriver:
             applied_lrs=list(metrics.applied_lrs) if metrics.applied_lrs else None,
             # rl_local_round dynamic_filter_* provenance: generated/dropped are
             # counted from the all-samples hook; replacement_attempts is a proxy
-            # (= groups not trained), not Miles' actual resample count.
+            # (= groups not trained), not the engine's actual resample count.
             **(
                 {"dynamic_filter_source": {
                     "generated_groups": "all_samples_hook_completed_groups",
@@ -1376,8 +1379,8 @@ class IslandDriver:
         """Replace the trainer behind the ports and re-publish the same policy (4.4).
 
         Called at a safe point. ``rebuild`` swaps the handle behind the
-        adapter's ``SwappableActor`` and restores the cut (e.g. a closure over
-        ``miles_adapter.trainer_rebuild.rebuild_same_shape``); the port objects
+        adapter's swappable actor and restores the cut (e.g. a closure over the
+        backend's same-shape rebuild helper); the port objects
         stay, so there is no rebind, no ``initialize`` and no
         ``after_local_train`` (the sync session is not called). Before and
         after, the trainer's policy hash must equal the cut's
@@ -1407,8 +1410,9 @@ class IslandDriver:
         if self._rollout_colocated():
             # Colocated: the engines share the GPUs and still hold exactly this
             # policy (checked above: restored == cut == published), resident since
-            # the last publish. Publishing again would ask SGLang to resume weights
-            # that were never offloaded (KeyError 'weights', scheduler exit), so the
+            # the last publish. Publishing again would ask the inference engine to
+            # resume weights that were never offloaded (SGLang: KeyError 'weights',
+            # scheduler exit), so the
             # engines are left as they are; only the trainer was rebuilt.
             members = frozenset(self.rollout.members())
             self.emit(
@@ -1451,8 +1455,8 @@ class IslandDriver:
 
         The trainer restarts from the syncer's authoritative policy and the
         ledger rebases to v, but a restarted rollout process starts its data
-        source where a fresh run's would (Miles ``RolloutDataSource``: offset 0,
-        ``sample_group_index`` 0). Its group ids ARE that counter, so rollout v
+        source where a fresh run's would (e.g. offset 0, group index 0 in the
+        backend's data source). Its group ids ARE that counter, so rollout v
         would re-draw the groups trained in rollout 0 and ``ledger.prepare``
         refuses them (GPU evidence a4s8-2r2 r6: ``groups ['g0'..'g3'] were
         already trained in rollout 0`` on every restart attempt). Fail closed:

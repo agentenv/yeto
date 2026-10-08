@@ -9,4 +9,10 @@ from ..capabilities import BackendTraits
 # what tapes recorded before decoupling and stay the recorded labels.
 MILES_WEIGHT_TRANSPORTS = {"same-device-ipc": "cuda-ipc", "collective-broadcast": "nccl-broadcast"}
 
-MILES_TRAITS = BackendTraits(weight_transport_names=MILES_WEIGHT_TRANSPORTS)
+# --offload-train: upstream train.py sleeps the actor *before* update_weights and
+# publishes from host backups (S13 FN OOM fix), so Miles can publish while asleep.
+MILES_TRAITS = BackendTraits(weight_transport_names=MILES_WEIGHT_TRANSPORTS, publish_while_offloaded=True)
+
+# Ledger ``engine_discarded.mechanism`` for groups aborted in flight when the
+# batch filled (partial_rollout off; cut-audit §3, sglang_rollout.py:420-437).
+MILES_ABORT_MECHANISM = "miles generate_rollout abort"

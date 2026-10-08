@@ -114,9 +114,14 @@ class BackendTraits:
     ``weight_transport_names``: neutral transport name -> the name the backend
     records (tape ``weight_transport`` label); a missing entry records the
     neutral name.
+    ``publish_while_offloaded``: a colocated trainer of this backend can publish
+    its policy while offloaded (asleep), so the driver offloads it right after
+    the sync boundary when the trainer reports ``publish_offloaded`` for this
+    run (Miles: ``--offload-train``). Default False: publish while resident.
     """
 
     weight_transport_names: Mapping[str, str] = field(default_factory=dict)
+    publish_while_offloaded: bool = False
 
     def __post_init__(self) -> None:
         unknown = sorted(set(self.weight_transport_names) - WEIGHT_TRANSPORTS)
