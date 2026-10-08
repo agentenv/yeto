@@ -383,6 +383,12 @@ def test_eval_island_body_keeps_logs_off_the_volume_until_the_end(tmp_path, monk
 
     from yeto.cloud import modal_eval_island as mei
 
+    import os
+    import sys
+
+    monkeypatch.setenv("PYTHONPATH", os.environ.get("PYTHONPATH", ""))  # restored after the test
+    monkeypatch.setenv("YETO_MODAL_RUNTIME_PYTHONPATH", "")
+    monkeypatch.setattr(sys, "path", list(sys.path))
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="NVIDIA H100 80GB HBM3\n"))
     seen = {}
 
@@ -399,6 +405,7 @@ def test_eval_island_body_keeps_logs_off_the_volume_until_the_end(tmp_path, monk
     assert seen["infer"]["log_dir"].startswith(str(tmp_path / "local"))
     assert (tmp_path / "vol/runs/e1/logs/sglang.log").read_text() == "up"
     assert (tmp_path / "vol/runs/e1/body.json").is_file()
+    assert os.environ["PYTHONPATH"] == mei.IMAGE_PYTHONPATH
     with pytest.raises(RuntimeError, match="asked for A100"):
         mei.eval_island_body({"store": str(tmp_path / "vol"), "assert_gpu_name": "A100",
                               "local_run_dir": str(tmp_path / "l2")})

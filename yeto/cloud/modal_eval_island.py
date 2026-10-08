@@ -257,7 +257,9 @@ class EvalFunctionSpec:
         from yeto.launcher import island_role_env
         from yeto.rl.eval.island import EVAL_ISLAND_ROLE
 
-        return {"HOME": "/root", "PYTHONUNBUFFERED": "1", "PYTHONPATH": IMAGE_PYTHONPATH,
+        # No PYTHONPATH here: Modal's own runtime path lives in PYTHONPATH and an
+        # override breaks the container entrypoint (S17 N11 first try: no grpclib).
+        return {"HOME": "/root", "PYTHONUNBUFFERED": "1",
                 "YETO_HARNESS_TB2_TASKS_DIR": TB2_MOUNT, STORE_ENV: EVAL_STORE_MOUNT,
                 MOUNTED_ENV: "1", VOLUME_ENV: self.volume, **island_role_env(EVAL_ISLAND_ROLE),
                 **{str(k): str(v) for k, v in self.envs.items()}}
@@ -278,10 +280,27 @@ def _gpu_sampler(path: Path, stop: Any, interval_s: float = 5.0) -> None:
             fh.write(json.dumps({"t": time.time(), "nvidia_smi": out.strip()}) + "\n")
 
 
+def _image_paths(environ: Any = None) -> None:
+    """Miles / SGLang / yeto source on ``sys.path``; subprocesses (SGLang, session
+    server, codex worker) get exactly the training island's ``PYTHONPATH``, without
+    Modal's runtime copies (their protobuf/grpclib would shadow the image's)."""
+    import sys
+
+    environ = os.environ if environ is None else environ
+    parts = IMAGE_PYTHONPATH.split(":")
+    for path in reversed(parts):
+        if path not in sys.path:
+            sys.path.insert(0, path)
+    environ["YETO_MODAL_RUNTIME_PYTHONPATH"] = str(environ.get("PYTHONPATH", ""))
+    environ["PYTHONPATH"] = IMAGE_PYTHONPATH
+
+
 def eval_island_body(config: Mapping[str, Any]) -> dict[str, Any]:
     """Inside the eval-island container: check the GPU, sample it, run ``island_main``."""
     import subprocess
     import threading
+
+    _image_paths()
 
     names = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
                            capture_output=True, text=True, timeout=30).stdout.split("\n")
@@ -331,6 +350,8 @@ def eval_seed_body(config: Mapping[str, Any]) -> dict[str, Any]:
     import subprocess
     import sys
 
+    _image_paths()
+
     for mod, pin in (("peft", "peft"), ("accelerate", "accelerate")):
         try:
             importlib.import_module(mod)
@@ -358,7 +379,7 @@ def build_eval_app(spec: EvalFunctionSpec) -> tuple[Any, Any, Any]:
     import modal
 
     image = (modal.Image.from_registry(spec.image_ref)
-             .env({"HOME": "/root", "PYTHONUNBUFFERED": "1", "PYTHONPATH": IMAGE_PYTHONPATH})
+             .env({"HOME": "/root", "PYTHONUNBUFFERED": "1"})
              .add_local_dir(spec.workdir, WORKDIR_MOUNT, copy=False,
                             ignore=[".git", ".venv", ".claude", "**/__pycache__", "**/*.pyc", "s1-runs"])
              .add_local_dir(spec.codex_dir, CODEX_MOUNT, copy=False)
