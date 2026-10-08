@@ -1617,6 +1617,9 @@ def run_ports_island(
         miles_args, launch, algorithm, yeto_policy_sync=yeto_policy_sync,
         harness_preflight=harness_preflight,
     )  # contract preflight(...) + harness preflight: before connect_island_ray()
+    from . import eval_wiring
+
+    eval_guard = eval_wiring.eval_guard_preflight(miles_args)  # D6.c: before any GPU action
     from .e2_harness import load_plan as load_e2_harness_plan
 
     e2_plan = load_e2_harness_plan()  # TEST ONLY: None unless an E2 harness snapshot
@@ -1732,6 +1735,7 @@ def run_ports_island(
         driver.heartbeat_interval_s = getattr(miles_args, "yeto_rl_heartbeat_interval_s", None)
         driver.resource_sample_interval_s = getattr(
             miles_args, "yeto_rl_resource_sample_interval_s", None)
+        eval_wiring.attach(driver, miles_args, eval_guard)  # rl-eval-difficulty-buckets 2.2/5.2
         if e2_plan is not None:  # TEST ONLY: E2 GPU harness instead of the training loop
             from .e2_harness import HarnessContext, run_harness
 

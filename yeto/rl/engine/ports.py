@@ -121,6 +121,10 @@ class RolloutBatchHandle:
     # fleet-dashboard 1.3: trained-batch summary (adv_mean/adv_std,
     # resp_len_mean/p95, truncated_frac, reward_p10/p50/p90); None = not reported.
     batch_summary: Mapping[str, float | None] | None = field(default=None, compare=False)
+    # rl-eval-difficulty-buckets 4.1: per-difficulty summary of the trained
+    # batch ({bucket: {n, reward_mean, success_rate, truncated_frac,
+    # resp_len_mean}}); None = rows carry no difficulty / not reported.
+    batch_summary_by_bucket: Mapping[str, Mapping[str, Any]] | None = field(default=None, compare=False)
     # S14-M1 (observe only): per-record TITO session mismatches
     # (rollout_meta_hook.harness_mismatch_records, truncated/capped); None = not
     # reported (default path). The driver tapes them as ``rl_harness_mismatch``.
