@@ -67,9 +67,9 @@ MILES_NEXT_BASE_IMAGE = (
 # every SHA.  PUBLIC on ghcr.io/michaellchung since 2026-10-07 (anonymous
 # pull); a private image needs SKYPILOT_DOCKER_{USERNAME,PASSWORD,SERVER} or
 # --rl-image-private (yeto.launcher.registry_login_for; read:packages token).
-# Tag 8bc5223-4e4148f; ghcr.io/agentenv (public); linux/amd64 only.
+# Tag 8bc5223-4e4148f; ghcr.io/michaellchung (public; same digest also at ghcr.io/agentenv, private); linux/amd64 only.
 MILES_NEXT_IMAGE = (
-    "docker:ghcr.io/agentenv/yeto-miles-ports@sha256:"
+    "docker:ghcr.io/michaellchung/yeto-miles-ports@sha256:"
     "4aeafd7789dbcc02d71f0068c449477e8ab5f6d5bdb037d6d34e8fbf12a5b039"
 )
 MILES_NEXT_IMAGE_MANIFEST = "/opt/yeto/image-manifest.json"

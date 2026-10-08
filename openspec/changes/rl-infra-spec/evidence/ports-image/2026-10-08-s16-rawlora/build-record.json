@@ -1,10 +1,11 @@
 {
-  "tag": "ghcr.io/agentenv/yeto-miles-ports:8bc5223-4e4148f",
+  "tag": "ghcr.io/michaellchung/yeto-miles-ports:8bc5223-4e4148f",
   "digest": "sha256:4aeafd7789dbcc02d71f0068c449477e8ab5f6d5bdb037d6d34e8fbf12a5b039",
   "layer_tar_sha256": "55759ad9f81a721aa918e6e81ee0bde3c4c3b17f7c603bb7cf7655caf8c20012",
   "base": "docker.io/radixark/miles@sha256:4d69750720eb1a4b99976a3fed45ed018e1fc4fff3d240667fa17d258dfc6e0c",
   "base_index": "sha256:90940828dcd4d54fd907ff668b43537cbd94778047580e4160d6560af548b74d",
   "miles_commit": "8bc52237a1102306abd8f89a2ea2090aa2df6850",
   "sglang_commit": "4e4148f1b4fe9f05973da0d1e5cfe237512d5155",
-  "sglang_version": "0.5.21.dev69+g4e4148f"
+  "sglang_version": "0.5.21.dev69+g4e4148f",
+  "also_pushed": "ghcr.io/agentenv/yeto-miles-ports:8bc5223-4e4148f (built there first, private; crane copy to michaellchung, same digest)"
 }
