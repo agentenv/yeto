@@ -48,3 +48,7 @@
 ## 2. 阶段 2：FN 2×8（待批）
 
 - [ ] 2.1 [GPU] FN 两岛异构等待时间与跨岛样本收益；依赖阶段 1 与 FN 单岛结论。
+
+## 9. 测试维护（S17 夜间 N16）
+
+- [x] 9.1 tests/test_rl_integration.py 在 main 上恢复可跑：`_start`/`_start_decoupled` 以前无条件带 `--resume`，而同步服务自 d4c72cd7 起拒绝"--resume 但检查点不存在"，首次启动就退出、岛连不上；改为只在检查点文件已存在时加 `--resume`（`resume=None` 按磁盘判断，可显式传 True/False）。另修 `test_miles_public_hook_runs_against_real_syncer` 的假 rollout 数据缺 GRPO 优势 `rewards` 字段（3720936f 起钩子要逐条统计非零优势）。证据：本机真 Rust syncer（`PATH=~/.cargo/bin:$PATH`，cargo build），不起 Ray，`pytest tests/test_rl_integration.py` 12 过（修前第 1 条即失败）。
