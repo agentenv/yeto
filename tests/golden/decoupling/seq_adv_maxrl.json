@@ -1,14 +1,14 @@
 {
- "algorithm_sha256": "e4b213355a0ddfbe0c94a7ac5c1806f16bc3ac0009829c260d80dd9af7b0f4f9",
- "algorithm_sha256_launcher_expected": "e4b213355a0ddfbe0c94a7ac5c1806f16bc3ac0009829c260d80dd9af7b0f4f9",
- "algorithm_sha256_learner_ports_spec": "e4b213355a0ddfbe0c94a7ac5c1806f16bc3ac0009829c260d80dd9af7b0f4f9",
+ "algorithm_sha256": "7458121d46104f8e9eb635b14b20daa8fd415147451ff3c2e69c06b09b41ef37",
+ "algorithm_sha256_launcher_expected": "7458121d46104f8e9eb635b14b20daa8fd415147451ff3c2e69c06b09b41ef37",
+ "algorithm_sha256_learner_ports_spec": "7458121d46104f8e9eb635b14b20daa8fd415147451ff3c2e69c06b09b41ef37",
  "algorithm_spec": {
   "advantage": {
    "estimator": "grpo",
    "reward_binary": true,
    "reward_postprocess": {
     "path": "yeto.rl.algos.reward_pipeline.post_process",
-    "sha256": "cfbc099ad9a117de6836a0cb48feb0d5f5d059d9265faa5884bd0ef9a489c162"
+    "sha256": "b7af1fb4212366fcc8c76118b1dd35ff4f87742d684a6b23bed775e17d23c8cf"
    },
    "rewards_normalization": true,
    "std_normalization": true,
@@ -49,11 +49,11 @@
   "plugins": [
    {
     "path": "yeto.rl.algos.reward_pipeline.grpo_default",
-    "sha256": "cfbc099ad9a117de6836a0cb48feb0d5f5d059d9265faa5884bd0ef9a489c162"
+    "sha256": "b7af1fb4212366fcc8c76118b1dd35ff4f87742d684a6b23bed775e17d23c8cf"
    },
    {
     "path": "yeto.rl.algos.seq_adv.gdpo",
-    "sha256": "2c710922aa44d7e0e6108450dc0fac6128063714385501c528def06c1ea4e656"
+    "sha256": "6935e992f7665822ccde0f2559b460625bd3d90c9089be62196260b3c1548162"
    }
   ],
   "sampling": {
@@ -65,10 +65,10 @@
   "schema": "yeto-rl-algorithm-spec-v2"
  },
  "execution_profile": {
-  "contract_hash": "sha256:4b7c610f458b454dee649a9b3c030f8339823858fde700c28d051a8206aefc25",
+  "contract_hash": "sha256:cfc65138416e06d544a70b24cd021cec1072ceab305229e8a677a9abf1f2c66c",
   "profile": {
    "algorithm_contract": "on-policy",
-   "algorithm_spec_sha256": "e4b213355a0ddfbe0c94a7ac5c1806f16bc3ac0009829c260d80dd9af7b0f4f9",
+   "algorithm_spec_sha256": "7458121d46104f8e9eb635b14b20daa8fd415147451ff3c2e69c06b09b41ef37",
    "allowed_overlap": [],
    "execution_mode": "partitioned-serial",
    "groups_per_batch": 4,
@@ -83,7 +83,7 @@
    "schema": "yeto-rl-execution-profile-v1"
   }
  },
- "launch_algorithm_sha256": "e4b213355a0ddfbe0c94a7ac5c1806f16bc3ac0009829c260d80dd9af7b0f4f9",
+ "launch_algorithm_sha256": "7458121d46104f8e9eb635b14b20daa8fd415147451ff3c2e69c06b09b41ef37",
  "launch_cli": [
   "--rl-placement",
   "fixed-partition",
@@ -261,20 +261,20 @@
   {
    "module_file": "yeto/rl/algos/reward_pipeline.py",
    "path": "yeto.rl.algos.reward_pipeline.grpo_default",
-   "source_sha256": "cfbc099ad9a117de6836a0cb48feb0d5f5d059d9265faa5884bd0ef9a489c162",
-   "spec_sha256": "cfbc099ad9a117de6836a0cb48feb0d5f5d059d9265faa5884bd0ef9a489c162"
+   "source_sha256": "b7af1fb4212366fcc8c76118b1dd35ff4f87742d684a6b23bed775e17d23c8cf",
+   "spec_sha256": "b7af1fb4212366fcc8c76118b1dd35ff4f87742d684a6b23bed775e17d23c8cf"
   },
   {
    "module_file": "yeto/rl/algos/reward_pipeline.py",
    "path": "yeto.rl.algos.reward_pipeline.post_process",
-   "source_sha256": "cfbc099ad9a117de6836a0cb48feb0d5f5d059d9265faa5884bd0ef9a489c162",
-   "spec_sha256": "cfbc099ad9a117de6836a0cb48feb0d5f5d059d9265faa5884bd0ef9a489c162"
+   "source_sha256": "b7af1fb4212366fcc8c76118b1dd35ff4f87742d684a6b23bed775e17d23c8cf",
+   "spec_sha256": "b7af1fb4212366fcc8c76118b1dd35ff4f87742d684a6b23bed775e17d23c8cf"
   },
   {
    "module_file": "yeto/rl/algos/seq_adv.py",
    "path": "yeto.rl.algos.seq_adv.gdpo",
-   "source_sha256": "2c710922aa44d7e0e6108450dc0fac6128063714385501c528def06c1ea4e656",
-   "spec_sha256": "2c710922aa44d7e0e6108450dc0fac6128063714385501c528def06c1ea4e656"
+   "source_sha256": "6935e992f7665822ccde0f2559b460625bd3d90c9089be62196260b3c1548162",
+   "spec_sha256": "6935e992f7665822ccde0f2559b460625bd3d90c9089be62196260b3c1548162"
   },
   {
    "module_file": "yeto/rl/engine/miles_adapter/rollout_meta_hook.py",
@@ -296,16 +296,16 @@
  "runtime_attrs": {
   "yeto_algo_plugins": {
    "config": {
-    "algorithm_spec_sha256": "e4b213355a0ddfbe0c94a7ac5c1806f16bc3ac0009829c260d80dd9af7b0f4f9",
+    "algorithm_spec_sha256": "7458121d46104f8e9eb635b14b20daa8fd415147451ff3c2e69c06b09b41ef37",
     "reward_pipeline": {
      "advantage_params": {},
      "advantage_transform": "maxrl",
-     "pipeline_sha256": "043ec279226950389b57a4689dabd2e02a224d739d18726a44077f70ad1bdf00",
+     "pipeline_sha256": "48557c162a3aeaa1b732d6ab9579069611d6a56575e149e907facf6555b4388e",
      "reward_shapers": []
     },
     "schema": "yeto-algo-plugins-v1"
    },
-   "sha256": "28f0779b0467b0c9230ca1e52b410bf3be8af2eb1dab18307a5899ac3f5c806d"
+   "sha256": "505a78eee3d97ba32532e08bf49fa5af81f2781fa28cb4d542e4a79baf2fb18f"
   },
   "yeto_rl_dynamic_sampling_max_replacements": null
  },

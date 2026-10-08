@@ -381,9 +381,9 @@ def emit_event(args: Any, event: dict[str, Any]) -> None:
     logger.warning("%s", json.dumps(event, sort_keys=True))
     learner = getattr(args, "yeto_rl_learner_id", None)
     if getattr(args, "yeto_rl_event_tape", None) and learner is not None:
-        from yeto.rl.miles import _append_rl_event
+        from yeto.rl.engine.events import write_event
 
-        _append_rl_event(args, event)  # tape write; echoed by the writer when enabled
+        write_event(args, event)  # tape write (core writer, decoupling 4.10); echoed when enabled
         return
     from yeto.rl.event_echo import format_record
 
@@ -397,8 +397,31 @@ def emit_event(args: Any, event: dict[str, Any]) -> None:
 # --------------------------------------------------------------------------
 
 
+def grpo_group_normalize(shared: Sequence[float], *, std_normalize: bool) -> list[float]:
+    """Pure GRPO group normalization of one group's per-rollout rewards (decoupling 4.6).
+
+    Mean-centred; divided by ``std + 1e-6`` when ``std_normalize`` and the group
+    has more than one rollout with non-zero std. float32, same torch ops as
+    Miles ``_normalize_rewards_by_rollout``.
+    """
+
+    import torch
+
+    values = torch.tensor(shared, dtype=torch.float)
+    centered = values - values.mean()
+    if std_normalize and len(values) > 1:
+        std = values.std()
+        if std > 0:
+            centered = centered / (std + 1e-6)
+    return centered.tolist()
+
+
 def grpo_default(args, samples, rewards, groups, params) -> list[float]:
-    """Exact ``_post_process_rewards`` normalization (``_normalize_rewards_by_rollout``)."""
+    """Exact ``_post_process_rewards`` normalization (``_normalize_rewards_by_rollout``).
+
+    Miles-plugin wrapper: reads the flags from ``args`` and the rollout
+    segments from ``samples``; the math is :func:`grpo_group_normalize`.
+    """
 
     if not (args.advantage_estimator in list(NORMALIZED_ESTIMATORS) and args.rewards_normalization):
         return rewards
@@ -406,17 +429,13 @@ def grpo_default(args, samples, rewards, groups, params) -> list[float]:
         return []
     import torch
 
+    std_normalize = bool(args.advantage_estimator in list(STD_ESTIMATORS) and args.grpo_std_normalization)
     normalized = torch.empty(len(rewards), dtype=torch.float)
     for rows in groups:
         segments = rollout_segments(samples, rows)
         shared = shared_rollout_rewards(rewards, segments)
-        values = torch.tensor(shared, dtype=torch.float)
-        centered = values - values.mean()
-        if args.advantage_estimator in list(STD_ESTIMATORS) and args.grpo_std_normalization and len(values) > 1:
-            std = values.std()
-            if std > 0:
-                centered = centered / (std + 1e-6)
-        for (_, seg_rows), value in zip(segments, centered.tolist(), strict=True):
+        centered = grpo_group_normalize(shared, std_normalize=std_normalize)
+        for (_, seg_rows), value in zip(segments, centered, strict=True):
             for row in seg_rows:
                 normalized[row] = value
     return normalized.tolist()

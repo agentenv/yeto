@@ -8,6 +8,7 @@ from yeto.rl.algos import critic, critic_fork, sao
 from yeto.rl.algos.compactionrl import compactionrl_spec
 from yeto.rl.algos.vapo import vapo_spec
 from yeto.rl.engine.algorithm import AlgorithmSpec, load_extensions
+from yeto.rl.engine.miles_adapter import algo_flag_rows as rows
 from yeto.rl.engine.miles_adapter import algorithm_flags as af
 
 load_extensions()
@@ -74,12 +75,12 @@ def test_num_critic_epochs_is_an_alias_of_critic_updates_per_step():
     b, _, _ = af.absorb_extra_argv(base, ["--critic-updates-per-step", "2"])
     assert a.critic.critic_updates_per_step == b.critic.critic_updates_per_step == 2
     assert a.sha256() == b.sha256()
-    argv = critic.critic_argv(a)
+    argv = rows.critic_argv(a)
     assert argv[argv.index("--critic-updates-per-step") + 1] == "2"
     assert "--num-critic-epochs" not in argv  # one spelling emitted
     with pytest.raises(af.AlgorithmFlagConflict):
         af.absorb_extra_argv(base, ["--num-critic-epochs", "2", "--critic-updates-per-step", "3"])
-    assert "--critic-updates-per-step" not in critic.critic_argv(base)  # default 1: not emitted
+    assert "--critic-updates-per-step" not in rows.critic_argv(base)  # default 1: not emitted
 
 
 @pytest.mark.parametrize("flag, value", [("--value-target-type", "two_hot"),

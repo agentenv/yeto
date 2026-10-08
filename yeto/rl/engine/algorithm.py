@@ -1619,7 +1619,7 @@ def _reject_critic_not_at_pin(s: AlgorithmSpec) -> str | None:
     # GPU G1 (9.4). --critic-updates-per-step (= --num-critic-epochs) and the
     # classification value loss are in the critic fork pin (algos/critic_fork.py,
     # yeto-critic-family e07e51c07). hl_gauss is translated only by the SAO fork
-    # argv (sao.sao_fork_argv), so it stays refused without policy_objective=sao_dis.
+    # argv (miles_adapter.algo_flag_rows.sao_fork_argv), so it stays refused without policy_objective=sao_dis.
     from yeto.rl.algos.critic_fork import fork_carries_critic_family
 
     if c.value_loss != "mse" and not (

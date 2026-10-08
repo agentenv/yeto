@@ -43,12 +43,6 @@ from yeto.rl.engine.algorithm import (
     register_mechanism,
     register_rejection,
 )
-from yeto.rl.engine.miles_adapter.algorithm_flags import (
-    FlagMapping,
-    _float,
-    _num,
-    register_flag,
-)
 
 DEFAULT_VARIANT = "policy_loss"
 VARIANTS = ("cispo", "sapo", "gmpo")
@@ -161,25 +155,8 @@ for _name in VARIANTS:
     register_mechanism("losses", _name, lambda s, v=_name: variant(s) == v)
 
 
-def _translate_variant(spec) -> list[str]:
-    name = variant(spec)
-    if name == DEFAULT_VARIANT:
-        return []  # default GRPO argv unchanged
-    argv = [VARIANT_FLAG, name]
-    for param, _ in VARIANT_PARAMS[name]:  # explicit, never the fork's default
-        argv += [PARAM_FLAGS[param], _num(getattr(spec.loss, param))]
-    return argv
-
-
-register_flag(FlagMapping(
-    VARIANT_FLAG, "loss.policy_loss_variant", False, str,
-    lambda v: [("loss.policy_loss_variant", v)], _translate_variant,
-))
-for _param, _flag in PARAM_FLAGS.items():
-    register_flag(FlagMapping(
-        _flag, f"loss.{_param}", False, _float,
-        lambda v, p=_param: [(f"loss.{p}", v)], lambda spec: [],
-    ))
+# Miles flag rows (``--policy-loss-variant`` and the parameter flags):
+# yeto.rl.engine.miles_adapter.algo_flag_rows (decoupling 4.3).
 
 
 # --------------------------------------------------------------------------
