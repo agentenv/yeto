@@ -32,6 +32,7 @@ from yeto.rl.engine.algorithm import (
     AlgorithmSpecError,
     BOUNDED_NONZERO_STD_FILTER,
     STOCK_NONZERO_STD_FILTER,
+    normalize_filter_name,
     AlgorithmSpec,
 )
 from .lr_schedule import LR_SCHEDULE_FLAGS
@@ -43,6 +44,7 @@ from .algorithm_flags import (
     objective_flags,
 )
 from .placement import PlacementRequest, check_placement_not_rewritten
+from .binding import filter_argv
 
 ROLLOUT_META_HOOK_PATH = (
     "yeto.rl.adapters.miles.rollout_meta_hook.extract_rollout_metadata"
@@ -487,7 +489,7 @@ def _dotted_callable(spec: str) -> str:
 
 
 def _algorithm_filter(config, algorithm: AlgorithmSpec) -> str | None:
-    requested = config.agent.dynamic_sampling_filter_path
+    requested = normalize_filter_name(config.agent.dynamic_sampling_filter_path)  # 4.4
     if requested == STOCK_NONZERO_STD_FILTER and (
         algorithm.dynamic_sampling_max_replacements is not None
     ):
@@ -835,7 +837,7 @@ def translate_run_config(
     if algorithm.kl_coef is not None:
         values.extend(("--kl-coef", str(algorithm.kl_coef)))
     if dynamic_filter is not None:
-        values.extend(("--dynamic-sampling-filter-path", dynamic_filter))
+        values.extend(filter_argv(dynamic_filter))  # 4.4: neutral name -> Miles path
     # Non-default AlgorithmSpec v2 fields (empty for every v1 spec, so the
     # default GRPO argv is byte-identical to R0).
     values.extend(algorithm_argv(algorithm))

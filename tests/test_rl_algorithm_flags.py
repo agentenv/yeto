@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pytest
 
+from yeto.rl.adapters.miles.binding import filter_path  # 4.4: neutral name -> Miles path
+
 from yeto.rl.engine.algorithm import (
     BOUNDED_NONZERO_STD_FILTER,
     STOCK_NONZERO_STD_FILTER,
@@ -242,7 +244,7 @@ def test_r0_positioned_fields_translate():
     assert argv[argv.index("--advantage-estimator") + 1] == "gspo"
     stock = AlgorithmSpec(sampling=SamplingSpec(filter=STOCK_NONZERO_STD_FILTER))
     argv = list(mc.translate_run_config(make_config(), stock).argv)
-    assert argv[argv.index("--dynamic-sampling-filter-path") + 1] == STOCK_NONZERO_STD_FILTER
+    assert argv[argv.index("--dynamic-sampling-filter-path") + 1] == filter_path(STOCK_NONZERO_STD_FILTER)
     over = AlgorithmSpec(sampling=SamplingSpec(filter=BOUNDED_NONZERO_STD_FILTER,
                                                over_sampling_batch_size=4))
     argv = list(mc.translate_run_config(make_config(), over).argv)

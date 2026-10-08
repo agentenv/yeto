@@ -27,3 +27,9 @@
 ## 标准样本
 
 去耦合各阶段合并前，`tests/test_decoupling_golden.py` 必须通过：典型配置下的 Miles 命令行、`AlgorithmSpec.sha256()`、`ExecutionProfile.contract_hash`、插件源码哈希、strict/decoupled 进度内容与假引擎 tape 片段与 `tests/golden/decoupling/` 逐字一致。哈希的有意变更记在 `openspec/changes/yeto-framework-decoupling/hash-migration.md`。
+
+## 阶段 4 之后（yeto-framework-decoupling，2026-10-08）
+
+- Miles 适配层在 `yeto/rl/adapters/miles/`（旧路径 `yeto/rl/engine/miles_adapter/` 与 `yeto/rl/miles.py`、`learner.py` 等留转发模块，导入得到同一对象）。
+- 核心、启动层、CLI 要用后端模块时，一律经 `yeto/rl/engine/backends.py` 的注册表按"角色"取（`backends.module("entry")` 等），不静态 import 适配层。当前后端：`--rl-backend`（启动器）或环境变量 `YETO_RL_BACKEND`（推理进程、codex 子进程），都没设时为 `miles`。
+- 推理进程里的策略令牌/本轮计数走 `yeto/rl/engine/rollout_meta.py`；动态采样过滤器用中立名，后端在 `binding` 角色里翻译并在启动前做三项绑定核对（design D6a）。

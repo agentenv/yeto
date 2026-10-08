@@ -337,7 +337,9 @@ def legacy_algorithm_argv(spec: AlgorithmSpec) -> list[str]:
     if spec.kl_coef is not None:
         argv += ["--kl-coef", str(spec.kl_coef)]
     if spec.dynamic_sampling_filter is not None:
-        argv += ["--dynamic-sampling-filter-path", spec.dynamic_sampling_filter]
+        from .binding import filter_argv
+
+        argv += filter_argv(spec.dynamic_sampling_filter)
     return argv
 
 

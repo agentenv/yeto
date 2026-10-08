@@ -193,7 +193,8 @@ def test_bounded_filter_and_runtime_attrs():
     )
     cfg = sub(make_config(), "agent", dynamic_sampling_filter_path=STOCK_NONZERO_STD_FILTER)
     launch = mc.translate_run_config(cfg, spec)
-    assert flag_value(list(launch.argv), "--dynamic-sampling-filter-path") == BOUNDED_NONZERO_STD_FILTER
+    assert flag_value(list(launch.argv), "--dynamic-sampling-filter-path") == (
+        "yeto.rl.filters.bounded_nonzero_reward_std")  # 4.4: Miles spelling of the neutral name
     assert launch.runtime_attrs == {"yeto_rl_dynamic_sampling_max_replacements": 3}
     ns = mc.apply_runtime_attrs(SimpleNamespace(), launch)
     assert ns.yeto_rl_dynamic_sampling_max_replacements == 3

@@ -44,10 +44,23 @@ from typing import Any
 ALGORITHM_SPEC_SCHEMA = "yeto-rl-algorithm-spec-v1"
 ALGORITHM_SPEC_SCHEMA_V2 = "yeto-rl-algorithm-spec-v2"
 ALGORITHM_SPEC_SCHEMAS = (ALGORITHM_SPEC_SCHEMA, ALGORITHM_SPEC_SCHEMA_V2)
-BOUNDED_NONZERO_STD_FILTER = "yeto.rl.filters.bounded_nonzero_reward_std"
-STOCK_NONZERO_STD_FILTER = (
-    "miles.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std"
-)
+# Neutral dynamic-sampling filter names (yeto-framework-decoupling 4.4, design
+# D6).  The backend adapter binds each name to its implementation (Miles:
+# ``yeto.rl.adapters.miles.binding``).  Specs written with the pre-4.4 Miles
+# module paths still load: they are normalized to these names, which gives a
+# *new* ``AlgorithmSpec.sha256()`` (hash-migration.md, 阶段 4 记录).
+BOUNDED_NONZERO_STD_FILTER = "nonzero_reward_std_bounded"
+STOCK_NONZERO_STD_FILTER = "nonzero_reward_std"
+LEGACY_FILTER_NAMES = {
+    "yeto.rl.filters.bounded_nonzero_reward_std": BOUNDED_NONZERO_STD_FILTER,
+    "miles.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std":
+        STOCK_NONZERO_STD_FILTER,
+}
+
+
+def normalize_filter_name(name: str | None) -> str | None:
+    """Neutral filter name for ``name`` (a neutral name or a pre-4.4 path)."""
+    return LEGACY_FILTER_NAMES.get(name, name) if isinstance(name, str) else name
 # v1 (R0) vocabulary: what the flat v1 fields can express.
 SUPPORTED_ADVANTAGE_ESTIMATORS = frozenset({"grpo", "ppo"})  # ppo: rl-algo-critic-family 2.2
 SUPPORTED_LOSSES = frozenset({"policy_loss"})
@@ -828,6 +841,7 @@ class SamplingSpec(_Group):
 
     def __post_init__(self) -> None:
         s = object.__setattr__
+        s(self, "filter", normalize_filter_name(self.filter))  # 4.4: old paths -> neutral
         if self.filter is not None and self.filter not in DYNAMIC_SAMPLING_FILTERS:
             raise AlgorithmSpecError(
                 f"unsupported dynamic sampling filter {self.filter!r} (sampling.filter; "
@@ -1072,6 +1086,7 @@ class AlgorithmSpec:
             if not math.isfinite(kl_coef) or kl_coef < 0:
                 raise AlgorithmSpecError("kl_coef must be finite and non-negative")
             kl = KlSpec(placement="reward", coef=float(kl_coef))  # design D5
+        dynamic_sampling_filter = normalize_filter_name(dynamic_sampling_filter)  # 4.4
         if dynamic_sampling_filter is not None or dynamic_sampling_max_replacements is not None:
             if sampling is not None:
                 raise AlgorithmSpecError("give v1 dynamic_sampling_* or sampling (v2), not both")
@@ -1402,7 +1417,7 @@ class AlgorithmSpec:
         ``yeto.launcher`` does when a replacement bound is set.
         """
 
-        flt = getattr(args, "dynamic_sampling_filter_path", None)
+        flt = normalize_filter_name(getattr(args, "dynamic_sampling_filter_path", None))
         limit = getattr(args, "dynamic_sampling_max_replacements", None)
         if flt == STOCK_NONZERO_STD_FILTER and limit is not None:
             flt = BOUNDED_NONZERO_STD_FILTER

@@ -147,11 +147,11 @@
   "--rollout-max-response-len",
   "128",
   "--rollout-sample-filter-path",
-  "yeto.rl.engine.miles_adapter.rollout_meta_hook.record_trained_groups",
+  "yeto.rl.adapters.miles.rollout_meta_hook.record_trained_groups",
   "--rollout-all-samples-process-path",
-  "yeto.rl.engine.miles_adapter.rollout_meta_hook.extract_rollout_metadata",
+  "yeto.rl.adapters.miles.rollout_meta_hook.extract_rollout_metadata",
   "--buffer-filter-path",
-  "yeto.rl.engine.miles_adapter.rollout_meta_hook.policy_buffer_filter",
+  "yeto.rl.adapters.miles.rollout_meta_hook.policy_buffer_filter",
   "--custom-rm-path",
   "pkg.reward.score",
   "--advantage-estimator",
@@ -186,7 +186,7 @@
   "10",
   "--group-query-attention"
  ],
- "miles_argv_sha256": "78727298ee39cb9a8684fdff600b8ac814a89f974a74db448b17bbe72d128b3a",
+ "miles_argv_sha256": "1108c08ed4e9ef28ec5ad2e37b3fe6ceb804db496824c9de4743b028a400a663",
  "name": "decoupled",
  "placement": {
   "allow_cross_node_engine_tp": false,
@@ -205,22 +205,22 @@
  },
  "plugins": [
   {
-   "module_file": "yeto/rl/engine/miles_adapter/rollout_meta_hook.py",
-   "path": "yeto.rl.engine.miles_adapter.rollout_meta_hook.extract_rollout_metadata",
-   "source_sha256": "be53a60841ce6244fc85c5d114ef25dc7c06a94f74fcaa5291d74094ef0d87ef"
+   "module_file": "yeto/rl/adapters/miles/rollout_meta_hook.py",
+   "path": "yeto.rl.adapters.miles.rollout_meta_hook.extract_rollout_metadata",
+   "source_sha256": "af10161a148d3059148342896778fec5b915c90ed96258ccab1754f1805cda61"
   },
   {
-   "module_file": "yeto/rl/engine/miles_adapter/rollout_meta_hook.py",
-   "path": "yeto.rl.engine.miles_adapter.rollout_meta_hook.policy_buffer_filter",
-   "source_sha256": "be53a60841ce6244fc85c5d114ef25dc7c06a94f74fcaa5291d74094ef0d87ef"
+   "module_file": "yeto/rl/adapters/miles/rollout_meta_hook.py",
+   "path": "yeto.rl.adapters.miles.rollout_meta_hook.policy_buffer_filter",
+   "source_sha256": "af10161a148d3059148342896778fec5b915c90ed96258ccab1754f1805cda61"
   },
   {
-   "module_file": "yeto/rl/engine/miles_adapter/rollout_meta_hook.py",
-   "path": "yeto.rl.engine.miles_adapter.rollout_meta_hook.record_trained_groups",
-   "source_sha256": "be53a60841ce6244fc85c5d114ef25dc7c06a94f74fcaa5291d74094ef0d87ef"
+   "module_file": "yeto/rl/adapters/miles/rollout_meta_hook.py",
+   "path": "yeto.rl.adapters.miles.rollout_meta_hook.record_trained_groups",
+   "source_sha256": "af10161a148d3059148342896778fec5b915c90ed96258ccab1754f1805cda61"
   }
  ],
- "ports_runtime_fingerprint": "sha256:13b7d41416af5afd3f80bcd39d9ae13ea76cea0c17be0723095143e5587e8476",
+ "ports_runtime_fingerprint": "sha256:cbe1cd067ae4be4241bb2c689a82a8aa1d1a2984c604d224197c38648da3eb75",
  "runtime_attrs": {
   "yeto_rl_dynamic_sampling_max_replacements": null
  },

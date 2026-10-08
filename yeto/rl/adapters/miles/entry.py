@@ -531,6 +531,10 @@ def preflight(profile: Any, algorithm: AlgorithmSpec, capabilities: EngineCapabi
     from yeto.rl.engine.execution_profile import check_algorithm_contract
 
     check_algorithm_contract(profile, algorithm)
+    # 4.4a (design D6a): neutral names bind to the pre-rename implementation, or no launch.
+    from .binding import check_spec
+
+    print("[yeto] backend binding " + json.dumps(check_spec(algorithm), sort_keys=True), flush=True)
     placement = "colocated" if profile.execution_mode == "colocated-serial" else "fixed-partition"
     capabilities.check(
         layout="lora",

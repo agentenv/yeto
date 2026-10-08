@@ -59,3 +59,63 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
 
 - 唯一变化：`yeto/rl/engine/miles_adapter/rollout_meta_hook.py` 源码哈希 `5b4d802c…` → `be53a608…`（全部 8 个配置的 `plugins` 里该文件 3 个入口）。原因：`record_trained_groups` 增加调用 `yeto.rl.harness.reasoning_loss_mask.apply_from_args`（默认不开时直接返回，不改样本）。`algorithm_sha256`、契约哈希、`ports_runtime_fingerprint`、Miles 命令行均不变。
 - 合并时顺带的边界修正：#127 原版在中立核心 `yeto/rl/harness/reasoning_loss_mask.py` 里 import 了 `miles.utils.processing_utils`，违反 import 边界（白名单只减不增）。改为由 Miles 适配层 `rollout_meta_hook._load_miles_tokenizer` 加载分词器并以 `tokenizer_loader` 传入；中立核心未拿到加载器时报错拒绝（不静默把思维链算进损失）。行为不变。
+
+## 阶段 4 记录（分支 s17-decouple-p4，起点 main 80e944b6，2026-10-08 夜）
+
+标准样本已用 `python tests/decoupling_golden.py --write` 重录；假引擎 tape 样本逐字节不变。
+
+### 8 个配置的变化一览
+
+| 配置 | `algorithm_sha256` | Miles 命令行摘要 | 契约哈希 |
+|---|---|---|---|
+| grpo_default | 不变 `27df1133c924e7a3…` | `8e29812ab25b71d9…` → `cd9c51c2946a4e45…` | `27bb768f7462a3ff…` → `27bb768f7462a3ff…` |
+| grpo_tis | 不变 `5a8a5a9ff5abb317…` | `499a99adb1b26e80…` → `06b407103acaff82…` | `f30ac4010eb5b88f…` → `f30ac4010eb5b88f…` |
+| decoupled | 不变 `27df1133c924e7a3…` | `78727298ee39cb9a…` → `1108c08ed4e9ef28…` | `634583f6f0d29e91…` → `634583f6f0d29e91…` |
+| drgrpo | 不变 `0b000b1c9cc85027…` | `9ae71f2b9407fb46…` → `7ee222703a50f20c…` | `94562ea539b9602a…` → `94562ea539b9602a…` |
+| seq_adv_maxrl | `7458121d46104f8e9eb635b14b20daa8fd415147451ff3c2e69c06b09b41ef37` → `0cbaa8212dad1654e09c8b349e7c323600749810f3da3335dfefb23c1960a815` | `67ed96627b700f65…` → `8acfb1140db90c4d…` | `cfc65138416e06d5…` → `2497445bf264fd1d…` |
+| codex_harness | 不变 `27df1133c924e7a3…` | `18fafcaafda2c19c…` → `259d2fdeff47128f…` | `27bb768f7462a3ff…` → `27bb768f7462a3ff…` |
+| elastic | 不变 `27df1133c924e7a3…` | `28bb08ef1bf161f9…` → `c88e8996324d0261…` | `27bb768f7462a3ff…` → `27bb768f7462a3ff…` |
+| fn_2x8 | 不变 `27df1133c924e7a3…` | `9dc4312965e48edd…` → `8d056171747e96ed…` | `18dda066767289bc…` → `18dda066767289bc…` |
+
+`ports_runtime_fingerprint`（= Miles 提交 + Miles 命令行）随命令行全部变化；`plugins` 字段全部变化（见下）。
+
+### 原因（逐项）
+
+| 变化 | 原因 | 任务 | 旧 | 新 |
+|---|---|---|---|---|
+| Miles 命令行：3 个插件路径 `yeto.rl.engine.miles_adapter.rollout_meta_hook.{record_trained_groups,extract_rollout_metadata,policy_buffer_filter}` → `yeto.rl.adapters.miles.rollout_meta_hook.*`（全部 8 个配置；命令行其余部分逐字节相同） | 目录搬迁 | 5.1 | — | — |
+| `rollout_meta_hook.py` 源码哈希（全部 8 个配置的 `plugins`，文件路径也变为 `yeto/rl/adapters/miles/rollout_meta_hook.py`） | 4 个键名常量与 `counter_value` 改为从核心 `engine/rollout_meta.py` 导入；新增 `sink_available()`。`record_trained_groups` 里 WP6 的两行与 `_load_miles_tokenizer` 原样保留 | 4.11 | `be53a608…` | `af10161a148d3059…` |
+| `seq_adv.py` 源码哈希 → **seq_adv_maxrl 的 `algorithm_sha256` 与契约哈希变化** | `_current_round_id`/`_report_round` 改走核心接口 `engine.rollout_meta`（读令牌/写本轮计数），数学部分未动 | 4.11 | `6935e992f7665822ccde0f2559b460625bd3d90c9089be62196260b3c1548162` | `c292fe3356eb3ca14fa93960c2da93303edf8d2755e62fef6b479bd833a885b8` |
+| `codex_openenv_subprocess_agent_function.py` 源码哈希（codex_harness 的 `plugins`） | `expected_policy_version` 改走核心接口 | 4.11 | `dab8efda…` | `22df84e9bbb22675…` |
+
+- 预告里说 codex_harness 的哈希会变：实际只有 `plugins` 字段（命令行插件，不进 `AlgorithmSpec.sha256()`）与命令行摘要变，`algorithm_sha256`、契约哈希不变。
+- CPU 逐位一致：`PYTHONPATH=/tmp/s15-noray python tests/decoupling_bitwise_check.py agentenv/main`：20 例全部 `torch.equal`，0 处差异（本机 2026-10-08 夜）。
+- 旧版引擎命令行快照（`tests/test_rl_argv_snapshot.py`）：把阶段 4 搬家后的新模块路径映射回旧路径后，全部摘要与原快照相同（证明旧版命令行除路径外逐字节不变）。
+- 同步更新：`examples/rl_algorithms/dapo-like.json`（seq_adv 源码哈希、过滤器改中立名）、`openspec/changes/rl-algo-seq-and-adv/examples/{maxrl,mapo,gdpo}.json`（`make_examples.py` 重新生成）。
+
+### 4.4 过滤器中立名
+
+| 旧名（Miles 路径） | 新名（中立） |
+|---|---|
+| `yeto.rl.filters.bounded_nonzero_reward_std` | `nonzero_reward_std_bounded` |
+| `miles.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std` | `nonzero_reward_std` |
+
+8 个标准样本都不带动态采样过滤器，所以 4.4 本身不改它们的哈希（WP7 交接里"全部 8 个样本换哈希"的估计不成立）。带过滤器的规格换新哈希（旧名、新名读入后得同一个新哈希；旧值取自 agentenv/main 80e944b6 同一构造）：
+
+| 规格 | 旧 `algorithm_sha256` | 新 |
+|---|---|---|
+| v1 有界过滤器、最多替换 2 次 | `32ba45a6d3e466e6b664f938779959fdae8767236d5177eabf59f62957e5a47a` | `b669e6c4de10a52d95ecc45294bbfeba857dddd0769abc358528729407bae37e` |
+| v2 原版过滤器 | `1129f5c0c80f08bf3d69c08e14e1c803c867e6508e1d55fc53934e671a774e2a` | `05d7bc4b978f11caf6489e530081dcc62ab2131b2261445ee10eefebeb012bb8` |
+| v2 有界过滤器、最多替换 4 次（`test_rl_engine_algorithm` 的 R0 样本同此） | `f25cf271d45d38253ea1f255095fe5c0a9b478841a6f90270533382b7adb41dc` | `ac623863613bc25aa7506f31b50e799b5a272919ecdcf05885ff72a9e38d9038` |
+
+- 传给 Miles 的 `--dynamic-sampling-filter-path` 仍是旧路径，逐字节不变（适配层 `adapters/miles/binding.py` 翻译）。
+- 版本边界：新旧代码的岛对同一带过滤器配置算出不同哈希，契约检查拒绝混跑；旧哈希的切点续训被 `verify_cut` 以"算法身份不同"拒绝（单测 `tests/test_rl_binding_check.py`）。
+- 4.4a 绑定核对（命令行逐字、插件身份、CPU 实调）在启动前执行，结果以 `[yeto] backend binding {...}` 打印到岛日志；原版过滤器（`miles.*`）在本机无 Miles，第③项记为 skipped。
+
+### 5.7 SecRLEnv 自证哈希
+
+`codex/generate.py` 的 Miles 包装搬到 `yeto/rl/adapters/miles/harness_glue/codex_generate.py`：`GENERATE_SHA256`（`harness/codex/pins.py`）与 `yeto.rl.SECRLENV_GENERATE_SHA256` 由 `1c79b0e678b8681b5bd6221b5a4bbc6adbe7a1413b688e248cb930eb3e456cca` 改为 `1df1ded9c6c81404a6101e1821aefc3129d207a3150241980306d6494ee4a2be`，`SECRLENV_GENERATE` 路径改为 `yeto.rl.adapters.miles.harness_glue.codex_generate.generate`。`agent.py`、`codex_harness_agent.py` 未改，签名哈希不变。
+
+### 未验证
+- 新哈希与新插件路径没有真机证据（本轮不上 GPU），由下一次本来要开的卡顺带取得。
+- 需 import Miles 的等价测试（`test_rl_reward_pipeline_equivalence`、`test_rl_seq_adv_miles`、`test_rl_algorithm_flags_upstream`）本机屏蔽未跑。
