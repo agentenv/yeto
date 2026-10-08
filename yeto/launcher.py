@@ -7179,7 +7179,14 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 "checkpoint -- use the streamed island log / event tape as the evidence",
                 file=sys.stderr,
             )
-            return 2
+            # S17 N16: the run itself is judged by the island outcome (its tape
+            # was already checked complete above).  Only an explicit --output
+            # the launcher cannot honour stays exit 2.
+            if output:
+                print(f"[launcher] --output {output} cannot be delivered from a "
+                      "Modal no-sync island; exit 2", file=sys.stderr)
+                return 2
+            return 1 if failed else 0
         elif source in modal_cfgs:
             print(
                 f"[launcher] every successful learner ran on Modal ({source}); its "

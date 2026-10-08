@@ -203,3 +203,7 @@
 - [ ] 7.2 [X；依赖7.1] 设计运行中扩池/缩池的云就绪→资源认证→pool提交/排空→释放顺序；验收：区分云供给慢路径与岛内快路径，worker增减不等于DiLoCo成员变化，记录成本与回退边界，不在本轮实现。
   - 完成记录（2026-09-29 INFRA，已实现（设计文档），依赖 7.1（及 1.5、3.8）未满足，未勾选）：f-design.md §2。内容包括：区分云供给慢路径与岛内快路径；扩池顺序为云就绪→资源认证→pool 提交，缩池顺序为排空→释放；失败矩阵；worker 增减不等于 DiLoCo 成员变化；成本记录与回退边界。本轮不实现。
 - [ ] 7.3 [X；依赖7.2] 形成跨岛分配、多云、DiLoCo成员变更的独立后续任务并对照现有云change；验收：不重复provider能力、不把容器重启当岛内切换、不预设每次全局barrier。
+
+## 8. S17 夜间小修（N16）
+
+- [x] 8.1 单岛、不同步（`--rl-single-island-no-sync`）、岛跑在 Modal 上时，岛成功 launcher 却返回 2（V1 verl、Miles s17-g1-base 都出现）。根因：`launcher.run` 收尾取产物时，Modal 岛的 `~/yeto-output` 无法用 ssh 拉回、又没有同步服务检查点，这条分支无条件 `return 2`，把"没有可拉回的产物"当成了运行失败。改法：仍打印原说明；没有要求 `--output` 时按岛结果返回（有岛失败 1，否则 0）；显式给了 `--output` 而无法交付时仍返回 2。失败语义不变：岛失败 4、事件记录不完整 3（在这条分支之前已返回）、Modal 容器更换、停机未确认 5 都不受影响。证据：tests/test_rl_launcher_island_failure.py 新增 3 条（成功→0、带 --output→2、失败→4 / 记录不完整→3），test_rl_algorithm_provenance 中原断言 2 的用例改为 0；相关 9 个测试文件 169 过，唯一失败 `test_export_records_algorithm_like_the_event` 在基线上同样失败。
