@@ -164,18 +164,37 @@ class ModalVolumeStore(CheckpointStore):
 
     def commit(self) -> float:
         """Explicit commit; a failing commit raises (the sync then reports store_synced
-        False and LATEST is not trusted by this launch's report). Modal still commits
-        in the background and at container exit (docs), which a later launch sees."""
+        False). In the island container the learner's Python cannot import the Modal
+        client, so the commit runs in the Modal runner's interpreter
+        (``YETO_MODAL_PYTHON`` / ``YETO_MODAL_SYSPATH``, exported by modal_runner)."""
         started = time.monotonic()
-        self._volume().commit()
+        if self._factory is None and os.environ.get("YETO_MODAL_PYTHON"):
+            self._runner_call("commit")
+        else:
+            self._volume().commit()
         self.commits += 1
         return time.monotonic() - started
+
+    def _runner_call(self, verb: str) -> None:
+        import subprocess
+
+        env = dict(os.environ)
+        env["PYTHONPATH"] = os.environ.get("YETO_MODAL_SYSPATH", "")
+        code = ("import sys, modal; modal.Volume.from_name(sys.argv[1])." + verb + "()")
+        done = subprocess.run([os.environ["YETO_MODAL_PYTHON"], "-c", code, self.volume_name],
+                              env=env, capture_output=True, text=True, timeout=600)
+        if done.returncode != 0:
+            raise RuntimeError(f"modal volume {verb} via the runner interpreter failed "
+                               f"(rc {done.returncode}): {done.stderr[-2000:]}")
 
     commits = 0
 
     def reload(self) -> None:
         try:
-            self._volume().reload()
+            if self._factory is None and os.environ.get("YETO_MODAL_PYTHON"):
+                self._runner_call("reload")
+            else:
+                self._volume().reload()
         except Exception as exc:  # noqa: BLE001 - reload is best effort (open files block it)
             logging.getLogger(__name__).warning("modal volume reload failed: %r", exc)
 

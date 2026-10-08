@@ -470,3 +470,30 @@ def test_preempt_signal_writes_only_a_marker_and_hands_the_signal_on(tmp_path):
         assert not (store.root / rs.LATEST).exists()  # no cut attempted in the grace window
     finally:
         signal.signal(signal.SIGUSR1, old)
+
+
+def test_modal_commit_goes_through_the_runner_interpreter(tmp_path, monkeypatch):
+    """G2 A: the learner's Python has no Modal client deps; the commit runs in the
+    runner's interpreter with the runner's import path (a fake modal module here)."""
+    import sys
+
+    fake = tmp_path / "pkg"
+    fake.mkdir()
+    log = tmp_path / "calls.txt"
+    (fake / "modal.py").write_text(
+        "class _V:\n"
+        "    def __init__(self, n): self.n = n\n"
+        f"    def commit(self): open({str(log)!r}, 'a').write('commit ' + self.n + '\\n')\n"
+        f"    def reload(self): open({str(log)!r}, 'a').write('reload ' + self.n + '\\n')\n"
+        "class Volume:\n"
+        "    @staticmethod\n"
+        "    def from_name(n): return _V(n)\n")
+    monkeypatch.setenv("YETO_MODAL_PYTHON", sys.executable)
+    monkeypatch.setenv("YETO_MODAL_SYSPATH", str(fake))
+    store = rs.ModalVolumeStore(tmp_path / "s", "yeto-ckpt")
+    store.reload()
+    assert store.commit() >= 0 and store.commits == 1
+    assert log.read_text().splitlines() == ["reload yeto-ckpt", "commit yeto-ckpt"]
+    monkeypatch.setenv("YETO_MODAL_SYSPATH", str(tmp_path / "nothing"))
+    with pytest.raises(RuntimeError, match="runner interpreter failed"):
+        store.commit()

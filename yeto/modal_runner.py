@@ -611,6 +611,11 @@ def island_main(cfg_json: str) -> int:
     else:
         rank, ips, all_ips = 0, ["127.0.0.1"], {}
     env = {**os.environ, **cfg.envs, **skypilot_env(rank, ips, cfg.gpus_per_node), "HOME": "/root"}
+    # rl-resume-from-checkpoint: the learner's own Python cannot import the Modal client
+    # (G2 A: "No module named 'grpclib'"); it commits the store Volume through this
+    # runner's interpreter and import path instead.
+    env["YETO_MODAL_PYTHON"] = sys.executable
+    env["YETO_MODAL_SYSPATH"] = os.pathsep.join(p for p in sys.path if p)
     print(f"[modal-island {cfg.learner_id}] rank {rank}/{len(ips)} starting (node ips {ips})", flush=True)
     # The launcher watches this line: a second, different id on the same call means Modal
     # moved the island to a new container (preemption / reschedule) and re-ran the script.
