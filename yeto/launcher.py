@@ -2293,6 +2293,18 @@ def _prepare_rl_args(
         raise ValueError(
             "--codex-reasoning-effort/--codex-backend-profile requires a signed Codex agent"
         )
+    if getattr(args, "codex_exclude_reasoning_from_loss", False):
+        if custom_agent not in SIGNED_CODEX_AGENTS:
+            raise ValueError(
+                "--codex-exclude-reasoning-from-loss requires a signed Codex agent"
+            )
+        from .rl.codex_backend import stock_codex_reasoning_markers
+
+        if stock_codex_reasoning_markers(codex_backend_profile) is None:
+            raise ValueError(
+                f"Codex profile {codex_backend_profile!r} declares no reasoning "
+                "markers; --codex-exclude-reasoning-from-loss is unavailable"
+            )
     secrlenv_infrastructure_replacements = getattr(
         args, "secrlenv_max_infrastructure_replacements", None
     )
@@ -3781,6 +3793,8 @@ def make_miles_island_task(
                 " --codex-backend-profile "
                 f"{shlex.quote(args.codex_backend_profile)}"
             )
+        if getattr(args, "codex_exclude_reasoning_from_loss", False):
+            flags += " --codex-exclude-reasoning-from-loss"
         if getattr(args, "codex_reasoning_effort", None):
             # The learner's _preflight_codex_harness re-validates the stock
             # profile (xhigh) and fails closed without it.

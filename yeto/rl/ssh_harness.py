@@ -583,12 +583,13 @@ def _codex_harness_contract(namespace, args) -> dict[str, Any]:
             raise HarnessError(
                 "Yeto Codex harness adapter source does not match its pin"
             )
-    from .codex_backend import stock_codex_backend_contract
+    from .codex_backend import stock_codex_backend_contract_with_reasoning_policy
 
     profile_name = getattr(args, "codex_backend_profile", None) or args.tito_model
-    backend = stock_codex_backend_contract(
+    backend = stock_codex_backend_contract_with_reasoning_policy(
         profile_name,
         args.rollout_max_response_len,
+        not getattr(args, "codex_exclude_reasoning_from_loss", False),
     )
     contract = {
         "agent_function_path": CODEX_HARNESS_AGENT,
@@ -697,7 +698,7 @@ def _validate_codex_harness(value: Any, learner: dict[str, Any]) -> None:
         if not path.is_absolute() or ".." in path.parts:
             raise HarnessError(f"stock Codex contract has an invalid {name}")
     from .codex_backend import (
-        stock_codex_backend_contract,
+        stock_codex_backend_contract_with_reasoning_policy,
         validate_stock_codex_fields,
     )
 
@@ -705,9 +706,10 @@ def _validate_codex_harness(value: Any, learner: dict[str, Any]) -> None:
     profile_name = str(
         learner.get("codex_backend_profile") or learner.get("tito_model", "")
     )
-    expected_backend = stock_codex_backend_contract(
+    expected_backend = stock_codex_backend_contract_with_reasoning_policy(
         profile_name,
         learner.get("rollout_max_response_len"),
+        not learner.get("codex_exclude_reasoning_from_loss", False),
     )
     if backend != expected_backend:
         raise HarnessError("stock Codex backend/TITO contract drifted")
@@ -1852,6 +1854,9 @@ def prepare(namespace) -> Path:
             "cybergym_reward_view": os.environ.get("CYBERGYM_REWARD_VIEW", "train"),
         },
     }
+    if getattr(args, "codex_exclude_reasoning_from_loss", False):
+        # S17 WP6: only present when opted out, so default plans are unchanged.
+        plan["learner"]["codex_exclude_reasoning_from_loss"] = True
     final_ack_timeout_s = getattr(namespace, "final_ack_timeout_s", None)
     if final_ack_timeout_s is not None:
         plan["final_ack_timeout_s"] = final_ack_timeout_s
@@ -3345,6 +3350,8 @@ def _learner_argv(plan: dict[str, Any], learner_id: int) -> list[str]:
         if learner.get("tito_allowed_append_roles"):
             values.append("--tito-allowed-append-roles")
             values.extend(learner["tito_allowed_append_roles"])
+    if learner.get("codex_exclude_reasoning_from_loss"):
+        values.append("--codex-exclude-reasoning-from-loss")
     if learner["trust_remote_code"]:
         values.append("--trust-remote-code")
     return values

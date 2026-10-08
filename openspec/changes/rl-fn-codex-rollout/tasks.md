@@ -30,4 +30,13 @@
 
 - [ ] 3.1 [CPU] `tests/multinode_gpu/fntrain.sh` 与 `infra-drafts/FN-TRAIN-PLAN.md` §2 参数表：奖励源改 codex 五件套 + `tbench_reward`，数据改 TB2/TB2.1 全量（Q3），`math_reward` 标注为冒烟专用；按 2.2 的时长分解重估首跑健康门费用。验收：`fntrain.sh plan` 渲染 argv 含 codex 五件套且 `_prepare_rl_args` 通过；FN-TRAIN-PLAN 预算表更新并标 [估算]。依赖：2.1 PASS。估算：2 h。
 - [ ] 3.2 [CPU] 多岛前置：A16 多岛 GPU 验收与 X5 drain 归 `rl-infra-spec` 3.3；本 change 在 progress 登记依赖与解除条件。估算：0.5 h。
-- [ ] 3.3 [CPU] 收尾：上游 `rl-codex-harness-rollout` tasks.md 5.1 / 5.2 / 9.2 按本 change 证据勾选或改写；`rl-algo-supplement` §14 行状态更新；`CODEX-STATUS-S14.md` A7 行改为"已恢复为目标，进度见本 change"。估算：0.5 h。
+- [ ] 3.3 [CPU] 收尾（S17 WP6：上游 5.1/5.2 已勾选，2.2 亦已勾选；9.2、`rl-algo-supplement` §14、CODEX-STATUS-S14 A7 仍待做）：上游 `rl-codex-harness-rollout` tasks.md 5.1 / 5.2 / 9.2 按本 change 证据勾选或改写；`rl-algo-supplement` §14 行状态更新；`CODEX-STATUS-S14.md` A7 行改为"已恢复为目标，进度见本 change"。估算：0.5 h。
+
+## 4. S17 补充（WP6，2026-10-08）
+
+- [x] 4.1 [Y][CPU] 思维链不计入损失的开关（默认计入）：`--codex-exclude-reasoning-from-loss`；逻辑在 `yeto/rl/harness/reasoning_loss_mask.py`，挂在 ports 路径 `--rollout-sample-filter-path` 钩子 `rollout_meta_hook.record_trained_groups`；profile 声明 `reasoning_markers`；打开时后端契约加 `reasoning_in_loss: false` 与标记，默认契约逐位不变。legacy 引擎拒绝该开关。验收：`tests/test_reasoning_loss_mask.py`（默认不碰样本/契约哈希逐位一致、掩码规则、重复调用不变、对齐断言仍过、同卡与训推分离都装钩子、Miles 两条 rollout 实现都在返回训练样本前调用钩子）。见 design「S17 思维链不计入损失」。
+- [ ] 4.2 [GPU] 4.1 打开时的真机效果（每条样本被置 0 的词元数落 tape、训练 loss 只覆盖非思考段）。**未验证**。
+- [x] 4.3 [CPU] 第三次上卡（medium、上下文 16384）配置与显存复核：`infra-drafts/FN-CODEX-RUN3-REVIEW-S17.md`（含 Miles 初始化断言逐条对照）。结论：16384 显存够 [估算]；medium 需先改 yeto 6 处写死的 xhigh（改法待拍板）。
+- [ ] 4.4 [Y][CPU] reasoning effort 变成运行参数（复核文档 §3.2 甲方案），待拍板；涉及签名文件 `codex_harness_agent.py`，与去耦合阶段 3/4 排顺序。
+- [ ] 4.5 [GPU] 第三次上卡（1 轮，估 $46–60，cap $65），依赖 4.4 与预登记。
+- [ ] 4.6 [CPU] TB2 判分沙箱预装依赖（复核文档 §7 方案），可选，待拍板。

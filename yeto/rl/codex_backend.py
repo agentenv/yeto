@@ -114,7 +114,15 @@ def _fn_profile(variant: str, model: str, revision: str) -> dict[str, Any]:
         # ``qwen3.8_small_and_flash_next_fixed.jinja`` renders every assistant
         # <think> block when ``preserve_thinking`` is undefined or true.
         "keeps_history_reasoning": True,
+        "reasoning_markers": _QWEN_REASONING_MARKERS,
     }
+
+
+# S17 WP6: reasoning block markers used by the optional "reasoning tokens do
+# not count toward the loss" switch (``yeto/rl/harness/reasoning_loss_mask.py``).
+# Token strings, resolved to ids by the rollout tokenizer (fail closed if they
+# are not single tokens).  Profiles without markers cannot opt out.
+_QWEN_REASONING_MARKERS = ("<think>", "</think>")
 
 
 _PROFILES: dict[str, dict[str, Any]] = {
@@ -148,6 +156,7 @@ _PROFILES: dict[str, dict[str, Any]] = {
         "model_revision": QWEN38_REVISION,
         "identity_label": "Qwen3.8",
         "keeps_history_reasoning": True,
+        "reasoning_markers": _QWEN_REASONING_MARKERS,
     },
     "qwen35": {
         "model": "qwen35",
@@ -165,6 +174,7 @@ _PROFILES: dict[str, dict[str, Any]] = {
         # ``qwen3.5_fixed.jinja`` + ``preserve_thinking: True`` keeps every
         # historical <think> block (rl-fn-codex-rollout D2 / upstream 5.1).
         "keeps_history_reasoning": True,
+        "reasoning_markers": _QWEN_REASONING_MARKERS,
     },
     # This is a distinct, closed model identity while deliberately reusing
     # Miles' model-family-level Qwen3.5 TITO implementation.  The profile name
@@ -183,6 +193,7 @@ _PROFILES: dict[str, dict[str, Any]] = {
         "identity_label": "Qwen3.5-0.8B",
         "tito_model": "qwen35",
         "keeps_history_reasoning": True,
+        "reasoning_markers": _QWEN_REASONING_MARKERS,
     },
     "qwen38_next": _fn_profile("full", QWEN38_NEXT_MODEL, QWEN38_NEXT_REVISION),
     "qwen38_next_4layer": _fn_profile(
@@ -209,6 +220,47 @@ def stock_codex_keeps_history_reasoning(profile_name: str) -> bool:
     if not isinstance(value, bool):
         raise ValueError("keeps_history_reasoning must be a bool")
     return value
+
+
+def stock_codex_reasoning_markers(profile_name: str) -> tuple[str, str] | None:
+    """(open, close) reasoning marker strings of one profile, or ``None``."""
+
+    markers = stock_codex_backend_profile(profile_name).get("reasoning_markers")
+    if markers is None:
+        return None
+    if (
+        not isinstance(markers, (tuple, list))
+        or len(markers) != 2
+        or not all(isinstance(m, str) and m for m in markers)
+    ):
+        raise ValueError("reasoning_markers must be two non-empty strings")
+    return (markers[0], markers[1])
+
+
+def stock_codex_backend_contract_with_reasoning_policy(
+    profile_name: str,
+    max_tokens: int,
+    reasoning_in_loss: bool = True,
+) -> dict[str, Any]:
+    """``stock_codex_backend_contract`` plus the reasoning-loss policy.
+
+    Default (reasoning counted) returns exactly ``stock_codex_backend_contract``
+    so existing contracts and hashes are unchanged; opting out adds
+    ``reasoning_in_loss: False`` and the profile's markers, and requires them.
+    """
+
+    contract = stock_codex_backend_contract(profile_name, max_tokens)
+    if reasoning_in_loss:
+        return contract
+    markers = stock_codex_reasoning_markers(profile_name)
+    if markers is None:
+        raise ValueError(
+            f"stock Codex profile {profile_name!r} declares no reasoning_markers; "
+            "reasoning cannot be excluded from the loss"
+        )
+    contract["reasoning_in_loss"] = False
+    contract["reasoning_markers"] = list(markers)
+    return contract
 
 
 def stock_codex_lora_layout(profile_name: str) -> tuple[str, int]:

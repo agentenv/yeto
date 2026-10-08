@@ -128,8 +128,13 @@ def record_trained_groups(args: Any, data: Sequence[Sequence[Any]]) -> None:
     """
 
     from yeto.rl.algos.sample_filters import apply_sample_filters
+    from yeto.rl.harness.reasoning_loss_mask import apply_from_args as apply_reasoning_loss_policy
 
     apply_sample_filters(args, data)
+    # Side effect beyond filtering (S17 WP6): with --codex-exclude-reasoning-from-loss
+    # this sets loss_mask 1 -> 0 on generated reasoning tokens of the kept samples
+    # (before Miles converts them to train data). Default: returns at once, no sample touched.
+    apply_reasoning_loss_policy(args, data)
     setattr(args, _TRAINED_ATTR, {_group_key(group) for group in data})
 
 

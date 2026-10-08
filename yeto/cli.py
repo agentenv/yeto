@@ -663,6 +663,14 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         ),
     )
     rl.add_argument(
+        "--codex-exclude-reasoning-from-loss",
+        action="store_true",
+        help=(
+            "stock Codex harness only: generated reasoning (<think> blocks) "
+            "gets loss_mask 0; default off = reasoning counts toward the loss"
+        ),
+    )
+    rl.add_argument(
         "--tito-allowed-append-roles",
         nargs="+",
         choices=["tool", "user", "system"],
