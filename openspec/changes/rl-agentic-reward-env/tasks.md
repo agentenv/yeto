@@ -33,4 +33,4 @@
 - [ ] 3.4 WP3 名单文件定稿后提交到 `data/eval/` 并在运行配置钉 sha256。
 
 ## 4. GPU 验证（并入 FN codex 第三次上卡，不单独开卡）
-- [ ] 4.1 FN codex 第三次上卡改用 `yeto.cloud.modal_reward_env:modal_provider`，记录每轮 rollout 中判分段时间，与 r2（未预装）对比。依赖 2.2 通过。
+- [x] 4.1 FN codex 第三次上卡改用 `yeto.cloud.modal_reward_env:modal_provider`，记录每轮 rollout 中判分段时间，与 r2（未预装）对比。依赖 2.2 通过。**[实测]** `s17-fncodex-r3-20261008a`：24 条全部判分成功（9 条得 1），整段生成（含沙箱、Codex 回合、判分）224 s，r2 为 688 s。单条判分耗时事件里没有字段，**未单独采到**（后续在 agent_metrics 带 evaluate_time）。
