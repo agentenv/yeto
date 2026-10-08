@@ -11,7 +11,7 @@
 ## 2. agent 包与 preflight 入库
 
 - [x] 2.1 [Y] 定位 legacy `yeto_miles_secrlenv` 与 `codex_openenv_*_agent_function` 源码（agentenv/miles examples、镜像内 site-packages）；找到就搬到 `yeto/rl/harness/codex/`，找不到就按 `tests/test_secrlenv_codex_harness.py` 重写，并在 progress 中标“重写”。验收：原测试文件的全部用例迁到新包后在 CPU 上通过。 **完成记录（已实现 / CPU 通过：legacy 包从 5bfc011 搬入 `yeto/rl/harness/codex/`（出处与 sha256 见 `pins.py`），`codex_openenv_*` 三模块重写；原 34 用例改 import 后 30 通过 + 4 skip（需 Codex 0.145.0 二进制）；证据 CODEX-PROGRESS §阶段 2）**
-- [ ] 2.2 [Y] 把 `_preflight_codex_harness`、`_verify_live_codex_app_server_schema`、`tbench_direct_preflight.validate_hmac_key_source` 抽到 `yeto/rl/harness/codex/preflight.py`，legacy 同名函数改为转调。验收：legacy 与新入口对同一组篡改输入（二进制 sha、schema、工具面、密钥权限）给出相同失败；CPU 单测。 **部分完成（新入口 `preflight.preflight_codex_openenv` 已实现 / CPU 通过；legacy 转调以可注入的 `preflight.forward_legacy_openenv_preflight` 提供（同一组输入给出与 legacy 相同的 ValueError 类别），legacy 文件改一行与 `yeto/rl/__init__.py` pin 更新由主 agent 另派 IMG，字段与新 sha 见 `preflight.required_pin_updates()` 与 CODEX-PROGRESS §阶段 3；未勾选）**
+- [x] 2.2 [Y] 把 `_preflight_codex_harness`、`_verify_live_codex_app_server_schema`、`tbench_direct_preflight.validate_hmac_key_source` 抽到 `yeto/rl/harness/codex/preflight.py`，legacy 同名函数改为转调。验收：legacy 与新入口对同一组篡改输入（二进制 sha、schema、工具面、密钥权限）给出相同失败；CPU 单测。 **（S17 WP6 核对 agentenv/main 59f8fb7a 后勾选：`learner._preflight_codex_openenv_adapter` 与 `tbench_direct_preflight` 已转调 `preflight.forward_legacy_openenv_preflight`，`yeto/rl/__init__.py` 的 SECRLENV_* 钉已指向 `yeto/rl/harness/codex/`；原注记保留如下）部分完成（新入口 `preflight.preflight_codex_openenv` 已实现 / CPU 通过；legacy 转调以可注入的 `preflight.forward_legacy_openenv_preflight` 提供（同一组输入给出与 legacy 相同的 ValueError 类别），legacy 文件改一行与 `yeto/rl/__init__.py` pin 更新由主 agent 另派 IMG，字段与新 sha 见 `preflight.required_pin_updates()` 与 CODEX-PROGRESS §阶段 3；未勾选）**
 - [x] 2.3 [IR-1] ports `entry.py` 在模型分配前调用 2.2 的 preflight。验收：CPU 单测，preflight 失败时不触发 placement / 分配调用。 **完成记录（已实现 / CPU 通过：INFRA `entry.preflight_stage` 的 `(miles_args, launch)` 钩子（偏差 1，接受）在 `connect_island_ray` 前运行；harness 侧 `codex.preflight.harness_preflight`（`HARNESS_PREFLIGHT_SPEC` 经 `YETO_HARNESS_PREFLIGHT`/`miles_args.yeto_harness_preflight` 解析）做 reward_scope/agent 函数/compaction/身份/密钥检查并安装 provider 与岛内 boards；失败时 allocator/Ray 调用数 0。`tests/test_rl_ir_harness.py::test_ir1_harness_preflight_*`、`tests/test_harness_codex_openenv.py::test_entry_preflight_stage_runs_codex_preflight_before_allocation_and_installs_boards`）**
 
 ## 3. tool-wait 与在途计数
@@ -30,8 +30,9 @@
 
 ## 5. reasoning 与模板一致性
 
-- [ ] 5.1 [Y] 每个受支持的 tito_model 声明 `keeps_history_reasoning`，并加一个离线测试：用 fork 的 `chat_template_verify.py` 渲染多轮带 think 的历史，比对声明。验收：CPU 测试，覆盖 legacy 用到的 Qwen3.5 / Qwen3.8 profile 与一个 Qwen3 模板。
-- [ ] 5.2 [Y] 网关在 `keeps_history_reasoning=false` 时按模板原因另起 chain，且 reasoning 生成段 mask=1。验收：CPU 单测，检查 mask 与断链原因计数。
+- [x] 5.1 [Y] 每个受支持的 tito_model 声明 `keeps_history_reasoning`，并加一个离线测试：用 fork 的 `chat_template_verify.py` 渲染多轮带 think 的历史，比对声明。验收：CPU 测试，覆盖 legacy 用到的 Qwen3.5 / Qwen3.8 profile 与一个 Qwen3 模板。
+- [x] 5.2 [Y] 网关在 `keeps_history_reasoning=false` 时按模板原因另起 chain，且 reasoning 生成段 mask=1。验收：CPU 单测，检查 mask 与断链原因计数。
+  - S17 WP6 勾选依据（5.1/5.2）：由 rl-fn-codex-rollout 0.2/0.5 完成——`codex_backend` 各 profile 声明 `keeps_history_reasoning`、`tests/test_codex_template_reasoning.py::test_keeps_history_reasoning_declaration_matches_fork_template`、`tests/test_harness_gateway.py::test_template_drops_reasoning_breaks_once_with_generated_mask_one`。
 
 ## 6. 奖励契约与信任分层
 

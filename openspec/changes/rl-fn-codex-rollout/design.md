@@ -107,3 +107,11 @@ Goals：FN（4 层与全尺寸）能用与 smoke-12 相同的 A 路径跑 Termin
 - 决定：新增 `codex_harness_agent.TB2_BASE_INSTRUCTIONS`（sha256 `72bea89b…cd37`，钉在 `yeto.rl.CODEX_TB2_BASE_INSTRUCTIONS_SHA256`）。TB2 环境提供者在每个租约的 worker 环境里设置 `YETO_CODEX_INSTRUCTIONS_FAMILY=tb2` 与签名哈希 `YETO_CODEX_TB2_BASE_INSTRUCTIONS_SHA256`，harness 据此选用 TB2 提示；哈希不符或未知 family 时拒绝运行。其它路径与 `CODEX_BASE_INSTRUCTIONS_SHA256`（`1c183656…a846`）不变，有单测。`CODEX_HARNESS_AGENT_SHA256` 随文件修改重新钉住。
 - 任务说明取自 `instruction.md`（`task_prompt()`），`tb2_provider.preflight_task_prompts` 在岛上 preflight 与启动脚本 PLAN_ONLY 两处拒绝"没有任务说明 / 字符串化 chat 列表"的数据行。
 - 判据：judge 的 kl_max 0.01 → 0.03（阶段 2 未训练的 v0 已是 0.0224，是推理端与训练端的数值差）。
+
+## S17 思维链不计入损失（WP6，2026-10-08）
+
+- 决定：开关 `--codex-exclude-reasoning-from-loss`，**默认关闭（思维链计入损失）**。打开时，对要训练的样本，把位于思考块（profile 声明的 `reasoning_markers`，Qwen 系为 `<think>`/`</think>`）内的生成词元 `loss_mask` 由 1 置 0；开标记若是模型生成的也置 0，**闭标记保留**（它是"停止思考、开始行动"的决策）；块状态在整条词元序列上跟踪，所以生成提示里模板预先打开的 `<think>`、合并后的多回合样本、被截断未闭合的块都能处理；只做 1→0，不改词元、logprob、长度，重复调用结果不变，`alignment` 契约（mask=1 ⊆ 生成段）仍成立。
+- 挂载点：ports 路径固定使用上游 `agentic_tool_call.generate`（`miles_adapter/config.py:243`），yeto 的 `codex_openenv_generate` 在 FN 训练路径上不会被调用；Miles v1 会话服务没有样本后处理钩子。因此挂在 yeto 已有的 `--rollout-sample-filter-path` 钩子 `rollout_meta_hook.record_trained_groups`。Miles 两种 rollout 实现（`sglang_rollout.py`、`inference_rollout_train.py`）都在返回训练样本之前调用它，转训练数据在其后（`rollout_executor`）；同卡与训推分离走同一代码路径。**这给原本只做过滤/记账的钩子增加了"改样本"的副作用**，已在代码注释写明；默认关闭时直接返回、不碰任何样本。
+- 不改 Miles（`merge.py:127` 方案需改 fork 并重建镜像）。legacy 引擎不装该钩子，learner 对 legacy 拒绝此开关，避免静默无效。
+- 契约：默认时后端契约与改动前逐位一致（单测按全部 profile 比较哈希）；打开时契约多出 `reasoning_in_loss: false` 与 `reasoning_markers`，learner 与 ssh_harness 两侧用同一函数生成与比对。标记字符串在 rollout 进程用模型分词器解析，不是单个词元即拒绝。
+- 真机效果未验证（tasks 4.2）。

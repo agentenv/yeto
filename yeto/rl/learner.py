@@ -128,6 +128,7 @@ def parse_args(argv=None):
     parser.add_argument("--session-server-port", type=int, nargs="+", default=None)
     parser.add_argument("--tito-model", default=None)
     parser.add_argument("--codex-backend-profile", default=None)
+    parser.add_argument("--codex-exclude-reasoning-from-loss", action="store_true")
     parser.add_argument(
         "--tito-allowed-append-roles",
         nargs="+",
@@ -1014,14 +1015,15 @@ def _preflight_codex_harness(args) -> None:
     ):
         raise ValueError("stock Codex OpenEnv surface identity drifted")
     from .codex_backend import (
-        stock_codex_backend_contract,
+        stock_codex_backend_contract_with_reasoning_policy,
         validate_stock_codex_fields,
     )
 
     profile_name = getattr(args, "codex_backend_profile", None) or args.tito_model
-    expected_backend = stock_codex_backend_contract(
+    expected_backend = stock_codex_backend_contract_with_reasoning_policy(
         profile_name,
         args.rollout_max_response_len,
+        not getattr(args, "codex_exclude_reasoning_from_loss", False),
     )
     validate_stock_codex_fields(
         tito_model=args.tito_model,
@@ -2324,6 +2326,23 @@ def run_miles(
         miles_argv.extend(extra_argv)
         miles_args = _parse_miles_args(miles_argv)
 
+    if getattr(args, "codex_exclude_reasoning_from_loss", False):
+        # S17 WP6: read by rollout_meta_hook.record_trained_groups in the
+        # rollout process (both engines, with or without Yeto policy
+        # sync); absent (default) == reasoning counted, no-op.
+        if rl_engine != "ports":
+            # Only the ports path installs that hook; refuse instead of a
+            # silent no-op on legacy.
+            raise ValueError("--codex-exclude-reasoning-from-loss requires --rl-engine ports")
+        miles_args.yeto_rl_codex_reasoning_in_loss = False
+        from .codex_backend import stock_codex_reasoning_markers
+
+        miles_args.yeto_rl_codex_reasoning_markers = list(
+            stock_codex_reasoning_markers(
+                getattr(args, "codex_backend_profile", None) or args.tito_model
+            )
+            or ()
+        )
     if yeto_policy_sync:
         if dense_full:
             from ..provenance import file_sha256

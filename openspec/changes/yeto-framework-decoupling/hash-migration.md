@@ -54,3 +54,8 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
 - 核对：把 `MILES_NEXT_COMMIT` 临时改回 `c35702ee…` 重算，8 个配置的 `ports_runtime_fingerprint` 与旧样本逐一相等，确认指纹变化只来自 Miles 提交钉。
 - #124（发布提速）rebase 到 main 之后，与 main 重算出的样本逐字节相同，#124 自身不改任何标准样本。
 - 已用 `python tests/decoupling_golden.py --write` 重新生成 8 个配置样本。
+
+## #127 合入（codex 思维链不计入损失开关，S17 合并，2026-10-08）
+
+- 唯一变化：`yeto/rl/engine/miles_adapter/rollout_meta_hook.py` 源码哈希 `5b4d802c…` → `be53a608…`（全部 8 个配置的 `plugins` 里该文件 3 个入口）。原因：`record_trained_groups` 增加调用 `yeto.rl.harness.reasoning_loss_mask.apply_from_args`（默认不开时直接返回，不改样本）。`algorithm_sha256`、契约哈希、`ports_runtime_fingerprint`、Miles 命令行均不变。
+- 合并时顺带的边界修正：#127 原版在中立核心 `yeto/rl/harness/reasoning_loss_mask.py` 里 import 了 `miles.utils.processing_utils`，违反 import 边界（白名单只减不增）。改为由 Miles 适配层 `rollout_meta_hook._load_miles_tokenizer` 加载分词器并以 `tokenizer_loader` 传入；中立核心未拿到加载器时报错拒绝（不静默把思维链算进损失）。行为不变。
