@@ -4163,6 +4163,103 @@ mod tests {
         }
     }
 
+    // --- 0.8a: legacy equivalence (strict synchronous rounds) ---------------
+
+    #[test]
+    fn legacy_contract_encoding_appends_nothing() {
+        let mut encoded = vec![1, 2, 3];
+        crate::elastic::IslandSchedulingMode::Legacy.encode_contract(&mut encoded);
+        assert_eq!(encoded, vec![1, 2, 3]);
+        assert_eq!(
+            round_test_config(8).island_scheduling,
+            crate::elastic::IslandSchedulingMode::Legacy
+        );
+    }
+
+    #[test]
+    fn legacy_round_needs_every_learner_and_adds_no_extra_wait() {
+        // Strict legacy: quorum == learners, grace 0.
+        let first = member(0, 10);
+        let second = member(1, 20);
+        let mut round = test_round(vec![first, second]);
+        round.quorum_size = 2;
+        round.quorum_deadline = Instant::now() + Duration::from_secs(3600);
+        round.pushes.insert(first, test_push(5));
+        // One of two arrived: keep waiting (no capacity-fraction step).
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Wait);
+        round.pushes.insert(second, test_push(5));
+        // Arrived == learners: complete at once, an hour before the deadline.
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Complete);
+    }
+
+    #[test]
+    fn legacy_round_timeout_never_merges_a_partial_quorum() {
+        let first = member(0, 10);
+        let mut round = test_round(vec![first, member(1, 20)]);
+        round.quorum_size = 2;
+        round.pushes.insert(first, test_push(5));
+        round.quorum_deadline = Instant::now() - Duration::from_millis(1);
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Restart);
+        assert!(next_committable_round(&[round], Instant::now()).is_none());
+    }
+
+    #[test]
+    fn legacy_strict_round_rejects_a_late_delta_without_carrying_it() {
+        let only = member(0, 10);
+        let mut rounds = vec![test_round(vec![only])];
+        assert_eq!(
+            route_push(&mut rounds, only, test_exact_push(1, 4), Some(0), true),
+            PushDisposition::StaleBase
+        );
+        assert!(rounds[0].pushes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn legacy_server_rejects_every_elastic_frame_type() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let key = b"k".to_vec();
+        for msg_type in [MSG_JOIN, MSG_LEAVE, MSG_LEASE_HEARTBEAT, MSG_SAMPLE_INDEX,
+                         MSG_DELTA_READY, MSG_ELASTIC_INIT, MSG_DELTA_TENSOR] {
+            let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+            let mut config = round_test_config(1);
+            config.port = port;
+            config.island_hmac_key = Some(key.clone());
+            let server = tokio::spawn(run(config));
+            let mut stream = None;
+            for _ in 0..100 {
+                if let Ok(s) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+                    stream = Some(s);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let mut stream = stream.expect("legacy syncer did not start");
+            // A correctly sealed elastic payload (epoch 0) still must not be
+            // accepted: legacy only knows HELLO/DATA_HELLO as a first frame.
+            let payload = crate::elastic::seal(&key, msg_type, 0u64.to_le_bytes().to_vec());
+            let mut frame = MAGIC.to_le_bytes().to_vec();
+            frame.push(msg_type);
+            frame.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+            frame.extend_from_slice(&payload);
+            stream.write_all(&frame).await.unwrap();
+            // Legacy answers with one MSG_ERROR naming the bad first frame
+            // and then closes the connection.
+            let mut reply = Vec::new();
+            tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut reply))
+                .await
+                .expect("legacy syncer kept the connection open")
+                .ok();
+            assert_eq!(reply.get(4), Some(&MSG_ERROR), "type {msg_type}");
+            let text = String::from_utf8_lossy(&reply[13..]);
+            assert!(
+                text.contains(&format!("first frame must be HELLO/DATA_HELLO, got {msg_type}")),
+                "type {msg_type}: {text}"
+            );
+            assert!(!server.is_finished(), "type {msg_type}: server exited");
+            server.abort();
+        }
+    }
+
     #[tokio::test]
     async fn elastic_mode_requires_an_hmac_key() {
         let mut config = round_test_config(1);
