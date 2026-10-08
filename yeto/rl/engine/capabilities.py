@@ -169,6 +169,11 @@ class EngineCapabilities:
     # (--rl-allow-unverified-mechanism, design D11). Recorded in the
     # attestation so every artifact shows it contains unverified mechanisms.
     unverified_mechanisms: frozenset[str] = frozenset()
+    # Algorithm spec fields (dotted paths, ``AlgorithmSpec.set_fields``) this
+    # backend can honour (decoupling 4.5). None = not declared: no field-level
+    # restriction (every existing backend; attestation bytes unchanged). A
+    # declared set refuses, before launch, any spec that sets a field outside it.
+    algorithm_fields: frozenset[str] | None = None
     extra: Mapping[str, Any] = field(default_factory=dict, compare=False)
     # Adapter-declared behaviour (decoupling 2.6/2.7); runtime-only, not serialized.
     traits: BackendTraits = field(default_factory=BackendTraits, compare=False)
@@ -198,6 +203,8 @@ class EngineCapabilities:
             if not src or not dst or src == dst or kind not in EDGE_KINDS:
                 raise ValueError(f"invalid certified edge {(src, dst, kind)}")
         s(self, "certified_edges", edges)
+        if self.algorithm_fields is not None:
+            s(self, "algorithm_fields", _names(self.algorithm_fields, None, "algorithm fields"))
         s(self, "optimized_paths", _names(self.optimized_paths, None, "optimized paths"))
         for dimension in R0_MECHANISMS:
             s(self, dimension, _names(getattr(self, dimension), None, dimension))
@@ -262,6 +269,8 @@ class EngineCapabilities:
             **{dimension: sorted(getattr(self, dimension)) for dimension in R0_MECHANISMS},
             "execution": self.execution.to_dict(),
             "unverified_mechanisms": sorted(self.unverified_mechanisms),
+            **({"algorithm_fields": sorted(self.algorithm_fields)}
+               if self.algorithm_fields is not None else {}),
         }
 
     def to_json(self) -> str:
@@ -296,6 +305,7 @@ class EngineCapabilities:
             },
             execution=ExecutionCapabilities.from_dict(payload.get("execution")),
             unverified_mechanisms=payload.get("unverified_mechanisms", []),
+            algorithm_fields=payload.get("algorithm_fields"),
         )
 
     @classmethod
@@ -375,6 +385,14 @@ class EngineCapabilities:
                 problems.append(
                     f"execution mode may produce policy age {age} but the algorithm tolerates "
                     f"max_policy_staleness={execution.max_policy_staleness}"
+                )
+        set_fields = getattr(algorithm, "set_fields", None)
+        if self.algorithm_fields is not None and callable(set_fields):
+            unsupported = sorted(set_fields() - self.algorithm_fields)
+            if unsupported:
+                problems.append(
+                    f"algorithm fields {unsupported} not supported by this backend "
+                    f"(declared algorithm_fields: {sorted(self.algorithm_fields)})"
                 )
         rejections = getattr(algorithm, "rejections", None)
         if callable(rejections):

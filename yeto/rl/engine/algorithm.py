@@ -1210,6 +1210,28 @@ class AlgorithmSpec:
             return core[tail]
         return _FIELDS[head][tail].default
 
+    def set_fields(self) -> frozenset[str]:
+        """Dotted paths whose value differs from :meth:`effective_default_at`
+        (decoupling 4.5: what a backend's ``algorithm_fields`` must cover).
+
+        Covers every core and registered extension field of every group plus
+        ``entropy_coef`` and ``plugins``; a default spec returns an empty set.
+        """
+
+        load_extensions()
+        out = set()
+        for head, group in _GROUPS.items():
+            names = [f.name for f in fields(group) if f.name != "ext"]
+            names += list(_FIELDS.get(head, {}))
+            for name in names:
+                path = f"{head}.{name}"
+                if self.get_path(path) != self.effective_default_at(path):
+                    out.add(path)
+        for path in ("entropy_coef", "plugins"):
+            if self.get_path(path) != self.default_at(path):
+                out.add(path)
+        return frozenset(out)
+
     def effective_default_at(self, path: str) -> Any:
         """:meth:`default_at`, except the critic defaults a critic spec fills in
         (rl-algo-critic-family D1): a filled value is not a user choice."""

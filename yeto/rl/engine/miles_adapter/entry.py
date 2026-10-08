@@ -1042,13 +1042,12 @@ def connect_island_ray(*, environ=None, ray_module=None, miles_args=None) -> str
     return address
 
 
-# E2 plan-v2 §0 determinism environment (with Megatron --deterministic-mode).
-# NVTE_ALLOW_NONDETERMINISTIC_ALGO=0: Megatron's --deterministic-mode only
-# setdefaults it in the process that validates the args, while Transformer
-# Engine reads it in each trainer rank (Ray worker); set it here so it reaches
-# every rank through connect_island_ray (A2 follow-up, local-gpu-plan L-2.3).
-DETERMINISM_ENV = {"NCCL_ALGO": "Ring", "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
-                   "NVIDIA_TF32_OVERRIDE": "0", "NVTE_ALLOW_NONDETERMINISTIC_ALGO": "0"}
+# E2 plan-v2 §0 determinism environment (with Megatron --deterministic-mode);
+# the table row lives in the core (decoupling 4.9, yeto.rl.engine.determinism).
+# It reaches every rank through connect_island_ray (A2 follow-up, L-2.3).
+from yeto.rl.engine.determinism import determinism_env as _determinism_env  # noqa: E402
+
+DETERMINISM_ENV = _determinism_env("miles", "nvidia")
 
 
 def resolve_declared_cells(inference_controller: Any, runner: Any,
