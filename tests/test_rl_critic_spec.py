@@ -8,7 +8,8 @@ import json
 import pytest
 import torch
 
-from yeto.rl.algos.critic import critic_argv, critic_run_problems
+from yeto.rl.algos.critic import critic_run_problems
+from yeto.rl.engine.miles_adapter.algo_flag_rows import critic_argv
 from yeto.rl.engine.algorithm import (
     AlgorithmSpec,
     AlgorithmSpecError,

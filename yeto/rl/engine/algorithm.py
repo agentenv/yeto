@@ -1,8 +1,9 @@
 """``AlgorithmSpec``: yeto-owned algorithm description with a canonical SHA256.
 
 Pure Python; no torch/ray/miles imports. The spec is translated to engine
-arguments only by adapters; ``to_legacy_argv`` documents the legacy mapping
-used by ``yeto.rl.learner.build_miles_argv``.
+arguments only by adapters (the legacy mapping used by
+``yeto.rl.learner.build_miles_argv`` is documented by
+``miles_adapter.algorithm_flags.legacy_algorithm_argv``, decoupling 4.3/E14).
 
 Structure (change ``rl-algorithm-capabilities``, design D1/D2/D7):
 
@@ -1210,6 +1211,28 @@ class AlgorithmSpec:
             return core[tail]
         return _FIELDS[head][tail].default
 
+    def set_fields(self) -> frozenset[str]:
+        """Dotted paths whose value differs from :meth:`effective_default_at`
+        (decoupling 4.5: what a backend's ``algorithm_fields`` must cover).
+
+        Covers every core and registered extension field of every group plus
+        ``entropy_coef`` and ``plugins``; a default spec returns an empty set.
+        """
+
+        load_extensions()
+        out = set()
+        for head, group in _GROUPS.items():
+            names = [f.name for f in fields(group) if f.name != "ext"]
+            names += list(_FIELDS.get(head, {}))
+            for name in names:
+                path = f"{head}.{name}"
+                if self.get_path(path) != self.effective_default_at(path):
+                    out.add(path)
+        for path in ("entropy_coef", "plugins"):
+            if self.get_path(path) != self.default_at(path):
+                out.add(path)
+        return frozenset(out)
+
     def effective_default_at(self, path: str) -> Any:
         """:meth:`default_at`, except the critic defaults a critic spec fills in
         (rl-algo-critic-family D1): a filled value is not a user choice."""
@@ -1389,16 +1412,6 @@ class AlgorithmSpec:
             dynamic_sampling_filter=flt,
             dynamic_sampling_max_replacements=limit,
         )
-
-    def to_legacy_argv(self) -> list[str]:
-        """Miles argv fragment emitted by legacy ``build_miles_argv`` for this spec."""
-
-        argv = ["--advantage-estimator", self.advantage_estimator]
-        if self.kl_coef is not None:
-            argv += ["--kl-coef", str(self.kl_coef)]
-        if self.dynamic_sampling_filter is not None:
-            argv += ["--dynamic-sampling-filter-path", self.dynamic_sampling_filter]
-        return argv
 
     def to_legacy_runtime_attrs(self) -> dict[str, Any]:
         """Attributes legacy sets on the Miles namespace (read by the filter)."""
@@ -1619,7 +1632,7 @@ def _reject_critic_not_at_pin(s: AlgorithmSpec) -> str | None:
     # GPU G1 (9.4). --critic-updates-per-step (= --num-critic-epochs) and the
     # classification value loss are in the critic fork pin (algos/critic_fork.py,
     # yeto-critic-family e07e51c07). hl_gauss is translated only by the SAO fork
-    # argv (sao.sao_fork_argv), so it stays refused without policy_objective=sao_dis.
+    # argv (miles_adapter.algo_flag_rows.sao_fork_argv), so it stays refused without policy_objective=sao_dis.
     from yeto.rl.algos.critic_fork import fork_carries_critic_family
 
     if c.value_loss != "mse" and not (

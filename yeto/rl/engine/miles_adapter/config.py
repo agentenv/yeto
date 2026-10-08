@@ -34,7 +34,7 @@ from ..algorithm import (
     STOCK_NONZERO_STD_FILTER,
     AlgorithmSpec,
 )
-from ..run_config import LR_SCHEDULE_FLAGS
+from .lr_schedule import LR_SCHEDULE_FLAGS
 from .algorithm_flags import (
     OBJECTIVE_FLAGS,
     absorb_extra_argv,
@@ -682,7 +682,8 @@ def translate_run_config(
         )
     dynamic_filter = _algorithm_filter(config, algorithm)
 
-    from ..run_config import RECIPE_QWEN3_5, RECIPE_QWEN3_8_NEXT, lr_schedule_argv
+    from ..run_config import RECIPE_QWEN3_5, RECIPE_QWEN3_8_NEXT
+    from .lr_schedule import lr_schedule_argv
 
     geometry = config.geometry
     parallel = config.parallel

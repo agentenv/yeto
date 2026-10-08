@@ -62,6 +62,31 @@
 
 **D10 可中断性四级与调度建议。** 等级定义见 spec `yeto-resource-dimensions`。第一版调度层只输出建议（与岛间调度 change 的 Non-Goals 一致），岛间调度与云层可与 verl 并行。自有集群接入（rl-local-cluster-deploy）推后，等 verl 完成且新集群到手后再做，本 change 只留 SSH/k3s 云提供方接口，不实现。实际开卡仍按现有 `--spot`/`--on-demand` 行为；把建议接到真实开卡另开任务并经用户确认。spot 回收通知 → 岛间调度的退岛 + 引擎 `save_cut`/`remove_engines` 的接缝只定义接口，不实现自动化。
 
+**D11 推理进程里的"轮次元数据/策略令牌/计数器"核心接口由谁注入（任务 4.11，原 3.4）——方案，待用户拍板，未实现。**
+
+背景：下列代码运行在**推理进程**（Miles 的 rollout Ray actor，codex 还会再起子进程）里，直接 import Miles 适配层的 `rollout_meta_hook`：
+- `algos/seq_adv.py` `_current_round_id`/`_report_round`（A2）：读当前策略令牌 `current_policy_token()`、写本轮计数 `record_round_metadata(args, round_id, nonzero_advantages=…)`；
+- `teacher_forcing.py` `_ports_policy_token`（A5）：读策略令牌；另有旧版引擎路径 `yeto.rl.miles._policy_token_for_rollout`；
+- `harness/codex/codex_openenv_generate.py`、`codex_openenv_subprocess_agent_function.py`（**子进程**）：`expected_policy_version(sample)` 与两个键名常量；`codex_openenv_agent_function.py`：`counter_value`（纯函数，可直接挪核心，不涉及注入）。
+
+拟定的核心接口（新文件 `yeto/rl/engine/rollout_meta.py`，只定义、不含任何框架代码）：`current_policy_token() -> str | None`、`expected_policy_version(sample) -> str | None`、`record_round_metadata(args, round_id, **counters)`、键名常量（`expected_policy_version`、`policy_age_violation` 等，字符串值不变，tape 字段不变）、`counter_value`（纯函数，搬家即可）。Miles 实现仍是 `rollout_meta_hook`（不改其源码，避免改其插件哈希）。
+
+待定问题：推理进程（含 codex 子进程）里，核心怎么拿到"Miles 实现"。候选：
+
+| 方案 | 做法 | 优点 | 缺点 |
+|---|---|---|---|
+| A 环境变量 + 后端名注册表（**建议**） | 适配层开岛时在推理进程环境里设 `YETO_RL_BACKEND=miles`（Miles：经 Ray `runtime_env.env_vars` 或岛启动脚本导出；核实：当前仓库里没有代码显式设置 `YETO_ROLLOUT_META_SINK`，推理进程用默认 Ray 具名 actor，因此落点需实施时确认）；核心 `rollout_meta.port()` 首次调用时按名字查表 `{"miles": "yeto.rl.engine.miles_adapter.rollout_meta_hook"}`，用 `importlib` 加载（字符串，不是静态 import，边界检查通过）。与阶段 4 任务 5.4 的 `--rl-backend` 注册表同一张表 | 子进程自动继承环境变量；与 5.4 合一；verl 只需加一行 | 需要决定"变量未设时"的行为（见下） |
+| B 由 Miles 先加载的插件在 import 时自注册 | `rollout_meta_hook` 被 Miles 作为 `--buffer-filter-path` 等加载时调用 `rollout_meta.install(self)` | 不需要环境变量 | 依赖加载顺序；**codex 子进程里不会加载该插件，拿不到实现**——不可行 |
+| C 经 `args` 运行时属性传模块路径 | 适配层用已有的运行时属性机制（`register_runtime_attrs`）把实现模块路径塞进 Miles `args` | 显式、进哈希 | `teacher_forcing`、codex 子进程等调用点拿不到 `args`，要改签名；路径进 argv/契约，改动面大 |
+| D 显式依赖注入（调用方传入端口对象） | 插件包装层把端口对象作为参数传给中立函数 | 最干净 | 插件签名由 Miles 决定，传不进去，只能在包装层做——等于方案 B/C 的变体 |
+
+方案 A 需要一并拍板的细节：
+1. 变量未设时：(a) 默认当作 `miles`（与现状行为完全相同，过渡期安全；建议到 verl 落地后改为必须显式设置）；或 (b) 视为"无实现"，读令牌返回 None、写计数被忽略（与现在"没有 sink 时返回 None"一致，但若启动器漏设变量，GDPO/MaxRL 的非零优势计数会静默丢失）。**建议 (a)**。
+2. 哈希：`seq_adv.py`、`codex_openenv_subprocess_agent_function.py` 是插件，改调用点即改插件源码哈希 → seq_adv_maxrl、codex_harness 两个标准样本换新哈希，记入 `hash-migration.md`（与 D6 一致）。
+3. 旧版引擎（`--rl-engine legacy`）的 `teacher_forcing` 路径不动，仍走 `yeto.rl.miles`（阶段 4 随 legacy 整体搬）。
+
+在用户拍板前，4.11 只交付本方案，`seq_adv`/`teacher_forcing`/codex 的 A2/A5/A7 白名单条目保持。
+
 ## Risks / Trade-offs
 
 - [搬迁改动 import 面大，易漏] → 转发模块 + 边界检查 + 标准样本三重兜底；每阶段只搬一类文件。
@@ -95,7 +120,7 @@
 
 以下按建议默认写入，等用户确认：
 
-（已全部确认，无待确认项。）
+- **D11（任务 4.11）推理进程里核心接口由谁注入**：建议方案 A（环境变量 `YETO_RL_BACKEND` + 后端名注册表，变量未设时默认 miles），待用户拍板；拍板前不实现。
 
 - 2026-10-08 用户决定：任务 2.3 拆分，驱动器侧在阶段 1 完成；`reward_pipeline.py` 侧（A4）移到阶段 3（任务 4.10），因为它是插件，改 import 会改插件源码哈希与算法哈希，应与 4.6 纯函数化同批换哈希。
 

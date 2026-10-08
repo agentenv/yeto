@@ -1356,8 +1356,8 @@ def _legacy_miles_argv(config) -> list[str]:
         RECIPE_DEEPSEEK_V4_FLASH,
         RECIPE_QWEN3_5,
         RECIPE_QWEN3_8_NEXT,
-        lr_schedule_argv,
     )
+    from .engine.miles_adapter.lr_schedule import lr_schedule_argv
 
     if config.model_recipe.name == RECIPE_QWEN3_8_NEXT:
         # The native Flash-Next recipe (raw torch_dist, qwen4_exp provider, per-expert
@@ -2602,7 +2602,7 @@ def _reject_lr_schedule_overrides(extra_argv: Sequence[str]) -> None:
     ports and could trip or defeat the zero-LR invariant.
     """
 
-    from .engine.run_config import LR_SCHEDULE_FLAGS
+    from .engine.miles_adapter.lr_schedule import LR_SCHEDULE_FLAGS
 
     for token in extra_argv:
         flag = str(token).split("=", 1)[0]

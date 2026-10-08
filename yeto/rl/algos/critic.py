@@ -39,47 +39,6 @@ from yeto.rl.engine.algorithm import (
     register_mechanism,
     register_rejection,
 )
-from yeto.rl.engine.miles_adapter import algorithm_flags as _af
-from yeto.rl.engine.miles_adapter.algorithm_flags import (
-    FlagMapping,
-    _float,
-    _int,
-    _num,
-    _str,
-    register_flag,
-)
-
-# --------------------------------------------------------------------------
-# translation (design D2)
-# --------------------------------------------------------------------------
-
-
-def critic_argv(spec: AlgorithmSpec) -> list[str]:
-    """Shared actor/critic PPO flags of the ports main stage.
-
-    Empty without a critic (default GRPO argv unchanged). gamma / lambd /
-    value_clip are always explicit (never Miles' defaults). The main stage runs
-    in rebuild mode, which requires ``--num-critic-only-steps 0`` (Miles
-    arguments.py:3210-3212); the warm-up is its own stage (design D5) whose
-    product the run configuration passes as ``--critic-load``.
-    """
-
-    if not spec.execution.needs_critic:
-        return []
-    a, c = spec.advantage, spec.critic
-    argv = ["--gamma", _num(a.gamma), "--lambd", _num(a.lambd),
-            "--value-clip", _num(c.value_clip)]
-    if c.critic_lr is not None:
-        argv += ["--critic-lr", _num(c.critic_lr)]
-    if c.critic_lr_warmup is not None:
-        argv += ["--critic-lr-warmup-iters", str(c.critic_lr_warmup)]
-    if c.critic_updates_per_step != 1:  # fork e07e51c07 (alias of --num-critic-epochs)
-        argv += ["--critic-updates-per-step", str(c.critic_updates_per_step)]
-    argv += ["--num-critic-only-steps", "0"]
-    if c.init == "load":
-        argv += ["--critic-load", c.load]
-    return argv + gae_variant_argv(spec)
-
 
 # Fork-only Miles flags (not in upstream c35702e): yeto-gae-variant ce96fc060
 # (--gae-*) and yeto-vapo cbf8c4737 (--positive-example-*).
@@ -93,79 +52,8 @@ FORK_FLAGS = frozenset({
 })
 
 
-def gae_variant_argv(spec: AlgorithmSpec) -> list[str]:
-    """Fork GAE extension flags (yeto-gae-variant ce96fc060, design D6).
-
-    Empty for vanilla GAE with a fixed lambda, so plain PPO argv is unchanged.
-    """
-
-    a = spec.advantage
-    argv: list[str] = []
-    if a.gae_variant == "decoupled":
-        argv += ["--gae-variant", "decoupled", "--gae-critic-lambd", _num(a.critic_lambd)]
-    elif a.gae_variant in ("cross_segment_per_sample", "cross_segment_whole_rollout"):
-        # CompactionRL (design D8): per_sample = the paper's form (one sample per
-        # compaction segment, local GAE x (gamma*lambda)^{tokens_after});
-        # whole_rollout = explicit control mode for the 9.5 ablation. Same fork names.
-        argv += ["--gae-variant", a.gae_variant]
-    if a.lambd_mode == "length_adaptive":
-        argv += ["--gae-lambd-mode", "length_adaptive", "--gae-length-alpha", _num(a.alpha)]
-    return argv
-
-
-def positive_lm_argv(spec: AlgorithmSpec) -> list[str]:
-    """VAPO positive-example LM loss (fork 70e3d7761); empty when unset.
-
-    ``--positive-example-source success`` reads the reward function's boolean
-    ``sample.metadata['success'/'is_correct']`` (missing -> fork error); ``reward``
-    (reward > threshold) only when the spec declares the reward binary success.
-    """
-
-    coef = getattr(spec.loss, "positive_lm_coef", None)
-    if coef is None:
-        return []
-    argv = ["--positive-example-lm-loss-coef", _num(coef),
-            "--positive-example-source", spec.loss.positive_lm_source]
-    if spec.loss.positive_lm_source == "reward":
-        argv += ["--positive-example-reward-threshold",
-                 _num(spec.loss.positive_lm_reward_threshold)]
-    return argv
-
-
-def _none(spec: AlgorithmSpec) -> list[str]:
-    return []
-
-
-register_flag(FlagMapping("--lambd", "advantage.lambd", False, _float,
-                          lambda v: [("advantage.lambd", v)], critic_argv))
-register_flag(FlagMapping("--value-clip", "critic.value_clip", False, _float,
-                          lambda v: [("critic.value_clip", v)], _none))
-register_flag(FlagMapping("--critic-lr", "critic.critic_lr", False, _float,
-                          lambda v: [("critic.critic_lr", v)], _none))
-register_flag(FlagMapping("--critic-lr-warmup-iters", "critic.critic_lr_warmup", False, _int,
-                          lambda v: [("critic.critic_lr_warmup", v)], _none))
-register_flag(FlagMapping("--num-critic-only-steps", "critic.warmup_steps", False, _int,
-                          lambda v: [("critic.warmup_steps", v)], _none))
-register_flag(FlagMapping("--critic-load", "critic.load", False, _str,
-                          lambda v: [("critic.init", "load"), ("critic.load", v)], _none))
-
-def _parse_gae_variant(raw: str) -> str:
-    if raw == "cross_segment":
-        raise _af.AlgorithmSpecError(
-            "--gae-variant cross_segment is ambiguous and refused: use "
-            "--gae-variant cross_segment_per_sample (CompactionRL, one sample per segment) or "
-            "--gae-variant cross_segment_whole_rollout (explicit control mode)")
-    return raw
-
-
-register_flag(FlagMapping("--gae-variant", "advantage.gae_variant", False, _parse_gae_variant,
-                          lambda v: [("advantage.gae_variant", v)], _none))
-register_flag(FlagMapping("--gae-lambd-mode", "advantage.lambd_mode", False, _str,
-                          lambda v: [("advantage.lambd_mode", v)], _none))
-register_flag(FlagMapping("--gae-length-alpha", "advantage.alpha", False, _float,
-                          lambda v: [("advantage.alpha", v)], _none))
-register_flag(FlagMapping("--gae-critic-lambd", "advantage.critic_lambd", False, _float,
-                          lambda v: [("advantage.critic_lambd", v)], _none))
+# Miles argv translation (critic_argv / gae_variant_argv / positive_lm_argv) and
+# flag rows: yeto.rl.engine.miles_adapter.algo_flag_rows (decoupling 4.3).
 
 # --------------------------------------------------------------------------
 # VAPO positive-example LM loss (change 7.2; VAPO arXiv 2504.05118 sec. 4.3 eq. 9-10)
@@ -252,28 +140,6 @@ register_mechanism("features", "gae_cross_segment_whole_rollout",
 register_mechanism("features", "critic_multi_update",
                    lambda s: s.execution.needs_critic
                    and s.critic.critic_updates_per_step not in (None, 1))
-register_flag(FlagMapping("--critic-updates-per-step", "critic.critic_updates_per_step", False,
-                          _int, lambda v: [("critic.critic_updates_per_step", v)], _none))
-# SAO's spelling of the same fork dest (e07e51c07); critic_argv emits the
-# --critic-updates-per-step spelling.
-register_flag(FlagMapping("--num-critic-epochs", "critic.critic_updates_per_step", False,
-                          _int, lambda v: [("critic.critic_updates_per_step", v)], _none))
-register_flag(FlagMapping("--positive-example-lm-loss-coef", "loss.positive_lm_coef", False,
-                          _float, lambda v: [("loss.positive_lm_coef", v)], positive_lm_argv))
-register_flag(FlagMapping("--positive-example-reward-threshold",
-                          "loss.positive_lm_reward_threshold", False, _float,
-                          lambda v: [("loss.positive_lm_reward_threshold", v)], _none))
-register_flag(FlagMapping("--positive-example-source", "loss.positive_lm_source", False, _str,
-                          lambda v: [("loss.positive_lm_source", v)], _none))
-
-# --gamma: seq_adv's row emits it for REINFORCE++; critic_argv owns it under a critic.
-_gamma_row = _af.MAPPINGS["--gamma"]
-_af.MAPPINGS["--gamma"] = FlagMapping(
-    _gamma_row.flag, _gamma_row.field, _gamma_row.switch, _gamma_row.parse, _gamma_row.absorb,
-    lambda spec: [] if spec.execution.needs_critic else _gamma_row.translate(spec),
-    _gamma_row.emitted_by_config,
-)
-
 # seq_adv's gamma rule refuses gamma != 1 outside REINFORCE++; GAE reads it.
 _seq_adv_gamma = _alg._REJECTIONS["seq_adv_gamma"]
 

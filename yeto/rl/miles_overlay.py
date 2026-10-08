@@ -67,13 +67,13 @@ def spec_fork_flags(spec_json: str | None) -> list[str]:
 
     if not spec_json:
         return []
-    from yeto.rl.algos import critic, sao
     from yeto.rl.engine.algorithm import AlgorithmSpec
+    from yeto.rl.engine.miles_adapter import algo_flag_rows as rows
     from yeto.rl.engine.miles_adapter.algorithm_flags import algorithm_argv
 
     spec = AlgorithmSpec.from_dict(json.loads(spec_json))
-    argv = (algorithm_argv(spec) + critic.critic_argv(spec)
-            + critic.positive_lm_argv(spec) + sao.sao_fork_argv(spec))
+    argv = (algorithm_argv(spec) + rows.critic_argv(spec)
+            + rows.positive_lm_argv(spec) + rows.sao_fork_argv(spec))
     return sorted({a for a in argv if a in FORK_ONLY_FLAGS})
 
 

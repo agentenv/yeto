@@ -44,7 +44,6 @@ from yeto.rl.engine.algorithm import (
     register_rejection,
     register_runtime_attrs,
 )
-from yeto.rl.engine.miles_adapter.algorithm_flags import _float, _num, _value_row, register_flag
 
 from . import reward_pipeline as rp
 
@@ -134,8 +133,7 @@ def _gdpo_json(value: tuple | None) -> dict | None:
 
 register_field("advantage", "gamma", default=1.0, parse=_parse_gamma)
 register_field("advantage", "gdpo", default=None, parse=_parse_gdpo, to_json=_gdpo_json)
-# --gamma: default 1.0 is not emitted (argv snapshots unchanged); --lambd stays unmapped.
-register_flag(_value_row("--gamma", "advantage.gamma", _float, emit=_num, default=1.0))
+# --gamma Miles flag row: yeto.rl.engine.miles_adapter.algo_flag_rows (decoupling 4.3).
 
 
 def gdpo_components(spec) -> tuple[tuple[str, float], ...]:
@@ -526,6 +524,20 @@ def reward_components(samples, rows, names: Sequence[str]) -> list[list[float]]:
     return out
 
 
+def gdpo_group_values(vectors, weights):
+    """Pure GDPO combination of one group (decoupling 4.6): each component is
+    group-normalized on its own, then weighted and summed. ``vectors`` is
+    rollouts x components; ``weights`` a float tensor (or sequence) per component."""
+
+    import torch
+
+    weights = torch.as_tensor(weights, dtype=torch.float)
+    k = int(weights.numel())
+    matrix = torch.tensor(vectors, dtype=torch.float).reshape(len(vectors), k)
+    normalized = torch.stack([_group_normalize(matrix[:, i]) for i in range(k)], dim=1)
+    return (normalized * weights).sum(dim=1)
+
+
 def gdpo(args, samples, rewards, groups, params) -> list[float]:
     import torch
 
@@ -544,11 +556,7 @@ def gdpo(args, samples, rewards, groups, params) -> list[float]:
                     f"{list(seg_rows)} have {comps}"
                 )
             vectors.append(comps[0])
-        matrix = torch.tensor(vectors, dtype=torch.float).reshape(len(vectors), len(names))
-        normalized = torch.stack(
-            [_group_normalize(matrix[:, k]) for k in range(len(names))], dim=1
-        )
-        combined = (normalized * weights).sum(dim=1)
+        combined = gdpo_group_values(vectors, weights)
         per_group.append(segments)
         entry_values.append(combined)
         per_group_rewards.append(rp.shared_rollout_rewards(rewards, segments))

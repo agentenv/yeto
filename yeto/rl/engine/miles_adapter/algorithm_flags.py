@@ -18,9 +18,10 @@ refused in extra argv (:data:`UNMAPPED_OBJECTIVE_FLAGS`). When Miles is
 upgraded, re-review this list against the new parser (``docs/MILES_RL.md``);
 ``tests/test_rl_algorithm_flags_upstream.py`` pins its existence upstream.
 
-Follow-up changes add rows with :func:`register_flag` from their own module
-(listed in ``yeto.rl.algos.EXTENSION_MODULES``) and remove the flag from the
-unmapped set in the same call.
+Extension rows are registered with :func:`register_flag` by the Miles adapter
+module :mod:`.algo_flag_rows` (decoupling task 4.3: the algorithm extensions in
+``yeto.rl.algos`` register only neutral fields); each call moves the flag out
+of the unmapped set.
 """
 
 from __future__ import annotations
@@ -285,15 +286,27 @@ EXTENSION_FLAGS: set[str] = set()
 UNMAPPED_OBJECTIVE_FLAGS: set[str] = set(_UNMAPPED)
 
 
+def _load_rows() -> None:
+    """Neutral extension fields, then their Miles flag rows (decoupling 4.3).
+
+    The extension modules no longer register Miles rows themselves; the rows
+    live in :mod:`.algo_flag_rows`, imported once (it calls
+    ``load_extensions()`` first so field registration order is unchanged).
+    """
+
+    load_extensions()
+    from . import algo_flag_rows  # noqa: F401
+
+
 def objective_flags() -> frozenset[str]:
     """Every objective-changing Miles flag (mapped or not)."""
 
-    load_extensions()
+    _load_rows()
     return frozenset(MAPPINGS) | frozenset(UNMAPPED_OBJECTIVE_FLAGS)
 
 
 def mapped_flags() -> frozenset[str]:
-    load_extensions()
+    _load_rows()
     return frozenset(MAPPINGS)
 
 
@@ -316,10 +329,22 @@ def register_flag(row: FlagMapping) -> None:
 # --------------------------------------------------------------------------
 
 
+def legacy_algorithm_argv(spec: AlgorithmSpec) -> list[str]:
+    """Miles argv fragment emitted by legacy ``build_miles_argv`` for this spec
+    (moved from ``AlgorithmSpec.to_legacy_argv``, decoupling 4.3/E14)."""
+
+    argv = ["--advantage-estimator", spec.advantage_estimator]
+    if spec.kl_coef is not None:
+        argv += ["--kl-coef", str(spec.kl_coef)]
+    if spec.dynamic_sampling_filter is not None:
+        argv += ["--dynamic-sampling-filter-path", spec.dynamic_sampling_filter]
+    return argv
+
+
 def algorithm_argv(spec: AlgorithmSpec) -> list[str]:
     """Non-default algorithm flags beyond the R0-positioned ones."""
 
-    load_extensions()
+    _load_rows()
     argv: list[str] = []
     for row in MAPPINGS.values():
         if not row.emitted_by_config:
@@ -381,7 +406,7 @@ def absorb_extra_argv(
     :class:`UnmappedAlgorithmFlag`.
     """
 
-    load_extensions()
+    _load_rows()
     split = _split(extra_argv)
     flags_present = {flag for flag, _, _ in split if flag}
     custom_tis = "--custom-tis-function-path" in flags_present
@@ -524,6 +549,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     result = dry_run(argv)
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result["verdict"] == "accepted" else 1
+
+
+# Rows of the algorithm extensions (decoupling 4.3); after every name above so
+# the circular import back into this module resolves.
+_load_rows()
 
 
 if __name__ == "__main__":

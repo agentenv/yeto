@@ -56,3 +56,40 @@ def test_invalid_declarations():
         _caps(parameter_layouts=["sparse"])
     with pytest.raises(ValueError):
         _caps(port_verbs=["RolloutPool.scale"])
+
+
+# --- decoupling 4.5: backend-declared algorithm fields ----------------------
+
+
+def test_algorithm_fields_undeclared_keeps_attestation_and_accepts_everything():
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+    from yeto.rl.engine.fake import fake_capabilities
+
+    caps = fake_capabilities("ports-only", features={"eps_clip"})
+    assert caps.algorithm_fields is None
+    assert "algorithm_fields" not in caps.to_attestation_dict()
+    caps.check(layout="lora", placement="colocated", execution_mode="colocated-serial",
+               algorithm=AlgorithmSpec(loss={"eps_clip": 0.3}))
+
+
+def test_algorithm_fields_declared_rejects_unsupported_field_before_launch():
+    import pytest
+
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+    from yeto.rl.engine.capabilities import CapabilityMismatch, EngineCapabilities
+    from yeto.rl.engine.fake import fake_capabilities
+
+    caps = fake_capabilities("ports-only", features={"eps_clip"},
+                             algorithm_fields={"kl.coef"})
+    kwargs = dict(layout="lora", placement="colocated", execution_mode="colocated-serial")
+    assert AlgorithmSpec().set_fields() == frozenset()
+    caps.check(algorithm=AlgorithmSpec(), **kwargs)  # default spec: nothing set
+    spec = AlgorithmSpec(loss={"eps_clip": 0.3})
+    assert "loss.eps_clip" in spec.set_fields()
+    with pytest.raises(CapabilityMismatch, match=r"algorithm fields \['loss.eps_clip'\]"):
+        caps.check(algorithm=spec, **kwargs)
+    wider = fake_capabilities("ports-only", features={"eps_clip"},
+                              algorithm_fields={"loss.eps_clip"})
+    wider.check(algorithm=spec, **kwargs)
+    again = EngineCapabilities.from_json(wider.to_json())
+    assert again.algorithm_fields == frozenset({"loss.eps_clip"})

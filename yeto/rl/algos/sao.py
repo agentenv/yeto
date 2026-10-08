@@ -43,13 +43,6 @@ from yeto.rl.engine.algorithm import (
     register_mechanism,
     register_rejection,
 )
-from yeto.rl.engine.miles_adapter.algorithm_flags import (
-    FlagMapping,
-    _float,
-    _int,
-    _num,
-    register_flag,
-)
 
 SAO_DIS = "sao_dis"
 POLICY_OBJECTIVES = (SAO_DIS,)
@@ -204,81 +197,8 @@ def sao_role_contract(spec: AlgorithmSpec, actor_steps_per_round: int) -> dict[s
     }
 
 
-# --------------------------------------------------------------------------
-# translation (fork flags)
-# --------------------------------------------------------------------------
-
-
-def sao_fork_argv(spec: AlgorithmSpec) -> list[str]:
-    """Fork flags for an SAO spec; empty for every other spec."""
-
-    loss = spec.loss
-    if loss.policy_objective != SAO_DIS:
-        return []
-    a, c = spec.advantage, spec.critic
-    argv = ["--policy-objective", SAO_DIS,
-            "--sao-dis-eps-low", _num(loss.sao_dis_eps_low),
-            "--sao-dis-eps-high", _num(loss.sao_dis_eps_high)]
-    if c.value_loss == "hl_gauss":
-        argv += ["--value-loss-type", "classification",
-                 "--value-num-bins", str(c.hl_gauss_bins),
-                 "--value-target-type", "hl_gauss",
-                 "--hl-gauss-sigma-ratio", _num(HL_GAUSS_SIGMA_RATIO),
-                 "--value-reward-range", _num(VALUE_REWARD_RANGE[0]), _num(VALUE_REWARD_RANGE[1])]
-    argv += ["--gae-variant", a.gae_variant, "--gae-lambd-mode", a.lambd_mode]
-    if a.lambd_mode == "length_adaptive":
-        argv += ["--gae-length-alpha", _num(a.alpha)]
-    if a.gae_variant == "decoupled":
-        argv += ["--gae-critic-lambd", _num(a.lambd)]
-    return argv
-
-
-register_flag(FlagMapping("--policy-objective", "loss.policy_objective", False, str,
-                          lambda v: [("loss.policy_objective", v)]
-                          # DIS compares against the rollout policy (fork forces
-                          # use_rollout_logprobs), as sao_algorithm_spec declares.
-                          + ([("execution.needs_rollout_logprobs", True)] if v == SAO_DIS else []),
-                          sao_fork_argv))
-register_flag(FlagMapping("--sao-dis-eps-low", "loss.sao_dis_eps_low", False, _float,
-                          lambda v: [("loss.sao_dis_eps_low", v)], lambda spec: []))
-register_flag(FlagMapping("--sao-dis-eps-high", "loss.sao_dis_eps_high", False, _float,
-                          lambda v: [("loss.sao_dis_eps_high", v)], lambda spec: []))
-
-
-# Value-head flags (fork 6b5bd88c). sao_fork_argv emits them for an hl_gauss
-# critic; absorbing them keeps a raw --value-loss-type from bypassing the spec.
-# --value-reward-range takes two values and is a translation constant
-# (VALUE_REWARD_RANGE): adapter-owned, never absorbed (algorithm_flags._UNMAPPED).
-def _value_loss_type(raw: str) -> str:
-    if raw not in ("mse", "classification"):
-        raise AlgorithmSpecError(f"expected mse or classification, got {raw!r}")
-    return raw
-
-
-def _hl_gauss_target(raw: str) -> str:
-    if raw != "hl_gauss":
-        raise AlgorithmSpecError(f"only hl_gauss is expressible (critic.value_loss), got {raw!r}")
-    return raw
-
-
-def _sigma_ratio(raw: str) -> float:
-    value = _float(raw)
-    if value != HL_GAUSS_SIGMA_RATIO:
-        raise AlgorithmSpecError(
-            f"the HL-Gauss sigma ratio is the translation constant {HL_GAUSS_SIGMA_RATIO}, got {raw!r}")
-    return value
-
-
-register_flag(FlagMapping(
-    "--value-loss-type", "critic.value_loss", False, _value_loss_type,
-    lambda v: [("critic.value_loss", "hl_gauss" if v == "classification" else "mse")],
-    lambda spec: []))
-register_flag(FlagMapping("--value-num-bins", "critic.hl_gauss_bins", False, _int,
-                          lambda v: [("critic.hl_gauss_bins", v)], lambda spec: []))
-register_flag(FlagMapping("--value-target-type", "critic.value_loss", False, _hl_gauss_target,
-                          lambda v: [], lambda spec: []))
-register_flag(FlagMapping("--hl-gauss-sigma-ratio", "critic.value_loss", False, _sigma_ratio,
-                          lambda v: [], lambda spec: []))
+# Miles fork argv (sao_fork_argv) and flag rows:
+# yeto.rl.engine.miles_adapter.algo_flag_rows (decoupling 4.3).
 
 
 # --------------------------------------------------------------------------

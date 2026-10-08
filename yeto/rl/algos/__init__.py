@@ -4,8 +4,9 @@ Each follow-up algorithm change (``rl-algo-mismatch-correction``,
 ``rl-algo-grpo-knobs``, ``rl-algo-seq-and-adv``, ``rl-algo-loss-variants``)
 adds its own module under this package that calls the registration API of
 :mod:`yeto.rl.engine.algorithm` (``register_field`` / ``register_mechanism`` /
-``register_rejection``) and :mod:`yeto.rl.engine.miles_adapter.algorithm_flags`
-(``register_flag``), and then adds exactly one line to
+``register_rejection``) -- neutral fields only; its Miles flag rows and argv
+translation go in :mod:`yeto.rl.engine.miles_adapter.algo_flag_rows`
+(``register_flag``, decoupling task 4.3) -- and then adds exactly one line to
 :data:`EXTENSION_MODULES`. The modules are imported lazily, once, the first
 time a spec is parsed or its mechanisms are evaluated.
 

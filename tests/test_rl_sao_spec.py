@@ -9,6 +9,7 @@ from tests.sao_recipe_reference import apply_sao_online_recipe
 from yeto.rl import sao_streaming_runtime as legacy
 from yeto.rl.algos import sao
 from yeto.rl.engine.algorithm import AlgorithmSpec, AlgorithmSpecError, load_extensions
+from yeto.rl.engine.miles_adapter.algo_flag_rows import sao_fork_argv
 from yeto.rl.engine.miles_adapter.algorithm_flags import algorithm_argv
 
 load_extensions()
@@ -94,7 +95,7 @@ def test_role_contract_matches_legacy_accounting(tmp_path, actor_steps):
 
 def test_fork_argv():
     spec = sao.sao_algorithm_spec("coding")
-    argv = sao.sao_fork_argv(spec)
+    argv = sao_fork_argv(spec)
     assert argv == [
         "--policy-objective", "sao_dis", "--sao-dis-eps-low", "0.8", "--sao-dis-eps-high", "3.0",
         "--value-loss-type", "classification", "--value-num-bins", "51",
@@ -103,7 +104,7 @@ def test_fork_argv():
         "--gae-variant", "decoupled", "--gae-lambd-mode", "length_adaptive",
         "--gae-length-alpha", "1.5", "--gae-critic-lambd", "1.0"]
     assert all(t in algorithm_argv(spec) for t in ("--policy-objective", "--gae-critic-lambd"))
-    assert sao.sao_fork_argv(AlgorithmSpec()) == []
+    assert sao_fork_argv(AlgorithmSpec()) == []
     assert "--policy-objective" not in algorithm_argv(AlgorithmSpec(advantage_estimator="ppo"))
 
 

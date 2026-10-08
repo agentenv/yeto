@@ -3,7 +3,7 @@
 design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新计算，不刻意保持旧值。本表为阶段 0 标准样本中每个配置记录"旧哈希 → 新哈希"及 CPU 逐位一致结果，供引用旧 GPU 证据。
 
 - 旧哈希：阶段 0（分支 `s16-decouple-p0`，基于 agentenv/main `62cec689`）用 `tests/decoupling_golden.py` 在 CPU 上算出，原值存于 `tests/golden/decoupling/<配置名>.json`。
-- 新哈希、CPU 逐位一致结果：阶段 3（任务 4.4、4.4a）/阶段 4（任务 5.x）填写。
+- 新哈希、CPU 逐位一致结果：阶段 3（任务 4.4、4.4a）/阶段 4（任务 5.x）填写。未列新哈希的配置表示到该阶段为止哈希未变（标准样本逐字节相同）。
 - 旧 GPU 证据：在 `/home/michael/work/s1-runs`、仓库 `openspec/changes/*/evidence`、`infra-drafts` 中按算法哈希全文检索（2026-10-08）。**只有算法哈希能对上**：标准样本的 `ExecutionProfile.contract_hash` 来自 CPU 小配置（批量、卡数与真机不同），检索结果为 0 条，因此本列不表示"同一契约的真机运行"，只表示"同一算法规格跑过 GPU"。
 
 | 配置名 | 说明 | 旧 `AlgorithmSpec.sha256()` | 旧 `ExecutionProfile.contract_hash` | 新哈希 | CPU 逐位一致 | 旧 GPU 证据（算法哈希相同） |
@@ -12,7 +12,7 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
 | grpo_tis | GRPO + TIS（tis_clip 2.0，tis_clip_low 0） | `5a8a5a9ff5abb317fc8159ab56c07293dc3bc99e084542880b6d32cc5a02b441` | `sha256:f30ac4010eb5b88fac0261507eb951da18718d2bacd512f2d29a79ad84269355` | 待阶段 3/4 | 待填 | `openspec/changes/rl-algo-mismatch-correction/evidence/2026-09-29-g1/runs/tis/`、`.../2026-09-29-g1c/runs/tis/`、`.../2026-09-29-g3b/run/`；另 `s1-runs/s15-fncodex-full-modal-20261007{a,b,c}`、`s15-fncodex-4layer-modal-20261007{a,b,c}` |
 | decoupled | decoupled 外层同步，每次同步 2 个本地轮 | `27df1133c924e7a337e90246c7e1e30699017f461e9f35b1dd165a0263e65bea` | `sha256:634583f6f0d29e91a0cb9882b42d732d2adea65ab9c8d37c3c4f87ec3e3904b5` | 待阶段 3/4 | 待填 | 算法规格同 grpo_default；decoupled 真机运行：`s1-runs/s14-dlr-ports-20261007a/head/sky_logs/2-yeto-head-job/run.log`（契约哈希未核对） |
 | drgrpo | Dr.GRPO 常数分母归约（G1 证据 spec 原文件） | `0b000b1c9cc850271ee20120fc2b3b8fbf624545d0f8a73cc21aa3389aaf6e85` | `sha256:94562ea539b9602ae900036c53941673ae4b49962631298cc80cb6f3cdeebb48` | 待阶段 3/4 | 待填 | `openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1/out/drgrpo/`（`island-0/events.jsonl`、`g1_meta.json`） |
-| seq_adv_maxrl | MaxRL 优势变换 + 奖励流水线插件 | `e4b213355a0ddfbe0c94a7ac5c1806f16bc3ac0009829c260d80dd9af7b0f4f9` | `sha256:4b7c610f458b454dee649a9b3c030f8339823858fde700c28d051a8206aefc25` | 待阶段 3/4 | 待填 | `openspec/changes/rl-algo-seq-and-adv/evidence/g3/rerun/`（`events/algo2a-g3-l{0,1}-modal.jsonl`、`check.json`） |
+| seq_adv_maxrl | MaxRL 优势变换 + 奖励流水线插件 | `e4b213355a0ddfbe0c94a7ac5c1806f16bc3ac0009829c260d80dd9af7b0f4f9` | `sha256:4b7c610f458b454dee649a9b3c030f8339823858fde700c28d051a8206aefc25` | 阶段 3（s17-decouple-p3）：算法 `7458121d46104f8e9eb635b14b20daa8fd415147451ff3c2e69c06b09b41ef37`；契约 `sha256:cfc65138416e06d544a70b24cd021cec1072ceab305229e8a677a9abf1f2c66c`；插件源码 `reward_pipeline` `cfbc099a…`→`b7af1fb4…`、`seq_adv` `2c710922…`→`6935e992…` | 一致（`tests/decoupling_bitwise_check.py`，20 例 `torch.equal`，见下文阶段 3 记录） | `openspec/changes/rl-algo-seq-and-adv/evidence/g3/rerun/`（`events/algo2a-g3-l{0,1}-modal.jsonl`、`check.json`） |
 | codex_harness | codex harness，Qwen3.5-0.8B，假 bundle 合同 | `27df1133c924e7a337e90246c7e1e30699017f461e9f35b1dd165a0263e65bea` | `sha256:27bb768f7462a3ff3b660d9ba9cf00477c16a840f2c8d9c00e259cec01ced533` | 待阶段 3/4 | 待填 | 无同配置 codex 运行（`s15-fncodex-*` 用的是 TIS 规格 `5a8a5a9f…`，见 grpo_tis 行）；算法规格本身同 grpo_default |
 | elastic | 岛内弹性模式（`--rl-elastic`） | `27df1133c924e7a337e90246c7e1e30699017f461e9f35b1dd165a0263e65bea` | `sha256:27bb768f7462a3ff3b660d9ba9cf00477c16a840f2c8d9c00e259cec01ced533` | 待阶段 3/4 | 待填 | 算法规格同 grpo_default；弹性真机运行例如 `s1-runs/s11-h200-20261005n-e1/`、`s1-runs/s15-island1a-20261007c/`（契约哈希未核对） |
 | fn_2x8 | Flash-Next 2×8 正式训练形状 | `27df1133c924e7a337e90246c7e1e30699017f461e9f35b1dd165a0263e65bea` | `sha256:18dda066767289bca9563ba12c23e8f20206421b23a492431f0810e14adce84e` | 待阶段 3/4 | 待填 | 算法规格同 grpo_default；FN 真机运行例如 `s1-runs/s14-fnsmoke-modal-20261007a/launch.log`、`s1-runs/s16-fn2x8-modal-20261008a/launch.log`（契约哈希未核对） |
@@ -24,3 +24,18 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
 - `ExecutionProfile` 所需的 5 个 Miles 参数取自翻译后的命令行，未经 Miles 解析器。
 - strict（schema 3）/decoupled（schema 4）进度文件：比对解码后的内容（去掉挂钟时间字段），不比对文件字节——文件里有每轮耗时等挂钟字段。
 - CISPO、critic 两类典型配置本阶段未录（用户指定清单未含），需要时补到标准样本并在本表加行。
+
+## 阶段 3 记录（分支 s17-decouple-p3，2026-10-08）
+
+哈希变化只有一处：**seq_adv_maxrl**（其余 7 个配置与假引擎 tape 标准样本逐字节不变）。原因是两个插件模块的源码变了，插件源码哈希进 `AlgorithmSpec.sha256()`：
+
+| 插件模块 | 改了什么 | 任务 | 旧源码哈希 | 新源码哈希 |
+|---|---|---|---|---|
+| `yeto/rl/algos/reward_pipeline.py` | 写事件改经核心写入器 `yeto.rl.engine.events.write_event`（不再 import `yeto.rl.miles`；默认写入器就是原函数，行为不变）；GRPO 组内归一化抽成纯函数 `grpo_group_normalize`，`grpo_default` 改为薄包装 | 4.10、4.6 | `cfbc099ad9a117de6836a0cb48feb0d5f5d059d9265faa5884bd0ef9a489c162` | `b7af1fb4212366fcc8c76118b1dd35ff4f87742d684a6b23bed775e17d23c8cf` |
+| `yeto/rl/algos/seq_adv.py` | `--gamma` 的 Miles 旗标行移到 `miles_adapter/algo_flag_rows.py`；GDPO 组内合成抽成纯函数 `gdpo_group_values` | 4.3、4.6 | `2c710922aa44d7e0e6108450dc0fac6128063714385501c528def06c1ea4e656` | `6935e992f7665822ccde0f2559b460625bd3d90c9089be62196260b3c1548162` |
+
+- CPU 逐位一致：`PYTHONPATH=/tmp/s15-noray python tests/decoupling_bitwise_check.py s16-decouple-p2` 从阶段 2 分支取出旧函数体，与新代码在同一批固定输入上比较（`grpo_default` 4 组输入 × 4 种估计器/标准差组合、`gdpo` 白化开/关、`maxrl` 2 组），20 例全部 `torch.equal`，0 处差异（本机 2026-10-08 运行）。
+- 未在本机验证：`tests/test_rl_reward_pipeline_equivalence.py`、`tests/test_rl_seq_adv_miles.py`（需 import Miles，本机按规则屏蔽 Miles/Ray，收集阶段即报错，未运行）。
+- 同步更新的样本：`tests/golden/decoupling/seq_adv_maxrl.json`、`examples/rl_algorithms/dapo-like.json`（插件源码哈希）、`openspec/changes/rl-algo-seq-and-adv/examples/{maxrl,mapo,gdpo}.json`（由该 change 的 `make_examples.py` 重新生成）。`openspec/changes/rl-algo-seq-and-adv/evidence/g3/` 下的历史证据保留旧哈希不改。
+- 旧 GPU 证据：算法规格（除插件源码哈希外）不变，按 D6 以"CPU 逐位一致 + 本表"引用 `rl-algo-seq-and-adv/evidence/g3/rerun/`；新哈希的真机证据未取得，由下一次本来要开的卡顺带取得。
+- 预告：任务 4.11（原 3.4）若按 design D11 实施，`seq_adv.py` 还会再改一次（`rollout_meta_hook` 调用改走核心接口），seq_adv_maxrl 与 codex_harness（`codex_openenv_subprocess_agent_function.run` 是插件）的哈希届时再变，并在本表追加。

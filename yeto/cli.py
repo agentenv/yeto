@@ -377,8 +377,11 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
                     help="ports: absolute node-side Megatron torch_dist checkpoint for --ref-load "
                     "(required by the Qwen3.8-Flash-Next raw recipe, e.g. "
                     "/mnt/yeto-models/torch_dist/qwen3.8-flash-next_torch_dist)")
-    rl.add_argument("--rl-deterministic-trainer", action="store_true",
-                    help="ports: Megatron --deterministic-mode plus NCCL_ALGO=Ring, "
+    rl.add_argument("--rl-deterministic-trainer", "--deterministic", action="store_true",
+                    dest="rl_deterministic_trainer",
+                    help="(--deterministic is the backend-neutral name, decoupling 4.9; the "
+                    "environment comes from yeto.rl.engine.determinism per backend x device) "
+                    "ports: Megatron --deterministic-mode plus NCCL_ALGO=Ring, "
                     "CUBLAS_WORKSPACE_CONFIG=:4096:8, NVIDIA_TF32_OVERRIDE=0 on the learner and "
                     "every Ray worker (E2 plan-v2 §0); off by default. SGLang deterministic "
                     "inference is --sglang-deterministic-inference (on by default)")
