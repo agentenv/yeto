@@ -329,6 +329,18 @@ def register_flag(row: FlagMapping) -> None:
 # --------------------------------------------------------------------------
 
 
+def legacy_algorithm_argv(spec: AlgorithmSpec) -> list[str]:
+    """Miles argv fragment emitted by legacy ``build_miles_argv`` for this spec
+    (moved from ``AlgorithmSpec.to_legacy_argv``, decoupling 4.3/E14)."""
+
+    argv = ["--advantage-estimator", spec.advantage_estimator]
+    if spec.kl_coef is not None:
+        argv += ["--kl-coef", str(spec.kl_coef)]
+    if spec.dynamic_sampling_filter is not None:
+        argv += ["--dynamic-sampling-filter-path", spec.dynamic_sampling_filter]
+    return argv
+
+
 def algorithm_argv(spec: AlgorithmSpec) -> list[str]:
     """Non-default algorithm flags beyond the R0-positioned ones."""
 

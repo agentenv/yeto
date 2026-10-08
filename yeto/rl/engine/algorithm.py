@@ -1,8 +1,9 @@
 """``AlgorithmSpec``: yeto-owned algorithm description with a canonical SHA256.
 
 Pure Python; no torch/ray/miles imports. The spec is translated to engine
-arguments only by adapters; ``to_legacy_argv`` documents the legacy mapping
-used by ``yeto.rl.learner.build_miles_argv``.
+arguments only by adapters (the legacy mapping used by
+``yeto.rl.learner.build_miles_argv`` is documented by
+``miles_adapter.algorithm_flags.legacy_algorithm_argv``, decoupling 4.3/E14).
 
 Structure (change ``rl-algorithm-capabilities``, design D1/D2/D7):
 
@@ -1411,16 +1412,6 @@ class AlgorithmSpec:
             dynamic_sampling_filter=flt,
             dynamic_sampling_max_replacements=limit,
         )
-
-    def to_legacy_argv(self) -> list[str]:
-        """Miles argv fragment emitted by legacy ``build_miles_argv`` for this spec."""
-
-        argv = ["--advantage-estimator", self.advantage_estimator]
-        if self.kl_coef is not None:
-            argv += ["--kl-coef", str(self.kl_coef)]
-        if self.dynamic_sampling_filter is not None:
-            argv += ["--dynamic-sampling-filter-path", self.dynamic_sampling_filter]
-        return argv
 
     def to_legacy_runtime_attrs(self) -> dict[str, Any]:
         """Attributes legacy sets on the Miles namespace (read by the filter)."""

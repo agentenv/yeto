@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from yeto.rl import learner
+from yeto.rl.engine.miles_adapter.algorithm_flags import legacy_algorithm_argv
 from yeto.rl.engine.algorithm import (
     BOUNDED_NONZERO_STD_FILTER,
     STOCK_NONZERO_STD_FILTER,
@@ -53,14 +54,14 @@ def test_legacy_mapping():
     )
     spec = AlgorithmSpec.from_legacy_args(args)
     assert spec == BOUNDED
-    assert spec.to_legacy_argv() == [
+    assert legacy_algorithm_argv(spec) == [
         "--advantage-estimator", "grpo",
         "--dynamic-sampling-filter-path", BOUNDED_NONZERO_STD_FILTER,
     ]
     assert spec.to_legacy_runtime_attrs() == {
         "yeto_rl_dynamic_sampling_max_replacements": 4
     }
-    assert AlgorithmSpec.from_legacy_args(SimpleNamespace()).to_legacy_argv() == [
+    assert legacy_algorithm_argv(AlgorithmSpec.from_legacy_args(SimpleNamespace())) == [
         "--advantage-estimator", "grpo",
     ]
     # Flags must match what legacy build_miles_argv actually emits.
