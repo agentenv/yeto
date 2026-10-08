@@ -26,4 +26,4 @@
 - [ ] 3.4 WP3 名单文件定稿后提交到 `data/eval/` 并在运行配置钉 sha256。
 
 ## 4. GPU 验证（并入 FN codex 第三次上卡，不单独开卡）
-- [ ] 4.1 FN codex 第三次上卡改用 `reward_env.tb2:modal_provider`，记录每轮 rollout 中判分段时间，与 r2（未预装）对比。依赖 2.2 通过。
+- [ ] 4.1 FN codex 第三次上卡改用 `yeto.cloud.modal_reward_env:modal_provider`，记录每轮 rollout 中判分段时间，与 r2（未预装）对比。依赖 2.2 通过。

@@ -10,7 +10,7 @@
 ``--build`` never targets the production app ``yeto-tbench2``.  Each image is
 built by Modal from ``Image.from_registry(base).run_commands(<prebake script>)``;
 Modal caches layers by content, so sandboxes later created from the same
-definition (``reward_env.tb2.PrebakedModalSandboxBackend``) reuse the build.
+definition (``yeto.cloud.modal_reward_env.PrebakedModalSandboxBackend``) reuse the build.
 """
 
 from __future__ import annotations
@@ -39,7 +39,8 @@ def plan_report(adapter, task_ids):
 def build(adapter, task_ids, app_name):
     import modal
 
-    from yeto.rl.harness.reward_env.tb2 import check_build_app, modal_image
+    from yeto.cloud.modal_reward_env import modal_image
+    from yeto.rl.harness.reward_env.tb2 import check_build_app
 
     app = modal.App.lookup(check_build_app(app_name), create_if_missing=True)
     results = []

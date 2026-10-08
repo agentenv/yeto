@@ -3264,7 +3264,7 @@ HARNESS_PASSTHROUGH_ENV_PREFIXES = ("YETO_HARNESS_TB2_",)
 # on ghcr 12fcd9e5: Sandbox create/exec/terminate, ray/sglang/miles import).
 MODAL_SANDBOX_PROVIDER = "yeto.rl.harness.codex.tb2_provider:modal_provider"
 # rl-agentic-reward-env: same TB2 provider, sandboxes from prebaked images.
-PREBAKED_MODAL_SANDBOX_PROVIDER = "yeto.rl.harness.reward_env.tb2:modal_provider"
+PREBAKED_MODAL_SANDBOX_PROVIDER = "yeto.cloud.modal_reward_env:modal_provider"
 MODAL_SANDBOX_PROVIDERS = frozenset({MODAL_SANDBOX_PROVIDER, PREBAKED_MODAL_SANDBOX_PROVIDER})
 MODAL_CLIENT_SETUP = (
     # --ignore-installed: in a Modal Function container the setup shell

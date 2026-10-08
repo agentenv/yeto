@@ -9,10 +9,10 @@ adds what that provider lacks:
   ``uvx -p 3.13 -w pytest==… …`` or ``pip install pytest…``), extracted so it can
   run once at image build time.  ``test.sh`` itself is never changed: at judge
   time it runs the same steps again but they hit the baked caches.
-- ``PrebakedModalSandboxBackend`` + ``modal_provider``: the existing
-  ``Tb2EnvironmentProvider`` with sandboxes started from the prebaked image,
-  under a separate Modal app (default ``yeto-reward-env``; never the
-  production ``yeto-tbench2`` name for builds).
+- the Modal app names/env knobs for the prebaked sandboxes; the Modal backend
+  itself (``PrebakedModalSandboxBackend`` + ``modal_provider``) lives in the
+  cloud layer ``yeto/cloud/modal_reward_env.py`` and is injected through the
+  neutral ``tb2_provider.SandboxBackend`` / ``YETO_HARNESS_ENVIRONMENT_PROVIDER``.
 - held-out evaluation split helpers (30 tasks by default).
 """
 
@@ -186,57 +186,11 @@ register(NAME, Tb2Benchmark)
 
 
 # ----------------------------------------------------------------------------- Modal backend
-
-
-def modal_image(plan: PrebakePlan, *, prebake: bool = True) -> Any:
-    from modal import Image
-
-    image = Image.from_registry(plan.base_image)
-    if prebake and not plan.empty:
-        image = image.run_commands("bash -lc " + shlex.quote(prebake_script(plan)))
-    return image
-
-
-def _prebake_enabled() -> bool:
-    return os.environ.get(PREBAKE_ENV, "1") != "0"
-
-
-class PrebakedModalSandboxBackend(tb2.ModalSandboxBackend):
-    """``tb2_provider.ModalSandboxBackend`` with the task's prebaked image."""
-
-    def __init__(self, *, prebake: bool = True, **kwargs: Any) -> None:
-        kwargs.setdefault("app_name", DEFAULT_APP)
-        super().__init__(**kwargs)
-        self.prebake = prebake
-
-    def create(self, task: tb2.Tb2Task, trajectory_id: str) -> tb2.ModalSandbox:
-        from modal import Sandbox
-
-        plan = prebake_from_test_sh((task.tests_dir / "test.sh").read_text(), task.docker_image)
-        tags = {"yeto-tb2-task": task.task_id, "yeto-trajectory": trajectory_id[:63],
-                "yeto-prebake": plan.digest()[:16] if self.prebake and not plan.empty else "none"}
-        if self.run_id:
-            tags["yeto-run-id"] = self.run_id[:63]
-        sandbox = Sandbox.create(
-            "sleep", "infinity", app=self._get_app(), image=modal_image(plan, prebake=self.prebake),
-            timeout=self.ttl_s, idle_timeout=self.idle_timeout_s, cpu=float(task.cpus),
-            memory=int(task.memory_mb), workdir=task.workdir, tags=tags,
-        )
-        return tb2.ModalSandbox(sandbox, task.workdir)
-
-
-def modal_provider(miles_args: Any = None) -> tb2.Tb2EnvironmentProvider:
-    """``YETO_HARNESS_ENVIRONMENT_PROVIDER=yeto.rl.harness.reward_env.tb2:modal_provider``."""
-    del miles_args
-    tb2.require_modal_client()
-    backend = PrebakedModalSandboxBackend(
-        prebake=_prebake_enabled(),
-        app_name=os.environ.get(APP_ENV, DEFAULT_APP),
-        ttl_s=int(tb2._env_float(tb2.SANDBOX_TTL_ENV, tb2.DEFAULT_SANDBOX_TTL_S) or tb2.DEFAULT_SANDBOX_TTL_S),
-        idle_timeout_s=int(tb2._env_float(tb2.IDLE_TIMEOUT_ENV, tb2.DEFAULT_IDLE_TIMEOUT_S)
-                           or tb2.DEFAULT_IDLE_TIMEOUT_S),
-    )
-    return tb2._provider(backend)
+# The Modal sandbox backend for this adapter lives in the cloud layer
+# (``yeto/cloud/modal_reward_env.py``; import boundary: neutral core never imports
+# a cloud library).  It is injected at launch through the neutral provider
+# interface ``YETO_HARNESS_ENVIRONMENT_PROVIDER=yeto.cloud.modal_reward_env:modal_provider``
+# (a ``tb2_provider.SandboxBackend`` behind a ``Tb2EnvironmentProvider``).
 
 
 def check_build_app(app_name: str) -> str:

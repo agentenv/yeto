@@ -198,7 +198,9 @@ def test_prebaked_backend(tmp_path, fake_modal, prebake):
 
     make_task(tmp_path, "t1")
     task = tb2.resolve_task("t1", tmp_path)
-    backend = rt.PrebakedModalSandboxBackend(prebake=prebake)
+    from yeto.cloud import modal_reward_env
+
+    backend = modal_reward_env.PrebakedModalSandboxBackend(prebake=prebake)
     handle = backend.create(task, "traj-1")
     assert fake_modal["app_name"] == "yeto-reward-env" and fake_modal["app"].name == "yeto-reward-env"
     assert handle.workdir == "/app"

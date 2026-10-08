@@ -45,7 +45,7 @@ EnvironmentProvider（沿用 tb2_provider.Tb2EnvironmentProvider：租约、中�
 ## D6. 命名与隔离
 - Modal app：运行时沙箱默认 `yeto-reward-env`（可用 `YETO_REWARD_ENV_MODAL_APP` 覆盖），构建脚本拒绝 `yeto-tbench2`；现有 `yeto-tbench2` 与旧 provider 不动。
 - 开关：`YETO_REWARD_ENV_PREBAKE=0` 关闭预装（同一 provider 做 A/B 计时）。
-- 启动：`YETO_HARNESS_ENVIRONMENT_PROVIDER=yeto.rl.harness.reward_env.tb2:modal_provider`；启动器把它和旧 Modal provider 一样处理（装 Modal 客户端）。
+- 启动：`YETO_HARNESS_ENVIRONMENT_PROVIDER=yeto.cloud.modal_reward_env:modal_provider`；启动器把它和旧 Modal provider 一样处理（装 Modal 客户端）。
 
 ## D7. 第二个 benchmark：SWE-bench Verified
 ### D7.1 数据与许可证 [实测除注明外]
