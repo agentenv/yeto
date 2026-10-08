@@ -242,7 +242,14 @@ async def drive_untrusted(
 
 def _metrics_dict(metrics: legacy.AgentMetrics) -> dict[str, Any]:
     # compaction_counters is {} unless the CompactionRL bridge ran.
-    return {**asdict(metrics), **harness.tito_counters(metrics), **compaction_bridge.compaction_counters(metrics)}
+    extra: dict[str, Any] = {}
+    # Observe only (S15 r2 follow-up): why the Codex episode ended and the shape
+    # of the last model reply; set by the stock driver, absent otherwise.
+    for name in ("end_reason", "last_completion"):
+        value = getattr(metrics, name, None)
+        if value is not None:
+            extra[name] = value
+    return {**asdict(metrics), **harness.tito_counters(metrics), **compaction_bridge.compaction_counters(metrics), **extra}
 
 
 # --- CompactionRL segment sessions (trusted side; design D8) ----------------
@@ -371,6 +378,7 @@ async def finish_trusted(
     status = untrusted["status"]
     if status not in POLICY_STATUSES:
         raise ValueError(f"untrusted result has invalid status {status!r}")
+    evaluation: dict[str, Any] = {}
     if status == "timeout":
         passed, testsh_rc, verifier_name = False, None, TIMEOUT_VERIFIER
     else:
@@ -392,6 +400,8 @@ async def finish_trusted(
     )
     metadata["agent_metrics"] = dict(untrusted.get("metrics") or {})
     metadata["exit_status"] = status
+    if status != "timeout" and isinstance(evaluation.get("log"), str):
+        metadata["verifier_log"] = evaluation["log"]  # observe only, unsigned
     return metadata
 
 

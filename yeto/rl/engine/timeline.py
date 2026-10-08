@@ -175,9 +175,41 @@ TRAJECTORY_REWARD_SCHEMA: dict[str, tuple[type, ...]] = {
 }
 
 
+# S15 stage-2 follow-up (observe only): why a trajectory scored what it did.
+# Present only when the harness reported them (old key set kept otherwise):
+# Codex exit status (completed / max_turns / max_seq_len / timeout), agent
+# counters and the signed test.sh exit code.
+TRAJECTORY_REWARD_OPTIONAL: dict[str, tuple[type, ...]] = {
+    "exit_status": (str,),
+    "turns": (int,),
+    "terminal_calls": (int,),
+    "submit_calls": (int,),
+    "parse_failures": (int,),
+    "max_seq_len_hit": (int,),
+    "timed_out": (int,),
+    "testsh_rc": (int, type(None)),
+    # S15 r2 follow-up: why Codex stopped and the shape of its last reply.
+    "end_reason": (str,),
+    "last_finish_reason": (str,),
+    "last_content_chars": (int,),
+    "last_reasoning_chars": (int,),
+    "last_tool_calls": (int,),
+    "last_tool_names": (str,),
+    "last_completion_tokens": (int, type(None)),
+    "last_content_head": (str,),
+    "last_reasoning_tail": (str,),
+    "verifier_log": (str,),
+}
+
+
 def validate_trajectory_reward(record: Mapping[str, object]) -> list[str]:
     """Schema check of one ``rl_trajectory_reward`` payload (labels excluded)."""
     problems = []
+    for key, types in TRAJECTORY_REWARD_OPTIONAL.items():
+        if key in record:
+            value = record[key]
+            if (int in types and isinstance(value, bool)) or not isinstance(value, types):
+                problems.append(f"trajectory reward key {key!r} is {type(value).__name__}")
     for key, types in TRAJECTORY_REWARD_SCHEMA.items():
         if key not in record:
             problems.append(f"missing trajectory reward key {key!r}")

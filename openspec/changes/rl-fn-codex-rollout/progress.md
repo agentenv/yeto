@@ -19,3 +19,16 @@
 - 新增可观测性已落地：`rl_trajectory_reward` 24 条（fix-git 0/4 得分，首次得到确定值）。judge 的 unclassified 分母修正（per-record），见 judgment-v2.json。
 - 待裁定：D7 阶段 1 的 grad_norm>0 与 Q4 非零奖励不要求相冲突；4 层变体是否适合作为阶段 1 载体（输出随机导致失配/截断/零奖励三者同源）。
 
+
+## 阶段 2 全尺寸（2026-10-07，S15，run `s15-fncodex-full-modal-20261007a`，Modal 8×H200，≈$79）
+- 基础设施链路通过：2 轮 × 24/24 轨迹、权重发布 v0→v2、rollout/trainer logprob |Δ| 0.076、tis_clipfrac 0.58%。judge FAIL 项为 kl_le_max（0.022 > 自设 0.01）。rc=5 = 拆除未确认（Modal app 仍 stopping）。
+- 48 条奖励全 0 的根因：任务说明从未送达模型。smoke6 数据只有通用 system 消息、无 metadata.prompt，subprocess agent 用 `str(prompt)` 作首条用户消息（6 个任务首条用户消息同为 101 词元，tape `rl_harness_mismatch` 395–405、704–708 行）。阶段 1 同样受影响。
+- KL 0.022 在 v0（未训练）即存在、两轮不变、与失配数无关 → 引擎与训练端数值差异，非训练漂移；建议重新标定门限。
+- 已修（分支 s15-fncodex-l3）：7e22c37f 任务说明取 `instruction.md`，无法解析时 fail closed；dad2fd57 `rl_trajectory_reward` 增加 exit_status/turns/testsh_rc 等可选字段。单测通过，未上卡。
+- 详见 `infra-drafts/FNCODEX-STAGE2-ANALYSIS.md`。下一步：TB2 专用系统提示（待裁定）、16384 上下文、1 轮全尺寸复跑（估 $55–65，需追加预算）。
+- 2026-10-07 为 TB2 更换系统提示（d449ef37 起）：TB2 专用签名系统提示、任务说明 preflight、judge kl_max 0.03；r2 脚本 `s1-runs/s15-fncodex-full-modal-r2.sh`（1 轮、最坏 $54.4），PLAN_ONLY 通过，6 个任务首条用户消息均为 instruction.md 原文。见 REVIEW §13。
+
+## 阶段 2 r2（2026-10-07，run `s15-fncodex-full-modal-20261007c`，代码 a978c15b，1 轮，≈$39.4）
+- judge PASS（KL 0.0209），但 24/24 奖励仍为 0。新采集字段生效：第 1 次回复就违反协议 10 条、第 1 次回复被 4096 截断 4 条、上下文 8192 用尽 8 条、多回合后违规 2 条，submit 0 次，没有一条用满 12 轮。
+- 8895dbc9：TB2 提示写明严格格式和预算；TB2 工具描述去掉 CTF 措辞（签名表面哈希 707e144f）；tape 增加 end_reason 和最后一次回复的形态。详见 STAGE2-ANALYSIS §6。下一步先做判分链路阳性对照（CPU 沙箱），上卡等用户裁定。
+- TB2 判分链路阳性对照（Modal CPU 沙箱，≈$0.03）：6/6 官方解 reward=1、6/6 空解 reward=0，判分链路正常，零奖励来自模型没做对。3a49e94d：verifier 输出末尾 2000 字符作为 `verifier_log` 写入轨迹和 tape。见 STAGE2-ANALYSIS §7。

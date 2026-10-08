@@ -101,3 +101,9 @@ Goals：FN（4 层与全尺寸）能用与 smoke-12 相同的 A 路径跑 Termin
 - Q4 非零奖励：不设为硬 PASS；全零只算链路通过、不算学习有效；另加一个已知可得分样例验证奖励链路。
 - Q5 序列长度：先 8192，按截断统计再决定是否升 16384。
 - 4 层变体进 Modal Volume：作为 GPU 阶段启动前的必备条件（上传、版本核对、加载验证先于计费）。
+
+## 2026-10-07 为 TB2 更换系统提示（S15 阶段 2 复盘后，主 agent 裁定）
+- 阶段 2 全尺寸 48 条轨迹奖励全 0，根因是任务说明未送达（见 `infra-drafts/FNCODEX-STAGE2-ANALYSIS.md`）；同时旧 Codex 系统提示是安全测试/CTF 措辞（TARGET_URL、flag、"没有被计分目标的 shell"），与 TB2（shell 所在容器即被计分环境）相反。
+- 决定：新增 `codex_harness_agent.TB2_BASE_INSTRUCTIONS`（sha256 `72bea89b…cd37`，钉在 `yeto.rl.CODEX_TB2_BASE_INSTRUCTIONS_SHA256`）。TB2 环境提供者在每个租约的 worker 环境里设置 `YETO_CODEX_INSTRUCTIONS_FAMILY=tb2` 与签名哈希 `YETO_CODEX_TB2_BASE_INSTRUCTIONS_SHA256`，harness 据此选用 TB2 提示；哈希不符或未知 family 时拒绝运行。其它路径与 `CODEX_BASE_INSTRUCTIONS_SHA256`（`1c183656…a846`）不变，有单测。`CODEX_HARNESS_AGENT_SHA256` 随文件修改重新钉住。
+- 任务说明取自 `instruction.md`（`task_prompt()`），`tb2_provider.preflight_task_prompts` 在岛上 preflight 与启动脚本 PLAN_ONLY 两处拒绝"没有任务说明 / 字符串化 chat 列表"的数据行。
+- 判据：judge 的 kl_max 0.01 → 0.03（阶段 2 未训练的 v0 已是 0.0224，是推理端与训练端的数值差）。

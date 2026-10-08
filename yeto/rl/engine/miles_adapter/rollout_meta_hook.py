@@ -517,7 +517,50 @@ def trajectory_reward_records(
                 "reward": float(reward) if math.isfinite(reward) else None,
                 "success": success if isinstance(success, bool) else None,
                 "aborted": _status(s) == "aborted",
+                **trajectory_diagnostics(meta),
             })
+    return out
+
+
+_DIAGNOSTIC_COUNTERS = ("turns", "terminal_calls", "submit_calls", "parse_failures",
+                        "max_seq_len_hit", "timed_out")
+
+
+def trajectory_diagnostics(meta: dict[str, Any]) -> dict[str, Any]:
+    """S15 stage-2 follow-up: Codex exit status, agent counters and the signed
+    ``testsh_rc`` from the harness metadata; only the keys that are present."""
+    out: dict[str, Any] = {}
+    status = meta.get("exit_status")
+    if isinstance(status, str) and status:
+        out["exit_status"] = status[:64]
+    metrics = meta.get("agent_metrics")
+    if isinstance(metrics, dict):
+        for key in _DIAGNOSTIC_COUNTERS:
+            value = metrics.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                out[key] = value
+        reason = metrics.get("end_reason")
+        if isinstance(reason, str) and reason:
+            out["end_reason"] = reason[:160]
+        last = metrics.get("last_completion")
+        if isinstance(last, dict):
+            for key, limit in (("finish_reason", 16), ("tool_names", 96), ("content_head", 200), ("reasoning_tail", 200)):
+                if isinstance(last.get(key), str):
+                    out[f"last_{key}"] = last[key][:limit]
+            for key in ("content_chars", "reasoning_chars", "tool_calls"):
+                value = last.get(key)
+                if isinstance(value, int) and not isinstance(value, bool):
+                    out[f"last_{key}"] = value
+            tokens = last.get("completion_tokens")
+            if tokens is None or (isinstance(tokens, int) and not isinstance(tokens, bool)):
+                out["last_completion_tokens"] = tokens
+    log = meta.get("verifier_log")
+    if isinstance(log, str):
+        out["verifier_log"] = log[-2000:]
+    outcome = meta.get("tbench_trusted_outcome")
+    if isinstance(outcome, dict) and "testsh_rc" in outcome:
+        rc = outcome.get("testsh_rc")
+        out["testsh_rc"] = rc if isinstance(rc, int) and not isinstance(rc, bool) else None
     return out
 
 

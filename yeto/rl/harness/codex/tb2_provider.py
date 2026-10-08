@@ -113,6 +113,11 @@ class Tb2Task:
     workdir: str
     agent_timeout_s: float
     verifier_timeout_s: float
+    # Task statement from ``instruction.md`` (the Terminal-Bench prompt).  The
+    # smoke datasets carry only ``task_id`` and a generic system message, so
+    # this is the only place the model can learn what to do (S15 stage 2: all
+    # 48 trajectories ran without it and scored 0).
+    instruction: str | None = None
 
     @property
     def tests_dir(self) -> Path:
@@ -150,7 +155,60 @@ def resolve_task(task_ref: str, tasks_dir: Path) -> Tb2Task:
         workdir=_dockerfile_workdir(task_dir / "environment" / "Dockerfile"),
         agent_timeout_s=float(config.get("agent", {}).get("timeout_sec", 900.0)),
         verifier_timeout_s=float(config.get("verifier", {}).get("timeout_sec", 900.0)),
+        instruction=_read_instruction(task_dir / "instruction.md"),
     )
+
+
+def tb2_instructions_env() -> dict[str, str]:
+    """Worker env selecting the signed TB2 Codex system prompt."""
+    from . import codex_harness_agent as harness
+
+    return {
+        harness.INSTRUCTIONS_FAMILY_ENV: harness.TB2_INSTRUCTIONS_FAMILY,
+        harness.TB2_INSTRUCTIONS_SHA_ENV: harness.TB2_BASE_INSTRUCTIONS_SHA256,
+    }
+
+
+class TaskPromptPreflightError(ValueError):
+    """A dataset row would reach Codex without a real task statement."""
+
+
+def preflight_task_prompts(data_path: Path, tasks_dir: Path) -> list[tuple[str, str]]:
+    """Resolve the first user message of every dataset row exactly as the
+    subprocess agent will (``task_prompt``) and refuse rows without a task
+    statement or whose prompt is a stringified chat list (S15 stage 2 root
+    cause).  Returns ``[(task_id, prompt), ...]`` in row order."""
+    import json
+    from types import SimpleNamespace
+
+    from .codex_openenv_subprocess_agent_function import TaskPromptMissing, task_prompt
+
+    out: list[tuple[str, str]] = []
+    for lineno, line in enumerate(Path(data_path).read_text().splitlines(), 1):
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        metadata = dict(row.get("metadata") or {})
+        task_id = metadata.get("task_id")
+        try:
+            task = resolve_task(task_id, Path(tasks_dir))
+            prompt = task_prompt(metadata, row.get("prompt"), SimpleNamespace(task=task))
+        except (TaskPromptMissing, ValueError, FileNotFoundError) as exc:
+            raise TaskPromptPreflightError(f"{data_path}:{lineno} task {task_id!r}: {exc}") from exc
+        head = prompt.lstrip()[:2]
+        if head in ("[{", "{'", '{"') or "'role':" in prompt or '"role":' in prompt:
+            raise TaskPromptPreflightError(f"{data_path}:{lineno} task {task_id!r}: prompt is a stringified chat message")
+        out.append((str(task_id), prompt))
+    if not out:
+        raise TaskPromptPreflightError(f"{data_path}: no dataset rows")
+    return out
+
+
+def _read_instruction(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    text = path.read_text(errors="replace").strip()
+    return text or None
 
 
 def _dockerfile_workdir(dockerfile: Path) -> str:
@@ -461,6 +519,15 @@ _REWARD_RE = re.compile(r"YETO_TB2_REWARD=(\S*)")
 _RC_RE = re.compile(r"YETO_TB2_TESTSH_RC=(\d+)")
 
 
+VERIFIER_LOG_CHARS = 2000
+
+
+def verifier_log_excerpt(output: str, limit: int = VERIFIER_LOG_CHARS) -> str:
+    """Last ``limit`` chars of the verifier output (pytest prints its verdict last)."""
+    text = output if isinstance(output, str) else ""
+    return text if len(text) <= limit else "…" + text[-(limit - 1):]
+
+
 class Tb2Verifier:
     """Trusted-side verifier: ``tests/test.sh`` inside the sandbox, reward from ``reward.txt``."""
 
@@ -487,6 +554,9 @@ class Tb2Verifier:
             "passed": bool(reward) and reward.group(1) == "1",
             "testsh_rc": testsh_rc,
             "timed_out": result.timed_out,
+            # Observe only (S15 verifier probe): the tail of test.sh output
+            # (pytest summary / install errors); never part of the signed outcome.
+            "log": verifier_log_excerpt(result.output),
         }
 
 
@@ -587,11 +657,12 @@ class Tb2EnvironmentProvider:
             await asyncio.to_thread(handle.terminate)
             raise
         deadline = self.lease_seconds if self.lease_seconds is not None else task.agent_timeout_s
-        worker_env: dict[str, str] | None = None
+        # 2026-10-07: TB2 episodes run under the signed TB2 system prompt.
+        worker_env: dict[str, str] | None = tb2_instructions_env()
         if "deadline" in faults:
             deadline = float(faults["deadline"] or 1.0)
         if "max_turns" in faults:
-            worker_env = {TURN_BUDGET_ENV: str(int(faults["max_turns"] or 2))}
+            worker_env = {**(worker_env or {}), TURN_BUDGET_ENV: str(int(faults["max_turns"] or 2))}
         state = {"destroyed": False}
 
         async def destroy() -> None:
