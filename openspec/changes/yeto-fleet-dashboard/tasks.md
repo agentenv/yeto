@@ -46,3 +46,25 @@
 ## 7. 集成检查
 
 - [ ] 7.1 [D；依赖1-4] 以一份真实 ports 多岛运行磁带（由其他已批准实验产生，本 change 不另起 GPU）执行 serve 与 export，核对训练曲线非空、round 表、告警与成本面板；验收：记录结果与截图。 CPU 替代已做：s9-m4x1-20261005aa（单岛 ports、node_lost→RECOVERY_REQUIRED）导出 `infra-drafts/tmp-logs/dashboard-s9-m4x1.html`，reward/grad_norm/tok/s 曲线非空、RECOVERY_REQUIRED 严重告警、E1 面板与派生 cell 表；无 syncer/fleet.jsonl 故 round 表与成本为“无数据”。**未做：多岛 ports 运行与截图。** S14 补做：2 岛真实磁带（s13-g3-modal-20261007f，0 轮）+ 3 份真实单岛 Modal 磁带 export/serve 核对，见 progress.md S14；仍无带 syncer/round 事件的真实多岛磁带，故未勾。
+
+
+## 8. 启动阶段可观测性与成本口径（2026-10-08 补充；等 FN 2×8 早门跑完再做）
+
+- [x] 8.1 [D；`yeto/dashboard/reducer.py`、`alerts.py`] 未见 `rl_driver_start` 的岛标为"启动中"，心跳告警改用启动阈值（默认 30 min，可配）。验收：用 `s16-rawlora-fn2x8-long-20261008a` 启动段磁带重放，不再出现"心跳超时"严重告警；人为截断到启动后 40 min 无事件时报警。
+- [x] 8.2 [D；`yeto/dashboard/cost.py`、`prices.example.json`] 价目表增加 CPU 核·时与内存 GiB·时单价，按岛申请的核数/内存计入；缺失时页面标"仅 GPU"。验收：Modal 2×8（32 核、768 GiB ×2）估算与启动脚本 $87.93/h 相差 <5%。
+- [x] 8.3 [D；`yeto/dashboard/cli.py`/`sources.py`] 未传 `--run` 时从磁带记录推断运行名并显示。验收：只传 `--tapes` 时页面标题显示运行名。
+- [ ] 8.4 [INFRA-REQ；依赖 yeto-framework-decoupling 标准样本；S17 未做：要改 driver.py，与去耦合阶段 3 同文件，等其完成后再做] 岛启动即开心跳与资源采样（phase=`startup`），并在加载权重完成、Ray 集群组好、推理引擎就绪各发一条事件；dashboard 按子步骤分别计时与告警。验收：标准样本中既有事件字段不变；新事件有单测；下一次真机运行启动段可见显存曲线与子步骤时间。
+
+- [x] 8.5 [D+INFRA；`yeto/modal_runner.py`、`reducer.py`] 训推分离时推理节点 GPU 未被采样（`rl_resource_sample` 只在驱动所在节点）：Modal 主机探针加记 GPU 利用率与 `node_rank`，多节点岛默认开启（30 s，可用 `YETO_MODAL_HOSTMEM_SAMPLE_S` 改或设 0 关闭），容器一启动就采样（顺带覆盖启动段显存）；reducer 按节点分别保留显存峰值与利用率。验收：单测；用 2×8 旧磁带重放可见节点 0/1 两条显存（旧磁带无利用率，显示"未采样"）；下一次真机看到推理节点利用率。
+
+## 9. 界面改版（2026-10-08 用户确认；等 FN 2×8 早门跑完，与第 8 组一起做）
+
+- [x] 9.1 [D；`tools/dashboard_preview.py`/`.html`，S17 用户已定稿] 静态预览页：用 `s16-rawlora-fn2x8-long-20261008a` 真实磁带生成，含暖色两主题、单岛布局、悬停竖线与数值框。验收：用户确认定稿。
+- [x] 9.2 [D；`static/index.html`] 暖色令牌（D-UI1），深浅主题与 `prefers-color-scheme` 均正确；训练/推理固定配色。验收：两主题截图对比度检查通过。（S17：令牌已实装，训练/推理与岛配色用色盲/对比度校验脚本验证通过；两主题截图未做，本机无浏览器）
+- [x] 9.3 [D；`reducer.py`、`static/app.js`] 布局按 `run_kind` 自动切换（D-UI2），未使用面板折叠。验收：单岛 2×8 磁带与一份多岛磁带各渲染一次，第一屏内容符合设计。
+- [x] 9.4 [D；`reducer.py`] 逐轮记录补齐：阶段起止（generate/train/sync/publish）、截断率、回答长度分位、训练/推理 tok/s、耗时拆分。验收：对 2×8 磁带重放，第 0、1 轮数值与 FN2X8-MODAL-PRELAUNCH-REVIEW §9 记录一致。（S17：`Reducer.round_records`，s16 2×8 重放第 0 轮 R 171/T 616/S 216/P 243 s、截断 0.5625、logprob 差 0.0232）
+- [x] 9.5 [D；`static/app.js`] 阶段时间线 + 每轮耗时拆分堆叠条（训练侧/推理侧占比）。验收：2×8 第 0 轮显示 R 171 s、T 615 s、S 216 s、P 243 s。
+- [x] 9.6 [D；`static/app.js`] 曲线：点少于 5 不连线；分位误差带；注明"每轮题目不同"。验收：2 轮数据只画两个点。
+- [ ] 9.7 [D；`static/app.js`] 悬停竖线与数值框（D-UI3）：吸附最近轮、内容齐全、多岛逐岛一行、三图联动、靠边翻转、点按与键盘。验收：浏览器手动检查 + 对数值框内容的 reducer 单测；缺失项显示"无"。（S17：已实装并有 node DOM 桩测试；浏览器手动检查待用户）
+- [ ] 9.8 [D] 借鉴参考图：左侧导航、顶部关键数字卡片、可展开岛健康列表、带时间与级别的事件流、命令复制按钮；成本表窄屏不横向滚动。验收：400 px 宽度下无横向滚动。（S17：已实装；400 px 宽度检查待浏览器）
+- [x] 9.9 [D；`sources.py`、`reducer.py`、`alerts.py`] 我方主动停机后显示"已停止"而不是"需恢复"（S17 用户裁定）。以谁为准：运行目录里的 `STOP_ISSUED_utc.txt`（停机脚本在发出停机命令前写入"<utc> <原因>"）；没有这个文件的旧运行，退回用 GATE*_STOPPED / EARLY_STOPPED_TIME / WATCHDOG_FIRED（内容里的时间，否则文件修改时间，都是停机命令返回的时间，偏晚，从严）。岛的第一次失败（RECOVERY_REQUIRED 或 island_lost）不早于停机时间减 5 s 才算我方停机造成，此时不出恢复与心跳告警；早于停机的失败照常报。验收：s16 2×8 旧记录重放显示"已停止（我方停机：gate）"、无告警；单测覆盖停机前失败、无标记、旧标记、去重。

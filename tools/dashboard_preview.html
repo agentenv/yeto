@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>yeto 看板预览</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#F3EEE7;--panel:#FBF8F3;--ink:#2A221C;--ink2:#7A6B5E;--line:#E4DACD;--accent:#C8641E;
+  --good:#4F7A5A;--warn:#C9952A;--bad:#B2432F;
+  --R:#C47A2C;--T:#6A4FA0;--S:#A8998A;--P:#5E5248;--band:rgba(106,79,160,.14);
+  --mono:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;
+  --sans:"Noto Sans SC",system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#1A1613;--panel:#24201C;--ink:#EDE4DA;--ink2:#A8998A;--line:#3A332D;--accent:#E8894A;
+  --good:#7FAE88;--warn:#E0B355;--bad:#E07A64;--R:#C98038;--T:#9C82D4;--S:#7D7064;--P:#B9AC9E;--band:rgba(156,130,212,.18)}}
+:root[data-theme="dark"]{
+  --bg:#1A1613;--panel:#24201C;--ink:#EDE4DA;--ink2:#A8998A;--line:#3A332D;--accent:#E8894A;
+  --good:#7FAE88;--warn:#E0B355;--bad:#E07A64;--R:#C98038;--T:#9C82D4;--S:#7D7064;--P:#B9AC9E;--band:rgba(156,130,212,.18)}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.55 var(--sans)}
+.num,.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.app{display:grid;grid-template-columns:200px minmax(0,1fr);min-height:100vh}
+nav{position:sticky;top:0;align-self:start;height:100vh;padding:20px 14px;border-right:1px solid var(--line)}
+nav .brand{font-weight:700;color:var(--accent);margin-bottom:18px;letter-spacing:.02em}
+nav a{display:block;padding:7px 10px;border-radius:8px;color:var(--ink2);text-decoration:none}
+nav a:hover,nav a.on{background:var(--panel);color:var(--ink)}
+nav .sub{font-size:12px;color:var(--ink2);margin-top:18px}
+main{padding:20px 24px 60px;max-width:1280px}
+header{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;margin-bottom:16px}
+h1{font-size:20px;margin:0}
+h2{font-size:15px;margin:0 0 10px}
+.tag{display:inline-block;padding:1px 8px;border:1px solid var(--line);border-radius:999px;font-size:12px;color:var(--ink2);margin-left:6px}
+.btn{border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:8px;padding:5px 10px;cursor:pointer;font:inherit}
+.btn:focus-visible,.panel:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.kpis{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin-bottom:16px}
+.kpi{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+.kpi .k{font-size:12px;color:var(--ink2)}
+.kpi .v{font-size:22px;font-weight:600;font-family:var(--mono)}
+.kpi .s{font-size:12px;color:var(--ink2)}
+.kpi.main{border-color:var(--accent)}
+.grid2{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);gap:14px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:14px;position:relative}
+.note{font-size:12px;color:var(--ink2)}
+.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--ink2);margin:4px 0 6px}
+.sw{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+svg{display:block;width:100%;height:auto;overflow:visible}
+svg text{fill:var(--ink2);font:11px var(--mono)}
+.grid line{stroke:var(--line)}
+.tip{position:absolute;pointer-events:none;background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  box-shadow:0 6px 24px rgba(0,0,0,.12);padding:9px 11px;font-size:12px;min-width:220px;z-index:5;display:none}
+.tip .h{font-weight:600;margin-bottom:4px}
+.tip .row{display:flex;justify-content:space-between;gap:12px}
+.tip .row span:last-child{font-family:var(--mono)}
+.st{display:inline-flex;align-items:center;gap:5px;font-weight:500}
+.st i{width:8px;height:8px;border-radius:50%;display:inline-block}
+.ok i{background:var(--good)}.ok{color:var(--good)}.wn i{background:var(--warn)}.wn{color:var(--warn)}.bd i{background:var(--bad)}.bd{color:var(--bad)}.mu{color:var(--ink2)}.mu i{background:var(--ink2)}
+.isl{border-top:1px solid var(--line);padding:8px 0}
+.isl summary{cursor:pointer;display:flex;justify-content:space-between;gap:8px;list-style:none}
+.isl summary::-webkit-details-marker{display:none}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:2px 12px;font-size:12px;margin-top:6px}
+.kv span:nth-child(odd){color:var(--ink2)}
+.ev{max-height:340px;overflow:auto;font-size:12px}
+.ev div{display:grid;grid-template-columns:70px 44px minmax(0,1fr);gap:8px;padding:4px 0;border-bottom:1px dashed var(--line)}
+.ev .t{font-family:var(--mono);color:var(--ink2)}
+.ev .x{overflow-wrap:anywhere}
+.cmd{display:flex;gap:8px;align-items:center;margin:6px 0}
+.cmd code{flex:1;min-width:0;overflow-wrap:anywhere;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:6px 8px;font:12px var(--mono)}
+.cmd .l{width:72px;flex:none;font-size:12px;color:var(--ink2)}
+.fold{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-top:1px solid var(--line);color:var(--ink2);font-size:13px}
+table.c{width:100%;border-collapse:collapse;font-size:12px}
+table.c td,table.c th{padding:4px 6px;border-bottom:1px solid var(--line);text-align:right}
+table.c td:first-child,table.c th:first-child{text-align:left}
+.hl{background:color-mix(in srgb,var(--accent) 10%,transparent)}
+.banner{border:1px dashed var(--accent);border-radius:10px;padding:8px 12px;margin-bottom:14px;font-size:12px;color:var(--ink2)}
+@media (max-width:900px){.app{grid-template-columns:1fr}nav{position:static;height:auto;display:flex;flex-wrap:wrap;gap:4px;border-right:0;border-bottom:1px solid var(--line);padding:10px 16px}
+  nav .brand{width:100%;margin:0}nav .sub{display:none}main{padding:14px 16px}.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.grid2{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="app">
+<nav aria-label="页面导航">
+  <div class="brand">yeto 看板</div>
+  <a href="#overview" class="on">概览</a><a href="#rounds">每轮</a><a href="#nodes">节点</a><a href="#cost">成本</a>
+  <a href="#events">事件</a><a href="#cmds">常用命令</a><a href="#unused">未使用面板</a>
+  <div class="sub">静态预览（9.1），数据来自真实磁带，等你定稿后再改 static/。</div>
+</nav>
+<main>
+<div class="banner" id="banner"></div>
+<header id="overview">
+  <div><h1 id="title"></h1><div class="note" id="sub"></div></div>
+  <div><button class="btn" id="layoutBtn" title="按 run_kind 自动选择；此按钮仅供预览另一种布局">布局：自动</button>
+  <button class="btn" id="themeBtn">主题：跟随系统</button></div>
+</header>
+<section class="kpis" id="kpis" aria-label="关键数字"></section>
+
+<div id="multiWall" class="panel" hidden><h2>岛卡片墙（多岛布局第一屏）</h2><div id="wall" class="note"></div></div>
+
+<section class="panel" id="rounds" tabindex="0" aria-label="每轮图表，左右键切换轮次">
+  <h2>每轮：reward、耗时拆分、阶段时间线 <span class="note">（悬停或左右键逐轮；三图联动）</span></h2>
+  <div class="grid2">
+    <div><div class="legend"><span><i class="sw" style="background:var(--T)"></i>reward 均值</span><span><i class="sw" style="background:var(--band)"></i>p10–p90</span><span class="note" id="nPts"></span></div>
+      <div id="cReward"></div><div class="note">每轮题目不同，看不出趋势前别解读成“下滑”。</div></div>
+    <div><div class="legend" id="legDur"></div><div id="cDur"></div></div>
+  </div>
+  <h2 style="margin-top:14px">阶段时间线（墙钟）</h2>
+  <div class="legend" id="legTl"></div><div id="cTl"></div>
+  <div class="tip" id="tip"></div>
+</section>
+
+<div class="grid2">
+<section class="panel" id="nodes"><h2>节点 GPU 显存（每节点 8 卡均值，GiB）</h2>
+  <div class="legend" id="legNodes"></div><div id="cNodes"></div>
+  <div class="note" id="nodesNote"></div></section>
+<section class="panel"><h2>岛健康</h2><div id="islands"></div></section>
+</div>
+
+<div class="grid2">
+<section class="panel" id="cost"><h2>成本（估算，非账单）</h2><div id="costBox"></div></section>
+<section class="panel" id="events"><h2>事件流</h2><div class="ev" id="evs"></div></section>
+</div>
+
+<section class="panel" id="cmds"><h2>常用命令</h2><div id="cmdBox"></div></section>
+<section class="panel" id="unused"><h2>本次运行未使用的面板</h2><div id="foldBox"></div></section>
+</main>
+</div>
+<script>
+const D=/*__DATA__*/null;
+const $=id=>document.getElementById(id), O=D.overview, RS=D.rounds;
+const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const f=(v,d=3)=>v==null||!isFinite(v)?"无":(Math.abs(v)>=100?v.toFixed(0):(+v).toFixed(d));
+const pct=v=>v==null?"无":(v*100).toFixed(1)+"%";
+const hm=s=>s==null?"无":(s>=3600?(s/3600).toFixed(1)+" h":(s/60).toFixed(0)+" min");
+const clock=t=>t==null?"无":new Date(t*1000).toISOString().slice(11,19);
+const PH=[["R","推理生成"],["T","训练"],["S","训练后同步"],["P","发布"]];
+const NS="http://www.w3.org/2000/svg";
+let cur=RS.length?RS.length-1:null, layout="auto";
+
+/* theme */
+const themes=["auto","light","dark"];let ti=0;
+$("themeBtn").onclick=()=>{ti=(ti+1)%3;const t=themes[ti];if(t==="auto")document.documentElement.removeAttribute("data-theme");else document.documentElement.dataset.theme=t;
+  $("themeBtn").textContent="主题："+({auto:"跟随系统",light:"浅色",dark:"深色"})[t];};
+/* layout (run_kind) */
+function kind(){return layout==="auto"?O.run_kind:layout}
+$("layoutBtn").onclick=()=>{layout=layout==="auto"?(O.run_kind==="single_island"?"multi_island":"single_island"):"auto";render()};
+
+function header(){
+  const k=kind();
+  $("title").innerHTML=esc(k==="single_island"?"单岛总览":"多岛总览")+" · <span class='mono'>"+esc(O.run||"未命名运行")+"</span>"+(O.run_inferred?"<span class='tag'>名称由磁带推断</span>":"")+"<span class='tag'>"+esc(O.run_kind)+"</span>";
+  $("sub").textContent=[D.config.model,D.config.gpu,D.config.placement].filter(Boolean).join(" · ");
+  $("layoutBtn").textContent="布局："+(layout==="auto"?"自动（"+(O.run_kind==="single_island"?"单岛":"多岛")+"）":(layout==="single_island"?"单岛（预览）":"多岛（预览）"));
+  $("banner").textContent="预览页（tasks 9.1）：数据来自 "+D.generated_from+"；缺失项一律显示“无”，不插值、不放演示数据。";
+}
+function stBadge(s){const m={ok:["ok","健康"],starting:["wn","启动中"],stale:["bd","掉线疑似"],lost:["bd","已丢失"],recovery:["bd","需恢复"],done:["mu","已结束"],unknown:["mu","无数据"]}[s]||["mu",s];
+  return `<span class="st ${m[0]}"><i></i>${m[1]}</span>`}
+function kpis(){
+  const isl=O.islands[0]||{}, c=O.cost||{}, last=RS[RS.length-1]||{};
+  const dur=(O.data_ts&&O.first_ts)?O.data_ts-O.first_ts:null;
+  const cards=[
+    ["状态",stBadge(isl.status),(O.alerts||[]).length+" 条告警",true],
+    ["估算成本","$"+f(c.total_usd,1),"$"+f((c.islands||[]).reduce((a,r)=>a+(r.rate_usd_h||0),0),2)+"/h（GPU+CPU+内存）"],
+    ["轮次",String(RS.length),"已发布到 v"+f(Math.max(...RS.map(r=>r.published_version??-1)),0)],
+    ["时长",hm(dur),"启动到最后事件"],
+    ["推理吞吐",f(last.gen_tok_s,0),"tok/s，最后一轮"]];
+  $("kpis").innerHTML=cards.map(([k,v,s,m])=>`<div class="kpi${m?" main":""}"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${esc(s)}</div></div>`).join("");
+}
+function el(tag,attrs,parent){const e=document.createElementNS(NS,tag);for(const k in attrs)e.setAttribute(k,attrs[k]);parent&&parent.appendChild(e);return e}
+
+/* chart 1: reward mean + p10-p90 band; < 5 points: dots only, no line */
+let rewardX=null;
+function chartReward(){
+  const W=560,H=220,m={l:40,r:12,t:10,b:26},box=$("cReward");box.innerHTML="";
+  const s=el("svg",{viewBox:`0 0 ${W} ${H}`,role:"img","aria-label":"每轮 reward 均值与 p10–p90"},box);
+  const n=RS.length, x=i=>m.l+(n<=1?(W-m.l-m.r)/2:i*(W-m.l-m.r)/(n-1)), y=v=>m.t+(1-v)*(H-m.t-m.b);rewardX=x;
+  const g=el("g",{class:"grid"},s);[0,.25,.5,.75,1].forEach(v=>{el("line",{x1:m.l,x2:W-m.r,y1:y(v),y2:y(v)},g);el("text",{x:m.l-6,y:y(v)+4,"text-anchor":"end"},s).textContent=v});
+  RS.forEach((r,i)=>{el("text",{x:x(i),y:H-8,"text-anchor":"middle"},s).textContent="第"+r.round+"轮"});
+  const band=RS.map((r,i)=>[i,r.p10,r.p90]).filter(p=>p[1]!=null&&p[2]!=null);
+  const lines=n>=5;
+  if(band.length>=2&&lines){el("path",{d:"M"+band.map(p=>x(p[0])+","+y(p[2])).join("L")+"L"+band.slice().reverse().map(p=>x(p[0])+","+y(p[1])).join("L")+"Z",fill:"var(--band)"},s)}
+  else band.forEach(p=>el("line",{x1:x(p[0]),x2:x(p[0]),y1:y(p[1]),y2:y(p[2]),stroke:"var(--band)","stroke-width":10,"stroke-linecap":"round"},s));
+  const pts=RS.map((r,i)=>[i,r.reward]).filter(p=>p[1]!=null);
+  if(lines&&pts.length>=2)el("path",{d:"M"+pts.map(p=>x(p[0])+","+y(p[1])).join("L"),fill:"none",stroke:"var(--T)","stroke-width":2},s);
+  $("nPts").textContent=lines?"":"（点少于 5 个：只画点不连线）";
+  el("line",{id:"vline",y1:m.t,y2:H-m.b,stroke:"var(--ink2)","stroke-dasharray":"3 3",visibility:"hidden"},s);
+  pts.forEach(p=>el("circle",{cx:x(p[0]),cy:y(p[1]),r:5,fill:"var(--T)",stroke:"var(--panel)","stroke-width":2,"data-i":p[0],class:"rdot"},s));
+  const hit=el("rect",{x:m.l-10,y:0,width:W-m.l-m.r+20,height:H,fill:"transparent"},s);
+  hit.addEventListener("mousemove",e=>{const pt=s.getBoundingClientRect(),vx=(e.clientX-pt.left)*W/pt.width;
+    let best=0,bd=1e9;RS.forEach((_,i)=>{const d=Math.abs(x(i)-vx);if(d<bd){bd=d;best=i}});setCur(best,e)});
+  hit.addEventListener("mouseleave",hideTip);hit.addEventListener("click",e=>{const pt=s.getBoundingClientRect(),vx=(e.clientX-pt.left)*W/pt.width;
+    let best=0,bd=1e9;RS.forEach((_,i)=>{const d=Math.abs(x(i)-vx);if(d<bd){bd=d;best=i}});setCur(best,e)});
+}
+/* chart 2: per-round time split, stacked horizontal bars (R/T/S/P) */
+function chartDur(){
+  const W=420,rowH=30,m={l:52,r:56,t:6,b:22},H=m.t+m.b+rowH*RS.length,box=$("cDur");box.innerHTML="";
+  $("legDur").innerHTML=PH.map(([k,l])=>`<span><i class="sw" style="background:var(--${k})"></i>${l}</span>`).join("");
+  const s=el("svg",{viewBox:`0 0 ${W} ${H}`,role:"img","aria-label":"每轮耗时拆分"},box);
+  const tot=RS.map(r=>PH.reduce((a,[k])=>a+(r.dur[k]||0),0)),mx=Math.max(...tot,1),sx=v=>v*(W-m.l-m.r)/mx;
+  RS.forEach((r,i)=>{const y=m.t+i*rowH;let x0=m.l;
+    el("rect",{x:0,y:y,width:W,height:rowH,fill:"transparent",class:"drow","data-i":i},s);
+    el("text",{x:m.l-8,y:y+rowH/2+4,"text-anchor":"end"},s).textContent="第"+r.round+"轮";
+    PH.forEach(([k])=>{const w=sx(r.dur[k]||0);if(w>0){el("rect",{x:x0,y:y+6,width:Math.max(w-2,1),height:rowH-12,rx:3,fill:`var(--${k})`},s);x0+=w}});
+    el("text",{x:x0+6,y:y+rowH/2+4},s).textContent=f(tot[i]/60,1)+"m";
+    const hit=el("rect",{x:0,y:y,width:W,height:rowH,fill:"transparent"},s);
+    hit.addEventListener("mousemove",e=>setCur(i,e));hit.addEventListener("mouseleave",hideTip);hit.addEventListener("click",e=>setCur(i,e));});
+}
+/* chart 3: phase timeline over wall clock */
+function chartTl(){
+  const all=RS.flatMap(r=>Object.values(r.phases)).flat();if(!all.length){$("cTl").textContent="无";return}
+  const t0=Math.min(...all,D.driver_start||Infinity,D.t0||Infinity),t1=Math.max(...all);
+  const W=1000,H=86,m={l:52,r:10,t:6,b:22},sx=t=>m.l+(t-t0)*(W-m.l-m.r)/(t1-t0),box=$("cTl");box.innerHTML="";
+  $("legTl").innerHTML=PH.map(([k,l])=>`<span><i class="sw" style="background:var(--${k})"></i>${l}</span>`).join("")+`<span><i class="sw" style="background:var(--line)"></i>启动（加载权重、组 Ray、起推理引擎）</span>`;
+  const s=el("svg",{viewBox:`0 0 ${W} ${H}`,role:"img","aria-label":"阶段时间线"},box);
+  const lanes={R:[m.t,"推理"],T:[m.t+26,"训练"],S:[m.t+26,""],P:[m.t+52-26,""]};
+  el("text",{x:m.l-8,y:m.t+16,"text-anchor":"end"},s).textContent="推理";el("text",{x:m.l-8,y:m.t+42,"text-anchor":"end"},s).textContent="训练侧";
+  if(D.t0&&D.driver_start)el("rect",{x:sx(D.t0),y:m.t,width:sx(D.driver_start)-sx(D.t0),height:48,fill:"var(--line)",rx:3},s);
+  RS.forEach((r,i)=>{for(const [k,v] of Object.entries(r.phases)){const lane=k==="R"?m.t:m.t+26;
+    const rc=el("rect",{x:sx(v[0]),y:lane,width:Math.max(sx(v[1])-sx(v[0])-1,1),height:22,rx:3,fill:`var(--${k})`,class:"tseg","data-i":i},s);
+    rc.addEventListener("mousemove",e=>setCur(i,e));rc.addEventListener("mouseleave",hideTip);rc.addEventListener("click",e=>setCur(i,e));}});
+  const ticks=6;for(let j=0;j<=ticks;j++){const t=t0+(t1-t0)*j/ticks;el("text",{x:sx(t),y:H-6,"text-anchor":"middle"},s).textContent=clock(t)}
+}
+/* linked hover */
+function setCur(i,e){cur=i;highlight();if(e)showTip(e)}
+function highlight(){
+  document.querySelectorAll(".rdot").forEach(d=>d.setAttribute("r",+d.dataset.i===cur?7:5));
+  const v=document.getElementById("vline");if(v&&cur!=null&&rewardX){v.setAttribute("x1",rewardX(cur));v.setAttribute("x2",rewardX(cur));v.setAttribute("visibility","visible")}
+  document.querySelectorAll(".drow").forEach(d=>d.setAttribute("fill",+d.dataset.i===cur?"var(--band)":"transparent"));
+  document.querySelectorAll(".tseg").forEach(d=>d.setAttribute("opacity",cur==null||+d.dataset.i===cur?1:.35));
+}
+function tipHtml(r){const row=(k,v)=>`<div class="row"><span>${k}</span><span>${v}</span></div>`;
+  return `<div class="h">第 ${r.round} 轮 · 训练用策略 v${r.policy_version} → 发布 ${r.published_version==null?"无":"v"+r.published_version}</div>`+
+  row("reward 均值",f(r.reward))+row("p10 / p50 / p90",f(r.p10,2)+" / "+f(r.p50,2)+" / "+f(r.p90,2))+row("截断率",pct(r.trunc))+
+  row("logprob 差",f(r.logprob_diff,4))+row("回答长度 均值/p95",f(r.resp_mean,0)+" / "+f(r.resp_p95,0))+row("grad_norm",f(r.grad_norm,4))+
+  PH.map(([k,l])=>row(`<i class="sw" style="background:var(--${k})"></i>${l}`,r.dur[k]==null?"无":f(r.dur[k],0)+" s")).join("")}
+function showTip(e){const t=$("tip"),p=$("rounds").getBoundingClientRect(),r=RS[cur];if(!r)return;t.innerHTML=tipHtml(r);t.style.display="block";
+  let x=e.clientX-p.left+14,y=e.clientY-p.top+14;const w=t.offsetWidth,h=t.offsetHeight;
+  if(x+w>p.width-8)x=e.clientX-p.left-w-14; if(y+h>p.height-8)y=Math.max(8,e.clientY-p.top-h-14); t.style.left=x+"px";t.style.top=y+"px"}
+function hideTip(){$("tip").style.display="none"}
+$("rounds").addEventListener("keydown",e=>{if(!RS.length)return;if(e.key==="ArrowRight")cur=Math.min(RS.length-1,(cur??-1)+1);else if(e.key==="ArrowLeft")cur=Math.max(0,(cur??1)-1);else return;
+  e.preventDefault();highlight();const t=$("tip"),r=RS[cur];t.innerHTML=tipHtml(r);t.style.display="block";t.style.left="16px";t.style.top="48px"});
+
+/* nodes */
+function chartNodes(){
+  const ks=Object.keys(D.nodes);const box=$("cNodes");box.innerHTML="";if(!ks.length){box.textContent="未采样";return}
+  const col={0:"var(--T)",1:"var(--R)"};
+  $("legNodes").innerHTML=ks.map(k=>`<span><i class="sw" style="background:${col[k]||"var(--ink2)"}"></i>节点 ${k}：${esc(D.node_roles[k]||"")}</span>`).join("");
+  const all=ks.flatMap(k=>D.nodes[k]);const t0=Math.min(...all.map(p=>p[0])),t1=Math.max(...all.map(p=>p[0])),vm=Math.max(...all.map(p=>p[1]),1);
+  const W=560,H=190,m={l:40,r:10,t:8,b:22},sx=t=>m.l+(t-t0)*(W-m.l-m.r)/(t1-t0||1),sy=v=>m.t+(1-v/vm)*(H-m.t-m.b);
+  const s=el("svg",{viewBox:`0 0 ${W} ${H}`,role:"img","aria-label":"每节点显存"},box);const g=el("g",{class:"grid"},s);
+  [0,.5,1].forEach(q=>{el("line",{x1:m.l,x2:W-m.r,y1:sy(vm*q),y2:sy(vm*q)},g);el("text",{x:m.l-6,y:sy(vm*q)+4,"text-anchor":"end"},s).textContent=f(vm*q,0)});
+  ks.forEach(k=>el("path",{d:"M"+D.nodes[k].map(p=>sx(p[0])+","+sy(p[1])).join("L"),fill:"none",stroke:col[k]||"var(--ink2)","stroke-width":2},s));
+  [t0,(t0+t1)/2,t1].forEach(t=>el("text",{x:sx(t),y:H-6,"text-anchor":"middle"},s).textContent=clock(t));
+  const hasU=ks.some(k=>D.nodes[k].some(p=>p[2]!=null));
+  $("nodesNote").textContent="来源：每节点主机探针（modal-hostmem-rank*.jsonl）。"+(hasU?"":"GPU 利用率：这份磁带未采样（旧探针只记显存；本分支已让探针同时记利用率，并对多节点岛默认开启）。");
+}
+function islands(){
+  $("islands").innerHTML=O.islands.map(c=>`<details class="isl" open><summary><span><b>岛 ${esc(c.id)}</b> <span class="note">${esc(c.name||"")}</span></span>${stBadge(c.status)}</summary>
+   <div class="kv"><span>云 / 卡</span><span class="num">${esc(c.cloud)} · ${esc(c.gpu)} × ${esc(c.gpus)}</span>
+   <span>阶段</span><span class="num">${esc(c.phase||"无")}</span><span>策略版本</span><span class="num">v${esc(c.policy_version??"无")}</span>
+   <span>最后事件</span><span class="num">${f(c.last_event_age_s,0)} s 前（相对数据末尾）</span>
+   ${(c.nodes||[]).map(n=>`<span>节点 ${esc(n.node)}</span><span class="num">显存峰值 ${f(Math.max(...(n.gpu_mem_used_mib_peak||[0]))/1024,1)} GiB · 利用率 ${n.gpu_util_pct==null?"未采样":f(n.gpu_util_pct,0)+"%"}</span>`).join("")}
+   </div></details>`).join("")||"无";
+}
+function cost(){
+  const c=O.cost||{};const rows=(c.islands||[]).map(r=>`<tr><td>岛 ${esc(r.id)}</td><td class="num">$${f(r.gpu_rate_usd_h,2)}</td><td class="num">${r.host_rate_usd_h==null?"无":"$"+f(r.host_rate_usd_h,2)}</td><td class="num">$${f(r.rate_usd_h,2)}</td><td class="num">${f(r.hours,2)} h</td><td class="num">$${f(r.cost_usd,1)}</td></tr>`).join("");
+  $("costBox").innerHTML=`<table class="c"><tr><th></th><th>GPU/h</th><th>CPU+内存/h</th><th>合计/h</th><th>时长</th><th>累计</th></tr>${rows}</table>
+  <div class="note" style="margin-top:6px">${esc(c.note||"")}。规格：${(c.islands||[]).map(r=>`${r.cpus??"无"} 核、${r.memory_gib??"无"} GiB`).join("；")}。价目：${esc(c.prices_source||"")}</div>`;
+}
+function events(){
+  const lvl=t=>t==="rl_publication"||t==="rl_round_trained"?["ok","完成"]:t==="rl_reconfiguration"?["wn","变更"]:["mu","信息"];
+  const al=(O.alerts||[]).map(a=>`<div><span class="t">告警</span><span class="st ${a.sev===0?"bd":"wn"}"><i></i></span><span class="x">${esc(a.title)}：${esc(a.detail)}</span></div>`).join("");
+  $("evs").innerHTML=al+D.events.slice().reverse().map(e=>{const l=lvl(e.type);return `<div><span class="t">${clock(e.ts)}</span><span class="st ${l[0]}" title="${l[1]}"><i></i>${l[1]}</span><span class="x"><b>${esc(e.type.replace(/^rl_/,""))}</b> ${esc(e.text)}</span></div>`}).join("");
+}
+function cmds(){
+  $("cmdBox").innerHTML=D.commands.map(([l,c],i)=>`<div class="cmd"><span class="l">${esc(l)}</span><code id="c${i}">${esc(c)}</code><button class="btn" data-c="${i}">复制</button></div>`).join("");
+  $("cmdBox").querySelectorAll("button").forEach(b=>b.onclick=()=>{const t=$("c"+b.dataset.c).textContent;
+    (navigator.clipboard?navigator.clipboard.writeText(t):Promise.reject()).then(()=>{b.textContent="已复制";setTimeout(()=>b.textContent="复制",1200)},()=>{b.textContent="请手动复制"})});
+}
+function folds(){
+  const multi=kind()==="multi_island";
+  const items=[["Syncer 合并时间线 / round 表","无 syncer 磁带"],["cell 表","仅 1 条快照"],["E1 重配置事务","无 journal 事务"],["Ray 面板","Modal 容器无入站端口"],["岛间弹性 / 租约","单岛"]];
+  $("foldBox").innerHTML=items.map(([n,w])=>`<div class="fold"><span>${n}</span><span>本次运行未使用（${w}）</span></div>`).join("");
+  $("multiWall").hidden=!multi;
+  if(multi)$("wall").innerHTML=O.islands.map(c=>`岛 ${esc(c.id)} ${stBadge(c.status)} · ${esc(c.gpu)}×${esc(c.gpus)} · v${esc(c.policy_version)}`).join("<br>")+"<div class='note'>（多岛布局：第一屏为岛卡片墙 + syncer 合并时间线；本运行只有一个岛，所以这里只预览排布。）</div>";
+}
+function render(){header();kpis();folds();chartReward();chartDur();chartTl();highlight();chartNodes();islands();cost();events();cmds()}
+render();
+document.querySelectorAll("nav a").forEach(a=>a.onclick=()=>{document.querySelectorAll("nav a").forEach(b=>b.classList.remove("on"));a.classList.add("on")});
+</script>
+</body>
+</html>

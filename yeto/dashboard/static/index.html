@@ -1,69 +1,135 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Yeto 舰队看板</title>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>yeto 看板</title>
 <style>
-:root{--bg:#f6f7f9;--panel:#ffffff;--panel2:#eef1f5;--ink:#16202c;--muted:#5d6b7c;--line:#d9dee6;--accent:#2f6fdb;--ok:#1f8a5b;--warn:#b7791f;--bad:#c2413a;--i0:#2f6fdb;--i1:#d0772a;--i2:#1f8a5b;--i3:#8a4fc4;--chip:#e6ebf2;
---sans:system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;--mono:ui-monospace,Menlo,Consolas,monospace}
-@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0f141a;--panel:#171e27;--panel2:#1f2833;--ink:#e3e9f0;--muted:#94a3b5;--line:#2c3744;--accent:#6c9cf0;--ok:#4cc38a;--warn:#e0a948;--bad:#ef6b62;--i0:#6c9cf0;--i1:#f09a55;--i2:#4cc38a;--i3:#b48ae8;--chip:#243040}}
-:root[data-theme="dark"]{--bg:#0f141a;--panel:#171e27;--panel2:#1f2833;--ink:#e3e9f0;--muted:#94a3b5;--line:#2c3744;--accent:#6c9cf0;--ok:#4cc38a;--warn:#e0a948;--bad:#ef6b62;--i0:#6c9cf0;--i1:#f09a55;--i2:#4cc38a;--i3:#b48ae8;--chip:#243040}
-*{box-sizing:border-box}html,body{margin:0}body{background:var(--bg);color:var(--ink);font:14px/1.45 var(--sans);overflow-x:hidden}
-.wrap{max-width:1400px;margin:0 auto;padding:12px 16px 40px}
-h1{font-size:18px;margin:0}h2{font-size:14px;margin:0 0 8px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.04em}
-.top{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line);padding-bottom:10px;margin-bottom:12px}
-.intent{font-size:13px;color:var(--muted);margin:4px 0 0}
-.chip{display:inline-block;padding:1px 8px;border-radius:10px;background:var(--chip);font-size:12px;color:var(--muted);white-space:nowrap}
-.chip.live{background:var(--ok);color:var(--panel)}.chip.off{background:var(--warn);color:var(--panel)}.chip.demo{border:1px dashed var(--muted);background:transparent}
-.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px;min-width:0}
-.grid{display:grid;gap:12px}
-.scroll{overflow-x:auto;max-width:100%}
-table{border-collapse:collapse;width:100%;font-size:13px}th,td{padding:5px 8px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}th{color:var(--muted);font-weight:500;position:sticky;top:0;background:var(--panel)}td:first-child,th:first-child{text-align:left}
+:root{
+  --bg:#F3EEE7;--panel:#FBF8F3;--ink:#2A221C;--ink2:#7A6B5E;--line:#E4DACD;--accent:#C8641E;
+  --good:#4F7A5A;--warn:#C9952A;--bad:#B2432F;
+  --R:#C47A2C;--T:#6A4FA0;--S:#A8998A;--P:#5E5248;--band:rgba(106,79,160,.14);--i0:#6A4FA0;--i1:#C47A2C;--i2:#1E8C6E;--i3:#8A7D70;
+  --mono:ui-monospace,"SF Mono","Cascadia Mono",Menlo,Consolas,monospace;
+  --sans:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#1A1613;--panel:#24201C;--ink:#EDE4DA;--ink2:#A8998A;--line:#3A332D;--accent:#E8894A;
+  --good:#7FAE88;--warn:#E0B355;--bad:#E07A64;--R:#C98038;--T:#9C82D4;--S:#7D7064;--P:#B9AC9E;--band:rgba(156,130,212,.18);--i0:#9C82D4;--i1:#C98038;--i2:#3DA585;--i3:#9A8C7E}}
+:root[data-theme="dark"]{
+  --bg:#1A1613;--panel:#24201C;--ink:#EDE4DA;--ink2:#A8998A;--line:#3A332D;--accent:#E8894A;
+  --good:#7FAE88;--warn:#E0B355;--bad:#E07A64;--R:#C98038;--T:#9C82D4;--S:#7D7064;--P:#B9AC9E;--band:rgba(156,130,212,.18);--i0:#9C82D4;--i1:#C98038;--i2:#3DA585;--i3:#9A8C7E}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.55 var(--sans)}
 .num,.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
-.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.muted{color:var(--muted)}
-.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:middle}
-.bar{height:8px;background:var(--panel2);border-radius:4px;overflow:hidden}.bar>i{display:block;height:100%}
-.ray{border:2px dashed var(--line);border-radius:8px;min-height:180px;display:flex;align-items:center;justify-content:center;text-align:center;color:var(--muted);padding:12px;background:repeating-linear-gradient(45deg,transparent 0 10px,var(--panel2) 10px 11px)}
-.ray iframe{display:none}
-button,select{font:inherit;color:var(--ink);background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:3px 10px;cursor:pointer}
-.drill{display:none}.drill.open{display:block}
-svg text{fill:var(--muted);font:11px var(--mono)}svg .ax{stroke:var(--line)}
-.k{font-size:12px;color:var(--muted)}.v{font:600 20px var(--mono)}
-details>summary{cursor:pointer;color:var(--accent)}
-.layout{display:grid;gap:12px;grid-template-columns:minmax(0,1fr) 340px;margin-top:12px}
-@media (max-width:980px){.layout{grid-template-columns:minmax(0,1fr)}}
-.alerts{display:grid;gap:8px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
-.al{background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--muted);border-radius:8px;padding:8px 10px;cursor:pointer;text-align:left;width:100%;min-width:0}
-.al:hover,.al:focus-visible{border-color:var(--accent)}.al.sel{outline:2px solid var(--accent)}
-.al .t{font-weight:600}.al .k{margin-top:2px}
-.sev{font:500 11px var(--mono);text-transform:uppercase;letter-spacing:.04em}
-.hc{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;cursor:pointer;margin-bottom:8px}
-.hc.sel{outline:2px solid var(--accent)}
-.hr{display:flex;justify-content:space-between;gap:8px;font-size:12px}
-.tabs{display:flex;flex-wrap:wrap;gap:4px;margin:8px 0}
-.tabs button{font-size:12px;padding:2px 8px}.tabs button[aria-pressed="true"]{background:var(--accent);color:var(--panel);border-color:var(--accent)}
-tr.hl td{background:var(--chip)}tr.miss td:nth-child(4){color:var(--warn)}
-.stat{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px}
-.topr{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center}
+.app{display:grid;grid-template-columns:200px minmax(0,1fr);min-height:100vh}
+nav{position:sticky;top:0;align-self:start;height:100vh;padding:20px 14px;border-right:1px solid var(--line)}
+nav .brand{font-weight:700;color:var(--accent);margin-bottom:18px;letter-spacing:.02em}
+nav a{display:block;padding:7px 10px;border-radius:8px;color:var(--ink2);text-decoration:none}
+nav a:hover,nav a.on{background:var(--panel);color:var(--ink)}
+nav .sub{font-size:12px;color:var(--ink2);margin-top:18px}
+main{padding:20px 24px 60px;max-width:1280px}
+header{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;margin-bottom:16px}
+h1{font-size:20px;margin:0}
+h2{font-size:15px;margin:0 0 10px}
+.tag{display:inline-block;padding:1px 8px;border:1px solid var(--line);border-radius:999px;font-size:12px;color:var(--ink2);margin-left:6px}
+.btn{border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:8px;padding:5px 10px;cursor:pointer;font:inherit}
+.btn:focus-visible,.panel:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.kpis{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin-bottom:16px}
+.kpi{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+.kpi .k{font-size:12px;color:var(--ink2)}
+.kpi .v{font-size:22px;font-weight:600;font-family:var(--mono)}
+.kpi .s{font-size:12px;color:var(--ink2)}
+.kpi.main{border-color:var(--accent)}
+.grid2{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);gap:14px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:14px;position:relative}
+.note{font-size:12px;color:var(--ink2)}
+.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--ink2);margin:4px 0 6px}
+.sw{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+svg{display:block;width:100%;height:auto;overflow:visible}
+svg text{fill:var(--ink2);font:11px var(--mono)}
+.grid line{stroke:var(--line)}
+.tip{position:absolute;pointer-events:none;background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  box-shadow:0 6px 24px rgba(0,0,0,.12);padding:9px 11px;font-size:12px;min-width:220px;z-index:5;display:none}
+.tip .h{font-weight:600;margin-bottom:4px}
+.tip .row{display:flex;justify-content:space-between;gap:12px}
+.tip .row span:last-child{font-family:var(--mono)}
+.st{display:inline-flex;align-items:center;gap:5px;font-weight:500}
+.st i{width:8px;height:8px;border-radius:50%;display:inline-block}
+.ok i{background:var(--good)}.ok{color:var(--good)}.wn i{background:var(--warn)}.wn{color:var(--warn)}.bd i{background:var(--bad)}.bd{color:var(--bad)}.mu{color:var(--ink2)}.mu i{background:var(--ink2)}
+.isl{border-top:1px solid var(--line);padding:8px 0}
+.isl summary{cursor:pointer;display:flex;justify-content:space-between;gap:8px;list-style:none}
+.isl summary::-webkit-details-marker{display:none}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:2px 12px;font-size:12px;margin-top:6px}
+.kv span:nth-child(odd){color:var(--ink2)}
+.ev{max-height:340px;overflow:auto;font-size:12px}
+.ev div{display:grid;grid-template-columns:70px 44px minmax(0,1fr);gap:8px;padding:4px 0;border-bottom:1px dashed var(--line)}
+.ev .t{font-family:var(--mono);color:var(--ink2)}
+.ev .x{overflow-wrap:anywhere}
+.cmd{display:flex;gap:8px;align-items:center;margin:6px 0}
+.cmd code{flex:1;min-width:0;overflow-wrap:anywhere;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:6px 8px;font:12px var(--mono)}
+.cmd .l{width:72px;flex:none;font-size:12px;color:var(--ink2)}
+.fold{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-top:1px solid var(--line);color:var(--ink2);font-size:13px}
+table.c{width:100%;border-collapse:collapse;font-size:12px}
+table.c td,table.c th{padding:4px 6px;border-bottom:1px solid var(--line);text-align:right}
+table.c td:first-child,table.c th:first-child{text-align:left}
+.hl{background:color-mix(in srgb,var(--accent) 10%,transparent)}
+.banner{border:1px dashed var(--accent);border-radius:10px;padding:8px 12px;margin-bottom:14px;font-size:12px;color:var(--ink2)}
+@media (max-width:900px){.app{grid-template-columns:1fr}nav{position:static;height:auto;display:flex;flex-wrap:wrap;gap:4px;border-right:0;border-bottom:1px solid var(--line);padding:10px 16px}
+  nav .brand{width:100%;margin:0}nav .sub{display:none}main{padding:14px 16px}.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.grid2{grid-template-columns:1fr}}
 
-.nd{color:var(--muted);font-style:italic;font-size:12px}.empty{padding:24px;text-align:center;color:var(--muted)}
-.cp{font-size:12px;padding:1px 8px;margin:2px 4px 2px 0}
-</style></head><body><div class="wrap">
-<div class="top"><div><h1 id="title">Syncer 总览</h1><p class="intent">先用告警与岛健康回答“哪里出问题”，再用叠加曲线与成本效率回答“训得好不好、花得值不值”。只读；所有操作仅提供“复制 CLI 命令”。</p></div><div class="topr" id="hdr"></div></div>
-<div class="alerts" id="alerts" aria-label="告警，按严重度排序"></div>
-<div class="layout">
- <div style="min-width:0;align-content:start" class="grid">
-  <div class="panel"><div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:space-between;align-items:center"><h2 style="margin:0">训练曲线（按岛叠加）</h2><div id="lg"></div></div>
-   <div class="tabs" id="tabs" role="group" aria-label="指标"></div>
-   <div id="big"></div>
-   <div class="k" id="cap">横轴 = 岛本地 round；竖虚线 = syncer round 边界（派生，按 step 近似对齐）；浅色带 = 该 round 有 missed；圆点 = 告警点，点击告警卡定位。</div></div>
-  <div id="drill" class="drill panel"></div>
-  <div class="panel"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><h2 style="margin:0">Syncer round 表 <span class="chip">派生</span></h2><label class="k"><input type="checkbox" id="onlybad"> 仅异常 round</label></div><div id="rounds" style="max-height:340px;overflow:auto;margin-top:8px"></div></div>
- </div>
- <aside class="grid" style="align-content:start">
-  <div class="panel"><h2>岛健康</h2><div id="cards"></div></div>
-  <div class="panel"><h2>成本效率</h2><div id="eff"></div></div>
- </aside>
+.tabs{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 8px}.tabs button{font-size:12px;padding:3px 8px}.tabs button.on{border-color:var(--accent);color:var(--accent)}
+.wall{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}
+.card{border:1px solid var(--line);border-radius:10px;padding:10px 12px;cursor:pointer;background:var(--bg)}.card.sel{border-color:var(--accent)}
+select{font:inherit;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:3px 6px}
+.alerts div{padding:4px 0;border-bottom:1px dashed var(--line);font-size:13px}
+</style>
+</head>
+<body>
+<div class="app">
+<nav aria-label="页面导航">
+  <div class="brand">yeto 看板</div>
+  <a href="#overview">概览</a><a href="#islandWall" id="navWall">岛</a><a href="#rounds">每轮</a><a href="#nodes">节点</a><a href="#cost">成本</a>
+  <a href="#events">事件</a><a href="#cmds">常用命令</a><a href="#unused">未使用面板</a>
+  <div class="sub" id="navSub"></div>
+</nav>
+<main>
+<header id="overview">
+  <div><h1 id="title">yeto 看板</h1><div class="note" id="sub"></div></div>
+  <div><button class="btn" id="layoutBtn" title="按 run_kind 自动选择；点按可临时看另一种布局">布局：自动</button>
+  <button class="btn" id="themeBtn">主题：跟随系统</button></div>
+</header>
+<section class="kpis" id="kpis" aria-label="关键数字"></section>
+<section class="panel alerts" id="alertBox" hidden></section>
+
+<section class="panel" id="islandWall" hidden><h2>岛卡片墙 <span class="note">（点选一个岛，下方各图切到该岛）</span></h2><div class="wall" id="wall"></div></section>
+<section class="panel" id="syncerBox" hidden><h2>Syncer 合并（按全局轮）</h2><div id="syncer"></div></section>
+
+<section class="panel" id="rounds" tabindex="0" aria-label="每轮图表，左右键切换轮次">
+  <h2>每轮 <span class="note" id="roundsIsl"></span> <span class="note">（悬停、点按或左右键逐轮；三图联动）</span></h2>
+  <div class="grid2">
+    <div><div class="tabs" id="tabs"></div><div class="legend" id="legMetric"></div>
+      <div id="cMetric"></div><div class="note">每轮题目不同，看不出趋势前别解读成“下滑”。</div></div>
+    <div><div class="legend" id="legDur"></div><div id="cDur"></div></div>
+  </div>
+  <h2 style="margin-top:14px">阶段时间线（墙钟）</h2>
+  <div class="legend" id="legTl"></div><div id="cTl"></div>
+  <div class="tip" id="tip"></div>
+</section>
+
+<div class="grid2">
+<section class="panel" id="nodes"><h2>节点 GPU 显存（每节点各卡均值，GiB）</h2>
+  <div class="legend" id="legNodes"></div><div id="cNodes"></div><div class="note" id="nodesNote"></div></section>
+<section class="panel"><h2>岛健康</h2><div id="islands"></div></section>
 </div>
-<p class="k" id="foot">成本为价目表 × GPU 数 × 墙钟的估算，非账单。W&amp;B 仅作曲线归档，不是本页数据源。</p>
+<div class="grid2">
+<section class="panel" id="cost"><h2>成本（估算，非账单）</h2><div id="costBox"></div></section>
+<section class="panel" id="events"><h2>事件流</h2><div class="ev" id="evs"></div></section>
+</div>
+<section class="panel" id="cmds"><h2>常用命令</h2><div id="cmdBox"></div></section>
+<section class="panel" id="unused"><h2>本次运行未使用的面板</h2><div id="foldBox"></div></section>
+</main>
 </div>
 <!--YETO-DATA-->
 <!--YETO-APP-->
-</body></html>
+</body>
+</html>

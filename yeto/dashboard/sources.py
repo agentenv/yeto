@@ -81,6 +81,7 @@ class TapeSource:
         self.island = island if island is not None else (
             island_hint(self.path) if "journal" in self.path.name
             else host_island_hint(self.path) if "hostmem" in self.path.name else None)
+        self.node = node_hint(self.path)
         self.offset = 0
         self.bad_lines = 0
 
@@ -116,7 +117,7 @@ class TapeSource:
     def pump(self, reducer) -> int:
         n = 0
         for off, rec in self.read_new():
-            if reducer.feed(rec, source=self.name, offset=off, island=self.island):
+            if reducer.feed(rec, source=self.name, offset=off, island=self.island, node=self.node):
                 n += 1
         return n
 
@@ -125,6 +126,8 @@ def load_all(reducer, paths: list[str]) -> list[TapeSource]:
     sources = [TapeSource(p) for p in discover(paths)]
     for s in sources:
         s.pump(reducer)
+    for rec in operator_stops_near(paths):
+        reducer.feed_operator_stop(rec)
     return sources
 
 
@@ -143,3 +146,120 @@ def run_sources(run: str) -> list[str]:
     if syncer.exists():
         out.append(str(syncer))
     return [p for p in out if Path(p).exists()]
+
+
+_RUN_FROM_TAPE_DIR = re.compile(r"^yeto-(.+)$")
+_RUN_FROM_ISLAND = re.compile(r"^(.+?)-l\d+(?:-[a-z0-9]+)?(?:\.jsonl)?$")
+
+
+def run_meta_near(path: str | os.PathLike, max_up: int = 4) -> dict | None:
+    """``meta.json`` of the ``~/.yeto/runs/<run>/`` directory a tape lives in
+    (looked up at most ``max_up`` parents), or None."""
+    p = Path(path)
+    for d in [p, *list(p.parents)[:max_up]]:
+        m = d / "meta.json"
+        if m.is_file():
+            try:
+                data = json.loads(m.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+                return None
+            if isinstance(data, dict) and isinstance(data.get("name"), str):
+                return data
+    return None
+
+
+def infer_run_name(sources: list[str], island_names: list[str] | None = None) -> str | None:
+    """Run name when ``--run`` was not given (tasks 8.3): the run directory's
+    meta.json, else a ``yeto-<run>`` Modal tape dir, else an island name /
+    learner tape file ``<run>-l<N>[-<cloud>]``. None when nothing matches."""
+    for s in sources:
+        meta = run_meta_near(s)
+        if meta:
+            return meta["name"]
+    for s in sources:
+        for part in Path(s).parts:
+            m = _RUN_FROM_TAPE_DIR.match(part)
+            if m:
+                return m.group(1)
+    for name in list(island_names or []) + [Path(s).name for s in sources]:
+        m = _RUN_FROM_ISLAND.match(name or "")
+        if m and not m.group(1).startswith(("rl-island", "modal-hostmem")):
+            return m.group(1)
+    return None
+
+
+_NODE_RE = re.compile(r"^rank(\d+)$")
+
+
+def node_hint(path: Path) -> str | None:
+    """Node rank of a per-node stream (``.../rank<R>/...``)."""
+    for part in reversed(path.parts):
+        m = _NODE_RE.match(part)
+        if m:
+            return m.group(1)
+    return None
+
+
+# -- our own stop of a run (tasks 9.9) ------------------------------------------------
+# Authority, in order: (1) ``STOP_ISSUED_utc.txt`` lines "<utc> <cause>" written by the
+# run's stop scripts right BEFORE they stop the cloud app (s1-runs/s17-gate-stop.sh and
+# the early/watchdog stoppers); (2) for runs older than that file, the legacy marker files
+# GATE*_STOPPED / EARLY_STOPPED_TIME / WATCHDOG_FIRED, whose content (a utc stamp) or
+# mtime is when the stop command RETURNED -- an upper bound on the issue time, so an
+# island failure in the few seconds before it is conservatively NOT counted as ours.
+STOP_FILE = "STOP_ISSUED_utc.txt"
+LEGACY_STOP_MARKERS = (("GATE*_STOPPED", "gate"), ("EARLY_STOPPED_TIME", "early"), ("WATCHDOG_FIRED", "watchdog"))
+
+
+def _utc_stamp(text: str) -> float | None:
+    import datetime as _dt
+
+    try:
+        return _dt.datetime.strptime(text.strip(), "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=_dt.timezone.utc).timestamp()
+    except ValueError:
+        return None
+
+
+def stop_records_in(d: Path) -> list[dict]:
+    """``operator_stop`` records for one run directory (see the authority note above)."""
+    out: list[dict] = []
+    f = d / STOP_FILE
+    if f.is_file():
+        for line in f.read_text(errors="replace").splitlines():
+            parts = line.split()
+            t = _utc_stamp(parts[0]) if parts else None
+            if t is not None:
+                out.append({"event": "operator_stop", "time_unix": t,
+                            "cause": parts[1] if len(parts) > 1 else "unknown",
+                            "marker": STOP_FILE, "path": str(f)})
+    if out:
+        return out
+    for pattern, cause in LEGACY_STOP_MARKERS:
+        for p in sorted(d.glob(pattern)):
+            if not p.is_file():
+                continue
+            try:
+                t = _utc_stamp(p.read_text(errors="replace").splitlines()[0]) if p.stat().st_size else None
+            except (OSError, IndexError):
+                t = None
+            out.append({"event": "operator_stop", "time_unix": t if t is not None else p.stat().st_mtime,
+                        "cause": cause, "marker": p.name + ("" if t is not None else " (mtime)"),
+                        "path": str(p)})
+    return out
+
+
+def operator_stops_near(paths: list[str], max_up: int = 5) -> list[dict]:
+    """Stop records from the given dirs/files and up to ``max_up`` parents
+    (a run's tapes live under ``<s1-runs>/<run>/{runs,tape-direct}/...``)."""
+    seen: set[Path] = set()
+    out: list[dict] = []
+    for raw in paths:
+        p = Path(os.path.expanduser(raw)).resolve()
+        start = p if p.is_dir() else p.parent
+        for d in [start, *list(start.parents)[:max_up]]:
+            if d in seen:
+                continue
+            seen.add(d)
+            out += stop_records_in(d)
+    return out

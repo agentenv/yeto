@@ -15,6 +15,10 @@ from typing import Any
 DEFAULT_THRESHOLDS: dict[str, float] = {
     "heartbeat_warn_s": 60.0,
     "heartbeat_severe_s": 300.0,
+    # Island still starting (no rl_driver_start yet: weight load, Ray, engine init;
+    # FN 2x8 measured 10-15 min). Tasks 8.1.
+    "startup_warn_s": 1200.0,
+    "startup_severe_s": 1800.0,
     "missed_consecutive_warn": 2,
     "missed_consecutive_severe": 5,
     "quorum_recent_rounds": 7,
@@ -48,7 +52,19 @@ def heartbeat(cards: list[dict], th: dict) -> list[dict]:
     out = []
     for c in cards:
         age = c["last_event_age_s"]
-        if c["status"] == "done" or c.get("finalized") or age is None:
+        if c["status"] in ("done", "stopped") or c.get("finalized") or age is None:
+            continue
+        if c.get("starting"):
+            warn, severe = th["startup_warn_s"], th["startup_severe_s"]
+            if age > severe:
+                sev = 0
+            elif age > warn:
+                sev = 1
+            else:
+                continue
+            out.append(_alert(sev, "startup", f"岛 {c['id']} 启动阶段无事件",
+                              f"仍在启动（未见 rl_driver_start），最后事件 {age:.0f}s 前"
+                              f"（启动阈值 {warn:.0f}s/{severe:.0f}s）", island=c["id"], metric="reward"))
             continue
         if age > th["heartbeat_severe_s"]:
             sev = 0
@@ -166,8 +182,9 @@ def budget(cost: dict, th: dict) -> list[dict]:
 def recovery(reducer) -> list[dict]:
     out = []
     for iid in reducer.island_ids():
-        rr = reducer.islands[iid]["recovery_required"]
-        if not rr:
+        isl = reducer.islands[iid]
+        rr = isl["recovery_required"]
+        if not rr or reducer.stopped_by_us(isl):  # failure caused by our own stop of the app
             continue
         last = rr[-1]
         tx = f"，E1 {last['tx_id']}" if last.get("tx_id") else ""
