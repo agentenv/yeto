@@ -40,11 +40,24 @@
 
 所以 `rl/policy_token`、`sync/publication_payload_hash`、`sync/publication_payload_bytes`、manifest 的 `target_policy_hash/payload_hash/payload_bytes` 与旧路径**数值相同**；CPU 单测逐项比对旧函数。哈希不按 PP 段拆开（那会改变哈希定义），而是**两个哈希各一个线程同时算**（`hashlib` 处理大块数据时释放 GIL），墙钟约等于一遍。
 
-### D3 "训练端仍持有要发布的那份"检查保留
+### D3 "训练端仍持有要发布的那份"检查改为比权重版本号（用户 S17 裁定）
 
-原 `publish` 在发送前再导出一次，确认训练进程手里的权重与要发布的状态哈希相同。这项检查防的是"导出之后、发布之前训练进程权重被改动"。新路径保留它，但改为 `TrainerResidentState.recheck()`：让训练进程**就地重新导出 + 算哈希**，只回传哈希。不一致仍报 `PublicationError("trainer weights differ ...")`，语义不变。
+原 `publish` 在发送前再整份导出一次、比内容哈希。用户裁定：快路径下**只比"训练进程里的权重版本号"**，不再重新导出、算哈希。
 
-代价：每轮仍有两次训练进程内导出（同步时一次、发布前一次），省掉的是 Ray 搬运 11.2 GB、驱动侧复制与 3–4 遍驱动侧哈希。若真机显示训练进程内导出本身（`gather_object`）就很慢，再看 D6 的可选项。
+- **由谁维护**：每个训练进程自己维护（`state_plugin` 模块里的两个值）：`process_id`（进程启动时生成的随机 id）和 `version`（整数，从 0 开始）。驱动不维护、不推算，只读取主 rank 的值。
+- **什么时候加一**：训练进程里所有会写可训练权重的入口都加一，宁可多加不漏加：
+  1. 每个优化器步：`install_grad_norm_recorder` 包装的 Miles `train_one_step` 返回后（抛异常也加，`finally`）；
+  2. `apply_state`（写入全局策略/扰动注入的应用），在写之前加一；
+  3. 切点恢复 `cut_plugin.restore_cut_shard`、`restore_resharded_shard`，在写之前加一。
+  导出、挪显存（offload/onload）、读梯度范数等不改权重，不加。所有插件入口都会先装好 `train_one_step` 包装，驱动在第一个训练步之前必先导出一次，所以不会漏掉第一步。
+- **怎么比**：`export_digest` 导出时把当时的 `{process_id, version}` 一并返回，记在句柄上（`TrainerResidentState.weights_mark`；改版本号的 `with_version` 保留它）。发布前（`publish` 与 `publish_members`）调用新插件 `weights_version` 取主 rank 当前值：
+  - 同一进程、版本号相同 → 通过，**不导出、不算哈希**，只一次很小的 Ray 调用；
+  - 同一进程、版本号不同 → 失败；
+  - 进程 id 不同（训练进程被重建/扩缩容替换，计数从 0 重来，版本号无法比较）→ 退回比内容：训练进程就地导出+哈希、只回传哈希，与句柄的 `policy_tensor_hash` 比。这条只在重建后发生（`driver` 训练进程重建、`trainer_transition` 扩缩容后的补发），与旧语义相同；
+  - 句柄上没有版本号（旧插件返回）→ 失败。
+- **对不上时报什么错**：训练进程侧抛 `WeightsChanged`（`policy_digest.py`，`PolicyDigestError` 的子类），消息分别为 `trainer weights version X != Y recorded for policy vN (weights written since the export)`、`rebuilt trainer holds <哈希>, not the policy <哈希>`、`the resident state carries no trainer weights version`。发布器把它转成 `PublicationError("trainer weights differ from the state requested for publication: <上述消息>")`——前半句与旧路径完全相同，走同样的发布失败处理；其他异常（如 Ray 调用失败）原样抛出，不冒充"权重不同"。
+- **语义变化（用户已接受）**：从"比内容"变为"比是否被写过"。比内容更严的地方：权重被写回原值（如 E1 的 LoRA 扰动注入：先扰动、再恢复原值）也算变化——**带扰动注入的测试运行若在扰动之后还要补发同一版本，需设 `YETO_RL_PUBLISH_FASTPATH=0`**。比内容更松的地方：不经过上述入口的改写（例如直接改 GPU 显存）查不出来；现有代码里没有这种路径。
+- 兜底取张量（D4）仍比内容哈希，不受影响。
 
 ### D4 兜底：要张量时自动取
 
@@ -53,31 +66,32 @@
 ### D5 只在单岛无同步时启用，可关
 
 - 只有 `LocalOnlySync` 用 `_local_state`；strict-avg 等多岛同步需要张量做平均，不变。
-- `IslandDriver.export_local_resident` 在 `policy_state` 没有 `export_digest`（假对象、以后的其他后端）或环境变量 `YETO_RL_PUBLISH_FASTPATH=0` 时返回 None，调用方回到 `export_local()` 老路。默认开启（**待用户确认**，见"待拍板"）。
+- `IslandDriver.export_local_resident` 在 `policy_state` 没有 `export_digest`（假对象、以后的其他后端）或环境变量 `YETO_RL_PUBLISH_FASTPATH=0` 时返回 None，调用方回到 `export_local()` 老路。默认开启（用户 S17 裁定：统一默认开启）。
 - 没有改 `config.py`/`entry.py`/`cli.py`（去耦合阶段 3 在改），所以开关用环境变量而非命令行参数。
 
 ### D6 不在本 change 里做、但可能需要的
 
 - 若训练进程内 `gather_object`（pickle 后经 NCCL 收集 PP 各段）是大头：改为按张量 `send/recv` 或各段先算再汇总——后者会改变哈希定义，需另走"新哈希 + 对照表"流程，本 change 不做。
-- `recheck` 改用"训练进程权重版本计数"（训练步/应用/重建时加一，检查只比计数，不导出）：可再省一次导出，但检查从"比内容"变成"比计数"，属语义放宽，**需用户拍板**。
+- （已定，见 D3）发布前检查改为比权重版本号。
 
 ## 每轮耗时预估（全部**未验证**）
 
-记 E = 训练进程内一次导出（含 PP 汇总、转 CPU、NaN/Inf 检查），H = 两线程并行哈希 11.2 GB。均无实测：
+记 E = 训练进程内一次导出（含 PP 汇总 `gather_object`、转 CPU、NaN/Inf 检查），H = 两线程并行哈希 11.2 GB。均无实测：
 
-- H：sha256 单线程常见 0.5–1.5 GB/s（本机型号 gVisor 下未知）→ 约 8–22 s。
-- E：下限参照 Miles 自己一次导出+汇总+NCCL 广播约 8 s（同一份数据但走 GPU）；上限为整个同步阶段 177 s 减去 Ray 搬运和驱动处理，没有分项数据。按 10–100 s 给区间。
+- H：sha256 单线程常见 0.5–1.5 GB/s（Modal gVisor 下未测）→ 约 8–22 s。
+- E：下限参照 Miles 自己一次导出+汇总+NCCL 广播约 8 s（同一份数据但走 GPU）；上限为整个同步阶段 177 s 减去 Ray 搬运和驱动处理，没有分项数据。按 10–100 s 给区间。用户裁定"汇到主进程"那一步要多久等真机再看。
+- 发布前版本号检查：一次小 Ray 调用，按 ≤1 s 计。
 
 | 项 | 现在（实测稳态） | 本 change 后（估） |
 |---|---|---|
 | 生成 | 155 | 155 |
 | 训练 | 90 | 90 |
 | 训练后同步 | 177 | E + H ≈ 18–122 |
-| 发布（Miles 之前） | ≈213 | recheck E + H ≈ 18–122 |
+| 发布（Miles 之前） | ≈213 | 版本号检查 ≈1 |
 | Miles update_weights | ≈25 | ≈25 |
-| **合计** | **≈660 s（11 min）** | **≈306–514 s（5.1–8.6 min）** |
+| **合计** | **≈660 s（11 min）** | **≈289–393 s（4.8–6.6 min）** |
 
-若采用 D6 的计数式检查，再省一次 E + H：≈288–392 s（4.8–6.5 min）。S17 交接里写的"约 4.5 min"对应 E 很小的情况，需真机确认。
+S17 交接里写的"约 4.5 min"对应 E 很小的情况，需真机确认。
 
 ## 风险
 

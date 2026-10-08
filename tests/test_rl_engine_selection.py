@@ -520,7 +520,10 @@ class _Actor:
             digest = digest_canonical_tensors(
                 tensors, base_model_revision=kwargs["base_model_revision"],
                 lora_config_hash=kwargs["lora_config_hash"], layout_hash=layout_hash_of(specs))
-            return [{"policy_version": kwargs["policy_version"], "digest": digest.to_wire()}, None]
+            return [{"policy_version": kwargs["policy_version"], "digest": digest.to_wire(),
+                     "weights": state_plugin.current_weights_version()}, None]
+        if fn_path == state_plugin.WEIGHTS_VERSION:
+            return [state_plugin.current_weights_version(), None]
         if fn_path == state_plugin.APPLY_STATE:
             self.tensor = kwargs["tensors"][NAME].clone()
             self.calls.append(("apply", kwargs["policy_version"], kwargs["optimizer"]))

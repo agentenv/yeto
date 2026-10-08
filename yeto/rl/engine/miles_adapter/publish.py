@@ -59,7 +59,7 @@ from yeto.rl.contracts import InferencePublicationManifest
 
 from ..ports import PublicationCause, PublicationResult
 from ..trainable_state import TrainableState
-from ..policy_digest import is_resident
+from ..policy_digest import WeightsChanged, is_resident
 from . import LoopRunner
 from .rollout import cells_of, member_id, policy_token, running_members
 
@@ -385,13 +385,20 @@ class MilesPublisher:
 
     def _check_trainer_holds(self, state: Any) -> str:
         """The trainer must still hold the policy being published (same check as
-        before). rl-publish-fastpath: for a trainer-resident state the trainer re-hashes
-        its current weights in place and only the digest crosses Ray."""
+        before). rl-publish-fastpath: for a trainer-resident state the trainer reports
+        its weights version (no export); see design D3."""
 
         tensor_hash = state.policy_tensor_hash()
         if is_resident(state):
-            current = state.recheck().policy_tensor_hash
-        elif self._export is not None:
+            # D3: compare the trainer's weights version, no export (a replaced trainer
+            # process falls back to a trainer-side content re-hash).
+            try:
+                state.check_holds()
+            except WeightsChanged as exc:
+                raise PublicationError(
+                    f"trainer weights differ from the state requested for publication: {exc}") from exc
+            return tensor_hash
+        if self._export is not None:
             current = self._export().policy_tensor_hash()
         else:
             return tensor_hash

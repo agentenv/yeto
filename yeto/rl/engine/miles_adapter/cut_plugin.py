@@ -38,6 +38,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from .state_plugin import (
+    bump_weights_version,
     _STEP_APPLIED_LRS,
     _STEP_GRAD_NORMS,
     _STEP_LOSSES,
@@ -680,6 +681,7 @@ RANK_COORDS = f"{_MODULE}.rank_coords"
 def restore_cut_shard(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_id: str) -> dict[str, Any]:
     """Verify and load this rank's shard; return the post-restore summary (identical digests expected)."""
     install_grad_norm_recorder()  # a rebuilt trainer process has no recorder yet
+    bump_weights_version()  # rl-publish-fastpath: restore writes trainable weights
     _inject_restore_sleep(actor)
     progress = {"written": False}
     try:
@@ -868,6 +870,7 @@ def restore_resharded_shard(
     Everything is validated before the first write.
     """
     install_grad_norm_recorder()
+    bump_weights_version()  # rl-publish-fastpath: restore writes trainable weights
     with trainer_resident(actor):
         return _restore_resharded(actor, directory=directory, files=files, cut_id=cut_id,
                                   source_dp=int(source_dp), rng_policy=rng_policy)

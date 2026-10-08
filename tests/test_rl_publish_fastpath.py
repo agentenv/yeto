@@ -30,6 +30,7 @@ from yeto.rl.engine.miles_adapter.publish import (  # noqa: E402
 from yeto.rl.engine.policy_digest import (  # noqa: E402
     PolicyDigest,
     PolicyDigestError,
+    WeightsChanged,
     TrainerResidentState,
     digest_canonical_tensors,
     is_resident,
@@ -109,25 +110,107 @@ def test_resident_versions_and_lazy_materialize():
         stale.materialize()
 
 
+def _step(ranks):
+    """Fake ranks bypass Miles' train_one_step; bump the weights version as the
+    installed wrapper does after every optimizer step."""
+
+    for r in ranks:
+        r.train_step()
+    sp.bump_weights_version()
+
+
 def _publisher(ps):
     return MilesPublisher(args=SimpleNamespace(), actor_model=None, rollout_executor=None,
                           inference_controller=None, export_trainer_state=ps.export)
 
 
-def test_publish_check_still_refuses_changed_trainer_weights():
+def test_publish_check_compares_weights_version_without_export():
     ranks, group, ps = make()
     pub = _publisher(ps)
     resident = ps.export_digest(policy_version=1)
+    assert resident.weights_mark == sp.current_weights_version()
     group.calls.clear()
     assert pub._check_trainer_holds(resident) == resident.policy_tensor_hash()
-    assert group.calls == [sp.EXPORT_DIGEST]  # re-hashed in the trainer, no full export
-    for r in ranks:
-        r.train_step()
-    with pytest.raises(PublicationError, match="trainer weights differ"):
+    assert group.calls == [sp.WEIGHTS_VERSION]  # no export, no hashing
+    # with_version keeps the mark (same weights, next policy version)
+    assert pub._check_trainer_holds(resident.with_version(2)) == resident.policy_tensor_hash()
+    _step(ranks)
+    with pytest.raises(PublicationError, match="trainer weights differ.*weights version"):
         pub._check_trainer_holds(resident)
-    # the full-state path is unchanged
+    # the full-state path is unchanged (content comparison)
     full = ps.export(policy_version=1)
     assert pub._check_trainer_holds(full) == full.policy_tensor_hash()
+
+
+def test_apply_and_restore_paths_bump_the_version():
+    ranks, group, ps = make()
+    resident = ps.export_digest(policy_version=0)
+    before = sp.current_weights_version()["version"]
+    ps.apply(ps.export(policy_version=0), optimizer="preserve", local_step=0)
+    assert sp.current_weights_version()["version"] == before + 2  # one per rank
+    with pytest.raises(WeightsChanged, match="weights version"):
+        resident.check_holds()
+    import inspect
+
+    from yeto.rl.engine.miles_adapter import cut_plugin
+
+    for fn in (cut_plugin.restore_cut_shard, cut_plugin.restore_resharded_shard, sp.apply_state):
+        assert "bump_weights_version()" in inspect.getsource(fn)
+    assert "bump_weights_version()" in inspect.getsource(sp.install_grad_norm_recorder)
+
+
+def test_wrapped_train_one_step_bumps_even_when_it_raises(monkeypatch):
+    import sys
+    import types
+
+    calls = []
+
+    def original(*a, **k):
+        calls.append(1)
+        if k.get("fail"):
+            raise RuntimeError("boom")
+        return (0.0, 1.0)
+
+    fake = types.ModuleType("miles.backends.megatron_utils.model")
+    fake.train_one_step = original
+    for name in ("miles", "miles.backends", "miles.backends.megatron_utils"):
+        monkeypatch.setitem(sys.modules, name, sys.modules.get(name) or types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "miles.backends.megatron_utils.model", fake)
+    monkeypatch.setattr(sys.modules["miles.backends.megatron_utils"], "model", fake, raising=False)
+    monkeypatch.setattr(sp, "_RECORDER_INSTALLED", False)
+    monkeypatch.setattr(sp, "_record_applied_lr", lambda *a: None)
+    monkeypatch.setattr(sp, "_arm_grad_audit", lambda *a: None)
+    monkeypatch.setattr(sp, "_record_step_losses", lambda *a: None)
+    assert sp.install_grad_norm_recorder()
+    v0 = sp.current_weights_version()["version"]
+    fake.train_one_step()
+    assert sp.current_weights_version()["version"] == v0 + 1
+    with pytest.raises(RuntimeError):
+        fake.train_one_step(fail=True)
+    assert sp.current_weights_version()["version"] == v0 + 2
+
+
+def test_replaced_trainer_process_falls_back_to_content_check(monkeypatch):
+    ranks, group, ps = make()
+    resident = ps.export_digest(policy_version=3)
+    monkeypatch.setattr(sp, "_WEIGHTS_PROCESS_ID", "rebuilt-process")
+    monkeypatch.setattr(sp, "_WEIGHTS_VERSION", 0)
+    group.calls.clear()
+    resident.check_holds()  # same content: accepted after a trainer-side re-hash
+    assert group.calls == [sp.WEIGHTS_VERSION, sp.EXPORT_DIGEST]
+    for r in ranks:
+        r.train_step()
+    with pytest.raises(WeightsChanged, match="rebuilt trainer holds"):
+        resident.check_holds()
+
+
+def test_missing_mark_is_refused():
+    ranks, group, ps = make()
+    from dataclasses import replace
+
+    resident = replace(ps.export_digest(policy_version=0), weights_mark=None)
+    with pytest.raises(PublicationError, match="no trainer weights version"):
+        _publisher(ps)._check_trainer_holds(resident)
 
 
 class _Driver:
@@ -173,4 +256,4 @@ def test_fastpath_switch_off_falls_back(monkeypatch):
 def test_resident_state_type_guards():
     d = PolicyDigest("a" * 64, "b" * 64, 8, ((NAMES[0], (2, 1)),))
     with pytest.raises(ValueError):
-        TrainerResidentState("full", REV, CFG, "c" * 64, 0, d, lambda v: None, lambda: d)
+        TrainerResidentState("full", REV, CFG, "c" * 64, 0, d, lambda v: None)

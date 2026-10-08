@@ -13,7 +13,7 @@ S16 的 FN 2×8 训推分离早门 `s16-rawlora-fn2x8-long-20261008a`（Modal 2�
 
 - **哈希在训练进程里算**：新增训练进程插件 `export_digest`，在训练主 rank 上照旧导出（同一个 `export_state`，含 NaN/Inf 检查和梯度流检查），然后在**同一次调用里**用两个线程并行算出 `policy_tensor_hash` 和 `payload_digest`（两个哈希的定义一个字节都不改），只把哈希值、字节数和（名字, 形状）清单经 Ray 带回驱动。
 - **驱动侧用"留在训练进程里的策略"句柄**：新增 `TrainerResidentState`，带版本号、各身份字段和上面的哈希，不带张量。单岛无同步时 `LocalOnlySync.start/boundary` 返回它；版本号改写不再复制张量。
-- **发布复用这次导出的结果**：`MilesPublisher.publish/publish_members` 遇到这种句柄时，`payload_hash/payload_bytes` 直接取训练进程算好的值；"训练进程手里的权重就是要发布的那份"这项检查**保留**，改为让训练进程就地重新导出+哈希、只回传哈希（不再搬 11.2 GB）。
+- **发布复用这次导出的结果**：`MilesPublisher.publish/publish_members` 遇到这种句柄时，`payload_hash/payload_bytes` 直接取训练进程算好的值；"训练进程手里的权重就是要发布的那份"这项检查**保留**，按用户 S17 裁定改为只比训练进程里的权重版本号（训练步/应用状态/切点恢复时加一），不再导出、不再算哈希；训练进程被重建时退回训练进程内比内容哈希。
 - **兜底**：凡是确实要张量的地方（`.tensors`、`to_lora()`、`policy_hash()`）自动触发一次完整导出，并核对哈希一致；后端没有 `export_digest`（测试用假对象、以后的 verl 等）或设了 `YETO_RL_PUBLISH_FASTPATH=0` 时走原路径。
 - **不改**：tape 事件与字段（`rl/policy_token`、`sync/publication_payload_hash`、`sync/publication_payload_bytes`、manifest 各字段）的值和语义；Miles 侧 WeightChecker 校验和与 `[LORA-CHECK]`；多岛同步（strict-avg 等仍需要张量，走原路径）。
 - 只加日志（不加 tape 字段）：每次导出打印总耗时、训练进程导出耗时、哈希耗时，供下次真机分解每轮时间。
@@ -30,7 +30,8 @@ S16 的 FN 2×8 训推分离早门 `s16-rawlora-fn2x8-long-20261008a`（Modal 2�
 
 - `yeto/rl/engine/policy_digest.py`（新）：`digest_canonical_tensors`、`PolicyDigest`、`TrainerResidentState`。
 - `yeto/rl/engine/miles_adapter/state_plugin.py`：新插件 `export_digest`（`EXPORT_DIGEST`）。
-- `yeto/rl/engine/miles_adapter/state.py`：`MilesPolicyState.export_digest / _digest_result / _current_digest`。
+- `yeto/rl/engine/miles_adapter/state.py`：`MilesPolicyState.export_digest / _digest_result / _current_digest / weights_version / check_holds`。
+- `yeto/rl/engine/miles_adapter/state_plugin.py` 另加权重版本号（`bump_weights_version`、`current_weights_version`、插件 `weights_version`，`train_one_step` 包装与 `apply_state` 加一）；`cut_plugin.py` 两个恢复入口加一。
 - `yeto/rl/engine/miles_adapter/publish.py`：`MilesPublisher._check_trainer_holds`、`_payload_of`，`publish` 与 `publish_members` 改用它们。
 - `yeto/rl/engine/bridges.py`：`_local_state`，`LocalOnlySync.start/boundary` 改用它。
 - `yeto/rl/engine/driver.py`：`IslandDriver.export_local_resident`（含开关 `YETO_RL_PUBLISH_FASTPATH`）。

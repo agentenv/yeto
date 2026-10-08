@@ -43,6 +43,10 @@ class PolicyDigestError(RuntimeError):
     """The trainer's weights no longer match a resident state's digest."""
 
 
+class WeightsChanged(PolicyDigestError):
+    """The trainer's weights version moved since a resident state was exported."""
+
+
 @dataclass(frozen=True)
 class PolicyDigest:
     policy_tensor_hash: str
@@ -166,7 +170,7 @@ class TrainerResidentState:
     path reads.  ``materialize(policy_version)`` exports the full state (used
     only by consumers that need tensors); ``recheck()`` returns the digest of
     the trainer's CURRENT weights (the publisher's "trainer still holds what
-    is being published" check).
+    is being published" check, by trainer weights version).
     """
 
     layout: str
@@ -176,7 +180,10 @@ class TrainerResidentState:
     policy_version: int
     digest: PolicyDigest
     materialize_fn: Callable[[int], TrainableState] = field(repr=False, compare=False)
-    recheck_fn: Callable[[], PolicyDigest] = field(repr=False, compare=False)
+    # trainer weights version at export: {"process_id", "version"} (design D3)
+    weights_mark: Mapping[str, Any] | None = None
+    # (state) -> None, raises when the trainer no longer holds this policy
+    holds_fn: Callable[[Any], None] | None = field(default=None, repr=False, compare=False)
     _cache: dict = field(default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -197,8 +204,13 @@ class TrainerResidentState:
     def with_version(self, policy_version: int) -> "TrainerResidentState":
         return replace(self, policy_version=int(policy_version), _cache={})
 
-    def recheck(self) -> PolicyDigest:
-        return self.recheck_fn()
+    def check_holds(self) -> None:
+        """Raise if the trainer's weights changed since this handle's export
+        (weights-version comparison, see design D3)."""
+
+        if self.holds_fn is None:
+            raise WeightsChanged("resident state has no trainer weights check")
+        self.holds_fn(self)
 
     # -- lazy full state ----------------------------------------------------
     def materialize(self) -> TrainableState:

@@ -15,9 +15,10 @@ from __future__ import annotations
 import inspect
 from typing import Any
 
+from ..policy_digest import WeightsChanged
 from ..trainable_state import LAYOUT_LORA, TrainableState, require_supported_layout
 from . import LoopRunner
-from .state_plugin import APPLY_STATE, EXPORT_DIGEST, EXPORT_STATE, OPTIMIZER_MODES
+from .state_plugin import APPLY_STATE, EXPORT_DIGEST, EXPORT_STATE, OPTIMIZER_MODES, WEIGHTS_VERSION
 
 
 class PolicyStateError(RuntimeError):
@@ -129,6 +130,37 @@ class MilesPolicyState:
               f"hash={state.digest.hash_seconds:.1f}s bytes={state.digest.payload_bytes}", flush=True)
         return state
 
+    def weights_version(self) -> dict[str, Any]:
+        """The main trainer rank's weights version ``{process_id, version}`` (D3)."""
+
+        results = [r for r in self._plugin(WEIGHTS_VERSION, {}) if r is not None]
+        if len(results) != 1:
+            raise PolicyStateError(f"expected exactly one main-rank weights version, got {len(results)}")
+        return dict(results[0])
+
+    def check_holds(self, state: Any) -> None:
+        """rl-publish-fastpath D3: the trainer still holds ``state`` (a trainer-resident
+        handle).  Same trainer process: compare weights versions only (no export).
+        Trainer process replaced since the handle was taken (rebuild / resize): its
+        counter restarted, so fall back to the content check (trainer-side re-hash).
+        Raises :class:`WeightsChanged` on a mismatch."""
+
+        mark = state.weights_mark
+        if mark is None:
+            raise WeightsChanged("the resident state carries no trainer weights version")
+        now = self.weights_version()
+        if now.get("process_id") == mark.get("process_id"):
+            if int(now.get("version", -1)) != int(mark.get("version", -2)):
+                raise WeightsChanged(
+                    f"trainer weights version {now.get('version')} != {mark.get('version')} recorded "
+                    f"for policy v{state.policy_version} (weights written since the export)")
+            return
+        current = self._current_digest(state.policy_version)
+        if current.policy_tensor_hash != state.policy_tensor_hash():
+            raise WeightsChanged(
+                f"rebuilt trainer holds {current.policy_tensor_hash}, "
+                f"not the policy {state.policy_tensor_hash()}")
+
     def _digest_kwargs(self, version: int) -> dict[str, Any]:
         return {"policy_version": version, "base_model_revision": self._revision,
                 "lora_config_hash": self._config_hash}
@@ -174,7 +206,8 @@ class MilesPolicyState:
             policy_version=version,
             digest=digest,
             materialize_fn=lambda v: self.export(policy_version=v),
-            recheck_fn=lambda: self._current_digest(version),
+            weights_mark=dict(result["weights"]) if result.get("weights") else None,
+            holds_fn=self.check_holds,
         )
 
     def _export_version(self, policy_version: int | None) -> int:
