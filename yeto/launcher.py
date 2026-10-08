@@ -3275,6 +3275,9 @@ HARNESS_PASSTHROUGH_ENV_PREFIXES = ("YETO_HARNESS_TB2_",)
 # touching the image's protobuf 7 (modal pins <7 but works; verified in-image
 # on ghcr 12fcd9e5: Sandbox create/exec/terminate, ray/sglang/miles import).
 MODAL_SANDBOX_PROVIDER = "yeto.rl.harness.codex.tb2_provider:modal_provider"
+# rl-agentic-reward-env: same TB2 provider, sandboxes from prebaked images.
+PREBAKED_MODAL_SANDBOX_PROVIDER = "yeto.cloud.modal_reward_env:modal_provider"
+MODAL_SANDBOX_PROVIDERS = frozenset({MODAL_SANDBOX_PROVIDER, PREBAKED_MODAL_SANDBOX_PROVIDER})
 MODAL_CLIENT_SETUP = (
     # --ignore-installed: in a Modal Function container the setup shell
     # already sees Modal's runtime copies (/pkg, /__modal/deps), so a plain
@@ -3931,7 +3934,7 @@ def make_miles_island_task(
         )
     if getattr(args, "rl_initial_adapter", None) is not None:
         setup_steps.append(f"chmod -R a-w {RL_INITIAL_ADAPTER_PATH}")
-    if codex_launch is not None and envs.get(HARNESS_ENVIRONMENT_PROVIDER_ENV) == MODAL_SANDBOX_PROVIDER:
+    if codex_launch is not None and envs.get(HARNESS_ENVIRONMENT_PROVIDER_ENV) in MODAL_SANDBOX_PROVIDERS:
         setup_steps.append(MODAL_CLIENT_SETUP)
     store_fs = model_store_filesystem(getattr(args, "model_store", None), spec.cloud, spec.region)
     store_env = ""
