@@ -220,6 +220,10 @@ class ModalIslandConfig:
     extra_mounts: dict[str, str] = field(default_factory=dict)
     # Event tape Volume (None = off, the pre-existing behaviour): the
     # container mirrors TAPE_SOURCE_DIR into <volume>/<tape_subdir>/rank<r>/.
+    # rl-resume-from-checkpoint: the --rl-checkpoint-store modal-volume://NAME Volume
+    # (v1), mounted read-write; the learner commits it after every cut (LATEST last).
+    checkpoint_store_volume_name: str | None = None
+    checkpoint_store_mount: str | None = None
     tape_volume_name: str | None = None
     tape_subdir: str | None = None
     # Model Volume (None = off): mounted read-only at model_volume_mount
@@ -270,6 +274,11 @@ class ModalIslandConfig:
             raise ValueError(f"tape_subdir {self.tape_subdir!r} must be relative, without '..'")
         if self.tape_volume_name and self.volume_name == self.tape_volume_name:
             raise ValueError("the tape volume must differ from the checkpoint volume")
+        if (self.checkpoint_store_volume_name is None) != (self.checkpoint_store_mount is None):
+            raise ValueError("checkpoint_store_volume_name and checkpoint_store_mount go together")
+        if self.checkpoint_store_volume_name and self.checkpoint_store_volume_name in (
+                self.volume_name, self.tape_volume_name, self.model_volume_name):
+            raise ValueError("the checkpoint store volume must differ from the other volumes")
         if (self.model_volume_name is None) != (self.model_volume_mount is None):
             raise ValueError("model_volume_name and model_volume_mount go together")
         if self.model_volume_name and self.model_volume_name in (self.volume_name, self.tape_volume_name):
@@ -395,11 +404,38 @@ class TapeSync:
         self._thread: threading.Thread | None = None
         self.syncs = 0
         self.errors: list[str] = []
+        # rl-resume-from-checkpoint 4.2: a re-run of the island in a new container
+        # (preemption + resume) must not replace the previous container's tape files.
+        # The k-th container to mirror into dst writes INCARNATION-<k>.txt and, for k > 0,
+        # names its copies "<stem>.inc<k><suffix>" (k = 0 keeps the old names).
+        self.incarnation: int | None = None
+
+    def _claim_incarnation(self) -> int:
+        if self.incarnation is None:
+            self.dst.mkdir(parents=True, exist_ok=True)
+            taken = sorted(self.dst.glob("INCARNATION-*.txt"))
+            k = len(taken)
+            if k == 0 and any(p.is_file() and p.name.endswith(TAPE_SUFFIXES) for p in self.dst.iterdir()):
+                k = 1  # files from a container that predates the markers
+            marker = self.dst / f"INCARNATION-{k}.txt"
+            marker.write_text(f"{os.environ.get('MODAL_TASK_ID', 'unknown')}\n", encoding="utf-8")
+            self.incarnation = k
+        return self.incarnation
+
+    def _target_name(self, name: str) -> str:
+        k = self._claim_incarnation()
+        if k == 0:
+            return name
+        for suffix in TAPE_SUFFIXES:
+            if name.endswith(suffix):
+                return f"{name[:-len(suffix)]}.inc{k}{suffix}"
+        return f"{name}.inc{k}"
 
     def sync_once(self) -> int:
         self.dst.mkdir(parents=True, exist_ok=True)
+        self._claim_incarnation()
         for name, text in list(self.extra.items()):
-            (self.dst / name).write_text(text, encoding="utf-8")
+            (self.dst / self._target_name(name)).write_text(text, encoding="utf-8")
             del self.extra[name]
         copied = 0
         if self.src.is_dir():
@@ -412,9 +448,10 @@ class TapeSync:
                 key = (st.st_size, st.st_mtime_ns)
                 if self._seen.get(f.name) == key:
                     continue
-                tmp = self.dst / f".{f.name}.tmp"
+                target = self._target_name(f.name)
+                tmp = self.dst / f".{target}.tmp"
                 tmp.write_bytes(f.read_bytes())
-                os.replace(tmp, self.dst / f.name)
+                os.replace(tmp, self.dst / target)
                 self._seen[f.name] = key
                 copied += 1
         self.commit()
@@ -719,6 +756,11 @@ class ModalOps:
         volumes = {}
         if cfg.volume_name and cfg.volume_mount:
             volumes[cfg.volume_mount] = modal.Volume.from_name(cfg.volume_name, create_if_missing=True)
+        if cfg.checkpoint_store_volume_name and cfg.checkpoint_store_mount:
+            # create_if_missing makes a v1 Volume (the default version); a failure to
+            # look it up/create it fails the launch (never a silent container-local store)
+            volumes[cfg.checkpoint_store_mount] = modal.Volume.from_name(
+                cfg.checkpoint_store_volume_name, create_if_missing=True)
         if cfg.tape_volume_name:
             volumes[TAPE_MOUNT] = modal.Volume.from_name(cfg.tape_volume_name, create_if_missing=True)
         if cfg.model_volume_name and cfg.model_volume_mount:

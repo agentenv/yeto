@@ -438,13 +438,28 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
                     "drops --balance-data (refused by the DP certification) and wires the "
                     "trainer ops and pool GPU ids; off by default")
     rl.add_argument("--rl-checkpoint-store", default=None, metavar="PATH|URI",
-                    help="--rl-elastic: off-island copy of the island state dir (journal, cuts, "
+                    help="--rl-elastic, or --rl-single-island-no-sync (resume across launches, "
+                    "rl-resume-from-checkpoint): off-island copy of the island state dir (journal, cuts, "
                     "ledger) for a rebuild after node loss (rl-multinode-island Q4): a bucket "
-                    "URI (s3://, gs://, ...) mounted on the island, or a path already shared "
+                    "URI (s3://, gs://, ...) mounted on the island, modal-volume://NAME[/PREFIX] on "
+                    "a Modal island (the only form Modal accepts), or a path already shared "
                     "across machines (NFS, persistent volume). The learner syncs the state dir "
                     "there after every commit point and restores from it when its state dir "
                     "is empty (machine replaced). Without it the state stays on node0's local "
                     "disk (warning on a multi-node island)")
+    # rl-resume-from-checkpoint (S17 C4)
+    rl.add_argument("--rl-cut-every", type=int, default=None,
+                    help="with --rl-checkpoint-store: keep a round cut every N rounds (plus the "
+                    "last round and our own stop); default 1")
+    rl.add_argument("--rl-cut-keep", type=int, default=None,
+                    help="with --rl-checkpoint-store and no --rl-elastic: keep the newest K cuts "
+                    "(default 2); older ones are deleted only after the new LATEST is committed")
+    rl.add_argument("--rl-resume-allow-config-change", action="store_true",
+                    help="resume a cut even though the run configuration differs (the "
+                    "differences are written to the rl_resume event); refused by default")
+    rl.add_argument("--rl-stop-after-rounds", type=int, default=None,
+                    help="with --rl-checkpoint-store and no --rl-elastic: stop after N rounds "
+                    "with a final cut (our own stop; the next launch resumes)")
     rl.add_argument("--rl-elastic-accept-rebind", action="store_true",
                     help="--rl-elastic, multi-node: accept a GPU uuid pool that differs from the "
                     "cfg / journal binding (machine replaced) and rebind; off by default the "

@@ -1457,6 +1457,14 @@ def check_cloud_prerequisites(
                 f"{SKY_CONFIG_PATH} (one Nebius project is bound to one region)"
             )
     modal_specs = [s for s in specs if s.cloud == "modal"]
+    store = str(getattr(args, "rl_checkpoint_store", None) or "") if args is not None else ""
+    if store:
+        # rl-resume-from-checkpoint 1.2: no silent drop; each cloud gets a store it can mount
+        if modal_specs:
+            modal_checkpoint_store(args)  # raises on a non-modal-volume store
+        if store.startswith("modal-volume://") and len(modal_specs) != len(specs):
+            raise ValueError("--rl-checkpoint-store modal-volume://... only mounts on Modal islands; "
+                             "use a bucket URI or a shared path for the other clouds")
     if modal_specs:
         from .modal_runner import (
             image_ref_from_rl_image,
@@ -1740,6 +1748,62 @@ NODE0_LOCAL_CHECKPOINT_WARNING = (
 )
 
 
+def _check_resume_launch_flags(args, rl_engine: str) -> bool:
+    """rl-resume-from-checkpoint: True when ``--rl-checkpoint-store`` is the non-elastic
+    resume store (``--rl-single-island-no-sync``, ports). Validates the cadence flags."""
+    store = getattr(args, "rl_checkpoint_store", None)
+    elastic = bool(getattr(args, "rl_elastic", False))
+    for name, flag in (("rl_cut_every", "--rl-cut-every"), ("rl_cut_keep", "--rl-cut-keep"),
+                       ("rl_stop_after_rounds", "--rl-stop-after-rounds")):
+        value = getattr(args, name, None)
+        if value is not None and value < 1:
+            raise ValueError(f"{flag} must be >= 1")
+        if value is not None and not store:
+            raise ValueError(f"{flag} needs --rl-checkpoint-store")
+    if getattr(args, "rl_resume_allow_config_change", False) and not store:
+        raise ValueError("--rl-resume-allow-config-change needs --rl-checkpoint-store")
+    if elastic:
+        for name, flag in (("rl_cut_keep", "--rl-cut-keep"), ("rl_stop_after_rounds", "--rl-stop-after-rounds")):
+            if getattr(args, name, None) is not None:
+                raise ValueError(f"{flag} applies to a non-elastic --rl-checkpoint-store run")
+        return False
+    if not store:
+        return False
+    if not getattr(args, "rl_single_island_no_sync", False) or rl_engine != "ports":
+        raise ValueError("--rl-checkpoint-store without --rl-elastic needs --rl-engine ports and "
+                         "--rl-single-island-no-sync (multi-island resume: rl-resume-from-checkpoint 3.3)")
+    rl_checkpoint_store_plan(args)  # validates the form
+    return True
+
+
+def modal_checkpoint_store(args) -> tuple[str, str] | None:
+    """``(volume name, path in the container)`` for a ``modal-volume://`` store, None
+    without a store. Any other store form on a Modal island is an error: Modal mounts no
+    bucket and a container path does not outlive the container (it used to be dropped
+    silently, rl-resume-from-checkpoint 1.2)."""
+    value = getattr(args, "rl_checkpoint_store", None)
+    if not value:
+        return None
+    from .rl.engine.resume import MODAL_VOLUME_SCHEME, parse_modal_volume_uri
+
+    if not str(value).startswith(MODAL_VOLUME_SCHEME + "://"):
+        raise ValueError(f"--rl-checkpoint-store {value!r} on a Modal island: Modal mounts neither "
+                         "buckets nor host paths here; use modal-volume://NAME[/PREFIX] (a v1 Volume)")
+    name, prefix = parse_modal_volume_uri(str(value))
+    return name, MODAL_CHECKPOINT_STORE_MOUNT + (f"/{prefix}" if prefix else "")
+
+
+MODAL_CHECKPOINT_STORE_MOUNT = "/root/yeto-checkpoint-store"
+
+
+def resumes_in_new_container(args) -> bool:
+    """A Modal re-run of the island (preemption) is a resume, not a failure, when the run
+    has a non-elastic modal-volume:// store (rl-resume-from-checkpoint 2.5)."""
+    store = str(getattr(args, "rl_checkpoint_store", None) or "")
+    return (store.startswith("modal-volume://") and not getattr(args, "rl_elastic", False)
+            and bool(getattr(args, "rl_single_island_no_sync", False)))
+
+
 def rl_checkpoint_store_plan(args) -> tuple[str, str | None] | None:
     """``(path on the island, bucket URI or None)`` for ``--rl-checkpoint-store``:
     a ``scheme://`` URI is mounted at :data:`ELASTIC_CHECKPOINT_STORE_MOUNT` (sky
@@ -1749,6 +1813,11 @@ def rl_checkpoint_store_plan(args) -> tuple[str, str | None] | None:
     if not value:
         return None
     value = str(value)
+    if value.startswith("modal-volume://"):
+        from .rl.engine.resume import parse_modal_volume_uri
+
+        _name, prefix = parse_modal_volume_uri(value)
+        return MODAL_CHECKPOINT_STORE_MOUNT + (f"/{prefix}" if prefix else ""), None
     if "://" in value:
         scheme, _, rest = value.partition("://")
         if not scheme.isalnum() or not rest.strip("/") or rest.startswith("/"):
@@ -1885,7 +1954,8 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
         given.append("--rl-elastic-trainer-edges")
     if getattr(args, "rl_elastic_accept_rebind", False):
         given.append("--rl-elastic-accept-rebind")
-    if getattr(args, "rl_checkpoint_store", None):
+    resume_store = _check_resume_launch_flags(args, rl_engine)
+    if getattr(args, "rl_checkpoint_store", None) and not resume_store:
         given.append("--rl-checkpoint-store")
     if getattr(args, "rl_elastic_declare_cells", False):
         given.append("--rl-elastic-declare-cells")
@@ -2021,6 +2091,18 @@ def _ports_infra_flags(args) -> tuple[str, str]:
     if island_scheduling_mode(args) == "elastic":  # legacy adds nothing
         flags += (" --rl-island-scheduling elastic"
                   f" --rl-syncer-epoch {island_syncer_epoch(args)}")
+    resume_store = (rl_checkpoint_store_plan(args)
+                    if getattr(args, "rl_checkpoint_store", None) and not getattr(args, "rl_elastic", False)
+                    else None)
+    if resume_store is not None:  # rl-resume-from-checkpoint: non-elastic resume store
+        flags += f" --rl-resume-store {shlex.quote(resume_store[0])}"
+        for name, flag in (("rl_cut_keep", "--rl-cut-keep"), ("rl_stop_after_rounds", "--rl-stop-after-rounds")):
+            if getattr(args, name, None) is not None:
+                flags += f" {flag} {int(getattr(args, name))}"
+    if getattr(args, "rl_checkpoint_store", None) and getattr(args, "rl_cut_every", None) is not None:
+        flags += f" --rl-cut-every {int(args.rl_cut_every)}"
+    if getattr(args, "rl_checkpoint_store", None) and getattr(args, "rl_resume_allow_config_change", False):
+        flags += " --rl-resume-allow-config-change"
     if getattr(args, "rl_elastic", False):
         prelude += (
             "mkdir -p ~/yeto-rl && printf '%s' "
@@ -4119,6 +4201,11 @@ def make_miles_island_task(
             mode=sky.StorageMode.MOUNT,
             sync_on_reconstruction=True,
         )
+    if getattr(args, "rl_checkpoint_store", None) and not getattr(args, "rl_elastic", False):
+        store = rl_checkpoint_store_plan(args)  # resume store: same bucket mount on sky
+        if store is not None and store[1] is not None:
+            storage_mounts[ELASTIC_CHECKPOINT_STORE_MOUNT] = sky.Storage(
+                source=store[1], mode=sky.StorageMode.MOUNT, persistent=True)
     if getattr(args, "rl_elastic", False):
         # rl-multinode-island Q4 (C5): the consistent checkpoint (journal + cuts) must
         # outlive node0 for a rebuild on other machines; a bucket URI is mounted on
@@ -4865,6 +4952,11 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
     if "HF_TOKEN" not in envs and os.path.isfile(token_path):
         with open(token_path, encoding="utf-8") as f:
             envs["HF_TOKEN"] = f.read().strip()
+    store_volume = modal_checkpoint_store(args) if rl else None
+    if store_volume is not None:
+        from .rl.engine.resume import MODAL_VOLUME_ENV
+
+        envs[MODAL_VOLUME_ENV] = store_volume[0]  # the learner commits this Volume
     volume_name = volume_mount = None
     if rl and getattr(args, "spot", False):
         volume_name = _rl_checkpoint_storage_name(args.cluster_prefix, learner_id)
@@ -4909,6 +5001,8 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         codex_dir=codex_dir,
         codex_mount=CODEX_CONTAINER_DIR if codex_dir else None,
         extra_mounts=extra_mounts,
+        checkpoint_store_volume_name=None if store_volume is None else store_volume[0],
+        checkpoint_store_mount=None if store_volume is None else MODAL_CHECKPOINT_STORE_MOUNT,
         tape_volume_name=getattr(args, "modal_tape_volume", None) or None,
         model_volume_name=(getattr(args, "modal_model_volume", None) or None) if rl else None,
         model_volume_mount=MODEL_STORE_MOUNT if rl and getattr(args, "modal_model_volume", None) else None,
@@ -7023,7 +7117,23 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         event_collectors: dict[str, EventCollector] = {}
         container_guards: list = []
 
+        resume_on_new_container = resumes_in_new_container(args)
+
         def on_container_change(message: str) -> None:
+            if resume_on_new_container:
+                # rl-resume-from-checkpoint: the Volume store carries LATEST; the re-run
+                # container resumes from the newest complete cut instead of starting over.
+                print(f"[launcher] WARNING: {message}; the island resumes from its "
+                      "modal-volume checkpoint store (no failure)", file=sys.stderr, flush=True)
+                if events_dir is not None:
+                    try:
+                        with open(Path(events_dir) / "launcher-errors.jsonl", "a") as fh:
+                            fh.write(json.dumps({"event": "modal_container_changed", "level": "warning",
+                                                 "resume": True, "message": message,
+                                                 "time": time.time()}) + "\n")
+                    except OSError:
+                        pass
+                return
             print(f"[launcher] ERROR: {message}; failing the run (exit {CONTAINER_CHANGED_EXIT}) "
                   "and stopping the Modal app", file=sys.stderr, flush=True)
             if events_dir is not None:
@@ -7039,7 +7149,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 print(f"[launcher] modal app stop failed: {e}", file=sys.stderr, flush=True)
 
         def container_changed() -> bool:
-            return any(g.tripped for g in container_guards)
+            return not resume_on_new_container and any(g.tripped for g in container_guards)
 
         if syncer_cluster is not None:
             spawn_tail(syncer_cluster, syncer_job)

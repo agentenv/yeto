@@ -216,6 +216,15 @@ def parse_args(argv=None):
     # rl-multinode-island Q4 (C5): off-island copy of the state dir (journal/cuts/ledger),
     # synced after every commit point and restored on an empty state dir (machine replaced)
     parser.add_argument("--rl-elastic-checkpoint-store", default=None, metavar="PATH")
+    # rl-resume-from-checkpoint (S17 C4): resume across launches WITHOUT --rl-elastic
+    # (single island, no sync). The store path is on the island (a Modal Volume mount, a
+    # bucket mount or a shared path); round cuts + a hashed state snapshot + LATEST go there.
+    parser.add_argument("--rl-resume-store", default=None, metavar="PATH")
+    parser.add_argument("--rl-resume-state-dir", default="~/yeto-rl/resume-state", metavar="PATH")
+    parser.add_argument("--rl-cut-every", type=int, default=None)
+    parser.add_argument("--rl-cut-keep", type=int, default=None)
+    parser.add_argument("--rl-resume-allow-config-change", action="store_true")
+    parser.add_argument("--rl-stop-after-rounds", type=int, default=None)
     parser.add_argument("--sglang-tp-size", type=int, default=None)
     parser.add_argument("--sglang-dp-size", type=int, default=None)
     parser.add_argument("--sglang-ep-size", type=int, default=None)
@@ -398,6 +407,7 @@ def _check_ports_infra_switches(args) -> None:
     check_recommend_flags(args)
     if getattr(args, "rl_elastic_declare_cells", False) and not getattr(args, "rl_elastic", False):
         raise ValueError("--rl-elastic-declare-cells needs --rl-elastic")
+    _check_resume_switches(args, ports=ports)
     if not getattr(args, "rl_elastic", False):
         if given:
             raise ValueError(", ".join(given) + " need --rl-elastic")
@@ -416,6 +426,39 @@ def _check_ports_infra_switches(args) -> None:
         value = getattr(args, name, None)
         if value is not None and not value > 0:
             raise ValueError(f"--{name.replace('_', '-')} must be positive")
+
+
+def _check_resume_switches(args, *, ports: bool) -> None:
+    """rl-resume-from-checkpoint: ``--rl-resume-store`` is single-island/no-sync and
+    ports-only; the cut cadence flags need a store (elastic or resume)."""
+    store = getattr(args, "rl_resume_store", None)
+    has_store = bool(store) or bool(getattr(args, "rl_elastic_checkpoint_store", None))
+    for name, flag in (("rl_cut_every", "--rl-cut-every"), ("rl_cut_keep", "--rl-cut-keep"),
+                       ("rl_stop_after_rounds", "--rl-stop-after-rounds")):
+        value = getattr(args, name, None)
+        if value is not None and not int(value) >= 1:
+            raise ValueError(f"{flag} must be >= 1")
+    given = [f for n, f in (("rl_cut_every", "--rl-cut-every"), ("rl_cut_keep", "--rl-cut-keep"),
+                            ("rl_stop_after_rounds", "--rl-stop-after-rounds"))
+             if getattr(args, n, None) is not None]
+    if getattr(args, "rl_resume_allow_config_change", False):
+        given.append("--rl-resume-allow-config-change")
+    if given and not has_store:
+        raise ValueError(", ".join(given) + " need --rl-resume-store (or --rl-elastic-checkpoint-store)")
+    if getattr(args, "rl_cut_keep", None) is not None and not store:
+        raise ValueError("--rl-cut-keep applies to --rl-resume-store (the elastic store keeps every cut)")
+    if getattr(args, "rl_stop_after_rounds", None) is not None and not store:
+        raise ValueError("--rl-stop-after-rounds needs --rl-resume-store")
+    if not store:
+        return
+    if not ports:
+        raise ValueError("--rl-resume-store only applies to --rl-engine ports")
+    if getattr(args, "rl_elastic", False):
+        raise ValueError("--rl-resume-store is the non-elastic store; with --rl-elastic use "
+                         "--rl-elastic-checkpoint-store")
+    if not getattr(args, "rl_single_island_no_sync", False):
+        raise ValueError("--rl-resume-store needs --rl-single-island-no-sync (multi-island resume "
+                         "is not implemented yet: rl-resume-from-checkpoint 3.3)")
 
 
 def _elastic_cells(value: str | None) -> tuple[str, ...]:
@@ -455,6 +498,23 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
         miles_args.yeto_rl_allow_cross_node_engine_tp = True
     if getattr(args, "rl_allow_cross_node_tp", False):
         miles_args.yeto_rl_allow_cross_node_tp = True
+    if getattr(args, "rl_resume_store", None):
+        miles_args.yeto_rl_resume = {
+            "store": str(args.rl_resume_store),
+            "state_dir": str(getattr(args, "rl_resume_state_dir", None) or "~/yeto-rl/resume-state"),
+            "every": int(getattr(args, "rl_cut_every", None) or 1),
+            "keep": int(getattr(args, "rl_cut_keep", None) or 2),
+            "allow_config_change": bool(getattr(args, "rl_resume_allow_config_change", False)),
+            "stop_after": (None if getattr(args, "rl_stop_after_rounds", None) is None
+                           else int(args.rl_stop_after_rounds)),
+        }
+        from yeto.rl.adapters.miles.rollout_meta_hook import ELASTIC_METADATA_ENV
+
+        # the cut needs the rollout data cursor (rollout-side metadata), as elastic does
+        miles_args.yeto_rl_elastic_metadata = True
+        (os.environ if environ is None else environ)[ELASTIC_METADATA_ENV] = "1"
+    elif getattr(args, "rl_cut_every", None) is not None:
+        miles_args.yeto_rl_resume_every = int(args.rl_cut_every)
     if not getattr(args, "rl_elastic", False):
         return
     miles_args.yeto_rl_elastic = {
