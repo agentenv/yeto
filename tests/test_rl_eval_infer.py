@@ -193,7 +193,8 @@ def test_agent_runs_the_training_worker_job(tmp_path):
 
     async def drive(job, trajectory, board, worker_env):
         seen.update(job=job, board=board, worker_env=worker_env)
-        return {"status": "max_turns", "metrics": {"turns": 12, "max_model_total_tokens": 7000},
+        return {"status": "max_turns", "metrics": {"turns": 12, "max_model_total_tokens": 7000,
+                                                   "end_reason": "CodexModelFailure: x", "secret": 1},
                 "episode_id": job["episode_id"]}
 
     agent, http = _agent(drive)
@@ -204,6 +205,7 @@ def test_agent_runs_the_training_worker_job(tmp_path):
     assert job["max_seq_len"] == 8192 and job["env_token"] == "tok" and job["driver"] == "stock"
     assert seen["worker_env"] == {"W": "1"} and seen["board"] is None
     assert out["end_reason"] == "max_turns" and out["turns"] == 12 and out["tokens"] == 7000
+    assert out["agent_detail"] == {"end_reason": "CodexModelFailure: x", "turns": 12, "max_model_total_tokens": 7000}
     create = [c for c in http.calls if c[1].endswith("/sessions")][0]
     assert create[2]["evaluation"] is True and create[2]["top_k"] == 20
     assert http.calls[-1][0] == "DELETE"
@@ -247,17 +249,17 @@ def test_tb2_attempt_records_timing_and_results_hash_ignores_it(tmp_path):
             return SimpleNamespace(verifier=Verifier(), destroy=destroy)
 
     async def agent(lease, task, trial, *, policy_token):
-        return {"episode_id": "e", "end_reason": "completed", "turns": 2}
+        return {"episode_id": "e", "end_reason": "completed", "turns": 2, "agent_detail": {"end_reason": "x"}}
 
     out = tb2_attempt(Provider(), agent)(EvalTask("a", "x"), 0, policy_version=0, policy_token="t")
     assert set(out["timing"]) == {"sandbox_s", "agent_s", "judge_s", "destroy_s"}
     from yeto.rl.eval.island import EvalIsland
 
     rec = EvalIsland._record(SimpleNamespace(island_id="e"), EvalTask("a", "tb2-easy"), 0, 0, "t", out, 1.0)
-    assert rec["timing"] == out["timing"]
+    assert rec["timing"] == out["timing"] and rec["agent_detail"] == {"end_reason": "x"}
     s1, s2 = EvalStore(tmp_path / "1"), EvalStore(tmp_path / "2")
     s1.append_unit(rec)
-    s2.append_unit({**rec, "timing": {"agent_s": 99.0}})
+    s2.append_unit({**rec, "timing": {"agent_s": 99.0}, "agent_detail": {"end_reason": "y"}})
     assert s1.results_sha256(0) == s2.results_sha256(0)
 
 

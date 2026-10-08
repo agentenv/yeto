@@ -274,6 +274,19 @@ class SglangSessionLoader:
 
 # --- 3. the agent port --------------------------------------------------------------------
 
+DETAIL_KEYS = ("end_reason", "last_completion", "parse_failures", "tool_calls", "turns",
+               "max_model_total_tokens", "timed_out", "max_seq_len_hit", "tito_session_mismatch")
+
+
+def agent_detail(metrics: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Why the episode ended, as the stock driver recorded it (bounded; raw data for the run record)."""
+    if not metrics:
+        return None
+    out = {k: metrics[k] for k in DETAIL_KEYS if k in metrics}
+    if isinstance(out.get("last_completion"), (str, dict, list)):
+        out["last_completion"] = json.dumps(out["last_completion"], default=str)[:1500]
+    return out
+
 
 def _default_drive() -> Callable[..., Any]:
     from yeto.rl.harness.codex.codex_openenv_subprocess_agent_function import _drive_worker
@@ -328,7 +341,8 @@ class CodexEvalAgent:
                 untrusted = {"status": "timeout", "metrics": {"timed_out": 1}, "episode_id": episode_id}
             except adapter.harness.CodexHarnessError as exc:  # training: infrastructure, not a reward
                 return {"episode_id": episode_id, "end_reason": "infra_error", "error": str(exc)[:500],
-                        "metrics": getattr(exc, "metrics", None), "agent_s": round(self.clock() - t0, 3)}
+                        "metrics": getattr(exc, "metrics", None), "agent_s": round(self.clock() - t0, 3),
+                        "agent_detail": agent_detail(getattr(exc, "metrics", None))}
         finally:
             await asyncio.to_thread(self.http, "DELETE", f"{self.cfg.session_url}/sessions/{session_id}")
         metrics = dict(untrusted.get("metrics") or {})
@@ -337,7 +351,7 @@ class CodexEvalAgent:
             return {"episode_id": episode_id, "end_reason": "infra_error", "error": f"unknown status {status!r}"}
         return {"episode_id": untrusted.get("episode_id", episode_id), "end_reason": STATUS_TO_END_REASON[status],
                 "turns": metrics.get("turns"), "tokens": metrics.get("max_model_total_tokens"),
-                "metrics": metrics, "agent_s": round(self.clock() - t0, 3)}
+                "metrics": metrics, "agent_s": round(self.clock() - t0, 3), "agent_detail": agent_detail(metrics)}
 
 
 # --- island_main factories ----------------------------------------------------------------

@@ -55,7 +55,8 @@ def tb2_attempt(provider: Any, agent: Agent, *, run: Callable[[Awaitable[Any]], 
             passed = bool(verdict.get("passed"))
             return {"trajectory_id": tid, "reward": 1.0 if passed else 0.0, "success": passed,
                     "end_reason": end, "turns": out.get("turns"), "tokens": out.get("tokens"),
-                    "verifier_timed_out": bool(verdict.get("timed_out")), "timing": timing}
+                    "verifier_timed_out": bool(verdict.get("timed_out")), "timing": timing,
+                    **({"agent_detail": out["agent_detail"]} if out.get("agent_detail") else {})}
 
         return run(go())
 

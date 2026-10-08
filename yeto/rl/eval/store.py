@@ -248,7 +248,7 @@ class EvalStore:
 
 
 # fields that depend on wall clock / attempt identity, not on the outcome
-_VOLATILE = ("t", "seconds", "attempt", "island", "trajectory_id", "timing")
+_VOLATILE = ("t", "seconds", "attempt", "island", "trajectory_id", "timing", "agent_detail")
 
 
 def _canonical_result(rec: Mapping[str, Any]) -> dict[str, Any]:
