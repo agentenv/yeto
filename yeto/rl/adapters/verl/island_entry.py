@@ -189,7 +189,9 @@ def ensure_ray_cpus(min_cpus: int = MIN_RAY_CPUS) -> dict:
         return info
     host, _, port = address.rpartition(":")
     temp = os.path.expanduser("~/miles-ray")
-    subprocess.run(f'pkill -f "{temp}/"; sleep 3; pkill -KILL -f "{temp}/"; sleep 1', shell=True)
+    # Not ``pkill -f <temp dir>`` inside ``sh -c``: the pattern matches that shell itself (V2 b).
+    # Inside a Modal container the launcher's island Ray is the only Ray on the node.
+    info["stop_rc"] = subprocess.run(["ray", "stop", "--force"], timeout=180).returncode
     gpus = int(before.get("GPU", 0))
     cmd = (f'ray start --head --node-ip-address={host} --port={port} --num-cpus={min_cpus} '
            f'--num-gpus={gpus} --include-dashboard=false --temp-dir={temp}')
