@@ -185,6 +185,9 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
                               default_backend=trainer.config.trainer.logger, config=cfg)
     trainer.global_steps = 1
     SkipManager.set_step(1)
+    # attributes verl's fit() sets before its loop (profiling off on the yeto path)
+    trainer.prev_step_profile = trainer.curr_step_profile = trainer.next_step_profile = False
+    trainer.timing_raw = {}
     trainer._reissue_inflight_prompts()
     trainer.on_train_begin()
 
