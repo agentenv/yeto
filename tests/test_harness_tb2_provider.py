@@ -630,3 +630,26 @@ def test_verifier_log_tail_reaches_the_trajectory_metadata_and_tape(monkeypatch,
     long = "x" * 5000 + "TAIL"
     excerpt = tb2_provider.verifier_log_excerpt(long)
     assert len(excerpt) == tb2_provider.VERIFIER_LOG_CHARS and excerpt.endswith("TAIL")
+
+
+def test_modal_sandbox_exec_reads_bytes_and_decodes_leniently():
+    calls = {}
+
+    class _Proc:
+        stdout = SimpleNamespace(read=lambda: b"ok \xf0\x9f")  # cut mid UTF-8 sequence
+        stderr = SimpleNamespace(read=lambda: b"")
+
+        @staticmethod
+        def wait():
+            return 0
+
+    class _Sandbox:
+        object_id = "sb"
+
+        def exec(self, *args, **kwargs):
+            calls["kwargs"] = kwargs
+            return _Proc()
+
+    result = tb2_provider.ModalSandbox(_Sandbox(), "/app").exec("echo", timeout_s=5)
+    assert calls["kwargs"]["text"] is False
+    assert result.output.startswith("ok ") and result.exit_code == 0
