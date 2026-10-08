@@ -451,3 +451,22 @@ def test_next_lr_matches_the_g1_tape_bitwise():
     assert next_lr_for(SimpleNamespace(lr=1e-5, lr_decay_style="linear", lr_decay_iters=None)) is None
     assert next_lr_for(SimpleNamespace(lr=1e-5, lr_decay_style="linear", lr_decay_iters=10,
                                        lr_warmup_iters=5)) is None
+
+
+def test_preempt_signal_writes_only_a_marker_and_hands_the_signal_on(tmp_path):
+    import os
+    import signal
+
+    store = _store(tmp_path / "store", _Vol())
+    ctl = _rctl(tmp_path, "a", store)
+    seen = []
+    old = signal.signal(signal.SIGUSR1, lambda n, f: seen.append(n))
+    try:
+        assert rs.install_preempt_handler(ctl, signals=("SIGUSR1",)) == ["SIGUSR1"]
+        os.kill(os.getpid(), signal.SIGUSR1)
+        marks = list((store.root / "preempt-notices").glob("*.json"))
+        assert len(marks) == 1 and json.loads(marks[0].read_text())["saved"] is False
+        assert seen == [signal.SIGUSR1] and store.commits == 1
+        assert not (store.root / rs.LATEST).exists()  # no cut attempted in the grace window
+    finally:
+        signal.signal(signal.SIGUSR1, old)

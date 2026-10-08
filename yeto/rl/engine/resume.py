@@ -163,9 +163,15 @@ class ModalVolumeStore(CheckpointStore):
         return modal.Volume.from_name(self.volume_name)
 
     def commit(self) -> float:
+        """Explicit commit; a failing commit raises (the sync then reports store_synced
+        False and LATEST is not trusted by this launch's report). Modal still commits
+        in the background and at container exit (docs), which a later launch sees."""
         started = time.monotonic()
         self._volume().commit()
+        self.commits += 1
         return time.monotonic() - started
+
+    commits = 0
 
     def reload(self) -> None:
         try:
@@ -515,6 +521,7 @@ def install_preempt_handler(controller: "ResumeController", *, emit: Callable[..
 
     if threading.current_thread() is not threading.main_thread():
         return []
+    del emit  # no tape write from a signal handler (the tape writer may hold its lock)
     installed = []
     for name in signals:
         signum = getattr(_signal, name, None)
@@ -527,9 +534,7 @@ def install_preempt_handler(controller: "ResumeController", *, emit: Callable[..
                 record = write_preempt_marker(controller.checkpoint_store, signal_name=_name,
                                               incarnation=controller.incarnation, rollout_id=None,
                                               store=controller.store)
-                if emit is not None:
-                    emit("rl_preempt_notice", **{k: v for k, v in record.items() if k != "incarnation"},
-                         incarnation=controller.incarnation.get("index"))
+                print(f"[yeto] rl_preempt_notice {json.dumps(record, sort_keys=True)}", flush=True)
             except Exception:  # noqa: BLE001 - never block the shutdown
                 pass
             if callable(_prev):
