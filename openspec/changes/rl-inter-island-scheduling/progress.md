@@ -194,3 +194,8 @@ tests/test_rl_inter_island_ledger.py tests/test_rl_inter_island_status.py tests/
 - 真机 [实测]：岛 1 在 v1 后静默 120.3 s（lease 90）→ 04:00:00 lease_expired → 静默结束后同步服务拒收 "1 is not a member (rejoin required)" → 13.4 s 后 elastic_rejoin（incarnation 1，catch_up，base 3）→ 同步服务 pool_join catch_up → 之后 v5–v10 共 6 步岛 1 权重≈0.5 → 两岛正常结束，rc=0，status finished，两岛 H100。
 - 发现：① 客户端事件在岛 tape 里各写两次（自建客户端被重复挂钩，0.22 起就有），已修 eb6ff049；② 重入后第一步里岛 1 除 catch-up 零权重条目外，还有一条用静默前已收到（被挂起）的 v2 训练出的迟到增量，按 γ=0.5 折扣并入（权重 0.497）。judge v1 的 C4 "首步岛 1 全部为 0" 因此不过；v2（看数据后改的口径，已注明）拆成 C4a catch-up 条目为 0（过）+ C4b 迟到增量记为信息。是否允许"过期前拿到的基座训出的增量在重入后按迟到并入"待裁定。
 - ≈$3.0 [估算]。证据 s1-runs/s15-island1b-20261008g/{judgment-pause.json(v1),judgment-pause-v2.json,launch.ts.log,head/yeto-output/yeto-tape.jsonl,head/yeto-syncer.log,tape-direct/}。
+
+## S17 N6 — tasks 0.10 离线 IS 比（未完成）
+- 证据：`evidence/is-ratio-lag0-verl-s16.json`、`evidence/is-ratio-offline-README.md`；脚本 `tools/offline_is_ratio_compare.py`，单测 3 passed。
+- 已验证：lag 0（训推不一致）下 TIS/IcePop/M2PO 截断比例均 <2e-5、ESS/N≈0.998，无差异。
+- 未验证：lag 1–4（无已存数据）；需下次上卡按 README 方案顺带采集后重跑。默认值暂 `tis`。
