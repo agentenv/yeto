@@ -65,5 +65,14 @@
 
 ## 5. V2：两个 verl 岛（S17 夜间追加）
 
-- [ ] 5.1 两个 verl 岛接严格同步 syncer（Nebius head + 2×Modal H100!），外层合并后每版两岛全局策略哈希一致；岛 1 在 v2 后退出、launcher 同 id 重启重入。验收：S17-V2-VERL-PRELAUNCH-REVIEW.md §4 J1–J6。
+- [x] 5.1 两个 verl 岛接严格同步 syncer（Nebius head + 2×Modal H100!），外层合并后每版两岛全局策略哈希一致；岛 1 在 v2 后退出、launcher 同 id 重启重入。验收：S17-V2-VERL-PRELAUNCH-REVIEW.md §4 J1–J6。
+  - 2026-10-08 V2（s1-runs/s17-verl-v2-20261008c，judgment.json J1–J6 全过，rc=0）：v0–v6 每版两岛全局策略哈希相同；岛 1 在 v2 后退出、launcher 同 id 重启、新连接代际重入并跑完；两岛每版发布读回 VERIFIED；判据无报警。前两次 a/b 失败原因（Ray CPU 槽不足、Ray 重启脚本错误）与修复见 S17-V2-VERL-PRELAUNCH-REVIEW.md §8。剩余：重入岛的数据游标不续位（未做）。
 - [x] 5.2 Miles 身份 HELLO 进 verl 会话被真 Rust syncer（严格参数）拒绝，反向同样被拒，同为 verl 接受。证据 s1-runs/s17-verl-handshake/result.json（布局哈希与 V1 真机一致）。注：严格模式下被拒会让 syncer 以 layout_hash_mismatch 致命退出；elastic 模式 JOIN 带身份由 N12（PR #140）补。
+
+## 6. 剩余（S17 夜间 V1/V2 之外，未验证）
+
+- [ ] 6.1 IcePop 到 verl rollout_corr 的映射与对照（现为拒绝）。
+- [ ] 6.2 1.4 lora_config_hash / wire_dtype 进身份哈希；1.4a 用 @register_adv_est 包 yeto 纯函数并逐位对照；1.4b 逐词元损失对照（含 clip_ratio_high、loss_agg_mode 与 Miles 默认是否一致）。
+- [ ] 6.3 1.7 阈值表正式数值；1.8 运行时清单并入 yeto 统一 schema；1.9/2.4 codex 会话服务。
+- [ ] 6.4 落盘发布方式真机验证；verl 岛重入后数据游标续位；elastic 模式 verl 岛（JOIN 带身份见 PR #140）。
+- [ ] 6.5 单岛不同步 + Modal 时 launcher 以 exit 2 收尾（与 Miles 相同的既有行为），是否改为成功由用户定。
