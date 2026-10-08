@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import math
-import statistics
 from types import SimpleNamespace
 from typing import Any
+
+from yeto.rl.rewards.builtin import BoundedNonzeroStdFilter
+from yeto.rl.rewards.types import Trajectory
 
 
 def _group_key(samples: list[Any]) -> tuple[Any, ...]:
@@ -39,33 +40,28 @@ def bounded_nonzero_reward_std(args, samples: list[Any], **kwargs):
     ``--dynamic-sampling-max-replacements N`` rejects the first ``N``
     zero-variance groups in a rollout and accepts the next one.  Decisions are
     memoized because Yeto's all-samples callback sees each group a second time.
+
+    Miles entry point; the decision and its state live in the neutral
+    :class:`yeto.rl.rewards.builtin.BoundedNonzeroStdFilter` (decoupling 3.2),
+    kept on ``args`` with its state dict exposed as before.
     """
 
-    rollout_id = getattr(args, "yeto_rl_policy_version", None)
-    state = getattr(args, "_yeto_bounded_filter_state", None)
-    if state is None or state.get("rollout_id") != rollout_id:
-        state = {"rollout_id": rollout_id, "rejections": 0, "forced": 0, "decisions": {}}
-        args._yeto_bounded_filter_state = state
-
+    flt = getattr(args, "_yeto_bounded_filter", None)
+    if flt is None:
+        flt = BoundedNonzeroStdFilter()
+        args._yeto_bounded_filter = flt
+    # The Miles round hook resets ``args._yeto_bounded_filter_state`` to None
+    # per rollout; the attribute stays the source of truth for the state.
+    shared = getattr(args, "_yeto_bounded_filter_state", None)
+    flt.state = shared if isinstance(shared, dict) else {}
+    round_id = getattr(args, "yeto_rl_policy_version", None)
     key = _group_key(samples)
-    previous = state["decisions"].get(key)
-    if previous is not None:
-        return _output(*previous)
-
-    rewards = [_reward(args, sample) for sample in samples]
-    std = statistics.pstdev(rewards) if rewards else 0.0
-    if not math.isfinite(std):
-        std = 0.0
-    if std > 1e-8:
-        decision = (True, None)
-    else:
-        limit = getattr(args, "yeto_rl_dynamic_sampling_max_replacements", None)
-        if limit is None or state["rejections"] < int(limit):
-            state["rejections"] += 1
-            value = round(rewards[0], 1) if rewards else 0.0
-            decision = (False, f"zero_std_{value}")
-        else:
-            state["forced"] += 1
-            decision = (True, f"bounded_fallback_after_{int(limit)}_replacements")
-    state["decisions"][key] = decision
-    return _output(*decision)
+    decision = flt.cached(round_id=round_id, key=key)
+    if decision is None:
+        group = [Trajectory(index=getattr(s, "index", None), reward=_reward(args, s))
+                 for s in samples]
+        decision = flt(group, round_id=round_id, key=key,
+                       max_replacements=getattr(args, "yeto_rl_dynamic_sampling_max_replacements",
+                                                None))
+    args._yeto_bounded_filter_state = flt.state
+    return _output(decision.keep, decision.reason)

@@ -13,6 +13,8 @@ import statistics
 from pathlib import Path
 from typing import Any
 
+from yeto.rl.rewards.types import RewardResult, Trajectory
+
 OUTCOME_KEY = "secrlenv_trusted_outcome"
 MAC_KEY = "secrlenv_trusted_outcome_hmac"
 INFRASTRUCTURE_STATUS = "infrastructure_error"
@@ -147,10 +149,28 @@ def verify_outcome(metadata: Any) -> float:
     return value
 
 
-def _sample_reward(sample: Any) -> float:
-    outcome, value = _verified_outcome(getattr(sample, "metadata", None))
+INFRASTRUCTURE_ABORT_REASON = "secrlenv_infrastructure_failure"
+
+
+def secrlenv_reward(trajectory: Trajectory) -> RewardResult:
+    """Neutral form (decoupling 3.3): only HMAC-authenticated rewards.
+
+    Missing or invalid evidence raises :class:`UntrustedOutcome` (fatal, the
+    signature check is unchanged).  A signed infrastructure marker is not a
+    verdict: it returns value 0.0 with ``aborted=True`` so the backend adapter
+    marks the sample with its abort status and the group is replaced.
+    """
+
+    outcome, value = _verified_outcome(trajectory.metadata)
     if outcome.get("status") != INFRASTRUCTURE_STATUS:
-        return value
+        return RewardResult(value=value)
+    return RewardResult(value=0.0, aborted=True, reason=INFRASTRUCTURE_ABORT_REASON)
+
+
+def _sample_reward(sample: Any) -> float:
+    result = secrlenv_reward(Trajectory(metadata=getattr(sample, "metadata", None)))
+    if not result.aborted:
+        return result.value
 
     # Miles calls the reward function before the dynamic group filter. Mark a
     # signed infrastructure failure ABORTED here so it is replaced, while still
@@ -159,7 +179,7 @@ def _sample_reward(sample: Any) -> float:
     from miles.utils.types import Sample
 
     sample.status = Sample.Status.ABORTED
-    return 0.0
+    return result.value
 
 
 async def reward_func(args: Any, samples: Any, **_kwargs: Any) -> float | list[float]:

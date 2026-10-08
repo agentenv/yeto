@@ -13,26 +13,16 @@ positive-example LM loss. Launch as ``yeto.rl.gsm8k_reward:score``.
 
 from __future__ import annotations
 
-import re
-
+# Neutral form: yeto.rl.rewards.builtin.gsm8k_reward (decoupling 3.2); this
+# module keeps the Miles entry point and its signature.
 from yeto.rl.math_reward import set_success
+from yeto.rl.rewards.builtin import _num, gsm8k_grade as grade, gsm8k_reward
+from yeto.rl.rewards.types import Trajectory
 
-
-def _num(s):
-    s = str(s).replace(",", "")
-    m = re.findall(r"-?\d+(?:\.\d+)?", s)
-    return float(m[-1]) if m else None
-
-
-def grade(response: str, label) -> float:
-    gold = _num(str(label).split("####")[-1]) if label is not None else None
-    text = response or ""
-    boxed = re.findall(r"\\boxed\{([^}]*)\}", text)
-    pred = _num(boxed[-1]) if boxed else _num(text[-200:])
-    return 1.0 if (gold is not None and pred is not None and abs(pred - gold) < 1e-6) else 0.0
+__all__ = ["_num", "grade", "score"]
 
 
 async def score(args, sample, **kwargs):
-    value = grade(sample.response or "", sample.label)
-    set_success(sample, value == 1.0)
-    return value
+    result = gsm8k_reward(Trajectory(response=sample.response or "", label=sample.label))
+    set_success(sample, result.metadata["success"])
+    return result.value

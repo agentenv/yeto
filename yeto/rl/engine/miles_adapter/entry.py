@@ -30,7 +30,7 @@ from ..algorithm import BOUNDED_NONZERO_STD_FILTER, STOCK_NONZERO_STD_FILTER, Al
 from ..capabilities import R0_MECHANISMS, EngineCapabilities, ExecutionCapabilities
 from .traits import MILES_TRAITS
 from . import LoopRunner
-from .config import MilesConfigError
+from .config import MilesConfigError, check_harness_reward_scope
 
 ENGINE_NAME = "miles-upstream"
 
@@ -519,6 +519,8 @@ def preflight_stage(
     elastic = elastic_wiring_for(miles_args, profile=profile, fingerprint=fingerprint)
     hook = harness_preflight if harness_preflight is not None else resolve_harness_preflight(miles_args)
     if hook is not None:
+        # 7.1 in Miles' error type; the neutral hook repeats it with the core error.
+        check_harness_reward_scope(getattr(miles_args, "yeto_harness_reward_scope", None))
         hook(miles_args, launch)  # IR-1: harness preflight before placement/allocation
     return fingerprint, capabilities, profile, elastic
 

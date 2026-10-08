@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from yeto.rl.rewards.types import RewardResult, Trajectory
 from yeto.rl.tbench_outcome import MAC_KEY, OUTCOME_KEY, UntrustedTBenchOutcome, verified_outcome
 
 INFRASTRUCTURE_KEY = "tbench_infrastructure_error"
@@ -41,16 +42,31 @@ def is_infrastructure(sample: Any) -> bool:
     return INFRASTRUCTURE_KEY in metadata and OUTCOME_KEY not in metadata and MAC_KEY not in metadata
 
 
-def _sample_reward(sample: Any) -> float:
-    if is_infrastructure(sample):
-        _mark_aborted(sample)
-        _metadata(sample).pop("success", None)  # no verdict: never a positive
-        return 0.0
-    metadata = _metadata(sample)
+def tbench_reward(trajectory: Trajectory) -> RewardResult:
+    """Neutral form (decoupling 3.3).
+
+    Writes the full-success flag into ``trajectory.metadata`` in place (the
+    signed pass bit, not reward > 0).  An unsigned infrastructure marker is no
+    verdict: ``success`` is removed and the result is ``aborted`` so the
+    backend adapter marks the sample with its abort status.
+    """
+
+    metadata = trajectory.metadata
+    if not isinstance(metadata, dict):
+        raise UntrustedTBenchOutcome("sample has no metadata")
+    if INFRASTRUCTURE_KEY in metadata and OUTCOME_KEY not in metadata and MAC_KEY not in metadata:
+        metadata.pop("success", None)  # no verdict: never a positive
+        return RewardResult(value=0.0, aborted=True, reason=INFRASTRUCTURE_KEY)
     outcome, value = verified_outcome(metadata)
-    # Full success = the signed pass bit (every test passed), not reward > 0.
     metadata["success"] = outcome["passed"] is True
-    return value
+    return RewardResult(value=value)
+
+
+def _sample_reward(sample: Any) -> float:
+    result = tbench_reward(Trajectory(metadata=_metadata(sample)))
+    if result.aborted:
+        _mark_aborted(sample)
+    return result.value
 
 
 async def reward_func(args: Any, samples: Any, **_kwargs: Any) -> float | list[float]:

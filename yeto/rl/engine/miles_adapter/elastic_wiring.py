@@ -217,23 +217,5 @@ def _lost_workers_of(mgr: Any, ray_mod: Any, cell: str, timeout_s: float) -> lis
     return [str(w) for w in (entry.get("lost_workers") or [])]
 
 
-class LazyBoardActor:
-    """The island's named ``ToolWaitBoard`` actor, looked up/created on first use
-    (``tool_wait.board_actor``): the elastic wiring is built before Ray is
-    connected. Attribute access forwards to the actor handle, so
-    ``tool_wait.read_tool_wait`` works on it unchanged."""
-
-    def __init__(self, learner_id: int, *, factory: Any = None) -> None:
-        self.learner_id = int(learner_id)
-        self._factory = factory
-        self._handle = None
-
-    def __getattr__(self, name: str) -> Any:
-        if name.startswith("_"):
-            raise AttributeError(name)
-        if self._handle is None:
-            factory = self._factory
-            if factory is None:
-                from ..tool_wait import board_actor as factory
-            self._handle = factory(self.learner_id)
-        return getattr(self._handle, name)
+# Moved to the core (decoupling 3.5); same object re-exported.
+from ..tool_wait import LazyBoardActor  # noqa: E402,F401

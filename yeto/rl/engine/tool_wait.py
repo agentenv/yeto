@@ -475,3 +475,26 @@ def board_actor(learner_id: int, *, namespace: str | None = None) -> Any:
         namespace=namespace,
         get_if_exists=True,
     ).remote()
+
+
+# Island board handle (moved from miles_adapter.elastic_wiring, decoupling 3.5).
+class LazyBoardActor:
+    """The island's named ``ToolWaitBoard`` actor, looked up/created on first use
+    (``tool_wait.board_actor``): the elastic wiring is built before Ray is
+    connected. Attribute access forwards to the actor handle, so
+    ``tool_wait.read_tool_wait`` works on it unchanged."""
+
+    def __init__(self, learner_id: int, *, factory: Any = None) -> None:
+        self.learner_id = int(learner_id)
+        self._factory = factory
+        self._handle = None
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        if self._handle is None:
+            factory = self._factory
+            if factory is None:
+                factory = board_actor
+            self._handle = factory(self.learner_id)
+        return getattr(self._handle, name)

@@ -1,0 +1,417 @@
+{
+ "filters.bounded_nonzero_reward_std": [
+  {
+   "decisions": 1,
+   "keep": true,
+   "reason": null,
+   "state": {
+    "forced": 0,
+    "rejections": 0,
+    "rollout_id": 1
+   }
+  },
+  {
+   "decisions": 2,
+   "keep": false,
+   "reason": "zero_std_0.0",
+   "state": {
+    "forced": 0,
+    "rejections": 1,
+    "rollout_id": 1
+   }
+  },
+  {
+   "decisions": 3,
+   "keep": false,
+   "reason": "zero_std_1.0",
+   "state": {
+    "forced": 0,
+    "rejections": 2,
+    "rollout_id": 1
+   }
+  },
+  {
+   "decisions": 3,
+   "keep": false,
+   "reason": "zero_std_0.0",
+   "state": {
+    "forced": 0,
+    "rejections": 2,
+    "rollout_id": 1
+   }
+  },
+  {
+   "decisions": 4,
+   "keep": true,
+   "reason": "bounded_fallback_after_2_replacements",
+   "state": {
+    "forced": 1,
+    "rejections": 2,
+    "rollout_id": 1
+   }
+  },
+  {
+   "decisions": 5,
+   "keep": true,
+   "reason": "bounded_fallback_after_2_replacements",
+   "state": {
+    "forced": 2,
+    "rejections": 2,
+    "rollout_id": 1
+   }
+  },
+  {
+   "decisions": 1,
+   "keep": false,
+   "reason": "zero_std_0.0",
+   "state": {
+    "forced": 0,
+    "rejections": 1,
+    "rollout_id": 2
+   }
+  },
+  {
+   "decisions": 2,
+   "keep": false,
+   "reason": "zero_std_0.0",
+   "state": {
+    "forced": 0,
+    "rejections": 2,
+    "rollout_id": 2
+   }
+  },
+  {
+   "decisions": 1,
+   "keep": true,
+   "reason": "bounded_fallback_after_0_replacements",
+   "state": {
+    "forced": 1,
+    "rejections": 0,
+    "rollout_id": 3
+   }
+  },
+  {
+   "decisions": 2,
+   "keep": true,
+   "reason": "bounded_fallback_after_0_replacements",
+   "state": {
+    "forced": 2,
+    "rejections": 0,
+    "rollout_id": 3
+   }
+  },
+  {
+   "decisions": 3,
+   "keep": true,
+   "reason": "bounded_fallback_after_0_replacements",
+   "state": {
+    "forced": 3,
+    "rejections": 0,
+    "rollout_id": 3
+   }
+  }
+ ],
+ "gdpo_reward": [
+  {
+   "entry": "reward_func",
+   "metadata": {
+    "success": true,
+    "yeto_reward_components": {
+     "correctness": 1.0,
+     "format": 1.0
+    }
+   },
+   "status": "completed",
+   "value": 1.0
+  },
+  {
+   "entry": "correctness_reward",
+   "metadata": {
+    "success": true
+   },
+   "status": "completed",
+   "value": 1.0
+  },
+  {
+   "entry": "components",
+   "value": {
+    "correctness": 1.0,
+    "format": 1.0
+   }
+  },
+  {
+   "entry": "reward_func",
+   "metadata": {
+    "success": false,
+    "yeto_reward_components": {
+     "correctness": 0.0,
+     "format": 1.0
+    }
+   },
+   "status": "completed",
+   "value": 0.0
+  },
+  {
+   "entry": "correctness_reward",
+   "metadata": {
+    "success": false
+   },
+   "status": "completed",
+   "value": 0.0
+  },
+  {
+   "entry": "components",
+   "value": {
+    "correctness": 0.0,
+    "format": 1.0
+   }
+  },
+  {
+   "entry": "reward_func",
+   "metadata": {
+    "keep": 2,
+    "success": false,
+    "yeto_reward_components": {
+     "correctness": 0.0,
+     "format": 0.0
+    }
+   },
+   "status": "completed",
+   "value": 0.0
+  },
+  {
+   "entry": "correctness_reward",
+   "metadata": {
+    "keep": 2,
+    "success": false
+   },
+   "status": "completed",
+   "value": 0.0
+  },
+  {
+   "entry": "components",
+   "value": {
+    "correctness": 0.0,
+    "format": 0.0
+   }
+  },
+  {
+   "entry": "reward_func",
+   "metadata": {
+    "success": true,
+    "yeto_reward_components": {
+     "correctness": 1.0,
+     "format": 1.0
+    }
+   },
+   "status": "completed",
+   "value": 1.0
+  },
+  {
+   "entry": "correctness_reward",
+   "metadata": {
+    "success": true
+   },
+   "status": "completed",
+   "value": 1.0
+  },
+  {
+   "entry": "components",
+   "value": {
+    "correctness": 1.0,
+    "format": 1.0
+   }
+  },
+  {
+   "entry": "reward_func",
+   "metadata": {
+    "success": false,
+    "yeto_reward_components": {
+     "correctness": 0.0,
+     "format": 0.0
+    }
+   },
+   "status": "completed",
+   "value": 0.0
+  },
+  {
+   "entry": "correctness_reward",
+   "metadata": {
+    "success": false
+   },
+   "status": "completed",
+   "value": 0.0
+  },
+  {
+   "entry": "components",
+   "value": {
+    "correctness": 0.0,
+    "format": 0.0
+   }
+  }
+ ],
+ "gsm8k_reward.score": [
+  {
+   "metadata": {
+    "success": true
+   },
+   "status": "completed",
+   "value": 1.0
+  },
+  {
+   "metadata": {
+    "success": true
+   },
+   "status": "completed",
+   "value": 1.0
+  },
+  {
+   "metadata": {
+    "keep": 2,
+    "success": false
+   },
+   "status": "completed",
+   "value": 0.0
+  },
+  {
+   "metadata": {
+    "success": false
+   },
+   "status": "completed",
+   "value": 0.0
+  },
+  {
+   "metadata": {
+    "success": true
+   },
+   "status": "completed",
+   "value": 1.0
+  },
+  {
+   "metadata": {
+    "keep": 5,
+    "success": false
+   },
+   "status": "completed",
+   "value": 0.0
+  },
+  {
+   "metadata": {
+    "success": false
+   },
+   "status": "completed",
+   "value": 0.0
+  }
+ ],
+ "length_reward.reward_func": [
+  {
+   "metadata": null,
+   "status": "completed",
+   "value": 0.99755859375
+  },
+  {
+   "metadata": {},
+   "status": "truncated",
+   "value": 0.0
+  },
+  {
+   "metadata": {
+    "keep": 2
+   },
+   "status": "aborted",
+   "value": 0.353515625
+  },
+  {
+   "metadata": null,
+   "status": "completed",
+   "value": 1.0
+  },
+  {
+   "metadata": {},
+   "status": null,
+   "value": 0.5
+  },
+  {
+   "metadata": {
+    "keep": 5
+   },
+   "status": "completed",
+   "value": 0.5
+  }
+ ],
+ "math_reward.reward_func": [
+  {
+   "metadata": {
+    "success": true
+   },
+   "status": "completed",
+   "value": 1.0
+  },
+  {
+   "metadata": {
+    "success": true
+   },
+   "status": "completed",
+   "value": 1.0
+  },
+  {
+   "metadata": {
+    "keep": 2,
+    "success": true
+   },
+   "status": "completed",
+   "value": 1.0
+  },
+  {
+   "metadata": {
+    "success": false
+   },
+   "status": "completed",
+   "value": 0.0
+  },
+  {
+   "metadata": {
+    "success": true
+   },
+   "status": "completed",
+   "value": 1.0
+  },
+  {
+   "metadata": {
+    "keep": 5,
+    "success": true
+   },
+   "status": "completed",
+   "value": 1.0
+  },
+  {
+   "metadata": {
+    "success": false
+   },
+   "status": "completed",
+   "value": 0.0
+  },
+  {
+   "metadata": {
+    "success": false
+   },
+   "status": "completed",
+   "value": 0.0
+  },
+  {
+   "metadata": {
+    "keep": 8,
+    "success": false
+   },
+   "status": "completed",
+   "value": 0.0
+  },
+  {
+   "metadata": {
+    "success": true
+   },
+   "status": "completed",
+   "value": 1.0
+  }
+ ]
+}
