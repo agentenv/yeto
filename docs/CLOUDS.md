@@ -332,7 +332,9 @@ This entry records the cross-cloud result the task asks for: an 8xH100
 single-container Modal RL island, two or more full sync rounds with the
 island in every round's responders, the WAN cost measured, and the
 `--pipeline` conclusion. Whether to re-run it once the gradient bug is
-fixed is an open decision recorded in `fix-rl-lora-grad-hook/design.md`.
+fixed was an open decision in `fix-rl-lora-grad-hook/design.md`;
+user decision 2026-10-08: no 8-GPU re-run - repeated later runs already
+show a live gradient signal, so task 8.4 stays checked as recorded.
 
 **`yeto shape` with real credentials, 2026-09-23 (task 8.5).**
 `yeto shape --clouds <cloud> --model qwen35-9b --budget 40`, spot. Checked

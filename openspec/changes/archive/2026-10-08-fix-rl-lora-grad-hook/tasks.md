@@ -32,4 +32,5 @@
 
 ## 6. 决策点
 
-- [ ] 6.1 与用户确认 `design.md` 的 Open Question：修复后是否要在 8 卡 H100 上重跑任务 8.4，还是接受单卡确认加已记录的基础设施结果。验证：结论记入 `docs/CLOUDS.md`，并据此决定是否勾选 8.4
+- [x] 6.1 与用户确认 `design.md` 的 Open Question：修复后是否要在 8 卡 H100 上重跑任务 8.4，还是接受单卡确认加已记录的基础设施结果。验证：结论记入 `docs/CLOUDS.md`，并据此决定是否勾选 8.4
+  - 用户裁定 2026-10-08：多次运行已有信号，不再 8 卡重跑。任务 8.4（在 add-nebius-verda-modal-clouds 的 tasks 中）原已勾选，维持勾选；结论已写入 `docs/CLOUDS.md`。

@@ -18,6 +18,7 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -243,6 +244,32 @@ impl Shared {
         })
     }
 
+    /// Bandwidth record for one tensor frame (ELASTIC_INIT / DELTA_TENSOR
+    /// received, ELASTIC_BASE sent): frame bytes incl. the 13-byte header
+    /// and wall seconds from header to last payload byte. Written straight
+    /// to the event tape as `kind:"transfer"` (not part of the coordinator
+    /// tape, so checkpoints and ledger golden cases are unchanged).
+    fn record_transfer(&mut self, direction: &str, msg_type: u8, island: Option<u32>, bytes: u64, seconds: f64) -> Result<()> {
+        let name = match msg_type {
+            MSG_ELASTIC_INIT => "elastic_init",
+            MSG_DELTA_TENSOR => "delta_tensor",
+            MSG_ELASTIC_BASE => "elastic_base",
+            _ => "other",
+        };
+        let island_json = island.map(|i| i.to_string()).unwrap_or_else(|| "null".into());
+        let secs = if seconds.is_finite() { format!("{seconds:?}") } else { "null".into() };
+        let line = format!(
+            "{{\"kind\":\"transfer\",\"syncer_epoch\":{},\"direction\":\"{direction}\",\"msg\":\"{name}\",\"island_id\":{island_json},\"bytes\":{bytes},\"seconds\":{secs},\"outer_version\":{}}}",
+            self.coord.syncer_epoch, self.coord.outer_version
+        );
+        if let Some(f) = self.tape.as_mut() {
+            writeln!(f, "{line}")?;
+            f.flush()?;
+        }
+        info!(direction, msg = name, island = ?island, bytes, seconds, "elastic transfer");
+        Ok(())
+    }
+
     /// Forget updates from islands that are no longer members.
     fn purge_departed(&mut self) {
         let coord = &self.coord;
@@ -364,6 +391,22 @@ impl Shared {
     }
 }
 
+fn island_of(cell: &AtomicU64) -> Option<u32> {
+    u32::try_from(cell.load(Ordering::Relaxed)).ok()
+}
+
+fn msg_island(m: &ElasticMsg) -> Option<u32> {
+    match m {
+        ElasticMsg::Join { island_id, .. }
+        | ElasticMsg::Leave { island_id, .. }
+        | ElasticMsg::LeaseHeartbeat { island_id, .. }
+        | ElasticMsg::DeltaReady { island_id, .. }
+        | ElasticMsg::ElasticInit { island_id, .. }
+        | ElasticMsg::DeltaTensor { island_id, .. } => Some(*island_id),
+        _ => None,
+    }
+}
+
 async fn send(wr: &mut tokio::net::tcp::OwnedWriteHalf, t: u8, p: &[u8]) -> Result<()> {
     let mut header = [0u8; 13];
     header[0..4].copy_from_slice(&MAGIC.to_le_bytes());
@@ -383,19 +426,32 @@ async fn serve_conn(
 ) -> Result<()> {
     let (mut rd, mut wr) = stream.into_split();
     let (tx, mut rx) = mpsc::unbounded_channel::<(u8, Vec<u8>)>();
+    // Island on this connection, learned from the first decoded message.
+    let island = Arc::new(AtomicU64::new(u64::MAX));
+    let (w_shared, w_island) = (shared.clone(), island.clone());
     let writer = tokio::spawn(async move {
         while let Some((t, p)) = rx.recv().await {
+            let started = Instant::now();
             if send(&mut wr, t, &p).await.is_err() {
                 break;
+            }
+            if t == MSG_ELASTIC_BASE {
+                let secs = started.elapsed().as_secs_f64();
+                let isl = island_of(&w_island);
+                let _ = w_shared.lock().unwrap().record_transfer("send", t, isl, p.len() as u64 + 13, secs);
             }
         }
     });
     let result = async {
         loop {
-            let frame = match read_frame_limited(&mut rd, |t| match t {
-                MSG_JOIN | MSG_LEAVE | MSG_LEASE_HEARTBEAT | MSG_SAMPLE_INDEX | MSG_DELTA_READY
-                | MSG_ELASTIC_INIT | MSG_DELTA_TENSOR => Ok(MAX_ELASTIC_FRAME),
-                other => bail!("message type {other} is not accepted by the elastic server"),
+            let mut header_at: Option<Instant> = None;
+            let frame = match read_frame_limited(&mut rd, |t| {
+                header_at = Some(Instant::now());
+                match t {
+                    MSG_JOIN | MSG_LEAVE | MSG_LEASE_HEARTBEAT | MSG_SAMPLE_INDEX | MSG_DELTA_READY
+                    | MSG_ELASTIC_INIT | MSG_DELTA_TENSOR => Ok(MAX_ELASTIC_FRAME),
+                    other => bail!("message type {other} is not accepted by the elastic server"),
+                }
             })
             .await
             {
@@ -411,8 +467,16 @@ async fn serve_conn(
                 }
             };
             let now = epoch0.elapsed().as_secs_f64();
+            let recv_secs = header_at.map(|t| t.elapsed().as_secs_f64());
             let outcome = ElasticMsg::decode(&key, frame.msg_type, &frame.payload).and_then(|msg| {
+                if let Some(i) = msg_island(&msg) {
+                    island.store(u64::from(i), Ordering::Relaxed);
+                }
                 let mut g = shared.lock().unwrap();
+                if matches!(frame.msg_type, MSG_ELASTIC_INIT | MSG_DELTA_TENSOR) {
+                    let bytes = frame.payload.len() as u64 + 13;
+                    g.record_transfer("recv", frame.msg_type, island_of(&island), bytes, recv_secs.unwrap_or(f64::NAN))?;
+                }
                 let r = g.handle(msg, now, &tx);
                 g.flush_tape()?;
                 r
@@ -741,6 +805,70 @@ mod tests {
         // the round its weight must be 0.
         assert!(!steps[2].contains("[4,2,100.0]"), "{}", steps[2]);
         assert!(!steps[2].contains("[3,"), "expired island must not be merged: {}", steps[2]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Bandwidth records: every ELASTIC_INIT / DELTA_TENSOR received and
+    /// ELASTIC_BASE sent lands on the event tape as kind "transfer" with the
+    /// island, the exact frame bytes and a finite duration.
+    #[tokio::test]
+    async fn tensor_frames_record_transfer_bytes_and_seconds() {
+        let dir = std::env::temp_dir().join(format!("elastic-xfer-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tape = dir.join("tape.jsonl");
+        let _ = std::fs::remove_file(&tape);
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(run(
+            listener,
+            ElasticServerConfig {
+                params: ElasticParams { quorum_theta: 0.6, carry_gamma: 0.5, soft_deadline_s: 60, q_min: 1, max_carry_lag: 2 },
+                key: KEY.to_vec(),
+                syncer_epoch: 3,
+                lease_s: 30.0,
+                total_steps: 1,
+                event_tape: Some(tape.clone()),
+                tick: Duration::from_millis(20),
+                outer_lr: 1.0,
+                outer_momentum: 0.0,
+                final_grace: Duration::ZERO,
+                checkpoint_path: None,
+                checkpoint_every: 0,
+                resume: false,
+            },
+        ));
+        let mut a = Island::connect(port, 5, 3).await;
+        a.join().await;
+        a.init(vec![0.0; 4]).await;
+        assert_eq!(a.next_base().await.0, 0);
+        a.update(0, 1.0).await;
+        assert_eq!(a.next_base().await.0, 1);
+        wait_for(&tape, "\"msg\":\"elastic_base\"", 2).await;
+        drop(a);
+        let _ = tokio::time::timeout(Duration::from_secs(5), server).await;
+
+        let frame_len = |m: ElasticMsg| m.encode(KEY).1.len() as u64 + 13;
+        let init_bytes = frame_len(ElasticMsg::ElasticInit { syncer_epoch: 3, island_id: 5, params: vec![0.0; 4] });
+        let delta_bytes = frame_len(ElasticMsg::DeltaTensor {
+            syncer_epoch: 3, island_id: 5, base_version: 0, c_tokens: 10, c_steps: 1, update: vec![1.0; 4],
+        });
+        let lines: Vec<String> = tape_lines(&tape).into_iter().filter(|l| l.contains("\"kind\":\"transfer\"")).collect();
+        let find = |dir: &str, msg: &str| -> Vec<String> {
+            lines.iter().filter(|l| l.contains(&format!("\"direction\":\"{dir}\",\"msg\":\"{msg}\""))).cloned().collect()
+        };
+        let init = find("recv", "elastic_init");
+        assert_eq!(init.len(), 1, "{lines:#?}");
+        assert!(init[0].contains(&format!("\"bytes\":{init_bytes},")), "{}", init[0]);
+        let delta = find("recv", "delta_tensor");
+        assert_eq!(delta.len(), 1, "{lines:#?}");
+        assert!(delta[0].contains(&format!("\"bytes\":{delta_bytes},")), "{}", delta[0]);
+        let bases = find("send", "elastic_base");
+        assert!(bases.len() >= 2, "{lines:#?}");
+        for l in init.iter().chain(&delta).chain(&bases) {
+            assert!(l.contains("\"island_id\":5,"), "{l}");
+            assert!(l.contains("\"syncer_epoch\":3,"), "{l}");
+            assert!(!l.contains("\"seconds\":null"), "{l}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
