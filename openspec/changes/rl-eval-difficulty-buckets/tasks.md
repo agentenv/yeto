@@ -27,7 +27,7 @@
 - [ ] 4.1 `rollout_meta_hook.build_metadata` 按 `metadata.difficulty` 分组汇总，写 `batch_summary_by_bucket`；CPU 单测
 - [ ] 4.2 真机核对开销（用 `rl_rollout` 时间戳），校正 design D5
 
-## 5. 评测岛（便宜的可中断卡，D11）
+## 5. 评测岛（第一版只用 Modal，D11）
 
 - [ ] 5.1 新增"只推理的评测岛"角色：启动器与岛账本区分它与训练岛（不进合并池、不交增量）
 - [ ] 5.2 训练驱动在评测版本把 adapter + manifest 写到持久存储并登记待评任务，不等评测
@@ -35,12 +35,11 @@
 - [ ] 5.4 逐条结果按 (`policy_version`, `task_id`, `trial`) 追加写持久存储；重启后跳过已完成、去重；被回收的进行中轨迹记 `preempted` 不计入
 - [ ] 5.5 版本排队（不丢弃），事件记队列长度、滞后轮数、`eval/preemptions`
 - [ ] 5.6 CPU 单测：模拟回收续跑结果与一次跑完逐位一致
-- [ ] 5.7 评测岛选云调度（D11.6）：复用 `providers.NebiusSignals`/`VerdaSignals`/`AwsProviders` 探针与 `launch_with_verda_candidates`，按价格+准备成本排序、失败换下一家、兜底 Modal；写 `rl_eval_island` 事件；CPU 单测用假探针
-- [ ] 5.8 持久存储（D11.7）：评测岛启动时主动下载 adapter 并校验 sha256，逐条结果追加写；存储方案与 rl-resume-from-checkpoint 对齐后定稿
+- [ ] 5.7 评测岛起岛（D11.6）：第一版只在 Modal 起 8×H200 评测岛，被抢占后在 Modal 重起续跑；写 `rl_eval_island` 事件；CPU 单测用假 Modal 客户端。多云 spot 选云为后续选项，归 rl-infra-spec 第 8 节
+- [ ] 5.8 持久存储（D11.7，已定 Modal Volume）：训练驱动在评测版本把 adapter + manifest 写入 Modal Volume（训练岛不在 Modal 时经 Modal API 上传），评测岛挂载后校验 sha256 与 policy_token，逐条结果追加写
 
 ## 6. 上卡准备与对接
 
 - [ ] 6.1 训练脚本加评测参数；复核文档写 D7 成本估计并台账预登记
 - [ ] 6.2 首次真机后用 `eval/wall_s` 校正 D7
 - [ ] 6.3 D10 接口需求交 WP4
-- [ ] 6.4 （可选，待用户定）数学固定评测集（D9）
