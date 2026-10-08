@@ -377,3 +377,57 @@ def test_ray_cpu_guard_only_acts_inside_modal(monkeypatch):
     assert out["skipped"].startswith("not a Modal container") and "restart" not in out
     monkeypatch.setattr(island_entry, "_ray_resources", lambda address: {"CPU": 64.0, "GPU": 1.0})
     assert "skipped" not in island_entry.ensure_ray_cpus() and "restart" not in island_entry.ensure_ray_cpus()
+
+
+# --- S17 N16: data cursor of a relaunched verl island ----------------------------
+class _FakeVerlTrainer:
+    """``_fetch_one_gen_batch`` as in verl acad9875: gen_batch_size prompts per call,
+    re-iterating the dataset at its end."""
+
+    def __init__(self, n_prompts=10, gen_batch_size=2):
+        from types import SimpleNamespace
+
+        self.config = SimpleNamespace(data={"gen_batch_size": gen_batch_size, "train_batch_size": 4})
+        self.n, self.gbs, self.pos, self.fetched = n_prompts, gen_batch_size, 0, []
+
+    def _fetch_one_gen_batch(self):
+        if self.pos + self.gbs > self.n:
+            self.pos = 0  # StopIteration -> new iter
+        batch = list(range(self.pos, self.pos + self.gbs))
+        self.pos += self.gbs
+        self.fetched.append(batch)
+        return batch
+
+
+def test_verl_data_cursor_counts_and_seeks_whole_rounds():
+    from yeto.rl.adapters.verl.data_cursor import VerlDataCursor
+    from yeto.rl.engine.bridges import whole_round_restart_cursor
+
+    straight = _FakeVerlTrainer()
+    for _ in range(6):  # rounds 0..2, 4 prompts each
+        straight._fetch_one_gen_batch()
+    relaunched = _FakeVerlTrainer()
+    cur = VerlDataCursor(relaunched)
+    assert cur.cursor() == {"sample_offset": 0}
+    wanted = whole_round_restart_cursor(cur.cursor(), 2, 4)  # rejoined at v2
+    assert cur.seek(wanted) == {"sample_offset": 8}
+    relaunched._fetch_one_gen_batch(); relaunched._fetch_one_gen_batch()  # round 2
+    assert relaunched.fetched[-2:] == straight.fetched[-2:]  # same prompts as no restart
+    assert relaunched.fetched[-2:] != relaunched.fetched[:2]  # not round 0 again
+    assert cur.cursor() == {"sample_offset": 12}
+
+
+def test_verl_data_cursor_refuses_what_it_cannot_honour():
+    from yeto.rl.adapters.verl.data_cursor import VerlDataCursor
+
+    trainer = _FakeVerlTrainer()
+    cur = VerlDataCursor(trainer)
+    with pytest.raises(ValueError, match="whole number"):
+        cur.seek({"sample_offset": 3})
+    with pytest.raises(ValueError, match="only"):
+        cur.seek({"sample_offset": 2, "epoch_id": 0})
+    cur.seek({"sample_offset": 4})
+    with pytest.raises(ValueError, match="move back"):
+        cur.seek({"sample_offset": 2})
+    with pytest.raises(RuntimeError, match="twice"):
+        VerlDataCursor(trainer)

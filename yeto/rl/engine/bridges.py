@@ -118,6 +118,33 @@ class LocalOnlySync:
         pass
 
 
+_FRESH_CURSOR = {"sample_offset": 0, "epoch_id": 0, "sample_group_index": 0, "sample_index": 0}
+
+
+def whole_round_restart_cursor(current: Mapping[str, int] | None, start_rollout_id: int,
+                               groups_per_round: int | None) -> dict[str, int] | None:
+    """Data cursor for an island that (re)starts at ``start_rollout_id`` > 0 with no
+    recorded cursor (empty or absent batch ledger, e.g. a fresh container): skip
+    ``start * groups_per_round`` groups from the data source's fresh position (same
+    shift as ``cut_injection.write_shifted_dataset_state``). ``current`` is the
+    pool's cursor as read now (None -> the Miles-shaped fresh cursor); a pool's
+    cursor must carry ``sample_offset`` (groups drawn so far), and
+    ``sample_group_index`` moves with it when present. None when unknown.
+
+    Shared by strict and elastic sync (S17 N16: strict had none, so a verl island
+    relaunched at v2 re-drew its rollout-0 prompts)."""
+    if not groups_per_round or start_rollout_id <= 0:
+        return None
+    cur = {k: int(v) for k, v in dict(current or {}).items()} or dict(_FRESH_CURSOR)
+    if "sample_offset" not in cur:
+        return None
+    groups = int(start_rollout_id) * int(groups_per_round)
+    cur["sample_offset"] += groups
+    if "sample_group_index" in cur:
+        cur["sample_group_index"] += groups
+    return cur
+
+
 # ---------------------------------------------------------------------------
 # Strict-avg
 # ---------------------------------------------------------------------------
@@ -239,6 +266,13 @@ class StrictAvgSync:
         if not finished:
             self.permit = self.bridge.wait_for_round()
         return SyncStart(state, version, finished)
+
+    def restart_cursor_fallback(self, current: Mapping[str, int] | None,
+                                start_rollout_id: int) -> dict[str, int] | None:
+        """S17 N16: a strict island relaunched at v > 0 without a ledger cursor (new
+        container, or no ``--rl-elastic`` ledger) must not re-draw rounds 0..v-1."""
+        return whole_round_restart_cursor(current, start_rollout_id,
+                                          getattr(self.config, "groups_per_round", None))
 
     def is_final_round(self, driver, *, rollout_id: int) -> bool:
         # Strict: local round ``rollout_id + 1`` is the last iff it reaches
@@ -478,17 +512,8 @@ class ElasticAvgSync:
     def restart_cursor_fallback(self, current: Mapping[str, int] | None,
                                 start_rollout_id: int) -> dict[str, int] | None:
         """0.21: the ledger has no cursor for ``start_rollout_id`` (e.g. a fresh
-        machine joining at base_version > 0): skip ``start * groups_per_round``
-        groups from the fresh data source position (same shift as
-        cut_injection.write_shifted_dataset_state). None when unknown."""
-        if not self.groups_per_round or start_rollout_id <= 0:
-            return None
-        cur = {"sample_offset": 0, "epoch_id": 0, "sample_group_index": 0, "sample_index": 0}
-        cur.update({k: int(v) for k, v in dict(current or {}).items() if k in cur})
-        groups = int(start_rollout_id) * int(self.groups_per_round)
-        cur["sample_offset"] += groups
-        cur["sample_group_index"] += groups
-        return cur
+        machine joining at base_version > 0): see :func:`whole_round_restart_cursor`."""
+        return whole_round_restart_cursor(current, start_rollout_id, self.groups_per_round)
 
     def is_final_round(self, driver, *, rollout_id: int) -> bool:
         return rollout_id + 1 >= self.config.global_rounds
@@ -684,6 +709,9 @@ class DualStrictAvgSync:
                 f"actor channel starts at round {start.rollout_id}, critic channel at {critic.rollout_id}")
         self._remember(driver, start.rollout_id)
         return start
+
+    def restart_cursor_fallback(self, current, start_rollout_id: int):
+        return self.actor.restart_cursor_fallback(current, start_rollout_id)
 
     def is_final_round(self, driver, *, rollout_id: int) -> bool:
         return self.actor.is_final_round(driver, rollout_id=rollout_id)

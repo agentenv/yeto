@@ -1484,9 +1484,13 @@ class IslandDriver:
         cursor = self.ledger.restart_cursor(start_rollout_id) if self.ledger is not None else None
         seek = getattr(self.rollout, "seek_data_cursor", None)
         fallback = getattr(self.sync, "restart_cursor_fallback", None)
-        if cursor is None and callable(seek) and callable(fallback):
-            # 0.21 (elastic only): no recorded cursor (empty ledger, joined at
-            # base_version > 0) -> advance by whole rounds from the fresh position.
+        # The whole-round fallback is for an island with NO record of rollout v-1
+        # (empty/absent ledger: fresh container, joined at base_version > 0). A
+        # ledger that recorded v-1 without a cursor stays fail-closed below.
+        unrecorded = self.ledger is None or self.ledger.state(start_rollout_id - 1) is None
+        if cursor is None and unrecorded and callable(seek) and callable(fallback):
+            # 0.21 (elastic) / S17 N16 (strict): advance by whole rounds from the
+            # fresh position.
             read = getattr(self.rollout, "data_cursor", None)
             wanted = fallback(read() if callable(read) else None, start_rollout_id)
             if wanted is not None:
@@ -1565,7 +1569,8 @@ class IslandDriver:
                     elif callable(getattr(self.sync, "restart_cursor_fallback", None)):
                         # 0.23: an elastic island without --rl-elastic has no batch
                         # ledger, yet must still not re-draw rounds below base_version
-                        # (1b: rollouts 3, 4 re-trained rollouts 0, 1).
+                        # (1b: rollouts 3, 4 re-trained rollouts 0, 1). S17 N16: same
+                        # for a strict island relaunched at v > 0 (verl V2 island 1).
                         self._restore_data_cursor(start.rollout_id)
                     state = start.state
                     self.publish(state, rollout_id=start.rollout_id)

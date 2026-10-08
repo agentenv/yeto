@@ -169,7 +169,19 @@ class VerlIsland:
 # ----------------------------------------------------------------------------- ports
 class VerlRolloutPool:
     def __init__(self, island: VerlIsland):
+        from .data_cursor import VerlDataCursor
+
         self.island = island
+        # S17 N16: lets the driver skip whole rounds when the island (re)starts at v > 0
+        self._cursor = VerlDataCursor(island.trainer)
+
+    def data_cursor(self) -> dict[str, int]:
+        return self._cursor.cursor()
+
+    def seek_data_cursor(self, cursor) -> dict[str, int]:
+        landed = self._cursor.seek(cursor)
+        self.island.emit("rl_verl_data_seek", data_cursor=landed)
+        return landed
 
     def generate(self, rollout_id: int, *, expected_policy_version: str | None = None) -> RolloutBatchHandle:
         import numpy as np
@@ -235,11 +247,12 @@ class VerlRolloutPool:
             "samples": len(uids), "reward_mean": float(np.mean(rewards)) if rewards else None,
             "gen_seconds": gen_seconds, "expected_policy_version": expected_policy_version,
             "prompts_sha256": prompt_sha, "sample_submit_global_steps": gen_steps,
-            "trainer_global_step": t.global_steps, "rewards": rewards, "uids": uids})
+            "trainer_global_step": t.global_steps, "rewards": rewards, "uids": uids,
+            "data_cursor": self.data_cursor()})
         return RolloutBatchHandle(
             rollout_id=rollout_id, policy_version=version, policy_hash=digest,
             groups=tuple(metas), completed=len(metas), aborted=0, payload=batch,
-            batch_summary=summary,
+            batch_summary=summary, data_cursor=self.data_cursor(),
         )
 
     def abort(self) -> None:
