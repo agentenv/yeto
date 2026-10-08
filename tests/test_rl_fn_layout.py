@@ -187,7 +187,15 @@ def test_receipt_layout_reads_learned_hash_after_first_sync_start_export():
     from yeto.rl.engine import bridges
     from yeto.rl.engine.miles_adapter import entry
 
-    assert "driver.export_local()" in inspect.getsource(bridges.LocalOnlySync.start)
+    # rl-publish-fastpath: start goes through _local_state, which exports (digest
+    # export or full export); both learn the layout hash on the first export.
+    assert "_local_state(driver" in inspect.getsource(bridges.LocalOnlySync.start)
+    local_state = inspect.getsource(bridges._local_state)
+    assert "export_local_resident" in local_state and "driver.export_local()" in local_state
+    from yeto.rl.engine.miles_adapter import state as miles_state
+
+    assert "self._expected_layout_hash = layout_hash" in inspect.getsource(
+        miles_state.MilesPolicyState._digest_result)
     src = inspect.getsource(entry)
     assert "parameter_layout_hash=lambda: policy_state.layout_hash" in src
     assert "parameter_layout_hash=lambda: layout_hash" not in src

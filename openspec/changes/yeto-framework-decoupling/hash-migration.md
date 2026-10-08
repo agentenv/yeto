@@ -39,3 +39,18 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
 - 同步更新的样本：`tests/golden/decoupling/seq_adv_maxrl.json`、`examples/rl_algorithms/dapo-like.json`（插件源码哈希）、`openspec/changes/rl-algo-seq-and-adv/examples/{maxrl,mapo,gdpo}.json`（由该 change 的 `make_examples.py` 重新生成）。`openspec/changes/rl-algo-seq-and-adv/evidence/g3/` 下的历史证据保留旧哈希不改。
 - 旧 GPU 证据：算法规格（除插件源码哈希外）不变，按 D6 以"CPU 逐位一致 + 本表"引用 `rl-algo-seq-and-adv/evidence/g3/rerun/`；新哈希的真机证据未取得，由下一次本来要开的卡顺带取得。
 - 预告：任务 4.11（原 3.4）若按 design D11 实施，`seq_adv.py` 还会再改一次（`rollout_meta_hook` 调用改走核心接口），seq_adv_maxrl 与 codex_harness（`codex_openenv_subprocess_agent_function.run` 是插件）的哈希届时再变，并在本表追加。
+
+## 合入 main 后的标准样本更新（S17 合并，2026-10-08）
+
+去耦合叠层（#118→#119→#120→#126）合进 main 后，main 上 `tests/test_decoupling_golden.py` 8 个配置样本不再一致（假引擎 tape 样本不变）。原因不是去耦合改了代码，而是阶段 0 分支（809b2cbb）的起点早于 main 上已合入的两个 PR，录样本时没包含它们的改动：
+
+| 变化字段 | 原因（已在 main 上的提交） | 旧值 | 新值 |
+|---|---|---|---|
+| `plugins`：`yeto/rl/engine/miles_adapter/rollout_meta_hook.py` 的 3 个入口（全部 8 个配置） | #116 codex/TB2 修复（`2d208ae5`、`60b2b8e1`、`9bd2a2ec`：tape 带 Codex 退出状态、结束原因、判分输出尾部） | `82c1c88c…` | `5b4d802c…` |
+| `plugins`：`codex_openenv_subprocess_agent_function.run`（仅 codex_harness） | #116（`ba7f95e7`：TB2 任务提示改发 instruction.md） | `7bd38698…` | `dab8efda…` |
+| `ports_runtime_fingerprint`（全部 8 个配置） | #121 方案 A 镜像钉：`MILES_NEXT_COMMIT` 由 `c35702ee…` 改为 `8bc52237…`，该指纹 = Miles 提交 + Miles 命令行 | 各配置旧值 | 各配置新值 |
+
+- `algorithm_sha256`、契约哈希、Miles 命令行均未变（上表 rollout_meta_hook / codex agent 函数是命令行插件，不进 `AlgorithmSpec.sha256()`）。
+- 核对：把 `MILES_NEXT_COMMIT` 临时改回 `c35702ee…` 重算，8 个配置的 `ports_runtime_fingerprint` 与旧样本逐一相等，确认指纹变化只来自 Miles 提交钉。
+- #124（发布提速）rebase 到 main 之后，与 main 重算出的样本逐字节相同，#124 自身不改任何标准样本。
+- 已用 `python tests/decoupling_golden.py --write` 重新生成 8 个配置样本。

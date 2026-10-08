@@ -55,6 +55,18 @@ def _at_version(state: CanonicalLoraState, version: int) -> CanonicalLoraState:
     )
 
 
+def _local_state(driver: Any, version: int) -> Any:
+    """rl-publish-fastpath: with no outer sync nothing on the driver reads the tensors,
+    so keep them in the trainer and bring back only the digests; drivers without the
+    fast path get the full export as before."""
+
+    resident = getattr(driver, "export_local_resident", None)
+    state = resident(policy_version=version) if callable(resident) else None
+    if state is not None:
+        return state
+    return TrainableState.from_lora(_at_version(_lora(driver.export_local()), version))
+
+
 # ---------------------------------------------------------------------------
 # No outer sync (single island smoke; task 4.1)
 # ---------------------------------------------------------------------------
@@ -72,8 +84,7 @@ class LocalOnlySync:
     def start(self, driver: IslandDriver) -> SyncStart:
         resumed = self.round_cuts.resume(driver) if self.round_cuts is not None else None
         rollout_id = 0 if resumed is None else int(resumed["next_rollout_id"])
-        state = _at_version(_lora(driver.export_local()), rollout_id)
-        return SyncStart(TrainableState.from_lora(state), rollout_id,
+        return SyncStart(_local_state(driver, rollout_id), rollout_id,
                          finished=rollout_id >= self.num_rollout)
 
     def at_safe_point(self, driver: IslandDriver, *, rollout_id: int) -> None:
@@ -93,11 +104,9 @@ class LocalOnlySync:
         return rollout_id + 1 >= self.num_rollout
 
     def boundary(self, driver, *, rollout_id, stats) -> SyncBoundary:
-        local = _at_version(_lora(driver.export_local()), rollout_id + 1)
+        local = _local_state(driver, rollout_id + 1)
         driver.emit("rl_local_round", **asdict(stats))
-        return SyncBoundary(
-            TrainableState.from_lora(local), stop=rollout_id + 1 >= self.num_rollout
-        )
+        return SyncBoundary(local, stop=rollout_id + 1 >= self.num_rollout)
 
     def published(self, driver, *, rollout_id, policy_hash) -> None:
         pass

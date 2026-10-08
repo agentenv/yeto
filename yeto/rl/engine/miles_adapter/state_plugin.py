@@ -37,6 +37,34 @@ OPTIMIZER_MODES = ("preserve", "reset")
 
 _PLUGIN_MODULE = "yeto.rl.engine.miles_adapter.state_plugin"
 EXPORT_STATE = f"{_PLUGIN_MODULE}.export_state"
+# rl-publish-fastpath: export + hash on the trainer, return only the digests.
+EXPORT_DIGEST = f"{_PLUGIN_MODULE}.export_digest"
+WEIGHTS_VERSION = f"{_PLUGIN_MODULE}.weights_version"
+
+# rl-publish-fastpath D3: version of the weights this trainer process holds.
+# Kept in each trainer process (module state), bumped on every path that writes
+# trainable weights: each optimizer step (wrapped train_one_step), apply_state,
+# cut restore (cut_plugin).  The process id makes a rebuilt / restarted trainer
+# (counter back to 0) never look like the old one.
+_WEIGHTS_PROCESS_ID = __import__("uuid").uuid4().hex
+_WEIGHTS_VERSION = 0
+
+
+def bump_weights_version() -> int:
+    global _WEIGHTS_VERSION
+    _WEIGHTS_VERSION += 1
+    return _WEIGHTS_VERSION
+
+
+def current_weights_version() -> dict[str, Any]:
+    return {"process_id": _WEIGHTS_PROCESS_ID, "version": _WEIGHTS_VERSION}
+
+
+def weights_version(actor: Any) -> dict[str, Any] | None:
+    """Plugin: the main rank's weights version (other ranks None, as export_state)."""
+
+    install_grad_norm_recorder()
+    return current_weights_version() if _is_main_rank(actor) else None
 APPLY_STATE = f"{_PLUGIN_MODULE}.apply_state"
 GRAD_NORM = f"{_PLUGIN_MODULE}.grad_norm"
 APPLIED_LRS = f"{_PLUGIN_MODULE}.applied_lrs"
@@ -450,6 +478,35 @@ def export_state(actor: Any, *, policy_version: int) -> dict[str, Any] | None:
         return _export_state(actor, policy_version=policy_version)
 
 
+def export_digest(
+    actor: Any, *, policy_version: int, base_model_revision: str, lora_config_hash: str,
+) -> dict[str, Any] | None:
+    """rl-publish-fastpath: :func:`export_state` on the trainer, but return only the
+    publication digests (policy tensor hash, payload hash/bytes, specs) instead of
+    the tensors.  The hash definitions are those of ``yeto.rl.core.policy_tensor_hash``
+    and ``publish.payload_digest`` (see ``policy_digest``); only where they run moves."""
+
+    from ..policy_digest import digest_canonical_tensors, layout_hash_of
+
+    import time
+
+    started = time.monotonic()
+    exported = export_state(actor, policy_version=policy_version)
+    export_seconds = round(time.monotonic() - started, 3)
+    if exported is None:
+        return None
+    tensors = exported["tensors"]
+    specs = [(name, tuple(int(d) for d in value.shape)) for name, value in sorted(tensors.items())]
+    digest = digest_canonical_tensors(
+        tensors,
+        base_model_revision=base_model_revision,
+        lora_config_hash=lora_config_hash,
+        layout_hash=layout_hash_of(specs),
+    )
+    return {"policy_version": int(policy_version), "digest": digest.to_wire(),
+            "export_seconds": export_seconds, "weights": current_weights_version()}
+
+
 def is_native_flash_next(actor: Any) -> bool:
     """Qwen3.8-Flash-Next (qwen4_exp) trains through Miles' native LoRA plugin.
 
@@ -775,6 +832,7 @@ def apply_state(
     """
 
     install_grad_norm_recorder()
+    bump_weights_version()  # rl-publish-fastpath: written (or partly) from here on
     with trainer_resident(actor):
         return _apply_state(
             actor,
@@ -881,7 +939,10 @@ def install_grad_norm_recorder() -> bool:
         _record_applied_lr(original, args, kwargs)
         _arm_grad_audit(original, args, kwargs)
         _EV_STATS.clear()
-        result = original(*args, **kwargs)
+        try:
+            result = original(*args, **kwargs)
+        finally:
+            bump_weights_version()  # rl-publish-fastpath: any step may have written weights
         try:
             norm = result[1]
             _STEP_GRAD_NORMS.append(float(norm.item() if hasattr(norm, "item") else norm))
