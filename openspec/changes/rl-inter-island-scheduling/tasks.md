@@ -65,3 +65,8 @@
 ## 9. 测试维护（S17 夜间 N16）
 
 - [x] 9.1 tests/test_rl_integration.py 在 main 上恢复可跑：`_start`/`_start_decoupled` 以前无条件带 `--resume`，而同步服务自 d4c72cd7 起拒绝"--resume 但检查点不存在"，首次启动就退出、岛连不上；改为只在检查点文件已存在时加 `--resume`（`resume=None` 按磁盘判断，可显式传 True/False）。另修 `test_miles_public_hook_runs_against_real_syncer` 的假 rollout 数据缺 GRPO 优势 `rewards` 字段（3720936f 起钩子要逐条统计非零优势）。证据：本机真 Rust syncer（`PATH=~/.cargo/bin:$PATH`，cargo build），不起 Ray，`pytest tests/test_rl_integration.py` 12 过（修前第 1 条即失败）。
+- [x] 9.2 ssh_harness 的同步服务首次启动不再无条件带 `--resume`（S18 遗留，原 `ssh_harness.py:2789`）。同步服务拒绝"带 `--resume` 但检查点不存在"，所以全新运行首启会被拒（读码结论，未真机验证）。改法：
+  1. `_syncer_argv(plan, resume=True|False)` 生成两种命令行；起服务脚本在检查点文件 `$RUN/state/state.ckpt` 已存在时用带 `--resume` 的一种，否则用不带的一种。
+  2. 5 处进程身份比对（起服务、等就绪、状态、强杀、停服务）共用 `_syncer_expected_argv_lines`，同时给出两种期望命令行；shell 函数 `syncer_argv_matches` 只要与其中一种逐项相同就认作同一进程。原因：首启时没有检查点、不带 `--resume`，之后每轮都写检查点，后续比对时文件已存在，不能据此推断启动时带没带。旧式进程（无 systemd 单元）的比对只看检查点路径与事件文件路径，不受影响。
+  - 子 agent 代拍板 + 理由：两种命令行都接受，而不是按当前磁盘状态猜一种，因为后者在首轮写完检查点后会把正在运行的服务误判为"身份漂移"，导致停服务/强杀被拒。其余参数仍须逐项相同，判据没有放宽到其他参数。
+  - 证据：`tests/test_rl_syncer_resume_and_session_port.py`（无检查点时启动命令不含 `--resume`、有检查点时含；两种命令行都通过比对，改端口、多参数、少参数都不通过；5 个脚本都定义两种期望命令行且 `bash -n` 通过）。状态：完成，未上卡。
