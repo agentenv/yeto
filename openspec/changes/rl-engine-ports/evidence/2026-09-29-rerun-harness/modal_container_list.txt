@@ -1,9 +1,0 @@
-                                Active Containers in environment:                                
-┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━┓
-┃ Container ID                  ┃ App ID                    ┃ App Name   ┃ Start Time           ┃
-┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━┩
-│ ta-01M3NXG4QW1GCKGMTB9F8QWYAS │ ap-zFbQ53O2sAmzX2AtdOTGLP │ yeto-rl-eq │ 2026-09-29 06:26 UTC │
-│ ta-01M3NW5V0NHM90BJ09WKR7NHPS │ ap-zFbQ53O2sAmzX2AtdOTGLP │ yeto-rl-eq │ 2026-09-29 06:03 UTC │
-│ ta-01M3NW5TE1HN79TTEVZ4DZ3ETS │ ap-zFbQ53O2sAmzX2AtdOTGLP │ yeto-rl-eq │ 2026-09-29 06:03 UTC │
-│ ta-01M3NW5TE1CD5TYX249Q8BJ49S │ ap-zFbQ53O2sAmzX2AtdOTGLP │ yeto-rl-eq │ 2026-09-29 06:03 UTC │
-└───────────────────────────────┴───────────────────────────┴────────────┴──────────────────────┘

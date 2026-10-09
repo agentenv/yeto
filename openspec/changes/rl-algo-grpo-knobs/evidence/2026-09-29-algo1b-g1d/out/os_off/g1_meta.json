@@ -1,6 +1,0 @@
-{
- "mechanism": "os_off",
- "algorithm_spec_sha256": "32ba45a6d3e466e6b664f938779959fdae8767236d5177eabf59f62957e5a47a",
- "allow_unverified": [],
- "rounds": 5
-}

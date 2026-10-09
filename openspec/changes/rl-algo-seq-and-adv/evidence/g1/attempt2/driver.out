@@ -1,14 +1,0 @@
-sandbox sb-p3xH10YsZ2hFlfXqMXikR3 ready after 1 s
-NVIDIA H100 80GB HBM3
-prompts 12
-=== RUN gspo_s2 2026-09-29T17:17:45Z
-rc=1
-Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
-Fetching 10 files:  60%|██████    | 6/10 [00:00<00:00, 50.67it/s]Fetching 10 files: 100%|██████████| 10/10 [00:06<00:00,  1.52it/s]
-worker rc 1 seconds 498
-FIRST_RUN_FAILED_ABORT
-ALL_DONE
-sandbox script rc 0
-fetched out.tgz
-terminated sb-p3xH10YsZ2hFlfXqMXikR3 total 557 s
-driver exit 0

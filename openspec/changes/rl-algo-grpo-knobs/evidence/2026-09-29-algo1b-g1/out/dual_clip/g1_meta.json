@@ -1,8 +1,0 @@
-{
- "mechanism": "dual_clip",
- "algorithm_spec_sha256": "6401cd10b4704384dd0142695f2f041b5f2a272b6957649980878105d1fd0ccb",
- "allow_unverified": [
-  "features:dual_clip"
- ],
- "rounds": 3
-}

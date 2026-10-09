@@ -1,1 +1,0 @@
-python /work/harness/kill44.py /work/out/kill44

@@ -1,19 +1,0 @@
-Loading weights:   0%|          | 0/311 [00:00<?, ?it/s]Loading weights:  60%|██████    | 188/311 [00:00<00:00, 1862.11it/s]Loading weights: 100%|██████████| 311/311 [00:00<00:00, 2068.74it/s]
-fp32 reference island 0: norm 0.623714 (44.3 s)
-fp32 reference island 1: norm 0.393890 (46.0 s)
-PASS: /home/michael/work/r0-integ/openspec/changes/rl-engine-ports/evidence/2026-09-29-eq62-v3/report.md
-Loading weights:   0%|          | 0/311 [00:00<?, ?it/s]Loading weights:  72%|███████▏  | 224/311 [00:00<00:00, 2192.69it/s]Loading weights: 100%|██████████| 311/311 [00:00<00:00, 2277.12it/s]
-fp32 reference island 0: norm 0.623714 (48.5 s)
-fp32 reference island 1: norm 0.393890 (45.3 s)
-Loading weights:   0%|          | 0/311 [00:00<?, ?it/s]Loading weights: 100%|██████████| 311/311 [00:00<00:00, 6069.11it/s]
-Loading weights:   0%|          | 0/311 [00:00<?, ?it/s]Loading weights: 100%|██████████| 311/311 [00:00<00:00, 6716.03it/s]
-Loading weights:   0%|          | 0/311 [00:00<?, ?it/s]Loading weights: 100%|██████████| 311/311 [00:00<00:00, 7961.36it/s]
-Loading weights:   0%|          | 0/311 [00:00<?, ?it/s]Loading weights: 100%|██████████| 311/311 [00:00<00:00, 6826.00it/s]
-Loading weights:   0%|          | 0/311 [00:00<?, ?it/s]Loading weights: 100%|██████████| 311/311 [00:00<00:00, 7618.17it/s]
-Loading weights:   0%|          | 0/311 [00:00<?, ?it/s]Loading weights: 100%|██████████| 311/311 [00:00<00:00, 7194.66it/s]
-Loading weights:   0%|          | 0/311 [00:00<?, ?it/s]Loading weights: 100%|██████████| 311/311 [00:00<00:00, 7909.70it/s]
-Loading weights:   0%|          | 0/311 [00:00<?, ?it/s]Loading weights: 100%|██████████| 311/311 [00:00<00:00, 7552.75it/s]
-Loading weights:   0%|          | 0/311 [00:00<?, ?it/s]Loading weights: 100%|██████████| 311/311 [00:00<00:00, 7650.74it/s]
-Loading weights:   0%|          | 0/311 [00:00<?, ?it/s]Loading weights: 100%|██████████| 311/311 [00:00<00:00, 7593.60it/s]
-PASS: /home/michael/work/r0-integ/openspec/changes/rl-engine-ports/evidence/2026-09-29-eq63-v3/report.md
-rc=0

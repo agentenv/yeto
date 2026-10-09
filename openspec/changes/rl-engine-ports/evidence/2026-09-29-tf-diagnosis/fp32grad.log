@@ -1,4 +1,0 @@
-Loading weights:   0%|          | 0/311 [00:00<?, ?it/s]Loading weights:  66%|██████▌   | 205/311 [00:00<00:00, 2045.10it/s]Loading weights: 100%|██████████| 311/311 [00:00<00:00, 2082.51it/s]
-island 0 fp32 grad norm 0.6237136115337525
-Loading weights:   0%|          | 0/311 [00:00<?, ?it/s]Loading weights:  61%|██████▏   | 191/311 [00:00<00:00, 1863.32it/s]Loading weights: 100%|██████████| 311/311 [00:00<00:00, 2015.07it/s]
-island 1 fp32 grad norm 0.3938896160296306

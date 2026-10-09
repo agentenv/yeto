@@ -1,5 +1,0 @@
-Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
-Fetching 10 files:  30%|███       | 3/10 [00:00<00:01,  5.60it/s]Fetching 10 files:  90%|█████████ | 9/10 [00:03<00:00,  2.27it/s]Fetching 10 files: 100%|██████████| 10/10 [00:05<00:00,  1.60it/s]Fetching 10 files: 100%|██████████| 10/10 [00:05<00:00,  1.85it/s]
-Generating train split:   0%|          | 0/7473 [00:00<?, ? examples/s]Generating train split: 100%|██████████| 7473/7473 [00:00<00:00, 305250.47 examples/s]
-Generating test split:   0%|          | 0/1319 [00:00<?, ? examples/s]Generating test split: 100%|██████████| 1319/1319 [00:00<00:00, 310192.71 examples/s]
-run tis rc 0 seconds 435

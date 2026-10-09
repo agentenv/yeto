@@ -1,21 +1,0 @@
-sandbox sb-d5jaFqTcmupKs4Pm7STePI ready after 1 s
-NVIDIA H100 80GB HBM3
-prompts 12
-=== RUN maxrl 2026-09-29T17:31:06Z
-rc=0
-Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
-Fetching 10 files:  10%|█         | 1/10 [00:00<00:01,  5.73it/s]Fetching 10 files:  70%|███████   | 7/10 [00:00<00:00, 23.09it/s]Fetching 10 files: 100%|██████████| 10/10 [00:05<00:00,  1.50it/s]Fetching 10 files: 100%|██████████| 10/10 [00:05<00:00,  1.90it/s]
-worker rc 0 seconds 415
-=== RUN mapo 2026-09-29T17:38:27Z
-rc=0
-Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Fetching 10 files: 100%|██████████| 10/10 [00:00<00:00, 755.59it/s]
-worker rc 0 seconds 338
-=== RUN gdpo 2026-09-29T17:44:23Z
-rc=0
-Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Fetching 10 files: 100%|██████████| 10/10 [00:00<00:00, 841.20it/s]
-worker rc 0 seconds 324
-ALL_DONE
-sandbox script rc 0
-fetched out.tgz
-terminated sb-d5jaFqTcmupKs4Pm7STePI total 1158 s
-driver exit 0

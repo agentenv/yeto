@@ -1,5 +1,0 @@
-Warning: Permanently added '[localhost]:10022' (ED25519) to the list of known hosts.
-/root/sky_workdir/yeto/rl/engine/miles_adapter/publish.py:78:INJECT_WEIGHT_OVERRIDE_ENV = "YETO_RL_TEST_INJECT_WEIGHT_OVERRIDE_PATH"
-/root/sky_workdir/yeto/rl/engine/miles_adapter/publish.py:261:        self._inject_override = os.environ.get(INJECT_WEIGHT_OVERRIDE_ENV) or None
-/root/sky_workdir/yeto/rl/engine/miles_adapter/publish.py:263:        self.weight_override_injector: Any = None  # async (cell, path) -> None
-/tmp/hf-prefetch.log
