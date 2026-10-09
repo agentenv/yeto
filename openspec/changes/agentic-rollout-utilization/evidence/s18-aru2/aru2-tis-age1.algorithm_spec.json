@@ -1,0 +1,49 @@
+{
+ "advantage": {
+  "estimator": "grpo",
+  "reward_binary": false,
+  "reward_postprocess": null,
+  "rewards_normalization": true,
+  "std_normalization": true,
+  "whiten": false
+ },
+ "correction": {
+  "function": null,
+  "method": "tis",
+  "mismatch_metrics": false,
+  "opsm_delta": null,
+  "tis_clip": 2.0,
+  "tis_clip_low": 0.0,
+  "use_rollout_logprobs": false
+ },
+ "entropy_coef": 0.0,
+ "execution": {
+  "group_required": true,
+  "max_policy_staleness": 1,
+  "needs_critic": false,
+  "needs_rollout_logprobs": false
+ },
+ "kl": {
+  "coef": null,
+  "estimator": null,
+  "placement": "none",
+  "unbiased": false
+ },
+ "loss": {
+  "aggregation": "default",
+  "custom_loss": null,
+  "eps_clip": null,
+  "eps_clip_c": null,
+  "eps_clip_high": null,
+  "reducer": null,
+  "variant": "policy_loss"
+ },
+ "plugins": [],
+ "sampling": {
+  "filter": null,
+  "max_replacements": null,
+  "over_sampling_batch_size": null,
+  "overlong_filter": false
+ },
+ "schema": "yeto-rl-algorithm-spec-v2"
+}

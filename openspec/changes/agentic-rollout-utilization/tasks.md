@@ -38,7 +38,16 @@
 - [x] 4.1 Miles 单轮路径开启 partial-rollout，接入版本段记账（验证：假引擎单测，跨版本续跑样本版本段正确）
   - 证据（分支 s18-aru-stage2）：Miles 声明阶段 2、上限至多 1（`yeto/rl/adapters/miles/policy_age.py` `SUPPORT`），只限单轮——带 `--custom-agent-function-path`/`--custom-generate-function-path` 或 `--recompute-logprobs-via-prefill` 时 launcher 起机前与岛内都报错（agentic 多轮为阶段 3）；`--partial-rollout` 由 `--rl-max-policy-age` 推导（`translate_run_config(max_policy_age=…)`，算法容许值须 ≥ 上限），不再带 `--mask-offpolicy-in-partial-rollout`：旧版本 token 留在损失里由 TIS 修正（设计决定 3），且 Miles arguments.py:76 在 class-based rollout 路径上遇到该开关直接报错（阶段 1 的推导若真开会起不来）。续跑接线 `yeto/rl/adapters/miles/carry_over.py`：`--buffer-filter-path` 在上限 >0 时让最旧 token 落后 ≤ 上限的缓冲组续跑、更旧或版本未知的组丢弃并计数；`group_record` 给出版本段 `policy_versions` 与最旧版本令牌，driver 按窗口核对；每轮 `rl_rollout_carry_over`（续入组/条/token、超限丢弃、退回缓冲组数、跨版本 token 数）；跨版本截断比例由轮末对含旧 token 的样本做一次当前版本预填充、按 TIS 上下界估计（推理侧估计，Miles TIS 只报全部 token 的截断比例），喂给 3.5 回退器；回退经元数据汇聚点把岛内上限降到 0；轨迹事件带 `started_rollout_id`、`policy_versions`（看板 #160 字段名）。测试 `tests/test_rl_miles_carry_over.py`（11 项：假引擎三轮——v3 截止、v4 续跑得版本段 [3,4]、v5 超限丢弃 6 token；版本未知丢弃；上限 0 元数据字节不变与旧缓冲规则；已知比值截断估计 0.5；回退通道；起机前拒绝 agentic；命令行只多 `--partial-rollout`；driver 事件与回退；轨迹字段）、`tests/test_rl_policy_age.py`（更新）。默认 0 只有插件源码哈希变化（hash-migration.md）。
   - 未接（报主 agent）：续训切点"在途轨迹"段的 Miles 接线——Miles 数据源 `state_dict` 不保存缓冲，上限 >0 时切点仍按 `buffer_length≠0` 拒绝（失败即关闭，不静默丢）；需要时另做"切点时导出缓冲组 token/版本段/生成概率、恢复时注入"。
-- [ ] 4.2 GPU 对照：小模型单轮任务，上限 0 vs 1，比较每轮时长、截断比例、奖励曲线（上卡前复核与预算报批；验证：判据写入本组并附证据路径）
+- [x] 4.2 GPU 对照：小模型单轮任务，上限 0 vs 1，比较每轮时长、截断比例、奖励曲线（上卡前复核与预算报批；验证：判据写入本组并附证据路径）
+  - 结果（2026-10-09 S18 ARU-2，分支 s18-aru-stage2 8330e717，镜像 main pin 2f7871f-2fa8801，复核 infra-drafts/S18-ARU2-PRELAUNCH-REVIEW.md）：Qwen3-0.6B LoRA r16、gsm8k、thinking、回答上限 2048、每轮 8×8、10 轮、三臂同一算法（GRPO+TIS[0,2]，容许落后 1）、Modal 1×H100 各一。MB=不多发（基线），M0=多发 16 组+上限 0（阶段 0 截止丢弃），M1=多发 16 组+上限 1（阶段 2 续跑）。**预登记判据：1 未过、2 过、3 未过、4 过、5 过**：
+    1. 每轮总时长中位 MB 78.4 s / M0 55.3 s / M1 63.8 s，M1/M0=1.15（≤0.8 未过；去第 0 轮 1.17）；M1/MB=0.81。生成段中位 MB 14.1 / M0 15.3 / M1 13.7 s，训练段中位 60.6 / 42.2 / 49.7 s——此任务生成段只占约 1/4，时间主要在训练，M0 快是因为丢掉长回答、训练的回答更短（回答均长 M0 约 690、M1 约 900、MB 约 990 token）。
+    2. 丢弃 token：M0 截止丢弃 69.3 万（600 条），M1 超限丢弃 5.7 万（版本未知 0），为 M0 的 8.3%（≤0.5 过）。M1 续入 450 条、39.9 万 token；378 条训练轨迹 `started_rollout_id` 早于本轮；9 轮出现带 [v−1,v] 版本段的训练组（有效性过）。
+    3. 奖励 10 轮均值 MB 0.759±0.041 / M0 0.922±0.023 / M1 0.806±0.054（SE），M1 不在 M0±2SE（未过），在 MB±2SE 内。M0 偏高是截止丢弃偏向短（易）题的结果（零方差组比例 M0 均 0.74、M1 0.66、MB 0.56），不是更好的训练；判据以 M0 为参照不合适，应以不截止的 MB 为参照。
+    4. 跨版本截断比例（推理侧估计）9 个续跑轮全部 0.0（共估计 35.3 万跨版本 token，未估计样本 0）；Miles 全 token `tis_clipfrac` 三臂全 0；`train_rollout_kl` 三臂同为约 6–8e-4、`train_rollout_logprob_abs_diff` 约 0.013–0.017，看不出跨版本差异。未触发告警/回退。跨版本 token 占续跑轮训练 token 的 61%。
+    5. 无 NaN、无 rl_invariant_failed；grad_norm 为 0 的轮（MB 第 6、M0 第 1/4、M1 第 8 轮）均为零方差组比例 1.0 的轮，yeto 不变量按规则放行；M0 第 9 轮 grad_norm 2.58（其余 ≤0.16），记录在案。
+    - GPU 利用率均值（容器内 nvidia-smi 每 10 s）MB 46% / M0 40% / M1 44%；SGLang 排队 0。
+    - 阈值建议：告警 0.2 / 回退 0.5 暂维持——本次实测为 0，阈值无法由零观测标定（TIS 下界 0 时只统计比值 >2 的 token，LoRA lr 1e-5、一版落后时比值都接近 1）；建议阶段 3（更大模型/全参数/更高学习率）复测，并补记跨版本比值分位数以便定阈值。
+    - 花费约 $4.0（上界）。证据：`evidence/s18-aru2/compare.json`（analyze.py 生成）、原始数据 s1-runs/s18-aru2-{mb,m0,m1}/。
 
 ## 5. 阶段 3：agentic 多轮续跑（门槛：阶段 2 达标 + FN 前缀重算代价已测）
 - [ ] 5.1 Miles fork agentic 生成循环：截止只在回合之间生效，工具执行中不中止（验证：fork 侧单测，截止落在工具执行中时等结果写回后挂起）
