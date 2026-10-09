@@ -23,18 +23,27 @@ def test_checked_fields_have_source_and_date():
     assert aws.value == 120 and aws.checked and "spot-instance-termination-notices" in aws.source
 
 
-@pytest.mark.parametrize("cloud", ["nebius", "verda"])
-def test_unchecked_clouds_are_empty_and_mean_no_notice(cloud):
-    for field in caps.FIELDS:
-        cap = caps.capability(cloud, field)
-        assert cap.value is None and cap.status == "unchecked" and cap.source is None
-    assert caps.notice_seconds(cloud) is None
+def test_nebius_and_verda_rows_match_official_docs_2026_10_09():
+    nb = caps.capability("nebius", "notice_s")
+    assert nb.value == 60 and nb.checked and "nebius.com" in nb.source and nb.checked_on
+    assert caps.notice_seconds("nebius") == 60
+    # Verda docs: "evicted at any time without warning" -> checked 0 s
+    assert caps.notice_seconds("verda") == 0
+    # method not in Verda docs: stays empty and unchecked
+    vm = caps.capability("verda", "notice_method")
+    assert vm.value is None and not vm.checked and vm.source is None
+    # fields nobody checked stay empty
+    for cloud in ("nebius", "verda"):
+        for field in ("durable_store", "price_source"):
+            cap = caps.capability(cloud, field)
+            assert cap.value is None and not cap.checked and cap.source is None
     assert caps.notice_seconds("someothercloud") is None
 
 
 def test_table_validation_rejects_estimates_and_missing_sources(tmp_path):
     table = json.loads(caps.TABLE_PATH.read_text())
-    table["clouds"]["nebius"]["notice_s"]["value"] = 30
+    table["clouds"]["nebius"]["durable_store"]["value"] = "x"
+    table["clouds"]["nebius"]["notice_s"]["status"] = "unchecked"
     with pytest.raises(caps.CapabilityTableError, match="unchecked"):
         caps.validate(table)
     table = json.loads(caps.TABLE_PATH.read_text())
