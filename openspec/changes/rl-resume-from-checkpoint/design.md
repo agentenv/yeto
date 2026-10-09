@@ -47,7 +47,7 @@
 | 回收通知 | Modal：先发中断信号，退出处理有 30 秒，再强杀 [文档⁶]；GPU 函数不能设为不可抢占 [文档⁶] | AWS spot：提前 2 分钟通知，尽力而为 [文档⁷] | Nebius 抢占式 VM 通知时间：未知 |
 | 适合 | **Modal 岛（现在默认）** | AWS/Verda 等 sky 岛；跨云共享 | Nebius 岛与 Nebius 上的 syncer head |
 
-¹ https://modal.com/docs/guide/volumes ² https://docs.aws.amazon.com/AmazonS3/latest/userguide/optimizing-performance.html ³ https://docs.nebius.com/compute/storage/types ⁴ https://modal.com/pricing ⁵ https://modal.com/docs/guide/cloud-bucket-mounts ⁶ https://modal.com/docs/guide/preemption （30 秒出自 Modal 文档的生命周期/`simulate_preemption` 说明，经搜索摘要转述，上线前需再核一次原文）⁷ https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/spot-instance-termination-notices.html
+¹ https://modal.com/docs/guide/volumes ² https://docs.aws.amazon.com/AmazonS3/latest/userguide/optimizing-performance.html ³ https://docs.nebius.com/compute/storage/types ⁴ https://modal.com/pricing ⁵ https://modal.com/docs/guide/cloud-bucket-mounts ⁶ https://modal.com/docs/guide/preemption （10-09 已核原文：30 秒宽限出自 https://modal.com/docs/guide/lifecycle-functions ，"Exit handlers are also called when a container is preempted"；统一口径见 `rl-infra-spec/cloud-pool-design.md` §3.6）⁷ https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/spot-instance-termination-notices.html
 
 注意：Modal 卷 v2 仍是 Beta，文档写"还不能保证不丢数据"[文档¹]；切点文件数很少（远低于 v1 的 5 万个文件建议），**用 v1 卷**。卷的提交语义是"后台每几秒提交 + 容器退出时最终提交"，其他容器要 `reload()` 才看到[文档¹]——所以"切点算写完"必须以我方 MANIFEST 落盘并显式提交为准，不能只看文件在不在。
 
