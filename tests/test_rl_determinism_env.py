@@ -10,7 +10,7 @@ PRE_MOVE = {"NCCL_ALGO": "Ring", "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
 
 
 def test_miles_nvidia_env_is_unchanged():
-    from yeto.rl.engine.miles_adapter.entry import DETERMINISM_ENV
+    from yeto.rl.adapters.miles.entry import DETERMINISM_ENV
 
     assert DETERMINISM_ENV == PRE_MOVE
     assert list(DETERMINISM_ENV) == list(PRE_MOVE)

@@ -580,7 +580,7 @@ def _full16_transport_geometry(
 
     import torch
 
-    from yeto.rl.deepseek_v4_expert_full import expert_full_specs
+    from yeto.rl.adapters.miles.models.deepseek_v4.expert_full import expert_full_specs
 
     specs = expert_full_specs(
         model_config,
@@ -955,7 +955,7 @@ def _forward_backward_step(models, seq_length: int, vocab_size: int) -> float:
 
 
 def _validate_clone_routers(models, contract, hidden_size: int, vocab_size: int):
-    from yeto.rl.deepseek_v4_expert_clone import (
+    from yeto.rl.adapters.miles.models.deepseek_v4.expert_clone import (
         ORIGINAL_EXPERTS,
         TOTAL_EXPERTS,
         logical_to_training_expert_id,
@@ -1097,7 +1097,7 @@ def main() -> None:
         # Production calls this before Megatron creates any topology groups.
         monkey_patch_torch_dist()
 
-    from yeto.rl.deepseek_v4_bridge import ensure_deepseek_v4_bridge
+    from yeto.rl.adapters.miles.models.deepseek_v4.bridge import ensure_deepseek_v4_bridge
 
     ensure_deepseek_v4_bridge()
 
@@ -1105,14 +1105,14 @@ def main() -> None:
     from miles.backends.megatron_utils.lora_utils import create_lora_instance
 
     from yeto.rl.export import derive_peft_lora_specs
-    from yeto.rl.learner import megatron_adapter_targets
+    from yeto.rl.adapters.miles.island_entry import megatron_adapter_targets
 
     clone_contract = None
     model_config = None
     if args.expect_clone_split or args.expert_full_count:
         from transformers import AutoConfig
 
-        from yeto.rl.deepseek_v4_expert_clone import contract_from_config
+        from yeto.rl.adapters.miles.models.deepseek_v4.expert_clone import contract_from_config
 
         model_config = AutoConfig.from_pretrained(
             args.model,
@@ -1149,7 +1149,7 @@ def main() -> None:
     expected_specs = dict(expected_attention_specs)
     expected_expert_specs = {}
     if args.expert_full_count:
-        from yeto.rl.deepseek_v4_expert_full import expert_full_specs
+        from yeto.rl.adapters.miles.models.deepseek_v4.expert_full import expert_full_specs
 
         expected_expert_specs = {
             spec.name: spec

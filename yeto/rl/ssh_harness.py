@@ -3150,7 +3150,7 @@ def _learner_argv(plan: dict[str, Any], learner_id: int) -> list[str]:
     learner = plan["learner"]
     island = plan["islands"][learner_id]
     values = _argv(
-        ["python3", "-m", "yeto.rl.learner"],
+        ["python3", "-m", "yeto.rl.adapters.miles.island_entry"],
         ("--model", learner["model"]),
         ("--rl-model-recipe", learner.get("rl_model_recipe", "generic")),
         ("--model-revision", learner["model_revision"]),

@@ -68,6 +68,9 @@ class BridgeConfig:
     audit_dir: str | None = None
     wan_streams: int = 4
     send_initial_params: bool = True
+    # Decoupling 6.2 (design D7): the syncer session contract binds the tensor
+    # layout to this backend identity hash; None keeps the layout-only contract.
+    backend_identity_sha256: str | None = None
 
 
 def _write_round_audit(
@@ -271,6 +274,7 @@ class StrictRlBridge:
             self.layout,
             dtype=DTYPE_F32,
             num_streams=config.wan_streams,
+            session_contract_hash=_session_contract(self.layout, config.backend_identity_sha256),
             # A dead syncer connection makes this island exit. The launcher
             # restarts the same logical ID, which reapplies the committed cut
             # and recomputes any uncommitted local result.
@@ -977,3 +981,13 @@ def make_island_bridge(runtime: IslandRuntime, config: BridgeConfig, *,
         elastic_client = ElasticIslandClient(
             ElasticClientConfig(config.syncer_addr, config.learner_id), hmac_key_from_env())
     return ElasticRlBridge(runtime, config, elastic_client, **elastic_kw)
+
+
+def _session_contract(layout, identity_sha256: str | None) -> bytes | None:
+    """HELLO session contract (decoupling 6.2): layout fingerprint bound to the backend identity."""
+    if identity_sha256 is None:
+        return None
+    from yeto.protocol import layout_fingerprint
+    from yeto.rl.engine.backend_identity import session_contract_hash
+
+    return session_contract_hash(layout_fingerprint(layout), identity_sha256)

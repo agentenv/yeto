@@ -115,8 +115,8 @@ def _run(script, tmp_path, blocked):
 
 
 def test_core_imports_without_miles_or_its_adapter(tmp_path):
-    _run(IMPORT_CORE, tmp_path, ("miles", "megatron", "sglang", "yeto.rl.miles", "yeto.rl.miles_overlay",
-                                 "yeto.rl.engine.miles_adapter"))
+    _run(IMPORT_CORE, tmp_path, ("miles", "megatron", "sglang", "yeto.rl.adapters.miles.legacy.engine", "yeto.rl.adapters.miles.overlay",
+                                 "yeto.rl.adapters.miles"))
 
 
 def test_fake_driver_runs_without_miles_installed(tmp_path):

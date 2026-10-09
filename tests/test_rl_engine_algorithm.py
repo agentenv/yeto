@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from yeto.rl import learner
-from yeto.rl.engine.miles_adapter.algorithm_flags import legacy_algorithm_argv
+from yeto.rl.adapters.miles.algorithm_flags import legacy_algorithm_argv
 from yeto.rl.engine.algorithm import (
     BOUNDED_NONZERO_STD_FILTER,
     STOCK_NONZERO_STD_FILTER,
@@ -28,7 +28,7 @@ def test_hash_stable_and_canonical():
     # Pinned: changing canonicalization is an identity break and must be deliberate.
     assert BOUNDED.canonical_json() == (
         '{"advantage_estimator":"grpo","dynamic_sampling_filter":'
-        '"yeto.rl.filters.bounded_nonzero_reward_std",'
+        '"nonzero_reward_std_bounded",'  # neutral name since decoupling 4.4 (hash-migration.md)
         '"dynamic_sampling_max_replacements":4,"kl_coef":null,'
         '"loss":"policy_loss","schema":"yeto-rl-algorithm-spec-v1"}'
     )
@@ -56,7 +56,7 @@ def test_legacy_mapping():
     assert spec == BOUNDED
     assert legacy_algorithm_argv(spec) == [
         "--advantage-estimator", "grpo",
-        "--dynamic-sampling-filter-path", BOUNDED_NONZERO_STD_FILTER,
+        "--dynamic-sampling-filter-path", "yeto.rl.filters.bounded_nonzero_reward_std",
     ]
     assert spec.to_legacy_runtime_attrs() == {
         "yeto_rl_dynamic_sampling_max_replacements": 4

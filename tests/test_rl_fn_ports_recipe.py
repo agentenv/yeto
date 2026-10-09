@@ -10,7 +10,7 @@ import pytest
 
 from yeto.rl.engine import run_config as rc
 from yeto.rl.engine.algorithm import AlgorithmSpec
-from yeto.rl.engine.miles_adapter import config as mc
+from yeto.rl.adapters.miles import config as mc
 from yeto.rl.profiles import qwen3_8_next as q
 
 from test_rl_miles_adapter_config import flag_value, make_config

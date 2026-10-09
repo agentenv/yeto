@@ -4,7 +4,7 @@ For GPU acceptance runs that need real tool waits on the ports path:
 A2+ (rl-infra-spec 1.7, tool-wait observation) and A4b (3.3 X5, drain keeps
 the old routing while trajectories wait on tools). Plugged in through Miles'
 supported per-sample hook ``--custom-generate-function-path
-yeto.rl.tool_wait_workload.generate`` (the ports adapter passes it through;
+yeto.rl.adapters.miles.harness_glue.tool_wait.generate`` (the ports adapter passes it through;
 ``--rollout-function-path`` stays adapter-owned).
 
 Each training trajectory first "calls a tool": it sleeps ``delay`` seconds
@@ -27,7 +27,8 @@ import time
 from typing import Any
 
 TOOL_DELAY_ENV = "YETO_RL_TEST_TOOL_DELAY_S"
-GENERATE_PATH = "yeto.rl.tool_wait_workload.generate"
+# The Miles generate hook moved to the adapter (yeto-framework-decoupling 5.7).
+GENERATE_PATH = "yeto.rl.adapters.miles.harness_glue.tool_wait.generate"
 
 
 def tool_delay_s(environ: Any = None) -> float:
@@ -66,16 +67,3 @@ async def tool_call(sample: Any, *, delay: float, board: Any, sleep=asyncio.slee
     waited = clock() - started
     sample.non_generation_time = float(getattr(sample, "non_generation_time", 0.0) or 0.0) + waited
     return waited
-
-
-async def generate(input: Any) -> Any:  # noqa: A002 - Miles GenerateFnInput protocol
-    from miles.rollout.base_types import GenerateFnOutput
-    from miles.rollout.sglang_rollout import generate as stock_generate
-
-    delay = tool_delay_s()
-    if delay > 0 and not input.evaluation:
-        learner_id = int(getattr(input.args, "yeto_rl_learner_id", 0) or 0)
-        await tool_call(input.sample, delay=delay, board=_board(learner_id))
-    sample = await stock_generate(input.args, input.sample, input.sampling_params,
-                                  evaluation=input.evaluation)
-    return GenerateFnOutput(samples=sample)

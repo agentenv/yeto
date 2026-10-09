@@ -100,7 +100,7 @@ class _Info:
 
 # ------------------------------------------------------------------ 2.2
 def startup_bundles(shuffle=False):
-    from yeto.rl.engine.miles_adapter.bundles import StartupBundles
+    from yeto.rl.adapters.miles.bundles import StartupBundles
 
     pg = ray.util.placement_group([{"GPU": 1, "CPU": 1}] * (2 * G), strategy="PACK")
     ray.get(pg.ready(), timeout=120)
@@ -122,7 +122,7 @@ def startup_bundles(shuffle=False):
 
 
 def case_pg_blocks():
-    from yeto.rl.engine.miles_adapter.bundles import BundleMapError
+    from yeto.rl.adapters.miles.bundles import BundleMapError
     from yeto.rl.engine.multinode import Topology
 
     pg, sb, table, nodes, order = startup_bundles()
@@ -152,8 +152,8 @@ def case_cells_bind():
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     import test_rl_e3_wiring_e1 as e3
 
-    from yeto.rl.engine.miles_adapter.placement import PlacementRequest
-    from yeto.rl.engine.miles_adapter.rollout import MembershipPlanError, MilesRolloutPool
+    from yeto.rl.adapters.miles.placement import PlacementRequest
+    from yeto.rl.adapters.miles.rollout import MembershipPlanError, MilesRolloutPool
 
     req = PlacementRequest("fixed-partition", trainer_gpus=4, rollout_gpus=2, gpus_per_engine=2,
                            standby_gpus=2, gpus_per_node=G, model_parallel=2,
@@ -300,7 +300,7 @@ def case_gpu_pool():
     from test_rl_reconfig_recovery import _ctl
 
     from yeto.rl.engine.journal import read_journal
-    from yeto.rl.engine.miles_adapter import entry
+    from yeto.rl.adapters.miles import entry
 
     tmp = Path(tempfile.mkdtemp(prefix="yeto-s1-sim-gpu-"))
     topology = SimpleNamespace(nodes=2, gpus_per_node=G)
@@ -369,8 +369,8 @@ def case_gpu_pool():
 # ------------------------------------------------------------------ C7 mixed_pp2 (Q2 + Q3)
 def case_mixed_pp2():
     from yeto.rl.elastic_benchmark.capabilities import parse_configs
-    from yeto.rl.engine.miles_adapter.bundles import ROLE_VIEWS, BundleMapError, StartupBundles
-    from yeto.rl.engine.miles_adapter.placement import PlacementRequest
+    from yeto.rl.adapters.miles.bundles import ROLE_VIEWS, BundleMapError, StartupBundles
+    from yeto.rl.adapters.miles.placement import PlacementRequest
     from yeto.rl.engine.multinode import Topology, TopologyError, node_placement_rejection, trainer_layout
 
     cfg_path = Path(__file__).resolve().parents[1] / "multinode_gpu" / "resources-2x2.json"

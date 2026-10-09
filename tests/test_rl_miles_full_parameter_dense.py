@@ -8,7 +8,7 @@ import pytest
 
 from yeto.protocol import FinalManifest
 from yeto.rl.contracts import LocalStepReceipt
-from yeto.rl.dense_sweep_wire import (
+from yeto.rl.adapters.miles.models.dense_sweep_wire import (
     DenseSweepConfig,
     PendingDenseWirePolicy,
 )
@@ -17,15 +17,15 @@ from yeto.rl.local_learner import (
     ParameterLayout,
     ParameterSpec,
 )
-from yeto.rl.miles import (
+from yeto.rl.adapters.miles.legacy.engine import (
     get_current_published_policy_identity,
     set_current_published_policy_identity,
 )
-from yeto.rl.miles_chunked_full_parameter import (
+from yeto.rl.adapters.miles.models.chunked_full_parameter import (
     ReferencedPolicyCut,
     StoredAuthoritativeFragment,
 )
-from yeto.rl.miles_full_parameter_dense import (
+from yeto.rl.adapters.miles.models.full_parameter_dense import (
     MilesDenseFullParameterConfig,
     MilesFullParameterDenseSync,
 )
@@ -284,7 +284,7 @@ def _layout() -> ParameterLayout:
 
 
 async def _initialized_sync(monkeypatch, tmp_path, *, fail_target_publication: bool):
-    import yeto.rl.miles_full_parameter_dense as module
+    import yeto.rl.adapters.miles.models.full_parameter_dense as module
 
     events = []
     adapter = _Adapter(_layout(), events)

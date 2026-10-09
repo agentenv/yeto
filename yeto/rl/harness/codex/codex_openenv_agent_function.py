@@ -3,7 +3,7 @@
 REWRITE, not a move: the legacy ``codex_openenv_*`` modules lived in a private
 ``agentenv/miles`` ``examples/experimental/openenv`` copy and were never found
 (CODEX-PROGRESS §1.3).  The interface below is the one the yeto consumers
-expect (``yeto/rl/learner.py``, ``yeto/rl/tbench_direct_preflight.py``,
+expect (``yeto/rl/adapters/miles/island_entry.py``, ``yeto/rl/tbench_direct_preflight.py``,
 ``tests/test_rl_codex_schema.py``): ``stock``, ``_OPENENV_IDENTITY_ENV``,
 ``codex_openenv_harness_identity()`` and a module-level ``run``.
 
@@ -428,7 +428,7 @@ def mirror_tito_counters(metrics: dict[str, Any] | None, harness_board: Any) -> 
     never forks, so ``chains_total`` stays 1 and ``chain_break_reason`` names the
     first break (the sample is infrastructure-aborted, never trained on).
     """
-    from yeto.rl.engine.miles_adapter.rollout_meta_hook import counter_value
+    from yeto.rl.engine.rollout_meta import counter_value
 
     metrics = metrics or {}
     mismatches = counter_value(metrics.get(TITO_SESSION_MISMATCH_KEY))

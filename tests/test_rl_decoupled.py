@@ -32,7 +32,7 @@ from yeto.rl.decoupled import (
     FragmentSubmission,
     InitialCut,
 )
-from yeto.rl.miles import DecoupledMilesPolicySync
+from yeto.rl.adapters.miles.legacy.engine import DecoupledMilesPolicySync
 from yeto.tensor_io import pack_fragment, unpack_fragment
 
 MODEL_REVISION = "a" * 40

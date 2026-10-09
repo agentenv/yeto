@@ -26,7 +26,7 @@ from yeto.rl.core import (
     canonical_state,
 )
 from yeto.rl.decoupled import DecoupledBridgeConfig, DecoupledRlBridge
-from yeto.rl.miles import MilesPolicySync, _island_checkpoint_config
+from yeto.rl.adapters.miles.legacy.engine import MilesPolicySync, _island_checkpoint_config
 from yeto.tensor_io import pack_tensor, unpack_fragment
 
 ROOT = Path(__file__).resolve().parent.parent

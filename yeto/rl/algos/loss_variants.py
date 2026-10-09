@@ -159,7 +159,7 @@ for _name in VARIANTS:
 
 
 # Miles flag rows (``--policy-loss-variant`` and the parameter flags):
-# yeto.rl.engine.miles_adapter.algo_flag_rows (decoupling 4.3).
+# yeto.rl.adapters.miles.algo_flag_rows (decoupling 4.3).
 
 
 # --------------------------------------------------------------------------

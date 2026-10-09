@@ -489,7 +489,10 @@ def dry_run(argv: Sequence[str] | None = None) -> dict[str, Any]:
     """Both stages' algorithm argv for a spec (no engine, no checkpoint I/O)."""
 
     from .engine.algorithm import resolve_ports_algorithm
-    from .engine.miles_adapter.algorithm_flags import absorb_extra_argv, algorithm_argv
+    from .engine import backends
+
+    _flags = backends.module("algorithm_flags", backends.DEFAULT_BACKEND)
+    absorb_extra_argv, algorithm_argv = _flags.absorb_extra_argv, _flags.algorithm_argv
 
     parser = argparse.ArgumentParser(prog="python3 -m yeto.rl.critic_warmup")
     parser.add_argument("--dry-run", action="store_true", required=True)

@@ -18,8 +18,8 @@ from yeto.rl.engine.cut import AlgorithmIdentity, CutFile, CutManifest, CutProgr
 from yeto.rl.engine.driver import EventTape, IslandDriver
 from yeto.rl.engine.fake import FakeEngine, fake_capabilities
 from yeto.rl.engine.ledger import BatchLedger
-from yeto.rl.engine.miles_adapter.entry import miles_capabilities
-from yeto.rl.engine.miles_adapter.traits import MILES_ABORT_MECHANISM, MILES_TRAITS
+from yeto.rl.adapters.miles.entry import miles_capabilities
+from yeto.rl.adapters.miles.traits import MILES_ABORT_MECHANISM, MILES_TRAITS
 from yeto.rl.engine.ports import GroupMetadata, RolloutBatchHandle
 
 NAME = "base_model.model.layer.lora_A.weight"

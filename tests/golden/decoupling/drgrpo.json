@@ -55,6 +55,14 @@
   },
   "schema": "yeto-rl-algorithm-spec-v2"
  },
+ "backend_identity": {
+  "device_family": "nvidia",
+  "engine": "miles",
+  "engine_commit": "8bc52237a1102306abd8f89a2ea2090aa2df6850",
+  "param_map_sha256": "36c37d691b6372ee86485cf0f7d4f8d5e185a6346b875aac33380518ee8f259a",
+  "schema": "yeto-backend-identity-v1",
+  "sha256": "9d5696a3d3b6e6d802115ef3deb970b5e4d9206d1751d71f9075a849d2909f8d"
+ },
  "execution_profile": {
   "contract_hash": "sha256:94562ea539b9602ae900036c53941673ae4b49962631298cc80cb6f3cdeebb48",
   "profile": {
@@ -190,11 +198,11 @@
   "--rollout-max-response-len",
   "128",
   "--rollout-sample-filter-path",
-  "yeto.rl.engine.miles_adapter.rollout_meta_hook.record_trained_groups",
+  "yeto.rl.adapters.miles.rollout_meta_hook.record_trained_groups",
   "--rollout-all-samples-process-path",
-  "yeto.rl.engine.miles_adapter.rollout_meta_hook.extract_rollout_metadata",
+  "yeto.rl.adapters.miles.rollout_meta_hook.extract_rollout_metadata",
   "--buffer-filter-path",
-  "yeto.rl.engine.miles_adapter.rollout_meta_hook.policy_buffer_filter",
+  "yeto.rl.adapters.miles.rollout_meta_hook.policy_buffer_filter",
   "--custom-rm-path",
   "pkg.reward.score",
   "--advantage-estimator",
@@ -232,7 +240,7 @@
   "10",
   "--group-query-attention"
  ],
- "miles_argv_sha256": "9ae71f2b9407fb464e716f627c0389e30ea54156b6c41df8e98f6ef8771ed201",
+ "miles_argv_sha256": "7ee222703a50f20c2c18b817596ddbca10140fe94645ca28acdcba05c871cc2b",
  "name": "drgrpo",
  "placement": {
   "allow_cross_node_engine_tp": false,
@@ -251,28 +259,28 @@
  },
  "plugins": [
   {
+   "module_file": "yeto/rl/adapters/miles/rollout_meta_hook.py",
+   "path": "yeto.rl.adapters.miles.rollout_meta_hook.extract_rollout_metadata",
+   "source_sha256": "af10161a148d3059148342896778fec5b915c90ed96258ccab1754f1805cda61"
+  },
+  {
+   "module_file": "yeto/rl/adapters/miles/rollout_meta_hook.py",
+   "path": "yeto.rl.adapters.miles.rollout_meta_hook.policy_buffer_filter",
+   "source_sha256": "af10161a148d3059148342896778fec5b915c90ed96258ccab1754f1805cda61"
+  },
+  {
+   "module_file": "yeto/rl/adapters/miles/rollout_meta_hook.py",
+   "path": "yeto.rl.adapters.miles.rollout_meta_hook.record_trained_groups",
+   "source_sha256": "af10161a148d3059148342896778fec5b915c90ed96258ccab1754f1805cda61"
+  },
+  {
    "module_file": "yeto/rl/algos/reducers.py",
    "path": "yeto.rl.algos.reducers.constant_denominator_reducer",
    "source_sha256": "253856acaefbea8de936b03ea89bf5c50039719732f21709aa66358f9f78e4ed",
    "spec_sha256": "253856acaefbea8de936b03ea89bf5c50039719732f21709aa66358f9f78e4ed"
-  },
-  {
-   "module_file": "yeto/rl/engine/miles_adapter/rollout_meta_hook.py",
-   "path": "yeto.rl.engine.miles_adapter.rollout_meta_hook.extract_rollout_metadata",
-   "source_sha256": "be53a60841ce6244fc85c5d114ef25dc7c06a94f74fcaa5291d74094ef0d87ef"
-  },
-  {
-   "module_file": "yeto/rl/engine/miles_adapter/rollout_meta_hook.py",
-   "path": "yeto.rl.engine.miles_adapter.rollout_meta_hook.policy_buffer_filter",
-   "source_sha256": "be53a60841ce6244fc85c5d114ef25dc7c06a94f74fcaa5291d74094ef0d87ef"
-  },
-  {
-   "module_file": "yeto/rl/engine/miles_adapter/rollout_meta_hook.py",
-   "path": "yeto.rl.engine.miles_adapter.rollout_meta_hook.record_trained_groups",
-   "source_sha256": "be53a60841ce6244fc85c5d114ef25dc7c06a94f74fcaa5291d74094ef0d87ef"
   }
  ],
- "ports_runtime_fingerprint": "sha256:cba7660ae38dbfccb0cd83ebcb694ea4b3976f3efbb86bb84df19382098dff2f",
+ "ports_runtime_fingerprint": "sha256:48f8d9c455562b3fb6a9bb4ae459ea0543c7fc2e1f39bf1e0a7fc8fb34c87c08",
  "runtime_attrs": {
   "yeto_algo_plugins": {
    "config": {
@@ -287,6 +295,6 @@
   "yeto_rl_dynamic_sampling_max_replacements": null
  },
  "session_contract_hash": null,
- "session_contract_hash_note": "运行时由 LoRA 张量布局算出（yeto.protocol.layout_fingerprint），离线不可得",
+ "session_contract_hash_note": "运行时由 LoRA 张量布局算出（yeto.protocol.layout_fingerprint），阶段 5 起再与 backend_identity.sha256 绑定（yeto.rl.engine.backend_identity.session_contract_hash），离线不可得",
  "title": "Dr.GRPO 常数分母归约（G1 drgrpo 证据里的 spec 原文件）"
 }

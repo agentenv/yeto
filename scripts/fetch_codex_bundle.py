@@ -11,7 +11,7 @@ Reproducible, pin-driven: every expected digest comes from ``yeto.rl``
 2. Extract ``package/vendor/<target>/bin/codex`` and
    ``package/vendor/<target>/codex-package.json``; check size + sha256.
 3. Run ``codex --version`` and ``codex app-server generate-json-schema
-   --experimental`` (the same command ``yeto.rl.learner._preflight_codex_harness``
+   --experimental`` (the same command ``yeto.rl.adapters.miles.island_entry._preflight_codex_harness``
    runs in the container) and write the v2 schema into the bundle.  Codex
    serialises the schema with unstable key order, so the file is written in
    canonical form (``sort_keys=True, indent=2``) and compared against the pin
@@ -172,7 +172,7 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"WARNING: canonical app-server schema sha256 {schema_sha} != pin "
             f"{CODEX_APP_SERVER_SCHEMA_SHA256}; the container preflight "
-            "(yeto.rl.learner._preflight_codex_harness) will reject this bundle until the pin is re-derived",
+            "(yeto.rl.adapters.miles.island_entry._preflight_codex_harness) will reject this bundle until the pin is re-derived",
             file=sys.stderr,
         )
         if not args.allow_schema_drift:

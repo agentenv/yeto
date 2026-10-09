@@ -21,9 +21,9 @@ from yeto.rl.engine.bridges import LocalOnlySync
 from yeto.rl.engine.driver import EventTape, IslandDriver, PolicyIdentityError, policy_token
 from yeto.rl.engine.execution_profile import ExecutionProfile
 from yeto.rl.engine.fake import FakeEngine, fake_capabilities
-from yeto.rl.engine.miles_adapter import config as cfg
-from yeto.rl.engine.miles_adapter import entry
-from yeto.rl.engine.miles_adapter.rollout import HARNESS_NOT_AGENTIC, MilesRolloutPool
+from yeto.rl.adapters.miles import config as cfg
+from yeto.rl.adapters.miles import entry
+from yeto.rl.adapters.miles.rollout import HARNESS_NOT_AGENTIC, MilesRolloutPool
 from yeto.rl.engine.timeline import (
     HARNESS_METRIC_KEYS,
     LOAD_SAMPLE_LABELS,
@@ -66,7 +66,7 @@ def test_ir1_agent_flags_pass_through_with_agentic_generate():
     ("custom_agent_function_path", "a.b.c"),
     ("agent_max_seq_len", 4096),
 ])
-@pytest.mark.parametrize("generate", [None, "yeto.rl.tool_wait_workload.generate"])
+@pytest.mark.parametrize("generate", [None, "yeto.rl.adapters.miles.harness_glue.tool_wait.generate"])
 def test_ir1_agent_flags_need_agentic_generate(field, value, generate):
     c = sub(make_config(), "agent", custom_generate_function_path=generate, **{field: value})
     with pytest.raises(cfg.UnmappedConfigError) as err:
@@ -168,7 +168,7 @@ def test_ir1_harness_preflight_resolves_from_args_or_env(monkeypatch):
     monkeypatch.setattr(entry, "_ir_test_hook", lambda a, l: calls.append("env"), raising=False)
     assert entry.resolve_harness_preflight(SimpleNamespace(), environ={}) is None
     hook = entry.resolve_harness_preflight(
-        SimpleNamespace(), environ={entry.HARNESS_PREFLIGHT_ENV: "yeto.rl.engine.miles_adapter.entry:_ir_test_hook"})
+        SimpleNamespace(), environ={entry.HARNESS_PREFLIGHT_ENV: "yeto.rl.adapters.miles.entry:_ir_test_hook"})
     hook(None, None)
     assert calls == ["env"]
     direct = lambda a, l: calls.append("args")  # noqa: E731
@@ -352,7 +352,7 @@ def test_ir3_miles_pool_refuses_a_foreign_target_token_before_sampling():
 
 
 def test_ir3_rollout_side_reads_expected_version_and_sums_violations(tmp_path, monkeypatch):
-    from yeto.rl.engine.miles_adapter import rollout_meta_hook as hook
+    from yeto.rl.adapters.miles import rollout_meta_hook as hook
 
     sink = f"dir:{tmp_path}"
     monkeypatch.setenv(hook.META_SINK_ENV, sink)
@@ -369,8 +369,8 @@ def test_ir3_rollout_side_reads_expected_version_and_sums_violations(tmp_path, m
 
 
 def test_ir3_handle_from_metadata_carries_policy_age_violation():
-    from yeto.rl.engine.miles_adapter.rollout import handle_from_metadata
-    from yeto.rl.engine.miles_adapter.rollout_meta_hook import METADATA_SCHEMA
+    from yeto.rl.adapters.miles.rollout import handle_from_metadata
+    from yeto.rl.adapters.miles.rollout_meta_hook import METADATA_SCHEMA
 
     payload = {"schema": METADATA_SCHEMA, "rollout_id": 1, "completed": 1, "aborted": 1,
                "groups": [{"group_id": "g0", "sample_ids": ["s0"], "policy_token": "yeto:1:h",
@@ -441,7 +441,7 @@ def test_harness_counters_accept_upstream_mismatch_lists():
     tito_session_mismatch as a list of mismatch records in the same metadata key."""
     from types import SimpleNamespace
 
-    from yeto.rl.engine.miles_adapter.rollout_meta_hook import counter_value, harness_counters
+    from yeto.rl.adapters.miles.rollout_meta_hook import counter_value, harness_counters
 
     assert counter_value([{"position": 3}, {"position": 9}]) == 2 and counter_value([]) == 0
     assert counter_value(None) == 0 and counter_value("") == 0 and counter_value(True) == 1 and counter_value(2) == 2

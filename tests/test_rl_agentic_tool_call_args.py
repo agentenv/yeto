@@ -21,7 +21,7 @@ import pytest
 
 from yeto.rl import MILES_NEXT_COMMIT
 from yeto.rl.engine.algorithm import AlgorithmSpec
-from yeto.rl.engine.miles_adapter import config as cfg
+from yeto.rl.adapters.miles import config as cfg
 
 from test_rl_miles_adapter_config import make_config, sub
 

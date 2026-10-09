@@ -17,7 +17,7 @@ from typing import Any
 
 from ..syncer_profile import SyncerSemanticProfile
 from .local_learner import ComponentIdentity
-from .miles_sao_streaming import (
+from yeto.rl.adapters.miles.models.sao_streaming import (
     MilesSaoRoleStreamConfig,
     MilesSaoStreamingConfig,
 )
@@ -26,9 +26,9 @@ _LEGACY_SCHEMA = "yeto.sao-streaming-runtime.v1"
 _SCHEMA = "yeto.sao-streaming-runtime.v2"
 _LEGACY_LAYOUT_ATTESTATION_SCHEMA = "miles.sao-streaming-layouts.v1"
 _LAYOUT_ATTESTATION_SCHEMA = "miles.sao-streaming-layouts.v2"
-_SYNC_FACTORY = "yeto.rl.miles_sao_streaming.create_miles_sao_streaming_sync"
-_IDENTITY_SETTER = "yeto.rl.miles.set_current_published_policy_identity"
-_ROLLOUT_FUNCTION = "yeto.rl.miles.generate_rollout"
+_SYNC_FACTORY = "yeto.rl.adapters.miles.models.sao_streaming.create_miles_sao_streaming_sync"
+_IDENTITY_SETTER = "yeto.rl.adapters.miles.legacy.engine.set_current_published_policy_identity"
+_ROLLOUT_FUNCTION = "yeto.rl.adapters.miles.legacy.engine.generate_rollout"
 _HEX = frozenset("0123456789abcdef")
 _LEGACY_TOP_LEVEL_FIELDS = {
     "schema",

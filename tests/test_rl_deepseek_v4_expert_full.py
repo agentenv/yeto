@@ -5,14 +5,14 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from yeto.rl.deepseek_v4_expert_clone import (
+from yeto.rl.adapters.miles.models.deepseek_v4.expert_clone import (
     CLONES_PER_LAYER,
     NUM_LAYERS,
     ORIGINAL_EXPERTS,
     TOTAL_EXPERTS,
     ExpertCloneContract,
 )
-from yeto.rl.deepseek_v4_expert_full import (
+from yeto.rl.adapters.miles.models.deepseek_v4.expert_full import (
     configure_clone_expert_full,
     expert_full_specs,
     wrap_attention_lora_with_expert_full,

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from yeto.rl.engine.miles_adapter.publish import MilesPublisher, PublicationError
+from yeto.rl.adapters.miles.publish import MilesPublisher, PublicationError
 from yeto.rl.engine.ports import PublicationCause
 
 BASE = {"rank0/model.w": "b0"}

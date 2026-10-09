@@ -32,7 +32,7 @@ from yeto.rl.algos import grpo_knobs  # noqa: E402
 from yeto.rl.algos import reward_pipeline as rp  # noqa: E402
 from yeto.rl.algos import seq_adv as sa  # noqa: E402
 from yeto.rl.engine.algorithm import AlgorithmSpec, load_extensions  # noqa: E402
-from yeto.rl.engine.miles_adapter import algorithm_flags as af  # noqa: E402
+from yeto.rl.adapters.miles import algorithm_flags as af  # noqa: E402
 
 load_extensions()
 

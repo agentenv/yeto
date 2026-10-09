@@ -19,12 +19,12 @@ from yeto.rl.engine.algorithm import AlgorithmSpec, AlgorithmSpecError, PluginRe
 from yeto.rl.engine.capabilities import CapabilityMismatch
 from yeto.rl.engine.driver import TrainStepMetrics
 from yeto.rl.engine.fake import fake_capabilities
-from yeto.rl.engine.miles_adapter.algorithm_flags import (
+from yeto.rl.adapters.miles.algorithm_flags import (
     AlgorithmFlagConflict,
     absorb_extra_argv,
     algorithm_argv,
 )
-from yeto.rl.engine.miles_adapter.entry import miles_capabilities
+from yeto.rl.adapters.miles.entry import miles_capabilities
 
 FINGERPRINT = "sha256:" + "0" * 64
 CHECK = dict(layout="lora", placement="colocated", execution_mode="colocated-serial")
@@ -249,14 +249,14 @@ def test_spec_correction_plus_argv_correction_conflict(base, argv):
 
 
 def test_custom_config_path_refused_on_ports():
-    from yeto.rl.engine.miles_adapter.config import MilesConfigError, check_extra_argv
+    from yeto.rl.adapters.miles.config import MilesConfigError, check_extra_argv
 
     with pytest.raises(MilesConfigError, match="custom-config-path"):
         check_extra_argv(["--custom-config-path", "x.yaml"], AlgorithmSpec())
 
 
 def test_conflict_fails_before_gpu_process():
-    from yeto.rl.engine.miles_adapter.config import MilesConfigError, check_extra_argv
+    from yeto.rl.adapters.miles.config import MilesConfigError, check_extra_argv
 
     with pytest.raises(MilesConfigError, match="--use-tis"):
         check_extra_argv(["--use-opsm", "--opsm-delta", "1e-4", "--use-tis"], AlgorithmSpec())
@@ -511,7 +511,7 @@ def test_doc_has_every_example():
 
 @pytest.mark.parametrize("index", range(6))
 def test_doc_example_dry_run(tmp_path, index):
-    from yeto.rl.engine.miles_adapter.algorithm_flags import dry_run
+    from yeto.rl.adapters.miles.algorithm_flags import dry_run
 
     allow, body = _doc_examples()[index]
     path = tmp_path / "spec.json"

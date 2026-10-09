@@ -133,7 +133,7 @@ def _gdpo_json(value: tuple | None) -> dict | None:
 
 register_field("advantage", "gamma", default=1.0, parse=_parse_gamma)
 register_field("advantage", "gdpo", default=None, parse=_parse_gdpo, to_json=_gdpo_json)
-# --gamma Miles flag row: yeto.rl.engine.miles_adapter.algo_flag_rows (decoupling 4.3).
+# --gamma Miles flag row: yeto.rl.adapters.miles.algo_flag_rows (decoupling 4.3).
 
 
 def gdpo_components(spec) -> tuple[tuple[str, float], ...]:
@@ -428,21 +428,14 @@ def _current_round_id() -> int | None:
     ``Sample.rollout_id`` is a per-trajectory key (multi-segment merging), not
     the training round; the round is read from the policy token the driver
     publishes before each rollout (``yeto:<rollout_id>:<hash>``, INFRA sink).
-    No sink (no ``YETO_ROLLOUT_META_SINK`` and no Ray): None.
+    No reachable sink (backend port, decoupling 4.11): None.
     """
 
-    import os
+    from yeto.rl.engine import rollout_meta
 
-    from yeto.rl.engine.miles_adapter import rollout_meta_hook as hook
-
-    if not os.environ.get(hook.META_SINK_ENV):
-        try:
-            import ray
-        except ImportError:
-            return None
-        if not ray.is_initialized():
-            return None
-    token = hook.current_policy_token()
+    if not rollout_meta.sink_available():
+        return None
+    token = rollout_meta.current_policy_token()
     if not token:
         return None
     parts = token.split(":")
@@ -458,7 +451,7 @@ def _report_round(args, name, per_group_rewards, advantages) -> None:
     round_id = _current_round_id()
     summary["rollout_id"] = round_id
     if round_id is not None:
-        from yeto.rl.engine.miles_adapter.rollout_meta_hook import record_round_metadata
+        from yeto.rl.engine.rollout_meta import record_round_metadata
 
         record_round_metadata(args, round_id,
                               nonzero_advantages=int(summary["nonzero_advantages"]))

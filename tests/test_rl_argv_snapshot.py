@@ -26,9 +26,9 @@ import pytest
 
 from yeto.rl import learner as rl_learner
 from yeto.rl.engine import run_config as rc
-from yeto.rl.engine.miles_adapter import lr_schedule as lrs
+from yeto.rl.adapters.miles import lr_schedule as lrs
 from yeto.rl.engine.algorithm import AlgorithmSpec
-from yeto.rl.engine.miles_adapter import config as mc
+from yeto.rl.adapters.miles import config as mc
 
 import test_rl_launcher as launcher_tests
 
@@ -113,6 +113,35 @@ def _lr_schedule_values(argv) -> dict[str, str]:
     }
 
 
+# yeto-framework-decoupling phase 4 moved Miles-only modules under
+# yeto/rl/adapters/miles/; the argv names plugins by module path.  Map the new
+# paths back so the digests prove nothing *else* changed (longest first).
+_PHASE4_MOVES = sorted([
+    ("yeto.rl.adapters.miles.legacy.engine", "yeto.rl.miles"),
+    ("yeto.rl.adapters.miles.island_entry", "yeto.rl.learner"),
+    ("yeto.rl.adapters.miles.overlay", "yeto.rl.miles_overlay"),
+    ("yeto.rl.adapters.miles.overlays", "yeto.rl.overlays"),
+    ("yeto/rl/adapters/miles/overlays/", "yeto/rl/overlays/"),
+    ("yeto.rl.adapters.miles.models.sao_streaming", "yeto.rl.miles_sao_streaming"),
+    ("yeto.rl.adapters.miles.models.full_parameter_dense", "yeto.rl.miles_full_parameter_dense"),
+    ("yeto.rl.adapters.miles.models.full_parameter", "yeto.rl.miles_full_parameter"),
+    ("yeto.rl.adapters.miles.models.dense_sweep_wire", "yeto.rl.dense_sweep_wire"),
+    ("yeto.rl.adapters.miles.models.flash_next_provider", "yeto.rl.flash_next_provider"),
+    ("yeto.rl.adapters.miles.models.deepseek_v4.bridge", "yeto.rl.deepseek_v4_bridge"),
+    ("yeto.rl.adapters.miles.models.deepseek_v4.clone_lora", "yeto.rl.deepseek_v4_clone_lora"),
+    ("yeto.rl.adapters.miles.models.deepseek_v4.expert_full_runtime",
+     "yeto.rl.deepseek_v4_expert_full_runtime"),
+    ("yeto.rl.adapters.miles.harness_glue.codex_generate", "yeto.rl.harness.codex.generate"),
+    ("yeto.rl.adapters.miles", "yeto.rl.engine.miles_adapter"),
+], key=lambda pair: -len(pair[0]))
+
+
+def _pre_move(item: str) -> str:
+    for new, old in _PHASE4_MOVES:
+        item = item.replace(new, old)
+    return item
+
+
 def _digest(payload) -> str:
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True).encode("utf-8")
@@ -131,11 +160,11 @@ def test_legacy_argv_is_identical_to_pre_split_snapshot(name, tmp_path):
         try:
             argv = real(*args, **kwargs)
         except Exception as exc:  # noqa: BLE001 - errors are part of the contract
-            entry = ["raise", _digest([type(exc).__name__, str(exc).replace(tmp, "<TMP>")])]
+            entry = ["raise", _digest([type(exc).__name__, _pre_move(str(exc).replace(tmp, "<TMP>"))])]
             records.append(entry)
             stripped.append(entry)
             raise
-        norm = [item.replace(tmp, "<TMP>") for item in argv]
+        norm = [_pre_move(item.replace(tmp, "<TMP>")) for item in argv]
         records.append(["argv", _digest(norm)])
         stripped.append(["argv", _digest(_strip_lr_schedule(norm))])
         legacy = _lr_schedule_values(argv)

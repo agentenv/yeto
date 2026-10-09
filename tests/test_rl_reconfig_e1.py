@@ -47,7 +47,7 @@ from yeto.rl.engine.journal import (
     read_journal,
 )
 from yeto.rl.engine.ledger import BatchLedger, LedgerError
-from yeto.rl.engine.miles_adapter.elastic_placement import ElasticPlacement, PlacementPlanError
+from yeto.rl.adapters.miles.elastic_placement import ElasticPlacement, PlacementPlanError
 from yeto.rl.engine.ports import (
     ElasticRolloutPool,
     MemberPublisher,
@@ -295,7 +295,7 @@ def test_reserved_port_verbs_and_optional_protocols():
 
 
 def test_miles_capabilities_do_not_declare_e1_verbs_yet():
-    from yeto.rl.engine.miles_adapter.entry import miles_capabilities
+    from yeto.rl.adapters.miles.entry import miles_capabilities
 
     caps = miles_capabilities(FP)
     assert not (set(caps.port_verbs) & RESERVED_PORT_VERBS)
@@ -795,7 +795,7 @@ def test_safe_point_with_a_deferred_eval_in_flight_does_not_drain(tmp_path):
 
 
 def test_tool_wait_board_feeds_the_drain_and_unknown_fails_closed(tmp_path):
-    from yeto.rl.engine.miles_adapter.rollout import HARNESS_NOT_AGENTIC, MilesRolloutPool
+    from yeto.rl.adapters.miles.rollout import HARNESS_NOT_AGENTIC, MilesRolloutPool
     from yeto.rl.engine.tool_wait import ToolWaitBoard
 
     board = ToolWaitBoard()
@@ -849,7 +849,7 @@ def test_engine_discarded_survives_replay(tmp_path):
 def test_missing_group_index_fails_closed():
     from types import SimpleNamespace
 
-    from yeto.rl.engine.miles_adapter.rollout_meta_hook import group_record
+    from yeto.rl.adapters.miles.rollout_meta_hook import group_record
 
     sample = SimpleNamespace(index=3, reward=1.0, weight_versions=[])
     for args in (SimpleNamespace(), SimpleNamespace(yeto_rl_elastic_metadata=True)):
@@ -905,7 +905,7 @@ def test_build_elastic_and_journal_expand_user_paths(tmp_path, monkeypatch):
     """Integ-s2 finding 5: '~' in --rl-elastic-state-dir/resources/attestation
     resolves to $HOME, never a literal './~' directory."""
     from yeto.rl.engine.journal import Journal, read_epochs, read_journal
-    from yeto.rl.engine.miles_adapter.elastic_wiring import build_elastic
+    from yeto.rl.adapters.miles.elastic_wiring import build_elastic
 
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.chdir(tmp_path)
@@ -964,7 +964,7 @@ class _FakeManager:
 
 
 def test_default_watchdog_kills_the_target_generation_and_unblocks(tmp_path):
-    from yeto.rl.engine.miles_adapter.elastic_wiring import kill_target_generation
+    from yeto.rl.adapters.miles.elastic_wiring import kill_target_generation
 
     driver, ctl, fork, pool, publisher, *_ = _setup(tmp_path)
     gate, dead = threading.Event(), []
@@ -1006,7 +1006,7 @@ def test_default_watchdog_kills_the_target_generation_and_unblocks(tmp_path):
 def test_watchdog_unmappable_target_enters_recovery_required_not_silent_wait(tmp_path):
     """GPU a4s3/a4s4 regression: a manager that cannot resolve the targets (fork-style
     lookup, real ``engine:`` member ids) must not leave the island waiting silently."""
-    from yeto.rl.engine.miles_adapter.elastic_wiring import kill_target_generation
+    from yeto.rl.adapters.miles.elastic_wiring import kill_target_generation
 
     driver, ctl, fork, pool, publisher, *_ = _setup(tmp_path)
     manager = _FakeManager()
@@ -1045,7 +1045,7 @@ def test_watchdog_target_without_live_workers_is_journaled_not_fatal(tmp_path):
     start_cells, GPU d123 chain 3) is journaled as ``skipped`` kind ``no_workers``; it is
     not an unresolved target, so the transaction still ends REBUILT_OLD (not
     RECOVERY_REQUIRED) once the blocked fork call returns."""
-    from yeto.rl.engine.miles_adapter.elastic_wiring import kill_target_generation
+    from yeto.rl.adapters.miles.elastic_wiring import kill_target_generation
 
     driver, ctl, fork, pool, publisher, *_ = _setup(tmp_path)
     manager = _FakeManager()
@@ -1089,7 +1089,7 @@ def test_watchdog_target_whose_workers_died_is_journaled_as_workers_lost(tmp_pat
     journals that cell as ``skipped`` kind ``workers_lost`` (naming the dead workers) instead
     of the generic ``no_workers``, kills the other target, and the transaction still ends
     REBUILT_OLD once the blocked fork call returns."""
-    from yeto.rl.engine.miles_adapter.elastic_wiring import kill_target_generation
+    from yeto.rl.adapters.miles.elastic_wiring import kill_target_generation
 
     driver, ctl, fork, pool, publisher, *_ = _setup(tmp_path)
     manager = _FakeManager()
@@ -1135,7 +1135,7 @@ def test_watchdog_target_whose_workers_died_is_journaled_as_workers_lost(tmp_pat
 def test_watchdog_describe_failure_falls_back_to_no_workers(tmp_path):
     """An older fork (no ``describe_cells``) or a failing lookup must not change the
     kill result or block the watchdog: the generic ``no_workers`` classification stands."""
-    from yeto.rl.engine.miles_adapter.elastic_wiring import _lost_workers_of
+    from yeto.rl.adapters.miles.elastic_wiring import _lost_workers_of
 
     class _Ray:
         def get(self, ref, timeout=None):
@@ -1161,7 +1161,7 @@ def test_watchdog_describe_failure_falls_back_to_no_workers(tmp_path):
 
 
 def test_watchdog_outside_start_verify_kills_nothing(tmp_path):
-    from yeto.rl.engine.miles_adapter.elastic_wiring import kill_target_generation
+    from yeto.rl.adapters.miles.elastic_wiring import kill_target_generation
 
     driver, ctl, *_ = _setup(tmp_path)
     fake_ray = _FakeRay(lambda h: None)
@@ -1173,7 +1173,7 @@ def test_watchdog_outside_start_verify_kills_nothing(tmp_path):
 
 
 def test_build_elastic_wires_the_default_watchdog_action(tmp_path):
-    from yeto.rl.engine.miles_adapter.elastic_wiring import build_elastic
+    from yeto.rl.adapters.miles.elastic_wiring import build_elastic
 
     res = tmp_path / "res.json"
     res.write_text(json.dumps({"configs": {"T4R2S2": {"trainer": 4, "rollout": 2, "standby": 2}},
@@ -1194,7 +1194,7 @@ def test_watchdog_firing_after_the_last_verify_prevents_the_commit(tmp_path):
     """Review F2: the deadline passes after the last _check_deadline but before
     the CAS (a slow verify_serving_policy); the new cells may have been killed,
     so the transaction must not commit."""
-    from yeto.rl.engine.miles_adapter.elastic_wiring import kill_target_generation
+    from yeto.rl.adapters.miles.elastic_wiring import kill_target_generation
 
     driver, ctl, fork, pool, publisher, *_ = _setup(tmp_path)
     fake_ray = _FakeRay(lambda handle: None)
