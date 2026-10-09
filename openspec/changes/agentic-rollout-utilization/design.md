@@ -24,8 +24,19 @@
    **丢弃 token 数（10-09 主 agent 代用户拍板）**：Miles 在部分 rollout 关闭时于 `abort()` 直接丢弃被中止组，yeto 拿不到其 token 数；在 agentenv/miles 分支 `s18-abort-discard-stats`（efbbc63ea，基于 8bc52237a）给 `abort()` 加统计 `args.rollout_abort_discard_stats = {groups, samples, response_tokens, unknown_groups}`，yeto 的 meta hook 读取；镜像未含此提交时报 None（未知），不猜。
 5. **切点携带未完成轨迹**：切点新增"在途轨迹"段（token、版本段、生成概率、会话状态引用），只在 N>0 时写；`cut.py` 的空缓冲断言改为"N=0 时必须为空"。
 6. **agentic 挂起点在回合之间**：在 Miles fork 的 agentic 生成循环里，截止信号只在模型回合结束、工具结果写回后生效；沙箱用 Modal 沙箱保活（存活上限默认 600 s，取 G6 训练+发布时长量级），超时丢弃。备选：沙箱快照恢复（DeltaBox 式）——Modal 侧能力未验证，列为后续。
+   **实现（S18 ARU-3，10-09）**：
+   - 挂起点放在 yeto 的 Codex 桥上（Codex → 桥 → Miles 会话服务）：每条轨迹一个"回合门"文件（`YETO_CODEX_SUSPEND_GATE`）。门关着时，桥在发下一个模型请求之前等待；工具在沙箱里照常跑完，结果已在这次请求的历史里。截止那一刻正在生成的模型回合被引擎中止（会话服务返回 503、不记录），桥在门打开后原样重发这一回合（被作废的只有这一回合已解码的 token）。
+   - Miles fork（agentenv/miles `s18-agentic-suspend`，`--agentic-suspend-between-turns --agentic-suspend-max-rounds N`，不用 `--partial-rollout`）：截止时先调 agent 模块的 `suspend()` 关门，再中止引擎请求并确认引擎空闲（`/get_load` 为 0，供训练卸载显存），未完成的组任务不等待、留在常驻事件循环里；下一轮开始调 `resume()` 开门，接回这些组并补发新组到多发数；开始轮超过 N 轮的组在截止时取消（agent 释放沙箱）并计数；凑够后才完成的组也留到下一轮，不丢；最后一轮照旧中止。
+   - 沙箱保活：挂起期间沙箱不动；桥的等待上限 `YETO_CODEX_SUSPEND_MAX_SECONDS`（默认 600 s），超时抛 `CodexSuspendExpired` → 基础设施样本、`run` 的 finally 销毁沙箱。Modal 沙箱的 `idle_timeout` 必须大于存活上限加一个模型回合（上卡用 900 s）；Codex 的 `stream_idle_timeout_ms` 在开门控时设为（上限+600 s）。
+   - 版本：同一条轨迹的模型调用跨版本（每次调用一个版本段），按"结束时的当前版本 − 最旧版本 ≤ N"判定（5.2，`codex_openenv_generate.window_problem`；Miles 侧按开始轮次先行取消）；工具输出 token 不计跨版本。
+   - 切点（3.3 的 Miles 接线）：上限 >0 时切点导出缓冲组（完整 Miles 样本 + 版本段 + 生成概率）与挂起 agentic 轨迹的引用；恢复时缓冲组按规则续跑或丢弃，agentic 引用一律丢弃并上报（进程与沙箱已不在，不从头重跑同一题）。
 7. **多岛**：每岛独立凑够即截止；合并按 outer_version，样本按版本段进入 `island_ledger` 的 `ACCEPT_IS` 判定；落后上限进契约哈希，不一致按 #143 规则只拒该连接。
 8. **FN（无前缀缓存的 mamba 混合结构）**：续跑需重算整段前缀，阶段 3 前先测重算代价；若续跑的前缀重算时间超过省下的等待时间，FN 只用阶段 0。
+   **估算（S18 ARU-3，10-09，未上卡；脚本与结果 s1-runs/s18-aru3-fn-prefix/{analyze.py,estimate.json}，数据 G6 s1-runs/s17-fncodex-r3-20261008a 1 轮 24 条）**：
+   - FN 关了前缀缓存：G6 全部 87 行 Prefill 的 `#cached-token` 为 0；生成段内预填充新 token 合计 39.1 万，与各回合上下文合计 48.3 万同量级（比值 0.81，差约两成未查清）——每个模型回合本来就重算整段前缀。所以续跑的额外重算只在"截止那一刻正在生成、被作废重做的那一回合"，挂起后的下一回合本来就要全量预填充。
+   - 上界估算（每条在途轨迹多重算一次整段上下文，预填充速率取大批次中位约 2.96 万 token/s，只有 6 行间接值）：长轨迹（≥5 回合）末回合上下文 p50 8462 / p90 约 15554 token → 每条约 0.29 / 0.53 s；24 条全部重做的极端上界约 2.7 s。
+   - 省下的等待（代理值，`#running-req` 回落时刻）：去掉最慢 10% 约 32 s，去掉最慢 25% 约 56 s（G6 整轮约 923 s，研究文档的"每轮约省 10%"量级吻合）。
+   - 结论：FN 续跑的前缀重算代价（≤约 2.7 s/轮）比省下的等待（约 32–56 s/轮）小一个数量级以上，**FN 不限于阶段 0**。可靠性：只 1 轮 24 条（14 条一回合即结束），预填充速率为间接值，省下的等待为代理值，8×H200 TP2/PP4/EP2 配置专属；结论方向稳健（差一个数量级），绝对数不可靠。不单为此上卡；FN 下次上卡时顺带采集预填充单批耗时、续跑后首回合首 token 延迟、被作废回合的已解码 token 数。
 
 9. **verl 并行线**：yeto verl 适配层现在走同步训练器、vLLM 推理，`entry.py:26` 声明 `max_policy_staleness=0`。verl fork 的 `fully_async_policy` 已有 `partial_rollout`、`staleness_threshold`（`fully_async_rollouter.py:421`）、按副本中止并重试（约 1222–1252 行），生成走 `AgentLoopManager`，可接 `tool_agent_loop`。做法：阶段 0 在同步模式下设多发与截止；阶段 2 起由落后上限推导 `async_training.staleness_threshold` 与 `partial_rollout`，适配层把 verl 的样本版本、丢弃计数翻译成 yeto 统一事件字段；多岛仍由 yeto 同步服务按 outer_version 合并，verl 的内部 message_queue 只在单岛内使用。备选：直接用 verl 原生完全异步、不经 yeto 开关——绕开契约与多岛账本，否决。风险：fully_async 是 experimental 目录，接口可能变动，锁 fork 版本；`tool_agent_loop` 在中止重试时是从头重跑还是续跑要读码确认（列入任务 6.1）。
    **6.1 读码结论（verl fork acad9875，10-09）**：

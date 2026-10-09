@@ -10,7 +10,7 @@
   "builder": "scripts/build_miles_ports_image.sh (crane append); docker/miles-ports/Dockerfile equivalent",
   "image": "ghcr.io/michaellchung/yeto-miles-ports",
   "miles": {
-    "commit": "df23a0b5e7937a35f7cea8c77b848805c30a17eb",
+    "commit": "ddce20992c9ee82270a22e259e9e2bf55f3053d1",
     "install": "base's editable install (pip install -e /root/miles --no-deps) kept (same path); /root is on the base's sys.path, so without PYTHONPATH import miles is a namespace package over the /root/miles checkout -- yeto runs with PYTHONPATH=$HOME/miles (regular package)",
     "path": "/root/miles",
     "repository": "https://github.com/michaellchung/miles",
@@ -26,5 +26,5 @@
     "upstream_commit": "571212b636baca45e10fa3b4da11a289123f3235",
     "version": "0.5.21.dev70+g2fa8801"
   },
-  "tag": "df23a0b-2fa8801"
+  "tag": "ddce209-2fa8801"
 }
