@@ -200,3 +200,4 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
 | fn_2x8 | `sha256:18dda066…` | `sha256:f88f978b…` | `18ce0b0f…` |
 
 - 旧 GPU 证据：只是契约哈希多了一个字段，训练行为不变，按 D6 继续以本表引用。
+- 同一 PR 另有一处插件源码变化（S17 N17）：`yeto/rl/harness/codex/codex_openenv_subprocess_agent_function.py` 增加 Miles 的 `abort` 钩子（多发请求凑够即截止时取消多余的 Codex 工作进程），codex_harness 样本里该插件 `source_sha256` `326680fe…` → `fbb48c5c…`（基于 #155 之后的 main）；不进算法哈希/契约哈希。
