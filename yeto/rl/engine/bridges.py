@@ -438,7 +438,9 @@ class ElasticAvgSync:
                                     syncer_epoch=self.syncer_epoch,
                                     backend_identity_sha256=island_contract_sha256(
                                         getattr(self.config, "backend_identity_sha256", None),
-                                        getattr(self.config, "lr_schedule_sha256", None))),
+                                        getattr(self.config, "lr_schedule_sha256", None),
+                                        test_salt=_identity_test_salt()),
+                                    compat_group=getattr(self.config, "compat_group", None)),
                 hmac_key_from_env(), on_event=self._client_event)
         return self.client
 
@@ -1119,3 +1121,10 @@ class DecoupledSync:
     def close(self) -> None:
         if self.bridge is not None:
             self.bridge.close()
+
+
+def _identity_test_salt():
+    """launch-preflight-guards 3.3: negative-test island salt (None normally)."""
+    from yeto.island_overrides import identity_test_salt
+
+    return identity_test_salt()

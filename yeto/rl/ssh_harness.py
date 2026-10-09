@@ -2754,7 +2754,14 @@ def _argv(command: Sequence[str], *options: tuple[str, Any]) -> list[str]:
     return values
 
 
-def _syncer_argv(plan: dict[str, Any]) -> list[str]:
+def _syncer_argv(plan: dict[str, Any], *, resume: bool = True) -> list[str]:
+    """Syncer argv; ``resume=False`` drops ``--resume`` for a first launch.
+
+    The start script picks the variant at launch time: ``--resume`` only when
+    the checkpoint file already exists (the syncer rejects ``--resume`` without
+    a checkpoint). Identity checks accept both variants, see
+    ``_syncer_expected_argv_lines``.
+    """
     learner = plan["learner"]
     sync_preset = learner.get("sync_preset", "strict-avg")
     decoupled = sync_preset == "decoupled"
@@ -2786,9 +2793,20 @@ def _syncer_argv(plan: dict[str, Any]) -> list[str]:
         ("--learner-weight", "equal"),
         ("--checkpoint-path", "$RUN/state/state.ckpt"),
         ("--checkpoint-every", 1),
-        ("--resume", None),
+        *((("--resume", None),) if resume else ()),
         ("--event-tape", "$RUN/state/events.jsonl"),
     )
+
+
+def _syncer_expected_argv_lines(plan: dict[str, Any]) -> str:
+    """Shell arrays for both legal syncer argv variants (with/without --resume)."""
+
+    resume = _shell_join_with_run(_syncer_argv(plan))
+    fresh = _shell_join_with_run(_syncer_argv(plan, resume=False))
+    return f"""EXPECTED_SYNCER_ARGV=({resume})
+EXPECTED_SYNCER_ARGV_FRESH=({fresh})
+EXPECTED_UNIT_ARGV=("$WRAPPER" "$EXIT_FILE" "${{EXPECTED_SYNCER_ARGV[@]}}")
+EXPECTED_UNIT_ARGV_FRESH=("$WRAPPER" "$EXIT_FILE" "${{EXPECTED_SYNCER_ARGV_FRESH[@]}}")"""
 
 
 def _shell_join_with_run(values: Sequence[str]) -> str:
@@ -2824,7 +2842,20 @@ def _legacy_syncer_pid_function() -> str:
 def _syncer_runtime_identity_functions() -> str:
     """Shell helpers that bind the listener to this run's exact systemd unit."""
 
-    return r"""syncer_unit_pid() {
+    return r"""# A syncer launched before its checkpoint existed runs without --resume;
+# both argv variants are the same process identity.
+syncer_argv_matches() {
+  local -n MATCH_ACTUAL=$1
+  local MATCH_START=$2
+  local -n MATCH_EXPECTED=$3
+  local MATCH_INDEX
+  [ "$((${#MATCH_ACTUAL[@]} - MATCH_START))" -eq "${#MATCH_EXPECTED[@]}" ] || return 1
+  for MATCH_INDEX in "${!MATCH_EXPECTED[@]}"; do
+    [ "${MATCH_ACTUAL[$((MATCH_START + MATCH_INDEX))]}" = "${MATCH_EXPECTED[$MATCH_INDEX]}" ] || return 1
+  done
+}
+
+syncer_unit_pid() {
   systemctl is-active --quiet "$UNIT" || return 1
   [ -s "$UNIT_FILE" ] && [ "$(cat "$UNIT_FILE")" = "$UNIT" ] || return 1
   PID="$(systemctl show --property=MainPID --value "$UNIT")"
@@ -2853,10 +2884,9 @@ def _syncer_runtime_identity_functions() -> str:
     fi
   done
   [ "$START" -ge 0 ] || return 1
-  [ "$((${#ACTUAL_ARGV[@]} - START))" -eq "${#EXPECTED_UNIT_ARGV[@]}" ] || return 1
-  for INDEX in "${!EXPECTED_UNIT_ARGV[@]}"; do
-    [ "${ACTUAL_ARGV[$((START + INDEX))]}" = "${EXPECTED_UNIT_ARGV[$INDEX]}" ] || return 1
-  done
+  syncer_argv_matches ACTUAL_ARGV "$START" EXPECTED_UNIT_ARGV \
+    || syncer_argv_matches ACTUAL_ARGV "$START" EXPECTED_UNIT_ARGV_FRESH \
+    || return 1
   printf '%s\n' "$PID"
 }
 
@@ -2871,10 +2901,9 @@ syncer_child_pid() {
   [ -n "$EXPECTED_EXE" ] && [ "$ACTUAL_EXE" = "$EXPECTED_EXE" ] || return 1
   [ -r "/proc/$CHILD_PID/cmdline" ] || return 1
   mapfile -d '' -t CHILD_ARGV < "/proc/$CHILD_PID/cmdline"
-  [ "${#CHILD_ARGV[@]}" -eq "${#EXPECTED_SYNCER_ARGV[@]}" ] || return 1
-  for INDEX in "${!EXPECTED_SYNCER_ARGV[@]}"; do
-    [ "${CHILD_ARGV[$INDEX]}" = "${EXPECTED_SYNCER_ARGV[$INDEX]}" ] || return 1
-  done
+  syncer_argv_matches CHILD_ARGV 0 EXPECTED_SYNCER_ARGV \
+    || syncer_argv_matches CHILD_ARGV 0 EXPECTED_SYNCER_ARGV_FRESH \
+    || return 1
   printf '%s\n' "$CHILD_PID"
 }
 
@@ -2938,7 +2967,6 @@ syncer_listener_owned_by_unit() {
 
 
 def _syncer_start_script(plan: dict[str, Any]) -> str:
-    command = _shell_join_with_run(_syncer_argv(plan))
     unit = shlex.quote(_syncer_unit_name(plan))
     eval_checkpoint = plan.get("eval_checkpoint")
     checkpoint_check = ""
@@ -2962,8 +2990,7 @@ SYNCER_BINARY="$RUN/state/yeto-syncer"
 CHECKPOINT_PATH="$RUN/state/state.ckpt"
 EVENT_TAPE="$RUN/state/events.jsonl"
 SYNCER_PORT={plan['syncer_port']}
-EXPECTED_SYNCER_ARGV=({command})
-EXPECTED_UNIT_ARGV=("$WRAPPER" "$EXIT_FILE" "${{EXPECTED_SYNCER_ARGV[@]}}")
+{_syncer_expected_argv_lines(plan)}
 {_legacy_syncer_pid_function()}
 {_syncer_runtime_identity_functions()}
 if systemctl is-active --quiet "$UNIT"; then
@@ -3001,6 +3028,11 @@ if [ "$(systemctl show --property=LoadState --value "$UNIT" 2>/dev/null || true)
   exit 1
 fi
 rm -f "$PID_FILE" "$EXIT_FILE"
+if [ -e "$CHECKPOINT_PATH" ]; then
+  LAUNCH_SYNCER_ARGV=("${{EXPECTED_SYNCER_ARGV[@]}}")
+else
+  LAUNCH_SYNCER_ARGV=("${{EXPECTED_SYNCER_ARGV_FRESH[@]}}")
+fi
 cat > "$WRAPPER" <<'SH'
 #!/usr/bin/env bash
 set -uo pipefail
@@ -3060,7 +3092,7 @@ systemd-run --quiet \
   --property="StandardOutput=append:$LOG_FILE" \
   --property="StandardError=append:$LOG_FILE" \
   --setenv="PYTHONPATH=$SYNCER_PYTHONPATH" \
-  "$WRAPPER" "$EXIT_FILE" {command}
+  "$WRAPPER" "$EXIT_FILE" "${{LAUNCH_SYNCER_ARGV[@]}}"
 sleep 1
 if ! systemctl is-active --quiet "$UNIT"; then
   systemctl show "$UNIT" \
@@ -3083,7 +3115,6 @@ def _start_syncer(plan: dict[str, Any]) -> None:
 
 def _wait_for_syncer(plan: dict[str, Any], timeout_s: int = 120) -> None:
     host, port = _validate_address(plan["syncer_address"])
-    command = _shell_join_with_run(_syncer_argv(plan))
     unit = shlex.quote(_syncer_unit_name(plan))
     _ssh(
         plan,
@@ -3098,8 +3129,7 @@ CHECKPOINT_PATH="$RUN/state/state.ckpt"
 EVENT_TAPE="$RUN/state/events.jsonl"
 EXIT_FILE="$RUN/state/syncer.exit"
 SYNCER_PORT={port}
-EXPECTED_SYNCER_ARGV=({command})
-EXPECTED_UNIT_ARGV=("$WRAPPER" "$EXIT_FILE" "${{EXPECTED_SYNCER_ARGV[@]}}")
+{_syncer_expected_argv_lines(plan)}
 {_syncer_runtime_identity_functions()}
 SYNCER_ADDRESS_HOST={shlex.quote(host)}
 command -v getent >/dev/null
@@ -3684,7 +3714,6 @@ def start(plan_path: str | Path) -> None:
 
 def _syncer_status_script(plan: dict[str, Any]) -> str:
     unit = shlex.quote(_syncer_unit_name(plan))
-    command = _shell_join_with_run(_syncer_argv(plan))
     return f"""UNIT={unit}
 UNIT_FILE="$RUN/state/syncer.unit"
 PID_FILE="$RUN/state/syncer.pid"
@@ -3694,8 +3723,7 @@ SYNCER_BINARY="$RUN/state/yeto-syncer"
 CHECKPOINT_PATH="$RUN/state/state.ckpt"
 EVENT_TAPE="$RUN/state/events.jsonl"
 SYNCER_PORT={plan['syncer_port']}
-EXPECTED_SYNCER_ARGV=({command})
-EXPECTED_UNIT_ARGV=("$WRAPPER" "$EXIT_FILE" "${{EXPECTED_SYNCER_ARGV[@]}}")
+{_syncer_expected_argv_lines(plan)}
 {_legacy_syncer_pid_function()}
 {_syncer_runtime_identity_functions()}
 if command -v systemctl >/dev/null && systemctl is-active --quiet "$UNIT"; then
@@ -3808,7 +3836,6 @@ def restart_learner(plan_path: str | Path, learner_id: int) -> None:
 def kill_syncer(plan_path: str | Path) -> None:
     _, plan = load_plan(plan_path)
     unit = shlex.quote(_syncer_unit_name(plan))
-    command = _shell_join_with_run(_syncer_argv(plan))
     _ssh(
         plan,
         _syncer_host(plan),
@@ -3823,8 +3850,7 @@ SYNCER_BINARY="$RUN/state/yeto-syncer"
 CHECKPOINT_PATH="$RUN/state/state.ckpt"
 EVENT_TAPE="$RUN/state/events.jsonl"
 SYNCER_PORT={plan['syncer_port']}
-EXPECTED_SYNCER_ARGV=({command})
-EXPECTED_UNIT_ARGV=("$WRAPPER" "$EXIT_FILE" "${{EXPECTED_SYNCER_ARGV[@]}}")
+{_syncer_expected_argv_lines(plan)}
 {_legacy_syncer_pid_function()}
 {_syncer_runtime_identity_functions()}
 if command -v systemctl >/dev/null && systemctl is-active --quiet "$UNIT"; then
@@ -3882,7 +3908,6 @@ def restart_syncer(plan_path: str | Path) -> None:
 
 def _syncer_stop_script(plan: dict[str, Any]) -> str:
     unit = shlex.quote(_syncer_unit_name(plan))
-    command = _shell_join_with_run(_syncer_argv(plan))
     return f"""set -euo pipefail
 {_remote_vars(plan)}
 UNIT={unit}
@@ -3894,8 +3919,7 @@ SYNCER_BINARY="$RUN/state/yeto-syncer"
 CHECKPOINT_PATH="$RUN/state/state.ckpt"
 EVENT_TAPE="$RUN/state/events.jsonl"
 SYNCER_PORT={plan['syncer_port']}
-EXPECTED_SYNCER_ARGV=({command})
-EXPECTED_UNIT_ARGV=("$WRAPPER" "$EXIT_FILE" "${{EXPECTED_SYNCER_ARGV[@]}}")
+{_syncer_expected_argv_lines(plan)}
 {_legacy_syncer_pid_function()}
 {_syncer_runtime_identity_functions()}
 LOAD_STATE="$(systemctl show --property=LoadState --value "$UNIT" 2>/dev/null || true)"

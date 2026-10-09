@@ -206,6 +206,8 @@
   - 不做（I5，2026-10-09，主 agent 按用户授权代拍板）：2.4 没有实测净收益边，建议器不会给出建议，自动模式上卡只会得出空结论；代码与单测保留，等"工具等待与 agentic GPU 利用"spec 产出新的收益来源再议。
 - [ ] 6.7 [X；依赖6.6] 综合故障、学习行为与部署回退验收；验收：sample/step/policy/roster正确或fail closed，学习符合预设标准，更新capability matrix/fork bundle/手册；未通过收益门槛保持manual/recommend。 （手册草稿 elastic-ops.md §1–§5b，验收未做）
   - 不做（I6，2026-10-09）：理由同 6.6，依赖 6.6。
+- [x] 6.8 [Y；依赖6.2] （S19 G2）建议器同时给出墙钟与 GPU 秒两个收益口径；`objective=gpu_seconds` 时减引擎在 GPU 秒净收益为正可被推荐，默认 `wall` 不变。（完成：`yeto/rl/engine/recommend.py` `Recommender.objective`/`measures`，`CandidateEdge.source_gpus/target_gpus`，`candidate_edges_from_attestation` 填卡数；`tests/test_rl_recommend_objective.py`；口径与默认策略见 design D9“收益口径”；未上卡。离线实测 f 见 infra-drafts/S19-ELASTIC-NET-BENEFIT.md §6。）
+- [ ] 6.9 （后续项，S19 G1）半自动"按钮"：看板读取待批建议，点击后写 CommandInbox `request` 命令文件（含 expected_config_epoch），显示 status.json。本轮不做。
 
 ## 7. 阶段 F：云资源池与岛间扩展设计
 

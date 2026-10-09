@@ -76,6 +76,9 @@ class BridgeConfig:
     # syncer compares (HELLO / JOIN), so islands with different LR schedules
     # are refused.  None = not declared (identity only).
     lr_schedule_sha256: str | None = None
+    # 7.7c: "<vendor>-<card>" (yeto.hw.catalog); sent in HELLO / JOIN so the
+    # syncer refuses another card type by name. None = not declared.
+    compat_group: str | None = None
 
 
 def _write_round_audit(
@@ -280,7 +283,9 @@ class StrictRlBridge:
             dtype=DTYPE_F32,
             num_streams=config.wan_streams,
             session_contract_hash=_session_contract(self.layout, island_contract_sha256(
-                config.backend_identity_sha256, getattr(config, "lr_schedule_sha256", None))),
+                config.backend_identity_sha256, getattr(config, "lr_schedule_sha256", None),
+                test_salt=_identity_test_salt())),
+            compat_group=getattr(config, "compat_group", None),
             # A dead syncer connection makes this island exit. The launcher
             # restarts the same logical ID, which reapplies the committed cut
             # and recomputes any uncommitted local result.
@@ -988,7 +993,9 @@ def make_island_bridge(runtime: IslandRuntime, config: BridgeConfig, *,
             ElasticClientConfig(config.syncer_addr, config.learner_id,
                                 backend_identity_sha256=island_contract_sha256(
                                     getattr(config, "backend_identity_sha256", None),
-                                    getattr(config, "lr_schedule_sha256", None))),
+                                    getattr(config, "lr_schedule_sha256", None),
+                                    test_salt=_identity_test_salt()),
+                                compat_group=getattr(config, "compat_group", None)),
             hmac_key_from_env())
     return ElasticRlBridge(runtime, config, elastic_client, **elastic_kw)
 
@@ -1001,3 +1008,10 @@ def _session_contract(layout, identity_sha256: str | None) -> bytes | None:
     from yeto.rl.engine.backend_identity import session_contract_hash
 
     return session_contract_hash(layout_fingerprint(layout), identity_sha256)
+
+
+def _identity_test_salt():
+    """launch-preflight-guards 3.3: negative-test island salt (None normally)."""
+    from yeto.island_overrides import identity_test_salt
+
+    return identity_test_salt()

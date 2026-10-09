@@ -1124,6 +1124,10 @@ class IslandDriver:
             "rl/filtered_groups": batch.filtered,
             "rl/carried_over_groups": batch.carried_over,
         }
+        # rl-algo-supplement 2.6: the engine's over-sampling tally; nothing when
+        # not reported (older Miles image, no over-sampling)
+        for key, value in sorted((getattr(batch, "over_sampling", None) or {}).items()):
+            values[f"rl/over_sampling/{key}"] = value
         extra = getattr(self.trainer, "algorithm_metrics", None)
         if callable(extra):
             values.update({str(k): v for k, v in dict(extra() or {}).items()})

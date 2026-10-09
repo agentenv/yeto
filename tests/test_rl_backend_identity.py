@@ -22,7 +22,7 @@ from yeto.rl.engine.backend_identity import (
 )
 
 GOLDEN = Path(__file__).resolve().parent / "golden" / "decoupling"
-FAKE_VERL = BackendIdentity("verl", "a" * 40, "nvidia", param_map_sha256({"kind": "hf-to-fsdp"}))
+FAKE_VERL = BackendIdentity("verl", "a" * 40, "nvidia", param_map_sha256({"kind": "hf-to-fsdp"}), "nvidia-h100")
 
 
 def test_miles_identity_is_fixed_and_hash_is_stable():

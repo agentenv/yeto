@@ -1,0 +1,95 @@
+{
+ "run": "s18-lpg-salt-20261009a",
+ "sched": "elastic",
+ "steps": 10,
+ "criteria": {
+  "P1_preflight_ran_before_cloud": true,
+  "P2_override_event_island1_only": true,
+  "P3_island1_refused_with_both_hashes": true,
+  "P4_only_that_connection": true,
+  "P5_island0_completes_all_rounds": true,
+  "P6_dashboard_marks_island1": true
+ },
+ "facts": {
+  "preflight_threads_local": [
+   [
+    "2650",
+    "2800"
+   ]
+  ],
+  "preflight_memory_local": [
+   [
+    "0",
+    "H100",
+    "36.6",
+    "71.3",
+    "OK"
+   ],
+   [
+    "1",
+    "H100",
+    "36.6",
+    "71.3",
+    "OK"
+   ]
+  ],
+  "preflight_threads_head": [
+   [
+    "499",
+    "2800"
+   ]
+  ],
+  "negative_banner": true,
+  "override_events": [
+   {
+    "island": 1,
+    "overrides": [
+     {
+      "island": 1,
+      "key": "identity_test_salt",
+      "name": "岛身份测试扰动",
+      "new": "n12neg",
+      "old": null
+     }
+    ]
+   }
+  ],
+  "refusal_lines": [
+   "backend identity mismatch, JOIN refused: island 1 declares 9079278ab3e9fcf84445ba2856c0543a586f6907e1a9155d40eb56afbfda02be but this elastic session is pinned to d1afed0164c1e8a67a67fd217e6deb5dfea94cec51f68109944b9e0ea54f33ac by its first JOIN; islands with a different training backend (e.g. Miles vs verl), engine commit, device family or parameter-name map cannot be merged"
+  ],
+  "syncer_lines_after_refusal": 51,
+  "syncer_fatal_lines": [],
+  "island0_refused": false,
+  "island0_local_rounds": [
+   1,
+   2,
+   3,
+   4,
+   5,
+   6,
+   7,
+   8,
+   9,
+   10
+  ],
+  "island0_finalized": true,
+  "island1_local_rounds": [],
+  "dashboard_cards": {
+   "0": null,
+   "1": {
+    "label": "负例岛：岛身份测试扰动 无→n12neg",
+    "overrides": [
+     {
+      "key": "identity_test_salt",
+      "name": "岛身份测试扰动",
+      "old": null,
+      "new": "n12neg"
+     }
+    ]
+   }
+  },
+  "gpu_names": []
+ },
+ "missing_evidence": [],
+ "verdict": "PASS"
+}

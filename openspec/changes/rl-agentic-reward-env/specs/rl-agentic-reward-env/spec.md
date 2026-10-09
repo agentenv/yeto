@@ -55,3 +55,21 @@ SWE-bench Verified 判分 MUST 在该题官方镜像的全新沙箱中，按官�
 #### Scenario: PASS_TO_PASS 被破坏
 - **WHEN** FAIL_TO_PASS 全过但任一 PASS_TO_PASS 失败
 - **THEN** 记为未解决
+
+### Requirement: 沙箱网络出口默认关闭
+奖励环境的任务沙箱 SHALL 默认没有网络出口；只有网络规则里列出的任务才 SHALL 按其规则放行（全部放行、域名白名单或 CIDR 白名单）。规则文件格式错误时 SHALL 报错，不得退回放行。
+
+#### Scenario: 未列出的任务
+- **WHEN** 为网络规则里没有的任务建 Modal 沙箱
+- **THEN** 沙箱以 `block_network=True` 创建
+
+#### Scenario: 域名白名单
+- **WHEN** 任务规则为 `{"domains": ["pypi.org"]}`
+- **THEN** 沙箱只放行 `pypi.org`（`outbound_domain_allowlist`）
+
+### Requirement: 本地沙箱只传最少环境变量
+`LocalProcessSandbox` SHALL 不继承父进程环境；命令只拿到 `PATH`、`LANG`、`LC_ALL`、`TZ`（父进程有时）以及沙箱自己的 `HOME`、`TB2_TESTS_DIR`、`TB2_VERIFIER_LOGS_DIR`。
+
+#### Scenario: 父进程带令牌
+- **WHEN** 父进程环境里有 `MODAL_TOKEN_SECRET`
+- **THEN** 沙箱命令的环境里没有该变量

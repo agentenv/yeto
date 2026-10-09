@@ -163,13 +163,43 @@ def publish_selftest(island, publisher, policy_state, specs) -> dict:
             "tamper_detected": detected, "seconds": time.time() - t0}
 
 
+def build_sync(plan: dict, specs, *, lora_hash: str, layout_hash: str, identity_sha256: str,
+               compat_group: str | None = None):
+    """Outer sync of the island plan: none / strict / elastic (both trainer paths)."""
+    from yeto.rl.engine.bridges import ElasticAvgSync, LocalOnlySync, StrictAvgSync
+
+    learner_id = int(plan["learner_id"])
+    mode = plan["sync"]
+    rounds = int(plan["global_rounds"])
+    if mode == "none":
+        sync = LocalOnlySync(rounds)
+    else:
+        from yeto.rl.bridge import BridgeConfig
+
+        host, _, port = plan["syncer"].rpartition(":")
+        bridge = BridgeConfig(
+            syncer_addr=(host, int(port)), learner_id=learner_id, global_rounds=rounds,
+            groups_per_round=int(plan["groups_per_round"]),
+            samples_per_group=int(plan["samples_per_group"]), local_optimizer_steps=1,
+            expected_specs=tuple(specs), base_model_revision=plan["model_revision"],
+            lora_config_hash=lora_hash, layout_hash=layout_hash, event_tape=plan["event_tape"],
+            wan_streams=int(plan.get("wan_streams", 4)),
+            backend_identity_sha256=identity_sha256, compat_group=compat_group)
+        if mode == "strict":
+            sync = StrictAvgSync(bridge, progress=None)
+        elif mode == "elastic":
+            sync = ElasticAvgSync(bridge, progress=None, syncer_epoch=int(plan.get("syncer_epoch", 0)))
+        else:
+            raise ValueError(f"unknown sync mode {mode!r}")
+    return sync
+
+
 def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
     from verl.utils.skip import SkipManager
     from verl.utils.tracking import Tracking
 
     from yeto.rl.core import canonical_layout_hash, canonical_lora_config_hash
     from yeto.rl.engine.algorithm import AlgorithmSpec
-    from yeto.rl.engine.bridges import ElasticAvgSync, LocalOnlySync, StrictAvgSync
     from yeto.rl.engine.driver import EventTape, IslandDriver
     from yeto.rl.export import adapter_targets, derive_peft_lora_specs
 
@@ -210,33 +240,16 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
                         tis_upper=float(plan.get("tis_upper", 2.0)),
                         thresholds_key=plan["thresholds_key"],
                         emit=lambda event, **f: tape.append({"event": event, **f}))
-    identity = backend_identity()
+    from yeto.hw.catalog import runtime_versions
+
+    identity = backend_identity(compat_group=plan.get("compat_group"))  # 7.7a: unset -> error
+    tape.append({"event": "rl_island_hardware", "compat_group": identity.compat_group, **runtime_versions()})
     tape.append({"event": "rl_verl_island_start", "plan": plan, "backend_identity": identity.to_dict(),
                  "backend_identity_sha256": identity.sha256(), "layout_hash": layout_hash,
                  "lora_config_hash": lora_hash, "n_specs": len(specs), "asserted": asserted,
                  "init_seconds": time.time() - t0})
-    mode = plan["sync"]
-    rounds = int(plan["global_rounds"])
-    if mode == "none":
-        sync = LocalOnlySync(rounds)
-    else:
-        from yeto.rl.bridge import BridgeConfig
-
-        host, _, port = plan["syncer"].rpartition(":")
-        bridge = BridgeConfig(
-            syncer_addr=(host, int(port)), learner_id=learner_id, global_rounds=rounds,
-            groups_per_round=int(plan["groups_per_round"]),
-            samples_per_group=int(plan["samples_per_group"]), local_optimizer_steps=1,
-            expected_specs=tuple(specs), base_model_revision=plan["model_revision"],
-            lora_config_hash=lora_hash, layout_hash=layout_hash, event_tape=plan["event_tape"],
-            wan_streams=int(plan.get("wan_streams", 4)),
-            backend_identity_sha256=identity.sha256())
-        if mode == "strict":
-            sync = StrictAvgSync(bridge, progress=None)
-        elif mode == "elastic":
-            sync = ElasticAvgSync(bridge, progress=None, syncer_epoch=int(plan.get("syncer_epoch", 0)))
-        else:
-            raise ValueError(f"unknown sync mode {mode!r}")
+    sync = build_sync(plan, specs, lora_hash=lora_hash, layout_hash=layout_hash,
+                      identity_sha256=identity.sha256(), compat_group=identity.compat_group)
     spec = (AlgorithmSpec.from_dict(plan["algorithm_spec"]) if plan.get("algorithm_spec")
             else AlgorithmSpec())
     publisher = VerlPublisher(island, strict=bool(plan.get("publish_strict", True)))
@@ -256,4 +269,68 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
               "seconds": time.time() - t0}
     tape.append({"event": "rl_verl_island_done", **result})
     tape.append({"event": "rl_learner_finalized"})  # launcher: a complete island tape ends with this
+    return result
+
+
+def run_fully_async_island(call, start_rollouter, plan: dict, cfg: dict) -> dict:
+    """agentic-rollout-utilization 6.4b: the yeto driver over the fully_async ports.
+
+    ``call(method, *args)`` reaches the trainer actor; ``start_rollouter`` starts the
+    rollouter's generation loop (called once, after the first verified publication)."""
+    from yeto.rl.core import canonical_layout_hash, canonical_lora_config_hash
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+    from yeto.rl.engine.driver import EventTape, IslandDriver
+    from yeto.rl.engine.policy_age import bind_policy_age
+    from yeto.rl.export import adapter_targets, derive_peft_lora_specs
+
+    from .entry import verl_capabilities
+    from .fully_async_ports import (FullyAsyncIsland, FullyAsyncPlacement, FullyAsyncPublisher,
+                                    FullyAsyncRolloutPool, FullyAsyncTrainerGroup)
+    from .fully_async_round import execution_profile_for
+    from .identity import backend_identity
+    from .ports_impl import VerlPolicyState
+
+    t0 = time.time()
+    learner_id = int(plan["learner_id"])
+    limit = int(plan["max_policy_age"])
+    asserted = check_asserted(plan.get("asserted") or {}, cfg)
+    specs = derive_peft_lora_specs(plan["model_path"], None, rank=int(plan["lora_rank"]),
+                                   targets=plan["lora_targets"])
+    layout_hash = canonical_layout_hash(specs)
+    lora_hash = canonical_lora_config_hash(rank=int(plan["lora_rank"]), target_modules=adapter_targets(specs))
+    tape = EventTape(plan["event_tape"], learner_id)
+    island = FullyAsyncIsland(
+        call, learner_id=learner_id, limit=limit, required=int(plan["groups_per_round"]),
+        out_dir=plan["out_dir"], readback_dir=os.environ.get("YETO_VERL_READBACK_DIR", plan["out_dir"]),
+        emit=lambda event, **f: tape.append({"event": event, **f}), start_rollouter=start_rollouter,
+        base_model_revision=plan["model_revision"], lora_config_hash=lora_hash,
+        layout_hash=layout_hash, expected_specs=specs)
+    call("yeto_configure", float(plan.get("tis_upper", 2.0)), list(plan["thresholds_key"]))
+    from yeto.hw.catalog import runtime_versions
+
+    identity = backend_identity(compat_group=plan.get("compat_group"))  # 7.7a: unset -> error
+    tape.append({"event": "rl_island_hardware", "compat_group": identity.compat_group, **runtime_versions()})
+    identity_sha = bind_policy_age(identity.sha256(), limit)
+    tape.append({"event": "rl_verl_island_start", "plan": plan, "backend_identity": identity.to_dict(),
+                 "backend_identity_sha256": identity_sha, "layout_hash": layout_hash,
+                 "lora_config_hash": lora_hash, "n_specs": len(specs), "asserted": asserted,
+                 "fully_async": True, "max_policy_age": limit, "init_seconds": time.time() - t0})
+    sync = build_sync(plan, specs, lora_hash=lora_hash, layout_hash=layout_hash, identity_sha256=identity_sha,
+                      compat_group=identity.compat_group)
+    spec = AlgorithmSpec.from_dict(plan["algorithm_spec"]) if plan.get("algorithm_spec") else AlgorithmSpec()
+    profile = execution_profile_for(spec, limit, groups_per_round=int(plan["groups_per_round"]),
+                                    samples_per_group=int(plan["samples_per_group"]), sync=plan["sync"])
+    publisher = FullyAsyncPublisher(island, strict=bool(plan.get("publish_strict", True)))
+    driver = IslandDriver(
+        learner_id=learner_id, rollout=FullyAsyncRolloutPool(island), trainer=FullyAsyncTrainerGroup(island),
+        policy_state=VerlPolicyState(island), publisher=publisher, placement=FullyAsyncPlacement(),
+        capabilities=verl_capabilities(_fingerprint(cfg), fully_async_limit=limit), algorithm=spec,
+        sync=sync, events=tape, profile=profile)
+    state = driver.run()
+    result = {"learner_id": learner_id, "rounds_completed": driver.rounds_completed,
+              "final_policy_version": state.policy_version,
+              "final_policy_tensor_hash": state.policy_tensor_hash(),
+              "version_map": island.vmap.to_dict(), "seconds": time.time() - t0}
+    tape.append({"event": "rl_verl_island_done", **result})
+    tape.append({"event": "rl_learner_finalized"})
     return result

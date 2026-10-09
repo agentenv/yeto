@@ -17,7 +17,7 @@
 - [x] 2.3 在 fork 中新增 `dual_clipfrac`（A<0 且 dual 下界生效的 token 比例），附 CPU 单测：默认参数下 loss 逐位不变，构造张量上的比例与手算一致。验证：fork 单测通过，经独立审查。（S14：未做；fork pin c35702e 无 `dual_clipfrac`，`git grep` 为空） **S19 10-09：fork 本地提交 ed75bd2a0（分支 s19-algosup-metrics，基于 ddce209，未推送），5 个 CPU 单测通过，独立审查通过（子 agent 审查）。**
 - [x] 2.4 在 fork 中记录超采样每次提交的批大小以及丢弃、补采计数，附 CPU 单测。验证：fork 单测通过，经独立审查；指标键名写入 `progress.md`。（S14：未做；fork 只在 `inference_rollout_train.py:120`/`sglang_rollout.py:483` 取 `over_sampling_batch_size`，未记录提交批大小） **S19 10-09：fork 本地提交 57d93872e（同分支），键名见 progress.md；独立审查后按意见补了 resumed/failed 计数，单测通过。**
 - [ ] 2.5 把 2.2–2.4 的提交合并为一次 pin 更新请求交给 IMG：快进 `yeto/ports`、重建镜像、更新 pin；在 ALGO 侧更新 `FORK_COMMITS`，并按 git diff 为 `MILES_DECLARED_PINS` 中的 4 项做迁移论证。验证：新 pin 在 Modal T4 上通过完整 parse_args + validate_parsed_args（$0.5），迁移论证写入 `progress.md`，`tests/test_rl_algorithm_flags_upstream.py` 通过。（S14：未做；但 pin 迁移论证流程已在 IMG 的 5 次 pin 变更中跑通，模板见 `entry.py:143-180` 注释与 `loss_variants.py:78-90`；与 critic-family 6.3 的 pin 更新合并为一次）
-- [x] 2.6 ALGO 侧接入新指标：在 fake 与 adapter 的指标映射中加入 `dual_clipfrac` 与超采样计数；需要改 trainer 取数时，以补丁 `infra-drafts/patches/algo-supp-metrics.patch` 交给 INFRA。验证：单测通过，补丁在临时副本上 apply 后相关测试通过。（S14：未做） **S19 10-09：ALGO 侧 ports/rollout/rollout_meta_hook/fake 已接入；driver 输出以补丁 `infra-drafts/patches/algo-supp-metrics.patch`（副本在 `patches/`）交 INFRA，在临时副本上 apply 后测试通过。**
+- [x] 2.6 ALGO 侧接入新指标：在 fake 与 adapter 的指标映射中加入 `dual_clipfrac` 与超采样计数；需要改 trainer 取数时，以补丁 `infra-drafts/patches/algo-supp-metrics.patch` 交给 INFRA。验证：单测通过，补丁在临时副本上 apply 后相关测试通过。（S14：未做） **S19 10-09：ALGO 侧 ports/rollout/rollout_meta_hook/fake 已接入；driver 输出补丁 `algo-supp-metrics.patch` 经主 agent 代拍板已直接并入本 PR，测试通过。**
 
 ## 3. 用户代码类机制永不声明（CPU）
 

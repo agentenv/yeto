@@ -107,3 +107,4 @@
 
 ### 仍需上卡（保持未勾）
 2.5 的 T4 检查、4.1–4.7、5.1–5.3、6.1–6.3。就绪状态写在 `infra-drafts/S19-BATCH3-PLAN.md` #1 与 #13。
+- 10-09 合并 main 后：主 agent 代拍板把 driver 补丁 `algo-supp-metrics.patch` 直接并入本 PR（不另走 INFRA 审批），`driver.py` 与 `tests/test_rl_algo_supp_metrics_driver.py` 已在分支内；golden 重新生成，相对 main 仍只有 rollout_meta_hook 的 24 行源码哈希变化。

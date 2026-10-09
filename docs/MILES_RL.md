@@ -1980,6 +1980,79 @@ far (evidence names; numbers are in the files, not repeated here):
 `FN-TRAIN-PLAN.md`), multi-island Flash-Next with outer sync, Flash-Next elastic
 edges (`FN-ELASTIC-GPU-PLAN.md`), and any reward improvement claim.
 
+## GPU memory estimate before launch
+
+`yeto launch` estimates the per-GPU memory peak of every RL island before it
+creates any cloud resource (`yeto/memory_estimate.py`, called from
+`launch_preflight.memory_preflight` in `launcher.run`, in `yeto launch` and in
+the head path). It is an upper-bound estimate, not a simulation. The old
+`warn_if_model_wont_fit` (weights only) stays as the first coarse check.
+
+Per GPU, in GiB (P parameters, V vocabulary, L layers, H hidden size, T tokens
+of one micro-batch = max(context, response) x micro-batch 1):
+
+1. weights `2P/(TP*PP)`
+2. grads + optimizer: full `4P/(TP*PP) + 12P/(TP*PP*DP_shard)`; LoRA `16*P_lora`
+3. activations `K_ACT * L/PP * T/(TP*CP) * H * 2`
+4. logits block `K_LOGIT * min(T, C) * V/TP * 4`
+5. inference engine `mem_fraction_static * GPU memory` when it shares the GPU and is not released
+6. fixed overhead `R0 + FRAG * (1+2+3+4)` (CUDA context, residual of the released engine, allocator fragmentation)
+
+A colocated island (train and rollout on one GPU, offload) alternates two
+phases; the peak is the larger of the training phase (1-6) and the rollout
+phase (`mem_fraction_static * GPU memory + R0`). GPU memory: H100 79.18 GiB and
+H200 139.80 GiB (as torch reports them), other GPUs `GPU_MEM_GB x 0.98`.
+
+Calibration constants (S17 M1 runs b, c, d; Qwen3.5-4B LoRA r16, 1 GPU per island):
+
+| Constant | Value | Source |
+|---|---|---|
+| K_LOGIT | 0.5 | run c OOM "Tried to allocate 7.58 GiB" = 16384 x 248320 x 2 bytes (one bf16 block) |
+| FRAG | 0.1953 | run c OOM: 21.04 GiB reserved-unallocated / 107.75 GiB allocated |
+| R0 | 4.97 GiB | run c OOM: 133.76 in use - 107.75 - 21.04 |
+| K_ACT (no recompute) | 45.62 | solved from run d tape peak 123.27 GiB |
+| K_ACT (full recompute) | 2.0 | 未验证 (no measured run) |
+
+Back-test (margin 0.9; `openspec/changes/launch-preflight-guards/evidence/memory-backtest.json`,
+script `memory_backtest.py` next to it). Measured peaks are the island tape
+`rl_load_sample.peak_gpu_mem_bytes` maxima (NVML, sampled every 10 s, so a lower
+bound of the true peak):
+
+| Run | Role | Request | Estimate GiB | Measured | Error |
+|---|---|---|---|---|---|
+| M1 run b | calibration | Qwen3.5-4B H100 ctx 16384 | 159.6 | OOM, demand >= 78.1 GiB | over limit (refused) |
+| M1 run c | calibration | Qwen3.5-4B H200 ctx 16384 | 159.6 | OOM, demand >= 141.3 GiB | over limit (refused) |
+| M1 run d | calibration | Qwen3.5-4B H200 ctx 12288 | 123.3 | 123.3 GiB (tape peak) | -0.0% |
+| N17 A/B a (a) | test | Qwen3.5-4B H200 ctx 12288 | 123.3 | 126.8 GiB (tape peak) | -2.8% |
+| N17 A/B a (b) | test | Qwen3.5-4B H200 ctx 12288 | 123.3 | 127.1 GiB (tape peak) | -3.0% |
+| N17 A/B b (a) | test | Qwen3.5-4B H200 ctx 12288 | 123.3 | 123.8 GiB (tape peak) | -0.4% |
+| N17 A/B b (b) | test | Qwen3.5-4B H200 ctx 12288 | 123.3 | 126.9 GiB (tape peak) | -2.9% |
+| N17 codex | test | Qwen3.5-4B H200 ctx 12288 | 123.3 | 119.5 GiB (tape peak) | +3.1% |
+| N17 elastic | test | Qwen3-0.6B H100 ctx 1024 | 36.6 | 35.0 GiB (tape peak) | +4.7% |
+| N17 strict | test | Qwen3-0.6B H100 ctx 1024 | 36.6 | 35.0 GiB (tape peak) | +4.7% |
+| ARU-2 M0 | test | Qwen3-0.6B H100 ctx 2560 | 36.6 | 36.8 GiB (tape peak) | -0.3% |
+| ARU-2 M1 | test | Qwen3-0.6B H100 ctx 2560 | 36.6 | 38.9 GiB (tape peak) | -5.8% |
+| ARU-2 MB | test | Qwen3-0.6B H100 ctx 2560 | 36.6 | 56.0 GiB (tape peak) | -34.5% |
+
+Run d is a calibration point, so its error is 0 by construction. The
+S17 morning report gives run d as 125-126 GB; the tape maximum is 131.3-132.4 GB
+(122.3-123.3 GiB); the estimate is within 10% of both. ARU-2 MB (Qwen3-0.6B) is
+under-estimated by about a third: its tape peak grows over the rounds (35 ->
+56 GiB) with micro-batch 1 and no dynamic batching; the cause is not known.
+
+Behaviour: above `--preflight-memory-margin` (default 0.9) x GPU memory the
+launch stops (`--preflight-memory error`, default) and lists the parts and the
+suggestions that fit, each with its recomputed peak: the longest context
+(multiple of 1024) that fits with the response shrunk in the same ratio, 2x
+GPUs of the same type, the next larger GPU type. Only Qwen3.5-4B is calibrated:
+for other models an over-limit estimate prints a warning and never stops the
+launch. A model whose structure is unknown (no local or cached `config.json`
+and not in `memory_estimate.BUILTIN_CONFIGS`) prints "显存未估算" and the launch
+continues. `--preflight-memory warn` prints and continues; `off` skips the
+estimate with a warning. The run manifest records the estimate per island
+(`preflight.memory`), and `yeto launch --dry-run` shows it per island
+(`memory_estimate`).
+
 ## Elastic reconfiguration
 
 `--rl-elastic` (off by default; ports, fixed partition; resources manifest

@@ -225,6 +225,28 @@ def cross_version_tokens(samples: Sequence[Any], current_version: int) -> tuple[
 Scorer = Callable[[Any], "list[float] | None"]
 
 
+# Router policies that route by the X-SMG-Routing-Key header (Miles
+# ``policy_uses_routing_key``). Under ``manual`` -- the default once Miles' session
+# server is on (agentic runs) -- the router rejects a request without the key
+# with a 4xx before any engine sees it (S18 ARU-3 M1: one router "client error"
+# per unscored sample, rounds 1-5: 16/8/8/8/8).
+ROUTING_KEY_POLICIES = ("consistent_hashing", "manual")
+ROUTING_KEY_HEADER = "X-SMG-Routing-Key"
+SCORING_ROUTING_KEY = "yeto-cross-version-score"
+
+
+def scoring_routing_headers(args: Any, sample: Any) -> dict[str, str]:
+    """Routing header for a scoring request: the sample's own key (the engine
+    that holds its prefix), else a fixed key when the router policy needs one;
+    {} when the policy routes without a key."""
+    key = getattr(sample, "routing_key", None)
+    if key:
+        return {ROUTING_KEY_HEADER: str(key)}
+    if getattr(args, "sglang_router_policy", None) in ROUTING_KEY_POLICIES:
+        return {ROUTING_KEY_HEADER: SCORING_ROUTING_KEY}
+    return {}
+
+
 def router_prefill_scorer(args: Any, timeout_s: float = 120.0) -> Scorer:
     """Score a sample's response tokens under the engines' current weights
     (SGLang prefill through the Miles router); None when scoring fails."""
@@ -242,7 +264,7 @@ def router_prefill_scorer(args: Any, timeout_s: float = 120.0) -> Scorer:
             payload = _build_prefill_scoring_payload(args, sample, {})
             request = urllib.request.Request(
                 url, data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"})
+                headers={"Content-Type": "application/json", **scoring_routing_headers(args, sample)})
             with urllib.request.urlopen(request, timeout=timeout_s) as response:  # noqa: S310
                 output = json.loads(response.read().decode("utf-8"))
             return [float(p) for p in _extract_response_logprobs(sample, output["meta_info"])]

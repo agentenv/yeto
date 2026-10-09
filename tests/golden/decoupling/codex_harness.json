@@ -11,12 +11,13 @@
   "schema": "yeto-rl-algorithm-spec-v1"
  },
  "backend_identity": {
+  "compat_group": "nvidia-h100",
   "device_family": "nvidia",
   "engine": "miles",
   "engine_commit": "ddce20992c9ee82270a22e259e9e2bf55f3053d1",
   "param_map_sha256": "36c37d691b6372ee86485cf0f7d4f8d5e185a6346b875aac33380518ee8f259a",
-  "schema": "yeto-backend-identity-v1",
-  "sha256": "494bbabad8be621190811ee4522bd6f6243d414c1bc5af3faae50274315eb528"
+  "schema": "yeto-backend-identity-v2",
+  "sha256": "6950281c0e2c371174028a5b0baa4b696144c0652ac481284cc2c082af827ad5"
  },
  "execution_profile": {
   "contract_hash": "sha256:67aee42a1a530e9b32695039266e1cef5393816354f3dd9363a6467a31823d43",
@@ -219,6 +220,8 @@
   "--max-seq-len",
   "128",
   "--use-session-server",
+  "--session-server-port",
+  "31801",
   "--tito-model",
   "qwen35",
   "--sglang-reasoning-parser",
@@ -227,7 +230,7 @@
   "<MILES-RESOLVED-TOOL-CALL-PARSER>",
   "--group-query-attention"
  ],
- "miles_argv_sha256": "259d2fdeff47128f18aee397e24646d92b8ee7778dd7db836c41a63eed8d3b8a",
+ "miles_argv_sha256": "334f1c896031c0f98244e6cc8541cf5652bf5ba40538142a13f8d4c2d802f380",
  "name": "codex_harness",
  "placement": {
   "allow_cross_node_engine_tp": false,
@@ -266,7 +269,7 @@
    "source_sha256": "8bc115e4b7c0a19467fc949348bbe3fc7e62c49ff5119c5d5a7867982327d1d0"
   }
  ],
- "ports_runtime_fingerprint": "sha256:6b1bc39e41e214ac9930ca0ecb09d34eb5d1683310682f3bcd286f69467349b3",
+ "ports_runtime_fingerprint": "sha256:9547421abb40d4f49ec3d743380dada4df2b8a7c9f2bdd837766de14a5038c59",
  "runtime_attrs": {
   "yeto_rl_dynamic_sampling_max_replacements": null
  },

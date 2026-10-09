@@ -57,7 +57,7 @@ def test_elastic_join_carries_the_bound_identity(monkeypatch):
     assert a != b
 
 
-@pytest.mark.parametrize("backend,limit,stage", [("miles", 2, 3), ("verl", 1, 1)])
+@pytest.mark.parametrize("backend,limit,stage", [("miles", 2, 3), ("verl", 2, 2)])
 def test_launcher_refuses_an_unsupported_limit_before_launch(backend, limit, stage):
     from tests.test_rl_launcher import _args
     from yeto.launcher import _prepare_rl_args
