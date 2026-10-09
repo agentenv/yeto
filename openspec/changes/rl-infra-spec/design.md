@@ -254,6 +254,8 @@ baseline 对比默认固定、测试范围内最佳固定、动态三组；相�
 - 单节点 placement（源码已确认，8443a8fd）：岛分配单节点 M 卡且未提供 `--rl-island-gpus-per-node`（无拓扑）时，`ElasticPlacement` 把 `n0:<g>` 解析为逻辑 bundle g；修复前 E1 COMMITTED 后误判 "outside the pool" 进入 RECOVERY_REQUIRED。
 - launcher 已知行为（源码已确认，未改）：job FAILED 时 launcher 进入恢复拆除，无视 `--keep` 拆集群；GPU 链因此对后续段重新 provision。
 - 实测状态：S11 H100 单节点（n=3）无净收益边（见 `evidence/d1/`），auto 按本节规则不可启用。
+- 收益口径（S19 G2，2026-10-09）：建议器对每条边同时算两个口径。墙钟口径：节省的墙钟秒 − (成本上界 + 恢复上界 + 安全边际)。GPU 秒口径：每源秒省下的 GPU 秒比例 = 1 − 目标卡数/源卡数 × (1 − 墙钟收益)，乘源卡数和 horizon；阻塞成本按 max(源卡数, 目标卡数) 计。卡数 = trainer + rollout，不含 standby（假设减下来的卡会被释放或另作他用；固定付费池里这个假设不成立，此时不应选 GPU 秒口径）。两个口径都写进建议的 evidence.measures。
+- 默认策略（子 agent 代拍板）：`Recommender.objective` 默认 `wall`，行为与之前一致，减引擎不会被推荐。用户显式选 `gpu_seconds` 后，只按 GPU 秒口径判净收益，减引擎可被推荐，加引擎一般不会被推荐。理由：减引擎会让墙钟变长，必须由用户确认"省钱优先于时间"；默认不变也不改变现有 auto 的行为。auto 继承建议器的口径，工具等待为主时仍保持不动。边缺卡数时 GPU 秒口径不出建议。
 
 ### D10. DiLoCo 与岛间边界
 

@@ -17,6 +17,12 @@ Gain model (design D1/D2):
 * cost: per (profile_hash, source, target) upper bounds from 5.7.  Unknown
   cost -> no recommendation.  Recommend only if
   ``gain_lower * horizon > cost_upper + safety_margin``.
+* objective (S19 G2): every evaluation reports two measures, wall time and GPU
+  seconds.  ``objective="wall"`` (default, unchanged behaviour) needs a wall-time
+  net gain, so removing engines is never recommended.  ``objective="gpu_seconds"``
+  needs a GPU-seconds net gain; the edge must carry GPU counts.  GPU seconds
+  saved per source second: ``1 - tgt_gpus/src_gpus * (1 - wall_gain)``; the
+  blocking cost is billed on ``max(src_gpus, tgt_gpus)``.
 """
 from __future__ import annotations
 
@@ -42,6 +48,8 @@ OVERLAP = "certified-overlap"
 TOOL_WAIT, TAIL, PUBLISH, GPU_SAT, BALANCED = (
     "tool_wait", "long_tail", "publish_block", "gpu_saturation", "balanced")
 HOLD = "hold-current-config"
+WALL, GPU_SECONDS = "wall", "gpu_seconds"
+OBJECTIVES = (WALL, GPU_SECONDS)
 
 
 @dataclass(frozen=True)
@@ -131,6 +139,10 @@ class CandidateEdge:
     target: str
     source_engines: int
     target_engines: int
+    # billed GPUs of the whole config (trainer + rollout); None = unknown, then
+    # the GPU-seconds measure is unknown and objective="gpu_seconds" holds
+    source_gpus: int | None = field(default=None, compare=False)
+    target_gpus: int | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -272,7 +284,8 @@ def candidate_edges_from_attestation(attestation: Any, configs: Mapping[str, Any
         if a is None or b is None:
             continue
         n = lambda c: int(c.rollout) // max(1, int(getattr(c, "rollout_engine_gpus", 1) or 1))  # noqa: E731
-        out[(src, dst)] = CandidateEdge(src, dst, n(a), n(b))
+        g = lambda c: int(getattr(c, "trainer", 0) or 0) + int(c.rollout)  # noqa: E731
+        out[(src, dst)] = CandidateEdge(src, dst, n(a), n(b), g(a), g(b))
     return list(out.values())
 
 
@@ -325,23 +338,56 @@ class Recommender:
     min_windows: int = 3
     efficiency_lower: float = 0.7
     clock: Callable[[], float] = time.time
+    objective: str = WALL  # S19 G2; see module doc and design D9
+
+    def __post_init__(self) -> None:
+        if self.objective not in OBJECTIVES:
+            raise ValueError(f"unknown objective {self.objective!r}")
+
+    def measures(self, gain: EdgeGain, cost: EdgeCost, edge: CandidateEdge) -> dict[str, Any]:
+        """Both measures over ``horizon_s``: net = benefit - (cost + recovery + margin).
+        Wall in seconds; GPU in GPU-seconds (None when the edge has no GPU counts)."""
+        block = cost.cost_upper_s + cost.recovery_upper_s + self.safety_margin_s
+        wall_benefit = gain.gain_lower * self.horizon_s
+        out: dict[str, Any] = {"wall_benefit_s": wall_benefit, "wall_need_s": block,
+                               "wall_net_s": wall_benefit - block, "gpu_benefit_s": None,
+                               "gpu_need_s": None, "gpu_net_s": None, "gpu_saving_fraction": None}
+        gs, gt = edge.source_gpus, edge.target_gpus
+        if gs and gt and gs > 0 and gt > 0:
+            frac = 1.0 - (gt / gs) * (1.0 - gain.gain_lower)
+            benefit = frac * gs * self.horizon_s
+            need = block * max(gs, gt)
+            out.update(gpu_saving_fraction=frac, gpu_benefit_s=benefit, gpu_need_s=need,
+                       gpu_net_s=benefit - need)
+        return out
 
     def _net(self, windows: Sequence[LoadWindow], edge: CandidateEdge, profile_hash: str | None,
              costs: Mapping[tuple[str, str, str], EdgeCost]) -> tuple[EdgeGain, EdgeCost | None, str | None]:
+        gain, cost, why, _ = self._evaluate(windows, edge, profile_hash, costs)
+        return gain, cost, why
+
+    def _evaluate(self, windows, edge, profile_hash, costs):
         gain = predict_gain(windows, edge, self.timeline, efficiency_lower=self.efficiency_lower)
         if gain.gain_lower is None:
-            return gain, None, gain.reason
+            return gain, None, gain.reason, None
         cost = costs.get((profile_hash, edge.source, edge.target)) if profile_hash else None
         if cost is None:
-            return gain, None, "unknown transition cost for this profile/edge"
+            return gain, None, "unknown transition cost for this profile/edge", None
         span = sum(w.duration_s for w in windows)
         if span <= 0:
-            return gain, cost, "empty window span"
-        benefit = gain.gain_lower * self.horizon_s
-        need = cost.cost_upper_s + cost.recovery_upper_s + self.safety_margin_s
-        if benefit <= need:
-            return gain, cost, f"no net gain: {benefit:.1f}s <= cost bound {need:.1f}s"
-        return gain, cost, None
+            return gain, cost, "empty window span", None
+        m = self.measures(gain, cost, edge)
+        if self.objective == GPU_SECONDS:
+            if m["gpu_net_s"] is None:
+                return gain, cost, "gpu_seconds objective needs source/target GPU counts", m
+            if m["gpu_net_s"] <= 0:
+                return gain, cost, (f"no net gain (gpu_seconds): {m['gpu_benefit_s']:.1f} <= "
+                                    f"cost bound {m['gpu_need_s']:.1f} GPU-s"), m
+            return gain, cost, None, m
+        if m["wall_net_s"] <= 0:
+            return gain, cost, (f"no net gain: {m['wall_benefit_s']:.1f}s <= "
+                                f"cost bound {m['wall_need_s']:.1f}s"), m
+        return gain, cost, None, m
 
     def recommend(self, controller: Any, windows: Iterable[Any],
                   candidates: Iterable[CandidateEdge],
@@ -365,16 +411,18 @@ class Recommender:
         for edge in candidates:
             if edge.source != source:
                 continue
-            gain, cost, why = self._net(ws, edge, phash, costs)
+            gain, cost, why, m = self._evaluate(ws, edge, phash, costs)
             if why is not None:
                 reasons.append(f"{edge.source}->{edge.target}: {why}")
                 continue
-            score = gain.gain_lower * self.horizon_s - cost.cost_upper_s
+            score = (m["gpu_net_s"] if self.objective == GPU_SECONDS
+                     else gain.gain_lower * self.horizon_s - cost.cost_upper_s)
             if best is None or score > best[0]:
-                best = (score, edge, gain, cost)
+                best = (score, edge, gain, cost, m)
         if best is None:
             return hold("; ".join(reasons) or "no candidate edge")
-        _, edge, gain, cost = best
+        _, edge, gain, cost, m = best
+        evidence = {**evidence, "objective": self.objective, "measures": m}
         digest = hashlib.sha256(f"{epoch}|{phash}|{edge.source}|{edge.target}|{now}".encode()
                                 ).hexdigest()[:12]
         return Recommendation(
