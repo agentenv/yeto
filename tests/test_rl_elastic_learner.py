@@ -16,7 +16,7 @@ from test_rl_launch_e2e_b1 import BASE, _elastic  # noqa: E402
 from test_rl_reconfig_e1 import _events  # noqa: E402
 from yeto.rl.engine.auto import AutoPolicy  # noqa: E402
 from yeto.rl.engine.controller import SUCCEEDED, read_journal  # noqa: E402
-from yeto.rl.engine.miles_adapter.elastic_hook import (TUNING,  # noqa: E402
+from yeto.rl.adapters.miles.elastic_hook import (TUNING,  # noqa: E402
                                                        check_recommend_flags,
                                                        elastic_hook_for,
                                                        recommend_flags)

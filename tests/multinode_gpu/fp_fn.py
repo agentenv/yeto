@@ -73,7 +73,7 @@ def fn_fingerprint(repo: str, case: str, *, seed: int | None = None,
 
     from rl_e2e_launch import island_run, learner_from_run
     from yeto.rl import learner
-    from yeto.rl.engine.miles_adapter.entry import ports_runtime_fingerprint
+    from yeto.rl.adapters.miles.entry import ports_runtime_fingerprint
     from yeto.rl.engine.run_config import resolve_rl_run_config
     from yeto.rl.engine import run_config
     from yeto.rl.profiles import qwen3_8_next as q

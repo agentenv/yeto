@@ -39,7 +39,7 @@ from yeto.rl.core import (
 )
 from yeto.rl.export import adapter_targets, derive_peft_lora_specs
 from yeto.rl.filters import bounded_nonzero_reward_std
-from yeto.rl.miles import MilesPolicySync, _BridgeRuntime
+from yeto.rl.adapters.miles.legacy.engine import MilesPolicySync, _BridgeRuntime
 
 
 def tensors():
@@ -1877,7 +1877,7 @@ def test_miles_strict_path_releases_both_base_aliases_before_waiting_for_cut():
 def test_miles_policy_hook_builds_round_stats_without_revalidating_versions(
     tmp_path, monkeypatch
 ):
-    from yeto.rl.deepseek_v4_expert_full_runtime import _TrainTelemetry
+    from yeto.rl.adapters.miles.models.deepseek_v4.expert_full_runtime import _TrainTelemetry
 
     checkpoint = tmp_path / "island.pt"
     args = SimpleNamespace(

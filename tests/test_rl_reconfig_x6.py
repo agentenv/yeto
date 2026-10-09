@@ -245,7 +245,7 @@ def test_strict_pause_budget_inputs(tmp_path, kw, deadline, ok, budget):
 def test_pause_inputs_reach_the_controller_through_the_wiring(tmp_path):
     import json as _json
 
-    from yeto.rl.engine.miles_adapter.elastic_wiring import build_elastic
+    from yeto.rl.adapters.miles.elastic_wiring import build_elastic
 
     res = tmp_path / "res.json"
     res.write_text(_json.dumps({"configs": {"T4R2S2": {"trainer": 4, "rollout": 2, "standby": 2}},

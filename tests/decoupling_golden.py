@@ -132,7 +132,7 @@ def _execution_profile(args, launch, algorithm, *, yeto_policy_sync: bool) -> di
     rollout_batch_size, n_samples_per_prompt, num_steps_per_rollout,
     yeto_rl_sync_preset, yeto_rl_overlap_eval.
     """
-    from yeto.rl.engine.miles_adapter.entry import execution_profile_for
+    from yeto.rl.adapters.miles.entry import execution_profile_for
 
     argv = list(launch.argv)
     view = types.SimpleNamespace(
@@ -252,7 +252,7 @@ def _codex_bundle(mp, tmp: Path) -> None:
     # The reasoning / tool-call parser names are resolved by Miles
     # (miles.utils.chat_template_utils), which this host must not import: the two
     # values are recorded as explicit placeholders, everything else is yeto's own.
-    from yeto.rl.engine.miles_adapter import config as mc
+    from yeto.rl.adapters.miles import config as mc
 
     mp.setattr(mc, "_resolve_tito_parsers", lambda model: (
         "<MILES-RESOLVED-REASONING-PARSER>", "<MILES-RESOLVED-TOOL-CALL-PARSER>"))
@@ -283,7 +283,7 @@ def record_config(config: Config) -> dict[str, Any]:
     from rl_e2e_launch import island_run, learner_from_run
     from yeto.rl import learner
     from yeto.rl.engine import run_config
-    from yeto.rl.engine.miles_adapter.entry import ports_runtime_fingerprint
+    from yeto.rl.adapters.miles.entry import ports_runtime_fingerprint
     from yeto.rl.engine.run_config import resolve_rl_run_config
 
     tmp = Path(tempfile.mkdtemp(prefix="yeto-golden-"))
@@ -342,9 +342,20 @@ def record_config(config: Config) -> dict[str, Any]:
         "placement": json.loads(norm(json.dumps(_jsonable(launch.placement)))),
         "runtime_attrs": json.loads(norm(json.dumps(_jsonable(dict(launch.runtime_attrs))))),
         "plugins": plugins_of(json.loads(spec.canonical_json()), argv),
+        # Phase 5 (design D7): parallel identity hash; the two hashes above are unchanged.
+        "backend_identity": _backend_identity(),
         "session_contract_hash": None,
-        "session_contract_hash_note": "运行时由 LoRA 张量布局算出（yeto.protocol.layout_fingerprint），离线不可得",
+        "session_contract_hash_note": "运行时由 LoRA 张量布局算出（yeto.protocol.layout_fingerprint），"
+                                      "阶段 5 起再与 backend_identity.sha256 绑定"
+                                      "（yeto.rl.engine.backend_identity.session_contract_hash），离线不可得",
     }
+
+
+def _backend_identity() -> dict:
+    from yeto.rl.adapters.miles.identity import backend_identity
+
+    identity = backend_identity("ports")
+    return {**identity.to_dict(), "sha256": identity.sha256()}
 
 
 # ---------------------------------------------------------------- fake-engine tapes / progress

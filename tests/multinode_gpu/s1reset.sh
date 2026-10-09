@@ -5,9 +5,9 @@ HOSTS=$CL; [ "${NODES:-2}" -ge 2 ] && HOSTS="$CL $CL-worker1"   # NODES=1 (S11 s
 for n in $HOSTS; do
   timeout 300 ssh -o StrictHostKeyChecking=no -o ConnectTimeout=20 $n 'bash -s' >> $LOG 2>&1 <<'REMOTE'
 echo "== $(hostname) reset $(date -u +%FT%TZ)"
-pkill -9 -f "yeto-rl/s1probe.sh" 2>/dev/null; pkill -f "python3 -m yeto.rl.learner" 2>/dev/null
+pkill -9 -f "yeto-rl/s1probe.sh" 2>/dev/null; pkill -f "python3 -m yeto.rl.adapters.miles.island_entry" 2>/dev/null
 MR="$HOME/miles-ray"; pkill -f "$MR/" 2>/dev/null; for i in $(seq 1 10); do pgrep -f "$MR/" >/dev/null || break; sleep 1; done; pkill -KILL -f "$MR/" 2>/dev/null
-pkill -KILL -f "yeto.rl.learner" 2>/dev/null; pkill -KILL -f "sglang.launch_server|sglang.srt|sglang::" 2>/dev/null; sleep 3
+pkill -KILL -f "yeto.rl.adapters.miles.island_entry" 2>/dev/null; pkill -KILL -f "sglang.launch_server|sglang.srt|sglang::" 2>/dev/null; sleep 3
 rm -rf ~/yeto-rl/elastic-state ~/yeto-output ~/yeto-rl/s1probe.log ~/yeto-rl/s1probe.out
 for i in $(seq 1 24); do
   apps=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | grep -c .); maxmem=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | sort -n | tail -1)

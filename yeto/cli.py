@@ -92,6 +92,13 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     )
     rl.add_argument("--rl-runtime", choices=["miles"], default="miles")
     rl.add_argument(
+        "--rl-backend",
+        choices=["miles", "verl"],
+        default="miles",
+        help="training backend adapter (yeto/rl/engine/backends.py; default miles). "
+        "A backend without a registered adapter is refused before launch.",
+    )
+    rl.add_argument(
         "--rl-engine",
         choices=["legacy", "ports"],
         default="ports",
@@ -315,7 +322,7 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     rl.add_argument("--rl-test-tool-delay-s", type=float, default=None, metavar="S",
                     help="ports, TEST ONLY: every training trajectory waits S seconds on a fake "
                     "tool call (needs --custom-generate-function-path "
-                    "yeto.rl.tool_wait_workload.generate); off by default")
+                    "yeto.rl.adapters.miles.harness_glue.tool_wait.generate); off by default")
     rl.add_argument("--rl-elastic-state-dir", default=None, metavar="ISLAND_PATH",
                     help="--rl-elastic: controller journal/ledger/cut dir ON THE ISLAND (e.g. a "
                     "persistent volume mount); default ~/yeto-rl/elastic-state")
@@ -405,8 +412,8 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     rl.add_argument("--rl-resource-sample-interval", type=float, default=None, metavar="SECONDS",
                     help="ports: NVML rl_resource_sample period forwarded to the learner "
                     "(default: learner default, 60 s with --rl-observe-timeline; 0 = off)")
-    from yeto.rl.engine.miles_adapter.elastic_hook import add_recommend_arguments
-    add_recommend_arguments(rl)  # D2 elastic hook (elastic-ops.md)
+    from yeto.rl.engine import backends as _rl_backends
+    _rl_backends.module("elastic_hook", _rl_backends.DEFAULT_BACKEND).add_recommend_arguments(rl)  # D2 elastic hook (elastic-ops.md)
     rl.add_argument("--rl-elastic-tool-wait-board", action="store_true",
                     help="--rl-elastic: feed the island's tool-wait board into the drain check "
                     "(3.3; needs a workload that records tool waits)")
@@ -431,13 +438,28 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
                     "drops --balance-data (refused by the DP certification) and wires the "
                     "trainer ops and pool GPU ids; off by default")
     rl.add_argument("--rl-checkpoint-store", default=None, metavar="PATH|URI",
-                    help="--rl-elastic: off-island copy of the island state dir (journal, cuts, "
+                    help="--rl-elastic, or --rl-single-island-no-sync (resume across launches, "
+                    "rl-resume-from-checkpoint): off-island copy of the island state dir (journal, cuts, "
                     "ledger) for a rebuild after node loss (rl-multinode-island Q4): a bucket "
-                    "URI (s3://, gs://, ...) mounted on the island, or a path already shared "
+                    "URI (s3://, gs://, ...) mounted on the island, modal-volume://NAME[/PREFIX] on "
+                    "a Modal island (the only form Modal accepts), or a path already shared "
                     "across machines (NFS, persistent volume). The learner syncs the state dir "
                     "there after every commit point and restores from it when its state dir "
                     "is empty (machine replaced). Without it the state stays on node0's local "
                     "disk (warning on a multi-node island)")
+    # rl-resume-from-checkpoint (S17 C4)
+    rl.add_argument("--rl-cut-every", type=int, default=None,
+                    help="with --rl-checkpoint-store: keep a round cut every N rounds (plus the "
+                    "last round and our own stop); default 1")
+    rl.add_argument("--rl-cut-keep", type=int, default=None,
+                    help="with --rl-checkpoint-store and no --rl-elastic: keep the newest K cuts "
+                    "(default 2); older ones are deleted only after the new LATEST is committed")
+    rl.add_argument("--rl-resume-allow-config-change", action="store_true",
+                    help="resume a cut even though the run configuration differs (the "
+                    "differences are written to the rl_resume event); refused by default")
+    rl.add_argument("--rl-stop-after-rounds", type=int, default=None,
+                    help="with --rl-checkpoint-store and no --rl-elastic: stop after N rounds "
+                    "with a final cut (our own stop; the next launch resumes)")
     rl.add_argument("--rl-elastic-accept-rebind", action="store_true",
                     help="--rl-elastic, multi-node: accept a GPU uuid pool that differs from the "
                     "cfg / journal binding (machine replaced) and rebind; off by default the "
@@ -451,6 +473,11 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
                     help="legacy (default): existing syncer behaviour, fixed members, every "
                     "island must arrive; elastic: inter-island scheduling (capacity-weighted "
                     "stepping, late deltas carried over with a discount, join/leave)")
+    rl.add_argument("--rl-lr-schedule", choices=("auto", "linear", "constant"), default="auto",
+                    help="island optimizer LR schedule: auto (default) = constant for decoupled "
+                    "and elastic islands, linear decay over global_rounds x optimizer_steps "
+                    "otherwise; constant = fixed LR in every mode (single island included); "
+                    "linear is refused for decoupled/elastic")
     rl.add_argument("--rl-quorum-theta", type=float, default=None, metavar="F",
                     help="elastic: step when arrived capacity >= F x total (default 0.75)")
     rl.add_argument("--rl-carry-gamma", type=float, default=None, metavar="F",
@@ -2639,7 +2666,7 @@ def rl_island_shape(args):
     """The fixed island the RL launcher will build from these flags, for
     the planner to price: actor GPUs plus dedicated rollout GPUs in the
     disjoint (full-parameter) mode, on one node; colocated (lora) mode
-    may span nodes. Mirrors the placement branch in yeto/rl/learner.py."""
+    may span nodes. Mirrors the placement branch in yeto/rl/adapters/miles/island_entry.py."""
     from .shape.plan import IslandShape
 
     if getattr(args, "training_mode", "sft") != "rl":

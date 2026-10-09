@@ -1,7 +1,7 @@
 import torch
 import pytest
 
-from yeto.rl.engine.miles_adapter.state import MilesPolicyState
+from yeto.rl.adapters.miles.state import MilesPolicyState
 
 
 def test_export_layout_mismatch_names_the_exported_tensors():

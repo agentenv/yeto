@@ -35,7 +35,7 @@ from yeto.rl.algos import mismatch_correction as mc  # noqa: E402
 from yeto.rl.algos import mismatch_observe  # noqa: E402
 from yeto.rl.algos.vendor import miles_mis  # noqa: E402
 from yeto.rl.engine.algorithm import AlgorithmSpec, PluginRef  # noqa: E402
-from yeto.rl.engine.miles_adapter.algorithm_flags import algorithm_argv  # noqa: E402
+from yeto.rl.adapters.miles.algorithm_flags import algorithm_argv  # noqa: E402
 
 MILES_ROOT = pathlib.Path(losses.__file__).resolve().parents[4]
 

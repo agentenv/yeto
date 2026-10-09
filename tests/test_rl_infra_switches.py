@@ -14,8 +14,8 @@ from test_rl_engine_selection import _cli, _island_task, _learner_argv
 from yeto import launcher
 from yeto.launcher import _prepare_rl_args
 from yeto.rl import learner
-from yeto.rl.engine.miles_adapter import entry
-from yeto.rl.engine.miles_adapter.rollout_meta_hook import ELASTIC_METADATA_ENV
+from yeto.rl.adapters.miles import entry
+from yeto.rl.adapters.miles.rollout_meta_hook import ELASTIC_METADATA_ENV
 
 NEW_ATTRS = ("rl_overlap_eval", "rl_elastic", "rl_elastic_resources",
              "rl_elastic_attestation", "rl_elastic_initial_config", "rl_elastic_cells",
@@ -82,7 +82,7 @@ def test_learner_refuses_incomplete_or_legacy_switches(extra, message, capsys):
 
 
 def test_entry_builds_elastic_wiring_from_miles_args(monkeypatch):
-    from yeto.rl.engine.miles_adapter import elastic_wiring
+    from yeto.rl.adapters.miles import elastic_wiring
 
     seen = {}
     monkeypatch.setattr(elastic_wiring, "build_elastic", lambda **kw: seen.update(kw) or "W")
@@ -341,7 +341,7 @@ def test_launcher_refuses_an_eval_file_over_the_inline_cap(tmp_path):
 
 # ---------------------------------------------------------------- test-only start delay (A5)
 def test_start_delay_injection_is_off_by_default_and_exported_when_given(tmp_path, monkeypatch):
-    from yeto.rl.engine.miles_adapter.rollout import INJECT_START_DELAY_ENV
+    from yeto.rl.adapters.miles.rollout import INJECT_START_DELAY_ENV
 
     args = _cli()
     assert args.rl_test_inject_start_delay_s is None
@@ -363,7 +363,7 @@ def test_start_delay_injection_is_off_by_default_and_exported_when_given(tmp_pat
 def test_pool_sleeps_once_before_the_first_start_cells(monkeypatch):
     import asyncio
 
-    from yeto.rl.engine.miles_adapter.rollout import (
+    from yeto.rl.adapters.miles.rollout import (
         INJECT_START_DELAY_ENV,
         MilesRolloutPool,
         injected_start_delay,
@@ -404,7 +404,7 @@ def test_pool_sleeps_once_before_the_first_start_cells(monkeypatch):
 
 # ---------------------------------------------------------------- test-only update_weights block (§4)
 def _publisher(monkeypatch, value):
-    from yeto.rl.engine.miles_adapter.publish import INJECT_UPDATE_BLOCK_ENV, MilesPublisher
+    from yeto.rl.adapters.miles.publish import INJECT_UPDATE_BLOCK_ENV, MilesPublisher
 
     if value is None:
         monkeypatch.delenv(INJECT_UPDATE_BLOCK_ENV, raising=False)
@@ -429,7 +429,7 @@ def _publisher(monkeypatch, value):
 def test_update_weights_block_is_off_by_default(monkeypatch):
     import asyncio
 
-    from yeto.rl.engine.miles_adapter.publish import PublicationError
+    from yeto.rl.adapters.miles.publish import PublicationError
 
     pub, order = _publisher(monkeypatch, None)
     with pytest.raises(PublicationError, match="stop here"):
@@ -440,7 +440,7 @@ def test_update_weights_block_is_off_by_default(monkeypatch):
 def test_update_weights_block_fails_when_the_target_dies_and_applies_once(monkeypatch):
     import asyncio
 
-    from yeto.rl.engine.miles_adapter.publish import PublicationError
+    from yeto.rl.adapters.miles.publish import PublicationError
 
     pub, order = _publisher(monkeypatch, "30")
     polls = []
@@ -466,7 +466,7 @@ def test_update_weights_block_fails_when_the_target_dies_and_applies_once(monkey
 def test_update_weights_block_times_out_into_the_real_call(monkeypatch):
     import asyncio
 
-    from yeto.rl.engine.miles_adapter.publish import PublicationError
+    from yeto.rl.adapters.miles.publish import PublicationError
 
     pub, order = _publisher(monkeypatch, "0.05")
 
@@ -484,7 +484,7 @@ def test_update_weights_block_times_out_into_the_real_call(monkeypatch):
 
 
 def test_launcher_exports_the_update_weights_block_only_when_given(tmp_path, monkeypatch):
-    from yeto.rl.engine.miles_adapter.publish import INJECT_UPDATE_BLOCK_ENV
+    from yeto.rl.adapters.miles.publish import INJECT_UPDATE_BLOCK_ENV
 
     args = _cli()
     _prepare_rl_args(args)
@@ -519,7 +519,7 @@ class _RayMod:
 
 
 def _liveness(infos_seq, ready=lambda: None):
-    from yeto.rl.engine.miles_adapter.publish import RayTargetLiveness
+    from yeto.rl.adapters.miles.publish import RayTargetLiveness
 
     seq = list(infos_seq)
     info = lambda n, g: SimpleNamespace(name=n, generation=g)  # noqa: E731
@@ -546,7 +546,7 @@ def test_liveness_probe_judges_the_recorded_target_generation(later, expect):
 def test_liveness_probe_reports_killed_and_unknown_errors_differently():
     import asyncio
 
-    from yeto.rl.engine.miles_adapter.publish import InjectedBlockProbeError
+    from yeto.rl.adapters.miles.publish import InjectedBlockProbeError
 
     def killed():
         raise _RayMod.exceptions.RayActorError("dead")

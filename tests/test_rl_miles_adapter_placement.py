@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from yeto.rl.engine.miles_adapter.placement import (
+from yeto.rl.adapters.miles.placement import (
     MilesPlacement,
     PlacementRequest,
     PlacementRewriteError,

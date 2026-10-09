@@ -35,7 +35,7 @@ from yeto.rl.engine.algorithm import (  # noqa: E402
     PluginRef,
     SamplingSpec,
 )
-from yeto.rl.engine.miles_adapter import algorithm_flags as af  # noqa: E402
+from yeto.rl.adapters.miles import algorithm_flags as af  # noqa: E402
 
 ICEPOP = "miles.backends.training_utils.loss_hub.corrections.icepop_function"
 REF = PluginRef.from_path("yeto.rl.engine.algorithm.plugin_source_sha256")

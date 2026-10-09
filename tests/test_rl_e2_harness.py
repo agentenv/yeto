@@ -11,9 +11,9 @@ import pytest
 import torch
 
 from tests.rl_cut_fakes import GBS, make_rank, train_step
-from yeto.rl.engine.miles_adapter import LoopRunner, cut_plugin, e2_harness, state_plugin
-from yeto.rl.engine.miles_adapter.trainer import MilesTrainerGroup
-from yeto.rl.engine.miles_adapter.trainer_rebuild import SwappableActor
+from yeto.rl.adapters.miles import LoopRunner, cut_plugin, e2_harness, state_plugin
+from yeto.rl.adapters.miles.trainer import MilesTrainerGroup
+from yeto.rl.adapters.miles.trainer_rebuild import SwappableActor
 from yeto.rl.engine.ports import GroupMetadata, RolloutBatchHandle
 
 ARGS = SimpleNamespace(actor_num_nodes=1, actor_num_gpus_per_node=1, num_steps_per_rollout=1,
@@ -227,7 +227,7 @@ def test_failed_rebuild_records_the_attempts(tmp_path, determinism):
 
 
 def test_diagnostic_sub_run_turns_the_read_guard_off(tmp_path, determinism):
-    from yeto.rl.engine.miles_adapter import cut_plugin as cp
+    from yeto.rl.adapters.miles import cut_plugin as cp
 
     ctx = _ctx(tmp_path)
     ctx.plan = {**ctx.plan, "unsafe_state_reads": True}

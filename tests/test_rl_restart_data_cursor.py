@@ -26,7 +26,7 @@ from yeto.rl.engine.driver import DriverError
 from yeto.rl.engine.fake import FakeEngine
 from yeto.rl.engine.journal import read_journal
 from yeto.rl.engine.ledger import BatchLedger, LedgerError
-from yeto.rl.engine.miles_adapter.rollout import MilesRolloutPool, seek_executor_cursor
+from yeto.rl.adapters.miles.rollout import MilesRolloutPool, seek_executor_cursor
 from yeto.rl.engine.ports import GroupMetadata, RolloutBatchHandle
 
 from test_rl_engine_driver import _strict_config, _strict_syncer
@@ -85,11 +85,12 @@ class MilesLikePool:
         return getattr(self._inner, name)
 
 
-def _island(tmp_path, syncer, *, rounds, tape, source, **pool_kw):
+def _island(tmp_path, syncer, *, rounds, tape, source, ledger=True, **pool_kw):
     sync_factory = lambda e: StrictAvgSync(  # noqa: E731
         _strict_config(tmp_path, e, learner_id=0, rounds=rounds, tape=tape),
         client_factory=lambda _bridge: syncer.client(0))
-    driver, ctl, *_rest = _setup(tmp_path, rounds=rounds, outer="strict-avg", sync_factory=sync_factory)
+    driver, ctl, *_rest = _setup(tmp_path, rounds=rounds, outer="strict-avg", sync_factory=sync_factory,
+                                 ledger=ledger)
     pool = MilesLikePool(driver.rollout, source, **pool_kw)
     driver.rollout = pool
     return driver, ctl, pool
@@ -107,7 +108,8 @@ def _events(tmp_path):
 
 def _close(driver, ctl):
     ctl.close()
-    driver.ledger.close()
+    if driver.ledger is not None:
+        driver.ledger.close()
 
 
 def _run_until_killed(tmp_path, syncer, *, rounds, report_cursor):
@@ -266,3 +268,52 @@ def test_miles_pool_seeks_a_local_executor():
     assert (source.sample_offset, source.sample_group_index, source.sample_index) == (8, 8, 64)
     with pytest.raises(RuntimeError, match="neither a local executor nor a Ray actor"):
         MilesRolloutPool.seek_data_cursor(SimpleNamespace(_executor=object()), cursor)
+
+
+# --- S17 N16: strict relaunch with NO ledger (verl V2 island 1, new container) -------
+
+def test_strict_relaunch_without_ledger_skips_trained_rounds(tmp_path):
+    """V2: island 1 left after v2 and was relaunched (same id, new container, no
+    ledger). Before the fix its data source restarted at 0 and round 2 re-drew the
+    groups of round 0; now the driver moves it by 2 whole rounds."""
+    rounds = 4
+    syncer = _syncer(rounds)
+    driver, ctl, _ = _island(tmp_path, syncer, rounds=rounds, tape="a.jsonl",
+                             source=DataSourceState(), die_at=2, ledger=False)
+    with pytest.raises(RuntimeError, match="killed at QUIESCING"):
+        driver.run()
+    _close(driver, ctl)
+    assert syncer.version == 2
+    source = DataSourceState()
+    driver, ctl, pool = _island(tmp_path / "relaunch", syncer, rounds=rounds, tape="b.jsonl",
+                                source=source, ledger=False)
+    driver.run()
+    g = driver.sync.config.groups_per_round
+    assert pool.seeks == [{"sample_offset": 2 * g, "epoch_id": 0,
+                           "sample_group_index": 2 * g, "sample_index": 0}]
+    assert source.sample_group_index == rounds * g  # drew rounds 2, 3 only, from g4 on
+    restored = [e for e in _events(tmp_path / "relaunch") if e["event"] == "cursor_restored"]
+    assert [(e["rollout_id"], e["source"]) for e in restored] == [(2, "base_version")]
+    _close(driver, ctl)
+
+
+def test_strict_relaunch_without_ledger_offset_only_cursor(tmp_path):
+    """A backend whose cursor is ``{"sample_offset": n}`` only (verl) is moved the same way."""
+    from yeto.rl.engine.bridges import whole_round_restart_cursor
+
+    assert whole_round_restart_cursor({"sample_offset": 0}, 2, 8) == {"sample_offset": 16}
+    assert whole_round_restart_cursor({"sample_offset": 0}, 0, 8) is None
+    assert whole_round_restart_cursor({"epoch_id": 0}, 2, 8) is None  # no offset: unknown
+    assert whole_round_restart_cursor(None, 1, 2) == {"sample_offset": 2, "epoch_id": 0,
+                                                     "sample_group_index": 2, "sample_index": 0}
+    assert whole_round_restart_cursor(None, 1, None) is None
+
+
+def test_strict_fresh_start_without_ledger_does_not_seek(tmp_path):
+    rounds = 2
+    syncer = _syncer(rounds)
+    driver, ctl, pool = _island(tmp_path, syncer, rounds=rounds, tape="a.jsonl",
+                                source=DataSourceState(), ledger=False)
+    driver.run()
+    assert pool.seeks == [] and syncer.version == rounds
+    _close(driver, ctl)

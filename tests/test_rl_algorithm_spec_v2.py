@@ -28,9 +28,16 @@ BOUNDED = AlgorithmSpec(
     dynamic_sampling_max_replacements=4,
 )
 # R0 golden (tests/test_rl_engine_algorithm.py pins the canonical JSON).
-R0_BOUNDED_JSON = (
+# decoupling 4.4: stored under the neutral filter name; the pre-4.4 JSON still loads.
+R0_BOUNDED_JSON_PRE_44 = (
     '{"advantage_estimator":"grpo","dynamic_sampling_filter":'
     '"yeto.rl.filters.bounded_nonzero_reward_std",'
+    '"dynamic_sampling_max_replacements":4,"kl_coef":null,'
+    '"loss":"policy_loss","schema":"yeto-rl-algorithm-spec-v1"}'
+)
+R0_BOUNDED_JSON = (
+    '{"advantage_estimator":"grpo","dynamic_sampling_filter":'
+    '"nonzero_reward_std_bounded",'
     '"dynamic_sampling_max_replacements":4,"kl_coef":null,'
     '"loss":"policy_loss","schema":"yeto-rl-algorithm-spec-v1"}'
 )
@@ -128,6 +135,7 @@ def test_v2_roundtrip():
 
 
 def test_r0_golden_hashes_unchanged():
+    assert AlgorithmSpec.from_dict(json.loads(R0_BOUNDED_JSON_PRE_44)) == BOUNDED  # old name loads
     assert BOUNDED.canonical_json() == R0_BOUNDED_JSON
     assert BOUNDED.sha256() == hashlib.sha256(R0_BOUNDED_JSON.encode()).hexdigest()
     assert AlgorithmSpec().canonical_json() == R0_DEFAULT_JSON

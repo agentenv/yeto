@@ -432,6 +432,7 @@ class IslandDriver:
         self.sleep: Callable[[float], None] = time.sleep
         self.published_state: TrainableState | None = None
         self.at_safe_point = False
+        self.last_applied_lrs: list[float] | None = None
         self.eval_overlap: EvalOverlap | None = None
         if profile is not None and profile.execution_mode == "partitioned-overlap" and evaluate_start:
             self.eval_overlap = EvalOverlap(evaluate_start, emit=self.emit, clock=self.clock)
@@ -593,6 +594,7 @@ class IslandDriver:
             placement=description.kind,
             **{"rl/algorithm_spec_sha256": self.algorithm.sha256()},
             runtime_fingerprint=self.capabilities.runtime_fingerprint,
+            **({"eval_guard": dict(self.eval_guard_report)} if self.eval_guard_report else {}),
         )
 
     # -- helpers used by sync sessions -----------------------------------
@@ -952,6 +954,9 @@ class IslandDriver:
         summary = getattr(batch, "batch_summary", None) or {}
         for key in BATCH_SUMMARY_KEYS:
             fields[key] = summary.get(key)
+        by_bucket = getattr(batch, "batch_summary_by_bucket", None)
+        if by_bucket:  # rl-eval-difficulty-buckets 4.1; absent = old field set
+            fields["batch_summary_by_bucket"] = {str(b): dict(v) for b, v in by_bucket.items()}
         return fields
 
     def _mismatch_fields(self) -> dict[str, Any]:
@@ -1127,7 +1132,28 @@ class IslandDriver:
         probe = getattr(self.sync, "is_final_round", None)
         return bool(probe(self, rollout_id=rollout_id)) if callable(probe) else False
 
+    # rl-eval-difficulty-buckets 5.2 (D11.4): optional exporter that writes the
+    # published policy of an eval version to the durable eval store and queues it
+    # for the eval island; the driver never waits for that evaluation. None = off.
+    eval_export: Callable[..., Mapping[str, Any] | None] | None = None
+    # rl-eval-difficulty-buckets 2.2 (D6.c): start-time hold-out check report,
+    # written into rl_driver_start as ``eval_guard`` only when set.
+    eval_guard_report: Mapping[str, Any] | None = None
+
+    def _export_eval_version(self, rollout_id: int, *, final: bool) -> None:
+        state = self.published_state
+        if self.eval_export is None or state is None:
+            return
+        manifest = self.eval_export(rollout_id, state, self.expected_token, final=final)
+        if manifest:
+            self.emit("rl_eval_export", policy_version=rollout_id,
+                      **{"rl/policy_token": manifest.get("rl/policy_token")},
+                      policy_tensor_hash=manifest.get("policy_tensor_hash"),
+                      bytes=sum(int(f.get("bytes", 0)) for f in (manifest.get("files") or {}).values()),
+                      seconds=manifest.get("export_seconds"), final=bool(final))
+
     def _maybe_eval(self, rollout_id: int, *, force: bool = False, defer: bool = False) -> None:
+        self._export_eval_version(rollout_id, final=force and rollout_id != 0)
         if self.evaluate is None or not self.eval_interval:
             return
         if not force and rollout_id % self.eval_interval:
@@ -1226,6 +1252,8 @@ class IslandDriver:
         metrics = raw if isinstance(raw, TrainStepMetrics) else TrainStepMetrics(**dict(raw))
         self._check_gradient(rollout_id, batch, receipt, metrics)
         self.trained_version = rollout_id + 1
+        # rl-resume-from-checkpoint: a round cut records the next round's lr from this
+        self.last_applied_lrs = list(metrics.applied_lrs) if metrics.applied_lrs else None
         if self.ledger is not None:
             self.ledger.optimizer_applied(
                 rollout_id, input_batch_hash=getattr(receipt, "input_batch_hash", None)
@@ -1496,9 +1524,13 @@ class IslandDriver:
         cursor = self.ledger.restart_cursor(start_rollout_id) if self.ledger is not None else None
         seek = getattr(self.rollout, "seek_data_cursor", None)
         fallback = getattr(self.sync, "restart_cursor_fallback", None)
-        if cursor is None and callable(seek) and callable(fallback):
-            # 0.21 (elastic only): no recorded cursor (empty ledger, joined at
-            # base_version > 0) -> advance by whole rounds from the fresh position.
+        # The whole-round fallback is for an island with NO record of rollout v-1
+        # (empty/absent ledger: fresh container, joined at base_version > 0). A
+        # ledger that recorded v-1 without a cursor stays fail-closed below.
+        unrecorded = self.ledger is None or self.ledger.state(start_rollout_id - 1) is None
+        if cursor is None and unrecorded and callable(seek) and callable(fallback):
+            # 0.21 (elastic) / S17 N16 (strict): advance by whole rounds from the
+            # fresh position.
             read = getattr(self.rollout, "data_cursor", None)
             wanted = fallback(read() if callable(read) else None, start_rollout_id)
             if wanted is not None:
@@ -1577,7 +1609,8 @@ class IslandDriver:
                     elif callable(getattr(self.sync, "restart_cursor_fallback", None)):
                         # 0.23: an elastic island without --rl-elastic has no batch
                         # ledger, yet must still not re-draw rounds below base_version
-                        # (1b: rollouts 3, 4 re-trained rollouts 0, 1).
+                        # (1b: rollouts 3, 4 re-trained rollouts 0, 1). S17 N16: same
+                        # for a strict island relaunched at v > 0 (verl V2 island 1).
                         self._restore_data_cursor(start.rollout_id)
                     state = start.state
                     self.publish(state, rollout_id=start.rollout_id)

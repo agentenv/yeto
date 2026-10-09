@@ -618,7 +618,7 @@ def test_last_completion_and_end_reason_reach_the_metrics(monkeypatch):
 
 
 def test_verifier_log_tail_reaches_the_trajectory_metadata_and_tape(monkeypatch, tmp_path):
-    from yeto.rl.engine.miles_adapter import rollout_meta_hook as hook
+    from yeto.rl.adapters.miles import rollout_meta_hook as hook
 
     provider = _provider(tmp_path)
     _configure(monkeypatch, provider)

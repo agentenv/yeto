@@ -890,7 +890,6 @@ pub async fn run(cfg: Config) -> Result<()> {
     let accept_session = session.clone();
     let accept_budget_cutoff = budget_cutoff.clone();
     let expected_learners = cfg.learners;
-    let strict_layout = cfg.max_base_lag == Some(0);
     let require_profile_binding = cfg.require_profile_binding;
     tokio::spawn(async move {
         loop {
@@ -906,7 +905,6 @@ pub async fn run(cfg: Config) -> Result<()> {
                             reg,
                             session,
                             expected_learners,
-                            strict_layout,
                             semantic_profile_hash,
                             require_profile_binding,
                             tx,
@@ -948,6 +946,37 @@ fn negotiated_payload_limits(layout: &Layout, dtype: u8) -> Result<(u64, u64)> {
         );
     }
     Ok((max_init, max_push))
+}
+
+fn hex32(h: &[u8; 32]) -> String {
+    h.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Admit `offered` into the session: the first HELLO establishes the session
+/// contract; later HELLOs must match it exactly. Returns the refusal message
+/// (sent to that connection only) on mismatch. Never fatal for the session.
+fn admit_session(session: &Session, offered: SessionSpec) -> Option<String> {
+    let mut guard = session.lock().unwrap();
+    match guard.as_ref() {
+        None => {
+            *guard = Some(offered);
+            None
+        }
+        Some(expected) if expected == &offered => None,
+        Some(expected) => Some(format!(
+            "session mismatch (HELLO refused, session keeps running): \
+             expected session_contract_hash={} layout_fingerprint={} dtype={} fragments={}, \
+             got session_contract_hash={} layout_fingerprint={} dtype={} fragments={}",
+            hex32(&expected.session_contract_hash),
+            hex32(&expected.layout_fingerprint),
+            expected.dtype,
+            expected.layout.fragments.len(),
+            hex32(&offered.session_contract_hash),
+            hex32(&offered.layout_fingerprint),
+            offered.dtype,
+            offered.layout.fragments.len(),
+        )),
+    }
 }
 
 fn parse_hello(payload: &[u8], expected_learners: u32) -> Result<ParsedHello> {
@@ -1037,7 +1066,6 @@ async fn handle_connection(
     registry: Registry,
     session: Session,
     expected_learners: u32,
-    strict_layout: bool,
     semantic_profile_hash: [u8; 32],
     require_profile_binding: bool,
     event_tx: mpsc::Sender<Event>,
@@ -1096,17 +1124,10 @@ async fn handle_connection(
                 _ => None,
             };
             if let Some(message) = profile_error {
+                // Refuse this connection only; the running session is unaffected.
                 send_direct(&mut wr, MSG_ERROR, message.as_bytes()).await?;
-                if strict_layout || require_profile_binding {
-                    event_tx
-                        .send(Event::Fatal {
-                            metric: "syncer_profile_mismatch",
-                            message: message.to_string(),
-                        })
-                        .await
-                        .ok();
-                }
-                bail!(message);
+                warn!(learner_id, generation, "rejected HELLO, session keeps running: {message}");
+                return Ok(());
             }
             let num_fragments = layout.fragments.len();
             let offered = SessionSpec {
@@ -1116,34 +1137,16 @@ async fn handle_connection(
                 session_contract_hash,
                 syncer_profile_hash,
             };
-            let mismatch = {
-                let mut guard = session.lock().unwrap();
-                match guard.as_ref() {
-                    None => {
-                        *guard = Some(offered.clone());
-                        None
-                    }
-                    Some(expected) if expected == &offered => None,
-                    Some(expected) => Some(format!(
-                        "session mismatch: expected dtype {} and initialized layout, got dtype {} and {} fragments",
-                        expected.dtype,
-                        dtype,
-                        layout.fragments.len()
-                    )),
-                }
-            };
-            if let Some(message) = mismatch {
+            // Strict and elastic alike: a HELLO whose contract differs from the
+            // established session is refused on this connection only (MSG_ERROR
+            // naming both hashes). The syncer and the islands already admitted
+            // keep running; one mis-wired island (e.g. a Miles island in a verl
+            // session) must not stop the whole run. The first HELLO still
+            // establishes the session contract.
+            if let Some(message) = admit_session(&session, offered) {
                 send_direct(&mut wr, MSG_ERROR, message.as_bytes()).await?;
-                if strict_layout {
-                    event_tx
-                        .send(Event::Fatal {
-                            metric: "layout_hash_mismatch",
-                            message: message.clone(),
-                        })
-                        .await
-                        .ok();
-                }
-                bail!(message);
+                warn!(learner_id, generation, "rejected HELLO, session keeps running: {message}");
+                return Ok(());
             }
             let member = Member {
                 learner_id,
@@ -3818,6 +3821,38 @@ mod tests {
         }
     }
 
+    fn spec(dtype: u8, layout: &Layout, fingerprint: u8, contract: u8) -> SessionSpec {
+        SessionSpec {
+            dtype,
+            layout: layout.clone(),
+            layout_fingerprint: [fingerprint; 32],
+            session_contract_hash: [contract; 32],
+            syncer_profile_hash: None,
+        }
+    }
+
+    #[test]
+    fn first_hello_establishes_session_and_mismatch_is_refused_without_reset() {
+        let layout = Layout { fragments: Vec::new() };
+        let session: Session = Arc::new(Mutex::new(None));
+        let verl = spec(DTYPE_F32, &layout, 0xaf, 0x4f);
+        // No session yet: the first HELLO defines the contract.
+        assert_eq!(admit_session(&session, verl.clone()), None);
+        // Same contract: admitted.
+        assert_eq!(admit_session(&session, verl.clone()), None);
+        // Same layout, other backend identity (Miles island in a verl session):
+        // refused, with both hashes in the message.
+        let miles = spec(DTYPE_F32, &layout, 0xaf, 0x69);
+        let message = admit_session(&session, miles).expect("must refuse");
+        assert!(message.starts_with("session mismatch"), "{message}");
+        assert!(message.contains(&format!("expected session_contract_hash={}", "4f".repeat(32))));
+        assert!(message.contains(&format!("got session_contract_hash={}", "69".repeat(32))));
+        assert!(message.contains(&format!("layout_fingerprint={}", "af".repeat(32))));
+        // The refusal does not touch the established session.
+        assert_eq!(session.lock().unwrap().as_ref(), Some(&verl));
+        assert_eq!(admit_session(&session, verl), None);
+    }
+
     fn registry_with_current(current: Member) -> Registry {
         let registry = Arc::new(Mutex::new(RegistryState::default()));
         registry
@@ -4160,6 +4195,103 @@ mod tests {
         for v in variants {
             config.island_scheduling = IslandSchedulingMode::Elastic(v);
             assert_ne!(config.semantic_profile_hash(), elastic, "{v:?}");
+        }
+    }
+
+    // --- 0.8a: legacy equivalence (strict synchronous rounds) ---------------
+
+    #[test]
+    fn legacy_contract_encoding_appends_nothing() {
+        let mut encoded = vec![1, 2, 3];
+        crate::elastic::IslandSchedulingMode::Legacy.encode_contract(&mut encoded);
+        assert_eq!(encoded, vec![1, 2, 3]);
+        assert_eq!(
+            round_test_config(8).island_scheduling,
+            crate::elastic::IslandSchedulingMode::Legacy
+        );
+    }
+
+    #[test]
+    fn legacy_round_needs_every_learner_and_adds_no_extra_wait() {
+        // Strict legacy: quorum == learners, grace 0.
+        let first = member(0, 10);
+        let second = member(1, 20);
+        let mut round = test_round(vec![first, second]);
+        round.quorum_size = 2;
+        round.quorum_deadline = Instant::now() + Duration::from_secs(3600);
+        round.pushes.insert(first, test_push(5));
+        // One of two arrived: keep waiting (no capacity-fraction step).
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Wait);
+        round.pushes.insert(second, test_push(5));
+        // Arrived == learners: complete at once, an hour before the deadline.
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Complete);
+    }
+
+    #[test]
+    fn legacy_round_timeout_never_merges_a_partial_quorum() {
+        let first = member(0, 10);
+        let mut round = test_round(vec![first, member(1, 20)]);
+        round.quorum_size = 2;
+        round.pushes.insert(first, test_push(5));
+        round.quorum_deadline = Instant::now() - Duration::from_millis(1);
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Restart);
+        assert!(next_committable_round(&[round], Instant::now()).is_none());
+    }
+
+    #[test]
+    fn legacy_strict_round_rejects_a_late_delta_without_carrying_it() {
+        let only = member(0, 10);
+        let mut rounds = vec![test_round(vec![only])];
+        assert_eq!(
+            route_push(&mut rounds, only, test_exact_push(1, 4), Some(0), true),
+            PushDisposition::StaleBase
+        );
+        assert!(rounds[0].pushes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn legacy_server_rejects_every_elastic_frame_type() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let key = b"k".to_vec();
+        for msg_type in [MSG_JOIN, MSG_LEAVE, MSG_LEASE_HEARTBEAT, MSG_SAMPLE_INDEX,
+                         MSG_DELTA_READY, MSG_ELASTIC_INIT, MSG_DELTA_TENSOR] {
+            let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+            let mut config = round_test_config(1);
+            config.port = port;
+            config.island_hmac_key = Some(key.clone());
+            let server = tokio::spawn(run(config));
+            let mut stream = None;
+            for _ in 0..100 {
+                if let Ok(s) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+                    stream = Some(s);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let mut stream = stream.expect("legacy syncer did not start");
+            // A correctly sealed elastic payload (epoch 0) still must not be
+            // accepted: legacy only knows HELLO/DATA_HELLO as a first frame.
+            let payload = crate::elastic::seal(&key, msg_type, 0u64.to_le_bytes().to_vec());
+            let mut frame = MAGIC.to_le_bytes().to_vec();
+            frame.push(msg_type);
+            frame.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+            frame.extend_from_slice(&payload);
+            stream.write_all(&frame).await.unwrap();
+            // Legacy answers with one MSG_ERROR naming the bad first frame
+            // and then closes the connection.
+            let mut reply = Vec::new();
+            tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut reply))
+                .await
+                .expect("legacy syncer kept the connection open")
+                .ok();
+            assert_eq!(reply.get(4), Some(&MSG_ERROR), "type {msg_type}");
+            let text = String::from_utf8_lossy(&reply[13..]);
+            assert!(
+                text.contains(&format!("first frame must be HELLO/DATA_HELLO, got {msg_type}")),
+                "type {msg_type}: {text}"
+            );
+            assert!(!server.is_finished(), "type {msg_type}: server exited");
+            server.abort();
         }
     }
 

@@ -37,7 +37,7 @@ for run in runs:
     text = open(os.path.join(spec["dir"], "launcher-dry-run.txt")).read()
     launcher = json.loads(text[text.index("{"):text.rindex("}") + 1])
     cmd = launcher["island_requests"][0]["learner_command"]
-    learner_args = cmd.split("python3 -m yeto.rl.learner", 1)[1].replace("$LEARNER_ID", "0")
+    learner_args = cmd.split("python3 -m yeto.rl.adapters.miles.island_entry", 1)[1].replace("$LEARNER_ID", "0")
     with open(os.path.join(spec["dir"], "learner-args.txt"), "w") as fh:
         fh.write(learner_args)
     harness = f"{d}/harness.json" if os.path.exists(os.path.join(spec["dir"], "harness.json")) else "-"

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from yeto.rl.miles_sao_streaming import MilesSaoStreamingConfig
+from yeto.rl.adapters.miles.models.sao_streaming import MilesSaoStreamingConfig
 from yeto.rl.sao_streaming_runtime import (
     bind_sao_streaming_runtime,
     load_sao_streaming_runtime,
@@ -178,9 +178,9 @@ def _args(**overrides):
         "start_rollout_id": 0,
         "lora_rank": 0,
         "external_policy_sync_path": (
-            "yeto.rl.miles_sao_streaming.create_miles_sao_streaming_sync"
+            "yeto.rl.adapters.miles.models.sao_streaming.create_miles_sao_streaming_sync"
         ),
-        "rollout_function_path": "yeto.rl.miles.generate_rollout",
+        "rollout_function_path": "yeto.rl.adapters.miles.legacy.engine.generate_rollout",
         "yeto_rl_learner_id": 0,
         "yeto_rl_base_model_revision": "a" * 40,
         "num_steps_per_rollout": 1,
@@ -343,11 +343,11 @@ def test_bind_installs_streaming_callback_and_private_evidence(tmp_path):
     assert args.yeto_rl_trajectory_evidence_schema_version == 2
     assert args.yeto_rl_sync_preset == "sao-streaming-full"
     assert args.external_policy_sync_path == (
-        "yeto.rl.miles_sao_streaming.create_miles_sao_streaming_sync"
+        "yeto.rl.adapters.miles.models.sao_streaming.create_miles_sao_streaming_sync"
     )
     assert args.external_policy_sync_run_until_stop is True
     assert args.external_policy_identity_setter_path == (
-        "yeto.rl.miles.set_current_published_policy_identity"
+        "yeto.rl.adapters.miles.legacy.engine.set_current_published_policy_identity"
     )
     assert args.yeto_rl_num_fragments == 4
     assert args.yeto_rl_total_fragment_steps == 8

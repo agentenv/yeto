@@ -33,8 +33,8 @@ import pytest
 import test_secrlenv_codex_harness as legacy_tests
 from yeto.rl import tbench_outcome
 from yeto.rl.engine.algorithm import AlgorithmSpec
-from yeto.rl.engine.miles_adapter import entry, rollout_meta_hook
-from yeto.rl.engine.miles_adapter.config import MilesConfigError
+from yeto.rl.adapters.miles import entry, rollout_meta_hook
+from yeto.rl.adapters.miles.config import MilesConfigError
 from yeto.rl.engine.timeline import HARNESS_METRIC_KEYS, LOAD_SAMPLE_SCHEMA
 from yeto.rl.engine.tool_wait import HARNESS_ZERO, HarnessBoard, HarnessSnapshot, ToolWaitBoard, drain_blockers
 from yeto.rl.harness.codex import (

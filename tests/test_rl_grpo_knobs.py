@@ -17,7 +17,7 @@ from yeto.rl.engine.algorithm import (
     AlgorithmSpecError,
     PluginRef,
 )
-from yeto.rl.engine.miles_adapter.algorithm_flags import algorithm_argv
+from yeto.rl.adapters.miles.algorithm_flags import algorithm_argv
 
 DEFAULT_SHA = AlgorithmSpec(advantage_estimator="grpo").sha256()
 OVERLONG = {"name": "overlong_penalty", "max_length": 100, "cache_length": 20}
@@ -177,7 +177,7 @@ def test_constant_rejections():
     with pytest.raises(AlgorithmSpecError, match="loss.constant_denominator must be a finite number > 0"):
         constant_spec(constant_denominator=0)
     # token aggregation and constant are one enum: the argv switch conflicts.
-    from yeto.rl.engine.miles_adapter.algorithm_flags import AlgorithmFlagConflict, absorb_extra_argv
+    from yeto.rl.adapters.miles.algorithm_flags import AlgorithmFlagConflict, absorb_extra_argv
 
     with pytest.raises(AlgorithmFlagConflict, match="loss.aggregation"):
         absorb_extra_argv(constant_spec(), ["--calculate-per-token-loss"])
@@ -388,7 +388,7 @@ def test_runtime_attrs_wired_through_spec():
 
 def test_translate_run_config_launch_checks():
     from test_rl_miles_adapter_config import make_config
-    from yeto.rl.engine.miles_adapter import config as mc
+    from yeto.rl.adapters.miles import config as mc
 
     spec = pipeline_spec(reward_shapers=[{"name": "overlong_penalty", "max_length": 4096, "cache_length": 256}])
     with pytest.raises(mc.MilesConfigError, match="exceeds the generation limit"):
@@ -434,7 +434,7 @@ def test_expects_gradient_with_overlong_filter():
 
 # ---------------------------------------------------------------- 6.3 hook (1b-hook.patch)
 
-from yeto.rl.engine.miles_adapter import rollout_meta_hook as rmh  # noqa: E402
+from yeto.rl.adapters.miles import rollout_meta_hook as rmh  # noqa: E402
 import inspect as _inspect  # noqa: E402
 
 needs_hook = pytest.mark.skipif("apply_sample_filters" not in _inspect.getsource(rmh.record_trained_groups),
@@ -481,7 +481,7 @@ def test_two_islands_ref_model_checked_before_joining(tmp_path):
 
     from test_rl_miles_adapter_config import make_config
     from yeto.rl import learner as rl_learner
-    from yeto.rl.engine.miles_adapter import config as mc
+    from yeto.rl.adapters.miles import config as mc
 
     spec = kl_spec()
     launch = mc.translate_run_config(make_config(), spec)
@@ -516,7 +516,7 @@ EXAMPLES = Path(__file__).resolve().parents[1] / "examples" / "rl_algorithms"
 @pytest.mark.parametrize("name", ["dapo-like", "dr-grpo"])
 def test_examples_build_and_translate(name):
     from test_rl_miles_adapter_config import make_config, sub
-    from yeto.rl.engine.miles_adapter import config as mc
+    from yeto.rl.adapters.miles import config as mc
 
     spec = AlgorithmSpec.from_json_file(str(EXAMPLES / f"{name}.json"))
     # plugin hashes are the current sources (a dispatcher/reducer edit must
@@ -654,7 +654,7 @@ def _kl_island(tmp_path, spec, syncer, joins, *, learner_id, model_revision):
     from yeto.rl.engine.bridges import StrictAvgSync
     from yeto.rl.engine.driver import EventTape, IslandDriver
     from yeto.rl.engine.fake import fake_capabilities
-    from yeto.rl.engine.miles_adapter import config as mc
+    from yeto.rl.adapters.miles import config as mc
     from test_rl_miles_adapter_config import make_config
 
     args = SimpleNamespace(rl_expected_algorithm_sha256=spec.sha256(), learner_id=learner_id,
@@ -775,7 +775,7 @@ def test_learner_binds_ref_source_and_override(tmp_path):
 
     from test_rl_miles_adapter_config import make_config
     from yeto.rl import learner as rl_learner
-    from yeto.rl.engine.miles_adapter import config as mc
+    from yeto.rl.adapters.miles import config as mc
 
     spec = kl_spec()
     launch = mc.translate_run_config(make_config(), spec)
@@ -812,7 +812,7 @@ def test_declared_table_matches_final_declaration():
     custom_pg_loss_reducer is declared there separately, limited to the Dr.GRPO reducer."""
 
     assert {d: set(n) for d, n in gk.declared_mechanisms().items()} == EXPECTED_1B_DECLARED
-    from yeto.rl.engine.miles_adapter import entry
+    from yeto.rl.adapters.miles import entry
 
     final = getattr(entry, "MILES_DECLARED", None)
     if final is not None:  # integrated branches: the 1b entries are exactly the declared ones
@@ -821,7 +821,7 @@ def test_declared_table_matches_final_declaration():
 
 
 def test_declared_caps_accept_1b_and_refuse_undeclared():
-    from yeto.rl.engine.miles_adapter.entry import miles_capabilities
+    from yeto.rl.adapters.miles.entry import miles_capabilities
 
     caps = gk.merge_declared(miles_capabilities("sha256:" + "0" * 64))
     for spec in (pipeline_spec(reward_shapers=[OVERLONG]), AlgorithmSpec(loss={"eps_clip": 0.2}),

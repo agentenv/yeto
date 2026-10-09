@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from yeto.rl.miles_full_parameter_probe import MilesFullParameterProbeSync
+from yeto.rl.adapters.miles.models.full_parameter_probe import MilesFullParameterProbeSync
 
 REVISION = "a" * 40
 CONFIG_HASH = "b" * 64
@@ -106,7 +106,7 @@ def test_probe_round_trips_one_changed_scalar_and_writes_private_evidence(
     evidence = tmp_path / "probe.json"
     _configure(monkeypatch, evidence)
     monkeypatch.setattr(
-        "yeto.rl.miles_full_parameter_probe._hardware_identity",
+        "yeto.rl.adapters.miles.models.full_parameter_probe._hardware_identity",
         lambda: {"gpu_count": 2},
     )
     args = SimpleNamespace(start_rollout_id=0, num_rollout=1)
@@ -143,7 +143,7 @@ def test_probe_round_trips_one_changed_scalar_and_writes_private_evidence(
 def test_probe_rejects_scheduler_drift_and_unexpected_training(monkeypatch, tmp_path):
     _configure(monkeypatch, tmp_path / "probe.json")
     monkeypatch.setattr(
-        "yeto.rl.miles_full_parameter_probe._hardware_identity",
+        "yeto.rl.adapters.miles.models.full_parameter_probe._hardware_identity",
         lambda: {"gpu_count": 2},
     )
     probe = MilesFullParameterProbeSync(

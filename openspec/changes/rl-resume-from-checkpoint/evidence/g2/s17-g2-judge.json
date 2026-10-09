@@ -1,0 +1,1511 @@
+{
+ "a": {
+  "cut_failures": [
+   {
+    "_file": "s17-g2-a/tape-direct/yeto-s17-g2-a/l0/rank0/rl-island-0.jsonl",
+    "error": "CutError('refusing to save a cut: runtime: backend_fingerprint missing')",
+    "event": "rl_round_cut",
+    "island_id": 0,
+    "ok": false,
+    "rollout_id": 2,
+    "time_unix": 1791482408.0093687
+   },
+   {
+    "_file": "s17-g2-a/tape-direct/yeto-s17-g2-a/l0/rank0/rl-island-0.jsonl",
+    "error": "CutError('refusing to save a cut: runtime: backend_fingerprint missing')",
+    "event": "rl_round_cut",
+    "island_id": 0,
+    "ok": false,
+    "rollout_id": 4,
+    "time_unix": 1791482460.0588078
+   },
+   {
+    "_file": "s17-g2-a/tape-direct/yeto-s17-g2-a/l0/rank0/rl-island-0.jsonl",
+    "error": "CutError('refusing to save a cut: outer: the outer commit of this cut is not settled (D5); runtime: backend_fingerprint missing')",
+    "event": "rl_round_cut",
+    "island_id": 0,
+    "ok": false,
+    "rollout_id": 6,
+    "time_unix": 1791482508.325633
+   }
+  ],
+  "cuts": [],
+  "events": 331,
+  "publications": [
+   0,
+   1,
+   2,
+   3,
+   4,
+   5,
+   6
+  ],
+  "resume_checks": [],
+  "resumes": [],
+  "rounds": {
+   "0": [
+    {
+     "file": "s17-g2-a/tape-direct/yeto-s17-g2-a/l0/rank0/rl-island-0.jsonl",
+     "grad_norm": 0.4499274790287018,
+     "ids": "6ac54d62824c59fa3a8f59264bca872f865403d905926ce326c231e62752ac7d",
+     "local_round_id": 1,
+     "loss": -1.862645149230957e-09,
+     "lrs": [
+      1e-05
+     ],
+     "reward": 0.9375,
+     "time_unix": 1791482377.5514047
+    }
+   ],
+   "1": [
+    {
+     "file": "s17-g2-a/tape-direct/yeto-s17-g2-a/l0/rank0/rl-island-0.jsonl",
+     "grad_norm": 0.48915454745292664,
+     "ids": "2db44ca8e1db6f0b44c22e6134a0eb33edb7e03f9323974771a6138c41bc9a04",
+     "local_round_id": 2,
+     "loss": 1.862645149230957e-09,
+     "lrs": [
+      8.333333333333334e-06
+     ],
+     "reward": 0.4375,
+     "time_unix": 1791482403.8014617
+    }
+   ],
+   "2": [
+    {
+     "file": "s17-g2-a/tape-direct/yeto-s17-g2-a/l0/rank0/rl-island-0.jsonl",
+     "grad_norm": 0.2347632646560669,
+     "ids": "69be7217a18d7585a50c20b2a7b0af4ddc13146706816ed0c22cf668eda0aaef",
+     "local_round_id": 3,
+     "loss": 0.0,
+     "lrs": [
+      6.666666666666668e-06
+     ],
+     "reward": 0.125,
+     "time_unix": 1791482430.6461601
+    }
+   ],
+   "3": [
+    {
+     "file": "s17-g2-a/tape-direct/yeto-s17-g2-a/l0/rank0/rl-island-0.jsonl",
+     "grad_norm": 0.36526644229888916,
+     "ids": "b81b61f029b2c44851ed2e40e1f38e0ed04104918d79b5dde04fb3690113fb36",
+     "local_round_id": 4,
+     "loss": 1.4901161193847656e-08,
+     "lrs": [
+      5e-06
+     ],
+     "reward": 0.59375,
+     "time_unix": 1791482456.1553159
+    }
+   ],
+   "4": [
+    {
+     "file": "s17-g2-a/tape-direct/yeto-s17-g2-a/l0/rank0/rl-island-0.jsonl",
+     "grad_norm": 0.41630443930625916,
+     "ids": "c9e424bfbd495a5e384a32516b0b7527bcb742e2256e4a12c04d0c4a28588d8d",
+     "local_round_id": 5,
+     "loss": 1.4901161193847656e-08,
+     "lrs": [
+      3.333333333333334e-06
+     ],
+     "reward": 0.34375,
+     "time_unix": 1791482479.778195
+    }
+   ],
+   "5": [
+    {
+     "file": "s17-g2-a/tape-direct/yeto-s17-g2-a/l0/rank0/rl-island-0.jsonl",
+     "grad_norm": 0.33577507734298706,
+     "ids": "d22bc0f35a19def136a29bce010ec380f14c53d3f64466271923635fc39b42a9",
+     "local_round_id": 6,
+     "loss": 5.587935447692871e-09,
+     "lrs": [
+      1.6666666666666665e-06
+     ],
+     "reward": 0.59375,
+     "time_unix": 1791482501.743484
+    }
+   ]
+  }
+ },
+ "a2": {
+  "cut_failures": [
+   {
+    "_file": "s17-g2-a2/tape-direct/yeto-s17-g2-a2/l0/rank0/rl-island-0.jsonl",
+    "error": "CutError('refusing to save a cut: runtime: backend_fingerprint missing')",
+    "event": "rl_round_cut",
+    "island_id": 0,
+    "ok": false,
+    "rollout_id": 2,
+    "time_unix": 1791482582.1884687
+   },
+   {
+    "_file": "s17-g2-a2/tape-direct/yeto-s17-g2-a2/l0/rank0/rl-island-0.jsonl",
+    "error": "CutError('refusing to save a cut: runtime: backend_fingerprint missing')",
+    "event": "rl_round_cut",
+    "island_id": 0,
+    "ok": false,
+    "rollout_id": 4,
+    "time_unix": 1791482642.4682944
+   },
+   {
+    "_file": "s17-g2-a2/tape-direct/yeto-s17-g2-a2/l0/rank0/rl-island-0.jsonl",
+    "error": "CutError('refusing to save a cut: outer: the outer commit of this cut is not settled (D5); runtime: backend_fingerprint missing')",
+    "event": "rl_round_cut",
+    "island_id": 0,
+    "ok": false,
+    "rollout_id": 6,
+    "time_unix": 1791482692.9080276
+   }
+  ],
+  "cuts": [],
+  "events": 337,
+  "publications": [
+   0,
+   1,
+   2,
+   3,
+   4,
+   5,
+   6
+  ],
+  "resume_checks": [],
+  "resumes": [],
+  "rounds": {
+   "0": [
+    {
+     "file": "s17-g2-a2/tape-direct/yeto-s17-g2-a2/l0/rank0/rl-island-0.jsonl",
+     "grad_norm": 0.4499274790287018,
+     "ids": "6ac54d62824c59fa3a8f59264bca872f865403d905926ce326c231e62752ac7d",
+     "local_round_id": 1,
+     "loss": -1.862645149230957e-09,
+     "lrs": [
+      1e-05
+     ],
+     "reward": 0.9375,
+     "time_unix": 1791482545.004812
+    }
+   ],
+   "1": [
+    {
+     "file": "s17-g2-a2/tape-direct/yeto-s17-g2-a2/l0/rank0/rl-island-0.jsonl",
+     "grad_norm": 0.48915454745292664,
+     "ids": "2db44ca8e1db6f0b44c22e6134a0eb33edb7e03f9323974771a6138c41bc9a04",
+     "local_round_id": 2,
+     "loss": 1.862645149230957e-09,
+     "lrs": [
+      8.333333333333334e-06
+     ],
+     "reward": 0.4375,
+     "time_unix": 1791482576.6358452
+    }
+   ],
+   "2": [
+    {
+     "file": "s17-g2-a2/tape-direct/yeto-s17-g2-a2/l0/rank0/rl-island-0.jsonl",
+     "grad_norm": 0.2347632646560669,
+     "ids": "69be7217a18d7585a50c20b2a7b0af4ddc13146706816ed0c22cf668eda0aaef",
+     "local_round_id": 3,
+     "loss": 0.0,
+     "lrs": [
+      6.666666666666668e-06
+     ],
+     "reward": 0.125,
+     "time_unix": 1791482607.3470716
+    }
+   ],
+   "3": [
+    {
+     "file": "s17-g2-a2/tape-direct/yeto-s17-g2-a2/l0/rank0/rl-island-0.jsonl",
+     "grad_norm": 0.36526644229888916,
+     "ids": "b81b61f029b2c44851ed2e40e1f38e0ed04104918d79b5dde04fb3690113fb36",
+     "local_round_id": 4,
+     "loss": 1.4901161193847656e-08,
+     "lrs": [
+      5e-06
+     ],
+     "reward": 0.59375,
+     "time_unix": 1791482637.4438255
+    }
+   ],
+   "4": [
+    {
+     "file": "s17-g2-a2/tape-direct/yeto-s17-g2-a2/l0/rank0/rl-island-0.jsonl",
+     "grad_norm": 0.41630443930625916,
+     "ids": "c9e424bfbd495a5e384a32516b0b7527bcb742e2256e4a12c04d0c4a28588d8d",
+     "local_round_id": 5,
+     "loss": 1.4901161193847656e-08,
+     "lrs": [
+      3.333333333333334e-06
+     ],
+     "reward": 0.34375,
+     "time_unix": 1791482663.6127393
+    }
+   ],
+   "5": [
+    {
+     "file": "s17-g2-a2/tape-direct/yeto-s17-g2-a2/l0/rank0/rl-island-0.jsonl",
+     "grad_norm": 0.33577507734298706,
+     "ids": "d22bc0f35a19def136a29bce010ec380f14c53d3f64466271923635fc39b42a9",
+     "local_round_id": 6,
+     "loss": 5.587935447692871e-09,
+     "lrs": [
+      1.6666666666666665e-06
+     ],
+     "reward": 0.59375,
+     "time_unix": 1791482687.2574668
+    }
+   ]
+  }
+ },
+ "b1r": {
+  "cut_failures": [],
+  "cuts": [],
+  "events": 7,
+  "publications": [],
+  "resume_checks": [],
+  "resumes": [],
+  "rounds": {}
+ },
+ "b2": {
+  "cut_failures": [],
+  "cuts": [
+   {
+    "cut_bytes": 142488798,
+    "cut_id": "r000004-c974634dca7d",
+    "final": false,
+    "latest_seq": 2,
+    "policy_hash": "c60dfe666ca0b5cd7a8e853a2191ce67c8d31081c51e81cb5866b57edce10544",
+    "pruned": [
+     "state/00000000",
+     "round-cuts/r000002-31c43f1588af"
+    ],
+    "rollout_id": 4,
+    "save_s": 4.569,
+    "store_commit_s": 12.760334208000017,
+    "store_copy_s": 0.023064119999958166,
+    "store_synced": true,
+    "total_s": 19.62,
+    "trainer_onloaded_for_cut": true,
+    "write_bytes_per_s": 31189217.388978735
+   },
+   {
+    "cut_bytes": 142488798,
+    "cut_id": "r000006-c974634dca7d",
+    "final": true,
+    "latest_seq": 3,
+    "policy_hash": "b9b87bb607068ef8a88dbd4b102d524f8bbba13bdf29d214f5ad7343b06ff349",
+    "pruned": [
+     "state/00000001",
+     "round-cuts/r000003-31c43f1588af"
+    ],
+    "rollout_id": 6,
+    "save_s": 4.183,
+    "store_commit_s": 11.98547918099996,
+    "store_copy_s": 0.02036897300001783,
+    "store_synced": true,
+    "total_s": 18.527,
+    "trainer_onloaded_for_cut": true,
+    "write_bytes_per_s": 34064098.13873494
+   }
+  ],
+  "events": 183,
+  "publications": [
+   3,
+   4,
+   5,
+   6
+  ],
+  "resume_checks": [
+   {
+    "_file": "s17-g2-b2/tape-direct/yeto-s17-g2-b2/l0/rank0/rl-island-0.jsonl",
+    "applied": [
+     5e-06
+    ],
+    "check": "lr_at_next_round",
+    "event": "rl_resume_check",
+    "expected": [
+     5e-06
+    ],
+    "island_id": 0,
+    "ok": true,
+    "rollout_id": 3,
+    "time_unix": 1791484718.2932796
+   }
+  ],
+  "resumes": [
+   {
+    "checks": {
+     "consumed_prompt_ids_digest": "same",
+     "cut_shards_sha256": "ok",
+     "ledger_last_round": "outer_recorded",
+     "policy_hash": "same",
+     "policy_version": 3,
+     "run_fingerprint": "same"
+    },
+    "config_diff": null,
+    "cut_bytes": 141870193,
+    "cut_id": "r000003-31c43f1588af",
+    "incarnation": 1,
+    "lr_at_next_round": [
+     5e-06
+    ],
+    "policy_hash": "65428c03d3c60203158a45bd6ec7806ad4c5e700fc406806db6fdc0ca958dc6c",
+    "restore_s": 10.581,
+    "rollout_id": 3,
+    "state_restore": {
+     "bytes": 6051,
+     "files": 3,
+     "latest": {
+      "bytes": 6051,
+      "cut_id": "r000003-31c43f1588af",
+      "incarnation": "31c43f1588af",
+      "manifest_sha256": "3d666551bc14824f1683921862811c712819ef8ecd292eea2606d5416cf8d56c",
+      "next_rollout_id": 3,
+      "reason": "round_cut",
+      "seq": 1
+     },
+     "moved_aside": null,
+     "seconds": 1.8916464490000067,
+     "seq": 1
+    }
+   }
+  ],
+  "rounds": {
+   "3": [
+    {
+     "file": "s17-g2-b2/tape-direct/yeto-s17-g2-b2/l0/rank0/rl-island-0.jsonl",
+     "grad_norm": 0.36526644229888916,
+     "ids": "b81b61f029b2c44851ed2e40e1f38e0ed04104918d79b5dde04fb3690113fb36",
+     "local_round_id": 4,
+     "loss": 1.4901161193847656e-08,
+     "lrs": [
+      5e-06
+     ],
+     "reward": 0.59375,
+     "time_unix": 1791484718.2854888
+    }
+   ],
+   "4": [
+    {
+     "file": "s17-g2-b2/tape-direct/yeto-s17-g2-b2/l0/rank0/rl-island-0.jsonl",
+     "grad_norm": 0.41630443930625916,
+     "ids": "c9e424bfbd495a5e384a32516b0b7527bcb742e2256e4a12c04d0c4a28588d8d",
+     "local_round_id": 5,
+     "loss": 1.4901161193847656e-08,
+     "lrs": [
+      3.333333333333334e-06
+     ],
+     "reward": 0.34375,
+     "time_unix": 1791484764.22043
+    }
+   ],
+   "5": [
+    {
+     "file": "s17-g2-b2/tape-direct/yeto-s17-g2-b2/l0/rank0/rl-island-0.jsonl",
+     "grad_norm": 0.33577507734298706,
+     "ids": "d22bc0f35a19def136a29bce010ec380f14c53d3f64466271923635fc39b42a9",
+     "local_round_id": 6,
+     "loss": 5.587935447692871e-09,
+     "lrs": [
+      1.6666666666666665e-06
+     ],
+     "reward": 0.59375,
+     "time_unix": 1791484785.4553566
+    }
+   ]
+  }
+ },
+ "c": {
+  "cut_failures": [],
+  "cuts": [
+   {
+    "cut_bytes": 142488793,
+    "cut_id": "r000002-735948345e37",
+    "final": false,
+    "latest_seq": 0,
+    "policy_hash": "0a99e3b20578acee398a0c1e397fcb129e29c5bd9310e12cde2f4ff2ed1ca942",
+    "pruned": [],
+    "rollout_id": 2,
+    "save_s": 4.061,
+    "store_commit_s": 3.863649219000024,
+    "store_copy_s": 0.016884156999992683,
+    "store_synced": true,
+    "total_s": 7.951,
+    "trainer_onloaded_for_cut": true,
+    "write_bytes_per_s": 35084510.12520622
+   },
+   {
+    "cut_bytes": 142488798,
+    "cut_id": "r000004-735948345e37",
+    "final": false,
+    "latest_seq": 1,
+    "policy_hash": "c60dfe666ca0b5cd7a8e853a2191ce67c8d31081c51e81cb5866b57edce10544",
+    "pruned": [],
+    "rollout_id": 4,
+    "save_s": 4.136,
+    "store_commit_s": 3.5783715699999448,
+    "store_copy_s": 0.017626241000016307,
+    "store_synced": true,
+    "total_s": 7.744,
+    "trainer_onloaded_for_cut": true,
+    "write_bytes_per_s": 34447162.31358576
+   },
+   {
+    "cut_bytes": 142488798,
+    "cut_id": "r000006-735948345e37",
+    "final": true,
+    "latest_seq": 2,
+    "policy_hash": "b9b87bb607068ef8a88dbd4b102d524f8bbba13bdf29d214f5ad7343b06ff349",
+    "pruned": [
+     "state/00000000",
+     "round-cuts/r000002-735948345e37"
+    ],
+    "rollout_id": 6,
+    "save_s": 3.749,
+    "store_commit_s": 17.26019212499989,
+    "store_copy_s": 0.015153521999991426,
+    "store_synced": true,
+    "total_s": 22.259,
+    "trainer_onloaded_for_cut": true,
+    "write_bytes_per_s": 38010449.45333705
+   }
+  ],
+  "events": 350,
+  "publications": [
+   0,
+   1,
+   2,
+   3,
+   4,
+   5,
+   6
+  ],
+  "resume_checks": [],
+  "resumes": [
+   {
+    "checks": {
+     "consumed_prompt_ids_digest": "same",
+     "cut_shards_sha256": "ok",
+     "ledger_last_round": "outer_recorded",
+     "policy_hash": "same",
+     "policy_version": 6,
+     "run_fingerprint": "same"
+    },
+    "config_diff": null,
+    "cut_bytes": 141870193,
+    "cut_id": "r000006-735948345e37",
+    "incarnation": 1,
+    "lr_at_next_round": [
+     0.0
+    ],
+    "policy_hash": "b9b87bb607068ef8a88dbd4b102d524f8bbba13bdf29d214f5ad7343b06ff349",
+    "restore_s": 10.216,
+    "rollout_id": 6,
+    "state_restore": {
+     "bytes": 10364,
+     "files": 3,
+     "latest": {
+      "bytes": 10364,
+      "cut_id": "r000006-735948345e37",
+      "incarnation": "735948345e37",
+      "manifest_sha256": "d6b3e1194c7973ed17e19a64d2da471274e119c26b8fc613c49832e2297291c4",
+      "next_rollout_id": 6,
+      "reason": "round_cut",
+      "seq": 2
+     },
+     "moved_aside": "/root/yeto-rl/resume-state.prev-1791485163",
+     "seconds": 1.0772233309999706,
+     "seq": 2
+    }
+   }
+  ],
+  "rounds": {
+   "0": [
+    {
+     "file": "s17-g2-c/tape-direct/yeto-s17-g2-c/l0/rank0/rl-island-0.jsonl",
+     "grad_norm": 0.4499274790287018,
+     "ids": "6ac54d62824c59fa3a8f59264bca872f865403d905926ce326c231e62752ac7d",
+     "local_round_id": 1,
+     "loss": -1.862645149230957e-09,
+     "lrs": [
+      1e-05
+     ],
+     "reward": 0.9375,
+     "time_unix": 1791484735.6637514
+    }
+   ],
+   "1": [
+    {
+     "file": "s17-g2-c/tape-direct/yeto-s17-g2-c/l0/rank0/rl-island-0.jsonl",
+     "grad_norm": 0.48915454745292664,
+     "ids": "2db44ca8e1db6f0b44c22e6134a0eb33edb7e03f9323974771a6138c41bc9a04",
+     "local_round_id": 2,
+     "loss": 1.862645149230957e-09,
+     "lrs": [
+      8.333333333333334e-06
+     ],
+     "reward": 0.4375,
+     "time_unix": 1791484761.5459192
+    }
+   ],
+   "2": [
+    {
+     "file": "s17-g2-c/tape-direct/yeto-s17-g2-c/l0/rank0/rl-island-0.jsonl",
+     "grad_norm": 0.2347632646560669,
+     "ids": "69be7217a18d7585a50c20b2a7b0af4ddc13146706816ed0c22cf668eda0aaef",
+     "local_round_id": 3,
+     "loss": 0.0,
+     "lrs": [
+      6.666666666666668e-06
+     ],
+     "reward": 0.125,
+     "time_unix": 1791484793.1460693
+    }
+   ],
+   "3": [
+    {
+     "file": "s17-g2-c/tape-direct/yeto-s17-g2-c/l0/rank0/rl-island-0.jsonl",
+     "grad_norm": 0.36526644229888916,
+     "ids": "b81b61f029b2c44851ed2e40e1f38e0ed04104918d79b5dde04fb3690113fb36",
+     "local_round_id": 4,
+     "loss": 1.4901161193847656e-08,
+     "lrs": [
+      5e-06
+     ],
+     "reward": 0.59375,
+     "time_unix": 1791484818.0635998
+    }
+   ],
+   "4": [
+    {
+     "file": "s17-g2-c/tape-direct/yeto-s17-g2-c/l0/rank0/rl-island-0.jsonl",
+     "grad_norm": 0.41630443930625916,
+     "ids": "c9e424bfbd495a5e384a32516b0b7527bcb742e2256e4a12c04d0c4a28588d8d",
+     "local_round_id": 5,
+     "loss": 1.4901161193847656e-08,
+     "lrs": [
+      3.333333333333334e-06
+     ],
+     "reward": 0.34375,
+     "time_unix": 1791484846.4408214
+    }
+   ],
+   "5": [
+    {
+     "file": "s17-g2-c/tape-direct/yeto-s17-g2-c/l0/rank0/rl-island-0.jsonl",
+     "grad_norm": 0.33577507734298706,
+     "ids": "d22bc0f35a19def136a29bce010ec380f14c53d3f64466271923635fc39b42a9",
+     "local_round_id": 6,
+     "loss": 5.587935447692871e-09,
+     "lrs": [
+      1.6666666666666665e-06
+     ],
+     "reward": 0.59375,
+     "time_unix": 1791484866.9606166
+    }
+   ]
+  }
+ },
+ "c2": {
+  "cut_failures": [],
+  "cuts": [
+   {
+    "cut_bytes": 142488798,
+    "cut_id": "r000006-6fd283e0e651",
+    "final": true,
+    "latest_seq": 2,
+    "policy_hash": "c64e14191a3146e3d613860d3f80f45a3b247fcb10e6147549d94cccbb1e1385",
+    "pruned": [
+     "state/00000000",
+     "round-cuts/r000002-0a0849b84e9a"
+    ],
+    "rollout_id": 6,
+    "save_s": 4.009,
+    "store_commit_s": 19.954612368000028,
+    "store_copy_s": 0.027710743999989518,
+    "store_synced": true,
+    "total_s": 24.906,
+    "trainer_onloaded_for_cut": true,
+    "write_bytes_per_s": 35542938.22350334
+   },
+   {
+    "cut_bytes": 142488793,
+    "cut_id": "r000002-0a0849b84e9a",
+    "final": false,
+    "latest_seq": 0,
+    "policy_hash": "0a99e3b20578acee398a0c1e397fcb129e29c5bd9310e12cde2f4ff2ed1ca942",
+    "pruned": [],
+    "rollout_id": 2,
+    "save_s": 4.341,
+    "store_commit_s": 5.039207920000024,
+    "store_copy_s": 0.015193318999990879,
+    "store_synced": true,
+    "total_s": 9.405,
+    "trainer_onloaded_for_cut": true,
+    "write_bytes_per_s": 32822082.064937208
+   }
+  ],
+  "events": 351,
+  "publications": [
+   0,
+   1,
+   2,
+   3,
+   4,
+   5,
+   6
+  ],
+  "resume_checks": [
+   {
+    "_file": "s17-g2-c2/tape-direct/yeto-s17-g2-c2/l0/rank0/rl-island-0.inc1.jsonl",
+    "applied": [
+     3.333333333333334e-06
+    ],
+    "check": "lr_at_next_round",
+    "event": "rl_resume_check",
+    "expected": [
+     3.333333333333334e-06
+    ],
+    "island_id": 0,
+    "ok": true,
+    "rollout_id": 4,
+    "time_unix": 1791487075.7837756
+   }
+  ],
+  "resumes": [
+   {
+    "checks": {
+     "consumed_prompt_ids_digest": "same",
+     "cut_shards_sha256": "ok",
+     "ledger_last_round": "outer_recorded",
+     "policy_hash": "same",
+     "policy_version": 4,
+     "run_fingerprint": "same"
+    },
+    "config_diff": null,
+    "cut_bytes": 141870193,
+    "cut_id": "r000004-0a0849b84e9a",
+    "incarnation": 1,
+    "lr_at_next_round": [
+     3.333333333333334e-06
+    ],
+    "policy_hash": "c60dfe666ca0b5cd7a8e853a2191ce67c8d31081c51e81cb5866b57edce10544",
+    "restore_s": 7.958,
+    "rollout_id": 4,
+    "state_restore": {
+     "bytes": 7504,
+     "files": 3,
+     "latest": {
+      "bytes": 7504,
+      "cut_id": "r000004-0a0849b84e9a",
+      "incarnation": "0a0849b84e9a",
+      "manifest_sha256": "73ef17e8ea1724347aba19e4d4c333c9c4ebde1fd281a3769c9ee9d8a9dce860",
+      "next_rollout_id": 4,
+      "reason": "round_cut",
+      "seq": 1
+     },
+     "moved_aside": "/root/yeto-rl/resume-state.prev-1791486921",
+     "seconds": 0.7822418240000104,
+     "seq": 1
+    }
+   }
+  ],
+  "rounds": {
+   "0": [
+    {
+     "file": "s17-g2-c2/tape-direct/yeto-s17-g2-c2/l0/rank0/rl-island-0.jsonl",
+     "grad_norm": 0.4499274790287018,
+     "ids": "6ac54d62824c59fa3a8f59264bca872f865403d905926ce326c231e62752ac7d",
+     "local_round_id": 1,
+     "loss": -1.862645149230957e-09,
+     "lrs": [
+      1e-05
+     ],
+     "reward": 0.9375,
+     "time_unix": 1791486600.8379128
+    }
+   ],
+   "1": [
+    {
+     "file": "s17-g2-c2/tape-direct/yeto-s17-g2-c2/l0/rank0/rl-island-0.jsonl",
+     "grad_norm": 0.48915454745292664,
+     "ids": "2db44ca8e1db6f0b44c22e6134a0eb33edb7e03f9323974771a6138c41bc9a04",
+     "local_round_id": 2,
+     "loss": 1.862645149230957e-09,
+     "lrs": [
+      8.333333333333334e-06
+     ],
+     "reward": 0.4375,
+     "time_unix": 1791486624.5677087
+    }
+   ],
+   "2": [
+    {
+     "file": "s17-g2-c2/tape-direct/yeto-s17-g2-c2/l0/rank0/rl-island-0.jsonl",
+     "grad_norm": 0.2347632646560669,
+     "ids": "69be7217a18d7585a50c20b2a7b0af4ddc13146706816ed0c22cf668eda0aaef",
+     "local_round_id": 3,
+     "loss": 0.0,
+     "lrs": [
+      6.666666666666668e-06
+     ],
+     "reward": 0.125,
+     "time_unix": 1791486656.0603182
+    }
+   ],
+   "3": [
+    {
+     "file": "s17-g2-c2/tape-direct/yeto-s17-g2-c2/l0/rank0/rl-island-0.jsonl",
+     "grad_norm": 0.36526644229888916,
+     "ids": "b81b61f029b2c44851ed2e40e1f38e0ed04104918d79b5dde04fb3690113fb36",
+     "local_round_id": 4,
+     "loss": 1.4901161193847656e-08,
+     "lrs": [
+      5e-06
+     ],
+     "reward": 0.59375,
+     "time_unix": 1791486679.6618378
+    }
+   ],
+   "4": [
+    {
+     "file": "s17-g2-c2/tape-direct/yeto-s17-g2-c2/l0/rank0/rl-island-0.inc1.jsonl",
+     "grad_norm": 0.4163757264614105,
+     "ids": "c9e424bfbd495a5e384a32516b0b7527bcb742e2256e4a12c04d0c4a28588d8d",
+     "local_round_id": 5,
+     "loss": 1.4901161193847656e-08,
+     "lrs": [
+      3.333333333333334e-06
+     ],
+     "reward": 0.34375,
+     "time_unix": 1791487075.7752445
+    }
+   ],
+   "5": [
+    {
+     "file": "s17-g2-c2/tape-direct/yeto-s17-g2-c2/l0/rank0/rl-island-0.inc1.jsonl",
+     "grad_norm": 0.4159427881240845,
+     "ids": "d22bc0f35a19def136a29bce010ec380f14c53d3f64466271923635fc39b42a9",
+     "local_round_id": 6,
+     "loss": -3.725290298461914e-09,
+     "lrs": [
+      1.6666666666666665e-06
+     ],
+     "reward": 0.59375,
+     "time_unix": 1791487094.805699
+    }
+   ]
+  }
+ },
+ "c3": {
+  "cut_failures": [],
+  "cuts": [
+   {
+    "cut_bytes": 142488798,
+    "cut_id": "r000004-a9b1498be614",
+    "final": false,
+    "latest_seq": 1,
+    "policy_hash": "a0e5692be1b911103548e81c2a7b197de291c389d338e3b9203f55b1ce0f9e2f",
+    "pruned": [],
+    "rollout_id": 4,
+    "save_s": 4.197,
+    "store_commit_s": 6.12132584699998,
+    "store_copy_s": 0.018592956000020422,
+    "store_synced": true,
+    "total_s": 10.347,
+    "trainer_onloaded_for_cut": true,
+    "write_bytes_per_s": 33949584.93761509
+   },
+   {
+    "cut_bytes": 142488798,
+    "cut_id": "r000006-a9b1498be614",
+    "final": true,
+    "latest_seq": 2,
+    "policy_hash": "e59389f9a784587fa796b90109150cf2f85bea78d66abcc003c976dfea8b3802",
+    "pruned": [
+     "state/00000000",
+     "round-cuts/r000002-d0a9feef0c43"
+    ],
+    "rollout_id": 6,
+    "save_s": 4.156,
+    "store_commit_s": 10.698174300000005,
+    "store_copy_s": 0.017613729999993666,
+    "store_synced": true,
+    "total_s": 16.069,
+    "trainer_onloaded_for_cut": true,
+    "write_bytes_per_s": 34283754.614540316
+   },
+   {
+    "cut_bytes": 142488793,
+    "cut_id": "r000002-d0a9feef0c43",
+    "final": false,
+    "latest_seq": 0,
+    "policy_hash": "0a99e3b20578acee398a0c1e397fcb129e29c5bd9310e12cde2f4ff2ed1ca942",
+    "pruned": [],
+    "rollout_id": 2,
+    "save_s": 5.023,
+    "store_commit_s": 161.98612791699998,
+    "store_copy_s": 0.020918389000030402,
+    "store_synced": true,
+    "total_s": 167.043,
+    "trainer_onloaded_for_cut": true,
+    "write_bytes_per_s": 28368694.803136487
+   }
+  ],
+  "events": 420,
+  "publications": [
+   0,
+   1,
+   2,
+   3,
+   4,
+   5,
+   6
+  ],
+  "resume_checks": [
+   {
+    "_file": "s17-g2-c3/tape-direct/yeto-s17-g2-c3/l0/rank0/rl-island-0.inc1.jsonl",
+    "applied": [
+     6.666666666666668e-06
+    ],
+    "check": "lr_at_next_round",
+    "event": "rl_resume_check",
+    "expected": [
+     6.666666666666668e-06
+    ],
+    "island_id": 0,
+    "ok": true,
+    "rollout_id": 2,
+    "time_unix": 1791488441.9343796
+   }
+  ],
+  "resumes": [
+   {
+    "checks": {
+     "consumed_prompt_ids_digest": "same",
+     "cut_shards_sha256": "ok",
+     "ledger_last_round": "outer_recorded",
+     "policy_hash": "same",
+     "policy_version": 2,
+     "run_fingerprint": "same"
+    },
+    "config_diff": null,
+    "cut_bytes": 141870193,
+    "cut_id": "r000002-d0a9feef0c43",
+    "incarnation": 1,
+    "lr_at_next_round": [
+     6.666666666666668e-06
+    ],
+    "policy_hash": "0a99e3b20578acee398a0c1e397fcb129e29c5bd9310e12cde2f4ff2ed1ca942",
+    "restore_s": 10.36,
+    "rollout_id": 2,
+    "state_restore": {
+     "bytes": 4632,
+     "files": 3,
+     "latest": {
+      "bytes": 4632,
+      "cut_id": "r000002-d0a9feef0c43",
+      "incarnation": "d0a9feef0c43",
+      "manifest_sha256": "7a098a9f4080a312de01913f50408e8383cc5d74f6aea76677b0266b3c338852",
+      "next_rollout_id": 2,
+      "reason": "round_cut",
+      "seq": 0
+     },
+     "moved_aside": "/root/yeto-rl/resume-state.prev-1791488262",
+     "seconds": 1.4006653050000182,
+     "seq": 0
+    }
+   }
+  ],
+  "rounds": {
+   "0": [
+    {
+     "file": "s17-g2-c3/tape-direct/yeto-s17-g2-c3/l0/rank0/rl-island-0.jsonl",
+     "grad_norm": 0.4499274790287018,
+     "ids": "6ac54d62824c59fa3a8f59264bca872f865403d905926ce326c231e62752ac7d",
+     "local_round_id": 1,
+     "loss": -1.862645149230957e-09,
+     "lrs": [
+      1e-05
+     ],
+     "reward": 0.9375,
+     "time_unix": 1791487779.1745255
+    }
+   ],
+   "1": [
+    {
+     "file": "s17-g2-c3/tape-direct/yeto-s17-g2-c3/l0/rank0/rl-island-0.jsonl",
+     "grad_norm": 0.48915454745292664,
+     "ids": "2db44ca8e1db6f0b44c22e6134a0eb33edb7e03f9323974771a6138c41bc9a04",
+     "local_round_id": 2,
+     "loss": 1.862645149230957e-09,
+     "lrs": [
+      8.333333333333334e-06
+     ],
+     "reward": 0.4375,
+     "time_unix": 1791487805.4672325
+    }
+   ],
+   "2": [
+    {
+     "file": "s17-g2-c3/tape-direct/yeto-s17-g2-c3/l0/rank0/rl-island-0.inc1.jsonl",
+     "grad_norm": 0.23480641841888428,
+     "ids": "69be7217a18d7585a50c20b2a7b0af4ddc13146706816ed0c22cf668eda0aaef",
+     "local_round_id": 3,
+     "loss": 0.0,
+     "lrs": [
+      6.666666666666668e-06
+     ],
+     "reward": 0.125,
+     "time_unix": 1791488441.926992
+    },
+    {
+     "file": "s17-g2-c3/tape-direct/yeto-s17-g2-c3/l0/rank0/rl-island-0.jsonl",
+     "grad_norm": 0.2347632646560669,
+     "ids": "69be7217a18d7585a50c20b2a7b0af4ddc13146706816ed0c22cf668eda0aaef",
+     "local_round_id": 3,
+     "loss": 0.0,
+     "lrs": [
+      6.666666666666668e-06
+     ],
+     "reward": 0.125,
+     "time_unix": 1791487997.028322
+    }
+   ],
+   "3": [
+    {
+     "file": "s17-g2-c3/tape-direct/yeto-s17-g2-c3/l0/rank0/rl-island-0.inc1.jsonl",
+     "grad_norm": 0.2759631276130676,
+     "ids": "b81b61f029b2c44851ed2e40e1f38e0ed04104918d79b5dde04fb3690113fb36",
+     "local_round_id": 4,
+     "loss": 7.450580596923828e-09,
+     "lrs": [
+      5e-06
+     ],
+     "reward": 0.65625,
+     "time_unix": 1791488467.508036
+    }
+   ],
+   "4": [
+    {
+     "file": "s17-g2-c3/tape-direct/yeto-s17-g2-c3/l0/rank0/rl-island-0.inc1.jsonl",
+     "grad_norm": 0.3190320134162903,
+     "ids": "c9e424bfbd495a5e384a32516b0b7527bcb742e2256e4a12c04d0c4a28588d8d",
+     "local_round_id": 5,
+     "loss": -2.7939677238464355e-09,
+     "lrs": [
+      3.333333333333334e-06
+     ],
+     "reward": 0.25,
+     "time_unix": 1791488504.4170756
+    }
+   ],
+   "5": [
+    {
+     "file": "s17-g2-c3/tape-direct/yeto-s17-g2-c3/l0/rank0/rl-island-0.inc1.jsonl",
+     "grad_norm": 0.3112547695636749,
+     "ids": "d22bc0f35a19def136a29bce010ec380f14c53d3f64466271923635fc39b42a9",
+     "local_round_id": 6,
+     "loss": -7.450580596923828e-09,
+     "lrs": [
+      1.6666666666666665e-06
+     ],
+     "reward": 0.65625,
+     "time_unix": 1791488525.8920286
+    }
+   ]
+  }
+ },
+ "criteria": {
+  "1_lr_check_b2": [
+   {
+    "applied": [
+     5e-06
+    ],
+    "expected": [
+     5e-06
+    ],
+    "ok": true,
+    "rollout_id": 3
+   }
+  ],
+  "1_lr_check_c": [],
+  "1_lr_check_c2": [
+   {
+    "applied": [
+     3.333333333333334e-06
+    ],
+    "expected": [
+     3.333333333333334e-06
+    ],
+    "ok": true,
+    "rollout_id": 4
+   }
+  ],
+  "1_lr_check_c3": [
+   {
+    "applied": [
+     6.666666666666668e-06
+    ],
+    "expected": [
+     6.666666666666668e-06
+    ],
+    "ok": true,
+    "rollout_id": 2
+   }
+  ],
+  "1_restore_hash_b2": [
+   {
+    "checks": {
+     "consumed_prompt_ids_digest": "same",
+     "cut_shards_sha256": "ok",
+     "ledger_last_round": "outer_recorded",
+     "policy_hash": "same",
+     "policy_version": 3,
+     "run_fingerprint": "same"
+    },
+    "cut": "r000003-31c43f1588af",
+    "restored": "65428c03d3c60203158a45bd6ec7806ad4c5e700fc406806db6fdc0ca958dc6c",
+    "same": true,
+    "saved": "65428c03d3c60203158a45bd6ec7806ad4c5e700fc406806db6fdc0ca958dc6c",
+    "store_pointer": "65428c03d3c60203158a45bd6ec7806ad4c5e700fc406806db6fdc0ca958dc6c"
+   }
+  ],
+  "1_restore_hash_c": [
+   {
+    "checks": {
+     "consumed_prompt_ids_digest": "same",
+     "cut_shards_sha256": "ok",
+     "ledger_last_round": "outer_recorded",
+     "policy_hash": "same",
+     "policy_version": 6,
+     "run_fingerprint": "same"
+    },
+    "cut": "r000006-735948345e37",
+    "restored": "b9b87bb607068ef8a88dbd4b102d524f8bbba13bdf29d214f5ad7343b06ff349",
+    "same": true,
+    "saved": "b9b87bb607068ef8a88dbd4b102d524f8bbba13bdf29d214f5ad7343b06ff349",
+    "store_pointer": "b9b87bb607068ef8a88dbd4b102d524f8bbba13bdf29d214f5ad7343b06ff349"
+   }
+  ],
+  "1_restore_hash_c2": [
+   {
+    "checks": {
+     "consumed_prompt_ids_digest": "same",
+     "cut_shards_sha256": "ok",
+     "ledger_last_round": "outer_recorded",
+     "policy_hash": "same",
+     "policy_version": 4,
+     "run_fingerprint": "same"
+    },
+    "cut": "r000004-0a0849b84e9a",
+    "restored": "c60dfe666ca0b5cd7a8e853a2191ce67c8d31081c51e81cb5866b57edce10544",
+    "same": false,
+    "saved": null,
+    "store_pointer": "c60dfe666ca0b5cd7a8e853a2191ce67c8d31081c51e81cb5866b57edce10544"
+   }
+  ],
+  "1_restore_hash_c3": [
+   {
+    "checks": {
+     "consumed_prompt_ids_digest": "same",
+     "cut_shards_sha256": "ok",
+     "ledger_last_round": "outer_recorded",
+     "policy_hash": "same",
+     "policy_version": 2,
+     "run_fingerprint": "same"
+    },
+    "cut": "r000002-d0a9feef0c43",
+    "restored": "0a99e3b20578acee398a0c1e397fcb129e29c5bd9310e12cde2f4ff2ed1ca942",
+    "same": true,
+    "saved": "0a99e3b20578acee398a0c1e397fcb129e29c5bd9310e12cde2f4ff2ed1ca942",
+    "store_pointer": null
+   }
+  ],
+  "3_lr_ids_vs_a_b2": [
+   {
+    "a": {
+     "ids": "b81b61f029b2c44851ed2e40e1f38e0ed04104918d79b5dde04fb3690113fb36",
+     "lrs": [
+      5e-06
+     ]
+    },
+    "b2": {
+     "ids": "b81b61f029b2c44851ed2e40e1f38e0ed04104918d79b5dde04fb3690113fb36",
+     "lrs": [
+      5e-06
+     ]
+    },
+    "ids_same": true,
+    "lr_same": true,
+    "rid": 3
+   },
+   {
+    "a": {
+     "ids": "c9e424bfbd495a5e384a32516b0b7527bcb742e2256e4a12c04d0c4a28588d8d",
+     "lrs": [
+      3.333333333333334e-06
+     ]
+    },
+    "b2": {
+     "ids": "c9e424bfbd495a5e384a32516b0b7527bcb742e2256e4a12c04d0c4a28588d8d",
+     "lrs": [
+      3.333333333333334e-06
+     ]
+    },
+    "ids_same": true,
+    "lr_same": true,
+    "rid": 4
+   },
+   {
+    "a": {
+     "ids": "d22bc0f35a19def136a29bce010ec380f14c53d3f64466271923635fc39b42a9",
+     "lrs": [
+      1.6666666666666665e-06
+     ]
+    },
+    "b2": {
+     "ids": "d22bc0f35a19def136a29bce010ec380f14c53d3f64466271923635fc39b42a9",
+     "lrs": [
+      1.6666666666666665e-06
+     ]
+    },
+    "ids_same": true,
+    "lr_same": true,
+    "rid": 5
+   }
+  ],
+  "3_lr_ids_vs_a_c2": [
+   {
+    "a": {
+     "ids": "c9e424bfbd495a5e384a32516b0b7527bcb742e2256e4a12c04d0c4a28588d8d",
+     "lrs": [
+      3.333333333333334e-06
+     ]
+    },
+    "c2": {
+     "ids": "c9e424bfbd495a5e384a32516b0b7527bcb742e2256e4a12c04d0c4a28588d8d",
+     "lrs": [
+      3.333333333333334e-06
+     ]
+    },
+    "ids_same": true,
+    "lr_same": true,
+    "rid": 4
+   },
+   {
+    "a": {
+     "ids": "d22bc0f35a19def136a29bce010ec380f14c53d3f64466271923635fc39b42a9",
+     "lrs": [
+      1.6666666666666665e-06
+     ]
+    },
+    "c2": {
+     "ids": "d22bc0f35a19def136a29bce010ec380f14c53d3f64466271923635fc39b42a9",
+     "lrs": [
+      1.6666666666666665e-06
+     ]
+    },
+    "ids_same": true,
+    "lr_same": true,
+    "rid": 5
+   }
+  ],
+  "3_lr_ids_vs_a_c3": [
+   {
+    "a": {
+     "ids": "69be7217a18d7585a50c20b2a7b0af4ddc13146706816ed0c22cf668eda0aaef",
+     "lrs": [
+      6.666666666666668e-06
+     ]
+    },
+    "c3": {
+     "ids": "69be7217a18d7585a50c20b2a7b0af4ddc13146706816ed0c22cf668eda0aaef",
+     "lrs": [
+      6.666666666666668e-06
+     ]
+    },
+    "ids_same": true,
+    "lr_same": true,
+    "rid": 2
+   },
+   {
+    "a": {
+     "ids": "b81b61f029b2c44851ed2e40e1f38e0ed04104918d79b5dde04fb3690113fb36",
+     "lrs": [
+      5e-06
+     ]
+    },
+    "c3": {
+     "ids": "b81b61f029b2c44851ed2e40e1f38e0ed04104918d79b5dde04fb3690113fb36",
+     "lrs": [
+      5e-06
+     ]
+    },
+    "ids_same": true,
+    "lr_same": true,
+    "rid": 3
+   },
+   {
+    "a": {
+     "ids": "c9e424bfbd495a5e384a32516b0b7527bcb742e2256e4a12c04d0c4a28588d8d",
+     "lrs": [
+      3.333333333333334e-06
+     ]
+    },
+    "c3": {
+     "ids": "c9e424bfbd495a5e384a32516b0b7527bcb742e2256e4a12c04d0c4a28588d8d",
+     "lrs": [
+      3.333333333333334e-06
+     ]
+    },
+    "ids_same": true,
+    "lr_same": true,
+    "rid": 4
+   },
+   {
+    "a": {
+     "ids": "d22bc0f35a19def136a29bce010ec380f14c53d3f64466271923635fc39b42a9",
+     "lrs": [
+      1.6666666666666665e-06
+     ]
+    },
+    "c3": {
+     "ids": "d22bc0f35a19def136a29bce010ec380f14c53d3f64466271923635fc39b42a9",
+     "lrs": [
+      1.6666666666666665e-06
+     ]
+    },
+    "ids_same": true,
+    "lr_same": true,
+    "rid": 5
+   }
+  ],
+  "4_metrics_b2": [
+   {
+    "grad_norm": {
+     "diff_vs_a": 0.0,
+     "noise": 0.0,
+     "within": true
+    },
+    "loss": {
+     "diff_vs_a": 0.0,
+     "noise": 0.0,
+     "within": true
+    },
+    "reward": {
+     "diff_vs_a": 0.0,
+     "noise": 0.0,
+     "within": true
+    },
+    "rid": 3
+   },
+   {
+    "grad_norm": {
+     "diff_vs_a": 0.0,
+     "noise": 0.0,
+     "within": true
+    },
+    "loss": {
+     "diff_vs_a": 0.0,
+     "noise": 0.0,
+     "within": true
+    },
+    "reward": {
+     "diff_vs_a": 0.0,
+     "noise": 0.0,
+     "within": true
+    },
+    "rid": 4
+   },
+   {
+    "grad_norm": {
+     "diff_vs_a": 0.0,
+     "noise": 0.0,
+     "within": true
+    },
+    "loss": {
+     "diff_vs_a": 0.0,
+     "noise": 0.0,
+     "within": true
+    },
+    "reward": {
+     "diff_vs_a": 0.0,
+     "noise": 0.0,
+     "within": true
+    },
+    "rid": 5
+   }
+  ],
+  "4_metrics_c2": [
+   {
+    "grad_norm": {
+     "diff_vs_a": 7.128715515136719e-05,
+     "noise": 0.0,
+     "within": false
+    },
+    "loss": {
+     "diff_vs_a": 0.0,
+     "noise": 0.0,
+     "within": true
+    },
+    "reward": {
+     "diff_vs_a": 0.0,
+     "noise": 0.0,
+     "within": true
+    },
+    "rid": 4
+   },
+   {
+    "grad_norm": {
+     "diff_vs_a": 0.08016771078109741,
+     "noise": 0.0,
+     "within": false
+    },
+    "loss": {
+     "diff_vs_a": 9.313225746154785e-09,
+     "noise": 0.0,
+     "within": false
+    },
+    "reward": {
+     "diff_vs_a": 0.0,
+     "noise": 0.0,
+     "within": true
+    },
+    "rid": 5
+   }
+  ],
+  "4_metrics_c3": [
+   {
+    "grad_norm": {
+     "diff_vs_a": 0.0,
+     "noise": 0.0,
+     "within": true
+    },
+    "loss": {
+     "diff_vs_a": 0.0,
+     "noise": 0.0,
+     "within": true
+    },
+    "reward": {
+     "diff_vs_a": 0.0,
+     "noise": 0.0,
+     "within": true
+    },
+    "rid": 2
+   },
+   {
+    "grad_norm": {
+     "diff_vs_a": 0.08930331468582153,
+     "noise": 0.0,
+     "within": false
+    },
+    "loss": {
+     "diff_vs_a": 7.450580596923828e-09,
+     "noise": 0.0,
+     "within": false
+    },
+    "reward": {
+     "diff_vs_a": 0.0625,
+     "noise": 0.0,
+     "within": false
+    },
+    "rid": 3
+   },
+   {
+    "grad_norm": {
+     "diff_vs_a": 0.09727242588996887,
+     "noise": 0.0,
+     "within": false
+    },
+    "loss": {
+     "diff_vs_a": 1.7695128917694092e-08,
+     "noise": 0.0,
+     "within": false
+    },
+    "reward": {
+     "diff_vs_a": 0.09375,
+     "noise": 0.0,
+     "within": false
+    },
+    "rid": 4
+   },
+   {
+    "grad_norm": {
+     "diff_vs_a": 0.024520307779312134,
+     "noise": 0.0,
+     "within": false
+    },
+    "loss": {
+     "diff_vs_a": 1.30385160446167e-08,
+     "noise": 0.0,
+     "within": false
+    },
+    "reward": {
+     "diff_vs_a": 0.0625,
+     "noise": 0.0,
+     "within": false
+    },
+    "rid": 5
+   }
+  ],
+  "4_noise_a_vs_a2": [
+   {
+    "bitwise_a_a2": true,
+    "grad_norm": 0.0,
+    "loss": 0.0,
+    "reward": 0.0,
+    "rid": 0
+   },
+   {
+    "bitwise_a_a2": true,
+    "grad_norm": 0.0,
+    "loss": 0.0,
+    "reward": 0.0,
+    "rid": 1
+   },
+   {
+    "bitwise_a_a2": true,
+    "grad_norm": 0.0,
+    "loss": 0.0,
+    "reward": 0.0,
+    "rid": 2
+   },
+   {
+    "bitwise_a_a2": true,
+    "grad_norm": 0.0,
+    "loss": 0.0,
+    "reward": 0.0,
+    "rid": 3
+   },
+   {
+    "bitwise_a_a2": true,
+    "grad_norm": 0.0,
+    "loss": 0.0,
+    "reward": 0.0,
+    "rid": 4
+   },
+   {
+    "bitwise_a_a2": true,
+    "grad_norm": 0.0,
+    "loss": 0.0,
+    "reward": 0.0,
+    "rid": 5
+   }
+  ]
+ },
+ "store_pointers": {
+  "r000002-31c43f1588af": "0a99e3b20578acee398a0c1e397fcb129e29c5bd9310e12cde2f4ff2ed1ca942",
+  "r000003-31c43f1588af": "65428c03d3c60203158a45bd6ec7806ad4c5e700fc406806db6fdc0ca958dc6c",
+  "r000004-0a0849b84e9a": "c60dfe666ca0b5cd7a8e853a2191ce67c8d31081c51e81cb5866b57edce10544",
+  "r000004-735948345e37": "c60dfe666ca0b5cd7a8e853a2191ce67c8d31081c51e81cb5866b57edce10544",
+  "r000004-a9b1498be614": "a0e5692be1b911103548e81c2a7b197de291c389d338e3b9203f55b1ce0f9e2f",
+  "r000004-c974634dca7d": "c60dfe666ca0b5cd7a8e853a2191ce67c8d31081c51e81cb5866b57edce10544",
+  "r000006-6fd283e0e651": "c64e14191a3146e3d613860d3f80f45a3b247fcb10e6147549d94cccbb1e1385",
+  "r000006-735948345e37": "b9b87bb607068ef8a88dbd4b102d524f8bbba13bdf29d214f5ad7343b06ff349",
+  "r000006-a9b1498be614": "e59389f9a784587fa796b90109150cf2f85bea78d66abcc003c976dfea8b3802",
+  "r000006-c974634dca7d": "b9b87bb607068ef8a88dbd4b102d524f8bbba13bdf29d214f5ad7343b06ff349"
+ }
+}

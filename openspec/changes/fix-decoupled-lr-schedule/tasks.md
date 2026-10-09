@@ -30,3 +30,8 @@
 - [x] 3.3 GPU：strict-avg 两岛 3 轮回归（配置同 `rl-engine-ports` 的 `2026-09-29-rerun-strict2`）。验证：每步应用的学习率与修复前证据逐位相同，最后一步大于 0，没有触发零学习率不变量。
   - 完成记录（2026-09-29）：GPU 验收通过（Modal 2×L40S，ports，yeto 20aba48，命令与 `rerun-strict2` 相同）。两岛 `applied_lrs` = [1e-4, 6.666666666666668e-05, 3.333333333333334e-05]，与修复前证据逐位相同；修复前证据没有 applied_lr 字段，按 Miles 在 scheduler.step 之后记录 `train/lr-pg_0` 推导（第 k 步应用值 = 第 k-1 步记录值，首步为配置值），且修复前后的 `train/lr-pg_0` 序列本身逐位相同。最后一步 3.33e-5 > 0，rc=0，未触发不变量。证据：`evidence/2026-09-29-gpu/compare-strict.txt`（脚本 `compare-strict.py`）、`evidence/2026-09-29-gpu/strict2-ports/`。
 
+
+## 4. 学习率调度开关（S17 夜间 N16）
+
+- [x] 4.1 新增 `--rl-lr-schedule {auto,linear,constant}`（默认 auto）。auto 保持原规则并并入 N5 在 s17-m1 上的 a73ab1b2：decoupled 与跨岛调度 elastic（`--rl-island-scheduling elastic`）的岛跑到同步服务叫停为止，用常数；strict-avg / dense-full / 单岛（含 `--rl-single-island-no-sync`）用线性衰减。constant：任何模式都固定学习率（单岛、多岛都可用；N4 的 FN 2×8 只能用 20000 步线性衰减近似）。linear：对 decoupled / elastic 拒绝（本地步数事先不知道，线性衰减可能中途降到 0）。链路：`yeto/cli.py` → launcher `_ports_infra_flags`（auto 不加任何参数，命令行与旧版逐字节相同）→ `adapters/miles/island_entry.py` → `engine/run_config.resolve_lr_schedule` → Miles `--lr-decay-style`。证据：tests/test_rl_miles_adapter_config.py 新增 6 条全过（该文件另 2 条失败需 import Miles，基线同样失败）；`tests/test_decoupling_golden.py` 12 过（8 个标准样本不变）。哈希影响见 `yeto-framework-decoupling/hash-migration.md`"S17 N16 学习率调度开关"。
+- [ ] 4.2 未做：verl 后端的同名开关（verl 适配层在 s17-verl-g1 分支，本分支基线 s17-decouple-p4 上还没有），verl 接入合并后再接；真机未验证（下次本来要开的卡顺带用 constant 跑，核对 `rl_local_round` 里每步学习率等于配置值）。

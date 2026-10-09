@@ -172,6 +172,13 @@
 ## 可选项决定
 
 - features:mismatch_metrics：保持未声明。原因是“use_tis=False、只开该标志”的对照运行无法表达（P0 对 custom 函数总是输出 `--use-tis`），而且 CORRECTION_COMPANIONS 已由各修正机制认领该标志。
-- mis（truncate/clip）：保持未声明，本轮不做触发验证。
+- mis（truncate/clip）：~~保持未声明，本轮不做触发验证。~~ 2026-10-08 已声明，见下。
 
 - 2026-10-07 S14：用户裁定接受 5.2 vendor 副本（偏离 D6 获批），tasks 5.2 勾选。
+
+## 2026-10-08 S17 G1（N3）：mis 截断变体触发验证 PASS → 声明 corrections:mis（7.3 勾选）
+- 运行 `s17-g1-mis`（Modal H100!:1，GPU 名断言通过；app ap-LG1oqHgS90z8M6bAwQHTFy 16:23:48–16:39:15Z，已 stopped；≈$1.0 估算）。代码 80e944b6，镜像 4aeafd77（Miles 8bc52237a）。
+- 预登记判据（evidence/2026-10-08-mis-trigger/plan.md）全部满足：truncate_fraction 0.0917/0.1093/0.1262（>0），after≤before 每步成立，is_ratio_max_final 1.0100 = 上界；rl_local_round 1..3、32 条、grad_norm 0.441/0.431/0.173；发布 v0..3 带 token；无失败事件；sha 76164019…、放行项 [corrections:mis]。
+- 草稿估计比例约为 09-29 [0.99,1.01] 遮挡比例（0.19–0.27）的一半；实测 0.09–0.13，与估计一致（只作对照）。
+- MIS 路径在 Miles 0394715→8bc52237a 之间无变化（loss_hub/losses.py 只改 policy_loss_variant 分派）；见 infra-drafts/S17-G1-PRELAUNCH-REVIEW.md §4。
+- 未验证：mis + mismatch_metrics 同开；sequence 级 mis；mask 以外的上下界组合。剩余任务：仅可选 7.7。

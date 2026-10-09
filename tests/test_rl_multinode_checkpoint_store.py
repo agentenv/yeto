@@ -169,7 +169,9 @@ def test_store_flag_flows_from_cli_to_the_learner_and_needs_elastic(tmp_path, mo
 
     from yeto.rl import learner
 
-    with pytest.raises(ValueError, match="--rl-checkpoint-store need --rl-elastic"):
+    # rl-resume-from-checkpoint: without --rl-elastic the store is the resume store, which
+    # needs --rl-single-island-no-sync (ports); a multi-island run is still refused
+    with pytest.raises(ValueError, match="--rl-checkpoint-store without --rl-elastic needs"):
         launcher._check_ports_infra_switches(_cli(("--rl-checkpoint-store", "s3://b/x")), "ports")
     parsed = learner.parse_args(_learner_argv(ELASTIC_LEARNER + ("--rl-elastic-checkpoint-store", "/mnt/s")))
     miles_args = SimpleNamespace()
@@ -186,7 +188,7 @@ def test_store_flag_flows_from_cli_to_the_learner_and_needs_elastic(tmp_path, mo
 def test_build_elastic_passes_the_store_to_the_controller(tmp_path):
     from test_rl_infra_switches import _elastic_files
 
-    from yeto.rl.engine.miles_adapter.elastic_wiring import build_elastic
+    from yeto.rl.adapters.miles.elastic_wiring import build_elastic
 
     res, _ = _elastic_files(tmp_path)
     wiring = build_elastic(state_dir=tmp_path / "state", resources=res, attestation=None, profile=None,

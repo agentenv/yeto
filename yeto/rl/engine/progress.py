@@ -1,7 +1,7 @@
 """Island progress files in the legacy formats (yeto-framework-decoupling 2.4). Import-light.
 
 Strict progress (schema 3) and decoupled progress (schema 4), moved unchanged
-from ``yeto.rl.miles`` (which re-exports the same objects) so the engine
+from ``yeto.rl.adapters.miles.legacy.engine`` (which re-exports the same objects) so the engine
 core's bridges no longer import the legacy Miles engine. Neither file ever
 contains LoRA tensors or optimizer state. Serialization is byte-for-byte the
 old code (``torch.save`` of the same dicts in the same key order).
