@@ -249,6 +249,11 @@ ISLAND_PRE_RUN_DONE = "[yeto-island] pre-run done"
 ISLAND_PRE_RUN_FAILED = "[yeto-island] pre-run FAILED"
 
 
+# Base port for Miles session servers when --session-server-port is unset
+# (instance i listens on base + i); applied in _prepare_rl_args.
+DEFAULT_SESSION_SERVER_PORT = 31801
+
+
 def read_island_pre_run(path) -> str:
     """The --rl-island-pre-run snippet: a readable, non-empty local file."""
     p = Path(path).expanduser()
@@ -2213,6 +2218,21 @@ def _ports_algorithm_flags(args) -> tuple[str, str]:
     return prelude + infra_prelude, flags + infra_flags
 
 
+def _default_session_server_port(args) -> None:
+    """Give Miles session servers a fixed base port when none was set.
+
+    Unset, Miles picks each session server port dynamically in the 20000+
+    range, where the engine's other ports (NCCL, dist-init, ...) are also
+    picked; S18 ARU-3 lost 1 of 4 launches to 20012 "address already in use"
+    (which process took it is not known). A fixed base outside that range and
+    below the Linux ephemeral range (32768+) avoids the shared range; Miles
+    adds the instance index and checks each port is free before it starts the
+    server. An explicit --session-server-port is kept unchanged.
+    """
+    if args.use_session_server and args.session_server_port is None:
+        args.session_server_port = [DEFAULT_SESSION_SERVER_PORT]
+
+
 def _prepare_rl_args(
     args,
     *,
@@ -2562,6 +2582,7 @@ def _prepare_rl_args(
         raise ValueError(
             "--session-server-port requires one positive port or an increasing range"
         )
+    _default_session_server_port(args)
 
     specs = [rl_island_spec(args, spec) for spec in parse_gpu_spec(args.gpu)]
     if getattr(args, "external_learners", 0):

@@ -105,3 +105,14 @@
   - 证据：`cli._attach_compare`（`--compare/--label/--compare-label`），`page_view()["compare"]`；`::test_compare_run_is_attached`；N17 A/B 本机 `serve --port 8797` 验证 `/api/view` 带 compare（已关）。离线页 infra-drafts/dash-aru-screenshots/n17-ab-compare.html。截图：本机无无头浏览器（无 chromium/playwright/puppeteer，也无 SVG 光栅化库），按要求未装大依赖，未截图——直接用浏览器打开该离线页查看。
 - [x] 7.7 旧磁带兼容：没有新事件/新字段时页面不报错，利用率区块显示"无数据"（验证：既有 JS 冒烟夹具与 test_dashboard_* 全过）
   - 证据：`::test_old_tape_has_no_utilization`、`::test_page_hides_utilization_for_old_tapes`；`tests/test_dashboard_*.py` 共 90 项全过（含原有冒烟夹具）。
+
+## 8. 遗留修复
+
+- [x] 8.1 会话服务端口冲突（S18 ARU-3：MB 臂第一次起机时会话服务绑 20012 报 "address already in use"，岛初始化超时，4 次起机 1 次）。改法：`--use-session-server` 且没给 `--session-server-port` 时，launcher 默认填 31801（`yeto/launcher.py` 的 `DEFAULT_SESSION_SERVER_PORT` 与 `_default_session_server_port`）。Miles 给第 i 个会话服务用 31801+i，启动前检查端口空闲。显式给了端口的不变。
+  - 子 agent 代拍板 + 理由：任务说明给了两种做法，看代码后两种都没选，改用固定起始端口。
+    1. 原因：没给端口时，Miles 在 20000 起的段里动态选会话服务端口，引擎的其他端口（如 NCCL 20067、dist-init 20035）也落在这一段。冲突发生在"选出空闲端口"到"真正绑定"之间。是哪个进程占了 20012，日志里看不出（未查明）。
+    2. 绑 0 号端口并回报：端口由 Miles 的端口分配器和会话服务进程决定，要改 agentenv/miles 并重建镜像，不是小改。
+    3. 遇错自动重开一次岛：要在 launcher 里从日志识别该错误，并绕过验收运行特意设的"岛失败不重开"（`--no-island-relaunch`/`--modal-retries 0`）；或在容器内重跑运行脚本，要处理残留进程与已写的事件磁带。改动大，风险也大。
+    4. 固定起始端口：改动只在 yeto 一处；31801 段不在动态分配段内，也低于 Linux 临时端口段（32768 起）。Miles 原有的"静态端口占用即报错"检查仍在。
+  - 影响：codex_harness 标准样本的 Miles 命令行多了 `--session-server-port 31801`，`miles_argv_sha256` 与 `ports_runtime_fingerprint` 随之变化（算法哈希、契约哈希不变），已重新生成 `tests/golden/decoupling/codex_harness.json`。用旧指纹写的检查点续跑时是否会被拒，未检查。
+  - 证据：`tests/test_rl_syncer_resume_and_session_port.py`（默认端口、显式端口不变、未开会话服务不填）；`tests/test_decoupling_golden.py` 过。状态：完成，未上卡；端口冲突是否消失要等下一次 agentic 上卡确认（未验证）。
