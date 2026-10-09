@@ -206,3 +206,8 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
 - 结论：默认 0 时**没有任何哈希变化**——8 个标准样本、`fake_engine_tapes.json`、`algorithm_sha256`、契约哈希、Miles 命令行、`backend_identity` 逐字节不变（`tests/test_decoupling_golden.py` 12 过，未重新生成）。
 - 原因：落后上限在 `ExecutionProfile` 里本来就有 `max_policy_age` 字段（默认 0，已在 `contract_hash` 内）；新开关只在非 0 时改变它（同时 `algorithm_contract` 改为 `bounded-staleness`）。发给同步服务的岛身份（HELLO 会话契约与 elastic JOIN）用 `policy_age.bind_policy_age` 绑定上限，0 时原样返回；launcher 在 0 时不向岛命令行加任何参数。
 - 非 0 时（目前两个后端都只支持到阶段 1，launcher 起机前拒绝）：岛身份哈希、契约哈希、算法哈希（`execution.max_policy_staleness`）都会变，落后上限不同的岛在握手时只拒该连接。
+
+## S17 N17 A/B 修复（2026-10-09）
+
+- `MILES_NEXT_COMMIT` efbbc63ea → 2f7871fb2（agentenv/miles s18-abort-discard-stats：efbbc63ea 只改了 sglang_rollout.abort，实际在用的训练路径 inference_rollout_train.abort 没有丢弃统计；本提交补上同样的统计，且被丢弃的多余组即使抛错也不再让 abort 失败）。镜像 `yeto-miles-ports:2f7871f-2fa8801@sha256:62b4f164…`，构建记录 `openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-09-2f7871f-2fa8801/`。8 个样本的 ports_runtime_fingerprint / backend_identity 随 Miles 提交变化。
+- `codex_openenv_subprocess_agent_function.py`：abort 钩子覆盖拿沙箱（打标记、拿到后立即销毁）、会话准备、工作进程、判分四段；租约已被 HarnessBoard 强制释放时记基础设施失败而不是让整轮崩溃。codex_harness 样本该插件 `source_sha256` `fbb48c5c…` → `bf3a62d2…`。算法哈希、契约哈希不变。

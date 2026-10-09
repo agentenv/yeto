@@ -300,30 +300,81 @@ def task_prompt(metadata: dict[str, Any], prompt: Any, lease: Any) -> str:
     )
 
 
-# S17 N17 (over-sampling A/B): in-flight worker tasks of this rollout process.
+# S17 N17 (over-sampling A/B): in-flight trajectories of this rollout process.
 # Miles calls ``<agent module>.abort(args)`` (``call_agent_abort_hook``) once
 # enough groups are collected; without it the Codex loops keep issuing fresh
 # turns after SGLang's abort_all and the rollout waits for every surplus group.
-_ACTIVE_WORKERS: dict[str, tuple["asyncio.Task[Any]", float]] = {}
+# Each entry: ``stage`` (acquire / segments / worker / verify / teardown), the
+# abortable step's task (None in acquire and teardown) and the start time.
+# acquire is never cancelled (a sandbox created by a cancelled acquire would
+# leak): the trajectory is flagged and stops right after acquire returns; the
+# other steps are cancelled and the lease is destroyed in ``run``'s finally.
+_INFLIGHT: dict[str, dict[str, Any]] = {}
 _ABORTED_IDS: set[str] = set()
 ABORTED_STATUS = "aborted_surplus"
+LEASE_EXPIRED_ON_BOARD = "lease force-released on the harness board before release"
+
+
+class _AbortedSurplus(Exception):
+    """abort() stopped this trajectory (surplus of an over-sampled rollout)."""
+
+
+class _LeaseExpiredOnBoard(Exception):
+    """The board force-released the lease at its hard deadline before ``run`` released it."""
+
+
+def _stage(trajectory_id: str, stage: str) -> None:
+    entry = _INFLIGHT.get(trajectory_id)
+    if entry is not None:
+        entry["stage"] = stage
+
+
+async def _abortable(trajectory_id: str, stage: str, awaitable: Any) -> Any:
+    """Run one step of ``run`` as a task abort() may cancel; a cancel that abort()
+    issued surfaces as :class:`_AbortedSurplus` (any other cancel propagates)."""
+    if trajectory_id in _ABORTED_IDS:
+        if asyncio.iscoroutine(awaitable):
+            awaitable.close()
+        raise _AbortedSurplus(stage)
+    task = asyncio.ensure_future(awaitable)
+    entry = _INFLIGHT.get(trajectory_id)
+    if entry is not None:
+        entry.update(stage=stage, task=task)
+    try:
+        return await task
+    except asyncio.CancelledError:
+        if trajectory_id in _ABORTED_IDS and task.cancelled():
+            raise _AbortedSurplus(stage) from None
+        raise
+    finally:
+        if entry is not None:
+            entry["task"] = None
 
 
 async def abort(args: Any = None) -> int:
-    """Cancel every in-flight Codex worker of this process (lease and worker
-    teardown run in ``run``'s ``finally``). Returns how many were cancelled and
-    logs one ``rl_codex_abort`` line with each trajectory's elapsed seconds."""
+    """Stop every in-flight trajectory of this process: cancel its current step
+    (segments / worker / verify) or, while it is still acquiring its sandbox,
+    flag it so it stops as soon as the sandbox exists. Leases are destroyed in
+    ``run``'s finally. Returns how many trajectories were stopped and logs one
+    ``rl_codex_abort`` line (count per stage, elapsed seconds)."""
     now = time.monotonic()
-    victims = [(tid, task, now - t0) for tid, (task, t0) in list(_ACTIVE_WORKERS.items())
-               if not task.done()]
-    for tid, task, _age in victims:
+    stages: dict[str, int] = {}
+    elapsed = []
+    for tid, entry in list(_INFLIGHT.items()):
+        if entry.get("stage") == "teardown":
+            continue
         _ABORTED_IDS.add(tid)
-        task.cancel()
-    if victims:
+        task = entry.get("task")
+        if task is not None and not task.done():
+            task.cancel()
+        stage = entry.get("stage", "?")
+        stages[stage] = stages.get(stage, 0) + 1
+        elapsed.append(round(now - entry["t0"], 2))
+    if elapsed:
         print("YETO_CODEX_ABORT " + json.dumps({
-            "event": "rl_codex_abort", "cancelled": len(victims),
-            "elapsed_s": sorted(round(a, 2) for _t, _k, a in victims)}), flush=True)
-    return len(victims)
+            "event": "rl_codex_abort", "cancelled": len(elapsed), "stages": stages,
+            "elapsed_s": sorted(elapsed)}), flush=True)
+    return len(elapsed)
 
 
 async def run(
@@ -331,9 +382,28 @@ async def run(
     prompt: Any,
     request_kwargs: dict[str, Any] | None = None,
     metadata: dict[str, Any] | None = None,
-    **_kwargs: Any,
+    **kwargs: Any,
 ) -> dict[str, Any] | None:
     metadata = dict(metadata or {})
+    try:
+        return await _run(base_url, prompt, request_kwargs, metadata, **kwargs)
+    except _LeaseExpiredOnBoard as exc:
+        # The trajectory outlived its lease's hard deadline (e.g. a detached
+        # Modal sandbox) and the board already force-released the lease:
+        # infrastructure, never a reward, and never a failed rollout (S17 N17 A/B a).
+        _task_id, sample_id = adapter.task_identity(metadata)
+        trajectory_id = str(metadata.get("trajectory_id") or sample_id)
+        return {**adapter.infrastructure_metadata(f"{LEASE_EXPIRED_ON_BOARD}: {exc}", episode_id=None),
+                **adapter.trajectory_fields(trajectory_id)}
+
+
+async def _run(
+    base_url: str,
+    prompt: Any,
+    request_kwargs: dict[str, Any] | None,
+    metadata: dict[str, Any],
+    **_kwargs: Any,
+) -> dict[str, Any] | None:
     if _provider is None:
         # Rollout workers are separate Ray actors: the driver's configure()
         # never ran here, so build the same wiring from the forwarded env.
@@ -356,6 +426,7 @@ async def run(
         return {**adapter.infrastructure_metadata(ADMISSION_CLOSED, episode_id=None), **fields}
     lease: EnvironmentLease | None = None
     session_open = lease_open = handed_off = False
+    _INFLIGHT[trajectory_id] = {"stage": "acquire", "task": None, "t0": time.monotonic()}
     try:
         if board is not None:
             _board_kwcall(board, "enter_session", trajectory_id, _member)
@@ -368,6 +439,9 @@ async def run(
             _note_acquire_failure(exc, trajectory_id)  # raises EnvironmentProviderOutage past the threshold
             return {**adapter.infrastructure_metadata(f"acquire: {type(exc).__name__}: {exc}", episode_id=None), **fields}
         _note_acquire_success()
+        if trajectory_id in _ABORTED_IDS:
+            # abort() during acquire: never started, the sandbox is destroyed below
+            return {**adapter.infrastructure_metadata(ABORTED_STATUS, episode_id=None), **fields}
         if board is not None:
             _board_kwcall(board, "lease_acquired", trajectory_id, deadline=time.monotonic() + lease.deadline_seconds)
             lease_open = True
@@ -383,21 +457,19 @@ async def run(
             **{k: metadata[k] for k in ("script", "final_status", "hang_seconds") if k in metadata},
         }
         try:
-            segments = await adapter.prepare_segment_sessions(job)
+            segments = await _abortable(trajectory_id, "segments", adapter.prepare_segment_sessions(job))
+        except _AbortedSurplus:
+            return {**adapter.infrastructure_metadata(ABORTED_STATUS, episode_id=episode_id), **fields}
         except Exception as exc:  # noqa: BLE001 - session-server failures are infrastructure
             return {**adapter.infrastructure_metadata(f"segment sessions: {type(exc).__name__}: {exc}", episode_id=episode_id), **fields}
         try:
-            worker = asyncio.ensure_future(
-                _drive_worker(job, trajectory_id, _tool_wait_board, getattr(lease, "worker_env", None)))
-            _ACTIVE_WORKERS[trajectory_id] = (worker, time.monotonic())
             try:
-                untrusted = await asyncio.wait_for(worker, timeout=lease.deadline_seconds)
-            except asyncio.CancelledError:
-                if trajectory_id not in _ABORTED_IDS:
-                    raise  # the rollout itself was cancelled, not abort()
+                untrusted = await _abortable(trajectory_id, "worker", asyncio.wait_for(
+                    _drive_worker(job, trajectory_id, _tool_wait_board, getattr(lease, "worker_env", None)),
+                    timeout=lease.deadline_seconds))
+            except _AbortedSurplus:
                 # abort(): surplus trajectory of an over-sampled rollout; Miles
                 # discards it (no partial rollout). Infrastructure, never a reward.
-                handed_off = False
                 return {**adapter.infrastructure_metadata(ABORTED_STATUS, episode_id=episode_id), **fields}
             except asyncio.TimeoutError:
                 untrusted = {"status": "timeout", "metrics": {"timed_out": 1}, "episode_id": episode_id}
@@ -407,21 +479,24 @@ async def run(
                 handed_off = True
                 return {**adapter.infrastructure_metadata(str(exc), episode_id=episode_id, metrics=metrics), **fields, **tito, **segments}
             tito = adapter.mirror_tito_counters(untrusted.get("metrics"), board)
-            signed = await adapter.finish_trusted(untrusted, lease.verifier, task_id=task_id, sample_id=sample_id)
+            try:
+                signed = await _abortable(trajectory_id, "verify", adapter.finish_trusted(
+                    untrusted, lease.verifier, task_id=task_id, sample_id=sample_id))
+            except _AbortedSurplus:
+                return {**adapter.infrastructure_metadata(ABORTED_STATUS, episode_id=episode_id), **fields}
             signed["expected_policy_version"] = expected_version
             signed.update(trajectory_started_at=started_at, trajectory_ended_at=time.time(),
                           sandbox_start_seconds=sandbox_start_seconds)
             handed_off = True
             return {**signed, **fields, **tito, **segments}
         finally:
-            _ACTIVE_WORKERS.pop(trajectory_id, None)
-            _ABORTED_IDS.discard(trajectory_id)
             # Worker crash (any non-harness exception), cancellation or a
             # finish_trusted error: the metadata never reaches
             # codex_openenv_generate, so delete the pre-created sessions here.
             if segments and not handed_off:
                 await adapter.release_unreturned_segments(base_url, segments)
     finally:
+        _stage(trajectory_id, "teardown")
         try:
             if lease is not None:
                 await lease.destroy()
@@ -430,7 +505,15 @@ async def run(
                     # force-released at its hard deadline (leases_expired_total).
                     raise RuntimeError(f"environment for {trajectory_id} was not confirmed destroyed")
                 if lease_open:
-                    _board_kwcall(board, "lease_released", trajectory_id)
+                    try:
+                        _board_kwcall(board, "lease_released", trajectory_id)
+                    except Exception as exc:  # noqa: BLE001 - ray wraps the board's ToolWaitError
+                        if "is not live" not in str(exc):
+                            raise
+                        # the board force-released it at its hard deadline already
+                        raise _LeaseExpiredOnBoard(str(exc).splitlines()[-1][:300]) from exc
         finally:
+            _INFLIGHT.pop(trajectory_id, None)
+            _ABORTED_IDS.discard(trajectory_id)
             if session_open:
                 _board_kwcall(board, "exit_session", trajectory_id)

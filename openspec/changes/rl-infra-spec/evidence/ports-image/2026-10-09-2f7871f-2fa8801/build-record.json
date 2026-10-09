@@ -1,0 +1,10 @@
+{
+  "tag": "ghcr.io/michaellchung/yeto-miles-ports:2f7871f-2fa8801",
+  "digest": "sha256:62b4f164c49d944a9dba8af86af027faf276040ea1f9a8d6841cc4afd46a15c7",
+  "layer_tar_sha256": "cd9b58c92b37d0fe7c6786eb2a6549536cf8d7597d66c27adff1c23862c6c4c7",
+  "base": "docker.io/radixark/miles@sha256:4d69750720eb1a4b99976a3fed45ed018e1fc4fff3d240667fa17d258dfc6e0c",
+  "base_index": "sha256:90940828dcd4d54fd907ff668b43537cbd94778047580e4160d6560af548b74d",
+  "miles_commit": "2f7871fb2e80d37420b16ef81f001c7b0ba8e32e",
+  "sglang_commit": "2fa880182eefdb31e64d8ea70317be27f9f32121",
+  "sglang_version": "0.5.21.dev70+g2fa8801"
+}

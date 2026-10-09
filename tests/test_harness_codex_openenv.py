@@ -291,8 +291,97 @@ def test_abort_hook_cancels_surplus_workers_and_releases_everything(monkeypatch)
     assert tbench_reward.INFRASTRUCTURE_KEY in result and tbench_outcome.MAC_KEY not in result
     assert subprocess_agent.ABORTED_STATUS in json.dumps(result)
     assert board.open == 0 and provider.destroyed == 1 and env.evaluations == 0
-    assert subprocess_agent._ACTIVE_WORKERS == {} and subprocess_agent._ABORTED_IDS == set()
+    assert subprocess_agent._INFLIGHT == {} and subprocess_agent._ABORTED_IDS == set()
     assert _run(subprocess_agent.abort(None)) == 0  # nothing in flight: no-op
+
+
+def test_abort_during_acquire_waits_for_the_sandbox_then_destroys_it(monkeypatch):
+    """S17 N17: acquire is never cancelled (a sandbox made by a cancelled acquire would
+    leak); the trajectory is flagged and stops as soon as the sandbox exists."""
+    env = FakeTerminalEnvironment(passed=True)
+    provider, board = _configure(monkeypatch, env)
+    gate = asyncio.Event()
+    real_acquire = provider.acquire
+
+    async def slow_acquire(task_id, trajectory_id):
+        await gate.wait()
+        return await real_acquire(task_id, trajectory_id)
+
+    provider.acquire = slow_acquire
+
+    async def scenario():
+        task = asyncio.create_task(subprocess_agent.run("http://miles", "p", {}, _metadata(hang_seconds=30)))
+        while "traj-1" not in subprocess_agent._INFLIGHT:
+            await asyncio.sleep(0.01)
+        assert subprocess_agent._INFLIGHT["traj-1"]["stage"] == "acquire"
+        assert await subprocess_agent.abort(None) == 1
+        gate.set()
+        return await asyncio.wait_for(task, 20)
+
+    result = _run(scenario())
+    assert subprocess_agent.ABORTED_STATUS in json.dumps(result) and tbench_outcome.MAC_KEY not in result
+    assert provider.destroyed == 1 and env.calls == [] and env.evaluations == 0
+    assert subprocess_agent._INFLIGHT == {} and subprocess_agent._ABORTED_IDS == set()
+
+
+def test_abort_during_verification_cancels_it_and_destroys_the_sandbox(monkeypatch):
+    env = FakeTerminalEnvironment(passed=True)
+    provider, board = _configure(monkeypatch, env)
+    started = asyncio.Event()
+
+    async def slow_finish(untrusted, verifier, **kw):
+        started.set()
+        await asyncio.sleep(60)  # a judge that hangs (detached sandbox)
+
+    monkeypatch.setattr(subprocess_agent.adapter, "finish_trusted", slow_finish)
+
+    async def scenario():
+        task = asyncio.create_task(subprocess_agent.run("http://miles", "p", {}, _metadata()))
+        await asyncio.wait_for(started.wait(), 20)
+        assert subprocess_agent._INFLIGHT["traj-1"]["stage"] == "verify"
+        assert await subprocess_agent.abort(None) == 1
+        return await asyncio.wait_for(task, 20)
+
+    result = _run(scenario())
+    assert subprocess_agent.ABORTED_STATUS in json.dumps(result) and tbench_outcome.MAC_KEY not in result
+    assert provider.destroyed == 1 and board.open == 0
+    assert subprocess_agent._INFLIGHT == {} and subprocess_agent._ABORTED_IDS == set()
+
+
+def test_lease_force_released_by_the_board_is_infrastructure_not_a_crash(monkeypatch):
+    """S17 N17 A/B arm a: the board force-released an expired lease; the late
+    lease_released raised ToolWaitError("... is not live") out of run() and the
+    reward function then failed the whole rollout. Now: infrastructure sample."""
+    from yeto.rl.engine.tool_wait import HarnessBoard
+
+    hb = HarnessBoard()
+    env = FakeTerminalEnvironment(passed=True)
+    provider, _board = _configure(monkeypatch, env, harness_board=hb, deadline=30.0)
+    real_destroy_calls = []
+
+    orig_acquire = provider.acquire
+
+    async def acquire(task_id, trajectory_id):
+        lease = await orig_acquire(task_id, trajectory_id)
+        orig_destroy = lease.destroy
+
+        async def destroy():
+            hb._leases.pop(trajectory_id, None)  # the board expired it meanwhile
+            real_destroy_calls.append(trajectory_id)
+            await orig_destroy()
+
+        return subprocess_agent.EnvironmentLease(
+            env_url=lease.env_url, env_token=lease.env_token, verifier=lease.verifier,
+            destroy=destroy, describe=lease.describe, deadline_seconds=lease.deadline_seconds)
+
+    provider.acquire = acquire
+    result = _run(subprocess_agent.run("http://miles", "p", {}, _metadata()))
+    assert tbench_reward.INFRASTRUCTURE_KEY in result and tbench_outcome.MAC_KEY not in result
+    assert subprocess_agent.LEASE_EXPIRED_ON_BOARD in json.dumps(result)
+    assert real_destroy_calls == ["traj-1"] and provider.destroyed == 1
+    assert hb.snapshot().in_flight == 0  # the session was still closed
+    sample = SimpleNamespace(metadata=result, status=None)
+    assert _run(tbench_reward.reward_func(None, sample)) == 0.0 and sample.status == "ABORTED"
 
 
 # ---------------------------------------------------------------- IR-2/IR-3: HarnessBoard, admission, policy token source
