@@ -58,3 +58,19 @@
 - 先到先定契约 → 负例岛晚连 180 s（主 agent 拍板，design 决定 4）。
 - RL 运行一律按固定名单（launcher.py:7281），elastic 被拒岛退出会停整场 → 主 agent 拍板修根因：`fixed_roster` 只对非 elastic 为真，elastic 下被拒或严格失败的岛只拆该岛、记 island_lost、不重开（单独提交，记入 rl-inter-island-scheduling tasks 10.1）。
 - 岛 1 不会写 rl_learner_finalized，运行结束码可能是 3（tape 不完整），按实际记录，不算判据失败。
+
+## 第 3 个运行重跑（`s18-lpg-age-20261009b`）补充复核（10-09，主 agent 代拍板 A、B）
+
+首跑 `s18-lpg-age-20261009a` 失败：岛 1 在 Miles 配置检查处退出（`--rl-max-policy-age 1` 需要算法规格 execution.max_policy_staleness≥1），没走到 JOIN。原因是上一轮复核只查了 launcher 侧的落后上限校验，漏了岛上的配置检查。
+
+A（已完成，提交 afe4237a）：`launch_preflight.check_policy_age_spec`，全局参数（`pre_cloud_checks`、dry-run）和换参数副本（`island_overrides.check_island_args`）共用。PLAN_ONLY 实测：默认规格报"tolerates 0"拒绝，`s1-runs/s18-aru2-m1/spec.json`（max_policy_staleness 1、TIS clip 2.0）放行，岛 1 命令行带 `--rl-max-policy-age 1`，岛 0 不带。单测 5 条。
+
+Miles 侧与落后上限相关的其他要求，逐条对照：
+1. `SUPPORT.check`（adapters/miles/policy_age.py）：Miles 阶段 2 最大 1 → 1 合法。
+2. `check_task`：不能配多轮 agentic 生成函数，不能开 `--recompute-logprobs-via-prefill` → 本次 gsm8k 默认生成、没开 prefill 重算，合法。
+3. `ExecutionProfile`（engine/execution_profile.py）：age>0 时契约为 bounded-staleness（岛自动带上），age 0 只允许 1 批在途 → 岛 0 不受影响。
+4. `check_algorithm_contract`（岛 A1 预检）：profile 绑定 launcher 给的规格哈希（两岛同一份规格）；age ≤ 规格容忍值（1≤1）；colocated-serial 模式产生的年龄 0 ≤ 1 → 两岛都过。
+5. `capabilities.check(max_policy_age=…)`：age ≤ 规格容忍值；规格字段（TIS、execution）在 Miles 声明支持的字段内 → launcher 侧同一检查 dry-run 已过；ARU-2 M1 用同一份规格在 Miles 单岛真机跑过 10 轮。
+6. 身份：岛 1 的后端身份经 `bind_policy_age(…,1)` 改变（island_entry `_backend_identity_sha256`），岛 0 不变 → JOIN 应被拒。规格哈希两岛相同，不是被拒原因。
+7. 未验证的风险：Miles 落后上限 1 与 elastic 调度同时开，此前没上过卡（ARU-2 只跑单岛无同步）。但岛 1 只需走到 JOIN（在训练开始之前），岛 0 的落后上限是 0，与此前的 elastic 运行相同。
+判据、形状、轮数、时限与首跑相同，只多 `--rl-algorithm-spec`（两岛同一份）。单跑上限 $5。
