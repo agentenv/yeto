@@ -140,3 +140,8 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
   - 新岛连旧 syncer：旧 syncer 解码时报 "trailing bytes in elastic frame type 15"，同样被拒。
   - 旧检查点（`YELSRV1`）新 syncer 不能 `--resume`，报 "predates the backend identity field"。
   - 同一种后端、同一个提交的岛，新代码之间行为和以前一样（JOIN_ACK、合并、权重都不变）。
+
+## 阶段 5 补：严格模式拒绝不一致的 HELLO 不再致命（分支 s17-strict-reject，2026-10-08 夜，任务 6.2b）
+
+- 算法哈希、契约哈希、8 个标准样本、帧格式、检查点格式：都不变。
+- 只变了 syncer 对错误岛的处理和 MSG_ERROR 文本：契约不一致时错误文本改为 `session mismatch (HELLO refused, session keeps running): expected session_contract_hash=… layout_fingerprint=… …, got …`（仍以 `session mismatch` 开头，旧客户端照样识别为被拒）。新旧代码可以混用。
