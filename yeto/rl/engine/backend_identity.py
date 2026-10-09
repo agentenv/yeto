@@ -83,6 +83,40 @@ def session_contract_hash(layout_fingerprint: bytes, identity_sha256: str) -> by
     return hashlib.sha256(SESSION_CONTRACT_DOMAIN + layout_fingerprint + digest).digest()
 
 
+LR_SCHEDULE_SCHEMA = "yeto-lr-schedule-v1"
+ISLAND_CONTRACT_DOMAIN = b"yeto-rl-island-contract-v1\0"
+
+
+def lr_schedule_sha256(decay_style: str, decay_iters: int | None, lr: Any,
+                       warmup_iters: int = 0, min_lr: Any = 0) -> str:
+    """Engine-neutral hash of the optimizer LR schedule an island applies (S17 N17).
+
+    Two islands whose schedules differ must not be merged: averaging deltas
+    trained at different learning rates silently skews the result.  A
+    ``constant`` schedule ignores its horizon (Megatron only needs it > 0), so
+    ``decay_iters`` is left out there and islands with different round counts
+    under the same constant LR still agree."""
+    body = {"schema": LR_SCHEDULE_SCHEMA, "decay_style": str(decay_style),
+            "lr": float(lr), "warmup_iters": int(warmup_iters or 0),
+            "min_lr": float(min_lr or 0)}
+    if decay_style != "constant":
+        body["decay_iters"] = None if decay_iters is None else int(decay_iters)
+    text = json.dumps(body, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def island_contract_sha256(identity_sha256: str | None, lr_schedule: str | None) -> str | None:
+    """What an island declares to the syncer as its identity (HELLO session
+    contract and elastic JOIN): the backend identity, bound to the LR schedule
+    hash when the adapter supplies one.  ``lr_schedule`` None keeps the plain
+    backend identity (old behaviour, e.g. verl until its adapter supplies it)."""
+    if identity_sha256 is None or lr_schedule is None:
+        return identity_sha256
+    ident = bytes.fromhex(_sha256_hex(identity_sha256, "backend identity sha256"))
+    lr = bytes.fromhex(_sha256_hex(lr_schedule, "lr schedule sha256"))
+    return hashlib.sha256(ISLAND_CONTRACT_DOMAIN + ident + lr).hexdigest()
+
+
 def check_identity_match(local: BackendIdentity, peer: BackendIdentity) -> None:
     if local.sha256() != peer.sha256():
         raise BackendIdentityMismatch(

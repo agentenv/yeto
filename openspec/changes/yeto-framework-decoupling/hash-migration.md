@@ -182,3 +182,21 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
 
 - `MILES_NEXT_COMMIT` 8bc52237a → efbbc63ea（agentenv/miles s18-abort-discard-stats：多发截止时统计丢弃的组/条/回复 token，只加统计），`SGLANG_NEXT_COMMIT` 4e4148f1b → 2fa880182（qwen3_coder 在 parallel_tool_calls=false 时一次只放行一个工具调用，S17 N17），镜像 `yeto-miles-ports:efbbc63-2fa8801@sha256:a7990076…`，构建记录 `openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-09-efbbc63-2fa8801/`。
 - 标准样本变化：8 个配置的 `ports_runtime_fingerprint`（= Miles 提交 + 命令行）与 `backend_identity`（engine_commit 是 Miles 提交）随 Miles 提交变化；算法哈希、契约哈希、Miles 命令行不变。已用 `python tests/decoupling_golden.py --write` 重生成。
+
+## 学习率调度进契约哈希（S17 N17，2026-10-09）
+
+- 原因：主 agent 按用户授权代拍板（S17-NIGHT-REPORT §七第 6 条）——不同岛学习率调度不一致时，合并出来的结果会悄悄跑偏；写进契约后，改学习率配置要重开岛，代价可接受。#150 的 `--rl-lr-schedule {auto,linear,constant}` 开关一并覆盖（开关只改 `--lr-decay-style`，自然进入哈希）。
+- 改动：`ExecutionProfile` 新增字段 `lr_schedule_sha256`（`yeto.rl.engine.backend_identity.lr_schedule_sha256`：`lr`、衰减方式、衰减步数、预热步数、最小学习率；**固定学习率时不计衰减步数**，因为 Megatron 只要求它 >0、不会读，避免轮数不同的岛被误拒）。Miles 侧取值见 `yeto/rl/adapters/miles/lr_schedule.py:miles_lr_schedule_sha256`（读 Miles 解析后的参数，两种引擎都一样）。
+- 跨岛拒绝：同一个学习率哈希还和后端身份绑在一起（`island_contract_sha256`），作为岛向 syncer 声明的身份——严格/decoupled 的 HELLO 会话契约和 elastic 的 JOIN 身份字段都用它，所以两岛学习率调度不同，第二个岛被拒（syncer 报"身份/会话契约不符"，不单独说是学习率）。没提供学习率哈希的后端（目前 verl）沿用原身份，行为不变。
+- 结果：8 个标准样本的 `execution_profile.contract_hash` 全变（新增字段），其余字段（算法哈希、Miles 命令行、指纹）不变；已用 `python tests/decoupling_golden.py --write` 重新生成。
+
+| 配置名 | 旧契约哈希 | 新契约哈希 | 学习率哈希 |
+|---|---|---|---|
+| grpo_default / codex_harness / elastic | `sha256:27bb768f…` | `sha256:67aee42a…` | `1a5872e0…`（linear） |
+| grpo_tis | `sha256:f30ac401…` | `sha256:ff357407…` | `1a5872e0…` |
+| decoupled | `sha256:634583f6…` | `sha256:05aafa6d…` | `c3427354…`（constant） |
+| drgrpo | `sha256:94562ea5…` | `sha256:bf82d9e7…` | `1a5872e0…` |
+| seq_adv_maxrl | `sha256:2497445b…` | `sha256:66569e2a…` | `1a5872e0…` |
+| fn_2x8 | `sha256:18dda066…` | `sha256:f88f978b…` | `18ce0b0f…` |
+
+- 旧 GPU 证据：只是契约哈希多了一个字段，训练行为不变，按 D6 继续以本表引用。

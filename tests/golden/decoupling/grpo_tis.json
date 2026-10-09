@@ -60,13 +60,14 @@
   "sha256": "d4981350fc891319162fee22be130d6b306bc18a177a7728a2e67f54575bbade"
  },
  "execution_profile": {
-  "contract_hash": "sha256:f30ac4010eb5b88fac0261507eb951da18718d2bacd512f2d29a79ad84269355",
+  "contract_hash": "sha256:ff3574071f62f2b71fb1eb71f5e32b71e272d1345b5cb280100429ab8a8c10f8",
   "profile": {
    "algorithm_contract": "on-policy",
    "algorithm_spec_sha256": "5a8a5a9ff5abb317fc8159ab56c07293dc3bc99e084542880b6d32cc5a02b441",
    "allowed_overlap": [],
    "execution_mode": "partitioned-serial",
    "groups_per_batch": 4,
+   "lr_schedule_sha256": "1a5872e05b262db8c1b8fd48b5b7249b41e479181097e724ae6200ed122d0e99",
    "max_inflight_batches": 1,
    "max_policy_age": 0,
    "name": "miles-lora-partitioned-serial",
