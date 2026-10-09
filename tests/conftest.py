@@ -26,7 +26,14 @@ def pytest_configure(config):
     )
 
 
+import os as _os
+
 import pytest as _pytest
+
+# decoupling 7.7a: islands must declare a compat_group (no default in code).
+# Unit tests that build identities at import time run as one H100 island;
+# tests of the missing-value error delete it with monkeypatch.
+_os.environ.setdefault("YETO_RL_COMPAT_GROUP", "nvidia-h100")
 
 
 import os as _os
@@ -62,6 +69,17 @@ def _no_teardown_diagnostics(monkeypatch):
     """launcher.teardown_island pulls logs over ssh/sky before a teardown;
     unit tests exercise it explicitly (test_verda_provider.py) instead."""
     monkeypatch.setenv("YETO_TEARDOWN_DIAG", "0")
+
+
+@_pytest.fixture(autouse=True)
+def _fixed_thread_reading(monkeypatch):
+    """launch-preflight-guards: launch() reads this user's thread count from
+    /proc; unit tests must not depend on (or wait for) the host's threads.
+    Tests of the thread preflight pass their own counter."""
+    from yeto import launch_preflight
+
+    monkeypatch.setattr(launch_preflight, "count_threads",
+                        lambda *a, **k: launch_preflight.ThreadCount(100, 0, False, 1))
 
 
 def pytest_collection_modifyitems(config, items):

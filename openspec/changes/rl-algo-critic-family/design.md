@@ -117,6 +117,12 @@ Miles arguments.py:3212 的约束只在 `--rematerialize-param-from-master-weigh
 - 验证：CPU 上 fork 单测（critic LoRA 参数数、冻结掩码、value head 可训练）；dry-run argv 快照；G1 1 卡对比 full critic 的 EV 曲线；G3 两岛 strict-avg 只平均 adapter 后哈希一致。
 - 备选：首轮直接做 LoRA critic。否决：Miles 无现成实现，先用全参数确立基线（决策 2）。
 
+### D-S19 算法上卡顺序（用户 2026-10-09）
+- 用户决定：SAO 与 CompactionRL 最先，排在 PPO 两岛（4.5）、VAPO（7.3）和 rl-algo-supplement 阶段一之前。
+- 理由（用户原意）：这两个算法直接服务 Flash-Next 后期训练；PPO/VAPO 是通用补证据。
+- 影响：S14 Q4"critic G3 排在算法阶段一之后"只对 PPO/VAPO 继续有效。
+- 前置不变：6.3 pin 与镜像更新先于 SAO/CompactionRL 上卡；CompactionRL 9.4 的环境与数据集仍待用户选定。
+
 ## Risks / Trade-offs
 
 - [共卡 + offload_train 导致显存与时长翻倍] → G1 用 0.5B 级小模型；记录每轮时长作为后续分卡决策依据。

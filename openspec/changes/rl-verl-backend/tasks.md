@@ -58,6 +58,11 @@
 - [ ] 3.6 运行时清单 NPU 字段（torch_npu、CANN、vllm_ascend、mindspeed、HCCL）。验收：真机清单字段齐全。
 - [ ] 3.7 Megatron(MindSpeed) 训练后端接入与其参数名映射表（为 Flash-Next 180B 准备）。验收：切换训练后端后五端口单测不变；小模型 3 步冒烟；Flash-Next 可行性另行评估。
 - [ ] 3.8 （可选）syncer torch-svd 工作进程在 npu 设备上可用性。验收：`--iso-worker-device npu:0` 能起并完成一次 SVD，否则记录不支持。
+- [ ] 3.9 （等 NPU 机器）NPU 开卡启动路径：launcher 能在 NPU 机器上起岛（资源申请、`npu-smi` 断言卡名与卡数、设备可见变量 `ASCEND_RT_VISIBLE_DEVICES`）。验收：真机起岛日志有卡名断言；卡名不符时启动前拒绝（单测）。（用户 10-09 要求补入）
+- [ ] 3.10 （等 NPU 机器）GPU/NPU 混跑契约：同一 run 中 GPU 岛与 NPU 岛的后端身份哈希不同，按 decoupling 卡型兼容组规则（10-09 用户定：卡型不同即拒，驱动版本只记录）在 HELLO 时拒绝或放行。验收：单测覆盖"GPU 岛 + NPU 岛"被拒；放开混跑需用户另批并补数值对照。（用户 10-09 要求补入）
+- [ ] 3.11 （等 NPU 机器）NPU 镜像构建：基于 3.1 选定的 CANN、torch_npu、vllm-ascend 版本构建镜像，记录镜像 digest 与 pip freeze。验收：镜像在 NPU 机器上起机，版本读回与清单一致。（用户 10-09 要求补入）
+- [ ] 3.12 （无卡可先做，标"等 NPU 机器"是为了真机复核）CPU 上模拟 `torch_npu` 的单测：用假 `torch_npu` 模块覆盖设备选择、3.3 断言、3.6 清单字段、发布读回的 NPU 分支。验收：单测在本机安全测试集里通过，不需要 NPU。（用户 10-09 要求补入）
+- [ ] 3.13 （等 NPU 机器）NPU 价目表与看板：费用表加 NPU 机型单价（来源与日期写明），看板按卡型显示 NPU 岛的费用与利用率。验收：单测读到 NPU 单价；看板人工审（记忆：看板界面由用户人工审）。（用户 10-09 要求补入）
 
 ## 4. 待定事项跟进（需用户拍板，非实现任务）
 
@@ -77,4 +82,9 @@
 - [ ] 6.4 落盘发布方式真机验证；verl 岛重入后数据游标续位；elastic 模式 verl 岛（JOIN 带身份见 PR #140）。
   - 2026-10-08 N16（分支 s17-rejoin-cursor，CPU 已实现并单测，**未上卡验证**）：数据游标续位已做。查明这是中立层缺陷，不是 verl 独有：驱动只在有批次账本或同步方式提供"按整轮跳过"兜底时才恢复数据位置，而这个兜底只有 elastic 有；严格同步且没有账本的岛（V2 的 verl 岛；Miles 严格模式不带 --rl-elastic 时同理，按代码推断、未上卡）在新容器里重启后数据源从 0 开始。Miles elastic 的 N3/N5 运行中退出重入是同进程暂停后重入，数据源没有重置，事件记录里也没有 cursor_restored，不存在同样的重复。改法：① 中立层 `bridges.whole_round_restart_cursor` 抽成共用函数，StrictAvgSync / DualStrictAvgSync 也提供兜底；驱动只在账本里没有 v-1 这一轮记录时才用兜底（账本记了 v-1 却没游标仍按原规则拒绝）。② verl 岛 `VerlRolloutPool` 提供 data_cursor / seek_data_cursor（`adapters/verl/data_cursor.py`：数 `_fetch_one_gen_batch` 取过的题数，向前跳整块，不能后退），每轮游标写进 verl-rollout 记录。证据：tests/test_rl_restart_data_cursor.py 新增 3 条（无账本严格重启跳过 2 轮，修前失败）、tests/test_rl_verl_adapter.py 新增 2 条（跳过后取到的题与不中断时相同）；39 个相关测试文件 919 过，唯一失败 test_rl_ir_harness 在基线同样失败。待下次 verl 两岛上卡时用 prompts_sha256 复核。
   - 2026-10-09 S17 N17：中立层的整轮跳过在 **Miles 严格同步** 岛上真机通过（`s17-n17-strict-20261009a`，见 rl-infra-spec 8.2）；verl 数据游标（`seek_data_cursor`）仍**未上卡验证**。
+- [ ] 6.6 verl fully_async 接入上卡（agentic-rollout-utilization 6.4b，约 2 卡、$15–25）。
+  - **用户 2026-10-09 决定：要做**。先在 NVIDIA GPU（N 卡）上跑，不等 NPU。结果统一备注"已在 N 卡跑过，NPU 未跑"；NPU 复跑待第 3 组 NPU 机器到位后另列。
+  - 设计在 agentic-rollout-utilization design 第 9 条"6.4b 设计"。2026-10-09 适配代码**完成**（写完且本机单测通过，未上卡）：`fully_async_round.py`（纯逻辑）、`fully_async_ports.py`（驱动端口）、`fully_async_runner.py`（镜像内 trainer actor 子类 + 任务运行器）、`patch_verl.py` 第二处补丁、`verl_main.main_fully_async`、`island_entry --rl-max-policy-age`；测试 `tests/test_rl_verl_fully_async_64b.py`（11 项，含假 trainer actor 下真实 IslandDriver 跑 3 轮）。镜像内路径（verl/Ray 真调用）**未验证**，靠本条上卡核实。
+  - 上卡前复核文档：`infra-drafts/S19-VERL-64B-PRELAUNCH-REVIEW.md`（判据、配置、预算）；并入第三批合并上卡（`infra-drafts/S19-BATCH3-PLAN.md`），预算需用户批。
+  - 验收：复核文档预登记判据 F1–F6 全部满足，证据路径写回本条。
 - [ ] 6.5 单岛不同步 + Modal 时 launcher 以 exit 2 收尾（与 Miles 相同的既有行为），是否改为成功由用户定。

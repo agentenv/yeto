@@ -32,7 +32,7 @@ or allocation overflows are errors rather than panics.
 
 | type | name | direction | payload |
 |---:|---|---|---|
-| 1 | HELLO | learner → syncer | protocol_version:u16 (=4), learner_id:u32, connection_generation:u64, dtype:u8 (1=f32, 2=bf16, 3=q4), num_fragments:u32, per-fragment layout, layout_fingerprint:[u8;32], session_contract_hash:[u8;32], optional syncer_profile_hash:[u8;32], num_streams:u16 |
+| 1 | HELLO | learner → syncer | protocol_version:u16 (=4), learner_id:u32, connection_generation:u64, dtype:u8 (1=f32, 2=bf16, 3=q4), num_fragments:u32, per-fragment layout, layout_fingerprint:[u8;32], session_contract_hash:[u8;32], optional syncer_profile_hash:[u8;32], num_streams:u16, optional compat_group trailer (`b"YCG1"`, u32 length, 1–64 bytes utf-8) |
 | 2 | INIT_PARAMS | learner → syncer | fragment_id:u32, full tensor bytes; only learner 0 may initialize |
 | 3 | PULL_REQ | syncer → learner | fragment_id:u32, global_step:u64, round_attempt:u32 |
 | 4 | PUSH_FRAGMENT | learner → syncer | learner_id:u32, fragment_id:u32, global_step:u64, round_attempt:u32, base_version:u64, local_step:u64, c_steps:u32, c_tokens:u64, base-relative learner-delta bytes |
@@ -74,6 +74,65 @@ layout, semantic fingerprint, session contract, and optional server profile
 binding. Every later HELLO must match them exactly,
 and learner IDs must lie in the configured `0..M` launch set. The learner ID
 repeated inside PUSH and HEARTBEAT must match the connected group.
+
+## HELLO authentication (secret-handling-hardening)
+
+When the syncer has an island HMAC key (`YETO_ISLAND_HMAC_KEY`; required in
+legacy mode unless `--allow-unauthenticated-islands`), the HELLO payload is:
+
+```
+body := version .. num_streams:u16 [ b"YCG1" | u32 n | n bytes utf-8 ]   # compat_group trailer optional
+HELLO payload := body | mac:[u8;32]
+mac := HMAC-SHA256(key, b"yeto-hello-mac-v1\0" | body)
+```
+
+- Order: the compat_group trailer (clear text, 8 + n bytes, 1 <= n <= 64) is
+  part of `body`; the 32-byte MAC is always the last field. The MAC therefore
+  covers the card-type group, so it cannot be changed in transit.
+- The syncer first strips and checks the last 32 bytes, then parses `body`
+  exactly as above (profile hash, num_streams, trailer detection).
+- Without a key nothing is appended (wire bytes unchanged).
+- A wrong or missing MAC gets ERROR `HELLO authentication failed: ...` on that
+  connection only; the client maps it to metric `island_auth_failed` and does
+  not retry. DATA_HELLO carries no MAC; it can only join the 64-bit random
+  connection generation of an authenticated HELLO.
+- `--expected-island-contract <hex32>`: the session contract must equal
+  `sha256(b"yeto-rl-session-contract-v2\0" | layout_fingerprint | pinned)`;
+  elastic pins the JOIN identity to the same value before the first JOIN.
+
+## Card-type compatibility group (yeto-framework-decoupling 7.7)
+
+- Every RL island declares `compat_group` = `"<vendor>-<card>"` in lower case,
+  for example `nvidia-h100`, `nvidia-h200`, `ascend-910b`. The value comes from
+  the card catalog `yeto/hw/catalog.py`. The launcher sets it from the `--gpu`
+  card type (env `YETO_RL_COMPAT_GROUP`). An unknown card stops the launch; there
+  is no default.
+- The group is a field of `BackendIdentity` (schema v2), so it is inside the
+  identity hash, the HELLO session contract and the elastic JOIN identity.
+- The group is also sent in clear text: as the HELLO trailer above, and as a
+  `u32 length + utf-8` field after `backend_identity` in JOIN. The syncer pins
+  the first admitted group. A HELLO or JOIN with another group gets ERROR
+  `兼容组不同：<a> 对 <b>，容差未标定` on that connection only. The syncer does not
+  exit and the admitted islands keep running. H100 and H200 are different groups.
+- Phase 1 rule: groups must be identical. `CARD_PAIR_TOLERANCE` in the catalog is
+  the key for calibrated card-pair tolerances (phase 2); it is empty now.
+- Driver version and CUDA version are recorded only: island log line
+  `[yeto-island] compat_group=...`, event `rl_island_hardware`, dashboard island
+  row. They never cause a refusal (user decision 2026-10-09). Reason: the checks
+  that run during training compare sha256 hashes only and do not depend on the
+  hardware; recompute comparisons run only in tests.
+- Version boundary: a syncer without this change refuses the HELLO trailer and
+  the longer JOIN; this syncer refuses a JOIN without the field.
+
+### What the syncer exchanges (7.7d)
+
+The syncer only exchanges deltas in a neutral format: flat f32 or bf16 tensors
+(q4 only as a wire compression of the same flat tensor), laid out by the HELLO
+fragment layout, which is built from the canonical parameter names
+(`yeto.rl.core` canonical specs; each backend maps its own names through its
+parameter-name map, whose hash is in the identity). No engine-specific layout,
+sharding or device format crosses the syncer. This is the precondition for
+phase 2 (merging different card types after the tolerance is calibrated).
 
 ## Striping
 

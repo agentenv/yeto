@@ -104,3 +104,67 @@ def test_final_grace_flag_and_status_state(tmp_path, monkeypatch):
     assert not ls.finished()
     (tmp_path / "status.json").write_text(json.dumps({**base, "state": "finished"}))
     assert ls.finished()
+
+
+# -- 10-09 ruling: elastic is not a fixed roster -----------------------------------
+def test_controller_fixed_roster_only_for_non_elastic_rl():
+    from types import SimpleNamespace
+
+    from yeto.launcher import controller_fixed_roster
+
+    assert controller_fixed_roster(SimpleNamespace(training_mode="rl", rl_island_scheduling="legacy"))
+    assert not controller_fixed_roster(SimpleNamespace(training_mode="rl", rl_island_scheduling="elastic"))
+    assert not controller_fixed_roster(SimpleNamespace(training_mode="sft", rl_island_scheduling="legacy"))
+
+
+def _refusing_ops(text):
+    ops = FakeOps()
+    ops.rl_strict_failure = lambda name, job: text if name == "l1" else None
+    return ops
+
+
+def test_elastic_refused_island_dropped_rest_continue():
+    ops = _refusing_ops("ElasticProtocolError: JOIN refused or timed out: backend identity mismatch, "
+                        "JOIN refused: island 1 declares aa but this elastic session is pinned to bb")
+    ops.status_seq["l0"] = [RUNNING, RUNNING, SUCCEEDED]
+    ops.status_seq["l1"] = [FAILED]
+    fleet = []
+    ctl = FleetController(learners={"l0": ("task-l0", 1), "l1": ("task-l1", 2)},
+                          syncer=(SYNCER, "task-syncer", 1), sky_ops=ops, poll_interval=30,
+                          recover_timeout=600, thread_cls=ImmediateThread, fixed_roster=False,
+                          elastic=True)
+    ctl._fleet = lambda kind, name=None, **kw: fleet.append((kind, name, kw.get("reason", "")))
+    ops.status_seq.setdefault(SYNCER, [RUNNING])
+    codes = ctl.run()  # no exception: the pool goes on
+    assert ops.relaunch_calls == [] and "l1" in ops.down_calls
+    assert ctl.learners["l1"]["state"] == "abandoned" and codes["l0"] == "JobStatus.SUCCEEDED"
+    assert any(k == "island_lost" and n == "l1" and "strict failure" in r for k, n, r in fleet)
+
+
+def test_elastic_strict_failure_drops_only_that_island():
+    ops = _refusing_ops("[yeto-rl-strict-failure] metric=x")
+    ops.status_seq["l0"] = [RUNNING, SUCCEEDED]
+    ops.status_seq["l1"] = [FAILED]
+    ops.status_seq.setdefault(SYNCER, [RUNNING])
+    ctl = FleetController(learners={"l0": ("task-l0", 1), "l1": ("task-l1", 2)},
+                          syncer=(SYNCER, "task-syncer", 1), sky_ops=ops, poll_interval=30,
+                          recover_timeout=600, thread_cls=ImmediateThread, fixed_roster=False,
+                          elastic=True)
+    ctl.run()
+    assert ops.relaunch_calls == [] and ops.down_calls.count("l1") >= 1 and "l0" not in ops.down_calls
+
+
+def test_legacy_refused_island_still_stops_the_run():
+    import pytest
+
+    ops = _refusing_ops("RuntimeError: session mismatch (HELLO refused, session keeps running): x")
+    ops.status_seq["l0"] = [RUNNING] * 50
+    ops.status_seq["l1"] = [FAILED]
+    ops.relaunch_results["l1"] = [None] * 200
+    with pytest.raises(FixedRosterIslandAbandoned):
+        _ctl(ops).run()  # fixed roster (legacy): unchanged
+    ops2 = _refusing_ops("[yeto-rl-strict-failure] metric=x")
+    ops2.status_seq["l0"] = [RUNNING] * 5
+    ops2.status_seq["l1"] = [FAILED]
+    with pytest.raises(RuntimeError, match="strict RL job l1 failed"):
+        _ctl(ops2).run()  # legacy strict failure: unchanged

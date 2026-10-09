@@ -60,6 +60,7 @@ def parse_args(argv):
     p.add_argument("--rl-island-scheduling", default="legacy")
     p.add_argument("--rl-syncer-epoch", type=int, default=0)
     p.add_argument("--rl-echo-events", action="store_true")
+    p.add_argument("--rl-max-policy-age", type=int, default=0)
     args, ignored = p.parse_known_args(argv)
     return args, ignored
 
@@ -257,6 +258,10 @@ def main(argv=None) -> int:
         sync = "strict"
     if sync != "none" and not args.syncer:
         raise SystemExit("--syncer is required unless --rl-single-island-no-sync")
+    limit = int(args.rl_max_policy_age or 0)
+    asserted_keys = vconf.ASSERTED_KEYS
+    if limit:  # agentic-rollout-utilization 6.4b: fully_async path
+        overrides, asserted_keys = fully_async_plan(limit, overrides, spec_dict, args, sync)
     test = json.loads(TEST_FILE.read_text()) if TEST_FILE.is_file() else {}
     exit_after = (test.get("exit_after_version") or {}).get(str(lid))
     env_exit = os.environ.get("YETO_VERL_TEST_EXIT_AFTER", "")  # TEST ONLY "ISLAND:VERSION[,...]"
@@ -276,7 +281,8 @@ def main(argv=None) -> int:
         "algorithm_spec": spec_dict, "syncer_epoch": args.rl_syncer_epoch,
         "test_exit_after_version": exit_after,
         "publish_selftest": os.environ.get("YETO_VERL_PUBLISH_SELFTEST") == "1", "run_config": run.to_dict(), "overrides": overrides,
-        "asserted": {k: _override_value(overrides, k) for k in vconf.ASSERTED_KEYS},
+        "asserted": {k: _override_value(overrides, k) for k in asserted_keys},
+        "max_policy_age": limit, "fully_async": bool(limit),
         "versions": manifest["versions"],
     }
     plan_path = work / f"plan-{lid}.json"
@@ -293,7 +299,8 @@ def main(argv=None) -> int:
     env["YETO_VERL_READBACK_DIR"] = str(readback)
     env["VERL_FILE_LOGGER_PATH"] = str(OUTPUT / f"verl-file-logger-{lid}.jsonl")
     readback.mkdir(parents=True, exist_ok=True)
-    cmd = [sys.executable, "-c", "from yeto.rl.adapters.verl.verl_main import main; main()", *overrides]
+    entry = "main_fully_async" if limit else "main"
+    cmd = [sys.executable, "-c", f"from yeto.rl.adapters.verl.verl_main import {entry}; {entry}()", *overrides]
     print("[yeto-verl] " + " ".join(shlex.quote(c) for c in cmd), flush=True)
     log = OUTPUT / f"verl-train-{lid}.log"
     with log.open("a") as handle:
@@ -305,6 +312,27 @@ def main(argv=None) -> int:
         code = proc.wait()
     print(f"[yeto-verl] island {lid} exit {code} after {time.time() - t0:.0f}s", flush=True)
     return code
+
+
+def fully_async_plan(limit: int, overrides: list[str], spec_dict: dict | None, args, sync: str):
+    """Limit > 0: fully_async overrides + asserted keys; the algorithm contract is
+    checked here (bounded staleness needs ``execution.max_policy_staleness >= limit``
+    and a TIS correction) so a wrong spec fails before verl starts."""
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+    from yeto.rl.engine.execution_profile import check_algorithm_contract
+
+    from .fully_async_round import (FULLY_ASYNC_ASSERTED_KEYS, execution_profile_for,
+                                    fully_async_run_overrides)
+    from .policy_age import SUPPORT
+
+    SUPPORT.check(limit)
+    spec = AlgorithmSpec.from_dict(spec_dict) if spec_dict else AlgorithmSpec()
+    profile = execution_profile_for(spec, limit, groups_per_round=args.groups_per_round,
+                                    samples_per_group=args.samples_per_group, sync=sync)
+    check_algorithm_contract(profile, spec)
+    out = fully_async_run_overrides(overrides, limit, groups_per_round=args.groups_per_round,
+                                    rounds=args.global_rounds)
+    return out, tuple(vconf.ASSERTED_KEYS) + FULLY_ASYNC_ASSERTED_KEYS
 
 
 def _override_value(overrides, key):

@@ -129,12 +129,13 @@
 - [ ] 7.4 `yeto/hw/topology.py`：`multinode.py` 中立部分（节点×卡），框架约束改为后端 `layout_rules`（E16、H7）。验收：`multinode` 现有测试通过；多节点标准样本一致。
 - [ ] 7.5 镜像三方合成接口（后端给软件需求、硬件给基底、云给仓库与凭据，V5）。验收：现有各云镜像解析结果与改动前相同。
 - [ ] 7.6 能力求交：后端支持的设备族 ∌ 请求设备族时启动前拒绝。验收：Miles×昇腾拒绝单测。
-- [ ] 7.7 卡型兼容组（D9a 第一期，细化见 design D9a-1，10-09 用户确认）。
+- [x] 7.7 卡型兼容组（D9a 第一期，细化见 design D9a-1，10-09 用户确认）。
   - 7.7a 岛身份加 `compat_group`（厂商-卡型，例如 `nvidia-h100`），取值来自 7.2 卡型目录，取不到即启动前报错。验收：单测覆盖取值与缺卡型报错。
   - 7.7b `compat_group` 进身份哈希与会话契约；在 `hash-migration.md` 记旧值、新值、原因、日期；更新 golden。验收：golden 测试按新值通过，迁移记录条目齐全。
   - 7.7c 比较函数与拒绝：兼容组不同按现有身份不符规则只拒该连接，原因写"兼容组不同，容差未标定"。阈值表留"卡型对容差"键，第一版为空。验收：单测 H100 对 H200 被拒且 syncer 不退出、同卡型 H200 对 H200 通过、NVIDIA 对昇腾被拒。
   - 7.7d 文档写明 syncer 只交换中立格式增量（扁平 f32/bf16、规范参数名）。验收：文档条目。
-  - 兼容组是否加驱动版本、CUDA 版本：待定，待用户拍板。
+  - 驱动版本、CUDA 版本：用户 10-09 决定只记录，不参与拒绝（design D9a-1）。
+  - 完成（s19-compat，2026-10-09，只跑 CPU 单测，未上卡）：7.7a `yeto/hw/catalog.py` + `BackendIdentity.compat_group`；7.7b 身份 schema v2，golden 迁移见 `hash-migration.md`「S19 7.7b」；7.7c syncer 在 HELLO 与 JOIN 上先比卡型串，不同只拒该连接，原因"兼容组不同：<a> 对 <b>，容差未标定"，`CARD_PAIR_TOLERANCE` 为空；7.7d 写入 `docs/PROTOCOL.md`。测试：`tests/test_hw_compat_group.py`、`tests/test_rl_strict_session_reject.py`（真 syncer：H200、昇腾岛的 HELLO 被拒，syncer 不退出，原两岛跑完）、`syncer/src/elastic_server.rs` `compat_group_pinned_by_first_join_refuses_other_card_type`（H100 会话拒 H200 与昇腾，同卡型仍可加入；H200 对 H200 通过）、`server.rs` `hello_with_other_compat_group_is_refused_naming_both_card_types`。
 - [ ] 7.8 第二期放开前的验证实验（只写计划，本 change 不上卡，需报批；金额待核价，按卡时估）。
   - 7.8a 同权重同批次，在 H100 与 H200 上算逐 token logprob 差的分布，并以同卡型重启的差作基线。约单卡 1 卡时。验证：差分布与基线对比表。
   - 7.8b 同批次单步梯度的余弦相似度与相对范数差。约单卡 1 卡时。验证：每层与整体数值表。

@@ -26,4 +26,5 @@
 ## 5. 收尾
 - [x] 5.1 本机安全测试集、cargo test
 - [ ] 5.2 上卡确认 Modal 容器内无 `MODAL_TOKEN_*`（未验证，下次上卡顺带）
+- [x] 5.4 合入 main（#173–#176）：HELLO 尾段顺序写进 docs/PROTOCOL.md；verl fully_async 驱动与 Ray actor 加凭据检查
 - [ ] 5.3 后续：SFT 与 ssh_harness 的密钥通道；本机计算岛契约的工具

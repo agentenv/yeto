@@ -66,6 +66,7 @@ class PrebakedModalSandboxBackend(tb2.ModalSandboxBackend):
             timeout=self.ttl_s, idle_timeout=self.idle_timeout_s, cpu=float(task.cpus),
             memory=int(task.memory_mb), workdir=task.workdir, tags=tags,
             **self._client_kwargs(),
+            **self.network_policy.grant(task.task_id).modal_kwargs(),
         )
         return tb2.ModalSandbox(sandbox, task.workdir)
 
@@ -80,5 +81,6 @@ def modal_provider(miles_args: Any = None) -> tb2.Tb2EnvironmentProvider:
         ttl_s=int(tb2._env_float(tb2.SANDBOX_TTL_ENV, tb2.DEFAULT_SANDBOX_TTL_S) or tb2.DEFAULT_SANDBOX_TTL_S),
         idle_timeout_s=int(tb2._env_float(tb2.IDLE_TIMEOUT_ENV, tb2.DEFAULT_IDLE_TIMEOUT_S)
                            or tb2.DEFAULT_IDLE_TIMEOUT_S),
+        network_policy=tb2.NetworkPolicy.from_env(),
     )
     return tb2._provider(backend)

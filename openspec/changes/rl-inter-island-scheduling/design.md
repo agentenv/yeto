@@ -190,3 +190,8 @@ driver 接口：`CrossIslandSampleSource.fetch(selected)`（只定义形状，�
 - 两岛同一 rollout 的样本批哈希相同：两岛用同一 seed 和同一数据源，一直在训同一批题。legacy 模式同样如此（证据：run s15-island1b-20261008b 的 trained_sample_ids_sha256）。是否按岛错开数据切片（例如按岛号偏移或分片），待用户裁定。
 - 1a（legacy/strict）重启后数据游标同样回到 0，已由 tape 证实；按代码推断（未逐条核对 1a 参数）原因与 0.23 同类：没开 `--rl-elastic` 时驱动没有批次账本，`_run` 跳过 `_restore_data_cursor`。0.23 只修了 elastic 路径，legacy 路径未改。
 - rl_local_round 比 rl_round_trained 少一条（run s15-island1b-20261008c，已核实）：岛 0 被杀的那一代在 1791399970 写了 rollout 2 的 rl_round_trained 和 export_push 阶段事件，kill.json 的 kill_unix 为 1791399970.25，进程死在导出参数期间。rl_round_trained 由驱动在优化步完成后立即写入，rl_local_round 则在边界里导出参数（以及测试延迟）之后、提交增量之前才写，所以在这段窗口内被杀，就只有 round_trained 没有 local_round。重启那一代从 rollout 2 重训，两条记录又都齐了。不是数据丢失，也不需要改。
+
+## 缺陷修复记录：elastic 被当成固定名单（10-09 主 agent 代用户拍板）
+
+- 现象：launcher 构造 FleetController 时 `fixed_roster = training_mode == "rl"`，elastic 也算固定名单。elastic 岛失败后（例如被 syncer 拒绝），launcher 抛 FixedRosterIslandAbandoned 停整场，与 elastic"成员可增减"的设计矛盾。由 launch-preflight-guards 上卡前复核发现，代码健康调查同时列为缺陷。
+- 修复：`fixed_roster` 只对非 elastic 的 RL 运行为真。elastic 下被拒或严格失败的岛只拆该岛、记 `island_lost`、不重开，其余岛继续。syncer 拒绝的识别标记：`backend identity mismatch, JOIN refused`、`session mismatch (HELLO refused`（launcher.SYNCER_REFUSAL_MARKERS，modal_runner 同名常量）。legacy 不变。

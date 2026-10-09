@@ -223,3 +223,20 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
 - `CODEX_HARNESS_AGENT_SHA256`（yeto/rl/__init__.py，codex_harness_agent.py 自证哈希）`1313cfa4…` → `1ab2129a…`：桥上加了回合门（门文件不存在时行为不变；Codex 命令行只在设了 `YETO_CODEX_SUSPEND_GATE` 时多一项 stream_idle_timeout_ms）。
 - 非 0 且 agentic（Miles 现声明阶段 3、上限 1）：命令行多 `--agentic-suspend-between-turns --agentic-suspend-max-rounds 1`（不带 `--partial-rollout`），需要含 agentenv/miles s18-agentic-suspend 提交的镜像。
 - 镜像 pin（同一分支，第二步）：`MILES_NEXT_COMMIT` 2f7871fb2 → ddce20992（agentenv/miles s18-agentic-suspend），`MILES_NEXT_IMAGE` `@sha256:62b4f164…` → `@sha256:9c252c38…`（tag ddce209-2fa8801，构建记录 openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-09-ddce209-2fa8801/）。8 个样本的 `backend_identity` 与 `ports_runtime_fingerprint` 随之变化（与以往换 pin 相同），其余字段不变。
+
+## S19 7.7b 卡型兼容组 `compat_group` 进岛身份（分支 s19-compat，2026-10-09）
+
+- 原因：用户 10-09 决定卡型不同的岛拒绝加入（H100 与 H200 也算不同）。岛身份 `BackendIdentity` 加字段 `compat_group`（"厂商-卡型"，例如 `nvidia-h100`），schema `yeto-backend-identity-v1` → `yeto-backend-identity-v2`。这是版本边界。
+- 变化范围：所有岛身份哈希都变，因此 HELLO 会话契约（`session_contract_hash`）和 elastic JOIN 身份也都变。算法哈希、契约哈希（`contract_hash`）、Miles 命令行、`fake_engine_tapes.json` 逐字节不变。
+- golden：8 个标准样本只变 `backend_identity` 三行（加 `compat_group`、改 `schema`、改 `sha256`），`python tests/decoupling_golden.py --write` 后 diff 只有这 24 行（8 行新增、16 行改动）。样本固定用 `nvidia-h100`。
+
+| 项 | 旧值 | 新值 |
+|---|---|---|
+| ports 岛身份 `backend_identity.sha256`（8 个样本相同，Miles ddce20992） | `494bbabad8be621190811ee4522bd6f6243d414c1bc5af3faae50274315eb528` | `6950281c0e2c371174028a5b0baa4b696144c0652ac481284cc2c082af827ad5`（`nvidia-h100`） |
+| 身份 schema | `yeto-backend-identity-v1` | `yeto-backend-identity-v2` |
+| elastic JOIN 测试帧（key `k1`，Rust 与 Python 共用） | 尾部 `3d2faaa5…` | 加 `u32 长度 + "nvidia-h100"`，尾部 `0b000000 6e76…3130 30` + HMAC `d76ccd49…` |
+
+- 线格式：HELLO 在 `num_streams` 之后可带尾段 `b"YCG1" + u32 长度 + 卡型串`；JOIN 在 `backend_identity` 之后必带 `u32 长度 + 卡型串`（空串 = 未声明）。旧 syncer 拒新帧，新 syncer 拒不带该字段的 JOIN；新旧不可混用。
+- elastic syncer 检查点格式不变：卡型固定值只在内存里；续跑后由身份哈希继续拒绝（身份哈希里已含卡型），第一个身份相同的 JOIN 再把可读的卡型固定下来。
+- 旧 GPU 证据：只是身份多了一个字段，训练行为不变，按 D6 继续以本表引用。
+- 合入 main（#173、#174 之后，2026-10-09）后重新生成 golden：旧值、新值与上表相同（main 上 ports 岛身份仍是 `494bbaba…`），diff 仍只有 `backend_identity` 的 24 行。#174 新增的 verl fully_async 路径同样带卡型身份（`trainer.py` 两条路径都经 `build_sync` 传 `compat_group`，并记 `rl_island_hardware`）。

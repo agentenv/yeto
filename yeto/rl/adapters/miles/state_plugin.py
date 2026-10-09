@@ -981,6 +981,17 @@ def _accumulate_ev_stats(returns: Any, values: Any, mask: Any = None) -> None:
         _EV_STATS[i] += value
 
 
+# Var(G) at or below this fraction of mean(G^2) (floor 1) is rounding noise,
+# not return spread. Miles' returns are advantages + values in fp32, so a
+# step whose rewards are all 0 leaves |G| ~ 1e-8 instead of exactly 0; EV then
+# divides by ~1e-16 (s14-forkg1-sao-20261007a round 5: EV -3.3e12).
+_EV_RELATIVE_VARIANCE_FLOOR = 1e-8
+
+
+def _degenerate_return_variance(var_g: float, mean_g2: float) -> bool:
+    return not var_g > _EV_RELATIVE_VARIANCE_FLOOR * max(1.0, mean_g2)
+
+
 def step_explained_variance(stats: list[float] | None = None) -> float | None:
     """EV over all tokens of the step's micro-batches (population variances);
     None without >= 2 tokens or when Var(G) is 0."""
@@ -989,7 +1000,7 @@ def step_explained_variance(stats: list[float] | None = None) -> float | None:
     if n < 2:
         return None
     var_g = sg2 / n - (sg / n) ** 2
-    if var_g <= 0.0:
+    if _degenerate_return_variance(var_g, sg2 / n):
         return None
     var_r = max(sr2 / n - (sr / n) ** 2, 0.0)
     return 1.0 - var_r / var_g
@@ -1014,7 +1025,7 @@ def explained_variance(returns: Any, values: Any, mask: Any = None) -> float | N
     if returns.numel() < 2:
         return None
     variance = torch.var(returns, unbiased=False)
-    if float(variance) == 0.0:
+    if _degenerate_return_variance(float(variance), float((returns.double() ** 2).mean())):
         return None
     return float(1.0 - torch.var(returns - values, unbiased=False) / variance)
 

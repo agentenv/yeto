@@ -110,6 +110,50 @@ global batch, group size, optimizer steps or truncation rules.
 `work.length_diagnostics` reports real lengths, cap-hit ratio and
 zero-advantage ratio from captured samples.
 
+## Negative-test islands (per-island override)
+
+To check on real hardware that a mismatching island is refused, one island
+can get another value of a whitelisted parameter. This is for negative tests
+only.
+
+```
+yeto launch ... --training-mode rl --rl-island-scheduling elastic \
+  --gpu modal:1xh100,modal:1xh100 \
+  --rl-negative-test-run \
+  --rl-island-override 1:identity_test_salt=n12
+```
+
+| Key | Effect on the named island |
+|---|---|
+| `rl_lr_schedule` | another LR schedule (`auto`/`linear`/`constant`); the LR schedule hash is part of the island identity |
+| `rl_max_policy_age` | another policy-age limit (落后上限); checked against the backend like the global flag |
+| `identity_test_salt` | TEST ONLY: mixed into `island_contract_sha256`, so the island declares a different identity |
+
+`--rl-max-carry-lag` is a syncer parameter and cannot be changed per island
+(10-09 ruling of the main agent for the user). Any other key, an island number
+out of range, or `--rl-island-override` without `--rl-negative-test-run` stops
+the launch before any cloud resource.
+
+**Warnings.** The launcher prints a NEGATIVE-TEST RUN banner. The run manifest
+has `negative_test: true` and `island_overrides` (island, key, old, new). The
+overridden island gets `YETO_ISLAND_OVERRIDE` (JSON) and writes an
+`rl_island_override` event at the head of its tape; the dashboard shows
+"负例岛：学习率调度 linear→constant" next to it. Every island of the run gets
+`YETO_NEGATIVE_TEST_RUN=1` and writes `YETO_NEGATIVE_TEST` at the root of its
+checkpoint store.
+
+**Not for production.** A run without `--rl-negative-test-run` refuses a
+`--rl-checkpoint-store` with the `YETO_NEGATIVE_TEST` marker (launcher, when the
+store is a path on this machine, plus the local run manifests; the island again
+at start, on every cloud). `yeto merge` refuses an adapter directory with the
+marker or with a `run_manifest.json` that has `negative_test: true` in it or up
+to two levels above. (The original plan named `--rl-resume` and `yeto export`;
+they do not exist on main, so the same guard sits on `--rl-checkpoint-store`
+and `yeto merge` -- 10-09 ruling of the main agent for the user.)
+
+Without `--rl-island-override` and `--rl-negative-test-run` every island
+command and environment is unchanged (`tests/test_decoupling_golden.py`).
+
 ## What is not implemented
 
 Runners for the fixed partition, scheduled switching, auto control, the

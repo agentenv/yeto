@@ -80,6 +80,7 @@ RECONNECT_DIAL_TIMEOUT = 20.0
 _HEADER = struct.Struct("<IBQ")  # magic, type, payload length
 _CHUNK_HEAD = struct.Struct("<QQQ")  # msg_id, total_len, offset
 _HELLO_HEAD = struct.Struct("<HIQBI")  # version, learner, generation, dtype, fragments
+HELLO_COMPAT_MAGIC = b"YCG1"  # server.rs HELLO_COMPAT_MAGIC
 _DATA_HELLO = struct.Struct("<HIQH")  # version, learner, generation, stream index
 _FINAL_MANIFEST_HEAD = struct.Struct("<HQI")  # revision, global_step, fragments
 _FINAL_ACK = struct.Struct("<HQ")  # revision, global_step
@@ -181,6 +182,7 @@ def encode_hello(
     connection_generation: int = 0,
     session_contract_hash: bytes | None = None,
     syncer_profile_hash: bytes | None = None,
+    compat_group: str | None = None,
 ) -> bytes:
     if session_contract_hash is None:
         # Generic/legacy callers still bind the session to the semantic tensor
@@ -215,6 +217,13 @@ def encode_hello(
     if syncer_profile_hash is not None:
         parts.append(syncer_profile_hash)
     parts.append(struct.pack("<H", num_streams))
+    if compat_group:
+        # yeto-framework-decoupling 7.7c: optional trailer b"YCG1" | u32 len |
+        # utf-8 ("nvidia-h100"); the syncer refuses another group by name.
+        raw = compat_group.encode("utf-8")
+        if not 0 < len(raw) <= 64:
+            raise ValueError("compat_group must be 1..64 bytes")
+        parts.append(HELLO_COMPAT_MAGIC + struct.pack("<I", len(raw)) + raw)
     return b"".join(parts)
 
 
@@ -453,6 +462,7 @@ class SyncerClient:
         session_contract_hash: bytes | None = None,
         syncer_profile_hash: bytes | None = None,
         hmac_key: bytes | None = None,
+        compat_group: str | None = None,
     ):
         if not 0 <= learner_id <= 0xFFFF_FFFF:
             raise ValueError(f"learner_id must fit u32, got {learner_id}")
@@ -481,6 +491,7 @@ class SyncerClient:
         # secret-handling-hardening: HELLO carries an HMAC when the island has
         # the key (the launcher ships it as a secret env).
         self.hmac_key = hmac_key if hmac_key is not None else island_hmac_key_from_env()
+        self.compat_group = compat_group
         self.connect_timeout = connect_timeout
         self.max_reconnects = max_reconnects
         self.finalization_timeout = finalization_timeout
@@ -601,6 +612,7 @@ class SyncerClient:
                         connection_generation,
                         self.session_contract_hash,
                         self.syncer_profile_hash,
+                        self.compat_group,
                     ),
                     self.hmac_key,
                 ),

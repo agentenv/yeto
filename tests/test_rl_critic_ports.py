@@ -359,3 +359,32 @@ def test_value_metrics_recorder_reports_step_level_ev_at_micro_batch_1(monkeypat
     model_mod.train_one_step(optimizer=None)  # stats reset per optimizer step
     (again,) = sp.step_losses(None)
     assert again["metrics"]["explained_variance"] == pytest.approx(expected)
+
+
+def test_explained_variance_is_none_when_returns_are_rounding_noise():
+    """s14-forkg1-sao-20261007a round 5: all rewards 0, fp32 returns ~1e-8,
+    EV -3.3e12. Rounding-level return spread is no spread: EV is None."""
+    import torch
+
+    from yeto.rl.adapters.miles.state_plugin import (
+        _accumulate_ev_stats,
+        _EV_STATS,
+        explained_variance,
+        step_explained_variance,
+    )
+
+    returns = torch.tensor([3e-8, -2e-8, 1e-8, 0.0])
+    values = torch.tensor([0.4, 0.1, 0.3, 0.2])
+    assert explained_variance(returns, values) is None
+    stats: list[float] = []
+    _EV_STATS_backup = list(_EV_STATS)
+    _EV_STATS.clear()
+    try:
+        _accumulate_ev_stats(returns, values)
+        stats = list(_EV_STATS)
+    finally:
+        _EV_STATS[:] = _EV_STATS_backup
+    assert step_explained_variance(stats) is None
+    # a real 0/1 reward spread (1 of 32 correct) still yields an EV
+    real = torch.tensor([1.0] + [0.0] * 31)
+    assert explained_variance(real, torch.full((32,), 0.5)) is not None

@@ -56,6 +56,14 @@
      4. 多岛：每岛内部 MessageQueue 只在岛内用；跨岛仍按 outer version 由 yeto 同步服务合并；续训切点需保存 rollouter 在途样本（MessageQueue 内容 + 续写状态）或按 3.3 规则丢弃并上报。
      5. 卡数与预算：推理与训练分卡，单岛最少 2×H100（rollouter 1 + trainer 1）；调试估计 3–5 次上卡（起机、发布读回、续写版本、对照），每次 0.6B ≈20–30 min×2 卡 ≈$3–4，合计 ≈$15–25；代码量估计 400–700 行 + 补丁。
      6. 风险：fully_async 在 experimental 目录、接口会变（锁 fork 提交）；trainer 继承旧版训练器，yeto 的 v1 判据钩子（`_compute_old_log_prob` 后接 mismatch 判据）要重挂。
+   - **6.4b 实施取舍（2026-10-09，子 agent 代拍板 + 理由）**：
+     1. 取样粒度：trainer actor 每次只从 MessageQueue 取 1 个样本（一个提示、n 条回答），由 yeto 逐个判定保留或丢弃，凑够 `groups_per_round` 个保留组才组批。理由：verl 的 `_get_samples_from_queue` 一次取满不判版本，逐个取才能在组批前丢弃超限组；改动只在 yeto 子类。
+     2. GRPO 组整体保留或整体丢弃，按组内最旧 token 的版本判定。理由：组内优势要整组算，拆组会改变优势。
+     3. 逐 token 版本段只记"每次调用的版本 + 新增 token 数"（构建期补丁写入 `extra_fields["yeto_resume_calls"]`），不另存 logprob。理由：logprob 已在 `rollout_log_probs` 里；版本段只需切点。token 数之和与回答长度不等时记入 `segment_token_mismatches`，不报错（F5 上卡核对）。
+     4. 声明上限只到 1（`SUPPORT = stage 2, max_policy_age 1`）。理由：复核文档只测上限 1；上卡通过后再放宽。
+     5. 驱动模式记为 `partitioned-serial`（放置 `fixed-partition`）。理由：rollouter 与 trainer 分卡；驱动仍按"生成→训练→发布"顺序调用，rollouter 的后台生成由 verl 限流，不算驱动层重叠。
+     6. rollouter 的 `fit()` 在第一次 yeto 发布（v0）之后才启动；verl 初始化时自带的一次权重推送（param 0）保留，yeto 的 v0 发布再推一次，`VersionMap` 记录 (0, 0)。理由：少改 verl 初始化流程。
+     7. 多岛续训：本次不保存 rollouter 在途样本；岛重启时 MessageQueue 内容丢失，新进程的 param version 从 0 重新配对外层版本（`VersionMap` 允许）。理由：设计第 4 条允许"丢弃并上报"；复核文档只跑单岛。
 
 ## Risks / Trade-offs
 - [截止丢弃偏向短轨迹，伤难题学习信号] → 阶段 0 判据含奖励与长度分布对照；偏差过大则阶段 0 只在评测岛或简单任务启用。

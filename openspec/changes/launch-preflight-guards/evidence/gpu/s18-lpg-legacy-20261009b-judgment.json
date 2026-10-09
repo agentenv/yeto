@@ -1,0 +1,86 @@
+{
+ "run": "s18-lpg-legacy-20261009b",
+ "sched": "legacy",
+ "steps": 4,
+ "criteria": {
+  "P1_preflight_ran_before_cloud": true,
+  "P2_override_event_island1_only": true,
+  "P3_island1_refused_with_both_hashes": true,
+  "P4_only_that_connection": true,
+  "P5_legacy_n_a": "not applicable: fixed roster stops the run by design (N14 report)",
+  "P6_dashboard_marks_island1": true
+ },
+ "facts": {
+  "preflight_threads_local": [
+   [
+    "2787",
+    "2800"
+   ]
+  ],
+  "preflight_memory_local": [
+   [
+    "0",
+    "H100",
+    "36.6",
+    "71.3",
+    "OK"
+   ],
+   [
+    "1",
+    "H100",
+    "36.6",
+    "71.3",
+    "OK"
+   ]
+  ],
+  "preflight_threads_head": [
+   [
+    "466",
+    "2800"
+   ]
+  ],
+  "negative_banner": true,
+  "override_events": [
+   {
+    "island": 1,
+    "overrides": [
+     {
+      "island": 1,
+      "key": "rl_lr_schedule",
+      "name": "学习率调度",
+      "new": "constant",
+      "old": "linear"
+     }
+    ]
+   }
+  ],
+  "refusal_lines": [
+   "session mismatch (HELLO refused, session keeps running): expected session_contract_hash=fa63f5c56b848153e5c907ab7d7622393d40ddefdf7530d55b65cdcf0411eb39 layout_fingerprint=f1c29481efeffd57ff1451a1e510ab088b2fdb082e01341d6313140ccf03b8b3 dtype=1 fragments=1, got session_contract_hash=43199ac85cc8201bc929bed77ec73466676a56e36a2aabb8925ac1caff8f9d32 layout_fingerprint=f1c29481efeffd57ff1451a1e510ab088b2fdb082e01341d6313140ccf03b8b3 dtype=1 fragments=1",
+   "session mismatch (HELLO refused, session keeps running): expected session_contract_hash=fa63f5c56b848153e5c907ab7d7622393d40ddefdf7530d55b65cdcf0411eb39 layout_fingerprint=f1c29481efeffd57ff1451a1e510ab088b2fdb082e01341d6313140ccf03b8b3 dtype=1 fragments=1, got session_contract_hash=43199ac85cc8201bc929bed77ec73466676a56e36a2aabb8925ac1caff8f9d32 layout_fingerprint=f1c29481efeffd57ff1451a1e510ab088b2fdb082e01341d6313140ccf03b8b3 dtype=1 fragments=1 le",
+   "session mismatch (HELLO refused, session keeps running): expected session_contract_hash=fa63f5c56b848153e5c907ab7d7622393d40ddefdf7530d55b65cdcf0411eb39 layout_fingerprint=f1c29481efeffd57ff1451a1e510ab088b2fdb082e01341d6313140ccf03b8b3 dtype=1 fragments=1, got session_contract_hash=43199ac85cc8201bc929bed77ec73466676a56e36a2aabb8925ac1caff8f9d32 layout_fingerprint=f1c29481efeffd57ff1451a1e510ab088b2fdb082e01341d6313140ccf03b8b3 dtype=1 fragments=1\",\""
+  ],
+  "syncer_lines_after_refusal": 10,
+  "syncer_fatal_lines": [],
+  "island0_refused": false,
+  "island0_local_rounds": [],
+  "island0_finalized": false,
+  "island1_local_rounds": [],
+  "dashboard_cards": {
+   "0": null,
+   "1": {
+    "label": "负例岛：学习率调度 linear→constant",
+    "overrides": [
+     {
+      "key": "rl_lr_schedule",
+      "name": "学习率调度",
+      "old": "linear",
+      "new": "constant"
+     }
+    ]
+   }
+  },
+  "gpu_names": []
+ },
+ "missing_evidence": [],
+ "verdict": "PASS"
+}

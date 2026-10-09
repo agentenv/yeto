@@ -274,3 +274,78 @@ def test_island_entry_modules_run_the_guard(module):
     source = open(importlib.util.find_spec(module).origin, encoding="utf-8").read()
     main_block = source[source.index('if __name__ == "__main__":'):]
     assert "check_island_credentials()" in main_block
+
+
+# --------------------------------------------------------------------------- merge with 7.7c / verl fully_async
+
+def test_hello_wire_order_body_then_compat_trailer_then_mac():
+    """docs/PROTOCOL.md "HELLO authentication": the compat_group trailer is part
+    of the MACed body; the 32-byte MAC is last."""
+    import struct
+
+    from yeto.protocol import HELLO_COMPAT_MAGIC, encode_hello
+
+    body = encode_hello(0, DTYPE_F32, _layout(), 0, 1, compat_group="nvidia-h100")
+    trailer = HELLO_COMPAT_MAGIC + struct.pack("<I", 11) + b"nvidia-h100"
+    assert body.endswith(trailer)
+    sealed = seal_hello(body, b"k")
+    assert len(sealed) == len(body) + 32 and sealed[:len(body)] == body
+    assert sealed[-32:] == hmac.new(b"k", HELLO_MAC_DOMAIN + body, hashlib.sha256).digest()
+    forged = body.replace(b"nvidia-h100", b"nvidia-h200")
+    assert seal_hello(forged, b"k")[-32:] != sealed[-32:]
+
+
+def test_legacy_hmac_with_compat_group_end_to_end(syncer_binary, tmp_path):
+    port = _port()
+    process = _syncer(syncer_binary, port, tmp_path, key="k3y")
+    try:
+        contract = session_contract_hash(layout_fingerprint(_layout()), GOOD)
+        client = SyncerClient(("127.0.0.1", port), 0, _layout(), dtype=DTYPE_F32, num_streams=0,
+                              connect_timeout=10, session_contract_hash=contract, max_reconnects=0,
+                              hmac_key=b"k3y", compat_group="nvidia-h100")
+        client.start()
+        try:
+            client.send_init(0, pack_tensor(torch.zeros(2), DTYPE_F32))
+            assert _wait_item(client.drain_updates).version == 0
+        finally:
+            client.close()
+    finally:
+        _stop(process)
+
+
+def test_verl_ray_runtime_env_forwards_island_key_not_cloud_credentials(monkeypatch):
+    import sys
+    import types
+
+    pkg = types.ModuleType("verl.trainer.constants_ppo")
+    pkg.get_ppo_ray_runtime_env = lambda _x: {"env_vars": {}}
+    for name in ("verl", "verl.trainer"):
+        monkeypatch.setitem(sys.modules, name, sys.modules.get(name) or types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "verl.trainer.constants_ppo", pkg)
+    # verl_main imports ray at module level; a stub never starts Ray.
+    ray_stub = types.ModuleType("ray")
+    ray_stub.remote = lambda *a, **k: (lambda cls: cls)
+    monkeypatch.setitem(sys.modules, "ray", sys.modules.get("ray") or ray_stub)
+    # setitem + delitem: teardown restores the original entry (or its absence).
+    monkeypatch.setitem(sys.modules, "yeto.rl.adapters.verl.verl_main", None)
+    monkeypatch.delitem(sys.modules, "yeto.rl.adapters.verl.verl_main")
+    from yeto.rl.adapters.verl import verl_main
+    monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "k3y")
+    monkeypatch.setenv("MODAL_TOKEN_SECRET", "x")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "y")
+    env = verl_main._runtime_env()["env_vars"]
+    assert env["YETO_ISLAND_HMAC_KEY"] == "k3y"
+    assert not set(env) & guard.CLOUD_CREDENTIAL_ENV_NAMES
+
+
+@pytest.mark.parametrize("path,needle", [
+    ("yeto/rl/adapters/verl/verl_main.py", "def _plan_and_ray"),
+    ("yeto/rl/adapters/verl/verl_main.py", "class YetoTaskRunner"),
+    ("yeto/rl/adapters/verl/fully_async_runner.py", "class YetoFullyAsyncTaskRunner"),
+])
+def test_verl_paths_run_the_guard(path, needle):
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / path).read_text()
+    after = source[source.index(needle):]
+    assert "check_island_credentials()" in after[:600]
