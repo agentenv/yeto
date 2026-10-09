@@ -1226,6 +1226,10 @@ def resolve_default_rl_image(args) -> None:
     except backends.UnknownBackend as exc:
         raise ValueError(str(exc)) from None
     if getattr(args, "rl_image", None) is None:
+        flags = _rl_backend_module(args, "launch_flags")
+        if getattr(flags, "DEFAULT_RL_IMAGE", None):  # rl-verl-backend: Modal-built engine image
+            args.rl_image = flags.DEFAULT_RL_IMAGE
+            return
         from .rl import default_rl_image
 
         args.rl_image = default_rl_image(getattr(args, "rl_engine", "ports"))
@@ -1516,6 +1520,12 @@ def _rl_miles_function(
     parts = value.split(".")
     if len(parts) < 2 or any(not part.isidentifier() for part in parts):
         raise ValueError(f"{flag} must be package.module.function")
+
+
+def _rl_backend_image_ok(args) -> bool:
+    """A backend may accept its own --rl-image form (verl: ``verl-build:<commit>``)."""
+    check = getattr(_rl_backend_module(args, "launch_flags"), "rl_image_ok", None)
+    return bool(check and check(getattr(args, "rl_image", None) or ""))
 
 
 def _rl_backend_module(args, role: str):
@@ -2678,7 +2688,7 @@ def _prepare_rl_args(
     _rl_callable(args.reward_function, "--reward-function", required=True)
     if not re.fullmatch(
         r"docker:[^\s@]+@sha256:[0-9a-fA-F]{64}", args.rl_image or ""
-    ):
+    ) and not _rl_backend_image_ok(args):
         raise ValueError(
             "--rl-image must be docker:<repository>@sha256:<64 hex digest>"
         )
@@ -3921,9 +3931,12 @@ def make_miles_island_task(
         )
     from .rl.miles_overlay import resolve_overlay
 
-    miles_setup, sglang_setup = _miles_source_setup(
-        getattr(args, "rl_engine", "ports"), resolve_overlay(args)
-    )
+    if getattr(_rl_backend_module(args, "launch_flags"), "NEEDS_MILES_SOURCE", True):
+        miles_setup, sglang_setup = _miles_source_setup(
+            getattr(args, "rl_engine", "ports"), resolve_overlay(args)
+        )
+    else:  # rl-verl-backend: the engine image carries its own pinned source
+        miles_setup = sglang_setup = ": # no Miles/SGLang checkout for this backend"
     model = resolve(args.model)
     if is_local_reference(model):
         prefetch = ": # local model; no Hub prefetch"
@@ -4129,7 +4142,7 @@ def make_miles_island_task(
             '  RAY_ADDRESS="$MASTER_ADDR:6379" '
             f"PYTHONPATH={island_pythonpath}$HOME/sglang/python:$HOME/sky_workdir{island_megatron_path}"
             "${PYTHONPATH:+:$PYTHONPATH} "
-            f"{getattr(args, 'rl_learner_launch_prefix', '')}python3 -m yeto.rl.adapters.miles.island_entry{flags}"
+            f"{getattr(args, 'rl_learner_launch_prefix', '')}python3 -m {_rl_backend_module(args, 'launch_flags').ISLAND_ENTRY_MODULE}{flags}"
             f"{_island_post_cmd(args)}\n"
             "else\n"
             # rl-multinode-island D1: the trap is armed before the join loop so a
@@ -7548,7 +7561,7 @@ def dry_run_plan(args) -> dict:
                 args, spec, learner_id, len(specs) + external, "$SYNCER_ADDR"
             )
             entry["learner_command"] = next(
-                (line.strip() for line in task.run.splitlines() if "yeto.rl.adapters.miles.island_entry" in line),
+                (line.strip() for line in task.run.splitlines() if _rl_backend_module(args, "launch_flags").ISLAND_ENTRY_MODULE in line),
                 None,
             )
         islands.append(entry)

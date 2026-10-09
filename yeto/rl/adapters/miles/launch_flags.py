@@ -22,3 +22,8 @@ def bundle_map_flag(bundle_map: Mapping[str, Sequence[int]]) -> str:
 def cross_node_flags(allow_cross_node_tp: bool, allow_cross_node_engine_tp: bool) -> str:
     return ((" --rl-allow-cross-node-tp" if allow_cross_node_tp else "")
             + (" --rl-allow-cross-node-engine-tp" if allow_cross_node_engine_tp else ""))
+
+
+# Module the launcher runs on every island node (rl-verl-backend: per backend).
+ISLAND_ENTRY_MODULE = "yeto.rl.adapters.miles.island_entry"
+NEEDS_MILES_SOURCE = True

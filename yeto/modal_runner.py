@@ -94,7 +94,7 @@ MODAL_FULL_NODE: dict[str, int] = {"H100": 8, "H200": 8, "B200": 8, "A100-80GB":
 TAPE_MOUNT = "/yeto-tape"
 TAPE_SOURCE_DIR = "/root/yeto-output"
 TAPE_SYNC_INTERVAL_S = 30.0
-TAPE_SUFFIXES = (".jsonl", ".json", ".csv", ".log", ".txt")
+TAPE_SUFFIXES = (".jsonl", ".json", ".csv", ".log", ".txt", ".pt")  # .pt: verl raw log-prob dumps
 TAPE_MAX_FILE_BYTES = 256 * 1024 * 1024
 MODAL_CPU_CORES_PER_GPU = 4
 MODAL_MEMORY_GIB_PER_GPU = 32
@@ -259,7 +259,8 @@ class ModalIslandConfig:
     def validate(self) -> None:
         validate_modal_shape(self.gpu, self.gpus_per_node, self.num_nodes)
         if self.training_mode == "rl":
-            if not self.image_ref or not re.fullmatch(r"[^\s@]+@sha256:[0-9a-fA-F]{64}", self.image_ref):
+            if not self.image_ref or not (re.fullmatch(r"[^\s@]+@sha256:[0-9a-fA-F]{64}", self.image_ref)
+                                          or ENGINE_BUILT_IMAGE_RE.fullmatch(self.image_ref)):
                 raise ValueError(
                     "RL islands on Modal must pin the Miles image by digest "
                     "(<repository>@sha256:<64 hex>), the same digest --rl-image gives sky"
@@ -308,8 +309,16 @@ class ModalIslandConfig:
         return cls(**data)
 
 
+# ``<backend>-build:<40-hex commit>``: an engine image Modal builds from the
+# backend's own recipe (``yeto.rl.engine.backends`` role ``image``), pinned by the
+# engine commit and the engine's lock file; there is no registry digest.
+ENGINE_BUILT_IMAGE_RE = re.compile(r"(?P<backend>[a-z][a-z0-9]*)-build:(?P<commit>[0-9a-f]{40})")
+
+
 def image_ref_from_rl_image(rl_image: str) -> str:
     """`--rl-image docker:<repo>@sha256:<hex>` -> the registry reference."""
+    if ENGINE_BUILT_IMAGE_RE.fullmatch(rl_image or ""):
+        return rl_image  # rl-verl-backend: built on Modal from a pinned engine commit
     ref = rl_image[len("docker:"):] if rl_image.startswith("docker:") else rl_image
     if not re.fullmatch(r"[^\s@]+@sha256:[0-9a-fA-F]{64}", ref):
         raise ValueError(f"--rl-image must pin a digest (docker:<repo>@sha256:<64 hex>), got {rl_image!r}")
@@ -692,7 +701,12 @@ class ModalOps:
 
     def build_image(self, cfg: ModalIslandConfig):
         modal = self._modal()
-        if cfg.training_mode == "rl":
+        built = ENGINE_BUILT_IMAGE_RE.fullmatch(cfg.image_ref or "") if cfg.training_mode == "rl" else None
+        if built:
+            from yeto.rl.engine import backends
+
+            image = backends.module("image", built["backend"]).modal_image(modal, built["commit"])
+        elif cfg.training_mode == "rl":
             creds = cfg.registry_creds or (
                 registry_credentials(cfg.image_ref, os.environ) if cfg.registry_login else None
             )
