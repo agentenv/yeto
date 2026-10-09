@@ -190,6 +190,9 @@ _PINS_0AF62F4D_PLUS = frozenset({
     # efbbc63ea = 8bc52237a + s18-abort-discard-stats (rollout/sglang_rollout.py abort tallies
     # discarded groups/samples/response tokens): rollout bookkeeping only, no loss path.
     "efbbc63ea0e8c6dcbc200ad5df5bc56badfce7bf",
+    # 2f7871fb2 = efbbc63ea + inference_rollout_train.abort tally / failed surplus group
+    # tolerated: rollout bookkeeping only, no loss path.
+    "2f7871fb2e80d37420b16ef81f001c7b0ba8e32e",
 })
 MILES_DECLARED_PINS: dict[str, frozenset[str]] = {
     # before 0af62f4d the LoRA bridge ignored calculate_per_token_loss (g1c:
