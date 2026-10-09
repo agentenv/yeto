@@ -200,3 +200,8 @@ tests/test_rl_inter_island_ledger.py tests/test_rl_inter_island_status.py tests/
 - legacy 逐行核实：相对 9e37b3c4^，legacy 相关文件 state/merge/iso_worker 零改动，server.rs 只新增（字段、elastic 提前返回分支、legacy 不追加字节的契约编码），无删除；legacy 契约哈希黄金值 b904a25c… 不变。无需修回。0.8a 勾选。
 - 新增 Rust 单测 6 项（5 项 legacy 等价 + 1 项 Python 账本黄金回放），`cargo test --manifest-path syncer/Cargo.toml`（即 CI 的 rust 任务命令）145 通过。CI 只跑 cargo test；本机未装 rustfmt/clippy，fmt/clippy 未跑（CI 也不跑）。
 - 0.8 仍未勾：>4 GiB 帧、真实学习者接入、分片 RDA/ISO/HeLoCo 合并未做。
+
+## S17 N6 — tasks 0.10 离线 IS 比（未完成）
+- 证据：`evidence/is-ratio-lag0-verl-s16.json`、`evidence/is-ratio-offline-README.md`；脚本 `tools/offline_is_ratio_compare.py`，单测 3 passed。
+- 已验证：lag 0（训推不一致）下 TIS/IcePop/M2PO 截断比例均 <2e-5、ESS/N≈0.998，无差异。
+- 未验证：lag 1–4（无已存数据）；需下次上卡按 README 方案顺带采集后重跑。默认值暂 `tis`。
