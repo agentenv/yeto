@@ -1,0 +1,41 @@
+{
+ "a_acquire_s": 1.048,
+ "a_after_destroy": "gone",
+ "a_alive_s": 304.579,
+ "a_cost_usd": 0.005346,
+ "a_cpus": 1,
+ "a_describe_after_park": "live",
+ "a_first": {
+  "exit_code": 0,
+  "output": "before-suspend\n"
+ },
+ "a_memory_mb": 2048,
+ "a_parked_cost_usd": 0.005267,
+ "a_parked_s": 300.1,
+ "a_sandbox_id": null,
+ "a_second": {
+  "exit_code": 0,
+  "output": "before-suspend\n"
+ },
+ "a_state_kept": true,
+ "b_after_destroy": "gone",
+ "b_alive_s": 62.101,
+ "b_cost_usd": 0.00109,
+ "b_expired": true,
+ "b_metrics": {
+  "suspend_expired": 1,
+  "suspend_retried_turns": 0,
+  "suspended_seconds": 60.07380636781454,
+  "suspensions": 1
+ },
+ "b_reason": "CodexSuspendExpired: suspended trajectory not continued within 60 s",
+ "b_sandbox_id": null,
+ "cost_per_parked_sandbox_minute_usd": 0.001053,
+ "ended_utc": "2026-10-09T07:32:50Z",
+ "expire_s": 60.0,
+ "idle_timeout_s": 600,
+ "park_s": 300.0,
+ "started_utc": "2026-10-09T07:26:43Z",
+ "task": "cancel-async-tasks",
+ "ttl_s": 1800
+}
