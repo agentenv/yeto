@@ -776,3 +776,58 @@ def test_live_cursor_unwraps_the_miles_ray_worker_handle(caplog):
         caplog.clear()
         assert pool(object()).live_data_cursor() == (None, None)
         assert "neither a local executor nor a Ray actor" in caplog.text
+
+
+def test_stuck_rebuild_is_bounded_by_deadline_plus_recovery(tmp_path):
+    """4.5 (S17 ruling): REBUILDING_TRAINER has a deadline. A rebuilder that never
+    returns must not hang the island: after deadline + timeouts.recovery the
+    controller enters RECOVERY_REQUIRED (trainer state unknown) and the driver stops."""
+    import threading
+    import time
+
+    from yeto.rl.engine.controller import Timeouts
+
+    driver, ctl, engine, trained, log = _island(tmp_path)
+    ctl.timeouts = Timeouts(recovery=0.3)
+    ctl._wall = time.time  # real clock: the bound is enforced in wall time
+    release = threading.Event()
+
+    def stuck(driver_, *, epoch, cut_id):
+        release.wait(30)  # simulated hang (NCCL / checkpoint load never returns)
+        return {"outcome": "RESTORED"}
+
+    ctl.trainer_rebuilder = stuck
+    _at(driver, 1, lambda: ctl.request_trainer_rebuild("rb", 0, 0.2))
+    t0 = time.monotonic()
+    with pytest.raises(Exception):
+        driver.run()
+    took = time.monotonic() - t0
+    release.set()
+    assert took < 10, took
+    assert ctl.recovery_required and "deadline" in ctl.recovery_required
+    assert ctl.status("rb")["phase"] == RECOVERY_REQUIRED
+    recs = list(ctl.journal.records)
+    rec = [r for r in recs if "rebuild_deadline" in json.dumps(r)]
+    assert rec, "request-level terminal record names the cause"
+    with pytest.raises(Rejected, match="RECOVERY_REQUIRED"):
+        ctl.request_trainer_rebuild("again", 0, 60)
+
+
+def test_slow_but_finished_rebuild_within_recovery_budget_is_late_not_failed(tmp_path):
+    import time
+
+    from yeto.rl.engine.controller import Timeouts
+
+    driver, ctl, engine, trained, log = _island(tmp_path)
+    ctl.timeouts = Timeouts(recovery=5.0)
+    ctl._wall = time.time
+    inner = ctl.trainer_rebuilder
+
+    def slow(driver_, *, epoch, cut_id):
+        time.sleep(0.4)
+        return inner(driver_, epoch=epoch, cut_id=cut_id)
+
+    ctl.trainer_rebuilder = slow
+    _at(driver, 1, lambda: ctl.request_trainer_rebuild("rb", 0, 0.2))
+    driver.run()
+    assert ctl.status("rb")["phase"] == SUCCEEDED
