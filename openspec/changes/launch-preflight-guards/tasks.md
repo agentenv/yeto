@@ -51,4 +51,5 @@
   - 未完成（仍未勾）：legacy、salt 两跑通过；落后上限首跑失败（P3），重跑 s18-lpg-age-20261009b 失败（证据不全，P4 缺 syncer 日志），其余判据通过。详见 evidence/n12-n14-plan.md 末节。是否再跑由主 agent 定。
 
 ## 5. 收尾
-- [ ] 5.1 本机安全测试集全绿（命令见 fix-known-red-tests），`openspec validate launch-preflight-guards` 通过（验证：命令输出存 evidence）
+- [x] 5.1 本机安全测试集全绿（命令见 fix-known-red-tests），`openspec validate launch-preflight-guards` 通过（验证：命令输出存 evidence）
+  - 完成：evidence/local-suite-20261009.txt。5115 通过、47 跳过、1 失败；失败的 1 例被测试脚本自带的线程闸门挡住（本机用户线程 3999），放宽后该文件 9 例通过。openspec validate 通过。
