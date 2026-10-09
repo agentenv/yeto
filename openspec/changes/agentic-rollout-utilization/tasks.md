@@ -35,7 +35,9 @@
   - 证据：`PolicyAgeGovernor`（告警 0.2、回退 0.5 默认）；driver `_govern_policy_age` 发 `rl_policy_age_warning` / `rl_policy_age_fallback`，回退后 `_max_policy_age()` 恒 0 并调用引擎可选动词 `set_max_policy_age(0)`；`tests/test_rl_version_segments.py::test_governor_warns_then_falls_back_and_never_goes_up`、`::test_driver_injected_high_truncation_falls_back_to_zero`。阈值默认值为本次拟定，阶段 2 上卡后按实测调整。
 
 ## 4. 阶段 2：单轮任务续跑（门槛：阶段 0 达标 + N15 偏差已定位）
-- [ ] 4.1 Miles 单轮路径开启 partial-rollout，接入版本段记账（验证：假引擎单测，跨版本续跑样本版本段正确）
+- [x] 4.1 Miles 单轮路径开启 partial-rollout，接入版本段记账（验证：假引擎单测，跨版本续跑样本版本段正确）
+  - 证据（分支 s18-aru-stage2）：Miles 声明阶段 2、上限至多 1（`yeto/rl/adapters/miles/policy_age.py` `SUPPORT`），只限单轮——带 `--custom-agent-function-path`/`--custom-generate-function-path` 或 `--recompute-logprobs-via-prefill` 时 launcher 起机前与岛内都报错（agentic 多轮为阶段 3）；`--partial-rollout` 由 `--rl-max-policy-age` 推导（`translate_run_config(max_policy_age=…)`，算法容许值须 ≥ 上限），不再带 `--mask-offpolicy-in-partial-rollout`：旧版本 token 留在损失里由 TIS 修正（设计决定 3），且 Miles arguments.py:76 在 class-based rollout 路径上遇到该开关直接报错（阶段 1 的推导若真开会起不来）。续跑接线 `yeto/rl/adapters/miles/carry_over.py`：`--buffer-filter-path` 在上限 >0 时让最旧 token 落后 ≤ 上限的缓冲组续跑、更旧或版本未知的组丢弃并计数；`group_record` 给出版本段 `policy_versions` 与最旧版本令牌，driver 按窗口核对；每轮 `rl_rollout_carry_over`（续入组/条/token、超限丢弃、退回缓冲组数、跨版本 token 数）；跨版本截断比例由轮末对含旧 token 的样本做一次当前版本预填充、按 TIS 上下界估计（推理侧估计，Miles TIS 只报全部 token 的截断比例），喂给 3.5 回退器；回退经元数据汇聚点把岛内上限降到 0；轨迹事件带 `started_rollout_id`、`policy_versions`（看板 #160 字段名）。测试 `tests/test_rl_miles_carry_over.py`（11 项：假引擎三轮——v3 截止、v4 续跑得版本段 [3,4]、v5 超限丢弃 6 token；版本未知丢弃；上限 0 元数据字节不变与旧缓冲规则；已知比值截断估计 0.5；回退通道；起机前拒绝 agentic；命令行只多 `--partial-rollout`；driver 事件与回退；轨迹字段）、`tests/test_rl_policy_age.py`（更新）。默认 0 只有插件源码哈希变化（hash-migration.md）。
+  - 未接（报主 agent）：续训切点"在途轨迹"段的 Miles 接线——Miles 数据源 `state_dict` 不保存缓冲，上限 >0 时切点仍按 `buffer_length≠0` 拒绝（失败即关闭，不静默丢）；需要时另做"切点时导出缓冲组 token/版本段/生成概率、恢复时注入"。
 - [ ] 4.2 GPU 对照：小模型单轮任务，上限 0 vs 1，比较每轮时长、截断比例、奖励曲线（上卡前复核与预算报批；验证：判据写入本组并附证据路径）
 
 ## 5. 阶段 3：agentic 多轮续跑（门槛：阶段 2 达标 + FN 前缀重算代价已测）
@@ -55,8 +57,12 @@
 - [x] 6.3 阶段 1：verl 适配层按落后上限声明能力，0 时 verl 命令行标准样本不变；不支持的阶段启动前报错（验证：标准样本比对与报错单测）
   - 证据：`yeto/rl/adapters/verl/policy_age.py`（`SUPPORT` 阶段 1、上限 0；`policy_age_overrides(0)` 为空）；`verl/entry.py` 的 `max_policy_staleness` 改为取自 `SUPPORT`；后端注册表新增角色 `policy_age`；测试：`tests/test_rl_verl_policy_age.py::test_verl_declares_stage_one_and_limit_zero_overrides_are_empty`、`::test_verl_command_line_unchanged_at_limit_zero`、`tests/test_rl_policy_age.py::test_launcher_refuses_an_unsupported_limit_before_launch[verl]`。仓库内无 verl 命令行标准样本文件，以 `build_overrides` 逐项相等代替。
 - [ ] 6.4 阶段 2：由落后上限推导 `staleness_threshold` 与 `partial_rollout`，样本版本段接入 yeto 账本（验证：CPU 单测；GPU 对照与 4.2 合并在同一次上卡，单岛 verl 小模型上限 0 vs 1）
+  - **拆分（10-09 主 agent 代用户拍板）**：fully_async 是另一套训练栈（`fully_async_main.py:36-220`：FullyAsyncTrainer 继承旧版 SeparateRayPPOTrainer，rollouter/trainer 两个常驻 actor 各自 fit()、MessageQueue 交换、CheckpointEngineManager 推权重、推理与训练分卡），接入等同重写 verl 适配层并需 2 卡多轮调试，超出 $45 与本阶段范围；用户要求 verl 同步推进，故翻译层先落地、接入单独设计后再批。原 6.4 改为下面 6.4a + 6.4b；6.5 依赖 6.4b；阶段 3 门槛只按 Miles 判定。
   - 子要求（6.1 读码所得，10-09 主 agent 拍板列入）：(a) verl 前缀续写发生在推理服务客户端内、对 agent loop 不可见——适配层需自行补记逐段版本与生成概率；(b) verl 版本只有每轨迹 min/max_global_steps——翻译为版本段边界，判定按最旧版本；(c) `staleness_threshold` 只按样本数限流、不比版本号——超限丢弃由 yeto 按版本段判定，不能依赖 verl；(d) trainer 本地 `current_param_version` 与外层 outer version 错位——多岛时适配层要做映射并约束检查点/日志步号。
-- [ ] 6.5 阶段 3：verl 多轮工具调用续跑（若 6.1 确认原生支持则复用，否则按第 5 组同样规则实现），GPU 对照与 5.5 合并上卡（验证：证据路径）
+- [x] 6.4a 翻译层（纯函数，verl 仍声明阶段 1、上限 >0 起机前照样报错，不接 fully_async、不上卡）（验证：CPU 单测）
+  - 证据：`yeto/rl/adapters/verl/fully_async_translate.py`，对应四个子要求：(a) `provenance_from_calls`——按每次续写调用的版本与新增 token 生成概率重建逐 token 版本段；(b) `versions_from_global_steps`——每轨迹 min/max 翻成区间内全部外层版本、按最旧判定；(c) `staleness_threshold_for`（上限 N → s=N−1，fully_async 本身至少落后 1 版）、`queue_version_lag`（排队样本最多落后 floor(s)+1 版，要求 trigger_parameter_sync_step=1）、`fully_async_overrides`、`judge_trajectory`（超限丢弃由 yeto 按版本段判定）；(d) `VersionMap`——trainer 本地 current_param_version ↔ outer version 双向映射、矛盾或倒退报错、检查点/日志步号取外层版本。测试 `tests/test_rl_verl_fully_async_translate.py`（5 项）。待 6.4b 真机核实：服务端 `extra_fields["global_steps"]` 是否即推送权重时的 current_param_version。
+- [ ] 6.4b verl fully_async 适配路径：先出设计（端口映射到 IslandDriver 每轮驱动、LoRA 导出/应用/发布读回改走 checkpoint engine、版本映射、卡数 ≥2、调试预算），写入 design 第 9 条"6.4b"小节，实施另行报批
+- [ ] 6.5（依赖 6.4b）阶段 3：verl 多轮工具调用续跑（若 6.1 确认原生支持则复用，否则按第 5 组同样规则实现），GPU 对照与 5.5 合并上卡（验证：证据路径）
 
 ## 7. dashboard 可视化（生成阶段利用率；只改看板读取与显示，不改训练代码）
 - [x] 7.1 每轮"截止丢弃 / 续跑"表：提交组数、目标组数、丢弃组数、丢弃条数、丢弃 token 数、过滤组数（来自 `rl_rollout_cutoff`）；字段为空显示"未知"而不是 0（验证：reducer 单测含 None 字段；JS 冒烟断言出现"未知"）

@@ -36,6 +36,15 @@
    - 与 yeto 多岛同步的冲突点：权重版本是 trainer 本地 `current_param_version`（`verl/experimental/fully_async_policy/fully_async_trainer.py:143, 687, 841`，也用于检查点目录与日志步），与外层 outer version 含义错位；rollouter 的 `global_steps` 是样本序号（`fully_async_rollouter.py:448, 711-715, 866-886`），续训时按固定比例推算；权重只经 `CheckpointEngineManager.update_weights` 从 actor 单向推送并先中止全部请求（`checkpoint_engine/base.py:510+`），外部同步器改写权重会绕过版本标记；`MessageQueue`（`message_queue.py:27-105`）不带版本检查。结论：verl 多轮工具续跑"原生可用"（模型生成层面），但版本记录要由 yeto 补成逐段，且外层版本须映射到 `current_param_version`。
    - **10-09 主 agent 代用户拍板**：verl 同步模式的截止不做（原拟 6.2b 构建期补丁，读码后撤回）：需跨 worker 计数并改同步训练器批次假设，代价大且只服务阶段 0 测量，阶段 0 数据用 Miles A/B 已足够；verl 的凑够即截止/续跑并入 6.4，走 fully_async 路径。阶段 2 接入时要在适配层翻译/约束的点（6.4 子要求）：partial_rollout 前缀续写发生在推理服务内、对 agent loop 不可见；版本只有每轨迹 min/max；staleness_threshold 按样本数限流不比版本号；trainer 本地版本号与 outer version 错位。
    - 同步模式：`rollout.over_sample_rate`（`verl/workers/config/rollout.py:178-179`）只有定义、fork 内无使用处，同步模式没有可用的多发截止；逐样本计时 `generate_sequences`/`tool_calls`/`compute_score`（`agent_loop.py:82-83, 1135, 1281-1302`）可直接翻译为统一字段。
+   - **10-09 主 agent 代用户拍板：6.4 拆为 6.4a（翻译层，已做）+ 6.4b（fully_async 适配路径，本小节设计，实施另批）**。理由：fully_async 是另一套训练栈（FullyAsyncTrainer 继承旧版 SeparateRayPPOTrainer，不是 yeto 现用的 v1 PPOTrainerSync），接入等同重写 verl 适配层并需 2 卡多轮调试，超出阶段 2 的 $45 与范围；用户要求 verl 同步推进，故翻译层先落地、接入单独设计后再批。阶段 3 门槛只按 Miles 判定；6.5 依赖 6.4b。
+   - **6.4a 翻译层**（`yeto/rl/adapters/verl/fully_async_translate.py`）：上限 N→`staleness_threshold = N−1`（fully_async 生成与训练重叠，本身至少落后 1 版；`trigger_parameter_sync_step=1` 时排队样本最多落后 floor(s)+1 版）、`partial_rollout=True`、一轮=一个 verl 参数版本（`require_batches × ppo_mini_batch_size = 每轮样本数`）；`VersionMap` 记录每次发布的 current_param_version↔outer version，检查点/日志步号用外层版本；每轨迹 min/max_global_steps→区间内全部外层版本、按最旧判定；按续写调用记录重建逐 token 版本段；超限由 yeto 丢弃。
+   - **6.4b 设计（草案，待批）**：
+     1. 驱动方式：不跑 fully_async 自带的两个 `fit()` 循环。保留 `FullyAsyncRollouter` 作常驻生成 actor（它的 MessageQueue、按样本数限流、partial_rollout 续写原样用），yeto `IslandDriver` 每轮：`generate` = 从 MessageQueue 取够一轮样本（`_get_samples_from_queue` 的取样逻辑）并用 6.4a 翻成 `RolloutBatchHandle`（组版本段、超限丢弃、计数进 `rl_rollout_carry_over`/`rl_rollout_cutoff` 同名字段）；`train_step` = 调 FullyAsyncTrainer 的 `fit_step` 中"算旧 logprob→优势→更新"三段（不含其 `_fit_update_weights`）；`publish` = yeto 发布后再调 `checkpoint_manager.update_weights(global_steps=param_version)`，并 `VersionMap.record(param_version, outer_version)`；rollouter `reset_staleness` 在发布后由 yeto 调。
+     2. LoRA：fully_async trainer 在 LoRA 时 `ref_in_actor`（`fully_async_trainer.py:96-100`）；yeto 的 LoRA 导出/应用（`ports_impl.VerlPolicyState`，经 `__ray_call__` 读写 FSDP2 PEFT 权重）要改为对 trainer 侧 actor worker 组执行；发布读回（`vllm_readback`）改为对 rollouter 的 vLLM 副本执行，确认 checkpoint engine 推 LoRA 后副本上能读回同一哈希。外部同步器改写权重必须走 `update_weights`，否则绕过版本标记（6.1 读码）。
+     3. 版本：服务端 `extra_fields["global_steps"]` 即推送时的 current_param_version——须真机核实（6.4a 假设）；续写调用记录（6.4a (a)）需在 `FullyAsyncLLMServerClient.generate` 外包一层（yeto 子类或构建期补丁，`patch_verl.py`），每次调用记下版本与新增 logprob。
+     4. 多岛：每岛内部 MessageQueue 只在岛内用；跨岛仍按 outer version 由 yeto 同步服务合并；续训切点需保存 rollouter 在途样本（MessageQueue 内容 + 续写状态）或按 3.3 规则丢弃并上报。
+     5. 卡数与预算：推理与训练分卡，单岛最少 2×H100（rollouter 1 + trainer 1）；调试估计 3–5 次上卡（起机、发布读回、续写版本、对照），每次 0.6B ≈20–30 min×2 卡 ≈$3–4，合计 ≈$15–25；代码量估计 400–700 行 + 补丁。
+     6. 风险：fully_async 在 experimental 目录、接口会变（锁 fork 提交）；trainer 继承旧版训练器，yeto 的 v1 判据钩子（`_compute_old_log_prob` 后接 mismatch 判据）要重挂。
 
 ## Risks / Trade-offs
 - [截止丢弃偏向短轨迹，伤难题学习信号] → 阶段 0 判据含奖励与长度分布对照；偏差过大则阶段 0 只在评测岛或简单任务启用。
@@ -49,7 +58,7 @@
 - 每阶段一个开关档位；默认 0 不变。回退：设回 0 即可；切点里有在途轨迹而以 0 恢复时，丢弃在途轨迹并上报（不报错）。
 - 阶段门槛：
   - 进入阶段 2：阶段 0 生成段中位时长 ≤ 基线 0.7 倍、奖励与长度分布偏差 ≤1 标准差、N15 偏差已定位、默认配置标准样本不变。
-  - 进入阶段 3：阶段 2 截断比例与奖励曲线在小模型上与基线误差内，且 FN 前缀重算代价已测。
+  - 进入阶段 3：阶段 2 截断比例与奖励曲线在小模型上与基线误差内，且 FN 前缀重算代价已测。（10-09 主 agent 代用户拍板：只按 Miles 判定；verl 阶段 2 接入为 6.4b，另批。）
 
 ## Open Questions
 - 沙箱存活上限 600 s 是否合适：等阶段 0 补采的工具耗时分布再调，不影响规格与任务拆分。
