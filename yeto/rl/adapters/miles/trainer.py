@@ -212,6 +212,26 @@ def critic_round_metrics(step_losses: list[dict[str, Any]] | None,
     return out
 
 
+def _own_storage(value: Any) -> Any:
+    """A tensor that owns exactly its own bytes, so pickling it ships only them.
+
+    Pickle (and Ray's serializer) writes a tensor's whole storage, not the view:
+    the critic channel hands over views into one flat fp32 buffer
+    (``tensors_from_flat_owned``), so each of ~300 views shipped the whole
+    ~2.4 GB buffer to the critic rank -- hundreds of GiB in the driver and a
+    hang in ``import_critic_state`` (s19-ppo-g3-20261009a)."""
+
+    import torch
+
+    if not isinstance(value, torch.Tensor):
+        return value
+    value = value.detach()
+    if value.is_contiguous() and value.storage_offset() == 0 and \
+            value.untyped_storage().nbytes() == value.numel() * value.element_size():
+        return value
+    return value.clone(memory_format=torch.contiguous_format)
+
+
 class MilesTrainerGroup:
     def __init__(
         self,
@@ -477,7 +497,7 @@ class MilesTrainerGroup:
             prefix, _, rest = key.partition(":")
             if not prefix.startswith("r") or not rest:
                 raise CriticStateError(f"critic tensor key {key!r} has no rank prefix")
-            by_rank.setdefault(int(prefix[1:]), {}).setdefault("tensors", {})[rest] = value
+            by_rank.setdefault(int(prefix[1:]), {}).setdefault("tensors", {})[rest] = _own_storage(value)
         for entry in by_rank.values():
             entry["sha256"] = critic_weights_sha256(entry["tensors"])
         results = list(self._run(self._critic.run_plugin(IMPORT_CRITIC_TENSORS, {"by_rank": by_rank})))
