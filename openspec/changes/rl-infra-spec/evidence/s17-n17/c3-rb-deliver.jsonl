@@ -1,0 +1,4 @@
+{"action": "island0", "container": "ta-01M4FCX0NTQMC6W93HY2F192JR", "wall": 1791518349.4532835}
+{"action": "write", "request": "rb1", "trigger": ["train", 2], "event_time": 1791518701.8175485, "write_rc": 0, "write_s": 2.02, "read_rc": 0, "read_s": 1.52, "readback": "{\"kind\": \"trainer-rebuild\", \"expected_config_epoch\": 0, \"deadline_s\": 900}", "err": "", "wall": 1791518710.0761776}
+{"action": "confirm", "request": "rb1", "taken": true, "after_s": 13.1, "inbox": "rb1.status.json\n{\"config_epoch\": 0, \"error\": null, \"kind\": \"trainer-rebuild\", \"known\": true, \"phase\": \"VALIDATING\", \"request_id\": \"rb1\", \"target\": null, \"terminal\": false, \"tx_id\": \"tx-0-cf5ecb1130c6-rb1\"}", "wall": 1791518723.2253535}
+{"action": "done", "delivered": [0], "wall": 1791518855.0511365}

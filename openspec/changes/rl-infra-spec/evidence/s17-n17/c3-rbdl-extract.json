@@ -1,0 +1,60 @@
+{"run": "s17-n17-c3-rbdl", "rc": "rc=4", "deliver": ["island0", "write", "confirm", "done"], "injection_lines": [], "tape_reconfig_phases": [], "journal_phases": [["rb1", "VALIDATING", 1791519439.9, ""], ["rb1", "WAIT_SAFE", 1791519439.9, ""], ["rb1", "REBUILDING_TRAINER", 1791519439.9, ""], [null, "RECOVERY_REQUIRED", 1791519739.9, "trainer rebuild exceeded its deadline: still running 60s after the transaction deadline (cut rb-0-fdf3049266af)"], ["rb1", "RECOVERY_REQUIRED", 1791519739.9, "trainer rebuild exceeded its deadline: still running 60s after the transaction deadline (cut rb-0-fdf3049266af)"]], "journal_source": "snapshot /home/michael/work/s1-runs/s17-n17-c3-rbdl/es-snapshots/1791519795-tail.tgz", "rounds_trained": [[0, 1, 2], [1, 2, 4], [2, 3, 6]], "rounds_after_terminal": [], "cursor_monotonic": true, "ledger_kinds": {"prepared": 3, "filtered": 3, "carried_over_report": 3, "optimizer_applied": 3, "outer_recorded": 3}, "optimizer_applied_dups": {}, "consumed_dups": {}, "finalized": false, "terminal": ["rb1", "RECOVERY_REQUIRED", 1791519739.9, "trainer rebuild exceeded its deadline: still running 60s after the transaction deadline (cut rb-0-fdf3049266af)"], "rebuilding_to_terminal_s": 300.0}
+
+   "tx_id": "tx-0-fdf3049266af-rb1",
+   "wall_time": 1791519739.871277
+  },
+  {
+   "cause": "rebuild_deadline",
+   "config_epoch": 0,
+   "deadline_wall": 1791519679.8709908,
+   "error": "trainer rebuild exceeded its deadline: still running 60s after the transaction deadline (cut rb-0-fdf3049266af)",
+   "fork_epoch": 0,
+   "island_record_seq": 8,
+   "kind": "phase",
+   "monotonic": 791.510662188,
+   "phase": "RECOVERY_REQUIRED",
+   "recovery_deadline_wall": 1791519739.8709908,
+   "request_id": "rb1",
+   "scope": "request",
+   "seq": 9,
+   "tx_id": "tx-0-fdf3049266af-rb1",
+   "wall_time": 1791519739.8718877
+  }
+ ],
+ "rounds_trained": [
+  [
+   0,
+   1,
+   2
+  ],
+  [
+   1,
+   2,
+   4
+  ],
+  [
+   2,
+   3,
+   6
+  ]
+ ],
+ "rounds_after_terminal": [],
+ "cursor_monotonic": true,
+ "ledger_kinds": {
+  "prepared": 3,
+  "filtered": 3,
+  "carried_over_report": 3,
+  "optimizer_applied": 3,
+  "outer_recorded": 3
+ },
+ "optimizer_applied_dups": {},
+ "consumed_dups": {},
+ "finalized": false,
+ "terminal": [
+  "rb1",
+  "RECOVERY_REQUIRED",
+  1791519739.9,
+  "trainer rebuild exceeded its deadline: still running 60s after the transaction deadline (cut rb-0-fdf3049266af)"
+ ],
+ "rebuilding_to_terminal_s": 300.0
+}

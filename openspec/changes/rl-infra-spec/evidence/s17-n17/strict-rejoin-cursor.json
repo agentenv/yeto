@@ -1,0 +1,8 @@
+{"run": "s17-n17-strict-20261009a", "code": "main 8a599212", "image": "a7990076 (efbbc63-2fa8801)",
+ "shape": "Nebius CPU head + 2x Modal H100!, Qwen3-0.6B gsm8k LoRA, strict-avg, 6 rounds",
+ "kill": {"island": 1, "after_policy_version": 2, "kill_unix": 1791521898.716092},
+ "cursor_restored": {"island_id": 1, "rollout_id": 2, "source": "base_version",
+                     "data_cursor": {"epoch_id": 0, "sample_group_index": 8, "sample_index": 0, "sample_offset": 8}},
+ "island1_group_index_by_round": {"before_kill": {"0": [0, 1, 2, 3], "1": [4, 5, 6, 7]},
+                                  "after_relaunch": {"2": [8, 9, 10, 11], "3": [12, 13, 14, 15], "4": [16, 17, 18, 19], "5": [20, 21, 22, 23]}},
+ "rc": 0, "verdict": "PASS: relaunched strict island resumes its data cursor (no repeat of round-0 prompts); its LR-bound session contract is accepted again"}

@@ -76,4 +76,5 @@
 - [ ] 6.3 1.7 阈值表正式数值；1.8 运行时清单并入 yeto 统一 schema；1.9/2.4 codex 会话服务。
 - [ ] 6.4 落盘发布方式真机验证；verl 岛重入后数据游标续位；elastic 模式 verl 岛（JOIN 带身份见 PR #140）。
   - 2026-10-08 N16（分支 s17-rejoin-cursor，CPU 已实现并单测，**未上卡验证**）：数据游标续位已做。查明这是中立层缺陷，不是 verl 独有：驱动只在有批次账本或同步方式提供"按整轮跳过"兜底时才恢复数据位置，而这个兜底只有 elastic 有；严格同步且没有账本的岛（V2 的 verl 岛；Miles 严格模式不带 --rl-elastic 时同理，按代码推断、未上卡）在新容器里重启后数据源从 0 开始。Miles elastic 的 N3/N5 运行中退出重入是同进程暂停后重入，数据源没有重置，事件记录里也没有 cursor_restored，不存在同样的重复。改法：① 中立层 `bridges.whole_round_restart_cursor` 抽成共用函数，StrictAvgSync / DualStrictAvgSync 也提供兜底；驱动只在账本里没有 v-1 这一轮记录时才用兜底（账本记了 v-1 却没游标仍按原规则拒绝）。② verl 岛 `VerlRolloutPool` 提供 data_cursor / seek_data_cursor（`adapters/verl/data_cursor.py`：数 `_fetch_one_gen_batch` 取过的题数，向前跳整块，不能后退），每轮游标写进 verl-rollout 记录。证据：tests/test_rl_restart_data_cursor.py 新增 3 条（无账本严格重启跳过 2 轮，修前失败）、tests/test_rl_verl_adapter.py 新增 2 条（跳过后取到的题与不中断时相同）；39 个相关测试文件 919 过，唯一失败 test_rl_ir_harness 在基线同样失败。待下次 verl 两岛上卡时用 prompts_sha256 复核。
+  - 2026-10-09 S17 N17：中立层的整轮跳过在 **Miles 严格同步** 岛上真机通过（`s17-n17-strict-20261009a`，见 rl-infra-spec 8.2）；verl 数据游标（`seek_data_cursor`）仍**未上卡验证**。
 - [ ] 6.5 单岛不同步 + Modal 时 launcher 以 exit 2 收尾（与 Miles 相同的既有行为），是否改为成功由用户定。

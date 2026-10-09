@@ -111,6 +111,7 @@
   - **未验证**：真机多岛（不上 GPU）；Ray 驱动的岛（本机不跑 Ray，只用假岛）。另：与 PR #134（s17-x1-syncer-modes）试合并无冲突，合并树 cargo test 147 过（139+6+2）。
 
 - [x] 6.2b 严格同步模式下，契约不一致的 HELLO 只拒这一条连接，不再让 syncer 退出（S17 N14，分支 s17-strict-reject，base s17-elastic-identity）。起因：N10 本机握手（`s1-runs/s17-verl-handshake/result.json`）显示 verl 会话里来一个 Miles 岛，syncer 以 `layout_hash_mismatch` 致命退出，等于一个连错的岛能停掉整场。验收：两个 verl 岛同步途中插进一个 Miles 岛，它被拒、错误帧写明双方哈希；syncer 与两个 verl 岛照常完成全部轮次。
+- [x] 6.2c 学习率调度进契约（S17 N17，#153，用户授权主 agent 代拍板）：`ExecutionProfile.lr_schedule_sha256`；同一哈希绑定进岛向 syncer 声明的身份（HELLO 会话契约与 elastic JOIN），两岛学习率调度不同即被拒。真 Rust syncer + 假岛测试：`tests/test_rl_strict_session_reject.py`（lr-schedule 参数）、`tests/test_rl_elastic_backend_identity.py::test_real_syncer_refuses_same_backend_with_other_lr_schedule`。真机只验了正例（真 Miles 岛算出的绑定身份互相接受、重开/重入后仍被接受：`s17-n17-strict-20261009a`、`s17-n17-elastic-20261009a`）；负例岛没在真机做（launcher 没有单独给某岛换参数的入口）。原因与哈希变化见 hash-migration.md。
   - 两种情况：
     - 会话还没建立：第一个 HELLO 定下会话契约，不变。
     - 会话已建立后来了契约不一致的 HELLO：回 MSG_ERROR（`session mismatch (HELLO refused, session keeps running): expected session_contract_hash=… layout_fingerprint=… dtype=… fragments=…, got …`），只关这条连接；不登记、不顶替同编号的已接纳岛，会话不变。syncer 语义配置（profile）不一致的 HELLO 同样只拒这一条（以前严格模式下也是致命退出）。
