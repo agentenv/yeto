@@ -46,7 +46,9 @@ MILES_NEXT_UPSTREAM_COMMIT = "9e4260de047a704208535c0e90c531929879ab40"
 # on yeto/ports e3a11ab38).
 # s16-raw-lora-disagg (8bc52237a = c35702e + broadcast LoRA gathers the adapter across PP onto one sender,
 # actor allows --megatron-to-hf-mode raw for non-colocated LoRA; MILES-RAW-LORA-DISAGG-S16.md plan A).
-MILES_NEXT_COMMIT = "8bc52237a1102306abd8f89a2ea2090aa2df6850"
+# s18-abort-discard-stats (efbbc63ea = 8bc52237a + rollout abort tallies discarded
+# groups/samples/response tokens without partial rollout; S18 agentic-rollout-util).
+MILES_NEXT_COMMIT = "efbbc63ea0e8c6dcbc200ad5df5bc56badfce7bf"
 # sgl-project/sglang ``sglang-miles`` head when radixark/miles@9e4260d was
 # committed (upstream's Dockerfile follows that branch unpinned).
 SGLANG_NEXT_REPOSITORY = "https://github.com/michaellchung/sglang"
@@ -54,7 +56,9 @@ SGLANG_NEXT_UPSTREAM_COMMIT = "571212b636baca45e10fa3b4da11a289123f3235"
 # yeto/lora-checksum (a1240c530 = 9f29303 + WeightChecker checksum covers LoRA adapter A/B);
 # yeto/ports 9f29303: the ported agentenv/sglang patches (see sglang-patch-port.md).
 # m3-qwen4exp-lora (4e4148f1b = a1240c530 + Qwen4ExpForConditionalGeneration LoRA hooks).
-SGLANG_NEXT_COMMIT = "4e4148f1b4fe9f05973da0d1e5cfe237512d5155"
+# n17-qwen3coder-single-call (2fa880182 = 4e4148f1b + qwen3_coder honors
+# parallel_tool_calls=false under tool_choice=auto: at most one tool call; S17 N17).
+SGLANG_NEXT_COMMIT = "2fa880182eefdb31e64d8ea70317be27f9f32121"
 MILES_LEGACY_PINS = MilesRevisionPins(MILES_REPOSITORY, MILES_COMMIT)
 MILES_NEXT_PINS = MilesRevisionPins(MILES_NEXT_REPOSITORY, MILES_NEXT_COMMIT)
 # radixark/miles:dev multi-arch index (upstream docker/Dockerfile at
@@ -71,10 +75,10 @@ MILES_NEXT_BASE_IMAGE = (
 # every SHA.  PUBLIC on ghcr.io/michaellchung since 2026-10-07 (anonymous
 # pull); a private image needs SKYPILOT_DOCKER_{USERNAME,PASSWORD,SERVER} or
 # --rl-image-private (yeto.launcher.registry_login_for; read:packages token).
-# Tag 8bc5223-4e4148f; ghcr.io/michaellchung (public; same digest also at ghcr.io/agentenv, private); linux/amd64 only.
+# Tag efbbc63-2fa8801; (previous 8bc5223-4e4148f @sha256:4aeafd77...) ghcr.io/michaellchung (public package); linux/amd64 only.
 MILES_NEXT_IMAGE = (
     "docker:ghcr.io/michaellchung/yeto-miles-ports@sha256:"
-    "4aeafd7789dbcc02d71f0068c449477e8ab5f6d5bdb037d6d34e8fbf12a5b039"
+    "a799007607bb6c675ad791a25808f14cd46722122d94f6b42df01bb37626a42f"
 )
 MILES_NEXT_IMAGE_MANIFEST = "/opt/yeto/image-manifest.json"
 # Nebius VM images whose /var/lib/docker already holds a docker image's
