@@ -405,7 +405,12 @@ def test_resume_keys_cover_every_seed_m_and_arm():
         )
 
 
-def test_resume_identity_survives_json_round_trip():
+def test_resume_identity_survives_json_round_trip(monkeypatch):
+    # The identity fingerprints the release syncer binary; this test checks the
+    # JSON round trip only, so stub the fingerprint (needs no cargo build).
+    monkeypatch.setattr(
+        "yeto.benchmark_resume.implementation_fingerprint", lambda root, paths: "d" * 64
+    )
     args = benchmark.build_parser().parse_args(
         [
             "--model",

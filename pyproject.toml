@@ -38,7 +38,20 @@ diffusion-protenix = ["protenix; python_version >= '3.11'"]
 a100-liger = ["liger-kernel==0.8.0", "peft==0.19.1"]
 a100-flash-attn = ["flash-attn==2.8.3"]
 wandb = ["wandb>=0.18"]
-dev = ["pytest", "pytest-timeout"]
+dev = ["pytest", "pytest-timeout", "pytest-asyncio"]
+# Local safe test suite (docs/TESTING.md): the dev tools plus the optional
+# packages the unit tests import. Versions match the head venv (10-09).
+test = [
+    "pytest",
+    "pytest-timeout",
+    "pytest-asyncio",
+    "skypilot[aws,runpod,nebius,verda]==0.13.0",
+    "boto3==1.43.104",
+    "peft==0.21.0",
+    "accelerate==1.15.0",
+    "pylatexenc==2.10",  # vendored Miles math grader (test_rl_neutral_rewards)
+    "pillow",  # diffusion tests
+]
 
 [project.scripts]
 yeto = "yeto.cli:main"

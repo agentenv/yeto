@@ -81,6 +81,24 @@ class CutSource:
         summary = dict(self.ledger.cut_summary()) if self.ledger is not None else {}
         if summary.get("engine_buffer_length") is not None:
             data.setdefault("buffer_length", summary["engine_buffer_length"])
+        in_flight: tuple = ()
+        limit = int(getattr(getattr(driver, "profile", None), "max_policy_age", 0) or 0)
+        if limit > 0:
+            # agentic-rollout-utilization 3.3: the unfinished work the rollout
+            # process holds NOW (buffered groups, suspended agentic trajectories).
+            exporter = getattr(self.rollout, "export_in_flight", None)
+            if not callable(exporter):
+                raise RebuildRefused("the rollout pool cannot export its in-flight trajectories")
+            from .in_flight import check_export
+
+            exported = exporter()
+            problems = check_export(exported)
+            if problems:
+                raise RebuildRefused("; ".join(problems))
+            in_flight = tuple(exported["entries"])
+            data["buffer_length"] = int(exported["buffer_groups"])
+            summary["carried_over"] = len(in_flight)
+            summary["max_policy_age"] = limit
         progress = CutProgress(
             local_step=int(driver.local_step),
             scheduler_samples=int(driver.local_step) * self.global_batch_size,
@@ -97,6 +115,7 @@ class CutSource:
             outer={"settled": bool(driver.at_safe_point), "policy_version": state.policy_version,
                    "policy_token": driver.expected_token},
             shared_filesystem=self.shared_filesystem,
+            in_flight=in_flight,
         )
 
     def expectation(self, layout: Mapping[str, int], *, epoch: int) -> Any:

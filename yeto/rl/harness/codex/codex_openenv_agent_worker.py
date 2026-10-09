@@ -4,7 +4,8 @@ Protocol (stdin/stdout, one JSON object per line):
 - stdin: one job ``{"base_url", "prompt", "request_kwargs", "episode_id",
   "max_seq_len", "env_url", "env_token", "driver": "stock"|"scripted", ...}``;
 - stdout events: ``{"event": "tool_wait", "phase": "enter"|"exit"}`` for every
-  tool execution, then exactly one ``{"event": "result", ...}`` or
+  tool execution, ``{"event": "suspend", "phase": "enter"|"exit"}`` around a
+  wait at the suspended model-turn gate, then exactly one ``{"event": "result", ...}`` or
   ``{"event": "error", "reason": ...}``.
 
 The worker refuses to start when a reward HMAC key is visible (trust split).
@@ -48,6 +49,8 @@ async def _main_async(job: dict[str, Any]) -> dict[str, Any]:
         enter=lambda: _emit({"event": "tool_wait", "phase": "enter"}),
         exit=lambda: _emit({"event": "tool_wait", "phase": "exit"}),
     )
+    # agentic-rollout-utilization 5.1: parked between model turns (gate closed)
+    adapter.harness.set_suspend_event_sink(lambda phase: _emit({"event": "suspend", "phase": phase}))
     async with HttpTerminalEnvironment(job["env_url"], job["env_token"]) as env:
         if job.get("driver") == "scripted":
             if os.getenv(SCRIPTED_DRIVER_ENV) != "1":

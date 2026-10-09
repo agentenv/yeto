@@ -242,6 +242,11 @@ async def _drive_worker(
                     phases.exit_tool()
                     if board is not None:
                         await _board_await(board, "exit", trajectory_id)
+            elif kind == "suspend":  # agentic-rollout-utilization 5.1
+                if event.get("phase") == "enter":
+                    phases.enter_suspend()
+                elif event.get("phase") == "exit":
+                    phases.exit_suspend()
             elif kind == "result":
                 if isinstance(event.get("metrics"), dict):  # observe only, unsigned
                     event["metrics"].update(phases.finish())
@@ -377,6 +382,90 @@ async def abort(args: Any = None) -> int:
     return len(elapsed)
 
 
+# agentic-rollout-utilization 5.1/5.3: suspension between model turns
+# (Miles --agentic-suspend-between-turns calls ``resume`` at the start of every
+# rollout and ``suspend`` at its cut-off). Each trajectory's worker gets its own
+# gate file (``YETO_CODEX_SUSPEND_GATE``); ``suspend`` creates the files of the
+# trajectories in flight (closed gate: the worker's bridge holds the next model
+# request -- a running tool call is not interrupted), ``resume`` removes them.
+# A trajectory parked longer than ``YETO_CODEX_SUSPEND_MAX_SECONDS`` (600 s) is
+# discarded by its bridge (CodexSuspendExpired -> infrastructure) and its lease
+# is destroyed in ``run``'s finally.
+_SUSPEND_DIR: str | None = None
+_SUSPEND_STATE: dict[str, Any] = {"suspended_at": None, "gates": {}}
+SUSPEND_EXPIRED = "CodexSuspendExpired"
+
+
+def _gate_path(trajectory_id: str) -> str | None:
+    if _SUSPEND_DIR is None:
+        return None
+    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in trajectory_id)
+    return os.path.join(_SUSPEND_DIR, f"{safe}.gate")
+
+
+async def suspend(args: Any = None) -> int:
+    """Close the model-turn gate of every trajectory in flight; returns how many."""
+    global _SUSPEND_DIR
+    if _SUSPEND_DIR is None:
+        import tempfile
+
+        _SUSPEND_DIR = tempfile.mkdtemp(prefix="yeto-codex-suspend-")
+    gates = _SUSPEND_STATE["gates"]
+    stages: dict[str, int] = {}
+    for tid, entry in list(_INFLIGHT.items()):
+        if entry.get("stage") == "teardown":
+            continue
+        path = _gate_path(tid)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("suspended\n")
+        gates[tid] = path
+        stage = entry.get("stage", "?")
+        stages[stage] = stages.get(stage, 0) + 1
+    _SUSPEND_STATE["suspended_at"] = time.time()
+    print("YETO_CODEX_SUSPEND " + json.dumps({
+        "event": "rl_codex_suspend", "suspended": len(gates), "stages": stages}), flush=True)
+    return len(gates)
+
+
+async def resume(args: Any = None) -> int:
+    """Open every closed gate (start of a rollout); returns how many were closed.
+    The first call also turns the gates on for the trajectories started after it."""
+    global _SUSPEND_DIR
+    if _SUSPEND_DIR is None:
+        import tempfile
+
+        _SUSPEND_DIR = tempfile.mkdtemp(prefix="yeto-codex-suspend-")
+    gates = _SUSPEND_STATE["gates"]
+    opened = 0
+    for tid, path in list(gates.items()):
+        try:
+            os.unlink(path)
+            opened += 1
+        except FileNotFoundError:
+            pass
+        gates.pop(tid, None)
+    since = _SUSPEND_STATE.get("suspended_at")
+    _SUSPEND_STATE["suspended_at"] = None
+    if opened or since is not None:
+        print("YETO_CODEX_RESUME " + json.dumps({
+            "event": "rl_codex_resume", "resumed": opened,
+            "suspended_s": None if since is None else round(time.time() - since, 3)}), flush=True)
+    return opened
+
+
+def _suspend_worker_env(trajectory_id: str) -> dict[str, str]:
+    path = _gate_path(trajectory_id)
+    if path is None:
+        return {}  # suspension not in use: worker environment unchanged
+    if _SUSPEND_STATE.get("suspended_at") is not None and trajectory_id not in _SUSPEND_STATE["gates"]:
+        # started while the rollout is suspended (should not happen: Miles holds
+        # new samples) -- park it too rather than generate on offloaded engines
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("suspended\n")
+        _SUSPEND_STATE["gates"][trajectory_id] = path
+    return {adapter.harness.SUSPEND_GATE_ENV: path}
+
+
 async def run(
     base_url: str,
     prompt: Any,
@@ -465,7 +554,9 @@ async def _run(
         try:
             try:
                 untrusted = await _abortable(trajectory_id, "worker", asyncio.wait_for(
-                    _drive_worker(job, trajectory_id, _tool_wait_board, getattr(lease, "worker_env", None)),
+                    _drive_worker(job, trajectory_id, _tool_wait_board,
+                                  {**(getattr(lease, "worker_env", None) or {}),
+                                   **_suspend_worker_env(trajectory_id)}),
                     timeout=lease.deadline_seconds))
             except _AbortedSurplus:
                 # abort(): surplus trajectory of an over-sampled rollout; Miles
@@ -515,5 +606,11 @@ async def _run(
         finally:
             _INFLIGHT.pop(trajectory_id, None)
             _ABORTED_IDS.discard(trajectory_id)
+            gate = _SUSPEND_STATE["gates"].pop(trajectory_id, None)
+            if gate is not None:
+                try:
+                    os.unlink(gate)
+                except FileNotFoundError:
+                    pass
             if session_open:
                 _board_kwcall(board, "exit_session", trajectory_id)

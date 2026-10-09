@@ -1,0 +1,118 @@
+{
+ "source": {
+  "tape": "/home/michael/work/s1-runs/s17-fncodex-r3-20261008a/tape-direct/.../rl-island-0.jsonl",
+  "analysis": "/home/michael/work/s1-runs/s17-fncodex-r3-20261008a/analysis.json",
+  "sglang_log": "/home/michael/work/s1-runs/s17-fncodex-r3-20261008a/launch.log"
+ },
+ "sample_size": {
+  "rounds": 1,
+  "trajectories": 24,
+  "note": "只有 1 轮 24 条(6 题×4)，p90 仅 2–3 条支撑"
+ },
+ "turns_per_traj": {
+  "n": 24,
+  "p50": 1.0,
+  "p90": 11.7,
+  "max": 12,
+  "mean": 4.583333333333333
+ },
+ "turns_dist": {
+  "10": 3,
+  "12": 3,
+  "1": 14,
+  "5": 1,
+  "6": 1,
+  "8": 1,
+  "11": 1
+ },
+ "turn_input_ctx_tokens": {
+  "n": 110,
+  "p50": 3283.0,
+  "p90": 9181.0,
+  "max": 15576,
+  "mean": 4394.7
+ },
+ "final_turn_ctx_tokens": {
+  "n": 24,
+  "p50": 6466.0,
+  "p90": 12196.999999999996,
+  "max": 15576,
+  "mean": 5962.541666666667
+ },
+ "long_traj_ge5_turns": {
+  "n": 10,
+  "final_ctx": {
+   "n": 10,
+   "p50": 8461.5,
+   "p90": 15554.4,
+   "max": 15576,
+   "mean": 9639.3
+  }
+ },
+ "prefill_log": {
+  "n_lines": 87,
+  "cached_token_sum": 0,
+  "gen_window_new_tokens_sum": 390903,
+  "tape_turn_ctx_sum": 483417,
+  "ratio_log_over_tape": 0.8086248518359925,
+  "rate_tok_s_median_of_sane_lines": 29565.83,
+  "rate_n": 6,
+  "rate_lower_bound_whole_gen_window": 1748.2245080500895,
+  "input_throughput_field_all": {
+   "n": 85,
+   "p50": 3908.54,
+   "p90": 635211.4139999998,
+   "max": 1009541.8,
+   "mean": 147541.0374117647
+  },
+  "note": "input throughput 字段=间隔均值，1s时间戳下同秒批次出现荒谬大值(最高~1e6)，不可直接用"
+ },
+ "timing": {
+  "generate_s": 223.6,
+  "train_s": 556.9125932879999,
+  "publish_s": [
+   367.7,
+   66.0
+  ],
+  "outer_sync_s": [
+   37.3
+  ],
+  "round_total_s": 923.0342996120453,
+  "rollout_cutoff_events": 0,
+  "peak_running_req": 24,
+  "t_running_le2_from_gen_start": 191.1719615459442,
+  "t_running_le5_from_gen_start": 167.1719615459442
+ },
+ "saved_wait_s": {
+  "drop_slowest_10pct_proxy": 32.42803845405578,
+  "drop_slowest_25pct_proxy": 56.42803845405578,
+  "note": "用 Decode 行 running-req<=k 的尾段时长近似；running-req 不含在工具等待中的轨迹，偏低估尾长"
+ },
+ "extra_prefill": {
+  "rate_used_tok_s": 29565.83,
+  "per_traj": {
+   "all_turn_ctx": {
+    "ctx_p50": 3283.0,
+    "ctx_p90": 9181.0,
+    "sec_p50": 0.11104034623753163,
+    "sec_p90": 0.31052738921924394
+   },
+   "long_traj_final_ctx": {
+    "ctx_p50": 8461.5,
+    "ctx_p90": 15554.4,
+    "sec_p50": 0.2861918640538757,
+    "sec_p90": 0.5260938049092483
+   },
+   "all_traj_final_ctx": {
+    "ctx_p50": 6466.0,
+    "ctx_p90": 12196.999999999996,
+    "sec_p50": 0.2186984096167772,
+    "sec_p90": 0.41253704022515164
+   }
+  },
+  "tail10pct_inflight_n": 3,
+  "total_sec_tail_p50": 0.8585755921616272,
+  "total_sec_tail_p90": 1.5782814147277449,
+  "total_sec_all24_upper": 2.6649683097007593
+ }
+}

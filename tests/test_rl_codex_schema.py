@@ -110,5 +110,6 @@ def test_codex_openenv_preflight_attests_pinned_adapter_and_environment(
     monkeypatch.delenv("YETO_CODEX_OPENENV_MODEL_REVISION")
     with pytest.raises(ValueError, match="environment drifted"):
         learner._preflight_codex_openenv_adapter(args, "qwen35_08b")
+    # qwen35 joined OPENENV_BACKEND_PROFILES in S17 M1, so use a profile outside the allowlist.
     with pytest.raises(ValueError, match="requires backend profile"):
-        learner._preflight_codex_openenv_adapter(args, "qwen35")
+        learner._preflight_codex_openenv_adapter(args, "not_an_openenv_profile")

@@ -207,6 +207,8 @@ def test_tbench_infrastructure_marker_aborts(monkeypatch):
 # -- 3.10 registry and user rewards ------------------------------------------------
 
 def test_custom_reward_via_miles_equals_direct_call():
+    # Earlier tests in a full run may import megatron; check only what this test loads.
+    before = set(sys.modules)
     from examples.custom_reward import reward as example
 
     assert "ends_with_label" in registry.registered_names()
@@ -220,7 +222,7 @@ def test_custom_reward_via_miles_equals_direct_call():
         direct = example.ends_with_label(Trajectory(response="the answer is 7", label="7"))
         assert _run(fn(None, sample)) == direct.value == 1.0
         assert sample.metadata == dict(direct.metadata)
-    assert not {m.split(".")[0] for m in sys.modules} & {"verl", "megatron"}
+    assert not {m.split(".")[0] for m in set(sys.modules) - before} & {"verl", "megatron"}
 
 
 def test_unregistered_name_lists_available():

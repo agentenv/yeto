@@ -49,7 +49,10 @@ def _import(site, name, pythonpath):
         """
     )
     env = {"PYTHONPATH": pythonpath, "PATH": "/usr/bin:/bin"}
-    return subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, cwd="/")
+    # -S: leave out this venv's site-packages. A venv that installs a regular
+    # (non-namespace) `megatron` package shadows the fake image tree; the image
+    # itself has only the editable finder, which this test rebuilds.
+    return subprocess.run([sys.executable, "-S", "-c", code], env=env, capture_output=True, text=True, cwd="/")
 
 
 def test_editable_finder_alone_cannot_import_post_training(tmp_path):

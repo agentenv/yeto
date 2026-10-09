@@ -474,6 +474,16 @@ def handle_from_metadata(
 _CARRY_OVER_KEYS = (
     "max_policy_age", "carried_out_groups", "cross_version_tokens", "trained_response_tokens",
     "cross_version_scored_tokens", "cross_version_unscored_samples",
+    # 5.5: distribution of the cross-version IS ratio (calibrates warn/fallback)
+    "cross_version_ratio_p50", "cross_version_ratio_p90", "cross_version_ratio_p99",
+    "cross_version_ratio_min", "cross_version_ratio_max",
+    "cross_version_unscored_reasons", "cross_version_unknown_version_tokens",
+    # 5.1/5.3: agentic suspension between model turns (carry_over.suspend_fields)
+    "suspended_groups", "suspended_done_groups", "over_age_cancelled_groups",
+    "over_age_cancelled_samples", "over_age_cancelled_tokens", "over_age_unknown_groups",
+    "resumed_groups", "resumed_done_groups", "suspend_expired_trajectories",
+    "policy_age_exceeded_trajectories", "suspended_trajectories", "suspended_env_seconds",
+    "suspend_retried_turns",
 )
 
 
@@ -709,6 +719,37 @@ class MilesRolloutPool:
         landed = self._run(_awaited(remote(seek_executor_cursor, wanted)))
         self._last_cursor = None if landed is None else dict(landed)
         return None if landed is None else dict(landed)
+
+    def _in_executor(self, fn: Any, *fn_args: Any, **fn_kwargs: Any) -> Any:
+        """Run ``fn(executor, ...)`` inside the rollout executor's process (same
+        targets as ``live_data_cursor``); raises when it cannot."""
+        kind, target = _executor_target(self._executor)
+        if kind == "local":
+            return fn(SimpleNamespace(data_source=target), *fn_args, **fn_kwargs)
+        if kind != "ray":
+            raise RuntimeError("rollout executor %s is neither a local executor nor a Ray "
+                               "actor (handle)" % type(self._executor).__name__)
+        remote = getattr(getattr(target, "__ray_call__", None), "remote", None)
+        if not callable(remote):
+            raise RuntimeError("Ray actor handle %s has no __ray_call__" % type(target).__name__)
+        return self._run(_awaited(remote(fn, *fn_args, **fn_kwargs)))
+
+    def export_in_flight(self) -> dict[str, Any]:
+        """agentic-rollout-utilization 3.3 (limit > 0): the cut's in-flight
+        entries (buffered groups, suspended agentic trajectories); raises when
+        they cannot be read (the cut is then refused, never written without them)."""
+        from .in_flight import export_in_flight
+
+        return dict(self._in_executor(export_in_flight))
+
+    def import_in_flight(self, entries: Any, *, max_policy_age: int, current_version: int,
+                         completed_group_ids: Any = ()) -> dict[str, Any]:
+        """Restore: continue or discard the cut's in-flight entries (report)."""
+        from .in_flight import import_in_flight
+
+        return dict(self._in_executor(
+            import_in_flight, list(entries), max_policy_age=int(max_policy_age),
+            current_version=int(current_version), completed_group_ids=list(completed_group_ids)))
 
     def data_cursor(self) -> dict[str, int] | None:
         """4.2/4.4: the LIVE data cursor, None when it cannot be read (unknown;

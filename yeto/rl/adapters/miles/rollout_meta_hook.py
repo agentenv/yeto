@@ -374,6 +374,8 @@ def build_metadata(
         # agentic-rollout-utilization 4.1: carry-over accounting (limit > 0 only;
         # the default key set is unchanged).
         payload.update(carry_over_fields(args, trained_samples, sink))
+        # 5.1/5.3: agentic suspension between turns (absent when not in use)
+        payload.update(_carry.suspend_fields(args, all_samples))
     if tool_wait > 0:
         # 1.7: time trajectories spent outside generation (tool calls), summed
         # over every generated sample (Miles Sample.non_generation_time).
@@ -930,6 +932,9 @@ def extract_rollout_metadata(args: Any, all_samples: Any, data_source: Any = Non
             payload["submitted_groups"] = submitted
             payload["carried_out_groups"] = max(
                 0, submitted + int(payload.get("resubmitted_groups", 0)) - generated)
+            if "suspended_groups" in payload:
+                # 5.1 agentic: the fork counted the groups it kept at this cut-off
+                payload["carried_out_groups"] = int(payload["suspended_groups"])
         elif submitted is not None:
             generated = payload["completed"] + payload["filtered"]
             payload["submitted_groups"] = submitted

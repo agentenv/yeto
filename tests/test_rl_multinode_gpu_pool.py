@@ -121,6 +121,16 @@ def test_first_run_without_uuids_binds_baseline_and_the_next_incarnation_compare
 
 
 # --------------------------------------------------------------- entry preflight
+@pytest.fixture(autouse=True)
+def _no_ray_incarnation_probe(monkeypatch):
+    """The rebind safety check (10-04 ruling v2) probes old incarnations through Ray
+    when ray imports. These tests cover the GPU pool only: no old incarnation."""
+    from yeto.rl.adapters.miles import entry
+
+    monkeypatch.setattr(entry, "_ray_live_incarnations", lambda topology, flat: {})
+    monkeypatch.setattr(entry, "_ray_write_incarnation_markers", lambda *a, **k: None)
+
+
 def _probe(rows):
     def probe(_topology):
         return rows

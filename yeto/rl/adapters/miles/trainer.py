@@ -682,6 +682,8 @@ class MilesTrainerGroup:
         problems = context_problems(
             cut_id=cut_id, progress=context.progress, algorithm=context.algorithm, data=context.data,
             ledger=context.ledger, outer=context.outer, runtime=runtime,
+            in_flight=tuple(getattr(context, "in_flight", ()) or ()),
+            max_policy_age=int((context.ledger or {}).get("max_policy_age", 0) or 0),
         ) + config_problems(self._args)
         if problems:
             raise CutError("refusing to save a cut: " + "; ".join(problems))
@@ -726,6 +728,7 @@ class MilesTrainerGroup:
             data=context.data,
             ledger=context.ledger,
             outer=context.outer,
+            in_flight=tuple(getattr(context, "in_flight", ()) or ()),
             files=tuple(
                 CutFile(s["path"], s["sha256"], int(s["bytes"]), s["coord"]) for s in summaries
             ),
