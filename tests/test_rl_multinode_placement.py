@@ -6,8 +6,8 @@ from dataclasses import dataclass
 
 import pytest
 
-from yeto.rl.engine.miles_adapter.bundles import BundleMapError, StartupBundles
-from yeto.rl.engine.miles_adapter.placement import PlacementRequest
+from yeto.rl.adapters.miles.bundles import BundleMapError, StartupBundles
+from yeto.rl.adapters.miles.placement import PlacementRequest
 from yeto.rl.engine import multinode as mn
 
 
@@ -277,7 +277,7 @@ def test_head_pinned_bundles_and_sort_key():
 def test_pin_placement_group_to_head_patches_fork_and_checks(monkeypatch):
     import types
 
-    from yeto.rl.engine.miles_adapter.entry import _ray_head_node, pin_placement_group_to_head
+    from yeto.rl.adapters.miles.entry import _ray_head_node, pin_placement_group_to_head
     from yeto.rl.engine.multinode import HEAD_RESOURCE
 
     nodes = [{"NodeID": "W", "Alive": True, "NodeManagerAddress": "10.0.0.14", "Resources": {"GPU": 1}},
@@ -342,7 +342,7 @@ def test_mixed_non_rectangular_bundle_map_rejected():
 def test_placement_request_shape_must_match_actor_args():
     from types import SimpleNamespace
 
-    from yeto.rl.engine.miles_adapter import config as mc
+    from yeto.rl.adapters.miles import config as mc
 
     def _cfg(nodes, per_node, bundle_map=None):
         return SimpleNamespace(parallel=SimpleNamespace(

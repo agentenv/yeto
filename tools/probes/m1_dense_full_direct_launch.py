@@ -494,7 +494,7 @@ def _validate_conversion_artifacts(
 
 def _source_hashes(yeto_root: Path, miles_root: Path) -> tuple[str, str]:
     from yeto.provenance import source_tree_sha256
-    from yeto.rl.miles import miles_execution_source_sha256
+    from yeto.rl.adapters.miles.legacy.engine import miles_execution_source_sha256
 
     return (
         source_tree_sha256(yeto_root / "yeto"),
@@ -1219,7 +1219,7 @@ def _learner_argv(
     argv = [
         "python3",
         "-m",
-        "yeto.rl.learner",
+        "yeto.rl.adapters.miles.island_entry",
         "--model",
         model["repo"],
         "--rollout-model",
@@ -2132,10 +2132,10 @@ def _validate_manifest(payload: Any) -> dict[str, Any]:
         if not isinstance(argv, list) or argv[:3] != [
             "python3",
             "-m",
-            "yeto.rl.learner",
+            "yeto.rl.adapters.miles.island_entry",
         ]:
             raise LaunchContractError(
-                "learner does not directly invoke yeto.rl.learner"
+                "learner does not directly invoke yeto.rl.adapters.miles.island_entry"
             )
         if argv != _learner_argv(
             manifest=payload,
@@ -2985,7 +2985,7 @@ def _exec_island(args: argparse.Namespace) -> None:
             "heldout data",
         )
     argv = manifest["learners"][args.island_id]["argv"]
-    if argv[:3] != ["python3", "-m", "yeto.rl.learner"]:
+    if argv[:3] != ["python3", "-m", "yeto.rl.adapters.miles.island_entry"]:
         raise LaunchContractError("manifest learner entry is not direct")
     from yeto.rl import learner
 

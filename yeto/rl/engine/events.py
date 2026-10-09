@@ -4,7 +4,7 @@ The engine core and the neutral algorithm code write tape events through
 :func:`write_event`; the backend injects its implementation with
 :func:`set_event_writer`. The default, :func:`append_tape_event`, is the
 island tape format every backend shares today (moved unchanged from
-``yeto.rl.miles._append_rl_event``, which now re-exports it): one JSONL
+``yeto.rl.adapters.miles.legacy.engine._append_rl_event``, which now re-exports it): one JSONL
 record ``{"island_id", "time_unix", **event}`` appended to
 ``args.yeto_rl_event_tape`` (echoed when ``YETO_RL_ECHO_EVENTS=1``), then
 teed to W&B. Event names and fields are never rewritten here.

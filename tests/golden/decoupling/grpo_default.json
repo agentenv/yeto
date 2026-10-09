@@ -10,6 +10,14 @@
   "loss": "policy_loss",
   "schema": "yeto-rl-algorithm-spec-v1"
  },
+ "backend_identity": {
+  "device_family": "nvidia",
+  "engine": "miles",
+  "engine_commit": "8bc52237a1102306abd8f89a2ea2090aa2df6850",
+  "param_map_sha256": "36c37d691b6372ee86485cf0f7d4f8d5e185a6346b875aac33380518ee8f259a",
+  "schema": "yeto-backend-identity-v1",
+  "sha256": "9d5696a3d3b6e6d802115ef3deb970b5e4d9206d1751d71f9075a849d2909f8d"
+ },
  "execution_profile": {
   "contract_hash": "sha256:27bb768f7462a3ff3b660d9ba9cf00477c16a840f2c8d9c00e259cec01ced533",
   "profile": {
@@ -143,11 +151,11 @@
   "--rollout-max-response-len",
   "128",
   "--rollout-sample-filter-path",
-  "yeto.rl.engine.miles_adapter.rollout_meta_hook.record_trained_groups",
+  "yeto.rl.adapters.miles.rollout_meta_hook.record_trained_groups",
   "--rollout-all-samples-process-path",
-  "yeto.rl.engine.miles_adapter.rollout_meta_hook.extract_rollout_metadata",
+  "yeto.rl.adapters.miles.rollout_meta_hook.extract_rollout_metadata",
   "--buffer-filter-path",
-  "yeto.rl.engine.miles_adapter.rollout_meta_hook.policy_buffer_filter",
+  "yeto.rl.adapters.miles.rollout_meta_hook.policy_buffer_filter",
   "--custom-rm-path",
   "pkg.reward.score",
   "--advantage-estimator",
@@ -182,7 +190,7 @@
   "10",
   "--group-query-attention"
  ],
- "miles_argv_sha256": "8e29812ab25b71d9df6c6eb0d52b41968ece740f15c56473db9434301f14b445",
+ "miles_argv_sha256": "cd9c51c2946a4e45bb63cd153ae64bc3ec0e3e998cf3d5e64fe6d4ed882c156b",
  "name": "grpo_default",
  "placement": {
   "allow_cross_node_engine_tp": false,
@@ -201,26 +209,26 @@
  },
  "plugins": [
   {
-   "module_file": "yeto/rl/engine/miles_adapter/rollout_meta_hook.py",
-   "path": "yeto.rl.engine.miles_adapter.rollout_meta_hook.extract_rollout_metadata",
-   "source_sha256": "be53a60841ce6244fc85c5d114ef25dc7c06a94f74fcaa5291d74094ef0d87ef"
+   "module_file": "yeto/rl/adapters/miles/rollout_meta_hook.py",
+   "path": "yeto.rl.adapters.miles.rollout_meta_hook.extract_rollout_metadata",
+   "source_sha256": "cab11ca4d4082524f113f3aa28963af7394767b9252c431c88088e466b23b760"
   },
   {
-   "module_file": "yeto/rl/engine/miles_adapter/rollout_meta_hook.py",
-   "path": "yeto.rl.engine.miles_adapter.rollout_meta_hook.policy_buffer_filter",
-   "source_sha256": "be53a60841ce6244fc85c5d114ef25dc7c06a94f74fcaa5291d74094ef0d87ef"
+   "module_file": "yeto/rl/adapters/miles/rollout_meta_hook.py",
+   "path": "yeto.rl.adapters.miles.rollout_meta_hook.policy_buffer_filter",
+   "source_sha256": "cab11ca4d4082524f113f3aa28963af7394767b9252c431c88088e466b23b760"
   },
   {
-   "module_file": "yeto/rl/engine/miles_adapter/rollout_meta_hook.py",
-   "path": "yeto.rl.engine.miles_adapter.rollout_meta_hook.record_trained_groups",
-   "source_sha256": "be53a60841ce6244fc85c5d114ef25dc7c06a94f74fcaa5291d74094ef0d87ef"
+   "module_file": "yeto/rl/adapters/miles/rollout_meta_hook.py",
+   "path": "yeto.rl.adapters.miles.rollout_meta_hook.record_trained_groups",
+   "source_sha256": "cab11ca4d4082524f113f3aa28963af7394767b9252c431c88088e466b23b760"
   }
  ],
- "ports_runtime_fingerprint": "sha256:03e9d88b7e22e720036112884c1c0c9f796e25a301bd2e7cb1090fcc9c0e166f",
+ "ports_runtime_fingerprint": "sha256:0ad73504ef7252426f67915a90ac108c2526178859de0dd77e2f429780b837a9",
  "runtime_attrs": {
   "yeto_rl_dynamic_sampling_max_replacements": null
  },
  "session_contract_hash": null,
- "session_contract_hash_note": "运行时由 LoRA 张量布局算出（yeto.protocol.layout_fingerprint），离线不可得",
+ "session_contract_hash_note": "运行时由 LoRA 张量布局算出（yeto.protocol.layout_fingerprint），阶段 5 起再与 backend_identity.sha256 绑定（yeto.rl.engine.backend_identity.session_contract_hash），离线不可得",
  "title": "GRPO 默认（ports，固定分区，strict-avg）"
 }

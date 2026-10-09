@@ -574,7 +574,7 @@ def test_driver_run_ends_in_driver_error_when_verification_fails(tmp_path):
 
 # ------------------------------------------------------------- adapter: member_states
 def test_miles_pool_member_states_from_describe_cells():
-    from yeto.rl.engine.miles_adapter.rollout import MilesRolloutPool
+    from yeto.rl.adapters.miles.rollout import MilesRolloutPool
 
     class Ctl:
         async def describe_cells(self):

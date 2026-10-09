@@ -5,8 +5,8 @@ from types import SimpleNamespace
 
 from yeto.rl.elastic_benchmark.capabilities import attestation_from_dict
 from yeto.rl.engine.algorithm import AlgorithmSpec
-from yeto.rl.engine.miles_adapter import config as mc
-from yeto.rl.engine.miles_adapter.elastic_hook import _declared_edges, is_flash_next_full
+from yeto.rl.adapters.miles import config as mc
+from yeto.rl.adapters.miles.elastic_hook import _declared_edges, is_flash_next_full
 from yeto.rl.profiles import qwen3_8_next as q
 
 from test_rl_fn_ports_recipe import _fn_config

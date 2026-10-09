@@ -366,6 +366,12 @@ class LocalProcessBackend:
 # ----------------------------------------------------------------------------- Modal backend
 
 
+def _decode_output(data: bytes | str | None) -> str:
+    if not data:
+        return ""
+    return data if isinstance(data, str) else data.decode("utf-8", errors="replace")
+
+
 class ModalSandbox:
     def __init__(self, sandbox: Any, workdir: str) -> None:
         self._sandbox = sandbox
@@ -373,11 +379,14 @@ class ModalSandbox:
         self.object_id = getattr(sandbox, "object_id", "")
 
     def exec(self, command: str, *, timeout_s: float, workdir: str | None = None) -> ExecResult:
+        # Bytes, decoded leniently: command output cut by the byte limit (or plain
+        # binary output) can end mid UTF-8 sequence, and Modal's text mode then
+        # raises UnicodeDecodeError inside the relay (S17 M1, 5 tool calls failed).
         process = self._sandbox.exec(
-            "bash", "-lc", command, workdir=workdir or self.workdir, timeout=int(timeout_s) + 30
+            "bash", "-lc", command, workdir=workdir or self.workdir, timeout=int(timeout_s) + 30, text=False
         )
-        output = process.stdout.read() or ""
-        err = process.stderr.read() or ""
+        output = _decode_output(process.stdout.read())
+        err = _decode_output(process.stderr.read())
         code = process.wait()
         return ExecResult(exit_code=int(code), output=output + err, timed_out=code in _TIMEOUT_EXIT_CODES)
 

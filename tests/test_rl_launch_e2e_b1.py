@@ -69,8 +69,8 @@ def test_observe_and_tool_wait_board_reach_the_island_wiring(tmp_path, monkeypat
     from types import SimpleNamespace
 
     from yeto.rl import learner
-    from yeto.rl.engine.miles_adapter import elastic_wiring, entry
-    from yeto.rl.engine.miles_adapter.elastic_wiring import LazyBoardActor
+    from yeto.rl.adapters.miles import elastic_wiring, entry
+    from yeto.rl.adapters.miles.elastic_wiring import LazyBoardActor
 
     run = island_run(BASE + _elastic(tmp_path) + ("--rl-observe-timeline",
                                                   "--rl-elastic-tool-wait-board"), monkeypatch)
@@ -94,7 +94,7 @@ def test_defaults_set_neither_observe_nor_board(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
     from yeto.rl import learner
-    from yeto.rl.engine.miles_adapter import elastic_wiring, entry
+    from yeto.rl.adapters.miles import elastic_wiring, entry
 
     args, _ = learner_from_run(island_run(BASE + _elastic(tmp_path), monkeypatch), tmp_path / "h")
     miles_args = SimpleNamespace(yeto_rl_learner_id=0, use_miles_router=True)
@@ -114,7 +114,7 @@ def test_declared_cells_travel_from_the_cli_to_the_fork_rollout_cells(tmp_path, 
     from test_rl_argv_snapshot import _captured_args
     from yeto.rl.engine import run_config as rc
     from yeto.rl.engine.algorithm import AlgorithmSpec
-    from yeto.rl.engine.miles_adapter import config as mc
+    from yeto.rl.adapters.miles import config as mc
 
     elastic = _elastic(tmp_path)[:-2] + ("--rl-elastic-cells", "r0,r1,r2",
                                          "--rl-elastic-declare-cells")
@@ -145,7 +145,7 @@ def test_default_run_declares_no_cells_and_keeps_the_placement_map(tmp_path, mon
     from test_rl_argv_snapshot import _captured_args
     from yeto.rl.engine import run_config as rc
     from yeto.rl.engine.algorithm import AlgorithmSpec
-    from yeto.rl.engine.miles_adapter import config as mc
+    from yeto.rl.adapters.miles import config as mc
 
     args, _ = learner_from_run(island_run(BASE + _elastic(tmp_path), monkeypatch), tmp_path / "h")
     assert not args.rl_elastic_declare_cells
@@ -164,7 +164,7 @@ def test_declared_cells_resolve_yeto_names_through_the_fork_alias():
 
     import pytest
 
-    from yeto.rl.engine.miles_adapter.entry import resolve_declared_cells
+    from yeto.rl.adapters.miles.entry import resolve_declared_cells
 
     runner = SimpleNamespace(run=asyncio.run)
     cells = {"inference-engine-all-0-0-00000": {"alias": "r0"},
@@ -201,19 +201,19 @@ def test_declare_cells_needs_names(tmp_path):
 
 
 # ---------------------------------------------------------------- item 4: tool-wait workload
-TOOL = ("--custom-generate-function-path", "yeto.rl.tool_wait_workload.generate",
+TOOL = ("--custom-generate-function-path", "yeto.rl.adapters.miles.harness_glue.tool_wait.generate",
         "--rl-test-tool-delay-s", "30")
 
 
 def test_tool_workload_reaches_the_learner_and_every_ray_worker(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
-    from yeto.rl.engine.miles_adapter.entry import connect_island_ray
+    from yeto.rl.adapters.miles.entry import connect_island_ray
     from yeto.rl.tool_wait_workload import TOOL_DELAY_ENV, tool_delay_s
 
     run = island_run(BASE + TOOL, monkeypatch)
     args, env = learner_from_run(run, tmp_path / "home")
-    assert args.custom_generate_function_path == "yeto.rl.tool_wait_workload.generate"
+    assert args.custom_generate_function_path == "yeto.rl.adapters.miles.harness_glue.tool_wait.generate"
     assert env[TOOL_DELAY_ENV] == "30.0" and tool_delay_s(env) == 30.0
     seen = {}
     ray = SimpleNamespace(init=lambda **kw: seen.update(kw), is_initialized=lambda: False)
@@ -295,7 +295,7 @@ def test_injection_and_restart_switches_reach_the_island(tmp_path, monkeypatch):
         "--rl-test-inject-stop-failures", "1", "--rl-test-kill-learner-at", "COMMITTED",
         "--rl-test-inject-undrain-fail", "1"),
         monkeypatch)
-    assert "yeto_rl_restart_loop python3 -m yeto.rl.learner" in run
+    assert "yeto_rl_restart_loop python3 -m yeto.rl.adapters.miles.island_entry" in run
     args, env = learner_from_run(run, tmp_path / "home")
     assert args.rl_elastic_state_dir == "/vol/elastic"
     assert env["YETO_RL_TEST_INJECT_LORA_PERTURB"] == "0.01"
@@ -372,8 +372,8 @@ def test_deterministic_trainer_reaches_miles_argv_env_and_ray_workers(tmp_path, 
     from yeto.rl import learner
     from yeto.rl.engine import run_config as rc
     from yeto.rl.engine.algorithm import AlgorithmSpec
-    from yeto.rl.engine.miles_adapter import config as mc
-    from yeto.rl.engine.miles_adapter.entry import DETERMINISM_ENV, connect_island_ray
+    from yeto.rl.adapters.miles import config as mc
+    from yeto.rl.adapters.miles.entry import DETERMINISM_ENV, connect_island_ray
 
     args, _ = learner_from_run(island_run(BASE + ("--rl-deterministic-trainer",), monkeypatch),
                                tmp_path / "home")
@@ -399,7 +399,7 @@ def test_determinism_is_off_by_default(tmp_path, monkeypatch):
     from yeto.rl import learner
     from yeto.rl.engine import run_config as rc
     from yeto.rl.engine.algorithm import AlgorithmSpec
-    from yeto.rl.engine.miles_adapter import config as mc
+    from yeto.rl.adapters.miles import config as mc
 
     args, _ = learner_from_run(island_run(BASE, monkeypatch), tmp_path / "home")
     environ = {}
@@ -417,7 +417,7 @@ def _argv_from(args_ns):
     from test_rl_argv_snapshot import _captured_args
     from yeto.rl.engine import run_config as rc
     from yeto.rl.engine.algorithm import AlgorithmSpec
-    from yeto.rl.engine.miles_adapter import config as mc
+    from yeto.rl.adapters.miles import config as mc
 
     (base,), kwargs = _captured_args()
     keys = ("rl_elastic", "rl_elastic_trainer_edges")
@@ -478,7 +478,7 @@ def test_trainer_edges_need_elastic():
 def test_cut_injections_rank_zero_reaches_the_island_and_ray_workers(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
-    from yeto.rl.engine.miles_adapter.entry import connect_island_ray
+    from yeto.rl.adapters.miles.entry import connect_island_ray
 
     run = island_run(BASE + _elastic(tmp_path) + (
         "--rl-test-inject-cut-save-kill-rank", "0", "--rl-test-inject-cut-restore-sleep", "1:30",
@@ -504,7 +504,7 @@ def test_lora_dropout_reaches_the_miles_argv_and_default_stays_zero(tmp_path, mo
     from test_rl_argv_snapshot import _captured_args
     from yeto.rl.engine import run_config as rc
     from yeto.rl.engine.algorithm import AlgorithmSpec
-    from yeto.rl.engine.miles_adapter import config as mc
+    from yeto.rl.adapters.miles import config as mc
 
     args, _ = learner_from_run(island_run(BASE + ("--rl-lora-dropout", "0.05"), monkeypatch),
                                tmp_path / "a")
@@ -547,7 +547,7 @@ def test_elastic_runs_carry_use_miles_router_and_defaults_do_not(tmp_path, monke
     from test_rl_argv_snapshot import _captured_args
     from yeto.rl.engine import run_config as rc
     from yeto.rl.engine.algorithm import AlgorithmSpec
-    from yeto.rl.engine.miles_adapter import config as mc
+    from yeto.rl.adapters.miles import config as mc
 
     elastic, _ = learner_from_run(island_run(BASE + _elastic(tmp_path), monkeypatch), tmp_path / "a")
     default, _ = learner_from_run(island_run(BASE, monkeypatch), tmp_path / "b")
@@ -575,7 +575,7 @@ def test_elastic_wiring_refuses_missing_fork_verb_preconditions():
 
     import pytest
 
-    from yeto.rl.engine.miles_adapter import entry
+    from yeto.rl.adapters.miles import entry
 
     cfg = {"resources": {}, "attestation": None, "state_dir": "/s", "initial_config": "c0",
            "declared_cells": ()}
@@ -597,7 +597,7 @@ def test_drain_and_recovery_timeouts_reach_the_controller(tmp_path, monkeypatch)
     from yeto.rl import learner
     from yeto.rl.engine.execution_profile import ExecutionProfile
     from yeto.rl.engine.algorithm import AlgorithmSpec
-    from yeto.rl.engine.miles_adapter import entry
+    from yeto.rl.adapters.miles import entry
 
     res = tmp_path / "res.json"
     res.write_text(json.dumps({"configs": {"c0": {"trainer": 1, "rollout": 1}}, "edges": []}))

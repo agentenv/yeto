@@ -1,0 +1,407 @@
+{
+ "C1_switch_samples_step_policy_roster": {
+  "up1_terminal": "SUCCEEDED",
+  "dn1_terminal": null,
+  "a_both_succeeded": false,
+  "b_samples_equal_per_round": true,
+  "b_detail": {
+   "island0_r0": {
+    "ok": true,
+    "base": [
+     [
+      "6ac54d62824c59fa3a8f59264bca872f865403d905926ce326c231e62752ac7d",
+      4,
+      32
+     ]
+    ],
+    "merged": [
+     [
+      "6ac54d62824c59fa3a8f59264bca872f865403d905926ce326c231e62752ac7d",
+      4,
+      32
+     ]
+    ]
+   },
+   "island0_r1": {
+    "ok": true,
+    "base": [
+     [
+      "2db44ca8e1db6f0b44c22e6134a0eb33edb7e03f9323974771a6138c41bc9a04",
+      4,
+      32
+     ]
+    ],
+    "merged": [
+     [
+      "2db44ca8e1db6f0b44c22e6134a0eb33edb7e03f9323974771a6138c41bc9a04",
+      4,
+      32
+     ]
+    ]
+   },
+   "island0_r2": {
+    "ok": true,
+    "base": [
+     [
+      "69be7217a18d7585a50c20b2a7b0af4ddc13146706816ed0c22cf668eda0aaef",
+      4,
+      32
+     ]
+    ],
+    "merged": [
+     [
+      "69be7217a18d7585a50c20b2a7b0af4ddc13146706816ed0c22cf668eda0aaef",
+      4,
+      32
+     ]
+    ]
+   },
+   "island0_r3": {
+    "ok": true,
+    "base": [
+     [
+      "b81b61f029b2c44851ed2e40e1f38e0ed04104918d79b5dde04fb3690113fb36",
+      4,
+      32
+     ]
+    ],
+    "merged": [
+     [
+      "b81b61f029b2c44851ed2e40e1f38e0ed04104918d79b5dde04fb3690113fb36",
+      4,
+      32
+     ]
+    ]
+   },
+   "island0_r4": {
+    "ok": true,
+    "base": [
+     [
+      "c9e424bfbd495a5e384a32516b0b7527bcb742e2256e4a12c04d0c4a28588d8d",
+      4,
+      32
+     ]
+    ],
+    "merged": [
+     [
+      "c9e424bfbd495a5e384a32516b0b7527bcb742e2256e4a12c04d0c4a28588d8d",
+      4,
+      32
+     ]
+    ]
+   },
+   "island0_r5": {
+    "ok": true,
+    "base": [
+     [
+      "d22bc0f35a19def136a29bce010ec380f14c53d3f64466271923635fc39b42a9",
+      4,
+      32
+     ]
+    ],
+    "merged": [
+     [
+      "d22bc0f35a19def136a29bce010ec380f14c53d3f64466271923635fc39b42a9",
+      4,
+      32
+     ]
+    ]
+   },
+   "island1_r0": {
+    "ok": true,
+    "base": [
+     [
+      "6ac54d62824c59fa3a8f59264bca872f865403d905926ce326c231e62752ac7d",
+      4,
+      32
+     ]
+    ],
+    "merged": [
+     [
+      "6ac54d62824c59fa3a8f59264bca872f865403d905926ce326c231e62752ac7d",
+      4,
+      32
+     ]
+    ]
+   },
+   "island1_r1": {
+    "ok": true,
+    "base": [
+     [
+      "2db44ca8e1db6f0b44c22e6134a0eb33edb7e03f9323974771a6138c41bc9a04",
+      4,
+      32
+     ]
+    ],
+    "merged": [
+     [
+      "2db44ca8e1db6f0b44c22e6134a0eb33edb7e03f9323974771a6138c41bc9a04",
+      4,
+      32
+     ]
+    ]
+   },
+   "island1_r2": {
+    "ok": true,
+    "base": [
+     [
+      "69be7217a18d7585a50c20b2a7b0af4ddc13146706816ed0c22cf668eda0aaef",
+      4,
+      32
+     ]
+    ],
+    "merged": [
+     [
+      "69be7217a18d7585a50c20b2a7b0af4ddc13146706816ed0c22cf668eda0aaef",
+      4,
+      32
+     ]
+    ]
+   },
+   "island1_r3": {
+    "ok": true,
+    "base": [
+     [
+      "b81b61f029b2c44851ed2e40e1f38e0ed04104918d79b5dde04fb3690113fb36",
+      4,
+      32
+     ]
+    ],
+    "merged": [
+     [
+      "b81b61f029b2c44851ed2e40e1f38e0ed04104918d79b5dde04fb3690113fb36",
+      4,
+      32
+     ]
+    ]
+   },
+   "island1_r4": {
+    "ok": true,
+    "base": [
+     [
+      "c9e424bfbd495a5e384a32516b0b7527bcb742e2256e4a12c04d0c4a28588d8d",
+      4,
+      32
+     ]
+    ],
+    "merged": [
+     [
+      "c9e424bfbd495a5e384a32516b0b7527bcb742e2256e4a12c04d0c4a28588d8d",
+      4,
+      32
+     ]
+    ]
+   },
+   "island1_r5": {
+    "ok": true,
+    "base": [
+     [
+      "d22bc0f35a19def136a29bce010ec380f14c53d3f64466271923635fc39b42a9",
+      4,
+      32
+     ]
+    ],
+    "merged": [
+     [
+      "d22bc0f35a19def136a29bce010ec380f14c53d3f64466271923635fc39b42a9",
+      4,
+      32
+     ]
+    ]
+   }
+  },
+  "c_island0_one_step_per_round": {
+   "one_round_trained_each": true,
+   "train_steps": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6
+   ],
+   "increment_by_1": true
+  },
+  "c_island1_one_step_per_round": {
+   "one_round_trained_each": true,
+   "train_steps": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6
+   ],
+   "increment_by_1": true
+  },
+  "c_step_unchanged": true,
+  "d_global_hash_equal_both_islands": true,
+  "d_publication_token_follows_apply": true,
+  "e_syncer_roster_merged": [
+   [
+    0,
+    1
+   ],
+   [
+    0,
+    1
+   ],
+   [
+    0,
+    1
+   ],
+   [
+    0,
+    1
+   ],
+   [
+    0,
+    1
+   ],
+   [
+    0,
+    1
+   ]
+  ],
+  "e_syncer_roster_base": [
+   [
+    0,
+    1
+   ],
+   [
+    0,
+    1
+   ],
+   [
+    0,
+    1
+   ],
+   [
+    0,
+    1
+   ],
+   [
+    0,
+    1
+   ],
+   [
+    0,
+    1
+   ]
+  ],
+  "e_roster_always_both_and_equal_base": true,
+  "verdict": false
+ },
+ "C2_quorum_pull_resend": {
+  "pull_resend_events": {
+   "0": [
+    {
+     "time_unix": 1791487187.0754325,
+     "global_step": 1,
+     "round_attempt": 1,
+     "pulls_received": 2
+    },
+    {
+     "time_unix": 1791487711.2901547,
+     "global_step": 3,
+     "round_attempt": 1,
+     "pulls_received": 2
+    },
+    {
+     "time_unix": 1791487711.2903981,
+     "global_step": 3,
+     "round_attempt": 1,
+     "pulls_received": 3
+    },
+    {
+     "time_unix": 1791487711.2905676,
+     "global_step": 3,
+     "round_attempt": 1,
+     "pulls_received": 4
+    }
+   ],
+   "1": [
+    {
+     "time_unix": 1791487180.8472953,
+     "global_step": 1,
+     "round_attempt": 1,
+     "pulls_received": 2
+    }
+   ]
+  },
+  "up1_window_wall": [
+   1791487319.7687285,
+   1791487689.2114756
+  ],
+  "resends_in_up_window": {
+   "0": [
+    3,
+    3,
+    3
+   ],
+   "1": []
+  },
+  "a_at_least_one_resend": true,
+  "b_no_strict_failure": true,
+  "c_island1_finalized": true,
+  "d_roster_unchanged": true,
+  "up_pause_rollout_id": 2,
+  "e_that_round_completed": true,
+  "injection_seen_in_log": true,
+  "verdict": true
+ },
+ "C3_finalization_refuses": {
+  "fin1_records": [],
+  "fin1_status_file": {
+   "rejected": "expected config epoch 2, current is 1",
+   "request_id": "fin1"
+  },
+  "a_rejected_or_cancelled": false,
+  "finalization_records": [
+   {
+    "kind": "finalization",
+    "monotonic": 1463.147065059,
+    "rollout_id": 6,
+    "seq": 27,
+    "wall_time": 1791487994.388982
+   }
+  ],
+  "b_config_epoch_end": 1,
+  "b_config_epoch_unchanged": false,
+  "verdict": false
+ },
+ "obs_plan_3.8_4.4_v2_s2": {
+  "pause_decisions": [
+   {
+    "request_id": null,
+    "tx_id": "tx-0-912d99850b5b-up1",
+    "rollout_id": 2,
+    "outer_phase": "round-boundary-published",
+    "allowed": true,
+    "stalls_peers": true,
+    "budget_s": 480.0,
+    "quorum_timeout_s": 120.0,
+    "margin": 4.0,
+    "idle_flow_timeout_s": null
+   }
+  ],
+  "executed_tx_pause_ok": true,
+  "no_conflicting_or_invalid_pull_permit": true,
+  "syncer_responded_per_step": {
+   "1:0": 1,
+   "1:1": 1,
+   "2:0": 1,
+   "2:1": 1,
+   "3:0": 1,
+   "3:1": 1,
+   "4:0": 1,
+   "4:1": 1,
+   "5:0": 1,
+   "5:1": 1,
+   "6:0": 1,
+   "6:1": 1
+  }
+ },
+ "C4_idle_flow_probe": "not run separately (head on Nebius public IP; see review \u00a72); if C2 shows a dropped flow -> environment-blocked",
+ "C5_report_note": "rollout capability only (no trainer edges)"
+}

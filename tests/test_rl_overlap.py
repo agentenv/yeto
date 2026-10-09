@@ -142,7 +142,7 @@ def test_eval_in_flight_blocks_a_quiescent_cut():
 
 
 def test_loop_handle_progresses_cooperatively_on_the_island_loop():
-    from yeto.rl.engine.miles_adapter import LoopRunner
+    from yeto.rl.adapters.miles import LoopRunner
 
     runner = LoopRunner(asyncio.new_event_loop())
     order = []
@@ -172,7 +172,7 @@ def test_loop_handle_progresses_cooperatively_on_the_island_loop():
 
 
 def test_loop_handle_cancel_waits_for_the_task_to_end():
-    from yeto.rl.engine.miles_adapter import LoopRunner
+    from yeto.rl.adapters.miles import LoopRunner
 
     runner = LoopRunner(asyncio.new_event_loop())
     state = []

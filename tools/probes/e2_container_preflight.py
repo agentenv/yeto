@@ -2,7 +2,7 @@
 
 usage: python e2_container_preflight.py <run-name> <learner-args-file> <harness.json|-> <out.json>
 
-Runs the real ``yeto.rl.learner.main`` with ``--rl-print-attestation-fingerprint``
+Runs the real ``yeto.rl.adapters.miles.island_entry.main`` with ``--rl-print-attestation-fingerprint``
 (INFRA-E1: builds and verifies the ports launch exactly like a real run --
 Megatron-Bridge provider, translate_run_config, Miles parse_args + validate,
 verify_ports_algorithm -- then exits before Ray/GPU/sync), captures the parsed

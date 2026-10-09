@@ -9,8 +9,8 @@ from tests.sao_recipe_reference import apply_sao_online_recipe
 from yeto.rl import sao_streaming_runtime as legacy
 from yeto.rl.algos import sao
 from yeto.rl.engine.algorithm import AlgorithmSpec, AlgorithmSpecError, load_extensions
-from yeto.rl.engine.miles_adapter.algo_flag_rows import sao_fork_argv
-from yeto.rl.engine.miles_adapter.algorithm_flags import algorithm_argv
+from yeto.rl.adapters.miles.algo_flag_rows import sao_fork_argv
+from yeto.rl.adapters.miles.algorithm_flags import algorithm_argv
 
 load_extensions()
 

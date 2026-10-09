@@ -4,7 +4,7 @@
 model provider into an immutable :class:`RLRunConfig`.  All validation and
 derivation that does not depend on a particular RL engine lives here; each
 engine then owns a pure translation of the config into its own launch
-arguments (legacy: ``yeto.rl.learner.build_miles_argv``; ports:
+arguments (legacy: ``yeto.rl.adapters.miles.island_entry.build_miles_argv``; ports:
 ``miles_adapter/config.py``).  Both paths start from the same resolved config,
 so equivalence runs are guaranteed identical inputs.
 
@@ -309,8 +309,11 @@ class LrSchedule:
 
 
 # The Miles/Megatron flags of a schedule (``--lr-decay-style`` ...) are the
-# Miles adapter's translation: yeto.rl.engine.miles_adapter.lr_schedule
+# Miles adapter's translation: yeto.rl.adapters.miles.lr_schedule
 # (decoupling 4.1). The schedule decision itself stays here.
+
+
+LR_SCHEDULE_CHOICES = ("auto", "linear", "constant")
 
 
 def resolve_lr_schedule(
@@ -322,18 +325,35 @@ def resolve_lr_schedule(
     rollout_batch_size: int,
     n_samples_per_prompt: int,
     global_batch: int,
+    island_scheduling: str = "legacy",
+    requested: str = "auto",
 ) -> LrSchedule | None:
-    """The island's LR schedule, decided by the sync mode (design D1-D3).
+    """The island's LR schedule (design D1-D3), ``--rl-lr-schedule`` (S17 N16).
+
+    ``auto`` (default) keeps the mode rule: decoupled and elastic islands run
+    until the syncer stops them (an elastic island that re-JOINs needs local
+    rounds past ``global_rounds``; S17 N5 a73ab1b2), so any finite linear
+    horizon can reach zero mid-run -> constant; strict-avg / dense-full /
+    single island -> linear over ``global_rounds * optimizer_steps``.
+    ``constant`` holds the LR in every mode (e.g. a single island compared
+    with a fixed-LR baseline; S17 N4 had to approximate it with a 20000-step
+    linear horizon). ``linear`` is refused where the horizon is unknown.
 
     Both engine translations (legacy ``_legacy_miles_argv`` and ports
     ``translate_run_config``) emit exactly this schedule.
     """
 
+    if requested not in LR_SCHEDULE_CHOICES:
+        raise ValueError(f"--rl-lr-schedule must be one of {LR_SCHEDULE_CHOICES}, got {requested!r}")
     if eval_only:
         return None
     horizon = global_rounds * optimizer_steps
-    if sync_preset == "decoupled":
-        # Run-until-stop: the local step count is unknown up front.
+    run_until_stop = sync_preset == "decoupled" or island_scheduling == "elastic"
+    if requested == "linear" and run_until_stop:
+        raise ValueError(
+            "--rl-lr-schedule linear needs a known local step count; decoupled and "
+            "elastic islands run until the syncer stops them (use auto or constant)")
+    if requested == "constant" or (requested == "auto" and run_until_stop):
         # decay_iters only satisfies Megatron's ``lr_decay_steps > 0``; a
         # constant schedule never reads it.
         return LrSchedule("constant", horizon)
@@ -483,23 +503,16 @@ def select_gdn_recipe(provider) -> GdnRecipe:
     )
 
 
+def _rules():
+    """Backend-specific checks of the run (decoupling 4.2): Miles -> adapters/miles/run_config_rules."""
+    from . import backends
+
+    return backends.module("run_config_rules", backends.DEFAULT_BACKEND)
+
+
 def _resolve_ref_load(args, model_path) -> str:
-    configured = getattr(args, "megatron_ref_load", None)
-    if configured is None:
-        return str(model_path)
-    configured_path = Path(configured).expanduser()
-    if not configured_path.is_absolute():
-        raise ValueError("--megatron-ref-load must be an absolute local path")
-    if configured_path.is_symlink() or not configured_path.is_dir():
-        raise ValueError("--megatron-ref-load must be a real local directory")
-    release_marker = configured_path / "latest_checkpointed_iteration.txt"
-    try:
-        marker = release_marker.read_text(encoding="utf-8").strip()
-    except OSError as exc:
-        raise ValueError("--megatron-ref-load has no readable release marker") from exc
-    if release_marker.is_symlink() or marker != "release":
-        raise ValueError("--megatron-ref-load is not a release checkpoint")
-    return str(configured_path.resolve())
+    """Reference-model path; the checkpoint-format rules belong to the backend (4.2)."""
+    return _rules().resolve_ref_load(args, model_path)
 
 
 def _validate_callable_spec(spec: str) -> None:
@@ -580,16 +593,15 @@ def resolve_rl_run_config(
     tensor_parallel = getattr(args, "tensor_parallel", 1)
     pipeline_parallel = getattr(args, "pipeline_parallel", 1)
     model_parallel = tensor_parallel * pipeline_parallel
-    if tensor_parallel <= 0 or pipeline_parallel <= 0 or actor_gpus % model_parallel:
-        raise ValueError("Miles actor world must be divisible by TP*PP")
+    rules = _rules()
+    rules.check_trainer_parallel(actor_gpus, tensor_parallel, pipeline_parallel)
     is_moe = getattr(provider, "num_moe_experts", None) is not None
     expert_parallel = getattr(args, "expert_parallel", None) or (
         actor_gpus if is_moe else 1
     )
     if not is_moe and expert_parallel != 1:
         raise ValueError("EP>1 requires a MoE model")
-    if actor_gpus % expert_parallel:
-        raise ValueError("expert parallelism must divide Miles actor world size")
+    rules.check_expert_parallel(actor_gpus, expert_parallel)
     fn_variant = qwen3_8_next_variant(args, provider)
     # the native Flash-Next plugin shards routed-expert LoRA by EP itself
     if fn_variant is None and is_moe and expert_parallel > 1 and args.lora_targets == "all-linear":
@@ -679,8 +691,7 @@ def resolve_rl_run_config(
     ref_load = (_resolve_ref_load(args, model_path) if verify_ref_load
                 else (getattr(args, "megatron_ref_load", None) or str(model_path)))
     global_batch = args.groups_per_round * args.samples_per_group // args.optimizer_steps
-    if global_batch % data_parallel:
-        raise ValueError("Miles global batch must divide evenly across DP ranks")
+    rules.check_global_batch(global_batch, data_parallel)
 
     if recipe == RECIPE_DEEPSEEK_V4_FLASH:
         expected_lora_targets = "attention" if expert_full else "attention-routed-experts"
@@ -906,6 +917,8 @@ def resolve_rl_run_config(
                 rollout_batch_size=args.groups_per_round,
                 n_samples_per_prompt=args.samples_per_group,
                 global_batch=global_batch,
+                island_scheduling=getattr(args, "rl_island_scheduling", None) or "legacy",
+                requested=getattr(args, "rl_lr_schedule", None) or "auto",
             ),
             seed=args.seed,
             critic=resolve_critic_run_config(args),

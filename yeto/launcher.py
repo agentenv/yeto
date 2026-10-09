@@ -436,7 +436,7 @@ def rl_colocated_engine_check(args, spec) -> list[dict[str, int]]:
 
 def rl_cross_node_flags(args) -> str:
     tp, engine = rl_cross_node_switches(args)
-    return (" --rl-allow-cross-node-tp" if tp else "") + (" --rl-allow-cross-node-engine-tp" if engine else "")
+    return _rl_backend_module(args, "launch_flags").cross_node_flags(tp, engine)
 
 
 def rl_island_layout(args, spec) -> tuple[int, int, dict[str, tuple[int, ...]]] | None:
@@ -452,7 +452,7 @@ def rl_island_layout(args, spec) -> tuple[int, int, dict[str, tuple[int, ...]]] 
     slots = getattr(args, "rl_elastic_initial_placement_slots", None)
     if slots is None or getattr(args, "rl_placement", "colocated") != "fixed-partition":
         return None
-    from .rl.engine.miles_adapter.placement import PlacementRequest
+    PlacementRequest = _rl_backend_module(args, "placement").PlacementRequest
     from .rl.engine.multinode import Topology, TopologyError, trainer_layout
 
     rollout = int(getattr(args, "rollout_num_gpus", 0) or 0)
@@ -507,9 +507,7 @@ def rl_island_bundle_map_flag(args, spec) -> str:
     counts = tuple(len(bundle_map[r]) for r in ("trainer", "rollout", "standby"))
     if bundle_map == leading_bundle_map(*counts):
         return ""
-    payload = json.dumps({k: list(v) for k, v in bundle_map.items()}, sort_keys=True,
-                         separators=(",", ":"))
-    return f" --rl-island-bundle-map {shlex.quote(payload)}"
+    return _rl_backend_module(args, "launch_flags").bundle_map_flag(bundle_map)
 
 
 def rl_min_nodes(args, spec) -> int:
@@ -1221,7 +1219,17 @@ def resolve_default_rl_image(args) -> None:
 
     if getattr(args, "training_mode", "sft") != "rl":
         return
+    from .rl.engine import backends
+
+    try:  # decoupling 5.4: a backend without a registered adapter is refused here
+        backends.get(getattr(args, "rl_backend", None) or backends.DEFAULT_BACKEND)
+    except backends.UnknownBackend as exc:
+        raise ValueError(str(exc)) from None
     if getattr(args, "rl_image", None) is None:
+        flags = _rl_backend_module(args, "launch_flags")
+        if getattr(flags, "DEFAULT_RL_IMAGE", None):  # rl-verl-backend: Modal-built engine image
+            args.rl_image = flags.DEFAULT_RL_IMAGE
+            return
         from .rl import default_rl_image
 
         args.rl_image = default_rl_image(getattr(args, "rl_engine", "ports"))
@@ -1453,6 +1461,14 @@ def check_cloud_prerequisites(
                 f"{SKY_CONFIG_PATH} (one Nebius project is bound to one region)"
             )
     modal_specs = [s for s in specs if s.cloud == "modal"]
+    store = str(getattr(args, "rl_checkpoint_store", None) or "") if args is not None else ""
+    if store:
+        # rl-resume-from-checkpoint 1.2: no silent drop; each cloud gets a store it can mount
+        if modal_specs:
+            modal_checkpoint_store(args)  # raises on a non-modal-volume store
+        if store.startswith("modal-volume://") and len(modal_specs) != len(specs):
+            raise ValueError("--rl-checkpoint-store modal-volume://... only mounts on Modal islands; "
+                             "use a bucket URI or a shared path for the other clouds")
     if modal_specs:
         from .modal_runner import (
             image_ref_from_rl_image,
@@ -1504,6 +1520,23 @@ def _rl_miles_function(
     parts = value.split(".")
     if len(parts) < 2 or any(not part.isidentifier() for part in parts):
         raise ValueError(f"{flag} must be package.module.function")
+
+
+def _rl_backend_image_ok(args) -> bool:
+    """A backend may accept its own --rl-image form (verl: ``verl-build:<commit>``)."""
+    check = getattr(_rl_backend_module(args, "launch_flags"), "rl_image_ok", None)
+    return bool(check and check(getattr(args, "rl_image", None) or ""))
+
+
+def _rl_backend_module(args, role: str):
+    """Adapter module for ``role`` of the selected training backend (decoupling 5.4).
+
+    The launcher never imports an adapter directly; ``--rl-backend`` (default
+    miles) picks the row of ``yeto.rl.engine.backends``.
+    """
+    from .rl.engine import backends
+
+    return backends.module(role, getattr(args, "rl_backend", None) or backends.DEFAULT_BACKEND)
 
 
 def _prepare_ports_algorithm(args, rl_engine: str) -> None:
@@ -1587,7 +1620,9 @@ def _prepare_ports_algorithm(args, rl_engine: str) -> None:
                 sync_preset=getattr(args, "rl_sync_preset", "strict-avg"),
             )
         )
-        from .rl.engine.miles_adapter.entry import miles_capabilities, with_partitioned_serial
+        _entry = _rl_backend_module(args, "entry")
+        miles_capabilities, with_partitioned_serial = (
+            _entry.miles_capabilities, _entry.with_partitioned_serial)
 
         partitioned = getattr(args, "rl_placement", "colocated") == "fixed-partition"
         capabilities = miles_capabilities(
@@ -1723,6 +1758,62 @@ NODE0_LOCAL_CHECKPOINT_WARNING = (
 )
 
 
+def _check_resume_launch_flags(args, rl_engine: str) -> bool:
+    """rl-resume-from-checkpoint: True when ``--rl-checkpoint-store`` is the non-elastic
+    resume store (``--rl-single-island-no-sync``, ports). Validates the cadence flags."""
+    store = getattr(args, "rl_checkpoint_store", None)
+    elastic = bool(getattr(args, "rl_elastic", False))
+    for name, flag in (("rl_cut_every", "--rl-cut-every"), ("rl_cut_keep", "--rl-cut-keep"),
+                       ("rl_stop_after_rounds", "--rl-stop-after-rounds")):
+        value = getattr(args, name, None)
+        if value is not None and value < 1:
+            raise ValueError(f"{flag} must be >= 1")
+        if value is not None and not store:
+            raise ValueError(f"{flag} needs --rl-checkpoint-store")
+    if getattr(args, "rl_resume_allow_config_change", False) and not store:
+        raise ValueError("--rl-resume-allow-config-change needs --rl-checkpoint-store")
+    if elastic:
+        for name, flag in (("rl_cut_keep", "--rl-cut-keep"), ("rl_stop_after_rounds", "--rl-stop-after-rounds")):
+            if getattr(args, name, None) is not None:
+                raise ValueError(f"{flag} applies to a non-elastic --rl-checkpoint-store run")
+        return False
+    if not store:
+        return False
+    if not getattr(args, "rl_single_island_no_sync", False) or rl_engine != "ports":
+        raise ValueError("--rl-checkpoint-store without --rl-elastic needs --rl-engine ports and "
+                         "--rl-single-island-no-sync (multi-island resume: rl-resume-from-checkpoint 3.3)")
+    rl_checkpoint_store_plan(args)  # validates the form
+    return True
+
+
+def modal_checkpoint_store(args) -> tuple[str, str] | None:
+    """``(volume name, path in the container)`` for a ``modal-volume://`` store, None
+    without a store. Any other store form on a Modal island is an error: Modal mounts no
+    bucket and a container path does not outlive the container (it used to be dropped
+    silently, rl-resume-from-checkpoint 1.2)."""
+    value = getattr(args, "rl_checkpoint_store", None)
+    if not value:
+        return None
+    from .cloud.modal_ckpt_store import MODAL_VOLUME_SCHEME, parse_modal_volume_uri
+
+    if not str(value).startswith(MODAL_VOLUME_SCHEME + "://"):
+        raise ValueError(f"--rl-checkpoint-store {value!r} on a Modal island: Modal mounts neither "
+                         "buckets nor host paths here; use modal-volume://NAME[/PREFIX] (a v1 Volume)")
+    name, prefix = parse_modal_volume_uri(str(value))
+    return name, MODAL_CHECKPOINT_STORE_MOUNT + (f"/{prefix}" if prefix else "")
+
+
+MODAL_CHECKPOINT_STORE_MOUNT = "/root/yeto-checkpoint-store"
+
+
+def resumes_in_new_container(args) -> bool:
+    """A Modal re-run of the island (preemption) is a resume, not a failure, when the run
+    has a non-elastic modal-volume:// store (rl-resume-from-checkpoint 2.5)."""
+    store = str(getattr(args, "rl_checkpoint_store", None) or "")
+    return (store.startswith("modal-volume://") and not getattr(args, "rl_elastic", False)
+            and bool(getattr(args, "rl_single_island_no_sync", False)))
+
+
 def rl_checkpoint_store_plan(args) -> tuple[str, str | None] | None:
     """``(path on the island, bucket URI or None)`` for ``--rl-checkpoint-store``:
     a ``scheme://`` URI is mounted at :data:`ELASTIC_CHECKPOINT_STORE_MOUNT` (sky
@@ -1732,6 +1823,11 @@ def rl_checkpoint_store_plan(args) -> tuple[str, str | None] | None:
     if not value:
         return None
     value = str(value)
+    if value.startswith("modal-volume://"):
+        from .cloud.modal_ckpt_store import parse_modal_volume_uri
+
+        _name, prefix = parse_modal_volume_uri(value)
+        return MODAL_CHECKPOINT_STORE_MOUNT + (f"/{prefix}" if prefix else ""), None
     if "://" in value:
         scheme, _, rest = value.partition("://")
         if not scheme.isalnum() or not rest.strip("/") or rest.startswith("/"):
@@ -1838,8 +1934,7 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
     sample_s = getattr(args, "rl_resource_sample_interval", None)
     if sample_s is not None and (rl_engine != "ports" or sample_s < 0):
         raise ValueError("--rl-resource-sample-interval needs --rl-engine ports and a value >= 0")
-    from yeto.rl.engine.miles_adapter.elastic_hook import check_recommend_flags
-    check_recommend_flags(args)
+    _rl_backend_module(args, "elastic_hook").check_recommend_flags(args)
     dropout = getattr(args, "rl_lora_dropout", None)
     if dropout is not None and (rl_engine != "ports" or not 0.0 <= dropout < 1.0):
         raise ValueError("--rl-lora-dropout needs --rl-engine ports and a value in [0, 1)")
@@ -1869,7 +1964,8 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
         given.append("--rl-elastic-trainer-edges")
     if getattr(args, "rl_elastic_accept_rebind", False):
         given.append("--rl-elastic-accept-rebind")
-    if getattr(args, "rl_checkpoint_store", None):
+    resume_store = _check_resume_launch_flags(args, rl_engine)
+    if getattr(args, "rl_checkpoint_store", None) and not resume_store:
         given.append("--rl-checkpoint-store")
     if getattr(args, "rl_elastic_declare_cells", False):
         given.append("--rl-elastic-declare-cells")
@@ -1989,8 +2085,7 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         flags += " --rl-observe-timeline"
     if getattr(args, "rl_resource_sample_interval", None) is not None:
         flags += f" --rl-resource-sample-interval {float(args.rl_resource_sample_interval)!r}"
-    from yeto.rl.engine.miles_adapter.elastic_hook import recommend_flags
-    flags += recommend_flags(args)
+    flags += _rl_backend_module(args, "elastic_hook").recommend_flags(args)
     if getattr(args, "rl_deterministic_trainer", False):
         flags += " --rl-deterministic-trainer"
     if getattr(args, "rl_lora_dropout", None) is not None:
@@ -2003,9 +2098,23 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         flags += " --rl-print-attestation-fingerprint"
     if getattr(args, "rl_boot_only", False):
         flags += " --rl-boot-only"
+    if (getattr(args, "rl_lr_schedule", None) or "auto") != "auto":  # auto adds nothing
+        flags += f" --rl-lr-schedule {args.rl_lr_schedule}"
     if island_scheduling_mode(args) == "elastic":  # legacy adds nothing
         flags += (" --rl-island-scheduling elastic"
                   f" --rl-syncer-epoch {island_syncer_epoch(args)}")
+    resume_store = (rl_checkpoint_store_plan(args)
+                    if getattr(args, "rl_checkpoint_store", None) and not getattr(args, "rl_elastic", False)
+                    else None)
+    if resume_store is not None:  # rl-resume-from-checkpoint: non-elastic resume store
+        flags += f" --rl-resume-store {shlex.quote(resume_store[0])}"
+        for name, flag in (("rl_cut_keep", "--rl-cut-keep"), ("rl_stop_after_rounds", "--rl-stop-after-rounds")):
+            if getattr(args, name, None) is not None:
+                flags += f" {flag} {int(getattr(args, name))}"
+    if getattr(args, "rl_checkpoint_store", None) and getattr(args, "rl_cut_every", None) is not None:
+        flags += f" --rl-cut-every {int(args.rl_cut_every)}"
+    if getattr(args, "rl_checkpoint_store", None) and getattr(args, "rl_resume_allow_config_change", False):
+        flags += " --rl-resume-allow-config-change"
     if getattr(args, "rl_elastic", False):
         prelude += (
             "mkdir -p ~/yeto-rl && printf '%s' "
@@ -2037,7 +2146,7 @@ def _ports_infra_flags(args) -> tuple[str, str]:
                 flags += f" {flag} {value!r}"
         delay = getattr(args, "rl_test_inject_start_delay_s", None)
         if delay is not None:
-            from .rl.engine.miles_adapter.rollout import INJECT_START_DELAY_ENV
+            INJECT_START_DELAY_ENV = _rl_backend_module(args, "rollout").INJECT_START_DELAY_ENV
 
             prelude += f"export {INJECT_START_DELAY_ENV}={float(delay)!r}\n"
         for name, _flag, env in _ELASTIC_TEST_EXPORTS:
@@ -2052,7 +2161,7 @@ def _ports_infra_flags(args) -> tuple[str, str]:
             args.rl_learner_launch_prefix = "yeto_rl_restart_loop "
         block = getattr(args, "rl_test_inject_update_weights_block_s", None)
         if block is not None:
-            from .rl.engine.miles_adapter.publish import INJECT_UPDATE_BLOCK_ENV
+            INJECT_UPDATE_BLOCK_ENV = _rl_backend_module(args, "publish").INJECT_UPDATE_BLOCK_ENV
 
             prelude += f"export {INJECT_UPDATE_BLOCK_ENV}={float(block)!r}\n"
         if getattr(args, "rl_elastic_attestation_json", None):
@@ -2581,7 +2690,7 @@ def _prepare_rl_args(
     _rl_callable(args.reward_function, "--reward-function", required=True)
     if not re.fullmatch(
         r"docker:[^\s@]+@sha256:[0-9a-fA-F]{64}", args.rl_image or ""
-    ):
+    ) and not _rl_backend_image_ok(args):
         raise ValueError(
             "--rl-image must be docker:<repository>@sha256:<64 hex digest>"
         )
@@ -3084,7 +3193,7 @@ def _sky_docker_login_config(login: dict[str, str]):
 def _miles_source_setup(rl_engine: str = "ports", overlay: str | None = None) -> tuple[str, str]:
     """Return the (miles_setup, sglang_setup) remote steps for ``rl_engine``.
 
-    ``overlay`` (ports only, default None = off): a :mod:`yeto.rl.miles_overlay`
+    ``overlay`` (ports only, default None = off): a :mod:`yeto.rl.adapters.miles.overlay`
     patch applied to the image's ~/miles after the checkout checks.
     """
 
@@ -3244,7 +3353,7 @@ def _miles_source_setup(rl_engine: str = "ports", overlay: str | None = None) ->
 # ``_codex_harness_contract`` the SSH harness uses, mounts the directory at
 # ``CODEX_CONTAINER_DIR`` (sky file_mounts / Modal add_local_dir) and injects
 # the ``YETO_CODEX_*`` environment the container preflights check
-# (``yeto.rl.learner._preflight_codex_harness`` expected_env and
+# (``yeto.rl.adapters.miles.island_entry._preflight_codex_harness`` expected_env and
 # ``codex_harness_agent._attest_runtime``); every value comes from the contract.
 CODEX_BUNDLE_DIR_ENV = "YETO_CODEX_BUNDLE_DIR"
 CODEX_CONTAINER_DIR = "/opt/yeto/codex"
@@ -3468,6 +3577,33 @@ def codex_harness_launch(args, environ=None) -> tuple[str, dict[str, str], dict[
     envs.update(compaction_env)  # {} unless the spec is CompactionRL
     mounts = {CODEX_CONTAINER_DIR: str(Path(bundle_dir).expanduser().resolve())}
     return flags, envs, mounts
+
+
+HEAD_CODEX_BUNDLE_PATH = "~/yeto-codex-bundle"
+
+
+def codex_head_staging(args, environ=None) -> tuple[dict[str, str], dict[str, str]]:
+    """(head file_mounts, head-job secret envs) for a signed Codex run under
+    ``--controller head`` (S17 M1).
+
+    The head VM replays the launch and builds every island itself, so it needs
+    what ``codex_harness_launch`` reads on the submitter: the bundle directory
+    (staged at ``HEAD_CODEX_BUNDLE_PATH``; the caller points
+    ``args.codex_bundle_dir`` there) and the harness env (provider, TB2 knobs,
+    reward HMAC key, Modal token).  The env goes as sky secrets (redacted),
+    never as plain envs.  Returns ({}, {}) for a non-Codex run; fails closed
+    exactly like ``codex_harness_launch`` (attests the local bundle first).
+    """
+    environ = os.environ if environ is None else environ
+    if codex_harness_launch(args, environ) is None:
+        return {}, {}
+    bundle_dir = getattr(args, "codex_bundle_dir", None) or environ.get(CODEX_BUNDLE_DIR_ENV)
+    mounts = {HEAD_CODEX_BUNDLE_PATH: str(Path(bundle_dir).expanduser().resolve())}
+    secrets = {name: environ[name] for name in (HARNESS_PREFLIGHT_ENV, *HARNESS_PASSTHROUGH_ENV)
+               if environ.get(name)}
+    secrets.update({name: value for name, value in environ.items()
+                    if name.startswith(HARNESS_PASSTHROUGH_ENV_PREFIXES) and value})
+    return mounts, secrets
 
 
 def _json_compact(value) -> str:
@@ -3824,9 +3960,12 @@ def make_miles_island_task(
         )
     from .rl.miles_overlay import resolve_overlay
 
-    miles_setup, sglang_setup = _miles_source_setup(
-        getattr(args, "rl_engine", "ports"), resolve_overlay(args)
-    )
+    if getattr(_rl_backend_module(args, "launch_flags"), "NEEDS_MILES_SOURCE", True):
+        miles_setup, sglang_setup = _miles_source_setup(
+            getattr(args, "rl_engine", "ports"), resolve_overlay(args)
+        )
+    else:  # rl-verl-backend: the engine image carries its own pinned source
+        miles_setup = sglang_setup = ": # no Miles/SGLang checkout for this backend"
     model = resolve(args.model)
     if is_local_reference(model):
         prefetch = ": # local model; no Hub prefetch"
@@ -4032,7 +4171,7 @@ def make_miles_island_task(
             '  RAY_ADDRESS="$MASTER_ADDR:6379" '
             f"PYTHONPATH={island_pythonpath}$HOME/sglang/python:$HOME/sky_workdir{island_megatron_path}"
             "${PYTHONPATH:+:$PYTHONPATH} "
-            f"{getattr(args, 'rl_learner_launch_prefix', '')}python3 -m yeto.rl.learner{flags}"
+            f"{getattr(args, 'rl_learner_launch_prefix', '')}python3 -m {_rl_backend_module(args, 'launch_flags').ISLAND_ENTRY_MODULE}{flags}"
             f"{_island_post_cmd(args)}\n"
             "else\n"
             # rl-multinode-island D1: the trap is armed before the join loop so a
@@ -4104,6 +4243,11 @@ def make_miles_island_task(
             mode=sky.StorageMode.MOUNT,
             sync_on_reconstruction=True,
         )
+    if getattr(args, "rl_checkpoint_store", None) and not getattr(args, "rl_elastic", False):
+        store = rl_checkpoint_store_plan(args)  # resume store: same bucket mount on sky
+        if store is not None and store[1] is not None:
+            storage_mounts[ELASTIC_CHECKPOINT_STORE_MOUNT] = sky.Storage(
+                source=store[1], mode=sky.StorageMode.MOUNT, persistent=True)
     if getattr(args, "rl_elastic", False):
         # rl-multinode-island Q4 (C5): the consistent checkpoint (journal + cuts) must
         # outlive node0 for a rebuild on other machines; a bucket URI is mounted on
@@ -4835,7 +4979,7 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         envs["CRITIC_SYNCER_ADDR"] = critic_syncer_address(syncer_addr)
     if rl and getattr(args, "rl_engine", "ports") != "ports":
         # Legacy Miles' own router launch misses its 30 s deadline on Modal's
-        # CPUs (see yeto.rl.learner.start_external_sglang_router).  Upstream
+        # CPUs (see yeto.rl.adapters.miles.island_entry.start_external_sglang_router).  Upstream
         # Miles (ports) launches its router as a Ray worker with a 120 s
         # budget and has no external router mode.
         envs["YETO_RL_EXTERNAL_ROUTER"] = "1"
@@ -4850,6 +4994,13 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
     if "HF_TOKEN" not in envs and os.path.isfile(token_path):
         with open(token_path, encoding="utf-8") as f:
             envs["HF_TOKEN"] = f.read().strip()
+    store_volume = modal_checkpoint_store(args) if rl else None
+    if store_volume is not None:
+        from .cloud.modal_ckpt_store import MODAL_VOLUME_ENV, STORE_IMPL
+        from .rl.engine.resume import STORE_IMPL_ENV
+
+        envs[MODAL_VOLUME_ENV] = store_volume[0]  # the learner commits this Volume
+        envs[STORE_IMPL_ENV] = STORE_IMPL  # the island builds the Modal store from yeto.cloud
     volume_name = volume_mount = None
     if rl and getattr(args, "spot", False):
         volume_name = _rl_checkpoint_storage_name(args.cluster_prefix, learner_id)
@@ -4894,6 +5045,8 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         codex_dir=codex_dir,
         codex_mount=CODEX_CONTAINER_DIR if codex_dir else None,
         extra_mounts=extra_mounts,
+        checkpoint_store_volume_name=None if store_volume is None else store_volume[0],
+        checkpoint_store_mount=None if store_volume is None else MODAL_CHECKPOINT_STORE_MOUNT,
         tape_volume_name=getattr(args, "modal_tape_volume", None) or None,
         model_volume_name=(getattr(args, "modal_model_volume", None) or None) if rl else None,
         model_volume_mount=MODEL_STORE_MOUNT if rl and getattr(args, "modal_model_volume", None) else None,
@@ -7008,7 +7161,23 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         event_collectors: dict[str, EventCollector] = {}
         container_guards: list = []
 
+        resume_on_new_container = resumes_in_new_container(args)
+
         def on_container_change(message: str) -> None:
+            if resume_on_new_container:
+                # rl-resume-from-checkpoint: the Volume store carries LATEST; the re-run
+                # container resumes from the newest complete cut instead of starting over.
+                print(f"[launcher] WARNING: {message}; the island resumes from its "
+                      "modal-volume checkpoint store (no failure)", file=sys.stderr, flush=True)
+                if events_dir is not None:
+                    try:
+                        with open(Path(events_dir) / "launcher-errors.jsonl", "a") as fh:
+                            fh.write(json.dumps({"event": "modal_container_changed", "level": "warning",
+                                                 "resume": True, "message": message,
+                                                 "time": time.time()}) + "\n")
+                    except OSError:
+                        pass
+                return
             print(f"[launcher] ERROR: {message}; failing the run (exit {CONTAINER_CHANGED_EXIT}) "
                   "and stopping the Modal app", file=sys.stderr, flush=True)
             if events_dir is not None:
@@ -7024,7 +7193,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 print(f"[launcher] modal app stop failed: {e}", file=sys.stderr, flush=True)
 
         def container_changed() -> bool:
-            return any(g.tripped for g in container_guards)
+            return not resume_on_new_container and any(g.tripped for g in container_guards)
 
         if syncer_cluster is not None:
             spawn_tail(syncer_cluster, syncer_job)
@@ -7179,7 +7348,14 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 "checkpoint -- use the streamed island log / event tape as the evidence",
                 file=sys.stderr,
             )
-            return 2
+            # S17 N16: the run itself is judged by the island outcome (its tape
+            # was already checked complete above).  Only an explicit --output
+            # the launcher cannot honour stays exit 2.
+            if output:
+                print(f"[launcher] --output {output} cannot be delivered from a "
+                      "Modal no-sync island; exit 2", file=sys.stderr)
+                return 2
+            return 1 if failed else 0
         elif source in modal_cfgs:
             print(
                 f"[launcher] every successful learner ran on Modal ({source}); its "
@@ -7414,7 +7590,7 @@ def dry_run_plan(args) -> dict:
                 args, spec, learner_id, len(specs) + external, "$SYNCER_ADDR"
             )
             entry["learner_command"] = next(
-                (line.strip() for line in task.run.splitlines() if "yeto.rl.learner" in line),
+                (line.strip() for line in task.run.splitlines() if _rl_backend_module(args, "launch_flags").ISLAND_ENTRY_MODULE in line),
                 None,
             )
         islands.append(entry)

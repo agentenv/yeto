@@ -85,8 +85,11 @@ def test_late_island_ends_normally_when_the_syncer_finished(tmp_path, send_finis
     _driver(engine, sync, tmp_path).run()  # no exception: a normal end (exit 0)
     tape = [json.loads(l) for l in (tmp_path / "events.jsonl").read_text().splitlines()]
     done = [e for e in tape if e["event"] == "elastic_finished"]
-    assert len(done) == 1 and done[0]["final_outer_version"] == 3
-    assert done[0]["reason"] == ("FINISHED" if send_finished else "connection closed after the final version")
+    # S17 M1: the island stops as soon as it applied the final outer version (here right after its
+    # first delta), so it no longer pushes one more delta into the finished syncer; the FINISHED
+    # path (elastic_finished) is then only taken when the push races the end (next test).
+    assert sync.base_version == 3 and done == []
+    assert sum(e["event"] == "rl_local_round" for e in tape) == 1
     if send_finished:  # LEAVE first so the syncer can exit before its grace window ends
         assert fake.leaves == 1
     client.close()
@@ -101,3 +104,21 @@ def test_disconnect_before_the_final_version_is_still_an_error():
     c.latest_base = ElasticBase(0, 6, (0.0,))
     with pytest.raises(ElasticFinished):
         c.raise_if_finished()
+
+
+def test_push_racing_the_end_takes_the_finished_path(tmp_path):
+    """The base the island holds is not final yet, but the syncer finished meanwhile:
+    FINISHED arrives before the next push and the island ends via elastic_finished."""
+    fake = FinishingSyncer(final=3, send_finished=True)
+    engine = _engine(torch.tensor([1.0, 3.0]))
+    client = ElasticIslandClient(
+        ElasticClientConfig(("x", 0), 0, lease_s=30.0, join_timeout_s=2, heartbeat_connection=False),
+        KEY, connect=fake.connect)
+    sync = ElasticAvgSync(_strict_config(tmp_path, engine, learner_id=0, rounds=4), client=client,
+                          base_wait_s=5.0)
+    _driver(engine, sync, tmp_path).run()
+    tape = [json.loads(l) for l in (tmp_path / "events.jsonl").read_text().splitlines()]
+    done = [e for e in tape if e["event"] == "elastic_finished"]
+    assert len(done) == 1 and done[0]["final_outer_version"] == 3 and done[0]["reason"] == "FINISHED"
+    assert fake.leaves == 1
+    client.close()

@@ -20,7 +20,7 @@ from yeto import launcher
 from yeto.rl.elastic_benchmark.capabilities import (Attestation, attestation_from_dict,
                                                     parse_configs, validate_edges)
 from yeto.rl.engine.controller import read_journal
-from yeto.rl.engine.miles_adapter.elastic_hook import elastic_hook_for
+from yeto.rl.adapters.miles.elastic_hook import elastic_hook_for
 from yeto.rl.profiles import qwen3_8_next as q
 
 MANIFEST = Path(__file__).resolve().parent / "multinode_gpu" / "resources-fn-4x8.json"

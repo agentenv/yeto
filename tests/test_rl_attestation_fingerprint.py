@@ -13,7 +13,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).parent))
 
 from yeto.rl import learner as rl_learner  # noqa: E402
-from yeto.rl.engine.miles_adapter import entry  # noqa: E402
+from yeto.rl.adapters.miles import entry  # noqa: E402
 
 
 def _launch():
@@ -22,7 +22,7 @@ def _launch():
     from test_rl_argv_snapshot import _captured_args
     from yeto.rl.engine import run_config as rc
     from yeto.rl.engine.algorithm import AlgorithmSpec
-    from yeto.rl.engine.miles_adapter import config as mc
+    from yeto.rl.adapters.miles import config as mc
 
     (base,), kwargs = _captured_args()
     part = argparse.Namespace(**{**vars(base), "rl_placement": "fixed-partition",

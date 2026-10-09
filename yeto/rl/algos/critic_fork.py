@@ -36,7 +36,7 @@ non-default variant is refused by the fork.
 The spec-level ``*_not_at_pin`` rejections check :data:`CRITIC_FORK_PIN`
 against :data:`FORK_COMMITS` (the loss_variants precedent). The ports image
 still ships ``yeto.rl.MILES_NEXT_COMMIT`` (c35702e); a run gets the pinned code
-only through the island-setup overlay (:mod:`yeto.rl.miles_overlay`, patch
+only through the island-setup overlay (:mod:`yeto.rl.adapters.miles.overlay`, patch
 c35702e..pin, sha256-checked, recorded as "image c35702e + overlay <sha256>").
 The mechanisms stay undeclared (``--rl-allow-unverified-mechanism``) until GPU G1.
 """

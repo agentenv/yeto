@@ -29,10 +29,10 @@ from yeto.rl.engine.controller import (
 )
 from yeto.rl.engine.driver import DriverError
 from yeto.rl.engine.journal import read_journal
-from yeto.rl.engine.miles_adapter import LoopRunner
-from yeto.rl.engine.miles_adapter.rebuild_wiring import make_trainer_rebuilder
-from yeto.rl.engine.miles_adapter.trainer import MilesTrainerGroup
-from yeto.rl.engine.miles_adapter.trainer_rebuild import SwappableActor, rebuild_same_shape
+from yeto.rl.adapters.miles import LoopRunner
+from yeto.rl.adapters.miles.rebuild_wiring import make_trainer_rebuilder
+from yeto.rl.adapters.miles.trainer import MilesTrainerGroup
+from yeto.rl.adapters.miles.trainer_rebuild import SwappableActor, rebuild_same_shape
 
 from test_rl_engine_driver import _strict_config, _strict_syncer
 from test_rl_reconfig_e1 import _setup
@@ -335,7 +335,7 @@ def test_miles_rebuilder_refuses_before_touching_the_trainer(tmp_path):
 
 
 def test_entry_wires_the_rebuilder_only_for_a_swappable_actor(tmp_path):
-    from yeto.rl.engine.miles_adapter import entry
+    from yeto.rl.adapters.miles import entry
 
     driver, ctl, *_ = _island(tmp_path)
     ctl.trainer_rebuilder = None
@@ -368,7 +368,7 @@ def test_rebuild_preconditions_refuse_before_any_write(tmp_path):
     rank, actor = _trained_actor()
     trainer = MilesTrainerGroup(args=ARGS, actor_model=actor, learner_id=0, learner_generation=0,
                                 parameter_layout_hash=lambda: "L", runner=LoopRunner())
-    from yeto.rl.engine.miles_adapter.trainer_rebuild import rebuild_preconditions
+    from yeto.rl.adapters.miles.trainer_rebuild import rebuild_preconditions
 
     args = SimpleNamespace(**{**vars(ARGS), "requested_load": "/ckpt"})
     rebuilder = make_trainer_rebuilder(
@@ -384,7 +384,7 @@ def test_rebuild_preconditions_refuse_before_any_write(tmp_path):
 
 
 def test_entry_leaves_the_rebuilder_unwired_when_preconditions_fail(tmp_path):
-    from yeto.rl.engine.miles_adapter import entry
+    from yeto.rl.adapters.miles import entry
 
     driver, ctl, *_ = _island(tmp_path)
     ctl.trainer_rebuilder = None
@@ -424,7 +424,7 @@ def test_round_trained_event_carries_the_data_cursor_only_when_reported(tmp_path
 def test_injected_rebuild_failure_takes_the_fork_path_to_rebuild_old(tmp_path):
     import types
 
-    from yeto.rl.engine.miles_adapter.trainer_rebuild import inject_rebuild_failures
+    from yeto.rl.adapters.miles.trainer_rebuild import inject_rebuild_failures
 
     fresh = [RankGroup([make_rank(9)]), RankGroup([make_rank(8)])]
     calls = []
@@ -454,7 +454,7 @@ def test_injected_rebuild_failure_takes_the_fork_path_to_rebuild_old(tmp_path):
     rank, actor = _trained_actor()
     trainer = MilesTrainerGroup(args=ARGS, actor_model=actor, learner_id=0, learner_generation=0,
                                 parameter_layout_hash=lambda: "L", runner=LoopRunner())
-    from yeto.rl.engine.miles_adapter.rebuild_wiring import CutSource  # noqa: F401
+    from yeto.rl.adapters.miles.rebuild_wiring import CutSource  # noqa: F401
 
     rebuilder = make_trainer_rebuilder(
         trainer=trainer, rollout=_Cursor(), ledger=_Ledger(),
@@ -490,7 +490,7 @@ def test_rebuild_fail_switch_is_exported_only_when_given(tmp_path, monkeypatch):
 def test_live_data_cursor_reads_the_executor_data_source_now():
     import asyncio
 
-    from yeto.rl.engine.miles_adapter.rollout import MilesRolloutPool
+    from yeto.rl.adapters.miles.rollout import MilesRolloutPool
 
     source = SimpleNamespace(sample_offset=8, epoch_id=0, sample_group_index=8, sample_index=64,
                              get_buffer_length=lambda: 0)
@@ -536,7 +536,7 @@ class ActorHandle:  # the name Ray's handle type has
 def test_live_cursor_is_read_inside_the_executor_actor():
     import asyncio
 
-    from yeto.rl.engine.miles_adapter.rollout import MilesRolloutPool
+    from yeto.rl.adapters.miles.rollout import MilesRolloutPool
 
     source = SimpleNamespace(sample_offset=8, epoch_id=0, sample_group_index=8, sample_index=64,
                              get_buffer_length=lambda: 0)
@@ -565,8 +565,8 @@ def test_same_shape_rebuild_sees_a_cursor_moved_in_the_actor(tmp_path):
     """G-4.5 row 5 through the live read: the cursor moves during the rebuild."""
     import asyncio
 
-    from yeto.rl.engine.miles_adapter.rollout import MilesRolloutPool
-    from yeto.rl.engine.miles_adapter.trainer_rebuild import RecoveryRequired
+    from yeto.rl.adapters.miles.rollout import MilesRolloutPool
+    from yeto.rl.adapters.miles.trainer_rebuild import RecoveryRequired
 
     source = SimpleNamespace(sample_offset=4, epoch_id=0, sample_group_index=4, sample_index=32,
                              get_buffer_length=lambda: 0)
@@ -752,7 +752,7 @@ def test_live_cursor_unwraps_the_miles_ray_worker_handle(caplog):
     import asyncio
     import logging
 
-    from yeto.rl.engine.miles_adapter.rollout import MilesRolloutPool
+    from yeto.rl.adapters.miles.rollout import MilesRolloutPool
 
     source = SimpleNamespace(sample_offset=8, epoch_id=0, sample_group_index=8, sample_index=64,
                              get_buffer_length=lambda: 0)
@@ -769,7 +769,7 @@ def test_live_cursor_unwraps_the_miles_ray_worker_handle(caplog):
     assert live.data_cursor()["sample_offset"] == 8
     source.sample_offset = 20
     assert live.live_data_cursor()[0]["sample_offset"] == 20
-    with caplog.at_level(logging.WARNING, logger="yeto.rl.engine.miles_adapter.rollout"):
+    with caplog.at_level(logging.WARNING, logger="yeto.rl.adapters.miles.rollout"):
         dead = pool(RayWorkerHandle(ActorHandle(executor, fail=True)))
         assert dead.live_data_cursor() == (None, None) and dead.data_cursor() is None
         assert "__ray_call__ in the executor actor failed" in caplog.text

@@ -31,13 +31,13 @@ from pathlib import Path
 
 PLAN_VERSION = "plan-v6"
 def _current_image_digest() -> str:
-    """Single source: MILES_NEXT_IMAGE in yeto/rl/__init__.py (not a hard-coded copy)."""
+    """Single source: MILES_NEXT_IMAGE in yeto/rl/adapters/miles/pins.py (not a hard-coded copy)."""
     import re
 
-    text = (Path(__file__).resolve().parents[2] / "yeto" / "rl" / "__init__.py").read_text(encoding="utf-8")
+    text = (Path(__file__).resolve().parents[2] / "yeto" / "rl" / "adapters" / "miles" / "pins.py").read_text(encoding="utf-8")
     m = re.search(r'^MILES_NEXT_IMAGE = \(\s*"[^"]*@sha256:"\s*"([0-9a-f]{64})"', text, re.M)
     if not m:
-        raise RuntimeError("cannot find MILES_NEXT_IMAGE digest in yeto/rl/__init__.py")
+        raise RuntimeError("cannot find MILES_NEXT_IMAGE digest in yeto/rl/adapters/miles/pins.py")
     return "sha256:" + m.group(1)
 
 
@@ -45,13 +45,13 @@ IMAGE_DIGEST = _current_image_digest()
 
 
 def _current_miles_commit() -> str:
-    """Single source: MILES_NEXT_COMMIT in yeto/rl/__init__.py."""
+    """Single source: MILES_NEXT_COMMIT in yeto/rl/adapters/miles/pins.py."""
     import re
 
-    text = (Path(__file__).resolve().parents[2] / "yeto" / "rl" / "__init__.py").read_text(encoding="utf-8")
+    text = (Path(__file__).resolve().parents[2] / "yeto" / "rl" / "adapters" / "miles" / "pins.py").read_text(encoding="utf-8")
     m = re.search(r'^MILES_NEXT_COMMIT = "([0-9a-f]{40})"', text, re.M)
     if not m:
-        raise RuntimeError("cannot find MILES_NEXT_COMMIT in yeto/rl/__init__.py")
+        raise RuntimeError("cannot find MILES_NEXT_COMMIT in yeto/rl/adapters/miles/pins.py")
     return m.group(1)
 
 IMAGE = f"ghcr.io/michaellchung/yeto-miles-ports@{IMAGE_DIGEST}"
@@ -181,7 +181,7 @@ RESOURCES_T2R1S0 = {  # same schema as the B1 cfg/resources-*.json
 
 def check_pins(repo: Path) -> list[str]:
     """The checkout's pins must be plan-v3's (environment only; criteria unchanged)."""
-    text = (repo / "yeto" / "rl" / "__init__.py").read_text(encoding="utf-8")
+    text = (repo / "yeto" / "rl" / "adapters" / "miles" / "pins.py").read_text(encoding="utf-8")
     out = []
     if MILES_COMMIT not in text:
         out.append(f"MILES_NEXT_COMMIT is not {MILES_COMMIT}")
@@ -361,7 +361,7 @@ import json, os, shlex, sys
 from pathlib import Path
 from types import SimpleNamespace
 cmd, harness_path = sys.argv[1], sys.argv[2]
-argv = shlex.split(cmd.split("python3 -m yeto.rl.learner", 1)[1].replace("$LEARNER_ID", "0"))
+argv = shlex.split(cmd.split("python3 -m yeto.rl.adapters.miles.island_entry", 1)[1].replace("$LEARNER_ID", "0"))
 from yeto.rl import learner
 from yeto.rl.engine.run_config import resolve_rl_run_config
 out = {"checks": []}

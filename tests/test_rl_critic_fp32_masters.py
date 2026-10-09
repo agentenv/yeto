@@ -19,7 +19,7 @@ import torch
 from yeto.rl import critic_state as cs
 from yeto.rl.engine.algorithm import AlgorithmSpecError, check_unverified_allowance
 from test_rl_algorithm_provenance import _fake_sky, _no_modal_listing  # noqa: F401
-from yeto.rl.engine.miles_adapter import state_plugin as sp
+from yeto.rl.adapters.miles import state_plugin as sp
 
 
 class _Range:
@@ -302,7 +302,7 @@ def test_critic_state_summary_wakes_an_asleep_colocated_critic():
 
     import torch
 
-    from yeto.rl.engine.miles_adapter import state_plugin
+    from yeto.rl.adapters.miles import state_plugin
 
     calls = []
 

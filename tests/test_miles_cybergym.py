@@ -17,7 +17,7 @@ pytest.importorskip(
 from yeto_miles_cybergym import reward
 from yeto_miles_cybergym.prompts import prompt_rows
 
-from yeto.rl.learner import prepare_prompt_data
+from yeto.rl.adapters.miles.island_entry import prepare_prompt_data
 
 
 class Response:

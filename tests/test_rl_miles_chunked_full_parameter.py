@@ -19,9 +19,9 @@ import torch
 # CI has no miles image; skip these tests when miles is absent.
 pytest.importorskip("miles")
 
-bridge_stub = types.ModuleType("yeto.rl.deepseek_v4_bridge")
+bridge_stub = types.ModuleType("yeto.rl.adapters.miles.models.deepseek_v4.bridge")
 bridge_stub.ensure_deepseek_v4_bridge = lambda: None
-sys.modules.setdefault("yeto.rl.deepseek_v4_bridge", bridge_stub)
+sys.modules.setdefault("yeto.rl.adapters.miles.models.deepseek_v4.bridge", bridge_stub)
 
 from miles.backends.megatron_utils.full_parameter_state import (
     FullParameterChunkDescriptor,
@@ -47,9 +47,9 @@ from yeto.protocol import (
     MSG_FINAL_FRAGMENT,
     SyncerClient,
 )
-from yeto.rl.dense_sweep_wire import _MilesRayInboundChunkSink
-from yeto.rl.dense_sweep_wire import DenseSweepConfig, DenseSweepWire
-from yeto.rl.miles_chunked_full_parameter import (
+from yeto.rl.adapters.miles.models.dense_sweep_wire import _MilesRayInboundChunkSink
+from yeto.rl.adapters.miles.models.dense_sweep_wire import DenseSweepConfig, DenseSweepWire
+from yeto.rl.adapters.miles.models.chunked_full_parameter import (
     MilesChunkedFullParameterAdapter,
 )
 from yeto.rl.trajectory_evidence import TrajectoryBatchEvidence

@@ -24,14 +24,14 @@ from __future__ import annotations
 import dataclasses
 from typing import Any, Awaitable, Callable
 
-from yeto.rl.engine.miles_adapter import rollout_meta_hook
+from yeto.rl.engine import rollout_meta
 
 from .alignment import AlignmentError, assert_sample_alignment
 from .tbench_reward import INFRASTRUCTURE_KEY
 
 UPSTREAM_PATH = "miles.rollout.generate_hub.agentic_tool_call.generate"
-POLICY_AGE_KEY = rollout_meta_hook.POLICY_AGE_VIOLATION_KEY  # "policy_age_violation"
-EXPECTED_VERSION_KEY = rollout_meta_hook.EXPECTED_POLICY_VERSION_KEY
+POLICY_AGE_KEY = rollout_meta.POLICY_AGE_VIOLATION_KEY  # "policy_age_violation"
+EXPECTED_VERSION_KEY = rollout_meta.EXPECTED_POLICY_VERSION_KEY
 ACTUAL_VERSIONS_KEY = "policy_versions_actual"
 
 
@@ -42,16 +42,21 @@ class PolicyVersionMissing(RuntimeError):
 def expected_policy_version(input_sample: Any) -> str | None:
     """IR-3 target token for ``input_sample`` (metadata first, else the driver sink)."""
     try:
-        return rollout_meta_hook.expected_policy_version(input_sample)
+        return rollout_meta.expected_policy_version(input_sample)
     except Exception:  # noqa: BLE001 - unreachable sink == nothing published
         meta = getattr(input_sample, "metadata", None)
         return str(meta[EXPECTED_VERSION_KEY]) if isinstance(meta, dict) and meta.get(EXPECTED_VERSION_KEY) else None
 
 
-def _load_upstream() -> Callable[[Any], Awaitable[Any]]:
-    from miles.rollout.generate_hub.agentic_tool_call import generate as upstream
+def _glue():
+    """Backend glue: upstream generate, aborted status, session collection (decoupling 5.7)."""
+    from yeto.rl.engine import backends
 
-    return upstream
+    return backends.module("harness_glue")
+
+
+def _load_upstream() -> Callable[[Any], Awaitable[Any]]:
+    return _glue().load_agentic_upstream()
 
 
 def _samples_of(output: Any) -> list[Any]:
@@ -61,10 +66,8 @@ def _samples_of(output: Any) -> list[Any]:
 
 def _mark_aborted(sample: Any, reason: str) -> None:
     try:
-        from miles.utils.types import Sample
-
-        sample.status = Sample.Status.ABORTED
-    except ImportError:
+        sample.status = _glue().aborted_status()
+    except ImportError:  # backend not installed (CPU tests)
         sample.status = "ABORTED"
     metadata = sample.metadata if isinstance(getattr(sample, "metadata", None), dict) else {}
     metadata.pop("tbench_trusted_outcome", None)
@@ -126,20 +129,8 @@ SegmentCollector = Callable[[Any, str, str], Awaitable[tuple[list[Any], dict[str
 
 
 async def collect_segment_session(input: Any, router: str, session_id: str) -> tuple[list[Any], dict[str, Any]]:
-    """Collect (and delete) one extra session exactly like upstream's tracer does."""
-    from miles.rollout.generate_utils.openai_endpoint_utils import (
-        COMPUTED_FIELDS,
-        ROLLOUT_SAMPLING_MASK_FIELDS,
-        OpenAIEndpointTracer,
-        should_return_sampling_mask,
-    )
-
-    fields = COMPUTED_FIELDS
-    if should_return_sampling_mask(input.args, input.sampling_params, evaluation=input.evaluation):
-        fields += ROLLOUT_SAMPLING_MASK_FIELDS
-    tracer = OpenAIEndpointTracer(router_url=router, session_id=session_id, samples_wire_fields=fields)
-    reply = await tracer.collect_samples(input.sample, max_seq_len=getattr(input.args, "max_seq_len", None))
-    return list(reply.samples), dict(reply.session_metadata or {})
+    """Collect (and delete) one extra session exactly like upstream's tracer does (backend glue)."""
+    return await _glue().collect_segment_session(input, router, session_id)
 
 
 def _optimized_tokens(sample: Any) -> int:

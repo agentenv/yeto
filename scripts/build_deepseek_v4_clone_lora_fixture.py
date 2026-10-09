@@ -58,7 +58,7 @@ def main() -> None:
     from peft import LoraConfig
     from safetensors.torch import save_file
 
-    from yeto.rl.deepseek_v4_bridge import ensure_deepseek_v4_bridge
+    from yeto.rl.adapters.miles.models.deepseek_v4.bridge import ensure_deepseek_v4_bridge
     from yeto.rl.export import adapter_targets, derive_peft_lora_specs
 
     ensure_deepseek_v4_bridge()

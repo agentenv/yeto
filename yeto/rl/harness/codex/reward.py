@@ -241,7 +241,7 @@ def check_group(args: Any, samples: list[Any], **_kwargs: Any):
 
     from miles.rollout.filter_hub.base_types import DynamicFilterOutput
 
-    from yeto.rl.miles import (
+    from yeto.rl.adapters.miles.legacy.engine import (
         SecRLEnvReplacementExhausted,
         SecRLEnvUntrustedEvidence,
     )
@@ -285,7 +285,7 @@ def check_group(args: Any, samples: list[Any], **_kwargs: Any):
         for outcome, _ in verified
     )
     if cleanup_failure:
-        from yeto.rl.miles import SecRLEnvRolloutCleanupError
+        from yeto.rl.adapters.miles.legacy.engine import SecRLEnvRolloutCleanupError
 
         raise SecRLEnvRolloutCleanupError(
             "SecRLEnv episode cleanup could not be verified"

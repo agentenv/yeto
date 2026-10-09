@@ -10,13 +10,13 @@ import pytest
 import torch
 
 from yeto.rl import deepseek_v4_expert_full_runtime as runtime
-from yeto.rl.deepseek_v4_expert_clone import (
+from yeto.rl.adapters.miles.models.deepseek_v4.expert_clone import (
     EXPERT_PARALLEL_SIZE,
     NUM_LAYERS,
     ORIGINAL_EXPERTS_PER_RANK,
     TRAINING_EXPERTS_PER_RANK,
 )
-from yeto.rl.deepseek_v4_expert_full_runtime import (
+from yeto.rl.adapters.miles.models.deepseek_v4.expert_full_runtime import (
     filter_selected_expert_tasks,
     install_on_arguments,
     install_on_lora_utils,
@@ -365,11 +365,11 @@ def test_pp2_hybrid_export_preserves_metrics_from_megatron_main_rank(
     )
 
     root_actor = SimpleNamespace(
-        args=SimpleNamespace(external_policy_sync_path="yeto.rl.miles:sync"),
+        args=SimpleNamespace(external_policy_sync_path="yeto.rl.adapters.miles.legacy.engine:sync"),
         _is_first_replica_megatron_main_rank=False,
     )
     main_args = SimpleNamespace(
-        external_policy_sync_path="yeto.rl.miles:sync",
+        external_policy_sync_path="yeto.rl.adapters.miles.legacy.engine:sync",
         _external_train_seconds=7.5,
     )
     runtime._capture_external_train_telemetry(
@@ -444,7 +444,7 @@ def test_pp2_hybrid_export_preserves_metrics_from_megatron_main_rank(
 
     # Exercise the deployed scalar path end to end: Miles' producer capture,
     # the metrics-owner Ray export, the round event, and the W&B projection.
-    from yeto.rl.miles import DecoupledMilesPolicySync, MilesPolicySync
+    from yeto.rl.adapters.miles.legacy.engine import DecoupledMilesPolicySync, MilesPolicySync
     from yeto.rl.wandb_rl import STEP_KEY, TRAIN_STEP_KEY, event_metrics
 
     hook = MilesPolicySync(
@@ -539,7 +539,7 @@ def test_train_telemetry_extractor_is_closed_finite_and_step_bound():
 
 
 def test_train_telemetry_capture_is_owner_only_typed_and_adversarially_closed():
-    owner = SimpleNamespace(external_policy_sync_path="yeto.rl.miles:sync")
+    owner = SimpleNamespace(external_policy_sync_path="yeto.rl.adapters.miles.legacy.engine:sync")
     runtime._capture_external_train_telemetry(
         owner,
         {
@@ -564,7 +564,7 @@ def test_train_telemetry_capture_is_owner_only_typed_and_adversarially_closed():
         loss=-0.25,
     )
 
-    peer = SimpleNamespace(external_policy_sync_path="yeto.rl.miles:sync")
+    peer = SimpleNamespace(external_policy_sync_path="yeto.rl.adapters.miles.legacy.engine:sync")
     runtime._capture_external_train_telemetry(
         peer,
         {"train/step": 9, "train/loss": -0.25},
@@ -1512,7 +1512,7 @@ def test_model_metric_capture_hook_rechecks_the_authoritative_owner():
         is_first_replica_megatron_main_rank = staticmethod(lambda: owner["value"])
 
     runtime.install_on_model(ModelModule)
-    args = SimpleNamespace(external_policy_sync_path="yeto.rl.miles:sync")
+    args = SimpleNamespace(external_policy_sync_path="yeto.rl.adapters.miles.legacy.engine:sync")
     metrics = {"train/step": 3, "train/loss": -0.5}
     ModelModule._capture_external_train_metrics(args, metrics)
     assert not hasattr(args, "_external_train_metrics")

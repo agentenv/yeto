@@ -45,8 +45,8 @@ from yeto.rl.codex_backend import (
 )
 from yeto.rl.core import CanonicalTensorSpec
 from yeto.rl.decoupled import DecoupledBridgeConfig
-from yeto.rl.learner import build_miles_argv
-from yeto.rl.miles import miles_execution_source_sha256, verify_miles_revision
+from yeto.rl.adapters.miles.island_entry import build_miles_argv
+from yeto.rl.adapters.miles.legacy.engine import miles_execution_source_sha256, verify_miles_revision
 
 
 def _args(extra=()):
@@ -1396,7 +1396,7 @@ def test_miles_task_checks_out_exact_commit_and_builds_multinode_ray(monkeypatch
     assert task.envs["CYBERGYM_API_KEY"] == "test-secret"
     assert task.envs["CYBERGYM_REWARD_SCHEME"] == "shaped_v1"
     assert task.envs["CYBERGYM_REWARD_VIEW"] == "train"
-    assert "python3 -m yeto.rl.learner" in task.run
+    assert "python3 -m yeto.rl.adapters.miles.island_entry" in task.run
     assert "$HOME/sglang/python" in task.run
     assert "--initial-adapter" not in task.run
     assert "--num-learners" not in task.run
@@ -1489,9 +1489,9 @@ def test_miles_runtime_requires_exact_detached_clean_checkout(tmp_path, monkeypa
     def run(command, **_kwargs):
         return types.SimpleNamespace(stdout=responses[tuple(command[3:])] + "\n")
 
-    monkeypatch.setattr("yeto.rl.miles.subprocess.run", run)
+    monkeypatch.setattr("yeto.rl.adapters.miles.legacy.engine.subprocess.run", run)
     monkeypatch.setattr(
-        "yeto.rl.miles.importlib.import_module",
+        "yeto.rl.adapters.miles.legacy.engine.importlib.import_module",
         lambda _name: types.SimpleNamespace(__file__=root / "miles/__init__.py"),
     )
     assert verify_miles_revision(root) == root.resolve()
@@ -1515,7 +1515,7 @@ def test_miles_runtime_accepts_only_exact_staged_source(tmp_path, monkeypatch):
     (root / "miles_plugins/__init__.py").write_text("", encoding="utf-8")
     expected = miles_execution_source_sha256(root)
     monkeypatch.setattr(
-        "yeto.rl.miles.importlib.import_module",
+        "yeto.rl.adapters.miles.legacy.engine.importlib.import_module",
         lambda _name: types.SimpleNamespace(__file__=package),
     )
     assert (
@@ -1720,11 +1720,11 @@ def test_miles_argv_uses_provider_capabilities_without_model_family_branches(
     assert argv[roles + 1 : roles + 3] == ["tool", "user"]
     assert (
         argv[argv.index("--rollout-all-samples-process-path") + 1]
-        == "yeto.rl.miles.queue_completed_groups"
+        == "yeto.rl.adapters.miles.legacy.engine.queue_completed_groups"
     )
     assert (
         argv[argv.index("--external-policy-sync-path") + 1]
-        == "yeto.rl.miles.create_policy_sync"
+        == "yeto.rl.adapters.miles.legacy.engine.create_policy_sync"
     )
     assert "--custom-megatron-init-path" not in argv
     assert "--use-distributed-optimizer" not in argv
@@ -1788,7 +1788,7 @@ def test_miles_argv_uses_provider_capabilities_without_model_family_branches(
         "/prompts.jsonl",
     ]
     assert eval_argv[eval_argv.index("--eval-function-path") + 1] == (
-        "yeto.rl.miles.generate_rollout"
+        "yeto.rl.adapters.miles.legacy.engine.generate_rollout"
     )
     assert eval_argv[eval_argv.index("--num-rollout") + 1] == "0"
     assert eval_argv[eval_argv.index("--eval-interval") + 1] == "1"
@@ -2219,7 +2219,7 @@ def test_miles_dense_full_parameter_argv_and_runtime_contract(
     assert argv[argv.index("--num-gpus-per-node") + 1] == "4"
     assert (
         argv[argv.index("--external-policy-sync-path") + 1]
-        == "yeto.rl.miles_full_parameter_dense."
+        == "yeto.rl.adapters.miles.models.full_parameter_dense."
         "create_miles_full_parameter_dense_sync"
     )
     dense = miles_args.yeto_rl_dense_full_parameter_config
@@ -2258,7 +2258,7 @@ def test_miles_dense_full_parameter_argv_and_runtime_contract(
     )
     assert (
         miles_args.external_policy_identity_setter_path
-        == "yeto.rl.miles.set_current_published_policy_identity"
+        == "yeto.rl.adapters.miles.legacy.engine.set_current_published_policy_identity"
     )
     evidence = Path(miles_args.yeto_rl_trajectory_evidence_dir)
     assert evidence.parent == audit
@@ -2706,7 +2706,7 @@ def test_miles_runner_builds_attested_attention_lora_expert_full_policy(
         return expert_specs
 
     monkeypatch.setattr(
-        "yeto.rl.deepseek_v4_bridge.ensure_deepseek_v4_bridge",
+        "yeto.rl.adapters.miles.models.deepseek_v4.bridge.ensure_deepseek_v4_bridge",
         lambda: None,
     )
     monkeypatch.setattr(rl_learner, "expert_full_specs", build_expert_specs)
@@ -2968,7 +2968,7 @@ def test_prompt_data_uses_the_only_split_when_there_is_no_train(tmp_path, monkey
     import datasets
 
     from yeto import data as yeto_data
-    from yeto.rl.learner import prepare_prompt_data
+    from yeto.rl.adapters.miles.island_entry import prepare_prompt_data
 
     seen = {}
 

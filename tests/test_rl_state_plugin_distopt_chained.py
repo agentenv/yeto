@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from yeto.rl.engine.miles_adapter import state_plugin as sp
+from yeto.rl.adapters.miles import state_plugin as sp
 
 DENSE_GROUP, EXPERT_GROUP = ("dense-dp", (0, 1)), None  # expert DP groups are per rank
 

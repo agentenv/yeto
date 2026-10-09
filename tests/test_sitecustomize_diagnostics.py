@@ -63,7 +63,7 @@ def test_tms_post_pause_hold_is_not_installed_without_tms(monkeypatch):
 
 
 def test_clone_only_lora_arms_the_miles_balanced_layout_hook(monkeypatch):
-    import yeto.rl.deepseek_v4_clone_lora as clone_lora
+    import yeto.rl.adapters.miles.models.deepseek_v4.clone_lora as clone_lora
 
     calls = []
     monkeypatch.setattr(clone_lora, "install", lambda: calls.append("installed"), raising=False)

@@ -3,7 +3,7 @@
 REWRITE, not a move: the legacy ``codex_openenv_*`` modules lived in a private
 ``agentenv/miles`` ``examples/experimental/openenv`` copy and were never found
 (CODEX-PROGRESS §1.3).  The interface below is the one the yeto consumers
-expect (``yeto/rl/learner.py``, ``yeto/rl/tbench_direct_preflight.py``,
+expect (``yeto/rl/adapters/miles/island_entry.py``, ``yeto/rl/tbench_direct_preflight.py``,
 ``tests/test_rl_codex_schema.py``): ``stock``, ``_OPENENV_IDENTITY_ENV``,
 ``codex_openenv_harness_identity()`` and a module-level ``run``.
 
@@ -19,8 +19,10 @@ The stock driver and Responses bridge are reused unchanged from
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import secrets
+import time
 import uuid
 from dataclasses import asdict
 from pathlib import Path
@@ -29,6 +31,8 @@ from typing import Any, Awaitable, Callable, Mapping
 
 from yeto.rl.codex_backend import (
     QWEN35_08B_MODEL,
+    QWEN35_MODEL,
+    QWEN35_REVISION,
     QWEN35_08B_REVISION,
     QWEN38_NEXT_4LAYER_MODEL,
     QWEN38_NEXT_4LAYER_REVISION,
@@ -47,6 +51,9 @@ from . import agent as legacy
 from . import codex_harness_agent as harness
 from . import compaction_bridge
 from .environment import TerminalEnvironment, TrustedVerifier
+
+# S17 M1: observe-only timing line appended to verifier_log (the tape keeps its 2000-char tail).
+VERIFIER_LOG_TAIL_CHARS = 4000
 from .pins import OPENENV_BACKEND_PROFILE, OPENENV_BACKEND_PROFILES
 
 # rl-fn-codex-rollout 1.0: the backend profile is no longer pinned to the
@@ -69,6 +76,7 @@ IMAGE_BACKEND_PROFILE_NAME = OPENENV_BACKEND_PROFILE  # "qwen35_08b"
 RUNTIME_PROFILE_ENV = "YETO_CODEX_CHAT_TEMPLATE"
 _PROFILE_IDENTITY: dict[str, tuple[str, str]] = {
     "qwen35_08b": (QWEN35_08B_MODEL, QWEN35_08B_REVISION),
+    "qwen35": (QWEN35_MODEL, QWEN35_REVISION),
     "qwen38_next": (QWEN38_NEXT_MODEL, QWEN38_NEXT_REVISION),
     "qwen38_next_4layer": (QWEN38_NEXT_4LAYER_MODEL, QWEN38_NEXT_4LAYER_REVISION),
 }
@@ -386,7 +394,9 @@ async def finish_trusted(
     if status == "timeout":
         passed, testsh_rc, verifier_name = False, None, TIMEOUT_VERIFIER
     else:
+        verify_started = time.monotonic()
         evaluation = await verifier.evaluate(untrusted["episode_id"])
+        verify_seconds = time.monotonic() - verify_started
         passed = bool(evaluation.get("passed"))
         testsh_rc = evaluation.get("testsh_rc")
         verifier_name = (
@@ -406,6 +416,16 @@ async def finish_trusted(
     metadata["exit_status"] = status
     if status != "timeout" and isinstance(evaluation.get("log"), str):
         metadata["verifier_log"] = evaluation["log"]  # observe only, unsigned
+        # S17 M1 (observe only, unsigned): verifier wall time and agent phase times
+        # (per-turn shapes would need the pinned codex_harness_agent.py), appended as the log's last line so the tape's
+        # verifier_log tail carries them.
+        metrics = untrusted.get("metrics") or {}
+        timing = {"verify_s": round(verify_seconds, 3)}
+        for name in ("create_time", "total_generation_time", "total_tool_time", "max_model_total_tokens"):
+            if isinstance(metrics.get(name), (int, float)) and not isinstance(metrics.get(name), bool):
+                timing[name] = round(float(metrics[name]), 3)
+        metadata["verifier_log"] = (metadata["verifier_log"] + "\nYETO_TIMING "
+                                    + json.dumps(timing, separators=(",", ":")))[-VERIFIER_LOG_TAIL_CHARS:]
     return metadata
 
 
@@ -432,7 +452,7 @@ def mirror_tito_counters(metrics: dict[str, Any] | None, harness_board: Any) -> 
     never forks, so ``chains_total`` stays 1 and ``chain_break_reason`` names the
     first break (the sample is infrastructure-aborted, never trained on).
     """
-    from yeto.rl.engine.miles_adapter.rollout_meta_hook import counter_value
+    from yeto.rl.engine.rollout_meta import counter_value
 
     metrics = metrics or {}
     mismatches = counter_value(metrics.get(TITO_SESSION_MISMATCH_KEY))

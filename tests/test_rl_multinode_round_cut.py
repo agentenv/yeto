@@ -24,11 +24,11 @@ from yeto.rl.engine.bridges import LocalOnlySync
 from yeto.rl.engine.controller import STORE_MANIFEST
 from yeto.rl.engine.cut import load_manifest
 from yeto.rl.engine.journal import read_journal
-from yeto.rl.engine.miles_adapter import LoopRunner
-from yeto.rl.engine.miles_adapter.rebuild_wiring import CutSource
-from yeto.rl.engine.miles_adapter.round_cut import POINTER, ROUND_CUTS, RoundCutCheckpoint, RoundCutError
-from yeto.rl.engine.miles_adapter.trainer import MilesTrainerGroup
-from yeto.rl.engine.miles_adapter.trainer_rebuild import SwappableActor
+from yeto.rl.adapters.miles import LoopRunner
+from yeto.rl.adapters.miles.rebuild_wiring import CutSource
+from yeto.rl.adapters.miles.round_cut import POINTER, ROUND_CUTS, RoundCutCheckpoint, RoundCutError
+from yeto.rl.adapters.miles.trainer import MilesTrainerGroup
+from yeto.rl.adapters.miles.trainer_rebuild import SwappableActor
 
 NEXT = 2  # A trained rollouts 0 and 1; the safe point before rollout 2 is cut
 

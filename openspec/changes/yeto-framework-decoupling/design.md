@@ -42,6 +42,8 @@
 
 **D7 后端身份并列哈希。** 新增 `BackendIdentity{engine, engine_commit, device_family, param_map_sha256}` 的独立哈希，不并入旧哈希；Miles 下取值固定。岛握手时比较，不同即拒绝。与 rl-verl-backend D6 的"后端身份进训练契约哈希"对齐：rl-verl-backend 的契约哈希输入（`local_learner.py`、`sao_streaming_runtime.py:203,642`）改为引用此处的身份哈希，而不是各自拼。
 
+实施记录（阶段 5，2026-10-08 夜）：岛握手用的是 syncer HELLO 的会话契约——实现为 `sha256("yeto-rl-session-contract-v2\0" + 布局指纹 + 身份哈希)`，syncer 侧不用改（它只比较字节相等）。代价：与阶段 5 之前的代码、以及之前写下的 syncer 检查点不兼容（版本边界，同 D6）。Miles 的参数名映射是恒等映射，仍单独哈希，以后改映射即改身份。
+
 **D8 算法分层（按 RL-ALGO-LOCATION §4）。**
 - 第 1 步（阶段 3 内，零 GPU）：`reward_pipeline.grpo_default`、`seq_adv` 的 MaxRL/MAPO/GDPO、超长惩罚、超长过滤拆成纯函数；Miles 插件改薄包装；等价测试保持 `torch.equal`。
 - 第 2 步（阶段 3 内）：中立逐词元损失接口与参考实现（以 `tests/rl_loss_variant_reference.py` 为蓝本），只做 CPU 对照 Miles fork 的 `compute_policy_loss/cispo/sapo/gmpo` 与 TIS/IcePop/MIS。
@@ -86,6 +88,8 @@
 3. 旧版引擎（`--rl-engine legacy`）的 `teacher_forcing` 路径不动，仍走 `yeto.rl.miles`（阶段 4 随 legacy 整体搬）。
 
 在用户拍板前，4.11 只交付本方案，`seq_adv`/`teacher_forcing`/codex 的 A2/A5/A7 白名单条目保持。
+
+**拍板与实施（2026-10-08 夜，主 agent 代拍板第 2 条）**：采用方案 A，变量未设时默认 miles（细节 1 选 (a)）。实现：`yeto/rl/engine/backends.py`（与 5.4 同一张注册表，按角色查模块）、`yeto/rl/engine/rollout_meta.py`；Miles 适配层在 `connect_island_ray` 的 Ray 作业环境里设 `YETO_RL_BACKEND=miles`（codex 子进程经环境继承）。哈希：seq_adv_maxrl 换新算法哈希；codex_harness 只有插件源码哈希变，算法哈希与契约哈希不变（hash-migration.md「阶段 4 记录」）。到 verl 落地后再议是否改为必须显式设置。
 
 ## Risks / Trade-offs
 
