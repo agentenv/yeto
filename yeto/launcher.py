@@ -4353,7 +4353,9 @@ def make_miles_island_task(
     if spec.cloud != "modal":  # Modal islands take only run + envs (see build_modal_island_config)
         task.set_resources(sky.Resources(**resources))
     storage_mounts = {}
-    if args.spot:
+    from .cloud.droppable import island_keeps_spot_volume
+
+    if island_keeps_spot_volume(args):
         checkpoint_mount = _rl_checkpoint_mount(args.rl_completed_groups_path)
         storage_mounts[checkpoint_mount] = sky.Storage(
             name=_rl_checkpoint_storage_name(args.cluster_prefix, learner_id),
@@ -5128,7 +5130,9 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         envs[MODAL_VOLUME_ENV] = store_volume[0]  # the learner commits this Volume
         envs[STORE_IMPL_ENV] = STORE_IMPL  # the island builds the Modal store from yeto.cloud
     volume_name = volume_mount = None
-    if rl and getattr(args, "spot", False):
+    from .cloud.droppable import island_keeps_spot_volume
+
+    if rl and island_keeps_spot_volume(args):
         volume_name = _rl_checkpoint_storage_name(args.cluster_prefix, learner_id)
         volume_mount = _rl_checkpoint_mount(args.rl_completed_groups_path).replace("~", "/root", 1)
     # Codex run bundle: the sky task mounts it at CODEX_CONTAINER_DIR; Modal
@@ -5254,13 +5258,26 @@ def _island_overrides(args, specs) -> dict:
     return overrides_of(args, len(specs))
 
 
-def _island_task(task_factory, args, spec, m, num_learners, syncer_addr, overrides):
-    """The island task, built from a checked args copy for an overridden island
-    (sky and Modal islands both start from this task)."""
-    from . import island_overrides as io
+def _island_role(args, specs, m) -> str | None:
+    """rl-spot-cost-saving phase 2: island m's role (anchor | droppable), None without
+    --rl-island-role. Admission already ran in pre_cloud_checks; it is re-run here
+    (pure, cheap) so every caller sees the same answer."""
+    from .cloud import droppable
 
-    task = task_factory(io.island_args(args, m, overrides), spec, m, num_learners, syncer_addr)
-    io.apply_to_task(task, io.island_env(args, m, overrides))
+    return droppable.admit(args, [s.cloud for s in specs]).get(m)
+
+
+def _island_task(task_factory, args, spec, m, num_learners, syncer_addr, overrides, role=None):
+    """The island task, built from a checked args copy for an overridden island
+    (sky and Modal islands both start from this task). ``role`` (phase 2) sets the
+    island's billing and drops the checkpoint store of a droppable island."""
+    from . import island_overrides as io
+    from .cloud import droppable
+
+    iargs = droppable.role_args(io.island_args(args, m, overrides), role)
+    task = task_factory(iargs, spec, m, num_learners, syncer_addr)
+    io.apply_to_task(task, {**io.island_env(args, m, overrides),
+                            **(droppable.role_env(role, spec.cloud, spec.region) if role else {})})
     return task
 
 
@@ -7252,10 +7269,13 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         island_overrides = _island_overrides(args, specs)
         for m, spec in enumerate(specs):
             name = learner_names[m]
+            role = _island_role(args, specs, m)
             task = _island_task(task_factory, args, spec, m, num_learners, syncer_addr,
-                                island_overrides)
+                                island_overrides, role)
             if spec.cloud == "modal":
-                cfg = build_modal_island_config(args, spec, m, task, modal_addr)
+                from .cloud.droppable import role_args
+
+                cfg = build_modal_island_config(role_args(args, role), spec, m, task, modal_addr)
                 print(f"[launcher] {name} dials {island_syncer_addrs(cfg.envs)}", flush=True)
                 tasks[name] = cfg
                 modal_cfgs[name] = cfg
@@ -7294,7 +7314,11 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         def resolve(name: str, m: int, rid) -> None:
             try:
                 if isinstance(rid, tuple) and rid and rid[0] == "verda":
-                    results[name] = launch_verda_island(sky, tasks[name], name, rid[1], args)
+                    from .cloud.droppable import role_args
+
+                    results[name] = launch_verda_island(
+                        sky, tasks[name], name, rid[1],
+                        role_args(args, _island_role(args, specs, m)))
                     verda["guard"].record(
                         name, getattr(results[name][1], "cluster_name_on_cloud", None)
                     )
@@ -7804,8 +7828,14 @@ def dry_run_plan(args) -> dict:
         if memory is not None:
             entry["memory_estimate"] = memory[learner_id]
         if rl:
+            role = _island_role(args, specs, learner_id)
             task = _island_task(make_miles_island_task, args, spec, learner_id,
-                                len(specs) + external, "$SYNCER_ADDR", island_overrides)
+                                len(specs) + external, "$SYNCER_ADDR", island_overrides, role)
+            if role is not None:
+                from .cloud.droppable import billing, rejoin_source
+
+                entry["island_role"] = {"role": role, "billing": billing(role),
+                                        "rejoin": rejoin_source(role)}
             if island_overrides.get(learner_id):
                 from .island_overrides import records
 

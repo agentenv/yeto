@@ -357,6 +357,11 @@ def add_cli_args(p) -> None:
                    help="negative-test run: an overridden island waits S seconds before it starts "
                    "(default 180), so the unchanged island sets the syncer's session contract "
                    "and the overridden one is refused")
+    g.add_argument("--rl-island-role", action="append", default=None, metavar="ISLAND:ROLE",
+                   help="rl-spot-cost-saving phase 2 (elastic only): ROLE anchor (on-demand, keeps "
+                   "the latest weights and the cut) or droppable (spot, comes back from the syncer "
+                   "base, never from a checkpoint store); repeatable; an island without a role is "
+                   "an anchor; replaces --spot")
     g.add_argument("--rl-negative-test-run", action="store_true",
                    help="mark this run as a negative-test run (required by --rl-island-override); "
                    "a normal run refuses to resume its checkpoint store and `yeto merge` refuses "
@@ -398,6 +403,9 @@ def pre_cloud_checks(args, *, counter=None, sleep=time.sleep, clock=time.monoton
         io.print_warning(args, overrides, out=out)
     record["preflight"] = preflight
     record.update(io.manifest_fields(args, overrides))
+    from .cloud import droppable
+
+    record.update(droppable.manifest_fields(droppable.admit(args, [s.cloud for s in specs])))
     record["islands_checked"] = num_islands
     args._launch_preflight_manifest = record
     return record
