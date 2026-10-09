@@ -145,3 +145,17 @@ Miles arguments.py:3212 的约束只在 `--rematerialize-param-from-master-weigh
 - critic LoRA 下 value head 是否全参数（默认全参数），在 D9 后续阶段 CPU 原型时定。
 - CompactionRL 的数据集与 agent 环境（Terminal-Bench 子集或其它）在该组 GPU 报批时选定。
 - critic LoRA 是否与 actor 共享冻结 backbone 以节省显存，待后续评估。
+
+### D8a CompactionRL 9.4/9.5 的 agent 环境与数据集（S19，子 agent 代拍板，2026-10-09）
+用户授权主 agent 代定，主 agent 交给子 agent。以下为**子 agent 代拍板**。
+- **agent 环境**：Codex harness（`yeto/rl/harness/codex`，Codex CLI 0.145.0）+ TB2 任务沙箱 `tb2_provider:modal_provider`，模型 Qwen3.5-0.8B。
+  - 理由 1：这是仓库里唯一在真卡上跑通过的 agent 环境（`codex-smoke-20261003-12`，Modal 1×H100，两步各 24/24 轨迹，见 `rl-codex-harness-rollout/evidence/gpu-20261003/`）。
+  - 理由 2：CompactionRL 的压缩只接在 Codex 桥上（`compaction_bridge.py`，D8 "Codex 桥接线"）；yeto 自管回合循环的 `compaction.run_episode` 没有接入 Miles rollout。
+  - 不选 `tb2_provider:local_provider`：它只用于 CPU 开发，在学习岛容器里直接执行模型生成的命令，且不提供 TB2 任务镜像。
+  - 后果：需要沙箱专用 Modal 令牌（Secret `yeto-sandbox-modal` → `YETO_SANDBOX_MODAL_TOKEN_ID/SECRET`，`launcher.require_sandbox_modal_token`）。
+- **数据集**：`data/tb2/tb2-train.jsonl` 中 18 道 `difficulty=hard` 任务。
+  - 理由：hard 题回合多、工具输出长，最容易让历史超过压缩阈值。
+- **上下文**：C=`--max-seq-len 16384`，T_comp=10,240（论文值，不改），所以历史超过 6,144 词元就触发压缩。
+  - 理由：S17 实测（`infra-drafts/AGENTIC-CONTEXT-BUDGET-S17.md` §1）在 8192 上下文下轨迹总长均值 3.8k–6.0k，截断率 0.21–0.46；C=8192 时 C<T_comp，进第一回合就会触发，不是有效测试。16384 下一部分轨迹会超过 6,144，另一部分不会，两种情况都能看到。
+  - 论文 C 为 64k/80k；本取值只为 G1/G3 功能验证，不代表训练配置。
+- **偏离论文**：G1/G3 不做 50 步 critic warm-up（`--num-critic-only-steps 0`），只验证路径通、段编号与优势修正、指标有限，不声称学习效果。
