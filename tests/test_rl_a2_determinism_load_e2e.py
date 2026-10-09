@@ -72,16 +72,16 @@ def _island(tmp_path, monkeypatch, miles_args, http, *, observe=False, profile=N
     from yeto.rl.engine.algorithm import AlgorithmSpec
     from yeto.rl.engine.bridges import LocalOnlySync
     from yeto.rl.engine.driver import EventTape
-    from yeto.rl.engine.miles_adapter import LoopRunner
-    from yeto.rl.engine.miles_adapter import rollout as rollout_mod
-    from yeto.rl.engine.miles_adapter import rollout_meta_hook as hook
-    from yeto.rl.engine.miles_adapter.entry import (
+    from yeto.rl.adapters.miles import LoopRunner
+    from yeto.rl.adapters.miles import rollout as rollout_mod
+    from yeto.rl.adapters.miles import rollout_meta_hook as hook
+    from yeto.rl.adapters.miles.entry import (
         compose_island,
         miles_capabilities,
         with_partitioned_serial,
     )
-    from yeto.rl.engine.miles_adapter.placement import MilesPlacement, PlacementRequest
-    from yeto.rl.engine.miles_adapter.rollout import DirMetadataSource
+    from yeto.rl.adapters.miles.placement import MilesPlacement, PlacementRequest
+    from yeto.rl.adapters.miles.rollout import DirMetadataSource
 
     sink = tmp_path / "sink"
     monkeypatch.setenv(hook.META_SINK_ENV, f"dir:{sink}")
@@ -147,7 +147,7 @@ def _learner(tmp_path, monkeypatch, *cli):
 def test_cli_deterministic_trainer_reaches_every_ray_worker_with_the_te_switch(
         tmp_path, monkeypatch):
     from yeto.rl import learner
-    from yeto.rl.engine.miles_adapter.entry import DETERMINISM_ENV, connect_island_ray
+    from yeto.rl.adapters.miles.entry import DETERMINISM_ENV, connect_island_ray
 
     args = _learner(tmp_path, monkeypatch, "--rl-deterministic-trainer")
     environ = {}
@@ -162,13 +162,13 @@ def test_cli_deterministic_trainer_reaches_every_ray_worker_with_the_te_switch(
 
 
 # ------------------------------------------------------------------ A2+ / 1.7 load samples
-TOOL = ("--custom-generate-function-path", "yeto.rl.tool_wait_workload.generate",
+TOOL = ("--custom-generate-function-path", "yeto.rl.adapters.miles.harness_glue.tool_wait.generate",
         "--rl-test-tool-delay-s", "5", "--rl-observe-timeline")
 
 
 def _profile(miles_args):
     from yeto.rl.engine.algorithm import AlgorithmSpec
-    from yeto.rl.engine.miles_adapter import entry
+    from yeto.rl.adapters.miles import entry
 
     spec = AlgorithmSpec()
     return entry.execution_profile_for(

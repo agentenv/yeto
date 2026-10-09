@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from yeto.rl.engine.miles_adapter.elastic_placement import ElasticPlacement, PlacementPlanError
+from yeto.rl.adapters.miles.elastic_placement import ElasticPlacement, PlacementPlanError
 from yeto.rl.engine.ports import PlacementDescription
 
 

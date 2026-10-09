@@ -98,7 +98,7 @@ def test_actor_without_island_address_hits_multiple_ray_instances():
 
 
 def test_connect_island_ray_pins_driver_and_actors_to_the_island_ray():
-    from yeto.rl.engine.miles_adapter.entry import connect_island_ray
+    from yeto.rl.adapters.miles.entry import connect_island_ray
 
     machine = _TwoRayMachine(raylet_env={"PATH": "/usr/bin", "PYTHONPATH": "/root/miles"})
     driver_env = {
@@ -114,7 +114,7 @@ def test_connect_island_ray_pins_driver_and_actors_to_the_island_ray():
 
 
 def test_connect_island_ray_is_a_noop_without_address_and_refuses_late_pin():
-    from yeto.rl.engine.miles_adapter.entry import connect_island_ray
+    from yeto.rl.adapters.miles.entry import connect_island_ray
 
     machine = _TwoRayMachine(raylet_env={})
     assert connect_island_ray(environ={}, ray_module=machine) is None
@@ -127,8 +127,8 @@ def test_connect_island_ray_is_a_noop_without_address_and_refuses_late_pin():
 def test_connect_island_ray_forwards_elastic_metadata_env_only_when_on():
     """Integ-s2 finding 2: Ray workers (where the rollout metadata hook runs)
     inherit the raylet env, so the --rl-elastic switch must travel in runtime_env."""
-    from yeto.rl.engine.miles_adapter.entry import connect_island_ray
-    from yeto.rl.engine.miles_adapter.rollout_meta_hook import ELASTIC_METADATA_ENV
+    from yeto.rl.adapters.miles.entry import connect_island_ray
+    from yeto.rl.adapters.miles.rollout_meta_hook import ELASTIC_METADATA_ENV
 
     on = _TwoRayMachine(raylet_env={})
     connect_island_ray(environ={"RAY_ADDRESS": "a:6379", ELASTIC_METADATA_ENV: "1"}, ray_module=on)
@@ -143,7 +143,7 @@ def test_connect_island_ray_forwards_codex_harness_env_and_learner_id_to_workers
     actors and must self-configure from the job runtime_env, not the raylet env."""
     from types import SimpleNamespace
 
-    from yeto.rl.engine.miles_adapter.entry import connect_island_ray
+    from yeto.rl.adapters.miles.entry import connect_island_ray
 
     machine = _TwoRayMachine(raylet_env={})
     environ = {

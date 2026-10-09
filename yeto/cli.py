@@ -92,6 +92,13 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     )
     rl.add_argument("--rl-runtime", choices=["miles"], default="miles")
     rl.add_argument(
+        "--rl-backend",
+        choices=["miles", "verl"],
+        default="miles",
+        help="training backend adapter (yeto/rl/engine/backends.py; default miles). "
+        "A backend without a registered adapter is refused before launch.",
+    )
+    rl.add_argument(
         "--rl-engine",
         choices=["legacy", "ports"],
         default="ports",
@@ -315,7 +322,7 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     rl.add_argument("--rl-test-tool-delay-s", type=float, default=None, metavar="S",
                     help="ports, TEST ONLY: every training trajectory waits S seconds on a fake "
                     "tool call (needs --custom-generate-function-path "
-                    "yeto.rl.tool_wait_workload.generate); off by default")
+                    "yeto.rl.adapters.miles.harness_glue.tool_wait.generate); off by default")
     rl.add_argument("--rl-elastic-state-dir", default=None, metavar="ISLAND_PATH",
                     help="--rl-elastic: controller journal/ledger/cut dir ON THE ISLAND (e.g. a "
                     "persistent volume mount); default ~/yeto-rl/elastic-state")
@@ -405,8 +412,8 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     rl.add_argument("--rl-resource-sample-interval", type=float, default=None, metavar="SECONDS",
                     help="ports: NVML rl_resource_sample period forwarded to the learner "
                     "(default: learner default, 60 s with --rl-observe-timeline; 0 = off)")
-    from yeto.rl.engine.miles_adapter.elastic_hook import add_recommend_arguments
-    add_recommend_arguments(rl)  # D2 elastic hook (elastic-ops.md)
+    from yeto.rl.engine import backends as _rl_backends
+    _rl_backends.module("elastic_hook", _rl_backends.DEFAULT_BACKEND).add_recommend_arguments(rl)  # D2 elastic hook (elastic-ops.md)
     rl.add_argument("--rl-elastic-tool-wait-board", action="store_true",
                     help="--rl-elastic: feed the island's tool-wait board into the drain check "
                     "(3.3; needs a workload that records tool waits)")
@@ -2624,7 +2631,7 @@ def rl_island_shape(args):
     """The fixed island the RL launcher will build from these flags, for
     the planner to price: actor GPUs plus dedicated rollout GPUs in the
     disjoint (full-parameter) mode, on one node; colocated (lora) mode
-    may span nodes. Mirrors the placement branch in yeto/rl/learner.py."""
+    may span nodes. Mirrors the placement branch in yeto/rl/adapters/miles/island_entry.py."""
     from .shape.plan import IslandShape
 
     if getattr(args, "training_mode", "sft") != "rl":

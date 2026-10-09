@@ -8,8 +8,8 @@ from yeto.rl.algos import critic, critic_fork, sao
 from yeto.rl.algos.compactionrl import compactionrl_spec
 from yeto.rl.algos.vapo import vapo_spec
 from yeto.rl.engine.algorithm import AlgorithmSpec, load_extensions
-from yeto.rl.engine.miles_adapter import algo_flag_rows as rows
-from yeto.rl.engine.miles_adapter import algorithm_flags as af
+from yeto.rl.adapters.miles import algo_flag_rows as rows
+from yeto.rl.adapters.miles import algorithm_flags as af
 
 load_extensions()
 

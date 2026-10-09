@@ -268,6 +268,44 @@ def test_tb2_holdout_stratified_and_reproducible(tmp_path):
         rt.build_holdout(adapter, exclude=["e0", "e1", "e2"])
 
 
+def test_tb2_holdout_excludes_smoke6_by_default(tmp_path):
+    adapter = _tb2_pool(tmp_path)
+    for t in rt.SMOKE6_TASK_IDS:
+        make_task(tmp_path, t, difficulty="medium")
+    adapter = rt.Tb2Benchmark(tmp_path, version="tb2@test")
+    h = rt.build_holdout(adapter)
+    ids = set(bm.holdout_ids(h))
+    assert not ids & set(rt.SMOKE6_TASK_IDS) and len(ids) == 30
+    assert h["excluded"] == [{"task_id": t, "reason": rt.SMOKE6_REASON} for t in sorted(rt.SMOKE6_TASK_IDS)]
+    assert "smoke6" in h["rule"]
+    none = rt.build_holdout(adapter, exclude={})
+    assert "excluded" not in none and len(none["items"]) == 30
+
+
+def test_holdout_cli_exclusions(tmp_path):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools" / "reward_env"))
+    import holdout
+
+    tasks = tmp_path / "tasks"
+    tasks.mkdir()
+    _tb2_pool(tasks)
+    out = tmp_path / "out"
+    # built-in smoke-6 list, but the checkout lacks them -> fail closed
+    with pytest.raises(SystemExit, match="not in the TB2 checkout"):
+        holdout.main(["--tb2-tasks-dir", str(tasks), "--out-dir", str(out)])
+    assert holdout.main(["--tb2-tasks-dir", str(tasks), "--tb2-no-exclude", "--out-dir", str(out)]) == 0
+    assert "excluded" not in json.loads((out / "tb2-holdout.json").read_text())
+    jl = tmp_path / "ex.jsonl"
+    jl.write_text(json.dumps({"metadata": {"task_id": "m00"}}) + "\n\n")
+    assert holdout.main(["--tb2-tasks-dir", str(tasks), "--tb2-exclude-jsonl", str(jl),
+                         "--tb2-exclude-reason", "r", "--out-dir", str(out)]) == 0
+    h = json.loads((out / "tb2-holdout.json").read_text())
+    assert h["excluded"] == [{"task_id": "m00", "reason": "r"}] and "m00" not in bm.holdout_ids(h)
+    jl.write_text(json.dumps({"prompt": "x"}) + "\n")
+    with pytest.raises(SystemExit, match="metadata.task_id"):
+        holdout.main(["--tb2-tasks-dir", str(tasks), "--tb2-exclude-jsonl", str(jl), "--out-dir", str(out)])
+
+
 def test_rows_split_and_leak_check():
     rows = [{"metadata": {"task_id": "a"}}, {"metadata": {"task_id": "c"}}, {"task_id": "b"}]
     train, ev = bm.split_rows(rows, ["a", "b"])

@@ -187,8 +187,8 @@ def test_ports_entry_builds_a_bound_profile_and_preflights_before_gpu():
 
     from yeto.rl.engine.capabilities import CapabilityMismatch
     from yeto.rl.engine.execution_profile import ProfileError
-    from yeto.rl.engine.miles_adapter import entry
-    from yeto.rl.engine.miles_adapter.placement import PlacementRequest
+    from yeto.rl.adapters.miles import entry
+    from yeto.rl.adapters.miles.placement import PlacementRequest
 
     args = SimpleNamespace(rollout_batch_size=4, n_samples_per_prompt=8, num_steps_per_rollout=1,
                            yeto_rl_sync_preset="strict-avg")

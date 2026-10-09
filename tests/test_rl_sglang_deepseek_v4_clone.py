@@ -6,14 +6,14 @@ from types import SimpleNamespace
 
 import torch
 
-from yeto.rl.deepseek_v4_expert_clone import (
+from yeto.rl.adapters.miles.models.deepseek_v4.expert_clone import (
     CLONES_PER_LAYER,
     NUM_LAYERS,
     ORIGINAL_EXPERTS,
     TOTAL_EXPERTS,
     ExpertCloneContract,
 )
-from yeto.rl.sglang_deepseek_v4_clone import (
+from yeto.rl.adapters.miles.models.deepseek_v4.sglang_clone import (
     _RUNTIME_INDEXER_Q_B_TARGET,
     _RUNTIME_Q_B_TARGET,
     _configure_moe,

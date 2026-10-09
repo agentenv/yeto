@@ -15,7 +15,7 @@ import torch
 
 from ..protocol import DTYPE_F32, FinalManifest, SyncerClient
 from ..tensor_io import unpack_fragment
-from .dense_sweep_wire import (
+from yeto.rl.adapters.miles.models.dense_sweep_wire import (
     DenseFragmentSubmission,
     DenseSweepClient,
     DenseSweepConfig,

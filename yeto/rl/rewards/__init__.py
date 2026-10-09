@@ -2,7 +2,7 @@
 
 Nothing here imports a training framework or a backend adapter
 (``tests/test_import_boundaries.py``).  Backend adapters wrap these functions
-(Miles: ``yeto.rl.engine.miles_adapter.rewards``).
+(Miles: ``yeto.rl.adapters.miles.rewards``).
 """
 
 from yeto.rl.rewards.types import (

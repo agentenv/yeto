@@ -9,8 +9,8 @@ import pytest
 from yeto.rl import critic_warmup as cw
 from yeto.rl.algos.vapo import PAPER_PARAMETERS, vapo_spec
 from yeto.rl.engine.algorithm import AlgorithmSpec
-from yeto.rl.engine.miles_adapter import algorithm_flags as af
-from yeto.rl.engine.miles_adapter import config as mc
+from yeto.rl.adapters.miles import algorithm_flags as af
+from yeto.rl.adapters.miles import config as mc
 from yeto.rl.engine.run_config import CriticRunConfig
 
 from test_rl_miles_adapter_config import make_config

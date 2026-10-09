@@ -62,7 +62,7 @@ def test_example_reward_is_a_valid_reward_spec_inside_the_repo():
 
 def test_named_columns_map_math_500_rows_and_never_guess(tmp_path, monkeypatch):
     from yeto import data as yeto_data
-    from yeto.rl.learner import prepare_prompt_data
+    from yeto.rl.adapters.miles.island_entry import prepare_prompt_data
 
     rows = [{"problem": "What is 6*7?", "answer": "42", "level": 1, "unique_id": "t/1"}]
     monkeypatch.setattr(yeto_data, "load_rows", lambda source, revision=None: rows)
@@ -88,7 +88,7 @@ def test_named_columns_map_math_500_rows_and_never_guess(tmp_path, monkeypatch):
 
 def test_default_columns_are_unchanged(tmp_path, monkeypatch):
     from yeto import data as yeto_data
-    from yeto.rl.learner import prepare_prompt_data
+    from yeto.rl.adapters.miles.island_entry import prepare_prompt_data
 
     rows = [{"prompt": "hi", "label": "x"}, {"messages": [{"role": "user", "content": "yo"}]}]
     monkeypatch.setattr(yeto_data, "load_rows", lambda source, revision=None: rows)

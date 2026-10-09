@@ -27,7 +27,7 @@ from yeto.rl.engine.controller import (
 )
 from yeto.rl.engine.driver import DriverError
 from yeto.rl.engine.journal import read_journal
-from yeto.rl.engine.miles_adapter.publish import (
+from yeto.rl.adapters.miles.publish import (
     HOLD_BEFORE_CHECK_ENV,
     INJECT_LORA_PERTURB_ENV,
     PublicationError,
@@ -299,7 +299,7 @@ def test_watchdog_on_the_blocked_update_is_classified(tmp_path, monkeypatch):
     """The REAL publisher's injected block (reached record, liveness probe) under the
     watchdog: it fires while the update is blocked."""
     monkeypatch.setenv("YETO_RL_TEST_INJECT_UPDATE_WEIGHTS_BLOCK_S", "5")
-    from yeto.rl.engine.miles_adapter.publish import MilesPublisher
+    from yeto.rl.adapters.miles.publish import MilesPublisher
 
     driver, ctl, fork, pool, publisher, fired, probe = _watchdog_setup(tmp_path)
     real = MilesPublisher(args=SimpleNamespace(), actor_model=None, rollout_executor=None,
@@ -389,7 +389,7 @@ def test_drain_timeout_with_a_working_undrain_stays_cancelled(tmp_path):
 
 # ------------------------------------------------ 5b. A4b: tool-wait injection
 def _real_pool(monkeypatch, seconds, board):
-    from yeto.rl.engine.miles_adapter.rollout import (
+    from yeto.rl.adapters.miles.rollout import (
         HARNESS_NOT_AGENTIC, INJECT_TOOL_WAIT_ENV, MilesRolloutPool,
     )
 
@@ -413,7 +413,7 @@ def _real_pool(monkeypatch, seconds, board):
 
 
 def test_undrain_fail_injection_fails_the_next_n_undrains_and_records(monkeypatch):
-    from yeto.rl.engine.miles_adapter.rollout import INJECT_UNDRAIN_FAIL_ENV
+    from yeto.rl.adapters.miles.rollout import INJECT_UNDRAIN_FAIL_ENV
 
     monkeypatch.setenv(INJECT_UNDRAIN_FAIL_ENV, "1")
     pool, records = _real_pool(monkeypatch, None, None)
@@ -434,7 +434,7 @@ def test_undrain_fail_injection_fails_the_next_n_undrains_and_records(monkeypatc
 
 
 def test_without_the_env_undrain_is_the_plain_uncordon(monkeypatch):
-    from yeto.rl.engine.miles_adapter.rollout import INJECT_UNDRAIN_FAIL_ENV
+    from yeto.rl.adapters.miles.rollout import INJECT_UNDRAIN_FAIL_ENV
 
     monkeypatch.delenv(INJECT_UNDRAIN_FAIL_ENV, raising=False)
     pool, records = _real_pool(monkeypatch, None, None)
@@ -479,7 +479,7 @@ def _side_effects(path):
 
 
 def test_side_effect_log_records_each_injected_execution_once(monkeypatch, tmp_path):
-    from yeto.rl.engine.miles_adapter.rollout import INJECTED_TOOL_WAIT_ID, injected_tool_call_id
+    from yeto.rl.adapters.miles.rollout import INJECTED_TOOL_WAIT_ID, injected_tool_call_id
     from yeto.rl.engine.tool_wait import ToolWaitBoard, side_effect_duplicates
 
     board = ToolWaitBoard()
@@ -526,14 +526,14 @@ def test_side_effect_log_records_each_injected_execution_once(monkeypatch, tmp_p
 
 
 def test_pool_accepts_a_path_and_entry_wires_it_from_the_env(monkeypatch, tmp_path):
-    from yeto.rl.engine.miles_adapter import entry
-    from yeto.rl.engine.miles_adapter.rollout import SIDE_EFFECT_LOG_ENV
+    from yeto.rl.adapters.miles import entry
+    from yeto.rl.adapters.miles.rollout import SIDE_EFFECT_LOG_ENV
     from yeto.rl.engine.tool_wait import ToolSideEffectLog, ToolWaitBoard
 
     pool, _ = _real_pool(monkeypatch, 1.0, ToolWaitBoard())
     pool2, _ = _real_pool(monkeypatch, None, None)
     assert pool._side_effects is None and pool2._side_effects is None
-    from yeto.rl.engine.miles_adapter.rollout import HARNESS_NOT_AGENTIC, MilesRolloutPool
+    from yeto.rl.adapters.miles.rollout import HARNESS_NOT_AGENTIC, MilesRolloutPool
 
     p = MilesRolloutPool(inference_controller=None, rollout_executor=None, metadata=None,
                          expected_policy=lambda: (0, "h"), harness=HARNESS_NOT_AGENTIC,

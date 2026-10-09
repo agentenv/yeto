@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 
 from yeto.rl.engine.capabilities import WEIGHT_TRANSPORTS, BackendTraits
-from yeto.rl.engine.miles_adapter.entry import miles_capabilities, with_partitioned_serial
-from yeto.rl.engine.miles_adapter.traits import MILES_TRAITS
+from yeto.rl.adapters.miles.entry import miles_capabilities, with_partitioned_serial
+from yeto.rl.adapters.miles.traits import MILES_TRAITS
 
 FP = "sha256:" + "1" * 64
 

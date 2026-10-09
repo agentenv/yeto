@@ -28,7 +28,7 @@ from yeto.rl.engine.capabilities import (
 )
 from yeto.rl.engine.driver import EventTape, IslandDriver
 from yeto.rl.engine.fake import FakeEngine, fake_capabilities
-from yeto.rl.engine.miles_adapter.entry import miles_capabilities
+from yeto.rl.adapters.miles.entry import miles_capabilities
 
 FP = "sha256:" + "e" * 64
 NAME = "base_model.model.layer.lora_A.weight"
@@ -316,7 +316,7 @@ MATRIX = [
 def test_rejection_matrix_before_any_engine_verb(tmp_path, binary_mechanism, name, spec, message):
     if spec is None:
         # One placement per spec: reward+loss KL can only arrive via extra argv.
-        from yeto.rl.engine.miles_adapter.algorithm_flags import absorb_extra_argv
+        from yeto.rl.adapters.miles.algorithm_flags import absorb_extra_argv
 
         with pytest.raises(AlgorithmSpecError, match=message):
             absorb_extra_argv(AlgorithmSpec(), ["--kl-coef", "0.1", "--use-kl-loss",
@@ -371,7 +371,7 @@ EXPECTED_MILES_DECLARED = {
 
 
 def test_miles_and_fake_declarations():
-    from yeto.rl.engine.miles_adapter.entry import MILES_DECLARED
+    from yeto.rl.adapters.miles.entry import MILES_DECLARED
 
     miles = miles_capabilities(FP)
     assert set(MILES_DECLARED) == EXPECTED_MILES_DECLARED
@@ -468,7 +468,7 @@ def test_unverified_allowance_exempts_only_named(tmp_path):
 
 
 def test_opsm_combines_with_tis_and_translates_both():
-    from yeto.rl.engine.miles_adapter.algorithm_flags import algorithm_argv
+    from yeto.rl.adapters.miles.algorithm_flags import algorithm_argv
 
     spec = AlgorithmSpec(correction=CorrectionSpec(method="tis", tis_clip=2, tis_clip_low=0,
                                                    opsm_delta=1e-4))
@@ -629,7 +629,7 @@ def test_mismatch_metrics_claimed_by_use_tis_corrections_only():
 
 
 def test_pinned_declaration_only_on_its_verified_miles_commit():
-    from yeto.rl.engine.miles_adapter import entry
+    from yeto.rl.adapters.miles import entry
 
     assert "loss_aggregations:token" in entry.MILES_DECLARED_PINS
     good = next(iter(entry.MILES_DECLARED_PINS["loss_aggregations:token"]))

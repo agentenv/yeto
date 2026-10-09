@@ -8,7 +8,7 @@ step is entered, before the scheduler advances.
 
 * ports: ``state_plugin.install_grad_norm_recorder`` wraps upstream
   ``train_one_step`` and calls :func:`optimizer_lr` before the step;
-* legacy: ``yeto.rl.learner`` sets the fork's existing
+* legacy: ``yeto.rl.adapters.miles.island_entry`` sets the fork's existing
   ``--custom-megatron-before-train-step-hook-path`` to :data:`HOOK_PATH`, a
   combined hook that records the LR and then runs the grad audit hook
   (``yeto.rl.grad_audit.before_train_step``) when that audit is configured, so

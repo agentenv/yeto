@@ -248,7 +248,7 @@ def test_cli_materializes_deterministic_jsonl(tmp_path):
 
 def test_enriched_rows_keep_the_existing_miles_grpo_schema(tmp_path, monkeypatch):
     from yeto import data as yeto_data
-    from yeto.rl.learner import prepare_prompt_data
+    from yeto.rl.adapters.miles.island_entry import prepare_prompt_data
 
     prompts, tasks, data = _fixture(tmp_path)
     rows = build_text_level1_rows(prompts, tasks, data, max_snippets=1)

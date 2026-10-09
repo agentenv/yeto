@@ -16,8 +16,8 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from yeto.rl.engine.miles_adapter import state_plugin as sp  # noqa: E402
-from yeto.rl.engine.miles_adapter.state import MilesPolicyState, PolicyStateError  # noqa: E402
+from yeto.rl.adapters.miles import state_plugin as sp  # noqa: E402
+from yeto.rl.adapters.miles.state import MilesPolicyState, PolicyStateError  # noqa: E402
 from yeto.rl.engine.ports import PolicyState  # noqa: E402
 from yeto.rl.engine.trainable_state import TrainableState, UnsupportedLayoutError  # noqa: E402
 
@@ -265,7 +265,7 @@ def test_sharded_master_rejected():
 
 
 def test_state_plugins_wake_an_offloaded_actor_and_restore_sleep():
-    from yeto.rl.engine.miles_adapter import state_plugin as sp
+    from yeto.rl.adapters.miles import state_plugin as sp
 
     calls = []
 
@@ -293,7 +293,7 @@ def test_state_plugins_wake_an_offloaded_actor_and_restore_sleep():
 
 
 def test_grad_norm_prefers_recorded_train_step_value(monkeypatch):
-    from yeto.rl.engine.miles_adapter import state_plugin as sp
+    from yeto.rl.adapters.miles import state_plugin as sp
 
     class Optimizer:
         def get_grad_norm(self):
@@ -312,7 +312,7 @@ def test_recorder_captures_the_lr_the_step_applies_not_the_advanced_one(monkeypa
     import sys
     import types
 
-    from yeto.rl.engine.miles_adapter import state_plugin as sp
+    from yeto.rl.adapters.miles import state_plugin as sp
 
     optimizer = SimpleNamespace(param_groups=[{"lr": 1e-5}])
 

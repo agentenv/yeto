@@ -20,7 +20,7 @@ from yeto.rl.engine.algorithm import AlgorithmSpec, LossSpec
 from yeto.rl.engine.bridges import LocalOnlySync
 from yeto.rl.engine.driver import EventTape, IslandDriver, TrainStepMetrics
 from yeto.rl.engine.fake import FakeEngine, fake_capabilities
-from yeto.rl.engine.miles_adapter.trainer import masked_fraction
+from yeto.rl.adapters.miles.trainer import masked_fraction
 
 NAME = "base_model.model.layer.lora_A.weight"
 MASKING = AlgorithmSpec(loss=LossSpec(eps_clip=0.123))
@@ -75,7 +75,7 @@ def test_adapter_reads_masked_fraction_when_present():
 
 
 def test_miles_trainer_step_metrics_carry_masked_fraction():
-    from yeto.rl.engine.miles_adapter.trainer import MilesTrainerGroup
+    from yeto.rl.adapters.miles.trainer import MilesTrainerGroup
 
     group = MilesTrainerGroup.__new__(MilesTrainerGroup)
     group.last_grad_norm = 1.0

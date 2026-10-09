@@ -32,7 +32,7 @@ Enabled only when ``YETO_RL_AUDIT_GRADS=1``. Wiring:
 
 * ports: ``state_plugin.install_grad_norm_recorder`` wraps upstream
   ``train_one_step`` and arms :func:`arm` for every step;
-* legacy: ``yeto.rl.learner`` sets Miles'
+* legacy: ``yeto.rl.adapters.miles.island_entry`` sets Miles'
   ``--custom-megatron-before-train-step-hook-path`` to :data:`HOOK_PATH`
   (fork code is untouched; the hook exists in both Miles trees).
 

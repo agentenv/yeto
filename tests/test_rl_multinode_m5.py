@@ -18,7 +18,7 @@ import pytest
 from yeto import launcher
 from yeto.gpu_spec import parse_gpu_spec
 from yeto.rl.engine import multinode as mn
-from yeto.rl.engine.miles_adapter.placement import PlacementRequest
+from yeto.rl.adapters.miles.placement import PlacementRequest
 
 GPU_DIR = Path(__file__).parent / "multinode_gpu"
 T24 = mn.Topology(2, 4)
@@ -93,7 +93,7 @@ def test_fixed_partition_3x4_fallback_layout():
 
 
 def test_learner_run_config_keeps_island_gpus_per_node_when_colocated():
-    from yeto.rl.engine.miles_adapter.config import placement_request
+    from yeto.rl.adapters.miles.config import placement_request
     from types import SimpleNamespace as NS
 
     par = NS(actor_num_nodes=2, actor_num_gpus_per_node=4, colocated=True, rollout_num_gpus_per_engine=8,

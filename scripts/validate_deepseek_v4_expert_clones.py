@@ -15,7 +15,7 @@ from pathlib import Path
 import torch
 from safetensors import safe_open
 
-from yeto.rl.deepseek_v4_expert_clone import (
+from yeto.rl.adapters.miles.models.deepseek_v4.expert_clone import (
     CLONES_PER_LAYER,
     NUM_LAYERS,
     ORIGINAL_EXPERTS,

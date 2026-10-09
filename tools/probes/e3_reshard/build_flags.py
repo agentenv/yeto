@@ -3,7 +3,7 @@
     python build_flags.py <out learner_flags.txt> -- <yeto launch args incl. --rl-single-island-no-sync
                                                      --controller local --gpu modal:2xh100 ...>
 
-The launcher's dry-run plan carries each island's ``python3 -m yeto.rl.learner``
+The launcher's dry-run plan carries each island's ``python3 -m yeto.rl.adapters.miles.island_entry``
 line; its flags are what a real island would run, so the harness gets the
 production argument pipeline (learner_shim.py).
 """
@@ -14,7 +14,7 @@ import json
 import subprocess
 import sys
 
-MARKER = "yeto.rl.learner"
+MARKER = "yeto.rl.adapters.miles.island_entry"
 
 
 def learner_flags(plan: dict) -> str:

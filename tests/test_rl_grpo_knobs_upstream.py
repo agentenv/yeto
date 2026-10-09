@@ -27,7 +27,7 @@ from yeto.rl.algos import grpo_knobs as gk  # noqa: E402
 from yeto.rl.algos import reducers  # noqa: E402
 from yeto.rl.algos import reward_pipeline as rp  # noqa: E402
 from yeto.rl.engine.algorithm import BOUNDED_NONZERO_STD_FILTER, AlgorithmSpec, PluginRef  # noqa: E402
-from yeto.rl.engine.miles_adapter.algorithm_flags import algorithm_argv  # noqa: E402
+from yeto.rl.adapters.miles.algorithm_flags import algorithm_argv  # noqa: E402
 
 MILES_REPO = Path(arguments.__file__).resolve().parents[2]  # the miles checkout on PYTHONPATH
 REF = {"source": "Qwen/Qwen3-0.6B", "revision": "rev-a"}
@@ -276,7 +276,7 @@ def test_full_parse_args(tmp_path, name):
     import json
 
     from test_rl_miles_adapter_config import _TINY_QWEN3, make_config, sub
-    from yeto.rl.engine.miles_adapter import config as mc
+    from yeto.rl.adapters.miles import config as mc
 
     (tmp_path / "config.json").write_text(json.dumps(_TINY_QWEN3))
     (tmp_path / "p.jsonl").write_text('{"messages":[{"role":"user","content":"hi"}],"label":"x"}\n')

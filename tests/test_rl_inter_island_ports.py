@@ -20,7 +20,7 @@ from test_rl_engine_driver import NAME, _driver, _engine, _run_threads, _strict_
 from test_rl_inter_island_elastic_client import FakeSyncer
 from yeto.rl.elastic_client import DeltaTensor, ElasticClientConfig, ElasticInit, ElasticIslandClient, Leave
 from yeto.rl.engine.bridges import ElasticAvgSync, StrictAvgSync
-from yeto.rl.engine.miles_adapter import entry
+from yeto.rl.adapters.miles import entry
 
 
 def _sync(tmp_path, engine, client, *, learner_id=0, rounds=2):

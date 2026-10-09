@@ -141,7 +141,7 @@ def test_refuse_partial_island_full_island_then_open_writes_topology_once(tmp_pa
 def test_entry_preflight_refuses_partial_island_before_any_placement_group(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
-    from yeto.rl.engine.miles_adapter import entry
+    from yeto.rl.adapters.miles import entry
 
     ctl = _ctl(tmp_path / "state", {"t": 1000.0})
     elastic = SimpleNamespace(controller=ctl)
@@ -248,7 +248,7 @@ def test_restart_recovery_precondition_and_confirm_check_the_layout(tmp_path):
 def test_entry_layout_from_megatron_args_and_placement(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
-    from yeto.rl.engine.miles_adapter import entry
+    from yeto.rl.adapters.miles import entry
 
     topology = SimpleNamespace(nodes=2, gpus_per_node=2)
     miles_args = SimpleNamespace(tensor_model_parallel_size=1, pipeline_model_parallel_size=2,

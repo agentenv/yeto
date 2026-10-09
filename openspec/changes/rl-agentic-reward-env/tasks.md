@@ -10,6 +10,8 @@
 - [x] 1.7 SWE-bench Verified 适配器：钉数据修订、任务清单解析（缺字段/重复即拒）、难度与桶、官方补丁应用链 + eval_script 判分脚本、官方 `get_eval_report` 评分、不打补丁模式、gold 补丁、污染检查键。验收：`tests/test_reward_env_swebench.py`（真实数据行 + 官方 swebench 5.0.2，独立 venv 跑 11 项通过）。
 - [x] 1.8 SWE 镜像清单：Docker Hub 元数据查询，500 个镜像钉摘要并记录大小（`tools/reward_env/swev_image_manifest.py`）。
 
+- [x] 1.9 TB2 留出名单先排除 S15 冒烟 6 题再分层抽样（WP3 D2，#123 c8979bd2）：`tb2.build_holdout` 默认排除、结果带 `excluded`（task_id+原因）；`holdout.py` 加 `--tb2-exclude-jsonl/--tb2-exclude-reason/--tb2-no-exclude`，被排除题不在 checkout 中即报错。验收：`tests/test_reward_env.py` 新增 2 项，reward_env 两文件 34 passed（S17 N2，分支 s17-holdout-excl，PR #131 待审）。本机 tb2-data（89 题）实生成：30 题、6 题排除，sha256 28d6730a…，存 s1-runs/s17-c7-holdout/tb2-holdout.json（名单定稿仍归 3.4/WP3）。
+
 ## 2. 上 Modal（仅 CPU，需批准）
 - [ ] 2.1 构建冒烟 6 题预装镜像，记录每题构建时间与镜像大小。估 <$0.1。
 - [ ] 2.2 预装 A/B：6 题 × {预装, 不预装} × {官方解, 空解}，记录冷启动（create→首个 exec）、判分时间、reward。判据：官方解全 1、空解全 0；预装判分时间显著下降。估 <$0.1。

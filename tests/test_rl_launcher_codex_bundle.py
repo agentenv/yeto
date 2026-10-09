@@ -120,7 +120,7 @@ def bundle(tmp_path, monkeypatch):
     return root, seen
 
 
-# The learner's container-side expected_env keys (yeto.rl.learner._preflight_codex_harness)
+# The learner's container-side expected_env keys (yeto.rl.adapters.miles.island_entry._preflight_codex_harness)
 # plus what codex_harness_agent._attest_runtime / preflight.assert_openenv_identity read.
 LEARNER_EXPECTED_ENV = {
     "YETO_CODEX_BINARY_PATH", "YETO_CODEX_BINARY_SHA256", "YETO_CODEX_BINARY_SIZE_BYTES",

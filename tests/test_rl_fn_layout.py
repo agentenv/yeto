@@ -29,9 +29,9 @@ def test_run_miles_flash_next_reaches_run_ports_island_with_learned_layout(snaps
         from fp_fn import fnrun_cli
         from yeto.rl import learner
         from yeto.rl.engine import run_config
-        from yeto.rl.engine.miles_adapter import config as mac
-        from yeto.rl.engine.miles_adapter import entry
-        from yeto.rl.engine.miles_adapter import state as mas
+        from yeto.rl.adapters.miles import config as mac
+        from yeto.rl.adapters.miles import entry
+        from yeto.rl.adapters.miles import state as mas
 
         mp = _m.MonkeyPatch()
         run = island_run(tuple(fnrun_cli("fn8s")), mp)
@@ -70,7 +70,7 @@ def test_run_miles_flash_next_reaches_run_ports_island_with_learned_layout(snaps
 def test_run_ports_predicted_layout_unchanged(monkeypatch):
     from yeto.rl import learner
     from yeto.rl.core import CanonicalTensorSpec, canonical_layout_hash
-    from yeto.rl.engine.miles_adapter import entry
+    from yeto.rl.adapters.miles import entry
 
     seen = {}
     monkeypatch.setattr(entry, "run_ports_island", lambda m, l, a, **kw: seen.update(kw))
@@ -132,7 +132,7 @@ class _FakeActorModel:
         self.calls = 0
 
     def run_plugin(self, path, kwargs):
-        from yeto.rl.engine.miles_adapter import state_plugin as sp
+        from yeto.rl.adapters.miles import state_plugin as sp
 
         self.calls += 1
         assert path == sp.EXPORT_STATE
@@ -143,8 +143,8 @@ class _FakeActorModel:
 
 def test_native_export_validates_and_policy_state_learns_layout(capsys):
     from yeto.rl.core import canonical_layout_hash, canonical_state_from_owned_tensors
-    from yeto.rl.engine.miles_adapter import state_plugin as sp
-    from yeto.rl.engine.miles_adapter.state import MilesPolicyState, PolicyStateError
+    from yeto.rl.adapters.miles import state_plugin as sp
+    from yeto.rl.adapters.miles.state import MilesPolicyState, PolicyStateError
 
     out = sp._export_flash_next(_actor(), policy_version=0, exporter=lambda m: iter(_fake_chunks()))
     names = set(out["tensors"])
@@ -171,7 +171,7 @@ def test_native_export_validates_and_policy_state_learns_layout(capsys):
 
 
 def test_native_export_refuses_duplicates_and_apply():
-    from yeto.rl.engine.miles_adapter import state_plugin as sp
+    from yeto.rl.adapters.miles import state_plugin as sp
 
     dup = [[(f"{P}0.x.lora_A.weight", torch.zeros(2, 2))], [(f"{P}0.x.lora_A.weight", torch.zeros(2, 2))]]
     with pytest.raises(sp.StatePluginError, match="duplicate"):
@@ -185,14 +185,14 @@ def test_receipt_layout_reads_learned_hash_after_first_sync_start_export():
     import inspect
 
     from yeto.rl.engine import bridges
-    from yeto.rl.engine.miles_adapter import entry
+    from yeto.rl.adapters.miles import entry
 
     # rl-publish-fastpath: start goes through _local_state, which exports (digest
     # export or full export); both learn the layout hash on the first export.
     assert "_local_state(driver" in inspect.getsource(bridges.LocalOnlySync.start)
     local_state = inspect.getsource(bridges._local_state)
     assert "export_local_resident" in local_state and "driver.export_local()" in local_state
-    from yeto.rl.engine.miles_adapter import state as miles_state
+    from yeto.rl.adapters.miles import state as miles_state
 
     assert "self._expected_layout_hash = layout_hash" in inspect.getsource(
         miles_state.MilesPolicyState._digest_result)
@@ -223,7 +223,7 @@ def test_profile_expected_native_export_tensors():
 
 def test_native_export_gathers_all_pp_stages(capsys, monkeypatch):
     """TP2 PP2 EP4: main rank (last stage) merges stage 0's 40 with its own 38."""
-    from yeto.rl.engine.miles_adapter import state_plugin as sp
+    from yeto.rl.adapters.miles import state_plugin as sp
     from yeto.rl.profiles import qwen3_8_next as prof
 
     sent = {}
@@ -254,13 +254,13 @@ def test_native_export_gathers_all_pp_stages(capsys, monkeypatch):
 
 
 def _canon_stage(layers):
-    from yeto.rl.engine.miles_adapter import state_plugin as sp
+    from yeto.rl.adapters.miles import state_plugin as sp
 
     return {sp._canonical(n): v for c in _fake_chunks(layers=layers) for n, v in c}
 
 
 def test_merge_pp_stage_exports_validates():
-    from yeto.rl.engine.miles_adapter import state_plugin as sp
+    from yeto.rl.adapters.miles import state_plugin as sp
 
     s0, s1 = _canon_stage([0, 1]), _canon_stage([2, 3])
     assert len(sp.merge_pp_stage_exports([s0, s1], num_layers=4)) == 78
@@ -291,7 +291,7 @@ def test_merge_pp_stage_exports_validates():
 def test_pp_gather_unwraps_miles_reloadable_process_group():
     """s13-h100-20261007a: gather_object(dst=...) rejected Miles' ReloadableProcessGroup
     wrapper ("is not registered"); the export must hand torch the inner group."""
-    from yeto.rl.engine.miles_adapter.state_plugin import _torch_group
+    from yeto.rl.adapters.miles.state_plugin import _torch_group
 
     class Reloadable:  # mirrors miles.utils.reloadable_process_group.ReloadableProcessGroup
         def __init__(self, group):

@@ -94,7 +94,7 @@ def test_use_gpus_4_island_task(monkeypatch, capsys):
 
 
 def test_use_gpus_colocated_placement_packs_4_plus_4():
-    from yeto.rl.engine.miles_adapter.placement import PlacementRequest
+    from yeto.rl.adapters.miles.placement import PlacementRequest
 
     req = PlacementRequest("colocated", trainer_gpus=8, rollout_gpus=8, gpus_per_engine=8, gpus_per_node=4,
                            allow_cross_node_engine_tp=True)
@@ -125,7 +125,7 @@ def test_use_gpus_3_breaks_tp8_whole_node_rule():
 
 
 def test_runtime_gpu_pool_rows_only_allocated():
-    from yeto.rl.engine.miles_adapter.entry import island_smi_rows
+    from yeto.rl.adapters.miles.entry import island_smi_rows
 
     out = "".join(f"{g}, GPU-{g:08x}-0000-0000-0000-000000000000\n" for g in range(8))
     assert [i for i, _u in island_smi_rows(out, "4")] == [0, 1, 2, 3]

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from yeto.rl.engine.miles_adapter.rollout import member_id
-from yeto.rl.engine.miles_adapter import entry
+from yeto.rl.adapters.miles.rollout import member_id
+from yeto.rl.adapters.miles import entry
 from yeto.rl.harness.codex import preflight
 
 

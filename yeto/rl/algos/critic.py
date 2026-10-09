@@ -53,7 +53,7 @@ FORK_FLAGS = frozenset({
 
 
 # Miles argv translation (critic_argv / gae_variant_argv / positive_lm_argv) and
-# flag rows: yeto.rl.engine.miles_adapter.algo_flag_rows (decoupling 4.3).
+# flag rows: yeto.rl.adapters.miles.algo_flag_rows (decoupling 4.3).
 
 # --------------------------------------------------------------------------
 # VAPO positive-example LM loss (change 7.2; VAPO arXiv 2504.05118 sec. 4.3 eq. 9-10)

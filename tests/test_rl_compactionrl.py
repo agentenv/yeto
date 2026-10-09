@@ -9,8 +9,8 @@ from yeto.rl.algos import critic
 from yeto.rl.algos.compactionrl import DESIGN_PARAMETERS, PAPER_PARAMETERS, compactionrl_spec
 from yeto.rl.algos.vapo import vapo_spec
 from yeto.rl.engine.algorithm import AlgorithmSpec
-from yeto.rl.engine.miles_adapter import algorithm_flags as af
-from yeto.rl.engine.miles_adapter import config as mc
+from yeto.rl.adapters.miles import algorithm_flags as af
+from yeto.rl.adapters.miles import config as mc
 from yeto.rl.engine.run_config import CriticRunConfig
 
 from test_rl_miles_adapter_config import make_config
