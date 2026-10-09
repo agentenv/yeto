@@ -194,3 +194,22 @@ tests/test_rl_inter_island_ledger.py tests/test_rl_inter_island_status.py tests/
 - 真机 [实测]：岛 1 在 v1 后静默 120.3 s（lease 90）→ 04:00:00 lease_expired → 静默结束后同步服务拒收 "1 is not a member (rejoin required)" → 13.4 s 后 elastic_rejoin（incarnation 1，catch_up，base 3）→ 同步服务 pool_join catch_up → 之后 v5–v10 共 6 步岛 1 权重≈0.5 → 两岛正常结束，rc=0，status finished，两岛 H100。
 - 发现：① 客户端事件在岛 tape 里各写两次（自建客户端被重复挂钩，0.22 起就有），已修 eb6ff049；② 重入后第一步里岛 1 除 catch-up 零权重条目外，还有一条用静默前已收到（被挂起）的 v2 训练出的迟到增量，按 γ=0.5 折扣并入（权重 0.497）。judge v1 的 C4 "首步岛 1 全部为 0" 因此不过；v2（看数据后改的口径，已注明）拆成 C4a catch-up 条目为 0（过）+ C4b 迟到增量记为信息。是否允许"过期前拿到的基座训出的增量在重入后按迟到并入"待裁定。
 - ≈$3.0 [估算]。证据 s1-runs/s15-island1b-20261008g/{judgment-pause.json(v1),judgment-pause-v2.json,launch.ts.log,head/yeto-output/yeto-tape.jsonl,head/yeto-syncer.log,tape-direct/}。
+
+### 0.8a / 0.8 黄金比对（S17 夜 N6，分支 s17-x1-syncer-modes，2026-10-08）
+
+- legacy 逐行核实：相对 9e37b3c4^，legacy 相关文件 state/merge/iso_worker 零改动，server.rs 只新增（字段、elastic 提前返回分支、legacy 不追加字节的契约编码），无删除；legacy 契约哈希黄金值 b904a25c… 不变。无需修回。0.8a 勾选。
+- 新增 Rust 单测 6 项（5 项 legacy 等价 + 1 项 Python 账本黄金回放），`cargo test --manifest-path syncer/Cargo.toml`（即 CI 的 rust 任务命令）145 通过。CI 只跑 cargo test；本机未装 rustfmt/clippy，fmt/clippy 未跑（CI 也不跑）。
+- 0.8 仍未勾：>4 GiB 帧、真实学习者接入、分片 RDA/ISO/HeLoCo 合并未做。
+
+## S17 N6 — tasks 0.10 离线 IS 比（未完成）
+- 证据：`evidence/is-ratio-lag0-verl-s16.json`、`evidence/is-ratio-offline-README.md`；脚本 `tools/offline_is_ratio_compare.py`，单测 3 passed。
+- 已验证：lag 0（训推不一致）下 TIS/IcePop/M2PO 截断比例均 <2e-5、ESS/N≈0.998，无差异。
+- 未验证：lag 1–4（无已存数据）；需下次上卡按 README 方案顺带采集后重跑。默认值暂 `tis`。
+
+### 1.2 S17 G1（N3，2026-10-08）`s17-g1-island` + 基线 `s17-g1-base`——按放宽判据通过，1.2 勾选
+- 代码 main 80e944b6（含 #128 带宽埋点），镜像 4aeafd77（Miles 8bc52237a），配置同 s15-island1b-20261008g（Qwen3-0.6B LoRA r16，gsm8k，4×8，回答 384，lr 1e-5，seed 17，soft 180 s，lease 90，岛 1 v1 后断链 120 s）。Modal app ap-caezvSldIrYPcR8SX5ksH3 17:13:59–17:30:56Z（stopped），head s17-g1-island-head 已 down（sky status not found）。≈$2.3 [估算]。
+- 基线：同配置单岛不同步 10 轮（`--rl-single-island-no-sync`，Modal H100!:1），reward 0.9375/0.4375/0.125/0.5312/0.3125/0.5625/0.75/0.625/0.9375/0.75，均值 0.597、SE 0.083。两岛：岛 0 0.9375/0.4375/0.0625/0.5938/0.3125/0.6875/0.7812/0.5/0.9062/0.75，岛 1 0.9375/0.4688/0.0625/0.5625/0.1562/0.5625/0.8125/0.625/1.0/0.7188，均值 0.594。10 轮小样本，只能说明不劣于，不能说明更好。
+- **带宽实测（transfer 记录，同步服务在 Nebius eu-north1，岛在 Modal）**：每帧约 40.37 MB（LoRA r16 fp32 全部适配器）。接收 DELTA_TENSOR：岛 0 共 10 帧，每帧 2.45–2.68 s，约 14.4–15.7 MiB/s；岛 1 断链前 6.6 MiB/s，重入后 7 帧稳定在 18.2–18.5 s/帧 ≈ 2.1 MiB/s（原因未查：同一容器、同一同步服务，重入后新建的连接明显变慢）。ELASTIC_INIT：岛 0 15.0、岛 1 6.8 MiB/s。发送 ELASTIC_BASE 22 帧中位 7.9 GiB/s——发送端计时只到写进套接字缓冲，不代表网络带宽，不作带宽依据。
+- 每轮时长：两岛每轮间隔中位约 48 s，单岛基线约 19 s；推理 2–13 s、训练 12.5–30 s 两边相同，多出的约 29 s 是上传增量（岛 1 慢连接 18 s）+ 等待对方 + 应用基版本。GPU 显存峰值 35.8 GB/80 GB，利用率均值约 10%（0.6B 小模型，卡很闲）。首轮在首个事件后约 264–291 s。
+- 发现（待修，未改代码）：岛 catch-up 重入后，岛本地 `policy_version` 比同步服务外层版本少 1（elastic_rejoin base 3，随后 rl_policy_apply 记 v2，哈希 = 岛 0 的 v3）。凡按版本号比较两岛（判据、陈旧度 lag 计算、dashboard）都会错位。上一跑 s15-island1b-20261008g 用同一判据没有出现错位；两次的差别是那次重入后第一步里多了一条迟到增量，是否就是原因未核实。
+- 未出现、未验证：软截止 timed_out、delta_carried_over（两岛都按时到达）；cursor_restored（本次不是重启）。

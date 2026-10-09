@@ -132,6 +132,8 @@
 
 ## 8. 阶段 7：云层与按任务分 spot/按需（可与 verl 并行）
 
+设计输入（S17）：`openspec/changes/rl-infra-spec/cloud-pool-design.md` §3.4（回收按等级处理，对应 8.7）、§5（调度建议规则与 `CloudAdvice` 形状，对应 8.6）。
+
 - [ ] 8.1 `yeto/cloud/provider.py` 云提供方接口与能力声明（计费方式、回收提前通知秒数、能否当头节点、网络档位、卡数上限），以 `modal_runner.py:1-25` 为样板；`CloudSignals` 并入（C2、C3）。验收：接口单测；Modal 实现通过现有 modal_runner 测试。
 - [ ] 8.2 各云实现，把 `launcher.py` 中 `if spec.cloud ==` 分支（C1：`:326,1200,1242,1254,3392,3718,4291,4586,6432,6531-6556`）、`MULTINODE_IB_CLOUDS`/`NETWORK_TIER_BEST_SHAPES`（C4）、云×卡→镜像表（C5，`:2494-2507`）、模型存储/预烘镜像/头节点限制（C6）移入；直接 `sky.Task` 只在 SkyPilot 实现内（C7）。验收：对现有各云配置干跑（不开卡）生成的 SkyPilot 任务与 Modal 调用参数与改动前一致的对照测试；边界检查"云名分支只在 `yeto/cloud/`"。
 - [ ] 8.3 自有集群只留接口：SSH 与 k3s 云提供方仅定义能力声明骨架与"未实现"报错（C8、C9）；实际接入归 rl-local-cluster-deploy，等 verl 完成且新集群到手后再做。验收：选择 ssh/k3s 时报"未实现"的单测；`ssh_harness` 现有路径不受影响。
