@@ -18,7 +18,7 @@ def test_default_backend_is_miles_when_env_unset(monkeypatch):
 
 
 def test_env_selects_backend_and_unknown_is_refused(monkeypatch):
-    monkeypatch.setenv(backends.BACKEND_ENV, "verl")
+    monkeypatch.setenv(backends.BACKEND_ENV, "nope")
     with pytest.raises(backends.UnknownBackend, match="未注册"):
         rollout_meta.current_policy_token()
     with pytest.raises(backends.UnknownBackend, match="未注册"):
@@ -95,7 +95,7 @@ def test_island_ray_job_env_names_the_backend():
 def test_cli_rl_backend_flag_and_launcher_refuses_unregistered():
     from yeto import launcher
 
-    args = argparse.Namespace(training_mode="rl", rl_backend="verl", rl_image="x")
+    args = argparse.Namespace(training_mode="rl", rl_backend="nope", rl_image="x")
     with pytest.raises(ValueError, match="未注册"):
         launcher.resolve_default_rl_image(args)
     args = argparse.Namespace(training_mode="rl", rl_backend="miles", rl_image="x")
