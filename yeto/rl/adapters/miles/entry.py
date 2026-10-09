@@ -833,8 +833,31 @@ def compose_island(
         install_preempt_handler(resume.controller, emit=driver.emit)
         _wire_round_cuts(driver, elastic=resume, miles_args=miles_args, algorithm=algorithm,
                          base_model_revision=base_model_revision)
+    _wire_droppable_reclaim(sync, driver)
     holder["driver"] = driver
     return driver
+
+
+def _wire_droppable_reclaim(sync: Any, driver: Any, environ: Any = None) -> Any:
+    """rl-spot-cost-saving 5.x: a droppable island (``YETO_ISLAND_ROLE``) LEAVEs the
+    elastic pool on a reclaim notice and writes ``spot_reclaim`` with role
+    droppable. Nothing is saved: it loses only its own round increment and comes
+    back from the syncer base. No-op on every other island."""
+    from yeto.cloud import droppable
+
+    if droppable.env_role(environ) is None or not hasattr(sync, "_client"):
+        return None
+
+    def leave() -> bool:
+        client = getattr(sync, "client", None)
+        if client is None:
+            return False
+        client.leave()
+        return True
+
+    island = str(getattr(getattr(sync, "config", None), "learner_id", "?"))
+    return droppable.install_reclaim_listener(island, leave=leave, emit=driver.emit,
+                                              environ=environ)
 
 
 # rl-resume-from-checkpoint design §3: what must be identical between a cut and the
