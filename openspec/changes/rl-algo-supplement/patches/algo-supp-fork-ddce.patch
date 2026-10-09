@@ -1,0 +1,495 @@
+From ed75bd2a0c9a94ba996f1bff02d2cde8c4bcda65 Mon Sep 17 00:00:00 2001
+From: michael <78113554+chowhsu@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 11:16:02 +0000
+Subject: [PATCH 1/2] loss_hub: dual_clipfrac metric (share of A<0 tokens where
+ the dual-clip bound is active); observation only, loss bitwise unchanged
+
+---
+ .../training_utils/loss_hub/losses.py         |   8 ++
+ .../training_utils/loss_hub/math_utils.py     |  22 ++++
+ .../training_utils/loss/test_dual_clipfrac.py | 100 ++++++++++++++++++
+ 3 files changed, 130 insertions(+)
+ create mode 100644 tests/fast/backends/training_utils/loss/test_dual_clipfrac.py
+
+diff --git a/miles/backends/training_utils/loss_hub/losses.py b/miles/backends/training_utils/loss_hub/losses.py
+index 12b50ee9d..72e54d15f 100644
+--- a/miles/backends/training_utils/loss_hub/losses.py
++++ b/miles/backends/training_utils/loss_hub/losses.py
+@@ -18,6 +18,7 @@ from miles.backends.training_utils.loss_hub.math_utils import (
+     compute_gmpo_loss,
+     compute_gspo_kl,
+     compute_opsm_mask,
++    compute_dual_clipfrac,
+     compute_policy_loss,
+     compute_sapo_loss,
+ )
+@@ -211,10 +212,14 @@ def policy_loss_function(
+         advantages.new_zeros(()),
+     )
+ 
++    dual_clipfrac = None
+     if variant == "policy_loss":
+         pg_loss, pg_clipfrac = compute_policy_loss(
+             ppo_kl, advantages, args.eps_clip, args.eps_clip_high, getattr(args, "eps_clip_c", None)
+         )
++        if getattr(args, "eps_clip_c", None) is not None:
++            # rl-algo-supplement 2.3: share of tokens where the dual-clip lower bound is active
++            dual_clipfrac = compute_dual_clipfrac(ppo_kl, advantages, args.eps_clip, args.eps_clip_high, args.eps_clip_c)
+     elif variant == "cispo":
+         pg_loss, pg_clipfrac = compute_cispo_loss(
+             ppo_kl, torch.where(active_tokens, log_probs, 0.0), advantages, args.eps_clip, args.eps_clip_high
+@@ -417,6 +422,9 @@ def policy_loss_function(
+         "ess_ratio": ess_ratio_sum.squeeze(),
+     }
+ 
++    if dual_clipfrac is not None:
++        reported_loss["dual_clipfrac"] = sum_of_sample_mean(dual_clipfrac).clone().detach()
++
+     if gmpo_clip_num is not None:
+         reported_loss["gmpo_clip_num"] = gmpo_clip_num.detach()
+         reported_loss["gmpo_clip_den"] = gmpo_clip_den.detach()
+diff --git a/miles/backends/training_utils/loss_hub/math_utils.py b/miles/backends/training_utils/loss_hub/math_utils.py
+index 8f8f1e1c7..b8bdb6be9 100644
+--- a/miles/backends/training_utils/loss_hub/math_utils.py
++++ b/miles/backends/training_utils/loss_hub/math_utils.py
+@@ -277,6 +277,28 @@ def compute_policy_loss(
+     return pg_losses, clipfrac
+ 
+ 
++def compute_dual_clipfrac(
++    ppo_kl: torch.Tensor,
++    advantages: torch.Tensor,
++    eps_clip: float,
++    eps_clip_high: float,
++    eps_clip_c: float,
++) -> torch.Tensor:
++    """Per-token indicator (float) that the dual-clip lower bound ``-c * A`` is the active term.
++
++    Mirrors :func:`compute_policy_loss` for ``A < 0``: the dual bound applies when
++    ``-c * A < max(-r * A, -clip(r) * A)``.  Observation only (eager, detached): it never
++    touches the loss, so the loss stays bitwise unchanged whether or not this is computed.
++    """
++    with torch.no_grad():
++        ratio = _safe_exp_neg_ppo_kl(ppo_kl)
++        pg_losses1 = -ratio * advantages
++        pg_losses2 = -ratio.clamp(1 - eps_clip, 1 + eps_clip_high) * advantages
++        clip_pg_losses1 = torch.maximum(pg_losses1, pg_losses2)
++        pg_losses3 = -eps_clip_c * advantages
++        return ((advantages < 0) & (pg_losses3 < clip_pg_losses1)).float()
++
++
+ @torch.compile(dynamic=True)
+ def compute_cispo_loss(
+     ppo_kl: torch.Tensor,
+diff --git a/tests/fast/backends/training_utils/loss/test_dual_clipfrac.py b/tests/fast/backends/training_utils/loss/test_dual_clipfrac.py
+new file mode 100644
+index 000000000..9e4720606
+--- /dev/null
++++ b/tests/fast/backends/training_utils/loss/test_dual_clipfrac.py
+@@ -0,0 +1,100 @@
++"""CPU tests for the dual_clipfrac observation metric (yeto rl-algo-supplement 2.3).
++
++dual_clipfrac = share of loss-masked tokens with A < 0 where the dual-clip lower bound -c*A
++is the active term of the PPO loss.  It is observation only: the loss must stay bitwise unchanged.
++"""
++
++import torch
++
++from miles.backends.training_utils.loss_hub.math_utils import compute_dual_clipfrac, compute_policy_loss
++
++from .test_policy_loss_variants import _inputs, _run, make_args
++
++
++def test_dual_clipfrac_hand_values():
++    # ratio r = exp(-ppo_kl); c = 3, eps = 0.2
++    r = torch.tensor([4.0, 2.0, 4.0, 0.5, 5.0])
++    adv = torch.tensor([-1.0, -1.0, 1.0, -1.0, 0.0])
++    ppo_kl = -torch.log(r)
++    got = compute_dual_clipfrac(ppo_kl, adv, 0.2, 0.2, 3.0)
++    # token 0: A<0, max(r*1, clip(r)*1)=4 > c=3 -> dual active; token 1: 2 < 3 -> not;
++    # token 2: A>0 -> not; token 3: 0.8 < 3 -> not; token 4: A=0 -> not
++    assert got.tolist() == [1.0, 0.0, 0.0, 0.0, 0.0]
++
++
++def test_dual_clipfrac_matches_where_loss_takes_dual_branch():
++    g = torch.Generator().manual_seed(3)
++    ppo_kl = torch.randn(2000, generator=g) * 1.5
++    adv = torch.randn(2000, generator=g)
++    c = 1.5
++    eager = compute_policy_loss.__wrapped__
++    loss_dual, _ = eager(ppo_kl, adv, 0.2, 0.28, c)
++    loss_plain, _ = eager(ppo_kl, adv, 0.2, 0.28, None)
++    frac = compute_dual_clipfrac(ppo_kl, adv, 0.2, 0.28, c)
++    changed = (loss_dual != loss_plain).float()
++    assert torch.equal(frac, changed)
++    assert 0 < frac.mean().item() < 1
++
++
++def _dual_inputs(args):
++    inputs = _inputs(args)
++    g = torch.Generator().manual_seed(21)
++    # wide ratio spread so some A < 0 tokens exceed c
++    inputs["log_probs"] = [x - 1.5 * torch.rand(x.shape, generator=g) for x in inputs["log_probs"]]
++    return inputs
++
++
++def test_policy_loss_function_reports_dual_clipfrac_without_changing_loss():
++    args = make_args(entropy_coef=0.0, eps_clip=0.2, eps_clip_high=0.28, eps_clip_c=1.5)
++    inputs = _dual_inputs(args)
++    loss_a, metrics_a, grad_a = _run(args, inputs)
++    assert "dual_clipfrac" in metrics_a
++    v = metrics_a["dual_clipfrac"]
++    assert torch.isfinite(v) and v.item() > 0
++    # the metric is detached and computing it does not touch the loss or gradient
++    from miles.backends.training_utils.loss_hub import losses as losses_mod
++
++    saved = losses_mod.compute_dual_clipfrac
++    try:
++        losses_mod.compute_dual_clipfrac = lambda *a, **k: torch.zeros_like(a[0])
++        loss_b, metrics_b, grad_b = _run(args, inputs)
++    finally:
++        losses_mod.compute_dual_clipfrac = saved
++    assert torch.equal(loss_a, loss_b) and torch.equal(grad_a, grad_b)
++    for k in metrics_a:
++        if k != "dual_clipfrac":
++            assert torch.equal(metrics_a[k], metrics_b[k]), k
++
++
++def test_dual_clipfrac_reduction_matches_hand():
++    """Reported value = sum over samples of the masked per-sample mean (same reducer as pg_clipfrac)."""
++    args = make_args(entropy_coef=0.0, eps_clip=0.2, eps_clip_high=0.28, eps_clip_c=1.5)
++    inputs = _dual_inputs(args)
++    _, metrics, _ = _run(args, inputs)
++    from miles.backends.training_utils.loss_hub.logit_processors import get_log_probs_and_entropy
++
++    from .loss_test_utils import make_batch, make_parallel_state
++
++    make_parallel_state()
++    batch = make_batch(inputs, "policy_loss")
++    lps = get_log_probs_and_entropy(
++        inputs["policy_logits"],
++        args=args,
++        unconcat_tokens=batch["unconcat_tokens"],
++        total_lengths=batch["total_lengths"],
++        response_lengths=batch["response_lengths"],
++        with_entropy=False,
++    )["log_probs"]
++    want = 0.0
++    for lp, old, adv, m in zip(lps, batch["log_probs"], batch["advantages"], batch["loss_masks"], strict=True):
++        r = torch.exp(lp.detach() - old)
++        l12 = torch.maximum(-r * adv, -r.clamp(0.8, 1.28) * adv)
++        tok = ((adv < 0) & (-1.5 * adv < l12)).float()
++        want += ((tok * m).sum() / torch.clamp_min(m.sum(), 1)).item()
++    assert abs(metrics["dual_clipfrac"].item() - want) < 1e-6
++
++
++def test_default_path_has_no_dual_clipfrac_key():
++    args = make_args(entropy_coef=0.0, eps_clip=0.2, eps_clip_high=0.28)
++    _, metrics, _ = _run(args, _inputs(args))
++    assert "dual_clipfrac" not in metrics
+-- 
+2.43.0
+
+
+From 57d93872ebd2e9c059f3973e60bc5e26b73fd254 Mon Sep 17 00:00:00 2001
+From: michael <78113554+chowhsu@users.noreply.github.com>
+Date: Fri, 9 Oct 2026 11:16:02 +0000
+Subject: [PATCH 2/2] inference rollout: over-sampling tally in rollout metrics
+ (submit batch sizes, refill calls, filtered/kept/surplus/failed/resumed
+ groups, in-flight at end)
+
+---
+ miles/rollout/filter_hub/base_types.py        |  60 ++++++++++
+ .../inference_rollout_train.py                |  12 ++
+ .../inference_rollout/test_agentic_suspend.py |   6 +
+ .../test_over_sampling_metrics.py             | 113 ++++++++++++++++++
+ 4 files changed, 191 insertions(+)
+ create mode 100644 tests/fast/rollout/inference_rollout/test_over_sampling_metrics.py
+
+diff --git a/miles/rollout/filter_hub/base_types.py b/miles/rollout/filter_hub/base_types.py
+index fd0eb5a9b..51a82d1c0 100644
+--- a/miles/rollout/filter_hub/base_types.py
++++ b/miles/rollout/filter_hub/base_types.py
+@@ -41,6 +41,41 @@ class MetricGatherer:
+         self._dynamic_filter_drop_reason_count = defaultdict(lambda: 0)
+         self._unfiltered_reward_sum = 0.0
+         self._unfiltered_reward_count = 0
++        # over-sampling tally (yeto rl-algo-supplement 2.4); reported only once a submission is recorded
++        self._submit_batch_sizes: list[int] = []
++        self._completed_groups = 0
++        self._filtered_groups = 0
++        self._surplus_groups = 0
++        self._kept_groups = 0
++        self._inflight_groups_at_end = 0
++        self._resumed_groups = 0
++        self._failed_groups = 0
++
++    def on_submit(self, num_groups: int) -> None:
++        """One call to the data source: ``num_groups`` groups submitted for generation."""
++        self._submit_batch_sizes.append(int(num_groups))
++
++    def on_groups_resumed(self, num_groups: int) -> None:
++        """Groups carried over from the previous rollout (agentic suspend), not submitted now."""
++        self._resumed_groups += int(num_groups)
++
++    def on_group_failed(self) -> None:
++        """A generation task raised: the group is neither completed nor in flight."""
++        self._failed_groups += 1
++
++    def on_group_completed(self) -> None:
++        self._completed_groups += 1
++
++    def on_group_kept(self) -> None:
++        self._kept_groups += 1
++
++    def on_group_surplus(self) -> None:
++        """A group passed the filter after the batch was already full (not used for training)."""
++        self._surplus_groups += 1
++
++    def on_rollout_end(self, inflight_groups: int) -> None:
++        """Groups still in flight when the batch is full (aborted, recycled or suspended)."""
++        self._inflight_groups_at_end = int(inflight_groups)
+ 
+     def on_group_before_dynamic_filter(self, args: argparse.Namespace, group: list) -> None:
+         for sample in _iter_group_samples(group):
+@@ -58,6 +93,14 @@ class MetricGatherer:
+             return
+         self._dynamic_filter_drop_reason_count[reason] += 1
+ 
++    def on_group_filtered(self) -> None:
++        self._filtered_groups += 1
++
++    def over_sampling_stats(self) -> dict[str, int] | None:
++        """The over-sampling tally with short keys (None before any submission)."""
++        p = "rollout/over_sampling/"
++        return {k[len(p):]: v for k, v in self.collect().items() if k.startswith(p)} or None
++
+     def collect(self):
+         metrics = {
+             f"rollout/dynamic_filter/drop_{reason}": count
+@@ -65,6 +108,23 @@ class MetricGatherer:
+         }
+         if self._unfiltered_reward_count:
+             metrics["rollout/raw_reward_unfiltered"] = self._unfiltered_reward_sum / self._unfiltered_reward_count
++        if self._submit_batch_sizes or self._resumed_groups:
++            # submitted + resumed == completed + failed + inflight_at_end
++            # completed == filtered + kept + surplus
++            sizes = self._submit_batch_sizes
++            p = "rollout/over_sampling/"
++            metrics[p + "submit_calls"] = len(sizes)
++            metrics[p + "refill_calls"] = max(0, len(sizes) - 1)
++            metrics[p + "submitted_groups"] = sum(sizes)
++            metrics[p + "submit_batch_size_first"] = sizes[0] if sizes else 0
++            metrics[p + "submit_batch_size_max"] = max(sizes) if sizes else 0
++            metrics[p + "resumed_groups"] = self._resumed_groups
++            metrics[p + "failed_groups"] = self._failed_groups
++            metrics[p + "completed_groups"] = self._completed_groups
++            metrics[p + "filtered_groups"] = self._filtered_groups
++            metrics[p + "kept_groups"] = self._kept_groups
++            metrics[p + "surplus_groups"] = self._surplus_groups
++            metrics[p + "inflight_groups_at_end"] = self._inflight_groups_at_end
+         return metrics
+ 
+ 
+diff --git a/miles/rollout/inference_rollout/inference_rollout_train.py b/miles/rollout/inference_rollout/inference_rollout_train.py
+index 3505ba4ed..3fa3994ce 100644
+--- a/miles/rollout/inference_rollout/inference_rollout_train.py
++++ b/miles/rollout/inference_rollout/inference_rollout_train.py
+@@ -289,12 +289,14 @@ async def generate_rollout_async(
+     started_at: dict = {}
+     if suspend_mode:
+         pendings, started_at = await resume(state, rollout_id)
++        metric_gatherer.on_groups_resumed(len(pendings))
+         # Over-sampling keeps --over-sampling-batch-size groups in flight: top the
+         # resumed groups up with new ones (the stock rule below only submits
+         # while pending < remaining budget, which resumed groups would block).
+         top_up = args.over_sampling_batch_size - len(pendings)
+         if pendings and top_up > 0:
+             samples = data_source(top_up)
++            metric_gatherer.on_submit(len(samples))
+             scheduler.on_submit(samples)
+             pendings.update(submit_generate_tasks(state, samples, scheduler.sample_done_callback))
+     data = []
+@@ -305,6 +307,7 @@ async def generate_rollout_async(
+         while scheduler.has_capacity(pending_groups=len(pendings), group_budget=target_data_size - len(data)):
+             # get samples from the buffer and submit the generation requests.
+             samples = data_source(args.over_sampling_batch_size)
++            metric_gatherer.on_submit(len(samples))
+             scheduler.on_submit(samples)
+             pendings.update(submit_generate_tasks(state, samples, scheduler.sample_done_callback))
+ 
+@@ -324,6 +327,7 @@ async def generate_rollout_async(
+                 if suspend_mode:
+                     started_at.pop(task, None)
+                     _suspended(state).pop(task, None)
++                metric_gatherer.on_group_failed()
+                 logger.error(f"[rollout] Task raised exception: {e!r}", exc_info=True)
+                 continue
+ 
+@@ -345,9 +349,11 @@ async def generate_rollout_async(
+ 
+             assert len(group) == args.n_samples_per_prompt
+             all_data.append(group)
++            metric_gatherer.on_group_completed()
+             metric_gatherer.on_group_before_dynamic_filter(args, group)
+             filter_output = apply_preput_filters(args, dynamic_filter, group)
+             if not filter_output.keep:
++                metric_gatherer.on_group_filtered()
+                 metric_gatherer.on_dynamic_filter_drop(reason=filter_output.reason)
+                 continue
+ 
+@@ -355,9 +361,15 @@ async def generate_rollout_async(
+             # NOTE: here we have not stored all the unused samples back to the data buffer.
+             if len(data) < target_data_size:
+                 data.append(group)
++                metric_gatherer.on_group_kept()
+                 pbar.update(args.n_samples_per_prompt)
++            else:
++                metric_gatherer.on_group_surplus()
+ 
+     pbar.close()
++    metric_gatherer.on_rollout_end(len(pendings))
++    # read by the all-samples hook like rollout_abort_discard_stats (yeto rl-algo-supplement 2.6)
++    args.rollout_over_sampling_stats = metric_gatherer.over_sampling_stats()
+     sample = data[-1][0][0] if isinstance(data[-1][0], list) else data[-1][0]
+     logger.info(
+         "Finish rollout: text_preview=%s, label=%s, reward_summary=%s",
+diff --git a/tests/fast/rollout/inference_rollout/test_agentic_suspend.py b/tests/fast/rollout/inference_rollout/test_agentic_suspend.py
+index 091892459..d349b9e7d 100644
+--- a/tests/fast/rollout/inference_rollout/test_agentic_suspend.py
++++ b/tests/fast/rollout/inference_rollout/test_agentic_suspend.py
+@@ -302,6 +302,12 @@ async def test_next_rollout_adopts_suspended_groups_tops_up_and_stamps_them(monk
+     assert all(s.metadata["start_rollout_id"] == 0 for s in carried)
+     assert all("start_rollout_id" not in s.metadata for s in fresh)
+     assert args.rollout_resume_stats == {"resumed_groups": 2, "resumed_done_groups": 0}
++    # over-sampling tally (yeto rl-algo-supplement 2.4): resumed groups are counted apart
++    m = {k.removeprefix("rollout/over_sampling/"): v for k, v in out1.metrics.items()
++         if k.startswith("rollout/over_sampling/")}
++    assert m["resumed_groups"] == 2 and m["submitted_groups"] == 2
++    assert (m["submitted_groups"] + m["resumed_groups"]
++            == m["completed_groups"] + m["failed_groups"] + m["inflight_groups_at_end"])
+     # cut-off of rollout 1: group 2 (started 0) would be 2 rounds old -> cancelled
+     assert args.rollout_suspend_stats["over_age_cancelled_groups"] == 1
+     assert set(inference_rollout_train._suspended(state).values()) == {1}  # group 5 kept
+diff --git a/tests/fast/rollout/inference_rollout/test_over_sampling_metrics.py b/tests/fast/rollout/inference_rollout/test_over_sampling_metrics.py
+new file mode 100644
+index 000000000..0371dd910
+--- /dev/null
++++ b/tests/fast/rollout/inference_rollout/test_over_sampling_metrics.py
+@@ -0,0 +1,113 @@
++"""Over-sampling tally in the rollout metrics (yeto rl-algo-supplement 2.4):
++submit batch sizes, refill calls, filtered / kept / surplus groups, groups in flight at the end."""
++
++import asyncio
++from argparse import Namespace
++from types import SimpleNamespace
++
++from miles.rollout.filter_hub.base_types import FilterOutput, MetricGatherer
++from miles.rollout.inference_rollout import inference_rollout_common, inference_rollout_train
++
++P = "rollout/over_sampling/"
++
++
++def test_gatherer_reports_nothing_without_a_submission():
++    assert not any(k.startswith(P) for k in MetricGatherer().collect())
++    assert MetricGatherer().over_sampling_stats() is None
++
++
++def test_gatherer_counts():
++    g = MetricGatherer()
++    g.on_submit(4)
++    g.on_submit(4)
++    g.on_submit(2)
++    for _ in range(7):
++        g.on_group_completed()
++    for _ in range(3):
++        g.on_group_filtered()
++    for _ in range(3):
++        g.on_group_kept()
++    g.on_group_surplus()
++    g.on_rollout_end(3)
++    m = g.collect()
++    assert m[P + "submit_calls"] == 3 and m[P + "refill_calls"] == 2
++    assert m[P + "submitted_groups"] == 10
++    assert m[P + "submit_batch_size_first"] == 4 and m[P + "submit_batch_size_max"] == 4
++    assert m[P + "completed_groups"] == 7 and m[P + "filtered_groups"] == 3
++    assert m[P + "kept_groups"] == 3 and m[P + "surplus_groups"] == 1
++    assert m[P + "inflight_groups_at_end"] == 3
++    assert m[P + "resumed_groups"] == 0 and m[P + "failed_groups"] == 0
++
++
++def test_gatherer_reports_resumed_only_rollout():
++    g = MetricGatherer()
++    g.on_groups_resumed(4)
++    g.on_group_failed()
++    m = g.collect()
++    assert m[P + "submit_calls"] == 0 and m[P + "refill_calls"] == 0 and m[P + "submitted_groups"] == 0
++    assert m[P + "submit_batch_size_first"] == 0 and m[P + "submit_batch_size_max"] == 0
++    assert m[P + "resumed_groups"] == 4 and m[P + "failed_groups"] == 1
++
++
++async def test_generate_rollout_async_reports_the_over_sampling_tally(monkeypatch):
++    aborted: list[int] = []
++
++    async def fake_abort(state, pendings, rollout_id):
++        aborted.append(len(pendings))
++        for t in pendings:
++            t.cancel()
++        return []
++
++    async def noop(*_a, **_k):
++        return None
++
++    def fake_submit(state, samples, sample_done_callback=None):
++        async def run(group):
++            # filtered groups finish first; kept groups 0 and 3 a bit later; group 6+ never in time
++            idx = group[0].group_index
++            await asyncio.sleep(0 if idx % 3 else 0.01 if idx < 6 else 10)
++            if idx == 1:
++                raise RuntimeError("generation failed")
++            for s in group:
++                s.status = s.Status.COMPLETED
++                s.reward = 1.0
++            return group
++
++        return [asyncio.create_task(run(group)) for group in samples]
++
++    def keep_even(args, _filter, group):
++        idx = group[0].group_index
++        return FilterOutput(keep=idx % 3 == 0, reason=None if idx % 3 == 0 else "zero_std")
++
++    monkeypatch.setattr(inference_rollout_train, "abort", fake_abort)
++    monkeypatch.setattr(inference_rollout_train, "submit_generate_tasks", fake_submit)
++    monkeypatch.setattr(inference_rollout_train.dumper_utils, "configure_sglang", noop)
++    monkeypatch.setattr(inference_rollout_train, "recompute_samples_rollout_logprobs_via_prefill", noop)
++    monkeypatch.setattr(inference_rollout_train, "apply_preput_filters", keep_even)
++    monkeypatch.setattr(inference_rollout_train, "load_function", lambda _p: None)
++    args = Namespace(
++        rollout_global_dataset=True, dynamic_sampling_filter_path=None, rollout_batch_size=2,
++        over_sampling_batch_size=3, n_samples_per_prompt=1, agentic_suspend_between_turns=False,
++        partial_rollout=False, num_rollout=6, sglang_router_ip="r", sglang_router_port=1,
++        rollout_submission_granularity=None, reward_key=None, eval_reward_key=None,
++        rollout_sample_filter_path=None, rollout_all_samples_process_path=None,
++    )
++    state = SimpleNamespace(args=args, aborted=False, reset=lambda: None, sampling_params={})
++    counter = iter(range(100))
++    source = lambda n: [[inference_rollout_common.Sample(group_index=(g := next(counter)), index=g, prompt="p",
++                                                         metadata={})] for _ in range(n)]
++    out, _ = await inference_rollout_train.generate_rollout_async(state, 0, source)
++    m = out.metrics
++    assert len(out.samples) == 2
++    assert m[P + "submit_batch_size_first"] == 3
++    assert m[P + "submitted_groups"] == 3 * m[P + "submit_calls"]
++    assert m[P + "refill_calls"] == m[P + "submit_calls"] - 1 >= 1
++    assert m[P + "kept_groups"] == 2
++    assert m[P + "filtered_groups"] == m["rollout/dynamic_filter/drop_zero_std"] >= 1  # group 1 failed, not filtered
++    assert m[P + "completed_groups"] == m[P + "filtered_groups"] + m[P + "kept_groups"] + m[P + "surplus_groups"]
++    assert m[P + "inflight_groups_at_end"] == aborted[0]
++    assert m[P + "failed_groups"] == 1 and m[P + "resumed_groups"] == 0
++    assert (m[P + "submitted_groups"] + m[P + "resumed_groups"]
++            == m[P + "completed_groups"] + m[P + "failed_groups"] + m[P + "inflight_groups_at_end"])
++    # the same tally (short keys) is left on args for the all-samples hook
++    assert args.rollout_over_sampling_stats == {k[len(P):]: v for k, v in m.items() if k.startswith(P)}
+-- 
+2.43.0
+

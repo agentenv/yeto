@@ -145,6 +145,25 @@ MILES_DECLARED: dict[str, str] = {
 }
 
 
+# User-code mechanisms that are never declared (rl-algo-supplement design D6):
+# GPU evidence covers one piece of code, not arbitrary user code.  The vendored
+# Dr.GRPO reducer is claimed by ``loss_aggregations:constant`` through
+# ``register_named_reducer`` and so never requires
+# ``features:custom_pg_loss_reducer``; every other reducer does.  The yeto
+# dispatcher (``reward_postprocessors:custom_reward_postprocess``) is yeto code
+# and is not in this list.  ``--rl-allow-unverified-mechanism`` still admits
+# these on a single island without outer sync only.
+NEVER_DECLARABLE: frozenset[str] = frozenset({
+    "corrections:custom",
+    "features:plugins",
+    "losses:custom_loss",
+    "features:custom_pg_loss_reducer",
+})
+if NEVER_DECLARABLE & set(MILES_DECLARED):  # pragma: no cover - guarded by tests too
+    raise RuntimeError(
+        f"MILES_DECLARED must not declare user-code mechanisms: {sorted(NEVER_DECLARABLE & set(MILES_DECLARED))}"
+    )
+
 # Declarations whose evidence holds only for specific Miles pins (exact
 # commits; a new pin must be re-verified before it is added here).
 # 5c1b49eb = 0af62f4d + the 2b loss variants: carried over by code diff, not

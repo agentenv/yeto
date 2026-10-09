@@ -950,6 +950,15 @@ def extract_rollout_metadata(args: Any, all_samples: Any, data_source: Any = Non
         payload.update(discard_stats_fields(getattr(args, "rollout_abort_discard_stats", None)))
         if hasattr(args, "rollout_abort_discard_stats"):
             args.rollout_abort_discard_stats = None
+        # rl-algo-supplement 2.6: the fork's over-sampling tally (absent on
+        # older images -> no field, unknown)
+        from yeto.rl.engine.ports import over_sampling_fields
+
+        over_sampling = over_sampling_fields(getattr(args, "rollout_over_sampling_stats", None))
+        if over_sampling is not None:
+            payload["over_sampling"] = over_sampling
+        if hasattr(args, "rollout_over_sampling_stats"):
+            args.rollout_over_sampling_stats = None
         put_to_sink(payload)
     finally:
         # Reset per-rollout state: the bounded filter keys its memo on

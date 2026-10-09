@@ -151,6 +151,10 @@ class RolloutBatchHandle:
     # truncated fraction the 3.5 governor reads (None = nothing crossed / unknown).
     carry_over: Mapping[str, Any] | None = field(default=None, compare=False)
     cross_version_truncated_fraction: float | None = None
+    # rl-algo-supplement 2.4/2.6: the engine's over-sampling tally of the round
+    # (:data:`OVER_SAMPLING_KEYS`: submit batch sizes, refill calls, filtered /
+    # kept / surplus groups, groups in flight at the end). None = not reported.
+    over_sampling: Mapping[str, int] | None = field(default=None, compare=False)
 
     def mismatched_groups(self, expected_token: str) -> tuple[GroupMetadata, ...]:
         return tuple(g for g in self.groups if g.policy_token != expected_token)
@@ -311,3 +315,27 @@ class ReconfigurablePlacement(Placement, Protocol):
     def reconfigure(self, plan: PlacementDescription, *, epoch: int) -> PlacementDescription: ...
 
 
+# rl-algo-supplement 2.4/2.6: keys of ``RolloutBatchHandle.over_sampling``
+# (Miles fork ``args.rollout_over_sampling_stats``, MetricGatherer). Identities:
+# submitted + resumed == completed + failed + inflight_at_end and
+# completed == filtered + kept + surplus.
+OVER_SAMPLING_KEYS = (
+    "submit_calls", "refill_calls", "submitted_groups", "submit_batch_size_first",
+    "submit_batch_size_max", "completed_groups", "filtered_groups", "kept_groups",
+    "surplus_groups", "inflight_groups_at_end", "resumed_groups", "failed_groups",
+)
+
+
+def over_sampling_fields(stats: Mapping[str, Any] | None) -> dict[str, int] | None:
+    """Validate an engine's over-sampling tally. Missing, a missing key or a
+    non-negative-int violation: None (unknown, never guessed)."""
+
+    if not isinstance(stats, Mapping):
+        return None
+    out: dict[str, int] = {}
+    for key in OVER_SAMPLING_KEYS:
+        value = stats.get(key)
+        if type(value) is not int or value < 0:
+            return None
+        out[key] = value
+    return out

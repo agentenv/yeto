@@ -1,0 +1,23 @@
+torch 2.13.0+cu130
+dtype | case | eps args | hand | eager | compiled | frac(A>0,ratio>1+hi) | loss eager==compiled | clipfrac eager==compiled
+float32 | eq 0.001/0.001 | same-obj | 0.452393 | 0.452393 | 0.452393 | 0.228516 | False | True
+float32 | eq 0.001/0.001 | distinct | 0.452393 | 0.452393 | 0.452393 | 0.228516 | False | True
+float32 | neq 0.001/10 | distinct | 0.223877 | 0.223877 | 0.223877 | 0.000000 | False | True
+float32 | neq 0.001/10 | distinct | 0.223877 | 0.223877 | 0.223877 | 0.000000 | False | True
+float32 | eq 0.2/0.2 | same-obj | 0.000000 | 0.000000 | 0.000000 | 0.000000 | False | True
+float32 | eq 0.2/0.2 | distinct | 0.000000 | 0.000000 | 0.000000 | 0.000000 | False | True
+float32 | neq 0.2/0.28 | distinct | 0.000000 | 0.000000 | 0.000000 | 0.000000 | False | True
+float32 | neq 0.2/0.28 | distinct | 0.000000 | 0.000000 | 0.000000 | 0.000000 | False | True
+bfloat16 | eq 0.001/0.001 | same-obj | 0.468018 | 0.468018 | 0.468018 | 0.239990 | False | True
+bfloat16 | eq 0.001/0.001 | distinct | 0.468018 | 0.468018 | 0.468018 | 0.239990 | False | True
+bfloat16 | neq 0.001/10 | distinct | 0.228027 | 0.228027 | 0.228027 | 0.000000 | False | True
+bfloat16 | neq 0.001/10 | distinct | 0.228027 | 0.228027 | 0.228027 | 0.000000 | False | True
+bfloat16 | eq 0.2/0.2 | same-obj | 0.000000 | 0.000000 | 0.000000 | 0.000000 | False | True
+bfloat16 | eq 0.2/0.2 | distinct | 0.000000 | 0.000000 | 0.000000 | 0.000000 | False | True
+bfloat16 | neq 0.2/0.28 | distinct | 0.000000 | 0.000000 | 0.000000 | 0.000000 | False | True
+bfloat16 | neq 0.2/0.28 | distinct | 0.000000 | 0.000000 | 0.000000 | 0.000000 | False | True
+reverse-order fresh compile lo=0.001 hi=10.0: hand=0.219971 compiled=0.219971 clipfrac equal=True loss max|diff|=2.384e-07
+reverse-order fresh compile lo=0.001 hi=0.001: hand=0.454102 compiled=0.454102 clipfrac equal=True loss max|diff|=2.384e-07
+reverse-order fresh compile lo=0.2 hi=0.28: hand=0.000000 compiled=0.000000 clipfrac equal=True loss max|diff|=2.384e-07
+reverse-order fresh compile lo=0.2 hi=0.2: hand=0.000000 compiled=0.000000 clipfrac equal=True loss max|diff|=2.384e-07
+MISMATCH rows (float32): none

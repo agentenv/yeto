@@ -69,3 +69,42 @@
 - Q5 mismatch 5.2：用户接受 vendor 副本（已勾）。
 - Q6 loss-variants 3.1–3.4：用户同意在 GPU 冒烟 6.1–6.4 通过后标关闭（待 S14 G1 结果）。
 - 自有集群 spec（rl-local-cluster-deploy）：用户决定先放着，等 FN RL 能力（infra+algo）实现后再做，切 PR 时同步更新 spec。
+
+## S19 阶段一门禁（2026-10-09，子 agent s19-algosup；无 GPU）
+
+### 1.1 计划确认记录
+- 计划文件：`evidence/phase1-plan.md`（4.x/5.x/6.x 逐项判据、最小证据、对照、卡型、硬超时、上限、前缀；合计上限 $30 ≤ $35）。
+- **主 agent 10-09 代用户确认。** 理由：沿用用户在 S14 已给的裁定——先用 A10G（Q1）、4.x/5.x 全做（Q2）、pin 合并更新（Q3）。
+- 6.2（CISPO 两岛，可选）：不做，除非 4.x 结果需要。
+- 2.5 fork：不真推送 `yeto/ports`，继续用 overlay 补丁（主 agent 代拍板；理由：推送需额外审批，overlay 已在 critic-family 验证可用）。
+
+### 1.3 测试基线
+- 命令（docs/TESTING.md 本机安全测试集；原 `/tmp/yeto-venv` 全量命令不再适用）：`PATH="$HOME/.cargo/bin:$PATH" PYTHONPATH=. OMP_NUM_THREADS=1 /home/michael/work/yeto-test-venv/bin/python -m pytest tests -q -p no:cacheprovider -m "not gpu" -rfEs`
+- 基线提交：agentenv/main 512bb773。第一次全量：9 failed、5061 passed、47 skipped、23 deselected（ray_local），439 s。这 9 个都是环境失败：7 个是 `s1run.sh` 线程守卫（"3098 user threads (max 2900)"，当时本机同时在跑 Miles CPU 测试），2 个是 attestation/infra_switches。在干净的 512bb773 worktree 上单独重跑这 9 个：9 passed。所以有效基线失败集合为空，记录见 `baseline-failures.txt`。
+- 改动后全量（本分支）：第一次 8 failed，都是 `test_decoupling_golden.py`，原因是 `rollout_meta_hook.py` 源码哈希变化（预期）；已重新生成样本并写入 `yeto-framework-decoupling/hash-migration.md`。最终结果见 PR 描述。
+
+### 2.1 / 2.2 clipfrac
+- 结论：CPU 上不能复现。compile 与 eager 的 clipfrac 逐位相同，并且等于手算（含 eps 相等且为同一对象、特化顺序反转）。见 `evidence/clipfrac-cpu/report.md`。
+- 2.2：不改 fork，按合法否定结论勾选。CUDA 代码生成未排除；5.2 判据中的"clipfrac 与离线重算一致"负责检查 GPU 上的残余疑点。5.3 记为不适用（上卡时勾选）。
+
+### 2.3 / 2.4 fork 小提交（本地，未推送）
+- worktree `/home/michael/work/miles-algosup`，分支 `s19-algosup-metrics`，基于当前 pin ddce20992。
+- ed75bd2a0 `dual_clipfrac`：A<0 且 dual 下界 -c·A 为生效项的 token 比例，按 loss mask 用 `sum_of_sample_mean` 归约；只在 `eps_clip_c` 设定时上报；no_grad，loss 与梯度逐位不变（单测 `tests/fast/backends/training_utils/loss/test_dual_clipfrac.py`）。
+- 57d93872e 超采样计数：Miles rollout 指标 `rollout/over_sampling/<键>`，同一字典（短键）写入 `args.rollout_over_sampling_stats` 供 all-samples hook 读取。键名：`submit_calls`、`refill_calls`、`submitted_groups`、`submit_batch_size_first`、`submit_batch_size_max`、`completed_groups`、`filtered_groups`、`kept_groups`、`surplus_groups`、`inflight_groups_at_end`、`resumed_groups`、`failed_groups`。恒等式：submitted + resumed = completed + failed + inflight_at_end；completed = filtered + kept + surplus。单测 `tests/fast/rollout/inference_rollout/test_over_sampling_metrics.py`，并在 `test_agentic_suspend.py` 加了 resumed 断言。
+- fork 测试：loss 目录 93 passed / 13 failed，13 个失败在改动前同样存在（cp2_consistency 3、loss_snapshot 2、training_logprob_reuse 8）；rollout 相关 18 passed。
+- 独立审查（sonnet 子 agent）：ed75bd2a0 通过；初版超采样提交在 suspend resumed 组和 task 异常两种情形下恒等式不成立，已按意见补 `resumed_groups`/`failed_groups` 并补测，得到 57d93872e。
+- 交付：`infra-drafts/patches/algo-supp-fork-ddce.patch`（git format-patch ddce20992..57d93872e，副本 `patches/`），供 2.5 与 critic 6.3 合成一份 overlay。
+
+### 2.6 ALGO 侧接入（子 agent 代拍板：最少改动）
+- `dual_clipfrac`：Miles loss 字典里的标量已经经 `trainer.round_metrics()` 进入 `rl_round_trained.train_metrics`，trainer 不需要改。fake 新增 `FakeEngine.dual_clipfrac`，非 None 时在 `round_metrics` 中上报。
+- 超采样计数：`yeto/rl/engine/ports.py` 新增 `RolloutBatchHandle.over_sampling`、`OVER_SAMPLING_KEYS`、`over_sampling_fields`（逐键校验，缺键或非法即 None，不猜）；`rollout_meta_hook.extract_rollout_metadata` 把 fork 的统计写入 metadata `over_sampling`；`rollout.handle_from_metadata` 填入句柄；fake 超采样路径给出同形状统计。代拍板理由：这些文件不在 design D8 的 INFRA 名单里，沿用 `rollout_abort_discard_stats` 的同一条路径。
+- driver（INFRA）：`rl_round_labels` 输出 `rl/over_sampling/<键>`，以补丁 `infra-drafts/patches/algo-supp-metrics.patch` 交付（含测试 `tests/test_rl_algo_supp_metrics_driver.py`），在临时副本上 apply 后测试通过。
+- 单测：`tests/test_rl_algo_supp_metrics.py`。
+
+### 3.1 / 3.2
+- 3.1：`yeto/rl/adapters/miles/entry.py` 新增 `NEVER_DECLARABLE` = {corrections:custom, features:plugins, losses:custom_loss, features:custom_pg_loss_reducer}，导入时若与 `MILES_DECLARED` 相交就报错；单测 `tests/test_rl_algo_never_declarable.py` 断言不相交（含每个已知 pin）、名称都是真实机制、放行开关多岛或外层同步下被拒（含 critic strict-avg 例外不覆盖用户代码）。
+- 3.2：`docs/MILES_RL.md` Declaration policy 加"永不声明：用户代码"段；修正 rl-algo-capabilities 第 6 节四处：seq-and-adv 六机制已声明、token 与 no_grpo_std_normalization 已重新声明、mismatch 节 mis 已声明、policy-loss 节 pin 改为 ddce2099。另把文档中 `python3 -m yeto.rl.engine.miles_adapter.algorithm_flags` 改为 `yeto.rl.adapters.miles.algorithm_flags`（旧路径是转发模块，作为 `-m` 运行时不输出任何内容）。dry-run 复跑见 `evidence/docs-dry-run/output.txt`，与文档注释一致。
+
+### 仍需上卡（保持未勾）
+2.5 的 T4 检查、4.1–4.7、5.1–5.3、6.1–6.3。就绪状态写在 `infra-drafts/S19-BATCH3-PLAN.md` #1 与 #13。
+- 10-09 合并 main 后：主 agent 代拍板把 driver 补丁 `algo-supp-metrics.patch` 直接并入本 PR（不另走 INFRA 审批），`driver.py` 与 `tests/test_rl_algo_supp_metrics_driver.py` 已在分支内；golden 重新生成，相对 main 仍只有 rollout_meta_hook 的 24 行源码哈希变化。

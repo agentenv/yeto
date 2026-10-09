@@ -240,3 +240,7 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
 - elastic syncer 检查点格式不变：卡型固定值只在内存里；续跑后由身份哈希继续拒绝（身份哈希里已含卡型），第一个身份相同的 JOIN 再把可读的卡型固定下来。
 - 旧 GPU 证据：只是身份多了一个字段，训练行为不变，按 D6 继续以本表引用。
 - 合入 main（#173、#174 之后，2026-10-09）后重新生成 golden：旧值、新值与上表相同（main 上 ports 岛身份仍是 `494bbaba…`），diff 仍只有 `backend_identity` 的 24 行。#174 新增的 verl fully_async 路径同样带卡型身份（`trainer.py` 两条路径都经 `build_sync` 传 `compat_group`，并记 `rl_island_hardware`）。
+
+## S19 rl-algo-supplement 2.6：超采样计数进 rollout metadata（分支 s19-algosup，2026-10-09）
+
+- Miles 命令行、算法哈希、契约哈希、`fake_engine_tapes.json` 逐字节不变。只有插件源码 `yeto/rl/adapters/miles/rollout_meta_hook.py` 变了（读取 fork 的 `args.rollout_over_sampling_stats`，写入 metadata `over_sampling`；旧镜像没有该属性时不写），8 个样本里该插件三处 `source_sha256` `03b3a27a…` → `dc334cba…`。`python tests/decoupling_golden.py --write` 后 diff 只有这 24 行。
