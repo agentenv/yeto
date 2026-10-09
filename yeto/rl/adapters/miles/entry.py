@@ -646,6 +646,8 @@ def compose_island(
     from .trainer import MilesTrainerGroup
 
     holder: dict[str, IslandDriver] = {}
+    # rl-resume-from-checkpoint: round cuts without --rl-elastic (single island, no sync)
+    resume = resume_wiring_for(miles_args, sync=sync) if elastic is None else None
 
     def expected_policy() -> tuple[int, str]:
         driver = holder["driver"]
@@ -720,6 +722,7 @@ def compose_island(
         **(
             {"controller": elastic.controller, "ledger": elastic.ledger}
             if elastic is not None
+            else {"ledger": resume.ledger} if resume is not None
             else {}
         ),
         **({"evaluate_start": evaluate_start} if evaluate_start is not None else {}),
@@ -773,8 +776,115 @@ def compose_island(
         # observation path is on so the legacy (observe=False) tape stays byte-identical.
         if observe:
             elastic.controller.set_event_sink(driver.emit, journal=True)
+    if resume is not None:
+        sync.stop_after = resume.stop_after
+        from yeto.rl.engine.resume import install_preempt_handler
+
+        install_preempt_handler(resume.controller, emit=driver.emit)
+        _wire_round_cuts(driver, elastic=resume, miles_args=miles_args, algorithm=algorithm,
+                         base_model_revision=base_model_revision)
     holder["driver"] = driver
     return driver
+
+
+# rl-resume-from-checkpoint design §3: what must be identical between a cut and the
+# launch resuming it (Miles argument names; num_rollout is NOT part of it: extending a
+# run is the normal resume). Missing attributes are recorded as None.
+RUN_FINGERPRINT_ARGS = (
+    "hf_checkpoint", "ref_load", "lora_rank", "lora_alpha", "lora_dropout", "target_modules",
+    "lr", "lr_decay_style", "min_lr", "lr_warmup_iters", "lr_decay_iters", "weight_decay",
+    "adam_beta1", "adam_beta2", "clip_grad", "optimizer", "seed", "prompt_data", "input_key",
+    "label_key", "rollout_shuffle", "rollout_batch_size", "n_samples_per_prompt",
+    "global_batch_size", "rollout_max_response_len", "rollout_temperature",
+    "tensor_model_parallel_size", "pipeline_model_parallel_size", "context_parallel_size",
+    "expert_model_parallel_size", "advantage_estimator", "eps_clip", "eps_clip_high", "kl_coef",
+    "use_kl_loss", "bf16", "fp16",
+)
+
+
+def run_fingerprint_of(miles_args: Any, algorithm: Any) -> dict[str, Any]:
+    def plain(value: Any) -> Any:
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        if isinstance(value, (list, tuple)):
+            return [plain(v) for v in value]
+        return str(value)
+
+    out = {name: plain(getattr(miles_args, name, None)) for name in RUN_FINGERPRINT_ARGS}
+    sha = getattr(algorithm, "sha256", None)
+    out["algorithm_spec_sha256"] = sha() if callable(sha) else None
+    return out
+
+
+def next_lr_for(miles_args: Any):
+    """Design §4.5 ``lr_at_next_round``: the lr the next round will train at, from the
+    run's schedule with Megatron's ``OptimizerParamScheduler.get_lr`` arithmetic
+    (constant / linear / cosine, warmup 0 -- what yeto's lr_schedule emits). The round
+    after ``local_step`` optimizer steps trains at scheduler step ``local_step``
+    (G1 tape: rounds 0..9 at 1e-5 * (1 - k/10)). None when the schedule is not one of
+    these (the cut still restores the scheduler step, checked in restore_cut_shard)."""
+    import math
+
+    style = getattr(miles_args, "lr_decay_style", None)
+    lr = getattr(miles_args, "lr", None)
+    warmup = int(getattr(miles_args, "lr_warmup_iters", 0) or 0)
+    min_lr = float(getattr(miles_args, "min_lr", 0.0) or 0.0)
+    decay = getattr(miles_args, "lr_decay_iters", None)
+    if lr is None or warmup != 0 or style not in ("constant", "linear", "cosine"):
+        return None
+    if style != "constant" and not decay:
+        return None
+    max_lr = float(lr)
+
+    def next_lr(driver: Any) -> Any:
+        k = int(getattr(driver, "local_step", 0))
+        if style == "constant":
+            value = max_lr
+        elif k > int(decay):
+            value = min_lr
+        else:
+            ratio = float(k) / float(int(decay))
+            coeff = (1.0 - ratio) if style == "linear" else 0.5 * (math.cos(math.pi * ratio) + 1.0)
+            value = min_lr + coeff * (max_lr - min_lr)
+        return [value]
+
+    return next_lr
+
+
+class ResumeWiring:
+    """The round-cut controller + batch ledger of a run with ``--rl-resume-store`` and
+    no ``--rl-elastic`` (same attribute names as ElasticWiring for _wire_round_cuts)."""
+
+    def __init__(self, *, controller: Any, ledger: Any, every: int, stop_after: int | None,
+                 allow_config_change: bool) -> None:
+        self.controller = controller
+        self.ledger = ledger
+        self.every = every
+        self.stop_after = stop_after
+        self.allow_config_change = allow_config_change
+
+
+def resume_wiring_for(miles_args: Any, *, sync: Any, environ: Any = None) -> ResumeWiring | None:
+    config = getattr(miles_args, "yeto_rl_resume", None)
+    if not config:
+        return None
+    from yeto.rl.engine.bridges import LocalOnlySync
+
+    if not isinstance(sync, LocalOnlySync):
+        raise ValueError("--rl-resume-store needs --rl-single-island-no-sync (multi-island resume "
+                         "goes through the syncer checkpoint; see rl-resume-from-checkpoint 3.3)")
+    from yeto.rl.engine.ledger import BatchLedger
+    from yeto.rl.engine.resume import ResumeController, store_for
+
+    if not config.get("runtime_fingerprint"):
+        raise ValueError("--rl-resume-store: no runtime fingerprint (a cut without it is refused)")
+    store = store_for(config["store"], environ=environ)
+    controller = ResumeController(state_dir=config["state_dir"], store=store,
+                                  runtime_fingerprint=str(config.get("runtime_fingerprint") or ""),
+                                  keep=int(config.get("keep", 2)))
+    return ResumeWiring(controller=controller, ledger=BatchLedger(controller.state_dir),
+                        every=int(config.get("every", 1)), stop_after=config.get("stop_after"),
+                        allow_config_change=bool(config.get("allow_config_change", False)))
 
 
 def _wire_round_cuts(driver, *, elastic, miles_args, algorithm, base_model_revision) -> None:
@@ -794,7 +904,14 @@ def _wire_round_cuts(driver, *, elastic, miles_args, algorithm, base_model_revis
         ref_model=(None if not ref_load
                    else {"ref_load": str(ref_load), "base_model_revision": base_model_revision}),
     )
-    wire_round_cuts(driver, controller=controller, source=source)
+    config = getattr(miles_args, "yeto_rl_resume", None) or {}
+    wire_round_cuts(driver, controller=controller, source=source,
+                    every=int(getattr(elastic, "every", None) or config.get("every")
+                              or getattr(miles_args, "yeto_rl_resume_every", None) or 1),
+                    fingerprint=run_fingerprint_of(miles_args, algorithm),
+                    allow_config_change=bool(getattr(elastic, "allow_config_change", False)
+                                             or config.get("allow_config_change", False)),
+                    next_lr=next_lr_for(miles_args))
 
 
 def _wire_trainer_rebuild(driver, *, elastic, miles_args, algorithm, actor_model,
@@ -1624,6 +1741,11 @@ def run_ports_island(
         miles_args, launch, algorithm, yeto_policy_sync=yeto_policy_sync,
         harness_preflight=harness_preflight,
     )  # contract preflight(...) + harness preflight: before connect_island_ray()
+    if getattr(miles_args, "yeto_rl_resume", None):
+        # the round cut's backend fingerprint (the elastic controller gets the same one;
+        # G2 A: a cut without it is refused "runtime: backend_fingerprint missing")
+        miles_args.yeto_rl_resume["runtime_fingerprint"] = fingerprint
+
     from . import eval_wiring
 
     eval_guard = eval_wiring.eval_guard_preflight(miles_args)  # D6.c: before any GPU action

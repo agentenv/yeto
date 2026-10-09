@@ -431,6 +431,7 @@ class IslandDriver:
         self.sleep: Callable[[float], None] = time.sleep
         self.published_state: TrainableState | None = None
         self.at_safe_point = False
+        self.last_applied_lrs: list[float] | None = None
         self.eval_overlap: EvalOverlap | None = None
         if profile is not None and profile.execution_mode == "partitioned-overlap" and evaluate_start:
             self.eval_overlap = EvalOverlap(evaluate_start, emit=self.emit, clock=self.clock)
@@ -1239,6 +1240,8 @@ class IslandDriver:
         metrics = raw if isinstance(raw, TrainStepMetrics) else TrainStepMetrics(**dict(raw))
         self._check_gradient(rollout_id, batch, receipt, metrics)
         self.trained_version = rollout_id + 1
+        # rl-resume-from-checkpoint: a round cut records the next round's lr from this
+        self.last_applied_lrs = list(metrics.applied_lrs) if metrics.applied_lrs else None
         if self.ledger is not None:
             self.ledger.optimizer_applied(
                 rollout_id, input_batch_hash=getattr(receipt, "input_batch_hash", None)
