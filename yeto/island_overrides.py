@@ -169,6 +169,9 @@ def check_island_args(args) -> None:
     if callable(task_check):
         task_check(age, custom_generate=getattr(args, "custom_generate_function_path", None),
                    custom_agent=getattr(args, "custom_agent_function_path", None))
+    from .launch_preflight import check_policy_age_spec
+
+    check_policy_age_spec(args)  # the same function the global flag goes through
 
 
 def island_args(args, island: int, overrides: dict[int, dict[str, Any]]):

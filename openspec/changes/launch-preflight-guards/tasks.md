@@ -43,8 +43,10 @@
   - 完成（本机单测通过，未上卡）：docs/RL_ELASTIC_BENCHMARK.md "Negative-test islands (per-island override)"（示例命令与警告）
 
 ## 4. 上卡验证 N12/N14 负例（需报批）
-- [ ] 4.1 上卡前复核：按 memory gpu-review-before-launch 捋清代码路径，把预登记判据与复核结论写进 evidence/n12-n14-plan.md（验证：文档存在且判据写明）
-- [ ] 4.2 报主 agent 批预算：Modal 两岛各 1×H100 + Nebius 无卡 head，Qwen3-0.6B gsm8k，三个短运行各约 15 分钟（严格模式学习率调度不同、elastic 身份不符、落后上限不同），估计 $10–15，上限 $20（验证：主 agent 批复记录在 evidence）
+- [x] 4.1 上卡前复核：按 memory gpu-review-before-launch 捋清代码路径，把预登记判据与复核结论写进 evidence/n12-n14-plan.md（验证：文档存在且判据写明）
+  - 完成：evidence/n12-n14-plan.md（代码路径 11 项、预登记判据 P1–P6、费用、复核中发现的两个问题及拍板）
+- [x] 4.2 报主 agent 批预算：Modal 两岛各 1×H100 + Nebius 无卡 head，Qwen3-0.6B gsm8k，三个短运行各约 15 分钟（严格模式学习率调度不同、elastic 身份不符、落后上限不同），估计 $10–15，上限 $20（验证：主 agent 批复记录在 evidence）
+  - 完成：主 agent 按用户代拍板授权批准，上限 $20；三个运行的最终组合记在 evidence/n12-n14-plan.md "批准"一节
 - [ ] 4.3 上卡运行，判据：被换参数的岛被拒，拒绝原因与参数对应，只拒该连接，另一岛继续训练并完成全部轮次，看板标出负例岛；本 change 的线程与显存预检在同一次运行中真机执行（验证：tape 与看板截图存 evidence，结论按"通过/失败"填写）
 
 ## 5. 收尾

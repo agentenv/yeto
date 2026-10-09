@@ -595,3 +595,60 @@ def test_override_env_reaches_ray_workers():
     seen.clear()
     connect_island_ray(environ={"RAY_ADDRESS": "10.0.0.1:6379"}, ray_module=ray)
     assert io_.OVERRIDE_ENV not in seen["runtime_env"]["env_vars"]
+
+
+# --- 10-09: --rl-max-policy-age needs a tolerant algorithm spec (s18-lpg-age-20261009a) ---
+ARU2_M1_SPEC = {"schema": "yeto-rl-algorithm-spec-v2",
+                "correction": {"method": "tis", "tis_clip": 2.0, "tis_clip_low": 0.0},
+                "execution": {"max_policy_staleness": 1}}
+
+
+def _spec_plan(tmp_path, extra, spec=None):
+    from test_rl_algorithm_provenance import _launcher_args
+    from yeto.launcher import _prepare_rl_args, dry_run_plan
+
+    if spec is not None:
+        path = tmp_path / "spec.json"
+        path.write_text(json.dumps(spec))
+        extra = (*extra, "--rl-algorithm-spec", str(path))
+    args = _launcher_args("ports", extra, gpu="modal:1xh100,modal:1xh100")
+    args.controller = "local"
+    _prepare_rl_args(args)
+    return args, dry_run_plan
+
+
+def test_policy_age_override_refused_with_default_spec(tmp_path):
+    args, plan = _spec_plan(tmp_path, ("--rl-negative-test-run", "--rl-island-override",
+                                       "1:rl_max_policy_age=1"))
+    with pytest.raises(lp.PreflightError, match="max_policy_staleness >= 1"):
+        plan(args)
+    with pytest.raises(lp.PreflightError, match="tolerates 0"):
+        io_.island_args(args, 1, {1: {"rl_max_policy_age": 1}})
+
+
+def test_policy_age_override_passes_with_aru2_m1_spec(tmp_path):
+    args, plan = _spec_plan(tmp_path, ("--rl-negative-test-run", "--rl-island-override",
+                                       "1:rl_max_policy_age=1"), spec=ARU2_M1_SPEC)
+    p = plan(args)
+    assert "--rl-max-policy-age 1" in p["island_requests"][1]["learner_command"]
+    assert "--rl-max-policy-age" not in p["island_requests"][0]["learner_command"]
+
+
+def test_global_policy_age_checked_before_cloud(tmp_path):
+    args, _ = _spec_plan(tmp_path, ())
+    args.rl_max_policy_age = 1
+    with pytest.raises(lp.PreflightError, match="tolerates 0"):
+        lp.check_policy_age_spec(args)
+    args, _ = _spec_plan(tmp_path, (), spec=ARU2_M1_SPEC)
+    args.rl_max_policy_age = 1
+    lp.check_policy_age_spec(args)  # passes
+    args.rl_max_policy_age = 0
+    lp.check_policy_age_spec(args)
+
+
+def test_launch_refuses_policy_age_without_tolerant_spec_before_cloud(monkeypatch, tmp_path):
+    launcher, args, calls, written = _memory_launch(monkeypatch, ("--rl-max-policy-age", "1"),
+                                                    seq=12288, resp=6144, tmp_path=tmp_path)
+    with pytest.raises(lp.PreflightError, match="max_policy_staleness"):
+        launcher.run(args)
+    assert "cloud" not in calls and written == []

@@ -388,6 +388,7 @@ def pre_cloud_checks(args, *, counter=None, sleep=time.sleep, clock=time.monoton
     if threads:
         preflight["threads"] = thread_preflight(args, counter=counter, sleep=sleep, clock=clock, out=out)
     preflight["memory"] = memory_preflight(args, specs, out=out)
+    check_policy_age_spec(args)  # global flag (island copies: island_overrides.check_island_args)
     num_islands = len(specs) + max(0, getattr(args, "external_learners", 0) or 0)
     overrides = io.overrides_of(args, len(specs))
     for island in overrides:
@@ -409,3 +410,30 @@ def dry_run_memory(args, specs) -> list[dict] | None:
     if mode == "off":
         return None
     return island_memory_estimates(args, specs, margin=margin)
+
+
+def check_policy_age_spec(args) -> None:
+    """``--rl-max-policy-age N`` (global or a per-island override) needs an
+    algorithm spec with ``execution.max_policy_staleness >= N`` -- the same rule
+    the Miles island applies in its config translation (adapters/miles/config.py)
+    and its A1 preflight, now checked before any cloud resource (10-09 ruling of
+    the main agent: S18 LPG run s18-lpg-age-20261009a failed on the island).
+    Needs prepared args (``rl_algorithm_spec_json`` resolved)."""
+    if getattr(args, "training_mode", "sft") != "rl":
+        return
+    age = int(getattr(args, "rl_max_policy_age", 0) or 0)
+    if age == 0:
+        return
+    import json as _json
+
+    from .rl.engine.algorithm import AlgorithmSpec
+    from .rl.engine.execution_profile import algorithm_max_policy_staleness
+
+    raw = getattr(args, "rl_algorithm_spec_json", None)
+    tolerated = (algorithm_max_policy_staleness(AlgorithmSpec.from_dict(_json.loads(raw)))
+                 if raw else 0)
+    if tolerated < age:
+        raise PreflightError(
+            f"--rl-max-policy-age {age} needs an algorithm spec with "
+            f"execution.max_policy_staleness >= {age} (and a TIS correction); the run's spec "
+            f"tolerates {tolerated} (--rl-algorithm-spec)")

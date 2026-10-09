@@ -5162,7 +5162,9 @@ def require_modal_for_gpu_exact(args, specs: list[ClusterSpec]) -> None:
 def _island_overrides(args, specs) -> dict:
     """launch-preflight-guards 3.2: validated per-island overrides ({} normally)."""
     from .island_overrides import overrides_of
+    from .launch_preflight import check_policy_age_spec
 
+    check_policy_age_spec(args)  # dry-run reaches here without pre_cloud_checks
     return overrides_of(args, len(specs))
 
 

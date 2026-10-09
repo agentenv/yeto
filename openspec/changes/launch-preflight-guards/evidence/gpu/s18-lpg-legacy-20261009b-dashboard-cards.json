@@ -1,0 +1,18 @@
+{
+ "run": "s18-lpg-legacy-20261009b",
+ "reducer_cards_negative_test": {
+  "0": null,
+  "1": {
+   "label": "负例岛：学习率调度 linear→constant",
+   "overrides": [
+    {
+     "key": "rl_lr_schedule",
+     "name": "学习率调度",
+     "old": "linear",
+     "new": "constant"
+    }
+   ]
+  }
+ },
+ "source": "s18-lpg-judge.py P6 (yeto.dashboard.reducer over all island events); offline page: s1-runs/<run>/dashboard.html (yeto dashboard export); no browser on this machine, so no PNG screenshot"
+}
