@@ -73,7 +73,7 @@ def test_resumed_calls_give_per_token_versions_and_logprobs():
     assert prov.logprobs[3] == 0.0 and math.isclose(prov.logprobs[0], -0.1)
 
 
-def test_verl_still_declares_stage_one():
+def test_verl_declares_stage_two_after_6_4b():
     from yeto.rl.adapters.verl.policy_age import SUPPORT
 
-    assert (SUPPORT.stage, SUPPORT.max_policy_age) == (1, 0)
+    assert (SUPPORT.stage, SUPPORT.max_policy_age) == (2, 1)
