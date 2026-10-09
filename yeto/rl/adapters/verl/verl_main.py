@@ -118,7 +118,25 @@ def main_fully_async(argv: list[str] | None = None) -> None:
     main_ppo.run_ppo = run_ppo  # fully_async_main.main imports it at call time
     if argv is not None:
         sys.argv = [sys.argv[0], *argv]
-    fa_main.main()
+    fully_async_hydra_entry(fa_main)()
+
+
+def fully_async_hydra_entry(fa_main):
+    """``fa_main.main`` re-decorated with an absolute config directory.
+
+    verl's ``@hydra.main(config_path="config")`` resolves ``config`` as the
+    package ``verl.experimental.fully_async_policy.config`` when the module is
+    imported (not run with ``-m``); that directory has no ``__init__.py``, so
+    hydra fails with "Primary config module ... not found" (S19 6.4b GPU run
+    s19-verl64b-async1-20261009a).  A file-system path works either way."""
+    import hydra
+
+    config_dir = os.path.join(os.path.dirname(os.path.abspath(fa_main.__file__)), "config")
+    inner = getattr(fa_main.main, "__wrapped__", None)
+    if inner is None:
+        raise RuntimeError("verl fully_async_main.main is not a hydra.main wrapper")
+    return hydra.main(config_path=config_dir, config_name="fully_async_ppo_trainer",
+                      version_base=None)(inner)
 
 
 if __name__ == "__main__":
