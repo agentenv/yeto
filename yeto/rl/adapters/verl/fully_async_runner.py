@@ -168,7 +168,12 @@ class _YetoTrainerMixin:
 YetoFullyAsyncTrainer = ray.remote(num_cpus=10)(type("YetoFullyAsyncTrainer", (_YetoTrainerMixin, _TrainerBase), {}))
 
 
-class YetoFullyAsyncTaskRunner(fa_main.FullyAsyncTaskRunner):
+# verl decorates its task runner with @ray.remote too; Ray refuses subclasses of
+# actor classes (found by the S19 Modal dry run), so subclass the plain class.
+_TaskRunnerBase = getattr(fa_main.FullyAsyncTaskRunner, "__ray_actor_class__", fa_main.FullyAsyncTaskRunner)
+
+
+class YetoFullyAsyncTaskRunner(_TaskRunnerBase):
     """verl's component set-up (trainer, rollouter, MessageQueue, initial weight
     sync); then the yeto driver instead of ``_run_training_loop``."""
 
