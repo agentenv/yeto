@@ -944,6 +944,12 @@ class _JobStatus:
         return self.text
 
 
+# Same markers as launcher.SYNCER_REFUSAL_MARKERS (kept here: modal_runner does
+# not import the launcher at module level).
+SYNCER_REFUSAL_MARKERS = ("backend identity mismatch, JOIN refused",
+                          "session mismatch (HELLO refused")
+
+
 class ModalIslandOps:
     """FleetController's `sky_ops` for Modal islands: names map to
     `ModalIslandConfig`s ('tasks'), job ids are call ids."""
@@ -982,7 +988,8 @@ class ModalIslandOps:
         try:
             for line in self.ops.tail_logs(job_id, entries=400):
                 text = str(line).strip()
-                if "[yeto-rl-strict-failure]" in text or "StrictRlInvariantError:" in text:
+                if "[yeto-rl-strict-failure]" in text or "StrictRlInvariantError:" in text \
+                        or any(m in text for m in SYNCER_REFUSAL_MARKERS):
                     return text
         except Exception:  # noqa: BLE001
             return None

@@ -2182,6 +2182,12 @@ def run_miles(
         # own tape file only: its rl_learner_finalized must not reach the
         # launcher's log-stream tape while this island's main run is still ahead.
         install_event_echo()
+    if not getattr(args, "rl_critic_baseline_run", False):
+        # launch-preflight-guards 3.4/3.6: negative-test island -> override event at
+        # the head of the tape; checkpoint store negative-test marker check.
+        from yeto.island_overrides import island_startup
+
+        island_startup(args, int(getattr(args, "learner_id", 0) or 0))
     if rl_engine == "ports":
         _require_ports_supported(args, extra_argv)
         from yeto.rl.adapters.miles.state import require_run_plugin

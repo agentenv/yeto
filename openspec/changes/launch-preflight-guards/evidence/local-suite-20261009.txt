@@ -1,0 +1,8 @@
+# 5.1 本机安全测试集（10-09，HEAD 1da44132 = s18-lpg 合入 agentenv/main 后）
+命令：docs/TESTING.md 第 2 节
+1 failed, 5115 passed, 47 skipped, 23 deselected, 10 warnings in 471.31s (0:07:51)
+FAILED tests/test_rl_multinode_m4x1.py::test_s1run_m4x1_argv_identical_except_rebind_and_itype
+失败原因：tests/multinode_gpu/s1run.sh 自带线程闸门（用户线程 3999 ≥ 2900，来自本机其他 agent），exit 3。与本分支代码无关。
+复跑：THREAD_MAX=99999 pytest tests/test_rl_multinode_m4x1.py -> 9 passed
+openspec validate launch-preflight-guards -> Change 'launch-preflight-guards' is valid
+scripts/precommit_check.py -> rc=0

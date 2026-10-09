@@ -83,6 +83,9 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="training loop selector; auto infers diffusion for diffusion aliases, "
         "otherwise uses the causal-LM learner",
     )
+    from .launch_preflight import add_cli_args as _add_preflight_args
+
+    _add_preflight_args(p)  # launch-preflight-guards 1.2 / 2.4 / 3.1
     rl = p.add_argument_group("Miles RL")
     rl.add_argument(
         "--training-mode",
@@ -1754,8 +1757,16 @@ def cmd_launch(args) -> int:
         return 0
     if getattr(args, "controller", "local") == "head":
         return cmd_launch_head(args)
+    try:  # launch-preflight-guards: before the worker can create any cloud resource
+        from .launch_preflight import pre_cloud_checks
 
-    args_dict = {k: v for k, v in vars(args).items() if k != "command"}
+        pre_cloud_checks(args)
+    except ValueError as exc:
+        print(f"[yeto] launch preflight refused: {exc}", file=sys.stderr)
+        return 1
+
+    args_dict = {k: v for k, v in vars(args).items()
+                 if k not in ("command", "_launch_preflight_manifest")}
     runs.create_run(name, args_dict)
     proc = _spawn_worker(name)
     runs.update_run(name, pid=proc.pid)
@@ -1830,7 +1841,7 @@ def _serializable_args(args) -> dict:
     controller mode pinned to 'head' (this dict is what `_head` replays)."""
     out = {}
     for k, v in vars(args).items():
-        if k == "command":
+        if k in ("command", "_launch_preflight_manifest"):
             continue
         try:
             json.dumps(v)
@@ -2030,6 +2041,13 @@ def cmd_launch_head(args) -> int:
     # Resolve the loss BEFORE serializing: a custom:<file.py> spec becomes
     # pickle:<file> here, and the pickle is file-mounted onto the head.
     launcher.prepare_launch_args(args)
+    try:  # launch-preflight-guards: before the head VM is provisioned
+        from .launch_preflight import pre_cloud_checks
+
+        pre_cloud_checks(args)
+    except ValueError as exc:
+        print(f"[yeto] launch preflight refused: {exc}", file=sys.stderr)
+        return 1
     # Every cloud the fleet (and the head) touches must have credentials on
     # this machine, or the head could never launch or tear islands down:
     # refuse before anything is recorded or provisioned.

@@ -1,0 +1,93 @@
+{
+ "run": "s18-lpg-age-20261009a",
+ "sched": "elastic",
+ "steps": 10,
+ "criteria": {
+  "P1_preflight_ran_before_cloud": true,
+  "P2_override_event_island1_only": true,
+  "P3_island1_refused_with_both_hashes": false,
+  "P4_only_that_connection": true,
+  "P5_island0_completes_all_rounds": true,
+  "P6_dashboard_marks_island1": true
+ },
+ "facts": {
+  "preflight_threads_local": [
+   [
+    "2369",
+    "2800"
+   ]
+  ],
+  "preflight_memory_local": [
+   [
+    "0",
+    "H100",
+    "36.6",
+    "71.3",
+    "OK"
+   ],
+   [
+    "1",
+    "H100",
+    "36.6",
+    "71.3",
+    "OK"
+   ]
+  ],
+  "preflight_threads_head": [
+   [
+    "500",
+    "2800"
+   ]
+  ],
+  "negative_banner": true,
+  "override_events": [
+   {
+    "island": 1,
+    "overrides": [
+     {
+      "island": 1,
+      "key": "rl_max_policy_age",
+      "name": "落后上限",
+      "new": 1,
+      "old": 0
+     }
+    ]
+   }
+  ],
+  "refusal_lines": [],
+  "syncer_lines_after_refusal": 0,
+  "syncer_fatal_lines": [],
+  "island0_refused": false,
+  "island0_local_rounds": [
+   1,
+   2,
+   3,
+   4,
+   5,
+   6,
+   7,
+   8,
+   9,
+   10
+  ],
+  "island0_finalized": true,
+  "island1_local_rounds": [],
+  "dashboard_cards": {
+   "0": null,
+   "1": {
+    "label": "负例岛：落后上限 0→1",
+    "overrides": [
+     {
+      "key": "rl_max_policy_age",
+      "name": "落后上限",
+      "old": 0,
+      "new": 1
+     }
+    ]
+   }
+  },
+  "gpu_names": []
+ },
+ "missing_evidence": [],
+ "verdict": "FAIL"
+}
