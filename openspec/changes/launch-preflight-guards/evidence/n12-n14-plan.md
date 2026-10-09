@@ -74,3 +74,22 @@ Miles 侧与落后上限相关的其他要求，逐条对照：
 6. 身份：岛 1 的后端身份经 `bind_policy_age(…,1)` 改变（island_entry `_backend_identity_sha256`），岛 0 不变 → JOIN 应被拒。规格哈希两岛相同，不是被拒原因。
 7. 未验证的风险：Miles 落后上限 1 与 elastic 调度同时开，此前没上过卡（ARU-2 只跑单岛无同步）。但岛 1 只需走到 JOIN（在训练开始之前），岛 0 的落后上限是 0，与此前的 elastic 运行相同。
 判据、形状、轮数、时限与首跑相同，只多 `--rl-algorithm-spec`（两岛同一份）。单跑上限 $5。
+
+## 三个运行的判读结果（10-09，judge v2：evidence/gpu/s18-lpg-judge.py）
+
+| 运行 | 调度 | 被换参数 | 结论 | 判据 |
+|---|---|---|---|---|
+| `s18-lpg-legacy-20261009b` | legacy | rl_lr_schedule | 通过 | P1–P4、P6 通过；P5 不适用 |
+| `s18-lpg-salt-20261009a` | elastic | identity_test_salt | 通过 | P1–P6 通过 |
+| `s18-lpg-age-20261009a` | elastic | rl_max_policy_age | 失败 | P3 失败：岛 1 在 Miles 配置检查处退出，没走到 JOIN |
+| `s18-lpg-age-20261009b` | elastic | rl_max_policy_age | 失败（证据不全） | P1、P2、P3、P5、P6 通过；P4 缺 syncer 日志 |
+
+`s18-lpg-age-20261009b` 细节（判读 json：evidence/gpu/s18-lpg-age-20261009b-judgment.json）：
+- 岛 1 在 09:57:50Z 被拒，原因是 "backend identity mismatch, JOIN refused: island 1 declares …"，信息含两边哈希。
+- launcher 只拆岛 1（"strict failure, not relaunched; the elastic pool goes on without it"），岛 0 继续。
+- 岛 0 的 tape（Modal Volume yeto-event-tapes，11:02 取回）有 local_round_id 1..10，10:05:04Z 写 rl_learner_finalized，最后发布 policy_version 10。
+- 看板 reducer：岛 1 卡片为"负例岛：落后上限 0→1"，岛 0 无标记。
+- 证据缺口：本地流日志在 10:04:29Z 截断（会话断开）。head 上的 launch.log 和 yeto-syncer.log 没在删 head 前拉回。head 已在 10:59 删除。所以 P4 按预登记规则记"失败（证据不全）"，不补数。
+- 只作参考、不改判的事实：本地流日志里有 48 行 syncer 记录，其中 37 行在拒绝之后，没有致命行；最后一行是 10:04:13Z outer_step outer_version=9。
+- 看门狗没触发，head 多开约 1 小时（约 $0.20）。原因未查。
+- 原始日志与 tape 已上传 yeto-evidence-archive，登记在 evidence/ARCHIVE-MANIFEST.tsv。

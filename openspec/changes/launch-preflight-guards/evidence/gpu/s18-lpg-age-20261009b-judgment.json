@@ -1,0 +1,106 @@
+{
+ "run": "s18-lpg-age-20261009b",
+ "sched": "elastic",
+ "steps": 10,
+ "criteria": {
+  "P1_preflight_ran_before_cloud": true,
+  "P2_override_event_island1_only": true,
+  "P3_island1_refused_with_both_hashes": true,
+  "P4_only_that_connection": false,
+  "P5_island0_completes_all_rounds": true,
+  "P6_dashboard_marks_island1": true
+ },
+ "facts": {
+  "preflight_threads_local": [
+   [
+    "2408",
+    "2800"
+   ]
+  ],
+  "preflight_memory_local": [
+   [
+    "0",
+    "H100",
+    "36.6",
+    "71.3",
+    "OK"
+   ],
+   [
+    "1",
+    "H100",
+    "36.6",
+    "71.3",
+    "OK"
+   ]
+  ],
+  "preflight_threads_head": [],
+  "negative_banner": true,
+  "override_events": [
+   {
+    "island": 1,
+    "overrides": [
+     {
+      "island": 1,
+      "key": "rl_max_policy_age",
+      "name": "落后上限",
+      "new": 1,
+      "old": 0
+     }
+    ]
+   }
+  ],
+  "refusal_lines": [
+   "backend identity mismatch, JOIN refused: island 1 declares 2cc053b54c5d95fd18521607211fb7167555d20c774bdbf192b62a41e3425a9d but this elastic session is pinned to d1afed0164c1e8a67a67fd217e6deb5dfea94cec51f68109944b9e0ea54f33ac by its first JOIN; islands with a different training backend (e.g. Miles vs verl), engine commit, device family or parameter-name map cannot be merged"
+  ],
+  "syncer_lines_after_refusal": 0,
+  "syncer_fatal_lines": [],
+  "island0_refused": false,
+  "island0_local_rounds": [
+   1,
+   2,
+   3,
+   4,
+   5,
+   6,
+   7,
+   8,
+   9,
+   10
+  ],
+  "island0_finalized": true,
+  "island1_local_rounds": [],
+  "dashboard_cards": {
+   "0": null,
+   "1": {
+    "label": "负例岛：落后上限 0→1",
+    "overrides": [
+     {
+      "key": "rl_max_policy_age",
+      "name": "落后上限",
+      "old": 0,
+      "new": 1
+     }
+    ]
+   }
+  },
+  "gpu_names": []
+ },
+ "missing_evidence": [
+  "launch.log",
+  "modal-app-logs.txt",
+  "head/yeto-syncer.log"
+ ],
+ "verdict": "INCOMPLETE",
+ "supplementary_not_counted": {
+  "note": "head 已删除，launch.log 与 head/yeto-syncer.log 没取回；预登记判读脚本判 INCOMPLETE，不改判。下面是本地流日志与岛磁带里的事实，只作参考。",
+  "missing_reason": "本地流日志 10:04:29 截断（会话断开）；head 在 10:59 由主 agent teardown 删除，之前没拉 launch.log 与 syncer 日志",
+  "stream_syncer_lines_total": 48,
+  "stream_syncer_lines_after_refusal": 37,
+  "stream_syncer_fatal_lines": 0,
+  "last_stream_syncer_line": "10:04:13 elastic event kind=outer_step outer_version=9",
+  "island0_tape_last_publication_policy_version": 10,
+  "island0_finalized_time_utc": "2026-10-09T10:05:04Z",
+  "modal_app_stopped_utc": "2026-10-09T10:05:35Z",
+  "tape_source": "Modal Volume yeto-event-tapes/yeto-s18-lpg-age-20261009b，11:02 取回 tape-direct/"
+ }
+}

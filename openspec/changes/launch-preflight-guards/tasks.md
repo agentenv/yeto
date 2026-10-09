@@ -48,6 +48,7 @@
 - [x] 4.2 报主 agent 批预算：Modal 两岛各 1×H100 + Nebius 无卡 head，Qwen3-0.6B gsm8k，三个短运行各约 15 分钟（严格模式学习率调度不同、elastic 身份不符、落后上限不同），估计 $10–15，上限 $20（验证：主 agent 批复记录在 evidence）
   - 完成：主 agent 按用户代拍板授权批准，上限 $20；三个运行的最终组合记在 evidence/n12-n14-plan.md "批准"一节
 - [ ] 4.3 上卡运行，判据：被换参数的岛被拒，拒绝原因与参数对应，只拒该连接，另一岛继续训练并完成全部轮次，看板标出负例岛；本 change 的线程与显存预检在同一次运行中真机执行（验证：tape 与看板截图存 evidence，结论按"通过/失败"填写）
+  - 未完成（仍未勾）：legacy、salt 两跑通过；落后上限首跑失败（P3），重跑 s18-lpg-age-20261009b 失败（证据不全，P4 缺 syncer 日志），其余判据通过。详见 evidence/n12-n14-plan.md 末节。是否再跑由主 agent 定。
 
 ## 5. 收尾
 - [ ] 5.1 本机安全测试集全绿（命令见 fix-known-red-tests），`openspec validate launch-preflight-guards` 通过（验证：命令输出存 evidence）
