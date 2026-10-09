@@ -102,3 +102,22 @@ head 侧 `fleet.jsonl` 由 `FleetController` 写入（`runs/<run>/fleet.jsonl`�
 `openspec/changes/yeto-fleet-dashboard/tasks.md` 的接口请求）；对应曲线 tab 与卡片字段显示“无数据”，
 发射后无需改看板即可出现。tok/s 在没有 `tok_per_s` 时由 `action_tokens / (rollout_seconds + train_seconds)` 推导。
 cell 表在没有 `rl_cell_snapshot` 时由 journal 的 `gpu_pool` 记录派生（标注来源）。
+
+## 生成阶段利用率（agentic-rollout-utilization 第 7 组）
+
+"每轮"面板下方的"生成阶段利用率"区块，数据来自学习端磁带：
+
+- 截止丢弃 / 续跑表：`rl_rollout_cutoff` 的提交组、目标组、丢弃组、丢弃条数、丢弃 token、过滤组；字段为空显示"未知"。
+- 轨迹完成曲线：`rl_trajectory_reward` 的 `trajectory_ended_at` 减生成段（`rl_timeline_span` task=generate）起点；虚线为截止（生成段结束）。被截止丢弃的轨迹没有完成事件，只在表里计数。
+- 四段耗时：`generation_seconds` / `tool_seconds` / `evaluate_time` / `sandbox_start_seconds` 每轮合计与工具执行占比；选定一轮后列出每条轨迹。
+- KV 占用与排队：`rl_load_sample` 的 `kv_used_tokens/kv_capacity_tokens` 与 `queued_requests`，底色为生成段。
+- 续跑跨轮（阶段 2 预留）：轨迹事件带 `started_rollout_id`（与训练轮不同）或 `policy_versions` 含多个版本时才显示。
+- 旧磁带没有这些事件时区块显示"无数据"。
+
+两条运行比较（只比较本区块；`--compare` 的磁带启动时读一次，不跟随）：
+
+```bash
+yeto dashboard export --tapes <A 磁带...> --compare <B 磁带...> --label "A 多发 6" --compare-label "B 多发 12" -o ab.html
+```
+
+页面上可切换"并排 / 叠加"（叠加只作用于完成曲线），以及"全部轮叠加 / 第 N 轮"。

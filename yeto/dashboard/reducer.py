@@ -130,6 +130,15 @@ NODE_SERIES_MAX = 20000
 NODE_SERIES_POINTS = 300
 # rl_timeline_span task -> page phase: R 推理生成 / T 训练 / S 训练后同步 / P 发布
 SPAN_PHASES = {"generate": "R", "train": "T", "outer_sync": "S", "publish": "P"}
+# agentic-rollout-utilization 7 (dashboard): rl_rollout_cutoff fields shown per round
+CUTOFF_KEYS = ("submitted_groups", "target_groups", "filtered_groups", "discarded_groups",
+               "discarded_trajectories", "discarded_tokens", "discarded_unknown_groups", "mechanism")
+# rl_trajectory_reward phase fields -> page names (generation / tool / judge / sandbox start)
+TRAJ_PHASES = (("gen", "generation_seconds"), ("tool", "tool_seconds"), ("judge", "evaluate_time"),
+               ("sandbox", "sandbox_start_seconds"))
+LOAD_KEYS = ("kv_used_tokens", "kv_capacity_tokens", "queued_requests", "running_requests",
+             "tool_wait_trajectories")
+UTIL_TRAJ_MAX = 400  # per-trajectory rows sent to the page (most recent)
 # Events only written once driver.run() is going (older tapes may lack rl_driver_start).
 DRIVER_RUNNING_EVENTS = frozenset({"rl_driver_phase", "rl_heartbeat", "rl_local_round", "rl_round_trained",
                                    "rl_resource_sample", "rl_publication"})
@@ -162,6 +171,8 @@ def _new_island(iid: str) -> dict:
 
         # fleet-dashboard 8.4: startup sub-steps {step: {"seconds", "step_s", "ts"}}
         "startup_steps": {}, "startup_step": None, "startup_step_ts": None,
+        # agentic-rollout-utilization 7: cutoff per round, per-trajectory timing, load samples
+        "cutoffs": {}, "trajs": [], "load": deque(maxlen=NODE_SERIES_MAX),
     }
 
 
@@ -192,6 +203,8 @@ class Reducer:
         self.sources_seen: list[str] = []
         self.operator_stops: list[dict] = []  # our own stop of the run (sources.operator_stops_near)
         self._run_meta_cache: tuple | None = None
+        self.label: str | None = None  # display label when compared (7.6)
+        self.compare: list["Reducer"] = []  # agentic-rollout-utilization 7.6
 
     # -- feeding ----------------------------------------------------------------
     def feed(self, record: Any, *, source: str = "-", offset: int | None = None,
@@ -365,6 +378,15 @@ class Reducer:
                 isl["pubs"][pv] = ts
         elif event == "rl_resource_sample":
             isl["resource"] = _resource(r, ts)
+        elif event == "rl_rollout_cutoff":
+            rid = r.get("rollout_id")
+            if isinstance(rid, int):
+                isl["cutoffs"][rid] = {k: r.get(k) for k in CUTOFF_KEYS}
+        elif event == "rl_trajectory_reward":
+            isl["trajs"].append(_traj(r))
+        elif event == "rl_load_sample":
+            if ts is not None:
+                isl["load"].append([ts] + [finite(r.get(k)) for k in LOAD_KEYS])
         elif event in ("rl_local_round", "rl_round_trained"):
             self._round_metrics(isl, r, event)
             if event == "rl_round_trained" and isinstance(r.get("rollout_id"), int):
@@ -483,6 +505,53 @@ class Reducer:
                         "cut_id": None if resume is None else resume["cut_id"]})
         return out
 
+    def utilization(self, isl: dict, rounds: list[dict] | None = None) -> dict | None:
+        """agentic-rollout-utilization 7: per-round cutoff tally, completion times inside the
+        generation span, four-phase time split, load (KV / queue) series and stage-2
+        carry-over. None when the tape has none of these events (older tapes)."""
+        if not (isl["cutoffs"] or isl["trajs"] or isl["load"]):
+            return None
+        rounds = self.round_records(isl) if rounds is None else rounds
+        gen = {r["round"]: r["phases"].get("R") for r in rounds}
+        by_rid: dict[int, list[dict]] = {}
+        for t in isl["trajs"]:
+            if t["rid"] is not None:
+                by_rid.setdefault(t["rid"], []).append(t)
+        out_rounds = []
+        for rid in sorted(set(gen) | set(isl["cutoffs"]) | set(by_rid)):
+            span, trs = gen.get(rid), by_rid.get(rid, [])
+            t0 = span[0] if span else None
+            done = sorted(round(t["end"] - t0, 2) for t in trs if t0 is not None and t["end"] is not None)
+            phases = {k: _sum(t[k] for t in trs) for k, _ in TRAJ_PHASES}
+            known = [v for v in phases.values() if v is not None]
+            tot = sum(known) if known else None
+            peaks = {"kv": None, "queued": None}
+            if span:
+                win = [x for x in isl["load"] if span[0] <= x[0] <= span[1]]
+                kv = [x[1] / x[2] for x in win if x[1] is not None and x[2]]
+                q = [x[3] for x in win if x[3] is not None]
+                peaks = {"kv": round(max(kv), 4) if kv else None, "queued": max(q) if q else None}
+            out_rounds.append({
+                "round": rid, "gen": span, "gen_s": round(span[1] - span[0], 1) if span else None,
+                "cutoff": isl["cutoffs"].get(rid), "done": done, "trajectories": len(trs),
+                "phases": phases, "tool_share": round(phases["tool"] / tot, 4) if tot and phases["tool"] is not None else None,
+                "peaks": peaks})
+        trajs = [{k: t[k] for k in ("rid", "id", "task", "reward", "gen", "tool", "judge", "sandbox")} |
+                 {"off": round(t["start"] - gen[t["rid"]][0], 2) if gen.get(t["rid"]) and t["start"] is not None else None,
+                  "dur": round(t["end"] - t["start"], 2) if t["start"] is not None and t["end"] is not None else None}
+                 for t in isl["trajs"][-UTIL_TRAJ_MAX:]]
+        carry = [{"id": t["id"], "task": t["task"], "from": t["started_rid"], "to": t["rid"], "versions": t["versions"]}
+                 for t in isl["trajs"]
+                 if (t["started_rid"] is not None and t["rid"] is not None and t["started_rid"] != t["rid"])
+                 or (t["versions"] and len({_seg_version(v) for v in t["versions"]}) > 1)]
+        load = list(isl["load"])
+        step = max(1, len(load) // NODE_SERIES_POINTS)
+        has_kv = any(x[1] is not None and x[2] for x in load)
+        return {"rounds": out_rounds, "trajectories": trajs, "carry": carry or None,
+                "load": [[x[0], round(x[1] / x[2], 4) if x[1] is not None and x[2] else None, x[3], x[4], x[5]]
+                         for x in load[::step]] if load else None,
+                "load_has_kv": has_kv}
+
     def node_series(self, isl: dict) -> dict:
         out = {}
         for rank, ser in isl["node_series"].items():
@@ -499,8 +568,10 @@ class Reducer:
         for iid in self.island_ids():
             isl = self.islands[iid]
             starts = [e["ts"] for e in isl["recent"] if e["type"] == "rl_driver_start"]
+            rounds = self.round_records(isl)
             isl_extra[iid] = {
-                "rounds": self.round_records(isl), "node_series": self.node_series(isl),
+                "rounds": rounds, "node_series": self.node_series(isl),
+                "util": self.utilization(isl, rounds),
                 "first_ts": isl["first_ts"], "ready_ts": isl["ready_ts"],
                 "driver_start_ts": isl.get("driver_start_ts") or (starts[0] if starts else None),
                 "cells": len(isl["cells"] or []),
@@ -509,7 +580,14 @@ class Reducer:
         usage = {"syncer": self.counts["syncer"] > 0, "journal": self.counts["journal"] > 0,
                  "cells": any(v["cells"] for v in isl_extra.values()),
                  "transactions": any(v["transactions"] for v in isl_extra.values())}
-        return {"overview": ov, "islands": isl_extra, "rounds_syncer": self.rounds(), "usage": usage}
+        view = {"overview": ov, "islands": isl_extra, "rounds_syncer": self.rounds(), "usage": usage,
+                "label": self.label}
+        if self.compare:
+            # agentic-rollout-utilization 7.6: other runs, utilization only (side by side / overlay)
+            view["compare"] = [{"label": c.label, "run": c.run_name()[0],
+                                "util": {i: c.utilization(c.islands[i]) for i in c.island_ids()}}
+                               for c in self.compare]
+        return view
 
     def _round_metrics(self, isl: dict, r: dict, event: str) -> None:
         if event == "rl_local_round":
@@ -989,6 +1067,33 @@ def _resource(r: dict, ts: float | None) -> dict:
 
 _SUMMARY_KEYS = ("phase", "rollout_id", "local_round_id", "policy_version", "reward_mean",
                  "grad_norm", "result", "global_step", "fragment_id", "error")
+
+
+def _traj(r: dict) -> dict:
+    """Compact per-trajectory record (agentic-rollout-utilization 1.3 fields). Missing = None."""
+    out = {"rid": r.get("rollout_id") if isinstance(r.get("rollout_id"), int) else None,
+           "id": r.get("trajectory_id"), "task": r.get("task_id"),
+           "start": finite(r.get("trajectory_started_at")), "end": finite(r.get("trajectory_ended_at")),
+           "reward": finite(r.get("reward")), "aborted": r.get("aborted"),
+           "turns": finite(r.get("turns")) if not isinstance(r.get("turns"), list) else len(r["turns"])}
+    for k, src in TRAJ_PHASES:
+        out[k] = finite(r.get(src))
+    # stage 2 (reserved): the round a carried-over trajectory started in, and its version segments
+    sr = r.get("started_rollout_id")
+    out["started_rid"] = sr if isinstance(sr, int) and not isinstance(sr, bool) else None
+    pv = r.get("policy_versions")
+    out["versions"] = pv if isinstance(pv, list) and pv else None
+    return out
+
+
+def _seg_version(seg: Any) -> Any:
+    """A version segment is ``[version, start, end)`` (version_segments) or a bare version."""
+    return seg[0] if isinstance(seg, (list, tuple)) and seg else seg
+
+
+def _sum(vals: Iterable[float | None]) -> float | None:
+    xs = [v for v in vals if v is not None]
+    return round(sum(xs), 3) if xs else None
 
 
 def _summary(r: dict) -> str:

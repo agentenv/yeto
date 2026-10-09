@@ -26,6 +26,7 @@ global.document = {
   documentElement: node("html"),
   getElementById: (id) => (id === "yeto-data" && !dataM ? null : mk(id)),
   createElementNS: () => { const n = node(null); svgNodes.push(n); return n; },
+  createElement: () => node(null),
   querySelectorAll: () => [],
   title: "",
 };
@@ -37,6 +38,11 @@ eval(appM[1]);
 const out = { title: els.title.innerHTML, kpis: els.kpis.innerHTML, islands: els.islands.innerHTML,
   cost: els.costBox.innerHTML, events: els.evs.innerHTML, folds: els.foldBox.innerHTML,
   metric: els.cMetric.innerHTML, svg_nodes: svgNodes.length, wall_hidden: els.islandWall.hidden };
+// agentic-rollout-utilization 7: generation-stage utilization panel
+out.util = { empty_hidden: mk("utilEmpty").hidden, body_hidden: mk("utilBody").hidden, ctl: mk("utilCtl").innerHTML,
+  cut: mk("uCut").innerHTML, carry_hidden: mk("uCarryBox").hidden, carry: mk("uCarry").innerHTML,
+  done_svg: svgNodes.filter((n) => n.attrs["class"] === "udone").length,
+  cut_lines: svgNodes.filter((n) => n.attrs["class"] === "ucut").length };
 // hover a timeline/duration segment with a mousemove handler -> tooltip
 const hov = svgNodes.find((n) => n.listeners.mousemove && n.attrs["class"] === "tseg");
 if (hov) { hov.listeners.mousemove[0]({ clientX: 10, clientY: 10 }); out.tip = els.tip.innerHTML; }
