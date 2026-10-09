@@ -99,7 +99,7 @@ tests/test_rl_inter_island_ledger.py tests/test_rl_inter_island_status.py tests/
 - 端到端 syncer 二进制（只读复制 Rust 工作树，不在其中编译）：
   `rm -rf /tmp/s15-noray/rs && mkdir -p /tmp/s15-noray/rs && cp -r /home/michael/work/s15-interisland-rs/syncer/{Cargo.toml,Cargo.lock,src} /tmp/s15-noray/rs/ && cd /tmp/s15-noray/rs && ~/.cargo/bin/cargo build`（cargo 已用户态安装在 ~/.cargo/bin，1.99.0）。未设置 YETO_TEST_ELASTIC_SYNCER 时真实二进制用例自动跳过。
 - 黄金帧更新方法：在 /tmp 副本的 src/elastic.rs 末尾加一个打印 `ElasticMsg::encode(b"k1")` 十六进制的测试（消息同 Rust 测试 all_frames_roundtrip...），`cargo test golden_dump -- --nocapture`，把输出替换 tests/test_rl_inter_island_elastic_client.py 的 RUST_GOLDEN。契约哈希 elastic 默认黄金值 4b61bb37…（tests/test_rl_inter_island_contract.py）。
-- git 身份：GIT_AUTHOR/COMMITTER_NAME=MichaelChung，EMAIL=michaelchung668@gmail.com，提交末尾 `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`；不 push。
+- git 身份：GIT_AUTHOR/COMMITTER_NAME=MichaelChung，EMAIL=<redacted-email>，提交末尾 `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`；不 push。
 
 ## 2026-10-07 夜（接续的 Python agent）：0.17、0.18、0.19 完成
 - 0.18（commit 01e85a52）：新增 `yeto/rl/engine/island_status.py`，读 syncer 写在 `--event-tape` 同目录的 status.json（schema `yeto.syncer.elastic-status/v1`），按数字岛号取 capacity、round_wall_ema_s、lease_remaining_s、arrival_history、pending、carried_over_lag，外加全局 syncer_epoch、outer_version、policy_hash，经 `scheduling_probe` 进 `IslandController.inspect()`。缺文件、坏 JSON、schema 不符都返回空，字段保持 None；legacy 下控制器不调用探针。`build_elastic` 新增 `syncer_status`、`island_number` 两个可选参数（learner 侧尚未传入，见未解决项）。

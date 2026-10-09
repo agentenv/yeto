@@ -1,8 +1,0 @@
-{
- "mechanism": "of_on",
- "algorithm_spec_sha256": "aa394d50849252c8422f7d3731a26d1365e876077b41304854c630b4d80c52a1",
- "allow_unverified": [
-  "features:overlong_filter"
- ],
- "rounds": 3
-}

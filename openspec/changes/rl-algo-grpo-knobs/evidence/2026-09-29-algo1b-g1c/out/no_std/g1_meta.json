@@ -1,8 +1,0 @@
-{
- "mechanism": "no_std",
- "algorithm_spec_sha256": "06d2760aaa4027ed2b93b5e492088dbe054a60526516b824f371e7fdbcd1cb83",
- "allow_unverified": [
-  "features:no_grpo_std_normalization"
- ],
- "rounds": 3
-}

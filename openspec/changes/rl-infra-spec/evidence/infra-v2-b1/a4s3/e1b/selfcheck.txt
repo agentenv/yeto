@@ -1,6 +1,0 @@
-Warning: Permanently added '[localhost]:10022' (ED25519) to the list of known hosts.
-{"t": 1790790255.4765308, "router": "http://10.0.0.36:20000"}
-{"t": 1790790467.072649, "data": {"inflight": {"http://10.0.0.36:20002": 0, "http://10.0.0.36:20037": 0}, "cordoned": []}}
-167
-fingerprint want=sha256:2d0a00f490d422416ded02620d3b9cc0807fb0204e59d2a23318785f1d0ed949 got=sha256:2d0a00f490d422416ded02620d3b9cc0807fb0204e59d2a23318785f1d0ed949
-selfcheck ok=1 2026-09-30T17:48:25Z

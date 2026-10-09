@@ -1,8 +1,0 @@
-..................................s.............s....................... [ 79%]
-......sssss........                                                      [100%]
-=========================== short test summary info ============================
-SKIPPED [1] tests/test_rl_mismatch_correction.py:258: needs 1a-shared.patch (OPSM + tis/custom)
-SKIPPED [1] tests/test_rl_mismatch_correction.py:334: needs 1a-shared.patch (OPSM + tis/custom)
-SKIPPED [4] tests/test_rl_mismatch_correction.py:456: needs 1a-shared.patch (named custom functions)
-SKIPPED [1] tests/test_rl_mismatch_correction.py:466: needs 1a-shared.patch (always_emit)
-84 passed, 7 skipped in 2.41s

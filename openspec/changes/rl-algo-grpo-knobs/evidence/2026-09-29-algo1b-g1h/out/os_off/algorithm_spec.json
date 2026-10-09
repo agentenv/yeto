@@ -1,1 +1,0 @@
-{"advantage_estimator":"grpo","dynamic_sampling_filter":"yeto.rl.filters.bounded_nonzero_reward_std","dynamic_sampling_max_replacements":2,"kl_coef":null,"loss":"policy_loss","schema":"yeto-rl-algorithm-spec-v1"}

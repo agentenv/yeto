@@ -1,9 +1,0 @@
-{
- "mechanism": "clip_higher",
- "algorithm_spec_sha256": "281d623cb3a78e759fef58bc4d866a0fa9fe38db3731491eff4597cd1cb86d86",
- "allow_unverified": [
-  "features:clip_higher",
-  "features:eps_clip"
- ],
- "rounds": 3
-}

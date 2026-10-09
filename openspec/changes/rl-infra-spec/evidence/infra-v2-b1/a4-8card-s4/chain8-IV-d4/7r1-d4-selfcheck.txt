@@ -1,8 +1,0 @@
-Warning: Permanently added '[localhost]:10022' (ED25519) to the list of known hosts.
-{"t": 1791073303.948829, "router": "http://10.0.0.58:20035"}
-{"t": 1791073501.497292, "data": {"inflight": {"http://10.0.0.58:20037": 0, "http://10.0.0.58:20000": 0}, "cordoned": []}}
-157
-gpu assert want=8xH100 got=8/8
-fingerprint want=sha256:b5046a61e5fc2130f0bf615d7ee9cf37966396e7b6471cc35c37b6b28bdbb900 got=sha256:8239bf0ae471abfa57729fd5021e5eace365d63c54df05f77536bf0cabed0a92
-probe_failed=1 (non-fatal; retried live by the after-hook)
-startup_failed: selfcheck_tool: fingerprint_mismatch

@@ -1,3 +1,0 @@
-{'app_id': 'ap-b43AWL3WDVThSe6RHSUEEp', 'description': 'yeto-infra-a-b12', 'state': 'stopped', 'tasks': '0', 'created_at': '2026-09-29 16:48:10+00:00', 'stopped_at': '2026-09-29 17:02:58+00:00'}
-{'app_id': 'ap-lEMebdd69SIlDhCPtW8YB2', 'description': 'infra-a-manifest', 'state': 'stopped', 'tasks': '0', 'created_at': '2026-09-29 16:41:34+00:00', 'stopped_at': '2026-09-29 16:42:53+00:00'}
-{'app_id': 'ap-2TvyfclllMc8Yoe7pRZ6LV', 'description': 'infra-a-manifest', 'state': 'stopped', 'tasks': '0', 'created_at': '2026-09-29 16:39:23+00:00', 'stopped_at': '2026-09-29 16:40:56+00:00'}

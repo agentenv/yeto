@@ -1,3 +1,0 @@
-{'app_id': 'ap-lszhmiLUsysrkfV1Io62fU', 'description': 'yeto-infra-a-r3c', 'state': 'stopped', 'tasks': '0', 'created_at': '2026-09-29 18:36:45+00:00', 'stopped_at': '2026-09-29 18:51:10+00:00'}
-{'app_id': 'ap-s84mI2MlyAd7ynkUnkZgSv', 'description': 'yeto-infra-a-r3b', 'state': 'stopped', 'tasks': '0', 'created_at': '2026-09-29 18:22:57+00:00', 'stopped_at': '2026-09-29 18:35:22+00:00'}
-{'app_id': 'ap-szi8e38CAtkcCXJ5SBM6yE', 'description': 'yeto-infra-a-r3a', 'state': 'stopped', 'tasks': '0', 'created_at': '2026-09-29 18:10:09+00:00', 'stopped_at': '2026-09-29 18:22:36+00:00'}
