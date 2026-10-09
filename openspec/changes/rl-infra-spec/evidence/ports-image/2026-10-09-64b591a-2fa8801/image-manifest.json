@@ -1,0 +1,30 @@
+{
+  "base": {
+    "index_digest": "sha256:90940828dcd4d54fd907ff668b43537cbd94778047580e4160d6560af548b74d",
+    "manifest_digest": "sha256:4d69750720eb1a4b99976a3fed45ed018e1fc4fff3d240667fa17d258dfc6e0c",
+    "miles_commit": "9e4260de047a704208535c0e90c531929879ab40",
+    "platform": "linux/amd64",
+    "repository": "docker.io/radixark/miles",
+    "sglang_commit": "e5bba1f9c433da5352e521a8bb826bab960e7836"
+  },
+  "builder": "scripts/build_miles_ports_image.sh (crane append); docker/miles-ports/Dockerfile equivalent",
+  "image": "ghcr.io/michaellchung/yeto-miles-ports",
+  "miles": {
+    "commit": "64b591a4bec1ffa37fb089d3e3b99c84773b1ffc",
+    "install": "base's editable install (pip install -e /root/miles --no-deps) kept (same path); /root is on the base's sys.path, so without PYTHONPATH import miles is a namespace package over the /root/miles checkout -- yeto runs with PYTHONPATH=$HOME/miles (regular package)",
+    "path": "/root/miles",
+    "repository": "https://github.com/michaellchung/miles",
+    "upstream_commit": "9e4260de047a704208535c0e90c531929879ab40"
+  },
+  "pure_python_overlay": true,
+  "schema": 1,
+  "sglang": {
+    "commit": "2fa880182eefdb31e64d8ea70317be27f9f32121",
+    "install": "pip install -e /sgl-workspace/sglang/python[all] --no-deps (base's editable install, same path)",
+    "path": "/sgl-workspace/sglang",
+    "repository": "https://github.com/michaellchung/sglang",
+    "upstream_commit": "571212b636baca45e10fa3b4da11a289123f3235",
+    "version": "0.5.21.dev70+g2fa8801"
+  },
+  "tag": "64b591a-2fa8801"
+}

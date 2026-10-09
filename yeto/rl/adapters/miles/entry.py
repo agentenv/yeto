@@ -216,6 +216,11 @@ _PINS_0AF62F4D_PLUS = frozenset({
     # agentic groups between model turns, arguments.py flags, utils/misc.py hook loader):
     # rollout scheduling only, no loss path.
     "ddce20992c9ee82270a22e259e9e2bf55f3053d1",
+    # 64b591a4b = ddce20992 + critic family (yeto-critic-c357 6574a9c82 commits cherry-picked:
+    # --gae-variant, VAPO positive LM loss, SAO DIS / HL-Gauss, critic epochs/freeze, value head)
+    # + rl-algo-supplement dual_clipfrac / over-sampling tally (S19 #1).  Every new flag defaults
+    # off; with defaults the loss is bitwise unchanged (fork test_ppo_gae_variants vs _gae_orig).
+    "64b591a4bec1ffa37fb089d3e3b99c84773b1ffc",
 })
 MILES_DECLARED_PINS: dict[str, frozenset[str]] = {
     # before 0af62f4d the LoRA bridge ignored calculate_per_token_loss (g1c:
@@ -833,8 +838,31 @@ def compose_island(
         install_preempt_handler(resume.controller, emit=driver.emit)
         _wire_round_cuts(driver, elastic=resume, miles_args=miles_args, algorithm=algorithm,
                          base_model_revision=base_model_revision)
+    _wire_droppable_reclaim(sync, driver)
     holder["driver"] = driver
     return driver
+
+
+def _wire_droppable_reclaim(sync: Any, driver: Any, environ: Any = None) -> Any:
+    """rl-spot-cost-saving 5.x: a droppable island (``YETO_ISLAND_ROLE``) LEAVEs the
+    elastic pool on a reclaim notice and writes ``spot_reclaim`` with role
+    droppable. Nothing is saved: it loses only its own round increment and comes
+    back from the syncer base. No-op on every other island."""
+    from yeto.cloud import droppable
+
+    if droppable.env_role(environ) is None or not hasattr(sync, "_client"):
+        return None
+
+    def leave() -> bool:
+        client = getattr(sync, "client", None)
+        if client is None:
+            return False
+        client.leave()
+        return True
+
+    island = str(getattr(getattr(sync, "config", None), "learner_id", "?"))
+    return droppable.install_reclaim_listener(island, leave=leave, emit=driver.emit,
+                                              environ=environ)
 
 
 # rl-resume-from-checkpoint design §3: what must be identical between a cut and the

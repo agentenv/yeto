@@ -244,3 +244,4 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
 ## S19 rl-algo-supplement 2.6：超采样计数进 rollout metadata（分支 s19-algosup，2026-10-09）
 
 - Miles 命令行、算法哈希、契约哈希、`fake_engine_tapes.json` 逐字节不变。只有插件源码 `yeto/rl/adapters/miles/rollout_meta_hook.py` 变了（读取 fork 的 `args.rollout_over_sampling_stats`，写入 metadata `over_sampling`；旧镜像没有该属性时不写），8 个样本里该插件三处 `source_sha256` `03b3a27a…` → `dc334cba…`。`python tests/decoupling_golden.py --write` 后 diff 只有这 24 行。
+- 镜像 pin（S19 #1，分支 s19-critic）：`MILES_NEXT_COMMIT` ddce20992 → 64b591a4b（本地 fork 分支 s19-critic-algosup = ddce20992 + critic 家族 8 个提交 + algo-supplement 观测指标 2 个提交，未推送），`MILES_NEXT_IMAGE` `@sha256:9c252c38…` → `@sha256:fa2413be…`（tag 64b591a-2fa8801，构建记录 openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-09-64b591a-2fa8801/）。8 个样本的 `backend_identity` 与 `ports_runtime_fingerprint` 随之变化（与以往换 pin 相同），其余字段不变。

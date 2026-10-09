@@ -51,6 +51,8 @@ def test_limit_drives_staleness_threshold_and_partial_rollout():
     assert "async_training.trigger_parameter_sync_step=1" in out
     assert "async_training.require_batches=1" in out
     assert "rollout.n_gpus_per_node=1" in out and "trainer.n_gpus_per_node=1" in out
+    # fork FullyAsyncTrainer asserts not hybrid_engine; the sync path never sets it
+    assert "actor_rollout_ref.hybrid_engine=False" in out
     assert f"rollout.total_rollout_steps={8 * (2 * 5 + 1 + 1)}" in out
     assert not any(o.startswith(("trainer.use_v1=", "trainer.v1.trainer_mode=")) for o in out)
     assert sum(o.startswith("trainer.n_gpus_per_node=") for o in out) == 1
@@ -321,3 +323,42 @@ def test_patch_hooks_apply_to_the_pinned_fork(tmp_path):
     text = (tmp_path / patch_verl.CALLS_TARGET).read_text()
     compile(text, "llm_server.py", "exec")
     assert text.count("yeto_resume_calls") == 1
+
+
+def test_fully_async_hydra_entry_uses_an_absolute_config_dir(tmp_path, monkeypatch):
+    """S19 GPU run s19-verl64b-async1-20261009a: verl's relative config_path failed
+    when fully_async_main was imported (config/ has no __init__.py)."""
+    import sys
+    import types
+
+    import importlib
+
+    if importlib.util.find_spec("ray") is None:  # the safe test venv has no Ray; never start it
+        fake_ray = types.SimpleNamespace(remote=lambda *a, **k: (lambda cls: cls))
+        monkeypatch.setitem(sys.modules, "ray", fake_ray)
+    monkeypatch.delitem(sys.modules, "yeto.rl.adapters.verl.verl_main", raising=False)
+    verl_main = importlib.import_module("yeto.rl.adapters.verl.verl_main")
+    monkeypatch.delitem(sys.modules, "yeto.rl.adapters.verl.verl_main", raising=False)
+
+    seen = {}
+
+    def fake_main(config_path=None, config_name=None, version_base=None):
+        seen.update(config_path=config_path, config_name=config_name, version_base=version_base)
+        return lambda fn: fn
+
+    monkeypatch.setitem(sys.modules, "hydra", types.SimpleNamespace(main=fake_main))
+
+    def inner(config):
+        return config
+
+    def wrapped():
+        return None
+
+    wrapped.__wrapped__ = inner
+    (tmp_path / "config").mkdir()
+    fa_main = types.SimpleNamespace(__file__=str(tmp_path / "fully_async_main.py"), main=wrapped)
+    assert verl_main.fully_async_hydra_entry(fa_main) is inner
+    assert seen == {"config_path": str(tmp_path / "config"), "config_name": "fully_async_ppo_trainer",
+                    "version_base": None}
+    with pytest.raises(RuntimeError):
+        verl_main.fully_async_hydra_entry(types.SimpleNamespace(__file__=fa_main.__file__, main=inner))

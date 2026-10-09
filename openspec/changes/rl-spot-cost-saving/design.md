@@ -46,6 +46,15 @@
 
 **D7 在途轨迹续跑。** 复用 #166 的带在途轨迹切点格式与 started_rollout_id / policy_versions 字段，不新造格式。回收路径与正常切点的差别只有两点：限时（超时的轨迹记丢弃）与写到持久存储（而不是本地）。agentic：只在回合之间挂起，沙箱不跨云保活，换云后能重放工具调用就重放，否则丢弃。体积估计：0.6B 级在途轨迹每条 KB 到 MB 量级，写 Modal 卷是否进得了 25 秒未测，列为上卡测量项。
 
+**D8 第 2 期细化：一个按需锚点岛 + 若干 spot 可丢弃岛（10-09 用户确认）。**
+- 开关：`--rl-island-role ISLAND:anchor|droppable`（可重复）。没写角色的岛是锚点岛。有角色时不能再用全局 `--spot`，计费由角色决定：锚点岛按需，可丢弃岛 spot。
+- 锚点岛保存最新权重与切点：锚点岛一直向 syncer 交增量，syncer 的 base 就是锚点岛这条权重线；给了 `--rl-checkpoint-store` 时，只有锚点岛保留它，切点写在那里。
+- 可丢弃岛重新上线时从锚点同步，不从存档恢复：可丢弃岛的参数副本里去掉 `--rl-checkpoint-store`，也不挂旧 `--spot` 的单岛卷（已完成组记录）。它重新上线时 JOIN（catch_up），取 syncer 当前 base 并重置优化器（`ElasticAvgSync.start`），数据游标按 syncer 版本推算（0.21 新机器规则）。加入后第一轮权重为 0（ledger `weight_of`）。
+- 全部可丢弃岛同时被回收时训练不中断：准入要求 `--rl-q-min` ≤ 锚点岛数。有通知的云（Modal、AWS）可丢弃岛收到通知后 LEAVE，成员减少，锚点岛单独就能达到 θ；无通知的云（Verda）等软截止后，锚点岛单独满足 q_min 也能推进。
+- 回收事件：可丢弃岛收到通知时写 `spot_reclaim`，`role=droppable`、`billing=spot`，不保存（只丢本轮增量），然后 LEAVE。Modal 走信号处理，AWS 走元数据轮询；Nebius、Verda 不装监听，走租约过期。
+- 准入（5.1）：只 elastic（legacy 拒绝，原因按 spec 写"可丢弃岛只在 elastic 下支持"）；至少一个锚点岛；Modal 不能当锚点岛（GPU 一律可抢占）；可丢弃岛所在云在能力表里 spot 字段不能为空；锚点岛在 Verda 时切点不能存本机路径（Verda 官方文档未写块卷在回收时的行为），必须用桶 URI。
+- 代码：`yeto/cloud/droppable.py`（准入、按岛参数、环境变量 `YETO_ISLAND_ROLE`、回收监听）；`yeto/launch_preflight.py`（参数与准入、manifest `island_roles`）；`yeto/launcher.py`（`_island_task`、Modal 配置、Verda 候选按岛计费、spot 卷判断）；`yeto/rl/adapters/miles/entry.py`（`_wire_droppable_reclaim`）。
+
 ## Risks / Trade-offs
 
 - [Modal 30 秒包括写卷与 commit，v1 卷 commit 实测 23–35 秒（10 GiB）] → 在途轨迹只写小文件；实测超时就改为"只写中断标记"，续跑退化为丢弃重做。
@@ -74,3 +83,9 @@
 5. `FleetController` 每个恢复窗口只问一次 `ReplacementPlanner`。开关关：只写 `spot_replace_advice`，原地重开照旧（默认行为不变）。开关开：planner 的 `launch()` 返回的新 job id 替代原地重开。本期没有接入任何真实的跨云开卡函数，所以生产里开关开的路径未验证。
 6. 打分预算检查按"单价 × launch_hours（默认 1 小时）"估本次开卡花费。这是保守近似，无实测依据。
 7. 评测岛的"实测保存耗时"取最近一次 `store.commit()` 耗时；容器启动后还没 commit 过时，视为没有实测，跳过保存。
+8. （第 2 期）"从锚点同步"实现为"从 syncer 当前 base 同步"，不做锚点岛到可丢弃岛的直接权重传输。理由：syncer base 就是锚点岛这条权重线，JOIN catch_up 已真机验证（M1、V2）；岛间直传需要新协议。风险：syncer 所在 head 若丢失，base 只能从 syncer 检查点（head 本机）或锚点岛切点恢复，本期未改这条路径。
+9. （第 2 期）没写角色的岛默认是锚点岛（按需），这样漏写只会多花钱，不会少一个锚点。
+10. （第 2 期）有角色时拒绝全局 `--spot`，避免锚点岛被误开成 spot。
+11. （第 2 期）可丢弃岛在 AWS 上能力表 spot 字段为"未核"但有值，准入放行；只拒绝值为空的云。理由：5.2 计划用 AWS spot，我方账号只能 spot。
+12. （第 2 期）可丢弃岛收到通知后只 LEAVE，进程不主动退出，等云强杀。LEAVE 后客户端不再发心跳，syncer 已把它移出成员。
+13. （第 2 期）FleetController 重开可丢弃岛时沿用原任务（角色、计费、环境变量都在任务里），换区域换云仍走 2.3 的 planner；本期未改 planner。
