@@ -300,3 +300,25 @@ def test_driver_reports_carry_over_and_governs_on_the_rollout_estimate(tmp_path)
     assert carry and carry[0]["carried_in_groups"] == 1
     assert carry[0]["cross_version_truncated_fraction"] == 0.9
     assert [e for e in events if e["event"] == "rl_policy_age_fallback"] and calls == [0]
+
+
+def test_trajectory_records_carry_start_round_and_segments(sink):
+    """Dashboard field names (#160): started_rollout_id + policy_versions; absent at limit 0."""
+    from yeto.rl.engine.timeline import validate_trajectory_reward
+
+    engine = FakePartialEngine()
+    s = Sample(index=0, group_index=0, metadata={"start_rollout_id": 3})
+    engine.generate(s, 3, 2, finish=False)
+    engine.generate(s, 4, 3, finish=True, reward=1.0)
+    fresh = Sample(index=1, group_index=0)
+    engine.generate(fresh, 4, 2, finish=True, reward=0.0)
+    hook.put_policy_token(tok(4), sink)
+    args = SimpleNamespace(yeto_rl_max_policy_age=1)
+    recs = hook.trajectory_reward_records(args, [[s, fresh]], limit=10)
+    assert recs[0]["started_rollout_id"] == 3 and recs[0]["policy_versions"] == [[3, 0, 2], [4, 2, 5]]
+    assert recs[1]["started_rollout_id"] == 4 and recs[1]["policy_versions"] == [[4, 0, 2]]
+    zero = hook.trajectory_reward_records(SimpleNamespace(), [[s, fresh]], limit=10)
+    assert all("started_rollout_id" not in r and "policy_versions" not in r for r in zero)
+    for r in recs:
+        assert not [p for p in validate_trajectory_reward({**r, "rollout_id": 4, "policy_version": 4})
+                    if "started_rollout_id" in p or "policy_versions" in p]

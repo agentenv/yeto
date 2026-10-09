@@ -561,6 +561,7 @@ def trajectory_reward_records(
     out: list[dict[str, Any]] = []
     if limit <= 0:
         return out
+    carry_round = current_round_id((), None) if _carry.max_policy_age(args) > 0 else None
     for group in all_samples:
         samples = _flat(group)
         if not samples or (trained is not None and _group_key(group) not in trained):
@@ -584,6 +585,8 @@ def trajectory_reward_records(
                 "success": success if isinstance(success, bool) else None,
                 "aborted": _status(s) == "aborted",
                 **trajectory_diagnostics(meta),
+                **(_carry.trajectory_fields(s, carry_round)
+                   if _carry.max_policy_age(args) > 0 else {}),
             })
     return out
 

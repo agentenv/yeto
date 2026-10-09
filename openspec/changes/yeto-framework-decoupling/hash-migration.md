@@ -214,5 +214,5 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
 
 ## S18 agentic-rollout-utilization 4.1：Miles 单轮续跑（分支 s18-aru-stage2，2026-10-09）
 
-- 默认 0：Miles 命令行、算法哈希、契约哈希、`fake_engine_tapes.json` 逐字节不变；只有插件源码 `yeto/rl/adapters/miles/rollout_meta_hook.py` 变了（落后上限 >0 时的缓冲过滤与版本段记账、回退通道），8 个样本里该插件三处 `source_sha256` `c58d994a…` → `8819d3a8…`，其余字段不变（`python tests/decoupling_golden.py --write` 后 diff 只有这 24 行）。
+- 默认 0：Miles 命令行、算法哈希、契约哈希、`fake_engine_tapes.json` 逐字节不变；只有插件源码 `yeto/rl/adapters/miles/rollout_meta_hook.py` 变了（落后上限 >0 时的缓冲过滤与版本段记账、回退通道），8 个样本里该插件三处 `source_sha256` `c58d994a…` → `a9937979…`，其余字段不变（`python tests/decoupling_golden.py --write` 后 diff 只有这 24 行）。
 - 非 0（Miles 现支持到阶段 2、上限 1）：命令行多一个 `--partial-rollout`（不再带 `--mask-offpolicy-in-partial-rollout`，见 tasks 4.1），岛身份、契约哈希、算法哈希按第 2 组规则变化。
