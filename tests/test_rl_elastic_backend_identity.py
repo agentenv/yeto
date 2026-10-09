@@ -136,3 +136,50 @@ def test_real_syncer_refuses_verl_island_in_miles_session(tmp_path):
                 pass
         syncer.kill()
         syncer.wait(5)
+
+
+@pytest.mark.skipif(not os.environ.get("YETO_TEST_ELASTIC_SYNCER"),
+                    reason="needs YETO_TEST_ELASTIC_SYNCER (syncer binary with elastic mode)")
+def test_real_syncer_refuses_same_backend_with_other_lr_schedule(tmp_path):
+    """S17 N17: two Miles islands whose LR schedules differ declare different bound
+    identities (island_contract_sha256); the elastic syncer refuses the second JOIN."""
+    from yeto.rl.engine.backend_identity import island_contract_sha256, lr_schedule_sha256
+
+    port, key = _free_port(), "lr-e2e"
+    syncer = subprocess.Popen(
+        [os.environ["YETO_TEST_ELASTIC_SYNCER"], "--port", str(port), "--learners", "2",
+         "--total-steps", "1", "--event-tape", str(tmp_path / "tape.jsonl"),
+         "--island-scheduling-mode", "elastic", "--quorum-theta", "1.0", "--carry-gamma", "0.5",
+         "--soft-deadline-s", "30", "--q-min", "1", "--max-carry-lag", "2",
+         "--island-lease-s", "6", "--syncer-epoch", "0", "--outer-lr", "1.0", "--outer-momentum", "0.0"],
+        env=dict(os.environ, YETO_ISLAND_HMAC_KEY=key),
+        stdout=open(tmp_path / "syncer.log", "w"), stderr=subprocess.STDOUT)
+    const = island_contract_sha256(MILES.sha256(), lr_schedule_sha256("constant", 6, 1e-5))
+    other = island_contract_sha256(MILES.sha256(), lr_schedule_sha256("constant", 6, 2e-5))
+
+    def client(island, ident):
+        return ElasticIslandClient(ElasticClientConfig(
+            ("127.0.0.1", port), island, lease_s=6.0, join_timeout_s=5.0,
+            backend_identity_sha256=ident), key.encode())
+
+    a, bad = client(1, const), client(2, other)
+    try:
+        for _ in range(50):
+            try:
+                a.join()
+                break
+            except OSError:
+                time.sleep(0.1)
+        a.elastic_init([0.0] * 4)
+        a.wait_base(newer_than=None, timeout_s=10.0)
+        with pytest.raises(ElasticProtocolError, match="backend identity mismatch") as exc:
+            bad.join()
+        assert const in str(exc.value) and other in str(exc.value)
+    finally:
+        for c in (a, bad):
+            try:
+                c.close()
+            except Exception:  # noqa: BLE001
+                pass
+        syncer.kill()
+        syncer.wait()
