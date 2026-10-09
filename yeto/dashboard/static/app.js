@@ -159,6 +159,126 @@ function hideTip(){if(!pinned)$("tip").style.display="none"}
 $("rounds").addEventListener("keydown",function(e){if(!RS.length)return;var ids=RS.map(function(r){return r.round}),i=ids.indexOf(cur);
   if(e.key==="ArrowRight")i=Math.min(ids.length-1,i+1);else if(e.key==="ArrowLeft")i=Math.max(0,i<0?ids.length-1:i-1);else if(e.key==="Escape"){pinned=false;cur=null;$("tip").style.display="none";highlight();return}else return;
   e.preventDefault();cur=ids[i];highlight();var t=$("tip");t.innerHTML=tipHtml(RS[i]);t.style.display="block";t.style.left="16px";t.style.top="48px"});
+/* generation-stage utilization (agentic-rollout-utilization 7). Missing values -> "未知"; no data -> hidden / "无数据". */
+var uRound="all",uMode="side";
+var UPH=[["gen","模型生成","var(--R)"],["tool","工具执行","var(--i2)"],["judge","判分","var(--T)"],["sandbox","沙箱启动","var(--S)"]];
+var RUN_COLORS=["var(--i0)","var(--i1)","var(--i2)","var(--i3)"];
+function unk(v,d){return fin(v)?f(v,d==null?0:d):"未知"}
+function utilRuns(){
+  var runs=[{label:V.label||(V.compare?"A":""),run:O.run,util:(V.islands[SEL]||{}).util}];
+  (V.compare||[]).forEach(function(c){var u=c.util||{},k=u[SEL]?SEL:Object.keys(u)[0];runs.push({label:c.label,run:c.run,util:k!=null?u[k]:null})});
+  return runs}
+function runHead(r,i,n){return n>1?'<div class="rl"><i class="sw" style="background:'+RUN_COLORS[i]+'"></i>'+esc(r.label)+' · <span class="mono">'+esc(r.run||"未命名运行")+'</span></div>':""}
+function util(){
+  var runs=utilRuns(),has=runs.some(function(r){return r.util});
+  $("util").hidden=false;$("utilEmpty").hidden=has;$("utilBody").hidden=!has;
+  $("utilIsl").textContent=SEL!=null&&(O.islands||[]).length>1?"· 岛 "+SEL:"";
+  if(!has){$("uCarryBox").hidden=true;return}
+  var rids={};runs.forEach(function(r){((r.util||{}).rounds||[]).forEach(function(x){rids[x.round]=1})});
+  var ids=Object.keys(rids).map(Number).sort(function(a,b){return a-b});
+  if(uRound!=="all"&&ids.indexOf(uRound)<0)uRound="all";
+  var btns=[["all","全部轮叠加"]].concat(ids.map(function(i){return [i,"第"+i+"轮"]}));
+  var ctl=btns.map(function(b){return '<button class="btn'+(b[0]===uRound?" on":"")+'" data-u="'+b[0]+'">'+b[1]+'</button>'}).join("");
+  if(runs.length>1)ctl+=' <button class="btn'+(uMode==="side"?" on":"")+'" data-mode="side">并排</button><button class="btn'+(uMode==="overlay"?" on":"")+'" data-mode="overlay">叠加</button>';
+  $("utilCtl").innerHTML=ctl;
+  Array.prototype.forEach.call($("utilCtl").querySelectorAll("button"),function(b){b.onclick=function(){
+    if(b.dataset.mode)uMode=b.dataset.mode;else uRound=b.dataset.u==="all"?"all":+b.dataset.u;util()}});
+  uCut(runs);uDone(runs);uPh(runs);uTr(runs);uLoad(runs);uCarry(runs);
+}
+function uCut(runs){
+  $("uCut").innerHTML=runs.map(function(r,i){var rr=((r.util||{}).rounds||[]);
+    if(!rr.some(function(x){return x.cutoff}))return '<div>'+runHead(r,i,runs.length)+'<div class="note">无数据（没有 rl_rollout_cutoff）</div></div>';
+    return '<div>'+runHead(r,i,runs.length)+'<table class="c"><tr><th>轮</th><th>生成段 s</th><th>提交组</th><th>目标组</th><th>丢弃组</th><th>丢弃条</th><th>丢弃 token</th><th>过滤组</th></tr>'+
+      rr.map(function(x){var c=x.cutoff||{};return '<tr'+(x.round===uRound?' class="hl"':"")+'><td class="num">'+x.round+'</td><td class="num">'+unk(x.gen_s)+'</td><td class="num">'+unk(c.submitted_groups)+'</td><td class="num">'+unk(c.target_groups)+
+        '</td><td class="num">'+unk(c.discarded_groups)+'</td><td class="num">'+unk(c.discarded_trajectories)+'</td><td class="num">'+unk(c.discarded_tokens)+'</td><td class="num">'+unk(c.filtered_groups)+'</td></tr>'}).join("")+'</table></div>'}).join("");
+}
+function uSel(rr){return uRound==="all"?rr:rr.filter(function(x){return x.round===uRound})}
+function uDone(runs){
+  var box=$("uDone");box.innerHTML="";
+  var groups=uMode==="overlay"&&runs.length>1?[runs.map(function(r,i){return [r,i]})]:runs.map(function(r,i){return [[r,i]]});
+  $("legDone").innerHTML=runs.length>1?runs.map(function(r,i){return '<span><i class="sw" style="background:'+RUN_COLORS[i]+'"></i>'+esc(r.label)+'</span>'}).join(""):(uRound==="all"?'<span>每条线一轮，越深越晚</span>':"");
+  groups.forEach(function(g){
+    var div=document.createElement?document.createElement("div"):null,host=div||box;if(div)box.appendChild(div);
+    var lines=[];g.forEach(function(ri){uSel(((ri[0].util||{}).rounds||[])).forEach(function(x,k,arr){if(x.done.length||fin(x.gen_s))lines.push({run:ri[1],round:x.round,done:x.done,cut:x.gen_s,k:k,n:arr.length})})});
+    var head=g.length===1?runHead(g[0][0],g[0][1],runs.length):"";
+    if(!lines.length){host.innerHTML=head+'<div class="note">无数据（没有轨迹起止时间）</div>';return}
+    if(div)div.innerHTML=head;
+    var W=560,H=210,m={l:40,r:12,t:10,b:26};
+    var xm=Math.max.apply(null,lines.map(function(l){return Math.max(fin(l.cut)?l.cut:0,l.done.length?l.done[l.done.length-1]:0)}).concat([1]));
+    var ym=Math.max.apply(null,lines.map(function(l){return l.done.length}).concat([1]));
+    var sx=function(v){return m.l+v*(W-m.l-m.r)/xm},sy=function(v){return m.t+(1-v/ym)*(H-m.t-m.b)};
+    var s=el("svg",{viewBox:"0 0 "+W+" "+H,role:"img","aria-label":"轨迹完成曲线"},host),gg=el("g",{"class":"grid"},s);
+    [0,.5,1].forEach(function(q){el("line",{x1:m.l,x2:W-m.r,y1:sy(ym*q),y2:sy(ym*q)},gg);el("text",{x:m.l-6,y:sy(ym*q)+4,"text-anchor":"end"},s).textContent=Math.round(ym*q)});
+    [0,.25,.5,.75,1].forEach(function(q){el("text",{x:sx(xm*q),y:H-8,"text-anchor":"middle"},s).textContent=Math.round(xm*q)+"s"});
+    lines.forEach(function(l){var col=runs.length>1||uRound!=="all"?RUN_COLORS[l.run]:"var(--R)",op=uRound==="all"&&l.n>1?.35+.65*l.k/(l.n-1):1;
+      var d="M"+sx(0)+","+sy(0);l.done.forEach(function(t,j){d+="L"+sx(t)+","+sy(j)+"L"+sx(t)+","+sy(j+1)});
+      if(fin(l.cut))d+="L"+sx(Math.max(l.cut,l.done.length?l.done[l.done.length-1]:0))+","+sy(l.done.length);
+      el("path",{d:d,fill:"none",stroke:col,"stroke-width":2,opacity:op,"class":"udone","data-r":l.round},s);
+      if(fin(l.cut))el("line",{x1:sx(l.cut),x2:sx(l.cut),y1:m.t,y2:H-m.b,stroke:col,"stroke-dasharray":"4 3",opacity:op,"class":"ucut"},s)});
+  });
+}
+function phBar(s,y0,h,ph,W,m,mx){var x0=m.l;UPH.forEach(function(p){var v=ph[p[0]];if(fin(v)&&v>0){var w=v*(W-m.l-m.r)/mx;el("rect",{x:x0,y:y0,width:Math.max(w-1,1),height:h,rx:2,fill:p[2]},s);x0+=w}});return x0}
+function uPh(runs){
+  $("legPh").innerHTML=UPH.map(function(p){return '<span><i class="sw" style="background:'+p[2]+'"></i>'+p[1]+'</span>'}).join("");
+  var box=$("uPh");box.innerHTML="";
+  runs.forEach(function(r,i){var div=document.createElement?document.createElement("div"):box;if(div!==box)box.appendChild(div);
+    var rr=((r.util||{}).rounds||[]).filter(function(x){return UPH.some(function(p){return fin(x.phases[p[0]])})});
+    if(!rr.length){div.innerHTML=runHead(r,i,runs.length)+'<div class="note">无数据（轨迹事件没有四段耗时字段）</div>';return}
+    div.innerHTML=runHead(r,i,runs.length);
+    var W=480,rowH=24,m={l:52,r:110,t:4,b:4},H=m.t+m.b+rowH*rr.length;
+    var mx=Math.max.apply(null,rr.map(function(x){return UPH.reduce(function(a,p){return a+(x.phases[p[0]]||0)},0)}).concat([1]));
+    var s=el("svg",{viewBox:"0 0 "+W+" "+H,role:"img","aria-label":"四段耗时"},div);
+    rr.forEach(function(x,k){var y0=m.t+k*rowH;if(x.round===uRound)el("rect",{x:0,y:y0,width:W,height:rowH,fill:"var(--band)"},s);
+      el("text",{x:m.l-8,y:y0+rowH/2+4,"text-anchor":"end"},s).textContent="第"+x.round+"轮";
+      var xe=phBar(s,y0+5,rowH-10,x.phases,W,m,mx);
+      el("text",{x:xe+6,y:y0+rowH/2+4},s).textContent="工具 "+(fin(x.tool_share)?(x.tool_share*100).toFixed(1)+"%":"未知")+" · "+x.trajectories+" 条"});
+  });
+}
+function uTr(runs){
+  var box=$("uTr");box.innerHTML="";
+  if(uRound==="all"){$("uTrNote").textContent="（先在上方选一轮）";return}
+  $("uTrNote").textContent="（第 "+uRound+" 轮，按总时长排序；横条长度 = 四段耗时之和）";
+  runs.forEach(function(r,i){var div=document.createElement?document.createElement("div"):box;if(div!==box)box.appendChild(div);
+    var tr=((r.util||{}).trajectories||[]).filter(function(t){return t.rid===uRound}).sort(function(a,b){return (b.dur||0)-(a.dur||0)});
+    if(!tr.length){div.innerHTML=runHead(r,i,runs.length)+'<div class="note">无数据</div>';return}
+    div.innerHTML=runHead(r,i,runs.length);
+    var W=480,rowH=14,m={l:8,r:70,t:2,b:2},H=m.t+m.b+rowH*tr.length;
+    var mx=Math.max.apply(null,tr.map(function(t){return UPH.reduce(function(a,p){return a+(t[p[0]]||0)},0)}).concat([1]));
+    var s=el("svg",{viewBox:"0 0 "+W+" "+H,role:"img","aria-label":"每条轨迹四段耗时"},div);
+    tr.forEach(function(t,k){var y0=m.t+k*rowH,xe=phBar(s,y0+2,rowH-4,t,W,m,mx);
+      var tl=el("title",{},el("rect",{x:0,y:y0,width:W,height:rowH,fill:"transparent"},s));
+      tl.textContent=(t.task||"")+" · 生成 "+unk(t.gen,1)+" s · 工具 "+unk(t.tool,1)+" s · 判分 "+unk(t.judge,1)+" s · 沙箱 "+unk(t.sandbox,1)+" s · reward "+unk(t.reward,2);
+      el("text",{x:xe+4,y:y0+rowH-3},s).textContent=fin(t.tool)&&fin(t.gen)?"工具 "+(t.tool/((t.gen||0)+(t.tool||0)+(t.judge||0)+(t.sandbox||0))*100).toFixed(0)+"%":"未知"});
+  });
+}
+function uLoad(runs){
+  var box=$("uLoad");box.innerHTML="";
+  $("legLoad").innerHTML='<span><i class="sw" style="background:var(--T)"></i>KV 占用 %</span><span><i class="sw" style="background:var(--R)"></i>排队请求</span><span><i class="sw" style="background:var(--band)"></i>生成段</span>';
+  runs.forEach(function(r,i){var div=document.createElement?document.createElement("div"):box;if(div!==box)box.appendChild(div);
+    var u=r.util||{},ld=(u.load||[]).filter(function(p){return fin(p[0])});
+    if(!ld.length){div.innerHTML=runHead(r,i,runs.length)+'<div class="note">无数据（没有 rl_load_sample）</div>';return}
+    div.innerHTML=runHead(r,i,runs.length)+(u.load_has_kv?"":'<div class="note">KV：这份磁带未报（SGLang 没报 kv_used_tokens）</div>');
+    var t0=ld[0][0],t1=ld[ld.length-1][0];
+    var spans=(u.rounds||[]).filter(function(x){return x.gen}).map(function(x){return [x.gen[0],x.gen[1],x.round]});
+    if(uRound!=="all"){var sp=spans.filter(function(q){return q[2]===uRound})[0];if(sp){var pad=(sp[1]-sp[0])*.1;t0=sp[0]-pad;t1=sp[1]+pad;ld=ld.filter(function(p){return p[0]>=t0&&p[0]<=t1})}}
+    var kvm=Math.max.apply(null,ld.map(function(p){return fin(p[1])?p[1]:0}).concat([.01])),qm=Math.max.apply(null,ld.map(function(p){return fin(p[2])?p[2]:0}).concat([1]));
+    var W=560,H=180,m={l:40,r:36,t:8,b:22},sx=function(t){return m.l+(t-t0)*(W-m.l-m.r)/((t1-t0)||1)};
+    var syk=function(v){return m.t+(1-v/kvm)*(H-m.t-m.b)},syq=function(v){return m.t+(1-v/qm)*(H-m.t-m.b)};
+    var s=el("svg",{viewBox:"0 0 "+W+" "+H,role:"img","aria-label":"KV 占用与排队"},div),g=el("g",{"class":"grid"},s);
+    spans.forEach(function(q){var a=Math.max(q[0],t0),b=Math.min(q[1],t1);if(b>a)el("rect",{x:sx(a),y:m.t,width:sx(b)-sx(a),height:H-m.t-m.b,fill:"var(--band)"},s)});
+    [0,.5,1].forEach(function(q){el("line",{x1:m.l,x2:W-m.r,y1:syk(kvm*q),y2:syk(kvm*q)},g);el("text",{x:m.l-6,y:syk(kvm*q)+4,"text-anchor":"end"},s).textContent=(kvm*q*100).toFixed(0)+"%";
+      el("text",{x:W-m.r+6,y:syq(qm*q)+4},s).textContent=Math.round(qm*q)});
+    var kp=ld.filter(function(p){return fin(p[1])});if(kp.length)el("path",{d:"M"+kp.map(function(p){return sx(p[0])+","+syk(p[1])}).join("L"),fill:"none",stroke:"var(--T)","stroke-width":2},s);
+    var qp=ld.filter(function(p){return fin(p[2])});if(qp.length)el("path",{d:"M"+qp.map(function(p){return sx(p[0])+","+syq(p[2])}).join("L"),fill:"none",stroke:"var(--R)","stroke-width":1.5,"stroke-dasharray":"2 2"},s);
+    [t0,(t0+t1)/2,t1].forEach(function(t){el("text",{x:sx(t),y:H-6,"text-anchor":"middle"},s).textContent=clock(t)});
+  });
+}
+function uCarry(runs){
+  var any=runs.some(function(r){return (r.util||{}).carry});$("uCarryBox").hidden=!any;if(!any){$("uCarry").innerHTML="";return}
+  $("uCarry").innerHTML=runs.map(function(r,i){var c=(r.util||{}).carry||[];
+    return '<div>'+runHead(r,i,runs.length)+(c.length?'<table class="c"><tr><th>轨迹</th><th>题目</th><th>开始轮 → 训练轮</th><th>版本段</th></tr>'+c.slice(-50).map(function(x){
+      return '<tr><td class="mono">'+esc(String(x.id||"").slice(-10))+'</td><td>'+esc(x.task||"")+'</td><td class="num">'+(x.from==null?"未知":x.from)+' → '+(x.to==null?"未知":x.to)+'</td><td class="mono">'+esc((x.versions||[]).map(function(v){return Array.isArray(v)?"v"+v[0]+"["+v[1]+","+v[2]+")":"v"+v}).join(" "))+'</td></tr>'}).join("")+'</table>':'<div class="note">无续跑轨迹</div>')+'</div>'}).join("");
+}
 /* nodes */
 function chartNodes(){
   var ex=V.islands[SEL]||{},ns=ex.node_series||{},ks=Object.keys(ns).sort(),box=$("cNodes");box.innerHTML="";$("legNodes").innerHTML="";
@@ -231,7 +351,7 @@ function render(){
   var ids=(O.islands||[]).map(function(c){return c.id});if(ids.indexOf(SEL)<0)SEL=ids[0]||null;
   RS=SEL!=null?((V.islands[SEL]||{}).rounds||[]):[];
   $("roundsIsl").textContent=SEL!=null&&ids.length>1?"· 岛 "+SEL:"";
-  header();kpis();wall();chartMetric();chartDur();chartTl();highlight();chartNodes();islands();cost();events();cmds();folds();
+  header();kpis();wall();chartMetric();chartDur();chartTl();highlight();util();chartNodes();islands();cost();events();cmds();folds();
 }
 function load(){
   if(OFFLINE){V=INLINE.page;EVENTS=(INLINE.events||{}).events||[];render();return}

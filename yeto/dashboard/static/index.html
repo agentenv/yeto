@@ -81,6 +81,9 @@ table.c td:first-child,table.c th:first-child{text-align:left}
 .wall{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}
 .card{border:1px solid var(--line);border-radius:10px;padding:10px 12px;cursor:pointer;background:var(--bg)}.card.sel{border-color:var(--accent)}
 select{font:inherit;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:3px 6px}
+h3{font-size:13px;margin:14px 0 6px}
+.ucols{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px}
+.ucols .rl{font-size:12px;font-weight:600;margin-bottom:2px}
 .alerts div{padding:4px 0;border-bottom:1px dashed var(--line);font-size:13px}
 </style>
 </head>
@@ -88,7 +91,7 @@ select{font:inherit;background:var(--panel);color:var(--ink);border:1px solid va
 <div class="app">
 <nav aria-label="页面导航">
   <div class="brand">yeto 看板</div>
-  <a href="#overview">概览</a><a href="#islandWall" id="navWall">岛</a><a href="#rounds">每轮</a><a href="#nodes">节点</a><a href="#cost">成本</a>
+  <a href="#overview">概览</a><a href="#islandWall" id="navWall">岛</a><a href="#rounds">每轮</a><a href="#util">生成利用率</a><a href="#nodes">节点</a><a href="#cost">成本</a>
   <a href="#events">事件</a><a href="#cmds">常用命令</a><a href="#unused">未使用面板</a>
   <div class="sub" id="navSub"></div>
 </nav>
@@ -114,6 +117,23 @@ select{font:inherit;background:var(--panel);color:var(--ink);border:1px solid va
   <h2 style="margin-top:14px">阶段时间线（墙钟）</h2>
   <div class="legend" id="legTl"></div><div id="cTl"></div>
   <div class="tip" id="tip"></div>
+</section>
+
+<section class="panel" id="util" aria-label="生成阶段利用率">
+  <h2>生成阶段利用率 <span class="note" id="utilIsl"></span></h2>
+  <div id="utilEmpty" class="note" hidden>无数据（磁带没有 rl_rollout_cutoff / rl_trajectory_reward 计时字段 / rl_load_sample）</div>
+  <div id="utilBody">
+    <div class="tabs" id="utilCtl"></div>
+    <h3>截止丢弃 / 续跑（每轮）</h3><div class="ucols" id="uCut"></div>
+    <h3>生成段内轨迹完成曲线 <span class="note">（横轴：生成段开始后秒数；纵轴：已完成轨迹数；虚线：截止 = 生成段结束）</span></h3>
+    <div class="legend" id="legDone"></div><div class="ucols" id="uDone"></div>
+    <h3>四段耗时（各轨迹合计） <span class="note">（模型生成 / 工具执行 / 判分 / 沙箱启动；右侧为工具执行占比）</span></h3>
+    <div class="legend" id="legPh"></div><div class="ucols" id="uPh"></div>
+    <h3>本轮每条轨迹 <span class="note" id="uTrNote"></span></h3><div class="ucols" id="uTr"></div>
+    <h3>KV 占用与排队 <span class="note">（实线：KV 占用 %，左轴；点线：排队请求数，右轴；底色：生成段）</span></h3>
+    <div class="legend" id="legLoad"></div><div class="ucols" id="uLoad"></div>
+    <div id="uCarryBox" hidden><h3>续跑轨迹跨轮（阶段 2）</h3><div class="ucols" id="uCarry"></div></div>
+  </div>
 </section>
 
 <div class="grid2">

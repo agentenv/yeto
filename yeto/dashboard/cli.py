@@ -22,6 +22,11 @@ def add_parser(sub) -> None:
         p.add_argument("--prices", default=None, help="price table JSON (default: built-in example, not a bill)")
         p.add_argument("--budget", type=float, default=None, help="budget cap in $ for the cost bar/alerts")
         p.add_argument("--thresholds", default=None, help="alert threshold overrides JSON")
+        p.add_argument("--compare", nargs="*", default=[], metavar="PATH",
+                       help="tapes of a second run to compare generation-stage utilization with "
+                       "(side by side / overlay; loaded once, not followed)")
+        p.add_argument("--label", default=None, help="display label of this run in the comparison (default A)")
+        p.add_argument("--compare-label", default=None, help="display label of the --compare run (default B)")
 
     s = dsub.add_parser("serve", help="loopback-only GET-only HTTP server")
     common(s)
@@ -61,6 +66,20 @@ def _paths(args) -> list[str]:
     return paths
 
 
+def _attach_compare(reducer, args) -> None:
+    """agentic-rollout-utilization 7.6: load the --compare run into its own reducer."""
+    if not getattr(args, "compare", None):
+        return
+    from .sources import load_all
+
+    other = _reducer(args)
+    other.run = None
+    load_all(other, list(args.compare))
+    reducer.label = args.label or "A"
+    other.label = args.compare_label or "B"
+    reducer.compare = [other]
+
+
 def main(args) -> int:
     cmd = args.dashboard_command
     if cmd == "mirror":
@@ -71,6 +90,7 @@ def main(args) -> int:
     try:
         reducer = _reducer(args)
         paths = _paths(args)
+        _attach_compare(reducer, args)
     except (OSError, ValueError) as exc:
         print(f"[dashboard] {exc}", file=sys.stderr)
         return 2
