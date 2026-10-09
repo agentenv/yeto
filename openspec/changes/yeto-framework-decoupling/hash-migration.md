@@ -160,3 +160,8 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
 - 变的只有 Miles 命令行摘要和 `ports_runtime_fingerprint`（`sha256:0ad73504…` → `sha256:cbe1cd06…`）。学习率调度不进 `AlgorithmSpec.sha256()`，也不进 `ExecutionProfile.contract_hash`。
 - 行为变化（随 auto 规则并入 N5 a73ab1b2）：`--rl-island-scheduling elastic` 的岛由线性改为常数学习率，命令行摘要随之变化；两个哈希不变。标准样本里的 `elastic` 配置是岛内弹性 `--rl-elastic`，不是跨岛 elastic，所以不受影响。
 - 已知限制（待主 agent 定）：因为契约哈希不含学习率调度，同一个同步服务下一个岛用 linear、另一个岛用 constant 不会被握手拒绝。launcher 给同一次运行的所有岛下发同一个值，只有手工拼命令或续训时换了参数才会出现；如果要堵死，需要把调度写进契约，这会让所有配置的契约哈希都变，本次没做。
+
+## S17 C9 codex 事件字段（PR #141，分支 s17-codex-events，2026-10-09 合进 main 时迁移）
+
+- 原因：C9 在 `trajectory_diagnostics` 里加了 `end_kind` 和逐回合长度（`turn_completion_tokens`、`turn_context_tokens`、`turn_tool_output_bytes`），原改在旧路径 `yeto/rl/engine/miles_adapter/rollout_meta_hook.py`；阶段 4/5 已把该文件搬到 `yeto/rl/adapters/miles/rollout_meta_hook.py`（旧路径只剩转发），合并时把这 8 行原样移到新文件。
+- 变化：8 个标准样本里 rollout_meta_hook 插件的 `source_sha256` 由 `605e0ee1e23444cd4710350fe64f59808658605ef0096ccad03d4e7a61585fca`（C6b 后）改为 `cab11ca4d4082524f113f3aa28963af7394767b9252c431c88088e466b23b760`。只有这一个字段变；`algorithm_sha256`、契约哈希、Miles 命令行、`backend_identity`、`fake_engine_tapes.json` 都不变。已用 `python tests/decoupling_golden.py --write` 重新生成。

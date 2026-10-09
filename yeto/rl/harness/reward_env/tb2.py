@@ -169,6 +169,10 @@ class Tb2Benchmark:
         t = self._task(task_id)
         return prebake_from_test_sh((t.tests_dir / "test.sh").read_text(), t.docker_image)
 
+    def judge_setup_commands(self, task_id: str) -> list[str]:
+        """Commands run before ``judge_command`` (stage large tests/, S17 G3)."""
+        return tb2.verifier_stage_commands(self._task(task_id))
+
     def judge_command(self, task_id: str, submission: str | None = None) -> str:
         del submission  # TB2 judges the sandbox the agent worked in (official stage-at-verify)
         return tb2.verifier_command(self._task(task_id))

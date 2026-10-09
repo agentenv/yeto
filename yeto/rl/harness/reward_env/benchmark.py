@@ -159,8 +159,13 @@ def run_judge(adapter: BenchmarkAdapter, task_id: str, handle: JudgeHandle, *, p
     """Run the adapter's judge command in ``handle`` and parse it (trusted side)."""
     spec = adapter.task_spec(task_id)
     command = adapter.judge_command(task_id, submission)
+    setup = getattr(adapter, "judge_setup_commands", None)
     started = clock()
     try:
+        for step in (setup(task_id) if setup is not None else ()):
+            staged = handle.exec(step, timeout_s=120)
+            if int(getattr(staged, "exit_code", 0)) != 0:
+                raise RuntimeError(f"judge setup failed: {(getattr(staged, 'output', '') or '')[-200:]}")
         result = handle.exec(command, timeout_s=spec.judge_timeout_s)
     except Exception as exc:  # noqa: BLE001 - sandbox gone / API error: infrastructure, not a 0
         return JudgeResult(benchmark=adapter.name, task_id=task_id, reward=0.0, passed=False, exit_code=-1,

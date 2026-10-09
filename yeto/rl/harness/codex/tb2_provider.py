@@ -511,17 +511,50 @@ class RelayTerminalEnvironment:
         return {"accepted": True}
 
 
+# S17 G3: Modal rejects an exec whose argv exceeds 64 KiB (ARG_MAX), and 7 of
+# the 89 TB2 tasks ship tests/ larger than that once tar+base64'd.  Small tests
+# stay inline (command unchanged); larger ones are first appended to a staging
+# file in the sandbox in chunks (``verifier_stage_commands``), and the verifier
+# command decodes that file instead.
+MAX_INLINE_TESTS_B64 = 48_000
+TESTS_STAGE_CHUNK = 48_000
+TESTS_STAGE_PATH = "/tmp/yeto-tb2-tests.tgz.b64"
+
+
+def verifier_stage_commands(task: Tb2Task) -> list[str]:
+    """Commands to run (in order) before ``verifier_command``; empty when inline."""
+    b64 = tests_tar_b64(task.tests_dir)
+    if len(b64) <= MAX_INLINE_TESTS_B64:
+        return []
+    commands = [f": > {TESTS_STAGE_PATH}"]
+    commands += [f"printf %s {b64[i:i + TESTS_STAGE_CHUNK]} >> {TESTS_STAGE_PATH}"
+                 for i in range(0, len(b64), TESTS_STAGE_CHUNK)]
+    return commands
+
+
 def verifier_command(task: Tb2Task) -> str:
     """Stage ``tests/`` at ``/tests``, run ``test.sh`` in the workdir, print the reward.
 
     The reward line is tagged so it survives arbitrary test output in front of it.
+    Large ``tests/`` must be staged first with ``verifier_stage_commands``.
     """
+    b64 = tests_tar_b64(task.tests_dir)
+    source = (f"echo {b64} | base64 -d" if len(b64) <= MAX_INLINE_TESTS_B64
+              else f"base64 -d {TESTS_STAGE_PATH}")
     return (
         f"T=${{TB2_TESTS_DIR:-{TESTS_PATH}}}; L=${{TB2_VERIFIER_LOGS_DIR:-{VERIFIER_LOGS_PATH}}}; "
-        f"rm -rf \"$T\" && mkdir -p \"$T\" \"$L\" && echo {tests_tar_b64(task.tests_dir)} | base64 -d | tar xzf - -C \"$T\" && "
+        f"rm -rf \"$T\" && mkdir -p \"$T\" \"$L\" && {source} | tar xzf - -C \"$T\" && "
         f"bash \"$T/test.sh\"; rc=$?; echo; echo \"YETO_TB2_TESTSH_RC=$rc\"; "
         f"echo \"YETO_TB2_REWARD=$(cat \"$L/reward.txt\" 2>/dev/null | tr -d '[:space:]')\""
     )
+
+
+def stage_tests(handle: "SandboxHandle", task: Tb2Task) -> None:
+    """Run ``verifier_stage_commands`` in ``handle``; raise if any chunk fails."""
+    for command in verifier_stage_commands(task):
+        result = handle.exec(command, timeout_s=120)
+        if result.exit_code != 0:
+            raise RuntimeError(f"staging tests/ failed (rc={result.exit_code}): {result.output[-200:]}")
 
 
 _REWARD_RE = re.compile(r"YETO_TB2_REWARD=(\S*)")
@@ -552,6 +585,7 @@ class Tb2Verifier:
         if bound is not None and episode_id != bound:
             raise ValueError(f"verifier bound to {bound!r}, asked for {episode_id!r}")
         self.evaluations += 1
+        await asyncio.to_thread(stage_tests, self._handle, self._task)
         result = await asyncio.to_thread(
             self._handle.exec, verifier_command(self._task), timeout_s=self._task.verifier_timeout_s
         )
