@@ -417,6 +417,9 @@ def handle_from_metadata(
         buffer_length=payload.get("buffer_length"),
         submitted_groups=payload.get("submitted_groups"),
         aborted_in_flight_groups=payload.get("aborted_in_flight_groups"),
+        aborted_in_flight_trajectories=payload.get("aborted_in_flight_trajectories"),
+        aborted_in_flight_tokens=payload.get("aborted_in_flight_tokens"),
+        aborted_in_flight_unknown_groups=payload.get("aborted_in_flight_unknown_groups"),
         abort_mechanism=MILES_ABORT_MECHANISM,
         tool_wait_seconds=(
             float(payload["tool_wait_seconds"]) if "tool_wait_seconds" in payload else None
@@ -467,6 +470,37 @@ def _engine_load(entries: Any) -> tuple[int, int] | None:
         running += total - queued
         waiting += queued
     return running, waiting
+
+
+def _engine_kv_used(entries: Any) -> int | None:
+    """agentic-rollout-utilization 1.3: KV tokens in use, SGLang ``/get_load``
+    (``num_tokens - num_pending_tokens`` = the scheduler's ``num_used_tokens``,
+    summed over DP ranks). None when an older engine omits the fields."""
+    if not isinstance(entries, list) or not entries:
+        return None
+    used = 0
+    for entry in entries:
+        if not isinstance(entry, dict):
+            return None
+        total, pending = entry.get("num_tokens"), entry.get("num_pending_tokens")
+        if type(total) is not int or type(pending) is not int:
+            return None
+        used += total - pending
+    return used
+
+
+def _engine_kv_capacity(info: Any) -> int | None:
+    """SGLang ``/server_info`` ``internal_states[*].memory_usage.token_capacity`` (sum)."""
+    if not isinstance(info, dict):
+        return None
+    states = info.get("internal_states")
+    if not isinstance(states, list) or not states:
+        return None
+    values = [(s.get("memory_usage") or {}).get("token_capacity") if isinstance(s, dict) else None
+              for s in states]
+    if all(type(v) is int and v > 0 for v in values):
+        return int(sum(values))
+    return None
 
 
 def _engine_capacity(info: Any) -> int | None:
@@ -522,6 +556,7 @@ class MilesRolloutPool:
         # TOOL_WAIT_NO_BOARD_STOCK, or None = unknown); default: the drain board.
         self._load_tool_wait = load_tool_wait if load_tool_wait is not None else tool_wait_board
         self._capacity: dict[str, int] = {}
+        self._kv_capacity: dict[str, int] = {}
         self._args = args
         # Cells the fork declared at startup (M1 bundles); None = E1 verbs off.
         self._declared = None if declared_cells is None else tuple(str(c) for c in declared_cells)
@@ -769,12 +804,17 @@ class MilesRolloutPool:
         running: int | None = 0
         queued: int | None = 0
         capacity: int | None = 0
+        kv_used: int | None = 0
+        kv_capacity: int | None = 0
         for url in sorted(inflight):
             base = url.rstrip("/")
             try:
-                load = _engine_load(get(base + "/get_load"))
+                entries = get(base + "/get_load")
+                load = _engine_load(entries)
             except Exception:  # noqa: BLE001
-                load = None
+                entries = load = None
+            used = _engine_kv_used(entries)
+            kv_used = None if used is None or kv_used is None else kv_used + used
             if load is None:
                 running = queued = None
             elif running is not None:
@@ -782,13 +822,19 @@ class MilesRolloutPool:
                 queued += load[1]
             if url not in self._capacity:
                 try:
-                    cap = _engine_capacity(get(base + "/server_info"))
+                    info = get(base + "/server_info")
                 except Exception:  # noqa: BLE001
-                    cap = None
+                    info = None
+                cap = _engine_capacity(info)
                 if cap is not None:
                     self._capacity[url] = cap
+                kv_cap = _engine_kv_capacity(info)
+                if kv_cap is not None:
+                    self._kv_capacity[url] = kv_cap
             cap = self._capacity.get(url)
             capacity = None if cap is None or capacity is None else capacity + cap
+            kv_cap = self._kv_capacity.get(url)
+            kv_capacity = None if kv_cap is None or kv_capacity is None else kv_capacity + kv_cap
         tool = self._tool_wait_count()
         sample.update(
             running_requests=running,
@@ -797,6 +843,12 @@ class MilesRolloutPool:
             tool_wait_trajectories=tool,
             ready_groups=None,
         )
+        # agentic-rollout-utilization 1.3 (only when the engines report them, so
+        # older engines' load samples are unchanged)
+        if kv_used is not None and inflight:
+            sample["kv_used_tokens"] = kv_used
+        if kv_capacity and inflight:
+            sample["kv_capacity_tokens"] = kv_capacity
         harness = self._harness_snapshot()  # IR-2/IR-4; None = unknown
         sample.update(
             harness_in_flight=None if harness is None else int(harness.in_flight),

@@ -373,3 +373,40 @@ def test_over_sampling_submitted_and_aborted_in_flight_groups(tmp_path):
     assert (payload["submitted_groups"], payload["aborted_in_flight_groups"]) == (8, 5)
     h = handle_from_metadata(payload, rollout_id=3, policy_version=3, policy_hash=H, data_pack=None)
     assert (h.submitted_groups, h.aborted_in_flight_groups) == (8, 5)
+
+
+def test_submitted_groups_survive_epoch_wrap_via_group_index():
+    """agentic-rollout-utilization 1.1: a 6-task set over-sampled at 8 wraps the epoch
+    every round; the monotonic sample_group_index still counts what was drawn."""
+    args = SimpleNamespace()
+    source = SimpleNamespace(sample_offset=0, sample_group_index=0)
+    assert hook.submitted_groups(args, source) is None  # first rollout: unknown
+    source.sample_offset, source.sample_group_index = 2, 8  # wrapped (6 tasks)
+    assert hook.submitted_groups(args, source) == 8
+    source.sample_offset, source.sample_group_index = 4, 24  # two submissions
+    assert hook.submitted_groups(args, source) == 16
+    source.buffer = [["g"]]
+    source.sample_group_index = 30
+    assert hook.submitted_groups(args, source) is None  # buffer reuse: unknown
+
+
+def test_fork_abort_discard_stats_reach_the_handle(tmp_path):
+    """agentic-rollout-utilization 1.2: the fork's abort() tally (exact, first rollout
+    included) overrides the offset-derived count and carries discarded tokens."""
+    import os
+
+    kept = [group(0, [1.0, 0.0]), group(1, [0.0, 1.0])]
+    args = SimpleNamespace(rollout_abort_discard_stats={
+        "groups": 4, "samples": 8, "response_tokens": 1234, "unknown_groups": 1})
+    hook.record_trained_groups(args, kept)
+    os.environ[hook.META_SINK_ENV] = f"dir:{tmp_path}"
+    try:
+        hook.extract_rollout_metadata(args, kept, SimpleNamespace(sample_group_index=6))
+    finally:
+        os.environ.pop(hook.META_SINK_ENV)
+    assert args.rollout_abort_discard_stats is None  # consumed once per rollout
+    payload = json.loads((tmp_path / "rollout-3.json").read_text())
+    assert "submitted_groups" not in payload  # first rollout: unknown
+    h = handle_from_metadata(payload, rollout_id=3, policy_version=3, policy_hash=H, data_pack=None)
+    assert (h.aborted_in_flight_groups, h.aborted_in_flight_trajectories,
+            h.aborted_in_flight_tokens, h.aborted_in_flight_unknown_groups) == (4, 8, 1234, 1)

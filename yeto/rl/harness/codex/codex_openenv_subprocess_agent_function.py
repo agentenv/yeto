@@ -35,6 +35,7 @@ from typing import Any, Awaitable, Callable, Protocol
 
 from yeto.rl.engine import rollout_meta
 from yeto.rl.engine.tool_wait import _call as _board_call
+from yeto.rl.engine.trajectory_timing import PhaseClock
 from yeto.rl.engine.tool_wait import _resolve as _board_resolve
 
 from . import codex_openenv_agent_function as adapter
@@ -218,6 +219,7 @@ async def _drive_worker(
         start_new_session=True,
     )
     in_tool = False
+    phases = PhaseClock()  # agentic-rollout-utilization 1.3
     try:
         assert process.stdin is not None and process.stdout is not None
         process.stdin.write((json.dumps(job) + "\n").encode())
@@ -232,13 +234,17 @@ async def _drive_worker(
             if kind == "tool_wait":
                 if event.get("phase") == "enter" and not in_tool:
                     in_tool = True
+                    phases.enter_tool()
                     if board is not None:
                         await _board_await(board, "enter", trajectory_id)
                 elif event.get("phase") == "exit" and in_tool:
                     in_tool = False
+                    phases.exit_tool()
                     if board is not None:
                         await _board_await(board, "exit", trajectory_id)
             elif kind == "result":
+                if isinstance(event.get("metrics"), dict):  # observe only, unsigned
+                    event["metrics"].update(phases.finish())
                 return event
             elif kind == "error":
                 error = adapter.harness.CodexHarnessError(str(event.get("reason")))
@@ -314,6 +320,7 @@ async def run(
     trajectory_id = str(metadata.get("trajectory_id") or sample_id)
     episode_id = adapter.new_episode_id()
     fields = adapter.trajectory_fields(trajectory_id)
+    started_at = time.time()  # agentic-rollout-utilization 1.3 (observe only)
     expected_version = resolve_expected_policy_version(metadata)
     if expected_version is None:  # IR-3: refuse before any environment exists
         raise PolicyVersionMissing(f"{POLICY_VERSION_MISSING} for trajectory {trajectory_id!r}")
@@ -328,7 +335,9 @@ async def run(
             _board_kwcall(board, "enter_session", trajectory_id, _member)
             session_open = True
         try:
+            acquire_started = time.monotonic()
             lease = await _provider.acquire(task_id, trajectory_id)
+            sandbox_start_seconds = round(time.monotonic() - acquire_started, 3)
         except Exception as exc:  # noqa: BLE001 - provisioning failures are infrastructure
             _note_acquire_failure(exc, trajectory_id)  # raises EnvironmentProviderOutage past the threshold
             return {**adapter.infrastructure_metadata(f"acquire: {type(exc).__name__}: {exc}", episode_id=None), **fields}
@@ -367,6 +376,8 @@ async def run(
             tito = adapter.mirror_tito_counters(untrusted.get("metrics"), board)
             signed = await adapter.finish_trusted(untrusted, lease.verifier, task_id=task_id, sample_id=sample_id)
             signed["expected_policy_version"] = expected_version
+            signed.update(trajectory_started_at=started_at, trajectory_ended_at=time.time(),
+                          sandbox_start_seconds=sandbox_start_seconds)
             handed_off = True
             return {**signed, **fields, **tito, **segments}
         finally:

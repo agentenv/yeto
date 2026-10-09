@@ -2452,9 +2452,13 @@ def _prepare_rl_args(
         if args.over_sampling_batch_size == args.rollout_batch_size:
             args.over_sampling_batch_size = expected_oversampling
         elif args.over_sampling_batch_size != expected_oversampling:
+            # agentic-rollout-utilization 1.1 (10-09 ruling): the SecRLEnv +1
+            # is a reserved same-task retry slot (_SecRLEnvRetryDataSource), not
+            # over-sampling; over-sample/cut-off applies to the other agents.
             raise ValueError(
                 "the SecRLEnv agents require oversampling equal to the training "
-                "batch plus one"
+                "batch plus one (a reserved same-task retry slot; over-sampling "
+                "with cut-off is not available to SecRLEnv agents)"
             )
         args.dynamic_sampling_filter_path = SECRLENV_GROUP_FILTER
         args.dynamic_sampling_max_replacements = (

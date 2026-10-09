@@ -19,7 +19,9 @@
 1. **一个开关 `--rl-max-policy-age N`（默认 0）贯穿全链路**，而不是复用 Miles 的 `--partial-rollout` 布尔量。理由：yeto 契约以"落后几版"表达，多岛账本已按落后版本数打折；Miles 开关由适配层从它推导（N>0 ⇒ partial-rollout + mask/TIS 设置）。备选：直接映射 Miles 布尔开关——无法表达上限、不中立，否决。
 2. **阶段 0 截止丢弃，不续跑**。理由：零契约改动即可拿到收益上界与偏差数据。代价：偏向短轨迹，以丢弃 token 数和长度分布对照量化。
 3. **token 级版本记录**：每个 token 存生成版本（续跑轨迹形成版本段）。训练端重要性采样比值用记录的生成概率计算，截断比例逐轮上报。备选：只按轨迹记录最旧版本——无法按段修正，否决。
-4. **TB 动态过滤与多发的关系**：保留过滤，但多发数改为显式配置并与过滤所需的 +1 取最大值；记录过滤掉与截止丢弃的分别计数，避免两种丢弃混在一起。
+4. **TB 动态过滤与多发的关系**：~~保留过滤，但多发数改为显式配置并与过滤所需的 +1 取最大值~~；记录过滤掉与截止丢弃的分别计数，避免两种丢弃混在一起。
+   **缩小（10-09 主 agent 代用户拍板）**：`launcher.py:2451` 的 +1 只作用于 SecRLEnv 智能体，它不是多发，而是给同题重试留的一个空位（`legacy/engine.py` `_SecRLEnvRetryDataSource` 首发 target 组、硬性要求 capacity==target+1，`ssh_harness.py` 同样要求）；取最大值会让 SecRLEnv 运行在 rollout 内报错。SecRLEnv（已搁置）维持 ==+1，显式给其他值时报错并说明多发不适用于 SecRLEnv；非 SecRLEnv 路径（含 M1 的 codex OpenEnv）显式 `--over-sampling-batch-size` 直通 Miles，launcher 只校验（≥ rollout batch）与记录，不取最大值。
+   **丢弃 token 数（10-09 主 agent 代用户拍板）**：Miles 在部分 rollout 关闭时于 `abort()` 直接丢弃被中止组，yeto 拿不到其 token 数；在 agentenv/miles 分支 `s18-abort-discard-stats`（efbbc63ea，基于 8bc52237a）给 `abort()` 加统计 `args.rollout_abort_discard_stats = {groups, samples, response_tokens, unknown_groups}`，yeto 的 meta hook 读取；镜像未含此提交时报 None（未知），不猜。
 5. **切点携带未完成轨迹**：切点新增"在途轨迹"段（token、版本段、生成概率、会话状态引用），只在 N>0 时写；`cut.py` 的空缓冲断言改为"N=0 时必须为空"。
 6. **agentic 挂起点在回合之间**：在 Miles fork 的 agentic 生成循环里，截止信号只在模型回合结束、工具结果写回后生效；沙箱用 Modal 沙箱保活（存活上限默认 600 s，取 G6 训练+发布时长量级），超时丢弃。备选：沙箱快照恢复（DeltaBox 式）——Modal 侧能力未验证，列为后续。
 7. **多岛**：每岛独立凑够即截止；合并按 outer_version，样本按版本段进入 `island_ledger` 的 `ACCEPT_IS` 判定；落后上限进契约哈希，不一致按 #143 规则只拒该连接。

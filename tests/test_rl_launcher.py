@@ -190,6 +190,21 @@ def test_signed_secrlenv_variance_filter_accepts_a_bounded_replacement_budget():
     assert args.dynamic_sampling_max_replacements == 4
 
 
+def test_over_sampling_without_filter_is_forwarded_for_cutoff():
+    """agentic-rollout-utilization 1.1: outside SecRLEnv an explicit over-sampling
+    count passes straight to the engine (cut-off at the batch, no filter needed)."""
+    args = _args(["--over-sampling-batch-size", "16"])
+    _prepare_rl_args(args)
+    assert args.over_sampling_batch_size == 16 > args.rollout_batch_size
+    assert getattr(args, "dynamic_sampling_filter_path", None) is None
+
+
+def test_over_sampling_below_the_batch_is_rejected():
+    args = _args(["--over-sampling-batch-size", "1"])
+    with pytest.raises(ValueError, match="at least --rollout-batch-size"):
+        _prepare_rl_args(args)
+
+
 def test_legacy_secrlenv_agent_auto_binds_exact_replacement_contract():
     args = _args(
         [
@@ -250,6 +265,10 @@ def test_secrlenv_agent_rejects_the_unwrapped_miles_generator():
         (
             ["--over-sampling-batch-size", "6"],
             "training batch plus one",
+        ),
+        (
+            ["--over-sampling-batch-size", "64"],
+            "not available to SecRLEnv agents",
         ),
     ],
 )

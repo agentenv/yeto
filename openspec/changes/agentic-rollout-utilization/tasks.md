@@ -1,9 +1,14 @@
 # Tasks
 
 ## 1. 阶段 0：多发请求、凑够即截止（不续跑）与指标补采
-- [ ] 1.1 launcher 显式配置多发数，与 TB 动态过滤所需 +1 取最大值；过滤丢弃与截止丢弃分别计数（验证：launcher 单测覆盖三种组合）
-- [ ] 1.2 截止时丢弃未完成轨迹并发事件（丢弃条数、已生成 token 数）（验证：假引擎单测，目标 24、多发 48，训练样本恰 24 条且全为当前版本）
-- [ ] 1.3 补采指标：每轨迹起止时间、每回合模型生成/工具执行/判分三段耗时、沙箱冷启动、KV 占用与排队峰值（验证：假引擎事件流可拆出三段且之和对上生成段；接通 `tool_wait_trajectories`）
+- [x] 1.1 launcher 显式配置多发数~~，与 TB 动态过滤所需 +1 取最大值~~；过滤丢弃与截止丢弃分别计数（验证：launcher 单测覆盖三种组合）
+  - 缩小（10-09 主 agent 代用户拍板，理由见 design 决定 4）：SecRLEnv 维持 ==+1 并明确报错；非 SecRLEnv 显式多发直通 Miles，只校验不取最大值。
+  - 证据：`tests/test_rl_launcher.py::test_over_sampling_without_filter_is_forwarded_for_cutoff`、`::test_over_sampling_below_the_batch_is_rejected`、`::test_secrlenv_agent_rejects_conflicting_replacement_contract[extra4-not available to SecRLEnv agents]`（三种组合：无过滤显式多发、低于批次拒绝、SecRLEnv 显式多发拒绝；SecRLEnv 默认 +1 由原有 `test_legacy_secrlenv_agent_auto_binds_exact_replacement_contract` 覆盖）；多发提交数改用单调 `sample_group_index`（数据集回绕安全）：`tests/test_rl_miles_adapter_rollout.py::test_submitted_groups_survive_epoch_wrap_via_group_index`；过滤丢弃（`filtered_groups`）与截止丢弃（`discarded_groups`）分列于 `rl_rollout_cutoff`：`tests/test_rl_rollout_cutoff.py::test_cutoff_keeps_first_target_and_counts_filter_and_cutoff_separately`。
+- [x] 1.2 截止时丢弃未完成轨迹并发事件（丢弃条数、已生成 token 数）（验证：假引擎单测，目标 24、多发 48，训练样本恰 24 条且全为当前版本）
+  - 证据：核心 `yeto/rl/engine/rollout_cutoff.py`（事件 `rl_rollout_cutoff`，字段 `CUTOFF_FIELDS` 两后端共用）；`tests/test_rl_rollout_cutoff.py::test_fake_engine_target_24_over_sampled_48_trains_exactly_24_current`（6 组×4=24 条，多发 12 组=48 条，两轮各训练 24 条且版本令牌全为当前版本，事件记丢弃 6 组 24 条及 token 数）；Miles fork 丢弃统计 agentenv/miles `s18-abort-discard-stats` efbbc63ea，fork 单测 `tests/fast/rollout/test_sglang_rollout.py::TestAbort::test_abort_without_partial_rollout_tallies_discarded_groups`；yeto 读取 `tests/test_rl_miles_adapter_rollout.py::test_fork_abort_discard_stats_reach_the_handle`。
+  - 注意：真机要拿到 token 数需重建含 efbbc63ea 的 ports 镜像；未重建时丢弃条数仍有（按 `sample_group_index` 推算，首轮未知），token 数报 None。
+- [x] 1.3 补采指标：每轨迹起止时间、每回合模型生成/工具执行/判分三段耗时、沙箱冷启动、KV 占用与排队峰值（验证：假引擎事件流可拆出三段且之和对上生成段；接通 `tool_wait_trajectories`）
+  - 证据：核心 `yeto/rl/engine/trajectory_timing.py`（`PhaseClock`、`phase_totals`）；codex OpenEnv 子进程智能体按工具进出边计时、记录沙箱获取耗时与起止墙钟时间；`rl_trajectory_reward` 新增可选字段 `trajectory_started_at/ended_at`、`sandbox_start_seconds`、`worker_seconds`、`turn_generation_seconds`、`turn_tool_seconds`（判分沿用 `evaluate_time`）；`rl_load_sample` 新增 `kv_used_tokens`、`kv_capacity_tokens`（SGLang 报才写），`timeline.load_peaks` 求排队与 KV 峰值；codex OpenEnv 智能体的 `tool_wait_trajectories` 接到岛内具名 ToolWaitBoard（原为未知）。测试：`tests/test_rl_rollout_cutoff.py::test_fake_engine_event_stream_splits_three_phases`、`tests/test_rl_trajectory_timing.py`（4 项）、`tests/test_harness_codex_openenv.py::test_subprocess_run_records_phase_timing`。
 - [ ] 1.4 GPU A/B（并入 N17 合并验证运行）：M1 run d 配置单岛 1×H200 各 6 轮，判据见 design Migration Plan；结果与证据路径写回本文件与 AGENTIC-GPU-UTIL-RESEARCH.md
 
 ## 2. 阶段 1：落后上限开关与契约（默认 0）

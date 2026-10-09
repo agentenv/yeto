@@ -1111,6 +1111,19 @@ class IslandDriver:
                       policy_version=int(getattr(batch, "policy_version", rollout_id)),
                       t=self.clock(), **self._labels(), **fields)
 
+    def _emit_rollout_cutoff(self, rollout_id: int, batch: Any) -> None:
+        """agentic-rollout-utilization 1.2: one ``rl_rollout_cutoff`` per round whose
+        over-sampled rollout cut off in-flight groups (policy-age limit 0: discarded).
+        Nothing is emitted when nothing was cut off or nothing is reported."""
+        from .rollout_cutoff import CUTOFF_EVENT, cutoff_report
+
+        report = cutoff_report(batch)
+        if report is None:
+            return
+        self.emit(CUTOFF_EVENT, rollout_id=rollout_id,
+                  policy_version=int(getattr(batch, "policy_version", rollout_id)),
+                  t=self.clock(), **self._labels(), **report.fields())
+
     def _emit_trajectory_rewards(self, rollout_id: int, batch: Any) -> None:
         """rl-fn-codex-rollout 1.0 (observe only): one ``rl_trajectory_reward`` per
         trained sample the rollout reported (task_id + reward), capped per round."""
@@ -1302,6 +1315,7 @@ class IslandDriver:
             int(self.profile.optimizer_steps_per_round) if self.profile is not None else 1
         )
         stats = self._stats(rollout_id, batch, metrics, rollout_seconds, train_seconds)
+        self._emit_rollout_cutoff(rollout_id, batch)
         if self.observe:
             self._emit_round_labels(rollout_id, batch, metrics)
             self._emit_harness_mismatches(rollout_id, batch)

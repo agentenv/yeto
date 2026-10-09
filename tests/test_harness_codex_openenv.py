@@ -734,3 +734,23 @@ def test_legacy_preflight_accepts_fn_profiles_against_image_env():
             None, "qwen38_next_4layer", {**env, "YETO_CODEX_OPENENV_BACKEND_PROFILE": "qwen38_next_4layer"})
     with pytest.raises(ValueError, match="environment drifted"):
         preflight.forward_legacy_openenv_preflight(None, "qwen38_next_4layer", {k: v for k, v in env.items() if "MODEL_ID" not in k})
+
+
+def test_subprocess_run_records_phase_timing(monkeypatch):
+    """agentic-rollout-utilization 1.3: per-turn generation/tool seconds sum to the
+    worker wall time; judge = evaluate_time; sandbox cold start and wall start/end."""
+    from yeto.rl.adapters.miles.rollout_meta_hook import trajectory_diagnostics
+    from yeto.rl.engine.trajectory_timing import phase_totals
+
+    env = FakeTerminalEnvironment(passed=True)
+    _configure(monkeypatch, env)
+    result = _run(subprocess_agent.run("http://miles", "p", {}, _metadata()))
+    record = trajectory_diagnostics(result)
+    assert len(record["turn_tool_seconds"]) == 3  # two commands + submit
+    assert len(record["turn_generation_seconds"]) == 4
+    totals = phase_totals(record)
+    assert totals["generation_seconds"] + totals["tool_seconds"] == pytest.approx(
+        record["worker_seconds"], abs=0.01)
+    assert totals["judge_seconds"] is not None and totals["judge_seconds"] >= 0
+    assert record["sandbox_start_seconds"] >= 0
+    assert record["trajectory_started_at"] <= record["trajectory_ended_at"]
