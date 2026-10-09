@@ -47,11 +47,10 @@
 ## 6. verl 并行线（与第 1–5 组同阶段门槛）
 - [x] 6.1 读码确认 verl fork fully_async 下 `tool_agent_loop` 被中止后是从头重跑还是续跑、版本记录粒度、与 yeto 多岛同步的冲突点，结论写入 design 第 9 条（验证：design 更新并附文件:行号）
   - 证据：design 第 9 条"6.1 读码结论"（verl fork acad9875，附文件:行号）：中止只打断模型生成、不打断工具；partial_rollout 开时在推理服务客户端内保留前缀续写；版本每轨迹 min/max；staleness_threshold 按样本数限流；trainer 本地版本号与 outer version 错位；同步模式 `over_sample_rate` 无使用处。
-- [ ] 6.2 阶段 0：verl 同步模式多发与截止，丢弃计数与三段耗时翻译成统一事件字段（验证：verl 适配层单测，字段与 Miles 一致）
-  - 已做（10-09 主 agent 拍板的范围）：统一字段翻译 `yeto/rl/adapters/verl/rollout_events.py`（agent loop 计时 → `generation_seconds`/`tool_seconds`/`evaluate_time`，min/max_global_steps → `policy_versions`，丢弃统计 → 与 Miles 相同的 `rl_rollout_cutoff` 字段）；Miles 侧 `PhaseClock` 同时给出同名总量字段；verl 多发数 ≠ 批次时起机前报错（`run_config_rules.check_over_sampling`，原为静默忽略）。测试：`tests/test_rl_verl_policy_age.py::test_verl_and_miles_report_the_same_trajectory_fields`、`::test_verl_discard_tally_uses_the_miles_cutoff_fields`、`::test_verl_refuses_over_sampling_before_launch`。
-  - 缺口（未勾的原因）：verl 同步模式的截止本身未实现，见 6.2b。
-- [ ] 6.2b verl 同步模式截止：经构建期补丁 `adapters/verl/patch_verl.py` 在 AgentLoopManager 凑够即截止并上报丢弃统计（10-09 主 agent 代用户拍板；CPU 单测尽量覆盖；镜像重建与真机验证并入 4.2/6.4 上卡）
-  - 读码评估（10-09，未开工，已报主 agent）：批次在 `AgentLoopManager.generate_sequences`（`verl/experimental/agent_loop/agent_loop.py:1249-1275`）按 worker 切块分发给多个 Ray actor，每个 `AgentLoopWorker.generate_sequences`（584-675）对本块 `asyncio.gather` 全部样本；全局"凑够即截止"需要跨 worker 计数（共享计数 actor 或按块均分目标），且输出批次变小后 verl 同步训练器（uid/重复/ppo_mini_batch 整除）的批次假设要一并处理——补丁量较大，按拍板先报主 agent 再做。
+- [x] 6.2 阶段 0：verl 同步模式多发与截止，丢弃计数与三段耗时翻译成统一事件字段（验证：verl 适配层单测，字段与 Miles 一致）
+  - 范围调整（10-09 主 agent 代用户拍板）：verl 的"凑够即截止/续跑"不在同步模式做，并入 6.4（阶段 2，走 fully_async 路径）；本项完成的是统一字段翻译与起机前报错。
+  - 证据：`yeto/rl/adapters/verl/rollout_events.py`（agent loop 计时 → `generation_seconds`/`tool_seconds`/`evaluate_time`，min/max_global_steps → `policy_versions`，丢弃统计 → 与 Miles 相同的 `rl_rollout_cutoff` 字段）；Miles `PhaseClock` 给出同名总量字段；verl 多发数 ≠ 批次时起机前报错（`run_config_rules.check_over_sampling`，原为静默忽略）。测试：`tests/test_rl_verl_policy_age.py::test_verl_and_miles_report_the_same_trajectory_fields`、`::test_verl_discard_tally_uses_the_miles_cutoff_fields`、`::test_verl_refuses_over_sampling_before_launch`。
+- [ ] 6.2b ~~verl 同步模式截止补丁~~：**不做**（10-09 主 agent 代用户拍板）。原因：批次在 `AgentLoopManager.generate_sequences`（`agent_loop.py:1249-1275`）按 worker 切块分给多个 Ray actor，全局截止需跨 worker 计数，且要改同步训练器的批次假设（uid/重复/ppo_mini_batch 整除），代价大且只服务阶段 0 测量；阶段 0 数据用 Miles A/B 已足够。verl 的截止/续跑并入 6.4 的 fully_async 路径。
 - [x] 6.3 阶段 1：verl 适配层按落后上限声明能力，0 时 verl 命令行标准样本不变；不支持的阶段启动前报错（验证：标准样本比对与报错单测）
   - 证据：`yeto/rl/adapters/verl/policy_age.py`（`SUPPORT` 阶段 1、上限 0；`policy_age_overrides(0)` 为空）；`verl/entry.py` 的 `max_policy_staleness` 改为取自 `SUPPORT`；后端注册表新增角色 `policy_age`；测试：`tests/test_rl_verl_policy_age.py::test_verl_declares_stage_one_and_limit_zero_overrides_are_empty`、`::test_verl_command_line_unchanged_at_limit_zero`、`tests/test_rl_policy_age.py::test_launcher_refuses_an_unsupported_limit_before_launch[verl]`。仓库内无 verl 命令行标准样本文件，以 `build_overrides` 逐项相等代替。
 - [ ] 6.4 阶段 2：由落后上限推导 `staleness_threshold` 与 `partial_rollout`，样本版本段接入 yeto 账本（验证：CPU 单测；GPU 对照与 4.2 合并在同一次上卡，单岛 verl 小模型上限 0 vs 1）
