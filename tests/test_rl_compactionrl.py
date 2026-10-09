@@ -11,7 +11,7 @@ from yeto.rl.algos.vapo import vapo_spec
 from yeto.rl.engine.algorithm import AlgorithmSpec
 from yeto.rl.adapters.miles import algorithm_flags as af
 from yeto.rl.adapters.miles import config as mc
-from yeto.rl.engine.run_config import CriticRunConfig
+from yeto.rl.engine.run_config import CriticRunConfig, LrSchedule
 
 from test_rl_miles_adapter_config import make_config
 
@@ -66,6 +66,8 @@ def test_stage_w_has_50_steps_and_the_same_critic_schedule():
     cfg = make_config()
     cfg = dataclasses.replace(cfg, algorithm=dataclasses.replace(
         cfg.algorithm, advantage_estimator="ppo",
+        # critic_updates_per_step=2 needs a non-decaying schedule (critic_lr_horizon)
+        lr_schedule=LrSchedule("constant", 3),
         critic=CriticRunConfig(critic_load="/w", init_sha256="a" * 64)))
     main = list(mc.translate_run_config(cfg, spec).argv)
     stage = cw.warmup_stage_argv(main, spec, actor_checkpoint="/ckpt/actor", critic_save="/c")
@@ -129,3 +131,22 @@ def test_whole_rollout_control_arm_is_explicit():
     result = af.dry_run(["--dry-run", "--extra", extra, *flags])
     assert result["verdict"] == "accepted"
     assert result["algorithm_spec_sha256"] == spec.sha256()
+
+
+def test_linear_schedule_shorter_than_critic_steps_is_refused():
+    """S14 SAO G1: --lr-decay-iters = actor steps is shared with a critic that
+    takes 2 updates per step, so the critic LR hit 0 halfway (critic_lr_horizon)."""
+    from yeto.rl.algos import sao
+    from yeto.rl.engine.algorithm import launch_problems
+
+    values = {"num_rollout": 12, "rollout_batch_size": 4, "n_samples_per_prompt": 8,
+              "global_batch_size": 32, "lr_decay_iters": 12, "lr_decay_style": "linear"}
+    for spec in (sao.sao_algorithm_spec("coding"), compactionrl_spec()):
+        problems = launch_problems(spec, values)
+        assert any("critic_lr_horizon" in p and "24 optimizer steps" in p for p in problems), problems
+        assert not any("critic_lr_horizon" in p
+                       for p in launch_problems(spec, {**values, "lr_decay_style": "constant"}))
+        assert not any("critic_lr_horizon" in p
+                       for p in launch_problems(spec, {**values, "lr_decay_iters": 24}))
+    one = AlgorithmSpec(advantage={"estimator": "ppo"}, execution={"needs_critic": True})
+    assert not any("critic_lr_horizon" in p for p in launch_problems(one, values))
