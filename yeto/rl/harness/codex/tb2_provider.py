@@ -39,6 +39,10 @@ Configuration (environment variables, read when the factory runs):
                                  (default ``yeto-tbench2``; sweep scope)
 ``YETO_HARNESS_TB2_SANDBOX_TTL_S`` / ``YETO_HARNESS_TB2_IDLE_TIMEOUT_S``
                                  Modal hard ceiling / idle reclamation
+``YETO_HARNESS_TB2_NETWORK_POLICY`` path of a JSON network policy that
+                                 replaces the built-in one (see
+                                 ``NetworkPolicy``); sandbox egress is closed
+                                 for every task the policy does not grant
 ``YETO_HARNESS_TB2_FAULT``       fault injection for the R-TB coverage matrix,
                                  comma separated ``kind:selector[=value]``:
                                  ``create_fail:<sel>`` acquire raises
@@ -88,6 +92,7 @@ MODAL_APP_ENV = "YETO_HARNESS_TB2_MODAL_APP"
 SANDBOX_TTL_ENV = "YETO_HARNESS_TB2_SANDBOX_TTL_S"
 IDLE_TIMEOUT_ENV = "YETO_HARNESS_TB2_IDLE_TIMEOUT_S"
 ENV_HOST_ENV = "YETO_HARNESS_TB2_ENV_HOST"
+NETWORK_POLICY_ENV = "YETO_HARNESS_TB2_NETWORK_POLICY"
 
 DEFAULT_MODAL_APP = "yeto-tbench2"
 DEFAULT_SANDBOX_TTL_S = 1800
@@ -230,6 +235,107 @@ def tests_tar_b64(tests_dir: Path) -> str:
     return base64.b64encode(buf.getvalue()).decode()
 
 
+# ----------------------------------------------------------------------------- network policy
+
+
+@dataclass(frozen=True)
+class NetworkGrant:
+    """Outbound network access of one sandbox.
+
+    The default grant is closed (no egress).  ``open`` allows all egress.
+    Otherwise only ``domains`` (``*.`` wildcard prefixes allowed) and
+    ``cidrs`` are reachable.
+    """
+
+    open: bool = False
+    domains: tuple[str, ...] = ()
+    cidrs: tuple[str, ...] = ()
+
+    @property
+    def closed(self) -> bool:
+        return not self.open and not self.domains and not self.cidrs
+
+    @classmethod
+    def parse(cls, value: Any, *, where: str) -> "NetworkGrant":
+        if value == "open":
+            return cls(open=True)
+        if value in ("closed", None):
+            return cls()
+        if not isinstance(value, dict) or set(value) - {"domains", "cidrs"}:
+            raise ValueError(f"{where}: grant must be 'open', 'closed' or {{domains, cidrs}}, got {value!r}")
+        domains = tuple(value.get("domains") or ())
+        cidrs = tuple(value.get("cidrs") or ())
+        for item in domains + cidrs:
+            if not isinstance(item, str) or not item or item == "*":
+                raise ValueError(f"{where}: bad allowlist entry {item!r} (use 'open' for all egress)")
+        import ipaddress
+
+        for cidr in cidrs:
+            ipaddress.ip_network(cidr, strict=False)
+        return cls(domains=domains, cidrs=cidrs)
+
+    def modal_kwargs(self) -> dict[str, Any]:
+        """``modal.Sandbox.create`` network arguments (modal >= 1.5.5)."""
+        if self.open:
+            return {}
+        if self.closed:
+            return {"block_network": True}
+        kwargs: dict[str, Any] = {}
+        if self.cidrs:
+            kwargs["outbound_cidr_allowlist"] = list(self.cidrs)
+        if self.domains:
+            kwargs["outbound_domain_allowlist"] = list(self.domains)
+        return kwargs
+
+
+CLOSED = NetworkGrant()
+
+
+@dataclass(frozen=True)
+class NetworkPolicy:
+    """Per-task network grants; every task not listed gets ``default`` (closed).
+
+    JSON form (``YETO_HARNESS_TB2_NETWORK_POLICY``)::
+
+        {"default": "closed",
+         "tasks": {"pip-task": {"domains": ["pypi.org", "files.pythonhosted.org"]},
+                   "web-task": "open"}}
+    """
+
+    tasks: dict[str, NetworkGrant] = field(default_factory=dict)
+    default: NetworkGrant = CLOSED
+
+    def grant(self, task_id: str) -> NetworkGrant:
+        return self.tasks.get(task_id, self.default)
+
+    @classmethod
+    def from_mapping(cls, data: Any, *, where: str = "network policy") -> "NetworkPolicy":
+        if not isinstance(data, dict) or set(data) - {"default", "tasks"}:
+            raise ValueError(f"{where}: expected {{'default', 'tasks'}}")
+        tasks = data.get("tasks", {})
+        if not isinstance(tasks, dict):
+            raise ValueError(f"{where}: 'tasks' must be an object")
+        return cls(
+            tasks={str(k): NetworkGrant.parse(v, where=f"{where} task {k}") for k, v in tasks.items()},
+            default=NetworkGrant.parse(data.get("default", "closed"), where=f"{where} default"),
+        )
+
+    @classmethod
+    def builtin(cls) -> "NetworkPolicy":
+        from .tb2_network_grants import TB2_OPEN_EGRESS_TASKS
+
+        return cls(tasks={t: NetworkGrant(open=True) for t in TB2_OPEN_EGRESS_TASKS})
+
+    @classmethod
+    def from_env(cls) -> "NetworkPolicy":
+        path = os.environ.get(NETWORK_POLICY_ENV)
+        if not path:
+            return cls.builtin()
+        import json
+
+        return cls.from_mapping(json.loads(Path(path).read_text()), where=path)
+
+
 # ----------------------------------------------------------------------------- backend protocol
 
 
@@ -276,13 +382,37 @@ _TIMEOUT_EXIT_CODES = frozenset({124, 137})
 # ----------------------------------------------------------------------------- local backend
 
 
+# Only these parent variables reach a local sandbox command (never tokens).
+LOCAL_ENV_PASSTHROUGH = ("PATH", "LANG", "LC_ALL", "TZ")
+DEFAULT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+def minimal_env(parent: dict[str, str] | None = None) -> dict[str, str]:
+    """The base environment of a local sandbox command.
+
+    The parent environment is not inherited: it holds Modal / HF / W&B
+    tokens and the reward HMAC key.  Only ``LOCAL_ENV_PASSTHROUGH`` is
+    copied; ``PATH`` falls back to a standard value.
+    """
+    parent = os.environ if parent is None else parent
+    env = {k: parent[k] for k in LOCAL_ENV_PASSTHROUGH if parent.get(k)}
+    env.setdefault("PATH", DEFAULT_PATH)
+    env.setdefault("LANG", "C.UTF-8")
+    return env
+
+
 class LocalProcessSandbox:
     """Commands run on this host in a scratch root; ``/tests`` and ``/logs`` are
-    redirected into that root through ``TB2_TESTS_DIR`` / ``TB2_VERIFIER_LOGS_DIR``."""
+    redirected into that root through ``TB2_TESTS_DIR`` / ``TB2_VERIFIER_LOGS_DIR``.
 
-    def __init__(self, root: Path, workdir: str) -> None:
+    Commands get ``minimal_env`` only.  The network grant is recorded but NOT
+    enforced: this backend is for CPU tests and dev on a trusted host.
+    """
+
+    def __init__(self, root: Path, workdir: str, network: NetworkGrant = CLOSED) -> None:
         self.root = root
         self.workdir = workdir
+        self.network = network
         (root / workdir.lstrip("/")).mkdir(parents=True, exist_ok=True)
         self._alive = True
         self._processes: set[subprocess.Popen] = set()
@@ -297,7 +427,7 @@ class LocalProcessSandbox:
         cwd = self.host_path(workdir or self.workdir)
         cwd.mkdir(parents=True, exist_ok=True)
         env = {
-            **os.environ,
+            **minimal_env(),
             "TB2_TESTS_DIR": str(self.host_path(TESTS_PATH)),
             "TB2_VERIFIER_LOGS_DIR": str(self.host_path(VERIFIER_LOGS_PATH)),
             "HOME": str(self.root),
@@ -348,15 +478,17 @@ class LocalProcessBackend:
     the fixture the verifier checks into place).
     """
 
-    def __init__(self, base_dir: Path | None = None, *, setup: Callable[[Tb2Task, LocalProcessSandbox], None] | None = None) -> None:
+    def __init__(self, base_dir: Path | None = None, *, setup: Callable[[Tb2Task, LocalProcessSandbox], None] | None = None,
+                 network_policy: NetworkPolicy | None = None) -> None:
         self.base_dir = Path(base_dir) if base_dir else Path(tempfile.gettempdir()) / "yeto-tb2-local"
+        self.network_policy = network_policy or NetworkPolicy()
         self.setup = setup
         self.created: list[LocalProcessSandbox] = []
 
     def create(self, task: Tb2Task, trajectory_id: str) -> LocalProcessSandbox:
         self.base_dir.mkdir(parents=True, exist_ok=True)
         root = Path(tempfile.mkdtemp(prefix=f"{task.task_id}-", dir=self.base_dir))
-        sandbox = LocalProcessSandbox(root, task.workdir)
+        sandbox = LocalProcessSandbox(root, task.workdir, self.network_policy.grant(task.task_id))
         if self.setup is not None:
             self.setup(task, sandbox)
         self.created.append(sandbox)
@@ -415,8 +547,11 @@ class ModalSandboxBackend:
         ttl_s: int = DEFAULT_SANDBOX_TTL_S,
         idle_timeout_s: int = DEFAULT_IDLE_TIMEOUT_S,
         run_id: str | None = None,
+        network_policy: NetworkPolicy | None = None,
     ) -> None:
         self.app_name = app_name
+        # Closed for every task unless a policy grants it (task 5.1).
+        self.network_policy = network_policy or NetworkPolicy()
         self.ttl_s = int(ttl_s)
         self.idle_timeout_s = int(idle_timeout_s)
         self.run_id = run_id or os.environ.get("OPENENV_RUN_ID") or ""
@@ -448,6 +583,7 @@ class ModalSandboxBackend:
             memory=int(task.memory_mb),
             workdir=task.workdir,
             tags=tags,
+            **self.network_policy.grant(task.task_id).modal_kwargs(),
         )
         return ModalSandbox(sandbox, task.workdir)
 
@@ -805,6 +941,7 @@ def modal_provider(miles_args: Any = None) -> Tb2EnvironmentProvider:
         app_name=os.environ.get(MODAL_APP_ENV, DEFAULT_MODAL_APP),
         ttl_s=int(_env_float(SANDBOX_TTL_ENV, DEFAULT_SANDBOX_TTL_S) or DEFAULT_SANDBOX_TTL_S),
         idle_timeout_s=int(_env_float(IDLE_TIMEOUT_ENV, DEFAULT_IDLE_TIMEOUT_S) or DEFAULT_IDLE_TIMEOUT_S),
+        network_policy=NetworkPolicy.from_env(),
     )
     return _provider(backend)
 
@@ -812,4 +949,4 @@ def modal_provider(miles_args: Any = None) -> Tb2EnvironmentProvider:
 def local_provider(miles_args: Any = None) -> Tb2EnvironmentProvider:
     """CPU-only provider (commands run on this host): smoke tests and dev."""
     del miles_args
-    return _provider(LocalProcessBackend())
+    return _provider(LocalProcessBackend(network_policy=NetworkPolicy.from_env()))

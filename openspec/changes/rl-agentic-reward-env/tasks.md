@@ -34,3 +34,8 @@
 
 ## 4. GPU 验证（并入 FN codex 第三次上卡，不单独开卡）
 - [x] 4.1 FN codex 第三次上卡改用 `yeto.cloud.modal_reward_env:modal_provider`，记录每轮 rollout 中判分段时间，与 r2（未预装）对比。依赖 2.2 通过。**[实测]** `s17-fncodex-r3-20261008a`：24 条全部判分成功（9 条得 1），整段生成（含沙箱、Codex 回合、判分）224 s，r2 为 688 s。单条判分耗时事件里没有字段，**未单独采到**（后续在 agent_metrics 带 evaluate_time）。
+
+## 5. 沙箱隔离（S19，分支 s19-sandbox）
+- [x] 5.1 沙箱网络出口默认关闭，按任务白名单放行（design D9）。`NetworkPolicy`/`NetworkGrant` 进 `tb2_provider`；`ModalSandboxBackend` 与 `PrebakedModalSandboxBackend` 建沙箱时传网络参数；内置规则给现有 89 个 TB2 任务显式 `open`；`YETO_HARNESS_TB2_NETWORK_POLICY` 可换规则文件。验收：`tests/test_sandbox_isolation.py`（假 modal 模块检查参数）。状态：完成（CPU 单测），Modal 上**未验证**。
+- [x] 5.2 `LocalProcessSandbox` 只传最少环境变量（`minimal_env`），不继承父进程环境，不带任何令牌。验收：`tests/test_sandbox_isolation.py` 在沙箱里跑 `env` 检查。状态：完成。
+- [ ] 5.3 把 TB2 任务的 `open` 收紧成域名白名单（apt 源、astral.sh、github、pypi 等），需先在 Modal CPU 上复跑阳性对照。未做。
