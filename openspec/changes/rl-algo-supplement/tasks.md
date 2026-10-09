@@ -124,3 +124,31 @@
 | rl-algo-seq-and-adv | 3.6 | rpp 梯度规则"收紧"分支依赖 KL 大小上报，记为已知限制（progress.md:50,144） | 已知限制 | $0 | 阶段二不处理；若要补证据并入 4.5 KL 批次 |
 | rl-algo-seq-and-adv / rl-algorithm-capabilities | — | tasks 全勾，无汇入 | — | — | — |
 | rl-fn-codex-rollout（新，S14 10-07） | 0.1–3.3 | FN 以 codex harness 为 rollout/奖励源：阶段 0 CPU（FN profile、5.1/5.2、A16、9.2 失配根因）→ 阶段 1 四层 1×H100! → 阶段 2 全尺寸 8×H200 两轮 → 阶段 3 并入 FN-TRAIN-PLAN | CPU+GPU | ≈$2–3 + $46–70（上限 $100） | 独立 change，需用户拍板 Q1–Q5（其 design Open Questions） |
+
+## 15. S19 阶段一门禁盘点（2026-10-09，只读盘点，未改勾选）
+
+> 范围：阶段一 = 第 1–6 组。当前 39 项中只有 1.2 完成。用户已在 S14 裁定 Q1–Q6（见 progress.md "S14 用户裁定"）。用户 10-09 另定：SAO 与 CompactionRL 最先（在 rl-algo-critic-family，见其 tasks.md 顶部与 design D-S19），所以本 change 阶段一排在 critic 的 SAO/CompactionRL 之后。
+
+**已满足**
+- 1.2 前置状态核实（S14 完成）。
+- 1.1 的前置决策：卡型（A10G 优先，Q1）、范围（4.x/5.x 全做，Q2）、pin 合并（Q3）已由用户给出；但 1.1 本身（计划文件 + 用户确认）未做。
+
+**不需上卡、不需用户确认（CPU，可直接派子 agent）**
+- 1.3 测试基线：改用本机安全测试集（`/home/michael/work/yeto-test-venv`，docs/TESTING.md），排除会拉 Ray 的用例；原命令里的 `/tmp/yeto-venv` 全量不再适用。
+- 2.1 clipfrac compile/eager 定性；2.2（只在 2.1 确认是 fork 缺陷时做）；2.3 dual_clipfrac；2.4 超采样计数；2.6 指标接入。
+- 3.1 不可声明名单；3.2 文档。
+- 1.1 计划文件的起草（确认要用户做，见下）。
+
+**需要用户确认**
+- 1.1 `evidence/phase1-plan.md` 定稿后需用户确认，确认前不得开始第 2 组以后的 apply（本 change 原规定）。建议并入第三批合并上卡统一报批。
+- 2.5 pin 更新：fork 推送仍按 S14"overlay 补丁代替 push"，若要真推 `yeto/ports` 需用户另批；镜像重建由 IMG 做。与 critic 6.3 合并为一次。
+- 6.2 CISPO 两岛（可选），需用户在 1.1 中确认。
+- 阶段一总预算（design D9 上限 $35，A10G 方案约 $26）需在第三批中报批。
+
+**需要上卡**（A10G 优先，前置为 1.1 已确认、2.5 新 pin 就绪）
+- 4.1 对照、4.2 CISPO/SAPO/GMPO、4.3 变体+TIS、4.4 dual_clip、4.5 KL×4、4.6 opsm_rollout、4.7 norm/whiten。
+- 5.1 over_sampling、5.2 clip_higher、5.3（条件）。
+- 6.1 两岛 G3、6.2（可选）。
+- 2.5 的 parse_args 检查（T4，约 $0.5）。
+
+**建议顺序**：critic 6.3 + 本 change 2.5 合并 pin → critic SAO/CompactionRL → 本 change 1.3/2.x/3.x（CPU，可与前一步并行）→ 1.1 定稿报批 → 4.x/5.x → 6.x。
