@@ -411,3 +411,34 @@ def test_build_sync_selects_the_dual_channel_for_a_critic():
     assert isinstance(sync, DualStrictAvgSync) and sync.OUTER_SYNC_KIND == "strict"
     with pytest.raises(ValueError, match="--critic-syncer"):
         build_sync(SimpleNamespace(**base, use_critic=True), yeto_policy_sync=True)
+
+
+def test_write_back_ships_only_each_tensors_own_bytes():
+    """s19-ppo-g3-20261009a: the channel hands import_critic_state views into one
+    flat buffer; pickling a view writes the whole buffer, so the run_plugin payload
+    grew to (number of tensors) x (buffer size). The write-back must pickle to about
+    the size of the weights."""
+    import pickle
+
+    seen = {}
+
+    class _Spy(_CriticRanks):
+        async def run_plugin(self, fn_path, kwargs=None):
+            if fn_path == sp.IMPORT_CRITIC_TENSORS:
+                seen["bytes"] = len(pickle.dumps(kwargs, protocol=5))
+            return await super().run_plugin(fn_path, kwargs)
+
+    trainer = _critic_trainer([_rank_actor(0)])
+    trainer._critic = _Spy(trainer._critic.ranks)
+    state = trainer.export_critic_state()
+    names = sorted(state)
+    flat = torch.cat([state[k].reshape(-1) for k in names] + [torch.zeros(100_000)])
+    views, offset = {}, 0
+    for k in names:
+        n = state[k].numel()
+        views[k] = flat[offset:offset + n].reshape(state[k].shape)
+        offset += n
+    assert all(v.untyped_storage().nbytes() == flat.numel() * 4 for v in views.values())
+    assert trainer.import_critic_state(views) == cs.critic_weights_sha256(state)
+    weights = sum(v.numel() * 4 for v in views.values())
+    assert seen["bytes"] < weights + 64 * 1024  # not len(views) x 400 KB
