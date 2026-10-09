@@ -1,0 +1,84 @@
+{
+ "verdict": "失败",
+ "criteria": {
+  "D1_one_reclaim_event_fields": false,
+  "D2_within_25s": false,
+  "D3_second_container_finished": true,
+  "D4_no_dup_no_loss": false,
+  "D5_same_as_oneshot": false
+ },
+ "facts": {
+  "spot_reclaim": [],
+  "launcher_starts": [
+   {
+    "event": "rl_eval_island",
+    "ts": 1791585123.4327772,
+    "cloud": "modal",
+    "gpu": "T4",
+    "gpus": 1,
+    "price_per_hour": null,
+    "attempt": 1,
+    "outcome": "started",
+    "wait_s": 0.149
+   },
+   {
+    "event": "rl_eval_island",
+    "ts": 1791585226.6286273,
+    "cloud": "modal",
+    "gpu": "T4",
+    "gpus": 1,
+    "price_per_hour": null,
+    "attempt": 1,
+    "outcome": "preempted",
+    "run_s": 103.344,
+    "error": "Preempted: v0: reclaim notice; stop before winning-avg-corewars#0"
+   },
+   {
+    "event": "rl_eval_island",
+    "ts": 1791585260.0873737,
+    "cloud": "modal",
+    "gpu": "T4",
+    "gpus": 1,
+    "price_per_hour": null,
+    "attempt": 2,
+    "outcome": "started",
+    "wait_s": 33.459
+   },
+   {
+    "event": "rl_eval_island",
+    "ts": 1791585367.9267232,
+    "cloud": "modal",
+    "gpu": "T4",
+    "gpus": 1,
+    "price_per_hour": null,
+    "attempt": 2,
+    "outcome": "finished",
+    "run_s": 141.298,
+    "evaluated": [
+     0
+    ]
+   }
+  ],
+  "signal": {
+   "container": "ta-01M4HCPZV0TVFANKPC01CAN7ZR",
+   "pid": "2",
+   "target_cmd": "python -u -R --check-hash-based-pycs never -m modal._container_entrypoint",
+   "results_before": 3,
+   "t": 1791585210.5142062,
+   "kill_rc": 0,
+   "kill_out": "",
+   "container_stopped": true,
+   "stop_rc": 0,
+   "stop_out": "",
+   "container_gone": true,
+   "stop_wait_s": 33.29
+  },
+  "planned_units": 8,
+  "result_rows": 0,
+  "orphan_starts_metric": null,
+  "rl_eval_units": null,
+  "oneshot_sha256": "5ae51639731cc329a58963bad512e3a12662b8cb363170f578824d449dbf2641",
+  "results_sha256": null,
+  "signal_to_preempted_s": 16.11
+ }
+}
