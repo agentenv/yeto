@@ -59,7 +59,8 @@
 - [x] 8.1 准备：复用 R0 冒烟小模型与 harness，证据目录 `openspec/changes/rl-algo-grpo-knobs/evidence/<日期>-<名称>/`，含 `YETO_SHA`、argv、事件与指标 jsonl。只开所需卡数（1 卡或 1+1 卡），不开整机；Modal 使用 `H100!:N` 并在启动时断言 GPU 名；日志与证据中不打印凭据。验证：dry-run 输出的资源请求与预期卡数一致；凭据扫描（grep token/key 模式）无命中。
 - [x] 8.2 G1（1 卡）：clip-higher、dual-clip、token 级聚合、Dr.GRPO（去 std + 常数分母）、KL loss（k3）、entropy、超采样、overlong 软惩罚、overlong 过滤（调小生成长度以触发截断）各 2–3 轮。验证：每项相关指标键存在且有限（如 clipfrac、kl_loss、entropy_loss、被过滤样本数）、零梯度不变量无误报、policy token 与 receipt 正常；KL loss 另记录峰值显存与每轮耗时，并与同配置默认 GRPO 对比；结果逐项写入 `progress.md`。
 - [x] 8.3 对 G1 通过的每项，在 Miles adapter 能力声明中加入该机制（每项单独变更），fake engine 同步。验证：`check()` 单测接受已声明项、仍拒绝未通过项；`progress.md` 引用对应证据目录。
-- [ ] 8.4 G3（1+1 卡）：两岛 strict-avg，组合配置 clip-higher + token 级聚合 + overlong（软惩罚与过滤），约 3 轮。验证：两岛算法哈希一致、外层同步后权重 hash 一致、不变量无失败、两岛有效样本数已记录。不做 decoupled 对比（须等 `fix-decoupled-lr-schedule` 合入）。
+- [x] 8.4 G3（1+1 卡）：两岛 strict-avg，组合配置 clip-higher + token 级聚合 + overlong（软惩罚与过滤），约 3 轮。验证：两岛算法哈希一致、外层同步后权重 hash 一致、不变量无失败、两岛有效样本数已记录。不做 decoupled 对比（须等 `fix-decoupled-lr-schedule` 合入）。
+  - 2026-10-08 S17 G1（N3）通过：`evidence/2026-10-08-s17-g1-knobs/`（Modal 2×H100! + Nebius 无卡 head，strict-avg/legacy 调度，3 轮，Qwen3-0.6B LoRA，gsm8k 4×8，回答 384，代码 80e944b6，Miles 8bc52237a）。组合配置 eps_clip 0.2 / eps_clip_high 0.28 + token 聚合 + overlong 软惩罚（max 384、cache 128）+ overlong 过滤，算法 sha aeda00ef…，两岛不带放行项。判据全过：两岛 sha 相同；v1–v3 两岛应用后的权重哈希逐版本相同；无失败事件、无零梯度误报；有效样本：每轮训练 32 条，过滤 0/2/8（岛 0）、0/2/9（岛 1）。说明：每轮 1 个优化步，pg_clipfrac 三步都是 0（比值恒为 1），本次不证明 clip-higher 在两岛下生效，只证明组合配置在两岛下可运行且一致；clip-higher 生效证据仍是单岛 g1j。
 - [ ] 8.5 拆除与费用：每次运行后拆除全部资源。验证：provider 侧列出 app/实例/卷为空的输出存入证据目录（无残留证明）；按运行汇总卡时与费用写入 `progress.md`。
 - [ ] 8.6 （可选，需另行申请预算）G4 效果 A/B 与 decoupled 对比：不在本 change 验收范围内，仅在用户批准且 `fix-decoupled-lr-schedule` 合入后记录方案。
 

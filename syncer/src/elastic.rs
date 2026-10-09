@@ -1231,6 +1231,110 @@ mod tests {
     use super::*;
     use crate::protocol::*;
 
+    /// Golden replay: tests/test_rl_inter_island_rust_golden.py drives the
+    /// Python CrossIslandLedger (elastic) through a fixed scenario and writes
+    /// the expected step/weight/carried/rejected/dropped sequence; the Rust
+    /// coordinator must reproduce it op by op.
+    #[test]
+    fn python_ledger_golden_tape_matches() {
+        let text = include_str!("../tests/fixtures/elastic_ledger_golden.txt");
+        let close = |a: f64, b: f64| (a - b).abs() <= 1e-12;
+        let mut c: Option<ElasticCoordinator> = None;
+        let mut checked = 0;
+        for (n, line) in text.lines().enumerate() {
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            let t: Vec<&str> = line.split_whitespace().collect();
+            if t[0] == "params" {
+                let p = ElasticParams {
+                    quorum_theta: t[1].parse().unwrap(),
+                    carry_gamma: t[2].parse().unwrap(),
+                    soft_deadline_s: 900,
+                    q_min: t[3].parse().unwrap(),
+                    max_carry_lag: t[4].parse().unwrap(),
+                };
+                c = Some(ElasticCoordinator::new(p, t[5].parse().unwrap(), 0).unwrap());
+                continue;
+            }
+            let c = c.as_mut().expect("params line first");
+            let (lhs, rhs) = line.split_once(" => ").unwrap();
+            let a: Vec<&str> = lhs.split_whitespace().collect();
+            let e: Vec<&str> = rhs.split_whitespace().collect();
+            let id = |s: &str| s.parse::<u32>().unwrap();
+            let u = |s: &str| s.parse::<u64>().unwrap();
+            let ctx = format!("fixture line {}: {line}", n + 1);
+            match a[0] {
+                "join" => {
+                    let catch_up = c.join(id(a[1]), a[2].parse().unwrap(), a[3].parse().unwrap()).unwrap();
+                    assert_eq!(catch_up.to_string(), e[1], "{ctx}");
+                    assert_eq!(c.outer_version, u(e[2]), "{ctx}");
+                }
+                "leave" => {
+                    c.leave(id(a[1]), LEAVE_REASON_REQUESTED).unwrap();
+                    match c.tape.last().unwrap() {
+                        TapeEvent::PoolLeave { dropped_uncommitted, .. } => {
+                            let got = dropped_uncommitted
+                                .map(|d| format!("{} {} {}", d.base_version, d.c_tokens, d.c_steps))
+                                .unwrap_or_else(|| "none".into());
+                            assert_eq!(got, e[1..].join(" "), "{ctx}");
+                        }
+                        ev => panic!("{ctx}: {ev:?}"),
+                    }
+                }
+                "submit" => {
+                    let ev = c.submit(Delta {
+                        island_id: id(a[1]),
+                        base_version: u(a[2]),
+                        c_tokens: u(a[3]),
+                        c_steps: u(a[4]),
+                    });
+                    let got = match ev {
+                        TapeEvent::DeltaAccepted { .. } => "delta_accepted".to_string(),
+                        TapeEvent::DeltaCarriedOver { lag, .. } => format!("delta_carried_over {lag}"),
+                        TapeEvent::DeltaRejected { reason, .. } => format!("delta_rejected {reason}"),
+                        ev => panic!("{ctx}: {ev:?}"),
+                    };
+                    assert_eq!(got, rhs, "{ctx}");
+                }
+                "advance" => match (c.try_advance(a[1] == "1"), e[0]) {
+                    (None, "no_step") => assert_eq!(c.outer_version, u(e[1]), "{ctx}"),
+                    (Some(plan), "outer_step") => {
+                        assert_eq!(plan.base_version, u(e[1]), "{ctx}");
+                        let TapeEvent::OuterStep { arrived, cap_arrived, cap_total, absent, .. } =
+                            c.tape.last().unwrap().clone()
+                        else {
+                            panic!("{ctx}")
+                        };
+                        assert_eq!(arrived, e[2].parse::<usize>().unwrap(), "{ctx}");
+                        assert!(close(cap_arrived, e[3].parse().unwrap()), "{ctx}");
+                        assert!(close(cap_total, e[4].parse().unwrap()), "{ctx}");
+                        let want_absent: Vec<u32> =
+                            if e[5] == "-" { vec![] } else { e[5].split(',').map(id).collect() };
+                        assert_eq!(absent, want_absent, "{ctx}");
+                        let mut got = plan.weights.clone();
+                        got.sort_by(|x, y| (x.0, x.1).cmp(&(y.0, y.1)));
+                        let want: Vec<(u32, u64, f64)> = e[6]
+                            .split(',')
+                            .map(|w| {
+                                let f: Vec<&str> = w.split(':').collect();
+                                (id(f[0]), u(f[1]), f[2].parse().unwrap())
+                            })
+                            .collect();
+                        assert_eq!(got.len(), want.len(), "{ctx}");
+                        for (g, w) in got.iter().zip(&want) {
+                            assert!(g.0 == w.0 && g.1 == w.1 && close(g.2, w.2), "{ctx}: {g:?} vs {w:?}");
+                        }
+                    }
+                    (got, _) => panic!("{ctx}: got {got:?}"),
+                },
+                op => panic!("{ctx}: unknown op {op}"),
+            }
+            checked += 1;
+        }
+        assert_eq!(checked, 23, "fixture op count");
+    }
+
     fn params() -> ElasticParams {
         ElasticParams {
             quorum_theta: DEFAULT_QUORUM_THETA,
