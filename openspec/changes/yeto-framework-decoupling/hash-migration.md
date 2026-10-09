@@ -177,3 +177,8 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
 - 原因：1.1 多发提交数改用单调的 `sample_group_index` 计数（数据集回绕时不再是未知）；1.2 读取 Miles fork `abort()` 的丢弃统计（agentenv/miles s18-abort-discard-stats efbbc63ea）；1.3 `trajectory_diagnostics` 增加轨迹起止时间、沙箱冷启动、逐回合模型生成/工具耗时；codex OpenEnv 子进程智能体记录这些耗时。
 - 变化：8 个标准样本里 rollout_meta_hook 插件的 `source_sha256` 由 `6192a704…` 改为 `c58d994ac22b5e9d839f82fa8621a5d58b40d3f8ecea5050c18827034df247b7`；codex_harness.json 里 `codex_openenv_subprocess_agent_function` 的 `source_sha256` 由 `22df84e9…` 改为 `326680fe569c33936899ae045aaccda49f8fd030cc4d9f7e539d7fb60ef12b96`。只有这两个字段变；`algorithm_sha256`、契约哈希、Miles 命令行、`backend_identity`、`fake_engine_tapes.json` 都不变（新事件 `rl_rollout_cutoff` 只在确有截止丢弃时发出，默认配置不发）。已用 `python tests/decoupling_golden.py --write` 重新生成。
 - 与 PR #153（N17 abort 钩子）同改 codex_harness.json 与本文件，后合者重新生成并迁移。
+
+## 镜像 pin 更新 efbbc63-2fa8801（S18，2026-10-09）
+
+- `MILES_NEXT_COMMIT` 8bc52237a → efbbc63ea（agentenv/miles s18-abort-discard-stats：多发截止时统计丢弃的组/条/回复 token，只加统计），`SGLANG_NEXT_COMMIT` 4e4148f1b → 2fa880182（qwen3_coder 在 parallel_tool_calls=false 时一次只放行一个工具调用，S17 N17），镜像 `yeto-miles-ports:efbbc63-2fa8801@sha256:a7990076…`，构建记录 `openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-09-efbbc63-2fa8801/`。
+- 标准样本变化：8 个配置的 `ports_runtime_fingerprint`（= Miles 提交 + 命令行）与 `backend_identity`（engine_commit 是 Miles 提交）随 Miles 提交变化；算法哈希、契约哈希、Miles 命令行不变。已用 `python tests/decoupling_golden.py --write` 重生成。
