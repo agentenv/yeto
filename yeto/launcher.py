@@ -436,7 +436,7 @@ def rl_colocated_engine_check(args, spec) -> list[dict[str, int]]:
 
 def rl_cross_node_flags(args) -> str:
     tp, engine = rl_cross_node_switches(args)
-    return (" --rl-allow-cross-node-tp" if tp else "") + (" --rl-allow-cross-node-engine-tp" if engine else "")
+    return _rl_backend_module(args, "launch_flags").cross_node_flags(tp, engine)
 
 
 def rl_island_layout(args, spec) -> tuple[int, int, dict[str, tuple[int, ...]]] | None:
@@ -452,7 +452,7 @@ def rl_island_layout(args, spec) -> tuple[int, int, dict[str, tuple[int, ...]]] 
     slots = getattr(args, "rl_elastic_initial_placement_slots", None)
     if slots is None or getattr(args, "rl_placement", "colocated") != "fixed-partition":
         return None
-    from .rl.engine.miles_adapter.placement import PlacementRequest
+    PlacementRequest = _rl_backend_module(args, "placement").PlacementRequest
     from .rl.engine.multinode import Topology, TopologyError, trainer_layout
 
     rollout = int(getattr(args, "rollout_num_gpus", 0) or 0)
@@ -507,9 +507,7 @@ def rl_island_bundle_map_flag(args, spec) -> str:
     counts = tuple(len(bundle_map[r]) for r in ("trainer", "rollout", "standby"))
     if bundle_map == leading_bundle_map(*counts):
         return ""
-    payload = json.dumps({k: list(v) for k, v in bundle_map.items()}, sort_keys=True,
-                         separators=(",", ":"))
-    return f" --rl-island-bundle-map {shlex.quote(payload)}"
+    return _rl_backend_module(args, "launch_flags").bundle_map_flag(bundle_map)
 
 
 def rl_min_nodes(args, spec) -> int:
@@ -1221,6 +1219,12 @@ def resolve_default_rl_image(args) -> None:
 
     if getattr(args, "training_mode", "sft") != "rl":
         return
+    from .rl.engine import backends
+
+    try:  # decoupling 5.4: a backend without a registered adapter is refused here
+        backends.get(getattr(args, "rl_backend", None) or backends.DEFAULT_BACKEND)
+    except backends.UnknownBackend as exc:
+        raise ValueError(str(exc)) from None
     if getattr(args, "rl_image", None) is None:
         from .rl import default_rl_image
 
@@ -1506,6 +1510,17 @@ def _rl_miles_function(
         raise ValueError(f"{flag} must be package.module.function")
 
 
+def _rl_backend_module(args, role: str):
+    """Adapter module for ``role`` of the selected training backend (decoupling 5.4).
+
+    The launcher never imports an adapter directly; ``--rl-backend`` (default
+    miles) picks the row of ``yeto.rl.engine.backends``.
+    """
+    from .rl.engine import backends
+
+    return backends.module(role, getattr(args, "rl_backend", None) or backends.DEFAULT_BACKEND)
+
+
 def _prepare_ports_algorithm(args, rl_engine: str) -> None:
     """rl-algorithm-capabilities D8/D9/D11, before any cloud or GPU work.
 
@@ -1587,7 +1602,9 @@ def _prepare_ports_algorithm(args, rl_engine: str) -> None:
                 sync_preset=getattr(args, "rl_sync_preset", "strict-avg"),
             )
         )
-        from .rl.engine.miles_adapter.entry import miles_capabilities, with_partitioned_serial
+        _entry = _rl_backend_module(args, "entry")
+        miles_capabilities, with_partitioned_serial = (
+            _entry.miles_capabilities, _entry.with_partitioned_serial)
 
         partitioned = getattr(args, "rl_placement", "colocated") == "fixed-partition"
         capabilities = miles_capabilities(
@@ -1838,8 +1855,7 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
     sample_s = getattr(args, "rl_resource_sample_interval", None)
     if sample_s is not None and (rl_engine != "ports" or sample_s < 0):
         raise ValueError("--rl-resource-sample-interval needs --rl-engine ports and a value >= 0")
-    from yeto.rl.engine.miles_adapter.elastic_hook import check_recommend_flags
-    check_recommend_flags(args)
+    _rl_backend_module(args, "elastic_hook").check_recommend_flags(args)
     dropout = getattr(args, "rl_lora_dropout", None)
     if dropout is not None and (rl_engine != "ports" or not 0.0 <= dropout < 1.0):
         raise ValueError("--rl-lora-dropout needs --rl-engine ports and a value in [0, 1)")
@@ -1989,8 +2005,7 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         flags += " --rl-observe-timeline"
     if getattr(args, "rl_resource_sample_interval", None) is not None:
         flags += f" --rl-resource-sample-interval {float(args.rl_resource_sample_interval)!r}"
-    from yeto.rl.engine.miles_adapter.elastic_hook import recommend_flags
-    flags += recommend_flags(args)
+    flags += _rl_backend_module(args, "elastic_hook").recommend_flags(args)
     if getattr(args, "rl_deterministic_trainer", False):
         flags += " --rl-deterministic-trainer"
     if getattr(args, "rl_lora_dropout", None) is not None:
@@ -2037,7 +2052,7 @@ def _ports_infra_flags(args) -> tuple[str, str]:
                 flags += f" {flag} {value!r}"
         delay = getattr(args, "rl_test_inject_start_delay_s", None)
         if delay is not None:
-            from .rl.engine.miles_adapter.rollout import INJECT_START_DELAY_ENV
+            INJECT_START_DELAY_ENV = _rl_backend_module(args, "rollout").INJECT_START_DELAY_ENV
 
             prelude += f"export {INJECT_START_DELAY_ENV}={float(delay)!r}\n"
         for name, _flag, env in _ELASTIC_TEST_EXPORTS:
@@ -2052,7 +2067,7 @@ def _ports_infra_flags(args) -> tuple[str, str]:
             args.rl_learner_launch_prefix = "yeto_rl_restart_loop "
         block = getattr(args, "rl_test_inject_update_weights_block_s", None)
         if block is not None:
-            from .rl.engine.miles_adapter.publish import INJECT_UPDATE_BLOCK_ENV
+            INJECT_UPDATE_BLOCK_ENV = _rl_backend_module(args, "publish").INJECT_UPDATE_BLOCK_ENV
 
             prelude += f"export {INJECT_UPDATE_BLOCK_ENV}={float(block)!r}\n"
         if getattr(args, "rl_elastic_attestation_json", None):
@@ -3084,7 +3099,7 @@ def _sky_docker_login_config(login: dict[str, str]):
 def _miles_source_setup(rl_engine: str = "ports", overlay: str | None = None) -> tuple[str, str]:
     """Return the (miles_setup, sglang_setup) remote steps for ``rl_engine``.
 
-    ``overlay`` (ports only, default None = off): a :mod:`yeto.rl.miles_overlay`
+    ``overlay`` (ports only, default None = off): a :mod:`yeto.rl.adapters.miles.overlay`
     patch applied to the image's ~/miles after the checkout checks.
     """
 
@@ -3244,7 +3259,7 @@ def _miles_source_setup(rl_engine: str = "ports", overlay: str | None = None) ->
 # ``_codex_harness_contract`` the SSH harness uses, mounts the directory at
 # ``CODEX_CONTAINER_DIR`` (sky file_mounts / Modal add_local_dir) and injects
 # the ``YETO_CODEX_*`` environment the container preflights check
-# (``yeto.rl.learner._preflight_codex_harness`` expected_env and
+# (``yeto.rl.adapters.miles.island_entry._preflight_codex_harness`` expected_env and
 # ``codex_harness_agent._attest_runtime``); every value comes from the contract.
 CODEX_BUNDLE_DIR_ENV = "YETO_CODEX_BUNDLE_DIR"
 CODEX_CONTAINER_DIR = "/opt/yeto/codex"
@@ -4032,7 +4047,7 @@ def make_miles_island_task(
             '  RAY_ADDRESS="$MASTER_ADDR:6379" '
             f"PYTHONPATH={island_pythonpath}$HOME/sglang/python:$HOME/sky_workdir{island_megatron_path}"
             "${PYTHONPATH:+:$PYTHONPATH} "
-            f"{getattr(args, 'rl_learner_launch_prefix', '')}python3 -m yeto.rl.learner{flags}"
+            f"{getattr(args, 'rl_learner_launch_prefix', '')}python3 -m yeto.rl.adapters.miles.island_entry{flags}"
             f"{_island_post_cmd(args)}\n"
             "else\n"
             # rl-multinode-island D1: the trap is armed before the join loop so a
@@ -4835,7 +4850,7 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         envs["CRITIC_SYNCER_ADDR"] = critic_syncer_address(syncer_addr)
     if rl and getattr(args, "rl_engine", "ports") != "ports":
         # Legacy Miles' own router launch misses its 30 s deadline on Modal's
-        # CPUs (see yeto.rl.learner.start_external_sglang_router).  Upstream
+        # CPUs (see yeto.rl.adapters.miles.island_entry.start_external_sglang_router).  Upstream
         # Miles (ports) launches its router as a Ray worker with a 120 s
         # budget and has no external router mode.
         envs["YETO_RL_EXTERNAL_ROUTER"] = "1"
@@ -7414,7 +7429,7 @@ def dry_run_plan(args) -> dict:
                 args, spec, learner_id, len(specs) + external, "$SYNCER_ADDR"
             )
             entry["learner_command"] = next(
-                (line.strip() for line in task.run.splitlines() if "yeto.rl.learner" in line),
+                (line.strip() for line in task.run.splitlines() if "yeto.rl.adapters.miles.island_entry" in line),
                 None,
             )
         islands.append(entry)

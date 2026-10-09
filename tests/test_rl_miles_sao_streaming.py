@@ -8,11 +8,11 @@ import pytest
 
 from yeto.protocol import PartialMessageGenerationLost, PullRequest
 from yeto.rl.local_learner import ComponentIdentity
-from yeto.rl.miles import (
+from yeto.rl.adapters.miles.legacy.engine import (
     get_current_published_policy_identity,
     set_current_published_policy_identity,
 )
-from yeto.rl.miles_sao_streaming import (
+from yeto.rl.adapters.miles.models.sao_streaming import (
     MilesFullParameterRoleStream,
     MilesSaoRoleStreamConfig,
     MilesSaoStreamingConfig,

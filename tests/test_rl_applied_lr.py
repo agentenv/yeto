@@ -16,7 +16,7 @@ from yeto.protocol import FinalManifest
 from yeto.rl import applied_lr, grad_audit
 from yeto.rl.core import PolicySnapshot, StrictRlInvariantError, require_nonzero_learning_rate
 from yeto.rl.decoupled import BroadcastBatch
-from yeto.rl.miles import DecoupledMilesPolicySync
+from yeto.rl.adapters.miles.legacy.engine import DecoupledMilesPolicySync
 
 import test_rl_core as core_tests
 import test_rl_decoupled as decoupled_tests
@@ -266,9 +266,9 @@ def test_legacy_decoupled_round_exhausting_the_budget_is_final(tmp_path):
 @pytest.mark.parametrize("flag", ["--lr-decay-style", "--lr-decay-iters", "--lr-warmup-iters", "--min-lr"])
 @pytest.mark.parametrize("form", ["split", "equals"])
 def test_legacy_rejects_lr_schedule_overrides_like_ports(flag, form):
-    from yeto.rl.engine.miles_adapter import config as mc
-    from yeto.rl.engine.miles_adapter.lr_schedule import LR_SCHEDULE_FLAGS
-    from yeto.rl.learner import _reject_lr_schedule_overrides
+    from yeto.rl.adapters.miles import config as mc
+    from yeto.rl.adapters.miles.lr_schedule import LR_SCHEDULE_FLAGS
+    from yeto.rl.adapters.miles.island_entry import _reject_lr_schedule_overrides
 
     extra = [flag, "5"] if form == "split" else [f"{flag}=5"]
     assert flag in LR_SCHEDULE_FLAGS and flag in mc.ADAPTER_OWNED_FLAGS
@@ -279,7 +279,7 @@ def test_legacy_rejects_lr_schedule_overrides_like_ports(flag, form):
 
 
 def test_legacy_allows_unrelated_extra_argv():
-    from yeto.rl.learner import _reject_lr_schedule_overrides
+    from yeto.rl.adapters.miles.island_entry import _reject_lr_schedule_overrides
 
     _reject_lr_schedule_overrides(["--lr", "1e-5", "--clip-grad", "1.0", "--lr-decay-foo", "x"])
 

@@ -7,7 +7,7 @@ response length goes into ``metadata`` for inspection.
 Use it from Miles either by registered name (import this module first) or by
 reference::
 
-    from yeto.rl.engine.miles_adapter.rewards import miles_custom_rm_path
+    from yeto.rl.adapters.miles.rewards import miles_custom_rm_path
     miles_custom_rm_path("examples.custom_reward.reward:ends_with_label")
     # -> value for --custom-rm-path
 """

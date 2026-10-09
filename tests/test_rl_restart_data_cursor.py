@@ -26,7 +26,7 @@ from yeto.rl.engine.driver import DriverError
 from yeto.rl.engine.fake import FakeEngine
 from yeto.rl.engine.journal import read_journal
 from yeto.rl.engine.ledger import BatchLedger, LedgerError
-from yeto.rl.engine.miles_adapter.rollout import MilesRolloutPool, seek_executor_cursor
+from yeto.rl.adapters.miles.rollout import MilesRolloutPool, seek_executor_cursor
 from yeto.rl.engine.ports import GroupMetadata, RolloutBatchHandle
 
 from test_rl_engine_driver import _strict_config, _strict_syncer

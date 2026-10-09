@@ -930,7 +930,7 @@ def test_colocated_publish_offloaded_sleeps_before_publish(tmp_path):
 
 def test_miles_trainer_group_publish_offloaded_follows_offload_train():
     from types import SimpleNamespace
-    from yeto.rl.engine.miles_adapter.trainer import MilesTrainerGroup
+    from yeto.rl.adapters.miles.trainer import MilesTrainerGroup
 
     prop = MilesTrainerGroup.publish_offloaded
     assert prop.fget(SimpleNamespace(_args=SimpleNamespace(colocate=True, offload_train=True)))

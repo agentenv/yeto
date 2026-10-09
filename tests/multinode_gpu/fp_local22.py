@@ -34,5 +34,5 @@ snap = "/root/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de2
 rc = resolve_rl_run_config(args, model_path=snap, rollout_model_path=None, prompt_path="/root/yeto-rl/prompts.jsonl", eval_prompt_path=None,
     provider=prov, target_modules=["down_proj","gate_proj","k_proj","o_proj","q_proj","up_proj","v_proj"], yeto_policy_sync=False)
 pl = learner.build_ports_launch(args, rc, ())
-from yeto.rl.engine.miles_adapter.entry import ports_runtime_fingerprint
+from yeto.rl.adapters.miles.entry import ports_runtime_fingerprint
 print(json.dumps({"fp": ports_runtime_fingerprint(pl), "argv": list(pl.argv)}))

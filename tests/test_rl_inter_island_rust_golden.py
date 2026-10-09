@@ -1,0 +1,134 @@
+"""Golden fixture: Python CrossIslandLedger (elastic) drives a fixed scenario;
+the Rust ElasticCoordinator replays the same ops and must match
+(syncer/src/elastic.rs::tests::python_ledger_golden_tape_matches).
+
+Regenerate: python tests/test_rl_inter_island_rust_golden.py --write
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+from yeto.rl.engine.island_ledger import CrossIslandLedger, DeltaEntry
+
+FIXTURE = Path(__file__).resolve().parents[1] / "syncer/tests/fixtures/elastic_ledger_golden.txt"
+# Plain-text format (the syncer has no JSON dependency): one line per op,
+# "<op args> => <expected>"; floats are Python repr (round-trip exact).
+PARAMS = {"quorum_theta": 0.75, "carry_gamma": 0.5, "q_min": 1, "max_carry_lag": 2}
+LEASE_S = 30.0
+
+# Island ids are u32 on the wire; Python uses their decimal string.
+OPS = [
+    {"op": "join", "island": 1, "capacity": 3.0, "now": 0.0},
+    {"op": "join", "island": 2, "capacity": 1.0, "now": 0.0},
+    {"op": "join", "island": 3, "capacity": 1.0, "now": 0.0},
+    # v0: big island alone is 3/5 < 0.75 -> wait; +island 2 -> 4/5 -> step.
+    {"op": "submit", "island": 1, "base": 0, "c_tokens": 100, "c_steps": 4},
+    {"op": "advance", "timed_out": False},
+    {"op": "submit", "island": 2, "base": 0, "c_tokens": 60, "c_steps": 3},
+    {"op": "advance", "timed_out": False},
+    # island 3 is late on base 0 (lag 1) -> carried with gamma^1.
+    {"op": "submit", "island": 3, "base": 0, "c_tokens": 50, "c_steps": 5},
+    {"op": "submit", "island": 1, "base": 1, "c_tokens": 120, "c_steps": 4},
+    {"op": "advance", "timed_out": True},
+    # new island joins at v2 (catch-up -> weight 0 in its first round).
+    {"op": "join", "island": 4, "capacity": 1.0, "now": 10.0},
+    {"op": "submit", "island": 4, "base": 2, "c_tokens": 80, "c_steps": 2},
+    {"op": "submit", "island": 1, "base": 2, "c_tokens": 90, "c_steps": 3},
+    {"op": "submit", "island": 2, "base": 2, "c_tokens": 70, "c_steps": 7},
+    {"op": "advance", "timed_out": False},
+    # island 3 submits base 0 at v3 (lag 3 > 2) -> rejected.
+    {"op": "submit", "island": 3, "base": 0, "c_tokens": 50, "c_steps": 5},
+    # island 2 submits then leaves -> dropped uncommitted.
+    {"op": "submit", "island": 2, "base": 3, "c_tokens": 40, "c_steps": 2},
+    {"op": "leave", "island": 2},
+    {"op": "advance", "timed_out": True},
+    {"op": "submit", "island": 4, "base": 3, "c_tokens": 30, "c_steps": 3},
+    {"op": "advance", "timed_out": True},
+    {"op": "submit", "island": 1, "base": 3, "c_tokens": 90, "c_steps": 3},
+    {"op": "advance", "timed_out": False},
+]
+
+
+def _parse_key(k: str, base: int) -> tuple[int, int]:
+    if "@" in k:
+        i, b = k.split("@")
+        return int(i), int(b)
+    return int(k), base
+
+
+def generate() -> dict:
+    led = CrossIslandLedger(theta=PARAMS["quorum_theta"], quorum_min=PARAMS["q_min"],
+                            gamma=PARAMS["carry_gamma"], max_carry_lag=PARAMS["max_carry_lag"],
+                            lease_s=LEASE_S, mode="elastic")
+    expected = []
+    for op in OPS:
+        k = op["op"]
+        if k == "join":
+            ev = led.join(str(op["island"]), now=op["now"], capacity=op["capacity"])
+            expected.append({"kind": "join", "catch_up": ev["catch_up"],
+                             "base_version": ev["base_version"]})
+        elif k == "leave":
+            ev = led.leave(str(op["island"]), reason="left")
+            d = ev["dropped_uncommitted"]
+            expected.append({"kind": "leave", "dropped": None if d is None else
+                             [d["outer_version"], d["c_tokens"], d["c_steps"]]})
+        elif k == "submit":
+            ev = led.submit(DeltaEntry(str(op["island"]), op["base"], 0,
+                                       led.published[op["base"]], op["c_tokens"], op["c_steps"]))
+            out = {"kind": ev["kind"]}
+            if ev["kind"] == "delta_carried_over":
+                out["lag"] = ev["lag"]
+            if ev["kind"] == "delta_rejected":
+                out["reason"] = ev["reason"]
+            expected.append(out)
+        else:
+            base = led.outer_version
+            ev = led.try_advance(timed_out=op["timed_out"])
+            if ev is None:
+                expected.append({"kind": "no_step", "outer_version": led.outer_version})
+            else:
+                weights = sorted([*_parse_key(key, base), w] for key, w in ev["weights"].items())
+                expected.append({"kind": "outer_step", "base_version": ev["base_version"],
+                                 "arrived": ev["arrived"], "cap_arrived": ev["cap_arrived"],
+                                 "cap_total": ev["cap_total"], "weights": weights,
+                                 "absent": sorted(int(a) for a in ev["absent"])})
+    return {"params": PARAMS, "lease_s": LEASE_S, "ops": OPS, "expected": expected}
+
+
+def render(g: dict) -> str:
+    p = g["params"]
+    lines = [f"# generated by tests/test_rl_inter_island_rust_golden.py; do not edit",
+             f"params {p['quorum_theta']!r} {p['carry_gamma']!r} {p['q_min']} "
+             f"{p['max_carry_lag']} {g['lease_s']!r}"]
+    for op, e in zip(g["ops"], g["expected"]):
+        k = op["op"]
+        if k == "join":
+            lhs = f"join {op['island']} {op['capacity']!r} {op['now']!r}"
+            rhs = f"join {str(e['catch_up']).lower()} {e['base_version']}"
+        elif k == "leave":
+            lhs = f"leave {op['island']}"
+            rhs = "leave " + ("none" if e["dropped"] is None else " ".join(map(str, e["dropped"])))
+        elif k == "submit":
+            lhs = f"submit {op['island']} {op['base']} {op['c_tokens']} {op['c_steps']}"
+            rhs = e["kind"] + (f" {e['lag']}" if "lag" in e else "") + (
+                f" {e['reason']}" if "reason" in e else "")
+        else:
+            lhs = f"advance {int(op['timed_out'])}"
+            if e["kind"] == "no_step":
+                rhs = f"no_step {e['outer_version']}"
+            else:
+                w = ",".join(f"{i}:{b}:{x!r}" for i, b, x in e["weights"])
+                a = ",".join(map(str, e["absent"])) or "-"
+                rhs = (f"outer_step {e['base_version']} {e['arrived']} {e['cap_arrived']!r} "
+                       f"{e['cap_total']!r} {a} {w}")
+        lines.append(f"{lhs} => {rhs}")
+    return "\n".join(lines) + "\n"
+
+
+def test_fixture_is_current():
+    assert FIXTURE.read_text() == render(generate())
+
+
+if __name__ == "__main__" and "--write" in sys.argv:
+    FIXTURE.write_text(render(generate()))

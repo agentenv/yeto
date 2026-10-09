@@ -7,7 +7,7 @@
 1. 中立核心——`yeto/rl/engine/`（适配层除外）、`yeto/rl/rewards/`、`yeto/rl/harness/`、`yeto/rl/algos/`，以及暂时还放在 `yeto/rl/` 下的奖励/过滤/算法扩展/harness 文件（清单见测试中的 `CORE_FILES`）——不得 import：
    - 训练或推理框架：`miles`、`miles_plugins`、`megatron`、`sglang`、`verl`、`vllm`、`torch_npu`；
    - 后端适配层：`yeto.rl.engine.miles_adapter`、`yeto.rl.adapters.*`；
-   - 旧版 Miles 引擎与补丁模块：`yeto.rl.miles`、`yeto.rl.miles_overlay`、`yeto.rl.overlays`、`yeto.rl.learner`、`yeto.rl.miles_full_parameter*` 等；
+   - 旧版 Miles 引擎与补丁模块：`yeto.rl.adapters.miles.legacy.engine`、`yeto.rl.adapters.miles.overlay`、`yeto.rl.adapters.miles.overlays`、`yeto.rl.adapters.miles.island_entry`、`yeto.rl.adapters.miles.models.full_parameter*` 等；
    - 云库：`sky`、`modal`、`yeto.modal_runner`、`yeto.shape.providers`。
 2. 各后端适配层之间不得互相 import。
 3. 云层/启动层（`launcher.py`、`modal_runner.py`、`cli.py`、`stage_w_entry.py`、`yeto/shape/`、以后的 `yeto/cloud/`）不得 import 后端适配层。
@@ -27,3 +27,9 @@
 ## 标准样本
 
 去耦合各阶段合并前，`tests/test_decoupling_golden.py` 必须通过：典型配置下的 Miles 命令行、`AlgorithmSpec.sha256()`、`ExecutionProfile.contract_hash`、插件源码哈希、strict/decoupled 进度内容与假引擎 tape 片段与 `tests/golden/decoupling/` 逐字一致。哈希的有意变更记在 `openspec/changes/yeto-framework-decoupling/hash-migration.md`。
+
+## 阶段 4 之后（yeto-framework-decoupling，2026-10-08）
+
+- Miles 适配层在 `yeto/rl/adapters/miles/`（旧路径 `yeto/rl/engine/miles_adapter/` 与 `yeto/rl/miles.py`、`learner.py` 等留转发模块，导入得到同一对象）。
+- 核心、启动层、CLI 要用后端模块时，一律经 `yeto/rl/engine/backends.py` 的注册表按"角色"取（`backends.module("entry")` 等），不静态 import 适配层。当前后端：`--rl-backend`（启动器）或环境变量 `YETO_RL_BACKEND`（推理进程、codex 子进程），都没设时为 `miles`。
+- 推理进程里的策略令牌/本轮计数走 `yeto/rl/engine/rollout_meta.py`；动态采样过滤器用中立名，后端在 `binding` 角色里翻译并在启动前做三项绑定核对（design D6a）。

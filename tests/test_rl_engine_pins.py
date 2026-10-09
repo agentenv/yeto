@@ -139,7 +139,7 @@ def test_harness_ports_setup_fetches_forks_without_bundle():
 
 
 def _fake_git(monkeypatch, tmp_path, *, commit, origin, status=""):
-    miles = pytest.importorskip("yeto.rl.miles")
+    miles = pytest.importorskip("yeto.rl.adapters.miles.legacy.engine")
     responses = {
         ("rev-parse", "HEAD"): commit,
         ("rev-parse", "--abbrev-ref", "HEAD"): "HEAD",
@@ -150,9 +150,9 @@ def _fake_git(monkeypatch, tmp_path, *, commit, origin, status=""):
     def run(argv, **_kwargs):
         return types.SimpleNamespace(stdout=responses[tuple(argv[3:])] + "\n")
 
-    monkeypatch.setattr("yeto.rl.miles.subprocess.run", run)
+    monkeypatch.setattr("yeto.rl.adapters.miles.legacy.engine.subprocess.run", run)
     monkeypatch.setattr(
-        "yeto.rl.miles.importlib.import_module",
+        "yeto.rl.adapters.miles.legacy.engine.importlib.import_module",
         lambda _name: types.SimpleNamespace(__file__=tmp_path / "miles/__init__.py"),
     )
     return miles.verify_miles_revision, responses

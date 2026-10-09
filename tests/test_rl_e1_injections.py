@@ -64,7 +64,7 @@ def test_kill_happens_once_per_state_dir(tmp_path, monkeypatch):
 
 
 def test_stop_failure_injection_goes_through_the_fork_provider(monkeypatch):
-    from yeto.rl.engine.miles_adapter.rollout import INJECT_STOP_FAILURES_ENV, MilesRolloutPool
+    from yeto.rl.adapters.miles.rollout import INJECT_STOP_FAILURES_ENV, MilesRolloutPool
 
     calls = []
 
@@ -99,7 +99,7 @@ def test_stop_failure_injection_goes_through_the_fork_provider(monkeypatch):
 
 
 def _perturb_publisher(monkeypatch, eps):
-    from yeto.rl.engine.miles_adapter.publish import INJECT_LORA_PERTURB_ENV, MilesPublisher
+    from yeto.rl.adapters.miles.publish import INJECT_LORA_PERTURB_ENV, MilesPublisher
 
     if eps is None:
         monkeypatch.delenv(INJECT_LORA_PERTURB_ENV, raising=False)
@@ -165,7 +165,7 @@ def _perturb_publisher(monkeypatch, eps):
 
 
 def test_lora_perturbation_makes_check_weights_refuse_the_new_engines(monkeypatch):
-    from yeto.rl.engine.miles_adapter.publish import PublicationError
+    from yeto.rl.adapters.miles.publish import PublicationError
 
     pub, world = _perturb_publisher(monkeypatch, 0.01)
     with pytest.raises(PublicationError, match="read-back differs"):
@@ -189,7 +189,7 @@ def test_without_the_injection_the_same_publication_is_admitted(monkeypatch):
 def test_lora_perturber_restores_the_trainer_exactly():
     import torch
 
-    from yeto.rl.engine.miles_adapter.entry import lora_perturber
+    from yeto.rl.adapters.miles.entry import lora_perturber
     from yeto.rl.engine.fake import FakeEngine
 
     engine = FakeEngine(tensors={"base_model.model.layer.lora_A.weight": torch.ones(1, 2)})
@@ -211,11 +211,11 @@ def test_lora_perturbation_inside_the_running_loop_with_real_policy_state(monkey
     over an async actor, in one running loop, as the island does."""
     import torch
 
-    from yeto.rl.engine.miles_adapter.publish import PublicationError
-    from yeto.rl.engine.miles_adapter import LoopRunner
-    from yeto.rl.engine.miles_adapter.entry import lora_perturber
-    from yeto.rl.engine.miles_adapter.state import MilesPolicyState
-    from yeto.rl.engine.miles_adapter.state_plugin import APPLY_STATE, EXPORT_STATE
+    from yeto.rl.adapters.miles.publish import PublicationError
+    from yeto.rl.adapters.miles import LoopRunner
+    from yeto.rl.adapters.miles.entry import lora_perturber
+    from yeto.rl.adapters.miles.state import MilesPolicyState
+    from yeto.rl.adapters.miles.state_plugin import APPLY_STATE, EXPORT_STATE
 
     name = "base_model.model.layer.lora_A.weight"
     held = {"t": torch.ones(1, 2), "step": 0}
@@ -260,7 +260,7 @@ def test_stop_failure_injection_is_armed_inside_the_fork_actor_through_a_ray_han
     reachable from the learner (``_engine_provider`` answered with a remote-call function and the
     stop failed with AttributeError instead of the fork's incomplete path). The arming must run
     inside the actor via ``__ray_call__``."""
-    from yeto.rl.engine.miles_adapter.rollout import INJECT_STOP_FAILURES_ENV, MilesRolloutPool
+    from yeto.rl.adapters.miles.rollout import INJECT_STOP_FAILURES_ENV, MilesRolloutPool
 
     calls = []
 

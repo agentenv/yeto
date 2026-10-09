@@ -17,8 +17,8 @@ import torch
 
 from tests.rl_reshard_fakes import GBS, MBS, default_args, gathered, make_world, params, train_step
 from yeto.rl.engine.cut import AlgorithmIdentity, CutError, CutProgress, RestoreExpectation
-from yeto.rl.engine.miles_adapter import LoopRunner
-from yeto.rl.engine.miles_adapter.reshard import (
+from yeto.rl.adapters.miles import LoopRunner
+from yeto.rl.adapters.miles.reshard import (
     ReshardPlan,
     ReshardRefused,
     algorithm_problems,
@@ -30,7 +30,7 @@ from yeto.rl.engine.miles_adapter.reshard import (
     scheduled_partitions,
     step_problems,
 )
-from yeto.rl.engine.miles_adapter.trainer import CutContext, MilesTrainerGroup
+from yeto.rl.adapters.miles.trainer import CutContext, MilesTrainerGroup
 
 SPEC_SHA = "a" * 64
 ALGO = AlgorithmIdentity(SPEC_SHA)
@@ -260,7 +260,7 @@ def test_indep_dp_and_multimodal_are_refused_before_any_write():
 
 
 def test_batch_guard_refuses_what_the_fork_would_split_unscheduled():
-    from yeto.rl.engine.miles_adapter.reshard import batch_guard_problems
+    from yeto.rl.adapters.miles.reshard import batch_guard_problems
 
     plan = _plan(1, 2)
     ok = batch_guard_problems(plan, rank_configs=[FULL, FULL], rollout_indices=list(range(GBS)), steps=1)
@@ -276,7 +276,7 @@ def test_batch_guard_refuses_what_the_fork_would_split_unscheduled():
 
 
 def test_train_step_is_guarded_after_a_resharded_restore(tmp_path):
-    from yeto.rl.engine.miles_adapter.trainer import TrainStepError
+    from yeto.rl.adapters.miles.trainer import TrainStepError
 
     ranks = _trained(1)
     _trainer(ranks).save_cut(epoch=1, context=_context(tmp_path, "c"))
@@ -315,7 +315,7 @@ def test_batch_guard_is_dropped_when_the_trainer_goes_back_to_another_layout(tmp
 
 def test_restore_reports_missing_moment_keys():
     """GPU C1 diagnostic 2: a restore that leaves exp_avg/exp_avg_sq out must be refused."""
-    from yeto.rl.engine.miles_adapter.cut_plugin import _slice_check
+    from yeto.rl.adapters.miles.cut_plugin import _slice_check
 
     full = {"w": {"tensors": {"param": torch.zeros(2), "exp_avg": torch.zeros(2), "exp_avg_sq": torch.zeros(2)},
                   "scalars": {"step": torch.tensor(2.0)}}}

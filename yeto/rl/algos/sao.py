@@ -198,7 +198,7 @@ def sao_role_contract(spec: AlgorithmSpec, actor_steps_per_round: int) -> dict[s
 
 
 # Miles fork argv (sao_fork_argv) and flag rows:
-# yeto.rl.engine.miles_adapter.algo_flag_rows (decoupling 4.3).
+# yeto.rl.adapters.miles.algo_flag_rows (decoupling 4.3).
 
 
 # --------------------------------------------------------------------------

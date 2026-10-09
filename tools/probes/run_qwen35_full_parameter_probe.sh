@@ -134,6 +134,6 @@ ray job submit \
   --attention-softmax-in-fp32 \
   --attention-backend flash \
   --external-policy-sync-path \
-  yeto.rl.miles_full_parameter_probe.create_full_parameter_probe
+  yeto.rl.adapters.miles.models.full_parameter_probe.create_full_parameter_probe
 
 test -s "${YETO_FULL_PARAMETER_PROBE_EVIDENCE}"

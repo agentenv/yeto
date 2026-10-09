@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Protocol
 
-from yeto.rl.engine.miles_adapter import rollout_meta_hook
+from yeto.rl.engine import rollout_meta
 from yeto.rl.engine.tool_wait import _call as _board_call
 from yeto.rl.engine.tool_wait import _resolve as _board_resolve
 
@@ -175,7 +175,7 @@ def _board_kwcall(target: Any, method: str, *args: Any, **kwargs: Any) -> Any:
 def resolve_expected_policy_version(metadata: dict[str, Any]) -> str | None:
     """IR-3 target token: prompt metadata first, else the driver token in the sink."""
     try:
-        return rollout_meta_hook.expected_policy_version(SimpleNamespace(metadata=metadata))
+        return rollout_meta.expected_policy_version(SimpleNamespace(metadata=metadata))
     except Exception:  # noqa: BLE001 - no sink reachable == no token published
         return None
 

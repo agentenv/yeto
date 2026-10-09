@@ -10,8 +10,8 @@ import pytest
 import torch
 
 from tests.rl_cut_fakes import make_rank, params, train_step
-from yeto.rl.engine.miles_adapter import cut_plugin, state_plugin
-from yeto.rl.engine.miles_adapter.cut_plugin import (
+from yeto.rl.adapters.miles import cut_plugin, state_plugin
+from yeto.rl.adapters.miles.cut_plugin import (
     CutPluginError,
     config_problems,
     restore_cut_shard,
@@ -221,7 +221,7 @@ def test_refusal_is_returned_but_a_failure_after_writing_raises(tmp_path, monkey
 def test_side_effect_free_state_removes_entries_created_by_a_read():
     from collections import defaultdict
 
-    from yeto.rl.engine.miles_adapter.cut_plugin import side_effect_free_state
+    from yeto.rl.adapters.miles.cut_plugin import side_effect_free_state
 
     inner = SimpleNamespace(state=defaultdict(dict))
     inner.state["kept"] = {"exp_avg": 1}
@@ -238,7 +238,7 @@ def test_side_effect_free_state_never_swallows_errors():
     missing/extra keys) propagates unchanged; only empty entries created by the read go."""
     from collections import defaultdict
 
-    from yeto.rl.engine.miles_adapter.cut_plugin import side_effect_free_state
+    from yeto.rl.adapters.miles.cut_plugin import side_effect_free_state
 
     inner = SimpleNamespace(state=defaultdict(dict))
 

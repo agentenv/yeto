@@ -94,7 +94,7 @@ def test_default_contract_is_bit_identical(profile):
 
 
 def test_record_trained_groups_default_unchanged(monkeypatch):
-    from yeto.rl.engine.miles_adapter import rollout_meta_hook as hook
+    from yeto.rl.adapters.miles import rollout_meta_hook as hook
 
     monkeypatch.setattr("yeto.rl.algos.sample_filters.apply_sample_filters", lambda a, d: None)
     data = [[_sample()]]
@@ -147,7 +147,7 @@ def test_idempotent_only_sets_zero():
 
 
 def test_record_trained_groups_applies_policy(monkeypatch):
-    from yeto.rl.engine.miles_adapter import rollout_meta_hook as hook
+    from yeto.rl.adapters.miles import rollout_meta_hook as hook
 
     monkeypatch.setattr("yeto.rl.algos.sample_filters.apply_sample_filters", lambda a, d: None)
     monkeypatch.setattr(hook, "_load_miles_tokenizer", _loader)
@@ -183,7 +183,7 @@ def test_contract_records_opt_out_and_requires_markers():
 def test_hook_installed_for_both_placements(colocated):
     from tests.test_rl_miles_adapter_config import flag_value, make_config  # noqa: PLC0415
     from yeto.rl.engine.algorithm import AlgorithmSpec
-    from yeto.rl.engine.miles_adapter import config as mc
+    from yeto.rl.adapters.miles import config as mc
 
     cfg = make_config(colocated=colocated)
     if not colocated:

@@ -16,7 +16,7 @@ spec.loader.exec_module(tool)
 
 
 def test_pin_check_is_against_plan_v6(tmp_path):
-    init = tmp_path / "yeto" / "rl" / "__init__.py"
+    init = tmp_path / "yeto" / "rl" / "adapters" / "miles" / "pins.py"
     init.parent.mkdir(parents=True)
     init.write_text(f'MILES_NEXT_COMMIT = "{tool.MILES_COMMIT}"\nX = "{tool.IMAGE_DIGEST.split(":")[1]}"\n')
     assert tool.PLAN_VERSION == "plan-v6" and tool.check_pins(tmp_path) == []
@@ -57,7 +57,7 @@ def test_dry_run_writes_every_run_in_plan_order(tmp_path, monkeypatch):
 
 
 def test_harness_plan_is_valid_for_the_in_learner_harness():
-    from yeto.rl.engine.miles_adapter.e2_harness import plan_problems
+    from yeto.rl.adapters.miles.e2_harness import plan_problems
 
     for run in tool.plan_runs():
         if run.harness:

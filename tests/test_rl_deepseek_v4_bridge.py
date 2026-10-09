@@ -4,14 +4,14 @@ from types import SimpleNamespace
 
 import pytest
 
-import yeto.rl.deepseek_v4_bridge as bridge_module
-from yeto.rl.deepseek_v4_bridge import (
+import yeto.rl.adapters.miles.models.deepseek_v4.bridge as bridge_module
+from yeto.rl.adapters.miles.models.deepseek_v4.bridge import (
     _checkpoint_parameter_name,
     _compression_ratios,
     _normalized_config,
     _rope_scaling_contract,
 )
-from yeto.rl.deepseek_v4_expert_clone import (
+from yeto.rl.adapters.miles.models.deepseek_v4.expert_clone import (
     CLONES_PER_LAYER,
     NUM_LAYERS,
     TOPK,

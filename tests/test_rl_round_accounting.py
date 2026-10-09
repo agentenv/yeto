@@ -8,10 +8,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from yeto.rl.engine.miles_adapter import rollout_meta_hook as hook
-from yeto.rl.engine.miles_adapter import state_plugin
-from yeto.rl.engine.miles_adapter import trainer as tr
-from yeto.rl.engine.miles_adapter.rollout import handle_from_metadata
+from yeto.rl.adapters.miles import rollout_meta_hook as hook
+from yeto.rl.adapters.miles import state_plugin
+from yeto.rl.adapters.miles import trainer as tr
+from yeto.rl.adapters.miles.rollout import handle_from_metadata
 
 H = "a" * 64
 
@@ -56,7 +56,7 @@ def _group():
 def test_nonzero_advantages_are_attributed_to_their_own_round(tmp_path):
     """Review R2 lag: the dispatcher reports AFTER the all-samples hook; each round's
     handle must carry that round's count (24, 16, 24), never the previous one."""
-    from yeto.rl.engine.miles_adapter.rollout import DirMetadataSource
+    from yeto.rl.adapters.miles.rollout import DirMetadataSource
 
     source = DirMetadataSource(tmp_path)
     sink = source.sink_spec
@@ -84,7 +84,7 @@ def test_nonzero_advantages_are_attributed_to_their_own_round(tmp_path):
 
 
 def test_round_metadata_for_another_rollout_is_refused():
-    from yeto.rl.engine.miles_adapter.rollout import RolloutMetadataError, merge_round_metadata
+    from yeto.rl.adapters.miles.rollout import RolloutMetadataError, merge_round_metadata
 
     with pytest.raises(RolloutMetadataError, match="arrived with rollout 2"):
         merge_round_metadata({"rollout_id": 2}, [{"schema": hook.ROUND_META_SCHEMA,
@@ -170,7 +170,7 @@ def test_driver_reports_each_rounds_own_nonzero_advantages(tmp_path):
 
 
 def test_receipt_label_is_the_role_family_matching_the_layout():
-    from yeto.rl.engine.miles_adapter.entry import receipt_role_family
+    from yeto.rl.adapters.miles.entry import receipt_role_family
     from yeto.rl.local_learner import _ROLES_BY_ALGORITHM
 
     for estimator in ("grpo", "gspo", "reinforce_plus_plus", "reinforce_plus_plus_baseline"):
@@ -191,7 +191,7 @@ def test_receipt_label_is_the_role_family_matching_the_layout():
 def test_round_id_comes_from_the_policy_token_not_trajectory_keys(tmp_path):
     """Multi-segment agentic rollouts: Sample.rollout_id is a trajectory key."""
     from yeto.rl.core import policy_snapshot_token
-    from yeto.rl.engine.miles_adapter.rollout import DirMetadataSource
+    from yeto.rl.adapters.miles.rollout import DirMetadataSource
 
     source = DirMetadataSource(tmp_path)
     sink = source.sink_spec
@@ -248,7 +248,7 @@ def test_router_inflight_probe_and_driver_sampler(tmp_path):
     from yeto.rl.engine.driver import EventTape, IslandDriver
     from yeto.rl.engine.execution_profile import ExecutionProfile
     from yeto.rl.engine.fake import FakeEngine, fake_capabilities
-    from yeto.rl.engine.miles_adapter.rollout import MilesRolloutPool
+    from yeto.rl.adapters.miles.rollout import MilesRolloutPool
 
     pool = MilesRolloutPool(inference_controller=None, rollout_executor=None, metadata=None,
                             expected_policy=lambda: (0, H),
@@ -304,7 +304,7 @@ def test_load_sample_gateway_workers_fallback_and_diag(caplog):
     Fall back to its GET /workers; when nothing works, log a reasoned, rate-limited warning."""
     import logging
 
-    from yeto.rl.engine.miles_adapter.rollout import MilesRolloutPool
+    from yeto.rl.adapters.miles.rollout import MilesRolloutPool
 
     pool = MilesRolloutPool(inference_controller=None, rollout_executor=None, metadata=None,
                             expected_policy=lambda: (0, H),
@@ -323,7 +323,7 @@ def test_load_sample_gateway_workers_fallback_and_diag(caplog):
     def missing(url):
         raise OSError("404 Not Found")
 
-    with caplog.at_level(logging.WARNING, logger="yeto.rl.engine.miles_adapter.rollout"):
+    with caplog.at_level(logging.WARNING, logger="yeto.rl.adapters.miles.rollout"):
         assert pool.load_sample(http_get=missing) is None
         assert pool.load_sample(http_get=missing) is None  # same reason: rate-limited
     msgs = [r.getMessage() for r in caplog.records if "load_sample unavailable" in r.getMessage()]
@@ -331,7 +331,7 @@ def test_load_sample_gateway_workers_fallback_and_diag(caplog):
     assert "/worker_inflight failed" in msgs[0] and "/workers failed" in msgs[0]
     assert "use_miles_router=False" in msgs[0]
     caplog.clear()
-    with caplog.at_level(logging.WARNING, logger="yeto.rl.engine.miles_adapter.rollout"):
+    with caplog.at_level(logging.WARNING, logger="yeto.rl.adapters.miles.rollout"):
         assert MilesRolloutPool(inference_controller=None, rollout_executor=None, metadata=None,
                                 expected_policy=lambda: (0, H)).load_sample() is None
     assert any("router address unknown" in r.getMessage() for r in caplog.records)

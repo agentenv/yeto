@@ -58,7 +58,7 @@ def test_verda_island_runs_in_vm_docker(monkeypatch):
     assert "--entrypoint /bin/bash " + image + " -c " in task.run
     for m in ("sky_workdir", "yeto-output", "yeto-rl", ".cache/huggingface"):
         assert f'-v "$HOME/{m}:/root/{m}"' in task.run
-    assert "python3 -m yeto.rl.learner" in task.run and "ray start --head" in task.run  # original run, in run.sh
+    assert "python3 -m yeto.rl.adapters.miles.island_entry" in task.run and "ray start --head" in task.run  # original run, in run.sh
     assert "[yeto-island] in-VM docker setup done" in task.run
     assert task.run.index("<<'YETO_ISLAND_SETUP_EOF'") < task.run.index("YETO_ISLAND_SETUP_EOF\n", 40) < task.run.index("<<'YETO_ISLAND_RUN_EOF'")
     # the original setup (fork checkout) is in setup.sh
@@ -135,7 +135,7 @@ def test_island_pre_run_is_embedded_before_ray(monkeypatch, tmp_path):
     i_start = run.index(launcher.ISLAND_PRE_RUN_START)
     i_body = run.index("convert_qwen3_8_next.sh --variant 4layer")
     i_done = run.index(launcher.ISLAND_PRE_RUN_DONE)
-    assert i_cd < i_start < i_body < i_done < run.index("ray start --head") < run.index("-m yeto.rl.learner")
+    assert i_cd < i_start < i_body < i_done < run.index("ray start --head") < run.index("-m yeto.rl.adapters.miles.island_entry")
     assert launcher.ISLAND_PRE_RUN_FAILED in run and "exit 1" in run[i_body:i_done]
     assert run.index(launcher.ISLAND_PRE_RUN_START) > run.index("YETO_ISLAND_RUN_EOF")  # inside the in-VM heredoc
     # the island resources/image are unchanged by the flag

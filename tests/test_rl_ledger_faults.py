@@ -33,8 +33,8 @@ from yeto.rl.engine.driver import PublicationError
 from yeto.rl.engine.fake import FakeEngine
 from yeto.rl.engine.journal import read_journal
 from yeto.rl.engine.ledger import BatchLedger, LedgerError
-from yeto.rl.engine.miles_adapter import rollout_meta_hook as hook
-from yeto.rl.engine.miles_adapter.rollout import handle_from_metadata, policy_token
+from yeto.rl.adapters.miles import rollout_meta_hook as hook
+from yeto.rl.adapters.miles.rollout import handle_from_metadata, policy_token
 
 from test_rl_engine_driver import _strict_config, _strict_syncer
 from test_rl_reconfig_e1 import NAME, _setup

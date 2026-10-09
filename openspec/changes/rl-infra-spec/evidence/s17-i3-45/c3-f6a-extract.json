@@ -1,0 +1,117 @@
+{
+ "run": "s17-i3-c3-f6a",
+ "rc": "rc=4",
+ "deliver": [
+  "island0",
+  "write",
+  "confirm",
+  "done"
+ ],
+ "injection_lines": [
+  "[s17-i3-c3-f6a-l0-modal] [yeto] TEST INJECTION YETO_RL_TEST_KILL_LEARNER_AT=REBUILDING_TRAINER: killing the learner"
+ ],
+ "rebuilt_events": [],
+ "tape_reconfig_phases": [],
+ "journal_phases": [
+  [
+   "rb1",
+   "VALIDATING",
+   1791498797.2,
+   ""
+  ],
+  [
+   "rb1",
+   "WAIT_SAFE",
+   1791498797.2,
+   ""
+  ],
+  [
+   "rb1",
+   "REBUILDING_TRAINER",
+   1791498797.2,
+   ""
+  ],
+  [
+   null,
+   "RECOVERY_REQUIRED",
+   1791499090.0,
+   "learner restarted after release, before commit"
+  ],
+  [
+   "rb1",
+   "RECOVERY_REQUIRED",
+   1791499090.0,
+   "learner restarted after release, before commit"
+  ]
+ ],
+ "journal_source": "pulled",
+ "recovery_records": [
+  {
+   "cause": "other",
+   "config_epoch": 0,
+   "error": "learner restarted after release, before commit",
+   "fork_epoch": 0,
+   "kind": "phase",
+   "monotonic": 731.578774875,
+   "phase": "RECOVERY_REQUIRED",
+   "request_id": null,
+   "scope": "island",
+   "seq": 6,
+   "tx_id": "tx-0-cf5ecb1130c6-rb1",
+   "wall_time": 1791499090.005235
+  },
+  {
+   "cause": "other",
+   "config_epoch": 0,
+   "deadline_wall": 1791499697.2056494,
+   "error": "learner restarted after release, before commit",
+   "fork_epoch": 0,
+   "island_record_seq": 6,
+   "kind": "phase",
+   "monotonic": 731.579735533,
+   "phase": "RECOVERY_REQUIRED",
+   "recovery_deadline_wall": 1791500597.2056494,
+   "request_id": "rb1",
+   "scope": "request",
+   "seq": 7,
+   "tx_id": "tx-0-cf5ecb1130c6-rb1",
+   "wall_time": 1791499090.0061953
+  }
+ ],
+ "rounds_trained": [
+  [
+   0,
+   1,
+   2
+  ],
+  [
+   1,
+   2,
+   4
+  ],
+  [
+   2,
+   3,
+   6
+  ]
+ ],
+ "rounds_after_terminal": [],
+ "cursor_monotonic": true,
+ "ledger_kinds": {
+  "prepared": 3,
+  "filtered": 3,
+  "carried_over_report": 3,
+  "optimizer_applied": 3,
+  "outer_recorded": 3
+ },
+ "optimizer_applied_dups": {},
+ "consumed_dups": {},
+ "finalized": false,
+ "terminal": [
+  "rb1",
+  "RECOVERY_REQUIRED",
+  1791499090.0,
+  "learner restarted after release, before commit"
+ ],
+ "rebuilding_to_terminal_s": 292.8
+}

@@ -10,6 +10,14 @@
   "loss": "policy_loss",
   "schema": "yeto-rl-algorithm-spec-v1"
  },
+ "backend_identity": {
+  "device_family": "nvidia",
+  "engine": "miles",
+  "engine_commit": "8bc52237a1102306abd8f89a2ea2090aa2df6850",
+  "param_map_sha256": "36c37d691b6372ee86485cf0f7d4f8d5e185a6346b875aac33380518ee8f259a",
+  "schema": "yeto-backend-identity-v1",
+  "sha256": "9d5696a3d3b6e6d802115ef3deb970b5e4d9206d1751d71f9075a849d2909f8d"
+ },
  "execution_profile": {
   "contract_hash": "sha256:18dda066767289bca9563ba12c23e8f20206421b23a492431f0810e14adce84e",
   "profile": {
@@ -180,11 +188,11 @@
   "--rollout-max-response-len",
   "4096",
   "--rollout-sample-filter-path",
-  "yeto.rl.engine.miles_adapter.rollout_meta_hook.record_trained_groups",
+  "yeto.rl.adapters.miles.rollout_meta_hook.record_trained_groups",
   "--rollout-all-samples-process-path",
-  "yeto.rl.engine.miles_adapter.rollout_meta_hook.extract_rollout_metadata",
+  "yeto.rl.adapters.miles.rollout_meta_hook.extract_rollout_metadata",
   "--buffer-filter-path",
-  "yeto.rl.engine.miles_adapter.rollout_meta_hook.policy_buffer_filter",
+  "yeto.rl.adapters.miles.rollout_meta_hook.policy_buffer_filter",
   "--custom-rm-path",
   "yeto.rl.math_reward.reward_func",
   "--advantage-estimator",
@@ -343,7 +351,7 @@
   "--sglang-ep-size",
   "8"
  ],
- "miles_argv_sha256": "9dc4312965e48edde56fb8ead64c84aa37798862716a854daa55a52bfc682ec3",
+ "miles_argv_sha256": "8d056171747e96ed982042e21b6adbb4fed746aa560f34a47e57d980756086e9",
  "name": "fn_2x8",
  "placement": {
   "allow_cross_node_engine_tp": false,
@@ -362,19 +370,19 @@
  },
  "plugins": [
   {
-   "module_file": "yeto/rl/engine/miles_adapter/rollout_meta_hook.py",
-   "path": "yeto.rl.engine.miles_adapter.rollout_meta_hook.extract_rollout_metadata",
-   "source_sha256": "be53a60841ce6244fc85c5d114ef25dc7c06a94f74fcaa5291d74094ef0d87ef"
+   "module_file": "yeto/rl/adapters/miles/rollout_meta_hook.py",
+   "path": "yeto.rl.adapters.miles.rollout_meta_hook.extract_rollout_metadata",
+   "source_sha256": "af10161a148d3059148342896778fec5b915c90ed96258ccab1754f1805cda61"
   },
   {
-   "module_file": "yeto/rl/engine/miles_adapter/rollout_meta_hook.py",
-   "path": "yeto.rl.engine.miles_adapter.rollout_meta_hook.policy_buffer_filter",
-   "source_sha256": "be53a60841ce6244fc85c5d114ef25dc7c06a94f74fcaa5291d74094ef0d87ef"
+   "module_file": "yeto/rl/adapters/miles/rollout_meta_hook.py",
+   "path": "yeto.rl.adapters.miles.rollout_meta_hook.policy_buffer_filter",
+   "source_sha256": "af10161a148d3059148342896778fec5b915c90ed96258ccab1754f1805cda61"
   },
   {
-   "module_file": "yeto/rl/engine/miles_adapter/rollout_meta_hook.py",
-   "path": "yeto.rl.engine.miles_adapter.rollout_meta_hook.record_trained_groups",
-   "source_sha256": "be53a60841ce6244fc85c5d114ef25dc7c06a94f74fcaa5291d74094ef0d87ef"
+   "module_file": "yeto/rl/adapters/miles/rollout_meta_hook.py",
+   "path": "yeto.rl.adapters.miles.rollout_meta_hook.record_trained_groups",
+   "source_sha256": "af10161a148d3059148342896778fec5b915c90ed96258ccab1754f1805cda61"
   },
   {
    "module_file": "yeto/rl/math_reward.py",
@@ -382,11 +390,11 @@
    "source_sha256": "e06179ddc416d31e644823b0ca713f8cb408ac294382b34b9b9addb3fe983051"
   }
  ],
- "ports_runtime_fingerprint": "sha256:acbd4cda27942fb3c7f4f754e5f545be1e229b2c5d235ace47f1427829091c43",
+ "ports_runtime_fingerprint": "sha256:27d390509edd816c61e2893c404033fa0296bc1ae6c27ae819b477c8c9afb800",
  "runtime_attrs": {
   "yeto_rl_dynamic_sampling_max_replacements": null
  },
  "session_contract_hash": null,
- "session_contract_hash_note": "运行时由 LoRA 张量布局算出（yeto.protocol.layout_fingerprint），离线不可得",
+ "session_contract_hash_note": "运行时由 LoRA 张量布局算出（yeto.protocol.layout_fingerprint），阶段 5 起再与 backend_identity.sha256 绑定（yeto.rl.engine.backend_identity.session_contract_hash），离线不可得",
  "title": "Flash-Next 2×8 正式训练形状（fntrain.sh print 2x8）"
 }
