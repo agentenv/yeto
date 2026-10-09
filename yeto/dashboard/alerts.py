@@ -19,6 +19,9 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
     # FN 2x8 measured 10-15 min). Tasks 8.1.
     "startup_warn_s": 1200.0,
     "startup_severe_s": 1800.0,
+    # 8.4: one startup sub-step (Ray up / engines ready / weights loaded) taking
+    # longer than this while heartbeats still arrive (process alive, step stuck).
+    "startup_step_warn_s": 900.0,
     "missed_consecutive_warn": 2,
     "missed_consecutive_severe": 5,
     "quorum_recent_rounds": 7,
@@ -48,6 +51,17 @@ def _alert(sev: int, rule: str, title: str, detail: str, *, island: str | None =
             "island": island, "round": round, "metric": metric}
 
 
+# keep in sync with yeto.rl.engine.telemetry.STARTUP_STEPS (dashboard does not import the engine)
+STARTUP_STEPS = ("ray_connected", "engine_ready", "weights_loaded")
+
+
+def _next_startup_step(done: str | None) -> str:
+    if done is None or done not in STARTUP_STEPS:
+        return STARTUP_STEPS[0]
+    i = STARTUP_STEPS.index(done)
+    return STARTUP_STEPS[i + 1] if i + 1 < len(STARTUP_STEPS) else "rl_driver_start"
+
+
 def heartbeat(cards: list[dict], th: dict) -> list[dict]:
     out = []
     for c in cards:
@@ -55,6 +69,12 @@ def heartbeat(cards: list[dict], th: dict) -> list[dict]:
         if c["status"] in ("done", "stopped") or c.get("finalized") or age is None:
             continue
         if c.get("starting"):
+            step_age = c.get("startup_step_age_s")
+            if step_age is not None and step_age > th["startup_step_warn_s"] and age <= th["startup_warn_s"]:
+                pending = _next_startup_step(c.get("startup_step"))
+                out.append(_alert(1, "startup_step", f"岛 {c['id']} 启动子步骤过慢",
+                                  f"等待 {pending} 已 {step_age:.0f}s（上一步 {c.get('startup_step') or '开始'}；"
+                                  f"阈值 {th['startup_step_warn_s']:.0f}s）", island=c["id"]))
             warn, severe = th["startup_warn_s"], th["startup_severe_s"]
             if age > severe:
                 sev = 0

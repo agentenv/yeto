@@ -159,6 +159,9 @@ def _new_island(iid: str) -> dict:
         # rl-resume-from-checkpoint 4.3: one entry per resume (launch boundary), the
         # rounds each launch trained (rid -> [ts...]) and the cuts saved
         "resumes": [], "trained_ts": {}, "cuts": [],
+
+        # fleet-dashboard 8.4: startup sub-steps {step: {"seconds", "step_s", "ts"}}
+        "startup_steps": {}, "startup_step": None, "startup_step_ts": None,
     }
 
 
@@ -338,7 +341,16 @@ class Reducer:
             isl["driver_started"] = True
         if event == "rl_driver_phase":
             isl["phase"] = r.get("phase")
+        elif event == "rl_startup_step":
+            step = r.get("step")
+            if step is not None:
+                isl["startup_steps"][str(step)] = {"seconds": r.get("seconds"), "step_s": r.get("step_s"), "ts": ts}
+                isl["startup_step"] = str(step)
+                if ts is not None:
+                    isl["startup_step_ts"] = max(ts, isl["startup_step_ts"] or ts)
         elif event == "rl_heartbeat":
+            if r.get("phase") == "startup" and r.get("startup_step") and isl["startup_step"] is None:
+                isl["startup_step"] = r.get("startup_step") if r.get("startup_step") != "begin" else None
             isl["heartbeat_seen"] = True
             if ts is not None:
                 isl["last_heartbeat_ts"] = max(ts, isl["last_heartbeat_ts"] or ts)
@@ -766,6 +778,11 @@ class Reducer:
             "nodes": [isl["nodes"][k] for k in sorted(isl["nodes"], key=lambda x: int(x) if x.isdigit() else 0)],
             "last_event_age_s": _r(age), "heartbeat_age_s": _r(hb_age),
             "heartbeat_seen": isl["heartbeat_seen"], "round": isl["round"],
+            "startup_steps": {k: {"seconds": v["seconds"], "step_s": v["step_s"]}
+                              for k, v in isl["startup_steps"].items()},
+            "startup_step": isl["startup_step"],
+            "startup_step_age_s": _r(now - (isl["startup_step_ts"] or isl["first_ts"]))
+            if starting and (isl["startup_step_ts"] or isl["first_ts"]) is not None else None,
             "rollout_id": isl["rollout_id"], "policy_version": isl["policy_version"],
             "phase": isl["phase"], "staleness": isl["staleness"], "contribution": isl["contribution"],
             "gpu_util_pct": res.get("util_pct"), "mem_pct": res.get("mem_pct"),

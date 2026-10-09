@@ -42,6 +42,8 @@
 
 **D7 后端身份并列哈希。** 新增 `BackendIdentity{engine, engine_commit, device_family, param_map_sha256}` 的独立哈希，不并入旧哈希；Miles 下取值固定。岛握手时比较，不同即拒绝。与 rl-verl-backend D6 的"后端身份进训练契约哈希"对齐：rl-verl-backend 的契约哈希输入（`local_learner.py`、`sao_streaming_runtime.py:203,642`）改为引用此处的身份哈希，而不是各自拼。
 
+实施记录（阶段 5，2026-10-08 夜）：岛握手用的是 syncer HELLO 的会话契约——实现为 `sha256("yeto-rl-session-contract-v2\0" + 布局指纹 + 身份哈希)`，syncer 侧不用改（它只比较字节相等）。代价：与阶段 5 之前的代码、以及之前写下的 syncer 检查点不兼容（版本边界，同 D6）。Miles 的参数名映射是恒等映射，仍单独哈希，以后改映射即改身份。
+
 **D8 算法分层（按 RL-ALGO-LOCATION §4）。**
 - 第 1 步（阶段 3 内，零 GPU）：`reward_pipeline.grpo_default`、`seq_adv` 的 MaxRL/MAPO/GDPO、超长惩罚、超长过滤拆成纯函数；Miles 插件改薄包装；等价测试保持 `torch.equal`。
 - 第 2 步（阶段 3 内）：中立逐词元损失接口与参考实现（以 `tests/rl_loss_variant_reference.py` 为蓝本），只做 CPU 对照 Miles fork 的 `compute_policy_loss/cispo/sapo/gmpo` 与 TIS/IcePop/MIS。

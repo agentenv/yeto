@@ -400,7 +400,9 @@ class ElasticAvgSync:
 
             self.client = ElasticIslandClient(
                 ElasticClientConfig(self.config.syncer_addr, self.config.learner_id,
-                                    syncer_epoch=self.syncer_epoch),
+                                    syncer_epoch=self.syncer_epoch,
+                                    backend_identity_sha256=getattr(
+                                        self.config, "backend_identity_sha256", None)),
                 hmac_key_from_env(), on_event=self._client_event)
         return self.client
 

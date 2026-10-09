@@ -211,3 +211,81 @@ class ResourceSampler(_Periodic):
             peaks = {"peak_gpu_mem_bytes": self._peak_gpu, "peak_cpu_rss_bytes": self._peak_rss}
             self._peak_gpu = self._peak_rss = None
         return {k: v for k, v in peaks.items() if v is not None}
+
+
+# --- fleet-dashboard 8.4: startup-phase telemetry -------------------------------
+
+STARTUP_PHASE = "startup"
+STARTUP_STEP_EVENT = "rl_startup_step"
+# Sub-steps between process start and ``rl_driver_start`` (in launch order on
+# the ports path): Ray cluster formed, inference engines up, training models
+# (weights) loaded. Adapters may report a subset; names outside this tuple are
+# refused so the dashboard's per-step timers stay a closed set.
+STARTUP_STEPS = ("ray_connected", "engine_ready", "weights_loaded")
+
+
+class StartupTelemetry:
+    """Heartbeat + resource sampling from island start until the driver takes over.
+
+    ``with StartupTelemetry(emit, ...) as st: ...; st.step("ray_connected")``.
+    Heartbeats carry ``phase="startup"`` and ``startup_step`` (the last finished
+    sub-step, ``"begin"`` before the first). ``step(name)`` writes one
+    ``rl_startup_step`` with ``seconds`` since start and ``step_s`` since the
+    previous step. Leaving the block stops both threads; the driver then starts
+    its own (``IslandDriver._telemetry_threads``). Opt-in like the driver's:
+    with neither interval set nothing starts and ``step`` still records events
+    only when ``always_steps`` is true (default False: tape unchanged)."""
+
+    def __init__(self, emit: Emit, *, heartbeat_interval_s: float | None = None,
+                 resource_interval_s: float | None = None, always_steps: bool = False,
+                 clock: Callable[[], float] = time.monotonic,
+                 labels: Callable[[], Mapping[str, Any]] | None = None,
+                 nvml_loader: Callable[[], Any] = load_nvml, **thread_kw: Any) -> None:
+        self._emit = emit
+        self._clock = clock
+        self._labels = labels or (lambda: {})
+        self.heartbeat_interval_s = heartbeat_interval_s
+        self.resource_interval_s = resource_interval_s
+        self.enabled = bool(heartbeat_interval_s or resource_interval_s or always_steps)
+        self._nvml_loader = nvml_loader
+        self._thread_kw = thread_kw
+        self._threads: list[_Periodic] = []
+        self._started: float | None = None
+        self._prev: float | None = None
+        self.current = "begin"
+        self.steps: list[tuple[str, float]] = []
+
+    def _state(self) -> dict[str, Any]:
+        return {"phase": STARTUP_PHASE, "rollout_id": None, "policy_version": None,
+                "startup_step": self.current, **self._labels()}
+
+    def __enter__(self) -> "StartupTelemetry":
+        self._started = self._prev = self._clock()
+        if self.heartbeat_interval_s:
+            self._threads.append(HeartbeatThread(self._emit, self._state, interval_s=self.heartbeat_interval_s,
+                                                 clock=self._clock, **self._thread_kw).start())
+        if self.resource_interval_s:
+            sampler = ResourceSampler(self._emit, interval_s=self.resource_interval_s, clock=self._clock,
+                                      nvml_loader=self._nvml_loader,
+                                      labels=lambda: {"phase": STARTUP_PHASE, **self._labels()},
+                                      **self._thread_kw)
+            self._threads.append(sampler.start())
+        return self
+
+    def step(self, name: str, **fields: Any) -> None:
+        if name not in STARTUP_STEPS:
+            raise ValueError(f"unknown startup step {name!r}; known: {STARTUP_STEPS}")
+        now = self._clock()
+        started = self._started if self._started is not None else now
+        prev = self._prev if self._prev is not None else now
+        self.steps.append((name, now - started))
+        self.current = name
+        self._prev = now
+        if self.enabled:
+            self._emit(STARTUP_STEP_EVENT, step=name, seconds=round(now - started, 3),
+                       step_s=round(now - prev, 3), pid=os.getpid(), **self._labels(), **fields)
+
+    def __exit__(self, *exc: Any) -> None:
+        for thread in self._threads:
+            thread.stop()
+        self._threads.clear()

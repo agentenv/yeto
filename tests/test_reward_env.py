@@ -207,7 +207,14 @@ def test_prebaked_backend(tmp_path, fake_modal, prebake):
     ops = fake_modal["image"].ops
     assert ops[0] == ("from_registry", "org/img:1")
     if prebake:
-        assert ops[1][0] == "run_commands" and "pytest --version" in ops[1][1][0]
+        assert ops[1][0] == "run_commands" and len(ops[1][1]) == 1
+        run = ops[1][1][0]
+        assert "\n" not in run and run.startswith("echo ")  # one Dockerfile RUN line (S17 G3)
+        import base64
+
+        script = base64.b64decode(run.split()[1]).decode()
+        assert script == rt.prebake_script(rt.prebake_from_test_sh(UVX_TEST_SH, "org/img:1"))
+        assert "pytest --version" in script
         assert fake_modal["tags"]["yeto-prebake"] == rt.prebake_from_test_sh(UVX_TEST_SH, "org/img:1").digest()[:16]
     else:
         assert len(ops) == 1 and fake_modal["tags"]["yeto-prebake"] == "none"
@@ -266,6 +273,44 @@ def test_tb2_holdout_stratified_and_reproducible(tmp_path):
     assert len(excluded["items"]) == 30
     with pytest.raises(ValueError, match="quota"):
         rt.build_holdout(adapter, exclude=["e0", "e1", "e2"])
+
+
+def test_tb2_holdout_excludes_smoke6_by_default(tmp_path):
+    adapter = _tb2_pool(tmp_path)
+    for t in rt.SMOKE6_TASK_IDS:
+        make_task(tmp_path, t, difficulty="medium")
+    adapter = rt.Tb2Benchmark(tmp_path, version="tb2@test")
+    h = rt.build_holdout(adapter)
+    ids = set(bm.holdout_ids(h))
+    assert not ids & set(rt.SMOKE6_TASK_IDS) and len(ids) == 30
+    assert h["excluded"] == [{"task_id": t, "reason": rt.SMOKE6_REASON} for t in sorted(rt.SMOKE6_TASK_IDS)]
+    assert "smoke6" in h["rule"]
+    none = rt.build_holdout(adapter, exclude={})
+    assert "excluded" not in none and len(none["items"]) == 30
+
+
+def test_holdout_cli_exclusions(tmp_path):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools" / "reward_env"))
+    import holdout
+
+    tasks = tmp_path / "tasks"
+    tasks.mkdir()
+    _tb2_pool(tasks)
+    out = tmp_path / "out"
+    # built-in smoke-6 list, but the checkout lacks them -> fail closed
+    with pytest.raises(SystemExit, match="not in the TB2 checkout"):
+        holdout.main(["--tb2-tasks-dir", str(tasks), "--out-dir", str(out)])
+    assert holdout.main(["--tb2-tasks-dir", str(tasks), "--tb2-no-exclude", "--out-dir", str(out)]) == 0
+    assert "excluded" not in json.loads((out / "tb2-holdout.json").read_text())
+    jl = tmp_path / "ex.jsonl"
+    jl.write_text(json.dumps({"metadata": {"task_id": "m00"}}) + "\n\n")
+    assert holdout.main(["--tb2-tasks-dir", str(tasks), "--tb2-exclude-jsonl", str(jl),
+                         "--tb2-exclude-reason", "r", "--out-dir", str(out)]) == 0
+    h = json.loads((out / "tb2-holdout.json").read_text())
+    assert h["excluded"] == [{"task_id": "m00", "reason": "r"}] and "m00" not in bm.holdout_ids(h)
+    jl.write_text(json.dumps({"prompt": "x"}) + "\n")
+    with pytest.raises(SystemExit, match="metadata.task_id"):
+        holdout.main(["--tb2-tasks-dir", str(tasks), "--tb2-exclude-jsonl", str(jl), "--out-dir", str(out)])
 
 
 def test_rows_split_and_leak_check():

@@ -1,0 +1,120 @@
+{
+ "run": "s17-i3-c3-f3",
+ "rc": "rc=4",
+ "deliver": [
+  "island0",
+  "write",
+  "confirm",
+  "done"
+ ],
+ "injection_lines": [],
+ "rebuilt_events": [],
+ "tape_reconfig_phases": [],
+ "journal_phases": [
+  [
+   "rb1",
+   "VALIDATING",
+   1791497419.6,
+   ""
+  ],
+  [
+   "rb1",
+   "WAIT_SAFE",
+   1791497419.6,
+   ""
+  ],
+  [
+   "rb1",
+   "REBUILDING_TRAINER",
+   1791497419.6,
+   ""
+  ],
+  [
+   null,
+   "RECOVERY_REQUIRED",
+   1791497421.4,
+   "trainer rebuild failed: RayTaskError(WorkerUnreachableError)(WorkerUnreachableError(\"Worker died or is unreachable when calling 'run_plugin': ActorDiedError()\"))"
+  ],
+  [
+   "rb1",
+   "RECOVERY_REQUIRED",
+   1791497421.4,
+   "trainer rebuild failed: RayTaskError(WorkerUnreachableError)(WorkerUnreachableError(\"Worker died or is unreachable when calling 'run_plugin': ActorDiedError()\"))"
+  ]
+ ],
+ "journal_source": "snapshot s17-i3-c3-f3/es-snapshots/1791497438-tail.tgz",
+ "recovery_records": [
+  {
+   "cause": "other",
+   "config_epoch": 0,
+   "error": "trainer rebuild failed: RayTaskError(WorkerUnreachableError)(WorkerUnreachableError(\"Worker died or is unreachable when calling 'run_plugin': ActorDiedError()\"))",
+   "fork_epoch": 0,
+   "kind": "phase",
+   "monotonic": 551.64913473,
+   "phase": "RECOVERY_REQUIRED",
+   "request_id": null,
+   "scope": "island",
+   "seq": 6,
+   "tx_id": "tx-0-cf5ecb1130c6-rb1",
+   "wall_time": 1791497421.3877795
+  },
+  {
+   "cause": "other",
+   "config_epoch": 0,
+   "deadline_wall": 1791498319.5555334,
+   "error": "trainer rebuild failed: RayTaskError(WorkerUnreachableError)(WorkerUnreachableError(\"Worker died or is unreachable when calling 'run_plugin': ActorDiedError()\"))",
+   "fork_epoch": 0,
+   "island_record_seq": 6,
+   "kind": "phase",
+   "monotonic": 551.64975588,
+   "phase": "RECOVERY_REQUIRED",
+   "recovery_deadline_wall": 1791499219.5555334,
+   "request_id": "rb1",
+   "scope": "request",
+   "seq": 7,
+   "tx_id": "tx-0-cf5ecb1130c6-rb1",
+   "wall_time": 1791497421.3884006
+  }
+ ],
+ "rounds_trained": [
+  [
+   0,
+   1,
+   2
+  ],
+  [
+   1,
+   2,
+   4
+  ],
+  [
+   2,
+   3,
+   6
+  ],
+  [
+   3,
+   4,
+   8
+  ]
+ ],
+ "rounds_after_terminal": [],
+ "cursor_monotonic": true,
+ "ledger_kinds": {
+  "prepared": 4,
+  "filtered": 4,
+  "carried_over_report": 4,
+  "optimizer_applied": 4,
+  "outer_recorded": 4
+ },
+ "optimizer_applied_dups": {},
+ "consumed_dups": {},
+ "finalized": false,
+ "terminal": [
+  "rb1",
+  "RECOVERY_REQUIRED",
+  1791497421.4,
+  "trainer rebuild failed: RayTaskError(WorkerUnreachableError)(WorkerUnreachableError(\"Worker died or is unreachable when calling 'run_plugin': ActorDiedError()\"))"
+ ],
+ "rebuilding_to_terminal_s": 1.8
+}

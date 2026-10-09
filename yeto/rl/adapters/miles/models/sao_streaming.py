@@ -259,6 +259,8 @@ def sao_role_stream_session_contract_hash(
         "component": asdict(config.component),
         "parameter_layout_hash": layout_hash,
         "training_contract_hash": config.training_contract_hash,
+        # decoupling 6.2 (design D7): SAO runs on the legacy Miles engine
+        "backend_identity_sha256": _legacy_identity_sha256(),
         "syncer_profile_hash": config.syncer_profile_hash,
         "profile": {
             "learner_generations": [
@@ -1715,3 +1717,9 @@ def create_miles_sao_streaming_sync(args) -> MilesSaoStreamingPolicySync:
     if not isinstance(config, MilesSaoStreamingConfig):
         raise TypeError("Miles SAO streaming configuration is missing")
     return MilesSaoStreamingPolicySync(args, config)
+
+
+def _legacy_identity_sha256() -> str:
+    from yeto.rl.adapters.miles.identity import backend_identity
+
+    return backend_identity("legacy").sha256()

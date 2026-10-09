@@ -1942,6 +1942,13 @@ def _parse_miles_args(argv: list[str]):
         sys.argv = previous
 
 
+def _backend_identity_sha256(args) -> str:
+    """Decoupling 6.2: this island's backend identity hash (bound into the syncer session)."""
+    from yeto.rl.adapters.miles.identity import backend_identity
+
+    return backend_identity(getattr(args, "rl_engine", "ports") or "ports").sha256()
+
+
 def _syncer_address(value: str) -> tuple[str, int]:
     host, separator, port = value.rpartition(":")
     if not separator or not host:
@@ -2611,6 +2618,7 @@ def run_miles(
                 canonical_layout_hash=layout_hash,
                 wan_streams=args.wan_streams,
                 learner_budget_steps=miles_args.yeto_rl_learner_budget_steps,
+                backend_identity_sha256=_backend_identity_sha256(args),
             )
         else:
             miles_args.yeto_rl_bridge_config = BridgeConfig(
@@ -2628,6 +2636,7 @@ def run_miles(
                 event_tape=args.event_tape,
                 audit_dir=args.audit_dir,
                 send_initial_params=not getattr(args, "eval_only", False),
+                backend_identity_sha256=_backend_identity_sha256(args),
             )
             if getattr(args, "rl_island_scheduling", "legacy") == "elastic":
                 # rl-inter-island-scheduling 0.15 (legacy sets nothing)
