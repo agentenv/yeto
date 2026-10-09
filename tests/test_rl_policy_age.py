@@ -103,7 +103,7 @@ def test_profile_limit_needs_the_bounded_staleness_contract():
         "name", "execution_mode", "outer_protocol", "algorithm_contract", "max_policy_age",
         "groups_per_batch", "samples_per_group", "optimizer_steps_per_round",
         "max_inflight_batches", "ready_buffer_groups", "allowed_overlap", "publish_rule",
-        "algorithm_spec_sha256", "schema"}
+        "algorithm_spec_sha256", "lr_schedule_sha256", "schema"}
 
 
 def _g(gid, version, versions=None, digest="h"):

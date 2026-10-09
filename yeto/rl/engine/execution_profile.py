@@ -175,6 +175,9 @@ class ExecutionProfile:
     # the run's ``AlgorithmSpec`` (``AlgorithmSpec.sha256()``, 64 hex). None =
     # unbound profile (planning only); the driver refuses to run one.
     algorithm_spec_sha256: str | None = None
+    # S17 N17: engine-neutral LR schedule hash (backend_identity.lr_schedule_sha256);
+    # part of the contract identity. None = schedule not declared.
+    lr_schedule_sha256: str | None = None
     extra: Mapping[str, Any] = field(default_factory=dict, compare=False)
 
     def __post_init__(self) -> None:

@@ -429,14 +429,16 @@ class ElasticAvgSync:
 
     def _client(self):
         if self.client is None:
+            from yeto.rl.engine.backend_identity import island_contract_sha256
             from yeto.rl.elastic_client import (ElasticClientConfig, ElasticIslandClient,
                                                 hmac_key_from_env)
 
             self.client = ElasticIslandClient(
                 ElasticClientConfig(self.config.syncer_addr, self.config.learner_id,
                                     syncer_epoch=self.syncer_epoch,
-                                    backend_identity_sha256=getattr(
-                                        self.config, "backend_identity_sha256", None)),
+                                    backend_identity_sha256=island_contract_sha256(
+                                        getattr(self.config, "backend_identity_sha256", None),
+                                        getattr(self.config, "lr_schedule_sha256", None))),
                 hmac_key_from_env(), on_event=self._client_event)
         return self.client
 

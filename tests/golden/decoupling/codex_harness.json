@@ -13,19 +13,20 @@
  "backend_identity": {
   "device_family": "nvidia",
   "engine": "miles",
-  "engine_commit": "8bc52237a1102306abd8f89a2ea2090aa2df6850",
+  "engine_commit": "efbbc63ea0e8c6dcbc200ad5df5bc56badfce7bf",
   "param_map_sha256": "36c37d691b6372ee86485cf0f7d4f8d5e185a6346b875aac33380518ee8f259a",
   "schema": "yeto-backend-identity-v1",
-  "sha256": "9d5696a3d3b6e6d802115ef3deb970b5e4d9206d1751d71f9075a849d2909f8d"
+  "sha256": "d4981350fc891319162fee22be130d6b306bc18a177a7728a2e67f54575bbade"
  },
  "execution_profile": {
-  "contract_hash": "sha256:27bb768f7462a3ff3b660d9ba9cf00477c16a840f2c8d9c00e259cec01ced533",
+  "contract_hash": "sha256:67aee42a1a530e9b32695039266e1cef5393816354f3dd9363a6467a31823d43",
   "profile": {
    "algorithm_contract": "on-policy",
    "algorithm_spec_sha256": "27df1133c924e7a337e90246c7e1e30699017f461e9f35b1dd165a0263e65bea",
    "allowed_overlap": [],
    "execution_mode": "partitioned-serial",
    "groups_per_batch": 4,
+   "lr_schedule_sha256": "1a5872e05b262db8c1b8fd48b5b7249b41e479181097e724ae6200ed122d0e99",
    "max_inflight_batches": 1,
    "max_policy_age": 0,
    "name": "miles-lora-partitioned-serial",
@@ -262,10 +263,10 @@
   {
    "module_file": "yeto/rl/harness/codex/codex_openenv_subprocess_agent_function.py",
    "path": "yeto.rl.harness.codex.codex_openenv_subprocess_agent_function.run",
-   "source_sha256": "326680fe569c33936899ae045aaccda49f8fd030cc4d9f7e539d7fb60ef12b96"
+   "source_sha256": "fbb48c5c09bd1ca1c8a91f528c563ce8549dd9fc3ab15fe04ce49f686c0884cc"
   }
  ],
- "ports_runtime_fingerprint": "sha256:1a2bad065d370d87e5ead84afa2dd76205ccd15c6cab7b4006476d931560fed4",
+ "ports_runtime_fingerprint": "sha256:f40d1115ab661f09325cbb1c6456ec4b0be3dea0461fc378e34d7bd94a7d738a",
  "runtime_attrs": {
   "yeto_rl_dynamic_sampling_max_replacements": null
  },

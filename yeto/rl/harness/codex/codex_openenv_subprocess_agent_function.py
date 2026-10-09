@@ -300,6 +300,32 @@ def task_prompt(metadata: dict[str, Any], prompt: Any, lease: Any) -> str:
     )
 
 
+# S17 N17 (over-sampling A/B): in-flight worker tasks of this rollout process.
+# Miles calls ``<agent module>.abort(args)`` (``call_agent_abort_hook``) once
+# enough groups are collected; without it the Codex loops keep issuing fresh
+# turns after SGLang's abort_all and the rollout waits for every surplus group.
+_ACTIVE_WORKERS: dict[str, tuple["asyncio.Task[Any]", float]] = {}
+_ABORTED_IDS: set[str] = set()
+ABORTED_STATUS = "aborted_surplus"
+
+
+async def abort(args: Any = None) -> int:
+    """Cancel every in-flight Codex worker of this process (lease and worker
+    teardown run in ``run``'s ``finally``). Returns how many were cancelled and
+    logs one ``rl_codex_abort`` line with each trajectory's elapsed seconds."""
+    now = time.monotonic()
+    victims = [(tid, task, now - t0) for tid, (task, t0) in list(_ACTIVE_WORKERS.items())
+               if not task.done()]
+    for tid, task, _age in victims:
+        _ABORTED_IDS.add(tid)
+        task.cancel()
+    if victims:
+        print("YETO_CODEX_ABORT " + json.dumps({
+            "event": "rl_codex_abort", "cancelled": len(victims),
+            "elapsed_s": sorted(round(a, 2) for _t, _k, a in victims)}), flush=True)
+    return len(victims)
+
+
 async def run(
     base_url: str,
     prompt: Any,
@@ -361,11 +387,18 @@ async def run(
         except Exception as exc:  # noqa: BLE001 - session-server failures are infrastructure
             return {**adapter.infrastructure_metadata(f"segment sessions: {type(exc).__name__}: {exc}", episode_id=episode_id), **fields}
         try:
+            worker = asyncio.ensure_future(
+                _drive_worker(job, trajectory_id, _tool_wait_board, getattr(lease, "worker_env", None)))
+            _ACTIVE_WORKERS[trajectory_id] = (worker, time.monotonic())
             try:
-                untrusted = await asyncio.wait_for(
-                    _drive_worker(job, trajectory_id, _tool_wait_board, getattr(lease, "worker_env", None)),
-                    timeout=lease.deadline_seconds,
-                )
+                untrusted = await asyncio.wait_for(worker, timeout=lease.deadline_seconds)
+            except asyncio.CancelledError:
+                if trajectory_id not in _ABORTED_IDS:
+                    raise  # the rollout itself was cancelled, not abort()
+                # abort(): surplus trajectory of an over-sampled rollout; Miles
+                # discards it (no partial rollout). Infrastructure, never a reward.
+                handed_off = False
+                return {**adapter.infrastructure_metadata(ABORTED_STATUS, episode_id=episode_id), **fields}
             except asyncio.TimeoutError:
                 untrusted = {"status": "timeout", "metrics": {"timed_out": 1}, "episode_id": episode_id}
             except adapter.harness.CodexHarnessError as exc:
@@ -381,6 +414,8 @@ async def run(
             handed_off = True
             return {**signed, **fields, **tito, **segments}
         finally:
+            _ACTIVE_WORKERS.pop(trajectory_id, None)
+            _ABORTED_IDS.discard(trajectory_id)
             # Worker crash (any non-harness exception), cancellation or a
             # finish_trusted error: the metadata never reaches
             # codex_openenv_generate, so delete the pre-created sessions here.

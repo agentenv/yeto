@@ -130,6 +130,10 @@ class RebuildRefused(RuntimeError):
     cut could not be saved): the transaction is CANCELLED, training goes on."""
 
 
+class _RebuildStuck(Exception):
+    """REBUILDING_TRAINER outlived deadline + recovery budget (4.5)."""
+
+
 @dataclass(frozen=True)
 class Timeouts:
     """``T_*`` of design D4 (seconds). Configuration values, set from measured P99."""
@@ -1517,8 +1521,15 @@ class IslandController:
             self._finish(tx, CANCELLED, error=str(exc))
             return CANCELLED
         try:
-            result = dict(self.trainer_rebuilder(driver, epoch=epochs.config_epoch, cut_id=cut_id)
-                          or {})
+            result = dict(self._bounded_rebuild(tx, driver, epochs.config_epoch, cut_id) or {})
+        except _RebuildStuck as exc:
+            # 4.5: REBUILDING_TRAINER is bounded by deadline + recovery budget.
+            # The stuck worker thread is abandoned (daemon); trainer state is
+            # unknown, so this is the RECOVERY_REQUIRED path, never a silent wait.
+            self._enter_recovery(tx.tx_id, cause="rebuild_deadline",
+                                 error=f"trainer rebuild exceeded its deadline: {exc}")
+            self._tx = None
+            raise RecoveryRequired(self.recovery_required) from exc
         except (RebuildRefused, RebuildNotStarted) as exc:
             # review F3: every refusal raised before the trainer is touched
             self._finish(tx, CANCELLED, error=f"trainer rebuild refused: {exc}")
@@ -1533,6 +1544,30 @@ class IslandController:
             result["late"] = True
         self._finish(tx, SUCCEEDED, rebuild=result, cut_id=cut_id)
         return SUCCEEDED
+
+    def _bounded_rebuild(self, tx: _Tx, driver: Any, epoch: int, cut_id: str) -> Any:
+        """Run the trainer rebuilder, but never longer than the transaction deadline
+        plus ``timeouts.recovery`` (late-but-finished results stay accepted and are
+        marked ``late``). Past that bound :class:`_RebuildStuck` is raised."""
+        box: dict[str, Any] = {}
+
+        def work() -> None:
+            try:
+                box["result"] = self.trainer_rebuilder(driver, epoch=epoch, cut_id=cut_id)
+            except BaseException as exc:  # noqa: BLE001 - re-raised in the caller thread
+                box["error"] = exc
+
+        worker = threading.Thread(target=work, name=f"rebuild-{cut_id}", daemon=True)
+        worker.start()
+        while worker.is_alive():
+            left = self._remaining(tx, recovery=True)
+            if left <= 0:
+                raise _RebuildStuck(f"still running {self.timeouts.recovery:.0f}s after the "
+                                    f"transaction deadline (cut {cut_id})")
+            worker.join(timeout=min(max(left, 0.01), 0.5))
+        if "error" in box:
+            raise box["error"]
+        return box.get("result")
 
     def cancel(self, request_id: str) -> str:
         """``cancelled`` / ``recovery_started`` / ``already_committed`` / ``unknown`` (D4)."""
