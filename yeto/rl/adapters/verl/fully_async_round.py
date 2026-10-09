@@ -59,6 +59,7 @@ FULLY_ASYNC_ASSERTED_KEYS = (
     "rollout.n_gpus_per_node",
     "trainer.n_gpus_per_node",
     "data.gen_batch_size",
+    "actor_rollout_ref.hybrid_engine",
 )
 
 
@@ -89,6 +90,11 @@ def fully_async_run_overrides(sync_overrides: Sequence[str], limit: int, *, grou
         f"rollout.total_rollout_steps={total_rollout_steps(limit, groups_per_round=groups_per_round, rounds=rounds)}",
         f"trainer.n_gpus_per_node={trainer_gpus}",
         "actor_rollout_ref.rollout.checkpoint_engine.backend=nccl",
+        # FullyAsyncTrainer/FullyAsyncRollouter assert not hybrid_engine
+        # (fork acad9875, fully_async_trainer.py:76); the sync path never sets
+        # this key, so without this override the config default True kills the
+        # island at startup (s19-verl64b-dbg1-20261009a, exit 1 after 86 s).
+        "actor_rollout_ref.hybrid_engine=False",
     ]
     return out
 
