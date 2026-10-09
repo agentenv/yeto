@@ -2339,6 +2339,12 @@ def _prepare_rl_args(
         raise ValueError(
             "RL --over-sampling-batch-size must be at least --rollout-batch-size"
         )
+    # agentic-rollout-utilization 6.2: a backend without over-sample cut-off
+    # refuses it before launch instead of silently ignoring it.
+    over_sampling_check = getattr(
+        _rl_backend_module(args, "run_config_rules"), "check_over_sampling", None)
+    if callable(over_sampling_check):
+        over_sampling_check(args.rollout_batch_size, args.over_sampling_batch_size)
     _rl_miles_function(args.custom_generate_function_path)
     custom_agent = getattr(args, "custom_agent_function_path", None)
     _rl_miles_function(custom_agent, "--custom-agent-function-path")

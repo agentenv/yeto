@@ -14,7 +14,8 @@ def test_phase_clock_splits_generation_and_tool_and_sums_to_wall():
     clock.enter_tool()   # 6.0: generation 1.0
     clock.exit_tool()    # 6.5: tool 0.5
     out = clock.finish()  # 9.0: generation 2.5
-    assert out == {"worker_seconds": 9.0, "turn_generation_seconds": [2.0, 1.0, 2.5],
+    assert out == {"worker_seconds": 9.0, "generation_seconds": 5.5, "tool_seconds": 3.5,
+                   "turn_generation_seconds": [2.0, 1.0, 2.5],
                    "turn_tool_seconds": [3.0, 0.5]}
     totals = phase_totals({**out, "evaluate_time": 4.0})
     assert totals == {"generation_seconds": 5.5, "tool_seconds": 3.5, "judge_seconds": 4.0}
