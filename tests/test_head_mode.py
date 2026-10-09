@@ -252,7 +252,9 @@ def test_rl_head_forwards_cybergym_secret_without_serializing_it(
     (_, head_task), = fake_sky["launches"]
     (_, job_task), = fake_sky["execs"]
     assert head_task.envs is None
-    assert job_task.envs["CYBERGYM_API_KEY"] == "test-secret"
+    # secret-handling-hardening: a sky secret, not a plain env.
+    assert "CYBERGYM_API_KEY" not in job_task.envs
+    assert job_task.secrets["CYBERGYM_API_KEY"] == "test-secret"
     assert job_task.envs["CYBERGYM_REWARD_SCHEME"] == "shaped_v1"
     assert job_task.envs["CYBERGYM_REWARD_VIEW"] == "train"
     assert "test-secret" not in job_task.run

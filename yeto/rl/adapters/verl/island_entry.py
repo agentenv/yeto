@@ -315,4 +315,7 @@ def _override_value(overrides, key):
 
 
 if __name__ == "__main__":
+    from yeto.island_credential_guard import check_island_credentials
+
+    check_island_credentials()  # secret-handling-hardening D4
     sys.exit(main())

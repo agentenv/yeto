@@ -141,10 +141,21 @@ struct Args {
     /// elastic: largest base lag still carried over; larger is rejected.
     #[arg(long, default_value_t = elastic::DEFAULT_MAX_CARRY_LAG)]
     max_carry_lag: u32,
-    /// elastic: HMAC-SHA256 key for the elastic message types; falls back
-    /// to the YETO_ISLAND_HMAC_KEY environment variable.
+    /// HMAC-SHA256 island key; falls back to the YETO_ISLAND_HMAC_KEY
+    /// environment variable. elastic: signs the elastic message types.
+    /// legacy: every HELLO must carry an HMAC under this key.
     #[arg(long)]
     island_hmac_key: Option<String>,
+    /// legacy only: run without island authentication (no HMAC key). Only
+    /// for local tests and benchmarks; also enabled by
+    /// YETO_SYNCER_ALLOW_UNAUTHENTICATED=1. Never set by the launcher's RL path.
+    #[arg(long, default_value_t = false)]
+    allow_unauthenticated_islands: bool,
+    /// Island contract (64 lowercase hex chars) pinned by the head's config:
+    /// legacy HELLO session contracts and elastic JOIN identities must match
+    /// it, so the first island to connect no longer decides the contract.
+    #[arg(long)]
+    expected_island_contract: Option<String>,
     /// elastic: membership lease in seconds (no heartbeat -> removed).
     #[arg(long, default_value_t = 30.0)]
     island_lease_s: f64,
@@ -225,6 +236,21 @@ fn main() -> anyhow::Result<()> {
     {
         anyhow::bail!("elastic mode requires --island-hmac-key or YETO_ISLAND_HMAC_KEY");
     }
+    if island_hmac_key.is_none() {
+        let allowed = args.allow_unauthenticated_islands
+            || std::env::var("YETO_SYNCER_ALLOW_UNAUTHENTICATED").as_deref() == Ok("1");
+        if !allowed {
+            anyhow::bail!(
+                "legacy mode requires an island HMAC key (--island-hmac-key or \
+                 YETO_ISLAND_HMAC_KEY); pass --allow-unauthenticated-islands only for local tests"
+            );
+        }
+    }
+    let expected_island_contract = args
+        .expected_island_contract
+        .as_deref()
+        .map(parse_hex32)
+        .transpose()?;
     let cfg = server::Config {
         port: args.port,
         learners: args.learners,
@@ -255,6 +281,7 @@ fn main() -> anyhow::Result<()> {
         require_profile_binding: args.require_profile_binding,
         island_scheduling,
         island_hmac_key,
+        expected_island_contract,
         island_lease_s: args.island_lease_s,
         syncer_epoch: args.syncer_epoch,
         elastic_final_grace_s: args.final_grace_s,
@@ -263,6 +290,18 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()?
         .block_on(server::run(cfg))
+}
+
+fn parse_hex32(text: &str) -> anyhow::Result<[u8; 32]> {
+    let ok = text.len() == 64 && text.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    if !ok {
+        anyhow::bail!("--expected-island-contract must be 64 lowercase hex chars");
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&text[2 * i..2 * i + 2], 16)?;
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

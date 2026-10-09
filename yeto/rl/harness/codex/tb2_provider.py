@@ -405,6 +405,24 @@ class ModalSandbox:
             return False
 
 
+SANDBOX_MODAL_TOKEN_ID_ENV = "YETO_SANDBOX_MODAL_TOKEN_ID"
+SANDBOX_MODAL_TOKEN_SECRET_ENV = "YETO_SANDBOX_MODAL_TOKEN_SECRET"
+
+
+def sandbox_modal_client(environ=None) -> Any:
+    """secret-handling-hardening: a Modal client built from the sandbox-only
+    token (YETO_SANDBOX_MODAL_TOKEN_*), or None when it is not set (then
+    Modal's default credentials apply, e.g. on a developer machine)."""
+    environ = os.environ if environ is None else environ
+    token_id = environ.get(SANDBOX_MODAL_TOKEN_ID_ENV)
+    token_secret = environ.get(SANDBOX_MODAL_TOKEN_SECRET_ENV)
+    if not (token_id and token_secret):
+        return None
+    from modal import Client
+
+    return Client.from_credentials(token_id, token_secret)
+
+
 class ModalSandboxBackend:
     """Modal Sandbox from the task's official image. All ``modal`` imports are lazy."""
 
@@ -421,14 +439,23 @@ class ModalSandboxBackend:
         self.idle_timeout_s = int(idle_timeout_s)
         self.run_id = run_id or os.environ.get("OPENENV_RUN_ID") or ""
         self._app: Any = None
+        self._client: Any = None
         self._lock = threading.Lock()
 
+    def _client_kwargs(self) -> dict[str, Any]:
+        """``{"client": c}`` for the sandbox-only token, ``{}`` otherwise."""
+        with self._lock:
+            if self._client is None:
+                self._client = sandbox_modal_client() or False
+            return {"client": self._client} if self._client else {}
+
     def _get_app(self) -> Any:
+        kwargs = self._client_kwargs()
         with self._lock:
             if self._app is None:
                 from modal import App
 
-                self._app = App.lookup(self.app_name, create_if_missing=True)
+                self._app = App.lookup(self.app_name, create_if_missing=True, **kwargs)
             return self._app
 
     def create(self, task: Tb2Task, trajectory_id: str) -> ModalSandbox:
@@ -448,6 +475,7 @@ class ModalSandboxBackend:
             memory=int(task.memory_mb),
             workdir=task.workdir,
             tags=tags,
+            **self._client_kwargs(),
         )
         return ModalSandbox(sandbox, task.workdir)
 

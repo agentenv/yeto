@@ -29,6 +29,34 @@ def pytest_configure(config):
 import pytest as _pytest
 
 
+import os as _os
+
+# secret-handling-hardening: the legacy syncer refuses to start without an
+# island HMAC key. Unit tests spawn it without one on 127.0.0.1; the explicit
+# opt-out is inherited by every syncer subprocess.
+_os.environ.setdefault("YETO_SYNCER_ALLOW_UNAUTHENTICATED", "1")
+
+
+_ORIGINAL_ISLAND_HMAC_KEY = _os.environ.get("YETO_ISLAND_HMAC_KEY")
+
+
+def _reset_island_hmac_key():
+    if _ORIGINAL_ISLAND_HMAC_KEY is None:
+        _os.environ.pop("YETO_ISLAND_HMAC_KEY", None)
+    else:
+        _os.environ["YETO_ISLAND_HMAC_KEY"] = _ORIGINAL_ISLAND_HMAC_KEY
+
+
+@_pytest.fixture(autouse=True)
+def _island_hmac_key_does_not_leak():
+    """launcher.island_hmac_secret may generate a legacy key into os.environ
+    (also from module-scoped fixtures); reset it around every test so no
+    syncer subprocess of another test inherits it."""
+    _reset_island_hmac_key()
+    yield
+    _reset_island_hmac_key()
+
+
 @_pytest.fixture(autouse=True)
 def _no_teardown_diagnostics(monkeypatch):
     """launcher.teardown_island pulls logs over ssh/sky before a teardown;

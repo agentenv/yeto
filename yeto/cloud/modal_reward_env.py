@@ -65,6 +65,7 @@ class PrebakedModalSandboxBackend(tb2.ModalSandboxBackend):
             "sleep", "infinity", app=self._get_app(), image=modal_image(plan, prebake=self.prebake),
             timeout=self.ttl_s, idle_timeout=self.idle_timeout_s, cpu=float(task.cpus),
             memory=int(task.memory_mb), workdir=task.workdir, tags=tags,
+            **self._client_kwargs(),
         )
         return tb2.ModalSandbox(sandbox, task.workdir)
 

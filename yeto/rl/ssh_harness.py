@@ -2788,6 +2788,9 @@ def _syncer_argv(plan: dict[str, Any]) -> list[str]:
         ("--checkpoint-every", 1),
         ("--resume", None),
         ("--event-tape", "$RUN/state/events.jsonl"),
+        # secret-handling-hardening: the direct SSH harness does not ship the
+        # island HMAC key yet (known gap, design.md); the opt-out is explicit.
+        ("--allow-unauthenticated-islands", None),
     )
 
 

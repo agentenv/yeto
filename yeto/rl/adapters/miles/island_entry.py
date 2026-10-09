@@ -3049,6 +3049,9 @@ def _rejoin_exhausted(error: BaseException | None) -> bool:
 
 if __name__ == "__main__":
     try:
+        from yeto.island_credential_guard import check_island_credentials
+
+        check_island_credentials()  # secret-handling-hardening D4
         main()
     except BaseException as error:  # noqa: BLE001
         if _rejoin_exhausted(error):

@@ -48,6 +48,9 @@ pub struct ElasticServerConfig {
     pub checkpoint_path: Option<PathBuf>,
     pub checkpoint_every: u64,
     pub resume: bool,
+    /// secret-handling-hardening: backend identity pinned by the head's
+    /// config. None keeps "first accepted JOIN pins it".
+    pub expected_backend_identity: Option<[u8; 32]>,
 }
 
 /// v2 (s17-elastic-identity) adds the pinned backend identity; v1
@@ -396,7 +399,7 @@ impl Shared {
                     ensure!(
                         pinned == backend_identity,
                         "backend identity mismatch, JOIN refused: island {island_id} declares {} \
-                         but this elastic session is pinned to {} by its first JOIN; islands with a \
+                         but this elastic session is pinned to {} (head config or first JOIN); islands with a \
                          different training backend (e.g. Miles vs verl), engine commit, device \
                          family or parameter-name map cannot be merged",
                         hex32(backend_identity),
@@ -569,7 +572,7 @@ pub async fn run(listener: TcpListener, cfg: ElasticServerConfig) -> Result<(u64
     };
     let shared = Arc::new(Mutex::new(Shared {
         coord: ElasticCoordinator::new(cfg.params, cfg.lease_s, cfg.syncer_epoch)?,
-        backend_identity: None,
+        backend_identity: cfg.expected_backend_identity,
         flushed: 0,
         round_started: Instant::now(),
         tape,
@@ -594,6 +597,16 @@ pub async fn run(listener: TcpListener, cfg: ElasticServerConfig) -> Result<(u64
             .with_context(|| format!("read elastic checkpoint {}", path.display()))?;
         let mut g = shared.lock().unwrap();
         g.restore(&bytes, cfg.lease_s, 0.0)?;
+        if let Some(pinned) = cfg.expected_backend_identity {
+            match g.backend_identity {
+                Some(saved) if saved != pinned => bail!(
+                    "elastic checkpoint pins backend identity {} but the head config pins {}",
+                    hex32(&saved),
+                    hex32(&pinned)
+                ),
+                _ => g.backend_identity = Some(pinned),
+            }
+        }
         g.publish_hash();
         // P9: every restart is a new coordinator incarnation.
         let epoch = (g.coord.syncer_epoch + 1).max(cfg.syncer_epoch);
@@ -792,6 +805,7 @@ mod tests {
                 checkpoint_path: None,
                 checkpoint_every: 0,
                 resume: false,
+                expected_backend_identity: None,
             },
         ));
         let (mut a, mut b, mut c) = (
@@ -886,6 +900,7 @@ mod tests {
                 checkpoint_path: None,
                 checkpoint_every: 0,
                 resume: false,
+                expected_backend_identity: None,
             },
         ));
         let mut a = Island::connect(port, 5, 3).await;
@@ -961,6 +976,7 @@ mod tests {
                 checkpoint_path: None,
                 checkpoint_every: 0,
                 resume: false,
+                expected_backend_identity: None,
             },
         ));
         let (mut a, mut b, mut c) = (
@@ -1040,6 +1056,7 @@ mod tests {
             checkpoint_path: Some(ckpt.clone()),
             checkpoint_every: 1,
             resume,
+            expected_backend_identity: None,
         };
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -1110,6 +1127,7 @@ mod tests {
                 checkpoint_path: None,
                 checkpoint_every: 0,
                 resume: false,
+                expected_backend_identity: None,
             },
         ));
         let mut a = Island::connect(port, 1, 0).await;
@@ -1189,6 +1207,7 @@ mod tests {
                 checkpoint_path: None,
                 checkpoint_every: 0,
                 resume: false,
+                expected_backend_identity: None,
             },
         ));
         let (mut a, mut b) = (Island::connect(port, 1, 0).await, Island::connect(port, 2, 0).await);
@@ -1265,6 +1284,7 @@ mod tests {
             checkpoint_path: Some(ckpt.clone()),
             checkpoint_every: 1,
             resume,
+            expected_backend_identity: None,
         };
         let expect_refused = |t: u8, p: &[u8]| {
             assert_eq!(t, MSG_ERROR);

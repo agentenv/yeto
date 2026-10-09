@@ -183,7 +183,8 @@ def test_sky_ports_task_logs_in_via_task_secrets(monkeypatch, login):
     args = _cli()
     _prepare_rl_args(args)
     task = _island_task(args, monkeypatch)
-    assert task.secrets == LOGIN
+    # secret-handling-hardening: RL islands also carry the island HMAC key.
+    assert {k: v for k, v in task.secrets.items() if k != "YETO_ISLAND_HMAC_KEY"} == LOGIN
     assert not hasattr(task.resources, "_docker_login_config")
     assert not set(LOGIN) & set(task.envs)
     # SkyPilot exports secrets into setup/run: both scripts drop them first
@@ -198,7 +199,7 @@ def test_no_login_means_no_docker_login(monkeypatch, no_login, engine):
     args = _cli(("--rl-engine", engine))
     _prepare_rl_args(args)
     task = _island_task(args, monkeypatch)
-    assert not hasattr(task, "secrets")
+    assert not any(k.startswith("SKYPILOT_DOCKER") for k in getattr(task, "secrets", None) or {})
     assert not hasattr(task.resources, "_docker_login_config")
 
 
@@ -525,7 +526,7 @@ def test_registry_login_for_defaults_to_none_for_public_image(monkeypatch, no_lo
         assert args.rl_image_private is False
         assert launcher.registry_login_for(args, {}) is None
         task = _island_task(args, monkeypatch)
-        assert not hasattr(task, "secrets")
+        assert not any(k.startswith("SKYPILOT_DOCKER") for k in getattr(task, "secrets", None) or {})
         assert "unset SKYPILOT_DOCKER" not in (task.setup or "")
 
 
@@ -579,7 +580,8 @@ def test_rl_image_private_from_docker_config_reaches_sky_secrets_and_modal(monke
     args = _cli(("--rl-image-private",))
     _prepare_rl_args(args)
     task = _island_task(args, monkeypatch)
-    assert task.secrets == LOGIN
+    # secret-handling-hardening: RL islands also carry the island HMAC key.
+    assert {k: v for k, v in task.secrets.items() if k != "YETO_ISLAND_HMAC_KEY"} == LOGIN
     assert "not-a-real-token" not in (task.setup or "") + (task.run or "")
     assert task.setup.startswith("unset SKYPILOT_DOCKER_USERNAME")
     from yeto.gpu_spec import parse_gpu_spec

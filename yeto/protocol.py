@@ -150,6 +150,29 @@ def read_frame(
     return msg_type, _read_exact(sock, length)
 
 
+HELLO_MAC_DOMAIN = b"yeto-hello-mac-v1\0"
+ISLAND_HMAC_KEY_ENV = "YETO_ISLAND_HMAC_KEY"
+
+
+def island_hmac_key_from_env(environ=None) -> bytes | None:
+    """The island HMAC key (secret-handling-hardening), or None when unset."""
+    import os
+
+    value = (os.environ if environ is None else environ).get(ISLAND_HMAC_KEY_ENV, "")
+    return value.encode() if value else None
+
+
+def seal_hello(body: bytes, key: bytes | None) -> bytes:
+    """Append HMAC-SHA256(key, HELLO_MAC_DOMAIN || body); no-op without a key.
+    The legacy syncer with a key refuses a HELLO without this trailer."""
+    if not key:
+        return body
+    import hmac
+    import hashlib
+
+    return body + hmac.new(key, HELLO_MAC_DOMAIN + body, hashlib.sha256).digest()
+
+
 def encode_hello(
     learner_id: int,
     dtype: int,
@@ -246,6 +269,8 @@ SESSION_REJECT_PREFIXES = (
     ("session mismatch", "layout_hash_mismatch"),
     ("HELLO syncer semantic profile", "syncer_profile_mismatch"),
     ("HELLO is missing the required syncer semantic profile", "syncer_profile_mismatch"),
+    # secret-handling-hardening: wrong or missing island HMAC key.
+    ("HELLO authentication failed", "island_auth_failed"),
 )
 
 
@@ -427,6 +452,7 @@ class SyncerClient:
         finalization_timeout: float = FINALIZATION_TIMEOUT,
         session_contract_hash: bytes | None = None,
         syncer_profile_hash: bytes | None = None,
+        hmac_key: bytes | None = None,
     ):
         if not 0 <= learner_id <= 0xFFFF_FFFF:
             raise ValueError(f"learner_id must fit u32, got {learner_id}")
@@ -452,6 +478,9 @@ class SyncerClient:
         self.num_streams = num_streams
         self.session_contract_hash = session_contract_hash
         self.syncer_profile_hash = syncer_profile_hash
+        # secret-handling-hardening: HELLO carries an HMAC when the island has
+        # the key (the launcher ships it as a secret env).
+        self.hmac_key = hmac_key if hmac_key is not None else island_hmac_key_from_env()
         self.connect_timeout = connect_timeout
         self.max_reconnects = max_reconnects
         self.finalization_timeout = finalization_timeout
@@ -563,14 +592,17 @@ class SyncerClient:
             write_frame(
                 control,
                 MSG_HELLO,
-                encode_hello(
-                    self.learner_id,
-                    self.dtype,
-                    self.layout,
-                    self.num_streams,
-                    connection_generation,
-                    self.session_contract_hash,
-                    self.syncer_profile_hash,
+                seal_hello(
+                    encode_hello(
+                        self.learner_id,
+                        self.dtype,
+                        self.layout,
+                        self.num_streams,
+                        connection_generation,
+                        self.session_contract_hash,
+                        self.syncer_profile_hash,
+                    ),
+                    self.hmac_key,
                 ),
             )
             socks.append(control)
