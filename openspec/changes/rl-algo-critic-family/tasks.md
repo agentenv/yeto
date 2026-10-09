@@ -1,5 +1,7 @@
 # Tasks
 
+> **算法优先级（用户 2026-10-09 定）**：SAO 与 CompactionRL 最先做。执行顺序：① SAO 解释方差 ≤0 查因（CPU，读 progress.md "S14 SAO G1"），再跑 8.4 的 G1 复跑与 G3；② CompactionRL 先选定 agent 环境与数据集（需用户确认），再跑 9.4 G1、9.5 G3；③ 然后才是 PPO 4.5、VAPO 7.3。6.3（pin 与镜像）是 ①② 的前置，与 rl-algo-supplement 2.5 合并为一次。这个顺序取代 S14 Q4 中"critic G3 排在算法阶段一之后"对 SAO/CompactionRL 的部分；PPO/VAPO 仍按 Q4。所有上卡归入第三批合并上卡（`infra-drafts/S19-BATCH3-PLAN.md`），仍需用户批预算。
+
 执行约定：
 - 测试命令 `/tmp/yeto-venv/bin/python -m pytest -q`；upstream 参数解析在 `/home/michael/work/miles-next-venv` 中运行。
 - fork 改动只提交到 `michaellchung/miles` `yeto/ports`，且需用户同意；绝不向 radixark/miles 或 sgl-project/sglang 提 PR。commit 与 push 需用户确认。
