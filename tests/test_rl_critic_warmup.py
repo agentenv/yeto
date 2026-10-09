@@ -8,7 +8,7 @@ import pytest
 
 from yeto.rl import critic_warmup as cw
 from yeto.rl.engine.algorithm import AlgorithmSpec, AlgorithmSpecError
-from yeto.rl.engine.miles_adapter import config as mc
+from yeto.rl.adapters.miles import config as mc
 from yeto.rl.engine.run_config import CriticRunConfig
 
 from test_rl_miles_adapter_config import make_config
@@ -247,7 +247,7 @@ def test_stage_w_entry_pins_island_ray_before_running_train_py(tmp_path, monkeyp
 
 
 def test_connect_island_ray_forwards_megatron_pythonpath_to_actors():
-    from yeto.rl.engine.miles_adapter.entry import connect_island_ray
+    from yeto.rl.adapters.miles.entry import connect_island_ray
 
     seen = {}
 

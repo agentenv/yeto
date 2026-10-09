@@ -8,7 +8,7 @@ describe the moved files. ``LEGACY_SOURCE_SHA256`` is kept for comparison.
 """
 
 AGENT_SHA256 = "fef958c32d27af124827b17369bb82557e96946c4b6f9b74c67f084a533f7c81"
-GENERATE_SHA256 = "1c79b0e678b8681b5bd6221b5a4bbc6adbe7a1413b688e248cb930eb3e456cca"
+GENERATE_SHA256 = "1df1ded9c6c81404a6101e1821aefc3129d207a3150241980306d6494ee4a2be"  # adapters/miles/harness_glue/codex_generate.py (decoupling 5.7; was 1c79b0e6…)
 
 LEGACY_SOURCE_SHA256 = {
     "agent.py": "0f76c7fbd81135bc5b02cab2488629aaff1bb58dc59eae9228ca317583d90c26",
@@ -30,4 +30,4 @@ OPENENV_BACKEND_PROFILE = "qwen35_08b"
 # (checked by ``codex_openenv_agent_function.profile_identity``).  The tool
 # surface pins (``*_SHA256`` identity env) are profile-independent, so adding a
 # profile here needs no image rebuild.
-OPENENV_BACKEND_PROFILES = ("qwen35_08b", "qwen38_next", "qwen38_next_4layer")
+OPENENV_BACKEND_PROFILES = ("qwen35_08b", "qwen35", "qwen38_next", "qwen38_next_4layer")  # qwen35 (4B): S17 M1

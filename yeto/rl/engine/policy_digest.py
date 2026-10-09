@@ -11,7 +11,7 @@ digests the driver used to compute itself:
 
 * ``policy_tensor_hash`` -- byte-identical to :func:`yeto.rl.core.policy_tensor_hash`;
 * ``payload_hash`` / ``payload_bytes`` -- byte-identical to
-  :func:`yeto.rl.engine.miles_adapter.publish.payload_digest`.
+  :func:`yeto.rl.adapters.miles.publish.payload_digest`.
 
 The two SHA-256 streams run in two threads (``hashlib`` releases the GIL on
 large buffers), so the wall time is about one pass.  The definitions of the

@@ -158,7 +158,7 @@ class LazyStateDistOptBackend(TorchCutBackend):
     def export_optimizer(self, optimizer, named):
         from collections import defaultdict
 
-        from yeto.rl.engine.miles_adapter.cut_plugin import side_effect_free_state
+        from yeto.rl.adapters.miles.cut_plugin import side_effect_free_state
 
         if not isinstance(optimizer.state, defaultdict):
             optimizer.state = defaultdict(dict, optimizer.state)

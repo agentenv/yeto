@@ -20,8 +20,8 @@ from test_rl_miles_adapter_state import (  # noqa: E402
 from yeto.rl.core import canonical_layout_hash, canonical_specs, canonical_state, policy_tensor_hash  # noqa: E402
 from yeto.rl.engine import bridges  # noqa: E402
 from yeto.rl.engine.driver import IslandDriver  # noqa: E402
-from yeto.rl.engine.miles_adapter import state_plugin as sp  # noqa: E402
-from yeto.rl.engine.miles_adapter.publish import (  # noqa: E402
+from yeto.rl.adapters.miles import state_plugin as sp  # noqa: E402
+from yeto.rl.adapters.miles.publish import (  # noqa: E402
     MilesPublisher,
     PublicationError,
     _payload_of,
@@ -152,7 +152,7 @@ def test_apply_and_restore_paths_bump_the_version():
         resident.check_holds()
     import inspect
 
-    from yeto.rl.engine.miles_adapter import cut_plugin
+    from yeto.rl.adapters.miles import cut_plugin
 
     for fn in (cut_plugin.restore_cut_shard, cut_plugin.restore_resharded_shard, sp.apply_state):
         assert "bump_weights_version()" in inspect.getsource(fn)

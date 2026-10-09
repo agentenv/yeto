@@ -15,8 +15,8 @@ from yeto.rl.engine.algorithm import (
     LossSpec,
     resolve_ports_algorithm,
 )
-from yeto.rl.engine.miles_adapter import config as mc
-from yeto.rl.engine.miles_adapter.entry import selection_event
+from yeto.rl.adapters.miles import config as mc
+from yeto.rl.adapters.miles.entry import selection_event
 from test_rl_engine_selection import _learner_argv
 from test_rl_miles_adapter_config import make_config
 
@@ -729,7 +729,7 @@ def test_no_sync_modal_log_rebuilds_event_tape(monkeypatch, tmp_path, capsys):
                                     "--rl-image", "docker:ghcr.io/x/y@sha256:" + "a" * 64),
                           gpu="modal:1xa100")
     args.keep = False
-    assert launcher.run(args) == 2
+    assert launcher.run(args) == 0  # S17 N16: island succeeded, no --output -> 0 (was 2)
     [local] = list((tmp_path / "runs" / args.cluster_prefix / "events").glob("*.jsonl"))
     assert local.read_text() == island_tape.read_text()  # line for line
     # and --rl-event-tape export reads it

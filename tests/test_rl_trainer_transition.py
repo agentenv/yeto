@@ -15,11 +15,11 @@ import torch
 from tests.rl_reshard_fakes import GBS, MBS, default_args, gathered, make_world, train_step
 from yeto.rl.elastic_benchmark.capabilities import ResourceConfig, attestation_from_dict
 from yeto.rl.engine.cut import AlgorithmIdentity, CutProgress, RestoreExpectation
-from yeto.rl.engine.miles_adapter import LoopRunner
-from yeto.rl.engine.miles_adapter.reshard import reshard_problems
-from yeto.rl.engine.miles_adapter.trainer import CutContext, MilesTrainerGroup
-from yeto.rl.engine.miles_adapter.trainer_rebuild import SwappableActor
-from yeto.rl.engine.miles_adapter.trainer_resize import MilesTrainerOps
+from yeto.rl.adapters.miles import LoopRunner
+from yeto.rl.adapters.miles.reshard import reshard_problems
+from yeto.rl.adapters.miles.trainer import CutContext, MilesTrainerGroup
+from yeto.rl.adapters.miles.trainer_rebuild import SwappableActor
+from yeto.rl.adapters.miles.trainer_resize import MilesTrainerOps
 from yeto.rl.engine.trainer_transition import (
     READY_TO_COMMIT,
     TrainerEdgeRejected,
@@ -332,7 +332,7 @@ def test_restore_source_needs_no_prior_save_cut_in_this_process(tmp_path):
 
 
 def test_slice_pg_info_signature_is_checked():
-    from yeto.rl.engine.miles_adapter.trainer_rebuild import check_slice_pg_info
+    from yeto.rl.adapters.miles.trainer_rebuild import check_slice_pg_info
 
     def _slice_pg_info(info, indices):
         return info

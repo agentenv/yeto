@@ -265,7 +265,7 @@ def test_mixed_2x2_pp2_trainer_spans_nodes(monkeypatch, tmp_path):
 
 
 def test_mixed_2x2_bundle_map_round_trips_into_the_learner_placement(monkeypatch, tmp_path):
-    from yeto.rl.engine.miles_adapter.placement import PlacementRequest
+    from yeto.rl.adapters.miles.placement import PlacementRequest
 
     args, spec, _ = _elastic_task(monkeypatch, tmp_path, "nebius:2x2xl40s",
                                   _GPU_DIR / "resources-2x2.json", "T2R1S1", rollout=1, standby=1)

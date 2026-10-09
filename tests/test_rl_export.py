@@ -19,7 +19,7 @@ from yeto.rl.core import (
     policy_tensor_hash,
     tensors_from_flat,
 )
-from yeto.rl.deepseek_v4_expert_clone import (
+from yeto.rl.adapters.miles.models.deepseek_v4.expert_clone import (
     NUM_LAYERS,
     ORIGINAL_EXPERTS,
     ExpertCloneContract,

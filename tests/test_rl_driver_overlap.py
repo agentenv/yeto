@@ -137,8 +137,8 @@ def test_ports_entry_opts_into_eval_overlap_only_when_asked():
     from types import SimpleNamespace
 
     from yeto.rl.engine.execution_profile import ProfileError
-    from yeto.rl.engine.miles_adapter import entry
-    from yeto.rl.engine.miles_adapter.placement import PlacementRequest
+    from yeto.rl.adapters.miles import entry
+    from yeto.rl.adapters.miles.placement import PlacementRequest
 
     spec = AlgorithmSpec()
     args = SimpleNamespace(rollout_batch_size=4, n_samples_per_prompt=8, num_steps_per_rollout=1)

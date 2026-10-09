@@ -137,7 +137,7 @@ while [ ! -f $R/rc.txt ]; do
     [ $C = m5 ] && { k=0; for n in $CL $CL-worker1; do timeout 60 \$S \$n \"echo $B5 | base64 -d | python3 - \$k\" >> $R/pulled/m5ranks.jsonl 2>/dev/null; k=\$((k+1)); done; }
     for n in $CL \$( [ $NODES = 2 ] && echo $CL-worker1 ); do
       [ -s $R/pulled/gpu-\$n.txt ] || timeout 60 \$S \$n 'hostname; nvidia-smi --query-gpu=index,uuid,name,driver_version --format=csv,noheader' > $R/pulled/gpu-\$n.txt 2>/dev/null
-      timeout 60 \$S \$n 'date -u +%FT%TZ; nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory --format=csv,noheader; ps -eo pid,args --no-headers | grep -E \"ray::|sglang|yeto.rl.learner|raylet\" | grep -v grep | cut -c1-140' >> $R/pulled/apps-\$n.txt 2>/dev/null
+      timeout 60 \$S \$n 'date -u +%FT%TZ; nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory --format=csv,noheader; ps -eo pid,args --no-headers | grep -E \"ray::|sglang|yeto.rl.adapters.miles.island_entry|raylet\" | grep -v grep | cut -c1-140' >> $R/pulled/apps-\$n.txt 2>/dev/null
     done
   fi
   sleep 10

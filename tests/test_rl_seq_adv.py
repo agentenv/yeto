@@ -32,8 +32,8 @@ from yeto.rl.engine.bridges import LocalOnlySync  # noqa: E402
 from yeto.rl.engine.capabilities import CapabilityMismatch  # noqa: E402
 from yeto.rl.engine.driver import EventTape, IslandDriver, TrainStepMetrics  # noqa: E402
 from yeto.rl.engine.fake import FakeEngine, fake_capabilities  # noqa: E402
-from yeto.rl.engine.miles_adapter import algorithm_flags as af  # noqa: E402
-from yeto.rl.engine.miles_adapter.entry import miles_capabilities  # noqa: E402
+from yeto.rl.adapters.miles import algorithm_flags as af  # noqa: E402
+from yeto.rl.adapters.miles.entry import miles_capabilities  # noqa: E402
 
 load_extensions()
 NAME = "base_model.model.layer.lora_A.weight"
@@ -556,7 +556,7 @@ def test_fake_driver_gdpo_expected_zero_grad_fails(tmp_path, count):
 
 
 def test_transforms_report_round_counter_for_the_metadata_hook(tmp_path, monkeypatch):
-    from yeto.rl.engine.miles_adapter import rollout_meta_hook as hook
+    from yeto.rl.adapters.miles import rollout_meta_hook as hook
 
     sink = f"dir:{tmp_path}"
     monkeypatch.setenv(hook.META_SINK_ENV, sink)
@@ -590,7 +590,7 @@ def test_no_sink_no_round_record():
 def test_trainer_reads_gspo_clipfrac_through_seq_adv():
     """2.2: the adapter (INFRA R1) fills masked_fraction from per-step pg_clipfrac."""
 
-    from yeto.rl.engine.miles_adapter import trainer
+    from yeto.rl.adapters.miles import trainer
 
     assert "gspo" in trainer.CLIPFRAC_MASKED_ESTIMATORS
     assert trainer.clipfrac_masked_fraction([{"pg_clipfrac": 1.0}, {"pg_clipfrac": 1.0}]) == 1.0

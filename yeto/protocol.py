@@ -239,6 +239,26 @@ class ProtocolError(RuntimeError):
     """The peer rejected this client as wire- or session-incompatible."""
 
 
+# MSG_ERROR prefixes the syncer uses when it refuses one HELLO whose contract
+# differs from the running session (server.rs admit_session / profile check).
+# The syncer and the admitted islands keep running; only this island stops.
+SESSION_REJECT_PREFIXES = (
+    ("session mismatch", "layout_hash_mismatch"),
+    ("HELLO syncer semantic profile", "syncer_profile_mismatch"),
+    ("HELLO is missing the required syncer semantic profile", "syncer_profile_mismatch"),
+)
+
+
+class SessionRejectedError(ProtocolError):
+    """The syncer refused this island's HELLO: its session contract (layout,
+    backend identity, profile) differs from the running session.  Deterministic
+    configuration error -- never retried; surfaced as a strict RL failure."""
+
+    def __init__(self, metric: str, message: str) -> None:
+        super().__init__(message)
+        self.metric = metric
+
+
 class PartialMessageGenerationLost(RuntimeError):
     """A chunked outbound message was split by connection-generation loss.
 
@@ -667,6 +687,15 @@ class SyncerClient:
     def check_health(self) -> None:
         """Raise only for unrecoverable failures. While a reconnect is being
         attempted this is a no-op; the training loop keeps stepping locally."""
+        if isinstance(self._err, SessionRejectedError):
+            # Wrong island for this session: a strict failure of this island
+            # only (bridge prints [yeto-rl-strict-failure], exit 1), not a
+            # network failure to retry and not a syncer crash.
+            from .rl.core import StrictRlInvariantError
+
+            raise StrictRlInvariantError(
+                self._err.metric, f"syncer refused this island: {self._err}"
+            ) from self._err
         if self._err is not None:
             raise RuntimeError(f"syncer connection failed: {self._err}") from self._err
 
@@ -1619,8 +1648,14 @@ class SyncerClient:
     ) -> None:
         if msg_type == MSG_ERROR:
             message = payload.decode("utf-8", errors="replace")
+            text = f"syncer rejected protocol session: {message}"
+            metric = next(
+                (m for prefix, m in SESSION_REJECT_PREFIXES if message.startswith(prefix)),
+                None,
+            )
             self._protocol_failed(
-                gen, ProtocolError(f"syncer rejected protocol session: {message}")
+                gen,
+                SessionRejectedError(metric, text) if metric else ProtocolError(text),
             )
             return
         if msg_type == MSG_SHUTDOWN:

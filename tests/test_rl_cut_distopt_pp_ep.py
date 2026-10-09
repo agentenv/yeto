@@ -20,8 +20,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from yeto.rl.engine.miles_adapter import cut_plugin as cp
-from yeto.rl.engine.miles_adapter import state_plugin as sp
+from yeto.rl.adapters.miles import cut_plugin as cp
+from yeto.rl.adapters.miles import state_plugin as sp
 
 MILES_CHECKOUT = os.environ.get("YETO_MILES_CHECKOUT", "/home/michael/work/miles-m3")
 MILES_PIN = "c35702e"

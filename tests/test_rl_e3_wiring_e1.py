@@ -15,8 +15,8 @@ import pytest
 
 from yeto.rl.engine.controller import IslandController, RecoveryRequired, _Tx, Plan
 from yeto.rl.engine.journal import EpochConflict, read_epochs, read_journal
-from yeto.rl.engine.miles_adapter.bundles import BundleMapError, StartupBundles
-from yeto.rl.engine.miles_adapter.rollout import MembershipPlanError, MilesRolloutPool
+from yeto.rl.adapters.miles.bundles import BundleMapError, StartupBundles
+from yeto.rl.adapters.miles.rollout import MembershipPlanError, MilesRolloutPool
 
 from test_rl_reconfig_e1 import CONFIGS, FP, _attestation, _profile
 
@@ -85,7 +85,7 @@ class FakeController:
 
 
 def _pool(manager, *, running=("c0",), per=1, bundles=True):
-    import yeto.rl.engine.miles_adapter.rollout as rollout_mod
+    import yeto.rl.adapters.miles.rollout as rollout_mod
 
     pool = MilesRolloutPool(
         inference_controller=FakeController(running), rollout_executor=None, metadata=None,
@@ -187,8 +187,8 @@ def test_failed_commit_cas_after_a_durable_rename_hints_restore_target(tmp_path)
 
 # ---------------------------------------------------------------- compose wiring
 def test_trainer_edges_are_not_wired_without_pool_gpus_or_proxy(tmp_path):
-    from yeto.rl.engine.miles_adapter import entry
-    from yeto.rl.engine.miles_adapter.trainer_rebuild import SwappableActor
+    from yeto.rl.adapters.miles import entry
+    from yeto.rl.adapters.miles.trainer_rebuild import SwappableActor
 
     ctl = _ctl(tmp_path)
     kw = dict(miles_args=SimpleNamespace(global_batch_size=16), launch=None, algorithm=None,
@@ -203,9 +203,9 @@ def test_trainer_edges_are_not_wired_without_pool_gpus_or_proxy(tmp_path):
 
 
 def test_trainer_edges_wiring_builds_miles_trainer_ops(tmp_path):
-    pytest.importorskip("yeto.rl.engine.miles_adapter.trainer_resize")
-    from yeto.rl.engine.miles_adapter import entry
-    from yeto.rl.engine.miles_adapter.trainer_rebuild import SwappableActor
+    pytest.importorskip("yeto.rl.adapters.miles.trainer_resize")
+    from yeto.rl.adapters.miles import entry
+    from yeto.rl.adapters.miles.trainer_rebuild import SwappableActor
 
     ctl = _ctl(tmp_path)
     m = FakeManager()
@@ -247,8 +247,8 @@ def test_failed_commit_cas_with_unreadable_epochs_is_unknown(tmp_path, monkeypat
 
 
 def test_trainer_edges_are_not_wired_when_rebuild_preconditions_fail(tmp_path):
-    from yeto.rl.engine.miles_adapter import entry
-    from yeto.rl.engine.miles_adapter.trainer_rebuild import SwappableActor
+    from yeto.rl.adapters.miles import entry
+    from yeto.rl.adapters.miles.trainer_rebuild import SwappableActor
 
     ctl = _ctl(tmp_path)
     ok = entry._wire_trainer_edges(
@@ -286,7 +286,7 @@ def test_manifest_pool_gpus_is_the_ordered_uuid_list(tmp_path):
 
     import pytest as _pytest
 
-    from yeto.rl.engine.miles_adapter.entry import manifest_pool_gpus
+    from yeto.rl.adapters.miles.entry import manifest_pool_gpus
 
     res = {"gpus": [{"uuid": "GPU-a"}, {"uuid": "GPU-b"}, {"uuid": "GPU-c"}]}
     assert manifest_pool_gpus(res) == ("GPU-a", "GPU-b", "GPU-c")
@@ -298,7 +298,7 @@ def test_manifest_pool_gpus_is_the_ordered_uuid_list(tmp_path):
 
 
 def test_pool_gpus_reach_build_elastic_only_with_trainer_edges(monkeypatch):
-    from yeto.rl.engine.miles_adapter import elastic_wiring, entry
+    from yeto.rl.adapters.miles import elastic_wiring, entry
 
     seen = {}
     monkeypatch.setattr(elastic_wiring, "build_elastic", lambda **kw: seen.update(kw) or "W")
@@ -317,7 +317,7 @@ def test_trainer_view_prefers_the_public_slice_pg_info(monkeypatch):
     import sys
     import types
 
-    from yeto.rl.engine.miles_adapter.trainer_rebuild import trainer_view
+    from yeto.rl.adapters.miles.trainer_rebuild import trainer_view
 
     calls = []
     pg = types.ModuleType("miles.ray.placement_group")

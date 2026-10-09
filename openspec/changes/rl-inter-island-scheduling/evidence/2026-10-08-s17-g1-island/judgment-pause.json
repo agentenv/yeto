@@ -1,0 +1,420 @@
+{
+ "pool_events": [
+  {
+   "kind": "pool_join",
+   "syncer_epoch": 0,
+   "island_id": 0,
+   "catch_up": false,
+   "base_version": 0,
+   "membership_epoch": 1
+  },
+  {
+   "kind": "pool_join",
+   "syncer_epoch": 0,
+   "island_id": 1,
+   "catch_up": false,
+   "base_version": 0,
+   "membership_epoch": 2
+  },
+  {
+   "kind": "pool_leave",
+   "syncer_epoch": 0,
+   "island_id": 1,
+   "reason": "lease_expired",
+   "dropped_uncommitted": null,
+   "membership_epoch": 3
+  },
+  {
+   "kind": "pool_join",
+   "syncer_epoch": 0,
+   "island_id": 1,
+   "catch_up": true,
+   "base_version": 3,
+   "membership_epoch": 4
+  },
+  {
+   "kind": "pool_leave",
+   "syncer_epoch": 0,
+   "island_id": 0,
+   "reason": "requested",
+   "dropped_uncommitted": null,
+   "membership_epoch": 5
+  },
+  {
+   "kind": "pool_leave",
+   "syncer_epoch": 0,
+   "island_id": 1,
+   "reason": "requested",
+   "dropped_uncommitted": null,
+   "membership_epoch": 6
+  }
+ ],
+ "C1_lease_expired": [
+  {
+   "kind": "pool_leave",
+   "syncer_epoch": 0,
+   "island_id": 1,
+   "reason": "lease_expired",
+   "dropped_uncommitted": null,
+   "membership_epoch": 3
+  }
+ ],
+ "C2_rejoin_required_refusals": {
+  "count": 1,
+  "first": [
+   "2026-10-08T17:23:38.909565Z  WARN yeto_syncer::elastic_server: elastic message refused error=1 is not a member (rejoin required)"
+  ],
+  "last": [
+   "2026-10-08T17:23:38.909565Z  WARN yeto_syncer::elastic_server: elastic message refused error=1 is not a member (rejoin required)"
+  ]
+ },
+ "C3_island_rejoin_events": [
+  {
+   "base_version": 3,
+   "catch_up": true,
+   "event": "elastic_rejoin",
+   "incarnation": 1,
+   "island_id": 1,
+   "membership_epoch": 4,
+   "time_unix": 1791480229.090866
+  }
+ ],
+ "C3_pool_join_after_lease": [
+  {
+   "kind": "pool_join",
+   "syncer_epoch": 0,
+   "island_id": 1,
+   "catch_up": true,
+   "base_version": 3,
+   "membership_epoch": 4
+  }
+ ],
+ "C4_join": {
+  "kind": "pool_join",
+  "syncer_epoch": 0,
+  "island_id": 1,
+  "catch_up": true,
+  "base_version": 3,
+  "membership_epoch": 4
+ },
+ "C4_first_step": {
+  "kind": "outer_step",
+  "syncer_epoch": 0,
+  "base_version": 3,
+  "arrived": 2,
+  "cap_arrived": 2.0,
+  "cap_total": 2.0,
+  "timed_out": false,
+  "raw_weights": [
+   [
+    0,
+    3,
+    41216400.0
+   ],
+   [
+    1,
+    3,
+    0.0
+   ]
+  ],
+  "weights": [
+   [
+    0,
+    3,
+    1.0
+   ],
+   [
+    1,
+    3,
+    0.0
+   ]
+  ],
+  "absent": []
+ },
+ "C4_island_entries_first_step": [
+  [
+   1,
+   3,
+   0.0
+  ]
+ ],
+ "C4a_catch_up_entry_zero": true,
+ "C4b_late_entries_info": [],
+ "C4_first_round_zero": true,
+ "C4_strict_all_zero_v1": true,
+ "C5_later_steps_with_weight": [
+  4,
+  5,
+  6,
+  7,
+  8,
+  9
+ ],
+ "C5_local_rounds_after_rejoin": [
+  3,
+  4,
+  5,
+  6,
+  7,
+  8,
+  9,
+  10
+ ],
+ "C6_rc": "rc=0",
+ "C6_exit3_lines": [],
+ "C6_finalized_islands": [
+  0,
+  1
+ ],
+ "C6_left_pool_summary": [],
+ "C6_status_state": "finished",
+ "C7_gpus": [
+  [
+   "0",
+   "H100!:1",
+   "['NVIDIA H100 80GB HBM3']"
+  ],
+  [
+   "1",
+   "H100!:1",
+   "['NVIDIA H100 80GB HBM3']"
+  ]
+ ],
+ "C8_raw_counts": [
+  1,
+  1,
+  1
+ ],
+ "C8_armed": [
+  {
+   "base_version": 1,
+   "event": "rl_driver_phase",
+   "island_id": 1,
+   "pause_s": 120.0,
+   "phase": "elastic_debug_pause_armed",
+   "time_unix": 1791480096.7038865
+  }
+ ],
+ "C8_pause": [
+  {
+   "event": "elastic_debug_pause",
+   "island_id": 1,
+   "pause_s": 120.0,
+   "start_unix": 1791480096.7040215,
+   "time_unix": 1791480096.704067
+  }
+ ],
+ "C8_pause_end": [
+  {
+   "end_unix": 1791480216.8834496,
+   "event": "elastic_debug_pause_end",
+   "island_id": 1,
+   "pause_s": 120.0,
+   "start_unix": 1791480096.7040215,
+   "time_unix": 1791480216.9302118
+  }
+ ],
+ "C8_pause_s": 120.2,
+ "C8_rejoin_after_pause_end_s": 12.2,
+ "outer_steps": [
+  {
+   "base_version": 0,
+   "arrived": 2,
+   "timed_out": false,
+   "weights": [
+    [
+     0,
+     0,
+     0.5085898077305298
+    ],
+    [
+     1,
+     0,
+     0.4914101922694702
+    ]
+   ],
+   "absent": []
+  },
+  {
+   "base_version": 1,
+   "arrived": 1,
+   "timed_out": false,
+   "weights": [
+    [
+     0,
+     1,
+     1.0
+    ]
+   ],
+   "absent": []
+  },
+  {
+   "base_version": 2,
+   "arrived": 1,
+   "timed_out": false,
+   "weights": [
+    [
+     0,
+     2,
+     1.0
+    ]
+   ],
+   "absent": []
+  },
+  {
+   "base_version": 3,
+   "arrived": 2,
+   "timed_out": false,
+   "weights": [
+    [
+     0,
+     3,
+     1.0
+    ],
+    [
+     1,
+     3,
+     0.0
+    ]
+   ],
+   "absent": []
+  },
+  {
+   "base_version": 4,
+   "arrived": 2,
+   "timed_out": false,
+   "weights": [
+    [
+     0,
+     4,
+     0.5258924134962779
+    ],
+    [
+     1,
+     4,
+     0.47410758650372203
+    ]
+   ],
+   "absent": []
+  },
+  {
+   "base_version": 5,
+   "arrived": 2,
+   "timed_out": false,
+   "weights": [
+    [
+     0,
+     5,
+     0.5464240222627892
+    ],
+    [
+     1,
+     5,
+     0.45357597773721076
+    ]
+   ],
+   "absent": []
+  },
+  {
+   "base_version": 6,
+   "arrived": 2,
+   "timed_out": false,
+   "weights": [
+    [
+     0,
+     6,
+     0.3537424968456311
+    ],
+    [
+     1,
+     6,
+     0.6462575031543689
+    ]
+   ],
+   "absent": []
+  },
+  {
+   "base_version": 7,
+   "arrived": 2,
+   "timed_out": false,
+   "weights": [
+    [
+     0,
+     7,
+     0.6079580065580646
+    ],
+    [
+     1,
+     7,
+     0.39204199344193535
+    ]
+   ],
+   "absent": []
+  },
+  {
+   "base_version": 8,
+   "arrived": 2,
+   "timed_out": false,
+   "weights": [
+    [
+     0,
+     8,
+     0.36363601436931026
+    ],
+    [
+     1,
+     8,
+     0.6363639856306897
+    ]
+   ],
+   "absent": []
+  },
+  {
+   "base_version": 9,
+   "arrived": 2,
+   "timed_out": false,
+   "weights": [
+    [
+     0,
+     9,
+     0.48646831580028116
+    ],
+    [
+     1,
+     9,
+     0.5135316841997188
+    ]
+   ],
+   "absent": []
+  }
+ ],
+ "reward_mean_by_island": {
+  "0": [
+   0.9375,
+   0.4375,
+   0.0625,
+   0.59375,
+   0.3125,
+   0.6875,
+   0.78125,
+   0.5,
+   0.90625,
+   0.75
+  ],
+  "1": [
+   0.9375,
+   0.46875,
+   0.0625,
+   0.5625,
+   0.15625,
+   0.5625,
+   0.8125,
+   0.625,
+   1.0,
+   0.71875
+  ]
+ },
+ "verdict": "PASS",
+ "problems": [],
+ "missing": []
+}

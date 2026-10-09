@@ -81,7 +81,7 @@ def test_island_syncer_addrs_line():
 
 
 def test_island_probe_names_the_unreachable_critic_syncer(capsys):
-    from yeto.rl.learner import probe_syncers
+    from yeto.rl.adapters.miles.island_entry import probe_syncers
 
     class _C:
         def close(self):

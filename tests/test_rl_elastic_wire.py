@@ -21,7 +21,7 @@ from yeto.rl.engine.controller import SUCCEEDED, IslandController, Rejected, rea
 from yeto.rl.engine.driver import EventTape, IslandDriver
 from yeto.rl.engine.elastic import AUTO_STATE_KIND, ElasticHook, restore_auto_state
 from yeto.rl.engine.fake import FakeEngine, fake_capabilities
-from yeto.rl.engine.miles_adapter.elastic_placement import ElasticPlacement
+from yeto.rl.adapters.miles.elastic_placement import ElasticPlacement
 from yeto.rl.engine.ports import PlacementDescription
 from yeto.rl.engine.recommend import Recommender
 from yeto.rl.profiles import qwen3_8_next as q
