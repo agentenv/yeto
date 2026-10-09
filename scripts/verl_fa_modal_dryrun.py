@@ -67,8 +67,12 @@ def dryrun():
                                          "reward.num_workers=2"]
     overrides = fully_async_run_overrides(sync, limit, groups_per_round=groups, rounds=rounds)
     out["overrides"] = overrides
-    r = subprocess.run([py, "-m", "verl.experimental.fully_async_policy.fully_async_main", "--cfg", "job",
-                        *overrides], capture_output=True, text=True, cwd="/workspace/verl")
+    # Same entry as the island (verl_main.main_fully_async): the module is imported, not
+    # run with -m (the first GPU run failed here; the -m form hid it).
+    entry = ("from verl.experimental.fully_async_policy import fully_async_main as f; "
+             "from yeto.rl.adapters.verl.verl_main import fully_async_hydra_entry as e; e(f)()")
+    r = subprocess.run([py, "-c", entry, "--cfg", "job", *overrides],
+                       capture_output=True, text=True, cwd="/workspace/verl")
     out["hydra_rc"] = r.returncode
     out["hydra_err_tail"] = r.stderr[-2500:]
     import yaml
