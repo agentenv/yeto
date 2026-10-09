@@ -113,7 +113,28 @@
 | I2 | 推理/评测岛、纯 rollout 岛 | 进行中轨迹作废（`end_reason=preempted`），样本组按账本记未消费；评测按"版本+题号+第几次"续跑（eval D11.3） |
 | I3 | 数据处理、镜像构建 | 整体重跑 |
 
-接缝（只定义接口，实现归去耦合 8.7）：云提供方报告"回收通知" → 岛内 controller 收到 `preempt_notice(deadline)` → 按上表做；无通知的云（Modal 文档未写宽限期长度）按"机器没了"处理。
+接缝（只定义接口，实现归去耦合 8.7）：云提供方报告"回收通知" → 岛内 controller 收到 `preempt_notice(deadline)` → 按上表做；宽限期按 §3.6 的统一口径。通知秒数未知或为 0 的云按"机器没了"处理。
+
+### 3.6 回收宽限期统一口径（10-09 按官方文档核对）
+
+本节取代本文件与 `rl-resume-from-checkpoint/design.md` 里此前的不同说法。以后引用宽限期只引用本节。
+
+| 云 | 有没有提前通知 | 通知后到被停的时间 | 怎么拿到通知 | 状态 |
+|---|---|---|---|---|
+| Modal | 没有提前通知。抢占发生时向容器发中断信号 | 退出处理函数有 30 秒宽限，超时被强杀。退出处理函数在抢占时也会被调用 | 容器内收中断信号，走 `@modal.exit` 退出处理 | 已核（文档 a、b） |
+| AWS EC2 spot | 有，约 2 分钟。AWS 写明是"尽力而为" | 约 2 分钟 | 实例元数据 `spot/instance-action`（建议每 5 秒查一次），或 EventBridge 事件 | 已核（文档 c） |
+| Nebius 抢占式 VM | 未知 | 未知 | 未知 | 未核 |
+| Verda spot | 未知 | 未知 | 未知 | 未核 |
+
+出处（10-09 用 WebFetch 读取原文）：
+- a https://modal.com/docs/guide/preemption ：抢占时向容器发中断信号，触发退出处理函数；GPU 函数不支持 `nonpreemptible`；被抢占后在同一输入上重启。本页没写宽限秒数。
+- b https://modal.com/docs/guide/lifecycle-functions ：原文"The exit handler is given a grace period of 30 seconds to finish"，以及"Exit handlers are also called when a container is preempted"。
+- c https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/spot-instance-termination-notices.html ：通知在停止或终止前两分钟发出；选休眠时没有两分钟提前量；通知是尽力而为。
+
+对设计的影响：
+- Modal 的 30 秒是"信号到强杀"的全部时间，不是提前通知。FN 全量切点 0.5–2 分钟写不完（`rl-resume-from-checkpoint/design.md` §2.2），所以 Modal 上回收时只写中断标记，靠定期切点续训。
+- AWS 的 2 分钟是尽力而为，不能当保证。只有实测"保存耗时 + 余量 < 120 秒"后，才对 AWS 训练岛开"回收时保存"。
+- 推理岛的在途轨迹体积远小于训练切点，可能放得进 30 秒。是否放得进要实测，由 `rl-spot-cost-saving` 处理。
 
 ### 3.5 成本与回退边界
 
@@ -226,7 +247,7 @@ CloudAdvice {
 ## 6. 未验证与风险
 
 - 岛级扩池的"开机到 JOIN"在 FN 尺寸上没测过；§5.3 的上界来自小模型外推。
-- AWS spot 回收通知（约 2 分钟）是惯例说法，仓库里没有代码读它（CLOUD-OPTIONS B.2 G7，未核）；Modal 抢占宽限期长度文档未写。
+- AWS spot 回收通知 2 分钟与 Modal 抢占后 30 秒退出宽限已按官方文档核对（§3.6）。仓库里还没有代码读 AWS 的通知，也没有代码处理 Modal 的中断信号，两者都未在真机验证。Nebius、Verda 的通知时间未核。
 - G5、G9、G10 本轮只按 tasks 文本核对，没有逐行查代码，标"未核"。
 - 跨云补岛时 head 必须在 Nebius 按需 VM；Nebius 只有 eu-north1，单点。
 
@@ -236,3 +257,10 @@ CloudAdvice {
 2. 归属：I7+I9 合写在 rl-infra-spec 第 7 节、代码落在去耦合阶段 7 与岛间调度，不新开 change（§0.1）——是否同意？
 3. I1 训练岛上 spot 的两个条件里"回收通知秒数"在未知时一律视为不满足（即训练岛不用 spot）——是否同意？
 4. spot 回收率无数据时不参与排序、只列风险（§5.2）——是否同意？
+
+### 7.1 建议答案（10-09 规划子 agent 拟，建议，待用户拍板）
+
+1. 同意，建议，待用户拍板。理由：整岛加入/退出已在 elastic 真机两岛验证（M1、V2），重入数据位置也已验证（#149）。节点级仍卡在 G4、G6、G11，其中 G6 要改 Miles fork。
+2. 部分改变，建议，待用户拍板。I7（扩缩规则）仍留在本文件。I9 的 spot 部分已扩成完整方案，另开 change `rl-spot-cost-saving`（云能力表、回收通知接口、推理岛用 spot、换区域换云）。原因：spot 方案要新代码与上卡验证，超出"只出建议"。去耦合 8.1、8.5 仍承担能力声明接口，8.7 由新 change 替代。
+3. 同意，建议，待用户拍板。并补一条：Modal 宽限已核为 30 秒（§3.6），小于 FN 切点保存时间，所以 Modal 训练岛即使知道秒数也不满足条件。AWS 2 分钟是尽力而为，实测保存时间够之前也不满足。训练岛第一版一律按需。
+4. 同意，建议，待用户拍板。补充：`rl-spot-cost-saving` 会把每次回收事件记进 tape，攒够数据后再让回收率进排序。没数据时用保守值做"最坏情况"提示，但不参与排序。
