@@ -349,12 +349,16 @@ function folds(){
   if((O.islands||[]).every(function(c){return (c.cloud||"")==="modal"}))items.push(["Ray 面板嵌入","Modal 容器无入站端口"]);
   $("foldBox").innerHTML=items.map(function(x){return '<div class="fold"><span>'+x[0]+'</span><span>本次运行未使用（'+x[1]+'）</span></div>'}).join("")||'<div class="note">无</div>';
 }
+function spot(){
+  var rows=(V.spot||[]).slice(-50).reverse();$("spotBox").hidden=!rows.length;if(!rows.length)return;
+  $("spot").innerHTML='<table class="c"><tr><th>事件</th><th>岛</th><th>云 / 区域</th><th>来源</th><th>剩余秒</th><th>已保存</th><th>结果</th><th>候选/拒绝</th></tr>'+rows.map(function(r){
+    return '<tr><td>'+esc(r.event)+'</td><td>'+esc(r.island)+'</td><td class="mono">'+esc(r.cloud||"无")+' / '+esc(r.region||"无")+'</td><td>'+esc(r.source||"")+'</td><td class="num">'+f(r.remaining_s,1)+'</td><td>'+(r.saved==null?"":(r.saved?"是":"否"))+'</td><td>'+esc(r.outcome||(r.auto_launch===false?"只出建议":""))+'</td><td class="num">'+(r.candidates==null?"":esc(r.candidates)+' / '+esc(r.rejected))+'</td></tr>'}).join("")+'</table>'}
 function render(){
   if(!V)return;O=V.overview;
   var ids=(O.islands||[]).map(function(c){return c.id});if(ids.indexOf(SEL)<0)SEL=ids[0]||null;
   RS=SEL!=null?((V.islands[SEL]||{}).rounds||[]):[];
   $("roundsIsl").textContent=SEL!=null&&ids.length>1?"· 岛 "+SEL:"";
-  header();kpis();wall();chartMetric();chartDur();chartTl();highlight();util();chartNodes();islands();cost();events();cmds();folds();
+  header();kpis();wall();chartMetric();chartDur();chartTl();highlight();util();chartNodes();islands();cost();events();cmds();folds();spot();
 }
 function load(){
   if(OFFLINE){V=INLINE.page;EVENTS=(INLINE.events||{}).events||[];render();return}

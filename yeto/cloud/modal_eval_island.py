@@ -197,6 +197,10 @@ def island_main(config: Mapping[str, Any], env: Mapping[str, str] | None = None)
     attempt = _factory(config.get("attempt") or env[ATTEMPT_ENV])(config)
     island_id = str(config.get("island_id", "eval-0"))
     emit = jsonl_emitter(root / "events" / f"{island_id}.jsonl", island=island_id)
+    handler = None
+    if config.get("reclaim_handler"):
+        handler = install_reclaim_handler(store, emit, island_id, region=config.get("region"),
+                                          install=config.get("reclaim_install_signals", True))
     if hasattr(loader, "emit") and getattr(loader, "emit") is None:
         loader.emit = emit
     marker = config.get("finished_marker")
@@ -206,7 +210,8 @@ def island_main(config: Mapping[str, Any], env: Mapping[str, str] | None = None)
         idle = store.training_finished
     else:
         idle = None
-    island = EvalIsland(store, plan, loader=loader, attempt=attempt, emit=emit, island_id=island_id)
+    island = EvalIsland(store, plan, loader=loader, attempt=attempt, emit=emit, island_id=island_id,
+                        stop=handler.stop.is_set if handler is not None else None)
     try:
         evaluated = island.run(idle=idle, poll_s=float(config.get("poll_s", 30.0)))
     finally:
@@ -215,6 +220,34 @@ def island_main(config: Mapping[str, Any], env: Mapping[str, str] | None = None)
             close()
         store.commit()
     return {"evaluated": evaluated, "loads": list(getattr(loader, "loads", []) or [])}
+
+
+def install_reclaim_handler(store: EvalStore, emit: Callable[..., None], island_id: str, *,
+                            region: str | None = None, install: bool = True,
+                            clock: Callable[[], float] = time.time) -> Any:
+    """rl-spot-cost-saving 1.4 / 3.1: Modal interrupt -> stop new units, commit the
+    unit log within the 25 s cap, write ``spot_reclaim``. Units lost mid-attempt keep
+    a bare ``start`` and rerun on the next container (version + task + trial).
+
+    The save time is the last measured ``store.commit()`` duration; before the first
+    commit there is no measurement and the save is skipped (spec)."""
+    from yeto.cloud.preemption import ModalExitHandler
+
+    timing: dict[str, float] = {}
+    inner = store.commit
+
+    def timed_commit() -> None:
+        t = clock()
+        inner()
+        timing["last"] = clock() - t
+
+    store.commit = timed_commit  # type: ignore[method-assign]
+    handler = ModalExitHandler(island_id, save=lambda budget: inner(), leave=lambda: None, emit=emit,
+                               last_save_s=lambda: timing.get("last"), region=region, role="eval",
+                               clock=clock)
+    if install:
+        handler.install()
+    return handler
 
 
 # --- the Modal GPU function (5.10) -------------------------------------------------
@@ -325,6 +358,7 @@ def eval_island_body(config: Mapping[str, Any]) -> dict[str, Any]:
         infer["base_model"] = snapshot_download(base, revision=str(infer["revision"]))
         timings["model_download_s"] = round(time.time() - t, 3)
     config = {**config, "infer": infer}
+    config.setdefault("reclaim_handler", True)  # rl-spot-cost-saving 3.1
     stop = threading.Event()
     sampler = threading.Thread(target=_gpu_sampler, args=(run_dir / "gpu.jsonl", stop), daemon=True)
     sampler.start()

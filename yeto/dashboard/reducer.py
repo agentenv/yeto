@@ -36,6 +36,9 @@ SYNCER_ISLAND_EVENTS = frozenset({"rl_fragment_push", "rl_policy_apply", "rl_pul
 TERMINAL_TX_PHASES = ("COMMITTED", "SUCCEEDED", "CANCELLED", "REBUILT_OLD", "RECOVERY_REQUIRED",
                       "FAILED")
 MAX_EVENTS = 20000
+# rl-spot-cost-saving 2.5: reclaim events and replacement advice shown as one table
+SPOT_EVENTS = frozenset({"spot_reclaim", "spot_replace_advice", "spot_replace_launch", "spot_budget_cap"})
+SPOT_MAX = 500
 NO_DATA = None
 
 # Overlay-chart metrics (v7 tabs): series key -> (label, extractor field paths).
@@ -167,6 +170,18 @@ def _iid(value: Any) -> str | None:
     return str(value)
 
 
+def _spot_row(r: dict) -> dict:
+    """One row of the reclaim / replacement table (no derived numbers)."""
+    cands = r.get("candidates") or []
+    top = cands[0] if cands else {}
+    return {"ts": record_ts(r), "event": r.get("event"), "island": r.get("island"),
+            "cloud": r.get("cloud") or top.get("cloud"), "region": r.get("region") or top.get("region"),
+            "source": r.get("source"), "remaining_s": r.get("remaining_s"), "saved": r.get("saved"),
+            "outcome": r.get("outcome"), "candidates": len(cands) if "candidates" in r else None,
+            "rejected": len(r.get("rejected") or []) if "rejected" in r else None,
+            "auto_launch": r.get("auto_launch")}
+
+
 def _new_island(iid: str) -> dict:
     return {
         "id": iid, "name": None, "cloud": None, "region": None, "gpu": None, "gpus": None,
@@ -209,6 +224,7 @@ class Reducer:
         self.applies: dict[int, set[str]] = {}
         self.publications: dict[int, set[str]] = {}
         self.fleet_records: list[dict] = []
+        self.spot: deque = deque(maxlen=SPOT_MAX)
         self.cost_ticks: list[dict] = []
         self.events: deque = deque(maxlen=MAX_EVENTS)
         self.event_seq = 0
@@ -236,6 +252,8 @@ class Reducer:
             return False
         if record.get("event") == HOST_SAMPLE_EVENT:
             return self._feed_host(record, island, node)
+        if record.get("event") in SPOT_EVENTS:
+            self.spot.append(_spot_row(record))
         kind = classify(record)
         self.counts[kind] += 1
         ts = record_ts(record)
@@ -600,7 +618,7 @@ class Reducer:
                  "cells": any(v["cells"] for v in isl_extra.values()),
                  "transactions": any(v["transactions"] for v in isl_extra.values())}
         view = {"overview": ov, "islands": isl_extra, "rounds_syncer": self.rounds(), "usage": usage,
-                "label": self.label}
+                "label": self.label, "spot": list(self.spot)}
         if self.compare:
             # agentic-rollout-utilization 7.6: other runs, utilization only (side by side / overlay)
             view["compare"] = [{"label": c.label, "run": c.run_name()[0],
