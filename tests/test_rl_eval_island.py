@@ -586,3 +586,16 @@ def test_reclaim_before_any_commit_skips_save(tmp_path):
     ev = h.handle()
     assert ev["saved"] is False and ev["outcome"] == "skip save: no measured save time"
     assert h.stop.is_set()
+
+
+def test_drill_bindings_run_an_island(tmp_path):
+    """rl-spot-cost-saving 3.2: the drill loader/attempt (no model) finish a plan."""
+    from yeto.rl.eval.drill import attempt_factory, loader_factory
+
+    store = EvalStore(tmp_path)
+    _put(store, 0)
+    events = []
+    island = EvalIsland(store, _plan(), loader=loader_factory({}), attempt=attempt_factory({"drill_unit_s": 0}),
+                        emit=lambda e, **f: events.append({"event": e, **f}))
+    assert island.run() == [0]
+    assert events[-1]["eval/units"] == 16 and events[-1]["eval/duplicate_results"] == 0

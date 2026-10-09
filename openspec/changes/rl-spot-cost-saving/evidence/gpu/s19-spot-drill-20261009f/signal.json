@@ -1,0 +1,14 @@
+{
+ "container": "ta-01M4HCPZV0TVFANKPC01CAN7ZR",
+ "pid": "2",
+ "target_cmd": "python -u -R --check-hash-based-pycs never -m modal._container_entrypoint",
+ "results_before": 3,
+ "t": 1791585210.5142062,
+ "kill_rc": 0,
+ "kill_out": "",
+ "container_stopped": true,
+ "stop_rc": 0,
+ "stop_out": "",
+ "container_gone": true,
+ "stop_wait_s": 33.29
+}
