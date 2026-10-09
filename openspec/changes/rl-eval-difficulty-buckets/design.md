@@ -1,6 +1,6 @@
 # Design：按难度分桶的固定评测集
 
-（第 4 版，2026-10-08，按 S17 用户裁定改：评测集以 Terminal-Bench 2 留出集与 SWE-bench Verified 为主；不用 Qwen3-32B 通过率；数学降为可选；SWE-Gym 暂不采用；SWE-bench Verified 统一用 SWE-bench 组织版；TB2 评测池排除冒烟 6 题；评测放在便宜的可中断卡上（D11）。）
+（第 5 版，2026-10-08，按 S17 第八批裁定改：评测权重权威存放处改为 Modal Volume、评测先只用 Modal、多云 spot 降为后续选项；不用数学评测集。第 4 版，按 S17 用户裁定改：评测集以 Terminal-Bench 2 留出集与 SWE-bench Verified 为主；不用 Qwen3-32B 通过率；数学降为可选；SWE-Gym 暂不采用；SWE-bench Verified 统一用 SWE-bench 组织版；TB2 评测池排除冒烟 6 题；评测放在便宜的可中断卡上（D11）。）
 
 ## Context
 
@@ -128,10 +128,10 @@ SWE-bench Verified：`task_id` = 官方 `instance_id`（如 `django__django-1109
 - 核对方法（接入任何 SWE 类训练来源时由构建工具执行并入档）：① `instance_id` 求交集；② `repo` 求交集；③ `(repo, base_commit)`；④ `problem_statement` 规范化 sha256；⑤ 补丁涉及的文件路径 + 仓库（防同一仓库的近似题）。任一非空则从训练集剔除并记录；结果写进复核文档。SWE-smith 等其他来源同样处理（SWE-smith 的仓库与 SWE-bench 是否重叠**未核**）。
 - SWE-Gym 没有官方难度字段，训练批次分桶对它只能标 `unknown`；以后可用第 0 轮或首次出现时的组内通过率另行分组，但那是策略相关口径，单列不混。
 
-### D9 数学（dapo-math-17k）：降为可选，不分桶
+### D9 数学（dapo-math-17k）：不用（S17 第八批用户裁定）
 
-- 理由：(1) 用户定先不用 Qwen3-32B 通过率，而 dapo-math-17k 本身没有难度或来源字段（上一版已核：zhuzilin 版只有 `prompt`/`label`，原版 `data_source`、`ability` 全同值）；(2) 自己用基座离线采样分桶约 $130（估计），给训练批次分桶要覆盖全部训练题约 $3,000（估计），超预算；(3) agentic 是后续主线。
-- 但 FN 全量训练的数据目前仍是 dapo-math，**完全不评也不行**。可选做法（零额外采样成本）：随机留出 200 题从训练集删除，作为不分桶的固定数学评测集（每题 4 次，第 0 轮 8 次）；第 0 轮结束后按基座逐题通过率（0 / 部分 / 全对）事后分组，组别在第 0 轮后冻结。不做训练批次分桶。是否启用由用户定；接口与 D6 相同（`benchmark`=`dapo-math-17k`）。
+- 用户定：不用数学评测集，先测 agentic RL。不建数学留出集，不做数学分桶，tasks 里原 6.4 删除。
+- 背景（保留供查）：dapo-math-17k 本身没有难度或来源字段；自己用基座离线采样分桶约 $130（估计），超出本轮目标。以后若训练数据仍含 dapo-math 又需要评，另开 change。
 
 ### D10 dashboard 接口需求（WP4 实现）
 
@@ -146,7 +146,7 @@ SWE-bench Verified：`task_id` = 官方 `instance_id`（如 `django__django-1109
 
 **D11.2 评测岛怎么拿到当前策略**——两条路比较：
 - a. 复用训推分离的发布路径（训练节点经 NCCL 直接推给推理引擎）：要求评测引擎与训练节点在同一集群网络里。Modal 上集群内任一容器被抢占会让**整个集群重来**（CLOUD-OPTIONS-S16 §A，引 Modal 文档），可抢占的评测若与训练同集群，被回收会连带训练重启，违背"评测不拖累训练"；跨云（AWS spot、自有集群）也没有这条网络。**不采用。**
-- b. **从持久存储加载（推荐）**：训练驱动在每个评测版本（第 0、10、20…轮与最后一轮）把已发布的 LoRA adapter（FN 约 11.2 GB）连同 manifest（`policy_tensor_hash`、`rl/policy_token`、版本号）写到持久存储（Modal Volume / S3 / Nebius 共享盘，按评测岛所在云选）。评测岛加载基座 + 该 adapter，校验哈希与 token 一致后才开评，事件里记录所评的 token。只在评测版本写，每 10 轮一次；写出耗时估计数十秒（**未测**），且与 WP1 发布提速（去掉每轮整份导出）不冲突——只在评测版本额外导出。
+- b. **从持久存储加载（推荐）**：训练驱动在每个评测版本（第 0、10、20…轮与最后一轮）把已发布的 LoRA adapter（FN 约 11.2 GB）连同 manifest（`policy_tensor_hash`、`rl/policy_token`、版本号）写到持久存储（已定 Modal Volume，见 D11.7）。评测岛加载基座 + 该 adapter，校验哈希与 token 一致后才开评，事件里记录所评的 token。只在评测版本写，每 10 轮一次；写出耗时估计数十秒（**未测**），且与 WP1 发布提速（去掉每轮整份导出）不冲突——只在评测版本额外导出。
 
 **D11.3 被回收时怎么办**：评测是幂等的。
 - 结果单位是"策略版本 + 题号 + 第几次"（`policy_version`、`task_id`、`trial`），每完成一条立刻追加写到持久存储的逐条文件。
@@ -156,7 +156,7 @@ SWE-bench Verified：`task_id` = 官方 `instance_id`（如 `django__django-1109
 
 **D11.4 与训练并行还是串行**：并行。训练驱动只负责"在评测版本把 adapter 写到持久存储并登记待评任务"，**不等评测**。评测岛按队列逐个评；若上一版本还没评完、新的评测版本又到了，新版本排队（不丢弃，队列长度和滞后轮数写进事件）。训练结束后评测岛把最后一版评完再退出。同卡单岛小规模验证时仍可用现有串行评测。
 
-**D11.5 多云卡源：怎么拿、多少钱**（用户 S17 裁定：Modal 与 AWS、Verda、Nebius 的 spot 都可以试；评测成本可接受）。评测岛是单节点 8×H200（FN 推理 SGLang TP8），只需出站网络（读存储、调 Modal 判分沙箱、写结果），不需要对外开端口。
+**D11.5 多云卡源：怎么拿、多少钱**（S17 第八批用户裁定：**评测先只用 Modal**；spot 不好用就不用，AWS/Verda/Nebius 的 spot 降为**后续选项**，下表留作以后接入时的参考，本 change 不实现）。评测岛是单节点 8×H200（FN 推理 SGLang TP8），只需出站网络（读存储、调 Modal 判分沙箱、写结果），不需要对外开端口。
 
 | 云 | 怎么拿可抢占卡（现有代码） | 价格（8×H200/时） | 可用性怎么探 | 已知问题 |
 |---|---|---|---|---|
@@ -166,12 +166,9 @@ SWE-bench Verified：`task_id` = 官方 `instance_id`（如 `django__django-1109
 | Verda | `yeto/sky_patches/verda.py`、`providers.VerdaSignals`（`use_spot`、读 `spot_price`）、`launch_with_verda_candidates`（按候选位置依次试，`VerdaCapacityExhausted` 即换下一家）、`yeto/verda_ops.py` | 官方价目 H200 spot $2.54/卡（按需 $5.07）→ 8 卡约 $20.3；8 卡 spot 是否提供未知 | `/instance-availability` 接口（VerdaSignals） | **常抢不到机器**：台账 10-04 1RTX6000ADA 全区无货、10-07 FIN-02 1×H200 按需 4 次尝试均无库存；sky 在 Verda 不开端口（head 放不了 Verda），评测岛不需要入站端口，不受影响 |
 | 自有集群 | 尚无 provider | 未知 | — | 约 10-10 到货，型号与是否可抢占未知 |
 
-**D11.6 评测岛按价格与可用性依次尝试**：每个评测版本登记后，评测调度器（新增，跑在驱动 / head 侧）：
-1. 并行只读探测：Nebius Capacity Advisor 的 preemptible 可起数量 ≥1；Verda `/instance-availability` 有 8×H200 spot；AWS spot 放置分数与配额余量；Modal 视为总是可用。
-2. 有货者按"单价 + 准备成本"排序。准备成本主要看基座权重是否已在该云（Nebius 共享盘 / Modal Volume 已有；AWS、Verda 要拉约 360 GB，估计 20–60 分钟，未测）。默认顺序：Nebius → Verda → AWS → Modal。
-3. 依次开机；某云失败（无货、超时）或 15 分钟内未就绪即换下一家，兜底 Modal。每次尝试写 `rl_eval_island` 事件（云、区域、单价、等待时间、失败原因），并按规则预登记台账。
-4. 被回收：按 D11.3 续跑，重新从第 1 步选云（不必回同一朵云）。
-5. 同时只跑一个评测岛，队列由它依次消化；排队超过 2 个版本才允许开第 2 个（上限 2，开关默认关，需用户批准）。
+**D11.6 评测岛放哪朵云**：第一版**只用 Modal**。评测调度器（新增，跑在驱动 / head 侧）每个评测版本登记后在 Modal 起一个 8×H200 评测岛；被抢占按 D11.3 续跑，仍在 Modal 上重起。每次起岛写 `rl_eval_island` 事件（云、单价、等待时间、失败原因），并按规则预登记台账。同时只跑一个评测岛，队列由它依次消化；排队超过 2 个版本才允许开第 2 个（上限 2，开关默认关，需用户批准）。
+
+后续选项（不在本 change 实现）：按价格与可用性在 Nebius / Verda / AWS spot 之间依次尝试、兜底 Modal（原第 4 版的选云顺序 Nebius → Verda → AWS → Modal）。这件事归云层自动调度（rl-infra-spec 第 8 节，第一版只出建议）统一做。**在别家 spot 上评测时，需要先把评测版本的权重（adapter + manifest，基座若不在那家也一样）从 Modal Volume 复制到那家的存储**（如 S3、Nebius 共享盘），复制完成并校验 sha256 后才能开评；复制耗时与出站流量费（Modal 出口 $0.04/GiB，一份 adapter 约 11.2 GB 约 $0.45，未核）计入该云的准备成本。
 
 **D11.7 持久存储：几朵云都要能读**
 
@@ -182,13 +179,13 @@ SWE-bench Verified：`task_id` = 官方 `instance_id`（如 `django__django-1109
 | c. Nebius 共享盘 | 只 Nebius 机器 | 已有，放模型权重 | Nebius 内最快 | 其他云读不到 |
 | d. Nebius 对象存储（S3 兼容） | 四朵云都能 | 未使用；价格与出站费**未查** | 与 a 一样通用 | 新接入，未验证 |
 
-**推荐**：a（S3）做权威存放处，只放小而关键的：评测版本 adapter + manifest、逐条评测结果、评测队列。评测岛**启动时用 boto3 主动下载并校验 sha256**，不依赖各云的存储挂载（避开"Modal 不挂 S3"与"只有 AWS 验证过 spot 挂载"）。基座权重（约 360 GB）按云就近缓存：Nebius 共享盘、Modal Volume；AWS/Verda 首次从 HF 拉（或放同区 S3，待定）。
+**定稿（S17 第八批用户裁定）**：**b（Modal Volume）做权威存放处**，放评测版本 adapter + manifest、逐条评测结果、评测队列；基座权重也在 Modal Volume。评测岛在 Modal 上直接挂载该 Volume，加载前校验 sha256 与 `rl/policy_token`。训练岛不在 Modal 时（例如 Nebius），由训练驱动在评测版本主动上传到 Modal Volume（经 Modal API/CLI），上传完成并写好 manifest 才登记待评任务。S3、Nebius 共享盘等只在以后接入别家 spot 评测时作为**复制目标**（见 D11.6 后续选项），不是权威存放处。
 
-**与检查点续训对齐**：存储选择与 rl-resume-from-checkpoint（另一子 agent，分支 s17-resume-ckpt）是同一个问题，**以那边为准**。截至本次修改（2026-10-08）该分支仍在 dcde202e、尚无这个 change 的文档，所以这里先写推荐；那边定稿后若不同，本节改为跟随。评测侧只要求三点：四朵云都能主动下载、sha256 校验、逐条结果可追加写。
+**与检查点续训对齐**：存储选择与 rl-resume-from-checkpoint（另一子 agent，分支 s17-resume-ckpt）是同一个问题，**以那边为准**。截至本次修改（2026-10-08）该分支仍在 dcde202e、尚无这个 change 的文档，所以这里先写推荐；那边定稿后若不同，本节改为跟随。评测侧只要求三点：评测岛能读到（第一版即 Modal 内挂载）、sha256 校验、逐条结果可追加写。
 
 ## Risks / Trade-offs
 
-- 评测成本高（D7）；放可中断卡后不拖慢训练，但 AWS spot 可能拿不到。
+- 评测成本高（D7）；第一版只用 Modal（约 $110–160/次），不拿 spot 的低价；spot 留作后续选项。
 - 评测岛是新角色（只推理的岛），需要启动器与岛账本区分它与训练岛。
 - TB2 留出后训练只剩 59 个任务，训练任务偏少；SWE-Gym 暂不采用，补训练来源以后另议。
 - SWE-bench Verified 的 HF 数据卡未写许可证（代码仓库 MIT）。
@@ -197,10 +194,7 @@ SWE-bench Verified：`task_id` = 官方 `instance_id`（如 `django__django-1109
 
 ## Open Questions（需用户拍板）
 
-已定：TB2 + SWE-bench Verified（组织版 78f471bf）为主；TB2 先排除冒烟 6 题再留出 30（分层）；SWE-bench Verified 只评测；SWE-Gym 暂不采用；不用 Qwen3-32B 通过率；每 10 轮评一次；训练批次按基准难度字段分桶；评测放便宜的可中断卡；评测成本接受；卡源 Modal 与 AWS/Verda/Nebius spot 都可试。
+已定：TB2 + SWE-bench Verified（组织版 78f471bf）为主；TB2 先排除冒烟 6 题再留出 30（分层）；SWE-bench Verified 只评测；SWE-Gym 暂不采用；不用 Qwen3-32B 通过率；每 10 轮评一次；训练批次按基准难度字段分桶；评测成本接受；评测先只用 Modal、权重权威存放处为 Modal Volume，多云 spot 为后续选项（第八批）；不用数学评测集（第八批）。
 
-1. 评测岛选云默认顺序 Nebius → Verda → AWS → Modal（D11.6）是否同意？
-2. 持久存储用 S3 做权威存放处（D11.7a），是否同意？最终以 rl-resume-from-checkpoint 为准。
-3. AWS/Verda 上基座权重怎么放：每次从 HF 拉，还是放同区 S3？
-4. 是否允许同时开第 2 个评测岛（D11.6 第 5 条，默认关）？
-5. 数学固定评测集（D9 可选，不分桶）要不要启用？
+1. AWS/Verda 上基座权重怎么放（只在以后接入别家 spot 评测时才需要定）：每次从 HF 拉，还是放同区 S3？
+2. 是否允许同时开第 2 个评测岛（D11.6，默认关）？
