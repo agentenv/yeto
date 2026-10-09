@@ -30,7 +30,7 @@ def _args(spec=None, **kw):
 def test_patch_file_matches_pinned_sha_and_fork_pin():
     data = mo.repo_patch_path().read_bytes()
     assert hashlib.sha256(data).hexdigest() == mo.CRITIC_C357_PATCH_SHA256
-    assert mo.CRITIC_C357_BASE_COMMIT == MILES_NEXT_COMMIT
+    assert mo.CRITIC_C357_BASE_COMMIT == "c35702eefcf2862cee155e46870e6ad30568d2c6"
     assert mo.CRITIC_C357_RESULT_COMMIT == critic_fork.CRITIC_FORK_PIN
 
 
@@ -55,12 +55,15 @@ def test_auto_is_off_without_fork_flags(spec):
 def test_auto_turns_on_for_critic_family_specs(make):
     args = _args(make())
     assert mo.spec_fork_flags(args.rl_algorithm_spec_json)
-    assert mo.resolve_overlay(args) == mo.CRITIC_C357
+    # S19 #1: the pinned image already contains the critic-family flags -> no overlay
+    assert MILES_NEXT_COMMIT != mo.CRITIC_C357_BASE_COMMIT
+    assert mo.resolve_overlay(args) is None
     assert mo.resolve_overlay(_args(make(), rl_miles_overlay="off")) is None
 
 
 def test_explicit_and_invalid_choices():
-    assert mo.resolve_overlay(_args(None, rl_miles_overlay="critic-c357")) == mo.CRITIC_C357
+    with pytest.raises(ValueError, match="already contains"):
+        mo.resolve_overlay(_args(None, rl_miles_overlay="critic-c357"))
     with pytest.raises(ValueError):
         mo.resolve_overlay(_args(None, rl_miles_overlay="critic-c357", rl_engine="legacy"))
     with pytest.raises(ValueError):
@@ -75,7 +78,7 @@ def test_setup_unchanged_when_off_and_appended_when_on():
     assert on[1] == off[1] and on[0].startswith(off[0])
     tail = on[0][len(off[0]):]
     for needle in (mo.CRITIC_C357_PATCH_SHA256, "REFUSING", "MILES_REFRESHED", "git -C ~/miles apply",
-                   mo.OVERLAY_RECORD_PATH, MILES_NEXT_COMMIT):
+                   mo.OVERLAY_RECORD_PATH, mo.CRITIC_C357_BASE_COMMIT):
         assert needle in tail
     assert tail.index("sha256sum --check") < tail.index("apply --check") < tail.index("apply ~/")
     with pytest.raises(ValueError):
@@ -83,13 +86,14 @@ def test_setup_unchanged_when_off_and_appended_when_on():
 
 
 def test_run_manifest_records_overlay_and_mismatch():
-    rec = launcher._miles_overlay_manifest(_args(vapo_spec()), "ports")["miles_overlay"]
+    assert launcher._miles_overlay_manifest(_args(vapo_spec()), "ports") == {}
+    rec = mo.overlay_record(mo.CRITIC_C357)
     assert rec["patch_sha256"] == mo.CRITIC_C357_PATCH_SHA256
     assert rec["image_manifest_matches_code"] is False and rec["result_commit_pushed"] is False
-    assert rec["summary"] == f"image miles {MILES_NEXT_COMMIT[:7]} + overlay {mo.CRITIC_C357_PATCH_SHA256}"
+    assert rec["summary"] == f"image miles {mo.CRITIC_C357_BASE_COMMIT[:7]} + overlay {mo.CRITIC_C357_PATCH_SHA256}"
 
 
-def _fake_image(tmp_path, *, head_ok=True, manifest_commit=MILES_NEXT_COMMIT):
+def _fake_image(tmp_path, *, head_ok=True, manifest_commit=mo.CRITIC_C357_BASE_COMMIT):
     """A ~/miles git repo with the patch's files at base content is not
     available on CPU; instead an empty repo whose HEAD check decides refusal."""
     home = tmp_path / "home"
