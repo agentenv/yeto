@@ -727,6 +727,23 @@ class IslandController:
         if not manifest.is_file():
             return None
         info = json.loads(manifest.read_text(encoding="utf-8"))
+        files = info.get("files")
+        if files is not None:
+            # rl-resume-from-checkpoint 1.3: every copied file is checked against the
+            # sha256 written at sync time before anything is restored (fail closed).
+            from .resume import StoreIntegrityError, copy_verified, sha256_file
+
+            bad = [rel for rel, meta in sorted(files.items())
+                   if not (store / rel).is_file() or sha256_file(store / rel) != meta["sha256"]]
+            if bad:
+                raise StoreIntegrityError(f"checkpoint store {store}: {len(bad)} file(s) differ from "
+                                          f"{STORE_MANIFEST}: {bad[:8]}")
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            for rel in sorted(files):
+                copy_verified(store / rel, self.state_dir / rel)
+            return {"restored_from": {k: info.get(k) for k in ("incarnation", "reason", "config_epoch",
+                                                                  "wall_time", "seq")},
+                    "verified_files": len(files)}
         self.state_dir.mkdir(parents=True, exist_ok=True)
         for child in store.iterdir():
             if child.name in (STORE_MANIFEST, STORE_ROUND_CUTS):
@@ -756,16 +773,19 @@ class IslandController:
                     "seq": int(self.journal.records[-1].get("seq", 0)) if self.journal.records else 0,
                     "layout": self.layout, "state_dir": str(self.state_dir)}
             try:
+                from .resume import copy_verified
+
                 store.mkdir(parents=True, exist_ok=True)
-                for child in self.state_dir.iterdir():
-                    if child.name == STORE_MANIFEST:
+                files: dict[str, dict[str, Any]] = {}
+                for path in sorted(self.state_dir.rglob("*")):
+                    rel = path.relative_to(self.state_dir)
+                    if (not path.is_file() or rel.parts[0] == STORE_MANIFEST
+                            or path.name == "journal.lock" or path.name.endswith(".tmp")):
                         continue
-                    target = store / child.name
-                    if child.is_dir():
-                        shutil.copytree(child, target, dirs_exist_ok=True,
-                                        ignore=shutil.ignore_patterns("journal.lock"))
-                    elif child.name != "journal.lock":
-                        shutil.copy2(child, target)
+                    # rl-resume-from-checkpoint 1.3: the copy is re-hashed against the source
+                    digest, size = copy_verified(path, store / rel)
+                    files[str(rel)] = {"sha256": digest, "bytes": size}
+                info["files"] = files
                 tmp = store / (STORE_MANIFEST + ".tmp")
                 tmp.write_text(json.dumps(info, sort_keys=True), encoding="utf-8")
                 tmp.replace(store / STORE_MANIFEST)

@@ -172,11 +172,17 @@ pub fn open<'a>(key: &[u8], msg_type: u8, payload: &'a [u8]) -> Result<&'a [u8]>
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ElasticMsg {
+    /// Body: syncer_epoch u64 | island_id u32 | incarnation u64 |
+    /// capacity f64 | backend_identity [32] (yeto-framework-decoupling 6.2a:
+    /// sha256 of the island's BackendIdentity; all zero = not declared).
+    /// The 32-byte field was added in s17-elastic-identity; older JOIN frames
+    /// (28-byte body) are refused, so old and new islands/syncers cannot mix.
     Join {
         syncer_epoch: u64,
         island_id: u32,
         incarnation: u64,
         capacity: f64,
+        backend_identity: [u8; 32],
     },
     JoinAck {
         syncer_epoch: u64,
@@ -303,10 +309,11 @@ impl ElasticMsg {
         let mut b = Vec::new();
         b.extend_from_slice(&self.syncer_epoch().to_le_bytes());
         match self {
-            Self::Join { island_id, incarnation, capacity, .. } => {
+            Self::Join { island_id, incarnation, capacity, backend_identity, .. } => {
                 b.extend_from_slice(&island_id.to_le_bytes());
                 b.extend_from_slice(&incarnation.to_le_bytes());
                 b.extend_from_slice(&capacity.to_bits().to_le_bytes());
+                b.extend_from_slice(backend_identity);
             }
             Self::JoinAck {
                 learner_slot,
@@ -391,6 +398,11 @@ impl ElasticMsg {
                 island_id: r.u32()?,
                 incarnation: r.u64()?,
                 capacity: f64_(&mut r)?,
+                backend_identity: r
+                    .take(32)
+                    .context("JOIN without backend identity (island older than the syncer?)")?
+                    .try_into()
+                    .context("backend identity")?,
             },
             MSG_JOIN_ACK => Self::JoinAck {
                 syncer_epoch,
@@ -1219,6 +1231,110 @@ mod tests {
     use super::*;
     use crate::protocol::*;
 
+    /// Golden replay: tests/test_rl_inter_island_rust_golden.py drives the
+    /// Python CrossIslandLedger (elastic) through a fixed scenario and writes
+    /// the expected step/weight/carried/rejected/dropped sequence; the Rust
+    /// coordinator must reproduce it op by op.
+    #[test]
+    fn python_ledger_golden_tape_matches() {
+        let text = include_str!("../tests/fixtures/elastic_ledger_golden.txt");
+        let close = |a: f64, b: f64| (a - b).abs() <= 1e-12;
+        let mut c: Option<ElasticCoordinator> = None;
+        let mut checked = 0;
+        for (n, line) in text.lines().enumerate() {
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            let t: Vec<&str> = line.split_whitespace().collect();
+            if t[0] == "params" {
+                let p = ElasticParams {
+                    quorum_theta: t[1].parse().unwrap(),
+                    carry_gamma: t[2].parse().unwrap(),
+                    soft_deadline_s: 900,
+                    q_min: t[3].parse().unwrap(),
+                    max_carry_lag: t[4].parse().unwrap(),
+                };
+                c = Some(ElasticCoordinator::new(p, t[5].parse().unwrap(), 0).unwrap());
+                continue;
+            }
+            let c = c.as_mut().expect("params line first");
+            let (lhs, rhs) = line.split_once(" => ").unwrap();
+            let a: Vec<&str> = lhs.split_whitespace().collect();
+            let e: Vec<&str> = rhs.split_whitespace().collect();
+            let id = |s: &str| s.parse::<u32>().unwrap();
+            let u = |s: &str| s.parse::<u64>().unwrap();
+            let ctx = format!("fixture line {}: {line}", n + 1);
+            match a[0] {
+                "join" => {
+                    let catch_up = c.join(id(a[1]), a[2].parse().unwrap(), a[3].parse().unwrap()).unwrap();
+                    assert_eq!(catch_up.to_string(), e[1], "{ctx}");
+                    assert_eq!(c.outer_version, u(e[2]), "{ctx}");
+                }
+                "leave" => {
+                    c.leave(id(a[1]), LEAVE_REASON_REQUESTED).unwrap();
+                    match c.tape.last().unwrap() {
+                        TapeEvent::PoolLeave { dropped_uncommitted, .. } => {
+                            let got = dropped_uncommitted
+                                .map(|d| format!("{} {} {}", d.base_version, d.c_tokens, d.c_steps))
+                                .unwrap_or_else(|| "none".into());
+                            assert_eq!(got, e[1..].join(" "), "{ctx}");
+                        }
+                        ev => panic!("{ctx}: {ev:?}"),
+                    }
+                }
+                "submit" => {
+                    let ev = c.submit(Delta {
+                        island_id: id(a[1]),
+                        base_version: u(a[2]),
+                        c_tokens: u(a[3]),
+                        c_steps: u(a[4]),
+                    });
+                    let got = match ev {
+                        TapeEvent::DeltaAccepted { .. } => "delta_accepted".to_string(),
+                        TapeEvent::DeltaCarriedOver { lag, .. } => format!("delta_carried_over {lag}"),
+                        TapeEvent::DeltaRejected { reason, .. } => format!("delta_rejected {reason}"),
+                        ev => panic!("{ctx}: {ev:?}"),
+                    };
+                    assert_eq!(got, rhs, "{ctx}");
+                }
+                "advance" => match (c.try_advance(a[1] == "1"), e[0]) {
+                    (None, "no_step") => assert_eq!(c.outer_version, u(e[1]), "{ctx}"),
+                    (Some(plan), "outer_step") => {
+                        assert_eq!(plan.base_version, u(e[1]), "{ctx}");
+                        let TapeEvent::OuterStep { arrived, cap_arrived, cap_total, absent, .. } =
+                            c.tape.last().unwrap().clone()
+                        else {
+                            panic!("{ctx}")
+                        };
+                        assert_eq!(arrived, e[2].parse::<usize>().unwrap(), "{ctx}");
+                        assert!(close(cap_arrived, e[3].parse().unwrap()), "{ctx}");
+                        assert!(close(cap_total, e[4].parse().unwrap()), "{ctx}");
+                        let want_absent: Vec<u32> =
+                            if e[5] == "-" { vec![] } else { e[5].split(',').map(id).collect() };
+                        assert_eq!(absent, want_absent, "{ctx}");
+                        let mut got = plan.weights.clone();
+                        got.sort_by(|x, y| (x.0, x.1).cmp(&(y.0, y.1)));
+                        let want: Vec<(u32, u64, f64)> = e[6]
+                            .split(',')
+                            .map(|w| {
+                                let f: Vec<&str> = w.split(':').collect();
+                                (id(f[0]), u(f[1]), f[2].parse().unwrap())
+                            })
+                            .collect();
+                        assert_eq!(got.len(), want.len(), "{ctx}");
+                        for (g, w) in got.iter().zip(&want) {
+                            assert!(g.0 == w.0 && g.1 == w.1 && close(g.2, w.2), "{ctx}: {g:?} vs {w:?}");
+                        }
+                    }
+                    (got, _) => panic!("{ctx}: got {got:?}"),
+                },
+                op => panic!("{ctx}: unknown op {op}"),
+            }
+            checked += 1;
+        }
+        assert_eq!(checked, 23, "fixture op count");
+    }
+
     fn params() -> ElasticParams {
         ElasticParams {
             quorum_theta: DEFAULT_QUORUM_THETA,
@@ -1342,7 +1458,7 @@ mod tests {
     #[test]
     fn all_frames_roundtrip_and_reject_tampering_and_wrong_key() {
         let msgs = vec![
-            ElasticMsg::Join { syncer_epoch: 3, island_id: 1, incarnation: 7, capacity: 2.5 },
+            ElasticMsg::Join { syncer_epoch: 3, island_id: 1, incarnation: 7, capacity: 2.5, backend_identity: [0xab; 32] },
             ElasticMsg::JoinAck {
                 syncer_epoch: 3,
                 learner_slot: 1,
@@ -1399,13 +1515,44 @@ mod tests {
         assert!(ElasticMsg::decode(b"k1", MSG_HEARTBEAT, &seal(b"k1", MSG_HEARTBEAT, vec![0; 8])).is_err());
     }
 
+    /// Golden JOIN frame (key b"k1"), the bytes the Python client
+    /// (tests/test_rl_inter_island_elastic_client.py RUST_GOLDEN[15]) must
+    /// produce; and the pre-identity 28-byte JOIN body is refused.
+    #[test]
+    fn join_frame_with_backend_identity_golden_and_old_format_refused() {
+        let m = ElasticMsg::Join {
+            syncer_epoch: 3,
+            island_id: 1,
+            incarnation: 7,
+            capacity: 2.5,
+            backend_identity: [0xab; 32],
+        };
+        let (t, p) = m.encode(b"k1");
+        assert_eq!(t, MSG_JOIN);
+        println!("JOIN_GOLDEN {}", hex(&p));
+        assert_eq!(hex(&p), JOIN_GOLDEN_HEX);
+        let mut old = Vec::new();
+        old.extend_from_slice(&3u64.to_le_bytes());
+        old.extend_from_slice(&1u32.to_le_bytes());
+        old.extend_from_slice(&7u64.to_le_bytes());
+        old.extend_from_slice(&2.5f64.to_bits().to_le_bytes());
+        let err = ElasticMsg::decode(b"k1", MSG_JOIN, &seal(b"k1", MSG_JOIN, old)).unwrap_err();
+        assert!(format!("{err:#}").contains("without backend identity"), "{err:#}");
+    }
+
+    const JOIN_GOLDEN_HEX: &str = "03000000000000000100000007000000000000000000000000000440abababababababababababababababababababababababababababababababab3d2faaa5418d42914e93471c8f79f008699aee2190bd1d505af97476e9ec21a7";
+
+    fn hex(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    }
+
     #[test]
     fn stale_syncer_epoch_is_fenced() {
         let mut c = ElasticCoordinator::new(params(), 30.0, 5).unwrap();
-        let old = ElasticMsg::Join { syncer_epoch: 4, island_id: 1, incarnation: 0, capacity: 1.0 };
+        let old = ElasticMsg::Join { syncer_epoch: 4, island_id: 1, incarnation: 0, capacity: 1.0, backend_identity: [0; 32] };
         assert!(format!("{:#}", c.apply(&old, 0.0).unwrap_err()).contains("fenced"));
         assert!(!c.is_member(1));
-        let cur = ElasticMsg::Join { syncer_epoch: 5, island_id: 1, incarnation: 0, capacity: 1.0 };
+        let cur = ElasticMsg::Join { syncer_epoch: 5, island_id: 1, incarnation: 0, capacity: 1.0, backend_identity: [0; 32] };
         assert!(matches!(c.apply(&cur, 0.0).unwrap(), Some(ElasticMsg::JoinAck { syncer_epoch: 5, .. })));
         let hb = ElasticMsg::LeaseHeartbeat { syncer_epoch: 4, island_id: 1, membership_epoch: 1, inner_step: 0, round_wall_s: 0.0 };
         assert!(c.apply(&hb, 1.0).is_err());

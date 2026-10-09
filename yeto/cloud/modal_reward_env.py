@@ -10,8 +10,8 @@ Behaviour is unchanged from the original location.
 
 from __future__ import annotations
 
+import base64
 import os
-import shlex
 from typing import Any
 
 from yeto.rl.harness.codex import tb2_provider as tb2
@@ -25,8 +25,20 @@ def modal_image(plan: PrebakePlan, *, prebake: bool = True) -> Any:
 
     image = Image.from_registry(plan.base_image)
     if prebake and not plan.empty:
-        image = image.run_commands("bash -lc " + shlex.quote(rt.prebake_script(plan)))
+        image = image.run_commands(prebake_run_command(plan))
     return image
+
+
+def prebake_run_command(plan: PrebakePlan) -> str:
+    """One Dockerfile ``RUN`` line for the multi-line prebake script.
+
+    A Dockerfile instruction cannot span raw newlines (S17 G3: Modal rejected
+    ``bash -lc '<multi-line>'`` with "could not parse Dockerfile"), so the
+    script travels base64-encoded and runs as a login shell from a temp file.
+    """
+    b64 = base64.b64encode(rt.prebake_script(plan).encode()).decode()
+    return (f"echo {b64} | base64 -d > /tmp/yeto-prebake.sh && bash -l /tmp/yeto-prebake.sh"
+            " && rm -f /tmp/yeto-prebake.sh")
 
 
 def _prebake_enabled() -> bool:

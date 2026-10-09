@@ -1,0 +1,106 @@
+{
+ "run": "s17-i3-c3-rbold2",
+ "rc": "rc=2",
+ "deliver": [
+  "island0",
+  "write",
+  "confirm",
+  "done"
+ ],
+ "injection_lines": [],
+ "rebuilt_events": [
+  {
+   "event": "rl_trainer_rebuilt",
+   "island_id": 0,
+   "policy_version": 4,
+   "rl/policy_token": "yeto:4:4de81c3b2b22065101d5c24c134eda4a089a7b99c4a007d036aef8c57e2dd11d",
+   "sync/publication_members": [
+    "engine:inference-engine-all-0-0-00000"
+   ],
+   "time_unix": 1791499843.289722
+  }
+ ],
+ "tape_reconfig_phases": [],
+ "journal_phases": [
+  [
+   "rb1",
+   "VALIDATING",
+   1791499711.2,
+   ""
+  ],
+  [
+   "rb1",
+   "WAIT_SAFE",
+   1791499711.2,
+   ""
+  ],
+  [
+   "rb1",
+   "REBUILDING_TRAINER",
+   1791499711.2,
+   ""
+  ],
+  [
+   "rb1",
+   "SUCCEEDED",
+   1791499843.3,
+   ""
+  ]
+ ],
+ "journal_source": "snapshot s17-i3-c3-rbold2/es-snapshots/1791499882-tail.tgz",
+ "recovery_records": [],
+ "rounds_trained": [
+  [
+   0,
+   1,
+   2
+  ],
+  [
+   1,
+   2,
+   4
+  ],
+  [
+   2,
+   3,
+   6
+  ],
+  [
+   3,
+   4,
+   8
+  ],
+  [
+   4,
+   5,
+   10
+  ],
+  [
+   5,
+   6,
+   12
+  ]
+ ],
+ "rounds_after_terminal": [
+  4,
+  5
+ ],
+ "cursor_monotonic": true,
+ "ledger_kinds": {
+  "prepared": 6,
+  "filtered": 6,
+  "carried_over_report": 6,
+  "optimizer_applied": 6,
+  "outer_recorded": 6
+ },
+ "optimizer_applied_dups": {},
+ "consumed_dups": {},
+ "finalized": true,
+ "terminal": [
+  "rb1",
+  "SUCCEEDED",
+  1791499843.3,
+  ""
+ ],
+ "rebuilding_to_terminal_s": 132.1
+}
