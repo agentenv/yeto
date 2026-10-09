@@ -642,8 +642,13 @@ def translate_run_config(
     *,
     extra_argv: Sequence[str] = (),
     tito_parser_resolver: Callable[[str], tuple[str | None, str | None]] | None = None,
+    max_policy_age: int = 0,
 ) -> MilesLaunchArgs:
-    """Pure translation of an ``RLRunConfig`` into upstream Miles argv."""
+    """Pure translation of an ``RLRunConfig`` into upstream Miles argv.
+
+    ``max_policy_age`` (--rl-max-policy-age, agentic-rollout-utilization 4.1):
+    0 adds nothing; N > 0 needs an algorithm tolerating N
+    (``execution.max_policy_staleness``) and appends Miles' partial rollout."""
 
     if not isinstance(algorithm, AlgorithmSpec):
         raise TypeError("algorithm must be an AlgorithmSpec")
@@ -845,6 +850,19 @@ def translate_run_config(
     # Non-default AlgorithmSpec v2 fields (empty for every v1 spec, so the
     # default GRPO argv is byte-identical to R0).
     values.extend(algorithm_argv(algorithm))
+    if max_policy_age:
+        from yeto.rl.engine.execution_profile import algorithm_max_policy_staleness
+
+        from .policy_age import SUPPORT, policy_age_argv
+
+        SUPPORT.check(max_policy_age)
+        tolerated = algorithm_max_policy_staleness(algorithm)
+        if tolerated < max_policy_age:
+            raise MilesConfigError(
+                f"--rl-max-policy-age {max_policy_age} needs an algorithm spec with "
+                f"execution.max_policy_staleness >= {max_policy_age} (and a TIS correction); "
+                f"the run's spec tolerates {tolerated}")
+        values.extend(policy_age_argv(max_policy_age))
     values.extend(critic_load_argv(config, algorithm))
 
     evaluation = config.eval

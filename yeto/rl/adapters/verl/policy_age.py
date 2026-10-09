@@ -6,6 +6,11 @@ derives ``async_training.staleness_threshold`` and ``partial_rollout`` of the
 fork's ``experimental/fully_async_policy`` from the limit; until then a limit
 > 0 is refused by the launcher before any machine starts, and the verl
 command line is unchanged at limit 0 (:func:`policy_age_overrides` is empty).
+
+6.4a (10-09): the translation between verl's fully_async bookkeeping and yeto's
+policy-age terms is :mod:`.fully_async_translate` (pure functions, unit tested);
+wiring it into a fully_async adapter path is 6.4b, so the declaration stays at
+stage 1 and a limit > 0 is still refused before launch.
 """
 
 from __future__ import annotations

@@ -1192,6 +1192,23 @@ class IslandDriver:
                   policy_version=int(getattr(batch, "policy_version", rollout_id)),
                   t=self.clock(), **self._labels(), **report.fields())
 
+    def _emit_carry_over(self, rollout_id: int, batch: Any) -> None:
+        """agentic-rollout-utilization 4.1: one ``rl_rollout_carry_over`` per round of a
+        limit > 0 run (carried in / back, discarded over the limit, cross-version
+        tokens and truncation). Limit 0: nothing (default tapes unchanged)."""
+        fields = getattr(batch, "carry_over", None)
+        if not fields:
+            return
+        groups = getattr(batch, "groups", ()) or ()
+        self.emit("rl_rollout_carry_over", rollout_id=rollout_id,
+                  policy_version=int(getattr(batch, "policy_version", rollout_id)),
+                  t=self.clock(), **self._labels(), **dict(fields),
+                  trained_groups_with_older_tokens=sum(
+                      1 for g in groups if getattr(g, "policy_versions", None)
+                      and min(g.policy_versions) < rollout_id),
+                  cross_version_truncated_fraction=getattr(
+                      batch, "cross_version_truncated_fraction", None))
+
     def _emit_trajectory_rewards(self, rollout_id: int, batch: Any) -> None:
         """rl-fn-codex-rollout 1.0 (observe only): one ``rl_trajectory_reward`` per
         trained sample the rollout reported (task_id + reward), capped per round."""
@@ -1331,6 +1348,14 @@ class IslandDriver:
         train_seconds = time.monotonic() - started
         raw = self.trainer.step_metrics()
         metrics = raw if isinstance(raw, TrainStepMetrics) else TrainStepMetrics(**dict(raw))
+        rollout_fraction = getattr(batch, "cross_version_truncated_fraction", None)
+        if metrics.cross_version_truncated_fraction is None and rollout_fraction is not None:
+            # agentic-rollout-utilization 4.1: an engine that estimates the
+            # cross-version truncation on the rollout side (Miles carry-over)
+            # reports it on the batch; the trainer metric wins when both exist.
+            import dataclasses as _dc
+
+            metrics = _dc.replace(metrics, cross_version_truncated_fraction=float(rollout_fraction))
         self._check_gradient(rollout_id, batch, receipt, metrics)
         self.trained_version = rollout_id + 1
         # rl-resume-from-checkpoint: a round cut records the next round's lr from this
@@ -1387,6 +1412,7 @@ class IslandDriver:
         )
         stats = self._stats(rollout_id, batch, metrics, rollout_seconds, train_seconds)
         self._emit_rollout_cutoff(rollout_id, batch)
+        self._emit_carry_over(rollout_id, batch)
         self._govern_policy_age(rollout_id, metrics)
         if self.observe:
             self._emit_round_labels(rollout_id, batch, metrics)

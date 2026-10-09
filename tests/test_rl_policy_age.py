@@ -57,14 +57,14 @@ def test_elastic_join_carries_the_bound_identity(monkeypatch):
     assert a != b
 
 
-@pytest.mark.parametrize("backend", ["miles", "verl"])
-def test_launcher_refuses_an_unsupported_limit_before_launch(backend):
+@pytest.mark.parametrize("backend,limit,stage", [("miles", 2, 2), ("verl", 1, 1)])
+def test_launcher_refuses_an_unsupported_limit_before_launch(backend, limit, stage):
     from tests.test_rl_launcher import _args
     from yeto.launcher import _prepare_rl_args
 
-    args = _args(["--rl-max-policy-age", "1"])
+    args = _args(["--rl-max-policy-age", str(limit)])
     args.rl_backend = backend
-    with pytest.raises(PolicyAgeError, match=f"backend '{backend}' supports up to stage 1"):
+    with pytest.raises(PolicyAgeError, match=f"backend '{backend}' supports up to stage {stage}"):
         _prepare_rl_args(args)
 
 
@@ -202,12 +202,13 @@ def test_miles_switches_are_derived_from_the_limit():
     from yeto.rl.engine.algorithm import AlgorithmSpec, AlgorithmSpecError, ExecutionSpec
 
     assert policy_age_argv(0) == ()
-    assert policy_age_argv(1) == ("--partial-rollout", "--mask-offpolicy-in-partial-rollout")
+    # 4.1: stage 2 keeps older tokens in the loss (TIS-corrected), no mask
+    assert policy_age_argv(1) == ("--partial-rollout",)
     assert "--partial-rollout" in af.mapped_flags()
     assert "--partial-rollout" not in af.UNMAPPED_OBJECTIVE_FLAGS
     row = af.MAPPINGS["--partial-rollout"]
     assert row.translate(AlgorithmSpec()) == []
-    assert row.translate(AlgorithmSpec(execution=ExecutionSpec(max_policy_staleness=1))) == [
-        "--partial-rollout", "--mask-offpolicy-in-partial-rollout"]
+    # 4.1: derived from the limit (translate_run_config), never from the spec's tolerance
+    assert row.translate(AlgorithmSpec(execution=ExecutionSpec(max_policy_staleness=1))) == []
     with pytest.raises((AlgorithmSpecError, ValueError), match="rl-max-policy-age"):
         af.absorb_extra_argv(AlgorithmSpec(), ["--partial-rollout"])

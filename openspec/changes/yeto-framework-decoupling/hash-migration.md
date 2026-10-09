@@ -211,3 +211,8 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
 
 - `MILES_NEXT_COMMIT` efbbc63ea → 2f7871fb2（agentenv/miles s18-abort-discard-stats：efbbc63ea 只改了 sglang_rollout.abort，实际在用的训练路径 inference_rollout_train.abort 没有丢弃统计；本提交补上同样的统计，且被丢弃的多余组即使抛错也不再让 abort 失败）。镜像 `yeto-miles-ports:2f7871f-2fa8801@sha256:62b4f164…`，构建记录 `openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-09-2f7871f-2fa8801/`。8 个样本的 ports_runtime_fingerprint / backend_identity 随 Miles 提交变化。
 - `codex_openenv_subprocess_agent_function.py`：abort 钩子覆盖拿沙箱（打标记、拿到后立即销毁）、会话准备、工作进程、判分四段；租约已被 HarnessBoard 强制释放时记基础设施失败而不是让整轮崩溃。codex_harness 样本该插件 `source_sha256` `fbb48c5c…` → `bf3a62d2…`。算法哈希、契约哈希不变。
+
+## S18 agentic-rollout-utilization 4.1：Miles 单轮续跑（分支 s18-aru-stage2，2026-10-09）
+
+- 默认 0：Miles 命令行、算法哈希、契约哈希、`fake_engine_tapes.json` 逐字节不变；只有插件源码 `yeto/rl/adapters/miles/rollout_meta_hook.py` 变了（落后上限 >0 时的缓冲过滤与版本段记账、回退通道），8 个样本里该插件三处 `source_sha256` `c58d994a…` → `a9937979…`，其余字段不变（`python tests/decoupling_golden.py --write` 后 diff 只有这 24 行）。
+- 非 0（Miles 现支持到阶段 2、上限 1）：命令行多一个 `--partial-rollout`（不再带 `--mask-offpolicy-in-partial-rollout`，见 tasks 4.1），岛身份、契约哈希、算法哈希按第 2 组规则变化。

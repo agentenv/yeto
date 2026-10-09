@@ -172,6 +172,10 @@ def _status(sample: Any) -> str:
     return str(getattr(status, "value", status) or "")
 
 
+from yeto.rl.adapters.miles import carry_over as _carry  # noqa: E402
+from yeto.rl.engine.policy_age import token_version  # noqa: E402
+
+
 def group_record(args: Any, group: Sequence[Any]) -> dict[str, Any]:
     samples = _flat(group)
     indices = [getattr(s, "index", None) for s in samples]
@@ -192,6 +196,16 @@ def group_record(args: Any, group: Sequence[Any]) -> dict[str, Any]:
         token = ""
     else:  # mixed policies inside one group can never match one snapshot
         token = "mixed:" + "|".join(sorted(versions))
+    carry = {}
+    if versions and _carry.max_policy_age(args) > 0:
+        # agentic-rollout-utilization 4.1: under a limit > 0 a carried-over group
+        # spans versions; its token names the OLDEST one (the driver checks it
+        # is a published version within the window) and its version segments
+        # are listed. Unparsable tokens keep "mixed:" (refused, fail closed).
+        numbered = {v: token_version(v) for v in versions}
+        if None not in numbered.values():
+            token = min(versions, key=lambda v: numbered[v])
+            carry = _carry.group_versions_record(group)
     rewards = [_reward(args, s) for s in samples]
     finite = [r for r in rewards if math.isfinite(r)]
     return {
@@ -205,6 +219,7 @@ def group_record(args: Any, group: Sequence[Any]) -> dict[str, Any]:
         ),
         "aborted": any(_status(s) == "aborted" for s in samples),
         "_key": list(_group_key(group)),
+        **carry,
     }
 
 
@@ -354,6 +369,11 @@ def build_metadata(
         ),
         **extra,
     }
+    limit = _carry.max_policy_age(args)
+    if limit > 0:
+        # agentic-rollout-utilization 4.1: carry-over accounting (limit > 0 only;
+        # the default key set is unchanged).
+        payload.update(carry_over_fields(args, trained_samples, sink))
     if tool_wait > 0:
         # 1.7: time trajectories spent outside generation (tool calls), summed
         # over every generated sample (Miles Sample.non_generation_time).
@@ -383,6 +403,27 @@ def build_metadata(
         if records:
             payload[TITO_SESSION_MISMATCH_RECORDS_KEY] = records
     return payload
+
+
+def carry_over_fields(args: Any, trained_samples: Sequence[Any],
+                      sink: str | None = None, scorer: Any = None) -> dict[str, Any]:
+    """4.1 rollout-metadata fields under a limit > 0: what the buffer filter carried
+    in / discarded this round, the trained cross-version tokens and the estimated
+    cross-version IS truncated fraction (:mod:`.carry_over`)."""
+    token = current_policy_token(sink)
+    version = token_version(token) if token else None
+    fields: dict[str, Any] = {"max_policy_age": _carry.max_policy_age(args)}
+    fields.update(_carry.take_carry_stats(args, version))
+    if version is None:
+        return fields
+    crossed, total = _carry.cross_version_tokens(trained_samples, version)
+    fields["cross_version_tokens"] = crossed
+    fields["trained_response_tokens"] = total
+    if crossed:
+        fields.update(_carry.estimate_cross_version_truncation(
+            args, trained_samples, version,
+            scorer if scorer is not None else _carry.router_prefill_scorer(args)))
+    return fields
 
 
 # IR-3/IR-4 sample-metadata keys written by agentic generate code (codex-harness
@@ -520,6 +561,7 @@ def trajectory_reward_records(
     out: list[dict[str, Any]] = []
     if limit <= 0:
         return out
+    carry_round = current_round_id((), None) if _carry.max_policy_age(args) > 0 else None
     for group in all_samples:
         samples = _flat(group)
         if not samples or (trained is not None and _group_key(group) not in trained):
@@ -543,6 +585,8 @@ def trajectory_reward_records(
                 "success": success if isinstance(success, bool) else None,
                 "aborted": _status(s) == "aborted",
                 **trajectory_diagnostics(meta),
+                **(_carry.trajectory_fields(s, carry_round)
+                   if _carry.max_policy_age(args) > 0 else {}),
             })
     return out
 
@@ -704,6 +748,40 @@ def sink_available() -> bool:
     return bool(ray.is_initialized())
 
 
+MAX_POLICY_AGE_FILE = "max-policy-age"
+
+
+def put_max_policy_age(limit: int, sink: str | None = None) -> None:
+    """Driver side (3.5 governor fallback): lower the rollout's policy-age limit."""
+    sink = sink or os.environ.get(META_SINK_ENV) or DEFAULT_SINK
+    kind, _, target = sink.partition(":")
+    if kind == "dir":
+        directory = Path(target)
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / MAX_POLICY_AGE_FILE).write_text(str(int(limit)), encoding="utf-8")
+        return
+    if kind == "ray":
+        import ray
+
+        ray.get(ray.get_actor(target or DEFAULT_SINK_ACTOR).set_limit.remote(int(limit)))
+        return
+    raise ValueError(f"unknown rollout metadata sink {sink!r}")
+
+
+def max_policy_age_override(sink: str | None = None) -> int | None:
+    """Rollout side: the limit set by :func:`put_max_policy_age` (None = not lowered)."""
+    sink = sink or os.environ.get(META_SINK_ENV) or DEFAULT_SINK
+    kind, _, target = sink.partition(":")
+    if kind == "dir":
+        path = Path(target) / MAX_POLICY_AGE_FILE
+        return int(path.read_text(encoding="utf-8")) if path.exists() else None
+    if kind == "ray":
+        import ray
+
+        return ray.get(ray.get_actor(target or DEFAULT_SINK_ACTOR).get_limit.remote())
+    raise ValueError(f"unknown rollout metadata sink {sink!r}")
+
+
 def current_policy_token(sink: str | None = None) -> str | None:
     """Rollout side: the token stored by :func:`put_policy_token`, if any."""
 
@@ -739,6 +817,15 @@ def policy_buffer_filter(args: Any, _rollout_id: Any, buffer: list, num_samples:
     """
 
     token = current_policy_token()
+    limit = _carry.max_policy_age(args)
+    if limit > 0:
+        # agentic-rollout-utilization 4.1: unfinished groups put back by Miles'
+        # partial-rollout abort continue while within the policy-age limit.
+        version = token_version(token) if token else None
+        if version is None:
+            raise RuntimeError(f"carry-over buffer filter without a published policy token ({token!r})")
+        return _carry.carry_over_buffer_filter(args, buffer, num_samples,
+                                               current_version=version, limit=limit)
     size = getattr(args, "n_samples_per_prompt", None)
     kept = [g for g in buffer if group_matches_policy(g, token, size)]
     selected, buffer[:] = kept[:num_samples], kept[num_samples:]
@@ -835,7 +922,15 @@ def extract_rollout_metadata(args: Any, all_samples: Any, data_source: Any = Non
             if buffer_length is not None:
                 payload["buffer_length"] = buffer_length
         submitted = submitted_groups(args, data_source)
-        if submitted is not None:
+        if submitted is not None and payload.get("max_policy_age"):
+            # 4.1: under partial rollout the abort does not discard; the groups
+            # submitted (new + resubmitted from the buffer) and not completed
+            # went back to the buffer to continue next round.
+            generated = payload["completed"] + payload["filtered"]
+            payload["submitted_groups"] = submitted
+            payload["carried_out_groups"] = max(
+                0, submitted + int(payload.get("resubmitted_groups", 0)) - generated)
+        elif submitted is not None:
             generated = payload["completed"] + payload["filtered"]
             payload["submitted_groups"] = submitted
             # submitted but not completed when the batch filled: aborted in

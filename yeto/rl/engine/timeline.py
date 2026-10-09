@@ -245,6 +245,9 @@ TRAJECTORY_REWARD_OPTIONAL: dict[str, tuple[type, ...]] = {
     # agentic-rollout-utilization 6.2: oldest/newest generating version of a
     # carried-over trajectory (absent at limit 0: every token is current)
     "policy_versions": (list,),
+    # agentic-rollout-utilization 4.1: the round a carried-over trajectory
+    # started in (Miles ``start_rollout_id``); absent at limit 0
+    "started_rollout_id": (int,),
 }
 
 

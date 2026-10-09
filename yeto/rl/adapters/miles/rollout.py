@@ -37,6 +37,7 @@ from .rollout_meta_hook import (
     DEFAULT_SINK_ACTOR,
     METADATA_SCHEMA,
     ROUND_META_SCHEMA,
+    put_max_policy_age,
     put_policy_token,
 )
 
@@ -232,7 +233,9 @@ async def running_members(controller: Any) -> frozenset[str]:
 
 
 def require_policy_tokens(batch: RolloutBatchHandle, expected_token: str) -> None:
-    bad = batch.mismatched_groups(expected_token)
+    # A group carrying version segments (limit > 0, 4.1) names its oldest version;
+    # the driver checked it against the policy-age window before training.
+    bad = tuple(g for g in batch.mismatched_groups(expected_token) if not g.policy_versions)
     if bad:
         raise PolicyTokenMismatch(expected_token, bad)
 
@@ -258,6 +261,9 @@ class DirMetadataSource:
 
     def set_policy_token(self, token: str) -> None:
         put_policy_token(token, self.sink_spec)
+
+    def set_max_policy_age(self, limit: int) -> None:
+        put_max_policy_age(limit, self.sink_spec)
 
     def take(self, rollout_id: int) -> dict[str, Any]:
         for name in (f"rollout-{rollout_id}.json", "rollout-latest.json"):
@@ -310,6 +316,14 @@ def _sink_actor_class():
         def get_token(self) -> str | None:
             return self._token
 
+        # agentic-rollout-utilization 3.5/4.1: the run's policy-age limit after a
+        # governor fallback (None = the configured limit; only ever lowered).
+        def set_limit(self, limit: int) -> None:
+            self._limit = int(limit)
+
+        def get_limit(self) -> int | None:
+            return getattr(self, "_limit", None)
+
         def put(self, encoded: str) -> None:
             self._pending.append(encoded)
 
@@ -337,6 +351,9 @@ class RayMetadataSink:
 
     def set_policy_token(self, token: str) -> None:
         self._ray.get(self._actor.set_token.remote(token))
+
+    def set_max_policy_age(self, limit: int) -> None:
+        self._ray.get(self._actor.set_limit.remote(int(limit)))
 
     def take(self, rollout_id: int) -> dict[str, Any]:
         deadline = time.monotonic() + self.timeout_s
@@ -388,6 +405,10 @@ def handle_from_metadata(
             filtered_samples=(
                 int(g["filtered_samples"]) if g.get("filtered_samples") is not None else None
             ),
+            # 4.1: version segments of a carried-over group (limit > 0 only)
+            policy_versions=(
+                tuple(int(v) for v in g["policy_versions"]) if g.get("policy_versions") else None
+            ),
         )
         for g in payload["groups"]
     )
@@ -412,7 +433,10 @@ def handle_from_metadata(
         # leftovers (cut-audit §3): the ports path forbids partial rollout, so the
         # only reuse is the data buffer; a reported empty buffer means 0.
         filtered=int(payload["filtered"]) if "filtered" in payload else None,
-        carried_over=0 if payload.get("buffer_length") == 0 else None,
+        # Limit > 0 (agentic-rollout-utilization 4.1): partial rollout puts the
+        # groups not completed back into the buffer; their count is reported.
+        carried_over=(int(payload["carried_out_groups"]) if "carried_out_groups" in payload
+                      else 0 if payload.get("buffer_length") == 0 else None),
         data_cursor=payload.get("data_cursor"),
         buffer_length=payload.get("buffer_length"),
         submitted_groups=payload.get("submitted_groups"),
@@ -439,7 +463,27 @@ def handle_from_metadata(
         trajectory_rewards=(
             tuple(payload["trajectory_rewards"]) if payload.get("trajectory_rewards") else None
         ),
+        carry_over=_carry_over_fields(payload),
+        cross_version_truncated_fraction=(
+            float(payload["cross_version_truncated_fraction"])
+            if payload.get("cross_version_truncated_fraction") is not None else None
+        ),
     )
+
+
+_CARRY_OVER_KEYS = (
+    "max_policy_age", "carried_out_groups", "cross_version_tokens", "trained_response_tokens",
+    "cross_version_scored_tokens", "cross_version_unscored_samples",
+)
+
+
+def _carry_over_fields(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """4.1: the carry-over accounting of a limit > 0 rollout (None at limit 0)."""
+    if not payload.get("max_policy_age"):
+        return None
+    from .carry_over import CARRY_FIELDS
+
+    return {k: payload[k] for k in (*_CARRY_OVER_KEYS, *CARRY_FIELDS) if k in payload}
 
 
 def _http_get_json(url: str, timeout_s: float = 2.0) -> Any:
@@ -594,6 +638,15 @@ class MilesRolloutPool:
         self._bundles = bundles
         self._gpus_per_engine = gpus_per_engine
         self._bind_seq = 0
+
+    def set_max_policy_age(self, limit: int) -> None:
+        """3.5 governor fallback (driver optional verb): lower the rollout side's
+        policy-age limit; the buffer filter then keeps only current complete
+        groups (limit-0 rule) and the metadata stops carrying version segments."""
+        setter = getattr(self._metadata, "set_max_policy_age", None)
+        if not callable(setter):
+            raise RuntimeError("this rollout metadata sink cannot lower the policy-age limit")
+        setter(int(limit))
 
     def live_data_cursor(self) -> tuple[dict[str, int] | None, int | None]:
         """The data source position NOW (and its reuse-buffer length), read inside
