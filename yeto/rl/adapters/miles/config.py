@@ -675,6 +675,8 @@ def translate_run_config(
         "global_batch_size": config.batch.global_batch,
         "lr_decay_iters": (config.algorithm.lr_schedule.decay_iters
                            if config.algorithm.lr_schedule is not None else None),
+        "lr_decay_style": (config.algorithm.lr_schedule.decay_style
+                           if config.algorithm.lr_schedule is not None else None),
     })
     if problems:
         raise MilesConfigError("algorithm spec rejected for this run: " + "; ".join(problems))

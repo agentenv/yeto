@@ -259,3 +259,45 @@ def critic_lr_warmup_problems(spec: AlgorithmSpec, values: Mapping[str, Any]) ->
 
 
 register_launch_check("critic_lr_warmup", critic_lr_warmup_problems)
+
+
+def critic_lr_horizon_problems(spec: AlgorithmSpec, values: Mapping[str, Any]) -> list[str]:
+    """A decaying LR schedule must cover every critic optimizer step.
+
+    yeto's linear/cosine schedule passes an explicit ``--lr-decay-iters`` =
+    actor steps, and Miles shares it with the critic (fork model.py only fills
+    ``lr_decay_iters`` when it is None).  With ``critic_updates_per_step`` = N > 1
+    the critic takes N x actor steps, so it trains at LR 0 for the last
+    (N-1)/N of the run (S14 SAO G1 s14-forkg1-sao-20261007a: decay 12, warmup
+    10, 24 critic steps -> critic LR 0 from step 12; values stuck near 0.05,
+    EV <= 0 every round).  A constant schedule never decays."""
+
+    if not spec.execution.needs_critic:
+        return []
+    style, decay = values.get("lr_decay_style"), values.get("lr_decay_iters")
+    if style in (None, "constant") or not decay:
+        return []
+    argv = tuple(values.get("extra_argv", ()))
+    overridden = ("--lr-decay-iters", "--lr-decay-style", "--num-rollout", "--global-batch-size",
+                  "--n-samples-per-prompt", "--rollout-batch-size", "--num-critic-epochs",
+                  "--critic-updates-per-step")
+    if any(_flag_values(argv, f) for f in overridden):
+        return []
+    try:
+        rounds, groups = int(values["num_rollout"]), int(values["rollout_batch_size"])
+        samples, gbs = int(values["n_samples_per_prompt"]), int(values["global_batch_size"])
+    except (KeyError, TypeError, ValueError):
+        return []
+    if rounds <= 0 or gbs <= 0:
+        return []
+    epochs = spec.critic.critic_updates_per_step or 1
+    critic_steps = rounds * groups * samples * epochs // gbs
+    if critic_steps > int(decay):
+        return [f"lr schedule {style!r} decays over {decay} iters, shared by the critic, but the "
+                f"critic takes {critic_steps} optimizer steps (critic_updates_per_step={epochs}); "
+                f"it would train at LR 0 for {critic_steps - int(decay)} steps. "
+                "Use --rl-lr-schedule constant"]
+    return []
+
+
+register_launch_check("critic_lr_horizon", critic_lr_horizon_problems)
