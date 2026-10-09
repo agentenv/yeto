@@ -1,6 +1,7 @@
 """rl-eval-difficulty-buckets 4.1 (D5): training batch summary by difficulty."""
 
 from types import SimpleNamespace
+import pytest
 
 
 from yeto.rl.adapters.miles import rollout_meta_hook as hook
@@ -39,6 +40,7 @@ def _group(gi, diffs):
             for i, d in enumerate(diffs)]
 
 
+@pytest.mark.ray_local  # build_metadata -> current_policy_token auto-starts Ray
 def test_build_metadata_adds_by_bucket_only_with_difficulty():
     args = SimpleNamespace(yeto_rl_observe_timeline=True)
     data = [_group(0, ["easy", "hard"]), _group(1, ["hard", "hard"])]

@@ -721,8 +721,19 @@ def test_public_cli_security_defaults_are_fail_closed():
 
 def test_production_tree_has_no_unsafe_torch_load_or_forced_remote_code():
     root = Path(__file__).parents[1] / "yeto"
+    # One exception: the Miles rollout hook runs inside the Miles process, which
+    # already loads this tokenizer with trust_remote_code=True (Miles data_source and
+    # sglang_rollout do the same call). Only this file and only this one call.
+    allowed = {
+        root / "rl/adapters/miles/rollout_meta_hook.py":
+            "load_tokenizer(args.hf_checkpoint, trust_remote_code=True)",
+    }
     for path in root.rglob("*.py"):
         source = path.read_text(encoding="utf-8")
+        if path in allowed:
+            assert source.count("trust_remote_code=True") == 1, path
+            assert source.count(allowed[path]) == 1, path
+            source = source.replace(allowed[path], "")
         assert "trust_remote_code=True" not in source, path
         tree = ast.parse(source, filename=str(path))
         for node in ast.walk(tree):

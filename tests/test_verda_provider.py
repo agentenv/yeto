@@ -342,7 +342,7 @@ def test_down_uses_recorded_names_verbatim(tmp_path, monkeypatch):
     # A run from before the lower-casing: its names are what sky knows.
     runs.update_run("old", pid=None, clusters=["old-syncer", "old-l0-FIN-03"])
     downed = []
-    monkeypatch.setattr(cli, "_down_and_verify", lambda c: downed.append(c) or True)
+    monkeypatch.setattr(cli, "_down_and_verify", lambda c, num_nodes=1: downed.append(c) or True)
     assert cli.main(["down", "old"]) == 0
     assert sorted(downed) == ["old-l0-FIN-03", "old-syncer"]
 

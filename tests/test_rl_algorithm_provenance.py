@@ -253,6 +253,11 @@ def test_launcher_hash_equals_learner_hash_without_absorption(tmp_path):
 
 
 def test_export_records_algorithm_like_the_event(tmp_path):
+    pytest.importorskip(
+        "accelerate",
+        reason="needs accelerate for yeto.rl.export (installed in the training image; "
+        "not in the local test venv)",
+    )
     from test_rl_export import (
         MODEL_REVISION, _model, _write_checkpoint, canonical_layout_hash,
         derive_peft_lora_specs, export_rl_checkpoint,

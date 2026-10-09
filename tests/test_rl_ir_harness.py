@@ -92,7 +92,7 @@ def test_ir1_append_roles_accepted_for_signed_codex_agent_when_equal_to_profile(
     assert "--tito-allowed-append-roles" not in " ".join(map(str, launch.argv))
     assert "--tito-model" in launch.argv
     bad = sub(c, "agent", tito_allowed_append_roles=("tool",))
-    with pytest.raises(cfg.UnmappedConfigError, match="fixes the append roles"):
+    with pytest.raises(cfg.UnmappedConfigError, match=r"fix the\s+append roles"):
         cfg.translate_run_config(bad, AlgorithmSpec(), tito_parser_resolver=stub)
 
 

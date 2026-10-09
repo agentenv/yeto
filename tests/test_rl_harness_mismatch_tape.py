@@ -18,6 +18,10 @@ from yeto.rl.engine.fake import FakeEngine, fake_capabilities
 from yeto.rl.adapters.miles import rollout_meta_hook as hook
 from yeto.rl.adapters.miles.rollout import handle_from_metadata
 
+# Where upstream Miles imports, the hook takes the real Ray path and starts Ray here
+# (S15, 10-07: dozens of workers). Run only with --run-ray-local.
+pytestmark = pytest.mark.ray_local
+
 KEY = hook.TITO_SESSION_MISMATCH_KEY
 RKEY = hook.TITO_SESSION_MISMATCH_RECORDS_KEY
 

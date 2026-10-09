@@ -692,10 +692,13 @@ fn validate_config(cfg: &Config) -> Result<()> {
         if cfg.learner_weight != LearnerWeight::Equal {
             bail!("--policy-sweep-fragments requires --learner-weight equal");
         }
-        if cfg.checkpoint_path.is_none() || cfg.checkpoint_every != 1 || !cfg.resume {
+        // --resume is not required here: a fresh sweep has no checkpoint yet and
+        // --resume refuses a missing file (see check_resume_checkpoint). The
+        // launcher adds --resume only when the checkpoint exists.
+        if cfg.checkpoint_path.is_none() || cfg.checkpoint_every != 1 {
             bail!(
-                "--policy-sweep-fragments requires --checkpoint-path, \
-                 --checkpoint-every 1, and --resume for crash-safe sweeps"
+                "--policy-sweep-fragments requires --checkpoint-path and \
+                 --checkpoint-every 1 for crash-safe sweeps"
             );
         }
     }
@@ -804,6 +807,23 @@ fn validate_resumed_policy_sweep(cfg: &Config, st: &GlobalState) -> Result<()> {
     Ok(())
 }
 
+/// `--resume` must point at an existing checkpoint file.
+fn check_resume_checkpoint(cfg: &Config) -> Result<()> {
+    if cfg.resume {
+        let path = cfg
+            .checkpoint_path
+            .as_ref()
+            .context("--resume requires --checkpoint-path")?;
+        if !path.is_file() {
+            bail!(
+                "--resume checkpoint does not exist or is not a file: {}",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 pub async fn run(cfg: Config) -> Result<()> {
     validate_config(&cfg)?;
     if let crate::elastic::IslandSchedulingMode::Elastic(params) = cfg.island_scheduling {
@@ -841,18 +861,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         info!(outer_version = version, "elastic syncer finished");
         return Ok(());
     }
-    if cfg.resume {
-        let path = cfg
-            .checkpoint_path
-            .as_ref()
-            .context("--resume requires --checkpoint-path")?;
-        if !path.is_file() {
-            bail!(
-                "--resume checkpoint does not exist or is not a file: {}",
-                path.display()
-            );
-        }
-    }
+    check_resume_checkpoint(&cfg)?;
     let semantic_profile_hash = cfg.semantic_profile_hash();
     if let Some(steps) = cfg.learner_budget_steps {
         if !(1..=u32::MAX as u64).contains(&steps) {
@@ -4372,13 +4381,49 @@ mod tests {
         for mutate in [
             |config: &mut Config| config.checkpoint_path = None,
             |config: &mut Config| config.checkpoint_every = 2,
-            |config: &mut Config| config.resume = false,
         ] {
             invalid = sweep_test_config(2, 4);
             mutate(&mut invalid);
             assert!(format!("{:#}", validate_config(&invalid).unwrap_err())
                 .contains("requires --checkpoint-path"));
         }
+    }
+
+    #[test]
+    fn policy_sweep_first_start_needs_no_resume_and_resume_needs_a_file() {
+        // A fresh sweep starts without --resume (no checkpoint exists yet).
+        let mut fresh = sweep_test_config(2, 4);
+        fresh.resume = false;
+        assert!(validate_config(&fresh).is_ok());
+        assert!(check_resume_checkpoint(&fresh).is_ok());
+
+        let directory = std::env::temp_dir().join(format!(
+            "yeto-sweep-resume-file-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let checkpoint = directory.join("state.ckpt");
+
+        // --resume with a missing file still fails (sweep and non-sweep).
+        let mut sweep = sweep_test_config(2, 4);
+        sweep.checkpoint_path = Some(checkpoint.clone());
+        let mut legacy = round_test_config(3);
+        legacy.checkpoint_path = Some(checkpoint.clone());
+        legacy.resume = true;
+        for config in [&sweep, &legacy] {
+            assert!(format!("{:#}", check_resume_checkpoint(config).unwrap_err())
+                .contains("does not exist or is not a file"));
+        }
+
+        // A restart with --resume and a checkpoint file is accepted.
+        std::fs::write(&checkpoint, b"x").unwrap();
+        assert!(check_resume_checkpoint(&sweep).is_ok());
+        assert!(check_resume_checkpoint(&legacy).is_ok());
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 
     #[test]

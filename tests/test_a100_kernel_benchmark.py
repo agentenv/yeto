@@ -11,8 +11,11 @@ from pathlib import Path
 from types import MethodType, SimpleNamespace
 
 import huggingface_hub
-import peft
 import pytest
+
+peft = pytest.importorskip(
+    "peft", reason="needs peft (installed in the training image; not in the local test venv)"
+)
 import torch
 import transformers
 

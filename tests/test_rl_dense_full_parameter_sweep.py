@@ -1,4 +1,5 @@
 import socket
+import shutil
 import subprocess
 import threading
 import time
@@ -32,6 +33,9 @@ from yeto.rl.local_learner import (
     parameter_cut_from_fragment_flats,
     parameter_values,
 )
+
+_NEEDS_CARGO = ("needs cargo to build the syncer (put ~/.cargo/bin on PATH; "
+                "see docs/TESTING.md)")
 
 
 _CENTRAL_DENSE_ATOL = 1e-7
@@ -427,6 +431,7 @@ def test_wire_replays_only_exact_uncommitted_pull_before_advancing_sweep():
     assert client.acked == FinalManifest(2, (1, 2))
 
 
+@pytest.mark.skipif(shutil.which("cargo") is None, reason=_NEEDS_CARGO)
 def test_two_real_clients_match_central_grpo_for_identical_frozen_batch(tmp_path):
     root = Path(__file__).resolve().parent.parent
     subprocess.run(["cargo", "build", "-q"], cwd=root / "syncer", check=True)
@@ -466,7 +471,8 @@ def test_two_real_clients_match_central_grpo_for_identical_frozen_batch(tmp_path
             str(checkpoint),
             "--checkpoint-every",
             "1",
-            "--resume",
+            # No --resume: the syncer rejects --resume when the checkpoint
+            # file does not exist (d4c72cd7), and this run starts fresh.
             "--max-base-lag",
             "0",
             "--learner-weight",
@@ -559,6 +565,7 @@ def test_two_real_clients_match_central_grpo_for_identical_frozen_batch(tmp_path
             process.wait(timeout=5)
 
 
+@pytest.mark.skipif(shutil.which("cargo") is None, reason=_NEEDS_CARGO)
 def test_two_real_clients_resume_mid_sweep_without_double_accounting(tmp_path):
     root = Path(__file__).resolve().parent.parent
     subprocess.run(["cargo", "build", "-q"], cwd=root / "syncer", check=True)
@@ -597,7 +604,6 @@ def test_two_real_clients_resume_mid_sweep_without_double_accounting(tmp_path):
         str(checkpoint),
         "--checkpoint-every",
         "1",
-        "--resume",
         "--max-base-lag",
         "0",
         "--learner-weight",
@@ -703,8 +709,10 @@ def test_two_real_clients_resume_mid_sweep_without_double_accounting(tmp_path):
 
         process.kill()
         assert process.wait(timeout=5) != 0
+        # Restart from the durable checkpoint. The first start has no
+        # checkpoint yet, and the syncer rejects --resume without one.
         process = subprocess.Popen(
-            command,
+            [*command, "--resume"],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
