@@ -46,7 +46,11 @@ FULLY_ASYNC_PLACEMENT = "fixed-partition"
 DISCARD_MECHANISM = "yeto policy-age discard (verl fully_async queue)"
 
 # Sync-path overrides that do not apply to the fully_async (legacy) trainer.
-_SYNC_ONLY_PREFIXES = ("trainer.use_v1=", "trainer.v1.trainer_mode=", "trainer.n_gpus_per_node=")
+# ``data.train_batch_size`` is replaced: FullyAsyncRollouter asserts it is 0
+# (prompts are pulled one at a time, ``gen_batch_size=1``); the batch size of a
+# round is ``ppo_mini_batch_size * require_batches``.
+_SYNC_ONLY_PREFIXES = ("trainer.use_v1=", "trainer.v1.trainer_mode=", "trainer.n_gpus_per_node=",
+                       "data.train_batch_size=")
 
 # Overrides the island re-reads from the resolved config (initialisation assertions).
 FULLY_ASYNC_ASSERTED_KEYS = (
@@ -59,7 +63,67 @@ FULLY_ASYNC_ASSERTED_KEYS = (
     "rollout.n_gpus_per_node",
     "trainer.n_gpus_per_node",
     "data.gen_batch_size",
+    "data.train_batch_size",
     "actor_rollout_ref.hybrid_engine",
+)
+
+
+def fully_async_startup_problems(lookup) -> list[str]:
+    """Every config assertion the fork (acad9875) runs while the fully_async
+    island starts, evaluated on the composed config (``lookup(dotted_key)``).
+
+    Sources (fork ``verl/experimental/fully_async_policy``):
+    ``fully_async_rollouter.py`` 350-364 (``__init__``), 733 (``_validate_config``),
+    842 (``_init_async_rollout_manager``); ``fully_async_trainer.py`` 76;
+    ``fully_async_main.py`` 228.  Found one by one on GPU before (dbg1:
+    hybrid_engine; async3: train_batch_size), so the set is checked as a whole
+    here and in the Modal CPU dry run.  Returns the failing checks."""
+    def num(key):
+        v = lookup(key)
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    def at_least(key, low):
+        v = num(key)
+        return v is not None and v >= low
+
+    def truthy(key):
+        return str(lookup(key)).strip().lower() == "true"
+
+    checks = [
+        ("actor_rollout_ref.hybrid_engine is False", not truthy("actor_rollout_ref.hybrid_engine")),
+        ("data.train_batch_size == 0", num("data.train_batch_size") == 0),
+        ("data.gen_batch_size == 1", num("data.gen_batch_size") == 1),
+        ("async_training.staleness_threshold >= 0",
+         at_least("async_training.staleness_threshold", 0)),
+        ("async_training.trigger_parameter_sync_step >= 1",
+         at_least("async_training.trigger_parameter_sync_step", 1)),
+        ("reward model off or enable_resource_pool",
+         not truthy("reward.reward_model.enable") or truthy("reward.reward_model.enable_resource_pool")),
+        ("actor_rollout_ref.rollout.calculate_log_probs", truthy("actor_rollout_ref.rollout.calculate_log_probs")),
+        ("actor_rollout_ref.rollout.mode == async", str(lookup("actor_rollout_ref.rollout.mode")) == "async"),
+        ("async_training present", lookup("async_training") is not None),
+        ("async_training.require_batches >= 1", at_least("async_training.require_batches", 1)),
+        ("actor_rollout_ref.actor.ppo_mini_batch_size >= 1",
+         at_least("actor_rollout_ref.actor.ppo_mini_batch_size", 1)),
+    ]
+    return [name for name, ok in checks if not ok]
+
+
+# Assertion lines in the fork's fully_async startup path that
+# :func:`fully_async_startup_problems` mirrors (whitespace-stripped prefixes).
+# The dry run greps the image's sources; a line not covered here fails it.
+FORK_STARTUP_ASSERTS = (
+    "assert not self.hybrid_engine",
+    "assert self.config.data.train_batch_size == 0",
+    "assert self.config.data.gen_batch_size == 1",
+    "assert self.config.async_training.staleness_threshold >= 0",
+    "assert self.config.async_training.trigger_parameter_sync_step >= 1",
+    "assert self.config.reward.reward_model.enable_resource_pool",
+    "assert self.config.actor_rollout_ref.rollout.calculate_log_probs",
+    "assert self.config.actor_rollout_ref.rollout.mode == \"async\"",
 )
 
 
@@ -95,6 +159,9 @@ def fully_async_run_overrides(sync_overrides: Sequence[str], limit: int, *, grou
         # this key, so without this override the config default True kills the
         # island at startup (s19-verl64b-dbg1-20261009a, exit 1 after 86 s).
         "actor_rollout_ref.hybrid_engine=False",
+        # FullyAsyncRollouter asserts train_batch_size == 0 (fork
+        # fully_async_rollouter.py:351; s19-verl64b-async3-20261009a died here).
+        "data.train_batch_size=0",
     ]
     return out
 

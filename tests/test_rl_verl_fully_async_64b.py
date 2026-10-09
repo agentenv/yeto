@@ -362,3 +362,79 @@ def test_fully_async_hydra_entry_uses_an_absolute_config_dir(tmp_path, monkeypat
                     "version_base": None}
     with pytest.raises(RuntimeError):
         verl_main.fully_async_hydra_entry(types.SimpleNamespace(__file__=fa_main.__file__, main=inner))
+
+
+# Fork (acad9875) config defaults for the keys the fully_async startup asserts
+# read: ppo_trainer.yaml + fully_async_ppo_trainer.yaml.
+_FORK_DEFAULTS = {
+    "actor_rollout_ref.hybrid_engine": True,
+    "data.train_batch_size": 1024,
+    "data.gen_batch_size": 1,
+    "async_training": {},
+    "async_training.staleness_threshold": 0.1,
+    "async_training.trigger_parameter_sync_step": 4,
+    "async_training.require_batches": 1,
+    "reward.reward_model.enable": False,
+    "reward.reward_model.enable_resource_pool": False,
+    "actor_rollout_ref.rollout.calculate_log_probs": True,
+    "actor_rollout_ref.rollout.mode": "async",
+    "actor_rollout_ref.actor.ppo_mini_batch_size": 256,
+}
+
+
+def _composed(overrides):
+    cfg = dict(_FORK_DEFAULTS)
+    for o in overrides:
+        key, _, value = o.lstrip("+").partition("=")
+        cfg[key] = value
+    return cfg.get
+
+
+def test_fully_async_overrides_pass_every_fork_startup_assert():
+    """s19-verl64b-async3-20261009a: FullyAsyncRollouter asserted
+    train_batch_size == 0.  All startup asserts are checked together now."""
+    import yeto.rl.adapters.verl.config as vconf
+
+    run = vconf.VerlRunConfig(model_path="/m", train_file="/t", val_file="/v", out_dir="/o",
+                              groups_per_round=32, samples_per_group=4, correction="tis")
+    sync = vconf.build_overrides(run)
+    out = far.fully_async_run_overrides(sync, 1, groups_per_round=32, rounds=5)
+    assert far.fully_async_startup_problems(_composed(out)) == []
+    assert sum(o.startswith("data.train_batch_size=") for o in out) == 1
+    assert "data.train_batch_size=0" in out and "data.gen_batch_size=1" in out
+    # the sync overrides alone trip the two asserts found on GPU (dbg1, async3)
+    assert set(far.fully_async_startup_problems(_composed(sync))) == {
+        "actor_rollout_ref.hybrid_engine is False", "data.train_batch_size == 0"}
+
+
+def test_startup_problems_flag_each_broken_key():
+    import yeto.rl.adapters.verl.config as vconf
+
+    run = vconf.VerlRunConfig(model_path="/m", train_file="/t", val_file="/v", out_dir="/o",
+                              groups_per_round=8, samples_per_group=4)
+    good = far.fully_async_run_overrides(vconf.build_overrides(run), 1, groups_per_round=8, rounds=5)
+    for bad, name in [("data.gen_batch_size=2", "data.gen_batch_size == 1"),
+                      ("async_training.staleness_threshold=-1", "async_training.staleness_threshold >= 0"),
+                      ("async_training.trigger_parameter_sync_step=0",
+                       "async_training.trigger_parameter_sync_step >= 1"),
+                      ("actor_rollout_ref.rollout.calculate_log_probs=False",
+                       "actor_rollout_ref.rollout.calculate_log_probs"),
+                      ("actor_rollout_ref.rollout.mode=sync", "actor_rollout_ref.rollout.mode == async"),
+                      ("reward.reward_model.enable=True", "reward model off or enable_resource_pool")]:
+        assert far.fully_async_startup_problems(_composed([*good, bad])) == [name], bad
+
+
+_FORK = Path("/home/michael/work/verl-fork-acad9875/verl/experimental/fully_async_policy")
+
+
+@pytest.mark.skipif(not _FORK.is_dir(), reason="local verl fork checkout not present")
+def test_mirror_covers_every_config_assert_in_the_fork_startup_path():
+    lines = []
+    for name in ("fully_async_rollouter.py", "fully_async_trainer.py"):
+        for line in (_FORK / name).read_text().splitlines():
+            t = line.strip()
+            if t.startswith("assert") and ("self.config" in t or "hybrid_engine" in t) \
+                    and "resume_from_path" not in t:
+                lines.append(t)
+    uncovered = [t for t in lines if not t.startswith(far.FORK_STARTUP_ASSERTS)]
+    assert lines and uncovered == []
