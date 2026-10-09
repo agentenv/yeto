@@ -163,7 +163,8 @@ def publish_selftest(island, publisher, policy_state, specs) -> dict:
             "tamper_detected": detected, "seconds": time.time() - t0}
 
 
-def build_sync(plan: dict, specs, *, lora_hash: str, layout_hash: str, identity_sha256: str):
+def build_sync(plan: dict, specs, *, lora_hash: str, layout_hash: str, identity_sha256: str,
+               compat_group: str | None = None):
     """Outer sync of the island plan: none / strict / elastic (both trainer paths)."""
     from yeto.rl.engine.bridges import ElasticAvgSync, LocalOnlySync, StrictAvgSync
 
@@ -183,7 +184,7 @@ def build_sync(plan: dict, specs, *, lora_hash: str, layout_hash: str, identity_
             expected_specs=tuple(specs), base_model_revision=plan["model_revision"],
             lora_config_hash=lora_hash, layout_hash=layout_hash, event_tape=plan["event_tape"],
             wan_streams=int(plan.get("wan_streams", 4)),
-            backend_identity_sha256=identity_sha256)
+            backend_identity_sha256=identity_sha256, compat_group=compat_group)
         if mode == "strict":
             sync = StrictAvgSync(bridge, progress=None)
         elif mode == "elastic":
@@ -239,13 +240,16 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
                         tis_upper=float(plan.get("tis_upper", 2.0)),
                         thresholds_key=plan["thresholds_key"],
                         emit=lambda event, **f: tape.append({"event": event, **f}))
-    identity = backend_identity()
+    from yeto.hw.catalog import runtime_versions
+
+    identity = backend_identity(compat_group=plan.get("compat_group"))  # 7.7a: unset -> error
+    tape.append({"event": "rl_island_hardware", "compat_group": identity.compat_group, **runtime_versions()})
     tape.append({"event": "rl_verl_island_start", "plan": plan, "backend_identity": identity.to_dict(),
                  "backend_identity_sha256": identity.sha256(), "layout_hash": layout_hash,
                  "lora_config_hash": lora_hash, "n_specs": len(specs), "asserted": asserted,
                  "init_seconds": time.time() - t0})
     sync = build_sync(plan, specs, lora_hash=lora_hash, layout_hash=layout_hash,
-                      identity_sha256=identity.sha256())
+                      identity_sha256=identity.sha256(), compat_group=identity.compat_group)
     spec = (AlgorithmSpec.from_dict(plan["algorithm_spec"]) if plan.get("algorithm_spec")
             else AlgorithmSpec())
     publisher = VerlPublisher(island, strict=bool(plan.get("publish_strict", True)))
@@ -302,13 +306,17 @@ def run_fully_async_island(call, start_rollouter, plan: dict, cfg: dict) -> dict
         base_model_revision=plan["model_revision"], lora_config_hash=lora_hash,
         layout_hash=layout_hash, expected_specs=specs)
     call("yeto_configure", float(plan.get("tis_upper", 2.0)), list(plan["thresholds_key"]))
-    identity = backend_identity()
+    from yeto.hw.catalog import runtime_versions
+
+    identity = backend_identity(compat_group=plan.get("compat_group"))  # 7.7a: unset -> error
+    tape.append({"event": "rl_island_hardware", "compat_group": identity.compat_group, **runtime_versions()})
     identity_sha = bind_policy_age(identity.sha256(), limit)
     tape.append({"event": "rl_verl_island_start", "plan": plan, "backend_identity": identity.to_dict(),
                  "backend_identity_sha256": identity_sha, "layout_hash": layout_hash,
                  "lora_config_hash": lora_hash, "n_specs": len(specs), "asserted": asserted,
                  "fully_async": True, "max_policy_age": limit, "init_seconds": time.time() - t0})
-    sync = build_sync(plan, specs, lora_hash=lora_hash, layout_hash=layout_hash, identity_sha256=identity_sha)
+    sync = build_sync(plan, specs, lora_hash=lora_hash, layout_hash=layout_hash, identity_sha256=identity_sha,
+                      compat_group=identity.compat_group)
     spec = AlgorithmSpec.from_dict(plan["algorithm_spec"]) if plan.get("algorithm_spec") else AlgorithmSpec()
     profile = execution_profile_for(spec, limit, groups_per_round=int(plan["groups_per_round"]),
                                     samples_per_group=int(plan["samples_per_group"]), sync=plan["sync"])

@@ -183,6 +183,11 @@ pub enum ElasticMsg {
         incarnation: u64,
         capacity: f64,
         backend_identity: [u8; 32],
+        /// yeto-framework-decoupling 7.7c: "<vendor>-<card>" (e.g.
+        /// "nvidia-h100"), u32 length + utf-8 after backend_identity; empty =
+        /// not declared. Added in s19-compat (version boundary: JOIN frames
+        /// without it are refused).
+        compat_group: String,
     },
     JoinAck {
         syncer_epoch: u64,
@@ -309,11 +314,12 @@ impl ElasticMsg {
         let mut b = Vec::new();
         b.extend_from_slice(&self.syncer_epoch().to_le_bytes());
         match self {
-            Self::Join { island_id, incarnation, capacity, backend_identity, .. } => {
+            Self::Join { island_id, incarnation, capacity, backend_identity, compat_group, .. } => {
                 b.extend_from_slice(&island_id.to_le_bytes());
                 b.extend_from_slice(&incarnation.to_le_bytes());
                 b.extend_from_slice(&capacity.to_bits().to_le_bytes());
                 b.extend_from_slice(backend_identity);
+                put_str(&mut b, compat_group);
             }
             Self::JoinAck {
                 learner_slot,
@@ -403,6 +409,8 @@ impl ElasticMsg {
                     .context("JOIN without backend identity (island older than the syncer?)")?
                     .try_into()
                     .context("backend identity")?,
+                compat_group: get_str(&mut r)
+                    .context("JOIN without compat_group (island older than the syncer?)")?,
             },
             MSG_JOIN_ACK => Self::JoinAck {
                 syncer_epoch,
@@ -1458,7 +1466,7 @@ mod tests {
     #[test]
     fn all_frames_roundtrip_and_reject_tampering_and_wrong_key() {
         let msgs = vec![
-            ElasticMsg::Join { syncer_epoch: 3, island_id: 1, incarnation: 7, capacity: 2.5, backend_identity: [0xab; 32] },
+            ElasticMsg::Join { syncer_epoch: 3, island_id: 1, incarnation: 7, capacity: 2.5, backend_identity: [0xab; 32], compat_group: String::new() },
             ElasticMsg::JoinAck {
                 syncer_epoch: 3,
                 learner_slot: 1,
@@ -1526,6 +1534,7 @@ mod tests {
             incarnation: 7,
             capacity: 2.5,
             backend_identity: [0xab; 32],
+            compat_group: "nvidia-h100".to_string(),
         };
         let (t, p) = m.encode(b"k1");
         assert_eq!(t, MSG_JOIN);
@@ -1536,11 +1545,15 @@ mod tests {
         old.extend_from_slice(&1u32.to_le_bytes());
         old.extend_from_slice(&7u64.to_le_bytes());
         old.extend_from_slice(&2.5f64.to_bits().to_le_bytes());
-        let err = ElasticMsg::decode(b"k1", MSG_JOIN, &seal(b"k1", MSG_JOIN, old)).unwrap_err();
+        let err = ElasticMsg::decode(b"k1", MSG_JOIN, &seal(b"k1", MSG_JOIN, old.clone())).unwrap_err();
         assert!(format!("{err:#}").contains("without backend identity"), "{err:#}");
+        // s19-compat: a JOIN with the identity but without compat_group is refused.
+        old.extend_from_slice(&[0xab; 32]);
+        let err = ElasticMsg::decode(b"k1", MSG_JOIN, &seal(b"k1", MSG_JOIN, old)).unwrap_err();
+        assert!(format!("{err:#}").contains("without compat_group"), "{err:#}");
     }
 
-    const JOIN_GOLDEN_HEX: &str = "03000000000000000100000007000000000000000000000000000440abababababababababababababababababababababababababababababababab3d2faaa5418d42914e93471c8f79f008699aee2190bd1d505af97476e9ec21a7";
+    const JOIN_GOLDEN_HEX: &str = "03000000000000000100000007000000000000000000000000000440abababababababababababababababababababababababababababababababab0b0000006e76696469612d68313030d76ccd494a9ee9bb15d43cdcafb727ab8d0c651b9b81c6481e80ff4084314b4c";
 
     fn hex(b: &[u8]) -> String {
         b.iter().map(|x| format!("{x:02x}")).collect()
@@ -1549,10 +1562,10 @@ mod tests {
     #[test]
     fn stale_syncer_epoch_is_fenced() {
         let mut c = ElasticCoordinator::new(params(), 30.0, 5).unwrap();
-        let old = ElasticMsg::Join { syncer_epoch: 4, island_id: 1, incarnation: 0, capacity: 1.0, backend_identity: [0; 32] };
+        let old = ElasticMsg::Join { syncer_epoch: 4, island_id: 1, incarnation: 0, capacity: 1.0, backend_identity: [0; 32], compat_group: String::new() };
         assert!(format!("{:#}", c.apply(&old, 0.0).unwrap_err()).contains("fenced"));
         assert!(!c.is_member(1));
-        let cur = ElasticMsg::Join { syncer_epoch: 5, island_id: 1, incarnation: 0, capacity: 1.0, backend_identity: [0; 32] };
+        let cur = ElasticMsg::Join { syncer_epoch: 5, island_id: 1, incarnation: 0, capacity: 1.0, backend_identity: [0; 32], compat_group: String::new() };
         assert!(matches!(c.apply(&cur, 0.0).unwrap(), Some(ElasticMsg::JoinAck { syncer_epoch: 5, .. })));
         let hb = ElasticMsg::LeaseHeartbeat { syncer_epoch: 4, island_id: 1, membership_epoch: 1, inner_step: 0, round_wall_s: 0.0 };
         assert!(c.apply(&hb, 1.0).is_err());

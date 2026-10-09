@@ -453,7 +453,14 @@ struct SessionSpec {
     layout_fingerprint: [u8; 32],
     session_contract_hash: [u8; 32],
     syncer_profile_hash: Option<[u8; 32]>,
+    /// yeto-framework-decoupling 7.7c: "<vendor>-<card>" from the optional
+    /// HELLO trailer; empty = not declared (older or generic clients).
+    compat_group: String,
 }
+
+/// Magic of the optional HELLO compat_group trailer (after num_streams):
+/// b"YCG1" | u32 length | utf-8. Older syncers refuse it (trailing bytes).
+const HELLO_COMPAT_MAGIC: &[u8; 4] = b"YCG1";
 
 struct ParsedHello {
     learner_id: u32,
@@ -466,6 +473,7 @@ struct ParsedHello {
     num_streams: u16,
     max_init_payload: u64,
     max_push_payload: u64,
+    compat_group: String,
 }
 
 #[derive(Default)]
@@ -957,6 +965,10 @@ fn negotiated_payload_limits(layout: &Layout, dtype: u8) -> Result<(u64, u64)> {
     Ok((max_init, max_push))
 }
 
+fn group_label(g: &str) -> &str {
+    if g.is_empty() { "未声明" } else { g }
+}
+
 fn hex32(h: &[u8; 32]) -> String {
     h.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -972,6 +984,15 @@ fn admit_session(session: &Session, offered: SessionSpec) -> Option<String> {
             None
         }
         Some(expected) if expected == &offered => None,
+        Some(expected) if expected.compat_group != offered.compat_group => Some(format!(
+            "session mismatch (HELLO refused, session keeps running): \
+             兼容组不同：{} 对 {}，容差未标定 (compat_group differs: expected {}, got {}; \
+             tolerance not calibrated)",
+            group_label(&expected.compat_group),
+            group_label(&offered.compat_group),
+            group_label(&expected.compat_group),
+            group_label(&offered.compat_group),
+        )),
         Some(expected) => Some(format!(
             "session mismatch (HELLO refused, session keeps running): \
              expected session_contract_hash={} layout_fingerprint={} dtype={} fragments={}, \
@@ -986,6 +1007,23 @@ fn admit_session(session: &Session, offered: SessionSpec) -> Option<String> {
             offered.layout.fragments.len(),
         )),
     }
+}
+
+/// Length of the optional compat_group trailer at the end of `rest` (the
+/// HELLO bytes after the session contract hash), 0 when there is none. The
+/// part before the trailer must be 2 (num_streams) or 34 (profile +
+/// num_streams) bytes; the trailer is b"YCG1" | u32 n | n bytes, 1 <= n <= 64.
+fn hello_compat_trailer_len(rest: &[u8]) -> usize {
+    for base in [2usize, 34] {
+        if rest.len() < base + 8 || &rest[base..base + 4] != HELLO_COMPAT_MAGIC {
+            continue;
+        }
+        let n = u32::from_le_bytes(rest[base + 4..base + 8].try_into().unwrap()) as usize;
+        if (1..=64).contains(&n) && rest.len() == base + 8 + n {
+            return 8 + n;
+        }
+    }
+    0
 }
 
 fn parse_hello(payload: &[u8], expected_learners: u32) -> Result<ParsedHello> {
@@ -1016,7 +1054,11 @@ fn parse_hello(payload: &[u8], expected_learners: u32) -> Result<ParsedHello> {
         .take(32)?
         .try_into()
         .context("session contract hash must be 32 bytes")?;
-    let syncer_profile_hash = match r.remaining() {
+    // Optional compat_group trailer (7.7c) after num_streams: find where the
+    // trailer starts so the profile extension is still decided by length.
+    let trailer_len = hello_compat_trailer_len(r.0);
+    let ext_len = r.remaining() - trailer_len;
+    let syncer_profile_hash = match ext_len {
         // Legacy/non-SAO HELLO.
         2 => None,
         // Profile-bound HELLO. Keeping the extension before num_streams lets
@@ -1029,6 +1071,13 @@ fn parse_hello(payload: &[u8], expected_learners: u32) -> Result<ParsedHello> {
         remaining => bail!("invalid HELLO profile extension length {remaining}"),
     };
     let num_streams = r.u16()?;
+    let compat_group = if trailer_len == 0 {
+        String::new()
+    } else {
+        let _magic = r.take(4)?;
+        let n = r.u32()? as usize;
+        String::from_utf8(r.take(n)?.to_vec()).context("HELLO compat_group is not utf-8")?
+    };
     if r.remaining() != 0 {
         bail!("trailing bytes in HELLO");
     }
@@ -1047,6 +1096,7 @@ fn parse_hello(payload: &[u8], expected_learners: u32) -> Result<ParsedHello> {
         num_streams,
         max_init_payload,
         max_push_payload,
+        compat_group,
     })
 }
 
@@ -1122,6 +1172,7 @@ async fn handle_connection(
                 num_streams,
                 max_init_payload,
                 max_push_payload,
+                compat_group,
             } = parsed;
             let profile_error = match syncer_profile_hash {
                 Some(offered) if offered != semantic_profile_hash => {
@@ -1145,6 +1196,7 @@ async fn handle_connection(
                 layout_fingerprint,
                 session_contract_hash,
                 syncer_profile_hash,
+                compat_group,
             };
             // Strict and elastic alike: a HELLO whose contract differs from the
             // established session is refused on this connection only (MSG_ERROR
@@ -3837,7 +3889,32 @@ mod tests {
             layout_fingerprint: [fingerprint; 32],
             session_contract_hash: [contract; 32],
             syncer_profile_hash: None,
+            compat_group: "nvidia-h100".to_string(),
         }
+    }
+
+    /// yeto-framework-decoupling 7.7c: legacy HELLO with another compat_group
+    /// (H200 or Ascend island in an H100 session) is refused with both groups
+    /// named, the session is untouched; same group H200/H200 is admitted.
+    #[test]
+    fn hello_with_other_compat_group_is_refused_naming_both_card_types() {
+        let layout = Layout { fragments: Vec::new() };
+        let session: Session = Arc::new(Mutex::new(None));
+        let h100 = spec(DTYPE_F32, &layout, 0xaf, 0x4f);
+        assert_eq!(admit_session(&session, h100.clone()), None);
+        for group in ["nvidia-h200", "ascend-910b"] {
+            let mut other = spec(DTYPE_F32, &layout, 0xaf, 0x50);
+            other.compat_group = group.to_string();
+            let message = admit_session(&session, other).expect("must refuse");
+            assert!(message.starts_with("session mismatch"), "{message}");
+            assert!(message.contains(&format!("兼容组不同：nvidia-h100 对 {group}，容差未标定")), "{message}");
+        }
+        assert_eq!(session.lock().unwrap().as_ref(), Some(&h100));
+        let session: Session = Arc::new(Mutex::new(None));
+        let mut h200 = spec(DTYPE_F32, &layout, 0xaf, 0x4f);
+        h200.compat_group = "nvidia-h200".to_string();
+        assert_eq!(admit_session(&session, h200.clone()), None);
+        assert_eq!(admit_session(&session, h200), None);
     }
 
     #[test]

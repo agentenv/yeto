@@ -311,6 +311,7 @@ function islands(){
     (c.stopped_by_us?'<span>停机</span><span>我方停机（'+esc((O.operator_stop||{}).cause)+'，依据 '+esc((O.operator_stop||{}).marker)+'）</span>':"")+
     (c.nodes||[]).map(function(n){var pk=Math.max.apply(null,(n.gpu_mem_used_mib_peak||[0]).concat([0]));
       return '<span>节点 '+esc(n.node)+'</span><span class="num">显存峰值 '+(pk/1024).toFixed(1)+' GiB · 利用率 '+(fin(n.gpu_util_pct)?f(n.gpu_util_pct,0)+"%":"未采样")+'</span>'}).join("")+
+    (ex.hardware?'<span>卡型 / 驱动 / CUDA</span><span>'+esc(ex.hardware.compat_group||"未声明")+' / '+esc(ex.hardware.driver_version||"未记录")+' / '+esc(ex.hardware.cuda_version||"未记录")+'</span>':"")+
     '<span>cell / 事务</span><span class="num">'+esc(ex.cells||0)+' / '+esc(ex.transactions||0)+'</span>'+
     '<span>Ray 面板</span><span>'+esc(re.note||(re.command?re.command:"本机 :"+re.port))+'</span></div></details>'}).join("")||'<div class="note">无数据</div>';
 }

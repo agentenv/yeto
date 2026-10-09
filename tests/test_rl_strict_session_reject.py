@@ -57,10 +57,10 @@ def _contract(identity: str) -> bytes:
     return session_contract_hash(layout_fingerprint(_layout()), identity)
 
 
-def _verl(port, learner_id, identity=VERL_ID):
+def _verl(port, learner_id, identity=VERL_ID, compat_group="nvidia-h100"):
     client = SyncerClient(("127.0.0.1", port), learner_id, _layout(), dtype=DTYPE_F32,
                           num_streams=0, connect_timeout=10,
-                          session_contract_hash=_contract(identity))
+                          session_contract_hash=_contract(identity), compat_group=compat_group)
     client.start()
     return client
 
@@ -73,7 +73,8 @@ MILES_ISLAND = textwrap.dedent("""
     from test_rl_integration import _layout
     contract = session_contract_hash(layout_fingerprint(_layout()), {miles!r})
     client = SyncerClient(("127.0.0.1", {port}), 1, _layout(), dtype=DTYPE_F32, num_streams=0,
-                          connect_timeout=10, session_contract_hash=contract, max_reconnects=0)
+                          connect_timeout=10, session_contract_hash=contract, max_reconnects=0,
+                          compat_group={group!r})
     try:
         client.start()
         deadline = time.monotonic() + 15
@@ -87,10 +88,18 @@ MILES_ISLAND = textwrap.dedent("""
 """)
 
 
-@pytest.mark.parametrize("good,intruder", [(VERL_ID, MILES_ID), (VERL_LINEAR, VERL_CONSTANT)],
-                         ids=["backend-identity", "lr-schedule"])
+# decoupling 7.7c: same backend, other card type (H200 or Ascend island in an
+# H100 session); the identity hash differs too because compat_group is in it.
+H200_ID = "c" * 64
+
+
+@pytest.mark.parametrize("good,intruder,group", [(VERL_ID, MILES_ID, "nvidia-h100"),
+                                                 (VERL_LINEAR, VERL_CONSTANT, "nvidia-h100"),
+                                                 (VERL_ID, H200_ID, "nvidia-h200"),
+                                                 (VERL_ID, H200_ID, "ascend-910b")],
+                         ids=["backend-identity", "lr-schedule", "compat-h200", "compat-ascend"])
 def test_mismatched_hello_is_refused_without_stopping_the_session(syncer_binary, tmp_path,
-                                                                    good, intruder):
+                                                                    good, intruder, group):
     port = _port()
     tape = tmp_path / "syncer.jsonl"
     process = _start(syncer_binary, port, tmp_path / "state.ckpt", rounds=3, learners=2,
@@ -111,14 +120,17 @@ def test_mismatched_hello_is_refused_without_stopping_the_session(syncer_binary,
         # A Miles island dials in mid-run with learner id 1 (as a mis-wired relaunch would).
         miles = subprocess.run(
             [sys.executable, "-c", MILES_ISLAND.format(tests=str(ROOT / "tests"), miles=intruder,
-                                                         port=port)],
+                                                         port=port, group=group)],
             capture_output=True, text=True, timeout=60,
             env={**os.environ, "PYTHONPATH": f"{ROOT}:{os.environ.get('PYTHONPATH', '')}"})
         (tmp_path / "miles.stderr").write_text(miles.stderr)
         assert miles.returncode == 1, miles.stdout + miles.stderr
         assert "StrictRlInvariantError: syncer refused this island" in miles.stderr
-        assert "expected session_contract_hash=" + _contract(good).hex() in miles.stderr
-        assert "got session_contract_hash=" + _contract(intruder).hex() in miles.stderr
+        if group == "nvidia-h100":
+            assert "expected session_contract_hash=" + _contract(good).hex() in miles.stderr
+            assert "got session_contract_hash=" + _contract(intruder).hex() in miles.stderr
+        else:
+            assert f"兼容组不同：nvidia-h100 对 {group}，容差未标定" in miles.stderr
         assert process.poll() is None, "syncer must keep running"
 
         # The two verl islands finish the remaining rounds unaffected.

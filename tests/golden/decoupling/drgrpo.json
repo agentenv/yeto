@@ -56,12 +56,13 @@
   "schema": "yeto-rl-algorithm-spec-v2"
  },
  "backend_identity": {
+  "compat_group": "nvidia-h100",
   "device_family": "nvidia",
   "engine": "miles",
   "engine_commit": "ddce20992c9ee82270a22e259e9e2bf55f3053d1",
   "param_map_sha256": "36c37d691b6372ee86485cf0f7d4f8d5e185a6346b875aac33380518ee8f259a",
-  "schema": "yeto-backend-identity-v1",
-  "sha256": "494bbabad8be621190811ee4522bd6f6243d414c1bc5af3faae50274315eb528"
+  "schema": "yeto-backend-identity-v2",
+  "sha256": "6950281c0e2c371174028a5b0baa4b696144c0652ac481284cc2c082af827ad5"
  },
  "execution_profile": {
   "contract_hash": "sha256:bf82d9e79e11047714673c97a0c60a9c80ac6673763a0052ed90d86a3cd2cf93",

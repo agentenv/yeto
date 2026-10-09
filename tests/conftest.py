@@ -26,7 +26,14 @@ def pytest_configure(config):
     )
 
 
+import os as _os
+
 import pytest as _pytest
+
+# decoupling 7.7a: islands must declare a compat_group (no default in code).
+# Unit tests that build identities at import time run as one H100 island;
+# tests of the missing-value error delete it with monkeypatch.
+_os.environ.setdefault("YETO_RL_COMPAT_GROUP", "nvidia-h100")
 
 
 @_pytest.fixture(autouse=True)

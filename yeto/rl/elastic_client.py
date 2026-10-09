@@ -100,6 +100,7 @@ class Join:
     incarnation: int
     capacity: float
     backend_identity: bytes = bytes(32)  # BackendIdentity.sha256() bytes; zero = not declared
+    compat_group: str = ""  # 7.7c: "<vendor>-<card>"; empty = not declared
     TYPE = MSG_JOIN
 
 
@@ -302,6 +303,7 @@ def encode(msg: Any, key: bytes) -> tuple[int, bytes]:
         if len(msg.backend_identity) != 32:
             raise ElasticProtocolError("JOIN backend_identity must be 32 bytes")
         b += bytes(msg.backend_identity)
+        b += _str(msg.compat_group or "")
     elif isinstance(msg, JoinAck):
         b += struct.pack("<IQQ", msg.learner_slot, msg.membership_epoch, msg.base_version)
         b += _hash32(msg.policy_hash) + bytes([int(bool(msg.catch_up))])
@@ -384,7 +386,12 @@ def decode(key: bytes, msg_type: int, payload: bytes) -> Any:
         except ElasticProtocolError as exc:
             raise ElasticProtocolError(
                 "JOIN without backend identity (island older than the syncer?)") from exc
-        msg = Join(epoch, island, incarnation, capacity, identity)
+        try:
+            group = r.text()
+        except ElasticProtocolError as exc:
+            raise ElasticProtocolError(
+                "JOIN without compat_group (island older than the syncer?)") from exc
+        msg = Join(epoch, island, incarnation, capacity, identity, group)
         if not (msg.capacity > 0 and msg.capacity != float("inf")):
             raise ElasticProtocolError("JOIN capacity must be > 0")
     elif msg_type == MSG_JOIN_ACK:
@@ -502,6 +509,9 @@ class ElasticClientConfig:
     # declared (32 zero bytes). The syncer refuses a JOIN whose identity differs
     # from the one the session's first JOIN pinned.
     backend_identity_sha256: str | None = None
+    # 7.7c: compat_group sent in every JOIN ("" = not declared); the syncer pins
+    # the first one and refuses another group, naming both.
+    compat_group: str | None = None
 
     def backend_identity_bytes(self) -> bytes:
         value = self.backend_identity_sha256
@@ -699,7 +709,7 @@ class ElasticIslandClient:
                 self._rejoin_base_seq = self._base_seq
             try:
                 self._send(Join(c.syncer_epoch, c.island_id, c.incarnation, float(c.capacity),
-                                c.backend_identity_bytes()))
+                                c.backend_identity_bytes(), c.compat_group or ""))
                 ok = self._ack.wait(c.join_timeout_s) and self.ack is not None
             except Exception as exc:  # noqa: BLE001
                 self.errors.append(f"rejoin: {exc}")
@@ -752,7 +762,7 @@ class ElasticIslandClient:
         self._threads.append(reader)
         c = self.config
         self._send(Join(c.syncer_epoch, c.island_id, c.incarnation, float(c.capacity),
-                                c.backend_identity_bytes()))
+                                c.backend_identity_bytes(), c.compat_group or ""))
         if not self._ack.wait(c.join_timeout_s) or self.ack is None:
             raise ElasticProtocolError("JOIN refused or timed out: " + "; ".join(self.errors))
         self._open_heartbeat_connection()
