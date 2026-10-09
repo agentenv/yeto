@@ -45,8 +45,10 @@ def dryrun():
 
     from yeto.rl.adapters.verl import config as vconf
     from yeto.rl.adapters.verl import island_entry, patch_verl
-    from yeto.rl.adapters.verl.fully_async_round import (FULLY_ASYNC_ASSERTED_KEYS,
-                                                         fully_async_run_overrides)
+    from yeto.rl.adapters.verl.fully_async_round import (FORK_STARTUP_ASSERTS,
+                                                         FULLY_ASYNC_ASSERTED_KEYS,
+                                                         fully_async_run_overrides,
+                                                         fully_async_startup_problems)
     from yeto.rl.adapters.verl.fully_async_translate import fully_async_overrides
 
     out["runtime"] = island_entry.runtime_manifest(0)
@@ -57,7 +59,7 @@ def dryrun():
                         "m.YetoFullyAsyncTaskRunner, v.main_fully_async)"],
                        capture_output=True, text=True, cwd="/workspace/verl")
     out["imports"] = [r.returncode, r.stdout[-1500:], r.stderr[-2500:]]
-    groups, rounds, limit = 8, 5, 1
+    groups, rounds, limit = 32, 5, 1  # the GPU run's shape
     cfg = vconf.VerlRunConfig(model_path="/tmp/model", train_file="/tmp/t.parquet", val_file="/tmp/v.parquet",
                               out_dir="/tmp/out", chat_template_kwargs={"enable_thinking": False},
                               reward_path="/root/sky_workdir/yeto/rl/adapters/verl/reward_fn.py",
@@ -97,6 +99,15 @@ def dryrun():
 
     out["asserted_mismatch"] = [k for k, v in out["asserted"].items()
                                 if v["want"] is not None and norm(v["got"]) != norm(v["want"])]
+    # every fork startup assert, on the composed config (dbg1/async3 found two on GPU)
+    out["startup_problems"] = fully_async_startup_problems(lookup) if composed else ["no composed config"]
+    fa_dir = "/workspace/verl/verl/experimental/fully_async_policy"
+    fork_asserts = [t.strip() for name in ("fully_async_rollouter.py", "fully_async_trainer.py")
+                    for t in open(os.path.join(fa_dir, name)).read().splitlines()
+                    if t.strip().startswith("assert") and ("self.config" in t or "hybrid_engine" in t)
+                    and "resume_from_path" not in t]
+    out["fork_asserts_uncovered"] = [t for t in fork_asserts if not t.startswith(FORK_STARTUP_ASSERTS)]
+    out["fork_asserts_seen"] = len(fork_asserts)
     want = fully_async_overrides(limit, samples_per_round=groups, ppo_mini_batch_size=groups)
     out["translate_6_4a"] = {k: {"want": v, "got": lookup(k)} for k, v in want.items()}
     out["translate_equal"] = all(norm(lookup(k)) == norm(v) for k, v in want.items())
@@ -106,7 +117,8 @@ def dryrun():
         "algorithm.rollout_correction.rollout_is", "trainer.use_v1")}
     out["pass"] = (not out["runtime"]["problems"] and all(out["patches_in_place"].values())
                    and out["imports"][0] == 0 and out["hydra_rc"] == 0 and not out["asserted_mismatch"]
-                   and out["translate_equal"])
+                   and out["translate_equal"] and not out["startup_problems"]
+                   and not out["fork_asserts_uncovered"] and out["fork_asserts_seen"] > 0)
     text = json.dumps(out, indent=1, default=str)
     print(text)
     return text  # a string: the local side has no torch to unpickle verl objects
