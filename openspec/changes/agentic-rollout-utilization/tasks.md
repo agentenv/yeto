@@ -57,3 +57,19 @@
 - [ ] 6.4 阶段 2：由落后上限推导 `staleness_threshold` 与 `partial_rollout`，样本版本段接入 yeto 账本（验证：CPU 单测；GPU 对照与 4.2 合并在同一次上卡，单岛 verl 小模型上限 0 vs 1）
   - 子要求（6.1 读码所得，10-09 主 agent 拍板列入）：(a) verl 前缀续写发生在推理服务客户端内、对 agent loop 不可见——适配层需自行补记逐段版本与生成概率；(b) verl 版本只有每轨迹 min/max_global_steps——翻译为版本段边界，判定按最旧版本；(c) `staleness_threshold` 只按样本数限流、不比版本号——超限丢弃由 yeto 按版本段判定，不能依赖 verl；(d) trainer 本地 `current_param_version` 与外层 outer version 错位——多岛时适配层要做映射并约束检查点/日志步号。
 - [ ] 6.5 阶段 3：verl 多轮工具调用续跑（若 6.1 确认原生支持则复用，否则按第 5 组同样规则实现），GPU 对照与 5.5 合并上卡（验证：证据路径）
+
+## 7. dashboard 可视化（生成阶段利用率；只改看板读取与显示，不改训练代码）
+- [x] 7.1 每轮"截止丢弃 / 续跑"表：提交组数、目标组数、丢弃组数、丢弃条数、丢弃 token 数、过滤组数（来自 `rl_rollout_cutoff`）；字段为空显示"未知"而不是 0（验证：reducer 单测含 None 字段；JS 冒烟断言出现"未知"）
+  - 证据：`yeto/dashboard/reducer.py`（`CUTOFF_KEYS`、`Reducer.utilization`）；`tests/test_dashboard_utilization.py::test_cutoff_completion_phases_and_load_per_round`（submitted_groups/discarded_tokens 为 None 保持 None）、`::test_page_draws_utilization_and_unknowns`（页面出现"未知"）。N17 A 臂第 0 轮 submitted_groups 为空，页面显示"未知"。
+- [x] 7.2 每轮生成段内的轨迹完成曲线：横轴为生成段内秒数，纵轴为已完成轨迹数，标出截止点（生成段结束）；可切换轮次或叠加全部轮次（验证：reducer 单测完成时刻相对生成段起点；JS 冒烟渲染曲线与切换）
+  - 证据：`utilization()` 的 `done`（相对生成段起点秒数）与 `gen_s`（截止点）；页面 `uDone`（"全部轮叠加 / 第 N 轮"切换）；单测 `done == [20.0, 40.0]`；JS 冒烟 2 轮×2 运行 = 4 条曲线、4 条截止线；N17 A/B 导出冒烟 12 条曲线。
+- [x] 7.3 每轮与每条轨迹的"模型生成 / 工具执行 / 判分 / 沙箱启动"四段耗时条（`rl_trajectory_reward` 的 `generation_seconds`、`tool_seconds`、`evaluate_time`、`sandbox_start_seconds`），显示工具执行占比（验证：reducer 单测四段合计与占比；JS 冒烟）
+  - 证据：`TRAJ_PHASES` 四段合计与 `tool_share`；页面 `uPh`（每轮）与 `uTr`（选定轮的每条轨迹）；单测四段合计 {16,2,1,1}、工具占比 0.1。N17 读出 A 臂各轮工具占比 0.9%–56.5%，B 臂 3.5%–9.9%。
+- [x] 7.4 KV 占用与排队曲线（`rl_load_sample` 的 `kv_used_tokens/kv_capacity_tokens`、`queued_requests`、`running_requests`），标出生成段（验证：reducer 单测；JS 冒烟）
+  - 证据：`load` 序列（KV 比例、排队、在跑、等工具）与每轮生成段内峰值 `peaks`；页面 `uLoad`；单测 kv 峰值 0.4、排队 5。N17 B 臂读出 KV 峰值 20.6%、排队最大 37，与 1.4 记录一致。
+- [x] 7.5 为阶段 2 预留：续跑轨迹跨了哪几轮（开始轮 → 训练轮、版本段），读取 `rl_trajectory_reward` 的 `started_rollout_id` 与 `policy_versions`；没有该数据时不显示（验证：reducer 单测构造跨轮轨迹与无该字段两种情形；JS 冒烟区块隐藏）
+  - 证据：`_traj` 读 `started_rollout_id`、`policy_versions`（版本段 `[版本, 起, 止)`），`carry` 无数据为 None；页面 `uCarry` 无数据隐藏；`::test_stage_two_carry_over_is_listed`、JS 冒烟 `carry_hidden`。字段名为本看板预留，阶段 2 写事件时按此命名或改这里。
+- [x] 7.6 两条运行并排 / 叠加比较：`yeto dashboard serve|export --compare <磁带...> [--label A --compare-label B]`，用 N17 两臂做示例（验证：reducer 单测；N17 A/B 本机起看板并截图存 infra-drafts/dash-aru-screenshots/）
+  - 证据：`cli._attach_compare`（`--compare/--label/--compare-label`），`page_view()["compare"]`；`::test_compare_run_is_attached`；N17 A/B 本机 `serve --port 8797` 验证 `/api/view` 带 compare（已关）。离线页 infra-drafts/dash-aru-screenshots/n17-ab-compare.html。截图：本机无无头浏览器（无 chromium/playwright/puppeteer，也无 SVG 光栅化库），按要求未装大依赖，未截图——直接用浏览器打开该离线页查看。
+- [x] 7.7 旧磁带兼容：没有新事件/新字段时页面不报错，利用率区块显示"无数据"（验证：既有 JS 冒烟夹具与 test_dashboard_* 全过）
+  - 证据：`::test_old_tape_has_no_utilization`、`::test_page_hides_utilization_for_old_tapes`；`tests/test_dashboard_*.py` 共 90 项全过（含原有冒烟夹具）。
