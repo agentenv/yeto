@@ -47,8 +47,14 @@
 
 - [x] 1.1 [CPU] prelaunch review + 脚本（两岛小模型，中途 kill/拉起一岛，跨岛样本 ACCEPT_IS、P4 carried_over、P6 降级 advice）；θ/γ 在此校准。依赖：0.8、rl-infra-spec 3.8/X6。
 - [x] 1.0 [GPU] legacy 回归（待批）：两岛小模型真机用 legacy 模式跑一次，与历史两岛结果对比（外层合并次数、reward、权重哈希），确认旧模式未变。
-- [ ] 1.2 [GPU] 执行；判据：成员变化不触发退出码 4/6、catch-up 首轮零权重在 syncer tape 可见、reward 不劣于无跨岛样本基线、带宽实测入档。
+- [x] 1.2 [GPU] 执行；判据：成员变化不触发退出码 4/6、catch-up 首轮零权重在 syncer tape 可见、reward 不劣于无跨岛样本基线、带宽实测入档。
   - 补充（2026-10-08，用户要求）：下次上卡必须采集带宽——同步服务对每次张量传输记录字节数和耗时并写入事件磁带（实现见 0.28），带宽由这些记录计算后入档。此前各次 1.2 运行的磁带与同步服务日志均无传输字节数和耗时，无法事后补算。
+  - 2026-10-08 S17 G1（N3，判据按 S17-OVERNIGHT-PLAN §一第 7 条放宽版，主 agent 代拍板）：`s17-g1-island`（Modal 2×H100! + Nebius 无卡 head，elastic，10 轮，岛 1 在 v1 后断链 120 s，lease 90）对比无跨岛样本基线 `s17-g1-base`（同配置单岛 10 轮）。证据 `evidence/2026-10-08-s17-g1-island/`。
+    - 成员变化不触发退出码 4/6：通过（rc=0，head 作业 SUCCEEDED，status finished，无 exit 4/6/3 行）。
+    - catch-up 首轮零权重在同步服务 tape 可见：通过（pool_join catch_up base 3 → 下一条 outer_step raw_weights [[0,3,41216400],[1,3,0.0]]；之后 v4–v9 岛 1 正常计权）。
+    - 带宽入档：通过（transfer 记录 43 条，见下方 progress）。
+    - reward：两岛 20 个本地轮均值 0.594（SE 0.063）≥ 基线 0.597 − 2×0.083 = 0.432，通过。
+    - 数值健康：无 NaN；**两条字面不符，按数据解释后判通过，主 agent 可推翻**：① 岛 1 第 9 轮、岛 0 第 10 轮 grad_norm=delta=0，原因是该批 4 组全部零方差（zero_variance_group_ratio=1.0，GRPO 优势全 0），零梯度不变量未报错，属正常；② 按 policy_version 对比两岛权重哈希从 v2 起不一致，原因是岛 1 catch-up 重入后本地版本号比同步服务外层版本少 1（岛 1 把 base 3 记成 v2），按应用顺序两岛哈希逐个相同（v3..v9 对 岛1 v2..v8），权重一致。② 是新发现的计数问题，记入 progress 待修。
   - 已裁定（2026-10-08）：断开期间用旧基座训出的增量，重新加入后按迟到增量并入（design"用户裁定记录"第 11 条）；judge 的 C4 按 v2 口径（catch-up 条目为 0 + 迟到增量记为信息）。
 
 ## 2. 阶段 2：FN 2×8（待批）
