@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 
 import torch
 
+from .engine.backend_identity import island_contract_sha256
 from ..protocol import DTYPE_F32, FinalManifest, PullRequest, SyncerClient
 from ..tensor_io import (
     apply_fragment,
@@ -39,6 +40,10 @@ class DecoupledBridgeConfig:
     learner_budget_steps: int | None = None
     # Decoupling 6.2 (design D7): see yeto.rl.bridge.BridgeConfig.
     backend_identity_sha256: str | None = None
+    # S17 N17: lr_schedule_sha256() of the island; bound into the identity the
+    # syncer compares (HELLO / JOIN), so islands with different LR schedules
+    # are refused.  None = not declared (identity only).
+    lr_schedule_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if self.num_fragments < 2:
@@ -133,7 +138,8 @@ class DecoupledRlBridge:
             self.layout,
             dtype=DTYPE_F32,
             num_streams=config.wan_streams,
-            session_contract_hash=_session_contract(self.layout, config.backend_identity_sha256),
+            session_contract_hash=_session_contract(self.layout, island_contract_sha256(
+                config.backend_identity_sha256, getattr(config, "lr_schedule_sha256", None))),
             max_reconnects=(None if config.learner_budget_steps is not None else 0),
         )
         count = self.layout.num_fragments

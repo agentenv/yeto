@@ -325,3 +325,9 @@ A完成运行指纹、论文适配与云实验计划、ExecutionProfile和观测
 ## 本轮交付与验证记录
 
 本轮只有设计文档，所有 implementation tasks 默认未执行；源码调查已完成不等于 A 阶段 GPU baseline 已完成。验收执行方案见 tasks 与 spec scenarios。
+
+### 4.5 收尾裁定（S17，2026-10-09，主 agent 按用户授权代拍板）
+
+- G-4.5 第 2 行（集合通信超时）：**不适用**。同形恢复插件各 rank 独立恢复，不做集合通信；睡眠注入只会拖慢、不会超时。硬测只能得到假通过或假失败，改判据比改设计合理。
+- G-4.5 第 6b 行（提交不确定）：**设计如此**。同形重建没有 COMMITTED 阶段：重建失败时回退旧 trainer（REBUILD_OLD，已真机验证），等价于"提交前不切换"；重建中 learner 崩溃，重启后 journal 对账判 RECOVERY_REQUIRED（第 6a 行已真机验证）。加 COMMITTED 阶段收益小。
+- REBUILDING_TRAINER 截止时间：真缺口，已补。`IslandController._bounded_rebuild` 在工作线程里调用 trainer 重建，等待上限 = 事务截止时间 + `Timeouts.recovery`；超过即 `_enter_recovery(cause="rebuild_deadline")`，卡住的线程被放弃（daemon），trainer 状态视为未知，不再继续消费。上限内迟到但完成的结果照旧接受并标 `late`。

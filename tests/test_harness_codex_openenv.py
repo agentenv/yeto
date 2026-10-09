@@ -272,6 +272,29 @@ def test_rollout_cancellation_kills_worker_and_releases_everything(monkeypatch):
     assert board.open == 0 and provider.destroyed == 1 and env.evaluations == 0
 
 
+def test_abort_hook_cancels_surplus_workers_and_releases_everything(monkeypatch):
+    """S17 N17: Miles' call_agent_abort_hook finds ``<module>.abort``; it cancels the
+    in-flight Codex workers so an over-sampled rollout does not wait for surplus
+    trajectories. The aborted trajectory is infrastructure (never a reward) and
+    its worker, lease and board entries are released."""
+    env = FakeTerminalEnvironment(passed=True)
+    provider, board = _configure(monkeypatch, env)
+
+    async def scenario():
+        task = asyncio.create_task(subprocess_agent.run("http://miles", "p", {}, _metadata(hang_seconds=30)))
+        while not board.events:
+            await asyncio.sleep(0.05)
+        assert await subprocess_agent.abort(None) == 1
+        return await asyncio.wait_for(task, 20)
+
+    result = _run(scenario())
+    assert tbench_reward.INFRASTRUCTURE_KEY in result and tbench_outcome.MAC_KEY not in result
+    assert subprocess_agent.ABORTED_STATUS in json.dumps(result)
+    assert board.open == 0 and provider.destroyed == 1 and env.evaluations == 0
+    assert subprocess_agent._ACTIVE_WORKERS == {} and subprocess_agent._ABORTED_IDS == set()
+    assert _run(subprocess_agent.abort(None)) == 0  # nothing in flight: no-op
+
+
 # ---------------------------------------------------------------- IR-2/IR-3: HarnessBoard, admission, policy token source
 
 def test_subprocess_run_counts_sessions_and_leases_on_the_harness_board_and_drains_to_zero(monkeypatch):

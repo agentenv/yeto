@@ -22,7 +22,11 @@ import torch
 
 from yeto.protocol import DTYPE_F32, SessionRejectedError, SyncerClient, layout_fingerprint
 from yeto.rl.core import StrictRlInvariantError
-from yeto.rl.engine.backend_identity import session_contract_hash
+from yeto.rl.engine.backend_identity import (
+    island_contract_sha256,
+    lr_schedule_sha256,
+    session_contract_hash,
+)
 from yeto.tensor_io import pack_tensor
 
 from test_rl_integration import _layout, _port, _push, _wait_item, syncer_binary  # noqa: F401
@@ -30,6 +34,11 @@ from test_rl_integration import _layout, _port, _push, _wait_item, syncer_binary
 ROOT = Path(__file__).resolve().parents[1]
 VERL_ID = "3b9e60e5a2c554a2826f6cef83fdeecabfc1723d6663c4d5fd23b01e08a555e2"
 MILES_ID = "9d5696a3d3b6e6d802115ef3deb970b5e4d9206d1751d71f9075a849d2909f8d"
+# S17 N17: same backend, different LR schedule (e.g. --rl-lr-schedule constant vs linear)
+LR_LINEAR = lr_schedule_sha256("linear", 3, 1e-5)
+LR_CONSTANT = lr_schedule_sha256("constant", 3, 1e-5)
+VERL_LINEAR = island_contract_sha256(VERL_ID, LR_LINEAR)
+VERL_CONSTANT = island_contract_sha256(VERL_ID, LR_CONSTANT)
 
 
 def _start(binary, port, checkpoint, rounds, *, learners, event_tape):
@@ -48,10 +57,10 @@ def _contract(identity: str) -> bytes:
     return session_contract_hash(layout_fingerprint(_layout()), identity)
 
 
-def _verl(port, learner_id):
+def _verl(port, learner_id, identity=VERL_ID):
     client = SyncerClient(("127.0.0.1", port), learner_id, _layout(), dtype=DTYPE_F32,
                           num_streams=0, connect_timeout=10,
-                          session_contract_hash=_contract(VERL_ID))
+                          session_contract_hash=_contract(identity))
     client.start()
     return client
 
@@ -78,14 +87,17 @@ MILES_ISLAND = textwrap.dedent("""
 """)
 
 
-def test_mismatched_hello_is_refused_without_stopping_the_session(syncer_binary, tmp_path):
+@pytest.mark.parametrize("good,intruder", [(VERL_ID, MILES_ID), (VERL_LINEAR, VERL_CONSTANT)],
+                         ids=["backend-identity", "lr-schedule"])
+def test_mismatched_hello_is_refused_without_stopping_the_session(syncer_binary, tmp_path,
+                                                                    good, intruder):
     port = _port()
     tape = tmp_path / "syncer.jsonl"
     process = _start(syncer_binary, port, tmp_path / "state.ckpt", rounds=3, learners=2,
                      event_tape=tape)
     c0 = c1 = None
     try:
-        c0, c1 = _verl(port, 0), _verl(port, 1)
+        c0, c1 = _verl(port, 0, good), _verl(port, 1, good)
         c0.send_init(0, pack_tensor(torch.zeros(2), DTYPE_F32))
         for c in (c0, c1):
             assert _wait_item(c.drain_updates).version == 0
@@ -98,15 +110,15 @@ def test_mismatched_hello_is_refused_without_stopping_the_session(syncer_binary,
 
         # A Miles island dials in mid-run with learner id 1 (as a mis-wired relaunch would).
         miles = subprocess.run(
-            [sys.executable, "-c", MILES_ISLAND.format(tests=str(ROOT / "tests"), miles=MILES_ID,
+            [sys.executable, "-c", MILES_ISLAND.format(tests=str(ROOT / "tests"), miles=intruder,
                                                          port=port)],
             capture_output=True, text=True, timeout=60,
             env={**os.environ, "PYTHONPATH": f"{ROOT}:{os.environ.get('PYTHONPATH', '')}"})
         (tmp_path / "miles.stderr").write_text(miles.stderr)
         assert miles.returncode == 1, miles.stdout + miles.stderr
         assert "StrictRlInvariantError: syncer refused this island" in miles.stderr
-        assert "expected session_contract_hash=" + _contract(VERL_ID).hex() in miles.stderr
-        assert "got session_contract_hash=" + _contract(MILES_ID).hex() in miles.stderr
+        assert "expected session_contract_hash=" + _contract(good).hex() in miles.stderr
+        assert "got session_contract_hash=" + _contract(intruder).hex() in miles.stderr
         assert process.poll() is None, "syncer must keep running"
 
         # The two verl islands finish the remaining rounds unaffected.

@@ -350,6 +350,8 @@ def execution_profile_for(
 
     from yeto.rl.engine.overlap import IMPLEMENTED_OVERLAP
 
+    from .lr_schedule import miles_lr_schedule_sha256
+
     mode = "colocated-serial" if launch.placement.kind == "colocated" else "partitioned-serial"
     overlap = frozenset()
     if getattr(miles_args, "yeto_rl_overlap_eval", False):
@@ -377,6 +379,7 @@ def execution_profile_for(
         optimizer_steps_per_round=int(getattr(miles_args, "num_steps_per_rollout", 1) or 1),
         allowed_overlap=overlap,
         algorithm_spec_sha256=expected_sha256,
+        lr_schedule_sha256=miles_lr_schedule_sha256(miles_args),
         extra={"algorithm_hash_source": source},
     )
 

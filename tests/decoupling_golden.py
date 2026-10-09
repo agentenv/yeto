@@ -141,6 +141,13 @@ def _execution_profile(args, launch, algorithm, *, yeto_policy_sync: bool) -> di
         num_steps_per_rollout=int(_argv_value(argv, "--num-steps-per-rollout", "1")),
         yeto_rl_sync_preset=getattr(args, "sync_preset", "strict-avg"),
         yeto_rl_overlap_eval=bool(getattr(args, "rl_overlap_eval", False)),
+        # S17 N17: the LR schedule enters the contract hash
+        lr=(None if _argv_value(argv, "--lr", None) is None else float(_argv_value(argv, "--lr"))),
+        lr_decay_style=_argv_value(argv, "--lr-decay-style", None),
+        lr_decay_iters=(None if _argv_value(argv, "--lr-decay-iters", None) is None
+                        else int(_argv_value(argv, "--lr-decay-iters"))),
+        lr_warmup_iters=int(_argv_value(argv, "--lr-warmup-iters", "0")),
+        min_lr=float(_argv_value(argv, "--min-lr", "0")),
     )
     for name, value in dict(launch.runtime_attrs).items():
         if name in ("yeto_rl_sync_preset", "yeto_rl_overlap_eval"):

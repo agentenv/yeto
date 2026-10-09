@@ -104,3 +104,58 @@ def test_dense_and_sao_training_contracts_reference_the_identity():
 
     for module in (full_parameter_dense, sao_streaming):
         assert module._legacy_identity_sha256() == miles_identity.backend_identity("legacy").sha256()
+
+
+def test_lr_schedule_is_bound_into_the_island_contract():
+    """S17 N17: islands with different LR schedules (e.g. --rl-lr-schedule constant
+    vs linear) declare different identities, so the syncer refuses the second."""
+    from types import SimpleNamespace
+
+    from yeto.rl.adapters.miles.lr_schedule import miles_lr_schedule_sha256
+    from yeto.rl.engine.backend_identity import island_contract_sha256, lr_schedule_sha256
+
+    sha = miles_identity.backend_identity("ports").sha256()
+    lin = lr_schedule_sha256("linear", 12, 1e-5)
+    const = lr_schedule_sha256("constant", 12, 1e-5)
+    assert lin != const != lr_schedule_sha256("constant", 12, 2e-5)
+    assert lr_schedule_sha256("linear", 12, 1e-5) != lr_schedule_sha256("linear", 24, 1e-5)
+    # a constant LR ignores its (unused) horizon: same LR, different rounds agree
+    assert const == lr_schedule_sha256("constant", 999, 1e-5)
+    assert island_contract_sha256(sha, None) == sha  # undeclared: old identity
+    assert island_contract_sha256(None, lin) is None
+    a, b = island_contract_sha256(sha, lin), island_contract_sha256(sha, const)
+    assert a != b and sha not in (a, b)
+    layout = _layout()
+    assert (session_contract_hash(layout_fingerprint(layout), a)
+            != session_contract_hash(layout_fingerprint(layout), b))
+    ns = SimpleNamespace(lr=1e-5, lr_decay_style="constant", lr_decay_iters=12,
+                         lr_warmup_iters=0, min_lr=0.0)
+    assert miles_lr_schedule_sha256(ns) == const
+    assert miles_lr_schedule_sha256(SimpleNamespace(lr=1e-5)) is None
+
+
+def test_bridge_configs_bind_lr_schedule_into_hello_and_join(monkeypatch):
+    from types import SimpleNamespace
+
+    import yeto.rl.elastic_client as ec
+    from yeto.rl import bridge, decoupled
+    from yeto.rl.engine.backend_identity import island_contract_sha256, lr_schedule_sha256
+    from yeto.rl.engine.bridges import ElasticAvgSync
+
+    for cls in (bridge.BridgeConfig, decoupled.DecoupledBridgeConfig):
+        assert "lr_schedule_sha256" in {f.name for f in dataclasses.fields(cls)}
+    sha = miles_identity.backend_identity("ports").sha256()
+    lr = lr_schedule_sha256("constant", 1, 1e-5)
+    seen = []
+
+    class Spy:
+        def __init__(self, config, key, **kw):
+            seen.append(config.backend_identity_sha256)
+
+    monkeypatch.setattr(ec, "ElasticIslandClient", Spy)
+    monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "k")
+    cfg = SimpleNamespace(syncer_addr=("x", 0), learner_id=1, backend_identity_sha256=sha,
+                          lr_schedule_sha256=lr, expected_specs=(), global_rounds=1,
+                          local_optimizer_steps=1)
+    ElasticAvgSync(cfg)._client()
+    assert seen == [island_contract_sha256(sha, lr)]
