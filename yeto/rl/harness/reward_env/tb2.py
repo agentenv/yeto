@@ -18,6 +18,7 @@ adds what that provider lacks:
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shlex
@@ -169,6 +170,10 @@ class Tb2Benchmark:
         t = self._task(task_id)
         return prebake_from_test_sh((t.tests_dir / "test.sh").read_text(), t.docker_image)
 
+    def judge_setup_commands(self, task_id: str) -> list[str]:
+        """Commands run before ``judge_command`` (stage large tests/, S17 G3)."""
+        return tb2.verifier_stage_commands(self._task(task_id))
+
     def judge_command(self, task_id: str, submission: str | None = None) -> str:
         del submission  # TB2 judges the sandbox the agent worked in (official stage-at-verify)
         return tb2.verifier_command(self._task(task_id))
@@ -203,6 +208,8 @@ def check_build_app(app_name: str) -> str:
 
 HOLDOUT_SEED = 20261008
 HOLDOUT_QUOTAS = {"tb2-easy": 2, "tb2-medium": 18, "tb2-hard": 10}
+HOLDOUT_RULE_UNUSABLE = ("exclude smoke6 (S15 trained) and data/eval/tb2-unusable.json; "
+                         "stratified by difficulty: easy 2 / medium 18 / hard 10")
 HOLDOUT_RULE = "exclude smoke6 (S15 trained); stratified by difficulty: easy 2 / medium 18 / hard 10"
 # WP3 rl-eval-difficulty-buckets D2 (#123 c8979bd2): the S15 smoke tasks
 # (codex-bundle/data/tbench2_smoke6.jsonl) were trained on in both S15 GPU runs,
@@ -216,9 +223,30 @@ def smoke6_exclusions() -> dict[str, str]:
     return {t: SMOKE6_REASON for t in SMOKE6_TASK_IDS}
 
 
+UNUSABLE_SCHEMA = "yeto.tb2-unusable/v1"
+# data/eval/tb2-unusable.json: tasks whose official solution does not score 1 in
+# our judge env (S17 G3 positive control).  They leave training *and* the eval pool.
+UNUSABLE_DEFAULT_PATH = Path(__file__).resolve().parents[4] / "data" / "eval" / "tb2-unusable.json"
+
+
+def load_unusable(path: str | os.PathLike[str] | None = None) -> dict[str, str]:
+    """``task_id -> "unusable/<category>: <reason>"`` from the unusable table (fail closed)."""
+    data = json.loads(Path(path or UNUSABLE_DEFAULT_PATH).read_text())
+    if data.get("schema") != UNUSABLE_SCHEMA or data.get("benchmark") != "tb2":
+        raise ValueError(f"{path or UNUSABLE_DEFAULT_PATH}: not a {UNUSABLE_SCHEMA} tb2 file")
+    out: dict[str, str] = {}
+    for item in data["items"]:
+        tid, cat, why = item["task_id"], item["category"], item["reason"]
+        if not (tid and cat and why) or tid in out:
+            raise ValueError(f"bad or duplicate unusable entry: {item!r}")
+        out[tid] = f"unusable/{cat}: {why}"
+    return out
+
+
 def build_holdout(adapter: "Tb2Benchmark", *, exclude: Any = None, **kwargs: Any) -> dict[str, Any]:
     """TB2 hold-out; ``exclude`` defaults to the smoke-6 tasks (pass ``{}`` for none)."""
     from .benchmark import build_holdout as _build
 
-    return _build(adapter, HOLDOUT_QUOTAS, seed=HOLDOUT_SEED, rule=HOLDOUT_RULE,
+    kwargs.setdefault("rule", HOLDOUT_RULE)
+    return _build(adapter, HOLDOUT_QUOTAS, seed=HOLDOUT_SEED,
                   exclude=smoke6_exclusions() if exclude is None else exclude, **kwargs)

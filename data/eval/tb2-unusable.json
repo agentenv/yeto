@@ -1,0 +1,21 @@
+{
+ "schema": "yeto.tb2-unusable/v1",
+ "benchmark": "tb2",
+ "source": "S17 G3 official-solution positive control on the Modal prebaked reward env (76/89 scored 1); evidence s1-runs/s17-g3-reward-env/pos-all.jsonl, openspec/changes/rl-agentic-reward-env/progress.md",
+ "rule": "a task whose official solution does not score 1 in our judge environment is excluded from both the training set and the hold-out pool",
+ "items": [
+  {"task_id": "adaptive-rejection-sampler", "category": "timeout", "reason": "official solve.sh hits the task agent timeout on the default CPU allotment"},
+  {"task_id": "build-cython-ext", "category": "official-solution-fails", "reason": "1 of 11 tests (pyknotid repo self-test) fails with the official solution; likely upstream drift, not investigated"},
+  {"task_id": "build-pmars", "category": "env-upstream-mirror", "reason": "solve.sh pins dpkg-dev 1.22.21, which is gone from the apt mirror (apt rc 100)"},
+  {"task_id": "caffe-cifar-10", "category": "timeout", "reason": "official solve.sh hits the task agent timeout on the default CPU allotment"},
+  {"task_id": "crack-7z-hash", "category": "timeout", "reason": "official solve.sh hits the task agent timeout on the default CPU allotment"},
+  {"task_id": "custom-memory-heap-crash", "category": "env-sandbox-permission", "reason": "solve.sh 'ulimit -c' is not permitted in the Modal sandbox; the release-build test fails (other 5 pass)"},
+  {"task_id": "mcmc-sampling-stan", "category": "env-dependency-install", "reason": "solve.sh fails to install rstan (there is no package called 'rstan')"},
+  {"task_id": "protein-assembly", "category": "official-solution-unstable", "reason": "official solver reports 'Wrong translation' and asks for a rerun"},
+  {"task_id": "qemu-alpine-ssh", "category": "env-upstream-mirror", "reason": "test.sh apt install 404s on Debian bullseye-security during prebake; image cannot be built"},
+  {"task_id": "qemu-startup", "category": "env-upstream-mirror", "reason": "test.sh apt install 404s on Debian bullseye-security during prebake; image cannot be built"},
+  {"task_id": "rstan-to-pystan", "category": "env-upstream-drift", "reason": "pystan fails to import pkg_resources (removed from current setuptools)"},
+  {"task_id": "schemelike-metacircular-eval", "category": "official-solution-fails", "reason": "2 of 63 tests fail with the official solution (397 s on 1 core; possibly too slow), not investigated"},
+  {"task_id": "sqlite-with-gcov", "category": "timeout", "reason": "official solve.sh hits the task agent timeout on the default CPU allotment"}
+ ]
+}

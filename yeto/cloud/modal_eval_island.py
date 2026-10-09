@@ -229,7 +229,7 @@ SEED_FUNCTION = "eval_seed"
 
 
 def default_image_ref() -> str:
-    from yeto.rl.adapters.miles.pins import MILES_NEXT_IMAGE
+    from yeto.rl import MILES_NEXT_IMAGE  # re-exported pin (same route as launcher.py)
 
     return MILES_NEXT_IMAGE.removeprefix("docker:")
 

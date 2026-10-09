@@ -199,6 +199,17 @@ TRAJECTORY_REWARD_OPTIONAL: dict[str, tuple[type, ...]] = {
     "last_content_head": (str,),
     "last_reasoning_tail": (str,),
     "verifier_log": (str,),
+    # S17 C9: finer end reason than ``exit_status`` (submit / completed_no_submit
+    # / turn_limit / protocol_error / response_truncated / context_limit /
+    # timeout) and per-turn lengths: model reply tokens, context tokens after
+    # each reply, tool-result bytes fed back.  Lists hold ints (None = no usage).
+    "end_kind": (str,),
+    "turn_completion_tokens": (list,),
+    "turn_context_tokens": (list,),
+    "turn_tool_output_bytes": (list,),
+    # S17 N13: seconds the trusted verifier spent grading this trajectory
+    # (absent when grading was skipped, e.g. timeout).
+    "evaluate_time": (float,),
 }
 
 

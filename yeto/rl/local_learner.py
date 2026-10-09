@@ -229,8 +229,14 @@ def dense_sweep_session_contract_hash(
     policy_rounds: int,
     learner_generations: Mapping[int, int],
     training_contract_hash: str = "0" * 64,
+    backend_identity_sha256: str | None = None,
 ) -> bytes:
-    """Hash the complete semantic identity of one strict dense-H=1 run."""
+    """Hash the complete semantic identity of one strict dense-H=1 run.
+
+    ``backend_identity_sha256`` (decoupling 6.2, design D7): the training
+    backend's identity hash enters the contract when given; None keeps the
+    pre-phase-5 payload (and hash) unchanged.
+    """
 
     if (
         isinstance(policy_rounds, bool)
@@ -266,6 +272,8 @@ def dense_sweep_session_contract_hash(
         "schema": 2,
         "parameter_layout_hash": layout.layout_hash,
         "training_contract_hash": training_contract_hash,
+        **({} if backend_identity_sha256 is None
+           else {"backend_identity_sha256": backend_identity_sha256}),
         "components": [asdict(component) for component in layout.components],
         "profile": {
             "policy_sweep_fragments": layout.fragments.num_fragments,

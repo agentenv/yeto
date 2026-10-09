@@ -520,3 +520,73 @@ def test_stock_codex_append_roles_resolve_by_tito_family(tito_model, ok):
     cfg.agent.custom_agent_function_path = "x:y"
     assert check(("tool", "user"), cfg) is not None
 
+
+
+# --- S17 N16: --rl-lr-schedule ----------------------------------------------------
+def test_elastic_island_lr_schedule_is_constant():
+    """S17 M1 (N5 a73ab1b2, folded into the auto rule): an elastic island runs until the
+    syncer's final outer version, so a linear horizon could reach 0 before it ends."""
+    assert rc.resolve_lr_schedule(**_schedule_args(sync_preset="strict-avg", global_rounds=6),
+                                  island_scheduling="elastic") == rc.LrSchedule("constant", 6)
+    assert rc.resolve_lr_schedule(**_schedule_args(sync_preset="strict-avg", global_rounds=6),
+                                  island_scheduling="legacy") == rc.LrSchedule("linear", 6)
+
+
+@pytest.mark.parametrize("preset,scheduling", [("strict-avg", "legacy"), ("decoupled", "legacy"),
+                                               ("strict-avg", "elastic")])
+def test_rl_lr_schedule_constant_in_every_mode(preset, scheduling):
+    got = rc.resolve_lr_schedule(**_schedule_args(sync_preset=preset, global_rounds=5),
+                                 island_scheduling=scheduling, requested="constant")
+    assert got == rc.LrSchedule("constant", 5)
+
+
+def test_rl_lr_schedule_auto_is_unchanged_and_linear_refused_without_horizon():
+    args = _schedule_args(sync_preset="strict-avg", global_rounds=5)
+    assert rc.resolve_lr_schedule(**args) == rc.resolve_lr_schedule(**args, requested="auto") \
+        == rc.resolve_lr_schedule(**args, requested="linear") == rc.LrSchedule("linear", 5)
+    for kw in ({"sync_preset": "decoupled"}, {"island_scheduling": "elastic"}):
+        a = _schedule_args(**{k: v for k, v in kw.items() if k == "sync_preset"})
+        with pytest.raises(ValueError, match="known local step count"):
+            rc.resolve_lr_schedule(**a, requested="linear",
+                                   **{k: v for k, v in kw.items() if k != "sync_preset"})
+    with pytest.raises(ValueError, match="must be one of"):
+        rc.resolve_lr_schedule(**args, requested="cosine")
+    assert rc.resolve_lr_schedule(**_schedule_args(eval_only=True), requested="constant") is None
+
+
+def test_rl_lr_schedule_flag_reaches_the_island_and_the_miles_argv():
+    """cli -> launcher island flags -> island_entry parser -> run config -> Miles flags."""
+    import argparse
+    from types import SimpleNamespace
+
+    from yeto import launcher
+    from yeto.cli import _add_launch_args
+    from yeto.rl.adapters.miles import island_entry
+
+    parser = argparse.ArgumentParser()
+    _add_launch_args(parser)
+    base = ["--model", "qwen35-9b", "--data", "d"]
+    assert parser.parse_args(base).rl_lr_schedule == "auto"
+    assert parser.parse_args(base + ["--rl-lr-schedule", "constant"]).rl_lr_schedule == "constant"
+    _, flags = launcher._ports_infra_flags(SimpleNamespace(rl_lr_schedule="constant"))
+    assert " --rl-lr-schedule constant" in flags
+    _, flags = launcher._ports_infra_flags(SimpleNamespace(rl_lr_schedule="auto"))
+    assert "--rl-lr-schedule" not in flags
+    seen = {}
+    original = argparse.ArgumentParser.parse_args
+
+    def capture(self, argv=None, namespace=None):
+        if self.prog.endswith("island_entry"):
+            action = next(a for a in self._actions if "--rl-lr-schedule" in a.option_strings)
+            seen.update(default=action.default, choices=tuple(action.choices))
+            raise SystemExit(0)
+        return original(self, argv, namespace)
+
+    argparse.ArgumentParser.parse_args = capture
+    try:
+        with pytest.raises(SystemExit):
+            island_entry.parse_args([])
+    finally:
+        argparse.ArgumentParser.parse_args = original
+    assert seen == {"default": "auto", "choices": ("auto", "linear", "constant")}
+    assert lrs.lr_schedule_argv(rc.LrSchedule("constant", 5))[:2] == ("--lr-decay-style", "constant")

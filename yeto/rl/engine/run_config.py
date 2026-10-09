@@ -313,6 +313,9 @@ class LrSchedule:
 # (decoupling 4.1). The schedule decision itself stays here.
 
 
+LR_SCHEDULE_CHOICES = ("auto", "linear", "constant")
+
+
 def resolve_lr_schedule(
     *,
     sync_preset: str,
@@ -322,18 +325,35 @@ def resolve_lr_schedule(
     rollout_batch_size: int,
     n_samples_per_prompt: int,
     global_batch: int,
+    island_scheduling: str = "legacy",
+    requested: str = "auto",
 ) -> LrSchedule | None:
-    """The island's LR schedule, decided by the sync mode (design D1-D3).
+    """The island's LR schedule (design D1-D3), ``--rl-lr-schedule`` (S17 N16).
+
+    ``auto`` (default) keeps the mode rule: decoupled and elastic islands run
+    until the syncer stops them (an elastic island that re-JOINs needs local
+    rounds past ``global_rounds``; S17 N5 a73ab1b2), so any finite linear
+    horizon can reach zero mid-run -> constant; strict-avg / dense-full /
+    single island -> linear over ``global_rounds * optimizer_steps``.
+    ``constant`` holds the LR in every mode (e.g. a single island compared
+    with a fixed-LR baseline; S17 N4 had to approximate it with a 20000-step
+    linear horizon). ``linear`` is refused where the horizon is unknown.
 
     Both engine translations (legacy ``_legacy_miles_argv`` and ports
     ``translate_run_config``) emit exactly this schedule.
     """
 
+    if requested not in LR_SCHEDULE_CHOICES:
+        raise ValueError(f"--rl-lr-schedule must be one of {LR_SCHEDULE_CHOICES}, got {requested!r}")
     if eval_only:
         return None
     horizon = global_rounds * optimizer_steps
-    if sync_preset == "decoupled":
-        # Run-until-stop: the local step count is unknown up front.
+    run_until_stop = sync_preset == "decoupled" or island_scheduling == "elastic"
+    if requested == "linear" and run_until_stop:
+        raise ValueError(
+            "--rl-lr-schedule linear needs a known local step count; decoupled and "
+            "elastic islands run until the syncer stops them (use auto or constant)")
+    if requested == "constant" or (requested == "auto" and run_until_stop):
         # decay_iters only satisfies Megatron's ``lr_decay_steps > 0``; a
         # constant schedule never reads it.
         return LrSchedule("constant", horizon)
@@ -897,6 +917,8 @@ def resolve_rl_run_config(
                 rollout_batch_size=args.groups_per_round,
                 n_samples_per_prompt=args.samples_per_group,
                 global_batch=global_batch,
+                island_scheduling=getattr(args, "rl_island_scheduling", None) or "legacy",
+                requested=getattr(args, "rl_lr_schedule", None) or "auto",
             ),
             seed=args.seed,
             critic=resolve_critic_run_config(args),

@@ -3,8 +3,32 @@
  "benchmark": "tb2",
  "benchmark_version": "tb2@2fd12b8",
  "seed": 20261008,
- "rule": "exclude smoke6 (S15 trained); stratified by difficulty: easy 2 / medium 18 / hard 10",
+ "rule": "exclude smoke6 (S15 trained) and data/eval/tb2-unusable.json; stratified by difficulty: easy 2 / medium 18 / hard 10",
  "excluded": [
+  {
+   "task_id": "adaptive-rejection-sampler",
+   "reason": "unusable/timeout: official solve.sh hits the task agent timeout on the default CPU allotment"
+  },
+  {
+   "task_id": "build-cython-ext",
+   "reason": "unusable/official-solution-fails: 1 of 11 tests (pyknotid repo self-test) fails with the official solution; likely upstream drift, not investigated"
+  },
+  {
+   "task_id": "build-pmars",
+   "reason": "unusable/env-upstream-mirror: solve.sh pins dpkg-dev 1.22.21, which is gone from the apt mirror (apt rc 100)"
+  },
+  {
+   "task_id": "caffe-cifar-10",
+   "reason": "unusable/timeout: official solve.sh hits the task agent timeout on the default CPU allotment"
+  },
+  {
+   "task_id": "crack-7z-hash",
+   "reason": "unusable/timeout: official solve.sh hits the task agent timeout on the default CPU allotment"
+  },
+  {
+   "task_id": "custom-memory-heap-crash",
+   "reason": "unusable/env-sandbox-permission: solve.sh 'ulimit -c' is not permitted in the Modal sandbox; the release-build test fails (other 5 pass)"
+  },
   {
    "task_id": "fix-git",
    "reason": "S15 smoke training"
@@ -18,16 +42,44 @@
    "reason": "S15 smoke training"
   },
   {
+   "task_id": "mcmc-sampling-stan",
+   "reason": "unusable/env-dependency-install: solve.sh fails to install rstan (there is no package called 'rstan')"
+  },
+  {
    "task_id": "openssl-selfsigned-cert",
    "reason": "S15 smoke training"
+  },
+  {
+   "task_id": "protein-assembly",
+   "reason": "unusable/official-solution-unstable: official solver reports 'Wrong translation' and asks for a rerun"
+  },
+  {
+   "task_id": "qemu-alpine-ssh",
+   "reason": "unusable/env-upstream-mirror: test.sh apt install 404s on Debian bullseye-security during prebake; image cannot be built"
+  },
+  {
+   "task_id": "qemu-startup",
+   "reason": "unusable/env-upstream-mirror: test.sh apt install 404s on Debian bullseye-security during prebake; image cannot be built"
   },
   {
    "task_id": "regex-log",
    "reason": "S15 smoke training"
   },
   {
+   "task_id": "rstan-to-pystan",
+   "reason": "unusable/env-upstream-drift: pystan fails to import pkg_resources (removed from current setuptools)"
+  },
+  {
+   "task_id": "schemelike-metacircular-eval",
+   "reason": "unusable/official-solution-fails: 2 of 63 tests fail with the official solution (397 s on 1 core; possibly too slow), not investigated"
+  },
+  {
    "task_id": "sqlite-db-truncate",
    "reason": "S15 smoke training"
+  },
+  {
+   "task_id": "sqlite-with-gcov",
+   "reason": "unusable/timeout: official solve.sh hits the task agent timeout on the default CPU allotment"
   }
  ],
  "items": [
@@ -40,11 +92,6 @@
    "task_id": "prove-plus-comm",
    "difficulty": "easy",
    "eval_bucket": "tb2-easy"
-  },
-  {
-   "task_id": "adaptive-rejection-sampler",
-   "difficulty": "medium",
-   "eval_bucket": "tb2-medium"
   },
   {
    "task_id": "break-filter-js-from-html",
@@ -117,17 +164,22 @@
    "eval_bucket": "tb2-medium"
   },
   {
+   "task_id": "raman-fitting",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
    "task_id": "reshard-c4-data",
    "difficulty": "medium",
    "eval_bucket": "tb2-medium"
   },
   {
-   "task_id": "rstan-to-pystan",
+   "task_id": "sanitize-git-repo",
    "difficulty": "medium",
    "eval_bucket": "tb2-medium"
   },
   {
-   "task_id": "schemelike-metacircular-eval",
+   "task_id": "winning-avg-corewars",
    "difficulty": "medium",
    "eval_bucket": "tb2-medium"
   },
@@ -138,6 +190,11 @@
   },
   {
    "task_id": "fix-code-vulnerability",
+   "difficulty": "hard",
+   "eval_bucket": "tb2-hard"
+  },
+  {
+   "task_id": "fix-ocaml-gc",
    "difficulty": "hard",
    "eval_bucket": "tb2-hard"
   },
@@ -163,11 +220,6 @@
   },
   {
    "task_id": "polyglot-rust-c",
-   "difficulty": "hard",
-   "eval_bucket": "tb2-hard"
-  },
-  {
-   "task_id": "protein-assembly",
    "difficulty": "hard",
    "eval_bucket": "tb2-hard"
   },

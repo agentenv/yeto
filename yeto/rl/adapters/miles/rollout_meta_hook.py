@@ -567,6 +567,17 @@ def trajectory_diagnostics(meta: dict[str, Any]) -> dict[str, Any]:
         reason = metrics.get("end_reason")
         if isinstance(reason, str) and reason:
             out["end_reason"] = reason[:160]
+        etime = metrics.get("evaluate_time")  # S17 N13: seconds spent grading
+        if isinstance(etime, (int, float)) and not isinstance(etime, bool) and etime >= 0:
+            out["evaluate_time"] = round(float(etime), 3)
+        kind = metrics.get("end_kind")  # S17 C9
+        if isinstance(kind, str) and kind:
+            out["end_kind"] = kind[:32]
+        for key in ("turn_completion_tokens", "turn_context_tokens", "turn_tool_output_bytes"):
+            values = metrics.get(key)
+            if isinstance(values, list):
+                out[key] = [v if isinstance(v, int) and not isinstance(v, bool) else None
+                            for v in values[:256]]
         last = metrics.get("last_completion")
         if isinstance(last, dict):
             for key, limit in (("finish_reason", 16), ("tool_names", 96), ("content_head", 200), ("reasoning_tail", 200)):

@@ -19,8 +19,10 @@ The stock driver and Responses bridge are reused unchanged from
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import secrets
+import time
 import uuid
 from dataclasses import asdict
 from pathlib import Path
@@ -29,6 +31,8 @@ from typing import Any, Awaitable, Callable, Mapping
 
 from yeto.rl.codex_backend import (
     QWEN35_08B_MODEL,
+    QWEN35_MODEL,
+    QWEN35_REVISION,
     QWEN35_08B_REVISION,
     QWEN38_NEXT_4LAYER_MODEL,
     QWEN38_NEXT_4LAYER_REVISION,
@@ -47,6 +51,9 @@ from . import agent as legacy
 from . import codex_harness_agent as harness
 from . import compaction_bridge
 from .environment import TerminalEnvironment, TrustedVerifier
+
+# S17 M1: observe-only timing line appended to verifier_log (the tape keeps its 2000-char tail).
+VERIFIER_LOG_TAIL_CHARS = 4000
 from .pins import OPENENV_BACKEND_PROFILE, OPENENV_BACKEND_PROFILES
 
 # rl-fn-codex-rollout 1.0: the backend profile is no longer pinned to the
@@ -69,6 +76,7 @@ IMAGE_BACKEND_PROFILE_NAME = OPENENV_BACKEND_PROFILE  # "qwen35_08b"
 RUNTIME_PROFILE_ENV = "YETO_CODEX_CHAT_TEMPLATE"
 _PROFILE_IDENTITY: dict[str, tuple[str, str]] = {
     "qwen35_08b": (QWEN35_08B_MODEL, QWEN35_08B_REVISION),
+    "qwen35": (QWEN35_MODEL, QWEN35_REVISION),
     "qwen38_next": (QWEN38_NEXT_MODEL, QWEN38_NEXT_REVISION),
     "qwen38_next_4layer": (QWEN38_NEXT_4LAYER_MODEL, QWEN38_NEXT_4LAYER_REVISION),
 }
@@ -229,6 +237,7 @@ async def drive_untrusted(
         status = await asyncio.wait_for(driving, timeout=_max_rollout_seconds())
     except asyncio.TimeoutError:
         metrics.timed_out = 1
+        metrics.end_kind = harness.END_KIND_TIMEOUT  # type: ignore[attr-defined]
         status = "timeout"
     except harness.CodexHarnessError as exc:
         # The rejection counters (G6a) must survive the failure: the trusted
@@ -245,7 +254,10 @@ def _metrics_dict(metrics: legacy.AgentMetrics) -> dict[str, Any]:
     extra: dict[str, Any] = {}
     # Observe only (S15 r2 follow-up): why the Codex episode ended and the shape
     # of the last model reply; set by the stock driver, absent otherwise.
-    for name in ("end_reason", "last_completion"):
+    # S17 C9: finer end reason and per-turn lengths (model reply tokens, context
+    # tokens after the reply, tool-result bytes).
+    for name in ("end_reason", "last_completion", "end_kind", "turn_completion_tokens",
+                 "turn_context_tokens", "turn_tool_output_bytes"):
         value = getattr(metrics, name, None)
         if value is not None:
             extra[name] = value
@@ -379,10 +391,13 @@ async def finish_trusted(
     if status not in POLICY_STATUSES:
         raise ValueError(f"untrusted result has invalid status {status!r}")
     evaluation: dict[str, Any] = {}
+    evaluate_time: float | None = None
     if status == "timeout":
         passed, testsh_rc, verifier_name = False, None, TIMEOUT_VERIFIER
     else:
+        started = time.monotonic()
         evaluation = await verifier.evaluate(untrusted["episode_id"])
+        evaluate_time = verify_seconds = time.monotonic() - started  # N13 metric + M1 YETO_TIMING
         passed = bool(evaluation.get("passed"))
         testsh_rc = evaluation.get("testsh_rc")
         verifier_name = (
@@ -399,9 +414,26 @@ async def finish_trusted(
         key=key,
     )
     metadata["agent_metrics"] = dict(untrusted.get("metrics") or {})
+    # S17 N13: the trusted verifier owns grading, so it owns the grading time
+    # (seconds, observe only, unsigned).  The worker's own ``evaluate_time`` is
+    # 0.0 on this path; a timeout skips grading and drops the key.
+    if evaluate_time is None:
+        metadata["agent_metrics"].pop("evaluate_time", None)
+    else:
+        metadata["agent_metrics"]["evaluate_time"] = evaluate_time
     metadata["exit_status"] = status
     if status != "timeout" and isinstance(evaluation.get("log"), str):
         metadata["verifier_log"] = evaluation["log"]  # observe only, unsigned
+        # S17 M1 (observe only, unsigned): verifier wall time and agent phase times
+        # (per-turn shapes would need the pinned codex_harness_agent.py), appended as the log's last line so the tape's
+        # verifier_log tail carries them.
+        metrics = untrusted.get("metrics") or {}
+        timing = {"verify_s": round(verify_seconds, 3)}
+        for name in ("create_time", "total_generation_time", "total_tool_time", "max_model_total_tokens"):
+            if isinstance(metrics.get(name), (int, float)) and not isinstance(metrics.get(name), bool):
+                timing[name] = round(float(metrics[name]), 3)
+        metadata["verifier_log"] = (metadata["verifier_log"] + "\nYETO_TIMING "
+                                    + json.dumps(timing, separators=(",", ":")))[-VERIFIER_LOG_TAIL_CHARS:]
     return metadata
 
 

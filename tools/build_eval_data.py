@@ -6,8 +6,9 @@
 
 Writes
 * ``<out>/eval/tb2-holdout-eval.jsonl``  -- the 30 hold-out tasks (eval only);
-* ``<out>/tb2/tb2-train.jsonl``           -- every other TB2 task (59 at tb2@2fd12b8,
-  the S15 smoke-6 included: they were excluded from the eval pool, not from training);
+* ``<out>/tb2/tb2-train.jsonl``           -- every other TB2 task except the unusable table
+  ``data/eval/tb2-unusable.json`` (S17 N13; 46 at tb2@2fd12b8 = 89 - 30 hold-out - 13
+  unusable; the S15 smoke-6 included: they were excluded from the eval pool, not from training);
 * ``<out>/eval/tb2-data.sha256.json``     -- sha256 of the hold-out list and both files
   (pin these in the run config).
 
@@ -55,7 +56,8 @@ def _jsonl(rows: list[dict[str, Any]]) -> bytes:
     return "".join(json.dumps(r, sort_keys=True, ensure_ascii=False) + "\n" for r in rows).encode()
 
 
-def build(tasks_dir: str | Path, holdout: dict[str, Any]) -> dict[str, bytes]:
+def build(tasks_dir: str | Path, holdout: dict[str, Any], *,
+          unusable: dict[str, str] | None = None) -> dict[str, bytes]:
     """{relative path: bytes} for the eval jsonl, the train jsonl and the sha256 record."""
     from yeto.rl.harness.reward_env import benchmark as bm
     from yeto.rl.harness.reward_env import tb2
@@ -75,12 +77,21 @@ def build(tasks_dir: str | Path, holdout: dict[str, Any]) -> dict[str, bytes]:
         if spec.eval_bucket != by_item[tid]["eval_bucket"]:
             raise ValueError(f"{tid}: bucket {spec.eval_bucket} != hold-out list {by_item[tid]['eval_bucket']}")
         eval_rows.append(_row(spec, with_bucket=True))
-    train_rows = [_row(adapter.task_spec(t), with_bucket=False) for t in every if t not in set(held)]
+    unusable = {} if unusable is None else unusable
+    unknown = sorted(set(unusable) - set(every))
+    if unknown:
+        raise ValueError(f"unusable tasks not in the checkout: {unknown}")
+    clash = sorted(set(unusable) & set(held))
+    if clash:
+        raise ValueError(f"unusable tasks in the hold-out list (rebuild it with tools/reward_env/holdout.py): {clash}")
+    train_rows = [_row(adapter.task_spec(t), with_bucket=False) for t in every
+                  if t not in set(held) and t not in unusable]
     bm.assert_disjoint([r["metadata"]["task_id"] for r in train_rows], held)
     eval_bytes, train_bytes = _jsonl(eval_rows), _jsonl(train_rows)
     record = {
         "benchmark_version": adapter.version,
         "holdout_sha256": bm.holdout_sha256(holdout),
+        "unusable_excluded": sorted(unusable),
         EVAL_JSONL: {"rows": len(eval_rows), "sha256": hashlib.sha256(eval_bytes).hexdigest()},
         TRAIN_JSONL: {"rows": len(train_rows), "sha256": hashlib.sha256(train_bytes).hexdigest()},
     }
@@ -93,9 +104,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--tb2-tasks-dir", required=True)
     p.add_argument("--holdout", required=True)
     p.add_argument("--out-dir", required=True)
+    p.add_argument("--tb2-unusable", default=None,
+                   help="unusable-task table (default: data/eval/tb2-unusable.json); its tasks leave training")
+    p.add_argument("--tb2-no-unusable", action="store_true", help="do not apply the unusable-task table")
     a = p.parse_args(argv)
+    from yeto.rl.harness.reward_env import tb2
+
+    unusable = {} if a.tb2_no_unusable else tb2.load_unusable(a.tb2_unusable)
     out = Path(a.out_dir)
-    for rel, data in build(a.tb2_tasks_dir, json.loads(Path(a.holdout).read_text())).items():
+    for rel, data in build(a.tb2_tasks_dir, json.loads(Path(a.holdout).read_text()),
+                           unusable=unusable).items():
         (out / rel).parent.mkdir(parents=True, exist_ok=True)
         (out / rel).write_bytes(data)
         print(rel, len(data), hashlib.sha256(data).hexdigest()[:12])

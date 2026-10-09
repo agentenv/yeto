@@ -30,4 +30,4 @@ OPENENV_BACKEND_PROFILE = "qwen35_08b"
 # (checked by ``codex_openenv_agent_function.profile_identity``).  The tool
 # surface pins (``*_SHA256`` identity env) are profile-independent, so adding a
 # profile here needs no image rebuild.
-OPENENV_BACKEND_PROFILES = ("qwen35_08b", "qwen38_next", "qwen38_next_4layer")
+OPENENV_BACKEND_PROFILES = ("qwen35_08b", "qwen35", "qwen38_next", "qwen38_next_4layer")  # qwen35 (4B): S17 M1

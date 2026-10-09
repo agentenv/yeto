@@ -38,3 +38,4 @@
 7.1 结论：未达验收口径（仓库内没有任何带 syncer 磁带/round 事件的真实多岛 ports 磁带；g3 两岛运行 0 轮），故不勾；已做两岛真实磁带 + 多份单岛真实磁带的 export 与 serve 核对。需要：多岛运行带出 syncer 磁带（或 6.1 的 Rust 原生 round 事件）后再验。
 
 4.1：本机无浏览器（chromium/chrome/firefox 均无，playwright 未安装，无 ~/.cache/ms-playwright），未截图、未勾。
+- 2026-10-08 S17 M1（N5）：看板 reducer 按 `sync/outer_version` 归并各岛应用（重入岛本地版本号会比同步服务多 1，分支 s17-m1 e3ddac89）。已知缺口（未修）：reducer 不认 elastic 同步服务事件带（kind=outer_step/pool_join/pool_leave/transfer 被记为 other，counts.syncer=0），多岛视图看不到外层步、成员变化和带宽。证据 s1-runs/s17-m1-20261008d/judgment-dashboard.json。

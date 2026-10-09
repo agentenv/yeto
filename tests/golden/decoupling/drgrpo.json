@@ -55,6 +55,14 @@
   },
   "schema": "yeto-rl-algorithm-spec-v2"
  },
+ "backend_identity": {
+  "device_family": "nvidia",
+  "engine": "miles",
+  "engine_commit": "8bc52237a1102306abd8f89a2ea2090aa2df6850",
+  "param_map_sha256": "36c37d691b6372ee86485cf0f7d4f8d5e185a6346b875aac33380518ee8f259a",
+  "schema": "yeto-backend-identity-v1",
+  "sha256": "9d5696a3d3b6e6d802115ef3deb970b5e4d9206d1751d71f9075a849d2909f8d"
+ },
  "execution_profile": {
   "contract_hash": "sha256:94562ea539b9602ae900036c53941673ae4b49962631298cc80cb6f3cdeebb48",
   "profile": {
@@ -253,17 +261,17 @@
   {
    "module_file": "yeto/rl/adapters/miles/rollout_meta_hook.py",
    "path": "yeto.rl.adapters.miles.rollout_meta_hook.extract_rollout_metadata",
-   "source_sha256": "605e0ee1e23444cd4710350fe64f59808658605ef0096ccad03d4e7a61585fca"
+   "source_sha256": "6192a70410e8f2a24fe76321dcd35036f16f7c679d91a4f4866d5081693e6ed6"
   },
   {
    "module_file": "yeto/rl/adapters/miles/rollout_meta_hook.py",
    "path": "yeto.rl.adapters.miles.rollout_meta_hook.policy_buffer_filter",
-   "source_sha256": "605e0ee1e23444cd4710350fe64f59808658605ef0096ccad03d4e7a61585fca"
+   "source_sha256": "6192a70410e8f2a24fe76321dcd35036f16f7c679d91a4f4866d5081693e6ed6"
   },
   {
    "module_file": "yeto/rl/adapters/miles/rollout_meta_hook.py",
    "path": "yeto.rl.adapters.miles.rollout_meta_hook.record_trained_groups",
-   "source_sha256": "605e0ee1e23444cd4710350fe64f59808658605ef0096ccad03d4e7a61585fca"
+   "source_sha256": "6192a70410e8f2a24fe76321dcd35036f16f7c679d91a4f4866d5081693e6ed6"
   },
   {
    "module_file": "yeto/rl/algos/reducers.py",
@@ -287,6 +295,6 @@
   "yeto_rl_dynamic_sampling_max_replacements": null
  },
  "session_contract_hash": null,
- "session_contract_hash_note": "运行时由 LoRA 张量布局算出（yeto.protocol.layout_fingerprint），离线不可得",
+ "session_contract_hash_note": "运行时由 LoRA 张量布局算出（yeto.protocol.layout_fingerprint），阶段 5 起再与 backend_identity.sha256 绑定（yeto.rl.engine.backend_identity.session_contract_hash），离线不可得",
  "title": "Dr.GRPO 常数分母归约（G1 drgrpo 证据里的 spec 原文件）"
 }

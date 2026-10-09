@@ -120,6 +120,54 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
 - 新哈希与新插件路径没有真机证据（本轮不上 GPU），由下一次本来要开的卡顺带取得。
 - 需 import Miles 的等价测试（`test_rl_reward_pipeline_equivalence`、`test_rl_seq_adv_miles`、`test_rl_algorithm_flags_upstream`）本机屏蔽未跑。
 
+## 阶段 5 记录（同分支 s17-decouple-p4，2026-10-08 夜）
+
+- `algorithm_sha256`、契约哈希、Miles 命令行：8 个标准样本全部不变（身份哈希是并列的第三个哈希，不并入前两个）。
+- 标准样本新增字段 `backend_identity`：Miles ports 身份 `{engine: miles, engine_commit: 8bc52237…, device_family: nvidia, param_map_sha256: 36c37d69…}`，哈希 `9d5696a3d3b6e6d802115ef3deb970b5e4d9206d1751d71f9075a849d2909f8d`。
+- 运行时变化（离线样本记不到）：RL 岛发给 syncer 的会话契约从"布局指纹"改为"布局指纹 + 身份哈希"的 sha256；dense 与 SAO 的会话契约输入加入 legacy Miles 身份哈希。新旧版本岛混跑会被 syncer 拒绝；阶段 5 之前的 syncer 检查点不能续跑。未取得真 syncer 与真机证据。
+
 ## C6b 评测岛（分支 s17-eval-island，基于 s17-decouple-p4 f7fe923e，2026-10-08 夜）
 
 只变一处：`yeto/rl/adapters/miles/rollout_meta_hook.py` 加了训练批次按难度分桶（rl-eval-difficulty-buckets 4.1），8 个标准样本里该插件的 `source_sha256` 由 `af10161a148d3059148342896778fec5b915c90ed96258ccab1754f1805cda61` 改为 `605e0ee1e23444cd4710350fe64f59808658605ef0096ccad03d4e7a61585fca`。该哈希不进 `AlgorithmSpec.sha256()`，8 个配置的算法哈希、契约哈希不变；`fake_engine_tapes.json` 逐字节不变。与阶段 5 合并时如两边都改了 rollout_meta_hook，以合并后源码重新生成（`python tests/decoupling_golden.py --write`）。
+
+## 阶段 5 补：elastic 模式 JOIN 带后端身份（分支 s17-elastic-identity，2026-10-08 夜，任务 6.2a）
+
+- 算法哈希、契约哈希、8 个标准样本：都不变（这次只改 elastic 帧和 elastic 检查点，不碰哈希输入）。
+- 帧格式变了：elastic JOIN（消息 15）的正文在 `capacity` 后面多 32 字节 `backend_identity`（岛的 `BackendIdentity.sha256()` 原始字节，没声明时全 0），HMAC 照旧覆盖"类型字节 + 正文"。黄金帧（密钥 `k1`，身份 `0xab`×32）由 Rust `ElasticMsg::encode` 自己输出：`03000000000000000100000007000000000000000000000000000440` + `ab`×32 + `3d2faaa5418d42914e93471c8f79f008699aee2190bd1d505af97476e9ec21a7`，Rust 单测和 Python 单测都比对这串字节。其余 elastic 消息的黄金帧不变。
+- elastic syncer 检查点格式：魔数 `YELSRV1` 改 `YELSRV2`，魔数后面加"有无身份 1 字节 + 身份 32 字节"。
+- 版本边界（新旧不能混用）：
+  - 旧岛（JOIN 没有身份字段）连新 syncer：JOIN 被拒，报 "JOIN without backend identity (island older than the syncer?)"。
+  - 新岛连旧 syncer：旧 syncer 解码时报 "trailing bytes in elastic frame type 15"，同样被拒。
+  - 旧检查点（`YELSRV1`）新 syncer 不能 `--resume`，报 "predates the backend identity field"。
+  - 同一种后端、同一个提交的岛，新代码之间行为和以前一样（JOIN_ACK、合并、权重都不变）。
+
+## 阶段 5 补：严格模式拒绝不一致的 HELLO 不再致命（分支 s17-strict-reject，2026-10-08 夜，任务 6.2b）
+
+- 算法哈希、契约哈希、8 个标准样本、帧格式、检查点格式：都不变。
+- 只变了 syncer 对错误岛的处理和 MSG_ERROR 文本：契约不一致时错误文本改为 `session mismatch (HELLO refused, session keeps running): expected session_contract_hash=… layout_fingerprint=… …, got …`（仍以 `session mismatch` 开头，旧客户端照样识别为被拒）。新旧代码可以混用。
+
+## S17 N16 学习率调度开关（分支 s17-lr-constant，基线 s17-decouple-p4 @5fac05f7）
+
+新增 `--rl-lr-schedule {auto,linear,constant}`，默认 auto。用 `tests/decoupling_golden.py` 的 `record_config` 走完整的 launcher → 岛 → Miles 命令行链路实测（grpo_default 配置）：
+
+| 配置 | `algorithm_sha256` | Miles 命令行摘要 | 契约哈希 | 学习率参数 |
+|---|---|---|---|---|
+| grpo_default（auto） | `27df1133c924e7a3…` 不变 | `cd9c51c2946a4e45…` 不变 | `27bb768f7462a3ff…` 不变 | `--lr-decay-style linear --lr-decay-iters 3` |
+| grpo_default + `--rl-lr-schedule linear` | 同上 | 同上（与 auto 逐字节相同） | 同上 | 同上 |
+| grpo_default + `--rl-lr-schedule constant` | `27df1133c924e7a3…` 不变 | `1108c08ed4e9ef28…`（与 decoupled 标准样本的摘要相同：两者命令行只差这一个值） | `27bb768f7462a3ff…` 不变 | `--lr-decay-style constant --lr-decay-iters 3` |
+
+- 8 个标准样本全部不变（auto 不往命令行加任何参数；`tests/test_decoupling_golden.py` 12 过）。
+- 变的只有 Miles 命令行摘要和 `ports_runtime_fingerprint`（`sha256:0ad73504…` → `sha256:cbe1cd06…`）。学习率调度不进 `AlgorithmSpec.sha256()`，也不进 `ExecutionProfile.contract_hash`。
+- 行为变化（随 auto 规则并入 N5 a73ab1b2）：`--rl-island-scheduling elastic` 的岛由线性改为常数学习率，命令行摘要随之变化；两个哈希不变。标准样本里的 `elastic` 配置是岛内弹性 `--rl-elastic`，不是跨岛 elastic，所以不受影响。
+- 已知限制（待主 agent 定）：因为契约哈希不含学习率调度，同一个同步服务下一个岛用 linear、另一个岛用 constant 不会被握手拒绝。launcher 给同一次运行的所有岛下发同一个值，只有手工拼命令或续训时换了参数才会出现；如果要堵死，需要把调度写进契约，这会让所有配置的契约哈希都变，本次没做。
+
+## S17 C9 codex 事件字段（PR #141，分支 s17-codex-events，2026-10-09 合进 main 时迁移）
+
+- 原因：C9 在 `trajectory_diagnostics` 里加了 `end_kind` 和逐回合长度（`turn_completion_tokens`、`turn_context_tokens`、`turn_tool_output_bytes`），原改在旧路径 `yeto/rl/engine/miles_adapter/rollout_meta_hook.py`；阶段 4/5 已把该文件搬到 `yeto/rl/adapters/miles/rollout_meta_hook.py`（旧路径只剩转发），合并时把这 8 行原样移到新文件。
+- 变化：8 个标准样本里 rollout_meta_hook 插件的 `source_sha256` 由 `605e0ee1e23444cd4710350fe64f59808658605ef0096ccad03d4e7a61585fca`（C6b 后）改为 `cab11ca4d4082524f113f3aa28963af7394767b9252c431c88088e466b23b760`。只有这一个字段变；`algorithm_sha256`、契约哈希、Miles 命令行、`backend_identity`、`fake_engine_tapes.json` 都不变。已用 `python tests/decoupling_golden.py --write` 重新生成。
+
+## S17 N13 evaluate_time（PR #142，分支 s17-codex-closeout，2026-10-09 合进 main 时迁移）
+
+- 原因：N13 在 `trajectory_diagnostics` 里加了 `evaluate_time`（判分耗时，只观测），原改在旧路径 rollout_meta_hook；合并时把这 3 行移到 `yeto/rl/adapters/miles/rollout_meta_hook.py`。
+- 变化：8 个标准样本里 rollout_meta_hook 插件的 `source_sha256` 由 `cab11ca4…`（C9 后）改为 `6192a70410e8f2a24fe76321dcd35036f16f7c679d91a4f4866d5081693e6ed6`，其他字段都不变；已重新生成。
+- 同时合并了 `codex_openenv_agent_function.finish_trusted` 里 N13 与 M1 各自加的判分计时：共用一次计时，`evaluate_time`（N13）与 `YETO_TIMING` 的 `verify_s`（M1）取同一个值。

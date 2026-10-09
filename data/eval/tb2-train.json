@@ -1,0 +1,292 @@
+{
+ "schema": "yeto-train-split/1",
+ "benchmark": "tb2",
+ "benchmark_version": "tb2@2fd12b8",
+ "holdout_sha256": "1937db4257845b1f9efb648ff6b25d1295c468f22514ac6361d611c64ec3886b",
+ "excluded": [
+  {
+   "task_id": "adaptive-rejection-sampler",
+   "reason": "unusable/timeout: official solve.sh hits the task agent timeout on the default CPU allotment"
+  },
+  {
+   "task_id": "build-cython-ext",
+   "reason": "unusable/official-solution-fails: 1 of 11 tests (pyknotid repo self-test) fails with the official solution; likely upstream drift, not investigated"
+  },
+  {
+   "task_id": "build-pmars",
+   "reason": "unusable/env-upstream-mirror: solve.sh pins dpkg-dev 1.22.21, which is gone from the apt mirror (apt rc 100)"
+  },
+  {
+   "task_id": "caffe-cifar-10",
+   "reason": "unusable/timeout: official solve.sh hits the task agent timeout on the default CPU allotment"
+  },
+  {
+   "task_id": "crack-7z-hash",
+   "reason": "unusable/timeout: official solve.sh hits the task agent timeout on the default CPU allotment"
+  },
+  {
+   "task_id": "custom-memory-heap-crash",
+   "reason": "unusable/env-sandbox-permission: solve.sh 'ulimit -c' is not permitted in the Modal sandbox; the release-build test fails (other 5 pass)"
+  },
+  {
+   "task_id": "mcmc-sampling-stan",
+   "reason": "unusable/env-dependency-install: solve.sh fails to install rstan (there is no package called 'rstan')"
+  },
+  {
+   "task_id": "protein-assembly",
+   "reason": "unusable/official-solution-unstable: official solver reports 'Wrong translation' and asks for a rerun"
+  },
+  {
+   "task_id": "qemu-alpine-ssh",
+   "reason": "unusable/env-upstream-mirror: test.sh apt install 404s on Debian bullseye-security during prebake; image cannot be built"
+  },
+  {
+   "task_id": "qemu-startup",
+   "reason": "unusable/env-upstream-mirror: test.sh apt install 404s on Debian bullseye-security during prebake; image cannot be built"
+  },
+  {
+   "task_id": "rstan-to-pystan",
+   "reason": "unusable/env-upstream-drift: pystan fails to import pkg_resources (removed from current setuptools)"
+  },
+  {
+   "task_id": "schemelike-metacircular-eval",
+   "reason": "unusable/official-solution-fails: 2 of 63 tests fail with the official solution (397 s on 1 core; possibly too slow), not investigated"
+  },
+  {
+   "task_id": "sqlite-with-gcov",
+   "reason": "unusable/timeout: official solve.sh hits the task agent timeout on the default CPU allotment"
+  }
+ ],
+ "items": [
+  {
+   "task_id": "bn-fit-modify",
+   "difficulty": "hard",
+   "eval_bucket": "tb2-hard"
+  },
+  {
+   "task_id": "cancel-async-tasks",
+   "difficulty": "hard",
+   "eval_bucket": "tb2-hard"
+  },
+  {
+   "task_id": "chess-best-move",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "circuit-fibsqrt",
+   "difficulty": "hard",
+   "eval_bucket": "tb2-hard"
+  },
+  {
+   "task_id": "cobol-modernization",
+   "difficulty": "easy",
+   "eval_bucket": "tb2-easy"
+  },
+  {
+   "task_id": "code-from-image",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "configure-git-webserver",
+   "difficulty": "hard",
+   "eval_bucket": "tb2-hard"
+  },
+  {
+   "task_id": "count-dataset-tokens",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "db-wal-recovery",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "distribution-search",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "dna-assembly",
+   "difficulty": "hard",
+   "eval_bucket": "tb2-hard"
+  },
+  {
+   "task_id": "extract-elf",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "feal-differential-cryptanalysis",
+   "difficulty": "hard",
+   "eval_bucket": "tb2-hard"
+  },
+  {
+   "task_id": "feal-linear-cryptanalysis",
+   "difficulty": "hard",
+   "eval_bucket": "tb2-hard"
+  },
+  {
+   "task_id": "filter-js-from-html",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "financial-document-processor",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "fix-git",
+   "difficulty": "easy",
+   "eval_bucket": "tb2-easy"
+  },
+  {
+   "task_id": "git-leak-recovery",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "git-multibranch",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "install-windows-3.11",
+   "difficulty": "hard",
+   "eval_bucket": "tb2-hard"
+  },
+  {
+   "task_id": "large-scale-text-editing",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "llm-inference-batching-scheduler",
+   "difficulty": "hard",
+   "eval_bucket": "tb2-hard"
+  },
+  {
+   "task_id": "log-summary-date-ranges",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "mailman",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "merge-diff-arc-agi-task",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "model-extraction-relu-logits",
+   "difficulty": "hard",
+   "eval_bucket": "tb2-hard"
+  },
+  {
+   "task_id": "modernize-scientific-stack",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "mteb-leaderboard",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "multi-source-data-merger",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "openssl-selfsigned-cert",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "password-recovery",
+   "difficulty": "hard",
+   "eval_bucket": "tb2-hard"
+  },
+  {
+   "task_id": "path-tracing-reverse",
+   "difficulty": "hard",
+   "eval_bucket": "tb2-hard"
+  },
+  {
+   "task_id": "polyglot-c-py",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "pypi-server",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "pytorch-model-cli",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "query-optimize",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "regex-chess",
+   "difficulty": "hard",
+   "eval_bucket": "tb2-hard"
+  },
+  {
+   "task_id": "regex-log",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "sparql-university",
+   "difficulty": "hard",
+   "eval_bucket": "tb2-hard"
+  },
+  {
+   "task_id": "sqlite-db-truncate",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "torch-pipeline-parallelism",
+   "difficulty": "hard",
+   "eval_bucket": "tb2-hard"
+  },
+  {
+   "task_id": "torch-tensor-parallelism",
+   "difficulty": "hard",
+   "eval_bucket": "tb2-hard"
+  },
+  {
+   "task_id": "train-fasttext",
+   "difficulty": "hard",
+   "eval_bucket": "tb2-hard"
+  },
+  {
+   "task_id": "tune-mjcf",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "vulnerable-secret",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "write-compressor",
+   "difficulty": "hard",
+   "eval_bucket": "tb2-hard"
+  }
+ ]
+}

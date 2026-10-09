@@ -32,3 +32,22 @@
 - judge PASS（KL 0.0209），但 24/24 奖励仍为 0。新采集字段生效：第 1 次回复就违反协议 10 条、第 1 次回复被 4096 截断 4 条、上下文 8192 用尽 8 条、多回合后违规 2 条，submit 0 次，没有一条用满 12 轮。
 - 8895dbc9：TB2 提示写明严格格式和预算；TB2 工具描述去掉 CTF 措辞（签名表面哈希 707e144f）；tape 增加 end_reason 和最后一次回复的形态。详见 STAGE2-ANALYSIS §6。下一步先做判分链路阳性对照（CPU 沙箱），上卡等用户裁定。
 - TB2 判分链路阳性对照（Modal CPU 沙箱，≈$0.03）：6/6 官方解 reward=1、6/6 空解 reward=0，判分链路正常，零奖励来自模型没做对。3a49e94d：verifier 输出末尾 2000 字符作为 `verifier_log` 写入轨迹和 tape。见 STAGE2-ANALYSIS §7。
+
+## G6 协议错误分析（S17 N13，2026-10-08 夜，CPU）
+数据：`s1-runs/s17-fncodex-r3-20261008a/tape-direct/.../rl-island-0.jsonl` 的 24 条 `rl_trajectory_reward`（字段 end_reason、last_tool_calls、last_tool_names、last_content_head、last_reasoning_tail、last_completion_tokens）。[实测]
+
+| 类别 | 条数 | 占协议错误 |
+|---|---|---|
+| 一次回复发了 2 个工具调用（只报"必须恰好一个工具调用"） | 10 | 91% |
+| 2 个工具调用且带一句文字（先报"文字和工具调用混在一起"） | 1（regex-log，回复 7264 词元） | 9% |
+| 工具调用格式坏 / 半截 JSON / 未知工具名 | 0 | 0 |
+| 思维标记缺失 / 模板问题 | 0 | 0 |
+| 网关拒绝 | 0 | 0 |
+| 被截断（finish_reason=length） | 0（截断的 4 条单独记为 response_truncated） | 0 |
+
+- 11 条全部在**第 1 回合**结束，finish_reason 都是 tool_calls，last_tool_calls 都是 2。按题：git-multibranch 4/4、log-summary-date-ranges 3/4、sqlite-db-truncate 2/4、fix-git 1/4、regex-log 1/4、openssl-selfsigned-cert 0/4。
+- 内容只有 `"\n\n"` 的 10 条，桥接 `strip()` 后为空，不算"混文字"，判定正确。
+- 思考都很短（29–103 字符，如 "Let me start by inspecting the environment."），随后连发两个探查命令。单调用的首回复 53–78 词元，双调用的 89–166 词元，与"真的写了两段工具调用"一致；其中 1 条第二个调用名是 `_terminal_placeholder`（我们没有这个工具，是模型自己写的），说明不是解析器把一段拆成两段。原始词元文本没有落盘，这一点是推断，**未直接核对**。
+- 根因：**模型**不遵守 TB2 系统提示里"每次恰好一个工具调用，否则本轮作废"（提示确实送到了模型，见 `TB2_BASE_INSTRUCTIONS`；launch.log 里 "First rollout sample" 预览的是数据集自带的旧 system 文本，codex 路径不使用）。**后端没兜住**：我们发了 `parallel_tool_calls: false`，但 SGLang（sglang-next `serving_chat.py` + `function_call/base_format_detector.py`）只有 glm47/Kimi K3 解析器会按它约束解码，本次用的 `qwen3_coder` 在 tool_choice=auto 下不约束。**桥接代码**：无缺陷，未改。
+- 可选改法（待用户定，未做）：①在我们的 SGLang 补丁里让 qwen3_coder 在 parallel_tool_calls=false 时只放行一个工具调用（约束解码，训练词元与执行一致）；②桥接只执行第一个调用、第二个回"一次只能一个"的工具错误（要动签名文件，且训练词元里留着没执行的调用）；③保持现状，把它当作训练要纠正的行为（GRPO 下这些轨迹奖励 0，同题有成功样本时会被压低）。①最干净。
+- 下次上卡想直接确认：在桥接里存最后一次回复的原始文本前 N 字节（要动签名文件，本次没做）。

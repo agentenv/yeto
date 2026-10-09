@@ -381,18 +381,28 @@ def test_build_eval_data_split_and_determinism(tmp_path):
     assert sha[tool.EVAL_JSONL]["sha256"] == hashlib.sha256(out[tool.EVAL_JSONL]).hexdigest()
     with pytest.raises(ValueError, match="checkout"):
         tool.build(tmp_path / "tb2", {**hold, "benchmark_version": "tb2@other"})
+    # S17 N13: the unusable table leaves training; an unusable task in the hold-out list is refused
+    tr = [json.loads(x) for x in tool.build(tmp_path / "tb2", hold, unusable={"d": "unusable/x: y"})[
+        tool.TRAIN_JSONL].decode().splitlines()]
+    assert [r["metadata"]["task_id"] for r in tr] == ["a"]
+    with pytest.raises(ValueError, match="hold-out"):
+        tool.build(tmp_path / "tb2", hold, unusable={"b": "unusable/x: y"})
 
 
 def test_shipped_eval_and_train_jsonl_match_their_sha_record():
     sha = json.loads((REPO / "data/eval/tb2-data.sha256.json").read_text())
-    for rel, n in (("eval/tb2-holdout-eval.jsonl", 30), ("tb2/tb2-train.jsonl", 59)):
+    for rel, n in (("eval/tb2-holdout-eval.jsonl", 30), ("tb2/tb2-train.jsonl", 46)):
         data = (REPO / "data" / rel).read_bytes()
         assert sha[rel] == {"rows": n, "sha256": hashlib.sha256(data).hexdigest()}
     hold = json.loads((REPO / "data/eval/tb2-holdout.json").read_text())
     ev = {json.loads(x)["metadata"]["task_id"] for x in (REPO / "data/eval/tb2-holdout-eval.jsonl").read_text().splitlines()}
     tr = {json.loads(x)["metadata"]["task_id"] for x in (REPO / "data/tb2/tb2-train.jsonl").read_text().splitlines()}
     assert ev == {i["task_id"] for i in hold["items"]} and not ev & tr
-    assert {e["task_id"] for e in hold["excluded"]} <= tr  # smoke-6: out of the eval pool, still trainable
+    unusable = {i["task_id"] for i in json.loads((REPO / "data/eval/tb2-unusable.json").read_text())["items"]}
+    assert not unusable & (ev | tr)  # S17 N13: unusable tasks leave both sets
+    assert {e["task_id"] for e in hold["excluded"]} - unusable <= tr  # smoke-6: out of the eval pool, still trainable
+    split = json.loads((REPO / "data/eval/tb2-train.json").read_text())
+    assert tr == {i["task_id"] for i in split["items"]} and sha["unusable_excluded"] == sorted(unusable)
 
 
 def test_eval_island_body_keeps_logs_off_the_volume_until_the_end(tmp_path, monkeypatch):

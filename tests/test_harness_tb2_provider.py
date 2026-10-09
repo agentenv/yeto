@@ -627,6 +627,84 @@ def test_verifier_log_tail_reaches_the_trajectory_metadata_and_tape(monkeypatch,
     assert "YETO_TB2_REWARD=0" in result["verifier_log"]
     diag = hook.trajectory_diagnostics(result)
     assert diag["verifier_log"] == result["verifier_log"] and diag["testsh_rc"] == 1
+    # S17 M1: observe-only timing line (verifier wall time, agent phase times, per-turn shapes)
+    timing = json.loads(result["verifier_log"].rsplit("YETO_TIMING ", 1)[1])
+    assert timing["verify_s"] >= 0
     long = "x" * 5000 + "TAIL"
     excerpt = tb2_provider.verifier_log_excerpt(long)
     assert len(excerpt) == tb2_provider.VERIFIER_LOG_CHARS and excerpt.endswith("TAIL")
+
+
+# --- S17 G3: tests/ larger than Modal's 64 KiB exec-argv limit ---------------------
+
+class _ArgvLimited:
+    """Wraps a sandbox handle and refuses any command longer than Modal's ARG_MAX."""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.lengths: list[int] = []
+
+    def exec(self, command, *, timeout_s, workdir=None):
+        self.lengths.append(len(command))
+        if len(command) > 65536:
+            raise RuntimeError("Total length of CMD arguments cannot exceed 65536 bytes (ARG_MAX)")
+        return self.inner.exec(command, timeout_s=timeout_s, workdir=workdir)
+
+
+@pytest.mark.parametrize("big", [False, True])
+def test_verifier_stages_large_tests_dir(tmp_path, big):
+    import os as _os
+
+    tasks_dir = _make_task(tmp_path / "tasks")
+    if big:  # ~200 KB of incompressible data -> ~270 KB base64
+        (tasks_dir / "fix-git" / "tests" / "blob.bin").write_bytes(_os.urandom(200_000))
+    task = tb2_provider.resolve_task("fix-git", tasks_dir)
+    stage = tb2_provider.verifier_stage_commands(task)
+    assert bool(stage) == big
+    backend = tb2_provider.LocalProcessBackend(tmp_path / "sandboxes")
+    handle = _ArgvLimited(backend.create(task, "t1"))
+    handle.exec("echo ok > fixed.txt", timeout_s=30)
+    verdict = _run(tb2_provider.Tb2Verifier(handle, task).evaluate("e"))
+    assert verdict["passed"] is True and verdict["testsh_rc"] == 0
+    assert max(handle.lengths) <= 65536
+    if big:
+        assert len(handle.lengths) >= 1 + len(stage)
+
+
+def test_reward_env_run_judge_stages_large_tests(tmp_path):
+    import os as _os
+
+    from yeto.rl.harness.reward_env import benchmark as bm
+    from yeto.rl.harness.reward_env import tb2 as rt
+
+    tasks_dir = _make_task(tmp_path / "tasks")
+    (tasks_dir / "fix-git" / "tests" / "blob.bin").write_bytes(_os.urandom(120_000))
+    adapter = rt.Tb2Benchmark(tasks_dir, version="tb2@test")
+    assert adapter.judge_setup_commands("fix-git")
+    task = tb2_provider.resolve_task("fix-git", tasks_dir)
+    handle = _ArgvLimited(tb2_provider.LocalProcessBackend(tmp_path / "sb").create(task, "t1"))
+    handle.exec("echo ok > fixed.txt", timeout_s=30)
+    result = bm.run_judge(adapter, "fix-git", handle, prebaked=False)
+    assert result.passed and not result.infra_error and max(handle.lengths) <= 65536
+
+def test_modal_sandbox_exec_reads_bytes_and_decodes_leniently():
+    calls = {}
+
+    class _Proc:
+        stdout = SimpleNamespace(read=lambda: b"ok \xf0\x9f")  # cut mid UTF-8 sequence
+        stderr = SimpleNamespace(read=lambda: b"")
+
+        @staticmethod
+        def wait():
+            return 0
+
+    class _Sandbox:
+        object_id = "sb"
+
+        def exec(self, *args, **kwargs):
+            calls["kwargs"] = kwargs
+            return _Proc()
+
+    result = tb2_provider.ModalSandbox(_Sandbox(), "/app").exec("echo", timeout_s=5)
+    assert calls["kwargs"]["text"] is False
+    assert result.output.startswith("ok ") and result.exit_code == 0

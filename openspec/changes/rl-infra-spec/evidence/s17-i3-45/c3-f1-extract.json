@@ -1,0 +1,62 @@
+{
+ "run": "s17-i3-c3-f1",
+ "rc": "rc=4",
+ "deliver": [
+  "island0",
+  "write",
+  "confirm",
+  "done"
+ ],
+ "injection_lines": [],
+ "rebuilt_events": [],
+ "tape_reconfig_phases": [],
+ "journal_phases": [
+  [
+   "rb1",
+   "VALIDATING",
+   1791496596.8,
+   ""
+  ],
+  [
+   "rb1",
+   "WAIT_SAFE",
+   1791496596.8,
+   ""
+  ],
+  [
+   "rb1",
+   "REBUILDING_TRAINER",
+   1791496596.8,
+   ""
+  ]
+ ],
+ "journal_source": "pulled",
+ "recovery_records": [],
+ "rounds_trained": [
+  [
+   0,
+   1,
+   2
+  ],
+  [
+   1,
+   2,
+   4
+  ],
+  [
+   2,
+   3,
+   6
+  ]
+ ],
+ "rounds_after_terminal": null,
+ "cursor_monotonic": true,
+ "ledger_kinds": {
+  "prepared": 1,
+  "filtered": 1,
+  "carried_over_report": 1
+ },
+ "optimizer_applied_dups": {},
+ "consumed_dups": {},
+ "finalized": false
+}

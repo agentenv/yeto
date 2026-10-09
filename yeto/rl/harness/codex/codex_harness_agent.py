@@ -1116,6 +1116,7 @@ class _ResponsesBridge:
         )
         self._last_assistant_message = None
         self._unobserved_tool_token_upper_bound += len(output.encode("utf-8")) + 256
+        _note_turn_tool_output(self._metrics, output)
         self._pending = None
 
     def mark_terminal(self) -> None:
@@ -1508,6 +1509,46 @@ class _ResponsesBridge:
 
 LAST_COMPLETION_HEAD_CHARS = 200
 
+# S17 C9 (observe only): why a Codex episode ended, finer than the signed
+# ``exit_status`` (which folds protocol errors into ``max_turns`` and reply
+# truncation into ``max_seq_len``).
+END_KIND_SUBMIT = "submit"                    # episode ended after a submit call
+END_KIND_COMPLETED = "completed_no_submit"    # Codex stopped on its own, no submit
+END_KIND_TURN_LIMIT = "turn_limit"            # signed turn budget reached
+END_KIND_PROTOCOL_ERROR = "protocol_error"    # model reply violated the tool protocol
+END_KIND_RESPONSE_TRUNCATED = "response_truncated"  # one reply hit the per-reply cap
+END_KIND_CONTEXT_LIMIT = "context_limit"      # whole trajectory hit the sequence cap
+END_KIND_TIMEOUT = "timeout"
+END_KINDS = (END_KIND_SUBMIT, END_KIND_COMPLETED, END_KIND_TURN_LIMIT, END_KIND_PROTOCOL_ERROR,
+             END_KIND_RESPONSE_TRUNCATED, END_KIND_CONTEXT_LIMIT, END_KIND_TIMEOUT)
+_TRUNCATED_SAMPLE_MESSAGE = "Miles returned a truncated sample"
+# Per-turn length lists are capped so one runaway episode cannot bloat events.
+TURN_LENGTHS_MAX = 256
+
+
+def end_kind_for(exc: BaseException) -> str:
+    if isinstance(exc, CodexSequenceLimit):
+        return END_KIND_RESPONSE_TRUNCATED if str(exc) == _TRUNCATED_SAMPLE_MESSAGE else END_KIND_CONTEXT_LIMIT
+    if isinstance(exc, CodexTurnLimit):
+        return END_KIND_TURN_LIMIT
+    if isinstance(exc, CodexModelFailure):
+        return END_KIND_PROTOCOL_ERROR
+    raise TypeError(f"not a policy boundary: {type(exc).__name__}")
+
+
+def _append_capped(metrics: Any, name: str, value: Any) -> None:
+    values = getattr(metrics, name, None)
+    if not isinstance(values, list):
+        values = []
+        setattr(metrics, name, values)
+    if len(values) < TURN_LENGTHS_MAX:
+        values.append(value)
+
+
+def _note_turn_tool_output(metrics: Any, output: str) -> None:
+    """Observe only (S17 C9): bytes of each tool result fed back to the model."""
+    _append_capped(metrics, "turn_tool_output_bytes", len(output.encode("utf-8")))
+
 
 def _note_last_completion(metrics: Any, choice: dict[str, Any], completion: dict[str, Any]) -> None:
     """Observe only (S15 r2 follow-up): shape of the latest model reply, so a
@@ -1521,6 +1562,13 @@ def _note_last_completion(metrics: Any, choice: dict[str, Any], completion: dict
     for call in calls:
         function = call.get("function") if isinstance(call, dict) else None
         names.append(str(function.get("name"))[:32] if isinstance(function, dict) else "?")
+    # S17 C9: one entry per model reply (None when the backend sent no usage).
+    tokens = usage.get("completion_tokens")
+    _append_capped(metrics, "turn_completion_tokens",
+                   tokens if isinstance(tokens, int) and not isinstance(tokens, bool) else None)
+    total = usage.get("total_tokens")
+    _append_capped(metrics, "turn_context_tokens",
+                   total if isinstance(total, int) and not isinstance(total, bool) else None)
     metrics.last_completion = {  # type: ignore[attr-defined]
         "finish_reason": str(choice.get("finish_reason"))[:16],
         "content_chars": len(content),
@@ -1916,13 +1964,22 @@ class _AppServerDriver:
 
     async def drive(self) -> str:
         try:
-            return await self._drive_protocol()
+            status = await self._drive_protocol()
         except CodexSequenceLimit as exc:
             self._metrics.end_reason = f"{type(exc).__name__}: {exc}"[:160]  # type: ignore[attr-defined]
+            self._metrics.end_kind = end_kind_for(exc)  # type: ignore[attr-defined]
             return "max_seq_len"
         except (CodexTurnLimit, CodexModelFailure) as exc:
+            # The signed status stays ``max_turns`` (reward 0, verifier still
+            # runs; changing it would change the signed outcome contract), but
+            # ``end_kind`` separates a real turn budget from a protocol error.
             self._metrics.end_reason = f"{type(exc).__name__}: {exc}"[:160]  # type: ignore[attr-defined]
+            self._metrics.end_kind = end_kind_for(exc)  # type: ignore[attr-defined]
             return "max_turns"
+        self._metrics.end_kind = (  # type: ignore[attr-defined]
+            END_KIND_SUBMIT if self._metrics.submit_calls else END_KIND_COMPLETED
+        )
+        return status
 
     async def _drive_protocol(self) -> str:
         initialized = await self._request(
@@ -2075,6 +2132,7 @@ async def run(
                 )
             except asyncio.TimeoutError:
                 metrics.timed_out = 1
+                metrics.end_kind = END_KIND_TIMEOUT  # type: ignore[attr-defined]
                 outcome_status = "timeout"
             except asyncio.CancelledError:
                 raise
