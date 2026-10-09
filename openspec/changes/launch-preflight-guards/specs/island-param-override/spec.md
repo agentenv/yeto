@@ -21,7 +21,7 @@ launcher SHALL 默认让所有岛使用同一份参数。只有用户传入单�
 - **THEN** launcher 起机前报错，不创建云资源
 
 ### Requirement: 只允许白名单参数
-单岛换参数 SHALL 只接受白名单内的参数：学习率调度、落后上限、补交落后上限、岛身份测试扰动。其他参数 SHALL 起机前报错。岛号超出岛数时 SHALL 起机前报错。
+单岛换参数 SHALL 只接受白名单内的参数：学习率调度、落后上限、岛身份测试扰动。补交落后上限是 syncer 参数，SHALL 起机前报错并写明"syncer 参数，不能按岛换"（10-09 主 agent 代用户拍板）。其他参数 SHALL 起机前报错。岛号超出岛数时 SHALL 起机前报错。
 
 #### Scenario: 非白名单参数
 - **WHEN** 用户要单独改某岛的模型版本
@@ -35,7 +35,7 @@ launcher SHALL 默认让所有岛使用同一份参数。只有用户传入单�
 - **THEN** 运行清单、岛 1 的 tape 都有这条记录，看板在岛 1 旁显示"负例岛：学习率调度 linear→constant"
 
 ### Requirement: 负例运行不能用于正式训练
-带负例运行标记的运行 SHALL 不能用续训接上正式运行，导出命令 SHALL 拒绝导出该运行的权重。
+带负例运行标记的运行 SHALL 不能用续训接上正式运行，导出命令 SHALL 拒绝导出该运行的权重。续训指 `--rl-checkpoint-store` 从仓库恢复，导出指 `yeto merge`（10-09 主 agent 代用户拍板：原文 `--rl-resume` / `yeto export` 在 main 不存在）。
 
 #### Scenario: 导出负例运行
 - **WHEN** 用户对负例运行执行导出

@@ -1,0 +1,18 @@
+{
+ "run": "s18-lpg-age-20261009a",
+ "reducer_cards_negative_test": {
+  "0": null,
+  "1": {
+   "label": "负例岛：落后上限 0→1",
+   "overrides": [
+    {
+     "key": "rl_max_policy_age",
+     "name": "落后上限",
+     "old": 0,
+     "new": 1
+    }
+   ]
+  }
+ },
+ "source": "s18-lpg-judge.py P6 (yeto.dashboard.reducer over all island events); offline page: s1-runs/<run>/dashboard.html (yeto dashboard export); no browser on this machine, so no PNG screenshot"
+}

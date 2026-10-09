@@ -105,16 +105,31 @@ def lr_schedule_sha256(decay_style: str, decay_iters: int | None, lr: Any,
     return hashlib.sha256(text.encode()).hexdigest()
 
 
-def island_contract_sha256(identity_sha256: str | None, lr_schedule: str | None) -> str | None:
+IDENTITY_TEST_SALT_DOMAIN = b"yeto-rl-identity-test-salt-v1\0"
+
+
+def island_contract_sha256(identity_sha256: str | None, lr_schedule: str | None,
+                           test_salt: str | None = None) -> str | None:
     """What an island declares to the syncer as its identity (HELLO session
     contract and elastic JOIN): the backend identity, bound to the LR schedule
     hash when the adapter supplies one.  ``lr_schedule`` None keeps the plain
-    backend identity (old behaviour, e.g. verl until its adapter supplies it)."""
-    if identity_sha256 is None or lr_schedule is None:
-        return identity_sha256
-    ident = bytes.fromhex(_sha256_hex(identity_sha256, "backend identity sha256"))
-    lr = bytes.fromhex(_sha256_hex(lr_schedule, "lr schedule sha256"))
-    return hashlib.sha256(ISLAND_CONTRACT_DOMAIN + ident + lr).hexdigest()
+    backend identity (old behaviour, e.g. verl until its adapter supplies it).
+
+    ``test_salt`` (launch-preflight-guards 3.3, TEST ONLY): the
+    ``identity_test_salt`` of a negative-test island; mixed into the result so
+    the island declares a different identity.  None (default) = unchanged."""
+    if identity_sha256 is None:
+        return None
+    if lr_schedule is None:
+        out = identity_sha256
+    else:
+        ident = bytes.fromhex(_sha256_hex(identity_sha256, "backend identity sha256"))
+        lr = bytes.fromhex(_sha256_hex(lr_schedule, "lr schedule sha256"))
+        out = hashlib.sha256(ISLAND_CONTRACT_DOMAIN + ident + lr).hexdigest()
+    if test_salt is None:
+        return out
+    return hashlib.sha256(IDENTITY_TEST_SALT_DOMAIN + bytes.fromhex(out)
+                          + str(test_salt).encode("utf-8")).hexdigest()
 
 
 def check_identity_match(local: BackendIdentity, peer: BackendIdentity) -> None:

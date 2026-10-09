@@ -1205,6 +1205,11 @@ def connect_island_ray(*, environ=None, ray_module=None, miles_args=None) -> str
 
     if environ.get(TOOL_DELAY_ENV):  # test tool-wait workload runs in Ray workers
         env_vars[TOOL_DELAY_ENV] = environ[TOOL_DELAY_ENV]
+    from yeto.island_overrides import NEGATIVE_RUN_ENV, OVERRIDE_ENV
+
+    for key in (OVERRIDE_ENV, NEGATIVE_RUN_ENV):  # launch-preflight-guards: negative-test island
+        if environ.get(key):  # (identity_test_salt is read where the sync client is built)
+            env_vars[key] = environ[key]
     if environ.get(ELASTIC_METADATA_ENV) == "1":
         # --rl-elastic: the rollout metadata hook runs inside Ray workers, which
         # inherit the raylet's environment, not the driver's.

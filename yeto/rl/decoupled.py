@@ -139,7 +139,8 @@ class DecoupledRlBridge:
             dtype=DTYPE_F32,
             num_streams=config.wan_streams,
             session_contract_hash=_session_contract(self.layout, island_contract_sha256(
-                config.backend_identity_sha256, getattr(config, "lr_schedule_sha256", None))),
+                config.backend_identity_sha256, getattr(config, "lr_schedule_sha256", None),
+                test_salt=_identity_test_salt())),
             max_reconnects=(None if config.learner_budget_steps is not None else 0),
         )
         count = self.layout.num_fragments
@@ -620,3 +621,10 @@ def _session_contract(layout, identity_sha256: str | None) -> bytes | None:
     from yeto.rl.engine.backend_identity import session_contract_hash
 
     return session_contract_hash(layout_fingerprint(layout), identity_sha256)
+
+
+def _identity_test_salt():
+    """launch-preflight-guards 3.3: negative-test island salt (None normally)."""
+    from yeto.island_overrides import identity_test_salt
+
+    return identity_test_salt()

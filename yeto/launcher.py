@@ -5180,6 +5180,25 @@ def require_modal_for_gpu_exact(args, specs: list[ClusterSpec]) -> None:
             )
 
 
+def _island_overrides(args, specs) -> dict:
+    """launch-preflight-guards 3.2: validated per-island overrides ({} normally)."""
+    from .island_overrides import overrides_of
+    from .launch_preflight import check_policy_age_spec
+
+    check_policy_age_spec(args)  # dry-run reaches here without pre_cloud_checks
+    return overrides_of(args, len(specs))
+
+
+def _island_task(task_factory, args, spec, m, num_learners, syncer_addr, overrides):
+    """The island task, built from a checked args copy for an overridden island
+    (sky and Modal islands both start from this task)."""
+    from . import island_overrides as io
+
+    task = task_factory(io.island_args(args, m, overrides), spec, m, num_learners, syncer_addr)
+    io.apply_to_task(task, io.island_env(args, m, overrides))
+    return task
+
+
 def warn_if_model_wont_fit(args, specs: list[ClusterSpec]) -> None:
     weight_gb = MODEL_WEIGHT_GB.get(args.model)
     if weight_gb is None:
@@ -5408,6 +5427,20 @@ def _tail(cluster: str, job_id: int, prefix: str, collector=None) -> int:
             time.sleep(5)
 
 
+def controller_fixed_roster(args) -> bool:
+    """FleetController ``fixed_roster``: RL runs whose island scheduling is NOT
+    elastic. Elastic membership is dynamic: an island that fails for good is
+    dropped and the pool goes on (10-09 ruling of the main agent for the user;
+    before, every RL run, elastic included, was a fixed roster)."""
+    return getattr(args, "training_mode", "sft") == "rl" and island_scheduling_mode(args) != "elastic"
+
+
+# The syncer refused this island (a deterministic configuration error, never
+# fixed by a relaunch): elastic JOIN identity / strict HELLO contract mismatch.
+SYNCER_REFUSAL_MARKERS = ("backend identity mismatch, JOIN refused",
+                          "session mismatch (HELLO refused")
+
+
 class SkySDKOps:
     """Thin adapter over the sky SDK: the only surface FleetController needs.
 
@@ -5475,6 +5508,7 @@ class SkySDKOps:
                     "[yeto-rl-strict-failure]" in text
                     or "RL strict failure " in text
                     or "StrictRlInvariantError:" in text
+                    or any(marker in text for marker in SYNCER_REFUSAL_MARKERS)
                 ):
                     return text
         except Exception:
@@ -6118,6 +6152,16 @@ class FleetController:
                 return  # grace: the finalized record may still be in the log stream
             else:
                 strict_failure = self._strict_failure(rec)
+                if strict_failure is not None and self.elastic and not is_syncer:
+                    # Elastic: a refused or strictly failed island is a deterministic
+                    # error -- relaunching it cannot help. Tear down only this island,
+                    # record island_lost, keep the rest of the pool running
+                    # (10-09 ruling of the main agent for the user).
+                    self._fleet("island_lost", rec["name"], reason=f"strict failure: {strict_failure}"[:500])
+                    print(f"[launcher] {rec['name']}: strict failure, not relaunched; the elastic "
+                          f"pool goes on without it: {strict_failure}", file=sys.stderr)
+                    self._abandon(rec, 0.0, reason="strict failure (elastic: island dropped)")
+                    return
                 if strict_failure is not None:
                     raise RuntimeError(
                         f"strict RL job {rec['name']} failed: {strict_failure}"
@@ -6224,15 +6268,18 @@ class FleetController:
             return False
 
     def _strict_failure(self, rec) -> str | None:
-        if not self.fixed_roster:
+        if not (self.fixed_roster or self.elastic):
             return None
         probe = getattr(self.ops, "rl_strict_failure", None)
         if probe is None:
             return None
         try:
-            return probe(rec["name"], rec["job_id"])
+            text = probe(rec["name"], rec["job_id"])
         except Exception:
             return None
+        if text is not None and not self.elastic and any(m in text for m in SYNCER_REFUSAL_MARKERS):
+            return None  # legacy unchanged: a refused island takes the fixed-roster path
+        return text
 
     def _enter_recovering(self, rec, reason: str, is_syncer: bool) -> None:
         rec["state"] = RECOVERING
@@ -6941,10 +6988,14 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     ):
         # Checked first: the flag must never turn an SFT launch syncer-less.
         raise ValueError("--rl-single-island-no-sync requires --training-mode rl")
-    from . import sky_patches
+    from . import launch_preflight, sky_patches
 
+    # launch-preflight-guards 1.3: thread count before anything touches a cloud.
+    args._launch_preflight_manifest = {"preflight": {"threads": launch_preflight.thread_preflight(args)}}
     sky_patches.install()
     prepare_launch_args(args)
+    # 2.3 / 3.1 / 3.6: memory estimate, island overrides, negative-test resume guard.
+    launch_preflight.pre_cloud_checks(args, threads=False)
     _write_run_manifest(args)
     head_mode = local_syncer is not None
     # --rl-single-island-no-sync: one ports island, no syncer at all
@@ -7104,9 +7155,11 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             modal_addr = resolve_syncer_for_modal(
                 syncer_addr, getattr(args, "syncer_public_addr", None)
             )
+        island_overrides = _island_overrides(args, specs)
         for m, spec in enumerate(specs):
             name = learner_names[m]
-            task = task_factory(args, spec, m, num_learners, syncer_addr)
+            task = _island_task(task_factory, args, spec, m, num_learners, syncer_addr,
+                                island_overrides)
             if spec.cloud == "modal":
                 cfg = build_modal_island_config(args, spec, m, task, modal_addr)
                 print(f"[launcher] {name} dials {island_syncer_addrs(cfg.envs)}", flush=True)
@@ -7276,7 +7329,9 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             on_relaunch=spawn_tail,
             syncer_probe=local_syncer.probe if head_mode else None,
             syncer_restart=local_syncer.restart if head_mode else None,
-            fixed_roster=getattr(args, "training_mode", "sft") == "rl",
+            # 10-09 ruling of the main agent for the user: elastic is NOT a fixed
+            # roster (an elastic island that fails for good is dropped, the rest go on).
+            fixed_roster=controller_fixed_roster(args),
             stop_flag=runs.stop_flag_path(args.cluster_prefix),
             finalized_probe=(
                 (lambda name: name in event_collectors and event_collectors[name].finalized)
@@ -7577,6 +7632,8 @@ def _write_run_manifest(args) -> dict | None:
         "source_sha256": getattr(args, "source_sha256", None),
         "cluster_prefix": args.cluster_prefix,
         **_miles_overlay_manifest(args, engine),
+        # launch-preflight-guards: preflight readings, negative_test, island_overrides
+        **(getattr(args, "_launch_preflight_manifest", None) or {}),
         "written_unix": time.time(),
     }
     print(f"[launcher] RL engine {engine}: image {manifest['rl_image']}, "
@@ -7634,6 +7691,10 @@ def dry_run_plan(args) -> dict:
     specs = parse_gpu_spec(args.gpu)
     external = max(0, getattr(args, "external_learners", 0) or 0)
     islands = []
+    island_overrides = _island_overrides(args, specs) if rl else {}
+    from .launch_preflight import dry_run_memory
+
+    memory = dry_run_memory(args, specs)
     for learner_id, spec in enumerate(specs):
         entry = {
             "learner_id": learner_id,
@@ -7646,10 +7707,16 @@ def dry_run_plan(args) -> dict:
         }
         if rl and rl_island_spec(args, spec) is not spec:
             entry["allocated_gpus_per_node"] = rl_island_spec(args, spec).gpus_per_node
+        if memory is not None:
+            entry["memory_estimate"] = memory[learner_id]
         if rl:
-            task = make_miles_island_task(
-                args, spec, learner_id, len(specs) + external, "$SYNCER_ADDR"
-            )
+            task = _island_task(make_miles_island_task, args, spec, learner_id,
+                                len(specs) + external, "$SYNCER_ADDR", island_overrides)
+            if island_overrides.get(learner_id):
+                from .island_overrides import records
+
+                entry["island_overrides"] = [r for r in records(args, island_overrides)
+                                             if r["island"] == learner_id]
             entry["learner_command"] = next(
                 (line.strip() for line in task.run.splitlines() if _rl_backend_module(args, "launch_flags").ISLAND_ENTRY_MODULE in line),
                 None,

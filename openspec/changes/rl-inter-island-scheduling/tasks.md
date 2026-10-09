@@ -70,3 +70,8 @@
   2. 5 处进程身份比对（起服务、等就绪、状态、强杀、停服务）共用 `_syncer_expected_argv_lines`，同时给出两种期望命令行；shell 函数 `syncer_argv_matches` 只要与其中一种逐项相同就认作同一进程。原因：首启时没有检查点、不带 `--resume`，之后每轮都写检查点，后续比对时文件已存在，不能据此推断启动时带没带。旧式进程（无 systemd 单元）的比对只看检查点路径与事件文件路径，不受影响。
   - 子 agent 代拍板 + 理由：两种命令行都接受，而不是按当前磁盘状态猜一种，因为后者在首轮写完检查点后会把正在运行的服务误判为"身份漂移"，导致停服务/强杀被拒。其余参数仍须逐项相同，判据没有放宽到其他参数。
   - 证据：`tests/test_rl_syncer_resume_and_session_port.py`（无检查点时启动命令不含 `--resume`、有检查点时含；两种命令行都通过比对，改端口、多参数、少参数都不通过；5 个脚本都定义两种期望命令行且 `bash -n` 通过）。状态：完成，未上卡。
+
+## 10. 缺陷修复：elastic 被当成固定名单（10-09 主 agent 代用户拍板）
+
+- [x] 10.1 FleetController 的 `fixed_roster` 改为"RL 且调度不是 elastic"（`launcher.controller_fixed_roster`）。以前所有 RL 运行（含 elastic）都按固定名单处理，elastic 岛一次失败就抛 FixedRosterIslandAbandoned 停整场。elastic 下岛被 syncer 拒绝（JOIN 身份不符、HELLO 契约不符）或严格失败时：只拆该岛、记 `island_lost` 事件、不重开（确定性的配置错误重开无用），其余岛继续。其他失败（如抢占）仍按 `--recover-timeout` 重开。legacy 行为不变（拒绝走固定名单放弃路径，严格失败仍报错停整场）。
+  - 完成（本机单测通过，未上卡）：tests/test_rl_elastic_fleet_end.py::test_controller_fixed_roster_only_for_non_elastic_rl、test_elastic_refused_island_dropped_rest_continue、test_elastic_strict_failure_drops_only_that_island、test_legacy_refused_island_still_stops_the_run；tests/test_controller.py 全过；golden 未变（tests/test_decoupling_golden.py 12 过，不涉及 hash-migration.md）。真机验证由 launch-preflight-guards 4.3 的 elastic 负例运行顺带覆盖。

@@ -432,6 +432,34 @@ the learner refuses to start when its source SHA256 differs from the
 fleet's. The launch log still prints only an MLX join command, not a Modal
 one; building the run script by hand is the gap left for manual Modal joins.
 
+## Thread preflight before launch
+
+`yeto launch` counts the threads of the current user before it creates any
+cloud resource (the same number as `ps -L -u $USER | wc -l` without the header
+line; read from `/proc`). The s1run thread guard (THREAD_MAX 3300,
+`ulimit -u 4096`) tears down a live run when the user goes over its limit, so
+a launch must not start near it. The check runs in `launcher.run` before
+`sky_patches.install()`, in `yeto launch` before the worker is spawned, and in
+the head path before the head VM is provisioned.
+
+| Threads | `wait` (default) | `error` | `off` |
+|---|---|---|---|
+| below `--preflight-thread-start` (default 2800) | continue | continue | no check |
+| start .. below `--preflight-thread-hard` (default 3000) | re-read every 30 s; continue when below start; stop after `--preflight-thread-wait-s` (default 1800) | stop | no check |
+| hard limit or more | stop | stop | no check |
+
+A stop creates no cloud resource. The message gives the total, the
+threshold, the hard limit and the threads of the SkyPilot API server
+(`sky.server` process, its `SkyPilot:executor` children and their
+descendants) with their share, or "未找到 SkyPilot API 服务". To free threads:
+`sky api stop && sky api start` -- only when no launch is in progress (a
+restart cancels a running `sky.launch`). Do not run local tests that start
+Ray while a GPU launch is live.
+
+Switch off: `--preflight-threads off` (prints a warning; the run manifest
+records `preflight.threads.disabled: true`). The readings are in the run
+manifest (`preflight.threads`).
+
 ## Tearing a run down
 
 `yeto down <prefix>` only says `run '<prefix>' is down` (exit 0) once every
