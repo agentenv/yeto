@@ -56,6 +56,7 @@
     - reward：两岛 20 个本地轮均值 0.594（SE 0.063）≥ 基线 0.597 − 2×0.083 = 0.432，通过。
     - 数值健康：无 NaN；**两条字面不符，按数据解释后判通过，主 agent 可推翻**：① 岛 1 第 9 轮、岛 0 第 10 轮 grad_norm=delta=0，原因是该批 4 组全部零方差（zero_variance_group_ratio=1.0，GRPO 优势全 0），零梯度不变量未报错，属正常；② 按 policy_version 对比两岛权重哈希从 v2 起不一致，原因是岛 1 catch-up 重入后本地版本号比同步服务外层版本少 1（岛 1 把 base 3 记成 v2），按应用顺序两岛哈希逐个相同（v3..v9 对 岛1 v2..v8），权重一致。② 是新发现的计数问题，记入 progress 待修。
   - 已裁定（2026-10-08）：断开期间用旧基座训出的增量，重新加入后按迟到增量并入（design"用户裁定记录"第 11 条）；judge 的 C4 按 v2 口径（catch-up 条目为 0 + 迟到增量记为信息）。
+  - S17 M1（2026-10-08 夜，N5）：两岛 agentic（Qwen3.5-0.8B + codex/TB2 训练题）+ 断链重入 + 带宽，复核 infra-drafts/S17-M1-PRELAUNCH-REVIEW.md（判据 J1–J7 预登记），运行 s1-runs/s17-m1-20261008a。代码改动：head 模式暂存 codex 包与 harness 变量（分支 s17-m1）。状态：run a（Qwen3.5-0.8B）已跑，按预登记判据 FAIL（证据 s1-runs/s17-m1-20261008a/judgment-m1.json）：离开/重入、带宽（岛→head 增量上传中位 0.84 MB/s，4.72 MB/次）、看板多岛、H100 断言通过；奖励 288 条全 0（286 次判分真实测试失败）；发现缺陷：重入岛按本地轮次结束、提前离池、未参加最后一次合并——已修（ElasticAvgSync 按同步服务外层版本结束 4fd9099a，elastic 恒定学习率 a73ab1b2，单测 tests/test_rl_elastic_rejoin_final_round.py）。run b（4B@16k，H100）、run c（同，H200）首步训练 OOM 停止；**run d（Qwen3.5-4B，上下文 12288，2×H200）按判据 v2 PASS**：非零奖励 29/288、两岛哈希链一致且都参加最后一次合并、断链→租约过期→自动重入→catch-up 权重 0→之后正常参与、同步服务 transfer 带宽（岛→head 中位 6.2 MB/s，重入前后不变）入档、看板多岛视图（s1-runs/s17-m1-20261008d/judgment-m1-v2.json，复核 infra-drafts/S17-M1-PRELAUNCH-REVIEW.md §14）。跨岛事件新增 sync/outer_version（e3ddac89）。未验证：修复里的'补跑一轮'分支本次真机未触发（无增量被拒），只有单测；看板 reducer 不认 elastic 同步服务事件带（未修）；1.2 的'reward 不劣于基线'按代拍板第 7 条放宽口径未单独评。
 
 ## 2. 阶段 2：FN 2×8（待批）
 

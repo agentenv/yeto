@@ -627,6 +627,32 @@ def test_verifier_log_tail_reaches_the_trajectory_metadata_and_tape(monkeypatch,
     assert "YETO_TB2_REWARD=0" in result["verifier_log"]
     diag = hook.trajectory_diagnostics(result)
     assert diag["verifier_log"] == result["verifier_log"] and diag["testsh_rc"] == 1
+    # S17 M1: observe-only timing line (verifier wall time, agent phase times, per-turn shapes)
+    timing = json.loads(result["verifier_log"].rsplit("YETO_TIMING ", 1)[1])
+    assert timing["verify_s"] >= 0
     long = "x" * 5000 + "TAIL"
     excerpt = tb2_provider.verifier_log_excerpt(long)
     assert len(excerpt) == tb2_provider.VERIFIER_LOG_CHARS and excerpt.endswith("TAIL")
+
+
+def test_modal_sandbox_exec_reads_bytes_and_decodes_leniently():
+    calls = {}
+
+    class _Proc:
+        stdout = SimpleNamespace(read=lambda: b"ok \xf0\x9f")  # cut mid UTF-8 sequence
+        stderr = SimpleNamespace(read=lambda: b"")
+
+        @staticmethod
+        def wait():
+            return 0
+
+    class _Sandbox:
+        object_id = "sb"
+
+        def exec(self, *args, **kwargs):
+            calls["kwargs"] = kwargs
+            return _Proc()
+
+    result = tb2_provider.ModalSandbox(_Sandbox(), "/app").exec("echo", timeout_s=5)
+    assert calls["kwargs"]["text"] is False
+    assert result.output.startswith("ok ") and result.exit_code == 0

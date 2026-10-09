@@ -398,7 +398,9 @@ class Reducer:
             if isl["source_lost"]:
                 isl["source_lost"]["recovered"] = True
         if event in SYNCER_ISLAND_EVENTS:
-            step = r.get("global_step", r.get("step", r.get("policy_version")))
+            # S17 M1: elastic islands carry the syncer's version explicitly; a re-JOINed
+            # island's local policy_version runs ahead of it, so it must not key the merge.
+            step = r.get("sync/outer_version", r.get("global_step", r.get("step", r.get("policy_version"))))
             if isinstance(step, int):
                 target = {"rl_fragment_push": self.pushes, "rl_policy_apply": self.applies,
                           "rl_member_publication": self.publications}.get(event)

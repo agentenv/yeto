@@ -409,6 +409,7 @@ class IslandDriver:
         # Optimizer steps the trainer's scheduler has counted (4.2/4.4 cut
         # progress): set by every apply, advanced by every trained round.
         self.local_step = 0
+        self.outer_version: int | None = None  # S17 M1: syncer version of the applied cut (elastic)
         self.profile = profile
         self.observe = bool(observe)
         self.config_epoch = int(config_epoch)
@@ -598,14 +599,22 @@ class IslandDriver:
 
     # -- helpers used by sync sessions -----------------------------------
     def apply_policy(
-        self, state: TrainableState, *, optimizer: str, local_step: int
+        self, state: TrainableState, *, optimizer: str, local_step: int,
+        outer_version: int | None = None,
     ) -> TrainableState:
-        """Apply one cut to the (resident) trainer and verify it round-trips."""
+        """Apply one cut to the (resident) trainer and verify it round-trips.
+
+        ``outer_version`` (S17 M1): the syncer's global outer version of this cut
+        when it differs in kind from the island's local ``policy_version`` (elastic:
+        a re-JOINed island's local counter runs ahead of the syncer).  The local
+        version stays the publication/ledger counter; every event that is compared
+        ACROSS islands carries ``sync/outer_version`` instead."""
 
         self.phase("apply", policy_version=state.policy_version, optimizer=optimizer)
         started = time.monotonic()
         self.policy_state.apply(state, optimizer=optimizer, local_step=local_step)
         self.local_step = int(local_step)
+        self.outer_version = None if outer_version is None else int(outer_version)
         applied = self.policy_state.export()
         expected = state.policy_tensor_hash()
         if applied.policy_tensor_hash() != expected:
@@ -622,6 +631,7 @@ class IslandDriver:
             **{
                 "sync/global_policy_hash": expected,
                 "sync/apply_seconds": time.monotonic() - started,
+                **({} if outer_version is None else {"sync/outer_version": int(outer_version)}),
             },
         )
         return state
@@ -688,6 +698,8 @@ class IslandDriver:
                 "sync/publication_payload_bytes": manifest.payload_bytes,
                 "sync/publication_payload_hash": manifest.payload_hash,
                 "sync/publication_members": sorted(result.members),
+                **({} if getattr(self, "outer_version", None) is None
+                   else {"sync/outer_version": self.outer_version}),
             },
         )
 

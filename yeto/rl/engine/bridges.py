@@ -467,7 +467,8 @@ class ElasticAvgSync:
         self.base, self.base_version = list(base.params), base.outer_version
         state = unflatten_state(self.base, rollout_id, self.template, self.specs)
         return driver.apply_policy(TrainableState.from_lora(state), optimizer="reset",
-                                   local_step=rollout_id * self.config.local_optimizer_steps)
+                                   local_step=rollout_id * self.config.local_optimizer_steps,
+                                   outer_version=int(base.outer_version))
 
     def start(self, driver: IslandDriver) -> SyncStart:
         from yeto.rl.bridge import flatten_state
@@ -545,7 +546,20 @@ class ElasticAvgSync:
         machine joining at base_version > 0): see :func:`whole_round_restart_cursor`."""
         return whole_round_restart_cursor(current, start_rollout_id, self.groups_per_round)
 
+    def _reached_final(self) -> bool:
+        """S17 M1: an elastic island ends once it applied the syncer's final outer
+        version, not after ``global_rounds`` LOCAL rounds.  A re-JOINed island lost
+        rounds (its delta refused while it was not a member, then the catch-up
+        entry weighted 0) yet its local rollout id kept counting, so on the local
+        count it left before the last outer step (s17-m1-20261008a: island 1 left
+        after v5, v6 merged island 0 alone).  When base == rollout_id + 1 (no
+        rejoin) this is the old rule.  Extra rounds past the local schedule run at
+        the trainer's tail learning rate (linear decay: 0) -- known limitation."""
+        return self.base_version is not None and self.base_version >= self.config.global_rounds
+
     def is_final_round(self, driver, *, rollout_id: int) -> bool:
+        if self.base_version is not None:
+            return self.base_version + 1 >= self.config.global_rounds
         return rollout_id + 1 >= self.config.global_rounds
 
     def boundary(self, driver, *, rollout_id, stats) -> SyncBoundary:
@@ -553,6 +567,8 @@ class ElasticAvgSync:
 
         if self.base is None:
             raise RuntimeError("elastic sync called outside an active round")
+        if rollout_id + 1 > self.config.global_rounds:
+            driver.phase("elastic_extra_round", rollout_id=rollout_id, base_version=self.base_version)
         self.in_boundary = True
         driver.phase("export_push", rollout_id=rollout_id, base_version=self.base_version)
         local = flatten_state(_lora(driver.export_local()), self.specs)
@@ -563,7 +579,8 @@ class ElasticAvgSync:
         if delay > 0:  # 0.25 test switch (heartbeats continue on their own thread)
             driver.phase("elastic_debug_delay", rollout_id=rollout_id, delay_s=delay)
             self._sleep(delay)
-        driver.emit("rl_local_round", **_elastic_local_round_fields(stats, sent_on, 4 * len(update)))
+        driver.emit("rl_local_round", **_elastic_local_round_fields(stats, sent_on, 4 * len(update)),
+                    **{"sync/base_outer_version": sent_on})
         from yeto.rl.elastic_client import ElasticFinished
 
         self.client.inner_step += self.config.local_optimizer_steps
@@ -579,7 +596,7 @@ class ElasticAvgSync:
         except ElasticFinished as done:
             return self._finished(driver, done, rollout_id=rollout_id, sent_on=sent_on)
         self.in_boundary = False
-        return SyncBoundary(state, rollout_id + 1 >= self.config.global_rounds)
+        return SyncBoundary(state, self._reached_final())
 
     def _finished(self, driver, done, *, rollout_id: int, sent_on: int) -> SyncBoundary:
         """0.26: the syncer ended the run while this (late) island was still
