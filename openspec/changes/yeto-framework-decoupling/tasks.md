@@ -98,8 +98,10 @@
 
 ## 6. 阶段 5：后端身份进契约
 
-- [ ] 6.1 `BackendIdentity{engine, engine_commit, device_family, param_map_sha256}` 与独立哈希；Miles 适配层给固定值（E23，`execution_profile.py:237-239`、`algorithm.py:1230`）。验收：旧两种哈希等于标准样本；身份哈希同配置两次相同、改任一字段即变。
-- [ ] 6.2 岛握手比较身份哈希，不同即拒绝；`local_learner.py` 与 `sao_streaming_runtime.py:203,642` 的训练契约输入引用该身份哈希。验收：单测——Miles 与模拟 verl 身份握手被拒并报双方身份；两个 Miles 岛握手不受影响（标准样本一致）。
+- [x] 6.1 `BackendIdentity{engine, engine_commit, device_family, param_map_sha256}` 与独立哈希；Miles 适配层给固定值（E23，`execution_profile.py:237-239`、`algorithm.py:1230`）。验收：旧两种哈希等于标准样本；身份哈希同配置两次相同、改任一字段即变。
+  - 已实现（s17-decouple-p4，S17 夜间 N1）：`yeto/rl/engine/backend_identity.py`（`BackendIdentity` + 独立 sha256，schema `yeto-backend-identity-v1`）；Miles 固定值在 `adapters/miles/identity.py`（engine=miles、ports 用 `MILES_NEXT_COMMIT`/legacy 用 `MILES_COMMIT`、device_family=nvidia、参数名映射=恒等映射的哈希），注册表角色 `identity`。标准样本新增 `backend_identity` 字段（ports 身份哈希 `9d5696a3d3b6…`），算法哈希与契约哈希不变。已验证：`tests/test_rl_backend_identity.py`（同配置两次相同、改任一字段即变、标准样本两种旧哈希不含身份）。
+- [x] 6.2 岛握手比较身份哈希，不同即拒绝；`local_learner.py` 与 `sao_streaming_runtime.py:203,642` 的训练契约输入引用该身份哈希。验收：单测——Miles 与模拟 verl 身份握手被拒并报双方身份；两个 Miles 岛握手不受影响（标准样本一致）。
+  - 已实现（s17-decouple-p4）：岛与 syncer 的 HELLO 会话契约由"布局指纹"改为"布局指纹 + 后端身份哈希"（`backend_identity.session_contract_hash`，`BridgeConfig`/`DecoupledBridgeConfig` 新字段 `backend_identity_sha256`，Miles 岛入口填入）；syncer 只接纳会话契约逐字节相同的岛（`syncer/src/server.rs` `SessionSpec` 相等比较），所以 Miles 与 verl（或不同 Miles 钉）的岛握手被拒；能拿到双方身份的地方用 `check_identity_match` 报双方身份。dense（`local_learner.dense_sweep_session_contract_hash` 新参数）与 SAO（`sao_role_stream_session_contract_hash`）的契约输入引用 legacy Miles 身份哈希。已验证：单测（Miles vs 模拟 verl 被拒并报双方身份；两个 Miles 岛契约相同；HELLO 帧带新契约）。**未验证**：真 Rust syncer 端到端（本机 `cargo build` 在基线就失败，`test_rl_integration` 12 例基线即报错）；真机多岛。**版本边界**：新旧代码的岛不能混跑（会话契约不同）；阶段 5 之前写下的 syncer 检查点因会话契约不同不能续跑。
 
 ## 7. 阶段 6：硬件层（可与 verl 并行）
 
@@ -112,6 +114,8 @@
 - [ ] 7.7 跨卡型/跨厂商合并接口（D9a 第一期）：契约加"兼容组"字段（卡型+厂商）与比较函数，第一版兼容组要求完全相同；阈值表加"卡型对/厂商对容差"键（无值即视为未标定、拒绝合并）；文档写明 syncer 只交换中立格式增量（扁平 f32/bf16、规范参数名）。验收：同卡型同厂商合并通过、H100 与 H200 拒绝并报"未标定容差"、NVIDIA 与昇腾拒绝的单测；第二、三期的前提与验收写入 design D9a，不在本 change 实现。
 
 ## 8. 阶段 7：云层与按任务分 spot/按需（可与 verl 并行）
+
+设计输入（S17）：`openspec/changes/rl-infra-spec/cloud-pool-design.md` §3.4（回收按等级处理，对应 8.7）、§5（调度建议规则与 `CloudAdvice` 形状，对应 8.6）。
 
 - [ ] 8.1 `yeto/cloud/provider.py` 云提供方接口与能力声明（计费方式、回收提前通知秒数、能否当头节点、网络档位、卡数上限），以 `modal_runner.py:1-25` 为样板；`CloudSignals` 并入（C2、C3）。验收：接口单测；Modal 实现通过现有 modal_runner 测试。
 - [ ] 8.2 各云实现，把 `launcher.py` 中 `if spec.cloud ==` 分支（C1：`:326,1200,1242,1254,3392,3718,4291,4586,6432,6531-6556`）、`MULTINODE_IB_CLOUDS`/`NETWORK_TIER_BEST_SHAPES`（C4）、云×卡→镜像表（C5，`:2494-2507`）、模型存储/预烘镜像/头节点限制（C6）移入；直接 `sky.Task` 只在 SkyPilot 实现内（C7）。验收：对现有各云配置干跑（不开卡）生成的 SkyPilot 任务与 Modal 调用参数与改动前一致的对照测试；边界检查"云名分支只在 `yeto/cloud/`"。

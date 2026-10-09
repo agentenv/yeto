@@ -342,9 +342,20 @@ def record_config(config: Config) -> dict[str, Any]:
         "placement": json.loads(norm(json.dumps(_jsonable(launch.placement)))),
         "runtime_attrs": json.loads(norm(json.dumps(_jsonable(dict(launch.runtime_attrs))))),
         "plugins": plugins_of(json.loads(spec.canonical_json()), argv),
+        # Phase 5 (design D7): parallel identity hash; the two hashes above are unchanged.
+        "backend_identity": _backend_identity(),
         "session_contract_hash": None,
-        "session_contract_hash_note": "运行时由 LoRA 张量布局算出（yeto.protocol.layout_fingerprint），离线不可得",
+        "session_contract_hash_note": "运行时由 LoRA 张量布局算出（yeto.protocol.layout_fingerprint），"
+                                      "阶段 5 起再与 backend_identity.sha256 绑定"
+                                      "（yeto.rl.engine.backend_identity.session_contract_hash），离线不可得",
     }
+
+
+def _backend_identity() -> dict:
+    from yeto.rl.adapters.miles.identity import backend_identity
+
+    identity = backend_identity("ports")
+    return {**identity.to_dict(), "sha256": identity.sha256()}
 
 
 # ---------------------------------------------------------------- fake-engine tapes / progress

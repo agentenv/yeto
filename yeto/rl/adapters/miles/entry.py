@@ -95,6 +95,13 @@ MILES_DECLARED: dict[str, str] = {
     "corrections:mismatch_observe": f"{_E1A}/2026-09-29-g1b observe + g2-observe (observation only; weights constant 1)",
     "corrections:icepop": f"{_E1A}/2026-09-29-trigger icepop [0.99,1.01] (masked tis_clipfrac 0.192/0.225/0.267)",
     "corrections:mis_mask": f"{_E1A}/2026-09-29-trigger mis-mask token [0.99,1.01] (mask fraction 0.192/0.225/0.267)",
+    "corrections:mis": (
+        f"{_E1A}/2026-10-08-mis-trigger mis truncate token, upper bound 1.01 (test value to trigger the "
+        "bound, not a recommendation), Miles 8bc52237a: mis_tis_truncate_fraction 0.0917/0.1093/0.1262, "
+        "weight after bound <= before in every step, mis_is_ratio_max_final 1.0100; G1 run with bound 2.0 "
+        "in 2026-09-29-g1b/runs/mis (fraction 0). MIS path unchanged 0394715..8bc52237a (loss_hub diff "
+        "touches only the policy_loss_variant dispatch)"
+    ),
     "features:eps_clip": f"{_E1B_B}/plan.md run A-r1 (eps_clip 0.001 / eps_clip_high 0.002, test values to trigger the clip, not recommendations): step-2 pg_clipfrac 0.1046/0.1107/0.1046",
     "features:no_grpo_std_normalization": f"{_E1B_C}/g1c_report.json no_std (isolated paired step 1: grad_norm 0.2428 vs baseline 0.6349; effective, paired_valid; analyze.py 12b592f)",
     "loss_aggregations:token": (
