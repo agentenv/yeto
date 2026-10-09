@@ -55,6 +55,10 @@ pub struct ElasticServerConfig {
 const SERVER_STATE_MAGIC: &[u8; 8] = b"YELSRV2\0";
 const SERVER_STATE_MAGIC_V1: &[u8; 8] = b"YELSRV1\0";
 
+fn group_label(g: &str) -> &str {
+    if g.is_empty() { "未声明" } else { g }
+}
+
 fn hex32(h: &[u8; 32]) -> String {
     if h.iter().all(|b| *b == 0) {
         return "<not declared>".into();
@@ -104,6 +108,13 @@ struct Shared {
     /// later JOIN must carry the same 32 bytes. Kept for the whole run and in
     /// the checkpoint, so a Miles session never admits a verl island.
     backend_identity: Option<[u8; 32]>,
+    /// yeto-framework-decoupling 7.7c: compat_group ("<vendor>-<card>")
+    /// pinned by the first accepted JOIN. A JOIN from another group is refused
+    /// with both groups named (phase 1: tolerance table empty). Not in the
+    /// checkpoint: the group is also inside the identity hash, so after
+    /// --resume the identity pin still refuses it; the readable pin is set
+    /// again by the first JOIN whose identity matches.
+    compat_group: Option<String>,
     flushed: usize,
     round_started: Instant,
     tape: Option<std::fs::File>,
@@ -391,7 +402,19 @@ impl Shared {
             ElasticMsg::DeltaReady { .. } if self.params.is_some() => {
                 bail!("DELTA_READY carries no tensor; use DELTA_TENSOR once a base exists")
             }
-            ElasticMsg::Join { island_id, backend_identity, .. } => {
+            ElasticMsg::Join { island_id, backend_identity, compat_group, .. } => {
+                if let Some(pinned) = &self.compat_group {
+                    ensure!(
+                        pinned == compat_group,
+                        "compat_group mismatch, JOIN refused: 兼容组不同：{} 对 {}，容差未标定 \
+                         (island {island_id} declares {}, this elastic session is pinned to {} by its \
+                         first JOIN; tolerance not calibrated)",
+                        group_label(pinned),
+                        group_label(compat_group),
+                        group_label(compat_group),
+                        group_label(pinned)
+                    );
+                }
                 if let Some(pinned) = &self.backend_identity {
                     ensure!(
                         pinned == backend_identity,
@@ -414,8 +437,9 @@ impl Shared {
         }
         let reply = result?;
         match &msg {
-            ElasticMsg::Join { island_id, backend_identity, .. } => {
+            ElasticMsg::Join { island_id, backend_identity, compat_group, .. } => {
                 self.backend_identity.get_or_insert(*backend_identity);
+                self.compat_group.get_or_insert_with(|| compat_group.clone());
                 self.outboxes.insert(*island_id, outbox.clone());
                 replies.extend(reply.map(|m| m.encode(&self.key)));
                 replies.extend(self.base_msg());
@@ -570,6 +594,7 @@ pub async fn run(listener: TcpListener, cfg: ElasticServerConfig) -> Result<(u64
     let shared = Arc::new(Mutex::new(Shared {
         coord: ElasticCoordinator::new(cfg.params, cfg.lease_s, cfg.syncer_epoch)?,
         backend_identity: None,
+        compat_group: None,
         flushed: 0,
         round_started: Instant::now(),
         tape,
@@ -667,12 +692,13 @@ mod tests {
         rd: OwnedReadHalf,
         wr: OwnedWriteHalf,
         identity: [u8; 32],
+        compat: String,
     }
 
     impl Island {
         async fn connect(port: u16, id: u32, epoch: u64) -> Self {
             let (rd, wr) = TcpStream::connect(("127.0.0.1", port)).await.unwrap().into_split();
-            Self { id, epoch, rd, wr, identity: MILES_ID }
+            Self { id, epoch, rd, wr, identity: MILES_ID, compat: "nvidia-h100".to_string() }
         }
         async fn send(&mut self, m: ElasticMsg) {
             let (t, p) = m.encode(KEY);
@@ -689,6 +715,7 @@ mod tests {
                 incarnation: 0,
                 capacity: 1.0,
                 backend_identity: self.identity,
+                compat_group: self.compat.clone(),
             })
             .await;
             let (t, p) = self.recv().await;
@@ -805,7 +832,7 @@ mod tests {
 
         // Fencing: an older syncer_epoch is refused with MSG_ERROR.
         let mut stale = Island::connect(port, 9, 6).await;
-        stale.send(ElasticMsg::Join { syncer_epoch: 6, island_id: 9, incarnation: 0, capacity: 1.0, backend_identity: MILES_ID }).await;
+        stale.send(ElasticMsg::Join { syncer_epoch: 6, island_id: 9, incarnation: 0, capacity: 1.0, backend_identity: MILES_ID, compat_group: String::new() }).await;
         let (t, p) = stale.recv().await;
         assert_eq!(t, MSG_ERROR);
         assert!(String::from_utf8_lossy(&p).contains("fenced"));
@@ -1222,7 +1249,7 @@ mod tests {
         let (t, p) = b.recv().await;
         expect_finished(t, &p);
         let mut c = Island::connect(port, 3, 0).await;
-        c.send(ElasticMsg::Join { syncer_epoch: 0, island_id: 3, incarnation: 0, capacity: 1.0, backend_identity: MILES_ID }).await;
+        c.send(ElasticMsg::Join { syncer_epoch: 0, island_id: 3, incarnation: 0, capacity: 1.0, backend_identity: MILES_ID, compat_group: String::new() }).await;
         let (t, p) = c.recv().await;
         expect_finished(t, &p);
         let status = std::fs::read_to_string(dir.join("status.json")).unwrap();
@@ -1282,7 +1309,7 @@ mod tests {
         a.next_base().await;
         let mut v = Island::connect(port, 2, 0).await;
         v.identity = verl;
-        v.send(ElasticMsg::Join { syncer_epoch: 0, island_id: 2, incarnation: 0, capacity: 1.0, backend_identity: verl }).await;
+        v.send(ElasticMsg::Join { syncer_epoch: 0, island_id: 2, incarnation: 0, capacity: 1.0, backend_identity: verl, compat_group: "nvidia-h100".to_string() }).await;
         let (t, p) = v.recv().await;
         expect_refused(t, &p);
         let mut b = Island::connect(port, 3, 0).await;
@@ -1301,7 +1328,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let server = tokio::spawn(run(listener, mk(3, true)));
         let mut v = Island::connect(port, 2, 1).await;
-        v.send(ElasticMsg::Join { syncer_epoch: 1, island_id: 2, incarnation: 0, capacity: 1.0, backend_identity: verl }).await;
+        v.send(ElasticMsg::Join { syncer_epoch: 1, island_id: 2, incarnation: 0, capacity: 1.0, backend_identity: verl, compat_group: "nvidia-h100".to_string() }).await;
         let (t, p) = v.recv().await;
         expect_refused(t, &p);
         server.abort();
@@ -1314,5 +1341,66 @@ mod tests {
         let err = run(listener, mk(3, true)).await.unwrap_err();
         assert!(format!("{err:#}").contains("predates the backend identity field"), "{err:#}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// yeto-framework-decoupling 7.7c (user decision 2026-10-09): the first
+    /// JOIN pins compat_group; an H200 island in an H100 session and an Ascend
+    /// island are refused with both groups named, the syncer keeps running and
+    /// a second H100 island still joins. An H200 session admits H200.
+    #[tokio::test]
+    async fn compat_group_pinned_by_first_join_refuses_other_card_type() {
+        let mk = || ElasticServerConfig {
+            params: ElasticParams { quorum_theta: 0.5, carry_gamma: 0.5, soft_deadline_s: 60, q_min: 1, max_carry_lag: 2 },
+            key: KEY.to_vec(),
+            syncer_epoch: 0,
+            lease_s: 30.0,
+            total_steps: 3,
+            event_tape: None,
+            tick: Duration::from_millis(20),
+            outer_lr: 1.0,
+            outer_momentum: 0.0,
+            final_grace: Duration::ZERO,
+            checkpoint_path: None,
+            checkpoint_every: 1,
+            resume: false,
+        };
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(run(listener, mk()));
+        let mut a = Island::connect(port, 1, 0).await;
+        assert!(matches!(a.join().await, ElasticMsg::JoinAck { .. }));
+        a.init(vec![0.0; 4]).await;
+        a.next_base().await;
+        for (id, group) in [(2u32, "nvidia-h200"), (4, "ascend-910b")] {
+            let mut h = Island::connect(port, id, 0).await;
+            h.compat = group.to_string();
+            h.identity = [0x33; 32]; // the group is inside the identity hash too
+            h.send(ElasticMsg::Join {
+                syncer_epoch: 0, island_id: id, incarnation: 0, capacity: 1.0,
+                backend_identity: h.identity, compat_group: h.compat.clone(),
+            }).await;
+            let (t, p) = h.recv().await;
+            assert_eq!(t, MSG_ERROR);
+            let text = String::from_utf8_lossy(&p).to_string();
+            assert!(text.contains("compat_group mismatch, JOIN refused"), "{text}");
+            assert!(text.contains(&format!("兼容组不同：nvidia-h100 对 {group}，容差未标定")), "{text}");
+        }
+        let mut b = Island::connect(port, 3, 0).await;
+        assert!(matches!(b.join().await, ElasticMsg::JoinAck { .. }), "same card type must still join");
+        server.abort();
+
+        // An H200 session admits a second H200 island.
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(run(listener, mk()));
+        let mut a = Island::connect(port, 1, 0).await;
+        a.compat = "nvidia-h200".to_string();
+        assert!(matches!(a.join().await, ElasticMsg::JoinAck { .. }));
+        a.init(vec![0.0; 4]).await;
+        a.next_base().await;
+        let mut b = Island::connect(port, 2, 0).await;
+        b.compat = "nvidia-h200".to_string();
+        assert!(matches!(b.join().await, ElasticMsg::JoinAck { .. }));
+        server.abort();
     }
 }

@@ -3806,6 +3806,9 @@ def island_uses_ports_megatron(args) -> bool:
     return bool(image) and strip(image) == strip(MILES_NEXT_IMAGE)
 
 
+from yeto.hw.catalog import COMPAT_GROUP_ENV, compat_group  # noqa: E402
+
+
 def make_miles_island_task(
     args,
     spec: ClusterSpec,
@@ -4051,6 +4054,9 @@ def make_miles_island_task(
         **({"CRITIC_SYNCER_ADDR": critic_syncer_address(syncer_addr)}
            if rl_needs_critic(args) and syncer_addr != "none" else {}),
         "LEARNER_ID": str(learner_id),
+        # decoupling 7.7a: "<vendor>-<card>" from the card catalog; an unknown
+        # card raises here, before any cloud spend (no default).
+        COMPAT_GROUP_ENV: compat_group(spec.gpu),
         "HF_HUB_ENABLE_HF_TRANSFER": "1",
         # Megatron refuses TP>1 or CP>1 without this; it is exported before
         # `ray start` so every Ray worker inherits it.  Harmless at TP1.

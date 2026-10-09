@@ -7,7 +7,7 @@ the same algorithm but different engines (Miles vs verl), engine commits,
 device families or parameter-name maps must not average their deltas.
 
 * :class:`BackendIdentity` -- ``{engine, engine_commit, device_family,
-  param_map_sha256}`` with its own hash (the old two hashes are unchanged);
+  param_map_sha256, compat_group}`` with its own hash (the old two hashes are unchanged);
   each adapter supplies its value (Miles: ``yeto.rl.adapters.miles.identity``).
 * :func:`session_contract_hash` -- what an RL island sends as the syncer HELLO
   session contract: the tensor-layout fingerprint bound to the identity hash.
@@ -25,7 +25,7 @@ import json
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping
 
-IDENTITY_SCHEMA = "yeto-backend-identity-v1"
+IDENTITY_SCHEMA = "yeto-backend-identity-v2"  # v2: + compat_group (7.7b)
 SESSION_CONTRACT_DOMAIN = b"yeto-rl-session-contract-v2\0"
 
 
@@ -45,12 +45,16 @@ class BackendIdentity:
     engine_commit: str  # pinned engine source commit
     device_family: str  # "nvidia", "ascend", ... (yeto/hw/device.py later)
     param_map_sha256: str  # hash of the backend's parameter-name map to canonical names
+    compat_group: str  # "<vendor>-<card>", e.g. "nvidia-h100" (yeto.hw.catalog, 7.7a)
 
     def __post_init__(self) -> None:
+        from yeto.hw.catalog import validate_compat_group
+
         for name in ("engine", "engine_commit", "device_family"):
             if not isinstance(getattr(self, name), str) or not getattr(self, name):
                 raise ValueError(f"backend identity {name} must be a non-empty string")
         _sha256_hex(self.param_map_sha256, "param_map_sha256")
+        validate_compat_group(self.compat_group)
 
     def to_dict(self) -> dict[str, Any]:
         return {"schema": IDENTITY_SCHEMA, **asdict(self)}
@@ -60,7 +64,7 @@ class BackendIdentity:
         if raw.get("schema") != IDENTITY_SCHEMA:
             raise ValueError(f"unknown backend identity schema {raw.get('schema')!r}")
         return cls(str(raw["engine"]), str(raw["engine_commit"]), str(raw["device_family"]),
-                   str(raw["param_map_sha256"]))
+                   str(raw["param_map_sha256"]), str(raw["compat_group"]))
 
     def canonical_json(self) -> str:
         return json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"))
@@ -133,6 +137,9 @@ def island_contract_sha256(identity_sha256: str | None, lr_schedule: str | None,
 
 
 def check_identity_match(local: BackendIdentity, peer: BackendIdentity) -> None:
+    from yeto.hw.catalog import check_compat_group
+
+    check_compat_group(local.compat_group, peer.compat_group)  # readable reason first (7.7c)
     if local.sha256() != peer.sha256():
         raise BackendIdentityMismatch(
             "backend identity differs, islands cannot be merged: "

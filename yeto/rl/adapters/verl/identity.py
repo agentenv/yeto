@@ -19,8 +19,11 @@ PARAM_MAP_SHA256 = param_map_sha256(PARAM_MAP)
 
 
 def backend_identity(rl_engine: str = "ports", *, device_family: str = DEVICE_FAMILY,
-                     train_backend: str = "fsdp2") -> BackendIdentity:
+                     train_backend: str = "fsdp2", compat_group: str | None = None) -> BackendIdentity:
     """Identity of a verl island (``rl_engine`` is accepted for the Miles-shaped call sites)."""
     if train_backend != "fsdp2":
         raise ValueError(f"verl train backend {train_backend!r} has no parameter-name map yet")
-    return BackendIdentity(ENGINE, VERL_COMMIT, device_family, PARAM_MAP_SHA256)
+    from yeto.hw.catalog import island_compat_group
+
+    return BackendIdentity(ENGINE, VERL_COMMIT, device_family, PARAM_MAP_SHA256,
+                           island_compat_group(compat_group))

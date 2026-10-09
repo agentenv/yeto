@@ -25,14 +25,14 @@ from yeto.rl.engine.backend_identity import BackendIdentity, param_map_sha256
 
 JOIN_GOLDEN = ("03000000000000000100000007000000000000000000000000000440"
                + "ab" * 32
-               + "3d2faaa5418d42914e93471c8f79f008699aee2190bd1d505af97476e9ec21a7")
+               + "0b0000006e76696469612d68313030d76ccd494a9ee9bb15d43cdcafb727ab8d0c651b9b81c6481e80ff4084314b4c")  # s19-compat: + compat_group "nvidia-h100"
 
 MILES = backend_identity("ports")
-VERL = BackendIdentity("verl", "0" * 40, "nvidia", param_map_sha256({"verl": "map"}))
+VERL = BackendIdentity("verl", "0" * 40, "nvidia", param_map_sha256({"verl": "map"}), "nvidia-h100")
 
 
 def test_join_golden_frame_matches_rust():
-    msg = Join(3, 1, 7, 2.5, bytes([0xab]) * 32)
+    msg = Join(3, 1, 7, 2.5, bytes([0xab]) * 32, "nvidia-h100")
     t, payload = encode(msg, b"k1")
     assert t == MSG_JOIN and payload.hex() == JOIN_GOLDEN
     assert decode(b"k1", t, payload) == msg
@@ -46,6 +46,9 @@ def test_old_join_frame_without_identity_is_refused():
     old = seal(b"k1", MSG_JOIN, struct.pack("<QIQd", 3, 1, 7, 2.5))
     with pytest.raises(ElasticProtocolError, match="without backend identity"):
         decode(b"k1", MSG_JOIN, old)
+    no_group = seal(b"k1", MSG_JOIN, struct.pack("<QIQd", 3, 1, 7, 2.5) + bytes(32))
+    with pytest.raises(ElasticProtocolError, match="without compat_group"):
+        decode(b"k1", MSG_JOIN, no_group)
 
 
 def test_config_identity_bytes():

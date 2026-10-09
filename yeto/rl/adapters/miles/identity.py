@@ -20,7 +20,12 @@ PARAM_MAP = {"schema": "yeto-param-map-v1", "backend": ENGINE, "kind": "identity
 PARAM_MAP_SHA256 = param_map_sha256(PARAM_MAP)
 
 
-def backend_identity(rl_engine: str = "ports", *, device_family: str = DEVICE_FAMILY) -> BackendIdentity:
-    """Identity of a Miles island (``--rl-engine ports`` pins MILES_NEXT_COMMIT, legacy MILES_COMMIT)."""
+def backend_identity(rl_engine: str = "ports", *, device_family: str = DEVICE_FAMILY,
+                     compat_group: str | None = None) -> BackendIdentity:
+    """Identity of a Miles island (``--rl-engine ports`` pins MILES_NEXT_COMMIT, legacy MILES_COMMIT).
+    ``compat_group`` None reads ``$YETO_RL_COMPAT_GROUP``; unset -> error (7.7a)."""
+    from yeto.hw.catalog import island_compat_group
+
     commit = MILES_NEXT_COMMIT if rl_engine == "ports" else MILES_COMMIT
-    return BackendIdentity(ENGINE, commit, device_family, PARAM_MAP_SHA256)
+    return BackendIdentity(ENGINE, commit, device_family, PARAM_MAP_SHA256,
+                           island_compat_group(compat_group))

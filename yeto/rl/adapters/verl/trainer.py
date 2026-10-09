@@ -210,7 +210,10 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
                         tis_upper=float(plan.get("tis_upper", 2.0)),
                         thresholds_key=plan["thresholds_key"],
                         emit=lambda event, **f: tape.append({"event": event, **f}))
-    identity = backend_identity()
+    from yeto.hw.catalog import runtime_versions
+
+    identity = backend_identity(compat_group=plan.get("compat_group"))  # 7.7a: unset -> error
+    tape.append({"event": "rl_island_hardware", "compat_group": identity.compat_group, **runtime_versions()})
     tape.append({"event": "rl_verl_island_start", "plan": plan, "backend_identity": identity.to_dict(),
                  "backend_identity_sha256": identity.sha256(), "layout_hash": layout_hash,
                  "lora_config_hash": lora_hash, "n_specs": len(specs), "asserted": asserted,
@@ -230,7 +233,7 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
             expected_specs=tuple(specs), base_model_revision=plan["model_revision"],
             lora_config_hash=lora_hash, layout_hash=layout_hash, event_tape=plan["event_tape"],
             wan_streams=int(plan.get("wan_streams", 4)),
-            backend_identity_sha256=identity.sha256())
+            backend_identity_sha256=identity.sha256(), compat_group=identity.compat_group)
         if mode == "strict":
             sync = StrictAvgSync(bridge, progress=None)
         elif mode == "elastic":

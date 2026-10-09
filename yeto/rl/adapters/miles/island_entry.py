@@ -207,6 +207,9 @@ def parse_args(argv=None):
     # S17 N16: LR schedule choice (yeto.rl.engine.run_config.resolve_lr_schedule)
     parser.add_argument("--rl-lr-schedule", choices=("auto", "linear", "constant"), default="auto")
     parser.add_argument("--rl-max-policy-age", type=int, default=0)
+    # decoupling 7.7a: "<vendor>-<card>" from the launcher's card catalog
+    # (yeto.hw.catalog); falls back to $YETO_RL_COMPAT_GROUP, unset -> error.
+    parser.add_argument("--rl-compat-group", default=None)
     parser.add_argument("--rl-syncer-epoch", type=int, default=0)
     parser.add_argument("--rl-elastic-quorum-timeout-s", type=float, default=None)
     parser.add_argument("--rl-elastic-idle-flow-timeout-s", type=float, default=None)
@@ -1968,8 +1971,33 @@ def _backend_identity_sha256(args) -> str:
 
     # agentic-rollout-utilization 2.1: a non-zero policy-age limit is bound into
     # the identity the syncer compares (limit 0: unchanged).
-    return bind_policy_age(backend_identity(getattr(args, "rl_engine", "ports") or "ports").sha256(),
+    identity = backend_identity(getattr(args, "rl_engine", "ports") or "ports",
+                                compat_group=getattr(args, "rl_compat_group", None))
+    return bind_policy_age(identity.sha256(),
                            int(getattr(args, "rl_max_policy_age", 0) or 0))
+
+
+from yeto.hw.catalog import HARDWARE_EVENT  # noqa: E402
+
+
+def _island_compat_group(args) -> str:
+    """Decoupling 7.7a: this island's compat_group, logged once with the driver
+    and CUDA versions (recorded only; they never cause a refusal)."""
+    from yeto.hw.catalog import COMPAT_GROUP_ENV, island_compat_group, runtime_versions
+
+    group = island_compat_group(getattr(args, "rl_compat_group", None))
+    os.environ[COMPAT_GROUP_ENV] = group  # in-process legacy model paths read it
+    if not getattr(args, "_yeto_compat_logged", False):
+        versions = runtime_versions()
+        print(f"[yeto-island] compat_group={group} driver_version={versions['driver_version']} "
+              f"cuda_version={versions['cuda_version']}", flush=True)
+        if getattr(args, "event_tape", None):
+            from yeto.rl.engine.driver import EventTape
+
+            EventTape(args.event_tape, int(getattr(args, "learner_id", 0) or 0)).append(
+                {"event": HARDWARE_EVENT, "compat_group": group, **versions})
+        args._yeto_compat_logged = True
+    return group
 
 
 def _syncer_address(value: str) -> tuple[str, int]:
@@ -2649,6 +2677,7 @@ def run_miles(
                 learner_budget_steps=miles_args.yeto_rl_learner_budget_steps,
                 backend_identity_sha256=_backend_identity_sha256(args),
                 lr_schedule_sha256=miles_lr_schedule_sha256(miles_args),
+                compat_group=_island_compat_group(args),
             )
         else:
             miles_args.yeto_rl_bridge_config = BridgeConfig(
@@ -2668,6 +2697,7 @@ def run_miles(
                 send_initial_params=not getattr(args, "eval_only", False),
                 backend_identity_sha256=_backend_identity_sha256(args),
                 lr_schedule_sha256=miles_lr_schedule_sha256(miles_args),
+                compat_group=_island_compat_group(args),
             )
             if getattr(args, "rl_island_scheduling", "legacy") == "elastic":
                 # rl-inter-island-scheduling 0.15 (legacy sets nothing)

@@ -361,6 +361,8 @@ class Reducer:
                 "rl_policy_apply", "rl_publication", "rl_driver_phase", "rl_heartbeat",
                 "rl_round_cut", "rl_member_publication", "rl_resume"):
             isl["policy_version"] = r.get("policy_version")
+        if event == "rl_island_hardware":  # decoupling 7.7: recorded, never a refusal reason
+            isl["hardware"] = {k: r.get(k) for k in ("compat_group", "driver_version", "cuda_version")}
         if event == "rl_driver_start" and isl.get("driver_start_ts") is None:
             isl["driver_start_ts"] = ts
         if event == "rl_driver_start":
@@ -591,7 +593,7 @@ class Reducer:
                 "util": self.utilization(isl, rounds),
                 "first_ts": isl["first_ts"], "ready_ts": isl["ready_ts"],
                 "driver_start_ts": isl.get("driver_start_ts") or (starts[0] if starts else None),
-                "cells": len(isl["cells"] or []),
+                "cells": len(isl["cells"] or []), "hardware": isl.get("hardware"),
                 "transactions": len(isl["tx_order"]), "ray_embed": self.ray_embed(isl, self.island_ids().index(iid)),
             }
         usage = {"syncer": self.counts["syncer"] > 0, "journal": self.counts["journal"] > 0,

@@ -361,7 +361,7 @@ def record_config(config: Config) -> dict[str, Any]:
 def _backend_identity() -> dict:
     from yeto.rl.adapters.miles.identity import backend_identity
 
-    identity = backend_identity("ports")
+    identity = backend_identity("ports", compat_group="nvidia-h100")  # 7.7b: fixed sample card type
     return {**identity.to_dict(), "sha256": identity.sha256()}
 
 
