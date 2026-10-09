@@ -87,6 +87,7 @@
 - [x] 6.4a 翻译层（纯函数，verl 仍声明阶段 1、上限 >0 起机前照样报错，不接 fully_async、不上卡）（验证：CPU 单测）
   - 证据：`yeto/rl/adapters/verl/fully_async_translate.py`，对应四个子要求：(a) `provenance_from_calls`——按每次续写调用的版本与新增 token 生成概率重建逐 token 版本段；(b) `versions_from_global_steps`——每轨迹 min/max 翻成区间内全部外层版本、按最旧判定；(c) `staleness_threshold_for`（上限 N → s=N−1，fully_async 本身至少落后 1 版）、`queue_version_lag`（排队样本最多落后 floor(s)+1 版，要求 trigger_parameter_sync_step=1）、`fully_async_overrides`、`judge_trajectory`（超限丢弃由 yeto 按版本段判定）；(d) `VersionMap`——trainer 本地 current_param_version ↔ outer version 双向映射、矛盾或倒退报错、检查点/日志步号取外层版本。测试 `tests/test_rl_verl_fully_async_translate.py`（5 项）。待 6.4b 真机核实：服务端 `extra_fields["global_steps"]` 是否即推送权重时的 current_param_version。
 - [ ] 6.4b verl fully_async 适配路径：先出设计（端口映射到 IslandDriver 每轮驱动、LoRA 导出/应用/发布读回改走 checkpoint engine、版本映射、卡数 ≥2、调试预算），写入 design 第 9 条"6.4b"小节，实施另行报批
+  - 2026-10-09 实施**完成**（代码写完且本机单测通过，未上卡）。改动见 rl-verl-backend 6.6；子 agent 代拍板见 design 第 9 条"6.4b 实施取舍"。
   - 用户 2026-10-09 决定：要做，先在 N 卡（NVIDIA GPU）上跑，结果备注"已在 N 卡跑过，NPU 未跑"；并入第三批合并上卡。上卡跟踪见 rl-verl-backend 6.6，复核文档 `infra-drafts/S19-VERL-64B-PRELAUNCH-REVIEW.md`。
 - [ ] 6.5（依赖 6.4b）阶段 3：verl 多轮工具调用续跑（若 6.1 确认原生支持则复用，否则按第 5 组同样规则实现），GPU 对照与 5.5 合并上卡（验证：证据路径）
 

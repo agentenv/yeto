@@ -9,27 +9,35 @@ launcher looks the function up under the Miles-era name ``miles_capabilities``
 from __future__ import annotations
 
 POLICY_TOKEN_SOURCE = ("publication (sync colocated by construction), not a per-sample engine report")
+FULLY_ASYNC_TOKEN_SOURCE = ("per-trajectory min/max_global_steps + per-call versions (yeto build patch), "
+                            "mapped to outer versions by the publication VersionMap")
 
 
-def verl_capabilities(fingerprint: str, *, unverified_mechanisms=()):
+def verl_capabilities(fingerprint: str, *, unverified_mechanisms=(), fully_async_limit: int = 0):
+    """``fully_async_limit`` 0: the sync colocated trainer (age 0).  > 0 (6.4b): the
+    fully_async path -- rollouter and trainer on separate GPUs (fixed partition,
+    driver still serial), policy age up to the limit (checked against SUPPORT)."""
     from yeto.rl.engine.capabilities import EngineCapabilities, ExecutionCapabilities
 
     from .policy_age import SUPPORT
 
+    if fully_async_limit:
+        SUPPORT.check(fully_async_limit)
     capabilities = EngineCapabilities(
         engine="verl",
         runtime_fingerprint=fingerprint,
         parameter_layouts={"lora"},
-        placements={"colocated"},
+        placements={"fixed-partition"} if fully_async_limit else {"colocated"},
         advantage_estimators={"grpo"},
         dynamic_sampling_filters=set(),
-        execution_modes={"colocated-serial"},
+        execution_modes={"partitioned-serial"} if fully_async_limit else {"colocated-serial"},
         corrections={"none", "tis"},
-        # agentic-rollout-utilization 6.3: declared from the policy-age support
-        # (stage 1: limit 0) instead of a hard-coded 0.
-        execution=ExecutionCapabilities(critic=False, max_policy_staleness=SUPPORT.max_policy_age,
+        # agentic-rollout-utilization 6.3/6.4b: the sync path produces age 0; the
+        # fully_async path up to its limit (<= SUPPORT.max_policy_age).
+        execution=ExecutionCapabilities(critic=False, max_policy_staleness=int(fully_async_limit),
                                         rollout_logprobs=True),
-        extra={"policy_token_source": POLICY_TOKEN_SOURCE},
+        extra={"policy_token_source": FULLY_ASYNC_TOKEN_SOURCE if fully_async_limit
+               else POLICY_TOKEN_SOURCE},
     )
     if unverified_mechanisms:
         capabilities = capabilities.with_unverified(unverified_mechanisms)

@@ -55,15 +55,25 @@ def test_verl_refuses_over_sampling_before_launch():
         _prepare_rl_args(args)
 
 
-def test_verl_declares_stage_one_and_limit_zero_overrides_are_empty():
+def test_verl_declares_stage_two_and_limit_zero_overrides_are_empty():
     from yeto.rl.adapters.verl.entry import verl_capabilities
     from yeto.rl.adapters.verl.policy_age import SUPPORT, policy_age_overrides
 
-    assert (SUPPORT.stage, SUPPORT.max_policy_age) == (1, 0)
+    assert (SUPPORT.stage, SUPPORT.max_policy_age) == (2, 1)  # 6.4b: fully_async path
     assert verl_capabilities("sha256:" + "0" * 64).execution.max_policy_staleness == 0
     assert policy_age_overrides(0) == ()
-    with pytest.raises(PolicyAgeError, match="backend 'verl' supports up to stage 1"):
-        policy_age_overrides(1)
+    with pytest.raises(PolicyAgeError, match="backend 'verl' supports up to stage 2"):
+        policy_age_overrides(2, groups_per_round=4)
+
+
+def test_launcher_accepts_verl_limit_one():
+    from tests.test_rl_launcher import _args
+    from yeto.launcher import _prepare_rl_args
+
+    args = _args(["--rl-max-policy-age", "1"])
+    args.rl_backend = "verl"
+    _prepare_rl_args(args)
+    assert args.rl_max_policy_age == 1
 
 
 def test_verl_command_line_unchanged_at_limit_zero():

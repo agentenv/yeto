@@ -314,6 +314,8 @@ def test_patch_verl_inserts_the_hook_once(tmp_path):
     target = tmp_path / patch_verl.TARGET
     target.parent.mkdir(parents=True)
     target.write_text("def f(self):\n" + patch_verl.ANCHOR + "            return 1\n")
+    calls = tmp_path / patch_verl.CALLS_TARGET
+    calls.write_text("def g(self):\n" + patch_verl.CALLS_ANCHOR + "            return 1\n")
     patch_verl.apply(tmp_path)
     patch_verl.apply(tmp_path)  # idempotent
     text = target.read_text()

@@ -66,13 +66,18 @@ def _runtime_env() -> dict:
     return env
 
 
-def main(argv: list[str] | None = None) -> None:
-    import verl.trainer.main_ppo as main_ppo
-
+def _plan_and_ray() -> dict:
     plan = json.loads(open(os.environ[PLAN_ENV]).read())
     if not ray.is_initialized():
         address = os.environ.get("RAY_ADDRESS") or None
         ray.init(address=address, runtime_env=_runtime_env(), namespace="yeto-verl")
+    return plan
+
+
+def main(argv: list[str] | None = None) -> None:
+    import verl.trainer.main_ppo as main_ppo
+
+    plan = _plan_and_ray()
 
     def run_ppo(config, task_runner_class=None):  # replaces verl's: our runner, our plan
         result = ray.get(YetoTaskRunner.remote().run.remote(config, plan))
@@ -82,6 +87,29 @@ def main(argv: list[str] | None = None) -> None:
     if argv is not None:
         sys.argv = [sys.argv[0], *argv]
     main_ppo.main()
+
+
+def main_fully_async(argv: list[str] | None = None) -> None:
+    """agentic-rollout-utilization 6.4b: verl's ``fully_async_main.main`` (its hydra
+    config ``fully_async_ppo_trainer`` + config fix-ups), with ``run_ppo``
+    replaced so that :class:`~.fully_async_runner.YetoFullyAsyncTaskRunner` runs
+    the island under the yeto driver."""
+    import verl.trainer.main_ppo as main_ppo
+    from verl.experimental.fully_async_policy import fully_async_main as fa_main
+
+    plan = _plan_and_ray()
+
+    def run_ppo(config, task_runner_class=None):
+        from yeto.rl.adapters.verl.fully_async_runner import YetoFullyAsyncTaskRunner
+
+        runner = ray.remote(num_cpus=1)(YetoFullyAsyncTaskRunner)
+        result = ray.get(runner.remote().run.remote(config, plan))
+        print("[yeto-verl] island result " + json.dumps(result, sort_keys=True, default=str), flush=True)
+
+    main_ppo.run_ppo = run_ppo  # fully_async_main.main imports it at call time
+    if argv is not None:
+        sys.argv = [sys.argv[0], *argv]
+    fa_main.main()
 
 
 if __name__ == "__main__":

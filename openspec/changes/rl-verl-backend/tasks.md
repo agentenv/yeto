@@ -84,7 +84,7 @@
   - 2026-10-09 S17 N17：中立层的整轮跳过在 **Miles 严格同步** 岛上真机通过（`s17-n17-strict-20261009a`，见 rl-infra-spec 8.2）；verl 数据游标（`seek_data_cursor`）仍**未上卡验证**。
 - [ ] 6.6 verl fully_async 接入上卡（agentic-rollout-utilization 6.4b，约 2 卡、$15–25）。
   - **用户 2026-10-09 决定：要做**。先在 NVIDIA GPU（N 卡）上跑，不等 NPU。结果统一备注"已在 N 卡跑过，NPU 未跑"；NPU 复跑待第 3 组 NPU 机器到位后另列。
-  - 设计在 agentic-rollout-utilization design 第 9 条"6.4b 设计"；适配代码（估 400–700 行 + 构建期补丁）**尚未实现**，上卡前须先完成并通过本机单测。
+  - 设计在 agentic-rollout-utilization design 第 9 条"6.4b 设计"。2026-10-09 适配代码**完成**（写完且本机单测通过，未上卡）：`fully_async_round.py`（纯逻辑）、`fully_async_ports.py`（驱动端口）、`fully_async_runner.py`（镜像内 trainer actor 子类 + 任务运行器）、`patch_verl.py` 第二处补丁、`verl_main.main_fully_async`、`island_entry --rl-max-policy-age`；测试 `tests/test_rl_verl_fully_async_64b.py`（11 项，含假 trainer actor 下真实 IslandDriver 跑 3 轮）。镜像内路径（verl/Ray 真调用）**未验证**，靠本条上卡核实。
   - 上卡前复核文档：`infra-drafts/S19-VERL-64B-PRELAUNCH-REVIEW.md`（判据、配置、预算）；并入第三批合并上卡（`infra-drafts/S19-BATCH3-PLAN.md`），预算需用户批。
   - 验收：复核文档预登记判据 F1–F6 全部满足，证据路径写回本条。
 - [ ] 6.5 单岛不同步 + Modal 时 launcher 以 exit 2 收尾（与 Miles 相同的既有行为），是否改为成功由用户定。
