@@ -6,23 +6,23 @@
 
 ## 1. 阶段一门禁与准备（无 GPU）
 
-- [ ] 1.1 编写阶段一 GPU 测试计划 `evidence/phase1-plan.md`：对 4.x、5.x、6.x 的每一项逐条列出判据、最小证据、对照组、卡型、硬超时、费用上限和唯一前缀，并汇总阶段一上限 ≤ $35。验证：计划已提交，并得到**用户确认**（确认记录写入 `progress.md`）。确认之前不得开始第 2 组以后的 apply。（S14：未做，`evidence/phase1-plan.md` 不存在；需先定卡型，见 §13 Q1）
+- [x] 1.1 编写阶段一 GPU 测试计划 `evidence/phase1-plan.md`：对 4.x、5.x、6.x 的每一项逐条列出判据、最小证据、对照组、卡型、硬超时、费用上限和唯一前缀，并汇总阶段一上限 ≤ $35。验证：计划已提交，并得到**用户确认**（确认记录写入 `progress.md`）。确认之前不得开始第 2 组以后的 apply。（S14：未做，`evidence/phase1-plan.md` 不存在；需先定卡型，见 §13 Q1） **S19 10-09：计划 `evidence/phase1-plan.md` 已定稿；主 agent 10-09 代用户确认（沿用 S14 Q1–Q3；6.2 不做，除非 4.x 需要），记录见 progress.md "S19 阶段一门禁"。**
 - [x] 1.2 核实前置状态：trainer v2 补丁（GMPO num/den）是否已合入 integ-decl；1a G3（g3c/g3d）所用的 launcher 回传磁带 harness 是否能直接复用于 1b；当前 pin 与 `FORK_COMMITS`。验证：结论与提交号或行号写入 `progress.md`。补丁未合入时，按 design D5 把 GMPO 标为暂缓。（S14 对账：三项结论见 progress.md §1，trainer v2 已合入 `yeto/rl/engine/miles_adapter/trainer.py:101,601-611`；磁带回传 harness 已被 seq-and-adv attempt 6 与 critic-family G1 复用；pin `c35702e` 在 `loss_variants.FORK_COMMITS`。GMPO 不暂缓。）
-- [ ] 1.3 记录全量测试基线（`OMP_NUM_THREADS=1 /tmp/yeto-venv/bin/python -m pytest -q --continue-on-collection-errors -p no:cacheprovider -rfE`），失败 id 存入 `baseline-failures.txt`。验证：文件存在，命令与计数写入 `progress.md`。（S14：未做；最近全量基线只有 `infra-drafts/s13-full2-pytest.log`（68 failed/4084 passed/26 errors，HEAD 未记录），不能当 e8d387ac 基线）
+- [x] 1.3 记录全量测试基线（`OMP_NUM_THREADS=1 /tmp/yeto-venv/bin/python -m pytest -q --continue-on-collection-errors -p no:cacheprovider -rfE`），失败 id 存入 `baseline-failures.txt`。验证：文件存在，命令与计数写入 `progress.md`。（S14：未做；最近全量基线只有 `infra-drafts/s13-full2-pytest.log`（68 failed/4084 passed/26 errors，HEAD 未记录），不能当 e8d387ac 基线） **S19 10-09：改用本机安全测试集（docs/TESTING.md），main 512bb773：9 failed / 5061 passed / 47 skipped / 23 deselected，失败 id 见 `baseline-failures.txt`，命令见 progress.md。**
 
 ## 2. clipfrac 定性与 fork 观测指标（CPU，fork 小提交）
 
-- [ ] 2.1 在 miles-next-venv 中离线复现 pg_clipfrac 疑点：compile 与 eager 两种模式、`eps_clip==eps_clip_high` 与 `≠` 两种情形，同时对照手算结果（design D3）。验证：`evidence/clipfrac-cpu/report.md` 给出“复现并定位根因”或“不能复现”的结论和可重跑脚本。（S14：未做；`rl-algo-grpo-knobs/evidence/2026-09-29-clipfrac-offline/report.md` 只有疑点与手算，compile/eager 对照未做）
-- [ ] 2.2 如果 2.1 确认是 fork 缺陷：在 `yeto/ports` 上做最小修复，并补 CPU 单测，证明修复前后 pg_loss 逐位相同、clipfrac 与手算一致。验证：fork 单测通过，经独立审查。如果不是缺陷，本项按合法否定结论记录并勾选。（S14：未做，依赖 2.1）
-- [ ] 2.3 在 fork 中新增 `dual_clipfrac`（A<0 且 dual 下界生效的 token 比例），附 CPU 单测：默认参数下 loss 逐位不变，构造张量上的比例与手算一致。验证：fork 单测通过，经独立审查。（S14：未做；fork pin c35702e 无 `dual_clipfrac`，`git grep` 为空）
-- [ ] 2.4 在 fork 中记录超采样每次提交的批大小以及丢弃、补采计数，附 CPU 单测。验证：fork 单测通过，经独立审查；指标键名写入 `progress.md`。（S14：未做；fork 只在 `inference_rollout_train.py:120`/`sglang_rollout.py:483` 取 `over_sampling_batch_size`，未记录提交批大小）
+- [x] 2.1 在 miles-next-venv 中离线复现 pg_clipfrac 疑点：compile 与 eager 两种模式、`eps_clip==eps_clip_high` 与 `≠` 两种情形，同时对照手算结果（design D3）。验证：`evidence/clipfrac-cpu/report.md` 给出“复现并定位根因”或“不能复现”的结论和可重跑脚本。（S14：未做；`rl-algo-grpo-knobs/evidence/2026-09-29-clipfrac-offline/report.md` 只有疑点与手算，compile/eager 对照未做） **S19 10-09：不能复现（CPU，compile 与 eager clipfrac 逐位相同且等于手算），见 `evidence/clipfrac-cpu/report.md`。**
+- [x] 2.2 如果 2.1 确认是 fork 缺陷：在 `yeto/ports` 上做最小修复，并补 CPU 单测，证明修复前后 pg_loss 逐位相同、clipfrac 与手算一致。验证：fork 单测通过，经独立审查。如果不是缺陷，本项按合法否定结论记录并勾选。（S14：未做，依赖 2.1） **S19 10-09：合法否定结论——2.1 未确认 fork 缺陷，不改 fork；GPU 残余疑点由 5.2 检查。**
+- [x] 2.3 在 fork 中新增 `dual_clipfrac`（A<0 且 dual 下界生效的 token 比例），附 CPU 单测：默认参数下 loss 逐位不变，构造张量上的比例与手算一致。验证：fork 单测通过，经独立审查。（S14：未做；fork pin c35702e 无 `dual_clipfrac`，`git grep` 为空） **S19 10-09：fork 本地提交 ed75bd2a0（分支 s19-algosup-metrics，基于 ddce209，未推送），5 个 CPU 单测通过，独立审查通过（子 agent 审查）。**
+- [x] 2.4 在 fork 中记录超采样每次提交的批大小以及丢弃、补采计数，附 CPU 单测。验证：fork 单测通过，经独立审查；指标键名写入 `progress.md`。（S14：未做；fork 只在 `inference_rollout_train.py:120`/`sglang_rollout.py:483` 取 `over_sampling_batch_size`，未记录提交批大小） **S19 10-09：fork 本地提交 57d93872e（同分支），键名见 progress.md；独立审查后按意见补了 resumed/failed 计数，单测通过。**
 - [ ] 2.5 把 2.2–2.4 的提交合并为一次 pin 更新请求交给 IMG：快进 `yeto/ports`、重建镜像、更新 pin；在 ALGO 侧更新 `FORK_COMMITS`，并按 git diff 为 `MILES_DECLARED_PINS` 中的 4 项做迁移论证。验证：新 pin 在 Modal T4 上通过完整 parse_args + validate_parsed_args（$0.5），迁移论证写入 `progress.md`，`tests/test_rl_algorithm_flags_upstream.py` 通过。（S14：未做；但 pin 迁移论证流程已在 IMG 的 5 次 pin 变更中跑通，模板见 `entry.py:143-180` 注释与 `loss_variants.py:78-90`；与 critic-family 6.3 的 pin 更新合并为一次）
-- [ ] 2.6 ALGO 侧接入新指标：在 fake 与 adapter 的指标映射中加入 `dual_clipfrac` 与超采样计数；需要改 trainer 取数时，以补丁 `infra-drafts/patches/algo-supp-metrics.patch` 交给 INFRA。验证：单测通过，补丁在临时副本上 apply 后相关测试通过。（S14：未做）
+- [x] 2.6 ALGO 侧接入新指标：在 fake 与 adapter 的指标映射中加入 `dual_clipfrac` 与超采样计数；需要改 trainer 取数时，以补丁 `infra-drafts/patches/algo-supp-metrics.patch` 交给 INFRA。验证：单测通过，补丁在临时副本上 apply 后相关测试通过。（S14：未做） **S19 10-09：ALGO 侧 ports/rollout/rollout_meta_hook/fake 已接入；driver 输出以补丁 `infra-drafts/patches/algo-supp-metrics.patch`（副本在 `patches/`）交 INFRA，在临时副本上 apply 后测试通过。**
 
 ## 3. 用户代码类机制永不声明（CPU）
 
-- [ ] 3.1 在 adapter 中加入“不可声明”名单（`corrections:custom`、`plugins`、`losses:custom_loss`、除 vendored Dr.GRPO reducer 以外的任意 `custom_pg_loss_reducer`），并加单测断言它与 `MILES_DECLARED` 不相交，同时断言放行开关在多岛下仍被拒绝。验证：新单测通过，全量测试失败集合与 1.3 基线一致。（S14：未做；多岛拒绝放行的单测已有 `tests/test_rl_algorithm_capabilities.py:413-440`，缺"不可声明名单"及其与 `MILES_DECLARED` 不相交断言）
-- [ ] 3.2 在 `docs/MILES_RL.md` 的 “Declaration policy” 中写入这条规则，并同步修正 rl-algo-capabilities 页第 6 节列出的四处文档与代码不一致。验证：文档中的 dry-run 示例按所写命令执行，输出一致。（S14：未做；`docs/MILES_RL.md:857` Declaration policy 仍写 dual_clip/opsm_rollout/custom 为"pending evidence or approval"，A12 审计称文档多处过时）
+- [x] 3.1 在 adapter 中加入“不可声明”名单（`corrections:custom`、`plugins`、`losses:custom_loss`、除 vendored Dr.GRPO reducer 以外的任意 `custom_pg_loss_reducer`），并加单测断言它与 `MILES_DECLARED` 不相交，同时断言放行开关在多岛下仍被拒绝。验证：新单测通过，全量测试失败集合与 1.3 基线一致。（S14：未做；多岛拒绝放行的单测已有 `tests/test_rl_algorithm_capabilities.py:413-440`，缺"不可声明名单"及其与 `MILES_DECLARED` 不相交断言） **S19 10-09：`entry.NEVER_DECLARABLE` + `tests/test_rl_algo_never_declarable.py`（8 个用例通过）；全量失败集合与 1.3 基线一致。**
+- [x] 3.2 在 `docs/MILES_RL.md` 的 “Declaration policy” 中写入这条规则，并同步修正 rl-algo-capabilities 页第 6 节列出的四处文档与代码不一致。验证：文档中的 dry-run 示例按所写命令执行，输出一致。（S14：未做；`docs/MILES_RL.md:857` Declaration policy 仍写 dual_clip/opsm_rollout/custom 为"pending evidence or approval"，A12 审计称文档多处过时） **S19 10-09：Declaration policy 写入"永不声明"规则，修正第 6 节四处不一致及 dry-run 命令路径；dry-run 复跑输出见 `evidence/docs-dry-run/output.txt`。**
 
 ## 4. 单卡 G1 生效验证（A10G；前置：1.1 已确认，2.5 新 pin 已就绪）
 

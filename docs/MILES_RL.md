@@ -905,10 +905,10 @@ Before any GPU process exists, the driver handshake refuses:
 alignment §7b): a mechanism is declared in `miles_capabilities` only on
 evidence that it actually takes effect on GPU. The declarations beyond R0,
 each with its evidence, are the `MILES_DECLARED` table in
-`yeto/rl/engine/miles_adapter/entry.py` (one commit per mechanism):
+`yeto/rl/adapters/miles/entry.py` (one commit per mechanism):
 
-- corrections: tis, opsm, opsm_trainer, icepop, mis_mask, mismatch_observe
-  (rl-algo-mismatch-correction);
+- corrections: tis, opsm, opsm_trainer, icepop, mis_mask, mis,
+  mismatch_observe (rl-algo-mismatch-correction);
 - loss_aggregations: constant, token (token only on Miles 0af62f4d+, where
   the LoRA bridge honours calculate_per_token_loss; entry.MILES_DECLARED_PINS
   withholds it under other pins); features: over_sampling (Miles 0af62f4d only;
@@ -925,11 +925,14 @@ each with its evidence, are the `MILES_DECLARED` table in
 
 Withdrawn after independent review:
 
-- loss_aggregations:token: grad_norm was bit-identical to the baseline.
-- features:no_grpo_std_normalization: no run isolates it from the
-  `constant` aggregation.
 - features:mismatch_metrics: every evidence run already had use_tis, and
   Miles emits the metrics under `get_mismatch_metrics or use_tis`.
+
+Withdrawn once and declared again on new evidence (both are in the list
+above): loss_aggregations:token (first withdrawn because grad_norm was
+bit-identical to the baseline; declared again on g1f, Miles 0af62f4d+) and
+features:no_grpo_std_normalization (first withdrawn because no run isolated it
+from the `constant` aggregation; declared again on the g1c isolated control).
 
 Under a correction that makes Miles set use_tis (tis, icepop, mis_mask,
 mismatch_observe), `correction.mismatch_metrics` is claimed by that correction
@@ -938,13 +941,26 @@ because the flag has no effect there. icepop and mismatch_observe specs are
 therefore accepted. Under a generic custom function it is still a separate,
 undeclared mechanism.
 
-Not declared, pending evidence or approval:
+Not declared, pending GPU evidence (rl-algo-supplement phase 1):
 
-- dual_clip;
-- mis, opsm_rollout, generic corrections:custom;
-- features:custom_pg_loss_reducer (generic). 1b now allows only its Dr.GRPO
-  reducer, and that reducer is claimed by `loss_aggregations:constant`
-  (`register_named_reducer`).
+- features:dual_clip, corrections:opsm_rollout.
+
+**Never declared: user code** (rl-algo-supplement design D6). GPU evidence
+covers one piece of code, not any code a user may supply. These mechanisms
+therefore never enter `MILES_DECLARED`; `entry.NEVER_DECLARABLE` lists them,
+and a test asserts that the list and `MILES_DECLARED` do not overlap:
+
+- `corrections:custom` (a generic custom correction function);
+- `features:plugins` (plugins that no registered yeto extension owns);
+- `losses:custom_loss` (`--custom-loss-function-path`);
+- `features:custom_pg_loss_reducer` (any reducer other than the vendored
+  Dr.GRPO reducer; that reducer is claimed by `loss_aggregations:constant`
+  through `register_named_reducer` at its evidenced source hash).
+
+The yeto reward dispatcher (`reward_postprocessors:custom_reward_postprocess`)
+is yeto code and is declared. A user can still run user code with
+`--rl-allow-unverified-mechanism`, but only on a single island without outer
+sync; with two or more islands or with outer sync the launch is refused.
 
 Settings an estimator mandates are claimed by that estimator's mechanism in
 that combination only (`ESTIMATOR_COMPANIONS`; main-agent decision, may be
@@ -1060,7 +1076,7 @@ whether a syncer is started), the algorithm hash and each learner command. It
 creates no cloud resource. With `--rl-single-island-no-sync` (which needs
 `--controller local`) it shows one island, no syncer and `outer_sync: false`.
 
-**Dry run.** `python3 -m yeto.rl.engine.miles_adapter.algorithm_flags
+**Dry run.** `python3 -m yeto.rl.adapters.miles.algorithm_flags
 --dry-run [--rl-algorithm-spec PATH] [--extra "<miles argv>"]
 [--rl-allow-unverified-mechanism NAME]` runs the same steps as the ports
 learner, with no engine: resolve, absorb, rejection matrix, then the Miles
@@ -1069,7 +1085,7 @@ flags, the Miles algorithm flags and the verdict. The exit code is 0 only when
 the spec is accepted.
 
 ```bash
-M="python3 -m yeto.rl.engine.miles_adapter.algorithm_flags"
+M="python3 -m yeto.rl.adapters.miles.algorithm_flags"
 $M --dry-run          # default GRPO: v1 schema, hash 27df1133..., accepted
 echo '{"schema":"yeto-rl-algorithm-spec-v2","loss":{"eps_clip_high":0.28}}' > clip_higher.json
 $M --dry-run --rl-algorithm-spec clip_higher.json
@@ -1232,7 +1248,7 @@ trained samples and groups in the per-round event is task 7.2; it needs a
 driver-side event field and is still open.
 
 ```bash
-M="python3 -m yeto.rl.engine.miles_adapter.algorithm_flags"
+M="python3 -m yeto.rl.adapters.miles.algorithm_flags"
 $M --dry-run --rl-algorithm-spec examples/rl_algorithms/dr-grpo.json
     # rejected: custom_pg_loss_reducer / no_grpo_std_normalization not declared (pre-G1)
 $M --dry-run --rl-algorithm-spec examples/rl_algorithms/dr-grpo.json \
@@ -1249,9 +1265,11 @@ Recorded outputs: `openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-dry-r
 > that contains it. The P0 framework branch (`algo-cap`) alone does not ship
 > them; there only the extension points described above exist.
 
-Six optional mechanisms, all **expressible but not declared** by the Miles
-adapter until their single-GPU smoke (G1) passes. Declared support is not a
-claim of benefit: no effect A/B has been run for any of them.
+Six optional mechanisms. All six are now **declared** by the Miles adapter
+(`MILES_DECLARED`, evidence `rl-algo-seq-and-adv/evidence/g1` attempts 4 and
+6). Declared support is not a claim of benefit: no effect A/B has been run for
+any of them. The allowance flags in the table below are only needed on an
+engine that does not declare them.
 
 | Mechanism (`--rl-allow-unverified-mechanism dimension:name`) | Spec | Engine argv |
 |---|---|---|
@@ -1265,15 +1283,16 @@ Example specs (PluginRef SHA256s regenerated by `make_examples.py`) live in
 `openspec/changes/rl-algo-seq-and-adv/examples/`. Check one without an engine:
 
 ```bash
-python3 -m yeto.rl.engine.miles_adapter.algorithm_flags --dry-run \
+python3 -m yeto.rl.adapters.miles.algorithm_flags --dry-run \
   --rl-algorithm-spec openspec/changes/rl-algo-seq-and-adv/examples/maxrl.json
-# verdict "rejected": features mechanism 'maxrl' not supported ... (not declared yet)
-python3 -m yeto.rl.engine.miles_adapter.algorithm_flags --dry-run \
+# verdict "accepted" (maxrl is declared; before its G1 this was "rejected")
+python3 -m yeto.rl.adapters.miles.algorithm_flags --dry-run \
   --rl-algorithm-spec openspec/changes/rl-algo-seq-and-adv/examples/maxrl.json \
   --rl-allow-unverified-mechanism features:maxrl \
   --rl-allow-unverified-mechanism reward_postprocessors:custom_reward_postprocess \
   --rl-allow-unverified-mechanism features:plugins
-# verdict "accepted" (single island without outer sync only; recorded as unverified)
+# verdict "accepted" (the allowances are only needed on an engine that does
+# not declare these mechanisms; single island without outer sync only)
 ```
 
 **GSPO.** The clip range must be explicit (`gspo_noclip.json` is rejected: the
@@ -1327,7 +1346,7 @@ enters the algorithm hash. Each round emits `rl_advantage_transform`
 > the computation is a variant branch in the Miles fork (`michaellchung/miles`
 > `yeto/ports`, `--policy-loss-variant`); yeto only describes, translates and
 > validates. The variants arrived in fork commit 5c1b49eb; the current
-> `MILES_NEXT_COMMIT` (c35702ee) descends from it and is listed in
+> `MILES_NEXT_COMMIT` (ddce2099) descends from it and is listed in
 > `yeto.rl.algos.loss_variants.FORK_COMMITS` (on any pin outside that set a
 > launch is refused). The Miles adapter does **not** declare `losses:cispo` /
 > `losses:sapo` / `losses:gmpo` until their GPU smoke passes; only the
@@ -1399,16 +1418,16 @@ Outer sync: the variants only change the loss and are orthogonal to strict-avg
 and decoupled; ports run serially (staleness 0, pi_old is this round's start).
 
 ```bash
-python3 -m yeto.rl.engine.miles_adapter.algorithm_flags --dry-run \
+python3 -m yeto.rl.adapters.miles.algorithm_flags --dry-run \
   --extra "--policy-loss-variant cispo --eps-clip 0.2 --eps-clip-high 0.28 --calculate-per-token-loss"
 # verdict "rejected": losses mechanism 'cispo' not supported (... expressible but not enabled)
-python3 -m yeto.rl.engine.miles_adapter.algorithm_flags --dry-run \
+python3 -m yeto.rl.adapters.miles.algorithm_flags --dry-run \
   --extra "--policy-loss-variant sapo" --rl-allow-unverified-mechanism losses:sapo
 # verdict "accepted"; miles_argv ends with
 #   --policy-loss-variant sapo --sapo-tau-pos 1.0 --sapo-tau-neg 1.05
 # and "launch_warnings" is empty on a pin in FORK_COMMITS (on a pin outside
 # FORK_COMMITS it lists "[loss_variants] ... Expressible but not opened")
-python3 -m yeto.rl.engine.miles_adapter.algorithm_flags --dry-run \
+python3 -m yeto.rl.adapters.miles.algorithm_flags --dry-run \
   --extra "--policy-loss-variant gmpo --sapo-tau-pos 1.2" \
   --rl-allow-unverified-mechanism losses:gmpo
 # verdict "rejected": [loss_variant_params] ['loss.sapo_tau_pos'] only apply to ...
@@ -1587,7 +1606,7 @@ python3 -m yeto.rl.critic_warmup --dry-run \
 above. Status: CPU-verified; G1 passed; G3 unverified.
 
 ```bash
-M="python3 -m yeto.rl.engine.miles_adapter.algorithm_flags"
+M="python3 -m yeto.rl.adapters.miles.algorithm_flags"
 A=--rl-allow-unverified-mechanism
 $M --dry-run --extra "--advantage-estimator ppo"
 # verdict "rejected": advantage estimator 'ppo' not supported (... expressible but not
@@ -1795,7 +1814,8 @@ mechanisms except `opsm_rollout`. On the integration branch the Miles adapter de
 `mis_mask`. Each was verified through `yeto launch --rl-single-island-no-sync`
 and, for the correcting mechanisms, by a run that made the branch fire (tasks
 7.2). `opsm` is the OPSM dimension and admits no source by itself;
-`opsm_rollout` and `mis` (truncate/clip) are not declared. Any other mechanism fails at startup with a
+`mis` (truncate) is declared on the 2026-10-08 trigger run (see
+`MILES_DECLARED`); `opsm_rollout` is not declared. Any other mechanism fails at startup with a
 list of the supported ones. For a single-island smoke only,
 `--rl-single-island-no-sync --rl-allow-unverified-mechanism corrections:<name>`
 (and `features:<name>` where needed) admits them. Two-island strict-avg runs (G3)
@@ -1862,7 +1882,7 @@ colocated mode publishes LoRA weights over CUDA IPC. The partitioned mode of
 does not carry over to the other.
 
 Examples. Each block is checked by `tests/test_rl_mismatch_correction.py`
-through the P0 dry run (`python3 -m yeto.rl.engine.miles_adapter.algorithm_flags
+through the P0 dry run (`python3 -m yeto.rl.adapters.miles.algorithm_flags
 --dry-run --rl-algorithm-spec FILE [--rl-allow-unverified-mechanism DIMENSION:NAME ...]`):
 it is rejected as undeclared without the allowances and accepted with them.
 

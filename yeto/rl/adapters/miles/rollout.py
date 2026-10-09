@@ -30,7 +30,7 @@ from typing import Any, Protocol
 from collections.abc import Mapping
 from types import SimpleNamespace
 
-from yeto.rl.engine.ports import GroupMetadata, RolloutBatchHandle
+from yeto.rl.engine.ports import GroupMetadata, RolloutBatchHandle, over_sampling_fields
 from .traits import MILES_ABORT_MECHANISM
 from . import LoopRunner
 from .rollout_meta_hook import (
@@ -468,6 +468,7 @@ def handle_from_metadata(
             float(payload["cross_version_truncated_fraction"])
             if payload.get("cross_version_truncated_fraction") is not None else None
         ),
+        over_sampling=over_sampling_fields(payload.get("over_sampling")),
     )
 
 

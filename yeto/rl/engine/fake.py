@@ -150,6 +150,10 @@ class FakeEngine:
     # ``3 * samples_per_group * (1 + (7 * g) % over)`` tokens; shorter groups
     # finish first. None = no over-sampling (default, unchanged behaviour).
     over_sampling_groups: int | None = None
+    # rl-algo-supplement 2.6: Miles reports ``dual_clipfrac`` in the loss dict
+    # when dual-clip (eps_clip_c) is on; the fake reports this constant in
+    # ``round_metrics`` (None = not reported, default).
+    dual_clipfrac: float | None = None
 
     def __post_init__(self) -> None:
         self.tensors = {k: v.detach().clone().float() for k, v in self.tensors.items()}
@@ -271,6 +275,14 @@ class FakeRolloutPool:
             aborted_in_flight_trajectories=report.discarded_trajectories,
             aborted_in_flight_tokens=report.discarded_tokens,
             aborted_in_flight_unknown_groups=0, abort_mechanism=report.mechanism,
+            # rl-algo-supplement 2.6: the fork's tally shape (one submission, no filter)
+            over_sampling={
+                "submit_calls": 1, "refill_calls": 0, "submitted_groups": over,
+                "submit_batch_size_first": over, "submit_batch_size_max": over,
+                "completed_groups": len(kept), "filtered_groups": 0, "kept_groups": len(kept),
+                "surplus_groups": 0, "inflight_groups_at_end": report.discarded_groups,
+                "resumed_groups": 0, "failed_groups": 0,
+            },
         )
 
     def abort(self) -> None:
@@ -381,7 +393,10 @@ class FakeTrainerGroup:
         return self.engine._last_metrics
 
     def round_metrics(self) -> dict[str, float]:
-        return dict(getattr(self, "critic_metrics", None) or {})
+        out = dict(getattr(self, "critic_metrics", None) or {})
+        if self.engine.dual_clipfrac is not None:
+            out["dual_clipfrac"] = float(self.engine.dual_clipfrac)
+        return out
 
     # rl-algo-critic-family 4.2: the critic channel's export / write-back
     def critic_layout(self) -> str:

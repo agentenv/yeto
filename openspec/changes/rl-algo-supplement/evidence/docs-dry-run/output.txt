@@ -1,0 +1,17 @@
+### python3 -m yeto.rl.adapters.miles.algorithm_flags --dry-run --rl-algorithm-spec openspec/changes/rl-algo-seq-and-adv/examples/maxrl.json
+"launch_warnings": []
+"verdict": "accepted"
+### python3 -m yeto.rl.adapters.miles.algorithm_flags --dry-run --rl-algorithm-spec openspec/changes/rl-algo-seq-and-adv/examples/maxrl.json --rl-allow-unverified-mechanism features:maxrl --rl-allow-unverified-mechanism reward_postprocessors:custom_reward_postprocess --rl-allow-unverified-mechanism features:plugins
+"launch_warnings": []
+"verdict": "accepted"
+### python3 -m yeto.rl.adapters.miles.algorithm_flags --dry-run --extra '--policy-loss-variant cispo --eps-clip 0.2 --eps-clip-high 0.28 --calculate-per-token-loss'
+not supported (supported: ['policy_loss']; expressible but not enabled on this engine)
+"launch_warnings": []
+"verdict": "rejected"
+### python3 -m yeto.rl.adapters.miles.algorithm_flags --dry-run --extra '--policy-loss-variant sapo' --rl-allow-unverified-mechanism losses:sapo
+"launch_warnings": []
+"verdict": "accepted"
+### python3 -m yeto.rl.adapters.miles.algorithm_flags --dry-run --extra '--policy-loss-variant gmpo --sapo-tau-pos 1.2' --rl-allow-unverified-mechanism losses:gmpo
+loss_variant_params] ['loss.sapo_tau_pos'] only apply to their own loss.policy_loss_variant, got 'gmpo'; drop them or select that variant
+"launch_warnings": []
+"verdict": "rejected"
