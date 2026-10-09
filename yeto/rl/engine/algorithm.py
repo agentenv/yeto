@@ -1693,11 +1693,14 @@ def _reject_critic_init(s: AlgorithmSpec) -> str | None:
 
 
 def _reject_staleness(s: AlgorithmSpec) -> str | None:
-    if s.execution.max_policy_staleness != 0:
+    # agentic-rollout-utilization 2.3: staleness > 0 is the bounded-staleness
+    # contract (token-level version segments); cross-version tokens need an
+    # importance-sampling correction, so a spec without one is still refused.
+    if s.execution.max_policy_staleness != 0 and s.correction.method not in ("tis", "custom"):
         return (
-            f"execution.max_policy_staleness={s.execution.max_policy_staleness}: no "
-            "asynchronous (staleness>0) algorithm contract exists; it needs its own change "
-            "(rl-infra-spec alignment A6). Use 0"
+            f"execution.max_policy_staleness={s.execution.max_policy_staleness} needs a "
+            "cross-version importance-sampling correction (correction.method 'tis' or "
+            "'custom'; agentic-rollout-utilization bounded-staleness contract; rl-infra-spec alignment A6). Use 0 otherwise"
         )
     return None
 

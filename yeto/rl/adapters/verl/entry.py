@@ -14,6 +14,8 @@ POLICY_TOKEN_SOURCE = ("publication (sync colocated by construction), not a per-
 def verl_capabilities(fingerprint: str, *, unverified_mechanisms=()):
     from yeto.rl.engine.capabilities import EngineCapabilities, ExecutionCapabilities
 
+    from .policy_age import SUPPORT
+
     capabilities = EngineCapabilities(
         engine="verl",
         runtime_fingerprint=fingerprint,
@@ -23,7 +25,10 @@ def verl_capabilities(fingerprint: str, *, unverified_mechanisms=()):
         dynamic_sampling_filters=set(),
         execution_modes={"colocated-serial"},
         corrections={"none", "tis"},
-        execution=ExecutionCapabilities(critic=False, max_policy_staleness=0, rollout_logprobs=True),
+        # agentic-rollout-utilization 6.3: declared from the policy-age support
+        # (stage 1: limit 0) instead of a hard-coded 0.
+        execution=ExecutionCapabilities(critic=False, max_policy_staleness=SUPPORT.max_policy_age,
+                                        rollout_logprobs=True),
         extra={"policy_token_source": POLICY_TOKEN_SOURCE},
     )
     if unverified_mechanisms:

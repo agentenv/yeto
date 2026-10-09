@@ -206,6 +206,7 @@ def parse_args(argv=None):
     parser.add_argument("--rl-island-scheduling", choices=("legacy", "elastic"), default="legacy")
     # S17 N16: LR schedule choice (yeto.rl.engine.run_config.resolve_lr_schedule)
     parser.add_argument("--rl-lr-schedule", choices=("auto", "linear", "constant"), default="auto")
+    parser.add_argument("--rl-max-policy-age", type=int, default=0)
     parser.add_argument("--rl-syncer-epoch", type=int, default=0)
     parser.add_argument("--rl-elastic-quorum-timeout-s", type=float, default=None)
     parser.add_argument("--rl-elastic-idle-flow-timeout-s", type=float, default=None)
@@ -473,6 +474,11 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
 
     if getattr(args, "rl_overlap_eval", False):
         miles_args.yeto_rl_overlap_eval = True
+    if getattr(args, "rl_max_policy_age", 0):  # agentic-rollout-utilization 2.1
+        from .policy_age import SUPPORT
+
+        SUPPORT.check(int(args.rl_max_policy_age))
+        miles_args.yeto_rl_max_policy_age = int(args.rl_max_policy_age)
     observe = bool(getattr(args, "rl_observe_timeline", False))
     if observe:
         miles_args.yeto_rl_observe_timeline = True
@@ -1947,8 +1953,12 @@ def _parse_miles_args(argv: list[str]):
 def _backend_identity_sha256(args) -> str:
     """Decoupling 6.2: this island's backend identity hash (bound into the syncer session)."""
     from yeto.rl.adapters.miles.identity import backend_identity
+    from yeto.rl.engine.policy_age import bind_policy_age
 
-    return backend_identity(getattr(args, "rl_engine", "ports") or "ports").sha256()
+    # agentic-rollout-utilization 2.1: a non-zero policy-age limit is bound into
+    # the identity the syncer compares (limit 0: unchanged).
+    return bind_policy_age(backend_identity(getattr(args, "rl_engine", "ports") or "ports").sha256(),
+                           int(getattr(args, "rl_max_policy_age", 0) or 0))
 
 
 def _syncer_address(value: str) -> tuple[str, int]:

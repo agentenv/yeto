@@ -177,3 +177,9 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
 - 原因：1.1 多发提交数改用单调的 `sample_group_index` 计数（数据集回绕时不再是未知）；1.2 读取 Miles fork `abort()` 的丢弃统计（agentenv/miles s18-abort-discard-stats efbbc63ea）；1.3 `trajectory_diagnostics` 增加轨迹起止时间、沙箱冷启动、逐回合模型生成/工具耗时；codex OpenEnv 子进程智能体记录这些耗时。
 - 变化：8 个标准样本里 rollout_meta_hook 插件的 `source_sha256` 由 `6192a704…` 改为 `c58d994ac22b5e9d839f82fa8621a5d58b40d3f8ecea5050c18827034df247b7`；codex_harness.json 里 `codex_openenv_subprocess_agent_function` 的 `source_sha256` 由 `22df84e9…` 改为 `326680fe569c33936899ae045aaccda49f8fd030cc4d9f7e539d7fb60ef12b96`。只有这两个字段变；`algorithm_sha256`、契约哈希、Miles 命令行、`backend_identity`、`fake_engine_tapes.json` 都不变（新事件 `rl_rollout_cutoff` 只在确有截止丢弃时发出，默认配置不发）。已用 `python tests/decoupling_golden.py --write` 重新生成。
 - 与 PR #153（N17 abort 钩子）同改 codex_harness.json 与本文件，后合者重新生成并迁移。
+
+## S18 agentic-rollout-utilization 第 2 组：落后上限开关 `--rl-max-policy-age`（分支 s18-aru-stage1，2026-10-09）
+
+- 结论：默认 0 时**没有任何哈希变化**——8 个标准样本、`fake_engine_tapes.json`、`algorithm_sha256`、契约哈希、Miles 命令行、`backend_identity` 逐字节不变（`tests/test_decoupling_golden.py` 12 过，未重新生成）。
+- 原因：落后上限在 `ExecutionProfile` 里本来就有 `max_policy_age` 字段（默认 0，已在 `contract_hash` 内）；新开关只在非 0 时改变它（同时 `algorithm_contract` 改为 `bounded-staleness`）。发给同步服务的岛身份（HELLO 会话契约与 elastic JOIN）用 `policy_age.bind_policy_age` 绑定上限，0 时原样返回；launcher 在 0 时不向岛命令行加任何参数。
+- 非 0 时（目前两个后端都只支持到阶段 1，launcher 起机前拒绝）：岛身份哈希、契约哈希、算法哈希（`execution.max_policy_staleness`）都会变，落后上限不同的岛在握手时只拒该连接。

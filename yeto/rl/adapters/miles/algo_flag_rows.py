@@ -271,3 +271,30 @@ register_flag(FlagMapping("--value-target-type", "critic.value_loss", False, _hl
                           lambda v: [], lambda spec: []))
 register_flag(FlagMapping("--hl-gauss-sigma-ratio", "critic.value_loss", False, _sigma_ratio,
                           lambda v: [], lambda spec: []))
+
+
+# --------------------------------------------------------------------------
+# policy-age limit (agentic-rollout-utilization 2.4, design decision 1)
+# --------------------------------------------------------------------------
+# Miles' boolean switches are derived from the neutral limit
+# (execution.max_policy_staleness, set by --rl-max-policy-age); they are never
+# accepted as pass-through argv, which could not express the limit. Limit 0:
+# nothing emitted (argv snapshots unchanged).
+
+
+def _refuse_partial_rollout(_value) -> list:
+    raise AlgorithmSpecError(
+        "Miles partial-rollout switches are derived from --rl-max-policy-age "
+        "(agentic-rollout-utilization); do not pass them directly")
+
+
+def _partial_rollout_argv(spec: AlgorithmSpec) -> list[str]:
+    from .policy_age import policy_age_argv
+
+    return list(policy_age_argv(int(spec.execution.max_policy_staleness)))
+
+
+register_flag(FlagMapping("--partial-rollout", "execution.max_policy_staleness", True,
+                          lambda raw: True, _refuse_partial_rollout, _partial_rollout_argv))
+register_flag(FlagMapping("--mask-offpolicy-in-partial-rollout", "execution.max_policy_staleness",
+                          True, lambda raw: True, _refuse_partial_rollout, lambda spec: []))

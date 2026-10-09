@@ -242,8 +242,8 @@ _UNMAPPED = [
     "--use-routing-replay",
     "--opd-kl-coef",
     "--clip-grad",
-    "--partial-rollout",
-    "--mask-offpolicy-in-partial-rollout",
+    # --partial-rollout / --mask-offpolicy-in-partial-rollout: derived from the
+    # neutral policy-age limit (agentic-rollout-utilization 2.4, algo_flag_rows)
     "--max-weight-staleness",
     "--keep-old-actor",
     "--update-weights-interval",

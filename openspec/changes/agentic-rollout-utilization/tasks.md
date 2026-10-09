@@ -12,10 +12,14 @@
 - [ ] 1.4 GPU A/B（并入 N17 合并验证运行）：M1 run d 配置单岛 1×H200 各 6 轮，判据见 design Migration Plan；结果与证据路径写回本文件与 AGENTIC-GPU-UTIL-RESEARCH.md
 
 ## 2. 阶段 1：落后上限开关与契约（默认 0）
-- [ ] 2.1 新增 `--rl-max-policy-age`（默认 0）进契约哈希；不一致的岛按只拒该连接处理（验证：严格与 elastic 握手单测；hash-migration.md 记录）
-- [ ] 2.2 默认 0 回归：重新生成标准样本，仅契约哈希变化（验证：标准样本比对脚本）
-- [ ] 2.3 execution_profile / driver 版本检查改为"落后不超过上限"，0 时行为不变（验证：单测覆盖 0、1、超限丢弃）
-- [ ] 2.4 Miles 适配层由上限推导 partial-rollout 与 mask/TIS 开关，从 algorithm_flags 不映射表移除（验证：Miles 命令行标准样本，上限 0 时无变化）
+- [x] 2.1 新增 `--rl-max-policy-age`（默认 0）进契约哈希；不一致的岛按只拒该连接处理（验证：严格与 elastic 握手单测；hash-migration.md 记录）
+  - 证据：核心 `yeto/rl/engine/policy_age.py`（`bind_policy_age` 0 时身份不变、非 0 绑定进岛身份；`PolicyAgeSupport` 后端声明支持到哪个阶段，适配层角色 `policy_age`）；launcher 起机前按后端检查；`tests/test_rl_policy_age.py::test_strict_handshake_refuses_an_island_with_another_limit`、`::test_elastic_join_carries_the_bound_identity`、`::test_launcher_refuses_an_unsupported_limit_before_launch[miles|verl]`、`::test_limit_zero_keeps_identity_and_nonzero_changes_it`；hash-migration.md "S18 第 2 组"一节（默认 0 无任何哈希变化）。
+- [x] 2.2 默认 0 回归：重新生成标准样本，仅契约哈希变化（验证：标准样本比对脚本）
+  - 证据：`tests/test_decoupling_golden.py` 12 过且 `tests/golden/` 无改动——默认 0 连契约哈希也不变（上限原本就在 `ExecutionProfile.contract_hash` 内且默认 0；0 时不加参数、岛身份原样），比 spec 预期更严。
+- [x] 2.3 execution_profile / driver 版本检查改为"落后不超过上限"，0 时行为不变（验证：单测覆盖 0、1、超限丢弃）
+  - 证据：`ExecutionProfile` 新增合约 `bounded-staleness`（上限 >0 必须用它，0 必须 on-policy），上限 >0 时 `train_blockers` 允许窗口内混版本；`AlgorithmSpec` 的 staleness>0 改为要求 TIS/自定义修正；`GroupMetadata.policy_versions`（版本段）；driver 上限 0 时旧规则不变（并拒绝含旧版本段的组），上限 N 时接受窗口内且哈希为已发布版本的组、超限报错（引擎侧用 `policy_age.split_by_age` 丢弃）。测试：`tests/test_rl_policy_age.py::test_profile_limit_needs_the_bounded_staleness_contract`、`::test_split_by_age_zero_one_and_over_limit`、`::test_driver_limit_zero_keeps_refusing_older_tokens`、`::test_driver_limit_one_accepts_version_segments_within_the_window`、`::test_driver_limit_one_refuses_a_group_two_versions_old`。
+- [x] 2.4 Miles 适配层由上限推导 partial-rollout 与 mask/TIS 开关，从 algorithm_flags 不映射表移除（验证：Miles 命令行标准样本，上限 0 时无变化）
+  - 证据：`yeto/rl/adapters/miles/policy_age.py`（`policy_age_argv`：0 → 无，N>0 → `--partial-rollout --mask-offpolicy-in-partial-rollout`）；`algo_flag_rows` 注册两行（由 `execution.max_policy_staleness` 推导，直接传入被拒并提示用 `--rl-max-policy-age`），从 `_UNMAPPED` 移除，仍属适配层独占参数；`tests/test_rl_policy_age.py::test_miles_switches_are_derived_from_the_limit`；Miles 命令行标准样本不变（`tests/test_decoupling_golden.py`）。TIS 由算法规格的 correction 配置（staleness>0 时必需），fork 未改。
 
 ## 3. 阶段 1：版本段记账、切点与多岛账本
 - [ ] 3.1 token 级生成版本与生成概率随样本携带（验证：样本序列化往返单测）

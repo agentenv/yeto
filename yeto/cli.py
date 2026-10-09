@@ -473,6 +473,11 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
                     help="legacy (default): existing syncer behaviour, fixed members, every "
                     "island must arrive; elastic: inter-island scheduling (capacity-weighted "
                     "stepping, late deltas carried over with a discount, join/leave)")
+    rl.add_argument("--rl-max-policy-age", type=int, default=0,
+                    help="agentic-rollout-utilization: how many published policy versions a "
+                    "trained sample may lag (0, default: deterministic, every sample from the "
+                    "policy just published). Part of the island contract; a backend that does "
+                    "not support the requested limit is refused before launch")
     rl.add_argument("--rl-lr-schedule", choices=("auto", "linear", "constant"), default="auto",
                     help="island optimizer LR schedule: auto (default) = constant for decoupled "
                     "and elastic islands, linear decay over global_rounds x optimizer_steps "

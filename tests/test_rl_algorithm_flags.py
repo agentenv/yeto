@@ -88,6 +88,7 @@ def test_mapping_table_is_subset_of_objective_list():
         assert callable(row.parse) and callable(row.absorb) and callable(row.translate)
         assert row.field.split(".")[0] in {
             "advantage", "loss", "kl", "correction", "sampling", "entropy_coef", "critic",
+            "execution",  # agentic-rollout-utilization 2.4: --partial-rollout from the limit
         }
 
 
