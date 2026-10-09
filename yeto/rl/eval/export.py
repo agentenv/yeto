@@ -88,4 +88,39 @@ class StoreEvalExporter:
             rollout_id, files=files, policy_tensor_hash=state.policy_tensor_hash(), policy_token=token,
             sampling=self.sampling, extra={**self.extra, "final": bool(final)})
         self.exported.append(rollout_id)
+        if final:
+            self.store.mark_training_finished({"final_version": int(rollout_id)})
         return {**manifest, "export_seconds": round(self.clock() - started, 3)}
+
+
+def initial_policy_state(model: str, revision: str, *, rank: int, targets: str, seed: int = 0,
+                         trust_remote_code: bool = True) -> Any:
+    """Version 0 as training starts it: PEFT's LoRA tensor contract for ``model``,
+    ``lora_A`` small seeded noise, ``lora_B`` zero (the served policy equals the base).
+    Needs torch, peft, accelerate, transformers (the training image)."""
+    import torch
+
+    from yeto.rl.core import canonical_lora_config_hash, canonical_state
+    from yeto.rl.engine.trainable_state import TrainableState
+    from yeto.rl.export import adapter_targets, derive_peft_lora_specs
+
+    specs = derive_peft_lora_specs(model, revision, rank=rank, targets=targets,
+                                   trust_remote_code=trust_remote_code)
+    gen = torch.Generator().manual_seed(int(seed))
+    tensors = {s.name: (torch.zeros(s.shape) if ".lora_B." in s.name
+                        else torch.randn(s.shape, generator=gen) * 0.01) for s in specs}
+    state = canonical_state(0, tensors, base_model_revision=revision,
+                            lora_config_hash=canonical_lora_config_hash(rank=rank,
+                                                                        target_modules=adapter_targets(specs)),
+                            expected_specs=specs)
+    return TrainableState.from_lora(state)
+
+
+def export_initial_version(store: EvalStore, model: str, revision: str, *, rank: int, targets: str,
+                           sampling: Mapping[str, Any], seed: int = 0) -> dict[str, Any]:
+    """Seed the store with version 0 through the training export path (smoke / first eval)."""
+    from yeto.rl.engine.driver import policy_token
+
+    state = initial_policy_state(model, revision, rank=rank, targets=targets, seed=seed)
+    exporter = StoreEvalExporter(store, sampling=sampling, extra={"base_model": model, "seeded": True})
+    return exporter(0, state, policy_token(0, state.policy_tensor_hash())) or {}

@@ -48,16 +48,20 @@ def _row(tid, **meta):
 
 
 def test_shipped_tb2_holdout_matches_131_and_excludes_smoke6():
+    """S17 N13: the unusable table (data/eval/tb2-unusable.json) also leaves the pool;
+    the list is the N13 one (1937db42..., replaces #131's 28d6730a...)."""
     doc = json.loads((REPO / "data/eval/tb2-holdout.json").read_text())
-    assert holdout_sha256(doc).startswith("28d6730a")
+    assert holdout_sha256(doc).startswith("1937db42")
     items = doc["items"]
     assert len(items) == 30
     counts = {b: sum(i["eval_bucket"] == b for i in items) for b in ("tb2-easy", "tb2-medium", "tb2-hard")}
     assert counts == {"tb2-easy": 2, "tb2-medium": 18, "tb2-hard": 10}
     smoke = {"fix-git", "regex-log", "sqlite-db-truncate", "log-summary-date-ranges",
              "openssl-selfsigned-cert", "git-multibranch"}
-    assert {e["task_id"] for e in doc["excluded"]} == smoke
-    assert not smoke & {i["task_id"] for i in items}
+    unusable = {i["task_id"] for i in json.loads((REPO / "data/eval/tb2-unusable.json").read_text())["items"]}
+    assert len(unusable) == 13
+    assert {e["task_id"] for e in doc["excluded"]} == smoke | unusable
+    assert not (smoke | unusable) & {i["task_id"] for i in items}
 
 
 # --- start-time guard (D6.c) ------------------------------------------------------------
@@ -498,7 +502,7 @@ def test_island_main_with_dotted_fakes(tmp_path, monkeypatch):
     out = mei.island_main({"store": str(tmp_path / "vol"), "holdout": str(hold), "task_ids": ["a", "b"],
                            "trials_v0": 1, "loader": "fake_eval_ports:loader",
                            "attempt": "fake_eval_ports:attempt"}, env={})
-    assert out == {"evaluated": [0]}
+    assert out == {"evaluated": [0], "loads": []}
     tape = [json.loads(x) for x in (tmp_path / "vol/events/eval-0.jsonl").read_text().splitlines()]
     assert tape[0]["event"] == "rl_eval" and tape[0]["eval/units"] == 2
 

@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from yeto.rl.eval.store import EvalStore
+from yeto.rl.eval.store import FINISHED_MARKER, EvalStore
 
 VOLUME_ENV = "YETO_RL_EVAL_VOLUME"          # Modal Volume name of the eval store
 MOUNTED_ENV = "YETO_RL_EVAL_STORE_MOUNTED"  # "1": YETO_RL_EVAL_STORE is that Volume's mount
@@ -65,7 +65,8 @@ class _Uploader:
         if not changed:
             return
         # manifests last: a reader never sees a manifest before its files
-        changed.sort(key=lambda c: (c[1].endswith("manifest.json") or c[1].startswith("queue/"), c[1]))
+        changed.sort(key=lambda c: (c[1].endswith("manifest.json") or c[1].startswith("queue/")
+                                    or c[1] == FINISHED_MARKER, c[1]))
         with self.volume.batch_upload(force=True) as batch:
             for path, rel, _ in changed:
                 batch.put_file(str(path), "/" + rel)
@@ -168,7 +169,11 @@ def island_main(config: Mapping[str, Any], env: Mapping[str, str] | None = None)
     inside the store or image), ``task_ids`` (optional subset), ``trials_v0`` /
     ``trials``, ``sampling`` (optional; default = the earliest queued
     manifest's), ``island_id``, ``volume`` (name, for commit/reload),
-    ``finished_marker`` (path; when present the queue is final)."""
+    ``finished_marker`` (path; when present the queue is final) or
+    ``wait_for_training`` (true: wait until the training side wrote
+    ``training-finished.json`` into the store, 5.10). The loader is closed
+    (``close()``, if any) when the island stops; its ``loads`` records ride in
+    the summary."""
     from yeto.rl.eval.island import EvalIsland, EvalPlan, jsonl_emitter
 
     env = os.environ if env is None else env
@@ -183,14 +188,229 @@ def island_main(config: Mapping[str, Any], env: Mapping[str, str] | None = None)
             return {"evaluated": []}
         sampling = store.load_manifest(queued[0], verify=False)["sampling"]
     holdout = json.loads(Path(config["holdout"]).read_text())
-    plan = EvalPlan.from_holdout(holdout, sampling=sampling, task_ids=config.get("task_ids"),
+    rows = []
+    if config.get("eval_data"):
+        rows = [json.loads(line) for line in Path(config["eval_data"]).read_text().splitlines() if line.strip()]
+    plan = EvalPlan.from_holdout(holdout, sampling=sampling, rows=rows, task_ids=config.get("task_ids"),
                                  trials_v0=int(config.get("trials_v0", 4)), trials=int(config.get("trials", 2)))
     loader = _factory(config.get("loader") or env[LOADER_ENV])(config)
     attempt = _factory(config.get("attempt") or env[ATTEMPT_ENV])(config)
     island_id = str(config.get("island_id", "eval-0"))
     emit = jsonl_emitter(root / "events" / f"{island_id}.jsonl", island=island_id)
+    if hasattr(loader, "emit") and getattr(loader, "emit") is None:
+        loader.emit = emit
     marker = config.get("finished_marker")
+    if marker:
+        idle = lambda: Path(marker).exists()  # noqa: E731
+    elif config.get("wait_for_training"):
+        idle = store.training_finished
+    else:
+        idle = None
     island = EvalIsland(store, plan, loader=loader, attempt=attempt, emit=emit, island_id=island_id)
-    evaluated = island.run(idle=(lambda: Path(marker).exists()) if marker else None,
-                           poll_s=float(config.get("poll_s", 30.0)))
-    return {"evaluated": evaluated}
+    try:
+        evaluated = island.run(idle=idle, poll_s=float(config.get("poll_s", 30.0)))
+    finally:
+        close = getattr(loader, "close", None)
+        if close is not None:
+            close()
+        store.commit()
+    return {"evaluated": evaluated, "loads": list(getattr(loader, "loads", []) or [])}
+
+
+# --- the Modal GPU function (5.10) -------------------------------------------------
+
+EVAL_STORE_MOUNT = "/mnt/yeto-eval-store"     # the eval store Volume inside the eval island
+CODEX_MOUNT = "/opt/yeto/codex"                 # yeto.rl.CODEX_CONTAINER_DIR (signed codex bundle)
+TB2_MOUNT = "/root/tb2-data"                    # terminal-bench-2 checkout (YETO_HARNESS_TB2_TASKS_DIR)
+WORKDIR_MOUNT = "/root/sky_workdir"             # yeto source, same place as the training islands
+IMAGE_PYTHONPATH = "/root/miles:/root/sglang/python:/root/sky_workdir"
+ISLAND_FUNCTION = "eval_island"
+SEED_FUNCTION = "eval_seed"
+
+
+def default_image_ref() -> str:
+    from yeto.rl import MILES_NEXT_IMAGE  # re-exported pin (same route as launcher.py)
+
+    return MILES_NEXT_IMAGE.removeprefix("docker:")
+
+
+@dataclass
+class EvalFunctionSpec:
+    """Shape of the eval-island Modal function. ``gpu`` is a Modal GPU string
+    (``H100!`` = exactly H100); ``envs`` become one Modal secret (codex
+    contract env, Modal token for the judge sandboxes, TB2 knobs)."""
+
+    app_name: str
+    volume: str
+    workdir: str
+    codex_dir: str
+    tb2_dir: str
+    gpu: str = "H100!"
+    gpus: int = 1
+    cpu: float = 8.0
+    memory_mib: int = 65536
+    timeout_s: int = 3600
+    image_ref: str = field(default_factory=default_image_ref)
+    envs: Mapping[str, str] = field(default_factory=dict)
+
+    def container_env(self) -> dict[str, str]:
+        from yeto.launcher import island_role_env
+        from yeto.rl.eval.island import EVAL_ISLAND_ROLE
+
+        # No PYTHONPATH here: Modal's own runtime path lives in PYTHONPATH and an
+        # override breaks the container entrypoint (S17 N11 first try: no grpclib).
+        return {"HOME": "/root", "PYTHONUNBUFFERED": "1",
+                "YETO_HARNESS_TB2_TASKS_DIR": TB2_MOUNT, STORE_ENV: EVAL_STORE_MOUNT,
+                MOUNTED_ENV: "1", VOLUME_ENV: self.volume, **island_role_env(EVAL_ISLAND_ROLE),
+                **{str(k): str(v) for k, v in self.envs.items()}}
+
+
+def _gpu_sampler(path: Path, stop: Any, interval_s: float = 5.0) -> None:
+    """nvidia-smi memory / utilization every ``interval_s`` into a jsonl (raw data first)."""
+    import subprocess
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    while not stop.wait(interval_s):
+        try:
+            out = subprocess.run(["nvidia-smi", "--query-gpu=index,name,memory.used,memory.total,utilization.gpu",
+                                  "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=20).stdout
+        except Exception as exc:  # noqa: BLE001
+            out = f"error {exc}"
+        with open(path, "a") as fh:
+            fh.write(json.dumps({"t": time.time(), "nvidia_smi": out.strip()}) + "\n")
+
+
+def _image_paths(environ: Any = None) -> None:
+    """Miles / SGLang / yeto source on ``sys.path``; subprocesses (SGLang, session
+    server, codex worker) get exactly the training island's ``PYTHONPATH``, without
+    Modal's runtime copies (their protobuf/grpclib would shadow the image's)."""
+    import sys
+
+    environ = os.environ if environ is None else environ
+    parts = IMAGE_PYTHONPATH.split(":")
+    for path in reversed(parts):
+        if path not in sys.path:
+            sys.path.insert(0, path)
+    environ["YETO_MODAL_RUNTIME_PYTHONPATH"] = str(environ.get("PYTHONPATH", ""))
+    environ["PYTHONPATH"] = IMAGE_PYTHONPATH
+
+
+def eval_island_body(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Inside the eval-island container: check the GPU, sample it, run ``island_main``."""
+    import subprocess
+    import threading
+
+    _image_paths()
+
+    names = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                           capture_output=True, text=True, timeout=30).stdout.split("\n")
+    names = [n.strip() for n in names if n.strip()]
+    want = config.get("assert_gpu_name")
+    if want and not all(want in n for n in names):
+        raise RuntimeError(f"eval island asked for {want}, got {names}")
+    # Logs and GPU samples stay on local disk while the servers run: a Modal
+    # Volume refuses reload() while files on it are open. Copied over at the end.
+    final_dir = Path(config["store"]) / "runs" / str(config.get("island_id", "eval-0"))
+    run_dir = Path(config.get("local_run_dir") or "/tmp/yeto-eval-run")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    infer = dict(config.get("infer") or {})
+    infer.setdefault("log_dir", str(run_dir / "logs"))
+    timings: dict[str, float] = {}
+    base = str(infer.get("base_model") or "")
+    if base and infer.get("revision") and not Path(base).exists():
+        # one pinned snapshot for SGLang and the session server's tokenizer
+        from huggingface_hub import snapshot_download
+
+        t = time.time()
+        infer["base_model"] = snapshot_download(base, revision=str(infer["revision"]))
+        timings["model_download_s"] = round(time.time() - t, 3)
+    config = {**config, "infer": infer}
+    stop = threading.Event()
+    sampler = threading.Thread(target=_gpu_sampler, args=(run_dir / "gpu.jsonl", stop), daemon=True)
+    sampler.start()
+    t0 = time.time()
+    try:
+        summary = island_main(config)
+    finally:
+        stop.set()
+        sampler.join(timeout=10)
+        (run_dir / "body.json").write_text(json.dumps({"gpu_names": names, **timings}, sort_keys=True))
+        import shutil
+
+        shutil.copytree(run_dir, final_dir, dirs_exist_ok=True)
+        if config.get("volume"):
+            _volume(config["volume"]).commit()  # logs, gpu samples, body.json survive a crash
+    return {**summary, **timings, "gpu_names": names, "container": os.environ.get("MODAL_TASK_ID"),
+            "wall_s": round(time.time() - t0, 3)}
+
+
+def eval_seed_body(config: Mapping[str, Any]) -> dict[str, Any]:
+    """CPU function: write version 0 into the mounted store through the training export path."""
+    import importlib
+    import subprocess
+    import sys
+
+    _image_paths()
+
+    for mod, pin in (("peft", "peft"), ("accelerate", "accelerate")):
+        try:
+            importlib.import_module(mod)
+        except ImportError:
+            subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--no-deps", "--target", "/tmp/seed-site",
+                            pin], check=True)
+            sys.path.insert(0, "/tmp/seed-site")
+    from yeto.rl.eval.export import export_initial_version
+
+    vol = _volume(config["volume"])
+    store = EvalStore(config["store"], commit=vol.commit, reload=vol.reload)
+    store.reload()
+    t0 = time.time()
+    manifest = export_initial_version(store, config["model"], config["revision"], rank=int(config["rank"]),
+                                      targets=str(config["targets"]), sampling=config["sampling"],
+                                      seed=int(config.get("seed", 0)))
+    if config.get("training_finished"):
+        store.mark_training_finished({"final_version": 0, "note": "seeded smoke"})
+    return {"manifest": manifest, "seconds": round(time.time() - t0, 3)}
+
+
+def build_eval_app(spec: EvalFunctionSpec) -> tuple[Any, Any, Any]:
+    """(app, eval-island GPU function, seed CPU function). The Volume is mounted
+    at :data:`EVAL_STORE_MOUNT` in both."""
+    import modal
+
+    image = (modal.Image.from_registry(spec.image_ref)
+             .env({"HOME": "/root", "PYTHONUNBUFFERED": "1"})
+             .add_local_dir(spec.workdir, WORKDIR_MOUNT, copy=False,
+                            ignore=[".git", ".venv", ".claude", "**/__pycache__", "**/*.pyc", "s1-runs"])
+             .add_local_dir(spec.codex_dir, CODEX_MOUNT, copy=False)
+             .add_local_dir(spec.tb2_dir, TB2_MOUNT, copy=False, ignore=[".git"]))
+    app = modal.App(spec.app_name)
+    volume = modal.Volume.from_name(spec.volume, create_if_missing=True)
+    secret = modal.Secret.from_dict(spec.container_env())
+    gpu = spec.gpu if spec.gpus == 1 else f"{spec.gpu}:{spec.gpus}"
+    island = app.function(image=image, gpu=gpu, cpu=spec.cpu, memory=spec.memory_mib, timeout=spec.timeout_s,
+                          secrets=[secret], volumes={EVAL_STORE_MOUNT: volume}, name=ISLAND_FUNCTION)(eval_island_body)
+    seed = app.function(image=image, cpu=4.0, memory=16384, timeout=1200, secrets=[secret],
+                        volumes={EVAL_STORE_MOUNT: volume}, name=SEED_FUNCTION)(eval_seed_body)
+    return app, island, seed
+
+
+class ModalFunctionClient:
+    """``EvalIslandLauncher`` client over a Modal function: ``start`` spawns, ``wait`` = ``get``."""
+
+    def __init__(self, function: Any) -> None:
+        self.function = function
+        self.calls: list[Any] = []
+
+    def start(self, config: Mapping[str, Any]) -> Any:
+        call = self.function.spawn({k: v for k, v in config.items() if k not in ("gpu", "gpus")})
+        self.calls.append(call)
+        return _CallHandle(call)
+
+
+class _CallHandle:
+    def __init__(self, call: Any) -> None:
+        self.call = call
+
+    def wait(self) -> dict[str, Any]:
+        return self.call.get()

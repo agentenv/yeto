@@ -32,6 +32,7 @@ from typing import Any, Callable, Iterable, Mapping
 
 MANIFEST_SCHEMA = "yeto-eval-policy/1"
 RESULT_SCHEMA = "yeto-eval-unit/1"
+FINISHED_MARKER = "training-finished.json"  # written by the training side after its final version
 
 
 class EvalIntegrityError(RuntimeError):
@@ -143,6 +144,14 @@ class EvalStore:
         self.commit()
         return manifest
 
+    def mark_training_finished(self, payload: Mapping[str, Any] | None = None) -> None:
+        """Training wrote its last eval version (5.10): the eval island stops once the queue is empty."""
+        _atomic_write(self.root / FINISHED_MARKER, json.dumps(dict(payload or {}), sort_keys=True).encode())
+        self.commit()
+
+    def training_finished(self) -> bool:
+        return (self.root / FINISHED_MARKER).is_file()
+
     # -- eval side ----------------------------------------------------------
     def queued_versions(self) -> list[int]:
         qdir = self.root / "queue"
@@ -239,7 +248,7 @@ class EvalStore:
 
 
 # fields that depend on wall clock / attempt identity, not on the outcome
-_VOLATILE = ("t", "seconds", "attempt", "island", "trajectory_id")
+_VOLATILE = ("t", "seconds", "attempt", "island", "trajectory_id", "timing", "agent_detail")
 
 
 def _canonical_result(rec: Mapping[str, Any]) -> dict[str, Any]:

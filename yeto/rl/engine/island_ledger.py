@@ -223,7 +223,11 @@ class CrossIslandLedger:
         return self.mode is IslandSchedulingMode.LEGACY
 
     def join(self, island_id: str, *, now: float, catch_up: bool | None = None,
-             capacity: float = 1.0) -> dict[str, Any]:
+             capacity: float = 1.0, role: str = "train") -> dict[str, Any]:
+        if role != "train":
+            # D11.1 (rl-eval-difficulty-buckets 5.1): an eval island only serves
+            # inference; it never joins the merge pool nor submits a delta.
+            raise LedgerError(f"{island_id}: role {role!r} cannot join the merge pool (train islands only)")
         if island_id in self.members:
             raise LedgerError(f"{island_id} is already a member")
         if self.legacy:

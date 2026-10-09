@@ -1,9 +1,8 @@
 {
- "schema": "yeto-eval-holdout/1",
+ "schema": "yeto-train-split/1",
  "benchmark": "tb2",
  "benchmark_version": "tb2@2fd12b8",
- "seed": 20261008,
- "rule": "exclude smoke6 (S15 trained) and data/eval/tb2-unusable.json; stratified by difficulty: easy 2 / medium 18 / hard 10",
+ "holdout_sha256": "1937db4257845b1f9efb648ff6b25d1295c468f22514ac6361d611c64ec3886b",
  "excluded": [
   {
    "task_id": "adaptive-rejection-sampler",
@@ -30,24 +29,8 @@
    "reason": "unusable/env-sandbox-permission: solve.sh 'ulimit -c' is not permitted in the Modal sandbox; the release-build test fails (other 5 pass)"
   },
   {
-   "task_id": "fix-git",
-   "reason": "S15 smoke training"
-  },
-  {
-   "task_id": "git-multibranch",
-   "reason": "S15 smoke training"
-  },
-  {
-   "task_id": "log-summary-date-ranges",
-   "reason": "S15 smoke training"
-  },
-  {
    "task_id": "mcmc-sampling-stan",
    "reason": "unusable/env-dependency-install: solve.sh fails to install rstan (there is no package called 'rstan')"
-  },
-  {
-   "task_id": "openssl-selfsigned-cert",
-   "reason": "S15 smoke training"
   },
   {
    "task_id": "protein-assembly",
@@ -62,10 +45,6 @@
    "reason": "unusable/env-upstream-mirror: test.sh apt install 404s on Debian bullseye-security during prebake; image cannot be built"
   },
   {
-   "task_id": "regex-log",
-   "reason": "S15 smoke training"
-  },
-  {
    "task_id": "rstan-to-pystan",
    "reason": "unusable/env-upstream-drift: pystan fails to import pkg_resources (removed from current setuptools)"
   },
@@ -74,162 +53,238 @@
    "reason": "unusable/official-solution-fails: 2 of 63 tests fail with the official solution (397 s on 1 core; possibly too slow), not investigated"
   },
   {
-   "task_id": "sqlite-db-truncate",
-   "reason": "S15 smoke training"
-  },
-  {
    "task_id": "sqlite-with-gcov",
    "reason": "unusable/timeout: official solve.sh hits the task agent timeout on the default CPU allotment"
   }
  ],
  "items": [
   {
-   "task_id": "overfull-hbox",
+   "task_id": "bn-fit-modify",
+   "difficulty": "hard",
+   "eval_bucket": "tb2-hard"
+  },
+  {
+   "task_id": "cancel-async-tasks",
+   "difficulty": "hard",
+   "eval_bucket": "tb2-hard"
+  },
+  {
+   "task_id": "chess-best-move",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "circuit-fibsqrt",
+   "difficulty": "hard",
+   "eval_bucket": "tb2-hard"
+  },
+  {
+   "task_id": "cobol-modernization",
    "difficulty": "easy",
    "eval_bucket": "tb2-easy"
   },
   {
-   "task_id": "prove-plus-comm",
+   "task_id": "code-from-image",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "configure-git-webserver",
+   "difficulty": "hard",
+   "eval_bucket": "tb2-hard"
+  },
+  {
+   "task_id": "count-dataset-tokens",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "db-wal-recovery",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "distribution-search",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "dna-assembly",
+   "difficulty": "hard",
+   "eval_bucket": "tb2-hard"
+  },
+  {
+   "task_id": "extract-elf",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "feal-differential-cryptanalysis",
+   "difficulty": "hard",
+   "eval_bucket": "tb2-hard"
+  },
+  {
+   "task_id": "feal-linear-cryptanalysis",
+   "difficulty": "hard",
+   "eval_bucket": "tb2-hard"
+  },
+  {
+   "task_id": "filter-js-from-html",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "financial-document-processor",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "fix-git",
    "difficulty": "easy",
    "eval_bucket": "tb2-easy"
   },
   {
-   "task_id": "break-filter-js-from-html",
+   "task_id": "git-leak-recovery",
    "difficulty": "medium",
    "eval_bucket": "tb2-medium"
   },
   {
-   "task_id": "build-pov-ray",
+   "task_id": "git-multibranch",
    "difficulty": "medium",
    "eval_bucket": "tb2-medium"
   },
   {
-   "task_id": "compile-compcert",
-   "difficulty": "medium",
-   "eval_bucket": "tb2-medium"
-  },
-  {
-   "task_id": "constraints-scheduling",
-   "difficulty": "medium",
-   "eval_bucket": "tb2-medium"
-  },
-  {
-   "task_id": "dna-insert",
-   "difficulty": "medium",
-   "eval_bucket": "tb2-medium"
-  },
-  {
-   "task_id": "gcode-to-text",
-   "difficulty": "medium",
-   "eval_bucket": "tb2-medium"
-  },
-  {
-   "task_id": "headless-terminal",
-   "difficulty": "medium",
-   "eval_bucket": "tb2-medium"
-  },
-  {
-   "task_id": "hf-model-inference",
-   "difficulty": "medium",
-   "eval_bucket": "tb2-medium"
-  },
-  {
-   "task_id": "kv-store-grpc",
-   "difficulty": "medium",
-   "eval_bucket": "tb2-medium"
-  },
-  {
-   "task_id": "largest-eigenval",
-   "difficulty": "medium",
-   "eval_bucket": "tb2-medium"
-  },
-  {
-   "task_id": "mteb-retrieve",
-   "difficulty": "medium",
-   "eval_bucket": "tb2-medium"
-  },
-  {
-   "task_id": "nginx-request-logging",
-   "difficulty": "medium",
-   "eval_bucket": "tb2-medium"
-  },
-  {
-   "task_id": "portfolio-optimization",
-   "difficulty": "medium",
-   "eval_bucket": "tb2-medium"
-  },
-  {
-   "task_id": "pytorch-model-recovery",
-   "difficulty": "medium",
-   "eval_bucket": "tb2-medium"
-  },
-  {
-   "task_id": "raman-fitting",
-   "difficulty": "medium",
-   "eval_bucket": "tb2-medium"
-  },
-  {
-   "task_id": "reshard-c4-data",
-   "difficulty": "medium",
-   "eval_bucket": "tb2-medium"
-  },
-  {
-   "task_id": "sanitize-git-repo",
-   "difficulty": "medium",
-   "eval_bucket": "tb2-medium"
-  },
-  {
-   "task_id": "winning-avg-corewars",
-   "difficulty": "medium",
-   "eval_bucket": "tb2-medium"
-  },
-  {
-   "task_id": "extract-moves-from-video",
+   "task_id": "install-windows-3.11",
    "difficulty": "hard",
    "eval_bucket": "tb2-hard"
   },
   {
-   "task_id": "fix-code-vulnerability",
+   "task_id": "large-scale-text-editing",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "llm-inference-batching-scheduler",
    "difficulty": "hard",
    "eval_bucket": "tb2-hard"
   },
   {
-   "task_id": "fix-ocaml-gc",
+   "task_id": "log-summary-date-ranges",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "mailman",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "merge-diff-arc-agi-task",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "model-extraction-relu-logits",
    "difficulty": "hard",
    "eval_bucket": "tb2-hard"
   },
   {
-   "task_id": "gpt2-codegolf",
+   "task_id": "modernize-scientific-stack",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "mteb-leaderboard",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "multi-source-data-merger",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "openssl-selfsigned-cert",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "password-recovery",
    "difficulty": "hard",
    "eval_bucket": "tb2-hard"
   },
   {
-   "task_id": "make-doom-for-mips",
+   "task_id": "path-tracing-reverse",
    "difficulty": "hard",
    "eval_bucket": "tb2-hard"
   },
   {
-   "task_id": "make-mips-interpreter",
+   "task_id": "polyglot-c-py",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "pypi-server",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "pytorch-model-cli",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "query-optimize",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "regex-chess",
    "difficulty": "hard",
    "eval_bucket": "tb2-hard"
   },
   {
-   "task_id": "path-tracing",
+   "task_id": "regex-log",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "sparql-university",
    "difficulty": "hard",
    "eval_bucket": "tb2-hard"
   },
   {
-   "task_id": "polyglot-rust-c",
+   "task_id": "sqlite-db-truncate",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "torch-pipeline-parallelism",
    "difficulty": "hard",
    "eval_bucket": "tb2-hard"
   },
   {
-   "task_id": "sam-cell-seg",
+   "task_id": "torch-tensor-parallelism",
    "difficulty": "hard",
    "eval_bucket": "tb2-hard"
   },
   {
-   "task_id": "video-processing",
+   "task_id": "train-fasttext",
+   "difficulty": "hard",
+   "eval_bucket": "tb2-hard"
+  },
+  {
+   "task_id": "tune-mjcf",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "vulnerable-secret",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "write-compressor",
    "difficulty": "hard",
    "eval_bucket": "tb2-hard"
   }

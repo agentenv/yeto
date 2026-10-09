@@ -1,0 +1,27 @@
+{
+ "benchmark_version": "tb2@2fd12b8",
+ "eval/tb2-holdout-eval.jsonl": {
+  "rows": 30,
+  "sha256": "88c3a209e7d00dca92bdd6f960acf8c0e226b6814fd0c457acf61915879a14d6"
+ },
+ "holdout_sha256": "1937db4257845b1f9efb648ff6b25d1295c468f22514ac6361d611c64ec3886b",
+ "tb2/tb2-train.jsonl": {
+  "rows": 46,
+  "sha256": "22deb28fff90bd0e8e2212846f6db8c28e382c1611094cbb2e20590e9920e741"
+ },
+ "unusable_excluded": [
+  "adaptive-rejection-sampler",
+  "build-cython-ext",
+  "build-pmars",
+  "caffe-cifar-10",
+  "crack-7z-hash",
+  "custom-memory-heap-crash",
+  "mcmc-sampling-stan",
+  "protein-assembly",
+  "qemu-alpine-ssh",
+  "qemu-startup",
+  "rstan-to-pystan",
+  "schemelike-metacircular-eval",
+  "sqlite-with-gcov"
+ ]
+}

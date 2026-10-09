@@ -16,6 +16,7 @@ judged (D6.d: only infrastructure errors are excluded from the pass rate).
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any, Awaitable, Callable, Mapping
 
 Agent = Callable[..., Awaitable[Mapping[str, Any]]]
@@ -25,24 +26,37 @@ def trajectory_id(policy_version: int, task_id: str, trial: int) -> str:
     return f"eval-v{int(policy_version)}-{task_id}-t{int(trial)}"
 
 
-def tb2_attempt(provider: Any, agent: Agent, *, run: Callable[[Awaitable[Any]], Any] = asyncio.run):
+def tb2_attempt(provider: Any, agent: Agent, *, run: Callable[[Awaitable[Any]], Any] = asyncio.run,
+                clock: Callable[[], float] = time.monotonic):
+    """``timing`` (seconds) in the result: ``sandbox_s`` (acquire), ``agent_s``, ``judge_s``, ``destroy_s``."""
+
     def attempt(task: Any, trial: int, *, policy_version: int, policy_token: str) -> dict[str, Any]:
         tid = trajectory_id(policy_version, task.task_id, trial)
 
         async def go() -> dict[str, Any]:
+            timing: dict[str, float] = {}
+            t = clock()
             lease = await provider.acquire(task.task_id, tid)
+            timing["sandbox_s"] = round(clock() - t, 3)
             try:
+                t = clock()
                 out = dict(await agent(lease, task, trial, policy_token=policy_token))
+                timing["agent_s"] = round(clock() - t, 3)
                 end = str(out.get("end_reason") or "completed")
                 if end == "infra_error":
-                    return {**out, "trajectory_id": tid, "reward": 0.0, "success": False}
+                    return {**out, "trajectory_id": tid, "reward": 0.0, "success": False, "timing": timing}
+                t = clock()
                 verdict = await lease.verifier.evaluate(out.get("episode_id", tid))
+                timing["judge_s"] = round(clock() - t, 3)
             finally:
+                t = clock()
                 await lease.destroy()
+                timing["destroy_s"] = round(clock() - t, 3)
             passed = bool(verdict.get("passed"))
             return {"trajectory_id": tid, "reward": 1.0 if passed else 0.0, "success": passed,
                     "end_reason": end, "turns": out.get("turns"), "tokens": out.get("tokens"),
-                    "verifier_timed_out": bool(verdict.get("timed_out"))}
+                    "verifier_timed_out": bool(verdict.get("timed_out")), "timing": timing,
+                    **({"agent_detail": out["agent_detail"]} if out.get("agent_detail") else {})}
 
         return run(go())
 

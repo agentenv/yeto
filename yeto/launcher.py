@@ -3624,6 +3624,22 @@ def _json_compact(value) -> str:
 # (ssh/kubernetes) and Modal size themselves and are left untouched.
 RL_ISLAND_MIN_CPUS = "8+"
 
+# Island roles (rl-eval-difficulty-buckets 5.1, D11.1). A "train" island trains,
+# publishes and joins the merge pool; an "eval" island only serves inference for
+# the eval store (yeto.cloud.modal_eval_island) and never joins the pool or
+# submits a delta (yeto.rl.engine.island_ledger refuses it).
+ISLAND_ROLE_ENV = "YETO_RL_ISLAND_ROLE"
+ISLAND_ROLE_TRAIN = "train"
+ISLAND_ROLE_EVAL = "eval"
+ISLAND_ROLES = (ISLAND_ROLE_TRAIN, ISLAND_ROLE_EVAL)
+
+
+def island_role_env(role: str) -> dict[str, str]:
+    """Container env naming the island's role; unknown roles fail before any cloud call."""
+    if role not in ISLAND_ROLES:
+        raise ValueError(f"unknown island role {role!r} (known: {ISLAND_ROLES})")
+    return {ISLAND_ROLE_ENV: role}
+
 
 MODEL_STORE_MOUNT = "/mnt/yeto-models"
 
