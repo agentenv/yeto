@@ -239,3 +239,4 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
 - 线格式：HELLO 在 `num_streams` 之后可带尾段 `b"YCG1" + u32 长度 + 卡型串`；JOIN 在 `backend_identity` 之后必带 `u32 长度 + 卡型串`（空串 = 未声明）。旧 syncer 拒新帧，新 syncer 拒不带该字段的 JOIN；新旧不可混用。
 - elastic syncer 检查点格式不变：卡型固定值只在内存里；续跑后由身份哈希继续拒绝（身份哈希里已含卡型），第一个身份相同的 JOIN 再把可读的卡型固定下来。
 - 旧 GPU 证据：只是身份多了一个字段，训练行为不变，按 D6 继续以本表引用。
+- 合入 main（#173、#174 之后，2026-10-09）后重新生成 golden：旧值、新值与上表相同（main 上 ports 岛身份仍是 `494bbaba…`），diff 仍只有 `backend_identity` 的 24 行。#174 新增的 verl fully_async 路径同样带卡型身份（`trainer.py` 两条路径都经 `build_sync` 传 `compat_group`，并记 `rl_island_hardware`）。

@@ -73,6 +73,12 @@ EnvironmentProvider（沿用 tb2_provider.Tb2EnvironmentProvider：租约、中�
 | 评测（WP3：每次 105 条） | 判分 ≈ $2/次 | GPU 推理费另计 |
 | 并发 | 与 TB2 共用 Modal 账户沙箱上限（未查证） | 2.3 并发探针一起测 |
 
+## D9. 沙箱隔离：网络出口与本地环境变量（S19，子 agent 代拍板）
+- **网络出口默认关闭。** `tb2_provider.NetworkPolicy` 按 task_id 给出放行规则（`NetworkGrant`）。没有列出的任务一律关闭（Modal `block_network=True`）。放行规则有三种：`open`（全部放行）、域名白名单（Modal `outbound_domain_allowlist`，支持 `*.` 前缀）、CIDR 白名单（`outbound_cidr_allowlist`）。modal 1.5.5（岛上安装的版本）已有这两个参数（已查源码）。
+- **规则来源。** 默认用内置规则 `yeto/rl/harness/codex/tb2_network_grants.py`。设置 `YETO_HARNESS_TB2_NETWORK_POLICY=<json 路径>` 时整份替换内置规则。格式不对就报错，不退回放行。
+- **现有 TB2 任务。** 子 agent 代拍板：89 题全部在内置规则里显式写 `open`。理由：每题的判分脚本在判分时用 apt / uv / pip 联网安装，S17 G3 阳性对照和 FN codex r3 都是在不限网络下通过的；Modal 沙箱建好后不能改网络，所以不能只在判分阶段开网。收紧成域名白名单需要先在 Modal 上用 CPU 复跑阳性对照，本次未做，**未验证**。
+- **LocalProcessSandbox 只传最少环境变量。** 子 agent 代拍板：父进程只传 `PATH`、`LANG`、`LC_ALL`、`TZ`，再加 `HOME`（沙箱根目录）和 `TB2_TESTS_DIR`、`TB2_VERIFIER_LOGS_DIR`。父进程里的 Modal/HF/W&B 令牌和判分 HMAC 密钥都不再传入。本地后端只记录网络规则，不强制执行（本地后端只用于 CPU 单测和开发机）。
+
 ## D8. 未决（需用户/主 agent 定）
 1. 首次镜像构建（Modal CPU，估 $0.3–1）是否批准；先构建冒烟 6 题还是全部 89 题。
 2. 冒烟 6 题是否排除出 TB2 评测池（按现规则 regex-log 会进评测集）。
