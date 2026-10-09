@@ -562,3 +562,9 @@ SAO 重跑：需用新 overlay（sha256 64f69bbf…）+ `--lora-targets attentio
 - 8.4：SAO 3 次训练前失败（LoRA 目标、warmup>decay、tied embedding），已修 b996392b，待重跑。
 - 4.5：G3 改为 Nebius 无卡 VM 跑 controller+syncer，进行中。
 - 机制正式声明（entry.py/fake.py critic=True 等）尚未做，待 G3 通过后由主 agent 统一处理。
+
+## S19 第三批 critic 组（2026-10-09，critic 子 agent）
+- 8.4 查因：SAO EV≤0 的一个真原因是 critic 学习率表。yeto linear 表的 `--lr-decay-iters`（= actor 步数 12）被 critic 共用，critic 每步更新 2 次共 24 步，第 12–24 步 LR=0。PR #190 加 launch check `critic_lr_horizon`，要求 `--rl-lr-schedule constant`。
+- 8.4 G1 复跑 `s19-sao-g1-20261009a`（镜像 64b591a-2fa8801，constant 表）：critic LR 第 11–24 步全为 5e-6；values 在全 0 轮后能回升跟随奖励均值。按预登记判据**失败（证据不全）**：第 4 轮奖励全 0，EV 按设计为 None。EV 结论 EV≤0（最后 4 轮均值 -0.031）。学习率不是 EV≤0 的唯一原因；其余原因未验证。
+- 4.5 G3 `s19-ppo-g3-20261009a`：**失败**（0 轮）。两岛卡在初始 critic 写回（`import_critic_state`），岛驱动进程 RSS 涨到数百 GiB，容器各被替换一次。S13 f 跑的停住也在同一位置（step 0 提交之后）。根因未查清；修好前 7.3 G3、8.4 G3 不上卡。
+- 判读 json：`evidence/s19/`；原始数据在 Modal Volume yeto-evidence-archive（`evidence/s19/ARCHIVE-MANIFEST.tsv`）。

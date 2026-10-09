@@ -1,0 +1,96 @@
+{
+ "events": 79,
+ "gpu_lines": [
+  "\u001b[36m(yeto-head-job, pid=2846)\u001b[0m [s19-ppo-g3-20261009a-l0-modal] [modal-island 0] requested H100!:1, got ['NVIDIA H100 80GB HBM3']",
+  "\u001b[36m(yeto-head-job, pid=2846)\u001b[0m [s19-ppo-g3-20261009a-l1-modal] [modal-island 1] requested H100!:1, got ['NVIDIA H100 80GB HBM3']"
+ ],
+ "kill": null,
+ "missing": [
+  "no kill.json (kill not performed)",
+  "rl_learner_finalized after the kill only from islands []",
+  "v1 actor: applies only from islands []",
+  "v1 critic: applies only from islands []",
+  "v1 critic_masters: applies only from islands []",
+  "v2 actor: applies only from islands []",
+  "v2 critic: applies only from islands []",
+  "v2 critic_masters: applies only from islands []",
+  "v3 actor: applies only from islands []",
+  "v3 critic: applies only from islands []",
+  "v3 critic_masters: applies only from islands []"
+ ],
+ "notes": [],
+ "per_version": {
+  "0": {
+   "actor": {
+    "hashes": [],
+    "islands": [],
+    "records": 0
+   },
+   "critic": {
+    "hashes": [],
+    "islands": [],
+    "records": 0
+   },
+   "critic_masters": {
+    "hashes": [],
+    "islands": [],
+    "records": 0
+   }
+  },
+  "1": {
+   "actor": {
+    "hashes": [],
+    "islands": [],
+    "records": 0
+   },
+   "critic": {
+    "hashes": [],
+    "islands": [],
+    "records": 0
+   },
+   "critic_masters": {
+    "hashes": [],
+    "islands": [],
+    "records": 0
+   }
+  },
+  "2": {
+   "actor": {
+    "hashes": [],
+    "islands": [],
+    "records": 0
+   },
+   "critic": {
+    "hashes": [],
+    "islands": [],
+    "records": 0
+   },
+   "critic_masters": {
+    "hashes": [],
+    "islands": [],
+    "records": 0
+   }
+  },
+  "3": {
+   "actor": {
+    "hashes": [],
+    "islands": [],
+    "records": 0
+   },
+   "critic": {
+    "hashes": [],
+    "islands": [],
+    "records": 0
+   },
+   "critic_masters": {
+    "hashes": [],
+    "islands": [],
+    "records": 0
+   }
+  }
+ },
+ "problems": [],
+ "rc": "rc=1 (2 yeto-head-job michael 29 mins ago 29 mins ago 29m 24s 1x[CPU:1+] RUNNING ~/sky_logs/sky-2026-10-09-23-08-04-336189 - )",
+ "resume": null,
+ "verdict": "INCOMPLETE"
+}
