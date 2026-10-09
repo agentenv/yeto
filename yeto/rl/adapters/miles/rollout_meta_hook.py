@@ -932,6 +932,9 @@ def extract_rollout_metadata(args: Any, all_samples: Any, data_source: Any = Non
             payload["submitted_groups"] = submitted
             payload["carried_out_groups"] = max(
                 0, submitted + int(payload.get("resubmitted_groups", 0)) - generated)
+            if "suspended_groups" in payload:
+                # 5.1 agentic: the fork counted the groups it kept at this cut-off
+                payload["carried_out_groups"] = int(payload["suspended_groups"])
         elif submitted is not None:
             generated = payload["completed"] + payload["filtered"]
             payload["submitted_groups"] = submitted

@@ -219,7 +219,7 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
 
 ## S18 agentic-rollout-utilization 阶段 3（第 5 组 + Miles 切点在途段；分支 s18-aru-stage3，2026-10-09）
 
-- 默认 0：Miles 命令行、算法哈希、契约哈希、`fake_engine_tapes.json` 逐字节不变。插件源码哈希变了两个文件：`yeto/rl/adapters/miles/rollout_meta_hook.py`（上限 >0 时多记挂起统计），8 个样本里三处 `source_sha256` `a9937979…` → `c9b4d7c8…`；`yeto/rl/harness/codex/codex_openenv_subprocess_agent_function.py`（suspend/resume 钩子、门文件），`codex_harness.json` 一处 `bf3a62d2…` → `8bc115e4…`。`python tests/decoupling_golden.py --write` 后 diff 只有这 25 行。
+- 默认 0：Miles 命令行、算法哈希、契约哈希、`fake_engine_tapes.json` 逐字节不变。插件源码哈希变了两个文件：`yeto/rl/adapters/miles/rollout_meta_hook.py`（上限 >0 时多记挂起统计），8 个样本里三处 `source_sha256` `a9937979…` → `03b3a27a…`；`yeto/rl/harness/codex/codex_openenv_subprocess_agent_function.py`（suspend/resume 钩子、门文件），`codex_harness.json` 一处 `bf3a62d2…` → `8bc115e4…`。`python tests/decoupling_golden.py --write` 后 diff 只有这 25 行。
 - `CODEX_HARNESS_AGENT_SHA256`（yeto/rl/__init__.py，codex_harness_agent.py 自证哈希）`1313cfa4…` → `1ab2129a…`：桥上加了回合门（门文件不存在时行为不变；Codex 命令行只在设了 `YETO_CODEX_SUSPEND_GATE` 时多一项 stream_idle_timeout_ms）。
 - 非 0 且 agentic（Miles 现声明阶段 3、上限 1）：命令行多 `--agentic-suspend-between-turns --agentic-suspend-max-rounds 1`（不带 `--partial-rollout`），需要含 agentenv/miles s18-agentic-suspend 提交的镜像。
 - 镜像 pin（同一分支，第二步）：`MILES_NEXT_COMMIT` 2f7871fb2 → ddce20992（agentenv/miles s18-agentic-suspend），`MILES_NEXT_IMAGE` `@sha256:62b4f164…` → `@sha256:9c252c38…`（tag ddce209-2fa8801，构建记录 openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-09-ddce209-2fa8801/）。8 个样本的 `backend_identity` 与 `ports_runtime_fingerprint` 随之变化（与以往换 pin 相同），其余字段不变。

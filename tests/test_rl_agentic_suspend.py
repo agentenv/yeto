@@ -405,3 +405,24 @@ def test_cut_source_writes_the_in_flight_section_under_a_limit():
     assert context.ledger["carried_over"] == 2 and context.ledger["max_policy_age"] == 1
     driver.profile.max_policy_age = 0
     assert source.context("r000004-y").in_flight == ()  # limit 0: section absent
+
+
+def test_translate_emits_the_suspend_flags_for_an_agentic_run():
+    import dataclasses
+
+    from tests.test_rl_miles_adapter_config import make_config  # noqa: PLC0415
+    from yeto.rl.adapters.miles.config import translate_run_config
+    from yeto.rl.engine.algorithm import AlgorithmSpec, CorrectionSpec, ExecutionSpec
+
+    tolerant = AlgorithmSpec(execution=ExecutionSpec(max_policy_staleness=1),
+                             correction=CorrectionSpec(method="tis", tis_clip=2.0, tis_clip_low=0.0))
+    config = make_config()
+    agent = dataclasses.replace(config.agent, custom_generate_function_path=miles_policy_age.AGENTIC_GENERATE,
+                                custom_agent_function_path=AGENT, use_session_server=True)
+    config = dataclasses.replace(config, agent=agent)
+    zero = translate_run_config(config, tolerant).argv
+    one = translate_run_config(config, tolerant, max_policy_age=1).argv
+    assert [a for a in one if a not in zero] == ["--agentic-suspend-between-turns", "--agentic-suspend-max-rounds"]
+    assert "--partial-rollout" not in one
+    i = one.index("--agentic-suspend-max-rounds")
+    assert one[i + 1] == "1"
