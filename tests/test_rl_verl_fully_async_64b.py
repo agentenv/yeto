@@ -51,6 +51,8 @@ def test_limit_drives_staleness_threshold_and_partial_rollout():
     assert "async_training.trigger_parameter_sync_step=1" in out
     assert "async_training.require_batches=1" in out
     assert "rollout.n_gpus_per_node=1" in out and "trainer.n_gpus_per_node=1" in out
+    # fork FullyAsyncTrainer asserts not hybrid_engine; the sync path never sets it
+    assert "actor_rollout_ref.hybrid_engine=False" in out
     assert f"rollout.total_rollout_steps={8 * (2 * 5 + 1 + 1)}" in out
     assert not any(o.startswith(("trainer.use_v1=", "trainer.v1.trainer_mode=")) for o in out)
     assert sum(o.startswith("trainer.n_gpus_per_node=") for o in out) == 1
