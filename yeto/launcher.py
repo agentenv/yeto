@@ -1784,7 +1784,7 @@ def modal_checkpoint_store(args) -> tuple[str, str] | None:
     value = getattr(args, "rl_checkpoint_store", None)
     if not value:
         return None
-    from .rl.engine.resume import MODAL_VOLUME_SCHEME, parse_modal_volume_uri
+    from .cloud.modal_ckpt_store import MODAL_VOLUME_SCHEME, parse_modal_volume_uri
 
     if not str(value).startswith(MODAL_VOLUME_SCHEME + "://"):
         raise ValueError(f"--rl-checkpoint-store {value!r} on a Modal island: Modal mounts neither "
@@ -1814,7 +1814,7 @@ def rl_checkpoint_store_plan(args) -> tuple[str, str | None] | None:
         return None
     value = str(value)
     if value.startswith("modal-volume://"):
-        from .rl.engine.resume import parse_modal_volume_uri
+        from .cloud.modal_ckpt_store import parse_modal_volume_uri
 
         _name, prefix = parse_modal_volume_uri(value)
         return MODAL_CHECKPOINT_STORE_MOUNT + (f"/{prefix}" if prefix else ""), None
@@ -4954,9 +4954,11 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
             envs["HF_TOKEN"] = f.read().strip()
     store_volume = modal_checkpoint_store(args) if rl else None
     if store_volume is not None:
-        from .rl.engine.resume import MODAL_VOLUME_ENV
+        from .cloud.modal_ckpt_store import MODAL_VOLUME_ENV, STORE_IMPL
+        from .rl.engine.resume import STORE_IMPL_ENV
 
         envs[MODAL_VOLUME_ENV] = store_volume[0]  # the learner commits this Volume
+        envs[STORE_IMPL_ENV] = STORE_IMPL  # the island builds the Modal store from yeto.cloud
     volume_name = volume_mount = None
     if rl and getattr(args, "spot", False):
         volume_name = _rl_checkpoint_storage_name(args.cluster_prefix, learner_id)

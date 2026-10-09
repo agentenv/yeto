@@ -120,3 +120,11 @@ Modal 文档：退出处理函数有 30 秒宽限，被抢占时也调用；GPU 
 - `--rl-elastic` 路径：store 仍是平铺拷贝（不改布局，避免动 M4/E 系列已验证的行为），但 `STORE-MANIFEST.json` 现在带每个文件的 sha256，恢复前逐个核对，不符即报错。
 - 学习率：`lr_at_next_round` 按 Megatron `get_lr` 公式（constant/linear/cosine、warmup 0）由 local_step 算出，已用 G1 基线 tape 的 10 个实际学习率逐位验证；其他调度为 None（仍有恢复后调度器步数核对）。
 - 未做：§5 mismatch tape 文件名带启动序号——`rollout_meta_hook.put_to_sink` 的目录写法（调试用，默认走 Ray actor）未改，因为改它会改插件源码哈希、牵动去耦合标准样本（hash-migration）；事件 tape（含 `rl_harness_mismatch`）本来就是追加写，Modal 镜像已改为按容器分文件。dashboard 只做了数据层（续训分段、启动开销、被丢弃的训练次数），页面画线未做。多岛岛内状态（3.3）、syncer 检查点进 store（1.4）未做。
+
+## 10. 合并进 main 时的调整（2026-10-09，合并 PR #145）
+
+- 原因：import 边界检查不过——中立核心 `yeto/rl/engine/resume.py` 的 `ModalVolumeStore` 里有 `import modal`。白名单只减不增，且核心不该带云厂商的逻辑（与 #129 把 Modal 沙箱挪到 `yeto/cloud/modal_reward_env.py` 的处理一致）。主 agent 拍板：把 Modal 实现挪出核心。
+- 改法：`ModalVolumeStore`、`parse_modal_volume_uri`、`MODAL_VOLUME_ENV`、`MODAL_VOLUME_SCHEME` 整体挪到 `yeto/cloud/modal_ckpt_store.py`，代码不改。核心 `resume.py` 只留 `CheckpointStore`/`BucketMountStore` 和一个注册点：`store_for` 看环境变量 `YETO_RL_STORE_IMPL`（`包.模块:函数`，或 `register_store_impl` 注册过的名字），有就交给该实现建存储，没有就按原来的桶挂载/本地目录。启动器在 Modal 岛上用 `modal-volume://` 存储时，除原来的 `YETO_RL_STORE_MODAL_VOLUME=<卷名>` 外再导出 `YETO_RL_STORE_IMPL=yeto.cloud.modal_ckpt_store:store_from_env`。
+- 行为不变：URL 写错、非 Modal 岛用 `modal-volume://` 仍由启动器报错（解析函数只是换了模块）；岛上选中 Modal 实现却没给卷名时报错。日志记录器名字从 `yeto.rl.engine.resume` 变为 `yeto.cloud.modal_ckpt_store`。
+- 验证：`tests/test_rl_resume_from_checkpoint.py` 全过（替换点改到新模块），import 边界检查通过，白名单条数不变。未上卡复验。
+- 提醒：基于 `s17-resume-impl` 的后续分支（如 N15 的确定性续训补跑）要跟着这次挪动 rebase。

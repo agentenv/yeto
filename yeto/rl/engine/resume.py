@@ -42,8 +42,6 @@ STATE_MANIFEST = "STATE-MANIFEST.json"
 ROUND_CUTS = "round-cuts"
 INCARNATIONS = "incarnations.jsonl"  # under the state dir: one line per launch
 RESUME_JOURNAL = "resume-journal.jsonl"  # under the state dir
-MODAL_VOLUME_ENV = "YETO_RL_STORE_MODAL_VOLUME"  # set by the launcher on a Modal island
-MODAL_VOLUME_SCHEME = "modal-volume"
 SKIP_NAMES = frozenset({"journal.lock", STATE_MANIFEST, LATEST})
 DEFAULT_CUT_KEEP = 2
 DEFAULT_CUT_EVERY = 1
@@ -108,7 +106,7 @@ def _tree_files(root: Path, *, skip: Iterable[str] = ()) -> list[Path]:
 
 
 # ---------------------------------------------------------------------------
-# store backends (local path / Modal Volume / bucket mount): write dir, commit, read, list
+# store backends (local path / bucket mount; cloud stores via STORE_IMPL_ENV): write dir, commit, read, list
 # ---------------------------------------------------------------------------
 class CheckpointStore:
     """A directory the trainer, the state sync and a later launch all see. ``commit``
@@ -141,89 +139,42 @@ class BucketMountStore(CheckpointStore):
     kind = "bucket-mount"
 
 
-class ModalVolumeStore(CheckpointStore):
-    """A Modal Volume (v1) mounted into the island container. Writes become visible
-    to another container only after ``commit()`` (Modal docs: background commits every
-    few seconds + a final commit at exit); a cut counts as written only after we
-    committed once ``LATEST`` is on disk."""
+STORE_IMPL_ENV = "YETO_RL_STORE_IMPL"  # "package.module:callable", exported by the launch layer
+_STORE_IMPLS: dict[str, Callable[..., CheckpointStore]] = {}
 
-    kind = "modal-volume"
 
-    def __init__(self, root: str | os.PathLike[str], volume_name: str,
-                 volume_factory: Callable[[str], Any] | None = None) -> None:
-        super().__init__(root)
-        self.volume_name = volume_name
-        self._factory = volume_factory
+def register_store_impl(name: str, factory: Callable[..., CheckpointStore]) -> None:
+    """Register a store implementation under ``name`` (what :data:`STORE_IMPL_ENV` may
+    name instead of a dotted path). Cloud-specific stores (e.g. the Modal Volume one in
+    ``yeto.cloud.modal_ckpt_store``) live outside the neutral core and are selected by
+    the launch layer, which exports :data:`STORE_IMPL_ENV` on the island."""
+    _STORE_IMPLS[name] = factory
 
-    def _volume(self) -> Any:
-        if self._factory is not None:
-            return self._factory(self.volume_name)
-        import modal  # only inside a Modal container
 
-        return modal.Volume.from_name(self.volume_name)
+def _store_impl(spec: str) -> Callable[..., CheckpointStore]:
+    if spec in _STORE_IMPLS:
+        return _STORE_IMPLS[spec]
+    module, sep, attr = spec.partition(":")
+    if not sep or not module or not attr:
+        raise ValueError(f"{STORE_IMPL_ENV}={spec!r}: expected 'package.module:callable'")
+    import importlib
 
-    def commit(self) -> float:
-        """Explicit commit; a failing commit raises (the sync then reports store_synced
-        False). In the island container the learner's Python cannot import the Modal
-        client, so the commit runs in the Modal runner's interpreter
-        (``YETO_MODAL_PYTHON`` / ``YETO_MODAL_SYSPATH``, exported by modal_runner)."""
-        started = time.monotonic()
-        if self._factory is None and os.environ.get("YETO_MODAL_PYTHON"):
-            self._runner_call("commit")
-        else:
-            self._volume().commit()
-        self.commits += 1
-        return time.monotonic() - started
-
-    def _runner_call(self, verb: str) -> None:
-        import subprocess
-
-        env = dict(os.environ)
-        env["PYTHONPATH"] = os.environ.get("YETO_MODAL_SYSPATH", "")
-        code = ("import sys, modal; modal.Volume.from_name(sys.argv[1])." + verb + "()")
-        done = subprocess.run([os.environ["YETO_MODAL_PYTHON"], "-c", code, self.volume_name],
-                              env=env, capture_output=True, text=True, timeout=600)
-        if done.returncode != 0:
-            raise RuntimeError(f"modal volume {verb} via the runner interpreter failed "
-                               f"(rc {done.returncode}): {done.stderr[-2000:]}")
-
-    commits = 0
-
-    def reload(self) -> None:
-        try:
-            if self._factory is None and os.environ.get("YETO_MODAL_PYTHON"):
-                self._runner_call("reload")
-            else:
-                self._volume().reload()
-        except Exception as exc:  # noqa: BLE001 - reload is best effort (open files block it)
-            logging.getLogger(__name__).warning("modal volume reload failed: %r", exc)
-
-    def describe(self) -> dict[str, Any]:
-        return {**super().describe(), "volume": self.volume_name}
+    return getattr(importlib.import_module(module), attr)
 
 
 def store_for(path: str | os.PathLike[str], *, environ: Mapping[str, str] | None = None,
-              volume_factory: Callable[[str], Any] | None = None) -> CheckpointStore:
-    """The store implementation for a store path on the island. The launcher exports
-    :data:`MODAL_VOLUME_ENV` (``<volume name>``) when the path is a mounted Modal Volume."""
+              **impl_kwargs: Any) -> CheckpointStore:
+    """The store implementation for a store path on the island. When the launch layer
+    exported :data:`STORE_IMPL_ENV`, that implementation builds the store (it reads its
+    own settings from ``environ``; ``impl_kwargs`` are passed through, e.g. a test
+    double); otherwise a bucket mount or a plain shared directory."""
     env = os.environ if environ is None else environ
-    volume = env.get(MODAL_VOLUME_ENV)
-    if volume:
-        return ModalVolumeStore(path, volume, volume_factory=volume_factory)
+    spec = env.get(STORE_IMPL_ENV)
+    if spec:
+        return _store_impl(spec)(path, environ=env, **impl_kwargs)
     if str(path).startswith(("~/yeto-checkpoint-store", str(Path("~/yeto-checkpoint-store").expanduser()))):
         return BucketMountStore(path)
     return CheckpointStore(path)
-
-
-def parse_modal_volume_uri(value: str) -> tuple[str, str]:
-    """``modal-volume://<name>[/<prefix>]`` -> (name, prefix). Raises ValueError."""
-    scheme, sep, rest = str(value).partition("://")
-    if scheme != MODAL_VOLUME_SCHEME or not sep:
-        raise ValueError(f"{value!r} is not a {MODAL_VOLUME_SCHEME}:// URI")
-    name, _, prefix = rest.strip("/").partition("/")
-    if not name or not all(c.isalnum() or c in "-_." for c in name) or ".." in prefix.split("/"):
-        raise ValueError(f"{value!r}: bad Modal Volume name or prefix")
-    return name, prefix.strip("/")
 
 
 # ---------------------------------------------------------------------------

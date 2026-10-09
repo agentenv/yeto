@@ -14,6 +14,7 @@ from test_rl_reconfig_recovery import _ctl
 from test_rl_trainer_rebuild_e1 import ARGS
 
 from tests.rl_cut_fakes import make_rank, params, train_step
+from yeto.cloud import modal_ckpt_store as mcs
 from yeto.rl.adapters.miles.rebuild_wiring import CutSource
 from yeto.rl.adapters.miles.round_cut import POINTER, RoundCutCheckpoint, RoundCutError
 from yeto.rl.engine import resume as rs
@@ -50,7 +51,7 @@ class _Vol:
 def _store(path, vol=None):
     if vol is None:
         return rs.CheckpointStore(path)
-    return rs.ModalVolumeStore(path, "yeto-ckpt", volume_factory=lambda name: vol)
+    return mcs.ModalVolumeStore(path, "yeto-ckpt", volume_factory=lambda name: vol)
 
 
 def _rctl(tmp_path, name, store, keep=2):
@@ -132,13 +133,16 @@ def test_copy_verified_detects_a_bad_copy(tmp_path, monkeypatch):
 
 
 def test_store_for_picks_the_backend_and_parses_modal_uris():
-    assert isinstance(rs.store_for("/x", environ={rs.MODAL_VOLUME_ENV: "v"}), rs.ModalVolumeStore)
+    assert isinstance(rs.store_for("/x", environ={rs.STORE_IMPL_ENV: mcs.STORE_IMPL, mcs.MODAL_VOLUME_ENV: "v"}),
+                      mcs.ModalVolumeStore)
+    with pytest.raises(ValueError, match=mcs.MODAL_VOLUME_ENV):
+        rs.store_for("/x", environ={rs.STORE_IMPL_ENV: mcs.STORE_IMPL})
     assert type(rs.store_for("/mnt/share", environ={})) is rs.CheckpointStore
     assert isinstance(rs.store_for("~/yeto-checkpoint-store/p", environ={}), rs.BucketMountStore)
-    assert rs.parse_modal_volume_uri("modal-volume://yeto-ckpt/run1/a") == ("yeto-ckpt", "run1/a")
+    assert mcs.parse_modal_volume_uri("modal-volume://yeto-ckpt/run1/a") == ("yeto-ckpt", "run1/a")
     for bad in ("s3://b/x", "modal-volume://", "modal-volume://a b", "modal-volume://v/../x"):
         with pytest.raises(ValueError):
-            rs.parse_modal_volume_uri(bad)
+            mcs.parse_modal_volume_uri(bad)
 
 
 def test_checks_fingerprint_lr_cadence():
@@ -373,7 +377,7 @@ def test_modal_island_config_mounts_the_store_volume(monkeypatch, tmp_path):
     cfg = build_modal_island_config(args, spec, 0, task, "none")
     assert cfg.checkpoint_store_volume_name == "yeto-ckpt"
     assert cfg.checkpoint_store_mount == "/root/yeto-checkpoint-store"
-    assert cfg.envs[rs.MODAL_VOLUME_ENV] == "yeto-ckpt"
+    assert cfg.envs[mcs.MODAL_VOLUME_ENV] == "yeto-ckpt" and cfg.envs[rs.STORE_IMPL_ENV] == mcs.STORE_IMPL
     cfg.validate()
     from yeto import modal_runner as mr
 
@@ -491,7 +495,7 @@ def test_modal_commit_goes_through_the_runner_interpreter(tmp_path, monkeypatch)
         "    def from_name(n): return _V(n)\n")
     monkeypatch.setenv("YETO_MODAL_PYTHON", sys.executable)
     monkeypatch.setenv("YETO_MODAL_SYSPATH", str(fake))
-    store = rs.ModalVolumeStore(tmp_path / "s", "yeto-ckpt")
+    store = mcs.ModalVolumeStore(tmp_path / "s", "yeto-ckpt")
     store.reload()
     assert store.commit() >= 0 and store.commits == 1
     assert log.read_text().splitlines() == ["reload yeto-ckpt", "commit yeto-ckpt"]
