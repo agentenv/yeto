@@ -145,3 +145,18 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
 
 - 算法哈希、契约哈希、8 个标准样本、帧格式、检查点格式：都不变。
 - 只变了 syncer 对错误岛的处理和 MSG_ERROR 文本：契约不一致时错误文本改为 `session mismatch (HELLO refused, session keeps running): expected session_contract_hash=… layout_fingerprint=… …, got …`（仍以 `session mismatch` 开头，旧客户端照样识别为被拒）。新旧代码可以混用。
+
+## S17 N16 学习率调度开关（分支 s17-lr-constant，基线 s17-decouple-p4 @5fac05f7）
+
+新增 `--rl-lr-schedule {auto,linear,constant}`，默认 auto。用 `tests/decoupling_golden.py` 的 `record_config` 走完整的 launcher → 岛 → Miles 命令行链路实测（grpo_default 配置）：
+
+| 配置 | `algorithm_sha256` | Miles 命令行摘要 | 契约哈希 | 学习率参数 |
+|---|---|---|---|---|
+| grpo_default（auto） | `27df1133c924e7a3…` 不变 | `cd9c51c2946a4e45…` 不变 | `27bb768f7462a3ff…` 不变 | `--lr-decay-style linear --lr-decay-iters 3` |
+| grpo_default + `--rl-lr-schedule linear` | 同上 | 同上（与 auto 逐字节相同） | 同上 | 同上 |
+| grpo_default + `--rl-lr-schedule constant` | `27df1133c924e7a3…` 不变 | `1108c08ed4e9ef28…`（与 decoupled 标准样本的摘要相同：两者命令行只差这一个值） | `27bb768f7462a3ff…` 不变 | `--lr-decay-style constant --lr-decay-iters 3` |
+
+- 8 个标准样本全部不变（auto 不往命令行加任何参数；`tests/test_decoupling_golden.py` 12 过）。
+- 变的只有 Miles 命令行摘要和 `ports_runtime_fingerprint`（`sha256:0ad73504…` → `sha256:cbe1cd06…`）。学习率调度不进 `AlgorithmSpec.sha256()`，也不进 `ExecutionProfile.contract_hash`。
+- 行为变化（随 auto 规则并入 N5 a73ab1b2）：`--rl-island-scheduling elastic` 的岛由线性改为常数学习率，命令行摘要随之变化；两个哈希不变。标准样本里的 `elastic` 配置是岛内弹性 `--rl-elastic`，不是跨岛 elastic，所以不受影响。
+- 已知限制（待主 agent 定）：因为契约哈希不含学习率调度，同一个同步服务下一个岛用 linear、另一个岛用 constant 不会被握手拒绝。launcher 给同一次运行的所有岛下发同一个值，只有手工拼命令或续训时换了参数才会出现；如果要堵死，需要把调度写进契约，这会让所有配置的契约哈希都变，本次没做。
