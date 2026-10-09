@@ -365,7 +365,8 @@ def build_ports_launch(args, run_config, extra_argv=()):
             run_config.algorithm, advantage_estimator=absorbed.advantage_estimator
         ),
     )
-    return translate_run_config(run_config, base_algorithm, extra_argv=tuple(extra_argv))
+    return translate_run_config(run_config, base_algorithm, extra_argv=tuple(extra_argv),
+                                max_policy_age=int(getattr(args, "rl_max_policy_age", 0) or 0))
 
 
 _ELASTIC_COMPANIONS = (
@@ -475,9 +476,13 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
     if getattr(args, "rl_overlap_eval", False):
         miles_args.yeto_rl_overlap_eval = True
     if getattr(args, "rl_max_policy_age", 0):  # agentic-rollout-utilization 2.1
-        from .policy_age import SUPPORT
+        from .policy_age import SUPPORT, check_task
 
         SUPPORT.check(int(args.rl_max_policy_age))
+        check_task(int(args.rl_max_policy_age),
+                   custom_generate=getattr(miles_args, "custom_generate_function_path", None),
+                   custom_agent=getattr(miles_args, "custom_agent_function_path", None),
+                   recompute_prefill=bool(getattr(miles_args, "recompute_logprobs_via_prefill", False)))
         miles_args.yeto_rl_max_policy_age = int(args.rl_max_policy_age)
     observe = bool(getattr(args, "rl_observe_timeline", False))
     if observe:

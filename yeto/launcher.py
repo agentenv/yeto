@@ -2332,7 +2332,13 @@ def _prepare_rl_args(
     from .rl.engine.policy_age import validate_limit
 
     max_policy_age = validate_limit(getattr(args, "rl_max_policy_age", 0) or 0)
-    _rl_backend_module(args, "policy_age").SUPPORT.check(max_policy_age)
+    policy_age_module = _rl_backend_module(args, "policy_age")
+    policy_age_module.SUPPORT.check(max_policy_age)
+    task_check = getattr(policy_age_module, "check_task", None)
+    if callable(task_check):  # 4.1: stage 2 is single-turn only (agentic = stage 3)
+        task_check(max_policy_age,
+                   custom_generate=getattr(args, "custom_generate_function_path", None),
+                   custom_agent=getattr(args, "custom_agent_function_path", None))
     if args.over_sampling_batch_size is None:
         args.over_sampling_batch_size = args.rollout_batch_size
     elif args.over_sampling_batch_size < args.rollout_batch_size:

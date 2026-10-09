@@ -144,6 +144,13 @@ class RolloutBatchHandle:
     # (rollout_meta_hook.trajectory_reward_records: task_id/trajectory_id/reward/
     # success); None = not reported. The driver tapes them as ``rl_trajectory_reward``.
     trajectory_rewards: tuple[Mapping[str, Any], ...] | None = field(default=None, compare=False)
+    # agentic-rollout-utilization 4.1 (limit > 0 only; None at limit 0): what the
+    # round carried in from / back to the engine's buffer and discarded over the
+    # limit (``carry_over.CARRY_FIELDS`` + carried_out_groups, cross_version_tokens,
+    # trained_response_tokens, ...), and the estimated cross-version IS
+    # truncated fraction the 3.5 governor reads (None = nothing crossed / unknown).
+    carry_over: Mapping[str, Any] | None = field(default=None, compare=False)
+    cross_version_truncated_fraction: float | None = None
 
     def mismatched_groups(self, expected_token: str) -> tuple[GroupMetadata, ...]:
         return tuple(g for g in self.groups if g.policy_token != expected_token)
