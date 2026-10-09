@@ -426,3 +426,22 @@ def test_translate_emits_the_suspend_flags_for_an_agentic_run():
     assert "--partial-rollout" not in one
     i = one.index("--agentic-suspend-max-rounds")
     assert one[i + 1] == "1"
+
+
+def test_estimate_reports_why_samples_are_unscored_and_skips_unknown_trained_tokens():
+    s = Sample(index=0, group_index=0)
+    FakePartialEngine().generate(s, 3, 2, finish=False)
+    FakePartialEngine().generate(s, 4, 1, finish=True)
+    s.weight_versions = s.weight_versions[1:]  # the first turn's span is missing
+    s.weight_versions.insert(0, Call([Span(tok(3), len(s.tokens) - 3, len(s.tokens) - 2)]))
+    args = SimpleNamespace(tis_clip_low=0.0, tis_clip=2.0)
+    out = carry_over.estimate_cross_version_truncation(args, [s], 4, lambda _s: [-0.5, -0.5, -0.5])
+    assert out["cross_version_unknown_version_tokens"] == 1 and out["cross_version_scored_tokens"] == 1
+
+    def failing(_s):
+        failing.last_error = "ValueError: alignment"
+        return None
+
+    out = carry_over.estimate_cross_version_truncation(args, [s], 4, failing)
+    assert out["cross_version_unscored_samples"] == 1
+    assert out["cross_version_unscored_reasons"] == {"ValueError: alignment": 1}

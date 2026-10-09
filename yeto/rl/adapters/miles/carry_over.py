@@ -231,6 +231,7 @@ def router_prefill_scorer(args: Any, timeout_s: float = 120.0) -> Scorer:
     import urllib.request
 
     def score(sample: Any) -> list[float] | None:
+        score.last_error = None
         try:
             url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate"
             from miles.rollout.generate_utils.prefill_logprobs import (
@@ -245,9 +246,11 @@ def router_prefill_scorer(args: Any, timeout_s: float = 120.0) -> Scorer:
             with urllib.request.urlopen(request, timeout=timeout_s) as response:  # noqa: S310
                 output = json.loads(response.read().decode("utf-8"))
             return [float(p) for p in _extract_response_logprobs(sample, output["meta_info"])]
-        except Exception:  # noqa: BLE001 - an estimate: unknown, never guessed
+        except Exception as exc:  # noqa: BLE001 - an estimate: unknown, never guessed
+            score.last_error = f"{type(exc).__name__}: {str(exc)[:120]}"
             return None
 
+    score.last_error = None
     return score
 
 
@@ -263,14 +266,34 @@ def estimate_cross_version_truncation(args: Any, samples: Sequence[Any], current
     corrections = []
     ratios: list[float] = []
     failed = 0
+    reasons: dict[str, int] = {}
+    unknown_tokens = 0
+
+    def fail(why: str) -> None:
+        nonlocal failed
+        failed += 1
+        reasons[why] = reasons.get(why, 0) + 1
+
     for sample in samples:
         versions = trained_token_versions(sample, current_version)
         if not any(v is not None and v != current_version for v in versions):
             continue
+        # a trained token whose version no span covers is left out of the
+        # estimate (weight 1, counted), instead of dropping the whole sample
+        unknown = sum(1 for v in versions if v is None)
+        if unknown:
+            unknown_tokens += unknown
+            versions = [current_version if v is None else v for v in versions]
         generated = list(getattr(sample, "rollout_log_probs", None) or ())
-        current = scorer(sample) if None not in versions and len(generated) == len(versions) else None
-        if current is None or len(current) != len(versions):
-            failed += 1
+        if len(generated) != len(versions):
+            fail(f"rollout_log_probs {len(generated)} != response {len(versions)}")
+            continue
+        current = scorer(sample)
+        if current is None:
+            fail(str(getattr(scorer, "last_error", None) or "scorer returned nothing"))
+            continue
+        if len(current) != len(versions):
+            fail(f"scored {len(current)} != response {len(versions)}")
             continue
         try:
             provenance = TokenProvenance(tuple(int(v) for v in versions),
@@ -279,10 +302,16 @@ def estimate_cross_version_truncation(args: Any, samples: Sequence[Any], current
                                                 clip_low=clip_low, clip_high=clip_high))
             ratios.extend(math.exp(float(c) - g) for v, g, c in zip(
                 provenance.versions, provenance.logprobs, current, strict=True) if v != current_version)
-        except (ProvenanceError, ValueError, OverflowError):
-            failed += 1
+        except (ProvenanceError, ValueError, OverflowError) as exc:
+            fail(f"{type(exc).__name__}: {str(exc)[:120]}")
     fraction = batch_truncated_fraction(corrections)
+    extra: dict[str, Any] = {}
+    if reasons:  # 5.5: why samples could not be scored (absent when all were)
+        extra["cross_version_unscored_reasons"] = dict(sorted(reasons.items())[:8])
+    if unknown_tokens:
+        extra["cross_version_unknown_version_tokens"] = unknown_tokens
     return {
+        **extra,
         "cross_version_truncated_fraction": None if fraction is None or not math.isfinite(fraction)
         else float(fraction),
         "cross_version_scored_tokens": sum(c.cross_version_tokens for c in corrections),

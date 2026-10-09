@@ -217,7 +217,8 @@ def test_cross_version_truncation_estimate_with_known_ratios(sink):
     assert math.isclose(out["cross_version_truncated_fraction"], 0.5)
     assert carry_over.estimate_cross_version_truncation(args, [s], 4, lambda _s: None) == {
         "cross_version_truncated_fraction": None, "cross_version_scored_tokens": 0,
-        "cross_version_unscored_samples": 1}
+        "cross_version_unscored_samples": 1,
+        "cross_version_unscored_reasons": {"scorer returned nothing": 1}}
     hook.put_policy_token(tok(4), sink)
     payload = round_metadata(args, [[s]], sink, scorer=lambda _s: current)
     handle = handle_from_metadata(payload, rollout_id=4, policy_version=4, policy_hash=HASHES[4],
