@@ -52,7 +52,7 @@ def test_ports_image_is_the_private_digest_pinned_fork_image():
     assert rl.MILES_NEXT_IMAGE_MANIFEST == "/opt/yeto/image-manifest.json"
     # The tag the build script pushes names the pinned commits.
     tag = f"{rl.MILES_NEXT_COMMIT[:7]}-{rl.SGLANG_NEXT_COMMIT[:7]}"
-    assert f"Tag {tag};" in (REPO / "yeto/rl/__init__.py").read_text()
+    assert f"Tag {tag};" in (REPO / "yeto/rl/adapters/miles/pins.py").read_text()
 
 
 def test_legacy_image_default_is_unchanged():
@@ -71,7 +71,7 @@ def test_build_inputs_match_the_pins():
         assert value in dockerfile
     script = (REPO / "scripts/build_miles_ports_image.sh").read_text()
     assert f"BASE_INDEX_DIGEST={base}" in script
-    assert "yeto/rl/__init__.py" in script  # commits are read from the pins
+    assert "yeto/rl/adapters/miles/pins.py" in script  # commits are read from the pins
     subprocess.run(["bash", "-n", str(REPO / "scripts/build_miles_ports_image.sh")], check=True)
 
 

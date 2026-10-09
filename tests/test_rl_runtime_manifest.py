@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from yeto.rl.engine import runtime_manifest as rm
-from yeto.rl.engine.miles_adapter.runtime_manifest import MILES_RUNTIME
+from yeto.rl.adapters.miles.runtime_manifest import MILES_RUNTIME
 
 PINS = {"miles": "a" * 40, "sglang": "b" * 40, "image": "docker:ghcr.io/x/miles@sha256:" + "c" * 64}
 

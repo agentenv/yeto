@@ -109,7 +109,7 @@ def test_learner_baseline_run_is_the_same_learner_without_warmup(tmp_path, monke
         args, argv, run=lambda cmd, check, env: (calls.append(cmd), envs.append(env)))
     (cmd,) = calls
     assert cmd[-1] == "--rl-critic-baseline-run" and "YETO_RL_ECHO_EVENTS" not in envs[0]
-    assert cmd[1:3] == ["-m", "yeto.rl.learner"]
+    assert cmd[1:3] == ["-m", "yeto.rl.adapters.miles.island_entry"]
     spec_path = cmd[cmd.index("--rl-algorithm-spec") + 1]
     base = AlgorithmSpec.from_json_file(spec_path)
     assert base.critic.warmup_steps == 0

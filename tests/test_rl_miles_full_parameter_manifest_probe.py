@@ -13,9 +13,9 @@ import pytest
 # CI has no miles image; skip these tests when miles is absent.
 pytest.importorskip("miles")
 
-bridge_stub = types.ModuleType("yeto.rl.deepseek_v4_bridge")
+bridge_stub = types.ModuleType("yeto.rl.adapters.miles.models.deepseek_v4.bridge")
 bridge_stub.ensure_deepseek_v4_bridge = lambda: None
-sys.modules.setdefault("yeto.rl.deepseek_v4_bridge", bridge_stub)
+sys.modules.setdefault("yeto.rl.adapters.miles.models.deepseek_v4.bridge", bridge_stub)
 
 from miles.backends.megatron_utils.full_parameter_state import (
     FullParameterShardManifest,
@@ -24,7 +24,7 @@ from miles.backends.megatron_utils.full_parameter_state import (
     _layout_hash,
 )
 from yeto.rl import miles_full_parameter_manifest_probe as module
-from yeto.rl.miles_full_parameter_manifest_probe import (
+from yeto.rl.adapters.miles.models.full_parameter_manifest_probe import (
     MilesFullParameterManifestProbeSync,
 )
 

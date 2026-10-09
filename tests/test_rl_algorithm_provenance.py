@@ -15,8 +15,8 @@ from yeto.rl.engine.algorithm import (
     LossSpec,
     resolve_ports_algorithm,
 )
-from yeto.rl.engine.miles_adapter import config as mc
-from yeto.rl.engine.miles_adapter.entry import selection_event
+from yeto.rl.adapters.miles import config as mc
+from yeto.rl.adapters.miles.entry import selection_event
 from test_rl_engine_selection import _learner_argv
 from test_rl_miles_adapter_config import make_config
 

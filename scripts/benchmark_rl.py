@@ -670,7 +670,7 @@ def run_training_worker(config_path: Path) -> int:
 
     from miles.utils.misc import load_function
 
-    from yeto.rl.learner import _miles_callable, run_miles
+    from yeto.rl.adapters.miles.island_entry import _miles_callable, run_miles
 
     load_function(_miles_callable(args.reward_function))
     run_miles(
@@ -844,7 +844,7 @@ def run_evaluation_worker(config_path: Path) -> int:
     from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
     from yeto.rl.export import _rl_model_factory
-    from yeto.rl.learner import _miles_callable
+    from yeto.rl.adapters.miles.island_entry import _miles_callable
 
     verify_worker_inputs(
         prompt_path=Path(payload["eval_path"]),
@@ -2678,7 +2678,7 @@ def main(argv=None) -> int:
         validate_data_manifest,
     )
     from yeto.provenance import python_spec_sha256
-    from yeto.rl.miles import verify_miles_revision
+    from yeto.rl.adapters.miles.legacy.engine import verify_miles_revision
 
     miles_root = str(args.miles_root)
     if miles_root not in sys.path:

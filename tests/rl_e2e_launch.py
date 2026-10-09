@@ -2,7 +2,7 @@
 
 Runs the island's own shell prelude (files written under ~/yeto-rl, ``export``s)
 with bash under a temporary HOME, lets bash expand the learner command line and
-parses it with the real ``yeto.rl.learner.parse_args``. No cloud, no GPU.
+parses it with the real ``yeto.rl.adapters.miles.island_entry.parse_args``. No cloud, no GPU.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ def learner_from_run(run: str, home: Path, *, env=None):
 
     head = run.split('if [ "$SKYPILOT_NODE_RANK" = "0" ]; then', 1)[1].split("\nelse\n", 1)[0]
     body = head.split("trap stop_miles_ray EXIT\n", 1)[1]
-    match = re.search(r"^\s*RAY_ADDRESS=\S+ PYTHONPATH=\S+ (?:yeto_rl_restart_loop )?python3 -m yeto\.rl\.learner", body, re.M)
+    match = re.search(r"^\s*RAY_ADDRESS=\S+ PYTHONPATH=\S+ (?:yeto_rl_restart_loop )?python3 -m yeto\.rl\.adapters\.miles\.island_entry", body, re.M)
     assert match, "no learner command in the island run"
     prelude, command = body[: match.start()], body[match.end():]
     home.mkdir(parents=True, exist_ok=True)

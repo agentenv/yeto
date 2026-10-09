@@ -34,7 +34,7 @@ BASE_SGLANG_VERSION=0.5.21.dev64+ge5bba1f
 
 pins=$(python3 - <<'PY'
 import re
-src = open("yeto/rl/__init__.py").read()
+src = open("yeto/rl/adapters/miles/pins.py").read()
 for k in ("MILES_NEXT_REPOSITORY", "MILES_NEXT_COMMIT", "MILES_NEXT_UPSTREAM_COMMIT",
           "SGLANG_NEXT_REPOSITORY", "SGLANG_NEXT_COMMIT", "SGLANG_NEXT_UPSTREAM_COMMIT"):
     print(f"{k}={re.search(rf'^{k} = \"([^\"]+)\"', src, re.M).group(1)}")

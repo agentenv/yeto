@@ -82,7 +82,7 @@ def test_full16_transport_geometry_bounds_each_canonical_owner(monkeypatch):
             for _projection in range(3)
         ]
 
-    module = ModuleType("yeto.rl.deepseek_v4_expert_full")
+    module = ModuleType("yeto.rl.adapters.miles.models.deepseek_v4.expert_full")
     module.expert_full_specs = expert_full_specs
     monkeypatch.setitem(sys.modules, module.__name__, module)
     model_config = object()
@@ -226,7 +226,7 @@ def test_task_coverage_resolves_separate_bridge_through_runtime(monkeypatch):
         assert not hasattr(actor, "_yeto_expert_full_bridge")
         return TaskBridge()
 
-    expert_runtime = ModuleType("yeto.rl.deepseek_v4_expert_full_runtime")
+    expert_runtime = ModuleType("yeto.rl.adapters.miles.models.deepseek_v4.expert_full_runtime")
     expert_runtime._actor_bridge = actor_bridge
     expert_runtime.filter_selected_expert_tasks = lambda tasks, expert_count: tasks
     yeto_rl = ModuleType("yeto.rl")
@@ -251,7 +251,7 @@ def test_task_coverage_resolves_separate_bridge_through_runtime(monkeypatch):
         "megatron.core": megatron_core,
         "yeto": yeto,
         "yeto.rl": yeto_rl,
-        "yeto.rl.deepseek_v4_expert_full_runtime": expert_runtime,
+        "yeto.rl.adapters.miles.models.deepseek_v4.expert_full_runtime": expert_runtime,
     }.items():
         monkeypatch.setitem(sys.modules, name, module)
     monkeypatch.setattr(validator.torch.distributed, "get_rank", lambda: 0)
@@ -326,7 +326,7 @@ def test_sleep_process_group_failure_reloads_groups_before_raising(monkeypatch):
             "expert-full conversion tasks do not cover local parameters"
         )
 
-    expert_runtime = ModuleType("yeto.rl.deepseek_v4_expert_full_runtime")
+    expert_runtime = ModuleType("yeto.rl.adapters.miles.models.deepseek_v4.expert_full_runtime")
     expert_runtime._expert_views = expert_views
     yeto_rl = ModuleType("yeto.rl")
     yeto_rl.deepseek_v4_expert_full_runtime = expert_runtime
@@ -341,7 +341,7 @@ def test_sleep_process_group_failure_reloads_groups_before_raising(monkeypatch):
         "megatron.core": megatron_core,
         "yeto": yeto,
         "yeto.rl": yeto_rl,
-        "yeto.rl.deepseek_v4_expert_full_runtime": expert_runtime,
+        "yeto.rl.adapters.miles.models.deepseek_v4.expert_full_runtime": expert_runtime,
     }.items():
         monkeypatch.setitem(sys.modules, name, module)
 

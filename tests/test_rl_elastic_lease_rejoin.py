@@ -130,7 +130,7 @@ def test_gives_up_after_n_consecutive_rejoin_failures():
 
 
 def test_learner_maps_rejoin_exhaustion_to_its_own_exit_code():
-    from yeto.rl.learner import _rejoin_exhausted
+    from yeto.rl.adapters.miles.island_entry import _rejoin_exhausted
 
     try:
         try:

@@ -1,8 +1,8 @@
 """Run one harness phase inside the container with the learner's own argument pipeline.
 
-    python learner_shim.py --phase gen|arm|dry --work DIR [--arm A1] -- <yeto.rl.learner flags>
+    python learner_shim.py --phase gen|arm|dry --work DIR [--arm A1] -- <yeto.rl.adapters.miles.island_entry flags>
 
-``yeto.rl.learner.main`` does everything a real island does before Ray
+``yeto.rl.adapters.miles.island_entry.main`` does everything a real island does before Ray
 (source/reward/Miles pin checks, model + data download, run config ->
 Miles argv -> ``parse_args``) and then calls
 ``entry.run_ports_island(miles_args, launch, algorithm, ...)``. The shim

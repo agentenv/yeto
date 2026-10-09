@@ -26,7 +26,7 @@ from yeto.rl.core import (
     canonical_state,
 )
 from yeto.rl.decoupled import DecoupledBridgeConfig, DecoupledRlBridge
-from yeto.rl.miles import MilesPolicySync, _island_checkpoint_config
+from yeto.rl.adapters.miles.legacy.engine import MilesPolicySync, _island_checkpoint_config
 from yeto.tensor_io import pack_tensor, unpack_fragment
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -68,7 +68,17 @@ def _layout():
     )
 
 
-def _start(binary, port, checkpoint, rounds, *, learners=2, event_tape=None):
+def _resume_flag(checkpoint, resume):
+    """`--resume` only when restarting from a checkpoint file that exists.
+
+    The syncer rejects `--resume` with a missing checkpoint (d4c72cd7), so a
+    fresh start must omit it; `resume=None` decides by the file on disk."""
+    if resume is None:
+        resume = Path(checkpoint).is_file()
+    return ["--resume"] if resume else []
+
+
+def _start(binary, port, checkpoint, rounds, *, learners=2, event_tape=None, resume=None):
     return subprocess.Popen(
         [
             str(binary),
@@ -98,7 +108,7 @@ def _start(binary, port, checkpoint, rounds, *, learners=2, event_tape=None):
             str(checkpoint),
             "--checkpoint-every",
             "1",
-            "--resume",
+            *_resume_flag(checkpoint, resume),
             "--max-base-lag",
             "0",
             "--learner-weight",
@@ -124,7 +134,7 @@ def _start_decoupled(
     learners=2,
     pipeline=2,
     learner_budget_steps=None,
-    resume=True,
+    resume=None,
 ):
     return subprocess.Popen(
         [
@@ -155,7 +165,7 @@ def _start_decoupled(
             str(checkpoint),
             "--checkpoint-every",
             "1",
-            *(["--resume"] if resume else []),
+            *_resume_flag(checkpoint, resume),
             "--max-base-lag",
             "0",
             "--learner-weight",
@@ -894,6 +904,9 @@ def test_miles_public_hook_runs_against_real_syncer(
                         "response_lengths": [2, 3],
                         "sample_indices": [0, 1],
                         "raw_reward": [0.0, 1.0],
+                        # GRPO advantages (group-normalized raw_reward); the
+                        # hook counts the non-zero ones (3720936f)
+                        "rewards": [-1.0, 1.0],
                     }
                 )
             ]

@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from yeto.rl.algos.critic import critic_run_problems
-from yeto.rl.engine.miles_adapter.algo_flag_rows import critic_argv
+from yeto.rl.adapters.miles.algo_flag_rows import critic_argv
 from yeto.rl.engine.algorithm import (
     AlgorithmSpec,
     AlgorithmSpecError,
@@ -20,8 +20,8 @@ from yeto.rl.engine.bridges import LocalOnlySync
 from yeto.rl.engine.capabilities import CapabilityMismatch, ExecutionCapabilities
 from yeto.rl.engine.driver import DriverError, EventTape, IslandDriver
 from yeto.rl.engine.fake import FakeEngine, fake_capabilities
-from yeto.rl.engine.miles_adapter import algorithm_flags as af
-from yeto.rl.engine.miles_adapter import config as mc
+from yeto.rl.adapters.miles import algorithm_flags as af
+from yeto.rl.adapters.miles import config as mc
 from yeto.rl.engine.run_config import CriticRunConfig
 
 from test_rl_miles_adapter_config import make_config

@@ -10,6 +10,14 @@
   "loss": "policy_loss",
   "schema": "yeto-rl-algorithm-spec-v1"
  },
+ "backend_identity": {
+  "device_family": "nvidia",
+  "engine": "miles",
+  "engine_commit": "8bc52237a1102306abd8f89a2ea2090aa2df6850",
+  "param_map_sha256": "36c37d691b6372ee86485cf0f7d4f8d5e185a6346b875aac33380518ee8f259a",
+  "schema": "yeto-backend-identity-v1",
+  "sha256": "9d5696a3d3b6e6d802115ef3deb970b5e4d9206d1751d71f9075a849d2909f8d"
+ },
  "execution_profile": {
   "contract_hash": "sha256:27bb768f7462a3ff3b660d9ba9cf00477c16a840f2c8d9c00e259cec01ced533",
   "profile": {
@@ -165,11 +173,11 @@
   "--rollout-max-response-len",
   "128",
   "--rollout-sample-filter-path",
-  "yeto.rl.engine.miles_adapter.rollout_meta_hook.record_trained_groups",
+  "yeto.rl.adapters.miles.rollout_meta_hook.record_trained_groups",
   "--rollout-all-samples-process-path",
-  "yeto.rl.engine.miles_adapter.rollout_meta_hook.extract_rollout_metadata",
+  "yeto.rl.adapters.miles.rollout_meta_hook.extract_rollout_metadata",
   "--buffer-filter-path",
-  "yeto.rl.engine.miles_adapter.rollout_meta_hook.policy_buffer_filter",
+  "yeto.rl.adapters.miles.rollout_meta_hook.policy_buffer_filter",
   "--custom-rm-path",
   "pkg.reward.score",
   "--advantage-estimator",
@@ -218,7 +226,7 @@
   "<MILES-RESOLVED-TOOL-CALL-PARSER>",
   "--group-query-attention"
  ],
- "miles_argv_sha256": "18fafcaafda2c19c3fd4a4f183db1d0e70c1ca04ad9994d6b279db48357223ee",
+ "miles_argv_sha256": "259d2fdeff47128f18aee397e24646d92b8ee7778dd7db836c41a63eed8d3b8a",
  "name": "codex_harness",
  "placement": {
   "allow_cross_node_engine_tp": false,
@@ -237,31 +245,31 @@
  },
  "plugins": [
   {
-   "module_file": "yeto/rl/engine/miles_adapter/rollout_meta_hook.py",
-   "path": "yeto.rl.engine.miles_adapter.rollout_meta_hook.extract_rollout_metadata",
-   "source_sha256": "be53a60841ce6244fc85c5d114ef25dc7c06a94f74fcaa5291d74094ef0d87ef"
+   "module_file": "yeto/rl/adapters/miles/rollout_meta_hook.py",
+   "path": "yeto.rl.adapters.miles.rollout_meta_hook.extract_rollout_metadata",
+   "source_sha256": "af10161a148d3059148342896778fec5b915c90ed96258ccab1754f1805cda61"
   },
   {
-   "module_file": "yeto/rl/engine/miles_adapter/rollout_meta_hook.py",
-   "path": "yeto.rl.engine.miles_adapter.rollout_meta_hook.policy_buffer_filter",
-   "source_sha256": "be53a60841ce6244fc85c5d114ef25dc7c06a94f74fcaa5291d74094ef0d87ef"
+   "module_file": "yeto/rl/adapters/miles/rollout_meta_hook.py",
+   "path": "yeto.rl.adapters.miles.rollout_meta_hook.policy_buffer_filter",
+   "source_sha256": "af10161a148d3059148342896778fec5b915c90ed96258ccab1754f1805cda61"
   },
   {
-   "module_file": "yeto/rl/engine/miles_adapter/rollout_meta_hook.py",
-   "path": "yeto.rl.engine.miles_adapter.rollout_meta_hook.record_trained_groups",
-   "source_sha256": "be53a60841ce6244fc85c5d114ef25dc7c06a94f74fcaa5291d74094ef0d87ef"
+   "module_file": "yeto/rl/adapters/miles/rollout_meta_hook.py",
+   "path": "yeto.rl.adapters.miles.rollout_meta_hook.record_trained_groups",
+   "source_sha256": "af10161a148d3059148342896778fec5b915c90ed96258ccab1754f1805cda61"
   },
   {
    "module_file": "yeto/rl/harness/codex/codex_openenv_subprocess_agent_function.py",
    "path": "yeto.rl.harness.codex.codex_openenv_subprocess_agent_function.run",
-   "source_sha256": "dab8efda87e716bc5d091f66de7a164bc5b8b3e8495c4815d4b2237f73b0b216"
+   "source_sha256": "22df84e9bbb226757a3806ad74353bfe3fad5f3db76c8b0d4b8a621217179758"
   }
  ],
- "ports_runtime_fingerprint": "sha256:2046c33955700f64f268ba25064b72e61c133c69ce13cde43c7e0bc7b4643773",
+ "ports_runtime_fingerprint": "sha256:1a2bad065d370d87e5ead84afa2dd76205ccd15c6cab7b4006476d931560fed4",
  "runtime_attrs": {
   "yeto_rl_dynamic_sampling_max_replacements": null
  },
  "session_contract_hash": null,
- "session_contract_hash_note": "运行时由 LoRA 张量布局算出（yeto.protocol.layout_fingerprint），离线不可得",
+ "session_contract_hash_note": "运行时由 LoRA 张量布局算出（yeto.protocol.layout_fingerprint），阶段 5 起再与 backend_identity.sha256 绑定（yeto.rl.engine.backend_identity.session_contract_hash），离线不可得",
  "title": "codex harness（ports，Qwen3.5-0.8B，假 bundle 合同）"
 }

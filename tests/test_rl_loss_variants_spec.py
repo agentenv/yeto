@@ -28,8 +28,8 @@ from yeto.rl.engine.bridges import LocalOnlySync  # noqa: E402
 from yeto.rl.engine.capabilities import CapabilityMismatch  # noqa: E402
 from yeto.rl.engine.driver import EventTape, IslandDriver, TrainStepMetrics  # noqa: E402
 from yeto.rl.engine.fake import FakeEngine, fake_capabilities  # noqa: E402
-from yeto.rl.engine.miles_adapter import algorithm_flags as af  # noqa: E402
-from yeto.rl.engine.miles_adapter.entry import miles_capabilities  # noqa: E402
+from yeto.rl.adapters.miles import algorithm_flags as af  # noqa: E402
+from yeto.rl.adapters.miles.entry import miles_capabilities  # noqa: E402
 
 load_extensions()
 NAME = "base_model.model.layer.lora_A.weight"
@@ -580,8 +580,8 @@ def test_translate_run_config_and_provenance_carry_variant_and_fork_commit(varia
     from test_rl_miles_adapter_config import make_config
 
     from yeto.rl import MILES_NEXT_COMMIT
-    from yeto.rl.engine.miles_adapter import config as mc
-    from yeto.rl.engine.miles_adapter.entry import selection_event
+    from yeto.rl.adapters.miles import config as mc
+    from yeto.rl.adapters.miles.entry import selection_event
 
     assert lv.fork_supports_variants(MILES_NEXT_COMMIT)
     s = spec(variant)

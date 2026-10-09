@@ -128,7 +128,7 @@ def _probe(rows):
 
 
 def test_entry_preflight_refuses_changed_pool_and_accepts_with_flag(tmp_path, monkeypatch):
-    from yeto.rl.engine.miles_adapter import entry
+    from yeto.rl.adapters.miles import entry
 
     topology = SimpleNamespace(nodes=2, gpus_per_node=2)
     resources = {"nodes": 2, "gpus_per_node": 2, "gpus": [
@@ -170,7 +170,7 @@ def test_entry_preflight_refuses_changed_pool_and_accepts_with_flag(tmp_path, mo
 
 
 def test_entry_preflight_probe_failure_is_fail_closed_and_single_node_is_a_no_op(tmp_path, monkeypatch):
-    from yeto.rl.engine.miles_adapter import entry
+    from yeto.rl.adapters.miles import entry
 
     topology = SimpleNamespace(nodes=2, gpus_per_node=1)
     miles_args = SimpleNamespace(yeto_rl_event_tape=str(tmp_path / "events.jsonl"), yeto_rl_learner_id=0,
@@ -215,7 +215,7 @@ def test_entry_preflight_probe_failure_is_fail_closed_and_single_node_is_a_no_op
 def test_main_calls_the_gpu_pool_preflight_right_after_the_partial_island_check():
     import inspect
 
-    from yeto.rl.engine.miles_adapter import entry
+    from yeto.rl.adapters.miles import entry
 
     src = inspect.getsource(entry)
     i = src.index("        refuse_partial_island_preflight(elastic, topology, miles_args, placement=launch.placement)\n")

@@ -5,7 +5,7 @@ plan and this code are committed and the main agent approves the run:
 
     python modal_run.py {dev-gather|a8} <outdir> <learner_flags.txt> <app-name> <frozen repo snapshot>
 
-``learner_flags.txt``: the flags of the ``python3 -m yeto.rl.learner`` line of
+``learner_flags.txt``: the flags of the ``python3 -m yeto.rl.adapters.miles.island_entry`` line of
 ``yeto launch ... --rl-single-island-no-sync --controller local --dry-run``
 (``build_flags.py`` extracts them). One Sandbox runs ``container_script`` with a
 hard ``timeout``; the app id / sandbox id go to ``<outdir>/resources.txt`` for
@@ -26,7 +26,7 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 def _pins() -> tuple[str, str]:
     """MILES_NEXT_IMAGE digest and MILES_NEXT_COMMIT of this checkout (read as text: no yeto import)."""
-    text = (REPO / "yeto" / "rl" / "__init__.py").read_text()
+    text = (REPO / "yeto" / "rl" / "adapters" / "miles" / "pins.py").read_text()
     image = re.search(r'MILES_NEXT_IMAGE = \(\s*"docker:([^"]+)"\s*"([^"]+)"', text)
     commit = re.search(r'MILES_NEXT_COMMIT = "([0-9a-f]{40})"', text)
     return image.group(1) + image.group(2), commit.group(1)

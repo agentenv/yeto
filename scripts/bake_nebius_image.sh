@@ -7,7 +7,7 @@
 #   IMAGE_REF=ghcr.io/...@sha256:... scripts/bake_nebius_image.sh
 #
 # Re-run whenever MILES_NEXT_IMAGE changes, then add the printed line to
-# NEBIUS_BAKED_IMAGES in yeto/rl/__init__.py (key = the docker digest; the
+# NEBIUS_BAKED_IMAGES in yeto/rl/adapters/miles/pins.py (key = the docker digest; the
 # launcher refuses a stale mapping and falls back to the stock image).
 # Registry credentials: ghcr.io entry of ~/.docker/config.json (as s1run.sh);
 # they go over ssh stdin and are removed from the VM before imaging.

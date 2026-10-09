@@ -6,8 +6,8 @@ import json
 import pytest
 import torch
 
-import yeto.rl.deepseek_v4_expert_clone as expert_clone
-from yeto.rl.deepseek_v4_expert_clone import (
+import yeto.rl.adapters.miles.models.deepseek_v4.expert_clone as expert_clone
+from yeto.rl.adapters.miles.models.deepseek_v4.expert_clone import (
     CLONES_PER_LAYER,
     NUM_LAYERS,
     ORIGINAL_EXPERTS,

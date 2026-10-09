@@ -152,7 +152,7 @@ def test_legacy_and_ports_layouts_align_to_the_same_gradient(tmp_path):
 
 
 def test_ports_recorder_arms_from_train_one_step(tmp_path, monkeypatch):
-    from yeto.rl.engine.miles_adapter import state_plugin as sp
+    from yeto.rl.adapters.miles import state_plugin as sp
 
     m = Lora(4)
     _backward(m)

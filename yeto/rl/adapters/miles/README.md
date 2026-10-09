@@ -22,4 +22,4 @@
 - 没有翻译的配置项抛 `UnmappedConfigError`（如部分仅旧版引擎支持的配置：DeepSeek V4、全参数等）。
 - Miles 容错（FT）语义、一个训练组多个 cell、被 Miles 改写的放置：分别以 `FaultToleranceArgsError`、`SingleCellError`、放置改写检测拒绝。
 - 只支持 NVIDIA CUDA（确定性环境变量 `cut_plugin.DETERMINISM_ENV` 为 CUDA 专用）。
-- 本目录之外的旧版引擎（`yeto/rl/miles.py`）与 Miles 补丁（`miles_overlay.py`、`overlays/`）不属于本适配层，阶段 4 再归位。
+- 本目录之外的旧版引擎（`yeto/rl/adapters/miles/legacy/engine.py`）与 Miles 补丁（`miles_overlay.py`、`overlays/`）不属于本适配层，阶段 4 再归位。

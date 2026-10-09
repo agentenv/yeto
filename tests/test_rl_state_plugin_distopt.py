@@ -15,7 +15,7 @@ import torch
 
 _dist = pytest.importorskip("megatron.core.optimizer.distrib_optimizer")
 
-from yeto.rl.engine.miles_adapter import state_plugin as sp  # noqa: E402
+from yeto.rl.adapters.miles import state_plugin as sp  # noqa: E402
 
 
 class _DistOptRank:

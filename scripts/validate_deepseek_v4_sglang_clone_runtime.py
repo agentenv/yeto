@@ -149,8 +149,8 @@ def main() -> None:
         raise ValueError("both positive and negative adapter fixtures are required")
     from transformers import AutoConfig
 
-    from yeto.rl.deepseek_v4_expert_clone import contract_from_config
-    from yeto.rl.sglang_deepseek_v4_clone import install
+    from yeto.rl.adapters.miles.models.deepseek_v4.expert_clone import contract_from_config
+    from yeto.rl.adapters.miles.models.deepseek_v4.sglang_clone import install
 
     contract = contract_from_config(
         AutoConfig.from_pretrained(

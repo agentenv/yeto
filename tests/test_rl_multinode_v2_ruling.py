@@ -18,7 +18,7 @@ from yeto.gpu_spec import parse_gpu_spec
 from yeto.rl.elastic_benchmark import capabilities as caps
 from yeto.rl.elastic_benchmark.capabilities import ManifestError
 from yeto.rl.engine import multinode as mn
-from yeto.rl.engine.miles_adapter.placement import PlacementRequest
+from yeto.rl.adapters.miles.placement import PlacementRequest
 
 T = mn.Topology(2, 4)
 
@@ -151,8 +151,8 @@ def test_launcher_switches_merge_cli_and_cfg_and_forward_to_the_learner(monkeypa
 
 
 def test_learner_switches_reach_the_placement_request_and_the_layout():
-    from yeto.rl.engine.miles_adapter import entry
-    from yeto.rl.engine.miles_adapter.config import placement_request
+    from yeto.rl.adapters.miles import entry
+    from yeto.rl.adapters.miles.config import placement_request
 
     parallel = SimpleNamespace(colocated=False, actor_num_nodes=2, actor_num_gpus_per_node=4,
                                dedicated_rollout_gpus=8, rollout_num_gpus_per_engine=8, standby_gpus=0,
@@ -186,8 +186,8 @@ def test_rollout_edge_scales_by_whole_engine_replicas():
 
 
 def test_bind_members_refuses_a_partial_node_cross_node_cell():
-    from yeto.rl.engine.miles_adapter.rollout import MembershipPlanError
-    import yeto.rl.engine.miles_adapter.rollout as ro
+    from yeto.rl.adapters.miles.rollout import MembershipPlanError
+    import yeto.rl.adapters.miles.rollout as ro
 
     class _B:
         gpus_per_node = 4
@@ -262,7 +262,7 @@ def test_role_map_and_occupation_and_stale_incarnation_rules():
 def test_entry_preflight_journals_roles_and_refuses_stale_incarnation(tmp_path, monkeypatch):
     from test_rl_multinode_recovery import _journal
     from test_rl_reconfig_recovery import _ctl
-    from yeto.rl.engine.miles_adapter import entry
+    from yeto.rl.adapters.miles import entry
 
     topology = SimpleNamespace(nodes=2, gpus_per_node=2)
     miles_args = SimpleNamespace(yeto_rl_event_tape=str(tmp_path / "events.jsonl"), yeto_rl_learner_id=0,
@@ -311,7 +311,7 @@ def test_entry_preflight_journals_roles_and_refuses_stale_incarnation(tmp_path, 
 
 
 def test_incarnation_marker_files_track_live_pids(tmp_path):
-    from yeto.rl.engine.miles_adapter import entry
+    from yeto.rl.adapters.miles import entry
 
     d = str(tmp_path / "markers")
     entry._write_markers([A, B], "inc-1", os.getpid(), marker_dir=d)

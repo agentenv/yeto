@@ -8,7 +8,7 @@ import torch
 
 from yeto.rl.contracts import TrajectoryEnvelope
 from yeto.rl.local_learner import ComponentIdentity
-from yeto.rl.miles_full_parameter import MilesFullParameterAdapter
+from yeto.rl.adapters.miles.models.full_parameter import MilesFullParameterAdapter
 from yeto.rl.trajectory_evidence import TrajectoryBatchEvidence
 
 REVISION = "a" * 40

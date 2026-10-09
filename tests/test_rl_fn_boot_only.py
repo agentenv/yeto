@@ -42,8 +42,8 @@ def _boot_body(snapshot: Path, *, boot_only: bool, ref_dir: str | None) -> str:
         from rl_e2e_launch import island_run, learner_from_run
         from fp_fn import fnrun_cli
         from yeto.rl import learner
-        from yeto.rl.engine.miles_adapter import config as mac
-        from yeto.rl.engine.miles_adapter import state as mas
+        from yeto.rl.adapters.miles import config as mac
+        from yeto.rl.adapters.miles import state as mas
 
         mp = _m.MonkeyPatch()
         extra = ("--rl-boot-only",) if {boot_only!r} else ()

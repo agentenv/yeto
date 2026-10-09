@@ -86,8 +86,8 @@ import importlib  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 
 from yeto.rl import critic_state as cs  # noqa: E402
-from yeto.rl.engine.miles_adapter import state_plugin as sp  # noqa: E402
-from yeto.rl.engine.miles_adapter.trainer import MilesTrainerGroup  # noqa: E402
+from yeto.rl.adapters.miles import state_plugin as sp  # noqa: E402
+from yeto.rl.adapters.miles.trainer import MilesTrainerGroup  # noqa: E402
 
 H = "a" * 64
 
@@ -402,7 +402,7 @@ def test_critic_channel_failure_rolls_back_both_roles(tmp_path):
 
 
 def test_build_sync_selects_the_dual_channel_for_a_critic():
-    from yeto.rl.engine.miles_adapter.entry import build_sync
+    from yeto.rl.adapters.miles.entry import build_sync
 
     base = dict(yeto_rl_bridge_config=SimpleNamespace(), yeto_rl_sync_preset="strict-avg",
                 yeto_rl_completed_groups_path="/tmp/s13/none.pt")

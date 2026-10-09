@@ -21,7 +21,7 @@ from yeto.rl.dense_full_parameter_sweep import (
     DenseFullParameterSweep,
     DenseSweepConfig,
 )
-from yeto.rl.dense_sweep_wire import DenseSweepWire
+from yeto.rl.adapters.miles.models.dense_sweep_wire import DenseSweepWire
 from yeto.rl.local_learner import (
     ComponentIdentity,
     ParameterLayout,
