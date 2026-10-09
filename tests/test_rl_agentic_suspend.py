@@ -445,3 +445,45 @@ def test_estimate_reports_why_samples_are_unscored_and_skips_unknown_trained_tok
     out = carry_over.estimate_cross_version_truncation(args, [s], 4, failing)
     assert out["cross_version_unscored_samples"] == 1
     assert out["cross_version_unscored_reasons"] == {"ValueError: alignment": 1}
+
+
+def _fake_prefill_module(monkeypatch):
+    import sys
+    import types
+
+    mod = types.ModuleType("miles.rollout.generate_utils.prefill_logprobs")
+    mod._build_prefill_scoring_payload = lambda args, sample, params: {"input_ids": list(sample.tokens)}
+    mod._extract_response_logprobs = lambda sample, meta: meta["input_token_logprobs"]
+    for name in ("miles", "miles.rollout", "miles.rollout.generate_utils"):
+        monkeypatch.setitem(sys.modules, name, sys.modules.get(name) or types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, mod.__name__, mod)
+
+
+def test_scorer_sends_routing_key_under_manual_router_policy(monkeypatch):
+    """S18 ARU-3 M1: the session server sets the router policy to ``manual``,
+    which rejects /generate without X-SMG-Routing-Key (one router client error
+    per unscored sample). The scorer must send the key."""
+    import io
+
+    _fake_prefill_module(monkeypatch)
+    seen: list[dict[str, str]] = []
+
+    def fake_urlopen(request, timeout):
+        seen.append({k.lower(): v for k, v in request.header_items()})
+        return io.BytesIO(json.dumps({"meta_info": {"input_token_logprobs": [-0.1, -0.2]}}).encode())
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    args = SimpleNamespace(sglang_router_ip="r", sglang_router_port=1, sglang_router_policy="manual")
+    score = carry_over.router_prefill_scorer(args)
+
+    keyed = SimpleNamespace(tokens=[1, 2, 3], response_length=2, routing_key="sess-7")
+    assert score(keyed) == [-0.1, -0.2] and score.last_error is None
+    assert seen[-1]["x-smg-routing-key"] == "sess-7"
+
+    unkeyed = SimpleNamespace(tokens=[1, 2, 3], response_length=2, routing_key=None)
+    assert score(unkeyed) == [-0.1, -0.2]
+    assert seen[-1]["x-smg-routing-key"] == carry_over.SCORING_ROUTING_KEY
+
+    args.sglang_router_policy = "cache_aware"
+    assert score(unkeyed) == [-0.1, -0.2]
+    assert "x-smg-routing-key" not in seen[-1]
