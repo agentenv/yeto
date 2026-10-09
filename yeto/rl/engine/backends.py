@@ -55,6 +55,7 @@ class BackendEntry:
     #   binding       neutral name -> backend binding check (4.4a)
     #   identity      BackendIdentity of this adapter (phase 5)
     #   image         Modal-built engine image recipe (verl: ``verl-build:<commit>``)
+    #   policy_age    SUPPORT: PolicyAgeSupport (agentic-rollout-utilization 2.1/6.3)
     roles: Mapping[str, str] = field(default_factory=dict)
 
 
@@ -75,6 +76,7 @@ _REGISTRY: dict[str, BackendEntry] = {
         "run_config_rules": f"{_MILES}.run_config_rules",
         "binding": f"{_MILES}.binding",
         "identity": f"{_MILES}.identity",
+        "policy_age": f"{_MILES}.policy_age",
     }),
     # rl-verl-backend: first step FSDP2 + vLLM, one GPU per island (roles the
     # neutral code needs; codex/elastic-pool roles are not provided yet and
@@ -88,6 +90,7 @@ _REGISTRY: dict[str, BackendEntry] = {
         "binding": f"{_VERL}.binding",
         "identity": f"{_VERL}.identity",
         "image": f"{_VERL}.image",
+        "policy_age": f"{_VERL}.policy_age",
     }),
 }
 

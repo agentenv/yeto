@@ -27,3 +27,13 @@ def check_expert_parallel(actor_gpus: int, expert_parallel: int) -> None:
 def check_global_batch(global_batch: int, data_parallel: int) -> None:
     if data_parallel != 1 or global_batch <= 0:
         raise ValueError("verl backend first step: data parallel 1 and a positive batch")
+
+
+def check_over_sampling(rollout_batch_size: int, over_sampling_batch_size: int) -> None:
+    """agentic-rollout-utilization 6.2: the pinned verl fork has no usable
+    over-sample cut-off in synchronous mode (``rollout.over_sample_rate`` is
+    defined but never used), so over-sampling is refused, not ignored."""
+    if over_sampling_batch_size != rollout_batch_size:
+        raise ValueError(
+            "verl 后端尚未实现多发截止（阶段 0，任务 6.2b）：--over-sampling-batch-size "
+            f"{over_sampling_batch_size} 必须等于 --rollout-batch-size {rollout_batch_size}")

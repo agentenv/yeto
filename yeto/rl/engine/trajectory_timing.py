@@ -31,6 +31,10 @@ TIMING_FIELDS: dict[str, tuple[type, ...]] = {
     "worker_seconds": (float,),
     "turn_generation_seconds": (list,),
     "turn_tool_seconds": (list,),
+    # Per-trajectory totals, the fields every backend reports with the same
+    # meaning (Miles: sums of the per-turn lists; verl: agent-loop timers).
+    "generation_seconds": (float,),
+    "tool_seconds": (float,),
 }
 MAX_TURNS_RECORDED = 256
 
@@ -64,6 +68,8 @@ class PhaseClock:
         self._mark, self._in_tool = now, False
         return {
             "worker_seconds": round(now - self._start, 3),
+            "generation_seconds": round(sum(self.generation), 3),
+            "tool_seconds": round(sum(self.tool), 3),
             "turn_generation_seconds": [round(v, 3) for v in self.generation[:MAX_TURNS_RECORDED]],
             "turn_tool_seconds": [round(v, 3) for v in self.tool[:MAX_TURNS_RECORDED]],
         }
@@ -73,6 +79,9 @@ def phase_totals(record: Mapping[str, Any]) -> dict[str, float | None]:
     """The three phase totals of one trajectory record (None = not reported)."""
 
     def total(key: str) -> float | None:
+        flat = record.get(key.replace("turn_", ""))
+        if isinstance(flat, (int, float)) and not isinstance(flat, bool):
+            return float(flat)
         values = record.get(key)
         if not isinstance(values, list) or any(
                 not isinstance(v, (int, float)) or isinstance(v, bool) for v in values):

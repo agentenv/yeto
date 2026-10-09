@@ -240,6 +240,11 @@ TRAJECTORY_REWARD_OPTIONAL: dict[str, tuple[type, ...]] = {
     "worker_seconds": (float,),
     "turn_generation_seconds": (list,),
     "turn_tool_seconds": (list,),
+    "generation_seconds": (float,),
+    "tool_seconds": (float,),
+    # agentic-rollout-utilization 6.2: oldest/newest generating version of a
+    # carried-over trajectory (absent at limit 0: every token is current)
+    "policy_versions": (list,),
 }
 
 

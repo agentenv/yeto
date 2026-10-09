@@ -2098,6 +2098,8 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         flags += " --rl-print-attestation-fingerprint"
     if getattr(args, "rl_boot_only", False):
         flags += " --rl-boot-only"
+    if getattr(args, "rl_max_policy_age", 0):  # 0 (default) adds nothing
+        flags += f" --rl-max-policy-age {int(args.rl_max_policy_age)}"
     if (getattr(args, "rl_lr_schedule", None) or "auto") != "auto":  # auto adds nothing
         flags += f" --rl-lr-schedule {args.rl_lr_schedule}"
     if island_scheduling_mode(args) == "elastic":  # legacy adds nothing
@@ -2325,12 +2327,24 @@ def _prepare_rl_args(
     if args.seq_len < 2:
         raise ValueError("RL v0 requires --seq-len >= 2")
     args.seq_len = max(args.seq_len, args.rollout_max_response_len)
+    # agentic-rollout-utilization 2.1: the policy-age limit is checked against
+    # what the selected backend supports before any cloud or GPU work.
+    from .rl.engine.policy_age import validate_limit
+
+    max_policy_age = validate_limit(getattr(args, "rl_max_policy_age", 0) or 0)
+    _rl_backend_module(args, "policy_age").SUPPORT.check(max_policy_age)
     if args.over_sampling_batch_size is None:
         args.over_sampling_batch_size = args.rollout_batch_size
     elif args.over_sampling_batch_size < args.rollout_batch_size:
         raise ValueError(
             "RL --over-sampling-batch-size must be at least --rollout-batch-size"
         )
+    # agentic-rollout-utilization 6.2: a backend without over-sample cut-off
+    # refuses it before launch instead of silently ignoring it.
+    over_sampling_check = getattr(
+        _rl_backend_module(args, "run_config_rules"), "check_over_sampling", None)
+    if callable(over_sampling_check):
+        over_sampling_check(args.rollout_batch_size, args.over_sampling_batch_size)
     _rl_miles_function(args.custom_generate_function_path)
     custom_agent = getattr(args, "custom_agent_function_path", None)
     _rl_miles_function(custom_agent, "--custom-agent-function-path")

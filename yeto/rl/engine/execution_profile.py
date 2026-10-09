@@ -16,9 +16,10 @@ execution modes are ``colocated-serial`` / ``partitioned-serial`` /
 * the outer protocol (``strict-avg`` / ``decoupled``) is orthogonal to the
   island-internal policy age: a decoupled outer protocol does NOT make the
   island asynchronous, and it cannot be used to justify ``max_policy_age > 0``;
-* a non-zero policy age needs a named algorithm contract that this change does
-  not provide (one-step-off-policy is a separate design), so such profiles are
-  rejected rather than silently accepted.
+* a non-zero policy age needs a named algorithm contract: only
+  ``bounded-staleness`` (agentic-rollout-utilization: token-level version
+  segments + cross-version importance-sampling correction) relaxes it; any
+  other contract with a non-zero age is rejected rather than silently accepted.
 """
 
 from __future__ import annotations
@@ -66,7 +67,9 @@ SAME_ROUND_DEPS: Mapping[str, tuple[str, ...]] = {
 
 # Algorithm contracts this change knows. Only "on-policy" is certified; any
 # other contract (e.g. "one-step-off-policy") is a separate algorithm design.
-ALGORITHM_CONTRACTS = ("on-policy",)
+# agentic-rollout-utilization 2.3: "bounded-staleness" = token-level version
+# segments + cross-version importance-sampling correction, limit > 0 only.
+ALGORITHM_CONTRACTS = ("on-policy", "bounded-staleness")
 FUTURE_CONTRACTS = ("one-step-off-policy",)
 
 
@@ -205,13 +208,19 @@ class ExecutionProfile:
                 "groups_per_batch * samples_per_group must be divisible by "
                 "optimizer_steps_per_round (no floor division of samples)"
             )
-        if self.max_policy_age != 0:
-            # On-policy is the only certified contract and it pins the age to 0.
-            # A decoupled OUTER protocol is not an island-internal async contract.
+        if not isinstance(self.max_policy_age, int) or isinstance(self.max_policy_age, bool) \
+                or self.max_policy_age < 0:
+            raise ProfileError("max_policy_age must be a non-negative integer")
+        if self.max_policy_age != 0 and self.algorithm_contract != "bounded-staleness":
+            # On-policy pins the age to 0. A decoupled OUTER protocol is not an
+            # island-internal async contract; only the bounded-staleness contract
+            # (agentic-rollout-utilization: version segments + IS correction) relaxes it.
             raise ProfileError(
                 "max_policy_age must be 0 under the on-policy contract "
                 f"(outer_protocol={self.outer_protocol!r} does not relax island staleness)"
             )
+        if self.max_policy_age == 0 and self.algorithm_contract == "bounded-staleness":
+            raise ProfileError("the bounded-staleness contract needs max_policy_age > 0")
         if self.max_policy_age == 0 and self.max_inflight_batches != 1:
             # Age 0: generation of batch r+1 waits for the publication of the
             # update trained on batch r, so a second batch can never be in flight.
@@ -474,7 +483,9 @@ def train_blockers(profile: ExecutionProfile, snap: ReadinessSnapshot) -> list[s
     if None in versions:
         out.append("ready group without a recorded policy version")
     versions.discard(None)
-    if len(versions) > 1:
+    if len(versions) > 1 and profile.max_policy_age == 0:
+        # Limit > 0 (bounded-staleness): versions within the window may mix;
+        # each is still checked against the limit below.
         out.append(f"batch mixes policy versions {sorted(versions)}")
     for v in versions:
         if snap.trained_policy_version - v > profile.max_policy_age:

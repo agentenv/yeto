@@ -201,3 +201,8 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
 
 - 旧 GPU 证据：只是契约哈希多了一个字段，训练行为不变，按 D6 继续以本表引用。
 - 同一 PR 另有一处插件源码变化（S17 N17）：`yeto/rl/harness/codex/codex_openenv_subprocess_agent_function.py` 增加 Miles 的 `abort` 钩子（多发请求凑够即截止时取消多余的 Codex 工作进程），codex_harness 样本里该插件 `source_sha256` `326680fe…` → `fbb48c5c…`（基于 #155 之后的 main）；不进算法哈希/契约哈希。
+## S18 agentic-rollout-utilization 第 2 组：落后上限开关 `--rl-max-policy-age`（分支 s18-aru-stage1，2026-10-09）
+
+- 结论：默认 0 时**没有任何哈希变化**——8 个标准样本、`fake_engine_tapes.json`、`algorithm_sha256`、契约哈希、Miles 命令行、`backend_identity` 逐字节不变（`tests/test_decoupling_golden.py` 12 过，未重新生成）。
+- 原因：落后上限在 `ExecutionProfile` 里本来就有 `max_policy_age` 字段（默认 0，已在 `contract_hash` 内）；新开关只在非 0 时改变它（同时 `algorithm_contract` 改为 `bounded-staleness`）。发给同步服务的岛身份（HELLO 会话契约与 elastic JOIN）用 `policy_age.bind_policy_age` 绑定上限，0 时原样返回；launcher 在 0 时不向岛命令行加任何参数。
+- 非 0 时（目前两个后端都只支持到阶段 1，launcher 起机前拒绝）：岛身份哈希、契约哈希、算法哈希（`execution.max_policy_staleness`）都会变，落后上限不同的岛在握手时只拒该连接。

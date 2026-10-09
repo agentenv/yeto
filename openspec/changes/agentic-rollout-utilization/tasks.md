@@ -12,17 +12,26 @@
 - [ ] 1.4 GPU A/B（并入 N17 合并验证运行）：M1 run d 配置单岛 1×H200 各 6 轮，判据见 design Migration Plan；结果与证据路径写回本文件与 AGENTIC-GPU-UTIL-RESEARCH.md
 
 ## 2. 阶段 1：落后上限开关与契约（默认 0）
-- [ ] 2.1 新增 `--rl-max-policy-age`（默认 0）进契约哈希；不一致的岛按只拒该连接处理（验证：严格与 elastic 握手单测；hash-migration.md 记录）
-- [ ] 2.2 默认 0 回归：重新生成标准样本，仅契约哈希变化（验证：标准样本比对脚本）
-- [ ] 2.3 execution_profile / driver 版本检查改为"落后不超过上限"，0 时行为不变（验证：单测覆盖 0、1、超限丢弃）
-- [ ] 2.4 Miles 适配层由上限推导 partial-rollout 与 mask/TIS 开关，从 algorithm_flags 不映射表移除（验证：Miles 命令行标准样本，上限 0 时无变化）
+- [x] 2.1 新增 `--rl-max-policy-age`（默认 0）进契约哈希；不一致的岛按只拒该连接处理（验证：严格与 elastic 握手单测；hash-migration.md 记录）
+  - 证据：核心 `yeto/rl/engine/policy_age.py`（`bind_policy_age` 0 时身份不变、非 0 绑定进岛身份；`PolicyAgeSupport` 后端声明支持到哪个阶段，适配层角色 `policy_age`）；launcher 起机前按后端检查；`tests/test_rl_policy_age.py::test_strict_handshake_refuses_an_island_with_another_limit`、`::test_elastic_join_carries_the_bound_identity`、`::test_launcher_refuses_an_unsupported_limit_before_launch[miles|verl]`、`::test_limit_zero_keeps_identity_and_nonzero_changes_it`；hash-migration.md "S18 第 2 组"一节（默认 0 无任何哈希变化）。
+- [x] 2.2 默认 0 回归：重新生成标准样本，仅契约哈希变化（验证：标准样本比对脚本）
+  - 证据：`tests/test_decoupling_golden.py` 12 过且 `tests/golden/` 无改动——默认 0 连契约哈希也不变（上限原本就在 `ExecutionProfile.contract_hash` 内且默认 0；0 时不加参数、岛身份原样），比 spec 预期更严。
+- [x] 2.3 execution_profile / driver 版本检查改为"落后不超过上限"，0 时行为不变（验证：单测覆盖 0、1、超限丢弃）
+  - 证据：`ExecutionProfile` 新增合约 `bounded-staleness`（上限 >0 必须用它，0 必须 on-policy），上限 >0 时 `train_blockers` 允许窗口内混版本；`AlgorithmSpec` 的 staleness>0 改为要求 TIS/自定义修正；`GroupMetadata.policy_versions`（版本段）；driver 上限 0 时旧规则不变（并拒绝含旧版本段的组），上限 N 时接受窗口内且哈希为已发布版本的组、超限报错（引擎侧用 `policy_age.split_by_age` 丢弃）。测试：`tests/test_rl_policy_age.py::test_profile_limit_needs_the_bounded_staleness_contract`、`::test_split_by_age_zero_one_and_over_limit`、`::test_driver_limit_zero_keeps_refusing_older_tokens`、`::test_driver_limit_one_accepts_version_segments_within_the_window`、`::test_driver_limit_one_refuses_a_group_two_versions_old`。
+- [x] 2.4 Miles 适配层由上限推导 partial-rollout 与 mask/TIS 开关，从 algorithm_flags 不映射表移除（验证：Miles 命令行标准样本，上限 0 时无变化）
+  - 证据：`yeto/rl/adapters/miles/policy_age.py`（`policy_age_argv`：0 → 无，N>0 → `--partial-rollout --mask-offpolicy-in-partial-rollout`）；`algo_flag_rows` 注册两行（由 `execution.max_policy_staleness` 推导，直接传入被拒并提示用 `--rl-max-policy-age`），从 `_UNMAPPED` 移除，仍属适配层独占参数；`tests/test_rl_policy_age.py::test_miles_switches_are_derived_from_the_limit`；Miles 命令行标准样本不变（`tests/test_decoupling_golden.py`）。TIS 由算法规格的 correction 配置（staleness>0 时必需），fork 未改。
 
 ## 3. 阶段 1：版本段记账、切点与多岛账本
-- [ ] 3.1 token 级生成版本与生成概率随样本携带（验证：样本序列化往返单测）
-- [ ] 3.2 训练端跨版本重要性采样修正与截断比例上报（验证：CPU 数值单测，构造已知比值）
-- [ ] 3.3 续训切点"在途轨迹"段，上限 0 时必须为空；以 0 恢复含在途轨迹的切点时丢弃并上报（验证：cut 单测与恢复单测）
-- [ ] 3.4 多岛：样本按版本段进入 island_ledger 的 ACCEPT_IS 判定（验证：账本单测，跨 1/2 版本两种情形）
-- [ ] 3.5 截断比例告警阈值与运行内自动回退到 0（只降不升）（验证：单测注入高截断比例）
+- [x] 3.1 token 级生成版本与生成概率随样本携带（验证：样本序列化往返单测）
+  - 证据：`yeto/rl/engine/version_segments.py` `TokenProvenance`（逐 token 版本 + 生成对数概率，序列化为版本段 + 概率）；组级 `GroupMetadata.policy_versions`（第 2 组）；`tests/test_rl_version_segments.py::test_provenance_serialization_roundtrip_and_segments`。Miles 样本上的实际填充属阶段 2（4.1）。
+- [x] 3.2 训练端跨版本重要性采样修正与截断比例上报（验证：CPU 数值单测，构造已知比值）
+  - 证据：`cross_version_is`（当前版本 token 权重 1，旧版本 token 取 exp(训练−生成) 截断到 [下界, 上界]，统计截断比例）、`batch_truncated_fraction`；`TrainStepMetrics.cross_version_truncated_fraction`，有值时写进 `rl_round_trained`；`tests/test_rl_version_segments.py::test_cross_version_is_with_known_ratios`、`::test_driver_injected_high_truncation_falls_back_to_zero`（事件含截断比例）。Miles 训练内由 TIS（生成时概率）执行，引擎上报截断比例属阶段 2 接线。
+- [x] 3.3 续训切点"在途轨迹"段，上限 0 时必须为空；以 0 恢复含在途轨迹的切点时丢弃并上报（验证：cut 单测与恢复单测）
+  - 证据：`CutManifest.in_flight`（非空才序列化，默认切点字节不变）；`context_problems`：上限 0 时在途段必须为空、carried_over 仍须 0，上限 >0 时 carried_over 必须等于在途条数（上限记在 ledger.max_policy_age）；`restore_in_flight`：上限 0 全部丢弃并上报，>0 时超限或同题组已完成者丢弃；`tests/test_rl_version_segments.py::test_cut_in_flight_section_empty_at_limit_zero`、`::test_restore_with_in_flight_trajectories`（5 条在途）。
+- [x] 3.4 多岛：样本按版本段进入 island_ledger 的 ACCEPT_IS 判定（验证：账本单测，跨 1/2 版本两种情形）
+  - 证据：`SampleGroup.version_segments`，`judge` 按最旧段判定、每段哈希必须是已发布版本；`tests/test_rl_version_segments.py::test_ledger_judges_carried_over_groups_by_their_oldest_segment`（跨 1 版本 ACCEPT_IS；上界 1 时跨 2 版本 REJECT、上界 2 时 ACCEPT_IS；伪造段哈希 REJECT）。
+- [x] 3.5 截断比例告警阈值与运行内自动回退到 0（只降不升）（验证：单测注入高截断比例）
+  - 证据：`PolicyAgeGovernor`（告警 0.2、回退 0.5 默认）；driver `_govern_policy_age` 发 `rl_policy_age_warning` / `rl_policy_age_fallback`，回退后 `_max_policy_age()` 恒 0 并调用引擎可选动词 `set_max_policy_age(0)`；`tests/test_rl_version_segments.py::test_governor_warns_then_falls_back_and_never_goes_up`、`::test_driver_injected_high_truncation_falls_back_to_zero`。阈值默认值为本次拟定，阶段 2 上卡后按实测调整。
 
 ## 4. 阶段 2：单轮任务续跑（门槛：阶段 0 达标 + N15 偏差已定位）
 - [ ] 4.1 Miles 单轮路径开启 partial-rollout，接入版本段记账（验证：假引擎单测，跨版本续跑样本版本段正确）
@@ -36,8 +45,14 @@
 - [ ] 5.5 GPU 对照：M1 配置两岛，上限 0 vs 1，判据含奖励与长度分布、沙箱错误 0、存活费用（上卡前报批；验证：证据路径）
 
 ## 6. verl 并行线（与第 1–5 组同阶段门槛）
-- [ ] 6.1 读码确认 verl fork fully_async 下 `tool_agent_loop` 被中止后是从头重跑还是续跑、版本记录粒度、与 yeto 多岛同步的冲突点，结论写入 design 第 9 条（验证：design 更新并附文件:行号）
-- [ ] 6.2 阶段 0：verl 同步模式多发与截止，丢弃计数与三段耗时翻译成统一事件字段（验证：verl 适配层单测，字段与 Miles 一致）
-- [ ] 6.3 阶段 1：verl 适配层按落后上限声明能力，0 时 verl 命令行标准样本不变；不支持的阶段启动前报错（验证：标准样本比对与报错单测）
+- [x] 6.1 读码确认 verl fork fully_async 下 `tool_agent_loop` 被中止后是从头重跑还是续跑、版本记录粒度、与 yeto 多岛同步的冲突点，结论写入 design 第 9 条（验证：design 更新并附文件:行号）
+  - 证据：design 第 9 条"6.1 读码结论"（verl fork acad9875，附文件:行号）：中止只打断模型生成、不打断工具；partial_rollout 开时在推理服务客户端内保留前缀续写；版本每轨迹 min/max；staleness_threshold 按样本数限流；trainer 本地版本号与 outer version 错位；同步模式 `over_sample_rate` 无使用处。
+- [x] 6.2 阶段 0：verl 同步模式多发与截止，丢弃计数与三段耗时翻译成统一事件字段（验证：verl 适配层单测，字段与 Miles 一致）
+  - 范围调整（10-09 主 agent 代用户拍板）：verl 的"凑够即截止/续跑"不在同步模式做，并入 6.4（阶段 2，走 fully_async 路径）；本项完成的是统一字段翻译与起机前报错。
+  - 证据：`yeto/rl/adapters/verl/rollout_events.py`（agent loop 计时 → `generation_seconds`/`tool_seconds`/`evaluate_time`，min/max_global_steps → `policy_versions`，丢弃统计 → 与 Miles 相同的 `rl_rollout_cutoff` 字段）；Miles `PhaseClock` 给出同名总量字段；verl 多发数 ≠ 批次时起机前报错（`run_config_rules.check_over_sampling`，原为静默忽略）。测试：`tests/test_rl_verl_policy_age.py::test_verl_and_miles_report_the_same_trajectory_fields`、`::test_verl_discard_tally_uses_the_miles_cutoff_fields`、`::test_verl_refuses_over_sampling_before_launch`。
+- [ ] 6.2b ~~verl 同步模式截止补丁~~：**不做**（10-09 主 agent 代用户拍板）。原因：批次在 `AgentLoopManager.generate_sequences`（`agent_loop.py:1249-1275`）按 worker 切块分给多个 Ray actor，全局截止需跨 worker 计数，且要改同步训练器的批次假设（uid/重复/ppo_mini_batch 整除），代价大且只服务阶段 0 测量；阶段 0 数据用 Miles A/B 已足够。verl 的截止/续跑并入 6.4 的 fully_async 路径。
+- [x] 6.3 阶段 1：verl 适配层按落后上限声明能力，0 时 verl 命令行标准样本不变；不支持的阶段启动前报错（验证：标准样本比对与报错单测）
+  - 证据：`yeto/rl/adapters/verl/policy_age.py`（`SUPPORT` 阶段 1、上限 0；`policy_age_overrides(0)` 为空）；`verl/entry.py` 的 `max_policy_staleness` 改为取自 `SUPPORT`；后端注册表新增角色 `policy_age`；测试：`tests/test_rl_verl_policy_age.py::test_verl_declares_stage_one_and_limit_zero_overrides_are_empty`、`::test_verl_command_line_unchanged_at_limit_zero`、`tests/test_rl_policy_age.py::test_launcher_refuses_an_unsupported_limit_before_launch[verl]`。仓库内无 verl 命令行标准样本文件，以 `build_overrides` 逐项相等代替。
 - [ ] 6.4 阶段 2：由落后上限推导 `staleness_threshold` 与 `partial_rollout`，样本版本段接入 yeto 账本（验证：CPU 单测；GPU 对照与 4.2 合并在同一次上卡，单岛 verl 小模型上限 0 vs 1）
+  - 子要求（6.1 读码所得，10-09 主 agent 拍板列入）：(a) verl 前缀续写发生在推理服务客户端内、对 agent loop 不可见——适配层需自行补记逐段版本与生成概率；(b) verl 版本只有每轨迹 min/max_global_steps——翻译为版本段边界，判定按最旧版本；(c) `staleness_threshold` 只按样本数限流、不比版本号——超限丢弃由 yeto 按版本段判定，不能依赖 verl；(d) trainer 本地 `current_param_version` 与外层 outer version 错位——多岛时适配层要做映射并约束检查点/日志步号。
 - [ ] 6.5 阶段 3：verl 多轮工具调用续跑（若 6.1 确认原生支持则复用，否则按第 5 组同样规则实现），GPU 对照与 5.5 合并上卡（验证：证据路径）

@@ -73,6 +73,10 @@ class GroupMetadata:
     # sample filter (rl-algo-grpo-knobs D7; ledger terminal state
     # ``filtered``, alignment A2/F5). None: no sample filter configured.
     filtered_samples: int | None = None
+    # agentic-rollout-utilization 2.3/3.1: the policy versions that generated
+    # this group's tokens (version segments of carried-over trajectories).
+    # None = every token from ``policy_token``'s version (limit 0 always).
+    policy_versions: tuple[int, ...] | None = None
 
 
 @dataclass(frozen=True)

@@ -114,6 +114,10 @@ ADAPTER_OWNED_FLAGS = frozenset(
         # D3): mapped ones only enter through absorption into AlgorithmSpec,
         # unmapped ones are refused.
         *OBJECTIVE_FLAGS,
+        # agentic-rollout-utilization 2.4: derived from --rl-max-policy-age
+        # (rows registered in algo_flag_rows, after this import-time constant).
+        "--partial-rollout",
+        "--mask-offpolicy-in-partial-rollout",
     }
 )
 # Parsed-namespace attributes that must stay off (post-normalization check).

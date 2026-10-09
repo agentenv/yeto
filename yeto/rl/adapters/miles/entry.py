@@ -379,9 +379,19 @@ def execution_profile_for(
         optimizer_steps_per_round=int(getattr(miles_args, "num_steps_per_rollout", 1) or 1),
         allowed_overlap=overlap,
         algorithm_spec_sha256=expected_sha256,
+        **_policy_age_fields(miles_args),
         lr_schedule_sha256=miles_lr_schedule_sha256(miles_args),
         extra={"algorithm_hash_source": source},
     )
+
+
+def _policy_age_fields(miles_args: Any) -> dict[str, Any]:
+    """agentic-rollout-utilization 2.1: limit 0 (default) adds nothing to the profile."""
+    from yeto.rl.engine.policy_age import BOUNDED_STALENESS_CONTRACT
+
+    age = int(getattr(miles_args, "yeto_rl_max_policy_age", 0) or 0)
+    return ({"max_policy_age": age, "algorithm_contract": BOUNDED_STALENESS_CONTRACT}
+            if age else {})
 
 
 def load_tool_wait_source(miles_args: Any, elastic: Any = None) -> Any:
