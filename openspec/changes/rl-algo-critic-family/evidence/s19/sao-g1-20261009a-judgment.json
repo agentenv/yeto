@@ -1,0 +1,267 @@
+{
+ "case": "sao",
+ "critic_lr": [
+  5.000000000000001e-07,
+  1.0000000000000002e-06,
+  1.5000000000000002e-06,
+  2.0000000000000003e-06,
+  2.5e-06,
+  3.0000000000000005e-06,
+  3.5000000000000004e-06,
+  4.000000000000001e-06,
+  4.5e-06,
+  5e-06,
+  5e-06,
+  5e-06,
+  5e-06,
+  5e-06,
+  5e-06,
+  5e-06,
+  5e-06,
+  5e-06,
+  5e-06,
+  5e-06,
+  5e-06,
+  5e-06,
+  5e-06,
+  5e-06
+ ],
+ "ev_by_round": [
+  -0.0725656285171532,
+  -0.10614492355032978,
+  -0.3279660615947666,
+  -0.2227448277598083,
+  null,
+  -0.04024651431631909,
+  -0.12410117174445845,
+  -0.6635785008529824,
+  0.048846884907162935,
+  0.04148052009208125,
+  -0.20795670544641465,
+  -0.004627499488419673
+ ],
+ "ev_last4_mean": -0.030564199983897533,
+ "ev_verdict": "EV<=0",
+ "gpu": [
+  "[s19-sao-g1-20261009a-l0-modal] [modal-island 0] requested H100!:1, got ['NVIDIA H100 80GB HBM3']"
+ ],
+ "missing": [
+  "round 4: explained_variance missing"
+ ],
+ "notes": [
+  "legacy-path EV +0.1365 (Terminal-Bench, mixed-label forward-only gate); here gsm8k in-training EV; recorded only"
+ ],
+ "overlay_applied": [
+  "RL engine ports: image docker:ghcr.io/michaellchung/yeto-miles-ports@sha256:fa2413be4c4fcf066437f946365f01392d6f884002f8fa19c770c12c08f2acf0, miles 64b591a4bec1ffa37fb089d3e3b99c84773b1ffc, sglang 2fa880182eefdb31e64d8ea70317be27f9f32121"
+ ],
+ "problems": [],
+ "rounds": [
+  {
+   "critic_init_sha256": null,
+   "explained_variance": -0.0725656285171532,
+   "extra_metrics": {
+    "critic/value_loss": 6.464175224304199,
+    "entropy_loss": 0.0,
+    "pg_clipfrac": 0.0001230314956046641,
+    "sao_dis_high_rejectfrac": 0.0,
+    "sao_dis_low_rejectfrac": 0.0001230314956046641,
+    "sao_dis_ratio": 1.0005916357040405,
+    "sao_dis_rejectfrac": 0.0001230314956046641
+   },
+   "grad_norm": 0.349266916513443,
+   "pg_loss": 0.01281716674566269,
+   "rollout_id": 0,
+   "value_loss": 6.464175224304199
+  },
+  {
+   "critic_init_sha256": null,
+   "explained_variance": -0.10614492355032978,
+   "extra_metrics": {
+    "critic/value_loss": 5.909738779067993,
+    "entropy_loss": 0.0,
+    "pg_clipfrac": 0.0,
+    "sao_dis_high_rejectfrac": 0.0,
+    "sao_dis_low_rejectfrac": 0.0,
+    "sao_dis_ratio": 1.0002758502960205,
+    "sao_dis_rejectfrac": 0.0
+   },
+   "grad_norm": 0.48309609293937683,
+   "pg_loss": -0.10728838294744492,
+   "rollout_id": 1,
+   "value_loss": 5.909738779067993
+  },
+  {
+   "critic_init_sha256": null,
+   "explained_variance": -0.3279660615947666,
+   "extra_metrics": {
+    "critic/value_loss": 5.313358545303345,
+    "entropy_loss": 0.0,
+    "pg_clipfrac": 0.0,
+    "sao_dis_high_rejectfrac": 0.0,
+    "sao_dis_low_rejectfrac": 0.0,
+    "sao_dis_ratio": 1.000127911567688,
+    "sao_dis_rejectfrac": 0.0
+   },
+   "grad_norm": 0.5796735882759094,
+   "pg_loss": -0.22919587790966034,
+   "rollout_id": 2,
+   "value_loss": 5.313358545303345
+  },
+  {
+   "critic_init_sha256": null,
+   "explained_variance": -0.2227448277598083,
+   "extra_metrics": {
+    "critic/value_loss": 4.389845132827759,
+    "entropy_loss": 0.0,
+    "pg_clipfrac": 0.0,
+    "sao_dis_high_rejectfrac": 0.0,
+    "sao_dis_low_rejectfrac": 0.0,
+    "sao_dis_ratio": 1.0002504587173462,
+    "sao_dis_rejectfrac": 0.0
+   },
+   "grad_norm": 0.34340423345565796,
+   "pg_loss": 0.015700826421380043,
+   "rollout_id": 3,
+   "value_loss": 4.389845132827759
+  },
+  {
+   "critic_init_sha256": null,
+   "explained_variance": null,
+   "extra_metrics": {
+    "critic/value_loss": 2.247974693775177,
+    "entropy_loss": 0.0,
+    "pg_clipfrac": 0.00016276042151730508,
+    "sao_dis_high_rejectfrac": 0.0,
+    "sao_dis_low_rejectfrac": 0.00016276042151730508,
+    "sao_dis_ratio": 0.9998101592063904,
+    "sao_dis_rejectfrac": 0.00016276042151730508
+   },
+   "grad_norm": 0.12271048128604889,
+   "pg_loss": -0.019006673246622086,
+   "rollout_id": 4,
+   "value_loss": 2.247974693775177
+  },
+  {
+   "critic_init_sha256": null,
+   "explained_variance": -0.04024651431631909,
+   "extra_metrics": {
+    "critic/value_loss": 3.011712670326233,
+    "entropy_loss": 0.0,
+    "pg_clipfrac": 8.138021075865254e-05,
+    "sao_dis_high_rejectfrac": 0.0,
+    "sao_dis_low_rejectfrac": 8.138021075865254e-05,
+    "sao_dis_ratio": 0.9994395971298218,
+    "sao_dis_rejectfrac": 8.138021075865254e-05
+   },
+   "grad_norm": 0.2586645781993866,
+   "pg_loss": 0.030748385936021805,
+   "rollout_id": 5,
+   "value_loss": 3.011712670326233
+  },
+  {
+   "critic_init_sha256": null,
+   "explained_variance": -0.12410117174445845,
+   "extra_metrics": {
+    "critic/value_loss": 2.384492039680481,
+    "entropy_loss": 0.0,
+    "pg_clipfrac": 0.004464285913854837,
+    "sao_dis_high_rejectfrac": 0.0,
+    "sao_dis_low_rejectfrac": 0.004464285913854837,
+    "sao_dis_ratio": 0.9982839226722717,
+    "sao_dis_rejectfrac": 0.004464285913854837
+   },
+   "grad_norm": 0.39733609557151794,
+   "pg_loss": -0.045612677931785583,
+   "rollout_id": 6,
+   "value_loss": 2.384492039680481
+  },
+  {
+   "critic_init_sha256": null,
+   "explained_variance": -0.6635785008529824,
+   "extra_metrics": {
+    "critic/value_loss": 1.8070992231369019,
+    "entropy_loss": 0.0,
+    "pg_clipfrac": 0.0,
+    "sao_dis_high_rejectfrac": 0.0,
+    "sao_dis_low_rejectfrac": 0.0,
+    "sao_dis_ratio": 1.0000789165496826,
+    "sao_dis_rejectfrac": 0.0
+   },
+   "grad_norm": 0.21498768031597137,
+   "pg_loss": -0.034272268414497375,
+   "rollout_id": 7,
+   "value_loss": 1.8070992231369019
+  },
+  {
+   "critic_init_sha256": null,
+   "explained_variance": 0.048846884907162935,
+   "extra_metrics": {
+    "critic/value_loss": 1.9967361092567444,
+    "entropy_loss": 0.0,
+    "pg_clipfrac": 0.0,
+    "sao_dis_high_rejectfrac": 0.0,
+    "sao_dis_low_rejectfrac": 0.0,
+    "sao_dis_ratio": 1.0001640319824219,
+    "sao_dis_rejectfrac": 0.0
+   },
+   "grad_norm": 0.3136998116970062,
+   "pg_loss": -0.027207791805267334,
+   "rollout_id": 8,
+   "value_loss": 1.9967361092567444
+  },
+  {
+   "critic_init_sha256": null,
+   "explained_variance": 0.04148052009208125,
+   "extra_metrics": {
+    "critic/value_loss": 1.741297721862793,
+    "entropy_loss": 0.0,
+    "pg_clipfrac": 0.0,
+    "sao_dis_high_rejectfrac": 0.0,
+    "sao_dis_low_rejectfrac": 0.0,
+    "sao_dis_ratio": 1.00056791305542,
+    "sao_dis_rejectfrac": 0.0
+   },
+   "grad_norm": 0.25783485174179077,
+   "pg_loss": -0.038450032472610474,
+   "rollout_id": 9,
+   "value_loss": 1.741297721862793
+  },
+  {
+   "critic_init_sha256": null,
+   "explained_variance": -0.20795670544641465,
+   "extra_metrics": {
+    "critic/value_loss": 1.6415638327598572,
+    "entropy_loss": 0.0,
+    "pg_clipfrac": 0.0,
+    "sao_dis_high_rejectfrac": 0.0,
+    "sao_dis_low_rejectfrac": 0.0,
+    "sao_dis_ratio": 1.0001006126403809,
+    "sao_dis_rejectfrac": 0.0
+   },
+   "grad_norm": 0.3397201895713806,
+   "pg_loss": 0.030179010704159737,
+   "rollout_id": 10,
+   "value_loss": 1.6415638327598572
+  },
+  {
+   "critic_init_sha256": null,
+   "explained_variance": -0.004627499488419673,
+   "extra_metrics": {
+    "critic/value_loss": 1.7916552424430847,
+    "entropy_loss": 0.0,
+    "pg_clipfrac": 8.138021075865254e-05,
+    "sao_dis_high_rejectfrac": 0.0,
+    "sao_dis_low_rejectfrac": 8.138021075865254e-05,
+    "sao_dis_ratio": 1.0000618696212769,
+    "sao_dis_rejectfrac": 8.138021075865254e-05
+   },
+   "grad_norm": 0.237635999917984,
+   "pg_loss": 0.007669204380363226,
+   "rollout_id": 11,
+   "value_loss": 1.7916552424430847
+  }
+ ],
+ "tape": "s19-sao-g1-20261009a/tape-direct/yeto-s19-sao-g1-20261009a/l0/rank0/rl-island-0.jsonl",
+ "verdict": "INCOMPLETE",
+ "warmup_product": null
+}
