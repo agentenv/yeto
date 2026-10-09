@@ -590,6 +590,9 @@ def trajectory_diagnostics(meta: dict[str, Any]) -> dict[str, Any]:
             tokens = last.get("completion_tokens")
             if tokens is None or (isinstance(tokens, int) and not isinstance(tokens, bool)):
                 out["last_completion_tokens"] = tokens
+    from yeto.rl.engine.trajectory_timing import timing_fields
+
+    out.update(timing_fields(meta))  # agentic-rollout-utilization 1.3
     log = meta.get("verifier_log")
     if isinstance(log, str):
         out["verifier_log"] = log[-2000:]
@@ -743,6 +746,7 @@ def policy_buffer_filter(args: Any, _rollout_id: Any, buffer: list, num_samples:
 
 
 _OFFSET_ATTR = "_yeto_data_source_offset"
+_GROUP_INDEX_ATTR = "_yeto_data_source_group_index"
 
 
 def submitted_groups(args: Any, data_source: Any) -> int | None:
@@ -751,17 +755,27 @@ def submitted_groups(args: Any, data_source: Any) -> int | None:
     Miles ``generate_rollout`` submits ``over_sampling_batch_size`` groups at a
     time and aborts the ones still in flight once enough are accepted; those
     never reach ``all_samples``. The drawn count is the advance of the data
-    source's ``sample_offset`` since the previous rollout (first rollout:
-    unknown; an epoch wrap-around or a buffer source: unknown -> None).
+    source's monotonic ``sample_group_index`` since the previous rollout
+    (agentic-rollout-utilization 1.1: survives an epoch wrap-around, which a
+    small task set hits every round under over-sampling). Sources without it
+    fall back to the ``sample_offset`` advance (a wrap-around: unknown). First
+    rollout or a buffer source: unknown -> None, never guessed.
     """
     source = getattr(data_source, "__self__", data_source)
     offset = getattr(source, "sample_offset", None)
-    if not isinstance(offset, int) or getattr(source, "buffer", None):
-        setattr(args, _OFFSET_ATTR, offset if isinstance(offset, int) else None)
-        return None
+    index = getattr(source, "sample_group_index", None)
+    index = index if isinstance(index, int) and not isinstance(index, bool) else None
+    previous_index = getattr(args, _GROUP_INDEX_ATTR, None)
     previous = getattr(args, _OFFSET_ATTR, None)
-    setattr(args, _OFFSET_ATTR, offset)
-    if not isinstance(previous, int) or offset < previous:
+    setattr(args, _GROUP_INDEX_ATTR, index)
+    setattr(args, _OFFSET_ATTR, offset if isinstance(offset, int) else None)
+    if getattr(source, "buffer", None):
+        return None
+    if index is not None:
+        if not isinstance(previous_index, int) or index < previous_index:
+            return None
+        return index - previous_index
+    if not isinstance(offset, int) or not isinstance(previous, int) or offset < previous:
         return None
     return offset - previous
 
@@ -828,6 +842,14 @@ def extract_rollout_metadata(args: Any, all_samples: Any, data_source: Any = Non
             # flight (partial_rollout off -> their prompts are consumed, never
             # trained: terminal, A2/F5 'filtered' with reason aborted_in_flight)
             payload["aborted_in_flight_groups"] = max(0, submitted - generated)
+        # agentic-rollout-utilization 1.2: the fork's abort() tally (agentenv/miles
+        # s18-abort-discard-stats) is exact, first rollout included; absent on
+        # older images -> the offset-derived count above (tokens unknown).
+        from yeto.rl.engine.rollout_cutoff import discard_stats_fields
+
+        payload.update(discard_stats_fields(getattr(args, "rollout_abort_discard_stats", None)))
+        if hasattr(args, "rollout_abort_discard_stats"):
+            args.rollout_abort_discard_stats = None
         put_to_sink(payload)
     finally:
         # Reset per-rollout state: the bounded filter keys its memo on

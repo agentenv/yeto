@@ -384,13 +384,21 @@ def load_tool_wait_source(miles_args: Any, elastic: Any = None) -> Any:
     The elastic drain board when wired; the island's named board when the
     tool-wait workload generate is configured (it counts on that board); 0
     (``TOOL_WAIT_NO_BOARD_STOCK``) for Miles' stock generate, which makes no
-    tool calls; None (unknown) for any other custom generate.
+    tool calls; the island's named board for the Codex OpenEnv agent, which
+    enters/exits it around every tool call (agentic-rollout-utilization 1.3);
+    None (unknown) for any other custom generate.
     """
+    from yeto.rl import CODEX_OPENENV_AGENT
+
     from .rollout import TOOL_WAIT_NO_BOARD_STOCK
 
     board = getattr(elastic, "tool_wait_board", None) if elastic is not None else None
     if board is not None:
         return board
+    if getattr(miles_args, "custom_agent_function_path", None) == CODEX_OPENENV_AGENT:
+        from .elastic_wiring import LazyBoardActor
+
+        return LazyBoardActor(int(getattr(miles_args, "yeto_rl_learner_id", 0) or 0))
     custom = getattr(miles_args, "custom_generate_function_path", None)
     if not custom:
         return TOOL_WAIT_NO_BOARD_STOCK

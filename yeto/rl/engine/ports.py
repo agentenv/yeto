@@ -106,6 +106,12 @@ class RolloutBatchHandle:
     # aborted in flight; None = unknown (see rollout_meta_hook.submitted_groups).
     submitted_groups: int | None = None
     aborted_in_flight_groups: int | None = None
+    # agentic-rollout-utilization 1.2: what the cut-off discarded (trajectories,
+    # response tokens already generated, groups whose tokens are unknown);
+    # None = the engine does not report it (see engine.rollout_cutoff).
+    aborted_in_flight_trajectories: int | None = None
+    aborted_in_flight_tokens: int | None = None
+    aborted_in_flight_unknown_groups: int | None = None
     # Engine mechanism that aborted them, recorded in the ledger's
     # ``engine_discarded`` entry (adapter-supplied, decoupling 2.7/E18).
     abort_mechanism: str | None = field(default=None, compare=False)

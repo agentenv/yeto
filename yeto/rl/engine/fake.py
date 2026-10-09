@@ -145,6 +145,11 @@ class FakeEngine:
     critic_tensors: dict[str, torch.Tensor] = field(default_factory=dict)
     # decoupling 2.8: "ports-only" builds a trainer without the optional verbs.
     capability_profile: str = "miles-like"
+    # agentic-rollout-utilization 1.2: submit this many groups per round and cut
+    # off at ``groups`` (stage 0: discard the rest). Group g generates
+    # ``3 * samples_per_group * (1 + (7 * g) % over)`` tokens; shorter groups
+    # finish first. None = no over-sampling (default, unchanged behaviour).
+    over_sampling_groups: int | None = None
 
     def __post_init__(self) -> None:
         self.tensors = {k: v.detach().clone().float() for k, v in self.tensors.items()}
@@ -199,6 +204,8 @@ class FakeRolloutPool:
             raise RuntimeError("generation before any publication")
         version, digest = e.published
         token = policy_token(version, digest)
+        if e.over_sampling_groups is not None:
+            return self._generate_over_sampled(rollout_id, version, digest, token)
         groups = []
         for g in range(e.groups):
             gtoken = (
@@ -224,6 +231,46 @@ class FakeRolloutPool:
         return RolloutBatchHandle(
             rollout_id, version, digest, tuple(groups), len(groups), 0, payload=object(),
             policy_age_violation=(1 if drifted else None),
+        )
+
+    def _generate_over_sampled(self, rollout_id, version, digest, token) -> RolloutBatchHandle:
+        from .rollout_cutoff import Completion, CutoffReport, cutoff_at_target
+
+        e = self.engine
+        over = int(e.over_sampling_groups)
+        if over < e.groups:
+            raise ValueError("over_sampling_groups must be >= groups")
+        spg = e.samples_per_group
+        submitted = [
+            Completion(f"r{rollout_id}-g{g}", spg, 3 * spg * (1 + (7 * g) % over))
+            for g in range(over)
+        ]
+        order = sorted(submitted, key=lambda c: (c.tokens, c.group_id))
+        report = CutoffReport.from_outcome(cutoff_at_target(order, e.groups),
+                                           mechanism="fake_cutoff")
+        kept = order[: e.groups]
+        groups = tuple(
+            GroupMetadata(c.group_id, tuple(f"{c.group_id}-s{s}" for s in range(spg)),
+                          token, 0.5, 0.5, c.tokens)
+            for c in sorted(kept, key=lambda c: c.group_id)
+        )
+        # 1.3: per-trajectory phase timing (two turns: gen, tool, gen; judge 0.5 s)
+        rewards = tuple(
+            {"sample_index": i, "group_index": gi, "task_id": f"task-{gi}",
+             "trajectory_id": sid, "reward": 0.5, "success": None, "aborted": False,
+             "turn_generation_seconds": [0.01 * c.tokens, 0.5], "turn_tool_seconds": [1.0],
+             "worker_seconds": 0.01 * c.tokens + 1.5, "evaluate_time": 0.5}
+            for gi, c in enumerate(sorted(kept, key=lambda c: c.group_id))
+            for i, sid in enumerate(f"{c.group_id}-s{s}" for s in range(spg))
+        )
+        return RolloutBatchHandle(
+            rollout_id, version, digest, groups, len(groups), report.discarded_groups,
+            payload=object(), filtered=0, submitted_groups=report.submitted_groups,
+            trajectory_rewards=rewards,
+            aborted_in_flight_groups=report.discarded_groups,
+            aborted_in_flight_trajectories=report.discarded_trajectories,
+            aborted_in_flight_tokens=report.discarded_tokens,
+            aborted_in_flight_unknown_groups=0, abort_mechanism=report.mechanism,
         )
 
     def abort(self) -> None:

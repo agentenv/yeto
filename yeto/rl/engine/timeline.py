@@ -123,7 +123,29 @@ LOAD_SAMPLE_SCHEMA: dict[str, tuple[str, type]] = {
     # 1.7 resource peaks (gauge since last sample; None when not probed)
     "peak_gpu_mem_bytes": ("gauge", int),
     "peak_cpu_rss_bytes": ("gauge", int),
+    # agentic-rollout-utilization 1.3: engine KV tokens in use / KV capacity
+    "kv_used_tokens": ("gauge", int),
+    "kv_capacity_tokens": ("gauge", int),
 }
+
+
+def load_peaks(events: Iterable[Mapping[str, object]], start: float, end: float) -> dict[str, float | None]:
+    """agentic-rollout-utilization 1.3: queue and KV peaks of the ``rl_load_sample``
+    events in ``[start, end]`` (e.g. one round's generation span). None = no sample
+    reported the field."""
+    queued: list[float] = []
+    kv: list[float] = []
+    for ev in events:
+        t = ev.get("t")
+        if ev.get("event") != "rl_load_sample" or not isinstance(t, (int, float)) or not start <= t <= end:
+            continue
+        if isinstance(ev.get("queued_requests"), int):
+            queued.append(float(ev["queued_requests"]))
+        used, cap = ev.get("kv_used_tokens"), ev.get("kv_capacity_tokens")
+        if isinstance(used, int) and isinstance(cap, int) and cap > 0:
+            kv.append(used / cap)
+    return {"peak_queued_requests": max(queued) if queued else None,
+            "peak_kv_fraction": max(kv) if kv else None}
 HARNESS_METRIC_KEYS = (
     "harness_in_flight", "env_live", "tito_session_mismatch", "tito_chain_breaks",
     "policy_age_violation",
@@ -210,6 +232,14 @@ TRAJECTORY_REWARD_OPTIONAL: dict[str, tuple[type, ...]] = {
     # S17 N13: seconds the trusted verifier spent grading this trajectory
     # (absent when grading was skipped, e.g. timeout).
     "evaluate_time": (float,),
+    # agentic-rollout-utilization 1.3: wall start/end, sandbox cold start and
+    # per-turn model-generation / tool seconds (engine.trajectory_timing).
+    "trajectory_started_at": (float,),
+    "trajectory_ended_at": (float,),
+    "sandbox_start_seconds": (float,),
+    "worker_seconds": (float,),
+    "turn_generation_seconds": (list,),
+    "turn_tool_seconds": (list,),
 }
 
 
