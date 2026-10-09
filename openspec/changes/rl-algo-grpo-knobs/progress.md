@@ -282,3 +282,8 @@
   - Miles 仓库的提交或 blob（9e4260d、0394715、96390ac3，已在 miles-next 中确认）；
   - 文件 sha256 前缀（ff7448c0、2fe93181），它们不是提交号。
 - 今后报告 SHA 前先 `git fetch`，再用 `git log -1 --format=%h` 或 `git rev-parse --short origin/<branch>` 取值，直接粘贴命令输出。
+
+## 2026-10-08 S17 G1（N3）：8.4 两岛组合配置 PASS
+- 运行 `s1-runs/s17-g1-knobs`，Modal app ap-LveQdgBv2VK0A5dQdBwBUd 17:27:42–17:43:09Z（stopped），head s17-g1-knobs-head 已 down；≈$2.1 [估算]。证据 `evidence/2026-10-08-s17-g1-knobs/`（judgment-knobs.json、metrics-g1.json、launch.log.gz、syncer-tape.jsonl、spec.json）。
+- 判据（infra-drafts/S17-G1-PRELAUNCH-REVIEW.md §6 D，上卡前固定）全部满足。reward 岛 0 0.9375/0.4375/0.125、岛 1 0.9375/0.4688/0.0938；grad_norm 0.43/0.38/0.49；截断比例 0–0.28；overlong 软惩罚 shaped_samples 1/1/16。
+- 观察：strict-avg 两岛每轮间隔约 88–104 s（同批 elastic 两岛约 48 s，单岛 19 s），GPU 显存峰值 35.9 GB。pg_clipfrac 为 0（一步一轮），clip-higher 两岛生效未验证。

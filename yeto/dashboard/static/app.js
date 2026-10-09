@@ -182,6 +182,10 @@ function islands(){
     '<span>阶段 / 策略</span><span class="num">'+esc(c.phase||"无")+' · '+(c.policy_version==null?"无":"v"+esc(c.policy_version))+'</span>'+
     '<span>最后事件</span><span class="num">'+(fin(c.last_event_age_s)?f(c.last_event_age_s,0)+" s 前":"无")+'</span>'+
     (c.starting?'<span>启动已用</span><span class="num">'+hm(c.startup_s)+'</span>':"")+
+    (Object.keys(c.startup_steps||{}).length?'<span>启动子步骤</span><span class="num">'+
+      Object.keys(c.startup_steps).map(function(k){var v=c.startup_steps[k];
+        return esc({ray_connected:"Ray 集群组好",engine_ready:"推理引擎就绪",weights_loaded:"训练权重加载完"}[k]||k)+" "+(fin(v.step_s)?f(v.step_s,0)+" s":"?")}).join(" · ")+
+      (c.starting&&fin(c.startup_step_age_s)?" · 当前步已等 "+f(c.startup_step_age_s,0)+" s":"")+'</span>':"")+
     (c.stopped_by_us?'<span>停机</span><span>我方停机（'+esc((O.operator_stop||{}).cause)+'，依据 '+esc((O.operator_stop||{}).marker)+'）</span>':"")+
     (c.nodes||[]).map(function(n){var pk=Math.max.apply(null,(n.gpu_mem_used_mib_peak||[0]).concat([0]));
       return '<span>节点 '+esc(n.node)+'</span><span class="num">显存峰值 '+(pk/1024).toFixed(1)+' GiB · 利用率 '+(fin(n.gpu_util_pct)?f(n.gpu_util_pct,0)+"%":"未采样")+'</span>'}).join("")+

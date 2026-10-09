@@ -428,6 +428,7 @@ def handle_from_metadata(
             int(payload["policy_age_violation"]) if "policy_age_violation" in payload else None
         ),
         batch_summary=payload.get("batch_summary"),
+        batch_summary_by_bucket=payload.get("batch_summary_by_bucket"),
         tito_session_mismatch_records=(
             tuple(payload["tito_session_mismatch_records"])
             if payload.get("tito_session_mismatch_records") else None

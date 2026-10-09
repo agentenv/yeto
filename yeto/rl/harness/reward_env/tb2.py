@@ -203,10 +203,22 @@ def check_build_app(app_name: str) -> str:
 
 HOLDOUT_SEED = 20261008
 HOLDOUT_QUOTAS = {"tb2-easy": 2, "tb2-medium": 18, "tb2-hard": 10}
-HOLDOUT_RULE = "stratified by difficulty: easy 2 / medium 18 / hard 10"
+HOLDOUT_RULE = "exclude smoke6 (S15 trained); stratified by difficulty: easy 2 / medium 18 / hard 10"
+# WP3 rl-eval-difficulty-buckets D2 (#123 c8979bd2): the S15 smoke tasks
+# (codex-bundle/data/tbench2_smoke6.jsonl) were trained on in both S15 GPU runs,
+# so they leave the eval pool before the stratified draw (they may stay in training).
+SMOKE6_TASK_IDS = ("fix-git", "regex-log", "sqlite-db-truncate", "log-summary-date-ranges",
+                   "openssl-selfsigned-cert", "git-multibranch")
+SMOKE6_REASON = "S15 smoke training"
 
 
-def build_holdout(adapter: "Tb2Benchmark", **kwargs: Any) -> dict[str, Any]:
+def smoke6_exclusions() -> dict[str, str]:
+    return {t: SMOKE6_REASON for t in SMOKE6_TASK_IDS}
+
+
+def build_holdout(adapter: "Tb2Benchmark", *, exclude: Any = None, **kwargs: Any) -> dict[str, Any]:
+    """TB2 hold-out; ``exclude`` defaults to the smoke-6 tasks (pass ``{}`` for none)."""
     from .benchmark import build_holdout as _build
 
-    return _build(adapter, HOLDOUT_QUOTAS, seed=HOLDOUT_SEED, rule=HOLDOUT_RULE, **kwargs)
+    return _build(adapter, HOLDOUT_QUOTAS, seed=HOLDOUT_SEED, rule=HOLDOUT_RULE,
+                  exclude=smoke6_exclusions() if exclude is None else exclude, **kwargs)

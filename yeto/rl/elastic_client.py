@@ -12,6 +12,14 @@ this module. Frame layout mirrors ``syncer/src/elastic.rs`` (ElasticMsg::encode
   23 ELASTIC_BASE, 24 SAMPLE_VERDICT (syncer reply to SAMPLE_INDEX).
 
 The key comes from ``YETO_ISLAND_HMAC_KEY`` (the launcher exports it).
+
+JOIN body (yeto-framework-decoupling 6.2a, branch s17-elastic-identity):
+``syncer_epoch u64 | island_id u32 | incarnation u64 | capacity f64 |
+backend_identity [32]`` -- the island's ``BackendIdentity.sha256()`` (all zero
+= not declared).  The syncer pins the first admitted identity and refuses a
+JOIN with any other one (Miles vs verl, another engine pin, ...).  Version
+boundary: JOIN frames without the field are refused by the new syncer and the
+old syncer refuses the new frame (trailing bytes); do not mix the two.
 """
 
 from __future__ import annotations
@@ -91,6 +99,7 @@ class Join:
     island_id: int
     incarnation: int
     capacity: float
+    backend_identity: bytes = bytes(32)  # BackendIdentity.sha256() bytes; zero = not declared
     TYPE = MSG_JOIN
 
 
@@ -290,6 +299,9 @@ def encode(msg: Any, key: bytes) -> tuple[int, bytes]:
     b = struct.pack("<Q", msg.syncer_epoch)
     if isinstance(msg, Join):
         b += struct.pack("<IQd", msg.island_id, msg.incarnation, msg.capacity)
+        if len(msg.backend_identity) != 32:
+            raise ElasticProtocolError("JOIN backend_identity must be 32 bytes")
+        b += bytes(msg.backend_identity)
     elif isinstance(msg, JoinAck):
         b += struct.pack("<IQQ", msg.learner_slot, msg.membership_epoch, msg.base_version)
         b += _hash32(msg.policy_hash) + bytes([int(bool(msg.catch_up))])
@@ -366,7 +378,13 @@ def decode(key: bytes, msg_type: int, payload: bytes) -> Any:
     r = _Reader(open_frame(key, msg_type, payload))
     (epoch,) = r.unpack("Q")
     if msg_type == MSG_JOIN:
-        msg = Join(epoch, *r.unpack("IQd"))
+        island, incarnation, capacity = r.unpack("IQd")
+        try:
+            identity = r.take(32)
+        except ElasticProtocolError as exc:
+            raise ElasticProtocolError(
+                "JOIN without backend identity (island older than the syncer?)") from exc
+        msg = Join(epoch, island, incarnation, capacity, identity)
         if not (msg.capacity > 0 and msg.capacity != float("inf")):
             raise ElasticProtocolError("JOIN capacity must be > 0")
     elif msg_type == MSG_JOIN_ACK:
@@ -480,6 +498,18 @@ class ElasticClientConfig:
     # 0.22: heartbeats on their own TCP connection (a multi-MB DELTA_TENSOR /
     # ELASTIC_BASE on the main connection must not delay lease renewal).
     heartbeat_connection: bool = True
+    # decoupling 6.2a: BackendIdentity.sha256() hex sent in every JOIN; None = not
+    # declared (32 zero bytes). The syncer refuses a JOIN whose identity differs
+    # from the one the session's first JOIN pinned.
+    backend_identity_sha256: str | None = None
+
+    def backend_identity_bytes(self) -> bytes:
+        value = self.backend_identity_sha256
+        if value is None:
+            return bytes(32)
+        if not isinstance(value, str) or len(value) != 64:
+            raise ElasticProtocolError("backend_identity_sha256 must be a 64-char sha256 hex digest")
+        return bytes.fromhex(value)
 
 
 REJOIN_MARKER = "rejoin required"
@@ -668,7 +698,8 @@ class ElasticIslandClient:
             with self._base_cv:
                 self._rejoin_base_seq = self._base_seq
             try:
-                self._send(Join(c.syncer_epoch, c.island_id, c.incarnation, float(c.capacity)))
+                self._send(Join(c.syncer_epoch, c.island_id, c.incarnation, float(c.capacity),
+                                c.backend_identity_bytes()))
                 ok = self._ack.wait(c.join_timeout_s) and self.ack is not None
             except Exception as exc:  # noqa: BLE001
                 self.errors.append(f"rejoin: {exc}")
@@ -720,7 +751,8 @@ class ElasticIslandClient:
         reader.start()
         self._threads.append(reader)
         c = self.config
-        self._send(Join(c.syncer_epoch, c.island_id, c.incarnation, float(c.capacity)))
+        self._send(Join(c.syncer_epoch, c.island_id, c.incarnation, float(c.capacity),
+                                c.backend_identity_bytes()))
         if not self._ack.wait(c.join_timeout_s) or self.ack is None:
             raise ElasticProtocolError("JOIN refused or timed out: " + "; ".join(self.errors))
         self._open_heartbeat_connection()

@@ -261,6 +261,36 @@ def batch_summary(args: Any, samples: Sequence[Any]) -> dict[str, float | None]:
     }
 
 
+def _bucket_of(sample: Any) -> str:
+    meta = getattr(sample, "metadata", None) or {}
+    value = meta.get("difficulty") if isinstance(meta, dict) else None
+    return str(value) if value not in (None, "") else "unknown"
+
+
+def batch_summary_by_bucket(args: Any, samples: Sequence[Any]) -> dict[str, dict[str, float | int | None]]:
+    """rl-eval-difficulty-buckets 4.1 (D5): trained samples grouped by their row's
+    ``metadata.difficulty`` (missing = ``unknown``): count, reward mean, success
+    rate (reward > 0), truncated fraction, mean response length. Scalars only."""
+    groups: dict[str, list[Any]] = {}
+    for s in samples:
+        groups.setdefault(_bucket_of(s), []).append(s)
+    out: dict[str, dict[str, float | int | None]] = {}
+    for bucket in sorted(groups):
+        rows = groups[bucket]
+        rewards = [r for r in (_reward(args, s) for s in rows) if math.isfinite(r)]
+        lengths = [float(getattr(s, "effective_response_length", None) or getattr(s, "response_length", 0) or 0)
+                   for s in rows]
+        n = len(rows)
+        out[bucket] = {
+            "n": n,
+            "reward_mean": statistics.fmean(rewards) if rewards else None,
+            "success_rate": sum(r > 0 for r in rewards) / len(rewards) if rewards else None,
+            "truncated_frac": sum(_status(s) == "truncated" for s in rows) / n,
+            "resp_len_mean": statistics.fmean(lengths) if lengths else None,
+        }
+    return out
+
+
 BATCH_SUMMARY_ENV = "YETO_RL_BATCH_SUMMARY"
 
 
@@ -331,6 +361,9 @@ def build_metadata(
         payload["tool_wait_seconds"] = tool_wait
     if trained_samples and batch_summary_enabled(args):
         payload["batch_summary"] = batch_summary(args, trained_samples)
+        if any(_bucket_of(s) != "unknown" for s in trained_samples):
+            # 4.1: only when rows carry a difficulty (old key set kept otherwise)
+            payload["batch_summary_by_bucket"] = batch_summary_by_bucket(args, trained_samples)
     if trained_samples and batch_summary_enabled(args):
         # rl-fn-codex-rollout 1.0 (observe only): one record per trained sample
         # (task_id / trajectory_id / reward / signed success) so the tape can

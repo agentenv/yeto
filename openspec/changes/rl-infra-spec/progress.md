@@ -805,3 +805,11 @@
 **费用**：本阶段 ≈$68（try12 $11、try13 $29、try15 $28）；H200 尝试均容量阻塞 ≈$0。明细见 `infra-drafts/gpu-spend.md`。
 - S14 勾选依据（2.3）：tasks.md 依赖 2.2（:51）与 1.7（:31）均已勾；A2（L-2.3）第三次三 arm 同 SHA 37155d8 判据 1–6 全过，证据 evidence/infra-v2-b1/a2/rerun3/RESULT.md（+RESULT-analysis.json）；X9 guard 见 round3-check.json（95203615 第三轮 C）。
 - S14 勾选依据（4.1b）：docs/MILES_RL.md 控制器条目已按 design D1 改为"允许岛内 yeto 侧重配置控制器，不做跨岛控制器与通用恢复框架"，S14 A12 审计核对一致并同步更新其余过时断言（提交见 s14-milesdoc 分支）。
+
+## S17 夜间（2026-10-08，N6）：7.1–7.3 增补与 7.4 云层调度建议设计
+
+- 产出：`cloud-pool-design.md`（只写设计，无代码、无测试、无上卡）。
+- 已核：f-design §6 缺口 G1/G2/G3/G7/G8/G12/G13 已有对应实现或已勾任务（按 tasks 与代码位置核对）；G4/G6/G11 未补。
+- 未核：G5/G9/G10（只按 tasks 文本，未逐行查代码）。
+- 未验证：岛级扩池在 FN 尺寸的开机到加入耗时；AWS 2 分钟回收通知；Modal 抢占宽限期。
+- 7.1–7.3 仍依赖 3.8，保持未勾；新增 7.4 未勾，待用户审。
