@@ -61,7 +61,9 @@ launcher 在 `sky_patches.install()` 之前读线程数。计数办法：遍历 
 
 ### 决定 4：单岛换参数在岛任务循环里换 `args` 副本
 新增 `--rl-island-override ISLAND:KEY=VALUE`（可重复）和 `--rl-negative-test-run`。在 `launch` 的岛循环（launcher.py:7086–7088）与 dry-run 循环（7616–7630）里，对被点名的岛先 `copy.copy(args)` 再 setattr，然后交给 `task_factory`。sky 岛与 Modal 岛都从这份 task 生成，所以一处生效。
+- 负例岛晚连（10-09 主 agent 代用户拍板，spec 外新增）：syncer 用第一个被接纳的连接确定会话契约（server.rs 中 HELLO 处理；elastic 的身份同样先到先钉）。两岛同时开机时谁先连上是随机的。所以带 `YETO_ISLAND_OVERRIDE` 的岛在岛入口启动后、连 syncer 之前等 `join_delay_s`（默认 180 s，`--rl-negative-join-delay-s` 可改），让未换参数的岛先定契约，被拒的一定是负例岛。正常运行不带该环境变量，行为与标准样本不变。
 - 白名单：`rl_lr_schedule`、`rl_max_policy_age`、`identity_test_salt`。最后一项是新的仅测试参数，岛侧把它混进 `island_contract_sha256` 的输入，只为造"身份不符"。
+- `rl_lr_schedule` 保留在白名单（10-09 主 agent 代用户拍板）。注意：elastic（以及 decoupled）下只有一个合法值（auto＝constant，linear 被拒），按岛换造不出"学习率调度不同"。legacy（strict-avg）下 auto＝linear，岛 1 换成 constant 就是不同的调度，LR 哈希已绑进会话契约，可以造负例。
 - `rl_max_carry_lag` 不在白名单：它只传给 syncer（launcher.py `_ISLAND_SCHEDULING_PARAMS` → syncer `--max-carry-lag`），岛命令行不带它，按岛换不改变任何岛的行为。传了就起机前报错，写明"syncer 参数，不能按岛换"。（10-09 主 agent 代用户拍板）
 - 先在 `prepare_launch_args` 之后对全局参数做完全部校验，再对每个改过的副本单独跑一遍与该参数相关的校验（例如 `--rl-max-policy-age` 的后端支持检查），避免副本绕过检查。
 - 记录：`_write_run_manifest`（7542）写 `negative_test: true` 与 `island_overrides` 列表。岛环境变量带 `YETO_ISLAND_OVERRIDE`（JSON），岛入口启动后在 tape 写 `rl_island_override` 事件。看板 reducer 读到该事件后给岛加标记。
@@ -86,8 +88,10 @@ launcher 在 `sky_patches.install()` 之前读线程数。计数办法：遍历 
 
 ## Open Questions
 
-- SkyPilot API 服务在本机的进程命令行特征需实现时确认（暂定包含 `sky.server`）。
-- N17 与 ARU-2 是否记录了显存峰值需翻原始数据确认。没有就只用 b、c、d 三点。
+- 后续改进项（本 change 不做，10-09 主 agent 代用户拍板记录）：syncer 以第一个被接纳的连接确定会话契约，契约应由 head 启动时的配置给定。
+
+- SkyPilot API 服务在本机的进程命令行特征需实现时确认（暂定包含 `sky.server`）。已确认（10-09 本机）：主进程 `python -m sky.server.server`，请求执行进程改名为 `SkyPilot:executor:<kind>:<pid>`，父进程是主进程。实现按"命令行含 sky.server 或以 SkyPilot: 开头，以及它们的子孙进程"统计。
+- N17 与 ARU-2 是否记录了显存峰值需翻原始数据确认。没有就只用 b、c、d 三点。已确认：都有岛 tape 的 `peak_gpu_mem_bytes`，见附表。
 
 ## 附表：显存估算回测（任务 2.2）
 

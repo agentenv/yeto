@@ -469,14 +469,23 @@ def test_manifest_fields_and_tape_event(tmp_path, capsys):
     tape = tmp_path / "rl-island-1.jsonl"
     island_args = SimpleNamespace(event_tape=str(tape), rl_resume_store=None,
                                   rl_elastic_checkpoint_store=None)
-    io_.island_startup(island_args, 1, env)
+    slept = []
+    io_.island_startup(island_args, 1, env, sleep=slept.append)
+    assert slept == [180.0]
     first = json.loads(tape.read_text().splitlines()[0])
     assert first["event"] == "rl_island_override" and first["island_id"] == 1
     assert first["overrides"][0]["new"] == "linear"
     # an island without overrides writes nothing
     tape0 = tmp_path / "rl-island-0.jsonl"
-    io_.island_startup(SimpleNamespace(event_tape=str(tape0)), 0, io_.island_env(args, 0, ov))
-    assert not tape0.exists()
+    io_.island_startup(SimpleNamespace(event_tape=str(tape0)), 0, io_.island_env(args, 0, ov),
+                       sleep=slept.append)
+    assert not tape0.exists() and slept == [180.0]  # the unchanged island does not wait
+    args.rl_negative_join_delay_s = 5
+    io_.island_startup(island_args, 1, io_.island_env(args, 1, ov), sleep=slept.append)
+    assert slept == [180.0, 5.0]
+    args.rl_negative_join_delay_s = -1
+    with pytest.raises(ValueError, match="join-delay"):
+        io_.island_env(args, 1, ov)
 
 
 def test_manifest_written_by_launcher(monkeypatch, tmp_path):
@@ -553,7 +562,7 @@ def test_island_refuses_marked_store(tmp_path):
     a = SimpleNamespace(event_tape=None, rl_resume_store=str(store), rl_elastic_checkpoint_store=None)
     with pytest.raises(ValueError, match="negative-test"):
         io_.island_startup(a, 0, {})
-    io_.island_startup(a, 0, {io_.NEGATIVE_RUN_ENV: "1"})
+    io_.island_startup(a, 0, {io_.NEGATIVE_RUN_ENV: "1"}, sleep=lambda s: pytest.fail("no wait"))
 
 
 def test_merge_refuses_negative_adapter(tmp_path):
@@ -572,3 +581,17 @@ def test_merge_refuses_negative_adapter(tmp_path):
     (adapter / io_.NEGATIVE_MARKER).unlink()
     with pytest.raises(ValueError, match="adapter_config"):
         merge_adapter(SimpleNamespace(adapter_dir=str(adapter), output_dir=str(tmp_path / "o")))
+
+
+def test_override_env_reaches_ray_workers():
+    from yeto.rl.adapters.miles.entry import connect_island_ray
+
+    seen = {}
+    ray = SimpleNamespace(init=lambda **kw: seen.update(kw), is_initialized=lambda: False)
+    env = {"RAY_ADDRESS": "10.0.0.1:6379", io_.OVERRIDE_ENV: '{"island":1}', io_.NEGATIVE_RUN_ENV: "1"}
+    connect_island_ray(environ=env, ray_module=ray)
+    assert seen["runtime_env"]["env_vars"][io_.OVERRIDE_ENV] == '{"island":1}'
+    assert seen["runtime_env"]["env_vars"][io_.NEGATIVE_RUN_ENV] == "1"
+    seen.clear()
+    connect_island_ray(environ={"RAY_ADDRESS": "10.0.0.1:6379"}, ray_module=ray)
+    assert io_.OVERRIDE_ENV not in seen["runtime_env"]["env_vars"]

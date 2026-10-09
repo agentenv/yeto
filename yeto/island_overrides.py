@@ -42,6 +42,11 @@ OVERRIDE_ENV = "YETO_ISLAND_OVERRIDE"
 NEGATIVE_RUN_ENV = "YETO_NEGATIVE_TEST_RUN"  # on every island of a negative-test run
 OVERRIDE_EVENT = "rl_island_override"
 NEGATIVE_MARKER = "YETO_NEGATIVE_TEST"
+# The syncer takes the session contract / identity from the FIRST admitted
+# connection.  An overridden island waits this long before it starts (and so
+# before it connects), so the unchanged island sets the contract and the
+# overridden one is the one refused (10-09 ruling of the main agent).
+DEFAULT_JOIN_DELAY_S = 180.0
 
 LR_SCHEDULES = ("auto", "linear", "constant")
 
@@ -189,7 +194,12 @@ def island_env(args, island: int, overrides: dict[int, dict[str, Any]]) -> dict[
     kv = overrides.get(island)
     if kv:
         recs = [r for r in records(args, overrides) if r["island"] == island]
-        env[OVERRIDE_ENV] = json.dumps({"island": island, "negative_test": True, "overrides": recs},
+        delay = getattr(args, "rl_negative_join_delay_s", None)
+        delay = DEFAULT_JOIN_DELAY_S if delay is None else float(delay)
+        if delay < 0:
+            raise ValueError("--rl-negative-join-delay-s must be >= 0")
+        env[OVERRIDE_ENV] = json.dumps({"island": island, "negative_test": True, "overrides": recs,
+                                        "join_delay_s": delay},
                                        sort_keys=True, separators=(",", ":"))
     return env
 
@@ -269,9 +279,14 @@ def island_is_negative(environ=None) -> bool:
     return (os.environ if environ is None else environ).get(NEGATIVE_RUN_ENV) == "1"
 
 
-def island_startup(args, island_id: int, environ=None) -> dict | None:
+def island_startup(args, island_id: int, environ=None, *, sleep=None) -> dict | None:
     """Island start (after the tape path is known, before training): write the
-    override event and check / mark the checkpoint store."""
+    override event, check / mark the checkpoint store, then (overridden island
+    only) wait ``join_delay_s`` before anything connects to the syncer."""
+    if sleep is None:
+        import time
+
+        sleep = time.sleep
     env = os.environ if environ is None else environ
     record = write_override_event(args.event_tape, island_id, env) if getattr(args, "event_tape", None) else None
     for name in ("rl_resume_store", "rl_elastic_checkpoint_store"):
@@ -286,6 +301,12 @@ def island_startup(args, island_id: int, environ=None) -> dict | None:
             print(f"[yeto-island] negative-test marker not checked for {store}: {e}", flush=True)
             continue
         check_store_marker(root, negative=island_is_negative(env))
+    data = env_override(env)
+    delay = float((data or {}).get("join_delay_s") or 0)
+    if delay > 0:
+        print(f"[yeto-island] negative-test island {island_id}: waiting {delay:.0f} s before it "
+              "starts, so the unchanged island sets the session contract", flush=True)
+        sleep(delay)
     return record
 
 

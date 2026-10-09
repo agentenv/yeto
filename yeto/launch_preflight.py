@@ -353,6 +353,10 @@ def add_cli_args(p) -> None:
                    help="NEGATIVE TEST ONLY: give one island another value of rl_lr_schedule, "
                    "rl_max_policy_age or identity_test_salt (repeatable); needs "
                    "--rl-negative-test-run")
+    g.add_argument("--rl-negative-join-delay-s", type=float, default=None, metavar="S",
+                   help="negative-test run: an overridden island waits S seconds before it starts "
+                   "(default 180), so the unchanged island sets the syncer's session contract "
+                   "and the overridden one is refused")
     g.add_argument("--rl-negative-test-run", action="store_true",
                    help="mark this run as a negative-test run (required by --rl-island-override); "
                    "a normal run refuses to resume its checkpoint store and `yeto merge` refuses "
