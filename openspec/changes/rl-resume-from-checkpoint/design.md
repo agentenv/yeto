@@ -121,6 +121,15 @@ Modal 文档：退出处理函数有 30 秒宽限，被抢占时也调用；GPU 
 - 学习率：`lr_at_next_round` 按 Megatron `get_lr` 公式（constant/linear/cosine、warmup 0）由 local_step 算出，已用 G1 基线 tape 的 10 个实际学习率逐位验证；其他调度为 None（仍有恢复后调度器步数核对）。
 - 未做：§5 mismatch tape 文件名带启动序号——`rollout_meta_hook.put_to_sink` 的目录写法（调试用，默认走 Ray actor）未改，因为改它会改插件源码哈希、牵动去耦合标准样本（hash-migration）；事件 tape（含 `rl_harness_mismatch`）本来就是追加写，Modal 镜像已改为按容器分文件。dashboard 只做了数据层（续训分段、启动开销、被丢弃的训练次数），页面画线未做。多岛岛内状态（3.3）、syncer 检查点进 store（1.4）未做。
 
+### 9.1 续训后为什么和不中断那次不逐位一致（S17 G2det，N15，2026-10-09）
+G2 的 C2/C3（Modal 改派新容器后续训）恢复哈希、第一轮生成都相同，但第一步训练数值差 1e-10 量级，之后分叉；B2 逐位相同。补了 6 跑（`infra-drafts/S17-G2DET-PRELAUNCH-REVIEW.md`，判读 `evidence/g2det/g2det-judge.json`，原始数据 `s1-runs/s17-g2det-*/`），结论：
+- **不是数值不确定**。开 `--rl-deterministic-trainer`（Megatron `--deterministic-mode` + NCCL_ALGO=Ring 等）的 A_det 与不开的 G2 A 6 轮逐位相同；C_det（同设置，第 4 轮中途停容器、改派续训）续训后的数值与 G2 C3 改派后**逐位相同**（第一步 ppo_kl 都是 −2.98e-10）。偏差是固定、可重复的。
+- **与改派容器、机器无关**。A_det（GCP us-east，VBIOS 96.00.DB）与 C_det 旧容器（eu-north，VBIOS 96.00.D0）在中断前逐位相同；驱动 580.95.05、CUDA 13.0、库版本相同。新 app 冷启动从中途切点 r4 续训（E_det）的数值与 G2 C2 改派后从 r4 续训的数值逐位相同。
+- **与切点种类无关**。F1 只存"我方停"切点 r4（策略哈希与 A_det 中途切点 r4 相同），F2 冷启动续训，数值与 E_det 逐位相同。
+- **原因是"新进程第一次训练"和"已经跑过几轮的进程"在同一权重、同一批数据上算出的 logprob 差 1e-10 量级**（同一步里算旧 logprob 的前向和训练前向也不一致，`ppo_kl`≠0）。A 自己的第一步（rollout 0）也是如此，而且可重复。B2 从 rollout 3 续训时这个差别碰巧为 0，所以显得逐位一致。具体是哪个内核/哪份缓存造成的**未查明**。
+- 判据随之调整：续训正确性看"恢复哈希、版本、学习率、题号逐位相同"+"同一切点续训可重复（不同容器、不同机房逐位相同）"；不要求与不中断那次在指标上逐位相同（逐位只在第一步碰巧无差时成立）。要做到与不中断逐位相同，需要找出新进程第一步的差别（候选：第一次前向之前加一次预热前向、或固定 cuBLAS/注意力的首次选择），不在本次范围。
+- 环境探针 `evidence/g2det/envprobe.sh` 已能采驱动、VBIOS、库版本和各进程确定性环境变量；本次只采到 A_det、C_det 旧容器两份（改派容器、E2、F1/F2 没采到，原因是探针触发条件，未查）。
+
 ## 10. 合并进 main 时的调整（2026-10-09，合并 PR #145）
 
 - 原因：import 边界检查不过——中立核心 `yeto/rl/engine/resume.py` 的 `ModalVolumeStore` 里有 `import modal`。白名单只减不增，且核心不该带云厂商的逻辑（与 #129 把 Modal 沙箱挪到 `yeto/cloud/modal_reward_env.py` 的处理一致）。主 agent 拍板：把 Modal 实现挪出核心。
