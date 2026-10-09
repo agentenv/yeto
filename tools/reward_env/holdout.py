@@ -21,6 +21,12 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--tb2-tasks-dir")
     p.add_argument("--swev-data")
+    p.add_argument("--tb2-exclude-jsonl", action="append", default=[],
+                   help="dataset jsonl whose metadata.task_id rows leave the TB2 eval pool "
+                        "(default: the built-in S15 smoke-6 list)")
+    p.add_argument("--tb2-exclude-reason", default=None,
+                   help="reason recorded for --tb2-exclude-jsonl tasks (default: S15 smoke training)")
+    p.add_argument("--tb2-no-exclude", action="store_true", help="do not exclude any TB2 task")
     p.add_argument("--out-dir", required=True)
     a = p.parse_args(argv)
     out = Path(a.out_dir)
@@ -29,7 +35,26 @@ def main(argv=None) -> int:
     if a.tb2_tasks_dir:
         from yeto.rl.harness.reward_env import tb2
 
-        written["tb2-holdout.json"] = tb2.build_holdout(tb2.Tb2Benchmark(a.tb2_tasks_dir))
+        if a.tb2_no_exclude:
+            exclude = {}
+        elif a.tb2_exclude_jsonl:
+            reason = a.tb2_exclude_reason or tb2.SMOKE6_REASON
+            exclude = {}
+            for path in a.tb2_exclude_jsonl:
+                for line in Path(path).read_text().splitlines():
+                    if line.strip():
+                        tid = bm.task_id_of(json.loads(line))
+                        if tid is None:
+                            raise SystemExit(f"{path}: row without metadata.task_id")
+                        exclude[tid] = reason
+        else:
+            exclude = None  # built-in smoke-6
+        adapter = tb2.Tb2Benchmark(a.tb2_tasks_dir)
+        holdout = tb2.build_holdout(adapter, exclude=exclude)
+        unknown = sorted({e["task_id"] for e in holdout.get("excluded", [])} - set(adapter.task_ids()))
+        if unknown:
+            raise SystemExit(f"excluded tasks not in the TB2 checkout: {unknown}")
+        written["tb2-holdout.json"] = holdout
     if a.swev_data:
         from yeto.rl.harness.reward_env import swebench_verified as sv
 
