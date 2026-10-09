@@ -178,6 +178,9 @@ class YetoFullyAsyncTaskRunner(_TaskRunnerBase):
     sync); then the yeto driver instead of ``_run_training_loop``."""
 
     def run(self, config, plan: dict):
+        from yeto.island_credential_guard import check_island_credentials
+
+        check_island_credentials()  # secret-handling-hardening D4 (fully_async Ray actor)
         fa_main.FullyAsyncTrainer = YetoFullyAsyncTrainer  # _create_trainer builds ours
         self._initialize_components(config)
         from omegaconf import OmegaConf

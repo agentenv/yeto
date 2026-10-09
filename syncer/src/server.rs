@@ -108,9 +108,17 @@ pub struct Config {
     /// Inter-island scheduling mode. Legacy (default) adds nothing to the
     /// semantic profile hash and changes no server behavior.
     pub island_scheduling: crate::elastic::IslandSchedulingMode,
-    /// HMAC-SHA256 key for elastic-only message types (never hashed into
-    /// the profile; legacy messages are not authenticated).
+    /// HMAC-SHA256 key (never hashed into the profile). elastic: signs the
+    /// elastic message types. legacy (secret-handling-hardening): every HELLO
+    /// must carry a trailing HMAC under this key.
     pub island_hmac_key: Option<Vec<u8>>,
+    /// secret-handling-hardening: island contract (backend identity bound to
+    /// the LR schedule, 32 bytes) pinned by the head's launch config. legacy:
+    /// a HELLO whose session_contract_hash is not
+    /// sha256(domain || layout_fingerprint || pinned) is refused, so the first
+    /// island to connect no longer decides the contract. elastic: pins the
+    /// JOIN backend identity before the first JOIN. None keeps first-wins.
+    pub expected_island_contract: Option<[u8; 32]>,
     /// elastic: membership lease (seconds without heartbeat before removal).
     pub island_lease_s: f64,
     /// elastic: fencing token of this coordinator incarnation.
@@ -845,6 +853,7 @@ pub async fn run(cfg: Config) -> Result<()> {
             listener,
             crate::elastic_server::ElasticServerConfig {
                 params,
+                expected_backend_identity: cfg.expected_island_contract,
                 key: cfg
                     .island_hmac_key
                     .clone()
@@ -908,6 +917,13 @@ pub async fn run(cfg: Config) -> Result<()> {
     let accept_budget_cutoff = budget_cutoff.clone();
     let expected_learners = cfg.learners;
     let require_profile_binding = cfg.require_profile_binding;
+    let hello_auth = Arc::new(HelloAuth {
+        key: cfg.island_hmac_key.clone(),
+        expected_contract: cfg.expected_island_contract,
+    });
+    if hello_auth.key.is_none() {
+        warn!("legacy syncer runs WITHOUT island authentication (HELLO is not HMAC-checked)");
+    }
     tokio::spawn(async move {
         loop {
             match listener.accept().await {
@@ -916,6 +932,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                     let session = accept_session.clone();
                     let budget_cutoff = accept_budget_cutoff.clone();
                     let tx = event_tx.clone();
+                    let hello_auth = hello_auth.clone();
                     tokio::spawn(async move {
                         if let Err(e) = handle_connection(
                             stream,
@@ -926,6 +943,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                             require_profile_binding,
                             tx,
                             budget_cutoff,
+                            hello_auth,
                         )
                         .await
                         {
@@ -971,6 +989,61 @@ fn group_label(g: &str) -> &str {
 
 fn hex32(h: &[u8; 32]) -> String {
     h.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Legacy HELLO authentication and the head-pinned island contract
+/// (secret-handling-hardening).
+pub struct HelloAuth {
+    pub key: Option<Vec<u8>>,
+    pub expected_contract: Option<[u8; 32]>,
+}
+
+/// Domain of the legacy HELLO MAC: HMAC-SHA256(key, domain || hello_body).
+pub const HELLO_MAC_DOMAIN: &[u8] = b"yeto-hello-mac-v1\0";
+/// Domain of the RL session contract (yeto.rl.engine.backend_identity).
+pub const SESSION_CONTRACT_DOMAIN: &[u8] = b"yeto-rl-session-contract-v2\0";
+
+/// With a key: verify and strip the trailing 32-byte HMAC of a HELLO.
+/// Without a key: the payload is the HELLO body (unauthenticated mode).
+fn open_hello<'a>(key: Option<&[u8]>, payload: &'a [u8]) -> Result<&'a [u8]> {
+    let Some(key) = key else { return Ok(payload) };
+    let mut framed = Vec::with_capacity(payload.len() + 1);
+    // elastic::open MACs msg_type || body; HELLO uses its own domain instead.
+    if payload.len() < crate::elastic::HMAC_LEN {
+        bail!("HELLO shorter than its HMAC (island has no YETO_ISLAND_HMAC_KEY?)");
+    }
+    let (body, mac) = payload.split_at(payload.len() - crate::elastic::HMAC_LEN);
+    framed.extend_from_slice(HELLO_MAC_DOMAIN);
+    framed.extend_from_slice(body);
+    let expected = crate::elastic::hmac_sha256(key, &framed);
+    let diff = expected.iter().zip(mac).fold(0u8, |acc, (x, y)| acc | (x ^ y));
+    if diff != 0 {
+        bail!("HELLO HMAC mismatch (wrong or missing island HMAC key)");
+    }
+    Ok(body)
+}
+
+/// The session contract an island with the pinned contract must offer.
+fn pinned_session_contract(layout_fingerprint: &[u8; 32], pinned: &[u8; 32]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(SESSION_CONTRACT_DOMAIN);
+    h.update(layout_fingerprint);
+    h.update(pinned);
+    h.finalize().into()
+}
+
+fn check_pinned_contract(pinned: Option<[u8; 32]>, offered: &SessionSpec) -> Option<String> {
+    let pinned = pinned?;
+    let want = pinned_session_contract(&offered.layout_fingerprint, &pinned);
+    (want != offered.session_contract_hash).then(|| {
+        format!(
+            "session mismatch (HELLO refused, session keeps running): the head pins \
+             island contract {}, expected session_contract_hash={}, got {}",
+            hex32(&pinned),
+            hex32(&want),
+            hex32(&offered.session_contract_hash),
+        )
+    })
 }
 
 /// Admit `offered` into the session: the first HELLO establishes the session
@@ -1129,6 +1202,7 @@ async fn handle_connection(
     require_profile_binding: bool,
     event_tx: mpsc::Sender<Event>,
     budget_cutoff: Arc<BudgetCutoff>,
+    hello_auth: Arc<HelloAuth>,
 ) -> Result<()> {
     stream.set_nodelay(true)?;
     let (mut rd, mut wr) = stream.into_split();
@@ -1153,7 +1227,15 @@ async fn handle_connection(
     };
     match first.msg_type {
         MSG_HELLO => {
-            let parsed = match parse_hello(&first.payload, expected_learners) {
+            let body = match open_hello(hello_auth.key.as_deref(), &first.payload) {
+                Ok(body) => body,
+                Err(error) => {
+                    let message = format!("HELLO authentication failed: {error:#}");
+                    let _ = send_direct(&mut wr, MSG_ERROR, message.as_bytes()).await;
+                    return Err(error);
+                }
+            };
+            let parsed = match parse_hello(body, expected_learners) {
                 Ok(parsed) => parsed,
                 Err(error) => {
                     let message = format!("invalid HELLO: {error:#}");
@@ -1204,6 +1286,11 @@ async fn handle_connection(
             // keep running; one mis-wired island (e.g. a Miles island in a verl
             // session) must not stop the whole run. The first HELLO still
             // establishes the session contract.
+            if let Some(message) = check_pinned_contract(hello_auth.expected_contract, &offered) {
+                send_direct(&mut wr, MSG_ERROR, message.as_bytes()).await?;
+                warn!(learner_id, generation, "rejected HELLO, session keeps running: {message}");
+                return Ok(());
+            }
             if let Some(message) = admit_session(&session, offered) {
                 send_direct(&mut wr, MSG_ERROR, message.as_bytes()).await?;
                 warn!(learner_id, generation, "rejected HELLO, session keeps running: {message}");
@@ -3870,6 +3957,68 @@ fn dump_state(st: &GlobalState, path: &std::path::Path) -> Result<()> {
 }
 
 #[cfg(test)]
+mod hello_auth_tests {
+    use super::*;
+
+    fn sealed(key: &[u8], body: &[u8]) -> Vec<u8> {
+        let mut input = HELLO_MAC_DOMAIN.to_vec();
+        input.extend_from_slice(body);
+        let mut out = body.to_vec();
+        out.extend_from_slice(&crate::elastic::hmac_sha256(key, &input));
+        out
+    }
+
+    #[test]
+    fn open_hello_accepts_the_right_key_only() {
+        let body = b"hello body bytes";
+        assert_eq!(open_hello(Some(b"k"), &sealed(b"k", body)).unwrap(), body);
+        assert!(open_hello(Some(b"k"), &sealed(b"other", body)).is_err());
+        assert!(open_hello(Some(b"k"), body).is_err());
+        assert!(open_hello(Some(b"k"), b"short").is_err());
+        // Unauthenticated mode passes the payload through unchanged.
+        assert_eq!(open_hello(None, body).unwrap(), body);
+    }
+
+    #[test]
+    fn mac_covers_the_compat_group_trailer_and_comes_last() {
+        // body = ... num_streams:u16 | b"YCG1" | u32 n | n bytes ; then 32-byte MAC
+        let mut rest = 0u16.to_le_bytes().to_vec();
+        rest.extend_from_slice(HELLO_COMPAT_MAGIC);
+        rest.extend_from_slice(&11u32.to_le_bytes());
+        rest.extend_from_slice(b"nvidia-h100");
+        let payload = sealed(b"k", &rest);
+        assert_eq!(payload.len(), 2 + 8 + 11 + 32);
+        let body = open_hello(Some(b"k"), &payload).unwrap();
+        assert_eq!(hello_compat_trailer_len(body), 8 + 11);
+        // A MAC-less parse of the sealed payload must not find the trailer.
+        assert_eq!(hello_compat_trailer_len(&payload), 0);
+        // Changing the clear-text group breaks the MAC.
+        let mut forged = payload.clone();
+        let at = 2 + 8;
+        forged[at] = b'a';
+        assert!(open_hello(Some(b"k"), &forged).is_err());
+    }
+
+    #[test]
+    fn pinned_contract_matches_the_python_session_contract() {
+        let layout_fp = [7u8; 32];
+        let pinned = [9u8; 32];
+        let good = pinned_session_contract(&layout_fp, &pinned);
+        let spec = |contract| SessionSpec {
+            dtype: DTYPE_F32,
+            layout: Layout { fragments: Vec::new() },
+            layout_fingerprint: layout_fp,
+            session_contract_hash: contract,
+            syncer_profile_hash: None,
+            compat_group: String::new(),
+        };
+        assert!(check_pinned_contract(Some(pinned), &spec(good)).is_none());
+        assert!(check_pinned_contract(Some(pinned), &spec([0u8; 32])).is_some());
+        assert!(check_pinned_contract(None, &spec([0u8; 32])).is_none());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -4168,6 +4317,7 @@ mod tests {
             require_profile_binding: false,
             island_scheduling: Default::default(),
             island_hmac_key: None,
+            expected_island_contract: None,
             island_lease_s: 30.0,
             syncer_epoch: 0,
             elastic_final_grace_s: None,

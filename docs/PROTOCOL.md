@@ -75,6 +75,31 @@ binding. Every later HELLO must match them exactly,
 and learner IDs must lie in the configured `0..M` launch set. The learner ID
 repeated inside PUSH and HEARTBEAT must match the connected group.
 
+## HELLO authentication (secret-handling-hardening)
+
+When the syncer has an island HMAC key (`YETO_ISLAND_HMAC_KEY`; required in
+legacy mode unless `--allow-unauthenticated-islands`), the HELLO payload is:
+
+```
+body := version .. num_streams:u16 [ b"YCG1" | u32 n | n bytes utf-8 ]   # compat_group trailer optional
+HELLO payload := body | mac:[u8;32]
+mac := HMAC-SHA256(key, b"yeto-hello-mac-v1\0" | body)
+```
+
+- Order: the compat_group trailer (clear text, 8 + n bytes, 1 <= n <= 64) is
+  part of `body`; the 32-byte MAC is always the last field. The MAC therefore
+  covers the card-type group, so it cannot be changed in transit.
+- The syncer first strips and checks the last 32 bytes, then parses `body`
+  exactly as above (profile hash, num_streams, trailer detection).
+- Without a key nothing is appended (wire bytes unchanged).
+- A wrong or missing MAC gets ERROR `HELLO authentication failed: ...` on that
+  connection only; the client maps it to metric `island_auth_failed` and does
+  not retry. DATA_HELLO carries no MAC; it can only join the 64-bit random
+  connection generation of an authenticated HELLO.
+- `--expected-island-contract <hex32>`: the session contract must equal
+  `sha256(b"yeto-rl-session-contract-v2\0" | layout_fingerprint | pinned)`;
+  elastic pins the JOIN identity to the same value before the first JOIN.
+
 ## Card-type compatibility group (yeto-framework-decoupling 7.7)
 
 - Every RL island declares `compat_group` = `"<vendor>-<card>"` in lower case,

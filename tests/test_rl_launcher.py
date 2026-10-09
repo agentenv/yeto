@@ -1412,7 +1412,8 @@ def test_miles_task_checks_out_exact_commit_and_builds_multinode_ray(monkeypatch
     assert task.envs["CYBERGYM_URL"] == "http://10.0.0.8:8666"
     assert task.envs["CYBERGYM_AGENT_ID"] == "benchmark-agent"
     assert task.envs["CYBERGYM_TIMEOUT"] == "90.0"
-    assert task.envs["CYBERGYM_API_KEY"] == "test-secret"
+    assert "CYBERGYM_API_KEY" not in task.envs  # secret-handling-hardening
+    assert task.secrets["CYBERGYM_API_KEY"] == "test-secret"
     assert task.envs["CYBERGYM_REWARD_SCHEME"] == "shaped_v1"
     assert task.envs["CYBERGYM_REWARD_VIEW"] == "train"
     assert "python3 -m yeto.rl.adapters.miles.island_entry" in task.run

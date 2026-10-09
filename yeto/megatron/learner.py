@@ -742,4 +742,7 @@ def _cycle(dataset, micro_batch_size: int = 1):
 
 
 if __name__ == "__main__":
+    from yeto.island_credential_guard import check_island_credentials
+
+    check_island_credentials()  # secret-handling-hardening D4
     main()

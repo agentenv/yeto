@@ -39,15 +39,23 @@ def _sft():
                            outer_momentum=0.9)
 
 
+HMAC_CHECK = ': "${YETO_ISLAND_HMAC_KEY:?island HMAC key secret missing}" && '
+
+
 def test_legacy_syncer_command_is_byte_identical(head_launcher):
+    """secret-handling-hardening: the only change to the legacy RL line is the
+    island HMAC key check in front (the key itself is a secret env); SFT only
+    gains the explicit --allow-unauthenticated-islands."""
     for extra in ((), ("--rl-island-scheduling", "legacy")):
         args = _args(extra)
         assert args.rl_island_scheduling == "legacy"
         for n in (1, 2, 4):
-            assert launcher.syncer_command(args, n) == head_launcher.syncer_command(args, n)
+            assert launcher.syncer_command(args, n) == head_launcher.syncer_command(args, n).replace(
+                "mkdir -p ~/yeto-output && ", "mkdir -p ~/yeto-output && " + HMAC_CHECK, 1)
             assert (launcher.critic_syncer_command(args, n)
-                    == head_launcher.critic_syncer_command(args, n))
-    assert launcher.syncer_command(_sft(), 2) == head_launcher.syncer_command(_sft(), 2)
+                    == HMAC_CHECK + head_launcher.critic_syncer_command(args, n))
+    assert launcher.syncer_command(_sft(), 2) == (
+        head_launcher.syncer_command(_sft(), 2) + " --allow-unauthenticated-islands")
 
 
 def test_legacy_learner_flags_unchanged():
@@ -64,7 +72,8 @@ def test_elastic_needs_hmac_key(monkeypatch):
     monkeypatch.delenv("YETO_ISLAND_HMAC_KEY")
     with pytest.raises(ValueError, match="YETO_ISLAND_HMAC_KEY"):
         launcher.syncer_command(_args(("--rl-island-scheduling", "elastic")), 2)
-    assert "HMAC" not in launcher.syncer_command(_args(), 2)  # legacy needs no key
+    # secret-handling-hardening: legacy generates a per-run key instead.
+    assert launcher.syncer_command(_args(), 2).startswith("mkdir -p ~/yeto-output && " + HMAC_CHECK)
 
 
 def test_elastic_syncer_flags_and_defaults():
@@ -180,7 +189,8 @@ def test_hmac_key_is_secret_on_syncer_task(monkeypatch, tmp_path):
     assert task.secrets == {"YETO_ISLAND_HMAC_KEY": "k3y"}
     assert "k3y" not in task.run and "k3y" not in json.dumps(task.envs or {})
     legacy = launcher.make_syncer_task(_args(), 2)
-    assert legacy.secrets is None and "HMAC" not in legacy.run
+    assert legacy.secrets == {"YETO_ISLAND_HMAC_KEY": "k3y"}  # secret-handling-hardening
+    assert "k3y" not in legacy.run
 
 
 def test_hmac_key_in_modal_cfg_envs_and_island_secrets(monkeypatch, tmp_path):
@@ -200,13 +210,16 @@ def test_hmac_key_in_modal_cfg_envs_and_island_secrets(monkeypatch, tmp_path):
     legacy = _args(("--gpu", "modal:8xh100", "--rl-engine", "ports"))
     _prepare_rl_args(_prov(legacy))
     lt = launcher.make_miles_island_task(legacy, spec, 0, 1, "127.0.0.1:29400")
-    assert "YETO_ISLAND_HMAC_KEY" not in (getattr(lt, "secrets", None) or {})
-    assert "YETO_ISLAND_HMAC_KEY" not in launcher.build_modal_island_config(legacy, spec, 0, lt, "1.2.3.4:5000").envs
+    # secret-handling-hardening: legacy islands carry the key too.
+    assert lt.secrets["YETO_ISLAND_HMAC_KEY"] == "k3y"
+    assert launcher.build_modal_island_config(legacy, spec, 0, lt, "1.2.3.4:5000").envs[
+        "YETO_ISLAND_HMAC_KEY"] == "k3y"
 
 
 def test_head_job_ships_hmac_secret():
     src = Path(launcher.__file__).with_name("cli.py").read_text()
     assert "secrets.update(launcher.island_hmac_secret(args))" in src
-    assert launcher.island_hmac_secret(_args()) == {}
+    assert launcher.island_hmac_secret(_args()) == {"YETO_ISLAND_HMAC_KEY": "k3y"}
+    assert launcher.island_hmac_secret(_sft()) == {}
     assert launcher.island_hmac_secret(_args(("--rl-island-scheduling", "elastic"))) == {
         "YETO_ISLAND_HMAC_KEY": "k3y"}

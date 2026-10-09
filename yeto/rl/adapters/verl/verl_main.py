@@ -28,6 +28,9 @@ FORWARD_ENV_PREFIXES = ("YETO_", "HF_", "VERL_FILE_LOGGER", "PYTHONPATH", "SYNCE
 @ray.remote(num_cpus=1)
 class YetoTaskRunner:
     def run(self, config, plan: dict):
+        from yeto.island_credential_guard import check_island_credentials
+
+        check_island_credentials()  # D4: the Ray actor that holds the syncer client
         import transfer_queue as tq
         from omegaconf import OmegaConf
         from verl.trainer.ppo.v1 import AgentLoopManagerTQ, get_trainer_cls
@@ -61,12 +64,18 @@ def _runtime_env() -> dict:
     env.setdefault("env_vars", {})
     env["env_vars"]["TRANSFER_QUEUE_ENABLE"] = "1"
     for key, value in os.environ.items():
+        # YETO_ covers YETO_ISLAND_HMAC_KEY (HELLO HMAC in the Ray actor that
+        # opens the syncer client) and YETO_SANDBOX_MODAL_TOKEN_*; no cloud
+        # credential matches these prefixes (secret-handling-hardening).
         if key.startswith(FORWARD_ENV_PREFIXES):
             env["env_vars"][key] = value
     return env
 
 
 def _plan_and_ray() -> dict:
+    from yeto.island_credential_guard import check_island_credentials
+
+    check_island_credentials()  # secret-handling-hardening D4 (driver, both paths)
     plan = json.loads(open(os.environ[PLAN_ENV]).read())
     if not ray.is_initialized():
         address = os.environ.get("RAY_ADDRESS") or None

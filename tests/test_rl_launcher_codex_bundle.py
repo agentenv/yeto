@@ -264,6 +264,8 @@ def test_modal_island_mounts_local_data_and_passes_tb2_env(bundle, monkeypatch, 
     data.write_text('{"prompt": "x", "metadata": {"task_id": "fix-git"}}\n')
     monkeypatch.setenv("MODAL_TOKEN_ID", "ak-test")
     monkeypatch.setenv("MODAL_TOKEN_SECRET", "as-test")
+    monkeypatch.setenv("YETO_SANDBOX_MODAL_TOKEN_ID", "sb-id")
+    monkeypatch.setenv("YETO_SANDBOX_MODAL_TOKEN_SECRET", "sb-secret")
     monkeypatch.setenv("YETO_HARNESS_TB2_TASKS_DIR", "/opt/yeto/codex/tb2-tasks")
     monkeypatch.setenv("YETO_HARNESS_TB2_FAULT", "create_fail:2")
     args = _codex_args()
@@ -274,8 +276,12 @@ def test_modal_island_mounts_local_data_and_passes_tb2_env(bundle, monkeypatch, 
     task = make_miles_island_task(args, spec, 0, 1, "127.0.0.1:29400")
     cfg = build_modal_island_config(args, spec, 0, task, "1.2.3.4:29400")
     assert cfg.extra_mounts == {"/root/yeto-data.jsonl": str(data)}
-    for name in ("MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET", "YETO_HARNESS_TB2_TASKS_DIR", "YETO_HARNESS_TB2_FAULT"):
+    for name in ("YETO_SANDBOX_MODAL_TOKEN_ID", "YETO_SANDBOX_MODAL_TOKEN_SECRET",
+                 "YETO_HARNESS_TB2_TASKS_DIR", "YETO_HARNESS_TB2_FAULT"):
         assert cfg.envs[name] == os.environ[name]
+    # secret-handling-hardening: the main Modal token never reaches the island.
+    assert not {"MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"} & set(cfg.envs)
+    assert not {"YETO_SANDBOX_MODAL_TOKEN_ID", "YETO_SANDBOX_MODAL_TOKEN_SECRET"} & set(task.envs)
     assert mr.ModalIslandConfig.from_json(cfg.to_json()).extra_mounts == cfg.extra_mounts
     state = fake_modal(monkeypatch)
     monkeypatch.setattr(mr, "registry_credentials", lambda *_a, **_k: None)
@@ -303,6 +309,10 @@ def test_island_setup_installs_the_modal_client_only_for_the_modal_sandbox_provi
     assert L.MODAL_CLIENT_SETUP not in plain.setup  # local/other providers: untouched
 
     monkeypatch.setenv(L.HARNESS_ENVIRONMENT_PROVIDER_ENV, L.MODAL_SANDBOX_PROVIDER)
+    with pytest.raises(ValueError, match="YETO_SANDBOX_MODAL_TOKEN_ID"):
+        make_miles_island_task(args, spec, 0, 1, "127.0.0.1:29400")
+    monkeypatch.setenv("YETO_SANDBOX_MODAL_TOKEN_ID", "sb-id")
+    monkeypatch.setenv("YETO_SANDBOX_MODAL_TOKEN_SECRET", "sb-secret")
     task = make_miles_island_task(args, spec, 0, 1, "127.0.0.1:29400")
     assert task.envs[L.HARNESS_ENVIRONMENT_PROVIDER_ENV] == L.MODAL_SANDBOX_PROVIDER
     assert L.MODAL_CLIENT_SETUP in task.setup

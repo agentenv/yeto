@@ -47,7 +47,8 @@ def test_verda_island_runs_in_vm_docker(monkeypatch):
     assert image.startswith("ghcr.io/") and "@sha256:" in image and not image.startswith("docker:")
     # VM task: sky gets no docker image (its Verda adapter raises on one); the login stays a secret
     assert not hasattr(task.resources, "image_id")
-    assert task.secrets == {k: LOGIN[k] for k in ("SKYPILOT_DOCKER_USERNAME", "SKYPILOT_DOCKER_PASSWORD", "SKYPILOT_DOCKER_SERVER")}
+    # secret-handling-hardening: HF token and island HMAC key ride as secrets too.
+    assert {k: v for k, v in task.secrets.items() if k.startswith("SKYPILOT_DOCKER")} == {k: LOGIN[k] for k in ("SKYPILOT_DOCKER_USERNAME", "SKYPILOT_DOCKER_PASSWORD", "SKYPILOT_DOCKER_SERVER")}
     assert task.resources.accelerators == "RTX-6000-Ada:1" and task.resources.infra == "verda/FIN-01"
     # host setup: toolkit check, login via stdin from the exported secret, pull by digest, GPU probe
     assert "--password-stdin" in task.setup and f"$DOCKER pull -q {image}" in task.setup
@@ -64,18 +65,19 @@ def test_verda_island_runs_in_vm_docker(monkeypatch):
     # the original setup (fork checkout) is in setup.sh
     assert "~/miles" in task.run.split("YETO_ISLAND_SETUP_EOF")[1]
     # environment is forwarded by NAME only: no value of any env/secret in either script
-    for name in list(task.envs) + ["SKYPILOT_NODE_IPS", "SKYPILOT_NODE_RANK", "SKYPILOT_NUM_GPUS_PER_NODE"]:
+    for name in list(task.envs) + [k for k in task.secrets if not k.startswith("SKYPILOT_DOCKER")] + ["SKYPILOT_NODE_IPS", "SKYPILOT_NODE_RANK", "SKYPILOT_NUM_GPUS_PER_NODE"]:
         assert f"-e {name} " in task.run or f"-e {name}\n" in task.run or task.run.rstrip().endswith(f"-e {name}")
     for secret in ("sekrit-token", "hf_sekrit"):
         assert secret not in task.setup and secret not in task.run
-    assert task.envs["HF_TOKEN"] == "hf_sekrit"  # still an env of the task (sky exports it on the host)
+    # secret-handling-hardening: a sky secret (sky exports it on the host, redacted in records)
+    assert "HF_TOKEN" not in task.envs and task.secrets["HF_TOKEN"] == "hf_sekrit"
     # the task is launched through the live-stock path, which wants no retry_until_up
     assert launcher.effective_recover_timeout(args) == 0  # --no-island-relaunch: G0 never relaunches
 
 
 def test_verda_island_without_registry_login_pulls_anonymously(monkeypatch):
     _, task = _task_for("verda:1xrtx-6000-ada", monkeypatch)
-    assert not hasattr(task, "secrets")
+    assert not any(k.startswith("SKYPILOT_DOCKER") for k in getattr(task, "secrets", None) or {})
     assert "docker login" not in task.setup and "pull -q" in task.setup
     assert not hasattr(task.resources, "image_id")
 

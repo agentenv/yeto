@@ -152,15 +152,17 @@ def test_connect_island_ray_forwards_codex_harness_env_and_learner_id_to_workers
         "YETO_HARNESS_TB2_FAULT": "create_fail:2",
         "YETO_CODEX_OPENENV_MODEL_REVISION": "abc",
         "TBENCH_REWARD_HMAC_KEY": "k",
-        "MODAL_TOKEN_SECRET": "s",
+        "YETO_SANDBOX_MODAL_TOKEN_SECRET": "s",
+        "MODAL_TOKEN_SECRET": "mainTok",
         "UNRELATED": "x",
     }
     connect_island_ray(environ=environ, ray_module=machine,
                        miles_args=SimpleNamespace(yeto_rl_learner_id=3, yeto_rl_cell_id="c7"))
     env_vars = machine.init_calls[0][1]["env_vars"]
     for key in ("YETO_HARNESS_ENVIRONMENT_PROVIDER", "YETO_HARNESS_TB2_FAULT", "YETO_CODEX_OPENENV_MODEL_REVISION",
-                "TBENCH_REWARD_HMAC_KEY", "MODAL_TOKEN_SECRET"):
+                "TBENCH_REWARD_HMAC_KEY", "YETO_SANDBOX_MODAL_TOKEN_SECRET"):
         assert env_vars[key] == environ[key]
+    assert "MODAL_TOKEN_SECRET" not in env_vars  # secret-handling-hardening
     assert env_vars["YETO_RL_LEARNER_ID"] == "3" and env_vars["YETO_RL_CELL_ID"] == "c7"
     assert "UNRELATED" not in env_vars
     # without miles_args (legacy callers) nothing harness-specific is forwarded

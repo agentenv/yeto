@@ -757,26 +757,43 @@ ISLAND_HMAC_KEY_ENV = "YETO_ISLAND_HMAC_KEY"
 
 
 def island_hmac_secret(args) -> dict[str, str]:
-    """elastic only (0.20): ``{YETO_ISLAND_HMAC_KEY: key}`` read from the launching
-    environment, to be shipped as a secret (sky ``secrets=``, Modal ``cfg.envs`` which
-    becomes a ``modal.Secret``) -- never spliced into a command line, log or
-    process list. ``{}`` in legacy."""
-    if island_scheduling_mode(args) == "legacy":
+    """RL runs: ``{YETO_ISLAND_HMAC_KEY: key}``, to be shipped as a secret (sky
+    ``secrets=``, Modal ``cfg.envs`` which becomes a ``modal.Secret``) -- never
+    spliced into a command line, log or process list.
+
+    elastic: the key must come from the launching environment (unchanged).
+    legacy (secret-handling-hardening): the legacy syncer also requires the key
+    (HELLO HMAC). Without one in the environment the launcher generates a
+    random per-run key once and keeps it in ``os.environ`` so the syncer task,
+    the head job and every island receive the same value. SFT: ``{}`` (its
+    syncer runs with --allow-unauthenticated-islands, see design.md)."""
+    if getattr(args, "training_mode", "sft") != "rl":
         return {}
     key = os.environ.get(ISLAND_HMAC_KEY_ENV, "")
     if not key:
-        raise ValueError(f"--rl-island-scheduling elastic needs {ISLAND_HMAC_KEY_ENV} "
-                         "in the launching environment (island message HMAC key)")
+        if island_scheduling_mode(args) != "legacy":
+            raise ValueError(f"--rl-island-scheduling elastic needs {ISLAND_HMAC_KEY_ENV} "
+                             "in the launching environment (island message HMAC key)")
+        import secrets as _secrets
+
+        key = os.environ[ISLAND_HMAC_KEY_ENV] = _secrets.token_hex(32)
     return {ISLAND_HMAC_KEY_ENV: key}
 
 
 def _syncer_island_hmac_export(args) -> str:
-    """elastic only: fail fast in the syncer's shell when the secret did not reach
-    it. The value itself arrives as a secret env (island_hmac_secret) and the
-    syncer reads the env var. "" in legacy, so the legacy line is unchanged."""
+    """RL: fail fast in the syncer's shell when the secret did not reach it.
+    The value itself arrives as a secret env (island_hmac_secret) and the
+    syncer reads the env var. "" for SFT."""
     if not island_hmac_secret(args):
         return ""
     return f': "${{{ISLAND_HMAC_KEY_ENV}:?island HMAC key secret missing}}" && '
+
+
+def _syncer_expected_contract(args) -> str:
+    """secret-handling-hardening: the head pins the island contract
+    (--rl-island-contract-sha256) instead of letting the first island decide."""
+    pinned = getattr(args, "rl_island_contract_sha256", None)
+    return f" --expected-island-contract {pinned}" if pinned else ""
 
 
 def _syncer_island_scheduling(args) -> str:
@@ -857,6 +874,7 @@ def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer",
             f" --total-steps {total_steps}"
             f"{_syncer_quorum_timeout(args)}"
             f"{_syncer_island_scheduling(args)}"
+            f"{_syncer_expected_contract(args)}"
             f" --outer-lr {args.outer_lr}"
             f" --outer-momentum {args.outer_momentum}"
             " --max-base-lag 0 --learner-weight equal"
@@ -885,6 +903,9 @@ def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer",
         f" {_resume_if_exists('~/yeto-state.ckpt')}"
         f" --mark-final-checkpoint"
         f" --event-tape {SYNCER_EVENT_TAPE}"
+        # secret-handling-hardening: SFT islands do not get the HMAC key yet
+        # (known gap in design.md); the opt-out is explicit, never implicit.
+        " --allow-unauthenticated-islands"
     )
 
 
@@ -1372,6 +1393,20 @@ CLOUD_CREDENTIAL_ENV: dict[str, tuple[str, ...]] = {
 # Everything a learner island may legitimately receive; anything in
 # CLOUD_CREDENTIAL_ENV or CLOUD_CREDENTIAL_PATHS must never reach one.
 CLOUD_CREDENTIAL_ENV_NAMES = frozenset(v for vals in CLOUD_CREDENTIAL_ENV.values() for v in vals)
+
+# secret-handling-hardening: env values that are secrets. They go to sky
+# ``secrets=`` (redacted in sky's records), never to plain ``envs=``.
+SECRET_ENV_NAMES = frozenset({
+    "HF_TOKEN", "WANDB_API_KEY", "CYBERGYM_API_KEY", "TBENCH_REWARD_HMAC_KEY",
+    "YETO_SANDBOX_MODAL_TOKEN_ID", "YETO_SANDBOX_MODAL_TOKEN_SECRET", "YETO_ISLAND_HMAC_KEY",
+})
+
+
+def split_secret_envs(envs) -> tuple[dict[str, str], dict[str, str]]:
+    """(plain envs, secret envs): every name in SECRET_ENV_NAMES moves to secrets."""
+    envs = dict(envs or {})
+    secrets = {k: envs.pop(k) for k in list(envs) if k in SECRET_ENV_NAMES}
+    return envs, secrets
 
 
 def head_cloud(args) -> str:
@@ -3416,9 +3451,10 @@ HARNESS_PASSTHROUGH_ENV = (
     HARNESS_ENVIRONMENT_PROVIDER_ENV,
     "TBENCH_REWARD_HMAC_KEY",
     # tb2_provider Modal Sandbox backend: the island creates task sandboxes
-    # itself, so it needs the Modal token; the TB2 knobs/faults ride along.
-    "MODAL_TOKEN_ID",
-    "MODAL_TOKEN_SECRET",
+    # itself. secret-handling-hardening: it gets a separate sandbox-only Modal
+    # token (YETO_SANDBOX_MODAL_TOKEN_*), never the main MODAL_TOKEN_*.
+    "YETO_SANDBOX_MODAL_TOKEN_ID",
+    "YETO_SANDBOX_MODAL_TOKEN_SECRET",
     "OPENENV_RUN_ID",
     "SECRLENV_MAX_TURNS",
 )
@@ -3432,6 +3468,18 @@ MODAL_SANDBOX_PROVIDER = "yeto.rl.harness.codex.tb2_provider:modal_provider"
 # rl-agentic-reward-env: same TB2 provider, sandboxes from prebaked images.
 PREBAKED_MODAL_SANDBOX_PROVIDER = "yeto.cloud.modal_reward_env:modal_provider"
 MODAL_SANDBOX_PROVIDERS = frozenset({MODAL_SANDBOX_PROVIDER, PREBAKED_MODAL_SANDBOX_PROVIDER})
+SANDBOX_MODAL_TOKEN_ENVS = ("YETO_SANDBOX_MODAL_TOKEN_ID", "YETO_SANDBOX_MODAL_TOKEN_SECRET")
+
+
+def require_sandbox_modal_token(envs) -> None:
+    """secret-handling-hardening: a Modal Sandbox provider on the island needs
+    the sandbox-only token; the main MODAL_TOKEN_* never goes to an island."""
+    missing = [n for n in SANDBOX_MODAL_TOKEN_ENVS if not envs.get(n)]
+    if missing:
+        raise ValueError(
+            f"the Modal Sandbox provider needs {', '.join(missing)} in the launching "
+            "environment: a separate Modal token used only for task sandboxes (the main "
+            "MODAL_TOKEN_ID/SECRET is never shipped to a learner island)")
 MODAL_CLIENT_SETUP = (
     # --ignore-installed: in a Modal Function container the setup shell
     # already sees Modal's runtime copies (/pkg, /__modal/deps), so a plain
@@ -4141,6 +4189,7 @@ def make_miles_island_task(
     if getattr(args, "rl_initial_adapter", None) is not None:
         setup_steps.append(f"chmod -R a-w {RL_INITIAL_ADAPTER_PATH}")
     if codex_launch is not None and envs.get(HARNESS_ENVIRONMENT_PROVIDER_ENV) in MODAL_SANDBOX_PROVIDERS:
+        require_sandbox_modal_token(envs)
         setup_steps.append(MODAL_CLIENT_SETUP)
     store_fs = model_store_filesystem(getattr(args, "model_store", None), spec.cloud, spec.region)
     store_env = ""
@@ -4265,6 +4314,7 @@ def make_miles_island_task(
             ">/dev/null 2>&1; do sleep 5; done\n"
             "fi"
     )
+    envs, env_secrets = split_secret_envs(envs)
     in_vm_docker = spec.cloud in IN_VM_DOCKER_CLOUDS
     if in_vm_docker:
         # C block: sky's docker runtime is unavailable here; the same setup
@@ -4272,9 +4322,10 @@ def make_miles_island_task(
         setup_script, run_script = (
             in_vm_docker_setup(args.rl_image, login=bool(registry_login)),
             in_vm_docker_run(args.rl_image, setup_script, run_script,
-                             [*envs.keys(), *island_hmac_secret(args).keys()], learner_id),
+                             [*envs.keys(), *env_secrets.keys(), *island_hmac_secret(args).keys()],
+                             learner_id),
         )
-    island_secrets = {**dict(registry_login or {}), **island_hmac_secret(args)}
+    island_secrets = {**dict(registry_login or {}), **env_secrets, **island_hmac_secret(args)}
     task = sky.Task(
         name=f"yeto-rl-island-{learner_id}",
         setup=setup_script,
@@ -4699,11 +4750,13 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         "--master_addr=$MASTER_ADDR --master_port=29500 "
         f"-m {entrypoint}{learner_flags}"
     )
+    envs, env_secrets = split_secret_envs(envs)
     task = sky.Task(
         name=f"yeto-learner-{learner_id}",
         setup="\n".join(setup_steps + [prefetch]),
         run=run,
         envs=envs,
+        **({"secrets": env_secrets} if env_secrets else {}),
         num_nodes=spec.num_nodes,
         workdir=str(REPO_ROOT),
         file_mounts=file_mounts,
@@ -4829,11 +4882,13 @@ def make_diffusion_sample_task(args, spec: ClusterSpec):
     envs = {"HF_HUB_ENABLE_HF_TRANSFER": "1"}
     if os.environ.get("HF_TOKEN"):
         envs["HF_TOKEN"] = os.environ["HF_TOKEN"]
+    envs, env_secrets = split_secret_envs(envs)
     task = sky.Task(
         name="yeto-diffusion-sample",
         setup="\n".join(setup_steps),
         run=run,
         envs=envs,
+        **({"secrets": env_secrets} if env_secrets else {}),
         workdir=str(REPO_ROOT),
         file_mounts=file_mounts or None,
     )
@@ -5039,6 +5094,10 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
     rl = getattr(args, "training_mode", "sft") == "rl"
     registry_login = registry_login_for(args) if rl else None
     envs = dict(getattr(task, "envs", None) or {})
+    # Modal ships cfg.envs as a modal.Secret, so the task's secret envs
+    # (split_secret_envs) join them here; registry logins stay out.
+    envs.update({k: v for k, v in (getattr(task, "secrets", None) or {}).items()
+                 if k in SECRET_ENV_NAMES})
     envs["SYNCER_ADDR"] = syncer_addr
     if "CRITIC_SYNCER_ADDR" in envs and syncer_addr != "none":
         # The critic syncer shares the actor syncer's host: swap it too, or a

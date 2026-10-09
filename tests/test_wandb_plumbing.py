@@ -97,7 +97,8 @@ def test_islands_are_told_which_fleet_they_belong_to(monkeypatch):
     # The group is the run's name, so every island and the syncer's tape run
     # land on one comparison view.
     assert task.envs["YETO_RUN_GROUP"] == "my-fleet"
-    assert task.envs["WANDB_API_KEY"] == "secret"
+    # secret-handling-hardening: the key is a secret, not a plain env.
+    assert "WANDB_API_KEY" not in task.envs and "WANDB_API_KEY" in task.secrets
 
 
 def test_a_missing_key_still_launches(monkeypatch):

@@ -476,6 +476,11 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
                     help="legacy (default): existing syncer behaviour, fixed members, every "
                     "island must arrive; elastic: inter-island scheduling (capacity-weighted "
                     "stepping, late deltas carried over with a discount, join/leave)")
+    rl.add_argument("--rl-island-contract-sha256", default=None,
+                    type=_sha256_hex_arg,
+                    help="secret-handling-hardening: island contract (backend identity bound to "
+                    "the LR schedule) pinned by the head; the syncer refuses islands whose "
+                    "contract differs, even when they connect first. Default: first island decides")
     rl.add_argument("--rl-max-policy-age", type=int, default=0,
                     help="agentic-rollout-utilization: how many published policy versions a "
                     "trained sample may lag (0, default: deterministic, every sample from the "
@@ -1252,6 +1257,12 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     from .wandb_logger import add_arguments as add_wandb_arguments
 
     add_wandb_arguments(p)
+
+
+def _sha256_hex_arg(value: str) -> str:
+    if len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
+        raise argparse.ArgumentTypeError("must be 64 lowercase hex chars")
+    return value
 
 
 def parse_args(argv=None):
@@ -2128,6 +2139,9 @@ def cmd_launch_head(args) -> int:
         # island HMAC key from this secret env (elastic only; {} in legacy).
         secrets.update(launcher.island_hmac_secret(args))
     secrets.update(codex_secrets)
+    # secret-handling-hardening: HF/W&B/CyberGym tokens ride as secrets too.
+    envs, env_secrets = launcher.split_secret_envs(envs)
+    secrets.update(env_secrets)
     job_task = sky.Task(
         name="yeto-head-job",
         run=(
