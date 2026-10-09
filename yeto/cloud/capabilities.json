@@ -31,17 +31,17 @@
                        "source": null, "checked_on": null}
     },
     "nebius": {
-      "notice_s": {"value": null, "status": "unchecked", "source": null, "checked_on": null},
-      "notice_method": {"value": null, "status": "unchecked", "source": null, "checked_on": null},
+      "notice_s": {"value": 60, "status": "checked", "kind": "advance_signal", "note": "SIGTERM 60 s before stop; SIGKILL if the system does not stop in time", "source": "https://docs.nebius.com/compute/virtual-machines/preemptible", "checked_on": "2026-10-09"},
+      "notice_method": {"value": "SIGTERM to the VM, then SIGKILL", "status": "checked", "note": "metadata endpoint: 官方文档未写", "source": "https://docs.nebius.com/compute/virtual-machines/preemptible", "checked_on": "2026-10-09"},
       "durable_store": {"value": null, "status": "unchecked", "source": null, "checked_on": null},
-      "spot": {"value": null, "status": "unchecked", "source": null, "checked_on": null},
+      "spot": {"value": "yes", "status": "checked", "note": "preemptible VM; on preemption only STOP is supported; attached volumes keep their data; dynamic public IP is released; local SSD is ephemeral (lost on stop)", "source": "https://docs.nebius.com/compute/virtual-machines/preemptible", "checked_on": "2026-10-09"},
       "price_source": {"value": null, "status": "unchecked", "source": null, "checked_on": null}
     },
     "verda": {
-      "notice_s": {"value": null, "status": "unchecked", "source": null, "checked_on": null},
-      "notice_method": {"value": null, "status": "unchecked", "source": null, "checked_on": null},
+      "notice_s": {"value": 0, "status": "checked", "kind": "none", "note": "docs: spot may be evicted at any time without warning", "source": "https://api.datacrunch.io/v1/docs", "checked_on": "2026-10-09"},
+      "notice_method": {"value": null, "status": "unchecked", "note": "官方文档未写 (no metadata endpoint, signal or webhook found)", "source": null, "checked_on": null},
       "durable_store": {"value": null, "status": "unchecked", "source": null, "checked_on": null},
-      "spot": {"value": null, "status": "unchecked", "source": null, "checked_on": null},
+      "spot": {"value": "yes", "status": "checked", "note": "is_spot; OS volume after eviction set by os_volume.on_spot_discontinue: keep_detached (default) | move_to_trash (deleted after 96 h) | delete_permanently; block volume/shared filesystem behaviour on eviction: 官方文档未写", "source": "https://api.datacrunch.io/v1/docs", "checked_on": "2026-10-09", "also": "https://docs.verda.com/cpu-and-gpu-instances/set-up-a-gpu-instance/"},
       "price_source": {"value": null, "status": "unchecked", "source": null, "checked_on": null}
     }
   }
