@@ -1,9 +1,0 @@
-[yeto] yeto-hp929b-l0-modal: not confirmed stopped (Modal app yeto-yeto-hp929b: still stopping... with 2 task(s))
-[yeto] yeto-hp929b-l1-modal: not confirmed stopped (Modal app yeto-yeto-hp929b: still stopping... with 2 task(s))
-/home/michael/work/gpu-head/venv/lib/python3.12/site-packages/sky/adaptors/nebius.py:248: FutureWarning: user_agent_prefix will become mandatory in a future release
-  return nebius.sdk.SDK(
-[yeto] run 'yeto-hp929b' is NOT fully down; unconfirmed: yeto-hp929b-l0-modal, yeto-hp929b-l1-modal. Rerun `yeto down yeto-hp929b`, or check the cloud console for instances named after them.
-[yeto] worker is not running
-[yeto] tearing down 3 cluster(s): yeto-hp929b-head, yeto-hp929b-l0-modal, yeto-hp929b-l1-modal
-[yeto] Modal app yeto-yeto-hp929b: stopped
-[yeto] yeto-hp929b-head: down

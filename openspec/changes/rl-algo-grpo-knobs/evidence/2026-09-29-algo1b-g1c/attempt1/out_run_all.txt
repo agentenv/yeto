@@ -1,5 +1,0 @@
-sandbox sb-B1geDjr6ZEjfupuiOEJBqg
-
-
-setup failed (see out/setup.log)
-exit=2

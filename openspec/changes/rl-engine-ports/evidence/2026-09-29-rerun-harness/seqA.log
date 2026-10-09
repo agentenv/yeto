@@ -1,28 +1,0 @@
-rc=0
-Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
-Fetching 10 files:  10%|█         | 1/10 [00:00<00:01,  8.40it/s]Fetching 10 files:  70%|███████   | 7/10 [00:00<00:00, 33.17it/s]Fetching 10 files: 100%|██████████| 10/10 [00:06<00:00,  1.62it/s]
-worker rc 0 seconds 460
-copied /home/michael/work/gpu-rerun/evidence/2026-09-29-rerun-smoke-normal
-rc=0
-Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Fetching 10 files: 100%|██████████| 10/10 [00:00<00:00, 846.63it/s]
-Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
-worker rc 1 seconds 317
-copied /home/michael/work/gpu-rerun/evidence/2026-09-29-rerun-smoke-badtoken
-rc=0
-Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Fetching 10 files: 100%|██████████| 10/10 [00:00<00:00, 805.20it/s]
-Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
-worker rc 1 seconds 296
-copied /home/michael/work/gpu-rerun/evidence/2026-09-29-rerun-smoke-zerograd
-rc=0
-Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Fetching 10 files: 100%|██████████| 10/10 [00:00<00:00, 873.85it/s]
-Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
-worker rc 1 seconds 307
-copied /home/michael/work/gpu-rerun/evidence/2026-09-29-rerun-smoke-pubfail
-rc=0
-Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Fetching 10 files: 100%|██████████| 10/10 [00:00<00:00, 814.87it/s]
-{"step": "first_learner_exit", "rc": -9, "killed": true, "t": 1790662705.7815042}
-{"step": "events_before_restart", "n": 34, "t": 1790662725.7827563}
-{"step": "restart_exit", "rc": 0, "t": 1790663234.6397407}
-{"step": "syncer_exit", "rc": 0, "t": 1790663234.640138}
-copied /home/michael/work/gpu-rerun/evidence/2026-09-29-rerun-kill44
-terminated

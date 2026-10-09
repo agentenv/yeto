@@ -1,0 +1,5 @@
+path	bytes	sha256	volume	volume_path
+openspec/changes/fix-verda-provider/evidence/pytest-failures-after.txt	9036	bb3d123b32f899e116c5a47fd449973aae6b07a6a28b13461599e42e5f6a6d34	yeto-evidence-archive	/openspec/changes/fix-verda-provider/evidence/pytest-failures-after.txt
+openspec/changes/fix-verda-provider/evidence/pytest-failures-before.txt	9036	bb3d123b32f899e116c5a47fd449973aae6b07a6a28b13461599e42e5f6a6d34	yeto-evidence-archive	/openspec/changes/fix-verda-provider/evidence/pytest-failures-before.txt
+openspec/changes/fix-verda-provider/evidence/real-sky-scenarios.stderr	166	b11202309a4a7513037968e2cdb1805b160b4c707f1bb8ca13c5b824a38011f3	yeto-evidence-archive	/openspec/changes/fix-verda-provider/evidence/real-sky-scenarios.stderr
+openspec/changes/fix-verda-provider/evidence/test_verda_provider.txt	141996	4f36181f646e8f4548e36527713c58beaa97955872e09da6d7c015e51e9506d7	yeto-evidence-archive	/openspec/changes/fix-verda-provider/evidence/test_verda_provider.txt

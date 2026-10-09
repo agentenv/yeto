@@ -1,12 +1,0 @@
-sandbox sb-NCEOOOmOOTK45bK8f140xp ready after 1 s
-NVIDIA H100 80GB HBM3
-prompts 12
-=== RUN gspo_s2 2026-09-29T16:50:28Z
-rc=1
-Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
-Fetching 10 files:  50%|█████     | 5/10 [00:00<00:00, 48.78it/s]Fetching 10 files: 100%|██████████| 10/10 [00:06<00:00,  1.29it/s]Fetching 10 files: 100%|██████████| 10/10 [00:06<00:00,  1.51it/s]
-worker rc 1 seconds 149
-=== RUN gspo_s1 2026-09-29T16:53:25Z
-sandbox script rc 137
-fetch failed An unexpected error occurred, please contact support@modal.com
-terminated sb-NCEOOOmOOTK45bK8f140xp total 207 s

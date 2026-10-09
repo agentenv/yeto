@@ -1,4 +1,0 @@
-rc=0
-Fetching 10 files:   0%|          | 0/10 [00:00<?, ?it/s]Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
-Fetching 10 files:  60%|██████    | 6/10 [00:00<00:00, 53.32it/s]Fetching 10 files: 100%|██████████| 10/10 [00:07<00:00,  1.39it/s]
-G1_RESULT {"mechanism": "clip_sym", "rc": 1, "seconds": 56.9, "peak_gpu_mib": 4}

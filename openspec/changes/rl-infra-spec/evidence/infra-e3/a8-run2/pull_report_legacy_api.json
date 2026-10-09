@@ -1,6 +1,0 @@
-{
- "ok": [],
- "bad": [],
- "error": "ConflictError: The legacy Sandbox filesystem API is no longer supported. See https://modal.com/docs/guide/migrate-sandbox-filesystem for details on how to migrate to the new FS API. Please contact support@modal.com if you need further assistance.",
- "release_error": "ConflictError('The legacy Sandbox filesystem API is no longer supported. See https://modal.com/docs/guide/migrate-sandbox-filesystem for details on how to migrate to the new FS API. Please contact support@modal.com if you need further assistance.')"
-}

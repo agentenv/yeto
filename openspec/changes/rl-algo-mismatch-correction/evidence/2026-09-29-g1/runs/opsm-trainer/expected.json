@@ -1,1 +1,0 @@
-{"sha256": "98dafc415d8a642e585aa9fdbefcf15d3297e4d268c547e4e8ee8e22934e2406", "allow": ["opsm", "opsm_trainer"], "argv": ["--use-opsm", "--opsm-delta", "0.0001"]}

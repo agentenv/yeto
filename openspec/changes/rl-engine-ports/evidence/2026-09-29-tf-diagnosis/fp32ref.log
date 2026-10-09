@@ -1,10 +1,0 @@
-[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
-Loading weights:   0%|          | 0/311 [00:00<?, ?it/s]Loading weights:  47%|████▋     | 147/311 [00:00<00:00, 1466.82it/s]Loading weights: 100%|██████████| 311/311 [00:00<00:00, 1799.08it/s]
-island 0 legacy-bf16 - fp32   mean_abs=1.0925e-02 max_abs=3.4819e-01 mean_signed=-9.0243e-04 rms=2.7890e-02
-island 0 ports-bf16 - fp32    mean_abs=1.1072e-02 max_abs=4.2813e-01 mean_signed=-6.0472e-04 rms=2.9205e-02
-island 0 sglang - fp32        mean_abs=9.3042e-03 max_abs=2.3404e-01 mean_signed=-8.9616e-05 rms=2.3035e-02
-island 0 legacy - ports       mean_abs=1.3103e-02 max_abs=4.4979e-01 mean_signed=-2.9771e-04 rms=3.5460e-02
-island 1 legacy-bf16 - fp32   mean_abs=1.3218e-02 max_abs=4.6696e-01 mean_signed=-3.6843e-04 rms=3.1819e-02
-island 1 ports-bf16 - fp32    mean_abs=1.2992e-02 max_abs=3.7207e-01 mean_signed=-3.1555e-04 rms=3.0739e-02
-island 1 sglang - fp32        mean_abs=1.0949e-02 max_abs=2.3556e-01 mean_signed=8.4755e-04 rms=2.5236e-02
-island 1 legacy - ports       mean_abs=1.6235e-02 max_abs=6.0162e-01 mean_signed=-5.2875e-05 rms=3.9880e-02
