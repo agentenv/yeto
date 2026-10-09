@@ -283,6 +283,7 @@ for a fleet, the metric tables, the debugging map, and the failure policy.
 
 ## Testing and CI
 
+    # local safe suite: see docs/TESTING.md (venv, Ray tests off by default)
     python3 -m pytest tests/          # includes a real syncer+learner loop
     (cd syncer && cargo test)
 

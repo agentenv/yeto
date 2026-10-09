@@ -657,10 +657,15 @@ def _write_terminal_fixture(tmp_path: Path) -> tuple[dict, str]:
                     reward=float(sample == 0),
                     reward_contract_hash=manifest["profile"]["reward_sha256"],
                     cleanup_evidence_hash=_sha("9"),
+                    # v2 evidence (the writer default) needs these three fields.
+                    evidence_kind="secrlenv",
+                    active_token_count=2,
+                    loss_mask_hash=_sha("f"),
+                    active_token_ids_hash=_sha("1"),
                 )
                 for sample in range(3)
             )
-            input_hash = _envelope_batch_hash(envelopes, trained_tokens)
+            input_hash = _envelope_batch_hash(envelopes, trained_tokens, schema_version=2)
             write_trajectory_batch_evidence(
                 trajectory_root,
                 TrajectoryBatchEvidence(

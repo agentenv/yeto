@@ -119,6 +119,7 @@ CASES = [
 ]
 
 
+@pytest.mark.ray_local  # upstream parse_args can start Ray on this machine
 @pytest.mark.parametrize("change, expected", CASES)
 def test_upstream_parse_args_accepts_non_default_mapping(tmp_path, monkeypatch, change, expected):
     (tmp_path / "config.json").write_text(json.dumps(TINY_QWEN3))

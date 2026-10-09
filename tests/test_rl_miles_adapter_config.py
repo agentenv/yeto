@@ -326,6 +326,7 @@ _TINY_QWEN3 = {
 }
 
 
+@pytest.mark.ray_local  # upstream parse_args can start Ray on this machine
 @pytest.mark.parametrize("colocated", [True, False])
 def test_upstream_parse_args_accepts_translation(tmp_path, colocated):
     """Runs only where upstream Miles + Megatron + SGLang import (e.g. the pinned image)."""

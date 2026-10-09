@@ -261,6 +261,8 @@ def test_workload_generate_delays_train_samples_only(monkeypatch):
     from types import SimpleNamespace
 
     from yeto.rl import tool_wait_workload as w
+    # decoupling 5.7 (da1f923b) moved the Miles generate hook to harness_glue.
+    from yeto.rl.adapters.miles.harness_glue import tool_wait as glue
 
     calls = []
 
@@ -281,9 +283,9 @@ def test_workload_generate_delays_train_samples_only(monkeypatch):
     monkeypatch.setenv(w.TOOL_DELAY_ENV, "5")
     inp = SimpleNamespace(args=SimpleNamespace(yeto_rl_learner_id=0), sample="S",
                           sampling_params={}, evaluation=False)
-    assert asyncio.run(w.generate(inp)) == ("out", "S")
+    assert asyncio.run(glue.generate(inp)) == ("out", "S")
     inp.evaluation = True
-    asyncio.run(w.generate(inp))
+    asyncio.run(glue.generate(inp))
     assert calls == [("tool", 5.0), ("gen", False), ("gen", True)]
 
 

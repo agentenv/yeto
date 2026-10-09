@@ -449,6 +449,7 @@ def _hook_samples(statuses, group_index):
 
 
 @needs_hook
+@pytest.mark.ray_local  # build_metadata -> current_policy_token auto-starts Ray
 def test_hook_overlong_filter_and_metadata():
     spec = AlgorithmSpec(sampling={"overlong_filter": True})
     args = SimpleNamespace(**gk.runtime_attrs(spec))
@@ -461,6 +462,7 @@ def test_hook_overlong_filter_and_metadata():
 
 
 @needs_hook
+@pytest.mark.ray_local  # build_metadata -> current_policy_token auto-starts Ray
 def test_hook_default_unchanged():
     args = SimpleNamespace()
     data = [_hook_samples(["completed", "truncated"], 0)]

@@ -22,7 +22,7 @@
 | test_rl_algorithm_provenance::test_export_records_algorithm_like_the_event | 缺 accelerate | 环境依赖 | `pytest.importorskip("accelerate")` 并写原因 |
 | test_ports_megatron_pythonpath | 缺 megatron.post_training | 环境依赖（只在 ports 镜像里有） | 模块级 importorskip 并写原因 |
 
-### CI 失败（主 agent 调查结果，CI run 37887731542）
+### CI 失败（主 agent 调查结果，CI run 37887731542）——不做：PM 决定不管 CI（10-09 用户），下表仅留档
 | 项 | 可能根因 | 处理方向 |
 |---|---|---|
 | 缺 pylatexenc、pytest-asyncio | 安装步骤（ci.yml:33）没列 | 补进安装步骤 |
@@ -38,7 +38,7 @@
 **Goals:**
 - 上表每一项都有结论：修复、带原因跳过、或确认已修好。
 - 默认 pytest 运行不会拉起 Ray。
-- 一条命令跑本机安全集，CI python 与 rust 作业转绿。
+- 一条命令跑本机安全集，全部通过（只允许带原因的跳过）。CI 不管（PM 决定，10-09 用户）。
 
 **Non-Goals:**
 - 不在本机跑 `ray_local` 测试，也不在本机跑包含 Ray 的全量测试。
@@ -60,9 +60,9 @@ conftest 加一个自动生效的夹具：已导入 ray 时把 `ray.init` 换成
 
 ### 决定 4：本机安全测试集命令
 ```
-cd <仓库根> && PATH="$HOME/.cargo/bin:$PATH" PYTHONPATH=. /home/michael/work/miles-next-venv/bin/python -m pytest tests -q -p no:cacheprovider -m "not gpu"
+cd <仓库根> && PATH="$HOME/.cargo/bin:$PATH" PYTHONPATH=. /home/michael/work/yeto-test-venv/bin/python -m pytest tests -q -p no:cacheprovider -m "not gpu" -rfEs
 ```
-默认已排除 `ray_local`。命令写进 docs/TESTING.md（新建）并在 README 链接。运行前须确认没有上卡链在跑（线程预检同理）。
+默认已排除 `ray_local`。10-09 改用专用测试 venv（选项 B，主 agent 代用户拍板），创建命令见 docs/TESTING.md。命令写进 docs/TESTING.md（新建）并在 README 链接。运行前须确认没有上卡链在跑（线程预检同理）。
 
 ### 决定 5：跳过只用于环境依赖
 代码与测试不一致的项一律修。跳过原因格式统一为"需要 X（在 Y 环境中运行）"。
@@ -78,3 +78,36 @@ cd <仓库根> && PATH="$HOME/.cargo/bin:$PATH" PYTHONPATH=. /home/michael/work/
 
 - 合入后，"完成"的判断改为以决定 4 的命令全绿为准。
 - 回滚：去掉 conftest 改动即可恢复旧收集行为。
+
+## 附录 A：会拉起 Ray 的测试（审计结果，10-09 FKRT）
+
+方法：静态 grep（`ray.init`、`ray start`、`upstream_parse_args`、导入 miles）加运行时守卫。规则禁止本机运行会拉 Ray 的测试，所以没有逐个单独运行候选。守卫在默认运行中拦截 `ray.init`（含 Ray 的自动初始化），两次全量运行期间后台每 3 秒检查 raylet/gcs_server，都没有出现。
+
+| 测试 | 判断 | 依据 | 处理 |
+|---|---|---|---|
+| test_rl_harness_mismatch_tape.py（整个文件） | 拉起 | S15 10-07 两次实测（记忆 miles-venv-ray-tests）；Miles 可导入时 hook 走真实 Ray 路径 | 模块级 `ray_local` |
+| test_rl_algorithm_flags_upstream.py::test_upstream_parse_args_accepts_non_default_mapping | 可能拉起 | 调上游 Miles parse_args | `ray_local` |
+| test_rl_miles_adapter_config.py::test_upstream_parse_args_accepts_translation | 拉起 | S15 实测 | `ray_local` |
+| test_rl_grpo_knobs.py::test_hook_overlong_filter_and_metadata、test_hook_default_unchanged | 拉起 | 全量运行时守卫拦截：build_metadata → current_policy_token 触发 Ray 自动初始化 | `ray_local` |
+| test_rl_eval_batch_buckets.py::test_build_metadata_adds_by_bucket_only_with_difficulty | 拉起 | 同上 | `ray_local` |
+| test_delta_protocol.py | 未拉起 | 只用 subprocess 起 Rust syncer，没有 ray 调用 | 不加标记 |
+| test_rl_launcher*.py、test_rl_ssh_harness.py、test_rl_multinode_m5_h100.py 等出现 `ray start` 的文件 | 未拉起 | `ray start` 只出现在断言的脚本字符串里 | 不加标记 |
+| tests/multinode_sim/sim.py | 不收集 | 不是 test_ 文件，在模拟环境里运行 | 不加标记 |
+| test_rl_multinode_gpu_pool.py 两例 | 未拉起 | 调 Ray 状态接口但不 init，失败报"Ray has not been started" | 测试替身替换 Ray 探针（见附录 B） |
+
+## 附录 B：全量运行中新发现的失败（不在原 9 个之内）
+
+| 测试 | 根因 | 处理 |
+|---|---|---|
+| test_rl_launch_e2e_b1::test_workload_generate_delays_train_samples_only | decoupling 5.7（da1f923b）把 generate 挪到 adapters/miles/harness_glue/tool_wait.py，测试没跟上 | 改测试，调新位置 |
+| test_rl_multinode_gpu_pool 两例 | 10-04 裁定 v2 加了"旧实例占卡"探针，默认走 Ray；测试写于无 ray 的 venv | 改测试，autouse 替身返回空 |
+| test_rl_neutral_rewards::test_custom_reward_via_miles_equals_direct_call | 断言全进程 sys.modules 不含 megatron，全量运行时前面的测试已导入 | 改测试，只查本测试新导入的模块 |
+| test_provenance::test_production_tree_has_no_unsafe_torch_load_or_forced_remote_code | rollout_meta_hook.py:120 `load_tokenizer(..., trust_remote_code=True)`，与 Miles 自身调用一致 | 主 agent 代用户拍板：测试加例外，只限这个文件这一处调用，不改代码 |
+| test_decoupling_golden::test_no_ray_and_no_miles_loaded | 本 change 第一版守卫在 conftest 导入了 ray | 改守卫：不导入 ray，用 import 钩子在 ray 被导入时再替换 |
+| test_rl_dense_full_parameter_sweep 两例（有 cargo 时） | syncer sweep 必须带 --resume 与 --resume 必须有文件两条规则冲突 | 改代码（主 agent 代用户拍板选 A），见 tasks 2.3 |
+| SLIM 报告的 10 个 evidence 测试失败 | 1 个是 m1_dense（即 2.4）。其余 9 个是 async 测试，SLIM 运行环境没装 pytest-asyncio（日志有 Unknown pytest.mark.asyncio 警告） | 装依赖，不改测试：pyproject dev/test 组加 pytest-asyncio；约定 venv 已含 |
+| 约 80 例缺 sky/peft/accelerate/boto3 | miles-next-venv 没装这些包 | 主 agent 代用户拍板选 B：新建 /home/michael/work/yeto-test-venv，pyproject 加 test 组 |
+
+## 遗留问题
+
+- yeto/rl/ssh_harness.py:2789 无条件加 --resume。没有 eval_checkpoint 的计划首次启动时 state.ckpt 不存在，syncer 可能拒绝启动。这是读码判断，未在真机验证。改法需同时改 5 处进程身份比对（start/wait/status/kill/stop 脚本把 argv 逐字和 /proc/PID/cmdline 比对）。本 change 不改（主 agent 10-09 同意）。
