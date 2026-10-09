@@ -124,6 +124,11 @@ class SampleGroup:
     n: int = 1
     behavior_logprob: tuple[float, ...] | None = None
     uri: str | None = None
+    # agentic-rollout-utilization 3.4: (outer_version, policy_hash) of every
+    # version segment of a carried-over group, oldest first. None = one segment
+    # (outer_version, policy_hash). Judged by its oldest segment; every segment
+    # must be a published version.
+    version_segments: tuple[tuple[int, str], ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -275,6 +280,20 @@ class CrossIslandLedger:
     # -- samples ----------------------------------------------------------------
     def judge(self, group: SampleGroup, *, consumer_island: str,
               consumer_inner_step: int | None = None) -> Verdict:
+        segments = group.version_segments
+        if segments:
+            bad = [v for v, h in segments if self.published.get(v) != h]
+            if bad:
+                verdict = Verdict(REJECT, "segment_policy_hash_mismatch",
+                                  self.outer_version - min(v for v, _ in segments), None, None)
+                self._emit("sample_verdict", island_id=group.island_id, consumer=consumer_island,
+                           group_version=group.outer_version, n=group.n,
+                           **{k: val for k, val in asdict(verdict).items()})
+                return verdict
+            oldest = min(segments)
+            from dataclasses import replace as _replace
+
+            group = _replace(group, outer_version=oldest[0], policy_hash=oldest[1])
         outer_lag, inner_lag = staleness(self.outer_version, consumer_inner_step,
                                          group.outer_version, group.inner_step)
 

@@ -22,11 +22,16 @@
   - 证据：`yeto/rl/adapters/miles/policy_age.py`（`policy_age_argv`：0 → 无，N>0 → `--partial-rollout --mask-offpolicy-in-partial-rollout`）；`algo_flag_rows` 注册两行（由 `execution.max_policy_staleness` 推导，直接传入被拒并提示用 `--rl-max-policy-age`），从 `_UNMAPPED` 移除，仍属适配层独占参数；`tests/test_rl_policy_age.py::test_miles_switches_are_derived_from_the_limit`；Miles 命令行标准样本不变（`tests/test_decoupling_golden.py`）。TIS 由算法规格的 correction 配置（staleness>0 时必需），fork 未改。
 
 ## 3. 阶段 1：版本段记账、切点与多岛账本
-- [ ] 3.1 token 级生成版本与生成概率随样本携带（验证：样本序列化往返单测）
-- [ ] 3.2 训练端跨版本重要性采样修正与截断比例上报（验证：CPU 数值单测，构造已知比值）
-- [ ] 3.3 续训切点"在途轨迹"段，上限 0 时必须为空；以 0 恢复含在途轨迹的切点时丢弃并上报（验证：cut 单测与恢复单测）
-- [ ] 3.4 多岛：样本按版本段进入 island_ledger 的 ACCEPT_IS 判定（验证：账本单测，跨 1/2 版本两种情形）
-- [ ] 3.5 截断比例告警阈值与运行内自动回退到 0（只降不升）（验证：单测注入高截断比例）
+- [x] 3.1 token 级生成版本与生成概率随样本携带（验证：样本序列化往返单测）
+  - 证据：`yeto/rl/engine/version_segments.py` `TokenProvenance`（逐 token 版本 + 生成对数概率，序列化为版本段 + 概率）；组级 `GroupMetadata.policy_versions`（第 2 组）；`tests/test_rl_version_segments.py::test_provenance_serialization_roundtrip_and_segments`。Miles 样本上的实际填充属阶段 2（4.1）。
+- [x] 3.2 训练端跨版本重要性采样修正与截断比例上报（验证：CPU 数值单测，构造已知比值）
+  - 证据：`cross_version_is`（当前版本 token 权重 1，旧版本 token 取 exp(训练−生成) 截断到 [下界, 上界]，统计截断比例）、`batch_truncated_fraction`；`TrainStepMetrics.cross_version_truncated_fraction`，有值时写进 `rl_round_trained`；`tests/test_rl_version_segments.py::test_cross_version_is_with_known_ratios`、`::test_driver_injected_high_truncation_falls_back_to_zero`（事件含截断比例）。Miles 训练内由 TIS（生成时概率）执行，引擎上报截断比例属阶段 2 接线。
+- [x] 3.3 续训切点"在途轨迹"段，上限 0 时必须为空；以 0 恢复含在途轨迹的切点时丢弃并上报（验证：cut 单测与恢复单测）
+  - 证据：`CutManifest.in_flight`（非空才序列化，默认切点字节不变）；`context_problems`：上限 0 时在途段必须为空、carried_over 仍须 0，上限 >0 时 carried_over 必须等于在途条数（上限记在 ledger.max_policy_age）；`restore_in_flight`：上限 0 全部丢弃并上报，>0 时超限或同题组已完成者丢弃；`tests/test_rl_version_segments.py::test_cut_in_flight_section_empty_at_limit_zero`、`::test_restore_with_in_flight_trajectories`（5 条在途）。
+- [x] 3.4 多岛：样本按版本段进入 island_ledger 的 ACCEPT_IS 判定（验证：账本单测，跨 1/2 版本两种情形）
+  - 证据：`SampleGroup.version_segments`，`judge` 按最旧段判定、每段哈希必须是已发布版本；`tests/test_rl_version_segments.py::test_ledger_judges_carried_over_groups_by_their_oldest_segment`（跨 1 版本 ACCEPT_IS；上界 1 时跨 2 版本 REJECT、上界 2 时 ACCEPT_IS；伪造段哈希 REJECT）。
+- [x] 3.5 截断比例告警阈值与运行内自动回退到 0（只降不升）（验证：单测注入高截断比例）
+  - 证据：`PolicyAgeGovernor`（告警 0.2、回退 0.5 默认）；driver `_govern_policy_age` 发 `rl_policy_age_warning` / `rl_policy_age_fallback`，回退后 `_max_policy_age()` 恒 0 并调用引擎可选动词 `set_max_policy_age(0)`；`tests/test_rl_version_segments.py::test_governor_warns_then_falls_back_and_never_goes_up`、`::test_driver_injected_high_truncation_falls_back_to_zero`。阈值默认值为本次拟定，阶段 2 上卡后按实测调整。
 
 ## 4. 阶段 2：单轮任务续跑（门槛：阶段 0 达标 + N15 偏差已定位）
 - [ ] 4.1 Miles 单轮路径开启 partial-rollout，接入版本段记账（验证：假引擎单测，跨版本续跑样本版本段正确）

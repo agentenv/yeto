@@ -207,6 +207,10 @@ class TrainStepMetrics:
     # (rl-algorithm-capabilities D6); None when the engine does not report it,
     # which keeps the stricter R0 gradient rule.
     masked_fraction: float | None = None
+    # agentic-rollout-utilization 3.2: truncated / cross-version tokens of the
+    # importance-sampling correction (version_segments.cross_version_is); None
+    # when no token crossed a version or the engine does not report it.
+    cross_version_truncated_fraction: float | None = None
 
 
 @dataclass(frozen=True)
@@ -1144,9 +1148,36 @@ class IslandDriver:
                       t=self.clock(), **self._labels(), **fields)
 
     def _max_policy_age(self) -> int:
-        """agentic-rollout-utilization 2.3: the profile's limit (0 without a profile)."""
+        """agentic-rollout-utilization 2.3: the profile's limit (0 without a
+        profile), or 0 once the 3.5 governor fell back (never back up)."""
+        governor = getattr(self, "_policy_age_governor", None)
+        if governor is not None:
+            return governor.limit
         profile = getattr(self, "profile", None)
         return int(getattr(profile, "max_policy_age", 0) or 0)
+
+    def _govern_policy_age(self, rollout_id: int, metrics: Any) -> None:
+        """agentic-rollout-utilization 3.2/3.5: report the cross-version truncated
+        fraction; warn above the threshold and fall back to limit 0 for the rest
+        of the run above the fallback threshold. Limit 0: nothing happens."""
+        fraction = getattr(metrics, "cross_version_truncated_fraction", None)
+        if self._max_policy_age() == 0 or fraction is None:
+            return
+        from .version_segments import PolicyAgeGovernor
+
+        governor = getattr(self, "_policy_age_governor", None)
+        if governor is None:
+            governor = self._policy_age_governor = PolicyAgeGovernor(self._max_policy_age())
+        seen = len(governor.events)
+        before = governor.limit
+        governor.observe(rollout_id, float(fraction))
+        for event in governor.events[seen:]:
+            fields = {k: v for k, v in event.items() if k != "event"}
+            self.emit(event["event"], t=self.clock(), **fields)
+        if governor.limit != before:
+            setter = getattr(self.rollout, "set_max_policy_age", None)
+            if callable(setter):
+                setter(governor.limit)
 
     def _emit_rollout_cutoff(self, rollout_id: int, batch: Any) -> None:
         """agentic-rollout-utilization 1.2: one ``rl_rollout_cutoff`` per round whose
@@ -1318,6 +1349,9 @@ class IslandDriver:
             trained_sample_ids_sha256=_sample_ids_sha256(batch),
             masked_fraction=metrics.masked_fraction,
             clip_fraction=metrics.clip_fraction,
+            # agentic-rollout-utilization 3.2 (only when reported: default tapes unchanged)
+            **({"cross_version_truncated_fraction": metrics.cross_version_truncated_fraction}
+               if getattr(metrics, "cross_version_truncated_fraction", None) is not None else {}),
             applied_lrs=list(metrics.applied_lrs) if metrics.applied_lrs else None,
             # rl_local_round dynamic_filter_* provenance: generated/dropped are
             # counted from the all-samples hook; replacement_attempts is a proxy
@@ -1353,6 +1387,7 @@ class IslandDriver:
         )
         stats = self._stats(rollout_id, batch, metrics, rollout_seconds, train_seconds)
         self._emit_rollout_cutoff(rollout_id, batch)
+        self._govern_policy_age(rollout_id, metrics)
         if self.observe:
             self._emit_round_labels(rollout_id, batch, metrics)
             self._emit_harness_mismatches(rollout_id, batch)

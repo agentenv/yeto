@@ -213,6 +213,10 @@ class CutManifest:
     schema: str = CUT_SCHEMA
     # Backend-private state (decoupling 2.7/E17); serialized only when non-empty.
     backend_state: Mapping[str, Any] = field(default_factory=dict)
+    # agentic-rollout-utilization 3.3: unfinished trajectories carried by the
+    # cut (InFlightTrajectory.to_dict()); written only under a policy-age limit
+    # > 0 and serialized only when non-empty (default manifests unchanged).
+    in_flight: tuple[Mapping[str, Any], ...] = ()
 
     def body(self) -> dict[str, Any]:
         return {
@@ -228,6 +232,7 @@ class CutManifest:
             "files": [f.to_dict() for f in sorted(self.files, key=lambda f: f.path)],
             "rank_summaries": [_jsonable(s) for s in self.rank_summaries],
             **({"backend_state": _jsonable(self.backend_state)} if self.backend_state else {}),
+            **({"in_flight": [_jsonable(t) for t in self.in_flight]} if self.in_flight else {}),
         }
 
     def digest(self) -> str:
@@ -260,6 +265,7 @@ class CutManifest:
                 files=tuple(CutFile.from_dict(f) for f in raw["files"]),
                 rank_summaries=tuple(raw.get("rank_summaries") or ()),
                 backend_state=raw.get("backend_state") or {},
+                in_flight=tuple(raw.get("in_flight") or ()),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise CutError(f"malformed cut manifest: {exc}") from exc
@@ -272,6 +278,8 @@ class CutManifest:
         out = context_problems(
             cut_id=self.cut_id, progress=self.progress, algorithm=self.algorithm, data=self.data,
             ledger=self.ledger, outer=self.outer, runtime=self.runtime,
+            # 3.3: the writer records a non-zero limit in the ledger section
+            in_flight=self.in_flight, max_policy_age=int(self.ledger.get("max_policy_age", 0) or 0),
         )
         if not self.files:
             out.append("files: no trainer shard")
@@ -303,8 +311,14 @@ def context_problems(
     ledger: Mapping[str, Any],
     outer: Mapping[str, Any],
     runtime: Mapping[str, Any],
+    in_flight: tuple[Mapping[str, Any], ...] = (),
+    max_policy_age: int = 0,
 ) -> list[str]:
-    """Checks that do not need the trainer shards; ``save_cut`` runs them before writing anything."""
+    """Checks that do not need the trainer shards; ``save_cut`` runs them before writing anything.
+
+    agentic-rollout-utilization 3.3: under limit 0 the in-flight section must be
+    empty and nothing is carried over (unchanged rules); under a limit > 0 the
+    carried-over count must equal the in-flight trajectories the cut holds."""
     out = [f"progress: {p}" for p in progress.problems()]
     if not _CUT_ID.match(cut_id):
         out.append(f"invalid cut_id {cut_id!r}")
@@ -315,7 +329,13 @@ def context_problems(
             out.append(f"data: cursor field {key!r} missing")
     if data.get("buffer_length") not in (None, 0):
         out.append(f"data: engine data buffer holds {data.get('buffer_length')} groups (not carried by a cut)")
-    if ledger.get("carried_over") != 0:
+    if max_policy_age == 0 and in_flight:
+        out.append(f"in_flight: {len(in_flight)} trajectories but max_policy_age is 0 (must be empty)")
+    if max_policy_age > 0:
+        if ledger.get("carried_over") != len(in_flight):
+            out.append(f"ledger: carried_over {ledger.get('carried_over')!r} != "
+                       f"{len(in_flight)} in-flight trajectories in the cut")
+    elif ledger.get("carried_over") != 0:
         # 4.1 audit: a first-version cut carries no reusable leftover (Miles ports
         # path: partial rollout refused, surplus groups dropped, buffer not saved).
         out.append(f"ledger: carried_over must be 0 for a first-version cut, got {ledger.get('carried_over')!r}")
