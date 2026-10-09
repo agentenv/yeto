@@ -1,0 +1,108 @@
+{
+ "src": "./tape-direct/yeto-s17-n17-codex-20261009a/l0/rank0/rl-island-0.jsonl",
+ "events": 516,
+ "rc": "rc=0",
+ "rounds_trained": 3,
+ "applied_lrs": [
+  [
+   1e-05
+  ],
+  [
+   1e-05
+  ],
+  [
+   1e-05
+  ]
+ ],
+ "lr_local_round": [
+  1e-05,
+  1e-05,
+  1e-05
+ ],
+ "trajectories": 72,
+ "task_ids_distinct": 18,
+ "tasks_outside_train46": [],
+ "tasks_in_unusable13": [],
+ "reward_mean": 0.1111,
+ "reward_std": 0.3143,
+ "nonzero_reward": 8,
+ "end_reason": [
+  [
+   "CodexTurnLimit: Codex reached the signed turn budget",
+   27
+  ],
+  [
+   "CodexSequenceLimit: Miles returned a truncated sample",
+   18
+  ],
+  [
+   "CodexSequenceLimit: Miles sequence limit reached",
+   17
+  ],
+  [
+   "CodexModelFailure: DSV4 mixed prose with the required tool call",
+   4
+  ],
+  [
+   "None",
+   3
+  ],
+  [
+   "CodexModelFailure: DSV4 returned a forbidden tool",
+   2
+  ],
+  [
+   "CodexModelFailure: DSV4 did not return thinking content",
+   1
+  ]
+ ],
+ "last_tool_calls": {
+  "1": 60,
+  "0": 12
+ },
+ "evaluate_time_present": 72,
+ "evaluate_time_p50_p90_max": [
+  6.519,
+  21.802,
+  168.06
+ ],
+ "turns_p50_p90": [
+  9,
+  12
+ ],
+ "turns_mean": 7.89,
+ "generate_span_s_by_round": {
+  "0": 178.5,
+  "1": 237.6,
+  "2": 145.6
+ },
+ "generate_span_median_s": 178.5,
+ "kv_peak_ratio": null,
+ "kv_samples": 0,
+ "queued_requests_max": 0,
+ "running_requests_max": 25,
+ "rollout_cutoff": [],
+ "traj_new_fields_present": {
+  "trajectory_started_at": 0,
+  "trajectory_ended_at": 0,
+  "sandbox_start_seconds": 0,
+  "worker_seconds": 0,
+  "turn_generation_seconds": 0,
+  "turn_tool_seconds": 0
+ },
+ "sandbox_start_s_p50_p90": [
+  null,
+  null
+ ],
+ "worker_s_p50_p90": [
+  null,
+  null
+ ],
+ "traj_wall_s_p50_p90": [
+  null,
+  null
+ ],
+ "tool_wait_trajectories_max": 0,
+ "peak_gpu_mem_gb": 128.3,
+ "learner_finalized": 1
+}

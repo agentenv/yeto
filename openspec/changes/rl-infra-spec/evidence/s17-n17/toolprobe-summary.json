@@ -1,0 +1,54 @@
+{
+ "old": {
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "sglang_commit": "4e4148f1b4fe9f05973da0d1e5cfe237512d5155",
+  "reasoning_parser": "qwen3",
+  "tool_call_parser": "qwen3_coder",
+  "chat_template": "/root/miles/miles/utils/chat_template_utils/templates/qwen3.5_fixed.jinja",
+  "ready_s": 124.2,
+  "parallel_tool_calls=False": {
+   "n": 32,
+   "calls_per_reply": {
+    "2": 32
+   },
+   "finish": {
+    "tool_calls": 32
+   }
+  },
+  "parallel_tool_calls=True": {
+   "n": 32,
+   "calls_per_reply": {
+    "2": 32
+   },
+   "finish": {
+    "tool_calls": 32
+   }
+  }
+ },
+ "new": {
+  "gpu": "NVIDIA H100 80GB HBM3",
+  "sglang_commit": "2fa880182eefdb31e64d8ea70317be27f9f32121",
+  "reasoning_parser": "qwen3",
+  "tool_call_parser": "qwen3_coder",
+  "chat_template": "/root/miles/miles/utils/chat_template_utils/templates/qwen3.5_fixed.jinja",
+  "ready_s": 175.7,
+  "parallel_tool_calls=False": {
+   "n": 32,
+   "calls_per_reply": {
+    "1": 32
+   },
+   "finish": {
+    "tool_calls": 32
+   }
+  },
+  "parallel_tool_calls=True": {
+   "n": 32,
+   "calls_per_reply": {
+    "2": 32
+   },
+   "finish": {
+    "tool_calls": 32
+   }
+  }
+ }
+}

@@ -1,0 +1,376 @@
+{
+ "A": {
+  "src": "s17-n17-ab-a-20261009b/launch.log",
+  "rounds_trained": 6,
+  "trajectories": 144,
+  "generate_s_by_round": {
+   "0": 168.1,
+   "1": 233.1,
+   "2": 325.4,
+   "3": 115.2,
+   "4": 132.9,
+   "5": 266.7
+  },
+  "generate_median_s": 200.6,
+  "generate_median_s_drop_slowest": 168.1,
+  "slowest_traj_s_by_round": {
+   "0": 139.6,
+   "1": 228.1,
+   "2": 320.0,
+   "3": 108.6,
+   "4": 127.8,
+   "5": 263.5
+  },
+  "generate_median_s_rounds_ge1": 233.1,
+  "kv_peak_ratio": 0.1175,
+  "queued_requests_max": 2,
+  "running_requests_max": 29,
+  "infra_or_sandbox_errors": 0,
+  "end_reason": [
+   [
+    "CodexTurnLimit: Codex reached the signed turn budget",
+    56
+   ],
+   [
+    "CodexSequenceLimit: Miles returned a truncated sample",
+    39
+   ],
+   [
+    "CodexSequenceLimit: Miles sequence limit reached",
+    36
+   ],
+   [
+    "None",
+    8
+   ],
+   [
+    "CodexModelFailure: DSV4 mixed prose with the required tool c",
+    5
+   ]
+  ],
+  "reward_mean": 0.0833,
+  "reward_std": 0.2764,
+  "nonzero": 12,
+  "tokens_mean": 3465.4,
+  "tokens_std": 2653.4,
+  "tokens_p10_p50_p90": [
+   507,
+   2572,
+   7047
+  ],
+  "turns_mean": 7.94,
+  "turns_std": 4.12,
+  "turns_p10_p50_p90": [
+   1,
+   9,
+   12
+  ],
+  "turn_generation_s_p50_p90": [
+   1.551,
+   9.659
+  ],
+  "turn_tool_s_p50_p90": [
+   0.165,
+   1.127
+  ],
+  "evaluate_time_p50_p90": [
+   6.944,
+   50.836
+  ],
+  "evaluate_time_present": 144,
+  "sandbox_start_s_p50_p90_max": [
+   3.038,
+   4.227,
+   7.544
+  ],
+  "traj_wall_s_p50_p90": [
+   59.45981001853943,
+   139.58613467216492
+  ],
+  "rollout_cutoff": [
+   {
+    "config_epoch": 0,
+    "discarded_groups": 5,
+    "discarded_tokens": 87809,
+    "discarded_trajectories": 20,
+    "discarded_unknown_groups": 0,
+    "filtered_groups": 1,
+    "mechanism": "miles generate_rollout abort",
+    "policy_version": 0,
+    "rollout_id": 0,
+    "submitted_groups": null,
+    "t": 1170.122371118,
+    "target_groups": 6,
+    "time_unix": 1791524652.0064201
+   },
+   {
+    "config_epoch": 0,
+    "discarded_groups": 0,
+    "discarded_tokens": 0,
+    "discarded_trajectories": 0,
+    "discarded_unknown_groups": 0,
+    "filtered_groups": 0,
+    "mechanism": "miles generate_rollout abort",
+    "policy_version": 1,
+    "rollout_id": 1,
+    "submitted_groups": 6,
+    "t": 1484.291381236,
+    "target_groups": 6,
+    "time_unix": 1791524966.1753898
+   },
+   {
+    "config_epoch": 0,
+    "discarded_groups": 0,
+    "discarded_tokens": 0,
+    "discarded_trajectories": 0,
+    "discarded_unknown_groups": 0,
+    "filtered_groups": 0,
+    "mechanism": "miles generate_rollout abort",
+    "policy_version": 2,
+    "rollout_id": 2,
+    "submitted_groups": 6,
+    "t": 1845.535985508,
+    "target_groups": 6,
+    "time_unix": 1791525327.4198341
+   },
+   {
+    "config_epoch": 0,
+    "discarded_groups": 4,
+    "discarded_tokens": 64238,
+    "discarded_trajectories": 16,
+    "discarded_unknown_groups": 0,
+    "filtered_groups": 2,
+    "mechanism": "miles generate_rollout abort",
+    "policy_version": 3,
+    "rollout_id": 3,
+    "submitted_groups": 12,
+    "t": 1998.102784536,
+    "target_groups": 6,
+    "time_unix": 1791525479.9867365
+   },
+   {
+    "config_epoch": 0,
+    "discarded_groups": 0,
+    "discarded_tokens": 0,
+    "discarded_trajectories": 0,
+    "discarded_unknown_groups": 0,
+    "filtered_groups": 0,
+    "mechanism": "miles generate_rollout abort",
+    "policy_version": 4,
+    "rollout_id": 4,
+    "submitted_groups": 6,
+    "t": 2167.848744097,
+    "target_groups": 6,
+    "time_unix": 1791525649.7327013
+   },
+   {
+    "config_epoch": 0,
+    "discarded_groups": 0,
+    "discarded_tokens": 0,
+    "discarded_trajectories": 0,
+    "discarded_unknown_groups": 0,
+    "filtered_groups": 0,
+    "mechanism": "miles generate_rollout abort",
+    "policy_version": 5,
+    "rollout_id": 5,
+    "submitted_groups": 6,
+    "t": 2468.660784538,
+    "target_groups": 6,
+    "time_unix": 1791525950.5446262
+   }
+  ],
+  "rc": "rc=0"
+ },
+ "B": {
+  "src": "s17-n17-ab-b-20261009b/tape-direct/yeto-s17-n17-ab-b-20261009b/l0/rank0/rl-island-0.jsonl",
+  "rounds_trained": 6,
+  "trajectories": 144,
+  "generate_s_by_round": {
+   "0": 158.7,
+   "1": 105.4,
+   "2": 120.3,
+   "3": 111.4,
+   "4": 101.4,
+   "5": 114.4
+  },
+  "generate_median_s": 112.9,
+  "generate_median_s_drop_slowest": 111.4,
+  "slowest_traj_s_by_round": {
+   "0": 147.9,
+   "1": 98.3,
+   "2": 112.7,
+   "3": 101.8,
+   "4": 95.3,
+   "5": 108.0
+  },
+  "generate_median_s_rounds_ge1": 111.4,
+  "kv_peak_ratio": 0.2057,
+  "queued_requests_max": 37,
+  "running_requests_max": 46,
+  "infra_or_sandbox_errors": 0,
+  "end_reason": [
+   [
+    "CodexTurnLimit: Codex reached the signed turn budget",
+    56
+   ],
+   [
+    "CodexSequenceLimit: Miles sequence limit reached",
+    42
+   ],
+   [
+    "CodexSequenceLimit: Miles returned a truncated sample",
+    37
+   ],
+   [
+    "CodexModelFailure: DSV4 mixed prose with the required tool c",
+    5
+   ],
+   [
+    "None",
+    4
+   ]
+  ],
+  "reward_mean": 0.0903,
+  "reward_std": 0.2866,
+  "nonzero": 13,
+  "tokens_mean": 3059.0,
+  "tokens_std": 2446.9,
+  "tokens_p10_p50_p90": [
+   561,
+   2342,
+   7311
+  ],
+  "turns_mean": 8.24,
+  "turns_std": 3.9,
+  "turns_p10_p50_p90": [
+   2,
+   10,
+   12
+  ],
+  "turn_generation_s_p50_p90": [
+   2.523,
+   11.616
+  ],
+  "turn_tool_s_p50_p90": [
+   0.159,
+   0.779
+  ],
+  "evaluate_time_p50_p90": [
+   5.515,
+   10.261
+  ],
+  "evaluate_time_present": 144,
+  "sandbox_start_s_p50_p90_max": [
+   0.433,
+   13.032,
+   14.13
+  ],
+  "traj_wall_s_p50_p90": [
+   71.04928755760193,
+   117.37596344947815
+  ],
+  "rollout_cutoff": [
+   {
+    "config_epoch": 0,
+    "discarded_groups": 6,
+    "discarded_tokens": 106411,
+    "discarded_trajectories": 24,
+    "discarded_unknown_groups": 0,
+    "filtered_groups": 0,
+    "mechanism": "miles generate_rollout abort",
+    "policy_version": 0,
+    "rollout_id": 0,
+    "submitted_groups": null,
+    "t": 1207.907059578,
+    "target_groups": 6,
+    "time_unix": 1791524689.3202107
+   },
+   {
+    "config_epoch": 0,
+    "discarded_groups": 6,
+    "discarded_tokens": 128466,
+    "discarded_trajectories": 24,
+    "discarded_unknown_groups": 0,
+    "filtered_groups": 0,
+    "mechanism": "miles generate_rollout abort",
+    "policy_version": 1,
+    "rollout_id": 1,
+    "submitted_groups": 12,
+    "t": 1379.819534185,
+    "target_groups": 6,
+    "time_unix": 1791524861.2327206
+   },
+   {
+    "config_epoch": 0,
+    "discarded_groups": 4,
+    "discarded_tokens": 79122,
+    "discarded_trajectories": 16,
+    "discarded_unknown_groups": 0,
+    "filtered_groups": 2,
+    "mechanism": "miles generate_rollout abort",
+    "policy_version": 2,
+    "rollout_id": 2,
+    "submitted_groups": 12,
+    "t": 1535.361607618,
+    "target_groups": 6,
+    "time_unix": 1791525016.7747788
+   },
+   {
+    "config_epoch": 0,
+    "discarded_groups": 6,
+    "discarded_tokens": 127115,
+    "discarded_trajectories": 24,
+    "discarded_unknown_groups": 0,
+    "filtered_groups": 0,
+    "mechanism": "miles generate_rollout abort",
+    "policy_version": 3,
+    "rollout_id": 3,
+    "submitted_groups": 12,
+    "t": 1681.494593197,
+    "target_groups": 6,
+    "time_unix": 1791525162.907692
+   },
+   {
+    "config_epoch": 0,
+    "discarded_groups": 5,
+    "discarded_tokens": 113957,
+    "discarded_trajectories": 20,
+    "discarded_unknown_groups": 0,
+    "filtered_groups": 1,
+    "mechanism": "miles generate_rollout abort",
+    "policy_version": 4,
+    "rollout_id": 4,
+    "submitted_groups": 12,
+    "t": 1818.824573284,
+    "target_groups": 6,
+    "time_unix": 1791525300.2375743
+   },
+   {
+    "config_epoch": 0,
+    "discarded_groups": 6,
+    "discarded_tokens": 107852,
+    "discarded_trajectories": 24,
+    "discarded_unknown_groups": 0,
+    "filtered_groups": 0,
+    "mechanism": "miles generate_rollout abort",
+    "policy_version": 5,
+    "rollout_id": 5,
+    "submitted_groups": 12,
+    "t": 1965.536867258,
+    "target_groups": 6,
+    "time_unix": 1791525446.9499736
+   }
+  ],
+  "rc": "rc=0"
+ },
+ "criteria": {
+  "gen_median_B_le_0.7A (rounds>=1)": true,
+  "gen_median_B_le_0.7A (all rounds)": true,
+  "info: gen_median_drop_slowest_B_le_0.7A": true,
+  "kv_peak_lt_0.6": true,
+  "sandbox_errors_0": true,
+  "reward_mean_within_1sd": true,
+  "tokens_mean_within_1sd": true,
+  "turns_mean_within_1sd": true
+ }
+}
