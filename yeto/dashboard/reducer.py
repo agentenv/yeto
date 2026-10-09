@@ -144,6 +144,19 @@ DRIVER_RUNNING_EVENTS = frozenset({"rl_driver_phase", "rl_heartbeat", "rl_local_
                                    "rl_resource_sample", "rl_publication"})
 
 
+def _fmt_override_value(value: Any) -> str:
+    return "无" if value is None else str(value)
+
+
+def negative_test_label(overrides: Any) -> dict:
+    """``rl_island_override`` -> the island badge: "负例岛：学习率调度 linear→constant"."""
+    rows = [o for o in (overrides or []) if isinstance(o, dict)]
+    parts = [f"{o.get('name') or o.get('key')} {_fmt_override_value(o.get('old'))}→"
+             f"{_fmt_override_value(o.get('new'))}" for o in rows]
+    return {"label": "负例岛：" + "，".join(parts) if parts else "负例岛",
+            "overrides": [{k: o.get(k) for k in ("key", "name", "old", "new")} for o in rows]}
+
+
 def _iid(value: Any) -> str | None:
     if value is None:
         return None
@@ -173,6 +186,8 @@ def _new_island(iid: str) -> dict:
         "startup_steps": {}, "startup_step": None, "startup_step_ts": None,
         # agentic-rollout-utilization 7: cutoff per round, per-trajectory timing, load samples
         "cutoffs": {}, "trajs": [], "load": deque(maxlen=NODE_SERIES_MAX),
+        # launch-preflight-guards 3.5: rl_island_override (negative-test island)
+        "negative_test": None,
     }
 
 
@@ -403,6 +418,8 @@ class Reducer:
                                 "total_s": r.get("total_s")})
         elif event == "rl_learner_finalized":
             isl["finalized"] = True
+        elif event == "rl_island_override":
+            isl["negative_test"] = negative_test_label(r.get("overrides"))
         elif event == "rl_reconfiguration":
             isl["reconfig"].append({"ts": ts, "result": r.get("result"), "rollout_id": r.get("rollout_id"),
                                     "cause": r.get("cause"), "error": r.get("error")})
@@ -873,6 +890,7 @@ class Reducer:
             "source_lost": isl["source_lost"],
             "resumes": list(isl["resumes"]), "cuts_saved": len(isl["cuts"]),
             "segments": self.resume_segments(isl),
+            "negative_test": isl["negative_test"],
         }
 
     def series(self, isl: dict) -> dict:

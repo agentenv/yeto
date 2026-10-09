@@ -1,0 +1,382 @@
+{
+ "constants": {
+  "K_LOGIT": 0.5,
+  "FRAG": 0.1953,
+  "R0_GIB": 4.97,
+  "K_ACT_NO_RECOMPUTE": 45.62,
+  "K_ACT_RECOMPUTE(unverified)": 2.0
+ },
+ "margin": 0.9,
+ "rows": [
+  {
+   "run": "M1 run b",
+   "role": "calibration",
+   "model": "Qwen/Qwen3.5-4B",
+   "gpu": "H100",
+   "seq_len": 16384,
+   "response_len": 8192,
+   "estimate_peak_gib": 159.608,
+   "limit_gib": 71.262,
+   "fits": false,
+   "parts_gib": {
+    "weights": 7.591,
+    "grads_optimizer": 0.156,
+    "activations": 114.05,
+    "logits_block": 7.578,
+    "inference": 0.0,
+    "fixed_overhead": 30.233
+   },
+   "measured": {
+    "kind": "oom",
+    "demand_gib_at_least": 78.123046875,
+    "source": "s17-m1-20261008b launch log: OOM 'Tried to allocate 126.00 MiB', 78.00 GiB in use of 79.18"
+   },
+   "measured_demand_gib_at_least": 78.12,
+   "estimate_over_limit": true
+  },
+  {
+   "run": "M1 run c",
+   "role": "calibration",
+   "model": "Qwen/Qwen3.5-4B",
+   "gpu": "H200",
+   "seq_len": 16384,
+   "response_len": 8192,
+   "estimate_peak_gib": 159.608,
+   "limit_gib": 125.82,
+   "fits": false,
+   "parts_gib": {
+    "weights": 7.591,
+    "grads_optimizer": 0.156,
+    "activations": 114.05,
+    "logits_block": 7.578,
+    "inference": 0.0,
+    "fixed_overhead": 30.233
+   },
+   "measured": {
+    "kind": "oom",
+    "demand_gib_at_least": 141.34,
+    "logits_block_gib": 7.58,
+    "source": "s17-m1-20261008c launch log: OOM 'Tried to allocate 7.58 GiB', 133.76 GiB in use of 139.80; 107.75 allocated by PyTorch, 21.04 reserved-unallocated"
+   },
+   "measured_demand_gib_at_least": 141.34,
+   "estimate_over_limit": true,
+   "logits_block_error_pct": -0.0
+  },
+  {
+   "run": "M1 run d",
+   "role": "calibration",
+   "model": "Qwen/Qwen3.5-4B",
+   "gpu": "H200",
+   "seq_len": 12288,
+   "response_len": 6144,
+   "estimate_peak_gib": 123.263,
+   "limit_gib": 125.82,
+   "fits": true,
+   "parts_gib": {
+    "weights": 7.591,
+    "grads_optimizer": 0.156,
+    "activations": 85.537,
+    "logits_block": 5.684,
+    "inference": 0.0,
+    "fixed_overhead": 24.295
+   },
+   "measured": {
+    "kind": "peak",
+    "peak_bytes": [
+     131320000000.0,
+     132360000000.0
+    ],
+    "source": "s17-m1-20261008d tape-direct l0/l1 rl-island-*.jsonl max peak_gpu_mem_bytes; S17-MORNING-REPORT says 125-126 GB (source of that figure not found)"
+   },
+   "measured_peak_gib": 123.27,
+   "error_pct": -0.0
+  },
+  {
+   "run": "N17 A/B a (a)",
+   "role": "test",
+   "model": "Qwen/Qwen3.5-4B",
+   "gpu": "H200",
+   "seq_len": 12288,
+   "response_len": 6144,
+   "estimate_peak_gib": 123.263,
+   "limit_gib": 125.82,
+   "fits": true,
+   "parts_gib": {
+    "weights": 7.591,
+    "grads_optimizer": 0.156,
+    "activations": 85.537,
+    "logits_block": 5.684,
+    "inference": 0.0,
+    "fixed_overhead": 24.295
+   },
+   "measured": {
+    "kind": "peak",
+    "peak_bytes": [
+     136190000000.0
+    ],
+    "source": "s17-n17-ab-a-20261009a tape-direct l0"
+   },
+   "measured_peak_gib": 126.84,
+   "error_pct": -2.8
+  },
+  {
+   "run": "N17 A/B a (b)",
+   "role": "test",
+   "model": "Qwen/Qwen3.5-4B",
+   "gpu": "H200",
+   "seq_len": 12288,
+   "response_len": 6144,
+   "estimate_peak_gib": 123.263,
+   "limit_gib": 125.82,
+   "fits": true,
+   "parts_gib": {
+    "weights": 7.591,
+    "grads_optimizer": 0.156,
+    "activations": 85.537,
+    "logits_block": 5.684,
+    "inference": 0.0,
+    "fixed_overhead": 24.295
+   },
+   "measured": {
+    "kind": "peak",
+    "peak_bytes": [
+     136460000000.0
+    ],
+    "source": "s17-n17-ab-a-20261009b tape-direct l0"
+   },
+   "measured_peak_gib": 127.09,
+   "error_pct": -3.0
+  },
+  {
+   "run": "N17 A/B b (a)",
+   "role": "test",
+   "model": "Qwen/Qwen3.5-4B",
+   "gpu": "H200",
+   "seq_len": 12288,
+   "response_len": 6144,
+   "estimate_peak_gib": 123.263,
+   "limit_gib": 125.82,
+   "fits": true,
+   "parts_gib": {
+    "weights": 7.591,
+    "grads_optimizer": 0.156,
+    "activations": 85.537,
+    "logits_block": 5.684,
+    "inference": 0.0,
+    "fixed_overhead": 24.295
+   },
+   "measured": {
+    "kind": "peak",
+    "peak_bytes": [
+     132880000000.0
+    ],
+    "source": "s17-n17-ab-b-20261009a tape-direct l0"
+   },
+   "measured_peak_gib": 123.75,
+   "error_pct": -0.4
+  },
+  {
+   "run": "N17 A/B b (b)",
+   "role": "test",
+   "model": "Qwen/Qwen3.5-4B",
+   "gpu": "H200",
+   "seq_len": 12288,
+   "response_len": 6144,
+   "estimate_peak_gib": 123.263,
+   "limit_gib": 125.82,
+   "fits": true,
+   "parts_gib": {
+    "weights": 7.591,
+    "grads_optimizer": 0.156,
+    "activations": 85.537,
+    "logits_block": 5.684,
+    "inference": 0.0,
+    "fixed_overhead": 24.295
+   },
+   "measured": {
+    "kind": "peak",
+    "peak_bytes": [
+     136250000000.0
+    ],
+    "source": "s17-n17-ab-b-20261009b tape-direct l0"
+   },
+   "measured_peak_gib": 126.89,
+   "error_pct": -2.9
+  },
+  {
+   "run": "N17 codex",
+   "role": "test",
+   "model": "Qwen/Qwen3.5-4B",
+   "gpu": "H200",
+   "seq_len": 12288,
+   "response_len": 6144,
+   "estimate_peak_gib": 123.263,
+   "limit_gib": 125.82,
+   "fits": true,
+   "parts_gib": {
+    "weights": 7.591,
+    "grads_optimizer": 0.156,
+    "activations": 85.537,
+    "logits_block": 5.684,
+    "inference": 0.0,
+    "fixed_overhead": 24.295
+   },
+   "measured": {
+    "kind": "peak",
+    "peak_bytes": [
+     128320000000.0
+    ],
+    "source": "s17-n17-codex-20261009a tape-direct l0"
+   },
+   "measured_peak_gib": 119.51,
+   "error_pct": 3.1
+  },
+  {
+   "run": "N17 elastic",
+   "role": "test",
+   "model": "Qwen/Qwen3-0.6B",
+   "gpu": "H100",
+   "seq_len": 1024,
+   "response_len": 384,
+   "estimate_peak_gib": 36.642,
+   "limit_gib": 71.262,
+   "fits": true,
+   "parts_gib": {
+    "weights": 1.22,
+    "grads_optimizer": 0.068,
+    "activations": 2.495,
+    "logits_block": 0.29,
+    "inference": 0.0,
+    "fixed_overhead": 5.765,
+    "rollout_phase_extra": 26.804
+   },
+   "measured": {
+    "kind": "peak",
+    "peak_bytes": [
+     37540000000.0,
+     37560000000.0
+    ],
+    "source": "s17-n17-elastic-20261009a tape-direct l0/l1"
+   },
+   "measured_peak_gib": 34.98,
+   "error_pct": 4.7
+  },
+  {
+   "run": "N17 strict",
+   "role": "test",
+   "model": "Qwen/Qwen3-0.6B",
+   "gpu": "H100",
+   "seq_len": 1024,
+   "response_len": 384,
+   "estimate_peak_gib": 36.642,
+   "limit_gib": 71.262,
+   "fits": true,
+   "parts_gib": {
+    "weights": 1.22,
+    "grads_optimizer": 0.068,
+    "activations": 2.495,
+    "logits_block": 0.29,
+    "inference": 0.0,
+    "fixed_overhead": 5.765,
+    "rollout_phase_extra": 26.804
+   },
+   "measured": {
+    "kind": "peak",
+    "peak_bytes": [
+     37540000000.0,
+     37560000000.0
+    ],
+    "source": "s17-n17-strict-20261009a tape-direct l0/l1"
+   },
+   "measured_peak_gib": 34.98,
+   "error_pct": 4.7
+  },
+  {
+   "run": "ARU-2 M0",
+   "role": "test",
+   "model": "Qwen/Qwen3-0.6B",
+   "gpu": "H100",
+   "seq_len": 2560,
+   "response_len": 2048,
+   "estimate_peak_gib": 36.642,
+   "limit_gib": 71.262,
+   "fits": true,
+   "parts_gib": {
+    "weights": 1.22,
+    "grads_optimizer": 0.068,
+    "activations": 6.237,
+    "logits_block": 0.724,
+    "inference": 0.0,
+    "fixed_overhead": 6.581,
+    "rollout_phase_extra": 21.812
+   },
+   "measured": {
+    "kind": "peak",
+    "peak_bytes": [
+     39480000000.0
+    ],
+    "source": "s18-aru2-m0 tape-direct l0"
+   },
+   "measured_peak_gib": 36.77,
+   "error_pct": -0.3
+  },
+  {
+   "run": "ARU-2 M1",
+   "role": "test",
+   "model": "Qwen/Qwen3-0.6B",
+   "gpu": "H100",
+   "seq_len": 2560,
+   "response_len": 2048,
+   "estimate_peak_gib": 36.642,
+   "limit_gib": 71.262,
+   "fits": true,
+   "parts_gib": {
+    "weights": 1.22,
+    "grads_optimizer": 0.068,
+    "activations": 6.237,
+    "logits_block": 0.724,
+    "inference": 0.0,
+    "fixed_overhead": 6.581,
+    "rollout_phase_extra": 21.812
+   },
+   "measured": {
+    "kind": "peak",
+    "peak_bytes": [
+     41750000000.0
+    ],
+    "source": "s18-aru2-m1 tape-direct l0"
+   },
+   "measured_peak_gib": 38.88,
+   "error_pct": -5.8
+  },
+  {
+   "run": "ARU-2 MB",
+   "role": "test",
+   "model": "Qwen/Qwen3-0.6B",
+   "gpu": "H100",
+   "seq_len": 2560,
+   "response_len": 2048,
+   "estimate_peak_gib": 36.642,
+   "limit_gib": 71.262,
+   "fits": true,
+   "parts_gib": {
+    "weights": 1.22,
+    "grads_optimizer": 0.068,
+    "activations": 6.237,
+    "logits_block": 0.724,
+    "inference": 0.0,
+    "fixed_overhead": 6.581,
+    "rollout_phase_extra": 21.812
+   },
+   "measured": {
+    "kind": "peak",
+    "peak_bytes": [
+     60100000000.0
+    ],
+    "source": "s18-aru2-mb tape-direct l0"
+   },
+   "measured_peak_gib": 55.97,
+   "error_pct": -34.5
+  }
+ ]
+}

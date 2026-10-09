@@ -19,6 +19,8 @@ function pct(v){return fin(v)?(v*100).toFixed(1)+"%":"无"}
 function hm(s){return !fin(s)?"无":(s>=3600?(s/3600).toFixed(1)+" h":(s/60).toFixed(0)+" min")}
 function clock(t){if(!fin(t))return "无";var d=new Date(t*1000);function p(n){return (n<10?"0":"")+n}return p(d.getHours())+":"+p(d.getMinutes())+":"+p(d.getSeconds())}
 function el(tag,a,parent){var e=document.createElementNS(NS,tag);for(var k in a)e.setAttribute(k,a[k]);if(parent)parent.appendChild(e);return e}
+// launch-preflight-guards 3.5: negative-test island badge (rl_island_override)
+function negBadge(c){return c&&c.negative_test?' <span class="st wn" title="'+esc(c.negative_test.label)+'"><i></i>'+esc(c.negative_test.label)+'</span> ':""}
 function islColor(id){var ids=(O.islands||[]).map(function(c){return c.id}),i=ids.indexOf(id);return i>=0&&i<3?ISL_COLORS[i]:"var(--i3)"}
 function kind(){return layout==="auto"?O.run_kind:layout}
 function stBadge(s){var m={ok:["ok","健康"],starting:["wn","启动中"],stopped:["mu","已停止"],stale:["bd","掉线疑似"],lost:["bd","已丢失"],
@@ -61,7 +63,7 @@ function wall(){
   var multi=kind()==="multi_island";$("islandWall").hidden=!multi;$("navWall").style.display=multi?"":"none";
   $("syncerBox").hidden=!(multi&&V.usage.syncer);
   if(multi)$("wall").innerHTML=(O.islands||[]).map(function(c){return '<div class="card'+(c.id===SEL?" sel":"")+'" data-id="'+esc(c.id)+'" tabindex="0">'+
-    '<div style="display:flex;justify-content:space-between"><b><i class="sw" style="background:'+islColor(c.id)+'"></i>岛 '+esc(c.id)+'</b>'+stBadge(c.status)+'</div>'+
+    '<div style="display:flex;justify-content:space-between"><b><i class="sw" style="background:'+islColor(c.id)+'"></i>岛 '+esc(c.id)+'</b>'+negBadge(c)+stBadge(c.status)+'</div>'+
     '<div class="note mono">'+esc(c.cloud||"无")+' · '+esc(c.gpu||"")+' × '+esc(c.gpus==null?"无":c.gpus)+'</div>'+
     '<div class="kv"><span>策略版本</span><span class="num">'+(c.policy_version==null?"无":"v"+esc(c.policy_version))+'</span><span>reward</span><span class="num">'+f(c.reward)+'</span><span>阶段</span><span class="num">'+esc(c.phase||"无")+'</span></div></div>'}).join("");
   Array.prototype.forEach.call(document.querySelectorAll(".card"),function(d){d.onclick=d.onkeydown=function(e){if(e.type==="keydown"&&e.key!=="Enter")return;SEL=d.dataset.id;cur=null;render()}});
@@ -297,7 +299,7 @@ function chartNodes(){
 }
 function islands(){
   $("islands").innerHTML=(O.islands||[]).map(function(c){var ex=V.islands[c.id]||{},re=ex.ray_embed||{};
-    return '<details class="isl"'+(c.id===SEL?" open":"")+'><summary><span><b>岛 '+esc(c.id)+'</b> <span class="note">'+esc(c.name||"")+'</span></span>'+stBadge(c.status)+'</summary>'+
+    return '<details class="isl"'+(c.id===SEL?" open":"")+'><summary><span><b>岛 '+esc(c.id)+'</b> <span class="note">'+esc(c.name||"")+'</span></span>'+negBadge(c)+stBadge(c.status)+'</summary>'+
     '<div class="kv"><span>云 / 卡</span><span class="num">'+esc(c.cloud||"无")+' · '+esc(c.gpu||"无")+' × '+esc(c.gpus==null?"无":c.gpus)+'</span>'+
     '<span>阶段 / 策略</span><span class="num">'+esc(c.phase||"无")+' · '+(c.policy_version==null?"无":"v"+esc(c.policy_version))+'</span>'+
     '<span>最后事件</span><span class="num">'+(fin(c.last_event_age_s)?f(c.last_event_age_s,0)+" s 前":"无")+'</span>'+

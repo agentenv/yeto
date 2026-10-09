@@ -5159,6 +5159,23 @@ def require_modal_for_gpu_exact(args, specs: list[ClusterSpec]) -> None:
             )
 
 
+def _island_overrides(args, specs) -> dict:
+    """launch-preflight-guards 3.2: validated per-island overrides ({} normally)."""
+    from .island_overrides import overrides_of
+
+    return overrides_of(args, len(specs))
+
+
+def _island_task(task_factory, args, spec, m, num_learners, syncer_addr, overrides):
+    """The island task, built from a checked args copy for an overridden island
+    (sky and Modal islands both start from this task)."""
+    from . import island_overrides as io
+
+    task = task_factory(io.island_args(args, m, overrides), spec, m, num_learners, syncer_addr)
+    io.apply_to_task(task, io.island_env(args, m, overrides))
+    return task
+
+
 def warn_if_model_wont_fit(args, specs: list[ClusterSpec]) -> None:
     weight_gb = MODEL_WEIGHT_GB.get(args.model)
     if weight_gb is None:
@@ -6920,10 +6937,14 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     ):
         # Checked first: the flag must never turn an SFT launch syncer-less.
         raise ValueError("--rl-single-island-no-sync requires --training-mode rl")
-    from . import sky_patches
+    from . import launch_preflight, sky_patches
 
+    # launch-preflight-guards 1.3: thread count before anything touches a cloud.
+    args._launch_preflight_manifest = {"preflight": {"threads": launch_preflight.thread_preflight(args)}}
     sky_patches.install()
     prepare_launch_args(args)
+    # 2.3 / 3.1 / 3.6: memory estimate, island overrides, negative-test resume guard.
+    launch_preflight.pre_cloud_checks(args, threads=False)
     _write_run_manifest(args)
     head_mode = local_syncer is not None
     # --rl-single-island-no-sync: one ports island, no syncer at all
@@ -7083,9 +7104,11 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             modal_addr = resolve_syncer_for_modal(
                 syncer_addr, getattr(args, "syncer_public_addr", None)
             )
+        island_overrides = _island_overrides(args, specs)
         for m, spec in enumerate(specs):
             name = learner_names[m]
-            task = task_factory(args, spec, m, num_learners, syncer_addr)
+            task = _island_task(task_factory, args, spec, m, num_learners, syncer_addr,
+                                island_overrides)
             if spec.cloud == "modal":
                 cfg = build_modal_island_config(args, spec, m, task, modal_addr)
                 print(f"[launcher] {name} dials {island_syncer_addrs(cfg.envs)}", flush=True)
@@ -7556,6 +7579,8 @@ def _write_run_manifest(args) -> dict | None:
         "source_sha256": getattr(args, "source_sha256", None),
         "cluster_prefix": args.cluster_prefix,
         **_miles_overlay_manifest(args, engine),
+        # launch-preflight-guards: preflight readings, negative_test, island_overrides
+        **(getattr(args, "_launch_preflight_manifest", None) or {}),
         "written_unix": time.time(),
     }
     print(f"[launcher] RL engine {engine}: image {manifest['rl_image']}, "
@@ -7613,6 +7638,10 @@ def dry_run_plan(args) -> dict:
     specs = parse_gpu_spec(args.gpu)
     external = max(0, getattr(args, "external_learners", 0) or 0)
     islands = []
+    island_overrides = _island_overrides(args, specs) if rl else {}
+    from .launch_preflight import dry_run_memory
+
+    memory = dry_run_memory(args, specs)
     for learner_id, spec in enumerate(specs):
         entry = {
             "learner_id": learner_id,
@@ -7625,10 +7654,16 @@ def dry_run_plan(args) -> dict:
         }
         if rl and rl_island_spec(args, spec) is not spec:
             entry["allocated_gpus_per_node"] = rl_island_spec(args, spec).gpus_per_node
+        if memory is not None:
+            entry["memory_estimate"] = memory[learner_id]
         if rl:
-            task = make_miles_island_task(
-                args, spec, learner_id, len(specs) + external, "$SYNCER_ADDR"
-            )
+            task = _island_task(make_miles_island_task, args, spec, learner_id,
+                                len(specs) + external, "$SYNCER_ADDR", island_overrides)
+            if island_overrides.get(learner_id):
+                from .island_overrides import records
+
+                entry["island_overrides"] = [r for r in records(args, island_overrides)
+                                             if r["island"] == learner_id]
             entry["learner_command"] = next(
                 (line.strip() for line in task.run.splitlines() if _rl_backend_module(args, "launch_flags").ISLAND_ENTRY_MODULE in line),
                 None,

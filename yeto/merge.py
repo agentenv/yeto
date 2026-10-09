@@ -52,6 +52,10 @@ def merge_adapter(args) -> Path:
     output_dir = Path(args.output_dir).expanduser()
     if not adapter_dir.is_dir():
         raise ValueError(f"adapter directory does not exist: {adapter_dir}")
+    # launch-preflight-guards 3.6: never export a negative-test run's weights.
+    from .island_overrides import check_merge_source
+
+    check_merge_source(adapter_dir)
     if not (adapter_dir / ADAPTER_CONFIG_FILE).is_file():
         raise ValueError(f"adapter has no {ADAPTER_CONFIG_FILE}: {adapter_dir}")
     try:

@@ -42,9 +42,10 @@ launcher 在 `sky_patches.install()` 之前读线程数。计数办法：遍历 
 3. 激活：`k_act · L/PP · T/(TP·CP) · H · 2`。开全重算时 k_act 取校准值（只保留每层输入），不开时取较大的校准值。
 4. 词表 logits 块：`k_logit · min(T, C) · V/TP · 4`（fp32）。k_logit 计入 logits、softmax 与反向各一份。S17 M1 run c 实测这一块 7.6 GiB，用它校准 k_logit。
 5. 推理侧（训练与推理同卡且不卸载时）：`mem_fraction_static · 卡显存`，按 SGLang 配置读取。卸载时只算推理侧常驻部分（校准值）。
-6. 固定开销：CUDA 上下文、NCCL 缓冲与碎片，取校准常数 `R`。
+6. 固定开销：CUDA 上下文、NCCL 缓冲与碎片。实现时拆成两项：`R0`（常数）＋ `FRAG ×（第 1–4 项之和）`（分配器碎片随训练分配量增长）。理由：run c 的 OOM 信息直接给出了碎片 21.04 GiB 与已分配 107.75 GiB，按比例建模比单一常数更贴近实测。
+7. 同卡且卸载（colocate + offload，默认 1 卡岛）时训练与推理交替：峰值取"训练阶段（1–6 项）"与"推理阶段（`mem_fraction_static × 卡显存 + R0`）"的较大者。理由：Qwen3-0.6B 运行的实测峰值（35–39 GiB）来自推理阶段的 KV 池，训练阶段远小于它。
 
-阈值：峰值 ≤ `0.9 × 卡显存` 通过（`--preflight-memory-margin` 可调）。超限时依次试三种建议并重算：上下文和回复长度各降一档（按 1024 取整）、同卡型加一倍卡（TP 或 DP 翻倍）、换下一档显存卡型（GPU_MEM_GB 中更大者），只输出能通过的建议。
+阈值：峰值 ≤ `0.9 × 卡显存` 通过（`--preflight-memory-margin` 可调）。卡显存用 torch 报告值：H100 79.18 GiB、H200 139.80 GiB（M1 OOM 信息），其他卡 `GPU_MEM_GB × 0.98`。超限时依次试三种建议并重算：上下文按 1024 一档往下找能通过的最长值、回复长度按同比例缩短（按 1024 取整）、同卡型加一倍卡（TP 或 DP 翻倍）、换下一档显存卡型（GPU_MEM_GB 中更大者），只输出能通过的建议。
 - 模型结构（L、H、V、P）从 `yeto/models.py` 的模型表或已下载的 HF config 读取。读不到时打印"显存未估算"并继续（spec 要求）。
 - 备选：直接起一张卡跑一步测峰值。没选，因为每次都要花钱，而 S17 两次 OOM 正是"起了才知道"。
 - 常数 k_act、k_logit、R、卸载常驻量在任务 2.2 回测前均为未验证。
@@ -60,10 +61,13 @@ launcher 在 `sky_patches.install()` 之前读线程数。计数办法：遍历 
 
 ### 决定 4：单岛换参数在岛任务循环里换 `args` 副本
 新增 `--rl-island-override ISLAND:KEY=VALUE`（可重复）和 `--rl-negative-test-run`。在 `launch` 的岛循环（launcher.py:7086–7088）与 dry-run 循环（7616–7630）里，对被点名的岛先 `copy.copy(args)` 再 setattr，然后交给 `task_factory`。sky 岛与 Modal 岛都从这份 task 生成，所以一处生效。
-- 白名单：`rl_lr_schedule`、`rl_max_policy_age`、`rl_max_carry_lag`、`identity_test_salt`。最后一项是新的仅测试参数，岛侧把它混进 `island_contract_sha256` 的输入，只为造"身份不符"。
+- 白名单：`rl_lr_schedule`、`rl_max_policy_age`、`identity_test_salt`。最后一项是新的仅测试参数，岛侧把它混进 `island_contract_sha256` 的输入，只为造"身份不符"。
+- `rl_max_carry_lag` 不在白名单：它只传给 syncer（launcher.py `_ISLAND_SCHEDULING_PARAMS` → syncer `--max-carry-lag`），岛命令行不带它，按岛换不改变任何岛的行为。传了就起机前报错，写明"syncer 参数，不能按岛换"。（10-09 主 agent 代用户拍板）
 - 先在 `prepare_launch_args` 之后对全局参数做完全部校验，再对每个改过的副本单独跑一遍与该参数相关的校验（例如 `--rl-max-policy-age` 的后端支持检查），避免副本绕过检查。
 - 记录：`_write_run_manifest`（7542）写 `negative_test: true` 与 `island_overrides` 列表。岛环境变量带 `YETO_ISLAND_OVERRIDE`（JSON），岛入口启动后在 tape 写 `rl_island_override` 事件。看板 reducer 读到该事件后给岛加标记。
-- 正式训练禁用：`--rl-resume` 指向的运行清单有 `negative_test: true` 时报错；`yeto export` 遇到该标记报错。
+- 正式训练禁用（10-09 主 agent 代用户拍板：原文 `--rl-resume` / `yeto export` 在 main 不存在，换成实际接入点）：
+  - 续训：续训靠 `--rl-checkpoint-store`。负例运行的每个岛带 `YETO_NEGATIVE_TEST_RUN=1`，启动时在 checkpoint store 根目录写 `YETO_NEGATIVE_TEST` 标记。非负例运行在 store 里发现该标记就报错：launcher 起机前检查本机可读的 store 路径，岛启动时再检查一次（跨机器、Modal Volume 都有效）。本机 runs 目录下 `negative_test: true` 且 `checkpoint_store` 相同的运行清单作为补充检查。
+  - 导出：对外导出权重的命令是 `yeto merge --adapter-dir`。adapter 目录及其上两级有 `YETO_NEGATIVE_TEST` 标记，或有 `negative_test: true` 的 run_manifest.json 时报错。
 - 备选：给每个岛单独一份完整配置文件。没选，因为改动面大，而负例只需要少数参数。
 
 ## Risks / Trade-offs
@@ -84,3 +88,32 @@ launcher 在 `sky_patches.install()` 之前读线程数。计数办法：遍历 
 
 - SkyPilot API 服务在本机的进程命令行特征需实现时确认（暂定包含 `sky.server`）。
 - N17 与 ARU-2 是否记录了显存峰值需翻原始数据确认。没有就只用 b、c、d 三点。
+
+## 附表：显存估算回测（任务 2.2）
+
+数据：evidence/memory-backtest.json（脚本 evidence/memory_backtest.py）。实测峰值取岛 tape 里 `rl_load_sample.peak_gpu_mem_bytes` 的最大值（NVML 整卡已用显存，每 10 s 采一次，是真实峰值的下界）。原始数据在 /home/michael/work/s1-runs/ 下（s17-m1-20261008b/c/d、s17-n17-*、s18-aru2-*）。
+
+校准常数：K_LOGIT=0.5（run c 申请 7.58 GiB＝16384×248320×2 字节，一份 bf16 logits），FRAG=0.1953、R0=4.97 GiB（run c OOM 信息），K_ACT（不重算）=45.62（由 run d 实测峰值 123.27 GiB 反解），K_ACT（全重算）=2.0（未验证）。
+
+| 运行 | 用途 | 请求 | 估算 GiB | 实测 | 误差 |
+|---|---|---|---|---|---|
+| M1 run b | 校准 | Qwen3.5-4B H100 上下文 16384 | 159.6 | OOM，需求 ≥ 78.1 GiB | 估算超限，起机前拦下 |
+| M1 run c | 校准 | Qwen3.5-4B H200 上下文 16384 | 159.6 | OOM，需求 ≥ 141.3 GiB | 估算超限，起机前拦下（logits 项误差 -0.0%） |
+| M1 run d | 校准 | Qwen3.5-4B H200 上下文 12288 | 123.3 | 123.3 GiB | -0.0% |
+| N17 A/B a (a) | 检验 | Qwen3.5-4B H200 上下文 12288 | 123.3 | 126.8 GiB | -2.8% |
+| N17 A/B a (b) | 检验 | Qwen3.5-4B H200 上下文 12288 | 123.3 | 127.1 GiB | -3.0% |
+| N17 A/B b (a) | 检验 | Qwen3.5-4B H200 上下文 12288 | 123.3 | 123.8 GiB | -0.4% |
+| N17 A/B b (b) | 检验 | Qwen3.5-4B H200 上下文 12288 | 123.3 | 126.9 GiB | -2.9% |
+| N17 codex | 检验 | Qwen3.5-4B H200 上下文 12288 | 123.3 | 119.5 GiB | +3.1% |
+| N17 elastic | 检验 | Qwen3-0.6B H100 上下文 1024 | 36.6 | 35.0 GiB | +4.7% |
+| N17 strict | 检验 | Qwen3-0.6B H100 上下文 1024 | 36.6 | 35.0 GiB | +4.7% |
+| ARU-2 M0 | 检验 | Qwen3-0.6B H100 上下文 2560 | 36.6 | 36.8 GiB | -0.3% |
+| ARU-2 M1 | 检验 | Qwen3-0.6B H100 上下文 2560 | 36.6 | 38.9 GiB | -5.8% |
+| ARU-2 MB | 检验 | Qwen3-0.6B H100 上下文 2560 | 36.6 | 56.0 GiB | -34.5% |
+
+判读：
+- b、c 估算超限，c 的 logits 项与 7.6 GiB 相差 0%，d 估算通过（123.3 ≤ 125.8 GiB）。三条验收全过。
+- run d 是校准点，误差 0 是构造出来的，不算检验。S17 早报写 d 峰值 125–126 GB；tape 最大值是 131.3–132.4 GB（122.3–123.3 GiB）。估算与两种读数都在 10% 以内。早报数字的出处没找到。
+- 检验点：N17 五个 4B 运行误差 −3.0%～+3.1%，N17 两岛 0.6B 运行 +4.7%，ARU-2 M0/M1 −0.3%/−5.8%。
+- ARU-2 MB 低估 34.5%：tape 峰值随轮次增长（35→56 GiB），配置与 M0 相同（micro batch 1、无动态批），原因未知。因只有 Qwen3.5-4B 校准过，其他模型超限只告警不拦截（design 风险一节）。
+- N17 A/B 的实测峰值（126.8–127.1 GiB）超过 0.9 阈值（125.8 GiB），但运行没有 OOM。估算 123.3 GiB 让它通过，结论一致。
