@@ -1,0 +1,185 @@
+{
+ "schema": "yeto-eval-holdout/1",
+ "benchmark": "tb2",
+ "benchmark_version": "tb2@2fd12b8",
+ "seed": 20261008,
+ "rule": "exclude smoke6 (S15 trained); stratified by difficulty: easy 2 / medium 18 / hard 10",
+ "excluded": [
+  {
+   "task_id": "fix-git",
+   "reason": "S15 smoke training"
+  },
+  {
+   "task_id": "git-multibranch",
+   "reason": "S15 smoke training"
+  },
+  {
+   "task_id": "log-summary-date-ranges",
+   "reason": "S15 smoke training"
+  },
+  {
+   "task_id": "openssl-selfsigned-cert",
+   "reason": "S15 smoke training"
+  },
+  {
+   "task_id": "regex-log",
+   "reason": "S15 smoke training"
+  },
+  {
+   "task_id": "sqlite-db-truncate",
+   "reason": "S15 smoke training"
+  }
+ ],
+ "items": [
+  {
+   "task_id": "overfull-hbox",
+   "difficulty": "easy",
+   "eval_bucket": "tb2-easy"
+  },
+  {
+   "task_id": "prove-plus-comm",
+   "difficulty": "easy",
+   "eval_bucket": "tb2-easy"
+  },
+  {
+   "task_id": "adaptive-rejection-sampler",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "break-filter-js-from-html",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "build-pov-ray",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "compile-compcert",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "constraints-scheduling",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "dna-insert",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "gcode-to-text",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "headless-terminal",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "hf-model-inference",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "kv-store-grpc",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "largest-eigenval",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "mteb-retrieve",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "nginx-request-logging",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "portfolio-optimization",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "pytorch-model-recovery",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "reshard-c4-data",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "rstan-to-pystan",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "schemelike-metacircular-eval",
+   "difficulty": "medium",
+   "eval_bucket": "tb2-medium"
+  },
+  {
+   "task_id": "extract-moves-from-video",
+   "difficulty": "hard",
+   "eval_bucket": "tb2-hard"
+  },
+  {
+   "task_id": "fix-code-vulnerability",
+   "difficulty": "hard",
+   "eval_bucket": "tb2-hard"
+  },
+  {
+   "task_id": "gpt2-codegolf",
+   "difficulty": "hard",
+   "eval_bucket": "tb2-hard"
+  },
+  {
+   "task_id": "make-doom-for-mips",
+   "difficulty": "hard",
+   "eval_bucket": "tb2-hard"
+  },
+  {
+   "task_id": "make-mips-interpreter",
+   "difficulty": "hard",
+   "eval_bucket": "tb2-hard"
+  },
+  {
+   "task_id": "path-tracing",
+   "difficulty": "hard",
+   "eval_bucket": "tb2-hard"
+  },
+  {
+   "task_id": "polyglot-rust-c",
+   "difficulty": "hard",
+   "eval_bucket": "tb2-hard"
+  },
+  {
+   "task_id": "protein-assembly",
+   "difficulty": "hard",
+   "eval_bucket": "tb2-hard"
+  },
+  {
+   "task_id": "sam-cell-seg",
+   "difficulty": "hard",
+   "eval_bucket": "tb2-hard"
+  },
+  {
+   "task_id": "video-processing",
+   "difficulty": "hard",
+   "eval_bucket": "tb2-hard"
+  }
+ ]
+}

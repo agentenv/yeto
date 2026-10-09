@@ -1,0 +1,107 @@
+{
+ "run": "s17-i3-c3-rb",
+ "rc": "rc=2",
+ "deliver": [
+  "island0",
+  "write",
+  "confirm",
+  "done"
+ ],
+ "injection_lines": [],
+ "rebuilt_events": [
+  {
+   "event": "rl_trainer_rebuilt",
+   "island_id": 0,
+   "policy_version": 3,
+   "rl/policy_token": "yeto:3:651da4c8a81c5d0988fe1573086eb36bc61516b6d156cffc66b9bc9800c0dfda",
+   "sync/publication_members": [
+    "engine:inference-engine-all-0-0-00000"
+   ],
+   "time_unix": 1791495007.4624715
+  }
+ ],
+ "tape_reconfig_phases": [],
+ "journal_phases": [
+  [
+   "rb1",
+   "VALIDATING",
+   1791494913.4,
+   ""
+  ],
+  [
+   "rb1",
+   "WAIT_SAFE",
+   1791494913.4,
+   ""
+  ],
+  [
+   "rb1",
+   "REBUILDING_TRAINER",
+   1791494913.4,
+   ""
+  ],
+  [
+   "rb1",
+   "SUCCEEDED",
+   1791495007.5,
+   ""
+  ]
+ ],
+ "journal_source": "snapshot s17-i3-c3-rb/es-snapshots/1791495031-tail.tgz",
+ "recovery_records": [],
+ "rounds_trained": [
+  [
+   0,
+   1,
+   2
+  ],
+  [
+   1,
+   2,
+   4
+  ],
+  [
+   2,
+   3,
+   6
+  ],
+  [
+   3,
+   4,
+   8
+  ],
+  [
+   4,
+   5,
+   10
+  ],
+  [
+   5,
+   6,
+   12
+  ]
+ ],
+ "rounds_after_terminal": [
+  3,
+  4,
+  5
+ ],
+ "cursor_monotonic": true,
+ "ledger_kinds": {
+  "prepared": 5,
+  "filtered": 5,
+  "carried_over_report": 5,
+  "optimizer_applied": 4,
+  "outer_recorded": 4
+ },
+ "optimizer_applied_dups": {},
+ "consumed_dups": {},
+ "finalized": true,
+ "terminal": [
+  "rb1",
+  "SUCCEEDED",
+  1791495007.5,
+  ""
+ ],
+ "rebuilding_to_terminal_s": 94.1
+}

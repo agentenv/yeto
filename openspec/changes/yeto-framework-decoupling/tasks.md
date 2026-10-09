@@ -103,6 +103,23 @@
 - [x] 6.2 岛握手比较身份哈希，不同即拒绝；`local_learner.py` 与 `sao_streaming_runtime.py:203,642` 的训练契约输入引用该身份哈希。验收：单测——Miles 与模拟 verl 身份握手被拒并报双方身份；两个 Miles 岛握手不受影响（标准样本一致）。
   - 已实现（s17-decouple-p4）：岛与 syncer 的 HELLO 会话契约由"布局指纹"改为"布局指纹 + 后端身份哈希"（`backend_identity.session_contract_hash`，`BridgeConfig`/`DecoupledBridgeConfig` 新字段 `backend_identity_sha256`，Miles 岛入口填入）；syncer 只接纳会话契约逐字节相同的岛（`syncer/src/server.rs` `SessionSpec` 相等比较），所以 Miles 与 verl（或不同 Miles 钉）的岛握手被拒；能拿到双方身份的地方用 `check_identity_match` 报双方身份。dense（`local_learner.dense_sweep_session_contract_hash` 新参数）与 SAO（`sao_role_stream_session_contract_hash`）的契约输入引用 legacy Miles 身份哈希。已验证：单测（Miles vs 模拟 verl 被拒并报双方身份；两个 Miles 岛契约相同；HELLO 帧带新契约）。**未验证**：真 Rust syncer 端到端（本机 `cargo build` 在基线就失败，`test_rl_integration` 12 例基线即报错）；真机多岛。**版本边界**：新旧代码的岛不能混跑（会话契约不同）；阶段 5 之前写下的 syncer 检查点因会话契约不同不能续跑。
 
+- [x] 6.2a elastic 模式补上身份比较（6.2 只覆盖了严格同步的 HELLO）。验收：Miles 岛和 verl 岛 JOIN 互拒并报双方身份；同后端同提交的岛行为不变；帧与 HMAC 两边逐字节一致。
+  - 已实现（s17-elastic-identity，base s17-decouple-p4）：elastic JOIN 正文加 32 字节后端身份哈希（`syncer/src/elastic.rs` `ElasticMsg::Join.backend_identity`；`yeto/rl/elastic_client.py` `Join.backend_identity`、`ElasticClientConfig.backend_identity_sha256`）；`bridge.make_island_bridge` 与 `engine/bridges.ElasticAvgSync` 把 `BridgeConfig.backend_identity_sha256` 传进 JOIN。syncer（`elastic_server.rs`）用第一个被接纳的 JOIN 钉住身份（和严格模式第一个 HELLO 定会话契约一样），之后身份不同的 JOIN 回 MSG_ERROR："backend identity mismatch, JOIN refused: island N declares <哈希> but this elastic session is pinned to <哈希> …"，不入池；钉住的身份写进检查点（`YELSRV2`），续跑后照样拒。
+  - 已验证：`cargo test` 141 过（基线 139 + 黄金帧/旧帧拒绝 1 + 服务端钉身份/续跑/旧检查点拒绝 1）；Python 单测（`tests/test_rl_elastic_backend_identity.py` 新增 5 例，`test_rl_inter_island_elastic_client.py` 黄金帧 15 更新）；elastic/inter_island/bridge/decoupled 相关 312 例全过。真 Rust syncer（release 构建）本地三假岛端到端：Miles 岛 1 加入并播种，verl 岛 2 被拒（错误里有双方哈希），Miles 岛 3 正常加入，岛 1、3 合并一步得 2.0（`test_real_syncer_refuses_verl_island_in_miles_session`，需 `YETO_TEST_ELASTIC_SYNCER`）。
+  - 本机 cargo：`cargo` 在 `~/.cargo/bin`，非登录 shell 的 PATH 里没有，直接敲 `cargo` 报 command not found；`export PATH=$HOME/.cargo/bin:$PATH` 后基线 5fac05f7 `cargo build` 成功、`cargo test` 139 过（N6 的 145 = 139 + 它 PR #134 加的 6 例）。所以 6.2 记录里的"本机 cargo build 在基线就失败"实为找不到 cargo，不是代码编不过。
+  - **版本边界**：见 hash-migration.md "阶段 5 补"——新旧岛/syncer 不能混用，`YELSRV1` 检查点不能续跑。
+  - **未验证**：真机多岛（不上 GPU）；Ray 驱动的岛（本机不跑 Ray，只用假岛）。另：与 PR #134（s17-x1-syncer-modes）试合并无冲突，合并树 cargo test 147 过（139+6+2）。
+
+- [x] 6.2b 严格同步模式下，契约不一致的 HELLO 只拒这一条连接，不再让 syncer 退出（S17 N14，分支 s17-strict-reject，base s17-elastic-identity）。起因：N10 本机握手（`s1-runs/s17-verl-handshake/result.json`）显示 verl 会话里来一个 Miles 岛，syncer 以 `layout_hash_mismatch` 致命退出，等于一个连错的岛能停掉整场。验收：两个 verl 岛同步途中插进一个 Miles 岛，它被拒、错误帧写明双方哈希；syncer 与两个 verl 岛照常完成全部轮次。
+  - 两种情况：
+    - 会话还没建立：第一个 HELLO 定下会话契约，不变。
+    - 会话已建立后来了契约不一致的 HELLO：回 MSG_ERROR（`session mismatch (HELLO refused, session keeps running): expected session_contract_hash=… layout_fingerprint=… dtype=… fragments=…, got …`），只关这条连接；不登记、不顶替同编号的已接纳岛，会话不变。syncer 语义配置（profile）不一致的 HELLO 同样只拒这一条（以前严格模式下也是致命退出）。
+    - 不变的部分：`--resume` 时检查点与第一个 HELLO 对不上仍是致命的 `layout_hash_mismatch`（那是会话本身建不起来）。
+  - 实现：`syncer/src/server.rs` 新 `admit_session`（拆出原来的比较逻辑，拒绝消息带双方哈希），`handle_connection` 去掉严格模式下发 `Event::Fatal` 的分支（参数 `strict_layout` 随之删除）。Python：`yeto/protocol.py` 新 `SessionRejectedError`（按 MSG_ERROR 前缀识别），`SyncerClient.check_health` 把它转成 `StrictRlInvariantError`（metric `layout_hash_mismatch` / `syncer_profile_mismatch`），走现有的严格失败路径：bridge 打 `[yeto-rl-strict-failure]`，进程退出码 1，launcher/modal 按日志里的 `StrictRlInvariantError:` 归为严格失败（确定性配置错误，不当作断线去重连，也不被当成 syncer 崩溃）。客户端收到拒绝后不重连（原本 `_protocol_failed` 就是终态）。
+  - 已验证：`cargo test` 142 过（141 + 新增 `first_hello_establishes_session_and_mismatch_is_refused_without_reset`）。pytest `tests/test_rl_strict_session_reject.py` 2 例：真 Rust syncer（debug 构建，`--max-base-lag 0`，3 轮）+ 两个 verl 身份假岛 + 第 1 轮后插进的 Miles 身份假岛（子进程，learner id 1）——Miles 岛退出码 1、stderr 有 `StrictRlInvariantError: syncer refused this island` 和双方契约哈希；syncer 不退出，两个 verl 岛完成第 2、3 轮并 FINAL_ACK，syncer 退出码 0，事件带里没有 `rl_strict_failure`；另一例确认其他 MSG_ERROR 仍归为原来的 "syncer connection failed"。连同 protocol_finalization / reconnect / elastic_backend_identity 共 24 过 1 跳过。证据：`s1-runs/s17-strict-reject/pytest.log`、`s1-runs/s17-strict-reject/tmp/test_mismatched_hello_is_refus0/`（syncer.log、miles.stderr、syncer.jsonl）。
+  - 注意：launcher 在固定名单模式下，岛的严格失败仍会让 launcher 停掉整场（`launcher.py` `_strict_failure` → `RuntimeError`）——这是 launcher 现有语义（launcher 自己配错了岛属于配置错误），本次没改；syncer 和其他岛本身不再受影响。`tests/test_rl_integration.py` 的 `_start` 带 `--resume` 而检查点不存在，基线上就起不来（如 `test_terminal_replacement_receives_final_policy` 在 base 上同样失败），新测试自带不带 `--resume` 的 `_start`；那批旧用例没修。
+  - **未验证**：真 verl/Miles 引擎岛（只用 `SyncerClient` 假岛，契约用 N10 结果里的真实身份哈希）；完整 bridge 进程里打出 `[yeto-rl-strict-failure]` 的那一步（只验证了 `check_health` 抛 `StrictRlInvariantError` 且子进程退出码 1）；真机多岛；Ray 驱动。
+
 ## 7. 阶段 6：硬件层（可与 verl 并行）
 
 - [ ] 7.1 `yeto/hw/device.py` 设备族表（NVIDIA、昇腾；AMD/TPU/摩尔线程预留行标"未核实"），以 `accel.py:22-30` 为起点；`accel.py` 改读此表（H1、V1）。验收：`accel.py` 现有用法测试通过；表单测。
@@ -114,6 +131,8 @@
 - [ ] 7.7 跨卡型/跨厂商合并接口（D9a 第一期）：契约加"兼容组"字段（卡型+厂商）与比较函数，第一版兼容组要求完全相同；阈值表加"卡型对/厂商对容差"键（无值即视为未标定、拒绝合并）；文档写明 syncer 只交换中立格式增量（扁平 f32/bf16、规范参数名）。验收：同卡型同厂商合并通过、H100 与 H200 拒绝并报"未标定容差"、NVIDIA 与昇腾拒绝的单测；第二、三期的前提与验收写入 design D9a，不在本 change 实现。
 
 ## 8. 阶段 7：云层与按任务分 spot/按需（可与 verl 并行）
+
+设计输入（S17）：`openspec/changes/rl-infra-spec/cloud-pool-design.md` §3.4（回收按等级处理，对应 8.7）、§5（调度建议规则与 `CloudAdvice` 形状，对应 8.6）。
 
 - [ ] 8.1 `yeto/cloud/provider.py` 云提供方接口与能力声明（计费方式、回收提前通知秒数、能否当头节点、网络档位、卡数上限），以 `modal_runner.py:1-25` 为样板；`CloudSignals` 并入（C2、C3）。验收：接口单测；Modal 实现通过现有 modal_runner 测试。
 - [ ] 8.2 各云实现，把 `launcher.py` 中 `if spec.cloud ==` 分支（C1：`:326,1200,1242,1254,3392,3718,4291,4586,6432,6531-6556`）、`MULTINODE_IB_CLOUDS`/`NETWORK_TIER_BEST_SHAPES`（C4）、云×卡→镜像表（C5，`:2494-2507`）、模型存储/预烘镜像/头节点限制（C6）移入；直接 `sky.Task` 只在 SkyPilot 实现内（C7）。验收：对现有各云配置干跑（不开卡）生成的 SkyPilot 任务与 Modal 调用参数与改动前一致的对照测试；边界检查"云名分支只在 `yeto/cloud/`"。

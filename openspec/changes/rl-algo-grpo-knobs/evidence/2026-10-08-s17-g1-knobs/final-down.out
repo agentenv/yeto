@@ -1,0 +1,9 @@
+
+
+/home/michael/work/gpu-head/venv/lib/python3.12/site-packages/sky/adaptors/nebius.py:248: FutureWarning: user_agent_prefix will become mandatory in a future release
+  return nebius.sdk.SDK(
+Failed to delete security group vpcsecuritygroup-e00ck2zj6s7kb3c34s after 6 attempts: Request error FAILED_PRECONDITION: SecurityGroup vpcsecuritygroup-e00ck2zj6s7kb3c34s is used by compute instances: computeinstance-e00kyqtvdex9w1zjfe; request_id: c8794bd9-2d8f-45f5-81e8-4c03dd61e010; trace_id: f1b8a2662d4cf717165c8eea9d02bce9; Caused by errors: 1. SecurityGroupFailedPrecondition in service VPC API 2. SecurityGroupFailedPrecondition in service VPC API. Leaving as orphan; clean up manually if needed.
+
+Terminating cluster s17-g1-knobs-head...done.
+Terminating 1 cluster ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100% 0:00:00
+down rc=0

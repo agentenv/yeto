@@ -80,42 +80,97 @@ class LocalOnlySync:
         # rl-multinode-island M4: miles_adapter.round_cut.RoundCutCheckpoint, wired when
         # a checkpoint store is configured (resume from the newest round cut).
         self.round_cuts: Any = None
+        # rl-resume-from-checkpoint: our own stop after this many rounds (exclusive
+        # rollout id; None = run to num_rollout). A final cut is kept at the stop.
+        self.stop_after: int | None = None
 
     def start(self, driver: IslandDriver) -> SyncStart:
         resumed = self.round_cuts.resume(driver) if self.round_cuts is not None else None
         rollout_id = 0 if resumed is None else int(resumed["next_rollout_id"])
         return SyncStart(_local_state(driver, rollout_id), rollout_id,
-                         finished=rollout_id >= self.num_rollout)
+                         finished=rollout_id >= self._end())
 
-    def at_safe_point(self, driver: IslandDriver, *, rollout_id: int) -> None:
-        """M4: keep a round cut at every safe point (a failed cut is reported, not fatal:
-        the previous pointer stays valid)."""
+    def at_safe_point(self, driver: IslandDriver, *, rollout_id: int, final: bool = False) -> None:
+        """M4: keep a round cut at the safe point (every ``--rl-cut-every`` rounds, and
+        always at the end). A failed cut is reported, not fatal: the previous pointer
+        stays valid."""
         if self.round_cuts is None:
             return
         try:
-            info = self.round_cuts.save(driver, rollout_id=rollout_id)
+            info = (self.round_cuts.save(driver, rollout_id=rollout_id, final=True) if final
+                    else self.round_cuts.save(driver, rollout_id=rollout_id))
         except Exception as error:  # noqa: BLE001
             driver.emit("rl_round_cut", rollout_id=rollout_id, ok=False, error=repr(error)[:2000])
             return
         if info is not None:
             driver.emit("rl_round_cut", rollout_id=rollout_id, ok=True, **info)
+            driver.emit("rl_cut_saved", rollout_id=rollout_id, **{
+                k: info.get(k) for k in ("cut_id", "cut_bytes", "save_s", "store_copy_s",
+                                         "store_commit_s", "total_s", "write_bytes_per_s",
+                                         "policy_hash", "store_synced", "latest_seq", "pruned",
+                                         "incarnation_index", "final", "trainer_onloaded_for_cut")})
+
+    def _end(self) -> int:
+        return self.num_rollout if self.stop_after is None else min(self.num_rollout, int(self.stop_after))
 
     def is_final_round(self, driver, *, rollout_id: int) -> bool:
         return rollout_id + 1 >= self.num_rollout
 
     def boundary(self, driver, *, rollout_id, stats) -> SyncBoundary:
+        check = getattr(self.round_cuts, "check_first_round", None)
+        if callable(check):  # resume: the first resumed round's lr continues (raises)
+            check(driver, rollout_id=rollout_id, applied_lrs=getattr(stats, "applied_lrs", None))
         local = _local_state(driver, rollout_id + 1)
         driver.emit("rl_local_round", **asdict(stats))
-        return SyncBoundary(local, stop=rollout_id + 1 >= self.num_rollout)
+        stop = rollout_id + 1 >= self._end()
+        if stop and rollout_id + 1 < self.num_rollout:
+            driver.emit("rl_stop_requested", rollout_id=rollout_id, stop_after=self.stop_after,
+                        num_rollout=self.num_rollout, reason="--rl-stop-after-rounds")
+        return SyncBoundary(local, stop=stop)
 
     def published(self, driver, *, rollout_id, policy_hash) -> None:
         pass
 
     def finish(self, driver) -> None:
-        pass
+        """rl-resume-from-checkpoint: the last round (or our own stop) always leaves a
+        cut, so a later launch continues from exactly here."""
+        version = getattr(driver, "published_version", None)
+        if self.round_cuts is not None and version is not None:
+            # after the last round's boundary + publish the island is at a round-boundary
+            # safe point (nothing in flight); the cut requires it settled (G2 A: refused
+            # "the outer commit of this cut is not settled" without this)
+            driver.at_safe_point = True
+            self.at_safe_point(driver, rollout_id=int(version), final=True)
 
     def close(self) -> None:
         pass
+
+
+_FRESH_CURSOR = {"sample_offset": 0, "epoch_id": 0, "sample_group_index": 0, "sample_index": 0}
+
+
+def whole_round_restart_cursor(current: Mapping[str, int] | None, start_rollout_id: int,
+                               groups_per_round: int | None) -> dict[str, int] | None:
+    """Data cursor for an island that (re)starts at ``start_rollout_id`` > 0 with no
+    recorded cursor (empty or absent batch ledger, e.g. a fresh container): skip
+    ``start * groups_per_round`` groups from the data source's fresh position (same
+    shift as ``cut_injection.write_shifted_dataset_state``). ``current`` is the
+    pool's cursor as read now (None -> the Miles-shaped fresh cursor); a pool's
+    cursor must carry ``sample_offset`` (groups drawn so far), and
+    ``sample_group_index`` moves with it when present. None when unknown.
+
+    Shared by strict and elastic sync (S17 N16: strict had none, so a verl island
+    relaunched at v2 re-drew its rollout-0 prompts)."""
+    if not groups_per_round or start_rollout_id <= 0:
+        return None
+    cur = {k: int(v) for k, v in dict(current or {}).items()} or dict(_FRESH_CURSOR)
+    if "sample_offset" not in cur:
+        return None
+    groups = int(start_rollout_id) * int(groups_per_round)
+    cur["sample_offset"] += groups
+    if "sample_group_index" in cur:
+        cur["sample_group_index"] += groups
+    return cur
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +294,13 @@ class StrictAvgSync:
         if not finished:
             self.permit = self.bridge.wait_for_round()
         return SyncStart(state, version, finished)
+
+    def restart_cursor_fallback(self, current: Mapping[str, int] | None,
+                                start_rollout_id: int) -> dict[str, int] | None:
+        """S17 N16: a strict island relaunched at v > 0 without a ledger cursor (new
+        container, or no ``--rl-elastic`` ledger) must not re-draw rounds 0..v-1."""
+        return whole_round_restart_cursor(current, start_rollout_id,
+                                          getattr(self.config, "groups_per_round", None))
 
     def is_final_round(self, driver, *, rollout_id: int) -> bool:
         # Strict: local round ``rollout_id + 1`` is the last iff it reaches
@@ -372,7 +434,9 @@ class ElasticAvgSync:
 
             self.client = ElasticIslandClient(
                 ElasticClientConfig(self.config.syncer_addr, self.config.learner_id,
-                                    syncer_epoch=self.syncer_epoch),
+                                    syncer_epoch=self.syncer_epoch,
+                                    backend_identity_sha256=getattr(
+                                        self.config, "backend_identity_sha256", None)),
                 hmac_key_from_env(), on_event=self._client_event)
         return self.client
 
@@ -478,17 +542,8 @@ class ElasticAvgSync:
     def restart_cursor_fallback(self, current: Mapping[str, int] | None,
                                 start_rollout_id: int) -> dict[str, int] | None:
         """0.21: the ledger has no cursor for ``start_rollout_id`` (e.g. a fresh
-        machine joining at base_version > 0): skip ``start * groups_per_round``
-        groups from the fresh data source position (same shift as
-        cut_injection.write_shifted_dataset_state). None when unknown."""
-        if not self.groups_per_round or start_rollout_id <= 0:
-            return None
-        cur = {"sample_offset": 0, "epoch_id": 0, "sample_group_index": 0, "sample_index": 0}
-        cur.update({k: int(v) for k, v in dict(current or {}).items() if k in cur})
-        groups = int(start_rollout_id) * int(self.groups_per_round)
-        cur["sample_offset"] += groups
-        cur["sample_group_index"] += groups
-        return cur
+        machine joining at base_version > 0): see :func:`whole_round_restart_cursor`."""
+        return whole_round_restart_cursor(current, start_rollout_id, self.groups_per_round)
 
     def is_final_round(self, driver, *, rollout_id: int) -> bool:
         return rollout_id + 1 >= self.config.global_rounds
@@ -684,6 +739,9 @@ class DualStrictAvgSync:
                 f"actor channel starts at round {start.rollout_id}, critic channel at {critic.rollout_id}")
         self._remember(driver, start.rollout_id)
         return start
+
+    def restart_cursor_fallback(self, current, start_rollout_id: int):
+        return self.actor.restart_cursor_fallback(current, start_rollout_id)
 
     def is_final_round(self, driver, *, rollout_id: int) -> bool:
         return self.actor.is_final_round(driver, rollout_id=rollout_id)

@@ -156,6 +156,12 @@ def _new_island(iid: str) -> dict:
         "contribution": None, "reconfig": [], "cells": None, "cells_source": None,
         "transactions": {}, "tx_order": [], "recovery_required": [], "source_lost": None,
         "recent": deque(maxlen=50), "events_by_type": {},
+        # rl-resume-from-checkpoint 4.3: one entry per resume (launch boundary), the
+        # rounds each launch trained (rid -> [ts...]) and the cuts saved
+        "resumes": [], "trained_ts": {}, "cuts": [],
+
+        # fleet-dashboard 8.4: startup sub-steps {step: {"seconds", "step_s", "ts"}}
+        "startup_steps": {}, "startup_step": None, "startup_step_ts": None,
     }
 
 
@@ -325,15 +331,26 @@ class Reducer:
         isl["recent"].append({"ts": ts, "type": event, "summary": _summary(r)})
         if r.get("policy_version") is not None and event in (
                 "rl_policy_apply", "rl_publication", "rl_driver_phase", "rl_heartbeat",
-                "rl_round_cut", "rl_member_publication"):
+                "rl_round_cut", "rl_member_publication", "rl_resume"):
             isl["policy_version"] = r.get("policy_version")
         if event == "rl_driver_start" and isl.get("driver_start_ts") is None:
             isl["driver_start_ts"] = ts
+        if event == "rl_driver_start":
+            isl.setdefault("driver_starts", []).append(ts)
         if event == "rl_driver_start" or (event in DRIVER_RUNNING_EVENTS and r.get("phase") != "startup"):
             isl["driver_started"] = True
         if event == "rl_driver_phase":
             isl["phase"] = r.get("phase")
+        elif event == "rl_startup_step":
+            step = r.get("step")
+            if step is not None:
+                isl["startup_steps"][str(step)] = {"seconds": r.get("seconds"), "step_s": r.get("step_s"), "ts": ts}
+                isl["startup_step"] = str(step)
+                if ts is not None:
+                    isl["startup_step_ts"] = max(ts, isl["startup_step_ts"] or ts)
         elif event == "rl_heartbeat":
+            if r.get("phase") == "startup" and r.get("startup_step") and isl["startup_step"] is None:
+                isl["startup_step"] = r.get("startup_step") if r.get("startup_step") != "begin" else None
             isl["heartbeat_seen"] = True
             if ts is not None:
                 isl["last_heartbeat_ts"] = max(ts, isl["last_heartbeat_ts"] or ts)
@@ -350,6 +367,18 @@ class Reducer:
             isl["resource"] = _resource(r, ts)
         elif event in ("rl_local_round", "rl_round_trained"):
             self._round_metrics(isl, r, event)
+            if event == "rl_round_trained" and isinstance(r.get("rollout_id"), int):
+                isl["trained_ts"].setdefault(r["rollout_id"], []).append(ts)
+        elif event == "rl_resume":
+            isl["resumes"].append({
+                "ts": ts, "rollout_id": r.get("rollout_id"), "incarnation": r.get("incarnation"),
+                "cut_id": r.get("cut_id"), "restore_s": r.get("restore_s"),
+                "cut_bytes": r.get("cut_bytes"), "config_diff": r.get("config_diff"),
+                "driver_start_ts": isl.get("driver_start_ts")})
+        elif event == "rl_cut_saved":
+            isl["cuts"].append({"ts": ts, "rollout_id": r.get("rollout_id"), "cut_id": r.get("cut_id"),
+                                "bytes": r.get("cut_bytes"), "save_s": r.get("save_s"),
+                                "total_s": r.get("total_s")})
         elif event == "rl_learner_finalized":
             isl["finalized"] = True
         elif event == "rl_reconfiguration":
@@ -417,7 +446,39 @@ class Reducer:
                 "resp_mean": pt.get("resp_len"), "resp_p95": pt.get("resp_p95"), "tok_s": pt.get("tok_s"),
                 "grad_norm": pt.get("grad_norm"), "kl": pt.get("kl"),
                 "phases": ph, "dur": {k: round(v[1] - v[0], 1) for k, v in ph.items()},
+                "discarded_trainings": self.discarded_trainings(isl, rid),
             })
+        return out
+
+    @staticmethod
+    def discarded_trainings(isl: dict, rid: int) -> int:
+        """rl-resume-from-checkpoint 4.3: how many times round ``rid`` was trained by a
+        launch whose result a later resume dropped (trained before a resume that went
+        back to a cut at or below ``rid``). The page greys such trainings out."""
+        n = 0
+        for ts in isl["trained_ts"].get(rid, []):
+            if ts is None:
+                continue
+            if any(x["ts"] is not None and x["ts"] > ts and isinstance(x["rollout_id"], int)
+                   and x["rollout_id"] <= rid for x in isl["resumes"]):
+                n += 1
+        return n
+
+    def resume_segments(self, isl: dict) -> list[dict]:
+        """One segment per launch: start (driver start), first round after it, the
+        startup overhead (start -> first trained round) and the resume it began with."""
+        starts = [t for t in isl.get("driver_starts", []) if t is not None]
+        trained = sorted(t for v in isl["trained_ts"].values() for t in v if t is not None)
+        out = []
+        for i, start in enumerate(starts):
+            end = starts[i + 1] if i + 1 < len(starts) else None
+            first = next((t for t in trained if t >= start and (end is None or t < end)), None)
+            resume = next((x for x in isl["resumes"] if x["ts"] is not None and x["ts"] >= start
+                           and (end is None or x["ts"] < end)), None)
+            out.append({"incarnation": i, "start_ts": start, "first_round_ts": first,
+                        "startup_s": None if first is None else _r(first - start),
+                        "resumed_at": None if resume is None else resume["rollout_id"],
+                        "cut_id": None if resume is None else resume["cut_id"]})
         return out
 
     def node_series(self, isl: dict) -> dict:
@@ -717,6 +778,11 @@ class Reducer:
             "nodes": [isl["nodes"][k] for k in sorted(isl["nodes"], key=lambda x: int(x) if x.isdigit() else 0)],
             "last_event_age_s": _r(age), "heartbeat_age_s": _r(hb_age),
             "heartbeat_seen": isl["heartbeat_seen"], "round": isl["round"],
+            "startup_steps": {k: {"seconds": v["seconds"], "step_s": v["step_s"]}
+                              for k, v in isl["startup_steps"].items()},
+            "startup_step": isl["startup_step"],
+            "startup_step_age_s": _r(now - (isl["startup_step_ts"] or isl["first_ts"]))
+            if starting and (isl["startup_step_ts"] or isl["first_ts"]) is not None else None,
             "rollout_id": isl["rollout_id"], "policy_version": isl["policy_version"],
             "phase": isl["phase"], "staleness": isl["staleness"], "contribution": isl["contribution"],
             "gpu_util_pct": res.get("util_pct"), "mem_pct": res.get("mem_pct"),
@@ -725,6 +791,8 @@ class Reducer:
             "host_mem_current_bytes": (isl["host"] or {}).get("current_bytes"),
             "reward": last.get("reward"), "tok_s": last.get("tok_s"),
             "source_lost": isl["source_lost"],
+            "resumes": list(isl["resumes"]), "cuts_saved": len(isl["cuts"]),
+            "segments": self.resume_segments(isl),
         }
 
     def series(self, isl: dict) -> dict:

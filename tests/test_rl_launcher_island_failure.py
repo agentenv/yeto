@@ -332,3 +332,44 @@ def test_stall_detection_disabled_with_zero(monkeypatch, tmp_path):
         learners={}, syncer=None, sky_ops=types.SimpleNamespace(now=lambda: 0.0),
         poll_interval=30, recover_timeout=0, progress_probe=lambda: 5, stall_timeout=0.0)
     ctl._check_stall()  # never raises when disabled
+
+
+def _run_single_modal_no_sync(monkeypatch, tmp_path, *, ok, output=None, finalized=True):
+    """S17 N16: one Modal island, --rl-single-island-no-sync (V1 verl, s17-g1-base)."""
+    from yeto.rl import event_echo
+
+    record, clock = [], Clock()
+    _setup(monkeypatch, tmp_path, failing=set() if ok else {0},
+           succeeding={0} if ok else set(), clock=clock, record=record)
+    fin = event_echo.format_record({"island_id": 0, "time_unix": 1.0,
+                                    "event": "rl_learner_finalized"})
+
+    def feed(*args, **kwargs):
+        collector = args[-1]
+        if collector is not None and finalized:
+            collector.feed(fin)
+
+    monkeypatch.setattr(launcher, "_tail_modal", feed)
+    args = _launcher_args("ports", ("--controller", "local", "--rl-single-island-no-sync",
+                                    "--rl-image", "docker:ghcr.io/x/y@sha256:" + "a" * 64),
+                          gpu="modal:1xa100")
+    args.keep, args.recover_timeout, args.controller_poll = False, 0.0, 30.0
+    args.output = output
+    return launcher.run(args)
+
+
+def test_single_modal_no_sync_success_exits_0(monkeypatch, tmp_path, capsys):
+    assert _run_single_modal_no_sync(monkeypatch, tmp_path, ok=True) == 0
+    assert "not fetchable over ssh" in capsys.readouterr().err  # still explained
+
+
+def test_single_modal_no_sync_explicit_output_still_exits_2(monkeypatch, tmp_path):
+    code = _run_single_modal_no_sync(monkeypatch, tmp_path, ok=True,
+                                     output=str(tmp_path / "out"))
+    assert code == 2
+
+
+def test_single_modal_no_sync_failure_semantics_unchanged(monkeypatch, tmp_path):
+    assert _run_single_modal_no_sync(monkeypatch, tmp_path, ok=False, finalized=False) == 4
+    assert _run_single_modal_no_sync(monkeypatch, tmp_path / "b", ok=True,
+                                     finalized=False) == launcher.NO_SYNC_INCOMPLETE_EXIT

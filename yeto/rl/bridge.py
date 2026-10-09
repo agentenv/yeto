@@ -979,7 +979,9 @@ def make_island_bridge(runtime: IslandRuntime, config: BridgeConfig, *,
         from .elastic_client import ElasticClientConfig, ElasticIslandClient, hmac_key_from_env
 
         elastic_client = ElasticIslandClient(
-            ElasticClientConfig(config.syncer_addr, config.learner_id), hmac_key_from_env())
+            ElasticClientConfig(config.syncer_addr, config.learner_id,
+                                backend_identity_sha256=getattr(config, "backend_identity_sha256", None)),
+            hmac_key_from_env())
     return ElasticRlBridge(runtime, config, elastic_client, **elastic_kw)
 
 
