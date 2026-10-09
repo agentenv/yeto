@@ -591,3 +591,46 @@ def test_rl_lr_schedule_flag_reaches_the_island_and_the_miles_argv():
         argparse.ArgumentParser.parse_args = original
     assert seen == {"default": "auto", "choices": ("auto", "linear", "constant")}
     assert lrs.lr_schedule_argv(rc.LrSchedule("constant", 5))[:2] == ("--lr-decay-style", "constant")
+
+
+@pytest.mark.ray_local  # upstream parse_args can start Ray on this machine
+@pytest.mark.parametrize("family", ["sao", "vapo", "compactionrl"])
+def test_upstream_parse_args_accepts_critic_family_on_pinned_image(tmp_path, family):
+    """S19 #1 (critic 6.3 / supplement 2.5): the pinned image's Miles parses the
+    critic-family fork flags with the full ports translation.  Runs only in the
+    image (Miles + Megatron + SGLang import)."""
+
+    pytest.importorskip("miles.utils.arguments")
+    pytest.importorskip("megatron.training")
+    from yeto.rl.adapters.miles.overlay import spec_fork_flags
+    from yeto.rl.algos import sao
+    from yeto.rl.algos.compactionrl import compactionrl_spec
+    from yeto.rl.algos.vapo import vapo_spec
+
+    spec = {"sao": lambda: sao.sao_algorithm_spec("coding"), "vapo": vapo_spec,
+            "compactionrl": compactionrl_spec}[family]()
+    flags = spec_fork_flags(spec.canonical_json())
+    assert flags
+    (tmp_path / "config.json").write_text(json.dumps(_TINY_QWEN3))
+    (tmp_path / "p.jsonl").write_text('{"messages":[{"role":"user","content":"hi"}],"label":"x"}\n')
+    cfg = dataclasses.replace(make_config(colocated=True), hf_checkpoint=str(tmp_path), ref_load=str(tmp_path))
+    cfg = sub(cfg, "data", prompt_path=str(tmp_path / "p.jsonl"))
+    cfg = sub(cfg, "trainable", target_modules=("q_proj", "k_proj", "v_proj", "o_proj"))
+    # A legal run config for a critic-family spec: the estimator comes from the
+    # spec, the LR decay horizon (50) exceeds the critic LR warm-up (10), and
+    # init='copy_actor_backbone' + warmup_steps > 0 families load the warm-up
+    # stage product (design D5; sao has warmup_steps=0 and takes no critic_load).
+    cfg = sub(cfg, "algorithm", advantage_estimator=spec.advantage.estimator,
+              lr_schedule=rc.LrSchedule("linear", 50),
+              critic=None if family == "sao"
+              else rc.CriticRunConfig(critic_load=str(tmp_path), init_sha256="0" * 64))
+    launch = mc.translate_run_config(cfg, spec)
+    args = mc.parse_miles_args(launch)
+    # Fork aliases share one argparse dest (e07e51c07: --critic-updates-per-step
+    # is an alias of --num-critic-epochs, dest num_critic_epochs).
+    alias_dest = {"--critic-updates-per-step": "num_critic_epochs"}
+    missing = [f for f in flags
+               if not hasattr(args, alias_dest.get(f, f.lstrip("-").replace("-", "_")))]
+    assert not missing, missing
+    if spec.critic is not None and spec.critic.critic_updates_per_step not in (None, 1):
+        assert args.num_critic_epochs == spec.critic.critic_updates_per_step

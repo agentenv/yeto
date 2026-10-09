@@ -19,6 +19,11 @@ Safety and honesty rules (progress "S13 fork rebase c35702e + overlay"):
   and flag that the image manifest (and ``git rev-parse HEAD``) no longer
   describe the running code.
 
+S19 #1 (2026-10-09): the pinned image now ships Miles 64b591a4b, which already
+contains these commits (cherry-picked onto ddce20992); ``auto`` therefore never
+applies the overlay and ``critic-c357`` is refused.  The code stays for old
+records and for a re-pin to c35702e.
+
 Off by default: ``--rl-miles-overlay auto`` (the default) enables it only for
 a spec whose Miles argv uses a fork-only flag; ``critic-c357`` forces it,
 ``off`` never applies it.
@@ -37,7 +42,7 @@ CRITIC_C357 = "critic-c357"
 OVERLAY_CHOICES = ("auto", "off", CRITIC_C357)
 
 # The fork commit the patch reproduces (git diff --binary c35702e..this).
-CRITIC_C357_BASE_COMMIT = MILES_NEXT_COMMIT
+CRITIC_C357_BASE_COMMIT = "c35702eefcf2862cee155e46870e6ad30568d2c6"
 CRITIC_C357_RESULT_COMMIT = "6574a9c82edeed17f4b00bc64db6c7cd6b45cb39"
 # git tree of CRITIC_C357_RESULT_COMMIT: the patched worktree must hash to exactly this.
 CRITIC_C357_RESULT_TREE = "d65bda3de776a5701e9d0d2fc2bd51cc254779bd"
@@ -89,7 +94,13 @@ def resolve_overlay(args) -> str | None:
             raise ValueError("--rl-miles-overlay critic-c357 needs --training-mode rl on the ports engine")
         return None
     if choice == CRITIC_C357:
+        if MILES_NEXT_COMMIT != CRITIC_C357_BASE_COMMIT:
+            raise ValueError(
+                f"--rl-miles-overlay critic-c357 patches Miles {CRITIC_C357_BASE_COMMIT[:7]}, but the pinned "
+                f"image ships {MILES_NEXT_COMMIT[:7]}, which already contains the critic-family flags")
         return CRITIC_C357
+    if MILES_NEXT_COMMIT != CRITIC_C357_BASE_COMMIT:
+        return None  # S19 #1: the pinned image has the fork-only flags built in
     return CRITIC_C357 if spec_fork_flags(getattr(args, "rl_algorithm_spec_json", None)) else None
 
 

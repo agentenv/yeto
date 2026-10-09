@@ -94,6 +94,11 @@ FORK_COMMITS: frozenset[str] = frozenset({
     # agentic groups between model turns, arguments.py flags, utils/misc.py hook loader):
     # rollout scheduling only, no loss path.
     "ddce20992c9ee82270a22e259e9e2bf55f3053d1",
+    # 64b591a4b = ddce20992 + critic family (yeto-critic-c357 6574a9c82 commits cherry-picked:
+    # --gae-variant, VAPO positive LM loss, SAO DIS / HL-Gauss, critic epochs/freeze, value head)
+    # + rl-algo-supplement dual_clipfrac / over-sampling tally (S19 #1).  Every new flag defaults
+    # off; with defaults the loss is bitwise unchanged (fork test_ppo_gae_variants vs _gae_orig).
+    "64b591a4bec1ffa37fb089d3e3b99c84773b1ffc",
 })
 
 MECHANISMS = {name: ("losses", name) for name in VARIANTS}
