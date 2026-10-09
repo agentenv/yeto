@@ -535,3 +535,54 @@ def test_canonical_policy_files_round_trip_policy_tensor_hash(tmp_path):
     assert verify_policy_tensor_hash(store.files_dir(10), store.load_manifest(10)) == state.policy_tensor_hash()
     with pytest.raises(EvalIntegrityError, match="policy_tensor_hash"):
         verify_policy_tensor_hash(store.files_dir(10), {**manifest, "policy_tensor_hash": "0" * 64})
+
+
+# --- rl-spot-cost-saving 3.1: reclaim notice on the eval island --------------------
+
+
+def test_reclaim_notice_stops_new_units_commits_and_resumes(tmp_path):
+    from yeto.cloud.modal_eval_island import install_reclaim_handler
+
+    commits = []
+    store = EvalStore(tmp_path / "s", commit=lambda: commits.append(1))
+    _put(store, 0)
+    events = []
+    emit = lambda e, **f: events.append({"event": e, **f})  # noqa: E731
+    t = [1000.0]
+    handler = install_reclaim_handler(store, emit, "eval-0", region="us-east", install=False,
+                                      clock=lambda: t[0])
+
+    class SignalAt(FakeAttempt):
+        def __call__(self, task, trial, **kw):
+            out = super().__call__(task, trial, **kw)
+            if self.calls == 3:
+                handler.handle(source="test")  # what the SIGINT handler calls
+            return out
+
+    island = _island(store, SignalAt(), events, stop=handler.stop.is_set)
+    with pytest.raises(Preempted, match="reclaim notice"):
+        island.run()
+    reclaim = [e for e in events if e["event"] == "spot_reclaim"]
+    assert len(reclaim) == 1
+    ev = reclaim[0]
+    assert ev["cloud"] == "modal" and ev["region"] == "us-east" and ev["role"] == "eval"
+    assert ev["source"] == "test" and ev["remaining_s"] == 25.0  # min(30 s grace, 25 s cap)
+    assert ev["saved"] is True and ev["outcome"] == "saved" and ev["leave_confirmed"] is None
+    # resume on a new container: exactly the missing units, no duplicates
+    store2 = EvalStore(tmp_path / "s")
+    done = []
+    _island(store2, FakeAttempt(), done).run()
+    assert done[0]["eval/units"] == 16 and done[0]["eval/duplicate_results"] == 0
+    assert store2.read_units(0).orphan_starts == 0  # the stop came between units
+
+
+def test_reclaim_before_any_commit_skips_save(tmp_path):
+    from yeto.cloud.modal_eval_island import install_reclaim_handler
+
+    store = EvalStore(tmp_path / "s", commit=lambda: None)
+    events = []
+    h = install_reclaim_handler(store, lambda e, **f: events.append(f), "eval-0", install=False)
+    # no store.commit() yet -> no measured save time
+    ev = h.handle()
+    assert ev["saved"] is False and ev["outcome"] == "skip save: no measured save time"
+    assert h.stop.is_set()

@@ -62,3 +62,15 @@
 
 - 第 2 期"elastic 可丢弃训练岛"是否接受为推理岛的近似：10-09 用户确认接受。若不接受，第 2 期跳过，直接等第 3 期。此项不影响第 1 组、第 2 组任务。
 - Nebius、Verda 回收通知：查官方文档后补表，不影响设计。
+
+## 实现记录（S19，子 agent 代拍板）
+
+以下取舍由子 agent 按"最稳妥、最少改动"代拍板：
+
+1. 能力表文件：`yeto/cloud/capabilities.json`，唯一读取入口 `yeto/cloud/capabilities.py`。未核规则对数值字段 `notice_s` 强制为空；文字字段（如 AWS `durable_store=s3`）可带值但仍标未核。理由：设计表已写这些文字，删掉会丢信息；数值不准会直接影响保存决策。去耦合 8.1/8.5 落地时必须调用 `notice_seconds()`，不另存一份。
+2. 回收事件名 `spot_reclaim`，字段含 `billing` 与 `role`（eval / droppable / anchor / train）。理由：第二期"一个按需锚点岛 + 若干 spot 岛"直接复用，不改事件格式。
+3. 保存在辅助线程里跑，超过预算就放弃等待并记"save timed out"。Python 无法强杀线程，超时的保存线程可能继续写；云的强杀会结束它。
+4. 评测岛没有协调器，离开确认记为空（null），不记 false。
+5. `FleetController` 每个恢复窗口只问一次 `ReplacementPlanner`。开关关：只写 `spot_replace_advice`，原地重开照旧（默认行为不变）。开关开：planner 的 `launch()` 返回的新 job id 替代原地重开。本期没有接入任何真实的跨云开卡函数，所以生产里开关开的路径未验证。
+6. 打分预算检查按"单价 × launch_hours（默认 1 小时）"估本次开卡花费。这是保守近似，无实测依据。
+7. 评测岛的"实测保存耗时"取最近一次 `store.commit()` 耗时；容器启动后还没 commit 过时，视为没有实测，跳过保存。

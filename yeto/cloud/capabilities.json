@@ -1,0 +1,48 @@
+{
+  "_doc": "rl-spot-cost-saving D2. Each field: value + status (checked|unchecked) + source + checked_on. An unchecked field MUST have value null. Do not fill estimates.",
+  "clouds": {
+    "modal": {
+      "notice_s": {"value": 30, "status": "checked", "kind": "grace_after_signal",
+                   "note": "no advance notice; SIGINT then 30 s exit-handler grace, then kill",
+                   "source": "https://modal.com/docs/guide/lifecycle-functions", "checked_on": "2026-10-09"},
+      "notice_method": {"value": "container interrupt signal -> @modal.exit", "status": "checked",
+                        "source": "https://modal.com/docs/guide/preemption", "checked_on": "2026-10-09"},
+      "durable_store": {"value": "modal_volume", "status": "checked",
+                        "source": "https://modal.com/docs/guide/volumes", "checked_on": "2026-10-09"},
+      "spot": {"value": "always_preemptible_gpu", "status": "checked",
+               "note": "GPU functions cannot be nonpreemptible",
+               "source": "https://modal.com/docs/guide/preemption", "checked_on": "2026-10-09"},
+      "price_source": {"value": "yeto.shape.providers.modal_node_price_per_hour", "status": "unchecked",
+                       "source": null, "checked_on": null}
+    },
+    "aws": {
+      "notice_s": {"value": 120, "status": "checked", "kind": "advance_best_effort",
+                   "note": "best effort; no 2-minute notice for hibernate",
+                   "source": "https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/spot-instance-termination-notices.html",
+                   "checked_on": "2026-10-09"},
+      "notice_method": {"value": "instance metadata spot/instance-action, poll every 5 s (or EventBridge)",
+                        "status": "checked",
+                        "source": "https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/spot-instance-termination-notices.html",
+                        "checked_on": "2026-10-09"},
+      "durable_store": {"value": "s3", "status": "unchecked", "source": null, "checked_on": null},
+      "spot": {"value": "yes", "status": "unchecked", "note": "our account: spot only (2026-10-08 capacity note)",
+               "source": null, "checked_on": null},
+      "price_source": {"value": "yeto.shape.providers.AwsProviders", "status": "unchecked",
+                       "source": null, "checked_on": null}
+    },
+    "nebius": {
+      "notice_s": {"value": null, "status": "unchecked", "source": null, "checked_on": null},
+      "notice_method": {"value": null, "status": "unchecked", "source": null, "checked_on": null},
+      "durable_store": {"value": null, "status": "unchecked", "source": null, "checked_on": null},
+      "spot": {"value": null, "status": "unchecked", "source": null, "checked_on": null},
+      "price_source": {"value": null, "status": "unchecked", "source": null, "checked_on": null}
+    },
+    "verda": {
+      "notice_s": {"value": null, "status": "unchecked", "source": null, "checked_on": null},
+      "notice_method": {"value": null, "status": "unchecked", "source": null, "checked_on": null},
+      "durable_store": {"value": null, "status": "unchecked", "source": null, "checked_on": null},
+      "spot": {"value": null, "status": "unchecked", "source": null, "checked_on": null},
+      "price_source": {"value": null, "status": "unchecked", "source": null, "checked_on": null}
+    }
+  }
+}

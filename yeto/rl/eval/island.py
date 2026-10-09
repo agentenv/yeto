@@ -124,7 +124,8 @@ def jsonl_emitter(path: str | Path, *, clock: Callable[[], float] = time.time, *
 
 class EvalIsland:
     def __init__(self, store: EvalStore, plan: EvalPlan, *, loader: PolicyLoader, attempt: Attempt,
-                 emit: Emit, island_id: str = "eval-0", clock: Callable[[], float] = time.monotonic) -> None:
+                 emit: Emit, island_id: str = "eval-0", clock: Callable[[], float] = time.monotonic,
+                 stop: Callable[[], bool] | None = None) -> None:
         self.store = store
         self.plan = plan
         self.loader = loader
@@ -132,6 +133,8 @@ class EvalIsland:
         self.emit = emit
         self.island_id = island_id
         self.clock = clock
+        # rl-spot-cost-saving 3.1: True once a reclaim notice arrived; no new unit starts
+        self.stop = stop
 
     # -- one version ------------------------------------------------------
     def _check(self, version: int) -> dict[str, Any]:
@@ -180,6 +183,8 @@ class EvalIsland:
         for task, trial in self.plan.units(version):
             if (version, task.task_id, trial) in log.results:
                 continue
+            if self.stop is not None and self.stop():
+                raise Preempted(f"v{version}: reclaim notice; stop before {task.task_id}#{trial}")
             self.store.append_unit({"kind": "start", "policy_version": version, "task_id": task.task_id,
                                     "trial": trial, "island": self.island_id})
             t0 = self.clock()

@@ -70,3 +70,4 @@ include = ["yeto*"]
 
 [tool.setuptools.package-data]
 "yeto.dashboard" = ["*.json", "static/*"]
+"yeto.cloud" = ["*.json"]

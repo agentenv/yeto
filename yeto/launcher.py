@@ -5884,6 +5884,7 @@ class FleetController:
         left_pool_probe=None,
         elastic: bool = False,
         no_island_relaunch: bool = False,
+        replacement_planner=None,
     ):
         """`learners` maps cluster name -> (task, job_id); `syncer` is
         (name, task, job_id) for a cluster syncer, or None with
@@ -5899,6 +5900,12 @@ class FleetController:
         self.left_pool_probe = left_pool_probe
         self.elastic = elastic
         self.no_island_relaunch = no_island_relaunch
+        # rl-spot-cost-saving 2.3: yeto.cloud.replace.ReplacementPlanner or None.
+        # Asked once per recovery window before the same-place relaunch. Auto
+        # launch off (default): it only writes spot_replace_advice and the
+        # existing relaunch runs unchanged. On: its launch() result (a new job
+        # id) replaces the same-place relaunch.
+        self.replacement_planner = replacement_planner
         # B12: True (--keep-abandoned) leaves an abandoned learner's cluster up for
         # post-mortem instead of tearing it down; the final teardown still honors --keep.
         self.keep_abandoned = keep_abandoned
@@ -6271,6 +6278,7 @@ class FleetController:
                 rec["recovering_s"] = rec.get("recovering_s", 0.0) + (
                     self.ops.now() - rec["failed_at"])
                 rec["failed_at"] = None
+                rec["replace_planned"] = False
                 rec["recovered_at"] = self.ops.now()
                 print(
                     f"[launcher] {rec['name']} recovered: relaunched as job "
@@ -6309,7 +6317,28 @@ class FleetController:
                 if not is_syncer:  # the syncer is never abandoned; it just is not relaunched
                     self._abandon(rec, elapsed, reason="STOP flag")
                 return
+            if not is_syncer and self.replacement_planner is not None and not rec.get("replace_planned"):
+                rec["replace_planned"] = True
+                planned = self._plan_replacement(rec)
+                if planned is not None:
+                    rec["attempt"] = planned
+                    return
             rec["attempt"] = self._start_relaunch(rec)
+
+    def _plan_replacement(self, rec):
+        try:
+            out = self.replacement_planner.plan(rec["name"])
+        except Exception as e:  # noqa: BLE001 - advice never breaks supervision
+            print(f"[launcher] {rec['name']}: replacement planner failed: {e}", file=sys.stderr)
+            return None
+        self._fleet("spot_replace_advice", rec["name"], action=out.get("action"),
+                    candidates=len(out.get("candidates") or []))
+        if out.get("action") != "launch":
+            return None
+        attempt = _RelaunchAttempt()
+        attempt.result = out.get("result")
+        attempt.finished = True
+        return attempt
 
     def _stop_requested(self, rec, where: str) -> bool:
         flag = self.stop_flag
