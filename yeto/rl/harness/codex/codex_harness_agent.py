@@ -368,6 +368,90 @@ class CodexTurnLimit(CodexHarnessError):
     """Codex reached the signed model-call budget after a valid trajectory."""
 
 
+class CodexSuspendExpired(CodexHarnessError):
+    """agentic-rollout-utilization 5.3: a trajectory suspended between model turns
+    was not continued within the survival limit (discarded; environment released)."""
+
+
+# agentic-rollout-utilization 5.1/5.3: model-turn gate of THIS trajectory (a file
+# path; the file exists = gate closed). The trusted side (``suspend``/``resume``
+# hooks of the subprocess agent function) creates and removes it; the bridge
+# checks it only before a model request, so a running tool call is never
+# interrupted and its result is already in the history when the request waits.
+SUSPEND_GATE_ENV = "YETO_CODEX_SUSPEND_GATE"
+SUSPEND_MAX_SECONDS_ENV = "YETO_CODEX_SUSPEND_MAX_SECONDS"
+SUSPEND_MAX_SECONDS_DEFAULT = 600.0
+SUSPEND_POLL_SECONDS = 0.25
+SUSPEND_METRIC_FIELDS = ("suspensions", "suspended_seconds", "suspend_retried_turns", "suspend_expired")
+
+
+def suspend_max_seconds() -> float:
+    raw = os.environ.get(SUSPEND_MAX_SECONDS_ENV)
+    if raw is None or raw == "":
+        return SUSPEND_MAX_SECONDS_DEFAULT
+    value = float(raw)
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{SUSPEND_MAX_SECONDS_ENV} must be a positive number of seconds")
+    return value
+
+
+# The worker process installs a sink for gate edges ("enter"/"exit") so the
+# trusted side's PhaseClock keeps parked time out of the generation phase.
+_suspend_event_sink: Any = None
+
+
+def set_suspend_event_sink(sink: Any) -> None:
+    global _suspend_event_sink
+    _suspend_event_sink = sink
+
+
+def _suspend_edge(phase: str) -> None:
+    if _suspend_event_sink is not None:
+        _suspend_event_sink(phase)
+
+
+class SuspendGate:
+    """The bridge side of one trajectory's model-turn gate."""
+
+    def __init__(self, path: str | None, metrics: Any, *, max_seconds: float | None = None,
+                 poll_seconds: float = SUSPEND_POLL_SECONDS, clock: Any = time.monotonic) -> None:
+        self.path = path or None
+        self.metrics = metrics
+        self.max_seconds = suspend_max_seconds() if max_seconds is None and self.path else (max_seconds or 0.0)
+        self.poll_seconds = poll_seconds
+        self.clock = clock
+        for name in SUSPEND_METRIC_FIELDS:
+            if not hasattr(metrics, name):
+                setattr(metrics, name, 0.0 if name == "suspended_seconds" else 0)
+
+    @property
+    def enabled(self) -> bool:
+        return self.path is not None
+
+    def closed(self) -> bool:
+        return self.path is not None and os.path.exists(self.path)
+
+    async def wait_open(self) -> None:
+        """Return at once when the gate is open; else wait (counted as one
+        suspension) until it opens, or raise :class:`CodexSuspendExpired` after
+        the survival limit."""
+        if not self.closed():
+            return
+        started = self.clock()
+        self.metrics.suspensions += 1
+        _suspend_edge("enter")
+        try:
+            while self.closed():
+                if self.clock() - started >= self.max_seconds:
+                    self.metrics.suspend_expired = 1
+                    raise CodexSuspendExpired(
+                        f"suspended trajectory not continued within {self.max_seconds:g} s")
+                await asyncio.sleep(self.poll_seconds)
+        finally:
+            self.metrics.suspended_seconds += self.clock() - started
+            _suspend_edge("exit")
+
+
 class CodexModelFailure(CodexHarnessError):
     """The sampled model turn could not produce one executable tool call."""
 
@@ -1045,6 +1129,7 @@ class _ResponsesBridge:
         self._lock = asyncio.Lock()
         self._fatal: asyncio.Future[BaseException] | None = None
         self.url: str | None = None
+        self._gate = SuspendGate(os.environ.get(SUSPEND_GATE_ENV), metrics)
 
     @property
     def token(self) -> str:
@@ -1392,29 +1477,43 @@ class _ResponsesBridge:
             payload["tools"] = copy.deepcopy(miles_tools())
             payload["tool_choice"] = "auto"
         started = time.monotonic()
+        suspended_before = self._metrics.suspended_seconds
         try:
-            async with self._session.post(
-                self._miles_url,
-                json=payload,
-                headers=self._compaction_headers(),
-            ) as response:
-                status = response.status
-                if status == 413:
-                    await _read_bounded_miles_response(response)
-                    raise _CompactionContextDoesNotFit(
-                        "Miles proved the compacted context exceeds its budget"
-                    )
-                if status != 200:
-                    raise CodexHarnessError(f"Miles session returned HTTP {status}")
-                if response.content_type != "text/event-stream":
-                    raise CodexHarnessError(
-                        "Miles session returned an unexpected media type"
-                    )
-                raw = await _read_bounded_miles_response(response)
+            while True:
+                # 5.1: a suspended trajectory waits here, between two model turns.
+                await self._gate.wait_open()
+                async with self._session.post(
+                    self._miles_url,
+                    json=payload,
+                    headers=self._compaction_headers(),
+                ) as response:
+                    status = response.status
+                    if status == 503 and self._gate.closed():
+                        # The cut-off aborted this model turn in the engine (the gate
+                        # closed first); the session server did not record it. Redo
+                        # the same turn once the trajectory is resumed.
+                        await _read_bounded_miles_response(response)
+                        self._metrics.suspend_retried_turns += 1
+                        continue
+                    if status == 413:
+                        await _read_bounded_miles_response(response)
+                        raise _CompactionContextDoesNotFit(
+                            "Miles proved the compacted context exceeds its budget"
+                        )
+                    if status != 200:
+                        raise CodexHarnessError(f"Miles session returned HTTP {status}")
+                    if response.content_type != "text/event-stream":
+                        raise CodexHarnessError(
+                            "Miles session returned an unexpected media type"
+                        )
+                    raw = await _read_bounded_miles_response(response)
+                    break
         except (aiohttp.ClientError, TimeoutError) as exc:
             raise CodexHarnessError("Miles session transport failed") from exc
         finally:
-            self._metrics.total_generation_time += time.monotonic() - started
+            # time parked at the gate is not generation time
+            self._metrics.total_generation_time += (
+                time.monotonic() - started - (self._metrics.suspended_seconds - suspended_before))
         completion = _parse_miles_sse(raw)
         if not summary and self._resume_summary is not None:
             # The session server tokenized this exact candidate before sampling.
@@ -1585,6 +1684,15 @@ def _toml_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=True)
 
 
+def _suspend_settings() -> list[str]:
+    """5.1: a suspended trajectory's model request is held by the bridge for up to
+    the survival limit (plus a training round); Codex must not give up on it."""
+    if not os.environ.get(SUSPEND_GATE_ENV):
+        return []  # default command line unchanged
+    idle_ms = int((suspend_max_seconds() + 600.0) * 1000)
+    return [f"model_providers.miles.stream_idle_timeout_ms={idle_ms}"]
+
+
 def _codex_argv(binary: Path, bridge: _ResponsesBridge) -> list[str]:
     if bridge.url is None:
         raise RuntimeError("bridge is not started")
@@ -1601,6 +1709,7 @@ def _codex_argv(binary: Path, bridge: _ResponsesBridge) -> list[str]:
         "model_providers.miles.requires_openai_auth=false",
         "model_providers.miles.request_max_retries=0",
         "model_providers.miles.stream_max_retries=0",
+        *_suspend_settings(),
         "features.shell_tool=false",
         "features.unified_exec=false",
         "features.multi_agent=false",

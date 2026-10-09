@@ -257,7 +257,9 @@ def _metrics_dict(metrics: legacy.AgentMetrics) -> dict[str, Any]:
     # S17 C9: finer end reason and per-turn lengths (model reply tokens, context
     # tokens after the reply, tool-result bytes).
     for name in ("end_reason", "last_completion", "end_kind", "turn_completion_tokens",
-                 "turn_context_tokens", "turn_tool_output_bytes"):
+                 "turn_context_tokens", "turn_tool_output_bytes",
+                 # agentic-rollout-utilization 5.1/5.3: only when a gate was in use
+                 *(harness.SUSPEND_METRIC_FIELDS if getattr(metrics, "suspensions", 0) else ())):
         value = getattr(metrics, name, None)
         if value is not None:
             extra[name] = value

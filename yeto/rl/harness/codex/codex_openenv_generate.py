@@ -9,10 +9,16 @@ know about:
 - ``expected_policy_version`` (IR-3: ``rollout_meta_hook.expected_policy_version``,
   i.e. prompt metadata first, else the driver token published through the
   metadata sink by ``MilesRolloutPool.generate``) is compared against the
-  weight versions SGLang reported for every generation; any drift aborts the
-  trajectory (metadata ``policy_age_violation=1`` -> ``harness_counters`` ->
+  weight versions SGLang reported for every generation; under the default
+  policy-age limit 0 any drift aborts the trajectory (metadata ``policy_age_violation=1`` -> ``harness_counters`` ->
   driver ``PolicyIdentityError``) instead of giving it a 0 reward; a missing
-  token refuses generation before upstream is called;
+  token refuses generation before upstream is called; under a limit > 0
+  (agentic-rollout-utilization 5.2: a trajectory suspended between model turns
+  continues under the next version) the versions are recorded as segments and
+  checked against the version current when the trajectory finishes: oldest at
+  most ``limit`` behind, none newer; outside the window the trajectory is
+  discarded (infrastructure ``policy_age_exceeded``, not a policy-identity
+  error);
 - mask/token/logprob alignment is asserted on every sample (``alignment``).
 
 The upstream function is injected (``upstream``) so this wrapper is testable
@@ -91,8 +97,37 @@ def actual_versions(sample: Any) -> list[str]:
     return versions
 
 
-def apply_trajectory_bookkeeping(input_sample: Any, samples: list[Any], *, expected_version: str | None = None) -> None:
-    """Siblings share ``group_index``/``rollout_id``; policy version and alignment checks."""
+POLICY_AGE_EXCEEDED = "policy_age_exceeded"
+VERSION_SEGMENTS_KEY = "policy_version_segments"
+
+
+def window_problem(versions: list[str], current_token: str | None, limit: int) -> str | None:
+    """Limit > 0: why ``versions`` (one per generation span) cannot be trained at
+    ``current_token`` (None = within the window)."""
+    from yeto.rl.engine.policy_age import token_version
+
+    current = token_version(str(current_token or ""))
+    if current is None:
+        return f"current policy token {current_token!r} has no version"
+    if not versions:
+        return "no generation version recorded"
+    numbers = [token_version(v) for v in versions]
+    if None in numbers:
+        return f"unparsable generation versions {sorted(set(versions))}"
+    if max(numbers) > current:
+        return f"generation version {max(numbers)} is newer than the current {current}"
+    if current - min(numbers) > limit:
+        return f"oldest generation version {min(numbers)} is {current - min(numbers)} behind {current} (limit {limit})"
+    return None
+
+
+def apply_trajectory_bookkeeping(input_sample: Any, samples: list[Any], *, expected_version: str | None = None,
+                                 max_policy_age: int = 0, current_version: str | None = None) -> None:
+    """Siblings share ``group_index``/``rollout_id``; policy version and alignment checks.
+
+    ``max_policy_age`` > 0 (5.2): versions are recorded as segments and checked
+    against ``current_version`` (the policy token current when the trajectory
+    finished; default ``expected_version``) instead of requiring one version."""
     group_index = getattr(input_sample, "group_index", None)
     rollout_key = getattr(input_sample, "index", None)
     if expected_version is None:
@@ -110,7 +145,15 @@ def apply_trajectory_bookkeeping(input_sample: Any, samples: list[Any], *, expec
             continue
         versions = actual_versions(sample)
         metadata[ACTUAL_VERSIONS_KEY] = versions
-        if expected_version is not None:
+        if max_policy_age > 0:
+            current = current_version if current_version is not None else expected_version
+            metadata[EXPECTED_VERSION_KEY] = current
+            metadata[VERSION_SEGMENTS_KEY] = sorted(set(versions))
+            problem = window_problem(versions, current, max_policy_age)
+            if problem is not None:
+                _mark_aborted(sample, f"{POLICY_AGE_EXCEEDED}: {problem}")
+                continue
+        elif expected_version is not None:
             metadata[EXPECTED_VERSION_KEY] = expected_version
             if not versions or any(v != str(expected_version) for v in versions):
                 metadata[POLICY_AGE_KEY] = 1
@@ -223,5 +266,15 @@ async def generate(
     samples = _samples_of(output)
     if len(samples) == 1 and isinstance(getattr(samples[0], "metadata", None), dict) and SESSIONS_KEY in samples[0].metadata:
         output = await assemble_compaction_segments(input, output, collect=collect)
-    apply_trajectory_bookkeeping(input.sample, _samples_of(output), expected_version=expected_version)
+    limit = int(getattr(getattr(input, "args", None), "yeto_rl_max_policy_age", 0) or 0)
+    current = None
+    if limit > 0:
+        # 5.2: the trajectory may have been suspended across a publish; it is
+        # trained at the version current NOW (driver token in the metadata sink).
+        try:
+            current = rollout_meta.current_policy_token() or expected_version
+        except Exception:  # noqa: BLE001 - unreachable sink: the start token
+            current = expected_version
+    apply_trajectory_bookkeeping(input.sample, _samples_of(output), expected_version=expected_version,
+                                 max_policy_age=limit, current_version=current)
     return output

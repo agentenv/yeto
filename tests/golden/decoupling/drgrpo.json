@@ -58,10 +58,10 @@
  "backend_identity": {
   "device_family": "nvidia",
   "engine": "miles",
-  "engine_commit": "2f7871fb2e80d37420b16ef81f001c7b0ba8e32e",
+  "engine_commit": "df23a0b5e7937a35f7cea8c77b848805c30a17eb",
   "param_map_sha256": "36c37d691b6372ee86485cf0f7d4f8d5e185a6346b875aac33380518ee8f259a",
   "schema": "yeto-backend-identity-v1",
-  "sha256": "5e96fa56b9c6c962eb7de5112e4a1e18c8e3e81e6ecf5056f9ac204244575675"
+  "sha256": "b8d995e87a87b31816cd89e5097a5d0af510ee0e81a940a7fe7735a78ac953ba"
  },
  "execution_profile": {
   "contract_hash": "sha256:bf82d9e79e11047714673c97a0c60a9c80ac6673763a0052ed90d86a3cd2cf93",
@@ -262,17 +262,17 @@
   {
    "module_file": "yeto/rl/adapters/miles/rollout_meta_hook.py",
    "path": "yeto.rl.adapters.miles.rollout_meta_hook.extract_rollout_metadata",
-   "source_sha256": "a993797920cb8fdbff8fff42cd690a035268eeca2de70f292f19287900170d2f"
+   "source_sha256": "c9b4d7c8e8b353a9adc80d36ca35c5d624476fccdcf79c4f06d652432cb13f34"
   },
   {
    "module_file": "yeto/rl/adapters/miles/rollout_meta_hook.py",
    "path": "yeto.rl.adapters.miles.rollout_meta_hook.policy_buffer_filter",
-   "source_sha256": "a993797920cb8fdbff8fff42cd690a035268eeca2de70f292f19287900170d2f"
+   "source_sha256": "c9b4d7c8e8b353a9adc80d36ca35c5d624476fccdcf79c4f06d652432cb13f34"
   },
   {
    "module_file": "yeto/rl/adapters/miles/rollout_meta_hook.py",
    "path": "yeto.rl.adapters.miles.rollout_meta_hook.record_trained_groups",
-   "source_sha256": "a993797920cb8fdbff8fff42cd690a035268eeca2de70f292f19287900170d2f"
+   "source_sha256": "c9b4d7c8e8b353a9adc80d36ca35c5d624476fccdcf79c4f06d652432cb13f34"
   },
   {
    "module_file": "yeto/rl/algos/reducers.py",
@@ -281,7 +281,7 @@
    "spec_sha256": "253856acaefbea8de936b03ea89bf5c50039719732f21709aa66358f9f78e4ed"
   }
  ],
- "ports_runtime_fingerprint": "sha256:e225e30ccea548bc8dcc61bc431ea98f8cc216e166bb0792dd603735bc934389",
+ "ports_runtime_fingerprint": "sha256:c5461ebbaec71d590abfd03eae08508f5b42882e444b07fa5207a081311497a3",
  "runtime_attrs": {
   "yeto_algo_plugins": {
    "config": {

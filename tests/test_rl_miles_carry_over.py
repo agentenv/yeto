@@ -238,9 +238,10 @@ def test_governor_fallback_lowers_the_rollout_limit_through_the_sink(sink, tmp_p
 def test_miles_stage_two_support_and_single_turn_check():
     from yeto.rl.adapters.miles.policy_age import SUPPORT, check_task, policy_age_argv
 
-    assert (SUPPORT.stage, SUPPORT.max_policy_age) == (2, 1)
+    # agentic-rollout-utilization 5 (stage 3) raised the declared stage; limit still <= 1
+    assert (SUPPORT.stage, SUPPORT.max_policy_age) == (3, 1)
     SUPPORT.check(1)
-    with pytest.raises(PolicyAgeError, match="stage 2"):
+    with pytest.raises(PolicyAgeError, match="at most 1"):
         SUPPORT.check(2)
     assert policy_age_argv(0) == () and policy_age_argv(1) == ("--partial-rollout",)
     check_task(1)

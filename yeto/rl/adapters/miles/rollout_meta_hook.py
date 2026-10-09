@@ -374,6 +374,8 @@ def build_metadata(
         # agentic-rollout-utilization 4.1: carry-over accounting (limit > 0 only;
         # the default key set is unchanged).
         payload.update(carry_over_fields(args, trained_samples, sink))
+        # 5.1/5.3: agentic suspension between turns (absent when not in use)
+        payload.update(_carry.suspend_fields(args, all_samples))
     if tool_wait > 0:
         # 1.7: time trajectories spent outside generation (tool calls), summed
         # over every generated sample (Miles Sample.non_generation_time).
