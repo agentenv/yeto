@@ -6,7 +6,7 @@
 
 - [ ] 1.1 `tools/build_eval_holdout.py`：读 tb2-data（钉 commit）各任务 `task.toml` 的 `difficulty`，先排除 S15 冒烟 6 题（`codex-bundle/data/tbench2_smoke6.jsonl`），再固定种子分层抽 30 个（easy 2 / medium 18 / hard 10），名单写 `excluded`；与 WP6 #129 的 `tools/reward_env/holdout.py` 对齐（加 `exclude=`），写 `data/eval/tb2-holdout.json` 与评测 jsonl，记 sha256。**部分**：名单用 #131 的 `tools/reward_env/holdout.py` 生成 `data/eval/tb2-holdout.json`（30 题，排除冒烟 6 题，sha256 `28d6730a…`，与 #131 记录一致）；`tools/build_eval_holdout.py` 未单独写（#131 工具已覆盖），**评测 jsonl 未生成**（S17 N9，分支 s17-eval-island）
 - [ ] 1.2 同工具：读 `SWE-bench/SWE-bench_Verified@78f471bf`（组织版，与 #129 一致）`difficulty`，按 design D2 分 3 桶、桶内按仓库分层抽（30/30/全部 45），写 `data/eval/swebench-verified-eval.json` 与评测 jsonl
-- [ ] 1.3 生成 TB2 训练数据（其余 59 个任务），行 `metadata` 带 D6.a 字段
+- [ ] 1.3 生成 TB2 训练数据（其余 59 个任务；S17 N13：扣掉判分不可用 13 题后为 **46 个**，清单 `tb2-train.json` 由 `tools/reward_env/holdout.py` 生成，见 rl-agentic-reward-env progress），行 `metadata` 带 D6.a 字段
 - [ ] 1.5 CPU 单测：同种子同哈希、分层题数、名单与 jsonl 一致
 
 ## 2. 启动检查与配置

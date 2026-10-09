@@ -27,7 +27,7 @@
 - [ ] 2.6 SWE 全量 500 题阳性/阴性对照（1000 次判分），产出可用题清单。估 ≈$20（CPU）+ 拉取。
 
 ## 3. 接入训练（依赖 WP3）
-- [ ] 3.1 评测集定稿（WP3）后写入 split 文件；数据准备脚本按 split 过滤训练集并在启动前 `assert_disjoint`。
+- [ ] 3.1 评测集定稿（WP3）后写入 split 文件；数据准备脚本按 split 过滤训练集并在启动前 `assert_disjoint`。（S17 N13 部分完成：`holdout.py` 同时写 `tb2-holdout.json` 与 `tb2-train.json`，生成时 `assert_disjoint`，不可用 13 题两边都排除；留出 30、训练 46，见 progress。训练 jsonl 生成脚本未做，名单待定稿。）
 - [ ] 3.2 每 10 轮评测：评测题走同一 provider，结果按 WP3 事件字段落 tape。
 - [ ] 3.3 SWE agent 沙箱 provider（agent 在实例镜像 /testbed 里工作，结束后取 diff，再开判分沙箱）；评分进程安装 `swebench==5.0.2`。
 - [ ] 3.4 WP3 名单文件定稿后提交到 `data/eval/` 并在运行配置钉 sha256。

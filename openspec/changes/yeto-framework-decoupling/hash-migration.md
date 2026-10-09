@@ -165,3 +165,9 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
 
 - 原因：C9 在 `trajectory_diagnostics` 里加了 `end_kind` 和逐回合长度（`turn_completion_tokens`、`turn_context_tokens`、`turn_tool_output_bytes`），原改在旧路径 `yeto/rl/engine/miles_adapter/rollout_meta_hook.py`；阶段 4/5 已把该文件搬到 `yeto/rl/adapters/miles/rollout_meta_hook.py`（旧路径只剩转发），合并时把这 8 行原样移到新文件。
 - 变化：8 个标准样本里 rollout_meta_hook 插件的 `source_sha256` 由 `605e0ee1e23444cd4710350fe64f59808658605ef0096ccad03d4e7a61585fca`（C6b 后）改为 `cab11ca4d4082524f113f3aa28963af7394767b9252c431c88088e466b23b760`。只有这一个字段变；`algorithm_sha256`、契约哈希、Miles 命令行、`backend_identity`、`fake_engine_tapes.json` 都不变。已用 `python tests/decoupling_golden.py --write` 重新生成。
+
+## S17 N13 evaluate_time（PR #142，分支 s17-codex-closeout，2026-10-09 合进 main 时迁移）
+
+- 原因：N13 在 `trajectory_diagnostics` 里加了 `evaluate_time`（判分耗时，只观测），原改在旧路径 rollout_meta_hook；合并时把这 3 行移到 `yeto/rl/adapters/miles/rollout_meta_hook.py`。
+- 变化：8 个标准样本里 rollout_meta_hook 插件的 `source_sha256` 由 `cab11ca4…`（C9 后）改为 `6192a70410e8f2a24fe76321dcd35036f16f7c679d91a4f4866d5081693e6ed6`，其他字段都不变；已重新生成。
+- 同时合并了 `codex_openenv_agent_function.finish_trusted` 里 N13 与 M1 各自加的判分计时：共用一次计时，`evaluate_time`（N13）与 `YETO_TIMING` 的 `verify_s`（M1）取同一个值。

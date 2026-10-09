@@ -3,6 +3,9 @@
 
     python tools/reward_env/holdout.py --tb2-tasks-dir ~/work/tb2-data \
         --swev-data swev-78f471bf.parquet --out-dir data/eval
+
+TB2 writes tb2-holdout.json (eval) and tb2-train.json (training task list cut
+against that hold-out).  Tasks in data/eval/tb2-unusable.json leave both.
 """
 
 from __future__ import annotations
@@ -26,7 +29,12 @@ def main(argv=None) -> int:
                         "(default: the built-in S15 smoke-6 list)")
     p.add_argument("--tb2-exclude-reason", default=None,
                    help="reason recorded for --tb2-exclude-jsonl tasks (default: S15 smoke training)")
-    p.add_argument("--tb2-no-exclude", action="store_true", help="do not exclude any TB2 task")
+    p.add_argument("--tb2-unusable", default=None,
+                   help="unusable-task table (default: data/eval/tb2-unusable.json); its tasks leave "
+                        "both the hold-out pool and the training list")
+    p.add_argument("--tb2-no-unusable", action="store_true", help="do not apply the unusable-task table")
+    p.add_argument("--tb2-no-exclude", action="store_true",
+                   help="do not exclude any TB2 task (neither smoke-6 nor the unusable table)")
     p.add_argument("--out-dir", required=True)
     a = p.parse_args(argv)
     out = Path(a.out_dir)
@@ -48,13 +56,22 @@ def main(argv=None) -> int:
                             raise SystemExit(f"{path}: row without metadata.task_id")
                         exclude[tid] = reason
         else:
-            exclude = None  # built-in smoke-6
+            exclude = tb2.smoke6_exclusions()
+        unusable = {} if (a.tb2_no_exclude or a.tb2_no_unusable) else tb2.load_unusable(a.tb2_unusable)
+        clash = sorted(set(unusable) & set(exclude))
+        if clash:
+            raise SystemExit(f"tasks both in the exclusion list and the unusable table: {clash}")
         adapter = tb2.Tb2Benchmark(a.tb2_tasks_dir)
-        holdout = tb2.build_holdout(adapter, exclude=exclude)
+        unknown = sorted(set(unusable) - set(adapter.task_ids()))
+        if unknown:
+            raise SystemExit(f"unusable tasks not in the TB2 checkout: {unknown}")
+        holdout = tb2.build_holdout(adapter, exclude={**exclude, **unusable},
+                                     **({"rule": tb2.HOLDOUT_RULE_UNUSABLE} if unusable else {}))
         unknown = sorted({e["task_id"] for e in holdout.get("excluded", [])} - set(adapter.task_ids()))
         if unknown:
             raise SystemExit(f"excluded tasks not in the TB2 checkout: {unknown}")
         written["tb2-holdout.json"] = holdout
+        written["tb2-train.json"] = bm.build_train_split(adapter, holdout, exclude=unusable)
     if a.swev_data:
         from yeto.rl.harness.reward_env import swebench_verified as sv
 

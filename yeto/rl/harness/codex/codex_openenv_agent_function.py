@@ -391,12 +391,13 @@ async def finish_trusted(
     if status not in POLICY_STATUSES:
         raise ValueError(f"untrusted result has invalid status {status!r}")
     evaluation: dict[str, Any] = {}
+    evaluate_time: float | None = None
     if status == "timeout":
         passed, testsh_rc, verifier_name = False, None, TIMEOUT_VERIFIER
     else:
-        verify_started = time.monotonic()
+        started = time.monotonic()
         evaluation = await verifier.evaluate(untrusted["episode_id"])
-        verify_seconds = time.monotonic() - verify_started
+        evaluate_time = verify_seconds = time.monotonic() - started  # N13 metric + M1 YETO_TIMING
         passed = bool(evaluation.get("passed"))
         testsh_rc = evaluation.get("testsh_rc")
         verifier_name = (
@@ -413,6 +414,13 @@ async def finish_trusted(
         key=key,
     )
     metadata["agent_metrics"] = dict(untrusted.get("metrics") or {})
+    # S17 N13: the trusted verifier owns grading, so it owns the grading time
+    # (seconds, observe only, unsigned).  The worker's own ``evaluate_time`` is
+    # 0.0 on this path; a timeout skips grading and drops the key.
+    if evaluate_time is None:
+        metadata["agent_metrics"].pop("evaluate_time", None)
+    else:
+        metadata["agent_metrics"]["evaluate_time"] = evaluate_time
     metadata["exit_status"] = status
     if status != "timeout" and isinstance(evaluation.get("log"), str):
         metadata["verifier_log"] = evaluation["log"]  # observe only, unsigned

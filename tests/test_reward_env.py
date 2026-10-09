@@ -304,13 +304,64 @@ def test_holdout_cli_exclusions(tmp_path):
     assert "excluded" not in json.loads((out / "tb2-holdout.json").read_text())
     jl = tmp_path / "ex.jsonl"
     jl.write_text(json.dumps({"metadata": {"task_id": "m00"}}) + "\n\n")
-    assert holdout.main(["--tb2-tasks-dir", str(tasks), "--tb2-exclude-jsonl", str(jl),
+    assert holdout.main(["--tb2-tasks-dir", str(tasks), "--tb2-exclude-jsonl", str(jl), "--tb2-no-unusable",
                          "--tb2-exclude-reason", "r", "--out-dir", str(out)]) == 0
     h = json.loads((out / "tb2-holdout.json").read_text())
     assert h["excluded"] == [{"task_id": "m00", "reason": "r"}] and "m00" not in bm.holdout_ids(h)
     jl.write_text(json.dumps({"prompt": "x"}) + "\n")
     with pytest.raises(SystemExit, match="metadata.task_id"):
         holdout.main(["--tb2-tasks-dir", str(tasks), "--tb2-exclude-jsonl", str(jl), "--out-dir", str(out)])
+
+
+def test_tb2_unusable_table_shipped():
+    table = rt.load_unusable()
+    assert len(table) == 13 and "qemu-startup" in table
+    assert all(r.startswith("unusable/") for r in table.values())
+    assert not set(table) & set(rt.SMOKE6_TASK_IDS)
+
+
+def test_tb2_unusable_bad_file(tmp_path):
+    bad = tmp_path / "u.json"
+    bad.write_text(json.dumps({"schema": "nope", "benchmark": "tb2", "items": []}))
+    with pytest.raises(ValueError, match="not a"):
+        rt.load_unusable(bad)
+    bad.write_text(json.dumps({"schema": rt.UNUSABLE_SCHEMA, "benchmark": "tb2", "items": [
+        {"task_id": "a", "category": "c", "reason": "r"}, {"task_id": "a", "category": "c", "reason": "r"}]}))
+    with pytest.raises(ValueError, match="duplicate"):
+        rt.load_unusable(bad)
+
+
+def test_holdout_cli_unusable_leaves_train_and_eval(tmp_path):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools" / "reward_env"))
+    import holdout
+
+    tasks = tmp_path / "tasks"
+    tasks.mkdir()
+    _tb2_pool(tasks)
+    for t in rt.SMOKE6_TASK_IDS:
+        make_task(tasks, t, difficulty="medium")
+    table = tmp_path / "u.json"
+    table.write_text(json.dumps({"schema": rt.UNUSABLE_SCHEMA, "benchmark": "tb2", "items": [
+        {"task_id": "m01", "category": "timeout", "reason": "slow"},
+        {"task_id": "h03", "category": "env", "reason": "404"}]}))
+    out = tmp_path / "out"
+    assert holdout.main(["--tb2-tasks-dir", str(tasks), "--tb2-unusable", str(table), "--out-dir", str(out)]) == 0
+    h = json.loads((out / "tb2-holdout.json").read_text())
+    tr = json.loads((out / "tb2-train.json").read_text())
+    held, train = set(bm.holdout_ids(h)), {i["task_id"] for i in tr["items"]}
+    assert len(held) == 30 and h["rule"] == rt.HOLDOUT_RULE_UNUSABLE
+    assert {"m01", "h03"} <= {e["task_id"] for e in h["excluded"]}
+    assert not {"m01", "h03"} & (held | train) and not held & train
+    assert set(rt.SMOKE6_TASK_IDS) <= train  # smoke-6 only leaves the eval pool
+    assert len(held) + len(train) + 2 == 36 + 6
+    assert tr["holdout_sha256"] == bm.holdout_sha256(h) and tr["schema"] == bm.TRAIN_SPLIT_SCHEMA
+    assert tr["excluded"] == [{"task_id": "h03", "reason": "unusable/env: 404"},
+                              {"task_id": "m01", "reason": "unusable/timeout: slow"}]
+    # an unusable task missing from the checkout fails closed
+    table.write_text(json.dumps({"schema": rt.UNUSABLE_SCHEMA, "benchmark": "tb2", "items": [
+        {"task_id": "zz", "category": "c", "reason": "r"}]}))
+    with pytest.raises(SystemExit, match="unusable tasks not in the TB2 checkout"):
+        holdout.main(["--tb2-tasks-dir", str(tasks), "--tb2-unusable", str(table), "--out-dir", str(out)])
 
 
 def test_rows_split_and_leak_check():
