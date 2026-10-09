@@ -5404,6 +5404,20 @@ def _tail(cluster: str, job_id: int, prefix: str, collector=None) -> int:
             time.sleep(5)
 
 
+def controller_fixed_roster(args) -> bool:
+    """FleetController ``fixed_roster``: RL runs whose island scheduling is NOT
+    elastic. Elastic membership is dynamic: an island that fails for good is
+    dropped and the pool goes on (10-09 ruling of the main agent for the user;
+    before, every RL run, elastic included, was a fixed roster)."""
+    return getattr(args, "training_mode", "sft") == "rl" and island_scheduling_mode(args) != "elastic"
+
+
+# The syncer refused this island (a deterministic configuration error, never
+# fixed by a relaunch): elastic JOIN identity / strict HELLO contract mismatch.
+SYNCER_REFUSAL_MARKERS = ("backend identity mismatch, JOIN refused",
+                          "session mismatch (HELLO refused")
+
+
 class SkySDKOps:
     """Thin adapter over the sky SDK: the only surface FleetController needs.
 
@@ -5471,6 +5485,7 @@ class SkySDKOps:
                     "[yeto-rl-strict-failure]" in text
                     or "RL strict failure " in text
                     or "StrictRlInvariantError:" in text
+                    or any(marker in text for marker in SYNCER_REFUSAL_MARKERS)
                 ):
                     return text
         except Exception:
@@ -6114,6 +6129,16 @@ class FleetController:
                 return  # grace: the finalized record may still be in the log stream
             else:
                 strict_failure = self._strict_failure(rec)
+                if strict_failure is not None and self.elastic and not is_syncer:
+                    # Elastic: a refused or strictly failed island is a deterministic
+                    # error -- relaunching it cannot help. Tear down only this island,
+                    # record island_lost, keep the rest of the pool running
+                    # (10-09 ruling of the main agent for the user).
+                    self._fleet("island_lost", rec["name"], reason=f"strict failure: {strict_failure}"[:500])
+                    print(f"[launcher] {rec['name']}: strict failure, not relaunched; the elastic "
+                          f"pool goes on without it: {strict_failure}", file=sys.stderr)
+                    self._abandon(rec, 0.0, reason="strict failure (elastic: island dropped)")
+                    return
                 if strict_failure is not None:
                     raise RuntimeError(
                         f"strict RL job {rec['name']} failed: {strict_failure}"
@@ -6220,15 +6245,18 @@ class FleetController:
             return False
 
     def _strict_failure(self, rec) -> str | None:
-        if not self.fixed_roster:
+        if not (self.fixed_roster or self.elastic):
             return None
         probe = getattr(self.ops, "rl_strict_failure", None)
         if probe is None:
             return None
         try:
-            return probe(rec["name"], rec["job_id"])
+            text = probe(rec["name"], rec["job_id"])
         except Exception:
             return None
+        if text is not None and not self.elastic and any(m in text for m in SYNCER_REFUSAL_MARKERS):
+            return None  # legacy unchanged: a refused island takes the fixed-roster path
+        return text
 
     def _enter_recovering(self, rec, reason: str, is_syncer: bool) -> None:
         rec["state"] = RECOVERING
@@ -7278,7 +7306,9 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             on_relaunch=spawn_tail,
             syncer_probe=local_syncer.probe if head_mode else None,
             syncer_restart=local_syncer.restart if head_mode else None,
-            fixed_roster=getattr(args, "training_mode", "sft") == "rl",
+            # 10-09 ruling of the main agent for the user: elastic is NOT a fixed
+            # roster (an elastic island that fails for good is dropped, the rest go on).
+            fixed_roster=controller_fixed_roster(args),
             stop_flag=runs.stop_flag_path(args.cluster_prefix),
             finalized_probe=(
                 (lambda name: name in event_collectors and event_collectors[name].finalized)

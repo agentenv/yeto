@@ -65,3 +65,8 @@
 ## 9. 测试维护（S17 夜间 N16）
 
 - [x] 9.1 tests/test_rl_integration.py 在 main 上恢复可跑：`_start`/`_start_decoupled` 以前无条件带 `--resume`，而同步服务自 d4c72cd7 起拒绝"--resume 但检查点不存在"，首次启动就退出、岛连不上；改为只在检查点文件已存在时加 `--resume`（`resume=None` 按磁盘判断，可显式传 True/False）。另修 `test_miles_public_hook_runs_against_real_syncer` 的假 rollout 数据缺 GRPO 优势 `rewards` 字段（3720936f 起钩子要逐条统计非零优势）。证据：本机真 Rust syncer（`PATH=~/.cargo/bin:$PATH`，cargo build），不起 Ray，`pytest tests/test_rl_integration.py` 12 过（修前第 1 条即失败）。
+
+## 10. 缺陷修复：elastic 被当成固定名单（10-09 主 agent 代用户拍板）
+
+- [x] 10.1 FleetController 的 `fixed_roster` 改为"RL 且调度不是 elastic"（`launcher.controller_fixed_roster`）。以前所有 RL 运行（含 elastic）都按固定名单处理，elastic 岛一次失败就抛 FixedRosterIslandAbandoned 停整场。elastic 下岛被 syncer 拒绝（JOIN 身份不符、HELLO 契约不符）或严格失败时：只拆该岛、记 `island_lost` 事件、不重开（确定性的配置错误重开无用），其余岛继续。其他失败（如抢占）仍按 `--recover-timeout` 重开。legacy 行为不变（拒绝走固定名单放弃路径，严格失败仍报错停整场）。
+  - 完成（本机单测通过，未上卡）：tests/test_rl_elastic_fleet_end.py::test_controller_fixed_roster_only_for_non_elastic_rl、test_elastic_refused_island_dropped_rest_continue、test_elastic_strict_failure_drops_only_that_island、test_legacy_refused_island_still_stops_the_run；tests/test_controller.py 全过；golden 未变（tests/test_decoupling_golden.py 12 过，不涉及 hash-migration.md）。真机验证由 launch-preflight-guards 4.3 的 elastic 负例运行顺带覆盖。
