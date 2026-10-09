@@ -1,1 +1,0 @@
-{"app_id": "ap-7z0qR79EpNnzMIL0ZpKcSm", "description": "yeto-infra-v2-b2-e2u-c1", "state": "stopped", "tasks": "0", "created_at": "2026-09-30 07:54:07+00:00", "stopped_at": "2026-09-30 08:05:20+00:00"}

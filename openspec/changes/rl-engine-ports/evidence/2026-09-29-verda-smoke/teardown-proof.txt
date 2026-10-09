@@ -1,7 +1,0 @@
-2026-09-29T04:25:40Z Verda API after teardown:
-GET /instances -> []
-GET /volumes -> only pre-existing, not ours: SFS-5Dri9wCK (50219ed0), OS-gV1tcaAS (9b4300b1)
-GET /sshkeys -> no yeto-verda-* keys (ebd30cb3, 3a958af8 deleted)
-Ours (all deleted permanently): inst 7b230643 (1H100.80S.32V FIN-02, 03:47:28-03:53, SSH unusable: passphrase key),
-  vol 27eff944; inst 92990421 (1A100.22V FIN-01 on-demand, 03:54:56-04:25:08), vol 8cc0b799 (200GB)
-Balance 200.43048 -> 198.70166 USD (delta 1.73)

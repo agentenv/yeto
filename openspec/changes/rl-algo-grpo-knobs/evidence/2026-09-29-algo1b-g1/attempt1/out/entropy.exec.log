@@ -1,5 +1,0 @@
-rc=1
-bash: line 1: /work/out/entropy.log: No such file or directory
-tail: cannot open '/work/out/entropy.log' for reading: No such file or directory
-tar: /work/out: Cannot open: No such file or directory
-tar: Error is not recoverable: exiting now

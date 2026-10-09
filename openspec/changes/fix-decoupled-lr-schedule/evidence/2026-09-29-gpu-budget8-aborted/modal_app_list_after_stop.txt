@@ -1,2 +1,0 @@
-│ ap-fo8hgVJQsXztw6MhoVgkYq │ lrfix-gpu    │ stopped │ 0     │ 2026-09-29   │ 20
-│ ap-YuIxwWxWXBiqNpdPNLYBBf │ lrfix-gpu    │ stopped │ 0     │ 2026-09-29   │ 20

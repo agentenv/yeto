@@ -1,6 +1,0 @@
-$ python3 -m yeto.rl.engine.miles_adapter.algorithm_flags --dry-run --rl-algorithm-spec openspec/changes/rl-algorithm-capabilities/evidence/2026-09-29-dry-run/clip_higher.json --extra --eps-clip-high 0.3
-{
-  "error": "extra argv --eps-clip-high sets loss.eps_clip_high=0.3 but the algorithm spec has loss.eps_clip_high=0.28",
-  "verdict": "rejected"
-}
-exit=1
