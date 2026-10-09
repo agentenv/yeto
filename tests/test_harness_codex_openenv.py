@@ -681,7 +681,7 @@ def test_legacy_preflight_forwarder_matches_legacy_failure_classes(monkeypatch):
     with pytest.raises(ValueError, match="environment drifted"):
         preflight.forward_legacy_openenv_preflight(None, "qwen35_08b", {k: v for k, v in env.items() if "MODEL_REVISION" not in k})
     pins = preflight.required_pin_updates()
-    assert pins["CODEX_HARNESS_AGENT_SHA256"] == "1313cfa44c25353314a180caaaa3d4945fcac83555f6b28f5365f73076fe05ab"
+    assert pins["CODEX_HARNESS_AGENT_SHA256"] == "1ab2129a59d3ef11b89d717eaa753410aa59ab9471ce385f50e29f2e74e8e0a5"
     assert pins["CODEX_OPENENV_AGENT"].endswith("codex_openenv_subprocess_agent_function.run")
 
 

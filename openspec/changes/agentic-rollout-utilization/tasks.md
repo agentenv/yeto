@@ -38,6 +38,7 @@
 - [x] 4.1 Miles 单轮路径开启 partial-rollout，接入版本段记账（验证：假引擎单测，跨版本续跑样本版本段正确）
   - 证据（分支 s18-aru-stage2）：Miles 声明阶段 2、上限至多 1（`yeto/rl/adapters/miles/policy_age.py` `SUPPORT`），只限单轮——带 `--custom-agent-function-path`/`--custom-generate-function-path` 或 `--recompute-logprobs-via-prefill` 时 launcher 起机前与岛内都报错（agentic 多轮为阶段 3）；`--partial-rollout` 由 `--rl-max-policy-age` 推导（`translate_run_config(max_policy_age=…)`，算法容许值须 ≥ 上限），不再带 `--mask-offpolicy-in-partial-rollout`：旧版本 token 留在损失里由 TIS 修正（设计决定 3），且 Miles arguments.py:76 在 class-based rollout 路径上遇到该开关直接报错（阶段 1 的推导若真开会起不来）。续跑接线 `yeto/rl/adapters/miles/carry_over.py`：`--buffer-filter-path` 在上限 >0 时让最旧 token 落后 ≤ 上限的缓冲组续跑、更旧或版本未知的组丢弃并计数；`group_record` 给出版本段 `policy_versions` 与最旧版本令牌，driver 按窗口核对；每轮 `rl_rollout_carry_over`（续入组/条/token、超限丢弃、退回缓冲组数、跨版本 token 数）；跨版本截断比例由轮末对含旧 token 的样本做一次当前版本预填充、按 TIS 上下界估计（推理侧估计，Miles TIS 只报全部 token 的截断比例），喂给 3.5 回退器；回退经元数据汇聚点把岛内上限降到 0；轨迹事件带 `started_rollout_id`、`policy_versions`（看板 #160 字段名）。测试 `tests/test_rl_miles_carry_over.py`（11 项：假引擎三轮——v3 截止、v4 续跑得版本段 [3,4]、v5 超限丢弃 6 token；版本未知丢弃；上限 0 元数据字节不变与旧缓冲规则；已知比值截断估计 0.5；回退通道；起机前拒绝 agentic；命令行只多 `--partial-rollout`；driver 事件与回退；轨迹字段）、`tests/test_rl_policy_age.py`（更新）。默认 0 只有插件源码哈希变化（hash-migration.md）。
   - 未接（报主 agent）：续训切点"在途轨迹"段的 Miles 接线——Miles 数据源 `state_dict` 不保存缓冲，上限 >0 时切点仍按 `buffer_length≠0` 拒绝（失败即关闭，不静默丢）；需要时另做"切点时导出缓冲组 token/版本段/生成概率、恢复时注入"。
+  - **已接（S18 ARU-3，完成、本机单测通过，未上卡）**：`yeto/rl/adapters/miles/in_flight.py`：上限 >0 时 `CutSource.context` 经 `MilesRolloutPool.export_in_flight`（在 rollout 执行器进程里）导出缓冲组（每条样本一个 `InFlightTrajectory`：版本段 + 生成概率 + 完整 Miles 样本 `engine_state`）和挂起 agentic 轨迹的会话引用（`codex-suspended:<id>`）；`cut.context_problems` 在上限 >0 且在途段带上全部缓冲组时不再拒绝 `buffer_length≠0`（上限 0 照旧拒绝）；`round_cut.resume` 用 `restore_in_flight` 规则恢复：未超限且同组未训练过的缓冲组整组放回 Miles 缓冲续跑，其余丢弃，agentic 引用一律丢弃（原因 `agentic_session_lost`），发 `rl_in_flight_restored` 事件。测试 `tests/test_rl_agentic_suspend.py::test_export_and_restore_buffered_groups_and_agentic_references`、`::test_export_refuses_a_buffered_token_of_unknown_version`、`::test_cut_source_writes_the_in_flight_section_under_a_limit`。
 - [x] 4.2 GPU 对照：小模型单轮任务，上限 0 vs 1，比较每轮时长、截断比例、奖励曲线（上卡前复核与预算报批；验证：判据写入本组并附证据路径）
   - 结果（2026-10-09 S18 ARU-2，分支 s18-aru-stage2 8330e717，镜像 main pin 2f7871f-2fa8801，复核 infra-drafts/S18-ARU2-PRELAUNCH-REVIEW.md）：Qwen3-0.6B LoRA r16、gsm8k、thinking、回答上限 2048、每轮 8×8、10 轮、三臂同一算法（GRPO+TIS[0,2]，容许落后 1）、Modal 1×H100 各一。MB=不多发（基线），M0=多发 16 组+上限 0（阶段 0 截止丢弃），M1=多发 16 组+上限 1（阶段 2 续跑）。**预登记判据：1 未过、2 过、3 未过、4 过、5 过**：
     1. 每轮总时长中位 MB 78.4 s / M0 55.3 s / M1 63.8 s，M1/M0=1.15（≤0.8 未过；去第 0 轮 1.17）；M1/MB=0.81。生成段中位 MB 14.1 / M0 15.3 / M1 13.7 s，训练段中位 60.6 / 42.2 / 49.7 s——此任务生成段只占约 1/4，时间主要在训练，M0 快是因为丢掉长回答、训练的回答更短（回答均长 M0 约 670、M1 约 900、MB 约 990 token）。
@@ -50,11 +51,26 @@
     - 花费约 $4.0（上界）。证据：`evidence/s18-aru2/compare.json`（analyze.py 生成）、原始数据 s1-runs/s18-aru2-{mb,m0,m1}/。
 
 ## 5. 阶段 3：agentic 多轮续跑（门槛：阶段 2 达标 + FN 前缀重算代价已测）
-- [ ] 5.1 Miles fork agentic 生成循环：截止只在回合之间生效，工具执行中不中止（验证：fork 侧单测，截止落在工具执行中时等结果写回后挂起）
-- [ ] 5.2 codex harness 逐条版本检查改为按段记录，不再因版本漂移中止（验证：harness 单测）
-- [ ] 5.3 沙箱挂起保活与存活上限、超时丢弃并释放（验证：Modal CPU 冒烟，统计存活费用）
-- [ ] 5.4 会话前缀跨版本保留；FN 无前缀缓存时测重算代价并决定 FN 是否只用阶段 0（验证：测量报告写入 design）
+- [x] 5.1 Miles fork agentic 生成循环：截止只在回合之间生效，工具执行中不中止（验证：fork 侧单测，截止落在工具执行中时等结果写回后挂起）
+  - 证据（S18 ARU-3，代码完成、本机单测通过，未上卡）：agentenv/miles 分支 `s18-agentic-suspend`（基于 2f7871fb2）`--agentic-suspend-between-turns`/`--agentic-suspend-max-rounds`：`inference_rollout_train.suspend/resume`（先关门再中止引擎、确认引擎空闲、组任务跨轮保留、超龄取消计数、凑够后完成的组留到下一轮、补发到多发数、最后一轮照旧中止），`inference_rollout_common.hold_new_samples`（未开始的样本等待而不是中止）。fork 单测 `tests/fast/rollout/inference_rollout/test_agentic_suspend.py` 8 项，其中 `test_cutoff_during_a_tool_call_waits_for_the_result_then_parks`：截止落在工具执行中，工具不被打断、结果写回后在下一模型回合前挂起，恢复后续跑；另含两轮端到端（接回、补发、`start_rollout_id` 标记、超龄取消）。yeto 侧回合门 `codex_harness_agent.SuspendGate` + `codex_openenv_subprocess_agent_function.suspend/resume`，`tests/test_rl_agentic_suspend.py`（假会话服务 + 假 Codex：工具期间截止→下一请求被挂住、恢复后带工具结果发出；被中止的回合 503 后重发同一请求；无挂起时 503 仍报错；超时丢弃）。镜像 `yeto-miles-ports:ddce209-2fa8801`（pin 见 hash-migration.md）。
+- [x] 5.2 codex harness 逐条版本检查改为按段记录，不再因版本漂移中止（验证：harness 单测）
+  - 证据（完成）：`codex_openenv_generate.apply_trajectory_bookkeeping(max_policy_age=…, current_version=…)`：上限 >0 时记版本段 `policy_version_segments`，按结束时当前版本判窗（`window_problem`：最旧落后 ≤ 上限、无更新版本、版本可解析），窗外记基础设施 `policy_age_exceeded` 丢弃（不是身份错误）；上限 0 行为不变。`tests/test_rl_agentic_suspend.py::test_codex_versions_are_recorded_as_segments_within_the_window`、`::test_window_problem_rules`。注：M1 配置走上游 `agentic_tool_call.generate`（不经此包装），其窗由 Miles 侧按开始轮次取消 + driver `check_batch_ages` 保证。
+- [x] 5.3 沙箱挂起保活与存活上限、超时丢弃并释放（验证：Modal CPU 冒烟，统计存活费用）
+  - 证据（Modal CPU 冒烟按本项判据通过，2026-10-09 07:26–07:33Z；s1-runs/s18-aru3/sandbox-smoke/{smoke.json,leak-check.json}，脚本 s1-runs/s18-aru3/sandbox_smoke.py）：真 Modal TB2 沙箱（yeto-tbench2，cancel-async-tasks，1 CPU/2 GiB）A：执行命令后静置 300 s（模拟跨训练轮挂起），再执行读到挂起前写的文件（状态保留，describe=live）；B：门关着、存活上限 60 s → `CodexSuspendExpired`，销毁后 describe=gone，`Sandbox.list` 两个标签 0 个在跑。存活费用：每个挂起沙箱每分钟约 $0.00105（1 CPU、2 GiB，Modal CPU 价）；冒烟合计约 $0.008。注意：Modal 沙箱 `idle_timeout`（默认 600 s）须大于存活上限加一回合，上卡设 900 s。
+- [x] 5.4 会话前缀跨版本保留；FN 无前缀缓存时测重算代价并决定 FN 是否只用阶段 0（验证：测量报告写入 design）
+  - 证据（完成，估算未上卡）：会话前缀由 Miles 会话服务的 TITO 记录跨版本保留（被中止的回合不记录，恢复后同一请求重发，前缀 token 不变）；换版本后 KV 必须重算（权重变了），续跑首回合全量预填充。FN 重算代价用 G6 数据估算写入 design 决定 8：续跑额外重算 ≤约 2.7 s/轮，远小于省下的约 32–56 s/轮 → FN 不限于阶段 0；估算依据与不可靠点见 design。
 - [ ] 5.5 GPU 对照：M1 配置两岛，上限 0 vs 1，判据含奖励与长度分布、沙箱错误 0、存活费用（上卡前报批；验证：证据路径）
+  - 结果（2026-10-09 S18 ARU-3，单岛三臂，代码 s18-aru-stage3 26c9eae5，镜像 ddce209-2fa8801@sha256:9c252c38，复核 infra-drafts/S18-ARU3-PRELAUNCH-REVIEW.md；主 agent 指示先单岛）：M1 agentic 配置（Qwen3.5-4B LoRA，12288/6144，TB2 46 题，每轮 6×4，6 轮，1×H200）。MB=不多发（多发=目标 6）、M0=多发 12+上限 0（截止丢弃）、M1=多发 12+上限 1（回合间挂起、下一轮续跑）。MB 第一次（mb-20261009a）起机时会话服务端口冲突失败、0 轮，主 agent 同意后重跑 mb-20261009b；**MB 比 M0/M1 晚约 14 min 开跑，三臂不是同时段**，沙箱供给与排队条件可能不同。
+    - 有效性：三臂 rc 0、6 轮；M1 有 5 轮 `resumed_groups>0`，12 个训练组带旧版本 token，看板续跑跨轮表 48 行（第 r 轮开始→第 r+1 轮训练），其中 14 条轨迹的版本段为 [v, v+1]；挂起 21 组次、接回 21 组次，被中止回合重发 8 次，引擎空闲确认 5/5 次。
+    - 判据 1（时长）**过**：第 1–5 轮每轮总时长中位 MB 202.8 s / M0 150.5 s / M1 113.1 s，M1/MB = 0.56（≤0.8）；M1/M0 = 0.75。生成段中位 173.7 / 93.2 / 86.9 s，训练段中位 42.5 / 37.8 / 24.5 s。
+    - 判据 2（丢弃）**过**：M1 超龄取消 5 组（20 条，取消时仍在跑，token 未知）+ 挂起超时 0 + 窗外 0 = 20 条，M0 截止丢弃 140 条（64.4 万 token），比值 0.14（≤0.5）。另：M1 最后一轮照旧中止丢弃 24 条（14.1 万 token），算上为 44 条（0.31）；MB 因一组被过滤触发整批补发，丢弃 40 条（21.1 万 token）。
+    - 判据 3（奖励与长度）**过**：轨迹奖励均值 MB 0.083±0.276（SD）/ M0 0.132 / M1 0.083，M1 与 MB 差 0；轨迹 token 均值 MB 3237±2528 / M0 2452 / M1 3122，M1 与 MB 差 −0.05 SD。M0 偏短偏易（截止丢弃偏向短轨迹）在 M1 消失。
+    - 判据 4（沙箱）**过**：三臂沙箱获取失败 0、租约到期 0、挂起超时 0；全部结束后 yeto-tbench2 在跑沙箱 0（08:44:46Z）。M1 挂起沙箱累计存活 908.7 s，按 5.3 单价约 $0.016。
+    - 判据 5（截断比例）**未验证**：没有触发告警或回退，但轮末的跨版本估计对 M1 全部含旧版本 token 的训练样本都没打出分（`cross_version_unscored_samples` 每轮 8–16 条，共 48 条，原因未知），所以比值分位数没有数据，告警 0.2 / 回退 0.5 无法标定。旁证：Miles 训练端对全部 token 的 TIS 截断比例（`tis_clipfrac`，上界 2）M1 六轮都是 0，跨版本 token 是其子集。已在 26c9eae5 之后补上未打分原因上报和"无版本段 token 跳过"（单测通过、未上卡）。
+    - 判据 6（数值）**过**：三臂 grad_norm 有限且 >0，奖励无 NaN，无 rl_invariant_failed。
+    - 另报：GPU 利用率均值 MB 36.5% / M0 41.1% / M1 48.6%；KV 峰值 11.6% / 16.7% / 16.7%；排队峰值 14 / 0 / 37；显存峰值约 130 GB。
+    - 未做：两岛一组。读码结论：多岛的版本段记账（island_ledger ACCEPT_IS）只在跨岛传样本时用到，跨岛样本传输在真机上没有实现；两岛各自训练时版本段只在岛内起作用，与本次单岛相同，跑两岛得不到新证据。是否改测别的多岛点由主 agent 定。
+    - 花费约 $12.4（含失败的 mb-a $1.4）。证据 `evidence/s18-aru3/`（compare.json、analyze.py、dashboard-carry-m1.json、沙箱冒烟、FN 估算）；原始磁带在 Modal Volume yeto-evidence-archive（ARCHIVE-MANIFEST.tsv），本地 s1-runs/s18-aru3-*。
 
 ## 6. verl 并行线（与第 1–5 组同阶段门槛）
 - [x] 6.1 读码确认 verl fork fully_async 下 `tool_agent_loop` 被中止后是从头重跑还是续跑、版本记录粒度、与 yeto 多岛同步的冲突点，结论写入 design 第 9 条（验证：design 更新并附文件:行号）

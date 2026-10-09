@@ -226,6 +226,9 @@ class RoundCutCheckpoint:
             raise RoundCutError(f"restored trainer holds {restored}, round cut holds {info['policy_hash']}")
         checks["policy_hash"] = "same"
         checks["policy_version"] = int(info["policy_version"])
+        in_flight = self._restore_in_flight(driver, manifest, rid)
+        if in_flight is not None:
+            checks["in_flight"] = in_flight
         driver.local_step = int(info["local_step"])
         self.resumed = dict(info)
         if info.get("lr_at_next_round") is not None:
@@ -252,6 +255,29 @@ class RoundCutCheckpoint:
             state_restore=restored_store or None,
         )
         return info
+
+    def _restore_in_flight(self, driver: Any, manifest: Any, rollout_id: int) -> dict[str, Any] | None:
+        """agentic-rollout-utilization 3.3: the cut's unfinished trajectories, by the
+        CURRENT run's limit: within it and not already trained -> continued
+        (buffered groups back into the data buffer); else discarded and reported.
+        Suspended agentic trajectories never survive a restart (discarded).
+        None when the cut carries none."""
+        entries = tuple(getattr(manifest, "in_flight", ()) or ())
+        if not entries:
+            return None
+        limit = int(getattr(getattr(driver, "profile", None), "max_policy_age", 0) or 0)
+        ledger = getattr(self.source, "ledger", None)
+        completed = sorted(getattr(ledger, "_consumed_groups", None) or ())
+        rollout = getattr(self.source, "rollout", None)
+        importer = getattr(rollout, "import_in_flight", None)
+        if not callable(importer):
+            raise RoundCutError("the cut carries in-flight trajectories but the rollout pool "
+                                "cannot import them")
+        report = importer(entries, max_policy_age=limit, current_version=int(rollout_id),
+                          completed_group_ids=completed)
+        driver.emit("rl_in_flight_restored", rollout_id=int(rollout_id), max_policy_age=limit,
+                    entries=len(entries), **report)
+        return report
 
     def check_first_round(self, driver: Any, *, rollout_id: int, applied_lrs: Any) -> None:
         """Design §4.5, on the boundary of the first resumed round (before it is recorded

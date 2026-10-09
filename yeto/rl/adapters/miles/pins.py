@@ -51,7 +51,7 @@ MILES_NEXT_UPSTREAM_COMMIT = "9e4260de047a704208535c0e90c531929879ab40"
 # 2f7871fb2 = efbbc63ea + the same tally on the train path actually in use
 # (inference_rollout_train.abort; efbbc63ea only patched sglang_rollout.abort) and a
 # failed surplus group no longer fails the abort (S17 N17 A/B).
-MILES_NEXT_COMMIT = "2f7871fb2e80d37420b16ef81f001c7b0ba8e32e"
+MILES_NEXT_COMMIT = "ddce20992c9ee82270a22e259e9e2bf55f3053d1"
 # sgl-project/sglang ``sglang-miles`` head when radixark/miles@9e4260d was
 # committed (upstream's Dockerfile follows that branch unpinned).
 SGLANG_NEXT_REPOSITORY = "https://github.com/michaellchung/sglang"
@@ -78,10 +78,10 @@ MILES_NEXT_BASE_IMAGE = (
 # every SHA.  PUBLIC on ghcr.io/michaellchung since 2026-10-07 (anonymous
 # pull); a private image needs SKYPILOT_DOCKER_{USERNAME,PASSWORD,SERVER} or
 # --rl-image-private (yeto.launcher.registry_login_for; read:packages token).
-# Tag 2f7871f-2fa8801; (previous efbbc63-2fa8801 @sha256:a7990076..., 8bc5223-4e4148f @sha256:4aeafd77...) ghcr.io/michaellchung (public package); linux/amd64 only.
+# Tag ddce209-2fa8801; (S18 ARU-3: Miles s18-agentic-suspend = 2f7871fb2 + --agentic-suspend-between-turns; previous 2f7871f-2fa8801 @sha256:62b4f164..., efbbc63-2fa8801 @sha256:a7990076..., 8bc5223-4e4148f @sha256:4aeafd77...) ghcr.io/michaellchung (public package); linux/amd64 only.
 MILES_NEXT_IMAGE = (
     "docker:ghcr.io/michaellchung/yeto-miles-ports@sha256:"
-    "62b4f164c49d944a9dba8af86af027faf276040ea1f9a8d6841cc4afd46a15c7"
+    "9c252c389a16e33c0cd762978fe7dcf20ed9e251e1477925d899aeda1760520a"
 )
 MILES_NEXT_IMAGE_MANIFEST = "/opt/yeto/image-manifest.json"
 # Nebius VM images whose /var/lib/docker already holds a docker image's

@@ -231,6 +231,7 @@ def router_prefill_scorer(args: Any, timeout_s: float = 120.0) -> Scorer:
     import urllib.request
 
     def score(sample: Any) -> list[float] | None:
+        score.last_error = None
         try:
             url = f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate"
             from miles.rollout.generate_utils.prefill_logprobs import (
@@ -245,9 +246,11 @@ def router_prefill_scorer(args: Any, timeout_s: float = 120.0) -> Scorer:
             with urllib.request.urlopen(request, timeout=timeout_s) as response:  # noqa: S310
                 output = json.loads(response.read().decode("utf-8"))
             return [float(p) for p in _extract_response_logprobs(sample, output["meta_info"])]
-        except Exception:  # noqa: BLE001 - an estimate: unknown, never guessed
+        except Exception as exc:  # noqa: BLE001 - an estimate: unknown, never guessed
+            score.last_error = f"{type(exc).__name__}: {str(exc)[:120]}"
             return None
 
+    score.last_error = None
     return score
 
 
@@ -261,27 +264,150 @@ def estimate_cross_version_truncation(args: Any, samples: Sequence[Any], current
     clip_low = float(getattr(args, "tis_clip_low", 0.0) or 0.0)
     clip_high = float(getattr(args, "tis_clip", 2.0) or 2.0)
     corrections = []
+    ratios: list[float] = []
     failed = 0
+    reasons: dict[str, int] = {}
+    unknown_tokens = 0
+
+    def fail(why: str) -> None:
+        nonlocal failed
+        failed += 1
+        reasons[why] = reasons.get(why, 0) + 1
+
     for sample in samples:
-        versions = response_token_versions(sample)
+        versions = trained_token_versions(sample, current_version)
         if not any(v is not None and v != current_version for v in versions):
             continue
+        # a trained token whose version no span covers is left out of the
+        # estimate (weight 1, counted), instead of dropping the whole sample
+        unknown = sum(1 for v in versions if v is None)
+        if unknown:
+            unknown_tokens += unknown
+            versions = [current_version if v is None else v for v in versions]
         generated = list(getattr(sample, "rollout_log_probs", None) or ())
-        current = scorer(sample) if None not in versions and len(generated) == len(versions) else None
-        if current is None or len(current) != len(versions):
-            failed += 1
+        if len(generated) != len(versions):
+            fail(f"rollout_log_probs {len(generated)} != response {len(versions)}")
+            continue
+        current = scorer(sample)
+        if current is None:
+            fail(str(getattr(scorer, "last_error", None) or "scorer returned nothing"))
+            continue
+        if len(current) != len(versions):
+            fail(f"scored {len(current)} != response {len(versions)}")
             continue
         try:
             provenance = TokenProvenance(tuple(int(v) for v in versions),
                                          tuple(min(float(p), 0.0) for p in generated))
             corrections.append(cross_version_is(provenance, current, current_version,
                                                 clip_low=clip_low, clip_high=clip_high))
-        except (ProvenanceError, ValueError, OverflowError):
-            failed += 1
+            ratios.extend(math.exp(float(c) - g) for v, g, c in zip(
+                provenance.versions, provenance.logprobs, current, strict=True) if v != current_version)
+        except (ProvenanceError, ValueError, OverflowError) as exc:
+            fail(f"{type(exc).__name__}: {str(exc)[:120]}")
     fraction = batch_truncated_fraction(corrections)
+    extra: dict[str, Any] = {}
+    if reasons:  # 5.5: why samples could not be scored (absent when all were)
+        extra["cross_version_unscored_reasons"] = dict(sorted(reasons.items())[:8])
+    if unknown_tokens:
+        extra["cross_version_unknown_version_tokens"] = unknown_tokens
     return {
+        **extra,
         "cross_version_truncated_fraction": None if fraction is None or not math.isfinite(fraction)
         else float(fraction),
         "cross_version_scored_tokens": sum(c.cross_version_tokens for c in corrections),
         "cross_version_unscored_samples": failed,
+        **ratio_quantiles(ratios),
     }
+
+
+def ratio_quantiles(ratios: Sequence[float]) -> dict[str, float]:
+    """p50/p90/p99/min/max of the cross-version ratios exp(current - generation)
+    (5.5: data to calibrate the warn/fallback thresholds); {} when none."""
+    values = sorted(r for r in ratios if math.isfinite(r))
+    if not values:
+        return {}
+
+    def q(p: float) -> float:
+        return values[min(len(values) - 1, max(0, math.ceil(p * len(values)) - 1))]
+
+    return {"cross_version_ratio_p50": q(0.50), "cross_version_ratio_p90": q(0.90),
+            "cross_version_ratio_p99": q(0.99), "cross_version_ratio_min": values[0],
+            "cross_version_ratio_max": values[-1]}
+
+
+def trained_token_versions(sample: Any, current_version: int) -> list[int | None]:
+    """Per response token, the version to correct for: tokens outside the loss
+    (``loss_mask`` 0: tool/environment output of an agentic sample, never
+    generated by the policy) count as current (weight 1, not crossed)."""
+    versions = response_token_versions(sample)
+    mask = getattr(sample, "loss_mask", None)
+    if mask is None or len(mask) != len(versions):
+        return versions
+    return [v if m else current_version for v, m in zip(versions, mask, strict=True)]
+
+
+# --------------------------------------------- agentic suspension (5.1/5.3)
+
+SUSPEND_STATS_ATTR = "rollout_suspend_stats"  # Miles fork, set at the cut-off
+RESUME_STATS_ATTR = "rollout_resume_stats"  # Miles fork, set at rollout start
+SUSPEND_EXPIRED_PREFIX = "CodexSuspendExpired"
+POLICY_AGE_EXCEEDED_PREFIX = "policy_age_exceeded"
+
+
+def _infrastructure_reason(sample: Any) -> str:
+    from yeto.rl.harness.codex.tbench_reward import INFRASTRUCTURE_KEY
+
+    meta = getattr(sample, "metadata", None)
+    reason = meta.get(INFRASTRUCTURE_KEY) if isinstance(meta, dict) else None
+    return str(reason) if reason else ""
+
+
+def _agent_metric(sample: Any, name: str) -> float:
+    meta = getattr(sample, "metadata", None)
+    metrics = meta.get("agent_metrics") if isinstance(meta, dict) else None
+    value = metrics.get(name) if isinstance(metrics, dict) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return 0.0
+    return float(value)
+
+
+def suspend_fields(args: Any, all_samples: Sequence[Sequence[Any]]) -> dict[str, Any]:
+    """Rollout-metadata fields of an agentic run under a limit > 0 (stage 3).
+
+    From the Miles fork (consumed): groups suspended at this rollout's cut-off,
+    groups resumed at its start, groups cancelled because they would exceed the
+    limit. From the samples of this rollout: trajectories discarded because
+    their suspension outlived the survival limit, trajectories outside the
+    version window, trajectories that were suspended at least once, and the
+    seconds their environments stayed alive while parked (survival cost)."""
+    suspend = getattr(args, SUSPEND_STATS_ATTR, None)
+    resume = getattr(args, RESUME_STATS_ATTR, None)
+    if suspend is None and resume is None:
+        return {}
+    for attr in (SUSPEND_STATS_ATTR, RESUME_STATS_ATTR):
+        if hasattr(args, attr):
+            setattr(args, attr, None)
+    out: dict[str, Any] = {}
+    for prefix, stats in (("", suspend), ("", resume)):
+        if isinstance(stats, dict):
+            out.update({f"{prefix}{k}": int(v) for k, v in stats.items()
+                        if isinstance(v, int) and not isinstance(v, bool)})
+    expired = over_age = parked = 0
+    parked_seconds = 0.0
+    retried = 0
+    for sample in _flat(list(all_samples)):
+        reason = _infrastructure_reason(sample)
+        expired += reason.startswith(SUSPEND_EXPIRED_PREFIX)
+        over_age += reason.startswith(POLICY_AGE_EXCEEDED_PREFIX)
+        if _agent_metric(sample, "suspensions") > 0:
+            parked += 1
+            parked_seconds += _agent_metric(sample, "suspended_seconds")
+            retried += int(_agent_metric(sample, "suspend_retried_turns"))
+    out.update({
+        "suspend_expired_trajectories": expired,
+        "policy_age_exceeded_trajectories": over_age,
+        "suspended_trajectories": parked,
+        "suspended_env_seconds": round(parked_seconds, 3),
+        "suspend_retried_turns": retried,
+    })
+    return out

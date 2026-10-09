@@ -1,0 +1,930 @@
+{
+ "arms": {
+  "MB": {
+   "src": "/home/michael/work/s1-runs/s18-aru3-mb-20261009b/tape-direct/yeto-s18-aru3-mb-20261009b/l0/rank0/rl-island-0.jsonl",
+   "rc": "rc=0",
+   "rounds_trained": 6,
+   "trajectories_trained": 144,
+   "round_total_s": [
+    318.3,
+    128.3,
+    170.3,
+    202.8,
+    302.2
+   ],
+   "round_total_median_s": 202.75269603729248,
+   "round_total_median_s_ge1": 186.5123301744461,
+   "round_total_median_s_drop_slowest": 186.5123301744461,
+   "generate_s_by_round": {
+    "0": 175.2,
+    "1": 240.1,
+    "2": 95.9,
+    "3": 102.3,
+    "4": 172.1,
+    "5": 272.8
+   },
+   "train_s_by_round": {
+    "0": 240.1,
+    "1": 67.8,
+    "2": 24.4,
+    "3": 60.6,
+    "4": 24.5,
+    "5": 23.4
+   },
+   "generate_median_s": 173.66432728699994,
+   "train_median_s": 42.527372660499964,
+   "reward_mean": 0.08333333333333333,
+   "reward_std": 0.2763853991962833,
+   "reward_se": 0.023032116599690275,
+   "nonzero_rewards": 12,
+   "tokens_mean": 3237.1458333333335,
+   "tokens_std": 2528.15743172097,
+   "tokens_se": 210.67978597674752,
+   "tokens_p10_p50_p90": [
+    523,
+    2350,
+    6342
+   ],
+   "turns_mean": 8.229166666666666,
+   "traj_wall_s_p50_p90_max": [
+    57.464534521102905,
+    146.28357768058777,
+    269.6810929775238
+   ],
+   "kv_peak_ratio": 0.11563864621887805,
+   "queued_requests_max": 14,
+   "gpu_util_mean": 36.506024096385545,
+   "gpu_mem_peak_mb": 130135.125,
+   "end_reasons": [
+    [
+     "CodexTurnLimit: Codex reached the signed turn budget",
+     65
+    ],
+    [
+     "CodexSequenceLimit: Miles sequence limit reached",
+     33
+    ],
+    [
+     "CodexSequenceLimit: Miles returned a truncated sample",
+     30
+    ],
+    [
+     "CodexModelFailure: DSV4 mixed prose with the required tool call",
+     10
+    ],
+    [
+     "None",
+     5
+    ],
+    [
+     "CodexModelFailure: DSV4 must return exactly one tool call",
+     1
+    ]
+   ],
+   "cutoff_discarded_trajectories": 40,
+   "cutoff_discarded_tokens": 210566,
+   "cutoff_discarded_tokens_unknown_rounds": 0,
+   "cutoff_events": {
+    "0": {
+     "discarded_groups": 5,
+     "discarded_tokens": 87475,
+     "discarded_trajectories": 20,
+     "discarded_unknown_groups": 0,
+     "filtered_groups": 1,
+     "submitted_groups": null,
+     "target_groups": 6
+    },
+    "1": {
+     "discarded_groups": 0,
+     "discarded_tokens": 0,
+     "discarded_trajectories": 0,
+     "discarded_unknown_groups": 0,
+     "filtered_groups": 0,
+     "submitted_groups": 6,
+     "target_groups": 6
+    },
+    "2": {
+     "discarded_groups": 0,
+     "discarded_tokens": 0,
+     "discarded_trajectories": 0,
+     "discarded_unknown_groups": 0,
+     "filtered_groups": 0,
+     "submitted_groups": 6,
+     "target_groups": 6
+    },
+    "3": {
+     "discarded_groups": 5,
+     "discarded_tokens": 123091,
+     "discarded_trajectories": 20,
+     "discarded_unknown_groups": 0,
+     "filtered_groups": 1,
+     "submitted_groups": 12,
+     "target_groups": 6
+    },
+    "4": {
+     "discarded_groups": 0,
+     "discarded_tokens": 0,
+     "discarded_trajectories": 0,
+     "discarded_unknown_groups": 0,
+     "filtered_groups": 0,
+     "submitted_groups": 6,
+     "target_groups": 6
+    },
+    "5": {
+     "discarded_groups": 0,
+     "discarded_tokens": 0,
+     "discarded_trajectories": 0,
+     "discarded_unknown_groups": 0,
+     "filtered_groups": 0,
+     "submitted_groups": 6,
+     "target_groups": 6
+    }
+   },
+   "carry_per_round": {},
+   "carry_totals": {
+    "suspended_groups": 0,
+    "resumed_groups": 0,
+    "over_age_cancelled_groups": 0,
+    "over_age_cancelled_samples": 0,
+    "over_age_cancelled_tokens": 0,
+    "over_age_unknown_groups": 0,
+    "suspend_expired_trajectories": 0,
+    "policy_age_exceeded_trajectories": 0,
+    "suspended_trajectories": 0,
+    "suspend_retried_turns": 0,
+    "cross_version_tokens": 0,
+    "trained_response_tokens": 0,
+    "trained_groups_with_older_tokens": 0
+   },
+   "suspended_env_seconds_total": 0,
+   "carried_trained_trajectories": 0,
+   "carried_trajectory_examples": [],
+   "grad_norm": [
+    0.036800138652324677,
+    0.031977854669094086,
+    0.04214060306549072,
+    0.0604061484336853,
+    0.03709295764565468,
+    0.06882571429014206
+   ],
+   "grad_norm_finite": true,
+   "invariant_failed": 0,
+   "policy_age_warnings": 0,
+   "policy_age_fallbacks": 0,
+   "trained_tis_clipfrac": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ]
+  },
+  "M0": {
+   "src": "/home/michael/work/s1-runs/s18-aru3-m0-20261009a/tape-direct/yeto-s18-aru3-m0-20261009a/l0/rank0/rl-island-0.jsonl",
+   "rc": "rc=0",
+   "rounds_trained": 6,
+   "trajectories_trained": 144,
+   "round_total_s": [
+    150.5,
+    159.7,
+    195.1,
+    135.1,
+    123.4
+   ],
+   "round_total_median_s": 150.48624062538147,
+   "round_total_median_s_ge1": 147.39478635787964,
+   "round_total_median_s_drop_slowest": 142.7779097557068,
+   "generate_s_by_round": {
+    "0": 161.7,
+    "1": 86.6,
+    "2": 86.0,
+    "3": 156.9,
+    "4": 99.8,
+    "5": 86.2
+   },
+   "train_s_by_round": {
+    "0": 263.2,
+    "1": 49.6,
+    "2": 62.5,
+    "3": 25.9,
+    "4": 25.9,
+    "5": 24.8
+   },
+   "generate_median_s": 93.19700081849999,
+   "train_median_s": 37.75671823999994,
+   "reward_mean": 0.13194444444444445,
+   "reward_std": 0.33843035919475567,
+   "reward_se": 0.028202529932896306,
+   "nonzero_rewards": 19,
+   "tokens_mean": 2451.652777777778,
+   "tokens_std": 1888.9552238658443,
+   "tokens_se": 157.4129353221537,
+   "tokens_p10_p50_p90": [
+    470,
+    1854,
+    5425
+   ],
+   "turns_mean": 8.42361111111111,
+   "traj_wall_s_p50_p90_max": [
+    63.58218693733215,
+    118.12857031822205,
+    149.6798450946808
+   ],
+   "kv_peak_ratio": 0.16665565866384863,
+   "queued_requests_max": 0,
+   "gpu_util_mean": 41.059701492537314,
+   "gpu_mem_peak_mb": 126503.125,
+   "end_reasons": [
+    [
+     "CodexTurnLimit: Codex reached the signed turn budget",
+     66
+    ],
+    [
+     "CodexSequenceLimit: Miles sequence limit reached",
+     33
+    ],
+    [
+     "CodexSequenceLimit: Miles returned a truncated sample",
+     29
+    ],
+    [
+     "CodexModelFailure: DSV4 mixed prose with the required tool call",
+     9
+    ],
+    [
+     "None",
+     6
+    ],
+    [
+     "CodexModelFailure: DSV4 returned a forbidden tool",
+     1
+    ]
+   ],
+   "cutoff_discarded_trajectories": 140,
+   "cutoff_discarded_tokens": 643833,
+   "cutoff_discarded_tokens_unknown_rounds": 0,
+   "cutoff_events": {
+    "0": {
+     "discarded_groups": 6,
+     "discarded_tokens": 101327,
+     "discarded_trajectories": 24,
+     "discarded_unknown_groups": 0,
+     "filtered_groups": 0,
+     "submitted_groups": null,
+     "target_groups": 6
+    },
+    "1": {
+     "discarded_groups": 6,
+     "discarded_tokens": 127942,
+     "discarded_trajectories": 24,
+     "discarded_unknown_groups": 0,
+     "filtered_groups": 0,
+     "submitted_groups": 12,
+     "target_groups": 6
+    },
+    "2": {
+     "discarded_groups": 5,
+     "discarded_tokens": 105725,
+     "discarded_trajectories": 20,
+     "discarded_unknown_groups": 0,
+     "filtered_groups": 1,
+     "submitted_groups": 12,
+     "target_groups": 6
+    },
+    "3": {
+     "discarded_groups": 6,
+     "discarded_tokens": 124168,
+     "discarded_trajectories": 24,
+     "discarded_unknown_groups": 0,
+     "filtered_groups": 0,
+     "submitted_groups": 12,
+     "target_groups": 6
+    },
+    "4": {
+     "discarded_groups": 6,
+     "discarded_tokens": 93434,
+     "discarded_trajectories": 24,
+     "discarded_unknown_groups": 0,
+     "filtered_groups": 0,
+     "submitted_groups": 12,
+     "target_groups": 6
+    },
+    "5": {
+     "discarded_groups": 6,
+     "discarded_tokens": 91237,
+     "discarded_trajectories": 24,
+     "discarded_unknown_groups": 0,
+     "filtered_groups": 0,
+     "submitted_groups": 12,
+     "target_groups": 6
+    }
+   },
+   "carry_per_round": {},
+   "carry_totals": {
+    "suspended_groups": 0,
+    "resumed_groups": 0,
+    "over_age_cancelled_groups": 0,
+    "over_age_cancelled_samples": 0,
+    "over_age_cancelled_tokens": 0,
+    "over_age_unknown_groups": 0,
+    "suspend_expired_trajectories": 0,
+    "policy_age_exceeded_trajectories": 0,
+    "suspended_trajectories": 0,
+    "suspend_retried_turns": 0,
+    "cross_version_tokens": 0,
+    "trained_response_tokens": 0,
+    "trained_groups_with_older_tokens": 0
+   },
+   "suspended_env_seconds_total": 0,
+   "carried_trained_trajectories": 0,
+   "carried_trajectory_examples": [],
+   "grad_norm": [
+    0.04173193499445915,
+    0.061153460294008255,
+    0.06407687067985535,
+    0.03992094472050667,
+    0.03658256679773331,
+    0.08477441966533661
+   ],
+   "grad_norm_finite": true,
+   "invariant_failed": 0,
+   "policy_age_warnings": 0,
+   "policy_age_fallbacks": 0,
+   "trained_tis_clipfrac": [
+    0.0,
+    2.3290478566195816e-05,
+    0.0001076658081728965,
+    0.0,
+    0.0,
+    0.0
+   ]
+  },
+  "M1": {
+   "src": "/home/michael/work/s1-runs/s18-aru3-m1-20261009a/tape-direct/yeto-s18-aru3-m1-20261009a/l0/rank0/rl-island-0.jsonl",
+   "rc": "rc=0",
+   "rounds_trained": 6,
+   "trajectories_trained": 144,
+   "round_total_s": [
+    96.6,
+    96.5,
+    122.0,
+    113.1,
+    126.4
+   ],
+   "round_total_median_s": 113.13549566268921,
+   "round_total_median_s_ge1": 117.5772294998169,
+   "round_total_median_s_drop_slowest": 104.87362468242645,
+   "generate_s_by_round": {
+    "0": 170.1,
+    "1": 66.0,
+    "2": 65.9,
+    "3": 91.6,
+    "4": 82.1,
+    "5": 95.5
+   },
+   "train_s_by_round": {
+    "0": 241.5,
+    "1": 24.2,
+    "2": 24.4,
+    "3": 24.3,
+    "4": 24.7,
+    "5": 24.5
+   },
+   "generate_median_s": 86.86680727200007,
+   "train_median_s": 24.487883817500006,
+   "reward_mean": 0.08333333333333333,
+   "reward_std": 0.2763853991962833,
+   "reward_se": 0.023032116599690275,
+   "nonzero_rewards": 12,
+   "tokens_mean": 3122.1458333333335,
+   "tokens_std": 2320.2961286365953,
+   "tokens_se": 193.35801071971628,
+   "tokens_p10_p50_p90": [
+    630,
+    2589,
+    6845
+   ],
+   "turns_mean": 8.055555555555555,
+   "traj_wall_s_p50_p90_max": [
+    68.25718069076538,
+    155.38876962661743,
+    466.21051359176636
+   ],
+   "kv_peak_ratio": 0.1667026543681872,
+   "queued_requests_max": 37,
+   "gpu_util_mean": 48.559633027522935,
+   "gpu_mem_peak_mb": 130063.125,
+   "end_reasons": [
+    [
+     "CodexTurnLimit: Codex reached the signed turn budget",
+     55
+    ],
+    [
+     "CodexSequenceLimit: Miles sequence limit reached",
+     36
+    ],
+    [
+     "CodexSequenceLimit: Miles returned a truncated sample",
+     35
+    ],
+    [
+     "CodexModelFailure: DSV4 mixed prose with the required tool call",
+     9
+    ],
+    [
+     "None",
+     7
+    ],
+    [
+     "CodexModelFailure: DSV4 returned a forbidden tool",
+     1
+    ],
+    [
+     "CodexModelFailure: DSV4 must return exactly one tool call",
+     1
+    ]
+   ],
+   "cutoff_discarded_trajectories": 24,
+   "cutoff_discarded_tokens": 140897,
+   "cutoff_discarded_tokens_unknown_rounds": 0,
+   "cutoff_events": {
+    "5": {
+     "discarded_groups": 6,
+     "discarded_tokens": 140897,
+     "discarded_trajectories": 24,
+     "discarded_unknown_groups": 0,
+     "filtered_groups": 0,
+     "submitted_groups": 7,
+     "target_groups": 6
+    }
+   },
+   "carry_per_round": {
+    "0": {
+     "suspended_groups": 5,
+     "suspended_done_groups": 0,
+     "resumed_groups": 0,
+     "resumed_done_groups": 0,
+     "over_age_cancelled_groups": 0,
+     "over_age_cancelled_samples": 0,
+     "over_age_cancelled_tokens": 0,
+     "over_age_unknown_groups": 0,
+     "suspend_expired_trajectories": 0,
+     "policy_age_exceeded_trajectories": 0,
+     "suspended_trajectories": 0,
+     "suspended_env_seconds": 0.0,
+     "suspend_retried_turns": 0,
+     "cross_version_tokens": 0,
+     "trained_response_tokens": 141934,
+     "cross_version_truncated_fraction": null,
+     "trained_groups_with_older_tokens": 0
+    },
+    "1": {
+     "suspended_groups": 5,
+     "suspended_done_groups": 0,
+     "resumed_groups": 5,
+     "resumed_done_groups": 3,
+     "over_age_cancelled_groups": 0,
+     "over_age_cancelled_samples": 0,
+     "over_age_cancelled_tokens": 0,
+     "over_age_unknown_groups": 0,
+     "suspend_expired_trajectories": 0,
+     "policy_age_exceeded_trajectories": 0,
+     "suspended_trajectories": 2,
+     "suspended_env_seconds": 478.475,
+     "suspend_retried_turns": 1,
+     "cross_version_tokens": 57159,
+     "trained_response_tokens": 125038,
+     "cross_version_truncated_fraction": null,
+     "cross_version_scored_tokens": 0,
+     "cross_version_unscored_samples": 16,
+     "trained_groups_with_older_tokens": 4,
+     "carried_out_groups": 5
+    },
+    "2": {
+     "suspended_groups": 3,
+     "suspended_done_groups": 0,
+     "resumed_groups": 5,
+     "resumed_done_groups": 0,
+     "over_age_cancelled_groups": 3,
+     "over_age_cancelled_samples": 0,
+     "over_age_cancelled_tokens": 0,
+     "over_age_unknown_groups": 3,
+     "suspend_expired_trajectories": 0,
+     "policy_age_exceeded_trajectories": 0,
+     "suspended_trajectories": 1,
+     "suspended_env_seconds": 34.294,
+     "suspend_retried_turns": 1,
+     "cross_version_tokens": 13690,
+     "trained_response_tokens": 122917,
+     "cross_version_truncated_fraction": null,
+     "cross_version_scored_tokens": 0,
+     "cross_version_unscored_samples": 8,
+     "trained_groups_with_older_tokens": 2,
+     "carried_out_groups": 3
+    },
+    "3": {
+     "suspended_groups": 3,
+     "suspended_done_groups": 0,
+     "resumed_groups": 3,
+     "resumed_done_groups": 0,
+     "over_age_cancelled_groups": 1,
+     "over_age_cancelled_samples": 0,
+     "over_age_cancelled_tokens": 0,
+     "over_age_unknown_groups": 1,
+     "suspend_expired_trajectories": 0,
+     "policy_age_exceeded_trajectories": 0,
+     "suspended_trajectories": 5,
+     "suspended_env_seconds": 157.264,
+     "suspend_retried_turns": 4,
+     "cross_version_tokens": 21908,
+     "trained_response_tokens": 124614,
+     "cross_version_truncated_fraction": null,
+     "cross_version_scored_tokens": 0,
+     "cross_version_unscored_samples": 8,
+     "trained_groups_with_older_tokens": 2,
+     "carried_out_groups": 3
+    },
+    "4": {
+     "suspended_groups": 5,
+     "suspended_done_groups": 0,
+     "resumed_groups": 3,
+     "resumed_done_groups": 1,
+     "over_age_cancelled_groups": 1,
+     "over_age_cancelled_samples": 0,
+     "over_age_cancelled_tokens": 0,
+     "over_age_unknown_groups": 1,
+     "suspend_expired_trajectories": 0,
+     "policy_age_exceeded_trajectories": 0,
+     "suspended_trajectories": 4,
+     "suspended_env_seconds": 135.419,
+     "suspend_retried_turns": 0,
+     "cross_version_tokens": 22666,
+     "trained_response_tokens": 151316,
+     "cross_version_truncated_fraction": null,
+     "cross_version_scored_tokens": 0,
+     "cross_version_unscored_samples": 8,
+     "trained_groups_with_older_tokens": 2,
+     "carried_out_groups": 5
+    },
+    "5": {
+     "resumed_groups": 5,
+     "resumed_done_groups": 0,
+     "suspend_expired_trajectories": 0,
+     "policy_age_exceeded_trajectories": 0,
+     "suspended_trajectories": 3,
+     "suspended_env_seconds": 103.226,
+     "suspend_retried_turns": 2,
+     "cross_version_tokens": 33556,
+     "trained_response_tokens": 145368,
+     "cross_version_truncated_fraction": null,
+     "cross_version_scored_tokens": 0,
+     "cross_version_unscored_samples": 8,
+     "trained_groups_with_older_tokens": 2,
+     "carried_out_groups": 1
+    }
+   },
+   "carry_totals": {
+    "suspended_groups": 21,
+    "resumed_groups": 21,
+    "over_age_cancelled_groups": 5,
+    "over_age_cancelled_samples": 0,
+    "over_age_cancelled_tokens": 0,
+    "over_age_unknown_groups": 5,
+    "suspend_expired_trajectories": 0,
+    "policy_age_exceeded_trajectories": 0,
+    "suspended_trajectories": 15,
+    "suspend_retried_turns": 8,
+    "cross_version_tokens": 148979,
+    "trained_response_tokens": 811187,
+    "trained_groups_with_older_tokens": 12
+   },
+   "suspended_env_seconds_total": 908.678,
+   "carried_trained_trajectories": 48,
+   "carried_trajectory_examples": [
+    {
+     "rollout_id": 1,
+     "started_rollout_id": 0,
+     "policy_versions": [
+      [
+       0,
+       0,
+       57
+      ],
+      [
+       0,
+       1710,
+       1881
+      ],
+      [
+       0,
+       1929,
+       1974
+      ],
+      [
+       0,
+       2022,
+       2089
+      ],
+      [
+       0,
+       2380,
+       2442
+      ],
+      [
+       0,
+       2479,
+       2684
+      ],
+      [
+       0,
+       2779,
+       2973
+      ],
+      [
+       0,
+       3451,
+       4712
+      ],
+      [
+       0,
+       4802,
+       5533
+      ],
+      [
+       0,
+       5822,
+       6394
+      ],
+      [
+       0,
+       6482,
+       6957
+      ],
+      [
+       0,
+       8239,
+       9095
+      ]
+     ],
+     "task_id": "bn-fit-modify",
+     "reward": 0.0,
+     "suspended_seconds": null
+    },
+    {
+     "rollout_id": 1,
+     "started_rollout_id": 0,
+     "policy_versions": [
+      [
+       0,
+       0,
+       61
+      ],
+      [
+       0,
+       1714,
+       2769
+      ],
+      [
+       0,
+       2882,
+       4061
+      ],
+      [
+       0,
+       4131,
+       4173
+      ],
+      [
+       0,
+       4464,
+       4517
+      ],
+      [
+       0,
+       4554,
+       5951
+      ],
+      [
+       0,
+       5990,
+       6971
+      ],
+      [
+       0,
+       7783,
+       10042
+      ],
+      [
+       0,
+       10117,
+       10680
+      ],
+      [
+       0,
+       10757,
+       10875
+      ]
+     ],
+     "task_id": "bn-fit-modify",
+     "reward": 0.0,
+     "suspended_seconds": null
+    },
+    {
+     "rollout_id": 1,
+     "started_rollout_id": 0,
+     "policy_versions": [
+      [
+       0,
+       0,
+       196
+      ],
+      [
+       0,
+       4405,
+       4632
+      ],
+      [
+       0,
+       4702,
+       4750
+      ],
+      [
+       0,
+       5041,
+       5093
+      ],
+      [
+       0,
+       5130,
+       5412
+      ],
+      [
+       0,
+       5482,
+       5535
+      ],
+      [
+       0,
+       5572,
+       5877
+      ],
+      [
+       0,
+       7355,
+       7434
+      ],
+      [
+       0,
+       7471,
+       7855
+      ],
+      [
+       0,
+       7957,
+       8467
+      ],
+      [
+       0,
+       9012,
+       9524
+      ]
+     ],
+     "task_id": "bn-fit-modify",
+     "reward": 0.0,
+     "suspended_seconds": null
+    },
+    {
+     "rollout_id": 1,
+     "started_rollout_id": 0,
+     "policy_versions": [
+      [
+       0,
+       0,
+       93
+      ],
+      [
+       0,
+       1765,
+       1928
+      ],
+      [
+       0,
+       1998,
+       2076
+      ],
+      [
+       0,
+       2113,
+       2167
+      ],
+      [
+       0,
+       2458,
+       2537
+      ],
+      [
+       0,
+       2606,
+       2669
+      ],
+      [
+       0,
+       2855,
+       2922
+      ],
+      [
+       0,
+       3460,
+       3678
+      ],
+      [
+       0,
+       3742,
+       3910
+      ],
+      [
+       0,
+       4080,
+       4273
+      ],
+      [
+       0,
+       4486,
+       4677
+      ],
+      [
+       0,
+       4854,
+       4933
+      ]
+     ],
+     "task_id": "bn-fit-modify",
+     "reward": 0.0,
+     "suspended_seconds": null
+    },
+    {
+     "rollout_id": 1,
+     "started_rollout_id": 0,
+     "policy_versions": [
+      [
+       0,
+       0,
+       1590
+      ]
+     ],
+     "task_id": "cancel-async-tasks",
+     "reward": 0.0,
+     "suspended_seconds": null
+    }
+   ],
+   "grad_norm": [
+    0.035119518637657166,
+    0.04925018921494484,
+    0.05074036121368408,
+    0.044891372323036194,
+    0.04916577786207199,
+    0.028037991374731064
+   ],
+   "grad_norm_finite": true,
+   "invariant_failed": 0,
+   "policy_age_warnings": 0,
+   "policy_age_fallbacks": 0,
+   "trained_tis_clipfrac": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ]
+  }
+ },
+ "criteria": {
+  "validity_rc0_6rounds": true,
+  "validity_m1_resumed_rounds_ge3": true,
+  "validity_m1_trained_groups_with_older_tokens": true,
+  "1_m1_round_median_le_0.8_mb": true,
+  "1_ratio": 0.5579974909033028,
+  "2_m1_discarded_trajectories": 20,
+  "2_m0_discarded_trajectories": 140,
+  "2_traj_ratio_le_0.5": true,
+  "2_m1_known_discarded_tokens": 140897,
+  "2_m1_unknown_token_groups": 5,
+  "2_m0_discarded_tokens": 643833,
+  "3_reward_m1_within_1sd_mb": true,
+  "3_reward_diff_over_sd": 0.0,
+  "3_tokens_m1_within_1sd_mb": true,
+  "3_tokens_diff_over_sd": -0.04548767357486795,
+  "5_no_round_ge_0.5": true,
+  "5_fractions": [
+   null,
+   null,
+   null,
+   null,
+   null,
+   null
+  ],
+  "6_numeric": true
+ }
+}

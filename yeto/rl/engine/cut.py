@@ -327,8 +327,16 @@ def context_problems(
     for key in DATA_CURSOR_FIELDS:
         if not isinstance(data.get(key), int):
             out.append(f"data: cursor field {key!r} missing")
-    if data.get("buffer_length") not in (None, 0):
-        out.append(f"data: engine data buffer holds {data.get('buffer_length')} groups (not carried by a cut)")
+    buffered = data.get("buffer_length")
+    if buffered not in (None, 0):
+        # agentic-rollout-utilization 3.3 (Miles wiring): under a limit > 0 the
+        # in-flight section carries the buffered groups (``engine_state``).
+        carried = len({t.get("group_id") for t in in_flight if t.get("engine_state") is not None})
+        if max_policy_age == 0:
+            out.append(f"data: engine data buffer holds {buffered} groups (not carried by a cut)")
+        elif carried != buffered:
+            out.append(f"data: engine data buffer holds {buffered} groups but the in-flight "
+                       f"section carries {carried}")
     if max_policy_age == 0 and in_flight:
         out.append(f"in_flight: {len(in_flight)} trajectories but max_policy_age is 0 (must be empty)")
     if max_policy_age > 0:
@@ -423,6 +431,8 @@ class CutContext:
     ledger: Mapping[str, Any]
     outer: Mapping[str, Any]
     shared_filesystem: bool = True
+    # agentic-rollout-utilization 3.3: unfinished trajectories (limit > 0 only)
+    in_flight: tuple[Mapping[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)

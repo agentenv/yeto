@@ -90,6 +90,10 @@ FORK_COMMITS: frozenset[str] = frozenset({
     # 2f7871fb2 = efbbc63ea + inference_rollout_train.abort tally / failed surplus group
     # tolerated: rollout bookkeeping only, no loss path.
     "2f7871fb2e80d37420b16ef81f001c7b0ba8e32e",
+    # ddce20992 = 2f7871fb2 + s18-agentic-suspend (inference_rollout_train/common suspend/resume of
+    # agentic groups between model turns, arguments.py flags, utils/misc.py hook loader):
+    # rollout scheduling only, no loss path.
+    "ddce20992c9ee82270a22e259e9e2bf55f3053d1",
 })
 
 MECHANISMS = {name: ("losses", name) for name in VARIANTS}

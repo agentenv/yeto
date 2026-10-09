@@ -862,7 +862,8 @@ def translate_run_config(
                 f"--rl-max-policy-age {max_policy_age} needs an algorithm spec with "
                 f"execution.max_policy_staleness >= {max_policy_age} (and a TIS correction); "
                 f"the run's spec tolerates {tolerated}")
-        values.extend(policy_age_argv(max_policy_age))
+        values.extend(policy_age_argv(
+            max_policy_age, agentic=bool(getattr(config.agent, "custom_agent_function_path", None))))
     values.extend(critic_load_argv(config, algorithm))
 
     evaluation = config.eval

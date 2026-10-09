@@ -217,7 +217,8 @@ def test_cross_version_truncation_estimate_with_known_ratios(sink):
     assert math.isclose(out["cross_version_truncated_fraction"], 0.5)
     assert carry_over.estimate_cross_version_truncation(args, [s], 4, lambda _s: None) == {
         "cross_version_truncated_fraction": None, "cross_version_scored_tokens": 0,
-        "cross_version_unscored_samples": 1}
+        "cross_version_unscored_samples": 1,
+        "cross_version_unscored_reasons": {"scorer returned nothing": 1}}
     hook.put_policy_token(tok(4), sink)
     payload = round_metadata(args, [[s]], sink, scorer=lambda _s: current)
     handle = handle_from_metadata(payload, rollout_id=4, policy_version=4, policy_hash=HASHES[4],
@@ -238,9 +239,10 @@ def test_governor_fallback_lowers_the_rollout_limit_through_the_sink(sink, tmp_p
 def test_miles_stage_two_support_and_single_turn_check():
     from yeto.rl.adapters.miles.policy_age import SUPPORT, check_task, policy_age_argv
 
-    assert (SUPPORT.stage, SUPPORT.max_policy_age) == (2, 1)
+    # agentic-rollout-utilization 5 (stage 3) raised the declared stage; limit still <= 1
+    assert (SUPPORT.stage, SUPPORT.max_policy_age) == (3, 1)
     SUPPORT.check(1)
-    with pytest.raises(PolicyAgeError, match="stage 2"):
+    with pytest.raises(PolicyAgeError, match="at most 1"):
         SUPPORT.check(2)
     assert policy_age_argv(0) == () and policy_age_argv(1) == ("--partial-rollout",)
     check_task(1)

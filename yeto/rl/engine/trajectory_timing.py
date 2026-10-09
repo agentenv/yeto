@@ -10,8 +10,9 @@ durations:
 * ``turn_tool_seconds[i]``: one tool execution (sandbox command / submit);
 * judging is the verifier's ``evaluate_time`` (recorded by the trusted layer).
 
-``len(turn_generation_seconds) == len(turn_tool_seconds) + 1`` and their sum is
-the worker's wall time (``worker_seconds``), so a tape can split each
+``len(turn_generation_seconds) == len(turn_tool_seconds) + 1`` and their sum
+(plus ``suspended_seconds``, time parked between two model turns across a
+rollout boundary, 5.1) is the worker's wall time (``worker_seconds``), so a tape can split each
 trajectory's generation segment into the three phases. Wall-clock
 ``trajectory_started_at``/``trajectory_ended_at`` and the sandbox cold start
 (``sandbox_start_seconds``: environment acquire) are recorded by the harness.
@@ -35,6 +36,9 @@ TIMING_FIELDS: dict[str, tuple[type, ...]] = {
     # meaning (Miles: sums of the per-turn lists; verl: agent-loop timers).
     "generation_seconds": (float,),
     "tool_seconds": (float,),
+    # agentic-rollout-utilization 5.1: time parked between two model turns while
+    # suspended across a rollout boundary (absent when never suspended).
+    "suspended_seconds": (float,),
 }
 MAX_TURNS_RECORDED = 256
 
@@ -46,6 +50,22 @@ class PhaseClock:
         self._in_tool = False
         self.generation: list[float] = []
         self.tool: list[float] = []
+        self.suspended = 0.0
+        self._suspend_mark: float | None = None
+
+    def enter_suspend(self) -> None:
+        """Parked at the model-turn gate (between turns): this time is kept out of
+        the generation phase and reported as ``suspended_seconds``."""
+        if self._suspend_mark is None:
+            self._suspend_mark = self._clock()
+
+    def exit_suspend(self) -> None:
+        if self._suspend_mark is None:
+            return
+        parked = self._clock() - self._suspend_mark
+        self._suspend_mark = None
+        self.suspended += parked
+        self._mark += parked  # the open (generation) phase does not include it
 
     def enter_tool(self) -> None:
         if self._in_tool:
@@ -63,10 +83,13 @@ class PhaseClock:
 
     def finish(self) -> dict[str, Any]:
         """Close the open phase and return the metrics fields."""
+        self.exit_suspend()
         now = self._clock()
         (self.tool if self._in_tool else self.generation).append(now - self._mark)
         self._mark, self._in_tool = now, False
+        extra = {"suspended_seconds": round(self.suspended, 3)} if self.suspended else {}
         return {
+            **extra,
             "worker_seconds": round(now - self._start, 3),
             "generation_seconds": round(sum(self.generation), 3),
             "tool_seconds": round(sum(self.tool), 3),
