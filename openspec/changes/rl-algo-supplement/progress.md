@@ -80,7 +80,8 @@
 
 ### 1.3 测试基线
 - 命令（docs/TESTING.md 本机安全测试集；原 `/tmp/yeto-venv` 全量命令不再适用）：`PATH="$HOME/.cargo/bin:$PATH" PYTHONPATH=. OMP_NUM_THREADS=1 /home/michael/work/yeto-test-venv/bin/python -m pytest tests -q -p no:cacheprovider -m "not gpu" -rfEs`
-- 基线提交：agentenv/main 512bb773。结果：9 failed、5061 passed、47 skipped、23 deselected（ray_local），439 s。失败 id 见 `baseline-failures.txt`（attestation 1、infra_switches 1、multinode m4x1/m5/m5_h100 7）。这些失败在本 change 改动之前就存在，本 change 不处理。
+- 基线提交：agentenv/main 512bb773。第一次全量：9 failed、5061 passed、47 skipped、23 deselected（ray_local），439 s。这 9 个都是环境失败：7 个是 `s1run.sh` 线程守卫（"3098 user threads (max 2900)"，当时本机同时在跑 Miles CPU 测试），2 个是 attestation/infra_switches。在干净的 512bb773 worktree 上单独重跑这 9 个：9 passed。所以有效基线失败集合为空，记录见 `baseline-failures.txt`。
+- 改动后全量（本分支）：第一次 8 failed，都是 `test_decoupling_golden.py`，原因是 `rollout_meta_hook.py` 源码哈希变化（预期）；已重新生成样本并写入 `yeto-framework-decoupling/hash-migration.md`。最终结果见 PR 描述。
 
 ### 2.1 / 2.2 clipfrac
 - 结论：CPU 上不能复现。compile 与 eager 的 clipfrac 逐位相同，并且等于手算（含 eps 相等且为同一对象、特化顺序反转）。见 `evidence/clipfrac-cpu/report.md`。

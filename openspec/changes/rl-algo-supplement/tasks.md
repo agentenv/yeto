@@ -8,7 +8,7 @@
 
 - [x] 1.1 编写阶段一 GPU 测试计划 `evidence/phase1-plan.md`：对 4.x、5.x、6.x 的每一项逐条列出判据、最小证据、对照组、卡型、硬超时、费用上限和唯一前缀，并汇总阶段一上限 ≤ $35。验证：计划已提交，并得到**用户确认**（确认记录写入 `progress.md`）。确认之前不得开始第 2 组以后的 apply。（S14：未做，`evidence/phase1-plan.md` 不存在；需先定卡型，见 §13 Q1） **S19 10-09：计划 `evidence/phase1-plan.md` 已定稿；主 agent 10-09 代用户确认（沿用 S14 Q1–Q3；6.2 不做，除非 4.x 需要），记录见 progress.md "S19 阶段一门禁"。**
 - [x] 1.2 核实前置状态：trainer v2 补丁（GMPO num/den）是否已合入 integ-decl；1a G3（g3c/g3d）所用的 launcher 回传磁带 harness 是否能直接复用于 1b；当前 pin 与 `FORK_COMMITS`。验证：结论与提交号或行号写入 `progress.md`。补丁未合入时，按 design D5 把 GMPO 标为暂缓。（S14 对账：三项结论见 progress.md §1，trainer v2 已合入 `yeto/rl/engine/miles_adapter/trainer.py:101,601-611`；磁带回传 harness 已被 seq-and-adv attempt 6 与 critic-family G1 复用；pin `c35702e` 在 `loss_variants.FORK_COMMITS`。GMPO 不暂缓。）
-- [x] 1.3 记录全量测试基线（`OMP_NUM_THREADS=1 /tmp/yeto-venv/bin/python -m pytest -q --continue-on-collection-errors -p no:cacheprovider -rfE`），失败 id 存入 `baseline-failures.txt`。验证：文件存在，命令与计数写入 `progress.md`。（S14：未做；最近全量基线只有 `infra-drafts/s13-full2-pytest.log`（68 failed/4084 passed/26 errors，HEAD 未记录），不能当 e8d387ac 基线） **S19 10-09：改用本机安全测试集（docs/TESTING.md），main 512bb773：9 failed / 5061 passed / 47 skipped / 23 deselected，失败 id 见 `baseline-failures.txt`，命令见 progress.md。**
+- [x] 1.3 记录全量测试基线（`OMP_NUM_THREADS=1 /tmp/yeto-venv/bin/python -m pytest -q --continue-on-collection-errors -p no:cacheprovider -rfE`），失败 id 存入 `baseline-failures.txt`。验证：文件存在，命令与计数写入 `progress.md`。（S14：未做；最近全量基线只有 `infra-drafts/s13-full2-pytest.log`（68 failed/4084 passed/26 errors，HEAD 未记录），不能当 e8d387ac 基线） **S19 10-09：改用本机安全测试集（docs/TESTING.md），main 512bb773 有效基线失败集合为空（首跑 9 个环境失败，干净重跑全过），见 `baseline-failures.txt` 与 progress.md。**
 
 ## 2. clipfrac 定性与 fork 观测指标（CPU，fork 小提交）
 

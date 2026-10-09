@@ -1,9 +1,15 @@
-FAILED tests/test_rl_attestation_fingerprint.py::test_both_paths_hash_the_same_launch_with_the_same_function
-FAILED tests/test_rl_infra_switches.py::test_run_ports_island_wires_elastic_before_ray_and_into_compose
-FAILED tests/test_rl_multinode_m4x1.py::test_launcher_accepts_m4x1_argv[m4a1]
-FAILED tests/test_rl_multinode_m4x1.py::test_launcher_accepts_m4x1_argv[m4b1]
-FAILED tests/test_rl_multinode_m4x1.py::test_s1run_m4x1_argv_identical_except_rebind_and_itype
-FAILED tests/test_rl_multinode_m4x1.py::test_s1run_m4x1_h100_and_store_required
-FAILED tests/test_rl_multinode_m5_h100.py::test_s1run_m5_h100_dry_args
-FAILED tests/test_rl_multinode_m5_h100.py::test_s1run_m5_refuses_tp8_mismatch
-FAILED tests/test_rl_multinode_m5.py::test_s1run_m5_dry_args
+# rl-algo-supplement 1.3 baseline (agentenv/main 512bb773, local safe suite, 2026-10-09)
+# Effective baseline failure set: EMPTY (0 failed).
+# The first full run reported the 9 ids below; all 9 were environment failures, not code failures:
+#   7 x tests/multinode_gpu/s1run.sh thread guard "abort: 3098 user threads (max 2900)"
+#     (a concurrent Miles CPU test run on this machine), 2 x attestation/infra_switches.
+# The same 9 ids rerun on a clean 512bb773 worktree: 9 passed.
+# FAILED tests/test_rl_attestation_fingerprint.py::test_both_paths_hash_the_same_launch_with_the_same_function
+# FAILED tests/test_rl_infra_switches.py::test_run_ports_island_wires_elastic_before_ray_and_into_compose
+# FAILED tests/test_rl_multinode_m4x1.py::test_launcher_accepts_m4x1_argv[m4a1]
+# FAILED tests/test_rl_multinode_m4x1.py::test_launcher_accepts_m4x1_argv[m4b1]
+# FAILED tests/test_rl_multinode_m4x1.py::test_s1run_m4x1_argv_identical_except_rebind_and_itype
+# FAILED tests/test_rl_multinode_m4x1.py::test_s1run_m4x1_h100_and_store_required
+# FAILED tests/test_rl_multinode_m5_h100.py::test_s1run_m5_h100_dry_args
+# FAILED tests/test_rl_multinode_m5_h100.py::test_s1run_m5_refuses_tp8_mismatch
+# FAILED tests/test_rl_multinode_m5.py::test_s1run_m5_dry_args
