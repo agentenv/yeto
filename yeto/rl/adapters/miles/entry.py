@@ -1624,6 +1624,9 @@ def run_ports_island(
         miles_args, launch, algorithm, yeto_policy_sync=yeto_policy_sync,
         harness_preflight=harness_preflight,
     )  # contract preflight(...) + harness preflight: before connect_island_ray()
+    from . import eval_wiring
+
+    eval_guard = eval_wiring.eval_guard_preflight(miles_args)  # D6.c: before any GPU action
     from .e2_harness import load_plan as load_e2_harness_plan
 
     e2_plan = load_e2_harness_plan()  # TEST ONLY: None unless an E2 harness snapshot
@@ -1633,6 +1636,15 @@ def run_ports_island(
         # the harness cuts need the rollout data cursor (rollout-side metadata)
         miles_args.yeto_rl_elastic_metadata = True
         os.environ[ELASTIC_METADATA_ENV] = "1"
+    from yeto.rl.engine.telemetry import StartupTelemetry
+
+    # fleet-dashboard 8.4: heartbeat/resource sampling from here until driver.run()
+    # takes over (same opt-in intervals as the driver's; tape unchanged when unset)
+    startup = StartupTelemetry(
+        lambda event, **fields: _append_rl_event(miles_args, {"event": event, **fields}),
+        heartbeat_interval_s=getattr(miles_args, "yeto_rl_heartbeat_interval_s", None),
+        resource_interval_s=getattr(miles_args, "yeto_rl_resource_sample_interval_s", None),
+    ).__enter__()  # stopped before driver.run() and in the finally below
     connect_island_ray(miles_args=miles_args)
     topology = getattr(launch.placement, "topology", None)
     if topology is not None and topology.nodes > 1:
@@ -1645,6 +1657,7 @@ def run_ports_island(
         reconcile_gpu_pool_preflight(elastic, topology, miles_args, placement=launch.placement)
         # rl-multinode-island D3 head pin: trainer block = node 0 = Ray head, fail closed
         pin_placement_group_to_head(topology.gpus_per_node)
+    startup.step("ray_connected")
 
     from miles.ray.placement_group import create_rollout_components, create_training_models
     from miles.ray.rollout.eval_dispatch import EvalDispatcher
@@ -1671,7 +1684,9 @@ def run_ports_island(
         init_orchestration_script(miles_args, disposer=disposer)
         controller, executor, _ = await create_rollout_components(miles_args)
         disposer.add(controller, executor)
+        startup.step("engine_ready")
         actor, critic = await create_training_models(miles_args, executor)
+        startup.step("weights_loaded")
         # rl-algo-critic-family 3.1: Miles creates a critic iff use_critic
         # (estimator ppo); it must agree with the AlgorithmSpec.
         if (critic is not None) != bool(algorithm.execution.needs_critic):
@@ -1739,6 +1754,7 @@ def run_ports_island(
         driver.heartbeat_interval_s = getattr(miles_args, "yeto_rl_heartbeat_interval_s", None)
         driver.resource_sample_interval_s = getattr(
             miles_args, "yeto_rl_resource_sample_interval_s", None)
+        eval_wiring.attach(driver, miles_args, eval_guard)  # rl-eval-difficulty-buckets 2.2/5.2
         if e2_plan is not None:  # TEST ONLY: E2 GPU harness instead of the training loop
             from .e2_harness import HarnessContext, run_harness
 
@@ -1748,11 +1764,13 @@ def run_ports_island(
                 backend_fingerprint=fingerprint, plan=e2_plan,
             ))
             return driver.published_state
+        startup.__exit__(None, None, None)  # the driver's own heartbeat starts in run()
         return driver.run()
     except BaseException as exc:
         error = exc
         raise
     finally:
+        startup.__exit__(None, None, None)
         try:
             runner.run(
                 disposer.__aexit__(

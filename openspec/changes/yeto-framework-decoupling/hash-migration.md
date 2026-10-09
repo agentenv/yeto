@@ -125,3 +125,7 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
 - `algorithm_sha256`、契约哈希、Miles 命令行：8 个标准样本全部不变（身份哈希是并列的第三个哈希，不并入前两个）。
 - 标准样本新增字段 `backend_identity`：Miles ports 身份 `{engine: miles, engine_commit: 8bc52237…, device_family: nvidia, param_map_sha256: 36c37d69…}`，哈希 `9d5696a3d3b6e6d802115ef3deb970b5e4d9206d1751d71f9075a849d2909f8d`。
 - 运行时变化（离线样本记不到）：RL 岛发给 syncer 的会话契约从"布局指纹"改为"布局指纹 + 身份哈希"的 sha256；dense 与 SAO 的会话契约输入加入 legacy Miles 身份哈希。新旧版本岛混跑会被 syncer 拒绝；阶段 5 之前的 syncer 检查点不能续跑。未取得真 syncer 与真机证据。
+
+## C6b 评测岛（分支 s17-eval-island，基于 s17-decouple-p4 f7fe923e，2026-10-08 夜）
+
+只变一处：`yeto/rl/adapters/miles/rollout_meta_hook.py` 加了训练批次按难度分桶（rl-eval-difficulty-buckets 4.1），8 个标准样本里该插件的 `source_sha256` 由 `af10161a148d3059148342896778fec5b915c90ed96258ccab1754f1805cda61` 改为 `605e0ee1e23444cd4710350fe64f59808658605ef0096ccad03d4e7a61585fca`。该哈希不进 `AlgorithmSpec.sha256()`，8 个配置的算法哈希、契约哈希不变；`fake_engine_tapes.json` 逐字节不变。与阶段 5 合并时如两边都改了 rollout_meta_hook，以合并后源码重新生成（`python tests/decoupling_golden.py --write`）。
