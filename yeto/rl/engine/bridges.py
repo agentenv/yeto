@@ -755,11 +755,40 @@ class DualStrictAvgSync:
         self.critic = StrictAvgSync(self._critic_config(driver), client_factory=self.critic_client_factory)
         critic = self.critic.start(self.view)
         start = self.actor.start(driver)
+        if critic.rollout_id == start.rollout_id - 1 and not critic.finished:
+            critic = self._critic_catchup(driver, critic.rollout_id, start)
         if critic.rollout_id != start.rollout_id or critic.finished != start.finished:
             raise CrossChannelCommitError(
                 f"actor channel starts at round {start.rollout_id}, critic channel at {critic.rollout_id}")
         self._remember(driver, start.rollout_id)
         return start
+
+    def _critic_catchup(self, driver: IslandDriver, version: int, actor: SyncStart) -> SyncStart:
+        """The island died after the actor channel committed round ``version + 1``
+        but before its critic push for that round reached the critic syncer (a
+        ~2.4 GB upload; s19-ppo-g3-20261009b). The fixed-roster critic syncer still
+        waits for this learner's round-``version + 1`` contribution, and the trained
+        critic of that round is lost. Submit the committed critic unchanged (zero
+        delta) so the critic channel also reaches ``version + 1``; the other islands'
+        critic updates are kept. Recorded as ``rl_critic_catchup``."""
+        driver.phase("critic_catchup", policy_version=version + 1)
+        stats = LocalRoundStats(
+            island_id=self.config.learner_id, local_round_id=version + 1,
+            base_policy_version=version, active_groups=0, completed_groups=0,
+            cancelled_groups=0, completed_trajectories=0, action_tokens=0,
+            tool_wait_seconds=0.0, group_p50_seconds=0.0, group_p95_seconds=0.0,
+            group_p99_seconds=0.0, reward_mean=0.0, reward_std=0.0,
+            zero_variance_group_ratio=0.0, mean_kl=None, ess_ratio=None,
+            clip_fraction=None, delta_l2_norm=0.0, rollout_seconds=0.0, train_seconds=0.0)
+        self.critic._submit(self.view, rollout_id=version, stats=stats)
+        state = self.critic._await(self.view, rollout_id=version)
+        if state.policy_version != actor.rollout_id:
+            raise CrossChannelCommitError(
+                f"critic catch-up returned v{state.policy_version}, actor is at v{actor.rollout_id}")
+        boundary = self.critic._commit(self.view, state)
+        driver.emit("rl_critic_catchup", policy_version=state.policy_version,
+                    **{"sync/global_critic_hash": state.policy_tensor_hash()})
+        return SyncStart(boundary.state, state.policy_version, boundary.stop)
 
     def restart_cursor_fallback(self, current, start_rollout_id: int):
         return self.actor.restart_cursor_fallback(current, start_rollout_id)
