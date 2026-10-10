@@ -1122,6 +1122,12 @@ def _apply_test_debug_rollout(args: Any) -> Any:
             raise MilesConfigError(f"{TEST_DEBUG_ROLLOUT_ENV} must contain {{rollout_id}}")
         print(f"[rl] TEST ONLY: --load-debug-rollout-data {path} (debug_train_only)", flush=True)
         args.load_debug_rollout_data = path
+        backend = os.environ.get("YETO_TEST_MILES_ATTENTION_BACKEND")
+        if backend:  # e.g. "fused" on a pre-Hopper test GPU (flash_attn.cute needs sm90)
+            from megatron.core.transformer.enums import AttnBackend
+
+            args.attention_backend = AttnBackend[backend]
+            print(f"[rl] TEST ONLY: attention_backend={backend}", flush=True)
     return args
 
 
