@@ -289,3 +289,22 @@ def test_verl_main_keeps_npus_visible_only_on_ascend(monkeypatch):
     monkeypatch.setattr(cat, "device_family", lambda *_a: "ascend")
     verl_main._keep_npu_visible_in_cpu_actors()
     assert os.environ[verl_main.NPU_NOSET_ENV] == "1"
+
+
+def test_fully_async_plan_sets_trainer_device_npu_on_ascend(monkeypatch):
+    from types import SimpleNamespace as NS
+
+    from yeto.hw import catalog as cat
+    from yeto.rl.adapters.verl import island_entry
+
+    from yeto.rl.engine.algorithm import AlgorithmSpec, CorrectionSpec, ExecutionSpec
+
+    spec = AlgorithmSpec(execution=ExecutionSpec(max_policy_staleness=1),
+                         correction=CorrectionSpec(method="tis", tis_clip=2.0, tis_clip_low=0.0)).to_dict()
+    args = NS(groups_per_round=8, samples_per_group=4, global_rounds=3)
+    monkeypatch.setattr(cat, "device_family", lambda *_a: "ascend")
+    out, _ = island_entry.fully_async_plan(1, [], spec, args, "none")
+    assert "trainer.device=npu" in out
+    monkeypatch.setattr(cat, "device_family", lambda *_a: "nvidia")
+    out, _ = island_entry.fully_async_plan(1, [], spec, args, "none")
+    assert not any(o.startswith("trainer.device=") for o in out)
