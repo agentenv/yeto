@@ -1,0 +1,97 @@
+{
+ "events": 0,
+ "gpu_lines": [
+  "\u001b[36m(yeto-head-job, pid=2852)\u001b[0m [s19-sao-g3-20261010a-l0-modal] [modal-island 0] requested H100!:1, got ['NVIDIA H100 80GB HBM3']",
+  "\u001b[36m(yeto-head-job, pid=2852)\u001b[0m [s19-sao-g3-20261010a-l1-modal] [modal-island 1] requested H100!:1, got ['NVIDIA H100 80GB HBM3']"
+ ],
+ "kill": null,
+ "missing": [
+  "rl_learner_finalized after the kill only from islands []",
+  "v1 actor: applies only from islands []",
+  "v1 critic: applies only from islands []",
+  "v1 critic_masters: applies only from islands []",
+  "v2 actor: applies only from islands []",
+  "v2 critic: applies only from islands []",
+  "v2 critic_masters: applies only from islands []",
+  "v3 actor: applies only from islands []",
+  "v3 critic: applies only from islands []",
+  "v3 critic_masters: applies only from islands []"
+ ],
+ "notes": [
+  "NOKILL: check 2 (kill/resume) not part of this run"
+ ],
+ "per_version": {
+  "0": {
+   "actor": {
+    "hashes": [],
+    "islands": [],
+    "records": 0
+   },
+   "critic": {
+    "hashes": [],
+    "islands": [],
+    "records": 0
+   },
+   "critic_masters": {
+    "hashes": [],
+    "islands": [],
+    "records": 0
+   }
+  },
+  "1": {
+   "actor": {
+    "hashes": [],
+    "islands": [],
+    "records": 0
+   },
+   "critic": {
+    "hashes": [],
+    "islands": [],
+    "records": 0
+   },
+   "critic_masters": {
+    "hashes": [],
+    "islands": [],
+    "records": 0
+   }
+  },
+  "2": {
+   "actor": {
+    "hashes": [],
+    "islands": [],
+    "records": 0
+   },
+   "critic": {
+    "hashes": [],
+    "islands": [],
+    "records": 0
+   },
+   "critic_masters": {
+    "hashes": [],
+    "islands": [],
+    "records": 0
+   }
+  },
+  "3": {
+   "actor": {
+    "hashes": [],
+    "islands": [],
+    "records": 0
+   },
+   "critic": {
+    "hashes": [],
+    "islands": [],
+    "records": 0
+   },
+   "critic_masters": {
+    "hashes": [],
+    "islands": [],
+    "records": 0
+   }
+  }
+ },
+ "problems": [],
+ "rc": "rc=1 (2 yeto-head-job michael 6 mins ago 6 mins ago 6m 23s 1x[CPU:1+] FAILED ~/sky_logs/sky-2026-10-10-02-27-11-916947 - )",
+ "resume": null,
+ "verdict": "INCOMPLETE"
+}

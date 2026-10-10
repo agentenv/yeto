@@ -1,0 +1,146 @@
+{
+ "events": 656,
+ "gpu_lines": [
+  "\u001b[36m(yeto-head-job, pid=2824)\u001b[0m [s19-sao-g3-20261010b-l0-modal] [modal-island 0] requested H100!:1, got ['NVIDIA H100 80GB HBM3']",
+  "\u001b[36m(yeto-head-job, pid=2824)\u001b[0m [s19-sao-g3-20261010b-l1-modal] [modal-island 1] requested H100!:1, got ['NVIDIA H100 80GB HBM3']"
+ ],
+ "kill": null,
+ "missing": [],
+ "notes": [
+  "NOKILL: check 2 (kill/resume) not part of this run"
+ ],
+ "per_version": {
+  "0": {
+   "actor": {
+    "hashes": [
+     "f532d77408ad236f20f1de8b9b1f92b2fd8acfcb0f1207d08b9dc707cd064919"
+    ],
+    "islands": [
+     0,
+     1
+    ],
+    "records": 2
+   },
+   "critic": {
+    "hashes": [
+     "2245d47471ff05a0978cf7937d6988739971a8ef3118a8626fd3384a353608e5"
+    ],
+    "islands": [
+     0,
+     1
+    ],
+    "records": 2
+   },
+   "critic_masters": {
+    "hashes": [
+     "0df0b96825aeade9470a05f45ae8aa14c8fe18043db2c31d11604bc96b4af13c"
+    ],
+    "islands": [
+     0,
+     1
+    ],
+    "records": 2
+   }
+  },
+  "1": {
+   "actor": {
+    "hashes": [
+     "c913ffefbb7049f96af3cdeffb018a3f25160ee1385f4014e1f7028f64c29c03"
+    ],
+    "islands": [
+     0,
+     1
+    ],
+    "records": 2
+   },
+   "critic": {
+    "hashes": [
+     "24841a632e1962d21ad59fc3bbabe68e4e6563213219f578f75117087e846247"
+    ],
+    "islands": [
+     0,
+     1
+    ],
+    "records": 2
+   },
+   "critic_masters": {
+    "hashes": [
+     "0c72715a34e693fc7a5f2b509f277e0c7b19270a8bc371fe333fd3c9f9dd31e4"
+    ],
+    "islands": [
+     0,
+     1
+    ],
+    "records": 2
+   }
+  },
+  "2": {
+   "actor": {
+    "hashes": [
+     "3fbc4f98b79db0bbc5780661b56bfd73d80a485103335b8662efff90170b02aa"
+    ],
+    "islands": [
+     0,
+     1
+    ],
+    "records": 2
+   },
+   "critic": {
+    "hashes": [
+     "2423b6187138ef47084a6206678ef056e5447e231a39a8ba13ea2eaabe16459d"
+    ],
+    "islands": [
+     0,
+     1
+    ],
+    "records": 2
+   },
+   "critic_masters": {
+    "hashes": [
+     "32f1ab1e9b35d70dd97969375cbdca7f77e88279e5abe1a350678101a7d01af4"
+    ],
+    "islands": [
+     0,
+     1
+    ],
+    "records": 2
+   }
+  },
+  "3": {
+   "actor": {
+    "hashes": [
+     "93bb094a62515385d9199bdd36c286e17a487f0cda6a7bd0360f47e30e233791"
+    ],
+    "islands": [
+     0,
+     1
+    ],
+    "records": 2
+   },
+   "critic": {
+    "hashes": [
+     "a58c6fac0b2b1a1b7a78f6da3db21360695dd82bbc288911d6c0ace0ce4731d4"
+    ],
+    "islands": [
+     0,
+     1
+    ],
+    "records": 2
+   },
+   "critic_masters": {
+    "hashes": [
+     "c0214814266b8f49aacc1a760e9914016036af2576b1af55ddf1c5c0cac718cf"
+    ],
+    "islands": [
+     0,
+     1
+    ],
+    "records": 2
+   }
+  }
+ },
+ "problems": [],
+ "rc": "rc=0",
+ "resume": null,
+ "verdict": "PASS"
+}

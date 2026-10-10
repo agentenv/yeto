@@ -1,0 +1,134 @@
+{
+ "events": 302,
+ "gpu_lines": [
+  "\u001b[36m(yeto-head-job, pid=2843)\u001b[0m [s19-ppo-g3-20261009b-l0-modal] [modal-island 0] requested H100!:1, got ['NVIDIA H100 80GB HBM3']",
+  "\u001b[36m(yeto-head-job, pid=2843)\u001b[0m [s19-ppo-g3-20261009b-l1-modal] [modal-island 1] requested H100!:1, got ['NVIDIA H100 80GB HBM3']",
+  "\u001b[36m(yeto-head-job, pid=2843)\u001b[0m [s19-ppo-g3-20261009b-l1-modal] [modal-island 1] requested H100!:1, got ['NVIDIA H100 80GB HBM3']",
+  "\u001b[36m(yeto-head-job, pid=2843)\u001b[0m [s19-ppo-g3-20261009b-l1-modal] [modal-island 1] requested H100!:1, got ['NVIDIA H100 80GB HBM3']"
+ ],
+ "kill": {
+  "call_id": "fc-01M4HHSKGH4S66DVAHRKQRZ8JB",
+  "island": "s19-ppo-g3-20261009b-l1-modal",
+  "kill_unix": 1791591413.0357275,
+  "vN_seen_unix": 1791591392.6761868
+ },
+ "missing": [
+  "rl_learner_finalized after the kill only from islands []",
+  "v1 actor: applies only from islands [1]",
+  "v1 critic: applies only from islands []",
+  "v1 critic_masters: applies only from islands []",
+  "v2 actor: applies only from islands []",
+  "v2 critic: applies only from islands []",
+  "v2 critic_masters: applies only from islands []",
+  "v3 actor: applies only from islands []",
+  "v3 critic: applies only from islands []",
+  "v3 critic_masters: applies only from islands []"
+ ],
+ "notes": [],
+ "per_version": {
+  "0": {
+   "actor": {
+    "hashes": [
+     "a34cd30f37ee5ffaad784b92defd77b3b6ce68095faf29288d5ea460912617c4"
+    ],
+    "islands": [
+     0,
+     1
+    ],
+    "records": 2
+   },
+   "critic": {
+    "hashes": [
+     "541eab67cfe71ab5b2d208e7049ce37f5503a61e8afb8f295052342e923d0258"
+    ],
+    "islands": [
+     0,
+     1
+    ],
+    "records": 3
+   },
+   "critic_masters": {
+    "hashes": [
+     "6519d46caa8007a1acae0c08b64befc779759a1cd023e719bd37afe8c4e21b7b"
+    ],
+    "islands": [
+     0,
+     1
+    ],
+    "records": 3
+   }
+  },
+  "1": {
+   "actor": {
+    "hashes": [
+     "343f41245231ba8cf4250e6679f9e75106937ddb5ea1503a467084f6b6de5142"
+    ],
+    "islands": [
+     1
+    ],
+    "records": 1
+   },
+   "critic": {
+    "hashes": [],
+    "islands": [],
+    "records": 0
+   },
+   "critic_masters": {
+    "hashes": [],
+    "islands": [],
+    "records": 0
+   }
+  },
+  "2": {
+   "actor": {
+    "hashes": [],
+    "islands": [],
+    "records": 0
+   },
+   "critic": {
+    "hashes": [],
+    "islands": [],
+    "records": 0
+   },
+   "critic_masters": {
+    "hashes": [],
+    "islands": [],
+    "records": 0
+   }
+  },
+  "3": {
+   "actor": {
+    "hashes": [],
+    "islands": [],
+    "records": 0
+   },
+   "critic": {
+    "hashes": [],
+    "islands": [],
+    "records": 0
+   },
+   "critic_masters": {
+    "hashes": [],
+    "islands": [],
+    "records": 0
+   }
+  }
+ },
+ "problems": [
+  "resume at actor v1 / critic v0 != last committed v0",
+  "log contains 'CrossChannelCommitError'"
+ ],
+ "rc": "rc=1 ()",
+ "resume": {
+  "first_post_kill_actor_apply": [
+   1,
+   "343f41245231ba8cf4250e6679f9e75106937ddb5ea1503a467084f6b6de5142"
+  ],
+  "first_post_kill_critic_apply": [
+   0,
+   "541eab67cfe71ab5b2d208e7049ce37f5503a61e8afb8f295052342e923d0258"
+  ],
+  "last_committed_before_kill": 0
+ },
+ "verdict": "FAIL"
+}

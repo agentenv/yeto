@@ -78,6 +78,7 @@
 - [ ] 10.2 （后续）yeto：放开 `param_mode=lora`，layout 哈希区分 full/lora，strict-avg 只平均 adapter+value head，checkpoint 按 adapter 粒度。验证：CPU 单测与 dry-run 快照。
 - [ ] 10.3 （后续）评估 critic 与 actor 共享冻结 backbone 的显存收益。验证：设计备忘写入 design 补充。
 - [ ] 10.4 （后续）GPU G1 1×H100 对比 full critic EV 曲线 + G3 1+1×H100 哈希一致。**需用户批准预算与机型**，估 ~3 h 卡时，≈$12（上限 $20）。验证：progress.md 记录。
+- [ ] 10.5 （后续，S19 critic2 记录）critic 写回 `import_critic_state` 把所有 rank 的张量（`by_rank`）发给每个 critic rank。单卡岛无影响；多 rank critic 时载荷按 rank 数放大。改为每个 rank 只收自己的张量。验证：CPU 单测检查每个 rank 收到的载荷只含本 rank。
 
 ## 11. 文档与能力页
 
