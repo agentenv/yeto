@@ -1,0 +1,18 @@
+{
+  "run": "s19-spot52-20261009b",
+  "code": "s19-spot52@4fb89471 (PR #186)",
+  "config": "anchor island 0 = Nebius eu-north1 1xH100 on-demand; droppable island 1 = Modal 1xH100; head = Nebius CPU VM; Qwen3-0.6B LoRA gsm8k; elastic; STEPS=40",
+  "reclaim": "2026-10-09T23:22:45Z modal container stop ta-01M4HESDWC75YH0ZQ0K77MD0QR (island 1, after anchor 1 round / droppable 8 rounds, outer v8)",
+  "rc": 0,
+  "P1": {"verdict": "pass", "evidence": "pool_leave island 1 after outer_step v8; outer_step v8..v23 weights only island 0 (16 versions) before island 1 contributes again at v24"},
+  "P2": {"verdict": "pass", "evidence": "island 1 tape: 1 spot_reclaim role=droppable billing=spot source=modal_signal leave_confirmed=true; launcher line 'signal 2: forwarded to the island script group'"},
+  "P3": {"verdict": "pass", "evidence": "syncer pool_leave island 1 reason=requested dropped_uncommitted=null (empty: island 1's v8 delta was already merged at 23:22:45, LEAVE at 23:22:49). The non-empty dropped_uncommitted path was NOT exercised on GPU (Rust unit test only)."},
+  "P4": {"verdict": "pass", "evidence": "new container ta-01M4HFMZTVMRQB4N32SFWWNA5R started 23:23:29Z; syncer pool_join island 1 catch_up=true base_version=22 at 23:29:02Z; island 1 cursor_restored source=base_version; run has no --rl-checkpoint-store; island 1 weights resume at v24 (carried over) through v39"},
+  "P5": {"verdict": "pass", "evidence": "spot_reclaim.handler_s=0.0 (<=25 s)"},
+  "P6": {"verdict": "pass", "evidence": "try a ~$0.02 + try b ~$7.4 [estimate, upper bound] <= $25"},
+  "overall": "pass",
+  "notes": [
+    "After the rejoin JOIN (23:29) the new container needed ~6 more minutes to start SGLang (scheduler_e2e 356 s); rounds v22-v24 waited for it (~3 min each), then ~1 min/round with two islands.",
+    "Modal is not cheaper than Nebius on-demand here; the cost comparison uses Nebius spot price for the droppable island as the reference."
+  ]
+}
