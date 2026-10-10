@@ -1097,7 +1097,8 @@ def validate_parsed_args(
     cells = counter(args)
     if cells != 1:
         raise SingleCellError(f"actor TrainGroup would have {cells} cells; ports require exactly 1")
-    check_placement_not_rewritten(launch.placement, args)
+    if not (os.environ.get(TEST_DEBUG_ROLLOUT_ENV) and getattr(args, "debug_train_only", False)):
+        check_placement_not_rewritten(launch.placement, args)  # test-only dump replay: no engines
 
 
 def _upstream_num_cells(args: Any) -> int:
