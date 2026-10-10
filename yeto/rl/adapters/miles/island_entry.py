@@ -2918,7 +2918,10 @@ def _run_test_debug_rollout_replay(args, miles_args) -> bool:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     from miles.utils.async_utils import with_disposer
+    from yeto.rl.adapters.miles.entry import connect_island_ray
 
+    # same job runtime_env as the ports island (PYTHONPATH -> pinned Miles/Megatron in the actors)
+    connect_island_ray(miles_args=miles_args)
     print(f"[rl] TEST ONLY: upstream Miles train loop on {miles_args.load_debug_rollout_data}", flush=True)
     asyncio.run(with_disposer(module.train, miles_args))
     print("[rl] TEST ONLY: upstream Miles train loop finished", flush=True)
