@@ -177,11 +177,35 @@ class YetoFullyAsyncTaskRunner(_TaskRunnerBase):
     """verl's component set-up (trainer, rollouter, MessageQueue, initial weight
     sync); then the yeto driver instead of ``_run_training_loop``."""
 
+    def _create_trainer(self, config) -> None:
+        """verl's ``_create_trainer`` (fork acad9875, fully_async_main.py:138), building
+        :data:`YetoFullyAsyncTrainer`.  Setting ``fa_main.FullyAsyncTrainer`` did not
+        reach verl's method inside the Ray actor (s19-verl64b-async7-20261010a: the
+        trainer was verl's own class, "no attribute yeto_configure"), so the method is
+        overridden here instead of relying on that module global."""
+        from verl.experimental.separation.utils import create_resource_pool_manager
+        from verl.trainer.ppo.utils import Role
+
+        print("[ASYNC MAIN] Starting create trainer (yeto)...")
+        mapping = {role: cls for role, cls in self.components["role_worker_mapping"].items()
+                   if role != Role.Rollout}
+        trainer = YetoFullyAsyncTrainer.remote(
+            config=config,
+            tokenizer=self.components["tokenizer"],
+            role_worker_mapping=mapping,
+            resource_pool_manager=create_resource_pool_manager(config, roles=list(mapping.keys())),
+            ray_worker_group_cls=self.components["ray_worker_group_cls"],
+            device_name=config.trainer.device,
+        )
+        trainer.yeto_configure  # noqa: B018 - fail fast (AttributeError) if this is not our class
+        ray.get(trainer.init_workers.remote())
+        self.components["trainer"] = trainer
+        print("[ASYNC MAIN] YetoFullyAsyncTrainer created and initialized successfully")
+
     def run(self, config, plan: dict):
         from yeto.island_credential_guard import check_island_credentials
 
         check_island_credentials()  # secret-handling-hardening D4 (fully_async Ray actor)
-        fa_main.FullyAsyncTrainer = YetoFullyAsyncTrainer  # _create_trainer builds ours
         self._initialize_components(config)
         from omegaconf import OmegaConf
 

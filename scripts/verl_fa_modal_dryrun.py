@@ -65,6 +65,12 @@ def dryrun():
     line = [x for x in r.stdout.splitlines() if x.startswith("YETO_LORA_WIRE_CHECK ")]
     out["lora_wire"] = (json.loads(line[-1].split(" ", 1)[1]) if line
                         else {"pass": False, "rc": r.returncode, "stderr": r.stderr[-3000:]})
+    # S19 async7: the task runner actor must build YetoFullyAsyncTrainer (local CPU Ray)
+    r = subprocess.run([py, "-m", "yeto.rl.adapters.verl.fa_runner_probe"], capture_output=True, text=True,
+                       cwd="/workspace/verl", env={**os.environ, "CUDA_VISIBLE_DEVICES": ""})
+    line = [x for x in r.stdout.splitlines() if x.startswith("YETO_FA_RUNNER_PROBE ")]
+    out["runner_probe"] = (json.loads(line[-1].split(" ", 1)[1]) if line
+                           else {"pass": False, "rc": r.returncode, "stderr": r.stderr[-3000:]})
     groups, rounds, limit = 32, 5, 1  # the GPU run's shape
     cfg = vconf.VerlRunConfig(model_path="/tmp/model", train_file="/tmp/t.parquet", val_file="/tmp/v.parquet",
                               out_dir="/tmp/out", chat_template_kwargs={"enable_thinking": False},
@@ -125,7 +131,7 @@ def dryrun():
                    and out["imports"][0] == 0 and out["hydra_rc"] == 0 and not out["asserted_mismatch"]
                    and out["translate_equal"] and not out["startup_problems"]
                    and not out["fork_asserts_uncovered"] and out["fork_asserts_seen"] > 0
-                   and out["lora_wire"].get("pass") is True)
+                   and out["lora_wire"].get("pass") is True and out["runner_probe"].get("pass") is True)
     text = json.dumps(out, indent=1, default=str)
     print(text)
     return text  # a string: the local side has no torch to unpickle verl objects
