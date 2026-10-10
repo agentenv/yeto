@@ -939,6 +939,7 @@ def install_grad_norm_recorder() -> bool:
         _record_applied_lr(original, args, kwargs)
         _arm_grad_audit(original, args, kwargs)
         _EV_STATS.clear()
+        _POLICY_STATS.clear()
         try:
             result = original(*args, **kwargs)
         finally:
@@ -953,6 +954,142 @@ def install_grad_norm_recorder() -> bool:
 
     megatron_model.train_one_step = train_one_step
     _RECORDER_INSTALLED = True
+    install_policy_metrics_recorder()
+    return True
+
+
+# rl-algo-supplement follow-up (S19 #13, 4.7 / 5.2): per optimizer step, sufficient
+# statistics of the advantages Miles trains on and of the PPO ratio against the clip
+# bounds.  Observation only: the wrapped functions' return values are passed through
+# untouched.  Per rank (no data-parallel / CP reduction).  Reset on entry to
+# train_one_step; written into the step-loss record by ``_record_step_losses``.
+_POLICY_STATS: dict[str, float] = {}
+_POLICY_METRICS_INSTALLED = False
+POLICY_STAT_KEYS = (
+    "yeto/adv_tokens", "yeto/adv_token_mean", "yeto/adv_token_var",
+    "yeto/adv_samples", "yeto/adv_sample_mean", "yeto/adv_sample_var",
+    "yeto/ratio_tokens", "yeto/ratio_pos_adv_tokens", "yeto/ratio_neg_adv_tokens",
+    "yeto/ratio_above_high_pos_adv", "yeto/ratio_below_low_neg_adv",
+    "yeto/ratio_min", "yeto/ratio_max", "yeto/clip_eps_low", "yeto/clip_eps_high",
+    "yeto/clipfrac_recomputed",
+)
+
+
+def _add(key: str, value: float) -> None:
+    _POLICY_STATS[key] = _POLICY_STATS.get(key, 0.0) + float(value)
+
+
+def accumulate_advantage_stats(advantages: Any, loss_masks: Any = None) -> None:
+    """Token- and sample-level sums of the (loss-masked) advantages of one micro-batch.
+
+    ``advantages`` / ``loss_masks``: per-sample 1-D tensors (Miles ``batch`` layout).
+    """
+    for i, adv in enumerate(advantages):
+        adv = adv.detach().double().flatten()
+        if loss_masks is not None and i < len(loss_masks) and loss_masks[i] is not None:
+            mask = loss_masks[i].detach().flatten().bool()
+            if mask.numel() == adv.numel():
+                adv = adv[mask]
+        if adv.numel() == 0:
+            continue
+        _add("_tok_n", adv.numel())
+        _add("_tok_s", float(adv.sum()))
+        _add("_tok_s2", float((adv * adv).sum()))
+        m = float(adv.mean())
+        _add("_smp_n", 1)
+        _add("_smp_s", m)
+        _add("_smp_s2", m * m)
+
+
+def accumulate_ratio_stats(ppo_kl: Any, advantages: Any, eps_clip: float, eps_clip_high: float) -> None:
+    """Counts behind ``pg_clipfrac`` for the standard PPO clip (tokens with A != 0 only:
+    Miles zeroes ppo_kl and A on masked tokens, so those never count)."""
+    import torch
+
+    with torch.no_grad():
+        kl = ppo_kl.detach().double().flatten()
+        adv = advantages.detach().double().flatten()
+        ratio = torch.exp(-kl)
+        pos, neg = adv > 0, adv < 0
+        active = pos | neg
+        _add("_r_n", int(active.sum()))
+        _add("_r_pos", int(pos.sum()))
+        _add("_r_neg", int(neg.sum()))
+        _add("_r_hi", int((pos & (ratio > 1 + eps_clip_high)).sum()))
+        _add("_r_lo", int((neg & (ratio < 1 - eps_clip)).sum()))
+        if bool(active.any()):
+            r = ratio[active]
+            lo, hi = float(r.min()), float(r.max())
+            _POLICY_STATS["_r_min"] = min(_POLICY_STATS.get("_r_min", lo), lo)
+            _POLICY_STATS["_r_max"] = max(_POLICY_STATS.get("_r_max", hi), hi)
+        _POLICY_STATS["_eps_lo"] = float(eps_clip)
+        _POLICY_STATS["_eps_hi"] = float(eps_clip_high)
+
+
+def step_policy_stats(stats: dict[str, float] | None = None) -> dict[str, float]:
+    """The step's ``yeto/*`` advantage and ratio metrics (population variances);
+    keys without data are omitted, never filled in."""
+    st = _POLICY_STATS if stats is None else stats
+    out: dict[str, float] = {}
+    n = st.get("_tok_n", 0.0)
+    if n > 0:
+        mean = st["_tok_s"] / n
+        out.update({"yeto/adv_tokens": n, "yeto/adv_token_mean": mean,
+                    "yeto/adv_token_var": max(st["_tok_s2"] / n - mean * mean, 0.0)})
+    k = st.get("_smp_n", 0.0)
+    if k > 0:
+        mean = st["_smp_s"] / k
+        out.update({"yeto/adv_samples": k, "yeto/adv_sample_mean": mean,
+                    "yeto/adv_sample_var": max(st["_smp_s2"] / k - mean * mean, 0.0)})
+    if "_eps_lo" in st:
+        rn = st.get("_r_n", 0.0)
+        out.update({"yeto/ratio_tokens": rn, "yeto/ratio_pos_adv_tokens": st.get("_r_pos", 0.0),
+                    "yeto/ratio_neg_adv_tokens": st.get("_r_neg", 0.0),
+                    "yeto/ratio_above_high_pos_adv": st.get("_r_hi", 0.0),
+                    "yeto/ratio_below_low_neg_adv": st.get("_r_lo", 0.0),
+                    "yeto/clip_eps_low": st["_eps_lo"], "yeto/clip_eps_high": st["_eps_hi"]})
+        if "_r_min" in st:
+            out.update({"yeto/ratio_min": st["_r_min"], "yeto/ratio_max": st["_r_max"]})
+        if rn > 0:
+            out["yeto/clipfrac_recomputed"] = (st.get("_r_hi", 0.0) + st.get("_r_lo", 0.0)) / rn
+    return out
+
+
+def install_policy_metrics_recorder() -> bool:
+    """Wrap Miles ``policy_loss_function`` (advantage stats) and the
+    ``compute_policy_loss`` it calls (ratio vs clip counts); idempotent."""
+
+    global _POLICY_METRICS_INSTALLED
+    if _POLICY_METRICS_INSTALLED:
+        return True
+    try:
+        from miles.backends.training_utils.loss_hub import losses
+    except ImportError:
+        return False
+    original_fn = getattr(losses, "policy_loss_function", None)
+    original_cpl = getattr(losses, "compute_policy_loss", None)
+    if original_fn is None:
+        return False
+
+    def policy_loss_function(args, batch, logits, sum_of_sample_mean):
+        try:
+            accumulate_advantage_stats(batch["advantages"], batch.get("loss_masks"))
+        except (KeyError, RuntimeError, TypeError, ValueError, AttributeError):
+            pass
+        return original_fn(args, batch, logits, sum_of_sample_mean)
+
+    losses.policy_loss_function = policy_loss_function
+    if original_cpl is not None:
+        def compute_policy_loss(ppo_kl, advantages, eps_clip, eps_clip_high, *rest, **kw):
+            result = original_cpl(ppo_kl, advantages, eps_clip, eps_clip_high, *rest, **kw)
+            try:
+                accumulate_ratio_stats(ppo_kl, advantages, eps_clip, eps_clip_high)
+            except (RuntimeError, TypeError, ValueError):
+                pass
+            return result
+
+        losses.compute_policy_loss = compute_policy_loss
+    _POLICY_METRICS_INSTALLED = True
     return True
 
 
@@ -1352,6 +1489,7 @@ def _record_step_losses(result: Any) -> None:
     ev = step_explained_variance()
     if ev is not None:
         scalars[EXPLAINED_VARIANCE_KEY] = ev
+    scalars.update(step_policy_stats())
     _STEP_LOSSES.append({"pg_clipfrac": clipfrac, "loss_tokens": None, "metrics": scalars})
 
 

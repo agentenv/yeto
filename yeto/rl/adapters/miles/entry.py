@@ -64,6 +64,7 @@ _E1B_G1F = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1f"
 _E1B_G1H = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1h"
 _E1B_G1I = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1i"
 _E1B_G1J = "openspec/changes/rl-algo-grpo-knobs/evidence/2026-09-29-algo1b-g1j"
+_ESUP = "openspec/changes/rl-algo-supplement/evidence/phase1-gpu"
 _E2A = "openspec/changes/rl-algo-seq-and-adv/evidence/g1"
 MILES_DECLARED: dict[str, str] = {
     "corrections:tis": f"{_E1A}/2026-09-29-g1c + 2026-09-29-trigger (tis_clipfrac > 0)",
@@ -142,6 +143,15 @@ MILES_DECLARED: dict[str, str] = {
         "a run on 0af62f4d. Open: suspected pg_clipfrac vs loss inconsistency "
         "(2026-09-29-clipfrac-offline/report.md). Miles 0af62f4d only"
     ),
+    # rl-algo-supplement phase 1 (S19 #13, Modal 1xA10G, Qwen3-0.6B LoRA, 3 rounds x 2 steps),
+    # Miles 64b591a4b only (see MILES_DECLARED_PINS).
+    "losses:cispo": f"{_ESUP}/results.md 4.2 cispo + 4.3 cispo-tis ((a)-(d),(f); round-1 step-2 pg_loss -0.0324 vs GRPO 0.000166)",
+    "losses:sapo": f"{_ESUP}/results.md 4.2 sapo + 4.3 sapo-tis ((a)-(d); round-1 step-2 pg_loss -0.0148 vs 0.000166)",
+    "losses:gmpo": f"{_ESUP}/results.md 4.2 gmpo + 4.3 gmpo-tis ((a)-(e); clip_fraction == gmpo num/den)",
+    "features:dual_clip": f"{_ESUP}/results.md 4.4 (eps_clip_c 1.01: dual_clipfrac 0.0030/0.0341/0.0371)",
+    "features:kl_unbiased": f"{_ESUP}/results.md 4.5 kl-unbiased (kl_loss 0.000245/0.000718/0.000954, differs from k3)",
+    "corrections:opsm_rollout": f"{_ESUP}/results.md 4.6 (opsm_clipfrac 0.0625/0.219/0.25, opsm_old_logprob_source=rollout)",
+    "features:rollout_logprobs_as_old": f"{_ESUP}/results.md 4.6 (use_rollout_logprobs=true in the event spec)",
 }
 
 
@@ -222,6 +232,7 @@ _PINS_0AF62F4D_PLUS = frozenset({
     # off; with defaults the loss is bitwise unchanged (fork test_ppo_gae_variants vs _gae_orig).
     "64b591a4bec1ffa37fb089d3e3b99c84773b1ffc",
 })
+_PINS_SUPP = frozenset({"64b591a4bec1ffa37fb089d3e3b99c84773b1ffc"})
 MILES_DECLARED_PINS: dict[str, frozenset[str]] = {
     # before 0af62f4d the LoRA bridge ignored calculate_per_token_loss (g1c:
     # grad_norm bit-identical to the baseline)
@@ -229,6 +240,10 @@ MILES_DECLARED_PINS: dict[str, frozenset[str]] = {
     "features:over_sampling": _PINS_0AF62F4D_PLUS,
     "features:overlong_filter": _PINS_0AF62F4D_PLUS,
     "features:clip_higher": _PINS_0AF62F4D_PLUS,
+    # rl-algo-supplement phase 1 G1 ran on 64b591a4b only (S19 #13); 5.2 re-ran clip_higher there too.
+    **{m: _PINS_SUPP for m in ("losses:cispo", "losses:sapo", "losses:gmpo", "features:dual_clip",
+                               "features:kl_unbiased", "corrections:opsm_rollout",
+                               "features:rollout_logprobs_as_old")},
 }
 
 

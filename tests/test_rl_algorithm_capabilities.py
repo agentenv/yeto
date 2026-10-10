@@ -212,7 +212,7 @@ def test_expressible_but_not_enabled_is_rejected_with_options():
     assert "expressible but not enabled" in text
 
 
-def test_miles_accepts_each_declared_mechanism_and_rejects_dual_clip():
+def test_miles_accepts_each_declared_mechanism():
     caps = miles_capabilities(FP)
     declared = caps.declared_mechanisms()
     covered = []
@@ -228,9 +228,8 @@ def test_miles_accepts_each_declared_mechanism_and_rejects_dual_clip():
     _check(caps, AlgorithmSpec())  # the R0 declarations
     assert covered, "no declared non-R0 mechanism was exercised"
     assert {"corrections:tis", "corrections:opsm"} <= set(covered)
-    assert "features:dual_clip" not in declared  # no GPU evidence of effect yet
-    with pytest.raises(CapabilityMismatch, match="'dual_clip' not supported"):
-        _check(caps, _combine(CANDIDATES["features:dual_clip"]))
+    # rl-algo-supplement 4.4 (Miles 64b591a4b): dual_clip declared after G1
+    assert "features:dual_clip" in declared
 
 
 def test_critic_rejected_with_the_real_reason():
@@ -342,6 +341,9 @@ def test_binary_reward_declared_passes(binary_mechanism):
 # The Miles adapter's declarations beyond R0, one line per mechanism (each
 # added in its own commit together with its MILES_DECLARED evidence entry).
 EXPECTED_MILES_DECLARED = {
+    # rl-algo-supplement phase 1 (64b591a4b)
+    "losses:cispo", "losses:sapo", "losses:gmpo", "features:dual_clip", "features:kl_unbiased",
+    "corrections:opsm_rollout", "features:rollout_logprobs_as_old",
     "corrections:tis",
     "corrections:opsm",
     "corrections:opsm_trainer",

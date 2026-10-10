@@ -375,12 +375,14 @@ def test_fake_driver_gmpo_correction_mask_does_not_relax(tmp_path):
 
 
 @pytest.mark.parametrize("variant", lv.VARIANTS)
-def test_miles_adapter_does_not_open_variants(variant):
+def test_miles_adapter_opens_variants_on_declared_pin(variant):
+    # rl-algo-supplement 4.2/4.3 G1 passed on Miles 64b591a4b (MILES_DECLARED_PINS)
     caps = miles_capabilities(FP)
-    assert variant not in caps.losses
-    with pytest.raises(CapabilityMismatch, match=f"losses mechanism {variant!r} not supported"):
-        caps.check(layout="lora", placement="colocated", execution_mode="colocated-serial",
-                   algorithm=spec(variant))
+    assert variant in caps.losses
+    caps.check(layout="lora", placement="colocated", execution_mode="colocated-serial",
+               algorithm=spec(variant))
+    from yeto.rl.adapters.miles.entry import declared_by_dimension
+    assert variant not in declared_by_dimension("ddce20992c9ee82270a22e259e9e2bf55f3053d1")["losses"]
 
 
 @pytest.mark.parametrize("variant", lv.VARIANTS)
@@ -404,8 +406,10 @@ def test_dry_run_reports_expressible_not_opened(monkeypatch):
     result = af.dry_run(["--dry-run", "--extra",
                          "--policy-loss-variant cispo --eps-clip 0.2 --eps-clip-high 0.28 "
                          "--calculate-per-token-loss"])
-    assert result["verdict"] == "rejected"
-    assert "losses mechanism 'cispo' not supported" in result["error"]
+    # declared on 64b591a4b (rl-algo-supplement 4.2), but the pin check still refuses a
+    # real launch when the fork commit is unknown
+    assert result["verdict"] == "accepted"
+    assert any("[loss_variants]" in w and "not opened" in w for w in result["launch_warnings"])
     allowed = af.dry_run(["--dry-run", "--extra", "--policy-loss-variant sapo",
                           "--rl-allow-unverified-mechanism", "losses:sapo"])
     assert allowed["verdict"] == "accepted"
