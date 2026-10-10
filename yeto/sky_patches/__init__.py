@@ -14,10 +14,10 @@ import importlib.util
 import sys
 import threading
 
-from . import verda
+from . import nebius, verda
 
 # target module -> patch function(module) -> bool (applied?)
-_PATCHES = {verda.TARGET_MODULE: verda.apply}
+_PATCHES = {verda.TARGET_MODULE: verda.apply, nebius.TARGET_MODULE: nebius.apply}
 _STATUS: dict[str, str] = {}
 _LOCK = threading.Lock()
 PTH_NAME = "yeto_sky_patches.pth"
@@ -97,7 +97,7 @@ def pth_line(repo_dir: str) -> str:
         f"_R = {repo_dir!r}\n"
         "class _YetoLazy:\n"
         "    def find_spec(self, name, path=None, target=None):\n"
-        "        if name != 'sky.provision.verda.instance':\n"
+        "        if name not in ('sky.provision.verda.instance', 'sky.provision.nebius.utils'):\n"
         "            return None\n"
         "        try:\n"
         "            sys.meta_path.remove(self)\n"
