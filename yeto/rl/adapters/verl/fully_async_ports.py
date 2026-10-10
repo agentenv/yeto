@@ -213,8 +213,9 @@ class FullyAsyncPublisher:
     """yeto publication over verl's checkpoint engine (6.4b design item 2)."""
 
     def __init__(self, island: FullyAsyncIsland, *, strict: bool = True,
-                 timeout_s: float = 180.0, sleep=time.sleep):
+                 timeout_s: float = 180.0, push_timeout_s: float = 600.0, sleep=time.sleep):
         self.island = island
+        self.push_timeout_s = push_timeout_s
         self.strict = strict
         self.timeout_s = timeout_s
         self.sleep = sleep
@@ -244,7 +245,15 @@ class FullyAsyncPublisher:
         if stale.exists():
             stale.unlink()
         started = time.monotonic()
-        pushed = isl.call("yeto_push_weights")  # {"param_version", "timing"}
+        try:  # S19 async5: a push that never returns must end the island, not hang it
+            pushed = isl.call("yeto_push_weights", timeout=self.push_timeout_s)  # {"param_version", "timing"}
+        except TimeoutError as exc:
+            check = pub.compare(version, sent, None, detail=f"push timeout: {exc}")
+            record = {**check.to_event(), "update_seconds": time.monotonic() - started}
+            isl.append_jsonl(f"verl-publish-{isl.learner_id}.jsonl", record)
+            isl.emit("rl_publication_check", **{k: v for k, v in record.items() if k != "event"})
+            raise PublicationError(f"verl fully_async publication v{version}: {check.status} {check.detail}",
+                                   cause=PublicationCause.LORA_UNVERIFIABLE) from exc
         param_version = int(pushed["param_version"])
         isl.vmap.record(param_version, version)  # raises on contradiction / regression
         readback = self._await_readback(version)

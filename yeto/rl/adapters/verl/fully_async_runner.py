@@ -194,15 +194,21 @@ class YetoFullyAsyncTaskRunner(_TaskRunnerBase):
         def start_rollouter():
             state["future"] = rollouter.fit.remote()
 
-        def call(name, *args):
+        def call(name, *args, timeout=None):
+            # timeout (s): S19 async5 hung 33 min in a push whose vLLM side had died;
+            # a call that does not return in time raises TimeoutError.
             ref = getattr(trainer, name).remote(*args)
-            future = state["future"]
-            if future is not None:
-                ready, _ = ray.wait([ref, future], num_returns=1)
-                if ref not in ready:
-                    ray.get(future)  # raises the rollouter's error; a clean end puts None in the queue
-                    state["future"] = None
-            return ray.get(ref)
+            deadline = None if timeout is None else time.monotonic() + float(timeout)
+            while True:
+                waits = [ref] if state["future"] is None else [ref, state["future"]]
+                left = None if deadline is None else max(0.0, deadline - time.monotonic())
+                ready, _ = ray.wait(waits, num_returns=1, timeout=left)
+                if ref in ready:
+                    return ray.get(ref)
+                if not ready:
+                    raise TimeoutError(f"trainer.{name} did not return within {timeout} s")
+                ray.get(state["future"])  # raises the rollouter's error; a clean end puts None in the queue
+                state["future"] = None
 
         try:
             return run_fully_async_island(call, start_rollouter, plan,

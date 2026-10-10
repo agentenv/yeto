@@ -53,12 +53,18 @@ def dryrun():
 
     out["runtime"] = island_entry.runtime_manifest(0)
     out["patches_in_place"] = {t: open(f"/workspace/verl/{t}").read().count(h) == 1
-                               for t, _a, h in patch_verl.PATCHES}
+                               for t, _a, h, *_ in patch_verl.PATCHES}
     r = subprocess.run([py, "-c", "import yeto.rl.adapters.verl.fully_async_runner as m, "
                         "yeto.rl.adapters.verl.verl_main as v; print(m.YetoFullyAsyncTrainer, "
                         "m.YetoFullyAsyncTaskRunner, v.main_fully_async)"],
                        capture_output=True, text=True, cwd="/workspace/verl")
     out["imports"] = [r.returncode, r.stdout[-1500:], r.stderr[-2500:]]
+    # S19 async5 fix: patched LoRA push reaches add_lora on CPU (lora_wire_check)
+    r = subprocess.run([py, "-m", "yeto.rl.adapters.verl.lora_wire_check"], capture_output=True, text=True,
+                       cwd="/workspace/verl", env={**os.environ, "CUDA_VISIBLE_DEVICES": ""})
+    line = [x for x in r.stdout.splitlines() if x.startswith("YETO_LORA_WIRE_CHECK ")]
+    out["lora_wire"] = (json.loads(line[-1].split(" ", 1)[1]) if line
+                        else {"pass": False, "rc": r.returncode, "stderr": r.stderr[-3000:]})
     groups, rounds, limit = 32, 5, 1  # the GPU run's shape
     cfg = vconf.VerlRunConfig(model_path="/tmp/model", train_file="/tmp/t.parquet", val_file="/tmp/v.parquet",
                               out_dir="/tmp/out", chat_template_kwargs={"enable_thinking": False},
@@ -118,7 +124,8 @@ def dryrun():
     out["pass"] = (not out["runtime"]["problems"] and all(out["patches_in_place"].values())
                    and out["imports"][0] == 0 and out["hydra_rc"] == 0 and not out["asserted_mismatch"]
                    and out["translate_equal"] and not out["startup_problems"]
-                   and not out["fork_asserts_uncovered"] and out["fork_asserts_seen"] > 0)
+                   and not out["fork_asserts_uncovered"] and out["fork_asserts_seen"] > 0
+                   and out["lora_wire"].get("pass") is True)
     text = json.dumps(out, indent=1, default=str)
     print(text)
     return text  # a string: the local side has no torch to unpickle verl objects
