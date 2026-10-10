@@ -69,5 +69,6 @@
 
 ## 6. 后续（不在本次上卡范围）
 - 4.5 k1：如需重测，先预登记适合 k1 的判据再上卡，例如"3 轮 kl_loss 均值 > 0 且有限"，或"与同 seed k3 运行逐轮同号、量级一致"。新判据要经确认后再开卡。
-- 4.7：需要先输出 advantage 方差（Miles 或 tape 的 adv_std），再重测。
-- 5.2：需要逐 token ratio 输出，才能做 clipfrac 离线核对。
+- 4.7：CPU 侧已补每步 advantage 方差（rl_round_trained.train_metrics 的 yeto/adv_token_var、yeto/adv_sample_var 等，轮内对各步取均值），下次 G1 重测时按原判据判。
+- 5.2：CPU 侧已补比值计数（yeto/ratio_above_high_pos_adv、yeto/ratio_below_low_neg_adv、yeto/ratio_tokens、yeto/clipfrac_recomputed），下次上卡用它与 pg_clipfrac 比对。注意：pg_clipfrac 是 Miles 按样本均值聚合，recomputed 是按 token 计，比对口径需先预登记。
+- 4.5 按估计器分开声明：新增按估计器区分的机制名（如 kl_estimators:k1/k2/low_var_kl），属代码改动，本次不做。

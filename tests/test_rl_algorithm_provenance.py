@@ -9,6 +9,7 @@ import pytest
 
 from yeto.rl import learner as rl_learner
 from yeto.rl.engine.algorithm import (
+    AdvantageSpec,
     BOUNDED_NONZERO_STD_FILTER,
     AlgorithmSpec,
     AlgorithmSpecError,
@@ -217,9 +218,11 @@ def test_launcher_refusals(tmp_path):
     with pytest.raises(ValueError, match="only apply to --rl-engine ports"):
         _prepare_rl_args(_launcher_args("legacy", ("--rl-algorithm-spec", rejected)))
     # F7: undeclared mechanisms and registered launch checks fail before any cloud work
-    dual = AlgorithmSpec(loss=LossSpec(eps_clip_c=3.0))  # dual_clip: never declared yet
-    undeclared = _spec_file(tmp_path, json.loads(dual.canonical_json()), "v2.json")
-    with pytest.raises(ValueError, match="'dual_clip' not supported"):
+    # no_rewards_normalization: not declared (rl-algo-supplement 4.7 evidence incomplete);
+    # dual_clip was used here until it was declared on 64b591a4b (4.4)
+    nonorm = AlgorithmSpec(advantage=AdvantageSpec(rewards_normalization=False))
+    undeclared = _spec_file(tmp_path, json.loads(nonorm.canonical_json()), "v2.json")
+    with pytest.raises(ValueError, match="'no_rewards_normalization' not supported"):
         _prepare_rl_args(_launcher_args("ports", ("--rl-algorithm-spec", undeclared)))
     from yeto.rl.engine import algorithm as alg
 

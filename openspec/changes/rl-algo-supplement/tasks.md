@@ -26,24 +26,36 @@
 
 ## 4. 单卡 G1 生效验证（A10G；前置：1.1 已确认，2.5 新 pin 已就绪）
 
-- [ ] 4.1 在新 pin 上跑同 seed 的默认 GRPO 对照组（$2.0，含对旧 pin 的一次复核），`num_steps_per_rollout=2`，3 轮。验证：通用判据满足，指标 jsonl 存入 `evidence/g1-baseline/`，供 4.2–4.7 与 5.x 共用。（S14：未做，GPU；无对应声明）
-- [ ] 4.2 CISPO、SAPO、GMPO 各跑一次 G1（$4.5），判据采用 loss-variants progress 修订版中的 (a)–(f)，不做修改；如果 1.2 判定 GMPO 暂缓，只跑 CISPO 和 SAPO。验证：每个变体的判据逐项写入 `evidence/g1-variants/results.md`；通过的变体在 `MILES_DECLARED` 中各自单独声明并附证据路径；adapter `check()` 单测接受已声明项，仍拒绝未通过项。（S14：未做，GPU；无对应声明）
-- [ ] 4.3 对 4.2 通过的每个变体，与已声明的 `corrections:tis` 组合做冒烟（$3.0），判据为 (a)(b)(c)，GMPO 另加 (e)。验证：结果写入 `evidence/g1-variants-tis/`；组合不另作声明，结果记为“组合 GPU 冒烟通过”。（S14：未做，GPU；无对应声明）
-- [ ] 4.4 dual_clip：`eps_clip_c=1.01`，每轮 2 步，3 轮（$1.5）。判据：`dual_clipfrac` > 0 且有限，加上通用判据。验证：通过后声明 `features:dual_clip`；如果比例恒为 0，记为合法否定结论，不声明。（S14：未做，GPU；无对应声明）
+- [x] 4.1 在新 pin 上跑同 seed 的默认 GRPO 对照组（$2.0，含对旧 pin 的一次复核），`num_steps_per_rollout=2`，3 轮。验证：通用判据满足，指标 jsonl 存入 `evidence/g1-baseline/`，供 4.2–4.7 与 5.x 共用。（S14：未做，GPU；无对应声明）
+  - S19 #13：通过（新 pin s19-p1-base-20261009e + 旧 pin 复核 s19-p1-baseold-20261010b）。证据 evidence/phase1-gpu/results.md
+- [x] 4.2 CISPO、SAPO、GMPO 各跑一次 G1（$4.5），判据采用 loss-variants progress 修订版中的 (a)–(f)，不做修改；如果 1.2 判定 GMPO 暂缓，只跑 CISPO 和 SAPO。验证：每个变体的判据逐项写入 `evidence/g1-variants/results.md`；通过的变体在 `MILES_DECLARED` 中各自单独声明并附证据路径；adapter `check()` 单测接受已声明项，仍拒绝未通过项。（S14：未做，GPU；无对应声明）
+  - S19 #13：三项通过；已在 MILES_DECLARED 声明，pin 只含 64b591a4b。证据 evidence/phase1-gpu/results.md
+- [x] 4.3 对 4.2 通过的每个变体，与已声明的 `corrections:tis` 组合做冒烟（$3.0），判据为 (a)(b)(c)，GMPO 另加 (e)。验证：结果写入 `evidence/g1-variants-tis/`；组合不另作声明，结果记为“组合 GPU 冒烟通过”。（S14：未做，GPU；无对应声明）
+  - S19 #13：三项通过（*-tis-20261010b）。证据 evidence/phase1-gpu/results.md
+- [x] 4.4 dual_clip：`eps_clip_c=1.01`，每轮 2 步，3 轮（$1.5）。判据：`dual_clipfrac` > 0 且有限，加上通用判据。验证：通过后声明 `features:dual_clip`；如果比例恒为 0，记为合法否定结论，不声明。（S14：未做，GPU；无对应声明）
+  - S19 #13：通过；features:dual_clip 已声明（pin 64b591a4b）。证据 evidence/phase1-gpu/results.md
 - [ ] 4.5 KL：k1、k2、low_var_kl、kl_unbiased 各跑一次（$4.0），放置位置为 `loss`，coef 0.01，带显式 `kl.ref_model`。判据：第 1 轮之后 `kl_loss` 存在、有限、> 0，并与已声明的 k3 运行数值不同。验证：每项单独判定、单独声明，结果写入 `evidence/g1-kl/`。（S14：未做，GPU；无对应声明）
-- [ ] 4.6 opsm_rollout（$1.5）：沿用 1a trigger 的小阈值，每轮 2 步。判据：`opsm_clipfrac` > 0，并且来源记录显示 π_old 取自 rollout logprob。验证：通过后声明 `corrections:opsm_rollout`。（S14：未做，GPU；无对应声明）
+  - S19 #13 现状（不勾）：k2、low_var_kl、kl_unbiased 通过（kl_unbiased 已声明，pin 64b591a4b；k2/low_var_kl 不需要单独机制名）。k1 失败：第 3 轮 kl_loss<0，判据缺陷，非实现缺陷，未重跑。按估计器分开声明列为后续（phase1-plan §6）。
+- [x] 4.6 opsm_rollout（$1.5）：沿用 1a trigger 的小阈值，每轮 2 步。判据：`opsm_clipfrac` > 0，并且来源记录显示 π_old 取自 rollout logprob。验证：通过后声明 `corrections:opsm_rollout`。（S14：未做，GPU；无对应声明）
+  - S19 #13：通过；corrections:opsm_rollout、features:rollout_logprobs_as_old 已声明（pin 64b591a4b）。证据 evidence/phase1-gpu/results.md
 - [ ] 4.7 no_rewards_normalization 与 grpo+whiten 各跑一次（$2.5）。判据：advantage 的均值和方差与对照组不同，并与离线重算结果一致（容差 1e-5）。验证：通过后分别声明；单测断言 grpo+whiten 的变 DP 边仍被 `reshard` 拒绝；`docs/MILES_RL.md` 记录这一限制。（S14：未做，GPU；无对应声明）
+  - S19 #13 现状（不勾）：两项失败（证据不全），均值与对照不同，方差无数据。已补 CPU 侧每步 advantage 方差输出（train_metrics 的 yeto/adv_*），下次上卡可判。
 
 ## 5. 既有弱证据复核（A10G）
 
-- [ ] 5.1 over_sampling 强证据（$2.0）：使用 2.4 的指标，配置上能触发动态过滤。判据：至少一轮的提交批大小大于 rollout batch size，并且被过滤组数 > 0。验证：`evidence/g1-over-sampling/results.md`；通过后把声明证据替换为新路径；不通过时撤回声明，并在 `progress.md` 说明。（S14：未做，GPU；无对应声明）
+- [x] 5.1 over_sampling 强证据（$2.0）：使用 2.4 的指标，配置上能触发动态过滤。判据：至少一轮的提交批大小大于 rollout batch size，并且被过滤组数 > 0。验证：`evidence/g1-over-sampling/results.md`；通过后把声明证据替换为新路径；不通过时撤回声明，并在 `progress.md` 说明。（S14：未做，GPU；无对应声明）
+  - S19 #13：通过（s19-p1-os-20261010b）。features:over_sampling 的 pin 已含 64b591a4b。证据 evidence/phase1-gpu/results.md
 - [ ] 5.2 clip_higher 在新 pin 上独立重跑（$1.5），沿用 g1j 配置与 g1j 预登记的判据。验证：通过后 `MILES_DECLARED_PINS` 中这一项改记为“在该 pin 上实测”；不通过时撤回声明。（S14：未做，GPU；无对应声明）
+  - S19 #13 现状（不勾）：grad_norm 判据通过（配对有效、第 3 步不等）；clipfrac 与离线重算一致未验证。已补 CPU 侧比值计数字段（train_metrics 的 yeto/ratio_*、yeto/clipfrac_recomputed），下次上卡可判。
 - [ ] 5.3 只有当 2.2 做了修复时才执行（$1.5）：在 GPU 上核对修复后 pg_clipfrac 与离线重算一致，并且 pg_loss 与修复前逐位相同。验证：结果写入 `evidence/g1-clipfrac/`；2.2 为否定结论时，本项记为不适用并勾选。（S14：未做，GPU；无对应声明）
+  - S19 #13：不适用（2.2 未改 fork），不勾。
 
 ## 6. 两岛 G3 与阶段一收尾（A10G 1+1）
 
-- [ ] 6.1 1b 的 8.4 G3（$4.0）：两岛 strict-avg，组合配置为 clip-higher + token 级聚合 + overlong（软惩罚与过滤），3 轮，使用 launcher 回传磁带 harness，不带放行参数。验证：两岛算法哈希一致，每轮外层同步后的权重哈希一致，不变量无失败，两岛有效样本数已记录；结果同步回 rl-algo-grpo-knobs 8.4 的完成记录。（S14：未做；= rl-algo-grpo-knobs 8.4，仍未勾）
+- [x] 6.1 1b 的 8.4 G3（$4.0）：两岛 strict-avg，组合配置为 clip-higher + token 级聚合 + overlong（软惩罚与过滤），3 轮，使用 launcher 回传磁带 harness，不带放行参数。验证：两岛算法哈希一致，每轮外层同步后的权重哈希一致，不变量无失败，两岛有效样本数已记录；结果同步回 rl-algo-grpo-knobs 8.4 的完成记录。（S14：未做；= rl-algo-grpo-knobs 8.4，仍未勾）
+  - S19 #13：通过（s19-p1-g3-20261010a，2×A10G + Nebius head）。证据 evidence/phase1-gpu/results.md
 - [ ] 6.2 （可选，需用户在 1.1 中确认）CISPO 两岛 strict-avg（$3.5），前提是 4.2 已经声明 CISPO，判据采用 loss-variants 6.3 的判据。验证：结果写入 `evidence/g3-cispo/`；未获确认时记为未执行。（S14：未做，GPU；无对应声明）
+  - S19 #13：未做（4.x 结果不需要），不勾。
 - [ ] 6.3 阶段一收尾：更新 `docs/MILES_RL.md` 的声明清单与证据路径；逐项汇总费用（≤ $35）并提供无残留证明；`progress.md` 按五种状态列出每项结果，并列出仍为“可表达未开放”的机制。验证：全量测试失败集合与基线一致；`openspec validate rl-algo-supplement --strict` 通过。（S14：未做）
 
 ## 7. 阶段二门禁（无 GPU）
