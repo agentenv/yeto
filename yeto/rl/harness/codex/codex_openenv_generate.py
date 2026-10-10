@@ -306,7 +306,28 @@ async def generate(
             current = expected_version
     apply_trajectory_bookkeeping(input.sample, _samples_of(output), expected_version=expected_version,
                                  max_policy_age=limit, current_version=current)
+    if _compactionrl_on():
+        output = _as_sample_list(output)
     return output
+
+
+def _compactionrl_on() -> bool:
+    from .compaction_bridge import compactionrl_enabled
+
+    return compactionrl_enabled()
+
+
+def _as_sample_list(output: Any) -> Any:
+    """CompactionRL: every rollout's output carries a *list* of samples (one per
+    segment, possibly one), so Miles flattens one uniform nesting level
+    (s19-compaction-g1-20261010e: compacted rollouts returned lists, the others a
+    bare Sample -> rollout_data_conversion "'Sample' object is not iterable")."""
+    samples = getattr(output, "samples", output)
+    if isinstance(samples, list):
+        return output
+    if dataclasses.is_dataclass(output) and hasattr(output, "samples"):
+        return dataclasses.replace(output, samples=[samples])
+    return [samples]
 
 
 def _add_arguments(parser: Any) -> None:
