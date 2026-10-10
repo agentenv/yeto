@@ -221,7 +221,7 @@
   "128",
   "--use-session-server",
   "--session-server-port",
-  "31801",
+  "9301",
   "--tito-model",
   "qwen35",
   "--sglang-reasoning-parser",
@@ -230,7 +230,7 @@
   "<MILES-RESOLVED-TOOL-CALL-PARSER>",
   "--group-query-attention"
  ],
- "miles_argv_sha256": "334f1c896031c0f98244e6cc8541cf5652bf5ba40538142a13f8d4c2d802f380",
+ "miles_argv_sha256": "279d3bae4c7c8381c9dfbea4e0e83ffdbfcd0afbeabb0f8931d7c3312984f771",
  "name": "codex_harness",
  "placement": {
   "allow_cross_node_engine_tp": false,
@@ -269,7 +269,7 @@
    "source_sha256": "8bc115e4b7c0a19467fc949348bbe3fc7e62c49ff5119c5d5a7867982327d1d0"
   }
  ],
- "ports_runtime_fingerprint": "sha256:0fc8077e58c531a6d0e419a695a9686b10241623b781c0e1709bafbe1fa4dab9",
+ "ports_runtime_fingerprint": "sha256:1e53cefc9b576336ada4d817f03bdf7a1a340e7082af0d1802e2abb2f4e59a8c",
  "runtime_attrs": {
   "yeto_rl_dynamic_sampling_max_replacements": null
  },

@@ -250,3 +250,7 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
 
 - 原因：`record_trained_groups` 新增调用 `yeto.rl.harness.placeholder_logprob_mask.apply_to_groups`。生成 logprob 恰为 0.0 且 token 是停止 token 的位置，loss_mask 由 1 改为 0，并在 metadata 中写 `placeholder_logprob_tokens`（为 0 时不写）。
 - 变化：8 个标准样本里 rollout_meta_hook 插件三处 `source_sha256` `dc334cba…` → `02fe1c79…`。Miles 命令行、算法哈希、契约哈希、`fake_engine_tapes.json` 不变。`python tests/decoupling_golden.py --write` 后 diff 只有这 24 行。
+
+## S19 会话服务基址 31801 → 9301（分支 s19-session-port，2026-10-10）
+
+只变 codex_harness 一个标准样本的两项：`miles_argv_sha256`、`ports_runtime_fingerprint`（Miles 命令行里的 `--session-server-port` 从 31801 改为 9301）。算法哈希与契约哈希不变。原因：s19-compaction-g1-20261010f 在 Modal（gVisor，临时端口 16000–65535）上丢了 31809。用旧基址起的岛与用新基址起的岛运行时指纹不同，续跑和弹性认证不能跨这个版本混用。

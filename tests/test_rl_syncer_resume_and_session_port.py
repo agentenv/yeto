@@ -11,7 +11,8 @@ def test_session_server_port_defaults_outside_dynamic_range():
     args = SimpleNamespace(use_session_server=True, session_server_port=None)
     L._default_session_server_port(args)
     assert args.session_server_port == [L.DEFAULT_SESSION_SERVER_PORT]
-    assert 30000 <= L.DEFAULT_SESSION_SERVER_PORT and L.DEFAULT_SESSION_SERVER_PORT + 256 < 32768
+    # below Ray worker ports (10002-19999) and the gVisor ephemeral range (16000+)
+    assert 1024 < L.DEFAULT_SESSION_SERVER_PORT and L.DEFAULT_SESSION_SERVER_PORT + 256 < 10002
 
 
 def test_session_server_port_explicit_or_disabled_is_untouched():
@@ -110,3 +111,17 @@ def test_start_script_launches_fresh_without_checkpoint(tmp_path, monkeypatch):
     (tmp_path / "state" / "state.ckpt").write_bytes(b"x")
     out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True).stdout
     assert "--resume" in out.split()
+
+
+
+def test_session_server_port_block_avoids_shared_ranges():
+    """s19-compaction-g1-20261010f lost 31809 between Miles' free-port check and
+    the server bind. The 32-port block (Miles default --session-server-workers)
+    must stay out of every range another process may take a port from at any time:
+    gVisor ephemeral 16000-65535 (Modal), Linux ephemeral 32768-60999,
+    Ray worker ports 10002-19999 (and Ray client 10001), Miles dynamic ports 20000+,
+    and the fixed Ray/Miles ports 6379, 8000, 8265, 9000."""
+    block = range(L.DEFAULT_SESSION_SERVER_PORT, L.DEFAULT_SESSION_SERVER_PORT + 32)
+    assert block[-1] < 10001
+    assert not {6379, 8000, 8265, 9000} & set(block)
+    assert block[0] > 1024
