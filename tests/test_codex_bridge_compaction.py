@@ -486,3 +486,16 @@ def test_wrapper_bounds_each_segment_collect(monkeypatch):
     assert generate_wrapper.segment_collect_timeout_s() == 0.05
     monkeypatch.setenv(generate_wrapper.SEGMENT_COLLECT_TIMEOUT_ENV, "bad")
     assert generate_wrapper.segment_collect_timeout_s() == generate_wrapper.DEFAULT_SEGMENT_COLLECT_TIMEOUT_S
+
+
+def test_wrapper_returns_a_list_for_every_rollout_when_compactionrl_is_on(monkeypatch):
+    """s19-compaction-g1-20261010e: mixed list / bare-Sample outputs broke Miles'
+    flattening ("'Sample' object is not iterable")."""
+    seg0 = _sample(10, 30, **_seg0_meta(0))
+    monkeypatch.setenv(cb.COMPACTIONRL_ENV, "1")
+    out, _ = _wrap(seg0, {})
+    assert out.samples == [seg0]
+    seg0 = _sample(10, 30, **_seg0_meta(0))
+    monkeypatch.setenv(cb.COMPACTIONRL_ENV, "0")
+    out, _ = _wrap(seg0, {})
+    assert out.samples is seg0  # CompactionRL off: unchanged
