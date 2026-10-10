@@ -160,7 +160,7 @@ def install_reclaim_listener(island: str, *, leave: Callable[[], Any], emit: Cal
                              start: bool = True) -> Any | None:
     """On a droppable island: listen for a reclaim notice and LEAVE. Nothing to save
     (the island loses only its own round increment), so ``save=None``. Modal: signal
-    handler; AWS: metadata poll; other clouds: no notice (lease expiry path).
+    handler; AWS: metadata poll; Nebius: host-hook notice file; other clouds: no notice (lease expiry path).
     Returns the handler/poller, or None when not installed."""
     doc = env_role(environ)
     if not doc or doc["role"] != DROPPABLE:
@@ -179,6 +179,29 @@ def install_reclaim_listener(island: str, *, leave: Callable[[], Any], emit: Cal
             return p.handle_notice(notice, save=None, leave=leave, emit=emit, last_save_s=None)
 
         poller = p.AwsMetadataPoller(island, on_notice, region=region, role=DROPPABLE)
+        if start:
+            poller.start()
+        return poller
+    if cloud == "nebius":
+        # Host SIGTERM -> systemd unit (installed by the launcher) -> notice file in the
+        # container -> this poller -> LEAVE; see yeto.cloud.nebius_reclaim.
+        from yeto.cloud import capabilities as caps, nebius_reclaim as nr
+
+        notice_path, ack_path = nr.notice_paths(environ)
+        for stale in (notice_path, ack_path):  # a restarted container keeps its /tmp
+            try:
+                os.remove(stale)
+            except OSError:
+                pass
+        notice_s = caps.notice_seconds("nebius")
+
+        def on_nebius_notice(notice):
+            return p.handle_notice(notice, save=None, leave=leave, emit=emit, last_save_s=None,
+                                   cap_s=None if notice_s is None else notice_s - p.DEFAULT_MARGIN_S)
+
+        poller = nr.NoticeFilePoller(island, on_nebius_notice, region=region, role=DROPPABLE,
+                                     notice_path=notice_path, ack_path=ack_path,
+                                     deadline_s=notice_s)
         if start:
             poller.start()
         return poller

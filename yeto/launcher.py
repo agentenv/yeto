@@ -5308,6 +5308,21 @@ def _island_overrides(args, specs) -> dict:
     return overrides_of(args, len(specs))
 
 
+def maybe_install_nebius_reclaim_hook(task, launched, name: str) -> bool | None:
+    """rl-spot-cost-saving (S19 real spot): a droppable island on Nebius gets the host
+    unit that forwards the VM stop SIGTERM to the learner (yeto.cloud.nebius_reclaim).
+    None when the island does not need it; never raises."""
+    from .cloud import nebius_reclaim
+
+    if not nebius_reclaim.wants_host_hook(getattr(task, "envs", None)):
+        return None
+    handle = launched[1] if isinstance(launched, tuple) and len(launched) > 1 else None
+    if handle is None:
+        print(f"[launcher] {name}: Nebius reclaim hook NOT installed (no cluster handle)")
+        return False
+    return nebius_reclaim.install_host_hook(handle, name=name)
+
+
 def _island_role(args, specs, m) -> str | None:
     """rl-spot-cost-saving phase 2: island m's role (anchor | droppable), None without
     --rl-island-role. Admission already ran in pre_cloud_checks; it is re-run here
@@ -5656,6 +5671,7 @@ class SkySDKOps:
 
         try:
             job_id, _handle = sky.get(sky.launch(task, cluster_name=cluster))
+            maybe_install_nebius_reclaim_hook(task, (job_id, _handle), cluster)
             return job_id
         except Exception as e:
             print(f"[launcher] relaunch of {cluster} failed: {e}", file=sys.stderr)
@@ -7374,6 +7390,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                     )
                 else:
                     results[name] = sky.stream_and_get(rid)
+                    maybe_install_nebius_reclaim_hook(tasks[name], results[name], name)
             except Exception as e:
                 errors[name] = e
 
