@@ -59,6 +59,16 @@ def test_switch_names_match_the_bridge_and_module_list_includes_it():
 def test_launcher_compactionrl_spec_switches_rollout_compaction_on(bundle):  # noqa: F811
     root, _ = bundle
     args = _with_spec(_codex_args(), crl.compactionrl_spec())
+    # upstream agentic_tool_call.generate never collects the segment sessions
+    # (s19-compaction-g1-20261010b: no tokens_after, trainer failed at round 0)
+    with pytest.raises(ValueError, match="codex_openenv_generate"):
+        L.codex_harness_launch(args, environ=_env(root))
+    from yeto.rl.adapters.miles import config as miles_config
+
+    args.custom_generate_function_path = miles_config.CODEX_OPENENV_GENERATE
+    check = miles_config._requires_agentic_generate("--custom-agent-function-path")
+    assert check("x.y", SimpleNamespace(agent=args)) is None  # the wrapper reads the agent flags
+    assert check("x.y", SimpleNamespace(agent=SimpleNamespace(custom_generate_function_path="a.b")))
     _flags, envs, _ = L.codex_harness_launch(args, environ=_env(root))
     assert envs[SWITCH] == "1" and TCOMP not in envs
     # The island preflight forwards YETO_CODEX_* to the Ray rollout workers.

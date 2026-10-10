@@ -242,11 +242,18 @@ SESSION_SERVER_PARTIAL_ROLLOUT_RULE = (
 )
 
 
+# yeto's Codex wrapper calls AGENTIC_TOOL_CALL_GENERATE with the same args (so it
+# reads the same agent flags) and turns CompactionRL segment sessions into one
+# sample per segment; without it a compacted rollout trains as one sample.
+CODEX_OPENENV_GENERATE = "yeto.rl.harness.codex.codex_openenv_generate.generate"
+AGENT_FLAG_READERS = frozenset({AGENTIC_TOOL_CALL_GENERATE, CODEX_OPENENV_GENERATE})
+
+
 def _requires_agentic_generate(flag: str) -> _Check:
     def check(value, config):
         if value is None:
             return None
-        if config.agent.custom_generate_function_path != AGENTIC_TOOL_CALL_GENERATE:
+        if config.agent.custom_generate_function_path not in AGENT_FLAG_READERS:
             return (
                 f"{flag} requires custom_generate_function_path={AGENTIC_TOOL_CALL_GENERATE} "
                 f"(got {config.agent.custom_generate_function_path!r})"
