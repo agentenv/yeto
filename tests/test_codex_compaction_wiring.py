@@ -338,3 +338,22 @@ def test_chain_judge_on_counts_segments():
     assert chain_judge.judge_chain_counts(bad_reason, compaction_enabled=True)
     bad_index = [_seg(0, 2), {**_seg(1, 2), "chain_index": 0}]
     assert chain_judge.judge_chain_counts(bad_index, compaction_enabled=True)
+
+
+def test_generate_wrapper_registers_upstream_agent_flags(monkeypatch):
+    """Miles parse_args calls the generate function's add_arguments; the wrapper
+    must register upstream agentic_tool_call's flags (s19-compaction-g1-20261010c)."""
+    import argparse
+
+    from yeto.rl.harness.codex import codex_openenv_generate as gen
+
+    def upstream():
+        pass
+
+    upstream.add_arguments = lambda p: (p.add_argument("--custom-agent-function-path"),
+                                        p.add_argument("--max-seq-len", type=int))
+    monkeypatch.setattr(gen, "_load_upstream", lambda: upstream)
+    parser = argparse.ArgumentParser()
+    gen.generate.add_arguments(parser)
+    ns = parser.parse_args(["--custom-agent-function-path", "a.b", "--max-seq-len", "16384"])
+    assert ns.custom_agent_function_path == "a.b" and ns.max_seq_len == 16384

@@ -278,3 +278,18 @@ async def generate(
     apply_trajectory_bookkeeping(input.sample, _samples_of(output), expected_version=expected_version,
                                  max_policy_age=limit, current_version=current)
     return output
+
+
+def _add_arguments(parser: Any) -> None:
+    """Miles parse_args registers a generate function's own flags through its
+    ``add_arguments`` attribute; this wrapper hands the agent flags
+    (--custom-agent-function-path, --max-seq-len) to upstream
+    agentic_tool_call.generate, so it must register upstream's flags too
+    (s19-compaction-g1-20261010c: "unrecognized arguments")."""
+    upstream = _load_upstream()
+    add = getattr(upstream, "add_arguments", None)
+    if callable(add):
+        add(parser)
+
+
+generate.add_arguments = _add_arguments
