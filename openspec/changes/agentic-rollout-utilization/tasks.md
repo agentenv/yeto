@@ -68,6 +68,7 @@
     - 判据 4（沙箱）**过**：三臂沙箱获取失败 0、租约到期 0、挂起超时 0；全部结束后 yeto-tbench2 在跑沙箱 0（08:44:46Z）。M1 挂起沙箱累计存活 908.7 s，按 5.3 单价约 $0.016。
     - 判据 5（截断比例）**未验证**：没有触发告警或回退，但轮末的跨版本估计对 M1 全部含旧版本 token 的训练样本都没打出分（`cross_version_unscored_samples` 每轮 8–16 条，共 48 条，原因未知），所以比值分位数没有数据，告警 0.2 / 回退 0.5 无法标定。旁证：Miles 训练端对全部 token 的 TIS 截断比例（`tis_clipfrac`，上界 2）M1 六轮都是 0，跨版本 token 是其子集。已在 26c9eae5 之后补上未打分原因上报和"无版本段 token 跳过"（单测通过、未上卡）。
     - 判据 6（数值）**过**：三臂 grad_norm 有限且 >0，奖励无 NaN，无 rl_invariant_failed。
+  - 判据 5 补测（2026-10-10 S19 第三批 #7，**通过**）：先在 CPU 查明 S18 未打分原因——镜像路由器（radixark/sgl-router-for-miles）在 manual 策略下拒收不带 `X-SMG-Routing-Key` 的请求，S18 M1 日志 48 行 client error 与未打分数逐轮一致、引擎侧 0 条 /generate；#176 让打分请求带路由键。上卡 M1 形状（Qwen3.5-4B，H200!:1）两个独立单岛 `s19-agentic5-a-20261010b`（8 轮，rc 0）与 `-b-`（第 6 轮被停），代码 655992f9。A 第 1–7 轮、B 第 1–5 轮 `cross_version_unscored_samples` 全 0；各轮截断比例 0.0；比值 p50 1.0、p90 1.002–1.015、p99 1.093–1.117、max ≤1.78。按预登记规则维持告警 0.2 / 回退 0.5。待查：每轮比值最小值为 0.0（有 token 当前 logprob 远低于生成时，tape 只有分位数，诊断字段见 PR #212）。复核与判读 `evidence/s19-agentic5/`，原始数据 yeto-evidence-archive `/s1-runs/s19-agentic5/`。花费 #7+#8 ≈$9.05 [估算]。
     - 另报：GPU 利用率均值 MB 36.5% / M0 41.1% / M1 48.6%；KV 峰值 11.6% / 16.7% / 16.7%；排队峰值 14 / 0 / 37；显存峰值约 130 GB。
     - 未做：两岛一组。读码结论：多岛的版本段记账（island_ledger ACCEPT_IS）只在跨岛传样本时用到，跨岛样本传输在真机上没有实现；两岛各自训练时版本段只在岛内起作用，与本次单岛相同，跑两岛得不到新证据。是否改测别的多岛点由主 agent 定。
     - 花费约 $12.4（含失败的 mb-a $1.4）。证据 `evidence/s18-aru3/`（compare.json、analyze.py、dashboard-carry-m1.json、沙箱冒烟、FN 估算）；原始磁带在 Modal Volume yeto-evidence-archive（ARCHIVE-MANIFEST.tsv），本地 s1-runs/s18-aru3-*。

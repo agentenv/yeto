@@ -1,0 +1,517 @@
+{
+ "judgment": {
+  "5a_unscored_zero": {
+   "pass": true,
+   "rounds": {
+    "A1": 0,
+    "A2": 0,
+    "A3": 0,
+    "A4": 0,
+    "A5": 0,
+    "A6": 0,
+    "A7": 0,
+    "B1": 0,
+    "B2": 0,
+    "B3": 0,
+    "B4": 0,
+    "B5": 0
+   }
+  },
+  "5b_quantiles_A_rounds": {
+   "pass": true,
+   "rounds": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7
+   ]
+  },
+  "5c_no_fallback": {
+   "max_fraction": 0.0,
+   "pass": true
+  },
+  "8a_rehearsals": {
+   "max_total_s": 1.9079,
+   "n": 14,
+   "ok": 14,
+   "pass": true
+  },
+  "8b_reclaim": {
+   "pass": false,
+   "reclaim_save": [],
+   "spot_reclaim": []
+  },
+  "calibration": {
+   "F": 0.0,
+   "recommendation": "keep warn 0.2 / fallback 0.5 (margin >= 2x)"
+  },
+  "validity": {
+   "A_rc": "rc=0",
+   "A_resumed_rounds": 7,
+   "A_rounds": 8,
+   "B_resumed_rounds": 5,
+   "pass": true
+  }
+ },
+ "summary": {
+  "A": {
+   "grad_norm": [
+    0.037764087319374084,
+    0.06761778891086578,
+    0.02915854938328266,
+    0.04180998355150223,
+    0.05278414860367775,
+    0.02931596338748932,
+    0.030418673530220985,
+    0.059620290994644165
+   ],
+   "invariant_failed": 0,
+   "per_round_carry": {
+    "0": {
+     "cross_version_tokens": 0,
+     "cross_version_truncated_fraction": null,
+     "resumed_groups": 0,
+     "suspended_groups": 4,
+     "suspended_trajectories": 0,
+     "trained_response_tokens": 122544
+    },
+    "1": {
+     "cross_version_ratio_max": 1.6813363897673799,
+     "cross_version_ratio_min": 1.179092500248129e-08,
+     "cross_version_ratio_p50": 1.0,
+     "cross_version_ratio_p90": 1.0055892855613433,
+     "cross_version_ratio_p99": 1.1103553079322703,
+     "cross_version_scored_tokens": 35597,
+     "cross_version_tokens": 35597,
+     "cross_version_truncated_fraction": 0.0,
+     "cross_version_unscored_samples": 0,
+     "resumed_groups": 4,
+     "suspended_groups": 5,
+     "suspended_trajectories": 3,
+     "trained_response_tokens": 106313
+    },
+    "2": {
+     "cross_version_ratio_max": 1.4531093292073747,
+     "cross_version_ratio_min": 3.2236763568592286e-08,
+     "cross_version_ratio_p50": 1.0,
+     "cross_version_ratio_p90": 1.0109177036309616,
+     "cross_version_ratio_p99": 1.1152827622494172,
+     "cross_version_scored_tokens": 67519,
+     "cross_version_tokens": 67519,
+     "cross_version_truncated_fraction": 0.0,
+     "cross_version_unscored_samples": 0,
+     "resumed_groups": 5,
+     "suspended_groups": 4,
+     "suspended_trajectories": 3,
+     "trained_response_tokens": 164032
+    },
+    "3": {
+     "cross_version_ratio_max": 1.7750925085504128,
+     "cross_version_ratio_min": 1.3407125022256685e-08,
+     "cross_version_ratio_p50": 1.0,
+     "cross_version_ratio_p90": 1.0095375930036514,
+     "cross_version_ratio_p99": 1.1161422627562179,
+     "cross_version_scored_tokens": 30513,
+     "cross_version_tokens": 30513,
+     "cross_version_truncated_fraction": 0.0,
+     "cross_version_unscored_samples": 0,
+     "resumed_groups": 4,
+     "suspended_groups": 3,
+     "suspended_trajectories": 3,
+     "trained_response_tokens": 139290
+    },
+    "4": {
+     "cross_version_ratio_max": 1.5074819609795196,
+     "cross_version_ratio_min": 6.333463981098124e-09,
+     "cross_version_ratio_p50": 1.0,
+     "cross_version_ratio_p90": 1.0087848672207729,
+     "cross_version_ratio_p99": 1.1124658804426089,
+     "cross_version_scored_tokens": 43123,
+     "cross_version_tokens": 43123,
+     "cross_version_truncated_fraction": 0.0,
+     "cross_version_unscored_samples": 0,
+     "resumed_groups": 3,
+     "suspended_groups": 5,
+     "suspended_trajectories": 3,
+     "trained_response_tokens": 174186
+    },
+    "5": {
+     "cross_version_ratio_max": 1.6147110387696293,
+     "cross_version_ratio_min": 3.394756563384287e-09,
+     "cross_version_ratio_p50": 1.0,
+     "cross_version_ratio_p90": 1.0149962812870812,
+     "cross_version_ratio_p99": 1.1158109728983374,
+     "cross_version_scored_tokens": 53852,
+     "cross_version_tokens": 53852,
+     "cross_version_truncated_fraction": 0.0,
+     "cross_version_unscored_samples": 0,
+     "resumed_groups": 5,
+     "suspended_groups": 5,
+     "suspended_trajectories": 0,
+     "trained_response_tokens": 107735
+    },
+    "6": {
+     "cross_version_ratio_max": 1.6143715246559114,
+     "cross_version_ratio_min": 8.674421564568854e-09,
+     "cross_version_ratio_p50": 1.0,
+     "cross_version_ratio_p90": 1.0088192611738975,
+     "cross_version_ratio_p99": 1.1136526328869383,
+     "cross_version_scored_tokens": 63436,
+     "cross_version_tokens": 63436,
+     "cross_version_truncated_fraction": 0.0,
+     "cross_version_unscored_samples": 0,
+     "resumed_groups": 5,
+     "suspended_groups": 5,
+     "suspended_trajectories": 3,
+     "trained_response_tokens": 186387
+    },
+    "7": {
+     "cross_version_ratio_max": 1.2838411363324949,
+     "cross_version_ratio_min": 8.151725293657446e-09,
+     "cross_version_ratio_p50": 1.0,
+     "cross_version_ratio_p90": 1.0090463387913433,
+     "cross_version_ratio_p99": 1.1096371971977403,
+     "cross_version_scored_tokens": 29576,
+     "cross_version_tokens": 29576,
+     "cross_version_truncated_fraction": 0.0,
+     "cross_version_unscored_samples": 0,
+     "resumed_groups": 5,
+     "suspended_trajectories": 2,
+     "trained_response_tokens": 87680
+    }
+   },
+   "rc": "rc=0",
+   "reclaim_saves": [],
+   "rehearsal_total_s_p50_p90_max": [
+    1.4144,
+    1.9042,
+    1.9079
+   ],
+   "rehearsals": [
+    {
+     "agentic_entries": 5,
+     "bytes": 2022,
+     "commit_error": null,
+     "commit_s": 1.4069,
+     "entries": 5,
+     "error": null,
+     "export_s": 0.0054,
+     "round": 0,
+     "total_s": 1.4144,
+     "write_s": 0.0016
+    },
+    {
+     "agentic_entries": 6,
+     "bytes": 2405,
+     "commit_error": null,
+     "commit_s": 1.2558,
+     "entries": 6,
+     "error": null,
+     "export_s": 0.0037,
+     "round": 1,
+     "total_s": 1.2626,
+     "write_s": 0.0022
+    },
+    {
+     "agentic_entries": 7,
+     "bytes": 2789,
+     "commit_error": null,
+     "commit_s": 1.3662,
+     "entries": 7,
+     "error": null,
+     "export_s": 0.0033,
+     "round": 2,
+     "total_s": 1.3718,
+     "write_s": 0.0017
+    },
+    {
+     "agentic_entries": 6,
+     "bytes": 2406,
+     "commit_error": null,
+     "commit_s": 1.2512,
+     "entries": 6,
+     "error": null,
+     "export_s": 0.0034,
+     "round": 3,
+     "total_s": 1.2573,
+     "write_s": 0.0021
+    },
+    {
+     "agentic_entries": 11,
+     "bytes": 4326,
+     "commit_error": null,
+     "commit_s": 1.3155,
+     "entries": 11,
+     "error": null,
+     "export_s": 0.0026,
+     "round": 4,
+     "total_s": 1.3205,
+     "write_s": 0.0018
+    },
+    {
+     "agentic_entries": 8,
+     "bytes": 3174,
+     "commit_error": null,
+     "commit_s": 1.9018,
+     "entries": 8,
+     "error": null,
+     "export_s": 0.0037,
+     "round": 5,
+     "total_s": 1.9079,
+     "write_s": 0.0018
+    },
+    {
+     "agentic_entries": 8,
+     "bytes": 3174,
+     "commit_error": null,
+     "commit_s": 1.8986,
+     "entries": 8,
+     "error": null,
+     "export_s": 0.0031,
+     "round": 6,
+     "total_s": 1.9042,
+     "write_s": 0.0018
+    },
+    {
+     "agentic_entries": 0,
+     "bytes": 104,
+     "commit_error": null,
+     "commit_s": 1.4665,
+     "entries": 0,
+     "error": null,
+     "export_s": 0.0028,
+     "round": 7,
+     "total_s": 1.4715,
+     "write_s": 0.0016
+    }
+   ],
+   "rounds_trained": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7
+   ],
+   "run": "s19-agentic5-a-20261010b",
+   "spot_reclaim": [],
+   "tapes": [
+    "/home/michael/work/s1-runs/s19-agentic5-a-20261010b/tape-direct/yeto-s19-agentic5-a-20261010b/l0/rank0/rl-island-0.jsonl"
+   ],
+   "tis_clipfrac_by_round": {
+    "1": null,
+    "2": null,
+    "3": null,
+    "4": null,
+    "5": null,
+    "6": null,
+    "7": null,
+    "8": null
+   }
+  },
+  "B": {
+   "grad_norm": [
+    0.030850594863295555,
+    0.04798191785812378,
+    0.03990388661623001,
+    0.040942296385765076,
+    0.034951187670230865,
+    0.018440481275320053
+   ],
+   "invariant_failed": 0,
+   "per_round_carry": {
+    "0": {
+     "cross_version_tokens": 0,
+     "cross_version_truncated_fraction": null,
+     "resumed_groups": 0,
+     "suspended_groups": 5,
+     "suspended_trajectories": 0,
+     "trained_response_tokens": 132487
+    },
+    "1": {
+     "cross_version_ratio_max": 1.4543047206826973,
+     "cross_version_ratio_min": 9.229964605442633e-09,
+     "cross_version_ratio_p50": 1.0,
+     "cross_version_ratio_p90": 1.007982076151257,
+     "cross_version_ratio_p99": 1.1093442377550138,
+     "cross_version_scored_tokens": 32662,
+     "cross_version_tokens": 32662,
+     "cross_version_truncated_fraction": 0.0,
+     "cross_version_unscored_samples": 0,
+     "resumed_groups": 5,
+     "suspended_groups": 4,
+     "suspended_trajectories": 3,
+     "trained_response_tokens": 102028
+    },
+    "2": {
+     "cross_version_ratio_max": 1.4621257874716607,
+     "cross_version_ratio_min": 5.6026254563682455e-09,
+     "cross_version_ratio_p50": 1.0,
+     "cross_version_ratio_p90": 1.013358533463926,
+     "cross_version_ratio_p99": 1.1173496866598527,
+     "cross_version_scored_tokens": 21513,
+     "cross_version_tokens": 21513,
+     "cross_version_truncated_fraction": 0.0,
+     "cross_version_unscored_samples": 0,
+     "resumed_groups": 4,
+     "suspended_groups": 4,
+     "suspended_trajectories": 3,
+     "trained_response_tokens": 143662
+    },
+    "3": {
+     "cross_version_ratio_max": 1.4540689611741673,
+     "cross_version_ratio_min": 1.186087129775007e-08,
+     "cross_version_ratio_p50": 1.0,
+     "cross_version_ratio_p90": 1.00900965171066,
+     "cross_version_ratio_p99": 1.1127945520953866,
+     "cross_version_scored_tokens": 21567,
+     "cross_version_tokens": 21567,
+     "cross_version_truncated_fraction": 0.0,
+     "cross_version_unscored_samples": 0,
+     "resumed_groups": 4,
+     "suspended_groups": 4,
+     "suspended_trajectories": 5,
+     "trained_response_tokens": 99600
+    },
+    "4": {
+     "cross_version_ratio_max": 1.4525596198197037,
+     "cross_version_ratio_min": 5.600285676035372e-09,
+     "cross_version_ratio_p50": 1.0,
+     "cross_version_ratio_p90": 1.001585405325388,
+     "cross_version_ratio_p99": 1.09319518615064,
+     "cross_version_scored_tokens": 30065,
+     "cross_version_tokens": 30065,
+     "cross_version_truncated_fraction": 0.0,
+     "cross_version_unscored_samples": 0,
+     "resumed_groups": 4,
+     "suspended_groups": 5,
+     "suspended_trajectories": 5,
+     "trained_response_tokens": 131926
+    },
+    "5": {
+     "cross_version_ratio_max": 1.3808560044268294,
+     "cross_version_ratio_min": 7.729068697774434e-08,
+     "cross_version_ratio_p50": 1.0,
+     "cross_version_ratio_p90": 1.0135389518375177,
+     "cross_version_ratio_p99": 1.1164746491813908,
+     "cross_version_scored_tokens": 69923,
+     "cross_version_tokens": 69923,
+     "cross_version_truncated_fraction": 0.0,
+     "cross_version_unscored_samples": 0,
+     "resumed_groups": 5,
+     "suspended_groups": 4,
+     "suspended_trajectories": 1,
+     "trained_response_tokens": 151810
+    }
+   },
+   "rc": "rc=4",
+   "reclaim_saves": [],
+   "rehearsal_total_s_p50_p90_max": [
+    1.7213,
+    1.8028,
+    1.8028
+   ],
+   "rehearsals": [
+    {
+     "agentic_entries": 5,
+     "bytes": 2022,
+     "commit_error": null,
+     "commit_s": 1.7899,
+     "entries": 5,
+     "error": null,
+     "export_s": 0.0057,
+     "round": 0,
+     "total_s": 1.7981,
+     "write_s": 0.0018
+    },
+    {
+     "agentic_entries": 10,
+     "bytes": 3942,
+     "commit_error": null,
+     "commit_s": 1.3947,
+     "entries": 10,
+     "error": null,
+     "export_s": 0.0033,
+     "round": 1,
+     "total_s": 1.4002,
+     "write_s": 0.0015
+    },
+    {
+     "agentic_entries": 9,
+     "bytes": 3558,
+     "commit_error": null,
+     "commit_s": 1.4403,
+     "entries": 9,
+     "error": null,
+     "export_s": 0.0029,
+     "round": 2,
+     "total_s": 1.4452,
+     "write_s": 0.0015
+    },
+    {
+     "agentic_entries": 11,
+     "bytes": 4326,
+     "commit_error": null,
+     "commit_s": 1.6572,
+     "entries": 11,
+     "error": null,
+     "export_s": 0.0031,
+     "round": 3,
+     "total_s": 1.6625,
+     "write_s": 0.0017
+    },
+    {
+     "agentic_entries": 11,
+     "bytes": 4326,
+     "commit_error": null,
+     "commit_s": 1.7169,
+     "entries": 11,
+     "error": null,
+     "export_s": 0.0022,
+     "round": 4,
+     "total_s": 1.7213,
+     "write_s": 0.0016
+    },
+    {
+     "agentic_entries": 5,
+     "bytes": 2022,
+     "commit_error": null,
+     "commit_s": 1.7979,
+     "entries": 5,
+     "error": null,
+     "export_s": 0.0028,
+     "round": 5,
+     "total_s": 1.8028,
+     "write_s": 0.0015
+    }
+   ],
+   "rounds_trained": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5
+   ],
+   "run": "s19-agentic5-b-20261010b",
+   "spot_reclaim": [],
+   "tapes": [
+    "/home/michael/work/s1-runs/s19-agentic5-b-20261010b/tape-direct/yeto-s19-agentic5-b-20261010b/l0/rank0/rl-island-0.inc1.jsonl",
+    "/home/michael/work/s1-runs/s19-agentic5-b-20261010b/tape-direct/yeto-s19-agentic5-b-20261010b/l0/rank0/rl-island-0.jsonl"
+   ],
+   "tis_clipfrac_by_round": {
+    "1": null,
+    "2": null,
+    "3": null,
+    "4": null,
+    "5": null,
+    "6": null
+   }
+  }
+ }
+}
