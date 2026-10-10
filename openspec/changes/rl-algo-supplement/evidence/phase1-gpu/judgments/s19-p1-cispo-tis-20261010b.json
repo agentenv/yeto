@@ -1,0 +1,72 @@
+{
+ "verdict": "PASS",
+ "case": "cispo-tis",
+ "run": "s19-p1-cispo-tis-20261010b",
+ "rounds": [
+  {
+   "rollout_id": 0,
+   "entropy_loss": 0.0,
+   "ess_ratio": 0.9993456101506715,
+   "loss": -0.02135244588123273,
+   "ois": 1.0006549709388812,
+   "pg_clipfrac": 0.0010200612036722204,
+   "pg_loss": -0.02135244588123273,
+   "ppo_kl": -0.00032854280841468104,
+   "tis": 0.9994326817127368,
+   "tis_abs": 0.011618691750264434,
+   "tis_clipfrac": 0.1930713327555751,
+   "train_rollout_kl": 0.0005623347748757524,
+   "train_rollout_logprob_abs_diff": 0.011649306759648152,
+   "grad_norm": 0.6696218252182007,
+   "reward_mean": 0.9375,
+   "reward_std": 0.24206145913796356
+  },
+  {
+   "rollout_id": 1,
+   "entropy_loss": 0.0,
+   "ess_ratio": 0.9990275675020075,
+   "loss": -0.05773558551332141,
+   "ois": 0.9995947370182012,
+   "pg_clipfrac": 0.002569593147751606,
+   "pg_loss": -0.05773558551332141,
+   "ppo_kl": 0.0008918184284479766,
+   "tis": 1.0000217975548362,
+   "tis_abs": 0.014292695059095546,
+   "tis_clipfrac": 0.23608274016884073,
+   "train_rollout_kl": 0.0006713726344812898,
+   "train_rollout_logprob_abs_diff": 0.014324880011148617,
+   "grad_norm": 0.5253781676292419,
+   "reward_mean": 0.34375,
+   "reward_std": 0.47495887979908324
+  },
+  {
+   "rollout_id": 2,
+   "entropy_loss": 0.0,
+   "ess_ratio": 0.9991019661107368,
+   "loss": -0.02415925920534341,
+   "ois": 1.0003989604391283,
+   "pg_clipfrac": 0.001527403414195867,
+   "pg_loss": -0.02415925920534341,
+   "ppo_kl": 6.0042109665095214e-05,
+   "tis": 1.0001820442680927,
+   "tis_abs": 0.016514380243092562,
+   "tis_clipfrac": 0.27535222659439906,
+   "train_rollout_kl": 0.0008301296141717423,
+   "train_rollout_logprob_abs_diff": 0.01652177901591722,
+   "grad_norm": 0.543567419052124,
+   "reward_mean": 0.125,
+   "reward_std": 0.33071891388307384
+  }
+ ],
+ "problems": [],
+ "missing": [],
+ "notes": [],
+ "spec_sha256": "d85490c5603c98fa984bb99d73eb5749470f2eac93dfd784abf2f2d3339705bd",
+ "miles_commit": "64b591a4bec1ffa37fb089d3e3b99c84773b1ffc",
+ "gpu": [
+  "[s19-p1-cispo-tis-20261010b-l0-modal] [modal-island 0] requested A10G:1, got ['NVIDIA A10']"
+ ],
+ "tape": "s19-p1-cispo-tis-20261010b/tape-direct/yeto-s19-p1-cispo-tis-20261010b/l0/rank0/rl-island-0.jsonl",
+ "n_step_dicts": 6,
+ "watchdog_fired": false
+}

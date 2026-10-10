@@ -57,3 +57,17 @@
 3. 4.2、4.4、5.1、5.2（解除 HANDOFF-AUDIT A1 的四个遗留）。
 4. 4.5、4.6、4.7，然后 4.3。
 5. 6.1。
+
+## 5. 上卡结果（S19 #13 执行子 agent，2026-10-10 回填）
+逐项结论、run id、关键数据见 `evidence/phase1-gpu/results.md`；判读 json 在 `evidence/phase1-gpu/judgments/`。摘要：
+- 通过：4.3 三项、4.1（新 pin + 旧 pin 复核）、4.2 CISPO/SAPO/GMPO、4.4、4.5 k2/low_var_kl/kl_unbiased、4.6、5.1、6.1。
+- 失败：4.5 k1（第 3 轮 kl_loss < 0）。判据缺陷，非实现缺陷：k1 估计器本身可为负。主 agent 代拍板，按预登记记失败，本次不重跑。
+- 失败（证据不全）：4.7 两项（advantage 方差无数据）。
+- 5.2：grad_norm 判据通过；clipfrac 离线重算未验证。
+- 4.3：CISPO/SAPO/GMPO + TIS 三项通过（*-tis-20261010b）。
+- 声明（MILES_DECLARED_PINS 等）未改：属代码改动，留给后续 PR。
+
+## 6. 后续（不在本次上卡范围）
+- 4.5 k1：如需重测，先预登记适合 k1 的判据再上卡，例如"3 轮 kl_loss 均值 > 0 且有限"，或"与同 seed k3 运行逐轮同号、量级一致"。新判据要经确认后再开卡。
+- 4.7：需要先输出 advantage 方差（Miles 或 tape 的 adv_std），再重测。
+- 5.2：需要逐 token ratio 输出，才能做 clipfrac 离线核对。
