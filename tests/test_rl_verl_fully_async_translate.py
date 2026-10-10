@@ -18,16 +18,17 @@ def _vmap(pairs=((0, 10), (1, 11), (2, 12), (3, 13))):
 
 
 def test_limit_to_staleness_threshold_and_queue_lag():
-    """(c) staleness only throttles by samples: s = N - 1, queued lag floor(s) + 1."""
-    assert t.staleness_threshold_for(1) == 0.0 and t.staleness_threshold_for(2) == 1.0
-    assert t.queue_version_lag(t.staleness_threshold_for(1)) == 1
+    """(c) staleness only throttles by samples: s = N (S19 10-10, was N - 1: async8 had
+    nothing in flight at a push), queued lag floor(s) + 1 = N + 1, beyond N yeto discards."""
+    assert t.staleness_threshold_for(1) == 1.0 and t.staleness_threshold_for(2) == 2.0
+    assert t.queue_version_lag(t.staleness_threshold_for(1)) == 2
     assert t.queue_version_lag(0.1) == 1 and t.queue_version_lag(1.0) == 2
     with pytest.raises(PolicyAgeError):
         t.staleness_threshold_for(0)
     with pytest.raises(t.VerlTranslationError, match="trigger_parameter_sync_step"):
         t.queue_version_lag(0.0, 4)
     assert t.fully_async_overrides(1, samples_per_round=128, ppo_mini_batch_size=32) == {
-        "async_training.staleness_threshold": 0.0, "async_training.partial_rollout": True,
+        "async_training.staleness_threshold": 1.0, "async_training.partial_rollout": True,
         "async_training.trigger_parameter_sync_step": 1, "async_training.require_batches": 4}
     with pytest.raises(t.VerlTranslationError, match="multiple"):
         t.fully_async_overrides(1, samples_per_round=100, ppo_mini_batch_size=32)

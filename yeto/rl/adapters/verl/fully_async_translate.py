@@ -22,7 +22,8 @@ The four sub-requirements of 6.4 (6.1 code reading, verl fork acad9875):
     drops anything, so the over-limit discard is yeto's
     (:func:`judge_trajectory`); :func:`fully_async_overrides` derives the
     throttle from the limit (:func:`staleness_threshold_for`) and
-    :func:`queue_version_lag` states the lag bound the throttle alone allows.
+    :func:`queue_version_lag` states the lag bound the throttle alone allows
+    (s = N, so up to N + 1 versions: the extra one is yeto's to discard).
 (d) the trainer's local ``current_param_version``
     (``fully_async_trainer.py:143, 687, 841``; also checkpoint directory and log
     step) is not yeto's outer version: :class:`VersionMap` records the pairing at
@@ -59,13 +60,20 @@ def staleness_threshold_for(limit: int) -> float:
     generated since the last parameter sync (``fully_async_rollouter.py:493-497``);
     with ``trigger_parameter_sync_step = 1`` (one verl version per yeto round) a
     queued sample can wait for at most ``floor(s) + 1`` versions
-    (:func:`queue_version_lag`). One version of lag is inherent to fully_async
-    (generation overlaps training), so N = 1 -> s = 0 and in general s = N - 1;
-    an in-flight sample continued by partial rollout may still cross one more
-    version, which yeto discards by version segment (:func:`judge_trajectory`)."""
+    (:func:`queue_version_lag`).
+
+    Mapping s = N (S19 decision 10-10, main agent; was s = N - 1).  With s = N - 1
+    = 0 the rollouter generated exactly one round and then idled until the next
+    sync, so nothing was in flight at a push and partial rollout never resumed
+    (GPU run s19-verl64b-async8-20261010a: "staleness_samples 32 >=
+    max_required_samples 32" every round, 0 resumed) -- fully_async degenerated
+    to sync alternation.  s = N keeps the rollouter generating while the trainer
+    trains; the limit is yeto's: groups whose oldest version is more than N
+    behind are discarded by version segment (:func:`judge_trajectory`,
+    ``RoundCollector``), not by verl's throttle."""
     if validate_limit(limit) == 0:
         raise PolicyAgeError("limit 0 does not use verl fully_async (the sync trainer stays)")
-    return float(limit - 1)
+    return float(limit)
 
 
 def queue_version_lag(staleness_threshold: float, trigger_parameter_sync_step: int = 1) -> int:
