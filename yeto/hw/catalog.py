@@ -14,6 +14,7 @@ part of the group and never cause a refusal (user decision 2026-10-09).
 from __future__ import annotations
 
 import os
+import platform
 import re
 import subprocess
 from typing import Mapping
@@ -120,12 +121,31 @@ def check_compat_group(local: str | None, peer: str | None) -> None:
         raise CompatGroupMismatch(reason)
 
 
+def _first_npu_id() -> str:
+    """NPU ID of the first card ``npu-smi`` can see.
+
+    A container may expose only a physical card such as ID 4 (ModelArts
+    notebooks do); ``npu-smi info -t board -i 0`` then fails. ``npu-smi info -l``
+    lists the visible IDs. Falls back to ``ASCEND_VISIBLE_DEVICES``, then "0".
+    """
+    try:
+        res = subprocess.run(["npu-smi", "info", "-l"], capture_output=True, text=True, timeout=10)
+        for line in res.stdout.splitlines():
+            key, _, value = line.partition(":")
+            if key.strip() == "NPU ID" and value.strip().isdigit():
+                return value.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    visible = os.environ.get("ASCEND_VISIBLE_DEVICES", "").split(",")[0].strip()
+    return visible if visible.isdigit() else "0"
+
+
 def _npu_runtime_versions() -> dict[str, str | None]:
     """Ascend driver, CANN and torch_npu versions (best effort; rl-verl-backend 3.6)."""
     out: dict[str, str | None] = {"npu_driver_version": None, "cann_version": None,
                                   "torch_npu_version": None}
     try:
-        res = subprocess.run(["npu-smi", "info", "-t", "board", "-i", "0"],
+        res = subprocess.run(["npu-smi", "info", "-t", "board", "-i", _first_npu_id()],
                              capture_output=True, text=True, timeout=10)
         for line in res.stdout.splitlines():
             if "Software Version" in line or "Driver Version" in line:
@@ -134,7 +154,10 @@ def _npu_runtime_versions() -> dict[str, str | None]:
     except (OSError, subprocess.SubprocessError):
         pass
     for path in ("/usr/local/Ascend/ascend-toolkit/latest/version.cfg",
-                 "/usr/local/Ascend/ascend-toolkit/latest/version.info"):
+                 "/usr/local/Ascend/ascend-toolkit/latest/version.info",
+                 # CANN 8.x layout (seen on ModelArts snt9b images, CANN 8.5.1).
+                 f"/usr/local/Ascend/ascend-toolkit/latest/{platform.machine()}-linux/"
+                 "ascend_toolkit_install.info"):
         try:
             with open(path) as fh:
                 text = fh.read()

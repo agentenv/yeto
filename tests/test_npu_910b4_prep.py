@@ -8,6 +8,7 @@ infra-drafts/S19-NPU-910B4-BRINGUP.md ("to verify on hardware").
 
 from __future__ import annotations
 
+import os
 import sys
 from types import SimpleNamespace
 
@@ -226,3 +227,65 @@ def test_threshold_key_separates_npu_from_gpu():
 
     assert _threshold_card({"device_family": "ascend", "npu_smi": NPU_SMI_INFO}) == "910B4"
     assert _threshold_card({"device_family": "nvidia", "nvidia_smi": "NVIDIA H100 80GB"}) == "H100"
+
+
+# --- S20 ModelArts bring-up: the container sees one card with a non-zero ID --
+NPU_SMI_LIST_ID4 = "\tTotal Count                    : 1\n\n\tNPU ID                         : 4\n\tChip Count                     : 1\n"
+
+
+def test_first_npu_id_reads_npu_smi_list(monkeypatch):
+    class _Res:
+        stdout = NPU_SMI_LIST_ID4
+
+    monkeypatch.setattr(catalog.subprocess, "run", lambda *a, **k: _Res())
+    assert catalog._first_npu_id() == "4"
+
+
+def test_first_npu_id_falls_back_to_visible_devices(monkeypatch):
+    def _missing(*_a, **_k):
+        raise OSError("npu-smi: not found")
+
+    monkeypatch.setattr(catalog.subprocess, "run", _missing)
+    monkeypatch.setenv("ASCEND_VISIBLE_DEVICES", "6,7")
+    assert catalog._first_npu_id() == "6"
+    monkeypatch.delenv("ASCEND_VISIBLE_DEVICES")
+    assert catalog._first_npu_id() == "0"
+
+
+def test_board_query_uses_the_visible_npu_id(monkeypatch):
+    calls = []
+
+    class _Res:
+        def __init__(self, out):
+            self.stdout = out
+
+    def _run(cmd, **_k):
+        calls.append(cmd)
+        if cmd[:3] == ["npu-smi", "info", "-l"]:
+            return _Res(NPU_SMI_LIST_ID4)
+        return _Res("\tSoftware Version               : 25.5.1\n")
+
+    monkeypatch.setattr(catalog.subprocess, "run", _run)
+    out = catalog._npu_runtime_versions()
+    assert ["npu-smi", "info", "-t", "board", "-i", "4"] in calls
+    assert out["npu_driver_version"] == "25.5.1"
+
+
+def test_unpinned_waiver_env_name_is_stable():
+    from yeto.rl.adapters.verl import island_entry
+
+    assert island_entry.ALLOW_UNPINNED_ENV == "YETO_VERL_ALLOW_UNPINNED"
+
+
+def test_verl_main_keeps_npus_visible_only_on_ascend(monkeypatch):
+    pytest.importorskip("ray")
+    from yeto.hw import catalog as cat
+    from yeto.rl.adapters.verl import verl_main
+
+    monkeypatch.delenv(verl_main.NPU_NOSET_ENV, raising=False)
+    monkeypatch.setattr(cat, "device_family", lambda *_a: "nvidia")
+    verl_main._keep_npu_visible_in_cpu_actors()
+    assert verl_main.NPU_NOSET_ENV not in os.environ
+    monkeypatch.setattr(cat, "device_family", lambda *_a: "ascend")
+    verl_main._keep_npu_visible_in_cpu_actors()
+    assert os.environ[verl_main.NPU_NOSET_ENV] == "1"
