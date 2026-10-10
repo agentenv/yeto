@@ -102,6 +102,9 @@ def compactionrl_spec(**overrides: Any) -> AlgorithmSpec:
 COMPACTION_SWITCH_ENV = "YETO_CODEX_COMPACTIONRL"
 COMPACTION_T_COMP_ENV = "YETO_CODEX_COMPACTIONRL_T_COMP"
 COMPACTED_GAE_VARIANT = "cross_segment_per_sample"
+# yeto's Codex generate wrapper (segment collection); the launcher checks it
+# without importing the adapter layer (import boundary, yeto/rl/engine/README.md).
+CODEX_OPENENV_GENERATE = "yeto.rl.harness.codex.codex_openenv_generate.generate"
 WHOLE_ROLLOUT_CONTROL_GAE_VARIANT = "cross_segment_whole_rollout"
 _SWITCH_FALSE = frozenset({"", "0", "false", "no", "off"})
 _SWITCH_TRUE = frozenset({"1", "true", "yes", "on"})

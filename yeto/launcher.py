@@ -3653,16 +3653,14 @@ def compactionrl_launch_env(args, environ, harness_compacts: bool) -> dict[str, 
         raise ValueError(f"CompactionRL launch: {error}") from error
     if not wanted:
         return {}
-    from .rl.adapters.miles.config import CODEX_OPENENV_GENERATE
-
     generate = getattr(args, "custom_generate_function_path", None)
-    if getattr(args, "custom_agent_function_path", None) and generate != CODEX_OPENENV_GENERATE:
+    if getattr(args, "custom_agent_function_path", None) and generate != crl.CODEX_OPENENV_GENERATE:
         # s19-compaction-g1-20261010b: with upstream agentic_tool_call.generate the
         # segment sessions are never collected, samples carry no tokens_after and
         # the trainer fails at round 0 (cross_segment_per_sample needs tokens_after).
         raise ValueError(
             f"CompactionRL launch: {crl.COMPACTED_GAE_VARIANT} needs "
-            f"--custom-generate-function-path {CODEX_OPENENV_GENERATE} (got {generate!r})")
+            f"--custom-generate-function-path {crl.CODEX_OPENENV_GENERATE} (got {generate!r})")
     env = {crl.COMPACTION_SWITCH_ENV: "1"}
     if t_comp:
         env[crl.COMPACTION_T_COMP_ENV] = str(t_comp).strip()
