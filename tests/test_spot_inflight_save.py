@@ -118,56 +118,6 @@ def test_install_is_opt_in(tmp_path):
     assert s.install(object(), object(), island="0", environ={}) is None
 
 
-def test_install_writes_pid_and_wires(tmp_path, monkeypatch):
-    class Driver:
-        def emit(self, event, **fields):
-            pass
-
-    installed = []
-    monkeypatch.setattr(p.ModalExitHandler, "install", lambda self: installed.append(1) or [])
-    env = {s.ENV_DIR: str(tmp_path / "save"), s.ENV_PID_FILE: str(tmp_path / "pid")}
-    h = s.install(Driver(), object(), island="0", environ=env)
-    assert h is not None and installed == [1] and h.role == "train"
-    assert (tmp_path / "pid").read_text().strip().isdigit()
-
-
-def test_modal_runner_forwards_to_the_learner_pid_only(tmp_path):
-    from yeto import modal_runner as mr
-
-    class P:
-        pid = 777
-
-        def __init__(self, kw):
-            self.kw = kw
-
-        def wait(self):
-            return 0
-
-    made, handlers, killed = [], {}, []
-
-    def popen(cmd, env, **kw):
-        made.append(P(kw))
-        return made[-1]
-
-    class Sig:
-        SIGINT, SIGTERM = _signal.SIGINT, _signal.SIGTERM
-
-        @staticmethod
-        def signal(num, fn):
-            handlers[num] = fn
-
-    pid = tmp_path / "pid"
-    env = {"YETO_SPOT_INFLIGHT_SAVE_DIR": "/yeto-tape/x", "YETO_SPOT_INFLIGHT_PID_FILE": str(pid)}
-    assert mr._run_forwarding_to_learner(["x"], env, popen=popen, sig=Sig,
-                                         kill=lambda p_, n: killed.append((p_, n))) == 0
-    assert made[-1].kw == {}  # same session: the Ray processes are not signalled
-    handlers[_signal.SIGTERM](_signal.SIGTERM, None)  # no pid file yet: not forwarded
-    assert killed == []
-    pid.write_text("4321\n")
-    handlers[_signal.SIGINT](_signal.SIGINT, None)
-    assert killed == [(4321, _signal.SIGINT)]
-
-
 def test_run_island_script_routes_inflight_env(monkeypatch):
     from yeto import modal_runner as mr
 

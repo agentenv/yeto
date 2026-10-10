@@ -6026,6 +6026,23 @@ def _verify_modal_app_stopped(modal_ops, args, *, run_started_unix: float | None
     return confirmed
 
 
+def container_set_poller_for(args, modal_ops, modal_cfgs, on_change, *, start: bool = True):
+    """The log-independent container guard (modal_runner.ContainerSetPoller), only when
+    a new container is never expected: no launcher relaunch, no checkpoint-store resume
+    and no droppable island. None otherwise."""
+    if modal_ops is None or not modal_cfgs or not callable(getattr(modal_ops, "list_container_ids", None)):
+        return None
+    if effective_recover_timeout(args) != 0 or resumes_in_new_container(args):
+        return None
+    if any(droppable_rejoins_in_new_container(args, cfg) for cfg in modal_cfgs.values()):
+        return None
+    from .modal_runner import ContainerSetPoller
+
+    expected = sum(max(1, int(getattr(cfg, "num_nodes", 1) or 1)) for cfg in modal_cfgs.values())
+    poller = ContainerSetPoller(modal_ops.list_container_ids, expected, on_change)
+    return poller.start() if start else poller
+
+
 def effective_recover_timeout(args) -> float:
     """The fleet controller's learner relaunch budget.
 
@@ -7533,6 +7550,9 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             spawn_tail(syncer_cluster, syncer_job)
         for name, (job_id, _handle) in results.items():
             spawn_tail(name, job_id)
+        container_poller = container_set_poller_for(args, modal_ops, modal_cfgs, on_container_change)
+        if container_poller is not None:
+            container_guards.append(container_poller)
 
         from . import runs
         from .modal_runner import RoutingOps
