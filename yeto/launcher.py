@@ -1488,6 +1488,9 @@ def check_cloud_prerequisites(
     machine, cannot mount object-store data, and (for RL) need the Miles
     image pinned by digest. `modal_ok` overrides the token check in tests.
     """
+    if args is not None and getattr(args, "modal_sandbox_secret", None):
+        for s in specs:
+            modal_sandbox_secret_name(args, s)  # non-Modal islands: refused
     nebius_regions = sorted({s.region for s in specs if s.cloud == "nebius" and s.region})
     if nebius_regions:
         from .shape.providers import SKY_CONFIG_PATH, nebius_project_ids
@@ -3492,6 +3495,29 @@ def require_sandbox_modal_token(envs) -> None:
             f"the Modal Sandbox provider needs {', '.join(missing)} in the launching "
             "environment: a separate Modal token used only for task sandboxes (the main "
             "MODAL_TOKEN_ID/SECRET is never shipped to a learner island)")
+# --modal-sandbox-secret: in-island fail-closed check (names only, never values).
+SANDBOX_TOKEN_IN_ISLAND_CHECK = (
+    "for _v in " + " ".join(SANDBOX_MODAL_TOKEN_ENVS) + "; do "
+    '[ -n "$(printenv "$_v")" ] || { echo "[yeto-setup] $_v missing in the island: '
+    'the --modal-sandbox-secret Modal Secret must hold it" >&2; exit 1; }; done'
+)
+
+
+def modal_sandbox_secret_name(args, spec) -> str | None:
+    """--modal-sandbox-secret NAME, or None when unset.  Only Modal islands can
+    attach a named Modal Secret: any other cloud is refused, never ignored."""
+    name = getattr(args, "modal_sandbox_secret", None)
+    if not name:
+        return None
+    if getattr(spec, "cloud", None) != "modal":
+        raise ValueError(
+            f"--modal-sandbox-secret attaches a Modal Secret to a Modal island; "
+            f"island cloud {getattr(spec, 'cloud', None)!r} cannot use it")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", str(name)):
+        raise ValueError(f"--modal-sandbox-secret {name!r} is not a Modal Secret name")
+    return str(name)
+
+
 MODAL_CLIENT_SETUP = (
     # --ignore-installed: in a Modal Function container the setup shell
     # already sees Modal's runtime copies (/pkg, /__modal/deps), so a plain
@@ -4200,8 +4226,14 @@ def make_miles_island_task(
         )
     if getattr(args, "rl_initial_adapter", None) is not None:
         setup_steps.append(f"chmod -R a-w {RL_INITIAL_ADAPTER_PATH}")
+    sandbox_secret = modal_sandbox_secret_name(args, spec)
     if codex_launch is not None and envs.get(HARNESS_ENVIRONMENT_PROVIDER_ENV) in MODAL_SANDBOX_PROVIDERS:
-        require_sandbox_modal_token(envs)
+        if sandbox_secret is None:
+            require_sandbox_modal_token(envs)
+        else:
+            # The token comes from the named Modal Secret at container start;
+            # the island re-checks it before anything else runs.
+            setup_steps.append(SANDBOX_TOKEN_IN_ISLAND_CHECK)
         setup_steps.append(MODAL_CLIENT_SETUP)
     store_fs = model_store_filesystem(getattr(args, "model_store", None), spec.cloud, spec.region)
     store_env = ""
@@ -5190,6 +5222,8 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         checkpoint_store_volume_name=None if store_volume is None else store_volume[0],
         checkpoint_store_mount=None if store_volume is None else MODAL_CHECKPOINT_STORE_MOUNT,
         tape_volume_name=getattr(args, "modal_tape_volume", None) or None,
+        named_secrets=((modal_sandbox_secret_name(args, spec),)
+                       if getattr(args, "modal_sandbox_secret", None) else ()),
         model_volume_name=(getattr(args, "modal_model_volume", None) or None) if rl else None,
         model_volume_mount=MODEL_STORE_MOUNT if rl and getattr(args, "modal_model_volume", None) else None,
         cpu_override=getattr(args, "modal_cpu", None),

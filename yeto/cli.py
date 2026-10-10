@@ -1162,6 +1162,15 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="Modal islands: extra container environment (repeatable), e.g. NCCL_DEBUG=INFO",
     )
     infra.add_argument(
+        "--modal-sandbox-secret",
+        default=None,
+        metavar="NAME",
+        help="Modal islands, Modal Sandbox task provider: attach the named Modal Secret "
+        "(it must hold YETO_SANDBOX_MODAL_TOKEN_ID/SECRET) to the island function instead "
+        "of shipping the sandbox token from the launching environment; the island setup "
+        "fails closed when either variable is missing. Refused for non-Modal islands",
+    )
+    infra.add_argument(
         "--modal-timeout-s",
         type=int,
         default=None,

@@ -231,6 +231,9 @@ class ModalIslandConfig:
     # under hf/<name>/<rev[:8]>/ and torch_dist checkpoints (Flash-Next).
     model_volume_name: str | None = None
     model_volume_mount: str | None = None
+    # Named Modal Secrets attached to the island function besides cfg.envs
+    # (--modal-sandbox-secret); values never pass through the launcher.
+    named_secrets: tuple[str, ...] = ()
     # Host resource overrides (None = per-GPU defaults below).
     cpu_override: int | None = None
     memory_gib_override: int | None = None
@@ -306,6 +309,7 @@ class ModalIslandConfig:
         data = json.loads(text)
         data["pip_requirements"] = tuple(data.get("pip_requirements") or ())
         data["extra_mounts"] = dict(data.get("extra_mounts") or {})
+        data["named_secrets"] = tuple(data.get("named_secrets") or ())
         return cls(**data)
 
 
@@ -802,7 +806,8 @@ class ModalOps:
             memory=cfg.memory_request_mib,
             timeout=cfg.timeout_s,
             retries=modal.Retries(max_retries=cfg.retries, initial_delay=0.0),
-            secrets=[modal.Secret.from_dict(dict(cfg.envs))],
+            secrets=[modal.Secret.from_dict(dict(cfg.envs)),
+                     *(modal.Secret.from_name(n) for n in cfg.named_secrets)],
             name=cfg.function_name,
         )
         if cfg.region:
