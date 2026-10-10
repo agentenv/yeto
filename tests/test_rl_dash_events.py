@@ -277,3 +277,41 @@ def test_ports_local_round_reaches_wandb_train_axis():
                        "grad_norm": 1.5, "local_round_id": 3, "reward_mean": 0.2})
     assert m["train/step"] == 3 and m["train/loss"] == 0.5 and m["train/grad_norm"] == 1.5
     assert m["rl/reward_mean"] == 0.2
+
+
+def test_rl_debug_dump_writes_flat_pt_names_next_to_the_tape(monkeypatch, tmp_path):
+    """--rl-debug-dump: Miles dumps land as flat *.pt next to the event tape (the
+    Modal tape mirror copies top-level .pt files only); off by default."""
+    from yeto.modal_runner import TAPE_SUFFIXES
+    from yeto.rl.adapters.miles.island_entry import apply_ports_infra_switches
+
+    monkeypatch.setattr("yeto.rl.adapters.miles.elastic_hook.apply_recommend_flags",
+                        lambda a, m: None)
+    base = dict(rl_observe_timeline=False, rl_heartbeat_interval=None,
+                rl_resource_sample_interval=None, event_tape=str(tmp_path / "rl-island-0.jsonl"))
+    off = SimpleNamespace()
+    apply_ports_infra_switches(SimpleNamespace(**base), off, environ={})
+    assert not hasattr(off, "save_debug_rollout_data") and not hasattr(off, "save_debug_train_data")
+    on = SimpleNamespace()
+    apply_ports_infra_switches(SimpleNamespace(**base, rl_debug_dump=True), on, environ={})
+    assert on.save_debug_rollout_data == f"{tmp_path}/miles-rollout-{{rollout_id}}.pt"
+    assert on.save_debug_train_data == f"{tmp_path}/miles-train-{{rollout_id}}_{{rank}}.pt"
+    name = on.save_debug_train_data.format(rollout_id=2, rank=0)
+    assert "/" not in name[len(str(tmp_path)) + 1:] and name.endswith(TAPE_SUFFIXES)
+
+
+def test_launcher_forwards_rl_debug_dump_for_ports_only():
+    from yeto import launcher as L
+    from yeto.cli import parse_args
+
+    M = ["--model", "Qwen/Qwen3-0.6B", "--data", "zhuzilin/gsm8k"]
+    args = parse_args(["--training-mode", "rl", "--gpu", "modal:1xh100", *M, "--rl-debug-dump"])
+    assert args.rl_debug_dump is True
+    assert parse_args(["--training-mode", "rl", "--gpu", "modal:1xh100", *M]).rl_debug_dump is False
+    assert " --rl-debug-dump" in L._ports_infra_flags(args)[1]
+    args.rl_debug_dump = False
+    assert " --rl-debug-dump" not in L._ports_infra_flags(args)[1]
+    args.rl_debug_dump = True
+    import pytest
+    with pytest.raises(ValueError, match="--rl-debug-dump needs --rl-engine ports"):
+        L._check_ports_infra_switches(args, "legacy")

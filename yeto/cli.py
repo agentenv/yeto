@@ -410,6 +410,11 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     rl.add_argument("--rl-test-inject-rebuild-cursor-shift", type=int, default=None, metavar="GROUPS",
                     help="--rl-elastic, TEST ONLY (E2 G-4.5): before a trainer rebuild, place a "
                     "dataset state advanced by GROUPS where rollout_executor.load reads it")
+    rl.add_argument("--rl-debug-dump", action="store_true",
+                    help="ports: Miles writes each round's rollout samples and train data "
+                    "(advantages, values, returns) as ~/yeto-output/miles-rollout-<r>.pt / "
+                    "miles-train-<r>_<rank>.pt (mirrored into the Modal tape Volume); "
+                    "evidence for offline checks, off by default")
     rl.add_argument("--rl-observe-timeline", action="store_true",
                     help="ports: record per-round timeline labels (rl-infra-spec 1.7); off by default")
     rl.add_argument("--rl-resource-sample-interval", type=float, default=None, metavar="SECONDS",

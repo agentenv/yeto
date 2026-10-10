@@ -157,6 +157,9 @@ def parse_args(argv=None):
     parser.add_argument("--rl-overlap-eval", action="store_true")
     # 1.7 observation: per-round timeline labels (entry observe=...), off by default.
     parser.add_argument("--rl-observe-timeline", action="store_true")
+    # ports: Miles rollout/train debug dumps next to the event tape (flat .pt
+    # names, so the Modal tape mirror picks them up).
+    parser.add_argument("--rl-debug-dump", action="store_true")
     # fleet-dashboard 2.1/2.2 (ports only): rl_heartbeat / rl_resource_sample
     # periods in seconds; default None = 30 / 60 with --rl-observe-timeline,
     # else off (0 disables explicitly).
@@ -478,6 +481,11 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
 
     if getattr(args, "rl_overlap_eval", False):
         miles_args.yeto_rl_overlap_eval = True
+    if getattr(args, "rl_debug_dump", False):
+        out = os.path.dirname(os.path.abspath(os.path.expanduser(
+            getattr(args, "event_tape", None) or "~/yeto-output/rl-island.jsonl")))
+        miles_args.save_debug_rollout_data = f"{out}/miles-rollout-{{rollout_id}}.pt"
+        miles_args.save_debug_train_data = f"{out}/miles-train-{{rollout_id}}_{{rank}}.pt"
     if getattr(args, "rl_max_policy_age", 0):  # agentic-rollout-utilization 2.1
         from .policy_age import SUPPORT, check_task
 
