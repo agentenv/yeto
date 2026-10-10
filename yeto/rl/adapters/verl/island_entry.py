@@ -383,6 +383,13 @@ def fully_async_plan(limit: int, overrides: list[str], spec_dict: dict | None, a
     check_algorithm_contract(profile, spec)
     out = fully_async_run_overrides(overrides, limit, groups_per_round=args.groups_per_round,
                                     rounds=args.global_rounds)
+    from yeto.hw.catalog import device_family
+
+    if device_family() == "ascend":
+        # fully_async_ppo_trainer.yaml defaults trainer.device=cuda; on an NPU
+        # node its resource pools then ask Ray for "GPU" and never schedule
+        # (S20 ModelArts 2x910B4, runBA_try2_gpures).
+        out = [o for o in out if not o.startswith("trainer.device=")] + ["trainer.device=npu"]
     return out, tuple(vconf.ASSERTED_KEYS) + FULLY_ASYNC_ASSERTED_KEYS
 
 
