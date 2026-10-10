@@ -1402,6 +1402,12 @@ SECRET_ENV_NAMES = frozenset({
 })
 
 
+def _secret_value(value) -> str:
+    """Plain text of a task secret: sky.Task stores pydantic SecretStr."""
+    getter = getattr(value, "get_secret_value", None)
+    return str(getter() if callable(getter) else value)
+
+
 def split_secret_envs(envs) -> tuple[dict[str, str], dict[str, str]]:
     """(plain envs, secret envs): every name in SECRET_ENV_NAMES moves to secrets."""
     envs = dict(envs or {})
@@ -5146,7 +5152,10 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
     envs = dict(getattr(task, "envs", None) or {})
     # Modal ships cfg.envs as a modal.Secret, so the task's secret envs
     # (split_secret_envs) join them here; registry logins stay out.
-    envs.update({k: v for k, v in (getattr(task, "secrets", None) or {}).items()
+    # sky.Task wraps secret values in pydantic SecretStr (str() is "**********"):
+    # unwrap, or the island gets the mask (s19-compaction-g1-20261010a: TBENCH
+    # reward HMAC key "outside its size bound").
+    envs.update({k: _secret_value(v) for k, v in (getattr(task, "secrets", None) or {}).items()
                  if k in SECRET_ENV_NAMES})
     envs["SYNCER_ADDR"] = syncer_addr
     if "CRITIC_SYNCER_ADDR" in envs and syncer_addr != "none":
