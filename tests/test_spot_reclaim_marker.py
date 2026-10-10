@@ -193,3 +193,54 @@ def test_no_near_zero_keeps_the_key_set():
     finally:
         co.trained_token_versions = orig
     assert "cross_version_ratio_near_zero" not in out and "cross_version_ratio_near_zero_examples" not in out
+
+
+def test_reclaim_uses_the_export_cached_at_train_start(tmp_path):
+    """S19 s19-agentic5-r-20261010c: the rollout actor was gone within 1 s of the
+    signal; the reclaim save must not need it while the in-flight set is frozen."""
+    calls = []
+
+    def export(t):
+        calls.append(t)
+        if len(calls) > 1:
+            raise RuntimeError("ActorDiedError")
+        return {"entries": [AGENTIC]}
+
+    class Driver:
+        def emit(self, event, **fields):
+            pass
+
+    lines = []
+    saver = s.InFlightSaver(export, str(tmp_path), printer=lines.append)
+    d = Driver()
+    s.wrap_emit_with_rehearsal(d, saver)
+    d.emit("rl_driver_phase", phase="train", rollout_id=1)
+    assert saver.cached_round == 1 and len(calls) == 1
+    out = saver.save(20.0)
+    assert out["export_source"] == "cached" and out["cached_round"] == 1 and out["entries"] == 1
+    assert len(calls) == 1  # no live export at reclaim
+    d.emit("rl_driver_phase", phase="generate", rollout_id=2)
+    assert saver.cached is None
+    import pytest
+
+    with pytest.raises(RuntimeError):
+        saver.save(20.0)  # during a rollout: live export (here: the actor is gone)
+
+
+def test_rehearsal_never_reads_the_cache(tmp_path):
+    exports = []
+    saver = s.InFlightSaver(lambda t: exports.append(t) or {"entries": []}, str(tmp_path), printer=lambda l: None)
+    saver.cached = {"entries": [AGENTIC]}
+    out = saver.rehearse(0)
+    assert out["export_source"] == "live" and out["entries"] == 0 and len(exports) == 1
+
+
+def test_cache_failure_is_printed_and_cleared(tmp_path):
+    def boom(t):
+        raise RuntimeError("x")
+
+    lines = []
+    saver = s.InFlightSaver(boom, str(tmp_path), printer=lines.append)
+    saver.cached = {"entries": []}
+    saver.refresh_cache(3)
+    assert saver.cached is None and "cache_failed" in lines[0]

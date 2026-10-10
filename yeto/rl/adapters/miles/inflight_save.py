@@ -46,6 +46,7 @@ ENV_PID_FILE = "YETO_SPOT_INFLIGHT_PID_FILE"
 DEFAULT_PID_FILE = "/tmp/yeto-learner.pid"
 EVENT = "rl_inflight_save"
 ROUND_EVENT = "rl_round_trained"
+PHASE_EVENT = "rl_driver_phase"
 PROGRESS = "rl_inflight_save_progress"
 ENV_MARKER = "YETO_SPOT_RECLAIM_MARKER"  # written by the Modal function process on its signal
 DEFAULT_MARKER = "/tmp/yeto-reclaim-requested"
@@ -141,6 +142,24 @@ class InFlightSaver:
         self.printer = printer or (lambda line: print(line, flush=True))
         self.last_save_s: float | None = None
         self.results: list[dict[str, Any]] = []
+        # The in-flight set taken right after a rollout ends (driver phase "train"):
+        # between the rollout's cut-off and the next rollout it does not change, and
+        # at a reclaim the Ray actors may already be gone (S19 s19-agentic5-r-20261010c:
+        # RolloutExecutor "killed by ray.kill" within 1 s of the signal). None while a
+        # rollout runs (the set changes then): the reclaim save exports live.
+        self.cached: Mapping[str, Any] | None = None
+        self.cached_round: Any = None
+
+    def refresh_cache(self, round_id: Any, budget_s: float = 10.0) -> None:
+        try:
+            self.cached, self.cached_round = self.export(budget_s), round_id
+        except Exception as exc:  # noqa: BLE001 - never stops training
+            self.cached, self.cached_round = None, None
+            self.printer(f"[yeto] {PROGRESS} " + json.dumps(
+                {"step": "cache_failed", "round": round_id, "error": f"{type(exc).__name__}: {str(exc)[:160]}"}))
+
+    def drop_cache(self) -> None:
+        self.cached, self.cached_round = None, None
 
     def progress(self, kind: str, step: str, t0: float, **fields: Any) -> None:
         """Reclaim path only: one line per step, so a save cut short by the kill
@@ -151,9 +170,13 @@ class InFlightSaver:
 
     def _save(self, kind: str, name: str, budget_s: float, **extra: Any) -> dict[str, Any]:
         t0 = self.clock()
-        self.progress(kind, "export_start", t0, budget_s=round(budget_s, 3))
-        exported = self.export(budget_s)
+        cached = self.cached if kind == "reclaim" else None
+        self.progress(kind, "export_start", t0, budget_s=round(budget_s, 3),
+                      source="cached" if cached is not None else "live")
+        exported = cached if cached is not None else self.export(budget_s)
         export_s = round(self.clock() - t0, 4)
+        extra = {**extra, "export_source": "cached" if cached is not None else "live",
+                 **({"cached_round": self.cached_round} if cached is not None else {})}
         self.progress(kind, "export_done", t0, entries=len(exported.get("entries") or []))
         out = write_in_flight(exported, self.directory, name, commit=self.commit, clock=self.clock)
         self.progress(kind, "written", t0, write_s=out["write_s"], commit_s=out["commit_s"])
@@ -207,11 +230,18 @@ def ray_export(executor: Any) -> Callable[[float], Mapping[str, Any]]:
 
 
 def wrap_emit_with_rehearsal(driver: Any, saver: InFlightSaver) -> None:
-    """Rehearse after each ``rl_round_trained`` (driver.emit wrapped on the instance)."""
+    """Rehearse after each ``rl_round_trained``; cache the in-flight export when a
+    rollout ends (``rl_driver_phase`` train) and drop it when the next one starts
+    (``generate``). driver.emit is wrapped on the instance."""
     original = driver.emit
 
     def emit(event: str, **fields: Any) -> None:
         original(event, **fields)
+        if event == PHASE_EVENT:
+            if fields.get("phase") == "train":  # the rollout just ended: set is frozen
+                saver.refresh_cache(fields.get("rollout_id"))
+            elif fields.get("phase") == "generate":  # the set changes from here on
+                saver.drop_cache()
         if event == ROUND_EVENT:
             saver.rehearse(fields.get("rollout_id", fields.get("round")))
 
