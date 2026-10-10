@@ -674,6 +674,7 @@ def translate_run_config(
         "multi_lora": any(t.split("=", 1)[0] == "--multi-lora" for t in extra_argv),
         # rl-algo-critic-family 2.3: critic GPU counts / deploy-component / indep-dp
         "extra_argv": tuple(extra_argv),
+        "reward_function": config.algorithm.reward_function,
         "actor_num_nodes": config.parallel.actor_num_nodes,
         "actor_num_gpus_per_node": config.parallel.actor_num_gpus_per_node,
         "elastic": bool(config.use_miles_router),  # set iff --rl-elastic (run_config)

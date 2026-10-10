@@ -39,6 +39,22 @@ def score(response: str, label) -> float:
     return 1.0 if grade_answer_mathd(answer, truth) or grade_answer_sympy(answer, truth) else 0.0
 
 
+SUCCESS_DECLARATION_ATTR = "yeto_writes_success"
+
+
+def writes_success(fn):
+    """Declare that reward function ``fn`` writes ``sample.metadata['success']``.
+
+    The launch check ``positive_lm_success`` (rl-algo-critic-family) rejects
+    ``loss.positive_lm_source='success'`` when the run's reward function lacks
+    this declaration: the Miles fork otherwise fails on the island at the first
+    critic step (S19 #6 VAPO G3 s19-vapo-g3-20261010a).
+    """
+
+    setattr(fn, SUCCESS_DECLARATION_ATTR, True)
+    return fn
+
+
 def set_success(sample, success: bool) -> None:
     """Write the boolean full-success flag into ``sample.metadata`` (in place)."""
     metadata = getattr(sample, "metadata", None)
@@ -48,6 +64,7 @@ def set_success(sample, success: bool) -> None:
     metadata["success"] = bool(success)
 
 
+@writes_success
 async def reward_func(args, sample, **kwargs) -> float:
     value = score(sample.response or "", sample.label)
     set_success(sample, value == 1.0)

@@ -99,6 +99,51 @@ def _reject_positive_lm(spec: AlgorithmSpec) -> str | None:
 
 register_rejection("positive_lm_threshold", _reject_positive_lm)
 
+
+def _reward_declares_success(reward_function: str) -> bool | None:
+    """True/False: the ``module:function`` carries the ``writes_success``
+    declaration; None: it cannot be imported here."""
+
+    import importlib
+
+    from yeto.rl.math_reward import SUCCESS_DECLARATION_ATTR
+
+    module, _, name = str(reward_function).partition(":")
+    try:
+        fn = getattr(importlib.import_module(module), name)
+    except Exception:  # noqa: BLE001 - any import failure means "not confirmed"
+        return None
+    return bool(getattr(fn, SUCCESS_DECLARATION_ATTR, False))
+
+
+def positive_lm_success_problems(spec: AlgorithmSpec, values: Mapping[str, Any]) -> list[str]:
+    """``loss.positive_lm_source='success'`` needs a reward function declared
+    (``yeto.rl.math_reward.writes_success``) to write ``sample.metadata['success']``.
+
+    Without it the Miles fork raises at the first critic step on the island
+    (S19 #6 s19-vapo-g3-20261010a: out-of-tree ``gsm8k_reward:score`` wrote no
+    flag; S13 G1 passed with ``yeto.rl.gsm8k_reward:score``). Skipped when the
+    caller passes no ``reward_function``.
+    """
+
+    if spec.loss.positive_lm_coef is None or spec.loss.positive_lm_source != "success":
+        return []
+    reward_function = values.get("reward_function")
+    if not reward_function:
+        return []
+    declared = _reward_declares_success(reward_function)
+    if declared:
+        return []
+    why = ("cannot be imported to confirm it" if declared is None
+           else "is not declared with yeto.rl.math_reward.writes_success")
+    return [f"loss.positive_lm_source='success' needs a reward function that writes "
+            f"sample.metadata['success']; {reward_function} {why}. Use e.g. "
+            "yeto.rl.gsm8k_reward:score, or positive_lm_source='reward' only when a "
+            "positive reward always means complete success"]
+
+
+register_launch_check("positive_lm_success", positive_lm_success_problems)
+
 # --------------------------------------------------------------------------
 # Stage-W value-quality gate (user decision B, design D5/D7). Absent (None) =
 # record only, never block; absent from the canonical JSON while None, so no

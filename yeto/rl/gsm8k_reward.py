@@ -15,13 +15,14 @@ from __future__ import annotations
 
 # Neutral form: yeto.rl.rewards.builtin.gsm8k_reward (decoupling 3.2); this
 # module keeps the Miles entry point and its signature.
-from yeto.rl.math_reward import set_success
+from yeto.rl.math_reward import set_success, writes_success
 from yeto.rl.rewards.builtin import _num, gsm8k_grade as grade, gsm8k_reward
 from yeto.rl.rewards.types import Trajectory
 
 __all__ = ["_num", "grade", "score"]
 
 
+@writes_success
 async def score(args, sample, **kwargs):
     result = gsm8k_reward(Trajectory(response=sample.response or "", label=sample.label))
     set_success(sample, result.metadata["success"])
