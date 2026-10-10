@@ -47,7 +47,7 @@ def run() -> dict:
 
         def get_per_tensor_param(self, layered_summon=False, base_sync_done=False, **_):
             if base_sync_done:
-                return iter([(names[0], torch.ones(32, 64)), (names[1], torch.ones(64, 32))]), dict(peft)
+                return iter([(names[0], torch.ones(32, 1024)), (names[1], torch.ones(1024, 32))]), dict(peft)
             return iter([("base_model.model.model.layers.0.self_attn.q_proj.base_layer.weight",
                           torch.zeros(64, 64))]), dict(peft)
 
@@ -73,9 +73,29 @@ def run() -> dict:
             vLLMColocateWorkerExtension._update_weights(ext, items, peft_config=kw.get("peft_config"),
                                                         base_sync_done=kw.get("base_sync_done", False))
 
+    from verl.checkpoint_engine.base import merge_weight_chunks, split_weight_chunks
+
+    bucket = 1 << 20
+
     class Engine2:
+        """Packs the stream into one byte bucket the way the NCCL engine does
+        (real split/merge helpers): catches dtype misalignment (async6)."""
+
         async def receive_weights(self, global_steps=None):
-            for item in lora_wire.sender_stream(trainer_worker, device="cpu"):
+            buf = torch.empty(bucket, dtype=torch.uint8)
+
+            async def chunks():
+                offset, pending = 0, []
+                async for meta, chunk in split_weight_chunks(
+                        lora_wire.sender_stream(trainer_worker, device="cpu"), bucket):
+                    assert offset + meta.chunk_size <= bucket, "check data must fit one bucket"
+                    buf[offset:offset + meta.chunk_size] = chunk
+                    pending.append((meta, offset))
+                    offset += meta.chunk_size
+                for meta, at in pending:
+                    yield meta, buf[at:at + meta.chunk_size]
+
+            async for item in merge_weight_chunks(chunks(), bucket):
                 yield item
 
     fake_self = SimpleNamespace(checkpoint_engine=Engine2(), server_adapter=Adapter())
@@ -87,6 +107,8 @@ def run() -> dict:
     if added:
         req = added[0]
         out["lora_tensor_names"] = sorted(req.lora_tensors)
+        out["values_ok"] = all(bool((t == 1).all()) and t.dtype == torch.float32
+                               for t in req.lora_tensors.values())
         from vllm.lora.peft_helper import PEFTHelper
 
         helper = PEFTHelper.from_dict(req.peft_config)
@@ -98,7 +120,7 @@ def run() -> dict:
     out["readback_hook_ran"] = os.path.isfile(rb)
     out["pass"] = (out["patched_sender"] and out["patched_receiver"] and len(calls) == 1
                    and calls[0]["base_sync_done"] is True and out["add_lora_calls"] == 1
-                   and out["lora_tensor_names"] == sorted(names) and out["peft_helper"]["r"] == 32
+                   and out["lora_tensor_names"] == sorted(names) and out["peft_helper"]["r"] == 32 and out["values_ok"]
                    and out["readback_hook_ran"])
     return out
 

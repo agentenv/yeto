@@ -92,3 +92,14 @@ def test_header_round_trip():
     meta = {"peft_config": PEFT, "phases": ["adapter"]}
     back = lw.decode_header(lw.encode_header(meta, "cpu"))
     assert back["phases"] == ["adapter"] and back["peft_config"]["target_modules"] == ["q_proj", "v_proj"]
+
+
+def test_marker_tensors_keep_later_tensors_aligned():
+    """s19-verl64b-async6-20261010a: a 1113-byte header shifted the next fp32
+    tensor to an odd bucket offset; markers are padded to ALIGN bytes."""
+    stream = list(lw.sender_stream(_worker(_Engine()), device="cpu"))
+    offset = 0
+    for name, tensor in stream:
+        assert offset % tensor.element_size() == 0, (name, offset)
+        offset += tensor.numel() * tensor.element_size()
+    assert stream[0][1].numel() % lw.ALIGN == 0 and stream[-1][1].numel() == lw.ALIGN

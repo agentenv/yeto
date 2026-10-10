@@ -33,15 +33,33 @@ HEADER = "__yeto_lora_wire__"
 PHASE_END = "__yeto_lora_phase_end__"
 
 
+# The checkpoint engine packs tensors back to back into byte buckets and the
+# receiver views each slice as its dtype; a uint8 tensor whose size is not a
+# multiple of the widest element size misaligns every tensor after it
+# (s19-verl64b-async6-20261010a: "storage_offset() must be divisible by 4").
+# Marker tensors are therefore padded to ALIGN bytes.
+ALIGN = 256
+
+
+def _padded(raw: bytes) -> bytes:
+    return raw + b"\0" * (-len(raw) % ALIGN or (ALIGN if not raw else 0))
+
+
 def encode_header(meta: dict, device) -> Any:
     import torch
 
-    raw = json.dumps(meta, sort_keys=True, default=_jsonable).encode()
+    raw = _padded(json.dumps(meta, sort_keys=True, default=_jsonable).encode())
     return torch.tensor(list(raw), dtype=torch.uint8, device=device)
 
 
+def phase_end(device) -> Any:
+    import torch
+
+    return torch.zeros(ALIGN, dtype=torch.uint8, device=device)
+
+
 def decode_header(tensor) -> dict:
-    return json.loads(bytes(tensor.detach().to("cpu").tolist()).decode())
+    return json.loads(bytes(tensor.detach().to("cpu").tolist()).rstrip(b"\0").decode())
 
 
 def _jsonable(value):
@@ -95,7 +113,7 @@ def sender_stream(worker, device=None):
         for phase in phases:
             for name, tensor in (base if phase == "base" else adapter):
                 yield name, _to_device(tensor, device)
-            yield PHASE_END, torch.zeros(1, dtype=torch.uint8, device=device)
+            yield PHASE_END, phase_end(device)
 
     return gen()
 
