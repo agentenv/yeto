@@ -2686,6 +2686,7 @@ def cmd_down(args) -> int:
 
     if unconfirmed:
         return _teardown_incomplete(name, meta, unconfirmed)
+    _nebius_sg_cleanup(name, meta)
     runs.update_run(
         name,
         state=runs.DOWN,
@@ -2693,6 +2694,19 @@ def cmd_down(args) -> int:
     )
     print(f"[yeto] run '{name}' is down")
     return 0
+
+
+def _nebius_sg_cleanup(name: str, meta: dict) -> list[str]:
+    """After every cluster of a run touching Nebius is confirmed down: delete the
+    run's unused ``sky-sg-<prefix>-*`` groups (sky leaks them; quota 128). Best
+    effort, never fails the down (patched out in tests)."""
+    args = meta.get("args") or {}
+    where = f"{args.get('gpu') or ''} {args.get('syncer_region') or ''}".lower()
+    if "nebius" not in where:
+        return []
+    from .cloud.nebius_sg_cleanup import delete_run_security_groups
+
+    return delete_run_security_groups(args.get("cluster_prefix") or name)
 
 
 def _teardown_incomplete(name: str, meta: dict, unconfirmed: list[str]) -> int:

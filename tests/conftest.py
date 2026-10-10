@@ -16,6 +16,10 @@ def pytest_addoption(parser):
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",
+        "real_nebius_sg_cleanup: keep cli._nebius_sg_cleanup unpatched (the test fakes the cloud itself)",
+    )
+    config.addinivalue_line(
+        "markers",
         "ray_local: test starts Ray on this machine (gcs_server/raylet/ray.init); "
         "not collected unless --run-ray-local is given",
     )
@@ -69,6 +73,17 @@ def _no_teardown_diagnostics(monkeypatch):
     """launcher.teardown_island pulls logs over ssh/sky before a teardown;
     unit tests exercise it explicitly (test_verda_provider.py) instead."""
     monkeypatch.setenv("YETO_TEARDOWN_DIAG", "0")
+
+
+@_pytest.fixture(autouse=True)
+def _no_real_nebius_sg_cleanup(request, monkeypatch):
+    """`yeto down` of a Nebius run deletes the run's leaked security groups through
+    the real Nebius API; unit tests must never reach the cloud. Tests of the cleanup
+    call yeto.cloud.nebius_sg_cleanup with a fake sky module instead."""
+    if request.node.get_closest_marker("real_nebius_sg_cleanup") is None:
+        from yeto import cli
+
+        monkeypatch.setattr(cli, "_nebius_sg_cleanup", lambda name, meta: [])
 
 
 @_pytest.fixture(autouse=True)
