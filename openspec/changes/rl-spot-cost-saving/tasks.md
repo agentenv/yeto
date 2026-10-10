@@ -39,7 +39,7 @@
 - [x] 5.1a 可丢弃岛不从存档恢复：去掉检查点存储与旧 spot 单岛卷，重新上线从 syncer base 同步（design D8）。验证：单测按岛参数与环境变量。（完成，未上卡）
 - [x] 5.1b 可丢弃岛回收监听：Modal 信号、AWS 元数据，写 `spot_reclaim`（role=droppable）后 LEAVE。验证：单测。（完成，未上卡）
 - [x] 5.1c 全部可丢弃岛同时被回收时锚点岛单独推进轮次。验证：Python ledger 镜像单测（有通知 LEAVE、无通知软截止两种）。Rust syncer 同规则，未单独测。（完成，未上卡）
-- [ ] 5.2 （未做；复核草稿 infra-drafts/S19-SPOT-PHASE2-PRELAUNCH-REVIEW.md）上卡：两岛 elastic（锚点按需 + 可丢弃岛 AWS spot 或 Modal），主动触发一次回收，确认锚点岛不停、可丢弃岛换区域重开并重入、损失只有本轮增量；记录成本对比。0.6B，最小卡数。预算约 $15–25，需报批。验证：预登记判据、回收事件、花费。
+- [x] 5.2 上卡**通过**（10-10 S19 #10，`s19-spot52-20261009b`，判读 evidence/s19-spot52/judgment.json）：锚点 Nebius 1×H100 按需 + 可丢弃 Modal 1×H100，`modal container stop` 主动回收一次。P1–P6 全过：回收后锚点单独推进 v8→v23；可丢弃岛 spot_reclaim（handler_s 0.0，leave_confirmed）；新容器 JOIN catch_up=true（base 22），游标来自 base_version，不读检查点存储；v24 起两岛重新合并。pool_leave 的 dropped_uncommitted 为空（回收时本轮增量已合并），非空丢弃路径只有单测。花费 ≈$7.4 [估算]。本项修复：Modal 回收信号转发到学习器进程组（原先学习器收不到）。
 
 ## 6. 第 3 期：独立推理岛前置（只写接口与前置检查）
 

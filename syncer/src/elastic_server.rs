@@ -1060,6 +1060,108 @@ mod tests {
         assert_close(&params.unwrap(), 4.9);
     }
 
+    /// rl-spot-cost-saving 5.2 (CPU part): anchor A (1) + droppable B (2).
+    /// Round 0: A=1, B=3 -> 2. B sends 100 on base 1 then LEAVEs (reclaim):
+    /// its delta is dropped_uncommitted. B's process is still alive and sends
+    /// 500 on base 1 after the LEAVE: refused (not a member), never merged.
+    /// A advances alone: 2+1=3, 3+1=4. B comes back on a new connection:
+    /// JOIN catch_up=true at base 3 and receives the syncer base (4.0); its
+    /// first-round delta (1000) has weight 0 -> 4+1=5.
+    #[tokio::test]
+    async fn droppable_leave_rejects_late_delta_and_anchor_advances_alone() {
+        let dir = std::env::temp_dir().join(format!("elastic-droppable-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tape = dir.join("tape.jsonl");
+        let _ = std::fs::remove_file(&tape);
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(run(
+            listener,
+            ElasticServerConfig {
+                params: ElasticParams { quorum_theta: 0.75, carry_gamma: 0.5, soft_deadline_s: 60, q_min: 1, max_carry_lag: 2 },
+                key: KEY.to_vec(),
+                syncer_epoch: 1,
+                lease_s: 30.0,
+                total_steps: 4,
+                event_tape: Some(tape.clone()),
+                tick: Duration::from_millis(20),
+                outer_lr: 1.0,
+                outer_momentum: 0.0,
+                final_grace: Duration::ZERO,
+                checkpoint_path: None,
+                checkpoint_every: 0,
+                resume: false,
+                expected_backend_identity: None,
+            },
+        ));
+        let (mut a, mut b) = (Island::connect(port, 1, 1).await, Island::connect(port, 2, 1).await);
+        a.join().await;
+        a.init(vec![0.0; 4]).await;
+        assert_eq!(a.next_base().await.0, 0);
+        b.join().await;
+        assert_eq!(b.next_base().await.0, 0);
+        a.update(0, 1.0).await;
+        b.update(0, 3.0).await;
+        let (v, p) = a.next_base().await;
+        assert_eq!(v, 1);
+        assert_close(&p, 2.0);
+        assert_eq!(b.next_base().await.0, 1);
+
+        b.update(1, 100.0).await;
+        wait_for(&tape, "\"kind\":\"delta_accepted\",\"syncer_epoch\":1,\"island_id\":2", 2).await;
+        b.send(ElasticMsg::Leave { syncer_epoch: 1, island_id: 2, reason: crate::elastic::LEAVE_REASON_REQUESTED }).await;
+        wait_for(&tape, "pool_leave", 1).await;
+        // Still-running process after LEAVE: the delta is refused, not stored.
+        b.update(1, 500.0).await;
+        let (t, msg) = tokio::time::timeout(Duration::from_secs(5), b.recv()).await.unwrap();
+        assert_eq!(t, MSG_ERROR);
+        assert!(String::from_utf8_lossy(&msg).contains("not a member"), "{}", String::from_utf8_lossy(&msg));
+        b.heartbeat().await;
+        let (t, msg) = tokio::time::timeout(Duration::from_secs(5), b.recv()).await.unwrap();
+        assert_eq!(t, MSG_ERROR, "{}", String::from_utf8_lossy(&msg));
+
+        a.update(1, 1.0).await;
+        let (v, p) = a.next_base().await;
+        assert_eq!(v, 2);
+        assert_close(&p, 3.0);
+        a.update(2, 1.0).await;
+        let (v, p) = a.next_base().await;
+        assert_eq!(v, 3);
+        assert_close(&p, 4.0);
+
+        let mut b2 = Island::connect(port, 2, 1).await;
+        assert!(matches!(b2.join().await, ElasticMsg::JoinAck { catch_up: true, base_version: 3, .. }));
+        let (v, p) = b2.next_base().await;
+        assert_eq!(v, 3);
+        assert_close(&p, 4.0);
+        b2.update(3, 1000.0).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        a.update(3, 1.0).await;
+        let (final_version, params) =
+            tokio::time::timeout(Duration::from_secs(10), server).await.unwrap().unwrap().unwrap();
+        assert_eq!(final_version, 4);
+        assert_close(&params.unwrap(), 5.0);
+
+        let lines = tape_lines(&tape);
+        let leave = lines.iter().find(|l| l.contains("pool_leave")).unwrap();
+        assert!(leave.contains("\"reason\":\"requested\""), "{leave}");
+        assert!(leave.contains("\"dropped_uncommitted\":{\"island_id\":2,\"outer_version\":1"), "{leave}");
+        // Accepted from B: base 0, base 1 (then dropped), base 3 after rejoin; the
+        // post-LEAVE 500 never reaches the ledger.
+        let accepted_b = lines.iter().filter(|l| l.contains("\"kind\":\"delta_accepted\"")
+            && l.contains("\"island_id\":2")).count();
+        assert_eq!(accepted_b, 3, "{lines:#?}");
+        let steps: Vec<&String> = lines.iter().filter(|l| l.contains("\"kind\":\"outer_step\"")).collect();
+        assert_eq!(steps.len(), 4, "{steps:#?}");
+        for s in &steps[1..3] {
+            assert!(s.contains("\"weights\":[[1,"), "{s}");
+            assert!(!s.contains("[2,"), "left island must not be merged: {s}");
+        }
+        assert!(lines.iter().any(|l| l.contains("pool_join") && l.contains("\"island_id\":2")
+            && l.contains("\"catch_up\":true")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// D-S6: one tensor step with a checkpoint, then restart with --resume:
     /// syncer_epoch increments, members/base/outer_version are restored, the
     /// old epoch is fenced, and a further step continues from the base.

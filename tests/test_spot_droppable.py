@@ -224,3 +224,73 @@ def test_droppable_rejoin_takes_the_current_base_with_zero_weight():
     assert ev["catch_up"] is True  # syncer sends the base the anchor advanced
     d = _delta("d1", led)
     assert led.weight_of(d) == 0.0  # first round after JOIN on the current base: no weight
+
+
+# --- 5.2 CPU part: after a reclaim LEAVE the still-running island must not rejoin -----------
+
+
+def test_client_after_leave_never_rejoins_on_not_member_errors():
+    """The syncer answers a left island's delta/heartbeat with "not a member
+    (rejoin required)". The droppable island LEAVEs on reclaim and is killed by
+    the cloud later; until then it must not JOIN again by itself (the rejoin
+    comes from the relaunched island, catch_up from the syncer base)."""
+    from yeto.rl.elastic_client import JoinAck, ElasticClientConfig, ElasticIslandClient
+
+    sent = []
+    c = ElasticIslandClient(ElasticClientConfig(syncer_addr=("x", 1), island_id=2), b"k")
+    c.ack = JoinAck(1, 2, 3, 1, bytes(32), False)
+    c.sock = object()
+    c._send = sent.append
+    c.leave()
+    assert type(sent[-1]).__name__ == "Leave"
+    c._on_error("2 is not a member (rejoin required)")
+    assert not c._rejoin.is_set()
+    assert c.rejoin() is True and c.rejoins == 0
+    c.check()
+    assert [type(m).__name__ for m in sent] == ["Leave"]
+
+
+# --- 5.2: the Modal reclaim signal reaches the learner (grandchild) ---------------------
+
+
+def test_island_script_forwards_reclaim_signal_to_group_on_droppable_only():
+    import json as _json
+    import signal as _signal
+
+    from yeto import modal_runner as mr
+
+    class P:
+        pid = 4242
+
+        def __init__(self, cmd, env, **kw):
+            self.kw = kw
+
+        def wait(self):
+            return 0
+
+    made, handlers, killed = [], {}, []
+
+    def popen(cmd, env, **kw):
+        made.append(P(cmd, env, **kw))
+        return made[-1]
+
+    class Sig:
+        SIGINT, SIGTERM = _signal.SIGINT, _signal.SIGTERM
+
+        @staticmethod
+        def signal(num, fn):
+            handlers[num] = fn
+
+    env = {"YETO_ISLAND_ROLE": _json.dumps({"role": "droppable", "cloud": "modal"})}
+    assert mr.run_island_script(["x"], env, popen=popen, signal_mod=Sig,
+                                killpg=lambda pid, n: killed.append((pid, n))) == 0
+    assert made[-1].kw == {"start_new_session": True}
+    handlers[_signal.SIGINT](_signal.SIGINT, None)
+    handlers[_signal.SIGTERM](_signal.SIGTERM, None)
+    assert killed == [(4242, _signal.SIGINT), (4242, _signal.SIGTERM)]
+
+    handlers.clear()
+    anchor = {"YETO_ISLAND_ROLE": _json.dumps({"role": "anchor", "cloud": "nebius"})}
+    assert mr.run_island_script(["x"], anchor, popen=popen, signal_mod=Sig) == 0
+    assert made[-1].kw == {} and handlers == {}
+    assert mr.run_island_script(["x"], {}, popen=popen, signal_mod=Sig) == 0 and handlers == {}

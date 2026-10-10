@@ -677,10 +677,45 @@ def _island_body(cfg: ModalIslandConfig, rank: int, ips: list[str], all_ips: dic
         code = subprocess.call(container_command(cfg.setup_script), env=env)
         if code != 0:
             raise RuntimeError(f"island {cfg.learner_id} rank {rank} setup exited with {code}")
-    code = subprocess.call(container_command(cfg.run_script), env=env)
+    code = run_island_script(container_command(cfg.run_script), env)
     if code != 0:
         raise RuntimeError(f"island {cfg.learner_id} rank {rank} exited with {code}")
     return code
+
+
+def _is_droppable(env: dict) -> bool:
+    from yeto.cloud import droppable
+
+    doc = droppable.env_role(env)
+    return bool(doc) and doc.get("role") == droppable.DROPPABLE
+
+
+def run_island_script(cmd: list[str], env: dict, *, popen=subprocess.Popen, signal_mod=None,
+                      killpg=None) -> int:
+    """Run the island script. rl-spot-cost-saving 5.2: on a droppable island Modal's
+    reclaim signal (SIGINT/SIGTERM, also from ``modal container stop``) reaches only
+    this function's process; the learner runs as a grandchild (``bash -lc``). Here
+    the script gets its own process group and both signals are forwarded to that
+    group, so the learner's reclaim listener LEAVEs. Then this process keeps waiting
+    for the script (the cloud kills the container later). Other islands: plain call."""
+    if not _is_droppable(env):
+        return subprocess.call(cmd, env=env) if popen is subprocess.Popen else popen(cmd, env=env).wait()
+    import signal as _signal
+
+    sig = signal_mod or _signal
+    killpg = killpg or os.killpg
+    proc = popen(cmd, env=env, start_new_session=True)
+
+    def forward(num, _frame):
+        print(f"[modal-island] signal {num}: forwarded to the island script group {proc.pid}", flush=True)
+        try:
+            killpg(proc.pid, num)
+        except (ProcessLookupError, PermissionError) as exc:
+            print(f"[modal-island] forward failed: {exc}", flush=True)
+
+    for name in ("SIGINT", "SIGTERM"):
+        sig.signal(getattr(sig, name), forward)
+    return proc.wait()
 
 
 class ModalOps:

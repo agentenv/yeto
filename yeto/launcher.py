@@ -1854,6 +1854,18 @@ def resumes_in_new_container(args) -> bool:
             and bool(getattr(args, "rl_single_island_no_sync", False)))
 
 
+def droppable_rejoins_in_new_container(args, modal_cfg) -> bool:
+    """rl-spot-cost-saving 5.2: on an elastic run a Modal re-run of a droppable island
+    (reclaim / ``modal container stop``) is expected: it rejoins from the syncer base.
+    Every other island keeps the fail-closed container guard."""
+    if island_scheduling_mode(args) != "elastic":
+        return False
+    from .cloud import droppable
+
+    doc = droppable.env_role(dict(getattr(modal_cfg, "envs", None) or {}))
+    return bool(doc) and doc.get("role") == droppable.DROPPABLE
+
+
 def rl_checkpoint_store_plan(args) -> tuple[str, str | None] | None:
     """``(path on the island, bucket URI or None)`` for ``--rl-checkpoint-store``:
     a ``scheme://`` URI is mounted at :data:`ELASTIC_CHECKPOINT_STORE_MOUNT` (sky
@@ -7376,7 +7388,10 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             if modal_ops is not None and name in modal_cfgs:
                 from .modal_runner import ContainerIdGuard
 
-                guard = ContainerIdGuard(on_change=on_container_change)
+                rejoins = droppable_rejoins_in_new_container(args, modal_cfgs[name])
+                guard = ContainerIdGuard(
+                    on_change=lambda m, _r=rejoins: on_container_change(m, droppable_rejoin=_r))
+                guard.expected = rejoins
                 container_guards.append(guard)
                 thread = threading.Thread(
                     target=_tail_modal, args=(modal_ops, job_id, label, collector), kwargs={"guard": guard},
@@ -7395,7 +7410,21 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
 
         resume_on_new_container = resumes_in_new_container(args)
 
-        def on_container_change(message: str) -> None:
+        def on_container_change(message: str, droppable_rejoin: bool = False) -> None:
+            if droppable_rejoin:
+                # rl-spot-cost-saving 5.2: a droppable island reclaimed on Modal re-runs
+                # in a new container and JOINs again (catch_up) from the syncer base.
+                print(f"[launcher] WARNING: {message}; droppable island, it rejoins from "
+                      "the syncer base (no failure)", file=sys.stderr, flush=True)
+                if events_dir is not None:
+                    try:
+                        with open(Path(events_dir) / "launcher-errors.jsonl", "a") as fh:
+                            fh.write(json.dumps({"event": "modal_container_changed", "level": "warning",
+                                                 "droppable_rejoin": True, "message": message,
+                                                 "time": time.time()}) + "\n")
+                    except OSError:
+                        pass
+                return
             if resume_on_new_container:
                 # rl-resume-from-checkpoint: the Volume store carries LATEST; the re-run
                 # container resumes from the newest complete cut instead of starting over.
@@ -7425,7 +7454,8 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 print(f"[launcher] modal app stop failed: {e}", file=sys.stderr, flush=True)
 
         def container_changed() -> bool:
-            return not resume_on_new_container and any(g.tripped for g in container_guards)
+            return not resume_on_new_container and any(
+                g.tripped and not getattr(g, "expected", False) for g in container_guards)
 
         if syncer_cluster is not None:
             spawn_tail(syncer_cluster, syncer_job)
