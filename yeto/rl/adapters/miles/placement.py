@@ -270,6 +270,10 @@ def _parsed_layout(args: Any) -> tuple[int, int] | None:
 
 
 def check_placement_not_rewritten(request: PlacementRequest, args: Any) -> None:
+    import os
+
+    if os.environ.get("YETO_TEST_MILES_LOAD_DEBUG_ROLLOUT_DATA") and getattr(args, "debug_train_only", False):
+        return  # test-only rollout-dump replay (config._apply_test_debug_rollout): no engines by design
     conflicts: list[str] = []
     for name in ("debug_rollout_only", "debug_train_only", "rollout_external"):
         if getattr(args, name, False):
