@@ -129,8 +129,9 @@ setsid bash -c "exec $PY -m yeto.cli $(cat $R/args.txt)" 9>&- > >(tee $R/launch.
 CLI=$!
 if [ -n "${KILL_AT:-}" ]; then
 ( cd /tmp; export HOME=/home/michael
-  until grep -aq "Suspended agentic groups at rollout ${KILL_AT}:" $R/launch.log 2>/dev/null; do kill -0 $CLI 2>/dev/null || { echo "$(date -u +%FT%TZ) launch ended before reclaim" >> $R/reclaim.log; exit 0; }; sleep 2; done
-  echo "$(date -u +%FT%TZ) saw suspend at rollout ${KILL_AT}" >> $R/reclaim.log
+  if [ "${KILL_ON:-suspend}" = train ]; then PAT="\"phase\":\"train\",\"rollout_id\":${KILL_AT}[,}]"; else PAT="Suspended agentic groups at rollout ${KILL_AT}:"; fi
+  until grep -aqE "$PAT" $R/launch.log 2>/dev/null; do kill -0 $CLI 2>/dev/null || { echo "$(date -u +%FT%TZ) launch ended before reclaim" >> $R/reclaim.log; exit 0; }; sleep 2; done
+  echo "$(date -u +%FT%TZ) saw ${KILL_ON:-suspend} at rollout ${KILL_AT}" >> $R/reclaim.log
   sleep ${KILL_DELAY:-8}
   CID=$(grep -a -oP '\[modal-island 0\] rank 0 container \K\S+' $R/launch.log | tail -1)
   echo "$(date -u +%FT%TZ) trigger container=$CID" >> $R/reclaim.log
