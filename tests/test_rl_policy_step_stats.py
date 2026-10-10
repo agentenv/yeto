@@ -53,7 +53,8 @@ def fake_miles(monkeypatch):
     return losses_mod, model_mod, seen
 
 
-def test_step_stats_recorded_and_loss_unchanged(fake_miles):
+def test_step_stats_recorded_and_loss_unchanged(fake_miles, monkeypatch):
+    monkeypatch.setenv("YETO_POLICY_METRICS", "1")
     losses_mod, model_mod, seen = fake_miles
     args = types.SimpleNamespace(eps_clip=0.2, eps_clip_high=0.28)
     advs = [torch.tensor([1.0, 1.0, 1.0]), torch.tensor([-0.5, -0.5])]
@@ -107,3 +108,13 @@ def test_masked_tokens_excluded():
 
 def test_no_data_no_keys():
     assert sp.step_policy_stats({}) == {}
+
+
+def test_policy_metrics_off_by_default(fake_miles, monkeypatch):
+    """Not verified on GPU yet: the wrappers are installed only with YETO_POLICY_METRICS=1."""
+    monkeypatch.delenv("YETO_POLICY_METRICS", raising=False)
+    losses_mod, model_mod, _ = fake_miles
+    original = losses_mod.policy_loss_function
+    model_mod.train_one_step = lambda *a, **k: (None, 0.5)
+    assert sp.install_grad_norm_recorder()
+    assert losses_mod.policy_loss_function is original

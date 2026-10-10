@@ -954,7 +954,9 @@ def install_grad_norm_recorder() -> bool:
 
     megatron_model.train_one_step = train_one_step
     _RECORDER_INSTALLED = True
-    install_policy_metrics_recorder()
+    # Opt-in until verified on GPU (hot path: per-micro-batch tensor reductions).
+    if os.environ.get("YETO_POLICY_METRICS") == "1":
+        install_policy_metrics_recorder()
     return True
 
 
