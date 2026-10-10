@@ -582,6 +582,31 @@ def test_head_down_script_downs_each_learner():
     assert 'print(f"[head] {c}: down", flush=True)' in script
     # Non-interactive ssh has no conda hook; the system python3 has no sky.
     assert script.index("~/miniconda3/bin/python3") < script.index("import sky")
+
+def _fake_py(path, has_sky: bool):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/bash\n"
+                    'if [ "$1" = -c ]; then exit ' + ("0" if has_sky else "1") + "; fi\n"
+                    'echo "RAN $0"; cat >/dev/null\n')
+    path.chmod(0o755)
+
+
+@pytest.mark.parametrize("venv_sky,conda_sky,want", [
+    (True, False, "yeto-head-py"),   # Nebius: miniconda 3.10 without sky (S19 bug)
+    (False, True, "miniconda3"),     # image whose own Python >= 3.11 got sky
+])
+def test_head_down_script_picks_the_python_that_has_sky(tmp_path, venv_sky, conda_sky, want):
+    import subprocess
+
+    _fake_py(tmp_path / "yeto-head-py/bin/python3", venv_sky)
+    _fake_py(tmp_path / "miniconda3/bin/python3", conda_sky)
+    (tmp_path / "sky_workdir").mkdir()
+    script = cli.HEAD_DOWN_SCRIPT.format(clusters=["a-l0"])
+    r = subprocess.run(["bash", "-c", script], env={"HOME": str(tmp_path), "PATH": "/usr/bin:/bin"},
+                       capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0 and f"/{want}/bin/python3" in r.stdout
+
+
 def test_head_syncer_counts_external_learner_seats(monkeypatch):
     """--external-learners seats must be in the head syncer's --learners, or
     it rejects the manual joiner ("learner id 1 is outside 0..1")."""

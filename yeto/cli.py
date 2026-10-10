@@ -2423,7 +2423,10 @@ def cmd_logs(args) -> int:
 # conda's .bashrc hook, so plain `python3` is the system one without sky.
 HEAD_DOWN_ATTEMPTS = 3
 HEAD_DOWN_RETRY_S = 20.0
-HEAD_DOWN_SCRIPT = """cd ~/sky_workdir && PY=$([ -x ~/miniconda3/bin/python3 ] && echo ~/miniconda3/bin/python3 || echo python3) && "$PY" - <<'PY'
+# The head's sky lives in the interpreter its setup installed into: HEAD_VENV
+# when the stock Python was < 3.11 (Nebius: miniconda 3.10, which has NO sky —
+# S19: "No module named 'sky'" on every Nebius head down), else miniconda/system.
+HEAD_DOWN_SCRIPT = """cd ~/sky_workdir && PY=$(for p in ~/yeto-head-py/bin/python3 ~/miniconda3/bin/python3; do [ -x "$p" ] && "$p" -c 'import sky' 2>/dev/null && {{ echo "$p"; break; }}; done) && PY=${{PY:-python3}} && "$PY" - <<'PY'
 import sky
 from yeto.launcher import terminate_and_verify
 for c in {clusters!r}:
