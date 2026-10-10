@@ -245,7 +245,7 @@ SESSION_SERVER_PARTIAL_ROLLOUT_RULE = (
 # yeto's Codex wrapper calls AGENTIC_TOOL_CALL_GENERATE with the same args (so it
 # reads the same agent flags) and turns CompactionRL segment sessions into one
 # sample per segment; without it a compacted rollout trains as one sample.
-CODEX_OPENENV_GENERATE = "yeto.rl.harness.codex.codex_openenv_generate.generate"
+from yeto.rl.algos.compactionrl import CODEX_OPENENV_GENERATE  # noqa: E402  (single source)
 AGENT_FLAG_READERS = frozenset({AGENTIC_TOOL_CALL_GENERATE, CODEX_OPENENV_GENERATE})
 
 
