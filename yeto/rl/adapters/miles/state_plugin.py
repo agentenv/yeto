@@ -226,53 +226,80 @@ def needs_gather(optimizer: Any, parameters: Sequence[Any]) -> bool:
     return any(not has_complete_master(p) for p in parameters)
 
 
-def full_masters(optimizer: Any, parameters: Sequence[Any], *, all_reduce_sum=None, reduce=None) -> list[Any]:
+def _single_rank_dp(leaf: Any) -> bool:
+    """True only when torch.distributed is up and the leaf's DP group has one rank
+    (no collective needed). Not initialised: False, the caller keeps the
+    ``_dp_all_reduce_sum`` path (a no-op there, patched in tests)."""
+    import torch.distributed as dist
+
+    if not (dist.is_available() and dist.is_initialized()):
+        return False
+    try:
+        return int(dist.get_world_size(group=getattr(leaf, "data_parallel_group", None))) == 1
+    except (RuntimeError, ValueError, TypeError, AttributeError):
+        return False  # unknown group: keep the collective path
+
+
+def full_masters(optimizer: Any, parameters: Sequence[Any], *, all_reduce_sum=None, reduce=None,
+                 device: Any = None) -> list[Any]:
     """FP32 masters in each parameter's shape; DP-sharded ones are gathered.
 
     Collective over each owning leaf's DP group when any parameter is
     DP-sharded (every rank must call it with the same parameters in the same
     order). ``reduce(flat, leaf)`` / ``all_reduce_sum(flat)`` replace the
     all-reduce (tests).
+
+    One flat FP32 buffer per leaf holds the gathered masters (each returned
+    master is a view of it); no second concatenated copy is made
+    (s19-compaction-g3-20261010a: the critic export ran out of GPU memory on
+    that copy). ``device``: where the gather buffers live (default: each
+    parameter's device). A leaf whose DP group has one rank needs no
+    collective, so a CPU buffer is allowed there; a CPU buffer with a
+    multi-rank group is refused (NCCL reduces GPU tensors only).
     """
     import torch
 
     has_dist, owned = distributed_ranges(optimizer)
-    out: list[Any] = []
-    pending: dict[int, tuple[Any, list[tuple[int, Any]]]] = {}
+    out: list[Any] = [None] * len(parameters)
+    pending: dict[int, tuple[Any, list[int]]] = {}
     for i, param in enumerate(parameters):
         if has_complete_master(param):
-            out.append(master_of(param))
+            out[i] = master_of(param)
             continue
         if not has_dist:
-            out.append(master_of(param))  # raises: no master anywhere
+            out[i] = master_of(param)  # raises: no master anywhere
             continue
-        full = torch.zeros(param.numel(), dtype=torch.float32, device=param.device)
-        if id(param) in owned:
-            _, _, start, end = owned[id(param)]
-            leaf = owned[id(param)][0]
-            shard = leaf._get_main_param_and_optimizer_states(param)["param"]
-            if shard.dtype != torch.float32 or shard.numel() != end - start:
-                raise StatePluginError("distributed-optimizer main shard does not match its range")
-            full[start:end] = shard.detach().reshape(-1)
         leaf = _leaf_for(optimizer, param, owned)
-        out.append(full)
-        pending.setdefault(id(leaf), (leaf, []))[1].append((i, full))
+        pending.setdefault(id(leaf), (leaf, []))[1].append(i)
     # Leaf order is the same on every rank of a DP group, so the per-group
     # collectives are issued in the same order.
     order = {id(leaf): k for k, leaf in enumerate(_optimizer_leaves(optimizer))} if pending else {}
     for _, (leaf, items) in sorted(pending.items(), key=lambda kv: order.get(kv[0], 0)):
-        flat = torch.cat([f for _, f in items])
+        hooked = reduce is not None or all_reduce_sum is not None
+        where = device if device is not None else parameters[items[0]].device
+        if (not hooked and torch.device(where).type == "cpu"
+                and parameters[items[0]].device.type != "cpu" and not _single_rank_dp(leaf)):
+            raise StatePluginError("CPU gather buffer with a multi-rank DP group")
+        flat = torch.zeros(sum(parameters[i].numel() for i in items), dtype=torch.float32, device=where)
+        offset = 0
+        for i in items:
+            param = parameters[i]
+            n = param.numel()
+            full = flat[offset : offset + n]
+            if id(param) in owned:
+                _, _, start, end = owned[id(param)]
+                shard = owned[id(param)][0]._get_main_param_and_optimizer_states(param)["param"]
+                if shard.dtype != torch.float32 or shard.numel() != end - start:
+                    raise StatePluginError("distributed-optimizer main shard does not match its range")
+                full[start:end].copy_(shard.detach().reshape(-1))
+            out[i] = full.view(param.shape)
+            offset += n
         if reduce is not None:
             reduce(flat, leaf)
         elif all_reduce_sum is not None:
             all_reduce_sum(flat)
-        else:
+        elif not _single_rank_dp(leaf):
             _dp_all_reduce_sum(leaf, flat)
-        offset = 0
-        for i, full in items:
-            n = full.numel()
-            out[i] = flat[offset : offset + n].view(parameters[i].shape)
-            offset += n
     return out
 
 
@@ -1288,7 +1315,13 @@ def _critic_masters(actor: Any, params: Mapping[str, Any]) -> dict[str, Any]:
     """
 
     keys = sorted(params)
-    masters = full_masters(getattr(actor, "optimizer", None), [params[k] for k in keys])
+    optimizer = getattr(actor, "optimizer", None)
+    leaves = [leaf for leaf in _optimizer_leaves(optimizer) if _is_distributed(leaf)] if optimizer is not None else []
+    # Single-rank DP groups need no collective: gather on the CPU, so the
+    # export/import does not need a full FP32 critic copy on the GPU
+    # (s19-compaction-g3-20261010a: OOM with the actor still resident).
+    device = "cpu" if leaves and all(_single_rank_dp(leaf) for leaf in leaves) else None
+    masters = full_masters(optimizer, [params[k] for k in keys], device=device)
     return dict(zip(keys, masters, strict=True))
 
 
@@ -1300,7 +1333,8 @@ def _write_critic_masters(actor: Any, params: Mapping[str, Any], targets: Mappin
 
     keys = sorted(params)
     plist = [params[k] for k in keys]
-    tlist = [targets[k].to(device=params[k].device, dtype=torch.float32) for k in keys]
+    # Targets stay where they are (CPU from the syncer); copy_ moves each one.
+    tlist = [targets[k].to(dtype=torch.float32) for k in keys]
     write_masters(getattr(actor, "optimizer", None), plist, tlist)
     for param, target in zip(plist, tlist, strict=True):
         if param.dtype != torch.float32:
@@ -1361,7 +1395,7 @@ def _import_critic_tensors(actor: Any, *, by_rank: dict[int, dict[str, Any]]) ->
             masters = _critic_masters(actor, params)
             written = _masters_cpu(masters)
             stale = [k for k, p in params.items() if p.dtype != torch.float32
-                     and not torch.equal(p.detach(), masters[k].to(p.dtype).view(p.shape))]
+                     and not torch.equal(p.detach(), masters[k].to(device=p.device, dtype=p.dtype).view(p.shape))]
     except StatePluginError as error:
         return {"refused": f"critic masters: {error}", "rank": rank}
     got = critic_weights_sha256(written)

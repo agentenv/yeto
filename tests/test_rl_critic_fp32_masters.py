@@ -323,3 +323,40 @@ def test_critic_state_summary_wakes_an_asleep_colocated_critic():
     out = state_plugin.critic_state_summary(Actor())
     assert calls == ["wake", "sleep"]
     assert len(out["specs"]) == 2 and len(out["weights_sha256"]) == 64
+
+
+def test_single_rank_dp_gathers_on_cpu_in_one_buffer(monkeypatch):
+    """s19-compaction-g3-20261010a: the critic export ran out of GPU memory on a
+    second (torch.cat) copy of the FP32 masters while the actor was still
+    resident. One flat buffer per leaf now; a single-rank DP group (dist up)
+    gathers on the CPU with no collective, and export/import still round-trip."""
+    import torch.distributed as dist
+
+    torch.manual_seed(5)
+    body = torch.nn.Module()
+    body.embedding = torch.nn.Linear(5, 3, bias=False)
+    body.output_layer = torch.nn.Linear(3, 1, bias=False)
+    body = body.to(torch.bfloat16)
+    actor = _island(3, dp_rank=0, dp_size=1, body=body)
+    ref = sp._critic_masters(_island(3, body=body), sp._critic_parameters(actor))
+    calls = []
+    monkeypatch.setattr(dist, "is_available", lambda: True)
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_world_size", lambda group=None: 1)
+    monkeypatch.setattr(sp, "_dp_all_reduce_sum", lambda leaf, flat: calls.append(flat))
+    monkeypatch.setattr(sp, "_rank", lambda: 0)
+    params = sp._critic_parameters(actor)
+    keys = sorted(params)
+    masters = sp.full_masters(actor.optimizer, [params[k] for k in keys], device="cpu")
+    sharded = [m for k, m in zip(keys, masters) if not sp.has_complete_master(params[k])]
+    assert sharded and len({m.untyped_storage().data_ptr() for m in sharded}) == 1  # one buffer
+    assert not calls  # single-rank group: no collective
+    e = sp._export_critic_tensors(actor)
+    assert not calls and all(t.device.type == "cpu" for t in e["tensors"].values())
+    for k, m in ref.items():
+        assert torch.equal(e["tensors"][k], m)
+    target = {k: v + 3e-5 for k, v in e["tensors"].items()}
+    h = cs.critic_weights_sha256(target)
+    assert sp._import_critic_tensors(actor, by_rank={0: {"tensors": target, "sha256": h}}) == {
+        "rank": 0, "weights_sha256": h}
+
