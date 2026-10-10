@@ -442,3 +442,64 @@ def test_write_back_ships_only_each_tensors_own_bytes():
     assert trainer.import_critic_state(views) == cs.critic_weights_sha256(state)
     weights = sum(v.numel() * 4 for v in views.values())
     assert seen["bytes"] < weights + 64 * 1024  # not len(views) x 400 KB
+
+
+def _catchup_sync(monkeypatch, *, critic_version, actor_version, awaited):
+    from yeto.rl.engine import bridges
+    from yeto.rl.engine.driver import SyncBoundary, SyncStart
+
+    calls = []
+
+    class _Channel:
+        def __init__(self, config, **_k):
+            self.config = config
+
+        def start(self, _driver):
+            version = critic_version if self.config == "critic" else actor_version
+            return SyncStart("s", version, False)
+
+        def _submit(self, _view, *, rollout_id, stats):
+            calls.append(("submit", rollout_id, stats))
+
+        def _await(self, _view, *, rollout_id):
+            calls.append(("await", rollout_id))
+            return SimpleNamespace(policy_version=awaited, policy_tensor_hash=lambda: "h" * 64)
+
+        def _commit(self, _view, state):
+            calls.append(("commit", state.policy_version))
+            return SyncBoundary("committed", False)
+
+    monkeypatch.setattr(bridges, "StrictAvgSync", _Channel)
+    sync = DualStrictAvgSync(SimpleNamespace(learner_id=1), critic_syncer_addr=("h", 1))
+    sync.actor = _Channel("actor")
+    monkeypatch.setattr(sync, "_critic_config", lambda _d: "critic")
+    sync.view = SimpleNamespace()
+    events = []
+    driver = SimpleNamespace(phase=lambda *a, **k: events.append(("phase", a[0])),
+                             emit=lambda name, **k: events.append((name, k.get("policy_version"))))
+    return sync, driver, calls, events
+
+
+def test_restarted_island_catches_the_critic_channel_up(monkeypatch):
+    """s19-ppo-g3-20261009b: island 1 was killed after the actor channel committed
+    v1 and before its critic push reached the critic syncer; the relaunched island
+    found actor v1 / critic v0 and refused to start, and island 0 waited forever.
+    The relaunched island now pushes its committed critic unchanged for v1."""
+    sync, driver, calls, events = _catchup_sync(monkeypatch, critic_version=0, actor_version=1, awaited=1)
+    start = sync.start(driver)
+    assert start.rollout_id == 1
+    (_, version, stats), *rest = calls
+    assert version == 0 and stats.local_round_id == 1 and stats.base_policy_version == 0
+    assert stats.island_id == 1 and stats.delta_l2_norm == 0.0 and stats.completed_trajectories == 0
+    assert rest == [("await", 0), ("commit", 1)]
+    assert ("rl_critic_catchup", 1) in events
+
+
+def test_critic_catchup_refuses_a_wrong_version_and_larger_gaps(monkeypatch):
+    sync, driver, _, _ = _catchup_sync(monkeypatch, critic_version=0, actor_version=1, awaited=2)
+    with pytest.raises(CrossChannelCommitError, match="catch-up returned v2"):
+        sync.start(driver)
+    sync, driver, calls, _ = _catchup_sync(monkeypatch, critic_version=0, actor_version=2, awaited=1)
+    with pytest.raises(CrossChannelCommitError, match="actor channel starts at round 2"):
+        sync.start(driver)
+    assert calls == []
