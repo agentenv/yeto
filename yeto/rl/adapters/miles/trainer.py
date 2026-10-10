@@ -66,6 +66,22 @@ def batch_hash(batch: RolloutBatchHandle) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def receipt_trajectory_ids(batch: RolloutBatchHandle) -> tuple[str, ...]:
+    """One id per trained trajectory, in batch order.
+
+    CompactionRL trains one sample per segment; the segments of one rollout
+    keep its sample index, so ``g.sample_ids`` repeats it (s19-compaction-g1-
+    20261010g: "local-step receipt contains duplicate trajectories"). The
+    segments are one trajectory: repeated ids collapse to the first. The
+    sample-level ``sample_ids`` (batch hash, trained_sample_indices check,
+    pooled reward) stay unchanged; trained_tokens still sums every segment.
+    """
+
+    return tuple(dict.fromkeys(
+        f"r{batch.rollout_id}:{g.group_id}:{s}" for g in batch.groups for s in g.sample_ids
+    ))
+
+
 MASKED_FRACTION_KEYS = ("masked_fraction", "train/masked_fraction")
 
 
@@ -364,9 +380,7 @@ class MilesTrainerGroup:
             base_policy_version=batch.policy_version,
             base_policy_hash=batch.policy_hash,
             input_batch_hash=batch_hash(batch),
-            trajectory_ids=tuple(
-                f"r{batch.rollout_id}:{g.group_id}:{s}" for g in batch.groups for s in g.sample_ids
-            ),
+            trajectory_ids=receipt_trajectory_ids(batch),
             trained_tokens=sum(g.token_count for g in batch.groups),
             optimizer_steps=steps,
             optimizer_step_succeeded=succeeded,

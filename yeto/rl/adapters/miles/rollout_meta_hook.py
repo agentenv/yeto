@@ -150,6 +150,11 @@ def record_trained_groups(args: Any, data: Sequence[Sequence[Any]]) -> None:
 
     setattr(args, _PLACEHOLDER_ATTR,
             mask_placeholder_logprobs(data, tokenizer_loader=_load_miles_tokenizer, args=args))
+    # CompactionRL: the masks above may drop optimised tokens; the per-segment
+    # counts (tokens_after, gae_length) must follow the final masks.
+    from yeto.rl.harness.codex.codex_openenv_generate import refresh_segment_counts
+
+    refresh_segment_counts([s for group in data for s in _flat(group)])
     setattr(args, _TRAINED_ATTR, {_group_key(group) for group in data})
 
 
