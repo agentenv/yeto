@@ -604,7 +604,9 @@ async def prepare_segment_sessions(
         job["base_url"], dict(job.get("request_kwargs") or {}), cfg.max_compactions, post=post, delete=delete
     )
     job[compaction_bridge.SEGMENT_URLS_KEY] = urls
-    return {compaction_bridge.SESSIONS_METADATA_KEY: ids}
+    router, _ = split_session_url(job["base_url"])
+    return {compaction_bridge.SESSIONS_METADATA_KEY: ids,
+            compaction_bridge.SESSIONS_ROUTER_METADATA_KEY: router}
 
 
 def hmac_key_env_names() -> tuple[str, ...]:

@@ -342,7 +342,8 @@ def test_on_trusted_side_precreates_sessions_and_worker_requires_them(monkeypatc
            "request_kwargs": {"temperature": 0.7, "top_p": 1, "top_k": 20, "max_tokens": 9}, "episode_id": "e",
            "max_seq_len": C}
     meta = _run(adapter.prepare_segment_sessions(job, post=post))
-    assert meta == {cb.SESSIONS_METADATA_KEY: ["seg1", "seg2", "seg3"]}
+    assert meta == {cb.SESSIONS_METADATA_KEY: ["seg1", "seg2", "seg3"], cb.SESSIONS_ROUTER_METADATA_KEY: "http://r:1"}
+    assert cb.SESSIONS_ROUTER_METADATA_KEY == generate_wrapper.ROUTER_KEY
     assert job[cb.SEGMENT_URLS_KEY] == [f"http://r:1/sessions/seg{i}" for i in (1, 2, 3)]
     assert posts == [("http://r:1/sessions", {"evaluation": False, "temperature": 0.7, "top_p": 1.0, "top_k": 20})] * 3
     with pytest.raises(harness.CodexHarnessError, match="max_seq_len"):
@@ -449,3 +450,18 @@ def test_wrapper_without_compaction_metadata_is_untouched():
     assert seen == [] and out.samples is seg0
     assert {k: v for k, v in seg0.metadata.items() if k not in before} == {
         "chain_index": 0, "chains_total": 1, "policy_versions_actual": ["pv"]}
+
+
+def test_wrapper_collects_on_the_recorded_router_and_aborts_without_one():
+    """s19-compaction-g1-20261010d: the returned metadata had no session_server_id;
+    the collect URL was "http:///sessions/<id>" and retried forever."""
+    meta = _seg0_meta(1, **{generate_wrapper.ROUTER_KEY: "http://10.0.0.2:7"})
+    del meta["session_server_id"]
+    seg0, s1 = _sample(10, 30, **meta), _sample(8, 20)
+    out, seen = _wrap(seg0, {"a": ([s1], {})})
+    assert {r for r, _ in seen} == {"http://10.0.0.2:7"} and [m.metadata["tokens_after"] for m in out.samples] == [20, 0]
+    bare = _seg0_meta(1)
+    del bare["session_server_id"]
+    seg0 = _sample(10, 30, **bare)
+    out, seen = _wrap(seg0, {"a": ([s1], {})})
+    assert seen == [] and generate_wrapper.INFRASTRUCTURE_KEY in seg0.metadata
