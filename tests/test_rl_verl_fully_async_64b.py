@@ -46,7 +46,7 @@ def test_limit_drives_staleness_threshold_and_partial_rollout():
                               groups_per_round=8, samples_per_group=4)
     sync = vconf.build_overrides(run)
     out = far.fully_async_run_overrides(sync, 1, groups_per_round=8, rounds=5)
-    assert "async_training.staleness_threshold=0.0" in out
+    assert "async_training.staleness_threshold=1.0" in out
     assert "async_training.partial_rollout=True" in out
     assert "async_training.trigger_parameter_sync_step=1" in out
     assert "async_training.require_batches=1" in out
@@ -70,7 +70,7 @@ def test_verl_declares_stage_two_up_to_limit_one():
     assert (SUPPORT.stage, SUPPORT.max_policy_age) == (2, 1)
     assert policy_age_overrides(0) == ()
     assert policy_age_overrides(1, groups_per_round=8) == (
-        "async_training.staleness_threshold=0.0", "async_training.partial_rollout=True",
+        "async_training.staleness_threshold=1.0", "async_training.partial_rollout=True",
         "async_training.trigger_parameter_sync_step=1", "async_training.require_batches=1")
     with pytest.raises(PolicyAgeError, match="supports up to stage 2"):
         policy_age_overrides(2, groups_per_round=8)
@@ -90,7 +90,7 @@ def test_island_entry_refuses_a_spec_that_does_not_tolerate_the_limit():
     with pytest.raises(Exception, match="max_policy_staleness"):
         fully_async_plan(1, ["trainer.use_v1=True"], None, args, "none")
     overrides, keys = fully_async_plan(1, ["trainer.use_v1=True"], TOLERANT.to_dict(), args, "none")
-    assert "async_training.staleness_threshold=0.0" in overrides
+    assert "async_training.staleness_threshold=1.0" in overrides
     assert "async_training.partial_rollout" in keys and "trainer.use_v1=True" not in overrides
 
 
@@ -131,6 +131,38 @@ def test_round_keeps_within_limit_and_discards_over_age_and_unknown():
     assert [g.policy_versions for g in groups] == [None, (1, 2)]
     assert [g.policy_token for g in groups] == ["yeto:2:h2", "yeto:1:h1"]
     assert groups[1].reward_mean == 0.5
+
+
+def test_kept_groups_never_exceed_the_limit_when_verl_runs_one_round_ahead():
+    """S19 10-10: staleness_threshold = N lets a queued sample wait N + 1 versions
+    (queue_version_lag); the limit is then enforced only by yeto's per-group
+    discard.  Every kept group's oldest token version is >= current - limit; every
+    group older than that is discarded (F4/F5 rely on this)."""
+    import random
+
+    from yeto.rl.adapters.verl.fully_async_translate import queue_version_lag, staleness_threshold_for
+
+    limit = 1
+    lag = queue_version_lag(staleness_threshold_for(limit))
+    assert lag == limit + 1
+    rng = random.Random(17)
+    vm = _vmap(8)
+    for current in range(lag, 8):
+        rc = far.RoundCollector(vm, current_outer=current, limit=limit, required=10 ** 6)
+        for k in range(200):
+            start = rng.randint(current - lag, current)
+            if rng.random() < 0.5 and start < current:  # resumed across publications
+                mid = rng.randint(start, current)
+                calls = [(start, 3), (mid, 2)]
+                lo, hi = start, mid
+            else:
+                calls, lo, hi = [(start, 4)], start, start
+            n = sum(c for _, c in calls)
+            rc.offer(_meta(f"g{current}-{k}", [lo, lo], [hi, hi], [n, n], calls=[calls, calls]))
+        assert rc.kept and rc.discarded
+        assert all(min(v.versions) >= current - limit for v in rc.kept)
+        assert all(min(v.versions) < current - limit for v in rc.discarded if not v.unknown)
+        assert rc.carry_over_fields()["resumed_trajectories"] > 0
 
 
 def test_call_records_must_agree_with_the_span_and_length():

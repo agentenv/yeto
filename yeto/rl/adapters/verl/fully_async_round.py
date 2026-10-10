@@ -9,7 +9,7 @@ Ray, so it is unit tested on the CPU:
 
 * :func:`fully_async_run_overrides` -- the sync-path overrides turned into the
   fully_async ones; ``--rl-max-policy-age N`` drives
-  ``async_training.staleness_threshold = N - 1`` and ``partial_rollout=True``
+  ``async_training.staleness_threshold = N`` (S19 10-10; was N - 1) and ``partial_rollout=True``
   through 6.4a's :func:`~.fully_async_translate.fully_async_overrides`.
 * :func:`sample_meta` -- one queued ``RolloutSample`` (one prompt, ``n``
   responses) -> plain metadata (versions, per-call token counts, lengths).
