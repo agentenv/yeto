@@ -164,6 +164,7 @@ class FakeTrainerActor:
     was pushed and writes the read-back file like vllm_readback does."""
 
     def __init__(self, readback_dir: Path, queue, *, tamper_at: int | None = None):
+        self.push_timeouts = []
         self.readback_dir = readback_dir
         self.queue = list(queue)
         self.tensors = {NAMES[0]: torch.zeros(2, 4), NAMES[1]: torch.zeros(4, 2)}
@@ -172,8 +173,12 @@ class FakeTrainerActor:
         self.pushes, self.tamper_at = [], tamper_at
         self.calls = []
 
-    def __call__(self, name, *args):
+    def __call__(self, name, *args, timeout=None):
         self.calls.append(name)
+        if name == "yeto_push_weights":
+            self.push_timeouts.append(timeout)
+            if getattr(self, "hang_push", False):
+                raise TimeoutError("trainer.yeto_push_weights did not return within 600 s")
         return getattr(self, name)(*args)
 
     def yeto_configure(self, *_):
@@ -300,6 +305,23 @@ def test_publication_mismatch_on_the_rollouter_replica_fails(tmp_path):
         driver.run()
 
 
+def test_push_that_never_returns_ends_the_island_unverifiable(tmp_path):
+    """S19 async5: the rollouter's vLLM died in the first push and the island hung
+    33 min; the push now has a timeout and the publication is LORA_UNVERIFIABLE."""
+    import json
+
+    from yeto.rl.engine.driver import PublicationError
+
+    actor = FakeTrainerActor(tmp_path / "rb", [_sample("a", 0, 0, [(0, 4)])] * 2)
+    actor.hang_push = True
+    driver, *_ = _driver(tmp_path, actor, rounds=2, required=1)
+    with pytest.raises(PublicationError, match="UNVERIFIABLE.*push timeout"):
+        driver.run()
+    assert actor.push_timeouts == [600.0]
+    rows = [json.loads(x) for x in (tmp_path / "out" / "verl-publish-0.jsonl").read_text().splitlines()]
+    assert rows[-1]["status"].endswith("UNVERIFIABLE") and "push timeout" in rows[-1]["detail"]
+
+
 def test_queue_end_and_too_many_stale_samples_stop_the_round(tmp_path):
     actor = FakeTrainerActor(tmp_path / "rb", [_sample("a", 0, 0, [(0, 4)])])
     driver, *_ = _driver(tmp_path, actor, rounds=2, required=2)
@@ -323,6 +345,12 @@ def test_patch_hooks_apply_to_the_pinned_fork(tmp_path):
     text = (tmp_path / patch_verl.CALLS_TARGET).read_text()
     compile(text, "llm_server.py", "exec")
     assert text.count("yeto_resume_calls") == 1
+    send = (tmp_path / patch_verl.SEND_TARGET).read_text()
+    compile(send, "engine_workers.py", "exec")
+    assert "_yeto_sender_stream(self)" in send and "per_tensor_param, _ = self.actor.engine" not in send
+    recv = (tmp_path / patch_verl.RECV_TARGET).read_text()
+    compile(recv, "base.py", "exec")
+    assert recv.count("_yeto_receive_phases(weights)") == 1
 
 
 def test_fully_async_hydra_entry_uses_an_absolute_config_dir(tmp_path, monkeypatch):
