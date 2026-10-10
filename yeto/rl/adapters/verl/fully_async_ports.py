@@ -135,7 +135,14 @@ class FullyAsyncRolloutPool:
             rollout_id=rollout_id, policy_version=version, policy_hash=digest, groups=groups,
             completed=len(groups), aborted=0, payload=None,
             submitted_groups=pulled, abort_mechanism=DISCARD_MECHANISM if collector.discarded else None,
-            carry_over=carry, **(discard if collector.discarded else {}),
+            carry_over=carry,
+            # Same field and meaning as Miles: groups aborted in flight and NOT
+            # trained.  verl's partial rollout continues interrupted requests
+            # (counted as resumed_trajectories in carry_over, like Miles'
+            # carried-over groups), so the only in-flight loss is yeto's
+            # over-age discard; 0 when none (known, not None -- S19 async10
+            # showed null on every round).
+            **(discard if collector.discarded else {"aborted_in_flight_groups": 0}),
         )
 
     def abort(self) -> None:
