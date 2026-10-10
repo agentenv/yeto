@@ -81,7 +81,8 @@ MODAL_GPU_NAME_PATTERNS: dict[str, str] = {
     "A100-80GB": r"\bA100\b.*\b80GB\b",
     "L40S": r"\bL40S\b",
     "L4": r"\bL4\b",
-    "A10G": r"\bA10G\b",
+    # Modal A10G containers report "NVIDIA A10" (seen 2026-09-30, infra-v2-b3-devgather-2)
+    "A10G": r"\bA10G?\b",
     "T4": r"\bT4\b",
 }
 MODAL_FULL_NODE: dict[str, int] = {"H100": 8, "H200": 8, "B200": 8, "A100-80GB": 8}

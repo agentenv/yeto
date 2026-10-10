@@ -1,0 +1,107 @@
+{
+ "verdict": "PASS",
+ "case": "os",
+ "run": "s19-p1-os-20261010b",
+ "rounds": [
+  {
+   "rollout_id": 0,
+   "entropy_loss": 0.0,
+   "ess_ratio": 0.9993796944618225,
+   "loss": -0.00014040246605873108,
+   "pg_clipfrac": 0.0020128784235566854,
+   "pg_loss": -0.00014040246605873108,
+   "ppo_kl": 0.00032979662006973887,
+   "train_rollout_kl": 0.0005849182780366391,
+   "train_rollout_logprob_abs_diff": 0.012289248406887054,
+   "grad_norm": 0.93227219581604,
+   "reward_mean": 0.8125,
+   "reward_std": 0.3903123748998999
+  },
+  {
+   "rollout_id": 1,
+   "entropy_loss": 0.0,
+   "ess_ratio": 0.9994433522224426,
+   "loss": -0.0003133993595838547,
+   "pg_clipfrac": 0.0014646132476627827,
+   "pg_loss": -0.0003133993595838547,
+   "ppo_kl": 8.008872828213498e-05,
+   "train_rollout_kl": 0.0006343412678688765,
+   "train_rollout_logprob_abs_diff": 0.01265955064445734,
+   "grad_norm": 0.606072187423706,
+   "reward_mean": 0.46875,
+   "reward_std": 0.4990224819584785
+  },
+  {
+   "rollout_id": 2,
+   "entropy_loss": 0.0,
+   "ess_ratio": 0.9994033575057983,
+   "loss": 0.0001564081758260727,
+   "pg_clipfrac": 0.0016964913811534643,
+   "pg_loss": 0.0001564081758260727,
+   "ppo_kl": -7.374733104370534e-05,
+   "train_rollout_kl": 0.0005579235294135287,
+   "train_rollout_logprob_abs_diff": 0.012035733554512262,
+   "grad_norm": 0.5559388399124146,
+   "reward_mean": 0.75,
+   "reward_std": 0.4330127018922193
+  }
+ ],
+ "problems": [],
+ "missing": [],
+ "notes": [],
+ "spec_sha256": "21d78ce285727fa62102d479b2af742e33c2076adaabf52a8c38a2114a9e8e37",
+ "over_sampling_per_round": [
+  {
+   "submit_calls": 1,
+   "refill_calls": 0,
+   "submitted_groups": 8,
+   "submit_batch_size_first": 8,
+   "submit_batch_size_max": 8,
+   "resumed_groups": 0,
+   "failed_groups": 0,
+   "completed_groups": 8,
+   "filtered_groups": 4,
+   "kept_groups": 4,
+   "surplus_groups": 0,
+   "inflight_groups_at_end": 0
+  },
+  {},
+  {
+   "submit_calls": 1,
+   "refill_calls": 0,
+   "submitted_groups": 8,
+   "submit_batch_size_first": 8,
+   "submit_batch_size_max": 8,
+   "resumed_groups": 0,
+   "failed_groups": 0,
+   "completed_groups": 8,
+   "filtered_groups": 3,
+   "kept_groups": 4,
+   "surplus_groups": 1,
+   "inflight_groups_at_end": 0
+  },
+  {},
+  {
+   "submit_calls": 1,
+   "refill_calls": 0,
+   "submitted_groups": 8,
+   "submit_batch_size_first": 8,
+   "submit_batch_size_max": 8,
+   "resumed_groups": 0,
+   "failed_groups": 0,
+   "completed_groups": 6,
+   "filtered_groups": 2,
+   "kept_groups": 4,
+   "surplus_groups": 0,
+   "inflight_groups_at_end": 2
+  },
+  {}
+ ],
+ "miles_commit": "64b591a4bec1ffa37fb089d3e3b99c84773b1ffc",
+ "gpu": [
+  "[s19-p1-os-20261010b-l0-modal] [modal-island 0] requested A10G:1, got ['NVIDIA A10']"
+ ],
+ "tape": "s19-p1-os-20261010b/tape-direct/yeto-s19-p1-os-20261010b/l0/rank0/rl-island-0.jsonl",
+ "n_step_dicts": 6,
+ "watchdog_fired": false
+}

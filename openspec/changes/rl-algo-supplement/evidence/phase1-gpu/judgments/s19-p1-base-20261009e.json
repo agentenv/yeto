@@ -1,0 +1,60 @@
+{
+ "verdict": "PASS",
+ "case": "base",
+ "run": "s19-p1-base-20261009e",
+ "rounds": [
+  {
+   "rollout_id": 0,
+   "entropy_loss": 0.0,
+   "ess_ratio": 0.9994311928749084,
+   "loss": 8.308514952659607e-05,
+   "pg_clipfrac": 0.0008879430242814124,
+   "pg_loss": 8.308514952659607e-05,
+   "ppo_kl": -0.00044083729153499007,
+   "train_rollout_kl": 0.0005580916476901621,
+   "train_rollout_logprob_abs_diff": 0.011673860251903534,
+   "grad_norm": 0.8681130409240723,
+   "reward_mean": 0.9375,
+   "reward_std": 0.24206145913796356
+  },
+  {
+   "rollout_id": 1,
+   "entropy_loss": 0.0,
+   "ess_ratio": 0.9988327026367188,
+   "loss": -0.0001757163554430008,
+   "pg_clipfrac": 0.001223579398356378,
+   "pg_loss": -0.0001757163554430008,
+   "ppo_kl": 0.00023854771279729903,
+   "train_rollout_kl": 0.0006624989910051227,
+   "train_rollout_logprob_abs_diff": 0.01283323997631669,
+   "grad_norm": 0.7659915089607239,
+   "reward_mean": 0.375,
+   "reward_std": 0.4841229182759271
+  },
+  {
+   "rollout_id": 2,
+   "entropy_loss": 0.0,
+   "ess_ratio": 0.999090313911438,
+   "loss": -1.529976725578308e-05,
+   "pg_clipfrac": 0.0005401280359365046,
+   "pg_loss": -1.529976725578308e-05,
+   "ppo_kl": 0.00016280611453112215,
+   "train_rollout_kl": 0.000725143647287041,
+   "train_rollout_logprob_abs_diff": 0.015253706369549036,
+   "grad_norm": 0.3934909403324127,
+   "reward_mean": 0.0625,
+   "reward_std": 0.24206145913796354
+  }
+ ],
+ "problems": [],
+ "missing": [],
+ "notes": [],
+ "spec_sha256": "27df1133c924e7a337e90246c7e1e30699017f461e9f35b1dd165a0263e65bea",
+ "miles_commit": "64b591a4bec1ffa37fb089d3e3b99c84773b1ffc",
+ "gpu": [
+  "[s19-p1-base-20261009e-l0-modal] [modal-island 0] requested A10G:1, got ['NVIDIA A10']"
+ ],
+ "tape": "s19-p1-base-20261009e/tape-direct/yeto-s19-p1-base-20261009e/l0/rank0/rl-island-0.jsonl",
+ "n_step_dicts": 6,
+ "watchdog_fired": false
+}

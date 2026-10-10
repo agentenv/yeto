@@ -1,0 +1,82 @@
+{
+ "verdict": "PASS",
+ "case": "clip-sym",
+ "run": "s19-p1-clip-sym-20261010b",
+ "rounds": [
+  {
+   "rollout_id": 0,
+   "entropy_loss": 0.0,
+   "ess_ratio": 0.9891068538029989,
+   "loss": 0.004217441504200299,
+   "pg_clipfrac": 0.07239442318677902,
+   "pg_loss": 0.004217441504200299,
+   "ppo_kl": 0.003063769545406103,
+   "train_rollout_kl": 0.0005560162244364619,
+   "train_rollout_logprob_abs_diff": 0.011903348999718824,
+   "grad_norm": 0.8681032061576843,
+   "reward_mean": 0.75,
+   "reward_std": 0.4330127018922193
+  },
+  {
+   "rollout_id": 1,
+   "entropy_loss": 0.0,
+   "ess_ratio": 0.997586190700531,
+   "loss": 0.0030575779577096305,
+   "pg_clipfrac": 0.09280771017074585,
+   "pg_loss": 0.0030575779577096305,
+   "ppo_kl": 0.001030235590102772,
+   "train_rollout_kl": 0.0008208024858807524,
+   "train_rollout_logprob_abs_diff": 0.01648083298156659,
+   "grad_norm": 0.8294706344604492,
+   "reward_mean": 0.20833333333333334,
+   "reward_std": 0.4061164310337068
+  },
+  {
+   "rollout_id": 2,
+   "entropy_loss": 0.0,
+   "ess_ratio": 0.9988247156143188,
+   "loss": 0.0033072233200073242,
+   "pg_clipfrac": 0.09051044285297394,
+   "pg_loss": 0.0033072233200073242,
+   "ppo_kl": -0.0001969530785572715,
+   "train_rollout_kl": 0.0005453680932987481,
+   "train_rollout_logprob_abs_diff": 0.011465372517704964,
+   "grad_norm": 0.6049720644950867,
+   "reward_mean": 0.5,
+   "reward_std": 0.5
+  }
+ ],
+ "problems": [],
+ "missing": [],
+ "notes": [],
+ "spec_sha256": "d8abeb2be481b954af4a0950956fd49296c5b42ef5389352a695574fe74c6d6c",
+ "step_grad_norms": [
+  0.8681032061576843,
+  0.3272944688796997,
+  0.4077902138233185,
+  0.8294706344604492,
+  0.0,
+  0.47052469849586487,
+  0.6049720644950867,
+  0.34061431884765625,
+  0.523211658000946
+ ],
+ "step_pg_clipfrac": [
+  0.0,
+  0.10488087683916092,
+  0.11230239272117615,
+  0.0,
+  0.0,
+  0.27842313051223755,
+  0.0,
+  0.06076982617378235,
+  0.21076150238513947
+ ],
+ "miles_commit": "64b591a4bec1ffa37fb089d3e3b99c84773b1ffc",
+ "gpu": [
+  "[s19-p1-clip-sym-20261010b-l0-modal] [modal-island 0] requested A10G:1, got ['NVIDIA A10']"
+ ],
+ "tape": "s19-p1-clip-sym-20261010b/tape-direct/yeto-s19-p1-clip-sym-20261010b/l0/rank0/rl-island-0.jsonl",
+ "n_step_dicts": 9,
+ "watchdog_fired": false
+}

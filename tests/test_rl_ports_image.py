@@ -357,10 +357,14 @@ def test_check_gpu_names():
         ("H100", [h100], 2),
         ("L4", ["NVIDIA L40S"], 1),
         ("A100-80GB", ["NVIDIA A100-SXM4-40GB"], 1),
+        ("A10G", ["NVIDIA A100-SXM4-40GB"], 1),
     ):
         with pytest.raises(RuntimeError, match="exact"):
             mr.check_gpu_names(gpu, names, count)
     assert set(mr.MODAL_GPU_NAME_PATTERNS) == set(mr.MODAL_GPUS)
+    # Modal A10G containers report "NVIDIA A10" (infra-v2-b3-devgather-2)
+    mr.check_gpu_names("A10G", ["NVIDIA A10"], 1)
+    mr.check_gpu_names("A10G", ["NVIDIA A10G"], 1)
 
 
 @pytest.mark.parametrize("exact", [False, True])

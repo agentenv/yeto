@@ -1,0 +1,70 @@
+{
+ "verdict": "PASS",
+ "case": "cispo",
+ "run": "s19-p1-cispo-20261010a",
+ "rounds": [
+  {
+   "rollout_id": 0,
+   "entropy_loss": 0.0,
+   "ess_ratio": 0.9994137221475476,
+   "loss": -0.02147080802776404,
+   "pg_clipfrac": 0.0013600816048962938,
+   "pg_loss": -0.02147080802776404,
+   "ppo_kl": -0.0001283287900680184,
+   "train_rollout_kl": 0.0005623347748757524,
+   "train_rollout_logprob_abs_diff": 0.011649306759648152,
+   "grad_norm": 0.6722792983055115,
+   "reward_mean": 0.9375,
+   "reward_std": 0.24206145913796356
+  },
+  {
+   "rollout_id": 1,
+   "entropy_loss": 0.0,
+   "ess_ratio": 0.9990163938340464,
+   "loss": -0.012878828428453087,
+   "pg_clipfrac": 0.00293398533007335,
+   "pg_loss": -0.012878828428453087,
+   "ppo_kl": 0.00019330551396955196,
+   "train_rollout_kl": 0.0006475268975801786,
+   "train_rollout_logprob_abs_diff": 0.01366369176533678,
+   "grad_norm": 0.8827667236328125,
+   "reward_mean": 0.4375,
+   "reward_std": 0.49607837082461076
+  },
+  {
+   "rollout_id": 2,
+   "entropy_loss": 0.0,
+   "ess_ratio": 0.9990772217012356,
+   "loss": -0.044319981089336935,
+   "pg_clipfrac": 0.001500441306266549,
+   "pg_loss": -0.044319981089336935,
+   "ppo_kl": 1.7869062162771334e-05,
+   "train_rollout_kl": 0.0008966449251459252,
+   "train_rollout_logprob_abs_diff": 0.017303432329509597,
+   "grad_norm": 0.42767468094825745,
+   "reward_mean": 0.09375,
+   "reward_std": 0.2914805954090255
+  }
+ ],
+ "problems": [],
+ "missing": [],
+ "notes": [],
+ "spec_sha256": "df42720f692e4493426b05573e03bad0836b75cd2d9b1dd9f522b05a1d0dd3f9",
+ "d_round1_step2_[variant,base]": {
+  "train/pg_loss": [
+   -0.03240710494875786,
+   0.00016615167260169983
+  ],
+  "train/grad_norm": [
+   0.5125587582588196,
+   0.3491441607475281
+  ]
+ },
+ "miles_commit": "64b591a4bec1ffa37fb089d3e3b99c84773b1ffc",
+ "gpu": [
+  "[s19-p1-cispo-20261010a-l0-modal] [modal-island 0] requested A10G:1, got ['NVIDIA A10']"
+ ],
+ "tape": "s19-p1-cispo-20261010a/tape-direct/yeto-s19-p1-cispo-20261010a/l0/rank0/rl-island-0.jsonl",
+ "n_step_dicts": 6,
+ "watchdog_fired": false
+}
