@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import sys
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -1107,6 +1108,29 @@ def _upstream_num_cells(args: Any) -> int:
     return compute_trainer_num_cells(args, role=ACTOR_ROLE)
 
 
+TEST_DEBUG_ROLLOUT_ENV = "YETO_TEST_MILES_LOAD_DEBUG_ROLLOUT_DATA"
+
+
+def _apply_test_debug_rollout(args: Any) -> Any:
+    """Test-only: train on a recorded rollout dump (Miles ``--load-debug-rollout-data``,
+    which implies ``--debug-train-only``; no inference engines). Set before Miles
+    validates the namespace so its derived placement flags follow. Unset: no change."""
+
+    path = os.environ.get(TEST_DEBUG_ROLLOUT_ENV)
+    if path:
+        if "{rollout_id}" not in path:
+            raise MilesConfigError(f"{TEST_DEBUG_ROLLOUT_ENV} must contain {{rollout_id}}")
+        print(f"[rl] TEST ONLY: --load-debug-rollout-data {path} (debug_train_only)", flush=True)
+        args.load_debug_rollout_data = path
+        backend = os.environ.get("YETO_TEST_MILES_ATTENTION_BACKEND")
+        if backend:  # e.g. "fused" on a pre-Hopper test GPU (flash_attn.cute needs sm90)
+            from megatron.core.transformer.enums import AttnBackend
+
+            args.attention_backend = AttnBackend[backend]
+            print(f"[rl] TEST ONLY: attention_backend={backend}", flush=True)
+    return args
+
+
 def parse_miles_args(launch: MilesLaunchArgs) -> Any:
     """Run upstream ``parse_args`` on the translated argv, then validate it."""
 
@@ -1115,7 +1139,7 @@ def parse_miles_args(launch: MilesLaunchArgs) -> Any:
         sys.argv = list(launch.argv)
         from miles.utils.arguments import parse_args
 
-        args = parse_args(preprocess_args=lambda ns: apply_runtime_attrs(ns, launch))
+        args = parse_args(preprocess_args=lambda ns: _apply_test_debug_rollout(apply_runtime_attrs(ns, launch)))
     finally:
         sys.argv = previous
     validate_parsed_args(args, launch)

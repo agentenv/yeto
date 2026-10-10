@@ -2900,6 +2900,34 @@ def run_critic_baseline(args, learner_argv: Sequence[str],
     run(command, check=True, env=env)
 
 
+def _run_test_debug_rollout_replay(args, miles_args) -> bool:
+    """TEST ONLY (YETO_TEST_MILES_LOAD_DEBUG_ROLLOUT_DATA): train on a recorded
+    rollout dump with upstream Miles' own train loop (train.py). The yeto driver
+    publishes to rollout engines, which a dump replay does not start; this checks
+    the Miles training half (packing, critic, advantages, train dump) only."""
+
+    from yeto.rl.adapters.miles.config import TEST_DEBUG_ROLLOUT_ENV
+
+    if not (os.environ.get(TEST_DEBUG_ROLLOUT_ENV) and getattr(miles_args, "debug_train_only", False)):
+        return False
+    import asyncio
+    import importlib.util
+
+    path = os.path.join(os.path.expanduser(args.miles_root), "train.py")
+    spec = importlib.util.spec_from_file_location("miles_upstream_train", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    from miles.utils.async_utils import with_disposer
+    from yeto.rl.adapters.miles.entry import connect_island_ray
+
+    # same job runtime_env as the ports island (PYTHONPATH -> pinned Miles/Megatron in the actors)
+    connect_island_ray(miles_args=miles_args)
+    print(f"[rl] TEST ONLY: upstream Miles train loop on {miles_args.load_debug_rollout_data}", flush=True)
+    asyncio.run(with_disposer(module.train, miles_args))
+    print("[rl] TEST ONLY: upstream Miles train loop finished", flush=True)
+    return True
+
+
 def _run_ports(
     args,
     miles_args,
@@ -2954,6 +2982,8 @@ def _run_ports(
     miles_args.wandb_entity = getattr(args, "wandb_entity", None)
     miles_args.wandb_mode = getattr(args, "wandb_mode", "online")
     apply_ports_infra_switches(args, miles_args)
+    if _run_test_debug_rollout_replay(args, miles_args):
+        return
     run_ports_island(
         miles_args,
         launch,
