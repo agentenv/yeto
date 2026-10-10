@@ -167,6 +167,7 @@ def apply_trajectory_bookkeeping(input_sample: Any, samples: list[Any], *, expec
 
 # --- CompactionRL segments (design D8; progress.md "S13 Codex 桥压缩拦截") ----
 SESSIONS_KEY = "codex_compaction_sessions"  # trusted: pre-created by the agent function
+ROUTER_KEY = "codex_compaction_router"  # trusted: router those sessions live on
 COMPACTION_METRICS_KEY = "codex_compaction"  # untrusted bridge record in agent_metrics
 SegmentCollector = Callable[[Any, str, str], Awaitable[tuple[list[Any], dict[str, Any]]]]
 
@@ -199,7 +200,15 @@ async def assemble_compaction_segments(input: Any, output: Any, *, collect: Segm
     if session_ids is None:
         return output
     collect = collect or collect_segment_session
-    router = f"http://{meta0.get('session_server_id', '')}"
+    # The agent function records the router it created the sessions on
+    # (s19-compaction-g1-20261010d: session_server_id is not in the returned
+    # metadata, the collect URL became "http:///sessions/..." and retried forever).
+    router = meta0.get(ROUTER_KEY)
+    if not router and meta0.get("session_server_id"):
+        router = f"http://{meta0['session_server_id']}"
+    if not isinstance(router, str) or not router.startswith(("http://", "https://")) or router.endswith("//"):
+        _mark_aborted(first, "segment collect: no session-server router for the segment sessions")
+        return output
     collected: list[tuple[list[Any], dict[str, Any]]] = []
     failure: str | None = None
     for session_id in session_ids if isinstance(session_ids, list) else []:

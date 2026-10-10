@@ -55,6 +55,9 @@ T_COMP_ENV = "YETO_CODEX_COMPACTIONRL_T_COMP"
 SEGMENT_URLS_KEY = "segment_base_urls"
 METRICS_KEY = "codex_compaction"
 SESSIONS_METADATA_KEY = "codex_compaction_sessions"
+# Router URL the segment sessions were created on (trusted, next to the ids);
+# the generate wrapper collects them there.
+SESSIONS_ROUTER_METADATA_KEY = "codex_compaction_router"
 # Codex 0.145.0 accepts this key under --strict-config (checked against the
 # pinned binary: a string value fails with "expected i64").
 CODEX_AUTO_COMPACT_DISABLED = "model_auto_compact_token_limit=9223372036854775807"
