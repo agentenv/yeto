@@ -27,7 +27,9 @@ without the Miles package.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
+import os
 from typing import Any, Awaitable, Callable
 
 from yeto.rl.engine import rollout_meta
@@ -168,6 +170,18 @@ def apply_trajectory_bookkeeping(input_sample: Any, samples: list[Any], *, expec
 # --- CompactionRL segments (design D8; progress.md "S13 Codex 桥压缩拦截") ----
 SESSIONS_KEY = "codex_compaction_sessions"  # trusted: pre-created by the agent function
 ROUTER_KEY = "codex_compaction_router"  # trusted: router those sessions live on
+SEGMENT_COLLECT_TIMEOUT_ENV = "YETO_CODEX_SEGMENT_COLLECT_TIMEOUT_S"
+DEFAULT_SEGMENT_COLLECT_TIMEOUT_S = 120.0
+
+
+def segment_collect_timeout_s() -> float:
+    """Per-session collect budget (env override, positive seconds)."""
+    raw = os.environ.get(SEGMENT_COLLECT_TIMEOUT_ENV)
+    try:
+        value = float(raw) if raw else DEFAULT_SEGMENT_COLLECT_TIMEOUT_S
+    except ValueError:
+        value = DEFAULT_SEGMENT_COLLECT_TIMEOUT_S
+    return value if value > 0 else DEFAULT_SEGMENT_COLLECT_TIMEOUT_S
 COMPACTION_METRICS_KEY = "codex_compaction"  # untrusted bridge record in agent_metrics
 SegmentCollector = Callable[[Any, str, str], Awaitable[tuple[list[Any], dict[str, Any]]]]
 
@@ -213,7 +227,13 @@ async def assemble_compaction_segments(input: Any, output: Any, *, collect: Segm
     failure: str | None = None
     for session_id in session_ids if isinstance(session_ids, list) else []:
         try:
-            collected.append(await collect(input, router, str(session_id)))
+            collected.append(await asyncio.wait_for(collect(input, router, str(session_id)),
+                                                    timeout=segment_collect_timeout_s()))
+        except asyncio.TimeoutError:
+            # s19-compaction-g1-20261010d: Miles' http_utils retries a failing
+            # collect for a long time; bound it so one rollout cannot stall the round.
+            failure = failure or f"segment collect: timed out after {segment_collect_timeout_s():g} s"
+            collected.append(([], {}))
         except Exception as exc:  # noqa: BLE001 - keep deleting the remaining sessions
             failure = failure or f"segment collect: {type(exc).__name__}: {exc}"
             collected.append(([], {}))

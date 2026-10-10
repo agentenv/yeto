@@ -465,3 +465,24 @@ def test_wrapper_collects_on_the_recorded_router_and_aborts_without_one():
     seg0 = _sample(10, 30, **bare)
     out, seen = _wrap(seg0, {"a": ([s1], {})})
     assert seen == [] and generate_wrapper.INFRASTRUCTURE_KEY in seg0.metadata
+
+
+def test_wrapper_bounds_each_segment_collect(monkeypatch):
+    """A hanging collect (Miles retries) aborts the rollout after the budget."""
+    import asyncio
+
+    monkeypatch.setenv(generate_wrapper.SEGMENT_COLLECT_TIMEOUT_ENV, "0.05")
+    seg0 = _sample(10, 30, **_seg0_meta(1))
+    inp = SimpleNamespace(sample=SimpleNamespace(group_index=7, index=11, metadata={"expected_policy_version": "pv"}))
+
+    async def upstream(_input):
+        return _Out(samples=seg0)
+
+    async def hang(_input, _router, _sid):
+        await asyncio.sleep(30)
+
+    out = _run(generate_wrapper.generate(inp, upstream=upstream, collect=hang))
+    assert "timed out" in seg0.metadata[generate_wrapper.INFRASTRUCTURE_KEY]
+    assert generate_wrapper.segment_collect_timeout_s() == 0.05
+    monkeypatch.setenv(generate_wrapper.SEGMENT_COLLECT_TIMEOUT_ENV, "bad")
+    assert generate_wrapper.segment_collect_timeout_s() == generate_wrapper.DEFAULT_SEGMENT_COLLECT_TIMEOUT_S
