@@ -1,0 +1,70 @@
+{
+ "verdict": "PASS",
+ "case": "sapo",
+ "run": "s19-p1-sapo-20261010a",
+ "rounds": [
+  {
+   "rollout_id": 0,
+   "entropy_loss": 0.0,
+   "ess_ratio": 0.9994461238384247,
+   "loss": -0.01476651057600975,
+   "pg_clipfrac": 0.0,
+   "pg_loss": -0.01476651057600975,
+   "ppo_kl": -3.0638482712674886e-05,
+   "train_rollout_kl": 0.0005580916185863316,
+   "train_rollout_logprob_abs_diff": 0.011673860251903534,
+   "grad_norm": 0.8681032061576843,
+   "reward_mean": 0.9375,
+   "reward_std": 0.24206145913796356
+  },
+  {
+   "rollout_id": 1,
+   "entropy_loss": 0.0,
+   "ess_ratio": 0.9990764260292053,
+   "loss": -0.02420204132795334,
+   "pg_clipfrac": 0.0,
+   "pg_loss": -0.02420204132795334,
+   "ppo_kl": -7.245146844070405e-05,
+   "train_rollout_kl": 0.0007444879738613963,
+   "train_rollout_logprob_abs_diff": 0.013704938348382711,
+   "grad_norm": 0.8875716924667358,
+   "reward_mean": 0.4375,
+   "reward_std": 0.49607837082461076
+  },
+  {
+   "rollout_id": 2,
+   "entropy_loss": 0.0,
+   "ess_ratio": 0.9992222785949707,
+   "loss": -0.025292309001088142,
+   "pg_clipfrac": 0.0,
+   "pg_loss": -0.025292309001088142,
+   "ppo_kl": 0.0003834558592643589,
+   "train_rollout_kl": 0.0008350659336429089,
+   "train_rollout_logprob_abs_diff": 0.016082273796200752,
+   "grad_norm": 0.5399029850959778,
+   "reward_mean": 0.15625,
+   "reward_std": 0.3630921887069453
+  }
+ ],
+ "problems": [],
+ "missing": [],
+ "notes": [],
+ "spec_sha256": "a67e4096f37c64d0d615451d9fe8bfb212260ab8e620ccab92188fb61a78b37b",
+ "d_round1_step2_[variant,base]": {
+  "train/pg_loss": [
+   -0.014801710844039917,
+   0.00016615167260169983
+  ],
+  "train/grad_norm": [
+   0.3492613434791565,
+   0.3491441607475281
+  ]
+ },
+ "miles_commit": "64b591a4bec1ffa37fb089d3e3b99c84773b1ffc",
+ "gpu": [
+  "[s19-p1-sapo-20261010a-l0-modal] [modal-island 0] requested A10G:1, got ['NVIDIA A10']"
+ ],
+ "tape": "s19-p1-sapo-20261010a/tape-direct/yeto-s19-p1-sapo-20261010a/l0/rank0/rl-island-0.jsonl",
+ "n_step_dicts": 6,
+ "watchdog_fired": false
+}

@@ -1,0 +1,63 @@
+{
+ "verdict": "PASS",
+ "case": "dual",
+ "run": "s19-p1-dual-20261010a",
+ "rounds": [
+  {
+   "rollout_id": 0,
+   "dual_clipfrac": 0.002986348234117031,
+   "entropy_loss": 0.0,
+   "ess_ratio": 0.9994461238384247,
+   "loss": -0.0003457339480519295,
+   "pg_clipfrac": 0.0007568930741399527,
+   "pg_loss": -0.0003457339480519295,
+   "ppo_kl": -3.0638482712674886e-05,
+   "train_rollout_kl": 0.0005580916185863316,
+   "train_rollout_logprob_abs_diff": 0.011673860251903534,
+   "grad_norm": 0.8681032061576843,
+   "reward_mean": 0.9375,
+   "reward_std": 0.24206145913796356
+  },
+  {
+   "rollout_id": 1,
+   "dual_clipfrac": 0.0341445654630661,
+   "entropy_loss": 0.0,
+   "ess_ratio": 0.9992868006229401,
+   "loss": -0.001179644837975502,
+   "pg_clipfrac": 0.0010999381775036454,
+   "pg_loss": -0.001179644837975502,
+   "ppo_kl": -0.000448202044935897,
+   "train_rollout_kl": 0.0006331978947855532,
+   "train_rollout_logprob_abs_diff": 0.013429456390440464,
+   "grad_norm": 0.7244040369987488,
+   "reward_mean": 0.46875,
+   "reward_std": 0.4990224819584785
+  },
+  {
+   "rollout_id": 2,
+   "dual_clipfrac": 0.037070661783218384,
+   "entropy_loss": 0.0,
+   "ess_ratio": 0.9990692436695099,
+   "loss": -0.0006909621879458427,
+   "pg_clipfrac": 0.0006286681164056063,
+   "pg_loss": -0.0006909621879458427,
+   "ppo_kl": 0.00022693205391988158,
+   "train_rollout_kl": 0.0007602300029247999,
+   "train_rollout_logprob_abs_diff": 0.016045804135501385,
+   "grad_norm": 0.3349703252315521,
+   "reward_mean": 0.03125,
+   "reward_std": 0.17399263633843817
+  }
+ ],
+ "problems": [],
+ "missing": [],
+ "notes": [],
+ "spec_sha256": "cd3dca7d6561881eb69305cc0336a75615777c0dfb448ce555a7d264db093a8e",
+ "miles_commit": "64b591a4bec1ffa37fb089d3e3b99c84773b1ffc",
+ "gpu": [
+  "[s19-p1-dual-20261010a-l0-modal] [modal-island 0] requested A10G:1, got ['NVIDIA A10']"
+ ],
+ "tape": "s19-p1-dual-20261010a/tape-direct/yeto-s19-p1-dual-20261010a/l0/rank0/rl-island-0.jsonl",
+ "n_step_dicts": 6,
+ "watchdog_fired": false
+}

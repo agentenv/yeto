@@ -1,0 +1,68 @@
+{
+ "verdict": "PASS",
+ "case": "kl-k3",
+ "run": "s19-p1-kl-k3-20261010a",
+ "rounds": [
+  {
+   "rollout_id": 0,
+   "entropy_loss": 0.0,
+   "ess_ratio": 0.9994311928749084,
+   "kl_loss": 0.00026788818649947643,
+   "loss": 8.576470281695947e-05,
+   "pg_clipfrac": 0.0008879430242814124,
+   "pg_loss": 8.308514952659607e-05,
+   "ppo_kl": -0.00044083729153499007,
+   "train_rollout_kl": 0.0005580916476901621,
+   "train_rollout_logprob_abs_diff": 0.011673860251903534,
+   "grad_norm": 0.8681130409240723,
+   "reward_mean": 0.9375,
+   "reward_std": 0.24206145913796356
+  },
+  {
+   "rollout_id": 1,
+   "entropy_loss": 0.0,
+   "ess_ratio": 0.9991807341575623,
+   "kl_loss": 0.0008820757211651653,
+   "loss": 0.00028785131871700287,
+   "pg_clipfrac": 0.001578015391714871,
+   "pg_loss": 0.00027901213616132736,
+   "ppo_kl": 0.00021333871700335294,
+   "train_rollout_kl": 0.0006963591149542481,
+   "train_rollout_logprob_abs_diff": 0.01381191611289978,
+   "grad_norm": 0.9219706654548645,
+   "reward_mean": 0.40625,
+   "reward_std": 0.4911323014219285
+  },
+  {
+   "rollout_id": 2,
+   "entropy_loss": 0.0,
+   "ess_ratio": 0.9991054832935333,
+   "kl_loss": 0.001038786256685853,
+   "loss": 9.645880390962702e-05,
+   "pg_clipfrac": 0.0011289381654933095,
+   "pg_loss": 8.607655763626099e-05,
+   "ppo_kl": -0.00023403376690112054,
+   "train_rollout_kl": 0.0007998004730325192,
+   "train_rollout_logprob_abs_diff": 0.01681260345503688,
+   "grad_norm": 0.48434627056121826,
+   "reward_mean": 0.0625,
+   "reward_std": 0.24206145913796356
+  }
+ ],
+ "problems": [],
+ "missing": [],
+ "notes": [],
+ "spec_sha256": "7446000dc88a3fd3a3804cc05fc4cac9bbe49034d1c3e3ba03a0c4edb8e3bac2",
+ "kl_loss_per_round": [
+  0.00026788818649947643,
+  0.0008820757211651653,
+  0.001038786256685853
+ ],
+ "miles_commit": "64b591a4bec1ffa37fb089d3e3b99c84773b1ffc",
+ "gpu": [
+  "[s19-p1-kl-k3-20261010a-l0-modal] [modal-island 0] requested A10G:1, got ['NVIDIA A10']"
+ ],
+ "tape": "s19-p1-kl-k3-20261010a/tape-direct/yeto-s19-p1-kl-k3-20261010a/l0/rank0/rl-island-0.jsonl",
+ "n_step_dicts": 6,
+ "watchdog_fired": false
+}

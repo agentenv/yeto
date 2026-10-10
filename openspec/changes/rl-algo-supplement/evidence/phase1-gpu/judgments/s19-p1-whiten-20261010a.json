@@ -1,0 +1,78 @@
+{
+ "verdict": "INCOMPLETE",
+ "case": "whiten",
+ "run": "s19-p1-whiten-20261010a",
+ "rounds": [
+  {
+   "rollout_id": 0,
+   "entropy_loss": 0.0,
+   "ess_ratio": 0.9993507862091064,
+   "loss": -0.061372486874461174,
+   "pg_clipfrac": 0.0023397752083837986,
+   "pg_loss": -0.061372486874461174,
+   "ppo_kl": -0.0004743786412291229,
+   "train_rollout_kl": 0.0005580916185863316,
+   "train_rollout_logprob_abs_diff": 0.011673860251903534,
+   "grad_norm": 1.1419553756713867,
+   "reward_mean": 0.9375,
+   "reward_std": 0.24206145913796356
+  },
+  {
+   "rollout_id": 1,
+   "entropy_loss": 0.0,
+   "ess_ratio": 0.9991373717784882,
+   "loss": -0.12817132472991943,
+   "pg_clipfrac": 0.0026161724235862494,
+   "pg_loss": -0.12817132472991943,
+   "ppo_kl": 6.84272381477058e-05,
+   "train_rollout_kl": 0.0006099379097577184,
+   "train_rollout_logprob_abs_diff": 0.012972562573850155,
+   "grad_norm": 0.9089701175689697,
+   "reward_mean": 0.34375,
+   "reward_std": 0.47495887979908324
+  },
+  {
+   "rollout_id": 2,
+   "entropy_loss": 0.0,
+   "ess_ratio": 0.9989468455314636,
+   "loss": -0.06873473152518272,
+   "pg_clipfrac": 0.0011140593560412526,
+   "pg_loss": -0.06873473152518272,
+   "ppo_kl": -0.0003254658658988774,
+   "train_rollout_kl": 0.0007716366671957076,
+   "train_rollout_logprob_abs_diff": 0.015798551961779594,
+   "grad_norm": 0.6943159699440002,
+   "reward_mean": 0.09375,
+   "reward_std": 0.2914805954090255
+  }
+ ],
+ "problems": [],
+ "missing": [
+  "advantage variance not emitted by Miles/tape (adv_std null); offline recompute (1e-5) impossible -> \u5931\u8d25\uff08\u8bc1\u636e\u4e0d\u5168\uff09"
+ ],
+ "notes": [],
+ "spec_sha256": "8b42dd08e033c0a7aa00d4105925e742147855a8e5d703b828c3e596d80ae208",
+ "rollout_advantages_mean": [
+  null,
+  0.06143924593925476,
+  null,
+  0.1279957890510559,
+  null,
+  0.06917063891887665
+ ],
+ "base_rollout_advantages_mean": [
+  null,
+  -1.30385160446167e-08,
+  null,
+  -7.450580596923828e-09,
+  null,
+  0.0
+ ],
+ "miles_commit": "64b591a4bec1ffa37fb089d3e3b99c84773b1ffc",
+ "gpu": [
+  "[s19-p1-whiten-20261010a-l0-modal] [modal-island 0] requested A10G:1, got ['NVIDIA A10']"
+ ],
+ "tape": "s19-p1-whiten-20261010a/tape-direct/yeto-s19-p1-whiten-20261010a/l0/rank0/rl-island-0.jsonl",
+ "n_step_dicts": 6,
+ "watchdog_fired": false
+}

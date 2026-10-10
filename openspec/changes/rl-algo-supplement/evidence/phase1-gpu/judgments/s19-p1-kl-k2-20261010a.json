@@ -1,0 +1,73 @@
+{
+ "verdict": "PASS",
+ "case": "kl-k2",
+ "run": "s19-p1-kl-k2-20261010a",
+ "rounds": [
+  {
+   "rollout_id": 0,
+   "entropy_loss": 0.0,
+   "ess_ratio": 0.9994461238384247,
+   "kl_loss": 0.00027828282327391207,
+   "loss": -2.13065832213033e-05,
+   "pg_clipfrac": 0.0007568930741399527,
+   "pg_loss": -2.4077482521533966e-05,
+   "ppo_kl": -3.0638482712674886e-05,
+   "train_rollout_kl": 0.0005580916185863316,
+   "train_rollout_logprob_abs_diff": 0.011673860251903534,
+   "grad_norm": 0.8681032061576843,
+   "reward_mean": 0.9375,
+   "reward_std": 0.24206145913796356
+  },
+  {
+   "rollout_id": 1,
+   "entropy_loss": 0.0,
+   "ess_ratio": 0.999147355556488,
+   "kl_loss": 0.0008882694528438151,
+   "loss": 0.0007169842720031738,
+   "pg_clipfrac": 0.0029904600232839584,
+   "pg_loss": 0.0007081106305122375,
+   "ppo_kl": -0.00015884338063187897,
+   "train_rollout_kl": 0.0006750750471837819,
+   "train_rollout_logprob_abs_diff": 0.013649932108819485,
+   "grad_norm": 0.837375283241272,
+   "reward_mean": 0.46875,
+   "reward_std": 0.4990224819584785
+  },
+  {
+   "rollout_id": 2,
+   "entropy_loss": 0.0,
+   "ess_ratio": 0.9990963041782379,
+   "kl_loss": 0.0010073971352539957,
+   "loss": 0.0008198678833650774,
+   "pg_clipfrac": 0.0013979789800941944,
+   "pg_loss": 0.0008098017424345016,
+   "ppo_kl": -8.616898412583396e-06,
+   "train_rollout_kl": 0.000782196904765442,
+   "train_rollout_logprob_abs_diff": 0.01582997292280197,
+   "grad_norm": 0.5108734369277954,
+   "reward_mean": 0.125,
+   "reward_std": 0.33071891388307384
+  }
+ ],
+ "problems": [],
+ "missing": [],
+ "notes": [],
+ "spec_sha256": "b84c3375a757efe4dd6eab23b862e4e60e7504587284baa24f2d62fedb746e38",
+ "kl_loss_per_round": [
+  0.00027828282327391207,
+  0.0008882694528438151,
+  0.0010073971352539957
+ ],
+ "k3_kl_loss_per_round": [
+  0.00026788818649947643,
+  0.0008820757211651653,
+  0.001038786256685853
+ ],
+ "miles_commit": "64b591a4bec1ffa37fb089d3e3b99c84773b1ffc",
+ "gpu": [
+  "[s19-p1-kl-k2-20261010a-l0-modal] [modal-island 0] requested A10G:1, got ['NVIDIA A10']"
+ ],
+ "tape": "s19-p1-kl-k2-20261010a/tape-direct/yeto-s19-p1-kl-k2-20261010a/l0/rank0/rl-island-0.jsonl",
+ "n_step_dicts": 6,
+ "watchdog_fired": false
+}
