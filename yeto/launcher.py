@@ -1648,6 +1648,7 @@ def _prepare_ports_algorithm(args, rl_engine: str) -> None:
             # rl-algo-critic-family 2.3 (critic run-level rejections)
             "sync_preset": getattr(args, "rl_sync_preset", "strict-avg"),
             "elastic": bool(getattr(args, "rl_elastic", False)),
+            "reward_function": getattr(args, "reward_function", None),
         })
         if problems:
             raise AlgorithmSpecError("algorithm spec rejected: " + "; ".join(problems))
