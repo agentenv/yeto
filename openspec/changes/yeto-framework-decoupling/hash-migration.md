@@ -254,3 +254,7 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
 ## S19 会话服务基址 31801 → 9301（分支 s19-session-port，2026-10-10）
 
 只变 codex_harness 一个标准样本的两项：`miles_argv_sha256`、`ports_runtime_fingerprint`（Miles 命令行里的 `--session-server-port` 从 31801 改为 9301）。算法哈希与契约哈希不变。原因：s19-compaction-g1-20261010f 在 Modal（gVisor，临时端口 16000–65535）上丢了 31809。用旧基址起的岛与用新基址起的岛运行时指纹不同，续跑和弹性认证不能跨这个版本混用。
+
+## S19 CompactionRL 段计数刷新（分支 s19-compaction-receipt-counts，2026-10-10）
+
+8 个标准样本只变 `plugins` 一项：rollout_meta_hook 插件的源码哈希变了（在掩码钩子之后刷新 CompactionRL 段计数）。算法哈希、契约哈希、argv 哈希不变。
