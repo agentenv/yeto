@@ -90,9 +90,10 @@
 - [ ] 6.4 落盘发布方式真机验证；verl 岛重入后数据游标续位；elastic 模式 verl 岛（JOIN 带身份见 PR #140）。
   - 2026-10-08 N16（分支 s17-rejoin-cursor，CPU 已实现并单测，**未上卡验证**）：数据游标续位已做。查明这是中立层缺陷，不是 verl 独有：驱动只在有批次账本或同步方式提供"按整轮跳过"兜底时才恢复数据位置，而这个兜底只有 elastic 有；严格同步且没有账本的岛（V2 的 verl 岛；Miles 严格模式不带 --rl-elastic 时同理，按代码推断、未上卡）在新容器里重启后数据源从 0 开始。Miles elastic 的 N3/N5 运行中退出重入是同进程暂停后重入，数据源没有重置，事件记录里也没有 cursor_restored，不存在同样的重复。改法：① 中立层 `bridges.whole_round_restart_cursor` 抽成共用函数，StrictAvgSync / DualStrictAvgSync 也提供兜底；驱动只在账本里没有 v-1 这一轮记录时才用兜底（账本记了 v-1 却没游标仍按原规则拒绝）。② verl 岛 `VerlRolloutPool` 提供 data_cursor / seek_data_cursor（`adapters/verl/data_cursor.py`：数 `_fetch_one_gen_batch` 取过的题数，向前跳整块，不能后退），每轮游标写进 verl-rollout 记录。证据：tests/test_rl_restart_data_cursor.py 新增 3 条（无账本严格重启跳过 2 轮，修前失败）、tests/test_rl_verl_adapter.py 新增 2 条（跳过后取到的题与不中断时相同）；39 个相关测试文件 919 过，唯一失败 test_rl_ir_harness 在基线同样失败。待下次 verl 两岛上卡时用 prompts_sha256 复核。
   - 2026-10-09 S17 N17：中立层的整轮跳过在 **Miles 严格同步** 岛上真机通过（`s17-n17-strict-20261009a`，见 rl-infra-spec 8.2）；verl 数据游标（`seek_data_cursor`）仍**未上卡验证**。
-- [ ] 6.6 verl fully_async 接入上卡（agentic-rollout-utilization 6.4b，约 2 卡、$15–25）。
+- [x] 6.6 verl fully_async 接入上卡（agentic-rollout-utilization 6.4b，约 2 卡、$15–25）。
   - **用户 2026-10-09 决定：要做**。先在 NVIDIA GPU（N 卡）上跑，不等 NPU。结果统一备注"已在 N 卡跑过，NPU 未跑"；NPU 复跑待第 3 组 NPU 机器到位后另列。
   - 设计在 agentic-rollout-utilization design 第 9 条"6.4b 设计"。2026-10-09 适配代码**完成**（写完且本机单测通过，未上卡）：`fully_async_round.py`（纯逻辑）、`fully_async_ports.py`（驱动端口）、`fully_async_runner.py`（镜像内 trainer actor 子类 + 任务运行器）、`patch_verl.py` 第二处补丁、`verl_main.main_fully_async`、`island_entry --rl-max-policy-age`；测试 `tests/test_rl_verl_fully_async_64b.py`（11 项，含假 trainer actor 下真实 IslandDriver 跑 3 轮）。镜像内路径（verl/Ray 真调用）**未验证**，靠本条上卡核实。
   - 上卡前复核文档：`infra-drafts/S19-VERL-64B-PRELAUNCH-REVIEW.md`（判据、配置、预算）；并入第三批合并上卡（`infra-drafts/S19-BATCH3-PLAN.md`），预算需用户批。
   - 验收：复核文档预登记判据 F1–F6 全部满足，证据路径写回本条。
+  - 2026-10-10 S19 #11 **完成**（已在 N 卡跑过，NPU 未跑）：B 臂 2×H100 fully_async。`s19-verl64b-async9-20261010a` 判 F1–F4、F6 通过（F5 在 gsm8k 短回答下未触发）；`s19-verl64b-async10-20261010a`（只开 enable_thinking）判 F5、F3、F4 通过（续写 54 条，版本段不符 0，超龄 0）。修复链：#178、#184、#185、#187、#193、#195、#205。复核见 infra-drafts/S19-VERL-64B-PRELAUNCH-REVIEW.md §9。合计约 $25.2（估算）。
 - [ ] 6.5 单岛不同步 + Modal 时 launcher 以 exit 2 收尾（与 Miles 相同的既有行为），是否改为成功由用户定。
