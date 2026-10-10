@@ -326,3 +326,61 @@ def test_island_setup_installs_the_modal_client_only_for_the_modal_sandbox_provi
     assert "exit 1" in L.MODAL_CLIENT_SETUP
     cfg = build_modal_island_config(args, spec, 0, task, "1.2.3.4:29400")
     assert L.MODAL_CLIENT_SETUP in cfg.setup_script
+
+
+def test_modal_sandbox_secret_attaches_a_named_secret_and_checks_in_the_island(bundle, monkeypatch):
+    """--modal-sandbox-secret: the sandbox token comes from a named Modal Secret
+    (never through the launcher); the island setup fails closed without it."""
+    for name in L.SANDBOX_MODAL_TOKEN_ENVS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("MODAL_TOKEN_ID", "ak-test")
+    monkeypatch.setenv("MODAL_TOKEN_SECRET", "as-test")
+    monkeypatch.setenv(L.HARNESS_ENVIRONMENT_PROVIDER_ENV, L.MODAL_SANDBOX_PROVIDER)
+    args = _codex_args()
+    args.gpu = "modal:1xl40s"
+    args.rl_image = "docker:ghcr.io/x/miles@sha256:" + "c" * 64
+    spec = parse_gpu_spec(args.gpu)[0]
+    with pytest.raises(ValueError, match="YETO_SANDBOX_MODAL_TOKEN_ID"):
+        make_miles_island_task(args, spec, 0, 1, "127.0.0.1:29400")  # unchanged without the flag
+    args.modal_sandbox_secret = "yeto-sandbox-modal"
+    task = make_miles_island_task(args, spec, 0, 1, "127.0.0.1:29400")
+    assert L.SANDBOX_TOKEN_IN_ISLAND_CHECK in task.setup
+    assert task.setup.index(L.SANDBOX_TOKEN_IN_ISLAND_CHECK) < task.setup.index(L.MODAL_CLIENT_SETUP)
+    cfg = build_modal_island_config(args, spec, 0, task, "1.2.3.4:29400")
+    assert cfg.named_secrets == ("yeto-sandbox-modal",)
+    assert not set(L.SANDBOX_MODAL_TOKEN_ENVS) & set(cfg.envs)
+    assert L.SANDBOX_TOKEN_IN_ISLAND_CHECK in cfg.setup_script
+    assert mr.ModalIslandConfig.from_json(cfg.to_json()).named_secrets == ("yeto-sandbox-modal",)
+    state = fake_modal(monkeypatch)
+    monkeypatch.setattr(mr, "registry_credentials", lambda *_a, **_k: None)
+    mr.ModalOps("yeto-run").define(cfg)
+    (_fn, kwargs), = state["functions"].values()
+    assert ("named-secret", "yeto-sandbox-modal") in kwargs["secrets"]
+
+
+def test_modal_sandbox_secret_in_island_check_fails_closed_without_values(tmp_path):
+    import subprocess
+
+    env = {"PATH": os.environ["PATH"], "YETO_SANDBOX_MODAL_TOKEN_ID": "ak-x"}
+    r = subprocess.run(["bash", "-c", L.SANDBOX_TOKEN_IN_ISLAND_CHECK], env=env,
+                       capture_output=True, text=True)
+    assert r.returncode == 1 and "YETO_SANDBOX_MODAL_TOKEN_SECRET missing" in r.stderr
+    assert "ak-x" not in r.stderr + r.stdout
+    env["YETO_SANDBOX_MODAL_TOKEN_SECRET"] = "as-y"
+    r = subprocess.run(["bash", "-c", L.SANDBOX_TOKEN_IN_ISLAND_CHECK], env=env,
+                       capture_output=True, text=True)
+    assert r.returncode == 0 and r.stdout + r.stderr == ""
+
+
+def test_modal_sandbox_secret_is_refused_for_non_modal_islands(bundle, monkeypatch):
+    args = _codex_args()
+    args.modal_sandbox_secret = "yeto-sandbox-modal"
+    spec = parse_gpu_spec(args.gpu)[0]
+    assert spec.cloud != "modal"
+    with pytest.raises(ValueError, match="--modal-sandbox-secret"):
+        make_miles_island_task(args, spec, 0, 1, "127.0.0.1:29400")
+    with pytest.raises(ValueError, match="cannot use it"):
+        L.check_cloud_prerequisites([spec], project_ids={}, args=args, modal_ok=True)
+    args.modal_sandbox_secret = "bad name;rm"
+    with pytest.raises(ValueError, match="not a Modal Secret name"):
+        L.modal_sandbox_secret_name(args, parse_gpu_spec("modal:1xl40s")[0])

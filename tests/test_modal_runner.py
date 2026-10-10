@@ -202,7 +202,8 @@ def fake_modal(monkeypatch):
 
     modal.App, modal.Image, modal.Function, modal.FunctionCall = App, Image, Function, FunctionCall
     modal.Retries = lambda **kw: ("retries", kw)
-    modal.Secret = types.SimpleNamespace(from_dict=lambda d: ("secret", d))
+    modal.Secret = types.SimpleNamespace(from_dict=lambda d: ("secret", d),
+                                         from_name=lambda n: ("named-secret", n))
     modal.Volume = types.SimpleNamespace(from_name=lambda n, create_if_missing=False: ("volume", n))
     modal.enable_output = contextlib.nullcontext
     experimental = types.ModuleType("modal.experimental")
