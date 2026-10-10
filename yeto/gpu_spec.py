@@ -36,7 +36,22 @@ _GPU_CANONICAL = {
     "b200": "B200",
     "v100": "V100",
     "t4": "T4",
+    # Ascend NPU (910B4 is the model the user bought, 2026-10-10). The
+    # launcher spells it like any other card: ``ssh:1x8x910b4``.
+    "910b4": "910B4",
+    "910b": "910B",
 }
+
+# Accelerator families per canonical card name. A card absent from this map is
+# an NVIDIA GPU; only the cards listed here need the NPU launcher path
+# (ASCEND_RT_VISIBLE_DEVICES, hccl, npu-smi).
+_CARD_DEVICE_TYPE = {"910B": "npu", "910B4": "npu"}
+
+
+def device_type_of(card: str) -> str:
+    """``"cuda"`` or ``"npu"`` for a canonical card name (:data:`_GPU_CANONICAL`)."""
+    return _CARD_DEVICE_TYPE.get(card, "cuda")
+
 
 _ENTRY_RE = re.compile(
     r"^(?P<cloud>[a-z]+):"
@@ -113,3 +128,57 @@ def require_min_nodes(spec: ClusterSpec, min_nodes: int) -> ClusterSpec:
             f"{min_nodes} node(s) of {spec.gpus_per_node}x{spec.gpu}"
         )
     return spec
+
+
+# --- npu-smi card assertion (task 3.9) ---------------------------------------
+#
+# ``npu-smi info`` prints one table row per chip, e.g.
+#
+#     | 0     910B4                   | OK              | 92.5  47  0 / 0     |
+#     | 0                             | 0000:C1:00.0    | 0     0 / 0  3161 / 32768 |
+#
+# The first row of each pair carries the card name. The parser below reads only
+# those rows, so a firmware change in the other columns does not break it.
+_NPU_SMI_ROW_RE = re.compile(r"^\|\s*(\d+)\s+(\S+)\s*\|")
+
+
+class NpuCardMismatch(RuntimeError):
+    """``npu-smi`` reports a card name or card count the island did not ask for."""
+
+
+def parse_npu_smi_names(text: str) -> list[str]:
+    """Card names ``npu-smi info`` reports, in device-id order (pure function)."""
+    found: dict[int, str] = {}
+    for line in text.splitlines():
+        m = _NPU_SMI_ROW_RE.match(line.strip())
+        if m is None:
+            continue
+        index, name = int(m.group(1)), m.group(2)
+        if name.lower() in ("name", "chip") or ":" in name:
+            continue  # header row, or the bus-id row of the same chip
+        found.setdefault(index, name)
+    return [found[i] for i in sorted(found)]
+
+
+def assert_npu_cards(text: str, card: str, count: int | None = None) -> list[str]:
+    """Refuse before training when ``npu-smi info`` does not show ``count`` x ``card``.
+
+    ``card`` is the canonical name (``"910B4"``); the comparison ignores case
+    and the ``-1`` / ``-2`` suffix npu-smi adds for a chip variant (a 910B4-1
+    is a 910B4). Returns the names found.
+    """
+    names = parse_npu_smi_names(text)
+    if not names:
+        raise NpuCardMismatch(
+            "npu-smi info reported no card row; cannot assert the card type "
+            f"(expected {card}). Output was: {text.strip()[:200]!r}")
+    want = card.strip().lower()
+    bad = [n for n in names if n.lower().split("-")[0] != want]
+    if bad:
+        raise NpuCardMismatch(
+            f"npu-smi reports card(s) {sorted(set(bad))} but this island expects {card}; "
+            "refusing to start (card type is a numerics boundary)")
+    if count is not None and len(names) != count:
+        raise NpuCardMismatch(
+            f"npu-smi reports {len(names)} x {card}, the island asked for {count}; refusing to start")
+    return names

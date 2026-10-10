@@ -12,7 +12,7 @@ import struct
 
 import pytest
 
-from yeto.gpu_spec import _GPU_CANONICAL, parse_gpu_spec
+from yeto.gpu_spec import _GPU_CANONICAL, device_type_of, parse_gpu_spec
 from yeto.hw import catalog
 from yeto.hw.catalog import (CompatGroupMismatch, UnknownCardType, check_compat_group,
                              compat_group, compat_refusal, island_compat_group)
@@ -29,9 +29,11 @@ def test_compat_group_values_from_the_catalog():
     assert compat_group("h200") == "nvidia-h200"
     assert compat_group("910B") == "ascend-910b"
     assert compat_group(parse_gpu_spec("aws:8xh100@us-east-2")[0].gpu) == "nvidia-h100"
+    assert compat_group("910b4") == "ascend-910b4"
     # every card the launcher accepts has a group (no launch reaches the island without one)
     for card in _GPU_CANONICAL.values():
-        assert compat_group(card).startswith("nvidia-")
+        vendor = "ascend" if device_type_of(card) == "npu" else "nvidia"
+        assert compat_group(card).startswith(vendor + "-")
 
 
 @pytest.mark.parametrize("card", ["", "h300", "mi300x"])
@@ -95,7 +97,7 @@ def test_hello_compat_trailer_layout():
 
 def test_runtime_versions_never_raise():
     versions = catalog.runtime_versions()
-    assert set(versions) == {"driver_version", "cuda_version"}
+    assert {"driver_version", "cuda_version"} <= set(versions)
 
 
 def test_dashboard_shows_hardware_record():

@@ -77,6 +77,9 @@
 - 参数名映射错误导致"同名不同义"静默合并 → 映射表哈希进契约哈希（VERL-ASCEND-DESIGN.md:96）。
 - Flash-Next 不在 verl NPU 支持表（VERL-ASCEND-DESIGN.md:28, 95）。
 - verl 推理端用 processed_logprobs，开 top_p 必带偏移（VERL-ASCEND-DESIGN.md:214）。
+- NPU 上引擎只能睡到 level 1：vllm-ascend 不支持 `sleep_mode=2`（verl fork acad9875 `verl/third_party/vllm/__init__.py:41-44`，已核实）。→ NPU 岛休眠态仍占 HBM，弹性显存估算不能照搬 GPU 岛的数，到货后单独量一次（S19-NPU-910B4-BRINGUP.md §5 第 5 步）。
+- 昇腾机器可能是 aarch64：fork 的昇腾 Dockerfile 同时处理 aarch64 与 x86_64 的 CANN 库路径（已核实），但轮子与镜像缓存不能跨架构复用。→ 构建脚本要求显式 `--arch` 并拒绝跨架构构建（`scripts/build_verl_npu_image.sh`）；到货当天先跑 `uname -m`。
+- NPU 依赖栈与 GPU 栈无交集：NPU 为 vLLM 0.23 + torch 2.10 + CANN 9.1.0，GPU 为 vLLM 0.29 + torch 2.13（已核实，出处见 `yeto/rl/adapters/verl/pins.py`）。→ 两个镜像、两套版本断言（`pins.expected_versions(family)`），不共用。
 
 ## Migration Plan
 

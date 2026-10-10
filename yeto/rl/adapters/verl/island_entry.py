@@ -27,7 +27,7 @@ import time
 from pathlib import Path
 
 from . import config as vconf
-from .pins import EXPECTED_VERSIONS, VERL_COMMIT, VERL_ROOT
+from .pins import VERL_COMMIT, VERL_ROOT, expected_versions
 from .reward_fn import function_for
 
 OUTPUT = Path(os.path.expanduser("~/yeto-output"))
@@ -98,13 +98,25 @@ def algorithm_options(spec_dict: dict | None) -> dict:
     return out
 
 
-def runtime_manifest(learner_id: int) -> dict:
+def runtime_manifest(learner_id: int, device_family: str | None = None) -> dict:
+    """Versions this island actually runs, with the per-family expected pins.
+
+    ``device_family`` None reads the family from this node's accelerator, so an
+    Ascend island asserts the NPU pins and runs ``npu-smi`` instead of
+    ``nvidia-smi`` (tasks 3.6, 3.14). The NVIDIA manifest keeps its old shape
+    and its ``nvidia_smi`` key.
+    """
     import importlib.metadata as md
 
+    from yeto.hw.catalog import device_family as detect_device_family
+    from yeto.hw.catalog import runtime_versions
+
+    family = device_family if device_family is not None else detect_device_family()
+    expected = expected_versions(family)
     versions = {}
-    for name in EXPECTED_VERSIONS:
+    for name in expected:
         try:
-            versions[name] = md.version(name)
+            versions[name] = md.version(name.replace("_", "-"))
         except md.PackageNotFoundError:
             versions[name] = None
     try:
@@ -113,21 +125,50 @@ def runtime_manifest(learner_id: int) -> dict:
         versions["torch"] = torch.__version__
     except ImportError:
         pass
+    if family == "ascend":
+        try:
+            import torch_npu
+
+            versions["torch_npu"] = getattr(torch_npu, "__version__", versions.get("torch_npu"))
+        except ImportError:
+            pass
     sha_file = Path("/workspace/verl_sha.txt")
     commit = sha_file.read_text().strip() if sha_file.is_file() else None
-    smi = subprocess.run("nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader",
-                         shell=True, capture_output=True, text=True).stdout.strip()
+    smi_cmd = ("npu-smi info" if family == "ascend" else
+               "nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader")
+    smi = subprocess.run(smi_cmd, shell=True, capture_output=True, text=True).stdout.strip()
+    smi_key = "npu_smi" if family == "ascend" else "nvidia_smi"
     manifest = {"schema": "yeto-verl-runtime-v1", "verl_commit": commit, "versions": versions,
-                "expected_versions": EXPECTED_VERSIONS, "nvidia_smi": smi, "learner_id": learner_id,
-                "python": sys.version.split()[0]}
+                "expected_versions": expected, smi_key: smi, "learner_id": learner_id,
+                "device_family": family, "python": sys.version.split()[0]}
+    if family == "ascend":
+        manifest["nvidia_smi"] = ""  # keeps the manifest shape stable for readers
+        manifest.update({k: v for k, v in runtime_versions(family).items()
+                         if k in ("npu_driver_version", "cann_version")})
     problems = []
     if commit != VERL_COMMIT:
         problems.append(f"verl commit {commit} != pin {VERL_COMMIT}")
-    for name, want in EXPECTED_VERSIONS.items():
+    for name, want in expected.items():
         if versions.get(name) != want:
             problems.append(f"{name} {versions.get(name)} != {want}")
     manifest["problems"] = problems
     return manifest
+
+
+def _threshold_card(manifest: dict) -> str:
+    """Card name for the numeric threshold table key.
+
+    NPU and GPU thresholds are separate rows: the NPU island has no
+    ``nvidia-smi`` output, so the key comes from ``npu-smi`` instead. The CUDA
+    behaviour (H100 shorthand, else the raw smi line) is unchanged.
+    """
+    if manifest.get("device_family") == "ascend":
+        from yeto.gpu_spec import parse_npu_smi_names
+
+        names = parse_npu_smi_names(manifest.get("npu_smi") or "")
+        return names[0] if names else (manifest.get("npu_smi") or "unknown-npu")
+    smi = manifest.get("nvidia_smi") or ""
+    return "H100" if "H100" in smi else smi
 
 
 def prepare_data(data: str, revision: str | None, root: Path, *, val_rows: int = 64) -> tuple[str, str]:
@@ -277,7 +318,7 @@ def main(argv=None) -> int:
         "lora_targets": args.lora_targets, "event_tape": os.path.expanduser(args.event_tape),
         "out_dir": str(OUTPUT), "tis_upper": algo["tis_upper"], "wan_streams": args.wan_streams,
         "thresholds_key": ["verl", "fsdp2", "vllm-" + str(manifest["versions"].get("vllm")),
-                           "H100" if "H100" in manifest["nvidia_smi"] else manifest["nvidia_smi"]],
+                           _threshold_card(manifest)],
         "algorithm_spec": spec_dict, "syncer_epoch": args.rl_syncer_epoch,
         "test_exit_after_version": exit_after,
         "publish_selftest": os.environ.get("YETO_VERL_PUBLISH_SELFTEST") == "1", "run_config": run.to_dict(), "overrides": overrides,
