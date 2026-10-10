@@ -702,11 +702,13 @@ def run_island_script(cmd: list[str], env: dict, *, popen=subprocess.Popen, sign
     the script gets its own process group and both signals are forwarded to that
     group, so the learner's reclaim listener LEAVEs. Then this process keeps waiting
     for the script (the cloud kills the container later). Other islands: plain call."""
-    if not _is_droppable(env):
-        return subprocess.call(cmd, env=env) if popen is subprocess.Popen else popen(cmd, env=env).wait()
     import signal as _signal
 
     sig = signal_mod or _signal
+    if not _is_droppable(env):
+        if env.get("YETO_SPOT_INFLIGHT_SAVE_DIR"):
+            return _run_forwarding_to_learner(cmd, env, popen=popen, sig=sig)
+        return subprocess.call(cmd, env=env) if popen is subprocess.Popen else popen(cmd, env=env).wait()
     killpg = killpg or os.killpg
     proc = popen(cmd, env=env, start_new_session=True)
 
@@ -716,6 +718,28 @@ def run_island_script(cmd: list[str], env: dict, *, popen=subprocess.Popen, sign
             killpg(proc.pid, num)
         except (ProcessLookupError, PermissionError) as exc:
             print(f"[modal-island] forward failed: {exc}", flush=True)
+
+    for name in ("SIGINT", "SIGTERM"):
+        sig.signal(getattr(sig, name), forward)
+    return proc.wait()
+
+
+def _run_forwarding_to_learner(cmd: list[str], env: dict, *, popen, sig, kill=None) -> int:
+    """rl-spot-cost-saving 4.1: with ``YETO_SPOT_INFLIGHT_SAVE_DIR`` set, forward the
+    reclaim signal to the learner process only (pid file written by the learner),
+    so the Ray processes stay up and the rollout executor can answer the in-flight
+    export within the grace period. No pid file yet: the signal is not forwarded."""
+    kill = kill or os.kill
+    proc = popen(cmd, env=env)
+    path = env.get("YETO_SPOT_INFLIGHT_PID_FILE") or "/tmp/yeto-learner.pid"
+
+    def forward(num, _frame):
+        try:
+            pid = int(Path(path).read_text().strip())
+            kill(pid, num)
+            print(f"[modal-island] signal {num}: forwarded to the learner {pid}", flush=True)
+        except (OSError, ValueError) as exc:
+            print(f"[modal-island] signal {num}: not forwarded ({exc})", flush=True)
 
     for name in ("SIGINT", "SIGTERM"):
         sig.signal(getattr(sig, name), forward)

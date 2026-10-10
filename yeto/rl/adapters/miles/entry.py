@@ -839,6 +839,10 @@ def compose_island(
         _wire_round_cuts(driver, elastic=resume, miles_args=miles_args, algorithm=algorithm,
                          base_model_revision=base_model_revision)
     _wire_droppable_reclaim(sync, driver)
+    # rl-spot-cost-saving 4.1 (opt-in, YETO_SPOT_INFLIGHT_SAVE_DIR): timed in-flight save
+    from .inflight_save import install as _install_inflight_save
+
+    _install_inflight_save(driver, rollout_executor, island=str(learner_id))
     holder["driver"] = driver
     return driver
 
