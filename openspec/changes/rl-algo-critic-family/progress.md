@@ -568,3 +568,7 @@ SAO 重跑：需用新 overlay（sha256 64f69bbf…）+ `--lora-targets attentio
 - 8.4 G1 复跑 `s19-sao-g1-20261009a`（镜像 64b591a-2fa8801，constant 表）：critic LR 第 11–24 步全为 5e-6；values 在全 0 轮后能回升跟随奖励均值。按预登记判据**失败（证据不全）**：第 4 轮奖励全 0，EV 按设计为 None。EV 结论 EV≤0（最后 4 轮均值 -0.031）。学习率不是 EV≤0 的唯一原因；其余原因未验证。
 - 4.5 G3 `s19-ppo-g3-20261009a`：**失败**（0 轮）。两岛卡在初始 critic 写回（`import_critic_state`），岛驱动进程 RSS 涨到数百 GiB，容器各被替换一次。S13 f 跑的停住也在同一位置（step 0 提交之后）。根因未查清；修好前 7.3 G3、8.4 G3 不上卡。
 - 判读 json：`evidence/s19/`；原始数据在 Modal Volume yeto-evidence-archive（`evidence/s19/ARCHIVE-MANIFEST.tsv`）。
+- 4.5 根因（S19 critic2）：critic 通道把状态拆成同一块 fp32 缓冲区上的切片，序列化时每个切片写整块缓冲区，写回载荷 = 张量数 × 约 2.4 GB。PR #192 修复。kill 后 actor/critic 版本不一致：PR #194（零增量追赶，上卡未触发，未验证）。
+- 4.5 G3 `s19-ppo-g3-20261009b` 失败（killer 在 v1 提交前取消岛 1，脚本已修）；`s19-ppo-g3-20261010d` **通过**（v1–v3 两岛 actor/critic 哈希一致，含一次 kill/resume）。
+- 8.4 G3 `s19-sao-g3-20261010a` 失败（critic_lr_warmup 10 ≥ 3 轮衰减步数，配置被拒）；`s19-sao-g3-20261010b`（warmup 改 2，`evidence/s19/sao-w2-spec.json`）**通过**。
+- 7.3 VAPO G3：已预登记，未开卡。
