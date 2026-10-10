@@ -290,6 +290,8 @@ def estimate_cross_version_truncation(args: Any, samples: Sequence[Any], current
     failed = 0
     reasons: dict[str, int] = {}
     unknown_tokens = 0
+    near_zero = 0
+    near_zero_examples: list[dict[str, Any]] = []
 
     def fail(why: str) -> None:
         nonlocal failed
@@ -322,8 +324,15 @@ def estimate_cross_version_truncation(args: Any, samples: Sequence[Any], current
                                          tuple(min(float(p), 0.0) for p in generated))
             corrections.append(cross_version_is(provenance, current, current_version,
                                                 clip_low=clip_low, clip_high=clip_high))
-            ratios.extend(math.exp(float(c) - g) for v, g, c in zip(
-                provenance.versions, provenance.logprobs, current, strict=True) if v != current_version)
+            for i, (v, g, c) in enumerate(zip(provenance.versions, provenance.logprobs, current, strict=True)):
+                if v == current_version:
+                    continue
+                r = math.exp(float(c) - g)
+                ratios.append(r)
+                if r < NEAR_ZERO_RATIO:  # 5.5 follow-up: where do zero ratios come from
+                    near_zero += 1
+                    if len(near_zero_examples) < NEAR_ZERO_EXAMPLES:
+                        near_zero_examples.append(_ratio_example(sample, provenance.versions, i, g, c))
         except (ProvenanceError, ValueError, OverflowError) as exc:
             fail(f"{type(exc).__name__}: {str(exc)[:120]}")
     fraction = batch_truncated_fraction(corrections)
@@ -332,6 +341,9 @@ def estimate_cross_version_truncation(args: Any, samples: Sequence[Any], current
         extra["cross_version_unscored_reasons"] = dict(sorted(reasons.items())[:8])
     if unknown_tokens:
         extra["cross_version_unknown_version_tokens"] = unknown_tokens
+    if near_zero:  # absent when none (old key set kept)
+        extra["cross_version_ratio_near_zero"] = near_zero
+        extra["cross_version_ratio_near_zero_examples"] = near_zero_examples
     return {
         **extra,
         "cross_version_truncated_fraction": None if fraction is None or not math.isfinite(fraction)
@@ -340,6 +352,27 @@ def estimate_cross_version_truncation(args: Any, samples: Sequence[Any], current
         "cross_version_unscored_samples": failed,
         **ratio_quantiles(ratios),
     }
+
+
+NEAR_ZERO_RATIO = 1e-6
+NEAR_ZERO_EXAMPLES = 8
+
+
+def _ratio_example(sample: Any, versions: Sequence[int], i: int, generated: float, current: Any) -> dict[str, Any]:
+    """One near-zero cross-version ratio: where in the response it sits and the two
+    log-probabilities (non-finite values as strings, JSON-safe)."""
+    def num(x: Any) -> Any:
+        x = float(x)
+        return round(x, 4) if math.isfinite(x) else str(x)
+
+    tokens = list(getattr(sample, "tokens", None) or ())
+    n = len(versions)
+    token = tokens[len(tokens) - n + i] if len(tokens) >= n else None
+    mask = list(getattr(sample, "loss_mask", None) or ())
+    return {"index": i, "response_len": n, "version": int(versions[i]),
+            "segment_start": i == 0 or versions[i - 1] != versions[i],
+            "token": token, "loss_mask": mask[i] if len(mask) == n else None,
+            "generation_logprob": num(generated), "current_logprob": num(current)}
 
 
 def ratio_quantiles(ratios: Sequence[float]) -> dict[str, float]:

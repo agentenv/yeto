@@ -725,22 +725,24 @@ def run_island_script(cmd: list[str], env: dict, *, popen=subprocess.Popen, sign
     return proc.wait()
 
 
-def _run_forwarding_to_learner(cmd: list[str], env: dict, *, popen, sig, kill=None) -> int:
-    """rl-spot-cost-saving 4.1: with ``YETO_SPOT_INFLIGHT_SAVE_DIR`` set, forward the
-    reclaim signal to the learner process only (pid file written by the learner),
-    so the Ray processes stay up and the rollout executor can answer the in-flight
-    export within the grace period. No pid file yet: the signal is not forwarded."""
-    kill = kill or os.kill
+def _run_forwarding_to_learner(cmd: list[str], env: dict, *, popen, sig, clock=time.time) -> int:
+    """rl-spot-cost-saving 4.1: with ``YETO_SPOT_INFLIGHT_SAVE_DIR`` set, the reclaim
+    signal (SIGINT/SIGTERM, also from ``modal container stop``) is turned into a
+    marker file the learner's watcher thread picks up. Nothing is signalled: the
+    learner and the Ray processes keep running until the platform kills the
+    container, so the rollout executor can answer the in-flight export."""
     proc = popen(cmd, env=env)
-    path = env.get("YETO_SPOT_INFLIGHT_PID_FILE") or "/tmp/yeto-learner.pid"
+    path = env.get("YETO_SPOT_RECLAIM_MARKER") or "/tmp/yeto-reclaim-requested"
 
     def forward(num, _frame):
         try:
-            pid = int(Path(path).read_text().strip())
-            kill(pid, num)
-            print(f"[modal-island] signal {num}: forwarded to the learner {pid}", flush=True)
-        except (OSError, ValueError) as exc:
-            print(f"[modal-island] signal {num}: not forwarded ({exc})", flush=True)
+            tmp = f"{path}.tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps({"signal": int(num), "time": clock()}) + "\n")
+            os.replace(tmp, path)
+            print(f"[modal-island] signal {num}: reclaim marker {path} written for the learner", flush=True)
+        except OSError as exc:
+            print(f"[modal-island] signal {num}: reclaim marker not written ({exc})", flush=True)
 
     for name in ("SIGINT", "SIGTERM"):
         sig.signal(getattr(sig, name), forward)
@@ -919,6 +921,17 @@ class ModalOps:
                 return state, tasks
         return None
 
+    def list_container_ids(self) -> set[str] | None:
+        """Running container ids of this run's app (``modal container list --json``);
+        None when the list cannot be read."""
+        proc = subprocess.run([sys.executable, "-m", "modal", "container", "list", "--json"],
+                              capture_output=True, text=True, timeout=60)
+        if proc.returncode != 0:
+            return None
+        rows = json.loads(proc.stdout or "[]")
+        return {str(r.get("Container ID") or r.get("container_id")) for r in rows
+                if (r.get("App Name") or r.get("app_name")) == self.app_name}
+
     def stop_app(self) -> None:
         """Stop every function of this run's app (used by `yeto down`).
 
@@ -994,6 +1007,67 @@ class ContainerIdGuard:
                 self.changes.append(msg)
                 if self.on_change is not None:
                     self.on_change(msg)
+
+
+class ContainerSetPoller:
+    """Second container guard, independent of the log stream (S19 run
+    s19-agentic5-b-20261010b: after ``modal container stop`` Modal rescheduled the
+    input on a new container -- by design, see ``modal container stop --help`` --
+    and the function-call log stream never delivered the new container's lines, so
+    :class:`ContainerIdGuard` did not trip and the island re-ran from scratch).
+
+    Every ``interval_s`` it lists the app's running containers. Once ``expected``
+    distinct ids were seen (all islands up), that set is the baseline; any later id
+    outside it trips the guard and calls ``on_change(message)`` once. A failed list
+    is skipped (never trips)."""
+
+    def __init__(self, list_ids, expected: int, on_change=None, *, interval_s: float = 30.0) -> None:
+        self.list_ids, self.expected_count, self.on_change = list_ids, max(1, int(expected)), on_change
+        self.interval_s = interval_s
+        self.baseline: set[str] | None = None
+        self.seen: set[str] = set()
+        self.changes: list[str] = []
+        self.expected = False  # launcher.container_changed(): a change here is never expected
+        self._stop = threading.Event()
+
+    @property
+    def tripped(self) -> bool:
+        return bool(self.changes)
+
+    def poll_once(self) -> None:
+        try:
+            ids = self.list_ids()
+        except Exception as exc:  # noqa: BLE001 - a failed list never trips
+            print(f"[launcher] container list failed: {exc}", flush=True)
+            return
+        if ids is None:
+            return
+        ids = set(ids)
+        if self.baseline is None:
+            self.seen |= ids
+            if len(self.seen) >= self.expected_count:
+                self.baseline = set(self.seen)
+            return
+        new = sorted(ids - self.baseline)
+        if new and not self.changes:
+            msg = (f"Modal app has a new container {', '.join(new)} besides "
+                   f"{', '.join(sorted(self.baseline))} (an island was rescheduled)")
+            self.changes.append(msg)
+            if self.on_change is not None:
+                self.on_change(msg)
+
+    def run(self) -> None:
+        while not self._stop.wait(self.interval_s):
+            self.poll_once()
+            if self.changes:
+                return
+
+    def start(self) -> "ContainerSetPoller":
+        threading.Thread(target=self.run, daemon=True, name="modal-container-set").start()
+        return self
+
+    def stop(self) -> None:
+        self._stop.set()
 
 
 class _JobStatus:

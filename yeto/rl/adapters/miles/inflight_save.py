@@ -5,15 +5,21 @@ Opt-in through ``YETO_SPOT_INFLIGHT_SAVE_DIR`` (a directory on a Modal Volume,
 e.g. under the tape mount). When set, the learner:
 
 * writes its pid to ``YETO_SPOT_INFLIGHT_PID_FILE`` (default
-  ``/tmp/yeto-learner.pid``) so the Modal function process forwards its reclaim
-  signal to the learner only (the Ray processes keep running until the
+  ``/tmp/yeto-learner.pid``; diagnostics only). The Modal function process does
+  not signal the learner or the Ray processes (they keep running until the
   platform kills the container; the rollout executor must answer the export);
 * after every trained round writes a rehearsal copy (``rehearsal-r<k>.json``):
   this measures the save time (``last_save_s`` for the reclaim plan, and the
   time distribution 4.4 asks for);
-* on SIGINT/SIGTERM runs :class:`yeto.cloud.preemption.ModalExitHandler` with
+* on the reclaim notice runs :class:`yeto.cloud.preemption.ModalExitHandler` with
   :meth:`InFlightSaver.save` (25 s cap; a save that overruns is abandoned and
-  only its ``.tmp`` file is left, never a half written ``.json``).
+  only its ``.tmp`` file is left, never a half written ``.json``). The notice is
+  a marker file (``YETO_SPOT_RECLAIM_MARKER``) the Modal function process writes
+  on SIGINT/SIGTERM; a daemon thread in the learner watches it. (S19 run
+  s19-agentic5-b-20261010b: a signal forwarded to the learner was not handled
+  within the ~20 s before the kill -- a Python signal handler runs only on the
+  main thread, which was inside a training call.) Each step prints
+  ``[yeto] rl_inflight_save_progress {...}``.
 
 The export is :func:`.in_flight.export_in_flight` (same entries as a cut). Agentic
 trajectories suspended between model turns are written as references only: by
@@ -40,6 +46,28 @@ ENV_PID_FILE = "YETO_SPOT_INFLIGHT_PID_FILE"
 DEFAULT_PID_FILE = "/tmp/yeto-learner.pid"
 EVENT = "rl_inflight_save"
 ROUND_EVENT = "rl_round_trained"
+PROGRESS = "rl_inflight_save_progress"
+ENV_MARKER = "YETO_SPOT_RECLAIM_MARKER"  # written by the Modal function process on its signal
+DEFAULT_MARKER = "/tmp/yeto-reclaim-requested"
+MARKER_POLL_S = 0.2
+
+
+def marker_file(environ: Mapping[str, str] | None = None) -> str:
+    env = os.environ if environ is None else environ
+    return env.get(ENV_MARKER) or DEFAULT_MARKER
+
+
+def watch_marker(path: str, on_marker: Callable[[str], Any], *, poll_s: float = MARKER_POLL_S,
+                 stop: Any = None, sleep: Callable[[float], Any] = time.sleep,
+                 exists: Callable[[str], bool] = os.path.exists) -> None:
+    """Daemon-thread loop: call ``on_marker(path)`` once when the marker appears.
+    Independent of the main thread (a Python signal handler only runs there, and
+    the main thread may sit in a long training call until the platform kill)."""
+    while stop is None or not stop.is_set():
+        if exists(path):
+            on_marker(path)
+            return
+        sleep(poll_s)
 
 
 def enabled(environ: Mapping[str, str] | None = None) -> bool:
@@ -114,11 +142,21 @@ class InFlightSaver:
         self.last_save_s: float | None = None
         self.results: list[dict[str, Any]] = []
 
+    def progress(self, kind: str, step: str, t0: float, **fields: Any) -> None:
+        """Reclaim path only: one line per step, so a save cut short by the kill
+        still shows how far it got (the result line is printed only at the end)."""
+        if kind == "reclaim":
+            self.printer(f"[yeto] {PROGRESS} " + json.dumps(
+                {"step": step, "elapsed_s": round(self.clock() - t0, 4), **fields}, sort_keys=True, default=str))
+
     def _save(self, kind: str, name: str, budget_s: float, **extra: Any) -> dict[str, Any]:
         t0 = self.clock()
+        self.progress(kind, "export_start", t0, budget_s=round(budget_s, 3))
         exported = self.export(budget_s)
         export_s = round(self.clock() - t0, 4)
+        self.progress(kind, "export_done", t0, entries=len(exported.get("entries") or []))
         out = write_in_flight(exported, self.directory, name, commit=self.commit, clock=self.clock)
+        self.progress(kind, "written", t0, write_s=out["write_s"], commit_s=out["commit_s"])
         out.update(kind=kind, export_s=export_s, total_s=round(self.clock() - t0, 4), **extra)
         self.results.append(out)
         self.printer(f"[yeto] {EVENT} {json.dumps(out, sort_keys=True)}")
@@ -200,8 +238,23 @@ def install(driver: Any, executor: Any, *, island: str, environ: Mapping[str, st
 
     handler = p.ModalExitHandler(island, save=saver.save, leave=lambda: None, emit=emit_reclaim,
                                  last_save_s=lambda: saver.last_save_s, role="train")
+    marker = marker_file(env)
+
+    def on_marker(path: str) -> None:
+        print(f"[yeto] {PROGRESS} " + json.dumps({"step": "marker_seen", "marker": path,
+                                                  "last_save_s": saver.last_save_s}), flush=True)
+        handler.handle(source="modal_signal")
+
     if start:
+        try:  # a marker left from an earlier process in this container is stale
+            os.unlink(marker)
+        except OSError:
+            pass
         Path(pid_file(env)).write_text(f"{os.getpid()}\n", encoding="utf-8")
-        handler.install()
+        import threading
+
+        threading.Thread(target=watch_marker, args=(marker, on_marker), daemon=True,
+                         name="yeto-reclaim-marker").start()
     handler.saver = saver
+    handler.marker = marker
     return handler
