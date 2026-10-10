@@ -54,3 +54,35 @@ def test_hostmem_sampler(tmp_path):
     s = HostMemSampler(1, str(tmp_path / "h.jsonl"))
     rec = s.sample()
     assert rec["event"] == "modal_host_sample" and rec["meminfo_used"] > 0 and s.peak_host > 0
+
+
+def test_hostmem_cgroup_v2_and_v1_and_rss(tmp_path):
+    """s19-compaction-g3-20261010b: cgroup_current/peak were null on Modal (gVisor);
+    the sampler now finds the own cgroup (v2, else v1) and adds summed process RSS."""
+    from yeto import modal_runner as mr
+
+    v2 = tmp_path / "v2"; (v2 / "c").mkdir(parents=True)
+    (v2 / "c" / "memory.current").write_text("1000\n")
+    (v2 / "c" / "memory.peak").write_text("2000\n")
+    (v2 / "c" / "memory.max").write_text("max\n")
+    (v2 / "c" / "memory.events").write_text("low 0\nhigh 0\nmax 3\noom 1\noom_kill 1\n")
+    pc = tmp_path / "pc2"; pc.write_text("0::/c\n")
+    m = mr._cgroup_mem(str(v2), str(pc))
+    assert m == {"cgroup_version": 2, "cgroup_current": 1000, "cgroup_peak": 2000, "cgroup_max": "max",
+                 "cgroup_oom_kill": 1, "cgroup_oom": 1}
+    v1 = tmp_path / "v1"; (v1 / "memory" / "x").mkdir(parents=True)
+    d = v1 / "memory" / "x"
+    (d / "memory.usage_in_bytes").write_text("300\n"); (d / "memory.max_usage_in_bytes").write_text("400\n")
+    (d / "memory.limit_in_bytes").write_text("68719476736\n"); (d / "memory.failcnt").write_text("0\n")
+    (d / "memory.oom_control").write_text("oom_kill_disable 0\nunder_oom 0\noom_kill 2\n")
+    pc1 = tmp_path / "pc1"; pc1.write_text("4:memory:/x\n0::/\n")
+    m1 = mr._cgroup_mem(str(v1), str(pc1))
+    assert m1["cgroup_version"] == 1 and m1["cgroup_current"] == 300 and m1["cgroup_max"] == 68719476736
+    assert m1["cgroup_oom_kill"] == 2
+    none = mr._cgroup_mem(str(tmp_path / "missing"), str(tmp_path / "nope"))
+    assert none["cgroup_version"] is None and none["cgroup_current"] is None
+    proc = tmp_path / "proc"; (proc / "12").mkdir(parents=True); (proc / "self").mkdir()
+    (proc / "12" / "status").write_text("Name:\tx\nVmRSS:\t   2048 kB\n")
+    assert mr._proc_rss_sum(str(proc)) == 2048 * 1024
+    rec = mr._host_mem_used_bytes()  # this machine: at least one memory source is non-null
+    assert rec["proc_rss_sum"] and (rec["cgroup_current"] is not None or rec["meminfo_used"])

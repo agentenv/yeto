@@ -510,9 +510,109 @@ def container_command(run_script: str) -> list[str]:
     return ["bash", "-lc", f"cd {shlex.quote(CONTAINER_WORKDIR)} && {run_script}"]
 
 
+CGROUP_ROOT = "/sys/fs/cgroup"
+
+
+def _read_int(path: str):
+    try:
+        with open(path) as f:
+            raw = f.read().strip()
+    except Exception:  # noqa: BLE001
+        return None
+    if raw == "max":
+        return "max"
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def _read_kv(path: str) -> dict:
+    out: dict = {}
+    try:
+        with open(path) as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) == 2 and parts[1].lstrip("-").isdigit():
+                    out[parts[0]] = int(parts[1])
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def _own_cgroup_dirs(root: str, proc_cgroup: str) -> tuple[list[str], list[str]]:
+    """(v2 dirs, v1 memory dirs) to try, own cgroup first, then the root."""
+    v2, v1 = [], []
+    try:
+        with open(proc_cgroup) as f:
+            for line in f:
+                _, ctrl, rel = line.rstrip("\n").split(":", 2)
+                rel = rel.lstrip("/")
+                if ctrl == "":
+                    v2.append(os.path.join(root, rel))
+                elif "memory" in ctrl.split(","):
+                    v1.append(os.path.join(root, "memory", rel))
+    except Exception:  # noqa: BLE001
+        pass
+    v2.append(root)
+    v1.append(os.path.join(root, "memory"))
+    return v2, v1
+
+
+def _cgroup_mem(root: str = CGROUP_ROOT, proc_cgroup: str = "/proc/self/cgroup") -> dict:
+    """Container memory from cgroup v2 (memory.current/peak/max/events) or,
+    failing that, cgroup v1 (memory.usage_in_bytes/max_usage_in_bytes/
+    limit_in_bytes, oom_control). Keys stay None when nothing is readable."""
+    out = {"cgroup_version": None, "cgroup_current": None, "cgroup_peak": None,
+           "cgroup_max": None, "cgroup_oom_kill": None, "cgroup_oom": None}
+    v2, v1 = _own_cgroup_dirs(root, proc_cgroup)
+    for d in v2:
+        cur = _read_int(os.path.join(d, "memory.current"))
+        if isinstance(cur, int):
+            ev = _read_kv(os.path.join(d, "memory.events"))
+            out.update(cgroup_version=2, cgroup_current=cur,
+                       cgroup_peak=_read_int(os.path.join(d, "memory.peak")),
+                       cgroup_max=_read_int(os.path.join(d, "memory.max")),
+                       cgroup_oom_kill=ev.get("oom_kill"), cgroup_oom=ev.get("oom"))
+            return out
+    for d in v1:
+        cur = _read_int(os.path.join(d, "memory.usage_in_bytes"))
+        if isinstance(cur, int):
+            ctl = _read_kv(os.path.join(d, "memory.oom_control"))
+            out.update(cgroup_version=1, cgroup_current=cur,
+                       cgroup_peak=_read_int(os.path.join(d, "memory.max_usage_in_bytes")),
+                       cgroup_max=_read_int(os.path.join(d, "memory.limit_in_bytes")),
+                       cgroup_oom_kill=ctl.get("oom_kill"), cgroup_oom=_read_int(os.path.join(d, "memory.failcnt")))
+            return out
+    return out
+
+
+def _proc_rss_sum(proc: str = "/proc") -> int | None:
+    """Sum of VmRSS over every visible process (container view; cgroup-free fallback)."""
+    total, seen = 0, 0
+    try:
+        names = os.listdir(proc)
+    except Exception:  # noqa: BLE001
+        return None
+    for name in names:
+        if not name.isdigit():
+            continue
+        try:
+            with open(os.path.join(proc, name, "status")) as f:
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        total += int(line.split()[1]) * 1024
+                        seen += 1
+                        break
+        except Exception:  # noqa: BLE001
+            continue
+    return total if seen else None
+
+
 def _host_mem_used_bytes() -> dict:
-    """Container-visible host memory: /proc/meminfo (MemTotal - MemAvailable)
-    plus cgroup memory.current/peak when readable (None otherwise)."""
+    """Container-visible host memory: /proc/meminfo (MemTotal - MemAvailable),
+    the container's cgroup memory (v2, else v1; incl. limit and OOM-kill
+    count) and the summed RSS of all visible processes. Unreadable -> None."""
     out: dict = {}
     try:
         info = {}
@@ -524,13 +624,8 @@ def _host_mem_used_bytes() -> dict:
         out["meminfo_used"] = info.get("MemTotal", 0) - info.get("MemAvailable", 0)
     except Exception:  # noqa: BLE001 - advisory
         pass
-    for key, path in (("cgroup_current", "/sys/fs/cgroup/memory.current"),
-                      ("cgroup_peak", "/sys/fs/cgroup/memory.peak")):
-        try:
-            with open(path) as f:
-                out[key] = int(f.read().strip())
-        except Exception:  # noqa: BLE001
-            out[key] = None
+    out.update(_cgroup_mem())
+    out["proc_rss_sum"] = _proc_rss_sum()
     return out
 
 
@@ -579,7 +674,8 @@ class HostMemSampler:
         except Exception:  # noqa: BLE001
             rec["gpu_mem_used_mib"] = None
             rec["gpu_util_pct"] = None
-        used = max(v or 0 for v in (rec.get("meminfo_used"), rec.get("cgroup_current")))
+        used = max(v if isinstance(v, int) else 0
+                   for v in (rec.get("meminfo_used"), rec.get("cgroup_current")))
         self.peak_host = max(self.peak_host, used)
         for i, v in enumerate(rec["gpu_mem_used_mib"] or []):
             if i >= len(self.peak_gpu):
