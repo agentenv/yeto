@@ -50,3 +50,35 @@ $6.32/h（H200 + CPU16 + 128 GiB）。每岛 HARD 3000 s + 看门狗余量 240 s
   - "回收后续跑省下的重做 token 比例"：**未验证**（agentic 挂起轨迹按设计丢弃，4.2/4.3 本次不做）。
   - 花费 [估算]：第 1 次 ≈$0.94；第 2 次 A 37.9 min ≈$3.99、B 39.1 min ≈$4.12（含重跑容器约 7 min）；合计 ≈$9.05 / 上限 $20。
   - 原始数据：Modal Volume yeto-evidence-archive `/s1-runs/s19-agentic5/*.tar.gz`（4 个运行目录 + 脚本与 inflight 文件），本地 s1-runs/s19-agentic5-*。
+
+## 6. 8b/8c 补跑预登记（主 agent 10-10 批；PR #212 合入后才开）
+- 运行：`s19-agentic5-r-20261010c`，1 岛 H200!:1，M1 形状同上，seed 19，**STEPS=3**，**KILL_AT=1**（第 1 轮挂起日志出现后 8 s `modal container stop`），HARD 1500 s。代码 = 合入 #212 后的 agentenv/main（运行时记 yeto_sha.txt），镜像 fa2413be。
+- 为什么是 3 轮、在第 1 轮停：第 0 轮训练后才有第一次演练耗时（没有实测耗时时按规则跳过保存）；最后一轮（rollout 2）走中止而不是挂起，所以只能在第 1 轮停。
+- 判据（不放宽）：
+  - 8b：日志依次有 `reclaim marker ... written`、`rl_inflight_save_progress` 的 marker_seen / export_done / written，`spot_reclaim` 的 outcome=saved 且 handler_s ≤ 25 s，kind=reclaim 的 `rl_inflight_save` total_s ≤ 25 s。
+  - 8c：卷 yeto-event-tapes `inflight-s19-agentic5-r-20261010c/reclaim-*.json` 存在、可解析、条目数等于打印的 entries。
+  - 8d（容器守卫）：若 Modal 在新容器重跑，launcher 在 ≤90 s 内打印 "Modal app has a new container" 并停 app；若没有新容器出现，记"未触发"。
+  - 另报（无通过线）：第 1 轮 `cross_version_ratio_near_zero` 与例子（位置、是否版本段首、token、loss_mask、两边 logprob）。
+- 费用：$6.32/h，最坏 (1500+240) s ≈ $3.05；预计 ≈$2。#7+#8 累计 ≈$9.05 + $3.05 ≤ $20。
+- 补跑 `s19-agentic5-r-20261010c`（代码 9d8ae007，含 #212；容器 03:59:41–约 04:20:45Z，≈$2.23 [估算]，rc=7）：
+  - 8b **失败**：标记路径生效（04:19:57Z stop → 04:19:59Z 标记写入 → 04:20:00Z marker_seen、export_start），但 `spot_reclaim` outcome = `save failed: ActorDiedError … RolloutExecutor … killed by ray.kill`，handler_s 0.003。信号后约 1 s 内 Ray actor 已被结束，是谁调用的 ray.kill 未查实。
+  - 8c **失败**：卷上没有 reclaim 文件（第 0 轮演练副本有，total_s 1.04 s）。
+  - 8d **通过**：04:20:43Z launcher 打印 "Modal app has a new container … failing the run (exit 7) and stopping the Modal app"（stop 后 46 s），app 已 stopped。
+  - 比值诊断：第 1 轮的 carry_over 事件在训练后才发出，容器在第 1 轮训练中被停，事件没有发出，**没有拿到数据**。
+  - 修复 PR #217：rollout 结束（driver 阶段 train）时缓存一次导出，回收时写缓存，不再依赖 Ray actor。
+- 二次补跑预登记（等 #217 合入并经主 agent 同意）：`s19-agentic5-r-20261010d`，STEPS=4、KILL_AT=2（第 1 轮的 carry_over 与诊断字段在第 2 轮训练前已发出），其余同 §6，判据 8b/8c/8d 不变；8b 另要求 `export_source=cached`。最坏 (1800+240) s ≈ $3.6。#7+#8 累计 ≈$11.28 + $3.6 ≈ $14.9 ≤ $20。
+- 后续项（主 agent 10-10 指示记录）：①缓存只覆盖"在训练、发布阶段被回收"；在生成阶段被回收时仍实时导出，而 actor 可能已被结束，保存会失败。②是谁对 RolloutExecutor 调用了 ray.kill（信号后约 1 s）仍待查。
+- 二次补跑 `s19-agentic5-r-20261010d`（代码 b1fafdb0，含 #212、#217；容器 04:36:13–约 05:01:58Z，≈$2.71 [估算]，rc=7）：
+  - 8b **失败**：05:00:58Z stop（第 2 轮挂起日志 05:00:48Z 后 8 s），此时 driver 阶段是 onload（05:00:58Z），train 阶段还没开始，缓存未建；回收走实时导出（source=live），同样 ActorDiedError。原因是预登记的触发时点（挂起后 8 s）落在训练前：挂起日志到 train 阶段之间有约 10 s（打分与元数据）。代码按设计执行，触发时点选错。
+  - 8c **失败**：卷上没有 reclaim 文件。
+  - 8d **通过**：05:01:54Z 新容器被拦，app 已 stopped。
+  - 第 1 轮比值诊断（**拿到**）：跨版本 30695 token，未打分 0，比值 <1e-6 的 token 65 个；8 个例子全是 token 248044 = `<|endoftext|>`，生成侧 logprob 是 0.0（占位值，不是模型采样得到），loss_mask=1，不在版本段首，当前 logprob −14.3 到 −19.5。结论：比值最小值 0.0 来自 `<|endoftext|>` 被当作训练 token、生成 logprob 用 0.0 占位，与续跑无关。这类 token 在 TIS 中权重约为 0（下界 0 不截断，所以不计入截断比例）。是否该把它的 loss_mask 设为 0 或补真实 logprob，交主 agent 定（后续项）。
+- 累计花费 #7+#8 ≈ $13.99 [估算] / $20。
+
+## 7. 三次补跑预登记（主 agent 10-10 批，只改触发时点，不改代码）
+- `s19-agentic5-r-20261010e`：代码 b1fafdb0（同 d），1 岛 H200!:1，seed 19，4 轮，HARD 1800 s。**触发：日志出现第 2 轮 driver 阶段 train 事件（`"phase":"train","rollout_id":2`）后 5 s 执行 `modal container stop`**。
+- 判据不变：8b（outcome=saved、handler_s ≤25 s、kind=reclaim 的 total_s ≤25 s，且 **export_source=cached**）、8c（卷上 reclaim 文件存在、可解析、条目数一致）、8d（新容器 ≤90 s 被拦）。
+- 本跑只验证"训练段回收时写缓存"的路径。生成或打分阶段回收时 actor 被结束、实时导出失败的问题仍未解决，记为后续项。
+- 费用：最坏 $3.6；#7+#8 累计 ≈$13.99 + $3.6 ≈ $17.6 ≤ $20。
+- 三次补跑 `s19-agentic5-r-20261010e`（代码 b1fafdb0；容器 05:13:04–05:43:36Z，≈$3.22 [估算]，rc=124）**失败（无数据）**：起机慢，引擎到 05:31Z 才就绪（前几跑约 6–8 min，这次约 18 min，原因未查），1800 s 硬超时前只完成第 0 轮，没有到第 2 轮 train 阶段，没有触发回收。8b/8c 无数据；8d 未触发。app 已 stopped。
+- #7+#8 累计 ≈ $17.21 [估算] / $20，剩余不够再跑一次（最坏 $3.6）。8b/8c 停在"失败（证据不全）"，交主 agent 定是否另批预算。
