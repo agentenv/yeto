@@ -14,7 +14,7 @@ import types
 from yeto.rl.algos.critic import positive_lm_success_problems
 from yeto.rl.algos.vapo import vapo_spec
 from yeto.rl.engine.algorithm import launch_problems
-from yeto.rl.math_reward import SUCCESS_DECLARATION_ATTR
+from yeto.rl.reward_declarations import writes_success
 
 _VALS = {"rollout_batch_size": 4, "rollout_max_response_len": 384,
          "context_parallel_size": 1, "multi_lora": False}
@@ -48,9 +48,21 @@ def test_undeclared_reward_is_refused(monkeypatch):
     assert any(p.startswith("[positive_lm_success]") for p in launch_problems(_spec(), vals))
 
 
-def test_unimportable_reward_is_refused():
-    probs = positive_lm_success_problems(_spec(), dict(_VALS, reward_function="no_such_mod_xyz:score"))
-    assert probs and "cannot be imported" in probs[0]
+def test_unimportable_reward_gets_no_verdict():
+    assert positive_lm_success_problems(_spec(), dict(_VALS, reward_function="no_such_mod_xyz:score")) == []
+
+
+def test_user_reward_with_declaration_passes(monkeypatch):
+    mod = types.ModuleType("_user_reward")
+
+    @writes_success
+    async def score(args, sample, **kw):
+        sample.metadata["success"] = True
+        return 1.0
+
+    mod.score = score
+    monkeypatch.setitem(sys.modules, "_user_reward", mod)
+    assert positive_lm_success_problems(_spec(), dict(_VALS, reward_function="_user_reward:score")) == []
 
 
 def test_declared_in_package_rewards_pass():
@@ -69,7 +81,6 @@ def test_skips_without_reward_or_other_source(monkeypatch):
 
 def test_gsm8k_score_writes_success_matching_reward():
     from yeto.rl.gsm8k_reward import score
-    assert getattr(score, SUCCESS_DECLARATION_ATTR) is True
     for response, want in (("so \\boxed{72}", 1.0), ("so \\boxed{71}", 0.0), ("", 0.0)):
         sample = types.SimpleNamespace(response=response, label="... #### 72", metadata={})
         value = asyncio.run(score(None, sample))
