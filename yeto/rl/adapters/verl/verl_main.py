@@ -72,12 +72,31 @@ def _runtime_env() -> dict:
     return env
 
 
+NPU_NOSET_ENV = "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES"
+
+
+def _keep_npu_visible_in_cpu_actors() -> None:
+    """On an Ascend node, stop Ray from hiding the NPUs from CPU-only actors.
+
+    Ray sets ``ASCEND_RT_VISIBLE_DEVICES=""`` in actors that request no NPU,
+    such as ``YetoTaskRunner``. verl then reads ``is_npu_available=False`` there,
+    and ``verl.third_party.vllm`` refuses the vLLM-Ascend version
+    (S20 ModelArts 910B4 run, runY_try2). Only set on an NPU node; the
+    caller's own value wins.
+    """
+    from yeto.hw.catalog import device_family
+
+    if device_family() == "ascend":
+        os.environ.setdefault(NPU_NOSET_ENV, "1")
+
+
 def _plan_and_ray() -> dict:
     from yeto.island_credential_guard import check_island_credentials
 
     check_island_credentials()  # secret-handling-hardening D4 (driver, both paths)
     plan = json.loads(open(os.environ[PLAN_ENV]).read())
     if not ray.is_initialized():
+        _keep_npu_visible_in_cpu_actors()
         address = os.environ.get("RAY_ADDRESS") or None
         ray.init(address=address, runtime_env=_runtime_env(), namespace="yeto-verl")
     return plan

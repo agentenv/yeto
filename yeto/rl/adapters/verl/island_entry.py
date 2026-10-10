@@ -31,6 +31,9 @@ from .pins import VERL_COMMIT, VERL_ROOT, expected_versions
 from .reward_fn import function_for
 
 OUTPUT = Path(os.path.expanduser("~/yeto-output"))
+# Bring-up only: "1" turns version/commit pin mismatches into a recorded
+# warning (manifest "problems_waived") instead of exit 2. Never set in production.
+ALLOW_UNPINNED_ENV = "YETO_VERL_ALLOW_UNPINNED"
 TEST_FILE = Path(os.path.expanduser("~/.yeto-verl-test.json"))  # TEST ONLY switches
 
 
@@ -255,6 +258,13 @@ def main(argv=None) -> int:
                    f" || {sys.executable} -m pip freeze > {OUTPUT}/verl-pip-freeze-{lid}.txt 2>/dev/null",
                    shell=True)
     print(f"[yeto-verl] island {lid} runtime {json.dumps(manifest)}", flush=True)
+    if manifest["problems"] and os.environ.get(ALLOW_UNPINNED_ENV) == "1":
+        # Bring-up only (new card, vendor image): run anyway, keep the evidence.
+        manifest["problems_waived"] = manifest.pop("problems")
+        manifest["problems"] = []
+        (OUTPUT / f"verl-runtime-{lid}.json").write_text(json.dumps(manifest, indent=1))
+        print(f"[yeto-verl] runtime check WAIVED by {ALLOW_UNPINNED_ENV}=1: "
+              f"{manifest['problems_waived']}", file=sys.stderr, flush=True)
     if manifest["problems"]:
         print(f"[yeto-verl] runtime check failed: {manifest['problems']}", file=sys.stderr, flush=True)
         return 2
