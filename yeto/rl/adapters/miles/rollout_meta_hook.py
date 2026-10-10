@@ -44,6 +44,8 @@ DEFAULT_SINK_ACTOR = "yeto_rollout_meta"
 DEFAULT_SINK = f"ray:{DEFAULT_SINK_ACTOR}"
 METADATA_SCHEMA = "yeto-rollout-meta-v1"
 _TRAINED_ATTR = "_yeto_trained_group_keys"
+# S19 #8: kept-sample stop tokens masked for a 0.0 placeholder logprob this rollout.
+_PLACEHOLDER_ATTR = "_yeto_placeholder_logprob_tokens"
 _BOUNDED_FILTER_STATE_ATTR = "_yeto_bounded_filter_state"
 # Per-round algorithm counters reported by rollout-side algorithm code AFTER
 # the all-samples hook ran (e.g. the rl-algo-seq-and-adv reward dispatcher's
@@ -141,6 +143,13 @@ def record_trained_groups(args: Any, data: Sequence[Sequence[Any]]) -> None:
     # this sets loss_mask 1 -> 0 on generated reasoning tokens of the kept samples
     # (before Miles converts them to train data). Default: returns at once, no sample touched.
     apply_reasoning_loss_policy(args, data, tokenizer_loader=_load_miles_tokenizer)
+    # S19 #8: a stop token forced by the engine's grammar mask (SGLang returns
+    # logprob exactly 0.0 under the masked distribution) is not a model choice:
+    # loss_mask 1 -> 0 before Miles converts the samples to train data.
+    from yeto.rl.harness.placeholder_logprob_mask import apply_to_groups as mask_placeholder_logprobs
+
+    setattr(args, _PLACEHOLDER_ATTR,
+            mask_placeholder_logprobs(data, tokenizer_loader=_load_miles_tokenizer, args=args))
     setattr(args, _TRAINED_ATTR, {_group_key(group) for group in data})
 
 
@@ -369,6 +378,11 @@ def build_metadata(
         ),
         **extra,
     }
+    placeholder = int(getattr(args, _PLACEHOLDER_ATTR, 0) or 0)
+    if placeholder:  # S19 #8: absent when 0 (old key set kept)
+        from yeto.rl.harness.placeholder_logprob_mask import COUNT_KEY as _PLACEHOLDER_KEY
+
+        payload[_PLACEHOLDER_KEY] = placeholder
     limit = _carry.max_policy_age(args)
     if limit > 0:
         # agentic-rollout-utilization 4.1: carry-over accounting (limit > 0 only;
@@ -967,6 +981,6 @@ def extract_rollout_metadata(args: Any, all_samples: Any, data_source: Any = Non
         from yeto.rl.algos.sample_filters import reset as _reset_sample_filters
 
         _reset_sample_filters(args)
-        for attr in (_TRAINED_ATTR, _BOUNDED_FILTER_STATE_ATTR):
+        for attr in (_TRAINED_ATTR, _BOUNDED_FILTER_STATE_ATTR, _PLACEHOLDER_ATTR):
             if hasattr(args, attr):
                 setattr(args, attr, None)
