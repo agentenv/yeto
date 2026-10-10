@@ -24,9 +24,31 @@ CARD_VENDOR: Mapping[str, str] = {
     "L40S": "nvidia", "RTX-6000-Ada": "nvidia", "RTX-PRO-6000": "nvidia",
     "H100": "nvidia", "H200": "nvidia", "B200": "nvidia", "V100": "nvidia",
     "T4": "nvidia",
-    # Ascend NPU (reserved; no launcher path yet)
-    "910B": "ascend",
+    # Ascend NPU. 910B4 is the model the user bought (decision 2026-10-10);
+    # "910B" stays as the family-level name earlier code already used.
+    "910B": "ascend", "910B4": "ascend",
 }
+
+# torch device type -> device family in the backend identity.
+DEVICE_FAMILY_BY_DEVICE_TYPE: Mapping[str, str] = {"cuda": "nvidia", "npu": "ascend"}
+
+
+def device_family(device_type: str | None = None) -> str:
+    """Device family for the backend identity.
+
+    With no argument, the family of the accelerator visible on this node
+    (``yeto.accel.available_type``); a CPU-only node reports ``"nvidia"`` so
+    that unit tests and dry runs keep the historical value.
+    """
+    if device_type is None:
+        try:
+            from yeto import accel  # noqa: PLC0415
+
+            device_type = accel.available_type()
+        except Exception:  # noqa: BLE001 - torch is optional at this call site
+            device_type = "cpu"
+    return DEVICE_FAMILY_BY_DEVICE_TYPE.get(device_type, "nvidia")
+
 
 # Phase 2 (design D9a): tolerances per (group, group) pair once calibrated.
 # Empty in phase 1: every pair of different groups is "not calibrated".
@@ -98,10 +120,54 @@ def check_compat_group(local: str | None, peer: str | None) -> None:
         raise CompatGroupMismatch(reason)
 
 
-def runtime_versions() -> dict[str, str | None]:
-    """Driver and CUDA versions of this host, for logs/events only (best effort,
-    never raises, never used to refuse an island)."""
+def _npu_runtime_versions() -> dict[str, str | None]:
+    """Ascend driver, CANN and torch_npu versions (best effort; rl-verl-backend 3.6)."""
+    out: dict[str, str | None] = {"npu_driver_version": None, "cann_version": None,
+                                  "torch_npu_version": None}
+    try:
+        res = subprocess.run(["npu-smi", "info", "-t", "board", "-i", "0"],
+                             capture_output=True, text=True, timeout=10)
+        for line in res.stdout.splitlines():
+            if "Software Version" in line or "Driver Version" in line:
+                out["npu_driver_version"] = line.split(":", 1)[-1].strip()
+                break
+    except (OSError, subprocess.SubprocessError):
+        pass
+    for path in ("/usr/local/Ascend/ascend-toolkit/latest/version.cfg",
+                 "/usr/local/Ascend/ascend-toolkit/latest/version.info"):
+        try:
+            with open(path) as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        for line in text.splitlines():
+            if "version" in line.lower() and "=" in line:
+                out["cann_version"] = line.split("=", 1)[1].strip()
+                break
+        if out["cann_version"]:
+            break
+    try:
+        import torch_npu  # noqa: PLC0415
+
+        out["torch_npu_version"] = getattr(torch_npu, "__version__", None)
+    except Exception:  # noqa: BLE001 - optional dependency
+        pass
+    return out
+
+
+def runtime_versions(device_family_name: str | None = None) -> dict[str, str | None]:
+    """Driver and runtime versions of this host, for logs/events only (best effort,
+    never raises, never used to refuse an island).
+
+    The NVIDIA keys stay exactly as before. On an Ascend island
+    (``device_family_name="ascend"``, or auto-detected) three NPU keys are
+    added: Ascend driver, CANN and torch_npu (task 3.6)."""
+    if device_family_name is None:
+        device_family_name = device_family()
     out: dict[str, str | None] = {"driver_version": None, "cuda_version": None}
+    if device_family_name == "ascend":
+        out.update(_npu_runtime_versions())
+        return out
     try:
         res = subprocess.run(["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
                              capture_output=True, text=True, timeout=10)

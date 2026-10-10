@@ -59,10 +59,18 @@
 - [ ] 3.7 Megatron(MindSpeed) 训练后端接入与其参数名映射表（为 Flash-Next 180B 准备）。验收：切换训练后端后五端口单测不变；小模型 3 步冒烟；Flash-Next 可行性另行评估。
 - [ ] 3.8 （可选）syncer torch-svd 工作进程在 npu 设备上可用性。验收：`--iso-worker-device npu:0` 能起并完成一次 SVD，否则记录不支持。
 - [ ] 3.9 （等 NPU 机器）NPU 开卡启动路径：launcher 能在 NPU 机器上起岛（资源申请、`npu-smi` 断言卡名与卡数、设备可见变量 `ASCEND_RT_VISIBLE_DEVICES`）。验收：真机起岛日志有卡名断言；卡名不符时启动前拒绝（单测）。（用户 10-09 要求补入）
-- [ ] 3.10 （等 NPU 机器）GPU/NPU 混跑契约：同一 run 中 GPU 岛与 NPU 岛的后端身份哈希不同，按 decoupling 卡型兼容组规则（10-09 用户定：卡型不同即拒，驱动版本只记录）在 HELLO 时拒绝或放行。验收：单测覆盖"GPU 岛 + NPU 岛"被拒；放开混跑需用户另批并补数值对照。（用户 10-09 要求补入）
+- [ ] 3.10 （部分完成：单测已有，真岛等机器）GPU/NPU 混跑契约：同一 run 中 GPU 岛与 NPU 岛的后端身份哈希不同，按 decoupling 卡型兼容组规则（10-09 用户定：卡型不同即拒，驱动版本只记录）在 HELLO 时拒绝或放行。验收：单测覆盖"GPU 岛 + NPU 岛"被拒；放开混跑需用户另批并补数值对照。（用户 10-09 要求补入）
+  - 2026-10-10：单测部分完成（`tests/test_npu_910b4_prep.py`）：NPU 岛与 GPU 岛被拒，错误里同时出现两个兼容组；设备族进入身份哈希，即使兼容组被人为写成一样也拒。真岛对接未验证。
 - [ ] 3.11 （等 NPU 机器）NPU 镜像构建：基于 3.1 选定的 CANN、torch_npu、vllm-ascend 版本构建镜像，记录镜像 digest 与 pip freeze。验收：镜像在 NPU 机器上起机，版本读回与清单一致。（用户 10-09 要求补入）
-- [ ] 3.12 （无卡可先做，标"等 NPU 机器"是为了真机复核）CPU 上模拟 `torch_npu` 的单测：用假 `torch_npu` 模块覆盖设备选择、3.3 断言、3.6 清单字段、发布读回的 NPU 分支。验收：单测在本机安全测试集里通过，不需要 NPU。（用户 10-09 要求补入）
+- [x] 3.12 （到货前完成）CPU 上模拟 `torch_npu` 的单测：用假 `torch_npu` 模块覆盖设备选择、3.6 清单字段、设备族与混跑拒绝。验收：单测在本机安全测试集里通过，不需要 NPU。（用户 10-09 要求补入）
+  - 2026-10-10：`tests/test_npu_910b4_prep.py`（24 项）在本机安全测试集通过。覆盖：卡型解析、`npu-smi` 卡名与卡数断言、`device_family()` 按设备取值、NPU 运行时清单字段、NPU/GPU 混跑拒绝、按设备族取版本断言、阈值表键分开。未覆盖（必须真机验）：真实 `torch.device("npu")` 构造、3.3 的 `enable_reduce_sample=false` 启动断言（属 3.3，尚未实现）、`publish.py` 读回的 NPU 分支（需真实 vllm-ascend）。
 - [ ] 3.13 （等 NPU 机器）NPU 价目表与看板：费用表加 NPU 机型单价（来源与日期写明），看板按卡型显示 NPU 岛的费用与利用率。验收：单测读到 NPU 单价；看板人工审（记忆：看板界面由用户人工审）。（用户 10-09 要求补入）
+- [x] 3.14 `pins.py` 的 `EXPECTED_VERSIONS` 按设备族分支。验收：NPU 岛断言 vllm 0.23.0 / torch 2.10.0，GPU 岛行为不变（单测）。（调研报告 T4）
+  - 2026-10-10：`pins.expected_versions(family)`；NPU 为 vLLM 0.23.0 + torch 2.10.0 + torch_npu 2.10.0.post4 + transformers 5.10.4（出处写在 `pins.py` 注释：verl fork acad9875 的 `docker/ascend/Dockerfile.ascend_9.1.0_a2`、`supported_tags.md`、`S19-NPU-EXPLORE.md`）。未知设备族报错，不默认回退到 CUDA。版本未在 910B4 上核实。
+- [x] 3.15 `gpu_spec.py` 认 910B4，并加 `npu-smi` 卡名断言。验收：`ssh:1x8x910b4` 能解析，未知卡仍报错，卡名/卡数不符在启动前拒绝（单测）。（调研报告 T5）
+  - 2026-10-10：`_GPU_CANONICAL` 加 `910b4`/`910b`，`device_type_of()` 返回 `npu`；`assert_npu_cards()` 拒绝卡名不符与卡数不符；兼容组为 `ascend-910b4`。launcher 的真机起岛路径仍属 3.9（等机器）。
+- [x] 3.16 NPU 镜像构建脚本草稿（3.11 的到货前部分）：按 verl fork 的昇腾 Dockerfile 写我们的构建脚本，x86_64 与 aarch64 两条分支。验收：脚本能生成两种架构的 Dockerfile，拒绝跨架构构建；不构建、不推镜像。
+  - 2026-10-10：`scripts/build_verl_npu_image.sh`（`--arch`、`--soc`、`--print-dockerfile`、`--no-build`）。未执行过构建；基础镜像可达性未核实。
 
 ## 4. 待定事项跟进（需用户拍板，非实现任务）
 
