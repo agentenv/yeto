@@ -454,6 +454,10 @@ def handle_from_metadata(
         policy_age_violation=(
             int(payload["policy_age_violation"]) if "policy_age_violation" in payload else None
         ),
+        placeholder_logprob_tokens=(
+            int(payload["placeholder_logprob_tokens"])
+            if "placeholder_logprob_tokens" in payload else None
+        ),
         batch_summary=payload.get("batch_summary"),
         batch_summary_by_bucket=payload.get("batch_summary_by_bucket"),
         tito_session_mismatch_records=(

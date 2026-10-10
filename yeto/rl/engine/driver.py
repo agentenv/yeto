@@ -1128,6 +1128,9 @@ class IslandDriver:
         # not reported (older Miles image, no over-sampling)
         for key, value in sorted((getattr(batch, "over_sampling", None) or {}).items()):
             values[f"rl/over_sampling/{key}"] = value
+        placeholder = getattr(batch, "placeholder_logprob_tokens", None)
+        if placeholder is not None:  # S19 #8: absent when not reported
+            values["rl/placeholder_logprob_tokens"] = int(placeholder)
         extra = getattr(self.trainer, "algorithm_metrics", None)
         if callable(extra):
             values.update({str(k): v for k, v in dict(extra() or {}).items()})
