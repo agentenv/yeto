@@ -168,7 +168,7 @@ def test_listener_only_on_droppable():
     noop = dict(leave=lambda: True, emit=lambda *a, **k: None, start=False)
     assert dr.install_reclaim_listener("0", environ=dr.role_env("anchor", "aws", None), **noop) is None
     assert dr.install_reclaim_listener("0", environ={}, **noop) is None
-    # Verda / Nebius droppable: no notice path here (lease expiry / LEAVE missing)
+    # Verda droppable: no notice path (lease expiry); Nebius: see test_nebius_reclaim.py
     assert dr.install_reclaim_listener("1", environ=dr.role_env("droppable", "verda", None),
                                        **noop) is None
 
