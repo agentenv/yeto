@@ -28,10 +28,12 @@
 
 ## 4. 回收时保存在途轨迹与续跑
 
-- [ ] 4.1 复用 #166 切点格式，加限时写与写持久存储，超时轨迹记丢弃不写半条。验证：单测部分写完场景。
+- [x] 4.1 复用 #166 切点格式，加限时写与写持久存储，超时轨迹记丢弃不写半条。验证：单测部分写完场景。
+  - 最小实现（完成，本机单测通过；S19 #8，主 agent 定范围）：PR #199 `adapters/miles/inflight_save.py`，`YETO_SPOT_INFLIGHT_SAVE_DIR` 开启；条目用 `export_in_flight`（与切点在途段相同），tmp+fsync+rename 后 commit Modal 卷，超时只留 .tmp。每轮训练后写一次演练副本计时，作为回收时的 `last_save_s`。回收触发：PR #212 改为函数进程写标记文件、学习器守护线程执行（#199 的信号转发在 GPU 上没有执行，见 4.4）。
 - [ ] 4.2 新岛读取切点续生成，保留版本段，超落后上限按 ARU 规则处理。验证：单测。
 - [ ] 4.3 agentic：只在回合间挂起，回合中途作废，换云沙箱重建或丢弃并记原因。验证：单测覆盖 spec 场景。
 - [ ] 4.4 上卡测量：0.6B agentic 配置，在途轨迹写 Modal 卷耗时是否进 25 秒；回收后续跑节省的重做 token 比例。并入 agentic-rollout-utilization 下一次续跑上卡（判据 5 那次）。预算增量约 $5，需报批。验证：预登记判据、耗时分位数、节省比例。
+  - 2026-10-10 S19 #8（并入 agentic 判据 5 那次，实际用 Qwen3.5-4B M1 形状、H200!:1，主 agent 定）：演练写卷 14 次全部成功，total_s 中位约 1.4–1.7 s、最大 1.91 s（几乎全是卷 commit；挂起轨迹只写引用，约 2 KB）——**8a 通过**。真实回收（`s19-agentic5-b-20261010b` 第 6 轮训练中 `modal container stop`）**失败（证据不全）**：信号已转给学习器，但被强杀前（约 21 s）回收保存没有执行，卷上无 reclaim 文件；修复 PR #212，待补跑。另查实：`modal container stop` 会把输入改派到新容器从头重跑（与 --modal-retries 无关），原容器守卫靠日志流没拦住，PR #212 加列容器守卫。"回收后续跑省下的重做 token 比例"**未验证**：agentic 挂起轨迹按设计不能在新容器续跑（`agentic_session_lost`），4.2/4.3 未做。证据 agentic-rollout-utilization `evidence/s19-agentic5/`。
 
 ## 5. 第 2 期：elastic 可丢弃岛（10-09 用户确认采用"一个按需锚点岛 + 若干 spot 可丢弃岛"）
 
