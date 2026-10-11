@@ -44,6 +44,13 @@ contract unchanged, proves the optimizer step changed policy parameters,
 and needs no fork patch; it cannot attribute the change to a specific
 optimizer step, which the gate does not require.
 
+代拍板 v2 (2026-10-11): after gate attempt 1 lost every island-side file
+on teardown, the collection of record is the island event tape's
+``rl_publication`` payload hashes (initial vs final policy version) — see
+:func:`collect_policy_update_from_tape`.  The adapter-file path remains as
+``--adapter-before/--adapter-after`` for runs that arrange adapter
+snapshots themselves.
+
 Flag hygiene: trusted flags live only in ``YETO_RLF_CTF_FLAGS_JSON`` (the
 Modal Secret).  Every persisted evidence string is scrubbed through
 ``yeto.rl.rlf.modal.scrub`` with the flag values; flags are never logged.
@@ -226,6 +233,60 @@ def collect_policy_update(
     return policy_update_evidence(dict(load(before_path)), dict(load(after_path)), step=step)
 
 
+def collect_policy_update_from_tape(
+    tape_path: str | Path,
+    *,
+    step: int,
+) -> PolicyUpdateEvidence:
+    """Policy-update proof from the island event tape's ``rl_publication`` records.
+
+    代拍板 v2 (2026-10-11, gate attempt 2): the first gate run lost every
+    island-side artifact when the island was torn down after the trainer
+    crash.  The event tape is the one channel that is mirrored to a Modal
+    Volume (``--modal-tape-volume``) and pulled even on failure, and the
+    driver publishes one ``rl_publication`` event per policy version with a
+    learner-computed payload hash.  Comparing the lowest- and
+    highest-version payload hashes proves an optimizer step changed policy
+    parameters without any island-side file surviving — the same
+    step-attribution limitation as the initial-vs-final adapter digest
+    (代拍板 v1), with strictly better survivability.
+
+    Fail closed: fewer than two distinct published policy versions, or a
+    publication without a payload hash, aborts the gate.
+    """
+    publications: dict[int, str] = {}
+    with Path(tape_path).expanduser().open(encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # prefixed/garbled lines are not gate evidence
+            if not isinstance(event, Mapping) or event.get("event") != "rl_publication":
+                continue
+            version = event.get("policy_version")
+            digest = event.get("sync/publication_payload_hash")
+            if not isinstance(version, int) or not isinstance(digest, str) or not digest:
+                raise GateEvidenceError(
+                    f"rl_publication event lacks policy_version/payload hash: {event!r}"
+                )
+            publications.setdefault(version, digest)
+    if len(publications) < 2:
+        raise GateEvidenceError(
+            f"event tape has {len(publications)} published policy version(s); "
+            "the gate needs the initial and at least one post-training publication"
+        )
+    first, last = min(publications), max(publications)
+    before_digest, after_digest = publications[first], publications[last]
+    updated = before_digest != after_digest
+    return PolicyUpdateEvidence(
+        int(step), updated, before_digest, after_digest,
+        ("policy_payload",) if updated else (),
+    )
+
+
 # ------------------------------------------------------------------ gate rows
 
 def build_gate_rows(
@@ -326,8 +387,12 @@ def main(argv: list[str] | None = None) -> None:
                     help="path to the trusted flags JSON (never logged)")
     gate = sub.add_parser("gate", help="collect island artifacts, judge, write evidence")
     gate.add_argument("--completed-groups", required=True)
-    gate.add_argument("--adapter-before", required=True)
-    gate.add_argument("--adapter-after", required=True)
+    gate.add_argument("--adapter-before", default=None)
+    gate.add_argument("--adapter-after", default=None)
+    gate.add_argument("--tape-events", default=None,
+                    help="island event tape (rl-island-*.jsonl): policy-update proof "
+                    "from rl_publication payload hashes (代拍板 v2); mutually "
+                    "exclusive with --adapter-before/--adapter-after")
     gate.add_argument("--step", type=int, required=True)
     gate.add_argument("--out", required=True)
     gate.add_argument("--flags-json", default=None)
@@ -345,9 +410,20 @@ def main(argv: list[str] | None = None) -> None:
         prepare_prompt_data(config, args.out)
         return
     samples = collect_rollout_samples(args.completed_groups)
-    update = collect_policy_update(args.adapter_before, args.adapter_after, step=args.step)
+    adapter_pair = (args.adapter_before, args.adapter_after)
+    if args.tape_events and any(adapter_pair):
+        raise SystemExit("--tape-events is mutually exclusive with --adapter-before/--adapter-after")
+    if args.tape_events:
+        update = collect_policy_update_from_tape(args.tape_events, step=args.step)
+        update_source = "event_tape"
+    elif all(adapter_pair):
+        update = collect_policy_update(args.adapter_before, args.adapter_after, step=args.step)
+        update_source = "adapter_files"
+    else:
+        raise SystemExit("policy-update proof needs --tape-events or --adapter-before + --adapter-after")
     rows = build_gate_rows(samples, update)
     evidence = run_gate(rows, collector="miles_island", update=update)
+    evidence["policy_update_source"] = update_source
     write_evidence(evidence, args.out, secrets=secrets)
     if not evidence["verdict"]:
         raise SystemExit(f"RL gate failed: {evidence['gate']}")

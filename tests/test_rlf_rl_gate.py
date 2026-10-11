@@ -19,6 +19,7 @@ from yeto.rl.eval.rlf_rl_gate import (
     GateEvidenceError,
     build_gate_rows,
     collect_policy_update,
+    collect_policy_update_from_tape,
     collect_rollout_samples,
     prepare_prompt_data,
     run_gate,
@@ -162,6 +163,61 @@ def test_real_collector_passing_run_announces_verdict(tmp_path):
     assert evidence["verdict"] is True and evidence["schema"] == EVIDENCE_SCHEMA
     assert evidence["policy_update_evidence"]["before_digest"] != \
         evidence["policy_update_evidence"]["after_digest"]
+
+
+# -- policy-update proof from the island event tape (代拍板 v2) -----------------
+
+def _tape(tmp_path, events):
+    path = tmp_path / "rl-island-0.jsonl"
+    path.write_text("".join(json.dumps(e) + "\n" for e in events), encoding="utf-8")
+    return path
+
+
+def _publication(version, digest):
+    return {"event": "rl_publication", "policy_version": version,
+            "sync/publication_payload_hash": digest}
+
+
+def test_tape_policy_update_detects_changed_payload(tmp_path):
+    tape = _tape(tmp_path, [
+        {"event": "rl_driver_start"},
+        _publication(0, "aaa"),
+        "not json at all",
+        _publication(1, "bbb"),
+        _publication(2, "ccc"),
+    ])
+    update = collect_policy_update_from_tape(tape, step=2)
+    assert update.updated is True
+    assert update.before_digest == "aaa" and update.after_digest == "ccc"
+    assert update.changed == ("policy_payload",)
+
+
+def test_tape_policy_update_unchanged_payload_marks_not_updated(tmp_path):
+    tape = _tape(tmp_path, [_publication(0, "aaa"), _publication(1, "aaa")])
+    update = collect_policy_update_from_tape(tape, step=1)
+    assert update.updated is False and update.changed == ()
+
+
+def test_tape_policy_update_fails_closed_on_single_version(tmp_path):
+    tape = _tape(tmp_path, [_publication(0, "aaa")])
+    with pytest.raises(GateEvidenceError, match="published policy version"):
+        collect_policy_update_from_tape(tape, step=1)
+
+
+def test_tape_policy_update_fails_closed_on_missing_hash(tmp_path):
+    tape = _tape(tmp_path, [_publication(0, "aaa"), {"event": "rl_publication",
+                                                    "policy_version": 1}])
+    with pytest.raises(GateEvidenceError, match="payload hash"):
+        collect_policy_update_from_tape(tape, step=1)
+
+
+def test_tape_policy_update_passes_full_gate(tmp_path):
+    samples = collect_rollout_samples("ckpt", loader=lambda _p: _payload(_passing_groups()))
+    tape = _tape(tmp_path, [_publication(0, "aaa"), _publication(1, "bbb")])
+    update = collect_policy_update_from_tape(tape, step=1)
+    rows = build_gate_rows(samples, update)
+    evidence = run_gate(rows, collector="miles_island", update=update)
+    assert evidence["verdict"] is True
 
 
 # -- evidence on disk: content and flag hygiene --------------------------------
