@@ -190,6 +190,49 @@ def collect_rollout_samples(
     return records
 
 
+def collect_rollout_samples_from_tape(
+    tape_path: str | Path,
+) -> list[dict[str, Any]]:
+    """Real reward/success collection from ``rl_sample_outcome`` tape events.
+
+    rlf-codex-rl 5.8 代拍板: on the ports engine the island checkpoint only
+    ever holds an empty completed-group queue, so sample-level evidence rides
+    the event tape (mirrored to the Modal volume, survives the island). The
+    same fail-closed rules as the checkpoint path: any gap in reward/success
+    aborts the gate.
+    """
+    outcomes: list[dict[str, Any]] = []
+    for line in Path(tape_path).expanduser().read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(record, dict) or record.get("event") != "rl_sample_outcome":
+            continue
+        outcomes.append(record)
+    if not outcomes:
+        raise GateEvidenceError("event tape has no rl_sample_outcome records")
+    records: list[dict[str, Any]] = []
+    for order, outcome in enumerate(outcomes):
+        reward = outcome.get("reward")
+        if not isinstance(reward, (int, float)) or isinstance(reward, bool):
+            raise GateEvidenceError(f"tape sample {order} lacks a numeric reward")
+        if outcome.get("success") is None:
+            raise GateEvidenceError(
+                f"tape sample {order} lacks success "
+                "(rlf_success reward must write it)"
+            )
+        records.append({"group_index": int(outcome.get("group_index", order)),
+                        "index": int(outcome.get("index", 0)),
+                        "task_id": outcome.get("task_id"),
+                        "reward": float(reward),
+                        "success": bool(outcome["success"])})
+    return records
+
+
 # ------------------------------------------------------- policy update evidence
 
 def _summarize_params_real(path: str | Path) -> dict[str, float]:
@@ -386,7 +429,9 @@ def main(argv: list[str] | None = None) -> None:
     pd.add_argument("--flags-json", default=None,
                     help="path to the trusted flags JSON (never logged)")
     gate = sub.add_parser("gate", help="collect island artifacts, judge, write evidence")
-    gate.add_argument("--completed-groups", required=True)
+    gate.add_argument("--completed-groups", default=None,
+                    help="island checkpoint with completed groups; optional when "
+                    "--tape-events carries rl_sample_outcome records (ports engine)")
     gate.add_argument("--adapter-before", default=None)
     gate.add_argument("--adapter-after", default=None)
     gate.add_argument("--tape-events", default=None,
@@ -409,7 +454,12 @@ def main(argv: list[str] | None = None) -> None:
         config = GateConfig(tasks_dir=args.tasks_dir, flags=flags, repeat=args.repeat)
         prepare_prompt_data(config, args.out)
         return
-    samples = collect_rollout_samples(args.completed_groups)
+    if args.completed_groups:
+        samples = collect_rollout_samples(args.completed_groups)
+    elif args.tape_events:
+        samples = collect_rollout_samples_from_tape(args.tape_events)
+    else:
+        raise SystemExit("rollout samples need --completed-groups or --tape-events")
     adapter_pair = (args.adapter_before, args.adapter_after)
     if args.tape_events and any(adapter_pair):
         raise SystemExit("--tape-events is mutually exclusive with --adapter-before/--adapter-after")
@@ -424,6 +474,7 @@ def main(argv: list[str] | None = None) -> None:
     rows = build_gate_rows(samples, update)
     evidence = run_gate(rows, collector="miles_island", update=update)
     evidence["policy_update_source"] = update_source
+    evidence["sample_source"] = "completed_groups" if args.completed_groups else "event_tape"
     write_evidence(evidence, args.out, secrets=secrets)
     if not evidence["verdict"]:
         raise SystemExit(f"RL gate failed: {evidence['gate']}")

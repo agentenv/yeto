@@ -59,3 +59,14 @@
 2. **RLF CTF 沙箱被 Modal 300s 空闲回收**：`RlfModalVmConfig` 写死 `idle_timeout=min(ttl_s,300)`，模型长生成轮（exec 空窗 >300s）后 VM 消失，下一 exec 抛 NotFoundError → episode 无 trusted finish → preflight fail-closed 丢弃该组（3 组被丢、由补位凑齐 16 样本；reward 全 0 与 0.8B 能力一致，非管线错误）。修复 de0a7b7a：idle_timeout 默认跟随 ttl_s，可显式覆盖。判据：fail-closed 行为本身正确，属环境 TTL 配置缺陷，非代码竞态。
 
 待用户重启后第四跑：fused + 沙箱修复，PREFIX 递增，预算 ≤$3。
+
+## 2026-10-11 gate 第四跑（rlf-gate-20261011-6，失败）与第五跑决策（代拍板）
+
+第四跑（fused/L40S/0.8B，约 12 min ≈$0.4）：沙箱修复生效（NotFoundError 归零）、fused 旗标生效（Megatron 打印 AttnBackend.fused）、rollout 0 收齐 16 样本。训练步失败：TE 报 "No dot product attention backend is available"——cuDNN fused 对 L40S/sm89 + 该输入组合不可用。三条后端全灭：flash（cute JIT 编译错）、unfused（seq8192 OOM：mbs 已为 1、recompute 未启用且无透传旗标、单样本分数块 7.34 GiB、总缺口 ~5.4 GiB）、fused（不支持）。trusted-fields 拒收 2 组为 ret2win 超时中止的 by-design 行为。
+
+第五跑决策（代拍板，留痕）：
+1. 卡型换 H200×1（141 GiB）+ unfused：4B 在 seq 8192 mbs1 无 recompute 估算峰值 ~87 GiB（据 0.8B 实测 42.5+7.3 外推），141 GiB 有充足余量；不加 recompute 透传（无旗标、加管道有风险）。
+2. 模型换 Qwen3.5-4B（rev 851bf6e8，M1 生产钉版，profile qwen35）：0.8B 连续两跑 16+ 样本 reward 全 0，gate 五判据中 std>0/success_count/advantage 三项都依赖至少一次 ezshell 成功，0.8B 不可行。4B 是 M1 agentic 跑验证过的形状（H200 + session server + TorchMemorySaver 共置）。
+3. 其余不变（LoRA r16 attention、seq 8192、GRPO 2×4×4、worker 8）。预算预登记 ≤$6。
+
+第五跑（rlf-gate-20261011-7）head 形态（代拍板）：本地 preflight 线程守卫把内核线程计入 root（~1000），真实用户线程仅 ~1841 仍卡 2800 线；按用户指示改用 `--controller head`（Nebius eu-north1 无卡 head）+ `--preflight-threads off`——理由：guard 的目的是保护跑 driver 的机器，head 模式下 driver 在 Nebius VM，本地只剩瘦客户端，本地计数是不适用的机器。Modal 令牌按 s19-critic-g3.sh 模式走环境变量进 head（不落盘）。跑完先从 head 拉回产物再 sky down。
