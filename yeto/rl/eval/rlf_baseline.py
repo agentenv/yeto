@@ -81,7 +81,7 @@ class BaselineConfig:
     model_identifier: str = QWEN3_30B_A3B_MODEL
     tito_model: str = "qwen3"
     context_length: int = 32_768
-    max_tokens: int = 1_024
+    max_tokens: int = 8_192  # default matches the qwen3_30b_a3b profile (widened 2026-10-11)
     max_turns: int = 48
     temperature: float = 1.0
     top_p: float = 1.0
@@ -106,13 +106,16 @@ class BaselineConfig:
     def for_profile(cls, profile: str = DEFAULT_PROFILE, **kwargs: Any) -> "BaselineConfig":
         """Derive every budget from the registered profile (one source of truth)."""
         p = stock_codex_backend_profile(profile)
-        return cls(profile=profile,
-                   revision=p.get("model_revision"),
-                   model_identifier=str(p.get("model_identifier") or ""),
-                   tito_model=str(p.get("tito_model") or p["model"]),
-                   context_length=int(p["max_seq_len"]),
-                   max_tokens=int(p["max_tokens_per_turn"]),
-                   max_turns=int(p["max_turns"]), **kwargs)
+        # explicit kwargs beat the profile (e.g. context_length=24576 for the
+        # qwen3_cyber compaction budget, which the bridge requires == max_seq_len)
+        derived = {"revision": p.get("model_revision"),
+                   "model_identifier": str(p.get("model_identifier") or ""),
+                   "tito_model": str(p.get("tito_model") or p["model"]),
+                   "context_length": int(p["max_seq_len"]),
+                   "max_tokens": int(p["max_tokens_per_turn"]),
+                   "max_turns": int(p["max_turns"])}
+        derived.update({k: v for k, v in kwargs.items() if v is not None or k not in derived})
+        return cls(profile=profile, **derived)
 
     @property
     def policy_id(self) -> str:
@@ -370,6 +373,7 @@ async def run_episode(cfg: BaselineConfig, provider: Any, row: Mapping[str, Any]
 
     lease = None
     session_id = None
+    segment_ids: list[str] = []
     try:
         lease = await provider.acquire(task_id, trajectory_id)
     except Exception as exc:  # noqa: BLE001 - a failed acquire is infrastructure, never a 0 reward
@@ -405,6 +409,13 @@ async def run_episode(cfg: BaselineConfig, provider: Any, row: Mapping[str, Any]
             "env_token": lease.env_token,
             "driver": "stock",
         }
+        # CompactionRL only (no-op when disabled): pre-create segment sessions in
+        # the trusted layer, same as the training agent function.
+        try:
+            segments_meta = await adapter.prepare_segment_sessions(job)
+        except Exception as exc:  # noqa: BLE001 - session-server failures are infrastructure
+            return infra(f"segment sessions: {type(exc).__name__}: {exc}")
+        segment_ids = list(segments_meta.get("codex_compaction_sessions") or [])
         worker_env = {**dict(getattr(lease, "worker_env", None) or {}), **cfg.worker_budget_env()}
         deadline = min(float(getattr(lease, "deadline_seconds", 0) or cfg.episode_seconds),
                        float(cfg.episode_seconds))
@@ -451,6 +462,7 @@ async def run_episode(cfg: BaselineConfig, provider: Any, row: Mapping[str, Any]
             "max_model_total_tokens": metrics.get("max_model_total_tokens"),
             "max_seq_len_hit": metrics.get("max_seq_len_hit"),
             "compactions": int((metrics.get("codex_compaction") or {}).get("compactions", 0)),
+            "segment_sessions": len(segment_ids),
             "last_completion": scrub(json.dumps(metrics.get("last_completion"), default=str)[:1500],
                                      *secrets) if metrics.get("last_completion") is not None else None,
             "grader_evidence": _scrubbed(trusted.get("grader_evidence") or {}, secrets),
@@ -461,6 +473,11 @@ async def run_episode(cfg: BaselineConfig, provider: Any, row: Mapping[str, Any]
         }
         return record
     finally:
+        for sid in segment_ids:
+            try:
+                await asyncio.to_thread(http, "DELETE", f"{session_url}/sessions/{sid}")
+            except Exception:  # noqa: BLE001 - teardown never masks the episode outcome
+                pass
         if session_id is not None:
             try:
                 await asyncio.to_thread(http, "DELETE", f"{session_url}/sessions/{session_id}")

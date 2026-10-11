@@ -75,14 +75,14 @@ def test_config_defaults_come_from_the_profile():
     profile = stock_codex_backend_profile("qwen3_30b_a3b")
     assert (cfg.context_length, cfg.max_tokens, cfg.max_turns) == \
         (profile["max_seq_len"], profile["max_tokens_per_turn"], profile["max_turns"]) == \
-        (32768, 1024, 48)
+        (32768, 8192, 48)
     assert cfg.mem_fraction_static == 0.9 and cfg.episode_seconds == 1800.0
     assert cfg.start_timeout_s == 900.0  # 15 min serving budget
     assert cfg.model_path.endswith("/hf/Qwen3-30B-A3B/ad44e777")
     assert cfg.policy_id == f"{profile['model_identifier']}@{profile['model_revision']}"
     env = cfg.worker_budget_env()
     assert env == {"YETO_CODEX_CHAT_TEMPLATE": "qwen3_30b_a3b",
-                   "SECRLENV_MAX_TURNS": "48", "YETO_CODEX_BACKEND_MAX_TOKENS": "1024"}
+                   "SECRLENV_MAX_TURNS": "48", "YETO_CODEX_BACKEND_MAX_TOKENS": "8192"}
 
 
 class _FakeProc:
@@ -271,10 +271,10 @@ def test_episode_success_trace_and_flag_hygiene():
     # the job and the worker budget env reached the drive
     job, worker_env = recorded[0]["job"], recorded[0]["worker_env"]
     assert job["episode_id"] == "ep-lease-1" and job["max_seq_len"] == 32768
-    assert job["request_kwargs"]["max_tokens"] == 1024 and job["driver"] == "stock"
+    assert job["request_kwargs"]["max_tokens"] == 8192 and job["driver"] == "stock"
     assert job["base_url"] == "http://sess/sessions/s-1"
     assert worker_env["SECRLENV_MAX_TURNS"] == "48"
-    assert worker_env["YETO_CODEX_BACKEND_MAX_TOKENS"] == "1024"
+    assert worker_env["YETO_CODEX_BACKEND_MAX_TOKENS"] == "8192"
     assert worker_env["YETO_CODEX_CHAT_TEMPLATE"] == "qwen3_30b_a3b"
     # teardown: session deleted, lease destroyed exactly once
     assert sessions.deleted == ["s-1"] and provider.leases[0].destroyed == 1

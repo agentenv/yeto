@@ -27,3 +27,16 @@
 - 结果：success_rate=0.0，reward=0.0，end_reason=max_seq_len（response_truncated）：模型第一轮把 1024 token 上限全部花在 thinking（reasoning_chars=4606，finish_reason=length，content_chars=0，0 tool calls）。reasoning 内容方向正确（在找 win 地址）。
 - 结论：32K 上下文没问题（max_model_total_tokens=1694）；1024/turn + xhigh thinking 对该模型不可行。5.7 的 compaction 验证需要"能跑多轮"的 baseline，当前预算下没有真实截断样本可验。
 - 花费：4 次 A100 运行合计约 24 min ≈ $1.0 [估算]（3 次启动期失败 + 1 次完整 episode）。
+
+## 2026-10-11 baseline 放宽预算后（用户批准 1024→8192）
+
+- 用户批准：单轮上限放宽到 8192，加简易题验证 reward 链路。
+- run8（8192 cap）：ret2win 真实 36 轮 36 tool calls、31K tokens，max_seq_len 截断——5.7 的真实触发条件已出现。bad case：模型用 32 位地址（\x0b\x85\x04\x08）+ 线性 padding 爆破，从未命中 flag。ezshell 因 stage_package 只发 Dockerfile/entrypoint.sh/public 而缺 service.sh 构建失败 → fixture 改为 public/service.sh。
+- run9：发现任务陈述没给目标地址，模型全程猜错地址（$TARGET_URL、localhost:1234），两题都在 6–8 轮后提交错 flag。修复：catalog.prompt_rows 从 task.yaml target_port 注入 "The target service listens on 127.0.0.1:31337"（RLF CTF target 固定 host network，地址恒为 127.0.0.1:<port>）。另发现 run.json 顶层 task_ids 不生效（需放 baseline 键下），已在新 run 配置修正。
+
+## 2026-10-11 5.7 compaction 真实验证（通过）
+
+- 24K profile（qwen3_cyber）三次真实跑：run14 10 轮死于单轮 8192 截断（未达触发线 20480，gate 正确不动）；run15 1 轮 protocol error；run17 6 轮早提交。profile 注册与 gating 真实有效。
+- 机制验证另用 12K 窗口/4K reserve/单轮 4096（触发线 8192）：run18 第 8 轮 10320 tokens 触发，summary_ok=true，segment 0 kept_steps=1，context 8210→2176 切换后继续 4 轮并以 submit 正常结束。segment identity 与共享 reward 合并由 CPU 测试锁定（test_codex_bridge_compaction / test_rlf_rollout_entry）。
+- 途中修复：baseline runner 未预创建 segment sessions（已补，含 teardown 清理）；for_profile 与覆盖参数冲突（kwargs 优先）；budget==max_seq_len 桥约束（profile 24576 需配 context_length 24576）。
+- 观察：该模型 thinking 轮常超 2K tokens，单轮截断（harness TITO 完整性规则）是长 episode 的主要死因；8K 窗口对该模型不可行。

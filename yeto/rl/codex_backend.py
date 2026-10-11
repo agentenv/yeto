@@ -224,7 +224,9 @@ _PROFILES: dict[str, dict[str, Any]] = {
         "keeps_history_reasoning": True,
         "reasoning_markers": _QWEN_REASONING_MARKERS,
         "max_seq_len": 32_768,
-        "max_tokens_per_turn": 1_024,
+        # 2026-10-11 user-approved: 1024/turn was consumed entirely by thinking
+        # (baseline run1: 0 tool calls, turn-1 truncation); widened to 8192.
+        "max_tokens_per_turn": 8_192,
         "max_turns": 48,
         "tool_output_bytes": 8_192,
     },

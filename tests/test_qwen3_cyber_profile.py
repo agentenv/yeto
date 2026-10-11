@@ -1,7 +1,7 @@
 """rlf-codex-rl 5.6: Qwen3-30B-A3B cyber baseline profile (CPU-only contracts).
 
 Covers the S21 audit gaps for task 5.6: the profile passes the closed
-allowlist checks, and the plan budgets (thinking mode, 32K window, 1024
+allowlist checks, and the plan budgets (thinking mode, 32K window, 8192
 tokens/turn, 48 turns, 8192-byte tool output) are registered values rather
 than unsigned defaults.
 """
@@ -67,7 +67,7 @@ def test_thinking_mode_and_pinned_identity():
 def test_budget_fields_match_the_5_6_plan():
     profile = stock_codex_backend_profile(PROFILE)
     assert profile["max_seq_len"] == 32_768  # 32K single-window baseline
-    assert profile["max_tokens_per_turn"] == 1_024
+    assert profile["max_tokens_per_turn"] == 8_192
     assert profile["max_turns"] == 48
     assert profile["tool_output_bytes"] == 8_192
 

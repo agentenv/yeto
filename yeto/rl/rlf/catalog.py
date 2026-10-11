@@ -48,6 +48,24 @@ def task_statement(catalog: TaskCatalog, task_id: str) -> str:
             if text: return text
     raise AdmissionError(f'task {task_id!r} has no public README task statement')
 
+def target_endpoint(catalog: TaskCatalog, task_id: str) -> str | None:
+    """The agent-visible target address from the package's task.yaml.
+
+    RLF CTF targets run on the episode VM's host network, so the address is
+    always 127.0.0.1:<target_port>.  Returns None when the package declares no
+    port (non-network task).
+    """
+    root = catalog.roots.get(task_id)
+    if root is None:
+        return None
+    text = (root/'task.yaml').read_text()
+    for line in text.splitlines():
+        if line.startswith('target_port:'):
+            port = line.split(':', 1)[1].strip()
+            return f'127.0.0.1:{port}' if port else None
+    return None
+
+
 def prompt_rows(catalog: TaskCatalog, task_ids: list[str]|None=None, *, repeat: int=1) -> list[dict[str, Any]]:
     """Catalog -> Miles ``--prompt-data`` rows (the catalog consumer for rollout).
 
@@ -60,6 +78,11 @@ def prompt_rows(catalog: TaskCatalog, task_ids: list[str]|None=None, *, repeat: 
     for task_id in (task_ids or list(catalog.tasks)):
         admission = catalog.get(task_id)
         statement = task_statement(catalog, task_id)
+        endpoint = target_endpoint(catalog, task_id)
+        if endpoint:
+            statement += ('\n\nThe target service listens on '
+                          + endpoint + ' (reachable from your shell).')
+
         metadata: dict[str, Any] = {'task_id': admission.task_id, 'rlf_task_id': admission.task_id,
                                     'benchmark': 'rlf', 'grader_mode': admission.grader_mode,
                                     'package_digest': admission.package_digest, 'prompt': statement}
