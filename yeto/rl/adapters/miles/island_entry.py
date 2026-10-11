@@ -131,6 +131,7 @@ def parse_args(argv=None):
     parser.add_argument("--use-session-server", action="store_true")
     parser.add_argument("--session-server-ip", default=None)
     parser.add_argument("--session-server-port", type=int, nargs="+", default=None)
+    parser.add_argument("--session-server-workers", type=int, default=None)
     parser.add_argument("--tito-model", default=None)
     parser.add_argument("--codex-backend-profile", default=None)
     parser.add_argument("--codex-exclude-reasoning-from-loss", action="store_true")
@@ -1740,6 +1741,8 @@ def _legacy_miles_argv(config) -> list[str]:
         if agent.session_server_port:
             values.append("--session-server-port")
             values.extend(str(port) for port in agent.session_server_port)
+        if agent.session_server_workers is not None:
+            values.extend(("--session-server-workers", str(agent.session_server_workers)))
         if agent.tito_model:
             from miles.utils.chat_template_utils import (
                 resolve_reasoning_and_tool_call_parser,
