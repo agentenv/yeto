@@ -55,6 +55,11 @@ class RlfModalVmConfig:
     cpu: float = 2.0
     memory_mb: int = 4096
     ttl_s: int = 1800
+    # Idle kill must not fire below ttl_s: agent turns can spend minutes in model
+    # generation with no exec running; a shorter idle timeout reclaims the VM
+    # mid-episode (Modal NotFoundError) and the fail-closed preflight then drops
+    # the whole group. Default: follow ttl_s (hard cap still bounds leaks).
+    idle_timeout_s: int | None = None
     image: str = 'debian:bookworm-slim'
     runtime: str = 'vm'
     image_run_commands: tuple = ()
@@ -106,8 +111,9 @@ def acquire_vm(task_id: str, episode_id: str, *, config: RlfModalVmConfig | None
         image = modal.Image.from_registry(cfg.image)
         if cfg.image_run_commands:
             image = image.run_commands(*cfg.image_run_commands)
+    idle_timeout_s = cfg.idle_timeout_s if cfg.idle_timeout_s is not None else cfg.ttl_s
     sb = modal.Sandbox.create('sleep', 'infinity', app=app, image=image, runtime='vm', cpu=cfg.cpu,
-                              memory=cfg.memory_mb, timeout=cfg.ttl_s, idle_timeout=min(cfg.ttl_s, 300),
+                              memory=cfg.memory_mb, timeout=cfg.ttl_s, idle_timeout=idle_timeout_s,
                               tags={'yeto-purpose': 'rlf-environment', 'yeto-task': task_id[:63],
                                     'yeto-episode': episode_id[:63]})
     return RlfVmLease(sb, task_id=task_id, episode_id=episode_id, trajectory_id=trajectory_id)

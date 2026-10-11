@@ -35,6 +35,11 @@ def parse_args(argv=None):
         choices=["generic", "deepseek-v4-flash"],
         default="generic",
     )
+    parser.add_argument(
+        "--rl-training-attention-backend",
+        choices=["auto", "flash", "fused", "unfused"],
+        default="auto",
+    )
     parser.add_argument("--expert-full-count", type=int, default=0)
     parser.add_argument("--expert-full-lr", type=float, default=1e-6)
     parser.add_argument("--expert-selection-sha256", default=None)
@@ -126,6 +131,7 @@ def parse_args(argv=None):
     parser.add_argument("--use-session-server", action="store_true")
     parser.add_argument("--session-server-ip", default=None)
     parser.add_argument("--session-server-port", type=int, nargs="+", default=None)
+    parser.add_argument("--session-server-workers", type=int, default=None)
     parser.add_argument("--tito-model", default=None)
     parser.add_argument("--codex-backend-profile", default=None)
     parser.add_argument("--codex-exclude-reasoning-from-loss", action="store_true")
@@ -1735,6 +1741,8 @@ def _legacy_miles_argv(config) -> list[str]:
         if agent.session_server_port:
             values.append("--session-server-port")
             values.extend(str(port) for port in agent.session_server_port)
+        if agent.session_server_workers is not None:
+            values.extend(("--session-server-workers", str(agent.session_server_workers)))
         if agent.tito_model:
             from miles.utils.chat_template_utils import (
                 resolve_reasoning_and_tool_call_parser,

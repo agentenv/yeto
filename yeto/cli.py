@@ -139,6 +139,14 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="model-specific Miles memory/kernel contract",
     )
     rl.add_argument(
+        "--rl-training-attention-backend",
+        choices=["auto", "flash", "fused", "unfused"],
+        default="auto",
+        help="override the recipe's Megatron --attention-backend (auto = recipe "
+        "decides); use unfused when the flash-attn cute JIT cannot compile on "
+        "the target GPU. Recipes with flash-only kernels refuse non-flash.",
+    )
+    rl.add_argument(
         "--expert-full-count",
         type=int,
         default=0,
@@ -698,6 +706,14 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     rl.add_argument("--use-session-server", action="store_true")
     rl.add_argument("--session-server-ip", default=None)
     rl.add_argument("--session-server-port", type=int, nargs="+", default=None)
+    rl.add_argument(
+        "--session-server-workers",
+        type=int,
+        default=None,
+        help="Miles session server instance count (default: Miles' 32); lower it "
+        "on few-core single-GPU islands to avoid the parallel-import storm "
+        "(32 sglang imports can miss the 300 s ready window)",
+    )
     rl.add_argument("--tito-model", default=None)
     rl.add_argument(
         "--codex-backend-profile",

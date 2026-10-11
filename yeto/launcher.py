@@ -2627,13 +2627,14 @@ def _prepare_rl_args(
     if not args.use_session_server and (
         args.session_server_ip is not None
         or args.session_server_port is not None
+        or getattr(args, "session_server_workers", None) is not None
         or args.tito_model is not None
         or getattr(args, "codex_backend_profile", None) is not None
         or getattr(args, "tito_allowed_append_roles", None) is not None
     ):
         raise ValueError(
-            "--session-server-ip/--session-server-port/--tito-model/"
-            "--codex-backend-profile/"
+            "--session-server-ip/--session-server-port/--session-server-workers/"
+            "--tito-model/--codex-backend-profile/"
             "--tito-allowed-append-roles requires --use-session-server"
         )
     roles = getattr(args, "tito_allowed_append_roles", None)
@@ -2650,6 +2651,8 @@ def _prepare_rl_args(
         raise ValueError(
             "--session-server-port requires one positive port or an increasing range"
         )
+    if getattr(args, "session_server_workers", None) is not None and int(args.session_server_workers) < 1:
+        raise ValueError("--session-server-workers must be at least 1")
     _default_session_server_port(args)
 
     specs = [rl_island_spec(args, spec) for spec in parse_gpu_spec(args.gpu)]
@@ -3491,7 +3494,7 @@ HARNESS_PASSTHROUGH_ENV = (
     "OPENENV_RUN_ID",
     "SECRLENV_MAX_TURNS",
 )
-HARNESS_PASSTHROUGH_ENV_PREFIXES = ("YETO_HARNESS_TB2_",)
+HARNESS_PASSTHROUGH_ENV_PREFIXES = ("YETO_HARNESS_TB2_", "YETO_RLF_")
 # tb2_provider's Modal Sandbox backend runs inside the island (rollout
 # workers create the task sandboxes), so the island python needs the Modal
 # client.  The ports image does not ship it; install it in setup without
@@ -3500,7 +3503,8 @@ HARNESS_PASSTHROUGH_ENV_PREFIXES = ("YETO_HARNESS_TB2_",)
 MODAL_SANDBOX_PROVIDER = "yeto.rl.harness.codex.tb2_provider:modal_provider"
 # rl-agentic-reward-env: same TB2 provider, sandboxes from prebaked images.
 PREBAKED_MODAL_SANDBOX_PROVIDER = "yeto.cloud.modal_reward_env:modal_provider"
-MODAL_SANDBOX_PROVIDERS = frozenset({MODAL_SANDBOX_PROVIDER, PREBAKED_MODAL_SANDBOX_PROVIDER})
+RLF_MODAL_SANDBOX_PROVIDER = "yeto.cloud.modal_reward_env:rlf_modal_provider"
+MODAL_SANDBOX_PROVIDERS = frozenset({MODAL_SANDBOX_PROVIDER, PREBAKED_MODAL_SANDBOX_PROVIDER, RLF_MODAL_SANDBOX_PROVIDER})
 SANDBOX_MODAL_TOKEN_ENVS = ("YETO_SANDBOX_MODAL_TOKEN_ID", "YETO_SANDBOX_MODAL_TOKEN_SECRET")
 
 
@@ -3968,7 +3972,12 @@ def make_miles_island_task(
     flags = (
         f" --model {shlex.quote(args.model)}"
         f" --rl-model-recipe {shlex.quote(args.rl_model_recipe)}"
-        f" --data {shlex.quote(learner_data_arg(args.data))}"
+        + (
+            f" --rl-training-attention-backend {args.rl_training_attention_backend}"
+            if getattr(args, "rl_training_attention_backend", "auto") not in (None, "auto")
+            else ""
+        )
+        + f" --data {shlex.quote(learner_data_arg(args.data))}"
         + (
             " --rl-single-island-no-sync"
             if getattr(args, "rl_single_island_no_sync", False)
@@ -4101,6 +4110,8 @@ def make_miles_island_task(
         if args.session_server_port:
             ports = " ".join(str(port) for port in args.session_server_port)
             flags += f" --session-server-port {ports}"
+        if getattr(args, "session_server_workers", None) is not None:
+            flags += f" --session-server-workers {int(args.session_server_workers)}"
         if args.tito_model:
             flags += f" --tito-model {shlex.quote(args.tito_model)}"
         if getattr(args, "codex_backend_profile", None):

@@ -40,3 +40,41 @@
 - 机制验证另用 12K 窗口/4K reserve/单轮 4096（触发线 8192）：run18 第 8 轮 10320 tokens 触发，summary_ok=true，segment 0 kept_steps=1，context 8210→2176 切换后继续 4 轮并以 submit 正常结束。segment identity 与共享 reward 合并由 CPU 测试锁定（test_codex_bridge_compaction / test_rlf_rollout_entry）。
 - 途中修复：baseline runner 未预创建 segment sessions（已补，含 teardown 清理）；for_profile 与覆盖参数冲突（kwargs 优先）；budget==max_seq_len 桥约束（profile 24576 需配 context_length 24576）。
 - 观察：该模型 thinking 轮常超 2K tokens，单轮截断（harness TITO 完整性规则）是长 episode 的主要死因；8K 窗口对该模型不可行。
+
+## 2026-10-11 5.8 GPU RL gate 首跑（失败：训练端 cutlass 编译，非 RLF 链路）
+
+- 配置：L40S×1，qwen35_08b，GRPO 2 轮×4 组×4 样本，LoRA r16，rlf_success reward，rlf_modal_provider，任务 ezshell+ret2win。
+- 进展：岛启动、RLF provider 环境装配、rollout 正常产样本（prefill batch 4 并发）——RLF→Codex rollout→reward 链路在训练路径上真实工作。
+- 失败点：Megatron 训练步 cutlass MLIR 编译错误 `unable to compute crd2idx ... cute.layout "(?):(?{i64 div=8})"`，island rank 0 exit 1，launcher 按固定名单 0s 恢复超时停跑（exit 4）。
+- 教训：岛停止前 tape/checkpoint 未拉回（"no pulled Modal tape file"），本跑 rollout 的 reward 证据随岛销毁。下次开卡：跑挂时先拉回 ~/yeto-output/ 与 ~/yeto-rl/ 再停。
+- failure class：trainer_kernel_compile（与 RLF 无关；与模型/LoRA shape 相关）。
+- 途中修复（已提交 3ff8e93e）：launcher 透传 YETO_RLF_* 前缀、rlf_modal_provider 入 MODAL_SANDBOX_PROVIDERS、岛侧任务目录 /root/sky_workdir 路径、sandbox token 走 Modal Secret。
+
+## 2026-10-11 gate 第三跑（rlf-gate-20261011-5，失败，双根因均已定位）
+
+代码 d15f6e1b（session-server-workers=8 生效：48s 就绪，远小于 300s 窗），unfused 后端，约 16 min ≈$0.55。
+进展链完整走到训练步：v0 rl_publication 落磁带（policy update 证据已可收集）、rollout 0 收齐 16 样本进训练转换。两个失败：
+
+1. **训练步 CUDA OOM**（unfused 后端，seq 8192：注意力分数矩阵全程驻留，与 LoRA 无关）。下一跑改 `--rl-training-attention-backend fused`（cuDNN，显存与 flash 同量级且完全绕开 flash-attn cute JIT 编译失败）。
+2. **RLF CTF 沙箱被 Modal 300s 空闲回收**：`RlfModalVmConfig` 写死 `idle_timeout=min(ttl_s,300)`，模型长生成轮（exec 空窗 >300s）后 VM 消失，下一 exec 抛 NotFoundError → episode 无 trusted finish → preflight fail-closed 丢弃该组（3 组被丢、由补位凑齐 16 样本；reward 全 0 与 0.8B 能力一致，非管线错误）。修复 de0a7b7a：idle_timeout 默认跟随 ttl_s，可显式覆盖。判据：fail-closed 行为本身正确，属环境 TTL 配置缺陷，非代码竞态。
+
+待用户重启后第四跑：fused + 沙箱修复，PREFIX 递增，预算 ≤$3。
+
+## 2026-10-11 gate 第四跑（rlf-gate-20261011-6，失败）与第五跑决策（代拍板）
+
+第四跑（fused/L40S/0.8B，约 12 min ≈$0.4）：沙箱修复生效（NotFoundError 归零）、fused 旗标生效（Megatron 打印 AttnBackend.fused）、rollout 0 收齐 16 样本。训练步失败：TE 报 "No dot product attention backend is available"——cuDNN fused 对 L40S/sm89 + 该输入组合不可用。三条后端全灭：flash（cute JIT 编译错）、unfused（seq8192 OOM：mbs 已为 1、recompute 未启用且无透传旗标、单样本分数块 7.34 GiB、总缺口 ~5.4 GiB）、fused（不支持）。trusted-fields 拒收 2 组为 ret2win 超时中止的 by-design 行为。
+
+第五跑决策（代拍板，留痕）：
+1. 卡型换 H200×1（141 GiB）+ unfused：4B 在 seq 8192 mbs1 无 recompute 估算峰值 ~87 GiB（据 0.8B 实测 42.5+7.3 外推），141 GiB 有充足余量；不加 recompute 透传（无旗标、加管道有风险）。
+2. 模型换 Qwen3.5-4B（rev 851bf6e8，M1 生产钉版，profile qwen35）：0.8B 连续两跑 16+ 样本 reward 全 0，gate 五判据中 std>0/success_count/advantage 三项都依赖至少一次 ezshell 成功，0.8B 不可行。4B 是 M1 agentic 跑验证过的形状（H200 + session server + TorchMemorySaver 共置）。
+3. 其余不变（LoRA r16 attention、seq 8192、GRPO 2×4×4、worker 8）。预算预登记 ≤$6。
+
+第五跑（rlf-gate-20261011-7）head 形态（代拍板）：本地 preflight 线程守卫把内核线程计入 root（~1000），真实用户线程仅 ~1841 仍卡 2800 线；按用户指示改用 `--controller head`（Nebius eu-north1 无卡 head）+ `--preflight-threads off`——理由：guard 的目的是保护跑 driver 的机器，head 模式下 driver 在 Nebius VM，本地只剩瘦客户端，本地计数是不适用的机器。Modal 令牌按 s19-critic-g3.sh 模式走环境变量进 head（不落盘）。跑完先从 head 拉回产物再 sky down。
+
+## 2026-10-11 5.8 gate 第六至八跑（-7/-8/-9）与最终通过
+
+- **-6（fused/L40S/0.8B）**：训练步 cuDNN fused 报 "No dot product attention backend is available"——flash(cute JIT 拒)、fused(cuDNN 拒)、unfused(OOM) 三后端在 L40S/sm89 全灭。代拍板：换 H200×1(141G)+unfused+Qwen3.5-4B（rev 851bf6e8 M1 钉版；0.8B 连续两跑 reward 全零过不了 success_count）。
+- **-7（H200+4B）**：训练 SUCCEEDED（raw_reward 0.125→0.375）但判定卡证据缺口：ports 引擎 completed_groups 恒空，样本 outcome 随岛销毁。修 054c20d5（legacy hook 写磁带）。
+- **-8**：训练 SUCCEEDED（0.5→0.1875）但仍零 outcome——ports 启动配置里 --rollout-all-samples-process-path 被 rollout_meta_hook.extract_rollout_metadata 占用（config.py:834），054c20d5 的 queue_completed_groups 只在 legacy 非 ports 路径注册，修复打在了不执行的位置。根因教训：**改代码前先验证目标函数在真实配置下被调用**（日志 2164 行一锤定音）。
+- **-9（通过）**：judge 改收 driver 侧现成的 rl_trajectory_reward 磁带事件（rl-fn-codex-rollout 1.0 管线，--rl-observe-timeline 打开，ec656e4e）。磁带 32 条轨迹事件（16样本×2轮），五判据全过：reward_sum=6.0、std=0.390、success_count=6、advantage_abs_sum=7.0、policy_update=True（v0/v1 payload hash 相异），collector=miles_island，verdict=True。**rlf-codex-rl 5.2/5.8 通过。**
+- 奖励曲线（4B，ezshell+ret2win 2×2）：-7: 0.125→0.375；-8: 0.5→0.1875；-9: 0.25→0.125。ret2win 全程零（符合设计，30B 也解不出）；轮间波动为采样噪声，gate 不考趋势。

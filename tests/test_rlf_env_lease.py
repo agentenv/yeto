@@ -416,3 +416,34 @@ def test_finish_trusted_tb2_fallback_byte_unchanged():
                                              task_id="tb2-task", sample_id="s-1", key=HMAC_KEY))
     assert md_timeout[tbench_outcome.OUTCOME_KEY]["verifier"] == tbench_outcome.TIMEOUT_VERIFIER
     assert not any(k.startswith("rlf_") for k in md_timeout)
+
+
+def test_acquire_vm_idle_timeout_follows_ttl(monkeypatch):
+    """Sandbox idle kill must not reclaim a VM mid-generation (S21 gate-5)."""
+    import sys
+    created: dict[str, Any] = {}
+
+    class _Sb:
+        object_id = "sb-x"
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            pass
+
+    fake_modal = SimpleNamespace(
+        App=SimpleNamespace(lookup=lambda *a, **k: object()),
+        Image=SimpleNamespace(from_registry=lambda *a, **k: object()),
+        Sandbox=SimpleNamespace(create=lambda *a, **k: (created.update(k) or _Sb())),
+    )
+    monkeypatch.setitem(sys.modules, "modal", fake_modal)
+
+    rlf_modal.acquire_vm("t", "ep")
+    assert created["timeout"] == 1800
+    assert created["idle_timeout"] == 1800  # not the old min(ttl, 300)
+
+    created.clear()
+    cfg = rlf_modal.RlfModalVmConfig(ttl_s=600, idle_timeout_s=900)
+    rlf_modal.acquire_vm("t", "ep", config=cfg)
+    assert created["timeout"] == 600 and created["idle_timeout"] == 900

@@ -417,6 +417,9 @@ class AgentConfig:
     session_server_port: tuple[Any, ...] | None
     tito_model: str | None
     tito_allowed_append_roles: tuple[str, ...] | None
+    # last + defaulted: direct AgentConfig constructors in older tests/helpers
+    # (keyword-style, without this field) keep working
+    session_server_workers: int | None = None
 
 
 @dataclass(frozen=True)
@@ -738,6 +741,19 @@ def resolve_rl_run_config(
     else:
         recipe_name, attention_backend = RECIPE_GENERIC, "unfused"
 
+    # rlf-codex-rl 5.8: --rl-training-attention-backend overrides the recipe's
+    # default (e.g. flash -> unfused when the flash-attn cute JIT fails to
+    # compile on a given GPU). Recipes whose kernels hard-require flash
+    # attention refuse any other backend.
+    backend_override = getattr(args, "rl_training_attention_backend", "auto") or "auto"
+    if backend_override != "auto":
+        if recipe_name in {RECIPE_DEEPSEEK_V4_FLASH, RECIPE_QWEN3_8_NEXT} and backend_override != "flash":
+            raise ValueError(
+                f"the {recipe_name} recipe requires --rl-training-attention-backend flash "
+                "(its kernels have no unfused/fused path)"
+            )
+        attention_backend = backend_override
+
     _validate_callable_spec(args.reward_function)
 
     eval_config = _resolve_eval(
@@ -960,6 +976,11 @@ def resolve_rl_run_config(
             use_session_server=use_session_server,
             session_server_ip=session_ip,
             session_server_port=tuple(session_port) if session_port else None,
+            session_server_workers=(
+                int(args.session_server_workers)
+                if getattr(args, "session_server_workers", None) is not None
+                else None
+            ),
             tito_model=tito_model,
             tito_allowed_append_roles=tuple(append_roles) if append_roles else None,
         ),
