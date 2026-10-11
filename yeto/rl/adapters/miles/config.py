@@ -449,6 +449,7 @@ LEAF_POLICY: dict[str, _Check] = {
     "agent.use_session_server": _ok,
     "agent.session_server_ip": _ok,
     "agent.session_server_port": _ok,
+    "agent.session_server_workers": _ok,
     "agent.tito_model": _ok,
     "agent.tito_allowed_append_roles": _stock_codex_append_roles_or_none(
         "upstream Miles has no --tito-allowed-append-roles; the append roles are "
@@ -972,6 +973,8 @@ def translate_run_config(
         if agent.session_server_port:
             values.append("--session-server-port")
             values.extend(str(port) for port in agent.session_server_port)
+        if agent.session_server_workers is not None:
+            values.extend(("--session-server-workers", str(agent.session_server_workers)))
         if agent.tito_model:
             resolver = tito_parser_resolver or _resolve_tito_parsers
             values.extend(("--tito-model", agent.tito_model))

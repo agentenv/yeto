@@ -417,6 +417,9 @@ class AgentConfig:
     session_server_port: tuple[Any, ...] | None
     tito_model: str | None
     tito_allowed_append_roles: tuple[str, ...] | None
+    # last + defaulted: direct AgentConfig constructors in older tests/helpers
+    # (keyword-style, without this field) keep working
+    session_server_workers: int | None = None
 
 
 @dataclass(frozen=True)
@@ -973,6 +976,11 @@ def resolve_rl_run_config(
             use_session_server=use_session_server,
             session_server_ip=session_ip,
             session_server_port=tuple(session_port) if session_port else None,
+            session_server_workers=(
+                int(args.session_server_workers)
+                if getattr(args, "session_server_workers", None) is not None
+                else None
+            ),
             tito_model=tito_model,
             tito_allowed_append_roles=tuple(append_roles) if append_roles else None,
         ),

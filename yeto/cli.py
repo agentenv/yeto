@@ -706,6 +706,14 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     rl.add_argument("--use-session-server", action="store_true")
     rl.add_argument("--session-server-ip", default=None)
     rl.add_argument("--session-server-port", type=int, nargs="+", default=None)
+    rl.add_argument(
+        "--session-server-workers",
+        type=int,
+        default=None,
+        help="Miles session server instance count (default: Miles' 32); lower it "
+        "on few-core single-GPU islands to avoid the parallel-import storm "
+        "(32 sglang imports can miss the 300 s ready window)",
+    )
     rl.add_argument("--tito-model", default=None)
     rl.add_argument(
         "--codex-backend-profile",

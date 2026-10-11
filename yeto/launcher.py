@@ -2627,13 +2627,14 @@ def _prepare_rl_args(
     if not args.use_session_server and (
         args.session_server_ip is not None
         or args.session_server_port is not None
+        or getattr(args, "session_server_workers", None) is not None
         or args.tito_model is not None
         or getattr(args, "codex_backend_profile", None) is not None
         or getattr(args, "tito_allowed_append_roles", None) is not None
     ):
         raise ValueError(
-            "--session-server-ip/--session-server-port/--tito-model/"
-            "--codex-backend-profile/"
+            "--session-server-ip/--session-server-port/--session-server-workers/"
+            "--tito-model/--codex-backend-profile/"
             "--tito-allowed-append-roles requires --use-session-server"
         )
     roles = getattr(args, "tito_allowed_append_roles", None)
@@ -2650,6 +2651,8 @@ def _prepare_rl_args(
         raise ValueError(
             "--session-server-port requires one positive port or an increasing range"
         )
+    if getattr(args, "session_server_workers", None) is not None and int(args.session_server_workers) < 1:
+        raise ValueError("--session-server-workers must be at least 1")
     _default_session_server_port(args)
 
     specs = [rl_island_spec(args, spec) for spec in parse_gpu_spec(args.gpu)]
@@ -4107,6 +4110,8 @@ def make_miles_island_task(
         if args.session_server_port:
             ports = " ".join(str(port) for port in args.session_server_port)
             flags += f" --session-server-port {ports}"
+        if getattr(args, "session_server_workers", None) is not None:
+            flags += f" --session-server-workers {int(args.session_server_workers)}"
         if args.tito_model:
             flags += f" --tito-model {shlex.quote(args.tito_model)}"
         if getattr(args, "codex_backend_profile", None):

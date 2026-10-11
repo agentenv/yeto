@@ -142,3 +142,25 @@ def test_auto_default_when_attr_missing():
         target_modules=["qkv_proj", "out_proj"],
     )
     assert _backend_of(argv) == "unfused"  # generic recipe default
+
+
+def test_session_server_workers_forwarded_when_set():
+    argv = build_miles_argv(
+        _args(session_server_workers=8),
+        model_path="/model",
+        prompt_path="/prompts.jsonl",
+        provider=_provider(),
+        target_modules=["qkv_proj", "out_proj"],
+    )
+    assert argv[argv.index("--session-server-workers") + 1] == "8"
+
+
+def test_session_server_workers_absent_by_default():
+    argv = build_miles_argv(
+        _args(),
+        model_path="/model",
+        prompt_path="/prompts.jsonl",
+        provider=_provider(),
+        target_modules=["qkv_proj", "out_proj"],
+    )
+    assert "--session-server-workers" not in argv
