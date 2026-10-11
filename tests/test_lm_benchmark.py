@@ -515,3 +515,12 @@ def test_eval_fairness_requires_same_held_out_target_count():
     benchmark.validate_eval_token_match(records, {"trained_tokens": 1234})
     with pytest.raises(RuntimeError, match="held-out target-token mismatch"):
         benchmark.validate_eval_token_match(records, {"trained_tokens": 1233})
+
+
+def test_benchmark_sets_one_island_hmac_key_for_syncer_and_learners():
+    env = {}
+    benchmark.ensure_island_hmac_key(env)
+    key = env["YETO_ISLAND_HMAC_KEY"]
+    assert len(key) == 64
+    benchmark.ensure_island_hmac_key(env)
+    assert env["YETO_ISLAND_HMAC_KEY"] == key  # an operator-provided key is kept

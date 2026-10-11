@@ -24,6 +24,7 @@ import json
 import math
 import os
 import re
+import secrets
 import shutil
 import signal
 import socket
@@ -37,6 +38,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+from yeto.protocol import ISLAND_HMAC_KEY_ENV  # noqa: E402
 from yeto.benchmark_resume import (  # noqa: E402
     build_data_manifest,
     implementation_fingerprint,
@@ -1706,8 +1708,17 @@ def print_plan(args, arms: list[Arm]) -> None:
     print(f"  repetitions: {len(seeds)} training seed(s)")
 
 
+def ensure_island_hmac_key(environ=os.environ) -> None:
+    """The syncer now refuses unauthenticated islands; every arm runs on this
+    host, so one random per-run key, inherited by the syncer and all learner
+    processes, satisfies it without weakening the real launch path."""
+    if not environ.get(ISLAND_HMAC_KEY_ENV):
+        environ[ISLAND_HMAC_KEY_ENV] = secrets.token_hex(32)
+
+
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    ensure_island_hmac_key()
     if args.eval_only:
         result = evaluate_loss(
             args.model,
