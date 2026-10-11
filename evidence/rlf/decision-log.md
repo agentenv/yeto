@@ -70,3 +70,11 @@
 3. 其余不变（LoRA r16 attention、seq 8192、GRPO 2×4×4、worker 8）。预算预登记 ≤$6。
 
 第五跑（rlf-gate-20261011-7）head 形态（代拍板）：本地 preflight 线程守卫把内核线程计入 root（~1000），真实用户线程仅 ~1841 仍卡 2800 线；按用户指示改用 `--controller head`（Nebius eu-north1 无卡 head）+ `--preflight-threads off`——理由：guard 的目的是保护跑 driver 的机器，head 模式下 driver 在 Nebius VM，本地只剩瘦客户端，本地计数是不适用的机器。Modal 令牌按 s19-critic-g3.sh 模式走环境变量进 head（不落盘）。跑完先从 head 拉回产物再 sky down。
+
+## 2026-10-11 5.8 gate 第六至八跑（-7/-8/-9）与最终通过
+
+- **-6（fused/L40S/0.8B）**：训练步 cuDNN fused 报 "No dot product attention backend is available"——flash(cute JIT 拒)、fused(cuDNN 拒)、unfused(OOM) 三后端在 L40S/sm89 全灭。代拍板：换 H200×1(141G)+unfused+Qwen3.5-4B（rev 851bf6e8 M1 钉版；0.8B 连续两跑 reward 全零过不了 success_count）。
+- **-7（H200+4B）**：训练 SUCCEEDED（raw_reward 0.125→0.375）但判定卡证据缺口：ports 引擎 completed_groups 恒空，样本 outcome 随岛销毁。修 054c20d5（legacy hook 写磁带）。
+- **-8**：训练 SUCCEEDED（0.5→0.1875）但仍零 outcome——ports 启动配置里 --rollout-all-samples-process-path 被 rollout_meta_hook.extract_rollout_metadata 占用（config.py:834），054c20d5 的 queue_completed_groups 只在 legacy 非 ports 路径注册，修复打在了不执行的位置。根因教训：**改代码前先验证目标函数在真实配置下被调用**（日志 2164 行一锤定音）。
+- **-9（通过）**：judge 改收 driver 侧现成的 rl_trajectory_reward 磁带事件（rl-fn-codex-rollout 1.0 管线，--rl-observe-timeline 打开，ec656e4e）。磁带 32 条轨迹事件（16样本×2轮），五判据全过：reward_sum=6.0、std=0.390、success_count=6、advantage_abs_sum=7.0、policy_update=True（v0/v1 payload hash 相异），collector=miles_island，verdict=True。**rlf-codex-rl 5.2/5.8 通过。**
+- 奖励曲线（4B，ezshell+ret2win 2×2）：-7: 0.125→0.375；-8: 0.5→0.1875；-9: 0.25→0.125。ret2win 全程零（符合设计，30B 也解不出）；轮间波动为采样噪声，gate 不考趋势。
