@@ -480,6 +480,29 @@ def row_from_session_events(
             if payload_type == "reasoning" and _looks_encrypted_reasoning(payload):
                 skipped_encrypted_reasoning += 1
                 pending_encrypted_reasoning += 1
+            elif payload_type in {"function_call", "custom_tool_call", "local_shell_call"}:
+                # Codex rollouts record tool use only as response items; keep
+                # them so agentic rows carry assistant tool_calls + tool results.
+                call_id = payload.get("call_id") or payload.get("id")
+                tool_call = _tool_call(
+                    {
+                        "tool_call_id": call_id,
+                        "name": payload.get("name") or payload_type,
+                        "arguments": payload.get("arguments", payload.get("input", payload.get("action", {}))),
+                    },
+                    len(messages),
+                )
+                _append_message(messages, "assistant", "", tool_calls=[tool_call])
+            elif payload_type in {"function_call_output", "custom_tool_call_output", "local_shell_call_output"}:
+                output = payload.get("output")
+                if isinstance(output, dict):
+                    output = output.get("content", output)
+                _append_message(
+                    messages,
+                    "tool",
+                    _truncate(_codex_output_text(output), max_tool_output_chars),
+                    tool_call_id=payload.get("call_id"),
+                )
             elif payload_type == "message" and not has_codex_event_messages:
                 role = payload.get("role")
                 content = _codex_output_text(payload.get("content"))
