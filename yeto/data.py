@@ -188,6 +188,19 @@ def _legacy_mask_hint() -> str:
     )
 
 
+def _plain_selected_template(tokenizer, tools: list | None):
+    getter = getattr(tokenizer, "get_chat_template", None)
+    try:
+        if callable(getter):
+            return getter(chat_template=None, tools=tools)
+        return getattr(tokenizer, "chat_template", None)
+    except Exception as exc:
+        raise ExactAssistantMaskError(
+            f"tokenizer {_tokenizer_label(tokenizer)!r} could not select its native "
+            f"chat template: {exc}. " + _legacy_mask_hint()
+        ) from exc
+
+
 def _selected_chat_template(tokenizer, tools: list | None) -> str:
     """Return the exact template that apply_chat_template will select.
 
@@ -196,18 +209,7 @@ def _selected_chat_template(tokenizer, tools: list | None) -> str:
     its result rather than guessing from tokenizer.chat_template.
     """
     label = _tokenizer_label(tokenizer)
-    getter = getattr(tokenizer, "get_chat_template", None)
-    try:
-        if callable(getter):
-            template = getter(chat_template=None, tools=tools)
-        else:
-            template = getattr(tokenizer, "chat_template", None)
-    except Exception as exc:
-        raise ExactAssistantMaskError(
-            f"tokenizer {label!r} could not select its native chat template: {exc}. "
-            + _legacy_mask_hint()
-        ) from exc
-
+    template = _plain_selected_template(tokenizer, tools)
     if not isinstance(template, str) or not template:
         raise ExactAssistantMaskError(
             f"tokenizer {label!r} has no native chat template, so an exact "
@@ -220,6 +222,59 @@ def _selected_chat_template(tokenizer, tools: list | None) -> str:
             f"assistant loss mask. {_legacy_mask_hint()}"
         )
     return template
+
+
+_QWEN_ASSISTANT_BRANCH = re.compile(
+    r'(\{%-? elif message\.role == "assistant" %\})(.*?)(\{%-? elif message\.role == "tool" %\})',
+    re.S,
+)
+_QWEN_TURN_OPEN = "'<|im_start|>' + message.role + '\\n"
+_QWEN_TURN_CLOSE = "{{- '<|im_end|>\\n' }}"
+_QWEN_THINK_DECISION = "{%- if loop.index0 > ns.last_query_index %}"
+
+
+def qwen_generation_template(template: str) -> str | None:
+    """Add `{% generation %}` to an official Qwen3 / Qwen3.5 chat template.
+
+    Qwen's published templates lack generation tags, so Transformers cannot
+    return an assistant mask for them. This rewrite touches only the assistant
+    branch: it emits `<|im_start|>assistant\\n` once before the existing
+    think/no-think decision, opens the generation block, strips that prefix
+    from every original emission, and closes the block after `<|im_end|>`.
+    The rendered text is therefore identical to the official template, and
+    the mask covers reasoning, content, tool calls and `<|im_end|>`. Any
+    template that does not match this exact Qwen shape returns None, so other
+    model families keep their old behavior (a clear ExactAssistantMaskError).
+    """
+    match = _QWEN_ASSISTANT_BRANCH.search(template)
+    if match is None:
+        return None
+    body = match.group(2)
+    if (
+        body.count(_QWEN_THINK_DECISION) != 1
+        or body.count(_QWEN_TURN_CLOSE) != 1
+        or "generation" in body
+    ):
+        return None
+    opens = body.count(_QWEN_TURN_OPEN)
+    if opens < 2:
+        return None
+    # "'<|im_start|>' + message.role + '\n' + content" -> "content";
+    # "'<|im_start|>' + message.role + '\n<think>..."  -> "'<think>...".
+    body = body.replace(_QWEN_TURN_OPEN + "' + ", "")
+    body = body.replace(_QWEN_TURN_OPEN, "'")
+    if "<|im_start|>" in body:
+        return None
+    body = body.replace(
+        _QWEN_THINK_DECISION,
+        "{{- '<|im_start|>' + message.role + '\\n' }}\n        {%- generation %}\n        "
+        + _QWEN_THINK_DECISION,
+    )
+    body = body.replace(
+        _QWEN_TURN_CLOSE,
+        "{{- '<|im_end|>' }}\n        {%- endgeneration %}\n        {{- '\\n' }}",
+    )
+    return template[: match.start(2)] + body + template[match.end(2) :]
 
 
 def _flat_list(value: Any, field: str, tokenizer) -> list:
@@ -258,12 +313,23 @@ def _native_assistant_tokens(
     tokens are assistant targets. Altering either sequence after templating
     would make the returned mask inexact.
     """
-    _selected_chat_template(tokenizer, tools)
+    override = {}
+    try:
+        _selected_chat_template(tokenizer, tools)
+    except ExactAssistantMaskError as exc:
+        # Official Qwen3 / Qwen3.5 templates lack `{% generation %}`; use the
+        # render-identical tagged rewrite. Every other template still fails.
+        template = _plain_selected_template(tokenizer, tools)
+        patched = qwen_generation_template(template) if template else None
+        if patched is None:
+            raise
+        override = {"chat_template": patched}
     label = _tokenizer_label(tokenizer)
     try:
         encoded = tokenizer.apply_chat_template(
             messages,
             tools=tools,
+            **override,
             tokenize=True,
             add_generation_prompt=False,
             return_dict=True,
