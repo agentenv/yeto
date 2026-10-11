@@ -40,3 +40,12 @@
 - 机制验证另用 12K 窗口/4K reserve/单轮 4096（触发线 8192）：run18 第 8 轮 10320 tokens 触发，summary_ok=true，segment 0 kept_steps=1，context 8210→2176 切换后继续 4 轮并以 submit 正常结束。segment identity 与共享 reward 合并由 CPU 测试锁定（test_codex_bridge_compaction / test_rlf_rollout_entry）。
 - 途中修复：baseline runner 未预创建 segment sessions（已补，含 teardown 清理）；for_profile 与覆盖参数冲突（kwargs 优先）；budget==max_seq_len 桥约束（profile 24576 需配 context_length 24576）。
 - 观察：该模型 thinking 轮常超 2K tokens，单轮截断（harness TITO 完整性规则）是长 episode 的主要死因；8K 窗口对该模型不可行。
+
+## 2026-10-11 5.8 GPU RL gate 首跑（失败：训练端 cutlass 编译，非 RLF 链路）
+
+- 配置：L40S×1，qwen35_08b，GRPO 2 轮×4 组×4 样本，LoRA r16，rlf_success reward，rlf_modal_provider，任务 ezshell+ret2win。
+- 进展：岛启动、RLF provider 环境装配、rollout 正常产样本（prefill batch 4 并发）——RLF→Codex rollout→reward 链路在训练路径上真实工作。
+- 失败点：Megatron 训练步 cutlass MLIR 编译错误 `unable to compute crd2idx ... cute.layout "(?):(?{i64 div=8})"`，island rank 0 exit 1，launcher 按固定名单 0s 恢复超时停跑（exit 4）。
+- 教训：岛停止前 tape/checkpoint 未拉回（"no pulled Modal tape file"），本跑 rollout 的 reward 证据随岛销毁。下次开卡：跑挂时先拉回 ~/yeto-output/ 与 ~/yeto-rl/ 再停。
+- failure class：trainer_kernel_compile（与 RLF 无关；与模型/LoRA shape 相关）。
+- 途中修复（已提交 3ff8e93e）：launcher 透传 YETO_RLF_* 前缀、rlf_modal_provider 入 MODAL_SANDBOX_PROVIDERS、岛侧任务目录 /root/sky_workdir 路径、sandbox token 走 Modal Secret。
