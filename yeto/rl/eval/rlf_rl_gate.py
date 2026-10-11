@@ -200,6 +200,17 @@ def collect_rollout_samples_from_tape(
     the event tape (mirrored to the Modal volume, survives the island). The
     same fail-closed rules as the checkpoint path: any gap in reward/success
     aborts the gate.
+
+    Two event shapes are accepted (rlf-codex-rl 5.8 attempt 8 lesson: the
+    ports launcher binds ``--rollout-all-samples-process-path`` to
+    ``rollout_meta_hook.extract_rollout_metadata``, so the legacy
+    ``queue_completed_groups`` hook never runs there; the meta hook already
+    reports per-sample records which the driver tapes as
+    ``rl_trajectory_reward`` behind ``--rl-observe-timeline``):
+
+    - ``rl_sample_outcome`` (legacy engine hook, 054c20d5);
+    - ``rl_trajectory_reward`` (rl-fn-codex-rollout 1.0 observe-only pipeline;
+      ``sample_index`` fills ``index``).
     """
     outcomes: list[dict[str, Any]] = []
     for line in Path(tape_path).expanduser().read_text().splitlines():
@@ -210,11 +221,15 @@ def collect_rollout_samples_from_tape(
             record = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if not isinstance(record, dict) or record.get("event") != "rl_sample_outcome":
+        if not isinstance(record, dict):
+            continue
+        if record.get("event") not in ("rl_sample_outcome", "rl_trajectory_reward"):
             continue
         outcomes.append(record)
     if not outcomes:
-        raise GateEvidenceError("event tape has no rl_sample_outcome records")
+        raise GateEvidenceError(
+            "event tape has no rl_sample_outcome/rl_trajectory_reward records"
+        )
     records: list[dict[str, Any]] = []
     for order, outcome in enumerate(outcomes):
         reward = outcome.get("reward")
@@ -226,7 +241,7 @@ def collect_rollout_samples_from_tape(
                 "(rlf_success reward must write it)"
             )
         records.append({"group_index": int(outcome.get("group_index", order)),
-                        "index": int(outcome.get("index", 0)),
+                        "index": int(outcome.get("index", outcome.get("sample_index", 0))),
                         "task_id": outcome.get("task_id"),
                         "reward": float(reward),
                         "success": bool(outcome["success"])})
@@ -431,7 +446,8 @@ def main(argv: list[str] | None = None) -> None:
     gate = sub.add_parser("gate", help="collect island artifacts, judge, write evidence")
     gate.add_argument("--completed-groups", default=None,
                     help="island checkpoint with completed groups; optional when "
-                    "--tape-events carries rl_sample_outcome records (ports engine)")
+                    "--tape-events carries rl_sample_outcome/rl_trajectory_reward "
+                    "records (ports engine)")
     gate.add_argument("--adapter-before", default=None)
     gate.add_argument("--adapter-after", default=None)
     gate.add_argument("--tape-events", default=None,
