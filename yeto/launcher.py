@@ -3491,7 +3491,7 @@ HARNESS_PASSTHROUGH_ENV = (
     "OPENENV_RUN_ID",
     "SECRLENV_MAX_TURNS",
 )
-HARNESS_PASSTHROUGH_ENV_PREFIXES = ("YETO_HARNESS_TB2_",)
+HARNESS_PASSTHROUGH_ENV_PREFIXES = ("YETO_HARNESS_TB2_", "YETO_RLF_")
 # tb2_provider's Modal Sandbox backend runs inside the island (rollout
 # workers create the task sandboxes), so the island python needs the Modal
 # client.  The ports image does not ship it; install it in setup without
@@ -3500,7 +3500,8 @@ HARNESS_PASSTHROUGH_ENV_PREFIXES = ("YETO_HARNESS_TB2_",)
 MODAL_SANDBOX_PROVIDER = "yeto.rl.harness.codex.tb2_provider:modal_provider"
 # rl-agentic-reward-env: same TB2 provider, sandboxes from prebaked images.
 PREBAKED_MODAL_SANDBOX_PROVIDER = "yeto.cloud.modal_reward_env:modal_provider"
-MODAL_SANDBOX_PROVIDERS = frozenset({MODAL_SANDBOX_PROVIDER, PREBAKED_MODAL_SANDBOX_PROVIDER})
+RLF_MODAL_SANDBOX_PROVIDER = "yeto.cloud.modal_reward_env:rlf_modal_provider"
+MODAL_SANDBOX_PROVIDERS = frozenset({MODAL_SANDBOX_PROVIDER, PREBAKED_MODAL_SANDBOX_PROVIDER, RLF_MODAL_SANDBOX_PROVIDER})
 SANDBOX_MODAL_TOKEN_ENVS = ("YETO_SANDBOX_MODAL_TOKEN_ID", "YETO_SANDBOX_MODAL_TOKEN_SECRET")
 
 
