@@ -49,3 +49,13 @@
 - 教训：岛停止前 tape/checkpoint 未拉回（"no pulled Modal tape file"），本跑 rollout 的 reward 证据随岛销毁。下次开卡：跑挂时先拉回 ~/yeto-output/ 与 ~/yeto-rl/ 再停。
 - failure class：trainer_kernel_compile（与 RLF 无关；与模型/LoRA shape 相关）。
 - 途中修复（已提交 3ff8e93e）：launcher 透传 YETO_RLF_* 前缀、rlf_modal_provider 入 MODAL_SANDBOX_PROVIDERS、岛侧任务目录 /root/sky_workdir 路径、sandbox token 走 Modal Secret。
+
+## 2026-10-11 gate 第三跑（rlf-gate-20261011-5，失败，双根因均已定位）
+
+代码 d15f6e1b（session-server-workers=8 生效：48s 就绪，远小于 300s 窗），unfused 后端，约 16 min ≈$0.55。
+进展链完整走到训练步：v0 rl_publication 落磁带（policy update 证据已可收集）、rollout 0 收齐 16 样本进训练转换。两个失败：
+
+1. **训练步 CUDA OOM**（unfused 后端，seq 8192：注意力分数矩阵全程驻留，与 LoRA 无关）。下一跑改 `--rl-training-attention-backend fused`（cuDNN，显存与 flash 同量级且完全绕开 flash-attn cute JIT 编译失败）。
+2. **RLF CTF 沙箱被 Modal 300s 空闲回收**：`RlfModalVmConfig` 写死 `idle_timeout=min(ttl_s,300)`，模型长生成轮（exec 空窗 >300s）后 VM 消失，下一 exec 抛 NotFoundError → episode 无 trusted finish → preflight fail-closed 丢弃该组（3 组被丢、由补位凑齐 16 样本；reward 全 0 与 0.8B 能力一致，非管线错误）。修复 de0a7b7a：idle_timeout 默认跟随 ttl_s，可显式覆盖。判据：fail-closed 行为本身正确，属环境 TTL 配置缺陷，非代码竞态。
+
+待用户重启后第四跑：fused + 沙箱修复，PREFIX 递增，预算 ≤$3。
