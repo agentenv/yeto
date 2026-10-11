@@ -110,3 +110,68 @@ Known unverified (first GPU run must confirm): Miles `resolve_serving`
 coverage of the `qwen3` tito family, LoRA-free `SessionServerConfig`
 (`lora_rank=None`), and A100-80GB scheduling latency on Modal.
 
+
+## Real-GPU RL gate (5.8): Miles GRPO on `qwen35_08b`
+
+The gate proves the RLF -> Miles GRPO -> GAE -> policy-update chain on real
+GPU with the small `qwen35_08b` profile (0.8B, the S17-verified harness
+stack; LoRA, 1xGPU). The 30B capability surface is covered separately by the
+5.6 baseline; 30B RL training is a follow-up item (design decision
+2026-10-11). Tasks: `fixture-ctf-ezshell` (solvable in ~2 turns, provides
+success) and `fixture-ctf-ret2win` (provides reward variance). Codex-only;
+AgentFlow is offline-only and refused at admission.
+
+### Runner and commands
+
+The gate runner is `yeto.rl.eval.rlf_rl_gate`. Island side, in order:
+
+    # 1. admit the packages, write Miles --prompt-data (flags never logged)
+    python -m yeto.rl.eval.rlf_rl_gate prompt-data \
+      --tasks-dir "$YETO_RLF_CTF_TASKS_DIR" --flags-json /trusted/flags.json \
+      --out /run/rlf_gate_prompt.jsonl --repeat 2
+
+    # 2. launch the Miles GRPO island (qwen35_08b, LoRA, 1xGPU):
+    #    --data /run/rlf_gate_prompt.jsonl --codex-backend-profile qwen35_08b
+    #    --reward-function rlf_success   (-> --custom-rm-path yeto.rl.adapters.miles.rewards.rlf_success)
+    #    --advantage-estimator grpo (fixed by island_entry)
+    #    env: YETO_HARNESS_ENVIRONMENT_PROVIDER=yeto.cloud.modal_reward_env:rlf_modal_provider
+    #         YETO_RLF_CTF_TASKS_DIR / YETO_RLF_CTF_FLAGS_JSON (Modal Secret, never in logs)
+
+    # 3. after training, collect real artifacts, judge, write evidence
+    python -m yeto.rl.eval.rlf_rl_gate gate \
+      --completed-groups /run/completed_groups.pt \
+      --adapter-before /run/adapter_init --adapter-after /run/adapter_final \
+      --step 2 --flags-json /trusted/flags.json --out /run/rlf_gate_evidence.json
+
+### Hard criteria (`yeto.rl.rlf.contracts.rl_gate`)
+
+Non-empty reward, `reward_std > 0`, `success_count > 0`,
+`advantage_abs_sum > 0`, `policy_update == true`. All-zero or constant
+reward MUST fail. The verdict is announced only for evidence collected
+from the real island artifacts (`collector="miles_island"`); CPU/injected
+collections exercise the orchestration but can never announce a pass.
+
+### Evidence chain (`yeto.rlf.rl_gate.evidence/v1`)
+
+- reward/success: the island completed-groups checkpoint
+  (`--completed-groups-path`) — the samples the learner actually trained
+  on, each with the `rlf_success` reward and `metadata.success` (W4 grade);
+- advantage: recomputed per GRPO group with `contracts.group_advantages`
+  (the designated computation of record; never hand-filled);
+- policy update: `contracts.policy_update_evidence` over a per-tensor
+  summary of the initial vs final LoRA adapter (代拍板: the Miles fork
+  exports no per-step snapshot hook; this proves parameters changed without
+  a fork patch, at the cost of not attributing the change to a specific
+  optimizer step, which the gate does not require);
+- the JSON carries reward detail, success, `advantage_abs_sum`, and the
+  before/after policy digests; trusted flags are scrubbed
+  (`rlf.modal.scrub`) and only their sha256 appears in `config_digest`.
+
+### Stop conditions
+
+Stop and treat as infrastructure (never scored): serving not healthy within
+15 min, or per-episode HARD deadline (30 min) exceeded repeatedly. Stop
+with gate failure (the chain is broken, investigate before re-running):
+`rl_gate` raising on any criterion, a sample missing `metadata.success`,
+or unchanged adapter digests after training. A passing run archives the
+evidence JSON next to the island artifacts.
