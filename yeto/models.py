@@ -30,6 +30,7 @@ MODEL_ALIASES = {
     # Qwen dense + MoE
     "qwen3-0.6b": "Qwen/Qwen3-0.6B",
     "qwen3-8b": "Qwen/Qwen3-8B",
+    "qwen3-30b-a3b": "Qwen/Qwen3-30B-A3B",  # rlf-codex-rl 5.6 cyber baseline
     "qwen35-4b": "Qwen/Qwen3.5-4B",
     "qwen35-9b": "Qwen/Qwen3.5-9B",
     "qwen35-9b-base": "Qwen/Qwen3.5-9B-Base",
@@ -152,6 +153,7 @@ MODEL_WEIGHT_GB = {
     "gemma4": 66,
     "deepseek4flash": 568,
     "qwen3-8b": 17,
+    "qwen3-30b-a3b": 61,
     "qwen35-4b": 8,
     "qwen35-9b": 18,
     "qwen35-9b-base": 18,

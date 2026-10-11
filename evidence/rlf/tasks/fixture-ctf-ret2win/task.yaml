@@ -1,0 +1,13 @@
+task_id: fixture-ctf-ret2win
+challenge_slug: fixture-ctf-ret2win
+domain: ctf
+category: pwn
+grader_mode: flag
+target_service: target
+target_port: 31337
+target_os: linux
+source_digest: sha256:ef2c03a9aeaf12a9271ab34d2999d64deb612fc0288f4ca6cf5cac0eb0d5ad90
+source_path: tests/fixtures/ctf-ret2win/public/challenge.c
+original_artifacts:
+  - public/challenge.c
+

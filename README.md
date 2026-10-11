@@ -185,6 +185,7 @@ Tested — a completed Yeto fine-tuning run on real hardware:
 |---|---|---|
 | `gemma4` | `google/gemma-4-12B-it` | 66 |
 | `qwen3-8b` | `Qwen/Qwen3-8B` | 17 |
+| `qwen3-30b-a3b` | `Qwen/Qwen3-30B-A3B` | 61 |
 | `qwen35-4b` | `Qwen/Qwen3.5-4B` | 8 |
 | `qwen35-9b` | `Qwen/Qwen3.5-9B` | 18 |
 | `qwen35-9b-base` | `Qwen/Qwen3.5-9B-Base` | 18 |

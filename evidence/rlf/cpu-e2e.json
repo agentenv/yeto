@@ -1,0 +1,27 @@
+{
+  "reward_sum": 1.0,
+  "reward_std": 0.5,
+  "success_count": 1,
+  "advantage_abs_sum": 1.0,
+  "policy_update": true,
+  "passed": true,
+  "evidence": {
+    "advantages": [
+      -0.5,
+      0.5
+    ],
+    "advantage_source": "group_advantages(reward - group mean)",
+    "policy_update": {
+      "step": 0,
+      "updated": true,
+      "before_digest": "1a88ebda8a11cbb6e7c15508650abf744225fca050040070236df580ad547eec",
+      "after_digest": "7f4fe5e9c0d9758e4470943d9f36385a32fd04a3fa957b240a949b81c7a17228",
+      "changed": [
+        "bias"
+      ]
+    },
+    "learner_params_after": {
+      "bias": 0.010000000000000002
+    }
+  }
+}

@@ -681,7 +681,7 @@ def test_legacy_preflight_forwarder_matches_legacy_failure_classes(monkeypatch):
     with pytest.raises(ValueError, match="environment drifted"):
         preflight.forward_legacy_openenv_preflight(None, "qwen35_08b", {k: v for k, v in env.items() if "MODEL_REVISION" not in k})
     pins = preflight.required_pin_updates()
-    assert pins["CODEX_HARNESS_AGENT_SHA256"] == "1ab2129a59d3ef11b89d717eaa753410aa59ab9471ce385f50e29f2e74e8e0a5"
+    assert pins["CODEX_HARNESS_AGENT_SHA256"] == "d2ebc3d96421d96bd193a289cfa89beb490726d6c65e65b1ba15395f001f7d74"
     assert pins["CODEX_OPENENV_AGENT"].endswith("codex_openenv_subprocess_agent_function.run")
 
 
@@ -800,7 +800,7 @@ def test_openenv_profile_pin_relaxed_to_allowlist(monkeypatch):
     from yeto.rl.harness.codex import pins
 
     assert adapter.IMAGE_BACKEND_PROFILE_NAME == pins.OPENENV_BACKEND_PROFILE == "qwen35_08b"
-    assert set(pins.OPENENV_BACKEND_PROFILES) == {"qwen35_08b", "qwen35", "qwen38_next", "qwen38_next_4layer"}
+    assert set(pins.OPENENV_BACKEND_PROFILES) == {"qwen35_08b", "qwen35", "qwen38_next", "qwen38_next_4layer", "qwen3_30b_a3b"}  # rlf-codex-rl 5.6
     # the identity derives from the selected profile (codex_backend allowlist), per profile
     assert adapter.profile_identity("qwen35_08b") == (cb.QWEN35_08B_MODEL, cb.QWEN35_08B_REVISION)
     assert adapter.profile_identity("qwen38_next_4layer") == (cb.QWEN38_NEXT_4LAYER_MODEL, cb.QWEN38_NEXT_4LAYER_REVISION)

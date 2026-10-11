@@ -15,6 +15,30 @@ REWARDS = {
     "yeto.rl.gsm8k_reward.score": "compute_score_gsm8k",
 }
 
+def validate_rlf_row(row):
+    """Reject unverifiable RLF samples before verl accepts their float reward."""
+    metadata = row.get("metadata", {}) if isinstance(row, dict) else getattr(row, "metadata", {})
+    required = ("rlf_episode_id", "rlf_task_id", "grader_evidence", "success")
+    missing = [key for key in required if key not in metadata]
+    if missing:
+        raise ValueError(f"RLF sample missing trusted metadata: {', '.join(missing)}")
+    return metadata
+
+def compute_score_rlf(data_source, solution_str, ground_truth=None, extra_info=None, **kwargs):
+    """verl entry point for an already trusted RLF outcome.
+
+    The numeric score is accepted only alongside the complete neutral metadata;
+    this prevents a bare float reward path from bypassing admission.
+    """
+    row = extra_info if isinstance(extra_info, dict) else kwargs.get("metadata", {})
+    metadata = validate_rlf_row(row)
+    value = metadata.get("reward", kwargs.get("reward", 0.0))
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ValueError("RLF reward must be numeric")
+    return float(value)
+
+REWARDS["yeto.rlf"] = "compute_score_rlf"
+
 
 class UnmappedReward(ValueError):
     pass

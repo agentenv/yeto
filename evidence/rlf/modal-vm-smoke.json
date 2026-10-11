@@ -1,0 +1,14 @@
+{
+  "app": "yeto-rlf-vm-smoke",
+  "runtime": "vm",
+  "sandbox_id": "sb-01M4KDWBTC7G8Z7WT3PGG8PJPF",
+  "returncode": null,
+  "ready_marker": "RLF_VM_READY",
+  "teardown": {
+    "terminated": true,
+    "app_state": "stopped",
+    "tasks": 0
+  },
+  "gpu": false,
+  "note": "modal CLI emitted local-state warning after successful stdout; app stop/list confirms teardown"
+}

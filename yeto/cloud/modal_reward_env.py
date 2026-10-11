@@ -17,6 +17,7 @@ from typing import Any
 from yeto.rl.harness.codex import tb2_provider as tb2
 from yeto.rl.harness.reward_env import tb2 as rt
 from yeto.rl.harness.reward_env.benchmark import PrebakePlan
+from yeto.rl.rlf.modal import RlfCtfConfig, RlfModalProvider, RlfModalVmConfig
 
 
 
@@ -84,3 +85,58 @@ def modal_provider(miles_args: Any = None) -> tb2.Tb2EnvironmentProvider:
         network_policy=tb2.NetworkPolicy.from_env(),
     )
     return tb2._provider(backend)
+
+
+RLF_CTF_TASKS_DIR_ENV = "YETO_RLF_CTF_TASKS_DIR"
+RLF_CTF_FLAGS_ENV = "YETO_RLF_CTF_FLAGS_JSON"  # {"task_id": "flag{...}"} (trusted only)
+RLF_CTF_VM_IMAGE_ENV = "YETO_RLF_CTF_VM_IMAGE"
+RLF_CTF_LEASE_SECONDS_ENV = "YETO_RLF_CTF_LEASE_SECONDS"
+
+
+def rlf_ctf_config_from_env(environ: Any = None) -> RlfCtfConfig | None:
+    """CTF packaging config, or None when the launch did not configure it.
+
+    Fail closed: setting ``YETO_RLF_CTF_TASKS_DIR`` without flags (or with
+    invalid JSON) raises instead of silently degrading to the VM-only lease.
+    """
+    import json
+    from pathlib import Path
+
+    environ = os.environ if environ is None else environ
+    tasks_dir = environ.get(RLF_CTF_TASKS_DIR_ENV)
+    if not tasks_dir:
+        return None
+    if not Path(tasks_dir).is_dir():
+        raise RuntimeError(f"{RLF_CTF_TASKS_DIR_ENV}={tasks_dir}: not a directory")
+    raw_flags = environ.get(RLF_CTF_FLAGS_ENV)
+    if not raw_flags:
+        raise RuntimeError(f"{RLF_CTF_TASKS_DIR_ENV} is set but {RLF_CTF_FLAGS_ENV} is not "
+                           "(the trusted flags never live in the task package)")
+    flags = json.loads(raw_flags)
+    if not isinstance(flags, dict) or not all(isinstance(k, str) and isinstance(v, str) and v
+                                              for k, v in flags.items()):
+        raise RuntimeError(f"{RLF_CTF_FLAGS_ENV} must be a JSON object of task_id -> flag")
+    lease = float(environ.get(RLF_CTF_LEASE_SECONDS_ENV) or 1800.0)
+    return RlfCtfConfig(tasks_dir=tasks_dir, flags=flags,
+                        vm_image=environ.get(RLF_CTF_VM_IMAGE_ENV) or "docker:27-dind",
+                        lease_seconds=lease)
+
+
+def rlf_modal_provider(miles_args: Any = None, *,
+                       config: RlfModalVmConfig | None = None,
+                       ctf: RlfCtfConfig | None = None) -> RlfModalProvider:
+    """``YETO_HARNESS_ENVIRONMENT_PROVIDER=yeto.cloud.modal_reward_env:rlf_modal_provider``.
+
+    Same factory contract as ``modal_provider`` (preflight calls
+    ``factory(miles_args)`` and requires ``.acquire`` on the product), but each
+    acquire opens one isolated Modal VM carrying RLF task/episode/trajectory
+    identity instead of a TB2 sandbox.
+
+    When CTF packaging is configured (``ctf=`` or ``YETO_RLF_CTF_TASKS_DIR`` +
+    ``YETO_RLF_CTF_FLAGS_JSON``), the provider is a full ``EnvironmentProvider``:
+    each acquire additionally runs the packaged nested-Docker CTF orchestration
+    and the lease exposes env_url/env_token/verifier/destroy/describe/deadline
+    (audit breakpoint 3).  Without it, the S20 VM-only lease is returned.
+    """
+    del miles_args
+    return RlfModalProvider(config=config, ctf=ctf if ctf is not None else rlf_ctf_config_from_env())
