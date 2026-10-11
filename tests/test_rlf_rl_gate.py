@@ -311,6 +311,43 @@ def test_tape_sample_outcomes_fail_closed(tmp_path):
         collect_rollout_samples_from_tape(tape)
 
 
+def _trajectory_reward(group, sample, reward, success, task="fixture-ctf-ezshell"):
+    return {"event": "rl_trajectory_reward", "rollout_id": 0, "policy_version": 0,
+            "group_index": group, "sample_index": sample, "trajectory_id": f"t-{sample}",
+            "task_id": task, "reward": reward, "success": success, "aborted": False}
+
+
+def test_tape_trajectory_rewards_collect(tmp_path):
+    """rlf-codex-rl 5.8 attempt 8 lesson: on the ports engine the all-samples
+    hook is rollout_meta_hook (queue_completed_groups never runs); the driver
+    tapes its per-sample records as rl_trajectory_reward."""
+    from yeto.rl.eval.rlf_rl_gate import collect_rollout_samples_from_tape
+    tape = _tape(tmp_path, [
+        {"event": "rl_driver_start"},
+        _trajectory_reward(0, 0, 1.0, True),
+        _trajectory_reward(0, 1, 0.0, False),
+        _trajectory_reward(1, 0, 0.0, False, task="fixture-ctf-ret2win"),
+    ])
+    records = collect_rollout_samples_from_tape(tape)
+    assert len(records) == 3
+    assert records[0]["reward"] == 1.0 and records[0]["success"] is True
+    assert records[0]["index"] == 0 and records[1]["index"] == 1
+    assert records[2]["task_id"] == "fixture-ctf-ret2win"
+
+
+def test_tape_trajectory_rewards_fail_closed(tmp_path):
+    from yeto.rl.eval.rlf_rl_gate import collect_rollout_samples_from_tape
+    from yeto.rl.eval.rlf_rl_gate import GateEvidenceError
+    # success None (no signed verdict) must abort, never default to False
+    tape = _tape(tmp_path, [_trajectory_reward(0, 0, 1.0, None)])
+    with pytest.raises(GateEvidenceError, match="lacks success"):
+        collect_rollout_samples_from_tape(tape)
+    # reward None (non-finite) must abort
+    tape = _tape(tmp_path, [_trajectory_reward(0, 0, None, True)])
+    with pytest.raises(GateEvidenceError, match="numeric reward"):
+        collect_rollout_samples_from_tape(tape)
+
+
 def test_emit_sample_outcomes_writes_tape(tmp_path, monkeypatch):
     from types import SimpleNamespace
     from yeto.rl.adapters.miles.legacy import engine as legacy_engine
