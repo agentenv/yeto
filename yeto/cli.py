@@ -139,6 +139,14 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="model-specific Miles memory/kernel contract",
     )
     rl.add_argument(
+        "--rl-training-attention-backend",
+        choices=["auto", "flash", "fused", "unfused"],
+        default="auto",
+        help="override the recipe's Megatron --attention-backend (auto = recipe "
+        "decides); use unfused when the flash-attn cute JIT cannot compile on "
+        "the target GPU. Recipes with flash-only kernels refuse non-flash.",
+    )
+    rl.add_argument(
         "--expert-full-count",
         type=int,
         default=0,

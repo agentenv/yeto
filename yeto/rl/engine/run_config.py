@@ -738,6 +738,19 @@ def resolve_rl_run_config(
     else:
         recipe_name, attention_backend = RECIPE_GENERIC, "unfused"
 
+    # rlf-codex-rl 5.8: --rl-training-attention-backend overrides the recipe's
+    # default (e.g. flash -> unfused when the flash-attn cute JIT fails to
+    # compile on a given GPU). Recipes whose kernels hard-require flash
+    # attention refuse any other backend.
+    backend_override = getattr(args, "rl_training_attention_backend", "auto") or "auto"
+    if backend_override != "auto":
+        if recipe_name in {RECIPE_DEEPSEEK_V4_FLASH, RECIPE_QWEN3_8_NEXT} and backend_override != "flash":
+            raise ValueError(
+                f"the {recipe_name} recipe requires --rl-training-attention-backend flash "
+                "(its kernels have no unfused/fused path)"
+            )
+        attention_backend = backend_override
+
     _validate_callable_spec(args.reward_function)
 
     eval_config = _resolve_eval(

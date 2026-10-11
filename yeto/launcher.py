@@ -3969,7 +3969,12 @@ def make_miles_island_task(
     flags = (
         f" --model {shlex.quote(args.model)}"
         f" --rl-model-recipe {shlex.quote(args.rl_model_recipe)}"
-        f" --data {shlex.quote(learner_data_arg(args.data))}"
+        + (
+            f" --rl-training-attention-backend {args.rl_training_attention_backend}"
+            if getattr(args, "rl_training_attention_backend", "auto") not in (None, "auto")
+            else ""
+        )
+        + f" --data {shlex.quote(learner_data_arg(args.data))}"
         + (
             " --rl-single-island-no-sync"
             if getattr(args, "rl_single_island_no_sync", False)

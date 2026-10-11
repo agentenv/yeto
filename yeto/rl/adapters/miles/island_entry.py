@@ -35,6 +35,11 @@ def parse_args(argv=None):
         choices=["generic", "deepseek-v4-flash"],
         default="generic",
     )
+    parser.add_argument(
+        "--rl-training-attention-backend",
+        choices=["auto", "flash", "fused", "unfused"],
+        default="auto",
+    )
     parser.add_argument("--expert-full-count", type=int, default=0)
     parser.add_argument("--expert-full-lr", type=float, default=1e-6)
     parser.add_argument("--expert-selection-sha256", default=None)
