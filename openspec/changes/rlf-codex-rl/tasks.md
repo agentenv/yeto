@@ -32,6 +32,10 @@
 - [x] 5.3 记录资源清理、失败分类和可复现 manifest；确认 SWE/其他 harness 未成为前置依赖。
 - [x] 5.4 更新运行文档与 handoff，说明旧 `rl-agentic-reward-env` change 保持搁置及后续 apply 顺序。
 - [x] 5.5 明确并验证 AgentFlow 仅用于离线任务生产/验收，在线 Yeto Codex RL rollout 不依赖 AgentFlow。
-- [ ] 5.6 用 Qwen3-30B-A3B thinking mode 在固定 cyber task 集上先跑 32K 单窗口能力 baseline，分析成功率、tool trace、提交 turn、`max_seq_len_hit` 和 reward 分布。
-- [ ] 5.7 若 baseline 在提交 flag 前截断，显式注册 Qwen compaction budget，启用 24K window、4K–8K reserve 和最多 2–3 次 compaction，并验证 segment identity/reward 合并。
+- [x] 5.6 用 Qwen3-30B-A3B thinking mode 在固定 cyber task 集上先跑 32K 单窗口能力 baseline，分析成功率、tool trace、提交 turn、`max_seq_len_hit` 和 reward 分布。
+- [x] 5.7 若 baseline 在提交 flag 前截断，显式注册 Qwen compaction budget，启用 24K window、4K–8K reserve 和最多 2–3 次 compaction，并验证 segment identity/reward 合并。
 - [ ] 5.8 在 Modal GPU RL gate 中硬性验证 reward sum/std、success count、`advantage_abs_sum > 0` 和 policy update；全零或恒定 reward 必须失败。
+
+
+<!-- 5.6 evidence: s1-runs/s21-rlf-baseline-20261011a/run10-out (ezshell reward=1.0, ret2win 0.0); turn cap widened 1024->8192 user-approved 2026-10-11 -->
+<!-- 5.7 evidence: run14 (24K profile gating) + run18 (12K forced firing at 10320 tokens, segment continuation); acceptance-status.json compaction_real_firing=pass -->
