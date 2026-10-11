@@ -268,3 +268,76 @@ def test_prepare_prompt_data_rejects_unadmitted_package(tmp_path):
     from yeto.rl.rlf.contracts import AdmissionError
     with pytest.raises(AdmissionError):
         prepare_prompt_data(_config(tmp_path), tmp_path / "prompt.jsonl")
+
+
+# --- rl_sample_outcome tape collection (ports engine, S21 gate-7) -----------
+
+def _outcome(group, index, reward, success, task="fixture-ctf-ezshell"):
+    return {"event": "rl_sample_outcome", "policy_version": 0,
+            "group_index": group, "index": index,
+            "task_id": task, "reward": reward, "success": success}
+
+
+def test_tape_sample_outcomes_collect(tmp_path):
+    from yeto.rl.eval.rlf_rl_gate import collect_rollout_samples_from_tape
+    tape = _tape(tmp_path, [
+        {"event": "rl_driver_start"},
+        _outcome(0, 0, 1.0, True),
+        _outcome(0, 1, 0.0, False),
+        "garbage",
+        _outcome(1, 0, 0.0, False, task="fixture-ctf-ret2win"),
+    ])
+    records = collect_rollout_samples_from_tape(tape)
+    assert len(records) == 3
+    assert records[0]["reward"] == 1.0 and records[0]["success"] is True
+    assert records[2]["task_id"] == "fixture-ctf-ret2win"
+
+
+def test_tape_sample_outcomes_fail_closed(tmp_path):
+    from yeto.rl.eval.rlf_rl_gate import collect_rollout_samples_from_tape
+    from yeto.rl.eval.rlf_rl_gate import GateEvidenceError
+    # no outcome records at all
+    tape = _tape(tmp_path, [{"event": "rl_driver_start"}])
+    with pytest.raises(GateEvidenceError, match="no rl_sample_outcome"):
+        collect_rollout_samples_from_tape(tape)
+    # missing success must abort, never default to False
+    tape = _tape(tmp_path, [_outcome(0, 0, 1.0, None)])
+    with pytest.raises(GateEvidenceError, match="lacks success"):
+        collect_rollout_samples_from_tape(tape)
+    # non-numeric reward aborts
+    bad = _outcome(0, 0, "1.0", True)
+    tape = _tape(tmp_path, [bad])
+    with pytest.raises(GateEvidenceError, match="numeric reward"):
+        collect_rollout_samples_from_tape(tape)
+
+
+def test_emit_sample_outcomes_writes_tape(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from yeto.rl.adapters.miles.legacy import engine as legacy_engine
+    tape = tmp_path / "rl-island-0.jsonl"
+    monkeypatch.setattr("yeto.rl.wandb_rl.tee", lambda *a, **k: None)
+    args = SimpleNamespace(yeto_rl_event_tape=str(tape), yeto_rl_learner_id=0,
+                           yeto_rl_policy_version=0)
+
+    class _Sample:
+        def __init__(self, reward, metadata):
+            self._d = {"reward": reward, "metadata": metadata}
+
+        def to_dict(self):
+            return self._d
+
+    groups = [
+        [_Sample(1.0, {"success": True, "rlf_task_id": "fixture-ctf-ezshell"}),
+         _Sample(0.0, {"success": False})],
+        [_Sample(None, {"success": False})],  # no numeric reward -> skipped
+    ]
+    legacy_engine._emit_sample_outcomes(args, groups)
+    events = [json.loads(line) for line in tape.read_text().splitlines()]
+    outcomes = [e for e in events if e["event"] == "rl_sample_outcome"]
+    assert len(outcomes) == 2
+    assert outcomes[0]["reward"] == 1.0 and outcomes[0]["success"] is True
+    assert outcomes[0]["task_id"] == "fixture-ctf-ezshell"
+    assert outcomes[1]["success"] is False
+    # no tape configured: no-op, no crash
+    legacy_engine._emit_sample_outcomes(
+        SimpleNamespace(yeto_rl_event_tape=None, yeto_rl_policy_version=0), groups)

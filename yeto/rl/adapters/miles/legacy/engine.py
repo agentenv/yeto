@@ -815,7 +815,46 @@ def queue_completed_groups(args, all_samples, data_source) -> None:
         "dropped_groups": dropped,
         "drop_reasons": drop_reasons,
     }
+    _emit_sample_outcomes(args, complete)
     source.add_samples(kept)
+
+
+def _emit_sample_outcomes(args, complete: list[list[Any]]) -> None:
+    """rlf-codex-rl 5.8: per-sample reward/success onto the event tape.
+
+    The ports bridge can only persist an empty completed-group queue, so the
+    RL gate's sample-level evidence must ride the tape (which is mirrored to
+    the Modal volume and survives the island). Fail-closed: a sample without
+    a numeric reward is skipped, and the gate rejects a tape with gaps.
+    """
+    if not getattr(args, "yeto_rl_event_tape", None):
+        return
+    from yeto.rl.engine.events import write_event
+
+    policy_version = int(getattr(args, "yeto_rl_policy_version", -1))
+    for group_index, group in enumerate(complete):
+        for index, sample in enumerate(group):
+            first = sample[0] if isinstance(sample, list) else sample
+            to_dict = getattr(first, "to_dict", None)
+            if not callable(to_dict):
+                continue
+            data = to_dict()
+            reward = data.get("reward")
+            if not isinstance(reward, (int, float)) or isinstance(reward, bool):
+                continue
+            metadata = data.get("metadata") or {}
+            write_event(
+                args,
+                {
+                    "event": "rl_sample_outcome",
+                    "policy_version": policy_version,
+                    "group_index": group_index,
+                    "index": index,
+                    "task_id": metadata.get("rlf_task_id") or metadata.get("task_id"),
+                    "reward": float(reward),
+                    "success": bool(metadata["success"]) if "success" in metadata else None,
+                },
+            )
 
 
 def _serialize_completed_groups(groups: list[list[Any]]) -> list[list[dict[str, Any]]]:
