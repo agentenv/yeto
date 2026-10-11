@@ -35,7 +35,7 @@ import os
 import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Self
+from typing import Any, Callable, Self
 
 from yeto.rl.compaction import (
     MAX_COMPACTIONS,
@@ -52,6 +52,11 @@ from . import agent as legacy
 
 COMPACTIONRL_ENV = "YETO_CODEX_COMPACTIONRL"
 T_COMP_ENV = "YETO_CODEX_COMPACTIONRL_T_COMP"
+# Explicit compaction budget registration: when set, the named profile fully
+# determines the CompactionConfig (its context_budget must equal max_seq_len,
+# which the bridge enforces anyway); unset keeps the max_seq_len+T_COMP
+# derivation below.  Starts with YETO_CODEX_ so workers inherit it.
+PROFILE_ENV = "YETO_CODEX_COMPACTIONRL_PROFILE"
 SEGMENT_URLS_KEY = "segment_base_urls"
 METRICS_KEY = "codex_compaction"
 SESSIONS_METADATA_KEY = "codex_compaction_sessions"
@@ -86,8 +91,38 @@ def compactionrl_enabled(env: Mapping[str, str] | None = None) -> bool:
     raise harness.CodexHarnessError(f"{COMPACTIONRL_ENV} must be a boolean flag")
 
 
+_COMPACTION_PROFILES: dict[str, Callable[[], CompactionConfig]] = {}
+
+
+def register_compaction_profile(name: str, factory: Callable[[], CompactionConfig]) -> None:
+    """Register a named, explicit compaction budget selectable via PROFILE_ENV."""
+    if not name or not callable(factory):
+        raise harness.CodexHarnessError("compaction profiles need a name and a factory")
+    _COMPACTION_PROFILES[name] = factory
+
+
+def compaction_profiles() -> tuple[str, ...]:
+    return tuple(sorted(_COMPACTION_PROFILES))
+
+
 def compaction_config(max_seq_len: int, env: Mapping[str, str] | None = None) -> CompactionConfig:
-    raw = (os.environ if env is None else env).get(T_COMP_ENV, "").strip()
+    env = os.environ if env is None else env
+    name = env.get(PROFILE_ENV, "").strip()
+    if name:
+        factory = _COMPACTION_PROFILES.get(name)
+        if factory is None:
+            raise harness.CodexHarnessError(
+                f"{PROFILE_ENV}={name!r} is not a registered compaction profile "
+                f"(registered: {', '.join(compaction_profiles()) or 'none'})"
+            )
+        cfg = factory()
+        if cfg.context_budget != int(max_seq_len):
+            raise harness.CodexHarnessError(
+                f"compaction profile {name!r} fixes context_budget={cfg.context_budget}; "
+                f"max_seq_len is {max_seq_len} (the bridge requires them equal)"
+            )
+        return cfg
+    raw = env.get(T_COMP_ENV, "").strip()
     t_comp = T_COMP
     if raw:
         if not raw.isdigit() or int(raw) <= 0:
@@ -97,6 +132,22 @@ def compaction_config(max_seq_len: int, env: Mapping[str, str] | None = None) ->
         return CompactionConfig(context_budget=int(max_seq_len), t_comp=t_comp)
     except ValueError as exc:
         raise harness.CodexHarnessError(f"CompactionRL config rejected: {exc}") from exc
+
+
+def qwen3_cyber_compaction_config() -> CompactionConfig:
+    """Registered fallback for long cyber traces after a 32K baseline truncates.
+
+    Keep 4K tokens available for the next response and permit at most three
+    segment boundaries; segment identity and shared reward are preserved by
+    ``assemble_compaction_segments``.  Select it on the run path with
+    ``YETO_CODEX_COMPACTIONRL_PROFILE=qwen3_cyber`` together with
+    ``--max-seq-len 24576`` (spec 5.7: the Qwen budget is explicit, never a
+    default of an unregistered model).
+    """
+    return CompactionConfig(context_budget=24_576, t_comp=4_096, max_compactions=3)
+
+
+register_compaction_profile("qwen3_cyber", qwen3_cyber_compaction_config)
 
 
 def _message_bound(message: Mapping[str, Any]) -> int:

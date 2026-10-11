@@ -58,7 +58,10 @@ _BACKEND_PROFILE = stock_codex_backend_profile(
 BACKEND_MODEL = _BACKEND_PROFILE["model"]
 BACKEND_REASONING_EFFORT = _BACKEND_PROFILE["backend_reasoning_effort"]
 BACKEND_CHAT_TEMPLATE_KWARGS = _BACKEND_PROFILE["chat_template_kwargs"]
-MAX_TOOL_OUTPUT_BYTES = 32_768
+# rlf-codex-rl 5.6: the tool-output budget is a profile field.  The
+# qwen3_30b_a3b cyber baseline pins 8192 bytes; profiles without a declaration
+# keep the signed 32 KiB default.
+MAX_TOOL_OUTPUT_BYTES = int(_BACKEND_PROFILE.get("tool_output_bytes", 32_768))
 CODEX_TOOL_OUTPUT_TOKEN_LIMIT = 65_536
 MAX_APP_SERVER_FRAME_BYTES = 2 * 1024 * 1024
 MAX_MILES_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -1501,7 +1504,14 @@ class _ResponsesBridge:
                             "Miles proved the compacted context exceeds its budget"
                         )
                     if status != 200:
-                        raise CodexHarnessError(f"Miles session returned HTTP {status}")
+                        snippet = ""
+                        if status != 503:
+                            # bounded diagnostic read (503 keeps the retry-path
+                            # no-read contract pinned by the sec harness tests)
+                            detail = await _read_bounded_miles_response(response)
+                            snippet = detail[:500].decode("utf-8", errors="replace") if isinstance(detail, bytes) else str(detail)[:500]
+                        raise CodexHarnessError(
+                            f"Miles session returned HTTP {status}" + (f": {snippet}" if snippet else ""))
                     if response.content_type != "text/event-stream":
                         raise CodexHarnessError(
                             "Miles session returned an unexpected media type"

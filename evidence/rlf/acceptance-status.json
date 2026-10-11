@@ -1,0 +1,18 @@
+{
+  "package_admission": "pass",
+  "modal_vm_dockerd": "pass",
+  "ctf_image_build": "pass",
+  "target_health": "pass",
+  "trusted_reference_flag": "pass",
+  "codex_trajectory_metadata": "pass_cpu_tests",
+  "cpu_reward_gae_gate": "pass",
+  "modal_gpu_rl_gate": "pending",
+  "qwen3_baseline": "pipeline_pass_model_truncated",
+  "failure_class": "resolved_transport_single_recv",
+  "swe": "deferred",
+  "online_harness": "codex_only",
+  "trusted_flag_evidence": "evidence/rlf/modal-ctf-trusted-recvfix2.log (sandbox sb-01M4MB62RAE1FR0Y3HDGWZJRX7, terminated)",
+  "ctf_lease_vm_e2e": "pass",
+  "ctf_lease_evidence": "evidence/rlf/modal-ctf-lease-e2e.log (vm sb-01M4MEKE66M30GA31EZBGEBRR0, destroyed, describe=gone)",
+  "qwen3_baseline_evidence": "s1-runs/s21-rlf-baseline-20261011a/run6-out (A100-80GB, serving ok, episode evaluated, reward=0.0, end=max_seq_len turn-1 truncation: 1024-token turn cap consumed by thinking, 0 tool calls)"
+}

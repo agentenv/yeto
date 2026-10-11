@@ -30,9 +30,11 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import os
+import uuid
 from typing import Any, Awaitable, Callable
 
 from yeto.rl.engine import rollout_meta
+from yeto.rl.rlf.contracts import EpisodeLease
 
 from .alignment import AlignmentError, assert_sample_alignment
 from .tbench_reward import INFRASTRUCTURE_KEY
@@ -123,6 +125,36 @@ def window_problem(versions: list[str], current_token: str | None, limit: int) -
     return None
 
 
+RLF_TASK_KEY = "rlf_task_id"
+RLF_IDENTITY_KEYS = ("rlf_task_id", "rlf_episode_id", "rlf_trajectory_id", "policy_id")
+
+
+def produce_rlf_identity(input_meta: dict[str, Any], *, expected_version: str | None = None) -> dict[str, Any]:
+    """Producer for the RLF identity quadruple on catalog-sourced rows.
+
+    Rows emitted by ``yeto.rl.rlf.catalog.prompt_rows`` carry ``rlf_task_id``
+    only; the per-rollout episode/trajectory ids are produced here (one
+    ``EpisodeLease`` per prompt draw) so episodes are never shared across
+    rollouts, and ``policy_id`` defaults to the IR-3 expected policy version.
+    Non-RLF rows (no ``rlf_task_id``) pass through unchanged, and ids already
+    present (e.g. written by the trusted finish) are never overwritten.
+    """
+    if not input_meta.get(RLF_TASK_KEY):
+        return input_meta
+    meta = dict(input_meta)
+    lease = EpisodeLease(
+        task_id=str(meta[RLF_TASK_KEY]),
+        trajectory_id=str(meta.get("rlf_trajectory_id") or f"rlf-traj-{uuid.uuid4().hex}"),
+    )
+    if not meta.get("rlf_episode_id"):
+        meta["rlf_episode_id"] = lease.episode_id
+    if not meta.get("rlf_trajectory_id"):
+        meta["rlf_trajectory_id"] = lease.trajectory_id
+    if not meta.get("policy_id") and expected_version is not None:
+        meta["policy_id"] = str(expected_version)
+    return meta
+
+
 def apply_trajectory_bookkeeping(input_sample: Any, samples: list[Any], *, expected_version: str | None = None,
                                  max_policy_age: int = 0, current_version: str | None = None) -> None:
     """Siblings share ``group_index``/``rollout_id``; policy version and alignment checks.
@@ -132,8 +164,11 @@ def apply_trajectory_bookkeeping(input_sample: Any, samples: list[Any], *, expec
     finished; default ``expected_version``) instead of requiring one version."""
     group_index = getattr(input_sample, "group_index", None)
     rollout_key = getattr(input_sample, "index", None)
+    input_meta = getattr(input_sample, "metadata", None)
+    input_meta = input_meta if isinstance(input_meta, dict) else {}
     if expected_version is None:
         expected_version = expected_policy_version(input_sample)
+    input_meta = produce_rlf_identity(input_meta, expected_version=expected_version)
     for position, sample in enumerate(samples):
         if group_index is not None:
             sample.group_index = group_index
@@ -142,6 +177,12 @@ def apply_trajectory_bookkeeping(input_sample: Any, samples: list[Any], *, expec
         metadata = sample.metadata if isinstance(getattr(sample, "metadata", None), dict) else {}
         metadata.setdefault("chain_index", position)
         metadata["chains_total"] = len(samples)
+        # RLF identity (produced above for catalog rows, or written upstream)
+        # is copied onto every Codex chain so trusted grading and segment
+        # aggregation cannot depend on framework-only sample fields.
+        for key in RLF_IDENTITY_KEYS:
+            if key in input_meta:
+                metadata.setdefault(key, input_meta[key])
         sample.metadata = metadata
         if INFRASTRUCTURE_KEY in metadata:
             continue

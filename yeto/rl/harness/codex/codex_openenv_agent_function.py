@@ -30,6 +30,8 @@ from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Mapping
 
 from yeto.rl.codex_backend import (
+    QWEN3_30B_A3B_MODEL,
+    QWEN3_30B_A3B_REVISION,
     QWEN35_08B_MODEL,
     QWEN35_MODEL,
     QWEN35_REVISION,
@@ -79,6 +81,7 @@ _PROFILE_IDENTITY: dict[str, tuple[str, str]] = {
     "qwen35": (QWEN35_MODEL, QWEN35_REVISION),
     "qwen38_next": (QWEN38_NEXT_MODEL, QWEN38_NEXT_REVISION),
     "qwen38_next_4layer": (QWEN38_NEXT_4LAYER_MODEL, QWEN38_NEXT_4LAYER_REVISION),
+    "qwen3_30b_a3b": (QWEN3_30B_A3B_MODEL, QWEN3_30B_A3B_REVISION),
 }
 assert set(_PROFILE_IDENTITY) == set(OPENENV_BACKEND_PROFILES)
 INFRASTRUCTURE_STATUS = "infrastructure"
@@ -380,6 +383,67 @@ async def release_unreturned_segments(
     )
 
 
+def _rlf_grade_from_evaluation(evaluation: dict[str, Any]) -> Any:
+    """RLF grade interface (rlf-codex-rl breakpoint 5); lazy import keeps the
+    neutral RLF package out of the TB2 import graph.  A malformed grade raises
+    ``RolloutRejected`` (fail closed) instead of downgrading to HMAC."""
+    from yeto.rl.rlf.preflight import trusted_grade_from_evaluation
+
+    return trusted_grade_from_evaluation(evaluation)
+
+
+def _finish_rlf(
+    untrusted: dict[str, Any],
+    grade: Any,
+    *,
+    task_id: str,
+    sample_id: str,
+    evaluate_time: float,
+    evaluation: dict[str, Any],
+    status: str,
+    key: str | bytes | None = None,
+) -> dict[str, Any]:
+    """Trusted finish for an RLF grade: close the episode via ``finish_episode``
+    (reward/success/grader evidence + the RLF identity quadruple, written by the
+    trusted side from the per-lease verifier's identity) on top of the usual
+    signed outcome envelope, so tape consumers keep working.  The ``policy_id``
+    leg of the quadruple is not produced here: it rides the input metadata and
+    is copied onto the chains by ``codex_openenv_generate`` bookkeeping."""
+    from yeto.rl.rlf.contracts import EpisodeLease, finish_episode
+    from yeto.rl.rlf.preflight import RolloutRejected
+
+    evidence_map = grade.grader_evidence
+    rlf_task_id = evidence_map.get("rlf_task_id")
+    rlf_episode_id = evidence_map.get("rlf_episode_id")
+    rlf_trajectory_id = evidence_map.get("rlf_trajectory_id")
+    if not all(isinstance(value, str) and value
+               for value in (rlf_task_id, rlf_episode_id, rlf_trajectory_id)):
+        raise RolloutRejected("RLF grade is missing the identity quadruple")
+    if rlf_task_id != task_id:
+        raise RolloutRejected(f"RLF grade task {rlf_task_id!r} does not match rollout task {task_id!r}")
+    lease = EpisodeLease(task_id=rlf_task_id, trajectory_id=rlf_trajectory_id,
+                         episode_id=rlf_episode_id)
+    reward = finish_episode(lease, grade)
+    metadata = build_signed_metadata(
+        task_id=task_id,
+        sample_id=sample_id,
+        episode_id=untrusted["episode_id"],
+        status=status,
+        reward=float(grade.reward),
+        verifier=NATIVE_VERIFIER,
+        testsh_rc=None,
+        key=key,
+    )
+    metadata.update(reward.metadata)  # success, reward, quadruple, grader_evidence, rlf_status
+    metadata["agent_metrics"] = dict(untrusted.get("metrics") or {})
+    metadata["agent_metrics"]["evaluate_time"] = evaluate_time
+    metadata["exit_status"] = status
+    if isinstance(evaluation.get("log"), str):
+        # Observe only, unsigned; the grader contract forbids the flag in it.
+        metadata["verifier_log"] = evaluation["log"][-VERIFIER_LOG_TAIL_CHARS:]
+    return metadata
+
+
 async def finish_trusted(
     untrusted: dict[str, Any],
     verifier: TrustedVerifier,
@@ -388,7 +452,12 @@ async def finish_trusted(
     sample_id: str,
     key: str | bytes | None = None,
 ) -> dict[str, Any]:
-    """Trusted layer: verify, build and sign the outcome (reward in {0,1})."""
+    """Trusted layer: verify, build and sign the outcome (reward in {0,1}).
+
+    When the verifier's evaluation carries an RLF grade the episode is closed
+    via ``finish_episode`` (``_finish_rlf``); anything else takes the TB2 HMAC
+    path below, byte-identical to before the RLF branch existed.
+    """
     status = untrusted["status"]
     if status not in POLICY_STATUSES:
         raise ValueError(f"untrusted result has invalid status {status!r}")
@@ -400,6 +469,11 @@ async def finish_trusted(
         started = time.monotonic()
         evaluation = await verifier.evaluate(untrusted["episode_id"])
         evaluate_time = verify_seconds = time.monotonic() - started  # N13 metric + M1 YETO_TIMING
+        grade = _rlf_grade_from_evaluation(evaluation)
+        if grade is not None:
+            return _finish_rlf(untrusted, grade, task_id=task_id, sample_id=sample_id,
+                               evaluate_time=evaluate_time, evaluation=evaluation, status=status,
+                               key=key)
         passed = bool(evaluation.get("passed"))
         testsh_rc = evaluation.get("testsh_rc")
         verifier_name = (

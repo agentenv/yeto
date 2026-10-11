@@ -19,6 +19,9 @@ QWEN35_MODEL = "Qwen/Qwen3.5-4B"
 QWEN35_REVISION = "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"
 QWEN35_08B_MODEL = "Qwen/Qwen3.5-0.8B"
 QWEN35_08B_REVISION = "2fc06364715b967f1860aea9cf38778875588b17"
+# rlf-codex-rl 5.6: Qwen3-30B-A3B cyber baseline identity (thinking mode).
+QWEN3_30B_A3B_MODEL = "Qwen/Qwen3-30B-A3B"
+QWEN3_30B_A3B_REVISION = "ad44e777bcd18fa416d9da3bd8f70d33ebb85d39"
 # Qwen3.8-Flash-Next identities are owned by ``yeto/rl/profiles/qwen3_8_next.py``
 # (single source of truth shared with the FN launch scripts); re-exported here
 # so the codex allowlist and its tests read the same constants.
@@ -194,6 +197,36 @@ _PROFILES: dict[str, dict[str, Any]] = {
         "tito_model": "qwen35",
         "keeps_history_reasoning": True,
         "reasoning_markers": _QWEN_REASONING_MARKERS,
+    },
+    # rlf-codex-rl 5.6: Qwen3-30B-A3B cyber baseline on its own ``qwen3`` TITO
+    # family, thinking mode.  The four budget fields are the 5.6 plan values:
+    # ``tool_output_bytes`` is honored directly by codex_harness_agent; the
+    # other three are launch-time knobs (``--agent-max-seq-len`` /
+    # ``YETO_CODEX_BACKEND_MAX_TOKENS`` / ``SECRLENV_MAX_TURNS``) documented in
+    # docs/RLF_CODEX_RUN.md, declared here so the baseline has one registered
+    # source of truth instead of relying on unsigned defaults.
+    "qwen3_30b_a3b": {
+        "model": "qwen3",
+        "tito_model": "qwen3",
+        "rl_model_recipe": "generic",
+        "backend_reasoning_effort": "xhigh",
+        "thinking": {"type": "enabled"},
+        "chat_template": "qwen3_30b_a3b",
+        "chat_template_kwargs": {
+            "enable_thinking": True,
+            "preserve_thinking": True,
+            "reasoning_effort": "xhigh",
+        },
+        "tito_allowed_append_roles": ["tool", "user"],
+        "model_identifier": QWEN3_30B_A3B_MODEL,
+        "model_revision": QWEN3_30B_A3B_REVISION,
+        "identity_label": "Qwen3-30B-A3B",
+        "keeps_history_reasoning": True,
+        "reasoning_markers": _QWEN_REASONING_MARKERS,
+        "max_seq_len": 32_768,
+        "max_tokens_per_turn": 1_024,
+        "max_turns": 48,
+        "tool_output_bytes": 8_192,
     },
     "qwen38_next": _fn_profile("full", QWEN38_NEXT_MODEL, QWEN38_NEXT_REVISION),
     "qwen38_next_4layer": _fn_profile(
