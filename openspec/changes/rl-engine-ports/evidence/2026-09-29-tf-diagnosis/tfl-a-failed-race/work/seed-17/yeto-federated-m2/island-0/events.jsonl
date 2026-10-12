@@ -1,5 +1,0 @@
-{"event":"rl_policy_apply_progress","island_id":0,"phase":"begin","policy_version":0,"time_unix":1790675624.3365195}
-{"event":"rl_policy_apply_progress","island_id":0,"phase":"apply_finished","policy_version":0,"time_unix":1790675624.6095378}
-{"event":"rl_policy_apply_progress","island_id":0,"phase":"hash_begin","policy_version":0,"time_unix":1790675624.6100786}
-{"event":"rl_policy_apply_progress","island_id":0,"phase":"hash_finished","policy_version":0,"time_unix":1790675625.0213344}
-{"event":"rl_policy_apply","island_id":0,"optimizer_reset_count":1,"policy_version":0,"reset_parameter_count":392,"rl/global_policy_version":0,"rl/optimizer_reset_count":1,"sync/global_policy_hash":"62f3b8f69c1cb9f2db1ab500f19da0dd76a5323536e6f38b0ee81bf1a486eaa6","time_unix":1790675625.0419207}
