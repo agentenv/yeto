@@ -40,6 +40,7 @@ from yeto.rl.engine.progress import (
     _load_decoupled_checkpoint,
     _save_decoupled_checkpoint,
 )
+from yeto.rl.compaction import validate_compaction_segments
 from yeto.rl.engine.events import append_tape_event as _append_rl_event
 from yeto.rl.adapters.miles.publish import (
     _policy_token,
@@ -69,64 +70,7 @@ def _validate_rollout_groups(data: object, groups: int, samples: int) -> None:
                 if isinstance(segment, list) or status not in {"completed", "truncated"}:
                     raise RuntimeError("Miles returned an incomplete trajectory")
             if isinstance(sample, list):
-                metadata = [getattr(segment, "metadata", None) for segment in segments]
-                trajectory_ids = {
-                    value.get("compaction_trajectory_id")
-                    for value in metadata
-                    if isinstance(value, Mapping)
-                }
-                indices = [
-                    value.get("compaction_segment_index")
-                    if isinstance(value, Mapping)
-                    else None
-                    for value in metadata
-                ]
-                types = [
-                    value.get("compaction_segment_type")
-                    if isinstance(value, Mapping)
-                    else None
-                    for value in metadata
-                ]
-                context_budgets = {
-                    value.get("compaction_context_budget")
-                    for value in metadata
-                    if isinstance(value, Mapping)
-                }
-                if (
-                    len(trajectory_ids) != 1
-                    or not all(
-                        isinstance(value, str) and value for value in trajectory_ids
-                    )
-                    or indices != list(range(len(segments)))
-                    or types != [
-                        "execution" if value % 2 == 0 else "summary"
-                        for value in range(len(segments))
-                    ]
-                    or types[-1] != "execution"
-                    or any(
-                        not isinstance(value, Mapping)
-                        or value.get("compaction_schema_version") != 1
-                        for value in metadata
-                    )
-                    or len(context_budgets) != 1
-                    or any(
-                        isinstance(value, bool)
-                        or not isinstance(value, int)
-                        or value <= 0
-                        for value in context_budgets
-                    )
-                ):
-                    raise RuntimeError("Miles returned malformed compaction segments")
-                identities = {
-                    (getattr(segment, "group_index", None), getattr(segment, "index", None))
-                    for segment in segments
-                }
-                if len(identities) != 1 or any(
-                    isinstance(value, bool) or not isinstance(value, int)
-                    for identity in identities
-                    for value in identity
-                ):
-                    raise RuntimeError("Miles compaction segments changed trajectory identity")
+                validate_compaction_segments(segments)
 
 
 def _policy_token_for_rollout(args, rollout_id: int) -> str:
