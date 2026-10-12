@@ -38,3 +38,18 @@ def test_spec_table_matches_the_docstring():
             pytest.skip("rl-codebase-consistency spec not present")
         spec = archived[0]
     assert _rows(spec.read_text()) == _rows(bridges.__doc__)
+
+
+def test_no_second_bridge_or_critic_sync_in_production_code():
+    """2.1/2.7: the dead elastic bridge, its factory and the in-process
+    two-role critic average are gone; PPO-family critic sync is
+    DualStrictAvgSync only.  (StrictRlBridge stays until the legacy engine is
+    deleted, task 1.10; StrictAvgSync delegates to it.)"""
+    hits = []
+    for path in sorted((REPO / "yeto").rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        for name in ("class ElasticRlBridge", "def make_island_bridge", "class TwoRoleStrictAvg"):
+            if name in text:
+                hits.append(f"{path.relative_to(REPO)}: {name}")
+    assert hits == []
+    assert hasattr(bridges.DualStrictAvgSync, "_critic_catchup")
