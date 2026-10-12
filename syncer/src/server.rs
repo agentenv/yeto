@@ -3146,7 +3146,7 @@ fn prepare_round_compute(cfg: &Config, st: &GlobalState, round: &Round) -> Resul
         outer_gradients.push(push.outer_gradient.as_slice());
         weights.push(match cfg.learner_weight {
             LearnerWeight::Tokens2OverSteps => {
-                crate::merge::learner_weight(push.c_tokens, push.c_steps)
+                crate::merge::learner_weight(push.c_tokens, u64::from(push.c_steps))
             }
             LearnerWeight::Equal => 1.0,
         });
@@ -3853,7 +3853,7 @@ fn append_tape(
             // tape must describe the merge that actually happened.
             1.0
         } else {
-            crate::merge::learner_weight(push.c_tokens, push.c_steps)
+            crate::merge::learner_weight(push.c_tokens, u64::from(push.c_steps))
         }
     };
     let weight_sum: f64 = pushes.values().map(event_weight).sum();

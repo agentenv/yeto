@@ -23,8 +23,12 @@
 //! Outer optimizer: SGD with Nesterov momentum, state held here on the
 //! syncer, with defaults lr=0.7 and μ=0.9.
 
-/// w_m = c_tokens² / c_steps ("quantity × quality").
-pub fn learner_weight(c_tokens: u64, c_steps: u32) -> f64 {
+/// w_m = c_tokens² / c_steps ("quantity × quality"). The only definition of the
+/// learner merge weight: strict pushes (server.rs) and elastic deltas
+/// (elastic.rs) both call it; Python `island_ledger.merge_weight` is locked to
+/// it by tests/test_rl_inter_island_rust_golden.py. `c_steps` is u64 so the
+/// elastic wire value needs no narrowing (u32 strict values widen losslessly).
+pub fn learner_weight(c_tokens: u64, c_steps: u64) -> f64 {
     if c_steps == 0 {
         0.0
     } else {
