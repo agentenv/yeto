@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from yeto.rl import miles
+from yeto.rl.adapters.miles.legacy import engine as miles
 
 POLICY_HASH = "a" * 64
 

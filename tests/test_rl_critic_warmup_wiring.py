@@ -10,7 +10,7 @@ import pytest
 
 from yeto import launcher
 from yeto.rl import critic_warmup as cw
-from yeto.rl import learner as rl_learner
+from yeto.rl.adapters.miles import island_entry as rl_learner
 from yeto.rl.engine.algorithm import AlgorithmSpec
 
 from test_rl_engine_selection import _learner_argv

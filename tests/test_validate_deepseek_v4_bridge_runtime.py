@@ -252,6 +252,8 @@ def test_task_coverage_resolves_separate_bridge_through_runtime(monkeypatch):
         "yeto": yeto,
         "yeto.rl": yeto_rl,
         "yeto.rl.adapters.miles.models.deepseek_v4.expert_full_runtime": expert_runtime,
+        # ``from <package> import expert_full_runtime`` reads the package attribute.
+        "yeto.rl.adapters.miles.models.deepseek_v4": SimpleNamespace(expert_full_runtime=expert_runtime),
     }.items():
         monkeypatch.setitem(sys.modules, name, module)
     monkeypatch.setattr(validator.torch.distributed, "get_rank", lambda: 0)
@@ -342,6 +344,8 @@ def test_sleep_process_group_failure_reloads_groups_before_raising(monkeypatch):
         "yeto": yeto,
         "yeto.rl": yeto_rl,
         "yeto.rl.adapters.miles.models.deepseek_v4.expert_full_runtime": expert_runtime,
+        # ``from <package> import expert_full_runtime`` reads the package attribute.
+        "yeto.rl.adapters.miles.models.deepseek_v4": SimpleNamespace(expert_full_runtime=expert_runtime),
     }.items():
         monkeypatch.setitem(sys.modules, name, module)
 
@@ -508,7 +512,7 @@ def test_task_coverage_rejects_any_sharded_optimizer_master():
 def test_pp2_expert_task_coverage_requires_one_owner_per_dp2_replica(monkeypatch):
     import torch
 
-    from yeto.rl import deepseek_v4_expert_full_runtime as expert_runtime
+    from yeto.rl.adapters.miles.models.deepseek_v4 import expert_full_runtime as expert_runtime
 
     coverage = []
     gathered_names = []

@@ -7,7 +7,7 @@ import asyncio
 import pytest
 
 from yeto.rl.engine import timeline
-from yeto.rl.engine.miles_adapter.rollout_meta_hook import trajectory_diagnostics
+from yeto.rl.adapters.miles.rollout_meta_hook import trajectory_diagnostics
 from yeto.rl.harness.codex import agent as legacy
 from yeto.rl.harness.codex import codex_harness_agent as H
 from yeto.rl.harness.codex import codex_openenv_agent_function as F

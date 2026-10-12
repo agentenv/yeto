@@ -263,7 +263,7 @@ def _pp2_attention_round_trip(
     import torch.distributed as dist
     from megatron.core import parallel_state
 
-    from yeto.rl import deepseek_v4_expert_full_runtime as expert_runtime
+    from yeto.rl.adapters.miles.models.deepseek_v4 import expert_full_runtime as expert_runtime
 
     specs = tuple(sorted(expected_specs.values(), key=lambda spec: spec.name))
     actor = Namespace(
@@ -415,7 +415,7 @@ def _pp2_expert_task_coverage(
 
     import torch.distributed as dist
 
-    from yeto.rl import deepseek_v4_expert_full_runtime as expert_runtime
+    from yeto.rl.adapters.miles.models.deepseek_v4 import expert_full_runtime as expert_runtime
 
     if actor_and_record is None:
         actor, local_record = _expert_task_coverage_snapshot(
@@ -509,7 +509,7 @@ def _pp2_expert_transport_shards(
 
     import torch.distributed as dist
 
-    from yeto.rl import deepseek_v4_expert_full_runtime as expert_runtime
+    from yeto.rl.adapters.miles.models.deepseek_v4 import expert_full_runtime as expert_runtime
 
     rank = dist.get_rank()
     fragment = expert_runtime._export_experts(
@@ -634,7 +634,7 @@ def _expert_task_coverage_snapshot(
     import torch.distributed as dist
     from megatron.core import parallel_state
 
-    from yeto.rl import deepseek_v4_expert_full_runtime as expert_runtime
+    from yeto.rl.adapters.miles.models.deepseek_v4 import expert_full_runtime as expert_runtime
 
     specs = tuple(sorted(expected_specs.values(), key=lambda spec: spec.name))
     actor = _expert_coverage_actor(
@@ -788,7 +788,7 @@ def _sleep_process_group_task_coverage(
         reload_process_groups,
     )
 
-    from yeto.rl import deepseek_v4_expert_full_runtime as expert_runtime
+    from yeto.rl.adapters.miles.models.deepseek_v4 import expert_full_runtime as expert_runtime
 
     before = _parallel_coordinates(parallel_state)
     local_record = None

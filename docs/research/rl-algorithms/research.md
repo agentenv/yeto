@@ -50,7 +50,7 @@
    - 但 `grpo` 和 `gspo` 的 advantage 只把 reward 广播到每个 token，KL 被丢弃（`LH/advantages.py:53-57`；`LH/math_utils.py:462-469` 的 `get_grpo_returns`）。
    - KL 只有在 `--use-kl-loss` 时才进入 loss（`LH/losses.py` 的 `use_kl_loss` 分支）。
    - 因此 `kl_coef>0` 加 GRPO 的效果是多占一份 ref 模型的显存和前向算力，梯度没有任何变化。
-   - legacy 的 `expert_full` 分支固定传 `--kl-coef 0.001`（`yeto/rl/learner.py:1068`）。legacy 用的是 agentenv fork，那边的 GRPO 是否同样忽略 KL **[未核实]**。
+   - legacy 的 `expert_full` 分支固定传 `--kl-coef 0.001`（`yeto/rl/adapters/miles/island_entry.py:1068`）。legacy 用的是 agentenv fork，那边的 GRPO 是否同样忽略 KL **[未核实]**。
 
 5. **在 ports 的串行 driver 下，外层同步不会让 rollout 数据变旧** [源码]：
    - 每轮的顺序是：用已发布策略生成，训练一次，在安全点 apply cut，再发布（`driver.py:1-10, 418-443`）。

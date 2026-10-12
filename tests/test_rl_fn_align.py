@@ -97,7 +97,7 @@ def test_missing_ref_load_refused(monkeypatch):
 
 
 def test_legacy_path_refuses_flash_next(monkeypatch):
-    from yeto.rl import learner
+    from yeto.rl.adapters.miles import island_entry as learner
 
     cfg = SimpleNamespace(model_recipe=SimpleNamespace(name=rc.RECIPE_QWEN3_8_NEXT))
     with pytest.raises(ValueError, match="ports-only"):

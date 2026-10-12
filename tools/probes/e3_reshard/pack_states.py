@@ -27,7 +27,7 @@ PARAM_ONLY_TAGS = ("s8",)
 
 
 def field_digests(state: dict) -> dict:
-    from yeto.rl.engine.miles_adapter.cut_plugin import state_digest
+    from yeto.rl.adapters.miles.cut_plugin import state_digest
 
     opt = state["optimizer"]
     out = {"adapter": state_digest(state.get("adapter") or {}), "scheduler": state_digest(state["scheduler"]),
@@ -59,7 +59,7 @@ def gather(dumps: list[dict], merge) -> dict:
 def pack(work: Path, merge, load) -> dict:
     import torch
 
-    from yeto.rl.engine.miles_adapter.cut_plugin import to_safe
+    from yeto.rl.adapters.miles.cut_plugin import to_safe
 
     out_dir = Path(work) / "packed"
     out_dir.mkdir(parents=True, exist_ok=True)

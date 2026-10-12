@@ -110,7 +110,7 @@ def test_invalid_combinations_refused():
 
 
 def test_learner_passes_mode_to_elastic_config():
-    from yeto.rl import learner
+    from yeto.rl.adapters.miles import island_entry as learner
     assert "island_scheduling" in Path(learner.__file__).read_text()
     from yeto.rl.adapters.miles import elastic_wiring
     import inspect

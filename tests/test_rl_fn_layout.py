@@ -27,7 +27,7 @@ def test_run_miles_flash_next_reaches_run_ports_island_with_learned_layout(snaps
         import _pytest.monkeypatch as _m
         from rl_e2e_launch import island_run, learner_from_run
         from fp_fn import fnrun_cli
-        from yeto.rl import learner
+        from yeto.rl.adapters.miles import island_entry as learner
         from yeto.rl.engine import run_config
         from yeto.rl.adapters.miles import config as mac
         from yeto.rl.adapters.miles import entry
@@ -68,7 +68,7 @@ def test_run_miles_flash_next_reaches_run_ports_island_with_learned_layout(snaps
 
 
 def test_run_ports_predicted_layout_unchanged(monkeypatch):
-    from yeto.rl import learner
+    from yeto.rl.adapters.miles import island_entry as learner
     from yeto.rl.core import CanonicalTensorSpec, canonical_layout_hash
     from yeto.rl.adapters.miles import entry
 

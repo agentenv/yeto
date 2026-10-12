@@ -35,7 +35,7 @@ def test_eval_sampling_knobs_reach_the_learner_and_the_run_config(tmp_path, monk
                            yeto_policy_sync=True)
     assert config.temperature == 0.0 and config.max_response_len == 64
     # the shipped heldout file is the one the learner verifies
-    from yeto.rl import learner
+    from yeto.rl.adapters.miles import island_entry as learner
 
     args.parameter_mode = "lora"
     assert learner._verify_eval_dataset_identity(args).read_text().startswith('{"prompt"')
@@ -68,7 +68,7 @@ def _elastic(tmp_path):
 def test_observe_and_tool_wait_board_reach_the_island_wiring(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
-    from yeto.rl import learner
+    from yeto.rl.adapters.miles import island_entry as learner
     from yeto.rl.adapters.miles import elastic_wiring, entry
     from yeto.rl.adapters.miles.elastic_wiring import LazyBoardActor
 
@@ -93,7 +93,7 @@ def test_observe_and_tool_wait_board_reach_the_island_wiring(tmp_path, monkeypat
 def test_defaults_set_neither_observe_nor_board(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
-    from yeto.rl import learner
+    from yeto.rl.adapters.miles import island_entry as learner
     from yeto.rl.adapters.miles import elastic_wiring, entry
 
     args, _ = learner_from_run(island_run(BASE + _elastic(tmp_path), monkeypatch), tmp_path / "h")
@@ -371,7 +371,7 @@ def test_deterministic_trainer_reaches_miles_argv_env_and_ray_workers(tmp_path, 
     from types import SimpleNamespace
 
     from test_rl_argv_snapshot import _captured_args
-    from yeto.rl import learner
+    from yeto.rl.adapters.miles import island_entry as learner
     from yeto.rl.engine import run_config as rc
     from yeto.rl.engine.algorithm import AlgorithmSpec
     from yeto.rl.adapters.miles import config as mc
@@ -398,7 +398,7 @@ def test_determinism_is_off_by_default(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
     from test_rl_argv_snapshot import _captured_args
-    from yeto.rl import learner
+    from yeto.rl.adapters.miles import island_entry as learner
     from yeto.rl.engine import run_config as rc
     from yeto.rl.engine.algorithm import AlgorithmSpec
     from yeto.rl.adapters.miles import config as mc
@@ -447,7 +447,7 @@ def _without_elastic_flags(argv):
 def test_trainer_edges_drop_balance_data_only(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
-    from yeto.rl import learner
+    from yeto.rl.adapters.miles import island_entry as learner
 
     edges, _ = learner_from_run(island_run(BASE + _elastic(tmp_path) + (
         "--rl-elastic-trainer-edges",), monkeypatch), tmp_path / "a")
@@ -596,7 +596,7 @@ def test_drain_and_recovery_timeouts_reach_the_controller(tmp_path, monkeypatch)
     import json
     from types import SimpleNamespace
 
-    from yeto.rl import learner
+    from yeto.rl.adapters.miles import island_entry as learner
     from yeto.rl.engine.execution_profile import ExecutionProfile
     from yeto.rl.engine.algorithm import AlgorithmSpec
     from yeto.rl.adapters.miles import entry

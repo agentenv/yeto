@@ -13,7 +13,7 @@ import pytest
 from test_rl_engine_selection import _cli, _island_task, _learner_argv
 from yeto import launcher
 from yeto.launcher import _prepare_rl_args
-from yeto.rl import learner
+from yeto.rl.adapters.miles import island_entry as learner
 from yeto.rl.adapters.miles import entry
 from yeto.rl.adapters.miles.rollout_meta_hook import ELASTIC_METADATA_ENV
 

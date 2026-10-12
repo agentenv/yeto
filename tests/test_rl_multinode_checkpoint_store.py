@@ -167,7 +167,7 @@ def test_store_flag_flows_from_cli_to_the_learner_and_needs_elastic(tmp_path, mo
     from test_rl_engine_selection import _cli, _learner_argv
     from test_rl_infra_switches import ELASTIC_LEARNER
 
-    from yeto.rl import learner
+    from yeto.rl.adapters.miles import island_entry as learner
 
     # rl-resume-from-checkpoint: without --rl-elastic the store is the resume store, which
     # needs --rl-single-island-no-sync (ports); a multi-island run is still refused

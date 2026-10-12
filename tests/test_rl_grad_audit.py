@@ -177,7 +177,7 @@ def test_ports_recorder_arms_from_train_one_step(tmp_path, monkeypatch):
 
 
 def test_learner_wires_legacy_hook_and_ports_directory(tmp_path, monkeypatch):
-    from yeto.rl import learner
+    from yeto.rl.adapters.miles import island_entry as learner
 
     args = SimpleNamespace(audit_dir=str(tmp_path / "audit"))
     monkeypatch.delenv(ga.GRAD_AUDIT_ENV, raising=False)

@@ -241,7 +241,7 @@ def test_accept_rebind_flag_flows_from_cli_to_the_learner(tmp_path, monkeypatch)
 
     from yeto import launcher
     from yeto.launcher import _prepare_rl_args
-    from yeto.rl import learner
+    from yeto.rl.adapters.miles import island_entry as learner
 
     res, _ = _elastic_files(tmp_path)
     gpu = ("--rl-rollout-gpus", "1", "--gpu", "aws:2xa100@us-east-1")

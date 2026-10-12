@@ -1,4 +1,4 @@
-# Miles 适配层（`yeto/rl/engine/miles_adapter/`）
+# Miles 适配层（`yeto/rl/adapters/miles/`）
 
 把 yeto 引擎核心的五个端口接到 pinned Miles（`yeto.rl.MILES_NEXT_COMMIT`）。计划在去耦合阶段 4 整体搬到 `yeto/rl/adapters/miles/`，原位置留转发模块。边界规则见 `../README.md`；本目录可以 import Miles/Megatron/SGLang/Ray，核心不可以 import 本目录。
 

@@ -24,7 +24,7 @@ def island_run(cli_extra, monkeypatch):
 
 def learner_from_run(run: str, home: Path, *, env=None):
     """(learner args namespace, exported env) as the island would see them."""
-    from yeto.rl import learner
+    from yeto.rl.adapters.miles import island_entry as learner
 
     head = run.split('if [ "$SKYPILOT_NODE_RANK" = "0" ]; then', 1)[1].split("\nelse\n", 1)[0]
     body = head.split("trap stop_miles_ray EXIT\n", 1)[1]

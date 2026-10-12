@@ -2341,7 +2341,7 @@ def run_miles(
 
         ensure_deepseek_v4_bridge()
 
-    from yeto.rl import flash_next_provider as flash_next
+    from yeto.rl.adapters.miles.models import flash_next_provider as flash_next
 
     native_lora_export = None
     if flash_next.is_flash_next(args, model_path):

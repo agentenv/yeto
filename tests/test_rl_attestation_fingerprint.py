@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from yeto.rl import learner as rl_learner  # noqa: E402
+from yeto.rl.adapters.miles import island_entry as rl_learner  # noqa: E402
 from yeto.rl.adapters.miles import entry  # noqa: E402
 
 

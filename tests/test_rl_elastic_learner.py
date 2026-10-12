@@ -28,7 +28,7 @@ FLAGS = ("--rl-observe-timeline", "--rl-recommend-mode", "recommend",
 
 # ---------------------------------------------------------------- CLI -> learner
 def test_flags_reach_the_learner_and_miles_args(tmp_path, monkeypatch):
-    from yeto.rl import learner
+    from yeto.rl.adapters.miles import island_entry as learner
 
     run = island_run(BASE + _elastic(tmp_path) + FLAGS, monkeypatch)
     args, _ = learner_from_run(run, tmp_path / "home")
@@ -45,7 +45,7 @@ def test_default_run_carries_no_recommend_flags(tmp_path, monkeypatch):
     assert "--rl-recommend-mode" not in run and "--rl-edge-costs-path" not in run
     args, _ = learner_from_run(run, tmp_path / "home")
     assert args.rl_recommend_mode is None
-    from yeto.rl import learner
+    from yeto.rl.adapters.miles import island_entry as learner
 
     ma = SimpleNamespace()
     learner.apply_ports_infra_switches(args, ma, {})

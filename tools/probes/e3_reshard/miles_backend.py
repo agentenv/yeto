@@ -36,9 +36,9 @@ SCHEDULE = {"cp_size": 1, "vpp_size": 1, "microbatch_group_size_per_vp_stage": 1
 
 class MilesBackend:
     def __init__(self, miles_args: Any, algorithm: Any, *, frozen_template: str, fingerprint: str) -> None:
-        from yeto.rl.engine.miles_adapter import LoopRunner
-        from yeto.rl.engine.miles_adapter.entry import connect_island_ray
-        from yeto.rl.engine.miles_adapter.state import require_run_plugin
+        from yeto.rl.adapters.miles import LoopRunner
+        from yeto.rl.adapters.miles.entry import connect_island_ray
+        from yeto.rl.adapters.miles.state import require_run_plugin
 
         require_run_plugin()
         connect_island_ray()
@@ -103,10 +103,10 @@ class MilesBackend:
         prepare_rollout -> executor.get (saves the samples) -> offload rollout -> metadata take] ->
         release refs -> trainer.onload().
         """
-        from yeto.rl.engine.miles_adapter.publish import MilesPublisher
-        from yeto.rl.engine.miles_adapter.rollout import MilesRolloutPool, RayMetadataSink
-        from yeto.rl.engine.miles_adapter.state import MilesPolicyState
-        from yeto.rl.engine.miles_adapter.trainer import MilesTrainerGroup
+        from yeto.rl.adapters.miles.publish import MilesPublisher
+        from yeto.rl.adapters.miles.rollout import MilesRolloutPool, RayMetadataSink
+        from yeto.rl.adapters.miles.state import MilesPolicyState
+        from yeto.rl.adapters.miles.trainer import MilesTrainerGroup
 
         identity = dict(identity or {})
         say = progress or (lambda _msg: None)
@@ -150,7 +150,7 @@ class MilesBackend:
             self._close()
 
     def start_arm(self, dp: int) -> None:
-        from yeto.rl.engine.miles_adapter.trainer import MilesTrainerGroup
+        from yeto.rl.adapters.miles.trainer import MilesTrainerGroup
 
         args = self._args(actor_num_gpus_per_node=int(dp), world_size=int(dp), **ARM_PARSE_DERIVED,
                           load_debug_rollout_data=self.frozen_template, save_debug_rollout_data=None)
@@ -163,7 +163,7 @@ class MilesBackend:
         return list(self.runner.run(self._actor.run_plugin(fn_path, kwargs or {})))
 
     def train(self, rollout_id: int) -> dict:
-        from yeto.rl.engine.miles_adapter.state_plugin import APPLIED_LRS, GRAD_NORM, STEP_LOSSES
+        from yeto.rl.adapters.miles.state_plugin import APPLIED_LRS, GRAD_NORM, STEP_LOSSES
 
         # IslandDriver.run_round: colocated -> trainer.onload() before the train step.
         if bool(getattr(self.trainer._args, "colocate", False)):

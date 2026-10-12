@@ -30,10 +30,10 @@ REPO = Path(__file__).resolve().parents[1]
 ALLOWLIST = REPO / "tests" / "import_boundary_allowlist.txt"
 README = "yeto/rl/engine/README.md"
 # Upper bound of allowlist entries; may only go down (D4).
-ALLOWLIST_CAP = 10
+ALLOWLIST_CAP = 11  # 0.6: +1 pre-existing launcher->overlay import hidden by a stub
 
 FRAMEWORKS = ("miles", "miles_plugins", "megatron", "sglang", "verl", "vllm", "torch_npu")
-ADAPTERS = ("yeto.rl.engine.miles_adapter", "yeto.rl.adapters")
+ADAPTERS = ("yeto.rl.adapters",)
 LEGACY = ("yeto.rl.miles", "yeto.rl.miles_overlay", "yeto.rl.overlays", "yeto.rl.learner",
           "yeto.rl.miles_full_parameter", "yeto.rl.miles_full_parameter_dense",
           "yeto.rl.miles_chunked_full_parameter", "yeto.rl.miles_sao_streaming",
@@ -50,7 +50,7 @@ CORE_FORBIDDEN = FRAMEWORKS + ADAPTERS + LEGACY + CLOUD
 
 # Neutral-core scopes: directories (recursive) and single files, repo-relative.
 CORE_DIRS = ("yeto/rl/engine", "yeto/rl/rewards", "yeto/rl/harness", "yeto/rl/algos")
-CORE_EXCLUDED_DIRS = ("yeto/rl/engine/miles_adapter",)
+CORE_EXCLUDED_DIRS: tuple[str, ...] = ()
 CORE_FILES = (
     # rewards / filters (audit R1-R3)
     "yeto/rl/math_reward.py", "yeto/rl/gsm8k_reward.py", "yeto/rl/length_reward.py",
@@ -61,7 +61,7 @@ CORE_FILES = (
     "yeto/rl/tool_wait_workload.py",
 )
 # Backend adapters: name -> directory.  Each must not import the others.
-ADAPTER_DIRS = {"miles": ("yeto/rl/engine/miles_adapter", "yeto/rl/adapters/miles"),
+ADAPTER_DIRS = {"miles": ("yeto/rl/adapters/miles",),
                 "verl": ("yeto/rl/adapters/verl",)}
 # Cloud / launch layer (audit A8, A9, C1-C3).
 CLOUD_FILES = ("yeto/launcher.py", "yeto/modal_runner.py", "yeto/cli.py",
@@ -212,12 +212,12 @@ def test_injected_framework_import_fails(tmp_path):
 
 def test_relative_import_of_the_adapter_and_cloud_library_fail(tmp_path):
     root = _tree(tmp_path, {
-        "yeto/rl/engine/cut.py": "from .miles_adapter.reshard import ReshardPlan\nimport sky\n",
-        "yeto/rl/engine/miles_adapter/x.py": "import miles\nimport megatron.core\n",  # adapter: ok
+        "yeto/rl/engine/cut.py": "from ..adapters.miles.reshard import ReshardPlan\nimport sky\n",
+        "yeto/rl/adapters/miles/x.py": "import miles\nimport megatron.core\n",  # adapter: ok
         "yeto/rl/algos/a.py": "import importlib\nimportlib.import_module('sglang.srt')\n",
     })
     got = {(v.file, v.module) for v in scan(root)}
-    assert got == {("yeto/rl/engine/cut.py", "yeto.rl.engine.miles_adapter"),
+    assert got == {("yeto/rl/engine/cut.py", "yeto.rl.adapters"),
                    ("yeto/rl/engine/cut.py", "sky"), ("yeto/rl/algos/a.py", "sglang")}
 
 
@@ -225,11 +225,11 @@ def test_adapters_and_cloud_layer_rules(tmp_path):
     root = _tree(tmp_path, {
         "yeto/rl/adapters/verl/x.py": "from yeto.rl.adapters.miles import pins\n",
         "yeto/rl/adapters/miles/y.py": "import yeto.rl.adapters.miles.pins\n",  # own adapter: ok
-        "yeto/launcher.py": "from yeto.rl.engine.miles_adapter import entry\nimport sky\n",
+        "yeto/launcher.py": "from yeto.rl.adapters.miles import entry\nimport sky\n",
     })
     got = {(v.file, v.module) for v in scan(root)}
     assert got == {("yeto/rl/adapters/verl/x.py", "yeto.rl.adapters.miles"),
-                   ("yeto/launcher.py", "yeto.rl.engine.miles_adapter")}
+                   ("yeto/launcher.py", "yeto.rl.adapters")}
 
 
 def test_fixed_violation_still_listed_asks_to_delete_the_entry(tmp_path):
@@ -250,3 +250,53 @@ def test_allowlist_cap_only_goes_down(tmp_path):
 def test_allowlist_entries_carry_a_note():
     for key, note in load_allowlist().items():
         assert note.startswith("#"), f"allowlist entry {key} needs an audit note"
+
+
+# ------------------------------------------------- one import path per module
+# rl-code-quality-cleanup 0.5/0.6 (spec "模块只有一个正式引用路径"): the 46
+# forwarding stubs are gone; no file may import an old path.
+OLD_PATHS = ("yeto.rl.engine.miles_adapter",) + tuple(m for m in LEGACY if m != "yeto.rl.overlays")
+OLD_PATH_SCOPES = ("yeto", "tests", "scripts", "tools")
+
+
+def scan_old_paths(root: Path = REPO) -> list[str]:
+    out = []
+    for rel in _files(root, OLD_PATH_SCOPES):
+        try:
+            names = imported_names(root / rel, rel)
+        except SyntaxError:
+            continue
+        for line, name in names:
+            for old in OLD_PATHS:
+                if _matches(name, old):
+                    out.append(f"{rel}:{line} imports old path {name} (forwarding stub {old} was deleted)")
+    return sorted(set(out))
+
+
+def test_no_file_imports_an_old_forwarding_path():
+    found = scan_old_paths()
+    assert not found, "\n".join(found)
+
+
+def test_forwarding_stubs_are_gone():
+    assert not (REPO / "yeto/rl/engine/miles_adapter").exists()
+    for old in OLD_PATHS:
+        if old == "yeto.rl.learner":
+            continue  # command-line entry only (python -m), not importable
+        assert not (REPO / (old.replace(".", "/") + ".py")).exists(), old
+
+
+def test_old_path_import_is_reported(tmp_path):
+    root = _tree(tmp_path, {"tests/t.py": "from yeto.rl import learner\n",
+                            "tools/u.py": "import yeto.rl.engine.miles_adapter.entry\n"})
+    found = scan_old_paths(root)
+    assert len(found) == 2 and "tests/t.py:1" in found[0] and "tools/u.py:1" in found[1]
+
+
+def test_learner_entry_is_not_importable():
+    import importlib
+
+    import pytest
+
+    with pytest.raises(ImportError, match="command-line entry only"):
+        importlib.import_module(".".join(("yeto", "rl", "learner")))

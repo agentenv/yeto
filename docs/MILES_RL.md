@@ -775,7 +775,7 @@ identity keeps the normal in-phase recovery behavior instead.
 ## Engine selection
 
 `--rl-engine {legacy,ports}` selects how an island drives Miles. It is accepted
-by `yeto launch`, `python3 -m yeto.rl.learner`, the SSH harness (through the
+by `yeto launch`, `python3 -m yeto.rl.adapters.miles.island_entry`, the SSH harness (through the
 launch arguments), `scripts/benchmark_rl.py` and `yeto-rl-export`. The default
 is `ports`; the choice is never inferred from the model, island count or other
 flags, is fixed before startup, and does not change during a run.
@@ -851,7 +851,7 @@ it joins outer sync, and refuses to start if the hash differs.
 Where the spec comes from:
 
 1. `--rl-algorithm-spec PATH`, a v1 or v2 JSON file. `yeto launch` and
-   `python3 -m yeto.rl.learner` both accept it; it applies to `ports` only.
+   `python3 -m yeto.rl.adapters.miles.island_entry` both accept it; it applies to `ports` only.
 2. Without that flag, the legacy CLI builds the spec exactly as in R0.
 3. Mapped Miles flags found in the extra argv are absorbed into the spec.
 
@@ -859,7 +859,7 @@ A spec that only uses R0 fields keeps the R0 v1 canonical JSON, so its hash
 is unchanged. Setting any new field switches the spec to
 `yeto-rl-algorithm-spec-v2`.
 
-**Absorb and reject.** `yeto/rl/engine/miles_adapter/algorithm_flags.py` maps
+**Absorb and reject.** `yeto/rl/adapters/miles/algorithm_flags.py` maps
 each Miles flag to a spec field. Every flag in that table is adapter-owned:
 
 - A mapped flag in the extra argv is absorbed. It is recorded as
@@ -986,7 +986,7 @@ algorithm change declares it after its single-GPU smoke passes.
 `--rl-allow-unverified-mechanism DIMENSION:NAME` (repeatable, for example
 `features:clip_higher`) exempts only the named mechanisms from the "not
 declared" check, and only on a single-island run **without outer sync**.
-Every launched run and every `yeto.rl.learner` run joins a syncer, so today
+Every launched run and every `yeto.rl.adapters.miles.island_entry` run joins a syncer, so today
 the allowance is refused on those entry points; only the fake engine and the
 dry run (which models a sync-less single island) accept it.
 Every other check still applies. The allowance does not change the hash. It is
@@ -1714,7 +1714,7 @@ $M --dry-run --extra "--advantage-estimator ppo --gae-variant cross_segment_per_
 
 ### Port responsibilities
 
-| port | responsibility | Miles adapter (`yeto/rl/engine/miles_adapter/`) |
+| port | responsibility | Miles adapter (`yeto/rl/adapters/miles/`) |
 | --- | --- | --- |
 | `RolloutPool` | generate one rollout of complete groups from the published policy; members | `rollout.py` over `InferenceController` + `RolloutExecutor`; metadata from `rollout_meta_hook.py` inside the rollout process |
 | `TrainerGroup` | one optimizer step on an opaque batch; onload/offload; grad norm for the per-round invariant | `trainer.py` over the single-cell actor group |
@@ -1933,7 +1933,7 @@ it is rejected as undeclared without the allowances and accepted with them.
 
 ## Algorithm status matrix
 
-"Declared" means the Miles adapter (`yeto/rl/engine/miles_adapter/entry.py`,
+"Declared" means the Miles adapter (`yeto/rl/adapters/miles/entry.py`,
 `MILES_DECLARED`) accepts the mechanism without
 `--rl-allow-unverified-mechanism`, which requires GPU evidence that it takes
 effect. Declarations say nothing about training gains. G1 = single island on
@@ -2161,8 +2161,8 @@ The implementation is intentionally confined to the RL boundary:
 | --- | --- |
 | `yeto/rl/core.py` | canonical LoRA, deterministic RL fragments, policy snapshots |
 | `yeto/rl/decoupled.py` | raw anchors, BCAST/PULL/PUSH state, final cut and benchmark consolidation |
-| `yeto/rl/miles.py` | rollout-token validation, safe-boundary hook, island checkpoint |
-| `yeto/rl/learner.py` | Miles argument mapping and runtime configuration |
+| `yeto/rl/adapters/miles/legacy/engine.py` | rollout-token validation, safe-boundary hook, island checkpoint |
+| `yeto/rl/adapters/miles/island_entry.py` | Miles argument mapping and runtime configuration |
 | `yeto/rl/export.py` | authoritative checkpoint to standard PEFT |
 | `yeto/rl/initial_adapter.py` | validated Decoupled PEFT policy warm start |
 | `scripts/benchmark_rl.py` | equal-work native/strict/decoupled comparison |

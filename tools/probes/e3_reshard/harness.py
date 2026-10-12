@@ -101,7 +101,7 @@ def _layout(dp: int) -> dict[str, int]:
 
 def cut_context(backend: Backend, root: Path, cut_id: str, local_step: int):
     from yeto.rl.engine.cut import AlgorithmIdentity, CutProgress
-    from yeto.rl.engine.miles_adapter.trainer import CutContext
+    from yeto.rl.adapters.miles.trainer import CutContext
 
     gbs = backend.global_batch_size
     return CutContext(
@@ -124,21 +124,21 @@ def expectation(backend: Backend, source_dp: int, local_step: int):
 
 
 def _dump(backend: Backend, ev: Evidence, tag: str) -> None:
-    from yeto.rl.engine.miles_adapter.e3_probe import DUMP_STATE
+    from yeto.rl.adapters.miles.e3_probe import DUMP_STATE
 
     ev.event("dump", tag=tag, ranks=backend.plugin(DUMP_STATE, {"directory": str(ev.dir / "state"), "tag": tag}))
 
 
 def _probe(backend: Backend, ev: Evidence, when: str) -> None:
-    from yeto.rl.engine.miles_adapter.e3_probe import RANK_INFO
+    from yeto.rl.adapters.miles.e3_probe import RANK_INFO
 
     ev.event("rank_info", when=when, ranks=backend.plugin(RANK_INFO))
 
 
 def run_arm(spec: ArmSpec, backend: Backend, work: Path) -> Path:
     """Run one arm of plan-v3 §2.1 and return its evidence directory."""
-    from yeto.rl.engine.miles_adapter.e3_probe import DRAIN_PROBE, INSTALL_PROBE
-    from yeto.rl.engine.miles_adapter.reshard import ReshardPlan
+    from yeto.rl.adapters.miles.e3_probe import DRAIN_PROBE, INSTALL_PROBE
+    from yeto.rl.adapters.miles.reshard import ReshardPlan
 
     work = Path(work)
     cuts = work / "cuts"

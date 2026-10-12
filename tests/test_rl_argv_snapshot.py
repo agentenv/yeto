@@ -24,7 +24,7 @@ import os
 
 import pytest
 
-from yeto.rl import learner as rl_learner
+from yeto.rl.adapters.miles import island_entry as rl_learner
 from yeto.rl.engine import run_config as rc
 from yeto.rl.adapters.miles import lr_schedule as lrs
 from yeto.rl.engine.algorithm import AlgorithmSpec

@@ -66,8 +66,8 @@ cfg.validate()
 keys = ("app_name", "function_name", "gpu_request", "num_nodes", "gpu_exact", "retries", "timeout_s",
         "tape_volume_name", "tape_subdir", "cpu_request", "memory_request_mib", "image_ref")
 print("modal cfg:", {k: getattr(cfg, k, "<absent in this code>") for k in keys})
-learner = next(l for l in task.run.splitlines() if "-m yeto.rl.learner" in l)
-print("learner flags:", learner.split("-m yeto.rl.learner", 1)[1].strip())
+learner = next(l for l in task.run.splitlines() if "-m yeto.rl.adapters.miles.island_entry" in l)
+print("learner flags:", learner.split("-m yeto.rl.adapters.miles.island_entry", 1)[1].strip())
 print("algorithm sha:", args.rl_expected_algorithm_sha256)
 print("overlay:", getattr(args, "rl_miles_overlay", None)); import re as _re
 print("setup overlay lines:", [l.strip()[:160] for l in (task.setup or "").splitlines() if _re.search(r"REFUSING|sha256sum|git apply|overlay", l)][:12])

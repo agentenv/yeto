@@ -17,7 +17,7 @@ from yeto.protocol import (
     FinalManifest,
     PullRequest,
 )
-from yeto.rl import miles
+from yeto.rl.adapters.miles.legacy import engine as miles
 from yeto.rl.core import (
     LocalRoundStats,
     PolicySnapshot,

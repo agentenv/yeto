@@ -30,7 +30,7 @@ ENGINES = ("http://10.0.0.2:30000", "http://10.0.0.3:30000")
 
 def _miles_args(args):
     """The island's miles_args fields this path reads (as Miles' parser names them)."""
-    from yeto.rl import learner
+    from yeto.rl.adapters.miles import island_entry as learner
 
     miles_args = SimpleNamespace(
         yeto_rl_learner_id=0, num_steps_per_rollout=1, offload_train=False,
@@ -146,7 +146,7 @@ def _learner(tmp_path, monkeypatch, *cli):
 # ------------------------------------------------------------------ A2 follow-up: trainer determinism
 def test_cli_deterministic_trainer_reaches_every_ray_worker_with_the_te_switch(
         tmp_path, monkeypatch):
-    from yeto.rl import learner
+    from yeto.rl.adapters.miles import island_entry as learner
     from yeto.rl.adapters.miles.entry import DETERMINISM_ENV, connect_island_ray
 
     args = _learner(tmp_path, monkeypatch, "--rl-deterministic-trainer")

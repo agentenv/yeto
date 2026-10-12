@@ -25,7 +25,7 @@ from yeto_miles_secrlenv.client import (
     require_daemon_ready,
 )
 
-from yeto.rl import miles as rl_miles
+from yeto.rl.adapters.miles.legacy import engine as rl_miles
 
 
 class FakeMessage:

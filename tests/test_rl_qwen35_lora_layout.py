@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from yeto.rl import learner as rl_learner
+from yeto.rl.adapters.miles import island_entry as rl_learner
 from yeto.rl.core import CanonicalTensorSpec, canonical_layout_hash
 from yeto.rl.export import adapter_targets, attention_output_gated, derive_peft_lora_specs, target_modules
 

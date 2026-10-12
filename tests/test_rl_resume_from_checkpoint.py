@@ -387,7 +387,7 @@ def test_modal_island_config_mounts_the_store_volume(monkeypatch, tmp_path):
 def test_learner_resume_switches(tmp_path):
     from test_rl_engine_selection import _learner_argv
 
-    from yeto.rl import learner
+    from yeto.rl.adapters.miles import island_entry as learner
 
     argv = _learner_argv(("--rl-single-island-no-sync", "--rl-resume-store", "/s",
                           "--rl-cut-every", "2", "--rl-cut-keep", "3", "--rl-stop-after-rounds", "3"))

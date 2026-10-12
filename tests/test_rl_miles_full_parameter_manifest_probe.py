@@ -23,7 +23,7 @@ from miles.backends.megatron_utils.full_parameter_state import (
     FullParameterTopology,
     _layout_hash,
 )
-from yeto.rl import miles_full_parameter_manifest_probe as module
+from yeto.rl.adapters.miles.models import full_parameter_manifest_probe as module
 from yeto.rl.adapters.miles.models.full_parameter_manifest_probe import (
     MilesFullParameterManifestProbeSync,
 )

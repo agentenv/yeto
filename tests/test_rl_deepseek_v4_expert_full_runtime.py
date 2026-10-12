@@ -9,7 +9,7 @@ from types import ModuleType, SimpleNamespace
 import pytest
 import torch
 
-from yeto.rl import deepseek_v4_expert_full_runtime as runtime
+from yeto.rl.adapters.miles.models.deepseek_v4 import expert_full_runtime as runtime
 from yeto.rl.adapters.miles.models.deepseek_v4.expert_clone import (
     EXPERT_PARALLEL_SIZE,
     NUM_LAYERS,

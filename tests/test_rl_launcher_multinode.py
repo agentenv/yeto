@@ -344,7 +344,7 @@ def test_old_2x1_cfg_and_single_node_outputs_unchanged(monkeypatch, tmp_path):
 
 
 def test_learner_parses_bundle_map_into_the_run_config_layout():
-    from yeto.rl import learner
+    from yeto.rl.adapters.miles import island_entry as learner
     from yeto.rl.engine.run_config import _island_bundle_map
 
     payload = '{"rollout":[1],"standby":[3],"trainer":[0,2]}'

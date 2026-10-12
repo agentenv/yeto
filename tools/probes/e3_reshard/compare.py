@@ -34,7 +34,7 @@ SHORT_RUN_REL = 1e-2
 def _load(path: str) -> dict:
     import torch
 
-    from yeto.rl.engine.miles_adapter.cut_plugin import from_safe
+    from yeto.rl.adapters.miles.cut_plugin import from_safe
 
     return from_safe(torch.load(path, map_location="cpu", weights_only=True))
 
@@ -150,7 +150,7 @@ def _micro_batches(shards: list[dict]) -> set[tuple[int, ...]]:
 
 
 def g2(work: Path, a: str, b: str, *, gbs: int, mbs: int, dp: dict[str, int]) -> list[str]:
-    from yeto.rl.engine.miles_adapter.reshard import scheduled_partitions
+    from yeto.rl.adapters.miles.reshard import scheduled_partitions
 
     out = []
     ta, tb = _train(work, a, 3), _train(work, b, 3)

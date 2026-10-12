@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from yeto.rl import learner
+from yeto.rl.adapters.miles import island_entry as learner
 from yeto.rl.adapters.miles.algorithm_flags import legacy_algorithm_argv
 from yeto.rl.engine.algorithm import (
     BOUNDED_NONZERO_STD_FILTER,

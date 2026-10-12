@@ -15,7 +15,7 @@ import torch
 from yeto import launcher
 from yeto.cli import parse_args as parse_cli
 from yeto.launcher import _prepare_rl_args, make_miles_island_task
-from yeto.rl import learner as rl_learner
+from yeto.rl.adapters.miles import island_entry as rl_learner
 from yeto.rl.engine.selection import (
     UnsupportedPortsCombination,
     ports_rejections,
