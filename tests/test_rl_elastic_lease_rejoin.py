@@ -181,3 +181,20 @@ def test_rejoin_events_reach_the_island_tape(tmp_path):
     tape = [json.loads(x) for x in (tmp_path / "events.jsonl").read_text().splitlines()]
     assert [e["incarnation"] for e in tape if e["event"] == "elastic_rejoin"] == [1]
     c.close()
+
+
+def test_island_lease_default_is_the_same_in_syncer_cli_and_launcher():
+    """rl-code-quality-cleanup 0.8: a syncer started without --island-lease-s
+    uses the launcher's default."""
+    import re
+    from pathlib import Path
+
+    from yeto import launcher
+
+    repo = Path(__file__).resolve().parents[1]
+    main_rs = (repo / "syncer/src/main.rs").read_text()
+    m = re.search(r"default_value_t = ([0-9.]+)\)\]\s*island_lease_s: f64", main_rs)
+    assert m, "island_lease_s default not found in syncer/src/main.rs"
+    assert float(m.group(1)) == launcher.DEFAULT_ISLAND_LEASE_S == 300.0
+    cli = (repo / "yeto/cli.py").read_text()
+    assert f"{launcher.DEFAULT_ISLAND_LEASE_S:g}" in cli[cli.index('"--rl-island-lease-s"'):][:400]

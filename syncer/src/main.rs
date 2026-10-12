@@ -156,8 +156,9 @@ struct Args {
     /// it, so the first island to connect no longer decides the contract.
     #[arg(long)]
     expected_island_contract: Option<String>,
-    /// elastic: membership lease in seconds (no heartbeat -> removed).
-    #[arg(long, default_value_t = 30.0)]
+    /// elastic: membership lease in seconds (no heartbeat -> removed). Same
+    /// default as the launcher and `yeto --rl-island-lease-s` (300 s).
+    #[arg(long, default_value_t = 300.0)]
     island_lease_s: f64,
     /// elastic: fencing token of this syncer incarnation; bump on every
     /// restart (D-S6 will persist it in the checkpoint).
