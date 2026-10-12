@@ -1808,7 +1808,7 @@ def test_miles_argv_uses_provider_capabilities_without_model_family_branches(
         "/prompts.jsonl",
     ]
     assert eval_argv[eval_argv.index("--eval-function-path") + 1] == (
-        "yeto.rl.adapters.miles.legacy.engine.generate_rollout"
+        "yeto.rl.adapters.miles.models.rollout_legacy_port.generate_rollout"
     )
     assert eval_argv[eval_argv.index("--num-rollout") + 1] == "0"
     assert eval_argv[eval_argv.index("--eval-interval") + 1] == "1"

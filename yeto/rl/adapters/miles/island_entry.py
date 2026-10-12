@@ -1573,7 +1573,7 @@ def _legacy_miles_argv(config) -> list[str]:
         "--rollout-max-response-len", str(batch.rollout_max_response_len),
         "--rollout-function-path",
         (
-            "yeto.rl.adapters.miles.legacy.engine.generate_rollout"
+            "yeto.rl.adapters.miles.models.rollout_legacy_port.generate_rollout"
             if config.yeto_policy_sync
             else "miles.rollout.sglang_rollout.generate_rollout"
         ),
@@ -1600,7 +1600,7 @@ def _legacy_miles_argv(config) -> list[str]:
         values.extend(
             (
                 "--eval-function-path",
-                "yeto.rl.adapters.miles.legacy.engine.generate_rollout",
+                "yeto.rl.adapters.miles.models.rollout_legacy_port.generate_rollout",
                 "--eval-prompt-data",
                 evaluation.dataset_name,
                 evaluation.prompt_path,

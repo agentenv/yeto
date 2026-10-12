@@ -18,6 +18,7 @@ from yeto.protocol import (
     PullRequest,
 )
 from yeto.rl.adapters.miles.legacy import engine as miles
+from yeto.rl.adapters.miles.models import rollout_legacy_port as rollout_port
 from yeto.rl.core import (
     LocalRoundStats,
     PolicySnapshot,
@@ -540,7 +541,7 @@ def test_decoupled_rollout_reads_snapshot_token_from_island_checkpoint(tmp_path)
         completed_groups=[],
     )
 
-    assert miles._policy_token_for_rollout(rollout_args, 3) == snapshot.token
+    assert rollout_port._policy_token_for_rollout(rollout_args, 3) == snapshot.token
 
 
 @pytest.mark.parametrize(
@@ -1034,7 +1035,7 @@ def test_decoupled_completed_groups_restore_only_the_exact_snapshot(
     stale = [sample("yeto:3", 2), sample("yeto:3", 3)]
     source = SimpleNamespace(buffer=[valid, stale])
 
-    miles._save_completed_groups(args, 3, 4, source, {"reward": 1.0})
+    rollout_port._save_completed_groups(args, 3, 4, source, {"reward": 1.0})
 
     payload = miles._load_decoupled_checkpoint(args)
     assert payload["optimizer_steps"] == 3
@@ -1042,7 +1043,7 @@ def test_decoupled_completed_groups_restore_only_the_exact_snapshot(
     restored = SimpleNamespace(
         buffer=[], add_samples=lambda groups: restored.buffer.extend(groups)
     )
-    miles._restore_completed_groups(args, 3, restored)
+    rollout_port._restore_completed_groups(args, 3, restored)
     assert len(restored.buffer) == 1
 
 

@@ -180,7 +180,7 @@ def _args(**overrides):
         "external_policy_sync_path": (
             "yeto.rl.adapters.miles.models.sao_streaming.create_miles_sao_streaming_sync"
         ),
-        "rollout_function_path": "yeto.rl.adapters.miles.legacy.engine.generate_rollout",
+        "rollout_function_path": "yeto.rl.adapters.miles.models.rollout_legacy_port.generate_rollout",
         "yeto_rl_learner_id": 0,
         "yeto_rl_base_model_revision": "a" * 40,
         "num_steps_per_rollout": 1,

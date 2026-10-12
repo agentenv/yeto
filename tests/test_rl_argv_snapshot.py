@@ -118,6 +118,8 @@ def _lr_schedule_values(argv) -> dict[str, str]:
 # paths back so the digests prove nothing *else* changed (longest first).
 _PHASE4_MOVES = sorted([
     ("yeto.rl.adapters.miles.legacy.engine", "yeto.rl.miles"),
+    # rl-code-quality-cleanup 1.3: generate_rollout moved out of the legacy engine.
+    ("yeto.rl.adapters.miles.models.rollout_legacy_port", "yeto.rl.miles"),
     ("yeto.rl.adapters.miles.island_entry", "yeto.rl.learner"),
     ("yeto.rl.adapters.miles.overlay", "yeto.rl.miles_overlay"),
     ("yeto.rl.adapters.miles.overlays", "yeto.rl.overlays"),
