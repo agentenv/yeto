@@ -884,3 +884,96 @@ class MilesPublisher:
                                            expected_weight_version=token)
         await self._commit_version(token, epoch)
         return checksums
+
+
+# ---------------------------------------------------------------------------
+# Published policy identity (moved from the legacy engine, rl-code-quality-cleanup
+# 1.4).  Miles calls ``set_current_published_policy_identity`` through
+# ``--external-policy-identity-setter-path``; dense-full evaluation and the
+# SAO streaming runtime read it back.
+# ---------------------------------------------------------------------------
+def _policy_token(version: int) -> str:
+    return f"yeto:{version}"
+
+
+_PUBLISHED_POLICY_IDENTITY_ATTRIBUTE = "_yeto_rl_current_published_policy_identity"
+
+
+_LOWER_HEX = frozenset("0123456789abcdef")
+
+
+def _validate_published_policy_identity(
+    policy_version: Any,
+    policy_hash: Any,
+) -> tuple[int, str]:
+    if type(policy_version) is not int or policy_version < 0:
+        raise ValueError("published policy version must be a non-negative integer")
+    if (
+        type(policy_hash) is not str
+        or len(policy_hash) != 64
+        or any(character not in _LOWER_HEX for character in policy_hash)
+    ):
+        raise ValueError("published policy hash must be a lowercase SHA256")
+    return policy_version, policy_hash
+
+
+def set_current_published_policy_identity(
+    args: Any,
+    *,
+    policy_version: int,
+    policy_hash: str,
+) -> tuple[int, str]:
+    """Expose an inference-ready policy identity to trajectory admission.
+
+    The full-parameter policy hook calls this only after the exact policy has
+    been applied atomically to Miles and published successfully to SGLang.
+    """
+
+    identity = _validate_published_policy_identity(policy_version, policy_hash)
+    previous = getattr(args, _PUBLISHED_POLICY_IDENTITY_ATTRIBUTE, None)
+    if previous is not None:
+        if type(previous) is not tuple or len(previous) != 2:
+            raise RuntimeError("current published policy identity is malformed")
+        try:
+            previous_version, previous_hash = _validate_published_policy_identity(
+                *previous
+            )
+        except ValueError as error:
+            raise RuntimeError(
+                "current published policy identity is malformed"
+            ) from error
+        if policy_version < previous_version:
+            raise RuntimeError("published policy identity cannot move backwards")
+        if policy_version == previous_version and policy_hash != previous_hash:
+            raise RuntimeError("published policy hash changed at the same version")
+    setattr(args, _PUBLISHED_POLICY_IDENTITY_ATTRIBUTE, identity)
+    # The RolloutManager owns a serialized args namespace.  Installing the
+    # identity through its remote setter is therefore also the only reliable
+    # way to tell rollout admission and evaluation which exact published
+    # policy they are sampling.
+    args.yeto_rl_policy_token = f"yeto:{policy_version}:{policy_hash}"
+    args.yeto_rl_eval_policy_version = policy_version
+    args.yeto_rl_eval_policy_hash = policy_hash
+    return identity
+
+
+def get_current_published_policy_identity(
+    args: Any,
+    *,
+    expected_policy_version: int,
+) -> tuple[int, str]:
+    """Return the exact inference-ready identity or fail closed."""
+
+    _validate_published_policy_identity(expected_policy_version, "0" * 64)
+    identity = getattr(args, _PUBLISHED_POLICY_IDENTITY_ATTRIBUTE, None)
+    if type(identity) is not tuple or len(identity) != 2:
+        raise RuntimeError("Miles has no current published policy identity")
+    try:
+        policy_version, policy_hash = _validate_published_policy_identity(*identity)
+    except ValueError as error:
+        raise RuntimeError("current published policy identity is malformed") from error
+    if policy_version != expected_policy_version:
+        raise RuntimeError(
+            "current published policy version does not match the rollout"
+        )
+    return policy_version, policy_hash

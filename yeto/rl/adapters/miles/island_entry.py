@@ -2617,7 +2617,7 @@ def run_miles(
                 training_contract_hash
             )
             miles_args.external_policy_identity_setter_path = (
-                "yeto.rl.adapters.miles.legacy.engine.set_current_published_policy_identity"
+                "yeto.rl.adapters.miles.publish.set_current_published_policy_identity"
             )
             miles_args.yeto_rl_trajectory_evidence_dir = str(evidence_directory)
             miles_args.yeto_rl_trajectory_evidence_kind = "secrlenv"

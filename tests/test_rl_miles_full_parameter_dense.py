@@ -17,7 +17,7 @@ from yeto.rl.local_learner import (
     ParameterLayout,
     ParameterSpec,
 )
-from yeto.rl.adapters.miles.legacy.engine import (
+from yeto.rl.adapters.miles.publish import (
     get_current_published_policy_identity,
     set_current_published_policy_identity,
 )

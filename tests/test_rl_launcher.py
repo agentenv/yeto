@@ -2278,7 +2278,7 @@ def test_miles_dense_full_parameter_argv_and_runtime_contract(
     )
     assert (
         miles_args.external_policy_identity_setter_path
-        == "yeto.rl.adapters.miles.legacy.engine.set_current_published_policy_identity"
+        == "yeto.rl.adapters.miles.publish.set_current_published_policy_identity"
     )
     evidence = Path(miles_args.yeto_rl_trajectory_evidence_dir)
     assert evidence.parent == audit
