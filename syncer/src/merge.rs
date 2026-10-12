@@ -349,6 +349,26 @@ mod tests {
         v.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt()
     }
 
+    /// rl-code-quality-cleanup 2.5: the Python copy (yeto/rl/engine/island_ledger.py
+    /// merge_weight) writes this fixture (tests/test_rl_inter_island_rust_golden.py);
+    /// learner_weight must give the same f64, bit for bit.
+    #[test]
+    fn python_merge_weight_golden_matches() {
+        let text = include_str!("../tests/fixtures/merge_weight_golden.txt");
+        let mut n = 0;
+        for line in text.lines() {
+            let (lhs, rhs) = line.split_once(" => ").expect("golden line");
+            let mut it = lhs.split(' ');
+            let t: u64 = it.next().unwrap().parse().unwrap();
+            let c: u64 = it.next().unwrap().parse().unwrap();
+            let want: f64 = rhs.parse().unwrap();
+            let got = learner_weight(t, c);
+            assert_eq!(got.to_bits(), want.to_bits(), "{t} {c}: Rust {got:?} != Python {want:?}");
+            n += 1;
+        }
+        assert!(n >= 10);
+    }
+
     #[test]
     fn weight_formula() {
         assert_eq!(learner_weight(100, 10), 1000.0);
