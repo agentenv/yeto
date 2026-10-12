@@ -2005,3 +2005,19 @@ def test_apply_on_remote_rank_updates_fp32_masters_under_no_grad(monkeypatch):
     assert aligned == [7]
     assert child.state == {}
     assert backups == ["actor"]
+
+
+def test_round_stats_with_telemetry_prefers_the_typed_capsule():
+    """rl-code-quality-cleanup 1.6: moved from the legacy policy sync."""
+    import pytest
+
+    from yeto.rl.adapters.miles.models.deepseek_v4.expert_full_runtime import (
+        _TrainTelemetry,
+        round_stats_with_telemetry,
+    )
+
+    assert round_stats_with_telemetry(None, 0.1, 0.9, 0.2) == (0.1, 0.9, 0.2)
+    capsule = _TrainTelemetry(step=3, kl=0.5, ess=None, clipfrac=0.0)
+    assert round_stats_with_telemetry(capsule, 0.1, 0.9, 0.2) == (0.5, 0.9, 0.0)
+    with pytest.raises(RuntimeError, match="invalid typed training telemetry"):
+        round_stats_with_telemetry({"kl": 0.5}, 0.1, 0.9, 0.2)

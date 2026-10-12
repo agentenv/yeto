@@ -639,20 +639,14 @@ class MilesPolicySync:
             raise RuntimeError(
                 "Miles did not export valid round train statistics"
             ) from error
-        telemetry = getattr(train_state, "telemetry", None)
-        if telemetry is not None:
-            from yeto.rl.adapters.miles.models.deepseek_v4.expert_full_runtime import _TrainTelemetry
+        from yeto.rl.adapters.miles.models.deepseek_v4.expert_full_runtime import (
+            round_stats_with_telemetry,
+        )
 
-            if not isinstance(telemetry, _TrainTelemetry):
-                raise RuntimeError("Miles exported invalid typed training telemetry")
-            # ``deepseek_v4_expert_full_runtime`` has already reduced the
-            # metrics-owner dictionary to a closed scalar-only capsule.  Never
-            # forward the original Miles record or inspect arbitrary keys here.
-            mean_kl = telemetry.kl if telemetry.kl is not None else mean_kl
-            ess_ratio = telemetry.ess if telemetry.ess is not None else ess_ratio
-            clip_fraction = (
-                telemetry.clipfrac if telemetry.clipfrac is not None else clip_fraction
-            )
+        telemetry = getattr(train_state, "telemetry", None)
+        mean_kl, ess_ratio, clip_fraction = round_stats_with_telemetry(
+            telemetry, mean_kl, ess_ratio, clip_fraction
+        )
         if train_seconds < 0:
             raise RuntimeError("Miles exported a negative train duration")
         metrics = self._rollout_metrics(rollout_id)
