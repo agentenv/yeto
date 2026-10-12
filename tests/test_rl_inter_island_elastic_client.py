@@ -153,85 +153,9 @@ def test_join_refused_fails_fast():
     c.close()
 
 
-NAMES = ("base_model.model.a.lora_A.weight", "base_model.model.z.lora_B.weight")
-
-
-def _state(version, a, z):
-    return canonical_state(version, {NAMES[0]: torch.tensor([a], dtype=torch.float32),
-                                     NAMES[1]: torch.tensor(z, dtype=torch.float32).reshape(2, 1)},
-                           base_model_revision="a" * 40, lora_config_hash="b" * 64)
-
-
-class Runtime:
-    """Each local round adds +1 to every parameter of the applied policy."""
-
-    def __init__(self):
-        self.applied, self.rounds, self.shut, self.cur = [], [], False, None
-
-    def initialize(self):
-        return _state(0, [1.0, 2.0], [3.0, 4.0])
-
-    def apply_global_policy(self, state):
-        self.applied.append(state.policy_version)
-        self.cur = state
-
-    def run_local_round(self, *, expected_policy_version, groups, samples_per_group,
-                        optimizer_steps):
-        self.rounds.append(expected_policy_version)
-        return SimpleNamespace(action_tokens=50 + len(self.rounds))
-
-    def export_local_policy(self):
-        t = {k: v + 1.0 for k, v in self.cur.tensors.items()}
-        return canonical_state(self.cur.policy_version, t, base_model_revision="a" * 40,
-                               lora_config_hash="b" * 64)
-
-    def record_local_round(self, stats):
-        pass
-
-    def shutdown(self):
-        self.shut = True
-
-
-def _cfg(tmp_path):
-    return SimpleNamespace(learner_id=3, global_rounds=2, groups_per_round=1, samples_per_group=1,
-                           local_optimizer_steps=4, event_tape=str(tmp_path / "tape.jsonl"),
-                           syncer_addr=("x", 0), expected_specs=())
-
-
-def test_elastic_bridge_init_delta_base(tmp_path):
-    fake = FakeSyncer()
-    rt = Runtime()
-    br = bridge_mod.make_island_bridge(rt, _cfg(tmp_path), island_scheduling="elastic",
-                                       elastic_client=_client(fake), base_wait_s=5.0)
-    assert br.run() == 2
-    assert rt.rounds == [0, 1] and rt.applied == [0, 1, 2] and rt.shut
-    time.sleep(0.05)
-    inits = [m for m in fake.frames if isinstance(m, ElasticInit)]
-    assert inits == [ElasticInit(0, 3, (1.0, 2.0, 3.0, 4.0))]  # canonical (sorted) order
-    deltas = [m for m in fake.frames if isinstance(m, DeltaTensor)]
-    assert [(d.base_version, d.c_tokens, d.c_steps, d.update) for d in deltas] == [
-        (0, 51, 4, (1.0, 1.0, 1.0, 1.0)), (1, 52, 4, (1.0, 1.0, 1.0, 1.0))]
-    assert fake.base == [3.0, 4.0, 5.0, 6.0]
-    assert isinstance(fake.frames[-1], Leave)
-    assert not any(isinstance(m, DeltaReady) for m in fake.frames)  # tensor run: no DELTA_READY
-
-
-def test_catch_up_island_uses_existing_base(tmp_path):
-    fake = FakeSyncer(catch_up=True, base=[9.0, 9.0, 9.0, 9.0])
-    rt = Runtime()
-    cfg = _cfg(tmp_path); cfg.global_rounds = 1
-    bridge_mod.make_island_bridge(rt, cfg, island_scheduling="elastic",
-                                  elastic_client=_client(fake), base_wait_s=5.0).run()
-    assert not any(isinstance(m, ElasticInit) for m in fake.frames)
-    assert rt.applied == [0, 1]
-
-
-def test_legacy_factory_is_strict_bridge(monkeypatch):
-    made = []
-    monkeypatch.setattr(bridge_mod, "StrictRlBridge", lambda r, c: made.append((r, c)) or "strict")
-    assert bridge_mod.make_island_bridge("rt", "cfg") == "strict" and made == [("rt", "cfg")]
-    with pytest.raises(ValueError):
-        bridge_mod.make_island_bridge("rt", "cfg", island_scheduling="auto")
+# rl-code-quality-cleanup 2.1: ElasticRlBridge / make_island_bridge (no production
+# caller) were deleted with their tests; the elastic island path is
+# yeto.rl.engine.bridges.ElasticAvgSync.
 
 
 def test_legacy_never_imports_elastic_client():

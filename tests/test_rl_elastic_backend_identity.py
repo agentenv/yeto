@@ -60,9 +60,8 @@ def test_config_identity_bytes():
 
 
 def test_bridges_pass_identity_to_the_elastic_client(monkeypatch):
-    """Both elastic bridge paths build the client with BridgeConfig.backend_identity_sha256."""
+    """The elastic bridge builds the client with BridgeConfig.backend_identity_sha256."""
     import yeto.rl.elastic_client as ec
-    from yeto.rl.bridge import make_island_bridge
     from yeto.rl.engine.bridges import ElasticAvgSync
 
     seen = []
@@ -75,12 +74,8 @@ def test_bridges_pass_identity_to_the_elastic_client(monkeypatch):
     monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "k")
     cfg = SimpleNamespace(syncer_addr=("x", 0), learner_id=1, backend_identity_sha256=MILES.sha256(),
                           expected_specs=(), global_rounds=1, local_optimizer_steps=1)
-    try:
-        make_island_bridge(SimpleNamespace(), cfg, island_scheduling="elastic")
-    except Exception:  # noqa: BLE001 -- only the client construction matters here
-        pass
     ElasticAvgSync(cfg)._client()
-    assert seen == [MILES.sha256(), MILES.sha256()]
+    assert seen == [MILES.sha256()]
 
 
 def _free_port() -> int:

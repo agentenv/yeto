@@ -12,8 +12,6 @@ from yeto.rl.critic_state import (
     CriticLayoutMismatch,
     CriticRoundMismatch,
     CriticRoundReceipt,
-    RoleAverageFailed,
-    TwoRoleStrictAvg,
     check_critic_layouts,
     critic_layout_hash,
     critic_weights_sha256,
@@ -91,61 +89,6 @@ def test_critic_layout_mismatch_refused():
 
 
 # -- 4.2 ------------------------------------------------------------------------------
-
-
-def _islands(n=2):
-    """Fake two islands: each trains actor/critic tensors from the committed round."""
-    engines = [FakeEngine(tensors={NAME: torch.zeros(1, 2)}, critic=True, step_delta=float(i + 1),
-                          critic_tensors={"output_layer.weight": torch.zeros(1, 2)})
-               for i in range(n)]
-    return engines
-
-
-def _local(engines, committed):
-    out = {}
-    for i, e in enumerate(engines):
-        e.tensors = {k: v.clone() for k, v in committed.actor.items()}
-        e.critic_tensors = {k: v.clone() for k, v in committed.critic.items()}
-        e.tensors = {k: v + (i + 1) for k, v in e.tensors.items()}
-        e.critic_tensors = {k: v + 10 * (i + 1) for k, v in e.critic_tensors.items()}
-        out[i] = (e.tensors, e.critic_tensors)
-    return out
-
-
-def test_two_islands_strict_avg_both_roles_hash_consistent():
-    engines = _islands()
-    sync = TwoRoleStrictAvg({NAME: torch.zeros(1, 2)}, {"output_layer.weight": torch.zeros(1, 2)})
-    committed = sync.round(_local(engines, sync.committed),
-                           receipts={0: receipt(), 1: receipt()})
-    assert committed.version == 1
-    assert torch.equal(committed.actor[NAME], torch.full((1, 2), 1.5))
-    assert torch.equal(committed.critic["output_layer.weight"], torch.full((1, 2), 15.0))
-    applied = [(critic_weights_sha256(committed.actor), critic_weights_sha256(committed.critic))
-               for _ in engines]  # both islands apply the same committed round
-    assert len(set(applied)) == 1
-
-
-def test_critic_average_failure_rolls_back_the_whole_round():
-    engines = _islands()
-
-    def broken(states):
-        raise RuntimeError("critic syncer lost a fragment")
-
-    sync = TwoRoleStrictAvg({NAME: torch.zeros(1, 2)}, {"output_layer.weight": torch.zeros(1, 2)},
-                            average_critic=broken)
-    before = (sync.committed.version, sync.committed.actor_sha256, sync.committed.critic_sha256)
-    with pytest.raises(RoleAverageFailed, match="not committed, both roles stay at round 0"):
-        sync.round(_local(engines, sync.committed))
-    assert (sync.committed.version, sync.committed.actor_sha256,
-            sync.committed.critic_sha256) == before
-
-
-def test_layout_mismatch_refuses_the_round_before_averaging():
-    sync = TwoRoleStrictAvg({NAME: torch.zeros(1, 2)}, {"output_layer.weight": torch.zeros(1, 2)})
-    with pytest.raises(CriticLayoutMismatch):
-        sync.round(_local(_islands(), sync.committed),
-                   receipts={0: receipt(), 1: receipt(critic_layout_hash="e" * 64)})
-    assert sync.committed.version == 0
 
 
 # -- 4.3 ------------------------------------------------------------------------------
