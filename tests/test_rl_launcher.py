@@ -1740,7 +1740,7 @@ def test_miles_argv_uses_provider_capabilities_without_model_family_branches(
     assert argv[roles + 1 : roles + 3] == ["tool", "user"]
     assert (
         argv[argv.index("--rollout-all-samples-process-path") + 1]
-        == "yeto.rl.adapters.miles.legacy.engine.queue_completed_groups"
+        == "yeto.rl.adapters.miles.models.rollout_legacy_port.queue_completed_groups"
     )
     assert (
         argv[argv.index("--external-policy-sync-path") + 1]

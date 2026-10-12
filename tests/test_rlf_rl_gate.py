@@ -350,7 +350,7 @@ def test_tape_trajectory_rewards_fail_closed(tmp_path):
 
 def test_emit_sample_outcomes_writes_tape(tmp_path, monkeypatch):
     from types import SimpleNamespace
-    from yeto.rl.adapters.miles.legacy import engine as legacy_engine
+    from yeto.rl.adapters.miles.models import rollout_legacy_port as legacy_engine
     tape = tmp_path / "rl-island-0.jsonl"
     monkeypatch.setattr("yeto.rl.wandb_rl.tee", lambda *a, **k: None)
     args = SimpleNamespace(yeto_rl_event_tape=str(tape), yeto_rl_learner_id=0,

@@ -1162,7 +1162,7 @@ def test_island_checkpoint_restores_only_complete_same_policy_groups(
 
     def generate(_args, _rollout_id, data_source, evaluation=False):
         assert not evaluation
-        miles.queue_completed_groups(
+        rollout_port.queue_completed_groups(
             _args, [used, unused, incomplete], data_source.get_samples
         )
         return SimpleNamespace(samples=[used], metrics={"reward": 2.0})
@@ -1235,8 +1235,7 @@ def test_queue_completed_groups_filters_zero_variance_groups_and_records_replace
         n_samples_per_prompt=2,
         dynamic_sampling_filter_path="test.filter",
     )
-    monkeypatch.setattr(
-        miles,
+    monkeypatch.setattr(rollout_port,
         "_dynamic_sampling_filter",
         lambda _args: (
             lambda _args, group: SimpleNamespace(
@@ -1249,7 +1248,7 @@ def test_queue_completed_groups_filters_zero_variance_groups_and_records_replace
     )
     source = DataSource()
 
-    miles.queue_completed_groups(args, [kept, dropped], source.get_samples)
+    rollout_port.queue_completed_groups(args, [kept, dropped], source.get_samples)
 
     assert source.buffer == [kept]
     assert args._yeto_dynamic_sampling_stats == {

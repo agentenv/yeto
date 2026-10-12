@@ -215,7 +215,6 @@ from yeto.rl.adapters.miles.publish import (  # noqa: E402
 )
 # generate_rollout and its queue/SecRLEnv helpers (rl-code-quality-cleanup 1.3).
 from yeto.rl.adapters.miles.models.rollout_legacy_port import (  # noqa: E402
-    _complete_group_for_policy,
     _policy_token_for_rollout,
     _record_strict_failure,
 )
@@ -243,108 +242,6 @@ def _require_training_progress(stats: LocalRoundStats) -> None:
         f"{stats.completed_trajectories} trained samples had nonzero "
         "advantages; the round's local state was not submitted",
     )
-
-
-def _dynamic_sampling_filter(args):
-    """Load the optional Miles group filter once per learner process."""
-
-    path = getattr(args, "dynamic_sampling_filter_path", None)
-    if not path:
-        return None
-    cached = getattr(args, "_yeto_dynamic_sampling_filter", None)
-    if cached is None:
-        from miles.utils.misc import load_function
-
-        cached = load_function(path)
-        args._yeto_dynamic_sampling_filter = cached
-    return cached
-
-
-def _dynamic_sampling_keep(args, group: object) -> tuple[bool, str | None]:
-    filter_fn = _dynamic_sampling_filter(args)
-    if filter_fn is None:
-        return True, None
-    result = filter_fn(args, group)
-    keep = bool(getattr(result, "keep", result))
-    reason = getattr(result, "reason", None)
-    return keep, None if reason is None else str(reason)
-
-
-def queue_completed_groups(args, all_samples, data_source) -> None:
-    """Retain complete oversampling results until this round selects its batch."""
-
-    source = getattr(data_source, "__self__", None)
-    if source is None or not callable(getattr(source, "add_samples", None)):
-        raise RuntimeError("pinned Miles did not provide a bound data source method")
-    complete = [
-        group
-        for group in all_samples
-        if _complete_group_for_policy(
-            group,
-            _policy_token_for_rollout(
-                args,
-                args.yeto_rl_policy_version,
-            ),
-            args.n_samples_per_prompt,
-        )
-    ]
-    kept = []
-    dropped = 0
-    drop_reasons: dict[str, int] = {}
-    for group in complete:
-        keep, reason = _dynamic_sampling_keep(args, group)
-        if keep:
-            kept.append(group)
-            continue
-        dropped += 1
-        if reason:
-            drop_reasons[reason] = drop_reasons.get(reason, 0) + 1
-    args._yeto_dynamic_sampling_stats = {
-        "generated_groups": len(complete),
-        "accepted_groups": len(kept),
-        "dropped_groups": dropped,
-        "drop_reasons": drop_reasons,
-    }
-    _emit_sample_outcomes(args, complete)
-    source.add_samples(kept)
-
-
-def _emit_sample_outcomes(args, complete: list[list[Any]]) -> None:
-    """rlf-codex-rl 5.8: per-sample reward/success onto the event tape.
-
-    The ports bridge can only persist an empty completed-group queue, so the
-    RL gate's sample-level evidence must ride the tape (which is mirrored to
-    the Modal volume and survives the island). Fail-closed: a sample without
-    a numeric reward is skipped, and the gate rejects a tape with gaps.
-    """
-    if not getattr(args, "yeto_rl_event_tape", None):
-        return
-    from yeto.rl.engine.events import write_event
-
-    policy_version = int(getattr(args, "yeto_rl_policy_version", -1))
-    for group_index, group in enumerate(complete):
-        for index, sample in enumerate(group):
-            first = sample[0] if isinstance(sample, list) else sample
-            to_dict = getattr(first, "to_dict", None)
-            if not callable(to_dict):
-                continue
-            data = to_dict()
-            reward = data.get("reward")
-            if not isinstance(reward, (int, float)) or isinstance(reward, bool):
-                continue
-            metadata = data.get("metadata") or {}
-            write_event(
-                args,
-                {
-                    "event": "rl_sample_outcome",
-                    "policy_version": policy_version,
-                    "group_index": group_index,
-                    "index": index,
-                    "task_id": metadata.get("rlf_task_id") or metadata.get("task_id"),
-                    "reward": float(reward),
-                    "success": bool(metadata["success"]) if "success" in metadata else None,
-                },
-            )
 
 
 class _BridgeRuntime:

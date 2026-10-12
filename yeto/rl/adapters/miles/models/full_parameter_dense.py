@@ -398,7 +398,7 @@ class MilesFullParameterDenseSync:
         self.current = None
 
     def _append_event(self, event: dict[str, Any]) -> None:
-        from yeto.rl.adapters.miles.legacy.engine import _append_rl_event
+        from yeto.rl.engine.events import append_tape_event as _append_rl_event
 
         _append_rl_event(self.args, event)
 

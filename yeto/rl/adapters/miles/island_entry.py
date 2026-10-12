@@ -1694,7 +1694,7 @@ def _legacy_miles_argv(config) -> list[str]:
         values.extend(
             (
                 "--rollout-all-samples-process-path",
-                "yeto.rl.adapters.miles.legacy.engine.queue_completed_groups",
+                "yeto.rl.adapters.miles.models.rollout_legacy_port.queue_completed_groups",
                 "--external-policy-sync-path",
                 policy_sync_path,
             )
