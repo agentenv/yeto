@@ -651,42 +651,15 @@ def install_event_echo() -> bool:
     if echo_enabled():
         return False
     enable_echo()
-    from yeto.rl.adapters.miles.legacy import engine as miles
-
-    if "append_record" not in miles._append_rl_event.__code__.co_names:
-        _wrap_legacy_tape_writer(miles)  # a writer not yet on append_record
+    # The tape writer (yeto.rl.engine.events.append_tape_event) writes through
+    # event_echo.append_record, so enabling the echo is enough; the old
+    # code-object probe for a pre-append_record writer is gone
+    # (rl-code-quality-cleanup 1.9).
     return True
 
 
-def _wrap_legacy_tape_writer(miles) -> None:
-    """Echo for a ``_append_rl_event`` that writes the file itself (pre
-    echo-writers patch): read back exactly the whole lines it appended."""
-
-    import threading
-
-    from yeto.rl.event_echo import PREFIX
-
-    original = miles._append_rl_event
-    lock = threading.Lock()
-
-    def echo(args, event):
-        with lock:
-            path = Path(args.yeto_rl_event_tape).expanduser()
-            before = path.stat().st_size if path.exists() else 0
-            original(args, event)
-            with path.open("rb") as handle:
-                handle.seek(before)
-                data = handle.read()
-        written = data[: data.rfind(b"\n") + 1].decode("utf-8")
-        for line in written.splitlines():
-            if line.strip():
-                print(PREFIX + line, flush=True)
-
-    miles._append_rl_event = echo
-
-
 def _append_ports_event(args, miles_args, event: dict) -> None:
-    from yeto.rl.adapters.miles.legacy.engine import _append_rl_event
+    from yeto.rl.engine.events import append_tape_event as _append_rl_event
 
     miles_args.yeto_rl_event_tape = args.event_tape
     miles_args.yeto_rl_learner_id = args.learner_id
