@@ -59,6 +59,10 @@ from . import (
     SGLANG_NEXT_REPOSITORY,
     SGLANG_REPOSITORY,
     SIGNED_CODEX_AGENTS,
+    TMS_PRELOAD_BASE_BINARY_SHA256,
+    TMS_PRELOAD_PATCH_BASE_COMMIT,
+    TMS_PRELOAD_PATCH_COMMIT,
+    TMS_PRELOAD_PATCH_REPOSITORY,
 )
 from .core import CanonicalTensorSpec, canonical_state, policy_hash, tensors_from_flat
 
@@ -67,15 +71,9 @@ SYNCER_PORT = 29400
 RAY_PORT = 6379
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_REMOTE_ROOT = ".cache/yeto-rl-ssh"
-TMS_PRELOAD_PATCH_REPOSITORY = "https://github.com/fzyzcjy/torch_memory_saver"
-TMS_PRELOAD_PATCH_BASE_COMMIT = "fdb09ad342f8d150e11afe719f798453cef742ad"
-TMS_PRELOAD_PATCH_COMMIT = "d7a3a51bce723a80736dabf233017b927de03df8"
 TMS_PRELOAD_PATCH_CONTAINER_PATH = (
     "/usr/local/lib/python3.12/dist-packages/"
     "torch_memory_saver_hook_mode_preload_cu13.abi3.so"
-)
-TMS_PRELOAD_BASE_BINARY_SHA256 = (
-    "c26551247616cabb0bb79dbd26abb61a688a4bb47c9b6a6f9873cfc98093640d"
 )
 TMS_TRAIN_DISK_BACKUP_CONTAINER_PATH = "/workspace/tms-disk-backup"
 TMS_TRAIN_DISK_BACKUP_DEFAULT_CHUNK_MB = 256

@@ -31,6 +31,7 @@ from yeto.rl.engine.capabilities import R0_MECHANISMS, EngineCapabilities, Execu
 from .traits import MILES_TRAITS
 from . import LoopRunner
 from .config import MilesConfigError, check_harness_reward_scope
+from .pins import miles_fork_lineage_from
 
 ENGINE_NAME = "miles-upstream"
 
@@ -201,37 +202,8 @@ if NEVER_DECLARABLE & set(MILES_DECLARED):  # pragma: no cover - guarded by test
 # weight_update/protocols/broadcast.py, utils/workers/ray_worker_manager.py and
 # parser entries in arguments.py -- no loss_hub/training-loss file (evidence
 # .../evidence/ports-image/2026-10-02-m3a27).
-_PINS_0AF62F4D_PLUS = frozenset({
-    "0af62f4d48ed6a5b185c257578d8f7e22312aa87",
-    "5c1b49ebccbc7508c1d9ef89eacc2db3e448b6ba",
-    "2f23a0fca9b80f6a7300da401703c343014b03c0",
-    "fb04d6ffa30edc28c7ba0a2e88802a84bbbd28f9",
-    "e3a11ab38cbb7fd911b23fdd62a4eb6dfbb1c841",
-    "1023269412bf4e54a1d95c8d2deaee795871aa72",
-    # c35702e = 1023269 + A27-2 (857fc9592): megatron_utils/actor.py, weight_update/
-    # updater.py + protocols/broadcast.py, ray/train/{cell,group}.py,
-    # utils/workers/worker_handle.py -- engine-failure propagation only, no loss path
-    # (evidence .../evidence/ports-image/2026-10-02-m3a27b).
-    "c35702eefcf2862cee155e46870e6ad30568d2c6",
-    # 8bc52237a = c35702e + s16-raw-lora-disagg (weight_update/protocols/broadcast.py placement +
-    # megatron_utils/actor.py guard + update_weight/hf_weight_iterator.py comment): no loss path.
-    "8bc52237a1102306abd8f89a2ea2090aa2df6850",
-    # efbbc63ea = 8bc52237a + s18-abort-discard-stats (rollout/sglang_rollout.py abort tallies
-    # discarded groups/samples/response tokens): rollout bookkeeping only, no loss path.
-    "efbbc63ea0e8c6dcbc200ad5df5bc56badfce7bf",
-    # 2f7871fb2 = efbbc63ea + inference_rollout_train.abort tally / failed surplus group
-    # tolerated: rollout bookkeeping only, no loss path.
-    "2f7871fb2e80d37420b16ef81f001c7b0ba8e32e",
-    # ddce20992 = 2f7871fb2 + s18-agentic-suspend (inference_rollout_train/common suspend/resume of
-    # agentic groups between model turns, arguments.py flags, utils/misc.py hook loader):
-    # rollout scheduling only, no loss path.
-    "ddce20992c9ee82270a22e259e9e2bf55f3053d1",
-    # 64b591a4b = ddce20992 + critic family (yeto-critic-c357 6574a9c82 commits cherry-picked:
-    # --gae-variant, VAPO positive LM loss, SAO DIS / HL-Gauss, critic epochs/freeze, value head)
-    # + rl-algo-supplement dual_clipfrac / over-sampling tally (S19 #1).  Every new flag defaults
-    # off; with defaults the loss is bitwise unchanged (fork test_ppo_gae_variants vs _gae_orig).
-    "64b591a4bec1ffa37fb089d3e3b99c84773b1ffc",
-})
+# Derived from the single lineage in pins.py (0.7): 0af62f4d and every later commit.
+_PINS_0AF62F4D_PLUS = miles_fork_lineage_from("0af62f4d48ed6a5b185c257578d8f7e22312aa87")
 _PINS_SUPP = frozenset({"64b591a4bec1ffa37fb089d3e3b99c84773b1ffc"})
 MILES_DECLARED_PINS: dict[str, frozenset[str]] = {
     # before 0af62f4d the LoRA bridge ignored calculate_per_token_loss (g1c:

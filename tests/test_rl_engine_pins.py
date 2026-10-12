@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import types
+from pathlib import Path
 
 import pytest
 
@@ -197,3 +198,39 @@ def test_verify_miles_revision_ports_rejects_dirty_tree(tmp_path, monkeypatch):
     )
     with pytest.raises(RuntimeError, match="not clean"):
         verify(tmp_path, expected=rl.MILES_NEXT_PINS)
+
+
+# -- rl-code-quality-cleanup 0.7: one source for fork lineage and harness pins --
+def test_fork_lineage_is_the_single_source_of_every_fork_commit_set():
+    from yeto.rl.adapters.miles import entry
+    from yeto.rl.adapters.miles import pins
+    from yeto.rl.algos import critic_fork, loss_variants
+
+    lineage = pins.MILES_FORK_LINEAGE
+    assert len(set(lineage)) == len(lineage) and lineage[-1] == rl.MILES_NEXT_COMMIT
+    # Miles declarations: 0af62f4d onwards; loss variants: 5c1b49eb onwards (one fewer).
+    assert entry._PINS_0AF62F4D_PLUS == frozenset(lineage)
+    assert loss_variants.FORK_COMMITS == frozenset(lineage[1:])
+    assert loss_variants.FORK_COMMITS < entry._PINS_0AF62F4D_PLUS
+    assert critic_fork.FORK_COMMITS == frozenset(pins.CRITIC_FORK_LINEAGE)
+    assert critic_fork.CRITIC_FORK_PIN == pins.CRITIC_FORK_LINEAGE[-1]
+
+
+def test_appending_a_fork_commit_reaches_every_derived_set(monkeypatch):
+    from yeto.rl.adapters.miles import pins
+
+    new = "f" * 40
+    monkeypatch.setattr(pins, "MILES_FORK_LINEAGE", pins.MILES_FORK_LINEAGE + (new,))
+    assert new in pins.miles_fork_lineage_from(pins.MILES_FORK_LINEAGE[0])
+    assert new in pins.miles_fork_lineage_from("5c1b49ebccbc7508c1d9ef89eacc2db3e448b6ba")
+
+
+def test_ssh_harness_pins_come_from_the_pin_module():
+    from yeto.rl import ssh_harness
+    from yeto.rl.adapters.miles import pins
+
+    for name in ("TMS_PRELOAD_PATCH_REPOSITORY", "TMS_PRELOAD_PATCH_BASE_COMMIT",
+                 "TMS_PRELOAD_PATCH_COMMIT", "TMS_PRELOAD_BASE_BINARY_SHA256"):
+        assert getattr(ssh_harness, name) == getattr(pins, name)
+    source = (Path(ssh_harness.__file__)).read_text()
+    assert 'TMS_PRELOAD_PATCH_COMMIT = "' not in source

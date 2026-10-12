@@ -43,13 +43,13 @@ The mechanisms stay undeclared (``--rl-allow-unverified-mechanism``) until GPU G
 
 from __future__ import annotations
 
-# Full SHAs of fork commits carrying every critic-family flag above.
-FORK_COMMITS: frozenset[str] = frozenset({
-    "6e7365b602ecf5d83d16169e87f4d78f4daf5f86",  # yeto-critic-c357 (local, on c35702e)
-    "6574a9c82edeed17f4b00bc64db6c7cd6b45cb39",  # yeto-critic-c357-tied: + critic value head on language_model (Qwen3.5 tied)
-})
+from yeto.rl import CRITIC_FORK_LINEAGE
 
-CRITIC_FORK_PIN = "6574a9c82edeed17f4b00bc64db6c7cd6b45cb39"
+# Full SHAs of fork commits carrying every critic-family flag above; derived
+# from the single lineage in adapters/miles/pins.py (0.7).
+FORK_COMMITS: frozenset[str] = frozenset(CRITIC_FORK_LINEAGE)
+
+CRITIC_FORK_PIN = CRITIC_FORK_LINEAGE[-1]
 
 
 def fork_carries_critic_family(commit: str | None = None) -> bool:
