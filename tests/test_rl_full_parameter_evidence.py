@@ -1,12 +1,15 @@
 """Ports rollout hook writes the full-parameter trajectory evidence (P0-1.7b.3).
 
-The legacy ``rollout_legacy_port.generate_rollout`` used to be the only
-writer; on ports the ``record_trained_groups`` hook binds the accepted batch
-to the policy token the driver published for the round.
+The ``record_trained_groups`` hook is the one writer: it binds the kept batch,
+after the final loss masks, to the policy token the driver published for the
+round.  ``rollout_legacy_port.generate_rollout`` (still the ports
+``--rollout-function-path``) no longer writes evidence; a second write of the
+same round would fail the exclusive create or bind the pre-filter batch.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -66,8 +69,20 @@ def test_published_token_binds_round_and_behavior_policy(tmp_path, written):
     assert write == ("write", str(tmp_path / "evidence"), ("evidence", 7))
 
 
-def test_without_an_evidence_dir_nothing_is_written(written):
-    evidence.persist_published_round_evidence(SimpleNamespace(), [["sample"]], None)
+def _kept_batch():
+    return [[SimpleNamespace(group_index=0, index=0, tokens=[1], response_length=1,
+                             loss_mask=[1], metadata={}, status=None)]]
+
+
+def _hook_round(tmp_path, monkeypatch, rollout_id: int) -> None:
+    monkeypatch.setenv(hook.META_SINK_ENV, f"dir:{tmp_path}")
+    hook.put_policy_token(f"yeto:{rollout_id}:{POLICY_HASH}", f"dir:{tmp_path}")
+    monkeypatch.setattr("yeto.rl.algos.sample_filters.apply_sample_filters", lambda *_a: None)
+
+
+def test_without_an_evidence_dir_the_hook_writes_nothing(tmp_path, monkeypatch, written):
+    _hook_round(tmp_path, monkeypatch, 2)
+    hook.record_trained_groups(SimpleNamespace(), _kept_batch())
     assert written == []
 
 
@@ -86,15 +101,30 @@ def test_unbound_context_fails_closed(tmp_path, written, overrides, token, messa
     assert written == []
 
 
-def test_record_trained_groups_writes_the_kept_batch(tmp_path, monkeypatch, written):
-    monkeypatch.setenv(hook.META_SINK_ENV, f"dir:{tmp_path}")
-    hook.put_policy_token(f"yeto:2:{POLICY_HASH}", f"dir:{tmp_path}")
-    monkeypatch.setattr("yeto.rl.algos.sample_filters.apply_sample_filters", lambda *_a: None)
-    kept = [[SimpleNamespace(group_index=0, index=0, tokens=[1], response_length=1,
-                             loss_mask=[1], metadata={}, status=None)]]
+def test_record_trained_groups_writes_the_kept_batch_once(tmp_path, monkeypatch, written):
+    _hook_round(tmp_path, monkeypatch, 2)
+    kept = _kept_batch()
 
     hook.record_trained_groups(_args(tmp_path), kept)
 
-    (built_groups, fields), _ = written
+    (built_groups, fields), write = written
     assert built_groups is kept
     assert (fields["rollout_id"], fields["behavior_policy_hash"]) == (2, POLICY_HASH)
+    assert write == ("write", str(tmp_path / "evidence"), ("evidence", 2))
+
+
+def test_the_hook_is_the_only_evidence_writer():
+    """No rollout function writes round evidence beside the hook (one per round)."""
+
+    root = Path(evidence.__file__).resolve().parents[5]
+    writers = sorted(
+        str(path.relative_to(root))
+        for path in (root / "yeto").rglob("*.py")
+        if "write_trajectory_batch_evidence(" in path.read_text(encoding="utf-8")
+        or "persist_published_round_evidence(" in path.read_text(encoding="utf-8")
+    )
+    assert writers == [
+        "yeto/rl/adapters/miles/full_parameter/evidence.py",
+        "yeto/rl/adapters/miles/rollout_meta_hook.py",
+        "yeto/rl/trajectory_evidence.py",
+    ]

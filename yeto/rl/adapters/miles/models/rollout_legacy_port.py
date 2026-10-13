@@ -42,10 +42,7 @@ from yeto.rl.engine.progress import (
 )
 from yeto.rl.compaction import validate_compaction_segments
 from yeto.rl.engine.events import append_tape_event as _append_rl_event
-from yeto.rl.adapters.miles.publish import (
-    _policy_token,
-    get_current_published_policy_identity,
-)
+from yeto.rl.adapters.miles.publish import _policy_token
 
 
 def _validate_rollout_groups(data: object, groups: int, samples: int) -> None:
@@ -685,25 +682,6 @@ def _attach_eval_scalar_metrics(output: Any) -> list[dict[str, Any]]:
     return results
 
 
-def _persist_trajectory_evidence(args: Any, rollout_id: int, groups: Any) -> None:
-    """Persist the closed accepted batch before Miles discards Sample metadata."""
-
-    from yeto.rl.adapters.miles.full_parameter.evidence import (
-        evidence_enabled,
-        persist_round_evidence,
-    )
-
-    if not evidence_enabled(args):
-        return
-    _, policy_hash = get_current_published_policy_identity(
-        args,
-        expected_policy_version=rollout_id,
-    )
-    persist_round_evidence(
-        args, groups, rollout_id=rollout_id, behavior_policy_hash=policy_hash
-    )
-
-
 def generate_rollout(args, rollout_id: int, data_source, evaluation: bool = False):
     """Keep Miles rollout, adding group/version queue contracts."""
 
@@ -795,7 +773,6 @@ def generate_rollout(args, rollout_id: int, data_source, evaluation: bool = Fals
         except StrictRlInvariantError as error:
             _record_strict_failure(args, error)
             raise
-        _persist_trajectory_evidence(args, rollout_id, output.samples)
         consumed = {_group_indices(group) for group in output.samples}
         data_source.buffer[:] = [
             group
