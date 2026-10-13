@@ -38,7 +38,7 @@ from pathlib import Path, PurePosixPath
 from . import delivery
 from .gpu_spec import ClusterSpec, parse_gpu_spec
 from .models import MODEL_WEIGHT_GB
-from .rl.engine.run_flags import CLI, rl_option_pairs
+from .rl.engine.run_flags import CLI, rl_forward_pairs, rl_option, rl_option_pairs
 
 SYNCER_PORT = 29400
 # rl-algo-critic-family 4.2.1 (design D4 plan a): a critic algorithm runs a
@@ -736,15 +736,10 @@ def rl_syncer_profile(args, num_learners: int):
     })
 
 
-_ISLAND_SCHEDULING_PARAMS = (
-    ("rl_quorum_theta", "--rl-quorum-theta"),
-    ("rl_carry_gamma", "--rl-carry-gamma"),
-    ("rl_soft_deadline_s", "--rl-soft-deadline-s"),
-    ("rl_q_min", "--rl-q-min"),
-    ("rl_max_carry_lag", "--rl-max-carry-lag"),
-    ("rl_syncer_epoch", "--rl-syncer-epoch"),
-    ("rl_island_lease_s", "--rl-island-lease-s"),
-    ("rl_final_grace_s", "--rl-final-grace-s"),
+_ISLAND_SCHEDULING_PARAMS = rl_option_pairs(
+    "rl_quorum_theta", "rl_carry_gamma", "rl_soft_deadline_s", "rl_q_min", "rl_max_carry_lag",
+    "rl_syncer_epoch", "rl_island_lease_s", "rl_final_grace_s",
+    layer=CLI,
 )
 
 ELASTIC_DEBUG_DELAY_ENV = "YETO_RL_ELASTIC_DEBUG_DELAY"
@@ -1842,7 +1837,7 @@ _ELASTIC_LAUNCH_FLAGS = rl_option_pairs(
 )
 # 3.8 strict pause budget: forwarded to the learner; the quorum timeout also
 # goes to the syncer so both sides use the same value.
-_ELASTIC_PAUSE_FLAGS = rl_option_pairs(
+_ELASTIC_PAUSE_FLAGS = rl_forward_pairs(
     "rl_elastic_quorum_timeout_s",
     "rl_elastic_idle_flow_timeout_s",
     "rl_elastic_pause_margin",
@@ -1851,7 +1846,6 @@ _ELASTIC_PAUSE_FLAGS = rl_option_pairs(
     "rl_elastic_recovery_timeout_s",
     # 3.7 restart recovery budget (recovery-design.md §3)
     "rl_elastic_max_recovery_attempts",
-    layer=CLI,
 )
 # Test-only fault injection for GPU acceptance runs (gpu-plan-v2 A5 quorum case):
 # exported into the island run command; off unless given.
@@ -1867,32 +1861,23 @@ _ELASTIC_TEST_FLAGS = rl_option_pairs(
 )
 # (attr, flag, env) of the test-only switches exported into the island run
 # command; each needs --rl-elastic, all are off by default.
-_ELASTIC_TEST_EXPORTS = (
-    ("rl_test_hold_before_check_s", "--rl-test-hold-before-check-s",
-     "YETO_RL_TEST_HOLD_BEFORE_CHECK_S"),
-    ("rl_test_inject_tool_wait_s", "--rl-test-inject-tool-wait-s",
-     "YETO_RL_TEST_INJECT_TOOL_WAIT_S"),
-    ("rl_test_inject_undrain_fail", "--rl-test-inject-undrain-fail",
-     "YETO_RL_TEST_INJECT_UNDRAIN_FAIL"),
-    # A4bc / 3.3 X5: side-effect journal of the injected tool (store_true -> "1")
-    ("rl_test_tool_side_effect_log", "--rl-test-tool-side-effect-log",
-     "YETO_RL_TEST_TOOL_SIDE_EFFECT_LOG"),
-    ("rl_test_inject_lora_perturb", "--rl-test-inject-lora-perturb",
-     "YETO_RL_TEST_INJECT_LORA_PERTURB"),
-    ("rl_test_inject_stop_failures", "--rl-test-inject-stop-failures",
-     "YETO_RL_TEST_INJECT_STOP_FAILURES"),
-    ("rl_test_kill_learner_at", "--rl-test-kill-learner-at", "YETO_RL_TEST_KILL_LEARNER_AT"),
-    ("rl_test_inject_rebuild_fail", "--rl-test-inject-rebuild-fail",
-     "YETO_RL_TEST_INJECT_REBUILD_FAIL"),
-    # E2 G-4.5 (plan-v3), read by miles_adapter.cut_injection
-    ("rl_test_inject_cut_save_kill_rank", "--rl-test-inject-cut-save-kill-rank",
-     "YETO_RL_TEST_INJECT_CUT_SAVE_KILL_RANK"),
-    ("rl_test_inject_cut_restore_kill_rank", "--rl-test-inject-cut-restore-kill-rank",
-     "YETO_RL_TEST_INJECT_CUT_RESTORE_KILL_RANK"),
-    ("rl_test_inject_cut_restore_sleep", "--rl-test-inject-cut-restore-sleep",
-     "YETO_RL_TEST_INJECT_CUT_RESTORE_SLEEP"),
-    ("rl_test_inject_rebuild_cursor_shift", "--rl-test-inject-rebuild-cursor-shift",
-     "YETO_RL_TEST_INJECT_REBUILD_CURSOR_SHIFT"),
+_ELASTIC_TEST_EXPORTS = tuple(
+    (dest, rl_option(dest, CLI), env) for dest, env in (
+        ("rl_test_hold_before_check_s", "YETO_RL_TEST_HOLD_BEFORE_CHECK_S"),
+        ("rl_test_inject_tool_wait_s", "YETO_RL_TEST_INJECT_TOOL_WAIT_S"),
+        ("rl_test_inject_undrain_fail", "YETO_RL_TEST_INJECT_UNDRAIN_FAIL"),
+        # A4bc / 3.3 X5: side-effect journal of the injected tool (store_true -> "1")
+        ("rl_test_tool_side_effect_log", "YETO_RL_TEST_TOOL_SIDE_EFFECT_LOG"),
+        ("rl_test_inject_lora_perturb", "YETO_RL_TEST_INJECT_LORA_PERTURB"),
+        ("rl_test_inject_stop_failures", "YETO_RL_TEST_INJECT_STOP_FAILURES"),
+        ("rl_test_kill_learner_at", "YETO_RL_TEST_KILL_LEARNER_AT"),
+        ("rl_test_inject_rebuild_fail", "YETO_RL_TEST_INJECT_REBUILD_FAIL"),
+        # E2 G-4.5 (plan-v3), read by miles_adapter.cut_injection
+        ("rl_test_inject_cut_save_kill_rank", "YETO_RL_TEST_INJECT_CUT_SAVE_KILL_RANK"),
+        ("rl_test_inject_cut_restore_kill_rank", "YETO_RL_TEST_INJECT_CUT_RESTORE_KILL_RANK"),
+        ("rl_test_inject_cut_restore_sleep", "YETO_RL_TEST_INJECT_CUT_RESTORE_SLEEP"),
+        ("rl_test_inject_rebuild_cursor_shift", "YETO_RL_TEST_INJECT_REBUILD_CURSOR_SHIFT"),
+    )
 )
 KILL_PHASES = ("QUIESCING", "TRANSFERRING", "INITIALIZING", "VERIFYING", "COMMITTED",
                "RESUMING", "REBUILDING_TRAINER")
@@ -2017,18 +2002,16 @@ def rl_checkpoint_store_plan(args) -> tuple[str, str | None] | None:
     if not (value.startswith("/") or value.startswith("~/")) or ".." in PurePosixPath(value).parts:
         raise ValueError("--rl-checkpoint-store must be a bucket URI or an absolute / ~/ path on the island")
     return value.rstrip("/") or "/", None
-_EVAL_LAUNCH_FLAGS = (
-    ("rl_eval_data", "--rl-eval-data"),
-    ("rl_eval_dataset_name", "--rl-eval-dataset-name"),
-    ("rl_eval_samples_per_prompt", "--rl-eval-samples-per-prompt"),
+_EVAL_LAUNCH_FLAGS = rl_option_pairs(
+    "rl_eval_data", "rl_eval_dataset_name", "rl_eval_samples_per_prompt", layer=CLI,
 )
 # optional eval knobs: launcher flag attr -> learner flag (forwarded when given)
-_EVAL_OPTIONAL_FLAGS = (
-    ("rl_eval_temperature", "--eval-temperature"),
-    ("rl_eval_top_p", "--eval-top-p"),
-    ("rl_eval_max_prompt_len", "--eval-max-prompt-len"),
-    ("rl_eval_max_response_len", "--eval-max-response-len"),
-    ("rl_eval_max_context_len", "--eval-max-context-len"),
+_EVAL_OPTIONAL_FLAGS = rl_forward_pairs(
+    ("rl_eval_temperature", "eval_temperature"),
+    ("rl_eval_top_p", "eval_top_p"),
+    ("rl_eval_max_prompt_len", "eval_max_prompt_len"),
+    ("rl_eval_max_response_len", "eval_max_response_len"),
+    ("rl_eval_max_context_len", "eval_max_context_len"),
 )
 EVAL_ISLAND_DATA_PATH = "~/yeto-rl/eval-heldout.jsonl"
 EVAL_INLINE_MAX_BYTES = 96 * 1024  # shipped inline in the run command (ARG_MAX headroom)
@@ -2044,7 +2027,7 @@ def _check_ports_eval(args, rl_engine: str) -> int | None:
 
     interval = getattr(args, "rl_eval_interval", None)
     given = [flag for name, flag in _EVAL_LAUNCH_FLAGS if getattr(args, name, None) is not None]
-    given += ["--rl-" + flag[2:] for name, flag in _EVAL_OPTIONAL_FLAGS
+    given += [rl_option(name, CLI) for name, _flag in _EVAL_OPTIONAL_FLAGS
               if getattr(args, name, None) is not None]
     args.rl_eval_data_text = None
     if interval is None:
