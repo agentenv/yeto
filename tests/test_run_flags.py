@@ -81,7 +81,6 @@ def test_island_divergences_are_the_declared_ones():
         "--reward-function": {"required": True},
         "--over-sampling-batch-size": {"required": True},
         "--rl-syncer-epoch": {"default": 0},
-        "--rl-elastic-quorum-timeout-s": {"type": float},
         "--rollout-max-response-len": {"default": None, "required": True},
     }
     aliases = {f.option: f.cli_aliases for f in rl_flags() if f.cli_aliases}
@@ -167,3 +166,17 @@ def test_sha256_hex_arg():
     assert run_flags.sha256_hex_arg(good) == good
     with pytest.raises(argparse.ArgumentTypeError):
         run_flags.sha256_hex_arg("A" * 64)
+
+
+def test_quorum_timeout_is_float_on_both_layers_and_whole_seconds_for_the_syncer():
+    import types
+
+    from yeto import launcher
+
+    flag = next(f for f in rl_flags() if f.option == "--rl-elastic-quorum-timeout-s")
+    assert flag.argparse_call(CLI)[1]["type"] is flag.argparse_call(ISLAND)[1]["type"] is float
+    args = types.SimpleNamespace(rl_elastic=True, rl_elastic_quorum_timeout_s=900.0)
+    assert launcher._syncer_quorum_timeout(args) == " --quorum-timeout-s 900"
+    with pytest.raises(ValueError, match="whole seconds"):
+        launcher._syncer_quorum_timeout(types.SimpleNamespace(rl_elastic=True,
+                                                              rl_elastic_quorum_timeout_s=1.5))

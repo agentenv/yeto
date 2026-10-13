@@ -631,10 +631,9 @@ def _cli_and_shared_flags() -> tuple[RlFlag, ...]:
                     island={"default": 0}),
         cli_flag("--rl-max-carry-lag", type=int, default=None, metavar="N",
                  help="elastic: oldest late delta still carried over, in outer steps (default 2)"),
-        shared_flag("--rl-elastic-quorum-timeout-s", type=int, default=None, metavar="S",
-                    help="--rl-elastic: syncer --quorum-timeout-s, also the island's strict "
-                    "pause budget input (default: syncer default 900)",
-                    island={"type": float}),
+        shared_flag("--rl-elastic-quorum-timeout-s", type=float, default=None, metavar="S",
+                    help="--rl-elastic: syncer --quorum-timeout-s (whole seconds), also the "
+                    "island's strict pause budget input (default: syncer default 900)"),
         shared_flag("--rl-elastic-idle-flow-timeout-s", type=float, default=None, metavar="S",
                     help="--rl-elastic: measured network idle-flow timeout capping the pause"),
         cli_flag("--rl-test-inject-start-delay-s", type=float, default=None, metavar="S",
