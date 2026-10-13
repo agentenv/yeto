@@ -465,10 +465,10 @@ def install() -> None:
         _MILES_TRAINABLE_STATE_FINDER = _MilesTrainableStateFinder()
         sys.meta_path.insert(0, _MILES_TRAINABLE_STATE_FINDER)
 
-    from yeto.rl.adapters.miles.models.deepseek_v4.expert_full_runtime import _install_or_defer
+    from yeto.rl.adapters.miles.models.deepseek_v4.expert_full_runtime import install_or_defer
 
-    _install_or_defer(_MILES_ACTOR, install_on_streaming_actor)
-    _install_or_defer(_MILES_ACTOR_GROUP, install_on_streaming_actor_group)
+    install_or_defer(_MILES_ACTOR, install_on_streaming_actor)
+    install_or_defer(_MILES_ACTOR_GROUP, install_on_streaming_actor_group)
 
 
 def assert_original_expert_lora_zero(models: Any) -> None:

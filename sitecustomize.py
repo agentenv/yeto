@@ -21,6 +21,12 @@ if os.environ.get("YETO_DSV4_EXPERT_FULL") == "1":
 
     install()
 
+if os.environ.get("YETO_DSV4_EXPERT_FULL_PORTS") == "1":
+    # Same recipe on the ports Miles layout (P0 1.7b.2); never set with the legacy flag.
+    from yeto.rl.adapters.miles.models.deepseek_v4.ports_runtime import install
+
+    install()
+
 
 def _install_tms_post_pause_hold() -> None:
     """Hold a Miles trainer actor after TMS pause for crash attribution.
