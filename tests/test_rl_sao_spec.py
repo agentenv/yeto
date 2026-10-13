@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from tests.sao_recipe_reference import apply_sao_online_recipe
-from yeto.rl import sao_streaming_runtime as legacy
+from yeto.rl import sao_streaming_runtime as streaming_runtime
 from yeto.rl.algos import sao
 from yeto.rl.engine.algorithm import AlgorithmSpec, AlgorithmSpecError, load_extensions
 from yeto.rl.adapters.miles.algo_flag_rows import sao_fork_argv
@@ -58,16 +58,15 @@ def _fake_runtime(tmp_path: Path, actor_steps, critic_steps):
     actor = SimpleNamespace(learner_id="L", component=SimpleNamespace(model_revision="R"),
                             optimizer_steps_per_round=actor_steps)
     critic = SimpleNamespace(optimizer_steps_per_round=critic_steps)
-    return SimpleNamespace(streams=SimpleNamespace(actor=actor, critic=critic),
+    return SimpleNamespace(actor=actor, critic=critic,
                            trajectory_evidence_kind="secrlenv",
                            trajectory_evidence_dir=tmp_path / "fresh")
 
 
 def _miles_args(actor_steps, epochs):
     return SimpleNamespace(
-        sao_online_recipe="coding", use_critic=True, num_critic_only_steps=0, start_rollout_id=0,
-        lora_rank=0, external_policy_sync_path=legacy._SYNC_FACTORY,
-        rollout_function_path=legacy._ROLLOUT_FUNCTION, yeto_rl_learner_id="L",
+        policy_objective="sao_dis", use_critic=True, num_critic_only_steps=0, start_rollout_id=0,
+        lora_rank=0, yeto_rl_learner_id="L",
         yeto_rl_base_model_revision="R", num_steps_per_rollout=actor_steps,
         num_critic_epochs=epochs)
 
@@ -77,12 +76,12 @@ def test_role_contract_matches_legacy_accounting(tmp_path, actor_steps):
     spec = sao.sao_algorithm_spec("reasoning")
     contract = sao.sao_role_contract(spec, actor_steps)
     steps = contract["optimizer_steps_per_round"]
-    # the legacy entry's own validator accepts exactly these numbers
-    legacy._validate_miles_runtime(
+    # the streaming runtime validator accepts exactly these numbers
+    streaming_runtime._validate_miles_runtime(
         _miles_args(actor_steps, spec.critic.critic_updates_per_step),
         _fake_runtime(tmp_path, steps["actor"], steps["critic"]))
     with pytest.raises(ValueError, match="optimizer accounting"):
-        legacy._validate_miles_runtime(
+        streaming_runtime._validate_miles_runtime(
             _miles_args(actor_steps, spec.critic.critic_updates_per_step),
             _fake_runtime(tmp_path, steps["actor"], steps["actor"]))
     from yeto.rl.local_learner import _ROLES_BY_ALGORITHM

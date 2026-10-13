@@ -1,8 +1,11 @@
-"""Hash-bound runtime wiring for full-parameter SAO streaming.
+"""Hash-bound runtime wiring for full-parameter SAO streaming on ports.
 
-The proven centralized SAO entrypoint remains independent of this module.
-Streaming launches opt in with a second, immutable JSON contract that names
+A streaming SAO island opts in with an immutable JSON contract that names
 both role-specific syncer sessions and the fresh trajectory-evidence path.
+Binding installs the two-role :class:`FullParameterSyncConfig` (actor and
+critic) that the ports island turns into the one full-parameter sync
+(P0-D8); the island's ``IslandDriver`` owns the loop, rollout and
+publication, so nothing here installs a Miles training-loop callback.
 """
 
 from __future__ import annotations
@@ -18,15 +21,17 @@ from typing import Any
 from ..syncer_profile import SyncerSemanticProfile
 from .local_learner import ComponentIdentity
 from yeto.rl.adapters.miles.full_parameter.role_stream import RoleStreamConfig
-from yeto.rl.adapters.miles.models.sao_streaming import MilesSaoStreamingConfig
+from yeto.rl.adapters.miles.full_parameter.session import (
+    CONFIG_ATTRIBUTE,
+    FullParameterSyncConfig,
+)
 
 _LEGACY_SCHEMA = "yeto.sao-streaming-runtime.v1"
 _SCHEMA = "yeto.sao-streaming-runtime.v2"
 _LEGACY_LAYOUT_ATTESTATION_SCHEMA = "miles.sao-streaming-layouts.v1"
 _LAYOUT_ATTESTATION_SCHEMA = "miles.sao-streaming-layouts.v2"
-_SYNC_FACTORY = "yeto.rl.adapters.miles.models.sao_streaming.create_miles_sao_streaming_sync"
-_IDENTITY_SETTER = "yeto.rl.adapters.miles.publish.set_current_published_policy_identity"
-_ROLLOUT_FUNCTION = "yeto.rl.adapters.miles.models.rollout_legacy_port.generate_rollout"
+SYNC_PRESET = "sao-streaming-full"
+SAO_POLICY_OBJECTIVE = "sao_dis"
 _HEX = frozenset("0123456789abcdef")
 _LEGACY_TOP_LEVEL_FIELDS = {
     "schema",
@@ -75,12 +80,6 @@ def _sha256_file(path: Path) -> str:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
-
-
-def sao_streaming_sync_factory_path() -> str:
-    """Return the one callback path owned by the streaming SAO entrypoint."""
-
-    return _SYNC_FACTORY
 
 
 def _sha256(name: str, value: object) -> str:
@@ -241,7 +240,15 @@ class SaoStreamingRuntime:
     layout_attestation_path: Path
     layout_attestation_sha256: str
     syncer_profile: SyncerSemanticProfile
-    streams: MilesSaoStreamingConfig
+    sync: FullParameterSyncConfig
+
+    @property
+    def actor(self) -> RoleStreamConfig:
+        return self.sync.roles[0]
+
+    @property
+    def critic(self) -> RoleStreamConfig:
+        return self.sync.roles[1]
 
 
 def _load_layout_attestation(
@@ -506,7 +513,7 @@ def load_sao_streaming_runtime(
         raise ValueError("SAO syncer profile differs from the frozen learner schedule")
     if actor.expected_layout_hash == critic.expected_layout_hash:
         raise ValueError("SAO actor and critic require role-distinct parameter layouts")
-    streams = MilesSaoStreamingConfig(actor=actor, critic=critic)
+    sync = FullParameterSyncConfig((actor, critic))
     attestation_path, attestation_sha256 = _load_layout_attestation(
         payload["layout_attestation"],
         expected_sao_context_sha256=bound_context,
@@ -523,13 +530,13 @@ def load_sao_streaming_runtime(
         attestation_path,
         attestation_sha256,
         syncer_profile,
-        streams,
+        sync,
     )
 
 
 def _validate_miles_runtime(args: Any, runtime: SaoStreamingRuntime) -> None:
-    actor = runtime.streams.actor
-    critic = runtime.streams.critic
+    actor = runtime.actor
+    critic = runtime.critic
     if runtime.trajectory_evidence_kind == "terminal-bench-2.1":
         from .tbench_outcome import validate_hmac_key_source
 
@@ -557,8 +564,11 @@ def _validate_miles_runtime(args: Any, runtime: SaoStreamingRuntime) -> None:
         raise ValueError(
             f"SAO streaming rejects state-bypassing debug options: {options}"
         )
-    if getattr(args, "sao_online_recipe", None) is None:
-        raise ValueError("SAO streaming requires --sao-online-recipe")
+    if getattr(args, "policy_objective", None) != SAO_POLICY_OBJECTIVE:
+        raise ValueError(
+            "SAO streaming requires the SAO algorithm spec "
+            "(loss.policy_objective='sao_dis')"
+        )
     if not getattr(args, "use_critic", False):
         raise ValueError("SAO streaming requires the Miles critic")
     if int(getattr(args, "num_critic_only_steps", 0)) != 0:
@@ -569,15 +579,6 @@ def _validate_miles_runtime(args: Any, runtime: SaoStreamingRuntime) -> None:
         raise ValueError("SAO streaming currently requires a version-zero start")
     if int(getattr(args, "lora_rank", 0)) > 0:
         raise ValueError("SAO streaming requires full-parameter training")
-    if getattr(args, "external_policy_sync_path", None) != _SYNC_FACTORY:
-        raise ValueError(
-            "SAO streaming requires its trusted external sync callback before "
-            "Miles argument validation"
-        )
-    if getattr(args, "rollout_function_path", None) != _ROLLOUT_FUNCTION:
-        raise ValueError(
-            "SAO streaming requires Yeto's evidence-producing rollout function"
-        )
     if getattr(args, "yeto_rl_learner_id", None) != actor.learner_id:
         raise ValueError("SAO streaming learner ID differs from the SecRLEnv context")
     if (
@@ -612,7 +613,12 @@ def _validate_miles_runtime(args: Any, runtime: SaoStreamingRuntime) -> None:
 
 
 def bind_sao_streaming_runtime(args: Any, runtime: SaoStreamingRuntime) -> Path:
-    """Install the validated streaming callback and create its private evidence dir."""
+    """Install the validated two-role sync config and create its private evidence dir.
+
+    ``args`` is the ports island's parsed Miles namespace.  The ports rollout
+    hook writes each round's trajectory evidence into the directory; the
+    full-parameter sync reads it back at the round boundary.
+    """
 
     _validate_miles_runtime(args, runtime)
     evidence = runtime.trajectory_evidence_dir
@@ -626,25 +632,18 @@ def bind_sao_streaming_runtime(args: Any, runtime: SaoStreamingRuntime) -> Path:
     if stat.S_IMODE(evidence.stat().st_mode) != 0o700:
         raise RuntimeError("SAO trajectory evidence directory is not private")
 
-    config = runtime.streams
-    args.yeto_rl_sao_streaming_config = config
+    actor = runtime.actor
+    setattr(args, CONFIG_ATTRIBUTE, runtime.sync)
     args.yeto_rl_trajectory_evidence_dir = str(evidence)
     args.yeto_rl_trajectory_evidence_kind = runtime.trajectory_evidence_kind
     args.yeto_rl_trajectory_evidence_schema_version = (
         runtime.trajectory_evidence_schema_version
     )
-    args.yeto_rl_sync_preset = "sao-streaming-full"
-    args.yeto_rl_learner_generation = config.actor.learner_generation
-    args.yeto_rl_learner_generations = config.actor.learner_generations
-    args.yeto_rl_num_fragments = config.actor.expected_fragments
-    args.yeto_rl_total_fragment_steps = config.actor.total_fragment_steps
-    args.yeto_rl_sao_training_contract_sha256 = config.actor.training_contract_hash
-    args.yeto_rl_sao_syncer_profile_sha256 = config.actor.syncer_profile_hash
-    args.yeto_rl_sao_layout_attestation = str(runtime.layout_attestation_path)
-    args.yeto_rl_sao_layout_attestation_sha256 = runtime.layout_attestation_sha256
-    args.external_policy_sync_path = _SYNC_FACTORY
-    args.external_policy_sync_run_until_stop = True
-    args.external_policy_identity_setter_path = _IDENTITY_SETTER
+    args.yeto_rl_sync_preset = SYNC_PRESET
+    args.yeto_rl_learner_generation = actor.learner_generation
+    args.yeto_rl_learner_generations = actor.learner_generations
+    args.yeto_rl_num_fragments = actor.expected_fragments
+    args.yeto_rl_total_fragment_steps = actor.total_fragment_steps
     return evidence
 
 

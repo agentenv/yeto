@@ -9,7 +9,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from yeto.rl.adapters.miles.models.sao_streaming import MilesSaoStreamingConfig
+from yeto.rl.adapters.miles.full_parameter.session import (
+    CONFIG_ATTRIBUTE,
+    FullParameterSyncConfig,
+)
 from yeto.rl.sao_streaming_runtime import (
     bind_sao_streaming_runtime,
     load_sao_streaming_runtime,
@@ -181,15 +184,11 @@ def _load(tmp_path: Path, payload: dict[str, object] | None = None):
 
 def _args(**overrides):
     values = {
-        "sao_online_recipe": "coding",
+        "policy_objective": "sao_dis",
         "use_critic": True,
         "num_critic_only_steps": 0,
         "start_rollout_id": 0,
         "lora_rank": 0,
-        "external_policy_sync_path": (
-            "yeto.rl.adapters.miles.models.sao_streaming.create_miles_sao_streaming_sync"
-        ),
-        "rollout_function_path": "yeto.rl.adapters.miles.models.rollout_legacy_port.generate_rollout",
         "yeto_rl_learner_id": 0,
         "yeto_rl_base_model_revision": "a" * 40,
         "num_steps_per_rollout": 1,
@@ -202,18 +201,20 @@ def _args(**overrides):
 def test_load_constructs_two_role_scoped_streams(tmp_path):
     runtime, evidence = _load(tmp_path)
 
-    assert isinstance(runtime.streams, MilesSaoStreamingConfig)
+    assert isinstance(runtime.sync, FullParameterSyncConfig)
+    assert not runtime.sync.sweep
+    assert tuple(runtime.sync.by_role()) == ("actor", "critic")
     assert runtime.trajectory_evidence_dir == evidence
-    assert runtime.streams.actor.role == "actor"
-    assert runtime.streams.critic.role == "critic"
-    assert runtime.streams.actor.syncer_addr == ("127.0.0.1", 29400)
-    assert runtime.streams.critic.syncer_addr == ("127.0.0.1", 29401)
-    assert runtime.streams.actor.expected_layout_hash == "3" * 64
-    assert runtime.streams.critic.expected_layout_hash == "4" * 64
+    assert runtime.actor.role == "actor"
+    assert runtime.critic.role == "critic"
+    assert runtime.actor.syncer_addr == ("127.0.0.1", 29400)
+    assert runtime.critic.syncer_addr == ("127.0.0.1", 29401)
+    assert runtime.actor.expected_layout_hash == "3" * 64
+    assert runtime.critic.expected_layout_hash == "4" * 64
     expected_profile = SyncerSemanticProfile.from_mapping(_syncer_profile()).sha256
-    assert runtime.streams.actor.syncer_profile_hash == expected_profile
-    assert runtime.streams.critic.syncer_profile_hash == expected_profile
-    assert runtime.streams.actor.pipeline_depth == 2
+    assert runtime.actor.syncer_profile_hash == expected_profile
+    assert runtime.critic.syncer_profile_hash == expected_profile
+    assert runtime.actor.pipeline_depth == 2
     assert runtime.syncer_profile.sha256 == expected_profile
     assert runtime.layout_attestation_path == tmp_path / "streaming-layouts.json"
 
@@ -338,7 +339,7 @@ def test_load_rejects_runtime_layout_drift_from_private_attestation(tmp_path):
         )
 
 
-def test_bind_installs_streaming_callback_and_private_evidence(tmp_path):
+def test_bind_installs_two_role_full_parameter_sync_and_private_evidence(tmp_path):
     runtime, evidence = _load(tmp_path)
     args = _args()
 
@@ -346,23 +347,16 @@ def test_bind_installs_streaming_callback_and_private_evidence(tmp_path):
 
     assert evidence.is_dir()
     assert stat.S_IMODE(evidence.stat().st_mode) == 0o700
-    assert args.yeto_rl_sao_streaming_config is runtime.streams
+    assert getattr(args, CONFIG_ATTRIBUTE) is runtime.sync
     assert args.yeto_rl_trajectory_evidence_dir == str(evidence)
     assert args.yeto_rl_trajectory_evidence_kind == "secrlenv"
     assert args.yeto_rl_trajectory_evidence_schema_version == 2
     assert args.yeto_rl_sync_preset == "sao-streaming-full"
-    assert args.external_policy_sync_path == (
-        "yeto.rl.adapters.miles.models.sao_streaming.create_miles_sao_streaming_sync"
-    )
-    assert args.external_policy_sync_run_until_stop is True
-    assert args.external_policy_identity_setter_path == (
-        "yeto.rl.adapters.miles.publish.set_current_published_policy_identity"
-    )
+    # The ports IslandDriver owns the loop: no Miles training-loop callback.
+    assert not hasattr(args, "external_policy_sync_path")
+    assert not hasattr(args, "rollout_function_path")
     assert args.yeto_rl_num_fragments == 4
     assert args.yeto_rl_total_fragment_steps == 8
-    assert args.yeto_rl_sao_layout_attestation == str(
-        tmp_path / "streaming-layouts.json"
-    )
 
 
 def test_terminal_bench_runtime_requires_private_key_source_and_binds_v2(
@@ -397,14 +391,21 @@ def test_bind_rejects_optimizer_drift_before_creating_evidence(tmp_path):
     assert not evidence.exists()
 
 
-@pytest.mark.parametrize("callback", (None, "untrusted.streaming.factory"))
-def test_bind_requires_preparsed_trusted_sync_callback(tmp_path, callback):
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    (
+        ({"policy_objective": "ppo"}, "SAO algorithm spec"),
+        ({"use_critic": False}, "Miles critic"),
+        ({"lora_rank": 16}, "full-parameter training"),
+    ),
+)
+def test_bind_requires_the_sao_spec_with_a_full_parameter_critic(
+    tmp_path, overrides, message
+):
     runtime, evidence = _load(tmp_path)
 
-    with pytest.raises(ValueError, match="trusted external sync callback"):
-        bind_sao_streaming_runtime(
-            _args(external_policy_sync_path=callback), runtime
-        )
+    with pytest.raises(ValueError, match=message):
+        bind_sao_streaming_runtime(_args(**overrides), runtime)
 
     assert not evidence.exists()
 

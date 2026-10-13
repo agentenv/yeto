@@ -537,12 +537,7 @@ class MilesChunkedFullParameterAdapter:
             or not trajectories.envelopes
             or (
                 role == "actor"
-                and trajectories.behavior_policy_hash
-                != (
-                    anchor.content_hash
-                    if self.layout.algorithm == "sao"
-                    else anchor.policy_hash
-                )
+                and trajectories.behavior_policy_hash != anchor.policy_hash
             )
         ):
             raise ValueError("Miles local-round evidence does not bind the anchor")
@@ -585,11 +580,7 @@ class MilesChunkedFullParameterAdapter:
             learner_id=learner_id,
             learner_generation=learner_generation,
             base_policy_version=anchor.policy_version,
-            base_policy_hash=(
-                anchor.content_hash
-                if self.layout.algorithm == "sao"
-                else anchor.policy_hash
-            ),
+            base_policy_hash=anchor.policy_hash,
             input_batch_hash=trajectories.input_batch_hash,
             trajectory_ids=trajectories.trajectory_ids,
             trained_tokens=trajectories.trained_tokens,

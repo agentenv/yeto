@@ -5,8 +5,10 @@ and benchmark all call :func:`require_ports_supported` before any remote or
 GPU work starts. The choice is always explicit; nothing here infers it.
 
 R0 ports support (spec ``rl-engine-selection`` "不支持的组合明确拒绝"):
-causal LM + LoRA, GRPO, serial colocated, strict-avg / decoupled presets.
-Everything else is rejected with a pointer to ``--rl-engine legacy``.
+causal LM + LoRA or full parameters, GRPO / PPO critics, serial colocated or
+fixed partition, strict-avg / decoupled presets and the full-parameter presets
+(dense strict sweep, SAO streaming).  Everything else is rejected with a
+pointer to ``--rl-engine legacy``.
 """
 
 from __future__ import annotations
@@ -16,6 +18,8 @@ from collections.abc import Sequence
 RL_ENGINES = ("legacy", "ports")
 DEFAULT_RL_ENGINE = "ports"
 PORTS_SYNC_PRESETS = frozenset({"strict-avg", "decoupled"})
+# P0-D8: one full-parameter sync; the preset only picks its profile.
+FULL_PARAMETER_SYNC_PRESETS = frozenset({"dense-full", "sao-streaming-full"})
 
 
 class UnsupportedPortsCombination(ValueError):
@@ -52,15 +56,17 @@ def ports_rejections(
     facts = _extra_argv_facts(extra_argv)
     if model_kind != "causal-lm":
         reasons.append(f"model kind {model_kind!r} (ports supports causal LMs only)")
-    full_parameter = tuning == "full" or parameter_mode == "full" or sync_preset == "dense-full"
+    full_parameter = (
+        tuning == "full"
+        or parameter_mode == "full"
+        or sync_preset in FULL_PARAMETER_SYNC_PRESETS
+    )
     if full_parameter and island_scheduling == "elastic":
         # P0-D7 follow-up (tasks 1.7b.6): the elastic syncer has no fragment frames yet.
         reasons.append("full-parameter training with --rl-island-scheduling elastic")
     elif tuning not in ("lora", "full") or parameter_mode not in ("lora", "full"):
         reasons.append(f"tuning {tuning!r} / parameter mode {parameter_mode!r}")
-    if "sao" in str(sync_preset) or facts.streaming_compaction:
-        reasons.append("SAO (streaming compaction)")
-    elif sync_preset not in PORTS_SYNC_PRESETS and sync_preset != "dense-full":
+    if sync_preset not in PORTS_SYNC_PRESETS | FULL_PARAMETER_SYNC_PRESETS:
         reasons.append(f"sync preset {sync_preset!r}")
     if (
         model_recipe == "deepseek-v4-flash"

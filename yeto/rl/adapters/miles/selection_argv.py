@@ -23,7 +23,6 @@ def flag_value(argv: Sequence[str], flag: str) -> str | None:
 
 @dataclass(frozen=True)
 class ExtraArgvFacts:
-    streaming_compaction: bool  # any --sao* flag
     advantage_estimator: str | None  # --advantage-estimator VALUE
     critic_flag: bool  # --use-critic (legacy fork only, not an upstream Miles flag)
     rollout_gpus_flag: bool  # --rollout-num-gpus VALUE
@@ -32,7 +31,6 @@ class ExtraArgvFacts:
 def extra_argv_facts(extra_argv: Sequence[str]) -> ExtraArgvFacts:
     tokens = [str(t) for t in extra_argv]
     return ExtraArgvFacts(
-        streaming_compaction=any(t.startswith("--sao") for t in tokens),
         advantage_estimator=flag_value(tokens, "--advantage-estimator"),
         critic_flag="--use-critic" in tokens,
         rollout_gpus_flag=bool(flag_value(tokens, "--rollout-num-gpus")),
