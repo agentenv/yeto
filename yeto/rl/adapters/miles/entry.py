@@ -204,7 +204,9 @@ if NEVER_DECLARABLE & set(MILES_DECLARED):  # pragma: no cover - guarded by test
 # .../evidence/ports-image/2026-10-02-m3a27).
 # Derived from the single lineage in pins.py (0.7): 0af62f4d and every later commit.
 _PINS_0AF62F4D_PLUS = miles_fork_lineage_from("0af62f4d48ed6a5b185c257578d8f7e22312aa87")
-_PINS_SUPP = frozenset({"64b591a4bec1ffa37fb089d3e3b99c84773b1ffc"})
+# 64b591a4b and later: 56068bd56 adds only full-parameter state/transport files
+# (no loss_hub or training-loss file), so the G1 evidence carries over by code diff.
+_PINS_SUPP = miles_fork_lineage_from("64b591a4bec1ffa37fb089d3e3b99c84773b1ffc")
 MILES_DECLARED_PINS: dict[str, frozenset[str]] = {
     # before 0af62f4d the LoRA bridge ignored calculate_per_token_loss (g1c:
     # grad_norm bit-identical to the baseline)
@@ -212,7 +214,7 @@ MILES_DECLARED_PINS: dict[str, frozenset[str]] = {
     "features:over_sampling": _PINS_0AF62F4D_PLUS,
     "features:overlong_filter": _PINS_0AF62F4D_PLUS,
     "features:clip_higher": _PINS_0AF62F4D_PLUS,
-    # rl-algo-supplement phase 1 G1 ran on 64b591a4b only (S19 #13); 5.2 re-ran clip_higher there too.
+    # rl-algo-supplement phase 1 G1 ran on 64b591a4b (S19 #13); 5.2 re-ran clip_higher there too.
     **{m: _PINS_SUPP for m in ("losses:cispo", "losses:sapo", "losses:gmpo", "features:dual_clip",
                                "features:kl_unbiased", "corrections:opsm_rollout",
                                "features:rollout_logprobs_as_old")},
