@@ -1160,8 +1160,6 @@ def test_miles_task_checks_out_exact_commit_and_builds_multinode_ray(monkeypatch
     assert not hasattr(on_demand, "storage_mounts")
 
 
-
-
 def test_miles_runtime_accepts_only_exact_staged_source(tmp_path, monkeypatch):
     root = tmp_path / "miles-source"
     (root / "miles").mkdir(parents=True)
@@ -1247,7 +1245,6 @@ def _stub_full_parameter_island(monkeypatch, tmp_path, *, miles_fields=None, **o
     )
     monkeypatch.setattr(rl_learner, "derive_peft_lora_specs", forbidden)
     monkeypatch.setattr(rl_learner, "adapter_targets", forbidden)
-    monkeypatch.setattr(rl_learner, "megatron_adapter_targets", forbidden)
     from yeto.rl.adapters.miles import config as miles_config
     from yeto.rl.adapters.miles import state as miles_state
 
@@ -1486,154 +1483,6 @@ def test_dense_full_legacy_weight_hook_rejects_quantized_rollout(tmp_path):
 
     with pytest.raises(ValueError, match="require an unquantized rollout model"):
         rl_learner._require_unquantized_full_parameter_rollout_model(model)
-
-
-def test_megatron_targets_follow_the_exact_peft_bridge_mappings():
-    qkv = types.SimpleNamespace(
-        megatron_param=(
-            "language_model.decoder.layers.3.self_attention.linear_qkv.weight"
-        ),
-        hf_param={
-            "q": "model.language_model.layers.3.self_attn.q_proj.weight",
-            "k": "model.language_model.layers.3.self_attn.k_proj.weight",
-            "v": "model.language_model.layers.3.self_attn.v_proj.weight",
-        },
-    )
-    projection = types.SimpleNamespace(
-        megatron_param=(
-            "language_model.decoder.layers.3.self_attention.linear_proj.weight"
-        ),
-        hf_param="model.language_model.layers.3.self_attn.o_proj.weight",
-    )
-    mappings = {
-        value: qkv for value in qkv.hf_param.values()
-    } | {projection.hf_param: projection}
-    registry = types.SimpleNamespace(
-        hf_to_megatron_lookup=lambda name: mappings.get(name)
-    )
-    bridge = types.SimpleNamespace(
-        _model_bridge=types.SimpleNamespace(mapping_registry=lambda: registry)
-    )
-    specs = tuple(
-        types.SimpleNamespace(name=f"base_model.model.{module}.lora_{side}.weight")
-        for module in (
-            "model.language_model.layers.3.self_attn.q_proj",
-            "model.language_model.layers.3.self_attn.k_proj",
-            "model.language_model.layers.3.self_attn.v_proj",
-            "model.language_model.layers.3.self_attn.o_proj",
-        )
-        for side in ("A", "B")
-    )
-
-    assert rl_learner.megatron_adapter_targets(specs, bridge) == [
-        "language_model.decoder.layers.3.self_attention.linear_k",
-        "language_model.decoder.layers.3.self_attention.linear_proj",
-        "language_model.decoder.layers.3.self_attention.linear_q",
-        "language_model.decoder.layers.3.self_attention.linear_v",
-    ]
-
-
-def test_megatron_targets_reject_a_peft_module_without_a_bridge_mapping():
-    bridge = types.SimpleNamespace(
-        _model_bridge=types.SimpleNamespace(
-            mapping_registry=lambda: types.SimpleNamespace(
-                hf_to_megatron_lookup=lambda _name: None
-            )
-        )
-    )
-    specs = (
-        types.SimpleNamespace(
-            name="base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight"
-        ),
-    )
-
-    with pytest.raises(ValueError, match="has no Megatron-Bridge mapping"):
-        rl_learner.megatron_adapter_targets(specs, bridge)
-
-
-def test_megatron_targets_wildcard_layers_for_pipeline_parallel():
-    def lookup(name):
-        match = re.fullmatch(
-            r"model\.layers\.(\d+)\.self_attn\.compressor\.indexer\."
-            r"q_b_proj\.weight",
-            name,
-        )
-        if match is None:
-            return None
-        layer = match.group(1)
-        return types.SimpleNamespace(
-            megatron_param=(
-                f"decoder.layers.{layer}.self_attention.indexer."
-                "linear_wq_b.weight"
-            ),
-            hf_param=name,
-        )
-
-    bridge = types.SimpleNamespace(
-        _model_bridge=types.SimpleNamespace(
-            mapping_registry=lambda: types.SimpleNamespace(
-                hf_to_megatron_lookup=lookup
-            )
-        )
-    )
-    specs = tuple(
-        types.SimpleNamespace(
-            name=(
-                "base_model.model.model.layers."
-                f"{layer}.self_attn.compressor.indexer.q_b_proj."
-                f"lora_{side}.weight"
-            )
-        )
-        for layer in (2, 22)
-        for side in ("A", "B")
-    )
-
-    assert rl_learner.megatron_adapter_targets(
-        specs,
-        bridge,
-        pipeline_parallel=2,
-    ) == [
-        "decoder.layers.*.self_attention.indexer.linear_wq_b"
-    ]
-
-
-def test_megatron_targets_collapse_e288_experts_to_standard_grouped_modules():
-    specs = tuple(
-        types.SimpleNamespace(
-            name=(
-                "base_model.model.model.layers.3.mlp.experts.287."
-                f"{projection}.lora_{side}.weight"
-            )
-        )
-        for projection in ("gate_proj", "up_proj", "down_proj")
-        for side in ("A", "B")
-    )
-    bridge = types.SimpleNamespace(
-        _model_bridge=types.SimpleNamespace(
-            mapping_registry=lambda: types.SimpleNamespace(
-                hf_to_megatron_lookup=lambda _name: None
-            )
-        )
-    )
-
-    assert rl_learner.megatron_adapter_targets(
-        specs,
-        bridge,
-        standard_grouped_experts=True,
-    ) == [
-        "decoder.layers.3.mlp.experts.linear_fc1",
-        "decoder.layers.3.mlp.experts.linear_fc2",
-    ]
-
-    assert rl_learner.megatron_adapter_targets(
-        specs,
-        bridge,
-        standard_grouped_experts=True,
-        pipeline_parallel=2,
-    ) == [
-        "decoder.layers.*.mlp.experts.linear_fc1",
-        "decoder.layers.*.mlp.experts.linear_fc2",
-    ]
 
 
 def test_decoupled_runner_rejects_multiple_optimizer_steps_per_rollout(tmp_path, monkeypatch):

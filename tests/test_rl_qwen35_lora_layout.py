@@ -16,7 +16,6 @@ from pathlib import Path
 
 import pytest
 
-from yeto.rl.adapters.miles import island_entry as rl_learner
 from yeto.rl.core import CanonicalTensorSpec, canonical_layout_hash
 from yeto.rl.export import adapter_targets, attention_output_gated, derive_peft_lora_specs, target_modules
 
@@ -130,38 +129,3 @@ def test_gated_attention_prediction_matches_megatron_export(qwen35_model_dir):
     assert adapter_targets(predicted) == ["o_proj", "out_proj"]
 
 
-def test_megatron_adapter_targets_fail_closed_on_gated_qkv():
-    qkv = types.SimpleNamespace(
-        megatron_param="language_model.decoder.layers.3.self_attention.linear_qkv.weight",
-        hf_param={
-            "q": "model.language_model.layers.3.self_attn.q_proj.weight",
-            "k": "model.language_model.layers.3.self_attn.k_proj.weight",
-            "v": "model.language_model.layers.3.self_attn.v_proj.weight",
-        },
-    )
-    out_proj = types.SimpleNamespace(
-        megatron_param="language_model.decoder.layers.0.self_attention.out_proj.weight",
-        hf_param="model.language_model.layers.0.linear_attn.out_proj.weight",
-    )
-    mappings = {value: qkv for value in qkv.hf_param.values()} | {out_proj.hf_param: out_proj}
-    bridge = types.SimpleNamespace(
-        _model_bridge=types.SimpleNamespace(
-            mapping_registry=lambda: types.SimpleNamespace(hf_to_megatron_lookup=mappings.get)
-        )
-    )
-
-    def specs(*modules):
-        return tuple(
-            types.SimpleNamespace(name=f"base_model.model.{m}.lora_{side}.weight")
-            for m in modules
-            for side in ("A", "B")
-        )
-
-    gdn = "model.language_model.layers.0.linear_attn.out_proj"
-    q = "model.language_model.layers.3.self_attn.q_proj"
-    assert rl_learner.megatron_adapter_targets(specs(gdn), bridge, attention_output_gate=True) == [
-        "language_model.decoder.layers.0.self_attention.out_proj"
-    ]
-    assert "linear_q" in rl_learner.megatron_adapter_targets(specs(q), bridge)[0]
-    with pytest.raises(ValueError, match="attention_output_gate"):
-        rl_learner.megatron_adapter_targets(specs(q, gdn), bridge, attention_output_gate=True)
