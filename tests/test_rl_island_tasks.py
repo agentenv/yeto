@@ -321,3 +321,74 @@ def test_non_ports_paths_refuse_island_tasks(factory):
         if factory == "make_learner_task" else (lambda: launcher.make_diffusion_sample_task(args, spec))
     with pytest.raises(ValueError, match="ports RL islands only"):
         call()
+
+
+# --- with per-island placement (rl-mixed-island-placement) ---------------------------------
+
+
+MIXED_GPUS = "aws:1xa100@us-east-1,aws:2xa100@us-west-2"
+MIXED_PLACEMENT = ("--rl-island-placement", "1:placement=fixed-partition",
+                   "--rl-rollout-gpus", "1", "--rl-island-scheduling", "elastic")
+
+
+def _mixed_island_args(catalog, tmp_path, monkeypatch, spec, *extra):
+    from yeto import runs
+
+    monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "k3y")  # elastic scheduling needs one
+    args = _launcher_args("ports", (F, spec, *MIXED_PLACEMENT, *extra), gpu=MIXED_GPUS)
+    args.data, args.data_revision, args.controller = str(catalog), None, "local"
+    return args
+
+
+def test_island_tasks_and_mixed_placement_combine_per_island(catalog, tmp_path, monkeypatch):
+    from yeto import launcher
+
+    args = _mixed_island_args(catalog, tmp_path, monkeypatch, "l0=web1-10;l1=pwn1-10")
+    launcher._prepare_rl_args(args)
+    islands = launcher.dry_run_plan(args)["island_requests"]
+    commands = [shlex.split(i["learner_command"]) for i in islands]
+    colocated, partitioned = commands
+
+    # Each island gets its own task file ...
+    hashes = [_flag(i["learner_command"], "--data-sha256") for i in islands]
+    assert hashes[0] != hashes[1]
+    assert [i["island_tasks"]["data_sha256"] for i in islands] == hashes
+    # ... and its own placement.
+    assert [i["placement"]["placement"] for i in islands] == ["colocated", "fixed-partition"]
+    assert "--rl-placement" not in colocated and "--rollout-num-gpus" not in colocated
+    assert partitioned[partitioned.index("--rl-placement") + 1] == "fixed-partition"
+    # The shared training contract stays equal: same algorithm hash on both islands,
+    # and both islands mark per-island placement for the full-parameter contract.
+    assert {c[c.index("--rl-expected-algorithm-sha256") + 1] for c in commands} == {
+        args.rl_expected_algorithm_sha256}
+    assert all("--rl-per-island-placement" in c for c in commands)
+
+
+def test_island_tasks_with_mixed_placement_keep_both_refusals(catalog, tmp_path, monkeypatch):
+    from yeto import launcher
+
+    heldout = _write_rows(tmp_path / "heldout.jsonl", ["web1"])
+    args = _mixed_island_args(catalog, tmp_path, monkeypatch, "l0=web1;l1=web2",
+                              "--rl-eval-interval", "1", "--rl-eval-data", str(heldout),
+                              "--rl-eval-dataset-name", "heldout",
+                              "--rl-eval-samples-per-prompt", "1")
+    with pytest.raises(ValueError, match="training islands do not run eval"):
+        launcher._prepare_rl_args(args)
+    args = _mixed_island_args(catalog, tmp_path, monkeypatch, "l0=web1;l1=web2")
+    args.rl_island_scheduling = "legacy"
+    with pytest.raises(ValueError, match="needs --rl-island-scheduling elastic"):
+        launcher._prepare_rl_args(args)
+
+
+def test_dense_contract_equal_across_island_tasks_and_placement():
+    """v6: per-island data, eval and (with --rl-per-island-placement) placement stay out."""
+    from yeto.rl.adapters.miles.island_entry import _dense_shared_miles_argv
+
+    island0 = ["--lr", "1e-6", "--prompt-data", "/i0.jsonl", "--colocate",
+               "--actor-num-gpus-per-node", "1", "--rollout-num-gpus-per-engine", "1"]
+    island1 = ["--lr", "1e-6", "--prompt-data", "/i1.jsonl", "--rollout-num-gpus", "1",
+               "--actor-num-gpus-per-node", "1", "--rollout-num-gpus-per-engine", "1"]
+    shared = [_dense_shared_miles_argv(a, per_island_placement=True) for a in (island0, island1)]
+    assert shared[0] == shared[1] == ["--lr", "1e-6", "--rollout-num-gpus-per-engine", "1"]
+    assert _dense_shared_miles_argv(island0) != _dense_shared_miles_argv(island1)
