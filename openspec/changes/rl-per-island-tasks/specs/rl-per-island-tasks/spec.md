@@ -30,3 +30,10 @@ The run manifest and the `rl_driver_start` event of each island SHALL record the
 #### Scenario: Data replaced on resume
 - **WHEN** after an island restarts, the sha256 of its local prompt file differs from the manifest
 - **THEN** the island refuses to start and reports both sha256 values
+
+### Requirement: With per-island tasks, eval runs only on the eval island
+When `--rl-island-tasks` is given, the launcher MUST reject eval on training islands (`--rl-eval-interval`). The full-parameter training contract MUST NOT contain eval settings, and the syncer does not reject when the eval settings differ between islands.
+
+#### Scenario: Per-island tasks with eval requested on training islands
+- **WHEN** both `--rl-island-tasks` and `--rl-eval-interval` are given
+- **THEN** the launch fails, and the error says that eval runs on the eval island

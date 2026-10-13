@@ -10,41 +10,41 @@ Before installation, the AgentENV host bootstrap flow SHALL check that `/dev/kvm
 
 #### Scenario: Missing /dev/kvm
 - **WHEN** the host has no `/dev/kvm`
-- **THEN** the bootstrap flow aborts before installation and the output contains "/dev/kvm"
+- **THEN** the bootstrap flow aborts before installation, and the output contains "/dev/kvm"
 
 #### Scenario: Kernel too old
-- **WHEN** `uname -r` is below 6.8
-- **THEN** the bootstrap flow aborts and hints to install an HWE kernel
+- **WHEN** `uname -r` is lower than 6.8
+- **THEN** the bootstrap flow aborts and prompts to install the HWE kernel
 
 #### Scenario: Ready
-- **WHEN** the check, the installation and the hello world all succeed
+- **WHEN** the three steps (check, install, hello world) succeed
 - **THEN** the ready record file exists and contains the kernel version and the AgentENV version
 
-### Requirement: The gateway implements Sandbox Fusion request semantics
-The gateway SHALL provide a `/run_code` endpoint. It SHALL accept the request fields of the verl Sandbox Fusion client (code, language, stdin, compile_timeout, run_timeout, memory_limit_MB, files, fetch_files), run in one AgentENV sandbox, and return a result that the verl client can parse (status, stdout, stderr, exit code, timeout flag, fetch_files content). A run timeout MUST return a timeout status and MUST NOT hang. The memory limit MUST be passed to the sandbox. The gateway MUST NOT require code changes on the verl side.
+### Requirement: Gateway implements the Sandbox Fusion request semantics
+The gateway SHALL provide a `/run_code` endpoint. It accepts the request fields of the verl Sandbox Fusion client (code, language, stdin, compile_timeout, run_timeout, memory_limit_MB, files, fetch_files), runs the code in one AgentENV sandbox, and returns a result that the verl client can parse (status, stdout, stderr, exit code, timeout flag, fetch_files content). A run timeout MUST return a timeout status and MUST NOT hang. The memory limit MUST be passed to the sandbox. The gateway MUST NOT require any code change on the verl side.
 
-#### Scenario: verl reward side connects directly
-- **WHEN** verl sets `reward.sandbox_fusion.url` to the gateway and runs one batch of the official Sandbox Fusion sample dataset
-- **THEN** reward computation completes, with no code change on the verl side
+#### Scenario: Direct connection from the verl reward side
+- **WHEN** verl sets `reward.sandbox_fusion.url` to the gateway and runs one batch of the official Sandbox Fusion example dataset
+- **THEN** the reward computation completes, with no code change on the verl side
 
 #### Scenario: Run timeout
 - **WHEN** the submitted code runs longer than run_timeout
 - **THEN** the gateway returns the timeout status within run_timeout plus a fixed margin, and the sandbox is destroyed
 
 #### Scenario: Concurrency limit
-- **WHEN** the number of concurrent requests exceeds the limit set in the gateway
-- **THEN** the extra requests queue or get a retryable 503/504, and the host MUST NOT run out of memory
+- **WHEN** the number of concurrent requests exceeds the limit set in the gateway config
+- **THEN** the excess requests queue or get a retryable 503/504, and the host MUST NOT run out of memory
 
 ### Requirement: Tool lifecycle and episode isolation
-The verl tool `agentenv_sandbox` SHALL implement the create / execute / calc_reward / release lifecycle. create allocates one sandbox for the episode. execute runs in that sandbox. release MUST destroy the sandbox, and the reference is that the gateway confirms the sandbox does not exist. Two episodes MUST NOT share a sandbox. A failed release MUST be recorded and retried, and MUST NOT leak silently.
+The verl tool `agentenv_sandbox` SHALL implement the create / execute / calc_reward / release lifecycle. `create` allocates one sandbox for the episode. `execute` runs in that sandbox. `release` MUST destroy the sandbox, and the criterion is that the gateway confirms the sandbox does not exist. Two episodes MUST NOT share a sandbox. A failed release MUST be recorded and retried, and MUST NOT leak silently.
 
-#### Scenario: Multi-turn tool calls share one sandbox
+#### Scenario: Several tool calls share one sandbox
 - **WHEN** the model calls the tool twice in the same episode, and the first call writes a file
-- **THEN** the second call can read the file
+- **THEN** the second call can read that file
 
 #### Scenario: Episode end
-- **WHEN** the tool release is called
-- **THEN** the sandbox does not exist in a gateway query. If the destroy request fails, it is retried and recorded
+- **WHEN** the tool `release` is called
+- **THEN** the sandbox does not exist in a gateway query; if the destroy request fails, it is retried and recorded
 
 #### Scenario: Different episodes cannot see each other
 - **WHEN** episode A writes a file and ends, and then episode B starts
@@ -54,11 +54,11 @@ The verl tool `agentenv_sandbox` SHALL implement the create / execute / calc_rew
 The system SHALL be able to run at least one training step with the verl `tool_agent` agent loop, the `agentenv_sandbox` tool and the Sandbox Fusion reward, and produce training samples that contain tool-call turns.
 
 #### Scenario: One step
-- **WHEN** verl starts with a small model and a small batch, and the tool and the reward both point to the cherryservers gateway
-- **THEN** one training step completes, `num_turns` in the samples is >= 2, and the log shows equal sandbox create and destroy counts
+- **WHEN** verl is started with a small model and a small batch, and both the tool and the reward point to the cherryservers gateway
+- **THEN** one training step completes, `num_turns` >= 2 in the samples, and the logs show equal counts of sandbox creation and destruction
 
-### Requirement: Token consistency measurement in the Codex stage
-When Codex produces trajectories as an external agent inside the sandbox, the system SHALL compare, for each episode, "the tokens generated by the inference side" with "the tokens re-tokenized from the text that comes back". An episode that does not match MUST be dropped and counted. At the end of a run, the system MUST report the mismatch rate. Until the mismatch rate is measured, this path MUST NOT be marked as usable for training.
+### Requirement: Token consistency measurement of the Codex stage
+When Codex produces trajectories as an external agent in the sandbox, the system SHALL compare, for each episode, "the tokens generated by the inference side" with "the tokens re-tokenized from the text sent back". An episode that does not match MUST be dropped and counted. At the end of the run, the system MUST report the mismatch rate. Before the mismatch rate is measured, the system MUST NOT record this path as usable for training.
 
 #### Scenario: Match
 - **WHEN** the re-tokenized result is identical to the generated tokens, token by token
@@ -70,13 +70,13 @@ When Codex produces trajectories as an external agent inside the sandbox, the sy
 
 #### Scenario: Report
 - **WHEN** one rollout ends
-- **THEN** the output shows the total number of episodes, the dropped number and the mismatch rate
+- **THEN** the output shows the total episode count, the dropped count and the mismatch rate
 
-### Requirement: Sandboxes have no egress by default
-A sandbox SHALL have no network egress by default. Only targets that are explicitly allowed by config (the verl rollout endpoint and the auth injection needed in the Codex stage) are opened. A malformed allowlist MUST raise an error and MUST NOT fall back to allowing everything.
+### Requirement: Sandbox has no egress by default
+By default, a sandbox SHALL have no network egress. Only targets that are explicitly allowed by config (the verl rollout endpoint and the auth injection needed by the Codex stage) are let through. A malformed allowlist MUST raise an error and MUST NOT fall back to allow-all.
 
 #### Scenario: Deny by default
-- **WHEN** a request to the external network starts inside the sandbox and no allowlist is configured
+- **WHEN** a request to the external network is made from inside the sandbox and no allowlist is configured
 - **THEN** the request fails
 
 #### Scenario: Allow the rollout endpoint
