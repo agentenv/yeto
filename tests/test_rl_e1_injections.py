@@ -153,7 +153,7 @@ def _perturb_publisher(monkeypatch, eps):
     pub = MilesPublisher(args=SimpleNamespace(), actor_model=None, rollout_executor=None,
                          inference_controller=Controller(), update_weights=update_weights,
                          flatten_checksums=lambda raw: list(raw))
-    pub._reference = ("yeto:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", {"w": repr(1.0)})  # read-back reference of the published policy
+    pub._reference = ("tok", {"w": repr(1.0)})  # read-back reference of the published policy
     pub.last_engine_checksums = {}
 
     def perturb(scale):
@@ -169,20 +169,20 @@ def test_lora_perturbation_makes_check_weights_refuse_the_new_engines(monkeypatc
 
     pub, world = _perturb_publisher(monkeypatch, 0.01)
     with pytest.raises(PublicationError, match="read-back differs"):
-        asyncio.run(pub._publish_members("yeto:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ["c2"], 1))
+        asyncio.run(pub._publish_members(1, "tok", ["c2"], 1))
     assert world["order"] == ["tracked", ("perturb", 0.01), ("update_weights", 1.01),
                               ("perturb", None)]  # never admitted
     assert world["trainer"] == 1.0  # the trainer holds the published policy again
     # only once per process: after REBUILD_OLD stops c2, the next member
     # publication is clean and admitted
     world["engine"].pop("c2")
-    asyncio.run(pub._publish_members("yeto:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ["c3"], 2))
+    asyncio.run(pub._publish_members(1, "tok", ["c3"], 2))
     assert world["order"][-1] == "admit"
 
 
 def test_without_the_injection_the_same_publication_is_admitted(monkeypatch):
     pub, world = _perturb_publisher(monkeypatch, None)
-    asyncio.run(pub._publish_members("yeto:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ["c2"], 1))
+    asyncio.run(pub._publish_members(1, "tok", ["c2"], 1))
     assert world["order"] == ["tracked", ("update_weights", 1.0), "admit"]
 
 
@@ -247,7 +247,7 @@ def test_lora_perturbation_inside_the_running_loop_with_real_policy_state(monkey
     async def main():
         # reaches check_weights (not "event loop is already running") and is refused
         with pytest.raises(PublicationError, match="read-back differs"):
-            await pub._publish_members("yeto:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ["c2"], 1)
+            await pub._publish_members(1, "tok", ["c2"], 1)
 
     asyncio.run(main())
     assert torch.equal(seen[0], torch.full((1, 2), 1.25))  # the member got the perturbed adapter

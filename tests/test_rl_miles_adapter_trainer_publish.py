@@ -13,7 +13,13 @@ from yeto.rl.adapters.miles.publish import MilesPublisher, PublicationError
 from yeto.rl.adapters.miles.rollout import PolicyTokenMismatch, policy_token
 from yeto.rl.adapters.miles.state_plugin import APPLIED_LRS, GRAD_NORM, STEP_LOSSES
 from yeto.rl.adapters.miles.trainer import MilesTrainerGroup, TrainStepError, batch_hash
-from yeto.rl.engine.ports import GroupMetadata, Publisher, RolloutBatchHandle, TrainerGroup
+from yeto.rl.engine.ports import (
+    GroupMetadata,
+    PublicationCause,
+    Publisher,
+    RolloutBatchHandle,
+    TrainerGroup,
+)
 
 H = "a" * 64
 L = "b" * 64
@@ -210,6 +216,55 @@ def test_miles_update_is_aligned_to_stamp_the_policy_version(monkeypatch):
     )
     pub.publish(state())
     assert calls == [("align_weight_version", {"next_version": 4}), "update_weights"]
+
+
+def _aligned_publisher(monkeypatch, calls, *, fail_updates=0, actor=None):
+    from yeto.rl.adapters.miles import publish as publish_module
+
+    failures = [fail_updates]
+
+    async def miles_update_weights(args, actor, executor, ctl, **kw):
+        calls.append("update_weights")
+        if failures[0]:
+            failures[0] -= 1
+            raise RuntimeError("broadcast failed")
+
+    monkeypatch.setattr(publish_module, "_default_update_weights", lambda: miles_update_weights)
+    return MilesPublisher(
+        args=SimpleNamespace(), actor_model=actor or PluginActor(calls), rollout_executor=object(),
+        inference_controller=Controller([Engine("http://e0")]), flatten_checksums=flatten,
+    )
+
+
+def test_a_failed_update_is_retried_with_the_same_version(monkeypatch):
+    calls = []
+    pub = _aligned_publisher(monkeypatch, calls, fail_updates=1)
+    with pytest.raises(PublicationError) as failed:
+        pub.publish(state())
+    assert failed.value.cause is PublicationCause.UPDATE_FAILED
+    pub.publish(state())
+    align = ("align_weight_version", {"next_version": 4})
+    assert calls == [align, "update_weights", align, "update_weights"]
+
+
+def test_an_alignment_failure_is_a_publication_error(monkeypatch):
+    class BrokenActor:
+        async def run_plugin(self, fn_path, kwargs):
+            raise RuntimeError("the trainer has no weight_updater")
+
+    calls = []
+    pub = _aligned_publisher(monkeypatch, calls, actor=BrokenActor())
+    with pytest.raises(PublicationError, match="weight_updater") as failed:
+        pub.publish(state())
+    assert failed.value.cause is PublicationCause.UPDATE_FAILED and calls == []
+
+
+def test_an_injected_update_is_not_aligned():
+    calls = []
+    pub, update_calls = publisher(Controller([Engine("http://e0")]))
+    pub._actor = PluginActor(calls)
+    pub.publish(state())
+    assert update_calls == ["update_weights"] and calls == []
 
 
 def publisher(controller, *, update_fails=False, export=None):

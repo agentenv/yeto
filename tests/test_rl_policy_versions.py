@@ -79,18 +79,44 @@ def test_driver_refuses_an_engine_version_no_publication_recorded(tmp_path):
         _numeric_driver(tmp_path, version_of=lambda rid: "99").run()
 
 
-def test_driver_hands_the_window_to_the_rollout_and_refuses_reused_versions(tmp_path):
-    from yeto.rl.engine.driver import PublicationError
-
+def test_driver_hands_the_window_to_the_rollout(tmp_path):
     driver = _numeric_driver(tmp_path, limit=1)
     seen = []
     driver.rollout.set_published_policies = lambda published: seen.append(published.hashes())
-    driver._record_published_policy(5, H5)
-    driver._record_published_policy(6, H6)
-    driver._record_published_policy(7, "7" * 64)
+    for version, policy_hash in ((5, H5), (6, H6), (7, "7" * 64)):
+        driver._record_published_policy(version, policy_hash)
     assert seen[-1] == {6: H6, 7: "7" * 64}  # limit 1: versions 6 and 7 stay
+
+
+def _published_state(driver, version):
+    state = driver.export_local()
+    return dataclasses.replace(state, policy_version=version)
+
+
+def test_driver_refuses_a_reused_version_before_publishing(tmp_path):
+    from yeto.rl.engine.driver import PublicationError
+
+    driver = _numeric_driver(tmp_path)
+    state = _published_state(driver, 7)
+    driver.published_policies.record(7, H5)
+    calls = []
+    driver.publisher = SimpleNamespace(publish=lambda s: calls.append(s))
     with pytest.raises(PublicationError, match="v7"):
-        driver._record_published_policy(7, H5)
+        driver.publish(state, rollout_id=7)
+    assert calls == []  # no engine was touched
+
+
+def test_failed_publication_leaves_the_published_map_unchanged(tmp_path):
+    driver = _numeric_driver(tmp_path)
+    state = _published_state(driver, 7)
+
+    def fail(_state):
+        raise RuntimeError("broadcast failed")
+
+    driver.publisher = SimpleNamespace(publish=fail)
+    with pytest.raises(RuntimeError, match="broadcast failed"):
+        driver.publish(state, rollout_id=7)
+    assert driver.published_policies.hashes() == {}
 
 
 # ---------------------------------------------------------------- Miles side

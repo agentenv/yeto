@@ -30,6 +30,10 @@ def engine_weight_version(version: int) -> str:
     return str(version)
 
 
+def _is_plain_version(text: str) -> bool:
+    return text.isascii() and text.isdigit()
+
+
 def engine_version_number(raw: object) -> int | None:
     """Policy version of an engine-reported weight version (None if unknown).
 
@@ -37,9 +41,7 @@ def engine_version_number(raw: object) -> int | None:
     publishers, the full ``yeto:<version>:<hash>`` label.
     """
     text = str(raw)
-    if text.isascii() and text.isdigit():
-        return int(text)
-    return token_version(text)
+    return int(text) if _is_plain_version(text) else token_version(text)
 
 
 def policy_label(version: int, policy_hash: str) -> str:
@@ -52,8 +54,8 @@ class PublishedPolicies:
 
     _hashes: dict[int, str] = field(default_factory=dict)
 
-    def record(self, version: int, policy_hash: str) -> None:
-        """Record a publication; the same version must always carry the same hash."""
+    def check(self, version: int, policy_hash: str) -> None:
+        """Refuse a publication whose version already names other weights."""
         engine_weight_version(version)  # validates the version
         if not policy_hash:
             raise ValueError(f"policy v{version} has no weight hash")
@@ -61,6 +63,10 @@ class PublishedPolicies:
         if known is not None and known != policy_hash:
             raise PolicyVersionConflict(
                 f"policy v{version} was published as {known} and again as {policy_hash}")
+
+    def record(self, version: int, policy_hash: str) -> None:
+        """Record a publication; the same version must always carry the same hash."""
+        self.check(version, policy_hash)
         self._hashes[version] = policy_hash
 
     def retain_from(self, oldest: int) -> None:
@@ -82,7 +88,7 @@ class PublishedPolicies:
         """
         version = engine_version_number(raw)
         label = None if version is None else self.label(version)
-        if label is None or (not str(raw).isdigit() and str(raw) != label):
+        if label is None or (not _is_plain_version(str(raw)) and str(raw) != label):
             return None
         return label
 
@@ -107,6 +113,4 @@ def engine_version_matches(raw: object, label: str) -> bool:
     that number to the label's weights. A full label must match exactly.
     """
     text = str(raw)
-    if text.isascii() and text.isdigit():
-        return int(text) == token_version(label)
-    return text == label
+    return int(text) == token_version(label) if _is_plain_version(text) else text == label

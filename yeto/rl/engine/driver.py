@@ -437,6 +437,8 @@ class IslandDriver:
         self.node_loss_poll_s = 2.0
         self.sleep: Callable[[float], None] = time.sleep
         self.published_state: TrainableState | None = None
+        # P0-S: published versions within the policy-age window (version -> hash)
+        self.published_policies = PublishedPolicies()
         self.at_safe_point = False
         self.last_applied_lrs: list[float] | None = None
         self.eval_overlap: EvalOverlap | None = None
@@ -669,7 +671,10 @@ class IslandDriver:
             )
         expected_hash = state.policy_tensor_hash()
         # refused before any engine is touched when the version names other weights
-        self._record_published_policy(rollout_id, expected_hash)
+        try:
+            self.published_policies.check(rollout_id, expected_hash)
+        except PolicyVersionConflict as error:
+            raise PublicationError(str(error)) from error
         self.phase("publish", policy_version=rollout_id)
         delay = self.fault_injection.get("publish_delay_s")
         if delay:
@@ -694,6 +699,7 @@ class IslandDriver:
                 f"partial publication of policy v{rollout_id}; unacknowledged "
                 f"rollout members: {missing}"
             )
+        self._record_published_policy(rollout_id, expected_hash)
         self.expected_token = policy_token(rollout_id, expected_hash)
         self.published_version = rollout_id
         self.published_state = state
@@ -711,23 +717,13 @@ class IslandDriver:
             },
         )
 
-    @property
-    def published_policies(self) -> PublishedPolicies:
-        """Published versions within the policy-age window (version -> weight hash)."""
-        published = self.__dict__.get("_published_policies")
-        if published is None:
-            published = self._published_policies = PublishedPolicies()
-        return published
-
     def _record_published_policy(self, version: int, policy_hash: str) -> None:
-        """P0-S: the inference engines serve the plain version number; the
-        version -> weight hash map is kept here (publication check: a version
-        published again with other weights is refused) and handed to the rollout
-        side, which names every trajectory's policy in its evidence from it."""
-        try:
-            self.published_policies.record(version, policy_hash)
-        except PolicyVersionConflict as error:
-            raise PublicationError(str(error)) from error
+        """P0-S: record a completed publication (checked before it started).
+
+        The inference engines serve the plain version number; the version ->
+        weight hash map is kept here and handed to the rollout side, which
+        names every trajectory's policy in its evidence from it."""
+        self.published_policies.record(version, policy_hash)
         self.published_policies.retain_from(version - self._max_policy_age())
         setter = getattr(self.rollout, "set_published_policies", None)
         if callable(setter):

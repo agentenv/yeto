@@ -62,18 +62,10 @@ from yeto.rl.contracts import InferencePublicationManifest
 from yeto.rl.engine.ports import PublicationCause, PublicationResult
 from yeto.rl.engine.trainable_state import TrainableState
 from yeto.rl.engine.policy_digest import WeightsChanged, is_resident
-from yeto.rl.engine.policy_age import token_version
 from yeto.rl.engine.policy_versions import engine_weight_version
 from . import LoopRunner
 from .rollout import cells_of, member_id, policy_token, running_members
 from .state_plugin import ALIGN_WEIGHT_VERSION
-
-
-def _token_version(token: str) -> int:
-    version = token_version(token)
-    if version is None:
-        raise PublicationError(f"malformed policy token {token!r}")
-    return version
 
 
 async def _stamp_engine_version(
@@ -443,10 +435,9 @@ class MilesPublisher:
     def publish(self, state: TrainableState, *, token_rollout_id: int | None = None) -> PublicationResult:
         tensor_hash = self._check_trainer_holds(state)
         payload_hash, payload_bytes = _payload_of(state)
-        token = policy_token(
-            state.policy_version if token_rollout_id is None else token_rollout_id, tensor_hash
-        )
-        members, checksums = self._runner.run(self._publish(token))
+        version = state.policy_version if token_rollout_id is None else token_rollout_id
+        token = policy_token(version, tensor_hash)
+        members, checksums = self._runner.run(self._publish(version, token))
         self.last_engine_checksums = checksums
         bodies = list((checksums or {}).values())
         self._reference = (
@@ -478,8 +469,9 @@ class MilesPublisher:
         )
         return PublicationResult(manifest=manifest, members=frozenset(members))
 
-    async def _publish(self, token: str) -> tuple[frozenset[str], dict[str, Any] | None]:
-        version = _token_version(token)
+    async def _publish(
+        self, version: int, token: str
+    ) -> tuple[frozenset[str], dict[str, Any] | None]:
         update_weights = self._update_weights_to(version)
         offload_rollout = bool(getattr(self._args, "offload_rollout", False))
         try:
@@ -550,9 +542,8 @@ class MilesPublisher:
         if bool(getattr(self._args, "offload_rollout", False)):
             raise PublicationError("member publication needs a partitioned rollout (no offload)")
         tensor_hash = self._check_trainer_holds(state)
-        token = policy_token(
-            state.policy_version if token_rollout_id is None else token_rollout_id, tensor_hash
-        )
+        version = state.policy_version if token_rollout_id is None else token_rollout_id
+        token = policy_token(version, tensor_hash)
         if not self._verify_checksums:
             raise PublicationError("member publication needs the payload read-back (checksums)")
         if self._reference is None or self._reference[0] != token:
@@ -561,7 +552,7 @@ class MilesPublisher:
             )
         payload_hash, payload_bytes = _payload_of(state)
         cells = cells_of(members)
-        checksums = self._runner.run(self._publish_members(token, cells, epoch))
+        checksums = self._runner.run(self._publish_members(version, token, cells, epoch))
         manifest_hash = hashlib.sha256(
             json.dumps(
                 {"token": token, "policy_tensor_hash": tensor_hash, "payload_hash": payload_hash,
@@ -777,9 +768,8 @@ class MilesPublisher:
                 frozenset(members), cause=PublicationCause.LORA_UNVERIFIABLE, engine_ids=failed)
 
     async def _publish_members(
-        self, token: str, cells: list[str], epoch: int
+        self, version: int, token: str, cells: list[str], epoch: int
     ) -> dict[str, Any] | None:
-        version = _token_version(token)
         update_weights = self._update_weights_to(version)
         try:
             await self._controller.wait_cells_tracked(cells, timeout_seconds=self.track_timeout_s)
