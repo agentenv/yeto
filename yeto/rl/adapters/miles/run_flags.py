@@ -309,6 +309,9 @@ _ISLAND = (
     # rl-multinode-island: GPUs per island node when the island spans nodes (the
     # launcher sends it for --gpu cloud:NxGxgpu with N > 1); None = single node.
     island_flag("--rl-island-gpus-per-node", type=int, default=None),
+    # set by the launcher on every island of a --rl-island-placement launch:
+    # the placement flags then stay out of the full-parameter training contract
+    island_flag("--rl-per-island-placement", action="store_true"),
     # rl-multinode-island Q2 (mixed rollout/trainer nodes): the role -> logical
     # bundle map derived by the launcher from the elastic cfg placement; None =
     # the leading-bundle layout (trainer first, then rollout, then standby).

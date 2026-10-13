@@ -479,20 +479,12 @@ def _canonical_sha256(value: Any) -> str:
 
 # Miles flags whose values may differ between islands of one full-parameter run:
 # routing ports, the rollout seed, the training data (P3: each island may train
-# on its own task list), evaluation (P3-Q3: eval runs on the eval island, so
-# training islands may carry none, or their own) and placement (P4: each island
-# may use its own GPU split, trainer shape and weight transfer path). Value
-# counts: one, except where listed in the two maps below.
+# on its own task list) and evaluation (P3-Q3: eval runs on the eval island, so
+# training islands may carry none, or their own). Value counts: one, except
+# where listed in the two maps below.
 _DENSE_ISLAND_LOCAL_MILES_FLAGS = frozenset(
     {
         "--prompt-data",
-        "--actor-num-nodes",
-        "--actor-num-gpus-per-node",
-        "--num-gpus-per-node",
-        "--rollout-num-gpus",
-        "--rollout-num-gpus-per-engine",
-        "--update-weight-transfer-mode",
-        "--yeto-placement-map",
         "--rollout-seed",
         "--rollout-engine-base-port",
         "--session-server-port",
@@ -522,6 +514,27 @@ _DENSE_ISLAND_LOCAL_MILES_SWITCHES = frozenset(
     {
         "--skip-eval-before-train",
         "--log-passrate",
+    }
+)
+
+# Placement flags left out of the contract only when the launch gives islands
+# their own placement (P4 --rl-per-island-placement): the GPU split, trainer
+# shape and weight transfer path then differ by design. A uniform launch keeps
+# them in, so islands with different GPU splits are still refused. The rollout
+# engine size (--rollout-num-gpus-per-engine) always stays in: it sets the
+# engine TP, which can change sampling numerics, and has no per-island value.
+_DENSE_PLACEMENT_MILES_FLAGS = frozenset(
+    {
+        "--actor-num-nodes",
+        "--actor-num-gpus-per-node",
+        "--num-gpus-per-node",
+        "--rollout-num-gpus",
+        "--update-weight-transfer-mode",
+        "--yeto-placement-map",
+    }
+)
+_DENSE_PLACEMENT_MILES_SWITCHES = frozenset(
+    {
         "--colocate",
         "--offload-train",
         "--no-offload-train",
@@ -808,17 +821,27 @@ def _lora_config_hash(args: Any, canonical_targets: Sequence[str]) -> str:
     )
 
 
-def _dense_shared_miles_argv(miles_argv: Sequence[str]) -> list[str]:
-    """``miles_argv`` without the island-local flags and their values."""
+def _dense_shared_miles_argv(
+    miles_argv: Sequence[str], *, per_island_placement: bool = False
+) -> list[str]:
+    """``miles_argv`` without the island-local flags and their values.
 
+    ``per_island_placement`` also drops the placement flags and switches.
+    """
+
+    local_flags = _DENSE_ISLAND_LOCAL_MILES_FLAGS | _DENSE_ISLAND_LOCAL_MILES_NARGS_FLAGS
+    local_switches = _DENSE_ISLAND_LOCAL_MILES_SWITCHES
+    if per_island_placement:
+        local_flags |= _DENSE_PLACEMENT_MILES_FLAGS
+        local_switches |= _DENSE_PLACEMENT_MILES_SWITCHES
     shared_argv = []
     index = 0
     while index < len(miles_argv):
         value = miles_argv[index]
         index += 1
-        if value in _DENSE_ISLAND_LOCAL_MILES_SWITCHES:
+        if value in local_switches:
             continue
-        if value not in _DENSE_ISLAND_LOCAL_MILES_FLAGS | _DENSE_ISLAND_LOCAL_MILES_NARGS_FLAGS:
+        if value not in local_flags:
             shared_argv.append(value)
             continue
         value_count = 0
@@ -839,16 +862,17 @@ def _dense_full_training_contract_sha256(
     model_config_sha256: str,
 ) -> str:
     """Hash shared training semantics while excluding island-local routing,
-    data, eval and placement.
+    data, eval and (with per-island placement) placement.
 
     Each island may train on its own task list (P3), so the training data
     (``--data``, its revision and the prompt file) stays out of the contract.
     Evaluation does not change the trained weights and runs on the eval island
-    (P3-Q3), so its settings stay out too. Each island may use its own
-    placement (P4), so the placement flags do too (v6).
+    (P3-Q3), so its settings stay out too. With per-island placement (P4) the
+    placement flags stay out as well; ``per_island_placement`` records that (v6).
     """
 
-    shared_argv = _dense_shared_miles_argv(miles_argv)
+    per_island_placement = bool(getattr(args, "rl_per_island_placement", False))
+    shared_argv = _dense_shared_miles_argv(miles_argv, per_island_placement=per_island_placement)
     explicit_rollout_seed = getattr(args, "rollout_seed", None)
     rollout_seed_contract = (
         {"mode": "fixed", "value": explicit_rollout_seed}
@@ -860,6 +884,7 @@ def _dense_full_training_contract_sha256(
             **_expert_full_contract(args),
             "schema": "yeto-dense-full-training-contract-v6",
             "shared_miles_argv": shared_argv,
+            "per_island_placement": per_island_placement,
             "rollout_seed_contract": rollout_seed_contract,
             "model": args.model,
             "model_revision": args.model_revision.lower(),

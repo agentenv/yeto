@@ -128,11 +128,15 @@ def _resolved(args: Any, island: int, overrides: dict[int, dict[str, Any]]) -> I
                            use_gpus_per_node=None if use is None else int(use))
 
 
+def _overrides_and_placements(args: Any, num_islands: int):
+    overrides = parse_overrides(getattr(args, OVERRIDES_DEST, None), num_islands)
+    return overrides, tuple(_resolved(args, m, overrides) for m in range(num_islands))
+
+
 def island_placements(args: Any, num_islands: int) -> tuple[IslandPlacement, ...]:
     """Every island's resolved placement values, in island order."""
 
-    overrides = parse_overrides(getattr(args, OVERRIDES_DEST, None), num_islands)
-    return tuple(_resolved(args, m, overrides) for m in range(num_islands))
+    return _overrides_and_placements(args, num_islands)[1]
 
 
 def is_mixed(placements: Sequence[IslandPlacement]) -> bool:
@@ -167,8 +171,7 @@ def check(args: Any, num_islands: int, *, island_scheduling: str) -> tuple[Islan
     ``standby-gpus`` above 0 on a colocated island.
     """
 
-    overrides = parse_overrides(getattr(args, OVERRIDES_DEST, None), num_islands)
-    placements = tuple(_resolved(args, m, overrides) for m in range(num_islands))
+    overrides, placements = _overrides_and_placements(args, num_islands)
     colocated = [p.island for p in placements if p.placement == COLOCATED]
     if is_mixed(placements) and island_scheduling != "elastic":
         kinds = ", ".join(f"island {p.island} {p.placement}" for p in placements)

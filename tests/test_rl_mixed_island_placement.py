@@ -152,6 +152,7 @@ def test_each_island_gets_its_own_shape_and_command(monkeypatch):
             == args.rl_expected_algorithm_sha256)
     for flags in (colocated, partitioned):
         assert _value(flags, "--rl-island-scheduling") == "elastic"
+        assert "--rl-per-island-placement" in flags
 
 
 def test_uniform_fixed_partition_command_is_unchanged_by_this_change(monkeypatch):
@@ -163,8 +164,11 @@ def test_uniform_fixed_partition_command_is_unchanged_by_this_change(monkeypatch
     explicit.gpu = plain.gpu
     for args in (plain, explicit):
         launcher._prepare_rl_args(args)
-    assert ([t.run for t in _island_tasks(plain, monkeypatch)]
-            == [t.run for t in _island_tasks(explicit, monkeypatch)])
+    plain_runs = [t.run for t in _island_tasks(plain, monkeypatch)]
+    explicit_runs = [t.run for t in _island_tasks(explicit, monkeypatch)]
+    assert all("--rl-per-island-placement" not in run for run in plain_runs)
+    # per-island values present: only the contract marker is added
+    assert [run.replace(" --rl-per-island-placement", "") for run in explicit_runs] == plain_runs
 
 
 def test_policy_age_overlap_differs_by_island_placement():
@@ -196,7 +200,8 @@ def test_run_manifest_rows_record_every_island_placement():
 
 # --- static check (tasks 1.3) --------------------------------------------------------
 
-PLACEMENT_DESTS = {"rl_placement", "rl_standby_gpus", "rl_island_use_gpus_per_node"}
+PLACEMENT_DESTS = {"rl_placement", "rl_standby_gpus", "rl_island_use_gpus_per_node",
+                   "rollout_num_gpus"}
 # Functions that read the placement values from the args they are given. Each
 # caller passes the island's args (rl_island_args); the run-wide readers are the
 # presets that need one placement on every island (both require the legacy
@@ -234,3 +239,16 @@ def _placement_readers(tree: ast.AST) -> set[str]:
 def test_launcher_reads_placement_values_only_from_island_args():
     tree = ast.parse(Path(inspect.getsourcefile(launcher)).read_text(encoding="utf-8"))
     assert _placement_readers(tree) == ISLAND_ARGS_READERS | RUN_WIDE_READERS
+
+
+def test_island_tasks_are_built_only_through_island_task():
+    """Every island task factory call passes the island's args (_island_task)."""
+    tree = ast.parse(Path(inspect.getsourcefile(launcher)).read_text(encoding="utf-8"))
+    callers = set()
+    for func in ast.walk(tree):
+        if isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for node in ast.walk(func):
+                if isinstance(node, ast.Call) and getattr(node.func, "id", None) in (
+                        "make_miles_island_task", "task_factory"):
+                    callers.add(func.name)
+    assert callers == {"_island_task"}

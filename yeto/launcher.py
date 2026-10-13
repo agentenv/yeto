@@ -357,8 +357,11 @@ def rl_island_placement_args(args) -> list:
     seen, out = set(), []
     for m in range(rl_island_count(args)):
         iargs = rl_island_args(args, m)
+        # rollout_num_gpus is included because a colocated island of a mixed
+        # run drops it (island_placement.island_args); the other fields follow.
         key = (getattr(iargs, "rl_placement", "colocated"),
-               getattr(iargs, "rl_standby_gpus", 0), getattr(iargs, "rollout_num_gpus", None))
+               getattr(iargs, "rl_standby_gpus", 0), getattr(iargs, "rollout_num_gpus", None),
+               getattr(iargs, "rl_island_use_gpus_per_node", None))
         if key not in seen:
             seen.add(key)
             out.append(iargs)
@@ -2482,6 +2485,8 @@ def _ports_algorithm_flags(args) -> tuple[str, str]:
         flags += f" --rl-standby-gpus {int(args.rl_standby_gpus)}"
     if getattr(args, "rl_placement", "colocated") == "fixed-partition":
         flags += f" --rollout-num-gpus {int(args.rollout_num_gpus)}"
+    if getattr(args, "rl_island_placement", None):
+        flags += " --rl-per-island-placement"
     allowed = list(getattr(args, "rl_allow_unverified_mechanism", None) or ())
     for name in allowed:
         flags += f" --rl-allow-unverified-mechanism {shlex.quote(name)}"
@@ -8273,6 +8278,7 @@ def dry_run_plan(args) -> dict:
 
     memory = dry_run_memory(args, specs)
     task_plan = island_task_plan(args) if rl else None
+    placements = rl_island_placement_records(args) if rl else []
     for learner_id, spec in enumerate(specs):
         entry = {
             "learner_id": learner_id,
@@ -8284,7 +8290,7 @@ def dry_run_plan(args) -> dict:
             "total_gpus": spec.total_gpus,
         }
         if rl:
-            entry["placement"] = rl_island_placement_records(args)[learner_id]
+            entry["placement"] = placements[learner_id]
         if rl and rl_island_spec(rl_island_args(args, learner_id), spec) is not spec:
             entry["allocated_gpus_per_node"] = rl_island_spec(
                 rl_island_args(args, learner_id), spec).gpus_per_node

@@ -1430,18 +1430,30 @@ def test_miles_dense_full_parameter_argv_and_runtime_contract(
     assert dense.training_contract_hash == rl_learner._dense_full_training_contract_sha256(
         eval_args, eval_argv, model_config_sha256=config_sha256
     )
-    # P4: each island may use its own placement; the placement flags stay out.
+    # P4: placement flags stay in a uniform launch's contract (different GPU
+    # splits refused) and leave it only with per-island placement.
     colocated_argv = list(learner_zero_argv)
     rollout = colocated_argv.index("--rollout-num-gpus")
     colocated_argv[rollout : rollout + 2] = ["--colocate"]
     colocated_argv[colocated_argv.index("--actor-num-gpus-per-node") + 1] = "4"
     colocated_argv[colocated_argv.index("--num-gpus-per-node") + 1] = "2"
-    colocated_argv[colocated_argv.index("--rollout-num-gpus-per-engine") + 1] = "2"
     offload = colocated_argv.index("--no-offload-train")
     colocated_argv[offload] = "--offload-train"
-    assert dense.training_contract_hash == rl_learner._dense_full_training_contract_sha256(
-        learner_zero_args, colocated_argv, model_config_sha256=config_sha256
-    )
+    other_rollout_argv = list(learner_zero_argv)
+    other_rollout_argv[other_rollout_argv.index("--rollout-num-gpus") + 1] = "3"
+    mixed_args = argparse.Namespace(**vars(learner_zero_args), rl_per_island_placement=True)
+
+    def contract(island_args, island_argv):
+        return rl_learner._dense_full_training_contract_sha256(
+            island_args, island_argv, model_config_sha256=config_sha256)
+
+    assert contract(learner_zero_args, other_rollout_argv) != dense.training_contract_hash
+    assert contract(learner_zero_args, colocated_argv) != dense.training_contract_hash
+    assert contract(mixed_args, colocated_argv) == contract(mixed_args, learner_zero_argv)
+    assert contract(mixed_args, learner_zero_argv) != dense.training_contract_hash
+    other_engine_argv = list(learner_zero_argv)
+    other_engine_argv[other_engine_argv.index("--rollout-num-gpus-per-engine") + 1] = "2"
+    assert contract(mixed_args, other_engine_argv) != contract(mixed_args, learner_zero_argv)
     changed_source_args = argparse.Namespace(**vars(learner_zero_args))
     changed_source_args.source_sha256 = "f" * 64
     assert dense.training_contract_hash != rl_learner._dense_full_training_contract_sha256(
