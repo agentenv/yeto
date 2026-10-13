@@ -2098,8 +2098,9 @@ def test_miles_dense_full_parameter_argv_and_runtime_contract(
         def from_hf_pretrained(*_args, **_kwargs):
             return Bridge()
 
-    async def train(args):
-        captured["miles_args"] = args
+    def run_ports(_args, miles_args, launch, *_rest, **_kwargs):
+        captured["miles_args"] = miles_args
+        captured["argv"] = list(launch.argv)
 
     def forbidden(*_args, **_kwargs):
         raise AssertionError("full mode must not derive LoRA state")
@@ -2109,15 +2110,20 @@ def test_miles_dense_full_parameter_argv_and_runtime_contract(
         "megatron.bridge",
         types.SimpleNamespace(AutoBridge=AutoBridge),
     )
-    monkeypatch.setitem(sys.modules, "train", types.SimpleNamespace(train=train))
     monkeypatch.setattr(rl_learner, "derive_peft_lora_specs", forbidden)
     monkeypatch.setattr(rl_learner, "adapter_targets", forbidden)
     monkeypatch.setattr(rl_learner, "megatron_adapter_targets", forbidden)
+    from yeto.rl.adapters.miles import config as miles_config
+    from yeto.rl.adapters.miles import state as miles_state
+
     monkeypatch.setattr(
-        rl_learner,
-        "_parse_miles_args",
-        lambda argv: argparse.Namespace(argv=argv),
+        miles_config, "parse_miles_args", lambda launch: argparse.Namespace(argv=list(launch.argv))
     )
+    monkeypatch.setattr(miles_state, "require_run_plugin", lambda: None)
+    monkeypatch.setattr(rl_learner, "verify_ports_algorithm", lambda *_args: None)
+    monkeypatch.setattr(rl_learner, "require_ports_router_mode", lambda *_args: None)
+    monkeypatch.setattr(rl_learner, "_append_ports_event", lambda *_args: None)
+    monkeypatch.setattr(rl_learner, "_run_ports", run_ports)
     monkeypatch.delenv("MILES_EXPERIMENTAL_FT_TRAINER", raising=False)
     monkeypatch.delenv(
         "MILES_ALLOW_MISSING_UNQUANTIZED_WEIGHT_UPDATE_HOOKS",
@@ -2137,7 +2143,8 @@ def test_miles_dense_full_parameter_argv_and_runtime_contract(
     prompts = tmp_path / "prompts.jsonl"
     prompts.write_text('{"messages":[]}\n', encoding="utf-8")
     args = argparse.Namespace(
-        rl_engine="legacy",
+        rl_engine="ports",
+        rl_placement="fixed-partition",
         parameter_mode="full",
         sync_preset="dense-full",
         model=QWEN35_MODEL,
@@ -2145,7 +2152,6 @@ def test_miles_dense_full_parameter_argv_and_runtime_contract(
         data="org/data",
         data_revision="b" * 40,
         rollout_model_revision=None,
-        miles_source_sha256="e" * 64,
         megatron_ref_load=str(ref_load),
         reward_sha256="c" * 64,
         source_sha256="d" * 64,
@@ -2156,12 +2162,13 @@ def test_miles_dense_full_parameter_argv_and_runtime_contract(
         trust_remote_code=True,
         learner_id=1,
         num_learners=2,
-        learner_generation=0,
+        learner_generation=2,
         syncer="127.0.0.1:29400",
-            global_rounds=3,
-            fragments=2,
-            parameter_layout_sha256="f" * 64,
-            total_fragment_steps=6,
+        global_rounds=3,
+        fragments=2,
+        parameter_layout_sha256="f" * 64,
+        syncer_profile_sha256="a" * 64,
+        total_fragment_steps=6,
         local_horizon=1,
         optimizer_steps=1,
         groups_per_round=2,
@@ -2232,30 +2239,24 @@ def test_miles_dense_full_parameter_argv_and_runtime_contract(
     assert argv[argv.index("--attention-dropout") + 1] == "0.0"
     assert argv[argv.index("--hidden-dropout") + 1] == "0.0"
     assert argv[argv.index("--attention-backend") + 1] == "flash"
-    assert "--bridge-distributed-weight-sync" in argv
-    assert "--allow-missing-unquantized-weight-update-hooks" in argv
-    assert argv[argv.index("--update-weight-transfer-mode") + 1] == "broadcast"
-    assert argv[argv.index("--rollout-weight-version-format") + 1] == "yeto-policy"
     assert argv[argv.index("--num-gpus-per-node") + 1] == "4"
-    assert (
-        argv[argv.index("--external-policy-sync-path") + 1]
-        == "yeto.rl.adapters.miles.models.full_parameter_dense."
-        "create_miles_full_parameter_dense_sync"
-    )
-    dense = miles_args.yeto_rl_dense_full_parameter_config
+    from yeto.rl.adapters.miles.full_parameter.session import CONFIG_ATTRIBUTE
+
+    sync = getattr(miles_args, CONFIG_ATTRIBUTE)
+    assert sync.sweep is True
+    (dense,) = sync.roles
+    assert (dense.algorithm, dense.role) == ("grpo", "actor")
     assert dense.component.model_revision == QWEN35_REVISION
     assert dense.component.config_hash == hashlib.sha256(config.read_bytes()).hexdigest()
-    assert dense.wire.policy_rounds == 3
-    assert dense.wire.learner_id == 1
-    assert dense.wire.learner_generation == 0
-    assert dense.learner_generations == (0, 0)
-    assert dense.minimum_fragments == 2
-    assert miles_args.yeto_rl_num_fragments == dense.minimum_fragments
-    assert miles_args.yeto_rl_miles_source_sha256 == "e" * 64
-    assert (
-        dense.training_contract_hash
-        == miles_args.yeto_rl_dense_training_contract_sha256
-    )
+    assert dense.syncer_addr == ("127.0.0.1", 29400)
+    assert dense.learner_id == 1
+    assert dense.learner_generation == 2
+    assert dense.learner_generations == (0, 2)
+    assert dense.total_fragment_steps == 6
+    assert dense.expected_fragments == 2
+    assert dense.expected_layout_hash == "f" * 64
+    assert dense.syncer_profile_hash == "a" * 64
+    assert (dense.local_horizon, dense.pipeline_depth) == (1, 1)
     learner_zero_argv = list(argv)
     learner_zero_argv[learner_zero_argv.index("--rollout-seed") + 1] = "7"
     session_port = learner_zero_argv.index("--session-server-port")
@@ -2287,6 +2288,45 @@ def test_miles_dense_full_parameter_argv_and_runtime_contract(
     assert miles_args.external_policy_sync_run_until_stop is False
     assert os.environ["MILES_EXPERIMENTAL_FT_TRAINER"] == "0"
     assert "MILES_ALLOW_MISSING_UNQUANTIZED_WEIGHT_UPDATE_HOOKS" not in os.environ
+
+
+def _dense_sweep_args(**overrides):
+    values = dict(
+        eval_only=False,
+        optimizer_steps=1,
+        local_horizon=1,
+        global_rounds=3,
+        fragments=2,
+        total_fragment_steps=6,
+        parameter_layout_sha256="f" * 64,
+        syncer_profile_sha256="a" * 64,
+    )
+    values.update(overrides)
+    return argparse.Namespace(**values)
+
+
+@pytest.mark.parametrize(
+    "engine, overrides, message",
+    [
+        ("legacy", {}, "only on the ports engine"),
+        ("ports", {"local_horizon": 2}, "requires H=1"),
+        ("ports", {"total_fragment_steps": 5}, "rounds\\*fragments"),
+        ("ports", {"syncer_profile_sha256": None}, "--syncer-profile-sha256"),
+        ("ports", {"eval_only": True}, "eval-only"),
+    ],
+)
+def test_dense_full_sweep_rejections(engine, overrides, message):
+    with pytest.raises(ValueError, match=message):
+        rl_learner._check_dense_full_sweep(
+            _dense_sweep_args(**overrides), rl_engine=engine, yeto_policy_sync=True
+        )
+
+
+def test_dense_full_sweep_accepts_any_generation_roster():
+    # P0-D7: no generation-0 / version-0 Milestone-1 limit any more.
+    rl_learner._check_dense_full_sweep(
+        _dense_sweep_args(), rl_engine="ports", yeto_policy_sync=True
+    )
 
 
 def test_dense_full_legacy_weight_hook_rejects_quantized_rollout(tmp_path):

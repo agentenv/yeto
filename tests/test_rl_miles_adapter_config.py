@@ -217,7 +217,7 @@ def test_algorithm_disagreement_rejected():
         ("ports", "rollout_engine_base_port", 15000, "ports.rollout_engine_base_port"),
         ("agent", "custom_agent_function_path", "a.b.c", "agent.custom_agent_function_path"),
         ("agent", "tito_allowed_append_roles", ("tool",), "agent.tito_allowed_append_roles"),
-        ("trainable", "parameter_mode", "full", "trainable.parameter_mode"),
+        ("trainable", "parameter_mode", "adapter", "trainable.parameter_mode"),
         ("trainable", "expert_full_count", 4, "trainable.expert_full_count"),
         ("trainable", "lora_targets", "attention-routed-experts", "trainable.lora_targets"),
         ("model_recipe", "name", rc.RECIPE_DEEPSEEK_V4_FLASH, "model_recipe.name"),
@@ -230,6 +230,12 @@ def test_unmappable_values_rejected_by_name(section, field, value, path):
         mc.translate_run_config(cfg, AlgorithmSpec())
     assert err.value.path == path
     assert path in str(err.value)
+
+
+def test_full_parameter_mode_emits_no_lora_flags():
+    cfg = sub(make_config(), "trainable", parameter_mode="full", target_modules=())
+    argv = mc.translate_run_config(cfg, AlgorithmSpec()).argv
+    assert not [token for token in argv if "lora" in token or token == "--target-modules"]
 
 
 def test_unknown_config_field_rejected_by_name():

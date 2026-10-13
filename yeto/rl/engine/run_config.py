@@ -1069,7 +1069,10 @@ def _lora_dropout(args, parameter_mode: str) -> float:
 
 
 def ports_training_eval(args, *, parameter_mode: str | None) -> bool:
-    """Training-time heldout eval on a ports LoRA island (not eval-only, not dense).
+    """Training-time heldout eval on a ports island (not eval-only).
+
+    Dense full-parameter islands use the same driver evaluation (rollout 0,
+    every ``interval`` rollouts and the final one; P0 1.7b.1b).
 
     Shared by the learner's dataset-identity check and :func:`_resolve_eval`
     so both accept exactly the same runs.
@@ -1078,7 +1081,6 @@ def ports_training_eval(args, *, parameter_mode: str | None) -> bool:
     return (
         not getattr(args, "eval_only", False)
         and getattr(args, "rl_engine", "ports") == "ports"
-        and parameter_mode != "full"
     )
 
 
@@ -1098,25 +1100,11 @@ def _resolve_eval(
     if eval_interval <= 0:
         raise ValueError("evaluation interval must be positive")
     eval_only = getattr(args, "eval_only", False)
-    dense_train_eval = (
-        not eval_only
-        and parameter_mode == "full"
-        and getattr(args, "sync_preset", None) == "dense-full"
-    )
     ports_train_eval = ports_training_eval(args, parameter_mode=parameter_mode)
     if eval_only:
         if eval_interval != 1:
             raise ValueError("SSH evaluation must be one separate eval-only run")
         selected = prompt_path
-    elif dense_train_eval:
-        if eval_interval != args.global_rounds + 1:
-            raise ValueError(
-                "dense full evaluation interval must remain outside the "
-                "training-round budget"
-            )
-        if eval_prompt_path is None:
-            raise ValueError("dense full evaluation requires heldout prompt data")
-        selected = eval_prompt_path
     elif ports_train_eval:
         # Ports LoRA island (rl-infra-spec 2.3 / launcher wiring): Miles runs
         # the heldout eval every ``interval`` rollouts through the driver's
@@ -1125,17 +1113,13 @@ def _resolve_eval(
             raise ValueError("ports training-time evaluation requires heldout prompt data")
         selected = eval_prompt_path
     else:
-        raise ValueError(
-            "training-time evaluation is restricted to dense full mode or the ports LoRA engine"
-        )
+        raise ValueError("training-time evaluation is restricted to the ports engine")
     eval_name = getattr(args, "eval_dataset_name", None)
     eval_samples = getattr(args, "eval_samples_per_prompt", None)
     if not eval_name or not isinstance(eval_samples, int) or eval_samples <= 0:
         raise ValueError("evaluation requires a dataset name and positive sample count")
-    # Eval-only reuses its sole normalized prompt file.  Dense training binds a
-    # separately normalized, immutable heldout split; its interval sits beyond
-    # the rollout budget because the dense policy hook evaluates only the exact
-    # initial and terminal published policies.
+    # Eval-only reuses its sole normalized prompt file; training binds a
+    # separately normalized, immutable heldout split.
     return EvalConfig(
         interval=eval_interval,
         dataset_name=str(eval_name),

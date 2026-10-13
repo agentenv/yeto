@@ -367,7 +367,7 @@ def test_learner_main_verifies_the_ports_pin_group(monkeypatch):
         rl_learner.main(
             _learner_argv(("--rl-engine", "legacy", "--data-revision", "f" * 40))
         )
-    assert calls == [{"expected_source_sha256": None}]  # legacy call unchanged
+    assert calls == [{}]  # legacy: no pin group and no source-tree hash
 
 
 # ---------------------------------------------------------------- SSH harness

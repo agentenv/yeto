@@ -50,7 +50,6 @@ def parse_args(argv=None):
     parser.add_argument("--eval-data", default=None)
     parser.add_argument("--eval-dataset-name", default=None)
     parser.add_argument("--eval-data-sha256", default=None)
-    parser.add_argument("--eval-summary-path", default=None)
     parser.add_argument("--eval-only", action="store_true")
     parser.add_argument("--eval-interval", type=int, default=None)
     parser.add_argument("--eval-samples-per-prompt", type=int, default=None)
@@ -101,6 +100,12 @@ def parse_args(argv=None):
     )
     parser.add_argument("--fragments", type=int, default=1)
     parser.add_argument("--parameter-layout-sha256", default=None)
+    parser.add_argument(
+        "--syncer-profile-sha256",
+        default=None,
+        help="full-parameter mode: the launcher-computed syncer semantic profile hash "
+        "(yeto.syncer_profile), bound into every role's HELLO",
+    )
     parser.add_argument("--pipeline", type=int, default=1)
     parser.add_argument("--local-horizon", type=int, default=1)
     parser.add_argument("--total-fragment-steps", type=int, default=None)
@@ -311,7 +316,6 @@ def parse_args(argv=None):
                              "the warm-up (randomly initialized value head) as the explained-"
                              "variance baseline (own event tape / completed-groups path; "
                              "--rl-single-island-no-sync only)")
-    parser.add_argument("--miles-source-sha256", default=None)
     parser.add_argument("--megatron-ref-load", default=None)
     parser.add_argument("--trust-remote-code", action="store_true")
     from yeto.wandb_logger import add_arguments as add_wandb_arguments
@@ -783,6 +787,99 @@ _DENSE_FULL_QUANTIZATION_CONFIG_KEYS = frozenset(
 )
 
 
+def _is_sha256(value: Any) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _check_dense_full_sweep(args, *, rl_engine: str, yeto_policy_sync: bool) -> None:
+    """Dense full-parameter GRPO is the strict-sweep profile of the ports
+    full-parameter sync (P0-D8): one role, H=1, whole-round fragment sweeps.
+
+    The Milestone-1 limits (version-0 start, generation-0 roster, pinned Miles
+    source tree) are gone (P0-D7); the syncer's authoritative fragments decide
+    the start version and the launcher owns the roster.
+    """
+
+    if rl_engine != "ports":
+        raise ValueError("dense full-parameter GRPO runs only on the ports engine")
+    if not yeto_policy_sync:
+        raise ValueError("dense full-parameter GRPO requires Yeto policy sync")
+    if getattr(args, "eval_only", False):
+        raise ValueError("dense full-parameter mode does not run eval-only")
+    if args.optimizer_steps != 1 or getattr(args, "local_horizon", 1) != 1:
+        raise ValueError("the dense full-parameter strict sweep requires H=1")
+    if (
+        type(args.global_rounds) is not int
+        or args.global_rounds < 1
+        or type(args.fragments) is not int
+        or args.fragments < 1
+        or args.total_fragment_steps != args.global_rounds * args.fragments
+        or not _is_sha256(args.parameter_layout_sha256)
+    ):
+        raise ValueError("dense full-parameter fragment budget must equal rounds*fragments")
+    if not _is_sha256(getattr(args, "syncer_profile_sha256", None)):
+        raise ValueError("dense full-parameter mode requires --syncer-profile-sha256")
+
+
+def _private_trajectory_evidence_dir(args) -> Path:
+    """A fresh owner-only directory for this island's trajectory evidence."""
+
+    parent = (
+        Path(args.audit_dir).expanduser()
+        if getattr(args, "audit_dir", None)
+        else Path(args.completed_groups_path).expanduser().parent
+    )
+    parent.mkdir(parents=True, exist_ok=True)
+    directory = Path(
+        tempfile.mkdtemp(prefix=f"trajectory-evidence-{args.learner_id}-", dir=parent)
+    )
+    if directory.stat().st_mode & 0o077:
+        raise RuntimeError("trajectory evidence directory is not private")
+    return directory
+
+
+def _roster_generations(args) -> tuple[int, ...]:
+    """The launcher's island roster: every peer at generation 0, this island at its own."""
+
+    generations = [0] * int(getattr(args, "num_learners", 1))
+    generations[args.learner_id] = int(getattr(args, "learner_generation", 0))
+    return tuple(generations)
+
+
+def _dense_full_sync_config(
+    args, *, model_config_sha256: str, training_contract_sha256: str
+):
+    """The dense strict sweep as a one-role :class:`FullParameterSyncConfig`."""
+
+    from yeto.rl.adapters.miles.full_parameter.role_stream import RoleStreamConfig
+    from yeto.rl.adapters.miles.full_parameter.session import FullParameterSyncConfig
+    from yeto.rl.local_learner import ComponentIdentity
+
+    actor = RoleStreamConfig(
+        algorithm="grpo",
+        role="actor",
+        component=ComponentIdentity(
+            role="actor",
+            model_revision=args.model_revision.lower(),
+            config_hash=model_config_sha256,
+        ),
+        syncer_addr=_syncer_address(args.syncer),
+        learner_id=args.learner_id,
+        learner_generation=int(getattr(args, "learner_generation", 0)),
+        learner_generations=_roster_generations(args),
+        total_fragment_steps=args.total_fragment_steps,
+        expected_fragments=args.fragments,
+        expected_layout_hash=args.parameter_layout_sha256,
+        local_horizon=1,
+        optimizer_steps_per_round=args.optimizer_steps,
+        training_contract_hash=training_contract_sha256,
+        syncer_profile_hash=args.syncer_profile_sha256,
+        pipeline_depth=1,
+        wan_streams=args.wan_streams,
+    )
+    return FullParameterSyncConfig((actor,), sweep=True)
+
+
 def _require_unquantized_dense_full_rollout_model(model_path: str | Path) -> None:
     """Enable the pinned SGLang BF16 hook fallback only for an exact safe model.
 
@@ -862,7 +959,7 @@ def _dense_full_training_contract_sha256(
     )
     return _canonical_sha256(
         {
-            "schema": "yeto-dense-full-training-contract-v3",
+            "schema": "yeto-dense-full-training-contract-v4",
             "shared_miles_argv": shared_argv,
             "rollout_seed_contract": rollout_seed_contract,
             "model": args.model,
@@ -892,7 +989,7 @@ def _dense_full_training_contract_sha256(
                 }
             ),
             "yeto_source_sha256": args.source_sha256,
-            "miles_source_sha256": args.miles_source_sha256,
+            "miles_backend_identity_sha256": _backend_identity_sha256(args),
             "reward_sha256": args.reward_sha256,
             "codex_harness_contract": getattr(
                 args,
@@ -1659,12 +1756,7 @@ def _legacy_miles_argv(config) -> list[str]:
             )
         )
     if config.yeto_policy_sync:
-        policy_sync_path = (
-            "yeto.rl.adapters.miles.models.full_parameter_dense."
-            "create_miles_full_parameter_dense_sync"
-            if trainable.parameter_mode == "full"
-            else "yeto.rl.adapters.miles.legacy.engine.create_policy_sync"
-        )
+        policy_sync_path = "yeto.rl.adapters.miles.legacy.engine.create_policy_sync"
         values.extend(
             (
                 "--rollout-all-samples-process-path",
@@ -1873,28 +1965,18 @@ def prepare_prompt_data(
 
 
 def _verify_eval_dataset_identity(args) -> Path | None:
-    """Verify the immutable source bytes for an eval-only or dense heldout run."""
+    """Verify the immutable source bytes for an eval-only or training heldout run."""
 
     if getattr(args, "eval_interval", None) is None:
         if getattr(args, "eval_only", False) or getattr(args, "eval_data", None):
             raise ValueError("--eval-only requires evaluation configuration")
         return None
     eval_only = getattr(args, "eval_only", False)
-    dense_train_eval = (
-        not eval_only
-        and getattr(args, "parameter_mode", None) == "full"
-        and getattr(args, "sync_preset", None) == "dense-full"
-    )
     from yeto.rl.engine.run_config import ports_training_eval
 
-    ports_train_eval = ports_training_eval(
-        args, parameter_mode=getattr(args, "parameter_mode", None)
-    )
-    if not eval_only and not dense_train_eval and not ports_train_eval:
-        raise ValueError(
-            "evaluation configuration requires --eval-only, dense full mode "
-            "or the ports LoRA engine"
-        )
+    train_eval = ports_training_eval(args, parameter_mode=getattr(args, "parameter_mode", None))
+    if not eval_only and not train_eval:
+        raise ValueError("evaluation configuration requires --eval-only or the ports engine")
     expected = str(getattr(args, "eval_data_sha256", "") or "").lower()
     if not re.fullmatch(r"[0-9a-f]{64}", expected):
         raise ValueError("evaluation dataset requires an immutable SHA256")
@@ -1904,7 +1986,7 @@ def _verify_eval_dataset_identity(args) -> Path | None:
     source = Path(source_value).expanduser()
     if source.is_symlink() or not source.is_file():
         raise ValueError("evaluation requires one regular local dataset file")
-    if (dense_train_eval or ports_train_eval) and (
+    if train_eval and (
         source.resolve() == Path(args.data).expanduser().resolve()
     ):
         raise ValueError("training-time evaluation must use a distinct heldout dataset")
@@ -1916,25 +1998,6 @@ def _verify_eval_dataset_identity(args) -> Path | None:
             f"evaluation dataset SHA256 mismatch: expected {expected}, got {actual}"
         )
     return source
-
-
-def _jsonl_record_count(path: str | Path) -> int:
-    source = Path(path)
-    count = 0
-    try:
-        with source.open(encoding="utf-8") as handle:
-            for line in handle:
-                if not line.strip():
-                    raise ValueError("evaluation prompt data contains a blank row")
-                value = json.loads(line)
-                if not isinstance(value, dict):
-                    raise ValueError("evaluation prompt row is not a JSON object")
-                count += 1
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise ValueError("evaluation prompt data is not canonical JSONL") from exc
-    if count < 1:
-        raise ValueError("evaluation prompt data is empty")
-    return count
 
 
 def _parse_miles_args(argv: list[str]):
@@ -2219,49 +2282,7 @@ def run_miles(
     ):
         raise ValueError("dense-full sync and full parameter mode must be selected together")
     if dense_full:
-        if not yeto_policy_sync:
-            raise ValueError("dense full-parameter GRPO requires Yeto policy sync")
-        miles_source_sha256 = getattr(args, "miles_source_sha256", None)
-        if (
-            type(miles_source_sha256) is not str
-            or len(miles_source_sha256) != 64
-            or any(value not in "0123456789abcdef" for value in miles_source_sha256)
-        ):
-            raise ValueError(
-                "dense full-parameter GRPO requires an exact Miles source SHA256"
-            )
-        if (
-            args.optimizer_steps != 1
-            or getattr(args, "local_horizon", 1) != 1
-        ):
-            raise ValueError("dense full-parameter GRPO requires H=1")
-        if getattr(args, "eval_only", False):
-            raise ValueError("Milestone-1 dense full-parameter mode does not run eval-only")
-        if (
-            type(args.global_rounds) is not int
-            or args.global_rounds < 1
-            or type(args.fragments) is not int
-            or args.fragments < 1
-            or args.total_fragment_steps != args.global_rounds * args.fragments
-            or not isinstance(args.parameter_layout_sha256, str)
-            or not re.fullmatch(r"[0-9a-f]{64}", args.parameter_layout_sha256)
-        ):
-            raise ValueError(
-                "dense full-parameter fragment budget must equal rounds*fragments"
-            )
-        num_learners = getattr(args, "num_learners", 1)
-        generation = getattr(args, "learner_generation", 0)
-        if (
-            type(num_learners) is not int
-            or num_learners < 1
-            or type(args.learner_id) is not int
-            or args.learner_id not in range(num_learners)
-            or type(generation) is not int
-            or generation != 0
-        ):
-            raise ValueError(
-                "Milestone-1 dense full-parameter mode requires a fixed generation-0 roster"
-            )
+        _check_dense_full_sweep(args, rl_engine=rl_engine, yeto_policy_sync=yeto_policy_sync)
 
     if (
         yeto_policy_sync
@@ -2538,90 +2559,29 @@ def run_miles(
         miles_args.wandb_mode = getattr(args, "wandb_mode", "online")
         if getattr(args, "eval_only", False):
             miles_args.yeto_rl_eval_policy_version = args.global_rounds
-        elif dense_full and getattr(args, "eval_interval", None) is not None:
-            if eval_prompt_path is None:
-                raise ValueError("dense full evaluation prompt path is unavailable")
-            summary_path = Path(
-                str(getattr(args, "eval_summary_path", "") or "")
-            ).expanduser()
-            if (
-                not summary_path.is_absolute()
-                or summary_path.exists()
-                or summary_path.is_symlink()
-                or not summary_path.parent.is_dir()
-                or summary_path.parent.is_symlink()
-            ):
-                raise ValueError(
-                    "dense full evaluation summary requires a fresh absolute path"
-                )
-            miles_args.yeto_rl_eval_policy_versions = (0, args.global_rounds)
-            miles_args.yeto_rl_eval_dataset_name = args.eval_dataset_name
-            miles_args.yeto_rl_eval_prompt_count = _jsonl_record_count(
-                eval_prompt_path
-            )
-            miles_args.yeto_rl_eval_samples_per_prompt = (
-                args.eval_samples_per_prompt
-            )
-            miles_args.yeto_rl_eval_summary_path = str(summary_path)
         miles_args.yeto_rl_sync_preset = sync_preset
         miles_args.external_policy_sync_run_until_stop = sync_preset == "decoupled"
         if dense_full:
-            from yeto.rl.adapters.miles.models.dense_sweep_wire import DenseSweepConfig
-            from yeto.rl.local_learner import ComponentIdentity
-            from yeto.rl.adapters.miles.models.full_parameter_dense import MilesDenseFullParameterConfig
+            from yeto.rl.adapters.miles.full_parameter.session import CONFIG_ATTRIBUTE
 
-            evidence_parent = (
-                Path(args.audit_dir).expanduser()
-                if getattr(args, "audit_dir", None)
-                else Path(args.completed_groups_path).expanduser().parent
-            )
-            evidence_parent.mkdir(parents=True, exist_ok=True)
-            evidence_directory = Path(
-                tempfile.mkdtemp(
-                    prefix=f"trajectory-evidence-{args.learner_id}-",
-                    dir=evidence_parent,
-                )
-            )
-            if evidence_directory.stat().st_mode & 0o077:
-                raise RuntimeError("trajectory evidence directory is not private")
-            learner_generations = (0,) * getattr(args, "num_learners", 1)
-            miles_args.yeto_rl_model_config_sha256 = model_config_hash
-            miles_args.yeto_rl_miles_source_sha256 = args.miles_source_sha256
-            miles_args.yeto_rl_dense_training_contract_sha256 = (
-                training_contract_hash
-            )
             miles_args.external_policy_identity_setter_path = (
                 "yeto.rl.adapters.miles.publish.set_current_published_policy_identity"
             )
-            miles_args.yeto_rl_trajectory_evidence_dir = str(evidence_directory)
+            miles_args.yeto_rl_trajectory_evidence_dir = str(
+                _private_trajectory_evidence_dir(args)
+            )
             miles_args.yeto_rl_trajectory_evidence_kind = "secrlenv"
             miles_args.yeto_rl_trajectory_evidence_schema_version = (
                 2 if bool(getattr(miles_args, "sao_compaction", False)) else 1
             )
-            miles_args.yeto_rl_num_fragments = args.fragments
-            miles_args.yeto_rl_total_sweeps = args.global_rounds
-            miles_args.yeto_rl_total_fragment_steps = args.total_fragment_steps
-            miles_args.yeto_rl_learner_generation = 0
-            miles_args.yeto_rl_learner_generations = learner_generations
-            miles_args.yeto_rl_dense_full_parameter_config = (
-                MilesDenseFullParameterConfig(
-                    component=ComponentIdentity(
-                        role="actor",
-                        model_revision=args.model_revision.lower(),
-                        config_hash=model_config_hash,
-                    ),
-                    wire=DenseSweepConfig(
-                        syncer_addr=_syncer_address(args.syncer),
-                        learner_id=args.learner_id,
-                        learner_generation=0,
-                        policy_rounds=args.global_rounds,
-                        wan_streams=args.wan_streams,
-                    ),
-                    learner_generations=learner_generations,
-                    minimum_fragments=args.fragments,
-                    training_contract_hash=training_contract_hash,
-                    expected_layout_hash=args.parameter_layout_sha256,
-                )
+            setattr(
+                miles_args,
+                CONFIG_ATTRIBUTE,
+                _dense_full_sync_config(
+                    args,
+                    model_config_sha256=model_config_hash,
+                    training_contract_sha256=training_contract_hash,
+                ),
             )
         elif sync_preset == "decoupled":
             from yeto.protocol import layout_fingerprint
@@ -3009,14 +2969,7 @@ def main(argv=None) -> None:
 
         verify_miles_revision(miles_root, expected=MILES_NEXT_PINS)
     else:
-        verify_miles_revision(
-            miles_root,
-            expected_source_sha256=(
-                args.miles_source_sha256
-                if args.parameter_mode == "full"
-                else None
-            ),
-        )
+        verify_miles_revision(miles_root)
     _preflight_codex_harness(args)
     probe_syncers(args)
 
