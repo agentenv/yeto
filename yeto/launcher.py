@@ -2062,6 +2062,76 @@ def _check_ports_eval(args) -> int | None:
     return interval
 
 
+ISLAND_TASKS_DIR = "island-tasks"
+
+
+def island_task_plan(args):
+    """rl-per-island-tasks: island -> :class:`IslandTaskData`, or None without the flag.
+
+    Recomputed from ``--data`` wherever the islands are built (the head's
+    second hop reads its staged copy); same source and spec give the same bytes.
+    """
+
+    spec_value = getattr(args, "rl_island_tasks", None)
+    if not spec_value:
+        return None
+    from .rl.island_tasks import parse_island_tasks, plan_island_tasks
+
+    return plan_island_tasks(args.data, parse_island_tasks(spec_value),
+                             range(len(parse_gpu_spec(args.gpu))))
+
+
+def _check_island_tasks(args, eval_interval: int | None) -> None:
+    """``--rl-island-tasks``: refuse a bad spec before any cloud call (P3-Q1..Q3).
+
+    Rewrites the flag to its inline form so a JSON-file spec reaches the head.
+    """
+
+    if not getattr(args, "rl_island_tasks", None):
+        return
+    from .datasource import kind
+    from .rl.island_tasks import format_island_tasks, parse_island_tasks, task_count_warning
+
+    flag = rl_option("rl_island_tasks", CLI)
+    data = getattr(args, "data", None)
+    if not (isinstance(data, str) and kind(data) == "local" and data.endswith(".jsonl")
+            and Path(data).expanduser().is_file()):
+        raise ValueError(f"{flag} needs --data to be one local JSONL file")
+    if getattr(args, "external_learners", 0):
+        raise ValueError(f"{flag} does not cover --external-learners")
+    if eval_interval is not None:
+        # P3-Q3: eval uses the full set on the eval island only.
+        raise ValueError(f"{flag}: training islands do not run eval; drop "
+                         f"{rl_option('rl_eval_interval', CLI)} and evaluate on the eval island")
+    args.rl_island_tasks = format_island_tasks(parse_island_tasks(args.rl_island_tasks))
+    warning = task_count_warning(island_task_plan(args))
+    if warning:
+        print(f"[launcher] WARNING {warning}", file=sys.stderr, flush=True)
+
+
+def island_task_data(args, learner_id: int) -> tuple[str, str, dict[str, str]]:
+    """The island's ``--data`` value, its SHA256 flag and file mounts.
+
+    Without ``--rl-island-tasks`` every island gets the shared ``--data``. With
+    it, the island's own prompt file is written under the run directory and
+    mounted in place of ``--data``.
+    """
+
+    from . import runs
+    from .datasource import learner_data_arg, learner_file_mounts
+
+    plan = island_task_plan(args)
+    if plan is None:
+        return learner_data_arg(args.data), "", learner_file_mounts(args.data)
+    island = plan[learner_id]
+    path = runs.run_dir(args.cluster_prefix) / ISLAND_TASKS_DIR / f"island-{learner_id}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(island.content)
+    return (learner_data_arg(str(path)),
+            f" {rl_option('data_sha256')} {island.sha256}",
+            learner_file_mounts(str(path)))
+
+
 def _check_ports_infra_switches(args) -> None:
     """``--rl-overlap-eval`` / ``--rl-elastic`` (rl-infra-spec 2.3 / 3.x): opt-in;
     the elastic manifest is read here so a bad file fails locally."""
@@ -2073,6 +2143,7 @@ def _check_ports_infra_switches(args) -> None:
     placement = getattr(args, "rl_placement", "colocated") or "colocated"
     _check_test_tool_delay(args)
     eval_interval = _check_ports_eval(args)
+    _check_island_tasks(args, eval_interval)
     if getattr(args, "rl_overlap_eval", False):
         # Same check the island's execution profile applies, run before any
         # resource is provisioned, on the values the launcher really forwards:
@@ -4124,7 +4195,6 @@ def make_miles_island_task(
 
     import sky
 
-    from .datasource import learner_data_arg, learner_file_mounts
     from .models import resolve
     from .provenance import is_local_reference
 
@@ -4132,6 +4202,7 @@ def make_miles_island_task(
         args, "reward_sha256", None
     ):
         raise ValueError("RL task requires prepared source and reward provenance")
+    island_data, island_data_sha256, data_mounts = island_task_data(args, learner_id)
     codex_launch = codex_harness_launch(args)  # None unless a signed Codex agent
     # --rl-island-use-gpus-per-node: island rules see M GPUs/node; resources stay physical.
     island = rl_island_spec(args, spec)
@@ -4144,7 +4215,7 @@ def make_miles_island_task(
             if getattr(args, "rl_training_attention_backend", "auto") not in (None, "auto")
             else ""
         )
-        + f" --data {shlex.quote(learner_data_arg(args.data))}"
+        + f" --data {shlex.quote(island_data)}{island_data_sha256}"
         + (
             " --rl-single-island-no-sync"
             if getattr(args, "rl_single_island_no_sync", False)
@@ -4340,7 +4411,7 @@ def make_miles_island_task(
             "|| { echo '[yeto-island] worker could not fetch the model snapshot:' >&2; "
             "tail -5 /tmp/hf-prefetch-worker.log >&2; exit 1; }\n"
         )
-    file_mounts = dict(learner_file_mounts(args.data))
+    file_mounts = dict(data_mounts)
     if getattr(args, "rl_initial_adapter", None) is not None:
         file_mounts[RL_INITIAL_ADAPTER_PATH] = os.path.expanduser(
             args.rl_initial_adapter
@@ -8023,6 +8094,15 @@ def _miles_overlay_manifest(args) -> dict:
     return {"miles_overlay": record} if record else {}
 
 
+def _island_tasks_manifest(args) -> dict:
+    """``island_tasks`` for the run manifest (rl-per-island-tasks); absent without the flag."""
+
+    plan = island_task_plan(args)
+    if plan is None:
+        return {}
+    return {"island_tasks": {str(island): data.record() for island, data in sorted(plan.items())}}
+
+
 def _write_run_manifest(args) -> dict | None:
     """Record the engine pins actually used (launch.log + <run dir>/run_manifest.json)."""
 
@@ -8039,6 +8119,7 @@ def _write_run_manifest(args) -> dict | None:
         "source_sha256": getattr(args, "source_sha256", None),
         "cluster_prefix": args.cluster_prefix,
         **_miles_overlay_manifest(args),
+        **_island_tasks_manifest(args),
         # launch-preflight-guards: preflight readings, negative_test, island_overrides
         **(getattr(args, "_launch_preflight_manifest", None) or {}),
         "written_unix": time.time(),
@@ -8118,6 +8199,7 @@ def dry_run_plan(args) -> dict:
     from .launch_preflight import dry_run_memory
 
     memory = dry_run_memory(args, specs)
+    task_plan = island_task_plan(args) if rl else None
     for learner_id, spec in enumerate(specs):
         entry = {
             "learner_id": learner_id,
@@ -8141,6 +8223,8 @@ def dry_run_plan(args) -> dict:
 
                 entry["island_role"] = {"role": role, "billing": billing(role),
                                         "rejoin": rejoin_source(role)}
+            if task_plan is not None:
+                entry["island_tasks"] = task_plan[learner_id].record()
             if island_overrides.get(learner_id):
                 from .island_overrides import records
 

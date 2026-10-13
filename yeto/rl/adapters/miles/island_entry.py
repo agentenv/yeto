@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from decimal import Decimal, DecimalException
 from pathlib import Path
 from typing import Any
@@ -480,6 +480,11 @@ def _canonical_sha256(value: Any) -> str:
 # Island-local Miles flags left out of the full-parameter training contract.
 # The training data is island-local too (P3 per-island tasks): its path and
 # content hash are not part of the contract the islands compare.
+# Miles flags whose values may differ between islands of one full-parameter run:
+# routing ports, the rollout seed, the training data (P3: each island may train
+# on its own task list) and evaluation (P3-Q3: eval runs on the eval island, so
+# training islands may carry none, or their own). Value counts: one, except
+# where listed in the two maps below.
 _DENSE_ISLAND_LOCAL_MILES_FLAGS = frozenset(
     {
         "--prompt-data",
@@ -489,12 +494,29 @@ _DENSE_ISLAND_LOCAL_MILES_FLAGS = frozenset(
         "--sglang-router-port",
         "--sglang-router-prometheus-port",
         "--train-master-base-port",
+        "--eval-interval",
+        "--n-samples-per-eval-prompt",
+        "--eval-temperature",
+        "--eval-top-p",
+        "--eval-max-prompt-len",
+        "--eval-max-response-len",
+        "--eval-max-context-len",
     }
 )
 
+# One or more values (up to the next flag).
 _DENSE_ISLAND_LOCAL_MILES_NARGS_FLAGS = frozenset(
     {
         "--session-server-port",
+        "--eval-prompt-data",  # name + path
+    }
+)
+
+# No value.
+_DENSE_ISLAND_LOCAL_MILES_SWITCHES = frozenset(
+    {
+        "--skip-eval-before-train",
+        "--log-passrate",
     }
 )
 
@@ -778,37 +800,45 @@ def _lora_config_hash(args: Any, canonical_targets: Sequence[str]) -> str:
     )
 
 
+def _dense_shared_miles_argv(miles_argv: Sequence[str]) -> list[str]:
+    """``miles_argv`` without the island-local flags and their values."""
+
+    shared_argv = []
+    index = 0
+    while index < len(miles_argv):
+        value = miles_argv[index]
+        index += 1
+        if value in _DENSE_ISLAND_LOCAL_MILES_SWITCHES:
+            continue
+        if value not in _DENSE_ISLAND_LOCAL_MILES_FLAGS | _DENSE_ISLAND_LOCAL_MILES_NARGS_FLAGS:
+            shared_argv.append(value)
+            continue
+        value_count = 0
+        while index < len(miles_argv) and not miles_argv[index].startswith("--"):
+            index += 1
+            value_count += 1
+            if value not in _DENSE_ISLAND_LOCAL_MILES_NARGS_FLAGS:
+                break
+        if value_count < 1:
+            raise ValueError(f"Miles flag has no value: {value}")
+    return shared_argv
+
+
 def _dense_full_training_contract_sha256(
     args: Any,
     miles_argv: Sequence[str],
     *,
     model_config_sha256: str,
 ) -> str:
-    """Hash shared training semantics while excluding island-local routing and data.
+    """Hash shared training semantics while excluding island-local routing, data and eval.
 
     Each island may train on its own task list (P3), so the training data
     (``--data``, its revision and the prompt file) stays out of the contract.
+    Evaluation does not change the trained weights and runs on the eval island
+    (P3-Q3), so its settings stay out too (v6).
     """
 
-    shared_argv = []
-    index = 0
-    while index < len(miles_argv):
-        value = miles_argv[index]
-        if value in _DENSE_ISLAND_LOCAL_MILES_FLAGS:
-            if index + 1 >= len(miles_argv):
-                raise ValueError(f"Miles flag has no value: {value}")
-            index += 1
-            value_count = 0
-            while index < len(miles_argv) and not miles_argv[index].startswith("--"):
-                index += 1
-                value_count += 1
-                if value not in _DENSE_ISLAND_LOCAL_MILES_NARGS_FLAGS:
-                    break
-            if value_count < 1:
-                raise ValueError(f"Miles flag has no value: {value}")
-            continue
-        shared_argv.append(value)
-        index += 1
+    shared_argv = _dense_shared_miles_argv(miles_argv)
     explicit_rollout_seed = getattr(args, "rollout_seed", None)
     rollout_seed_contract = (
         {"mode": "fixed", "value": explicit_rollout_seed}
@@ -818,32 +848,12 @@ def _dense_full_training_contract_sha256(
     return _canonical_sha256(
         {
             **_expert_full_contract(args),
-            "schema": "yeto-dense-full-training-contract-v5",
+            "schema": "yeto-dense-full-training-contract-v6",
             "shared_miles_argv": shared_argv,
             "rollout_seed_contract": rollout_seed_contract,
             "model": args.model,
             "model_revision": args.model_revision.lower(),
             "model_config_sha256": model_config_sha256,
-            "evaluation": (
-                None
-                if getattr(args, "eval_interval", None) is None
-                else {
-                    "data": getattr(args, "eval_data", None),
-                    "data_sha256": getattr(args, "eval_data_sha256", None),
-                    "dataset_name": getattr(args, "eval_dataset_name", None),
-                    "interval": args.eval_interval,
-                    "samples_per_prompt": getattr(
-                        args, "eval_samples_per_prompt", None
-                    ),
-                    "temperature": getattr(args, "eval_temperature", None),
-                    "top_p": getattr(args, "eval_top_p", None),
-                    "max_prompt_len": getattr(args, "eval_max_prompt_len", None),
-                    "max_response_len": getattr(
-                        args, "eval_max_response_len", None
-                    ),
-                    "max_context_len": getattr(args, "eval_max_context_len", None),
-                }
-            ),
             "yeto_source_sha256": args.source_sha256,
             "miles_backend_identity_sha256": _backend_identity_sha256(args),
             "reward_sha256": args.reward_sha256,
@@ -1310,6 +1320,18 @@ def prepare_prompt_data(
     return output
 
 
+def _verify_island_task_data(args) -> dict[str, Any] | None:
+    """rl-per-island-tasks: check this island's own prompt file against the
+    launcher's SHA256 before any training; None when the island shares ``--data``."""
+
+    expected = getattr(args, "data_sha256", None)
+    if not expected:
+        return None
+    from yeto.rl.island_tasks import verify_island_data
+
+    return verify_island_data(args.data, expected)
+
+
 def _verify_eval_dataset_identity(args) -> Path | None:
     """Verify the immutable source bytes for an eval-only or training heldout run."""
 
@@ -1507,10 +1529,15 @@ def run_miles(
     rollout_model_path: str | Path | None = None,
     prompt_path: str | Path,
     eval_prompt_path: str | Path | None = None,
+    island_tasks: Mapping[str, Any] | None = None,
     yeto_policy_sync: bool = True,
     extra_argv: Sequence[str] = (),
 ) -> None:
-    """Run one Miles job, optionally with Yeto's external policy boundary."""
+    """Run one Miles job, optionally with Yeto's external policy boundary.
+
+    ``island_tasks`` (rl-per-island-tasks) is this island's checked task list,
+    recorded in ``rl_driver_start``.
+    """
 
     _check_ports_algorithm_options(args, outer_sync=yeto_policy_sync)
     if (
@@ -1892,6 +1919,7 @@ def run_miles(
 
     _configure_grad_audit(args, miles_args)
     require_ports_router_mode(miles_args)
+    miles_args.yeto_rl_island_tasks = dict(island_tasks) if island_tasks else None
     _run_ports(
         args,
         miles_args,
@@ -2159,6 +2187,7 @@ def main(argv=None) -> None:
             revision=args.rollout_model_revision,
         )
     eval_source = _verify_eval_dataset_identity(args)
+    island_tasks = _verify_island_task_data(args)
     columns = dict(
         prompt_column=getattr(args, "rl_prompt_column", None),
         label_column=getattr(args, "rl_label_column", None),
@@ -2189,6 +2218,7 @@ def main(argv=None) -> None:
         rollout_model_path=rollout_model_path,
         prompt_path=prompt_path,
         eval_prompt_path=eval_prompt_path,
+        island_tasks=island_tasks,
         # --rl-single-island-no-sync: LocalOnlySync, no syncer connection.
         yeto_policy_sync=not getattr(args, "rl_single_island_no_sync", False),
     )

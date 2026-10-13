@@ -612,6 +612,7 @@ class IslandDriver:
             **{"rl/algorithm_spec_sha256": self.algorithm.sha256()},
             runtime_fingerprint=self.capabilities.runtime_fingerprint,
             **({"eval_guard": dict(self.eval_guard_report)} if self.eval_guard_report else {}),
+            **({"island_tasks": dict(self.island_tasks)} if self.island_tasks else {}),
         )
 
     # -- helpers used by sync sessions -----------------------------------
@@ -1284,6 +1285,9 @@ class IslandDriver:
     # rl-eval-difficulty-buckets 2.2 (D6.c): start-time hold-out check report,
     # written into rl_driver_start as ``eval_guard`` only when set.
     eval_guard_report: Mapping[str, Any] | None = None
+    # rl-per-island-tasks: this island's task ids and prompt-file SHA256, written
+    # into rl_driver_start as ``island_tasks`` only when the island has its own list.
+    island_tasks: Mapping[str, Any] | None = None
 
     def _export_eval_version(self, rollout_id: int, *, final: bool) -> None:
         state = self.published_state

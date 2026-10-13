@@ -223,6 +223,8 @@ _ISLAND = (
     island_flag("--model", required=True),
     island_flag("--model-revision", required=True),
     island_flag("--data", required=True),
+    # rl-per-island-tasks: SHA256 of this island's own prompt file (checked before training)
+    island_flag("--data-sha256", default=None),
     island_flag("--data-revision", default=None),
     island_flag("--eval-data", default=None),
     island_flag("--eval-dataset-name", default=None),

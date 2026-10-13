@@ -627,6 +627,12 @@ _SCHEDULING = (
     shared_flag("--rl-elastic-pause-margin", type=float, default=None, metavar="X",
                 help="--rl-elastic: pause budget = X * quorum timeout (default 0.5; "
                 "X6 cross-quorum runs only)"),
+    # rl-per-island-tasks: each training island trains on its own task subset.
+    cli_flag("--rl-island-tasks", default=None, metavar="SPEC",
+             help="per-island task lists from --data (a local JSONL whose rows carry "
+             "metadata.task_id): 'l0=web1-10,pwn1-10;l1=web11-20,pwn11-20' or a JSON file "
+             "{\"0\": [...], \"1\": [...]}; the launcher writes one prompt file per island; "
+             "every training island needs a list; eval runs on the eval island only"),
 )
 
 _EVAL = (

@@ -1419,6 +1419,17 @@ def test_miles_dense_full_parameter_argv_and_runtime_contract(
     assert dense.training_contract_hash == rl_learner._dense_full_training_contract_sha256(
         other_data_args, other_data_argv, model_config_sha256=config_sha256
     )
+    # P3-Q3: eval runs on the eval island; an island's eval settings stay out (v6).
+    eval_args = argparse.Namespace(**vars(learner_zero_args))
+    eval_args.eval_interval, eval_args.eval_data = 2, "/heldout.jsonl"
+    eval_argv = learner_zero_argv + [
+        "--eval-prompt-data", "heldout", "/heldout.jsonl", "--eval-interval", "2",
+        "--skip-eval-before-train", "--n-samples-per-eval-prompt", "4", "--log-passrate",
+        "--eval-top-p", "0.9", "--eval-max-response-len", "64",
+    ]
+    assert dense.training_contract_hash == rl_learner._dense_full_training_contract_sha256(
+        eval_args, eval_argv, model_config_sha256=config_sha256
+    )
     changed_source_args = argparse.Namespace(**vars(learner_zero_args))
     changed_source_args.source_sha256 = "f" * 64
     assert dense.training_contract_hash != rl_learner._dense_full_training_contract_sha256(
@@ -1718,3 +1729,12 @@ def test_miles_island_sets_a_per_node_vcpu_floor(monkeypatch, gpu, extra, want):
     task = make_miles_island_task(args, spec, 0, 1, "127.0.0.1:29400")
     assert task.resources.cpus == want
     assert task.resources.accelerators == spec.accelerators
+
+
+def test_run_miles_carries_the_island_task_record(monkeypatch, tmp_path):
+    captured, args, model, _config, prompts, _audit, _ref = _stub_full_parameter_island(
+        monkeypatch, tmp_path
+    )
+    record = {"task_ids": ["web1"], "data_sha256": "a" * 64}
+    rl_learner.run_miles(args, model_path=model, prompt_path=prompts, island_tasks=record)
+    assert captured["miles_args"].yeto_rl_island_tasks == record
