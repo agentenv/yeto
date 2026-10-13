@@ -564,3 +564,34 @@ def test_island_entry_rejects_policy_age_for_sao_streaming():
             rl_engine="ports",
             yeto_policy_sync=True,
         )
+
+
+def test_island_entry_rejects_an_evidence_root_others_can_write(monkeypatch, tmp_path):
+    from test_rl_launcher import _stub_full_parameter_island
+
+    evidence = tmp_path / "shared-root" / "sao-evidence"
+    evidence.parent.mkdir()
+    evidence.parent.chmod(0o777)
+    payload = _payload(evidence)
+    _bind_attestation(tmp_path, payload)
+    source = tmp_path / "streaming.json"
+    digest = _write_runtime(source, payload)
+    _captured, args, model, _config, prompts, _audit, _ref = _stub_full_parameter_island(
+        monkeypatch,
+        tmp_path,
+        miles_fields=_args(yeto_rl_learner_id=None).__dict__,
+        sync_preset="sao-streaming-full",
+        sao_streaming_runtime=str(source),
+        sao_streaming_runtime_sha256=digest,
+        sao_context_sha256=SECRLENV_CONTEXT_SHA256,
+        critic_syncer="127.0.0.1:29401",
+        learner_id=0,
+        model_revision="a" * 40,
+        parameter_layout_sha256=None,
+        syncer_profile_sha256=None,
+    )
+    from yeto.rl.adapters.miles import island_entry
+
+    with pytest.raises(ValueError, match="writable by others"):
+        island_entry.run_miles(args, model_path=model, prompt_path=prompts)
+    assert not evidence.exists()

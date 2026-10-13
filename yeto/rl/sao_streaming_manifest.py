@@ -45,6 +45,8 @@ class SaoIslandContract:
     # The syncer port of each role the runtime contract names; it is part of
     # every role session's identity, so the launch must serve exactly these.
     role_ports: tuple[tuple[str, int], ...]
+    # Local rounds per sync (H); both roles share it.
+    local_horizon: int
 
 
 @dataclass(frozen=True)
@@ -84,17 +86,25 @@ def _shipped(name: str, record: Any) -> ShippedFile:
     return ShippedFile(host, container, sha256)
 
 
-def _role_ports(runtime: ShippedFile) -> tuple[tuple[str, int], ...]:
+def _launch_fields(runtime: ShippedFile) -> tuple[tuple[tuple[str, int], ...], int]:
+    """The role syncer ports and the shared local horizon the runtime names."""
     try:
         payload = json.loads(runtime.host_path.read_text(encoding="utf-8"))
+        roles = [payload[role] for role in ("actor", "critic")]
         ports = tuple(
-            (role, payload[role]["syncer"]["port"]) for role in ("actor", "critic")
+            (role, record["syncer"]["port"])
+            for role, record in zip(("actor", "critic"), roles)
         )
+        horizons = {record["local_horizon"] for record in roles}
     except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError) as error:
-        raise SaoManifestError("SAO streaming runtime names no role syncer ports") from error
+        raise SaoManifestError(
+            "SAO streaming runtime names no role syncer ports or local horizon"
+        ) from error
     if any(type(port) is not int or not 0 < port < 65536 for _role, port in ports):
         raise SaoManifestError("SAO streaming runtime role syncer port is invalid")
-    return ports
+    if len(horizons) != 1 or any(type(h) is not int or h < 1 for h in horizons):
+        raise SaoManifestError("SAO streaming runtime roles need one local horizon >= 1")
+    return ports, horizons.pop()
 
 
 def load_sao_streaming_manifest(path: str | Path) -> SaoStreamingManifest:
@@ -132,6 +142,7 @@ def load_sao_streaming_manifest(path: str | Path) -> SaoStreamingManifest:
             raise SaoManifestError("SAO manifest island order changed")
         context = raw.get("sao_context")
         runtime = _shipped("SAO streaming runtime", raw.get("streaming_context"))
+        role_ports, local_horizon = _launch_fields(runtime)
         islands.append(
             SaoIslandContract(
                 island_id=island_id,
@@ -143,7 +154,8 @@ def load_sao_streaming_manifest(path: str | Path) -> SaoStreamingManifest:
                 layout_attestation=_shipped(
                     "SAO layout attestation", raw.get("layout_attestation")
                 ),
-                role_ports=_role_ports(runtime),
+                role_ports=role_ports,
+                local_horizon=local_horizon,
             )
         )
     return SaoStreamingManifest(profile, fragments, tuple(islands))

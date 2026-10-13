@@ -2666,8 +2666,16 @@ def run_miles(
             # Two-role (actor + critic) full-parameter sync; the ports rollout
             # hook writes the round evidence the runtime directory names.
             # The contract names a fresh evidence directory under the island's
-            # run root; the island creates that root, the bind the directory.
-            sao_runtime.trajectory_evidence_dir.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            # run root; the island creates that root, the bind the directory
+            # (0o700, checked there).  A root that already exists may be
+            # readable by others (the evidence directory is private), but no
+            # one else may write to it: they could replace the directory.
+            evidence_root = sao_runtime.trajectory_evidence_dir.parent
+            evidence_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if evidence_root.stat().st_mode & 0o022:
+                raise ValueError(
+                    f"SAO trajectory evidence root {evidence_root} is writable by others"
+                )
             bind_sao_streaming_runtime(miles_args, sao_runtime)
         elif sync_preset == "decoupled":
             from yeto.protocol import layout_fingerprint

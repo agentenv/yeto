@@ -41,7 +41,7 @@ def _write(path, payload) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _manifest(tmp_path, profile=None, islands=2, ports=None):
+def _manifest(tmp_path, profile=None, islands=2, ports=None, horizon=1):
     profile = profile or _syncer_profile()
     ports = ports or {"actor": 29400, "critic": 29401}
     records = []
@@ -51,7 +51,8 @@ def _manifest(tmp_path, profile=None, islands=2, ports=None):
                            ("layout_attestation", "layout-attestation.json")):
             host = tmp_path / f"island-{island_id}" / file
             content = {"island": island_id, "file": file,
-                       **{role: {"syncer": {"port": port}} for role, port in ports.items()}}
+                       **{role: {"syncer": {"port": port}, "local_horizon": horizon}
+                          for role, port in ports.items()}}
             shipped[name] = {"host_path": str(host),
                              "container_path": f"/contracts/island-{island_id}/{file}",
                              "sha256": _write(host, content)}
@@ -191,6 +192,50 @@ def test_launcher_rejects_contracts_for_other_syncer_ports(tmp_path):
     manifest = _manifest(tmp_path, ports={"actor": 29400, "critic": 29500})
     with pytest.raises(ValueError, match="role syncer ports"):
         _prepare_rl_args(_sao_args(tmp_path, manifest))
+
+
+@pytest.mark.parametrize(
+    ("extra", "conflict"),
+    (
+        (("--outer-lr", "0.5"), "--outer-lr 0.5 (contract: 0.7)"),
+        (("--quorum", "3"), "--quorum 3 (contract: 2)"),
+        (("--pipeline", "1"), "--pipeline 1 (contract: 2)"),
+        (("--fragments", "4"), "--fragments 4 (contract: 8)"),
+    ),
+)
+def test_launcher_rejects_explicit_settings_that_conflict_with_the_contract(
+        tmp_path, extra, conflict):
+    from yeto.launcher import _prepare_rl_args
+
+    with pytest.raises(ValueError, match="conflict with the SAO contracts") as raised:
+        _prepare_rl_args(_sao_args(tmp_path, _manifest(tmp_path), extra))
+    assert conflict in str(raised.value)
+
+
+def test_explicit_settings_equal_to_the_contract_are_accepted(tmp_path):
+    from yeto.launcher import _prepare_rl_args
+
+    args = _sao_args(tmp_path, _manifest(tmp_path), ("--outer-lr", "0.7", "--quorum", "2"))
+    _prepare_rl_args(args)
+    assert (args.outer_lr, args.quorum) == (0.7, 2)
+
+
+def test_local_horizon_comes_from_the_contract(tmp_path):
+    from yeto.launcher import _prepare_rl_args, dry_run_plan
+
+    args = _sao_args(tmp_path, _manifest(tmp_path, horizon=2))
+    args.controller = "local"
+    _prepare_rl_args(args)
+    command = dry_run_plan(args)["island_requests"][0]["learner_command"]
+    assert _flag(command, "--local-horizon") == "2"
+
+
+def test_local_horizon_conflict_is_rejected(tmp_path):
+    from yeto.launcher import _prepare_rl_args
+
+    with pytest.raises(ValueError, match=r"--local-rl-rounds-per-sync 3 \(contract: 1\)"):
+        _prepare_rl_args(_sao_args(tmp_path, _manifest(tmp_path),
+                                   ("--local-rl-rounds-per-sync", "3")))
 
 
 def test_contracts_only_apply_to_the_sao_preset(tmp_path):

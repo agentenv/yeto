@@ -2412,6 +2412,35 @@ def _default_session_server_port(args) -> None:
         args.session_server_port = [DEFAULT_SESSION_SERVER_PORT]
 
 
+def _f32_shortest(value: float) -> float:
+    """The shortest decimal of an f32 value, as the Rust syncer parses it back."""
+    return float(f"{value:.7g}")
+
+
+def _adopt_contract_settings(args, adopted: dict, *, source: str) -> None:
+    """Set launch settings a frozen contract owns.
+
+    A setting at its CLI default takes the contract value; any other value
+    that differs from the contract is a conflict, not silently overridden.
+    (A value typed equal to the CLI default cannot be told apart from the
+    default and is treated as not given.)"""
+    import argparse
+
+    from .cli import _add_launch_args
+
+    parser = argparse.ArgumentParser()
+    _add_launch_args(parser)
+    conflicts = []
+    for dest, value in adopted.items():
+        given = getattr(args, dest)
+        if given != parser.get_default(dest) and given != value:
+            conflicts.append(f"--{dest.replace('_', '-')} {given} (contract: {value})")
+    if conflicts:
+        raise ValueError(f"settings conflict with the {source}: " + "; ".join(conflicts))
+    for dest, value in adopted.items():
+        setattr(args, dest, value)
+
+
 def _prepare_sao_streaming(args, *, num_islands: int) -> None:
     """sao-streaming-full (P0-1.7b.3): actor and critic full-parameter streams.
 
@@ -2446,21 +2475,25 @@ def _prepare_sao_streaming(args, *, num_islands: int) -> None:
     if any(island.role_ports != served for island in manifest.islands):
         raise ValueError("the SAO contracts name role syncer ports the launch does not "
                          f"serve ({served})")
-    def f32(value: float) -> float:
-        # The profile holds f32 values; render their shortest decimal.
-        return float(f"{value:.7g}")
-
+    horizons = {island.local_horizon for island in manifest.islands}
+    if len(horizons) != 1:
+        raise ValueError("the SAO contracts name different local horizons per island")
+    adopted = {
+        "quorum": profile.quorum,
+        "grace_ms": profile.grace_ms,
+        "grace_gamma": profile.grace_gamma,
+        "grace_tau": profile.grace_tau,
+        "pipeline": profile.pipeline,
+        "sync_interval_steps": profile.sync_interval_steps,
+        "delta_correction": profile.delta_correction,
+        # The syncer takes the outer optimizer settings as f32.
+        "outer_lr": _f32_shortest(profile.outer_lr),
+        "outer_momentum": _f32_shortest(profile.outer_momentum),
+        "fragments": manifest.expected_fragments,
+        "local_rl_rounds_per_sync": horizons.pop(),
+    }
+    _adopt_contract_settings(args, adopted, source="SAO contracts")
     args.rl_sao_manifest = manifest
-    args.quorum = profile.quorum
-    args.grace_ms = profile.grace_ms
-    args.grace_gamma = f32(profile.grace_gamma)
-    args.grace_tau = f32(profile.grace_tau)
-    args.pipeline = profile.pipeline
-    args.sync_interval_steps = f32(profile.sync_interval_steps)
-    args.delta_correction = profile.delta_correction
-    args.outer_lr = f32(profile.outer_lr)
-    args.outer_momentum = f32(profile.outer_momentum)
-    args.fragments = manifest.expected_fragments
     args.rl_total_fragment_steps = profile.total_steps
     rendered = rl_syncer_profile(args, num_islands)
     if rendered.sha256 != profile.sha256:
