@@ -11,30 +11,30 @@ Commit and PR text use English only. Before each PR merges, run the local safe t
 
 ## 2. Commit language check (local hook only)
 
-- [ ] 2.1 Add a check script: read the commit message file, check subject and body, forbid CJK character ranges and fullwidth punctuation, and skip `#` comment lines
-- [ ] 2.2 Unit tests for the script: pure English passes; a subject with Chinese characters fails; a body with fullwidth punctuation fails; `→` and `é` pass
-- [ ] 2.3 Add a `commit-msg` stage hook to `.pre-commit-config.yaml`; write one line with the install command in README or CONTRIBUTING (`pre-commit install --hook-type commit-msg`)
-- [ ] 2.4 Install the hook in each local worktree, and use a test commit message with Chinese characters to confirm it is rejected (no commit is created)
+- [x] 2.1 Add a check script: read the commit message file, check subject and body, forbid CJK character ranges and fullwidth punctuation, and skip `#` comment lines
+- [x] 2.2 Unit tests for the script: pure English passes; a subject with Chinese characters fails; a body with fullwidth punctuation fails; `→` and `é` pass
+- [x] 2.3 Add a `commit-msg` stage hook to `.pre-commit-config.yaml`; write one line with the install command in README or CONTRIBUTING (`pre-commit install --hook-type commit-msg`)
+- [x] 2.4 Install the hook in each local worktree, and use a test commit message with Chinese characters to confirm it is rejected (no commit is created) (checked: the script rejects a message file with Han characters; the shared hooks directory had no commit-msg, so it was installed)
 
 ## 3. Fork sync and upstream
 
 - [ ] 3.1 See the fork merge plan; not executed in this change (user, 2026-10-13: from now on all development is in agentenv, and the content of the personal fork merges into agentenv)
-- [ ] 3.2 Leave the `upstream` remote alone for now; this change does not delete it
-- [ ] 3.3 Record in the P6 document: judge ahead and behind against `agentenv/main`
+- [x] 3.2 Leave the `upstream` remote alone for now; this change does not delete it
+- [x] 3.3 Record in the P6 document: judge ahead and behind against `agentenv/main`
 
 ## 4. Complete .gitignore
 
-- [ ] 4.1 For each path listed by `git status --ignored`, run `git check-ignore -v` and record the source rule
-- [ ] 4.2 Add rules only for gaps (evidence work directories, common caches); do not change lines 82-91
-- [ ] 4.3 Confirm that `git ls-files -ci --exclude-standard` has no new hits (tracked files are not hit by mistake by the new rules)
+- [x] 4.1 For each path listed by `git status --ignored`, run `git check-ignore -v` and record the source rule
+- [x] 4.2 Add rules only for gaps (evidence work directories, common caches); do not change lines 82-91 (only .mypy_cache/, .ruff_cache/, .ipynb_checkpoints/, .DS_Store added; no gap for evidence work directories)
+- [x] 4.3 Confirm that `git ls-files -ci --exclude-standard` has no new hits (tracked files are not hit by mistake by the new rules)
 
 ## 5. Chinese openspec directories enter the repo (Chinese first, translate to English before they enter)
 
-- [ ] 5.1 After the user finishes reviewing the Chinese draft, translate `rl-code-quality-cleanup`, `rl-verl-agentenv-codex`, and the directory of this change entirely into English
-- [ ] 5.2 Spot-check the "unverified" kind of sentences in the translation, and confirm the degree of certainty is unchanged
-- [ ] 5.3 Commit the English version with an English commit message; after they enter the repo, run `tests/test_rl_sync_mode_table.py` and confirm it no longer skips and passes
-- [ ] 5.4 Run `openspec validate --strict` on the three directories
+- [x] 5.1 After the user finishes reviewing the Chinese draft, translate `rl-code-quality-cleanup`, `rl-verl-agentenv-codex`, and the directory of this change entirely into English
+- [x] 5.2 Spot-check the "unverified" kind of sentences in the translation, and confirm the degree of certainty is unchanged
+- [x] 5.3 Commit the English version with an English commit message; after they enter the repo, run `tests/test_rl_sync_mode_table.py` and confirm it no longer skips and passes (run in s23-t10: 3 passed, none skipped)
+- [x] 5.4 Run `openspec validate --strict` on the three directories
 
 ## 6. Location of evidence logs
 
-- [ ] 6.1 Put evidence logs in `/home/michael/work/infra-drafts/evidence/`; do not upload them to object storage and do not commit them
+- [x] 6.1 Put evidence logs in `/home/michael/work/infra-drafts/evidence/`; do not upload them to object storage and do not commit them
