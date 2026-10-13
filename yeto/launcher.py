@@ -38,6 +38,7 @@ from pathlib import Path, PurePosixPath
 from . import delivery
 from .gpu_spec import ClusterSpec, parse_gpu_spec
 from .models import MODEL_WEIGHT_GB
+from .rl.engine.run_flags import CLI, rl_option_pairs
 
 SYNCER_PORT = 29400
 # rl-algo-critic-family 4.2.1 (design D4 plan a): a critic algorithm runs a
@@ -1832,34 +1833,37 @@ def _check_critic_warmup_options(args, spec) -> None:
         )
 
 
-_ELASTIC_LAUNCH_FLAGS = (
-    ("rl_elastic_resources", "--rl-elastic-resources"),
-    ("rl_elastic_attestation", "--rl-elastic-attestation"),
-    ("rl_elastic_initial_config", "--rl-elastic-initial-config"),
-    ("rl_elastic_cells", "--rl-elastic-cells"),
+_ELASTIC_LAUNCH_FLAGS = rl_option_pairs(
+    "rl_elastic_resources",
+    "rl_elastic_attestation",
+    "rl_elastic_initial_config",
+    "rl_elastic_cells",
+    layer=CLI,
 )
 # 3.8 strict pause budget: forwarded to the learner; the quorum timeout also
 # goes to the syncer so both sides use the same value.
-_ELASTIC_PAUSE_FLAGS = (
-    ("rl_elastic_quorum_timeout_s", "--rl-elastic-quorum-timeout-s"),
-    ("rl_elastic_idle_flow_timeout_s", "--rl-elastic-idle-flow-timeout-s"),
-    ("rl_elastic_pause_margin", "--rl-elastic-pause-margin"),
+_ELASTIC_PAUSE_FLAGS = rl_option_pairs(
+    "rl_elastic_quorum_timeout_s",
+    "rl_elastic_idle_flow_timeout_s",
+    "rl_elastic_pause_margin",
     # controller D4 timeouts T_drain / T_recovery (plan.md E1-C, E1-D 4)
-    ("rl_elastic_drain_timeout_s", "--rl-elastic-drain-timeout-s"),
-    ("rl_elastic_recovery_timeout_s", "--rl-elastic-recovery-timeout-s"),
+    "rl_elastic_drain_timeout_s",
+    "rl_elastic_recovery_timeout_s",
     # 3.7 restart recovery budget (recovery-design.md §3)
-    ("rl_elastic_max_recovery_attempts", "--rl-elastic-max-recovery-attempts"),
+    "rl_elastic_max_recovery_attempts",
+    layer=CLI,
 )
 # Test-only fault injection for GPU acceptance runs (gpu-plan-v2 A5 quorum case):
 # exported into the island run command; off unless given.
-_ELASTIC_TEST_FLAGS = (
-    ("rl_test_inject_start_delay_s", "--rl-test-inject-start-delay-s"),
-    ("rl_test_inject_update_weights_block_s", "--rl-test-inject-update-weights-block-s"),
-    ("rl_test_inject_stop_failures", "--rl-test-inject-stop-failures"),
-    ("rl_test_hold_before_check_s", "--rl-test-hold-before-check-s"),
-    ("rl_test_inject_tool_wait_s", "--rl-test-inject-tool-wait-s"),
-    ("rl_test_inject_undrain_fail", "--rl-test-inject-undrain-fail"),
-    ("rl_elastic_restart_attempts", "--rl-elastic-restart-attempts"),
+_ELASTIC_TEST_FLAGS = rl_option_pairs(
+    "rl_test_inject_start_delay_s",
+    "rl_test_inject_update_weights_block_s",
+    "rl_test_inject_stop_failures",
+    "rl_test_hold_before_check_s",
+    "rl_test_inject_tool_wait_s",
+    "rl_test_inject_undrain_fail",
+    "rl_elastic_restart_attempts",
+    layer=CLI,
 )
 # (attr, flag, env) of the test-only switches exported into the island run
 # command; each needs --rl-elastic, all are off by default.
