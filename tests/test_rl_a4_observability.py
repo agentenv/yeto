@@ -48,7 +48,7 @@ def test_cause_enum_values():
 def test_payload_readback_refusal_carries_cause_and_engine_ids(monkeypatch):
     pub, world = _perturb_publisher(monkeypatch, 0.01)
     with pytest.raises(PublicationError) as raised:
-        asyncio.run(pub._publish_members("tok", ["c2"], 1))
+        asyncio.run(pub._publish_members("yeto:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ["c2"], 1))
     assert raised.value.cause is PublicationCause.PAYLOAD_MISMATCH
     assert raised.value.engine_ids == ("engine0",)  # index in the check_weights read-back
 
@@ -61,7 +61,7 @@ def test_update_weights_failure_cause(monkeypatch):
 
     pub._update_weights = broken
     with pytest.raises(PublicationError) as raised:
-        asyncio.run(pub._publish_members("tok", ["c2"], 1))
+        asyncio.run(pub._publish_members("yeto:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ["c2"], 1))
     assert raised.value.cause is PublicationCause.UPDATE_FAILED
     assert raised.value.engine_ids == ("engine:c2",)
 
@@ -82,7 +82,7 @@ def test_token_not_reported_cause(monkeypatch):
 
     pub._controller.start_update_weights = start
     with pytest.raises(PublicationError) as raised:
-        asyncio.run(pub._publish_members("tok", ["c2"], 1))
+        asyncio.run(pub._publish_members("yeto:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ["c2"], 1))
     assert raised.value.cause is PublicationCause.TOKEN_MISMATCH
 
 
@@ -130,7 +130,7 @@ def _sinked(monkeypatch, eps):
 def test_perturbation_writes_an_applied_test_injection_record(monkeypatch):
     pub, world, records = _sinked(monkeypatch, 0.01)
     with pytest.raises(PublicationError):
-        asyncio.run(pub._publish_members("tok", ["c2"], 1))
+        asyncio.run(pub._publish_members("yeto:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ["c2"], 1))
     (event, f), = [r for r in records if r[0] == "test_injection"]  # member_engines is not an injection
     assert event == "test_injection" and f["kind"] == "lora_perturb" and f["applied"] is True
     assert f["target_members"] == ["engine:c2"] and f["scale"] == 0.01
@@ -144,7 +144,7 @@ def test_perturbation_hook_failure_is_applied_false(monkeypatch):
 
     pub.perturb_trainer = broken
     with pytest.raises(PublicationError, match="already running"):
-        asyncio.run(pub._publish_members("tok", ["c2"], 1))
+        asyncio.run(pub._publish_members("yeto:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ["c2"], 1))
     (event, f), = records
     assert event == "test_injection" and f["applied"] is False
     assert "already running" in f["error"]
@@ -154,7 +154,7 @@ def test_missing_perturbation_hook_is_applied_false(monkeypatch):
     pub, world, records = _sinked(monkeypatch, 0.01)
     pub.perturb_trainer = None
     with pytest.raises(PublicationError):
-        asyncio.run(pub._publish_members("tok", ["c2"], 1))
+        asyncio.run(pub._publish_members("yeto:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ["c2"], 1))
     assert records[0][1]["applied"] is False
 
 
@@ -231,7 +231,7 @@ def test_hold_sits_between_end_update_and_check_without_blocking_the_loop(monkey
 
         task = asyncio.create_task(ticker())
         try:
-            await pub._publish_members("tok", ["c2"], 1)
+            await pub._publish_members("yeto:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ["c2"], 1)
         finally:
             task.cancel()
 
@@ -247,14 +247,14 @@ def test_hold_sits_between_end_update_and_check_without_blocking_the_loop(monkey
     # once per process: the next member publication is not held again
     records.clear()
     world["engine"].pop("c2")
-    asyncio.run(pub._publish_members("tok", ["c3"], 2))
+    asyncio.run(pub._publish_members("yeto:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ["c3"], 2))
     assert [e for e, _ in records if e in ("test_hold", "test_injection")] == []
 
 
 def test_hold_is_ignored_outside_test_injection_mode(monkeypatch, capsys):
     pub, world, records = _hold_publisher(monkeypatch, 5, injection_mode=False)
     started = time.monotonic()
-    asyncio.run(pub._publish_members("tok", ["c2"], 1))
+    asyncio.run(pub._publish_members("yeto:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ["c2"], 1))
     assert time.monotonic() - started < 2
     assert [e for e, _ in records if e in ("test_hold", "test_injection")] == []
     assert "ignored" in capsys.readouterr().err

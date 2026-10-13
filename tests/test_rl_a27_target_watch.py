@@ -97,7 +97,7 @@ def test_a_dead_target_fails_the_member_update_without_waiting_for_the_rendezvou
         t0 = time.monotonic()
         killer = asyncio.ensure_future(kill_later())
         with pytest.raises(PublicationError) as info:
-            await pub._publish_members("tok", ["c2", "c3"], epoch=1)
+            await pub._publish_members("yeto:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ["c2", "c3"], epoch=1)
         await killer
         elapsed = time.monotonic() - t0
         assert elapsed < 2.0, f"waited {elapsed:.2f}s"
@@ -135,7 +135,7 @@ def test_a_call_that_fails_on_its_own_after_the_loss_is_not_cancelled():
 
         side = asyncio.ensure_future(die_then_fail())
         with pytest.raises(PublicationError) as info:
-            await pub._publish_members("tok", ["c3"], epoch=1)
+            await pub._publish_members("yeto:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ["c3"], epoch=1)
         await side
         assert isinstance(info.value.__cause__, TargetWorkersLostError)
         assert "failed on its own" in str(info.value.__cause__)
@@ -157,7 +157,7 @@ def test_a_healthy_member_update_runs_to_completion_under_the_watch():
         pub, records = _publisher(controller, update_weights, probe)
         # no engines in the fake controller -> the token verification step is what fails, not the watch
         with pytest.raises(PublicationError, match="update lock covers"):
-            await pub._publish_members("tok", ["c2"], epoch=1)
+            await pub._publish_members("yeto:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ["c2"], epoch=1)
         assert calls == [["c2"]]
         assert probe.polls >= 1
         assert records == []  # the watch saw nothing (the abort below comes from the token step's own cleanup)
@@ -180,7 +180,7 @@ def test_an_unavailable_probe_leaves_the_update_unwatched():
 
         pub, _ = _publisher(controller, update_weights, Broken())
         with pytest.raises(PublicationError, match="update lock covers"):
-            await pub._publish_members("tok", ["c2"], epoch=1)
+            await pub._publish_members("yeto:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ["c2"], epoch=1)
         assert calls == [["c2"]]
 
     asyncio.run(scenario())
@@ -196,7 +196,7 @@ def test_the_watch_can_be_switched_off():
         pub, _ = _publisher(controller, update_weights, probe)
         pub.watch_targets = False
         with pytest.raises(PublicationError, match="update lock covers"):
-            await pub._publish_members("tok", ["c2"], epoch=1)
+            await pub._publish_members("yeto:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ["c2"], epoch=1)
         assert probe.snapshots == []
 
     asyncio.run(scenario())

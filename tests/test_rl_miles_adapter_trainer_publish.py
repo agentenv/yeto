@@ -194,6 +194,24 @@ class PluginActor:
         return []
 
 
+def test_miles_update_is_aligned_to_stamp_the_policy_version(monkeypatch):
+    """P0-S: Miles' update_weights stamps its counter; the counter is aligned first."""
+    from yeto.rl.adapters.miles import publish as publish_module
+
+    calls = []
+
+    async def miles_update_weights(args, actor, executor, ctl, **kw):
+        calls.append("update_weights")
+
+    monkeypatch.setattr(publish_module, "_default_update_weights", lambda: miles_update_weights)
+    pub = MilesPublisher(
+        args=SimpleNamespace(), actor_model=PluginActor(calls), rollout_executor=object(),
+        inference_controller=Controller([Engine("http://e0")]), flatten_checksums=flatten,
+    )
+    pub.publish(state())
+    assert calls == [("align_weight_version", {"next_version": 4}), "update_weights"]
+
+
 def publisher(controller, *, update_fails=False, export=None):
     calls = []
 
@@ -203,7 +221,7 @@ def publisher(controller, *, update_fails=False, export=None):
             raise RuntimeError("broadcast failed")
 
     pub = MilesPublisher(
-        args=SimpleNamespace(), actor_model=PluginActor(calls), rollout_executor=object(),
+        args=SimpleNamespace(), actor_model=object(), rollout_executor=object(),
         inference_controller=controller, export_trainer_state=export,
         update_weights=update_weights, flatten_checksums=flatten,
     )
@@ -225,8 +243,7 @@ def test_publish_full_manifest_with_members():
     assert result.members == frozenset({"engine:c0", "engine:c1"})
     # P0-S: the engines carry the plain policy version; the label stays with yeto
     assert all(e.version == "4" for e in engines)
-    assert calls == [("align_weight_version", {"next_version": 4}), "update_weights"]
-    assert ctl.log == ["start", "end"]
+    assert calls == ["update_weights"] and ctl.log == ["start", "end"]
     assert set(pub.last_engine_checksums) == {"http://e0", "http://e1"}
     # payload hash is content-addressed
     pub2, _ = publisher(Controller([Engine("http://e0")]))

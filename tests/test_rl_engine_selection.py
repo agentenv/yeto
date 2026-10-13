@@ -643,8 +643,8 @@ def test_ports_composition_root_over_stubbed_upstream(tmp_path, monkeypatch):
     publications = [e for e in events if e["event"] == "rl_publication"]
     tokens = [e["rl/policy_token"] for e in publications]
     assert [t.split(":")[1] for t in tokens] == ["0", "1", "2"]
-    # publisher token == driver token == what the rollout process filtered on
-    assert controller.engine.version == tokens[-1]
+    # P0-S: the engine carries the plain version of the driver's token
+    assert controller.engine.version == tokens[-1].split(":")[1]
     assert hook.current_policy_token() == tokens[-2]
     assert all(e["sync/publication_members"] == ["engine:c0"] for e in publications)
     local = [e for e in events if e["event"] == "rl_local_round"]

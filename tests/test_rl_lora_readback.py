@@ -67,7 +67,7 @@ def _pub(bodies, reference, *, lora=True, lazy=False, warmup_fails=()):
     pub = MilesPublisher(args=args, actor_model=None, rollout_executor=None,
                          inference_controller=Controller(), update_weights=update_weights,
                          flatten_checksums=lambda raw: list(raw))
-    pub._reference = ("tok", dict(reference))
+    pub._reference = ("yeto:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", dict(reference))
     pub.last_engine_checksums = {}
     records = []
     pub.event_sink = lambda event, **f: records.append((event, f))
@@ -87,7 +87,7 @@ def _pub(bodies, reference, *, lora=True, lazy=False, warmup_fails=()):
 
 
 def _run(pub):
-    asyncio.run(pub._publish_members("tok", ["c2"], 1))
+    asyncio.run(pub._publish_members("yeto:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ["c2"], 1))
 
 
 def test_perturbed_adapter_is_payload_mismatch_and_never_admitted():
@@ -138,9 +138,9 @@ def test_lazily_loaded_perturbed_adapter_is_still_refused_after_warm_up():
 def test_failed_warm_up_is_unverifiable_not_a_mismatch_and_never_admitted():
     ref = BASE | LORA
     pub, order = _pub([dict(ref), dict(ref)], ref, lazy=True, warmup_fails=(1,))
-    pub._reference = ("tok", dict(ref))
+    pub._reference = ("yeto:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", dict(ref))
     with pytest.raises(PublicationError, match="warm-up failed") as ei:
-        asyncio.run(pub._publish_members("tok", ["c2", "c3"], 1))
+        asyncio.run(pub._publish_members("yeto:1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ["c2", "c3"], 1))
     assert ei.value.cause == PublicationCause.LORA_UNVERIFIABLE
     assert list(ei.value.engine_ids) == ["http://engine1:30000"]
     assert "check" not in order and "admit" not in order
