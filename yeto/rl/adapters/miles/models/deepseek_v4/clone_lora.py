@@ -10,6 +10,13 @@ The packed parameters remain present on every EP rank.  That preserves the
 standard Megatron-Bridge/SGLang per-expert LoRA conversion contract; inactive
 expert tensors export as exact zeros instead of requiring a sparse, custom
 checkpoint format.
+
+The external policy sync carries only the clone experts.  Packing them back
+into each rank's slots (:func:`clone_slot_updates`) and checking that the
+original slots stay zero (:func:`assert_original_slots_zero`) serve both Miles
+layouts: the legacy fork's ``trainable_state`` helpers
+(:func:`install_on_trainable_state`) and the ports state plugin
+(:class:`ClonePackedAdapterPolicy`).
 """
 
 from __future__ import annotations
@@ -23,6 +30,7 @@ from typing import Any
 
 from yeto.rl.adapters.miles.models.deepseek_v4.expert_clone import (
     EXPERT_PARALLEL_SIZE,
+    NUM_LAYERS,
     ORIGINAL_EXPERTS,
     ORIGINAL_EXPERTS_PER_RANK,
     TOTAL_EXPERTS,
@@ -208,69 +216,93 @@ def configure_clone_only_grouped_lora(
     return tuple(sorted(records, key=lambda item: item.base_linear_name))
 
 
-def _require_miles_packed_layout(
-    parameter,
-    *,
-    expert_parallel_rank: int,
-    expert_parallel_size: int,
-) -> int:
+# Canonical PEFT name of one logical routed-expert adapter side, as the Bridge
+# exports it and as the external policy carries it (same pattern as Miles').
+EXPERT_LORA = re.compile(
+    r"^(?P<prefix>base_model\.model\.model\.layers\."
+    r"(?P<layer>\d+)\.mlp\.experts\.)"
+    r"(?P<expert>\d+)\."
+    r"(?P<projection>gate_proj|up_proj|down_proj)\."
+    r"lora_(?P<side>A|B)\.weight$"
+)
+_PROJECTIONS = ("gate_proj", "up_proj", "down_proj")
+_SIDES = ("A", "B")
+
+
+def _expert_name(match: re.Match[str], expert: int, projection: str, side: str) -> str:
+    return f"{match.group('prefix')}{expert}.{projection}.lora_{side}.weight"
+
+
+def clone_expert_lora_names() -> frozenset[str]:
+    """Every per-expert adapter name the clone-only policy carries (clones only)."""
+
+    return frozenset(
+        f"base_model.model.model.layers.{layer}.mlp.experts.{expert}.{projection}.lora_{side}.weight"
+        for layer in range(NUM_LAYERS)
+        for expert in range(ORIGINAL_EXPERTS, TOTAL_EXPERTS)
+        for projection in _PROJECTIONS
+        for side in _SIDES
+    )
+
+
+_CLONE_EXPERT_LORA_NAMES = clone_expert_lora_names()
+
+
+def _require_balanced_ep(expert_parallel_rank: int, expert_parallel_size: int) -> None:
     rank, size = int(expert_parallel_rank), int(expert_parallel_size)
     if size != EXPERT_PARALLEL_SIZE or not 0 <= rank < size:
         raise RuntimeError(
             "balanced clone-only policy requires "
             f"EP{EXPERT_PARALLEL_SIZE}, got rank={rank}, size={size}"
         )
-    local_count = int(parameter.shape[0])
-    if local_count != TRAINING_EXPERTS_PER_RANK:
+
+
+def _require_packed_count(local_count: int) -> None:
+    if int(local_count) != TRAINING_EXPERTS_PER_RANK:
         raise RuntimeError(
             "balanced clone-only policy requires "
             f"{TRAINING_EXPERTS_PER_RANK} packed experts per rank, got {local_count}"
         )
-    return rank * local_count
 
 
-def _sparse_expert_updates(
-    module,
+def clone_slot_updates(
     name: str,
-    side: Any,
+    packed_shape: tuple[int, ...],
     tensors,
     *,
     expert_parallel_rank: int,
     expert_parallel_size: int,
-):
-    """Prepare each EP8 rank's four logical clone writes for pinned Miles."""
+) -> tuple[tuple[int, Any], ...]:
+    """``(local slot, value)`` writes of this EP rank's logical clone experts.
+
+    ``name`` is the packed parameter's representative canonical name.  Under the
+    balanced E288 layout every rank owns 32 original slots followed by four
+    clone slots; originals are not written (they stay exact zeros).
+    """
 
     import torch
 
-    match = module._EXPERT_LORA.fullmatch(name)
+    match = EXPERT_LORA.fullmatch(name)
     if match is None:
         raise RuntimeError(f"cannot pack non-expert LoRA side {name!r}")
-    parameter = side.param_weight
-    if parameter is None or parameter.ndim != 3:
+    if len(packed_shape) != 3:
         raise RuntimeError(f"packed expert side {name!r} is not a rank-3 parameter")
-    start = _require_miles_packed_layout(
-        parameter,
-        expert_parallel_rank=expert_parallel_rank,
-        expert_parallel_size=expert_parallel_size,
-    )
+    _require_balanced_ep(expert_parallel_rank, expert_parallel_size)
+    _require_packed_count(packed_shape[0])
+    start = int(expert_parallel_rank) * TRAINING_EXPERTS_PER_RANK
     projection = match.group("projection")
     adapter_side = match.group("side")
     if projection == "up_proj":
         raise RuntimeError("packed fc1 representative unexpectedly uses up_proj")
 
     updates = []
-    for local_index in range(
-        ORIGINAL_EXPERTS_PER_RANK,
-        TRAINING_EXPERTS_PER_RANK,
-    ):
+    for local_index in range(ORIGINAL_EXPERTS_PER_RANK, TRAINING_EXPERTS_PER_RANK):
         expert = training_to_logical_expert_id(start + local_index)
         if projection == "down_proj":
-            value = tensors[
-                module._expert_name(match, expert, "down_proj", adapter_side)
-            ]
+            value = tensors[_expert_name(match, expert, "down_proj", adapter_side)]
         elif adapter_side == "A":
-            gate = tensors[module._expert_name(match, expert, "gate_proj", "A")]
-            up = tensors[module._expert_name(match, expert, "up_proj", "A")]
+            gate = tensors[_expert_name(match, expert, "gate_proj", "A")]
+            up = tensors[_expert_name(match, expert, "up_proj", "A")]
             if not torch.equal(gate, up):
                 raise RuntimeError(
                     "fused fc1 gate/up LoRA A tensors differ for layer "
@@ -278,78 +310,104 @@ def _sparse_expert_updates(
                 )
             value = gate
         else:
-            gate = tensors[module._expert_name(match, expert, "gate_proj", "B")]
-            up = tensors[module._expert_name(match, expert, "up_proj", "B")]
+            gate = tensors[_expert_name(match, expert, "gate_proj", "B")]
+            up = tensors[_expert_name(match, expert, "up_proj", "B")]
             value = torch.cat((gate, up), dim=0)
-        if tuple(value.shape) != tuple(parameter.shape[1:]):
+        if tuple(value.shape) != tuple(packed_shape[1:]):
             raise RuntimeError(
                 f"packed expert LoRA slice mismatch for {name!r}: "
-                f"got {tuple(value.shape)}, expected {tuple(parameter.shape[1:])}"
+                f"got {tuple(value.shape)}, expected {tuple(packed_shape[1:])}"
             )
         updates.append((local_index, value))
-
-    return (
-        parameter.main_param.view(parameter.shape),
-        ORIGINAL_EXPERTS_PER_RANK,
-        tuple(updates),
-    )
+    return tuple(updates)
 
 
-def _assert_original_packed_masters_zero(
-    module,
-    sides,
-    *,
-    expert_parallel_rank: int,
-) -> None:
+def assert_original_slots_zero(name: str, master) -> None:
+    """Fail if this rank's original-expert slots of a packed master are nonzero."""
+
     import torch
 
-    found = 0
-    for name, side in sides:
-        match = module._EXPERT_LORA.fullmatch(name)
-        parameter = side.param_weight
-        if match is None or parameter is None:
-            continue
-        found += 1
-        _require_miles_packed_layout(
-            parameter,
-            expert_parallel_rank=expert_parallel_rank,
-            expert_parallel_size=EXPERT_PARALLEL_SIZE,
+    _require_packed_count(master.shape[0])
+    if torch.count_nonzero(master[:ORIGINAL_EXPERTS_PER_RANK]).item():
+        raise RuntimeError(f"original packed expert LoRA master is nonzero for {name!r}")
+
+
+class ClonePackedAdapterPolicy:
+    """Ports ``state_plugin.PackedAdapterPolicy`` of the E288 clone-only LoRA.
+
+    The external policy carries the 32 clone experts of every layer; the 256
+    original-expert slots of each packed parameter stay exact zeros.
+    """
+
+    def __init__(self, *, expert_parallel_rank: int | None = None,
+                 expert_parallel_size: int | None = None) -> None:
+        # Explicit coordinates are a CPU-test hook; production reads Megatron's.
+        self._coordinates = (expert_parallel_rank, expert_parallel_size)
+
+    def packed_name(self, side: Any) -> str | None:
+        hf_param = side.mapping.hf_param
+        if isinstance(hf_param, dict) and len(set(hf_param.values())) == 1:
+            hf_param = next(iter(hf_param.values()))
+        if not isinstance(hf_param, str):
+            return None
+        name = hf_param if hf_param.startswith("base_model.model.") else "base_model.model." + hf_param
+        return name if EXPERT_LORA.fullmatch(name) is not None else None
+
+    def is_expert_name(self, name: str) -> bool:
+        return EXPERT_LORA.fullmatch(name) is not None
+
+    def carried_names(self) -> frozenset[str]:
+        return _CLONE_EXPERT_LORA_NAMES
+
+    def check_frozen_slots(self, name: str, master: Any) -> None:
+        assert_original_slots_zero(name, master)
+
+    def slot_writes(self, name: str, packed_shape: tuple[int, ...], tensors) -> Any:
+        from yeto.rl.adapters.miles.state_plugin import PackedSlotWrites
+
+        rank, size = _parallel_coordinates(
+            expert_parallel_rank=self._coordinates[0],
+            expert_parallel_size=self._coordinates[1],
         )
-        master = parameter.main_param.view(parameter.shape)
-        if torch.count_nonzero(master[:ORIGINAL_EXPERTS_PER_RANK]).item():
-            raise RuntimeError(
-                f"original packed expert LoRA master is nonzero for {name!r}"
-            )
-    if not found:
-        raise RuntimeError("clone-only actor has no packed expert LoRA sides")
+        updates = clone_slot_updates(
+            name, packed_shape, tensors, expert_parallel_rank=rank, expert_parallel_size=size
+        )
+        return PackedSlotWrites(frozen=slice(0, ORIGINAL_EXPERTS_PER_RANK), updates=updates)
 
 
 def install_on_trainable_state(module) -> None:
-    """Patch the two pinned Miles helpers that encode EP expert ownership."""
+    """Patch the two pinned legacy Miles helpers that encode EP expert ownership."""
 
     if getattr(module, "_yeto_balanced_expert_layout_installed", False):
         return
 
-    def sparse_expert_updates(name, side, tensors, **coordinates):
-        return _sparse_expert_updates(
-            module,
+    def sparse_expert_updates(name, side, tensors, *, expert_parallel_rank, expert_parallel_size):
+        parameter = side.param_weight
+        if parameter is None:
+            raise RuntimeError(f"packed expert side {name!r} has no parameter")
+        updates = clone_slot_updates(
             name,
-            side,
+            tuple(parameter.shape),
             tensors,
-            **coordinates,
+            expert_parallel_rank=expert_parallel_rank,
+            expert_parallel_size=expert_parallel_size,
         )
+        return parameter.main_param.view(parameter.shape), ORIGINAL_EXPERTS_PER_RANK, updates
 
-    def assert_original_packed_masters_zero(sides, **coordinates):
-        return _assert_original_packed_masters_zero(
-            module,
-            sides,
-            **coordinates,
-        )
+    def assert_original_packed_masters_zero(sides, *, expert_parallel_rank):
+        _require_balanced_ep(expert_parallel_rank, EXPERT_PARALLEL_SIZE)
+        packed = [
+            (name, side.param_weight)
+            for name, side in sides
+            if EXPERT_LORA.fullmatch(name) is not None and side.param_weight is not None
+        ]
+        if not packed:
+            raise RuntimeError("clone-only actor has no packed expert LoRA sides")
+        for name, parameter in packed:
+            assert_original_slots_zero(name, parameter.main_param.view(parameter.shape))
 
     module._sparse_expert_updates = sparse_expert_updates
-    module._assert_original_packed_masters_zero = (
-        assert_original_packed_masters_zero
-    )
+    module._assert_original_packed_masters_zero = assert_original_packed_masters_zero
     module._yeto_balanced_expert_layout_installed = True
 
 

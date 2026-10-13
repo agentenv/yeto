@@ -219,7 +219,6 @@ def test_algorithm_disagreement_rejected():
         ("agent", "tito_allowed_append_roles", ("tool",), "agent.tito_allowed_append_roles"),
         ("trainable", "parameter_mode", "adapter", "trainable.parameter_mode"),
         ("trainable", "expert_full_count", 4, "trainable.expert_full_count"),
-        ("trainable", "lora_targets", "attention-routed-experts", "trainable.lora_targets"),
         ("serving", "tp_size", 4, "serving.tp_size"),
     ],
 )
@@ -264,6 +263,20 @@ def test_deepseek_v4_recipe_without_expert_full_has_no_hybrid_flags():
 
     assert "--full-parameter-lora-hybrid" not in argv
     assert "--optimizer" not in argv
+
+
+def test_deepseek_v4_clone_only_lora_uses_packed_expert_adapters():
+    # P0 1.7b.2b: standard LoRA keeps one packed adapter per grouped-expert linear.
+    cfg = sub(_deepseek_v4_expert_full_config(), "trainable", expert_full_count=0,
+              lora_targets="attention-routed-experts")
+    argv = list(mc.translate_run_config(cfg, AlgorithmSpec()).argv)
+
+    assert argv[argv.index("--lora-type") + 1] == "lora"
+    assert "--no-sglang-lora-use-virtual-experts" in argv
+    assert "--full-parameter-lora-hybrid" not in argv
+    plain = mc.translate_run_config(sub(cfg, "trainable", lora_targets="attention"), AlgorithmSpec()).argv
+    assert plain[list(plain).index("--lora-type") + 1] == "canonical_lora"
+    assert "--no-sglang-lora-use-virtual-experts" not in plain
 
 
 def test_unknown_config_field_rejected_by_name():

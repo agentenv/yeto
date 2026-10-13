@@ -775,7 +775,6 @@ def _require_ports_supported(args, extra_argv: Sequence[str] = ()) -> None:
         sync_preset=getattr(args, "sync_preset", "strict-avg"),
         parameter_mode=getattr(args, "parameter_mode", "lora"),
         model_recipe=getattr(args, "rl_model_recipe", "generic"),
-        lora_targets=getattr(args, "lora_targets", None),
         expert_full_count=getattr(args, "expert_full_count", 0) or 0,
         rollout_num_gpus=getattr(args, "rollout_num_gpus", None),
         placement=getattr(args, "rl_placement", "colocated"),
@@ -824,27 +823,34 @@ def _require_env(name: str, value: str) -> None:
     os.environ[name] = value
 
 
+def _require_layout_runtime(legacy_flag: str, *, rl_engine: str) -> None:
+    """Switch on the runtime of this engine's Miles layout (``<flag>`` or ``<flag>_PORTS``)."""
+
+    runtime, other = (f"{legacy_flag}_PORTS", legacy_flag)
+    if rl_engine != "ports":
+        runtime, other = other, runtime
+    if os.environ.get(other) not in (None, "0"):
+        raise ValueError(f"{other} selects the other Miles layout's runtime")
+    _require_env(runtime, "1")
+
+
 def _configure_deepseek_v4_env(args, *, rl_engine: str, clone_only_lora: bool, expert_full: bool) -> None:
     """Process-wide switches the DeepSeek V4 runtime patches read (sitecustomize).
 
-    Ray workers inherit them; expert-full picks the runtime of the Miles layout.
+    Ray workers inherit them; clone-only LoRA and expert-full each pick the
+    runtime of the engine's Miles layout.
     """
 
     if clone_only_lora or expert_full:
         _require_env("YETO_DSV4_EXPERT_CLONE", "1")
     if clone_only_lora:
-        _require_env("YETO_DSV4_CLONE_ONLY_LORA", "1")
+        _require_layout_runtime("YETO_DSV4_CLONE_ONLY_LORA", rl_engine=rl_engine)
     if clone_only_lora or expert_full:
         if os.environ.get("SGLANG_OPT_FUSE_WQA_WKV") not in (None, "0"):
             raise ValueError("SGLANG_OPT_FUSE_WQA_WKV must be unset or 0 for V4 attention LoRA")
         os.environ["SGLANG_OPT_FUSE_WQA_WKV"] = "0"
     if expert_full:
-        runtime, other = ("YETO_DSV4_EXPERT_FULL_PORTS", "YETO_DSV4_EXPERT_FULL")
-        if rl_engine != "ports":
-            runtime, other = other, runtime
-        if os.environ.get(other) not in (None, "0"):
-            raise ValueError(f"{other} selects the other Miles layout's expert-full runtime")
-        _require_env(runtime, "1")
+        _require_layout_runtime("YETO_DSV4_EXPERT_FULL", rl_engine=rl_engine)
         _require_env("YETO_DSV4_EXPERT_FULL_COUNT", str(args.expert_full_count))
         _require_env("YETO_DSV4_EXPERT_FULL_LR", str(args.expert_full_lr))
         _require_env("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0")

@@ -46,7 +46,16 @@ EXPERT_FULL_ARGV: tuple[str, ...] = (
 )
 
 
-def recipe_argv(trainable: Any) -> list[str]:
-    """Recipe flags, plus the expert-full optimizer and transport flags when selected."""
+# Clone-only expert LoRA: SGLang serves the packed expert adapters per expert,
+# as the legacy recipe did.
+CLONE_ONLY_ARGV: tuple[str, ...] = ("--no-sglang-lora-use-virtual-experts",)
 
-    return [*RECIPE_ARGV, *(EXPERT_FULL_ARGV if trainable.expert_full else ())]
+
+def recipe_argv(trainable: Any) -> list[str]:
+    """Recipe flags, plus the flags of the selected expert tuning."""
+
+    return [
+        *RECIPE_ARGV,
+        *(EXPERT_FULL_ARGV if trainable.expert_full else ()),
+        *(CLONE_ONLY_ARGV if trainable.routed_expert_lora else ()),
+    ]

@@ -288,12 +288,6 @@ def _check_parameter_mode(value, _config):
     return None if value in ("lora", "full") else f"parameter mode {value!r}"
 
 
-def _check_lora_targets(value, _config):
-    if value == "attention-routed-experts":
-        return "routed-expert (DSV4 clone) LoRA is legacy-only"
-    return None
-
-
 def _check_expert_full(value, config):
     """Expert-full rides the full-parameter transport, which needs DP=1."""
 
@@ -361,7 +355,7 @@ LEAF_POLICY: dict[str, _Check] = {
     "trainable.lora_rank": _ok,
     "trainable.lora_dropout": _ok,
     "trainable.lora_expert_rank": _ok,
-    "trainable.lora_targets": _check_lora_targets,
+    "trainable.lora_targets": _ok,
     "trainable.target_modules": _ok,
     "trainable.expert_full_count": _check_expert_full,
     "data.prompt_path": _ok,
@@ -659,7 +653,9 @@ def _lora_argv(trainable: Any, *, colocated: bool) -> list[str]:
         # "0" (default argv unchanged) unless --rl-lora-dropout
         "--lora-dropout", (format(trainable.lora_dropout, "g")
                            if getattr(trainable, "lora_dropout", 0.0) else "0"),
-        "--lora-type", "canonical_lora",
+        # DSV4 clone-only LoRA keeps one packed adapter per grouped-expert
+        # linear (standard LoRA); canonical LoRA splits it per projection.
+        "--lora-type", "lora" if trainable.routed_expert_lora else "canonical_lora",
         "--target-modules", ",".join(trainable.target_modules),
         # upstream applies the LoRA base CPU backup only under colocate
         # (utils/lora/utils.py:39-41); a LoRA fixed partition drops it.

@@ -44,7 +44,6 @@ def ports_rejections(
     model_kind: str = "causal-lm",
     tuning: str = "lora",
     model_recipe: str = "generic",
-    lora_targets: str | None = None,
     expert_full_count: int = 0,
     rollout_num_gpus: int | None = None,
     use_critic: bool = False,
@@ -71,10 +70,9 @@ def ports_rejections(
         reasons.append(f"tuning {tuning!r} / parameter mode {parameter_mode!r}")
     if sync_preset not in PORTS_SYNC_PRESETS | FULL_PARAMETER_SYNC_PRESETS:
         reasons.append(f"sync preset {sync_preset!r}")
-    # P0 1.7b.2: the DeepSeek V4 recipe and its expert-full tuning run on
-    # ports; expert-full is a LoRA hybrid on the full-parameter sync.
-    if lora_targets == "attention-routed-experts":
-        reasons.append("DeepSeek V4 clone-only expert LoRA (attention-routed-experts)")
+    # P0 1.7b.2/1.7b.2b: the DeepSeek V4 recipe, its clone-only expert LoRA
+    # and expert-full run on ports; expert-full is a LoRA hybrid on the
+    # full-parameter sync.
     if int(expert_full_count or 0) > 0 and sync_preset != "dense-full":
         reasons.append("expert-full tuning without --rl-sync-preset dense-full (the full-parameter sync)")
     estimator = facts.advantage_estimator or advantage_estimator
