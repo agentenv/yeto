@@ -1409,19 +1409,22 @@ def test_miles_dense_full_parameter_argv_and_runtime_contract(
     learner_zero_argv[session_port + 1 : session_port + 3] = ["31000", "31001"]
     learner_zero_args = argparse.Namespace(**vars(args))
     learner_zero_args.learner_id = 0
+    config_sha256 = hashlib.sha256(config.read_bytes()).hexdigest()
     assert dense.training_contract_hash == rl_learner._dense_full_training_contract_sha256(
-        learner_zero_args,
-        learner_zero_argv,
-        model_config_sha256=hashlib.sha256(config.read_bytes()).hexdigest(),
-        prompt_data_sha256=hashlib.sha256(prompts.read_bytes()).hexdigest(),
+        learner_zero_args, learner_zero_argv, model_config_sha256=config_sha256
+    )
+    # P3: each island may train on its own task list; the data stays out.
+    other_data_args = argparse.Namespace(**vars(learner_zero_args))
+    other_data_args.data, other_data_args.data_revision = "org/other", "e" * 40
+    other_data_argv = list(learner_zero_argv)
+    other_data_argv[other_data_argv.index("--prompt-data") + 1] = "/elsewhere/prompts.jsonl"
+    assert dense.training_contract_hash == rl_learner._dense_full_training_contract_sha256(
+        other_data_args, other_data_argv, model_config_sha256=config_sha256
     )
     changed_source_args = argparse.Namespace(**vars(learner_zero_args))
     changed_source_args.source_sha256 = "f" * 64
     assert dense.training_contract_hash != rl_learner._dense_full_training_contract_sha256(
-        changed_source_args,
-        learner_zero_argv,
-        model_config_sha256=hashlib.sha256(config.read_bytes()).hexdigest(),
-        prompt_data_sha256=hashlib.sha256(prompts.read_bytes()).hexdigest(),
+        changed_source_args, learner_zero_argv, model_config_sha256=config_sha256
     )
     assert (
         miles_args.external_policy_identity_setter_path

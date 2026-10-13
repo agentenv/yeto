@@ -477,8 +477,12 @@ def _canonical_sha256(value: Any) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+# Island-local Miles flags left out of the full-parameter training contract.
+# The training data is island-local too (P3 per-island tasks): its path and
+# content hash are not part of the contract the islands compare.
 _DENSE_ISLAND_LOCAL_MILES_FLAGS = frozenset(
     {
+        "--prompt-data",
         "--rollout-seed",
         "--rollout-engine-base-port",
         "--session-server-port",
@@ -777,9 +781,12 @@ def _dense_full_training_contract_sha256(
     miles_argv: Sequence[str],
     *,
     model_config_sha256: str,
-    prompt_data_sha256: str,
 ) -> str:
-    """Hash shared training semantics while excluding island-local routing."""
+    """Hash shared training semantics while excluding island-local routing and data.
+
+    Each island may train on its own task list (P3), so the training data
+    (``--data``, its revision and the prompt file) stays out of the contract.
+    """
 
     shared_argv = []
     index = 0
@@ -809,15 +816,12 @@ def _dense_full_training_contract_sha256(
     return _canonical_sha256(
         {
             **_expert_full_contract(args),
-            "schema": "yeto-dense-full-training-contract-v4",
+            "schema": "yeto-dense-full-training-contract-v5",
             "shared_miles_argv": shared_argv,
             "rollout_seed_contract": rollout_seed_contract,
             "model": args.model,
             "model_revision": args.model_revision.lower(),
             "model_config_sha256": model_config_sha256,
-            "prompt_data_sha256": prompt_data_sha256,
-            "data": args.data,
-            "data_revision": args.data_revision,
             "evaluation": (
                 None
                 if getattr(args, "eval_interval", None) is None
@@ -1796,10 +1800,7 @@ def run_miles(
             model_config_hash = file_sha256(model_config_path)
             if dense_full:
                 training_contract_hash = _dense_full_training_contract_sha256(
-                    args,
-                    miles_argv,
-                    model_config_sha256=model_config_hash,
-                    prompt_data_sha256=file_sha256(prompt_path),
+                    args, miles_argv, model_config_sha256=model_config_hash
                 )
         if full_parameter:
             layout_hash = model_config_hash
