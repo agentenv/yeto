@@ -396,6 +396,14 @@ _PLACEMENT = (
                 help="rl-multinode-island (ruling 2026-10-04 v2): let the trainer TP*CP group "
                 "span nodes (default: TP stays inside a node, refused otherwise); same as cfg "
                 "parallel.allow_cross_node_tp; journaled as topology.layout.cross_node_tp"),
+    # rl-mixed-island-placement: per-island placement values (yeto.rl.engine.island_placement)
+    cli_flag("--rl-island-placement", action="append", default=None,
+             metavar="ISLAND:KEY=VALUE",
+             help="give island ISLAND its own placement value (repeatable); KEY is "
+             "placement (colocated | fixed-partition), standby-gpus or use-gpus-per-node; "
+             "other islands keep --rl-placement / --rl-standby-gpus / "
+             "--rl-island-use-gpus-per-node. Different placements need "
+             "--rl-island-scheduling elastic"),
     cli_flag("--rl-island-use-gpus-per-node", type=int, default=None, metavar="M",
              help="rl-multinode-island: provision the --gpu machines (N GPUs/node, billed) but "
              "give the island only local GPUs 0..M-1 on every node (M <= N): ray start "

@@ -62,9 +62,9 @@ def _strip(events):
 
 
 NEW_EVENTS = {"rl_timeline_span", "rl_readiness", "rl_round_labels"}
-# Always emitted since the 1b/2a request (not an observation event); the R0
-# comparison removes exactly this event and nothing else.
-ACCOUNTING_EVENTS = {"rl_round_trained"}
+# Always emitted since the 1b/2a request and P4 3.1 (not observation events);
+# the R0 comparison removes exactly these events and nothing else.
+ACCOUNTING_EVENTS = {"rl_round_trained", "rl_round_wall"}
 
 
 R0_TAPE = json.loads(
@@ -98,7 +98,10 @@ def test_profile_none_matches_the_recorded_r0_tape(tmp_path):
                             capabilities=fake_capabilities())
         driver.run()
         events = _events(tmp_path / f"{kind}.jsonl")
-        trained = [e for e in events if e["event"] in ACCOUNTING_EVENTS]
+        trained = [e for e in events if e["event"] == "rl_round_trained"]
+        walls = [e for e in events if e["event"] == "rl_round_wall"]
+        assert [(e["rollout_id"], e["placement"]) for e in walls] == [(r, kind) for r in range(3)]
+        assert all(e["round_seconds"] >= e["rollout_seconds"] >= 0 for e in walls)
         assert [(e["trained_groups"], e["trained_samples"]) for e in trained] == [
             (engine_groups, engine_groups * engine_samples) for _ in range(3)
         ]
