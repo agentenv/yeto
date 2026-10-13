@@ -570,8 +570,8 @@ def test_benchmark_forwards_custom_generate_function_path(tmp_path):
     prompt = tmp_path / "prompts.jsonl"
     prompt.write_text("{}\n", encoding="utf-8")
     payload = bench.worker_payload(
-        args, bench.WorkerSpec(0, 1, 1, prompt, False),
-        arm=bench.select_arms("1", 1, 1, kinds=("native",))[0], run_dir=tmp_path,
+        args, bench.WorkerSpec(0, 1, 1, prompt),
+        arm=bench.select_arms("1", 1, 1, kinds=("single",))[0], run_dir=tmp_path,
         model_path=tmp_path / "model", syncer=None, reward_sha256="c" * 64)
     assert payload["arguments"]["custom_generate_function_path"] == \
         "yeto.rl.teacher_forcing.replay_generate"

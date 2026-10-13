@@ -307,7 +307,6 @@ Four heavier harnesses (all support `--dry-run`):
     python scripts/compare_diloco.py --data <chat.jsonl> --settings all --dry-run
 
     # Miles RL quality check: one Yeto island, federated and decoupled Yeto
-    # (default --rl-engine ports; add --rl-engine legacy for the native arm)
     python scripts/benchmark_rl.py <model/data/reward arguments> --dry-run
 
     # diffusion quality check with an explicit, fixed media shape
