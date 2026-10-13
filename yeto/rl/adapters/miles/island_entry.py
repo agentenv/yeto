@@ -851,6 +851,10 @@ def _check_dense_full_sweep(args, *, rl_engine: str, yeto_policy_sync: bool) -> 
     _check_full_parameter_sync(args, rl_engine=rl_engine, yeto_policy_sync=yeto_policy_sync)
     if args.optimizer_steps != 1 or getattr(args, "local_horizon", 1) != 1:
         raise ValueError("the dense full-parameter strict sweep requires H=1")
+    if int(getattr(args, "rl_max_policy_age", 0) or 0) != 0:
+        # The sweep publishes whole rounds in lockstep with the syncer; rollout
+        # running ahead of training is a separate profile, not part of P0-S.
+        raise ValueError("the dense full-parameter strict sweep requires --rl-max-policy-age 0")
     if (
         type(args.global_rounds) is not int
         or args.global_rounds < 1
