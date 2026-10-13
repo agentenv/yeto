@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import sys
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
@@ -33,24 +32,18 @@ from .core import (
 
 
 class IslandRuntime(Protocol):
+    """What :class:`StrictRlBridge` calls on its island.
+
+    The island loop itself (rollout, training, round boundaries) belongs to
+    ``yeto.rl.engine.driver.IslandDriver``; ``engine.bridges.StrictAvgSync``
+    drives this bridge at each boundary (rl-code-quality-cleanup 2.3).
+    """
+
     def initialize(self) -> CanonicalLoraState: ...
 
     def apply_global_policy(self, state: CanonicalLoraState) -> None: ...
 
-    def run_local_round(
-        self,
-        *,
-        expected_policy_version: int,
-        groups: int,
-        samples_per_group: int,
-        optimizer_steps: int,
-    ) -> LocalRoundStats: ...
-
-    def export_local_policy(self) -> CanonicalLoraState: ...
-
     def record_local_round(self, stats: LocalRoundStats) -> None: ...
-
-    def shutdown(self) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -304,41 +297,6 @@ class StrictRlBridge:
         self._pulls_seen: dict[int, int] = {}  # global step -> PULLs received
         self.pushed_step: int | None = None
 
-    def run(self) -> CanonicalLoraState:
-        try:
-            self.start()
-            while True:
-                self.client.check_health()
-                if self.client.finalizing.is_set():
-                    return self._finalize()
-                progressed = self._drain_messages()
-                permit = self._ready_permit()
-                if permit is not None:
-                    self._run_round(permit)
-                    progressed = True
-                if not progressed:
-                    time.sleep(0.05)
-        except StrictRlInvariantError as error:
-            self._append_event(
-                {
-                    "event": "rl_strict_failure",
-                    "metric": error.metric,
-                    "value": 1,
-                    "error": f"{type(error).__name__}: {error}",
-                }
-            )
-            print(
-                f"[yeto-rl-strict-failure] {error.metric}: {error}",
-                file=sys.stderr,
-                flush=True,
-            )
-            raise
-        finally:
-            try:
-                self.runtime.shutdown()
-            finally:
-                self.client.close()
-
     def start(self) -> None:
         self.client.start()
         if not self.config.send_initial_params:
@@ -523,30 +481,6 @@ class StrictRlBridge:
             self.permits.pop(target, None)
             return None
         return self.permits.pop(target, None)
-
-    def _run_round(self, permit: PullRequest) -> None:
-        base = self.current
-        if base is None or permit.global_step != base.policy_version + 1:
-            raise RuntimeError("RL attempted a local round without its exact base")
-        stats = self.runtime.run_local_round(
-            expected_policy_version=base.policy_version,
-            groups=self.config.groups_per_round,
-            samples_per_group=self.config.samples_per_group,
-            optimizer_steps=self.config.local_optimizer_steps,
-        )
-        if (
-            stats.island_id != self.config.learner_id
-            or stats.base_policy_version != base.policy_version
-            or stats.local_round_id != permit.global_step
-        ):
-            raise RuntimeError("Miles returned LocalRoundStats for a different round")
-
-        self.submit_local_state(
-            permit,
-            base,
-            self.runtime.export_local_policy(),
-            stats,
-        )
 
     def export_tensor_groups(
         self,

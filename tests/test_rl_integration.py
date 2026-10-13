@@ -22,6 +22,7 @@ from yeto.rl.core import (
 )
 from yeto.rl.decoupled import DecoupledBridgeConfig, DecoupledRlBridge
 from yeto.tensor_io import pack_tensor, unpack_fragment
+from strict_bridge_loop import run_strict_bridge
 
 ROOT = Path(__file__).resolve().parent.parent
 MODEL_REVISION = "a" * 40
@@ -307,7 +308,7 @@ class _BridgeThread(threading.Thread):
 
     def run(self):
         try:
-            self.result = self.bridge.run()
+            self.result = run_strict_bridge(self.bridge)
         except BaseException as error:
             self.error = error
 

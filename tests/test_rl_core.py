@@ -33,6 +33,7 @@ from yeto.rl.core import (
 )
 from yeto.rl.export import adapter_targets, derive_peft_lora_specs
 from yeto.rl.filters import bounded_nonzero_reward_std
+from strict_bridge_loop import run_round
 
 
 def tensors():
@@ -423,7 +424,7 @@ def test_policy_delta_rejects_exported_policy_version_drift():
     bridge = StrictRlBridge(runtime, _bridge_config())
     bridge.current = bridge.initial
     with pytest.raises(ValueError, match="versions differ"):
-        bridge._run_round(PullRequest(0, 1, 1))
+        run_round(bridge, PullRequest(0, 1, 1))
 
 
 def test_local_round_event_contains_every_init_metric(tmp_path):
@@ -438,7 +439,7 @@ def test_local_round_event_contains_every_init_metric(tmp_path):
     pushed = []
     bridge.client = SimpleNamespace(push_fragment=lambda *values: pushed.append(values))
 
-    bridge._run_round(PullRequest(0, 1, 1))
+    run_round(bridge, PullRequest(0, 1, 1))
 
     event = json.loads(event_tape.read_text())
     expected = {
