@@ -2662,7 +2662,6 @@ def main(argv=None) -> int:
                     if any(arm.kind == "decoupled" for arm in arms)
                     else "strict-avg"
                 ),
-                lora_targets=args.lora_targets,
             )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc

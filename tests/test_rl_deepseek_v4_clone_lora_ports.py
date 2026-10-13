@@ -285,7 +285,9 @@ def test_island_entry_switches_on_the_clone_only_runtime_of_its_engine(monkeypat
     from yeto.rl.adapters.miles import island_entry
 
     for name in (*_DSV4_FLAGS, "SGLANG_OPT_FUSE_WQA_WKV"):
-        monkeypatch.delenv(name, raising=False)
+        # setenv first so monkeypatch also removes what the island entry sets.
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
 
     island_entry._configure_deepseek_v4_env(SimpleNamespace(), rl_engine=engine, clone_only_lora=True,
                                             expert_full=False)
