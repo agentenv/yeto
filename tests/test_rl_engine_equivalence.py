@@ -136,7 +136,10 @@ def _committed_arm_or_skip(run_dir: Path) -> Path:
     ``[truncated: ...]`` marker, and the parquet shards were removed.  round1_check
     needs the full per-step metrics, so skip when the arm is missing or trimmed
     rather than fail on evidence this tree does not carry."""
-    arms = eq.discover_arms(run_dir) if run_dir.is_dir() else {}
+    try:
+        arms = eq.discover_arms(run_dir) if run_dir.is_dir() else {}
+    except FileNotFoundError:  # events.jsonl moved out of the repo (no run logs in git)
+        arms = {}
     if not arms:
         pytest.skip(f"committed evidence missing under {run_dir} (trimmed by #77)")
     arm = next(iter(arms.values()))
