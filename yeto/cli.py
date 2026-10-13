@@ -747,8 +747,18 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     rl.add_argument("--local-rl-rounds-per-sync", type=int, default=1)
     rl.add_argument(
         "--rl-sync-preset",
-        choices=["strict-avg", "decoupled"],
+        choices=["strict-avg", "decoupled", "dense-full"],
         default="strict-avg",
+        help="dense-full: full-parameter GRPO as strict whole-model fragment sweeps "
+        "(ports engine, --rl-placement fixed-partition, --rl-parameter-layout-sha256)",
+    )
+    rl.add_argument(
+        "--rl-parameter-layout-sha256",
+        default=None,
+        metavar="HEX",
+        help="dense-full only: the full-parameter layout hash reported by the Miles "
+        "layout probe (yeto.rl.adapters.miles.models.full_parameter_manifest_probe); "
+        "--fragments must equal that layout's fragment count",
     )
     rl.add_argument(
         "--rl-initial-adapter",
