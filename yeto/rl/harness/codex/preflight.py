@@ -19,8 +19,7 @@ and, through ``preflight_codex_openenv``, on:
 - the CPU-only scripted worker driver being allowed in a training process;
 - Codex binary / version / identity drift (``codex_harness_agent._attest_runtime``:
   signed env, binary sha256 and size, ``codex --version`` == 0.145.0);
-- OpenEnv identity env drift against ``codex_openenv_agent_function._OPENENV_IDENTITY_ENV``;
-- reward HMAC key source problems (``tbench_outcome.validate_hmac_key_source``).
+- OpenEnv identity env drift against ``codex_openenv_agent_function._OPENENV_IDENTITY_ENV``.
 """
 
 from __future__ import annotations
@@ -35,7 +34,6 @@ from typing import Any
 from yeto.rl.engine.members import MEMBER_PREFIX, member_id
 from yeto.rl.engine.tool_wait import LazyBoardActor, harness_board_actor
 from yeto.rl.harness.reward_scope import check_harness_reward_scope
-from yeto.rl.tbench_outcome import validate_hmac_key_source
 
 from . import codex_harness_agent as harness
 from . import codex_openenv_agent_function as adapter
@@ -102,7 +100,6 @@ def preflight_codex_openenv(
     env: Mapping[str, str] | None = None,
     *,
     attest_runtime: Callable[[], Path] = harness._attest_runtime,
-    validate_key: Callable[[], None] = validate_hmac_key_source,
 ) -> dict[str, Any]:
     """Return a small report on success; raise ``PreflightError`` otherwise."""
     env = os.environ if env is None else env
@@ -113,10 +110,6 @@ def preflight_codex_openenv(
         binary = attest_runtime()
     except harness.CodexHarnessError as exc:
         raise PreflightError(f"Codex runtime attestation failed: {exc}") from exc
-    try:
-        validate_key()
-    except Exception as exc:  # noqa: BLE001 - any key-source problem is fatal
-        raise PreflightError(f"reward HMAC key source rejected: {exc}") from exc
     return {
         "codex_binary": str(binary),
         "codex_version": harness.CODEX_CLI_VERSION,
@@ -217,7 +210,6 @@ LEARNER_ID_ENV = "YETO_RL_LEARNER_ID"
 # can self-configure (A-T3-4, codex-smoke-20261003-6).
 WORKER_PASSTHROUGH_ENV = (
     ENVIRONMENT_PROVIDER_ENV,
-    "TBENCH_REWARD_HMAC_KEY",
     # secret-handling-hardening: the sandbox-only Modal token, never MODAL_TOKEN_*.
     "YETO_SANDBOX_MODAL_TOKEN_ID",
     "YETO_SANDBOX_MODAL_TOKEN_SECRET",

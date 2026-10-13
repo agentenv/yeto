@@ -40,9 +40,7 @@ from .generate import capture_agent_metadata
 from .reward import (
     INFRASTRUCTURE_503_RETRIES_KEY,
     INFRASTRUCTURE_STATUS,
-    MAC_KEY,
     OUTCOME_KEY,
-    sign_outcome,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -2329,7 +2327,7 @@ async def run(
                     task_id,
                     retry_ledger[INFRASTRUCTURE_503_RETRIES_KEY],
                 )
-                return legacy._signed_agent_result(
+                return legacy._agent_result(
                     outcome, INFRASTRUCTURE_STATUS, metrics
                 )
             except Exception:
@@ -2373,8 +2371,7 @@ async def run(
             )
         result = {
             OUTCOME_KEY: outcome,
-            MAC_KEY: sign_outcome(outcome),
-            "exit_status": outcome_status,
+                "exit_status": outcome_status,
             "agent_metrics": metrics.to_dict(),
         }
         capture_agent_metadata(result)

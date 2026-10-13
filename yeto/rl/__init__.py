@@ -46,7 +46,7 @@ def __getattr__(name: str):
 
 SECRLENV_AGENT_PATH = "yeto/rl/harness/codex/agent.py"
 SECRLENV_AGENT_SHA256 = (
-    "fef958c32d27af124827b17369bb82557e96946c4b6f9b74c67f084a533f7c81"
+    "84c6c708cba2142e3d043ae047c90f529b90b953b739261466b8a6e28b2c7411"
 )
 SECRLENV_AGENT = "yeto.rl.harness.codex.agent.run"
 SECRLENV_REWARD = "yeto.rl.harness.codex.reward:reward_func"
@@ -54,7 +54,7 @@ SECRLENV_GROUP_FILTER = "yeto.rl.harness.codex.reward.check_group"
 # Moved to the Miles adapter (yeto-framework-decoupling 5.7); was yeto.rl.harness.codex.generate.
 SECRLENV_GENERATE = "yeto.rl.adapters.miles.harness_glue.codex_generate.generate"
 SECRLENV_GENERATE_SHA256 = (
-    "1df1ded9c6c81404a6101e1821aefc3129d207a3150241980306d6494ee4a2be"
+    "a32121837f889bb0151c0bb196bc41eaeb550ec1fb738568a75d513b52ccef23"
 )
 SECRLENV_ZERO_VARIANCE_REPLACEMENTS = 0
 SECRLENV_INFRASTRUCTURE_REPLACEMENTS = 1
@@ -64,7 +64,7 @@ SECRLENV_INFRASTRUCTURE_REPLACEMENTS = 1
 CODEX_HARNESS_AGENT = "yeto.rl.harness.codex.codex_harness_agent.run"
 CODEX_HARNESS_AGENT_PATH = "yeto/rl/harness/codex/codex_harness_agent.py"
 CODEX_HARNESS_AGENT_SHA256 = (
-    "d2ebc3d96421d96bd193a289cfa89beb490726d6c65e65b1ba15395f001f7d74"
+    "7b84b034601abebc0a9424ee14c100d6cf1e413c326065bde1ad26c716516f1d"
 )
 CODEX_BASE_INSTRUCTIONS_SHA256 = (
     "1c183656ca1319142cba9e76baa199b7ab59f770a51a76660622a087e74ba846"

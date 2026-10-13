@@ -77,10 +77,6 @@ def validate_miles_args(args: Any, runtime: SaoStreamingRuntime) -> None:
 
     actor = runtime.actor
     critic = runtime.critic
-    if runtime.trajectory_evidence_kind == "terminal-bench-2.1":
-        from yeto.rl.tbench_outcome import validate_hmac_key_source
-
-        validate_hmac_key_source()
     enabled = [name for name in _UNSAFE_DEBUG_FLAGS if bool(getattr(args, name, False))]
     enabled += [
         name for name in _UNSAFE_DEBUG_VALUES if getattr(args, name, None) is not None

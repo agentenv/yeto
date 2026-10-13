@@ -49,7 +49,7 @@ def persist_published_round_evidence(
     from yeto.rl.core import parse_policy_snapshot_token
     from yeto.rl.trajectory_evidence import (
         EVIDENCE_KINDS,
-        EVIDENCE_SCHEMA_VERSIONS,
+        LAUNCH_CONTEXT_SCHEMA_VERSIONS,
         build_trajectory_batch_evidence,
         write_trajectory_batch_evidence,
     )
@@ -60,7 +60,7 @@ def persist_published_round_evidence(
     if evidence_kind not in EVIDENCE_KINDS:
         raise RuntimeError("trajectory evidence kind is not bound by the launch context")
     schema_version = getattr(args, "yeto_rl_trajectory_evidence_schema_version", None)
-    if schema_version not in EVIDENCE_SCHEMA_VERSIONS:
+    if schema_version not in LAUNCH_CONTEXT_SCHEMA_VERSIONS:
         raise RuntimeError("trajectory evidence schema is not bound by the launch context")
     rollout_id, policy_hash = parse_policy_snapshot_token(policy_token)
     evidence = build_trajectory_batch_evidence(

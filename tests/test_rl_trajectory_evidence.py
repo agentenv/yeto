@@ -1,15 +1,11 @@
 import json
+from dataclasses import asdict, replace
 from types import SimpleNamespace
 
 import pytest
 
-pytest.importorskip(
-    "yeto_miles_secrlenv",
-    reason="SecRLEnv trajectory v1 is an optional external integration",
-)
-
-from yeto_miles_secrlenv import reward
-
+from yeto.rl import trajectory_evidence
+from yeto.rl.harness.codex import reward
 from yeto.rl.trajectory_evidence import (
     build_trajectory_batch_evidence,
     read_trajectory_batch_evidence,
@@ -34,7 +30,6 @@ def _sample(*, group_index, index, value, status="completed"):
         status=SimpleNamespace(value=status),
         metadata={
             reward.OUTCOME_KEY: outcome,
-            reward.MAC_KEY: reward.sign_outcome(outcome),
             "untrusted_arbitrary_payload": {"must": "not be persisted"},
         },
         reward=value,
@@ -44,10 +39,7 @@ def _sample(*, group_index, index, value, status="completed"):
     )
 
 
-def test_authenticated_batch_round_trips_without_arbitrary_metadata(
-    tmp_path, monkeypatch
-):
-    monkeypatch.setenv("SECRLENV_REWARD_HMAC_KEY", "s" * 48)
+def test_validated_batch_round_trips_without_arbitrary_metadata(tmp_path):
     groups = [
         [_sample(group_index=11, index=0, value=0.0)],
         [_sample(group_index=19, index=1, value=1.0, status="truncated")],
@@ -69,10 +61,13 @@ def test_authenticated_batch_round_trips_without_arbitrary_metadata(
         "CVE-2026-0001",
     ]
     assert all(item.behavior_policy_version == 3 for item in evidence.envelopes)
+    assert evidence.schema_version == 3
+    assert evidence.evidence_kind == "secrlenv"
 
     root = tmp_path / "private"
     path = write_trajectory_batch_evidence(root, evidence)
     assert path.stat().st_mode & 0o777 == 0o600
+    assert json.loads(path.read_text())["schema"] == 3
     assert read_trajectory_batch_evidence(path) == evidence
     assert write_trajectory_batch_evidence(root, evidence) == path
     raw = path.read_text()
@@ -80,11 +75,10 @@ def test_authenticated_batch_round_trips_without_arbitrary_metadata(
     assert "episode-" not in raw
 
 
-def test_forged_reward_or_nonterminal_status_fails_before_evidence(monkeypatch):
-    monkeypatch.setenv("SECRLENV_REWARD_HMAC_KEY", "s" * 48)
+def test_invalid_reward_or_nonterminal_status_fails_before_evidence():
     sample = _sample(group_index=0, index=0, value=1.0)
-    sample.metadata[reward.OUTCOME_KEY]["reward"] = 0.0
-    with pytest.raises(reward.UntrustedOutcome, match="signature mismatch"):
+    sample.metadata[reward.OUTCOME_KEY]["reward"] = 1.5
+    with pytest.raises(reward.UntrustedOutcome, match="outside"):
         build_trajectory_batch_evidence(
             [[sample]],
             rollout_id=0,
@@ -102,8 +96,7 @@ def test_forged_reward_or_nonterminal_status_fails_before_evidence(monkeypatch):
         )
 
 
-def test_tampered_persisted_batch_hash_is_rejected(tmp_path, monkeypatch):
-    monkeypatch.setenv("SECRLENV_REWARD_HMAC_KEY", "s" * 48)
+def test_tampered_persisted_batch_hash_is_rejected(tmp_path):
     evidence = build_trajectory_batch_evidence(
         [[_sample(group_index=0, index=0, value=1.0)]],
         rollout_id=0,
@@ -119,8 +112,7 @@ def test_tampered_persisted_batch_hash_is_rejected(tmp_path, monkeypatch):
         read_trajectory_batch_evidence(path)
 
 
-def test_tampered_persisted_trained_token_aggregate_is_rejected(tmp_path, monkeypatch):
-    monkeypatch.setenv("SECRLENV_REWARD_HMAC_KEY", "s" * 48)
+def test_tampered_persisted_trained_token_aggregate_is_rejected(tmp_path):
     evidence = build_trajectory_batch_evidence(
         [[_sample(group_index=0, index=0, value=1.0)]],
         rollout_id=0,
@@ -137,8 +129,7 @@ def test_tampered_persisted_trained_token_aggregate_is_rejected(tmp_path, monkey
         read_trajectory_batch_evidence(path)
 
 
-def test_response_token_count_is_authenticated_by_batch_hash(tmp_path, monkeypatch):
-    monkeypatch.setenv("SECRLENV_REWARD_HMAC_KEY", "s" * 48)
+def test_tampered_response_token_count_is_rejected(tmp_path):
     evidence = build_trajectory_batch_evidence(
         [[_sample(group_index=0, index=0, value=1.0)]],
         rollout_id=0,
@@ -152,12 +143,11 @@ def test_response_token_count_is_authenticated_by_batch_hash(tmp_path, monkeypat
     path.write_text(json.dumps(value))
     path.chmod(0o600)
 
-    with pytest.raises(ValueError, match="batch hash changed"):
+    with pytest.raises(ValueError, match="exceeds its response length|batch hash changed"):
         read_trajectory_batch_evidence(path)
 
 
-def test_existing_public_evidence_root_is_rejected_without_chmod(tmp_path, monkeypatch):
-    monkeypatch.setenv("SECRLENV_REWARD_HMAC_KEY", "s" * 48)
+def test_existing_public_evidence_root_is_rejected_without_chmod(tmp_path):
     root = tmp_path / "public"
     root.mkdir(mode=0o755)
     root.chmod(0o755)
@@ -170,3 +160,100 @@ def test_existing_public_evidence_root_is_rejected_without_chmod(tmp_path, monke
     with pytest.raises(RuntimeError, match="root is not private"):
         write_trajectory_batch_evidence(root, evidence)
     assert root.stat().st_mode & 0o777 == 0o755
+
+
+def _batch():
+    return build_trajectory_batch_evidence(
+        [[_sample(group_index=0, index=0, value=1.0)]],
+        rollout_id=0,
+        behavior_policy_hash="a" * 64,
+        reward_contract_hash="b" * 64,
+    )
+
+
+def test_outcome_hashes_ignore_legacy_mac_field_and_reward_key_env(monkeypatch):
+    plain = _batch()
+    monkeypatch.setenv("SECRLENV_REWARD_HMAC_KEY", "s" * 48)
+    legacy = _sample(group_index=0, index=0, value=1.0)
+    legacy.metadata["secrlenv_trusted_outcome_hmac"] = "0" * 64
+    with_mac = build_trajectory_batch_evidence(
+        [[legacy]],
+        rollout_id=0,
+        behavior_policy_hash="a" * 64,
+        reward_contract_hash="b" * 64,
+    )
+    assert with_mac == plain
+
+
+def _rewrite_as(evidence, schema_version: int):
+    """Re-encode schema 3 evidence in an older layout, as old writers did."""
+
+    if schema_version == 1:
+        envelopes = tuple(
+            replace(
+                item,
+                evidence_kind="secrlenv",
+                active_token_count=None,
+                loss_mask_hash=None,
+                active_token_ids_hash=None,
+                active_behavior_logprobs_hash=None,
+            )
+            for item in evidence.envelopes
+        )
+        trained_tokens = sum(item.response_token_count for item in envelopes)
+    else:
+        envelopes, trained_tokens = evidence.envelopes, evidence.trained_tokens
+    batch_hash = trajectory_evidence._envelope_batch_hash(
+        envelopes,
+        trained_tokens,
+        schema_version=schema_version,
+        evidence_kind=evidence.evidence_kind,
+    )
+    payload = {
+        "schema": schema_version,
+        "rollout_id": evidence.rollout_id,
+        "behavior_policy_hash": evidence.behavior_policy_hash,
+        "input_batch_hash": batch_hash,
+        "trained_tokens": trained_tokens,
+        "envelopes": [
+            trajectory_evidence._envelope_mapping(item, schema_version)
+            for item in envelopes
+        ],
+    }
+    if schema_version == 2:
+        payload["evidence_kind"] = evidence.evidence_kind
+    return payload
+
+
+@pytest.mark.parametrize("schema_version", [1, 2])
+def test_signed_era_evidence_is_still_readable_by_structure(tmp_path, schema_version):
+    payload = _rewrite_as(_batch(), schema_version)
+    root = tmp_path / "private"
+    root.mkdir(mode=0o700)
+    path = root / "rollout-00000000.json"
+    path.write_text(json.dumps(payload))
+    path.chmod(0o600)
+
+    evidence = read_trajectory_batch_evidence(path)
+    assert evidence.schema_version == schema_version
+    assert evidence.input_batch_hash == payload["input_batch_hash"]
+
+    payload["envelopes"][0]["reward"] = 0.0
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="batch hash changed"):
+        read_trajectory_batch_evidence(path)
+
+
+def test_unknown_schema_is_rejected(tmp_path):
+    path = write_trajectory_batch_evidence(tmp_path / "private", _batch())
+    value = json.loads(path.read_text())
+    value["schema"] = 5
+    path.write_text(json.dumps(value))
+    with pytest.raises(ValueError, match="schema is unsupported"):
+        read_trajectory_batch_evidence(path)
+
+
+def test_schema_3_records_every_layered_field():
+    item = _batch().envelopes[0]
+    assert set(asdict(item)) == set(trajectory_evidence._V2_ENVELOPE_FIELDS)
+    assert item.active_token_count == item.response_token_count

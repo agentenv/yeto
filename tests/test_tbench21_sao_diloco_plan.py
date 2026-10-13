@@ -184,10 +184,7 @@ def test_builds_exact_full_suite_plan(tmp_path):
     assert (
         manifest["required_gates"]["openenv_compaction_trajectory_evidence_v2"] is True
     )
-    assert (
-        manifest["required_gates"]["terminal_bench_signed_outcome_hmac_key_file"]
-        is True
-    )
+    assert "terminal_bench_signed_outcome_hmac_key_file" not in manifest["required_gates"]
     assert manifest["required_gates"]["direct_codex_qwen35_08b_preflight"] is True
     assert manifest["launch_readiness"]["ready"] is False
     assert [

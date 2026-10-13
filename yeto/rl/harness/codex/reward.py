@@ -1,22 +1,16 @@
-"""Authenticated reward extraction for secrlenv Miles samples."""
+"""Validated reward extraction for secrlenv Miles samples."""
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
 import math
-import os
 import re
-import stat
 import statistics
-from pathlib import Path
 from typing import Any
 
 from yeto.rl.rewards.types import RewardResult, Trajectory
 
 OUTCOME_KEY = "secrlenv_trusted_outcome"
-MAC_KEY = "secrlenv_trusted_outcome_hmac"
 INFRASTRUCTURE_STATUS = "infrastructure_error"
 CLEANUP_ERROR_STATUS = "cleanup_error"
 INFRASTRUCTURE_503_RETRIES_KEY = "secrlenv_infrastructure_503_retries"
@@ -27,7 +21,7 @@ ADMISSION_NONCE_KEY = "admission_nonce"
 ADMISSION_PHASE = "pre_create"
 ADMISSION_ERROR_CODE = "infrastructure_error"
 _ADMISSION_NONCE = re.compile(r"[0-9a-f]{32}")
-_SIGNED_STATUSES = {
+_OUTCOME_STATUSES = {
     "completed",
     "timeout",
     "max_turns",
@@ -45,42 +39,15 @@ def _canonical(value: dict[str, Any]) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
-def _hmac_key() -> bytes:
-    value = os.getenv("SECRLENV_REWARD_HMAC_KEY") or os.getenv("SECRLENV_BEARER_TOKEN", "")
-    if not value and os.getenv("SECRLENV_BEARER_TOKEN_FILE"):
-        path = Path(os.environ["SECRLENV_BEARER_TOKEN_FILE"])
-        try:
-            info = path.stat()
-            if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
-                raise UntrustedOutcome("secrlenv token file is not private")
-            value = path.read_text(encoding="utf-8").strip()
-        except OSError as exc:
-            raise UntrustedOutcome(f"cannot read secrlenv token file: {exc}") from exc
-    if len(value) < 32:
-        raise UntrustedOutcome("secrlenv reward HMAC key is missing or too short")
-    return value.encode("utf-8")
-
-
-def sign_outcome(outcome: dict[str, Any], *, key: str | bytes | None = None) -> str:
-    secret = key if key is not None else _hmac_key()
-    if isinstance(secret, str):
-        secret = secret.encode("utf-8")
-    return hmac.new(secret, _canonical(outcome), hashlib.sha256).hexdigest()
-
-
 def _verified_outcome(metadata: Any) -> tuple[dict[str, Any], float]:
     if not isinstance(metadata, dict):
         raise UntrustedOutcome("sample metadata is not an object")
     outcome = metadata.get(OUTCOME_KEY)
-    supplied_mac = metadata.get(MAC_KEY)
-    if not isinstance(outcome, dict) or not isinstance(supplied_mac, str):
-        raise UntrustedOutcome("sample has no signed secrlenv outcome")
-    expected_mac = sign_outcome(outcome)
-    if not hmac.compare_digest(expected_mac, supplied_mac):
-        raise UntrustedOutcome("secrlenv outcome signature mismatch")
+    if not isinstance(outcome, dict):
+        raise UntrustedOutcome("sample has no secrlenv outcome")
     schema = outcome.get("schema")
     status = outcome.get("status")
-    if schema not in {1, ADMISSION_SCHEMA} or status not in _SIGNED_STATUSES:
+    if schema not in {1, ADMISSION_SCHEMA} or status not in _OUTCOME_STATUSES:
         raise UntrustedOutcome("secrlenv outcome has an invalid schema or status")
     infrastructure_503_retries = outcome.get(INFRASTRUCTURE_503_RETRIES_KEY)
     if (
@@ -153,10 +120,10 @@ INFRASTRUCTURE_ABORT_REASON = "secrlenv_infrastructure_failure"
 
 
 def secrlenv_reward(trajectory: Trajectory) -> RewardResult:
-    """Neutral form (decoupling 3.3): only HMAC-authenticated rewards.
+    """Neutral form (decoupling 3.3): only structurally valid rewards.
 
-    Missing or invalid evidence raises :class:`UntrustedOutcome` (fatal, the
-    signature check is unchanged).  A signed infrastructure marker is not a
+    Missing or invalid evidence raises :class:`UntrustedOutcome` (fatal).
+    An infrastructure marker is not a
     verdict: it returns value 0.0 with ``aborted=True`` so the backend adapter
     marks the sample with its abort status and the group is replaced.
     """
@@ -173,7 +140,7 @@ def _sample_reward(sample: Any) -> float:
         return result.value
 
     # Miles calls the reward function before the dynamic group filter. Mark a
-    # signed infrastructure failure ABORTED here so it is replaced, while still
+    # infrastructure failure ABORTED here so it is replaced, while still
     # returning the numeric value required by the reward-function API. The
     # group filter never permits this transient zero into training data.
     from miles.utils.types import Sample
@@ -183,9 +150,9 @@ def _sample_reward(sample: Any) -> float:
 
 
 async def reward_func(args: Any, samples: Any, **_kwargs: Any) -> float | list[float]:
-    """Return only HMAC-authenticated host-side rewards.
+    """Return only structurally valid host-side rewards.
 
-    Missing or invalid metadata remains fatal. A signed infrastructure marker
+    Missing or invalid metadata remains fatal. An infrastructure marker
     is returned as the numeric zero required by Miles only after marking its
     sample ABORTED, so the group filter replaces it and it never enters training.
     """
@@ -202,26 +169,37 @@ def _flatten_samples(samples: list[Any]) -> list[Any]:
     return flattened
 
 
+def _outcome_fingerprint(outcome: Any) -> bytes | None:
+    """Return a hashable outcome identity; malformed outcomes fail later."""
+
+    if not isinstance(outcome, dict):
+        return None
+    try:
+        return _canonical(outcome)
+    except (TypeError, ValueError):
+        return None
+
+
 def _group_key(samples: list[Any]) -> tuple[Any, ...]:
     """Identify a generated group across Miles' repeated callbacks.
 
     Sample indexes are stable across the generation-time and all-samples
-    callbacks.  The signed episode identity and MAC prevent an index collision
-    from reusing a decision for different external-environment evidence.
+    callbacks.  The episode identity and canonical outcome prevent an index
+    collision from reusing a decision for different external-environment
+    evidence.
     """
 
     values = []
     for sample in samples:
         metadata = getattr(sample, "metadata", None)
         outcome = metadata.get(OUTCOME_KEY) if isinstance(metadata, dict) else None
-        supplied_mac = metadata.get(MAC_KEY) if isinstance(metadata, dict) else None
         index = getattr(sample, "index", None)
         values.append(
             (
                 index if index is not None else id(sample),
                 outcome.get("episode_id") if isinstance(outcome, dict) else None,
                 outcome.get("task_id") if isinstance(outcome, dict) else None,
-                supplied_mac,
+                _outcome_fingerprint(outcome),
             )
         )
     return tuple(values)
@@ -237,7 +215,7 @@ def _replacement_limit(args: Any) -> int | None:
 
 
 def check_group(args: Any, samples: list[Any], **_kwargs: Any):
-    """Authenticate groups and coordinate bounded same-task replacements."""
+    """Validate groups and coordinate bounded same-task replacements."""
 
     from miles.rollout.filter_hub.base_types import DynamicFilterOutput
 
@@ -268,7 +246,7 @@ def check_group(args: Any, samples: list[Any], **_kwargs: Any):
         verified = [_verified_outcome(sample.metadata) for sample in flattened]
     except UntrustedOutcome:
         raise SecRLEnvUntrustedEvidence(
-            "SecRLEnv rollout evidence authentication failed"
+            "SecRLEnv rollout evidence validation failed"
         ) from None
 
     statuses = []

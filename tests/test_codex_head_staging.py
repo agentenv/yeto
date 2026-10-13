@@ -7,7 +7,7 @@ from yeto import launcher
 
 def test_non_codex_run_stages_nothing(monkeypatch):
     monkeypatch.setattr(launcher, "codex_harness_launch", lambda args, environ=None: None)
-    assert launcher.codex_head_staging(SimpleNamespace(), {"TBENCH_REWARD_HMAC_KEY": "k"}) == ({}, {})
+    assert launcher.codex_head_staging(SimpleNamespace(), {"HF_TOKEN": "k"}) == ({}, {})
 
 
 def test_codex_run_mounts_bundle_and_forwards_harness_env_as_secrets(monkeypatch, tmp_path):
@@ -15,7 +15,6 @@ def test_codex_run_mounts_bundle_and_forwards_harness_env_as_secrets(monkeypatch
     env = {
         launcher.CODEX_BUNDLE_DIR_ENV: str(tmp_path),
         launcher.HARNESS_ENVIRONMENT_PROVIDER_ENV: "yeto.rl.harness.codex.tb2_provider:modal_provider",
-        "TBENCH_REWARD_HMAC_KEY": "secret",
         "MODAL_TOKEN_ID": "id",
         "MODAL_TOKEN_SECRET": "sec",
         "YETO_SANDBOX_MODAL_TOKEN_ID": "sid",
@@ -24,12 +23,13 @@ def test_codex_run_mounts_bundle_and_forwards_harness_env_as_secrets(monkeypatch
         "YETO_HARNESS_TB2_TASKS_DIR": "/opt/yeto/codex/tb2-tasks",
         "YETO_HARNESS_TB2_MODAL_APP": "yeto-tbench2",
         "UNRELATED": "x",
+        "TBENCH_REWARD_HMAC_KEY": "retired",
         "SECRLENV_MAX_TURNS": "",
     }
     mounts, secrets = launcher.codex_head_staging(SimpleNamespace(), env)
     assert mounts == {launcher.HEAD_CODEX_BUNDLE_PATH: str(tmp_path.resolve())}
     assert secrets == {k: env[k] for k in (
-        launcher.HARNESS_ENVIRONMENT_PROVIDER_ENV, "TBENCH_REWARD_HMAC_KEY",
+        launcher.HARNESS_ENVIRONMENT_PROVIDER_ENV,
         "YETO_SANDBOX_MODAL_TOKEN_ID", "YETO_SANDBOX_MODAL_TOKEN_SECRET", "OPENENV_RUN_ID", "YETO_HARNESS_TB2_TASKS_DIR", "YETO_HARNESS_TB2_MODAL_APP")}
 
 

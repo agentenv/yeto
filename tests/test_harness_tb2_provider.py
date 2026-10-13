@@ -34,7 +34,6 @@ from yeto.rl.harness.codex import (
 )
 from yeto.rl.harness.codex.environment import HttpTerminalEnvironment
 
-KEY = "k" * 48
 
 TEST_SH = textwrap.dedent(
     """\
@@ -75,7 +74,6 @@ def _provider(tmp_path: Path, **kw: Any) -> tb2_provider.Tb2EnvironmentProvider:
 
 
 def _configure(monkeypatch, provider, harness_board: Any = None) -> None:
-    monkeypatch.setenv("TBENCH_REWARD_HMAC_KEY", KEY)
     monkeypatch.setenv("YETO_CODEX_OPENENV_ALLOW_SCRIPTED_DRIVER", "1")
     subprocess_agent.configure(provider=provider, tool_wait_board=None, harness_board=harness_board, member="m0")
 
@@ -184,7 +182,7 @@ def test_subprocess_run_positive_and_negative_rewards_through_the_real_relay(mon
 
     result = _run(subprocess_agent.run("http://miles", "p", {}, _metadata(["ls", "echo nope > fixed.txt"], trajectory_id="traj-neg")))
     outcome, reward = tbench_outcome.verified_outcome(result)
-    assert reward == 0.0 and outcome["status"] == "completed" and tbench_outcome.MAC_KEY in result
+    assert reward == 0.0 and outcome["status"] == "completed" and tbench_outcome.OUTCOME_KEY in result
     assert provider.destroyed == 2 and hb.snapshot().env_live == 0
 
 
@@ -193,7 +191,7 @@ def test_create_fail_fault_is_infrastructure_aborted_and_touches_no_sandbox(monk
     provider = _provider(tmp_path, faults=tb2_provider.parse_faults("create_fail:traj-1"))
     _configure(monkeypatch, provider, harness_board=hb)
     result = _run(subprocess_agent.run("http://miles", "p", {}, _metadata(["ls"])))
-    assert tbench_reward.INFRASTRUCTURE_KEY in result and tbench_outcome.MAC_KEY not in result
+    assert tbench_reward.INFRASTRUCTURE_KEY in result and tbench_outcome.OUTCOME_KEY not in result
     assert "InjectedCreateFailure" in result[tbench_reward.INFRASTRUCTURE_KEY]
     sample = SimpleNamespace(metadata=result, status=None)
     assert _run(tbench_reward.reward_func(None, sample)) == 0.0 and sample.status == "ABORTED"
@@ -240,7 +238,6 @@ def test_max_turns_fault_sets_the_worker_turn_budget(monkeypatch, tmp_path):
     result = _run(subprocess_agent.run("http://miles", "p", {}, _metadata(["echo ok > fixed.txt"])))
     assert tbench_outcome.verified_outcome(result)[1] == 1.0
     assert captured["env"][tb2_provider.TURN_BUDGET_ENV] == "2"
-    assert "TBENCH_REWARD_HMAC_KEY" not in captured["env"]
     # the budget is the bridge's signed turn limit
     monkeypatch.setenv(tb2_provider.TURN_BUDGET_ENV, "2")
     legacy_tests._set_bridge_env(monkeypatch)
@@ -418,7 +415,7 @@ def test_subprocess_rejection_counters_reach_the_board_and_abort(monkeypatch, tm
 
     monkeypatch.setattr(subprocess_agent, "_drive_worker", rejected)
     result = _run(subprocess_agent.run("http://miles", "p", {}, _metadata(["ls"])))
-    assert tbench_reward.INFRASTRUCTURE_KEY in result and tbench_outcome.MAC_KEY not in result
+    assert tbench_reward.INFRASTRUCTURE_KEY in result and tbench_outcome.OUTCOME_KEY not in result
     assert result["chains_total"] == 1 and result["chain_break_reason"] == "retry_fork"
     assert result["agent_metrics"]["tito_session_mismatch"] == 1
     sample = SimpleNamespace(metadata=result, status=None)

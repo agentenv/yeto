@@ -141,14 +141,13 @@ def test_generic_miles_wrapper_equals_original_entry_point(name, entry):
 
 # -- 3.3 codex: abort as a reward result --------------------------------------------
 
-def _signed(status: str, reward: float, monkeypatch) -> dict:
+def _outcome_metadata(status: str, reward: float) -> dict:
     from yeto.rl.harness.codex import reward as codex_reward
 
-    monkeypatch.setenv("SECRLENV_REWARD_HMAC_KEY", "k" * 48)
     outcome = {"schema": 1, "status": status, "episode_id": "ep", "task_id": "t", "reward": reward,
                "passed": reward == 1.0, "class": None,
                codex_reward.INFRASTRUCTURE_503_RETRIES_KEY: 0}
-    return {codex_reward.OUTCOME_KEY: outcome, codex_reward.MAC_KEY: codex_reward.sign_outcome(outcome)}
+    return {codex_reward.OUTCOME_KEY: outcome}
 
 
 @pytest.fixture
@@ -164,7 +163,7 @@ def fake_miles_sample(monkeypatch):
 def test_codex_infrastructure_outcome_aborts_in_neutral_and_miles(monkeypatch, fake_miles_sample):
     from yeto.rl.harness.codex import reward as codex_reward
 
-    metadata = _signed("infrastructure_error", 0.0, monkeypatch)
+    metadata = _outcome_metadata("infrastructure_error", 0.0)
     result = codex_reward.secrlenv_reward(Trajectory(metadata=metadata))
     assert (result.value, result.aborted, result.reason) == (0.0, True, "secrlenv_infrastructure_failure")
     sample = cases.FakeSample(metadata=dict(metadata))
@@ -175,17 +174,18 @@ def test_codex_infrastructure_outcome_aborts_in_neutral_and_miles(monkeypatch, f
     assert generic.status is cases.Status.ABORTED
 
 
-def test_codex_verdict_and_failed_signature(monkeypatch, fake_miles_sample):
+def test_codex_verdict_and_invalid_outcome(monkeypatch, fake_miles_sample):
     from yeto.rl.harness.codex import reward as codex_reward
 
-    metadata = _signed("completed", 1.0, monkeypatch)
+    metadata = _outcome_metadata("completed", 1.0)
     result = codex_reward.secrlenv_reward(Trajectory(metadata=metadata))
     assert (result.value, result.aborted) == (1.0, False)
     sample = cases.FakeSample(metadata=dict(metadata))
     assert _run(codex_reward.reward_func(None, [sample])) == [1.0]
     assert sample.status is cases.Status.COMPLETED
-    tampered = dict(metadata)
-    tampered[codex_reward.MAC_KEY] = "0" * 64
+    legacy = {**metadata, "secrlenv_trusted_outcome_hmac": "0" * 64}
+    assert codex_reward.secrlenv_reward(Trajectory(metadata=legacy)) == result
+    tampered = {codex_reward.OUTCOME_KEY: {**metadata[codex_reward.OUTCOME_KEY], "reward": 1.5}}
     with pytest.raises(codex_reward.UntrustedOutcome):
         codex_reward.secrlenv_reward(Trajectory(metadata=tampered))
     with pytest.raises(codex_reward.UntrustedOutcome):

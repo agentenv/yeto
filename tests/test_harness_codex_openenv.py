@@ -20,9 +20,6 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
-import os
-import subprocess
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -48,7 +45,6 @@ from yeto.rl.harness.codex import (
 )
 from yeto.rl.harness.codex.environment import FakeTerminalEnvironment, serve_environment
 
-KEY = "k" * 48
 
 
 class _Board:
@@ -115,7 +111,7 @@ def _good_env() -> dict[str, str]:
 
 def test_preflight_fails_closed_on_compaction_scripted_driver_identity_and_version(tmp_path):
     ok = lambda: tmp_path / "codex"  # noqa: E731
-    report = preflight.preflight_codex_openenv(_good_env(), attest_runtime=ok, validate_key=lambda: None)
+    report = preflight.preflight_codex_openenv(_good_env(), attest_runtime=ok)
     assert report["compaction"] == "disabled" and report["codex_version"] == "codex-cli 0.145.0"
     for env, match in (
         ({**_good_env(), "YETO_CODEX_COMPACTION_ENABLED": "1"}, "incompatible"),
@@ -124,19 +120,13 @@ def test_preflight_fails_closed_on_compaction_scripted_driver_identity_and_versi
         ({k: v for k, v in _good_env().items() if "MODEL_REVISION" not in k}, "identity drifted"),
     ):
         with pytest.raises(preflight.PreflightError, match=match):
-            preflight.preflight_codex_openenv(env, attest_runtime=ok, validate_key=lambda: None)
+            preflight.preflight_codex_openenv(env, attest_runtime=ok)
 
     def bad_version() -> Path:
         raise harness.CodexHarnessError("pinned Codex version contract drifted")
 
     with pytest.raises(preflight.PreflightError, match="version contract drifted"):
-        preflight.preflight_codex_openenv(_good_env(), attest_runtime=bad_version, validate_key=lambda: None)
-
-    def bad_key() -> None:
-        raise tbench_outcome.UntrustedTBenchOutcome("key too short")
-
-    with pytest.raises(preflight.PreflightError, match="key source rejected"):
-        preflight.preflight_codex_openenv(_good_env(), attest_runtime=ok, validate_key=bad_key)
+        preflight.preflight_codex_openenv(_good_env(), attest_runtime=bad_version)
 
 
 # ---------------------------------------------------------------- Responses -> TITO prefix (1)
@@ -184,10 +174,9 @@ def test_responses_tool_call_round_trip_is_append_only_on_the_miles_wire(monkeyp
     _run(scenario())
 
 
-# ---------------------------------------------------------------- subprocess entry: signing, tool-wait, cleanup (2)
+# ---------------------------------------------------------------- subprocess entry: outcome, tool-wait, cleanup (2)
 
 def _configure(monkeypatch, env: FakeTerminalEnvironment, harness_board: Any = None, **kw) -> tuple[_Provider, _Board]:
-    monkeypatch.setenv("TBENCH_REWARD_HMAC_KEY", KEY)
     monkeypatch.setenv("YETO_CODEX_OPENENV_ALLOW_SCRIPTED_DRIVER", "1")
     provider = _Provider(env, **kw)
     board = _Board()
@@ -202,11 +191,11 @@ def _metadata(**extra) -> dict[str, Any]:
             "expected_policy_version": "pv-7", **extra}
 
 
-def test_subprocess_run_scrubs_key_relays_tool_wait_and_signs(monkeypatch):
+def test_subprocess_run_relays_tool_wait_and_builds_outcome(monkeypatch):
     env = FakeTerminalEnvironment(passed=True)
     provider, board = _configure(monkeypatch, env)
     result = _run(subprocess_agent.run("http://miles", "p", {}, _metadata(expected_policy_version="pv-7")))
-    assert result is not None and tbench_outcome.MAC_KEY in result
+    assert result is not None and tbench_outcome.OUTCOME_KEY in result
     outcome, reward = tbench_outcome.verified_outcome(result)
     assert reward == 1.0 and outcome["status"] == "completed" and outcome["task_id"] == "fix-git"
     assert env.evaluations == 1 and [c for _, c in env.calls] == ["git status", "git checkout -- ."]
@@ -216,7 +205,7 @@ def test_subprocess_run_scrubs_key_relays_tool_wait_and_signs(monkeypatch):
     assert result["expected_policy_version"] == "pv-7"
 
 
-def test_subprocess_negative_reward_and_timeout_are_signed_policy_boundaries(monkeypatch):
+def test_subprocess_negative_reward_and_timeout_are_policy_boundaries(monkeypatch):
     env = FakeTerminalEnvironment(passed=False)
     _configure(monkeypatch, env)
     result = _run(subprocess_agent.run("http://miles", "p", {}, _metadata()))
@@ -231,20 +220,13 @@ def test_subprocess_negative_reward_and_timeout_are_signed_policy_boundaries(mon
     assert env.evaluations == 0 and provider.destroyed == 1 and board.open == 0
 
 
-def test_subprocess_infrastructure_failures_are_unsigned_and_aborted(monkeypatch):
+def test_subprocess_infrastructure_failures_have_no_outcome_and_abort(monkeypatch):
     env = FakeTerminalEnvironment(passed=True)
     _configure(monkeypatch, env, fail=True)
     result = _run(subprocess_agent.run("http://miles", "p", {}, _metadata()))
-    assert tbench_reward.INFRASTRUCTURE_KEY in result and tbench_outcome.MAC_KEY not in result
+    assert tbench_reward.INFRASTRUCTURE_KEY in result and tbench_outcome.OUTCOME_KEY not in result
     sample = SimpleNamespace(metadata=result, status=None)
     assert _run(tbench_reward.reward_func(None, sample)) == 0.0 and sample.status == "ABORTED"
-
-    # worker refuses to start with a reward key visible
-    proc = subprocess.run(
-        [sys.executable, "-m", subprocess_agent.WORKER_MODULE], input="{}\n", capture_output=True, text=True,
-        env={**os.environ, "TBENCH_REWARD_HMAC_KEY": KEY},
-    )
-    assert proc.returncode == 1 and "leaked" in json.loads(proc.stdout.strip().splitlines()[-1])["reason"]
 
 
 def test_rollout_cancellation_kills_worker_and_releases_everything(monkeypatch):
@@ -288,7 +270,7 @@ def test_abort_hook_cancels_surplus_workers_and_releases_everything(monkeypatch)
         return await asyncio.wait_for(task, 20)
 
     result = _run(scenario())
-    assert tbench_reward.INFRASTRUCTURE_KEY in result and tbench_outcome.MAC_KEY not in result
+    assert tbench_reward.INFRASTRUCTURE_KEY in result and tbench_outcome.OUTCOME_KEY not in result
     assert subprocess_agent.ABORTED_STATUS in json.dumps(result)
     assert board.open == 0 and provider.destroyed == 1 and env.evaluations == 0
     assert subprocess_agent._INFLIGHT == {} and subprocess_agent._ABORTED_IDS == set()
@@ -319,7 +301,7 @@ def test_abort_during_acquire_waits_for_the_sandbox_then_destroys_it(monkeypatch
         return await asyncio.wait_for(task, 20)
 
     result = _run(scenario())
-    assert subprocess_agent.ABORTED_STATUS in json.dumps(result) and tbench_outcome.MAC_KEY not in result
+    assert subprocess_agent.ABORTED_STATUS in json.dumps(result) and tbench_outcome.OUTCOME_KEY not in result
     assert provider.destroyed == 1 and env.calls == [] and env.evaluations == 0
     assert subprocess_agent._INFLIGHT == {} and subprocess_agent._ABORTED_IDS == set()
 
@@ -343,7 +325,7 @@ def test_abort_during_verification_cancels_it_and_destroys_the_sandbox(monkeypat
         return await asyncio.wait_for(task, 20)
 
     result = _run(scenario())
-    assert subprocess_agent.ABORTED_STATUS in json.dumps(result) and tbench_outcome.MAC_KEY not in result
+    assert subprocess_agent.ABORTED_STATUS in json.dumps(result) and tbench_outcome.OUTCOME_KEY not in result
     assert provider.destroyed == 1 and board.open == 0
     assert subprocess_agent._INFLIGHT == {} and subprocess_agent._ABORTED_IDS == set()
 
@@ -376,7 +358,7 @@ def test_lease_force_released_by_the_board_is_infrastructure_not_a_crash(monkeyp
 
     provider.acquire = acquire
     result = _run(subprocess_agent.run("http://miles", "p", {}, _metadata()))
-    assert tbench_reward.INFRASTRUCTURE_KEY in result and tbench_outcome.MAC_KEY not in result
+    assert tbench_reward.INFRASTRUCTURE_KEY in result and tbench_outcome.OUTCOME_KEY not in result
     assert subprocess_agent.LEASE_EXPIRED_ON_BOARD in json.dumps(result)
     assert real_destroy_calls == ["traj-1"] and provider.destroyed == 1
     assert hb.snapshot().in_flight == 0  # the session was still closed
@@ -413,7 +395,7 @@ def test_subprocess_run_counts_sessions_and_leases_on_the_harness_board_and_drai
     done = hb.snapshot()
     assert done.in_flight == 0 and done.env_live == 0 and done.leases_expired_total == 0
     assert drain_blockers(0, idle_tools, done) == [] and provider.destroyed == 1
-    assert tbench_outcome.MAC_KEY in result and result["expected_policy_version"] == "pv-7"
+    assert tbench_outcome.OUTCOME_KEY in result and result["expected_policy_version"] == "pv-7"
 
 
 def test_subprocess_run_refuses_new_session_when_admission_is_closed(monkeypatch):
@@ -424,11 +406,11 @@ def test_subprocess_run_refuses_new_session_when_admission_is_closed(monkeypatch
     assert hb.allow_new_session("m0") is False
     result = _run(subprocess_agent.run("http://miles", "p", {}, _metadata()))
     assert result[tbench_reward.INFRASTRUCTURE_KEY] == subprocess_agent.ADMISSION_CLOSED
-    assert tbench_outcome.MAC_KEY not in result and provider.runner is None  # nothing acquired
+    assert tbench_outcome.OUTCOME_KEY not in result and provider.runner is None  # nothing acquired
     assert hb.snapshot() == HarnessSnapshot(0, 0, hb.snapshot().generation)
     hb.open_admission(["m0"])
     result = _run(subprocess_agent.run("http://miles", "p", {}, _metadata()))
-    assert tbench_outcome.MAC_KEY in result and hb.snapshot().in_flight == 0 and hb.snapshot().env_live == 0
+    assert tbench_outcome.OUTCOME_KEY in result and hb.snapshot().in_flight == 0 and hb.snapshot().env_live == 0
 
 
 def test_subprocess_cancellation_releases_board_lease_and_session(monkeypatch):
@@ -528,7 +510,6 @@ def test_entry_preflight_stage_runs_codex_preflight_before_allocation_and_instal
     for name, value in _good_env().items():
         monkeypatch.setenv(name, value)
     monkeypatch.delenv("YETO_CODEX_OPENENV_ALLOW_SCRIPTED_DRIVER", raising=False)
-    monkeypatch.setenv("TBENCH_REWARD_HMAC_KEY", KEY)
     attested = []
     monkeypatch.setattr(preflight, "preflight_codex_openenv",
                         lambda env=None, **kw: attested.append(env.get("YETO_CODEX_OPENENV_MODEL_REVISION")) or {})
@@ -576,48 +557,47 @@ def test_ir4_schema_names_match_the_harness_payload_keys():
     assert generate_wrapper.POLICY_AGE_KEY == "policy_age_violation" == rollout_meta_hook.POLICY_AGE_VIOLATION_KEY
 
 
-# ---------------------------------------------------------------- reward verification at three points (3)
+# ---------------------------------------------------------------- reward validation at three points (3)
 
-def _signed(reward: float = 1.0, **over) -> dict[str, Any]:
-    md = tbench_outcome.build_signed_metadata(
+def _outcome_metadata(reward: float = 1.0, **over) -> dict[str, Any]:
+    md = tbench_outcome.build_outcome_metadata(
         task_id="fix-git", sample_id="s1", episode_id="ep1", status="completed", reward=reward,
-        verifier=tbench_outcome.TEST_SH_VERIFIER, testsh_rc=0 if reward else 1, key=KEY,
+        verifier=tbench_outcome.TEST_SH_VERIFIER, testsh_rc=0 if reward else 1,
     )
     md.update(over)
     return md
 
 
-def test_reward_is_verified_at_reward_function_parent_and_evidence(monkeypatch):
-    monkeypatch.setenv("TBENCH_REWARD_HMAC_KEY", KEY)
-    good = SimpleNamespace(metadata=_signed(), status=None, rollout_id=1)
+def test_reward_is_validated_at_reward_function_parent_and_evidence():
+    good = SimpleNamespace(metadata=_outcome_metadata(), status=None, rollout_id=1)
     assert _run(tbench_reward.reward_func(None, [good])) == [1.0]
     tampered = copy.deepcopy(good.metadata)
-    tampered[tbench_outcome.OUTCOME_KEY]["reward"] = 0.0
-    tampered[tbench_outcome.OUTCOME_KEY]["passed"] = False
-    for bad in (tampered, {**_signed(), "extra": 1} | {tbench_outcome.OUTCOME_KEY: {**_signed()[tbench_outcome.OUTCOME_KEY], "x": 1}}):
+    tampered[tbench_outcome.OUTCOME_KEY]["reward"] = 0.0  # pass bit now disagrees
+    for bad in (tampered, {**_outcome_metadata(), "extra": 1} | {tbench_outcome.OUTCOME_KEY: {**_outcome_metadata()[tbench_outcome.OUTCOME_KEY], "x": 1}}):
         with pytest.raises(tbench_outcome.UntrustedTBenchOutcome):
             _run(tbench_reward.reward_func(None, SimpleNamespace(metadata=bad, status=None)))
         with pytest.raises(tbench_outcome.UntrustedTBenchOutcome):
             tbench_outcome.verified_outcome(bad)  # parent-side verification point
-    monkeypatch.setenv("TBENCH_REWARD_HMAC_KEY", "w" * 48)  # wrong key at the evidence point
     from yeto.rl import trajectory_evidence
 
-    with pytest.raises(Exception):
-        trajectory_evidence._verified_outcome(good.metadata, "tbench")
+    # evidence point: a legacy MAC field is ignored, structure is still checked
+    legacy = {**good.metadata, "tbench_trusted_outcome_hmac": "0" * 64}
+    assert trajectory_evidence._verified_outcome(legacy, "terminal-bench-2.1").reward == 1.0
+    with pytest.raises(tbench_outcome.UntrustedTBenchOutcome):
+        trajectory_evidence._verified_outcome(tampered, "terminal-bench-2.1")
 
 
 # ---------------------------------------------------------------- siblings share one reward (5)
 
 def test_sibling_segments_share_reward_and_count_once(monkeypatch):
-    monkeypatch.setenv("TBENCH_REWARD_HMAC_KEY", KEY)
-    a = SimpleNamespace(metadata=_signed(1.0, trajectory_id="t1"), status=None, rollout_id=3)
-    b = SimpleNamespace(metadata=_signed(1.0, trajectory_id="t1"), status=None, rollout_id=3)
-    c = SimpleNamespace(metadata=_signed(0.0, trajectory_id="t2"), status=None, rollout_id=4)
+    a = SimpleNamespace(metadata=_outcome_metadata(1.0, trajectory_id="t1"), status=None, rollout_id=3)
+    b = SimpleNamespace(metadata=_outcome_metadata(1.0, trajectory_id="t1"), status=None, rollout_id=3)
+    c = SimpleNamespace(metadata=_outcome_metadata(0.0, trajectory_id="t2"), status=None, rollout_id=4)
     rewards = tbench_reward.check_siblings([a, b, c])
     assert rewards == {("rollout", 3): 1.0, ("rollout", 4): 0.0}  # two trajectories, not three samples
     assert tbench_reward.check_group(None, [[a, b], c]).keep is True
     assert tbench_reward.check_group(None, [[a, b]]).keep is False  # zero std over trajectories
-    b_bad = SimpleNamespace(metadata=_signed(0.0, trajectory_id="t1"), status=None, rollout_id=3)
+    b_bad = SimpleNamespace(metadata=_outcome_metadata(0.0, trajectory_id="t1"), status=None, rollout_id=3)
     with pytest.raises(tbench_outcome.UntrustedTBenchOutcome, match="different outcomes"):
         tbench_reward.check_group(None, [[a, b_bad], c])
     infra = SimpleNamespace(metadata={tbench_reward.INFRASTRUCTURE_KEY: "x"}, status=None)
@@ -647,7 +627,7 @@ def test_generate_wrapper_sets_sibling_keys_checks_policy_version_and_alignment(
     stale = _sample([1, 2, 3], [0, 1, 1], [-0.1, -0.2], 2, [("pv-old", 1, 3)])
     _run(generate_wrapper.generate(inp, upstream=lambda _i: _coro(SimpleNamespace(samples=[stale]))))
     assert stale.status == "ABORTED" and stale.metadata["policy_age_violation"] == 1
-    assert tbench_outcome.MAC_KEY not in stale.metadata and "policy_age" in stale.metadata[tbench_reward.INFRASTRUCTURE_KEY]
+    assert tbench_outcome.OUTCOME_KEY not in stale.metadata and "policy_age" in stale.metadata[tbench_reward.INFRASTRUCTURE_KEY]
 
 
 async def _coro(value):
@@ -681,15 +661,8 @@ def test_legacy_preflight_forwarder_matches_legacy_failure_classes(monkeypatch):
     with pytest.raises(ValueError, match="environment drifted"):
         preflight.forward_legacy_openenv_preflight(None, "qwen35_08b", {k: v for k, v in env.items() if "MODEL_REVISION" not in k})
     pins = preflight.required_pin_updates()
-    assert pins["CODEX_HARNESS_AGENT_SHA256"] == "d2ebc3d96421d96bd193a289cfa89beb490726d6c65e65b1ba15395f001f7d74"
+    assert pins["CODEX_HARNESS_AGENT_SHA256"] == "7b84b034601abebc0a9424ee14c100d6cf1e413c326065bde1ad26c716516f1d"
     assert pins["CODEX_OPENENV_AGENT"].endswith("codex_openenv_subprocess_agent_function.run")
-
-
-def test_scrubbed_environment_removes_every_reward_key_name():
-    base = {n: "x" for n in adapter.hmac_key_env_names()} | {"PATH": "/bin"}
-    assert subprocess_agent.scrubbed_environment(base) == {"PATH": "/bin"}
-    with pytest.raises(RuntimeError, match="leaked"):
-        adapter.assert_no_reward_key(base)
 
 
 # ---------------------------------------------------------------- A-T3-4: rollout workers configure themselves
@@ -743,7 +716,7 @@ def test_repeated_provider_failures_tear_the_rollout_down_instead_of_resampling(
 
     # a success resets the counter; injected create_fail faults never count
     provider.fail = False
-    assert tbench_outcome.MAC_KEY in _run(subprocess_agent.run("http://miles", "p", {}, _metadata()))
+    assert tbench_outcome.OUTCOME_KEY in _run(subprocess_agent.run("http://miles", "p", {}, _metadata()))
     from yeto.rl.harness.codex.tb2_provider import InjectedCreateFailure
 
     async def injected(task_id, trajectory_id):
@@ -774,11 +747,10 @@ def test_tool_wait_board_calls_are_awaited_in_order_and_never_fail_the_trajector
 
     resolved: list[Any] = []
     monkeypatch.setattr(subprocess_agent, "_board_resolve", lambda ref: resolved.append(ref) or ref.value)
-    monkeypatch.setenv("TBENCH_REWARD_HMAC_KEY", KEY)
     monkeypatch.setenv("YETO_CODEX_OPENENV_ALLOW_SCRIPTED_DRIVER", "1")
     subprocess_agent.configure(provider=_Provider(env), tool_wait_board=_RemoteBoard(), harness_board=None, member="m0")
     result = _run(subprocess_agent.run("http://miles", "p", {}, _metadata()))
-    assert tbench_outcome.MAC_KEY in result
+    assert tbench_outcome.OUTCOME_KEY in result
     kinds = [k for k, _ in order]
     assert kinds and kinds == ["enter", "exit"] * (len(kinds) // 2)  # strictly alternating, same trajectory
     assert len(resolved) == len(order)  # every board call was awaited
@@ -789,7 +761,7 @@ def test_tool_wait_board_calls_are_awaited_in_order_and_never_fail_the_trajector
             self.exit = SimpleNamespace(remote=lambda tid: (_ for _ in ()).throw(RuntimeError("board down")))
 
     subprocess_agent.configure(provider=_Provider(env), tool_wait_board=_FailingBoard(), harness_board=None, member="m0")
-    assert tbench_outcome.MAC_KEY in _run(subprocess_agent.run("http://miles", "p", {}, _metadata()))
+    assert tbench_outcome.OUTCOME_KEY in _run(subprocess_agent.run("http://miles", "p", {}, _metadata()))
     subprocess_agent.configure(provider=None)
 
 

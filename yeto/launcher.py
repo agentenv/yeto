@@ -1504,7 +1504,7 @@ CLOUD_CREDENTIAL_ENV_NAMES = frozenset(v for vals in CLOUD_CREDENTIAL_ENV.values
 # secret-handling-hardening: env values that are secrets. They go to sky
 # ``secrets=`` (redacted in sky's records), never to plain ``envs=``.
 SECRET_ENV_NAMES = frozenset({
-    "HF_TOKEN", "WANDB_API_KEY", "CYBERGYM_API_KEY", "TBENCH_REWARD_HMAC_KEY",
+    "HF_TOKEN", "WANDB_API_KEY", "CYBERGYM_API_KEY",
     "YETO_SANDBOX_MODAL_TOKEN_ID", "YETO_SANDBOX_MODAL_TOKEN_SECRET", "YETO_ISLAND_HMAC_KEY",
 })
 
@@ -3725,7 +3725,6 @@ HARNESS_PREFLIGHT_ENV = "YETO_HARNESS_PREFLIGHT"
 HARNESS_ENVIRONMENT_PROVIDER_ENV = "YETO_HARNESS_ENVIRONMENT_PROVIDER"
 HARNESS_PASSTHROUGH_ENV = (
     HARNESS_ENVIRONMENT_PROVIDER_ENV,
-    "TBENCH_REWARD_HMAC_KEY",
     # tb2_provider Modal Sandbox backend: the island creates task sandboxes
     # itself. secret-handling-hardening: it gets a separate sandbox-only Modal
     # token (YETO_SANDBOX_MODAL_TOKEN_*), never the main MODAL_TOKEN_*.

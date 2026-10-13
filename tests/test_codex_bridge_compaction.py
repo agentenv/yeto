@@ -365,7 +365,7 @@ def _sample(n_prompt, n_gen, version="pv", **meta):
 
 def _seg0_meta(compactions, sessions=("a", "b", "c"), **extra):
     return {"expected_policy_version": "pv", "session_server_id": "10.0.0.1:9", "exit_status": "completed",
-            "tbench_trusted_outcome": {"reward": 1.0}, "tbench_trusted_outcome_hmac": "mac",
+            "tbench_trusted_outcome": {"reward": 1.0},
             "chain_index": 0, "chains_total": 1, "segment_id": 0, "chain_break_reason": None,
             generate_wrapper.SESSIONS_KEY: list(sessions),
             "agent_metrics": {cb.METRICS_KEY: {"compactions": compactions}}, **extra}

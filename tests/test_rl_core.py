@@ -1301,7 +1301,6 @@ def test_secrlenv_proxy_retries_same_task_without_advancing_signed_batch():
     failed[0].status = SimpleNamespace(value="aborted")
     failed[0].response = "failed-response"
     failed[0].metadata["secrlenv_trusted_outcome"] = {"status": "infrastructure_error"}
-    failed[0].metadata["secrlenv_trusted_outcome_hmac"] = "signed"
     proxy.request_retry(
         failed,
         evidence_key="first-evidence",

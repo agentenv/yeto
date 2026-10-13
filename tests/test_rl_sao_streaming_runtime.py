@@ -351,7 +351,7 @@ def test_bind_installs_two_role_full_parameter_sync_and_private_evidence(tmp_pat
     assert args.yeto_rl_total_fragment_steps == 8
 
 
-def test_terminal_bench_runtime_requires_private_key_source_and_binds_v2(
+def test_terminal_bench_runtime_binds_v2_without_any_reward_key(
     tmp_path, monkeypatch
 ):
     payload = _payload(tmp_path / "trajectory-evidence-0")
@@ -360,14 +360,6 @@ def test_terminal_bench_runtime_requires_private_key_source_and_binds_v2(
     monkeypatch.delenv("TBENCH_REWARD_HMAC_KEY", raising=False)
     monkeypatch.delenv("TBENCH_REWARD_HMAC_KEY_FILE", raising=False)
 
-    with pytest.raises(RuntimeError, match="missing or outside"):
-        bind_sao_streaming_runtime(_args(), runtime)
-    assert not evidence.exists()
-
-    key_file = tmp_path / "tbench-hmac.key"
-    key_file.write_text("t" * 48)
-    key_file.chmod(0o400)
-    monkeypatch.setenv("TBENCH_REWARD_HMAC_KEY_FILE", str(key_file))
     args = _args()
     bind_sao_streaming_runtime(args, runtime)
     assert args.yeto_rl_trajectory_evidence_kind == "terminal-bench-2.1"
