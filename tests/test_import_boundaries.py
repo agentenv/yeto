@@ -204,9 +204,53 @@ def removed_module_imports(root: Path = REPO) -> list[str]:
     return list(hits.values())
 
 
+# The import scan above misses a removed module named in text, e.g. a Miles
+# hook path ("module:attr") or a dotted path handed to load_function.  Any
+# mention of the removed packages in code, tests or docs is reported.
+REMOVED_TEXT = ("adapters.miles.legacy", "rollout_legacy_port")
+REMOVED_TEXT_SCOPES = ("yeto", "scripts", "tools", "tests", "docs")
+REMOVED_TEXT_SUFFIXES = (".py", ".md", ".sh", ".json", ".toml", ".yaml", ".yml", ".txt")
+REMOVED_TEXT_EXEMPT = ("tests/test_import_boundaries.py",)  # names them to forbid them
+
+
+def removed_module_mentions(root: Path = REPO) -> list[str]:
+    hits = []
+    for scope in REMOVED_TEXT_SCOPES:
+        base = root / scope
+        if not base.is_dir():
+            continue
+        for path in sorted(base.rglob("*")):
+            rel = path.relative_to(root).as_posix()
+            if (not path.is_file() or path.suffix not in REMOVED_TEXT_SUFFIXES
+                    or rel in REMOVED_TEXT_EXEMPT or "__pycache__" in path.parts):
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            for number, line in enumerate(text.splitlines(), start=1):
+                for needle in REMOVED_TEXT:
+                    if needle in line:
+                        hits.append(f"{rel}:{number} mentions {needle}")
+    return hits
+
+
 # ------------------------------------------------------------------ tests
 def test_removed_legacy_engine_is_never_imported():
     assert not removed_module_imports(), "\n".join(removed_module_imports())
+
+
+def test_removed_legacy_engine_is_never_named():
+    found = removed_module_mentions()
+    assert not found, "\n".join(found)
+
+
+def test_removed_module_name_in_text_is_caught(tmp_path):
+    root = _tree(tmp_path, {
+        "yeto/hooks.py": 'HOOK = "yeto.rl.adapters.miles.legacy.engine:sync"\n',
+        "docs/notes.md": "see rollout_legacy_port.generate_rollout\n",
+    })
+    assert removed_module_mentions(root) == [
+        "yeto/hooks.py:1 mentions adapters.miles.legacy",
+        "docs/notes.md:1 mentions rollout_legacy_port",
+    ]
 
 
 def test_removed_module_import_is_caught(tmp_path):
