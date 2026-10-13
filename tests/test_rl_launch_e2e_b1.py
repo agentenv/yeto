@@ -31,7 +31,7 @@ def test_eval_sampling_knobs_reach_the_learner_and_the_run_config(tmp_path, monk
         256, 64, 512)
     from yeto.rl.engine.run_config import _resolve_eval
 
-    config = _resolve_eval(args, parameter_mode="lora", prompt_path="/p", eval_prompt_path="/e",
+    config = _resolve_eval(args, prompt_path="/p", eval_prompt_path="/e",
                            yeto_policy_sync=True)
     assert config.temperature == 0.0 and config.max_response_len == 64
     # the shipped heldout file is the one the learner verifies

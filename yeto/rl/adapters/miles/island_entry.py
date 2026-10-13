@@ -1974,7 +1974,7 @@ def _verify_eval_dataset_identity(args) -> Path | None:
     eval_only = getattr(args, "eval_only", False)
     from yeto.rl.engine.run_config import ports_training_eval
 
-    train_eval = ports_training_eval(args, parameter_mode=getattr(args, "parameter_mode", None))
+    train_eval = ports_training_eval(args)
     if not eval_only and not train_eval:
         raise ValueError("evaluation configuration requires --eval-only or the ports engine")
     expected = str(getattr(args, "eval_data_sha256", "") or "").lower()

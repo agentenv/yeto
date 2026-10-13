@@ -234,15 +234,15 @@ def test_ports_lora_training_eval_resolves_and_legacy_lora_still_refused(tmp_pat
 
     args = SimpleNamespace(eval_interval=2, eval_only=False, rl_engine="ports",
                            eval_dataset_name="held", eval_samples_per_prompt=4)
-    config = _resolve_eval(args, parameter_mode="lora", prompt_path="/p",
+    config = _resolve_eval(args, prompt_path="/p",
                            eval_prompt_path="/e", yeto_policy_sync=True)
     assert config.interval == 2 and config.prompt_path == "/e"
     with pytest.raises(ValueError, match="heldout"):
-        _resolve_eval(args, parameter_mode="lora", prompt_path="/p",
+        _resolve_eval(args, prompt_path="/p",
                       eval_prompt_path=None, yeto_policy_sync=True)
     args.rl_engine = "legacy"
     with pytest.raises(ValueError, match="restricted"):
-        _resolve_eval(args, parameter_mode="lora", prompt_path="/p",
+        _resolve_eval(args, prompt_path="/p",
                       eval_prompt_path="/e", yeto_policy_sync=True)
 
 
