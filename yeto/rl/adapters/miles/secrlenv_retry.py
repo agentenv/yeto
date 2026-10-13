@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import Any
 
 from yeto.rl import SECRLENV_AGENTS, SECRLENV_INFRASTRUCTURE_REPLACEMENTS
@@ -39,8 +39,10 @@ from yeto.rl.harness.codex.reward import (
     SecRLEnvReplacementExhausted,
     SecRLEnvRolloutCleanupError,
     SecRLEnvRolloutTerminalError,
+    TERMINAL_ERROR_ATTR,
     SecRLEnvUntrustedEvidence,
     UntrustedOutcome,
+    sample_statuses,
 )
 
 DATA_SOURCE_PATH = "yeto.rl.adapters.miles.secrlenv_miles.SecRLEnvRetryDataSource"
@@ -56,7 +58,6 @@ _STAT_NAMES = (
     "replacement_attempts",
     "nontrainable_groups",
     "infrastructure_groups",
-    "aborted_groups",
     "pending_groups",
     "failed_groups",
 )
@@ -115,20 +116,6 @@ def _task_indices(group: object) -> tuple[int, ...] | None:
     return tuple(values)
 
 
-def _sample_statuses(group: object) -> list[str | None]:
-    values: list[str | None] = []
-    pending = list(group) if isinstance(group, list) else []
-    while pending:
-        item = pending.pop(0)
-        if isinstance(item, list):
-            pending[0:0] = item
-            continue
-        status = getattr(item, "status", None)
-        value = getattr(status, "value", status)
-        values.append(value if isinstance(value, str) else None)
-    return values
-
-
 def _strict_int(value: Any) -> bool:
     return type(value) is int
 
@@ -171,6 +158,7 @@ class SecRLEnvTaskRetry:
         self._retry_stats = dict.fromkeys(_STAT_NAMES, 0)
         setattr(self._retry_args, RETRY_STATS_ATTR, self._retry_stats)
         setattr(self._retry_args, FILTER_STATE_ATTR, None)
+        setattr(self._retry_args, TERMINAL_ERROR_ATTR, None)
 
     def get_samples(self, num_samples: int) -> list[list[Any]]:
         if not _strict_int(num_samples) or num_samples != self._retry_capacity:
@@ -250,10 +238,9 @@ class SecRLEnvTaskRetry:
                 metadata[INFRASTRUCTURE_503_RETRIES_KEY] = (
                     infrastructure_503_retries[int(sample.index)]
                 )
-        statuses = _sample_statuses(group)
+        statuses = sample_statuses(group)
         stats = self._retry_stats
         stats["nontrainable_groups"] += 1
-        stats["aborted_groups"] += int("aborted" in statuses)
         stats["pending_groups"] += int("pending" in statuses)
         stats["failed_groups"] += int("failed" in statuses)
         stats["infrastructure_groups"] += int(reason == "secrlenv_infrastructure_failure")
@@ -273,27 +260,58 @@ def retry_metrics(stats: Mapping[str, int] | None) -> dict[str, float]:
 TERMINAL_ERRORS = (SecRLEnvRolloutTerminalError, UntrustedOutcome)
 
 
+def first_terminal_error(args: Any, error: BaseException) -> BaseException:
+    """The round's first terminal error, else ``error``.
+
+    Miles swallows an exception raised inside a generate task (it only counts
+    the group as failed); the round then stops later on a different error,
+    e.g. a refill without a queued retry. The SecRLEnv code records the first
+    one on ``args`` (``reward.remember_terminal_error``).
+    """
+
+    recorded = getattr(args, TERMINAL_ERROR_ATTR, None)
+    return recorded if isinstance(recorded, TERMINAL_ERRORS) else error
+
+
+async def cancel_and_wait(tasks: Iterable[asyncio.Task[Any]]) -> None:
+    """Cancel ``tasks`` and wait until every one has finished."""
+
+    pending = [task for task in tasks if not task.done()]
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+
+
 async def raise_after_terminal_cleanup(
     error: BaseException,
     *,
     abort: Callable[[], Awaitable[Any]],
+    in_flight: Callable[[], Iterable[asyncio.Task[Any]]],
     require_clean: Callable[[], None],
     timeout_s: float = TERMINAL_CLEANUP_TIMEOUT_S,
 ) -> None:
-    """Abort the in-flight work after a terminal error, then raise it sanitized.
+    """Stop the in-flight work after a terminal error, then raise it sanitized.
 
-    ``abort`` stops the engines and the agent's episodes; ``require_clean``
-    raises if an episode is left behind. A cleanup failure or timeout raises
-    :class:`SecRLEnvRolloutCleanupError` instead. Error text never carries
-    episode payloads (``from None``).
+    Order: ``abort`` stops the engines and the agent's episodes; the group
+    tasks ``in_flight`` returns are cancelled and awaited (the backend loop
+    that owned them has already exited); ``require_clean`` raises if an
+    episode is left behind. A cleanup failure or timeout (one bound for the
+    whole sequence) raises :class:`SecRLEnvRolloutCleanupError` instead.
+    Error text never carries episode payloads (``from None``).
     """
 
     if isinstance(error, SecRLEnvRolloutTerminalError):
         terminal: SecRLEnvRolloutTerminalError = error
     else:
         terminal = SecRLEnvUntrustedEvidence("SecRLEnv rollout evidence authentication failed")
+
+    async def stop() -> None:
+        await abort()
+        await cancel_and_wait(in_flight())
+
     try:
-        await asyncio.wait_for(abort(), timeout=timeout_s)
+        await asyncio.wait_for(stop(), timeout=timeout_s)
         require_clean()
     except Exception:
         raise SecRLEnvRolloutCleanupError("SecRLEnv terminal rollout cleanup failed") from None

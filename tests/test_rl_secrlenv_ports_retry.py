@@ -204,7 +204,7 @@ def test_round_draws_the_exact_batch_then_only_the_queued_retry():
     assert source.draws == [TARGET]  # no new task was drawn for the retry
     assert source.retry_stats() == dict(
         replacement_attempts=1, nontrainable_groups=1, infrastructure_groups=1,
-        aborted_groups=0, pending_groups=0, failed_groups=1)
+        pending_groups=0, failed_groups=1)
     assert retry.retry_metrics(args._yeto_secrlenv_retry_stats)[
         "rl/secrlenv/replacement_attempts"] == 1.0
 
@@ -310,7 +310,8 @@ def _cleanup(error, *, abort=None, require_clean=lambda: None, timeout_s=1.0):
         calls.append("abort")
 
     asyncio.run(retry.raise_after_terminal_cleanup(
-        error, abort=abort or default_abort, require_clean=require_clean, timeout_s=timeout_s))
+        error, abort=abort or default_abort, in_flight=list, require_clean=require_clean,
+        timeout_s=timeout_s))
     return calls
 
 
@@ -363,6 +364,8 @@ def stub_miles(monkeypatch):
         async def _call_train(self, input):
             if isinstance(self.outcome, BaseException):
                 raise self.outcome
+            if callable(self.outcome):  # a driver standing in for generate_rollout_async
+                return await self.outcome(self.state.args)
             return self.outcome
 
     async def abort(state, pendings, rollout_id):
@@ -435,4 +438,72 @@ def test_launcher_ports_preflight_accepts_a_secrlenv_run():
     _prepare_rl_args(args)
     assert args.dynamic_sampling_filter_path == SECRLENV_GROUP_FILTER
     assert args.rl_expected_algorithm_sha256 == _secrlenv_spec().sha256()
+    # Regression: computed before the contract bound the filter, the hash was
+    # that of the filterless spec and the island refused the run.
+    assert args.rl_expected_algorithm_sha256 != AlgorithmSpec(advantage_estimator="grpo").sha256()
     assert args.over_sampling_batch_size == args.rollout_batch_size + 1
+
+
+def _miles_like_round(source, *, stuck):
+    """Stands in for Miles' generate_rollout_async: group tasks run as
+    ``generate_and_rm_group``; an exception inside a task is swallowed (the
+    group only counts as failed) and a dropped group triggers a refill."""
+
+    from yeto.rl.harness.codex.reward import remember_terminal_error
+
+    async def generate_and_rm_group(args, group, fail):
+        if fail:
+            error = UntrustedOutcome("forged outcome with episode payload")
+            remember_terminal_error(args, error)  # what reward_func/generate do
+            raise error
+        await asyncio.sleep(3600)
+
+    async def driver(args):
+        groups = source.get_samples(TARGET + 1)
+        pendings = {asyncio.create_task(generate_and_rm_group(args, g, i == 0))
+                    for i, g in enumerate(groups)}
+        stuck.extend(pendings)
+        done, pendings = await asyncio.wait(pendings, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            try:
+                task.result()
+            except Exception:  # noqa: BLE001 - Miles: logged, group counted as failed
+                continue
+        source.get_samples(TARGET + 1)  # refill for the dropped group: no retry queued
+
+    return driver
+
+
+def test_rollout_function_raises_the_first_terminal_error_and_stops_group_tasks(
+        stub_miles, monkeypatch):
+    module, calls = stub_miles
+    monkeypatch.setattr(module, "_require_no_episode_residue", lambda: calls.append("clean"))
+    args = _args()
+    source = module.SecRLEnvRetryDataSource(args)
+    stuck = []
+    fn = module.SecRLEnvRolloutFn(SimpleNamespace(
+        args=args, outcome=_miles_like_round(source, stuck=stuck)))
+
+    async def run():
+        with pytest.raises(SecRLEnvUntrustedEvidence) as raised:
+            await fn._call_train(SimpleNamespace(rollout_id=4))
+        # checked inside the loop: asyncio.run would cancel leftovers on exit
+        assert len(stuck) == TARGET and all(task.done() for task in stuck)
+        return raised.value
+
+    error = asyncio.run(run())
+    assert "payload" not in str(error)  # sanitized first error, not the refill error
+    assert calls == [("abort", set(), 4), "clean"]
+    assert sum(task.cancelled() for task in stuck) == TARGET - 1
+
+
+def test_round_start_forgets_the_previous_terminal_error():
+    from yeto.rl.harness.codex.reward import TERMINAL_ERROR_ATTR
+
+    args = _args()
+    source = _RetrySource(args)
+    setattr(args, TERMINAL_ERROR_ATTR, UntrustedOutcome("old"))
+    source.get_samples(TARGET + 1)
+    assert getattr(args, TERMINAL_ERROR_ATTR) is None
+    fallback = SecRLEnvReplacementExhausted("x")
+    assert retry.first_terminal_error(args, fallback) is fallback

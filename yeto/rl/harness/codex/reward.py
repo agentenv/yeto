@@ -175,9 +175,44 @@ async def reward_func(args: Any, samples: Any, **_kwargs: Any) -> float | list[f
     sample FAILED, so the group check replaces it and it never enters training.
     """
 
-    if isinstance(samples, list):
-        return [_sample_reward(sample) for sample in samples]
-    return _sample_reward(samples)
+    try:
+        if isinstance(samples, list):
+            return [_sample_reward(sample) for sample in samples]
+        return _sample_reward(samples)
+    except UntrustedOutcome as error:
+        remember_terminal_error(args, error)
+        raise
+
+
+def sample_statuses(samples: Any) -> list[str | None]:
+    """Status value of every sample in ``samples`` (nested lists flattened)."""
+
+    values: list[str | None] = []
+    pending = list(samples) if isinstance(samples, list) else []
+    while pending:
+        item = pending.pop(0)
+        if isinstance(item, list):
+            pending[0:0] = item
+            continue
+        status = getattr(item, "status", None)
+        value = getattr(status, "value", status)
+        values.append(value if isinstance(value, str) else None)
+    return values
+
+
+# Miles catches an exception raised inside a generate task and only counts the
+# group as failed; the rollout then fails later with a different error.  The
+# SecRLEnv code records the first terminal error here so the backend can
+# raise it instead.
+TERMINAL_ERROR_ATTR = "_yeto_secrlenv_terminal_error"
+
+
+def remember_terminal_error(args: Any, error: BaseException) -> None:
+    if args is not None and getattr(args, TERMINAL_ERROR_ATTR, None) is None:
+        try:
+            setattr(args, TERMINAL_ERROR_ATTR, error)
+        except AttributeError:
+            pass
 
 
 def _flatten_samples(samples: list[Any]) -> list[Any]:
@@ -262,11 +297,7 @@ def check_group(args: Any, samples: list[Any], **_kwargs: Any):
             "SecRLEnv rollout evidence validation failed"
         ) from None
 
-    statuses = []
-    for sample in flattened:
-        status = getattr(sample, "status", None)
-        value = getattr(status, "value", status)
-        statuses.append(value if isinstance(value, str) else None)
+    statuses = sample_statuses(flattened)
     infrastructure = any(
         outcome.get("status") == INFRASTRUCTURE_STATUS
         for outcome, _ in verified
@@ -285,8 +316,6 @@ def check_group(args: Any, samples: list[Any], **_kwargs: Any):
     if infrastructure or incomplete:
         if infrastructure:
             reason = "secrlenv_infrastructure_failure"
-        elif "aborted" in statuses:
-            reason = "secrlenv_aborted"
         elif "pending" in statuses:
             reason = "secrlenv_pending"
         elif "failed" in statuses:

@@ -7,6 +7,7 @@ the contract and its logic live in :mod:`.secrlenv_retry`.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from miles.rollout.data_source import RolloutDataSourceWithBuffer
@@ -17,6 +18,7 @@ from .secrlenv_retry import (
     RETRY_STATS_ATTR,
     TERMINAL_ERRORS,
     SecRLEnvTaskRetry,
+    first_terminal_error,
     raise_after_terminal_cleanup,
     retry_metrics,
 )
@@ -37,10 +39,11 @@ class SecRLEnvRolloutFn(InferenceRolloutFn):
             output = await super()._call_train(input)
         except TERMINAL_ERRORS as error:
             await raise_after_terminal_cleanup(
-                error,
+                first_terminal_error(self.state.args, error),
                 # Miles' end-of-round abort: stop every engine request and
                 # call the agent's abort hook (tears down local episodes).
                 abort=lambda: abort(self.state, set(), input.rollout_id),
+                in_flight=_in_flight_groups,
                 require_clean=_require_no_episode_residue,
             )
             raise  # unreachable: the cleanup always raises
@@ -49,6 +52,20 @@ class SecRLEnvRolloutFn(InferenceRolloutFn):
         if isinstance(metrics, dict):
             metrics.update(retry_metrics(stats))
         return output
+
+
+# Miles keeps a round's group tasks in a local of generate_rollout_async; when
+# a terminal error leaves that loop they are only reachable on the event loop.
+_GROUP_TASK = "generate_and_rm_group"
+
+
+def _in_flight_groups() -> list[asyncio.Task[Any]]:
+    current = asyncio.current_task()
+    return [
+        task for task in asyncio.all_tasks()
+        if task is not current and not task.done()
+        and getattr(task.get_coro(), "__name__", None) == _GROUP_TASK
+    ]
 
 
 def _require_no_episode_residue() -> None:

@@ -16,7 +16,12 @@ from typing import Any
 
 from yeto.rl.harness.codex.generate import _CAPTURED_AGENT_METADATA
 from yeto.rl.harness.codex.pins import GENERATE_SHA256 as SECRLENV_GENERATE_SHA256
-from yeto.rl.harness.codex.reward import OUTCOME_KEY, UntrustedOutcome, _verified_outcome
+from yeto.rl.harness.codex.reward import (
+    OUTCOME_KEY,
+    UntrustedOutcome,
+    _verified_outcome,
+    remember_terminal_error,
+)
 
 
 def _verify_pinned_source() -> None:
@@ -69,41 +74,50 @@ async def generate(input: Any) -> Any:
 
     token = _CAPTURED_AGENT_METADATA.set(None)
     try:
-        output = await upstream(input)
-        samples = _generated_samples(output)
-        if not samples:
-            raise UntrustedOutcome("SecRLEnv generation returned no samples")
-
-        has_outcome = [
-            isinstance(getattr(sample, "metadata", None), dict)
-            and OUTCOME_KEY in sample.metadata
-            for sample in samples
-        ]
-        if all(has_outcome):
-            return output
-        if (
-            any(has_outcome)
-            or len(samples) != 1
-            or _status_value(samples[0]) != "aborted"
-            or getattr(samples[0], "response", None) not in {None, ""}
-        ):
-            raise UntrustedOutcome("SecRLEnv generation lost outcome metadata")
-
-        captured = _CAPTURED_AGENT_METADATA.get()
-        _verified_outcome(captured)
-        if not isinstance(captured, dict):  # Kept explicit for type narrowing.
-            raise UntrustedOutcome("SecRLEnv generation has no outcome")
-        evidence = {OUTCOME_KEY: copy.deepcopy(captured[OUTCOME_KEY])}
-        metadata = getattr(samples[0], "metadata", None)
-        if not isinstance(metadata, dict):
-            raise UntrustedOutcome("SecRLEnv sample metadata is not an object")
-        metadata.update(evidence)
-        from miles.utils.types import Sample
-
-        samples[0].status = Sample.Status.FAILED
-        return output
+        return await _generate(upstream, input)
+    except UntrustedOutcome as error:
+        remember_terminal_error(getattr(getattr(input, "state", None), "args", None), error)
+        raise
     finally:
         _CAPTURED_AGENT_METADATA.reset(token)
+
+
+async def _generate(upstream: Any, input: Any) -> Any:
+    """Validate the upstream output; restore evidence on the no-record fallback."""
+
+    output = await upstream(input)
+    samples = _generated_samples(output)
+    if not samples:
+        raise UntrustedOutcome("SecRLEnv generation returned no samples")
+
+    has_outcome = [
+        isinstance(getattr(sample, "metadata", None), dict)
+        and OUTCOME_KEY in sample.metadata
+        for sample in samples
+    ]
+    if all(has_outcome):
+        return output
+    if (
+        any(has_outcome)
+        or len(samples) != 1
+        or _status_value(samples[0]) != "aborted"
+        or getattr(samples[0], "response", None) not in {None, ""}
+    ):
+        raise UntrustedOutcome("SecRLEnv generation lost outcome metadata")
+
+    captured = _CAPTURED_AGENT_METADATA.get()
+    _verified_outcome(captured)
+    if not isinstance(captured, dict):  # Kept explicit for type narrowing.
+        raise UntrustedOutcome("SecRLEnv generation has no outcome")
+    evidence = {OUTCOME_KEY: copy.deepcopy(captured[OUTCOME_KEY])}
+    metadata = getattr(samples[0], "metadata", None)
+    if not isinstance(metadata, dict):
+        raise UntrustedOutcome("SecRLEnv sample metadata is not an object")
+    metadata.update(evidence)
+    from miles.utils.types import Sample
+
+    samples[0].status = Sample.Status.FAILED
+    return output
 
 
 def _add_arguments(parser: Any) -> None:
