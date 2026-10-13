@@ -370,3 +370,38 @@ changing its learner-owned artifact path.
 Every merge appends event-tape fields for protocol/delta semantics, attempt,
 launch base version, frozen members and generations, responders, staleness,
 weights, counters, quorum/grace timings, and sync latency.
+
+## Elastic island departure (rl-island-graceful-leave)
+
+Under `--rl-island-scheduling elastic` an island that stops sends one LEAVE
+frame with a one-byte reason code. Only the class of the departure goes on
+the wire; the exception type and text go to the island's event tape
+(`island_leave`, and `elastic_leave_failed` when the send fails). The codes
+are defined in `yeto/rl/elastic_client.py` (`LeaveReason`) and
+`syncer/src/elastic.rs` (`LEAVE_REASON_*`); a test pins both.
+
+| Code | Name | Sent when |
+|---|---|---|
+| 0 | FINISHED | the run ended normally, or the syncer finished first |
+| 1 | LEASE_EXPIRED | never sent: the syncer assigns it when an island is silent for the lease |
+| 2 | STOPPED | KeyboardInterrupt / SystemExit |
+| 3 | PREEMPTED | a droppable island received a cloud reclaim notice |
+| 4 | INFRA_FAILED | node or trainer lost, reconfiguration or storage failure, any unmapped error |
+| 5 | TRAINING_FAILED | a training check failed (publication, policy identity, optimizer step, non-finite values) |
+| 6 | CONFIG_MISMATCH | incompatible configuration; a refused first JOIN is recorded on the tape only |
+
+The exception table is `yeto/rl/engine/leave_reason.py`. An island sends at
+most one LEAVE: a reclaim listener's PREEMPTED is not overwritten by the
+driver's close. A SIGTERM that kills the process (`yeto down`, platform stop)
+sends nothing; the syncer removes the island after the lease. The syncer logs
+an unknown code as `unknown(<n>)` and removes the island as usual.
+
+The lease defaults to 150 s in all three places (`syncer --island-lease-s`,
+the launcher and `yeto --rl-island-lease-s`). Islands heartbeat every
+lease/3 (50 s) on their own thread, so two lost heartbeats are tolerated.
+
+To add an island to a running elastic fleet there is no CLI: start another
+island process against the same syncer address with the same
+`--rl-syncer-epoch`, the same HMAC key and a compatible backend identity and
+compat group. It JOINs with `catch_up` and receives the current base; its
+weight is zero in the round it joins.

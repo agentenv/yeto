@@ -272,8 +272,30 @@ fn get_f32s(r: &mut crate::protocol::Reader) -> Result<Vec<f32>> {
     Ok(out)
 }
 
-pub const LEAVE_REASON_REQUESTED: u8 = 0;
+/// LEAVE reason codes (one wire byte). Must equal `LeaveReason` in
+/// `yeto/rl/elastic_client.py`; a parity test pins both. Only the syncer
+/// itself assigns `LEAVE_REASON_LEASE_EXPIRED`; islands send the others.
+pub const LEAVE_REASON_FINISHED: u8 = 0;
 pub const LEAVE_REASON_LEASE_EXPIRED: u8 = 1;
+pub const LEAVE_REASON_STOPPED: u8 = 2;
+pub const LEAVE_REASON_PREEMPTED: u8 = 3;
+pub const LEAVE_REASON_INFRA_FAILED: u8 = 4;
+pub const LEAVE_REASON_TRAINING_FAILED: u8 = 5;
+pub const LEAVE_REASON_CONFIG_MISMATCH: u8 = 6;
+
+/// Log name of a LEAVE reason; an unknown code is logged, never refused.
+pub fn leave_reason_name(reason: u8) -> String {
+    match reason {
+        LEAVE_REASON_FINISHED => "finished".into(),
+        LEAVE_REASON_LEASE_EXPIRED => "lease_expired".into(),
+        LEAVE_REASON_STOPPED => "stopped".into(),
+        LEAVE_REASON_PREEMPTED => "preempted".into(),
+        LEAVE_REASON_INFRA_FAILED => "infra_failed".into(),
+        LEAVE_REASON_TRAINING_FAILED => "training_failed".into(),
+        LEAVE_REASON_CONFIG_MISMATCH => "config_mismatch".into(),
+        other => format!("unknown({other})"),
+    }
+}
 
 impl ElasticMsg {
     pub fn msg_type(&self) -> u8 {
@@ -739,7 +761,7 @@ impl TapeEvent {
             ),
             Self::PoolLeave { island_id, reason, dropped_uncommitted, membership_epoch } => format!(
                 "\"island_id\":{island_id},\"reason\":\"{}\",\"dropped_uncommitted\":{},\"membership_epoch\":{membership_epoch}",
-                if *reason == LEAVE_REASON_LEASE_EXPIRED { "lease_expired" } else { "requested" },
+                leave_reason_name(*reason),
                 dropped_uncommitted.as_ref().map(delta_json).unwrap_or_else(|| "null".into())
             ),
             Self::DeltaAccepted { island_id } => format!("\"island_id\":{island_id}"),
@@ -1240,6 +1262,20 @@ mod tests {
     use super::*;
     use crate::protocol::*;
 
+    /// rl-island-graceful-leave D7 Q5: every code has a log name; an unknown
+    /// code is logged as unknown(<n>) and still removes the island.
+    #[test]
+    fn leave_reason_names_and_unknown_code() {
+        let names: Vec<String> = (0..=6).map(leave_reason_name).collect();
+        assert_eq!(names, ["finished", "lease_expired", "stopped", "preempted", "infra_failed",
+                           "training_failed", "config_mismatch"]);
+        assert_eq!(leave_reason_name(42), "unknown(42)");
+        let mut c = ElasticCoordinator::new(params(), 30.0, 0).unwrap();
+        c.join(1, 1.0, 0.0).unwrap();
+        c.leave(1, 42).unwrap();
+        assert!(!c.is_member(1));
+    }
+
     /// rl-code-quality-cleanup 2.4: the elastic weight is merge::learner_weight,
     /// bit for bit, and keeps its zero branch; same values as the old
     /// tokens^2 / steps formula.
@@ -1294,7 +1330,7 @@ mod tests {
                     assert_eq!(c.outer_version, u(e[2]), "{ctx}");
                 }
                 "leave" => {
-                    c.leave(id(a[1]), LEAVE_REASON_REQUESTED).unwrap();
+                    c.leave(id(a[1]), LEAVE_REASON_FINISHED).unwrap();
                     match c.tape.last().unwrap() {
                         TapeEvent::PoolLeave { dropped_uncommitted, .. } => {
                             let got = dropped_uncommitted
@@ -1490,7 +1526,7 @@ mod tests {
                 policy_hash: [7; 32],
                 catch_up: true,
             },
-            ElasticMsg::Leave { syncer_epoch: 3, island_id: 1, reason: LEAVE_REASON_REQUESTED },
+            ElasticMsg::Leave { syncer_epoch: 3, island_id: 1, reason: LEAVE_REASON_FINISHED },
             ElasticMsg::LeaseHeartbeat {
                 syncer_epoch: 3,
                 island_id: 1,
@@ -1657,7 +1693,7 @@ mod tests {
         c.join(2, 1.0, 0.0).unwrap();
         c.join(3, 1.0, 0.0).unwrap();
         c.submit(delta(2, 0));
-        c.leave(2, LEAVE_REASON_REQUESTED).unwrap();
+        c.leave(2, LEAVE_REASON_FINISHED).unwrap();
         match c.tape.last().unwrap() {
             TapeEvent::PoolLeave { dropped_uncommitted: Some(d), .. } => assert_eq!(d.island_id, 2),
             e => panic!("{e:?}"),
@@ -1685,7 +1721,7 @@ mod tests {
         c.try_advance(true).unwrap();
         c.submit(delta(2, 0)); // carried, lag 1
         c.submit(delta(3, 1));
-        c.leave(3, LEAVE_REASON_REQUESTED).unwrap(); // dropped
+        c.leave(3, LEAVE_REASON_FINISHED).unwrap(); // dropped
         let bytes = c.encode_state();
         let r = ElasticCoordinator::decode_state(params(), 30.0, &bytes, 100.0).unwrap();
         assert_eq!((r.syncer_epoch, r.membership_epoch, r.outer_version), (4, 4, 1));

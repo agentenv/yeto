@@ -778,7 +778,7 @@ def elastic_debug_pause_env(args) -> dict[str, str]:
     return {ELASTIC_DEBUG_PAUSE_ENV: str(spec)}
 
 
-DEFAULT_ISLAND_LEASE_S = 300.0  # 0.22: 1b expired a 30 s lease during a 60-90 s round
+DEFAULT_ISLAND_LEASE_S = 150.0  # P5: heartbeats every lease/3 = 50 s on their own thread; tolerates 2 lost
 
 
 def island_lease_s(args) -> float:

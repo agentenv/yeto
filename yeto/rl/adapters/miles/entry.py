@@ -879,11 +879,9 @@ def _wire_droppable_reclaim(sync: Any, driver: Any, environ: Any = None) -> Any:
         return None
 
     def leave() -> bool:
-        client = getattr(sync, "client", None)
-        if client is None:
-            return False
-        client.leave()
-        return True
+        from yeto.rl.elastic_client import LeaveReason
+
+        return sync.leave(LeaveReason.PREEMPTED)  # once per process; the driver's close won't resend
 
     island = str(getattr(getattr(sync, "config", None), "learner_id", "?"))
     return droppable.install_reclaim_listener(island, leave=leave, emit=driver.emit,

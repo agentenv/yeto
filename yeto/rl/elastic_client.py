@@ -34,6 +34,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from enum import IntEnum
 from typing import Any
 
 from ..protocol import MSG_ERROR, read_frame, write_frame
@@ -59,8 +60,23 @@ VERDICT_ACCEPT_IS = 1   # stale within bound: accepted, needs importance-samplin
 VERDICT_REJECT = 2
 VERDICT_NAMES = {VERDICT_ACCEPT: "ACCEPT", VERDICT_ACCEPT_IS: "ACCEPT_IS", VERDICT_REJECT: "REJECT"}
 
-LEAVE_REASON_REQUESTED = 0
-LEAVE_REASON_LEASE_EXPIRED = 1
+
+
+class LeaveReason(IntEnum):
+    """LEAVE reason code (one wire byte); equal to ``LEAVE_REASON_*`` in
+    ``syncer/src/elastic.rs`` (parity test). Only the class of the departure
+    goes on the wire; the exception detail goes to the island's event tape.
+    ``LEASE_EXPIRED`` is assigned by the syncer only, never sent by an island."""
+
+    FINISHED = 0
+    LEASE_EXPIRED = 1
+    STOPPED = 2
+    PREEMPTED = 3
+    INFRA_FAILED = 4
+    TRAINING_FAILED = 5
+    CONFIG_MISMATCH = 6
+
+
 HMAC_LEN = 32
 MAX_ELASTIC_FRAME = 128 * 1024
 MAX_ELASTIC_BASE_FRAME = 1 << 36  # a full flat f32 base vector
@@ -119,7 +135,7 @@ class JoinAck:
 class Leave:
     syncer_epoch: int
     island_id: int
-    reason: int = LEAVE_REASON_REQUESTED
+    reason: int = LeaveReason.FINISHED
     TYPE = MSG_LEAVE
 
 
@@ -527,6 +543,12 @@ REJOIN_MARKER = "rejoin required"
 ELASTIC_REJOIN_FAILED_EXIT = 7
 
 
+class ElasticJoinRefused(ElasticProtocolError):
+    """The syncer answered the first JOIN with an error (e.g. backend identity or
+    compat_group differ): the island never became a member, so no LEAVE goes
+    out; the departure is CONFIG_MISMATCH on the island tape only (design D7 Q6)."""
+
+
 class ElasticRejoinError(ElasticProtocolError):
     """``max_rejoin_failures`` consecutive automatic re-JOINs failed."""
 
@@ -563,6 +585,7 @@ class ElasticIslandClient:
         self.rejoins = 0                   # successful automatic re-JOINs
         self.rejoin_failures = 0           # consecutive failed ones
         self.fatal: ElasticRejoinError | None = None
+        self.join_refusal: str | None = None  # first MSG_ERROR before any JOIN_ACK
         self.finished: Finished | None = None  # 0.26
         self.disconnected = False
         # 0.26: outer version at which the run ends (the syncer's total_steps); a
@@ -632,7 +655,10 @@ class ElasticIslandClient:
                 return
             self._link_wait()
             if t == MSG_ERROR:
-                self._on_error(payload.decode("utf-8", "replace"))
+                text = payload.decode("utf-8", "replace")
+                if self.ack is None and self.join_refusal is None:
+                    self.join_refusal = text
+                self._on_error(text)
                 self._ack.set()  # a refused JOIN must not wait for the timeout
                 continue
             try:
@@ -764,6 +790,8 @@ class ElasticIslandClient:
         self._send(Join(c.syncer_epoch, c.island_id, c.incarnation, float(c.capacity),
                                 c.backend_identity_bytes(), c.compat_group or ""))
         if not self._ack.wait(c.join_timeout_s) or self.ack is None:
+            if self.join_refusal is not None:
+                raise ElasticJoinRefused("JOIN refused: " + self.join_refusal)
             raise ElasticProtocolError("JOIN refused or timed out: " + "; ".join(self.errors))
         self._open_heartbeat_connection()
         hb = threading.Thread(target=self._heartbeat, name="elastic-heartbeat", daemon=True)
@@ -850,7 +878,7 @@ class ElasticIslandClient:
         if self.disconnected and self.known_final():
             raise ElasticFinished(self.latest_base.outer_version, "connection closed after the final version")
 
-    def leave(self, reason: int = LEAVE_REASON_REQUESTED) -> None:
+    def leave(self, reason: int = LeaveReason.FINISHED) -> None:
         self._left.set()  # no heartbeat after LEAVE
         if self.ack is not None and self.sock is not None:
             self._send(Leave(self.config.syncer_epoch, self.config.island_id, reason))

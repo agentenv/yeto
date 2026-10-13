@@ -29,6 +29,7 @@ Rust syncer.
 from __future__ import annotations
 
 import math
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -45,10 +46,12 @@ from yeto.rl.core import (
     policy_hash,
     policy_tensor_hash,
 )
+from yeto.rl.elastic_client import LeaveReason
 
 from . import progress as legacy_progress
 from .pause_audit import PAUSABLE_PHASE
 from .driver import IslandDriver, SyncBoundary, SyncStart
+from .leave_reason import sendable
 from .trainable_state import TrainableState
 
 
@@ -154,8 +157,8 @@ class LocalOnlySync:
             driver.at_safe_point = True
             self.at_safe_point(driver, rollout_id=int(version), final=True)
 
-    def close(self) -> None:
-        pass
+    def close(self, reason: int = 0) -> None:
+        pass  # no coordinator: nothing to LEAVE
 
 
 _FRESH_CURSOR = {"sample_offset": 0, "epoch_id": 0, "sample_group_index": 0, "sample_index": 0}
@@ -371,8 +374,8 @@ class StrictAvgSync:
         if policy_hash(final) != policy_hash(self.current):
             raise RuntimeError("final policy differs from the committed global policy")
 
-    def close(self) -> None:
-        if self.bridge is not None:
+    def close(self, reason: int = 0) -> None:
+        if self.bridge is not None:  # strict roster: no LEAVE semantics (design D3)
             self.bridge.client.close()
 
 
@@ -438,6 +441,7 @@ class ElasticAvgSync:
         self.base_version: int | None = None
         self.in_boundary = False
         self.left = False
+        self._leave_lock = threading.Lock()
 
     def _client(self):
         if self.client is None:
@@ -621,12 +625,7 @@ class ElasticAvgSync:
                     base_version=None if base is None else base.outer_version)
         # FINISHED: LEAVE first so the syncer exits as soon as every island left
         # instead of waiting out its final grace window; best-effort otherwise.
-        if not self.left:
-            try:
-                self.client.leave()
-            except Exception:  # noqa: BLE001 - the syncer may already be gone
-                pass
-        self.left = True
+        self.leave(LeaveReason.FINISHED)
         self.in_boundary = False
         if base is not None and base.outer_version > sent_on:
             state = self._apply(driver, base, rollout_id + 1)
@@ -641,23 +640,36 @@ class ElasticAvgSync:
         return "in-boundary" if self.in_boundary else PAUSABLE_PHASE
 
     def finish(self, driver) -> None:
-        if self.client is not None and not self.left:
+        self.leave(LeaveReason.FINISHED)
+
+    def leave(self, reason: int) -> bool:
+        """Send LEAVE once per process; True when this call sent it (the first reason wins: a reclaim
+        listener's PREEMPTED is not overwritten by the driver's close). A failed
+        send is reported as ``elastic_leave_failed``, never raised: the driver
+        may be propagating the original error (design D2)."""
+        with self._leave_lock:
+            if self.client is None or self.left:
+                return False
+            self.left = True
+        code = sendable(reason)
+        try:
+            self.client.leave(code)
+            return True
+        except Exception as error:  # noqa: BLE001 - the syncer may already be gone
             from yeto.rl.elastic_client import ElasticFinished
 
-            try:
-                self.client.leave()
-            except (ElasticFinished, BrokenPipeError, ConnectionResetError):
-                pass  # 0.26: the syncer already finished
-            self.left = True
+            if isinstance(error, (ElasticFinished, BrokenPipeError, ConnectionResetError)) \
+                    and code is LeaveReason.FINISHED:
+                return False  # 0.26: the syncer already finished
+            driver = getattr(self, "_driver", None)
+            if driver is not None:
+                driver.emit("elastic_leave_failed", reason=int(code), reason_name=code.name,
+                            error_type=type(error).__name__, error=str(error))
+            return False
 
-    def close(self) -> None:
+    def close(self, reason: int = LeaveReason.FINISHED) -> None:
         if self.client is not None:
-            if not self.left:
-                try:
-                    self.client.leave()
-                except Exception:
-                    pass
-                self.left = True
+            self.leave(reason)
             self.client.close()
 
 
@@ -846,10 +858,10 @@ class DualStrictAvgSync:
         self.actor.finish(driver)
         self.critic.finish(self.view)
 
-    def close(self) -> None:
-        self.actor.close()
+    def close(self, reason: int = 0) -> None:
+        self.actor.close(reason)
         if self.critic is not None:
-            self.critic.close()
+            self.critic.close(reason)
 
 
 # ---------------------------------------------------------------------------
@@ -1157,6 +1169,6 @@ class DecoupledSync:
         if not self.finished:
             raise RuntimeError("stopped before decoupled RL finalization")
 
-    def close(self) -> None:
-        if self.bridge is not None:
+    def close(self, reason: int = 0) -> None:
+        if self.bridge is not None:  # no LEAVE semantics (design D3)
             self.bridge.close()
