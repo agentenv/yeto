@@ -258,3 +258,7 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
 ## S19 CompactionRL 段计数刷新（分支 s19-compaction-receipt-counts，2026-10-10）
 
 8 个标准样本只变 `plugins` 一项：rollout_meta_hook 插件的源码哈希变了（在掩码钩子之后刷新 CompactionRL 段计数）。算法哈希、契约哈希、argv 哈希不变。
+
+## S23 P2 删奖励签名（rl-drop-reward-tamper-hash，分支 s23-t8，2026-10-13）
+
+只变 codex_harness 一个标准样本的 `plugins` 一项：`codex_openenv_subprocess_agent_function.py` 源码哈希 `8bc115e4…` → `6055fcc8…`（删除向 worker 清除奖励密钥变量的 `scrubbed_environment`）。算法哈希、契约哈希、argv 哈希不变。已按 COORDINATION §5 P2-Q5 接受。`python tests/decoupling_golden.py --write` 后 diff 只有这 1 行。

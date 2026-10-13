@@ -22,7 +22,7 @@ class _Verifier:
 
 def _finish(status, verifier):
     untrusted = {"status": status, "episode_id": "ep", "metrics": {"turns": 2, "evaluate_time": 0.0}}
-    return asyncio.run(F.finish_trusted(untrusted, verifier, task_id="t", sample_id="s", key=b"k" * 32))
+    return asyncio.run(F.finish_trusted(untrusted, verifier, task_id="t", sample_id="s"))
 
 
 def test_finish_trusted_records_evaluate_time():
