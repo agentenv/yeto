@@ -47,7 +47,6 @@ def test_deepseek_v4_expert_full_runs_on_the_full_parameter_sync():
     # P0 1.7b.2: attention LoRA + clone experts as one full-parameter LoRA hybrid.
     assert ports_rejections(
         sync_preset="dense-full",
-        model_recipe="deepseek-v4-flash",
         expert_full_count=4,
     ) == []
 
@@ -65,7 +64,7 @@ def test_ppo_is_not_routed_to_legacy():
         (dict(sync_preset="dense-full", parameter_mode="full", island_scheduling="elastic"), "elastic"),
         (dict(sync_preset="sao-streaming-full", parameter_mode="full",
               island_scheduling="elastic"), "elastic"),
-        (dict(model_recipe="deepseek-v4-flash", expert_full_count=4), "expert-full"),
+        (dict(expert_full_count=4), "expert-full"),
         (dict(sync_preset="dense-full", expert_full_count=4, island_scheduling="elastic"), "elastic"),
         (dict(use_critic=True), "critic"),
         (dict(extra_argv=("--use-critic",)), "critic"),

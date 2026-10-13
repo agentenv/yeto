@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from yeto.rl.adapters.miles.models.deepseek_v4.expert_clone import (
+    CLONES_PER_LAYER,
     EXPERT_PARALLEL_SIZE,
     NUM_LAYERS,
     ORIGINAL_EXPERTS,
@@ -361,6 +362,22 @@ class ClonePackedAdapterPolicy:
 
     def check_frozen_slots(self, name: str, master: Any) -> None:
         assert_original_slots_zero(name, master)
+
+    def carried_bytes(self, packed: Any) -> int:
+        """FP32 bytes this rank's packed bindings carry across all clone experts.
+
+        The fused fc1 A slice exports as both gate and up A; the fc1 B slice
+        already holds gate and up.  Under PP this covers the local stage only.
+        """
+
+        total = 0
+        for name, shape in packed:
+            match = EXPERT_LORA.fullmatch(name)
+            if match is None or len(shape) != 3:
+                raise RuntimeError(f"not a packed expert LoRA binding: {name!r}")
+            copies = 2 if (match.group("projection"), match.group("side")) == ("gate_proj", "A") else 1
+            total += 4 * shape[1] * shape[2] * CLONES_PER_LAYER * copies
+        return total
 
     def slot_writes(self, name: str, packed_shape: tuple[int, ...], tensors) -> Any:
         from yeto.rl.adapters.miles.state_plugin import PackedSlotWrites

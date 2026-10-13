@@ -43,7 +43,6 @@ def ports_rejections(
     parameter_mode: str = "lora",
     model_kind: str = "causal-lm",
     tuning: str = "lora",
-    model_recipe: str = "generic",
     expert_full_count: int = 0,
     rollout_num_gpus: int | None = None,
     use_critic: bool = False,

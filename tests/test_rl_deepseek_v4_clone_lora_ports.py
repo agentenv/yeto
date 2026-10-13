@@ -213,10 +213,94 @@ def test_apply_refuses_an_original_expert_in_the_policy(clone_policy):
         sp._apply_state(_Actor(), tensors=tensors, policy_version=1, local_step=0, optimizer="preserve")
 
 
-def test_policy_registration_rejects_a_second_policy_type(monkeypatch):
+def _fc1_name(expert: int, projection: str, side: str) -> str:
+    return f"base_model.model.model.layers.0.mlp.experts.{expert}.{projection}.lora_{side}.weight"
+
+
+def _clone_fc1_tensors(rank: int, side: str, slice_shape: tuple[int, int]) -> dict[str, torch.Tensor]:
+    tensors = {}
+    for expert in _logical_ids(rank)[ORIGINAL_EXPERTS_PER_RANK:]:
+        for projection, offset in (("gate_proj", 0.0), ("up_proj", 0.5)):
+            value = torch.full(slice_shape, float(expert) + (offset if side == "B" else 0.0))
+            tensors[_fc1_name(expert, projection, side)] = value
+    return tensors
+
+
+def test_fc1_b_slot_concatenates_gate_and_up():
+    policy = ClonePackedAdapterPolicy(expert_parallel_rank=3, expert_parallel_size=8)
+    tensors = _clone_fc1_tensors(3, "B", (2, 4))
+
+    writes = policy.slot_writes(_fc1_name(0, "gate_proj", "B"), (TRAINING_EXPERTS_PER_RANK, 4, 4), tensors)
+
+    assert writes.frozen == slice(0, ORIGINAL_EXPERTS_PER_RANK)
+    slot, value = writes.updates[0]
+    expert = _logical_ids(3)[slot]
+    assert slot == ORIGINAL_EXPERTS_PER_RANK
+    assert torch.equal(value[:2], torch.full((2, 4), float(expert)))
+    assert torch.equal(value[2:], torch.full((2, 4), expert + 0.5))
+
+
+def test_fc1_a_requires_equal_gate_and_up():
+    policy = ClonePackedAdapterPolicy(expert_parallel_rank=0, expert_parallel_size=8)
+    tensors = _clone_fc1_tensors(0, "A", (2, 4))
+    tensors[_fc1_name(_logical_ids(0)[-1], "up_proj", "A")] += 1
+
+    with pytest.raises(RuntimeError, match="gate/up LoRA A tensors differ"):
+        policy.slot_writes(_fc1_name(0, "gate_proj", "A"), (TRAINING_EXPERTS_PER_RANK, 2, 4), tensors)
+
+
+@pytest.mark.parametrize(("rank", "size"), [(0, 4), (8, 8)])
+def test_slot_writes_refuse_an_unbalanced_expert_parallel_layout(rank, size):
+    policy = ClonePackedAdapterPolicy(expert_parallel_rank=rank, expert_parallel_size=size)
+
+    with pytest.raises(ValueError, match="EP size|expert-parallel"):
+        policy.slot_writes(_down_b(0), (TRAINING_EXPERTS_PER_RANK, *SLICE), {})
+
+
+def test_carried_bytes_matches_the_sparse_clone_specs():
+    from tests.test_rl_export import _expanded_deepseek_v4_config
+    from yeto.rl import export as rl_export
+
+    rank = 8
+    specs = rl_export._deepseek_v4_clone_expert_lora_specs(_expanded_deepseek_v4_config(), rank=rank)
+    per_layer = [(_fc1_name(0, "gate_proj", "A").replace("layers.0", f"layers.{layer}"), (36, rank, 4096))
+                 for layer in range(43)]
+    per_layer += [(_fc1_name(0, "gate_proj", "B").replace("layers.0", f"layers.{layer}"), (36, 4096, rank))
+                  for layer in range(43)]
+    per_layer += [(_fc1_name(0, "down_proj", "A").replace("layers.0", f"layers.{layer}"), (36, rank, 2048))
+                  for layer in range(43)]
+    per_layer += [(_fc1_name(0, "down_proj", "B").replace("layers.0", f"layers.{layer}"), (36, 4096, rank))
+                  for layer in range(43)]
+
+    assert ClonePackedAdapterPolicy().carried_bytes(per_layer) == 4 * sum(spec.numel for spec in specs)
+
+
+def test_export_refuses_a_policy_above_the_single_return_limit(monkeypatch, clone_policy, fake_bridge):
+    monkeypatch.setattr(sp, "MAX_PACKED_EXPORT_BYTES", 4 * SLICE[0] * SLICE[1] * 31)
+
+    with pytest.raises(sp.StatePluginError, match="chunked transport"):
+        sp._export_state(_Actor(), policy_version=1)
+
+
+def test_distributed_optimizer_is_refused_before_any_write(monkeypatch, clone_policy, fake_bridge):
+    actor = _Actor()
+    actor.opt_param_scheduler = SimpleNamespace(num_steps=0, step=lambda increment: pytest.fail("scheduler moved"))
+    monkeypatch.setattr(sp, "distributed_ranges", lambda _optimizer: (True, {}))
+    tensors = {ATTENTION: torch.ones(2, 4), **{name: torch.ones(SLICE) for name in LAYER0_DOWN_B_CLONES}}
+
+    with pytest.raises(sp.StatePluginError, match="distributed optimizer"):
+        sp._apply_state(actor, tensors=tensors, policy_version=1, local_step=1, optimizer="preserve")
+    with pytest.raises(sp.StatePluginError, match="distributed optimizer"):
+        sp._export_state(actor, policy_version=1)
+    assert torch.equal(actor.module.attention.detach(), torch.full((2, 4), 0.5))
+
+
+def test_policy_registration_keeps_the_first_policy_and_rejects_another_type(monkeypatch):
     monkeypatch.setattr(sp, "_PACKED_POLICY", None)
-    sp.register_packed_adapter_policy(ClonePackedAdapterPolicy())
-    sp.register_packed_adapter_policy(ClonePackedAdapterPolicy())  # same type: no-op
+    first = ClonePackedAdapterPolicy()
+    sp.register_packed_adapter_policy(first)
+    sp.register_packed_adapter_policy(ClonePackedAdapterPolicy())  # same type keeps the first
+    assert sp.packed_adapter_policy() is first
 
     with pytest.raises(sp.StatePluginError, match="already registered"):
         sp.register_packed_adapter_policy(SimpleNamespace())

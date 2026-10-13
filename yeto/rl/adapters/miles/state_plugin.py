@@ -130,33 +130,63 @@ class PackedAdapterPolicy(Protocol):
     def slot_writes(self, name: str, packed_shape: tuple[int, ...], tensors: Mapping[str, Any]) -> PackedSlotWrites:
         """This rank's writes of the carried tensors into the packed parameter."""
 
+    def carried_bytes(self, packed: Sequence[tuple[str, tuple[int, ...]]]) -> int:
+        """FP32 bytes of the carried tensors, given ``(name, shape)`` of local packed bindings."""
+
 
 _PACKED_POLICY: PackedAdapterPolicy | None = None
 
 
 def register_packed_adapter_policy(policy: PackedAdapterPolicy) -> None:
-    """Install the process's packed-adapter policy (once; same type is a no-op)."""
+    """Install the process's packed-adapter policy once.
+
+    A second registration of the same type keeps the first policy; another
+    type is refused.
+    """
 
     global _PACKED_POLICY
-    if _PACKED_POLICY is not None and type(_PACKED_POLICY) is not type(policy):
+    if _PACKED_POLICY is None:
+        _PACKED_POLICY = policy
+    elif type(_PACKED_POLICY) is not type(policy):
         raise StatePluginError(
             f"packed-adapter policy {type(_PACKED_POLICY).__name__} is already registered"
         )
-    _PACKED_POLICY = policy
 
 
 def packed_adapter_policy() -> PackedAdapterPolicy | None:
     return _PACKED_POLICY
 
 
-def _packed_policy_for(bindings: Sequence[AdapterBinding]) -> PackedAdapterPolicy | None:
-    """The registered policy when these bindings include a packed parameter."""
+# One run_plugin return carries the whole policy; above this the export needs
+# a chunked transport, which the packed path does not have yet.
+MAX_PACKED_EXPORT_BYTES = 2 * 1024**3
 
-    if not any(b.packed for b in bindings):
+
+def _packed_policy_for(actor: Any, bindings: Sequence[AdapterBinding]) -> PackedAdapterPolicy | None:
+    """The registered policy when these bindings include a packed parameter.
+
+    Export and apply both call this before touching any state, so an
+    unsupported actor is refused before a partial write.
+    """
+
+    packed = [b for b in bindings if b.packed]
+    if not packed:
         return None
     if _PACKED_POLICY is None:  # pragma: no cover - bindings come from the policy
         raise StatePluginError("packed adapter bindings without a packed-adapter policy")
+    has_distributed, _owned = distributed_ranges(getattr(actor, "optimizer", None))
+    if has_distributed or not all(has_complete_master(b.parameter) for b in packed):
+        raise StatePluginError("packed adapters need complete FP32 masters, not a distributed optimizer")
     return _PACKED_POLICY
+
+
+def _require_packed_export_fits(policy: PackedAdapterPolicy, bindings: Sequence[AdapterBinding]) -> None:
+    size = policy.carried_bytes([(b.name, tuple(b.parameter.shape)) for b in bindings if b.packed])
+    if size > MAX_PACKED_EXPORT_BYTES:
+        raise StatePluginError(
+            f"packed adapter export is about {size / 1024**3:.1f} GiB, above the "
+            f"{MAX_PACKED_EXPORT_BYTES / 1024**3:.0f} GiB single-return limit; it needs chunked transport"
+        )
 
 
 def _require_carried(policy: PackedAdapterPolicy, names: Iterable[str], what: str) -> None:
@@ -819,7 +849,7 @@ def _export_state(actor: Any, *, policy_version: int) -> dict[str, Any] | None:
     tensors: dict[str, Any] = {}
     with torch.no_grad():
         # Packed parameters export one tensor per expert only through the Bridge.
-        if _model_parallel(actor) or _packed_policy_for(bindings) is not None:
+        if _model_parallel(actor) or _packed_policy_for(actor, bindings) is not None:
             tensors = _collective_export(actor, bindings)
         else:
             masters = full_masters(getattr(actor, "optimizer", None), params)
@@ -851,10 +881,12 @@ def _collective_export(actor: Any, bindings: Sequence[AdapterBinding]) -> dict[s
     names: set[str] = set()
     params = [b.parameter for b in bindings]
     opt = getattr(actor, "optimizer", None)
+    policy = _packed_policy_for(actor, bindings)
+    if policy is not None:
+        _require_packed_export_fits(policy, bindings)
     # DistributedOptimizer (e.g. EP>1 with dense DP>1): no main_param on the
     # parameter; gather the full FP32 master within each owning leaf's DP group.
     masters = full_masters(opt, params) if needs_gather(opt, params) else None
-    policy = _packed_policy_for(bindings)
     if policy is not None:
         # Frozen slots are checked once in the packed masters; the per-expert
         # copies of frozen experts are dropped from the export below.
@@ -992,7 +1024,7 @@ def _apply_state(
         raise StatePluginError("Flash-Next native LoRA has no apply_state contract (no-sync only)")
     bindings = adapter_bindings(actor)
     params = [b.parameter for b in bindings]
-    policy = _packed_policy_for(bindings)
+    policy = _packed_policy_for(actor, bindings)
     unpacked = [b for b in bindings if not b.packed]
     packed = [b for b in bindings if b.packed]
     local = {b.name for b in unpacked}
@@ -1023,8 +1055,6 @@ def _apply_state(
         scheduler_samples = align_scheduler(actor, local_step)
         opt = getattr(actor, "optimizer", None)
         sharded = write_masters(opt, [b.parameter for b in unpacked], [targets[b.name] for b in unpacked])
-        if sharded and packed:
-            raise StatePluginError("packed adapters need complete FP32 masters, not a distributed optimizer")
         for master, writes in slot_writes:
             master[writes.frozen].zero_()
             for slot, value in writes.updates:

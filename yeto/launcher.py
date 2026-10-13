@@ -2608,7 +2608,6 @@ def _prepare_rl_args(
             sync_preset=args.rl_sync_preset,
             model_kind=resolve_model_kind(args.model, args.model_kind),
             tuning=args.tuning,
-            model_recipe=getattr(args, "rl_model_recipe", "generic"),
             expert_full_count=getattr(args, "expert_full_count", 0) or 0,
             rollout_num_gpus=getattr(args, "rollout_num_gpus", None),
             placement=getattr(args, "rl_placement", "colocated"),

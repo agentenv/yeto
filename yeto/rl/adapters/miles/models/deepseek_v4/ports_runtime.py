@@ -46,7 +46,7 @@ _WEIGHT_ITERATOR = "miles.backends.megatron_utils.update_weight.hf_weight_iterat
 
 
 def _install_once(module: ModuleType, patch) -> None:
-    marker = f"_yeto_dsv4_ports{patch.__name__}_installed"
+    marker = f"_yeto_dsv4_ports__{patch.__name__.lstrip('_')}__installed"
     if getattr(module, marker, False):
         return
     patch(module)

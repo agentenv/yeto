@@ -774,7 +774,6 @@ def _require_ports_supported(args, extra_argv: Sequence[str] = ()) -> None:
     require_ports_supported(
         sync_preset=getattr(args, "sync_preset", "strict-avg"),
         parameter_mode=getattr(args, "parameter_mode", "lora"),
-        model_recipe=getattr(args, "rl_model_recipe", "generic"),
         expert_full_count=getattr(args, "expert_full_count", 0) or 0,
         rollout_num_gpus=getattr(args, "rollout_num_gpus", None),
         placement=getattr(args, "rl_placement", "colocated"),
