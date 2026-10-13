@@ -457,6 +457,8 @@ def _retained_replay(retained: Any, observed: Any | None) -> Any | None:
 
 # LEAVE reason of a clean finish (P5 code 0, FINISHED).  P5 owns the full code
 # table; this session only forwards the code it is closed with.
+# TODO(P5 rl-island-graceful-leave): once yeto/rl/engine/leave_reason.py lands,
+# replace this constant with LeaveReason.FINISHED (an IntEnum equal to 0).
 REASON_FINISHED = 0
 
 

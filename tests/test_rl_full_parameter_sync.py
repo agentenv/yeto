@@ -595,3 +595,10 @@ def test_miles_build_sync_selects_full_parameter_sync_for_a_full_parameter_islan
         FullParameterSyncConfig(
             (_role_stream_config("actor", 30100), _role_stream_config("critic", 30101)), sweep=True
         )
+
+
+def test_close_defaults_to_the_p5_finished_code():
+    import inspect
+
+    # P5 code table: 0 is FINISHED (LeaveReason.FINISHED once P5 merges).
+    assert inspect.signature(FullParameterSync.close).parameters["reason"].default == 0
