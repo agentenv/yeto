@@ -36,9 +36,12 @@ def test_dry_run_ppo_has_two_syncers():
 
     args = _two_island_args(PPO)
     plan = launcher.dry_run_plan(args)
-    critic = plan["critic_syncer"]
+    actor, critic = plan["role_syncers"]
+    assert (actor["role"], critic["role"]) == ("actor", "critic")
+    assert actor["port"] == launcher.SYNCER_PORT
     assert critic["port"] == launcher.CRITIC_SYNCER_PORT != launcher.SYNCER_PORT
     assert critic["layout"] == "critic_layout_hash"
+    assert critic["address"] == "$CRITIC_SYNCER_ADDR"
     command = critic["command"]
     assert f"--port {launcher.CRITIC_SYNCER_PORT}" in command
     assert f"--port {launcher.SYNCER_PORT}" not in command
@@ -51,7 +54,7 @@ def test_dry_run_ppo_has_two_syncers():
     assert full.index(f"--port {launcher.CRITIC_SYNCER_PORT}") < full.index(f"--port {launcher.SYNCER_PORT}")
     assert full.count("~/yeto-output/yeto-state.ckpt") == 2  # actor: path + resume test
     assert launcher.syncer_ports(args) == [launcher.SYNCER_PORT, launcher.CRITIC_SYNCER_PORT]
-    snapshot = {k: plan[k] for k in ("islands", "syncer", "outer_sync", "critic_syncer")}
+    snapshot = {k: plan[k] for k in ("islands", "syncer", "outer_sync", "role_syncers")}
     assert json.loads(json.dumps(snapshot)) == snapshot
 
 
@@ -60,7 +63,7 @@ def test_critic_free_plan_and_syncer_unchanged():
 
     args = _two_island_args()
     plan = launcher.dry_run_plan(args)
-    assert "critic_syncer" not in plan
+    assert [syncer["role"] for syncer in plan["role_syncers"]] == ["actor"]
     assert all("--critic-syncer" not in i["learner_command"] for i in plan["island_requests"])
     command = launcher.syncer_command(args, 2)
     assert str(launcher.CRITIC_SYNCER_PORT) not in command and "critic" not in command

@@ -559,6 +559,26 @@ SYNCER_EVENT_TAPE = "~/yeto-tape.jsonl"
 RL_SYNCER_EVENT_TAPE = "~/yeto-output/yeto-tape.jsonl"
 RL_CRITIC_SYNCER_EVENT_TAPE = "~/yeto-output/yeto-critic-tape.jsonl"
 RL_CRITIC_SYNCER_CHECKPOINT = "~/yeto-output/yeto-critic-state.ckpt"
+RL_SYNCER_CHECKPOINT = "~/yeto-output/yeto-state.ckpt"
+
+
+@dataclass(frozen=True)
+class RoleSyncer:
+    """Where one trainable role's RL syncer listens and keeps its state (P0-D8)."""
+
+    role: str
+    port: int
+    address: str  # the island-side env reference
+    checkpoint: str
+    event_tape: str
+
+
+ROLE_SYNCERS = {
+    "actor": RoleSyncer("actor", SYNCER_PORT, "$SYNCER_ADDR", RL_SYNCER_CHECKPOINT,
+                        RL_SYNCER_EVENT_TAPE),
+    "critic": RoleSyncer("critic", CRITIC_SYNCER_PORT, "$CRITIC_SYNCER_ADDR",
+                         RL_CRITIC_SYNCER_CHECKPOINT, RL_CRITIC_SYNCER_EVENT_TAPE),
+}
 
 
 def rl_needs_critic(args) -> bool:
@@ -585,16 +605,21 @@ def critic_syncer_address(syncer_addr: str) -> str:
     return f"{host}:{CRITIC_SYNCER_PORT}"
 
 
-def critic_syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> str:
-    """The critic channel: the same strict RL syncer invocation as the actor's
-    (rounds, quorum, outer optimizer), with its own port, checkpoint and tape."""
-    return (
-        syncer_command(args, num_learners, binary=binary, critic=False)
-        .replace(f" --port {SYNCER_PORT}", f" --port {CRITIC_SYNCER_PORT}", 1)
-        .replace("~/yeto-output/yeto-state.ckpt", RL_CRITIC_SYNCER_CHECKPOINT)
-        .replace(f" --event-tape {RL_SYNCER_EVENT_TAPE}", f" --event-tape {RL_CRITIC_SYNCER_EVENT_TAPE}", 1)
-        .replace("mkdir -p ~/yeto-output && ", "", 1)
-    )
+def rl_trainable_roles(args) -> tuple[str, ...]:
+    """The roles the prepared algorithm trains, actor first; one syncer each."""
+    return ("actor", "critic") if rl_needs_critic(args) else ("actor",)
+
+
+def rl_role_syncers(args) -> tuple[RoleSyncer, ...]:
+    return tuple(ROLE_SYNCERS[role] for role in rl_trainable_roles(args))
+
+
+def role_syncer_commands(args, num_learners: int,
+                         binary: str = "~/yeto-syncer") -> dict[str, str]:
+    """One strict RL syncer invocation per trainable role (rounds, quorum and
+    outer optimizer shared), each on its own port, checkpoint and tape."""
+    return {syncer.role: _rl_role_syncer_command(args, num_learners, binary, syncer)
+            for syncer in rl_role_syncers(args)}
 
 
 def syncer_event_tape(args) -> str:
@@ -841,47 +866,51 @@ def _final_grace_s(args, soft_deadline_s: int) -> int:
     return value
 
 
-def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer",
-                   critic: bool | None = None) -> str:
+def _rl_role_syncer_command(args, num_learners: int, binary: str,
+                            syncer: RoleSyncer) -> str:
+    """One role's strict RL syncer; --resume only once its checkpoint exists."""
+    total_steps = getattr(args, "rl_total_fragment_steps", args.total_steps)
+    return (
+        f"{binary}"
+        f" --port {syncer.port}"
+        f" --learners {num_learners}"
+        f" --quorum {args.quorum}"
+        f" --grace-ms {args.grace_ms}"
+        f" --grace-gamma {args.grace_gamma}"
+        f" --grace-tau {args.grace_tau}"
+        f" --pipeline {args.pipeline}"
+        f" --sync-interval-steps {args.sync_interval_steps}"
+        f" --delta-correction {args.delta_correction}"
+        f" --total-steps {total_steps}"
+        f"{_syncer_quorum_timeout(args)}"
+        f"{_syncer_island_scheduling(args)}"
+        f"{_syncer_expected_contract(args)}"
+        f" --outer-lr {args.outer_lr}"
+        f" --outer-momentum {args.outer_momentum}"
+        " --max-base-lag 0 --learner-weight equal"
+        f" --checkpoint-path {syncer.checkpoint}"
+        " --checkpoint-every 1"
+        f" {_resume_if_exists(syncer.checkpoint)}"
+        f" --event-tape {syncer.event_tape}"
+    )
+
+
+def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> str:
     """The syncer invocation shared by the syncer-cluster task (local
     controller mode) and the head-node subprocess (head controller mode).
     --resume makes any restart pick up from the on-disk checkpoint.
 
-    A critic algorithm (4.2.1) backgrounds the critic syncer first; the actor
-    syncer stays the foreground process (the job's health)."""
+    RL runs one syncer per trainable role (P0-D8): every role after the
+    actor is backgrounded first; the actor syncer stays the foreground
+    process (the job's health)."""
     if getattr(args, "training_mode", "sft") == "rl":
-        total_steps = getattr(args, "rl_total_fragment_steps", args.total_steps)
-        if critic is None:
-            critic = rl_needs_critic(args)
-        critic_prefix = (
-            f"{{ {critic_syncer_command(args, num_learners, binary=binary)} & }} && "
-            if critic else ""
-        )
+        commands = role_syncer_commands(args, num_learners, binary=binary)
+        actor = commands.pop("actor")
         return (
             "mkdir -p ~/yeto-output && "
             + _syncer_island_hmac_export(args)
-            + critic_prefix
-            + f"{binary}"
-            f" --port {SYNCER_PORT}"
-            f" --learners {num_learners}"
-            f" --quorum {args.quorum}"
-            f" --grace-ms {args.grace_ms}"
-            f" --grace-gamma {args.grace_gamma}"
-            f" --grace-tau {args.grace_tau}"
-            f" --pipeline {args.pipeline}"
-            f" --sync-interval-steps {args.sync_interval_steps}"
-            f" --delta-correction {args.delta_correction}"
-            f" --total-steps {total_steps}"
-            f"{_syncer_quorum_timeout(args)}"
-            f"{_syncer_island_scheduling(args)}"
-            f"{_syncer_expected_contract(args)}"
-            f" --outer-lr {args.outer_lr}"
-            f" --outer-momentum {args.outer_momentum}"
-            " --max-base-lag 0 --learner-weight equal"
-            " --checkpoint-path ~/yeto-output/yeto-state.ckpt"
-            " --checkpoint-every 1"
-            f" {_resume_if_exists('~/yeto-output/yeto-state.ckpt')}"
-            f" --event-tape {RL_SYNCER_EVENT_TAPE}"
+            + "".join(f"{{ {command} & }} && " for command in commands.values())
+            + actor
         )
     if island_scheduling_mode(args) != "legacy":
         raise ValueError("--rl-island-scheduling elastic only applies to --training-mode rl")
@@ -995,7 +1024,7 @@ def syncer_ports(args) -> list[int] | None:
     """`ports=` for the syncer/head resources; None where sky can't open them."""
     if syncer_cloud(args) in NO_OPEN_PORTS_CLOUDS:
         return None
-    return [SYNCER_PORT, CRITIC_SYNCER_PORT] if rl_needs_critic(args) else [SYNCER_PORT]
+    return [syncer.port for syncer in rl_role_syncers(args)]
 
 
 def ufw_setup(port: int = SYNCER_PORT) -> str:
@@ -1065,7 +1094,7 @@ def probe_syncer_ports(args, host: str, *, probe=None) -> list[str]:
     connection. A pass here does not prove the islands' egress (Modal), only
     that the head side is open."""
     probe = probe or tcp_probe
-    ports = [SYNCER_PORT, CRITIC_SYNCER_PORT] if rl_needs_critic(args) else [SYNCER_PORT]
+    ports = [syncer.port for syncer in rl_role_syncers(args)]
     details = []
     for port in ports:
         ok, detail = probe(host, port)
@@ -7932,6 +7961,22 @@ def _no_sync_events_dir(args) -> Path:
     return runs.run_dir(args.cluster_prefix) / "events"
 
 
+def _dry_run_role_syncers(args, num_learners: int) -> list[dict]:
+    commands = role_syncer_commands(args, num_learners)
+    return [
+        {
+            "role": syncer.role,
+            "port": syncer.port,
+            "address": syncer.address,
+            "layout": f"{syncer.role}_layout_hash",
+            "command": commands[syncer.role],
+            "checkpoint": syncer.checkpoint,
+            "event_tape": syncer.event_tape,
+        }
+        for syncer in rl_role_syncers(args)
+    ]
+
+
 def dry_run_plan(args) -> dict:
     """``yeto launch --dry-run``: what a launch would request, creating nothing.
 
@@ -7997,15 +8042,9 @@ def dry_run_plan(args) -> dict:
         "external_learners": external,
         "total_gpus": sum(s.total_gpus for s in specs),
         "syncer": None if no_sync else ("head VM" if head else f"{args.cluster_prefix}-syncer"),
-        # 4.2.1: present only for a critic algorithm, so every critic-free plan is unchanged
-        **({"critic_syncer": {
-            "port": CRITIC_SYNCER_PORT,
-            "address": "$CRITIC_SYNCER_ADDR",
-            "layout": "critic_layout_hash",
-            "command": critic_syncer_command(args, len(specs) + external),
-            "checkpoint": RL_CRITIC_SYNCER_CHECKPOINT,
-            "event_tape": RL_CRITIC_SYNCER_EVENT_TAPE,
-        }} if rl and not no_sync and rl_needs_critic(args) else {}),
+        # P0-D8: one syncer per trainable role (actor first); none without outer sync
+        "role_syncers": [] if not rl or no_sync else _dry_run_role_syncers(
+            args, len(specs) + external),
         "outer_sync": not no_sync,
         "algorithm_spec_sha256": getattr(args, "rl_expected_algorithm_sha256", None),
         "algorithm_spec": getattr(args, "rl_algorithm_spec_json", None),
