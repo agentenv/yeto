@@ -1,4 +1,4 @@
-"""Launcher end-to-end wiring of --rl-sync-preset dense-full (P0-1.7b.1-Q6/Q7). No Ray.
+"""Launcher end-to-end wiring of --rl-sync-preset full-parameter (P0-1.7b.1-Q6/Q7). No Ray.
 
 The dense strict sweep is launched like any ports island on a fixed
 partition; the syncer adds the policy-sweep profile and the launcher sends
@@ -15,14 +15,15 @@ from test_rl_algorithm_provenance import _fake_sky, _launcher_args, _no_modal_li
 
 LAYOUT = "e" * 64
 TWO_ISLANDS = "modal:2xh100,modal:2xh100"
-DENSE = ("--rl-sync-preset", "dense-full", "--rl-placement", "fixed-partition",
+DENSE = ("--rl-sync-preset", "full-parameter", "--rl-placement", "fixed-partition",
          "--rl-rollout-gpus", "1", "--rl-parameter-layout-sha256", LAYOUT, "--fragments", "4")
 
 
-def _dense_plan(extra=()):
+def _dense_plan(extra=(), preset="full-parameter"):
     from yeto.launcher import _prepare_rl_args, dry_run_plan
 
-    args = _launcher_args("ports", DENSE + tuple(extra), gpu=TWO_ISLANDS)
+    flags = tuple(preset if value == "full-parameter" else value for value in DENSE)
+    args = _launcher_args("ports", flags + tuple(extra), gpu=TWO_ISLANDS)
     args.controller = "local"
     _prepare_rl_args(args)
     return args, dry_run_plan(args)
@@ -59,7 +60,7 @@ def test_dense_island_command_carries_layout_roster_and_profile_hash():
     profile_hash = launcher.rl_syncer_profile(args, 2).sha256
     for island in plan["island_requests"]:
         command = island["learner_command"]
-        assert _flag(command, "--sync-preset") == "dense-full"
+        assert _flag(command, "--sync-preset") == "full-parameter"
         assert _flag(command, "--parameter-mode") == "full"
         assert _flag(command, "--parameter-layout-sha256") == LAYOUT
         assert _flag(command, "--num-learners") == "2"
@@ -99,11 +100,22 @@ def test_dense_full_refusals(extra, message, monkeypatch):
         _prepare_rl_args(args)
 
 
+def test_dense_full_is_an_alias_of_the_full_parameter_preset():
+    # P0-1.7b.2-Q2: the old name still parses, on both layers, to the new one.
+    args, plan = _dense_plan(preset="dense-full")
+    assert args.rl_sync_preset == "full-parameter"
+    command = plan["island_requests"][0]["learner_command"]
+    assert _flag(command, "--sync-preset") == "full-parameter"
+    from yeto.rl.engine.selection import canonical_sync_preset
+
+    assert canonical_sync_preset("dense-full") == "full-parameter"
+
+
 def test_layout_hash_only_with_dense_full():
     from yeto.launcher import _prepare_rl_args
 
     args = _launcher_args("ports", ("--rl-parameter-layout-sha256", LAYOUT))
-    with pytest.raises(ValueError, match="only applies to --rl-sync-preset dense-full"):
+    with pytest.raises(ValueError, match="only applies to --rl-sync-preset full-parameter"):
         _prepare_rl_args(args)
 
 
@@ -115,13 +127,13 @@ def test_island_entry_accepts_the_dense_island_command():
     tokens = shlex.split(command.split("-m yeto.rl.adapters.miles.island_entry", 1)[1])
     tokens = [{"$SYNCER_ADDR": "127.0.0.1:29400", "$LEARNER_ID": "1"}.get(t, t) for t in tokens]
     parsed = island_entry.parse_args(tokens)
-    assert (parsed.parameter_mode, parsed.sync_preset) == ("full", "dense-full")
+    assert (parsed.parameter_mode, parsed.sync_preset) == ("full", "full-parameter")
     assert (parsed.num_learners, parsed.learner_id) == (2, 1)
     island_entry._check_dense_full_sweep(parsed, rl_engine="ports", yeto_policy_sync=True)
 
 
 EXPERT_FULL = (
-    "--rl-sync-preset", "dense-full", "--rl-placement", "fixed-partition",
+    "--rl-sync-preset", "full-parameter", "--rl-placement", "fixed-partition",
     "--rl-rollout-gpus", "8", "--rl-parameter-layout-sha256", LAYOUT, "--fragments", "4",
     "--rl-model-recipe", "deepseek-v4-flash", "--lora-targets", "attention",
     "--expert-full-count", "4", "--expert-full-lr", "1e-06",
@@ -144,7 +156,7 @@ def test_deepseek_v4_expert_full_island_is_the_lora_hybrid_on_the_dense_sweep(mo
     profile_hash = launcher.rl_syncer_profile(args, 2).sha256
     for island in plan["island_requests"]:
         command = island["learner_command"]
-        assert _flag(command, "--sync-preset") == "dense-full"
+        assert _flag(command, "--sync-preset") == "full-parameter"
         assert "--parameter-mode" not in command
         assert _flag(command, "--lora-targets") == "attention"
         assert _flag(command, "--expert-full-count") == "4"
@@ -165,5 +177,5 @@ def test_deepseek_v4_expert_full_island_is_the_lora_hybrid_on_the_dense_sweep(mo
     from yeto.rl.adapters.miles import island_entry
 
     parsed = island_entry.parse_args(tokens)
-    assert (parsed.parameter_mode, parsed.sync_preset, parsed.expert_full_count) == ("lora", "dense-full", 4)
+    assert (parsed.parameter_mode, parsed.sync_preset, parsed.expert_full_count) == ("lora", "full-parameter", 4)
     island_entry._check_dense_full_sweep(parsed, rl_engine="ports", yeto_policy_sync=True)

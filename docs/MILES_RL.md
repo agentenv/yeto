@@ -279,7 +279,7 @@ on Miles' implicit default, whose horizon is
 
 | Preset | `--lr-decay-style` | `--lr-decay-iters` | `--lr-warmup-iters` | `--min-lr` |
 |--------|--------------------|--------------------|---------------------|------------|
-| `strict-avg`, `dense-full` | `linear` | `global_rounds x optimizer_steps` | `0` | `0` |
+| `strict-avg`, `full-parameter` (alias `dense-full`) | `linear` | `global_rounds x optimizer_steps` | `0` | `0` |
 | `decoupled` | `constant` | `global_rounds x optimizer_steps` (unused; satisfies Megatron's `lr_decay_steps > 0`) | `0` | `0` |
 | eval-only | not passed | | | |
 

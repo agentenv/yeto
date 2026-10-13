@@ -18,11 +18,22 @@ from collections.abc import Sequence
 RL_ENGINES = ("legacy", "ports")
 DEFAULT_RL_ENGINE = "ports"
 PORTS_SYNC_PRESETS = frozenset({"strict-avg", "decoupled"})
-# P0-D8: one full-parameter sync; the preset only picks its profile (dense
-# strict sweep, or SAO's actor + critic streaming).
-DENSE_FULL_SYNC_PRESET = "dense-full"
+# P0-D8: one full-parameter sync; the preset only picks its profile (the
+# strict whole-model sweep, or SAO's actor + critic streaming).
+# ``full-parameter`` names the transport (every parameter of the synced state
+# is swept), not which parameters train: DeepSeek V4 expert-full rides it too
+# (P0-1.7b.2-Q2).  ``dense-full`` is its old name, kept as an alias.
+FULL_PARAMETER_SYNC_PRESET = "full-parameter"
 SAO_STREAMING_SYNC_PRESET = "sao-streaming-full"
-FULL_PARAMETER_SYNC_PRESETS = frozenset({DENSE_FULL_SYNC_PRESET, SAO_STREAMING_SYNC_PRESET})
+FULL_PARAMETER_SYNC_PRESETS = frozenset({FULL_PARAMETER_SYNC_PRESET, SAO_STREAMING_SYNC_PRESET})
+SYNC_PRESETS = ("strict-avg", "decoupled", FULL_PARAMETER_SYNC_PRESET, SAO_STREAMING_SYNC_PRESET)
+SYNC_PRESET_ALIASES = {"dense-full": FULL_PARAMETER_SYNC_PRESET}
+
+
+def canonical_sync_preset(value: str) -> str:
+    """argparse type for the sync preset flags: resolve an alias to its preset."""
+
+    return SYNC_PRESET_ALIASES.get(value, value)
 
 
 class UnsupportedPortsCombination(ValueError):
@@ -54,6 +65,7 @@ def ports_rejections(
     """Reasons the combination is outside the R0 ports matrix (empty = OK)."""
 
     reasons: list[str] = []
+    sync_preset = canonical_sync_preset(sync_preset)
     facts = _extra_argv_facts(extra_argv)
     if model_kind != "causal-lm":
         reasons.append(f"model kind {model_kind!r} (ports supports causal LMs only)")
@@ -72,8 +84,8 @@ def ports_rejections(
     # P0 1.7b.2/1.7b.2b: the DeepSeek V4 recipe, its clone-only expert LoRA
     # and expert-full run on ports; expert-full is a LoRA hybrid on the
     # full-parameter sync.
-    if int(expert_full_count or 0) > 0 and sync_preset != "dense-full":
-        reasons.append("expert-full tuning without --rl-sync-preset dense-full (the full-parameter sync)")
+    if int(expert_full_count or 0) > 0 and sync_preset != FULL_PARAMETER_SYNC_PRESET:
+        reasons.append(f"expert-full tuning without --rl-sync-preset {FULL_PARAMETER_SYNC_PRESET}")
     estimator = facts.advantage_estimator or advantage_estimator
     # rl-algo-critic-family 3.1: PPO (shared actor/critic, Miles derives
     # use_critic from the estimator) is not routed to legacy any more; the

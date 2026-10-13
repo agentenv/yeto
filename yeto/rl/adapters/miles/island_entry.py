@@ -46,15 +46,22 @@ def parse_args(argv=None):
         args.lora_r is None or args.lora_targets is None
     ):
         parser.error("LoRA mode requires --lora-r and --lora-targets")
-    from yeto.rl.engine.selection import FULL_PARAMETER_SYNC_PRESETS, SAO_STREAMING_SYNC_PRESET
+    from yeto.rl.engine.selection import (
+        FULL_PARAMETER_SYNC_PRESET,
+        FULL_PARAMETER_SYNC_PRESETS,
+        SAO_STREAMING_SYNC_PRESET,
+    )
 
     if args.parameter_mode == "full" and args.sync_preset not in FULL_PARAMETER_SYNC_PRESETS:
         parser.error(
             "--parameter-mode full requires a full-parameter --sync-preset "
             f"({', '.join(sorted(FULL_PARAMETER_SYNC_PRESETS))})"
         )
-    if args.sync_preset == "dense-full" and not _trains_base_parameters(args):
-        parser.error("--sync-preset dense-full requires --parameter-mode full or --expert-full-count")
+    if args.sync_preset == FULL_PARAMETER_SYNC_PRESET and not _trains_base_parameters(args):
+        parser.error(
+            f"--sync-preset {FULL_PARAMETER_SYNC_PRESET} requires --parameter-mode full "
+            "or --expert-full-count"
+        )
     if args.sync_preset == SAO_STREAMING_SYNC_PRESET and args.parameter_mode != "full":
         parser.error("--sync-preset sao-streaming-full requires --parameter-mode full")
     sao_runtime = (
@@ -581,11 +588,11 @@ def _full_parameter_mode(args, sync_preset: str) -> bool:
     """True for a full-parameter island.
 
     Full parameter mode needs a full-parameter preset, and a full-parameter
-    preset needs full parameter mode, except that the dense-full sweep also
+    preset needs full parameter mode, except that the full-parameter sweep also
     carries the DeepSeek V4 expert-full LoRA hybrid (P0 1.7b.2).
     """
 
-    from yeto.rl.engine.selection import DENSE_FULL_SYNC_PRESET, FULL_PARAMETER_SYNC_PRESETS
+    from yeto.rl.engine.selection import FULL_PARAMETER_SYNC_PRESET, FULL_PARAMETER_SYNC_PRESETS
 
     full_mode = getattr(args, "parameter_mode", "lora") == "full"
     full_preset = sync_preset in FULL_PARAMETER_SYNC_PRESETS
@@ -593,7 +600,7 @@ def _full_parameter_mode(args, sync_preset: str) -> bool:
         raise ValueError("full parameter mode needs a full-parameter sync preset")
     if full_preset and not _trains_base_parameters(args):
         raise ValueError(f"the {sync_preset} sync needs full parameter mode or expert-full tuning")
-    if full_preset and not full_mode and sync_preset != DENSE_FULL_SYNC_PRESET:
+    if full_preset and not full_mode and sync_preset != FULL_PARAMETER_SYNC_PRESET:
         raise ValueError(f"the {sync_preset} sync needs full parameter mode")
     return full_mode
 
@@ -2153,7 +2160,7 @@ def run_miles(
 
         require_run_plugin()
     from yeto.rl.engine.selection import (
-        DENSE_FULL_SYNC_PRESET,
+        FULL_PARAMETER_SYNC_PRESET,
         FULL_PARAMETER_SYNC_PRESETS,
         SAO_STREAMING_SYNC_PRESET,
     )
@@ -2162,11 +2169,11 @@ def run_miles(
     sync_preset = getattr(args, "sync_preset", "strict-avg")
     full_parameter = _full_parameter_mode(args, sync_preset)
     # P0-D8: every full-parameter preset runs the one full-parameter sync; the
-    # dense-full strict sweep also carries DeepSeek V4 expert-full (P0 1.7b.2).
+    # full-parameter strict sweep also carries DeepSeek V4 expert-full (P0 1.7b.2).
     full_parameter_sync = sync_preset in FULL_PARAMETER_SYNC_PRESETS
-    dense_full = sync_preset == DENSE_FULL_SYNC_PRESET
+    dense_full = sync_preset == FULL_PARAMETER_SYNC_PRESET
     if rl_engine == "ports" and _trains_base_parameters(args) and not full_parameter_sync:
-        raise ValueError("ports expert-full tuning needs the dense-full sync")
+        raise ValueError(f"expert-full tuning needs the {FULL_PARAMETER_SYNC_PRESET} sync")
     sao_runtime = None
     if dense_full:
         _check_dense_full_sweep(args, rl_engine=rl_engine, yeto_policy_sync=yeto_policy_sync)

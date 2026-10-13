@@ -46,7 +46,7 @@ def test_sao_runs_on_ports(kwargs):
 def test_deepseek_v4_expert_full_runs_on_the_full_parameter_sync():
     # P0 1.7b.2: attention LoRA + clone experts as one full-parameter LoRA hybrid.
     assert ports_rejections(
-        sync_preset="dense-full",
+        sync_preset="full-parameter",
         expert_full_count=4,
     ) == []
 
@@ -61,11 +61,11 @@ def test_ppo_is_not_routed_to_legacy():
 @pytest.mark.parametrize(
     "kwargs, reason",
     [
-        (dict(sync_preset="dense-full", parameter_mode="full", island_scheduling="elastic"), "elastic"),
+        (dict(sync_preset="full-parameter", parameter_mode="full", island_scheduling="elastic"), "elastic"),
         (dict(sync_preset="sao-streaming-full", parameter_mode="full",
               island_scheduling="elastic"), "elastic"),
         (dict(expert_full_count=4), "expert-full"),
-        (dict(sync_preset="dense-full", expert_full_count=4, island_scheduling="elastic"), "elastic"),
+        (dict(sync_preset="full-parameter", expert_full_count=4, island_scheduling="elastic"), "elastic"),
         (dict(use_critic=True), "critic"),
         (dict(extra_argv=("--use-critic",)), "critic"),
         (dict(extra_argv=("--advantage-estimator", "gspo")), "non-GRPO"),
@@ -705,7 +705,7 @@ def test_island_post_cmd_runs_after_the_learner_and_keeps_its_exit_code(monkeypa
 
 @pytest.mark.parametrize(
     "kwargs",
-    [dict(sync_preset="dense-full", parameter_mode="full"), dict(tuning="full", parameter_mode="full")],
+    [dict(sync_preset="full-parameter", parameter_mode="full"), dict(tuning="full", parameter_mode="full")],
 )
 def test_full_parameter_training_runs_on_ports(kwargs):
     """P0-D8: full-parameter training has one ports sync (FullParameterSync)."""

@@ -34,6 +34,7 @@ from types import MappingProxyType
 from typing import Any, Protocol
 
 from yeto.rl.engine.backends import DEFAULT_BACKEND, KNOWN_BACKENDS
+from yeto.rl.engine.selection import SYNC_PRESETS, canonical_sync_preset
 
 CLI = "cli"
 ISLAND = "island"
@@ -760,9 +761,11 @@ _SYNC = (
     cli_flag("--local-rl-rounds-per-sync", type=int, default=1),
     cli_flag(
         "--rl-sync-preset",
-        choices=["strict-avg", "decoupled", "dense-full", "sao-streaming-full"],
+        choices=SYNC_PRESETS,
+        type=canonical_sync_preset,
         default="strict-avg",
-        help="dense-full: full-parameter GRPO as strict whole-model fragment sweeps "
+        help="full-parameter (alias dense-full): full-parameter GRPO as strict "
+        "whole-model fragment sweeps "
         "(ports engine, --rl-placement fixed-partition, --rl-parameter-layout-sha256); "
         "with --expert-full-count the swept state is the DeepSeek V4 LoRA hybrid; "
         "sao-streaming-full: full-parameter SAO, actor and critic streams "

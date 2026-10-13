@@ -333,7 +333,7 @@ def resolve_lr_schedule(
     ``auto`` (default) keeps the mode rule: decoupled and elastic islands run
     until the syncer stops them (an elastic island that re-JOINs needs local
     rounds past ``global_rounds``; S17 N5 a73ab1b2), so any finite linear
-    horizon can reach zero mid-run -> constant; strict-avg / dense-full /
+    horizon can reach zero mid-run -> constant; strict-avg / full-parameter /
     single island -> linear over ``global_rounds * optimizer_steps``.
     ``constant`` holds the LR in every mode (e.g. a single island compared
     with a fixed-LR baseline; S17 N4 had to approximate it with a 20000-step
@@ -357,7 +357,7 @@ def resolve_lr_schedule(
         # decay_iters only satisfies Megatron's ``lr_decay_steps > 0``; a
         # constant schedule never reads it.
         return LrSchedule("constant", horizon)
-    # strict-avg / dense-full: one local round (optimizer_steps steps) per
+    # strict-avg / full-parameter: one local round (optimizer_steps steps) per
     # global round.  The explicit linear horizon equals Miles' implicit
     # ``num_rollout * rollout_batch_size * n_samples / global_batch`` only
     # when every round is exactly ``optimizer_steps`` optimizer steps.

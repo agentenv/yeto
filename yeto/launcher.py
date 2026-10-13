@@ -39,6 +39,7 @@ from . import delivery
 from .gpu_spec import ClusterSpec, parse_gpu_spec
 from .models import MODEL_WEIGHT_GB
 from .rl.engine.run_flags import CLI, rl_forward_pairs, rl_option, rl_option_pairs
+from .rl.engine.selection import FULL_PARAMETER_SYNC_PRESET, SAO_STREAMING_SYNC_PRESET
 
 SYNCER_PORT = 29400
 # rl-algo-critic-family 4.2.1 (design D4 plan a): a critic algorithm runs a
@@ -668,18 +669,18 @@ def _syncer_quorum_timeout(args) -> str:
 
 def rl_dense_sweep(args) -> bool:
     return (getattr(args, "training_mode", "sft") == "rl"
-            and getattr(args, "rl_sync_preset", None) == "dense-full")
+            and getattr(args, "rl_sync_preset", None) == FULL_PARAMETER_SYNC_PRESET)
 
 
 def rl_sao_streaming(args) -> bool:
     return (getattr(args, "training_mode", "sft") == "rl"
-            and getattr(args, "rl_sync_preset", None) == "sao-streaming-full")
+            and getattr(args, "rl_sync_preset", None) == SAO_STREAMING_SYNC_PRESET)
 
 
 def _syncer_profile_binding(args) -> str:
     """Full-parameter presets bind every HELLO to the syncer's semantic profile.
 
-    dense-full adds strict P-fragment policy sweeps; sao-streaming-full adds the
+    full-parameter adds strict P-fragment policy sweeps; sao-streaming-full adds the
     frozen contract's timeouts and the publishable final checkpoint."""
     if rl_dense_sweep(args):
         return f" --policy-sweep-fragments {args.fragments} --require-profile-binding"
@@ -2498,7 +2499,7 @@ def sao_contract_mounts(args, learner_id: int) -> dict[str, str]:
 
 
 def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
-    """dense-full (P0-D8): one actor role swept as whole-model fragments.
+    """full-parameter preset (P0-D8): one actor role swept as whole-model fragments.
 
     The syncer's strict policy-sweep profile fixes its merge semantics
     (every island per round, no grace, serial rounds, plain averaging);
@@ -2519,9 +2520,9 @@ def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
     if island_scheduling_mode(args) != "legacy":
         problems.append("--rl-island-scheduling legacy (no fragment frames in elastic mode)")
     if rl_needs_critic(args):
-        problems.append("a critic-free algorithm (dense-full trains the actor only)")
+        problems.append("a critic-free algorithm (the strict sweep trains the actor only)")
     if problems:
-        raise ValueError("--rl-sync-preset dense-full requires " + "; ".join(problems))
+        raise ValueError(f"--rl-sync-preset {FULL_PARAMETER_SYNC_PRESET} requires " + "; ".join(problems))
     args.quorum = num_islands
     args.grace_ms = 0
     args.pipeline = 1
@@ -2639,7 +2640,7 @@ def _prepare_rl_args(
         )
     if not args.inner_lr > 0:
         raise ValueError(f"RL requires --inner-lr > 0 (got {args.inner_lr})")
-    if args.rl_sync_preset in ("strict-avg", "dense-full"):
+    if args.rl_sync_preset in ("strict-avg", FULL_PARAMETER_SYNC_PRESET):
         if args.local_rl_rounds_per_sync != 1:
             raise ValueError(f"--rl-sync-preset {args.rl_sync_preset} requires "
                              "--local-rl-rounds-per-sync 1 (strict sweep H=1)")
@@ -3046,9 +3047,10 @@ def _prepare_rl_args(
     if getattr(args, "learner_image", None) is not None:
         raise ValueError("RL uses digest-pinned --rl-image, not --learner-image")
     args.rl_total_fragment_steps = args.total_steps
-    if args.rl_sync_preset != "dense-full" and getattr(args, "rl_parameter_layout_sha256", None):
-        raise ValueError("--rl-parameter-layout-sha256 only applies to --rl-sync-preset dense-full")
-    if args.rl_sync_preset != "sao-streaming-full" and getattr(args, "rl_sao_contracts", None):
+    if args.rl_sync_preset != FULL_PARAMETER_SYNC_PRESET and getattr(args, "rl_parameter_layout_sha256", None):
+        raise ValueError("--rl-parameter-layout-sha256 only applies to "
+                         f"--rl-sync-preset {FULL_PARAMETER_SYNC_PRESET}")
+    if args.rl_sync_preset != SAO_STREAMING_SYNC_PRESET and getattr(args, "rl_sao_contracts", None):
         raise ValueError("--rl-sao-contracts only applies to --rl-sync-preset sao-streaming-full")
     if args.rl_sync_preset == "decoupled":
         if args.experimental_rl_sync:
@@ -3068,9 +3070,9 @@ def _prepare_rl_args(
         args.merge_alpha = 0.0
         args.wire_dtype = "f32"
         args.rl_total_fragment_steps = args.total_steps * args.fragments
-    elif args.rl_sync_preset == "dense-full":
+    elif args.rl_sync_preset == FULL_PARAMETER_SYNC_PRESET:
         _prepare_dense_full_sweep(args, num_islands=len(specs))
-    elif args.rl_sync_preset == "sao-streaming-full":
+    elif args.rl_sync_preset == SAO_STREAMING_SYNC_PRESET:
         _prepare_sao_streaming(args, num_islands=len(specs))
     elif not args.experimental_rl_sync:
         args.fragments = 1
@@ -4187,11 +4189,11 @@ from yeto.hw.catalog import COMPAT_GROUP_ENV, compat_group  # noqa: E402
 
 
 def _rl_trainable_island_flags(args, learner_id: int, num_learners: int) -> str:
-    """LoRA rank/targets; for dense-full the full-parameter sweep identity (the
+    """LoRA rank/targets; for the full-parameter preset the sweep identity (the
     probed layout hash, the frozen roster size and the syncer profile hash);
     for sao-streaming-full this island's hash-bound runtime contract.
 
-    dense-full trains every parameter, unless DeepSeek V4 expert-full selects
+    the full-parameter preset trains every parameter, unless DeepSeek V4 expert-full selects
     the LoRA hybrid (attention LoRA plus clone experts, P0 1.7b.2)."""
     if rl_sao_streaming(args):
         island = args.rl_sao_manifest.island(learner_id)

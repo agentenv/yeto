@@ -15,6 +15,7 @@ from types import MappingProxyType
 
 from yeto.rl.adapters.miles.pins import MILES_IMAGE
 from yeto.rl.engine.run_flags import RlFlag, cli_flag, island_flag, shared_flag
+from yeto.rl.engine.selection import SYNC_PRESETS, canonical_sync_preset
 
 _MODE = (
     cli_flag("--rl-runtime", choices=["miles"], default="miles"),
@@ -262,7 +263,8 @@ _ISLAND = (
     ),
     island_flag(
         "--sync-preset",
-        choices=["strict-avg", "decoupled", "dense-full", "sao-streaming-full"],
+        choices=SYNC_PRESETS,
+        type=canonical_sync_preset,
         default="strict-avg",
     ),
     island_flag("--fragments", type=int, default=1),
@@ -371,7 +373,7 @@ _SYNC = (
         "--rl-parameter-layout-sha256",
         default=None,
         metavar="HEX",
-        help="dense-full only: the full-parameter layout hash reported by the Miles "
+        help="full-parameter preset only: the full-parameter layout hash reported by the Miles "
         "layout probe (yeto.rl.adapters.miles.models.full_parameter_manifest_probe); "
         "--fragments must equal that layout's fragment count",
     ),

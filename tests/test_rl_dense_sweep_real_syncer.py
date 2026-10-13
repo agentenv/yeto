@@ -1,7 +1,7 @@
 """Dense strict sweep against the real Rust syncer (P0-1.7b.1, Q7 item 4).
 
 The syncer runs the exact actor command the launcher generates for
-``--rl-sync-preset dense-full``; the client binds the profile hash the
+``--rl-sync-preset full-parameter``; the client binds the profile hash the
 launcher sends islands. One learner sweeps P=2 fragments once: the syncer
 must accept that HELLO, merge the sweep and finalize ``init + delta``; a
 HELLO with any other profile hash must be refused.
@@ -45,7 +45,7 @@ def _dense_args():
     from yeto.launcher import _prepare_rl_args
 
     args = _launcher_args("ports", (
-        "--rl-sync-preset", "dense-full", "--rl-placement", "fixed-partition",
+        "--rl-sync-preset", "full-parameter", "--rl-placement", "fixed-partition",
         "--rl-rollout-gpus", "1", "--rl-parameter-layout-sha256", "e" * 64,
         "--fragments", str(FRAGMENTS), "--total-steps", "1"), gpu="modal:2xh100")
     args.controller = "local"
