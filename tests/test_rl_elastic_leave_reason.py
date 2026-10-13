@@ -102,8 +102,7 @@ def test_a_finished_island_leaves_with_finished(tmp_path):
     engine, sync, _ = _elastic(tmp_path, fake)
     _driver(engine, sync, tmp_path).run()
     assert _leaves(fake) == [LeaveReason.FINISHED]
-    leave = [e for e in _tape(tmp_path) if e["event"] == "island_leave"]
-    assert leave[-1]["reason_name"] == "FINISHED" and leave[-1]["error_type"] is None
+    assert not [e for e in _tape(tmp_path) if e["event"] == "island_leave"]  # golden tapes unchanged
 
 
 @pytest.mark.parametrize("error, reason", [

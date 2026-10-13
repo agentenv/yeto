@@ -46,13 +46,12 @@ from yeto.rl.core import (
     policy_hash,
     policy_tensor_hash,
 )
+from yeto.rl import elastic_client
 from yeto.rl.elastic_client import (
     DEFAULT_ISLAND_LEASE_S,
     ElasticClientConfig,
     ElasticFinished,
-    ElasticIslandClient,
     LeaveReason,
-    hmac_key_from_env,
 )
 
 from . import progress as legacy_progress
@@ -455,8 +454,10 @@ class ElasticAvgSync:
 
     def _client(self):
         if self.client is None:
-            self.client = ElasticIslandClient(self._client_config(), hmac_key_from_env(),
-                                              on_event=self._client_event)
+            # looked up on the module at call time: tests substitute the client class
+            self.client = elastic_client.ElasticIslandClient(
+                self._client_config(), elastic_client.hmac_key_from_env(),
+                on_event=self._client_event)
         return self.client
 
     def _client_config(self) -> ElasticClientConfig:

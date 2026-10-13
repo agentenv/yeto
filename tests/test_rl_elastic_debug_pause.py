@@ -202,8 +202,9 @@ def test_self_built_client_events_reach_the_tape_once(tmp_path, monkeypatch):
                                 fake.key, connect=fake.connect, on_event=kw.get("on_event"))
         built.append(c)
         return c
-    monkeypatch.setattr(bridges, "ElasticIslandClient", make)
-    monkeypatch.setattr(bridges, "hmac_key_from_env", lambda: fake.key)
+    import yeto.rl.elastic_client as ec
+    monkeypatch.setattr(ec, "ElasticIslandClient", make)
+    monkeypatch.setattr(ec, "hmac_key_from_env", lambda: fake.key)
     monkeypatch.setenv(PAUSE_ENV, "0:1:0.05")
     _driver(engine, sync, tmp_path).run()
     assert built and bridges.ElasticAvgSync

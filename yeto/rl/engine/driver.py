@@ -1814,12 +1814,16 @@ class IslandDriver:
 
     def _close_sync(self, failure: BaseException | None) -> None:
         """Close the bridge with the LEAVE reason of this departure (design D7).
-        The detail stays on the island tape; only the code goes on the wire."""
+        A failed departure's detail goes to the island tape (``island_leave``);
+        only the code goes on the wire. A finished run adds no tape record."""
         reason = leave_reason_for(failure)
+        if failure is not None:
+            self._record_leave(reason, failure)
+        self.sync.close(reason)
+
+    def _record_leave(self, reason: LeaveReason, failure: BaseException) -> None:
         try:
             self.emit("island_leave", reason=int(reason), reason_name=reason.name,
-                      error_type=None if failure is None else type(failure).__name__,
-                      error=None if failure is None else str(failure))
+                      error_type=type(failure).__name__, error=str(failure))
         except Exception:  # noqa: BLE001 - the tape must not mask the original error
             pass
-        self.sync.close(reason)

@@ -49,7 +49,7 @@ class _Client:
     def delta_tensor(self, *, base_version, c_tokens, c_steps, update):
         self.deltas.append(base_version)
 
-    def leave(self):
+    def leave(self, reason=0):
         self.left = True
 
     def close(self):

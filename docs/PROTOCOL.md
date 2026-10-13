@@ -375,8 +375,9 @@ weights, counters, quorum/grace timings, and sync latency.
 
 Under `--rl-island-scheduling elastic` an island that stops sends one LEAVE
 frame with a one-byte reason code. Only the class of the departure goes on
-the wire; the exception type and text go to the island's event tape
-(`island_leave`, and `elastic_leave_failed` when the send fails). The codes
+the wire; for a failed departure the exception type and text go to the
+island's event tape (`island_leave`; a finished run adds no record), and a
+failed send is recorded as `elastic_leave_failed`. The codes
 are defined in `yeto/rl/elastic_client.py` (`LeaveReason`) and
 `syncer/src/elastic.rs` (`LEAVE_REASON_*`); a test pins both.
 
