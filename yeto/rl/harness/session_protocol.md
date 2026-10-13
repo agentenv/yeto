@@ -40,4 +40,4 @@ harness 的约定：
 | 另有 `POST /sessions/{id}/v1/messages`（Anthropic 兼容）与 `/sessions/{id}/{path}` 透传 | `sessions.py:135,237` | 已核实存在；codex harness 不用，不属本协议 |
 | 流式聊天（SSE）回复格式 | — | **未核实**；替身只实现非流式 JSON |
 
-注意：legacy pin `MILES_COMMIT = ae475060…` 的会话服务较旧（`POST /sessions` 不读请求体、无 `/samples` 路径，`miles/rollout/session/sessions.py:51-60`）；本协议以 ports pin 为准，legacy 路径是否用到会话服务未核实。
+注意：本协议以 ports pin 为准，即 `yeto/rl/adapters/miles/pins.py` 的 `MILES_NEXT_COMMIT`。legacy 引擎已在 1543c319 删除，它的旧 pin 不再适用。
