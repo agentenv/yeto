@@ -170,26 +170,23 @@ def test_parsed_fully_async_is_accepted_only_for_an_overlapped_launch():
                                 num_cells=lambda _a: 1)
 
 
-def test_fully_async_cut_discards_background_generation():
-    from yeto.rl.adapters.miles.in_flight import export_in_flight
-
-    executor = SimpleNamespace(args=SimpleNamespace(fully_async=True),
-                               data_source=SimpleNamespace(buffer=[["recycled prompt"]]))
-    assert export_in_flight(executor) == {"entries": [], "buffer_groups": 0}
-
-
 def test_fully_async_trained_groups_hook_reports_the_round(monkeypatch):
     from yeto.rl.adapters.miles import rollout_meta_hook as hook
 
     monkeypatch.setattr("yeto.rl.algos.sample_filters.apply_sample_filters", lambda *_a: None)
+    from yeto.rl.adapters.miles import fully_async_prompts
+
+    ledger = SimpleNamespace(marked=[], mark_trained=lambda data: ledger.marked.append(data),
+                             take_round_counts=lambda: {"submitted_groups": 1})
+    monkeypatch.setattr(fully_async_prompts, "_LEDGER", ledger)
     reported = []
     monkeypatch.setattr(hook, "extract_rollout_metadata",
-                        lambda args, data: reported.append((args, data)))
+                        lambda args, data, round_counts: reported.append((args, data, round_counts)))
     data = [[SimpleNamespace(group_index=0, index=0, tokens=[1], response_length=1,
                              loss_mask=[1], metadata={}, status=None)]]
     args = SimpleNamespace(fully_async=True)
     hook.record_trained_groups(args, data)
-    assert reported == [(args, data)]
+    assert reported == [(args, data, {"submitted_groups": 1})] and ledger.marked == [data]
     hook.record_trained_groups(SimpleNamespace(), data)
     assert len(reported) == 1  # the all-samples hook reports otherwise
 

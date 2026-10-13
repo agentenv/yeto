@@ -492,6 +492,8 @@ def handle_from_metadata(
 
 
 _CARRY_OVER_KEYS = (
+    # P0-S overlap: Miles fully_async stale drops (None = unknown)
+    "stale_dropped_groups",
     "max_policy_age", "carried_out_groups", "cross_version_tokens", "trained_response_tokens",
     "cross_version_scored_tokens", "cross_version_unscored_samples",
     # 5.5: distribution of the cross-version IS ratio (calibrates warn/fallback)
@@ -633,6 +635,8 @@ class MilesRolloutPool:
         self._capacity: dict[str, int] = {}
         self._kv_capacity: dict[str, int] = {}
         self._args = args
+        self._fully_async = bool(getattr(args, "fully_async", False))
+        self._prompt_ledger_installed = False
         # Cells the fork declared at startup (M1 bundles); None = E1 verbs off.
         self._declared = None if declared_cells is None else tuple(str(c) for c in declared_cells)
         self._track_timeout_s = float(track_timeout_s)
@@ -807,6 +811,12 @@ class MilesRolloutPool:
         setter = getattr(self._metadata, "set_policy_token", None)
         if setter is not None:  # rollout-side group-reuse filter + agentic generate read it
             setter(token)
+        if self._fully_async and not self._prompt_ledger_installed:
+            # P0-S: account for the prompts the background worker draws
+            from .fully_async_prompts import install as install_prompt_ledger
+
+            self._in_executor(install_prompt_ledger)
+            self._prompt_ledger_installed = True
         self._run(self._controller.prepare_rollout(rollout_id))
         data_pack = self._run(self._executor.get(rollout_id))
         self._offload_after_rollout()

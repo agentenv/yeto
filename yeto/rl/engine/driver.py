@@ -1391,7 +1391,8 @@ class IslandDriver:
             # agentic-rollout-utilization 4.1: an engine that estimates the
             # cross-version truncation on the rollout side (Miles carry-over)
             # reports it on the batch; the trainer metric wins when both exist.
-            metrics = dataclasses.replace(metrics, cross_version_truncated_fraction=float(rollout_fraction))
+            metrics = dataclasses.replace(
+                metrics, cross_version_truncated_fraction=float(rollout_fraction))
         self._check_gradient(rollout_id, batch, receipt, metrics)
         self.trained_version = rollout_id + 1
         # rl-resume-from-checkpoint: a round cut records the next round's lr from this

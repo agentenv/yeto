@@ -134,9 +134,12 @@ def export_in_flight(executor: Any) -> dict[str, Any]:
     """Runs INSIDE the rollout executor actor: the in-flight entries and the
     data buffer length they account for."""
     if getattr(getattr(executor, "args", None), "fully_async", False):
-        # P0-S decision 3: generation still running in the background at a cut
-        # is discarded, never saved; the resumed run generates afresh.
-        return {"entries": [], "buffer_groups": 0}
+        # P0-S decision 3: background generation is discarded, never saved;
+        # its prompts go back into the data buffer (reset), so the cut carries
+        # them like any buffered group and the resumed run generates them again.
+        from .fully_async_prompts import requeue_untrained
+
+        requeue_untrained(executor)
     source = getattr(executor, "data_source", None)
     source = getattr(source, "__self__", source)
     buffer = list(getattr(source, "buffer", None) or [])

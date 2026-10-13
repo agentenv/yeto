@@ -22,7 +22,8 @@ continue next round; :mod:`.carry_over` keeps those within the limit and drops
 older ones). With ``overlap`` (a partitioned island, P0-S) it emits
 ``--fully-async --max-weight-staleness N`` instead: Miles keeps generating
 while the trainer trains and drops groups more than N versions old; the
-engines carry the plain policy version, so Miles' staleness filter works. Stage 2 no longer emits ``--mask-offpolicy-in-partial-rollout``:
+engines carry the plain policy version, so Miles' staleness filter works.
+Stage 2 no longer emits ``--mask-offpolicy-in-partial-rollout``:
 tokens of an older version stay in the loss and are corrected by the TIS the
 algorithm spec must configure (``AlgorithmSpec`` refuses staleness > 0 without
 a correction), using their generation log-probabilities (design decision 3).

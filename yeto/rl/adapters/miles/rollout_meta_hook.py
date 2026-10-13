@@ -166,8 +166,15 @@ def record_trained_groups(args: Any, data: Sequence[Sequence[Any]]) -> None:
         )
     if getattr(args, "fully_async", False):
         # P0-S: Miles' fully_async drains finished groups and runs no
-        # all-samples hook; the trained groups are the whole round report.
-        extract_rollout_metadata(args, data)
+        # all-samples hook; the trained groups are the round report, with the
+        # prompt ledger's counts (groups drawn, stale groups dropped).
+        from .fully_async_prompts import current as current_prompt_ledger
+
+        ledger = current_prompt_ledger()
+        if ledger is None:
+            raise RuntimeError("fully_async round without the yeto prompt ledger")
+        ledger.mark_trained(data)
+        extract_rollout_metadata(args, data, round_counts=ledger.take_round_counts())
 
 
 def _reward(args: Any, sample: Any) -> float:
@@ -956,7 +963,13 @@ def elastic_metadata_enabled(args: Any) -> bool:
         ELASTIC_METADATA_ENV) == "1"
 
 
-def extract_rollout_metadata(args: Any, all_samples: Any, data_source: Any = None) -> None:
+def extract_rollout_metadata(
+    args: Any,
+    all_samples: Any,
+    data_source: Any = None,
+    *,
+    round_counts: Mapping[str, Any] | None = None,
+) -> None:
     """``--rollout-all-samples-process-path`` hook (under fully_async: called by
     :func:`record_trained_groups` with the trained groups)."""
 
@@ -969,7 +982,12 @@ def extract_rollout_metadata(args: Any, all_samples: Any, data_source: Any = Non
             if buffer_length is not None:
                 payload["buffer_length"] = buffer_length
         submitted = submitted_groups(args, data_source)
-        if submitted is not None and payload.get("max_policy_age"):
+        if round_counts is not None:
+            # P0-S overlap: groups drawn this round finish in later rounds, so
+            # the draws and Miles' stale drops are reported as they are
+            # (stale_dropped_groups None = unknown), not balanced per round.
+            payload.update(round_counts)
+        elif submitted is not None and payload.get("max_policy_age"):
             # 4.1: under partial rollout the abort does not discard; the groups
             # submitted (new + resubmitted from the buffer) and not completed
             # went back to the buffer to continue next round.
