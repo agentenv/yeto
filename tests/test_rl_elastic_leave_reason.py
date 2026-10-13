@@ -250,3 +250,26 @@ def test_concurrent_leaves_send_one_frame(tmp_path):
         t.join()
     assert results.count(True) == 1 and len(_leaves(fake)) == 1
     sync.close()
+
+
+def test_the_verl_elastic_island_command_carries_the_lease(monkeypatch):
+    """verl islands are built by the same launcher task as Miles islands
+    (make_miles_island_task with the verl ISLAND_ENTRY_MODULE)."""
+    import sys
+    import types
+
+    from test_rl_launcher import _Resources, _Storage, _StorageMode, _Task, _args
+    from yeto.gpu_spec import parse_gpu_spec
+    from yeto.launcher import _prepare_rl_args, make_miles_island_task
+
+    monkeypatch.setitem(sys.modules, "sky", types.SimpleNamespace(
+        Task=_Task, Resources=_Resources, Storage=_Storage, StorageMode=_StorageMode))
+    monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "k3y")
+    args = _args(("--rl-backend", "verl", "--rl-engine", "ports", "--rl-island-scheduling", "elastic",
+                  "--rl-island-lease-s", "90"))
+    args.model_revision, args.data_revision = "a" * 40, "b" * 40
+    args.source_sha256, args.reward_sha256 = "c" * 64, "d" * 64
+    _prepare_rl_args(args)
+    run = make_miles_island_task(args, parse_gpu_spec(args.gpu)[0], 0, 1, "127.0.0.1:1").run
+    assert "yeto.rl.adapters.verl.island_entry" in run
+    assert " --rl-island-lease-s 90.0" in run

@@ -404,8 +404,8 @@ two lost heartbeats are tolerated.
 
 At the end of the run the launcher waives the missing `rl_learner_finalized`
 record only for islands whose last syncer `pool_leave` reason is `finished`,
-`stopped`, `preempted` or `lease_expired` (and the pre-reason-code
-`requested`); any failure code keeps the run failed.
+`stopped`, `preempted` or `lease_expired`; any other reason keeps the run
+failed.
 
 To add an island to a running elastic fleet there is no CLI: start another
 island process against the same syncer address with the same

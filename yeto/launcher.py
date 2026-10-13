@@ -5806,10 +5806,10 @@ _ISLAND_NAME_RE = re.compile(r"-l(\d+)-")
 
 
 # LEAVE reason names (syncer leave_reason_name) whose island owes no
-# rl_learner_finalized. "requested" is what a pre-reason-code syncer logged for
-# every island-sent LEAVE. TRAINING_FAILED, CONFIG_MISMATCH, INFRA_FAILED and
-# unknown codes stay failures.
-EXCUSED_LEAVE_REASONS = frozenset({"finished", "stopped", "preempted", "lease_expired", "requested"})
+# rl_learner_finalized. INFRA_FAILED, TRAINING_FAILED, CONFIG_MISMATCH, unknown
+# codes and the pre-reason-code "requested" stay failures (syncer and launcher
+# ship from one build; older runs are not resumed).
+EXCUSED_LEAVE_REASONS = frozenset({"finished", "stopped", "preempted", "lease_expired"})
 
 
 def syncer_pool_departures(tape_path, offset: int = 0) -> dict[int, str]:
