@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from ..syncer_profile import SyncerSemanticProfile
+from .engine.selection import SAO_STREAMING_SYNC_PRESET
 from .local_learner import ComponentIdentity
 from yeto.rl.adapters.miles.full_parameter.role_stream import RoleStreamConfig
 from yeto.rl.adapters.miles.full_parameter.session import (
@@ -30,7 +31,6 @@ _LEGACY_SCHEMA = "yeto.sao-streaming-runtime.v1"
 _SCHEMA = "yeto.sao-streaming-runtime.v2"
 _LEGACY_LAYOUT_ATTESTATION_SCHEMA = "miles.sao-streaming-layouts.v1"
 _LAYOUT_ATTESTATION_SCHEMA = "miles.sao-streaming-layouts.v2"
-SYNC_PRESET = "sao-streaming-full"
 SAO_POLICY_OBJECTIVE = "sao_dis"
 _HEX = frozenset("0123456789abcdef")
 _LEGACY_TOP_LEVEL_FIELDS = {
@@ -639,7 +639,7 @@ def bind_sao_streaming_runtime(args: Any, runtime: SaoStreamingRuntime) -> Path:
     args.yeto_rl_trajectory_evidence_schema_version = (
         runtime.trajectory_evidence_schema_version
     )
-    args.yeto_rl_sync_preset = SYNC_PRESET
+    args.yeto_rl_sync_preset = SAO_STREAMING_SYNC_PRESET
     args.yeto_rl_learner_generation = actor.learner_generation
     args.yeto_rl_learner_generations = actor.learner_generations
     args.yeto_rl_num_fragments = actor.expected_fragments

@@ -4,9 +4,9 @@ Registration module listed in :data:`yeto.rl.algos.EXTENSION_MODULES`. It
 translates the legacy SAO online recipe (``--sao-online-recipe`` applied by
 ``miles.backends.training_utils.sao.apply_sao_online_recipe`` on
 agentenv/miles ``feat/sao-tbench21-e2e-validation`` @ 16a9bea4, the code the
-streaming entry ``yeto.rl.sao_streaming_runtime`` runs) into an
-:class:`AlgorithmSpec`, so the recipe is part of the algorithm hash instead of
-a Miles-side side effect.
+old Miles-loop streaming entry ran) into an :class:`AlgorithmSpec`, so the
+recipe is part of the algorithm hash instead of a Miles-side side effect.
+Streaming SAO on ports (``yeto.rl.sao_streaming_runtime``) checks this spec.
 
 What is declared here:
 
@@ -230,9 +230,8 @@ def _reject_sao_not_at_pin(s: AlgorithmSpec) -> str | None:
     if CRITIC_FORK_PIN in FORK_COMMITS:
         return None
     return (
-        "loss.policy_objective='sao_dis' needs the Miles fork SAO port (yeto-sao, not yet "
-        "pinned); run SAO through the streaming entry (yeto.rl.sao_streaming_runtime) "
-        "until the pin carries it"
+        "loss.policy_objective='sao_dis' needs the Miles fork SAO port (yeto-sao), which "
+        "the current Miles pin does not carry"
     )
 
 

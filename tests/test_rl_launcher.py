@@ -2338,7 +2338,7 @@ def test_dense_full_legacy_weight_hook_rejects_quantized_rollout(tmp_path):
     )
 
     with pytest.raises(ValueError, match="require an unquantized rollout model"):
-        rl_learner._require_unquantized_dense_full_rollout_model(model)
+        rl_learner._require_unquantized_full_parameter_rollout_model(model)
 
 
 def test_miles_argv_preserves_mrope_provider_configuration():

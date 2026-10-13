@@ -28,7 +28,7 @@ def test_trajectory_evidence_requires_exact_current_published_policy_identity(
     assert args.yeto_rl_policy_token == f"yeto:3:{POLICY_HASH}"
     assert rollout_port._policy_token_for_rollout(
         SimpleNamespace(
-            yeto_rl_sync_preset="sao-streaming-full",
+            yeto_rl_sync_preset="decoupled",
             yeto_rl_policy_token=args.yeto_rl_policy_token,
         ),
         3,

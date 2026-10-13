@@ -430,3 +430,82 @@ def test_bind_rejects_state_bypassing_debug_shortcuts(tmp_path, overrides):
         bind_sao_streaming_runtime(_args(**overrides), runtime)
 
     assert not evidence.exists()
+
+
+# --- the ports island entry (P0-1.7b.3) ------------------------------------
+
+
+def _island_argv(*extra):
+    from test_rl_engine_selection import _learner_argv
+
+    argv = _learner_argv()
+    lora = argv.index("--lora-r")
+    return [*argv[:lora], *argv[lora + 4:], *extra]
+
+
+def _sao_island_argv(runtime_path, runtime_sha256):
+    return _island_argv(
+        "--parameter-mode", "full",
+        "--sync-preset", "sao-streaming-full",
+        "--sao-streaming-runtime", str(runtime_path),
+        "--sao-streaming-runtime-sha256", runtime_sha256,
+        "--sao-context-sha256", SECRLENV_CONTEXT_SHA256,
+    )
+
+
+def test_island_parses_the_sao_preset_only_with_its_runtime_contract(tmp_path):
+    from yeto.rl.adapters.miles import island_entry
+
+    args = island_entry.parse_args(_sao_island_argv(tmp_path / "rt.json", "1" * 64))
+    assert (args.parameter_mode, args.sync_preset) == ("full", "sao-streaming-full")
+
+    argv = _sao_island_argv(tmp_path / "rt.json", "1" * 64)
+    index = argv.index("--sao-context-sha256")
+    del argv[index:index + 2]
+    with pytest.raises(SystemExit):
+        island_entry.parse_args(argv)
+    with pytest.raises(SystemExit):  # the runtime belongs to the SAO preset only
+        island_entry.parse_args(
+            _island_argv(
+                "--lora-r", "8", "--lora-targets", "attention",
+                "--sao-streaming-runtime", str(tmp_path / "rt.json"),
+                "--sao-streaming-runtime-sha256", "1" * 64,
+                "--sao-context-sha256", SECRLENV_CONTEXT_SHA256,
+            )
+        )
+    with pytest.raises(SystemExit):  # full parameters need a full-parameter preset
+        island_entry.parse_args(_island_argv("--parameter-mode", "full"))
+
+
+def test_island_loads_the_runtime_for_its_own_learner(tmp_path):
+    from yeto.rl.adapters.miles import island_entry
+
+    payload = _payload(tmp_path / "evidence")
+    _bind_attestation(tmp_path, payload)
+    source = tmp_path / "streaming.json"
+    digest = _write_runtime(source, payload)
+    args = island_entry.parse_args(_sao_island_argv(source, digest))
+
+    runtime = island_entry._load_sao_streaming_runtime(args)
+    assert tuple(runtime.sync.by_role()) == ("actor", "critic")
+
+    args.learner_id = 1
+    with pytest.raises(ValueError, match="different learner"):
+        island_entry._load_sao_streaming_runtime(args)
+
+
+@pytest.mark.parametrize(
+    ("engine", "sync", "overrides", "message"),
+    (
+        ("legacy", True, {}, "only on the ports engine"),
+        ("ports", False, {}, "Yeto policy sync"),
+        ("ports", True, {"eval_only": True}, "eval-only"),
+        ("ports", True, {"rl_max_policy_age": 1}, "--rl-max-policy-age"),
+    ),
+)
+def test_full_parameter_island_rejections(engine, sync, overrides, message):
+    from yeto.rl.adapters.miles import island_entry
+
+    args = SimpleNamespace(**{"eval_only": False, "rl_max_policy_age": 0, **overrides})
+    with pytest.raises(ValueError, match=message):
+        island_entry._check_full_parameter_sync(args, rl_engine=engine, yeto_policy_sync=sync)

@@ -18,8 +18,11 @@ from collections.abc import Sequence
 RL_ENGINES = ("legacy", "ports")
 DEFAULT_RL_ENGINE = "ports"
 PORTS_SYNC_PRESETS = frozenset({"strict-avg", "decoupled"})
-# P0-D8: one full-parameter sync; the preset only picks its profile.
-FULL_PARAMETER_SYNC_PRESETS = frozenset({"dense-full", "sao-streaming-full"})
+# P0-D8: one full-parameter sync; the preset only picks its profile (dense
+# strict sweep, or SAO's actor + critic streaming).
+DENSE_FULL_SYNC_PRESET = "dense-full"
+SAO_STREAMING_SYNC_PRESET = "sao-streaming-full"
+FULL_PARAMETER_SYNC_PRESETS = frozenset({DENSE_FULL_SYNC_PRESET, SAO_STREAMING_SYNC_PRESET})
 
 
 class UnsupportedPortsCombination(ValueError):
