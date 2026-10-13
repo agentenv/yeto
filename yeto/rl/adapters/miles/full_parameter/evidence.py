@@ -13,7 +13,11 @@ miles or torch.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from yeto.rl.engine.policy_versions import PublishedPolicies
+    from yeto.rl.trajectory_evidence import BehaviorPolicyOf
 
 
 def evidence_enabled(args: Any) -> bool:
@@ -23,16 +27,23 @@ def evidence_enabled(args: Any) -> bool:
 
 
 def persist_published_round_evidence(
-    args: Any, groups: Sequence[Any], policy_token: str | None
+    args: Any,
+    groups: Sequence[Any],
+    policy_token: str | None,
+    published: PublishedPolicies,
 ) -> None:
-    """Write one accepted batch, bound to the policy token the driver published.
+    """Write one accepted batch, bound to the policy token the driver published
+    and every trajectory to the policy that generated it (P0-S, schema 4).
 
     The caller (the ports rollout hook) calls this only when
     :func:`evidence_enabled`; it is the one writer of round evidence.  The
     driver publishes ``yeto:<rollout_id>:<policy_tensor_hash>`` before each
     rollout (``MilesRolloutPool``); that token is the batch's round and
-    behavior policy.  The evidence kind and schema come from the launch
-    context bound on ``args``; they are never inferred from sample metadata.
+    policy.  ``published`` maps every version in the policy-age window to
+    its weight hash; a trajectory is named by the oldest version on its
+    tokens.  The evidence kind comes from the launch context bound on
+    ``args``; the context must also bind a schema, but new evidence is
+    always schema 4.
     """
 
     from yeto.rl.core import parse_policy_snapshot_token
@@ -58,6 +69,22 @@ def persist_published_round_evidence(
         behavior_policy_hash=policy_hash,
         reward_contract_hash=getattr(args, "yeto_rl_reward_sha256", None),
         evidence_kind=evidence_kind,
-        schema_version=schema_version,
+        behavior_policy_of=_oldest_published_policy(published),
     )
     write_trajectory_batch_evidence(args.yeto_rl_trajectory_evidence_dir, evidence)
+
+
+def _oldest_published_policy(published: PublishedPolicies) -> BehaviorPolicyOf:
+    from ..carry_over import sample_versions
+
+    def behavior_policy(segments: Sequence[Any]) -> tuple[int, str]:
+        versions = {v for sample in segments for v in sample_versions(sample)}
+        if not versions or None in versions:
+            raise RuntimeError("a trained trajectory has tokens of unknown policy version")
+        oldest = min(versions)
+        policy_hash = published.hash_of(oldest)
+        if policy_hash is None:
+            raise RuntimeError(f"policy v{oldest} of a trained trajectory was not published")
+        return oldest, policy_hash
+
+    return behavior_policy

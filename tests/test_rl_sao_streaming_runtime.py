@@ -502,7 +502,6 @@ def test_island_loads_the_runtime_for_its_own_learner(tmp_path):
         ("legacy", True, {}, "only on the ports engine"),
         ("ports", False, {}, "Yeto policy sync"),
         ("ports", True, {"eval_only": True}, "eval-only"),
-        ("ports", True, {"rl_max_policy_age": 1}, "--rl-max-policy-age"),
     ),
 )
 def test_full_parameter_island_rejections(engine, sync, overrides, message):
@@ -555,17 +554,6 @@ def test_island_entry_binds_the_sao_streaming_runtime_end_to_end(monkeypatch, tm
     assert "--lora-rank" not in miles_args.argv
 
 
-def test_island_entry_rejects_policy_age_for_sao_streaming():
-    from yeto.rl.adapters.miles import island_entry
-
-    with pytest.raises(ValueError, match="--rl-max-policy-age"):
-        island_entry._check_full_parameter_sync(
-            SimpleNamespace(eval_only=False, rl_max_policy_age=1),
-            rl_engine="ports",
-            yeto_policy_sync=True,
-        )
-
-
 def test_island_entry_rejects_an_evidence_root_others_can_write(monkeypatch, tmp_path):
     from test_rl_launcher import _stub_full_parameter_island
 
@@ -595,3 +583,11 @@ def test_island_entry_rejects_an_evidence_root_others_can_write(monkeypatch, tmp
     with pytest.raises(ValueError, match="writable by others"):
         island_entry.run_miles(args, model_path=model, prompt_path=prompts)
     assert not evidence.exists()
+
+
+def test_full_parameter_island_accepts_a_policy_age_limit():
+    """P0-S: every trajectory records its own behavior policy (evidence schema 4)."""
+    from yeto.rl.adapters.miles import island_entry
+
+    args = SimpleNamespace(eval_only=False, rl_max_policy_age=1)
+    island_entry._check_full_parameter_sync(args, rl_engine="ports", yeto_policy_sync=True)

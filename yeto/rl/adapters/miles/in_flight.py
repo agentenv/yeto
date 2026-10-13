@@ -133,6 +133,10 @@ def _codex_suspension() -> tuple[Mapping[str, Any], Mapping[str, Any]]:
 def export_in_flight(executor: Any) -> dict[str, Any]:
     """Runs INSIDE the rollout executor actor: the in-flight entries and the
     data buffer length they account for."""
+    if getattr(getattr(executor, "args", None), "fully_async", False):
+        # P0-S decision 3: generation still running in the background at a cut
+        # is discarded, never saved; the resumed run generates afresh.
+        return {"entries": [], "buffer_groups": 0}
     source = getattr(executor, "data_source", None)
     source = getattr(source, "__self__", source)
     buffer = list(getattr(source, "buffer", None) or [])

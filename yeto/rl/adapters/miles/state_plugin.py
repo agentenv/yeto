@@ -67,6 +67,7 @@ def weights_version(actor: Any) -> dict[str, Any] | None:
     return current_weights_version() if _is_main_rank(actor) else None
 APPLY_STATE = f"{_PLUGIN_MODULE}.apply_state"
 GRAD_NORM = f"{_PLUGIN_MODULE}.grad_norm"
+ALIGN_WEIGHT_VERSION = f"{_PLUGIN_MODULE}.align_weight_version"
 APPLIED_LRS = f"{_PLUGIN_MODULE}.applied_lrs"
 STEP_LOSSES = f"{_PLUGIN_MODULE}.step_losses"
 # rl-algo-critic-family 3.2: run in the critic's processes before its train.
@@ -1587,6 +1588,21 @@ def _arm_grad_audit(original: Any, args: tuple, kwargs: dict) -> bool:
 
 
 _GRAD_BINDINGS: dict[int, Any] = {}
+
+
+def align_weight_version(actor: Any, *, next_version: int) -> None:
+    """Plugin (P0-S): make Miles' next ``update_weights`` stamp ``next_version``.
+
+    Miles increments ``weight_updater.weight_version`` once per update, writes
+    it to the inference engines and gives it to the rollout executor as the
+    current version (the fully_async staleness filter subtracts from it). Set
+    to ``next_version - 1`` here, the update stamps the yeto policy version.
+    """
+
+    updater = getattr(actor, "weight_updater", None)
+    if updater is None:
+        raise RuntimeError("the trainer has no weight_updater to carry the policy version")
+    updater.weight_version = int(next_version) - 1
 
 
 def grad_norm(actor: Any) -> float:

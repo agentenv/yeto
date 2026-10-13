@@ -9,8 +9,9 @@ Miles rollout process:
 
 * :func:`response_token_versions` -- the version segments of one sample: the
   yeto policy version of every response token, read from the per-call
-  ``weight_versions`` spans SGLang reports (the span version is the yeto policy
-  token ``yeto:<version>:<hash>`` the publisher stamps on the engines);
+  ``weight_versions`` spans SGLang reports (the span version is the plain policy
+  version the publisher stamps on the engines, P0-S; older engines carry the
+  full ``yeto:<version>:<hash>`` label);
 * :func:`carry_over_buffer_filter` -- Miles' ``--buffer-filter-path`` under a
   limit > 0: groups whose oldest token is at most N versions behind the round
   being generated continue; older ones (and groups whose token versions are
@@ -38,7 +39,7 @@ import math
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from yeto.rl.engine.policy_age import token_version
+from yeto.rl.engine.policy_versions import engine_version_number
 from yeto.rl.engine.version_segments import (
     ProvenanceError,
     TokenProvenance,
@@ -95,7 +96,7 @@ def response_token_versions(sample: Any) -> list[int | None]:
     start = len(getattr(sample, "tokens", None) or ()) - n
     out: list[int | None] = [None] * n
     for span in _spans(sample):
-        version = token_version(str(getattr(span, "version", "")))
+        version = engine_version_number(getattr(span, "version", ""))
         lo, hi = max(int(span.abs_start), start), min(int(span.abs_end), start + n)
         for pos in range(lo, hi):
             out[pos - start] = version

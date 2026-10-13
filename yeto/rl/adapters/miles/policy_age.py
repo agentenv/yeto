@@ -19,7 +19,10 @@ N`` (agentenv fork: unfinished trajectories are suspended between two model
 turns at the cut-off and continued by the next rollout, at most N rollouts
 after the one that started them), else ``--partial-rollout`` (unfinished groups go back to Miles' data buffer and
 continue next round; :mod:`.carry_over` keeps those within the limit and drops
-older ones). Stage 2 no longer emits ``--mask-offpolicy-in-partial-rollout``:
+older ones). With ``overlap`` (a partitioned island, P0-S) it emits
+``--fully-async --max-weight-staleness N`` instead: Miles keeps generating
+while the trainer trains and drops groups more than N versions old; the
+engines carry the plain policy version, so Miles' staleness filter works. Stage 2 no longer emits ``--mask-offpolicy-in-partial-rollout``:
 tokens of an older version stay in the loss and are corrected by the TIS the
 algorithm spec must configure (``AlgorithmSpec`` refuses staleness > 0 without
 a correction), using their generation log-probabilities (design decision 3).
@@ -40,9 +43,11 @@ SUSPEND_CAPABLE_AGENTS = frozenset({
 })
 
 
-def policy_age_argv(limit: int, *, agentic: bool = False) -> tuple[str, ...]:
+def policy_age_argv(limit: int, *, agentic: bool = False, overlap: bool = False) -> tuple[str, ...]:
     if validate_limit(limit) == 0:
         return ()
+    if overlap:
+        return ("--fully-async", "--max-weight-staleness", str(limit))
     if agentic:
         return ("--agentic-suspend-between-turns", "--agentic-suspend-max-rounds", str(limit))
     return PARTIAL_ROLLOUT_FLAGS

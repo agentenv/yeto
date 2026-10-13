@@ -30,6 +30,7 @@ from typing import Any, Protocol
 from collections.abc import Mapping
 from types import SimpleNamespace
 
+from yeto.rl.engine.policy_versions import PublishedPolicies
 from yeto.rl.engine.ports import GroupMetadata, RolloutBatchHandle, over_sampling_fields
 from .traits import MILES_ABORT_MECHANISM
 from . import LoopRunner
@@ -38,6 +39,7 @@ from .rollout_meta_hook import (
     METADATA_SCHEMA,
     ROUND_META_SCHEMA,
     put_max_policy_age,
+    put_published_policies,
     put_policy_token,
 )
 
@@ -265,6 +267,9 @@ class DirMetadataSource:
     def set_max_policy_age(self, limit: int) -> None:
         put_max_policy_age(limit, self.sink_spec)
 
+    def set_published_policies(self, policies: Mapping[str, str]) -> None:
+        put_published_policies(policies, self.sink_spec)
+
     def take(self, rollout_id: int) -> dict[str, Any]:
         for name in (f"rollout-{rollout_id}.json", "rollout-latest.json"):
             path = self.directory / name
@@ -324,6 +329,13 @@ def _sink_actor_class():
         def get_limit(self) -> int | None:
             return getattr(self, "_limit", None)
 
+        # P0-S: published version -> weight hash (JSON), for trajectory evidence.
+        def set_policies(self, payload: str) -> None:
+            self._policies = payload
+
+        def get_policies(self) -> str | None:
+            return getattr(self, "_policies", None)
+
         def put(self, encoded: str) -> None:
             self._pending.append(encoded)
 
@@ -354,6 +366,9 @@ class RayMetadataSink:
 
     def set_max_policy_age(self, limit: int) -> None:
         self._ray.get(self._actor.set_limit.remote(int(limit)))
+
+    def set_published_policies(self, policies: Mapping[str, str]) -> None:
+        self._ray.get(self._actor.set_policies.remote(json.dumps(dict(policies), sort_keys=True)))
 
     def take(self, rollout_id: int) -> dict[str, Any]:
         deadline = time.monotonic() + self.timeout_s
@@ -663,6 +678,13 @@ class MilesRolloutPool:
         if not callable(setter):
             raise RuntimeError("this rollout metadata sink cannot lower the policy-age limit")
         setter(int(limit))
+
+    def set_published_policies(self, published: PublishedPolicies) -> None:
+        """P0-S (driver optional verb): the published versions in the policy-age
+        window, from which the rollout side names each trajectory's policy."""
+        setter = getattr(self._metadata, "set_published_policies", None)
+        if callable(setter):
+            setter(published.to_dict())
 
     def live_data_cursor(self) -> tuple[dict[str, int] | None, int | None]:
         """The data source position NOW (and its reuse-buffer length), read inside

@@ -183,6 +183,17 @@ def flatten(raw):  # mirrors upstream flatten_inference_engine_checksums
     return out
 
 
+class PluginActor:
+    """Records the weight-version alignment the publisher runs before an update."""
+
+    def __init__(self, calls):
+        self.calls = calls
+
+    async def run_plugin(self, fn_path, kwargs):
+        self.calls.append((fn_path.rsplit(".", 1)[-1], dict(kwargs)))
+        return []
+
+
 def publisher(controller, *, update_fails=False, export=None):
     calls = []
 
@@ -192,7 +203,7 @@ def publisher(controller, *, update_fails=False, export=None):
             raise RuntimeError("broadcast failed")
 
     pub = MilesPublisher(
-        args=SimpleNamespace(), actor_model=object(), rollout_executor=object(),
+        args=SimpleNamespace(), actor_model=PluginActor(calls), rollout_executor=object(),
         inference_controller=controller, export_trainer_state=export,
         update_weights=update_weights, flatten_checksums=flatten,
     )
@@ -212,9 +223,10 @@ def test_publish_full_manifest_with_members():
     assert m.target_policy_version == 4 and m.target_policy_hash == s.policy_tensor_hash()
     assert m.payload_bytes == (8 + 12) * 4
     assert result.members == frozenset({"engine:c0", "engine:c1"})
-    token = policy_token(4, s.policy_tensor_hash())
-    assert all(e.version == token for e in engines)
-    assert calls == ["update_weights"] and ctl.log == ["start", "end"]
+    # P0-S: the engines carry the plain policy version; the label stays with yeto
+    assert all(e.version == "4" for e in engines)
+    assert calls == [("align_weight_version", {"next_version": 4}), "update_weights"]
+    assert ctl.log == ["start", "end"]
     assert set(pub.last_engine_checksums) == {"http://e0", "http://e1"}
     # payload hash is content-addressed
     pub2, _ = publisher(Controller([Engine("http://e0")]))

@@ -1,4 +1,17 @@
-"""Closed, authenticated trajectory evidence for replayable RL updates."""
+"""Closed, authenticated trajectory evidence for replayable RL updates.
+
+Schemas written here:
+
+* 1 -- flat SecRLEnv envelopes;
+* 2 -- benchmark-neutral envelopes with active-token and compaction-segment
+  evidence; every trajectory carries the round's policy (version = rollout);
+* 4 -- the schema 2 layout where every trajectory carries the policy that
+  generated it (P0-S: rollout and training may differ by a bounded number of
+  versions). The batch keeps the round's policy hash; a trajectory of the
+  round's own version must carry it, older trajectories carry their own.
+
+Schema 3 is reserved for the reward-hash change of the P2 branch.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +20,7 @@ import json
 import math
 import os
 import struct
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any
@@ -16,6 +29,9 @@ from .contracts import TrajectoryEnvelope
 
 _LEGACY_SCHEMA = 1
 _SCHEMA = 2
+_PER_TRAJECTORY_POLICY_SCHEMA = 4
+_LAYERED_SCHEMAS = frozenset({_SCHEMA, _PER_TRAJECTORY_POLICY_SCHEMA})
+_SCHEMAS = frozenset({_LEGACY_SCHEMA, *_LAYERED_SCHEMAS})
 _SHA256 = frozenset("0123456789abcdef")
 EVIDENCE_KINDS = frozenset({"secrlenv", "terminal-bench-2.1"})
 EVIDENCE_SCHEMA_VERSIONS = frozenset({_LEGACY_SCHEMA, _SCHEMA})
@@ -34,6 +50,10 @@ _LEGACY_ENVELOPE_FIELDS = (
     "cleanup_evidence_hash",
 )
 _V2_ENVELOPE_FIELDS = frozenset(field.name for field in fields(TrajectoryEnvelope))
+
+BehaviorPolicyOf = Callable[[Sequence[Any]], tuple[int, str]]
+"""The (version, weight hash) of the policy that generated one logical
+trajectory, given its segments (one sample, or the samples of a compaction)."""
 
 
 @dataclass(frozen=True)
@@ -69,6 +89,7 @@ def build_trajectory_batch_evidence(
     reward_contract_hash: str,
     evidence_kind: str = "secrlenv",
     schema_version: int | None = None,
+    behavior_policy_of: BehaviorPolicyOf | None = None,
 ) -> TrajectoryBatchEvidence:
     """Authenticate accepted samples and bind their exact training batch.
 
@@ -76,6 +97,10 @@ def build_trajectory_batch_evidence(
     inferred from arbitrary sample metadata. Schema 1 remains the byte-exact
     flat SecRLEnv representation; Terminal-Bench and nested compaction use
     schema 2 with active-token and composite-segment evidence.
+
+    ``behavior_policy_of`` selects schema 4: it names the policy of every
+    logical trajectory (``behavior_policy_hash`` stays the round's policy).
+    Without it every trajectory carries ``(rollout_id, behavior_policy_hash)``.
     """
 
     _nonnegative_int("rollout_id", rollout_id)
@@ -95,7 +120,11 @@ def build_trajectory_batch_evidence(
     inferred_schema = (
         _SCHEMA if evidence_kind != "secrlenv" or nested else _LEGACY_SCHEMA
     )
-    if schema_version is None:
+    if behavior_policy_of is not None:
+        if schema_version not in (None, _PER_TRAJECTORY_POLICY_SCHEMA):
+            raise ValueError("per-trajectory behavior policies need trajectory evidence schema 4")
+        schema_version = _PER_TRAJECTORY_POLICY_SCHEMA
+    elif schema_version is None:
         schema_version = inferred_schema
     elif schema_version not in {_LEGACY_SCHEMA, _SCHEMA}:
         raise ValueError("trajectory evidence schema is unsupported")
@@ -118,6 +147,9 @@ def build_trajectory_batch_evidence(
             if not segments:
                 raise ValueError("trajectory evidence has an empty compacted rollout")
 
+            behavior_version, behavior_hash = _behavior_policy(
+                behavior_policy_of, segments, rollout_id, behavior_policy_hash
+            )
             first = segments[0]
             group_index = getattr(first, "group_index", None)
             sample_index = getattr(first, "index", None)
@@ -239,8 +271,8 @@ def build_trajectory_batch_evidence(
                             task_id=verified.task_id,
                             prompt_group_id=f"r{rollout_id}:g{group_index}",
                             sample_index=sample_index,
-                            behavior_policy_version=rollout_id,
-                            behavior_policy_hash=behavior_policy_hash,
+                            behavior_policy_version=behavior_version,
+                            behavior_policy_hash=behavior_hash,
                             token_ids=tokens,
                             response_token_count=response_length,
                             behavior_logprobs_hash=behavior_logprobs_hash,
@@ -286,8 +318,15 @@ def build_trajectory_batch_evidence(
                             str(compaction_context_budget).encode("ascii"),
                         ]
                     )
+                if schema_version == _PER_TRAJECTORY_POLICY_SCHEMA:
+                    identity_parts.extend(
+                        [str(behavior_version).encode("ascii"), bytes.fromhex(behavior_hash)]
+                    )
                 trajectory_id = _hash_parts(
-                    b"yeto-trajectory-id-v2\0", *identity_parts
+                    b"yeto-trajectory-id-v4\0"
+                    if schema_version == _PER_TRAJECTORY_POLICY_SCHEMA
+                    else b"yeto-trajectory-id-v2\0",
+                    *identity_parts,
                 )
                 envelopes.append(
                     TrajectoryEnvelope(
@@ -295,8 +334,8 @@ def build_trajectory_batch_evidence(
                         task_id=verified.task_id,
                         prompt_group_id=f"r{rollout_id}:g{group_index}",
                         sample_index=sample_index,
-                        behavior_policy_version=rollout_id,
-                        behavior_policy_hash=behavior_policy_hash,
+                        behavior_policy_version=behavior_version,
+                        behavior_policy_hash=behavior_hash,
                         token_ids=tokens,
                         response_token_count=response_length,
                         behavior_logprobs_hash=behavior_logprobs_hash,
@@ -370,7 +409,7 @@ def write_trajectory_batch_evidence(
             for envelope in evidence.envelopes
         ],
     }
-    if evidence.schema_version == _SCHEMA:
+    if evidence.schema_version in _LAYERED_SCHEMAS:
         payload["evidence_kind"] = evidence.evidence_kind
     raw = (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode()
     try:
@@ -420,7 +459,7 @@ def read_trajectory_batch_evidence(path: str | Path) -> TrajectoryBatchEvidence:
         "trained_tokens",
         "envelopes",
     }
-    if schema_version == _SCHEMA:
+    if schema_version in _LAYERED_SCHEMAS:
         expected_fields.add("evidence_kind")
     elif schema_version != _LEGACY_SCHEMA:
         raise ValueError("trajectory evidence schema is unsupported")
@@ -767,7 +806,7 @@ def _validate_batch_evidence(evidence: TrajectoryBatchEvidence) -> None:
     _nonnegative_int("trained_tokens", evidence.trained_tokens)
     if evidence.trained_tokens < 1:
         raise ValueError("trajectory evidence trained-token count is invalid")
-    if evidence.schema_version not in {_LEGACY_SCHEMA, _SCHEMA}:
+    if evidence.schema_version not in _SCHEMAS:
         raise ValueError("trajectory evidence schema is unsupported")
     if evidence.evidence_kind not in EVIDENCE_KINDS:
         raise ValueError("trajectory evidence kind is unsupported")
@@ -776,7 +815,7 @@ def _validate_batch_evidence(evidence: TrajectoryBatchEvidence) -> None:
         and evidence.evidence_kind != "secrlenv"
     ):
         raise ValueError("legacy trajectory evidence can only represent SecRLEnv")
-    if evidence.schema_version == _SCHEMA and any(
+    if evidence.schema_version in _LAYERED_SCHEMAS and any(
         item.evidence_kind != evidence.evidence_kind
         or item.active_token_count is None
         or item.loss_mask_hash is None
@@ -784,6 +823,7 @@ def _validate_batch_evidence(evidence: TrajectoryBatchEvidence) -> None:
         for item in evidence.envelopes
     ):
         raise ValueError("trajectory evidence v2 item is incomplete")
+    _validate_behavior_policies(evidence)
     _validate_envelope_order(
         evidence.envelopes, schema_version=evidence.schema_version
     )
@@ -801,6 +841,42 @@ def _validate_batch_evidence(evidence: TrajectoryBatchEvidence) -> None:
         raise ValueError("trajectory evidence batch hash changed")
 
 
+def _behavior_policy(
+    behavior_policy_of: BehaviorPolicyOf | None,
+    segments: Sequence[Any],
+    rollout_id: int,
+    round_policy_hash: str,
+) -> tuple[int, str]:
+    if behavior_policy_of is None:
+        return rollout_id, round_policy_hash
+    version, policy_hash = behavior_policy_of(segments)
+    _nonnegative_int("behavior_policy_version", version)
+    _sha256("behavior_policy_hash", policy_hash)
+    if version > rollout_id:
+        raise ValueError("trajectory was generated by a policy newer than its round")
+    if version == rollout_id and policy_hash != round_policy_hash:
+        raise ValueError("trajectory names its round's version with other weights")
+    return version, policy_hash
+
+
+def _validate_behavior_policies(evidence: TrajectoryBatchEvidence) -> None:
+    """Schemas 1/2: every trajectory carries the round's policy. Schema 4: no
+    trajectory is newer than its round, and one of the round's own version
+    carries the round's hash."""
+    for item in evidence.envelopes:
+        _nonnegative_int("behavior_policy_version", item.behavior_policy_version)
+        _sha256("behavior_policy_hash", item.behavior_policy_hash)
+        same_version = item.behavior_policy_version == evidence.rollout_id
+        if evidence.schema_version == _PER_TRAJECTORY_POLICY_SCHEMA:
+            valid = item.behavior_policy_version < evidence.rollout_id or (
+                same_version and item.behavior_policy_hash == evidence.behavior_policy_hash
+            )
+        else:
+            valid = same_version and item.behavior_policy_hash == evidence.behavior_policy_hash
+        if not valid:
+            raise ValueError("trajectory evidence behavior policy does not fit its round")
+
+
 def _envelope_batch_hash(
     envelopes: tuple[TrajectoryEnvelope, ...],
     trained_tokens: int,
@@ -815,9 +891,13 @@ def _envelope_batch_hash(
         ],
     }
     domain = b"yeto-trajectory-batch-v1\0"
-    if schema_version == _SCHEMA:
-        payload.update({"schema": _SCHEMA, "evidence_kind": evidence_kind})
-        domain = b"yeto-trajectory-batch-v2\0"
+    if schema_version in _LAYERED_SCHEMAS:
+        payload.update({"schema": schema_version, "evidence_kind": evidence_kind})
+        domain = (
+            b"yeto-trajectory-batch-v4\0"
+            if schema_version == _PER_TRAJECTORY_POLICY_SCHEMA
+            else b"yeto-trajectory-batch-v2\0"
+        )
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return _hash_parts(domain, raw)
 

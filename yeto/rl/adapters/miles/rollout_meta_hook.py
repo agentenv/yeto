@@ -35,7 +35,7 @@ import math
 import os
 import statistics
 import tempfile
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -161,7 +161,13 @@ def record_trained_groups(args: Any, data: Sequence[Sequence[Any]]) -> None:
     from .full_parameter.evidence import evidence_enabled, persist_published_round_evidence
 
     if evidence_enabled(args):
-        persist_published_round_evidence(args, data, current_policy_token())
+        persist_published_round_evidence(
+            args, data, current_policy_token(), published_policies()
+        )
+    if getattr(args, "fully_async", False):
+        # P0-S: Miles' fully_async drains finished groups and runs no
+        # all-samples hook; the trained groups are the whole round report.
+        extract_rollout_metadata(args, data)
 
 
 def _reward(args: Any, sample: Any) -> float:
@@ -194,6 +200,11 @@ def _status(sample: Any) -> str:
 
 from yeto.rl.adapters.miles import carry_over as _carry  # noqa: E402
 from yeto.rl.engine.policy_age import token_version  # noqa: E402
+from yeto.rl.engine.policy_versions import (  # noqa: E402
+    PublishedPolicies,
+    engine_version_matches,
+    engine_version_number,
+)
 
 
 def group_record(args: Any, group: Sequence[Any]) -> dict[str, Any]:
@@ -222,7 +233,7 @@ def group_record(args: Any, group: Sequence[Any]) -> dict[str, Any]:
         # spans versions; its token names the OLDEST one (the driver checks it
         # is a published version within the window) and its version segments
         # are listed. Unparsable tokens keep "mixed:" (refused, fail closed).
-        numbered = {v: token_version(v) for v in versions}
+        numbered = {v: engine_version_number(v) for v in versions}
         if None not in numbered.values():
             token = min(versions, key=lambda v: numbered[v])
             carry = _carry.group_versions_record(group)
@@ -775,6 +786,47 @@ def sink_available() -> bool:
     return bool(ray.is_initialized())
 
 
+PUBLISHED_POLICIES_FILE = "published-policies.json"
+
+
+def put_published_policies(policies: Mapping[str, str], sink: str | None = None) -> None:
+    """Driver side (P0-S): the published versions in the policy-age window
+    (version -> weight hash); the rollout side names trajectory policies from it."""
+    payload = json.dumps(dict(policies), sort_keys=True)
+    sink = sink or os.environ.get(META_SINK_ENV) or DEFAULT_SINK
+    kind, _, target = sink.partition(":")
+    if kind == "dir":
+        directory = Path(target)
+        directory.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=directory, prefix=".tmp-")
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+        os.replace(tmp, directory / PUBLISHED_POLICIES_FILE)
+        return
+    if kind == "ray":
+        import ray
+
+        ray.get(ray.get_actor(target or DEFAULT_SINK_ACTOR).set_policies.remote(payload))
+        return
+    raise ValueError(f"unknown rollout metadata sink {sink!r}")
+
+
+def published_policies(sink: str | None = None) -> PublishedPolicies:
+    """Rollout side: the map stored by :func:`put_published_policies` (empty if none)."""
+    sink = sink or os.environ.get(META_SINK_ENV) or DEFAULT_SINK
+    kind, _, target = sink.partition(":")
+    if kind == "dir":
+        path = Path(target) / PUBLISHED_POLICIES_FILE
+        payload = path.read_text(encoding="utf-8") if path.exists() else None
+    elif kind == "ray":
+        import ray
+
+        payload = ray.get(ray.get_actor(target or DEFAULT_SINK_ACTOR).get_policies.remote())
+    else:
+        raise ValueError(f"unknown rollout metadata sink {sink!r}")
+    return PublishedPolicies.from_dict(json.loads(payload) if payload else None)
+
+
 MAX_POLICY_AGE_FILE = "max-policy-age"
 
 
@@ -831,7 +883,10 @@ def group_matches_policy(group: Sequence[Any], token: str | None, size: int | No
     if not token or not samples or (size is not None and len(group) != size):
         return False
     for sample in samples:
-        if _status(sample) not in _REUSABLE_STATUSES or _versions(sample) != {token}:
+        versions = _versions(sample)
+        if _status(sample) not in _REUSABLE_STATUSES or not versions or not all(
+            engine_version_matches(v, token) for v in versions
+        ):
             return False
     return True
 
@@ -938,7 +993,8 @@ def elastic_metadata_enabled(args: Any) -> bool:
 
 
 def extract_rollout_metadata(args: Any, all_samples: Any, data_source: Any = None) -> None:
-    """``--rollout-all-samples-process-path`` hook."""
+    """``--rollout-all-samples-process-path`` hook (under fully_async: called by
+    :func:`record_trained_groups` with the trained groups)."""
 
     try:
         payload = build_metadata(args, all_samples)
