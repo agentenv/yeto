@@ -417,6 +417,18 @@ async def test_dense_sweep_applies_only_a_complete_sweep():
     assert actor.fragment_versions == (1, 2)
 
 
+@pytest.mark.asyncio
+async def test_dense_sweep_does_not_apply_while_only_part_of_the_sweep_is_permitted():
+    actor = _PairedRole("actor", [_sweep_candidate(1, 0)], [])  # fragment 1 not PULLed yet
+    pairing = _pairing(actor, sweep=True, pipeline_depth=1)
+
+    assert _steps(pairing.submit_ready(), "actor") == [1]
+    committed = await pairing.commit_staged_broadcasts()  # fragment 0 broadcast is staged
+
+    assert committed["actor"].applied_fragments == ()
+    assert actor.fragment_versions == (0, 0)
+
+
 def test_sweep_profile_is_one_actor_with_horizon_one():
     with pytest.raises(ValueError, match="one actor role and H=1"):
         _profile(("actor", "critic"), sweep=True)
@@ -499,6 +511,45 @@ def test_strict_sweep_boundary_blocks_until_the_sweep_is_applied():
     assert not session.pairing.inflight
 
 
+class _LatePullRole(_PairedRole):
+    """The syncer permits the sweep's second fragment only after some polls."""
+
+    def __init__(self, *args, late, polls_before_pull, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.late = late
+        self.polls_before_pull = polls_before_pull
+
+    def ready_submission_candidates(self):
+        self.polls_before_pull -= 1
+        if self.polls_before_pull == 0 and self.late is not None:
+            self.candidates.append(self.late)
+            self.late = None
+        return super().ready_submission_candidates()
+
+
+def test_strict_sweep_boundary_waits_for_a_late_pull_of_the_sweep():
+    actor = _LatePullRole("actor", [_sweep_candidate(1, 0)], [],
+                          late=_sweep_candidate(2, 1), polls_before_pull=4)
+    session, driver = _session(actor, sweep=True, pipeline_depth=1), _Driver()
+    session.start(driver)
+
+    boundary = session.boundary(driver, rollout_id=0, stats=None)
+
+    assert actor.fragment_versions == (1, 2)
+    assert boundary.state.policy_tensor_hash() == "cut-(1, 2)"
+
+
+def test_strict_sweep_boundary_does_not_return_with_a_partial_sweep():
+    actor = _LatePullRole("actor", [_sweep_candidate(1, 0)], [],
+                          late=None, polls_before_pull=0)
+    session, driver = _session(actor, sweep=True, pipeline_depth=1, wait_timeout=0.05), _Driver()
+    session.start(driver)
+
+    with pytest.raises(TimeoutError):
+        session.boundary(driver, rollout_id=0, stats=None)
+    assert actor.fragment_versions == (0, 0) and actor.closed
+
+
 def test_terminal_round_acknowledges_every_role_after_publication():
     actor = _PairedRole("actor", [_candidate("actor", 3, base_version=1), _candidate("actor", 4, base_version=2)], [])
     critic = _PairedRole("critic", [_candidate("critic", 3, base_version=1), _candidate("critic", 4, base_version=2)], [])
@@ -529,6 +580,27 @@ def test_close_closes_every_role_once_and_records_the_reason():
     assert [e for e in driver.events if e[0] == "rl_sync_closed"] == [
         ("rl_sync_closed", {"sync/leave_reason": 5, "sync/finished": False})
     ]
+
+
+class _CloseFailsRole(_PairedRole):
+    def close(self):
+        super().close()
+        raise OSError("socket already gone")
+
+
+def test_close_closes_every_role_even_when_one_close_fails():
+    actor = _CloseFailsRole("actor", [], [])
+    critic = _PairedRole("critic", [], [])
+    session, driver = _session(actor, critic), _Driver()
+    session.start(driver)
+
+    with pytest.raises(RuntimeError, match="actor close failed: OSError: socket already gone"):
+        session.close(3)
+
+    assert actor.closed and critic.closed
+    [(_, fields)] = [e for e in driver.events if e[0] == "rl_sync_closed"]
+    assert fields["sync/leave_reason"] == 3
+    assert fields["sync/close_failures"] == ["actor close failed: OSError: socket already gone"]
 
 
 def test_fragment_resident_state_never_materializes():
