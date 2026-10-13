@@ -55,7 +55,16 @@ def _syncer_profile() -> dict[str, object]:
 
 def test_syncer_profile_matches_rust_canonical_vector():
     assert SyncerSemanticProfile.from_mapping(_syncer_profile()).sha256 == (
-        "b904a25c417a24deef77b8526c4e982a13a35c65d331a4cafb74e579b584d4b7"
+        "85a50d0e4fd5103b81a2295536fca0e5ad96cd50531fb1396208af8459be571e"
+    )
+
+
+def test_syncer_profile_hash_ignores_resume():
+    # P0-1.7b.1-Q7: a restarted syncer (--resume) keeps the islands' HELLO hash.
+    fresh = _syncer_profile()
+    fresh["resume"] = False
+    assert SyncerSemanticProfile.from_mapping(fresh).sha256 == (
+        SyncerSemanticProfile.from_mapping(_syncer_profile()).sha256
     )
 
 

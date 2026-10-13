@@ -13,7 +13,9 @@ import struct
 from dataclasses import dataclass
 
 SYNCER_SEMANTIC_PROFILE_SCHEMA = "yeto.syncer-semantic-profile.v1"
-_DOMAIN = b"yeto-syncer-semantic-profile-v1\0"
+# v2 drops ``resume`` (how a run starts, not its semantics): a restarted
+# syncer keeps the hash every island carries in HELLO (P0-1.7b.1-Q7).
+_DOMAIN = b"yeto-syncer-semantic-profile-v2\0"
 _FIELDS = {
     "schema",
     "learners",
@@ -302,7 +304,6 @@ class SyncerSemanticProfile:
         encoded.extend(struct.pack("<ff", self.outer_lr, self.outer_momentum))
         encoded.append(self.checkpoint_enabled)
         encoded.extend(struct.pack("<Q", self.checkpoint_every))
-        encoded.append(self.resume)
         encoded.append(self.mark_final_checkpoint)
         _encode_optional(encoded, self.learner_budget_steps, "<Q")
         _encode_optional(encoded, self.max_base_lag, "<Q")

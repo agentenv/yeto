@@ -127,7 +127,9 @@ pub struct Config {
     pub elastic_final_grace_s: Option<u64>,
 }
 
-const SEMANTIC_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-semantic-profile-v1\0";
+// v2 drops `resume`: it is how a run (re)starts, not its semantics, so a
+// restarted syncer keeps the hash every island already carries in HELLO.
+const SEMANTIC_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-semantic-profile-v2\0";
 
 impl Config {
     /// Canonical identity of every launch field that can affect merging,
@@ -153,7 +155,6 @@ impl Config {
         encoded.extend_from_slice(&self.outer_momentum.to_bits().to_le_bytes());
         encoded.push(u8::from(self.checkpoint_path.is_some()));
         encoded.extend_from_slice(&self.checkpoint_every.to_le_bytes());
-        encoded.push(u8::from(self.resume));
         encoded.push(u8::from(self.mark_final_checkpoint));
         encode_optional_u64(&mut encoded, self.learner_budget_steps);
         encode_optional_u64(&mut encoded, self.max_base_lag);
@@ -4349,7 +4350,7 @@ mod tests {
             .collect::<String>();
         assert_eq!(
             digest,
-            "b904a25c417a24deef77b8526c4e982a13a35c65d331a4cafb74e579b584d4b7"
+            "85a50d0e4fd5103b81a2295536fca0e5ad96cd50531fb1396208af8459be571e"
         );
 
         let original = config.semantic_profile_hash();
@@ -4357,6 +4358,7 @@ mod tests {
         config.checkpoint_path = Some(std::path::PathBuf::from("/another/critic.ckpt"));
         config.final_state = Some(std::path::PathBuf::from("/ignored/final.bin"));
         config.event_tape = Some(std::path::PathBuf::from("/ignored/events.jsonl"));
+        config.resume = false; // P0-1.7b.1-Q7: how the syncer starts, not semantics
         assert_eq!(config.semantic_profile_hash(), original);
         config.pipeline = 3;
         assert_ne!(config.semantic_profile_hash(), original);
@@ -4398,7 +4400,7 @@ mod tests {
             .collect::<String>();
         assert_eq!(
             digest,
-            "4b61bb37c3dfafce169058a26f4e76dd1fcaad257c115ea468133916a24560b8"
+            "c677c127b1ad3e1da179863ee02b6b2e1bc232edb03b088bad62251e5d8d9ba5"
         );
     }
 
