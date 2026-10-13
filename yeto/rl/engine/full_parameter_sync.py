@@ -32,6 +32,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
 from yeto.protocol import PartialMessageGenerationLost
+from yeto.rl.elastic_client import LeaveReason
 
 from .driver import SyncBoundary, SyncStart
 
@@ -471,11 +472,6 @@ def _retained_replay(retained: Any, observed: Any | None) -> Any | None:
     return replace(retained, permit=observed.permit)
 
 
-# LEAVE reason of a clean finish (P5 code 0, FINISHED).  P5 owns the full code
-# table; this session only forwards the code it is closed with.
-# TODO(P5 rl-island-graceful-leave): once yeto/rl/engine/leave_reason.py lands,
-# replace this constant with LeaveReason.FINISHED (an IntEnum equal to 0).
-REASON_FINISHED = 0
 
 
 class FullParameterSync:
@@ -594,9 +590,9 @@ class FullParameterSync:
         if not self.finished:
             raise RuntimeError("full-parameter sync stopped before every role acknowledged its final cut")
 
-    def close(self, reason: int = REASON_FINISHED) -> None:
+    def close(self, reason: int = LeaveReason.FINISHED) -> None:
         """Close every role once.  Full-parameter syncers run in legacy mode,
-        which has no LEAVE message, so the reason is only recorded."""
+        which has no LEAVE message, so the P5 reason code is only recorded."""
 
         if self.closed:
             return
@@ -605,7 +601,9 @@ class FullParameterSync:
         if self._driver is not None:
             self._driver.emit(
                 "rl_sync_closed",
-                **{"sync/leave_reason": int(reason), "sync/finished": self.finished,
+                **{"sync/leave_reason": int(reason),
+                   "sync/leave_reason_name": LeaveReason(reason).name,
+                   "sync/finished": self.finished,
                    **({"sync/close_failures": failures} if failures else {})},
             )
         if failures:

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from yeto.protocol import PartialMessageGenerationLost, PullRequest
+from yeto.rl.elastic_client import LeaveReason
 from yeto.rl.adapters.miles.full_parameter.role_stream import (
     RoleRoundResult,
     RoleSubmissionCandidate,
@@ -573,12 +574,13 @@ def test_close_closes_every_role_once_and_records_the_reason():
     session, driver = _session(actor, critic), _Driver()
     session.start(driver)
 
-    session.close(5)
-    session.close(0)
+    session.close(LeaveReason.TRAINING_FAILED)
+    session.close()
 
     assert actor.closed and critic.closed
     assert [e for e in driver.events if e[0] == "rl_sync_closed"] == [
-        ("rl_sync_closed", {"sync/leave_reason": 5, "sync/finished": False})
+        ("rl_sync_closed", {"sync/leave_reason": 5, "sync/leave_reason_name": "TRAINING_FAILED",
+                            "sync/finished": False})
     ]
 
 
@@ -595,11 +597,11 @@ def test_close_closes_every_role_even_when_one_close_fails():
     session.start(driver)
 
     with pytest.raises(RuntimeError, match="actor close failed: OSError: socket already gone"):
-        session.close(3)
+        session.close(LeaveReason.PREEMPTED)
 
     assert actor.closed and critic.closed
     [(_, fields)] = [e for e in driver.events if e[0] == "rl_sync_closed"]
-    assert fields["sync/leave_reason"] == 3
+    assert (fields["sync/leave_reason"], fields["sync/leave_reason_name"]) == (3, "PREEMPTED")
     assert fields["sync/close_failures"] == ["actor close failed: OSError: socket already gone"]
 
 
