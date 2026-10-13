@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from yeto.rl import applied_lr, grad_audit
+from yeto.rl import applied_lr
 from yeto.rl.core import StrictRlInvariantError, require_nonzero_learning_rate
 
 import test_rl_decoupled as decoupled_tests
@@ -22,7 +22,7 @@ class _Optimizer:
 
 
 # ---------------------------------------------------------------------------
-# reading and transporting the applied LR
+# reading the applied LR
 # ---------------------------------------------------------------------------
 def test_optimizer_lr_reads_param_groups_and_chained_children():
     assert applied_lr.optimizer_lr(_Optimizer(1e-5, 1e-5)) == 1e-5
@@ -31,40 +31,6 @@ def test_optimizer_lr_reads_param_groups_and_chained_children():
     assert applied_lr.optimizer_lr(_Optimizer(0.0)) == 0.0
     with pytest.raises(applied_lr.AppliedLrError):
         applied_lr.optimizer_lr(SimpleNamespace(param_groups=[]))
-
-
-def test_record_and_collect_round_trip(tmp_path):
-    args = SimpleNamespace(**{applied_lr.APPLIED_LR_DIR_ATTR: str(tmp_path)})
-    applied_lr.record(args, 4, 0, _Optimizer(1e-5), is_writer=lambda: True)
-    applied_lr.record(args, 4, 1, _Optimizer(5e-6), is_writer=lambda: True)
-    assert applied_lr.record(args, 4, 2, _Optimizer(1.0), is_writer=lambda: False) == 1.0
-    assert applied_lr.collect(tmp_path, 4, 2) == (1e-5, 5e-6)
-    assert list(tmp_path.iterdir()) == []  # consumed
-    with pytest.raises(applied_lr.AppliedLrError, match="optimizer step 0"):
-        applied_lr.collect(tmp_path, 4, 1)
-    # not armed: nothing recorded
-    assert applied_lr.record(SimpleNamespace(), 0, 0, _Optimizer(1e-5)) is None
-
-
-def test_combined_hook_records_lr_and_runs_the_grad_audit(tmp_path, monkeypatch):
-    audited = []
-    monkeypatch.setattr(
-        grad_audit, "before_train_step", lambda *a: audited.append(a[1:3])
-    )
-    args = SimpleNamespace(
-        **{
-            applied_lr.APPLIED_LR_DIR_ATTR: str(tmp_path / "lr"),
-            grad_audit.GRAD_AUDIT_DIR_ATTR: str(tmp_path / "audit"),
-        }
-    )
-    applied_lr.before_train_step(args, 2, 0, [], _Optimizer(3e-6), None)
-    assert audited == [(2, 0)]
-    assert applied_lr.collect(tmp_path / "lr", 2, 1) == (3e-6,)
-    # grad audit not configured: only the LR is recorded
-    del args.yeto_rl_grad_audit_dir
-    applied_lr.before_train_step(args, 3, 0, [], _Optimizer(3e-6), None)
-    assert audited == [(2, 0)]
-    assert applied_lr.collect(tmp_path / "lr", 3, 1) == (3e-6,)
 
 
 def test_invariant_message_names_round_and_lr():
