@@ -43,6 +43,16 @@ def test_sao_runs_on_ports(kwargs):
     assert ports_rejections(**kwargs) == []
 
 
+def test_deepseek_v4_expert_full_runs_on_the_full_parameter_sync():
+    # P0 1.7b.2: attention LoRA + clone experts as one full-parameter LoRA hybrid.
+    assert ports_rejections(
+        sync_preset="dense-full",
+        model_recipe="deepseek-v4-flash",
+        lora_targets="attention",
+        expert_full_count=4,
+    ) == []
+
+
 def test_ppo_is_not_routed_to_legacy():
     # rl-algo-critic-family 3.1: the critic is decided by the algorithm spec,
     # the capability declaration and the critic rejections, not by routing.
@@ -56,9 +66,9 @@ def test_ppo_is_not_routed_to_legacy():
         (dict(sync_preset="dense-full", parameter_mode="full", island_scheduling="elastic"), "elastic"),
         (dict(sync_preset="sao-streaming-full", parameter_mode="full",
               island_scheduling="elastic"), "elastic"),
-        (dict(model_recipe="deepseek-v4-flash"), "DeepSeek V4"),
-        (dict(lora_targets="attention-routed-experts"), "DeepSeek V4"),
-        (dict(expert_full_count=4), "DeepSeek V4"),
+        (dict(lora_targets="attention-routed-experts"), "clone-only expert LoRA"),
+        (dict(model_recipe="deepseek-v4-flash", expert_full_count=4), "expert-full"),
+        (dict(sync_preset="dense-full", expert_full_count=4, island_scheduling="elastic"), "elastic"),
         (dict(use_critic=True), "critic"),
         (dict(extra_argv=("--use-critic",)), "critic"),
         (dict(extra_argv=("--advantage-estimator", "gspo")), "non-GRPO"),
@@ -131,7 +141,7 @@ def test_explicit_legacy_is_forwarded_to_learner_and_source_setup(monkeypatch):
 
 
 def test_default_ports_rejects_legacy_only_runs_with_a_legacy_hint():
-    args = _cli(("--rl-model-recipe", "deepseek-v4-flash"))
+    args = _cli(("--lora-targets", "attention-routed-experts"))
     with pytest.raises(UnsupportedPortsCombination) as error:
         _prepare_rl_args(args)
     assert "--rl-engine legacy" in str(error.value)
@@ -257,9 +267,8 @@ def test_ports_router_mode_ignores_external_router_and_refuses_preset_address(ca
 @pytest.mark.parametrize(
     "extra, reason",
     [
-        (("--rl-model-recipe", "deepseek-v4-flash"), "DeepSeek V4"),
-        (("--expert-full-count", "2"), "DeepSeek V4"),
-        (("--lora-targets", "attention-routed-experts"), "DeepSeek V4"),
+        (("--expert-full-count", "2"), "expert-full"),
+        (("--lora-targets", "attention-routed-experts"), "clone-only expert LoRA"),
     ],
 )
 def test_launcher_rejects_ports_before_startup(extra, reason):
@@ -295,7 +304,7 @@ def test_learner_default_is_ports():
 @pytest.mark.parametrize(
     "extra",
     [
-        ("--rl-model-recipe", "deepseek-v4-flash"),
+        ("--lora-targets", "attention-routed-experts"),
         ("--expert-full-count", "2"),
         ("--rollout-num-gpus", "2"),
     ],
@@ -404,7 +413,11 @@ def test_harness_plan_key_only_for_ports():
     with pytest.raises(HarnessError, match="absent"):
         ssh_harness._validate_plan({**_plan(), "rl_engine": "legacy"})
     dsv4 = {**_plan(), "rl_engine": "ports"}
-    dsv4["learner"] = {**dsv4["learner"], "rl_model_recipe": "deepseek-v4-flash"}
+    dsv4["learner"] = {
+        **dsv4["learner"],
+        "rl_model_recipe": "deepseek-v4-flash",
+        "lora_targets": "attention-routed-experts",
+    }
     with pytest.raises(HarnessError, match="legacy"):
         ssh_harness._validate_plan(dsv4)
 

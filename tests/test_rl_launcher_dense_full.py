@@ -118,3 +118,52 @@ def test_island_entry_accepts_the_dense_island_command():
     assert (parsed.parameter_mode, parsed.sync_preset) == ("full", "dense-full")
     assert (parsed.num_learners, parsed.learner_id) == (2, 1)
     island_entry._check_dense_full_sweep(parsed, rl_engine="ports", yeto_policy_sync=True)
+
+
+EXPERT_FULL = (
+    "--rl-sync-preset", "dense-full", "--rl-placement", "fixed-partition",
+    "--rl-rollout-gpus", "8", "--rl-parameter-layout-sha256", LAYOUT, "--fragments", "4",
+    "--rl-model-recipe", "deepseek-v4-flash", "--lora-targets", "attention",
+    "--expert-full-count", "4", "--expert-full-lr", "1e-06",
+    "--expert-selection-sha256", "1" * 64, "--expert-selection-contract-sha256", "2" * 64,
+    "--tensor-parallel", "8", "--expert-parallel", "8", "--rollout-num-gpus-per-engine", "8",
+    "--sglang-tp-size", "8", "--sglang-ep-size", "8", "--sglang-attention-backend", "dsv4",
+    "--sglang-page-size", "256", "--no-sglang-deterministic-inference",
+)
+
+
+def test_deepseek_v4_expert_full_island_is_the_lora_hybrid_on_the_dense_sweep(monkeypatch):
+    # P0 1.7b.2: attention LoRA + clone experts ride the same strict sweep as dense.
+    from yeto import launcher
+    from yeto.launcher import _prepare_rl_args, dry_run_plan
+
+    args = _launcher_args("ports", EXPERT_FULL, gpu="modal:16xh200,modal:16xh200")
+    args.controller = "local"
+    _prepare_rl_args(args)
+    plan = dry_run_plan(args)
+    profile_hash = launcher.rl_syncer_profile(args, 2).sha256
+    for island in plan["island_requests"]:
+        command = island["learner_command"]
+        assert _flag(command, "--sync-preset") == "dense-full"
+        assert "--parameter-mode" not in command
+        assert _flag(command, "--lora-targets") == "attention"
+        assert _flag(command, "--expert-full-count") == "4"
+        assert _flag(command, "--syncer-profile-sha256") == profile_hash
+    [actor] = plan["role_syncers"]
+    assert _flag(actor["command"], "--policy-sweep-fragments") == "4"
+
+
+    from yeto.gpu_spec import parse_gpu_spec
+
+    task = launcher.make_miles_island_task(args, parse_gpu_spec(args.gpu)[0], 0, 2, "127.0.0.1:1")
+    assert task.envs["YETO_DSV4_EXPERT_FULL_PORTS"] == "1"
+    assert "YETO_DSV4_EXPERT_FULL" not in task.envs  # the legacy runtime stays off
+
+    tokens = shlex.split(plan["island_requests"][0]["learner_command"].split(
+        "-m yeto.rl.adapters.miles.island_entry", 1)[1])
+    tokens = [{"$SYNCER_ADDR": "127.0.0.1:29400", "$LEARNER_ID": "1"}.get(t, t) for t in tokens]
+    from yeto.rl.adapters.miles import island_entry
+
+    parsed = island_entry.parse_args(tokens)
+    assert (parsed.parameter_mode, parsed.sync_preset, parsed.expert_full_count) == ("lora", "dense-full", 4)
+    island_entry._check_dense_full_sweep(parsed, rl_engine="ports", yeto_policy_sync=True)

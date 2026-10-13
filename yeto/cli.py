@@ -107,10 +107,10 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         default="ports",
         help=(
             "RL engine path: ports (default; yeto-owned island loop over "
-            "upstream Miles; LoRA + GRPO + serial colocated + "
-            "strict-avg/decoupled only) or legacy (agentenv Miles fork; "
-            "required for SAO, dense-full, DeepSeek V4, critic, fixed "
-            "partition and non-causal models; deprecated)"
+            "upstream Miles; LoRA + GRPO, strict-avg/decoupled, dense-full "
+            "and DeepSeek V4 expert-full) or legacy (agentenv Miles fork; "
+            "required for SAO, DeepSeek V4 clone-only LoRA and non-causal "
+            "models; deprecated)"
         ),
     )
     rl.add_argument(
@@ -751,6 +751,7 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         default="strict-avg",
         help="dense-full: full-parameter GRPO as strict whole-model fragment sweeps "
         "(ports engine, --rl-placement fixed-partition, --rl-parameter-layout-sha256); "
+        "with --expert-full-count the swept state is the DeepSeek V4 LoRA hybrid; "
         "sao-streaming-full: full-parameter SAO, actor and critic streams "
         "(ports engine, --rl-placement fixed-partition, --rl-sao-contracts)",
     )

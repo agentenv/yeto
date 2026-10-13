@@ -4204,19 +4204,25 @@ from yeto.hw.catalog import COMPAT_GROUP_ENV, compat_group  # noqa: E402
 def _rl_trainable_island_flags(args, learner_id: int, num_learners: int) -> str:
     """LoRA rank/targets; for dense-full the full-parameter sweep identity (the
     probed layout hash, the frozen roster size and the syncer profile hash);
-    for sao-streaming-full this island's hash-bound runtime contract."""
+    for sao-streaming-full this island's hash-bound runtime contract.
+
+    dense-full trains every parameter, unless DeepSeek V4 expert-full selects
+    the LoRA hybrid (attention LoRA plus clone experts, P0 1.7b.2)."""
     if rl_sao_streaming(args):
         island = args.rl_sao_manifest.island(learner_id)
         return (" --parameter-mode full"
                 f" --sao-streaming-runtime {shlex.quote(island.runtime.container_path)}"
                 f" --sao-streaming-runtime-sha256 {island.runtime.sha256}"
                 f" --sao-context-sha256 {island.context_sha256}")
+    lora = f" --lora-r {args.lora_r} --lora-targets {args.lora_targets}"
     if not rl_dense_sweep(args):
-        return f" --lora-r {args.lora_r} --lora-targets {args.lora_targets}"
-    return (" --parameter-mode full"
-            f" --parameter-layout-sha256 {args.rl_parameter_layout_sha256}"
-            f" --num-learners {num_learners}"
-            f" --syncer-profile-sha256 {rl_syncer_profile(args, num_learners).sha256}")
+        return lora
+    sweep = (f" --parameter-layout-sha256 {args.rl_parameter_layout_sha256}"
+             f" --num-learners {num_learners}"
+             f" --syncer-profile-sha256 {rl_syncer_profile(args, num_learners).sha256}")
+    if getattr(args, "expert_full_count", 0):
+        return lora + sweep
+    return " --parameter-mode full" + sweep
 
 
 def make_miles_island_task(
@@ -4504,10 +4510,13 @@ def make_miles_island_task(
             }
         )
     if getattr(args, "expert_full_count", 0):
+        # Each Miles layout has its own expert-full runtime (sitecustomize).
+        runtime_flag = ("YETO_DSV4_EXPERT_FULL_PORTS"
+                        if getattr(args, "rl_engine", "ports") == "ports" else "YETO_DSV4_EXPERT_FULL")
         envs.update(
             {
                 "YETO_DSV4_EXPERT_CLONE": "1",
-                "YETO_DSV4_EXPERT_FULL": "1",
+                runtime_flag: "1",
                 "YETO_DSV4_EXPERT_FULL_COUNT": str(args.expert_full_count),
                 "YETO_DSV4_EXPERT_FULL_LR": str(args.expert_full_lr),
                 "NVTE_GROUPED_LINEAR_SINGLE_PARAM": "0",

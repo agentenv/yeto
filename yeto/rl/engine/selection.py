@@ -7,8 +7,8 @@ GPU work starts. The choice is always explicit; nothing here infers it.
 R0 ports support (spec ``rl-engine-selection`` "不支持的组合明确拒绝"):
 causal LM + LoRA or full parameters, GRPO / PPO critics, serial colocated or
 fixed partition, strict-avg / decoupled presets and the full-parameter presets
-(dense strict sweep, SAO streaming).  Everything else is rejected with a
-pointer to ``--rl-engine legacy``.
+(dense strict sweep, which also carries DeepSeek V4 expert-full, and SAO
+streaming).  Everything else is rejected with a pointer to ``--rl-engine legacy``.
 """
 
 from __future__ import annotations
@@ -71,12 +71,12 @@ def ports_rejections(
         reasons.append(f"tuning {tuning!r} / parameter mode {parameter_mode!r}")
     if sync_preset not in PORTS_SYNC_PRESETS | FULL_PARAMETER_SYNC_PRESETS:
         reasons.append(f"sync preset {sync_preset!r}")
-    if (
-        model_recipe == "deepseek-v4-flash"
-        or lora_targets == "attention-routed-experts"
-        or int(expert_full_count or 0) > 0
-    ):
-        reasons.append("DeepSeek V4 recipe (clone/expert-full LoRA)")
+    # P0 1.7b.2: the DeepSeek V4 recipe and its expert-full tuning run on
+    # ports; expert-full is a LoRA hybrid on the full-parameter sync.
+    if lora_targets == "attention-routed-experts":
+        reasons.append("DeepSeek V4 clone-only expert LoRA (attention-routed-experts)")
+    if int(expert_full_count or 0) > 0 and sync_preset != "dense-full":
+        reasons.append("expert-full tuning without --rl-sync-preset dense-full (the full-parameter sync)")
     estimator = facts.advantage_estimator or advantage_estimator
     # rl-algo-critic-family 3.1: PPO (shared actor/critic, Miles derives
     # use_critic from the estimator) is not routed to legacy any more; the

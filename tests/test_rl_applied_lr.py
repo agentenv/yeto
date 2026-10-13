@@ -83,7 +83,7 @@ def test_learner_arms_one_combined_hook_with_grad_audit(tmp_path, monkeypatch):
     )
     miles_args = SimpleNamespace(custom_megatron_before_train_step_hook_path=None)
     monkeypatch.setenv(grad_audit.GRAD_AUDIT_ENV, "1")
-    assert learner._configure_applied_lr(args, miles_args, "legacy", dense_full=False)
+    assert learner._configure_applied_lr(args, miles_args, "legacy", full_parameter_sync=False)
     assert learner._configure_grad_audit(args, miles_args, "legacy")
     # neither overwrote the other: the combined hook runs both
     assert miles_args.custom_megatron_before_train_step_hook_path == applied_lr.HOOK_PATH
@@ -92,15 +92,15 @@ def test_learner_arms_one_combined_hook_with_grad_audit(tmp_path, monkeypatch):
     assert lr_dir.startswith(str(tmp_path / "tape" / "applied-lr-1-"))
 
     # ports reads the LR in its train_one_step recorder; eval-only never trains
-    assert not learner._configure_applied_lr(args, SimpleNamespace(), "ports", dense_full=False)
+    assert not learner._configure_applied_lr(args, SimpleNamespace(), "ports", full_parameter_sync=False)
     eval_args = SimpleNamespace(**vars(args), eval_only=True)
-    assert not learner._configure_applied_lr(eval_args, SimpleNamespace(), "legacy", dense_full=False)
+    assert not learner._configure_applied_lr(eval_args, SimpleNamespace(), "legacy", full_parameter_sync=False)
     with pytest.raises(ValueError, match="conflicts"):
         learner._configure_applied_lr(
             args,
             SimpleNamespace(custom_megatron_before_train_step_hook_path="x.y"),
             "legacy",
-            dense_full=False,
+            full_parameter_sync=False,
         )
 
 
