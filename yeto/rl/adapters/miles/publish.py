@@ -889,8 +889,8 @@ class MilesPublisher:
 # ---------------------------------------------------------------------------
 # Published policy identity (moved from the legacy engine, rl-code-quality-cleanup
 # 1.4).  Miles calls ``set_current_published_policy_identity`` through
-# ``--external-policy-identity-setter-path``; dense-full evaluation and the
-# SAO streaming runtime read it back.
+# ``--external-policy-identity-setter-path``; the SAO streaming runtime reads
+# it back.
 # ---------------------------------------------------------------------------
 def _policy_token(version: int) -> str:
     return f"yeto:{version}"

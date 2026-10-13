@@ -790,15 +790,6 @@ def generate_rollout(args, rollout_id: int, data_source, evaluation: bool = Fals
         if policy_version < 0:
             raise RuntimeError("Miles evaluation has no applied policy version")
         policy_hash = getattr(args, "yeto_rl_eval_policy_hash", None)
-        if getattr(args, "yeto_rl_sync_preset", None) == "dense-full":
-            identity = get_current_published_policy_identity(
-                args,
-                expected_policy_version=policy_version,
-            )
-            if identity is None or identity[1] != policy_hash:
-                raise RuntimeError(
-                    "dense Miles evaluation has no exact published policy identity"
-                )
         for result in _attach_eval_scalar_metrics(output):
             _append_rl_event(
                 args,
@@ -914,8 +905,7 @@ def generate_rollout(args, rollout_id: int, data_source, evaluation: bool = Fals
 # ---------------------------------------------------------------------------
 # Miles --rollout-all-samples-process-path: keep complete oversampled groups
 # (moved from the legacy engine with the dynamic-sampling filter helpers,
-# rl-code-quality-cleanup 1.7; used by dense-full and the strict/decoupled
-# policy-sync runs).
+# rl-code-quality-cleanup 1.7; used by the strict/decoupled policy-sync runs).
 # ---------------------------------------------------------------------------
 def _dynamic_sampling_filter(args):
     """Load the optional Miles group filter once per learner process."""

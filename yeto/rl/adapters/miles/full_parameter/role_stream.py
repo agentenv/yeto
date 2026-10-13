@@ -29,7 +29,7 @@ from yeto.rl.adapters.miles.models.chunked_full_parameter import (
     ReferencedPolicyCut,
     StoredAuthoritativeFragment,
 )
-from yeto.rl.adapters.miles.models.dense_sweep_wire import MilesRayInboundChunkSink
+from yeto.rl.adapters.miles.full_parameter.inbound_sink import MilesRayInboundChunkSink
 from yeto.rl.engine.policy_digest import PolicyDigest, TrainerResidentState, WeightsChanged
 from yeto.rl.engine.trainable_state import LAYOUT_FRAGMENTS, UnsupportedLayoutError
 from yeto.rl.local_learner import ComponentIdentity
