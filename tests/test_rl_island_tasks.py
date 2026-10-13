@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import shlex
+from pathlib import Path
 
 import pytest
 
@@ -19,6 +20,7 @@ from yeto.rl.island_tasks import (
 )
 
 TWO_ISLANDS = "modal:1xh100,modal:1xh100"
+F = "--rl-island-tasks"
 
 
 def _write_rows(path, task_ids, *, nested=True):
@@ -47,15 +49,15 @@ def catalog(tmp_path):
 
 
 def test_inline_spec_accepts_both_island_key_forms():
-    spec = parse_island_tasks("l0=web1-10,pwn1-10; 1=web11-20 , pwn11-20")
+    spec = parse_island_tasks("l0=web1-10,pwn1-10; 1=web11-20 , pwn11-20", flag=F)
     assert spec == {0: ("web1-10", "pwn1-10"), 1: ("web11-20", "pwn11-20")}
-    assert parse_island_tasks(format_island_tasks(spec)) == spec
+    assert parse_island_tasks(format_island_tasks(spec), flag=F) == spec
 
 
 def test_json_file_spec(tmp_path):
     path = tmp_path / "islands.json"
     path.write_text(json.dumps({"0": ["web1", "web2"], "l1": ["pwn1"]}))
-    assert parse_island_tasks(str(path)) == {0: ("web1", "web2"), 1: ("pwn1",)}
+    assert parse_island_tasks(str(path), flag=F) == {0: ("web1", "web2"), 1: ("pwn1",)}
 
 
 @pytest.mark.parametrize("value, message", [
@@ -67,38 +69,38 @@ def test_json_file_spec(tmp_path):
 ])
 def test_bad_inline_spec_is_refused(value, message):
     with pytest.raises(ValueError, match=message):
-        parse_island_tasks(value)
+        parse_island_tasks(value, flag=F)
 
 
 def test_json_spec_rejects_non_lists_and_separator_ids(tmp_path):
     path = tmp_path / "islands.json"
     path.write_text(json.dumps({"0": "web1"}))
     with pytest.raises(ValueError, match="list of strings"):
-        parse_island_tasks(str(path))
+        parse_island_tasks(str(path), flag=F)
     path.write_text(json.dumps({"0": ["a,b"]}))
     with pytest.raises(ValueError, match="contains one of"):
-        parse_island_tasks(str(path))
+        parse_island_tasks(str(path), flag=F)
 
 
 # --- plan against the data ----------------------------------------------------------------
 
 
 def test_plan_gives_each_island_only_its_tasks(catalog):
-    spec = parse_island_tasks("l0=web1-10,pwn1-10;l1=web11-20,pwn11-20")
-    plan = plan_island_tasks(catalog, spec, [0, 1])
+    spec = parse_island_tasks("l0=web1-10,pwn1-10;l1=web11-20,pwn11-20", flag=F)
+    plan = plan_island_tasks(catalog, spec, [0, 1], flag=F)
     assert set(plan[0].task_ids) == set(_ids("web", 1, 10) + _ids("pwn", 1, 10))
     assert set(plan[1].task_ids) == set(_ids("web", 11, 20) + _ids("pwn", 11, 20))
     rows = [json.loads(line) for line in plan[0].content.decode().splitlines()]
     assert [row["metadata"]["task_id"] for row in rows] == list(plan[0].task_ids)
     # source order and bytes: the same inputs always give the same SHA256
-    assert plan[0].sha256 == plan_island_tasks(catalog, spec, [0, 1])[0].sha256
+    assert plan[0].sha256 == plan_island_tasks(catalog, spec, [0, 1], flag=F)[0].sha256
     assert plan[0].sha256 != plan[1].sha256
-    assert task_count_warning(plan) is None
+    assert task_count_warning(plan, flag=F) is None
 
 
 def test_literal_task_id_wins_over_range_and_zero_padding(tmp_path):
     data = _write_rows(tmp_path / "t.jsonl", ["cve-2021-4", "x01", "x02", "x03"], nested=False)
-    plan = plan_island_tasks(data, {0: ("cve-2021-4",), 1: ("x01-03",)}, [0, 1])
+    plan = plan_island_tasks(data, {0: ("cve-2021-4",), 1: ("x01-03",)}, [0, 1], flag=F)
     assert plan[0].task_ids == ("cve-2021-4",)
     assert plan[1].task_ids == ("x01", "x02", "x03")
 
@@ -112,19 +114,19 @@ def test_literal_task_id_wins_over_range_and_zero_padding(tmp_path):
 ])
 def test_plan_refuses_bad_configurations(catalog, spec, islands, message):
     with pytest.raises(ValueError, match=message):
-        plan_island_tasks(catalog, spec, islands)
+        plan_island_tasks(catalog, spec, islands, flag=F)
 
 
 def test_plan_refuses_rows_without_task_id(tmp_path):
     data = tmp_path / "t.jsonl"
     data.write_text('{"metadata": {"task_id": "a"}}\n{"prompt": "no id"}\n')
     with pytest.raises(ValueError, match=":2: row has no metadata.task_id"):
-        plan_island_tasks(data, {0: ("a",)}, [0])
+        plan_island_tasks(data, {0: ("a",)}, [0], flag=F)
 
 
 def test_unequal_task_counts_only_warn(catalog):
-    plan = plan_island_tasks(catalog, {0: ("web1-20",), 1: ("pwn1-18",)}, [0, 1])
-    warning = task_count_warning(plan)
+    plan = plan_island_tasks(catalog, {0: ("web1-20",), 1: ("pwn1-18",)}, [0, 1], flag=F)
+    warning = task_count_warning(plan, flag=F)
     assert "island 0: 20" in warning and "island 1: 18" in warning
 
 
@@ -132,7 +134,7 @@ def test_unequal_task_counts_only_warn(catalog):
 
 
 def test_island_refuses_changed_data_and_reports_both_hashes(catalog, tmp_path):
-    plan = plan_island_tasks(catalog, {0: ("web1-2",)}, [0])
+    plan = plan_island_tasks(catalog, {0: ("web1-2",)}, [0], flag=F)
     local = tmp_path / "island.jsonl"
     local.write_bytes(plan[0].content)
     assert verify_island_data(local, plan[0].sha256.upper()) == plan[0].record()
@@ -266,3 +268,56 @@ def test_dense_contract_drops_island_local_flags_only():
     assert _dense_shared_miles_argv(argv) == ["--lr", "1e-6", "--num-rollout", "5"]
     with pytest.raises(ValueError, match="no value: --eval-interval"):
         _dense_shared_miles_argv(["--eval-interval", "--lr", "1"])
+
+
+def test_plan_is_computed_once_and_cached(catalog, tmp_path, monkeypatch):
+    from yeto import launcher
+    from yeto.rl import island_tasks
+
+    args = _island_args(catalog, tmp_path, monkeypatch, "l0=web1;l1=web2")
+    launcher._prepare_rl_args(args)
+    monkeypatch.setattr(island_tasks, "plan_island_tasks",
+                        lambda *a, **k: pytest.fail("plan recomputed"))
+    launcher.dry_run_plan(args)
+    assert set(launcher._island_tasks_manifest(args)["island_tasks"]) == {"0", "1"}
+    with pytest.raises(ValueError, match=r"no task list for learner 2 \(planned islands: \[0, 1\]\)"):
+        launcher.island_task_data(args, 2)
+
+
+def test_head_second_hop_rebuilds_the_same_files(catalog, tmp_path, monkeypatch):
+    """First hop stages --data for the head (head_stage); the head prepares again."""
+
+    import shutil
+
+    from yeto import launcher
+    from yeto.cli import _serializable_args
+    from yeto.datasource import head_stage
+
+    spec = tmp_path / "islands.json"
+    spec.write_text(json.dumps({"0": ["web1-3"], "1": ["pwn1-3"]}))
+    first = _island_args(catalog, tmp_path, monkeypatch, str(spec))
+    launcher._prepare_rl_args(first)
+    first_hashes = {k: v.sha256 for k, v in launcher.island_task_plan(first).items()}
+    staged_path, mounts = head_stage(first.data)
+    (head_copy_source,) = mounts.values()
+    head_copy = tmp_path / "head" / Path(staged_path).name
+    head_copy.parent.mkdir()
+    shutil.copyfile(head_copy_source, head_copy)
+    replay = _serializable_args(first)
+    assert "_island_task_plan" not in replay
+    second = argparse.Namespace(**{**replay, "data": str(head_copy)})
+    launcher._prepare_rl_args(second)
+    assert {k: v.sha256 for k, v in launcher.island_task_plan(second).items()} == first_hashes
+
+
+@pytest.mark.parametrize("factory", ["make_learner_task", "make_diffusion_sample_task"])
+def test_non_ports_paths_refuse_island_tasks(factory):
+    from yeto import launcher
+    from yeto.gpu_spec import parse_gpu_spec
+
+    args = argparse.Namespace(rl_island_tasks="l0=web1")
+    spec = parse_gpu_spec(TWO_ISLANDS)[0]
+    call = (lambda: launcher.make_learner_task(args, spec, 0, 1, "x")) \
+        if factory == "make_learner_task" else (lambda: launcher.make_diffusion_sample_task(args, spec))
+    with pytest.raises(ValueError, match="ports RL islands only"):
+        call()

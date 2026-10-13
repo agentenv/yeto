@@ -632,7 +632,8 @@ _SCHEDULING = (
              help="per-island task lists from --data (a local JSONL whose rows carry "
              "metadata.task_id): 'l0=web1-10,pwn1-10;l1=web11-20,pwn11-20' or a JSON file "
              "{\"0\": [...], \"1\": [...]}; the launcher writes one prompt file per island; "
-             "every training island needs a list; eval runs on the eval island only"),
+             "every training island needs a list; eval runs on the eval island only; a JSON "
+             "spec file path must not contain '='"),
 )
 
 _EVAL = (

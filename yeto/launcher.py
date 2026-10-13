@@ -2068,21 +2068,25 @@ ISLAND_TASKS_DIR = "island-tasks"
 def island_task_plan(args):
     """rl-per-island-tasks: island -> :class:`IslandTaskData`, or None without the flag.
 
-    Recomputed from ``--data`` wherever the islands are built (the head's
-    second hop reads its staged copy); same source and spec give the same bytes.
+    Computed once per launch by :func:`_check_island_tasks` (cached on
+    ``args``). Islands are only built for the ``--gpu`` entries (elastic adds
+    no islands), so the plan covers every learner id the launch can build.
+    The head's second hop prepares its own args and rebuilds the same bytes
+    from its staged ``--data``.
     """
 
-    spec_value = getattr(args, "rl_island_tasks", None)
-    if not spec_value:
+    if not getattr(args, "rl_island_tasks", None):
         return None
-    from .rl.island_tasks import parse_island_tasks, plan_island_tasks
-
-    return plan_island_tasks(args.data, parse_island_tasks(spec_value),
-                             range(len(parse_gpu_spec(args.gpu))))
+    plan = getattr(args, "_island_task_plan", None)
+    if plan is None:
+        raise ValueError(f"{rl_option('rl_island_tasks', CLI)} was not checked; "
+                         "prepare the launch arguments first")
+    return plan
 
 
 def _check_island_tasks(args, eval_interval: int | None) -> None:
-    """``--rl-island-tasks``: refuse a bad spec before any cloud call (P3-Q1..Q3).
+    """``--rl-island-tasks``: refuse a bad spec before any cloud call (P3-Q1..Q3),
+    then cache the plan on ``args``.
 
     Rewrites the flag to its inline form so a JSON-file spec reaches the head.
     """
@@ -2090,7 +2094,12 @@ def _check_island_tasks(args, eval_interval: int | None) -> None:
     if not getattr(args, "rl_island_tasks", None):
         return
     from .datasource import kind
-    from .rl.island_tasks import format_island_tasks, parse_island_tasks, task_count_warning
+    from .rl.island_tasks import (
+        format_island_tasks,
+        parse_island_tasks,
+        plan_island_tasks,
+        task_count_warning,
+    )
 
     flag = rl_option("rl_island_tasks", CLI)
     data = getattr(args, "data", None)
@@ -2103,10 +2112,21 @@ def _check_island_tasks(args, eval_interval: int | None) -> None:
         # P3-Q3: eval uses the full set on the eval island only.
         raise ValueError(f"{flag}: training islands do not run eval; drop "
                          f"{rl_option('rl_eval_interval', CLI)} and evaluate on the eval island")
-    args.rl_island_tasks = format_island_tasks(parse_island_tasks(args.rl_island_tasks))
-    warning = task_count_warning(island_task_plan(args))
+    spec = parse_island_tasks(args.rl_island_tasks, flag=flag)
+    args.rl_island_tasks = format_island_tasks(spec)
+    args._island_task_plan = plan_island_tasks(
+        data, spec, range(len(parse_gpu_spec(args.gpu))), flag=flag)
+    warning = task_count_warning(args._island_task_plan, flag=flag)
     if warning:
         print(f"[launcher] WARNING {warning}", file=sys.stderr, flush=True)
+
+
+def _refuse_island_tasks(args, path: str) -> None:
+    """Per-island tasks exist on the ports RL island path only."""
+
+    if getattr(args, "rl_island_tasks", None):
+        raise ValueError(f"{rl_option('rl_island_tasks', CLI)} applies to ports RL islands "
+                         f"only, not the {path} path")
 
 
 def island_task_data(args, learner_id: int) -> tuple[str, str, dict[str, str]]:
@@ -2123,6 +2143,9 @@ def island_task_data(args, learner_id: int) -> tuple[str, str, dict[str, str]]:
     plan = island_task_plan(args)
     if plan is None:
         return learner_data_arg(args.data), "", learner_file_mounts(args.data)
+    if learner_id not in plan:
+        raise ValueError(f"{rl_option('rl_island_tasks', CLI)} has no task list for learner "
+                         f"{learner_id} (planned islands: {sorted(plan)})")
     island = plan[learner_id]
     path = runs.run_dir(args.cluster_prefix) / ISLAND_TASKS_DIR / f"island-{learner_id}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -4703,6 +4726,7 @@ def _is_alphafold3_request(args) -> bool:
 
 
 def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: int, syncer_addr: str):
+    _refuse_island_tasks(args, "SFT learner")
     import sky
 
     from .adapter_lifecycle import (
@@ -5116,6 +5140,7 @@ def _add_flag(cmd: str, name: str, value) -> str:
 
 
 def make_diffusion_sample_task(args, spec: ClusterSpec):
+    _refuse_island_tasks(args, "diffusion sample")
     import sky
 
     from .datasource import learner_data_arg, learner_file_mounts

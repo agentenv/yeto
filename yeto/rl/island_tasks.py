@@ -18,6 +18,7 @@ unless the token itself is a task id. A row's task id is
 top-level ``task_id``.
 
 This module is backend-neutral: it knows JSONL rows and task ids only.
+Callers pass the flag name (``flag=``) that error messages name.
 """
 
 from __future__ import annotations
@@ -54,7 +55,7 @@ class IslandTaskData:
         return {"task_ids": list(self.task_ids), "data_sha256": self.sha256}
 
 
-def parse_island_tasks(value: str) -> dict[int, tuple[str, ...]]:
+def parse_island_tasks(value: str, *, flag: str) -> dict[int, tuple[str, ...]]:
     """Parse ``--rl-island-tasks`` (inline spec or JSON file) into island -> tokens.
 
     Tokens are not expanded here: range expansion needs the task ids in the
@@ -63,48 +64,49 @@ def parse_island_tasks(value: str) -> dict[int, tuple[str, ...]]:
 
     text = (value or "").strip()
     if not text:
-        raise ValueError("--rl-island-tasks is empty")
+        raise ValueError(f"{flag} is empty")
     path = Path(text).expanduser()
     if "=" not in text and path.is_file():
-        return _parse_json_spec(path)
+        return _parse_json_spec(path, flag)
     if "=" not in text:
-        raise ValueError(f"--rl-island-tasks {value!r} is neither 'l0=...;l1=...' "
+        raise ValueError(f"{flag} {value!r} is neither 'l0=...;l1=...' "
                          "nor an existing JSON file")
     spec: dict[int, tuple[str, ...]] = {}
     for entry in filter(None, (part.strip() for part in text.split(";"))):
         key, _, tokens = entry.partition("=")
-        _add_island(spec, key.strip(), [t.strip() for t in tokens.split(",") if t.strip()])
+        _add_island(spec, key.strip(), [t.strip() for t in tokens.split(",") if t.strip()], flag)
     return spec
 
 
-def _parse_json_spec(path: Path) -> dict[int, tuple[str, ...]]:
+def _parse_json_spec(path: Path, flag: str) -> dict[int, tuple[str, ...]]:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        raise ValueError(f"--rl-island-tasks {path}: not a readable JSON file ({exc})") from exc
+        raise ValueError(f"{flag} {path}: not a readable JSON file ({exc})") from exc
     if not isinstance(raw, dict):
-        raise ValueError(f"--rl-island-tasks {path}: expected an object of island -> task list")
+        raise ValueError(f"{flag} {path}: expected an object of island -> task list")
     spec: dict[int, tuple[str, ...]] = {}
     for key, tokens in raw.items():
         if not isinstance(tokens, list) or not all(isinstance(t, str) for t in tokens):
-            raise ValueError(f"--rl-island-tasks {path}: island {key!r} needs a list of strings")
+            raise ValueError(f"{flag} {path}: island {key!r} needs a list of strings")
         for token in tokens:
             if any(sep in token for sep in _SEPARATORS):
-                raise ValueError(f"--rl-island-tasks {path}: task id {token!r} contains one "
+                raise ValueError(f"{flag} {path}: task id {token!r} contains one "
                                  f"of {_SEPARATORS}")
-        _add_island(spec, str(key).strip(), [t.strip() for t in tokens])
+        _add_island(spec, str(key).strip(), [t.strip() for t in tokens], flag)
     return spec
 
 
-def _add_island(spec: dict[int, tuple[str, ...]], key: str, tokens: list[str]) -> None:
+def _add_island(spec: dict[int, tuple[str, ...]], key: str, tokens: list[str],
+                flag: str) -> None:
     match = _ISLAND_KEY.match(key)
     if match is None:
-        raise ValueError(f"--rl-island-tasks: bad island key {key!r} (use l<id> or <id>)")
+        raise ValueError(f"{flag}: bad island key {key!r} (use l<id> or <id>)")
     island = int(match.group(1))
     if island in spec:
-        raise ValueError(f"--rl-island-tasks: island {island} is given twice")
+        raise ValueError(f"{flag}: island {island} is given twice")
     if not tokens or not all(tokens):
-        raise ValueError(f"--rl-island-tasks: island {island} has an empty task list")
+        raise ValueError(f"{flag}: island {island} has an empty task list")
     spec[island] = tuple(tokens)
 
 
@@ -123,7 +125,7 @@ def row_task_id(row: Mapping[str, Any]) -> str | None:
     return None if row.get("task_id") is None else str(row["task_id"])
 
 
-def _read_rows(path: Path) -> list[tuple[str, bytes]]:
+def _read_rows(path: Path, flag: str) -> list[tuple[str, bytes]]:
     """``(task id, original line bytes)`` for every non-empty line of a JSONL file."""
 
     rows = []
@@ -137,14 +139,14 @@ def _read_rows(path: Path) -> list[tuple[str, bytes]]:
         task_id = row_task_id(row) if isinstance(row, dict) else None
         if task_id is None:
             raise ValueError(f"{path}:{number}: row has no metadata.task_id or task_id; "
-                             "--rl-island-tasks needs a task id on every row")
+                             f"{flag} needs a task id on every row")
         rows.append((task_id, line if line.endswith(b"\n") else line + b"\n"))
     if not rows:
         raise ValueError(f"{path}: no data rows")
     return rows
 
 
-def _expand(token: str, known: set[str]) -> list[str]:
+def _expand(token: str, known: set[str], flag: str) -> list[str]:
     if token in known:
         return [token]
     match = _RANGE.match(token)
@@ -152,7 +154,7 @@ def _expand(token: str, known: set[str]) -> list[str]:
         return [token]
     start, end = match.group("start"), match.group("end")
     if int(start) > int(end):
-        raise ValueError(f"--rl-island-tasks: range {token!r} runs backwards")
+        raise ValueError(f"{flag}: range {token!r} runs backwards")
     width = len(start) if start.startswith("0") and len(start) > 1 else 0
     return [f"{match.group('prefix')}{n:0{width}d}" for n in range(int(start), int(end) + 1)]
 
@@ -165,6 +167,8 @@ def plan_island_tasks(
     source: str | Path,
     spec: Mapping[int, Sequence[str]],
     islands: Sequence[int],
+    *,
+    flag: str,
 ) -> dict[int, IslandTaskData]:
     """Check ``spec`` against the data and build each island's prompt file content.
 
@@ -175,23 +179,23 @@ def plan_island_tasks(
 
     unknown_islands = sorted(set(spec) - set(islands))
     if unknown_islands:
-        raise ValueError(f"--rl-island-tasks names islands {unknown_islands}, but the run has "
+        raise ValueError(f"{flag} names islands {unknown_islands}, but the run has "
                          f"training islands {list(islands)}")
     missing = [island for island in islands if island not in spec]
     if missing:
-        raise ValueError(f"--rl-island-tasks has no task list for islands {missing}; "
+        raise ValueError(f"{flag} has no task list for islands {missing}; "
                          "give every training island a list")
-    rows = _read_rows(Path(source).expanduser())
+    rows = _read_rows(Path(source).expanduser(), flag)
     known = {task_id for task_id, _line in rows}
     plan = {}
     for island in islands:
-        task_ids = [task for token in spec[island] for task in _expand(token, known)]
+        task_ids = [task for token in spec[island] for task in _expand(token, known, flag)]
         repeated = sorted(t for t, n in Counter(task_ids).items() if n > 1)
         if repeated:
-            raise ValueError(f"--rl-island-tasks: island {island} names {repeated} twice")
+            raise ValueError(f"{flag}: island {island} names {repeated} twice")
         absent = [t for t in task_ids if t not in known]
         if absent:
-            raise ValueError(f"--rl-island-tasks: island {island} names tasks not in "
+            raise ValueError(f"{flag}: island {island} names tasks not in "
                              f"{source}: {absent}")
         chosen = set(task_ids)
         lines = [line for task_id, line in rows if task_id in chosen]
@@ -203,14 +207,14 @@ def plan_island_tasks(
     return plan
 
 
-def task_count_warning(plan: Mapping[int, IslandTaskData]) -> str | None:
+def task_count_warning(plan: Mapping[int, IslandTaskData], *, flag: str) -> str | None:
     """The launch warning for unequal per-island task counts (P3-Q2), or None."""
 
     counts = {island: len(data.task_ids) for island, data in sorted(plan.items())}
     if len(set(counts.values())) <= 1:
         return None
     listed = ", ".join(f"island {island}: {count}" for island, count in counts.items())
-    return (f"--rl-island-tasks: islands have different task counts ({listed}); smaller "
+    return (f"{flag}: islands have different task counts ({listed}); smaller "
             "islands repeat their tasks more often, and task difficulty differences "
             "change each island's share of the merged update")
 
@@ -234,5 +238,6 @@ def verify_island_data(path: str | Path, expected_sha256: str) -> dict[str, Any]
     if actual != expected:
         raise ValueError(f"island task data {path} SHA256 mismatch: launcher sent "
                          f"{expected}, file has {actual}")
-    task_ids = _unique_in_order(task_id for task_id, _line in _read_rows(Path(path).expanduser()))
+    rows = _read_rows(Path(path).expanduser(), "--data")
+    task_ids = _unique_in_order(task_id for task_id, _line in rows)
     return {"task_ids": task_ids, "data_sha256": actual}

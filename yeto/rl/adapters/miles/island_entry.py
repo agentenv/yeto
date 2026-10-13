@@ -477,9 +477,6 @@ def _canonical_sha256(value: Any) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-# Island-local Miles flags left out of the full-parameter training contract.
-# The training data is island-local too (P3 per-island tasks): its path and
-# content hash are not part of the contract the islands compare.
 # Miles flags whose values may differ between islands of one full-parameter run:
 # routing ports, the rollout seed, the training data (P3: each island may train
 # on its own task list) and evaluation (P3-Q3: eval runs on the eval island, so
