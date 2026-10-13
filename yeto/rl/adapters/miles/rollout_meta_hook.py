@@ -749,25 +749,79 @@ def put_to_sink(payload: dict[str, Any], sink: str | None = None) -> None:
     raise ValueError(f"unknown rollout metadata sink {sink!r}")
 
 
-def put_policy_token(token: str, sink: str | None = None) -> None:
-    """Driver side: publish the token the next rollout must be sampled from."""
+def _sink_target(sink: str | None) -> tuple[str, str]:
+    kind, _, target = (sink or os.environ.get(META_SINK_ENV) or DEFAULT_SINK).partition(":")
+    if kind not in ("dir", "ray"):
+        raise ValueError(f"unknown rollout metadata sink {sink!r}")
+    return kind, target
 
-    sink = sink or os.environ.get(META_SINK_ENV) or DEFAULT_SINK
-    kind, _, target = sink.partition(":")
+
+def _sink_write(sink: str | None, file_name: str, text: str, actor_method: str, value: Any) -> None:
+    """Driver side: store one value (atomic file under ``dir:``, actor call under ``ray:``)."""
+    kind, target = _sink_target(sink)
     if kind == "dir":
         directory = Path(target)
         directory.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=directory, prefix=".tmp-")
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(token)
-        os.replace(tmp, directory / POLICY_TOKEN_FILE)
+            handle.write(text)
+        os.replace(tmp, directory / file_name)
         return
-    if kind == "ray":
-        import ray
+    import ray
 
-        ray.get(ray.get_actor(target or DEFAULT_SINK_ACTOR).set_token.remote(token))
-        return
-    raise ValueError(f"unknown rollout metadata sink {sink!r}")
+    actor = ray.get_actor(target or DEFAULT_SINK_ACTOR)
+    ray.get(getattr(actor, actor_method).remote(value))
+
+
+def _sink_read(sink: str | None, file_name: str, actor_method: str) -> Any:
+    """Rollout side: the stored value (file text under ``dir:``), None when unset."""
+    kind, target = _sink_target(sink)
+    if kind == "dir":
+        path = Path(target) / file_name
+        return path.read_text(encoding="utf-8") if path.exists() else None
+    import ray
+
+    return ray.get(getattr(ray.get_actor(target or DEFAULT_SINK_ACTOR), actor_method).remote())
+
+
+def put_policy_token(token: str, sink: str | None = None) -> None:
+    """Driver side: publish the token the next rollout must be sampled from."""
+    _sink_write(sink, POLICY_TOKEN_FILE, token, "set_token", token)
+
+
+def current_policy_token(sink: str | None = None) -> str | None:
+    """Rollout side: the token stored by :func:`put_policy_token`, if any."""
+    return _sink_read(sink, POLICY_TOKEN_FILE, "get_token")
+
+
+PUBLISHED_POLICIES_FILE = "published-policies.json"
+
+
+def put_published_policies(policies: Mapping[str, str], sink: str | None = None) -> None:
+    """Driver side (P0-S): the published versions in the policy-age window
+    (version -> weight hash); the rollout side names trajectory policies from it."""
+    payload = json.dumps(dict(policies), sort_keys=True)
+    _sink_write(sink, PUBLISHED_POLICIES_FILE, payload, "set_policies", payload)
+
+
+def published_policies(sink: str | None = None) -> PublishedPolicies:
+    """Rollout side: the map stored by :func:`put_published_policies` (empty if none)."""
+    payload = _sink_read(sink, PUBLISHED_POLICIES_FILE, "get_policies")
+    return PublishedPolicies.from_dict(json.loads(payload) if payload else None)
+
+
+MAX_POLICY_AGE_FILE = "max-policy-age"
+
+
+def put_max_policy_age(limit: int, sink: str | None = None) -> None:
+    """Driver side (3.5 governor fallback): lower the rollout's policy-age limit."""
+    _sink_write(sink, MAX_POLICY_AGE_FILE, str(int(limit)), "set_limit", int(limit))
+
+
+def max_policy_age_override(sink: str | None = None) -> int | None:
+    """Rollout side: the limit set by :func:`put_max_policy_age` (None = not lowered)."""
+    value = _sink_read(sink, MAX_POLICY_AGE_FILE, "get_limit")
+    return None if value is None else int(value)
 
 
 def sink_available() -> bool:
@@ -784,96 +838,6 @@ def sink_available() -> bool:
     except ImportError:
         return False
     return bool(ray.is_initialized())
-
-
-PUBLISHED_POLICIES_FILE = "published-policies.json"
-
-
-def put_published_policies(policies: Mapping[str, str], sink: str | None = None) -> None:
-    """Driver side (P0-S): the published versions in the policy-age window
-    (version -> weight hash); the rollout side names trajectory policies from it."""
-    payload = json.dumps(dict(policies), sort_keys=True)
-    sink = sink or os.environ.get(META_SINK_ENV) or DEFAULT_SINK
-    kind, _, target = sink.partition(":")
-    if kind == "dir":
-        directory = Path(target)
-        directory.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=directory, prefix=".tmp-")
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(payload)
-        os.replace(tmp, directory / PUBLISHED_POLICIES_FILE)
-        return
-    if kind == "ray":
-        import ray
-
-        ray.get(ray.get_actor(target or DEFAULT_SINK_ACTOR).set_policies.remote(payload))
-        return
-    raise ValueError(f"unknown rollout metadata sink {sink!r}")
-
-
-def published_policies(sink: str | None = None) -> PublishedPolicies:
-    """Rollout side: the map stored by :func:`put_published_policies` (empty if none)."""
-    sink = sink or os.environ.get(META_SINK_ENV) or DEFAULT_SINK
-    kind, _, target = sink.partition(":")
-    if kind == "dir":
-        path = Path(target) / PUBLISHED_POLICIES_FILE
-        payload = path.read_text(encoding="utf-8") if path.exists() else None
-    elif kind == "ray":
-        import ray
-
-        payload = ray.get(ray.get_actor(target or DEFAULT_SINK_ACTOR).get_policies.remote())
-    else:
-        raise ValueError(f"unknown rollout metadata sink {sink!r}")
-    return PublishedPolicies.from_dict(json.loads(payload) if payload else None)
-
-
-MAX_POLICY_AGE_FILE = "max-policy-age"
-
-
-def put_max_policy_age(limit: int, sink: str | None = None) -> None:
-    """Driver side (3.5 governor fallback): lower the rollout's policy-age limit."""
-    sink = sink or os.environ.get(META_SINK_ENV) or DEFAULT_SINK
-    kind, _, target = sink.partition(":")
-    if kind == "dir":
-        directory = Path(target)
-        directory.mkdir(parents=True, exist_ok=True)
-        (directory / MAX_POLICY_AGE_FILE).write_text(str(int(limit)), encoding="utf-8")
-        return
-    if kind == "ray":
-        import ray
-
-        ray.get(ray.get_actor(target or DEFAULT_SINK_ACTOR).set_limit.remote(int(limit)))
-        return
-    raise ValueError(f"unknown rollout metadata sink {sink!r}")
-
-
-def max_policy_age_override(sink: str | None = None) -> int | None:
-    """Rollout side: the limit set by :func:`put_max_policy_age` (None = not lowered)."""
-    sink = sink or os.environ.get(META_SINK_ENV) or DEFAULT_SINK
-    kind, _, target = sink.partition(":")
-    if kind == "dir":
-        path = Path(target) / MAX_POLICY_AGE_FILE
-        return int(path.read_text(encoding="utf-8")) if path.exists() else None
-    if kind == "ray":
-        import ray
-
-        return ray.get(ray.get_actor(target or DEFAULT_SINK_ACTOR).get_limit.remote())
-    raise ValueError(f"unknown rollout metadata sink {sink!r}")
-
-
-def current_policy_token(sink: str | None = None) -> str | None:
-    """Rollout side: the token stored by :func:`put_policy_token`, if any."""
-
-    sink = sink or os.environ.get(META_SINK_ENV) or DEFAULT_SINK
-    kind, _, target = sink.partition(":")
-    if kind == "dir":
-        path = Path(target) / POLICY_TOKEN_FILE
-        return path.read_text(encoding="utf-8") if path.exists() else None
-    if kind == "ray":
-        import ray
-
-        return ray.get(ray.get_actor(target or DEFAULT_SINK_ACTOR).get_token.remote())
-    raise ValueError(f"unknown rollout metadata sink {sink!r}")
 
 
 def group_matches_policy(group: Sequence[Any], token: str | None, size: int | None) -> bool:

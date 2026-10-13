@@ -181,6 +181,7 @@ def _two_trajectory_batch(behavior_policy_of=None, **fields):
         reward_contract_hash="b" * 64,
         evidence_kind="terminal-bench-2.1",
         behavior_policy_of=behavior_policy_of,
+        **({"max_policy_age": 1} if behavior_policy_of else {}),
         **fields,
     )
 
@@ -204,7 +205,11 @@ def test_schema4_records_every_trajectory_policy_and_round_trips(tmp_path, monke
 
 @pytest.mark.parametrize(
     ("policy", "message"),
-    (((6, ROUND_HASH), "newer than its round"), ((5, OLDER_HASH), "other weights")),
+    (
+        ((6, ROUND_HASH), "newer than its round"),
+        ((5, OLDER_HASH), "other weights"),
+        ((3, OLDER_HASH), "policy-age limit"),
+    ),
 )
 def test_schema4_refuses_a_policy_that_does_not_fit_the_round(monkeypatch, policy, message):
     monkeypatch.setenv(tbench_outcome.HMAC_ENV, "t" * 48)
@@ -217,7 +222,7 @@ def test_schema4_tampered_trajectory_policy_is_rejected(tmp_path, monkeypatch):
     evidence = _two_trajectory_batch(lambda segments: (4, OLDER_HASH))
     path = write_trajectory_batch_evidence(tmp_path / "private", evidence)
     value = json.loads(path.read_text())
-    value["envelopes"][0]["behavior_policy_version"] = 3
+    value["envelopes"][0]["behavior_policy_hash"] = "d" * 64
     path.write_text(json.dumps(value))
     with pytest.raises(ValueError, match="batch hash changed"):
         read_trajectory_batch_evidence(path)
@@ -227,3 +232,15 @@ def test_schema4_is_not_mixed_with_a_bound_older_schema(monkeypatch):
     monkeypatch.setenv(tbench_outcome.HMAC_ENV, "t" * 48)
     with pytest.raises(ValueError, match="schema 4"):
         _two_trajectory_batch(lambda segments: (5, ROUND_HASH), schema_version=2)
+
+
+def test_schema4_records_its_policy_age_limit(tmp_path, monkeypatch):
+    monkeypatch.setenv(tbench_outcome.HMAC_ENV, "t" * 48)
+    evidence = _two_trajectory_batch(lambda segments: (4, OLDER_HASH))
+    assert evidence.max_policy_age == 1
+    path = write_trajectory_batch_evidence(tmp_path / "private", evidence)
+    value = json.loads(path.read_text())
+    value["max_policy_age"] = 0  # a tighter limit the trajectories do not meet
+    path.write_text(json.dumps(value))
+    with pytest.raises(ValueError, match="policy-age limit"):
+        read_trajectory_batch_evidence(path)

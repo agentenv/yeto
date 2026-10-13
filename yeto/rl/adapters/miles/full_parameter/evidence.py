@@ -70,6 +70,8 @@ def persist_published_round_evidence(
         reward_contract_hash=getattr(args, "yeto_rl_reward_sha256", None),
         evidence_kind=evidence_kind,
         behavior_policy_of=_oldest_published_policy(published),
+        # the configured limit (the driver's age check applies any fallback)
+        max_policy_age=int(getattr(args, "yeto_rl_max_policy_age", 0) or 0),
     )
     write_trajectory_batch_evidence(args.yeto_rl_trajectory_evidence_dir, evidence)
 

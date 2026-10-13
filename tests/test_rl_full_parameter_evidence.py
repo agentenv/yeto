@@ -73,6 +73,7 @@ def test_published_token_binds_round_and_behavior_policy(tmp_path, written):
     assert built_groups is groups
     behavior_policy_of = fields.pop("behavior_policy_of")
     assert fields == {
+        "max_policy_age": 0,
         "rollout_id": 7,
         "behavior_policy_hash": POLICY_HASH,
         "reward_contract_hash": REWARD_HASH,
