@@ -16,13 +16,17 @@ if os.environ.get("YETO_DSV4_CLONE_ONLY_LORA") == "1":
 
     install()
 
+if os.environ.get("YETO_DSV4_EXPERT_FULL") == "1" and os.environ.get("YETO_DSV4_EXPERT_FULL_PORTS") == "1":
+    # Each flag patches a different Miles layout; both at once is a launcher bug.
+    raise RuntimeError("YETO_DSV4_EXPERT_FULL and YETO_DSV4_EXPERT_FULL_PORTS are mutually exclusive")
+
 if os.environ.get("YETO_DSV4_EXPERT_FULL") == "1":
     from yeto.rl.adapters.miles.models.deepseek_v4.expert_full_runtime import install
 
     install()
 
 if os.environ.get("YETO_DSV4_EXPERT_FULL_PORTS") == "1":
-    # Same recipe on the ports Miles layout (P0 1.7b.2); never set with the legacy flag.
+    # Same recipe on the ports Miles layout (P0 1.7b.2).
     from yeto.rl.adapters.miles.models.deepseek_v4.ports_runtime import install
 
     install()

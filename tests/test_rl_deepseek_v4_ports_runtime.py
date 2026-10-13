@@ -101,7 +101,8 @@ class _TaskBridge:
 
 
 def _iterator(monkeypatch, task_bridge):
-    monkeypatch.setattr(ports_runtime, "NUM_LAYERS", 1)
+    monkeypatch.setattr(expert_full_runtime, "NUM_LAYERS", 1)
+    monkeypatch.setattr(expert_full_runtime, "weight_iterator_task_bridge", lambda _iterator: task_bridge)
     monkeypatch.setattr(ports_runtime, "weight_iterator_task_bridge", lambda _iterator: task_bridge)
 
     class Iterator:
@@ -169,7 +170,7 @@ def test_non_sender_ranks_run_the_export_without_yielding(monkeypatch):
     iterator = _iterator(monkeypatch, task_bridge)
 
     assert list(iterator._iter_hf_param_units({}, materialize=False)) == []
-    assert len(task_bridge.exported_tasks) == ports_runtime.expected_expert_task_count(5)
+    assert len(task_bridge.exported_tasks) == expert_full_runtime.expected_expert_task_count(5)
 
 
 def test_publish_refuses_an_unexpected_expert_task_count(monkeypatch):
@@ -227,3 +228,13 @@ def test_v4_bridge_registers_in_the_lora_bridge_module_of_either_layout(monkeypa
     bridge.install_deepseek_v4_actor_bridge_hook()
 
     assert installed == [module]
+
+
+def test_sitecustomize_refuses_both_expert_full_runtimes(monkeypatch):
+    for name in ("YETO_DSV4_EXPERT_CLONE", "YETO_DSV4_CLONE_ONLY_LORA", "YETO_TMS_POST_PAUSE_IDLE_S"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("YETO_DSV4_EXPERT_FULL", "1")
+    monkeypatch.setenv("YETO_DSV4_EXPERT_FULL_PORTS", "1")
+
+    with pytest.raises(RuntimeError, match="mutually exclusive"):
+        runpy.run_path(str(ROOT / "sitecustomize.py"), run_name="_sitecustomize_both_test")

@@ -817,6 +817,39 @@ _DENSE_FULL_QUANTIZATION_CONFIG_KEYS = frozenset(
 )
 
 
+def _require_env(name: str, value: str) -> None:
+    current = os.environ.get(name)
+    if current not in (None, value):
+        raise ValueError(f"{name} must be unset or {value}, got {current!r}")
+    os.environ[name] = value
+
+
+def _configure_deepseek_v4_env(args, *, rl_engine: str, clone_only_lora: bool, expert_full: bool) -> None:
+    """Process-wide switches the DeepSeek V4 runtime patches read (sitecustomize).
+
+    Ray workers inherit them; expert-full picks the runtime of the Miles layout.
+    """
+
+    if clone_only_lora or expert_full:
+        _require_env("YETO_DSV4_EXPERT_CLONE", "1")
+    if clone_only_lora:
+        _require_env("YETO_DSV4_CLONE_ONLY_LORA", "1")
+    if clone_only_lora or expert_full:
+        if os.environ.get("SGLANG_OPT_FUSE_WQA_WKV") not in (None, "0"):
+            raise ValueError("SGLANG_OPT_FUSE_WQA_WKV must be unset or 0 for V4 attention LoRA")
+        os.environ["SGLANG_OPT_FUSE_WQA_WKV"] = "0"
+    if expert_full:
+        runtime, other = ("YETO_DSV4_EXPERT_FULL_PORTS", "YETO_DSV4_EXPERT_FULL")
+        if rl_engine != "ports":
+            runtime, other = other, runtime
+        if os.environ.get(other) not in (None, "0"):
+            raise ValueError(f"{other} selects the other Miles layout's expert-full runtime")
+        _require_env(runtime, "1")
+        _require_env("YETO_DSV4_EXPERT_FULL_COUNT", str(args.expert_full_count))
+        _require_env("YETO_DSV4_EXPERT_FULL_LR", str(args.expert_full_lr))
+        _require_env("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0")
+
+
 def _trains_base_parameters(args) -> bool:
     """Full-parameter or DeepSeek V4 expert-full: the full-parameter sync carries the cut."""
 
@@ -1034,6 +1067,23 @@ def _expert_full_contract(args: Any) -> dict[str, Any]:
             "selection_contract_sha256": args.expert_selection_contract_sha256,
         }
     }
+
+
+def _lora_config_hash(args: Any, canonical_targets: Sequence[str]) -> str:
+    """The LoRA identity hash; expert-full adds its expert selection.
+
+    Plain LoRA keeps the canonical hash unchanged, so existing identities hold.
+    """
+
+    from yeto.rl.core import canonical_lora_config_hash
+
+    base = canonical_lora_config_hash(rank=args.lora_r, target_modules=canonical_targets)
+    expert_full = _expert_full_contract(args)
+    if not expert_full:
+        return base
+    return _canonical_sha256(
+        {"schema": "yeto-lora-expert-full-config-v1", "lora_config_sha256": base, **expert_full}
+    )
 
 
 def _dense_full_training_contract_sha256(
@@ -2425,42 +2475,15 @@ def run_miles(
     if full_parameter and expert_full:
         raise ValueError("full-parameter mode cannot also select expert-full tuning")
 
-    def require_env(name: str, value: str) -> None:
-        current = os.environ.get(name)
-        if current not in (None, value):
-            raise ValueError(f"{name} must be unset or {value}, got {current!r}")
-        os.environ[name] = value
-
     if full_parameter:
         _require_unquantized_full_parameter_rollout_model(
             rollout_model_path or model_path
         )
     if full_parameter_sync:
-        require_env("MILES_EXPERIMENTAL_FT_TRAINER", "0")
-
-    if clone_only_lora or expert_full:
-        require_env("YETO_DSV4_EXPERT_CLONE", "1")
-    if clone_only_lora:
-        require_env("YETO_DSV4_CLONE_ONLY_LORA", "1")
-    if clone_only_lora or expert_full:
-        fuse_wqa_wkv = os.environ.get("SGLANG_OPT_FUSE_WQA_WKV")
-        if fuse_wqa_wkv not in (None, "0"):
-            raise ValueError(
-                "SGLANG_OPT_FUSE_WQA_WKV must be unset or 0 for V4 attention LoRA"
-            )
-        os.environ["SGLANG_OPT_FUSE_WQA_WKV"] = "0"
-    if expert_full:
-        # Each Miles layout has its own runtime patches (sitecustomize).
-        require_env(
-            "YETO_DSV4_EXPERT_FULL_PORTS" if rl_engine == "ports" else "YETO_DSV4_EXPERT_FULL",
-            "1",
-        )
-        require_env(
-            "YETO_DSV4_EXPERT_FULL_COUNT",
-            str(args.expert_full_count),
-        )
-        require_env("YETO_DSV4_EXPERT_FULL_LR", str(args.expert_full_lr))
-        require_env("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0")
+        _require_env("MILES_EXPERIMENTAL_FT_TRAINER", "0")
+    _configure_deepseek_v4_env(
+        args, rl_engine=rl_engine, clone_only_lora=clone_only_lora, expert_full=expert_full
+    )
 
     if getattr(args, "rl_model_recipe", "generic") == "deepseek-v4-flash":
         from yeto.rl.adapters.miles.models.deepseek_v4.bridge import ensure_deepseek_v4_bridge
@@ -2633,16 +2656,10 @@ def run_miles(
                 }
             )
         else:
-            from yeto.rl.core import (
-                canonical_layout_hash,
-                canonical_lora_config_hash,
-            )
+            from yeto.rl.core import canonical_layout_hash
 
             layout_hash = canonical_layout_hash(specs)
-            lora_config_hash = canonical_lora_config_hash(
-                rank=args.lora_r,
-                target_modules=canonical_targets,
-            )
+            lora_config_hash = _lora_config_hash(args, canonical_targets)
         miles_args.yeto_rl_trust_remote_code = args.trust_remote_code
         miles_args.yeto_rl_model = args.model
         miles_args.yeto_rl_data = args.data
@@ -3038,12 +3055,10 @@ def _run_ports(
     learns it from the first export (before any receipt) and pins it after.
     """
 
-    from yeto.rl.core import canonical_layout_hash, canonical_lora_config_hash
+    from yeto.rl.core import canonical_layout_hash
     from yeto.rl.adapters.miles.entry import run_ports_island
 
-    lora_config_hash = canonical_lora_config_hash(
-        rank=args.lora_r, target_modules=canonical_targets
-    )
+    lora_config_hash = _lora_config_hash(args, canonical_targets)
     if native_lora_export is not None:
         if specs:
             raise ValueError("native LoRA export must not carry predicted specs")
