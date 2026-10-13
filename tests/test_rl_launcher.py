@@ -1430,6 +1430,18 @@ def test_miles_dense_full_parameter_argv_and_runtime_contract(
     assert dense.training_contract_hash == rl_learner._dense_full_training_contract_sha256(
         eval_args, eval_argv, model_config_sha256=config_sha256
     )
+    # P4: each island may use its own placement; the placement flags stay out.
+    colocated_argv = list(learner_zero_argv)
+    rollout = colocated_argv.index("--rollout-num-gpus")
+    colocated_argv[rollout : rollout + 2] = ["--colocate"]
+    colocated_argv[colocated_argv.index("--actor-num-gpus-per-node") + 1] = "4"
+    colocated_argv[colocated_argv.index("--num-gpus-per-node") + 1] = "2"
+    colocated_argv[colocated_argv.index("--rollout-num-gpus-per-engine") + 1] = "2"
+    offload = colocated_argv.index("--no-offload-train")
+    colocated_argv[offload] = "--offload-train"
+    assert dense.training_contract_hash == rl_learner._dense_full_training_contract_sha256(
+        learner_zero_args, colocated_argv, model_config_sha256=config_sha256
+    )
     changed_source_args = argparse.Namespace(**vars(learner_zero_args))
     changed_source_args.source_sha256 = "f" * 64
     assert dense.training_contract_hash != rl_learner._dense_full_training_contract_sha256(

@@ -479,12 +479,20 @@ def _canonical_sha256(value: Any) -> str:
 
 # Miles flags whose values may differ between islands of one full-parameter run:
 # routing ports, the rollout seed, the training data (P3: each island may train
-# on its own task list) and evaluation (P3-Q3: eval runs on the eval island, so
-# training islands may carry none, or their own). Value counts: one, except
-# where listed in the two maps below.
+# on its own task list), evaluation (P3-Q3: eval runs on the eval island, so
+# training islands may carry none, or their own) and placement (P4: each island
+# may use its own GPU split, trainer shape and weight transfer path). Value
+# counts: one, except where listed in the two maps below.
 _DENSE_ISLAND_LOCAL_MILES_FLAGS = frozenset(
     {
         "--prompt-data",
+        "--actor-num-nodes",
+        "--actor-num-gpus-per-node",
+        "--num-gpus-per-node",
+        "--rollout-num-gpus",
+        "--rollout-num-gpus-per-engine",
+        "--update-weight-transfer-mode",
+        "--yeto-placement-map",
         "--rollout-seed",
         "--rollout-engine-base-port",
         "--session-server-port",
@@ -514,6 +522,9 @@ _DENSE_ISLAND_LOCAL_MILES_SWITCHES = frozenset(
     {
         "--skip-eval-before-train",
         "--log-passrate",
+        "--colocate",
+        "--offload-train",
+        "--no-offload-train",
     }
 )
 
@@ -827,12 +838,14 @@ def _dense_full_training_contract_sha256(
     *,
     model_config_sha256: str,
 ) -> str:
-    """Hash shared training semantics while excluding island-local routing, data and eval.
+    """Hash shared training semantics while excluding island-local routing,
+    data, eval and placement.
 
     Each island may train on its own task list (P3), so the training data
     (``--data``, its revision and the prompt file) stays out of the contract.
     Evaluation does not change the trained weights and runs on the eval island
-    (P3-Q3), so its settings stay out too (v6).
+    (P3-Q3), so its settings stay out too. Each island may use its own
+    placement (P4), so the placement flags do too (v6).
     """
 
     shared_argv = _dense_shared_miles_argv(miles_argv)
