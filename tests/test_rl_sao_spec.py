@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from tests.sao_recipe_reference import apply_sao_online_recipe
-from yeto.rl import sao_streaming_runtime as streaming_runtime
+from yeto.rl.adapters.miles.full_parameter import sao_binding
 from yeto.rl.algos import sao
 from yeto.rl.engine.algorithm import AlgorithmSpec, AlgorithmSpecError, load_extensions
 from yeto.rl.adapters.miles.algo_flag_rows import sao_fork_argv
@@ -77,11 +77,11 @@ def test_role_contract_matches_legacy_accounting(tmp_path, actor_steps):
     contract = sao.sao_role_contract(spec, actor_steps)
     steps = contract["optimizer_steps_per_round"]
     # the streaming runtime validator accepts exactly these numbers
-    streaming_runtime._validate_miles_runtime(
+    sao_binding.validate_miles_args(
         _miles_args(actor_steps, spec.critic.critic_updates_per_step),
         _fake_runtime(tmp_path, steps["actor"], steps["critic"]))
     with pytest.raises(ValueError, match="optimizer accounting"):
-        streaming_runtime._validate_miles_runtime(
+        sao_binding.validate_miles_args(
             _miles_args(actor_steps, spec.critic.critic_updates_per_step),
             _fake_runtime(tmp_path, steps["actor"], steps["actor"]))
     from yeto.rl.local_learner import _ROLES_BY_ALGORITHM

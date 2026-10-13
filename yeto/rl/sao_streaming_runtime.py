@@ -1,11 +1,11 @@
-"""Hash-bound runtime wiring for full-parameter SAO streaming on ports.
+"""The hash-bound runtime contract of a full-parameter SAO streaming island.
 
 A streaming SAO island opts in with an immutable JSON contract that names
-both role-specific syncer sessions and the fresh trajectory-evidence path.
-Binding installs the two-role :class:`FullParameterSyncConfig` (actor and
-critic) that the ports island turns into the one full-parameter sync
-(P0-D8); the island's ``IslandDriver`` owns the loop, rollout and
-publication, so nothing here installs a Miles training-loop callback.
+both role-specific syncer sessions, the fresh trajectory-evidence path and
+the layout attestation of both roles.  This module loads and checks that
+contract; it is engine-neutral.  The Miles adapter
+(``yeto.rl.adapters.miles.full_parameter.sao_binding``) turns the checked
+role contracts into the two-role full-parameter sync (P0-D8).
 """
 
 from __future__ import annotations
@@ -14,34 +14,18 @@ import hashlib
 import json
 import math
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from ..syncer_profile import SyncerSemanticProfile
-from .engine.selection import SAO_STREAMING_SYNC_PRESET
 from .local_learner import ComponentIdentity
-from yeto.rl.adapters.miles.full_parameter.role_stream import RoleStreamConfig
-from yeto.rl.adapters.miles.full_parameter.session import (
-    CONFIG_ATTRIBUTE,
-    FullParameterSyncConfig,
-)
+from .trajectory_evidence import EVIDENCE_KINDS
 
-_LEGACY_SCHEMA = "yeto.sao-streaming-runtime.v1"
 _SCHEMA = "yeto.sao-streaming-runtime.v2"
-_LEGACY_LAYOUT_ATTESTATION_SCHEMA = "miles.sao-streaming-layouts.v1"
 _LAYOUT_ATTESTATION_SCHEMA = "miles.sao-streaming-layouts.v2"
-SAO_POLICY_OBJECTIVE = "sao_dis"
+_TRAJECTORY_EVIDENCE_SCHEMA_VERSION = 2
 _HEX = frozenset("0123456789abcdef")
-_LEGACY_TOP_LEVEL_FIELDS = {
-    "schema",
-    "sao_secrlenv_context_sha256",
-    "trajectory_evidence_dir",
-    "layout_attestation",
-    "syncer_profile",
-    "actor",
-    "critic",
-}
 _TOP_LEVEL_FIELDS = {
     "schema",
     "sao_context_sha256",
@@ -52,7 +36,6 @@ _TOP_LEVEL_FIELDS = {
     "critic",
 }
 _TRAJECTORY_EVIDENCE_FIELDS = {"directory", "kind", "schema_version"}
-_TRAJECTORY_EVIDENCE_KINDS = frozenset({"secrlenv", "terminal-bench-2.1"})
 _ROLE_FIELDS = {
     "role",
     "component",
@@ -94,7 +77,7 @@ def _sha256(name: str, value: object) -> str:
 
 def _mapping(name: str, value: object, fields: set[str]) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != fields:
-        raise ValueError(f"{name} fields do not match the v1 schema")
+        raise ValueError(f"{name} fields do not match the schema")
     return value
 
 
@@ -113,12 +96,30 @@ def _finite_number(name: str, value: object) -> float:
     return result
 
 
-def _parse_role(
-    expected_role: str,
-    raw: object,
-    *,
-    syncer_profile: SyncerSemanticProfile,
-) -> RoleStreamConfig:
+@dataclass(frozen=True)
+class SaoRoleContract:
+    """One role's checked stream contract (engine-neutral)."""
+
+    role: str
+    component: ComponentIdentity
+    syncer_addr: tuple[str, int]
+    learner_id: int
+    learner_generation: int
+    learner_generations: tuple[int, ...]
+    total_fragment_steps: int
+    expected_fragments: int
+    expected_layout_hash: str
+    local_horizon: int
+    optimizer_steps_per_round: int
+    training_contract_hash: str
+    wan_streams: int
+    wait_timeout: float
+    poll_seconds: float
+    max_fragment_bytes: int
+    max_chunk_bytes: int
+
+
+def _parse_role(expected_role: str, raw: object) -> SaoRoleContract:
     role = _mapping(f"SAO {expected_role} stream", raw, _ROLE_FIELDS)
     if role["role"] != expected_role:
         raise ValueError(f"SAO {expected_role} stream role changed")
@@ -147,8 +148,7 @@ def _parse_role(
     model_revision = component["model_revision"]
     if type(model_revision) is not str:
         raise ValueError(f"SAO {expected_role} model revision must be a string")
-    return RoleStreamConfig(
-        algorithm="sao",
+    return SaoRoleContract(
         role=expected_role,
         component=ComponentIdentity(
             role=expected_role,
@@ -202,8 +202,6 @@ def _parse_role(
             f"SAO {expected_role} training contract",
             role["training_contract_sha256"],
         ),
-        syncer_profile_hash=syncer_profile.sha256,
-        pipeline_depth=syncer_profile.pipeline,
         wan_streams=_integer(
             f"SAO {expected_role} wan_streams",
             role["wan_streams"],
@@ -231,7 +229,7 @@ def _parse_role(
 
 @dataclass(frozen=True)
 class SaoStreamingRuntime:
-    """Validated runtime contract ready to bind into a Miles namespace."""
+    """A checked runtime contract: both role streams and their shared context."""
 
     sao_context_sha256: str
     trajectory_evidence_dir: Path
@@ -240,24 +238,53 @@ class SaoStreamingRuntime:
     layout_attestation_path: Path
     layout_attestation_sha256: str
     syncer_profile: SyncerSemanticProfile
-    sync: FullParameterSyncConfig
+    roles: tuple[SaoRoleContract, ...]
+
+    def role(self, name: str) -> SaoRoleContract:
+        """The stream contract of role ``name`` (``actor`` or ``critic``)."""
+
+        for contract in self.roles:
+            if contract.role == name:
+                return contract
+        raise KeyError(f"SAO runtime has no {name} role")
 
     @property
-    def actor(self) -> RoleStreamConfig:
-        return self.sync.roles[0]
+    def actor(self) -> SaoRoleContract:
+        return self.role("actor")
 
     @property
-    def critic(self) -> RoleStreamConfig:
-        return self.sync.roles[1]
+    def critic(self) -> SaoRoleContract:
+        return self.role("critic")
+
+    def with_syncer_addresses(
+        self, *, actor: tuple[str, int], critic: tuple[str, int]
+    ) -> SaoStreamingRuntime:
+        """The same contract with the launch's syncer hosts.
+
+        The contract is frozen before the syncer host is known.  The host is
+        not part of any session hash, but each role's port is, so the ports
+        must stay those the contract names.
+        """
+
+        addresses = {"actor": actor, "critic": critic}
+        for contract in self.roles:
+            if addresses[contract.role][1] != contract.syncer_addr[1]:
+                raise ValueError("SAO syncer ports differ from the runtime contract")
+        return replace(
+            self,
+            roles=tuple(
+                replace(contract, syncer_addr=addresses[contract.role])
+                for contract in self.roles
+            ),
+        )
 
 
 def _load_layout_attestation(
     raw: object,
     *,
     expected_sao_context_sha256: str,
-    benchmark_neutral: bool,
-    actor: RoleStreamConfig,
-    critic: RoleStreamConfig,
+    actor: SaoRoleContract,
+    critic: SaoRoleContract,
     syncer_profile_sha256: str,
 ) -> tuple[Path, str]:
     reference = _mapping(
@@ -286,22 +313,13 @@ def _load_layout_attestation(
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise ValueError("SAO streaming layout attestation is malformed") from error
-    context_field = (
-        "sao_context_sha256"
-        if benchmark_neutral
-        else "sao_secrlenv_context_sha256"
-    )
-    expected_schema = (
-        _LAYOUT_ATTESTATION_SCHEMA
-        if benchmark_neutral
-        else _LEGACY_LAYOUT_ATTESTATION_SCHEMA
-    )
+    context_field = "sao_context_sha256"
     payload = _mapping(
         "SAO streaming layout attestation",
         payload,
         {"schema", context_field, "settings", "actor", "critic"},
     )
-    if payload["schema"] != expected_schema:
+    if payload["schema"] != _LAYOUT_ATTESTATION_SCHEMA:
         raise ValueError("unsupported SAO streaming layout attestation schema")
     if (
         _sha256(
@@ -446,39 +464,25 @@ def load_sao_streaming_runtime(
     if not isinstance(payload, dict):
         raise TypeError("SAO streaming context must be an object")
     schema = payload.get("schema")
-    if schema == _LEGACY_SCHEMA:
-        payload = _mapping(
-            "SAO streaming context", payload, _LEGACY_TOP_LEVEL_FIELDS
-        )
-        context_field = "sao_secrlenv_context_sha256"
-        evidence = payload["trajectory_evidence_dir"]
-        evidence_kind = "secrlenv"
-        evidence_schema_version = 1
-        benchmark_neutral = False
-    elif schema == _SCHEMA:
-        payload = _mapping("SAO streaming context", payload, _TOP_LEVEL_FIELDS)
-        context_field = "sao_context_sha256"
-        evidence_contract = _mapping(
-            "SAO trajectory evidence",
-            payload["trajectory_evidence"],
-            _TRAJECTORY_EVIDENCE_FIELDS,
-        )
-        evidence = evidence_contract["directory"]
-        evidence_kind = evidence_contract["kind"]
-        evidence_schema_version = evidence_contract["schema_version"]
-        if (
-            evidence_kind not in _TRAJECTORY_EVIDENCE_KINDS
-            or evidence_schema_version != 2
-        ):
-            raise ValueError(
-                "SAO trajectory evidence kind/schema is unsupported"
-            )
-        benchmark_neutral = True
-    else:
+    if schema != _SCHEMA:
         raise ValueError(f"unsupported SAO streaming schema: {schema!r}")
+    payload = _mapping("SAO streaming context", payload, _TOP_LEVEL_FIELDS)
+    evidence_contract = _mapping(
+        "SAO trajectory evidence",
+        payload["trajectory_evidence"],
+        _TRAJECTORY_EVIDENCE_FIELDS,
+    )
+    evidence = evidence_contract["directory"]
+    evidence_kind = evidence_contract["kind"]
+    evidence_schema_version = evidence_contract["schema_version"]
+    if (
+        evidence_kind not in EVIDENCE_KINDS
+        or evidence_schema_version != _TRAJECTORY_EVIDENCE_SCHEMA_VERSION
+    ):
+        raise ValueError("SAO trajectory evidence kind/schema is unsupported")
     bound_context = _sha256(
         "bound SAO context",
-        payload[context_field],
+        payload["sao_context_sha256"],
     )
     if bound_context != expected_sao_context_sha256:
         raise ValueError("SAO streaming context binds a different SAO context")
@@ -496,16 +500,8 @@ def load_sao_streaming_runtime(
 
     syncer_profile = SyncerSemanticProfile.from_mapping(payload["syncer_profile"])
     syncer_profile.validate_sao()
-    actor = _parse_role(
-        "actor",
-        payload["actor"],
-        syncer_profile=syncer_profile,
-    )
-    critic = _parse_role(
-        "critic",
-        payload["critic"],
-        syncer_profile=syncer_profile,
-    )
+    actor = _parse_role("actor", payload["actor"])
+    critic = _parse_role("critic", payload["critic"])
     if (
         syncer_profile.learners != len(actor.learner_generations)
         or syncer_profile.total_steps != actor.total_fragment_steps
@@ -513,11 +509,9 @@ def load_sao_streaming_runtime(
         raise ValueError("SAO syncer profile differs from the frozen learner schedule")
     if actor.expected_layout_hash == critic.expected_layout_hash:
         raise ValueError("SAO actor and critic require role-distinct parameter layouts")
-    sync = FullParameterSyncConfig((actor, critic))
     attestation_path, attestation_sha256 = _load_layout_attestation(
         payload["layout_attestation"],
         expected_sao_context_sha256=bound_context,
-        benchmark_neutral=benchmark_neutral,
         actor=actor,
         critic=critic,
         syncer_profile_sha256=syncer_profile.sha256,
@@ -530,121 +524,8 @@ def load_sao_streaming_runtime(
         attestation_path,
         attestation_sha256,
         syncer_profile,
-        sync,
+        (actor, critic),
     )
-
-
-def _validate_miles_runtime(args: Any, runtime: SaoStreamingRuntime) -> None:
-    actor = runtime.actor
-    critic = runtime.critic
-    if runtime.trajectory_evidence_kind == "terminal-bench-2.1":
-        from .tbench_outcome import validate_hmac_key_source
-
-        validate_hmac_key_source()
-    unsafe_debug_flags = (
-        "debug_skip_weight_update",
-        "debug_disable_optimizer",
-        "debug_train_only",
-        "debug_rollout_only",
-    )
-    enabled_debug_flags = [
-        name for name in unsafe_debug_flags if bool(getattr(args, name, False))
-    ]
-    unsafe_debug_values = (
-        "load_debug_rollout_data",
-        "ci_inject_rollout_data_path",
-        "ci_ft_test_actions",
-        "debug_exit_after_rollout",
-    )
-    enabled_debug_values = [
-        name for name in unsafe_debug_values if getattr(args, name, None) is not None
-    ]
-    if enabled_debug_flags or enabled_debug_values:
-        options = ", ".join(enabled_debug_flags + enabled_debug_values)
-        raise ValueError(
-            f"SAO streaming rejects state-bypassing debug options: {options}"
-        )
-    if getattr(args, "policy_objective", None) != SAO_POLICY_OBJECTIVE:
-        raise ValueError(
-            "SAO streaming requires the SAO algorithm spec "
-            "(loss.policy_objective='sao_dis')"
-        )
-    if not getattr(args, "use_critic", False):
-        raise ValueError("SAO streaming requires the Miles critic")
-    if int(getattr(args, "num_critic_only_steps", 0)) != 0:
-        raise ValueError(
-            "SAO streaming requires actor and critic lockstep from rollout zero"
-        )
-    if int(getattr(args, "start_rollout_id", 0)) != 0:
-        raise ValueError("SAO streaming currently requires a version-zero start")
-    if int(getattr(args, "lora_rank", 0)) > 0:
-        raise ValueError("SAO streaming requires full-parameter training")
-    if getattr(args, "yeto_rl_learner_id", None) != actor.learner_id:
-        raise ValueError("SAO streaming learner ID differs from the SecRLEnv context")
-    if (
-        getattr(args, "yeto_rl_base_model_revision", None)
-        != actor.component.model_revision
-    ):
-        raise ValueError("SAO actor revision differs from the SecRLEnv base model")
-
-    actor_steps = getattr(args, "num_steps_per_rollout", None)
-    critic_epochs = getattr(args, "num_critic_epochs", None)
-    if (
-        type(actor_steps) is not int
-        or actor_steps < 1
-        or type(critic_epochs) is not int
-        or critic_epochs < 1
-        or actor.optimizer_steps_per_round != actor_steps
-        or critic.optimizer_steps_per_round != actor_steps * critic_epochs
-    ):
-        raise ValueError("SAO role optimizer accounting differs from the Miles recipe")
-
-    evidence = runtime.trajectory_evidence_dir
-    parent = evidence.parent
-    if (
-        evidence.exists()
-        or evidence.is_symlink()
-        or not parent.is_dir()
-        or parent.is_symlink()
-    ):
-        raise ValueError(
-            "SAO trajectory evidence path must be fresh with a real parent"
-        )
-
-
-def bind_sao_streaming_runtime(args: Any, runtime: SaoStreamingRuntime) -> Path:
-    """Install the validated two-role sync config and create its private evidence dir.
-
-    ``args`` is the ports island's parsed Miles namespace.  The ports rollout
-    hook writes each round's trajectory evidence into the directory; the
-    full-parameter sync reads it back at the round boundary.
-    """
-
-    _validate_miles_runtime(args, runtime)
-    evidence = runtime.trajectory_evidence_dir
-    try:
-        evidence.mkdir(mode=0o700)
-        evidence.chmod(0o700)
-    except OSError as error:
-        raise ValueError(
-            "failed to create private SAO trajectory evidence directory"
-        ) from error
-    if stat.S_IMODE(evidence.stat().st_mode) != 0o700:
-        raise RuntimeError("SAO trajectory evidence directory is not private")
-
-    actor = runtime.actor
-    setattr(args, CONFIG_ATTRIBUTE, runtime.sync)
-    args.yeto_rl_trajectory_evidence_dir = str(evidence)
-    args.yeto_rl_trajectory_evidence_kind = runtime.trajectory_evidence_kind
-    args.yeto_rl_trajectory_evidence_schema_version = (
-        runtime.trajectory_evidence_schema_version
-    )
-    args.yeto_rl_sync_preset = SAO_STREAMING_SYNC_PRESET
-    args.yeto_rl_learner_generation = actor.learner_generation
-    args.yeto_rl_learner_generations = actor.learner_generations
-    args.yeto_rl_num_fragments = actor.expected_fragments
-    args.yeto_rl_total_fragment_steps = actor.total_fragment_steps
-    return evidence
 
 
 def streaming_runtime_schema() -> str:

@@ -2067,10 +2067,10 @@ def test_miles_argv_uses_provider_capabilities_without_model_family_branches(
         )
 
 
-def test_miles_dense_full_parameter_argv_and_runtime_contract(
-    monkeypatch,
-    tmp_path,
-):
+def _stub_full_parameter_island(monkeypatch, tmp_path, *, miles_fields=None, **overrides):
+    """A dense-full ports island with Megatron, Miles parsing and the ports
+    loop stubbed; ``overrides`` change the island args (e.g. the SAO preset)."""
+
     captured = {}
 
     class Provider:
@@ -2116,9 +2116,10 @@ def test_miles_dense_full_parameter_argv_and_runtime_contract(
     from yeto.rl.adapters.miles import config as miles_config
     from yeto.rl.adapters.miles import state as miles_state
 
-    monkeypatch.setattr(
-        miles_config, "parse_miles_args", lambda launch: argparse.Namespace(argv=list(launch.argv))
-    )
+    def parse(launch):
+        return argparse.Namespace(argv=list(launch.argv), **dict(miles_fields or {}))
+
+    monkeypatch.setattr(miles_config, "parse_miles_args", parse)
     monkeypatch.setattr(miles_state, "require_run_plugin", lambda: None)
     monkeypatch.setattr(rl_learner, "verify_ports_algorithm", lambda *_args: None)
     monkeypatch.setattr(rl_learner, "require_ports_router_mode", lambda *_args: None)
@@ -2199,6 +2200,17 @@ def test_miles_dense_full_parameter_argv_and_runtime_contract(
         rl_model_recipe="generic",
         expert_full_count=0,
         eval_only=False,
+    )
+    args = argparse.Namespace(**{**vars(args), **overrides})
+    return captured, args, model, config, prompts, audit, ref_load
+
+
+def test_miles_dense_full_parameter_argv_and_runtime_contract(
+    monkeypatch,
+    tmp_path,
+):
+    captured, args, model, config, prompts, audit, ref_load = _stub_full_parameter_island(
+        monkeypatch, tmp_path
     )
 
     rl_learner.run_miles(
@@ -2313,6 +2325,8 @@ def _dense_sweep_args(**overrides):
         ("ports", {"total_fragment_steps": 5}, "rounds\\*fragments"),
         ("ports", {"syncer_profile_sha256": None}, "--syncer-profile-sha256"),
         ("ports", {"eval_only": True}, "eval-only"),
+        # P0-S lifts this for every full-parameter preset.
+        ("ports", {"rl_max_policy_age": 1}, "--rl-max-policy-age"),
     ],
 )
 def test_dense_full_sweep_rejections(engine, overrides, message):

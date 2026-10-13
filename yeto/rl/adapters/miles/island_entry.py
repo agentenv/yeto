@@ -106,6 +106,8 @@ def parse_args(argv=None):
         help="full-parameter mode: the launcher-computed syncer semantic profile hash "
         "(yeto.syncer_profile), bound into every role's HELLO",
     )
+    # The SAO streaming run contract (P0-1.7b.3).  These three flags move into
+    # the flag schema (adapters/miles/run_flags.py, P0-4.7) when that merges.
     parser.add_argument(
         "--sao-streaming-runtime",
         default=None,
@@ -838,7 +840,8 @@ def _check_full_parameter_sync(args, *, rl_engine: str, yeto_policy_sync: bool) 
     if int(getattr(args, "rl_max_policy_age", 0) or 0) != 0:
         # The round's trajectory evidence binds one behavior policy (the
         # published cut); mixed-version batches need an evidence format that
-        # records each trajectory's version first.
+        # records each trajectory's version first.  This applies to dense-full
+        # as well as to SAO streaming; P0-S lifts it for both.
         raise ValueError("full-parameter training does not support --rl-max-policy-age > 0 yet")
 
 
@@ -929,6 +932,7 @@ def _dense_full_sync_config(
 def _load_sao_streaming_runtime(args):
     """Load the hash-bound SAO streaming contract before any GPU work."""
 
+    from yeto.rl.adapters.miles.full_parameter.sao_binding import sao_sync_config
     from yeto.rl.sao_streaming_runtime import load_sao_streaming_runtime
 
     runtime = load_sao_streaming_runtime(
@@ -938,6 +942,14 @@ def _load_sao_streaming_runtime(args):
     )
     if runtime.actor.learner_id != args.learner_id:
         raise ValueError("SAO streaming runtime names a different learner")
+    if not getattr(args, "critic_syncer", None):
+        raise ValueError("SAO streaming requires --critic-syncer")
+    runtime = runtime.with_syncer_addresses(
+        actor=_syncer_address(args.syncer),
+        critic=_syncer_address(args.critic_syncer),
+    )
+    # Fail closed on the role pairing before any GPU work; bound later.
+    sao_sync_config(runtime)
     return runtime
 
 
@@ -2636,9 +2648,7 @@ def run_miles(
                 _private_trajectory_evidence_dir(args)
             )
             miles_args.yeto_rl_trajectory_evidence_kind = "secrlenv"
-            miles_args.yeto_rl_trajectory_evidence_schema_version = (
-                2 if bool(getattr(miles_args, "sao_compaction", False)) else 1
-            )
+            miles_args.yeto_rl_trajectory_evidence_schema_version = 1
             setattr(
                 miles_args,
                 CONFIG_ATTRIBUTE,
@@ -2649,10 +2659,15 @@ def run_miles(
                 ),
             )
         elif sao_runtime is not None:
-            from yeto.rl.sao_streaming_runtime import bind_sao_streaming_runtime
+            from yeto.rl.adapters.miles.full_parameter.sao_binding import (
+                bind_sao_streaming_runtime,
+            )
 
             # Two-role (actor + critic) full-parameter sync; the ports rollout
             # hook writes the round evidence the runtime directory names.
+            # The contract names a fresh evidence directory under the island's
+            # run root; the island creates that root, the bind the directory.
+            sao_runtime.trajectory_evidence_dir.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             bind_sao_streaming_runtime(miles_args, sao_runtime)
         elif sync_preset == "decoupled":
             from yeto.protocol import layout_fingerprint
