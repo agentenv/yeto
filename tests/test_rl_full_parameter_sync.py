@@ -548,3 +548,50 @@ def test_fragment_resident_state_never_materializes():
     assert state.payload_digest == ("q" * 64, 8)
     with pytest.raises(UnsupportedLayoutError):
         state.materialize()
+
+
+def _role_stream_config(role: str, port: int, *, sweep: bool = False):
+    from yeto.rl.adapters.miles.full_parameter.role_stream import RoleStreamConfig
+    from yeto.rl.local_learner import ComponentIdentity
+
+    return RoleStreamConfig(
+        algorithm="grpo",
+        role=role,
+        component=ComponentIdentity(role, "a" * 40, "c" * 64),
+        syncer_addr=("127.0.0.1", port),
+        learner_id=0,
+        learner_generation=0,
+        learner_generations=(0, 0),
+        total_fragment_steps=4,
+        expected_fragments=2,
+        expected_layout_hash="1" * 64,
+        local_horizon=1,
+        optimizer_steps_per_round=1,
+        training_contract_hash="2" * 64,
+        syncer_profile_hash="3" * 64,
+        pipeline_depth=1,
+    )
+
+
+def test_miles_build_sync_selects_full_parameter_sync_for_a_full_parameter_island():
+    from yeto.rl.adapters.miles.entry import _policy_state_for, build_sync
+    from yeto.rl.adapters.miles.full_parameter.session import (
+        FullParameterSyncConfig,
+        MilesFullParameterPolicyState,
+    )
+
+    config = FullParameterSyncConfig((_role_stream_config("actor", 30100),), sweep=True)
+    args = SimpleNamespace(yeto_rl_full_parameter_config=config)
+    runner = SimpleNamespace(run=asyncio.run)
+
+    sync, progress = build_sync(args, yeto_policy_sync=True, runner=runner, groups={"actor": object()})
+
+    assert isinstance(sync, FullParameterSync) and progress is None
+    assert sync.pairing.profile.sweep and sync.pairing.profile.roles == ("actor",)
+    assert isinstance(_policy_state_for(sync), MilesFullParameterPolicyState)
+    with pytest.raises(ValueError, match="runner and trainer groups"):
+        build_sync(args, yeto_policy_sync=True)
+    with pytest.raises(ValueError, match="one actor role and H=1"):
+        FullParameterSyncConfig(
+            (_role_stream_config("actor", 30100), _role_stream_config("critic", 30101)), sweep=True
+        )

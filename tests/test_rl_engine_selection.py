@@ -42,8 +42,7 @@ def test_ppo_is_not_routed_to_legacy():
     [
         (dict(sync_preset="sao-streaming-full"), "SAO"),
         (dict(extra_argv=("--sao-compaction",)), "SAO"),
-        (dict(sync_preset="dense-full", parameter_mode="full"), "dense-full"),
-        (dict(tuning="full"), "full-parameter"),
+        (dict(sync_preset="dense-full", parameter_mode="full", island_scheduling="elastic"), "elastic"),
         (dict(model_recipe="deepseek-v4-flash"), "DeepSeek V4"),
         (dict(lora_targets="attention-routed-experts"), "DeepSeek V4"),
         (dict(expert_full_count=4), "DeepSeek V4"),
@@ -283,7 +282,6 @@ def test_learner_default_is_ports():
 @pytest.mark.parametrize(
     "extra",
     [
-        ("--parameter-mode", "full", "--sync-preset", "dense-full"),
         ("--rl-model-recipe", "deepseek-v4-flash"),
         ("--expert-full-count", "2"),
         ("--rollout-num-gpus", "2"),
@@ -291,8 +289,6 @@ def test_learner_default_is_ports():
 )
 def test_learner_parser_rejects_unsupported_ports_runs(extra, capsys):
     argv = _learner_argv(("--rl-engine", "ports", *extra))
-    if "--parameter-mode" in extra:
-        argv = [a for a in argv if a not in ("--lora-r", "8", "--lora-targets", "attention")]
     with pytest.raises(SystemExit):
         rl_learner.parse_args(argv)
     assert "only supported by the legacy path" in capsys.readouterr().err
@@ -685,3 +681,13 @@ def test_island_post_cmd_runs_after_the_learner_and_keeps_its_exit_code(monkeypa
     after = run.split(learner, 1)[1]
     assert '( set +e; nvidia-smi -L; echo done ) > "$HOME/yeto-output/post-cmd.txt" 2>&1' in after
     assert "exit ${LRC:-0}" in after.split("else", 1)[0]
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [dict(sync_preset="dense-full", parameter_mode="full"), dict(tuning="full", parameter_mode="full")],
+)
+def test_full_parameter_training_runs_on_ports(kwargs):
+    """P0-D8: full-parameter training has one ports sync (FullParameterSync)."""
+
+    assert ports_rejections(**kwargs) == []

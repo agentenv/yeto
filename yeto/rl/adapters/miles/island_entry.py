@@ -745,6 +745,7 @@ def _require_ports_supported(args, extra_argv: Sequence[str] = ()) -> None:
         expert_full_count=getattr(args, "expert_full_count", 0) or 0,
         rollout_num_gpus=getattr(args, "rollout_num_gpus", None),
         placement=getattr(args, "rl_placement", "colocated"),
+        island_scheduling=getattr(args, "rl_island_scheduling", "legacy"),
         extra_argv=tuple(extra_argv),
     )
 
