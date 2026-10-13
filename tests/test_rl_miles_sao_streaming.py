@@ -12,14 +12,16 @@ from yeto.rl.adapters.miles.publish import (
     get_current_published_policy_identity,
     set_current_published_policy_identity,
 )
-from yeto.rl.adapters.miles.models.sao_streaming import (
+from yeto.rl.adapters.miles.full_parameter.role_stream import (
     MilesFullParameterRoleStream,
-    MilesSaoRoleStreamConfig,
+    RoleRoundResult,
+    RoleStreamConfig,
+    RoleSubmissionCandidate,
+    role_stream_session_contract_hash,
+)
+from yeto.rl.adapters.miles.models.sao_streaming import (
     MilesSaoStreamingConfig,
     MilesSaoStreamingPolicySync,
-    RoleRoundResult,
-    _RoleSubmissionCandidate,
-    sao_role_stream_session_contract_hash,
 )
 
 
@@ -40,8 +42,9 @@ def _role_config(
     port: int,
     fragments: int = 2,
     total_steps: int = 4,
-) -> MilesSaoRoleStreamConfig:
-    return MilesSaoRoleStreamConfig(
+) -> RoleStreamConfig:
+    return RoleStreamConfig(
+        algorithm="sao",
         role=role,
         component=ComponentIdentity(
             role, ("a" if role == "actor" else "b") * 40, "c" * 64
@@ -72,23 +75,23 @@ def test_role_sessions_are_domain_separated_and_dual_config_is_lockstep():
     config = MilesSaoStreamingConfig(actor, critic)
 
     assert config.actor.role == "actor"
-    assert sao_role_stream_session_contract_hash("1" * 64, actor) != (
-        sao_role_stream_session_contract_hash("1" * 64, critic)
+    assert role_stream_session_contract_hash("1" * 64, actor) != (
+        role_stream_session_contract_hash("1" * 64, critic)
     )
-    assert sao_role_stream_session_contract_hash("1" * 64, actor) != (
-        sao_role_stream_session_contract_hash(
+    assert role_stream_session_contract_hash("1" * 64, actor) != (
+        role_stream_session_contract_hash(
             "1" * 64,
             replace(actor, syncer_profile_hash="2" * 64),
         )
     )
-    assert sao_role_stream_session_contract_hash("1" * 64, actor) != (
-        sao_role_stream_session_contract_hash(
+    assert role_stream_session_contract_hash("1" * 64, actor) != (
+        role_stream_session_contract_hash(
             "1" * 64,
             replace(actor, pipeline_depth=1),
         )
     )
-    assert sao_role_stream_session_contract_hash("1" * 64, critic) != (
-        sao_role_stream_session_contract_hash(
+    assert role_stream_session_contract_hash("1" * 64, critic) != (
+        role_stream_session_contract_hash(
             "1" * 64,
             replace(critic, optimizer_steps_per_round=3),
         )
@@ -179,7 +182,7 @@ class _PairedRole:
     def __init__(
         self,
         role: str,
-        candidates: list[_RoleSubmissionCandidate],
+        candidates: list[RoleSubmissionCandidate],
         events: list[tuple[str, int, bool]],
         *,
         false_pushes: int = 0,
@@ -328,7 +331,7 @@ class _PartialThenIncrementedAttemptRole(_PairedRole):
 
 
 def _candidate(role: str, global_step: int, *, base_version: int = 0):
-    return _RoleSubmissionCandidate(
+    return RoleSubmissionCandidate(
         role=role,
         permit=PullRequest((global_step - 1) % 2, global_step, 1),
         base_version=base_version,

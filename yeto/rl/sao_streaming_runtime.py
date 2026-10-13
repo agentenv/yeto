@@ -17,10 +17,8 @@ from typing import Any
 
 from ..syncer_profile import SyncerSemanticProfile
 from .local_learner import ComponentIdentity
-from yeto.rl.adapters.miles.models.sao_streaming import (
-    MilesSaoRoleStreamConfig,
-    MilesSaoStreamingConfig,
-)
+from yeto.rl.adapters.miles.full_parameter.role_stream import RoleStreamConfig
+from yeto.rl.adapters.miles.models.sao_streaming import MilesSaoStreamingConfig
 
 _LEGACY_SCHEMA = "yeto.sao-streaming-runtime.v1"
 _SCHEMA = "yeto.sao-streaming-runtime.v2"
@@ -121,7 +119,7 @@ def _parse_role(
     raw: object,
     *,
     syncer_profile: SyncerSemanticProfile,
-) -> MilesSaoRoleStreamConfig:
+) -> RoleStreamConfig:
     role = _mapping(f"SAO {expected_role} stream", raw, _ROLE_FIELDS)
     if role["role"] != expected_role:
         raise ValueError(f"SAO {expected_role} stream role changed")
@@ -150,7 +148,8 @@ def _parse_role(
     model_revision = component["model_revision"]
     if type(model_revision) is not str:
         raise ValueError(f"SAO {expected_role} model revision must be a string")
-    return MilesSaoRoleStreamConfig(
+    return RoleStreamConfig(
+        algorithm="sao",
         role=expected_role,
         component=ComponentIdentity(
             role=expected_role,
@@ -250,8 +249,8 @@ def _load_layout_attestation(
     *,
     expected_sao_context_sha256: str,
     benchmark_neutral: bool,
-    actor: MilesSaoRoleStreamConfig,
-    critic: MilesSaoRoleStreamConfig,
+    actor: RoleStreamConfig,
+    critic: RoleStreamConfig,
     syncer_profile_sha256: str,
 ) -> tuple[Path, str]:
     reference = _mapping(
