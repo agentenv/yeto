@@ -168,7 +168,9 @@ def test_codex_infrastructure_outcome_aborts_in_neutral_and_miles(monkeypatch, f
     assert (result.value, result.aborted, result.reason) == (0.0, True, "secrlenv_infrastructure_failure")
     sample = cases.FakeSample(metadata=dict(metadata))
     assert _run(codex_reward.reward_func(None, sample)) == 0.0
-    assert sample.status is cases.Status.ABORTED
+    # The SecRLEnv entry marks FAILED, not ABORTED: Miles drops an aborted
+    # group before the SecRLEnv group check could schedule its retry.
+    assert sample.status is cases.Status.FAILED
     generic = cases.FakeSample(metadata=dict(metadata))
     assert _run(miles_rewards.miles_reward(codex_reward.secrlenv_reward)(None, generic)) == 0.0
     assert generic.status is cases.Status.ABORTED

@@ -57,6 +57,12 @@ async def generate(input: Any) -> Any:
     the custom agent's metadata.  SecRLEnv may restore that metadata only after
     validating the complete outcome; every other missing/invalid
     evidence path remains fatal.
+
+    The restored sample is marked ``failed``, not ``aborted``: Miles drops a
+    group with an aborted sample before the dynamic filter runs, so the
+    SecRLEnv group check would never see it and could not schedule the
+    same-task retry.  A ``failed`` sample still never trains (the group check
+    rejects any status other than completed or truncated).
     """
 
     from miles.rollout.generate_hub.agentic_tool_call import generate as upstream
@@ -92,6 +98,9 @@ async def generate(input: Any) -> Any:
         if not isinstance(metadata, dict):
             raise UntrustedOutcome("SecRLEnv sample metadata is not an object")
         metadata.update(evidence)
+        from miles.utils.types import Sample
+
+        samples[0].status = Sample.Status.FAILED
         return output
     finally:
         _CAPTURED_AGENT_METADATA.reset(token)

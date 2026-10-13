@@ -8,7 +8,7 @@ describe the moved files. ``LEGACY_SOURCE_SHA256`` is kept for comparison.
 """
 
 AGENT_SHA256 = "84c6c708cba2142e3d043ae047c90f529b90b953b739261466b8a6e28b2c7411"
-GENERATE_SHA256 = "a32121837f889bb0151c0bb196bc41eaeb550ec1fb738568a75d513b52ccef23"  # adapters/miles/harness_glue/codex_generate.py (decoupling 5.7; was 1df1ded9…)
+GENERATE_SHA256 = "f5f3ca76ab6f6f78ff5fea7ca7c114237aa11a67ec9c1dae107424e47b843638"  # adapters/miles/harness_glue/codex_generate.py (P0-1.7b.4-Q1 restored sample marked failed; was a3212183…)
 
 LEGACY_SOURCE_SHA256 = {
     "agent.py": "0f76c7fbd81135bc5b02cab2488629aaff1bb58dc59eae9228ca317583d90c26",

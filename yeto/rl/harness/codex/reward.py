@@ -155,13 +155,15 @@ def _sample_reward(sample: Any) -> float:
     if not result.aborted:
         return result.value
 
-    # Miles calls the reward function before the dynamic group filter. Mark a
-    # infrastructure failure ABORTED here so it is replaced, while still
-    # returning the numeric value required by the reward-function API. The
-    # group filter never permits this transient zero into training data.
+    # Miles calls the reward function before the dynamic group filter. Mark an
+    # infrastructure failure FAILED here so the group check replaces it, while
+    # still returning the numeric value required by the reward-function API.
+    # The group check never permits this transient zero into training data.
+    # FAILED, not ABORTED: Miles drops a group with an aborted sample before
+    # the group check runs, so its same-task retry would never be scheduled.
     from miles.utils.types import Sample
 
-    sample.status = Sample.Status.ABORTED
+    sample.status = Sample.Status.FAILED
     return result.value
 
 
@@ -170,7 +172,7 @@ async def reward_func(args: Any, samples: Any, **_kwargs: Any) -> float | list[f
 
     Missing or invalid metadata remains fatal. An infrastructure marker
     is returned as the numeric zero required by Miles only after marking its
-    sample ABORTED, so the group filter replaces it and it never enters training.
+    sample FAILED, so the group check replaces it and it never enters training.
     """
 
     if isinstance(samples, list):

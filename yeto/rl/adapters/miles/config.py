@@ -93,6 +93,7 @@ ADAPTER_OWNED_FLAGS = frozenset(
         "--rollout-all-samples-process-path",
         "--rollout-sample-filter-path",
         "--rollout-function-path",
+        "--data-source-path",  # SecRLEnv same-task retry (secrlenv_retry)
         "--buffer-filter-path",
         "--fully-async",
         "--debug-train-only",
@@ -250,7 +251,10 @@ SESSION_SERVER_PARTIAL_ROLLOUT_RULE = (
 # reads the same agent flags) and turns CompactionRL segment sessions into one
 # sample per segment; without it a compacted rollout trains as one sample.
 from yeto.rl.algos.compactionrl import CODEX_OPENENV_GENERATE  # noqa: E402  (single source)
-AGENT_FLAG_READERS = frozenset({AGENTIC_TOOL_CALL_GENERATE, CODEX_OPENENV_GENERATE})
+from yeto.rl import SECRLENV_GENERATE  # noqa: E402  (wraps AGENTIC_TOOL_CALL_GENERATE)
+AGENT_FLAG_READERS = frozenset(
+    {AGENTIC_TOOL_CALL_GENERATE, CODEX_OPENENV_GENERATE, SECRLENV_GENERATE}
+)
 
 
 def _requires_agentic_generate(flag: str) -> _Check:
@@ -507,6 +511,22 @@ def _algorithm_filter(config, algorithm: AlgorithmSpec) -> str | None:
             f"{algorithm.dynamic_sampling_filter!r}",
         )
     return algorithm.dynamic_sampling_filter
+
+
+def _secrlenv_retry_argv(agent, batch, dynamic_filter: str | None,
+                         max_policy_age: int) -> tuple[str, ...]:
+    """P0-1.7b.4-Q1: the SecRLEnv agents bind the same-task retry classes."""
+
+    from .secrlenv_retry import rollout_argv
+
+    try:
+        return rollout_argv(custom_agent=agent.custom_agent_function_path,
+                            dynamic_filter=dynamic_filter,
+                            rollout_batch_size=batch.groups_per_round,
+                            over_sampling_batch_size=batch.over_sampling_batch_size,
+                            max_policy_age=max_policy_age)
+    except ValueError as exc:
+        raise UnmappedConfigError("agent.custom_agent_function_path", str(exc)) from None
 
 
 def placement_request(config) -> PlacementRequest:
@@ -980,6 +1000,7 @@ def translate_run_config(
         values.extend(("--custom-generate-function-path", agent.custom_generate_function_path))
     if agent.custom_agent_function_path:  # IR-1 (leaf policy proved agentic generate)
         values.extend(("--custom-agent-function-path", agent.custom_agent_function_path))
+    values.extend(_secrlenv_retry_argv(agent, batch, dynamic_filter, max_policy_age))
     if agent.agent_max_seq_len is not None:
         values.extend(("--max-seq-len", str(int(agent.agent_max_seq_len))))
     if agent.use_session_server:
