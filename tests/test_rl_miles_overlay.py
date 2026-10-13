@@ -48,7 +48,7 @@ def test_patch_adds_exactly_the_fork_only_flags():
                                                                        execution={"needs_critic": True})])
 def test_auto_is_off_without_fork_flags(spec):
     assert mo.resolve_overlay(_args(spec)) is None
-    assert launcher._miles_overlay_manifest(_args(spec), "ports") == {}
+    assert launcher._miles_overlay_manifest(_args(spec)) == {}
 
 
 @pytest.mark.parametrize("make", [vapo_spec, compactionrl_spec, lambda: sao.sao_algorithm_spec("coding")])
@@ -65,28 +65,24 @@ def test_explicit_and_invalid_choices():
     with pytest.raises(ValueError, match="already contains"):
         mo.resolve_overlay(_args(None, rl_miles_overlay="critic-c357"))
     with pytest.raises(ValueError):
-        mo.resolve_overlay(_args(None, rl_miles_overlay="critic-c357", rl_engine="legacy"))
-    with pytest.raises(ValueError):
         mo.resolve_overlay(_args(None, rl_miles_overlay="bogus"))
     assert mo.resolve_overlay(_args(None, training_mode="sft")) is None
 
 
 def test_setup_unchanged_when_off_and_appended_when_on():
-    off = launcher._miles_source_setup("ports")
-    assert launcher._miles_source_setup("ports", None) == off
-    on = launcher._miles_source_setup("ports", mo.CRITIC_C357)
+    off = launcher._miles_source_setup()
+    assert launcher._miles_source_setup(None) == off
+    on = launcher._miles_source_setup(mo.CRITIC_C357)
     assert on[1] == off[1] and on[0].startswith(off[0])
     tail = on[0][len(off[0]):]
     for needle in (mo.CRITIC_C357_PATCH_SHA256, "REFUSING", "MILES_REFRESHED", "git -C ~/miles apply",
                    mo.OVERLAY_RECORD_PATH, mo.CRITIC_C357_BASE_COMMIT):
         assert needle in tail
     assert tail.index("sha256sum --check") < tail.index("apply --check") < tail.index("apply ~/")
-    with pytest.raises(ValueError):
-        launcher._miles_source_setup("legacy", mo.CRITIC_C357)
 
 
 def test_run_manifest_records_overlay_and_mismatch():
-    assert launcher._miles_overlay_manifest(_args(vapo_spec()), "ports") == {}
+    assert launcher._miles_overlay_manifest(_args(vapo_spec())) == {}
     rec = mo.overlay_record(mo.CRITIC_C357)
     assert rec["patch_sha256"] == mo.CRITIC_C357_PATCH_SHA256
     assert rec["image_manifest_matches_code"] is False and rec["result_commit_pushed"] is False
@@ -139,7 +135,7 @@ def test_learner_accepts_dirty_miles_only_as_the_exact_overlay_tree(tmp_path, mo
     import json as _json
     import subprocess as sp
 
-    from yeto.rl.adapters.miles.legacy import engine as M
+    from yeto.rl.adapters.miles import revision as M
     from yeto.rl.adapters.miles import overlay as O
 
     repo = tmp_path / "miles"

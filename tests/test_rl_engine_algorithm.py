@@ -1,16 +1,7 @@
-import inspect
-from types import SimpleNamespace
 
 import pytest
 
-from yeto.rl.adapters.miles import island_entry as learner
-from yeto.rl.adapters.miles.algorithm_flags import legacy_algorithm_argv
-from yeto.rl.engine.algorithm import (
-    BOUNDED_NONZERO_STD_FILTER,
-    STOCK_NONZERO_STD_FILTER,
-    AlgorithmSpec,
-    AlgorithmSpecError,
-)
+from yeto.rl.engine.algorithm import BOUNDED_NONZERO_STD_FILTER, AlgorithmSpec, AlgorithmSpecError
 
 BOUNDED = AlgorithmSpec(
     dynamic_sampling_filter=BOUNDED_NONZERO_STD_FILTER,
@@ -47,25 +38,3 @@ def test_unknown_and_invalid_rejected():
         AlgorithmSpec(dynamic_sampling_max_replacements=2)
 
 
-def test_legacy_mapping():
-    args = SimpleNamespace(
-        dynamic_sampling_filter_path=STOCK_NONZERO_STD_FILTER,
-        dynamic_sampling_max_replacements=4,
-    )
-    spec = AlgorithmSpec.from_legacy_args(args)
-    assert spec == BOUNDED
-    assert legacy_algorithm_argv(spec) == [
-        "--advantage-estimator", "grpo",
-        "--dynamic-sampling-filter-path", "yeto.rl.filters.bounded_nonzero_reward_std",
-    ]
-    assert spec.to_legacy_runtime_attrs() == {
-        "yeto_rl_dynamic_sampling_max_replacements": 4
-    }
-    assert legacy_algorithm_argv(AlgorithmSpec.from_legacy_args(SimpleNamespace())) == [
-        "--advantage-estimator", "grpo",
-    ]
-    # Flags must match what legacy build_miles_argv actually emits.
-    source = inspect.getsource(learner)
-    for token in ('"--advantage-estimator", "grpo"', '"--dynamic-sampling-filter-path"',
-                  '"--kl-coef"', "yeto_rl_dynamic_sampling_max_replacements"):
-        assert token in source

@@ -25,7 +25,7 @@ from yeto_miles_secrlenv.client import (
     require_daemon_ready,
 )
 
-from yeto.rl.adapters.miles.models import rollout_legacy_port as rollout_port
+from yeto.rl.harness.codex import reward as secrlenv_reward
 
 
 class FakeMessage:
@@ -1266,7 +1266,7 @@ def test_admission_replacement_nonce_preserves_shared_retry_exhaustion(monkeypat
     def retry(group, **kwargs):
         assert kwargs["infrastructure_503_retries"] == {201: 1}
         if calls:
-            raise rollout_port.SecRLEnvReplacementExhausted(
+            raise secrlenv_reward.SecRLEnvReplacementExhausted(
                 "SecRLEnv rollout replacement budget was exhausted"
             )
         calls.append((group, kwargs))
@@ -1294,7 +1294,7 @@ def test_admission_replacement_nonce_preserves_shared_retry_exhaustion(monkeypat
 
     initial = reward.check_group(args, first)
     with pytest.raises(
-        rollout_port.SecRLEnvReplacementExhausted,
+        secrlenv_reward.SecRLEnvReplacementExhausted,
         match="budget was exhausted",
     ):
         reward.check_group(args, exhausted)
@@ -1319,7 +1319,7 @@ def test_signed_cleanup_failure_is_terminal_without_replacement(monkeypatch):
 
     assert asyncio.run(reward.reward_func(None, sample)) == 0.0
     with pytest.raises(
-        rollout_port.SecRLEnvRolloutCleanupError,
+        secrlenv_reward.SecRLEnvRolloutCleanupError,
         match="cleanup could not be verified",
     ):
         reward.check_group(
@@ -1410,7 +1410,7 @@ def test_aborted_and_untrusted_groups_never_use_bounded_fallback(monkeypatch):
 
     aborted_result = reward.check_group(args, aborted)
     with pytest.raises(
-        rollout_port.SecRLEnvUntrustedEvidence,
+        secrlenv_reward.SecRLEnvUntrustedEvidence,
         match="authentication failed",
     ):
         reward.check_group(args, [forged])
@@ -1430,7 +1430,7 @@ def test_signed_infrastructure_replacement_is_memoized_and_exhausts(monkeypatch)
 
     def retry(group, **kwargs):
         if calls:
-            raise rollout_port.SecRLEnvReplacementExhausted(
+            raise secrlenv_reward.SecRLEnvReplacementExhausted(
                 "SecRLEnv rollout replacement budget was exhausted"
             )
         calls.append((group, kwargs))
@@ -1460,7 +1460,7 @@ def test_signed_infrastructure_replacement_is_memoized_and_exhausts(monkeypatch)
     initial = reward.check_group(args, first)
     duplicate = reward.check_group(args, first)
     with pytest.raises(
-        rollout_port.SecRLEnvReplacementExhausted,
+        secrlenv_reward.SecRLEnvReplacementExhausted,
         match="budget was exhausted",
     ):
         reward.check_group(args, second)

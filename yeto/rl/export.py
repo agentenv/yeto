@@ -289,18 +289,15 @@ def export_rl_checkpoint(
     pipeline: int = 1,
     local_horizon: int = 1,
     benchmark_learner_budget_steps: int | None = None,
-    rl_engine: str = "ports",
     algorithm_spec: Any = None,
     unverified_mechanisms: Sequence[str] = (),
     event_tape_incomplete: bool = False,
 ) -> CanonicalLoraState:
     """Export the authoritative RL checkpoint as a PEFT adapter.
 
-    ``rl_engine="ports"`` (the default) is recorded in
-    ``yeto_rl_provenance.json``; an explicit ``rl_engine="legacy"`` leaves the
-    provenance output byte-identical to pre-ports exports.
+    The engine (``rl_engine: ports``) is recorded in ``yeto_rl_provenance.json``.
 
-    ports only (change rl-algorithm-capabilities D9/D11): ``algorithm_spec``
+    Change rl-algorithm-capabilities D9/D11: ``algorithm_spec``
     (an ``AlgorithmSpec``, a mapping or a JSON string) is recorded as its
     canonical JSON ``algorithm_spec`` plus ``algorithm_spec_sha256`` -- the
     same values as the run's ``rl_engine_selected`` event; unverified
@@ -310,10 +307,6 @@ def export_rl_checkpoint(
 
     from ..models import resolve
 
-    if rl_engine not in ("legacy", "ports"):
-        raise ValueError(f"unknown rl_engine {rl_engine!r}")
-    if rl_engine != "ports" and (algorithm_spec is not None or unverified_mechanisms):
-        raise ValueError("algorithm provenance is recorded only for rl_engine='ports'")
     algorithm = None
     if algorithm_spec is not None:
         from .engine.algorithm import AlgorithmSpec
@@ -435,31 +428,29 @@ def export_rl_checkpoint(
             "sync_layout_fingerprint": checkpoint.layout_hash,
             "checkpoint_sha256": checkpoint.sha256,
         }
-    if rl_engine == "ports":
-        provenance = {
-            **(provenance or {"sync_preset": sync_preset, "policy_hash": policy_tensor_hash(state)}),
-            "rl_engine": rl_engine,
-        }
-        if algorithm is not None:
-            provenance["algorithm_spec"] = algorithm.canonical_json()
-            provenance["algorithm_spec_sha256"] = algorithm.sha256()
-        if event_tape_incomplete:
-            provenance["event_tape_incomplete"] = True
-        if unverified_mechanisms:
-            provenance["rl/unverified_mechanisms"] = sorted(set(unverified_mechanisms))
-            provenance["contains_unverified_mechanisms"] = True
-    if provenance is not None:
-        path = Path(output_dir).expanduser() / "yeto_rl_provenance.json"
-        temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-        try:
-            temporary.write_text(
-                json.dumps(provenance, sort_keys=True, separators=(",", ":"))
-                + "\n",
-                encoding="utf-8",
-            )
-            os.replace(temporary, path)
-        finally:
-            temporary.unlink(missing_ok=True)
+    provenance = {
+        **(provenance or {"sync_preset": sync_preset, "policy_hash": policy_tensor_hash(state)}),
+        "rl_engine": "ports",
+    }
+    if algorithm is not None:
+        provenance["algorithm_spec"] = algorithm.canonical_json()
+        provenance["algorithm_spec_sha256"] = algorithm.sha256()
+    if event_tape_incomplete:
+        provenance["event_tape_incomplete"] = True
+    if unverified_mechanisms:
+        provenance["rl/unverified_mechanisms"] = sorted(set(unverified_mechanisms))
+        provenance["contains_unverified_mechanisms"] = True
+    path = Path(output_dir).expanduser() / "yeto_rl_provenance.json"
+    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    try:
+        temporary.write_text(
+            json.dumps(provenance, sort_keys=True, separators=(",", ":"))
+            + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
     return state
 
 
@@ -491,12 +482,6 @@ def parse_args(argv=None):
     parser.add_argument("--fragments", type=int, default=1)
     parser.add_argument("--pipeline", type=int, default=1)
     parser.add_argument("--local-horizon", type=int, default=1)
-    parser.add_argument(
-        "--rl-engine",
-        choices=["legacy", "ports"],
-        default="ports",
-        help="engine that produced the checkpoint (recorded in provenance for ports)",
-    )
     parser.add_argument(
         "--rl-algorithm-spec",
         default=None,
@@ -587,7 +572,6 @@ def main(argv=None) -> None:
         fragments=args.fragments,
         pipeline=args.pipeline,
         local_horizon=args.local_horizon,
-        rl_engine=args.rl_engine,
         algorithm_spec=algorithm_spec,
         unverified_mechanisms=unverified,
         **({"event_tape_incomplete": True} if incomplete else {}),

@@ -195,13 +195,12 @@ def test_install_arms_only_ports_module_names(monkeypatch):
 
 
 @pytest.mark.parametrize(("flag", "expected"), [
-    ("YETO_DSV4_EXPERT_FULL_PORTS", "ports"),
-    ("YETO_DSV4_EXPERT_FULL", "legacy"),
+    ("YETO_DSV4_EXPERT_FULL_PORTS", ["ports"]),
+    ("YETO_DSV4_EXPERT_FULL", []),  # the legacy-layout switch is gone
 ])
-def test_sitecustomize_picks_the_runtime_for_the_miles_layout(monkeypatch, flag, expected):
+def test_sitecustomize_installs_the_ports_expert_full_runtime(monkeypatch, flag, expected):
     calls = []
     monkeypatch.setattr(ports_runtime, "install", lambda: calls.append("ports"))
-    monkeypatch.setattr(expert_full_runtime, "install", lambda: calls.append("legacy"))
     for name in ("YETO_DSV4_EXPERT_CLONE", "YETO_DSV4_CLONE_ONLY_LORA", "YETO_DSV4_EXPERT_FULL",
                  "YETO_DSV4_EXPERT_FULL_PORTS", "YETO_TMS_POST_PAUSE_IDLE_S"):
         monkeypatch.delenv(name, raising=False)
@@ -209,7 +208,7 @@ def test_sitecustomize_picks_the_runtime_for_the_miles_layout(monkeypatch, flag,
 
     runpy.run_path(str(ROOT / "sitecustomize.py"), run_name="_sitecustomize_dsv4_test")
 
-    assert calls == [expected]
+    assert calls == expected
     assert os.environ[flag] == "1"
 
 
@@ -230,11 +229,3 @@ def test_v4_bridge_registers_in_the_lora_bridge_module_of_either_layout(monkeypa
     assert installed == [module]
 
 
-def test_sitecustomize_refuses_both_expert_full_runtimes(monkeypatch):
-    for name in ("YETO_DSV4_EXPERT_CLONE", "YETO_DSV4_CLONE_ONLY_LORA", "YETO_TMS_POST_PAUSE_IDLE_S"):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("YETO_DSV4_EXPERT_FULL", "1")
-    monkeypatch.setenv("YETO_DSV4_EXPERT_FULL_PORTS", "1")
-
-    with pytest.raises(RuntimeError, match="mutually exclusive"):
-        runpy.run_path(str(ROOT / "sitecustomize.py"), run_name="_sitecustomize_both_test")

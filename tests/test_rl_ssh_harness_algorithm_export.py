@@ -32,12 +32,8 @@ def _tapes(artifacts, per_island):
         path.write_text("".join(json.dumps(e) + "\n" for e in [{"event": "other"}, *events]))
 
 
-def _plan(engine="ports", islands=2):
-    return {"rl_engine": engine, "islands": [{"hosts": ["h"]}] * islands}
-
-
-def test_legacy_runs_export_no_algorithm(tmp_path):
-    assert ssh_harness._run_algorithm_provenance(_plan("legacy"), tmp_path) == (None, ())
+def _plan(islands=2):
+    return {"rl_engine": "ports", "islands": [{"hosts": ["h"]}] * islands}
 
 
 def test_ports_run_algorithm_comes_from_the_island_events(tmp_path):
@@ -62,11 +58,8 @@ def test_ports_export_fails_closed(tmp_path, per_island, match):
         ssh_harness._run_algorithm_provenance(_plan(), tmp_path)
 
 
-@pytest.mark.parametrize("engine", ["ports", "legacy"])
-def test_verify_passes_the_algorithm_to_export(tmp_path, monkeypatch, engine):
+def test_verify_passes_the_algorithm_to_export(tmp_path, monkeypatch):
     plan, checkpoint, final_hash = _decoupled_oracle_fixture(tmp_path / "fixture")
-    if engine == "ports":
-        plan["rl_engine"] = "ports"  # legacy plans have no rl_engine key
     plan_path = tmp_path / "plan.json"
     _write_plan(plan_path, plan)
     artifacts = tmp_path / "artifacts"
@@ -75,8 +68,7 @@ def test_verify_passes_the_algorithm_to_export(tmp_path, monkeypatch, engine):
             path = artifacts / f"island-{learner_id}" / f"node-{node_id}.inspect.json"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps({"Status": "exited", "ExitCode": 0, "OOMKilled": False, "RestartCount": 0}))
-    if engine == "ports":
-        _tapes(artifacts, [[_event()] for _ in plan["islands"]])
+    _tapes(artifacts, [[_event()] for _ in plan["islands"]])
 
     import yeto.export as checkpoint_export
     from yeto.rl import export as rl_export
@@ -86,9 +78,5 @@ def test_verify_passes_the_algorithm_to_export(tmp_path, monkeypatch, engine):
     exported = {}
     monkeypatch.setattr(rl_export, "export_rl_checkpoint", lambda *_a, **kw: exported.update(kw))
     ssh_harness.verify(plan_path, str(tmp_path / "adapter"))
-    assert exported["rl_engine"] == engine
-    if engine == "ports":
-        assert exported["algorithm_spec"] == SPEC.canonical_json()
-    else:
-        assert exported["algorithm_spec"] is None
+    assert exported["algorithm_spec"] == SPEC.canonical_json()
     assert exported["unverified_mechanisms"] == ()

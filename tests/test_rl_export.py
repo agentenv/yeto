@@ -466,26 +466,11 @@ def test_ports_engine_is_recorded_in_export_provenance(tmp_path):
     values = torch.zeros(sum(spec.numel for spec in specs))
     checkpoint = tmp_path / "state.ckpt"
     _write_checkpoint(checkpoint, values, layout_hash, ledger_size=0)
-    export_rl_checkpoint(
-        checkpoint, tmp_path / "legacy", model=str(model_path),
-        model_revision=MODEL_REVISION, rank=2, lora_targets="all-linear",
-        rl_engine="legacy",
-    )
-    assert not (tmp_path / "legacy" / "yeto_rl_provenance.json").exists()
     state = export_rl_checkpoint(
         checkpoint, tmp_path / "ports", model=str(model_path),
         model_revision=MODEL_REVISION, rank=2, lora_targets="all-linear",
-        rl_engine="ports",
     )
     provenance = json.loads((tmp_path / "ports" / "yeto_rl_provenance.json").read_text())
-    # ports is the default: an export without rl_engine records it too.
-    export_rl_checkpoint(
-        checkpoint, tmp_path / "default", model=str(model_path),
-        model_revision=MODEL_REVISION, rank=2, lora_targets="all-linear",
-    )
-    assert json.loads(
-        (tmp_path / "default" / "yeto_rl_provenance.json").read_text()
-    ) == provenance
     assert provenance == {
         "rl_engine": "ports",
         "sync_preset": "strict-avg",

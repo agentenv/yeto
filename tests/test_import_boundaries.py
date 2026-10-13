@@ -30,7 +30,7 @@ REPO = Path(__file__).resolve().parents[1]
 ALLOWLIST = REPO / "tests" / "import_boundary_allowlist.txt"
 README = "yeto/rl/engine/README.md"
 # Upper bound of allowlist entries; may only go down (D4).
-ALLOWLIST_CAP = 11  # 0.6: +1 pre-existing launcher->overlay import hidden by a stub
+ALLOWLIST_CAP = 8  # rl-code-quality-cleanup 1.10: legacy engine and launcher->overlay gone
 
 FRAMEWORKS = ("miles", "miles_plugins", "megatron", "sglang", "verl", "vllm", "torch_npu")
 ADAPTERS = ("yeto.rl.adapters",)
@@ -189,7 +189,31 @@ def problems(violations: list[Violation], allowlist: dict, cap: int) -> list[str
     return out
 
 
+# Removed with the legacy Miles engine (rl-code-quality-cleanup 1.10); no file
+# anywhere, tests included, may import them again.  No allowlist.
+REMOVED = ("yeto.rl.adapters.miles.legacy", "yeto.rl.adapters.miles.models.rollout_legacy_port")
+REMOVED_SCAN_DIRS = ("yeto", "scripts", "tools", "tests")
+
+
+def removed_module_imports(root: Path = REPO) -> list[str]:
+    hits: dict[tuple[str, int], str] = {}
+    for rel in _files(root, REMOVED_SCAN_DIRS):
+        for line, name in imported_names(root / rel, rel):
+            if any(_matches(name, prefix) for prefix in REMOVED):
+                hits.setdefault((rel, line), f"{rel}:{line} import {name}")
+    return list(hits.values())
+
+
 # ------------------------------------------------------------------ tests
+def test_removed_legacy_engine_is_never_imported():
+    assert not removed_module_imports(), "\n".join(removed_module_imports())
+
+
+def test_removed_module_import_is_caught(tmp_path):
+    root = _tree(tmp_path, {"scripts/x.py": "from yeto.rl.adapters.miles.legacy import engine\n"})
+    assert removed_module_imports(root) == ["scripts/x.py:1 import yeto.rl.adapters.miles.legacy"]
+
+
 def test_repository_respects_the_import_boundaries():
     found = problems(scan(), load_allowlist(), ALLOWLIST_CAP)
     assert not found, "\n".join(found)

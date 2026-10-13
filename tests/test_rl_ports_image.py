@@ -2,7 +2,6 @@
 wiring for SkyPilot and Modal, and the image-aware ports source setup.
 Legacy must be unchanged."""
 
-import hashlib
 import json
 import os
 import re
@@ -43,7 +42,7 @@ def login(monkeypatch):
 
 
 def test_ports_image_is_the_private_digest_pinned_fork_image():
-    assert rl.default_rl_image("ports") == rl.MILES_NEXT_IMAGE
+    assert rl.default_rl_image() == rl.MILES_NEXT_IMAGE
     assert re.fullmatch(
         r"docker:ghcr\.io/(michaellchung|agentenv)/yeto-miles-ports@sha256:[0-9a-f]{64}",
         rl.MILES_NEXT_IMAGE,
@@ -53,13 +52,6 @@ def test_ports_image_is_the_private_digest_pinned_fork_image():
     # The tag the build script pushes names the pinned commits.
     tag = f"{rl.MILES_NEXT_COMMIT[:7]}-{rl.SGLANG_NEXT_COMMIT[:7]}"
     assert f"Tag {tag};" in (REPO / "yeto/rl/adapters/miles/pins.py").read_text()
-
-
-def test_legacy_image_default_is_unchanged():
-    assert rl.default_rl_image("legacy") == rl.MILES_IMAGE == (
-        "docker:ghcr.io/agentenv/miles@sha256:"
-        "80c20538b63f76defde06ad5d4cfa564ae6f261110696eb1864470cb835e1590"
-    )
 
 
 def test_build_inputs_match_the_pins():
@@ -97,14 +89,8 @@ def test_commits_and_digest_are_pinned_together_with_the_build_record():
 LEGACY_SETUP_SHA256 = "1166134dbe978365d349f5e8f1851be7ccf7599c62dd28b01e88a64901425985"
 
 
-def test_legacy_source_setup_is_byte_identical():
-    miles, sglang = launcher._miles_source_setup("legacy")
-    digest = hashlib.sha256((miles + "\0" + sglang).encode()).hexdigest()
-    assert digest == LEGACY_SETUP_SHA256
-
-
 def test_ports_setup_reuses_the_image_forks_and_still_verifies():
-    miles, sglang = launcher._miles_source_setup("ports")
+    miles, sglang = launcher._miles_source_setup()
     subprocess.run(["bash", "-n"], input=miles + "\n" + sglang, text=True, check=True)
     c = rl.MILES_NEXT_COMMIT
     # Miles: the image's /root/miles (= ~/miles) is already at the pin, so
@@ -194,33 +180,12 @@ def test_sky_ports_task_logs_in_via_task_secrets(monkeypatch, login):
     assert task.resources.image_id == rl.MILES_NEXT_IMAGE
 
 
-@pytest.mark.parametrize("engine", ["ports", "legacy"])
-def test_no_login_means_no_docker_login(monkeypatch, no_login, engine):
-    args = _cli(("--rl-engine", engine))
+def test_no_login_means_no_docker_login(monkeypatch, no_login):
+    args = _cli()
     _prepare_rl_args(args)
     task = _island_task(args, monkeypatch)
     assert not any(k.startswith("SKYPILOT_DOCKER") for k in getattr(task, "secrets", None) or {})
     assert not hasattr(task.resources, "_docker_login_config")
-
-
-def _legacy_task_blob(monkeypatch):
-    args = _cli(("--rl-engine", "legacy"))
-    _prepare_rl_args(args)
-    task = _island_task(args, monkeypatch)
-    d = {k: v for k, v in vars(task).items() if k not in ("calls", "storage_mounts")}
-    d["resources"] = vars(d["resources"])
-    return json.dumps(d, sort_keys=True, default=str)
-
-
-@pytest.mark.parametrize(
-    "env",
-    [LOGIN, {"SKYPILOT_DOCKER_SERVER": "ghcr.io"}, {**LOGIN, "SKYPILOT_DOCKER_SERVER": "docker.io"}],
-)
-def test_legacy_task_ignores_any_registry_login(monkeypatch, no_login, env):
-    before = _legacy_task_blob(monkeypatch)
-    for key, value in env.items():
-        monkeypatch.setenv(key, value)
-    assert _legacy_task_blob(monkeypatch) == before  # even for its ghcr.io image
 
 
 def test_modal_pulls_the_private_image_with_the_login(monkeypatch, login):
@@ -242,20 +207,6 @@ def test_modal_pulls_the_private_image_with_the_login(monkeypatch, login):
         (cfg.image_ref,),
         {"secret": ("secret", {"REGISTRY_USERNAME": "user", "REGISTRY_PASSWORD": "not-a-real-token"})},
     )
-
-
-def test_modal_legacy_pull_ignores_the_login(monkeypatch, login):
-    args = _cli(("--rl-engine", "legacy"))
-    _prepare_rl_args(args)
-    task = _island_task(args, monkeypatch)
-    from yeto.gpu_spec import parse_gpu_spec
-
-    args.cluster_prefix = "img-test"
-    cfg = build_modal_island_config(args, parse_gpu_spec("modal:1xh100")[0], 0, task, "1.2.3.4:5")
-    assert cfg.registry_login is False
-    state = fake_modal(monkeypatch)
-    mr.ModalOps("img-test").define(cfg)
-    assert state["images"][0].calls[0] == ("from_registry", (cfg.image_ref,), {})
 
 
 def test_modal_public_image_pull_is_unchanged(monkeypatch, no_login):
@@ -474,7 +425,7 @@ def _run_ports_miles_setup(tmp_path, *, manifest: bool, peft_version: str):
         f'exec {sys.executable} "$@"\n'
     )
     (shim / "python3").chmod(0o755)
-    miles, _ = launcher._miles_source_setup("ports")
+    miles, _ = launcher._miles_source_setup()
     script = miles.replace(rl.MILES_NEXT_COMMIT, sha).replace(
         rl.MILES_NEXT_IMAGE_MANIFEST, str(manifest_path)
     )
@@ -524,23 +475,19 @@ def _docker_config(tmp_path, host="ghcr.io", auth="user:not-a-real-token"):
 
 
 def test_registry_login_for_defaults_to_none_for_public_image(monkeypatch, no_login):
-    for engine in ("ports", "legacy"):
-        args = _cli(("--rl-engine", engine))
-        _prepare_rl_args(args)
-        assert args.rl_image_private is False
-        assert launcher.registry_login_for(args, {}) is None
-        task = _island_task(args, monkeypatch)
-        assert not any(k.startswith("SKYPILOT_DOCKER") for k in getattr(task, "secrets", None) or {})
-        assert "unset SKYPILOT_DOCKER" not in (task.setup or "")
+    args = _cli()
+    _prepare_rl_args(args)
+    assert args.rl_image_private is False
+    assert launcher.registry_login_for(args, {}) is None
+    task = _island_task(args, monkeypatch)
+    assert not any(k.startswith("SKYPILOT_DOCKER") for k in getattr(task, "secrets", None) or {})
+    assert "unset SKYPILOT_DOCKER" not in (task.setup or "")
 
 
 def test_registry_login_for_uses_environment_login(no_login):
     args = _cli()
     _prepare_rl_args(args)
     assert launcher.registry_login_for(args, LOGIN) == LOGIN
-    legacy = _cli(("--rl-engine", "legacy"))
-    _prepare_rl_args(legacy)
-    assert launcher.registry_login_for(legacy, LOGIN) is None  # legacy: env ignored as before
 
 
 def test_rl_image_private_prefers_env_then_docker_config(monkeypatch, no_login, tmp_path):
@@ -551,10 +498,6 @@ def test_rl_image_private_prefers_env_then_docker_config(monkeypatch, no_login, 
     (tmp_path / ".docker").mkdir()
     _docker_config(tmp_path / ".docker")
     assert launcher.registry_login_for(args, {}) == LOGIN
-    # explicit private pull of a legacy-engine image also injects
-    legacy = _cli(("--rl-engine", "legacy", "--rl-image", rl.MILES_NEXT_IMAGE, "--rl-image-private"))
-    _prepare_rl_args(legacy)
-    assert launcher.registry_login_for(legacy, {}) == LOGIN
 
 
 def test_rl_image_private_without_any_login_is_an_error(monkeypatch, no_login, tmp_path):

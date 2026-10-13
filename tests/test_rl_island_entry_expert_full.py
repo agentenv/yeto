@@ -35,27 +35,17 @@ def _args(**overrides):
     return SimpleNamespace(**values)
 
 
-@pytest.mark.parametrize(("engine", "runtime", "other"), [
-    ("ports", "YETO_DSV4_EXPERT_FULL_PORTS", "YETO_DSV4_EXPERT_FULL"),
-    ("legacy", "YETO_DSV4_EXPERT_FULL", "YETO_DSV4_EXPERT_FULL_PORTS"),
-])
-def test_expert_full_env_selects_the_runtime_of_the_engine(clean_env, engine, runtime, other):
-    island_entry._configure_deepseek_v4_env(_args(), rl_engine=engine, clone_only_lora=False, expert_full=True)
+def test_expert_full_env_selects_the_ports_runtime(clean_env):
+    island_entry._configure_deepseek_v4_env(_args(), clone_only_lora=False, expert_full=True)
 
-    assert os.environ[runtime] == "1"
-    assert other not in os.environ
+    assert os.environ["YETO_DSV4_EXPERT_FULL_PORTS"] == "1"
+    assert "YETO_DSV4_EXPERT_FULL" not in os.environ
     assert os.environ["YETO_DSV4_EXPERT_FULL_COUNT"] == "4"
     assert os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"] == "0"
 
 
-def test_expert_full_env_refuses_the_other_layouts_runtime(clean_env):
-    clean_env.setenv("YETO_DSV4_EXPERT_FULL", "1")
-    with pytest.raises(ValueError, match="other Miles layout"):
-        island_entry._configure_deepseek_v4_env(_args(), rl_engine="ports", clone_only_lora=False, expert_full=True)
-
-
 def test_plain_lora_sets_no_deepseek_v4_switch(clean_env):
-    island_entry._configure_deepseek_v4_env(_args(), rl_engine="ports", clone_only_lora=False, expert_full=False)
+    island_entry._configure_deepseek_v4_env(_args(), clone_only_lora=False, expert_full=False)
     assert not any(name in os.environ for name in _DSV4_ENV)
 
 

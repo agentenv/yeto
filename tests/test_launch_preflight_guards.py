@@ -12,7 +12,6 @@ import pytest
 from yeto import island_overrides as io_
 from yeto import launch_preflight as lp
 from yeto import memory_estimate as me
-from test_rl_algorithm_provenance import _fake_sky, _no_modal_listing  # noqa: F401 (autouse fixtures)
 
 # tests/conftest.py replaces count_threads with a fixed reading; keep the real one.
 REAL_COUNT_THREADS = lp.count_threads
@@ -497,7 +496,7 @@ def test_manifest_written_by_launcher(monkeypatch, tmp_path):
                            cluster_prefix="neg", _launch_preflight_manifest={
                                "negative_test": True, "island_overrides": [{"island": 1}],
                                "preflight": {"threads": {"total": 1}}})
-    monkeypatch.setattr(launcher, "_miles_overlay_manifest", lambda a, e: {})
+    monkeypatch.setattr(launcher, "_miles_overlay_manifest", lambda a: {})
     launcher._write_run_manifest(args)
     data = json.loads((tmp_path / "neg" / "run_manifest.json").read_text())
     assert data["negative_test"] is True and data["island_overrides"] == [{"island": 1}]

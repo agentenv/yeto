@@ -501,7 +501,7 @@ def dry_run(argv: Sequence[str] | None = None) -> dict[str, Any]:
     parser.add_argument("--actor-checkpoint", required=True)
     parser.add_argument("--critic-save", required=True)
     args = parser.parse_args(argv)
-    base = resolve_ports_algorithm(args, rl_engine="ports")
+    base = resolve_ports_algorithm(args)
     spec, _, _ = absorb_extra_argv(base, shlex.split(args.extra))
     problems = spec.rejections()
     if problems:

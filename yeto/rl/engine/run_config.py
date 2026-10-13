@@ -4,9 +4,7 @@
 model provider into an immutable :class:`RLRunConfig`.  All validation and
 derivation that does not depend on a particular RL engine lives here; each
 engine then owns a pure translation of the config into its own launch
-arguments (legacy: ``yeto.rl.adapters.miles.island_entry.build_miles_argv``; ports:
-``miles_adapter/config.py``).  Both paths start from the same resolved config,
-so equivalence runs are guaranteed identical inputs.
+arguments (Miles: ``yeto.rl.adapters.miles.config.translate_run_config``).
 
 This module is import-light: it never imports torch, ray or miles.
 
@@ -339,8 +337,7 @@ def resolve_lr_schedule(
     with a fixed-LR baseline; S17 N4 had to approximate it with a 20000-step
     linear horizon). ``linear`` is refused where the horizon is unknown.
 
-    Both engine translations (legacy ``_legacy_miles_argv`` and ports
-    ``translate_run_config``) emit exactly this schedule.
+    The Miles translation (``translate_run_config``) emits exactly this schedule.
     """
 
     if requested not in LR_SCHEDULE_CHOICES:
@@ -1062,8 +1059,8 @@ def _lora_dropout(args, parameter_mode: str) -> float:
     value = float(value)
     if not 0.0 <= value < 1.0:
         raise ValueError("--rl-lora-dropout must be in [0, 1)")
-    if getattr(args, "rl_engine", "ports") != "ports" or parameter_mode != "lora":
-        raise ValueError("--rl-lora-dropout only applies to the ports LoRA engine")
+    if parameter_mode != "lora":
+        raise ValueError("--rl-lora-dropout only applies to LoRA training")
     return value
 
 
@@ -1077,10 +1074,7 @@ def ports_training_eval(args) -> bool:
     so both accept exactly the same runs.
     """
 
-    return (
-        not getattr(args, "eval_only", False)
-        and getattr(args, "rl_engine", "ports") == "ports"
-    )
+    return not getattr(args, "eval_only", False)
 
 
 def _resolve_eval(

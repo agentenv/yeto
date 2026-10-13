@@ -199,7 +199,7 @@ def role_stream_session_contract_hash(
         "component": asdict(config.component),
         "parameter_layout_hash": layout_hash,
         "training_contract_hash": config.training_contract_hash,
-        "backend_identity_sha256": backend_identity("ports").sha256(),
+        "backend_identity_sha256": backend_identity().sha256(),
         "syncer_profile_hash": config.syncer_profile_hash,
         "profile": {
             "learner_generations": [

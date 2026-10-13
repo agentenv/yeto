@@ -171,7 +171,6 @@ def test_validate_compaction_segments_accepts_and_refuses():
     import pytest
 
     from yeto.rl.compaction import validate_compaction_segments
-    from yeto.rl.adapters.miles.models import rollout_legacy_port
 
     validate_compaction_segments(_segments())
     for bad in (_segments(2),  # ends on a summary
@@ -185,4 +184,3 @@ def test_validate_compaction_segments_accepts_and_refuses():
     moved[1].index = 6
     with pytest.raises(RuntimeError, match="changed trajectory identity"):
         validate_compaction_segments(moved)
-    assert rollout_legacy_port.validate_compaction_segments is validate_compaction_segments

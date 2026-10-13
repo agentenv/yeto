@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from yeto.rl.adapters.miles.legacy import engine as miles
+from yeto.rl.engine import progress
 from yeto.rl.bridge import BridgeConfig
 from yeto.rl.core import (
     LocalRoundStats,
@@ -345,7 +345,7 @@ def test_single_island_strict_progress_and_publication_tokens(tmp_path):
     assert [c for c in engine.calls if c[0] == "publish"] == [("publish", 0), ("publish", 1)]
     payload = torch.load(tmp_path / "island.pt", weights_only=True)
     assert payload["schema_version"] == 3
-    assert payload["config"] == miles._island_checkpoint_config(args)
+    assert payload["config"] == progress._island_checkpoint_config(args)
     assert payload["local_round_id"] == 1
     assert payload["local_round_stats"]["base_policy_version"] == 0
     assert "tensors" not in payload and "optimizer" not in payload
@@ -438,7 +438,7 @@ def _dengine(offset=0.0, **kwargs):
 
 
 def _save(args, snapshot, steps, tokens, groups=()):
-    miles._save_decoupled_checkpoint(
+    progress._save_decoupled_checkpoint(
         args, snapshot=snapshot, optimizer_steps=steps, action_tokens=tokens,
         rollout_metrics={}, local_round_stats=None, completed_groups=list(groups),
     )
@@ -511,7 +511,7 @@ def test_decoupled_boundary_preserves_optimizer_and_publishes_one_snapshot(tmp_p
     assert engine.published[0] == 1
     assert args.yeto_rl_policy_token == sync.snapshot.token
     assert torch.equal(engine.tensors["base_model.model.a.lora_A.weight"], torch.tensor([[3.0, 4.0]]))
-    payload = miles._load_decoupled_checkpoint(args)
+    payload = progress._load_decoupled_checkpoint(args)
     assert payload["next_rollout_id"] == 1 and payload["fragment_versions"] == [1, 0]
     events = _events(tmp_path / "events.jsonl")
     assert [e["event"] for e in events].count("rl_sync_hook") == 1
@@ -548,7 +548,7 @@ def test_decoupled_pending_finalization_records_work_and_stops(tmp_path):
     assert result.stop and sync.finished
     assert engine.policy_state.applied == [(1, "preserve", 1)]
     assert Bridge.acknowledged == FinalManifest(4, (3, 4))
-    assert miles._load_decoupled_checkpoint(args)["fragment_versions"] == [3, 4]
+    assert progress._load_decoupled_checkpoint(args)["fragment_versions"] == [3, 4]
     events = _events(tmp_path / "events.jsonl")
     assert [e["event"] for e in events].count("rl_local_round") == 1
     assert next(e for e in events if e["event"] == "rl_final_cut")[
@@ -608,7 +608,7 @@ def test_decoupled_budget_freezes_and_stops_after_final_cut(tmp_path):
     assert sync.boundary(driver, rollout_id=0, stats=_stats(0)).stop
     assert engine.policy_state.applied == [(1, "preserve", 1)]
     assert Bridge.acknowledged == FinalManifest(2, (1, 2))
-    payload = miles._load_decoupled_checkpoint(args)
+    payload = progress._load_decoupled_checkpoint(args)
     assert payload["next_rollout_id"] == 1 and payload["fragment_versions"] == [1, 2]
     events = _events(tmp_path / "events.jsonl")
     assert [e["event"] for e in events].count("rl_fragment_push") == 1
@@ -663,7 +663,7 @@ def test_decoupled_restart_applies_newer_uneven_cut_with_reset(tmp_path):
     assert engine.scheduler_step == 2
     assert start.rollout_id == 2 and not start.finished
     assert sync.snapshot.fragment_versions == (3, 2)
-    assert miles._load_decoupled_checkpoint(args)["completed_groups"] == []
+    assert progress._load_decoupled_checkpoint(args)["completed_groups"] == []
 
 
 def test_decoupled_restart_keeps_groups_for_exact_rebuilt_snapshot(tmp_path):
@@ -674,7 +674,7 @@ def test_decoupled_restart_keeps_groups_for_exact_rebuilt_snapshot(tmp_path):
     _save(args, snapshot, 2, 10, groups=[group])
     sync = DecoupledSync(args, bridge_factory=_recovery_bridge(recovered, (1, 0), []))
     sync.start(_driver(_dengine(), sync, tmp_path))
-    restored = miles._load_decoupled_checkpoint(args)
+    restored = progress._load_decoupled_checkpoint(args)
     assert restored["policy_token"] == snapshot.token
     assert len(restored["completed_groups"]) == 1
 
@@ -689,7 +689,7 @@ def test_decoupled_restart_at_terminal_cut_publishes_once_and_stops(tmp_path):
     _driver(engine, sync, tmp_path).run()
     assert bridge.acknowledged == manifest
     assert [c for c in engine.calls if c[0] in {"publish", "generate", "train"}] == [("publish", 2)]
-    assert miles._load_decoupled_checkpoint(args)["fragment_versions"] == [3, 4]
+    assert progress._load_decoupled_checkpoint(args)["fragment_versions"] == [3, 4]
 
 
 def test_decoupled_run_until_stop_against_fake_syncer(tmp_path):
@@ -718,7 +718,7 @@ def test_decoupled_run_until_stop_against_fake_syncer(tmp_path):
         assert torch.equal(engine.tensors[name], value)
     modes = [a[1] for a in engine.policy_state.applied]
     assert modes[0] == "reset" and set(modes[1:]) == {"preserve"}
-    payload = miles._load_decoupled_checkpoint(args)
+    payload = progress._load_decoupled_checkpoint(args)
     assert payload["next_rollout_id"] == 5 and payload["fragment_versions"] == [3, 4]
     assert "tensors" not in payload
     phases = [

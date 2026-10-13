@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 from types import SimpleNamespace
 
 import pytest
@@ -100,7 +101,7 @@ def test_codex_openenv_preflight_attests_pinned_adapter_and_environment(
             "codex_openenv_subprocess_agent_function": subprocess_adapter,
         }[name]
 
-    monkeypatch.setattr(learner.importlib, "import_module", import_module)
+    monkeypatch.setattr(importlib, "import_module", import_module)
     for name, value in CODEX_OPENENV_IDENTITY_ENV.items():
         monkeypatch.setenv(name, value)
 

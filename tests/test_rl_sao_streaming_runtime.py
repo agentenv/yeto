@@ -489,19 +489,18 @@ def test_island_loads_the_runtime_for_its_own_learner(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("engine", "sync", "overrides", "message"),
+    ("sync", "overrides", "message"),
     (
-        ("legacy", True, {}, "only on the ports engine"),
-        ("ports", False, {}, "Yeto policy sync"),
-        ("ports", True, {"eval_only": True}, "eval-only"),
+        (False, {}, "Yeto policy sync"),
+        (True, {"eval_only": True}, "eval-only"),
     ),
 )
-def test_full_parameter_island_rejections(engine, sync, overrides, message):
+def test_full_parameter_island_rejections(sync, overrides, message):
     from yeto.rl.adapters.miles import island_entry
 
     args = SimpleNamespace(**{"eval_only": False, "rl_max_policy_age": 0, **overrides})
     with pytest.raises(ValueError, match=message):
-        island_entry._check_full_parameter_sync(args, rl_engine=engine, yeto_policy_sync=sync)
+        island_entry._check_full_parameter_sync(args, yeto_policy_sync=sync)
 
 
 def test_island_entry_binds_the_sao_streaming_runtime_end_to_end(monkeypatch, tmp_path):
@@ -582,7 +581,7 @@ def test_full_parameter_island_accepts_a_policy_age_limit():
     from yeto.rl.adapters.miles import island_entry
 
     args = SimpleNamespace(eval_only=False, rl_max_policy_age=1)
-    island_entry._check_full_parameter_sync(args, rl_engine="ports", yeto_policy_sync=True)
+    island_entry._check_full_parameter_sync(args, yeto_policy_sync=True)
 
 
 def test_context_schema_label_2_still_writes_trajectory_evidence_schema_4(tmp_path):

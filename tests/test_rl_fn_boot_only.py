@@ -125,7 +125,7 @@ def test_launcher_rejects_boot_only_without_no_sync():
 
     with pytest.raises(ValueError, match="--rl-boot-only needs"):
         launcher._check_ports_infra_switches(
-            SimpleNamespace(rl_boot_only=True, rl_single_island_no_sync=False), "ports")
+            SimpleNamespace(rl_boot_only=True, rl_single_island_no_sync=False))
 
 
 # ------------------------------------------------------------ scripts (print-only)

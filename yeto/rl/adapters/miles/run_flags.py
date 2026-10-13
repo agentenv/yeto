@@ -13,22 +13,20 @@ import json
 from collections.abc import Mapping
 from types import MappingProxyType
 
-from yeto.rl.adapters.miles.pins import MILES_IMAGE
+from yeto.rl.adapters.miles.pins import MILES_NEXT_IMAGE
 from yeto.rl.engine.run_flags import RlFlag, cli_flag, island_flag, shared_flag
-from yeto.rl.engine.selection import SYNC_PRESETS, canonical_sync_preset
+from yeto.rl.engine.selection import RL_ENGINES, SYNC_PRESETS, canonical_sync_preset
 
 _MODE = (
     cli_flag("--rl-runtime", choices=["miles"], default="miles"),
     shared_flag(
         "--rl-engine",
-        choices=["legacy", "ports"],
+        choices=RL_ENGINES,
         default="ports",
         help=(
-            "RL engine path: ports (default; yeto-owned island loop over "
-            "upstream Miles; LoRA + GRPO, strict-avg/decoupled, dense-full "
-            "and DeepSeek V4 expert-full) or legacy (agentenv Miles fork; "
-            "required for SAO, DeepSeek V4 clone-only LoRA and non-causal "
-            "models; deprecated)"
+            "RL engine path: ports, the yeto-owned island loop over upstream "
+            "Miles and the only one left (the legacy engine is removed); the "
+            "flag stays so existing commands parse"
         ),
     ),
     cli_flag(
@@ -36,8 +34,7 @@ _MODE = (
         default=None,
         help=(
             "digest-pinned RL image (docker:REPO@sha256:DIGEST); defaults to "
-            f"{MILES_IMAGE} for --rl-engine legacy and the upstream Miles "
-            "image for --rl-engine ports"
+            f"{MILES_NEXT_IMAGE}, upstream Miles with the pinned forks"
         ),
     ),
     shared_flag(

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import os
 import re
 import sys
@@ -22,17 +21,14 @@ from yeto.launcher import (
 )
 from yeto.rl import (
     CODEX_OPENENV_AGENT,
-    MILES_BASE_COMMIT,
-    MILES_BUNDLE_PATH,
-    MILES_BUNDLE_SHA256,
-    MILES_COMMIT,
+    MILES_NEXT_COMMIT,
+    MILES_NEXT_REPOSITORY,
     MILES_PEFT_VERSION,
-    MILES_REPOSITORY,
     SECRLENV_GENERATE,
     SECRLENV_GROUP_FILTER,
     SECRLENV_REWARD,
-    SGLANG_COMMIT,
-    SGLANG_REPOSITORY,
+    SGLANG_NEXT_COMMIT,
+    SGLANG_NEXT_REPOSITORY,
 )
 from yeto.rl.adapters.miles import island_entry as rl_learner
 from yeto.rl.codex_backend import (
@@ -40,13 +36,17 @@ from yeto.rl.codex_backend import (
     QWEN35_08B_REVISION,
     QWEN35_MODEL,
     QWEN35_REVISION,
-    QWEN38_MODEL,
-    QWEN38_REVISION,
 )
-from yeto.rl.core import CanonicalTensorSpec
-from yeto.rl.decoupled import DecoupledBridgeConfig
-from yeto.rl.adapters.miles.island_entry import build_miles_argv
-from yeto.rl.adapters.miles.legacy.engine import miles_execution_source_sha256, verify_miles_revision
+from yeto.rl.adapters.miles.revision import miles_execution_source_sha256, verify_miles_revision
+
+
+# DeepSeek V4 expert-full rides the full-parameter strict sweep (P0 1.7b.2);
+# its accepted launch is in test_rl_launcher_dense_full.py.
+_FULL_PARAMETER_SWEEP = (
+    "--gpu", "modal:16xh200,modal:16xh200",
+    "--rl-sync-preset", "full-parameter", "--rl-placement", "fixed-partition",
+    "--rl-rollout-gpus", "8", "--rl-parameter-layout-sha256", "e" * 64, "--fragments", "4",
+)
 
 
 def _args(extra=()):
@@ -73,10 +73,6 @@ def _args(extra=()):
             "--reward-function",
             "pkg.reward:score",
             "--trust-remote-code",
-            # This suite pins the legacy path; ports is the CLI default and
-            # is covered by tests/test_rl_engine_selection.py.
-            "--rl-engine",
-            "legacy",
             *extra,
         ]
     )
@@ -125,29 +121,6 @@ def test_init_rl_cli_and_strict_preset_are_the_public_contract():
     assert not hasattr(args, "rl_global_rounds")
 
 
-def test_variance_aware_filter_requires_and_forwards_oversampling():
-    args = _args(
-        [
-            "--over-sampling-batch-size",
-            "8",
-            "--dynamic-sampling-filter-path",
-            "miles.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std",
-        ]
-    )
-    _prepare_rl_args(args)
-    assert args.over_sampling_batch_size == 8
-    assert args.dynamic_sampling_filter_path.endswith("check_reward_nonzero_std")
-
-    invalid = _args(
-        [
-            "--dynamic-sampling-filter-path",
-            "miles.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std",
-        ]
-    )
-    with pytest.raises(ValueError, match="greater than"):
-        _prepare_rl_args(invalid)
-
-
 def test_bounded_variance_filter_and_large_run_safety_options():
     args = _args(
         [
@@ -168,26 +141,6 @@ def test_bounded_variance_filter_and_large_run_safety_options():
     )
     assert args.rl_offload_train is True
     assert args.rl_distributed_timeout_minutes == 7
-
-
-def test_signed_secrlenv_variance_filter_accepts_a_bounded_replacement_budget():
-    args = _args(
-        [
-            "--over-sampling-batch-size",
-            "8",
-            "--dynamic-sampling-filter-path",
-            "yeto.rl.harness.codex.reward.check_group",
-            "--dynamic-sampling-max-replacements",
-            "4",
-        ]
-    )
-
-    _prepare_rl_args(args)
-
-    assert args.dynamic_sampling_filter_path == (
-        "yeto.rl.harness.codex.reward.check_group"
-    )
-    assert args.dynamic_sampling_max_replacements == 4
 
 
 def test_over_sampling_without_filter_is_forwarded_for_cutoff():
@@ -244,51 +197,6 @@ def test_secrlenv_agent_rejects_the_unwrapped_miles_generator():
     )
 
     with pytest.raises(ValueError, match="signed SecRLEnv generate wrapper"):
-        _prepare_rl_args(args)
-
-
-@pytest.mark.parametrize(
-    "extra,match",
-    [
-        (
-            ["--dynamic-sampling-filter-path", "other.filter"],
-            "exact signed group filter",
-        ),
-        (
-            ["--dynamic-sampling-max-replacements", "1"],
-            "zero variance replacements",
-        ),
-        (
-            ["--secrlenv-max-infrastructure-replacements", "2"],
-            "exactly one infrastructure replacement",
-        ),
-        (
-            ["--over-sampling-batch-size", "6"],
-            "training batch plus one",
-        ),
-        (
-            ["--over-sampling-batch-size", "64"],
-            "not available to SecRLEnv agents",
-        ),
-    ],
-)
-def test_secrlenv_agent_rejects_conflicting_replacement_contract(extra, match):
-    args = _args(
-        [
-            "--reward-function",
-            SECRLENV_REWARD,
-            "--custom-generate-function-path",
-            SECRLENV_GENERATE,
-            "--custom-agent-function-path",
-            "yeto.rl.harness.codex.agent.run",
-            "--use-session-server",
-            "--tito-model",
-            "org/model",
-            *extra,
-        ]
-    )
-
-    with pytest.raises(ValueError, match=match):
         _prepare_rl_args(args)
 
 
@@ -496,116 +404,6 @@ def test_rl_maps_long_task_and_oversampling_options_to_miles():
     assert args.tito_allowed_append_roles == ["tool", "user"]
 
 
-def test_stock_codex_harness_requires_explicit_signed_xhigh_dsv4_contract():
-    args = _args(("--codex-reasoning-effort", "xhigh"))
-    with pytest.raises(ValueError, match="signed Codex agent"):
-        _prepare_rl_args(args)
-
-    args = _args(
-        (
-            "--gpu",
-            "aws:8xh200@us-east-1,aws:8xh200@us-west-2",
-            "--rl-model-recipe",
-            "deepseek-v4-flash",
-            "--lora-targets",
-            "attention-routed-experts",
-            "--tensor-parallel",
-            "8",
-            "--expert-parallel",
-            "8",
-            "--rollout-num-gpus-per-engine",
-            "8",
-            "--sglang-tp-size",
-            "8",
-            "--sglang-ep-size",
-            "8",
-            "--sglang-attention-backend",
-            "dsv4",
-            "--sglang-page-size",
-            "256",
-            "--no-sglang-deterministic-inference",
-            "--custom-generate-function-path",
-            SECRLENV_GENERATE,
-            "--custom-agent-function-path",
-            "yeto.rl.harness.codex.codex_harness_agent.run",
-            "--reward-function",
-            SECRLENV_REWARD,
-            "--codex-reasoning-effort",
-            "xhigh",
-            "--use-session-server",
-            "--tito-model",
-            "deepseekv4",
-            "--tito-allowed-append-roles",
-            "tool",
-            "user",
-        )
-    )
-
-    _prepare_rl_args(args)
-
-    assert args.codex_reasoning_effort == "xhigh"
-    assert args.tito_allowed_append_roles == ["tool", "user"]
-    assert args.apply_chat_template_kwargs == {
-        "thinking_mode": "thinking",
-        "reasoning_effort": "max",
-        "drop_thinking": False,
-    }
-    assert args.dynamic_sampling_filter_path == SECRLENV_GROUP_FILTER
-    assert args.dynamic_sampling_max_replacements == 0
-    assert args.secrlenv_max_infrastructure_replacements == 1
-    assert args.over_sampling_batch_size == args.rollout_batch_size + 1
-
-    args.apply_chat_template_kwargs["drop_thinking"] = True
-    with pytest.raises(ValueError, match="chat-template kwargs"):
-        _prepare_rl_args(args)
-
-
-def test_stock_codex_harness_accepts_only_the_exact_qwen38_xhigh_profile():
-    args = _args(
-        (
-            "--model",
-            QWEN38_MODEL,
-            "--model-revision",
-            QWEN38_REVISION,
-            "--lora-targets",
-            "attention",
-            "--custom-generate-function-path",
-            SECRLENV_GENERATE,
-            "--custom-agent-function-path",
-            "yeto.rl.harness.codex.codex_harness_agent.run",
-            "--reward-function",
-            SECRLENV_REWARD,
-            "--codex-reasoning-effort",
-            "xhigh",
-            "--use-session-server",
-            "--tito-model",
-            "qwen38",
-            "--tito-allowed-append-roles",
-            "tool",
-            "user",
-        )
-    )
-
-    _prepare_rl_args(args)
-
-    assert args.rl_model_recipe == "generic"
-    assert args.model == QWEN38_MODEL
-    assert args.model_revision == QWEN38_REVISION
-    assert args.codex_reasoning_effort == "xhigh"
-    assert args.tito_model == "qwen38"
-    assert args.lora_targets == "attention"
-    assert args.expert_full_count == 0
-    assert args.apply_chat_template_kwargs == {
-        "enable_thinking": True,
-        "preserve_thinking": True,
-        "reasoning_effort": "xhigh",
-    }
-
-    args.model_revision = "0" * 40
-    with pytest.raises(ValueError, match="Qwen3.8 model identity"):
-        _prepare_rl_args(args)
-
-
 def test_codex_openenv_uses_exact_08b_profile_with_qwen35_tito_family():
     args = _args(
         (
@@ -726,7 +524,7 @@ def test_rl_validation_rejects_out_of_contract_topology(extra, match):
 
 def test_rl_validation_rejects_diffusion_models():
     args = _args(("--model-kind", "diffusion"))
-    with pytest.raises(ValueError, match="only causal language models"):
+    with pytest.raises(ValueError, match="causal LMs only"):
         _prepare_rl_args(args)
 
 
@@ -871,56 +669,6 @@ def test_deepseek_recipe_island_env_table(monkeypatch):
     assert "NVTE_GROUPED_LINEAR_SINGLE_PARAM" not in task.envs
 
 
-def test_rl_accepts_attested_sixteen_expert_full_deepseek_recipe():
-    args = _args(
-        (
-            "--gpu",
-            "ssh:2x8xh200@island-0",
-            "--rollout-model",
-            "/data/models/deepseek-v4-flash-fp8",
-            "--rollout-model-revision",
-            "7eb21d27aee405755da5251f4458e9fff87c047b",
-            "--rl-model-recipe",
-            "deepseek-v4-flash",
-            "--lora-targets",
-            "attention",
-            "--expert-full-count",
-            "16",
-            "--expert-full-lr",
-            "1e-6",
-            "--expert-selection-sha256",
-            "a" * 64,
-            "--expert-selection-contract-sha256",
-            "b" * 64,
-            "--tensor-parallel",
-            "8",
-            "--pipeline-parallel",
-            "2",
-            "--expert-parallel",
-            "8",
-            "--rollout-num-gpus-per-engine",
-            "8",
-            "--sglang-tp-size",
-            "8",
-            "--sglang-ep-size",
-            "8",
-            "--sglang-attention-backend",
-            "dsv4",
-            "--no-sglang-deterministic-inference",
-            "--sglang-page-size",
-            "256",
-        )
-    )
-
-    _prepare_rl_args(args)
-
-    assert args.expert_full_count == 16
-    assert args.pipeline_parallel == 2
-    assert args.expert_full_lr == 1e-6
-    assert args.expert_selection_sha256 == "a" * 64
-    assert args.expert_selection_contract_sha256 == "b" * 64
-
-
 @pytest.mark.parametrize(
     "extra,match",
     [
@@ -976,7 +724,7 @@ def test_rl_accepts_attested_sixteen_expert_full_deepseek_recipe():
     ],
 )
 def test_rl_rejects_invalid_expert_full_contract(extra, match):
-    args = _args(extra)
+    args = _args(_FULL_PARAMETER_SWEEP + extra)
 
     with pytest.raises(ValueError, match=match):
         _prepare_rl_args(args)
@@ -1153,83 +901,6 @@ class _StorageMode:
     MOUNT = "mount"
 
 
-def test_miles_task_forwards_expert_full_contract_and_runtime_environment(
-    monkeypatch,
-):
-    monkeypatch.setitem(
-        sys.modules,
-        "sky",
-        types.SimpleNamespace(
-            Task=_Task,
-            Resources=_Resources,
-            Storage=_Storage,
-            StorageMode=_StorageMode,
-        ),
-    )
-    args = _args(
-        (
-            "--gpu",
-            "ssh:2x8xh200@island-0",
-            "--rollout-model",
-            "/data/models/deepseek-v4-flash-fp8",
-            "--rollout-model-revision",
-            "7eb21d27aee405755da5251f4458e9fff87c047b",
-            "--rl-model-recipe",
-            "deepseek-v4-flash",
-            "--lora-targets",
-            "attention",
-            "--expert-full-count",
-            "16",
-            "--expert-full-lr",
-            "1e-6",
-            "--expert-selection-sha256",
-            "a" * 64,
-            "--expert-selection-contract-sha256",
-            "b" * 64,
-            "--tensor-parallel",
-            "8",
-            "--expert-parallel",
-            "8",
-            "--rollout-num-gpus-per-engine",
-            "8",
-            "--sglang-tp-size",
-            "8",
-            "--sglang-ep-size",
-            "8",
-            "--sglang-attention-backend",
-            "dsv4",
-            "--no-sglang-deterministic-inference",
-            "--sglang-page-size",
-            "256",
-        )
-    )
-    args.model_revision = "c" * 40
-    args.data_revision = "d" * 40
-    args.source_sha256 = "e" * 64
-    args.reward_sha256 = "f" * 64
-    _prepare_rl_args(args)
-    from yeto.gpu_spec import parse_gpu_spec
-
-    task = make_miles_island_task(
-        args,
-        parse_gpu_spec(args.gpu)[0],
-        0,
-        1,
-        "127.0.0.1:29400",
-    )
-
-    assert "--expert-full-count 16" in task.run
-    assert "--expert-full-lr 1e-06" in task.run
-    assert f"--expert-selection-sha256 {'a' * 64}" in task.run
-    assert f"--expert-selection-contract-sha256 {'b' * 64}" in task.run
-    assert task.envs["YETO_DSV4_EXPERT_CLONE"] == "1"
-    assert task.envs["YETO_DSV4_EXPERT_FULL"] == "1"
-    assert task.envs["YETO_DSV4_EXPERT_FULL_COUNT"] == "16"
-    assert task.envs["YETO_DSV4_EXPERT_FULL_LR"] == "1e-06"
-    assert task.envs["NVTE_GROUPED_LINEAR_SINGLE_PARAM"] == "0"
-    assert "YETO_DSV4_CLONE_ONLY_LORA" not in task.envs
-
-
 def test_miles_tasks_mount_the_same_attested_initial_adapter(
     monkeypatch, tmp_path
 ):
@@ -1373,29 +1044,22 @@ def test_miles_task_checks_out_exact_commit_and_builds_multinode_ray(monkeypatch
         1,
         "127.0.0.1:29400",
     )
-    assert MILES_REPOSITORY in task.setup
-    assert MILES_COMMIT in task.setup
-    assert (
-        f"git -C ~/miles fetch --depth 1 origin {MILES_BASE_COMMIT}"
-        in task.setup
-    )
-    assert f"MILES_BUNDLE=~/sky_workdir/{MILES_BUNDLE_PATH}" in task.setup
+    assert MILES_NEXT_REPOSITORY in task.setup
+    assert MILES_NEXT_COMMIT in task.setup
+    assert f"git -C ~/miles fetch --depth 1 origin {MILES_NEXT_COMMIT}" in task.setup
     # An image's own Miles clone (other remote) is re-pointed at the pin
     # before fetching; the verifier rejects any other origin.
-    set_url = f"git -C ~/miles remote set-url origin {MILES_REPOSITORY}"
+    set_url = f"git -C ~/miles remote set-url origin {MILES_NEXT_REPOSITORY}"
     assert set_url in task.setup
     assert task.setup.index(set_url) < task.setup.index("fetch --depth 1 origin")
     # Miles pins its rollout manager via Ray's state API (dashboard-served);
     # a head started with --include-dashboard=false fails at start-up.
     assert "ray start --head" in task.run and "--include-dashboard=true" in task.run
     assert "--include-dashboard=false" not in task.run
-    assert MILES_BUNDLE_SHA256 in task.setup
-    assert f'git -C ~/miles fetch "$MILES_BUNDLE" {MILES_COMMIT}' in task.setup
-    assert SGLANG_REPOSITORY in task.setup
-    assert SGLANG_COMMIT in task.setup
+    assert SGLANG_NEXT_REPOSITORY in task.setup
+    assert SGLANG_NEXT_COMMIT in task.setup
     assert "checkout --detach" in task.setup
     for duplicate_check in (
-        "config --get remote.origin.url",
         "diff --quiet",
         "pathlib.Path(miles.__file__)",
         "import megatron.bridge",
@@ -1496,33 +1160,6 @@ def test_miles_task_checks_out_exact_commit_and_builds_multinode_ray(monkeypatch
     assert not hasattr(on_demand, "storage_mounts")
 
 
-def test_miles_runtime_requires_exact_detached_clean_checkout(tmp_path, monkeypatch):
-    root = tmp_path / "miles"
-    root.mkdir()
-    responses = {
-        ("rev-parse", "HEAD"): MILES_COMMIT,
-        ("rev-parse", "--abbrev-ref", "HEAD"): "HEAD",
-        ("config", "--get", "remote.origin.url"): MILES_REPOSITORY,
-        ("status", "--porcelain", "--untracked-files=all"): "",
-    }
-
-    def run(command, **_kwargs):
-        return types.SimpleNamespace(stdout=responses[tuple(command[3:])] + "\n")
-
-    monkeypatch.setattr("yeto.rl.adapters.miles.legacy.engine.subprocess.run", run)
-    monkeypatch.setattr(
-        "yeto.rl.adapters.miles.legacy.engine.importlib.import_module",
-        lambda _name: types.SimpleNamespace(__file__=root / "miles/__init__.py"),
-    )
-    assert verify_miles_revision(root) == root.resolve()
-
-    responses[("rev-parse", "--abbrev-ref", "HEAD")] = "main"
-    with pytest.raises(RuntimeError, match="not detached"):
-        verify_miles_revision(root)
-    responses[("rev-parse", "--abbrev-ref", "HEAD")] = "HEAD"
-    responses[("status", "--porcelain", "--untracked-files=all")] = "?? rogue.py"
-    with pytest.raises(RuntimeError, match="not clean"):
-        verify_miles_revision(root)
 
 
 def test_miles_runtime_accepts_only_exact_staged_source(tmp_path, monkeypatch):
@@ -1535,7 +1172,7 @@ def test_miles_runtime_accepts_only_exact_staged_source(tmp_path, monkeypatch):
     (root / "miles_plugins/__init__.py").write_text("", encoding="utf-8")
     expected = miles_execution_source_sha256(root)
     monkeypatch.setattr(
-        "yeto.rl.adapters.miles.legacy.engine.importlib.import_module",
+        "yeto.rl.adapters.miles.revision.importlib.import_module",
         lambda _name: types.SimpleNamespace(__file__=package),
     )
     assert (
@@ -1545,58 +1182,6 @@ def test_miles_runtime_accepts_only_exact_staged_source(tmp_path, monkeypatch):
     package.write_text("VERSION = 2\n", encoding="utf-8")
     with pytest.raises(RuntimeError, match="source mismatch"):
         verify_miles_revision(root, expected_source_sha256=expected)
-
-
-def test_external_router_starts_and_hands_miles_its_address(monkeypatch):
-    """Modal RL islands: Miles' router spawn missed its 30 s deadline, so
-    the learner starts the standalone router and passes its address."""
-    from yeto.rl.adapters.miles import island_entry as learner
-
-    http_utils = types.ModuleType("miles.utils.http_utils")
-    http_utils.find_available_port = lambda start: start
-    http_utils.get_host_info = lambda: ("modal", "172.20.0.5")
-    for name in ("miles", "miles.utils"):
-        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
-    monkeypatch.setitem(sys.modules, "miles.utils.http_utils", http_utils)
-    monkeypatch.setattr("atexit.register", lambda fn: None)
-
-    class Proc:
-        returncode = None
-
-        def poll(self):
-            return self.returncode
-
-        def terminate(self):
-            pass
-
-    started = []
-    attempts = []
-
-    def connect(host, port):
-        attempts.append((host, port))
-        if len(attempts) < 3:
-            raise OSError("not yet")
-
-    args = types.SimpleNamespace(
-        sglang_router_ip=None, sglang_router_port=3500,
-        sglang_router_request_timeout_secs=14400, sglang_router_policy=None,
-    )
-    learner.start_external_sglang_router(
-        args, popen=lambda cmd: started.append(cmd) or Proc(), connect=connect, sleep=lambda s: None
-    )
-    assert args.sglang_router_ip == "172.20.0.5" and args.sglang_router_port == 3500
-    cmd = started[0]
-    assert cmd[1:3] == ["-m", "sglang_router.launch_router"]
-    assert cmd[cmd.index("--host") + 1] == "172.20.0.5" and cmd[cmd.index("--port") + 1] == "3500"
-    assert attempts[-1] == ("172.20.0.5", 3500)
-
-    dead = Proc()
-    dead.returncode = 2
-    with pytest.raises(RuntimeError, match="exited with 2"):
-        learner.start_external_sglang_router(
-            types.SimpleNamespace(sglang_router_port=3500), popen=lambda cmd: dead,
-            connect=connect, sleep=lambda s: None,
-        )
 
 
 def test_eval_dataset_identity_is_verified_again_inside_the_learner(tmp_path):
@@ -1614,457 +1199,6 @@ def test_eval_dataset_identity_is_verified_again_inside_the_learner(tmp_path):
     prompts.write_text('{"messages": [{"role": "user"}]}\n', encoding="utf-8")
     with pytest.raises(ValueError, match="SHA256 mismatch"):
         rl_learner._verify_eval_dataset_identity(args)
-
-
-def test_miles_argv_uses_provider_capabilities_without_model_family_branches(
-    monkeypatch,
-):
-    monkeypatch.setitem(
-        sys.modules,
-        "miles.utils.chat_template_utils",
-        types.SimpleNamespace(
-            resolve_reasoning_and_tool_call_parser=lambda model: (
-                ("deepseek-v4", "deepseekv4")
-                if model == "deepseekv4"
-                else ("qwen3", "qwen25")
-            )
-        ),
-    )
-    args = argparse.Namespace(
-        seq_len=128,
-        groups_per_round=4,
-        samples_per_group=2,
-        optimizer_steps=1,
-        lora_targets="auto",
-        lora_r=4,
-        seed=1,
-        learner_id=0,
-        global_rounds=3,
-        inner_lr=1e-4,
-        reward_function="pkg.reward:score",
-        over_sampling_batch_size=6,
-        rollout_max_response_len=64,
-        custom_generate_function_path="pkg.agent.generate",
-        custom_agent_function_path="pkg.agent.run",
-        agent_max_seq_len=96,
-        use_session_server=True,
-        session_server_ip="127.0.0.1",
-        session_server_port=[31000, 31002],
-        tito_model="qwen3",
-        tito_allowed_append_roles=["tool", "user"],
-        actor_num_nodes=1,
-        actor_num_gpus_per_node=8,
-        expert_parallel=None,
-        apply_chat_template_kwargs={"enable_thinking": False},
-    )
-    provider = argparse.Namespace(
-        hidden_size=16,
-        num_attention_heads=4,
-        num_layers=2,
-        ffn_hidden_size=32,
-        num_query_groups=2,
-        kv_channels=4,
-        seq_length=256,
-        vocab_size=64,
-        normalization="RMSNorm",
-        layernorm_epsilon=1e-6,
-        position_embedding_type="yarn",
-        rotary_base=10000,
-        gated_linear_unit=True,
-        share_embeddings_and_output_weights=False,
-        add_bias_linear=False,
-        add_qkv_bias=True,
-        qk_layernorm=True,
-        num_moe_experts=8,
-        moe_ffn_hidden_size=24,
-        moe_router_topk=2,
-        moe_layer_freq=[0, 1],
-        moe_shared_expert_intermediate_size=12,
-        multi_latent_attention=True,
-        q_lora_rank=8,
-        kv_lora_rank=4,
-        qk_head_dim=4,
-        qk_pos_emb_head_dim=2,
-        v_head_dim=4,
-    )
-    argv = build_miles_argv(
-        args,
-        model_path="/model",
-        prompt_path="/prompts.jsonl",
-        provider=provider,
-        target_modules=["qkv_proj", "out_proj"],
-    )
-    assert "--add-qkv-bias" in argv
-    assert "--qk-layernorm" in argv
-    assert "--group-query-attention" not in argv
-    assert argv[argv.index("--target-modules") + 1] == "qkv_proj,out_proj"
-    assert argv[argv.index("--max-position-embeddings") + 1] == "256"
-    assert argv[argv.index("--rotary-base") + 1] == "10000"
-    assert argv[argv.index("--position-embedding-type") + 1] == "rope"
-    assert argv[argv.index("--rope-type") + 1] == "yarn"
-    assert argv[argv.index("--num-experts") + 1] == "8"
-    assert argv[argv.index("--moe-ffn-hidden-size") + 1] == "24"
-    assert argv[argv.index("--moe-router-topk") + 1] == "2"
-    assert argv[argv.index("--moe-layer-freq") + 1] == "[0, 1]"
-    assert argv[argv.index("--moe-shared-expert-intermediate-size") + 1] == "12"
-    assert argv[argv.index("--q-lora-rank") + 1] == "8"
-    assert argv[argv.index("--kv-lora-rank") + 1] == "4"
-    assert "--multi-latent-attention" in argv
-    assert argv[argv.index("--attention-backend") + 1] == "unfused"
-    assert "--sglang-attention-backend" not in argv
-    assert argv[argv.index("--lr") + 1] == "0.0001"
-    assert argv[argv.index("--actor-num-nodes") + 1] == "1"
-    assert argv[argv.index("--actor-num-gpus-per-node") + 1] == "8"
-    assert argv[argv.index("--expert-model-parallel-size") + 1] == "8"
-    assert argv[argv.index("--over-sampling-batch-size") + 1] == "6"
-    assert "--balance-data" in argv
-    assert json.loads(argv[argv.index("--apply-chat-template-kwargs") + 1]) == {
-        "enable_thinking": False
-    }
-    assert argv[argv.index("--rollout-max-response-len") + 1] == "64"
-    assert (
-        argv[argv.index("--custom-generate-function-path") + 1]
-        == "pkg.agent.generate"
-    )
-    assert argv[argv.index("--custom-agent-function-path") + 1] == "pkg.agent.run"
-    assert argv[argv.index("--max-seq-len") + 1] == "96"
-    assert "--apply-chat-template" not in argv
-    assert "--use-session-server" in argv
-    assert argv[argv.index("--session-server-ip") + 1] == "127.0.0.1"
-    port = argv.index("--session-server-port")
-    assert argv[port + 1 : port + 3] == ["31000", "31002"]
-    assert argv[argv.index("--tito-model") + 1] == "qwen3"
-    assert argv[argv.index("--sglang-reasoning-parser") + 1] == "qwen3"
-    assert argv[argv.index("--sglang-tool-call-parser") + 1] == "qwen25"
-    roles = argv.index("--tito-allowed-append-roles")
-    assert argv[roles + 1 : roles + 3] == ["tool", "user"]
-    assert (
-        argv[argv.index("--rollout-all-samples-process-path") + 1]
-        == "yeto.rl.adapters.miles.models.rollout_legacy_port.queue_completed_groups"
-    )
-    assert (
-        argv[argv.index("--external-policy-sync-path") + 1]
-        == "yeto.rl.adapters.miles.legacy.engine.create_policy_sync"
-    )
-    assert "--custom-megatron-init-path" not in argv
-    assert "--use-distributed-optimizer" not in argv
-    assert "--no-offload-train" in argv
-    assert argv[argv.index("--sglang-mem-fraction-static") + 1] == "0.4"
-    assert "--sglang-enable-deterministic-inference" in argv
-    assert argv[argv.index("--rollout-seed") + 1] == "1"
-    assert "--pin-rollout-manager-to-head" in argv
-    assert "--eval-prompt-data" not in argv
-    assert "--eval-function-path" not in argv
-    assert "--eval-interval" not in argv
-    for recipe_flag in (
-        "--rollout-shuffle",
-        "--rollout-temperature",
-        "--eps-clip",
-        "--eps-clip-high",
-        "--entropy-coef",
-        "--kl-coef",
-        "--optimizer",
-        "--weight-decay",
-        "--adam-beta1",
-        "--adam-beta2",
-        "--clip-grad",
-        "--micro-batch-size",
-        "--attention-dropout",
-        "--hidden-dropout",
-    ):
-        assert recipe_flag not in argv
-    # The LR schedule is explicit (fix-decoupled-lr-schedule): strict-avg is
-    # linear over global_rounds * optimizer_steps, never Miles' implicit default.
-    schedule = argv[argv.index("--lr-decay-style") : argv.index("--lr-decay-style") + 8]
-    assert schedule == [
-        "--lr-decay-style", "linear", "--lr-decay-iters", "3",
-        "--lr-warmup-iters", "0", "--min-lr", "0",
-    ]
-
-    eval_args = argparse.Namespace(
-        **vars(args),
-        eval_only=True,
-        eval_dataset_name="flaky100",
-        eval_data_sha256="f" * 64,
-        eval_interval=1,
-        eval_samples_per_prompt=3,
-        eval_temperature=0.6,
-        eval_top_p=0.9,
-        eval_max_prompt_len=96,
-        eval_max_response_len=64,
-        eval_max_context_len=128,
-    )
-    eval_argv = build_miles_argv(
-        eval_args,
-        model_path="/model",
-        prompt_path="/prompts.jsonl",
-        provider=provider,
-        target_modules=["qkv_proj", "out_proj"],
-    )
-    assert eval_argv[eval_argv.index("--prompt-data") + 1] == "/prompts.jsonl"
-    eval_data = eval_argv.index("--eval-prompt-data")
-    assert eval_argv[eval_data + 1 : eval_data + 3] == [
-        "flaky100",
-        "/prompts.jsonl",
-    ]
-    assert eval_argv[eval_argv.index("--eval-function-path") + 1] == (
-        "yeto.rl.adapters.miles.models.rollout_legacy_port.generate_rollout"
-    )
-    assert eval_argv[eval_argv.index("--num-rollout") + 1] == "0"
-    assert eval_argv[eval_argv.index("--eval-interval") + 1] == "1"
-    assert "--skip-eval-before-train" in eval_argv
-    assert eval_argv[eval_argv.index("--n-samples-per-eval-prompt") + 1] == "3"
-    assert "--log-passrate" in eval_argv
-    assert eval_argv[eval_argv.index("--eval-temperature") + 1] == "0.6"
-    assert eval_argv[eval_argv.index("--eval-top-p") + 1] == "0.9"
-    assert eval_argv[eval_argv.index("--eval-max-prompt-len") + 1] == "96"
-    assert eval_argv[eval_argv.index("--eval-max-response-len") + 1] == "64"
-    assert eval_argv[eval_argv.index("--eval-max-context-len") + 1] == "128"
-    assert eval_argv[eval_argv.index("--max-seq-len") + 1] == "128"
-
-    parallel_values = vars(args).copy()
-    parallel_values.update(
-        actor_num_nodes=2,
-        actor_num_gpus_per_node=8,
-        tensor_parallel=8,
-        pipeline_parallel=2,
-        expert_parallel=8,
-        rollout_num_gpus_per_engine=8,
-        sglang_tp_size=8,
-        sglang_dp_size=1,
-        sglang_ep_size=8,
-        sglang_mem_fraction_static=0.5,
-        sglang_attention_backend="dsv4",
-        sglang_deterministic_inference=False,
-        sglang_page_size=256,
-        sglang_max_running_requests=8,
-        sglang_chunked_prefill_size=4096,
-        use_rollout_routing_replay=True,
-    )
-    parallel_args = argparse.Namespace(**parallel_values)
-    parallel_argv = build_miles_argv(
-        parallel_args,
-        model_path="/model",
-        prompt_path="/prompts.jsonl",
-        provider=provider,
-        target_modules=["qkv_proj", "out_proj"],
-    )
-    assert parallel_argv[parallel_argv.index("--tensor-model-parallel-size") + 1] == "8"
-    assert parallel_argv[parallel_argv.index("--pipeline-model-parallel-size") + 1] == "2"
-    assert parallel_argv[parallel_argv.index("--rollout-num-gpus-per-engine") + 1] == "8"
-    assert parallel_argv[parallel_argv.index("--sglang-tp-size") + 1] == "8"
-    assert parallel_argv[parallel_argv.index("--sglang-ep-size") + 1] == "8"
-    assert parallel_argv[parallel_argv.index("--sglang-attention-backend") + 1] == "dsv4"
-    assert "--sequence-parallel" in parallel_argv
-    assert "--use-rollout-routing-replay" in parallel_argv
-    assert "--sglang-enable-deterministic-inference" not in parallel_argv
-
-    uneven_provider = argparse.Namespace(**vars(provider))
-    uneven_provider.num_layers = 43
-    uneven_provider.moe_layer_freq = [1] * 43
-    recipe_values = vars(parallel_args).copy()
-    recipe_values.update(
-        rl_model_recipe="deepseek-v4-flash",
-        pipeline_parallel=2,
-        lora_targets="attention-routed-experts",
-        tito_model="deepseekv4",
-    )
-    recipe_args = argparse.Namespace(**recipe_values)
-    uneven_argv = build_miles_argv(
-        recipe_args,
-        model_path="/models/deepseek-v4-flash-bf16",
-        rollout_model_path="/models/deepseek-v4-flash-fp8",
-        prompt_path="/prompts.jsonl",
-        provider=uneven_provider,
-        target_modules=["qkv_proj", "out_proj"],
-    )
-    assert uneven_argv[uneven_argv.index("--hf-checkpoint") + 1] == (
-        "/models/deepseek-v4-flash-fp8"
-    )
-    assert uneven_argv[uneven_argv.index("--ref-load") + 1] == (
-        "/models/deepseek-v4-flash-bf16"
-    )
-    assert "--load" not in uneven_argv
-    assert uneven_argv[uneven_argv.index("--model-name") + 1] == "deepseekv4"
-    assert uneven_argv[uneven_argv.index("--attention-backend") + 1] == "flash"
-    assert uneven_argv[uneven_argv.index("--qkv-format") + 1] == "bshd"
-    assert uneven_argv[uneven_argv.index("--transformer-impl") + 1] == (
-        "transformer_engine"
-    )
-    assert "--recompute-granularity" in uneven_argv
-    assert "--moe-router-freeze-gate" in uneven_argv
-    assert "--freeze-e-score-correction-bias" in uneven_argv
-    assert uneven_argv[
-        uneven_argv.index("--decoder-first-pipeline-num-layers") + 1
-    ] == "22"
-    assert uneven_argv[
-        uneven_argv.index("--decoder-last-pipeline-num-layers") + 1
-    ] == "21"
-    assert uneven_argv[uneven_argv.index("--moe-layer-freq") + 1] == "1"
-    assert uneven_argv[
-        uneven_argv.index("--sglang-reasoning-parser") + 1
-    ] == "deepseek-v4"
-    assert uneven_argv[
-        uneven_argv.index("--sglang-tool-call-parser") + 1
-    ] == "deepseekv4"
-
-    bad_v4_provider = argparse.Namespace(**vars(uneven_provider))
-    bad_v4_provider.moe_layer_freq = [1] * 42 + [0]
-    with pytest.raises(ValueError, match="every one of its 43 layers"):
-        build_miles_argv(
-            recipe_args,
-            model_path="/models/deepseek-v4-flash-bf16",
-            rollout_model_path="/models/deepseek-v4-flash-fp8",
-            prompt_path="/prompts.jsonl",
-            provider=bad_v4_provider,
-            target_modules=["qkv_proj", "out_proj"],
-        )
-
-    clone_recipe_args = argparse.Namespace(**recipe_values)
-    clone_recipe_args.lora_targets = "attention-routed-experts"
-    clone_argv = build_miles_argv(
-        clone_recipe_args,
-        model_path="/models/deepseek-v4-flash-bf16-e288",
-        rollout_model_path="/models/deepseek-v4-flash-fp8-e288",
-        prompt_path="/prompts.jsonl",
-        provider=uneven_provider,
-        target_modules=[
-            "decoder.layers.0.self_attention.linear_q_down_proj",
-            "decoder.layers.0.mlp.experts.linear_fc1",
-            "decoder.layers.0.mlp.experts.linear_fc2",
-        ],
-    )
-    assert clone_argv[clone_argv.index("--lora-type") + 1] == "lora"
-    assert "--no-sglang-lora-use-virtual-experts" in clone_argv
-    assert "--sglang-disable-shared-experts-fusion" in clone_argv
-    assert clone_argv[clone_argv.index("--sglang-moe-runner-backend") + 1] == (
-        "triton"
-    )
-
-    full_recipe_args = argparse.Namespace(**recipe_values)
-    full_recipe_args.lora_targets = "attention"
-    full_recipe_args.expert_full_count = 16
-    full_recipe_args.expert_full_lr = 1e-6
-    full_argv = build_miles_argv(
-        full_recipe_args,
-        model_path="/models/deepseek-v4-flash-bf16-e288",
-        rollout_model_path="/models/deepseek-v4-flash-fp8-e288",
-        prompt_path="/prompts.jsonl",
-        provider=uneven_provider,
-        target_modules=["decoder.layers.0.self_attention.linear_q_down_proj"],
-    )
-    assert full_argv[full_argv.index("--lora-type") + 1] == "canonical_lora"
-    assert "--accumulate-allreduce-grads-in-fp32" in full_argv
-    assert full_argv[full_argv.index("--optimizer") + 1] == "adam"
-    assert full_argv[full_argv.index("--adam-beta1") + 1] == "0.9"
-    assert full_argv[full_argv.index("--adam-beta2") + 1] == "0.98"
-    assert full_argv[full_argv.index("--adam-eps") + 1] == "1e-08"
-    assert full_argv[full_argv.index("--weight-decay") + 1] == "0"
-    assert full_argv[full_argv.index("--clip-grad") + 1] == "1.0"
-    assert full_argv[full_argv.index("--kl-coef") + 1] == "0.001"
-
-    native_argv = build_miles_argv(
-        args,
-        model_path="/model",
-        prompt_path="/prompts.jsonl",
-        provider=provider,
-        target_modules=["qkv_proj", "out_proj"],
-        yeto_policy_sync=False,
-    )
-    assert "--external-policy-sync-path" not in native_argv
-    assert "--rollout-all-samples-process-path" not in native_argv
-    assert native_argv[native_argv.index("--rollout-function-path") + 1] == (
-        "miles.rollout.sglang_rollout.generate_rollout"
-    )
-    assert not any(value.startswith("yeto.rl.") for value in native_argv)
-
-    paired_args = argparse.Namespace(
-        **vars(args),
-        rollout_seed=91,
-        rollout_engine_base_port=22000,
-        sglang_router_port=21900,
-        sglang_router_prometheus_port=21901,
-        train_master_base_port=21902,
-    )
-    paired_argv = build_miles_argv(
-        paired_args,
-        model_path="/model",
-        prompt_path="/prompts.jsonl",
-        provider=provider,
-        target_modules=["qkv_proj", "out_proj"],
-    )
-    assert paired_argv[paired_argv.index("--rollout-seed") + 1] == "91"
-    assert paired_argv[
-        paired_argv.index("--rollout-engine-base-port") + 1
-    ] == "22000"
-    assert paired_argv[paired_argv.index("--sglang-router-port") + 1] == "21900"
-    assert paired_argv[
-        paired_argv.index("--sglang-router-prometheus-port") + 1
-    ] == "21901"
-    assert paired_argv[
-        paired_argv.index("--train-master-base-port") + 1
-    ] == "21902"
-
-    dense_values = vars(provider).copy()
-    dense_values.pop("num_moe_experts")
-    dense_provider = argparse.Namespace(**dense_values)
-    dense_args = argparse.Namespace(**vars(args))
-    dense_args.optimizer_steps = 1
-    dense_argv = build_miles_argv(
-        dense_args,
-        model_path="/model",
-        prompt_path="/prompts.jsonl",
-        provider=dense_provider,
-        target_modules=["qkv_proj", "out_proj"],
-    )
-    assert dense_argv[dense_argv.index("--expert-model-parallel-size") + 1] == "1"
-    assert "--qkv-format" not in dense_argv
-
-    gdn_values = vars(dense_provider).copy()
-    gdn_values["experimental_attention_variant"] = "gated_delta_net"
-    gdn_argv = build_miles_argv(
-        dense_args,
-        model_path="/model",
-        prompt_path="/prompts.jsonl",
-        provider=argparse.Namespace(**gdn_values),
-        target_modules=["qkv_proj", "out_proj"],
-    )
-    assert gdn_argv[gdn_argv.index("--qkv-format") + 1] == "bshd"
-    # A gated-delta-net hybrid takes Miles' Qwen3.5 layer spec, exactly as
-    # the pinned Codex profile does; the generic GPT path would build the
-    # wrong model for it.
-    assert gdn_argv[gdn_argv.index("--model-name") + 1] == "qwen3_5"
-    spec = gdn_argv.index("--spec")
-    assert gdn_argv[spec + 1 : spec + 3] == [
-        "miles_plugins.models.qwen3_5",
-        "get_qwen3_5_spec",
-    ]
-    assert "--apply-layernorm-1p" in gdn_argv
-    assert "--attention-output-gate" in gdn_argv
-    assert gdn_argv[gdn_argv.index("--attention-backend") + 1] == "flash"
-    assert dense_argv[dense_argv.index("--model-name") + 1] != "qwen3_5"
-    assert "--spec" not in dense_argv
-
-    dense_args.expert_parallel = 2
-    with pytest.raises(ValueError, match="EP>1 requires a MoE"):
-        build_miles_argv(
-            dense_args,
-            model_path="/model",
-            prompt_path="/prompts.jsonl",
-            provider=dense_provider,
-            target_modules=["qkv_proj", "out_proj"],
-        )
-
-    too_long = argparse.Namespace(**vars(args))
-    too_long.seq_len = 257
-    with pytest.raises(ValueError, match="model context limit"):
-        build_miles_argv(
-            too_long,
-            model_path="/model",
-            prompt_path="/prompts.jsonl",
-            provider=provider,
-            target_modules=["qkv_proj", "out_proj"],
-        )
 
 
 def _stub_full_parameter_island(monkeypatch, tmp_path, *, miles_fields=None, **overrides):
@@ -2318,29 +1452,24 @@ def _dense_sweep_args(**overrides):
 
 
 @pytest.mark.parametrize(
-    "engine, overrides, message",
+    "overrides, message",
     [
-        ("legacy", {}, "only on the ports engine"),
-        ("ports", {"local_horizon": 2}, "requires H=1"),
-        ("ports", {"total_fragment_steps": 5}, "rounds\\*fragments"),
-        ("ports", {"syncer_profile_sha256": None}, "--syncer-profile-sha256"),
-        ("ports", {"eval_only": True}, "eval-only"),
+        ({"local_horizon": 2}, "requires H=1"),
+        ({"total_fragment_steps": 5}, "rounds\\*fragments"),
+        ({"syncer_profile_sha256": None}, "--syncer-profile-sha256"),
+        ({"eval_only": True}, "eval-only"),
         # P0-S lifts this for every full-parameter preset.
-        ("ports", {"rl_max_policy_age": 1}, "--rl-max-policy-age"),
+        ({"rl_max_policy_age": 1}, "--rl-max-policy-age"),
     ],
 )
-def test_dense_full_sweep_rejections(engine, overrides, message):
+def test_dense_full_sweep_rejections(overrides, message):
     with pytest.raises(ValueError, match=message):
-        rl_learner._check_dense_full_sweep(
-            _dense_sweep_args(**overrides), rl_engine=engine, yeto_policy_sync=True
-        )
+        rl_learner._check_dense_full_sweep(_dense_sweep_args(**overrides), yeto_policy_sync=True)
 
 
 def test_dense_full_sweep_accepts_any_generation_roster():
     # P0-D7: no generation-0 / version-0 Milestone-1 limit any more.
-    rl_learner._check_dense_full_sweep(
-        _dense_sweep_args(), rl_engine="ports", yeto_policy_sync=True
-    )
+    rl_learner._check_dense_full_sweep(_dense_sweep_args(), yeto_policy_sync=True)
 
 
 def test_dense_full_legacy_weight_hook_rejects_quantized_rollout(tmp_path):
@@ -2353,57 +1482,6 @@ def test_dense_full_legacy_weight_hook_rejects_quantized_rollout(tmp_path):
 
     with pytest.raises(ValueError, match="require an unquantized rollout model"):
         rl_learner._require_unquantized_full_parameter_rollout_model(model)
-
-
-def test_miles_argv_preserves_mrope_provider_configuration():
-    args = argparse.Namespace(
-        seq_len=128,
-        groups_per_round=4,
-        samples_per_group=2,
-        optimizer_steps=1,
-        lora_targets="attention",
-        lora_r=4,
-        seed=1,
-        learner_id=0,
-        global_rounds=1,
-        inner_lr=1e-5,
-        reward_function="pkg.reward:score",
-        over_sampling_batch_size=4,
-        rollout_max_response_len=64,
-        custom_generate_function_path=None,
-        use_session_server=False,
-        actor_num_nodes=1,
-        actor_num_gpus_per_node=2,
-        expert_parallel=None,
-    )
-    provider = argparse.Namespace(
-        hidden_size=16,
-        num_attention_heads=4,
-        num_layers=2,
-        ffn_hidden_size=32,
-        num_query_groups=2,
-        kv_channels=4,
-        seq_length=256,
-        vocab_size=64,
-        layernorm_epsilon=1e-6,
-        position_embedding_type="mrope",
-        rotary_base=1000000,
-        rotary_percent=0.25,
-        mrope_section=[11, 11, 10],
-    )
-
-    argv = build_miles_argv(
-        args,
-        model_path="/model",
-        prompt_path="/prompts.jsonl",
-        provider=provider,
-        target_modules=["q_proj"],
-    )
-
-    assert argv[argv.index("--position-embedding-type") + 1] == "mrope"
-    assert argv[argv.index("--rotary-percent") + 1] == "0.25"
-    section = argv.index("--mrope-section")
-    assert argv[section + 1 : section + 4] == ["11", "11", "10"]
 
 
 def test_megatron_targets_follow_the_exact_peft_bridge_mappings():
@@ -2554,347 +1632,13 @@ def test_megatron_targets_collapse_e288_experts_to_standard_grouped_modules():
     ]
 
 
-def test_miles_runner_keeps_native_arm_outside_yeto_policy_sync(monkeypatch):
-    captured = {}
+def test_decoupled_runner_rejects_multiple_optimizer_steps_per_rollout(tmp_path, monkeypatch):
+    from yeto.rl.adapters.miles import state
 
-    class Provider:
-        def finalize(self):
-            captured["finalized"] = True
-
-    class Bridge:
-        def to_megatron_provider(self, load_weights):
-            assert load_weights is False
-            return Provider()
-
-    class AutoBridge:
-        @staticmethod
-        def from_hf_pretrained(path, trust_remote_code):
-            assert path == "/model"
-            assert trust_remote_code is True
-            return Bridge()
-
-    async def train(args):
-        captured["miles_args"] = args
-
-    def build(*args, **kwargs):
-        captured["policy_sync"] = kwargs["yeto_policy_sync"]
-        return ["train.py"]
-
-    monkeypatch.setitem(
-        sys.modules,
-        "megatron.bridge",
-        types.SimpleNamespace(AutoBridge=AutoBridge),
-    )
-    monkeypatch.setitem(sys.modules, "train", types.SimpleNamespace(train=train))
-    monkeypatch.setattr(rl_learner, "derive_peft_lora_specs", lambda *a, **k: ())
-    monkeypatch.setattr(rl_learner, "adapter_targets", lambda specs: [])
-    monkeypatch.setattr(
-        rl_learner,
-        "megatron_adapter_targets",
-        lambda specs, bridge, **_kwargs: [],
-    )
-    monkeypatch.setattr(rl_learner, "build_miles_argv", build)
-    monkeypatch.setattr(
-        rl_learner,
-        "_parse_miles_args",
-        lambda argv: argparse.Namespace(argv=argv),
-    )
-    args = argparse.Namespace(
-        rl_engine="legacy",
-        trust_remote_code=True,
-        lora_r=4,
-        lora_targets="auto",
-        learner_id=0,
-    )
-
-    rl_learner.run_miles(
-        args,
-        model_path="/model",
-        prompt_path="/prompts.jsonl",
-        yeto_policy_sync=False,
-        extra_argv=("--save-debug-rollout-data", "/rollouts/{rollout_id}.pt"),
-    )
-
-    assert captured["finalized"]
-    assert captured["policy_sync"] is False
-    assert captured["miles_args"].argv == [
-        "train.py",
-        "--save-debug-rollout-data",
-        "/rollouts/{rollout_id}.pt",
-    ]
-    assert not hasattr(captured["miles_args"], "yeto_rl_bridge_config")
-
-
-def test_miles_runner_builds_the_decoupled_runtime_contract(monkeypatch, tmp_path):
-    captured = {}
-
-    class Provider:
-        def finalize(self):
-            pass
-
-    class Bridge:
-        def to_megatron_provider(self, load_weights):
-            assert load_weights is False
-            return Provider()
-
-    class AutoBridge:
-        @staticmethod
-        def from_hf_pretrained(*_args, **_kwargs):
-            return Bridge()
-
-    async def train(args):
-        captured["miles_args"] = args
-
-    specs = tuple(
-        CanonicalTensorSpec(
-            f"base_model.model.layer{index}.lora_A.weight",
-            (1, index + 1),
-            "float32",
-            index + 1,
-        )
-        for index in range(4)
-    )
-    monkeypatch.setitem(
-        sys.modules,
-        "megatron.bridge",
-        types.SimpleNamespace(AutoBridge=AutoBridge),
-    )
-    monkeypatch.setitem(sys.modules, "train", types.SimpleNamespace(train=train))
-    monkeypatch.setattr(rl_learner, "derive_peft_lora_specs", lambda *a, **k: specs)
-    monkeypatch.setattr(
-        rl_learner,
-        "megatron_adapter_targets",
-        lambda *_args, **_kwargs: ["layer"],
-    )
-    monkeypatch.setattr(rl_learner, "build_miles_argv", lambda *a, **k: ["train.py"])
-    monkeypatch.setattr(
-        rl_learner,
-        "_parse_miles_args",
-        lambda argv: argparse.Namespace(argv=argv),
-    )
-    args = argparse.Namespace(
-        rl_engine="legacy",
-        trust_remote_code=True,
-        lora_r=4,
-        lora_targets="all-linear",
-        learner_id=0,
-        model="org/model",
-        data="org/data",
-        model_revision="a" * 40,
-        data_revision="b" * 40,
-        reward_sha256="c" * 64,
-        source_sha256="d" * 64,
-        completed_groups_path=str(tmp_path / "island.pt"),
-        event_tape=str(tmp_path / "events.jsonl"),
-        syncer="127.0.0.1:29400",
-        global_rounds=3,
-        sync_preset="decoupled",
-        fragments=2,
-        pipeline=2,
-        local_horizon=4,
-        total_fragment_steps=6,
-        learner_budget_steps=3,
-        optimizer_steps=1,
-        wan_streams=0,
-        audit_dir=None,
-        initial_adapter="/parent-adapter",
-        initial_adapter_sha256="9" * 64,
-    )
-
-    rl_learner.run_miles(
-        args,
-        model_path="/model",
-        prompt_path="/prompts.jsonl",
-    )
-
-    miles_args = captured["miles_args"]
-    assert isinstance(miles_args.yeto_rl_bridge_config, DecoupledBridgeConfig)
-    assert miles_args.yeto_rl_bridge_config.num_fragments == 2
-    assert miles_args.yeto_rl_bridge_config.pipeline == 2
-    assert miles_args.yeto_rl_bridge_config.local_horizon == 4
-    assert miles_args.yeto_rl_bridge_config.total_fragment_steps == 6
-    assert miles_args.yeto_rl_bridge_config.learner_budget_steps == 3
-    assert miles_args.yeto_rl_sync_preset == "decoupled"
-    assert miles_args.yeto_rl_pipeline == 2
-    assert miles_args.external_policy_sync_run_until_stop is True
-    assert len(miles_args.yeto_rl_sync_layout_fingerprint) == 64
-    assert miles_args.yeto_rl_initial_adapter == "/parent-adapter"
-    assert miles_args.yeto_rl_initial_adapter_sha256 == "9" * 64
-
-
-def test_miles_runner_builds_attested_attention_lora_expert_full_policy(
-    monkeypatch,
-    tmp_path,
-):
-    captured = {}
-
-    class Provider:
-        def finalize(self):
-            pass
-
-    class Bridge:
-        def to_megatron_provider(self, load_weights):
-            assert load_weights is False
-            return Provider()
-
-    class AutoBridge:
-        @staticmethod
-        def from_hf_pretrained(*_args, **_kwargs):
-            return Bridge()
-
-    async def train(args):
-        captured["miles_args"] = args
-
-    attention_specs = (
-        CanonicalTensorSpec(
-            "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight",
-            (8, 16),
-            "float32",
-            128,
-        ),
-    )
-    expert_specs = (
-        CanonicalTensorSpec(
-            "base_model.model.model.layers.0.mlp.experts.256.gate_proj.weight",
-            (8, 16),
-            "float32",
-            128,
-        ),
-    )
-
-    monkeypatch.setitem(
-        sys.modules,
-        "megatron.bridge",
-        types.SimpleNamespace(AutoBridge=AutoBridge),
-    )
-    monkeypatch.setitem(sys.modules, "train", types.SimpleNamespace(train=train))
-    monkeypatch.setattr(
-        rl_learner,
-        "derive_peft_lora_specs",
-        lambda *a, **k: attention_specs,
-    )
-
-    def build_expert_specs(config, **kwargs):
-        captured["expert_config"] = config
-        captured["expert_kwargs"] = kwargs
-        return expert_specs
-
-    monkeypatch.setattr(
-        "yeto.rl.adapters.miles.models.deepseek_v4.bridge.ensure_deepseek_v4_bridge",
-        lambda: None,
-    )
-    monkeypatch.setattr(rl_learner, "expert_full_specs", build_expert_specs)
-    monkeypatch.setattr(
-        "transformers.AutoConfig.from_pretrained",
-        lambda *_args, **_kwargs: types.SimpleNamespace(marker="config"),
-    )
-    monkeypatch.setattr(rl_learner, "adapter_targets", lambda specs: ["q_proj"])
-
-    def build_megatron_targets(specs, *_args, **kwargs):
-        captured["megatron_target_specs"] = specs
-        captured["megatron_target_kwargs"] = kwargs
-        return ["linear_q"]
-
-    monkeypatch.setattr(
-        rl_learner,
-        "megatron_adapter_targets",
-        build_megatron_targets,
-    )
-    monkeypatch.setattr(rl_learner, "build_miles_argv", lambda *a, **k: ["train.py"])
-    monkeypatch.setattr(
-        rl_learner,
-        "_parse_miles_args",
-        lambda argv: argparse.Namespace(argv=argv),
-    )
-    args = argparse.Namespace(
-        rl_engine="legacy",
-        trust_remote_code=True,
-        rl_model_recipe="deepseek-v4-flash",
-        lora_r=8,
-        lora_targets="attention",
-        expert_full_count=16,
-        expert_full_lr=1e-6,
-        expert_selection_sha256="a" * 64,
-        expert_selection_contract_sha256="b" * 64,
-        learner_id=0,
-        model="/model",
-        data="/data",
-        model_revision="c" * 40,
-        rollout_model_revision="d" * 40,
-        data_revision=None,
-        reward_sha256="e" * 64,
-        completed_groups_path=str(tmp_path / "island.pt"),
-        event_tape=str(tmp_path / "events.jsonl"),
-        syncer="127.0.0.1:29400",
-        global_rounds=1,
-        sync_preset="strict-avg",
-        groups_per_round=1,
-        samples_per_group=2,
-        optimizer_steps=1,
-        pipeline_parallel=2,
-        wan_streams=0,
-        audit_dir=str(tmp_path / "audit"),
-        dynamic_sampling_max_replacements=0,
-        secrlenv_max_infrastructure_replacements=1,
-    )
-
-    rl_learner.run_miles(
-        args,
-        model_path="/model",
-        rollout_model_path="/rollout",
-        prompt_path="/prompts.jsonl",
-    )
-
-    miles_args = captured["miles_args"]
-    assert captured["expert_config"].marker == "config"
-    assert captured["expert_kwargs"] == {
-        "expert_count": 16,
-        "expected_selection_sha256": "a" * 64,
-        "expected_selection_contract_sha256": "b" * 64,
-    }
-    assert captured["megatron_target_specs"] == attention_specs
-    assert captured["megatron_target_kwargs"] == {
-        "pipeline_parallel": 2,
-        "standard_grouped_experts": False,
-        "attention_output_gate": False,
-    }
-    assert miles_args.yeto_rl_expected_specs == tuple(
-        sorted(attention_specs + expert_specs)
-    )
-    assert miles_args.yeto_rl_bridge_config.send_initial_params is True
-    assert miles_args.yeto_rl_dynamic_sampling_max_replacements == 0
-    assert miles_args.yeto_rl_secrlenv_max_infrastructure_replacements == 1
-    for name in (
-        "yeto_rl_expert_full_count",
-        "yeto_rl_expert_full_lr",
-        "yeto_rl_expert_selection_sha256",
-        "yeto_rl_expert_selection_contract_sha256",
-    ):
-        assert not hasattr(miles_args, name)
-    assert os.environ["YETO_DSV4_EXPERT_FULL"] == "1"
-    assert os.environ["YETO_DSV4_EXPERT_FULL_COUNT"] == "16"
-    assert os.environ["YETO_DSV4_EXPERT_FULL_LR"] == "1e-06"
-    assert os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"] == "0"
-
-    args.eval_only = True
-    rl_learner.run_miles(
-        args,
-        model_path="/model",
-        rollout_model_path="/rollout",
-        prompt_path="/prompts.jsonl",
-    )
-    assert (
-        captured["miles_args"].yeto_rl_bridge_config.send_initial_params is False
-    )
-    assert captured["miles_args"].yeto_rl_eval_policy_version == 1
-
-
-def test_decoupled_runner_rejects_multiple_optimizer_steps_per_rollout(tmp_path):
+    monkeypatch.setattr(state, "require_run_plugin", lambda: None)  # no Miles here
     with pytest.raises(ValueError, match="one optimizer step"):
         rl_learner.run_miles(
-            argparse.Namespace(
-                rl_engine="legacy", sync_preset="decoupled", optimizer_steps=2
-            ),
+            argparse.Namespace(sync_preset="decoupled", optimizer_steps=2),
             model_path=tmp_path,
             prompt_path=tmp_path / "prompts.jsonl",
         )

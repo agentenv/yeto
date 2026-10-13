@@ -3,22 +3,13 @@
 # Miles pins moved to ``yeto.rl.adapters.miles.pins`` (decoupling 5.3, audit L4).
 # Re-exported lazily so importing the neutral core never loads the adapter.
 _MILES_PIN_NAMES = frozenset((
-    "MILES_REPOSITORY",
-    "MILES_BASE_COMMIT",
-    "MILES_COMMIT",
-    "MILES_BUNDLE_PATH",
-    "MILES_BUNDLE_SHA256",
     "MILES_PEFT_VERSION",
-    "SGLANG_REPOSITORY",
-    "SGLANG_COMMIT",
-    "MILES_IMAGE",
     "MILES_NEXT_REPOSITORY",
     "MILES_NEXT_UPSTREAM_COMMIT",
     "MILES_NEXT_COMMIT",
     "SGLANG_NEXT_REPOSITORY",
     "SGLANG_NEXT_UPSTREAM_COMMIT",
     "SGLANG_NEXT_COMMIT",
-    "MILES_LEGACY_PINS",
     "MILES_NEXT_PINS",
     "MILES_NEXT_BASE_IMAGE",
     "MILES_NEXT_IMAGE",

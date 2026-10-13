@@ -13,15 +13,11 @@ import torch
 import yeto.rl as rl_config
 from yeto.provenance import python_spec_sha256
 from yeto.rl import (
-    MILES_BASE_COMMIT,
-    MILES_BUNDLE_PATH,
-    MILES_BUNDLE_SHA256,
-    MILES_COMMIT,
-    MILES_IMAGE,
+    MILES_NEXT_COMMIT,
+    MILES_NEXT_REPOSITORY,
     MILES_PEFT_VERSION,
-    MILES_REPOSITORY,
-    SGLANG_COMMIT,
-    SGLANG_REPOSITORY,
+    SGLANG_NEXT_COMMIT,
+    SGLANG_NEXT_REPOSITORY,
     ssh_harness,
 )
 from yeto.rl.bridge import _write_round_audit
@@ -87,17 +83,15 @@ def _plan():
         "syncer_address": "a0:29400",
         "syncer_port": 29400,
         "docker_image": IMAGE,
+        "rl_engine": "ports",
         "miles": {
-            "repository": MILES_REPOSITORY,
-            "base_commit": MILES_BASE_COMMIT,
-            "commit": MILES_COMMIT,
-            "bundle_path": MILES_BUNDLE_PATH,
-            "bundle_sha256": MILES_BUNDLE_SHA256,
+            "repository": MILES_NEXT_REPOSITORY,
+            "commit": MILES_NEXT_COMMIT,
             "peft_version": MILES_PEFT_VERSION,
         },
         "sglang": {
-            "repository": SGLANG_REPOSITORY,
-            "commit": SGLANG_COMMIT,
+            "repository": SGLANG_NEXT_REPOSITORY,
+            "commit": SGLANG_NEXT_COMMIT,
         },
         "source_sha256": "c" * 64,
         "reward_sha256": "e" * 64,
@@ -640,6 +634,9 @@ def test_verify_dispatches_and_exports_with_decoupled_plan(tmp_path, monkeypatch
     from yeto.rl import export as rl_export
 
     monkeypatch.setattr(checkpoint_export, "parse_checkpoint", lambda _path: checkpoint)
+    # The algorithm provenance read from island tapes is covered by
+    # test_rl_ssh_harness_algorithm_export.py.
+    monkeypatch.setattr(ssh_harness, "_run_algorithm_provenance", lambda *_a: (None, ()))
     monkeypatch.setattr(
         ssh_harness,
         "_verify_oracle",
@@ -670,7 +667,7 @@ def test_plan_digest_and_current_miles_pin_are_validated(tmp_path):
     plan_path = tmp_path / "plan.json"
     _write_plan(plan_path, _plan())
     _, loaded = load_plan(plan_path)
-    assert loaded["miles"]["commit"] == MILES_COMMIT
+    assert loaded["miles"]["commit"] == MILES_NEXT_COMMIT
 
     payload = json.loads(plan_path.read_text())
     payload["plan"]["miles"]["commit"] = "0" * 40
@@ -746,24 +743,6 @@ def test_prepare_cli_exposes_final_secrlenv_eval_controls():
     assert args.eval_max_prompt_len == 4096
     assert args.eval_max_response_len == 32768
     assert args.eval_max_context_len == 32768
-
-
-def test_miles_and_sglang_pins_include_the_compatible_builds():
-    assert MILES_BASE_COMMIT == "6062afe0a9d5d6471e8395dedc81c78dd9f4a84f"
-    assert MILES_COMMIT == "ae475060fa670145aef75d678809039ae999cb97"
-    assert not hasattr(rl_config, "MILES_UPSTREAM_COMMIT")
-    assert MILES_BUNDLE_PATH == "yeto/rl/vendor/miles-qwen38.bundle"
-    assert MILES_BUNDLE_SHA256 == (
-        "da3464d3c389f7e2cb3e390119b3c42c2f130d94a0711f9c95608f3243826cc6"
-    )
-    assert SGLANG_COMMIT == "e1b57eb8e7749235c987cc6b1b2824ce3265369b"
-    assert not hasattr(rl_config, "SGLANG_UPSTREAM_COMMIT")
-    assert not hasattr(rl_config, "SGLANG_BUNDLE_PATH")
-    assert not hasattr(rl_config, "SGLANG_BUNDLE_SHA256")
-    assert MILES_IMAGE == (
-        "docker:ghcr.io/agentenv/miles@sha256:"
-        "80c20538b63f76defde06ad5d4cfa564ae6f261110696eb1864470cb835e1590"
-    )
 
 
 def test_plan_requires_the_patched_sglang_pin():
@@ -907,8 +886,6 @@ def test_prepare_maps_a_local_prompt_file_into_the_remote_plan(tmp_path, monkeyp
 
     assert plan["learner"]["data"] == "/workspace/data/dataset.jsonl"
     assert plan["learner"]["data_local_path"] == str(prompts.resolve())
-    # ports is the default engine and is recorded in the plan; only an
-    # explicit legacy run keeps the key-less (digest-compatible) plan.
     assert plan["rl_engine"] == "ports"
     assert plan["learner"]["data_revision"] is None
     assert plan["syncer_address"] == "100.64.0.6:29400"
@@ -1898,7 +1875,7 @@ def test_deepseek_v4_nodes_use_the_verified_sglang_environment():
 
     for value in (
         "YETO_DSV4_EXPERT_CLONE=1",
-        "YETO_DSV4_CLONE_ONLY_LORA=1",
+        "YETO_DSV4_CLONE_ONLY_LORA_PORTS=1",
         "SGLANG_SKIP_CHECKPOINT_LOAD_CHECK=1",
         "SGLANG_DSV4_FP4_EXPERTS=0",
         "SGLANG_HEALTH_CHECK_TIMEOUT=120",
@@ -2014,64 +1991,6 @@ def test_node_network_interface_is_attested_and_propagated():
     plan["network_interface"] = "bad interface"
     with pytest.raises(HarnessError, match="invalid network interface"):
         ssh_harness._validate_plan(plan)
-
-
-def test_expert_full_plan_forwards_attestation_and_runtime_environment():
-    plan = _plan()
-    plan["islands"] = [
-        {
-            "hosts": ["root@h200-n1", "root@h200-n2"],
-            "gpus_per_node": 8,
-            "accelerator": "H200",
-        }
-    ]
-    plan["learner"].update(
-        {
-            "rl_model_recipe": "deepseek-v4-flash",
-            "global_rounds": 1,
-            "groups_per_round": 1,
-            "samples_per_group": 2,
-            "over_sampling_batch_size": 1,
-            "lora_r": 8,
-            "lora_targets": "attention",
-            "inner_lr": 1e-5,
-            "expert_full_count": 16,
-            "expert_full_lr": 1e-6,
-            "expert_selection_sha256": "a" * 64,
-            "expert_selection_contract_sha256": "b" * 64,
-            "tensor_parallel": 8,
-            "pipeline_parallel": 2,
-            "expert_parallel": 8,
-            "rollout_num_gpus_per_engine": 8,
-            "sglang_tp_size": 8,
-            "sglang_dp_size": 1,
-            "sglang_ep_size": 8,
-            "sglang_attention_backend": "dsv4",
-            "sglang_deterministic_inference": False,
-            "sglang_page_size": 256,
-        }
-    )
-
-    ssh_harness._validate_plan(plan)
-    argv = _learner_argv(plan, 0)
-    parsed = parse_learner_args(argv[3:])
-    script = _node_start_script(plan, 0, 0)
-
-    assert parsed.expert_full_count == 16
-    assert parsed.expert_full_lr == 1e-6
-    assert parsed.pipeline_parallel == 2
-    assert parsed.expert_selection_sha256 == "a" * 64
-    assert parsed.expert_selection_contract_sha256 == "b" * 64
-    for value in (
-        "YETO_DSV4_EXPERT_CLONE=1",
-        "YETO_DSV4_EXPERT_FULL=1",
-        "YETO_DSV4_EXPERT_FULL_COUNT=16",
-        "YETO_DSV4_EXPERT_FULL_LR=1e-06",
-        "NVTE_GROUPED_LINEAR_SINGLE_PARAM=0",
-        "--shm-size 64g",
-    ):
-        assert value in script
-    assert "YETO_DSV4_CLONE_ONLY_LORA" not in script
 
 
 def test_harness_forwards_chat_template_kwargs_to_the_learner():
@@ -2409,17 +2328,14 @@ def test_syncer_and_node_scripts_use_fixed_roster_and_ray_topology():
     assert '--node-ip-address="$NODE_IP"' in worker
     assert "python3 -m yeto.rl.adapters.miles.island_entry" not in worker
     setup = _host_setup_script(plan, 4)
-    assert SGLANG_REPOSITORY in setup
-    assert SGLANG_COMMIT in setup
-    assert f'git -C "$RUN/miles" remote set-url origin {MILES_REPOSITORY}' in setup
-    assert f'git -C "$RUN/miles" fetch --depth 1 origin {MILES_BASE_COMMIT}' in setup
-    assert f'MILES_BUNDLE="$RUN/source/{MILES_BUNDLE_PATH}"' in setup
-    assert MILES_BUNDLE_SHA256 in setup
-    assert f'git -C "$RUN/miles" fetch "$MILES_BUNDLE" {MILES_COMMIT}' in setup
-    assert f'git -C "$RUN/sglang" remote set-url origin {SGLANG_REPOSITORY}' in setup
+    assert SGLANG_NEXT_REPOSITORY in setup
+    assert SGLANG_NEXT_COMMIT in setup
+    assert f'git -C "$RUN/miles" remote set-url origin {MILES_NEXT_REPOSITORY}' in setup
+    assert f'git -C "$RUN/miles" fetch --depth 1 origin {MILES_NEXT_COMMIT}' in setup
+    assert "MILES_BUNDLE" not in setup
+    assert f'git -C "$RUN/sglang" remote set-url origin {SGLANG_NEXT_REPOSITORY}' in setup
     assert '"$RUN/sglang"' in setup
-    assert "SGLANG_BUNDLE" not in setup
-    assert f'git -C "$RUN/sglang" fetch --depth 1 origin {SGLANG_COMMIT}' in setup
+    assert f'git -C "$RUN/sglang" fetch --depth 1 origin {SGLANG_NEXT_COMMIT}' in setup
     assert setup.count("docker image inspect") == 2
     assert setup.index("docker image inspect") < setup.index("docker pull")
     for script in (head, worker):

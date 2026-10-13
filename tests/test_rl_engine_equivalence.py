@@ -534,15 +534,13 @@ def test_replay_index_exact_then_occurrence_then_miss():
     assert idx.hits == {"exact": 2, "occurrence": 1}
 
 
-def test_apply_record_restamps_policy_token_per_engine():
-    s = tfm.apply_record(_sample("p", 0), _rec("p", 0, "a"), ports_token="yeto:0:abc",
-                         legacy_token=None)
+def test_apply_record_restamps_the_policy_token():
+    s = tfm.apply_record(_sample("p", 0), _rec("p", 0, "a"), ports_token="yeto:0:abc")
     assert s.response == "a" and s.tokens == [1, 2, 3] and s.status is _Status.COMPLETED
     assert s.weight_versions == [] and s.metadata["weight_version"] == "yeto:0:abc"
-    s = tfm.apply_record(_sample("p", 0), _rec("p", 0, "a"), ports_token=None, legacy_token="L")
-    assert s.weight_versions == ["L"] and s.metadata["yeto_teacher_forced"]
+    assert s.metadata["yeto_teacher_forced"]
     with pytest.raises(tfm.ReplayMiss):
-        tfm.apply_record(_sample("q", 0), _rec("p", 0, "a"), ports_token=None, legacy_token=None)
+        tfm.apply_record(_sample("q", 0), _rec("p", 0, "a"), ports_token=None)
 
 
 def test_replay_generate_loads_recorded_dump(tmp_path, monkeypatch):

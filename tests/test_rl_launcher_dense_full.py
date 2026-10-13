@@ -129,7 +129,7 @@ def test_island_entry_accepts_the_dense_island_command():
     parsed = island_entry.parse_args(tokens)
     assert (parsed.parameter_mode, parsed.sync_preset) == ("full", "full-parameter")
     assert (parsed.num_learners, parsed.learner_id) == (2, 1)
-    island_entry._check_dense_full_sweep(parsed, rl_engine="ports", yeto_policy_sync=True)
+    island_entry._check_dense_full_sweep(parsed, yeto_policy_sync=True)
 
 
 EXPERT_FULL = (
@@ -178,4 +178,4 @@ def test_deepseek_v4_expert_full_island_is_the_lora_hybrid_on_the_dense_sweep(mo
 
     parsed = island_entry.parse_args(tokens)
     assert (parsed.parameter_mode, parsed.sync_preset, parsed.expert_full_count) == ("lora", "full-parameter", 4)
-    island_entry._check_dense_full_sweep(parsed, rl_engine="ports", yeto_policy_sync=True)
+    island_entry._check_dense_full_sweep(parsed, yeto_policy_sync=True)

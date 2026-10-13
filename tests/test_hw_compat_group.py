@@ -47,10 +47,10 @@ def test_missing_island_group_is_an_error_before_start(monkeypatch):
     with pytest.raises(UnknownCardType, match="not set"):
         island_compat_group()
     with pytest.raises(UnknownCardType):
-        miles_identity.backend_identity("ports")
+        miles_identity.backend_identity()
     with pytest.raises(UnknownCardType):
         verl_identity.backend_identity()
-    assert miles_identity.backend_identity("ports", compat_group="nvidia-h200").compat_group == "nvidia-h200"
+    assert miles_identity.backend_identity(compat_group="nvidia-h200").compat_group == "nvidia-h200"
     monkeypatch.setenv(catalog.COMPAT_GROUP_ENV, "nvidia-h200")
     assert island_compat_group() == "nvidia-h200"
     with pytest.raises(ValueError):
@@ -58,8 +58,8 @@ def test_missing_island_group_is_an_error_before_start(monkeypatch):
 
 
 def test_compat_group_is_in_the_identity_hash():
-    h100 = miles_identity.backend_identity("ports", compat_group="nvidia-h100")
-    h200 = miles_identity.backend_identity("ports", compat_group="nvidia-h200")
+    h100 = miles_identity.backend_identity(compat_group="nvidia-h100")
+    h200 = miles_identity.backend_identity(compat_group="nvidia-h200")
     assert h100.sha256() != h200.sha256()
     assert h100.to_dict()["compat_group"] == "nvidia-h100"
     assert type(h100).from_dict(h100.to_dict()) == h100
@@ -77,13 +77,13 @@ def test_comparison_rules():
 
 
 def test_identity_check_names_both_card_types():
-    h100 = miles_identity.backend_identity("ports", compat_group="nvidia-h100")
+    h100 = miles_identity.backend_identity(compat_group="nvidia-h100")
     with pytest.raises(CompatGroupMismatch, match="nvidia-h100 对 nvidia-h200"):
-        check_identity_match(h100, miles_identity.backend_identity("ports", compat_group="nvidia-h200"))
+        check_identity_match(h100, miles_identity.backend_identity(compat_group="nvidia-h200"))
     with pytest.raises(CompatGroupMismatch, match="nvidia-h100 对 ascend-910b"):
         check_identity_match(h100, verl_identity.backend_identity(compat_group="ascend-910b"))
-    check_identity_match(miles_identity.backend_identity("ports", compat_group="nvidia-h200"),
-                         miles_identity.backend_identity("ports", compat_group="nvidia-h200"))
+    check_identity_match(miles_identity.backend_identity(compat_group="nvidia-h200"),
+                         miles_identity.backend_identity(compat_group="nvidia-h200"))
     with pytest.raises(BackendIdentityMismatch):  # same card, other backend: old rule
         check_identity_match(h100, verl_identity.backend_identity(compat_group="nvidia-h100"))
 

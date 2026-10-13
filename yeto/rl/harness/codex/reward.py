@@ -31,6 +31,22 @@ _OUTCOME_STATUSES = {
 }
 
 
+class SecRLEnvRolloutTerminalError(RuntimeError):
+    """Sanitized base class for non-recoverable SecRLEnv rollout failures."""
+
+
+class SecRLEnvReplacementExhausted(SecRLEnvRolloutTerminalError):
+    """The one authenticated same-task replacement did not restore progress."""
+
+
+class SecRLEnvUntrustedEvidence(SecRLEnvRolloutTerminalError):
+    """A rollout group did not carry authentic SecRLEnv evidence."""
+
+
+class SecRLEnvRolloutCleanupError(SecRLEnvRolloutTerminalError):
+    """Pinned Miles could not drain a terminal SecRLEnv rollout."""
+
+
 class UntrustedOutcome(RuntimeError):
     pass
 
@@ -219,11 +235,6 @@ def check_group(args: Any, samples: list[Any], **_kwargs: Any):
 
     from miles.rollout.filter_hub.base_types import DynamicFilterOutput
 
-    from yeto.rl.adapters.miles.models.rollout_legacy_port import (
-        SecRLEnvReplacementExhausted,
-        SecRLEnvUntrustedEvidence,
-    )
-
     flattened = _flatten_samples(samples)
     rollout_id = getattr(args, "yeto_rl_policy_version", None)
     state = getattr(args, "_yeto_secrlenv_filter_state", None)
@@ -263,8 +274,6 @@ def check_group(args: Any, samples: list[Any], **_kwargs: Any):
         for outcome, _ in verified
     )
     if cleanup_failure:
-        from yeto.rl.adapters.miles.models.rollout_legacy_port import SecRLEnvRolloutCleanupError
-
         raise SecRLEnvRolloutCleanupError(
             "SecRLEnv episode cleanup could not be verified"
         )
