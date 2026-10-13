@@ -46,10 +46,18 @@ from yeto.rl.core import (
     policy_hash,
     policy_tensor_hash,
 )
-from yeto.rl.elastic_client import LeaveReason
+from yeto.rl.elastic_client import (
+    DEFAULT_ISLAND_LEASE_S,
+    ElasticClientConfig,
+    ElasticFinished,
+    ElasticIslandClient,
+    LeaveReason,
+    hmac_key_from_env,
+)
 
 from . import progress as legacy_progress
 from .pause_audit import PAUSABLE_PHASE
+from .backend_identity import config_island_contract_sha256
 from .driver import IslandDriver, SyncBoundary, SyncStart
 from .leave_reason import sendable
 from .trainable_state import TrainableState
@@ -157,7 +165,7 @@ class LocalOnlySync:
             driver.at_safe_point = True
             self.at_safe_point(driver, rollout_id=int(version), final=True)
 
-    def close(self, reason: int = 0) -> None:
+    def close(self, reason: int = LeaveReason.FINISHED) -> None:
         pass  # no coordinator: nothing to LEAVE
 
 
@@ -374,7 +382,7 @@ class StrictAvgSync:
         if policy_hash(final) != policy_hash(self.current):
             raise RuntimeError("final policy differs from the committed global policy")
 
-    def close(self, reason: int = 0) -> None:
+    def close(self, reason: int = LeaveReason.FINISHED) -> None:
         if self.bridge is not None:  # strict roster: no LEAVE semantics (design D3)
             self.bridge.client.close()
 
@@ -424,8 +432,10 @@ class ElasticAvgSync:
 
     def __init__(self, config: BridgeConfig, *, progress: StrictIslandProgress | None = None,
                  client: Any = None, syncer_epoch: int = 0, base_wait_s: float = 3600.0,
-                 groups_per_round: int | None = None) -> None:
+                 groups_per_round: int | None = None, lease_s: float | None = None) -> None:
         self.config = config
+        # the syncer's --island-lease-s; the client heartbeats every lease_s/3
+        self.lease_s = DEFAULT_ISLAND_LEASE_S if lease_s is None else float(lease_s)
         # 0.21: groups one round draws from the data source; used to advance the
         # cursor on a restart whose ledger holds no cursor (fresh machine).
         self._sleep = __import__("time").sleep
@@ -445,18 +455,16 @@ class ElasticAvgSync:
 
     def _client(self):
         if self.client is None:
-            from yeto.rl.engine.backend_identity import config_island_contract_sha256
-            from yeto.rl.elastic_client import (ElasticClientConfig, ElasticIslandClient,
-                                                hmac_key_from_env)
-
-            self.client = ElasticIslandClient(
-                ElasticClientConfig(self.config.syncer_addr, self.config.learner_id,
-                                    syncer_epoch=self.syncer_epoch,
-                                    backend_identity_sha256=config_island_contract_sha256(
-                                        self.config),
-                                    compat_group=getattr(self.config, "compat_group", None)),
-                hmac_key_from_env(), on_event=self._client_event)
+            self.client = ElasticIslandClient(self._client_config(), hmac_key_from_env(),
+                                              on_event=self._client_event)
         return self.client
+
+    def _client_config(self) -> ElasticClientConfig:
+        c = self.config
+        return ElasticClientConfig(c.syncer_addr, c.learner_id, syncer_epoch=self.syncer_epoch,
+                                   lease_s=self.lease_s,
+                                   backend_identity_sha256=config_island_contract_sha256(c),
+                                   compat_group=getattr(c, "compat_group", None))
 
     _TAPE_CLIENT_EVENTS = ("elastic_rejoin", "elastic_rejoin_failed", "elastic_debug_pause",
                            "elastic_debug_pause_end")
@@ -599,8 +607,6 @@ class ElasticAvgSync:
             self._sleep(delay)
         driver.emit("rl_local_round", **_elastic_local_round_fields(stats, sent_on, 4 * len(update)),
                     **{"sync/base_outer_version": sent_on})
-        from yeto.rl.elastic_client import ElasticFinished
-
         self.client.inner_step += self.config.local_optimizer_steps
         try:
             self.client.raise_if_finished()
@@ -656,8 +662,6 @@ class ElasticAvgSync:
             self.client.leave(code)
             return True
         except Exception as error:  # noqa: BLE001 - the syncer may already be gone
-            from yeto.rl.elastic_client import ElasticFinished
-
             if isinstance(error, (ElasticFinished, BrokenPipeError, ConnectionResetError)) \
                     and code is LeaveReason.FINISHED:
                 return False  # 0.26: the syncer already finished
@@ -858,7 +862,7 @@ class DualStrictAvgSync:
         self.actor.finish(driver)
         self.critic.finish(self.view)
 
-    def close(self, reason: int = 0) -> None:
+    def close(self, reason: int = LeaveReason.FINISHED) -> None:
         self.actor.close(reason)
         if self.critic is not None:
             self.critic.close(reason)
@@ -1169,6 +1173,6 @@ class DecoupledSync:
         if not self.finished:
             raise RuntimeError("stopped before decoupled RL finalization")
 
-    def close(self, reason: int = 0) -> None:
+    def close(self, reason: int = LeaveReason.FINISHED) -> None:
         if self.bridge is not None:  # no LEAVE semantics (design D3)
             self.bridge.close()

@@ -55,6 +55,7 @@ _TABLE: tuple[tuple[LeaveReason, tuple[tuple[str, str], ...]], ...] = (
     )),
     (LeaveReason.TRAINING_FAILED, (
         (_E + "driver", "DriverError"),  # Publication/PolicyIdentity/RoundFailed and checks
+        ("yeto.rl.adapters.miles.publish", "PublicationError"),  # Miles publish refusal
         ("yeto.rl.core", "StrictRlInvariantError"),
         (_E + "bridges", "CrossChannelCommitError"),
         (_E + "policy_digest", "PolicyDigestError"),
@@ -76,9 +77,17 @@ def _loaded(module: str, name: str) -> type | None:
 
 
 def leave_reason_for(error: BaseException | None) -> LeaveReason:
-    """The LEAVE code for an island that stops with ``error`` (None: finished)."""
+    """The LEAVE code for an island that stops with ``error`` (None: finished).
+    A plain ``DriverError`` raised ``from`` another error (e.g. a wrapped
+    ``ProfileError``) takes the code of that cause."""
     if error is None:
         return LeaveReason.FINISHED
+    if type(error) is _loaded(_E + "driver", "DriverError") and error.__cause__ is not None:
+        return leave_reason_for(error.__cause__)
+    return _table_reason(error)
+
+
+def _table_reason(error: BaseException) -> LeaveReason:
     for reason, names in _TABLE:
         classes = tuple(c for c in (_loaded(m, n) for m, n in names) if c is not None)
         if classes and isinstance(error, classes):

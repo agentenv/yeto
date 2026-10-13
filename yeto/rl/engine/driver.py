@@ -72,6 +72,7 @@ from yeto.rl.core import (
     StrictRlInvariantError,
     require_nonzero_learning_rate,
 )
+from yeto.rl.elastic_client import LeaveReason
 
 from .algorithm import AlgorithmSpec
 from .capabilities import BackendTraits, EngineCapabilities
@@ -247,7 +248,7 @@ class SyncSession(Protocol):
 
     def finish(self, driver: "IslandDriver") -> None: ...
 
-    def close(self, reason: int = 0) -> None:
+    def close(self, reason: int = LeaveReason.FINISHED) -> None:
         """End the session; ``reason`` is the LEAVE code (``LeaveReason``) for
         sessions with a coordinator, ignored by the others."""
 

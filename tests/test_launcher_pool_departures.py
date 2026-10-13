@@ -51,3 +51,14 @@ def test_excuse_departed_keeps_exit3_for_others():
     assert still == ["run-l0-modal", "odd-name"]
     assert left == [{"island": 1, "name": "run-l1-modal", "reason": "lease_expired"}]
     assert launcher.NO_SYNC_INCOMPLETE_EXIT == 3
+
+
+def test_only_excused_leave_reasons_waive_the_finalized_record(tmp_path):
+    """rl-island-graceful-leave: a failure code must not hide a missing
+    rl_learner_finalized (it would turn a failed island into a clean departure)."""
+    reasons = ["finished", "stopped", "preempted", "lease_expired", "infra_failed",
+               "training_failed", "config_mismatch", "unknown(42)"]
+    tape = _tape(tmp_path, [{"kind": "pool_leave", "island_id": i, "reason": r}
+                            for i, r in enumerate(reasons)])
+    assert launcher.syncer_pool_departures(tape) == {
+        0: "finished", 1: "stopped", 2: "preempted", 3: "lease_expired"}

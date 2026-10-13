@@ -188,7 +188,8 @@ def build_sync(plan: dict, specs, *, lora_hash: str, layout_hash: str, identity_
         if mode == "strict":
             sync = StrictAvgSync(bridge, progress=None)
         elif mode == "elastic":
-            sync = ElasticAvgSync(bridge, progress=None, syncer_epoch=int(plan.get("syncer_epoch", 0)))
+            sync = ElasticAvgSync(bridge, progress=None, syncer_epoch=int(plan.get("syncer_epoch", 0)),
+                                  lease_s=plan.get("island_lease_s"))
         else:
             raise ValueError(f"unknown sync mode {mode!r}")
     return sync

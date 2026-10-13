@@ -778,7 +778,7 @@ def elastic_debug_pause_env(args) -> dict[str, str]:
     return {ELASTIC_DEBUG_PAUSE_ENV: str(spec)}
 
 
-DEFAULT_ISLAND_LEASE_S = 150.0  # P5: heartbeats every lease/3 = 50 s on their own thread; tolerates 2 lost
+DEFAULT_ISLAND_LEASE_S = 150.0  # passed to the syncer and to every island (heartbeat every lease/3)
 
 
 def island_lease_s(args) -> float:
@@ -2268,7 +2268,8 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         flags += f" --rl-lr-schedule {args.rl_lr_schedule}"
     if island_scheduling_mode(args) == "elastic":  # legacy adds nothing
         flags += (" --rl-island-scheduling elastic"
-                  f" --rl-syncer-epoch {island_syncer_epoch(args)}")
+                  f" --rl-syncer-epoch {island_syncer_epoch(args)}"
+                  f" --rl-island-lease-s {island_lease_s(args)!r}")
     resume_store = (rl_checkpoint_store_plan(args)
                     if getattr(args, "rl_checkpoint_store", None) and not getattr(args, "rl_elastic", False)
                     else None)
@@ -5804,14 +5805,24 @@ def settle_echo_tapes(collectors: dict, names, modal_cfgs, events_dir, *,
 _ISLAND_NAME_RE = re.compile(r"-l(\d+)-")
 
 
+# LEAVE reason names (syncer leave_reason_name) whose island owes no
+# rl_learner_finalized. "requested" is what a pre-reason-code syncer logged for
+# every island-sent LEAVE. TRAINING_FAILED, CONFIG_MISMATCH, INFRA_FAILED and
+# unknown codes stay failures.
+EXCUSED_LEAVE_REASONS = frozenset({"finished", "stopped", "preempted", "lease_expired", "requested"})
+
+
 def syncer_pool_departures(tape_path, offset: int = 0) -> dict[int, str]:
-    """Elastic islands the syncer formally removed from the pool and never re-admitted.
+    """Elastic islands the syncer removed from the pool for an excused reason and
+    never re-admitted.
 
     Reads the syncer event tape (from ``offset``: this run's part only) and returns
     ``{island_id: reason}`` for every island whose last pool record is ``pool_leave``
-    (``lease_expired``, ``requested``, ...). User ruling S16 §6.6: such an island owes no
-    ``rl_learner_finalized`` record; the run summary reports it as a mid-run departure
-    instead of the launcher's exit 3. Unreadable tape -> {} (fail closed: exit 3 stays)."""
+    with a reason in ``EXCUSED_LEAVE_REASONS``. User ruling S16 §6.6: such an island
+    owes no ``rl_learner_finalized`` record; the run summary reports it as a mid-run
+    departure instead of the launcher's exit 3. An island that left with a failure
+    code is not returned, so its missing record still fails the run. Unreadable
+    tape -> {} (fail closed: exit 3 stays)."""
     last: dict[int, tuple[str, str]] = {}
     try:
         with open(tape_path, encoding="utf-8") as handle:
@@ -5828,7 +5839,8 @@ def syncer_pool_departures(tape_path, offset: int = 0) -> dict[int, str]:
                     last[rec["island_id"]] = (kind, str(rec.get("reason") or "unknown"))
     except OSError:
         return {}
-    return {i: reason for i, (kind, reason) in last.items() if kind == "pool_leave"}
+    return {i: reason for i, (kind, reason) in last.items()
+            if kind == "pool_leave" and reason in EXCUSED_LEAVE_REASONS}
 
 
 def excuse_departed_islands(incomplete: list[str], departures: dict[int, str]) -> tuple[list[str], list[dict]]:
@@ -7930,8 +7942,9 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         if container_changed():
             return CONTAINER_CHANGED_EXIT
         if (no_sync_incomplete and head_mode and island_scheduling_mode(args) == "elastic"):
-            # S16 §6.6: an island the syncer removed from the pool (lease expiry,
-            # requested leave) owes no rl_learner_finalized; report it, do not exit 3.
+            # S16 §6.6: an island the syncer removed from the pool for an excused
+            # reason (finished, stopped, preempted, lease expiry) owes no
+            # rl_learner_finalized; report it, do not exit 3. Failure codes still fail.
             departures = syncer_pool_departures(
                 local_syncer.event_tape, getattr(local_syncer, "_event_offset", 0))
             still, left = excuse_departed_islands(no_sync_incomplete, departures)

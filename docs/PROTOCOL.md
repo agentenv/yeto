@@ -396,9 +396,16 @@ driver's close. A SIGTERM that kills the process (`yeto down`, platform stop)
 sends nothing; the syncer removes the island after the lease. The syncer logs
 an unknown code as `unknown(<n>)` and removes the island as usual.
 
-The lease defaults to 150 s in all three places (`syncer --island-lease-s`,
-the launcher and `yeto --rl-island-lease-s`). Islands heartbeat every
-lease/3 (50 s) on their own thread, so two lost heartbeats are tolerated.
+The lease defaults to 150 s (`syncer --island-lease-s`, the launcher, `yeto
+--rl-island-lease-s` and the island client). The launcher passes the same
+value to the syncer and to every elastic island (`--rl-island-lease-s`), and
+islands heartbeat every lease/3 (50 s at the default) on their own thread, so
+two lost heartbeats are tolerated.
+
+At the end of the run the launcher waives the missing `rl_learner_finalized`
+record only for islands whose last syncer `pool_leave` reason is `finished`,
+`stopped`, `preempted` or `lease_expired` (and the pre-reason-code
+`requested`); any failure code keeps the run failed.
 
 To add an island to a running elastic fleet there is no CLI: start another
 island process against the same syncer address with the same

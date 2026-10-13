@@ -61,7 +61,6 @@ VERDICT_REJECT = 2
 VERDICT_NAMES = {VERDICT_ACCEPT: "ACCEPT", VERDICT_ACCEPT_IS: "ACCEPT_IS", VERDICT_REJECT: "REJECT"}
 
 
-
 class LeaveReason(IntEnum):
     """LEAVE reason code (one wire byte); equal to ``LEAVE_REASON_*`` in
     ``syncer/src/elastic.rs`` (parity test). Only the class of the departure
@@ -77,6 +76,10 @@ class LeaveReason(IntEnum):
     CONFIG_MISMATCH = 6
 
 
+# Elastic island lease on the syncer; the island heartbeats every lease/3.
+# Same default as `syncer --island-lease-s`, the launcher and `yeto
+# --rl-island-lease-s` (a test pins all four).
+DEFAULT_ISLAND_LEASE_S = 150.0
 HMAC_LEN = 32
 MAX_ELASTIC_FRAME = 128 * 1024
 MAX_ELASTIC_BASE_FRAME = 1 << 36  # a full flat f32 base vector
@@ -513,7 +516,7 @@ class ElasticClientConfig:
     island_id: int
     capacity: float = 1.0
     incarnation: int = 0
-    lease_s: float = 30.0
+    lease_s: float = DEFAULT_ISLAND_LEASE_S
     syncer_epoch: int = 0
     join_timeout_s: float = 60.0
     # 0.22: consecutive failed automatic re-JOINs before the island gives up.

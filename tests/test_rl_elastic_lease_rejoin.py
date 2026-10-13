@@ -195,8 +195,10 @@ def test_island_lease_default_is_the_same_in_syncer_cli_and_launcher():
     main_rs = (repo / "syncer/src/main.rs").read_text()
     m = re.search(r"default_value_t = ([0-9.]+)\)\]\s*island_lease_s: f64", main_rs)
     assert m, "island_lease_s default not found in syncer/src/main.rs"
-    assert float(m.group(1)) == launcher.DEFAULT_ISLAND_LEASE_S == 150.0
+    from yeto.rl.elastic_client import DEFAULT_ISLAND_LEASE_S, ElasticClientConfig
     from yeto.rl.engine.run_flags import rl_flags
 
+    assert float(m.group(1)) == launcher.DEFAULT_ISLAND_LEASE_S == DEFAULT_ISLAND_LEASE_S == 150.0
+    assert ElasticClientConfig(("x", 0), 0).lease_s == DEFAULT_ISLAND_LEASE_S  # island side
     lease = next(f for f in rl_flags() if f.option == "--rl-island-lease-s")
-    assert f"Default {launcher.DEFAULT_ISLAND_LEASE_S:g} " in lease.kwargs["help"]
+    assert f"Default {launcher.DEFAULT_ISLAND_LEASE_S:g}" in lease.kwargs["help"]
