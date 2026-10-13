@@ -7,7 +7,7 @@ Commit and PR text use English only. Before each PR merges, run the local safe t
 - [x] 1.1 On 2026-10-13 the user cancelled the requirement "clean up logs before #238 merges" (checked: #238 added no logs); the decision is recorded in proposal.md
 - [x] 1.2 Moving logs out has its own PR #240 (https://github.com/agentenv/yeto/pull/240, branch `s23-move-run-logs`, based on `agentenv/main` c9d25b69)
 - [ ] 1.3 After #240 merges: #239 drops these two commits; confirm that the diff of #239 no longer contains the log-removal changes
-- [ ] 1.4 Tell the main agent to tick 0.4 in `rl-code-quality-cleanup/tasks.md` (this change does not edit that directory)
+- [x] 1.4 Tell the main agent to tick 0.4 in `rl-code-quality-cleanup/tasks.md` (this change does not edit that directory)
 
 ## 2. Commit language check (local hook only)
 
