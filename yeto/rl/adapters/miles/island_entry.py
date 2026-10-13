@@ -640,7 +640,7 @@ def _roster_generations(args) -> tuple[int, ...]:
 
 
 def _dense_full_sync_config(
-    args, *, model_config_sha256: str, training_contract_sha256: str
+    args, *, model_config_sha256: str, training_contract_sha256: str, algorithm_spec_sha256: str
 ):
     """The dense strict sweep as a one-role :class:`FullParameterSyncConfig`."""
 
@@ -668,15 +668,19 @@ def _dense_full_sync_config(
         training_contract_hash=training_contract_sha256,
         syncer_profile_hash=args.syncer_profile_sha256,
         pipeline_depth=1,
+        algorithm_spec_sha256=algorithm_spec_sha256,
         wan_streams=args.wan_streams,
     )
     return FullParameterSyncConfig((actor,), sweep=True)
 
 
 def _load_sao_streaming_runtime(args):
-    """Load the hash-bound SAO streaming contract before any GPU work."""
+    """Load the hash-bound SAO streaming contract before any GPU work.
 
-    from yeto.rl.adapters.miles.full_parameter.sao_binding import sao_sync_config
+    The role pairing is checked when the runtime is bound (still before Ray
+    starts), once the island's algorithm spec hash is known.
+    """
+
     from yeto.rl.sao_streaming_runtime import load_sao_streaming_runtime
 
     runtime = load_sao_streaming_runtime(
@@ -692,8 +696,6 @@ def _load_sao_streaming_runtime(args):
         actor=_syncer_address(args.syncer),
         critic=_syncer_address(args.critic_syncer),
     )
-    # Fail closed on the role pairing before any GPU work; bound later.
-    sao_sync_config(runtime)
     return runtime
 
 
@@ -1884,6 +1886,7 @@ def run_miles(
                     args,
                     model_config_sha256=model_config_hash,
                     training_contract_sha256=training_contract_hash,
+                    algorithm_spec_sha256=algorithm_spec_sha256,
                 ),
             )
         elif sao_runtime is not None:
@@ -1904,7 +1907,9 @@ def run_miles(
                 raise ValueError(
                     f"SAO trajectory evidence root {evidence_root} is writable by others"
                 )
-            bind_sao_streaming_runtime(miles_args, sao_runtime)
+            bind_sao_streaming_runtime(
+                miles_args, sao_runtime, algorithm_spec_sha256=algorithm_spec_sha256
+            )
         elif sync_preset == "decoupled":
             from yeto.protocol import layout_fingerprint
             from yeto.rl.core import build_rl_fragment_layout

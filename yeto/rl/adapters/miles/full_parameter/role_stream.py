@@ -71,6 +71,8 @@ class RoleStreamConfig:
     training_contract_hash: str
     syncer_profile_hash: str
     pipeline_depth: int
+    # P0-4.8: the island's AlgorithmSpec hash; placement capabilities stay out.
+    algorithm_spec_sha256: str
     wan_streams: int = 4
     wait_timeout: float = 900.0
     poll_seconds: float = 0.01
@@ -134,6 +136,7 @@ class RoleStreamConfig:
         require_sha256("expected_layout_hash", self.expected_layout_hash)
         require_sha256("training_contract_hash", self.training_contract_hash)
         require_sha256("syncer_profile_hash", self.syncer_profile_hash)
+        require_sha256("algorithm_spec_sha256", self.algorithm_spec_sha256)
 
     @property
     def roster(self) -> dict[int, int]:
@@ -193,13 +196,14 @@ def role_stream_session_contract_hash(
 
     require_sha256("layout_hash", layout_hash)
     payload = {
-        "schema": "yeto-full-parameter-role-stream-v2",
+        "schema": "yeto-full-parameter-role-stream-v3",
         "algorithm": config.algorithm,
         "role": config.role,
         "component": asdict(config.component),
         "parameter_layout_hash": layout_hash,
         "training_contract_hash": config.training_contract_hash,
         "backend_identity_sha256": backend_identity().sha256(),
+        "algorithm_spec_sha256": config.algorithm_spec_sha256,
         "syncer_profile_hash": config.syncer_profile_hash,
         "profile": {
             "learner_generations": [
@@ -215,7 +219,7 @@ def role_stream_session_contract_hash(
         },
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    return hashlib.sha256(b"yeto-role-stream-session-v2\0" + encoded).digest()
+    return hashlib.sha256(b"yeto-role-stream-session-v3\0" + encoded).digest()
 
 
 class MilesFullParameterRoleStream:

@@ -29,6 +29,8 @@ from yeto.syncer_profile import (
 
 SECRLENV_CONTEXT_SHA256 = "9" * 64
 
+ALGORITHM_SHA256 = "a1" * 32
+
 
 def _syncer_profile() -> dict[str, object]:
     return {
@@ -204,7 +206,7 @@ def _args(**overrides):
 def test_load_constructs_two_role_scoped_streams(tmp_path):
     runtime, evidence = _load(tmp_path)
 
-    sync = sao_sync_config(runtime)
+    sync = sao_sync_config(runtime, algorithm_spec_sha256=ALGORITHM_SHA256)
     assert isinstance(sync, FullParameterSyncConfig)
     assert not sync.sweep
     assert tuple(sync.by_role()) == ("actor", "critic")
@@ -264,7 +266,7 @@ def test_load_or_role_pairing_rejects_role_or_lockstep_drift(tmp_path, mutation,
     mutation(payload)
 
     with pytest.raises(ValueError, match=message):
-        sao_sync_config(_load(tmp_path, payload)[0])
+        sao_sync_config(_load(tmp_path, payload)[0], algorithm_spec_sha256=ALGORITHM_SHA256)
 
 
 @pytest.mark.parametrize(
@@ -334,11 +336,11 @@ def test_bind_installs_two_role_full_parameter_sync_and_private_evidence(tmp_pat
     runtime, evidence = _load(tmp_path)
     args = _args()
 
-    assert bind_sao_streaming_runtime(args, runtime) == evidence
+    assert bind_sao_streaming_runtime(args, runtime, algorithm_spec_sha256=ALGORITHM_SHA256) == evidence
 
     assert evidence.is_dir()
     assert stat.S_IMODE(evidence.stat().st_mode) == 0o700
-    assert getattr(args, CONFIG_ATTRIBUTE) == sao_sync_config(runtime)
+    assert getattr(args, CONFIG_ATTRIBUTE) == sao_sync_config(runtime, algorithm_spec_sha256=ALGORITHM_SHA256)
     assert args.yeto_rl_trajectory_evidence_dir == str(evidence)
     assert args.yeto_rl_trajectory_evidence_kind == "secrlenv"
     assert args.yeto_rl_trajectory_evidence_schema_version == 2
@@ -361,7 +363,7 @@ def test_terminal_bench_runtime_binds_v2_without_any_reward_key(
     monkeypatch.delenv("TBENCH_REWARD_HMAC_KEY_FILE", raising=False)
 
     args = _args()
-    bind_sao_streaming_runtime(args, runtime)
+    bind_sao_streaming_runtime(args, runtime, algorithm_spec_sha256=ALGORITHM_SHA256)
     assert args.yeto_rl_trajectory_evidence_kind == "terminal-bench-2.1"
     assert args.yeto_rl_trajectory_evidence_schema_version == 2
 
@@ -370,7 +372,7 @@ def test_bind_rejects_optimizer_drift_before_creating_evidence(tmp_path):
     runtime, evidence = _load(tmp_path)
 
     with pytest.raises(ValueError, match="optimizer accounting"):
-        bind_sao_streaming_runtime(_args(num_critic_epochs=3), runtime)
+        bind_sao_streaming_runtime(_args(num_critic_epochs=3), runtime, algorithm_spec_sha256=ALGORITHM_SHA256)
 
     assert not evidence.exists()
 
@@ -389,7 +391,7 @@ def test_bind_requires_the_sao_spec_with_a_full_parameter_critic(
     runtime, evidence = _load(tmp_path)
 
     with pytest.raises(ValueError, match=message):
-        bind_sao_streaming_runtime(_args(**overrides), runtime)
+        bind_sao_streaming_runtime(_args(**overrides), runtime, algorithm_spec_sha256=ALGORITHM_SHA256)
 
     assert not evidence.exists()
 
@@ -411,7 +413,7 @@ def test_bind_rejects_state_bypassing_debug_shortcuts(tmp_path, overrides):
     runtime, evidence = _load(tmp_path)
 
     with pytest.raises(ValueError, match="state-bypassing debug options"):
-        bind_sao_streaming_runtime(_args(**overrides), runtime)
+        bind_sao_streaming_runtime(_args(**overrides), runtime, algorithm_spec_sha256=ALGORITHM_SHA256)
 
     assert not evidence.exists()
 
@@ -473,7 +475,7 @@ def test_island_loads_the_runtime_for_its_own_learner(tmp_path):
     args.syncer = "10.0.0.7:29400"
     args.critic_syncer = "10.0.0.7:29401"
     runtime = island_entry._load_sao_streaming_runtime(args)
-    assert tuple(sao_sync_config(runtime).by_role()) == ("actor", "critic")
+    assert tuple(sao_sync_config(runtime, algorithm_spec_sha256=ALGORITHM_SHA256).by_role()) == ("actor", "critic")
     # The contract fixes ports; the host follows the launch's syncer address.
     assert runtime.actor.syncer_addr == ("10.0.0.7", 29400)
     assert runtime.critic.syncer_addr == ("10.0.0.7", 29401)
@@ -533,12 +535,14 @@ def test_island_entry_binds_the_sao_streaming_runtime_end_to_end(monkeypatch, tm
 
     miles_args = captured["miles_args"]
     assert miles_args.yeto_rl_sync_preset == "sao-streaming-full"
+    # P0-4.8: both role sessions bind the island's algorithm spec hash.
     assert getattr(miles_args, CONFIG_ATTRIBUTE) == sao_sync_config(
         load_sao_streaming_runtime(
             source,
             expected_sha256=digest,
             expected_sao_context_sha256=SECRLENV_CONTEXT_SHA256,
-        )
+        ),
+        algorithm_spec_sha256=captured["algorithm_spec_sha256"],
     )
     assert miles_args.yeto_rl_trajectory_evidence_dir == str(evidence)
     assert stat.S_IMODE(evidence.stat().st_mode) == 0o700
@@ -599,7 +603,7 @@ def test_context_schema_label_2_still_writes_trajectory_evidence_schema_4(tmp_pa
 
     runtime, evidence = _load(tmp_path)
     args = _args()
-    bind_sao_streaming_runtime(args, runtime)
+    bind_sao_streaming_runtime(args, runtime, algorithm_spec_sha256=ALGORITHM_SHA256)
     assert args.yeto_rl_trajectory_evidence_schema_version == 2
     args.yeto_rl_reward_sha256 = "b" * 64
     outcome = {

@@ -53,6 +53,7 @@ def _role_config(
         training_contract_hash="f" * 64,
         syncer_profile_hash="0" * 64,
         pipeline_depth=2,
+        algorithm_spec_sha256="a1" * 32,
         wan_streams=2,
         wait_timeout=1,
         poll_seconds=0.001,
@@ -74,6 +75,13 @@ def test_role_sessions_are_domain_separated_and_dual_config_is_lockstep():
         role_stream_session_contract_hash(
             "1" * 64,
             replace(actor, syncer_profile_hash="2" * 64),
+        )
+    )
+    # P0-4.8: a different algorithm spec is a different session.
+    assert role_stream_session_contract_hash("1" * 64, actor) != (
+        role_stream_session_contract_hash(
+            "1" * 64,
+            replace(actor, algorithm_spec_sha256="b2" * 32),
         )
     )
     assert role_stream_session_contract_hash("1" * 64, actor) != (

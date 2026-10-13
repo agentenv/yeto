@@ -1235,6 +1235,7 @@ def _stub_full_parameter_island(monkeypatch, tmp_path, *, miles_fields=None, **o
     def run_ports(_args, miles_args, launch, *_rest, **_kwargs):
         captured["miles_args"] = miles_args
         captured["argv"] = list(launch.argv)
+        captured["algorithm_spec_sha256"] = launch.algorithm.sha256()
 
     def forbidden(*_args, **_kwargs):
         raise AssertionError("full mode must not derive LoRA state")
