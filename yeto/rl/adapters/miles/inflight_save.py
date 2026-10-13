@@ -131,7 +131,8 @@ def write_in_flight(exported: Mapping[str, Any], directory: str | os.PathLike[st
 class InFlightSaver:
     """Export + write, timed. ``export(timeout_s)`` returns the export mapping. Every
     write goes through :func:`yeto.rl.engine.recovery.save` into ``store`` (default:
-    a local directory store at ``directory``)."""
+    a local directory store at ``directory``). A local store has nothing to commit:
+    the write then reports ``commit_s`` None, as without a volume."""
 
     def __init__(self, export: Callable[[float], Mapping[str, Any]], directory: str, *,
                  emit: Callable[..., Any] | None = None, store: CheckpointStore | None = None,
@@ -182,7 +183,8 @@ class InFlightSaver:
         cut = ConsistentCut(checkpoint_id=name, trigger=PREEMPT if kind == "reclaim" else PERIODIC,
                             outer_step=_as_step(extra.get("cached_round", extra.get("round"))))
         out = recovery.save(cut, store=self.store, clock=self.clock, write=lambda record: {
-            **write_in_flight(exported, self.directory, name, commit=self.store.commit, cut=record,
+            **write_in_flight(exported, self.directory, name, cut=record,
+                              commit=None if self.store.kind == "local" else self.store.commit,
                               clock=self.clock), "committed": True})
         self.progress(kind, "written", t0, write_s=out["write_s"], commit_s=out["commit_s"])
         out.update(kind=kind, export_s=export_s, total_s=round(self.clock() - t0, 4), **extra)

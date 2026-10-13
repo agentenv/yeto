@@ -189,3 +189,56 @@ def test_elastic_controller_store_goes_through_the_interface(tmp_path):
     by_path = _ctl(tmp_path / "c/state", {"t": 3.0}, checkpoint_store=str(tmp_path / "store2"))
     assert type(by_path.store) is rs.CheckpointStore
     by_path.close()
+
+
+def test_elastic_commit_runs_outside_the_record_lock_and_its_failure_is_not_a_copy_failure(tmp_path):
+    import threading
+
+    seen = {}
+
+    class _LockProbe(_CountingStore):
+        def commit(self):
+            probe = threading.Thread(target=lambda: seen.setdefault(
+                "free", ctl._record_lock.acquire(timeout=1) and (ctl._record_lock.release() or True)))
+            probe.start()
+            probe.join()
+            if seen.get("fail"):
+                raise RuntimeError("volume busy")
+            return 0.0
+
+    store = _LockProbe(tmp_path / "store")
+    ctl = _ctl(tmp_path / "a/state", {"t": 1.0}, checkpoint_store=store)
+    assert ctl.sync_checkpoint_store("test") and seen["free"] is True
+    assert ctl.last_store_sync["commit_error"] is None
+    seen["fail"] = True
+    assert ctl.sync_checkpoint_store("test")
+    assert ctl.last_store_sync["ok"] is True and "volume busy" in ctl.last_store_sync["commit_error"]
+    assert (store.root / rs.FLAT_MANIFEST).is_file()
+    ctl.close()
+
+
+def test_inflight_saver_commit_semantics_per_backend(tmp_path, monkeypatch):
+    """Local store: nothing to commit (commit_s None). Modal store: the commit runs in
+    the runner interpreter named by YETO_MODAL_PYTHON (a fake modal module here)."""
+    import sys
+
+    local = s.InFlightSaver(lambda t: {"entries": []}, str(tmp_path / "l"), printer=lambda line: None)
+    assert local.rehearse(1)["commit_s"] is None
+
+    fake = tmp_path / "pkg"
+    fake.mkdir()
+    log = tmp_path / "calls.txt"
+    (fake / "modal.py").write_text(
+        "class _V:\n"
+        "    def __init__(self, n): self.n = n\n"
+        f"    def commit(self): open({str(log)!r}, 'a').write('commit ' + self.n + '\\n')\n"
+        "class Volume:\n"
+        "    @staticmethod\n"
+        "    def from_name(n): return _V(n)\n")
+    monkeypatch.setenv("YETO_MODAL_PYTHON", sys.executable)
+    monkeypatch.setenv("YETO_MODAL_SYSPATH", str(fake))
+    modal = s.InFlightSaver(lambda t: {"entries": []}, str(tmp_path / "m"),
+                            store=mcs.ModalVolumeStore(tmp_path / "m", "tape-vol"), printer=lambda line: None)
+    out = modal.rehearse(1)
+    assert out["commit_error"] is None and out["commit_s"] is not None
+    assert log.read_text().splitlines() == ["commit tape-vol"]

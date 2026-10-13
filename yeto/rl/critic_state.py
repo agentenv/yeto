@@ -173,8 +173,10 @@ Tensors = Mapping[str, torch.Tensor]
 
 
 class CriticCheckpointStore(CheckpointStore):
-    """Critic backend of the checkpoint store interface:
-    ``<root>/critic/round-<n>/``: weights + optimizer state + manifest (last)."""
+    """Critic backend of the checkpoint store interface: a layout backend for
+    ``<root>/critic/round-<n>/`` (weights + optimizer state + manifest, last).
+    Its ``save`` runs per rank inside the trainer cut (``state_plugin``), which the
+    round cut's ``recovery.save`` wraps; it is not itself a ``recovery.save`` path."""
 
     kind = "critic"
     MANIFEST = "critic-manifest.json"

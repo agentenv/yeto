@@ -735,10 +735,12 @@ class IslandController:
 
     def sync_checkpoint_store(self, reason: str, *, skip_if_recovery: bool = False) -> bool:
         """Mirror the state dir (journal, epochs, cuts, ledger, inbox...) into the store
-        (``resume.sync_flat_mirror``: manifest last, then commit). Runs under the record
-        lock so no journal line is torn by a concurrent append. A failing sync is
-        logged + remembered (``last_store_sync``), never fatal: the store is a
-        durability aid, the island's truth stays the local journal."""
+        (``resume.sync_flat_mirror``: manifest last) under the record lock, so no
+        journal line is torn by a concurrent append; then commit the store outside
+        the lock (a Modal commit may take minutes and must not block the journal).
+        A failing copy is logged + remembered (``last_store_sync``) and returns False;
+        a failing commit only sets ``commit_error`` (the copy is on the store). Never
+        fatal: the store is a durability aid, the island's truth stays the local journal."""
         if self.store is None:
             return False
         with self._record_lock:
@@ -755,8 +757,15 @@ class IslandController:
                 logging.getLogger(__name__).warning(
                     "checkpoint store sync (%s) to %s failed: %r", reason, self.store.root, exc)
                 return False
-            self.last_store_sync = {**info, "ok": True}
-            return True
+        commit_error = None
+        try:
+            self.store.commit()
+        except Exception as exc:  # noqa: BLE001 - the copy is written; Modal also commits at exit
+            commit_error = repr(exc)
+            logging.getLogger(__name__).warning(
+                "checkpoint store commit (%s) of %s failed: %r", reason, self.store.root, exc)
+        self.last_store_sync = {**info, "ok": True, "commit_error": commit_error}
+        return True
 
     def set_on_watchdog(self, handler: Callable[[str, str], None] | None) -> None:
         self._on_watchdog = handler

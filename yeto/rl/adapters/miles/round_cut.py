@@ -187,6 +187,8 @@ class RoundCutCheckpoint:
         into the state dir, then the state dir into the store (which commits)."""
         self._write_pointer({**info, CUT_KEY: cut_record})
         synced = self.controller.sync_checkpoint_store("round_cut", skip_if_recovery=True)
+        # the store sync commits itself (snapshot layout: in write_snapshot; flat layout:
+        # in the controller, outside its lock), also when it failed: recovery.save must not
         return {"synced": bool(synced), "committed": True}
 
     # ---------------------------------------------------------------- resume

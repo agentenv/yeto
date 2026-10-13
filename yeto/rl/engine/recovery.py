@@ -33,9 +33,12 @@ if TYPE_CHECKING:
 CUT_SCHEMA = "yeto.consistent_cut/v1"
 CUT_KEY = "consistent_cut"
 
-PREEMPT = "preempt"    # a reclaim / preemption notice
-PERIODIC = "periodic"  # a cadence (``--rl-cut-every``, the per-round rehearsal)
-MANUAL = "manual"      # our own stop or the last round (``final=True``)
+# Trigger of each save path: InFlightSaver.save (reclaim, via handle_notice) -> PREEMPT;
+# InFlightSaver.rehearse and RoundCutCheckpoint.save(final=False) -> PERIODIC;
+# RoundCutCheckpoint.save(final=True) (last round or our own stop) -> MANUAL.
+PREEMPT = "preempt"
+PERIODIC = "periodic"
+MANUAL = "manual"
 TRIGGERS = (PREEMPT, PERIODIC, MANUAL)
 
 

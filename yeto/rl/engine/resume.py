@@ -278,8 +278,9 @@ def restore_snapshot(store_root: Path, state_dir: Path, latest: Mapping[str, Any
 
 def sync_flat_mirror(store: CheckpointStore, state_dir: Path, info: Mapping[str, Any]) -> dict[str, Any]:
     """Flat layout (``--rl-elastic``): copy every file of ``state_dir`` into the store
-    root (each copy hash-checked), write :data:`FLAT_MANIFEST` last, then commit.
-    Returns the manifest (``info`` plus ``files``)."""
+    root (each copy hash-checked) and write :data:`FLAT_MANIFEST` last. Does NOT
+    commit: the caller commits outside any lock it holds (a Modal commit may take
+    minutes). Returns the manifest (``info`` plus ``files``)."""
     root = store.root
     root.mkdir(parents=True, exist_ok=True)
     files: dict[str, dict[str, Any]] = {}
@@ -294,7 +295,6 @@ def sync_flat_mirror(store: CheckpointStore, state_dir: Path, info: Mapping[str,
     tmp = root / (FLAT_MANIFEST + ".tmp")
     tmp.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
     tmp.replace(root / FLAT_MANIFEST)
-    store.commit()
     return manifest
 
 
