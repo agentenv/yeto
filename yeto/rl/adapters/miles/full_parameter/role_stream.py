@@ -30,10 +30,16 @@ from yeto.rl.adapters.miles.models.chunked_full_parameter import (
     StoredAuthoritativeFragment,
 )
 from yeto.rl.adapters.miles.models.dense_sweep_wire import MilesRayInboundChunkSink
+from yeto.rl.engine.policy_digest import PolicyDigest, TrainerResidentState, WeightsChanged
+from yeto.rl.engine.trainable_state import LAYOUT_FRAGMENTS, UnsupportedLayoutError
 from yeto.rl.local_learner import ComponentIdentity
 from yeto.rl.trajectory_evidence import TrajectoryBatchEvidence
 
 _LOWER_HEX = frozenset("0123456789abcdef")
+
+
+def _never_materialize(_policy_version: int):
+    raise UnsupportedLayoutError(LAYOUT_FRAGMENTS)
 
 
 def require_sha256(name: str, value: object) -> str:
@@ -265,6 +271,32 @@ class MilesFullParameterRoleStream:
         if self.current is None:
             raise RuntimeError(f"{self.config.algorithm} {self.config.role} stream is not initialized")
         return self.current.content_hash
+
+    def resident_state(self, policy_version: int) -> TrainerResidentState:
+        """The current cut as a trainer-resident policy handle (no tensors).
+
+        The policy tensor hash is the chunked cut identity, the payload hash its
+        content identity; fragments never leave the trainer (P0-D1).
+        """
+
+        if self.current is None or self.adapter is None:
+            raise RuntimeError(f"{self.config.algorithm} {self.config.role} stream is not initialized")
+        cut = self.current
+        payload_bytes = sum(fragment.numel * 4 for fragment in self.adapter.layout.fragments.fragments)
+        return TrainerResidentState(
+            layout=LAYOUT_FRAGMENTS,
+            base_model_revision=self.config.component.model_revision,
+            config_hash=self.config.component.config_hash,
+            layout_hash=cut.layout_hash,
+            policy_version=int(policy_version),
+            digest=PolicyDigest(cut.policy_hash, cut.content_hash, payload_bytes, ()),
+            materialize_fn=_never_materialize,
+            holds_fn=self._check_holds,
+        )
+
+    def _check_holds(self, state: TrainerResidentState) -> None:
+        if self.current is None or self.current.policy_hash != state.policy_tensor_hash():
+            raise WeightsChanged(f"{self.config.role} trainer no longer holds the published cut")
 
     @property
     def finalizing(self) -> bool:

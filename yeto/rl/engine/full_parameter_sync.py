@@ -29,7 +29,12 @@ import asyncio
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+from .driver import SyncBoundary, SyncStart
+
+if TYPE_CHECKING:
+    from .driver import IslandDriver
 
 LOCKSTEP_FIELDS = (
     "learner_id",
@@ -60,6 +65,9 @@ class RoleStream(Protocol):
     @property
     def finalizing(self) -> bool: ...
 
+    async def initialize(self, group: Any) -> None: ...
+    async def complete_local_round(self, *, rollout_id: int, trajectories: Any) -> Any: ...
+    def resident_state(self, policy_version: int) -> Any: ...
     def ready_submission_candidates(self) -> tuple[Any, ...]: ...
     def retain_candidate(self, candidate: Any) -> None: ...
     def release_candidate(self, candidate: Any) -> None: ...
@@ -357,7 +365,9 @@ class RolePairing:
         local_step = self.inflight[key].candidates["actor"].local_step
         return [k for k, pair in self.inflight.items() if pair.candidates["actor"].local_step == local_step]
 
-    async def _apply_pair(self, key: LogicalKey, pair: PairedSubmission, applied: dict[str, list[int]]) -> None:
+    async def _apply_pair(
+        self, key: LogicalKey, pair: PairedSubmission, applied: dict[str, list[int]]
+    ) -> None:
         step, fragment_id, _base = key
         if not pair.complete:
             raise RuntimeError("broadcast arrived before every paired PUSH was retained")
@@ -443,3 +453,132 @@ def _retained_replay(retained: Any, observed: Any | None) -> Any | None:
     ):
         raise RuntimeError("reconnect replay changed logical identity")
     return replace(retained, permit=observed.permit)
+
+
+# LEAVE reason of a clean finish (P5 code 0, FINISHED).  P5 owns the full code
+# table; this session only forwards the code it is closed with.
+REASON_FINISHED = 0
+
+
+class FullParameterSync:
+    """The ports ``SyncSession`` for full-parameter training (every algorithm).
+
+    The driver trains one local round, then :meth:`boundary` records it on
+    every role, submits and applies through :class:`RolePairing`, and returns
+    the actor's cut as a trainer-resident handle that the driver publishes
+    with its normal publication check.  A strict sweep profile blocks in the
+    boundary until the whole sweep is applied; a streaming profile never waits
+    for WAN I/O.
+
+    ``run`` executes a coroutine on the engine's event loop; ``groups`` maps a
+    role to its trainer group; ``trajectories(rollout_id)`` returns the
+    immutable trajectory evidence of the round the trainer just consumed.
+    """
+
+    def __init__(
+        self,
+        pairing: RolePairing,
+        *,
+        groups: Mapping[str, Any],
+        run: Any,
+        trajectories: Any,
+    ) -> None:
+        if set(groups) != set(pairing.streams):
+            raise ValueError("every trainable role needs exactly one trainer group")
+        self.pairing = pairing
+        self.groups = dict(groups)
+        self.run = run
+        self.trajectories = trajectories
+        self.terminal = False
+        self.finished = False
+        self.closed = False
+        self._driver: IslandDriver | None = None
+
+    @property
+    def actor(self) -> RoleStream:
+        return self.pairing.streams["actor"]
+
+    def start(self, driver: IslandDriver) -> SyncStart:
+        self._driver = driver
+        self.run(self.pairing.gather_roles(lambda role, stream: stream.initialize(self.groups[role])))
+        return SyncStart(state=self.actor.resident_state(0), rollout_id=0)
+
+    def boundary(self, driver: IslandDriver, *, rollout_id: int, stats: Any) -> SyncBoundary:
+        del stats
+        self.terminal = self.run(self._boundary(rollout_id))
+        versions = self.pairing.fragment_versions()
+        state = self.actor.resident_state(rollout_id + 1)
+        driver.emit(
+            "rl_full_parameter_round",
+            policy_version=rollout_id + 1,
+            terminal=self.terminal,
+            **{
+                "sync/fragment_versions": list(versions),
+                "sync/global_policy_hash": state.policy_tensor_hash(),
+                "sync/inflight_pairs": len(self.pairing.inflight),
+            },
+        )
+        return SyncBoundary(state=state, stop=self.terminal)
+
+    async def _boundary(self, rollout_id: int) -> bool:
+        pairing = self.pairing
+        trajectories = self.trajectories(rollout_id)
+        await pairing.gather_roles(
+            lambda _role, stream: stream.complete_local_round(
+                rollout_id=rollout_id, trajectories=trajectories
+            )
+        )
+        pairing.submit_ready()
+        await pairing.commit_staged_broadcasts()
+        if pairing.profile.sweep:
+            await self._wait_for_sweep()
+        if pairing.any_finalizing:
+            await pairing.finish_without_more_training()
+            return True
+        for stream in pairing.streams.values():
+            stream.discard_detached_submission_cut()
+        return False
+
+    async def _wait_for_sweep(self) -> None:
+        """Strict sweep: block until this local step's whole sweep is applied."""
+
+        pairing = self.pairing
+        deadline = time.monotonic() + pairing.profile.wait_timeout
+        while pairing.inflight and not pairing.any_finalizing:
+            if time.monotonic() >= deadline:
+                error = TimeoutError("dense sweep was not applied before the wait timeout")
+                pairing.fail_stop(error)
+                raise error
+            await asyncio.sleep(pairing.profile.poll_seconds)
+            pairing.submit_ready()
+            await pairing.commit_staged_broadcasts()
+
+    def is_final_round(self, driver: IslandDriver, *, rollout_id: int) -> bool:
+        del driver, rollout_id
+        return self.terminal
+
+    def published(self, driver: IslandDriver, *, rollout_id: int, policy_hash: str) -> None:
+        del rollout_id, policy_hash
+        if self.terminal:
+            self.finished = self.pairing.acknowledge_final()
+            driver.emit("rl_full_parameter_final_ack", acknowledged=self.finished)
+
+    def finish(self, driver: IslandDriver) -> None:
+        del driver
+        if not self.finished:
+            raise RuntimeError("full-parameter sync stopped before every role acknowledged its final cut")
+
+    def close(self, reason: int = REASON_FINISHED) -> None:
+        """Close every role once.  Full-parameter syncers run in legacy mode,
+        which has no LEAVE message, so the reason is only recorded."""
+
+        if self.closed:
+            return
+        self.closed = True
+        for stream in self.pairing.streams.values():
+            stream.close()
+        if self._driver is not None:
+            self._driver.emit(
+                "rl_sync_closed",
+                **{"sync/leave_reason": int(reason), "sync/finished": self.finished},
+            )

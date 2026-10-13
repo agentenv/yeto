@@ -12,6 +12,7 @@ from yeto.rl.adapters.miles.full_parameter.role_stream import (
     RoleSubmissionCandidate,
 )
 from yeto.rl.engine.full_parameter_sync import (
+    FullParameterSync,
     FullParameterSyncProfile,
     RolePairing,
     require_lockstep,
@@ -80,6 +81,19 @@ class _PairedRole:
 
     def close(self):
         self.closed = True
+
+    async def initialize(self, group):
+        self.group = group
+
+    def resident_state(self, policy_version):
+        versions = self.fragment_versions
+        return SimpleNamespace(
+            policy_version=policy_version,
+            policy_tensor_hash=lambda: f"cut-{versions}",
+        )
+
+    def discard_detached_submission_cut(self):
+        pass
 
     def acknowledge_final(self):
         self.final_acknowledged = True
@@ -420,3 +434,117 @@ def test_lockstep_requires_one_schedule_and_distinct_syncers():
         require_lockstep((base, base))
     with pytest.raises(ValueError, match="lockstep"):
         require_lockstep((base, SimpleNamespace(**{**vars(base), "syncer_addr": ("h", 2), "local_horizon": 3})))
+
+
+class _Driver:
+    def __init__(self):
+        self.events = []
+
+    def emit(self, event, **fields):
+        self.events.append((event, fields))
+
+
+def _session(*streams, **profile):
+    pairing = _pairing(*streams, **profile)
+    return FullParameterSync(
+        pairing,
+        groups={stream.role: f"{stream.role}-group" for stream in streams},
+        run=asyncio.run,
+        trajectories=lambda rollout_id: f"evidence-{rollout_id}",
+    )
+
+
+def test_session_streams_one_round_and_publishes_the_actor_cut():
+    events = []
+    actor = _PairedRole("actor", [_candidate("actor", 1)], events)
+    critic = _PairedRole("critic", [_candidate("critic", 1)], events)
+    session, driver = _session(actor, critic), _Driver()
+
+    start = session.start(driver)
+    assert (start.rollout_id, actor.group, critic.group) == (0, "actor-group", "critic-group")
+    boundary = session.boundary(driver, rollout_id=0, stats=None)
+
+    assert not boundary.stop
+    assert boundary.state.policy_version == 1
+    assert boundary.state.policy_tensor_hash() == "cut-(1, 0)"
+    assert ("train-boundary", "critic", 0) in events
+    name, fields = driver.events[-1]
+    assert name == "rl_full_parameter_round"
+    assert fields["sync/fragment_versions"] == [1, 0]
+
+
+class _SlowBroadcastRole(_PairedRole):
+    """Release broadcasts only after a few polls (a WAN round trip)."""
+
+    def __init__(self, *args, polls_before_release, **kwargs):
+        super().__init__(*args, release_broadcasts=False, **kwargs)
+        self.polls_before_release = polls_before_release
+
+    async def stage_available_broadcasts(self):
+        self.polls_before_release -= 1
+        self.release_broadcasts = self.polls_before_release <= 0
+        return await super().stage_available_broadcasts()
+
+
+def test_strict_sweep_boundary_blocks_until_the_sweep_is_applied():
+    actor = _SlowBroadcastRole("actor", [_sweep_candidate(1, 0), _sweep_candidate(2, 1)], [],
+                               polls_before_release=3)
+    session, driver = _session(actor, sweep=True, pipeline_depth=1), _Driver()
+    session.start(driver)
+
+    boundary = session.boundary(driver, rollout_id=0, stats=None)
+
+    assert actor.fragment_versions == (1, 2)
+    assert boundary.state.policy_tensor_hash() == "cut-(1, 2)"
+    assert not session.pairing.inflight
+
+
+def test_terminal_round_acknowledges_every_role_after_publication():
+    actor = _PairedRole("actor", [_candidate("actor", 3, base_version=1), _candidate("actor", 4, base_version=2)], [])
+    critic = _PairedRole("critic", [_candidate("critic", 3, base_version=1), _candidate("critic", 4, base_version=2)], [])
+    actor.fragment_versions = critic.fragment_versions = (1, 2)
+    actor.finalizing = critic.finalizing = True
+    session, driver = _session(actor, critic), _Driver()
+    session.start(driver)
+
+    boundary = session.boundary(driver, rollout_id=2, stats=None)
+    assert boundary.stop and session.is_final_round(driver, rollout_id=2)
+    with pytest.raises(RuntimeError, match="acknowledged its final cut"):
+        session.finish(driver)
+    session.published(driver, rollout_id=3, policy_hash="x")
+    session.finish(driver)
+    assert actor.final_acknowledged and critic.final_acknowledged
+
+
+def test_close_closes_every_role_once_and_records_the_reason():
+    actor = _PairedRole("actor", [], [])
+    critic = _PairedRole("critic", [], [])
+    session, driver = _session(actor, critic), _Driver()
+    session.start(driver)
+
+    session.close(5)
+    session.close(0)
+
+    assert actor.closed and critic.closed
+    assert [e for e in driver.events if e[0] == "rl_sync_closed"] == [
+        ("rl_sync_closed", {"sync/leave_reason": 5, "sync/finished": False})
+    ]
+
+
+def test_fragment_resident_state_never_materializes():
+    from yeto.rl.engine.policy_digest import PolicyDigest, TrainerResidentState
+    from yeto.rl.engine.trainable_state import UnsupportedLayoutError
+
+    state = TrainerResidentState(
+        layout="fragments",
+        base_model_revision="r",
+        config_hash="c",
+        layout_hash="l",
+        policy_version=1,
+        digest=PolicyDigest("p" * 64, "q" * 64, 8, ()),
+        materialize_fn=lambda _version: pytest.fail("fragments must not materialize"),
+    )
+    assert state.policy_tensor_hash() == "p" * 64
+    assert state.payload_digest == ("q" * 64, 8)
+    with pytest.raises(UnsupportedLayoutError):
+        state.materialize()
