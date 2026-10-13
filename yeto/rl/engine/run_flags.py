@@ -556,7 +556,7 @@ _SCHEDULING = (
     cli_flag("--rl-island-contract-sha256", default=None,
              type=sha256_hex_arg,
              help="secret-handling-hardening: island contract (backend identity bound to "
-             "the LR schedule) pinned by the head; the syncer refuses islands whose "
+             "the LR schedule and the AlgorithmSpec hash) pinned by the head; the syncer refuses islands whose "
              "contract differs, even when they connect first. Default: first island decides"),
     shared_flag("--rl-max-policy-age", type=int, default=0,
                 help="agentic-rollout-utilization: how many published policy versions a "

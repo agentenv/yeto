@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 
 import torch
 
-from .engine.backend_identity import island_contract_sha256
+from .engine.backend_identity import config_island_contract_sha256
 from ..protocol import DTYPE_F32, FinalManifest, PullRequest, SyncerClient
 from ..tensor_io import (
     apply_fragment,
@@ -44,6 +44,9 @@ class DecoupledBridgeConfig:
     # syncer compares (HELLO / JOIN), so islands with different LR schedules
     # are refused.  None = not declared (identity only).
     lr_schedule_sha256: str | None = None
+    # rl-code-quality-cleanup 4.8: AlgorithmSpec.sha256() of the island, the
+    # third part of that identity.  None = not declared.
+    algorithm_spec_sha256: str | None = None
     # 7.7c: "<vendor>-<card>" (yeto.hw.catalog); sent in HELLO / JOIN so the
     # syncer refuses another card type by name. None = not declared.
     compat_group: str | None = None
@@ -141,9 +144,8 @@ class DecoupledRlBridge:
             self.layout,
             dtype=DTYPE_F32,
             num_streams=config.wan_streams,
-            session_contract_hash=_session_contract(self.layout, island_contract_sha256(
-                config.backend_identity_sha256, getattr(config, "lr_schedule_sha256", None),
-                test_salt=_identity_test_salt())),
+            session_contract_hash=_session_contract(
+                self.layout, config_island_contract_sha256(config)),
             compat_group=getattr(config, "compat_group", None),
             max_reconnects=(None if config.learner_budget_steps is not None else 0),
         )
@@ -625,10 +627,3 @@ def _session_contract(layout, identity_sha256: str | None) -> bytes | None:
     from yeto.rl.engine.backend_identity import session_contract_hash
 
     return session_contract_hash(layout_fingerprint(layout), identity_sha256)
-
-
-def _identity_test_salt():
-    """launch-preflight-guards 3.3: negative-test island salt (None normally)."""
-    from yeto.island_overrides import identity_test_salt
-
-    return identity_test_salt()

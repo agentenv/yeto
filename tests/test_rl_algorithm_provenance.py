@@ -958,3 +958,18 @@ def test_every_ports_island_gets_the_echo_flag_legacy_does_not():
     assert "--rl-echo-events" not in _island_run(_launcher_args("legacy", gpu="modal:1xa100"))
     args = rl_learner.parse_args(_learner_argv(("--rl-echo-events",)))
     assert args.rl_echo_events
+
+
+def test_algorithm_hash_ignores_placement_capabilities():
+    """rl-code-quality-cleanup 4.8 / rl-mixed-island-placement Q4: the launcher adds
+    the partitioned-serial capability only for fixed-partition, but the expected
+    AlgorithmSpec hash (part of the island contract) must not change with it."""
+    from yeto.launcher import _prepare_ports_algorithm
+
+    hashes = []
+    for placement in ("colocated", "fixed-partition"):
+        args = _launcher_args("ports", gpu="aws:2xa100@us-east-1")
+        args.rl_placement = placement
+        _prepare_ports_algorithm(args, "ports")
+        hashes.append(args.rl_expected_algorithm_sha256)
+    assert hashes[0] == hashes[1]

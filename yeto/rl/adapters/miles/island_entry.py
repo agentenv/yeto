@@ -2346,6 +2346,8 @@ def run_miles(
             )
             or ()
         )
+    # 4.8: part of the island contract; placement capabilities stay out of it.
+    algorithm_spec_sha256 = None if ports_algorithm is None else ports_algorithm.sha256()
     if yeto_policy_sync:
         if full_parameter_sync:
             from yeto.provenance import file_sha256
@@ -2508,6 +2510,7 @@ def run_miles(
                 learner_budget_steps=miles_args.yeto_rl_learner_budget_steps,
                 backend_identity_sha256=_backend_identity_sha256(args),
                 lr_schedule_sha256=miles_lr_schedule_sha256(miles_args),
+                algorithm_spec_sha256=algorithm_spec_sha256,
                 compat_group=_island_compat_group(args),
             )
         else:
@@ -2528,6 +2531,7 @@ def run_miles(
                 send_initial_params=not getattr(args, "eval_only", False),
                 backend_identity_sha256=_backend_identity_sha256(args),
                 lr_schedule_sha256=miles_lr_schedule_sha256(miles_args),
+                algorithm_spec_sha256=algorithm_spec_sha256,
                 compat_group=_island_compat_group(args),
             )
             if getattr(args, "rl_island_scheduling", "legacy") == "elastic":
