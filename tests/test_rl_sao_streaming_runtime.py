@@ -583,3 +583,54 @@ def test_full_parameter_island_accepts_a_policy_age_limit():
 
     args = SimpleNamespace(eval_only=False, rl_max_policy_age=1)
     island_entry._check_full_parameter_sync(args, rl_engine="ports", yeto_policy_sync=True)
+
+
+def test_context_schema_label_2_still_writes_trajectory_evidence_schema_4(tmp_path):
+    """The context's ``schema_version`` (2) is an attested layout label only."""
+
+    from yeto.rl.adapters.miles.full_parameter.evidence import (
+        persist_published_round_evidence,
+    )
+    from yeto.rl.engine.policy_versions import PublishedPolicies
+    from yeto.rl.harness.codex import reward
+    from yeto.rl.trajectory_evidence import (
+        read_trajectory_batch_evidence,
+        trajectory_batch_evidence_path,
+    )
+
+    runtime, evidence = _load(tmp_path)
+    args = _args()
+    bind_sao_streaming_runtime(args, runtime)
+    assert args.yeto_rl_trajectory_evidence_schema_version == 2
+    args.yeto_rl_reward_sha256 = "b" * 64
+    outcome = {
+        "schema": 1,
+        "status": "completed",
+        "episode_id": "episode-0",
+        "task_id": "CVE-2026-0000",
+        "reward": 1.0,
+        "passed": True,
+        "class": None,
+        reward.INFRASTRUCTURE_503_RETRIES_KEY: 0,
+    }
+    sample = SimpleNamespace(
+        group_index=0,
+        index=0,
+        status=SimpleNamespace(value="completed"),
+        metadata={reward.OUTCOME_KEY: outcome},
+        reward=1.0,
+        tokens=[1, 2, 3],
+        response_length=2,
+        rollout_log_probs=[-0.1, -0.2],
+        weight_versions=[
+            SimpleNamespace(spans=[SimpleNamespace(version="0", abs_start=1, abs_end=3)])
+        ],
+    )
+
+    persist_published_round_evidence(
+        args, [[sample]], "yeto:0:" + "a" * 64, PublishedPolicies.from_dict({"0": "a" * 64})
+    )
+
+    path = trajectory_batch_evidence_path(evidence, 0)
+    assert json.loads(path.read_text())["schema"] == 4
+    assert read_trajectory_batch_evidence(path).schema_version == 4

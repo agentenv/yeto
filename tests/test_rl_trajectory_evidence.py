@@ -1,5 +1,7 @@
 import json
-from dataclasses import asdict, replace
+import shutil
+from dataclasses import asdict
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -185,61 +187,43 @@ def test_outcome_hashes_ignore_legacy_mac_field_and_reward_key_env(monkeypatch):
     assert with_mac == plain
 
 
-def _rewrite_as(evidence, schema_version: int):
-    """Re-encode schema 3 evidence in an older layout, as old writers did."""
-
-    if schema_version == 1:
-        envelopes = tuple(
-            replace(
-                item,
-                evidence_kind="secrlenv",
-                active_token_count=None,
-                loss_mask_hash=None,
-                active_token_ids_hash=None,
-                active_behavior_logprobs_hash=None,
-            )
-            for item in evidence.envelopes
-        )
-        trained_tokens = sum(item.response_token_count for item in envelopes)
-    else:
-        envelopes, trained_tokens = evidence.envelopes, evidence.trained_tokens
-    batch_hash = trajectory_evidence._envelope_batch_hash(
-        envelopes,
-        trained_tokens,
-        schema_version=schema_version,
-        evidence_kind=evidence.evidence_kind,
-    )
-    payload = {
-        "schema": schema_version,
-        "rollout_id": evidence.rollout_id,
-        "behavior_policy_hash": evidence.behavior_policy_hash,
-        "input_batch_hash": batch_hash,
-        "trained_tokens": trained_tokens,
-        "envelopes": [
-            trajectory_evidence._envelope_mapping(item, schema_version)
-            for item in envelopes
-        ],
-    }
-    if schema_version == 2:
-        payload["evidence_kind"] = evidence.evidence_kind
-    return payload
+_FIXTURES = Path(__file__).parent / "fixtures" / "trajectory_evidence"
 
 
-@pytest.mark.parametrize("schema_version", [1, 2])
-def test_signed_era_evidence_is_still_readable_by_structure(tmp_path, schema_version):
-    payload = _rewrite_as(_batch(), schema_version)
+def _private_copy(tmp_path: Path, name: str) -> Path:
+    """Readers require a private file; git does not keep the mode."""
+
     root = tmp_path / "private"
     root.mkdir(mode=0o700)
     path = root / "rollout-00000000.json"
-    path.write_text(json.dumps(payload))
+    shutil.copyfile(_FIXTURES / name, path)
     path.chmod(0o600)
+    return path
+
+
+@pytest.mark.parametrize(
+    ("name", "schema_version", "evidence_kind", "envelopes"),
+    [
+        ("schema1-secrlenv.json", 1, "secrlenv", 2),
+        ("schema2-tbench.json", 2, "terminal-bench-2.1", 2),
+    ],
+)
+def test_signed_era_evidence_written_by_old_code_is_still_readable(
+    tmp_path, name, schema_version, evidence_kind, envelopes
+):
+    # Fixtures were written by commit f2db57f8 (signed rewards); see
+    # tests/fixtures/trajectory_evidence/generate_signed_era.py.
+    path = _private_copy(tmp_path, name)
+    raw = json.loads(path.read_text())
 
     evidence = read_trajectory_batch_evidence(path)
     assert evidence.schema_version == schema_version
-    assert evidence.input_batch_hash == payload["input_batch_hash"]
+    assert evidence.evidence_kind == evidence_kind
+    assert len(evidence.envelopes) == envelopes
+    assert evidence.input_batch_hash == raw["input_batch_hash"]
 
-    payload["envelopes"][0]["reward"] = 0.0
-    path.write_text(json.dumps(payload))
+    raw["envelopes"][0]["reward"] = 1.0 - raw["envelopes"][0]["reward"]
+    path.write_text(json.dumps(raw))
     with pytest.raises(ValueError, match="batch hash changed"):
         read_trajectory_batch_evidence(path)
 
@@ -255,5 +239,5 @@ def test_unknown_schema_is_rejected(tmp_path):
 
 def test_schema_3_records_every_layered_field():
     item = _batch().envelopes[0]
-    assert set(asdict(item)) == set(trajectory_evidence._V2_ENVELOPE_FIELDS)
+    assert set(asdict(item)) == set(trajectory_evidence._LAYERED_ENVELOPE_FIELDS)
     assert item.active_token_count == item.response_token_count

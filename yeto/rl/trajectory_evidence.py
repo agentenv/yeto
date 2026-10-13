@@ -58,7 +58,7 @@ _LEGACY_ENVELOPE_FIELDS = (
     "reward_contract_hash",
     "cleanup_evidence_hash",
 )
-_V2_ENVELOPE_FIELDS = frozenset(field.name for field in fields(TrajectoryEnvelope))
+_LAYERED_ENVELOPE_FIELDS = frozenset(field.name for field in fields(TrajectoryEnvelope))
 
 BehaviorPolicyOf = Callable[[Sequence[Any]], tuple[int, str]]
 """The (version, weight hash) of the policy that generated one logical
@@ -461,10 +461,7 @@ def _verified_outcome(
     metadata: Mapping[str, Any], evidence_kind: str
 ) -> _VerifiedOutcome:
     if evidence_kind == "terminal-bench-2.1":
-        if any(
-            key in metadata
-            for key in ("secrlenv_trusted_outcome",)
-        ):
+        if "secrlenv_trusted_outcome" in metadata:
             raise ValueError("trajectory metadata mixes benchmark evidence kinds")
         from .tbench_outcome import canonical_outcome, verified_outcome
 
@@ -477,10 +474,7 @@ def _verified_outcome(
             canonical=canonical_outcome(outcome),
         )
 
-    if any(
-        key in metadata
-        for key in ("tbench_trusted_outcome",)
-    ):
+    if "tbench_trusted_outcome" in metadata:
         raise ValueError("trajectory metadata mixes benchmark evidence kinds")
     from yeto.rl.harness.codex.reward import (
         CLEANUP_ERROR_STATUS,
@@ -675,7 +669,7 @@ def _envelope_from_mapping(value: Any, schema_version: int) -> TrajectoryEnvelop
     expected = (
         frozenset(_LEGACY_ENVELOPE_FIELDS)
         if schema_version == _LEGACY_SCHEMA
-        else _V2_ENVELOPE_FIELDS
+        else _LAYERED_ENVELOPE_FIELDS
     )
     if not isinstance(value, dict) or set(value) != expected:
         raise ValueError("trajectory evidence item fields are malformed")
