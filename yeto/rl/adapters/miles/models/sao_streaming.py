@@ -1033,7 +1033,7 @@ class MilesSaoStreamingPolicySync:
             or self.published_actor_hash != self.actor.content_hash
         ):
             raise RuntimeError("Miles called SAO streaming outside its safe boundary")
-        from yeto.rl.adapters.miles.legacy.engine import get_current_published_policy_identity
+        from yeto.rl.adapters.miles.publish import get_current_published_policy_identity
 
         if get_current_published_policy_identity(
             self.args,
@@ -1607,7 +1607,7 @@ class MilesSaoStreamingPolicySync:
             raise RuntimeError(
                 "rollout process installed the wrong SAO policy identity"
             )
-        from yeto.rl.adapters.miles.legacy.engine import set_current_published_policy_identity
+        from yeto.rl.adapters.miles.publish import set_current_published_policy_identity
 
         set_current_published_policy_identity(
             self.args,

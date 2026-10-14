@@ -19,6 +19,7 @@ import yeto.rl.core as core_module
 from yeto.fragments import MERGE_AVG
 from yeto.protocol import BcastFragment, FinalFragment, FinalManifest, PullRequest
 from yeto.rl.adapters.miles.legacy import engine as miles
+from yeto.rl.adapters.miles.models import rollout_legacy_port as rollout_port
 from yeto.rl.bridge import BridgeConfig, StrictRlBridge
 from yeto.rl.core import (
     CanonicalTensorSpec,
@@ -254,7 +255,7 @@ def test_generate_rollout_preserves_the_miles_evaluation_boundary(monkeypatch, c
     monkeypatch.setitem(sys.modules, "miles.rollout.sglang_rollout", upstream)
     events = []
     monkeypatch.setattr(
-        miles,
+        rollout_port,
         "_append_rl_event",
         lambda _args, event: events.append(event),
     )
@@ -285,12 +286,12 @@ def test_generate_rollout_preserves_the_miles_evaluation_boundary(monkeypatch, c
         )
         return output, {}
 
-    monkeypatch.setattr(miles, "_run_rollout_with_metrics", run)
+    monkeypatch.setattr(rollout_port, "_run_rollout_with_metrics", run)
     args = SimpleNamespace(yeto_rl_eval_policy_version=9)
     data_source = object()
 
     with caplog.at_level(logging.INFO, logger="miles.rollout.sglang_rollout"):
-        assert miles.generate_rollout(args, 7, data_source, evaluation=True) is output
+        assert rollout_port.generate_rollout(args, 7, data_source, evaluation=True) is output
     assert observed == {
         "generate": sentinel,
         "args": args,
@@ -329,7 +330,7 @@ def test_eval_scalars_reject_aborted_episode_evidence():
     )
 
     with pytest.raises(RuntimeError, match="aborted sample"):
-        miles._attach_eval_scalar_metrics(output)
+        rollout_port._attach_eval_scalar_metrics(output)
 
 
 @pytest.mark.parametrize(
@@ -918,7 +919,7 @@ def test_miles_rollout_lifecycle_metrics_use_real_task_completion(monkeypatch):
         asyncio.run(run())
         return object()
 
-    _, lifecycle = miles._run_rollout_with_metrics(
+    _, lifecycle = rollout_port._run_rollout_with_metrics(
         generate, SimpleNamespace(), 0, object(), False
     )
     assert lifecycle["active"] == 0
@@ -965,14 +966,14 @@ def test_generate_rollout_rejects_invalid_policy_versions_before_train(
     ]
     output = SimpleNamespace(samples=[samples], metrics={})
     monkeypatch.setattr(
-        miles,
+        rollout_port,
         "_run_rollout_with_metrics",
         lambda *_args, **_kwargs: (
             output,
             {"active": 0, "peak_active": 0, "cancelled": 0, "durations": []},
         ),
     )
-    monkeypatch.setattr(miles, "_save_completed_groups", lambda *_args: None)
+    monkeypatch.setattr(rollout_port, "_save_completed_groups", lambda *_args: None)
     event_tape = tmp_path / "events.jsonl"
     args = SimpleNamespace(
         n_samples_per_prompt=2,
@@ -983,7 +984,7 @@ def test_generate_rollout_rejects_invalid_policy_versions_before_train(
     )
 
     with pytest.raises(StrictRlInvariantError) as failure:
-        miles.generate_rollout(args, 3, SimpleNamespace(buffer=[]))
+        rollout_port.generate_rollout(args, 3, SimpleNamespace(buffer=[]))
 
     assert failure.value.metric == "mixed_version_group_count"
     assert (
@@ -1019,14 +1020,14 @@ def test_generate_rollout_accepts_the_exact_decoupled_snapshot_token(
     ]
     output = SimpleNamespace(samples=[samples], metrics={})
     monkeypatch.setattr(
-        miles,
+        rollout_port,
         "_run_rollout_with_metrics",
         lambda *_args, **_kwargs: (
             output,
             {"active": 0, "peak_active": 0, "cancelled": 0, "durations": []},
         ),
     )
-    monkeypatch.setattr(miles, "_save_completed_groups", lambda *_args: None)
+    monkeypatch.setattr(rollout_port, "_save_completed_groups", lambda *_args: None)
     args = SimpleNamespace(
         n_samples_per_prompt=2,
         rollout_batch_size=1,
@@ -1037,7 +1038,7 @@ def test_generate_rollout_accepts_the_exact_decoupled_snapshot_token(
         yeto_rl_learner_id=0,
     )
 
-    result = miles.generate_rollout(args, 3, SimpleNamespace(buffer=[]))
+    result = rollout_port.generate_rollout(args, 3, SimpleNamespace(buffer=[]))
 
     assert result is output
 
@@ -1123,7 +1124,7 @@ def test_island_checkpoint_restores_only_complete_same_policy_groups(
             self.buffer.extend(groups)
 
     source = DataSource([complete, incomplete])
-    miles._save_completed_groups(args, 3, 4, source, {"reward": 1.5})
+    rollout_port._save_completed_groups(args, 3, 4, source, {"reward": 1.5})
     assert source.buffer == [complete]
     payload = torch.load(checkpoint, weights_only=True)
     for name, value in {
@@ -1143,15 +1144,15 @@ def test_island_checkpoint_restores_only_complete_same_policy_groups(
     assert not list(tmp_path.glob(".island.pt.tmp-*"))
 
     restored = DataSource()
-    miles._restore_completed_groups(args, 3, restored)
+    rollout_port._restore_completed_groups(args, 3, restored)
     assert len(restored.buffer) == 1
     args.seed = 8
     incompatible = DataSource()
-    miles._restore_completed_groups(args, 3, incompatible)
+    rollout_port._restore_completed_groups(args, 3, incompatible)
     assert incompatible.buffer == []
     args.seed = 7
     stale = DataSource()
-    miles._restore_completed_groups(args, 4, stale)
+    rollout_port._restore_completed_groups(args, 4, stale)
     assert stale.buffer == []
 
     used = [sample("completed", 3, 10), sample("completed", 3, 11)]
@@ -1161,7 +1162,7 @@ def test_island_checkpoint_restores_only_complete_same_policy_groups(
 
     def generate(_args, _rollout_id, data_source, evaluation=False):
         assert not evaluation
-        miles.queue_completed_groups(
+        rollout_port.queue_completed_groups(
             _args, [used, unused, incomplete], data_source.get_samples
         )
         return SimpleNamespace(samples=[used], metrics={"reward": 2.0})
@@ -1183,7 +1184,7 @@ def test_island_checkpoint_restores_only_complete_same_policy_groups(
     checkpoint.unlink()
     source = DataSource()
 
-    miles.generate_rollout(args, 3, source)
+    rollout_port.generate_rollout(args, 3, source)
 
     assert source.buffer == [unused]
     payload = torch.load(checkpoint, weights_only=True)
@@ -1234,8 +1235,7 @@ def test_queue_completed_groups_filters_zero_variance_groups_and_records_replace
         n_samples_per_prompt=2,
         dynamic_sampling_filter_path="test.filter",
     )
-    monkeypatch.setattr(
-        miles,
+    monkeypatch.setattr(rollout_port,
         "_dynamic_sampling_filter",
         lambda _args: (
             lambda _args, group: SimpleNamespace(
@@ -1248,7 +1248,7 @@ def test_queue_completed_groups_filters_zero_variance_groups_and_records_replace
     )
     source = DataSource()
 
-    miles.queue_completed_groups(args, [kept, dropped], source.get_samples)
+    rollout_port.queue_completed_groups(args, [kept, dropped], source.get_samples)
 
     assert source.buffer == [kept]
     assert args._yeto_dynamic_sampling_stats == {
@@ -1294,7 +1294,7 @@ def test_secrlenv_proxy_retries_same_task_without_advancing_signed_batch():
         yeto_rl_secrlenv_max_infrastructure_replacements=1,
     )
     source = Source()
-    proxy = miles._SecRLEnvRetryDataSource(args, source)
+    proxy = rollout_port._SecRLEnvRetryDataSource(args, source)
 
     initial = proxy.get_samples(21)
     failed = initial[4]
@@ -1332,10 +1332,10 @@ def test_secrlenv_proxy_retries_same_task_without_advancing_signed_batch():
     selected = [group for group in initial if group is not failed] + replacement
     for group in selected[:-1]:
         group[0].status = SimpleNamespace(value="completed")
-    miles._validate_rollout_groups(selected, 20, 1)
+    rollout_port._validate_rollout_groups(selected, 20, 1)
 
     with pytest.raises(
-        miles.SecRLEnvReplacementExhausted,
+        rollout_port.SecRLEnvReplacementExhausted,
         match="budget was exhausted",
     ):
         proxy.request_retry(
@@ -1366,10 +1366,10 @@ def test_rollout_group_validation_accepts_complete_compaction_trajectory():
             )
         )
 
-    miles._validate_rollout_groups([[segments]], groups=1, samples=1)
+    rollout_port._validate_rollout_groups([[segments]], groups=1, samples=1)
 
     with pytest.raises(RuntimeError, match="malformed compaction segments"):
-        miles._validate_rollout_groups([[segments[:2]]], groups=1, samples=1)
+        rollout_port._validate_rollout_groups([[segments[:2]]], groups=1, samples=1)
 
 
 def test_secrlenv_terminal_filter_error_drains_pinned_rollout(monkeypatch):
@@ -1377,7 +1377,7 @@ def test_secrlenv_terminal_filter_error_drains_pinned_rollout(monkeypatch):
     cleanup = []
 
     async def generate_rollout_async(*_args, **_kwargs):
-        raise miles.SecRLEnvReplacementExhausted(
+        raise rollout_port.SecRLEnvReplacementExhausted(
             "SecRLEnv rollout replacement budget was exhausted"
         )
 
@@ -1401,8 +1401,8 @@ def test_secrlenv_terminal_filter_error_drains_pinned_rollout(monkeypatch):
     monkeypatch.setitem(sys.modules, "miles.utils", utils)
     monkeypatch.setitem(sys.modules, "miles.utils.async_utils", async_utils)
 
-    with pytest.raises(miles.SecRLEnvReplacementExhausted):
-        miles._secrlenv_generate_with_cleanup(
+    with pytest.raises(rollout_port.SecRLEnvReplacementExhausted):
+        rollout_port._secrlenv_generate_with_cleanup(
             SimpleNamespace(),
             7,
             SimpleNamespace(get_samples=lambda _count: [], add_samples=lambda _groups: None),
@@ -1441,10 +1441,10 @@ def test_secrlenv_untrusted_reward_error_is_sanitized_and_drained(monkeypatch):
     monkeypatch.setitem(sys.modules, "miles.utils.async_utils", async_utils)
 
     with pytest.raises(
-        miles.SecRLEnvUntrustedEvidence,
+        rollout_port.SecRLEnvUntrustedEvidence,
         match="rollout evidence authentication failed",
     ) as captured:
-        miles._secrlenv_generate_with_cleanup(
+        rollout_port._secrlenv_generate_with_cleanup(
             SimpleNamespace(),
             9,
             SimpleNamespace(
@@ -1463,7 +1463,7 @@ def test_secrlenv_terminal_cleanup_has_outer_deadline(monkeypatch):
     cleanup_started = []
 
     async def generate_rollout_async(*_args, **_kwargs):
-        raise miles.SecRLEnvReplacementExhausted(
+        raise rollout_port.SecRLEnvReplacementExhausted(
             "SecRLEnv rollout replacement budget was exhausted"
         )
 
@@ -1488,16 +1488,16 @@ def test_secrlenv_terminal_cleanup_has_outer_deadline(monkeypatch):
     monkeypatch.setitem(sys.modules, "miles.utils", utils)
     monkeypatch.setitem(sys.modules, "miles.utils.async_utils", async_utils)
     monkeypatch.setattr(
-        miles,
+        rollout_port,
         "_SECRLENV_TERMINAL_CLEANUP_TIMEOUT_SECONDS",
         0.01,
     )
 
     with pytest.raises(
-        miles.SecRLEnvRolloutCleanupError,
+        rollout_port.SecRLEnvRolloutCleanupError,
         match="terminal rollout cleanup failed",
     ) as captured:
-        miles._secrlenv_generate_with_cleanup(
+        rollout_port._secrlenv_generate_with_cleanup(
             SimpleNamespace(),
             10,
             SimpleNamespace(
@@ -1517,7 +1517,7 @@ def test_secrlenv_terminal_cleanup_rejects_episode_residue(monkeypatch):
     cleanup = []
 
     async def generate_rollout_async(*_args, **_kwargs):
-        raise miles.SecRLEnvReplacementExhausted(
+        raise rollout_port.SecRLEnvReplacementExhausted(
             "SecRLEnv rollout replacement budget was exhausted"
         )
 
@@ -1547,10 +1547,10 @@ def test_secrlenv_terminal_cleanup_rejects_episode_residue(monkeypatch):
     )
 
     with pytest.raises(
-        miles.SecRLEnvRolloutCleanupError,
+        rollout_port.SecRLEnvRolloutCleanupError,
         match="terminal rollout cleanup failed",
     ):
-        miles._secrlenv_generate_with_cleanup(
+        rollout_port._secrlenv_generate_with_cleanup(
             SimpleNamespace(),
             8,
             SimpleNamespace(get_samples=lambda _count: [], add_samples=lambda _groups: None),
@@ -1570,18 +1570,18 @@ def test_secrlenv_terminal_rollout_does_not_advance_checkpoint(monkeypatch):
     monkeypatch.setitem(sys.modules, "miles", package)
     monkeypatch.setitem(sys.modules, "miles.rollout", rollout)
     monkeypatch.setitem(sys.modules, "miles.rollout.sglang_rollout", upstream)
-    monkeypatch.setattr(miles, "_restore_completed_groups", lambda *_args: None)
+    monkeypatch.setattr(rollout_port, "_restore_completed_groups", lambda *_args: None)
     monkeypatch.setattr(
-        miles,
+        rollout_port,
         "_run_rollout_with_metrics",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            miles.SecRLEnvReplacementExhausted(
+            rollout_port.SecRLEnvReplacementExhausted(
                 "SecRLEnv rollout replacement budget was exhausted"
             )
         ),
     )
     saved = []
-    monkeypatch.setattr(miles, "_save_completed_groups", lambda *_args: saved.append(True))
+    monkeypatch.setattr(rollout_port, "_save_completed_groups", lambda *_args: saved.append(True))
     args = SimpleNamespace(
         n_samples_per_prompt=1,
         rollout_batch_size=1,
@@ -1593,8 +1593,8 @@ def test_secrlenv_terminal_rollout_does_not_advance_checkpoint(monkeypatch):
         yeto_rl_completed_groups_path="unused",
     )
 
-    with pytest.raises(miles.SecRLEnvReplacementExhausted):
-        miles.generate_rollout(args, 0, SimpleNamespace(buffer=[]))
+    with pytest.raises(rollout_port.SecRLEnvReplacementExhausted):
+        rollout_port.generate_rollout(args, 0, SimpleNamespace(buffer=[]))
 
     assert saved == []
 
@@ -1627,7 +1627,7 @@ def test_generate_rollout_records_drop_reasons_as_numeric_metrics(monkeypatch):
     monkeypatch.setitem(sys.modules, "miles", package)
     monkeypatch.setitem(sys.modules, "miles.rollout", rollout)
     monkeypatch.setitem(sys.modules, "miles.rollout.sglang_rollout", upstream)
-    monkeypatch.setattr(miles, "_restore_completed_groups", lambda *_args: None)
+    monkeypatch.setattr(rollout_port, "_restore_completed_groups", lambda *_args: None)
 
     def run(*_args):
         args._yeto_dynamic_sampling_stats = {
@@ -1643,14 +1643,14 @@ def test_generate_rollout_records_drop_reasons_as_numeric_metrics(monkeypatch):
             "durations": [],
         }
 
-    monkeypatch.setattr(miles, "_run_rollout_with_metrics", run)
+    monkeypatch.setattr(rollout_port, "_run_rollout_with_metrics", run)
     monkeypatch.setattr(
-        miles,
+        rollout_port,
         "_save_completed_groups",
         lambda _args, _policy, _next, _source, metrics: captured.update(metrics),
     )
 
-    miles.generate_rollout(args, 3, source)
+    rollout_port.generate_rollout(args, 3, source)
 
     assert captured["rl/dynamic_filter/drop_reason/zero_std_-1.0"] == 1.0
     assert all(isinstance(value, (int, float)) for value in captured.values())

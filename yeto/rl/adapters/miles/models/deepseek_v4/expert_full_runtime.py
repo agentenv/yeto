@@ -433,6 +433,31 @@ def _train_lr(metrics: Mapping[str, Any]) -> float | None:
     return _finite_train_metric(metrics, tuple(name for _group, name in groups))
 
 
+def round_stats_with_telemetry(
+    telemetry: object,
+    mean_kl: float | None,
+    ess_ratio: float | None,
+    clip_fraction: float | None,
+) -> tuple[float | None, float | None, float | None]:
+    """Round KL / ESS / clip fraction, preferring the typed DSV4 train telemetry.
+
+    Moved from the legacy policy sync (rl-code-quality-cleanup 1.6).  This
+    runtime has already reduced the metrics-owner dictionary to the closed,
+    scalar-only :class:`_TrainTelemetry` capsule; never forward the original
+    Miles record or inspect arbitrary keys.  ``None`` telemetry keeps the
+    given values; anything else that is not the capsule is refused.
+    """
+    if telemetry is None:
+        return mean_kl, ess_ratio, clip_fraction
+    if not isinstance(telemetry, _TrainTelemetry):
+        raise RuntimeError("Miles exported invalid typed training telemetry")
+    return (
+        telemetry.kl if telemetry.kl is not None else mean_kl,
+        telemetry.ess if telemetry.ess is not None else ess_ratio,
+        telemetry.clipfrac if telemetry.clipfrac is not None else clip_fraction,
+    )
+
+
 def _extract_train_telemetry(metrics: object) -> _TrainTelemetry | None:
     """Narrow Miles' rank-owner dictionary without retaining raw input."""
 

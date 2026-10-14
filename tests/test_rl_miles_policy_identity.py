@@ -3,6 +3,8 @@ from types import SimpleNamespace
 import pytest
 
 from yeto.rl.adapters.miles.legacy import engine as miles
+from yeto.rl.adapters.miles.models import rollout_legacy_port as rollout_port
+from yeto.rl.adapters.miles import publish
 
 POLICY_HASH = "a" * 64
 
@@ -16,32 +18,32 @@ def test_trajectory_evidence_requires_exact_current_published_policy_identity(
     )
 
     with pytest.raises(RuntimeError, match="no current published policy identity"):
-        miles._persist_trajectory_evidence(args, 3, ())
+        rollout_port._persist_trajectory_evidence(args, 3, ())
 
-    miles.set_current_published_policy_identity(
+    publish.set_current_published_policy_identity(
         args,
         policy_version=3,
         policy_hash=POLICY_HASH,
     )
     assert args.yeto_rl_policy_token == f"yeto:3:{POLICY_HASH}"
-    assert miles._policy_token_for_rollout(
+    assert rollout_port._policy_token_for_rollout(
         SimpleNamespace(
             yeto_rl_sync_preset="sao-streaming-full",
             yeto_rl_policy_token=args.yeto_rl_policy_token,
         ),
         3,
     ) == f"yeto:3:{POLICY_HASH}"
-    assert miles.get_current_published_policy_identity(
+    assert publish.get_current_published_policy_identity(
         args,
         expected_policy_version=3,
     ) == (3, POLICY_HASH)
     with pytest.raises(RuntimeError, match="does not match the rollout"):
-        miles._persist_trajectory_evidence(args, 4, ())
+        rollout_port._persist_trajectory_evidence(args, 4, ())
 
 
 def test_published_policy_identity_cannot_change_at_a_version_or_regress():
     args = SimpleNamespace()
-    miles.set_current_published_policy_identity(
+    publish.set_current_published_policy_identity(
         args,
         policy_version=3,
         policy_hash=POLICY_HASH,
@@ -49,13 +51,13 @@ def test_published_policy_identity_cannot_change_at_a_version_or_regress():
     original_token = args.yeto_rl_policy_token
 
     with pytest.raises(RuntimeError, match="hash changed"):
-        miles.set_current_published_policy_identity(
+        publish.set_current_published_policy_identity(
             args,
             policy_version=3,
             policy_hash="b" * 64,
         )
     with pytest.raises(RuntimeError, match="move backwards"):
-        miles.set_current_published_policy_identity(
+        publish.set_current_published_policy_identity(
             args,
             policy_version=2,
             policy_hash=POLICY_HASH,

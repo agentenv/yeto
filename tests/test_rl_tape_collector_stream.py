@@ -215,3 +215,16 @@ def test_tail_skips_sky_control_none_and_ends_when_the_stream_ends(monkeypatch, 
     assert calls == [("isl-l0", 7, True, False)]
     assert c.finalized and c.count == 2
     assert "[isl-l0] YETO_RL_EVENT" in capsys.readouterr().out
+
+
+def test_echo_needs_no_code_object_probe():
+    """rl-code-quality-cleanup 1.9: no runtime __code__ inspection decides the
+    tape writer; the shared writer goes through event_echo.append_record."""
+    import inspect
+
+    from yeto.rl.adapters.miles import island_entry
+    from yeto.rl.engine import events
+
+    assert "co_names" not in inspect.getsource(island_entry) and "__code__" not in inspect.getsource(island_entry)
+    assert not hasattr(island_entry, "_wrap_legacy_tape_writer")
+    assert "append_record" in inspect.getsource(events.append_tape_event)

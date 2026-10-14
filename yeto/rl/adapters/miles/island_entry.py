@@ -651,42 +651,15 @@ def install_event_echo() -> bool:
     if echo_enabled():
         return False
     enable_echo()
-    from yeto.rl.adapters.miles.legacy import engine as miles
-
-    if "append_record" not in miles._append_rl_event.__code__.co_names:
-        _wrap_legacy_tape_writer(miles)  # a writer not yet on append_record
+    # The tape writer (yeto.rl.engine.events.append_tape_event) writes through
+    # event_echo.append_record, so enabling the echo is enough; the old
+    # code-object probe for a pre-append_record writer is gone
+    # (rl-code-quality-cleanup 1.9).
     return True
 
 
-def _wrap_legacy_tape_writer(miles) -> None:
-    """Echo for a ``_append_rl_event`` that writes the file itself (pre
-    echo-writers patch): read back exactly the whole lines it appended."""
-
-    import threading
-
-    from yeto.rl.event_echo import PREFIX
-
-    original = miles._append_rl_event
-    lock = threading.Lock()
-
-    def echo(args, event):
-        with lock:
-            path = Path(args.yeto_rl_event_tape).expanduser()
-            before = path.stat().st_size if path.exists() else 0
-            original(args, event)
-            with path.open("rb") as handle:
-                handle.seek(before)
-                data = handle.read()
-        written = data[: data.rfind(b"\n") + 1].decode("utf-8")
-        for line in written.splitlines():
-            if line.strip():
-                print(PREFIX + line, flush=True)
-
-    miles._append_rl_event = echo
-
-
 def _append_ports_event(args, miles_args, event: dict) -> None:
-    from yeto.rl.adapters.miles.legacy.engine import _append_rl_event
+    from yeto.rl.engine.events import append_tape_event as _append_rl_event
 
     miles_args.yeto_rl_event_tape = args.event_tape
     miles_args.yeto_rl_learner_id = args.learner_id
@@ -1573,7 +1546,7 @@ def _legacy_miles_argv(config) -> list[str]:
         "--rollout-max-response-len", str(batch.rollout_max_response_len),
         "--rollout-function-path",
         (
-            "yeto.rl.adapters.miles.legacy.engine.generate_rollout"
+            "yeto.rl.adapters.miles.models.rollout_legacy_port.generate_rollout"
             if config.yeto_policy_sync
             else "miles.rollout.sglang_rollout.generate_rollout"
         ),
@@ -1600,7 +1573,7 @@ def _legacy_miles_argv(config) -> list[str]:
         values.extend(
             (
                 "--eval-function-path",
-                "yeto.rl.adapters.miles.legacy.engine.generate_rollout",
+                "yeto.rl.adapters.miles.models.rollout_legacy_port.generate_rollout",
                 "--eval-prompt-data",
                 evaluation.dataset_name,
                 evaluation.prompt_path,
@@ -1694,7 +1667,7 @@ def _legacy_miles_argv(config) -> list[str]:
         values.extend(
             (
                 "--rollout-all-samples-process-path",
-                "yeto.rl.adapters.miles.legacy.engine.queue_completed_groups",
+                "yeto.rl.adapters.miles.models.rollout_legacy_port.queue_completed_groups",
                 "--external-policy-sync-path",
                 policy_sync_path,
             )
@@ -2617,7 +2590,7 @@ def run_miles(
                 training_contract_hash
             )
             miles_args.external_policy_identity_setter_path = (
-                "yeto.rl.adapters.miles.legacy.engine.set_current_published_policy_identity"
+                "yeto.rl.adapters.miles.publish.set_current_published_policy_identity"
             )
             miles_args.yeto_rl_trajectory_evidence_dir = str(evidence_directory)
             miles_args.yeto_rl_trajectory_evidence_kind = "secrlenv"

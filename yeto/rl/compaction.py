@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -265,3 +265,74 @@ def run_episode(policy: Callable[[list[Message]], str], env: Environment,
         truncated = True
     return CompactionEpisode(rollout_id or uuid.uuid4().hex, segments, float(env.reward()),
                              compactions, truncated, summaries_ok, kept)
+
+
+def validate_compaction_segments(segments: Sequence[Any]) -> None:
+    """Check the compaction records of one segmented Miles trajectory
+    (moved from the legacy engine's rollout check, rl-code-quality-cleanup 1.5).
+
+    Every segment carries ``metadata`` with schema version 1, one shared
+    non-empty ``compaction_trajectory_id`` and one positive integer
+    ``compaction_context_budget``; ``compaction_segment_index`` runs 0..n-1 and
+    ``compaction_segment_type`` alternates execution/summary, ending on
+    execution; all segments keep one integer (group_index, index) identity.
+    Raises ``RuntimeError`` otherwise.
+    """
+    metadata = [getattr(segment, "metadata", None) for segment in segments]
+    trajectory_ids = {
+        value.get("compaction_trajectory_id")
+        for value in metadata
+        if isinstance(value, Mapping)
+    }
+    indices = [
+        value.get("compaction_segment_index")
+        if isinstance(value, Mapping)
+        else None
+        for value in metadata
+    ]
+    types = [
+        value.get("compaction_segment_type")
+        if isinstance(value, Mapping)
+        else None
+        for value in metadata
+    ]
+    context_budgets = {
+        value.get("compaction_context_budget")
+        for value in metadata
+        if isinstance(value, Mapping)
+    }
+    if (
+        len(trajectory_ids) != 1
+        or not all(
+            isinstance(value, str) and value for value in trajectory_ids
+        )
+        or indices != list(range(len(segments)))
+        or types != [
+            "execution" if value % 2 == 0 else "summary"
+            for value in range(len(segments))
+        ]
+        or types[-1] != "execution"
+        or any(
+            not isinstance(value, Mapping)
+            or value.get("compaction_schema_version") != 1
+            for value in metadata
+        )
+        or len(context_budgets) != 1
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value <= 0
+            for value in context_budgets
+        )
+    ):
+        raise RuntimeError("Miles returned malformed compaction segments")
+    identities = {
+        (getattr(segment, "group_index", None), getattr(segment, "index", None))
+        for segment in segments
+    }
+    if len(identities) != 1 or any(
+        isinstance(value, bool) or not isinstance(value, int)
+        for identity in identities
+        for value in identity
+    ):
+        raise RuntimeError("Miles compaction segments changed trajectory identity")

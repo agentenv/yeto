@@ -150,3 +150,39 @@ def test_linear_schedule_shorter_than_critic_steps_is_refused():
                        for p in launch_problems(spec, {**values, "lr_decay_iters": 24}))
     one = AlgorithmSpec(advantage={"estimator": "ppo"}, execution={"needs_critic": True})
     assert not any("critic_lr_horizon" in p for p in launch_problems(one, values))
+
+
+# -- rl-code-quality-cleanup 1.5: compaction record check lives in yeto.rl.compaction --
+def _segments(n=3, override=None):
+    from types import SimpleNamespace
+
+    out = []
+    for i in range(n):
+        meta = {"compaction_schema_version": 1, "compaction_trajectory_id": "t1",
+                "compaction_segment_index": i,
+                "compaction_segment_type": "execution" if i % 2 == 0 else "summary",
+                "compaction_context_budget": 4096}
+        meta.update((override or {}).get(i, {}))
+        out.append(SimpleNamespace(metadata=meta, group_index=2, index=5))
+    return out
+
+
+def test_validate_compaction_segments_accepts_and_refuses():
+    import pytest
+
+    from yeto.rl.compaction import validate_compaction_segments
+    from yeto.rl.adapters.miles.models import rollout_legacy_port
+
+    validate_compaction_segments(_segments())
+    for bad in (_segments(2),  # ends on a summary
+                _segments(3, {1: {"compaction_segment_index": 2}}),
+                _segments(3, {2: {"compaction_trajectory_id": "t2"}}),
+                _segments(3, {0: {"compaction_context_budget": 0}}),
+                _segments(3, {0: {"compaction_schema_version": 2}})):
+        with pytest.raises(RuntimeError, match="malformed compaction segments"):
+            validate_compaction_segments(bad)
+    moved = _segments()
+    moved[1].index = 6
+    with pytest.raises(RuntimeError, match="changed trajectory identity"):
+        validate_compaction_segments(moved)
+    assert rollout_legacy_port.validate_compaction_segments is validate_compaction_segments

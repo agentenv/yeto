@@ -234,7 +234,7 @@ class MilesFullParameterDenseSync:
             or rollout_id != self.current.policy_version
         ):
             raise RuntimeError("Miles called dense sync outside one active H=1 round")
-        from yeto.rl.adapters.miles.legacy.engine import get_current_published_policy_identity
+        from yeto.rl.adapters.miles.publish import get_current_published_policy_identity
 
         if get_current_published_policy_identity(
             self.args,
@@ -323,7 +323,7 @@ class MilesFullParameterDenseSync:
     ) -> None:
         if actor_model is not self.actor_model or self.current is None:
             raise RuntimeError("Miles published through the wrong dense actor group")
-        from yeto.rl.adapters.miles.legacy.engine import (
+        from yeto.rl.adapters.miles.publish import (
             _policy_token,
         )
 
@@ -398,7 +398,7 @@ class MilesFullParameterDenseSync:
         self.current = None
 
     def _append_event(self, event: dict[str, Any]) -> None:
-        from yeto.rl.adapters.miles.legacy.engine import _append_rl_event
+        from yeto.rl.engine.events import append_tape_event as _append_rl_event
 
         _append_rl_event(self.args, event)
 
@@ -557,7 +557,7 @@ class MilesFullParameterDenseSync:
         )
         if identity != (policy_version, policy_hash):
             raise RuntimeError("rollout process installed the wrong policy identity")
-        from yeto.rl.adapters.miles.legacy.engine import set_current_published_policy_identity
+        from yeto.rl.adapters.miles.publish import set_current_published_policy_identity
 
         set_current_published_policy_identity(
             self.args,
