@@ -33,6 +33,7 @@ from .buffer_rollout import (
     SampleBufferRolloutError,
     open_buffer,
     register_reader,
+    renumber_group,
 )
 
 
@@ -51,7 +52,8 @@ class BufferWriterRolloutFn(InferenceRolloutFn):
         sampler_id = os.environ.get(SAMPLER_ID_ENV)
         if not sampler_id:
             raise SampleBufferRolloutError(f"{SAMPLER_ID_ENV} is not set")
-        # a per-process suffix: a restarted sampler may repeat Miles group indexes
+        # a per-process suffix: a restarted sampler repeats Miles group indexes, so the
+        # sample ids stay unique; the trainer renumbers groups by buffer position
         self._writer = GroupWriter(open_buffer(), f"{sampler_id}-{uuid.uuid4().hex[:8]}")
 
     async def _call_train(self, input: Any) -> Any:
@@ -78,6 +80,7 @@ class BufferReaderRolloutFn(BaseRolloutFn):
         if age is None:
             raise SampleBufferRolloutError(f"{MAX_POLICY_AGE_ENV} is not set")
         self.groups = int(args.rollout_batch_size)
+        self.samples_per_group = int(args.n_samples_per_prompt)
         self.reader = BatchReader(
             open_buffer(batch_size=self.groups), max_policy_age=int(age),
             wait_s=float(os.environ.get(WAIT_ENV, DEFAULT_WAIT_S)),
@@ -90,5 +93,7 @@ class BufferReaderRolloutFn(BaseRolloutFn):
                                            "set --eval-function-path or disable eval")
         groups, report = self.reader.take(input.rollout_id, self.groups,
                                           current_version=input.weight_version)
-        samples = [[Sample.from_dict(d) for d in group] for group in groups]
+        samples = [[Sample.from_dict(d) for d in renumber_group(
+            group, position=position, samples_per_group=self.samples_per_group)]
+            for position, group in groups]
         return RolloutFnTrainOutput(samples=samples, metrics=report.metrics())

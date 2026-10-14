@@ -228,6 +228,23 @@ def _elastic_cells(value: str | None) -> tuple[str, ...]:
     return tuple(c.strip() for c in (value or "").split(",") if c.strip())
 
 
+def apply_sample_role(args, miles_args, environ=None) -> None:
+    """L4.6 (--rl-sample-role sampler|trainer): the buffer config on ``miles_args``
+    and the environment of the buffer rollout functions (forwarded to the Ray
+    workers by ``connect_island_ray``). Role ``both`` sets nothing."""
+    from yeto.rl.engine import sample_roles
+
+    from .buffer_rollout import island_env
+
+    if sample_roles.sample_role(args) == sample_roles.BOTH:
+        return
+    config = sample_roles.resolve(args, groups_per_round=args.groups_per_round)
+    miles_args.yeto_rl_sample_buffer = config
+    (os.environ if environ is None else environ).update(island_env(
+        config.role, store_root=config.store, sampler_id=f"island{int(args.learner_id)}",
+        max_policy_age=int(getattr(args, "rl_max_policy_age", 0) or 0), wait_s=config.wait_s))
+
+
 def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
     """Carry the opt-in 2.3/3.x switches onto ``miles_args`` before any rollout
     process starts. Without them nothing is set (default path unchanged)."""
@@ -248,6 +265,7 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
                    custom_agent=getattr(miles_args, "custom_agent_function_path", None),
                    recompute_prefill=bool(getattr(miles_args, "recompute_logprobs_via_prefill", False)))
         miles_args.yeto_rl_max_policy_age = int(args.rl_max_policy_age)
+    apply_sample_role(args, miles_args, environ)
     observe = bool(getattr(args, "rl_observe_timeline", False))
     if observe:
         miles_args.yeto_rl_observe_timeline = True
@@ -2225,6 +2243,13 @@ def _run_ports(
     miles_args.wandb_mode = getattr(args, "wandb_mode", "online")
     apply_ports_infra_switches(args, miles_args)
     if _run_test_debug_rollout_replay(args, miles_args):
+        return
+    from yeto.rl.engine.sample_roles import SAMPLER, sample_role
+
+    if sample_role(args) == SAMPLER:  # L4.6: generate into the sample buffer, never train
+        from yeto.rl.adapters.miles.sampler_island import run_sampler_island
+
+        run_sampler_island(miles_args)
         return
     run_ports_island(
         miles_args,
