@@ -230,7 +230,7 @@ def build_trajectory_batch_evidence(
                         "compaction-marked trajectory was not preserved as segments"
                     )
 
-                verified = _verified_outcome(sample, metadata, evidence_kind)
+                verified = _trajectory_outcome(sample, metadata, evidence_kind)
                 outcome_identity = (
                     verified.task_id,
                     verified.episode_id,
@@ -469,11 +469,19 @@ def read_trajectory_batch_evidence(path: str | Path) -> TrajectoryBatchEvidence:
     return evidence
 
 
-def _verified_outcome(
+def _trajectory_outcome(
     sample: Any, metadata: Mapping[str, Any], evidence_kind: str
 ) -> _VerifiedOutcome:
     if evidence_kind == REWARD_FUNCTION_EVIDENCE_KIND:
         return _reward_function_outcome(sample, metadata)
+    return _verified_outcome(metadata, evidence_kind)
+
+
+def _verified_outcome(
+    metadata: Mapping[str, Any], evidence_kind: str
+) -> _VerifiedOutcome:
+    """The trusted grader verdict of a ``secrlenv`` or Terminal-Bench sample."""
+
     if evidence_kind == "terminal-bench-2.1":
         if "secrlenv_trusted_outcome" in metadata:
             raise ValueError("trajectory metadata mixes benchmark evidence kinds")
