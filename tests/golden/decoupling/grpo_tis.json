@@ -1,7 +1,7 @@
 {
- "algorithm_sha256": "5a8a5a9ff5abb317fc8159ab56c07293dc3bc99e084542880b6d32cc5a02b441",
- "algorithm_sha256_launcher_expected": "5a8a5a9ff5abb317fc8159ab56c07293dc3bc99e084542880b6d32cc5a02b441",
- "algorithm_sha256_learner_ports_spec": "5a8a5a9ff5abb317fc8159ab56c07293dc3bc99e084542880b6d32cc5a02b441",
+ "algorithm_sha256": "27df1133c924e7a337e90246c7e1e30699017f461e9f35b1dd165a0263e65bea",
+ "algorithm_sha256_launcher_expected": "27df1133c924e7a337e90246c7e1e30699017f461e9f35b1dd165a0263e65bea",
+ "algorithm_sha256_learner_ports_spec": "27df1133c924e7a337e90246c7e1e30699017f461e9f35b1dd165a0263e65bea",
  "algorithm_spec": {
   "advantage": {
    "estimator": "grpo",
@@ -12,13 +12,17 @@
    "whiten": false
   },
   "correction": {
+   "batch_normalize": false,
    "function": null,
+   "level": "token",
+   "lower": 0.0,
    "method": "tis",
    "mismatch_metrics": false,
    "opsm_delta": null,
-   "tis_clip": 2.0,
-   "tis_clip_low": 0.0,
-   "use_rollout_logprobs": false
+   "ratio_mask": "none",
+   "upper": 2.0,
+   "use_rollout_logprobs": false,
+   "veto": null
   },
   "entropy_coef": 0.0,
   "execution": {
@@ -61,10 +65,10 @@
   "sha256": "aeee22abefe0a1e756fe8e23e5f2af3931a3eee946b355bc0044cace2a365ea6"
  },
  "execution_profile": {
-  "contract_hash": "sha256:ff3574071f62f2b71fb1eb71f5e32b71e272d1345b5cb280100429ab8a8c10f8",
+  "contract_hash": "sha256:67aee42a1a530e9b32695039266e1cef5393816354f3dd9363a6467a31823d43",
   "profile": {
    "algorithm_contract": "on-policy",
-   "algorithm_spec_sha256": "5a8a5a9ff5abb317fc8159ab56c07293dc3bc99e084542880b6d32cc5a02b441",
+   "algorithm_spec_sha256": "27df1133c924e7a337e90246c7e1e30699017f461e9f35b1dd165a0263e65bea",
    "allowed_overlap": [],
    "execution_mode": "partitioned-serial",
    "groups_per_batch": 4,
@@ -80,7 +84,7 @@
    "schema": "yeto-rl-execution-profile-v1"
   }
  },
- "launch_algorithm_sha256": "5a8a5a9ff5abb317fc8159ab56c07293dc3bc99e084542880b6d32cc5a02b441",
+ "launch_algorithm_sha256": "27df1133c924e7a337e90246c7e1e30699017f461e9f35b1dd165a0263e65bea",
  "launch_cli": [
   "--rl-placement",
   "fixed-partition",
