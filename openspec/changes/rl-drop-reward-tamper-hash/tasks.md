@@ -17,6 +17,8 @@
 - [x] 2.7b Recompute the three source pin values: `agent.py`, `codex_generate.py`, `codex_harness_agent.py` (`pins.py`, `yeto/rl/__init__.py`). The files changed, so the pin values must change with them
 - [ ] 2.8 Run the local safe test set; the four tests backend_identity, elastic_backend_identity, hw_compat_group, and export MUST pass
 
+- [x] 2.9 Add the `reward-function` evidence kind and choose the kind from the island's reward function (design.md implementation record item 9)
+
 ## 3. Credential guard (per D1)
 
 - This section is not done in this change: D1 decided to move the credential guard out of this change (2026-10-13)
