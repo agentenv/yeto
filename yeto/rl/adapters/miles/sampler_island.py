@@ -102,7 +102,7 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None) -> int:
 
     from . import LoopRunner
     from .entry import connect_island_ray
-    from .rollout import _release
+    from .rollout import RayMetadataSink, _release
 
     config = _buffer_config(miles_args, SAMPLER)
     if config is None:
@@ -114,6 +114,9 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None) -> int:
         append_tape_event(miles_args, {"event": event, **fields})
 
     connect_island_ray(miles_args=miles_args)
+    # The rollout process's metadata hook pushes each round's group records to this
+    # named actor (on a trainer island the driver creates it and consumes them).
+    metadata = RayMetadataSink()
     runner = LoopRunner()
     disposer = Disposer()
 
@@ -127,6 +130,7 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None) -> int:
     async def generate(rollout_id: int) -> None:
         await controller.prepare_rollout(rollout_id)
         _release(await executor.get(rollout_id))  # the rollout function wrote the groups
+        metadata.discard()  # the groups are in the buffer; nobody here reads the records
 
     error: BaseException | None = None
     try:

@@ -266,6 +266,10 @@ class DirMetadataSource:
     def sink_spec(self) -> str:
         return f"dir:{self.directory}"
 
+    def discard(self) -> int:
+        """Drop every pushed record (a sampler island has no consumer); returns the count."""
+        return len(self._ray.get(self._actor.take_all.remote()))
+
     def set_policy_token(self, token: str) -> None:
         put_policy_token(token, self.sink_spec)
 
