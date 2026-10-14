@@ -68,7 +68,7 @@ class CuttableFakeTrainer(FakeTrainerGroup):
                     shared_filesystem: bool = True) -> Any:
         e = self.engine
         e.calls.append(("restore_cut", cut_id))
-        payload = torch.load(Path(root) / f"{cut_id}.pt")
+        payload = torch.load(Path(root) / f"{cut_id}.pt", weights_only=True)
         if int(payload["epoch"]) != int(epoch):
             raise ValueError(f"cut {cut_id} is at epoch {payload['epoch']}, not {epoch}")
         if set(payload["tensors"]) != set(e.tensors):
