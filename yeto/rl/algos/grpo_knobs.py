@@ -258,16 +258,14 @@ def _reject_plugins(s) -> str | None:
     required = required_plugins(s)
     listed = {p.path: p.sha256 for p in s.plugins}
     missing = [r.path for r in required if r.path not in listed]
-    stale = [r.path for r in required if r.path in listed and listed[r.path] != r.sha256]
-    problems = []
+    # rl-identity-tiering L9.2: a stale source hash is a startup warning
+    # (AlgorithmSpec.verify_plugins), not a rejection.
     if missing:
-        problems.append(
+        return (
             f"plugins must list the code of every reward-pipeline / sample-filter module "
             f"{missing} (grpo_knobs.with_pipeline_plugins adds them)"
         )
-    if stale:
-        problems.append(f"plugins {stale}: source hash differs from the current module source")
-    return "; ".join(problems) or None
+    return None
 
 
 register_rejection("grpo_knobs_reward_pipeline", _reject_pipeline)

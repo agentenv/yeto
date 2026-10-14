@@ -188,7 +188,7 @@ def test_icepop_weights():
 def test_icepop_source_hash_pinned():
     ref = PluginRef.from_path(mc.ICEPOP_PATH)
     assert ref.sha256 == mc.ICEPOP_SOURCE_SHA256
-    ref.verify(import_callable=True)
+    assert ref.verify(import_callable=True) is None
 
 
 def test_icepop_all_out_of_interval_zero_gradient(local_log_probs):

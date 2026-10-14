@@ -616,7 +616,19 @@ class IslandDriver:
             runtime_fingerprint=self.capabilities.runtime_fingerprint,
             **({"eval_guard": dict(self.eval_guard_report)} if self.eval_guard_report else {}),
             **({"island_tasks": dict(self.island_tasks)} if self.island_tasks else {}),
+            **self._code_identity(),
         )
+
+    def _code_identity(self) -> dict[str, str]:
+        """rl-identity-tiering L9.1 dual write; absent without a code digest."""
+
+        from yeto.provenance import CODE_PACK_MODE_SOURCE_TREE
+
+        if not self.code_pack_digest:
+            return {}
+        mode = getattr(self, "code_pack_mode", None) or CODE_PACK_MODE_SOURCE_TREE
+        return {"semantic_sha256": self.algorithm.semantic_sha256(),
+                "code_pack_digest": self.code_pack_digest, "code_pack_mode": mode}
 
     # -- helpers used by sync sessions -----------------------------------
     def apply_policy(
@@ -1308,6 +1320,10 @@ class IslandDriver:
     # rl-per-island-tasks: this island's task ids and prompt-file SHA256, written
     # into rl_driver_start as ``island_tasks`` only when the island has its own list.
     island_tasks: Mapping[str, Any] | None = None
+    # rl-identity-tiering L9.1: this island's code identity, written into
+    # rl_driver_start with ``semantic_sha256`` only when set.
+    code_pack_digest: str | None = None
+    code_pack_mode: str | None = None  # None: the L9.1 transition (source tree hash)
 
     def _export_eval_version(self, rollout_id: int, *, final: bool) -> None:
         state = self.published_state

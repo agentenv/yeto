@@ -37,6 +37,16 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def verify_island_code_pack(digest: str | None, tree: str | Path | None = None) -> None:
+    """rl-identity-tiering L9.5: refuse to start when the workdir is not the run pack."""
+
+    if not digest:
+        return
+    from yeto.codepack import verify_tree
+
+    verify_tree(tree if tree is not None else Path(__file__).resolve().parents[4], digest)
+
+
 def parse_args(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -397,14 +407,20 @@ class AlgorithmMismatchError(RuntimeError):
 def verify_ports_algorithm(args, miles_args, launch) -> None:
     """D9/D11: before the island joins outer sync (no bridge exists yet).
 
-    Plugins are re-hashed and imported; the island's algorithm hash is
+    Plugins are re-hashed and imported (a stale source hash: warning event,
+    rl-identity-tiering L9.2); the island's algorithm hash is
     compared with ``--rl-expected-algorithm-sha256`` (mismatch: event +
     refusal; missing: warning event, for manually started islands);
     absorbed flags and unverified allowances are recorded.
     """
 
     algorithm = launch.algorithm
-    algorithm.verify_plugins()
+    for warning in algorithm.verify_plugins():
+        _append_ports_event(args, miles_args, {
+            "event": "rl_plugin_source_mismatch",
+            "level": "warning",
+            "message": warning,
+        })
     from yeto.rl.engine.algorithm import island_problems
 
     problems = island_problems(algorithm, {
@@ -1993,6 +2009,15 @@ def run_miles(
     _configure_grad_audit(args, miles_args)
     require_ports_router_mode(miles_args)
     miles_args.yeto_rl_island_tasks = dict(island_tasks) if island_tasks else None
+    # rl-identity-tiering: the run code pack digest (L9.4, checked at startup), else
+    # (L9.1 transition) the attested source tree hash.
+    if getattr(args, "code_pack_digest", None):
+        from yeto.codepack import CODE_PACK_MODE_GIT_PATCH
+
+        miles_args.yeto_rl_code_pack_digest = args.code_pack_digest
+        miles_args.yeto_rl_code_pack_mode = CODE_PACK_MODE_GIT_PATCH
+    else:
+        miles_args.yeto_rl_code_pack_digest = args.source_sha256
     _run_ports(
         args,
         miles_args,
@@ -2210,6 +2235,7 @@ def main(argv=None) -> None:
     )
 
     verify_source_tree_sha256(args.source_sha256)
+    verify_island_code_pack(getattr(args, "code_pack_digest", None))
     if not is_immutable_commit(args.model_revision):
         raise ValueError("RL model revision must be an immutable commit")
     if not is_local_reference(args.data) and not is_immutable_commit(
