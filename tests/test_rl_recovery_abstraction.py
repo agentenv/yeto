@@ -242,3 +242,48 @@ def test_inflight_saver_commit_semantics_per_backend(tmp_path, monkeypatch):
     out = modal.rehearse(1)
     assert out["commit_error"] is None and out["commit_s"] is not None
     assert log.read_text().splitlines() == ["commit tape-vol"]
+
+
+# ---------------------------------------------------------------- rl-trainer-start-stop L3.2
+def test_scheduled_cut_saves_and_resumes_like_a_manual_cut(tmp_path):
+    """D3: a stop the trainer scheduler orders writes a SCHEDULED cut; the next
+    start restores it the same way as a MANUAL cut."""
+    assert rc.SCHEDULED in rc.TRIGGERS and rc.SCHEDULED in rc.FINAL_TRIGGERS
+    store = _store(tmp_path / "store")
+    rank_a, ctl_a, driver_a, cp_a = _trained_island(tmp_path, store, 2)
+    driver_a.sync = SimpleNamespace(outer_version=2)
+    with pytest.raises(Exception, match="final=True"):
+        cp_a.save(driver_a, rollout_id=2, trigger=rc.SCHEDULED)
+    with pytest.raises(Exception, match="final=True"):
+        cp_a.save(driver_a, rollout_id=2, final=True, trigger=rc.PERIODIC)
+    saved = cp_a.save(driver_a, rollout_id=2, final=True, trigger=rc.SCHEDULED)
+    cut = rc.ConsistentCut.from_record(saved[rc.CUT_KEY])
+    assert cut.trigger == rc.SCHEDULED and saved["final"] is True
+
+    rank_b = make_rank(9)
+    ctl_b = _rctl(tmp_path, "b", store)
+    driver_b = _Driver(rank_b)
+    got = _cp(ctl_b, driver_b, _trainer(rank_b), _Ledger(2)).resume(driver_b)
+    assert got["next_rollout_id"] == 2 and driver_b.local_step == cut.island_steps[ISLAND] == 2
+    assert rc.ConsistentCut.from_record(got[rc.CUT_KEY]).trigger == rc.SCHEDULED
+    for n, v in params(rank_a).items():
+        assert torch.equal(v, params(rank_b)[n])
+
+
+def test_local_only_sync_passes_the_final_trigger_to_the_round_cut():
+    from yeto.rl.engine.bridges import LocalOnlySync
+
+    calls = []
+
+    class Cuts:
+        def save(self, driver, **kw):
+            calls.append(kw)
+
+    sync = LocalOnlySync(3)
+    sync.round_cuts = Cuts()
+    driver = SimpleNamespace(published_version=1, at_safe_point=False, emit=lambda *a, **k: None)
+    sync.finish(driver)
+    sync.final_trigger = rc.SCHEDULED
+    sync.finish(driver)
+    assert calls == [{"rollout_id": 1, "final": True},
+                     {"rollout_id": 1, "final": True, "trigger": rc.SCHEDULED}]
