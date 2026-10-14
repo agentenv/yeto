@@ -466,3 +466,18 @@ def _algorithm_spec():
     from yeto.rl.engine.algorithm import AlgorithmSpec
 
     return AlgorithmSpec()
+
+
+def test_ray_metadata_sink_discard_drops_every_record():
+    from yeto.rl.adapters.miles.rollout import RayMetadataSink
+
+    class _Actor:
+        class take_all:
+            @staticmethod
+            def remote():
+                return ["a", "b"]
+
+    sink = RayMetadataSink.__new__(RayMetadataSink)
+    sink._ray = SimpleNamespace(get=lambda x: x)
+    sink._actor = _Actor()
+    assert sink.discard() == 2
