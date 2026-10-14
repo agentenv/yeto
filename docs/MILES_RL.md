@@ -2047,13 +2047,11 @@ controller of `rl-infra-spec`. What exists today:
 
 ## Benchmark
 
-[`scripts/benchmark_rl.py`](../scripts/benchmark_rl.py) runs up to four local,
-equal-hardware real-Miles arms. The `native` arm (stock Miles' own loop) went
-with the legacy engine; the default arm set is `single,federated,decoupled`:
+[`scripts/benchmark_rl.py`](../scripts/benchmark_rl.py) runs up to three local,
+equal-hardware real-Miles arms (default: all of `single,federated,decoupled`):
 
 | arm | purpose |
 | --- | --- |
-| `native-miles-mM` | native Miles with no Yeto synchronization |
 | `yeto-single-mM` | one strict Yeto island using all `M*G` GPUs |
 | `yeto-federated-mM` | strict full-roster FedAvg across `M` islands |
 | `yeto-decoupled-mM` | decoupled fragment synchronization across `M` islands |
@@ -2070,7 +2068,7 @@ The report includes held-out reward and pass@k, KL/ESS/clip fraction, rollout,
 train, hook and finalization time, artifact-ready time, trajectories and action
 tokens per second, GPU-hours, time-weighted GPU activity/utilization, realized
 `H`, PULL-to-PUSH latency, BCAST queue time, fragment payload traffic,
-responder count, and deltas versus native, single-island, and strict federation
+responder count, and deltas versus single-island and strict federation
 controls.
 
 The harness uses real SGLang generation, the selected real reward callable,

@@ -18,10 +18,6 @@ packed routed-expert LoRA whose original-expert slots stay zero
 (:func:`~.clone_lora.wrap_clone_only_lora`).  Its LoRA state sync carries the
 clone experts only, through the ports state plugin's packed-adapter policy
 (:class:`~.clone_lora.ClonePackedAdapterPolicy`).
-
-The legacy Miles layout keeps :mod:`.expert_full_runtime` and
-:func:`.clone_lora.install` until P0 1.7b.4 removes them; this module touches
-only ports module names.
 """
 
 from __future__ import annotations

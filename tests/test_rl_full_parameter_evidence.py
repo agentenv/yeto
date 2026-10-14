@@ -2,9 +2,8 @@
 
 The ``record_trained_groups`` hook is the one writer: it binds the kept batch,
 after the final loss masks, to the policy token the driver published for the
-round.  ``rollout_legacy_port.generate_rollout`` (still the ports
-``--rollout-function-path``) no longer writes evidence; a second write of the
-same round would fail the exclusive create or bind the pre-filter batch.
+round.  The ports rollout function does not write evidence; a second write of
+the same round would fail the exclusive create or bind the pre-filter batch.
 Every trajectory is also bound to the policy that generated it (P0-S,
 schema 4).
 """

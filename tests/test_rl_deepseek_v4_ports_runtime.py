@@ -212,11 +212,8 @@ def test_sitecustomize_installs_the_ports_expert_full_runtime(monkeypatch, flag,
     assert os.environ[flag] == "1"
 
 
-@pytest.mark.parametrize("helper", [
-    "miles.backends.megatron_utils.bridge_lora_helpers",
-    "miles.backends.megatron_utils.lora.bridge",
-])
-def test_v4_bridge_registers_in_the_lora_bridge_module_of_either_layout(monkeypatch, helper):
+def test_v4_bridge_registers_in_the_ports_lora_bridge_module(monkeypatch):
+    helper = "miles.backends.megatron_utils.lora.bridge"
     from yeto.rl.adapters.miles.models.deepseek_v4 import bridge
 
     installed = []

@@ -1467,44 +1467,9 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         raise HarnessError(
             "dsv4/compressed attention is incompatible with deterministic inference"
         )
-    expert_full_count = learner.get("expert_full_count", 0)
-    if (
-        not isinstance(expert_full_count, int)
-        or isinstance(expert_full_count, bool)
-        or not 0 <= expert_full_count <= 32
-    ):
-        raise HarnessError("plan has an invalid expert_full_count")
-    if expert_full_count:
-        expert_full_lr = learner.get("expert_full_lr")
-        if (
-            not isinstance(expert_full_lr, (int, float))
-            or isinstance(expert_full_lr, bool)
-            or not 0 < expert_full_lr < float("inf")
-        ):
-            raise HarnessError("plan has an invalid expert_full_lr")
-        for name in (
-            "expert_selection_sha256",
-            "expert_selection_contract_sha256",
-        ):
-            if not _SHA256.fullmatch(str(learner.get(name, ""))):
-                raise HarnessError(f"plan has an invalid {name}")
-        if (
-            learner.get("rl_model_recipe") != "deepseek-v4-flash"
-            or learner.get("lora_targets") != "attention"
-        ):
-            raise HarnessError(
-                "expert-full plan requires DeepSeek V4 and attention LoRA"
-            )
-    elif learner.get("expert_selection_sha256") is not None or learner.get(
-        "expert_selection_contract_sha256"
-    ) is not None:
-        raise HarnessError("expert selection hashes require expert_full_count")
     if learner.get("rl_model_recipe") == "deepseek-v4-flash":
-        expected_lora_targets = (
-            "attention" if expert_full_count else "attention-routed-experts"
-        )
         if (
-            learner.get("lora_targets") != expected_lora_targets
+            learner.get("lora_targets") != "attention-routed-experts"
             or tensor_parallel != 8
             or learner.get("expert_parallel") != 8
             or rollout_gpus != 8
@@ -1970,14 +1935,9 @@ def prepare(namespace) -> Path:
             "Codex artifact options require the signed stock Codex agent"
         )
     if getattr(args, "expert_full_count", 0):
-        plan["learner"].update(
-            expert_full_count=args.expert_full_count,
-            expert_full_lr=args.expert_full_lr,
-            expert_selection_sha256=args.expert_selection_sha256,
-            expert_selection_contract_sha256=(
-                args.expert_selection_contract_sha256
-            ),
-        )
+        # Recorded only so plan validation rejects it: expert-full needs the
+        # full-parameter sync preset, which this harness does not run.
+        plan["learner"]["expert_full_count"] = args.expert_full_count
     _validate_plan(plan)
     _write_plan(plan_path, plan)
     print(f"prepared {plan_path}")
@@ -3191,19 +3151,6 @@ def _learner_argv(plan: dict[str, Any], learner_id: int) -> list[str]:
                 learner["rollout_model_revision"],
             )
         )
-    if learner.get("expert_full_count", 0):
-        values.extend(
-            (
-                "--expert-full-count",
-                str(learner["expert_full_count"]),
-                "--expert-full-lr",
-                str(learner["expert_full_lr"]),
-                "--expert-selection-sha256",
-                learner["expert_selection_sha256"],
-                "--expert-selection-contract-sha256",
-                learner["expert_selection_contract_sha256"],
-            )
-        )
     if learner.get("apply_chat_template_kwargs"):
         values.extend(
             (
@@ -3487,20 +3434,11 @@ done
     else:
         jit_cache_setup = ""
         jit_cache_volumes = ""
-    expert_full = bool(learner.get("expert_full_count", 0))
     if learner.get("rl_model_recipe") == "deepseek-v4-flash":
         attention_env = ""
-        expert_env = (
-            "--env YETO_DSV4_EXPERT_FULL_PORTS=1 "
-            f"--env YETO_DSV4_EXPERT_FULL_COUNT={learner['expert_full_count']} "
-            f"--env YETO_DSV4_EXPERT_FULL_LR={learner['expert_full_lr']} "
-            "--env NVTE_GROUPED_LINEAR_SINGLE_PARAM=0 "
-            if expert_full
-            else "--env YETO_DSV4_CLONE_ONLY_LORA_PORTS=1 "
-        )
         recipe_env = (
             "  --env YETO_DSV4_EXPERT_CLONE=1 "
-            f"{expert_env}"
+            "--env YETO_DSV4_CLONE_ONLY_LORA_PORTS=1 "
             "--env SGLANG_SKIP_CHECKPOINT_LOAD_CHECK=1 "
             "--env SGLANG_DSV4_FP4_EXPERTS=0 "
             "--env SGLANG_HEALTH_CHECK_TIMEOUT=120 "

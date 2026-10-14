@@ -26,15 +26,8 @@ _BRIDGE_CLASS: type | None = None
 _CLONE_ROUTER_CLASS: type | None = None
 _ENSURING_BRIDGE = False
 _MILES_HELPER_FINDER = None
-# The Miles module that builds the LoRA Bridge in each trainer worker: the
-# legacy layout's helper and the ports layout's ``lora.bridge``.  Only one of
-# them exists in a given image, so arming both is safe.
-_MILES_HELPER_TARGETS = frozenset(
-    {
-        "miles.backends.megatron_utils.bridge_lora_helpers",
-        "miles.backends.megatron_utils.lora.bridge",
-    }
-)
+# The ports Miles module that builds the LoRA Bridge in each trainer worker.
+_MILES_HELPER_TARGET = "miles.backends.megatron_utils.lora.bridge"
 _LAYER_COMPRESSION = {
     "sliding_attention": 0,
     "compressed_sparse_attention": 4,
@@ -810,7 +803,7 @@ class _MilesHelperLoader(importlib.abc.Loader):
 
 class _MilesHelperFinder(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname not in _MILES_HELPER_TARGETS:
+        if fullname != _MILES_HELPER_TARGET:
             return None
         try:
             sys.meta_path.remove(self)
@@ -827,9 +820,9 @@ def install_deepseek_v4_actor_bridge_hook() -> None:
     """Patch an imported Miles helper or arm its process-wide import hook."""
 
     global _MILES_HELPER_FINDER
-    loaded = [sys.modules[name] for name in _MILES_HELPER_TARGETS if name in sys.modules]
-    for module in loaded:
-        install_on_miles_bridge_helpers(module)
-    if not loaded and _MILES_HELPER_FINDER is None:
+    loaded = sys.modules.get(_MILES_HELPER_TARGET)
+    if loaded is not None:
+        install_on_miles_bridge_helpers(loaded)
+    elif _MILES_HELPER_FINDER is None:
         _MILES_HELPER_FINDER = _MilesHelperFinder()
         sys.meta_path.insert(0, _MILES_HELPER_FINDER)

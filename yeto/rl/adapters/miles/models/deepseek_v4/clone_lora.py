@@ -13,18 +13,13 @@ checkpoint format.
 
 The external policy sync carries only the clone experts.  Packing them back
 into each rank's slots (:func:`clone_slot_updates`) and checking that the
-original slots stay zero (:func:`assert_original_slots_zero`) serve both Miles
-layouts: the legacy fork's ``trainable_state`` helpers
-(:func:`install_on_trainable_state`) and the ports state plugin
-(:class:`ClonePackedAdapterPolicy`).
+original slots stay zero (:func:`assert_original_slots_zero`) back the ports
+state plugin's packed-adapter policy (:class:`ClonePackedAdapterPolicy`).
 """
 
 from __future__ import annotations
 
-import importlib.abc
-import importlib.machinery
 import re
-import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -44,10 +39,6 @@ _ROUTED_ADAPTER = re.compile(
     r"(?:^|\.)decoder\.layers\.(?P<layer>\d+)\.mlp\.experts\."
     r"(?P<branch>linear_fc[12])$"
 )
-_MILES_TRAINABLE_STATE = "miles.backends.megatron_utils.trainable_state"
-_MILES_ACTOR = "miles.backends.megatron_utils.actor"
-_MILES_ACTOR_GROUP = "miles.ray.actor_group"
-_MILES_TRAINABLE_STATE_FINDER = None
 
 
 @dataclass(frozen=True)
@@ -390,182 +381,6 @@ class ClonePackedAdapterPolicy:
             name, packed_shape, tensors, expert_parallel_rank=rank, expert_parallel_size=size
         )
         return PackedSlotWrites(frozen=slice(0, ORIGINAL_EXPERTS_PER_RANK), updates=updates)
-
-
-def install_on_trainable_state(module) -> None:
-    """Patch the two pinned legacy Miles helpers that encode EP expert ownership."""
-
-    if getattr(module, "_yeto_balanced_expert_layout_installed", False):
-        return
-
-    def sparse_expert_updates(name, side, tensors, *, expert_parallel_rank, expert_parallel_size):
-        parameter = side.param_weight
-        if parameter is None:
-            raise RuntimeError(f"packed expert side {name!r} has no parameter")
-        updates = clone_slot_updates(
-            name,
-            tuple(parameter.shape),
-            tensors,
-            expert_parallel_rank=expert_parallel_rank,
-            expert_parallel_size=expert_parallel_size,
-        )
-        return parameter.main_param.view(parameter.shape), ORIGINAL_EXPERTS_PER_RANK, updates
-
-    def assert_original_packed_masters_zero(sides, *, expert_parallel_rank):
-        _require_balanced_ep(expert_parallel_rank, EXPERT_PARALLEL_SIZE)
-        packed = [
-            (name, side.param_weight)
-            for name, side in sides
-            if EXPERT_LORA.fullmatch(name) is not None and side.param_weight is not None
-        ]
-        if not packed:
-            raise RuntimeError("clone-only actor has no packed expert LoRA sides")
-        for name, parameter in packed:
-            assert_original_slots_zero(name, parameter.main_param.view(parameter.shape))
-
-    module._sparse_expert_updates = sparse_expert_updates
-    module._assert_original_packed_masters_zero = assert_original_packed_masters_zero
-    module._yeto_balanced_expert_layout_installed = True
-
-
-def install_on_streaming_actor(module) -> None:
-    """Export clone-only policy tensors into bounded Ray objects."""
-
-    if getattr(module, "_yeto_clone_stream_export_installed", False):
-        return
-
-    def export_trainable_state_chunks(self, tensor_groups):
-        from yeto.rl.adapters.miles.models.deepseek_v4.expert_full_runtime import (
-            _TrainableStateFragment,
-            _chunk_export_fragment_for_ray,
-        )
-
-        groups = tuple(tuple(group) for group in tensor_groups)
-        expected_names = tuple(name for group in groups for name in group)
-        state = module.export_external_trainable_state(
-            self,
-            policy_version=getattr(self, "_external_policy_version", 0),
-        )
-        if state is None:
-            return None
-        if state.policy_version != getattr(self, "_external_policy_version", 0):
-            raise RuntimeError("clone-only export changed policy version")
-        tensors = state.tensors
-        if not isinstance(tensors, dict):
-            tensors = dict(tensors)
-        fragment = _TrainableStateFragment(
-            # PP's physical main rank owns one complete clone-only policy.
-            source_rank=0,
-            policy_version=state.policy_version,
-            expected_names=expected_names,
-            tensors=tensors,
-            is_metrics_source=True,
-            train_rollout_kl=getattr(state, "train_rollout_kl", None),
-            ess_ratio=getattr(state, "ess_ratio", None),
-            pg_clipfrac=getattr(state, "pg_clipfrac", None),
-            train_seconds=getattr(state, "train_seconds", None),
-        )
-        return _chunk_export_fragment_for_ray(
-            fragment,
-            tensor_groups=groups,
-        )
-
-    module.MegatronTrainRayActor.export_trainable_state_chunks = (
-        export_trainable_state_chunks
-    )
-    module._yeto_clone_stream_export_installed = True
-
-
-def install_on_streaming_actor_group(module) -> None:
-    """Expose the bounded clone-only export through Miles' v1 train group."""
-
-    if getattr(module, "_yeto_clone_stream_export_installed", False):
-        return
-
-    async def export_trainable_state_chunks(self, tensor_groups):
-        from yeto.rl.adapters.miles.models.deepseek_v4.expert_full_runtime import (
-            _prepare_chunked_policy_export,
-        )
-
-        fragments = await self._broadcast(
-            "export_trainable_state_chunks",
-            tensor_groups,
-        )
-        return _prepare_chunked_policy_export(
-            tuple(fragment for fragment in fragments if fragment is not None)
-        )
-
-    module.RayTrainGroup.export_trainable_state_chunks = (
-        export_trainable_state_chunks
-    )
-    module._yeto_clone_stream_export_installed = True
-
-
-class _MilesTrainableStateLoader(importlib.abc.Loader):
-    def __init__(self, wrapped) -> None:
-        self.wrapped = wrapped
-
-    def create_module(self, spec):
-        create = getattr(self.wrapped, "create_module", None)
-        return None if create is None else create(spec)
-
-    def exec_module(self, module) -> None:
-        self.wrapped.exec_module(module)
-        install_on_trainable_state(module)
-
-
-class _MilesTrainableStateFinder(importlib.abc.MetaPathFinder):
-    def find_spec(self, fullname, path=None, target=None):
-        if fullname != _MILES_TRAINABLE_STATE:
-            return None
-        try:
-            sys.meta_path.remove(self)
-            spec = importlib.machinery.PathFinder.find_spec(fullname, path)
-        finally:
-            sys.meta_path.insert(0, self)
-        if spec is None or spec.loader is None:
-            return spec
-        spec.loader = _MilesTrainableStateLoader(spec.loader)
-        return spec
-
-
-def install() -> None:
-    """Patch clone-only Miles state/export paths or arm lazy import hooks."""
-
-    global _MILES_TRAINABLE_STATE_FINDER
-    loaded = sys.modules.get(_MILES_TRAINABLE_STATE)
-    if loaded is not None:
-        install_on_trainable_state(loaded)
-    elif _MILES_TRAINABLE_STATE_FINDER is None:
-        _MILES_TRAINABLE_STATE_FINDER = _MilesTrainableStateFinder()
-        sys.meta_path.insert(0, _MILES_TRAINABLE_STATE_FINDER)
-
-    from yeto.rl.adapters.miles.models.deepseek_v4.expert_full_runtime import install_or_defer
-
-    install_or_defer(_MILES_ACTOR, install_on_streaming_actor)
-    install_or_defer(_MILES_ACTOR_GROUP, install_on_streaming_actor_group)
-
-
-def assert_original_expert_lora_zero(models: Any) -> None:
-    """Fail if any masked original-expert adapter slice has drifted from zero."""
-
-    import torch
-
-    found = 0
-    for chunk in _model_chunks(models):
-        for module in chunk.modules():
-            mask = getattr(module, "_yeto_clone_active_mask", None)
-            if mask is None:
-                continue
-            found += 1
-            inactive = ~mask.bool()
-            for side in (module.linear_in.weight, module.linear_out.weight):
-                if inactive.any() and torch.count_nonzero(side[inactive]).item() != 0:
-                    raise RuntimeError(
-                        f"original-expert LoRA drifted on {module.base_linear_name}"
-                    )
-    if not found:
-        raise RuntimeError("no clone-only expert LoRA masks are installed")
 
 
 class _CloneOnlyLoraProxy:
