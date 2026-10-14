@@ -160,7 +160,7 @@ def test_registry_credentials_match_the_image_registry():
 
 
 def _fake_login_config(monkeypatch):
-    monkeypatch.setattr(launcher, "_sky_docker_login_config", lambda login: ("login", dict(login)))
+    monkeypatch.setattr("yeto.launch.credentials._sky_docker_login_config", lambda login: ("login", dict(login)))
 
 
 def test_sky_ports_task_logs_in_via_task_secrets(monkeypatch, login):

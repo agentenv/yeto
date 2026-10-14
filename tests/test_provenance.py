@@ -492,7 +492,7 @@ def test_pickle_is_opt_in_and_hash_attested(tmp_path):
 
 
 def test_launcher_stages_unsafe_pickle_at_fixed_shell_neutral_path(monkeypatch, tmp_path):
-    monkeypatch.setattr(launcher, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr("yeto.launch.loss.REPO_ROOT", tmp_path)
     dangerous = tmp_path / "loss; touch SHOULD_NOT_EXIST.pkl"
     losses.dump_pickled_loss(lambda *args: (0, 0), dangerous)
 
@@ -508,7 +508,7 @@ def test_launcher_stages_unsafe_pickle_at_fixed_shell_neutral_path(monkeypatch, 
 
 
 def test_pickled_loss_staging_is_content_addressed_per_run(monkeypatch, tmp_path):
-    monkeypatch.setattr(launcher, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr("yeto.launch.loss.REPO_ROOT", tmp_path)
     first = tmp_path / "first.pkl"
     second = tmp_path / "second.pkl"
     first.write_bytes(b"first executable payload")
@@ -539,7 +539,8 @@ def test_launcher_does_not_execute_custom_loss_before_unsafe_opt_in(tmp_path):
 
 
 def test_launcher_attests_synced_source_and_diffusion_adapter(monkeypatch, tmp_path):
-    monkeypatch.setattr(launcher, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr("yeto.launch.args.REPO_ROOT", tmp_path)
+    monkeypatch.setattr("yeto.launch.loss.REPO_ROOT", tmp_path)
     model = tmp_path / "model"
     model.mkdir()
     data = tmp_path / "rows.jsonl"
@@ -573,7 +574,7 @@ def test_launcher_attests_synced_source_and_diffusion_adapter(monkeypatch, tmp_p
 def test_cloud_sampler_preserves_and_checks_expected_adapter_digest(
     monkeypatch, tmp_path
 ):
-    monkeypatch.setattr(launcher, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr("yeto.launch.diffusion_sample.REPO_ROOT", tmp_path)
     adapter = tmp_path / "adapter.py"
     adapter.write_text(
         "def make_adapter():\n    return object()\n",

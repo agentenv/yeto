@@ -153,7 +153,7 @@ def _launcher_args(engine, extra=(), gpu="aws:1xa100@us-east-1"):
 def _no_modal_listing(monkeypatch):
     import yeto.launcher as launcher
 
-    monkeypatch.setattr(launcher, "_list_modal_apps", lambda: [])  # nothing listed = stopped
+    monkeypatch.setattr("yeto.launch.modal_islands._list_modal_apps", lambda: [])  # nothing listed = stopped
 
 
 @pytest.fixture(autouse=True)
@@ -871,14 +871,14 @@ def test_modal_two_islands_with_syncer_rebuild_tapes_and_fail_closed(monkeypatch
     fake_sky = sys_modules_sky(monkeypatch)
     fake_sky.launch = lambda task, **kw: "rid-syncer"
     fake_sky.stream_and_get = lambda rid: (1, types.SimpleNamespace(head_ip="10.0.0.1"))
-    monkeypatch.setattr(launcher, "tcp_probe", lambda host, port, **kw: (True, f"{host}:{port} reachable"))
+    monkeypatch.setattr("yeto.launch.syncer.tcp_probe", lambda host, port, **kw: (True, f"{host}:{port} reachable"))
     monkeypatch.setattr(modal_runner, "ModalOps", FakeModalOps)
     monkeypatch.setattr(modal_runner, "resolve_syncer_for_modal", lambda addr, public: addr)
     monkeypatch.setattr(launcher, "prepare_launch_args", launcher._prepare_rl_args)
     monkeypatch.setattr(launcher, "warn_if_model_wont_fit", lambda *a, **k: None)
     monkeypatch.setattr(launcher, "make_syncer_task", lambda *a, **k: object())
     monkeypatch.setattr(launcher, "_tail", lambda *a, **k: None)
-    monkeypatch.setattr(launcher, "terminate_and_verify", lambda *a, **k: True)
+    monkeypatch.setattr("yeto.launch.teardown.terminate_and_verify", lambda *a, **k: True)
     monkeypatch.setattr(launcher.subprocess, "run", lambda *a, **k: None)
 
     class Controller:
