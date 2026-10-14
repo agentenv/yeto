@@ -29,6 +29,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from yeto.rl.engine.overlap import ROLLOUT_OVERLAP_MODE
+
 from .fully_async_translate import (
     VerlTranslationError,
     VersionMap,
@@ -287,6 +289,7 @@ class RoundCollector:
         carried = [v for v in self.kept if v.versions and min(v.versions) < self.current_outer]
         over_age = [v for v in self.discarded if not v.unknown]
         return {
+            "execution_mode": ROLLOUT_OVERLAP_MODE,
             "max_policy_age": self.limit,
             "carried_in_groups": len(carried),
             "carried_in_trajectories": sum(v.meta.n for v in carried),

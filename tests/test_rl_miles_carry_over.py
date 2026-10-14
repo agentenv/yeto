@@ -301,7 +301,30 @@ def test_driver_reports_carry_over_and_governs_on_the_rollout_estimate(tmp_path)
     carry = [e for e in events if e["event"] == "rl_rollout_carry_over"]
     assert carry and carry[0]["carried_in_groups"] == 1
     assert carry[0]["cross_version_truncated_fraction"] == 0.9
+    assert carry[0]["execution_mode"] == driver.execution_mode  # no override: profile label
     assert [e for e in events if e["event"] == "rl_policy_age_fallback"] and calls == [0]
+
+
+def test_an_overlapped_rollout_labels_its_carry_over_event(tmp_path):
+    """P0-S-fix B: the fully_async round's own mode replaces the profile label."""
+    import dataclasses
+
+    from tests.test_rl_policy_age import _driver
+
+    driver = _driver(tmp_path, 1)
+    original = driver.rollout.generate
+
+    def gen(rid, **kw):
+        return dataclasses.replace(original(rid, **kw), carry_over={
+            "max_policy_age": 1, "execution_mode": "partitioned-overlap"})
+
+    driver.rollout.generate = gen
+    driver.run()
+    events = [json.loads(l) for l in (tmp_path / "e.jsonl").read_text().splitlines()]
+    carry = [e for e in events if e["event"] == "rl_rollout_carry_over"]
+    assert carry and {e["execution_mode"] for e in carry} == {"partitioned-overlap"}
+    assert all(e["execution_mode"] == driver.execution_mode
+               for e in events if e["event"] != "rl_rollout_carry_over" and "execution_mode" in e)
 
 
 def test_trajectory_records_carry_start_round_and_segments(sink):

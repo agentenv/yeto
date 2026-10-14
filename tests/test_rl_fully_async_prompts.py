@@ -62,10 +62,23 @@ def executor():
 def test_round_counts_report_draws_and_miles_stale_drops(executor):
     ledger = prompts.current()
     executor.data_source.get_samples(3)
-    executor.generate_rollout._output = SimpleNamespace(_metric_stale_groups=2)
-    assert ledger.take_round_counts() == {"submitted_groups": 3, "stale_dropped_groups": 2}
-    executor.generate_rollout._output = SimpleNamespace(_metric_stale_groups=5)
-    assert ledger.take_round_counts() == {"submitted_groups": 0, "stale_dropped_groups": 3}
+    output = SimpleNamespace(_metric_stale_groups=9)
+    executor.generate_rollout._output = output
+    assert ledger.take_round_counts() == {"submitted_groups": 3, "stale_dropped_groups": 9}
+
+
+def test_stale_drops_follow_miles_per_step_reset(executor):
+    """Miles' get_metrics zeroes the counter after each round's hook (G2 ps1:
+    a running-total delta turned 9, 0, 10, 0 into 9, -9, 10, -10)."""
+    ledger = prompts.current()
+    output = SimpleNamespace(_metric_stale_groups=0)
+    executor.generate_rollout._output = output
+    reported = []
+    for dropped in (9, 0, 10, 0):
+        output._metric_stale_groups = dropped
+        reported.append(ledger.take_round_counts()["stale_dropped_groups"])
+        output._metric_stale_groups = 0  # Miles' get_metrics, right after the hook
+    assert reported == [9, 0, 10, 0]
 
 
 def test_an_unexposed_stale_count_is_reported_unknown(executor, caplog):
@@ -128,3 +141,8 @@ def test_overlap_round_report_carries_the_ledger_counts(monkeypatch):
         SimpleNamespace(), [], round_counts={"submitted_groups": 3, "stale_dropped_groups": None})
     assert sent[0]["submitted_groups"] == 3 and sent[0]["stale_dropped_groups"] is None
     assert "aborted_in_flight_groups" not in sent[0] and "carried_out_groups" not in sent[0]
+    # the round overlapped training: the carry-over event must not say serial
+    assert sent[0]["execution_mode"] == "partitioned-overlap"
+    from yeto.rl.adapters.miles.rollout import _carry_over_fields
+
+    assert _carry_over_fields(sent[0])["execution_mode"] == "partitioned-overlap"

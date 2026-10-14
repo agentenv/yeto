@@ -39,6 +39,11 @@ from .execution_profile import ExecutionProfile
 # dependency table (reward||checkpoint, ...) have no producer on the ports path.
 IMPLEMENTED_OVERLAP = frozenset({("eval", "train"), ("eval", "outer_sync")})
 EVAL_QUEUE_BOUND = 1
+# The execution mode a round reports when its rollout overlapped training
+# (Miles / verl fully_async at max_policy_age > 0). The profile keeps the
+# driver's step-scheduling mode (partitioned-serial); only the per-round
+# ``rl_rollout_carry_over`` event carries this label.
+ROLLOUT_OVERLAP_MODE = "partitioned-overlap"
 
 
 class OverlapGuardError(RuntimeError):
