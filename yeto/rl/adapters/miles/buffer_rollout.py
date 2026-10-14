@@ -59,6 +59,9 @@ SAMPLER_ID_ENV = "YETO_SAMPLE_BUFFER_SAMPLER_ID"  # prefix of the sample ids a s
 WAIT_ENV = "YETO_SAMPLE_BUFFER_WAIT_S"  # reader: max seconds to wait for a full round
 POLL_ENV = "YETO_SAMPLE_BUFFER_POLL_S"  # reader: seconds between index reads while waiting
 MAX_POLICY_AGE_ENV = "YETO_SAMPLE_BUFFER_MAX_POLICY_AGE"
+# the rollout functions run in Ray workers, which inherit the raylet's environment:
+# connect_island_ray forwards these to every worker
+ISLAND_ENVS = (BUFFER_ROOT_ENV, SAMPLER_ID_ENV, WAIT_ENV, POLL_ENV, MAX_POLICY_AGE_ENV)
 
 DEFAULT_WAIT_S = 3600.0
 DEFAULT_POLL_S = 2.0
@@ -201,6 +204,32 @@ def group_entry_fields(samples: Sequence[Mapping[str, Any]]) -> tuple[int, int]:
     return int(oldest), tokens
 
 
+def renumber_group(samples: Sequence[dict[str, Any]], *, position: int,
+                   samples_per_group: int) -> list[dict[str, Any]]:
+    """Give a group read from the buffer an identity unique in the buffer.
+
+    Miles numbers groups and samples per sampler process from 0, so groups from two
+    sampler rounds (or a restarted sampler) repeat them; the trainer's batch checks
+    and trajectory ids need them unique. The buffer position is unique for the
+    buffer's life and the same after a restore re-reads it, so ``group_index`` is
+    the position and ``index`` is ``position * samples_per_group + j``. The
+    sampler's numbers stay in ``metadata["yeto_sampler_identity"]``."""
+    if len(samples) > int(samples_per_group):
+        raise SampleBufferRolloutError(
+            f"group at buffer position {position} has {len(samples)} samples > "
+            f"samples per group {samples_per_group}")
+    out = []
+    for j, sample in enumerate(samples):
+        sample = dict(sample)
+        metadata = dict(sample.get("metadata") or {})
+        metadata["yeto_sampler_identity"] = {"group_index": sample.get("group_index"),
+                                             "index": sample.get("index")}
+        sample.update(metadata=metadata, group_index=int(position),
+                      index=int(position) * int(samples_per_group) + j)
+        out.append(sample)
+    return out
+
+
 # ---------------------------------------------------------------------- sampler side
 class GroupWriter:
     """Writes finished groups to the buffer: payload first, then the index entry."""
@@ -258,15 +287,16 @@ class BatchReader:
         self._ends: dict[int, int] = {}  # rollout id -> buffer position after its round
 
     def take(self, rollout_id: int, groups: int, *, current_version: int | None
-             ) -> tuple[list[list[dict[str, Any]]], TakeReport]:
-        """``groups`` decoded groups for ``rollout_id``. Waits up to ``wait_s`` for
-        them; after the data end returns what is left (raises when nothing is)."""
+             ) -> tuple[list[tuple[int, list[dict[str, Any]]]], TakeReport]:
+        """``groups`` ``(buffer position, decoded group)`` pairs for ``rollout_id``.
+        Waits up to ``wait_s`` for them; after the data end returns what is left
+        (raises when nothing is)."""
         if int(groups) < 1:
             raise ValueError("groups must be positive")
         rollout_id = int(rollout_id)
         started = self.clock()
         start = self.buffer.read_cursor
-        out: list[list[dict[str, Any]]] = []
+        out: list[tuple[int, list[dict[str, Any]]]] = []
         versions: dict[int, int] = {}
         stale = 0
         floor = None if current_version is None else int(current_version) - self.max_policy_age
@@ -276,7 +306,8 @@ class BatchReader:
                 if floor is not None and item.entry.behavior_version < floor:
                     stale += 1
                     continue
-                out.append(decode_group(self.buffer.read_payload(item.entry.payload_ref)))
+                out.append((item.position,
+                            decode_group(self.buffer.read_payload(item.entry.payload_ref))))
                 versions[item.entry.behavior_version] = versions.get(item.entry.behavior_version, 0) + 1
             if len(out) >= groups or selected:
                 continue
@@ -332,6 +363,13 @@ def _active_reader() -> BatchReader:
 def executor_watermark_before(_executor: Any, rollout_id: int) -> int:
     """Runs INSIDE the rollout executor actor (``__ray_call__``)."""
     return _active_reader().watermark_before(int(rollout_id))
+
+
+def executor_read_cursor(_executor: Any) -> int | None:
+    """Runs INSIDE the rollout executor actor: the buffer position after the last
+    selected group (None before the reader exists)."""
+    reader = _ACTIVE.get(TRAINER)
+    return None if reader is None else int(reader.buffer.read_cursor)
 
 
 def executor_reset(_executor: Any, watermark: int) -> int:

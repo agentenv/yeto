@@ -462,6 +462,10 @@ LEAF_POLICY: dict[str, _Check] = {
     # d2-wire: read by the yeto-side ElasticHook only; no Miles option.
     "edge_costs_path": _ok,
     "elastic_window_s": _ok,
+    # L4.6: the buffer rollout functions (translate_run_config); the island
+    # environment and the sampler loop read the rest.
+    "sample_buffer": _ok,
+    **{f"sample_buffer.{name}": _ok for name in ("role", "store", "max_backlog_groups", "wait_s")},
 }
 
 
@@ -761,7 +765,13 @@ def translate_run_config(
     agent = config.agent
     columns = config.data.columns
     request = placement_request(config)
-    rollout_overlap = max_policy_age > 0 and request.kind != "colocated"
+    sample_buffer = getattr(config, "sample_buffer", None)
+    if sample_buffer is not None and trainable.parameter_mode != "full":
+        # the sampler loads each release as a full HF checkpoint (update_weights_from_disk)
+        raise MilesConfigError(f"--rl-sample-role {sample_buffer.role} supports full-parameter "
+                               "mode only (a LoRA release cannot be loaded by the sampler yet)")
+    # a buffer island selects its own rollout function, so never Miles' fully_async
+    rollout_overlap = max_policy_age > 0 and request.kind != "colocated" and sample_buffer is None
 
     if request.kind == "colocated":
         placement_values = ["--colocate"]
@@ -913,6 +923,8 @@ def translate_run_config(
             max_policy_age, agentic=bool(getattr(config.agent, "custom_agent_function_path", None)),
             overlap=rollout_overlap))
     values.extend(critic_load_argv(config, algorithm))
+    if sample_buffer is not None:
+        values.extend(sample_buffer_argv(sample_buffer.role, max_policy_age=max_policy_age))
 
     evaluation = config.eval
     if evaluation is not None:
@@ -1098,6 +1110,24 @@ def translate_run_config(
         algorithm=algorithm,
         absorbed_flags=dict(absorbed),
     )
+
+
+# Miles builds the HF snapshot exporter (actor.export_hf) only when one of its HF
+# outputs is set. yeto never calls save_model, so this path is never written; the
+# trainer's policy releases call export_hf with their own directory.
+RELEASE_EXPORTER_SAVE_HF = "/tmp/yeto-rl-unused-save-hf/rollout_{rollout_id}"
+
+
+def sample_buffer_argv(role: str, *, max_policy_age: int) -> tuple[str, ...]:
+    """L4.6: a sampler writes the buffer and builds no trainer model
+    (``--debug-rollout-only``: rollout GPUs only, engines serve the base weights);
+    a trainer reads the buffer and can export HF snapshots for its releases."""
+    from .buffer_rollout import SAMPLER, rollout_argv
+
+    argv = rollout_argv(role, max_policy_age=max_policy_age)
+    if role == SAMPLER:
+        return (*argv, "--debug-rollout-only")
+    return (*argv, "--save-hf", RELEASE_EXPORTER_SAVE_HF)
 
 
 def _full_parameter_optimizer_attrs(trainable: Any) -> dict[str, Any]:

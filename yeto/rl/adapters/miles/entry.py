@@ -876,6 +876,10 @@ def compose_island(
         _wire_round_cuts(driver, elastic=resume, miles_args=miles_args, algorithm=algorithm,
                          base_model_revision=base_model_revision)
     _wire_droppable_reclaim(sync, driver)
+    from .sampler_island import wire_policy_releases
+
+    # L4.6: a trainer island (--rl-sample-role trainer) releases every publish to the samplers
+    wire_policy_releases(driver, miles_args=miles_args, actor_model=actor_model, runner=runner)
     # rl-spot-cost-saving 4.1 (opt-in, YETO_SPOT_INFLIGHT_SAVE_DIR): timed in-flight save
     from .inflight_save import install as _install_inflight_save
 
@@ -1310,6 +1314,13 @@ def connect_island_ray(*, environ=None, ray_module=None, miles_args=None) -> str
 
     for key in (OVERRIDE_ENV, NEGATIVE_RUN_ENV):  # launch-preflight-guards: negative-test island
         if environ.get(key):  # (identity_test_salt is read where the sync client is built)
+            env_vars[key] = environ[key]
+    from yeto.rl.engine.resume import STORE_IMPL_ENV
+
+    from .buffer_rollout import ISLAND_ENVS as SAMPLE_BUFFER_ENVS
+
+    for key in (*SAMPLE_BUFFER_ENVS, STORE_IMPL_ENV):  # L4.6: the buffer rollout functions
+        if environ.get(key):  # open the store inside the rollout executor actor
             env_vars[key] = environ[key]
     if environ.get(ELASTIC_METADATA_ENV) == "1":
         # --rl-elastic: the rollout metadata hook runs inside Ray workers, which
