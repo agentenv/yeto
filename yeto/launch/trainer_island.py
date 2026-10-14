@@ -33,6 +33,7 @@ from typing import Any
 from yeto.rl import event_echo
 from yeto.rl.engine.resume import CheckpointStore
 from yeto.rl.engine.sample_buffer import BUFFER_DIR, INDEX, CommittedBacklog, FileSampleBuffer
+from yeto.rl.engine.start_phases import SUBMITTED_ENV
 from yeto.rl.engine.trainer_lifecycle import CutLog, CutRef, DurableSampleBuffer, TrainerLifecycle
 from yeto.rl.engine.trainer_remote import (
     EVENT,
@@ -193,7 +194,8 @@ class ModalTrainerIslands:
     def __init__(self, modal_ops: Any, cfg: Any, *, name: str, jobs_path: Path,
                  poll_s: float | None = None,
                  tail: Callable[[str, str, IslandEvents], None] | None = None,
-                 sleep: Callable[[float], None] = time.sleep) -> None:
+                 sleep: Callable[[float], None] = time.sleep,
+                 clock: Callable[[], float] = time.time) -> None:
         self.modal_ops = modal_ops
         self.cfg = cfg
         self.name = name
@@ -201,11 +203,15 @@ class ModalTrainerIslands:
         self.poll_s = poll_s
         self._tail = tail or self._tail_thread
         self.sleep = sleep
+        self.clock = clock
         self.jobs: list[_Job] = []
 
     # -- TrainerIslands --------------------------------------------------------
     def launch(self, incarnation: int, resume_from: CutRef | None) -> _Job:
-        envs = {**self.cfg.envs, **island_env(incarnation, resume_from, poll_s=self.poll_s)}
+        # Phase ``submitted`` of this incarnation is the spawn, not the run's launch:
+        # the held-back task was built when the fleet started (T_s, start_phases).
+        envs = {**self.cfg.envs, **island_env(incarnation, resume_from, poll_s=self.poll_s),
+                SUBMITTED_ENV: f"{self.clock():.3f}"}
         call_id = self.modal_ops.spawn(replace(self.cfg, envs=envs))
         self._save_call(incarnation, call_id)
         job = _Job(int(incarnation), str(call_id), IslandEvents())
