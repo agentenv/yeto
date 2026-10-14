@@ -24,21 +24,24 @@ def _batches(n):
     return [torch.randn(3, 6, generator=g) for _ in range(n)]
 
 
-def test_same_shape_restore_matches_continuous_run_bitwise(tmp_path):
+@pytest.mark.parametrize("full", [False, True], ids=["lora", "full-parameter"])
+def test_same_shape_restore_matches_continuous_run_bitwise(tmp_path, full):
     batches = _batches(3)
     # continuous run: 2 steps, then the frozen third batch
-    cont = make_rank(seed=0)
+    cont = make_rank(seed=0, full=full)
     torch.manual_seed(99)
     for b in batches:
         train_step(cont, b)  # the RNG is global: finish the continuous run first
     # cut run: same 2 steps, save, "rebuild" (fresh rank, different init), restore, third batch
-    run = make_rank(seed=0)
+    run = make_rank(seed=0, full=full)
     torch.manual_seed(99)
     for b in batches[:2]:
         train_step(run, b)
     summary = save_cut_shard(run, directory=str(tmp_path), cut_id="c1")
     assert summary["has_optimizer_state"] and summary["has_rng"] and summary["scheduler_samples"] == 8
-    fresh = make_rank(seed=5)
+    assert summary["tuning"] == ("full" if full else "lora")
+    assert summary["adapter_names"] == sorted(params(run))
+    fresh = make_rank(seed=5, full=full)
     torch.manual_seed(12345)  # the rebuilt process has other RNG state
     restored = restore_cut_shard(fresh, directory=str(tmp_path), files=[summary], cut_id="c1")
     assert restored["state_digest"] == summary["state_digest"]
@@ -115,6 +118,20 @@ def test_non_lora_trainable_parameters_are_refused(tmp_path):
     rank = make_rank(0)
     rank.model[0].base.weight.requires_grad_(True)
     assert re.search("other than LoRA", save_cut_shard(rank, directory=str(tmp_path), cut_id="c1")["refused"])
+
+
+def test_a_trainer_without_trainable_parameters_is_refused(tmp_path):
+    rank = make_rank(0, full=True)
+    rank.model[0].requires_grad_(False)
+    assert re.search("no trainable parameters", save_cut_shard(rank, directory=str(tmp_path), cut_id="c1")["refused"])
+
+
+def test_a_lora_cut_does_not_restore_into_a_full_parameter_trainer(tmp_path):
+    rank = make_rank(0)
+    train_step(rank, _batches(1)[0])
+    s = save_cut_shard(rank, directory=str(tmp_path), cut_id="c1")
+    refused = restore_cut_shard(make_rank(0, full=True), directory=str(tmp_path), files=[s], cut_id="c1")
+    assert re.search("adapter names differ", refused["refused"])
 
 
 @pytest.mark.parametrize(

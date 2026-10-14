@@ -8,7 +8,9 @@ and never sets ``--save``/``--load``; a cut is written and read only here.
 
 One shard per rank holds (4.1 audit, ``cut-audit.md``):
 
-* LoRA adapter model copies (bf16 or fp32), keyed by parameter name;
+* the model copies (bf16 or fp32) of the trainable parameters, keyed by
+  parameter name: the LoRA adapters of a LoRA trainer, every trainable
+  parameter of a full-parameter trainer (key ``adapter`` in both cases);
 * the optimizer state keyed by parameter name, including the FP32 main copy
   (``param``), the moments and the step/hyper-parameters -- produced by the
   fork-M5 helpers ``miles.backends.megatron_utils.lora.dp_invariant_state``
@@ -25,8 +27,10 @@ ep, etp_size, edp, edp_size) must match on restore, and a range-tagged
 ranges of the rebuilt optimizer -- no peer shard is read (TP/PP>1 and EP>1
 included). Refused like fork-M5: fp16 (loss-scaler state not saved),
 precision-aware optimizer, partial DistOpt instances, CP>1, and a trainer
-without LoRA adapters; the DP-resharding restore also refuses EP>1 and
-TP/PP>1 with DistOpt. torch / miles are imported lazily.
+whose trainable parameters mix LoRA adapters with others; the DP-resharding
+restore also refuses EP>1 and TP/PP>1 with DistOpt. A full-parameter shard
+holds the whole model copy on every DP rank plus this rank's optimizer range
+(Qwen3-0.6B at DP=1, estimated: 1.2 GB bf16 model + 7.2 GB FP32 master and moments). torch / miles are imported lazily.
 """
 
 from __future__ import annotations
@@ -262,13 +266,25 @@ def _require(actor: Any, backend: Any, *, reshard: bool = False) -> dict[str, in
 
 
 def _adapters(actor: Any, backend: Any) -> list[tuple[str, Any]]:
-    named = [(n, p) for n, p in backend.named_parameters(actor.model) if backend.is_adapter(n)]
-    if not named:
-        raise CutPluginError("no LoRA adapter parameters: only LoRA trainers are covered by the cut (4.1)")
-    trainable = {id(p) for _, p in backend.named_parameters(actor.model) if p.requires_grad}
-    if {id(p) for _, p in named} != trainable:
+    """The parameters a cut carries: the LoRA adapters of a LoRA trainer, else every
+    trainable parameter of a full-parameter trainer (the shard's ``adapter`` entry
+    then holds the full model copy). A mix -- LoRA adapters plus other trainable
+    parameters -- is refused: neither set alone is the trainer's state."""
+    every = backend.named_parameters(actor.model)
+    trainable = [(n, p) for n, p in every if p.requires_grad]
+    adapters = [(n, p) for n, p in every if backend.is_adapter(n)]
+    if not adapters:
+        if not trainable:
+            raise CutPluginError("the trainer has no trainable parameters: nothing to cut")
+        return trainable
+    if {id(p) for _, p in adapters} != {id(p) for _, p in trainable}:
         raise CutPluginError("trainable parameters other than LoRA adapters exist; the cut would miss them")
-    return named
+    return adapters
+
+
+def _tuning(backend: Any, named: list) -> str:
+    """``lora`` or ``full`` (what :func:`_adapters` selected)."""
+    return "lora" if any(backend.is_adapter(n) for n, _ in named) else "full"
 
 
 # --------------------------------------------------------------------------
@@ -569,6 +585,7 @@ def _save(actor: Any, *, directory: str, cut_id: str) -> dict[str, Any]:
         "weight_version": (snap.get("miles_counters") or {}).get("weight_version"),
         "rng_digest": state_digest(rng),
         "components": component_digests({"state": snap, "rng": rng}),
+        "tuning": _tuning(backend, named),
         "adapter_tensors": len(named),
         "adapter_names": sorted(n for n, _ in named),
         "optimizer_names": sorted((snap["optimizer_named"] or {}).get("entries", {})),
