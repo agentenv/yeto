@@ -184,6 +184,21 @@ def test_driver_limit_one_accepts_version_segments_within_the_window(tmp_path):
     _driver(tmp_path, 1, versions=lambda rid: (max(0, rid - 1), rid)).run()
     events = [json.loads(l) for l in (tmp_path / "e.jsonl").read_text().splitlines()]
     assert len([e for e in events if e["event"] == "rl_round_trained"]) == 3
+    # P0-S evidence: each accepted group's generating policy, labelled with the
+    # published hash of its version
+    labels = {e["policy_version"]: e["rl/policy_token"] for e in events if e["event"] == "rl_publication"}
+    policies = [e for e in events if e["event"] == "rl_group_policies"]
+    assert [e["rollout_id"] for e in policies] == [0, 1, 2]
+    for e in policies:
+        first = e["groups"][0]
+        assert first[1] == labels[e["rollout_id"]]
+        assert first[2] == sorted({max(0, e["rollout_id"] - 1), e["rollout_id"]})
+        assert all(g[1] == labels[e["rollout_id"]] and g[2] is None for g in e["groups"][1:])
+
+
+def test_driver_limit_zero_tapes_no_group_policies(tmp_path):
+    _driver(tmp_path, 0).run()
+    assert '"rl_group_policies"' not in (tmp_path / "e.jsonl").read_text()
 
 
 def test_driver_limit_one_refuses_a_group_two_versions_old(tmp_path):

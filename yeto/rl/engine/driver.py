@@ -925,6 +925,14 @@ class IslandDriver:
             )
         if not batch.groups:
             raise PolicyIdentityError(f"rollout {rollout_id} produced no complete group")
+        if limit > 0:
+            # P0-S evidence: the generating policy of every accepted group (its
+            # label carries the weight hash of that version), so a round's
+            # trajectories can be matched against the publications.
+            self.emit("rl_group_policies", rollout_id=rollout_id, groups=[
+                [g.group_id, g.policy_token,
+                 None if g.policy_versions is None else sorted(set(g.policy_versions))]
+                for g in batch.groups])
         if self.eval_overlap is not None:
             self.eval_overlap.after_generate(
                 rollout_id, token=self.expected_token, published_version=self.published_version
