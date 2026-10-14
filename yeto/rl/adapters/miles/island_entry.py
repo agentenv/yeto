@@ -397,14 +397,20 @@ class AlgorithmMismatchError(RuntimeError):
 def verify_ports_algorithm(args, miles_args, launch) -> None:
     """D9/D11: before the island joins outer sync (no bridge exists yet).
 
-    Plugins are re-hashed and imported; the island's algorithm hash is
+    Plugins are re-hashed and imported (a stale source hash: warning event,
+    rl-identity-tiering L9.2); the island's algorithm hash is
     compared with ``--rl-expected-algorithm-sha256`` (mismatch: event +
     refusal; missing: warning event, for manually started islands);
     absorbed flags and unverified allowances are recorded.
     """
 
     algorithm = launch.algorithm
-    algorithm.verify_plugins()
+    for warning in algorithm.verify_plugins():
+        _append_ports_event(args, miles_args, {
+            "event": "rl_plugin_source_mismatch",
+            "level": "warning",
+            "message": warning,
+        })
     from yeto.rl.engine.algorithm import island_problems
 
     problems = island_problems(algorithm, {
@@ -1997,6 +2003,9 @@ def run_miles(
     _configure_grad_audit(args, miles_args)
     require_ports_router_mode(miles_args)
     miles_args.yeto_rl_island_tasks = dict(island_tasks) if island_tasks else None
+    # rl-identity-tiering L9.1 (transition): until the run code pack exists, the
+    # code identity is the attested source tree hash (checked at startup).
+    miles_args.yeto_rl_code_pack_digest = args.source_sha256
     _run_ports(
         args,
         miles_args,

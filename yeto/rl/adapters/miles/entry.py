@@ -2040,6 +2040,7 @@ def run_ports_island(
             miles_args, "yeto_rl_resource_sample_interval_s", None)
         eval_wiring.attach(driver, miles_args, eval_guard)  # rl-eval-difficulty-buckets 2.2/5.2
         driver.island_tasks = getattr(miles_args, "yeto_rl_island_tasks", None)  # P3
+        driver.code_pack_digest = getattr(miles_args, "yeto_rl_code_pack_digest", None)
         driver.start_phases = start_phases  # L0: first_step_done
         if e2_plan is not None:  # TEST ONLY: E2 GPU harness instead of the training loop
             from .e2_harness import HarnessContext, run_harness

@@ -225,12 +225,12 @@ def test_plugin_hash_matches():
         assert FILE_REF.sha256 == hashlib.sha256(handle.read()).hexdigest()
 
 
-def test_plugin_hash_mismatch_reports_both():
+def test_plugin_hash_mismatch_warns_with_both():
+    # rl-identity-tiering L9.2: a stale hash is a warning, not a reject.
     bad = PluginRef(FILE_REF.path, "0" * 64)
-    with pytest.raises(PluginIdentityError, match=f"spec {'0' * 64}, runtime {FILE_REF.sha256}"):
-        bad.verify()
-    with pytest.raises(PluginIdentityError):
-        AlgorithmSpec(plugins=(bad,)).verify_plugins()
+    assert f"spec {'0' * 64}, runtime {FILE_REF.sha256}" in bad.verify()
+    assert AlgorithmSpec(plugins=(bad,)).verify_plugins() == (bad.verify(),)
+    assert FILE_REF.verify() is None
 
 
 def test_plugin_import_failure():

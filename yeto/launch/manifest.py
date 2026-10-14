@@ -29,6 +29,22 @@ def _island_tasks_manifest(args) -> dict:
     return {"island_tasks": {str(island): data.record() for island, data in sorted(plan.items())}}
 
 
+def _code_identity_manifest(args) -> dict:
+    """rl-identity-tiering L9.1 dual write: ``semantic_sha256`` of the prepared
+    algorithm spec and ``code_pack_digest`` (transition: the source tree hash).
+    ``semantic_sha256`` is absent when no spec was prepared."""
+
+    from ..rl.engine.algorithm import AlgorithmSpec
+    from ..provenance import CODE_PACK_MODE_SOURCE_TREE
+
+    out = {"code_pack_digest": getattr(args, "source_sha256", None),
+           "code_pack_mode": CODE_PACK_MODE_SOURCE_TREE}
+    raw = getattr(args, "rl_algorithm_spec_json", None)
+    if raw:
+        out["semantic_sha256"] = AlgorithmSpec.from_dict(json.loads(raw)).semantic_sha256()
+    return out
+
+
 def _write_run_manifest(args) -> dict | None:
     """Record the engine pins actually used (launch.log + <run dir>/run_manifest.json)."""
 
@@ -43,6 +59,7 @@ def _write_run_manifest(args) -> dict | None:
         "miles_commit": _rl.MILES_NEXT_COMMIT,
         "sglang_commit": _rl.SGLANG_NEXT_COMMIT,
         "source_sha256": getattr(args, "source_sha256", None),
+        **_code_identity_manifest(args),
         "cluster_prefix": args.cluster_prefix,
         **_miles_overlay_manifest(args),
         **_island_tasks_manifest(args),
