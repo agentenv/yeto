@@ -86,6 +86,7 @@ from .execution_profile import (
     train_blockers,
 )
 from .leave_reason import leave_reason_for
+from .offpolicy_correction import OFFPOLICY_GATE_EVENT
 from .overlap import EvalOverlap, EvalStarter, overlap_refusal
 from .ports import (
     Placement,
@@ -1259,6 +1260,12 @@ class IslandDriver:
         fields = getattr(batch, "carry_over", None)
         if not fields:
             return
+        fields = dict(fields)
+        gate = fields.pop(OFFPOLICY_GATE_EVENT, None)
+        if gate:  # rl-offpolicy-correction-passthrough D6: its own event per round
+            self.emit(OFFPOLICY_GATE_EVENT, rollout_id=rollout_id,
+                      policy_version=int(getattr(batch, "policy_version", rollout_id)),
+                      t=self.clock(), **self._labels(), **dict(gate))
         groups = getattr(batch, "groups", ()) or ()
         self.emit("rl_rollout_carry_over", rollout_id=rollout_id,
                   policy_version=int(getattr(batch, "policy_version", rollout_id)),

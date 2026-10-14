@@ -63,17 +63,19 @@ def test_limit_drives_staleness_threshold_and_partial_rollout():
     assert not any("staleness" in o for o in vconf.build_overrides(run))
 
 
-def test_verl_declares_stage_two_up_to_limit_one():
+def test_verl_declares_stage_two_up_to_limit_four():
     from yeto.rl.adapters.verl.entry import verl_capabilities
     from yeto.rl.adapters.verl.policy_age import SUPPORT, policy_age_overrides
 
-    assert (SUPPORT.stage, SUPPORT.max_policy_age) == (2, 1)
+    assert (SUPPORT.stage, SUPPORT.max_policy_age) == (2, 4)
     assert policy_age_overrides(0) == ()
     assert policy_age_overrides(1, groups_per_round=8) == (
         "async_training.staleness_threshold=1.0", "async_training.partial_rollout=True",
         "async_training.trigger_parameter_sync_step=1", "async_training.require_batches=1")
     with pytest.raises(PolicyAgeError, match="supports up to stage 2"):
-        policy_age_overrides(2, groups_per_round=8)
+        policy_age_overrides(5, groups_per_round=8)
+    # L6.9: A_hard = 2 maps to staleness_threshold 2 (decoupled PPO needs >= 2)
+    assert "async_training.staleness_threshold=2.0" in policy_age_overrides(2, groups_per_round=8)
     sync_caps = verl_capabilities("sha256:" + "0" * 64)
     assert sync_caps.execution.max_policy_staleness == 0 and sync_caps.placements == {"colocated"}
     fa = verl_capabilities("sha256:" + "0" * 64, fully_async_limit=1)

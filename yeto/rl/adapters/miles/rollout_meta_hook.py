@@ -458,7 +458,8 @@ def carry_over_fields(args: Any, trained_samples: Sequence[Any],
     token = current_policy_token(sink)
     version = token_version(token) if token else None
     fields: dict[str, Any] = {"max_policy_age": _carry.max_policy_age(args)}
-    fields.update(_carry.take_carry_stats(args, version))
+    counts, dropped_lengths = _carry.take_carry_round(args, version)
+    fields.update(counts)
     if version is None:
         return fields
     crossed, total = _carry.cross_version_tokens(trained_samples, version)
@@ -468,12 +469,16 @@ def carry_over_fields(args: Any, trained_samples: Sequence[Any],
         fields.update(_carry.estimate_cross_version_truncation(
             args, trained_samples, version,
             scorer if scorer is not None else _carry.router_prefill_scorer(args)))
+    # rl-offpolicy-correction-passthrough D6: the driver tapes it as offpolicy_gate
+    fields[OFFPOLICY_GATE_EVENT] = _carry.offpolicy_gate(
+        counts, dropped_lengths, trained_samples, fields.pop(_carry.TRUNCATED_BY_TURN, None))
     return fields
 
 
 # IR-3/IR-4 sample-metadata keys written by agentic generate code (codex-harness
 # codex_openenv_generate): summed per rollout into the metadata payload.
 # Neutral names and values live in the core port (decoupling 4.11); re-exported.
+from yeto.rl.engine.offpolicy_correction import OFFPOLICY_GATE_EVENT  # noqa: E402
 from yeto.rl.engine.rollout_meta import (  # noqa: E402
     EXPECTED_POLICY_VERSION_KEY,
     POLICY_AGE_VIOLATION_KEY,
