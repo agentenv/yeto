@@ -272,3 +272,8 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
 
 - Only change: the source hash of `yeto/rl/adapters/miles/rollout_meta_hook.py` `1188451c…` → `a4fa982b…` (the three plugin entries in `plugins`, all 8 samples). Cause: fully_async rounds now report `execution_mode` on the carry-over event (ff6105fc). `algorithm_sha256`, contract hashes, `ports_runtime_fingerprint` and the Miles argv are unchanged.
 - Regenerated with `python tests/decoupling_golden.py --write`.
+
+## S24 cold-start image pin (branch s24-image, 2026-10-14)
+
+- `MILES_NEXT_COMMIT` 386ae3b07 → 17aeb5cb5 (michaellchung/miles `s24-miles-import`: light Ray actors stay off `megatron_utils`, rl-trainer-cold-start-cost L2.1; master port held until use, S23 defect 9). No loss path change; appended to `MILES_FORK_LINEAGE`. `MILES_NEXT_IMAGE` `@sha256:bcd5ffd3…` → `@sha256:b304f857…` (tag 17aeb5c-2fa8801; the layer also carries peft 0.20.0 and the lazy-modelopt Megatron-Bridge `__init__.py`, L2.2–L2.4; build record `openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-14-17aeb5c-2fa8801/`).
+- Golden: in all 8 samples only `backend_identity` (engine_commit, sha256) and `ports_runtime_fingerprint` change with the Miles commit. Algorithm hashes, contract hashes, plugins, Miles argv and `fake_engine_tapes.json` are unchanged. Regenerated with `python tests/decoupling_golden.py --write`; the diff is 24 lines.
