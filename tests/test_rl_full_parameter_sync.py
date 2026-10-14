@@ -677,3 +677,53 @@ def test_close_defaults_to_the_p5_finished_code():
 
     # P5 code table: 0 is FINISHED (LeaveReason.FINISHED once P5 merges).
     assert inspect.signature(FullParameterSync.close).parameters["reason"].default == 0
+
+
+def test_layout_stream_role_splits_only_role_lane_algorithms():
+    from yeto.rl.local_learner import layout_stream_role
+
+    assert layout_stream_role("grpo", "actor") is None
+    assert layout_stream_role("sao", "actor") == "actor"
+    assert layout_stream_role("sao", "critic") == "critic"
+    with pytest.raises(ValueError, match="no trainable role"):
+        layout_stream_role("grpo", "critic")
+    with pytest.raises(ValueError, match="no trainable role"):
+        layout_stream_role("dpo", "actor")
+
+
+@pytest.mark.parametrize(("algorithm", "role", "expected"), [
+    ("grpo", "actor", None),
+    ("sao", "critic", "critic"),
+])
+def test_role_stream_initializes_dense_with_the_plain_layout(monkeypatch, algorithm, role, expected):
+    # P0-1.11 G3-fp probe: the dense (grpo) actor stream passed stream_role="actor",
+    # which ParameterLayout.create refuses for non-SAO algorithms.
+    from yeto.rl.adapters.miles.full_parameter import role_stream as module
+    from yeto.rl.local_learner import ComponentIdentity, ParameterLayout, ParameterSpec
+
+    seen = {}
+
+    class Stop(Exception):
+        pass
+
+    async def fake_initialize(group, **kwargs):
+        seen.update(kwargs)
+        ParameterLayout.create(
+            algorithm=kwargs["algorithm"],
+            components=kwargs["components"],
+            specs=(ParameterSpec(role, "w", (2,), "float32", 2, "tp0"),),
+            num_fragments=1,
+            fragment_strategy="owner_affine",
+            stream_role=kwargs["stream_role"],
+        )
+        raise Stop
+
+    monkeypatch.setattr(module.MilesChunkedFullParameterAdapter, "initialize", fake_initialize)
+    config = replace(
+        _role_stream_config(role, 30100),
+        algorithm=algorithm,
+        component=ComponentIdentity(role, "a" * 40, "c" * 64),
+    )
+    with pytest.raises(Stop):
+        asyncio.run(module.MilesFullParameterRoleStream(config).initialize(object()))
+    assert seen["stream_role"] == expected

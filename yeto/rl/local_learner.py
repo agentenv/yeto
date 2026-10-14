@@ -32,6 +32,20 @@ _GIT_REVISION = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
+def layout_stream_role(algorithm: str, role: str) -> str | None:
+    """The ``stream_role`` a per-role parameter stream lays out with.
+
+    Only role-lane algorithms (SAO) split their roles into separate layouts.
+    A single-role algorithm streams its one role with the plain layout, whose
+    hash carries no role field; ``role`` must still be that algorithm's role.
+    """
+
+    roles = _ROLES_BY_ALGORITHM.get(algorithm)
+    if roles is None or role not in roles:
+        raise ValueError(f"{algorithm!r} has no trainable role {role!r}")
+    return role if algorithm in _ROLE_LANE_ALGORITHMS else None
+
+
 @dataclass(frozen=True, order=True)
 class ComponentIdentity:
     """Immutable identity of one trainable algorithm component."""

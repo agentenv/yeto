@@ -32,7 +32,7 @@ from yeto.rl.adapters.miles.models.chunked_full_parameter import (
 from yeto.rl.adapters.miles.full_parameter.inbound_sink import MilesRayInboundChunkSink
 from yeto.rl.engine.policy_digest import PolicyDigest, TrainerResidentState, WeightsChanged
 from yeto.rl.engine.trainable_state import LAYOUT_FRAGMENTS, UnsupportedLayoutError
-from yeto.rl.local_learner import ComponentIdentity
+from yeto.rl.local_learner import ComponentIdentity, layout_stream_role
 from yeto.rl.trajectory_evidence import TrajectoryBatchEvidence
 
 _LOWER_HEX = frozenset("0123456789abcdef")
@@ -318,7 +318,7 @@ class MilesFullParameterRoleStream:
             group,
             policy_version=0,
             algorithm=self.config.algorithm,
-            stream_role=self.config.role,
+            stream_role=layout_stream_role(self.config.algorithm, self.config.role),
             components=(self.config.component,),
             minimum_fragments=self.config.expected_fragments,
             expected_fragments=self.config.expected_fragments,
