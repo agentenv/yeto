@@ -249,8 +249,12 @@ def _prepare_rl_args(
         )
     if resolve_model_kind(args.model, args.model_kind) != "causal-lm":
         raise ValueError("RL v0 supports only causal language models")
-    if args.tuning != "lora":
-        raise ValueError("RL v0 requires --tuning lora")
+    from ..rl.engine import sample_roles
+
+    if args.tuning != "lora" and not sample_roles.buffer_full_parameter(args):
+        raise ValueError("RL v0 requires --tuning lora (--tuning full: only sampler / trainer "
+                         "islands, --rl-sample-role or --rl-island-sample-role, with "
+                         "--rl-single-island-no-sync)")
     if args.lora_r <= 0:
         raise ValueError("RL v0 requires a positive LoRA rank")
     if args.total_steps <= 0:

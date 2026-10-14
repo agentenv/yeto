@@ -10,13 +10,19 @@ An island has one sample role:
 * ``trainer``: the island trains on groups read from the buffer and releases
   every published policy for the samplers.
 
-The sampler and the trainer are separate single-island launches that mount the
-same checkpoint store (the buffer and the releases live there). This module is
-engine-neutral; the Miles mapping is in ``adapters.miles.buffer_rollout``.
+The sampler and the trainer mount the same checkpoint store (the buffer and the
+releases live there). They are either separate single-island launches
+(``--rl-sample-role``), or one launch of two islands, a *store-coupled pair*
+(``--rl-island-sample-role 0:sampler --rl-island-sample-role 1:trainer``, L5.4):
+there is no syncer, and each island runs as its own one-learner, no-sync island
+(learner id 0 of 1) whose role comes from its island args (:func:`island_args`).
+This module is engine-neutral; the Miles mapping is in
+``adapters.miles.buffer_rollout``.
 """
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from typing import Any
 
@@ -49,8 +55,89 @@ def sample_role(args: Any) -> str:
     return role
 
 
+def island_roles(args: Any, num_islands: int) -> dict[int, str]:
+    """``--rl-island-sample-role ISLAND:ROLE`` entries as {island: role}; {} without
+    them. Raises ValueError on a malformed, out-of-range or repeated entry."""
+    roles: dict[int, str] = {}
+    for item in getattr(args, "rl_island_sample_role", None) or ():
+        island, sep, role = str(item).partition(":")
+        if not sep or not island.strip().isdigit():
+            raise ValueError(f"--rl-island-sample-role takes ISLAND:ROLE, got {item!r}")
+        m = int(island)
+        if not 0 <= m < num_islands:
+            raise ValueError(f"--rl-island-sample-role {item!r}: --gpu has {num_islands} island(s)")
+        if role not in (SAMPLER, TRAINER):
+            raise ValueError(f"--rl-island-sample-role {item!r}: ROLE must be {SAMPLER} or {TRAINER}")
+        if m in roles:
+            raise ValueError(f"--rl-island-sample-role names island {m} twice")
+        roles[m] = role
+    return roles
+
+
+def is_pair(args: Any) -> bool:
+    """Whether the launch is a store-coupled sampler/trainer pair."""
+    return bool(getattr(args, "rl_island_sample_role", None))
+
+
+def island_args(args: Any, island: int, num_islands: int) -> Any:
+    """``args`` as island ``island`` of a pair sees it: a copy with its
+    ``rl_sample_role``, keeping only its own role's option (the sampler's backlog
+    cap, the trainer's wait); ``args`` itself outside a pair."""
+    roles = island_roles(args, num_islands)
+    if not roles:
+        return args
+    out = copy.copy(args)
+    out.rl_sample_role = roles[island]
+    if out.rl_sample_role == SAMPLER:
+        out.rl_sample_wait_s = None
+    else:
+        out.rl_sampler_max_backlog_rounds = None
+    return out
+
+
+def island_learner(args: Any, island: int, num_learners: int) -> tuple[int, int]:
+    """``(learner id, number of learners)`` the island command carries. A pair
+    island is a one-learner no-sync island: (0, 1). The launcher keeps ``island``
+    for the cluster / Modal function name, the tape and the volumes."""
+    return (0, 1) if is_pair(args) else (island, num_learners)
+
+
+def buffer_full_parameter(args: Any) -> bool:
+    """``--tuning full`` on sampler/trainer islands (single or pair, no-sync): the
+    island trains every parameter without the full-parameter sync, since a buffer
+    island has no syncer; the policy reaches the sampler as a store release."""
+    return (getattr(args, "tuning", "lora") == "full"
+            and bool(getattr(args, "rl_single_island_no_sync", False))
+            and (is_pair(args) or sample_role(args) != BOTH))
+
+
+def check_pair(args: Any, num_islands: int) -> None:
+    """Launch checks of a store-coupled pair (nothing outside a pair): exactly two
+    islands, one sampler and one trainer, ``--rl-single-island-no-sync`` (no
+    syncer), no ``--rl-sample-role`` and no external learner; then every island's
+    own role checks on its island args."""
+    roles = island_roles(args, num_islands)
+    if not roles:
+        return
+    if num_islands != 2 or sorted(roles.values()) != [SAMPLER, TRAINER] or len(roles) != 2:
+        raise ValueError("--rl-island-sample-role: a pair is two --gpu islands, one "
+                         f"{SAMPLER} and one {TRAINER} (got {num_islands} island(s), roles "
+                         f"{dict(sorted(roles.items()))})")
+    if sample_role(args) != BOTH:
+        raise ValueError("--rl-island-sample-role replaces --rl-sample-role; give only one")
+    if int(getattr(args, "external_learners", 0) or 0):
+        raise ValueError("--rl-island-sample-role does not take external learners")
+    if not getattr(args, "rl_single_island_no_sync", False):
+        raise ValueError("--rl-island-sample-role needs --rl-single-island-no-sync: the pair "
+                         "has no syncer; each island is a one-learner no-sync island over the "
+                         "shared --rl-checkpoint-store")
+    for m in range(num_islands):
+        check_launch(island_args(args, m, num_islands))
+
+
 def check_launch(args: Any) -> None:
-    """Launch-side checks, before any cloud work. ``both`` checks nothing."""
+    """Launch-side checks of one island's role, before any cloud work. ``both``
+    checks nothing (a pair checks each island with :func:`check_pair`)."""
     role = sample_role(args)
     if role == BOTH:
         for flag, dest in (("--rl-sampler-max-backlog-rounds", "rl_sampler_max_backlog_rounds"),
@@ -60,7 +147,7 @@ def check_launch(args: Any) -> None:
         return
     if not getattr(args, "rl_single_island_no_sync", False):
         raise ValueError(f"--rl-sample-role {role} needs --rl-single-island-no-sync: a sampler "
-                         "and a trainer are separate single-island launches over one store")
+                         "and a trainer are separate no-sync islands over one store")
     if not getattr(args, "rl_checkpoint_store", None):
         raise ValueError(f"--rl-sample-role {role} needs --rl-checkpoint-store (the sample "
                          "buffer and the policy releases live in it)")
@@ -97,7 +184,8 @@ def resolve(args: Any, *, groups_per_round: int) -> SampleBufferConfig | None:
 
 
 def island_flags(args: Any) -> str:
-    """The learner flags the launcher forwards (empty for ``both``)."""
+    """The learner flags the launcher forwards (empty for ``both``); ``args`` are
+    the island args (:func:`island_args`)."""
     role = sample_role(args)
     if role == BOTH:
         return ""

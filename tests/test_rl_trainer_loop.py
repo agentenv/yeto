@@ -298,5 +298,7 @@ def test_switch_on_runs_the_loop_beside_the_controller(tmp_path, monkeypatch):
     assert cloud.membership.tape == [("JOIN", 0), ("LEAVE", 0, LeaveReason.STOPPED)]
     assert cloud.cuts.latest().policy_version == 2
     journal = Journal(launch_loop.journal_dir(args))
-    assert [r["event"] for r in journal.records if r["kind"] == LOOP_KIND] == ["started", "ready", "stopped"]
+    # after run() returned (the samplers ended), the loop drained: data ended -> finished
+    assert [r["event"] for r in journal.records if r["kind"] == LOOP_KIND] == [
+        "started", "ready", "stopped", "finished"]
     journal.close()

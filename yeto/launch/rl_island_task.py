@@ -57,6 +57,8 @@ def _rl_trainable_island_flags(args, learner_id: int, num_learners: int) -> str:
                 f" --sao-context-sha256 {island.context_sha256}")
     lora = f" --lora-r {args.lora_r} --lora-targets {args.lora_targets}"
     if not rl_dense_sweep(args):
+        if getattr(args, "tuning", "lora") == "full":  # L4.6 buffer island (checked at launch)
+            return " --parameter-mode full"
         return lora
     sweep = (f" --parameter-layout-sha256 {args.rl_parameter_layout_sha256}"
              f" --num-learners {num_learners}"

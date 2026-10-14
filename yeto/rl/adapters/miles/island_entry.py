@@ -60,10 +60,12 @@ def parse_args(argv=None):
         SAO_STREAMING_SYNC_PRESET,
     )
 
-    if args.parameter_mode == "full" and args.sync_preset not in FULL_PARAMETER_SYNC_PRESETS:
+    if (args.parameter_mode == "full" and args.sync_preset not in FULL_PARAMETER_SYNC_PRESETS
+            and not _buffer_island(args)):
         parser.error(
             "--parameter-mode full requires a full-parameter --sync-preset "
-            f"({', '.join(sorted(FULL_PARAMETER_SYNC_PRESETS))})"
+            f"({', '.join(sorted(FULL_PARAMETER_SYNC_PRESETS))}) or a no-sync "
+            "--rl-sample-role sampler / trainer island"
         )
     if args.sync_preset == FULL_PARAMETER_SYNC_PRESET and not _trains_base_parameters(args):
         parser.error(
@@ -652,6 +654,14 @@ def _is_sha256(value: Any) -> bool:
     return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
 
 
+def _buffer_island(args) -> bool:
+    """A no-sync sampler / trainer island (L4.6): it has no outer sync, so full
+    parameter mode runs without the full-parameter sync preset."""
+    from yeto.rl.engine.sample_roles import BOTH, sample_role
+
+    return bool(getattr(args, "rl_single_island_no_sync", False)) and sample_role(args) != BOTH
+
+
 def _full_parameter_mode(args, sync_preset: str) -> bool:
     """True for a full-parameter island.
 
@@ -664,8 +674,9 @@ def _full_parameter_mode(args, sync_preset: str) -> bool:
 
     full_mode = getattr(args, "parameter_mode", "lora") == "full"
     full_preset = sync_preset in FULL_PARAMETER_SYNC_PRESETS
-    if full_mode and not full_preset:
-        raise ValueError("full parameter mode needs a full-parameter sync preset")
+    if full_mode and not full_preset and not _buffer_island(args):
+        raise ValueError("full parameter mode needs a full-parameter sync preset "
+                         "(or a no-sync --rl-sample-role sampler / trainer island)")
     if full_preset and not _trains_base_parameters(args):
         raise ValueError(f"the {sync_preset} sync needs full parameter mode or expert-full tuning")
     if full_preset and not full_mode and sync_preset != FULL_PARAMETER_SYNC_PRESET:

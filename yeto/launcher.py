@@ -39,7 +39,7 @@ from .gpu_spec import ClusterSpec, parse_gpu_spec
 from .models import MODEL_WEIGHT_GB
 from .rl.event_echo import TapeCollector as EventCollector
 from .launch.rl_backend import _rl_backend_module
-from .launch.topology import rl_island_args, rl_island_placement_records, rl_island_spec
+from .launch.topology import rl_island_args, rl_island_count, rl_island_placement_records, rl_island_spec
 from .launch.syncer import (
     SYNCER_PORT, island_scheduling_mode, island_syncer_addrs, make_syncer_task, probe_syncer_ports,
     resolve_island_syncer_epoch, rl_role_syncers, role_syncer_commands, syncer_event_tape,
@@ -175,9 +175,13 @@ def _island_task(task_factory, args, spec, m, num_learners, syncer_addr, overrid
     island's billing and drops the checkpoint store of a droppable island."""
     from . import island_overrides as io
     from .cloud import droppable
+    from .rl.engine import sample_roles
 
     iargs = droppable.role_args(io.island_args(rl_island_args(args, m), m, overrides), role)
-    task = task_factory(iargs, spec, m, num_learners, syncer_addr)
+    # L5.4 pair: the island's sample role; it runs as learner 0 of 1 (no syncer).
+    iargs = sample_roles.island_args(iargs, m, rl_island_count(args))
+    learner_id, island_learners = sample_roles.island_learner(args, m, num_learners)
+    task = task_factory(iargs, spec, learner_id, island_learners, syncer_addr)
     io.apply_to_task(task, {**io.island_env(args, m, overrides),
                             **(droppable.role_env(role, spec.cloud, spec.region) if role else {})})
     return task
@@ -910,6 +914,10 @@ def dry_run_plan(args) -> dict:
     head = getattr(args, "controller", "local") == "head"
     if no_sync and head:
         raise ValueError("--rl-single-island-no-sync has no syncer; use --controller local")
+    from .launch import trainer_loop
+    from .rl.engine import sample_roles
+
+    trainer_loop.check(args)  # the launch refuses the same scheduler combinations
     specs = parse_gpu_spec(args.gpu)
     external = max(0, getattr(args, "external_learners", 0) or 0)
     islands = []
@@ -945,6 +953,11 @@ def dry_run_plan(args) -> dict:
 
                 entry["island_role"] = {"role": role, "billing": billing(role),
                                         "rejoin": rejoin_source(role)}
+            if sample_roles.is_pair(args):  # L5.4: per-island role, learner 0 of 1
+                entry["sample_role"] = sample_roles.island_args(
+                    args, learner_id, len(specs)).rl_sample_role
+            if learner_id == trainer_loop.held_island(args):
+                entry["held_by_trainer_scheduler"] = True  # the fleet never starts it
             if task_plan is not None:
                 entry["island_tasks"] = task_plan[learner_id].record()
             if island_overrides.get(learner_id):
@@ -970,6 +983,10 @@ def dry_run_plan(args) -> dict:
         "role_syncers": [] if not rl or no_sync else _dry_run_role_syncers(
             args, len(specs) + external),
         "outer_sync": not no_sync,
+        # rl-trainer-start-stop L5.3b/L5.4: the head's scheduler and the island it owns
+        "trainer_scheduler": (None if not trainer_loop.enabled(args) else {
+            "mode": args.rl_trainer_scheduler, "island": trainer_loop.held_island(args),
+            "interval_s": args.rl_trainer_scheduler_interval}),
         "algorithm_spec_sha256": getattr(args, "rl_expected_algorithm_sha256", None),
         "algorithm_spec": getattr(args, "rl_algorithm_spec_json", None),
         "unverified_mechanisms": list(getattr(args, "rl_allow_unverified_mechanism", None) or ()),

@@ -23,7 +23,9 @@ refuses anything else before any launch.
 
 from __future__ import annotations
 
+import dataclasses
 import sys
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TypeVar
@@ -40,6 +42,7 @@ S1 = "s1"
 MODES = (OFF, S1)
 DEFAULT_INTERVAL_S = 30.0
 DEFAULT_START_SECONDS = 600.0
+DEFAULT_DRAIN_SECONDS = 3600.0
 TRAINER_PRECISION = "bf16"  # the trainer's precision; a convertible node must match it
 JOURNAL_DIR = "trainer-loop"
 
@@ -76,6 +79,10 @@ def add_arguments(group) -> None:
         "--rl-trainer-command-poll-seconds", type=float, default=None,
         help="seconds between two reads of the command file on the trainer island and of "
         "the island events on the head (default 5)")
+    group.add_argument(
+        "--rl-trainer-drain-seconds", type=float, default=DEFAULT_DRAIN_SECONDS,
+        help="after the fleet (the samplers) ended: max seconds the scheduler keeps the "
+        "trainer to consume the rest of the buffer before it stops it (default 3600)")
     group.add_argument(
         "--rl-trainer-start-seconds", type=float, default=DEFAULT_START_SECONDS,
         help="configured trainer start time T_s (seconds); a measured start replaces it")
@@ -135,6 +142,8 @@ def check(args) -> None:
                          "island binding to the cloud layer")
     if args.rl_trainer_scheduler_interval <= 0:
         raise SystemExit("--rl-trainer-scheduler-interval must be positive")
+    if getattr(args, "rl_trainer_drain_seconds", DEFAULT_DRAIN_SECONDS) < 0:
+        raise SystemExit("--rl-trainer-drain-seconds must be >= 0")
     if binding_factory is default_binding:
         _check_modal_island(args)
 
@@ -180,19 +189,34 @@ def run_with_trainer_loop(args, run: Callable[[], T], *, island: TrainerIsland |
                           factory: Callable[[Any, TrainerIsland | None], CloudTrainerBinding]
                           | None = None) -> T:
     """``run()`` (the fleet controller); with the switch on, the trainer loop ticks
-    on its own thread meanwhile and stops the trainer when ``run`` returns.
-    ``island``: the held-back trainer island (:func:`held_island`)."""
+    on its own thread meanwhile. ``island``: the held-back trainer island
+    (:func:`held_island`).
+
+    When ``run`` returns, the fleet (the samplers) has ended: the data ended. The
+    loop keeps ticking up to ``--rl-trainer-drain-seconds`` so the trainer consumes
+    the rest of the buffer and the loop finishes (backlog under one batch); then
+    the trainer is stopped. When ``run`` raises, the trainer is stopped at once."""
     if not enabled(args):
         return run()
     factory = binding_factory if factory is None else factory
     if factory is None:
         check(args)  # raises
     binding = factory(args, island)
+    fleet_ended = threading.Event()
+    cloud_data_ended = binding.data_ended
+    binding = dataclasses.replace(
+        binding, data_ended=lambda: fleet_ended.is_set() or bool(cloud_data_ended()))
     with Journal(journal_dir(args)) as journal:
         runner = TrainerLoopThread(build(args, binding, journal),
                                    args.rl_trainer_scheduler_interval).start()
         try:
-            return run()
+            result = run()
+            fleet_ended.set()
+            drain_s = float(getattr(args, "rl_trainer_drain_seconds", DEFAULT_DRAIN_SECONDS))
+            if not runner.join(drain_s):
+                print(f"[launcher] trainer scheduler: buffer not drained after {drain_s:.0f} s "
+                      "since the fleet ended; stopping the trainer", file=sys.stderr, flush=True)
+            return result
         finally:
             runner.stop()
             if runner.error is not None:

@@ -77,11 +77,17 @@ def _prepare_ports_algorithm(args) -> None:
             len(parse_gpu_spec(args.gpu)) if getattr(args, "gpu", None) else 1
         ) + max(0, getattr(args, "external_learners", 0) or 0)
         no_sync = bool(getattr(args, "rl_single_island_no_sync", False))
-        if no_sync and (islands != 1 or getattr(args, "rl_sync_preset", "strict-avg")
+        from ..rl.engine import sample_roles
+
+        # L5.4: a store-coupled sampler/trainer pair is two no-sync islands
+        # (sample_roles.check_pair holds its own rules).
+        no_sync_islands = 2 if sample_roles.is_pair(args) else 1
+        if no_sync and (islands != no_sync_islands or getattr(args, "rl_sync_preset", "strict-avg")
                         != "strict-avg" or getattr(args, "rl_initial_adapter", None)):
             raise AlgorithmSpecError(
                 "--rl-single-island-no-sync needs exactly one island (one --gpu entry, no "
-                "external learners), the default sync preset and no initial adapter"
+                "external learners; two with --rl-island-sample-role), the default sync "
+                "preset and no initial adapter"
             )
         args.rl_allow_unverified_mechanism = list(
             check_unverified_allowance(
@@ -368,7 +374,10 @@ def _check_ports_infra_switches(args) -> None:
         raise ValueError("--rl-boot-only needs --rl-single-island-no-sync")
     from ..rl.engine import sample_roles
 
-    sample_roles.check_launch(args)  # L4.6 --rl-sample-role (both checks nothing)
+    if sample_roles.is_pair(args):  # L5.4 --rl-island-sample-role: per-island roles
+        sample_roles.check_pair(args, rl_island_count(args))
+    else:
+        sample_roles.check_launch(args)  # L4.6 --rl-sample-role (both checks nothing)
     pre_run = getattr(args, "rl_island_pre_run", None)
     if pre_run is not None:
         if not getattr(args, "rl_single_island_no_sync", False):
