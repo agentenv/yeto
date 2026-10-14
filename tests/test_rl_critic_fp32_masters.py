@@ -270,6 +270,24 @@ def test_allowance_strict_avg_critic_on_two_islands_decoupled_still_refused():
     assert critic_run_problems(ppo, {"sync_preset": "strict-avg"}) == []
 
 
+def test_allowance_sao_streaming_full_has_a_critic_channel():
+    """sao-streaming-full requires the SAO critic, which has its own role
+    syncer (P0-D8); without the allowance no multi-island SAO run could start
+    (P0-1.11 GPU check, 2026-10-14)."""
+
+    names = [
+        "advantage_estimators:ppo", "execution:critic", "features:critic_multi_update",
+        "features:gae_decoupled", "features:gae_length_adaptive", "features:sao_dis",
+        "features:value_hl_gauss",
+    ]
+    assert check_unverified_allowance(
+        names, islands=2, outer_sync=True, sync_preset="sao-streaming-full"
+    ) == tuple(sorted(names))
+    with pytest.raises(AlgorithmSpecError, match="single-island"):
+        check_unverified_allowance(["execution:critic", "losses:cispo"], islands=2,
+                                   outer_sync=True, sync_preset="sao-streaming-full")
+
+
 def test_launcher_two_island_critic_strict_avg_passes_decoupled_refused(tmp_path, _fake_sky, _no_modal_listing):  # noqa: F811
     from test_rl_algorithm_provenance import _launcher_args
 
