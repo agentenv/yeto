@@ -73,8 +73,12 @@ class RoundCutCheckpoint:
         # set by resume(): where the rollout data source continues (the cut's cursor)
         self.resume_data_cursor: dict[str, int] | None = None
         # rl-trainer-start-stop D4: the durable sample buffer's consumed watermark,
-        # written into the cut record (None: the run reads no sample buffer)
-        self.buffer_watermark: Any = None  # callable() -> int | None
+        # written into the cut record (None: the run reads no sample buffer).
+        # buffer_watermark(next_rollout_id) commits and returns the position after the
+        # last trained round; buffer_resume(watermark) continues there after a restore
+        # (buffer_rollout.wire_sample_buffer sets both).
+        self.buffer_watermark: Any = None  # callable(int) -> int | None
+        self.buffer_resume: Any = None  # callable(int) -> int
 
     # ---------------------------------------------------------------- pointer
     @property
@@ -173,7 +177,8 @@ class RoundCutCheckpoint:
             checkpoint_id=cut_id, trigger=(trigger or MANUAL) if final else PERIODIC,
             outer_step=info["outer_version"], island_steps={ISLAND: info["local_step"]},
             completed_groups=consumed_n, completed_groups_digest=consumed_sha,
-            buffer_watermark=self.buffer_watermark() if callable(self.buffer_watermark) else None)
+            buffer_watermark=(self.buffer_watermark(int(rollout_id)) if callable(self.buffer_watermark)
+                              else None))
         saved = recovery.save(cut, store=ctl.store, write=lambda record: self._write_and_sync(info, record))
         info[CUT_KEY] = saved[CUT_KEY]
         synced = saved["synced"]
@@ -215,6 +220,8 @@ class RoundCutCheckpoint:
 
         info = self.pointer()
         if info is None:
+            if callable(self.buffer_resume):
+                self.buffer_resume(0)
             return None
         started = time.monotonic()
         rid = int(info["next_rollout_id"])
@@ -260,6 +267,12 @@ class RoundCutCheckpoint:
         if in_flight is not None:
             checks["in_flight"] = in_flight
         self.resume_data_cursor = _cut_data_cursor(manifest)
+        if callable(self.buffer_resume):
+            watermark = (info.get(CUT_KEY) or {}).get("buffer_watermark")
+            if watermark is None:
+                raise RoundCutError(f"round cut {info['cut_id']} has no sample buffer watermark "
+                                    "but this trainer reads the sample buffer")
+            checks["buffer_watermark"] = int(self.buffer_resume(int(watermark)))
         driver.local_step = int(info["local_step"])
         self.resumed = dict(info)
         if info.get("lr_at_next_round") is not None:
