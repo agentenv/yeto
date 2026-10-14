@@ -95,6 +95,10 @@ MODAL_FULL_NODE: dict[str, int] = {"H100": 8, "H200": 8, "B200": 8, "A100-80GB":
 TAPE_MOUNT = "/yeto-tape"
 TAPE_SOURCE_DIR = "/root/yeto-output"
 TAPE_SYNC_INTERVAL_S = 30.0
+# Files outside the tape directory that the tape also mirrors (flattened to
+# "<parent dir>.<file>"): a full-parameter island's trajectory evidence lives
+# in a private mkdtemp directory under ~/yeto-rl that ends with the container.
+TAPE_MIRROR_GLOBS = ("/root/yeto-rl/trajectory-evidence-*/rollout-*.json",)
 TAPE_SUFFIXES = (".jsonl", ".json", ".csv", ".log", ".txt", ".pt")  # .pt: verl raw log-prob dumps
 TAPE_MAX_FILE_BYTES = 256 * 1024 * 1024
 MODAL_CPU_CORES_PER_GPU = 4
@@ -410,8 +414,10 @@ class TapeSync:
     Copies whole files that changed (size or mtime); never deletes."""
 
     def __init__(self, src: str, dst: str, commit, interval_s: float = TAPE_SYNC_INTERVAL_S,
-                 extra: dict[str, str] | None = None) -> None:
+                 extra: dict[str, str] | None = None,
+                 mirror_globs: tuple[str, ...] = ()) -> None:
         self.src, self.dst, self.commit, self.interval_s = Path(src), Path(dst), commit, interval_s
+        self.mirror_globs = tuple(mirror_globs)  # absolute globs, flattened into dst
         self.extra = dict(extra or {})  # file name -> text written once
         self._seen: dict[str, tuple[int, int]] = {}
         self._stop = threading.Event()
@@ -454,23 +460,30 @@ class TapeSync:
         copied = 0
         if self.src.is_dir():
             for f in sorted(self.src.iterdir()):
-                if not f.is_file() or not f.name.endswith(TAPE_SUFFIXES):
-                    continue
-                st = f.stat()
-                if st.st_size > TAPE_MAX_FILE_BYTES:
-                    continue
-                key = (st.st_size, st.st_mtime_ns)
-                if self._seen.get(f.name) == key:
-                    continue
-                target = self._target_name(f.name)
-                tmp = self.dst / f".{target}.tmp"
-                tmp.write_bytes(f.read_bytes())
-                os.replace(tmp, self.dst / target)
-                self._seen[f.name] = key
-                copied += 1
+                if f.is_file() and f.name.endswith(TAPE_SUFFIXES):
+                    copied += self._copy_if_changed(f, f.name)
+        for pattern in self.mirror_globs:
+            root = Path(pattern).anchor or "."
+            for f in sorted(Path(root).glob(str(Path(pattern).relative_to(root)))):
+                if f.is_file() and f.name.endswith(TAPE_SUFFIXES):
+                    copied += self._copy_if_changed(f, f"{f.parent.name}.{f.name}")
         self.commit()
         self.syncs += 1
         return copied
+
+    def _copy_if_changed(self, f: Path, name: str) -> int:
+        st = f.stat()
+        if st.st_size > TAPE_MAX_FILE_BYTES:
+            return 0
+        key = (st.st_size, st.st_mtime_ns)
+        if self._seen.get(name) == key:
+            return 0
+        target = self._target_name(name)
+        tmp = self.dst / f".{target}.tmp"
+        tmp.write_bytes(f.read_bytes())
+        os.replace(tmp, self.dst / target)
+        self._seen[name] = key
+        return 1
 
     def _safe_sync(self) -> None:
         try:
@@ -736,7 +749,7 @@ def island_main(cfg_json: str) -> int:
         os.makedirs(TAPE_SOURCE_DIR, exist_ok=True)
         tape = TapeSync(
             TAPE_SOURCE_DIR, f"{TAPE_MOUNT}/{cfg.tape_subdir}/rank{rank}",
-            _volume_commit(cfg.tape_volume_name),
+            _volume_commit(cfg.tape_volume_name), mirror_globs=TAPE_MIRROR_GLOBS,
         )
     hostmem = None
     interval = hostmem_interval_s(cfg)

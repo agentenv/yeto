@@ -727,3 +727,42 @@ def test_role_stream_initializes_dense_with_the_plain_layout(monkeypatch, algori
     with pytest.raises(Stop):
         asyncio.run(module.MilesFullParameterRoleStream(config).initialize(object()))
     assert seen["stream_role"] == expected
+
+
+def test_role_stream_reports_initial_cut_upload_progress_on_timeout(monkeypatch, capsys):
+    # P0-1.11 run 20261014c: the initial cut timed out after 900 s with no
+    # sign of how much INIT_PARAMS had left the island; the wait now reports it.
+    from yeto.protocol import SendProgress
+    from yeto.rl.adapters.miles.full_parameter import role_stream as module
+
+    class StalledClient:
+        def check_health(self):
+            pass
+
+        def drain_updates(self):
+            return []
+
+        def send_progress(self):
+            return SendProgress(
+                bytes_sent=3 * 2**20, queued_chunks=7, reconnects=1, connected=True
+            )
+
+    monkeypatch.setattr(module, "INITIAL_CUT_REPORT_SECONDS", 0.0)
+    config = replace(_role_stream_config("actor", 30100), wait_timeout=0.05)
+    adapter = SimpleNamespace(
+        layout=SimpleNamespace(fragments=SimpleNamespace(num_fragments=2))
+    )
+    stream = module.MilesFullParameterRoleStream(config)
+
+    with pytest.raises(TimeoutError, match="initial cut"):
+        stream._wait_for_initial_fragments(StalledClient(), adapter)
+
+    lines = [
+        line for line in capsys.readouterr().err.splitlines()
+        if line.startswith("[yeto-initial-cut]")
+    ]
+    assert lines[0].startswith("[yeto-initial-cut] learner 0 waiting: 0/2 fragment(s)")
+    assert "timed out: 0/2 fragment(s)" in lines[-1]
+    assert lines[-1].endswith(
+        "sent 3.0 MiB, 7 chunk(s) queued, 1 redial(s), connected=True"
+    )

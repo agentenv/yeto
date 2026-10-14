@@ -488,6 +488,25 @@ def test_tape_sync_copies_changed_files_and_commits(tmp_path):
     assert len(commits) == sync.syncs >= 3 and not sync.errors
 
 
+def test_tape_sync_mirrors_trajectory_evidence_outside_the_tape_dir(tmp_path):
+    # P0-1.11 run 20261014b: the full-parameter evidence stayed in a private
+    # directory of a stopped container and could not be read back.
+    src, dst = tmp_path / "out", tmp_path / "vol" / "rank0"
+    src.mkdir()
+    evidence = tmp_path / "rl" / "trajectory-evidence-0-abc"
+    evidence.mkdir(parents=True)
+    (evidence / "rollout-00000000.json").write_text('{"schema": 4}')
+    (evidence / "scratch.bin").write_text("x")
+    pattern = str(tmp_path / "rl" / "trajectory-evidence-*" / "rollout-*.json")
+    sync = mr.TapeSync(str(src), str(dst), lambda: None, interval_s=3600,
+                       mirror_globs=(pattern,))
+    assert sync.sync_once() == 1
+    copied = dst / "trajectory-evidence-0-abc.rollout-00000000.json"
+    assert copied.read_text() == '{"schema": 4}'
+    assert sync.sync_once() == 0
+    assert mr.TAPE_MIRROR_GLOBS == ("/root/yeto-rl/trajectory-evidence-*/rollout-*.json",)
+
+
 def test_tape_sync_errors_never_raise(tmp_path):
     def boom():
         raise OSError("volume gone")
