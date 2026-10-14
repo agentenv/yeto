@@ -12,13 +12,17 @@
    "whiten": false
   },
   "correction": {
+   "batch_normalize": false,
    "function": null,
+   "level": "token",
+   "lower": null,
    "method": "none",
    "mismatch_metrics": false,
    "opsm_delta": null,
-   "tis_clip": null,
-   "tis_clip_low": null,
-   "use_rollout_logprobs": false
+   "ratio_mask": "none",
+   "upper": null,
+   "use_rollout_logprobs": false,
+   "veto": null
   },
   "entropy_coef": 0.0,
   "execution": {
