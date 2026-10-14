@@ -40,12 +40,15 @@ class SampleBufferConfig:
 
     ``store``: the checkpoint store path that holds the buffer and the releases;
     ``max_backlog_groups``: sampler admission cap (unconsumed groups);
-    ``wait_s``: trainer, max seconds to wait for one full round."""
+    ``wait_s``: trainer, max seconds to wait for one full round;
+    ``min_round_s``: sampler, min seconds from one round start to the next (a
+    throttle, so a test can make the sampler slower than the trainer)."""
 
     role: str
     store: str
     max_backlog_groups: int | None = None
     wait_s: float | None = None
+    min_round_s: float | None = None
 
 
 def sample_role(args: Any) -> str:
@@ -92,6 +95,7 @@ def island_args(args: Any, island: int, num_islands: int) -> Any:
         out.rl_sample_wait_s = None
     else:
         out.rl_sampler_max_backlog_rounds = None
+        out.rl_sampler_min_round_seconds = None
     return out
 
 
@@ -141,6 +145,7 @@ def check_launch(args: Any) -> None:
     role = sample_role(args)
     if role == BOTH:
         for flag, dest in (("--rl-sampler-max-backlog-rounds", "rl_sampler_max_backlog_rounds"),
+                           ("--rl-sampler-min-round-seconds", "rl_sampler_min_round_seconds"),
                            ("--rl-sample-wait-s", "rl_sample_wait_s")):
             if getattr(args, dest, None) is not None:
                 raise ValueError(f"{flag} needs --rl-sample-role sampler or trainer")
@@ -160,6 +165,10 @@ def check_launch(args: Any) -> None:
     if rounds is not None and (role != SAMPLER or int(rounds) < 1):
         raise ValueError("--rl-sampler-max-backlog-rounds needs --rl-sample-role sampler "
                          "and a value >= 1")
+    min_round_s = getattr(args, "rl_sampler_min_round_seconds", None)
+    if min_round_s is not None and (role != SAMPLER or not float(min_round_s) > 0):
+        raise ValueError("--rl-sampler-min-round-seconds needs --rl-sample-role sampler "
+                         "and a value > 0")
     wait_s = getattr(args, "rl_sample_wait_s", None)
     if wait_s is not None and (role != TRAINER or not float(wait_s) > 0):
         raise ValueError("--rl-sample-wait-s needs --rl-sample-role trainer and a value > 0")
@@ -176,11 +185,14 @@ def resolve(args: Any, *, groups_per_round: int) -> SampleBufferConfig | None:
                          "(--rl-resume-store on the island)")
     rounds = getattr(args, "rl_sampler_max_backlog_rounds", None)
     wait_s = getattr(args, "rl_sample_wait_s", None)
+    min_round_s = getattr(args, "rl_sampler_min_round_seconds", None)
     return SampleBufferConfig(
         role=role, store=str(store),
         max_backlog_groups=(int(groups_per_round) * int(rounds or DEFAULT_MAX_BACKLOG_ROUNDS)
                             if role == SAMPLER else None),
-        wait_s=None if wait_s is None else float(wait_s))
+        wait_s=None if wait_s is None else float(wait_s),
+        min_round_s=(float(min_round_s) if role == SAMPLER and min_round_s is not None
+                     else None))
 
 
 def island_flags(args: Any) -> str:
@@ -192,6 +204,8 @@ def island_flags(args: Any) -> str:
     flags = f" --rl-sample-role {role}"
     if getattr(args, "rl_sampler_max_backlog_rounds", None) is not None:
         flags += f" --rl-sampler-max-backlog-rounds {int(args.rl_sampler_max_backlog_rounds)}"
+    if getattr(args, "rl_sampler_min_round_seconds", None) is not None:
+        flags += f" --rl-sampler-min-round-seconds {float(args.rl_sampler_min_round_seconds)!r}"
     if getattr(args, "rl_sample_wait_s", None) is not None:
         flags += f" --rl-sample-wait-s {float(args.rl_sample_wait_s)!r}"
     return flags

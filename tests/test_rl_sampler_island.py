@@ -59,6 +59,9 @@ def test_role_both_is_the_default_and_adds_nothing():
     ({"rl_sample_role": "trainer"}, "--rl-max-policy-age >= 1"),
     ({"rl_sampler_max_backlog_rounds": 0}, "a value >= 1"),
     ({"rl_sample_wait_s": 3.0}, "--rl-sample-role trainer"),
+    ({"rl_sampler_min_round_seconds": 0.0}, "a value > 0"),
+    ({"rl_sample_role": "trainer", "rl_max_policy_age": 1, "rl_sampler_min_round_seconds": 5.0},
+     "--rl-sampler-min-round-seconds needs --rl-sample-role sampler"),
     ({"rl_sample_role": "x"}, "expected one of"),
 ])
 def test_launch_refuses_unsupported_role_combinations(kw, message):
@@ -84,6 +87,20 @@ def test_launch_forwards_the_role_flags_and_the_island_resolves_them():
     assert sample_roles.resolve(trainer, groups_per_round=8).wait_s == 30.0
     with pytest.raises(ValueError, match="--rl-resume-store"):
         sample_roles.resolve(SimpleNamespace(rl_sample_role="trainer"), groups_per_round=8)
+
+
+def test_sampler_min_round_seconds_is_forwarded_and_resolved_for_the_sampler_only():
+    args = _launch_args(rl_sampler_min_round_seconds=240.0)
+    sample_roles.check_launch(args)
+    assert " --rl-sampler-min-round-seconds 240.0" in sample_roles.island_flags(args)
+    island = SimpleNamespace(rl_sample_role="sampler", rl_resume_store="/mnt/store",
+                             rl_sampler_min_round_seconds=240.0)
+    assert sample_roles.resolve(island, groups_per_round=8).min_round_s == 240.0
+    pair = SimpleNamespace(rl_island_sample_role=["0:sampler", "1:trainer"],
+                           rl_sampler_min_round_seconds=240.0, rl_sample_wait_s=9.0,
+                           rl_sampler_max_backlog_rounds=None)
+    assert sample_roles.island_args(pair, 1, 2).rl_sampler_min_round_seconds is None
+    assert sample_roles.island_args(pair, 0, 2).rl_sampler_min_round_seconds == 240.0
 
 
 def test_role_flags_exist_on_both_layers():
@@ -260,6 +277,25 @@ def test_sampler_loads_releases_and_waits_at_the_backlog_cap(tmp_path):
     assert sampler.served == [1, 2]
     assert sampler.names().count("rl_sampler_backlog_full") == 2
     assert buffer.data_ended and sampler.names()[-1] == "rl_sampler_data_end"
+
+
+def test_sampler_throttle_keeps_min_round_seconds_between_round_starts(tmp_path):
+    releases = PolicyReleaseStore(CheckpointStore(tmp_path))
+    sampler = _Sampler(tmp_path, releases, max_backlog_groups=100, rounds=3)
+    now = [0.0]
+    slept = []
+    sampler.loop.clock = lambda: now[0]
+    sampler.loop.min_round_s = 10.0
+    sampler.loop.sleep = slept.append
+
+    def generate(rid, inner=sampler.generate):
+        now[0] += 4.0  # a round takes 4 s
+        inner(rid)
+
+    sampler.loop.generate = generate
+    assert sampler.loop.run() == 3
+    assert slept == [6.0, 6.0]  # not after the last round
+    assert sampler.names().count("rl_sampler_throttle") == 2
 
 
 def test_sampler_keeps_the_last_version_while_the_trainer_is_stopped(tmp_path):

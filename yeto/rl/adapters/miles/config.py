@@ -467,7 +467,8 @@ LEAF_POLICY: dict[str, _Check] = {
     # L4.6: the buffer rollout functions (translate_run_config); the island
     # environment and the sampler loop read the rest.
     "sample_buffer": _ok,
-    **{f"sample_buffer.{name}": _ok for name in ("role", "store", "max_backlog_groups", "wait_s")},
+    **{f"sample_buffer.{name}": _ok
+       for name in ("role", "store", "max_backlog_groups", "wait_s", "min_round_s")},
 }
 
 

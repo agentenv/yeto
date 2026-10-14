@@ -145,6 +145,17 @@ def test_t_s_falls_back_to_configuration():
     assert S1Scheduler(S1Config(a_hard=2, start_seconds=7.0)).start_seconds() == 7.0
 
 
+def test_fixed_t_s_overrides_the_measured_start_and_journals_both():
+    records = []
+    s = S1Scheduler(S1Config(a_hard=2, start_seconds=30.0, fixed_start_seconds=True),
+                    start_events=lambda: [_summary(650.0)],
+                    record=lambda kind, tx_id=None, **f: records.append(f), clock=_Clock())
+    assert s.start_seconds() == 30.0
+    s.decide(EMPTY, TRAINING)
+    assert records[-1]["inputs"]["start_seconds"] == 30.0
+    assert records[-1]["inputs"]["measured_start_seconds"] == 650.0
+
+
 def test_measured_t_s_changes_q_s1():
     events: list[dict] = []
     s = S1Scheduler(S1Config(a_hard=10, start_seconds=500.0, alpha=0.5, batch_seconds=10.0),

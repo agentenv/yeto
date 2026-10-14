@@ -10,6 +10,8 @@
   trainer starts for the full batches left, also below ``Q_on``.
 * ``T_s`` is the last measured start (``trainer_start_summary.total_s``, the event of
   rl-trainer-cold-start-cost L0.1) or, without a measurement, the configured value.
+  With ``fixed_start_seconds`` the configured value is an override (a check run uses
+  a small one to get several stops); the measured value is still journaled.
 * Prices are accepted and ignored (S3 is not in this change).
 
 The idle start time is the only state. It is a wall-clock time, so a scheduler
@@ -53,12 +55,14 @@ def last_start_seconds(events: Iterable[Mapping[str, Any]]) -> float | None:
 @dataclass(frozen=True)
 class S1Config:
     """``start_seconds``: configured ``T_s``, used when no start was measured.
-    ``batch_seconds`` (``T_b``) is needed only with ``alpha``."""
+    ``batch_seconds`` (``T_b``) is needed only with ``alpha``. ``fixed_start_seconds``:
+    use ``start_seconds`` even after a start was measured."""
 
     a_hard: int
     start_seconds: float
     alpha: float | None = None
     batch_seconds: float | None = None
+    fixed_start_seconds: bool = False
 
     def __post_init__(self) -> None:
         if self.a_hard < 0:
@@ -90,8 +94,11 @@ class S1Scheduler:
         self.idle_since: float | None = None
 
     # ------------------------------------------------------------ inputs
+    def measured_start_seconds(self) -> float | None:
+        return last_start_seconds(self._start_events()) if self._start_events else None
+
     def start_seconds(self) -> float:
-        measured = last_start_seconds(self._start_events()) if self._start_events else None
+        measured = None if self.config.fixed_start_seconds else self.measured_start_seconds()
         return self.config.start_seconds if measured is None else measured
 
     def q_on(self, start_seconds: float) -> float:
@@ -151,7 +158,9 @@ class S1Scheduler:
                      inputs={"at": now, "lifecycle_state": state.value,
                              "batches": backlog.batches, "samples": backlog.samples,
                              "data_ended": backlog.data_ended,
-                             "start_seconds": t_s, "q_on": q_on},
+                             "start_seconds": t_s, "q_on": q_on,
+                     **({"measured_start_seconds": self.measured_start_seconds()}
+                        if self.config.fixed_start_seconds else {})},
                      decision=_decision_dict(decision))
 
     def restore(self, records: Iterable[Mapping[str, Any]]) -> bool:

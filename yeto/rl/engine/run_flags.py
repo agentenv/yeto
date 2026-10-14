@@ -563,6 +563,9 @@ _RESUME = (
     shared_flag("--rl-sampler-max-backlog-rounds", type=int, default=None, metavar="N",
                 help="--rl-sample-role sampler: wait while the buffer holds N rounds the trainer "
                 "has not read (as of its last release); default 4"),
+    shared_flag("--rl-sampler-min-round-seconds", type=float, default=None, metavar="S",
+                help="--rl-sample-role sampler: start one round at most every S seconds (a "
+                "throttle; a check run uses it to make the trainer idle); default no throttle"),
     shared_flag("--rl-sample-wait-s", type=float, default=None, metavar="S",
                 help="--rl-sample-role trainer: max seconds to wait for one full round from "
                 "the buffer (default 3600)"),
