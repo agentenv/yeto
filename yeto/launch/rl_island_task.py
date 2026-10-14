@@ -6,6 +6,7 @@ import json
 import os
 import shlex
 import sys
+import time
 
 from ..gpu_spec import ClusterSpec
 from ..hw.catalog import COMPAT_GROUP_ENV, compat_group
@@ -13,6 +14,7 @@ from .code_pack import code_pack_island_flag, code_workdir
 from .rl_backend import _miles_overlay, _rl_backend_module
 from .remote_setup import (
     HF_TOKEN_ENV, HF_TOKEN_PATH, PORTS_MEGATRON_PATH, WAN_TUNING, island_pre_run_block,
+    model_prefetch,
 )
 from .topology import (
     multinode_env_prelude, multinode_network_tier, rl_cross_node_flags, rl_island_bundle_map_flag,
@@ -32,6 +34,7 @@ from .island_tasks import island_task_data
 from .rl_ports import _ports_algorithm_flags
 from .rl_args import sao_contract_mounts
 from .images import _miles_source_setup
+from ..rl.engine.start_phases import SUBMITTED_ENV, shell_mark, shell_reset
 from .in_vm_docker import (
     DOCKER_LOGIN_UNSET, IN_VM_DOCKER_CLOUDS, in_vm_docker_run, in_vm_docker_setup,
 )
@@ -40,6 +43,12 @@ from .codex import (
     SANDBOX_TOKEN_IN_ISLAND_CHECK, codex_harness_launch, modal_sandbox_secret_name,
     require_sandbox_modal_token,
 )
+
+
+def submitted_unix() -> float:
+    """Phase ``submitted`` of the island being built (a seam for byte-equal task tests)."""
+
+    return time.time()
 
 
 def _rl_trainable_island_flags(args, learner_id: int, num_learners: int) -> str:
@@ -274,15 +283,7 @@ def make_miles_island_task(
     if is_local_reference(model):
         prefetch = ": # local model; no Hub prefetch"
     else:
-        revision = (
-            f" --revision {shlex.quote(args.model_revision)}"
-            if args.model_revision
-            else ""
-        )
-        prefetch = (
-            f"(nohup huggingface-cli download {shlex.quote(model)}{revision} "
-            ">/tmp/hf-prefetch.log 2>&1 &) || true"
-        )
+        prefetch = model_prefetch(model, args.model_revision)
     worker_model_fetch = ""
     if spec.num_nodes > 1 and not is_local_reference(model):
         # Same call and cache as the learner's own snapshot_download on the
@@ -317,6 +318,8 @@ def make_miles_island_task(
         **({"CRITIC_SYNCER_ADDR": critic_syncer_address(syncer_addr)}
            if rl_needs_critic(args) and syncer_addr != "none" else {}),
         "LEARNER_ID": str(learner_id),
+        # rl-trainer-cold-start-cost L0: phase ``submitted`` (launcher clock)
+        SUBMITTED_ENV: f"{submitted_unix():.3f}",
         # decoupling 7.7a: "<vendor>-<card>" from the card catalog; an unknown
         # card raises here, before any cloud spend (no default).
         COMPAT_GROUP_ENV: compat_group(spec.gpu),
@@ -374,7 +377,10 @@ def make_miles_island_task(
         envs["YETO_RUN_GROUP"] = args.cluster_prefix
         if os.environ.get("WANDB_API_KEY"):
             envs["WANDB_API_KEY"] = os.environ["WANDB_API_KEY"]
-    setup_steps = [WAN_TUNING, HF_TOKEN_ENV, miles_setup, sglang_setup]
+    # rl-trainer-cold-start-cost L0: the setup shell records its start/end and
+    # the run shell records ray_ready (start_phases.MARK_DIR); the island replays them.
+    setup_steps = [shell_reset(), shell_mark("container_ready"),
+                   WAN_TUNING, HF_TOKEN_ENV, miles_setup, sglang_setup]
     if getattr(args, "wandb", False):
         setup_steps.append(
             "pip install -q wandb || echo '[yeto-setup] wandb install failed; "
@@ -424,6 +430,7 @@ def make_miles_island_task(
     # dataclasses.asdict on it: "asdict() should be called on dataclass
     # instances"; B1 nsmoke). SkyPilot exports secrets into setup/run, so both
     # scripts unset them first. Default (public image): nothing injected.
+    setup_steps.append(shell_mark("setup_done"))
     registry_login = registry_login_for(args)
     login_unset = DOCKER_LOGIN_UNSET if registry_login else ""
     setup_script = login_unset + "\n".join(setup_steps)
@@ -467,6 +474,7 @@ def make_miles_island_task(
             '--port=6379 --include-dashboard=true --temp-dir="$MILES_RAY_DIR"'
             + rl_island_ray_gpus(args, spec)
             + (" --dashboard-host=0.0.0.0" if spec.num_nodes > 1 else "") + "\n"
+            f"  {shell_mark('ray_ready')}\n"
             "  trap stop_miles_ray EXIT\n"
             # Miles calls ray.init(address="auto"), which reads RAY_ADDRESS
             # first and otherwise sky's /tmp/ray/ray_current_cluster file.

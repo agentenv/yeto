@@ -369,8 +369,8 @@ class _ModalVolumePackStore:
         return modal.Volume.from_name(self.name, create_if_missing=create)
 
     def put(self, digest: str, data: bytes) -> str:
-        # The pack is made before the first island starts, so the run's Volume may not
-        # exist yet; create it as the island launch would (modal_runner).
+        # The first start stores the pack before the island creates the run's
+        # checkpoint volume (modal_runner, create_if_missing), so create it here too.
         rel = "/".join(p for p in (self.prefix, PACK_DIR, f"{digest}.tar") if p)
         with self._volume(create=True).batch_upload(force=True) as batch:
             batch.put_file(io.BytesIO(data), "/" + rel)
