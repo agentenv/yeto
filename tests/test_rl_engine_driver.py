@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from yeto.rl import miles
+from yeto.rl.adapters.miles.legacy import engine as miles
 from yeto.rl.bridge import BridgeConfig
 from yeto.rl.core import (
     LocalRoundStats,

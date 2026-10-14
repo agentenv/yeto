@@ -23,8 +23,12 @@
 //! Outer optimizer: SGD with Nesterov momentum, state held here on the
 //! syncer, with defaults lr=0.7 and μ=0.9.
 
-/// w_m = c_tokens² / c_steps ("quantity × quality").
-pub fn learner_weight(c_tokens: u64, c_steps: u32) -> f64 {
+/// w_m = c_tokens² / c_steps ("quantity × quality"). The only definition of the
+/// learner merge weight: strict pushes (server.rs) and elastic deltas
+/// (elastic.rs) both call it; Python `island_ledger.merge_weight` is locked to
+/// it by tests/test_rl_inter_island_rust_golden.py. `c_steps` is u64 so the
+/// elastic wire value needs no narrowing (u32 strict values widen losslessly).
+pub fn learner_weight(c_tokens: u64, c_steps: u64) -> f64 {
     if c_steps == 0 {
         0.0
     } else {
@@ -343,6 +347,26 @@ mod tests {
 
     fn norm(v: &[f32]) -> f64 {
         v.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt()
+    }
+
+    /// rl-code-quality-cleanup 2.5: the Python copy (yeto/rl/engine/island_ledger.py
+    /// merge_weight) writes this fixture (tests/test_rl_inter_island_rust_golden.py);
+    /// learner_weight must give the same f64, bit for bit.
+    #[test]
+    fn python_merge_weight_golden_matches() {
+        let text = include_str!("../tests/fixtures/merge_weight_golden.txt");
+        let mut n = 0;
+        for line in text.lines() {
+            let (lhs, rhs) = line.split_once(" => ").expect("golden line");
+            let mut it = lhs.split(' ');
+            let t: u64 = it.next().unwrap().parse().unwrap();
+            let c: u64 = it.next().unwrap().parse().unwrap();
+            let want: f64 = rhs.parse().unwrap();
+            let got = learner_weight(t, c);
+            assert_eq!(got.to_bits(), want.to_bits(), "{t} {c}: Rust {got:?} != Python {want:?}");
+            n += 1;
+        }
+        assert!(n >= 10);
     }
 
     #[test]

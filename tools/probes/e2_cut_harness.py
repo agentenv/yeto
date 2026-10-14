@@ -362,7 +362,7 @@ from pathlib import Path
 from types import SimpleNamespace
 cmd, harness_path = sys.argv[1], sys.argv[2]
 argv = shlex.split(cmd.split("python3 -m yeto.rl.adapters.miles.island_entry", 1)[1].replace("$LEARNER_ID", "0"))
-from yeto.rl import learner
+from yeto.rl.adapters.miles import island_entry as learner
 from yeto.rl.engine.run_config import resolve_rl_run_config
 out = {"checks": []}
 args = learner.parse_args(argv)
@@ -400,7 +400,7 @@ if "--load" in miles_argv:
 if getattr(args, "rl_deterministic_trainer", False) and "--deterministic-mode" not in miles_argv:
     problems.append("--rl-deterministic-trainer did not reach the Miles argv")
 if os.path.exists(harness_path):
-    from yeto.rl.engine.miles_adapter.e2_harness import plan_problems
+    from yeto.rl.adapters.miles.e2_harness import plan_problems
     plan = json.loads(Path(harness_path).read_text())
     problems += plan_problems(plan)
     i = miles_argv.index("--lora-dropout") if "--lora-dropout" in miles_argv else None
@@ -408,7 +408,7 @@ if os.path.exists(harness_path):
     if plan.get("lora_dropout") is not None and dropout != plan["lora_dropout"]:
         problems.append(f"Miles --lora-dropout {dropout} != plan {plan['lora_dropout']} "
                         "(the in-learner harness would stop as environment_blocked)")
-    from yeto.rl.engine.miles_adapter.cut_plugin import config_problems
+    from yeto.rl.adapters.miles.cut_plugin import config_problems
     ns = SimpleNamespace(fp16="--fp16" in miles_argv,
                          use_precision_aware_optimizer="--use-precision-aware-optimizer" in miles_argv)
     problems += config_problems(ns)

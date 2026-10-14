@@ -53,7 +53,7 @@ def learner_argv(flags_text: str) -> list[str]:
 
 
 def build_launch(flags_text: str):
-    from yeto.rl import learner
+    from yeto.rl.adapters.miles import island_entry as learner
     from yeto.rl.engine.run_config import resolve_rl_run_config
 
     from learner_shim import with_trainer_edges

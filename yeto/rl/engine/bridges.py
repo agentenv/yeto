@@ -12,6 +12,18 @@ Island progress checkpoints keep the legacy on-disk formats (strict schema 3,
 decoupled schema 4) through the core progress module
 (:mod:`yeto.rl.engine.progress`, shared with the legacy engine); they never
 contain LoRA tensors or optimizer state.
+
+Sync modes (rl-code-quality-cleanup 2.6; the one place these rules are written
+down, kept identical in openspec spec ``rl-codebase-consistency``).  The island
+delta is ``local - base`` in ``StrictRlBridge.submit_local_state`` (strict) and
+the fragment bridges in ``yeto.rl.decoupled`` (decoupled); the merge is on the
+Rust syncer.
+
+| mode | merge weight | staleness | finish |
+|---|---|---|---|
+| strict (``StrictAvgSync``, ``DualStrictAvgSync`` for the critic) | syncer ``--learner-weight equal`` (launcher RL default); ``tokens2-over-steps`` = ``merge::learner_weight`` when chosen | ``--max-base-lag 0``: every island trains from the exact global version v and pushes against v; quorum = all islands | stop when the committed version reaches ``global_rounds``; ``finish`` checks the final policy equals the committed one |
+| decoupled (``DecoupledSync``) | same syncer flags as strict (``equal``, ``--max-base-lag 0``), per fragment | fragments rotate with ``--pipeline`` fragments in flight; each fragment is merged against its own fragment version | stop when the syncer is finalizing or a submission reaches ``total_fragment_steps``; ``learner_budget_steps`` consolidates into one final cut |
+| elastic (``ElasticAvgSync``) | ``merge_weight`` = ``merge::learner_weight`` (tokens^2 / steps); a catch-up island has weight 0 on its join version; a late delta is carried with ``carry_gamma^lag`` | a delta with lag > ``DEFAULT_MAX_CARRY_LAG`` (2) is rejected (``carry_lag_exceeded``); samples at most ``MAX_SAMPLE_OUTER_LAG`` (2) outer steps stale; step at quorum ``theta`` (0.75) of capacity, at least ``q_min`` (1) | the syncer answers FINISHED after ``total_steps``, and keeps answering for ``final_grace_s`` (default: the soft deadline) |
 """
 
 from __future__ import annotations

@@ -18,7 +18,7 @@ import yeto.rl.bridge as bridge_module
 import yeto.rl.core as core_module
 from yeto.fragments import MERGE_AVG
 from yeto.protocol import BcastFragment, FinalFragment, FinalManifest, PullRequest
-from yeto.rl import miles
+from yeto.rl.adapters.miles.legacy import engine as miles
 from yeto.rl.bridge import BridgeConfig, StrictRlBridge
 from yeto.rl.core import (
     CanonicalTensorSpec,

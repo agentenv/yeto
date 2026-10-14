@@ -64,6 +64,60 @@ SGLANG_NEXT_UPSTREAM_COMMIT = "571212b636baca45e10fa3b4da11a289123f3235"
 # n17-qwen3coder-single-call (2fa880182 = 4e4148f1b + qwen3_coder honors
 # parallel_tool_calls=false under tool_choice=auto: at most one tool call; S17 N17).
 SGLANG_NEXT_COMMIT = "2fa880182eefdb31e64d8ea70317be27f9f32121"
+# Fork lineage on michaellchung/miles yeto/ports, oldest first; the single
+# source for every "this fork commit carries X" set (rl-code-quality-cleanup
+# 0.7).  Each entry is the previous one plus the change named here; the newest
+# is MILES_NEXT_COMMIT.  Append a commit here and the loss-variant set
+# (algos/loss_variants.FORK_COMMITS) and the Miles declaration pins
+# (adapters/miles/entry.py) include it with no other edit.
+MILES_FORK_LINEAGE: tuple[str, ...] = (
+    # 0af62f4d: LoRA bridge honours calculate_per_token_loss (g1c).
+    "0af62f4d48ed6a5b185c257578d8f7e22312aa87",
+    # 5c1b49eb: fast-forward of 0af62f4d with the 2b loss variants
+    # (--policy-loss-variant, --sapo-tau-*, --gmpo-log-clip-*).
+    "5c1b49ebccbc7508c1d9ef89eacc2db3e448b6ba",
+    "2f23a0fca9b80f6a7300da401703c343014b03c0",  # + F-R1 (placement/worker files only)
+    "fb04d6ffa30edc28c7ba0a2e88802a84bbbd28f9",  # + M5 (LoRA dp_invariant_state.py only)
+    "e3a11ab38cbb7fd911b23fdd62a4eb6dfbb1c841",  # + M5 error text/docstring/tests
+    # 1023269 = e3a11ab3 + M3 (Qwen3.8-Next LoRA layout) + A27 (worker loss / bounded
+    # weight-update group); no loss_hub file.
+    "1023269412bf4e54a1d95c8d2deaee795871aa72",
+    # c35702e = + A27-2 (857fc9592) engine-failure propagation; no loss path.
+    "c35702eefcf2862cee155e46870e6ad30568d2c6",
+    # 8bc52237a = + s16-raw-lora-disagg; no loss path.
+    "8bc52237a1102306abd8f89a2ea2090aa2df6850",
+    # efbbc63ea = + s18-abort-discard-stats; rollout bookkeeping only.
+    "efbbc63ea0e8c6dcbc200ad5df5bc56badfce7bf",
+    # 2f7871fb2 = + inference_rollout_train.abort tally; rollout bookkeeping only.
+    "2f7871fb2e80d37420b16ef81f001c7b0ba8e32e",
+    # ddce20992 = + s18-agentic-suspend; rollout scheduling only.
+    "ddce20992c9ee82270a22e259e9e2bf55f3053d1",
+    # 64b591a4b = + critic family + rl-algo-supplement metrics (S19 #1); new flags
+    # default off, loss bitwise unchanged with defaults.
+    "64b591a4bec1ffa37fb089d3e3b99c84773b1ffc",
+)
+
+
+def miles_fork_lineage_from(commit: str) -> frozenset[str]:
+    """``commit`` and every later commit of :data:`MILES_FORK_LINEAGE`."""
+    return frozenset(MILES_FORK_LINEAGE[MILES_FORK_LINEAGE.index(commit):])
+
+
+# Critic-family fork (a separate chain, local, on c35702e), oldest first; the
+# newest entry is the critic fork pin (algos/critic_fork.CRITIC_FORK_PIN).
+CRITIC_FORK_LINEAGE: tuple[str, ...] = (
+    "6e7365b602ecf5d83d16169e87f4d78f4daf5f86",  # yeto-critic-c357
+    "6574a9c82edeed17f4b00bc64db6c7cd6b45cb39",  # yeto-critic-c357-tied: + value head on language_model
+)
+
+# torch_memory_saver preload patch used by the SSH harness (was a separate pin
+# in yeto/rl/ssh_harness.py).
+TMS_PRELOAD_PATCH_REPOSITORY = "https://github.com/fzyzcjy/torch_memory_saver"
+TMS_PRELOAD_PATCH_BASE_COMMIT = "fdb09ad342f8d150e11afe719f798453cef742ad"
+TMS_PRELOAD_PATCH_COMMIT = "d7a3a51bce723a80736dabf233017b927de03df8"
+TMS_PRELOAD_BASE_BINARY_SHA256 = (
+    "c26551247616cabb0bb79dbd26abb61a688a4bb47c9b6a6f9873cfc98093640d"
+)
 MILES_LEGACY_PINS = MilesRevisionPins(MILES_REPOSITORY, MILES_COMMIT)
 MILES_NEXT_PINS = MilesRevisionPins(MILES_NEXT_REPOSITORY, MILES_NEXT_COMMIT)
 # radixark/miles:dev multi-arch index (upstream docker/Dockerfile at

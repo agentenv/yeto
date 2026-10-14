@@ -22,8 +22,10 @@ _ROLES_BY_ALGORITHM = {
     # rl-algo-critic-family D4: critic as a second role, own layout lane
     "ppo": frozenset({"actor", "critic"}),
 }
-# Algorithms whose roles may be laid out as separate role lanes (stream_role).
-_ROLE_LANE_ALGORITHMS = frozenset({"sao", "ppo"})
+# Algorithms whose roles may be laid out as separate role lanes (stream_role):
+# SAO streaming only.  The PPO role lane had no production caller (critic sync
+# is DualStrictAvgSync) and was removed, rl-code-quality-cleanup 2.1.
+_ROLE_LANE_ALGORITHMS = frozenset({"sao"})
 _PARAMETER_NAME = re.compile(r"[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,511}\Z")
 _SHARD_ID = re.compile(r"[a-z0-9][a-z0-9_.-]{0,127}\Z")
 _GIT_REVISION = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
@@ -115,7 +117,7 @@ class ParameterLayout:
             algorithm not in _ROLE_LANE_ALGORITHMS
             or stream_role not in _ROLES_BY_ALGORITHM[algorithm]
         ):
-            raise ValueError("role-scoped parameter streams require an SAO role (or a PPO role)")
+            raise ValueError("role-scoped parameter streams require an SAO role")
         ordered_components = tuple(sorted(components))
         ordered_specs = tuple(sorted(specs))
         component_roles = {component.role for component in ordered_components}

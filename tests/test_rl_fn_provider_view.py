@@ -79,7 +79,7 @@ def _view_probe(snapshot: Path, model: str) -> str:
     return f"""
         import dataclasses
         from types import SimpleNamespace
-        from yeto.rl import flash_next_provider as fnp
+        from yeto.rl.adapters.miles.models import flash_next_provider as fnp
         args = SimpleNamespace(model={model!r})
         assert fnp.is_flash_next(args, {str(snapshot)!r})
         assert fnp.is_flash_next(SimpleNamespace(model="/x/local"), {str(snapshot)!r})
@@ -163,7 +163,7 @@ def test_view_matches_fp_fn_provider(snapshots):
 def test_name_and_shape_variant_must_agree(snapshots):
     body = f"""
         from types import SimpleNamespace
-        from yeto.rl import flash_next_provider as fnp
+        from yeto.rl.adapters.miles.models import flash_next_provider as fnp
         try:
             fnp.flash_next_provider(SimpleNamespace(model="Qwen/Qwen3.8-Flash-Next"),
                                     {str(snapshots['4layer'])!r})
@@ -179,7 +179,7 @@ def test_missing_miles_alias_registration_is_explicit(snapshots):
     body = f"""
         from types import SimpleNamespace
         sys.modules['miles'] = None
-        from yeto.rl import flash_next_provider as fnp
+        from yeto.rl.adapters.miles.models import flash_next_provider as fnp
         try:
             fnp.flash_next_provider(SimpleNamespace(model="CharyZeng/Qwen3.8-Flash-Next-4layer"),
                                     {str(snapshots['4layer'])!r})
@@ -195,7 +195,7 @@ def test_missing_miles_alias_registration_is_explicit(snapshots):
 def test_non_flash_next_models_are_not_routed(tmp_path):
     from types import SimpleNamespace
 
-    from yeto.rl import flash_next_provider as fnp
+    from yeto.rl.adapters.miles.models import flash_next_provider as fnp
 
     (tmp_path / "config.json").write_text(json.dumps({"model_type": "qwen3_5_moe"}))
     assert not fnp.is_flash_next(SimpleNamespace(model="Qwen/Qwen3.5-35B-A3B"), tmp_path)
@@ -214,7 +214,7 @@ def test_run_miles_fn8s_reaches_ports_argv_without_megatron(snapshots):
         import _pytest.monkeypatch as _m
         from rl_e2e_launch import island_run, learner_from_run
         from fp_fn import fnrun_cli
-        from yeto.rl import learner
+        from yeto.rl.adapters.miles import island_entry as learner
         from yeto.rl.engine import run_config
         from yeto.rl.adapters.miles import config as mac
         from yeto.rl.adapters.miles import state as mas

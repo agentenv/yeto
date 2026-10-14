@@ -26,6 +26,13 @@ _MILES_PIN_NAMES = frozenset((
     "NEBIUS_BAKED_IMAGES",
     "MILES_NEXT_IMAGE_SGLANG_ROOT",
     "MilesRevisionPins",
+    "MILES_FORK_LINEAGE",
+    "CRITIC_FORK_LINEAGE",
+    "miles_fork_lineage_from",
+    "TMS_PRELOAD_PATCH_REPOSITORY",
+    "TMS_PRELOAD_PATCH_BASE_COMMIT",
+    "TMS_PRELOAD_PATCH_COMMIT",
+    "TMS_PRELOAD_BASE_BINARY_SHA256",
     "default_rl_image",
 ))
 

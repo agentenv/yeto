@@ -7,17 +7,17 @@ import time
 
 
 if os.environ.get("YETO_DSV4_EXPERT_CLONE") == "1":
-    from yeto.rl.sglang_deepseek_v4_clone import install
+    from yeto.rl.adapters.miles.models.deepseek_v4.sglang_clone import install
 
     install()
 
 if os.environ.get("YETO_DSV4_CLONE_ONLY_LORA") == "1":
-    from yeto.rl.deepseek_v4_clone_lora import install
+    from yeto.rl.adapters.miles.models.deepseek_v4.clone_lora import install
 
     install()
 
 if os.environ.get("YETO_DSV4_EXPERT_FULL") == "1":
-    from yeto.rl.deepseek_v4_expert_full_runtime import install
+    from yeto.rl.adapters.miles.models.deepseek_v4.expert_full_runtime import install
 
     install()
 

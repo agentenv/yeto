@@ -9,9 +9,17 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import re
+
+from yeto.rl.engine import island_ledger
 from yeto.rl.engine.island_ledger import CrossIslandLedger, DeltaEntry
 
-FIXTURE = Path(__file__).resolve().parents[1] / "syncer/tests/fixtures/elastic_ledger_golden.txt"
+REPO = Path(__file__).resolve().parents[1]
+FIXTURE = REPO / "syncer/tests/fixtures/elastic_ledger_golden.txt"
+# rl-code-quality-cleanup 2.5: Python merge_weight vs Rust merge::learner_weight.
+WEIGHT_FIXTURE = REPO / "syncer/tests/fixtures/merge_weight_golden.txt"
+WEIGHT_CASES = ((0, 0), (0, 4), (7, 0), (1, 1), (37, 4), (91, 4), (50, 5), (4096, 3),
+                (1 << 20, 7), (123457, 13), (2**32 - 1, 1), (5, 2**32 + 9), (10**9, 999983))
 # Plain-text format (the syncer has no JSON dependency): one line per op,
 # "<op args> => <expected>"; floats are Python repr (round-trip exact).
 PARAMS = {"quorum_theta": 0.75, "carry_gamma": 0.5, "q_min": 1, "max_carry_lag": 2}
@@ -130,5 +138,46 @@ def test_fixture_is_current():
     assert FIXTURE.read_text() == render(generate())
 
 
+def render_weights() -> str:
+    """"<c_tokens> <c_steps> => <weight repr>"; read by
+    syncer/src/merge.rs::tests::python_merge_weight_golden_matches."""
+    return "".join(f"{t} {c} => {island_ledger.merge_weight(t, c)!r}\n" for t, c in WEIGHT_CASES)
+
+
+def test_merge_weight_fixture_is_current():
+    """Python's merge_weight copy (island-local ledger, no Rust build) is
+    locked to the Rust learner_weight through this fixture: the Rust test
+    replays it bit for bit."""
+    assert WEIGHT_FIXTURE.read_text() == render_weights()
+
+
+def _rust_const(name: str) -> int:
+    text = (REPO / "syncer/src/elastic.rs").read_text()
+    m = re.search(rf"pub const {name}: u\d+ = (\d+);", text)
+    assert m, f"{name} not found in syncer/src/elastic.rs"
+    return int(m.group(1))
+
+
+def test_lag_bounds_match_rust():
+    pairs = {
+        "MAX_SAMPLE_OUTER_LAG vs StalenessPolicy.max_outer_lag":
+            (_rust_const("MAX_SAMPLE_OUTER_LAG"), island_ledger.StalenessPolicy().max_outer_lag),
+        "DEFAULT_MAX_CARRY_LAG vs island_ledger.DEFAULT_MAX_CARRY_LAG":
+            (_rust_const("DEFAULT_MAX_CARRY_LAG"), island_ledger.DEFAULT_MAX_CARRY_LAG),
+        "golden PARAMS max_carry_lag vs island_ledger.DEFAULT_MAX_CARRY_LAG":
+            (PARAMS["max_carry_lag"], island_ledger.DEFAULT_MAX_CARRY_LAG),
+    }
+    for what, (rust, python) in pairs.items():
+        assert rust == python, f"{what}: Rust {rust} != Python {python}"
+
+
+def test_fixture_has_a_lag_over_the_bound_rejected():
+    lines = FIXTURE.read_text().splitlines()
+    assert "submit 3 0 50 5 => delta_rejected carry_lag_exceeded" in lines
+    # island 3 submits base 0 after advance to v3: lag 3 > max_carry_lag 2.
+    assert island_ledger.DEFAULT_MAX_CARRY_LAG == 2
+
+
 if __name__ == "__main__" and "--write" in sys.argv:
     FIXTURE.write_text(render(generate()))
+    WEIGHT_FIXTURE.write_text(render_weights())

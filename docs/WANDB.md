@@ -81,7 +81,7 @@ count — so a curve can be filtered by cloud, region, or GPU.
 
 ## RL islands
 
-An RL island runs MILES behind `yeto.rl.learner`, so there is no inner
+An RL island runs MILES behind `yeto.rl.adapters.miles.island_entry`, so there is no inner
 loop here to instrument — but the island already keeps its own structured
 event tape (`--event-tape`, written by `_append_rl_event`), carrying every
 rollout round, fragment broadcast, fragment push, and strict-invariant

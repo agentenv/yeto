@@ -482,7 +482,7 @@ def test_two_islands_ref_model_checked_before_joining(tmp_path):
     verify_ports_algorithm (called before any bridge, P0 test_learner_checks_before_the_bridge)."""
 
     from test_rl_miles_adapter_config import make_config
-    from yeto.rl import learner as rl_learner
+    from yeto.rl.adapters.miles import island_entry as rl_learner
     from yeto.rl.adapters.miles import config as mc
 
     spec = kl_spec()
@@ -652,7 +652,7 @@ def _kl_island(tmp_path, spec, syncer, joins, *, learner_id, model_revision):
     the driver with strict-avg outer sync (the bridge joins in sync.start)."""
 
     import test_rl_engine_driver as td
-    from yeto.rl import learner as rl_learner
+    from yeto.rl.adapters.miles import island_entry as rl_learner
     from yeto.rl.engine.bridges import StrictAvgSync
     from yeto.rl.engine.driver import EventTape, IslandDriver
     from yeto.rl.engine.fake import fake_capabilities
@@ -684,7 +684,7 @@ def _kl_island(tmp_path, spec, syncer, joins, *, learner_id, model_revision):
 
 def test_fake_two_islands_ref_mismatch_fails_before_outer_sync(tmp_path):
     import test_rl_engine_driver as td
-    from yeto.rl import learner as rl_learner
+    from yeto.rl.adapters.miles import island_entry as rl_learner
 
     spec = kl_spec(revision=td.MODEL_REVISION)
     engine = td._engine()
@@ -776,7 +776,7 @@ def test_learner_binds_ref_source_and_override(tmp_path):
     """3.3: the learner passes --model / --megatron-ref-load to the island check."""
 
     from test_rl_miles_adapter_config import make_config
-    from yeto.rl import learner as rl_learner
+    from yeto.rl.adapters.miles import island_entry as rl_learner
     from yeto.rl.adapters.miles import config as mc
 
     spec = kl_spec()

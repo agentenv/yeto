@@ -34,7 +34,7 @@ from yeto.rl import (
     SGLANG_COMMIT,
     SGLANG_REPOSITORY,
 )
-from yeto.rl import learner as rl_learner
+from yeto.rl.adapters.miles import island_entry as rl_learner
 from yeto.rl.codex_backend import (
     QWEN35_08B_MODEL,
     QWEN35_08B_REVISION,
@@ -1550,7 +1550,7 @@ def test_miles_runtime_accepts_only_exact_staged_source(tmp_path, monkeypatch):
 def test_external_router_starts_and_hands_miles_its_address(monkeypatch):
     """Modal RL islands: Miles' router spawn missed its 30 s deadline, so
     the learner starts the standalone router and passes its address."""
-    from yeto.rl import learner
+    from yeto.rl.adapters.miles import island_entry as learner
 
     http_utils = types.ModuleType("miles.utils.http_utils")
     http_utils.find_available_port = lambda start: start

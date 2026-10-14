@@ -9,9 +9,9 @@ The critic is a second trainable role next to the actor:
   initialization source and its content hash, critic weight hash, value
   metrics; :func:`check_critic_layouts` refuses islands whose critic (or actor)
   layouts differ;
-* :class:`TwoRoleStrictAvg` -- strict-avg of actor and critic as ONE round:
-  actor first, then critic; the round commits only if both averages succeed,
-  otherwise both roles keep the previous round (decision 1, 2026-10-06);
+* critic sync over the wire is ``yeto.rl.engine.bridges.DualStrictAvgSync``
+  (the in-process ``TwoRoleStrictAvg`` had no production caller and was
+  deleted, rl-code-quality-cleanup 2.1);
 * :class:`CriticCheckpointStore` -- critic weights + optimizer state per
   round; restore refuses an actor/critic round mismatch.
 
@@ -24,7 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -46,10 +46,6 @@ class CriticLayoutMismatch(CriticStateError):
 
 class CriticRoundMismatch(CriticStateError):
     pass
-
-
-class RoleAverageFailed(CriticStateError):
-    """One role's average failed; the round was not committed."""
 
 
 def _sha(name: str, value: str | None, *, optional: bool = False) -> None:
@@ -166,66 +162,7 @@ def check_critic_layouts(receipts: Mapping[int, CriticRoundReceipt]) -> None:
             )
 
 
-# --------------------------------------------------------------------------
-# 4.2 strict-avg of both roles as one round
-# --------------------------------------------------------------------------
-
 Tensors = Mapping[str, torch.Tensor]
-
-
-def mean_average(states: Sequence[Tensors]) -> dict[str, torch.Tensor]:
-    names = set(states[0])
-    if any(set(s) != names for s in states):
-        raise ValueError("islands disagree on the parameter names")
-    return {n: torch.stack([s[n].detach().float() for s in states]).mean(0) for n in names}
-
-
-@dataclass(frozen=True)
-class CommittedRound:
-    version: int
-    actor: dict[str, torch.Tensor]
-    critic: dict[str, torch.Tensor]
-
-    @property
-    def actor_sha256(self) -> str:
-        return critic_weights_sha256(self.actor)
-
-    @property
-    def critic_sha256(self) -> str:
-        return critic_weights_sha256(self.critic)
-
-
-class TwoRoleStrictAvg:
-    """Strict-avg of actor + critic: actor first, then critic, commit both or none."""
-
-    def __init__(self, actor: Tensors, critic: Tensors, *,
-                 average_actor: Callable[[Sequence[Tensors]], dict] = mean_average,
-                 average_critic: Callable[[Sequence[Tensors]], dict] = mean_average) -> None:
-        self.committed = CommittedRound(0, dict(actor), dict(critic))
-        self.average_actor = average_actor
-        self.average_critic = average_critic
-
-    def round(self, local: Mapping[int, tuple[Tensors, Tensors]], *,
-              receipts: Mapping[int, CriticRoundReceipt] | None = None) -> CommittedRound:
-        """``local``: island -> (actor, critic) trained from the committed round."""
-
-        if receipts is not None:
-            check_critic_layouts(receipts)
-        islands = sorted(local)
-        try:
-            actor = self.average_actor([local[i][0] for i in islands])
-        except Exception as error:
-            raise RoleAverageFailed(f"actor average failed: {error}") from error
-        try:
-            critic = self.average_critic([local[i][1] for i in islands])
-        except Exception as error:
-            raise RoleAverageFailed(
-                f"critic average failed after the actor average: {error}; round "
-                f"{self.committed.version + 1} is not committed, both roles stay at "
-                f"round {self.committed.version}"
-            ) from error
-        self.committed = CommittedRound(self.committed.version + 1, actor, critic)
-        return self.committed
 
 
 # --------------------------------------------------------------------------

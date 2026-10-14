@@ -3333,7 +3333,7 @@ def _miles_source_setup(rl_engine: str = "ports", overlay: str | None = None) ->
     if overlay is not None and rl_engine != "ports":
         raise ValueError("a Miles overlay needs the ports engine")
     if rl_engine == "ports":
-        from .rl.miles_overlay import overlay_setup
+        from .rl.adapters.miles.overlay import overlay_setup
 
         def checkout(
             path: str, repository: str, commit: str, refreshed_flag: str = ""
@@ -4145,7 +4145,7 @@ def make_miles_island_task(
             " --initial-adapter-sha256 "
             f"{shlex.quote(args.rl_initial_adapter_sha256)}"
         )
-    from .rl.miles_overlay import resolve_overlay
+    from .rl.adapters.miles.overlay import resolve_overlay
 
     if getattr(_rl_backend_module(args, "launch_flags"), "NEEDS_MILES_SOURCE", True):
         miles_setup, sglang_setup = _miles_source_setup(
@@ -7868,7 +7868,7 @@ def _miles_overlay_manifest(args, engine: str) -> dict:
 
     if engine != "ports":
         return {}
-    from .rl.miles_overlay import overlay_record, resolve_overlay
+    from .rl.adapters.miles.overlay import overlay_record, resolve_overlay
 
     record = overlay_record(resolve_overlay(args))
     return {"miles_overlay": record} if record else {}

@@ -23,7 +23,7 @@ cli = ["--gpu", "nebius:2x2xl40s@eu-north1", "--on-demand", "--model", "Qwen/Qwe
 run = island_run(tuple(cli), mp)
 tmp = Path(tempfile.mkdtemp())
 args, env = learner_from_run(run, tmp / "home")
-from yeto.rl import learner
+from yeto.rl.adapters.miles import island_entry as learner
 from yeto.rl.engine.run_config import resolve_rl_run_config
 class GPTModelProvider(SimpleNamespace): pass
 prov = GPTModelProvider(hidden_size=1024, num_attention_heads=16, num_layers=28, ffn_hidden_size=3072, num_query_groups=8, kv_channels=128,

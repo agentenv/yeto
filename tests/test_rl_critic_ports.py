@@ -236,16 +236,15 @@ def _component(role):
     return ComponentIdentity(role=role, model_revision="c" * 40, config_hash="d" * 64)
 
 
-def test_local_learner_ppo_roles_and_role_lanes():
+def test_local_learner_ppo_roles_and_no_ppo_role_lane():
     specs = [ParameterSpec(role="actor", name="w", shape=(2,), dtype="float32", numel=2),
              ParameterSpec(role="critic", name="w", shape=(2,), dtype="float32", numel=2)]
-    both = ParameterLayout.create(algorithm="ppo", components=[_component("actor"),
-                                  _component("critic")], specs=specs, num_fragments=1)
-    critic_lane = ParameterLayout.create(algorithm="ppo", components=[_component("critic")],
-                                         specs=specs[1:], num_fragments=1, stream_role="critic")
-    actor_lane = ParameterLayout.create(algorithm="ppo", components=[_component("actor")],
-                                        specs=specs[:1], num_fragments=1, stream_role="actor")
-    assert len({both.layout_hash, critic_lane.layout_hash, actor_lane.layout_hash}) == 3
+    ParameterLayout.create(algorithm="ppo", components=[_component("actor"),
+                           _component("critic")], specs=specs, num_fragments=1)
+    # rl-code-quality-cleanup 2.1: role lanes are SAO-only.
+    with pytest.raises(ValueError, match="role-scoped"):
+        ParameterLayout.create(algorithm="ppo", components=[_component("critic")],
+                               specs=specs[1:], num_fragments=1, stream_role="critic")
     with pytest.raises(ValueError, match="ppo requires exactly these trainable roles"):
         ParameterLayout.create(algorithm="ppo", components=[_component("actor")],
                                specs=specs[:1], num_fragments=1)

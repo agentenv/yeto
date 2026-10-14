@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from yeto.rl import learner as rl_learner
+from yeto.rl.adapters.miles import island_entry as rl_learner
 from yeto.rl.engine.algorithm import (
     AdvantageSpec,
     BOUNDED_NONZERO_STD_FILTER,
@@ -655,10 +655,10 @@ def test_no_sync_modal_run_end_to_end_through_fleet_controller(monkeypatch, caps
 
 
 def test_no_sync_event_echo_matches_tape(tmp_path, monkeypatch, capsys):
-    from yeto.rl import miles
+    from yeto.rl.adapters.miles.legacy import engine as miles
 
     monkeypatch.setenv("YETO_RL_ECHO_EVENTS", "0")  # restored after the test
-    from yeto.rl import miles as _miles
+    from yeto.rl.adapters.miles.legacy import engine as _miles
 
     monkeypatch.setattr(_miles, "_append_rl_event", _miles._append_rl_event)  # restored too
     assert rl_learner.install_event_echo() is True
@@ -677,12 +677,12 @@ def test_no_sync_modal_log_rebuilds_event_tape(monkeypatch, tmp_path, capsys):
     import yeto.launcher as launcher
     import yeto.modal_runner as modal_runner
     from yeto import runs
-    from yeto.rl import miles
+    from yeto.rl.adapters.miles.legacy import engine as miles
 
     monkeypatch.setattr(runs, "RUNS_DIR", tmp_path / "runs")
     # the island side: produce the echoed log with the real echo
     monkeypatch.setenv("YETO_RL_ECHO_EVENTS", "0")  # restored after the test
-    from yeto.rl import miles as _miles
+    from yeto.rl.adapters.miles.legacy import engine as _miles
 
     monkeypatch.setattr(_miles, "_append_rl_event", _miles._append_rl_event)  # restored too
     rl_learner.install_event_echo()

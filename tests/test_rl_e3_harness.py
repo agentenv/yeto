@@ -314,7 +314,7 @@ def test_local_dry_run_reproduces_the_container_refusal_and_passes_with_the_prof
     local_dry = importlib.import_module("local_dry")
     shim = importlib.import_module("learner_shim")
     modal_run = importlib.import_module("modal_run")
-    from yeto.rl import learner
+    from yeto.rl.adapters.miles import island_entry as learner
     from yeto.rl.engine.run_config import resolve_rl_run_config
 
     # Without the trainer-edge translation the argv carries --balance-data: the DEV-GATHER run 1 refusal.

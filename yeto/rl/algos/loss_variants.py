@@ -34,6 +34,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from yeto.rl import miles_fork_lineage_from
 from yeto.rl.engine.algorithm import (
     SEQUENCE_RATIO_ESTIMATORS,
     AlgorithmSpecError,
@@ -66,40 +67,10 @@ PARAM_FLAGS = {
 }
 FORK_FLAGS = frozenset({VARIANT_FLAG, *PARAM_FLAGS.values()})
 
-# Miles commits (full SHA) whose parser/loss implement --policy-loss-variant.
-# yeto/ports 5c1b49eb (fast-forward of 0af62f4d with the 2b loss variants);
-# image ghcr.io/michaellchung/yeto-miles-ports:5c1b49e-9f29303 (Agent IMG).
-FORK_COMMITS: frozenset[str] = frozenset({
-    "5c1b49ebccbc7508c1d9ef89eacc2db3e448b6ba",
-    "2f23a0fca9b80f6a7300da401703c343014b03c0",  # 5c1b49eb + F-R1 (placement/worker files only)
-    "fb04d6ffa30edc28c7ba0a2e88802a84bbbd28f9",  # 2f23a0fc + M5 (LoRA dp_invariant_state.py only)
-    "e3a11ab38cbb7fd911b23fdd62a4eb6dfbb1c841",  # fb04d6ff + M5 error text/docstring/tests
-    # e3a11ab3 + M3 (Qwen3.8-Next LoRA layout) + A27 (worker loss / bounded
-    # weight-update group): `git diff --name-only e3a11ab38..1023269 -- miles`
-    # has no loss_hub file; arguments.py only adds parser entries.
-    "1023269412bf4e54a1d95c8d2deaee795871aa72",
-    # c35702e = ab904f43a + fork-a27-worker-loss 857fc9592 (A27-2: actor/cell/group/
-    # updater/worker_handle external-failure handling); still no loss_hub file.
-    "c35702eefcf2862cee155e46870e6ad30568d2c6",
-    # 8bc52237a = c35702e + s16-raw-lora-disagg (weight_update/protocols/broadcast.py placement +
-    # megatron_utils/actor.py guard + update_weight/hf_weight_iterator.py comment): no loss path.
-    "8bc52237a1102306abd8f89a2ea2090aa2df6850",
-    # efbbc63ea = 8bc52237a + s18-abort-discard-stats (rollout/sglang_rollout.py abort tallies
-    # discarded groups/samples/response tokens): rollout bookkeeping only, no loss path.
-    "efbbc63ea0e8c6dcbc200ad5df5bc56badfce7bf",
-    # 2f7871fb2 = efbbc63ea + inference_rollout_train.abort tally / failed surplus group
-    # tolerated: rollout bookkeeping only, no loss path.
-    "2f7871fb2e80d37420b16ef81f001c7b0ba8e32e",
-    # ddce20992 = 2f7871fb2 + s18-agentic-suspend (inference_rollout_train/common suspend/resume of
-    # agentic groups between model turns, arguments.py flags, utils/misc.py hook loader):
-    # rollout scheduling only, no loss path.
-    "ddce20992c9ee82270a22e259e9e2bf55f3053d1",
-    # 64b591a4b = ddce20992 + critic family (yeto-critic-c357 6574a9c82 commits cherry-picked:
-    # --gae-variant, VAPO positive LM loss, SAO DIS / HL-Gauss, critic epochs/freeze, value head)
-    # + rl-algo-supplement dual_clipfrac / over-sampling tally (S19 #1).  Every new flag defaults
-    # off; with defaults the loss is bitwise unchanged (fork test_ppo_gae_variants vs _gae_orig).
-    "64b591a4bec1ffa37fb089d3e3b99c84773b1ffc",
-})
+# Miles commits (full SHA) whose parser/loss implement --policy-loss-variant:
+# yeto/ports 5c1b49eb (the 2b loss variants) and every later fork commit.
+# Derived from the single lineage in adapters/miles/pins.py (0.7).
+FORK_COMMITS: frozenset[str] = miles_fork_lineage_from("5c1b49ebccbc7508c1d9ef89eacc2db3e448b6ba")
 
 MECHANISMS = {name: ("losses", name) for name in VARIANTS}
 

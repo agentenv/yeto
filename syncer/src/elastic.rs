@@ -479,12 +479,13 @@ impl ElasticMsg {
 // Coordinator state machine (mirrors CrossIslandLedger, elastic branch)
 // ---------------------------------------------------------------------------
 
-/// Syncer merge weight, same formula as merge.rs (tokens^2 / steps).
+/// Syncer merge weight: `merge::learner_weight` (tokens^2 / steps), with the
+/// elastic zero-tokens / zero-steps branch kept explicit.
 pub fn merge_weight(c_tokens: u64, c_steps: u64) -> f64 {
     if c_tokens == 0 || c_steps == 0 {
         return 0.0;
     }
-    (c_tokens as f64).powi(2) / c_steps as f64
+    crate::merge::learner_weight(c_tokens, c_steps)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1238,6 +1239,20 @@ impl ElasticCoordinator {
 mod tests {
     use super::*;
     use crate::protocol::*;
+
+    /// rl-code-quality-cleanup 2.4: the elastic weight is merge::learner_weight,
+    /// bit for bit, and keeps its zero branch; same values as the old
+    /// tokens^2 / steps formula.
+    #[test]
+    fn merge_weight_is_merge_learner_weight() {
+        for &(t, s) in &[(1u64, 1u64), (37, 4), (91, 4), (4096, 3), (1 << 20, 7), (u32::MAX as u64, 1),
+                         (5, u32::MAX as u64 + 9)] {
+            assert_eq!(merge_weight(t, s).to_bits(), crate::merge::learner_weight(t, s).to_bits());
+            assert_eq!(merge_weight(t, s).to_bits(), ((t as f64).powi(2) / s as f64).to_bits());
+        }
+        assert_eq!(merge_weight(0, 4), 0.0);
+        assert_eq!(merge_weight(7, 0), 0.0);
+    }
 
     /// Golden replay: tests/test_rl_inter_island_rust_golden.py drives the
     /// Python CrossIslandLedger (elastic) through a fixed scenario and writes

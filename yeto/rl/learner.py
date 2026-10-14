@@ -1,17 +1,14 @@
-"""Forwarding module (yeto-framework-decoupling phase 4): moved to ``yeto.rl.adapters.miles.island_entry``.
+"""Command-line entry only: ``python -m yeto.rl.learner <argv>`` runs
+:mod:`yeto.rl.adapters.miles.island_entry` as ``__main__``.
 
-Importing the old path yields the very same module object; running it with
-``python -m`` runs the new module.  Delete once no caller uses the old path
-(design D2).
+This is not an import path (rl-code-quality-cleanup 0.6): import
+``yeto.rl.adapters.miles.island_entry`` instead.
 """
 
-if __name__ == "__main__":
-    import runpy
+if __name__ != "__main__":
+    raise ImportError("yeto.rl.learner is a command-line entry only; "
+                      "import yeto.rl.adapters.miles.island_entry")
 
-    runpy.run_module("yeto.rl.adapters.miles.island_entry", run_name="__main__", alter_sys=True)
-else:
-    import sys as _sys
+import runpy
 
-    from yeto.rl.adapters.miles import island_entry as _module
-
-    _sys.modules[__name__] = _module
+runpy.run_module("yeto.rl.adapters.miles.island_entry", run_name="__main__", alter_sys=True)

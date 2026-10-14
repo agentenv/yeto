@@ -74,7 +74,7 @@ def test_combined_hook_records_lr_and_runs_the_grad_audit(tmp_path, monkeypatch)
 
 
 def test_learner_arms_one_combined_hook_with_grad_audit(tmp_path, monkeypatch):
-    from yeto.rl import learner
+    from yeto.rl.adapters.miles import island_entry as learner
 
     args = SimpleNamespace(
         audit_dir=str(tmp_path / "audit"),
@@ -287,7 +287,7 @@ def test_legacy_allows_unrelated_extra_argv():
 def test_legacy_build_path_calls_the_lr_override_check():
     import inspect
 
-    from yeto.rl import learner
+    from yeto.rl.adapters.miles import island_entry as learner
 
     source = inspect.getsource(learner)
     check = source.index("_reject_lr_schedule_overrides(extra_argv)")
@@ -298,7 +298,7 @@ def test_legacy_build_path_calls_the_lr_override_check():
 def test_learner_rejects_non_positive_inner_lr_before_start(lr, capsys):
     from test_rl_engine_selection import _learner_argv
 
-    from yeto.rl import learner
+    from yeto.rl.adapters.miles import island_entry as learner
 
     argv = _learner_argv()
     argv[argv.index("--inner-lr") + 1] = lr

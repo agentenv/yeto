@@ -10,8 +10,8 @@ import pytest
 from yeto.rl import (
     CODEX_OPENENV_AGENT_MODULES,
     CODEX_OPENENV_IDENTITY_ENV,
-    learner,
 )
+from yeto.rl.adapters.miles import island_entry as learner
 
 
 def test_live_codex_schema_accepts_reordered_identical_json(tmp_path):

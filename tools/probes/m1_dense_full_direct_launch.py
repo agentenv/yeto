@@ -2987,7 +2987,7 @@ def _exec_island(args: argparse.Namespace) -> None:
     argv = manifest["learners"][args.island_id]["argv"]
     if argv[:3] != ["python3", "-m", "yeto.rl.adapters.miles.island_entry"]:
         raise LaunchContractError("manifest learner entry is not direct")
-    from yeto.rl import learner
+    from yeto.rl.adapters.miles import island_entry as learner
 
     _install_ray_placement_guard(manifest, args.island_id)
 

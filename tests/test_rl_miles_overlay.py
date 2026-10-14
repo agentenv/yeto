@@ -13,7 +13,7 @@ import pytest
 
 from yeto import launcher
 from yeto.rl import MILES_NEXT_COMMIT
-from yeto.rl import miles_overlay as mo
+from yeto.rl.adapters.miles import overlay as mo
 from yeto.rl.algos import critic_fork, sao
 from yeto.rl.algos.compactionrl import compactionrl_spec
 from yeto.rl.algos.vapo import vapo_spec
@@ -139,8 +139,8 @@ def test_learner_accepts_dirty_miles_only_as_the_exact_overlay_tree(tmp_path, mo
     import json as _json
     import subprocess as sp
 
-    from yeto.rl import miles as M
-    from yeto.rl import miles_overlay as O
+    from yeto.rl.adapters.miles.legacy import engine as M
+    from yeto.rl.adapters.miles import overlay as O
 
     repo = tmp_path / "miles"
     repo.mkdir()
@@ -170,7 +170,7 @@ def test_result_tree_pin_matches_fork_commit():
     import subprocess as sp
     from pathlib import Path
 
-    from yeto.rl import miles_overlay as O
+    from yeto.rl.adapters.miles import overlay as O
 
     fork = Path("/home/michael/work/miles-critic-c357")
     if not fork.is_dir():

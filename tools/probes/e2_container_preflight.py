@@ -23,7 +23,7 @@ argv = shlex.split(Path(args_file).read_text()) + ["--rl-print-attestation-finge
 result = {"run": run, "stage": "import", "problems": []}
 captured = {}
 try:
-    from yeto.rl import learner
+    from yeto.rl.adapters.miles import island_entry as learner
 
     original = learner.verify_ports_algorithm
 
@@ -44,8 +44,8 @@ try:
     result["miles_argv"] = fp[0]["miles_argv"]
     result["stage"] = "e2_checks"
     ma = captured["miles_args"]
-    from yeto.rl.engine.miles_adapter.cut_plugin import config_problems
-    from yeto.rl.engine.miles_adapter.trainer_rebuild import rebuild_preconditions
+    from yeto.rl.adapters.miles.cut_plugin import config_problems
+    from yeto.rl.adapters.miles.trainer_rebuild import rebuild_preconditions
 
     problems = [f"rebuild: {p}" for p in rebuild_preconditions(ma)]
     problems += [f"cut: {p}" for p in config_problems(ma)]
@@ -57,7 +57,7 @@ try:
         "pipeline_model_parallel_size", "context_parallel_size", "expert_model_parallel_size",
         "actor_num_gpus_per_node", "global_batch_size", "megatron_to_hf_mode")}
     if harness_file != "-":
-        from yeto.rl.engine.miles_adapter.e2_harness import plan_problems
+        from yeto.rl.adapters.miles.e2_harness import plan_problems
 
         plan = json.loads(Path(harness_file).read_text())
         problems += [f"harness plan: {p}" for p in plan_problems(plan)]

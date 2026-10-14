@@ -41,7 +41,7 @@ PARITY_KEYS = ("balance_data", "balance_by_flops", "use_dynamic_batch_size", "us
 
 def argv_check(argv, algorithm, overrides) -> dict:
     """THE pre-GPU check; run identically by ``local_dry.py`` and by every container phase."""
-    from yeto.rl.engine.miles_adapter.reshard import argv_profile, argv_reshard_problems
+    from yeto.rl.adapters.miles.reshard import argv_profile, argv_reshard_problems
 
     profile = argv_profile(argv, overrides)
     return {"algorithm_spec_sha256": algorithm.sha256(), "overrides": dict(overrides),
@@ -51,7 +51,7 @@ def argv_check(argv, algorithm, overrides) -> dict:
 
 def phase_summary(miles_args, launch, algorithm, overrides=None) -> dict:
     """Container: the argv check (same as local) plus the check on the parsed args and their agreement."""
-    from yeto.rl.engine.miles_adapter.reshard import ReshardPlan, reshard_problems
+    from yeto.rl.adapters.miles.reshard import ReshardPlan, reshard_problems
 
     overrides = dict(overrides or {})
     summary = argv_check(list(getattr(launch, "argv", ())), algorithm, overrides)
@@ -122,7 +122,7 @@ def make_phase(ns):
         from miles_backend import MilesBackend
 
         from yeto.rl import MILES_NEXT_COMMIT
-        from yeto.rl.engine.miles_adapter.entry import runtime_fingerprint
+        from yeto.rl.adapters.miles.entry import runtime_fingerprint
 
         backend = MilesBackend(miles_args, algorithm, frozen_template=frozen_template(work),
                                fingerprint=runtime_fingerprint(launch, MILES_NEXT_COMMIT))
@@ -156,9 +156,9 @@ def main(argv: list[str] | None = None) -> int:
     ns = ap.parse_args(argv[:split])
     if ns.phase == "arm" and not ns.arm:
         raise SystemExit("--phase arm needs --arm")
-    from yeto.rl import learner
+    from yeto.rl.adapters.miles import island_entry as learner
     from yeto.rl.engine import run_config
-    from yeto.rl.engine.miles_adapter import entry
+    from yeto.rl.adapters.miles import entry
 
     entry.run_ports_island = make_phase(ns)
     run_config.resolve_rl_run_config = with_trainer_edges(run_config.resolve_rl_run_config)

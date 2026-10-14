@@ -131,7 +131,7 @@ def miles_argv():
     import _pytest.monkeypatch as _m
 
     from rl_e2e_launch import island_run, learner_from_run
-    from yeto.rl import learner
+    from yeto.rl.adapters.miles import island_entry as learner
     from yeto.rl.engine import run_config
     from yeto.rl.engine.run_config import resolve_rl_run_config
     from yeto.rl.profiles import qwen3_8_next as q
