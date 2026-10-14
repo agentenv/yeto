@@ -45,7 +45,7 @@ SECRLENV_GROUP_FILTER = "yeto.rl.harness.codex.reward.check_group"
 # Moved to the Miles adapter (yeto-framework-decoupling 5.7); was yeto.rl.harness.codex.generate.
 SECRLENV_GENERATE = "yeto.rl.adapters.miles.harness_glue.codex_generate.generate"
 SECRLENV_GENERATE_SHA256 = (
-    "a32121837f889bb0151c0bb196bc41eaeb550ec1fb738568a75d513b52ccef23"
+    "1630dc8a3aae3cbbd4708a81c9803920791ee58d6725c3fcaa4736373f8f9e48"
 )
 SECRLENV_ZERO_VARIANCE_REPLACEMENTS = 0
 SECRLENV_INFRASTRUCTURE_REPLACEMENTS = 1

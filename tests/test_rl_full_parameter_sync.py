@@ -644,6 +644,7 @@ def _role_stream_config(role: str, port: int, *, sweep: bool = False):
         training_contract_hash="2" * 64,
         syncer_profile_hash="3" * 64,
         pipeline_depth=1,
+        algorithm_spec_sha256="a1" * 32,
     )
 
 

@@ -477,8 +477,12 @@ def _canonical_sha256(value: Any) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+# Island-local Miles flags left out of the full-parameter training contract.
+# The training data is island-local too (P3 per-island tasks): its path and
+# content hash are not part of the contract the islands compare.
 _DENSE_ISLAND_LOCAL_MILES_FLAGS = frozenset(
     {
+        "--prompt-data",
         "--rollout-seed",
         "--rollout-engine-base-port",
         "--session-server-port",
@@ -636,7 +640,7 @@ def _roster_generations(args) -> tuple[int, ...]:
 
 
 def _dense_full_sync_config(
-    args, *, model_config_sha256: str, training_contract_sha256: str
+    args, *, model_config_sha256: str, training_contract_sha256: str, algorithm_spec_sha256: str
 ):
     """The dense strict sweep as a one-role :class:`FullParameterSyncConfig`."""
 
@@ -664,15 +668,19 @@ def _dense_full_sync_config(
         training_contract_hash=training_contract_sha256,
         syncer_profile_hash=args.syncer_profile_sha256,
         pipeline_depth=1,
+        algorithm_spec_sha256=algorithm_spec_sha256,
         wan_streams=args.wan_streams,
     )
     return FullParameterSyncConfig((actor,), sweep=True)
 
 
 def _load_sao_streaming_runtime(args):
-    """Load the hash-bound SAO streaming contract before any GPU work."""
+    """Load the hash-bound SAO streaming contract before any GPU work.
 
-    from yeto.rl.adapters.miles.full_parameter.sao_binding import sao_sync_config
+    The role pairing is checked when the runtime is bound (still before Ray
+    starts), once the island's algorithm spec hash is known.
+    """
+
     from yeto.rl.sao_streaming_runtime import load_sao_streaming_runtime
 
     runtime = load_sao_streaming_runtime(
@@ -688,8 +696,6 @@ def _load_sao_streaming_runtime(args):
         actor=_syncer_address(args.syncer),
         critic=_syncer_address(args.critic_syncer),
     )
-    # Fail closed on the role pairing before any GPU work; bound later.
-    sao_sync_config(runtime)
     return runtime
 
 
@@ -777,9 +783,12 @@ def _dense_full_training_contract_sha256(
     miles_argv: Sequence[str],
     *,
     model_config_sha256: str,
-    prompt_data_sha256: str,
 ) -> str:
-    """Hash shared training semantics while excluding island-local routing."""
+    """Hash shared training semantics while excluding island-local routing and data.
+
+    Each island may train on its own task list (P3), so the training data
+    (``--data``, its revision and the prompt file) stays out of the contract.
+    """
 
     shared_argv = []
     index = 0
@@ -809,15 +818,12 @@ def _dense_full_training_contract_sha256(
     return _canonical_sha256(
         {
             **_expert_full_contract(args),
-            "schema": "yeto-dense-full-training-contract-v4",
+            "schema": "yeto-dense-full-training-contract-v5",
             "shared_miles_argv": shared_argv,
             "rollout_seed_contract": rollout_seed_contract,
             "model": args.model,
             "model_revision": args.model_revision.lower(),
             "model_config_sha256": model_config_sha256,
-            "prompt_data_sha256": prompt_data_sha256,
-            "data": args.data,
-            "data_revision": args.data_revision,
             "evaluation": (
                 None
                 if getattr(args, "eval_interval", None) is None
@@ -1796,10 +1802,7 @@ def run_miles(
             model_config_hash = file_sha256(model_config_path)
             if dense_full:
                 training_contract_hash = _dense_full_training_contract_sha256(
-                    args,
-                    miles_argv,
-                    model_config_sha256=model_config_hash,
-                    prompt_data_sha256=file_sha256(prompt_path),
+                    args, miles_argv, model_config_sha256=model_config_hash
                 )
         if full_parameter:
             layout_hash = model_config_hash
@@ -1883,6 +1886,7 @@ def run_miles(
                     args,
                     model_config_sha256=model_config_hash,
                     training_contract_sha256=training_contract_hash,
+                    algorithm_spec_sha256=algorithm_spec_sha256,
                 ),
             )
         elif sao_runtime is not None:
@@ -1903,7 +1907,9 @@ def run_miles(
                 raise ValueError(
                     f"SAO trajectory evidence root {evidence_root} is writable by others"
                 )
-            bind_sao_streaming_runtime(miles_args, sao_runtime)
+            bind_sao_streaming_runtime(
+                miles_args, sao_runtime, algorithm_spec_sha256=algorithm_spec_sha256
+            )
         elif sync_preset == "decoupled":
             from yeto.protocol import layout_fingerprint
             from yeto.rl.core import build_rl_fragment_layout

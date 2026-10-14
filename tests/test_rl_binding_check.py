@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import pytest
 
+from yeto.rl import SECRLENV_GROUP_FILTER
 from yeto.rl.adapters.miles import binding
 from yeto.rl.engine import algorithm as alg
 from yeto.rl.engine.algorithm import AlgorithmSpec, SamplingSpec
@@ -32,7 +33,7 @@ SPECS = {
 
 
 def test_every_legacy_name_normalizes_to_a_neutral_name():
-    assert set(alg.LEGACY_FILTER_NAMES) == {B_OLD, S_OLD}
+    assert set(alg.LEGACY_FILTER_NAMES) == {B_OLD, S_OLD, SECRLENV_GROUP_FILTER}
     for old, new in alg.LEGACY_FILTER_NAMES.items():
         assert alg.normalize_filter_name(old) == new
         assert alg.normalize_filter_name(new) == new

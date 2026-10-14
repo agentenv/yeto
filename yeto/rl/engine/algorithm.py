@@ -50,10 +50,15 @@ ALGORITHM_SPEC_SCHEMAS = (ALGORITHM_SPEC_SCHEMA, ALGORITHM_SPEC_SCHEMA_V2)
 # *new* ``AlgorithmSpec.sha256()`` (hash-migration.md, 阶段 4 记录).
 BOUNDED_NONZERO_STD_FILTER = "nonzero_reward_std_bounded"
 STOCK_NONZERO_STD_FILTER = "nonzero_reward_std"
+# SecRLEnv group check (P0-1.7b.4-Q1): verifies each group's signed episode
+# outcomes, rejects non-trainable groups and asks the backend to rerun the
+# same task once; zero-variance groups follow the bounded rule.
+SECRLENV_GROUP_CHECK_FILTER = "secrlenv_group_check"
 LEGACY_FILTER_NAMES = {
     "yeto.rl.filters.bounded_nonzero_reward_std": BOUNDED_NONZERO_STD_FILTER,
     "miles.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std":
         STOCK_NONZERO_STD_FILTER,
+    "yeto.rl.harness.codex.reward.check_group": SECRLENV_GROUP_CHECK_FILTER,
 }
 
 
@@ -63,7 +68,7 @@ def normalize_filter_name(name: str | None) -> str | None:
 # v1 (R0) vocabulary: what the flat v1 fields can express.
 SUPPORTED_ADVANTAGE_ESTIMATORS = frozenset({"grpo", "ppo"})  # ppo: rl-algo-critic-family 2.2
 SUPPORTED_LOSSES = frozenset({"policy_loss"})
-SUPPORTED_FILTERS = frozenset({BOUNDED_NONZERO_STD_FILTER})
+SUPPORTED_FILTERS = frozenset({BOUNDED_NONZERO_STD_FILTER, SECRLENV_GROUP_CHECK_FILTER})
 
 # v2 vocabulary: what the structured spec can *express* (upstream Miles
 # ``arguments.py`` choices at MILES_NEXT_COMMIT). Expressible is not
@@ -111,7 +116,9 @@ LOSS_AGGREGATIONS = ["default", "token", "constant"]
 KL_PLACEMENTS = ("none", "reward", "loss")
 KL_ESTIMATORS = ("k1", "k2", "k3", "low_var_kl")
 CORRECTION_METHODS = ["none", "tis", "opsm", "custom"]
-DYNAMIC_SAMPLING_FILTERS = {BOUNDED_NONZERO_STD_FILTER, STOCK_NONZERO_STD_FILTER}
+DYNAMIC_SAMPLING_FILTERS = {
+    BOUNDED_NONZERO_STD_FILTER, STOCK_NONZERO_STD_FILTER, SECRLENV_GROUP_CHECK_FILTER,
+}
 # Plugins may only live in yeto or in Miles' own (built-in) namespace (D7).
 PLUGIN_NAMESPACES = ["yeto.", "miles."]
 

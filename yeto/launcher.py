@@ -2572,7 +2572,6 @@ def _prepare_rl_args(
         placement=getattr(args, "rl_placement", "colocated"),
         island_scheduling=getattr(args, "rl_island_scheduling", "legacy"),
     )
-    _prepare_ports_algorithm(args)
     if resolve_model_kind(args.model, args.model_kind) != "causal-lm":
         raise ValueError("RL v0 supports only causal language models")
     if args.tuning != "lora":
@@ -2828,6 +2827,9 @@ def _prepare_rl_args(
                 "--dynamic-sampling-max-replacements is only supported with "
                 "an approved bounded nonzero-variance filter"
             )
+    # After the agent contract binds its filter (SecRLEnv) and the over-sampling
+    # count: the expected spec hash must be the one the island computes.
+    _prepare_ports_algorithm(args)
     if not args.use_session_server and (
         args.session_server_ip is not None
         or args.session_server_port is not None

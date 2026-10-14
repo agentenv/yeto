@@ -26,7 +26,12 @@ import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
-from yeto.rl.engine.algorithm import BOUNDED_NONZERO_STD_FILTER, STOCK_NONZERO_STD_FILTER, AlgorithmSpec
+from yeto.rl.engine.algorithm import (
+    BOUNDED_NONZERO_STD_FILTER,
+    SECRLENV_GROUP_CHECK_FILTER,
+    STOCK_NONZERO_STD_FILTER,
+    AlgorithmSpec,
+)
 from yeto.rl.engine.capabilities import R0_MECHANISMS, EngineCapabilities, ExecutionCapabilities
 from yeto.rl.engine.events import append_tape_event
 from .traits import MILES_TRAITS
@@ -253,7 +258,9 @@ def miles_capabilities(
     Mechanism dimensions are the R0 set (``EngineCapabilities`` defaults:
     grpo, policy_loss, default aggregation, KL none/reward, no correction,
     the nonzero-std filters); a follow-up algorithm change adds a mechanism
-    here only after its single-GPU smoke (G1) passed. ``execution``
+    here only after its single-GPU smoke (G1) passed. Exception: the SecRLEnv
+    group check moved over from the removed legacy engine (P0-1.7b.4-Q1,
+    decided 2026-10-13); its ports run is scheduled for the next GPU stage. ``execution``
     (rl-algorithm-capabilities D4, alignment A1): no critic, serial
     colocated produces policy age 0, and upstream SGLang rollouts return
     logprobs (``sglang_rollout.py`` ``return_logprob=True``).
@@ -265,7 +272,9 @@ def miles_capabilities(
         runtime_fingerprint=fingerprint,
         parameter_layouts={"lora"},
         placements={"colocated"},
-        dynamic_sampling_filters={BOUNDED_NONZERO_STD_FILTER, STOCK_NONZERO_STD_FILTER},
+        dynamic_sampling_filters={
+            BOUNDED_NONZERO_STD_FILTER, STOCK_NONZERO_STD_FILTER, SECRLENV_GROUP_CHECK_FILTER,
+        },
         execution_modes={"colocated-serial"},
         execution=ExecutionCapabilities(
             critic=False, max_policy_staleness=0, rollout_logprobs=True

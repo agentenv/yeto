@@ -270,9 +270,6 @@ class _PortsStrictRuntime:
         if self.progress is not None:
             self.progress.commit_round(stats)
 
-    def shutdown(self) -> None:
-        pass
-
 
 class StrictAvgSync:
     """Strict-avg at the safe boundary: export+PUSH, wait v+1, reset-apply."""

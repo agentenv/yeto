@@ -35,7 +35,7 @@ _UNSAFE_DEBUG_VALUES = (
 
 
 def _role_stream(
-    contract: SaoRoleContract, runtime: SaoStreamingRuntime
+    contract: SaoRoleContract, runtime: SaoStreamingRuntime, algorithm_spec_sha256: str
 ) -> RoleStreamConfig:
     return RoleStreamConfig(
         algorithm="sao",
@@ -53,6 +53,7 @@ def _role_stream(
         training_contract_hash=contract.training_contract_hash,
         syncer_profile_hash=runtime.syncer_profile.sha256,
         pipeline_depth=runtime.syncer_profile.pipeline,
+        algorithm_spec_sha256=algorithm_spec_sha256,
         wan_streams=contract.wan_streams,
         wait_timeout=contract.wait_timeout,
         poll_seconds=contract.poll_seconds,
@@ -61,13 +62,18 @@ def _role_stream(
     )
 
 
-def sao_sync_config(runtime: SaoStreamingRuntime) -> FullParameterSyncConfig:
-    """The two-role (actor, critic) streaming sync the contract describes."""
+def sao_sync_config(
+    runtime: SaoStreamingRuntime, *, algorithm_spec_sha256: str
+) -> FullParameterSyncConfig:
+    """The two-role (actor, critic) streaming sync the contract describes.
+
+    Both role sessions bind the island's algorithm spec hash (P0-4.8).
+    """
 
     return FullParameterSyncConfig(
         (
-            _role_stream(runtime.actor, runtime),
-            _role_stream(runtime.critic, runtime),
+            _role_stream(runtime.actor, runtime, algorithm_spec_sha256),
+            _role_stream(runtime.critic, runtime, algorithm_spec_sha256),
         )
     )
 
@@ -133,7 +139,9 @@ def validate_miles_args(args: Any, runtime: SaoStreamingRuntime) -> None:
         )
 
 
-def bind_sao_streaming_runtime(args: Any, runtime: SaoStreamingRuntime) -> Path:
+def bind_sao_streaming_runtime(
+    args: Any, runtime: SaoStreamingRuntime, *, algorithm_spec_sha256: str
+) -> Path:
     """Install the two-role sync config and create its private evidence dir.
 
     ``args`` is the ports island's parsed Miles namespace; the island sets
@@ -143,7 +151,7 @@ def bind_sao_streaming_runtime(args: Any, runtime: SaoStreamingRuntime) -> Path:
     """
 
     validate_miles_args(args, runtime)
-    sync = sao_sync_config(runtime)
+    sync = sao_sync_config(runtime, algorithm_spec_sha256=algorithm_spec_sha256)
     evidence = runtime.trajectory_evidence_dir
     try:
         evidence.mkdir(mode=0o700)

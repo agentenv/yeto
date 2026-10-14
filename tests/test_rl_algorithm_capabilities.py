@@ -136,6 +136,9 @@ R0_MECHANISMS_P0 = {
     f"dynamic_sampling_filters:{alg.BOUNDED_NONZERO_STD_FILTER}",
     f"dynamic_sampling_filters:{alg.STOCK_NONZERO_STD_FILTER}",
 }
+# Moved from the removed legacy engine (P0-1.7b.4-Q1); declared with the R0
+# filters, it needs SecRLEnv episode evidence, so no CPU candidate exercises it.
+SECRLENV_FILTER_P0 = {f"dynamic_sampling_filters:{alg.SECRLENV_GROUP_CHECK_FILTER}"}
 # P0 built-ins without a candidate, with the reason.
 EXEMPT = {"advantage_estimators:ppo": "critic: refused by the rejection matrix"}
 
@@ -143,7 +146,7 @@ EXEMPT = {"advantage_estimators:ppo": "critic: refused by the rejection matrix"}
 def test_candidates_cover_the_p0_mechanism_registry():
     registered = alg.mechanism_names()
     assert set(CANDIDATES) <= registered
-    p0_builtin = set(CANDIDATES) | set(EXEMPT) | R0_MECHANISMS_P0
+    p0_builtin = set(CANDIDATES) | set(EXEMPT) | R0_MECHANISMS_P0 | SECRLENV_FILTER_P0
     # every P0 built-in beyond R0 has a candidate (extension mechanisms may add more)
     builtin = {
         f"{m.dimension}:{m.name}" for m in alg.registered_mechanisms()
@@ -377,7 +380,9 @@ def test_miles_and_fake_declarations():
 
     miles = miles_capabilities(FP)
     assert set(MILES_DECLARED) == EXPECTED_MILES_DECLARED
-    assert miles.declared_mechanisms() == R0_MECHANISMS_P0 | EXPECTED_MILES_DECLARED
+    assert miles.declared_mechanisms() == (
+        R0_MECHANISMS_P0 | SECRLENV_FILTER_P0 | EXPECTED_MILES_DECLARED
+    )
     assert all(MILES_DECLARED[m] for m in MILES_DECLARED)  # every entry cites evidence
     # the fake declares every correction for CPU tests (and nothing else extra)
     fake = fake_capabilities()
