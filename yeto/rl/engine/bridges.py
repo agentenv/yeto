@@ -131,6 +131,12 @@ class LocalOnlySync:
                                          "policy_hash", "store_synced", "latest_seq", "pruned",
                                          "incarnation_index", "final", "trainer_onloaded_for_cut")})
 
+    def resume_data_cursor(self) -> dict[str, int] | None:
+        """The data cursor recorded by the round cut this run resumed from (None:
+        no resume, or the cut recorded none). The driver seeks to it first."""
+        cursor = getattr(self.round_cuts, "resume_data_cursor", None)
+        return None if cursor is None else dict(cursor)
+
     def _end(self) -> int:
         return self.num_rollout if self.stop_after is None else min(self.num_rollout, int(self.stop_after))
 

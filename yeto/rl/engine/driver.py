@@ -1700,8 +1700,22 @@ class IslandDriver:
         pool that reports cursors -> DriverError (no silent re-training)."""
         if start_rollout_id <= 0:
             return
-        cursor = self.ledger.restart_cursor(start_rollout_id) if self.ledger is not None else None
         seek = getattr(self.rollout, "seek_data_cursor", None)
+        from_cut = getattr(self.sync, "resume_data_cursor", None)
+        cut_cursor = from_cut() if callable(from_cut) else None
+        if cut_cursor is not None and callable(seek):
+            # Resume from a round cut: the cut read the data source at the safe
+            # point (P0-S: after fully_async put its untrained groups back), so
+            # its cursor wins over the ledger's per-round record.
+            landed = seek(cut_cursor)
+            landed = None if landed is None else {k: int(v) for k, v in dict(landed).items()}
+            if landed != cut_cursor:
+                raise DriverError(f"restart at rollout {start_rollout_id}: data source seek "
+                                  f"to the cut's cursor {cut_cursor} landed on {landed}")
+            self.emit("rl_data_cursor_restored", rollout_id=start_rollout_id, source="round_cut",
+                      data_cursor=dict(landed))
+            return
+        cursor = self.ledger.restart_cursor(start_rollout_id) if self.ledger is not None else None
         fallback = getattr(self.sync, "restart_cursor_fallback", None)
         # The whole-round fallback is for an island with NO record of rollout v-1
         # (empty/absent ledger: fresh container, joined at base_version > 0). A
