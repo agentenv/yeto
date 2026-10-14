@@ -41,10 +41,9 @@ from typing import Any
 
 from yeto.rl.engine.offpolicy_correction import (
     GATE_GROUP_DROPPED,
-    GATE_KEPT,
+    GATE_DROPPED_LENGTHS,
     GATE_UNKNOWN_VERSION_DROPPED,
-    GRANULARITY_TOKEN,
-    offpolicy_gate_event,
+    TRUNCATED_BY_TURN,
 )
 from yeto.rl.engine.policy_versions import engine_version_number
 from yeto.rl.engine.version_segments import (
@@ -198,30 +197,14 @@ def take_carry_round(args: Any, current_version: int | None
              for reason in (GATE_GROUP_DROPPED, GATE_UNKNOWN_VERSION_DROPPED)})
 
 
-def take_carry_stats(args: Any, current_version: int | None) -> dict[str, int]:
-    """This round's carry-over counts (zeros when nothing was buffered); consumed."""
-    return take_carry_round(args, current_version)[0]
+def take_carry_stats(args: Any, current_version: int | None) -> dict[str, Any]:
+    """This round's carry-over counts (zeros when nothing was buffered); consumed.
 
-
-def offpolicy_gate(counts: dict[str, int], dropped_lengths: dict[str, list[int]],
-                   trained_samples: Sequence[Any],
-                   truncation_by_turn: dict[int, tuple[int, int]] | None) -> dict[str, Any]:
-    """The Miles ``offpolicy_gate`` fields of one round (design D6).
-
-    ``kept``: trained groups (distinct ``group_index``; samples when Miles
-    gave none). Drops are whole groups discarded by the buffer filter. The
-    truncation-by-turn counts are tokens (Miles gives per-token versions).
-    Under ``--fully-async`` Miles drops stale groups in its own data buffer;
-    those are not seen here (Miles reports ``rollout/fully_async/*`` metrics).
-    """
-    groups = {getattr(s, "group_index", None) for s in trained_samples}
-    kept = len(groups) if None not in groups else len(trained_samples)
-    return offpolicy_gate_event(
-        backend="miles",
-        counts={GATE_KEPT: kept, GATE_GROUP_DROPPED: counts["over_age_discarded_groups"],
-                GATE_UNKNOWN_VERSION_DROPPED: counts["unknown_version_discarded_groups"]},
-        dropped_lengths=dropped_lengths, truncation_by_turn=truncation_by_turn,
-        granularity=GRANULARITY_TOKEN)
+    Also carries the dropped response lengths under :data:`GATE_DROPPED_LENGTHS`
+    (rl-offpolicy-correction-passthrough D6); the driver turns them into
+    ``offpolicy_gate`` and removes the key from ``rl_rollout_carry_over``."""
+    counts, lengths = take_carry_round(args, current_version)
+    return {**counts, GATE_DROPPED_LENGTHS: lengths}
 
 
 def group_versions_record(group: Sequence[Any]) -> dict[str, Any]:
@@ -408,9 +391,6 @@ def estimate_cross_version_truncation(args: Any, samples: Sequence[Any], current
         "cross_version_unscored_samples": failed,
         **ratio_quantiles(ratios),
     }
-
-
-TRUNCATED_BY_TURN = "cross_version_truncated_by_turn"
 
 
 def turn_indices(sample: Any, n: int) -> list[int | None]:

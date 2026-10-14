@@ -143,6 +143,9 @@ def test_island_tape_gets_record_and_warnings(tmp_path):
     island_entry_append = island_entry._append_ports_event
     island_entry._append_ports_event = lambda _a, _m, e: events.append(e)
     try:
+        island_entry._append_correction_record(SimpleNamespace(), SimpleNamespace(),
+                                               AlgorithmSpec())
+        assert events == []  # default tapes unchanged
         spec = decoupled(level="sequence")
         island_entry._append_correction_record(SimpleNamespace(), SimpleNamespace(), spec)
     finally:
@@ -301,8 +304,9 @@ def test_miles_buffer_filter_drops_feed_the_gate():
     kept = carry_over.carry_over_buffer_filter(args, [old_a, old_b, fresh], 4,
                                                current_version=4, limit=2)
     assert kept == [fresh]
-    counts, lengths = carry_over.take_carry_round(args, 4)
-    gate = carry_over.offpolicy_gate(counts, lengths, fresh, None)
+    fields = carry_over.take_carry_stats(args, 4)
+    gate = oc.gate_from_carry_over(fields, kept=1, backend="miles")
+    assert oc.GATE_DROPPED_LENGTHS not in fields
     assert gate["counts"] == {"group_dropped": 2, "kept": 1, "unknown_version_dropped": 0}
     hist = gate["dropped_length_histogram"]["group_dropped"]
     assert (hist["256-1023"], hist["4096-16383"]) == (1, 1)
@@ -325,13 +329,17 @@ def test_driver_tapes_offpolicy_gate_as_its_own_event():
     emitted = []
     fake = SimpleNamespace(emit=lambda name, **kw: emitted.append((name, kw)),
                            clock=lambda: 0.0, _labels=lambda: {})
-    gate = {"counts": {"kept": 1}, "granularity": "token"}
-    batch = SimpleNamespace(carry_over={"max_policy_age": 2, oc.OFFPOLICY_GATE_EVENT: gate},
-                            policy_version=3, groups=())
+    carry = {"max_policy_age": 2, "over_age_discarded_groups": 1,
+             oc.GATE_DROPPED_LENGTHS: {"group_dropped": [300]},
+             oc.TRUNCATED_BY_TURN: {0: (1, 2)}}
+    batch = SimpleNamespace(carry_over=carry, policy_version=3, groups=(object(),))
     IslandDriver._emit_carry_over(fake, 3, batch)
     assert [name for name, _ in emitted] == [oc.OFFPOLICY_GATE_EVENT, "rl_rollout_carry_over"]
-    assert emitted[0][1]["counts"] == {"kept": 1}
-    assert oc.OFFPOLICY_GATE_EVENT not in emitted[1][1]
+    assert emitted[0][1]["counts"]["kept"] == 1
+    assert emitted[0][1]["counts"]["group_dropped"] == 1
+    assert emitted[0][1]["granularity"] == "token"
+    assert oc.GATE_DROPPED_LENGTHS not in emitted[1][1]
+    assert oc.TRUNCATED_BY_TURN not in emitted[1][1]
 
 
 # -- L6.9 A_hard >= 2 ----------------------------------------------------------
