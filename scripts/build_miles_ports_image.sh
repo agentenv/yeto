@@ -90,6 +90,8 @@ json.dump({
              "version": "$SGLANG_VERSION",
              "install": "pip install -e /sgl-workspace/sglang/python[all] --no-deps (base's editable install, same path)"},
   "pure_python_overlay": True,
+  "megatron_bridge": {"commit": "8cd3466d14d2337c8492827b3712482c2b3e4866",
+                      "patches": ["lazy-modelopt (docker/miles-ports/megatron_bridge_init.py)"]},
   "builder": "scripts/build_miles_ports_image.sh (crane append); docker/miles-ports/Dockerfile equivalent",
 }, open(sys.argv[1], "w"), indent=2, sort_keys=True)
 PY
