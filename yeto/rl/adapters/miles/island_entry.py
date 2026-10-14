@@ -658,6 +658,15 @@ def _is_sha256(value: Any) -> bool:
     return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
 
 
+def _full_parameter_identity(model_config_sha256: str) -> tuple[str, str]:
+    """``(layout hash, config hash)`` of a full-parameter island: no LoRA layout,
+    the model config is the identity."""
+
+    return model_config_sha256, _canonical_sha256(
+        {"schema": "yeto-full-parameter-mode-v1", "model_config_sha256": model_config_sha256}
+    )
+
+
 def _buffer_island(args) -> bool:
     """A no-sync sampler / trainer island (L4.6): it has no outer sync, so full
     parameter mode runs without the full-parameter sync preset."""
@@ -1699,7 +1708,7 @@ def run_miles(
     # full-parameter strict sweep also carries DeepSeek V4 expert-full (P0 1.7b.2).
     full_parameter_sync = sync_preset in FULL_PARAMETER_SYNC_PRESETS
     dense_full = sync_preset == FULL_PARAMETER_SYNC_PRESET
-    if _trains_base_parameters(args) and not full_parameter_sync:
+    if _trains_base_parameters(args) and not full_parameter_sync and not _buffer_island(args):
         raise ValueError(f"expert-full tuning needs the {FULL_PARAMETER_SYNC_PRESET} sync")
     sao_runtime = None
     if dense_full:
@@ -1866,13 +1875,7 @@ def run_miles(
                     args, miles_argv, model_config_sha256=model_config_hash
                 )
         if full_parameter:
-            layout_hash = model_config_hash
-            lora_config_hash = _canonical_sha256(
-                {
-                    "schema": "yeto-full-parameter-mode-v1",
-                    "model_config_sha256": model_config_hash,
-                }
-            )
+            layout_hash, lora_config_hash = _full_parameter_identity(model_config_hash)
         else:
             from yeto.rl.core import canonical_layout_hash
 
@@ -2056,6 +2059,17 @@ def run_miles(
     _configure_grad_audit(args, miles_args)
     require_ports_router_mode(miles_args)
     miles_args.yeto_rl_island_tasks = dict(island_tasks) if island_tasks else None
+    if full_parameter and not yeto_policy_sync:
+        # A no-sync buffer island (L4.6) trains every parameter without the sync
+        # block above: bind the same full-parameter identity for _run_ports.
+        from yeto.provenance import file_sha256
+
+        model_config_path = Path(model_path) / "config.json"
+        if not model_config_path.is_file():
+            raise ValueError("full-parameter model has no config.json")
+        miles_args.yeto_rl_parameter_mode = parameter_mode
+        miles_args.yeto_rl_layout_hash, miles_args.yeto_rl_lora_config_hash = (
+            _full_parameter_identity(file_sha256(model_config_path)))
     miles_args.yeto_rl_code_pack_digest = code_pack_digest
     if getattr(args, "code_pack_digest", None):
         from yeto.codepack import CODE_PACK_MODE_GIT_PATCH
