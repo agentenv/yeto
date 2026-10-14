@@ -92,12 +92,27 @@ def _record_trainer_start(args, events_dir) -> dict | None:
     from the settled tapes into ``run_manifest.json`` (``trainer_start``), where the
     scheduler reads ``T_s`` of the last run.  Never fails the run."""
 
+    return _record_trainer_start_from(args, sorted(Path(events_dir).glob("*.jsonl")))
+
+
+def _record_sky_trainer_start(args, clusters, diag_root: str | None = None) -> dict | None:
+    """``trainer_start`` for sky islands whose tape is not echoed to the launcher:
+    read the island tapes (``rl-island-*.jsonl``) that the pre-teardown diagnostics
+    fetched into ``<diag_root>/<cluster>/``.  Never fails the run."""
+
+    from .teardown import TEARDOWN_DIAG_DIR
+
+    root = Path(diag_root or TEARDOWN_DIAG_DIR).expanduser()
+    tapes = [p for c in clusters for p in sorted((root / c).glob("rl-island-*.jsonl"))]
+    return _record_trainer_start_from(args, tapes) if tapes else None
+
+
+def _record_trainer_start_from(args, tapes) -> dict | None:
     from .. import runs
     from ..rl.engine import start_phases
 
     try:
-        summaries = start_phases.summaries_from_events(
-            start_phases.read_tape_records(sorted(Path(events_dir).glob("*.jsonl"))))
+        summaries = start_phases.summaries_from_events(start_phases.read_tape_records(tapes))
         path = runs.run_dir(args.cluster_prefix) / "run_manifest.json"
         if start_phases.write_manifest_summary(path, summaries):
             return summaries

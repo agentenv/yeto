@@ -72,7 +72,8 @@ from .launch.fleet import (
 from .launch.teardown import collect_diagnostics_parallel, teardown_island
 from .launch.verda import _rename_hook, launch_verda_island, prepare_verda_islands
 from .launch.manifest import (
-    _dashboard_fleet_log, _no_sync_events_dir, _record_trainer_start, _write_run_manifest,
+    _dashboard_fleet_log, _no_sync_events_dir, _record_sky_trainer_start, _record_trainer_start,
+    _write_run_manifest,
 )
 
 # Re-exported: callers and tests reach these as ``yeto.launcher.<name>``.
@@ -805,6 +806,11 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 if not teardown_island(sky, name, head=head_mode, collect=None,
                                        num_nodes=nodes_by_cluster.get(name, 1)):
                     unverified.append(name)
+            # rl-trainer-cold-start-cost L0.2: sky islands without an echoed tape
+            # (their tapes are in the pre-teardown diagnostics, also for islands
+            # the controller tore down earlier) still give the manifest T_s.
+            _record_sky_trainer_start(
+                args, [n for n in nodes_by_cluster if n not in modal_cfgs and n not in echo_names])
             if modal_ops is not None:
                 # Belt and braces: stop the whole per-run Modal app so no
                 # function call of this run outlives the launcher.
