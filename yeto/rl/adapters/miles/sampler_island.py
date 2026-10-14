@@ -32,6 +32,7 @@ from yeto.rl.engine.sample_roles import SAMPLER, TRAINER
 from .buffer_rollout import SampleBufferRolloutError, executor_read_cursor, open_buffer
 from .publish import _engine_id, _maybe_await, _stamp_engine_version
 
+SAMPLER_TRAIN_PARALLEL_CONFIG = {"dp_size": 1}
 BASE_POLICY_VERSION = 0  # the engines start with the base weights: policy version 0
 
 
@@ -125,6 +126,9 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None) -> int:
         init_orchestration_script(miles_args, disposer=disposer)
         controller, executor, _ = await create_rollout_components(miles_args)
         disposer.add(controller, executor)
+        # Miles post-processes each round for the trainer's data-parallel layout, which a
+        # trainer actor sets; a sampler has none. The buffer trainer is DP=1 (full mode).
+        await executor.set_train_parallel_config(SAMPLER_TRAIN_PARALLEL_CONFIG)
         return controller, executor
 
     async def generate(rollout_id: int) -> None:
