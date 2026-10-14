@@ -15,7 +15,9 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 MG = REPO / "tests" / "multinode_gpu"
-TRY27 = (REPO / "openspec/changes/rl-infra-spec/evidence/fn/try27-s12-h100-20261006a/fna/pulled"
+# Run logs are kept outside the repository (rl-code-quality-cleanup 0.3).
+EVIDENCE = Path(os.environ.get("YETO_EVIDENCE_DIR", "/home/michael/work/infra-drafts/evidence"))
+TRY27 = (EVIDENCE / "rl-infra-spec/evidence/fn/try27-s12-h100-20261006a/fna/pulled"
          / "rl-island-0.jsonl")
 sys.path.insert(0, str(REPO / "scripts"))
 import judge_fn_learning_signal as jfs  # noqa: E402
@@ -50,6 +52,7 @@ def test_length_reward_spec_is_a_valid_callable_in_repo():
 
 
 # ------------------------------------------------------------------ judge
+@pytest.mark.skipif(not TRY27.exists(), reason="out-of-repo evidence log not present")
 def test_signal_judge_fails_try27():
     r = subprocess.run([sys.executable, str(REPO / "scripts/judge_fn_learning_signal.py"), str(TRY27)],
                        capture_output=True, text=True)
