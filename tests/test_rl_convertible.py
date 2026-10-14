@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import types
 
 import pytest
 
@@ -360,30 +361,62 @@ def test_miles_port_call_order_both_directions():
                    ("admission", True)]
 
 
+class FakeEngine:
+    def __init__(self, url):
+        self.server_url = url
+        self.version = None
+
+    async def update_weight_version(self, stamp):
+        self.version = stamp
+
+    async def get_weight_version(self):
+        return self.version
+
+
 class ChecksumController(FakeController):
     """Engines whose ``check_weights(checksum)`` body is the last loaded version."""
 
     def __init__(self, log, engines=1):
         super().__init__(log)
         self.loaded = None
-        self.engines = engines
+        self.engines = [FakeEngine(f"http://e{i}") for i in range(engines)]
         self.skew = False
+
+    async def start_update_weights(self):
+        self.log.append("start_update_weights")
+        return types.SimpleNamespace(rollout_engines=self.engines,
+                                     snapshot_cell_id_to_hashes={f"c{i}": "h" for i in range(len(self.engines))})
+
+    async def end_update_weights(self, snapshot_cell_id_to_hashes):
+        self.log.append("end_update_weights")
+
+    async def abort_update_weights(self):
+        self.log.append("abort_update_weights")
+
+    async def get_cell_statuses(self):
+        return {f"c{i}": types.SimpleNamespace(phase="Running") for i in range(len(self.engines))}
 
     async def check_weights(self, action):
         assert action == "checksum"
-        bodies = [{"w": f"v{self.loaded}", "e": i if self.skew else 0} for i in range(self.engines)]
-        return bodies
+        return [{"w": f"v{self.loaded}", "e": i if self.skew else 0} for i in range(len(self.engines))]
 
 
-def _publisher(log, controller):
+def _publisher(log, controller, *, lora_rank=0):
     async def update_weights(args, actor, executor, ctrl):
         log.append("update_weights")
         ctrl.loaded = 7
 
-    return MilesPublisher(args=argparse.Namespace(offload_rollout=True), actor_model=None,
-                          rollout_executor=None, inference_controller=controller,
-                          update_weights=update_weights, flatten_checksums=list,
-                          runner=LoopRunner())
+    publisher = MilesPublisher(args=argparse.Namespace(offload_rollout=True, lora_rank=lora_rank),
+                               actor_model=None, rollout_executor=None,
+                               inference_controller=controller, update_weights=update_weights,
+                               flatten_checksums=list, runner=LoopRunner())
+
+    async def warmup(engine, adapter, timeout_s):
+        log.append(("lora_warmup", engine.server_url))
+        return {}
+
+    publisher.lora_warmup = warmup
+    return publisher
 
 
 def test_publisher_load_version_returns_the_engine_checksum_digest():
@@ -393,9 +426,19 @@ def test_publisher_load_version_returns_the_engine_checksum_digest():
     assert publisher.published_checksum is None
     digest = publisher.load_version(7)
     assert digest == engine_checksum_digest({"e": 0, "w": "v7"})
-    assert log == ["update_weights"]  # no onload, no KV: the port does those
+    # no onload, no KV: the port does those; no LoRA warm-up for a full-parameter run
+    assert log == ["update_weights", "start_update_weights", "end_update_weights"]
+    assert [e.version for e in controller.engines] == ["7", "7"]
     publisher._reference = ("token", {"w": "v7", "e": 0})
     assert publisher.published_checksum == digest
+
+
+def test_publisher_load_version_warms_the_lora_adapter_before_the_read_back():
+    log: list = []
+    controller = ChecksumController(log, engines=2)
+    _publisher(log, controller, lora_rank=16).load_version(7)
+    assert log == ["update_weights", "start_update_weights", "end_update_weights",
+                   ("lora_warmup", "http://e0"), ("lora_warmup", "http://e1")]
 
 
 def test_publisher_load_version_fails_when_engines_differ():
@@ -442,5 +485,5 @@ def test_miles_conversion_port_wires_publisher_pool_and_trainer():
     assert receipt.weight_checksum == expected
     assert log == [("admission", False), "abort_all",
                    ("offload", ("weights", "kv_cache", "cuda_graph")), "trainer.onload",
-                   "trainer.offload", ("onload", ("weights",)), "update_weights", "onload_kv",
-                   ("admission", True)]
+                   "trainer.offload", ("onload", ("weights",)), "update_weights",
+                   "start_update_weights", "end_update_weights", "onload_kv", ("admission", True)]

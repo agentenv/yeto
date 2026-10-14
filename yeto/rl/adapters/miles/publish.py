@@ -477,6 +477,35 @@ class MilesPublisher:
         )
         return PublicationResult(manifest=manifest, members=frozenset(members))
 
+    async def _stamp_version(self, version: int, label: str) -> tuple[list[Any], list[str], frozenset[str]]:
+        """Under the controller's update lock, stamp ``version`` on every running
+        engine and read it back. Returns the engines, their ids and the members."""
+        info = await self._controller.start_update_weights()
+        ok = False
+        try:
+            engines = list(info.rollout_engines)
+            updated = frozenset(_member(c) for c in info.snapshot_cell_id_to_hashes)
+            members = updated & await running_members(self._controller)
+            if not engines or not members:
+                raise PublicationError("no rollout engines are eligible for publication")
+            ids = [_engine_id(e, i) for i, e in enumerate(engines)]
+            failed, cause = await _stamp_engine_version(engines, ids, version)
+            if failed:
+                raise PublicationError(
+                    f"{len(failed)}/{len(engines)} rollout engines did not acknowledge {label}: "
+                    f"{sorted(failed)}",
+                    frozenset(failed), cause=cause, engine_ids=failed,
+                )
+            ok = True
+        finally:
+            if ok:
+                await self._controller.end_update_weights(
+                    snapshot_cell_id_to_hashes=info.snapshot_cell_id_to_hashes
+                )
+            else:
+                await self._controller.abort_update_weights()
+        return engines, ids, members
+
     async def _publish(
         self, version: int, token: str
     ) -> tuple[frozenset[str], dict[str, Any] | None]:
@@ -494,31 +523,7 @@ class MilesPublisher:
             raise PublicationError(f"upstream update_weights failed: {exc}",
                                    cause=PublicationCause.UPDATE_FAILED) from exc
         self._published_once = True
-
-        info = await self._controller.start_update_weights()
-        ok = False
-        try:
-            engines = list(info.rollout_engines)
-            updated = frozenset(_member(c) for c in info.snapshot_cell_id_to_hashes)
-            members = updated & await running_members(self._controller)
-            if not engines or not members:
-                raise PublicationError("no rollout engines are eligible for publication")
-            ids = [_engine_id(e, i) for i, e in enumerate(engines)]
-            failed, cause = await _stamp_engine_version(engines, ids, version)
-            if failed:
-                raise PublicationError(
-                    f"{len(failed)}/{len(engines)} rollout engines did not acknowledge {token}: "
-                    f"{sorted(failed)}",
-                    frozenset(failed), cause=cause, engine_ids=failed,
-                )
-            ok = True
-        finally:
-            if ok:
-                await self._controller.end_update_weights(
-                    snapshot_cell_id_to_hashes=info.snapshot_cell_id_to_hashes
-                )
-            else:
-                await self._controller.abort_update_weights()
+        engines, ids, members = await self._stamp_version(version, token)
 
         checksums = None
         if self._verify_checksums:
@@ -545,12 +550,15 @@ class MilesPublisher:
 
     def load_version(self, version: int) -> str:
         """Load the trainer's weights of published ``version`` into this node's
-        engines and return the digest of their common weight checksum.
+        engines, stamp the version, and return the digest of their common weight
+        checksum.
 
         For a convertible node going back to rollout: the caller has offloaded the
         trainer (``update_weights`` reads its host backups) and given the engines
-        their weight memory back; KV onload, version stamping and admission stay
-        with the caller. Engines with different checksums fail the load."""
+        their weight memory back; KV onload and admission stay with the caller.
+        In LoRA mode the adapter is first loaded into each engine's LoRA pool
+        (as for a member publication), so the checksum covers it. Engines with
+        different checksums fail the load."""
         return self._runner.run(self._load_version(version))
 
     async def _load_version(self, version: int) -> str:
@@ -560,6 +568,9 @@ class MilesPublisher:
         except Exception as exc:
             raise PublicationError(f"upstream update_weights failed: {exc}",
                                    cause=PublicationCause.UPDATE_FAILED) from exc
+        engines, ids, members = await self._stamp_version(version, f"version {version}")
+        if lora_mode(self._args):
+            await self._warm_up_lora(engines, ids, [], sorted(members))
         raw = await self._controller.check_weights(action="checksum")
         try:
             bodies = (self._flatten or _default_flatten())(raw)
