@@ -465,6 +465,8 @@ def _append_correction_record(args, miles_args, algorithm) -> None:
 
     from .offpolicy_correction import BACKEND, correction_mapping
 
+    if algorithm.correction.is_default():
+        return  # default tapes unchanged; the run manifest still records the group
     mapping = correction_mapping(algorithm)
     _append_ports_event(args, miles_args, {
         "event": CORRECTION_RECORD_EVENT,

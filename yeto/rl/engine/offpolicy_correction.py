@@ -54,6 +54,12 @@ DROPPED_LENGTH_EDGES = (256, 1024, 4096, 16384)
 GRANULARITY_TOKEN = "token"
 GRANULARITY_TRAJECTORY = "trajectory"
 GRANULARITIES = (GRANULARITY_TOKEN, GRANULARITY_TRAJECTORY)
+# Round-metadata keys an adapter fills for the driver (removed from
+# rl_rollout_carry_over): dropped lengths per reason, truncation per turn,
+# and the granularity of the turn counts.
+GATE_DROPPED_LENGTHS = "offpolicy_gate_dropped_lengths"
+TRUNCATED_BY_TURN = "cross_version_truncated_by_turn"
+GATE_GRANULARITY = "offpolicy_gate_granularity"
 
 
 class CorrectionConfigError(ValueError):
@@ -329,6 +335,26 @@ def offpolicy_gate_event(*, backend: str, counts: Mapping[str, int],
         "granularity": granularity,
         **extra,
     }
+
+
+def gate_from_carry_over(fields: dict[str, Any], *, kept: int, backend: str
+                         ) -> dict[str, Any] | None:
+    """Pop the gate keys from a round's carry-over fields and build the
+    ``offpolicy_gate`` event fields; None when the adapter gave none."""
+
+    lengths = fields.pop(GATE_DROPPED_LENGTHS, None)
+    turns = fields.pop(TRUNCATED_BY_TURN, None)
+    granularity = fields.pop(GATE_GRANULARITY, GRANULARITY_TOKEN)
+    if lengths is None:
+        return None
+    counts = {GATE_KEPT: kept,
+              GATE_GROUP_DROPPED: int(fields.get("over_age_discarded_groups", 0) or 0),
+              GATE_UNKNOWN_VERSION_DROPPED:
+                  int(fields.get("unknown_version_discarded_groups", 0) or 0)}
+    if turns is not None:
+        turns = {int(k): tuple(v) for k, v in turns.items()}
+    return offpolicy_gate_event(backend=backend, counts=counts, dropped_lengths=lengths,
+                                truncation_by_turn=turns, granularity=granularity)
 
 
 # --------------------------------------------------------------------------
