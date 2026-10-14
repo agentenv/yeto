@@ -381,6 +381,8 @@ class MilesPublisher:
         self._runner = runner or LoopRunner()
         self.last_engine_checksums: dict[str, dict[str, Any]] | None = None
         self._published_once = False
+        # (engines, ids, members) stamped by the last load_version (convertible node)
+        self._loaded_engines: tuple[list[Any], list[str], frozenset[str]] | None = None
         # (token, per-engine checksum body) of the last full publication whose
         # engines all reported the same body: the payload reference (3.5).
         self._reference: tuple[str, dict[str, Any]] | None = None
@@ -548,27 +550,39 @@ class MilesPublisher:
         publication (None: no publication yet, checksums off, or engines differed)."""
         return None if self._reference is None else engine_checksum_digest(self._reference[1])
 
-    def load_version(self, version: int) -> str:
+    def load_version(self, version: int) -> None:
         """Load the trainer's weights of published ``version`` into this node's
-        engines, stamp the version, and return the digest of their common weight
-        checksum.
+        engines and stamp the version.
 
         For a convertible node going back to rollout: the caller has offloaded the
         trainer (``update_weights`` reads its host backups) and given the engines
         their weight memory back; KV onload and admission stay with the caller.
-        In LoRA mode the adapter is first loaded into each engine's LoRA pool
-        (as for a member publication), so the checksum covers it. Engines with
-        different checksums fail the load."""
-        return self._runner.run(self._load_version(version))
+        Read the result with :meth:`served_checksum` once the KV cache is back."""
+        self._runner.run(self._load_version(version))
 
-    async def _load_version(self, version: int) -> str:
+    async def _load_version(self, version: int) -> None:
         update_weights = self._update_weights_to(version)
         try:
             await update_weights(self._args, self._actor, self._executor, self._controller)
         except Exception as exc:
             raise PublicationError(f"upstream update_weights failed: {exc}",
                                    cause=PublicationCause.UPDATE_FAILED) from exc
-        engines, ids, members = await self._stamp_version(version, f"version {version}")
+        self._loaded_engines = await self._stamp_version(version, f"version {version}")
+
+    def served_checksum(self) -> str:
+        """Digest of the weight checksum the engines of the last :meth:`load_version`
+        serve; all engines must report the same one.
+
+        Needs the KV cache back: in LoRA mode the adapter is first loaded into
+        each engine's LoRA pool by one generate (as for a member publication),
+        so the checksum covers it (G-L7.4: a generate with the KV cache released
+        crashed the engine scheduler)."""
+        if self._loaded_engines is None:
+            raise PublicationError("served_checksum needs a load_version first")
+        return self._runner.run(self._served_checksum(*self._loaded_engines))
+
+    async def _served_checksum(self, engines: list[Any], ids: list[str],
+                               members: frozenset[str]) -> str:
         if lora_mode(self._args):
             await self._warm_up_lora(engines, ids, [], sorted(members))
         raw = await self._controller.check_weights(action="checksum")
@@ -580,8 +594,8 @@ class MilesPublisher:
         digests = {engine_checksum_digest(dict(b)) for b in bodies}
         if len(digests) != 1:
             raise PublicationError(
-                f"{len(bodies)} engines reported {len(digests)} different weight checksums "
-                f"after loading version {version}", cause=PublicationCause.PAYLOAD_MISMATCH)
+                f"{len(bodies)} engines reported {len(digests)} different weight checksums",
+                cause=PublicationCause.PAYLOAD_MISMATCH)
         return digests.pop()
 
     # -- member publication (3.5) ---------------------------------------------

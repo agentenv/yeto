@@ -346,7 +346,8 @@ def test_miles_port_call_order_both_directions():
     log: list = []
     port = MilesConversionPort(
         controller=FakeController(log), trainer=FakeTrainer(log), run=_run,
-        load_weights=lambda v: (log.append(("load_weights", v)), f"sha-{v}")[1],
+        load_weights=lambda v: log.append(("load_weights", v)),
+        read_checksum=lambda: (log.append("read_checksum"), "sha-5")[1],
         collect_inflight=lambda: (log.append("collect"), [InflightTrajectory("t9")])[1],
         set_admission=lambda on: log.append(("admission", on)),
         memory_tags=lambda: ["weights", "kv_cache", "cuda_graph"], weight_tags=lambda: ["weights"])
@@ -358,7 +359,7 @@ def test_miles_port_call_order_both_directions():
     assert log == [("admission", False), "collect", "abort_all",
                    ("offload", ("weights", "kv_cache", "cuda_graph")), "trainer.onload",
                    "trainer.offload", ("onload", ("weights",)), ("load_weights", 5), "onload_kv",
-                   ("admission", True)]
+                   "read_checksum", ("admission", True)]
 
 
 class FakeEngine:
@@ -424,7 +425,10 @@ def test_publisher_load_version_returns_the_engine_checksum_digest():
     controller = ChecksumController(log, engines=2)
     publisher = _publisher(log, controller)
     assert publisher.published_checksum is None
-    digest = publisher.load_version(7)
+    with pytest.raises(PublicationError, match="needs a load_version"):
+        publisher.served_checksum()
+    publisher.load_version(7)
+    digest = publisher.served_checksum()
     assert digest == engine_checksum_digest({"e": 0, "w": "v7"})
     # no onload, no KV: the port does those; no LoRA warm-up for a full-parameter run
     assert log == ["update_weights", "start_update_weights", "end_update_weights"]
@@ -436,7 +440,9 @@ def test_publisher_load_version_returns_the_engine_checksum_digest():
 def test_publisher_load_version_warms_the_lora_adapter_before_the_read_back():
     log: list = []
     controller = ChecksumController(log, engines=2)
-    _publisher(log, controller, lora_rank=16).load_version(7)
+    publisher = _publisher(log, controller, lora_rank=16)
+    publisher.load_version(7)
+    publisher.served_checksum()
     assert log == ["update_weights", "start_update_weights", "end_update_weights",
                    ("lora_warmup", "http://e0"), ("lora_warmup", "http://e1")]
 
@@ -446,7 +452,9 @@ def test_publisher_load_version_fails_when_engines_differ():
     controller = ChecksumController(log, engines=2)
     controller.skew = True
     with pytest.raises(PublicationError, match="2 different weight checksums"):
-        _publisher(log, controller).load_version(7)
+        publisher = _publisher(log, controller)
+        publisher.load_version(7)
+        publisher.served_checksum()
 
 
 class FakePool:
@@ -472,7 +480,7 @@ def test_engine_requests_inflight_counts_running_and_queued_or_nothing_when_unkn
 def test_miles_conversion_port_wires_publisher_pool_and_trainer():
     log: list = []
     controller = ChecksumController(log)
-    publisher = _publisher(log, controller)
+    publisher = _publisher(log, controller, lora_rank=16)
     port = miles_conversion_port(controller=controller,
                                  rollout=FakePool(log, {"running_requests": 1, "queued_requests": 0}),
                                  trainer=FakeTrainer(log), publisher=publisher, run=_run)
@@ -486,4 +494,6 @@ def test_miles_conversion_port_wires_publisher_pool_and_trainer():
     assert log == [("admission", False), "abort_all",
                    ("offload", ("weights", "kv_cache", "cuda_graph")), "trainer.onload",
                    "trainer.offload", ("onload", ("weights",)), "update_weights",
-                   "start_update_weights", "end_update_weights", "onload_kv", ("admission", True)]
+                   "start_update_weights", "end_update_weights", "onload_kv",
+                   # the LoRA warm-up generates: only with the KV cache back (G-L7.4)
+                   ("lora_warmup", "http://e0"), ("admission", True)]

@@ -17,14 +17,17 @@ adapter already uses (``rollout.py`` ``_offload_after_rollout``, ``publish.py``
   the release above always frees the weights), then ``load_weights(version)``
   (the existing weight update; in this fork ``begin_weight_update`` ->
   ``update_weights_from_tensor`` -> ``end_weight_update``, checked on one GPU in
-  SESSION24 L8.1), then ``controller.onload_kv()``. ``load_weights`` returns the
-  engine weight checksum of the loaded version.
+  SESSION24 L8.1), then ``controller.onload_kv()``, then ``read_checksum()``:
+  the engine weight checksum of the loaded version. The read comes after the KV
+  onload: in LoRA mode it serves one generate to load the adapter into the LoRA
+  pool, which crashed the engine scheduler with the KV cache released (G-L7.4).
 
 :func:`miles_conversion_port` wires the three callbacks from the island's
 adapter objects:
 
-* ``load_weights``: :meth:`.publish.MilesPublisher.load_version` (digest of the
-  engines' common ``check_weights(checksum)`` body; compare with
+* ``load_weights`` / ``read_checksum``: :meth:`.publish.MilesPublisher.load_version`
+  and :meth:`.publish.MilesPublisher.served_checksum` (digest of the engines'
+  common ``check_weights(checksum)`` body; compare with
   :attr:`.publish.MilesPublisher.published_checksum` of the same version);
 * ``collect_inflight``: :func:`engine_requests_inflight`, the requests running
   or queued on the engines (Miles puts their groups back into its data buffer
@@ -67,7 +70,8 @@ class MilesConversionPort:
 
     def __init__(self, *, controller: Any, trainer: Any,
                  run: Callable[[Awaitable[Any]], Any],
-                 load_weights: Callable[[int], str | None],
+                 load_weights: Callable[[int], None],
+                 read_checksum: Callable[[], str | None] = lambda: None,
                  collect_inflight: Callable[[], list[InflightTrajectory]] = list,
                  set_admission: Callable[[bool], None] | None = None,
                  memory_tags: Callable[[], list[str]] = _all_memory_tags,
@@ -76,6 +80,7 @@ class MilesConversionPort:
         self._trainer = trainer
         self._run = run
         self._load_weights = load_weights
+        self._read_checksum = read_checksum
         self._collect_inflight = collect_inflight
         self._set_admission = set_admission
         self._memory_tags = memory_tags
@@ -99,9 +104,9 @@ class MilesConversionPort:
 
     def resume_rollout(self, version: int) -> str | None:
         self._run(self._controller.onload(tags=self._weight_tags()))
-        checksum = self._load_weights(version)
+        self._load_weights(version)
         self._run(self._controller.onload_kv())
-        return checksum
+        return self._read_checksum()
 
     def accept_requests(self) -> None:
         if self._set_admission is not None:
@@ -128,6 +133,6 @@ def miles_conversion_port(*, controller: Any, rollout: Any, trainer: Any, publis
     trainer (``onload``/``offload``), ``publisher`` its :class:`.publish.MilesPublisher`."""
     return MilesConversionPort(
         controller=controller, trainer=trainer, run=run,
-        load_weights=publisher.load_version,
+        load_weights=publisher.load_version, read_checksum=publisher.served_checksum,
         collect_inflight=lambda: engine_requests_inflight(rollout),
         set_admission=rollout.set_admission)
