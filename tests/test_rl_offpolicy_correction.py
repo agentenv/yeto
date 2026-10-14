@@ -419,3 +419,17 @@ def test_staleness_policy_correction_is_derived():
                                                      ratio_mask="icepop"))
     assert StalenessPolicy.for_algorithm(icepop).correction == "icepop"
     assert StalenessPolicy.for_algorithm(AlgorithmSpec()).correction == "tis"
+
+
+def test_miles_rollout_handle_keeps_the_gate_inputs():
+    # L6.10 GPU: the Miles handle dropped the gate keys, so the driver taped no offpolicy_gate
+    from yeto.rl.adapters.miles.rollout import _carry_over_fields
+
+    payload = {"max_policy_age": 1, "over_age_discarded_groups": 1,
+               oc.GATE_DROPPED_LENGTHS: {"group_dropped": [300], "unknown_version_dropped": []},
+               oc.TRUNCATED_BY_TURN: {"0": [1, 2]}}
+    fields = _carry_over_fields(payload)
+    gate = oc.gate_from_carry_over(fields, kept=3, backend="miles")
+    assert gate["counts"] == {"group_dropped": 1, "kept": 3, "unknown_version_dropped": 0}
+    assert gate["truncation_by_turn"]["0"]["truncated"] == 1
+    assert oc.GATE_DROPPED_LENGTHS not in fields
