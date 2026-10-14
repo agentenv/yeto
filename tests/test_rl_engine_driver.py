@@ -130,6 +130,17 @@ def test_serial_colocated_three_rounds_event_order(tmp_path):
     assert [e["event"] for e in events].count("rl_local_round") == 3
 
 
+def test_driver_start_records_island_tasks_only_when_set(tmp_path):
+    record = {"task_ids": ["web1", "web2"], "data_sha256": "a" * 64}
+    for island_tasks, expected in ((None, None), (record, record)):
+        driver = _driver(_engine(), LocalOnlySync(1), tmp_path / str(bool(island_tasks)))
+        driver.island_tasks = island_tasks
+        driver.run()
+        events = _events(tmp_path / str(bool(island_tasks)) / "events.jsonl")
+        start = next(e for e in events if e["event"] == "rl_driver_start")
+        assert start.get("island_tasks") == expected
+
+
 def test_fixed_partition_never_offloads(tmp_path):
     engine = _engine(placement_kind="fixed-partition")
     _driver(engine, LocalOnlySync(2), tmp_path).run()

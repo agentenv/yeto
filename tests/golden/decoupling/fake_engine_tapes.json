@@ -363,6 +363,15 @@
     "time_unix": "<VOLATILE>"
    },
    {
+    "event": "rl_round_wall",
+    "island_id": 0,
+    "placement": "colocated",
+    "rollout_id": 0,
+    "rollout_seconds": "<VOLATILE>",
+    "round_seconds": "<VOLATILE>",
+    "time_unix": "<VOLATILE>"
+   },
+   {
     "event": "rl_driver_phase",
     "island_id": 0,
     "phase": "offload",
@@ -590,6 +599,15 @@
     ],
     "sync/publication_payload_bytes": 24,
     "sync/publication_payload_hash": "f2bfcec5290e2a76b743502782e7c3bab74aa464437c57cdd49bc18f28cee5be",
+    "time_unix": "<VOLATILE>"
+   },
+   {
+    "event": "rl_round_wall",
+    "island_id": 0,
+    "placement": "colocated",
+    "rollout_id": 1,
+    "rollout_seconds": "<VOLATILE>",
+    "round_seconds": "<VOLATILE>",
     "time_unix": "<VOLATILE>"
    },
    {
@@ -830,6 +848,15 @@
     "time_unix": "<VOLATILE>"
    },
    {
+    "event": "rl_round_wall",
+    "island_id": 0,
+    "placement": "colocated",
+    "rollout_id": 2,
+    "rollout_seconds": "<VOLATILE>",
+    "round_seconds": "<VOLATILE>",
+    "time_unix": "<VOLATILE>"
+   },
+   {
     "event": "rl_driver_phase",
     "island_id": 0,
     "phase": "offload",
@@ -1024,6 +1051,15 @@
     ],
     "sync/publication_payload_bytes": 24,
     "sync/publication_payload_hash": "cae3e0a58d6aebd9072383d76f6599fde2d33b80a2f85749a5c5f44477102fa4",
+    "time_unix": "<VOLATILE>"
+   },
+   {
+    "event": "rl_round_wall",
+    "island_id": 0,
+    "placement": "colocated",
+    "rollout_id": 3,
+    "rollout_seconds": "<VOLATILE>",
+    "round_seconds": "<VOLATILE>",
     "time_unix": "<VOLATILE>"
    },
    {
@@ -1282,6 +1318,15 @@
     "time_unix": "<VOLATILE>"
    },
    {
+    "event": "rl_round_wall",
+    "island_id": 0,
+    "placement": "colocated",
+    "rollout_id": 4,
+    "rollout_seconds": "<VOLATILE>",
+    "round_seconds": "<VOLATILE>",
+    "time_unix": "<VOLATILE>"
+   },
+   {
     "event": "rl_driver_phase",
     "island_id": 0,
     "phase": "finish",
@@ -1523,6 +1568,15 @@
     "time_unix": "<VOLATILE>"
    },
    {
+    "event": "rl_round_wall",
+    "island_id": 0,
+    "placement": "colocated",
+    "rollout_id": 0,
+    "rollout_seconds": "<VOLATILE>",
+    "round_seconds": "<VOLATILE>",
+    "time_unix": "<VOLATILE>"
+   },
+   {
     "event": "rl_driver_phase",
     "island_id": 0,
     "phase": "offload",
@@ -1646,6 +1700,15 @@
     ],
     "sync/publication_payload_bytes": 8,
     "sync/publication_payload_hash": "ad02908e7dc8436bd2b7894ec3c745e38daae971187ca817c60e44c5af471827",
+    "time_unix": "<VOLATILE>"
+   },
+   {
+    "event": "rl_round_wall",
+    "island_id": 0,
+    "placement": "colocated",
+    "rollout_id": 1,
+    "rollout_seconds": "<VOLATILE>",
+    "round_seconds": "<VOLATILE>",
     "time_unix": "<VOLATILE>"
    },
    {
@@ -1787,6 +1850,15 @@
     ],
     "sync/publication_payload_bytes": 8,
     "sync/publication_payload_hash": "0f9e0aa006f3782e96f800fa154a071185d73a0f0a1894cfadd102081a5715ad",
+    "time_unix": "<VOLATILE>"
+   },
+   {
+    "event": "rl_round_wall",
+    "island_id": 0,
+    "placement": "colocated",
+    "rollout_id": 2,
+    "rollout_seconds": "<VOLATILE>",
+    "round_seconds": "<VOLATILE>",
     "time_unix": "<VOLATILE>"
    },
    {
@@ -2125,6 +2197,15 @@
     ],
     "sync/publication_payload_bytes": 8,
     "sync/publication_payload_hash": "a47077a19cd711eed33ac9521628adc95b9fbae3f98b8a29810cc96dbc1065af",
+    "time_unix": "<VOLATILE>"
+   },
+   {
+    "event": "rl_round_wall",
+    "island_id": 0,
+    "placement": "colocated",
+    "rollout_id": 0,
+    "rollout_seconds": "<VOLATILE>",
+    "round_seconds": "<VOLATILE>",
     "time_unix": "<VOLATILE>"
    },
    {

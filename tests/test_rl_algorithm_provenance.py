@@ -353,7 +353,7 @@ def test_fixed_partition_passes_selection_on_learner_and_launcher(capsys):
     assert args.rl_placement == "fixed-partition"
     with pytest.raises(SystemExit):  # without --rl-placement it is still refused
         rl_learner.parse_args(_learner_argv(("--rollout-num-gpus", "1")))
-    assert 'placement=getattr(args, "rl_placement", "colocated")' in inspect.getsource(
+    assert 'placement=getattr(iargs, "rl_placement", "colocated")' in inspect.getsource(
         launcher._prepare_rl_args)
 
 

@@ -223,6 +223,8 @@ _ISLAND = (
     island_flag("--model", required=True),
     island_flag("--model-revision", required=True),
     island_flag("--data", required=True),
+    # rl-per-island-tasks: SHA256 of this island's own prompt file (checked before training)
+    island_flag("--data-sha256", default=None),
     island_flag("--data-revision", default=None),
     island_flag("--eval-data", default=None),
     island_flag("--eval-dataset-name", default=None),
@@ -307,6 +309,9 @@ _ISLAND = (
     # rl-multinode-island: GPUs per island node when the island spans nodes (the
     # launcher sends it for --gpu cloud:NxGxgpu with N > 1); None = single node.
     island_flag("--rl-island-gpus-per-node", type=int, default=None),
+    # set by the launcher on every island of a --rl-island-placement launch:
+    # the placement flags then stay out of the full-parameter training contract
+    island_flag("--rl-per-island-placement", action="store_true"),
     # rl-multinode-island Q2 (mixed rollout/trainer nodes): the role -> logical
     # bundle map derived by the launcher from the elastic cfg placement; None =
     # the leading-bundle layout (trainer first, then rollout, then standby).

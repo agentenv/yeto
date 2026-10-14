@@ -46,7 +46,7 @@ Code-reading result on 2026-10-13 (branch HEAD `f2db57f8`):
   - Cross-check of the reason code values between Python and Rust.
   - End-to-end: a real Rust syncer and two simulated islands. One island leaves for each category of reason, and the other island keeps producing rounds.
   - Removal on lease timeout: the test uses a shortened lease (it does not wait the real 150 s).
-- Not done: the launcher sending LEAVE on behalf of the island (deferred, see D5 and D6 in design.md); strict path failure isolation; a CLI to add an island during a run; run on GPU.
+- Not done: the launcher sending LEAVE on behalf of the island (deferred, see D5 in design.md); strict path failure isolation; a CLI to add an island during a run; run on GPU.
 
 ## Capabilities
 

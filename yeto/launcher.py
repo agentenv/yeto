@@ -337,6 +337,47 @@ def rl_island_spec(args, spec):
     return dataclasses.replace(spec, gpus_per_node=m)
 
 
+def rl_island_count(args) -> int:
+    """The number of learner islands of the launch (one per ``--gpu`` entry)."""
+    return len(parse_gpu_spec(args.gpu)) if getattr(args, "gpu", None) else 1
+
+
+def rl_island_args(args, learner_id: int):
+    """``args`` as island ``learner_id`` sees it (rl-mixed-island-placement): a
+    copy with its per-island placement values, or ``args`` itself without any.
+    Every island-side rule below (trainer shape, layout, minimum nodes, learner
+    command) reads the placement from these args, never from the run-wide ones."""
+    from .rl.engine import island_placement
+
+    return island_placement.island_args(args, learner_id, rl_island_count(args))
+
+
+def rl_island_placement_args(args) -> list:
+    """One island args copy per distinct placement value set of the launch."""
+    seen, out = set(), []
+    for m in range(rl_island_count(args)):
+        iargs = rl_island_args(args, m)
+        # rollout_num_gpus is included because a colocated island of a mixed
+        # run drops it (island_placement.island_args); the other fields follow.
+        key = (getattr(iargs, "rl_placement", "colocated"),
+               getattr(iargs, "rl_standby_gpus", 0), getattr(iargs, "rollout_num_gpus", None),
+               getattr(iargs, "rl_island_use_gpus_per_node", None))
+        if key not in seen:
+            seen.add(key)
+            out.append(iargs)
+    return out
+
+
+def rl_island_placement_records(args) -> list[dict]:
+    """Run manifest / dry-run rows: every island's placement values and the
+    AlgorithmSpec hash it receives (the same on every island, P4-Q4)."""
+    from .rl.engine import island_placement
+
+    algorithm = getattr(args, "rl_expected_algorithm_sha256", None)
+    return [{**p.record(), "algorithm_sha256": algorithm}
+            for p in island_placement.island_placements(args, rl_island_count(args))]
+
+
 def rl_island_gpu_env(args, spec) -> str:
     """Shell exports pinning the island to local GPUs ``0..M-1`` (exported before
     ``ray start`` so Ray, the learner, Miles actors and the sglang subprocesses all
@@ -1778,18 +1819,21 @@ def _prepare_ports_algorithm(args) -> None:
         miles_capabilities, with_partitioned_serial = (
             _entry.miles_capabilities, _entry.with_partitioned_serial)
 
-        partitioned = getattr(args, "rl_placement", "colocated") == "fixed-partition"
-        capabilities = miles_capabilities(
-            "sha256:" + "0" * 64, unverified_mechanisms=args.rl_allow_unverified_mechanism
-        )
-        if partitioned:
-            capabilities = with_partitioned_serial(capabilities)
-        capabilities.check(
-            layout="lora",
-            placement="fixed-partition" if partitioned else "colocated",
-            execution_mode="partitioned-serial" if partitioned else "colocated-serial",
-            algorithm=spec,
-        )
+        # Each island checks its own placement; the AlgorithmSpec hash does not
+        # depend on it (P4-Q4: placement capabilities stay out of the hash).
+        for partitioned in sorted({getattr(iargs, "rl_placement", "colocated") == "fixed-partition"
+                                   for iargs in rl_island_placement_args(args)}):
+            capabilities = miles_capabilities(
+                "sha256:" + "0" * 64, unverified_mechanisms=args.rl_allow_unverified_mechanism
+            )
+            if partitioned:
+                capabilities = with_partitioned_serial(capabilities)
+            capabilities.check(
+                layout="lora",
+                placement="fixed-partition" if partitioned else "colocated",
+                execution_mode="partitioned-serial" if partitioned else "colocated-serial",
+                algorithm=spec,
+            )
     except (AlgorithmSpecError, CapabilityMismatch) as error:
         raise ValueError(str(error)) from error
     _check_critic_warmup_options(args, spec)
@@ -2062,17 +2106,115 @@ def _check_ports_eval(args) -> int | None:
     return interval
 
 
+ISLAND_TASKS_DIR = "island-tasks"
+
+
+def island_task_plan(args):
+    """rl-per-island-tasks: island -> :class:`IslandTaskData`, or None without the flag.
+
+    Computed once per launch by :func:`_check_island_tasks` (cached on
+    ``args``). Islands are only built for the ``--gpu`` entries (elastic adds
+    no islands), so the plan covers every learner id the launch can build.
+    The head's second hop prepares its own args and rebuilds the same bytes
+    from its staged ``--data``.
+    """
+
+    if not getattr(args, "rl_island_tasks", None):
+        return None
+    plan = getattr(args, "_island_task_plan", None)
+    if plan is None:
+        raise ValueError(f"{rl_option('rl_island_tasks', CLI)} was not checked; "
+                         "prepare the launch arguments first")
+    return plan
+
+
+def _check_island_tasks(args, eval_interval: int | None) -> None:
+    """``--rl-island-tasks``: refuse a bad spec before any cloud call (P3-Q1..Q3),
+    then cache the plan on ``args``.
+
+    Rewrites the flag to its inline form so a JSON-file spec reaches the head.
+    """
+
+    if not getattr(args, "rl_island_tasks", None):
+        return
+    from .datasource import kind
+    from .rl.island_tasks import (
+        format_island_tasks,
+        parse_island_tasks,
+        plan_island_tasks,
+        task_count_warning,
+    )
+
+    flag = rl_option("rl_island_tasks", CLI)
+    data = getattr(args, "data", None)
+    if not (isinstance(data, str) and kind(data) == "local" and data.endswith(".jsonl")
+            and Path(data).expanduser().is_file()):
+        raise ValueError(f"{flag} needs --data to be one local JSONL file")
+    if getattr(args, "external_learners", 0):
+        raise ValueError(f"{flag} does not cover --external-learners")
+    if eval_interval is not None:
+        # P3-Q3: eval uses the full set on the eval island only.
+        raise ValueError(f"{flag}: training islands do not run eval; drop "
+                         f"{rl_option('rl_eval_interval', CLI)} and evaluate on the eval island")
+    spec = parse_island_tasks(args.rl_island_tasks, flag=flag)
+    args.rl_island_tasks = format_island_tasks(spec)
+    args._island_task_plan = plan_island_tasks(
+        data, spec, range(len(parse_gpu_spec(args.gpu))), flag=flag)
+    warning = task_count_warning(args._island_task_plan, flag=flag)
+    if warning:
+        print(f"[launcher] WARNING {warning}", file=sys.stderr, flush=True)
+
+
+def _refuse_island_tasks(args, path: str) -> None:
+    """Per-island tasks exist on the ports RL island path only."""
+
+    if getattr(args, "rl_island_tasks", None):
+        raise ValueError(f"{rl_option('rl_island_tasks', CLI)} applies to ports RL islands "
+                         f"only, not the {path} path")
+
+
+def island_task_data(args, learner_id: int) -> tuple[str, str, dict[str, str]]:
+    """The island's ``--data`` value, its SHA256 flag and file mounts.
+
+    Without ``--rl-island-tasks`` every island gets the shared ``--data``. With
+    it, the island's own prompt file is written under the run directory and
+    mounted in place of ``--data``.
+    """
+
+    from . import runs
+    from .datasource import learner_data_arg, learner_file_mounts
+
+    plan = island_task_plan(args)
+    if plan is None:
+        return learner_data_arg(args.data), "", learner_file_mounts(args.data)
+    if learner_id not in plan:
+        raise ValueError(f"{rl_option('rl_island_tasks', CLI)} has no task list for learner "
+                         f"{learner_id} (planned islands: {sorted(plan)})")
+    island = plan[learner_id]
+    path = runs.run_dir(args.cluster_prefix) / ISLAND_TASKS_DIR / f"island-{learner_id}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(island.content)
+    return (learner_data_arg(str(path)),
+            f" {rl_option('data_sha256')} {island.sha256}",
+            learner_file_mounts(str(path)))
+
+
 def _check_ports_infra_switches(args) -> None:
     """``--rl-overlap-eval`` / ``--rl-elastic`` (rl-infra-spec 2.3 / 3.x): opt-in;
     the elastic manifest is read here so a bad file fails locally."""
 
-    from .rl.engine.execution_profile import check_elastic_placement, check_overlap_eval
+    from .rl.engine import island_placement
+    from .rl.engine.execution_profile import UNKNOWN, check_elastic_placement, check_overlap_eval
 
-    from .rl.engine.execution_profile import UNKNOWN
-
-    placement = getattr(args, "rl_placement", "colocated") or "colocated"
+    placements = island_placement.check(args, rl_island_count(args),
+                                        island_scheduling=island_scheduling_mode(args))
+    # The checks below need a fixed partition; any colocated island fails them.
+    placement = (island_placement.FIXED_PARTITION
+                 if all(p.placement == island_placement.FIXED_PARTITION for p in placements)
+                 else island_placement.COLOCATED)
     _check_test_tool_delay(args)
     eval_interval = _check_ports_eval(args)
+    _check_island_tasks(args, eval_interval)
     if getattr(args, "rl_overlap_eval", False):
         # Same check the island's execution profile applies, run before any
         # resource is provisioned, on the values the launcher really forwards:
@@ -2343,6 +2485,8 @@ def _ports_algorithm_flags(args) -> tuple[str, str]:
         flags += f" --rl-standby-gpus {int(args.rl_standby_gpus)}"
     if getattr(args, "rl_placement", "colocated") == "fixed-partition":
         flags += f" --rollout-num-gpus {int(args.rollout_num_gpus)}"
+    if getattr(args, "rl_island_placement", None):
+        flags += " --rl-per-island-placement"
     allowed = list(getattr(args, "rl_allow_unverified_mechanism", None) or ())
     for name in allowed:
         flags += f" --rl-allow-unverified-mechanism {shlex.quote(name)}"
@@ -2563,15 +2707,16 @@ def _prepare_rl_args(
     from .rl.engine.selection import require_ports_supported
 
     # Rejected before any cloud or GPU work (spec rl-engine-selection).
-    require_ports_supported(
-        sync_preset=args.rl_sync_preset,
-        model_kind=resolve_model_kind(args.model, args.model_kind),
-        tuning=args.tuning,
-        expert_full_count=getattr(args, "expert_full_count", 0) or 0,
-        rollout_num_gpus=getattr(args, "rollout_num_gpus", None),
-        placement=getattr(args, "rl_placement", "colocated"),
-        island_scheduling=getattr(args, "rl_island_scheduling", "legacy"),
-    )
+    for iargs in rl_island_placement_args(args):
+        require_ports_supported(
+            sync_preset=args.rl_sync_preset,
+            model_kind=resolve_model_kind(args.model, args.model_kind),
+            tuning=args.tuning,
+            expert_full_count=getattr(args, "expert_full_count", 0) or 0,
+            rollout_num_gpus=getattr(iargs, "rollout_num_gpus", None),
+            placement=getattr(iargs, "rl_placement", "colocated"),
+            island_scheduling=getattr(args, "rl_island_scheduling", "legacy"),
+        )
     if resolve_model_kind(args.model, args.model_kind) != "causal-lm":
         raise ValueError("RL v0 supports only causal language models")
     if args.tuning != "lora":
@@ -2861,7 +3006,8 @@ def _prepare_rl_args(
         raise ValueError("--session-server-workers must be at least 1")
     _default_session_server_port(args)
 
-    specs = [rl_island_spec(args, spec) for spec in parse_gpu_spec(args.gpu)]
+    per_island = [rl_island_args(args, m) for m in range(rl_island_count(args))]
+    specs = [rl_island_spec(iargs, spec) for iargs, spec in zip(per_island, parse_gpu_spec(args.gpu))]
     if getattr(args, "external_learners", 0):
         raise ValueError("RL v0 does not support external learner slots")
     if args.tensor_parallel <= 0 or args.pipeline_parallel <= 0:
@@ -2872,21 +3018,21 @@ def _prepare_rl_args(
             raise ValueError("RL expert parallelism must be positive")
         if any(spec.total_gpus % args.expert_parallel for spec in specs):
             raise ValueError("RL expert parallelism must divide every island")
-    for spec in specs:
-        if getattr(args, "rl_placement", "colocated") == "fixed-partition":
+    for iargs, spec in zip(per_island, specs):
+        if getattr(iargs, "rl_placement", "colocated") == "fixed-partition":
             # rl-infra-spec 2.1: the node's GPUs are trainer + rollout + standby;
             # parallel-size checks below apply to the trainer part.
-            if spec.num_nodes == 1 and rl_actor_gpus_per_node(args, spec) < 1:
+            if spec.num_nodes == 1 and rl_actor_gpus_per_node(iargs, spec) < 1:
                 raise ValueError(
                     "--rl-placement fixed-partition needs one node with "
                     "--rollout-num-gpus + --rl-standby-gpus < GPUs per node"
                 )
-            if int(args.rollout_num_gpus) % args.rollout_num_gpus_per_engine:
+            if int(iargs.rollout_num_gpus) % args.rollout_num_gpus_per_engine:
                 raise ValueError("--rollout-num-gpus must be a multiple of --rollout-num-gpus-per-engine")
             from .gpu_spec import require_min_nodes
 
-            require_min_nodes(spec, rl_min_nodes(args, spec))
-            actor_nodes, actor = rl_trainer_shape(args, spec)
+            require_min_nodes(spec, rl_min_nodes(iargs, spec))
+            actor_nodes, actor = rl_trainer_shape(iargs, spec)
             node_parallel = args.tensor_parallel * int(getattr(args, "context_parallel", 1) or 1)
             cross_tp, cross_engine = rl_cross_node_switches(args)
             if spec.num_nodes > 1 and not cross_tp and (node_parallel > spec.gpus_per_node
@@ -2907,7 +3053,7 @@ def _prepare_rl_args(
             # m5 (ruling 2026-10-04 v2): a colocated multi-node island carves its engines out
             # of the whole island; an engine larger than a node (sglang nnodes>1) needs the
             # explicit opt-in and must take whole nodes, before any cloud work.
-            rl_colocated_engine_check(args, spec)
+            rl_colocated_engine_check(iargs, spec)
         if spec.total_gpus % model_parallel:
             raise ValueError(
                 "RL TP*PP must divide every island GPU world size"
@@ -4124,7 +4270,6 @@ def make_miles_island_task(
 
     import sky
 
-    from .datasource import learner_data_arg, learner_file_mounts
     from .models import resolve
     from .provenance import is_local_reference
 
@@ -4132,6 +4277,7 @@ def make_miles_island_task(
         args, "reward_sha256", None
     ):
         raise ValueError("RL task requires prepared source and reward provenance")
+    island_data, island_data_sha256, data_mounts = island_task_data(args, learner_id)
     codex_launch = codex_harness_launch(args)  # None unless a signed Codex agent
     # --rl-island-use-gpus-per-node: island rules see M GPUs/node; resources stay physical.
     island = rl_island_spec(args, spec)
@@ -4144,7 +4290,7 @@ def make_miles_island_task(
             if getattr(args, "rl_training_attention_backend", "auto") not in (None, "auto")
             else ""
         )
-        + f" --data {shlex.quote(learner_data_arg(args.data))}"
+        + f" --data {shlex.quote(island_data)}{island_data_sha256}"
         + (
             " --rl-single-island-no-sync"
             if getattr(args, "rl_single_island_no_sync", False)
@@ -4340,7 +4486,7 @@ def make_miles_island_task(
             "|| { echo '[yeto-island] worker could not fetch the model snapshot:' >&2; "
             "tail -5 /tmp/hf-prefetch-worker.log >&2; exit 1; }\n"
         )
-    file_mounts = dict(learner_file_mounts(args.data))
+    file_mounts = dict(data_mounts)
     if getattr(args, "rl_initial_adapter", None) is not None:
         file_mounts[RL_INITIAL_ADAPTER_PATH] = os.path.expanduser(
             args.rl_initial_adapter
@@ -4632,6 +4778,7 @@ def _is_alphafold3_request(args) -> bool:
 
 
 def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: int, syncer_addr: str):
+    _refuse_island_tasks(args, "SFT learner")
     import sky
 
     from .adapter_lifecycle import (
@@ -5045,6 +5192,7 @@ def _add_flag(cmd: str, name: str, value) -> str:
 
 
 def make_diffusion_sample_task(args, spec: ClusterSpec):
+    _refuse_island_tasks(args, "diffusion sample")
     import sky
 
     from .datasource import learner_data_arg, learner_file_mounts
@@ -5517,7 +5665,7 @@ def _island_task(task_factory, args, spec, m, num_learners, syncer_addr, overrid
     from . import island_overrides as io
     from .cloud import droppable
 
-    iargs = droppable.role_args(io.island_args(args, m, overrides), role)
+    iargs = droppable.role_args(io.island_args(rl_island_args(args, m), m, overrides), role)
     task = task_factory(iargs, spec, m, num_learners, syncer_addr)
     io.apply_to_task(task, {**io.island_env(args, m, overrides),
                             **(droppable.role_env(role, spec.cloud, spec.region) if role else {})})
@@ -7554,8 +7702,8 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 continue
             tasks[name] = task
             print(f"[launcher] {name} dials {island_syncer_addrs(getattr(task, 'envs', None))}", flush=True)
-            alloc = (rl_island_spec(args, spec) if getattr(args, "training_mode", "sft") == "rl"
-                     else spec)
+            alloc = (rl_island_spec(rl_island_args(args, m), spec)
+                     if getattr(args, "training_mode", "sft") == "rl" else spec)
             print(f"[launcher] launching learner {m} on {spec} as {name}"
                   + (f" (physical {spec.gpus_per_node} GPUs/node billed, island allocated "
                      f"{alloc.gpus_per_node}/node = GPUs 0..{alloc.gpus_per_node - 1})"
@@ -8023,6 +8171,15 @@ def _miles_overlay_manifest(args) -> dict:
     return {"miles_overlay": record} if record else {}
 
 
+def _island_tasks_manifest(args) -> dict:
+    """``island_tasks`` for the run manifest (rl-per-island-tasks); absent without the flag."""
+
+    plan = island_task_plan(args)
+    if plan is None:
+        return {}
+    return {"island_tasks": {str(island): data.record() for island, data in sorted(plan.items())}}
+
+
 def _write_run_manifest(args) -> dict | None:
     """Record the engine pins actually used (launch.log + <run dir>/run_manifest.json)."""
 
@@ -8039,8 +8196,10 @@ def _write_run_manifest(args) -> dict | None:
         "source_sha256": getattr(args, "source_sha256", None),
         "cluster_prefix": args.cluster_prefix,
         **_miles_overlay_manifest(args),
+        **_island_tasks_manifest(args),
         # launch-preflight-guards: preflight readings, negative_test, island_overrides
         **(getattr(args, "_launch_preflight_manifest", None) or {}),
+        "island_placements": rl_island_placement_records(args),
         "written_unix": time.time(),
     }
     print(f"[launcher] RL image {manifest['rl_image']}, "
@@ -8118,6 +8277,8 @@ def dry_run_plan(args) -> dict:
     from .launch_preflight import dry_run_memory
 
     memory = dry_run_memory(args, specs)
+    task_plan = island_task_plan(args) if rl else None
+    placements = rl_island_placement_records(args) if rl else []
     for learner_id, spec in enumerate(specs):
         entry = {
             "learner_id": learner_id,
@@ -8128,8 +8289,11 @@ def dry_run_plan(args) -> dict:
             "gpus_per_node": spec.gpus_per_node,
             "total_gpus": spec.total_gpus,
         }
-        if rl and rl_island_spec(args, spec) is not spec:
-            entry["allocated_gpus_per_node"] = rl_island_spec(args, spec).gpus_per_node
+        if rl:
+            entry["placement"] = placements[learner_id]
+        if rl and rl_island_spec(rl_island_args(args, learner_id), spec) is not spec:
+            entry["allocated_gpus_per_node"] = rl_island_spec(
+                rl_island_args(args, learner_id), spec).gpus_per_node
         if memory is not None:
             entry["memory_estimate"] = memory[learner_id]
         if rl:
@@ -8141,6 +8305,8 @@ def dry_run_plan(args) -> dict:
 
                 entry["island_role"] = {"role": role, "billing": billing(role),
                                         "rejoin": rejoin_source(role)}
+            if task_plan is not None:
+                entry["island_tasks"] = task_plan[learner_id].record()
             if island_overrides.get(learner_id):
                 from .island_overrides import records
 

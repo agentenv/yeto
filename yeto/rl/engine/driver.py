@@ -409,6 +409,7 @@ class IslandDriver:
         self.eval_interval = eval_interval
         self.max_rollouts = max_rollouts
         self.colocated = False
+        self.placement_kind: str | None = None  # set by handshake()
         # Colocated trainers that can publish while offloaded (declared by the
         # backend: traits.publish_while_offloaded, and enabled for this run by the
         # trainer's publish_offloaded) are offloaded right after the sync boundary,
@@ -595,6 +596,7 @@ class IslandDriver:
                 "trainer group does not report grad_norm; the per-round "
                 "gradient invariant cannot be checked"
             )
+        self.placement_kind = description.kind
         self.colocated = description.kind == "colocated"
         self.weight_transport = self.traits.transport_label(str(
             description.extra.get("weight_transport")
@@ -612,6 +614,7 @@ class IslandDriver:
             **{"rl/algorithm_spec_sha256": self.algorithm.sha256()},
             runtime_fingerprint=self.capabilities.runtime_fingerprint,
             **({"eval_guard": dict(self.eval_guard_report)} if self.eval_guard_report else {}),
+            **({"island_tasks": dict(self.island_tasks)} if self.island_tasks else {}),
         )
 
     # -- helpers used by sync sessions -----------------------------------
@@ -1284,6 +1287,9 @@ class IslandDriver:
     # rl-eval-difficulty-buckets 2.2 (D6.c): start-time hold-out check report,
     # written into rl_driver_start as ``eval_guard`` only when set.
     eval_guard_report: Mapping[str, Any] | None = None
+    # rl-per-island-tasks: this island's task ids and prompt-file SHA256, written
+    # into rl_driver_start as ``island_tasks`` only when the island has its own list.
+    island_tasks: Mapping[str, Any] | None = None
 
     def _export_eval_version(self, rollout_id: int, *, final: bool) -> None:
         state = self.published_state
@@ -1355,12 +1361,17 @@ class IslandDriver:
         if self.ledger is not None:
             self.ledger.prepare(batch, policy_token=self.expected_token)
         try:
-            return self._train_round(rollout_id, batch, rollout_seconds)
+            boundary = self._train_round(rollout_id, batch, rollout_seconds)
         except BaseException as error:
             if self.ledger is not None and self.ledger.state(rollout_id) == "prepared":
                 self.ledger.discard(rollout_id, error=f"{type(error).__name__}: {error}")
             self._classify_failure(rollout_id, error)
             raise
+        # P4 3.1: every island's wall time per round, whatever its placement
+        # (generate + train + outer boundary + publish), for cross-island comparison.
+        self.emit("rl_round_wall", rollout_id=rollout_id, placement=self.placement_kind,
+                  round_seconds=time.monotonic() - started, rollout_seconds=rollout_seconds)
+        return boundary
 
     def _train_round(self, rollout_id: int, batch: RolloutBatchHandle,
                      rollout_seconds: float) -> SyncBoundary:

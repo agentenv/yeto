@@ -396,6 +396,14 @@ _PLACEMENT = (
                 help="rl-multinode-island (ruling 2026-10-04 v2): let the trainer TP*CP group "
                 "span nodes (default: TP stays inside a node, refused otherwise); same as cfg "
                 "parallel.allow_cross_node_tp; journaled as topology.layout.cross_node_tp"),
+    # rl-mixed-island-placement: per-island placement values (yeto.rl.engine.island_placement)
+    cli_flag("--rl-island-placement", action="append", default=None,
+             metavar="ISLAND:KEY=VALUE",
+             help="give island ISLAND its own placement value (repeatable); KEY is "
+             "placement (colocated | fixed-partition), standby-gpus or use-gpus-per-node; "
+             "other islands keep --rl-placement / --rl-standby-gpus / "
+             "--rl-island-use-gpus-per-node. Different placements need "
+             "--rl-island-scheduling elastic"),
     cli_flag("--rl-island-use-gpus-per-node", type=int, default=None, metavar="M",
              help="rl-multinode-island: provision the --gpu machines (N GPUs/node, billed) but "
              "give the island only local GPUs 0..M-1 on every node (M <= N): ray start "
@@ -627,6 +635,13 @@ _SCHEDULING = (
     shared_flag("--rl-elastic-pause-margin", type=float, default=None, metavar="X",
                 help="--rl-elastic: pause budget = X * quorum timeout (default 0.5; "
                 "X6 cross-quorum runs only)"),
+    # rl-per-island-tasks: each training island trains on its own task subset.
+    cli_flag("--rl-island-tasks", default=None, metavar="SPEC",
+             help="per-island task lists from --data (a local JSONL whose rows carry "
+             "metadata.task_id): 'l0=web1-10,pwn1-10;l1=web11-20,pwn11-20' or a JSON file "
+             "{\"0\": [...], \"1\": [...]}; the launcher writes one prompt file per island; "
+             "every training island needs a list; eval runs on the eval island only; a JSON "
+             "spec file path must not contain '='"),
 )
 
 _EVAL = (
