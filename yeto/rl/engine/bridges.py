@@ -29,6 +29,7 @@ Rust syncer.
 from __future__ import annotations
 
 import math
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -45,10 +46,19 @@ from yeto.rl.core import (
     policy_hash,
     policy_tensor_hash,
 )
+from yeto.rl import elastic_client
+from yeto.rl.elastic_client import (
+    DEFAULT_ISLAND_LEASE_S,
+    ElasticClientConfig,
+    ElasticFinished,
+    LeaveReason,
+)
 
 from . import progress as legacy_progress
 from .pause_audit import PAUSABLE_PHASE
+from .backend_identity import config_island_contract_sha256
 from .driver import IslandDriver, SyncBoundary, SyncStart
+from .leave_reason import sendable
 from .trainable_state import TrainableState
 
 
@@ -154,8 +164,8 @@ class LocalOnlySync:
             driver.at_safe_point = True
             self.at_safe_point(driver, rollout_id=int(version), final=True)
 
-    def close(self) -> None:
-        pass
+    def close(self, reason: int = LeaveReason.FINISHED) -> None:
+        pass  # no coordinator: nothing to LEAVE
 
 
 _FRESH_CURSOR = {"sample_offset": 0, "epoch_id": 0, "sample_group_index": 0, "sample_index": 0}
@@ -371,8 +381,8 @@ class StrictAvgSync:
         if policy_hash(final) != policy_hash(self.current):
             raise RuntimeError("final policy differs from the committed global policy")
 
-    def close(self) -> None:
-        if self.bridge is not None:
+    def close(self, reason: int = LeaveReason.FINISHED) -> None:
+        if self.bridge is not None:  # strict roster: no LEAVE semantics (design D3)
             self.bridge.client.close()
 
 
@@ -421,8 +431,10 @@ class ElasticAvgSync:
 
     def __init__(self, config: BridgeConfig, *, progress: StrictIslandProgress | None = None,
                  client: Any = None, syncer_epoch: int = 0, base_wait_s: float = 3600.0,
-                 groups_per_round: int | None = None) -> None:
+                 groups_per_round: int | None = None, lease_s: float | None = None) -> None:
         self.config = config
+        # the syncer's --island-lease-s; the client heartbeats every lease_s/3
+        self.lease_s = DEFAULT_ISLAND_LEASE_S if lease_s is None else float(lease_s)
         # 0.21: groups one round draws from the data source; used to advance the
         # cursor on a restart whose ledger holds no cursor (fresh machine).
         self._sleep = __import__("time").sleep
@@ -438,21 +450,22 @@ class ElasticAvgSync:
         self.base_version: int | None = None
         self.in_boundary = False
         self.left = False
+        self._leave_lock = threading.Lock()
 
     def _client(self):
         if self.client is None:
-            from yeto.rl.engine.backend_identity import config_island_contract_sha256
-            from yeto.rl.elastic_client import (ElasticClientConfig, ElasticIslandClient,
-                                                hmac_key_from_env)
-
-            self.client = ElasticIslandClient(
-                ElasticClientConfig(self.config.syncer_addr, self.config.learner_id,
-                                    syncer_epoch=self.syncer_epoch,
-                                    backend_identity_sha256=config_island_contract_sha256(
-                                        self.config),
-                                    compat_group=getattr(self.config, "compat_group", None)),
-                hmac_key_from_env(), on_event=self._client_event)
+            # looked up on the module at call time: tests substitute the client class
+            self.client = elastic_client.ElasticIslandClient(
+                self._client_config(), elastic_client.hmac_key_from_env(),
+                on_event=self._client_event)
         return self.client
+
+    def _client_config(self) -> ElasticClientConfig:
+        c = self.config
+        return ElasticClientConfig(c.syncer_addr, c.learner_id, syncer_epoch=self.syncer_epoch,
+                                   lease_s=self.lease_s,
+                                   backend_identity_sha256=config_island_contract_sha256(c),
+                                   compat_group=getattr(c, "compat_group", None))
 
     _TAPE_CLIENT_EVENTS = ("elastic_rejoin", "elastic_rejoin_failed", "elastic_debug_pause",
                            "elastic_debug_pause_end")
@@ -595,8 +608,6 @@ class ElasticAvgSync:
             self._sleep(delay)
         driver.emit("rl_local_round", **_elastic_local_round_fields(stats, sent_on, 4 * len(update)),
                     **{"sync/base_outer_version": sent_on})
-        from yeto.rl.elastic_client import ElasticFinished
-
         self.client.inner_step += self.config.local_optimizer_steps
         try:
             self.client.raise_if_finished()
@@ -621,12 +632,7 @@ class ElasticAvgSync:
                     base_version=None if base is None else base.outer_version)
         # FINISHED: LEAVE first so the syncer exits as soon as every island left
         # instead of waiting out its final grace window; best-effort otherwise.
-        if not self.left:
-            try:
-                self.client.leave()
-            except Exception:  # noqa: BLE001 - the syncer may already be gone
-                pass
-        self.left = True
+        self.leave(LeaveReason.FINISHED)
         self.in_boundary = False
         if base is not None and base.outer_version > sent_on:
             state = self._apply(driver, base, rollout_id + 1)
@@ -641,23 +647,34 @@ class ElasticAvgSync:
         return "in-boundary" if self.in_boundary else PAUSABLE_PHASE
 
     def finish(self, driver) -> None:
-        if self.client is not None and not self.left:
-            from yeto.rl.elastic_client import ElasticFinished
+        self.leave(LeaveReason.FINISHED)
 
-            try:
-                self.client.leave()
-            except (ElasticFinished, BrokenPipeError, ConnectionResetError):
-                pass  # 0.26: the syncer already finished
+    def leave(self, reason: int) -> bool:
+        """Send LEAVE once per process; True when this call sent it (the first reason wins: a reclaim
+        listener's PREEMPTED is not overwritten by the driver's close). A failed
+        send is reported as ``elastic_leave_failed``, never raised: the driver
+        may be propagating the original error (design D2)."""
+        with self._leave_lock:
+            if self.client is None or self.left:
+                return False
             self.left = True
+        code = sendable(reason)
+        try:
+            self.client.leave(code)
+            return True
+        except Exception as error:  # noqa: BLE001 - the syncer may already be gone
+            if isinstance(error, (ElasticFinished, BrokenPipeError, ConnectionResetError)) \
+                    and code is LeaveReason.FINISHED:
+                return False  # 0.26: the syncer already finished
+            driver = getattr(self, "_driver", None)
+            if driver is not None:
+                driver.emit("elastic_leave_failed", reason=int(code), reason_name=code.name,
+                            error_type=type(error).__name__, error=str(error))
+            return False
 
-    def close(self) -> None:
+    def close(self, reason: int = LeaveReason.FINISHED) -> None:
         if self.client is not None:
-            if not self.left:
-                try:
-                    self.client.leave()
-                except Exception:
-                    pass
-                self.left = True
+            self.leave(reason)
             self.client.close()
 
 
@@ -846,10 +863,10 @@ class DualStrictAvgSync:
         self.actor.finish(driver)
         self.critic.finish(self.view)
 
-    def close(self) -> None:
-        self.actor.close()
+    def close(self, reason: int = LeaveReason.FINISHED) -> None:
+        self.actor.close(reason)
         if self.critic is not None:
-            self.critic.close()
+            self.critic.close(reason)
 
 
 # ---------------------------------------------------------------------------
@@ -1157,6 +1174,6 @@ class DecoupledSync:
         if not self.finished:
             raise RuntimeError("stopped before decoupled RL finalization")
 
-    def close(self) -> None:
-        if self.bridge is not None:
+    def close(self, reason: int = LeaveReason.FINISHED) -> None:
+        if self.bridge is not None:  # no LEAVE semantics (design D3)
             self.bridge.close()

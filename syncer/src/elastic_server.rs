@@ -1067,6 +1067,66 @@ mod tests {
     /// A advances alone: 2+1=3, 3+1=4. B comes back on a new connection:
     /// JOIN catch_up=true at base 3 and receives the syncer base (4.0); its
     /// first-round delta (1000) has weight 0 -> 4+1=5.
+    /// rl-island-graceful-leave 4.3: an island leaving with any reason code
+    /// (and an unknown code) is removed at once; the other island keeps
+    /// producing rounds well before the 60 s soft deadline, and the tape names
+    /// each code.
+    #[tokio::test]
+    async fn leave_reasons_are_logged_by_name_and_the_other_island_continues() {
+        use crate::elastic::*;
+        let dir = std::env::temp_dir().join(format!("elastic-leave-reasons-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tape = dir.join("tape.jsonl");
+        let _ = std::fs::remove_file(&tape);
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let reasons = [LEAVE_REASON_FINISHED, LEAVE_REASON_STOPPED, LEAVE_REASON_PREEMPTED,
+                       LEAVE_REASON_INFRA_FAILED, LEAVE_REASON_TRAINING_FAILED,
+                       LEAVE_REASON_CONFIG_MISMATCH, 42];
+        let server = tokio::spawn(run(
+            listener,
+            ElasticServerConfig {
+                params: ElasticParams { quorum_theta: 0.75, carry_gamma: 0.5, soft_deadline_s: 60, q_min: 1, max_carry_lag: 2 },
+                key: KEY.to_vec(),
+                syncer_epoch: 1,
+                lease_s: 30.0,
+                total_steps: reasons.len() as u64,
+                event_tape: Some(tape.clone()),
+                tick: Duration::from_millis(20),
+                outer_lr: 1.0,
+                outer_momentum: 0.0,
+                final_grace: Duration::ZERO,
+                checkpoint_path: None,
+                checkpoint_every: 0,
+                resume: false,
+                expected_backend_identity: None,
+            },
+        ));
+        let mut a = Island::connect(port, 1, 1).await;
+        a.join().await;
+        a.init(vec![0.0; 4]).await;
+        assert_eq!(a.next_base().await.0, 0);
+        for (version, reason) in reasons.iter().enumerate() {
+            let mut b = Island::connect(port, 2, 1).await;
+            b.join().await;
+            b.send(ElasticMsg::Leave { syncer_epoch: 1, island_id: 2, reason: *reason }).await;
+            wait_for(&tape, "pool_leave", version + 1).await;
+            a.update(version as u64, 1.0).await;
+            let (v, _) = tokio::time::timeout(Duration::from_secs(5), a.next_base()).await.unwrap();
+            assert_eq!(v, version as u64 + 1);
+        }
+        let (final_version, _) =
+            tokio::time::timeout(Duration::from_secs(10), server).await.unwrap().unwrap().unwrap();
+        assert_eq!(final_version, reasons.len() as u64);
+        let names: Vec<String> = tape_lines(&tape)
+            .iter()
+            .filter(|l| l.contains("pool_leave"))
+            .map(|l| l.split("\"reason\":\"").nth(1).unwrap().split('"').next().unwrap().to_string())
+            .collect();
+        assert_eq!(names, ["finished", "stopped", "preempted", "infra_failed", "training_failed",
+                           "config_mismatch", "unknown(42)"]);
+    }
+
     #[tokio::test]
     async fn droppable_leave_rejects_late_delta_and_anchor_advances_alone() {
         let dir = std::env::temp_dir().join(format!("elastic-droppable-{}", std::process::id()));
@@ -1109,7 +1169,7 @@ mod tests {
 
         b.update(1, 100.0).await;
         wait_for(&tape, "\"kind\":\"delta_accepted\",\"syncer_epoch\":1,\"island_id\":2", 2).await;
-        b.send(ElasticMsg::Leave { syncer_epoch: 1, island_id: 2, reason: crate::elastic::LEAVE_REASON_REQUESTED }).await;
+        b.send(ElasticMsg::Leave { syncer_epoch: 1, island_id: 2, reason: crate::elastic::LEAVE_REASON_FINISHED }).await;
         wait_for(&tape, "pool_leave", 1).await;
         // Still-running process after LEAVE: the delta is refused, not stored.
         b.update(1, 500.0).await;
@@ -1144,7 +1204,7 @@ mod tests {
 
         let lines = tape_lines(&tape);
         let leave = lines.iter().find(|l| l.contains("pool_leave")).unwrap();
-        assert!(leave.contains("\"reason\":\"requested\""), "{leave}");
+        assert!(leave.contains("\"reason\":\"finished\""), "{leave}");
         assert!(leave.contains("\"dropped_uncommitted\":{\"island_id\":2,\"outer_version\":1"), "{leave}");
         // Accepted from B: base 0, base 1 (then dropped), base 3 after rejoin; the
         // post-LEAVE 500 never reaches the ledger.
@@ -1377,7 +1437,7 @@ mod tests {
         assert!(status.contains("\"state\":\"finished\""), "{status}");
         for i in [&mut a, &mut b] {
             let id = i.id;
-            i.send(ElasticMsg::Leave { syncer_epoch: 0, island_id: id, reason: crate::elastic::LEAVE_REASON_REQUESTED }).await;
+            i.send(ElasticMsg::Leave { syncer_epoch: 0, island_id: id, reason: crate::elastic::LEAVE_REASON_FINISHED }).await;
         }
         let (v, p) = tokio::time::timeout(Duration::from_secs(10), server).await.unwrap().unwrap().unwrap();
         assert_eq!(v, 1);

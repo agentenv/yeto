@@ -62,6 +62,7 @@ def parse_args(argv):
     p.add_argument("--rl-algorithm-spec", default=None)
     p.add_argument("--rl-island-scheduling", default="legacy")
     p.add_argument("--rl-syncer-epoch", type=int, default=0)
+    p.add_argument("--rl-island-lease-s", type=float, default=None)
     p.add_argument("--rl-echo-events", action="store_true")
     p.add_argument("--rl-max-policy-age", type=int, default=0)
     args, ignored = p.parse_known_args(argv)
@@ -329,7 +330,7 @@ def main(argv=None) -> int:
         "out_dir": str(OUTPUT), "tis_upper": algo["tis_upper"], "wan_streams": args.wan_streams,
         "thresholds_key": ["verl", "fsdp2", "vllm-" + str(manifest["versions"].get("vllm")),
                            _threshold_card(manifest)],
-        "algorithm_spec": spec_dict, "syncer_epoch": args.rl_syncer_epoch,
+        "algorithm_spec": spec_dict, "syncer_epoch": args.rl_syncer_epoch, "island_lease_s": args.rl_island_lease_s,
         "test_exit_after_version": exit_after,
         "publish_selftest": os.environ.get("YETO_VERL_PUBLISH_SELFTEST") == "1", "run_config": run.to_dict(), "overrides": overrides,
         "asserted": {k: _override_value(overrides, k) for k in asserted_keys},

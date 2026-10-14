@@ -313,7 +313,7 @@ def test_driver_rebuild_trainer_republishes_without_outer_effects(tmp_path):
         def finish(self, d):
             pass
 
-        def close(self):
+        def close(self, reason=0):
             pass
 
     driver = IslandDriver(

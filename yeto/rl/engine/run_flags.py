@@ -588,9 +588,9 @@ _SCHEDULING = (
     cli_flag("--rl-final-grace-s", type=int, default=None, metavar="S",
              help="elastic: after total steps the syncer keeps answering FINISHED for "
              "this long so late islands end cleanly (default: the soft deadline)"),
-    cli_flag("--rl-island-lease-s", type=float, default=None, metavar="S",
-             help="elastic: island lease on the syncer (--island-lease-s); an island "
-             "silent this long is removed. Default 300 (well above a 60-90 s local round)"),
+    shared_flag("--rl-island-lease-s", type=float, default=None, metavar="S",
+                help="elastic: island lease on the syncer (--island-lease-s); an island "
+                "silent this long is removed; islands heartbeat every S/3. Default 150"),
     cli_flag("--rl-q-min", type=int, default=None, metavar="N",
              help="elastic: minimum arrived islands for a step (default 1)"),
     shared_flag("--rl-syncer-epoch", type=int, default=None, metavar="N",

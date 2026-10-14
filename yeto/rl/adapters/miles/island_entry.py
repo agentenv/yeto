@@ -2538,6 +2538,7 @@ def run_miles(
                 # rl-inter-island-scheduling 0.15 (legacy sets nothing)
                 miles_args.yeto_rl_island_scheduling = "elastic"
                 miles_args.yeto_rl_syncer_epoch = int(getattr(args, "rl_syncer_epoch", 0))
+                miles_args.yeto_rl_island_lease_s = getattr(args, "rl_island_lease_s", None)
             # 4.2.1: the critic syncer (second channel); its BridgeConfig needs
             # the critic specs/layout, built by build_sync once Miles created it.
             miles_args.yeto_rl_critic_syncer_addr = (

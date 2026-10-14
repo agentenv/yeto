@@ -72,6 +72,7 @@ from yeto.rl.core import (
     StrictRlInvariantError,
     require_nonzero_learning_rate,
 )
+from yeto.rl.elastic_client import LeaveReason
 
 from .algorithm import AlgorithmSpec
 from .capabilities import BackendTraits, EngineCapabilities
@@ -84,6 +85,7 @@ from .execution_profile import (
     require,
     train_blockers,
 )
+from .leave_reason import leave_reason_for
 from .overlap import EvalOverlap, EvalStarter, overlap_refusal
 from .ports import (
     Placement,
@@ -154,6 +156,11 @@ def load_fault_injection(environ: Mapping[str, str] | None = None) -> dict[str, 
 
 class DriverError(RuntimeError):
     """The island loop cannot continue safely."""
+
+
+class IslandRecoveryRequired(DriverError):
+    """A node or the trainer is lost and cannot be recovered; the island stops
+    (LEAVE reason INFRA_FAILED, not a failed training check)."""
 
 
 class RebuildNotStarted(DriverError):
@@ -241,7 +248,9 @@ class SyncSession(Protocol):
 
     def finish(self, driver: "IslandDriver") -> None: ...
 
-    def close(self) -> None: ...
+    def close(self, reason: int = LeaveReason.FINISHED) -> None:
+        """End the session; ``reason`` is the LEAVE code (``LeaveReason``) for
+        sessions with a coordinator, ignored by the others."""
 
     # Optional: whether the round ``rollout_id`` is the island's last one
     # (strict: local_round_id >= global_rounds; decoupled: the final cut is
@@ -754,7 +763,7 @@ class IslandDriver:
         if error:
             self.emit("rl_reconfiguration", rollout_id=None, result="RECOVERY_REQUIRED",
                       error=str(error), config_epoch=self.config_epoch)
-            raise DriverError(f"island is RECOVERY_REQUIRED: {error}")
+            raise IslandRecoveryRequired(f"island is RECOVERY_REQUIRED: {error}")
 
     def _probe_nodes(self, rollout_id: int) -> None:
         """rl-multinode-island D9: before each round ask the controller whether every
@@ -767,7 +776,7 @@ class IslandDriver:
         if error:
             self.emit("rl_reconfiguration", rollout_id=rollout_id, result="RECOVERY_REQUIRED",
                       error=str(error), config_epoch=self.config_epoch)
-            raise DriverError(f"island is RECOVERY_REQUIRED: {error}")
+            raise IslandRecoveryRequired(f"island is RECOVERY_REQUIRED: {error}")
 
     def _classify_failure(self, rollout_id: int | None, error: BaseException) -> None:
         """Failure-path node-loss attribution (rl-multinode-island D9, tasks 3.3):
@@ -782,7 +791,7 @@ class IslandDriver:
         SystemExit are never attributed."""
         if isinstance(error, (KeyboardInterrupt, SystemExit)):
             return
-        if isinstance(error, DriverError) and "RECOVERY_REQUIRED" in str(error):
+        if isinstance(error, IslandRecoveryRequired):
             return  # already attributed by _probe_nodes/_classify_failure
         check = getattr(self.controller, "check_nodes", None) if self.controller else None
         if not callable(check) or not getattr(self.controller, "topology", None):
@@ -797,7 +806,7 @@ class IslandDriver:
                 self.emit("rl_reconfiguration", rollout_id=rollout_id, result="RECOVERY_REQUIRED",
                           error=str(lost), config_epoch=self.config_epoch,
                           cause=f"{type(error).__name__}: {error}")
-                raise DriverError(f"island is RECOVERY_REQUIRED: {lost}") from error
+                raise IslandRecoveryRequired(f"island is RECOVERY_REQUIRED: {lost}") from error
             remaining = deadline - self.clock()
             if remaining <= 0:
                 return
@@ -819,7 +828,7 @@ class IslandDriver:
         except RecoveryRequired as error:
             self.emit("rl_reconfiguration", rollout_id=rollout_id, result="RECOVERY_REQUIRED",
                       error=str(error), config_epoch=self.config_epoch)
-            raise DriverError(f"island is RECOVERY_REQUIRED: {error}") from error
+            raise IslandRecoveryRequired(f"island is RECOVERY_REQUIRED: {error}") from error
         if pending is not None:
             members = sorted(self.rollout.members())
             self.emit("rl_reconfiguration", rollout_id=rollout_id, result="RECOVERED",
@@ -1338,7 +1347,7 @@ class IslandDriver:
         # 2026-10-02 ruling (E1-D ④): an island in RECOVERY_REQUIRED never prepares or trains
         # another batch; the safe point already raised, this guards the ledger path itself.
         if self.controller is not None and getattr(self.controller, "recovery_required", None):
-            raise DriverError(f"island is RECOVERY_REQUIRED: {self.controller.recovery_required}")
+            raise IslandRecoveryRequired(f"island is RECOVERY_REQUIRED: {self.controller.recovery_required}")
         self._probe_nodes(rollout_id)
         started = time.monotonic()
         batch = self._generate(rollout_id)
@@ -1567,7 +1576,7 @@ class IslandDriver:
         except RecoveryRequired as error:
             self.emit("rl_reconfiguration", rollout_id=rollout_id, result="RECOVERY_REQUIRED",
                       error=str(error), config_epoch=self.config_epoch, **eval_due)
-            raise DriverError(f"island is RECOVERY_REQUIRED: {error}") from error
+            raise IslandRecoveryRequired(f"island is RECOVERY_REQUIRED: {error}") from error
         if result is not None:
             # the reason of a refusal (REBUILT_OLD: structured publication cause + the
             # disagreeing engine ids) rides on the tape record
@@ -1747,6 +1756,7 @@ class IslandDriver:
     def _run(self) -> TrainableState:
         self.handshake()
         self._refuse_if_recovery_required()
+        failure: BaseException | None = None
         try:
             try:
                 start = None
@@ -1794,7 +1804,26 @@ class IslandDriver:
                     error=f"{type(error).__name__}: {error}",
                 )
                 raise
+        except BaseException as error:
+            failure = error
+            raise
         finally:
             if self.eval_overlap is not None:
                 self.eval_overlap.abort()  # no orphan eval task on error/cancel paths
-            self.sync.close()
+            self._close_sync(failure)
+
+    def _close_sync(self, failure: BaseException | None) -> None:
+        """Close the bridge with the LEAVE reason of this departure (design D7).
+        A failed departure's detail goes to the island tape (``island_leave``);
+        only the code goes on the wire. A finished run adds no tape record."""
+        reason = leave_reason_for(failure)
+        if failure is not None:
+            self._record_leave(reason, failure)
+        self.sync.close(reason)
+
+    def _record_leave(self, reason: LeaveReason, failure: BaseException) -> None:
+        try:
+            self.emit("island_leave", reason=int(reason), reason_name=reason.name,
+                      error_type=type(failure).__name__, error=str(failure))
+        except Exception:  # noqa: BLE001 - the tape must not mask the original error
+            pass

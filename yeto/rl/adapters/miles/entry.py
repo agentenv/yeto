@@ -639,6 +639,7 @@ def build_sync(
             raise ValueError("--rl-island-scheduling elastic does not support a critic yet")
         return ElasticAvgSync(miles_args.yeto_rl_bridge_config, progress=progress,
                               syncer_epoch=int(getattr(miles_args, "yeto_rl_syncer_epoch", 0)),
+                              lease_s=getattr(miles_args, "yeto_rl_island_lease_s", None),
                               groups_per_round=int(getattr(miles_args, "rollout_batch_size", 0) or 0) or None,
                               ), progress
     critic_syncer = getattr(miles_args, "yeto_rl_critic_syncer_addr", None)
@@ -879,11 +880,9 @@ def _wire_droppable_reclaim(sync: Any, driver: Any, environ: Any = None) -> Any:
         return None
 
     def leave() -> bool:
-        client = getattr(sync, "client", None)
-        if client is None:
-            return False
-        client.leave()
-        return True
+        from yeto.rl.elastic_client import LeaveReason
+
+        return sync.leave(LeaveReason.PREEMPTED)  # once per process; the driver's close won't resend
 
     island = str(getattr(getattr(sync, "config", None), "learner_id", "?"))
     return droppable.install_reclaim_listener(island, leave=leave, emit=driver.emit,

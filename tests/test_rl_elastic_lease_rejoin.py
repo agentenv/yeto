@@ -148,7 +148,7 @@ def test_launcher_island_lease_default_and_flag(monkeypatch):
 
     monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "k3y")
     cmd = launcher.syncer_command(_args(("--rl-island-scheduling", "elastic")), 2)
-    assert " --island-lease-s 300.0" in cmd
+    assert " --island-lease-s 150.0" in cmd
     cmd = launcher.syncer_command(_args(("--rl-island-scheduling", "elastic", "--rl-island-lease-s", "450")), 2)
     assert " --island-lease-s 450.0" in cmd
     assert "--island-lease-s" not in launcher.syncer_command(_args(), 2)
@@ -184,7 +184,7 @@ def test_rejoin_events_reach_the_island_tape(tmp_path):
 
 
 def test_island_lease_default_is_the_same_in_syncer_cli_and_launcher():
-    """rl-code-quality-cleanup 0.8: a syncer started without --island-lease-s
+    """rl-code-quality-cleanup 0.8 / rl-island-graceful-leave 3.3: a syncer started without --island-lease-s
     uses the launcher's default."""
     import re
     from pathlib import Path
@@ -195,8 +195,10 @@ def test_island_lease_default_is_the_same_in_syncer_cli_and_launcher():
     main_rs = (repo / "syncer/src/main.rs").read_text()
     m = re.search(r"default_value_t = ([0-9.]+)\)\]\s*island_lease_s: f64", main_rs)
     assert m, "island_lease_s default not found in syncer/src/main.rs"
-    assert float(m.group(1)) == launcher.DEFAULT_ISLAND_LEASE_S == 300.0
+    from yeto.rl.elastic_client import DEFAULT_ISLAND_LEASE_S, ElasticClientConfig
     from yeto.rl.engine.run_flags import rl_flags
 
+    assert float(m.group(1)) == launcher.DEFAULT_ISLAND_LEASE_S == DEFAULT_ISLAND_LEASE_S == 150.0
+    assert ElasticClientConfig(("x", 0), 0).lease_s == DEFAULT_ISLAND_LEASE_S  # island side
     lease = next(f for f in rl_flags() if f.option == "--rl-island-lease-s")
-    assert f"Default {launcher.DEFAULT_ISLAND_LEASE_S:g} " in lease.kwargs["help"]
+    assert f"Default {launcher.DEFAULT_ISLAND_LEASE_S:g}" in lease.kwargs["help"]

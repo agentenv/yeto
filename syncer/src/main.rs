@@ -157,8 +157,8 @@ struct Args {
     #[arg(long)]
     expected_island_contract: Option<String>,
     /// elastic: membership lease in seconds (no heartbeat -> removed). Same
-    /// default as the launcher and `yeto --rl-island-lease-s` (300 s).
-    #[arg(long, default_value_t = 300.0)]
+    /// default as the launcher and `yeto --rl-island-lease-s` (150 s).
+    #[arg(long, default_value_t = 150.0)]
     island_lease_s: f64,
     /// elastic: fencing token of this syncer incarnation; bump on every
     /// restart (D-S6 will persist it in the checkpoint).
