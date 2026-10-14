@@ -158,6 +158,10 @@ class RolloutBatchHandle:
     # (:data:`OVER_SAMPLING_KEYS`: submit batch sizes, refill calls, filtered /
     # kept / surplus groups, groups in flight at the end). None = not reported.
     over_sampling: Mapping[str, int] | None = field(default=None, compare=False)
+    # rl-offpolicy-correction-passthrough L6.11: the engine backend that built
+    # this batch ("miles", "verl", ...), set by the adapter; it labels the
+    # driver's ``offpolicy_gate`` event. None = not reported ("unknown").
+    backend: str | None = field(default=None, compare=False)
 
     def mismatched_groups(self, expected_token: str) -> tuple[GroupMetadata, ...]:
         return tuple(g for g in self.groups if g.policy_token != expected_token)

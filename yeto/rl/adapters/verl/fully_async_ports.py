@@ -136,6 +136,7 @@ class FullyAsyncRolloutPool:
             completed=len(groups), aborted=0, payload=None,
             submitted_groups=pulled, abort_mechanism=DISCARD_MECHANISM if collector.discarded else None,
             carry_over=carry,
+            backend="verl",
             # Same field and meaning as Miles: groups aborted in flight and NOT
             # trained.  verl's partial rollout continues interrupted requests
             # (counted as resumed_trajectories in carry_over, like Miles'
