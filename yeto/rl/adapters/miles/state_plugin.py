@@ -70,6 +70,9 @@ GRAD_NORM = f"{_PLUGIN_MODULE}.grad_norm"
 ALIGN_WEIGHT_VERSION = f"{_PLUGIN_MODULE}.align_weight_version"
 APPLIED_LRS = f"{_PLUGIN_MODULE}.applied_lrs"
 STEP_LOSSES = f"{_PLUGIN_MODULE}.step_losses"
+# Run in the actor's processes before its first train: a full-parameter actor
+# never calls a LoRA state plugin, which would otherwise install the recorders.
+ACTOR_RECORDERS = f"{_PLUGIN_MODULE}.install_actor_recorders"
 # rl-algo-critic-family 3.2: run in the critic's processes before its train.
 CRITIC_RECORDERS = f"{_PLUGIN_MODULE}.install_critic_recorders"
 EXPLAINED_VARIANCE_KEY = "explained_variance"
@@ -1096,8 +1099,8 @@ _RECORDER_INSTALLED = False
 def install_grad_norm_recorder() -> bool:
     """Wrap upstream ``train_one_step`` to record the grad norm it returns.
 
-    Idempotent; called from every state plugin, and the driver always exports
-    the trainable state before the first training step.
+    Idempotent; called from every state plugin, and the trainer installs it in
+    every actor process before the first training step (ACTOR_RECORDERS).
     """
 
     global _RECORDER_INSTALLED
@@ -1630,6 +1633,13 @@ def save_critic_cut(actor: Any, **kwargs: Any) -> dict[str, Any]:
 def restore_critic_cut(actor: Any, **kwargs: Any) -> dict[str, Any]:
     with trainer_resident(actor):
         return _restore_critic_cut(actor, **kwargs)
+
+
+def install_actor_recorders(actor: Any) -> bool:
+    """Plugin: the per-step recorders in an actor process (idempotent)."""
+
+    del actor
+    return install_grad_norm_recorder()
 
 
 def install_critic_recorders(actor: Any) -> bool:

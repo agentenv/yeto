@@ -31,6 +31,7 @@ from yeto.rl.engine.ports import RolloutBatchHandle
 from . import LoopRunner
 from .rollout import policy_token, require_policy_tokens
 from .state_plugin import (
+    ACTOR_RECORDERS,
     APPLIED_LRS,
     CRITIC_RECORDERS,
     CRITIC_STATE_SUMMARY,
@@ -264,6 +265,7 @@ class MilesTrainerGroup:
         spec: Any = None,
         critic_model: Any = None,
         release_outputs: Callable[[Any], None] | None = None,
+        install_actor_recorders: bool = False,
     ) -> None:
         self._spec = spec
         # rl-algo-critic-family 3.1: shared actor/critic PPO (Miles train.py
@@ -289,6 +291,10 @@ class MilesTrainerGroup:
         # (``last_step_losses`` stays gated on the mechanisms that consume it).
         self.last_round_step_losses: list[dict[str, Any]] | None = None
         self.optimizer_steps_total = 0
+        # A LoRA actor installs its step recorders through the state plugins
+        # the publisher calls before the first step; a full-parameter actor
+        # calls none of them, so the trainer installs the recorders itself.
+        self._actor_recorders_installed = not install_actor_recorders
 
     def train_step(self, batch: RolloutBatchHandle) -> LocalStepReceipt:
         if batch.payload is None:
@@ -305,6 +311,7 @@ class MilesTrainerGroup:
             if self._check_tokens:  # spec: reject before training
                 require_policy_tokens(batch, policy_token(batch.rollout_id, batch.policy_hash))
             critic_outputs = self._train_critic(batch) if self._critic is not None else None
+            self._install_actor_recorders()
             if critic_outputs is None:
                 outputs = self._run(self._actor.train(batch.rollout_id, batch.payload))
             else:
@@ -386,6 +393,18 @@ class MilesTrainerGroup:
             optimizer_step_succeeded=succeeded,
             parameter_layout_hash=self._layout_hash(),
         )
+
+    def _install_actor_recorders(self) -> None:
+        """Record every optimizer step's applied LR and grad norm in the actor
+        processes, once per trainer; without them ``_applied_lrs`` finds no
+        steps."""
+
+        if self._actor_recorders_installed:
+            return
+        installed = list(self._run(self._actor.run_plugin(ACTOR_RECORDERS, {})))
+        if not installed or not all(installed):
+            raise TrainStepError(f"actor step recorders could not be installed: {installed}")
+        self._actor_recorders_installed = True
 
     def _workers(self) -> int:
         return int(getattr(self._args, "actor_num_nodes", 1) or 1) * int(
