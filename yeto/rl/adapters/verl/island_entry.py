@@ -25,6 +25,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 from . import config as vconf
 from .pins import VERL_COMMIT, VERL_ROOT, expected_versions
@@ -316,6 +317,7 @@ def main(argv=None) -> int:
     asserted_keys = vconf.ASSERTED_KEYS
     if limit:  # agentic-rollout-utilization 6.4b: fully_async path
         overrides, asserted_keys = fully_async_plan(limit, overrides, spec_dict, args, sync)
+        append_correction_record(args, spec_dict)
     test = json.loads(TEST_FILE.read_text()) if TEST_FILE.is_file() else {}
     exit_after = (test.get("exit_after_version") or {}).get(str(lid))
     env_exit = os.environ.get("YETO_VERL_TEST_EXIT_AFTER", "")  # TEST ONLY "ISLAND:VERSION[,...]"
@@ -401,6 +403,28 @@ def fully_async_plan(limit: int, overrides: list[str], spec_dict: dict | None, a
         # (S20 ModelArts 2x910B4, runBA_try2_gpures).
         out = [o for o in out if not o.startswith("trainer.device=")] + ["trainer.device=npu"]
     return out, tuple(vconf.ASSERTED_KEYS) + FULLY_ASYNC_ASSERTED_KEYS
+
+
+def append_correction_record(args, spec_dict: dict | None) -> None:
+    """rl-offpolicy-correction-passthrough D8 (as Miles' island entry): the island
+    tape records the full correction group, the verl values and ``prox_anchor``;
+    each field verl cannot map gets a ``correction_config_warning``."""
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+    from yeto.rl.engine.events import append_tape_event
+    from yeto.rl.engine.offpolicy_correction import CORRECTION_RECORD_EVENT, correction_record
+
+    from .offpolicy_correction import BACKEND, correction_mapping
+
+    spec = AlgorithmSpec.from_dict(spec_dict) if spec_dict else AlgorithmSpec()
+    if spec.correction.is_default():
+        return  # default tapes unchanged
+    mapping = correction_mapping(spec)
+    tape = SimpleNamespace(yeto_rl_event_tape=args.event_tape,
+                           yeto_rl_learner_id=args.learner_id)
+    append_tape_event(tape, {"event": CORRECTION_RECORD_EVENT,
+                             **correction_record(spec.correction, mapping, backend=BACKEND)})
+    for warning in mapping.warnings:
+        append_tape_event(tape, warning.event())
 
 
 def _override_value(overrides, key):

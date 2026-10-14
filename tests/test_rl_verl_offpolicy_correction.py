@@ -120,8 +120,10 @@ def test_backend_role_feeds_the_run_manifest_and_the_cross_island_warning():
 
 
 @pytest.mark.parametrize("limit", [2, 4])
-def test_fully_async_plan_runs_the_correction_mapping(limit):
-    from yeto.rl.adapters.verl.island_entry import fully_async_plan
+def test_fully_async_plan_runs_the_correction_mapping(limit, tmp_path):
+    import json
+
+    from yeto.rl.adapters.verl.island_entry import append_correction_record, fully_async_plan
 
     import yeto.rl.adapters.verl.config as vconf
 
@@ -129,8 +131,18 @@ def test_fully_async_plan_runs_the_correction_mapping(limit):
                               groups_per_round=8, samples_per_group=4)
     spec = AlgorithmSpec(execution=ExecutionSpec(max_policy_staleness=limit),
                          correction=CorrectionSpec(method="tis", lower=0.5, upper=2.0))
-    args = SimpleNamespace(groups_per_round=8, samples_per_group=4, global_rounds=3)
+    tape = tmp_path / "tape.jsonl"
+    args = SimpleNamespace(groups_per_round=8, samples_per_group=4, global_rounds=3,
+                           event_tape=str(tape), learner_id=0)
     out, keys = fully_async_plan(limit, vconf.build_overrides(run), spec.to_dict(), args, "none")
+    append_correction_record(args, spec.to_dict())
+    append_correction_record(args, AlgorithmSpec().to_dict())  # default: tape unchanged
+    # D8: the island tape records the group, the verl values and prox_anchor
+    events = [json.loads(line) for line in tape.read_text().splitlines()]
+    assert events[0]["event"] == oc.CORRECTION_RECORD_EVENT and events[0]["backend"] == "verl"
+    assert events[0]["prox_anchor"] == oc.PROX_FIRST_LOCAL_STEP
+    assert events[0]["group"]["upper"] == 2.0
+    assert [(e["event"], e["field"]) for e in events[1:]] == [(oc.CORRECTION_CONFIG_WARNING, "lower")]
     assert f"async_training.staleness_threshold={float(limit)}" in out
     assert "async_training.partial_rollout=True" in out
     assert [o for o in out if o.startswith(K + "bypass_mode=")] == [K + "bypass_mode=False"]
