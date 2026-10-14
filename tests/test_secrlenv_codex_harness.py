@@ -1065,7 +1065,6 @@ def test_codex_exhausted_precreate_503_returns_signed_admission(monkeypatch):
                 503, "infrastructure_error", "unavailable"
             )
 
-    monkeypatch.setenv("SECRLENV_REWARD_HMAC_KEY", "a" * 48)
     monkeypatch.setenv("SECRLENV_CAPACITY_MAX_WAIT_SECONDS", "30")
     monkeypatch.setattr(harness, "EpisodeClient", AdmissionClient)
     monkeypatch.setattr(harness, "_attest_runtime", lambda: Path("/codex"))
@@ -1089,7 +1088,7 @@ def test_codex_exhausted_precreate_503_returns_signed_admission(monkeypatch):
     harness.legacy.require_no_episode_residue()
 
 
-def test_codex_precreate_infrastructure_retry_timeout_remains_unsigned(
+def test_codex_precreate_infrastructure_retry_timeout_is_not_a_verdict(
     monkeypatch,
 ):
     attempts = 0
@@ -1110,7 +1109,6 @@ def test_codex_precreate_infrastructure_retry_timeout_remains_unsigned(
                 )
             await asyncio.Event().wait()
 
-    monkeypatch.setenv("SECRLENV_REWARD_HMAC_KEY", "a" * 48)
     monkeypatch.setenv("SECRLENV_CAPACITY_MAX_WAIT_SECONDS", "0.01")
     monkeypatch.setattr(harness, "EpisodeClient", AdmissionTimeoutClient)
     monkeypatch.setattr(harness, "_attest_runtime", lambda: Path("/codex"))
@@ -1193,7 +1191,6 @@ def test_run_does_not_start_codex_before_capacity_retry_creates_episode(
     monkeypatch.setattr(harness, "EpisodeClient", CapacityThenReadyClient)
     monkeypatch.setattr(harness, "_attest_runtime", lambda: Path("/codex"))
     monkeypatch.setattr(harness, "_drive_codex", drive_after_create)
-    monkeypatch.setattr(harness, "sign_outcome", lambda _outcome: "signed")
     monkeypatch.setattr(harness.legacy.random, "uniform", lambda *_args: 0.0)
     try:
         result = asyncio.run(
@@ -1245,7 +1242,6 @@ def test_run_close_failure_returns_terminal_cleanup_evidence(monkeypatch):
     monkeypatch.setattr(harness, "EpisodeClient", CloseFailingClient)
     monkeypatch.setattr(harness, "_attest_runtime", lambda: Path("/codex"))
     monkeypatch.setattr(harness, "_drive_codex", complete_policy)
-    monkeypatch.setattr(harness, "sign_outcome", lambda _outcome: "signed")
     try:
         result = asyncio.run(
             harness.run(

@@ -10,14 +10,13 @@ Messages → TITO chat, prefix hash chains).
 | Item | Trusted layer | Untrusted layer |
 |---|---|---|
 | Processes | training driver / `agentic_tool_call` worker; `codex_openenv_subprocess_agent_function.run`; verifier runner | `codex_openenv_agent_worker` subprocess (own session, `start_new_session=True`); Codex 0.145.0 binary (isolated `CODEX_HOME`); task container |
-| Reward HMAC key | read from `TBENCH_REWARD_HMAC_KEY(_FILE)` (0400/0600, non-symlink, 32–4096 B; `tbench_outcome.validate_hmac_key_source`) only in the trusted process | scrubbed from the worker env (`scrubbed_environment`); the worker refuses to start if `TBENCH_REWARD_HMAC_KEY*`/`SECRLENV_REWARD_HMAC_KEY` is visible (`assert_no_reward_key`) |
 | Verifier assets (`tests/test.sh`, solution) | injected by the sandbox backend only at `verify` time (`TB2_WITHHOLD_TESTS` semantics); `evaluate` is not routed on the worker wire (`environment.serve_environment`) | never readable before verification |
 | Network | gateway / session-server endpoint; environment control endpoint (bearer token per lease) | task container: default deny egress except the gateway session endpoint (sandbox backend policy, D9); worker reaches only `env_url` and `base_url` |
-| Signing points | `tbench_reward.reward_func`, parent `tbench_outcome.verified_outcome`, `trajectory_evidence._verified_outcome` — all three verify; any failure rejects the sample | cannot forge: no key |
-| Failure classes | infrastructure (acquire/lease/worker protocol): unsigned, sample ABORTED, no 0 reward; policy boundary (timeout / max_turns / max_seq_len) and wrong answer: signed, reward 0 | — |
+| Validation points | `tbench_reward.reward_func`, parent `tbench_outcome.verified_outcome`, `trajectory_evidence._verified_outcome` — all three check outcome structure; any failure rejects the sample. Rewards are not signed (openspec `rl-drop-reward-tamper-hash`) | never runs the verifier |
+| Failure classes | infrastructure (acquire/lease/worker protocol): no outcome, sample ABORTED, no 0 reward; policy boundary (timeout / max_turns / max_seq_len) and wrong answer: outcome with reward 0 | — |
 | Cleanup | lease `destroy` + `describe()=="gone"` before return; worker SIGTERM→SIGKILL on process group; tool-wait scope balanced on cancel | — |
 
-CPU evidence: `tests/test_harness_codex_openenv.py` (`*_scrubs_key_*`, `*_infrastructure_failures_*`, `*_cancellation_*`).
+CPU evidence: `tests/test_harness_codex_openenv.py` (`*_infrastructure_failures_*`, `*_cancellation_*`).
 
 ## Gateway (tasks 4.1/4.2)
 

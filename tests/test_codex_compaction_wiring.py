@@ -25,7 +25,7 @@ from yeto.rl.harness.codex import compaction_bridge as cb
 from yeto.rl.harness.codex import preflight
 from yeto.rl.harness.codex.environment import FakeTerminalEnvironment
 
-from test_harness_codex_openenv import KEY, _Provider, _metadata
+from test_harness_codex_openenv import _Provider, _metadata
 from test_rl_launcher_codex_bundle import PROVIDER, _codex_args, bundle  # noqa: F401 - fixture
 
 SWITCH, TCOMP = crl.COMPACTION_SWITCH_ENV, crl.COMPACTION_T_COMP_ENV
@@ -265,7 +265,6 @@ def test_in_process_run_hands_sessions_off_on_success(monkeypatch):
 
 
 def _subprocess(monkeypatch, *, drive, finish=None):
-    monkeypatch.setenv("TBENCH_REWARD_HMAC_KEY", KEY)
     monkeypatch.setenv(SWITCH, "1")
     monkeypatch.setenv(TCOMP, "4000")
     provider = _Provider(FakeTerminalEnvironment(passed=True))

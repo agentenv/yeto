@@ -38,9 +38,7 @@ from .reward import (
     CLEANUP_ERROR_STATUS,
     INFRASTRUCTURE_503_RETRIES_KEY,
     INFRASTRUCTURE_STATUS,
-    MAC_KEY,
     OUTCOME_KEY,
-    sign_outcome,
 )
 
 
@@ -673,7 +671,7 @@ def _infrastructure_outcome(
     episode_id: str,
     infrastructure_503_retries: int = 0,
 ) -> dict[str, Any]:
-    """Build a signed abort signal, never a synthetic grader verdict."""
+    """Build an abort signal, never a synthetic grader verdict."""
 
     return {
         "schema": 1,
@@ -712,12 +710,11 @@ def _admission_infrastructure_outcome(
     }
 
 
-def _signed_agent_result(
+def _agent_result(
     outcome: dict[str, Any], outcome_status: str, metrics: AgentMetrics
 ) -> dict[str, Any]:
     result = {
         OUTCOME_KEY: outcome,
-        MAC_KEY: sign_outcome(outcome),
         "exit_status": outcome_status,
         "agent_metrics": metrics.to_dict(),
     }
@@ -730,7 +727,7 @@ def _cleanup_error_outcome(
     episode_id: str,
     infrastructure_503_retries: int = 0,
 ) -> dict[str, Any]:
-    """Build a signed terminal signal when episode release is unproven."""
+    """Build a terminal signal when episode release is unproven."""
 
     outcome = _infrastructure_outcome(
         task_id,
@@ -817,7 +814,7 @@ async def run(
     metadata: dict[str, Any] | None = None,
     **_kwargs: Any,
 ) -> dict[str, Any] | None:
-    """Run one model-driven secrlenv episode and return signed reward metadata."""
+    """Run one model-driven secrlenv episode and return reward metadata."""
 
     del prompt  # The authenticated daemon supplies the immutable task prompt.
     metadata = dict(metadata or {})
@@ -976,7 +973,7 @@ async def run(
                     task_id,
                     retry_ledger[INFRASTRUCTURE_503_RETRIES_KEY],
                 )
-                return _signed_agent_result(outcome, INFRASTRUCTURE_STATUS, metrics)
+                return _agent_result(outcome, INFRASTRUCTURE_STATUS, metrics)
             except Exception:
                 LOGGER.exception("refusing untrusted secrlenv admission metadata")
                 return None
@@ -1022,7 +1019,7 @@ async def run(
                     INFRASTRUCTURE_503_RETRIES_KEY
                 ],
             )
-        result = _signed_agent_result(outcome, outcome_status, metrics)
+        result = _agent_result(outcome, outcome_status, metrics)
     except Exception:
         LOGGER.exception("refusing untrusted secrlenv evaluation metadata")
         return None

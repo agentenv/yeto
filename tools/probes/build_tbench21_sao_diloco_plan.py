@@ -439,7 +439,6 @@ def build_plan(tasks_dir: Path, output_dir: Path, *, seed: str, run_root: str) -
             "all_task_images_available": True,
             "openenv_tbench_max_active_episodes_at_least": TARGET_CONCURRENCY,
             "openenv_compaction_trajectory_evidence_v2": True,
-            "terminal_bench_signed_outcome_hmac_key_file": True,
             "direct_codex_qwen35_08b_preflight": True,
             "host_open_file_limit_at_least": 65536,
             "fresh_per_island_ray_clusters": True,

@@ -16,7 +16,7 @@ from typing import Any
 
 from yeto.rl.harness.codex.generate import _CAPTURED_AGENT_METADATA
 from yeto.rl.harness.codex.pins import GENERATE_SHA256 as SECRLENV_GENERATE_SHA256
-from yeto.rl.harness.codex.reward import MAC_KEY, OUTCOME_KEY, UntrustedOutcome, _verified_outcome
+from yeto.rl.harness.codex.reward import OUTCOME_KEY, UntrustedOutcome, _verified_outcome
 
 
 def _verify_pinned_source() -> None:
@@ -55,7 +55,7 @@ async def generate(input: Any) -> Any:
     Pinned Miles intentionally returns an aborted copy when a session emitted no
     model records or all records were truncated, but it does so before merging
     the custom agent's metadata.  SecRLEnv may restore that metadata only after
-    authenticating the complete signed outcome; every other missing/invalid
+    validating the complete outcome; every other missing/invalid
     evidence path remains fatal.
     """
 
@@ -68,37 +68,30 @@ async def generate(input: Any) -> Any:
         if not samples:
             raise UntrustedOutcome("SecRLEnv generation returned no samples")
 
-        evidence_fields = []
-        for sample in samples:
-            metadata = getattr(sample, "metadata", None)
-            evidence_fields.append(
-                (
-                    isinstance(metadata, dict) and OUTCOME_KEY in metadata,
-                    isinstance(metadata, dict) and MAC_KEY in metadata,
-                )
-            )
-        if all(outcome and mac for outcome, mac in evidence_fields):
+        has_outcome = [
+            isinstance(getattr(sample, "metadata", None), dict)
+            and OUTCOME_KEY in sample.metadata
+            for sample in samples
+        ]
+        if all(has_outcome):
             return output
         if (
-            any(outcome or mac for outcome, mac in evidence_fields)
+            any(has_outcome)
             or len(samples) != 1
             or _status_value(samples[0]) != "aborted"
             or getattr(samples[0], "response", None) not in {None, ""}
         ):
-            raise UntrustedOutcome("SecRLEnv generation lost signed outcome metadata")
+            raise UntrustedOutcome("SecRLEnv generation lost outcome metadata")
 
         captured = _CAPTURED_AGENT_METADATA.get()
         _verified_outcome(captured)
         if not isinstance(captured, dict):  # Kept explicit for type narrowing.
-            raise UntrustedOutcome("SecRLEnv generation has no signed outcome")
-        signed_evidence = {
-            OUTCOME_KEY: copy.deepcopy(captured[OUTCOME_KEY]),
-            MAC_KEY: captured[MAC_KEY],
-        }
+            raise UntrustedOutcome("SecRLEnv generation has no outcome")
+        evidence = {OUTCOME_KEY: copy.deepcopy(captured[OUTCOME_KEY])}
         metadata = getattr(samples[0], "metadata", None)
         if not isinstance(metadata, dict):
             raise UntrustedOutcome("SecRLEnv sample metadata is not an object")
-        metadata.update(signed_evidence)
+        metadata.update(evidence)
         return output
     finally:
         _CAPTURED_AGENT_METADATA.reset(token)

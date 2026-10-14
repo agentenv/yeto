@@ -342,8 +342,7 @@ def _default_drive() -> Callable[..., Any]:
 async def run_episode(cfg: BaselineConfig, provider: Any, row: Mapping[str, Any], *,
                       session_url: str, drive: Callable[..., Any] | None = None,
                       http: Callable[..., tuple[int, Any]] = _http,
-                      clock: Callable[[], float] = time.monotonic,
-                      hmac_key: str | bytes | None = None) -> dict[str, Any]:
+                      clock: Callable[[], float] = time.monotonic) -> dict[str, Any]:
     """One baseline episode: lease -> session -> Codex worker -> trusted finish -> trace.
 
     Never raises for episode-level failures: they become trace records with
@@ -436,14 +435,14 @@ async def run_episode(cfg: BaselineConfig, provider: Any, row: Mapping[str, Any]
                     "agent_metrics": _scrubbed(metrics, secrets)}
         try:
             trusted = await adapter.finish_trusted(untrusted, lease.verifier, task_id=task_id,
-                                                   sample_id=trajectory_id, key=hmac_key)
+                                                   sample_id=trajectory_id)
         except RolloutRejected as exc:
             return {**infra(""), "classification": "rejected",
                     "error": scrub(f"grade rejected: {exc}", secrets),
                     "agent_metrics": _scrubbed(metrics, secrets)}
         reward = trusted.get("reward")
         if reward is None:
-            # the timeout path carries the 0 reward only in the signed outcome envelope
+            # the timeout path carries the 0 reward only in the outcome envelope
             reward = (trusted.get(tbench_outcome.OUTCOME_KEY) or {}).get("reward")
         record: dict[str, Any] = {
             **trace,
@@ -497,13 +496,12 @@ async def run_baseline(cfg: BaselineConfig, provider: Any, rows: list[Mapping[st
                        session_url: str, drive: Callable[..., Any] | None = None,
                        http: Callable[..., tuple[int, Any]] = _http,
                        clock: Callable[[], float] = time.monotonic,
-                       hmac_key: str | bytes | None = None,
                        progress: Callable[[str], None] | None = print) -> list[dict[str, Any]]:
     """Sequentially run every prompt row (one 32K window serves one episode at a time)."""
     traces = []
     for i, row in enumerate(rows):
         trace = await run_episode(cfg, provider, row, session_url=session_url, drive=drive,
-                                  http=http, clock=clock, hmac_key=hmac_key)
+                                  http=http, clock=clock)
         traces.append(trace)
         if progress is not None:
             progress(f"[rlf-baseline] {i + 1}/{len(rows)} {trace['task_id']}: "
@@ -605,7 +603,6 @@ def load_catalog(tasks_dir: str | Path, *, evidence: Mapping[str, Any] | None = 
 def run_from_config(config: Mapping[str, Any], *, provider: Any = None,
                     drive: Callable[..., Any] | None = None,
                     http: Callable[..., tuple[int, Any]] | None = None,
-                    hmac_key: str | bytes | None = None,
                     progress: Callable[[str], None] | None = print) -> dict[str, Any]:
     """The whole run (in-container body and CLI share this).
 
@@ -641,7 +638,7 @@ def run_from_config(config: Mapping[str, Any], *, provider: Any = None,
         if not session_url:
             raise InfrastructureError("serve=external needs config['session_url']")
         traces = asyncio.run(run_baseline(cfg, provider, rows, session_url=session_url,
-                                          drive=drive, http=http or _http, hmac_key=hmac_key,
+                                          drive=drive, http=http or _http,
                                           progress=progress))
     except InfrastructureError as exc:
         traces = []

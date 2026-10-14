@@ -1,16 +1,22 @@
-"""Closed, authenticated trajectory evidence for replayable RL updates.
+"""Closed trajectory evidence for replayable RL updates.
 
-Schemas written here:
+Schema history:
 
-* 1 -- flat SecRLEnv envelopes;
+* 1 -- flat SecRLEnv envelopes; outcome hashes included the reward HMAC.
 * 2 -- benchmark-neutral envelopes with active-token and compaction-segment
-  evidence; every trajectory carries the round's policy (version = rollout);
-* 4 -- the schema 2 layout where every trajectory carries the policy that
+  evidence; outcome hashes included the reward HMAC.
+* 3 -- the schema 2 layout with outcome hashes over the canonical outcome
+  only (rewards are no longer signed); every trajectory carries the round's
+  policy (version = rollout).
+* 4 -- the schema 3 layout where every trajectory carries the policy that
   generated it (P0-S: rollout and training may differ by a bounded number of
   versions). The batch keeps the round's policy hash; a trajectory of the
   round's own version must carry it, older trajectories carry their own.
 
-Schema 3 is reserved for the reward-hash change of the P2 branch.
+New evidence is schema 4 when the caller names each trajectory's policy (the
+ports rollout hook) and schema 3 otherwise.  Schema 1 and 2 files remain
+readable: their structure and batch hash are checked, but the HMAC that was
+mixed into their outcome hashes is not (and cannot be) re-verified.
 """
 
 from __future__ import annotations
@@ -28,13 +34,16 @@ from typing import Any
 from .contracts import TrajectoryEnvelope
 
 _LEGACY_SCHEMA = 1
-_SCHEMA = 2
+_SIGNED_LAYERED_SCHEMA = 2
+_SCHEMA = 3
 _PER_TRAJECTORY_POLICY_SCHEMA = 4
-_LAYERED_SCHEMAS = frozenset({_SCHEMA, _PER_TRAJECTORY_POLICY_SCHEMA})
-_SCHEMAS = frozenset({_LEGACY_SCHEMA, *_LAYERED_SCHEMAS})
+_LAYERED_SCHEMAS = frozenset({_SIGNED_LAYERED_SCHEMA, _SCHEMA, _PER_TRAJECTORY_POLICY_SCHEMA})
+_READABLE_SCHEMAS = frozenset({_LEGACY_SCHEMA, *_LAYERED_SCHEMAS})
 _SHA256 = frozenset("0123456789abcdef")
 EVIDENCE_KINDS = frozenset({"secrlenv", "terminal-bench-2.1"})
-EVIDENCE_SCHEMA_VERSIONS = frozenset({_LEGACY_SCHEMA, _SCHEMA})
+# The launch context still names the signed-era layout (1 or 2) it was
+# attested with; it must be bound, but new evidence is schema 3 or 4.
+LAUNCH_CONTEXT_SCHEMA_VERSIONS = frozenset({_LEGACY_SCHEMA, _SIGNED_LAYERED_SCHEMA})
 _LEGACY_ENVELOPE_FIELDS = (
     "trajectory_id",
     "task_id",
@@ -49,7 +58,7 @@ _LEGACY_ENVELOPE_FIELDS = (
     "reward_contract_hash",
     "cleanup_evidence_hash",
 )
-_V2_ENVELOPE_FIELDS = frozenset(field.name for field in fields(TrajectoryEnvelope))
+_LAYERED_ENVELOPE_FIELDS = frozenset(field.name for field in fields(TrajectoryEnvelope))
 
 BehaviorPolicyOf = Callable[[Sequence[Any]], tuple[int, str]]
 """The (version, weight hash) of the policy that generated one logical
@@ -79,7 +88,6 @@ class _VerifiedOutcome:
     episode_id: str
     sample_id: str | None
     reward: float
-    mac: str
     canonical: bytes
 
 
@@ -90,16 +98,13 @@ def build_trajectory_batch_evidence(
     behavior_policy_hash: str,
     reward_contract_hash: str,
     evidence_kind: str = "secrlenv",
-    schema_version: int | None = None,
     behavior_policy_of: BehaviorPolicyOf | None = None,
     max_policy_age: int | None = None,
 ) -> TrajectoryBatchEvidence:
-    """Authenticate accepted samples and bind their exact training batch.
+    """Validate accepted samples and bind their exact training batch.
 
     ``evidence_kind`` is an explicit, hash-bound runtime choice. It is never
-    inferred from arbitrary sample metadata. Schema 1 remains the byte-exact
-    flat SecRLEnv representation; Terminal-Bench and nested compaction use
-    schema 2 with active-token and composite-segment evidence.
+    inferred from arbitrary sample metadata. The result is schema 3.
 
     ``behavior_policy_of`` selects schema 4: it names the policy of every
     logical trajectory (``behavior_policy_hash`` stays the round's policy),
@@ -120,34 +125,20 @@ def build_trajectory_batch_evidence(
     ):
         raise ValueError("trajectory evidence requires non-empty RL groups")
 
-    nested = any(isinstance(sample, list) for group in groups for sample in group)
-    inferred_schema = (
-        _SCHEMA if evidence_kind != "secrlenv" or nested else _LEGACY_SCHEMA
-    )
     if behavior_policy_of is not None:
-        if schema_version not in (None, _PER_TRAJECTORY_POLICY_SCHEMA):
-            raise ValueError("per-trajectory behavior policies need trajectory evidence schema 4")
         schema_version = _PER_TRAJECTORY_POLICY_SCHEMA
         _nonnegative_int("max_policy_age", max_policy_age)
     elif max_policy_age is not None:
         raise ValueError("a policy-age limit is recorded only with per-trajectory policies")
-    elif schema_version is None:
-        schema_version = inferred_schema
-    elif schema_version not in {_LEGACY_SCHEMA, _SCHEMA}:
-        raise ValueError("trajectory evidence schema is unsupported")
-    if schema_version == _LEGACY_SCHEMA and (
-        evidence_kind != "secrlenv" or nested
-    ):
-        raise ValueError(
-            "legacy trajectory evidence cannot represent this benchmark/layout"
-        )
+    else:
+        schema_version = _SCHEMA
     envelopes: list[TrajectoryEnvelope] = []
     seen_sample_indices: set[int] = set()
     seen_groups: set[int] = set()
     batch_compaction_context_budget: int | None = None
 
     for group in groups:
-        signed_group_index: int | None = None
+        current_group_index: int | None = None
         for logical_sample in group:
             compacted = isinstance(logical_sample, list)
             segments = logical_sample if compacted else [logical_sample]
@@ -162,12 +153,12 @@ def build_trajectory_batch_evidence(
             sample_index = getattr(first, "index", None)
             _nonnegative_int("sample.group_index", group_index)
             _nonnegative_int("sample.index", sample_index)
-            if signed_group_index is None:
+            if current_group_index is None:
                 if group_index in seen_groups:
                     raise ValueError("trajectory batch repeats an RL group")
-                signed_group_index = group_index
+                current_group_index = group_index
                 seen_groups.add(group_index)
-            elif group_index != signed_group_index:
+            elif group_index != current_group_index:
                 raise ValueError("trajectory RL group mixes group identities")
             if sample_index in seen_sample_indices:
                 raise ValueError(
@@ -177,7 +168,7 @@ def build_trajectory_batch_evidence(
 
             compaction_id: str | None = None
             compaction_context_budget: int | None = None
-            expected_outcome: tuple[str, str, str | None, float, str] | None = None
+            expected_outcome: tuple[str, str, str | None, float, bytes] | None = None
             for segment_ordinal, sample in enumerate(segments):
                 if (
                     getattr(sample, "group_index", None) != group_index
@@ -233,13 +224,13 @@ def build_trajectory_batch_evidence(
                     verified.episode_id,
                     verified.sample_id,
                     verified.reward,
-                    verified.mac,
+                    verified.canonical,
                 )
                 if expected_outcome is None:
                     expected_outcome = outcome_identity
                 elif outcome_identity != expected_outcome:
                     raise ValueError(
-                        "compaction segments do not share one signed outcome"
+                        "compaction segments do not share one outcome"
                     )
                 _require_sample_reward(sample, verified.reward)
 
@@ -261,35 +252,6 @@ def build_trajectory_batch_evidence(
                     evidence_kind, verified
                 )
 
-                if schema_version == _LEGACY_SCHEMA:
-                    trajectory_id = _hash_parts(
-                        b"yeto-trajectory-id-v1\0",
-                        str(rollout_id).encode("ascii"),
-                        str(group_index).encode("ascii"),
-                        str(sample_index).encode("ascii"),
-                        verified.task_id.encode("utf-8"),
-                        verified.episode_id.encode("utf-8"),
-                        bytes.fromhex(token_hash),
-                        verified.mac.encode("ascii"),
-                    )
-                    envelopes.append(
-                        TrajectoryEnvelope(
-                            trajectory_id=trajectory_id,
-                            task_id=verified.task_id,
-                            prompt_group_id=f"r{rollout_id}:g{group_index}",
-                            sample_index=sample_index,
-                            behavior_policy_version=behavior_version,
-                            behavior_policy_hash=behavior_hash,
-                            token_ids=tokens,
-                            response_token_count=response_length,
-                            behavior_logprobs_hash=behavior_logprobs_hash,
-                            reward=verified.reward,
-                            reward_contract_hash=reward_contract_hash,
-                            cleanup_evidence_hash=cleanup_evidence_hash,
-                        )
-                    )
-                    continue
-
                 (
                     active_token_count,
                     loss_mask_hash,
@@ -310,7 +272,6 @@ def build_trajectory_batch_evidence(
                     verified.episode_id.encode("utf-8"),
                     (verified.sample_id or "").encode("utf-8"),
                     bytes.fromhex(token_hash),
-                    verified.mac.encode("ascii"),
                 ]
                 if compacted:
                     assert compaction_id is not None
@@ -332,7 +293,7 @@ def build_trajectory_batch_evidence(
                 trajectory_id = _hash_parts(
                     b"yeto-trajectory-id-v4\0"
                     if schema_version == _PER_TRAJECTORY_POLICY_SCHEMA
-                    else b"yeto-trajectory-id-v2\0",
+                    else b"yeto-trajectory-id-v3\0",
                     *identity_parts,
                 )
                 envelopes.append(
@@ -500,15 +461,9 @@ def _verified_outcome(
     metadata: Mapping[str, Any], evidence_kind: str
 ) -> _VerifiedOutcome:
     if evidence_kind == "terminal-bench-2.1":
-        if any(
-            key in metadata
-            for key in (
-                "secrlenv_trusted_outcome",
-                "secrlenv_trusted_outcome_hmac",
-            )
-        ):
+        if "secrlenv_trusted_outcome" in metadata:
             raise ValueError("trajectory metadata mixes benchmark evidence kinds")
-        from .tbench_outcome import MAC_KEY, canonical_outcome, verified_outcome
+        from .tbench_outcome import canonical_outcome, verified_outcome
 
         outcome, reward = verified_outcome(dict(metadata))
         return _VerifiedOutcome(
@@ -516,19 +471,14 @@ def _verified_outcome(
             episode_id=outcome["episode_id"],
             sample_id=outcome["sample_id"],
             reward=reward,
-            mac=metadata[MAC_KEY],
             canonical=canonical_outcome(outcome),
         )
 
-    if any(
-        key in metadata
-        for key in ("tbench_trusted_outcome", "tbench_trusted_outcome_hmac")
-    ):
+    if "tbench_trusted_outcome" in metadata:
         raise ValueError("trajectory metadata mixes benchmark evidence kinds")
     from yeto.rl.harness.codex.reward import (
         CLEANUP_ERROR_STATUS,
         INFRASTRUCTURE_STATUS,
-        MAC_KEY,
         _canonical,
     )
     from yeto.rl.harness.codex.reward import (
@@ -538,21 +488,17 @@ def _verified_outcome(
     outcome, reward = verified_secrlenv_outcome(dict(metadata))
     if outcome["status"] in {INFRASTRUCTURE_STATUS, CLEANUP_ERROR_STATUS}:
         raise ValueError("trajectory has no terminal grader/cleanup evidence")
-    supplied_mac = metadata.get(MAC_KEY)
-    if not isinstance(supplied_mac, str):
-        raise TypeError("trajectory has no signed cleanup evidence")
     task_id = outcome.get("task_id")
     episode_id = outcome.get("episode_id")
     if not isinstance(task_id, str) or not task_id:
-        raise ValueError("trajectory has no signed task identity")
+        raise ValueError("trajectory has no task identity")
     if not isinstance(episode_id, str) or not episode_id:
-        raise ValueError("trajectory has no signed episode identity")
+        raise ValueError("trajectory has no episode identity")
     return _VerifiedOutcome(
         task_id=task_id,
         episode_id=episode_id,
         sample_id=None,
         reward=reward,
-        mac=supplied_mac,
         canonical=_canonical(outcome),
     )
 
@@ -600,7 +546,7 @@ def _require_sample_reward(sample: Any, verified_reward: float) -> None:
         or not math.isfinite(float(sample_reward))
         or float(sample_reward) != verified_reward
     ):
-        raise ValueError("trajectory reward differs from signed evidence")
+        raise ValueError("trajectory reward differs from its outcome")
 
 
 def _tokens(sample: Any) -> tuple[int, ...]:
@@ -694,11 +640,11 @@ def _outcome_evidence_hash(
     evidence_kind: str, verified: _VerifiedOutcome
 ) -> str:
     domain = (
-        b"yeto-tbench-verdict-evidence-v1\0"
+        b"yeto-tbench-verdict-evidence-v2\0"
         if evidence_kind == "terminal-bench-2.1"
-        else b"yeto-secrlenv-cleanup-evidence-v1\0"
+        else b"yeto-secrlenv-cleanup-evidence-v2\0"
     )
-    return _hash_parts(domain, verified.canonical, verified.mac.encode("ascii"))
+    return _hash_parts(domain, verified.canonical)
 
 
 def _trained_token_count(envelopes: tuple[TrajectoryEnvelope, ...]) -> int:
@@ -723,7 +669,7 @@ def _envelope_from_mapping(value: Any, schema_version: int) -> TrajectoryEnvelop
     expected = (
         frozenset(_LEGACY_ENVELOPE_FIELDS)
         if schema_version == _LEGACY_SCHEMA
-        else _V2_ENVELOPE_FIELDS
+        else _LAYERED_ENVELOPE_FIELDS
     )
     if not isinstance(value, dict) or set(value) != expected:
         raise ValueError("trajectory evidence item fields are malformed")
@@ -820,7 +766,7 @@ def _validate_batch_evidence(evidence: TrajectoryBatchEvidence) -> None:
     _nonnegative_int("trained_tokens", evidence.trained_tokens)
     if evidence.trained_tokens < 1:
         raise ValueError("trajectory evidence trained-token count is invalid")
-    if evidence.schema_version not in _SCHEMAS:
+    if evidence.schema_version not in _READABLE_SCHEMAS:
         raise ValueError("trajectory evidence schema is unsupported")
     if evidence.evidence_kind not in EVIDENCE_KINDS:
         raise ValueError("trajectory evidence kind is unsupported")
@@ -836,7 +782,7 @@ def _validate_batch_evidence(evidence: TrajectoryBatchEvidence) -> None:
         or item.active_token_ids_hash is None
         for item in evidence.envelopes
     ):
-        raise ValueError("trajectory evidence v2 item is incomplete")
+        raise ValueError("layered trajectory evidence item is incomplete")
     _validate_behavior_policies(evidence)
     _validate_envelope_order(
         evidence.envelopes, schema_version=evidence.schema_version
@@ -943,11 +889,7 @@ def _envelope_batch_hash(
         payload.update({"schema": schema_version, "evidence_kind": evidence_kind})
         if schema_version == _PER_TRAJECTORY_POLICY_SCHEMA:
             payload["max_policy_age"] = max_policy_age
-        domain = (
-            b"yeto-trajectory-batch-v4\0"
-            if schema_version == _PER_TRAJECTORY_POLICY_SCHEMA
-            else b"yeto-trajectory-batch-v2\0"
-        )
+        domain = f"yeto-trajectory-batch-v{schema_version}\0".encode("ascii")
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return _hash_parts(domain, raw)
 

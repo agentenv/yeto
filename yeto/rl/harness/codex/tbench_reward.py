@@ -1,12 +1,12 @@
 """Reward and group filter for Terminal-Bench Codex samples on the ports path.
 
-- ``reward_func``: only HMAC-authenticated ``tbench_outcome`` rewards (first of
-  the three verification points, design D7).  An unsigned infrastructure marker
+- ``reward_func``: only structurally valid ``tbench_outcome`` rewards (first of
+  the three validation points, design D7).  An infrastructure marker
   marks the sample ABORTED and returns the numeric 0.0 Miles requires; the
   group filter never lets it into training.  A verified outcome also sets
-  ``sample.metadata["success"]`` to the signed ``passed`` bit (all
+  ``sample.metadata["success"]`` to the outcome ``passed`` bit (all
   Terminal-Bench tests passed); aborted samples get no flag.
-- ``check_group``: authenticates every sample again, drops groups with aborted
+- ``check_group``: validates every sample again, drops groups with aborted
   members, and enforces R-D5a: samples of one trajectory (siblings) share one
   reward and are counted once (``rollout_id``/``trajectory_id``).
 """
@@ -16,7 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 from yeto.rl.rewards.types import RewardResult, Trajectory
-from yeto.rl.tbench_outcome import MAC_KEY, OUTCOME_KEY, UntrustedTBenchOutcome, verified_outcome
+from yeto.rl.tbench_outcome import OUTCOME_KEY, UntrustedTBenchOutcome, verified_outcome
 
 INFRASTRUCTURE_KEY = "tbench_infrastructure_error"
 
@@ -39,14 +39,14 @@ def _mark_aborted(sample: Any) -> None:
 
 def is_infrastructure(sample: Any) -> bool:
     metadata = _metadata(sample)
-    return INFRASTRUCTURE_KEY in metadata and OUTCOME_KEY not in metadata and MAC_KEY not in metadata
+    return INFRASTRUCTURE_KEY in metadata and OUTCOME_KEY not in metadata
 
 
 def tbench_reward(trajectory: Trajectory) -> RewardResult:
     """Neutral form (decoupling 3.3).
 
     Writes the full-success flag into ``trajectory.metadata`` in place (the
-    signed pass bit, not reward > 0).  An unsigned infrastructure marker is no
+    outcome pass bit, not reward > 0).  An infrastructure marker is no
     verdict: ``success`` is removed and the result is ``aborted`` so the
     backend adapter marks the sample with its abort status.
     """
@@ -54,7 +54,7 @@ def tbench_reward(trajectory: Trajectory) -> RewardResult:
     metadata = trajectory.metadata
     if not isinstance(metadata, dict):
         raise UntrustedTBenchOutcome("sample has no metadata")
-    if INFRASTRUCTURE_KEY in metadata and OUTCOME_KEY not in metadata and MAC_KEY not in metadata:
+    if INFRASTRUCTURE_KEY in metadata and OUTCOME_KEY not in metadata:
         metadata.pop("success", None)  # no verdict: never a positive
         return RewardResult(value=0.0, aborted=True, reason=INFRASTRUCTURE_KEY)
     outcome, value = verified_outcome(metadata)
@@ -94,7 +94,7 @@ def sibling_key(sample: Any) -> Any:
 
 
 def check_siblings(samples: list[Any]) -> dict[Any, float]:
-    """R-D5a: siblings share one signed reward; returns one reward per trajectory."""
+    """R-D5a: siblings share one reward; returns one reward per trajectory."""
     per_trajectory: dict[Any, float] = {}
     outcomes: dict[Any, dict[str, Any]] = {}
     for sample in samples:
@@ -112,7 +112,7 @@ def check_siblings(samples: list[Any]) -> dict[Any, float]:
 
 
 def check_group(args: Any, samples: list[Any], **_kwargs: Any):
-    """Dynamic group filter: authenticate, drop aborted groups, enforce sibling sharing."""
+    """Dynamic group filter: validate, drop aborted groups, enforce sibling sharing."""
     try:
         from miles.rollout.filter_hub.base_types import DynamicFilterOutput
     except ImportError:  # CPU tests without the Miles package

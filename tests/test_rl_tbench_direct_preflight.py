@@ -51,11 +51,9 @@ def _environment(monkeypatch):
         "YETO_CODEX_MAX_COMPACTIONS": "3",
         "OPENENV_MAX_ROLLOUT_TIME_SECONDS": "1800",
         "SECRLENV_MAX_ROLLOUT_TIME_SECONDS": "1800",
-        "TBENCH_REWARD_HMAC_KEY": "t" * 48,
     }
     for name, value in values.items():
         monkeypatch.setenv(name, value)
-    monkeypatch.delenv("TBENCH_REWARD_HMAC_KEY_FILE", raising=False)
 
 
 def _context() -> dict[str, str]:

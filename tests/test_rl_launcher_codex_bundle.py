@@ -392,7 +392,7 @@ def test_modal_island_ships_real_secret_values_not_sky_masks(bundle, monkeypatch
     pydantic = pytest.importorskip("pydantic")
     masked = pydantic.SecretStr("k" * 48)  # what sky>=0.10 Task.secrets holds
     assert str(masked) != "k" * 48
-    task = types.SimpleNamespace(envs={"A": "1"}, secrets={"TBENCH_REWARD_HMAC_KEY": masked},
+    task = types.SimpleNamespace(envs={"A": "1"}, secrets={"HF_TOKEN": masked},
                                  setup="", run="echo")
     monkeypatch.setenv("MODAL_TOKEN_ID", "ak-test")
     monkeypatch.setenv("MODAL_TOKEN_SECRET", "as-test")
@@ -401,5 +401,5 @@ def test_modal_island_ships_real_secret_values_not_sky_masks(bundle, monkeypatch
     args.rl_image = "docker:ghcr.io/x/miles@sha256:" + "c" * 64
     spec = parse_gpu_spec(args.gpu)[0]
     cfg = build_modal_island_config(args, spec, 0, task, "1.2.3.4:29400")
-    assert cfg.envs["TBENCH_REWARD_HMAC_KEY"] == "k" * 48
+    assert cfg.envs["HF_TOKEN"] == "k" * 48
     assert L._secret_value("plain") == "plain"

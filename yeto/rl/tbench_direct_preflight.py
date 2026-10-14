@@ -15,7 +15,6 @@ from . import (
     CODEX_OPENENV_IDENTITY_ENV,
 )
 from .codex_backend import QWEN35_08B_MODEL, QWEN35_08B_REVISION
-from .tbench_outcome import validate_hmac_key_source
 
 _REWARD_FUNCTION = "openenv_generate.reward_func"
 _FILTER_FUNCTION = "openenv_generate.check_terminal_bench_episode"
@@ -127,5 +126,4 @@ def preflight_tbench_codex_streaming(
             "Terminal-Bench trusted container environment drifted: "
             + ", ".join(mismatched_environment)
         )
-    validate_hmac_key_source()
     _attest_adapter(Path(miles_root).expanduser().resolve())

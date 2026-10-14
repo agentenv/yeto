@@ -8,9 +8,9 @@ expect (``yeto/rl/adapters/miles/island_entry.py``, ``yeto/rl/tbench_direct_pref
 ``codex_openenv_harness_identity()`` and a module-level ``run``.
 
 Trust split (design D7):
-- ``drive_untrusted`` runs Codex against a terminal environment and never sees
-  the reward HMAC key (the worker subprocess asserts that);
-- ``finish_trusted`` runs the verifier and signs the ``tbench_outcome``.
+- ``drive_untrusted`` runs Codex against a terminal environment and never runs
+  the verifier;
+- ``finish_trusted`` runs the verifier and builds the ``tbench_outcome``.
 
 The stock driver and Responses bridge are reused unchanged from
 ``codex_harness_agent`` (moved from ``yeto_miles_secrlenv@5bfc011``).
@@ -46,7 +46,7 @@ from yeto.rl.tbench_outcome import (
     NATIVE_VERIFIER,
     TEST_SH_VERIFIER,
     TIMEOUT_VERIFIER,
-    build_signed_metadata,
+    build_outcome_metadata,
 )
 
 from . import agent as legacy
@@ -386,7 +386,7 @@ async def release_unreturned_segments(
 def _rlf_grade_from_evaluation(evaluation: dict[str, Any]) -> Any:
     """RLF grade interface (rlf-codex-rl breakpoint 5); lazy import keeps the
     neutral RLF package out of the TB2 import graph.  A malformed grade raises
-    ``RolloutRejected`` (fail closed) instead of downgrading to HMAC."""
+    ``RolloutRejected`` (fail closed) instead of downgrading to the TB2 path."""
     from yeto.rl.rlf.preflight import trusted_grade_from_evaluation
 
     return trusted_grade_from_evaluation(evaluation)
@@ -401,12 +401,11 @@ def _finish_rlf(
     evaluate_time: float,
     evaluation: dict[str, Any],
     status: str,
-    key: str | bytes | None = None,
 ) -> dict[str, Any]:
     """Trusted finish for an RLF grade: close the episode via ``finish_episode``
     (reward/success/grader evidence + the RLF identity quadruple, written by the
     trusted side from the per-lease verifier's identity) on top of the usual
-    signed outcome envelope, so tape consumers keep working.  The ``policy_id``
+    outcome envelope, so tape consumers keep working.  The ``policy_id``
     leg of the quadruple is not produced here: it rides the input metadata and
     is copied onto the chains by ``codex_openenv_generate`` bookkeeping."""
     from yeto.rl.rlf.contracts import EpisodeLease, finish_episode
@@ -424,7 +423,7 @@ def _finish_rlf(
     lease = EpisodeLease(task_id=rlf_task_id, trajectory_id=rlf_trajectory_id,
                          episode_id=rlf_episode_id)
     reward = finish_episode(lease, grade)
-    metadata = build_signed_metadata(
+    metadata = build_outcome_metadata(
         task_id=task_id,
         sample_id=sample_id,
         episode_id=untrusted["episode_id"],
@@ -432,14 +431,13 @@ def _finish_rlf(
         reward=float(grade.reward),
         verifier=NATIVE_VERIFIER,
         testsh_rc=None,
-        key=key,
     )
     metadata.update(reward.metadata)  # success, reward, quadruple, grader_evidence, rlf_status
     metadata["agent_metrics"] = dict(untrusted.get("metrics") or {})
     metadata["agent_metrics"]["evaluate_time"] = evaluate_time
     metadata["exit_status"] = status
     if isinstance(evaluation.get("log"), str):
-        # Observe only, unsigned; the grader contract forbids the flag in it.
+        # Observe only; the grader contract forbids the flag in it.
         metadata["verifier_log"] = evaluation["log"][-VERIFIER_LOG_TAIL_CHARS:]
     return metadata
 
@@ -450,12 +448,11 @@ async def finish_trusted(
     *,
     task_id: str,
     sample_id: str,
-    key: str | bytes | None = None,
 ) -> dict[str, Any]:
-    """Trusted layer: verify, build and sign the outcome (reward in {0,1}).
+    """Trusted layer: verify and build the outcome (reward in {0,1}).
 
     When the verifier's evaluation carries an RLF grade the episode is closed
-    via ``finish_episode`` (``_finish_rlf``); anything else takes the TB2 HMAC
+    via ``finish_episode`` (``_finish_rlf``); anything else takes the TB2
     path below, byte-identical to before the RLF branch existed.
     """
     status = untrusted["status"]
@@ -472,14 +469,13 @@ async def finish_trusted(
         grade = _rlf_grade_from_evaluation(evaluation)
         if grade is not None:
             return _finish_rlf(untrusted, grade, task_id=task_id, sample_id=sample_id,
-                               evaluate_time=evaluate_time, evaluation=evaluation, status=status,
-                               key=key)
+                               evaluate_time=evaluate_time, evaluation=evaluation, status=status)
         passed = bool(evaluation.get("passed"))
         testsh_rc = evaluation.get("testsh_rc")
         verifier_name = (
             TEST_SH_VERIFIER if isinstance(testsh_rc, int) else NATIVE_VERIFIER
         )
-    metadata = build_signed_metadata(
+    metadata = build_outcome_metadata(
         task_id=task_id,
         sample_id=sample_id,
         episode_id=untrusted["episode_id"],
@@ -487,11 +483,10 @@ async def finish_trusted(
         reward=1.0 if passed else 0.0,
         verifier=verifier_name,
         testsh_rc=testsh_rc if isinstance(testsh_rc, int) else None,
-        key=key,
     )
     metadata["agent_metrics"] = dict(untrusted.get("metrics") or {})
     # S17 N13: the trusted verifier owns grading, so it owns the grading time
-    # (seconds, observe only, unsigned).  The worker's own ``evaluate_time`` is
+    # (seconds, observe only).  The worker's own ``evaluate_time`` is
     # 0.0 on this path; a timeout skips grading and drops the key.
     if evaluate_time is None:
         metadata["agent_metrics"].pop("evaluate_time", None)
@@ -499,8 +494,8 @@ async def finish_trusted(
         metadata["agent_metrics"]["evaluate_time"] = evaluate_time
     metadata["exit_status"] = status
     if status != "timeout" and isinstance(evaluation.get("log"), str):
-        metadata["verifier_log"] = evaluation["log"]  # observe only, unsigned
-        # S17 M1 (observe only, unsigned): verifier wall time and agent phase times
+        metadata["verifier_log"] = evaluation["log"]  # observe only
+        # S17 M1 (observe only): verifier wall time and agent phase times
         # (per-turn shapes would need the pinned codex_harness_agent.py), appended as the log's last line so the tape's
         # verifier_log tail carries them.
         metrics = untrusted.get("metrics") or {}
@@ -514,7 +509,7 @@ async def finish_trusted(
 
 
 def infrastructure_metadata(reason: str, *, episode_id: str | None, metrics: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Unsigned marker: no reward, sample must be ABORTED (never a 0 reward)."""
+    """Infrastructure marker: no reward, sample must be ABORTED (never a 0 reward)."""
     return {
         "tbench_infrastructure_error": reason,
         "exit_status": INFRASTRUCTURE_STATUS,
@@ -651,9 +646,9 @@ async def run(
                 **segments,
             }
         tito = mirror_tito_counters(untrusted.get("metrics"), harness_board)
-        signed = await finish_trusted(untrusted, verifier, task_id=task_id, sample_id=sample_id)
+        finished = await finish_trusted(untrusted, verifier, task_id=task_id, sample_id=sample_id)
         handed_off = True
-        return {**signed, **trajectory_fields(trajectory_id), **tito, **segments}
+        return {**finished, **trajectory_fields(trajectory_id), **tito, **segments}
     finally:
         if segments and not handed_off:
             await release_unreturned_segments(job["base_url"], segments)
@@ -681,13 +676,3 @@ async def prepare_segment_sessions(
     router, _ = split_session_url(job["base_url"])
     return {compaction_bridge.SESSIONS_METADATA_KEY: ids,
             compaction_bridge.SESSIONS_ROUTER_METADATA_KEY: router}
-
-
-def hmac_key_env_names() -> tuple[str, ...]:
-    return ("TBENCH_REWARD_HMAC_KEY", "TBENCH_REWARD_HMAC_KEY_FILE", "SECRLENV_REWARD_HMAC_KEY")
-
-
-def assert_no_reward_key(env: dict[str, str] | None = None) -> None:
-    present = [name for name in hmac_key_env_names() if (env if env is not None else os.environ).get(name)]
-    if present:
-        raise RuntimeError(f"reward HMAC key leaked into the untrusted layer: {', '.join(present)}")

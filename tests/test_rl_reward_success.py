@@ -11,7 +11,6 @@ from types import SimpleNamespace
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
-KEY = "k" * 40
 
 
 def _run(coro):
@@ -104,16 +103,14 @@ def test_gdpo_success_is_correctness_not_format(monkeypatch):
 def _tb_sample(monkeypatch, reward, status="completed", verifier=None, rc=None):
     from yeto.rl import tbench_outcome
 
-    monkeypatch.setenv(tbench_outcome.HMAC_ENV, KEY)
-    monkeypatch.delenv(tbench_outcome.HMAC_FILE_ENV, raising=False)
     verifier = verifier or tbench_outcome.NATIVE_VERIFIER
-    meta = tbench_outcome.build_signed_metadata(
+    meta = tbench_outcome.build_outcome_metadata(
         task_id="t1", sample_id="s1", episode_id="e1", status=status, reward=reward,
-        verifier=verifier, testsh_rc=rc, key=KEY)
+        verifier=verifier, testsh_rc=rc)
     return SimpleNamespace(metadata=meta, status=None)
 
 
-def test_tbench_success_is_signed_pass_bit(monkeypatch):
+def test_tbench_success_is_outcome_pass_bit(monkeypatch):
     from yeto.rl import tbench_outcome
     from yeto.rl.harness.codex import tbench_reward
 

@@ -82,7 +82,6 @@ def _mark_aborted(sample: Any, reason: str) -> None:
         sample.status = "ABORTED"
     metadata = sample.metadata if isinstance(getattr(sample, "metadata", None), dict) else {}
     metadata.pop("tbench_trusted_outcome", None)
-    metadata.pop("tbench_trusted_outcome_hmac", None)
     metadata[INFRASTRUCTURE_KEY] = reason
     sample.metadata = metadata
 

@@ -24,7 +24,6 @@ from yeto.rl.rlf import modal as rlf_modal
 
 FLAG = "flag{rlf_baseline_cpu_test_9f2e}"
 TASK = "fixture-ctf-ret2win"
-HMAC_KEY = "k" * 48
 
 
 def _run(coro):
@@ -247,8 +246,7 @@ def test_episode_success_trace_and_flag_hygiene():
     sessions = FakeSessions()
     recorded: list[dict] = []
     trace = _run(rb.run_episode(_cfg(), provider, ROW, session_url="http://sess",
-                                drive=make_drive(recorded=recorded), http=sessions,
-                                hmac_key=HMAC_KEY))
+                                drive=make_drive(recorded=recorded), http=sessions,))
     assert trace["classification"] == "success" and trace["success"] is True
     assert trace["reward"] == 1.0 and trace["end_reason"] == "completed"
     # RLF identity quadruple + baseline policy identity
@@ -283,8 +281,7 @@ def test_episode_success_trace_and_flag_hygiene():
 def test_episode_wrong_flag_is_failed_with_zero_reward():
     provider = FakeProvider()
     trace = _run(rb.run_episode(_cfg(), provider, ROW, session_url="http://sess",
-                                drive=make_drive(submit="flag{nope}"), http=FakeSessions(),
-                                hmac_key=HMAC_KEY))
+                                drive=make_drive(submit="flag{nope}"), http=FakeSessions(),))
     assert trace["classification"] == "failed" and trace["success"] is False
     assert trace["reward"] == 0.0
     assert trace["submissions"][0]["flag_correct"] is False
@@ -299,7 +296,7 @@ def test_episode_hard_deadline_times_out_and_skips_grading():
 
     cfg = _cfg(episode_seconds=0.2)
     trace = _run(rb.run_episode(cfg, provider, ROW, session_url="http://sess",
-                                drive=slow_drive, http=FakeSessions(), hmac_key=HMAC_KEY))
+                                drive=slow_drive, http=FakeSessions()))
     assert trace["status"] == "timeout" and trace["end_reason"] == "timed_out"
     assert trace["classification"] == "failed" and trace["reward"] == 0.0
     assert provider.leases[0].verifier.evaluations == 0  # a timeout never reaches the grader
@@ -323,7 +320,7 @@ def test_episode_lease_deadline_tightens_the_hard_limit():
 
     provider.acquire = acquire
     trace = _run(rb.run_episode(cfg, provider, ROW, session_url="http://sess",
-                                drive=slow_drive, http=FakeSessions(), hmac_key=HMAC_KEY))
+                                drive=slow_drive, http=FakeSessions()))
     assert trace["status"] == "timeout"
 
 
@@ -334,7 +331,7 @@ def test_episode_harness_error_is_infrastructure():
         raise harness.CodexHarnessError("worker exited without a result")
 
     trace = _run(rb.run_episode(_cfg(), provider, ROW, session_url="http://sess",
-                                drive=broken_drive, http=FakeSessions(), hmac_key=HMAC_KEY))
+                                drive=broken_drive, http=FakeSessions()))
     assert trace["classification"] == "infrastructure" and trace["reward"] is None
     assert "worker exited" in trace["error"]
     assert provider.leases[0].destroyed == 1
@@ -346,7 +343,7 @@ def test_episode_acquire_failure_is_infrastructure_and_never_graded():
             raise rlf_modal.OrchestrationError(f"no trusted flag configured, FLAG={FLAG}")
 
     trace = _run(rb.run_episode(_cfg(), DenyProvider(), ROW, session_url="http://sess",
-                                drive=make_drive(), http=FakeSessions(), hmac_key=HMAC_KEY))
+                                drive=make_drive(), http=FakeSessions()))
     assert trace["classification"] == "infrastructure"
     assert trace.get("rlf_episode_id") is None  # no lease, no identity
     assert "acquire" in trace["error"] and FLAG not in json.dumps(trace)  # scrubbed
@@ -370,7 +367,7 @@ def test_episode_malformed_grade_is_rejected_not_failed():
 
     provider.acquire = acquire
     trace = _run(rb.run_episode(_cfg(), provider, ROW, session_url="http://sess",
-                                drive=drive, http=FakeSessions(), hmac_key=HMAC_KEY))
+                                drive=drive, http=FakeSessions()))
     assert trace["classification"] == "rejected" and trace["reward"] is None
     assert "grade rejected" in trace["error"]
 
@@ -394,7 +391,7 @@ def test_run_from_config_end_to_end(tmp_path):
               "out_dir": str(tmp_path / "out"), "serve": "external",
               "session_url": "http://sess", "baseline": {"repeat": 2, "model_path": "/m"}}
     result = rb.run_from_config(config, provider=provider, drive=make_drive(),
-                                http=FakeSessions(), hmac_key=HMAC_KEY, progress=None)
+                                http=FakeSessions(), progress=None)
     assert result["ok"] is True
     summary = result["summary"]
     assert summary["episodes"] == 2 and summary["evaluated"] == 2

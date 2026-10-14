@@ -474,6 +474,9 @@ def load_sao_streaming_runtime(
     )
     evidence = evidence_contract["directory"]
     evidence_kind = evidence_contract["kind"]
+    # ``schema_version`` is the layout label the context was attested with
+    # (part of its hash). It must stay 2; the writer emits trajectory evidence
+    # schema 4 (openspec rl-drop-reward-tamper-hash, P0-S).
     evidence_schema_version = evidence_contract["schema_version"]
     if (
         evidence_kind not in EVIDENCE_KINDS

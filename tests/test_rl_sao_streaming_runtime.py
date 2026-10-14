@@ -351,7 +351,7 @@ def test_bind_installs_two_role_full_parameter_sync_and_private_evidence(tmp_pat
     assert args.yeto_rl_total_fragment_steps == 8
 
 
-def test_terminal_bench_runtime_requires_private_key_source_and_binds_v2(
+def test_terminal_bench_runtime_binds_v2_without_any_reward_key(
     tmp_path, monkeypatch
 ):
     payload = _payload(tmp_path / "trajectory-evidence-0")
@@ -360,14 +360,6 @@ def test_terminal_bench_runtime_requires_private_key_source_and_binds_v2(
     monkeypatch.delenv("TBENCH_REWARD_HMAC_KEY", raising=False)
     monkeypatch.delenv("TBENCH_REWARD_HMAC_KEY_FILE", raising=False)
 
-    with pytest.raises(RuntimeError, match="missing or outside"):
-        bind_sao_streaming_runtime(_args(), runtime)
-    assert not evidence.exists()
-
-    key_file = tmp_path / "tbench-hmac.key"
-    key_file.write_text("t" * 48)
-    key_file.chmod(0o400)
-    monkeypatch.setenv("TBENCH_REWARD_HMAC_KEY_FILE", str(key_file))
     args = _args()
     bind_sao_streaming_runtime(args, runtime)
     assert args.yeto_rl_trajectory_evidence_kind == "terminal-bench-2.1"
@@ -591,3 +583,54 @@ def test_full_parameter_island_accepts_a_policy_age_limit():
 
     args = SimpleNamespace(eval_only=False, rl_max_policy_age=1)
     island_entry._check_full_parameter_sync(args, rl_engine="ports", yeto_policy_sync=True)
+
+
+def test_context_schema_label_2_still_writes_trajectory_evidence_schema_4(tmp_path):
+    """The context's ``schema_version`` (2) is an attested layout label only."""
+
+    from yeto.rl.adapters.miles.full_parameter.evidence import (
+        persist_published_round_evidence,
+    )
+    from yeto.rl.engine.policy_versions import PublishedPolicies
+    from yeto.rl.harness.codex import reward
+    from yeto.rl.trajectory_evidence import (
+        read_trajectory_batch_evidence,
+        trajectory_batch_evidence_path,
+    )
+
+    runtime, evidence = _load(tmp_path)
+    args = _args()
+    bind_sao_streaming_runtime(args, runtime)
+    assert args.yeto_rl_trajectory_evidence_schema_version == 2
+    args.yeto_rl_reward_sha256 = "b" * 64
+    outcome = {
+        "schema": 1,
+        "status": "completed",
+        "episode_id": "episode-0",
+        "task_id": "CVE-2026-0000",
+        "reward": 1.0,
+        "passed": True,
+        "class": None,
+        reward.INFRASTRUCTURE_503_RETRIES_KEY: 0,
+    }
+    sample = SimpleNamespace(
+        group_index=0,
+        index=0,
+        status=SimpleNamespace(value="completed"),
+        metadata={reward.OUTCOME_KEY: outcome},
+        reward=1.0,
+        tokens=[1, 2, 3],
+        response_length=2,
+        rollout_log_probs=[-0.1, -0.2],
+        weight_versions=[
+            SimpleNamespace(spans=[SimpleNamespace(version="0", abs_start=1, abs_end=3)])
+        ],
+    )
+
+    persist_published_round_evidence(
+        args, [[sample]], "yeto:0:" + "a" * 64, PublishedPolicies.from_dict({"0": "a" * 64})
+    )
+
+    path = trajectory_batch_evidence_path(evidence, 0)
+    assert json.loads(path.read_text())["schema"] == 4
+    assert read_trajectory_batch_evidence(path).schema_version == 4

@@ -339,7 +339,6 @@ class _SecRLEnvRetryDataSource:
             metadata = getattr(sample, "metadata", None)
             if isinstance(metadata, dict):
                 metadata.pop("secrlenv_trusted_outcome", None)
-                metadata.pop("secrlenv_trusted_outcome_hmac", None)
                 metadata["secrlenv_infrastructure_503_retries"] = (
                     infrastructure_503_retries[int(sample.index)]
                 )

@@ -7,8 +7,8 @@ the image line and still describe the legacy import path; the values below
 describe the moved files. ``LEGACY_SOURCE_SHA256`` is kept for comparison.
 """
 
-AGENT_SHA256 = "fef958c32d27af124827b17369bb82557e96946c4b6f9b74c67f084a533f7c81"
-GENERATE_SHA256 = "1df1ded9c6c81404a6101e1821aefc3129d207a3150241980306d6494ee4a2be"  # adapters/miles/harness_glue/codex_generate.py (decoupling 5.7; was 1c79b0e6…)
+AGENT_SHA256 = "84c6c708cba2142e3d043ae047c90f529b90b953b739261466b8a6e28b2c7411"
+GENERATE_SHA256 = "a32121837f889bb0151c0bb196bc41eaeb550ec1fb738568a75d513b52ccef23"  # adapters/miles/harness_glue/codex_generate.py (decoupling 5.7; was 1df1ded9…)
 
 LEGACY_SOURCE_SHA256 = {
     "agent.py": "0f76c7fbd81135bc5b02cab2488629aaff1bb58dc59eae9228ca317583d90c26",

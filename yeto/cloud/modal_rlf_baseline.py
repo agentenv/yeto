@@ -21,7 +21,7 @@ Local entrypoint inputs (never baked into the image):
 * ``YETO_RLF_BASELINE_ENVS_JSON`` — JSON file with the container env:
   the Codex contract env (``yeto.launcher.codex_container_env(
   codex_bundle_contract(...))``, same as the eval island's codex-env.json),
-  ``TBENCH_REWARD_HMAC_KEY``, ``YETO_RLF_CTF_FLAGS_JSON`` (trusted flags;
+  ``YETO_RLF_CTF_FLAGS_JSON`` (trusted flags;
   live only in the Modal Secret, never in the image or the traces) and the
   sandbox-only ``MODAL_TOKEN_ID`` / ``MODAL_TOKEN_SECRET`` the RLF provider
   needs to open episode VMs.
@@ -46,8 +46,7 @@ CODEX_MOUNT = "/opt/yeto/codex"                  # yeto.launcher.CODEX_CONTAINER
 TASKS_MOUNT = "/root/rlf-tasks"
 ENVS_JSON_ENV = "YETO_RLF_BASELINE_ENVS_JSON"
 
-_SECRET_ENV_KEYS = ("TBENCH_REWARD_HMAC_KEY", "YETO_RLF_CTF_FLAGS_JSON",
-                    "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET")
+_SECRET_ENV_KEYS = ("YETO_RLF_CTF_FLAGS_JSON", "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET")
 
 
 def default_image_ref() -> str:

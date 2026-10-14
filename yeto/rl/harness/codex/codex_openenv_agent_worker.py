@@ -62,7 +62,6 @@ async def _main_async(job: dict[str, Any]) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     del argv
     try:
-        adapter.assert_no_reward_key()
         job = json.loads(sys.stdin.readline())
         if not isinstance(job, dict):
             raise ValueError("worker job must be a JSON object")

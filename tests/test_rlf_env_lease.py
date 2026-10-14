@@ -2,7 +2,7 @@
 
 Fake VM exec / fake verifier: orchestration order, flag hygiene (never in
 stdout/logs/exceptions), fail-closed grade parsing, idempotent teardown, and
-the finish_trusted dual path (RLF grade vs byte-identical TB2 HMAC fallback).
+the finish_trusted dual path (RLF grade vs byte-identical TB2 fallback).
 No Modal, no GPU, no nested Docker.
 """
 
@@ -27,7 +27,6 @@ from yeto.rl import tbench_outcome
 
 FLAG = "flag{trusted_vm_acceptance_7b3d}"
 TASK = "fixture-ctf-ret2win"
-HMAC_KEY = "k" * 48
 
 
 # --- fakes -------------------------------------------------------------------
@@ -363,19 +362,18 @@ def _rlf_payload(passed=True):
 def test_finish_trusted_rlf_grade_writes_back_episode():
     untrusted = {"status": "completed", "metrics": {"turns": 3}, "episode_id": "ep-wire"}
     md = _run(adapter.finish_trusted(untrusted, _GradeVerifier(_rlf_payload()),
-                                     task_id=TASK, sample_id="s-1", key=HMAC_KEY))
+                                     task_id=TASK, sample_id="s-1"))
     # RLF write-back: reward/success/grader evidence + identity quadruple
     assert md["reward"] == 1.0 and md["success"] is True
     assert md["grader_evidence"]["grader"] == "rlf-flag"
     assert (md["rlf_task_id"], md["rlf_episode_id"], md["rlf_trajectory_id"]) == \
         (TASK, "ep-rlf-1", "traj-rlf-1")
     assert md["rlf_status"] == "completed" and md["exit_status"] == "completed"
-    # the signed outcome envelope still verifies (tape consumers keep working)
+    # the outcome envelope still validates (tape consumers keep working)
     outcome = md[tbench_outcome.OUTCOME_KEY]
     assert outcome["reward"] == 1.0 and outcome["episode_id"] == "ep-wire"
-    import hmac as _h
-    assert _h.compare_digest(tbench_outcome.sign_outcome(outcome, key=HMAC_KEY),
-                             md[tbench_outcome.MAC_KEY])
+    assert tbench_outcome.verified_outcome(md) == (outcome, 1.0)
+    assert "tbench_trusted_outcome_hmac" not in md
     assert md["agent_metrics"]["turns"] == 3 and "evaluate_time" in md["agent_metrics"]
 
 
@@ -384,36 +382,35 @@ def test_finish_trusted_malformed_grade_fails_closed():
     bad = {"rlf_grade": {"status": "completed"}}  # present but malformed
     with pytest.raises(RolloutRejected, match="malformed"):
         _run(adapter.finish_trusted(untrusted, _GradeVerifier(bad),
-                                    task_id=TASK, sample_id="s-1", key=HMAC_KEY))
+                                    task_id=TASK, sample_id="s-1"))
     missing_identity = _rlf_payload()
     del missing_identity["rlf_grade"]["grader_evidence"]["rlf_episode_id"]
     with pytest.raises(RolloutRejected, match="identity"):
         _run(adapter.finish_trusted(untrusted, _GradeVerifier(missing_identity),
-                                    task_id=TASK, sample_id="s-1", key=HMAC_KEY))
+                                    task_id=TASK, sample_id="s-1"))
     wrong_task = _rlf_payload()
     wrong_task["rlf_grade"]["grader_evidence"]["rlf_task_id"] = "other-task"
     with pytest.raises(RolloutRejected, match="does not match"):
         _run(adapter.finish_trusted(untrusted, _GradeVerifier(wrong_task),
-                                    task_id=TASK, sample_id="s-1", key=HMAC_KEY))
+                                    task_id=TASK, sample_id="s-1"))
 
 
 def test_finish_trusted_tb2_fallback_byte_unchanged():
     untrusted = {"status": "completed", "metrics": {"turns": 2}, "episode_id": "ep-wire"}
     tb2_payload = {"passed": True, "testsh_rc": 0, "log": "ok"}
     md = _run(adapter.finish_trusted(untrusted, _GradeVerifier(tb2_payload),
-                                     task_id="tb2-task", sample_id="s-1", key=HMAC_KEY))
+                                     task_id="tb2-task", sample_id="s-1"))
     # no RLF keys at all on the fallback path
     assert not any(k.startswith("rlf_") or k == "grader_evidence" for k in md)
     assert "success" not in md
     outcome = md[tbench_outcome.OUTCOME_KEY]
     assert outcome["reward"] == 1.0 and outcome["verifier"] == tbench_outcome.TEST_SH_VERIFIER
-    import hmac as _h
-    assert _h.compare_digest(tbench_outcome.sign_outcome(outcome, key=HMAC_KEY),
-                             md[tbench_outcome.MAC_KEY])
+    assert tbench_outcome.verified_outcome(md) == (outcome, 1.0)
+    assert "tbench_trusted_outcome_hmac" not in md
     # timeout path never calls the verifier and never sees RLF keys
     md_timeout = _run(adapter.finish_trusted({"status": "timeout", "metrics": {}, "episode_id": "ep"},
                                              _GradeVerifier(tb2_payload),
-                                             task_id="tb2-task", sample_id="s-1", key=HMAC_KEY))
+                                             task_id="tb2-task", sample_id="s-1"))
     assert md_timeout[tbench_outcome.OUTCOME_KEY]["verifier"] == tbench_outcome.TIMEOUT_VERIFIER
     assert not any(k.startswith("rlf_") for k in md_timeout)
 

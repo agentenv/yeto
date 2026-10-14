@@ -181,13 +181,6 @@ def resolve_expected_policy_version(metadata: dict[str, Any]) -> str | None:
         return None
 
 
-def scrubbed_environment(base: dict[str, str] | None = None) -> dict[str, str]:
-    env = dict(os.environ if base is None else base)
-    for name in adapter.hmac_key_env_names():
-        env.pop(name, None)
-    return env
-
-
 async def _terminate(process: asyncio.subprocess.Process) -> None:
     if process.returncode is not None:
         return
@@ -215,7 +208,7 @@ async def _drive_worker(
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL if os.getenv("YETO_CODEX_WORKER_STDERR") != "1" else None,
-        env=scrubbed_environment({**os.environ, **{str(k): str(v) for k, v in (worker_env or {}).items()}}),
+        env={**os.environ, **{str(k): str(v) for k, v in (worker_env or {}).items()}},
         start_new_session=True,
     )
     in_tool = False
