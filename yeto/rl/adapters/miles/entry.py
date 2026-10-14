@@ -210,8 +210,8 @@ if NEVER_DECLARABLE & set(MILES_DECLARED):  # pragma: no cover - guarded by test
 # .../evidence/ports-image/2026-10-02-m3a27).
 # Derived from the single lineage in pins.py (0.7): 0af62f4d and every later commit.
 _PINS_0AF62F4D_PLUS = miles_fork_lineage_from("0af62f4d48ed6a5b185c257578d8f7e22312aa87")
-# 64b591a4b and later: 56068bd56 adds only full-parameter state/transport files
-# (no loss_hub or training-loss file), so the G1 evidence carries over by code diff.
+# 64b591a4b and later: 56068bd56 .. 386ae3b07 add only full-parameter state/transport,
+# LoRA-hybrid publish and SAO streaming files (no loss_hub or training-loss file), so the G1 evidence carries over by code diff.
 _PINS_SUPP = miles_fork_lineage_from("64b591a4bec1ffa37fb089d3e3b99c84773b1ffc")
 MILES_DECLARED_PINS: dict[str, frozenset[str]] = {
     # before 0af62f4d the LoRA bridge ignored calculate_per_token_loss (g1c:

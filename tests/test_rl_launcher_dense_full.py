@@ -179,3 +179,34 @@ def test_deepseek_v4_expert_full_island_is_the_lora_hybrid_on_the_dense_sweep(mo
     parsed = island_entry.parse_args(tokens)
     assert (parsed.parameter_mode, parsed.sync_preset, parsed.expert_full_count) == ("lora", "full-parameter", 4)
     island_entry._check_dense_full_sweep(parsed, yeto_policy_sync=True)
+
+
+def test_ports_entry_takes_the_full_parameter_identity_from_run_miles(monkeypatch):
+    """P0-1.11 GPU run fpprobe-20261014a: the full-parameter island has no LoRA
+    rank, so ``_run_ports`` must forward the identity run_miles bound instead
+    of re-deriving a LoRA hash (it raised TypeError on lora_r=None)."""
+    from types import SimpleNamespace
+
+    from yeto.rl.adapters.miles import entry, island_entry
+
+    _, plan = _dense_plan()
+    command = plan["island_requests"][0]["learner_command"]
+    tokens = shlex.split(command.split("-m yeto.rl.adapters.miles.island_entry", 1)[1])
+    tokens = [{"$SYNCER_ADDR": "127.0.0.1:29400", "$LEARNER_ID": "0"}.get(t, t) for t in tokens]
+    args = island_entry.parse_args(tokens)
+    assert args.lora_r is None
+    args.event_tape = "/tmp/tape.jsonl"
+    miles_args = SimpleNamespace(
+        yeto_rl_parameter_mode="full",
+        yeto_rl_lora_config_hash="c" * 64,
+        yeto_rl_layout_hash="d" * 64,
+    )
+    seen = {}
+    monkeypatch.setattr(island_entry, "apply_ports_infra_switches", lambda *a: None)
+    monkeypatch.setattr(island_entry, "_run_test_debug_rollout_replay", lambda *a: False)
+    monkeypatch.setattr(entry, "run_ports_island", lambda *a, **kw: seen.update(kw))
+    island_entry._run_ports(args, miles_args, "launch", "algorithm", specs=(),
+                            canonical_targets=(), yeto_policy_sync=True)
+    assert (seen["lora_config_hash"], seen["layout_hash"]) == ("c" * 64, "d" * 64)
+    assert seen["yeto_policy_sync"] is True
+    assert miles_args.yeto_rl_learner_id == 0
