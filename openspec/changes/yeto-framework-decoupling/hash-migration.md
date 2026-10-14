@@ -272,3 +272,8 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
 
 - Only change: the source hash of `yeto/rl/adapters/miles/rollout_meta_hook.py` `1188451c…` → `a4fa982b…` (the three plugin entries in `plugins`, all 8 samples). Cause: fully_async rounds now report `execution_mode` on the carry-over event (ff6105fc). `algorithm_sha256`, contract hashes, `ports_runtime_fingerprint` and the Miles argv are unchanged.
 - Regenerated with `python tests/decoupling_golden.py --write`.
+
+## S24 L5.6 island sync timing (branch s24-l5-measure, 2026-10-14)
+
+- Only change: `fake_engine_tapes.json` `strict_progress.tape` gains one `rl_sync_timing` event (rl-trainer-start-stop L5.6: `sync/submit_ts`, `sync/global_ready_ts`, `sync/recv_seconds`, `sync/sync_wait_seconds`; all four are scrubbed to `<VOLATILE>`). The 8 config samples, algorithm hashes and contract hashes are unchanged.
+- Regenerated with `python tests/decoupling_golden.py --write`; the diff is 11 added lines.
