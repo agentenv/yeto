@@ -24,17 +24,15 @@ refuses anything else before any launch.
 from __future__ import annotations
 
 import sys
-from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TypeVar
 
 from yeto.rl.engine.journal import Journal
-from yeto.rl.engine.trainer_lifecycle import CutLog, DurableSampleBuffer, TrainerLifecycle
 from yeto.rl.engine.trainer_loop import TrainerLoop, TrainerLoopThread, next_incarnation
 from yeto.rl.engine.trainer_scheduler import S1Config, S1Scheduler
 
-from .trainer_island import TrainerIsland
+from .trainer_island import CloudTrainerBinding, TrainerIsland
 
 OFF = "off"
 S1 = "s1"
@@ -44,27 +42,6 @@ DEFAULT_START_SECONDS = 600.0
 JOURNAL_DIR = "trainer-loop"
 
 T = TypeVar("T")
-
-
-@dataclass
-class CloudTrainerBinding:
-    """What the loop needs from the cloud layer for one run.
-
-    ``lifecycle(first_incarnation)`` builds the trainer lifecycle (e.g.
-    ``DriverLifecycle`` whose ``build_driver`` acquires a trainer island and whose
-    ``release`` gives it back). ``release_orphan(incarnation)`` gives back the island
-    a dead head started. ``data_ended`` tells the samplers finished.
-    ``after_restore()`` runs after the journal is read back and an orphan released
-    (e.g. reset the head's buffer to the watermark of the newest cut)."""
-
-    lifecycle: Callable[[int], TrainerLifecycle]
-    buffer: DurableSampleBuffer
-    cuts: CutLog
-    release_orphan: Callable[[int], None] | None = None
-    data_ended: Callable[[], bool] = lambda: False
-    start_events: Callable[[], Iterable[Mapping[str, Any]]] | None = None
-    spec: Mapping[str, Any] | None = None
-    after_restore: Callable[[], None] | None = None
 
 
 def default_binding(args, island: TrainerIsland | None) -> CloudTrainerBinding:

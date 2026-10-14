@@ -33,7 +33,7 @@ from typing import Any
 from yeto.rl import event_echo
 from yeto.rl.engine.resume import CheckpointStore
 from yeto.rl.engine.sample_buffer import BUFFER_DIR, INDEX, CommittedBacklog, FileSampleBuffer
-from yeto.rl.engine.trainer_lifecycle import CutRef
+from yeto.rl.engine.trainer_lifecycle import CutLog, CutRef, DurableSampleBuffer, TrainerLifecycle
 from yeto.rl.engine.trainer_remote import (
     EVENT,
     RemoteTrainerLifecycle,
@@ -57,6 +57,27 @@ class TrainerIsland:
     cloud: str
     modal_cfg: Any = None  # modal_runner.ModalIslandConfig
     modal_ops: Any = None  # modal_runner.ModalOps (app deployed)
+
+
+@dataclass
+class CloudTrainerBinding:
+    """What the loop needs from the cloud layer for one run.
+
+    ``lifecycle(first_incarnation)`` builds the trainer lifecycle (e.g.
+    ``DriverLifecycle`` whose ``build_driver`` acquires a trainer island and whose
+    ``release`` gives it back). ``release_orphan(incarnation)`` gives back the island
+    a dead head started. ``data_ended`` tells the samplers finished.
+    ``after_restore()`` runs after the journal is read back and an orphan released
+    (e.g. reset the head's buffer to the watermark of the newest cut)."""
+
+    lifecycle: Callable[[int], TrainerLifecycle]
+    buffer: DurableSampleBuffer
+    cuts: CutLog
+    release_orphan: Callable[[int], None] | None = None
+    data_ended: Callable[[], bool] = lambda: False
+    start_events: Callable[[], Iterable[Mapping[str, Any]]] | None = None
+    spec: Mapping[str, Any] | None = None
+    after_restore: Callable[[], None] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -255,10 +276,9 @@ class ModalTrainerIslands:
 # ---------------------------------------------------------------------------
 def modal_binding(args: Any, island: TrainerIsland, *, journal_dir: Path,
                   files: StoreFiles | None = None, islands: Any = None) -> Any:
-    """The :class:`~yeto.launch.trainer_loop.CloudTrainerBinding` of a Modal trainer
+    """The :class:`CloudTrainerBinding` of a Modal trainer
     island (``files`` / ``islands`` replace the SDK in tests)."""
     from .storage import MODAL_CHECKPOINT_STORE_MOUNT, modal_checkpoint_store
-    from .trainer_loop import CloudTrainerBinding
 
     if files is None:
         volume, mount = modal_checkpoint_store(args)
