@@ -8,7 +8,8 @@ rl-trainer-start-stop design D1/D2. Mechanism and policy are separate:
 * :class:`DurableSampleBuffer` holds the samples across trainer stops.
 
 A trainer that starts once is the special case: a scheduler that holds until the
-data ends, then stops with ``FINISHED`` (:class:`AlwaysOnScheduler`).
+data ends, then stops with ``FINISHED`` (:class:`AlwaysOnScheduler`). Scheduler S1
+(start on backlog, ski-rental stop) is in :mod:`.trainer_scheduler`.
 
 :class:`DriverLifecycle` is the lifecycle over the existing :class:`IslandDriver`
 (D2). Each start builds a fresh driver (new trainer ports, new sync session) for a
