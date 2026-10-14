@@ -287,11 +287,11 @@ def test_export_cli_reads_spec_file(tmp_path, monkeypatch):
 
 
 def test_selection_event_records_absorbed_flags_and_allowance():
-    launch = _launch(AlgorithmSpec(), ("--eps-clip-high", "0.28", "--use-rollout-logprobs"))
+    launch = _launch(AlgorithmSpec(), ("--eps-clip-high", "0.28", "--normalize-advantages"))
     event = selection_event(launch=launch, algorithm=launch.algorithm, miles_commit="x",
                             unverified_mechanisms=("features:clip_higher",))
     assert event["rl/algorithm_absorbed_flags"] == {"--eps-clip-high": "0.28",
-                                                    "--use-rollout-logprobs": True}
+                                                    "--normalize-advantages": True}
     assert event["rl/unverified_mechanisms"] == ["features:clip_higher"]
     assert event["rl/algorithm_spec_sha256"] == launch.algorithm.sha256()
     plain = selection_event(launch=_launch(AlgorithmSpec()), algorithm=AlgorithmSpec(),

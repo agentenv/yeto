@@ -140,17 +140,9 @@ def _kl_rows() -> list[FlagMapping]:
 
 def _correction_rows() -> list[FlagMapping]:
     def use_tis(spec):
-        c = spec.correction
-        if c.method not in ("tis", "custom"):
-            return []
-        argv = ["--use-tis"]
-        if c.tis_clip is not None:
-            argv += ["--tis-clip", _num(c.tis_clip)]
-        if c.tis_clip_low is not None:
-            argv += ["--tis-clip-low", _num(c.tis_clip_low)]
-        if c.function is not None:
-            argv += ["--custom-tis-function-path", c.function.path]
-        return argv
+        from .offpolicy_correction import tis_argv  # neutral fields -> Miles (D3)
+
+        return tis_argv(spec)
 
     def use_opsm(spec):
         c = spec.correction
@@ -161,10 +153,10 @@ def _correction_rows() -> list[FlagMapping]:
     return [
         FlagMapping("--use-tis", "correction.method", True, lambda raw: True,
                     lambda _: [("correction.method", "tis")], use_tis),
-        FlagMapping("--tis-clip", "correction.tis_clip", False, _float,
-                    lambda v: [("correction.tis_clip", v)], lambda spec: []),
-        FlagMapping("--tis-clip-low", "correction.tis_clip_low", False, _float,
-                    lambda v: [("correction.tis_clip_low", v)], lambda spec: []),
+        FlagMapping("--tis-clip", "correction.upper", False, _float,
+                    lambda v: [("correction.upper", v)], lambda spec: []),
+        FlagMapping("--tis-clip-low", "correction.lower", False, _float,
+                    lambda v: [("correction.lower", v)], lambda spec: []),
         FlagMapping("--custom-tis-function-path", "correction.function", False, _plugin,
                     lambda v: [("correction.method", "custom"), ("correction.function", v)],
                     lambda spec: []),

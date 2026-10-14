@@ -108,6 +108,14 @@ class StalenessPolicy:
     # Algorithm families whose value/critic needs on-policy data (design Q3).
     on_policy_only: bool = False
 
+    @classmethod
+    def for_algorithm(cls, spec: Any, **kwargs: Any) -> "StalenessPolicy":
+        """``correction`` derived from the algorithm spec, not the fixed ``"tis"``
+        (rl-offpolicy-correction-passthrough D7)."""
+        from .offpolicy_correction import staleness_correction
+
+        return cls(correction=staleness_correction(spec), **kwargs)
+
     def __post_init__(self) -> None:
         if self.correction not in IS_CORRECTIONS:
             raise LedgerError(f"correction {self.correction!r} is not one of {IS_CORRECTIONS}")

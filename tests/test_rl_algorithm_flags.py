@@ -218,7 +218,6 @@ CASES = [
                                     tis_clip_low=0.5, mismatch_metrics=True)),
      ["--use-tis", "--tis-clip", "5.0", "--tis-clip-low", "0.5",
       "--custom-tis-function-path", REF.path, "--get-mismatch-metrics"]),
-    (dict(correction=CorrectionSpec(use_rollout_logprobs=True)), ["--use-rollout-logprobs"]),
     (dict(correction=CorrectionSpec(method="opsm", opsm_delta=1e-4)),
      ["--use-opsm", "--opsm-delta", "0.0001"]),
 ]
