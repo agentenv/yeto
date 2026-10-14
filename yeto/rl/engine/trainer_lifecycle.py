@@ -14,15 +14,15 @@ data ends, then stops with ``FINISHED`` (:class:`AlwaysOnScheduler`).
 (D2). Each start builds a fresh driver (new trainer ports, new sync session) for a
 new incarnation, so ``IslandDriver.rebuild_trainer`` (a same-driver rebuild) is
 never needed across starts. The driver runs on its own thread; the lifecycle
-wraps its sync session to observe the states and to hold the driver at a round
-boundary until it is told to train on or to drain:
+wraps its sync session to observe the states and to hold the driver after a
+publication until it is told to train on or to drain:
 
 * JOIN as a new incarnation before restoring (``Membership.join``);
 * restore the last cut through the sync session's own resume path (round cut ->
   ``CuttableTrainer.restore_cut``);
 * the first publication after the restore is the warm-up; the trainer is then
   ``TRAINING`` and waits for :meth:`DriverLifecycle.run`;
-* a drain ends the driver at the next round boundary: the final cut takes the
+* a drain ends the driver where it waits: the final cut takes the
   trigger of the stop reason (``STOPPED`` -> ``SCHEDULED``) and LEAVE carries the
   P5 reason code (``Membership.leave``).
 
@@ -131,7 +131,8 @@ class RunReceipt:
 @dataclass(frozen=True)
 class SampleIndexEntry:
     """One sample in the durable buffer: its id, the policy version that produced it
-    (behavior version, P0-S schema 4) and where its payload is."""
+    (behavior version, P0-S schema 4) and where its payload is. One sample per
+    entry; the cross-island group index is ``sample_pool.SampleIndexEntry``."""
 
     sample_id: str
     behavior_version: int
@@ -153,7 +154,8 @@ class BacklogStats:
     """``batches``: unconsumed samples in units of one training batch;
     ``version_histogram``: behavior version -> unconsumed samples;
     ``arrival_rate``: samples per second over the recent window;
-    ``data_ended``: the samplers will append nothing more."""
+    ``data_ended``: the samplers will append nothing more;
+    ``max_version_gap``: current trainer version minus ``oldest_version``."""
 
     batches: float
     samples: int
@@ -161,6 +163,7 @@ class BacklogStats:
     version_histogram: Mapping[int, int] = field(default_factory=dict)
     arrival_rate: float = 0.0
     data_ended: bool = False
+    max_version_gap: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -316,19 +319,24 @@ class TrainerHandle:
 # ---------------------------------------------------------------------------
 # Sync wrapper: the lifecycle's view into the driver
 # ---------------------------------------------------------------------------
-class _StopBeforeTraining(Exception):
-    """A drain ordered before the first round: end the driver without a round."""
+class _Drained(Exception):
+    """Ends the driver after a drain: the cut is written, nothing more to train."""
 
 
 class _LifecycleSync:
-    """Wraps the driver's sync session; everything else is delegated."""
+    """Wraps the driver's sync session; everything else is delegated.
+
+    The driver waits for the next verb right after each publication (the restored
+    policy, then every trained version), so the samplers already hold the newest
+    version while the trainer waits (D5). A drain there finishes the inner session
+    (final cut, with the trigger of the stop reason) and ends the driver."""
 
     def __init__(self, inner: Any, handle: TrainerHandle, membership: Membership | None) -> None:
         self.inner = inner
         self.handle = handle
         self.membership = membership
         self.closed_reason: LeaveReason | None = None
-        self.stopped_before_training = False
+        self.drained = False
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.inner, name)
@@ -356,36 +364,36 @@ class _LifecycleSync:
         if h.state is LifecycleState.WARMING:
             # the restored policy is on the samplers: warm-up done
             h.advance(LifecycleState.TRAINING)
-            if h.park() is not None:
-                self.stopped_before_training = True
-                h.advance(LifecycleState.DRAINING)
-                raise _StopBeforeTraining()
+        if h.state is not LifecycleState.TRAINING or not h.wants_park():
+            return
+        trigger = h.park()
+        if trigger is None:
+            return
+        h.advance(LifecycleState.DRAINING)
+        if hasattr(self.inner, "final_trigger"):
+            self.inner.final_trigger = trigger
+        self.inner.finish(driver)  # the final cut at the published version
+        self.drained = True
+        raise _Drained()
 
     def boundary(self, driver: IslandDriver, *, rollout_id: int, stats: Any) -> Any:
         out = self.inner.boundary(driver, rollout_id=rollout_id, stats=stats)
         h = self.handle
+        commit = getattr(driver.rollout, "commit_round", None)
+        if callable(commit):  # the round is trained: its samples are consumed (D4)
+            commit(rollout_id)
         with h._cond:
             h.rounds += 1
         if out.stop:  # the data ended: drain on our own
             h.data_ended = True
             h.advance(LifecycleState.DRAINING)
-            return out
-        if not h.wants_park():
-            return out
-        trigger = h.park()
-        if trigger is None:
-            return out
-        if hasattr(self.inner, "final_trigger"):
-            self.inner.final_trigger = trigger
-        h.advance(LifecycleState.DRAINING)
-        return replace(out, stop=True)
+        return out
 
     def close(self, reason: int = LeaveReason.FINISHED) -> None:
         """The driver's departure code (P5) unless the driver ended cleanly or by
         our own stop: then the reason the lifecycle was given."""
         code = LeaveReason(reason)
-        if (code is LeaveReason.FINISHED or self.stopped_before_training) \
-                and self.handle.requested_reason is not None:
+        if (code is LeaveReason.FINISHED or self.drained) and self.handle.requested_reason is not None:
             code = self.handle.requested_reason
         self.closed_reason = code
         self.inner.close(code)
@@ -474,9 +482,9 @@ class DriverLifecycle:
                               data_ended=handle.data_ended)
 
     def drain_and_cut(self, handle: TrainerHandle, reason: LeaveReason) -> CutRef | None:
-        """End the driver at the round boundary where it waits: publish, final cut
-        with the trigger of ``reason``, close the sync session. Returns the cut
-        (None without a cut log, or when nothing was trained since the restore)."""
+        """End the driver where it waits (after a publication): final cut with the
+        trigger of ``reason``, close the sync session. Returns the newest cut (the
+        restored one when nothing was trained since; None without a cut log)."""
         reason = LeaveReason(reason)
         trigger = CUT_TRIGGER_FOR_REASON.get(reason)
         if trigger is None:
@@ -489,7 +497,7 @@ class DriverLifecycle:
                 handle._drain_trigger = trigger
                 handle._cond.notify_all()
         self._join(handle)
-        if handle.error is not None and not isinstance(handle.error, _StopBeforeTraining):
+        if handle.error is not None:
             raise LifecycleError(f"incarnation {handle.incarnation} failed") from handle.error
         return handle.cut
 
@@ -510,17 +518,17 @@ class DriverLifecycle:
         assert handle.driver is not None
         try:
             handle.driver.run()
-        except _StopBeforeTraining as error:
-            handle.error = error
+        except _Drained:
+            pass
         except BaseException as error:  # noqa: BLE001 - reported on the handle
             handle.error = error
-        if handle.error is None or isinstance(handle.error, _StopBeforeTraining):
+        if handle.error is None:
             if self.cuts is not None:
                 handle.cut = self.cuts.latest()
         with handle._cond:
             handle._done = True
             handle._cond.notify_all()
-        if handle.error is not None and not isinstance(handle.error, _StopBeforeTraining):
+        if handle.error is not None:
             # from any state to STOPPED on failure; LEAVE with the driver's code
             self._end(handle, sync.closed_reason or leave_reason_for(handle.error))
 
