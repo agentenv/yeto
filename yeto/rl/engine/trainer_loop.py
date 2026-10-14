@@ -281,6 +281,12 @@ class TrainerLoopThread:
         if close_reason is not None and not self._thread.is_alive():
             self.loop.close(close_reason)
 
+    def join(self, timeout: float | None = None) -> bool:
+        """Wait up to ``timeout`` seconds for the loop to end on its own (finished
+        or a tick error); True when it ended."""
+        self._thread.join(timeout)
+        return not self._thread.is_alive()
+
     def _run(self) -> None:
         try:
             while not self.loop.finished and not self._stop.is_set():
