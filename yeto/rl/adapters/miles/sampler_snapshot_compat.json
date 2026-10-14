@@ -1,6 +1,9 @@
 {
   "schema": 1,
-  "flags": ["enable_memory_saver", "enable_weights_cpu_backup"],
+  "flags": [
+    "enable_memory_saver",
+    "enable_weights_cpu_backup"
+  ],
   "records": [
     {
       "sglang_commit": "2fa880182eefdb31e64d8ea70317be27f9f32121",
@@ -12,6 +15,17 @@
       "model": "Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca",
       "evidence": "infra-drafts/SESSION24/gpu/L8.1-review.md; s1-runs/s24-l8.1/verdict.json (modal call fc-01M4XGJ1BNVHVYK51WC6RGQAYE)",
       "summary": "flags on vs off: generated text and full-model check_weights checksum equal after two update_weights_from_tensor updates; release/resume after each update keeps the updated weights"
+    },
+    {
+      "sglang_commit": "2fa880182eefdb31e64d8ea70317be27f9f32121",
+      "update_path": "distributed",
+      "result": "pass",
+      "check": "G-L8.2",
+      "date": "2026-10-14",
+      "gpu": "2x NVIDIA H100 80GB HBM3",
+      "model": "Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca",
+      "evidence": "infra-drafts/SESSION24/gpu/L8.2-review.md; s1-runs/s24-l8.2/verdict.json (modal call fc-01M4XKWDD28W8KF0T784FSQ2GT)",
+      "summary": "trainer GPU0 -> engine GPU1 NCCL update_weights_from_distributed, flags on vs off: text and full-model checksum equal after two updates; release/resume (GPU1 35154 -> 2200 -> 34878 MiB) then a new NCCL group and a second update; resume keeps the updated weights"
     }
   ]
 }

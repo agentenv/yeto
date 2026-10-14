@@ -97,3 +97,10 @@ def test_cli_flag_is_off_by_default_and_parses():
     base = ["launch", "--training-mode", "rl", "--gpu", "modal:2xh100", "--model", "x", "--data", "y"]
     assert cli.build_parser().parse_args(base).rl_sampler_snapshot is False
     assert cli.build_parser().parse_args([*base, "--rl-sampler-snapshot"]).rl_sampler_snapshot is True
+
+
+def test_shipped_records_hold_the_l8_2_distributed_pass():
+    record = ss.require_recorded_pass(ss.UPDATE_PATH_DISTRIBUTED)
+    assert record.check == "G-L8.2"
+    argv = mc.translate_run_config(snapshot_config(), AlgorithmSpec()).argv
+    assert "--sglang-config" in argv
