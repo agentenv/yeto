@@ -1089,6 +1089,7 @@ def translate_run_config(
         rollout_overlap=rollout_overlap,
         runtime_attrs={
             **algorithm.to_legacy_runtime_attrs(),
+            **_full_parameter_optimizer_attrs(trainable),
             # rl-algo-critic-family 4.1: receipt init source (warm-up product)
             **({"yeto_rl_critic_init_sha256": config.algorithm.critic.init_sha256}
                if getattr(config.algorithm, "critic", None) is not None
@@ -1097,6 +1098,24 @@ def translate_run_config(
         algorithm=algorithm,
         absorbed_flags=dict(absorbed),
     )
+
+
+def _full_parameter_optimizer_attrs(trainable: Any) -> dict[str, Any]:
+    """Keep every FP32 master whole in full-parameter mode.
+
+    Miles' ``set_default_megatron_args`` turns the distributed optimizer on for
+    Adam regardless of argv, so ``--no-use-distributed-optimizer`` would be
+    overwritten. Under the distributed optimizer each ``param.main_param`` is a
+    flat slice of the owned range even at DP=1, and the full-parameter shard
+    manifest (Miles ``full_parameter_state._master_parameter``) refuses it as
+    an incomplete master. The attribute is applied in ``preprocess_args``,
+    after Miles' defaults and before Megatron's ``validate_args``. Full mode is
+    DP=1 only (``resolve_rl_run_config``), so no master is DP-sharded either way.
+    """
+
+    if trainable.parameter_mode != "full":
+        return {}
+    return {"use_distributed_optimizer": False}
 
 
 def _resolve_tito_parsers(model: str) -> tuple[str | None, str | None]:
@@ -1124,6 +1143,13 @@ def validate_parsed_args(
 ) -> None:
     """Refuse FT semantics, multi-cell groups and rewritten placement."""
 
+    if (
+        launch.runtime_attrs.get("use_distributed_optimizer") is False
+        and getattr(args, "use_distributed_optimizer", False)
+    ):
+        raise MilesConfigError(
+            "Miles re-enabled the distributed optimizer; full-parameter mode needs whole FP32 masters"
+        )
     if launch.rollout_overlap and not getattr(args, "fully_async", False):
         raise MilesConfigError("Miles did not enable fully_async for the overlapped rollout")
     allowed = {"fully_async"} if launch.rollout_overlap else set()

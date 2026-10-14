@@ -236,6 +236,33 @@ def test_full_parameter_mode_emits_no_lora_flags():
     assert not [token for token in argv if "lora" in token or token == "--target-modules"]
 
 
+
+def test_full_parameter_mode_turns_the_distributed_optimizer_off():
+    # Miles' set_default_megatron_args forces the distributed optimizer on for
+    # Adam, which leaves each FP32 master a flat slice; the full-parameter
+    # shard manifest needs whole masters. The override rides preprocess_args.
+    cfg = sub(make_config(), "trainable", parameter_mode="full", target_modules=())
+    launch = mc.translate_run_config(cfg, AlgorithmSpec())
+    assert launch.runtime_attrs["use_distributed_optimizer"] is False
+    assert "--use-distributed-optimizer" not in launch.argv
+    namespace = SimpleNamespace(use_distributed_optimizer=True)
+    mc.apply_runtime_attrs(namespace, launch)
+    assert namespace.use_distributed_optimizer is False
+
+
+def test_lora_mode_leaves_the_distributed_optimizer_to_miles():
+    launch = mc.translate_run_config(make_config(), AlgorithmSpec())
+    assert "use_distributed_optimizer" not in launch.runtime_attrs
+
+
+def test_validate_parsed_args_refuses_a_reenabled_distributed_optimizer():
+    cfg = sub(make_config(), "trainable", parameter_mode="full", target_modules=())
+    launch = mc.translate_run_config(cfg, AlgorithmSpec())
+    with pytest.raises(mc.MilesConfigError, match="distributed optimizer"):
+        mc.validate_parsed_args(
+            _parsed(use_distributed_optimizer=True), launch, num_cells=lambda a: 1
+        )
+
 def _deepseek_v4_expert_full_config():
     cfg = make_config()
     cfg = sub(cfg, "model_recipe", name=rc.RECIPE_DEEPSEEK_V4_FLASH)
