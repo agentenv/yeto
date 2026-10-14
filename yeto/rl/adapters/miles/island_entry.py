@@ -837,12 +837,6 @@ def _check_full_parameter_sync(args, *, rl_engine: str, yeto_policy_sync: bool) 
         raise ValueError("full-parameter training requires Yeto policy sync")
     if getattr(args, "eval_only", False):
         raise ValueError("full-parameter mode does not run eval-only")
-    if int(getattr(args, "rl_max_policy_age", 0) or 0) != 0:
-        # The round's trajectory evidence binds one behavior policy (the
-        # published cut); mixed-version batches need an evidence format that
-        # records each trajectory's version first.  This applies to dense-full
-        # as well as to SAO streaming; P0-S lifts it for both.
-        raise ValueError("full-parameter training does not support --rl-max-policy-age > 0 yet")
 
 
 def _check_dense_full_sweep(args, *, rl_engine: str, yeto_policy_sync: bool) -> None:
@@ -857,6 +851,10 @@ def _check_dense_full_sweep(args, *, rl_engine: str, yeto_policy_sync: bool) -> 
     _check_full_parameter_sync(args, rl_engine=rl_engine, yeto_policy_sync=yeto_policy_sync)
     if args.optimizer_steps != 1 or getattr(args, "local_horizon", 1) != 1:
         raise ValueError("the dense full-parameter strict sweep requires H=1")
+    if int(getattr(args, "rl_max_policy_age", 0) or 0) != 0:
+        # The sweep publishes whole rounds in lockstep with the syncer; rollout
+        # running ahead of training is a separate profile, not part of P0-S.
+        raise ValueError("the dense full-parameter strict sweep requires --rl-max-policy-age 0")
     if (
         type(args.global_rounds) is not int
         or args.global_rounds < 1

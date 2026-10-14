@@ -492,12 +492,13 @@ def test_gen_phase_runs_the_production_round_components_in_driver_order(monkeypa
     backend.generate_frozen(2, identity={"layout_hash": "L"}, metadata_sink=_Sink(log))
     names = [e[0] for e in log]
     first = names[:names.index("executor.get") + 1]
-    assert first == ["export", "export", "update_weights", "onload_kv", "start_update_weights", "update_weight_version",
+    # P0-S: the weight-version alignment plugin runs before Miles' update
+    assert first == ["export", "export", "plugin", "update_weights", "onload_kv", "start_update_weights", "update_weight_version",
                      "update_weight_version", "end_update_weights", "check_weights", "trainer.offload",
                      "sink.set_policy_token", "prepare_rollout", "executor.get"]
     second = names[names.index("executor.get") + 1:]
     assert second[:5] == ["offload_kv", "sink.take", "trainer.onload", "export", "onload_weights"]
-    assert ("update_weight_version", policy_token_for(1)) in log
+    assert ("update_weight_version", "1") in log  # P0-S: plain policy version
     assert released == ["pack0", "pack1"] and names[-1] == "close"
 
 

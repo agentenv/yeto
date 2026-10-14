@@ -162,3 +162,85 @@ def test_explicit_evidence_kind_rejects_cross_benchmark_metadata(monkeypatch):
             reward_contract_hash="b" * 64,
             evidence_kind="terminal-bench-2.1",
         )
+
+
+ROUND_HASH = "a" * 64
+OLDER_HASH = "c" * 64
+
+
+def _two_trajectory_batch(behavior_policy_of=None, **fields):
+    first = _segment(0, mask=[1, 1, 1])
+    second = copy.deepcopy(_segment(0, mask=[1, 1, 1], metadata=_signed_metadata(sample_id="train:fix-git:r1")))
+    for sample, index in ((first, 7), (second, 8)):
+        sample.metadata = {k: v for k, v in sample.metadata.items() if not k.startswith("compaction_")}
+        sample.index = index
+    return build_trajectory_batch_evidence(
+        [[first, second]],
+        rollout_id=5,
+        behavior_policy_hash=ROUND_HASH,
+        reward_contract_hash="b" * 64,
+        evidence_kind="terminal-bench-2.1",
+        behavior_policy_of=behavior_policy_of,
+        **({"max_policy_age": 1} if behavior_policy_of else {}),
+        **fields,
+    )
+
+
+def test_schema4_records_every_trajectory_policy_and_round_trips(tmp_path, monkeypatch):
+    """P0-S: a trajectory continued from an older policy carries that policy."""
+    monkeypatch.setenv(tbench_outcome.HMAC_ENV, "t" * 48)
+    policies = iter(((4, OLDER_HASH), (5, ROUND_HASH)))
+    evidence = _two_trajectory_batch(lambda segments: next(policies))
+
+    assert evidence.schema_version == 4
+    assert [(e.behavior_policy_version, e.behavior_policy_hash) for e in evidence.envelopes] == [
+        (4, OLDER_HASH), (5, ROUND_HASH)]
+    path = write_trajectory_batch_evidence(tmp_path / "private", evidence)
+    assert read_trajectory_batch_evidence(path) == evidence
+    # the batch hash covers the per-trajectory policies
+    strict = _two_trajectory_batch()
+    assert strict.schema_version == 2
+    assert strict.input_batch_hash != evidence.input_batch_hash
+
+
+@pytest.mark.parametrize(
+    ("policy", "message"),
+    (
+        ((6, ROUND_HASH), "newer than its round"),
+        ((5, OLDER_HASH), "other weights"),
+        ((3, OLDER_HASH), "policy-age limit"),
+    ),
+)
+def test_schema4_refuses_a_policy_that_does_not_fit_the_round(monkeypatch, policy, message):
+    monkeypatch.setenv(tbench_outcome.HMAC_ENV, "t" * 48)
+    with pytest.raises(ValueError, match=message):
+        _two_trajectory_batch(lambda segments: policy)
+
+
+def test_schema4_tampered_trajectory_policy_is_rejected(tmp_path, monkeypatch):
+    monkeypatch.setenv(tbench_outcome.HMAC_ENV, "t" * 48)
+    evidence = _two_trajectory_batch(lambda segments: (4, OLDER_HASH))
+    path = write_trajectory_batch_evidence(tmp_path / "private", evidence)
+    value = json.loads(path.read_text())
+    value["envelopes"][0]["behavior_policy_hash"] = "d" * 64
+    path.write_text(json.dumps(value))
+    with pytest.raises(ValueError, match="batch hash changed"):
+        read_trajectory_batch_evidence(path)
+
+
+def test_schema4_is_not_mixed_with_a_bound_older_schema(monkeypatch):
+    monkeypatch.setenv(tbench_outcome.HMAC_ENV, "t" * 48)
+    with pytest.raises(ValueError, match="schema 4"):
+        _two_trajectory_batch(lambda segments: (5, ROUND_HASH), schema_version=2)
+
+
+def test_schema4_records_its_policy_age_limit(tmp_path, monkeypatch):
+    monkeypatch.setenv(tbench_outcome.HMAC_ENV, "t" * 48)
+    evidence = _two_trajectory_batch(lambda segments: (4, OLDER_HASH))
+    assert evidence.max_policy_age == 1
+    path = write_trajectory_batch_evidence(tmp_path / "private", evidence)
+    value = json.loads(path.read_text())
+    value["max_policy_age"] = 0  # a tighter limit the trajectories do not meet
+    path.write_text(json.dumps(value))
+    with pytest.raises(ValueError, match="policy-age limit"):
+        read_trajectory_batch_evidence(path)

@@ -5,6 +5,8 @@ after the final loss masks, to the policy token the driver published for the
 round.  ``rollout_legacy_port.generate_rollout`` (still the ports
 ``--rollout-function-path``) no longer writes evidence; a second write of the
 same round would fail the exclusive create or bind the pre-filter batch.
+Every trajectory is also bound to the policy that generated it (P0-S,
+schema 4).
 """
 
 from __future__ import annotations
@@ -17,9 +19,19 @@ import pytest
 from yeto.rl import trajectory_evidence
 from yeto.rl.adapters.miles import rollout_meta_hook as hook
 from yeto.rl.adapters.miles.full_parameter import evidence
+from yeto.rl.engine.policy_versions import PublishedPolicies
 
 POLICY_HASH = "a" * 64
+OLDER_HASH = "c" * 64
 REWARD_HASH = "b" * 64
+PUBLISHED = PublishedPolicies.from_dict({"6": OLDER_HASH, "7": POLICY_HASH})
+
+
+def _sample(*versions):
+    calls = [SimpleNamespace(spans=[SimpleNamespace(version=v, abs_start=2 + i, abs_end=3 + i)])
+             for i, v in enumerate(versions)]
+    return SimpleNamespace(tokens=[0, 0, *(1 for _ in versions)], response_length=len(versions),
+                           weight_versions=calls)
 
 
 @pytest.fixture
@@ -54,18 +66,22 @@ def test_published_token_binds_round_and_behavior_policy(tmp_path, written):
     groups = [["sample"]]
 
     evidence.persist_published_round_evidence(
-        _args(tmp_path), groups, f"yeto:7:{POLICY_HASH}"
+        _args(tmp_path), groups, f"yeto:7:{POLICY_HASH}", PUBLISHED
     )
 
     (built_groups, fields), write = written
     assert built_groups is groups
+    behavior_policy_of = fields.pop("behavior_policy_of")
     assert fields == {
+        "max_policy_age": 0,
         "rollout_id": 7,
         "behavior_policy_hash": POLICY_HASH,
         "reward_contract_hash": REWARD_HASH,
         "evidence_kind": "secrlenv",
-        "schema_version": 1,
     }
+    assert behavior_policy_of([_sample("7", "7")]) == (7, POLICY_HASH)
+    # a trajectory continued across a publication is named by its oldest version
+    assert behavior_policy_of([_sample("6", "7")]) == (6, OLDER_HASH)
     assert write == ("write", str(tmp_path / "evidence"), ("evidence", 7))
 
 
@@ -87,6 +103,19 @@ def test_without_an_evidence_dir_the_hook_writes_nothing(tmp_path, monkeypatch, 
 
 
 @pytest.mark.parametrize(
+    ("sample", "message"),
+    ((_sample("5"), "not published"), (_sample("mixed"), "unknown policy version")),
+)
+def test_trajectory_policy_must_be_published(tmp_path, written, sample, message):
+    evidence.persist_published_round_evidence(
+        _args(tmp_path), [["s"]], f"yeto:7:{POLICY_HASH}", PUBLISHED
+    )
+    behavior_policy_of = written[0][1]["behavior_policy_of"]
+    with pytest.raises(RuntimeError, match=message):
+        behavior_policy_of([sample])
+
+
+@pytest.mark.parametrize(
     ("overrides", "token", "message"),
     (
         ({}, None, "published policy token"),
@@ -97,19 +126,23 @@ def test_without_an_evidence_dir_the_hook_writes_nothing(tmp_path, monkeypatch, 
 )
 def test_unbound_context_fails_closed(tmp_path, written, overrides, token, message):
     with pytest.raises((RuntimeError, ValueError), match=message):
-        evidence.persist_published_round_evidence(_args(tmp_path, **overrides), [["s"]], token)
+        evidence.persist_published_round_evidence(
+            _args(tmp_path, **overrides), [["s"]], token, PUBLISHED
+        )
     assert written == []
 
 
 def test_record_trained_groups_writes_the_kept_batch_once(tmp_path, monkeypatch, written):
     _hook_round(tmp_path, monkeypatch, 2)
     kept = _kept_batch()
+    hook.put_published_policies({"2": POLICY_HASH}, f"dir:{tmp_path}")
 
     hook.record_trained_groups(_args(tmp_path), kept)
 
     (built_groups, fields), write = written
     assert built_groups is kept
     assert (fields["rollout_id"], fields["behavior_policy_hash"]) == (2, POLICY_HASH)
+    assert fields["behavior_policy_of"]([_sample("2")]) == (2, POLICY_HASH)
     assert write == ("write", str(tmp_path / "evidence"), ("evidence", 2))
 
 

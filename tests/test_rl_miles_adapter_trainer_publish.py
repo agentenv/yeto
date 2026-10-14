@@ -13,7 +13,13 @@ from yeto.rl.adapters.miles.publish import MilesPublisher, PublicationError
 from yeto.rl.adapters.miles.rollout import PolicyTokenMismatch, policy_token
 from yeto.rl.adapters.miles.state_plugin import APPLIED_LRS, GRAD_NORM, STEP_LOSSES
 from yeto.rl.adapters.miles.trainer import MilesTrainerGroup, TrainStepError, batch_hash
-from yeto.rl.engine.ports import GroupMetadata, Publisher, RolloutBatchHandle, TrainerGroup
+from yeto.rl.engine.ports import (
+    GroupMetadata,
+    PublicationCause,
+    Publisher,
+    RolloutBatchHandle,
+    TrainerGroup,
+)
 
 H = "a" * 64
 L = "b" * 64
@@ -183,6 +189,84 @@ def flatten(raw):  # mirrors upstream flatten_inference_engine_checksums
     return out
 
 
+class PluginActor:
+    """Records the weight-version alignment the publisher runs before an update."""
+
+    def __init__(self, calls):
+        self.calls = calls
+
+    async def run_plugin(self, fn_path, kwargs):
+        self.calls.append((fn_path.rsplit(".", 1)[-1], dict(kwargs)))
+        return []
+
+
+def test_miles_update_is_aligned_to_stamp_the_policy_version(monkeypatch):
+    """P0-S: Miles' update_weights stamps its counter; the counter is aligned first."""
+    from yeto.rl.adapters.miles import publish as publish_module
+
+    calls = []
+
+    async def miles_update_weights(args, actor, executor, ctl, **kw):
+        calls.append("update_weights")
+
+    monkeypatch.setattr(publish_module, "_default_update_weights", lambda: miles_update_weights)
+    pub = MilesPublisher(
+        args=SimpleNamespace(), actor_model=PluginActor(calls), rollout_executor=object(),
+        inference_controller=Controller([Engine("http://e0")]), flatten_checksums=flatten,
+    )
+    pub.publish(state())
+    assert calls == [("align_weight_version", {"next_version": 4}), "update_weights"]
+
+
+def _aligned_publisher(monkeypatch, calls, *, fail_updates=0, actor=None):
+    from yeto.rl.adapters.miles import publish as publish_module
+
+    failures = [fail_updates]
+
+    async def miles_update_weights(args, actor, executor, ctl, **kw):
+        calls.append("update_weights")
+        if failures[0]:
+            failures[0] -= 1
+            raise RuntimeError("broadcast failed")
+
+    monkeypatch.setattr(publish_module, "_default_update_weights", lambda: miles_update_weights)
+    return MilesPublisher(
+        args=SimpleNamespace(), actor_model=actor or PluginActor(calls), rollout_executor=object(),
+        inference_controller=Controller([Engine("http://e0")]), flatten_checksums=flatten,
+    )
+
+
+def test_a_failed_update_is_retried_with_the_same_version(monkeypatch):
+    calls = []
+    pub = _aligned_publisher(monkeypatch, calls, fail_updates=1)
+    with pytest.raises(PublicationError) as failed:
+        pub.publish(state())
+    assert failed.value.cause is PublicationCause.UPDATE_FAILED
+    pub.publish(state())
+    align = ("align_weight_version", {"next_version": 4})
+    assert calls == [align, "update_weights", align, "update_weights"]
+
+
+def test_an_alignment_failure_is_a_publication_error(monkeypatch):
+    class BrokenActor:
+        async def run_plugin(self, fn_path, kwargs):
+            raise RuntimeError("the trainer has no weight_updater")
+
+    calls = []
+    pub = _aligned_publisher(monkeypatch, calls, actor=BrokenActor())
+    with pytest.raises(PublicationError, match="weight_updater") as failed:
+        pub.publish(state())
+    assert failed.value.cause is PublicationCause.UPDATE_FAILED and calls == []
+
+
+def test_an_injected_update_is_not_aligned():
+    calls = []
+    pub, update_calls = publisher(Controller([Engine("http://e0")]))
+    pub._actor = PluginActor(calls)
+    pub.publish(state())
+    assert update_calls == ["update_weights"] and calls == []
+
+
 def publisher(controller, *, update_fails=False, export=None):
     calls = []
 
@@ -212,8 +296,8 @@ def test_publish_full_manifest_with_members():
     assert m.target_policy_version == 4 and m.target_policy_hash == s.policy_tensor_hash()
     assert m.payload_bytes == (8 + 12) * 4
     assert result.members == frozenset({"engine:c0", "engine:c1"})
-    token = policy_token(4, s.policy_tensor_hash())
-    assert all(e.version == token for e in engines)
+    # P0-S: the engines carry the plain policy version; the label stays with yeto
+    assert all(e.version == "4" for e in engines)
     assert calls == ["update_weights"] and ctl.log == ["start", "end"]
     assert set(pub.last_engine_checksums) == {"http://e0", "http://e1"}
     # payload hash is content-addressed

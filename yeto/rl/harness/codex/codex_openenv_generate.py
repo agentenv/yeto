@@ -34,6 +34,7 @@ import uuid
 from typing import Any, Awaitable, Callable
 
 from yeto.rl.engine import rollout_meta
+from yeto.rl.engine.policy_versions import engine_version_matches, engine_version_number
 from yeto.rl.rlf.contracts import EpisodeLease
 
 from .alignment import AlignmentError, assert_sample_alignment
@@ -115,7 +116,7 @@ def window_problem(versions: list[str], current_token: str | None, limit: int) -
         return f"current policy token {current_token!r} has no version"
     if not versions:
         return "no generation version recorded"
-    numbers = [token_version(v) for v in versions]
+    numbers = [engine_version_number(v) for v in versions]
     if None in numbers:
         return f"unparsable generation versions {sorted(set(versions))}"
     if max(numbers) > current:
@@ -198,7 +199,9 @@ def apply_trajectory_bookkeeping(input_sample: Any, samples: list[Any], *, expec
                 continue
         elif expected_version is not None:
             metadata[EXPECTED_VERSION_KEY] = expected_version
-            if not versions or any(v != str(expected_version) for v in versions):
+            if not versions or not all(
+                engine_version_matches(v, str(expected_version)) for v in versions
+            ):
                 metadata[POLICY_AGE_KEY] = 1
                 _mark_aborted(sample, f"policy_age_violation: expected {expected_version}, saw {versions}")
                 continue

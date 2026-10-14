@@ -163,6 +163,9 @@ class MilesLaunchArgs:
     # ``algorithm_sha256``) and the absorbed flags ({flag: argv value}).
     algorithm: AlgorithmSpec | None = None
     absorbed_flags: Mapping[str, Any] = field(default_factory=dict)
+    # P0-S: generation keeps running while the trainer trains (Miles
+    # fully_async, bounded by --max-weight-staleness = the policy-age limit).
+    rollout_overlap: bool = False
 
 
 # --------------------------------------------------------------------------
@@ -677,7 +680,11 @@ def translate_run_config(
 
     ``max_policy_age`` (--rl-max-policy-age, agentic-rollout-utilization 4.1):
     0 adds nothing; N > 0 needs an algorithm tolerating N
-    (``execution.max_policy_staleness``) and appends Miles' partial rollout."""
+    (``execution.max_policy_staleness``). A colocated island appends Miles'
+    partial rollout (carry-over at the cut-off); a partitioned island overlaps
+    rollout with training through Miles' fully_async (P0-S), so the
+    all-samples metadata hook and the carry-over buffer filter are not set:
+    the trained-groups hook reports the round instead."""
 
     if not isinstance(algorithm, AlgorithmSpec):
         raise TypeError("algorithm must be an AlgorithmSpec")
@@ -737,6 +744,7 @@ def translate_run_config(
     agent = config.agent
     columns = config.data.columns
     request = placement_request(config)
+    rollout_overlap = max_policy_age > 0 and request.kind != "colocated"
 
     if request.kind == "colocated":
         placement_values = ["--colocate"]
@@ -838,8 +846,10 @@ def translate_run_config(
         "--rollout-max-response-len", str(batch.rollout_max_response_len),
         # D3: metadata is extracted inside the rollout process
         "--rollout-sample-filter-path", TRAINED_GROUPS_HOOK_PATH,
-        "--rollout-all-samples-process-path", ROLLOUT_META_HOOK_PATH,
-        "--buffer-filter-path", POLICY_BUFFER_FILTER_PATH,
+        *(() if rollout_overlap else (
+            "--rollout-all-samples-process-path", ROLLOUT_META_HOOK_PATH,
+            "--buffer-filter-path", POLICY_BUFFER_FILTER_PATH,
+        )),
         "--custom-rm-path", _dotted_callable(config.algorithm.reward_function),
         # algorithm (D7): the only place AlgorithmSpec becomes Miles args
         "--advantage-estimator", algorithm.advantage_estimator,
@@ -880,7 +890,8 @@ def translate_run_config(
                 f"execution.max_policy_staleness >= {max_policy_age} (and a TIS correction); "
                 f"the run's spec tolerates {tolerated}")
         values.extend(policy_age_argv(
-            max_policy_age, agentic=bool(getattr(config.agent, "custom_agent_function_path", None))))
+            max_policy_age, agentic=bool(getattr(config.agent, "custom_agent_function_path", None)),
+            overlap=rollout_overlap))
     values.extend(critic_load_argv(config, algorithm))
 
     evaluation = config.eval
@@ -1054,6 +1065,7 @@ def translate_run_config(
         argv=tuple(values),
         placement=request,
         algorithm_sha256=algorithm.sha256(),
+        rollout_overlap=rollout_overlap,
         runtime_attrs={
             **algorithm.to_legacy_runtime_attrs(),
             # rl-algo-critic-family 4.1: receipt init source (warm-up product)
@@ -1091,7 +1103,11 @@ def validate_parsed_args(
 ) -> None:
     """Refuse FT semantics, multi-cell groups and rewritten placement."""
 
-    enabled = [name for name in _FT_NAMESPACE_OFF if getattr(args, name, None)]
+    if launch.rollout_overlap and not getattr(args, "fully_async", False):
+        raise MilesConfigError("Miles did not enable fully_async for the overlapped rollout")
+    allowed = {"fully_async"} if launch.rollout_overlap else set()
+    enabled = [name for name in _FT_NAMESPACE_OFF
+               if name not in allowed and getattr(args, name, None)]
     if enabled:
         raise FaultToleranceArgsError(
             f"Miles normalized the arguments into fault-tolerance mode ({enabled}); "

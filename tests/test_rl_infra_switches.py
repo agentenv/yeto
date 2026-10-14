@@ -433,7 +433,7 @@ def test_update_weights_block_is_off_by_default(monkeypatch):
 
     pub, order = _publisher(monkeypatch, None)
     with pytest.raises(PublicationError, match="stop here"):
-        asyncio.run(pub._publish_members("t", ["c2"], 1))
+        asyncio.run(pub._publish_members(1, "t", ["c2"], 1))
     assert order == ["tracked", "update_weights"] and pub.injected_blocks == []
 
 
@@ -455,11 +455,11 @@ def test_update_weights_block_fails_when_the_target_dies_and_applies_once(monkey
 
     pub.liveness_probe = Probe()
     with pytest.raises(PublicationError, match="dead: actor died"):
-        asyncio.run(pub._publish_members("t", ["c2"], 1))
+        asyncio.run(pub._publish_members(1, "t", ["c2"], 1))
     assert order == ["tracked"] and pub.injected_blocks == [30.0] and len(polls) == 3
     # second member publication of the process: no block
     with pytest.raises(PublicationError, match="stop here"):
-        asyncio.run(pub._publish_members("t", ["c3"], 2))
+        asyncio.run(pub._publish_members(1, "t", ["c3"], 2))
     assert order == ["tracked", "tracked", "update_weights"]
 
 
@@ -479,7 +479,7 @@ def test_update_weights_block_times_out_into_the_real_call(monkeypatch):
 
     pub.liveness_probe = Alive()
     with pytest.raises(PublicationError, match="stop here"):
-        asyncio.run(pub._publish_members("t", ["c2"], 1))
+        asyncio.run(pub._publish_members(1, "t", ["c2"], 1))
     assert order == ["tracked", "update_weights"]
 
 

@@ -87,7 +87,7 @@ def _pub(bodies, reference, *, lora=True, lazy=False, warmup_fails=()):
 
 
 def _run(pub):
-    asyncio.run(pub._publish_members("tok", ["c2"], 1))
+    asyncio.run(pub._publish_members(1, "tok", ["c2"], 1))
 
 
 def test_perturbed_adapter_is_payload_mismatch_and_never_admitted():
@@ -140,7 +140,7 @@ def test_failed_warm_up_is_unverifiable_not_a_mismatch_and_never_admitted():
     pub, order = _pub([dict(ref), dict(ref)], ref, lazy=True, warmup_fails=(1,))
     pub._reference = ("tok", dict(ref))
     with pytest.raises(PublicationError, match="warm-up failed") as ei:
-        asyncio.run(pub._publish_members("tok", ["c2", "c3"], 1))
+        asyncio.run(pub._publish_members(1, "tok", ["c2", "c3"], 1))
     assert ei.value.cause == PublicationCause.LORA_UNVERIFIABLE
     assert list(ei.value.engine_ids) == ["http://engine1:30000"]
     assert "check" not in order and "admit" not in order

@@ -35,7 +35,7 @@ import math
 import os
 import statistics
 import tempfile
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -161,7 +161,20 @@ def record_trained_groups(args: Any, data: Sequence[Sequence[Any]]) -> None:
     from .full_parameter.evidence import evidence_enabled, persist_published_round_evidence
 
     if evidence_enabled(args):
-        persist_published_round_evidence(args, data, current_policy_token())
+        persist_published_round_evidence(
+            args, data, current_policy_token(), published_policies()
+        )
+    if getattr(args, "fully_async", False):
+        # P0-S: Miles' fully_async drains finished groups and runs no
+        # all-samples hook; the trained groups are the round report, with the
+        # prompt ledger's counts (groups drawn, stale groups dropped).
+        from .fully_async_prompts import current as current_prompt_ledger
+
+        ledger = current_prompt_ledger()
+        if ledger is None:
+            raise RuntimeError("fully_async round without the yeto prompt ledger")
+        ledger.mark_trained(data)
+        extract_rollout_metadata(args, data, round_counts=ledger.take_round_counts())
 
 
 def _reward(args: Any, sample: Any) -> float:
@@ -194,6 +207,11 @@ def _status(sample: Any) -> str:
 
 from yeto.rl.adapters.miles import carry_over as _carry  # noqa: E402
 from yeto.rl.engine.policy_age import token_version  # noqa: E402
+from yeto.rl.engine.policy_versions import (  # noqa: E402
+    PublishedPolicies,
+    engine_version_matches,
+    engine_version_number,
+)
 
 
 def group_record(args: Any, group: Sequence[Any]) -> dict[str, Any]:
@@ -222,7 +240,7 @@ def group_record(args: Any, group: Sequence[Any]) -> dict[str, Any]:
         # spans versions; its token names the OLDEST one (the driver checks it
         # is a published version within the window) and its version segments
         # are listed. Unparsable tokens keep "mixed:" (refused, fail closed).
-        numbered = {v: token_version(v) for v in versions}
+        numbered = {v: engine_version_number(v) for v in versions}
         if None not in numbered.values():
             token = min(versions, key=lambda v: numbered[v])
             carry = _carry.group_versions_record(group)
@@ -738,25 +756,79 @@ def put_to_sink(payload: dict[str, Any], sink: str | None = None) -> None:
     raise ValueError(f"unknown rollout metadata sink {sink!r}")
 
 
-def put_policy_token(token: str, sink: str | None = None) -> None:
-    """Driver side: publish the token the next rollout must be sampled from."""
+def _sink_target(sink: str | None) -> tuple[str, str]:
+    kind, _, target = (sink or os.environ.get(META_SINK_ENV) or DEFAULT_SINK).partition(":")
+    if kind not in ("dir", "ray"):
+        raise ValueError(f"unknown rollout metadata sink {sink!r}")
+    return kind, target
 
-    sink = sink or os.environ.get(META_SINK_ENV) or DEFAULT_SINK
-    kind, _, target = sink.partition(":")
+
+def _sink_write(sink: str | None, file_name: str, text: str, actor_method: str, value: Any) -> None:
+    """Driver side: store one value (atomic file under ``dir:``, actor call under ``ray:``)."""
+    kind, target = _sink_target(sink)
     if kind == "dir":
         directory = Path(target)
         directory.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=directory, prefix=".tmp-")
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(token)
-        os.replace(tmp, directory / POLICY_TOKEN_FILE)
+            handle.write(text)
+        os.replace(tmp, directory / file_name)
         return
-    if kind == "ray":
-        import ray
+    import ray
 
-        ray.get(ray.get_actor(target or DEFAULT_SINK_ACTOR).set_token.remote(token))
-        return
-    raise ValueError(f"unknown rollout metadata sink {sink!r}")
+    actor = ray.get_actor(target or DEFAULT_SINK_ACTOR)
+    ray.get(getattr(actor, actor_method).remote(value))
+
+
+def _sink_read(sink: str | None, file_name: str, actor_method: str) -> Any:
+    """Rollout side: the stored value (file text under ``dir:``), None when unset."""
+    kind, target = _sink_target(sink)
+    if kind == "dir":
+        path = Path(target) / file_name
+        return path.read_text(encoding="utf-8") if path.exists() else None
+    import ray
+
+    return ray.get(getattr(ray.get_actor(target or DEFAULT_SINK_ACTOR), actor_method).remote())
+
+
+def put_policy_token(token: str, sink: str | None = None) -> None:
+    """Driver side: publish the token the next rollout must be sampled from."""
+    _sink_write(sink, POLICY_TOKEN_FILE, token, "set_token", token)
+
+
+def current_policy_token(sink: str | None = None) -> str | None:
+    """Rollout side: the token stored by :func:`put_policy_token`, if any."""
+    return _sink_read(sink, POLICY_TOKEN_FILE, "get_token")
+
+
+PUBLISHED_POLICIES_FILE = "published-policies.json"
+
+
+def put_published_policies(policies: Mapping[str, str], sink: str | None = None) -> None:
+    """Driver side (P0-S): the published versions in the policy-age window
+    (version -> weight hash); the rollout side names trajectory policies from it."""
+    payload = json.dumps(dict(policies), sort_keys=True)
+    _sink_write(sink, PUBLISHED_POLICIES_FILE, payload, "set_policies", payload)
+
+
+def published_policies(sink: str | None = None) -> PublishedPolicies:
+    """Rollout side: the map stored by :func:`put_published_policies` (empty if none)."""
+    payload = _sink_read(sink, PUBLISHED_POLICIES_FILE, "get_policies")
+    return PublishedPolicies.from_dict(json.loads(payload) if payload else None)
+
+
+MAX_POLICY_AGE_FILE = "max-policy-age"
+
+
+def put_max_policy_age(limit: int, sink: str | None = None) -> None:
+    """Driver side (3.5 governor fallback): lower the rollout's policy-age limit."""
+    _sink_write(sink, MAX_POLICY_AGE_FILE, str(int(limit)), "set_limit", int(limit))
+
+
+def max_policy_age_override(sink: str | None = None) -> int | None:
+    """Rollout side: the limit set by :func:`put_max_policy_age` (None = not lowered)."""
+    value = _sink_read(sink, MAX_POLICY_AGE_FILE, "get_limit")
+    return None if value is None else int(value)
 
 
 def sink_available() -> bool:
@@ -775,55 +847,6 @@ def sink_available() -> bool:
     return bool(ray.is_initialized())
 
 
-MAX_POLICY_AGE_FILE = "max-policy-age"
-
-
-def put_max_policy_age(limit: int, sink: str | None = None) -> None:
-    """Driver side (3.5 governor fallback): lower the rollout's policy-age limit."""
-    sink = sink or os.environ.get(META_SINK_ENV) or DEFAULT_SINK
-    kind, _, target = sink.partition(":")
-    if kind == "dir":
-        directory = Path(target)
-        directory.mkdir(parents=True, exist_ok=True)
-        (directory / MAX_POLICY_AGE_FILE).write_text(str(int(limit)), encoding="utf-8")
-        return
-    if kind == "ray":
-        import ray
-
-        ray.get(ray.get_actor(target or DEFAULT_SINK_ACTOR).set_limit.remote(int(limit)))
-        return
-    raise ValueError(f"unknown rollout metadata sink {sink!r}")
-
-
-def max_policy_age_override(sink: str | None = None) -> int | None:
-    """Rollout side: the limit set by :func:`put_max_policy_age` (None = not lowered)."""
-    sink = sink or os.environ.get(META_SINK_ENV) or DEFAULT_SINK
-    kind, _, target = sink.partition(":")
-    if kind == "dir":
-        path = Path(target) / MAX_POLICY_AGE_FILE
-        return int(path.read_text(encoding="utf-8")) if path.exists() else None
-    if kind == "ray":
-        import ray
-
-        return ray.get(ray.get_actor(target or DEFAULT_SINK_ACTOR).get_limit.remote())
-    raise ValueError(f"unknown rollout metadata sink {sink!r}")
-
-
-def current_policy_token(sink: str | None = None) -> str | None:
-    """Rollout side: the token stored by :func:`put_policy_token`, if any."""
-
-    sink = sink or os.environ.get(META_SINK_ENV) or DEFAULT_SINK
-    kind, _, target = sink.partition(":")
-    if kind == "dir":
-        path = Path(target) / POLICY_TOKEN_FILE
-        return path.read_text(encoding="utf-8") if path.exists() else None
-    if kind == "ray":
-        import ray
-
-        return ray.get(ray.get_actor(target or DEFAULT_SINK_ACTOR).get_token.remote())
-    raise ValueError(f"unknown rollout metadata sink {sink!r}")
-
-
 def group_matches_policy(group: Sequence[Any], token: str | None, size: int | None) -> bool:
     """Legacy ``_complete_group_for_policy`` over upstream sample versions."""
 
@@ -831,7 +854,10 @@ def group_matches_policy(group: Sequence[Any], token: str | None, size: int | No
     if not token or not samples or (size is not None and len(group) != size):
         return False
     for sample in samples:
-        if _status(sample) not in _REUSABLE_STATUSES or _versions(sample) != {token}:
+        versions = _versions(sample)
+        if _status(sample) not in _REUSABLE_STATUSES or not versions or not all(
+            engine_version_matches(v, token) for v in versions
+        ):
             return False
     return True
 
@@ -937,8 +963,15 @@ def elastic_metadata_enabled(args: Any) -> bool:
         ELASTIC_METADATA_ENV) == "1"
 
 
-def extract_rollout_metadata(args: Any, all_samples: Any, data_source: Any = None) -> None:
-    """``--rollout-all-samples-process-path`` hook."""
+def extract_rollout_metadata(
+    args: Any,
+    all_samples: Any,
+    data_source: Any = None,
+    *,
+    round_counts: Mapping[str, Any] | None = None,
+) -> None:
+    """``--rollout-all-samples-process-path`` hook (under fully_async: called by
+    :func:`record_trained_groups` with the trained groups)."""
 
     try:
         payload = build_metadata(args, all_samples)
@@ -949,7 +982,12 @@ def extract_rollout_metadata(args: Any, all_samples: Any, data_source: Any = Non
             if buffer_length is not None:
                 payload["buffer_length"] = buffer_length
         submitted = submitted_groups(args, data_source)
-        if submitted is not None and payload.get("max_policy_age"):
+        if round_counts is not None:
+            # P0-S overlap: groups drawn this round finish in later rounds, so
+            # the draws and Miles' stale drops are reported as they are
+            # (stale_dropped_groups None = unknown), not balanced per round.
+            payload.update(round_counts)
+        elif submitted is not None and payload.get("max_policy_age"):
             # 4.1: under partial rollout the abort does not discard; the groups
             # submitted (new + resubmitted from the buffer) and not completed
             # went back to the buffer to continue next round.
