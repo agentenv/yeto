@@ -42,6 +42,8 @@ from typing import Any
 
 ALGORITHM_SPEC_SCHEMA = "yeto-rl-algorithm-spec-v1"
 ALGORITHM_SPEC_SCHEMA_V2 = "yeto-rl-algorithm-spec-v2"
+# rl-identity-tiering D1: domain of AlgorithmSpec.semantic_sha256().
+ALGORITHM_SEMANTIC_SCHEMA = "yeto-rl-algorithm-semantic-v1"
 ALGORITHM_SPEC_SCHEMAS = (ALGORITHM_SPEC_SCHEMA, ALGORITHM_SPEC_SCHEMA_V2)
 # Neutral dynamic-sampling filter names (yeto-framework-decoupling 4.4, design
 # D6).  The backend adapter binds each name to its implementation (Miles:
@@ -232,6 +234,22 @@ def _plugin(path: str, value: Any) -> "PluginRef | None":
     raise AlgorithmSpecError(f"{path} must be a plugin reference {{path, sha256}}, got {value!r}")
 
 
+def _strip_plugin_hashes(value: Any) -> Any:
+    """Copy of canonical JSON ``value`` with ``sha256`` dropped from plugin refs.
+
+    A plugin ref is the only canonical object whose keys are ``path`` plus an
+    optional ``sha256`` (:meth:`PluginRef.to_dict`).
+    """
+
+    if isinstance(value, Mapping):
+        if "path" in value and set(value) <= {"path", "sha256"}:
+            return {"path": value["path"]}
+        return {k: _strip_plugin_hashes(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_strip_plugin_hashes(v) for v in value]
+    return value
+
+
 # --------------------------------------------------------------------------
 # PluginRef (design D7)
 # --------------------------------------------------------------------------
@@ -259,10 +277,17 @@ def plugin_source_sha256(path: str) -> str:
 
 @dataclass(frozen=True)
 class PluginRef:
-    """A plugin callable identified by dotted path + its module source SHA256."""
+    """A plugin callable identified by dotted path and, optionally, the SHA256
+    of its module source.
+
+    rl-identity-tiering migration step 2: ``sha256`` may be absent, and a
+    present ``sha256`` that differs from the runtime source is a warning, not
+    a reject (:meth:`verify`). The path stays part of the semantic hash; the
+    source hash does not (:meth:`AlgorithmSpec.semantic_sha256`).
+    """
 
     path: str
-    sha256: str
+    sha256: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.path, str) or not self.path or " " in self.path:
@@ -273,6 +298,8 @@ class PluginRef:
                 f"{sorted(PLUGIN_NAMESPACES)}"
             )
         digest = self.sha256
+        if digest is None:
+            return
         if not isinstance(digest, str) or len(digest) != 64 or any(
             c not in "0123456789abcdef" for c in digest.lower()
         ):
@@ -291,19 +318,28 @@ class PluginRef:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any], *, field_path: str = "plugin") -> "PluginRef":
-        if not isinstance(payload, Mapping) or set(payload) != {"path", "sha256"}:
-            raise AlgorithmSpecError(f"{field_path} must be an object with exactly path and sha256")
-        return cls(path=payload["path"], sha256=payload["sha256"])
+        if (not isinstance(payload, Mapping) or "path" not in payload
+                or not set(payload) <= {"path", "sha256"}):
+            raise AlgorithmSpecError(
+                f"{field_path} must be an object with path and an optional sha256"
+            )
+        return cls(path=payload["path"], sha256=payload.get("sha256"))
 
     def to_dict(self) -> dict[str, str]:
-        return {"path": self.path, "sha256": self.sha256}
+        # No sha256 key when absent, so every pinned ref keeps its old canonical form.
+        return {"path": self.path, **({"sha256": self.sha256} if self.sha256 else {})}
 
-    def verify(self, *, import_callable: bool = True) -> None:
-        """Startup check: importable and the source hash matches (else reject)."""
+    def verify(self, *, import_callable: bool = True) -> str | None:
+        """Startup check: the module must be importable (else reject).
+
+        Returns a warning message when the pinned source hash differs from
+        the runtime source, else None. The caller records the warning.
+        """
 
         actual = plugin_source_sha256(self.path)
-        if actual != self.sha256:
-            raise PluginIdentityError(
+        warning = None
+        if self.sha256 is not None and actual != self.sha256:
+            warning = (
                 f"plugin {self.path!r} source hash mismatch: spec {self.sha256}, "
                 f"runtime {actual}"
             )
@@ -315,6 +351,7 @@ class PluginRef:
                 raise PluginIdentityError(f"plugin {self.path!r}: import failed: {exc}") from exc
             if not callable(getattr(loaded, name, None)):
                 raise PluginIdentityError(f"plugin {self.path!r}: {name!r} is not a callable")
+        return warning
 
 
 # --------------------------------------------------------------------------
@@ -1274,6 +1311,22 @@ class AlgorithmSpec:
     def sha256(self) -> str:
         return hashlib.sha256(self.canonical_json().encode("utf-8")).hexdigest()
 
+    def semantic_dict(self) -> dict[str, Any]:
+        """The numerics-relevant part of the spec (rl-identity-tiering D1).
+
+        The full v2 form with every plugin reduced to its path: a plugin
+        source change alone does not change it; any configuration change does.
+        """
+
+        return {"schema": ALGORITHM_SEMANTIC_SCHEMA,
+                "spec": _strip_plugin_hashes(self.structured_dict())}
+
+    def semantic_sha256(self) -> str:
+        payload = json.dumps(
+            self.semantic_dict(), sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
     @property
     def schema(self) -> str:
         return ALGORITHM_SPEC_SCHEMA if self.is_v1_expressible() else ALGORITHM_SPEC_SCHEMA_V2
@@ -1324,9 +1377,12 @@ class AlgorithmSpec:
                     refs.setdefault(value.path, value)
         return tuple(refs[k] for k in sorted(refs))
 
-    def verify_plugins(self, *, import_callable: bool = True) -> None:
-        for ref in self.referenced_plugins():
-            ref.verify(import_callable=import_callable)
+    def verify_plugins(self, *, import_callable: bool = True) -> tuple[str, ...]:
+        """Verify every referenced plugin; returns the source hash warnings."""
+
+        warnings = (ref.verify(import_callable=import_callable)
+                    for ref in self.referenced_plugins())
+        return tuple(w for w in warnings if w is not None)
 
     # -- derived (design D4/D6) ----------------------------------------------
     def required_mechanisms(self) -> frozenset[tuple[str, str]]:

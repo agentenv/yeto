@@ -523,7 +523,7 @@ def test_examples_build_and_translate(name):
     spec = AlgorithmSpec.from_json_file(str(EXAMPLES / f"{name}.json"))
     # plugin hashes are the current sources (a dispatcher/reducer edit must
     # regenerate the examples: the hash is the plugin identity)
-    spec.verify_plugins()
+    assert spec.verify_plugins() == ()
     assert spec.rejections() == []
     cfg = make_config()
     if spec.sampling.over_sampling_batch_size is not None:
@@ -576,10 +576,12 @@ def test_post_process_rechecks_pipeline_identity():
         rp.post_process(args, [])
 
 
-def test_stale_plugin_hash_rejected():
+def test_stale_plugin_hash_warns_not_rejected():
     spec = pipeline_spec(reward_shapers=[OVERLONG])
     stale = spec.replace(plugins=[{"path": p.path, "sha256": "1" * 64} for p in spec.plugins])
-    assert any("source hash differs" in p for p in stale.rejections())
+    assert stale.rejections() == []
+    assert all("source hash mismatch" in w for w in stale.verify_plugins())
+    assert len(stale.verify_plugins()) == len(spec.plugins)
 
 
 def test_unknown_transform_refused_at_launch():

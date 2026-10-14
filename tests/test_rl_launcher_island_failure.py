@@ -276,6 +276,13 @@ def test_run_manifest_records_image_and_pins(monkeypatch, tmp_path, capsys):
     assert manifest["rl_image"] == rl.MILES_NEXT_IMAGE  # the ports default, no override
     assert manifest["miles_commit"] == rl.MILES_NEXT_COMMIT
     assert manifest["sglang_commit"] == rl.SGLANG_NEXT_COMMIT
+    # rl-identity-tiering L9.1 dual write (transition: digest = source tree hash)
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+
+    assert manifest["code_pack_digest"] == manifest["source_sha256"] == args.source_sha256
+    assert manifest["code_pack_mode"] == "source-tree"
+    assert manifest["semantic_sha256"] == AlgorithmSpec.from_dict(
+        _json.loads(args.rl_algorithm_spec_json)).semantic_sha256()
     out = capsys.readouterr().out
     assert f"image {rl.MILES_NEXT_IMAGE}" in out and rl.MILES_NEXT_COMMIT in out
 

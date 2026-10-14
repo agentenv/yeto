@@ -122,7 +122,7 @@ def test_observe_translation_and_identity():
     other = AlgorithmSpec(correction={"method": "custom", "mismatch_metrics": True,
                                       "function": {"path": mc.OBSERVE_PATH, "sha256": "1" * 64}})
     assert other.sha256() != s.sha256() != AlgorithmSpec().sha256()
-    s.verify_plugins(import_callable=True)
+    assert s.verify_plugins(import_callable=True) == ()
 
 
 @pytest.mark.parametrize(
@@ -543,6 +543,6 @@ def test_doc_examples_pin_current_plugin_sources(tmp_path):
         spec = AlgorithmSpec.from_json_file(str(path))
         for ref in spec.referenced_plugins():
             if ref.path.startswith("yeto."):
-                ref.verify(import_callable=False)
+                assert ref.verify(import_callable=False) is None
             else:
                 assert ref.sha256 == mc.ICEPOP_SOURCE_SHA256
