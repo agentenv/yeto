@@ -40,6 +40,10 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from yeto.rl.engine import recovery
+from yeto.rl.engine.recovery import CUT_KEY, PERIODIC, PREEMPT, ConsistentCut
+from yeto.rl.engine.resume import CheckpointStore
+
 ENV_DIR = "YETO_SPOT_INFLIGHT_SAVE_DIR"
 ENV_VOLUME = "YETO_SPOT_INFLIGHT_SAVE_VOLUME"   # Modal Volume to commit after a write
 ENV_PID_FILE = "YETO_SPOT_INFLIGHT_PID_FILE"
@@ -81,27 +85,21 @@ def pid_file(environ: Mapping[str, str] | None = None) -> str:
     return env.get(ENV_PID_FILE) or DEFAULT_PID_FILE
 
 
-def volume_commit(volume_name: str) -> Callable[[], None]:
-    def commit() -> None:
-        import modal
-
-        modal.Volume.from_name(volume_name).commit()
-
-    return commit
-
-
 def write_in_flight(exported: Mapping[str, Any], directory: str | os.PathLike[str], name: str, *,
-                    commit: Callable[[], Any] | None = None,
+                    commit: Callable[[], Any] | None = None, cut: Mapping[str, Any] | None = None,
                     clock: Callable[[], float] = time.monotonic) -> dict[str, Any]:
-    """Write ``exported`` as ``<directory>/<name>.json`` (tmp + fsync + rename +
-    dir fsync), then commit the volume. A failed commit is reported, not raised
-    (the file is on the mount; Modal also commits when the container exits)."""
+    """Write ``exported`` (plus the consistent-cut record ``cut``, if given) as
+    ``<directory>/<name>.json`` (tmp + fsync + rename + dir fsync), then commit the
+    volume. A failed commit is reported, not raised (the file is on the mount; Modal
+    also commits when the container exits)."""
     folder = Path(directory)
     folder.mkdir(parents=True, exist_ok=True)
     entries = list(exported.get("entries") or [])
     agentic = sum(1 for e in entries if str(e.get("session_ref") or "").startswith("codex-suspended:"))
-    body = json.dumps({"schema": "yeto.inflight_save/v1", "written_at": time.time(), **dict(exported)},
-                      sort_keys=True).encode("utf-8")
+    document = {"schema": "yeto.inflight_save/v1", "written_at": time.time(), **dict(exported)}
+    if cut is not None:
+        document[CUT_KEY] = dict(cut)
+    body = json.dumps(document, sort_keys=True).encode("utf-8")
     t0 = clock()
     final = folder / f"{name}.json"
     tmp = folder / f".{name}.json.tmp"
@@ -131,14 +129,18 @@ def write_in_flight(exported: Mapping[str, Any], directory: str | os.PathLike[st
 
 
 class InFlightSaver:
-    """Export + write, timed. ``export(timeout_s)`` returns the export mapping."""
+    """Export + write, timed. ``export(timeout_s)`` returns the export mapping. Every
+    write goes through :func:`yeto.rl.engine.recovery.save` into ``store`` (default:
+    a local directory store at ``directory``). A local store has nothing to commit:
+    the write then reports ``commit_s`` None, as without a volume."""
 
     def __init__(self, export: Callable[[float], Mapping[str, Any]], directory: str, *,
-                 emit: Callable[..., Any] | None = None, commit: Callable[[], Any] | None = None,
+                 emit: Callable[..., Any] | None = None, store: CheckpointStore | None = None,
                  clock: Callable[[], float] = time.monotonic,
                  printer: Callable[[str], Any] | None = None) -> None:
         self.export, self.directory, self.emit = export, directory, emit
-        self.commit, self.clock = commit, clock
+        self.store = store if store is not None else CheckpointStore(directory)
+        self.clock = clock
         self.printer = printer or (lambda line: print(line, flush=True))
         self.last_save_s: float | None = None
         self.results: list[dict[str, Any]] = []
@@ -178,7 +180,12 @@ class InFlightSaver:
         extra = {**extra, "export_source": "cached" if cached is not None else "live",
                  **({"cached_round": self.cached_round} if cached is not None else {})}
         self.progress(kind, "export_done", t0, entries=len(exported.get("entries") or []))
-        out = write_in_flight(exported, self.directory, name, commit=self.commit, clock=self.clock)
+        cut = ConsistentCut(checkpoint_id=name, trigger=PREEMPT if kind == "reclaim" else PERIODIC,
+                            outer_step=_as_step(extra.get("cached_round", extra.get("round"))))
+        out = recovery.save(cut, store=self.store, clock=self.clock, write=lambda record: {
+            **write_in_flight(exported, self.directory, name, cut=record,
+                              commit=None if self.store.kind == "local" else self.store.commit,
+                              clock=self.clock), "committed": True})
         self.progress(kind, "written", t0, write_s=out["write_s"], commit_s=out["commit_s"])
         out.update(kind=kind, export_s=export_s, total_s=round(self.clock() - t0, 4), **extra)
         self.results.append(out)
@@ -206,6 +213,13 @@ class InFlightSaver:
         """Reclaim save (called by :func:`yeto.cloud.preemption.handle_notice`)."""
         out = self._save("reclaim", f"reclaim-{int(time.time())}", budget_s, save_budget_s=round(budget_s, 3))
         return {"dropped_trajectories": 0, **out}
+
+
+def _as_step(value: Any) -> int | None:
+    try:
+        return None if value is None else int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def ray_export(executor: Any) -> Callable[[float], Mapping[str, Any]]:
@@ -259,8 +273,12 @@ def install(driver: Any, executor: Any, *, island: str, environ: Mapping[str, st
     from yeto.cloud import preemption as p
 
     volume = env.get(ENV_VOLUME)
-    saver = InFlightSaver(ray_export(executor), directory,
-                          commit=volume_commit(volume) if volume else None)
+    store = None
+    if volume:
+        from yeto.cloud.modal_ckpt_store import ModalVolumeStore
+
+        store = ModalVolumeStore(directory, volume)
+    saver = InFlightSaver(ray_export(executor), directory, store=store)
     wrap_emit_with_rehearsal(driver, saver)
     def emit_reclaim(event: str, **fields: Any) -> None:
         print(f"[yeto] {event} {json.dumps(fields, sort_keys=True, default=str)}", flush=True)

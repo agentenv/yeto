@@ -31,6 +31,8 @@ from typing import Any
 
 import torch
 
+from yeto.rl.engine.resume import CheckpointStore
+
 CRITIC_LAYOUT_DOMAIN = b"yeto-rl-critic-layout-v1\0"
 CRITIC_WEIGHTS_DOMAIN = b"yeto-rl-critic-weights-v1\0"
 _HEX = frozenset("0123456789abcdef")
@@ -170,16 +172,21 @@ Tensors = Mapping[str, torch.Tensor]
 # --------------------------------------------------------------------------
 
 
-class CriticCheckpointStore:
-    """``<root>/critic/round-<n>/``: weights + optimizer state + manifest (last)."""
+class CriticCheckpointStore(CheckpointStore):
+    """Critic backend of the checkpoint store interface: a layout backend for
+    ``<root>/critic/round-<n>/`` (weights + optimizer state + manifest, last).
+    Its ``save`` runs per rank inside the trainer cut (``state_plugin``), which the
+    round cut's ``recovery.save`` wraps; it is not itself a ``recovery.save`` path."""
 
+    kind = "critic"
     MANIFEST = "critic-manifest.json"
 
     def __init__(self, root: str | os.PathLike) -> None:
-        self.root = Path(root) / "critic"
+        super().__init__(root)
+        self.critic_dir = self.root / "critic"
 
     def save(self, *, round_id: int, weights: Tensors, optimizer: Mapping[str, Any]) -> dict:
-        target = self.root / f"round-{round_id}"
+        target = self.critic_dir / f"round-{round_id}"
         target.mkdir(parents=True, exist_ok=True)
         torch.save({k: v.detach().cpu() for k, v in weights.items()}, target / "weights.pt")
         torch.save(dict(optimizer), target / "optimizer.pt")
@@ -200,18 +207,18 @@ class CriticCheckpointStore:
 
         if critic_round is None:
             rounds = sorted(
-                int(p.name.split("-", 1)[1]) for p in self.root.glob("round-*")
+                int(p.name.split("-", 1)[1]) for p in self.critic_dir.glob("round-*")
                 if (p / self.MANIFEST).exists()
             )
             if not rounds:
-                raise CriticStateError(f"no committed critic checkpoint under {self.root}")
+                raise CriticStateError(f"no committed critic checkpoint under {self.critic_dir}")
             critic_round = rounds[-1]
         if critic_round != actor_round:
             raise CriticRoundMismatch(
                 f"checkpoint actor round {actor_round} != critic round {critic_round}; "
                 "actor and critic must come from the same committed round"
             )
-        target = self.root / f"round-{critic_round}"
+        target = self.critic_dir / f"round-{critic_round}"
         manifest = json.loads((target / self.MANIFEST).read_text())
         weights = torch.load(target / "weights.pt", weights_only=True)
         optimizer = torch.load(target / "optimizer.pt", weights_only=True)

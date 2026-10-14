@@ -18,8 +18,14 @@ sync torn by a crash/preemption leaves the previous snapshot valid.
 
 Without ``--rl-elastic`` the round cuts are driven by :class:`ResumeController`
 (the subset of the island controller the round cut uses: state dir, store,
-incarnation, journal-ish record). ``--rl-elastic`` keeps its own controller
-(flat store copy, now with per-file hashes, see ``controller.sync_checkpoint_store``).
+incarnation, journal-ish record). ``--rl-elastic`` keeps its reconfiguration
+controller, which mirrors its state dir into the same :class:`CheckpointStore`
+interface in the flat layout (:func:`sync_flat_mirror` / :func:`restore_flat_mirror`)::
+
+    <store>/...                            flat copy of the state dir
+    <store>/STORE-MANIFEST.json            every file with sha256 + bytes, written last
+
+What a save describes and the one save path are in :mod:`yeto.rl.engine.recovery`.
 """
 
 from __future__ import annotations
@@ -40,6 +46,7 @@ LATEST = "LATEST"
 STATE_DIR = "state"
 STATE_MANIFEST = "STATE-MANIFEST.json"
 ROUND_CUTS = "round-cuts"
+FLAT_MANIFEST = "STORE-MANIFEST.json"  # flat layout (--rl-elastic): written last
 INCARNATIONS = "incarnations.jsonl"  # under the state dir: one line per launch
 RESUME_JOURNAL = "resume-journal.jsonl"  # under the state dir
 SKIP_NAMES = frozenset({"journal.lock", STATE_MANIFEST, LATEST})
@@ -106,11 +113,18 @@ def _tree_files(root: Path, *, skip: Iterable[str] = ()) -> list[Path]:
 
 
 # ---------------------------------------------------------------------------
-# store backends (local path / bucket mount; cloud stores via STORE_IMPL_ENV): write dir, commit, read, list
+# the store interface + backends: local directory (this class), bucket mount,
+# Modal Volume (``yeto.cloud.modal_ckpt_store``), critic (``yeto.rl.critic_state``)
 # ---------------------------------------------------------------------------
 class CheckpointStore:
-    """A directory the trainer, the state sync and a later launch all see. ``commit``
-    makes what was written durable/visible for the next reader (no-op locally)."""
+    """The checkpoint store interface, and its local-directory backend.
+
+    A store is a directory (``root``) the trainer, the state sync and a later launch
+    all see. ``commit`` makes what was written durable/visible for the next reader
+    (no-op locally) and returns the seconds it took; ``reload`` makes what another
+    writer committed visible here. Backends override ``kind`` and, when the medium
+    needs it, ``commit``/``reload``. Saving and restoring code takes a store and
+    never branches on the backend."""
 
     kind = "local"
 
@@ -262,6 +276,70 @@ def restore_snapshot(store_root: Path, state_dir: Path, latest: Mapping[str, Any
             "moved_aside": None if moved is None else str(moved)}
 
 
+def sync_flat_mirror(store: CheckpointStore, state_dir: Path, info: Mapping[str, Any]) -> dict[str, Any]:
+    """Flat layout (``--rl-elastic``): copy every file of ``state_dir`` into the store
+    root (each copy hash-checked) and write :data:`FLAT_MANIFEST` last. Does NOT
+    commit: the caller commits outside any lock it holds (a Modal commit may take
+    minutes). Returns the manifest (``info`` plus ``files``)."""
+    root = store.root
+    root.mkdir(parents=True, exist_ok=True)
+    files: dict[str, dict[str, Any]] = {}
+    for path in sorted(Path(state_dir).rglob("*")):
+        rel = path.relative_to(state_dir)
+        if (not path.is_file() or rel.parts[0] == FLAT_MANIFEST
+                or path.name == "journal.lock" or path.name.endswith(".tmp")):
+            continue
+        digest, size = copy_verified(path, root / rel)
+        files[str(rel)] = {"sha256": digest, "bytes": size}
+    manifest = {**info, "files": files}
+    tmp = root / (FLAT_MANIFEST + ".tmp")
+    tmp.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+    tmp.replace(root / FLAT_MANIFEST)
+    return manifest
+
+
+def restore_flat_mirror(store: CheckpointStore, state_dir: Path) -> dict[str, Any] | None:
+    """Flat layout: copy a complete store copy (:data:`FLAT_MANIFEST` present) into
+    ``state_dir``, every file checked against the manifest first (fail closed with
+    :class:`StoreIntegrityError`). A manifest without ``files`` (written before the
+    hashes) restores by plain copy. Round cuts stay in the store (read in place).
+    Returns where the copy came from, or None when the store holds no copy."""
+    store.reload()
+    root = store.root
+    manifest = root / FLAT_MANIFEST
+    if not manifest.is_file():
+        return None
+    info = json.loads(manifest.read_text(encoding="utf-8"))
+    origin = {"restored_from": {k: info.get(k) for k in ("incarnation", "reason", "config_epoch",
+                                                         "wall_time", "seq")}}
+    state_dir = Path(state_dir)
+    files = info.get("files")
+    if files is None:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        _plain_copy(root, state_dir)
+        return origin
+    bad = [rel for rel, meta in sorted(files.items())
+           if not (root / rel).is_file() or sha256_file(root / rel) != meta["sha256"]]
+    if bad:
+        raise StoreIntegrityError(f"checkpoint store {root}: {len(bad)} file(s) differ from "
+                                  f"{FLAT_MANIFEST}: {bad[:8]}")
+    state_dir.mkdir(parents=True, exist_ok=True)
+    for rel in sorted(files):
+        copy_verified(root / rel, state_dir / rel)
+    return {**origin, "verified_files": len(files)}
+
+
+def _plain_copy(root: Path, state_dir: Path) -> None:
+    for child in root.iterdir():
+        if child.name in (FLAT_MANIFEST, ROUND_CUTS):
+            continue
+        target = state_dir / child.name
+        if child.is_dir():
+            shutil.copytree(child, target, dirs_exist_ok=True)
+        else:
+            shutil.copy2(child, target)
+
+
 def prune(store_root: Path, *, keep: int, cut_ids_of: Callable[[Path], str | None]) -> list[str]:
     """Keep the ``keep`` newest snapshots (by seq) and only the cuts they point at.
     Runs only after LATEST names the new snapshot; returns what was deleted."""
@@ -360,7 +438,10 @@ class _JournalShim:
 
 
 class ResumeController:
-    """The surface :class:`~yeto.rl.adapters.miles.round_cut.RoundCutCheckpoint` needs,
+    """The recovery controller of a run (the ``--rl-elastic`` reconfiguration controller
+    only mirrors its state dir through :func:`sync_flat_mirror` / :func:`restore_flat_mirror`).
+
+    The surface :class:`~yeto.rl.adapters.miles.round_cut.RoundCutCheckpoint` needs,
     without the elastic controller: ``state_dir``, ``checkpoint_store`` (path),
     ``incarnation`` (``id`` + ``index``, 0 = first launch), ``recovery_required``,
     ``sync_checkpoint_store`` (snapshot + LATEST + commit + prune) and ``_record``.

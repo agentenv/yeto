@@ -31,7 +31,11 @@ import os
 from pathlib import Path
 from typing import Any
 
-ROUND_CUTS = "round-cuts"  # under the checkpoint store (not under the state dir)
+from yeto.rl.engine import recovery
+from yeto.rl.engine.recovery import CUT_KEY, MANUAL, PERIODIC, ConsistentCut
+from yeto.rl.engine.resume import ROUND_CUTS  # under the checkpoint store (not under the state dir)
+
+ISLAND = "local"  # round cuts run without an outer syncer: one island, the local one
 POINTER = "round-cut.json"  # under the state dir (synced with the ledger/journal)
 
 
@@ -154,8 +158,13 @@ class RoundCutCheckpoint:
             "outer_version": getattr(getattr(driver, "sync", None), "outer_version", None),
             "final": bool(final),
         }
-        self._write_pointer(info)
-        synced = ctl.sync_checkpoint_store("round_cut", skip_if_recovery=True)
+        cut = ConsistentCut(
+            checkpoint_id=cut_id, trigger=MANUAL if final else PERIODIC,
+            outer_step=info["outer_version"], island_steps={ISLAND: info["local_step"]},
+            completed_groups=consumed_n, completed_groups_digest=consumed_sha)
+        saved = recovery.save(cut, store=ctl.store, write=lambda record: self._write_and_sync(info, record))
+        info[CUT_KEY] = saved[CUT_KEY]
+        synced = saved["synced"]
         sync = dict(getattr(ctl, "last_store_sync", None) or {})
         cut_bytes = directory_bytes(Path(self.root) / cut_id)
         total_s = time.monotonic() - started
@@ -172,6 +181,15 @@ class RoundCutCheckpoint:
         if not synced:
             info["store_error"] = sync.get("error")
         return info
+
+    def _write_and_sync(self, info: dict[str, Any], cut_record: dict[str, Any]) -> dict[str, Any]:
+        """The round cut's ``recovery.save`` writer: the pointer (with the cut record)
+        into the state dir, then the state dir into the store (which commits)."""
+        self._write_pointer({**info, CUT_KEY: cut_record})
+        synced = self.controller.sync_checkpoint_store("round_cut", skip_if_recovery=True)
+        # the store sync commits itself (snapshot layout: in write_snapshot; flat layout:
+        # in the controller, outside its lock), also when it failed: recovery.save must not
+        return {"synced": bool(synced), "committed": True}
 
     # ---------------------------------------------------------------- resume
     def resume(self, driver: Any) -> dict[str, Any] | None:

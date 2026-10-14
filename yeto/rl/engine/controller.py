@@ -39,7 +39,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import shutil
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -51,6 +50,8 @@ from .execution_profile import ExecutionProfile, ReadinessSnapshot, quiescent_cu
 from .driver import RebuildNotStarted
 from .journal import EpochState, Journal, read_epochs, read_journal, replay_pool
 from .pause_audit import DEFAULT_MARGIN, DEFAULT_QUORUM_TIMEOUT_S, PAUSABLE_PHASE, pause_decision
+from .resume import (FLAT_MANIFEST, ROUND_CUTS, CheckpointStore, restore_flat_mirror, store_for,
+                     sync_flat_mirror)
 from .ports import ElasticRolloutPool, MemberPublisher, PlacementDescription, ReconfigurablePlacement
 try:  # E3 (4.7) module; absent until infra-e3 is integrated -> trainer edges refused
     from .trainer_transition import (
@@ -87,8 +88,8 @@ CANCELLED = "CANCELLED"
 REBUILD_OLD = "REBUILD_OLD"
 REBUILT_OLD = "REBUILT_OLD"
 RECOVERY_REQUIRED = "RECOVERY_REQUIRED"
-STORE_MANIFEST = "STORE-MANIFEST.json"  # Q4 (C5): written last by sync_checkpoint_store
-STORE_ROUND_CUTS = "round-cuts"  # M4: round cuts live in the store itself (written by the adapter)
+STORE_MANIFEST = FLAT_MANIFEST  # Q4 (C5): written last by sync_checkpoint_store
+STORE_ROUND_CUTS = ROUND_CUTS  # M4: round cuts live in the store itself (written by the adapter)
 LAYOUT_KEYS = ("tp", "pp", "cp", "ep", "trainer", "nodes", "gpus_per_node", "bundle_map",
                "cross_node_tp", "cross_node_engine_tp")
 # 4.4: same-shape trainer rebuild behind the ports (cut saved, trainer being
@@ -202,6 +203,14 @@ def layout_diff(base: Mapping[str, Any], now: Mapping[str, Any]) -> dict[str, tu
     return {k: (base.get(k), now.get(k)) for k in LAYOUT_KEYS if norm(base.get(k)) != norm(now.get(k))}
 
 
+def _as_store(store: str | Path | CheckpointStore | None) -> CheckpointStore | None:
+    """The checkpoint store a ``--rl-elastic-checkpoint-store`` value names (backend by
+    ``resume.store_for``); None or "" = node0-local state only."""
+    if store is None or store == "":
+        return None
+    return store if isinstance(store, CheckpointStore) else store_for(store)
+
+
 def _failure_detail(exc: BaseException) -> dict[str, Any]:
     """Publication cause + disagreeing engine ids of a failed step (``other`` when the
     exception is not a structured PublicationError)."""
@@ -312,7 +321,7 @@ class IslandController:
         topology: tuple[int, int] | None = None,
         node_probe: Callable[[], Any] | None = None,
         layout: Mapping[str, Any] | None = None,
-        checkpoint_store: str | Path | None = None,
+        checkpoint_store: str | Path | CheckpointStore | None = None,
         scheduling_probe: Callable[[], Mapping[str, Any]] | None = None,
         island_scheduling: str = "legacy",
         pause_advice_source: Callable[[], Any] | None = None,
@@ -367,8 +376,8 @@ class IslandController:
         # epochs, cuts, ledger) kept by sync_checkpoint_store() after every commit
         # point; a learner starting on an EMPTY state dir (machine replaced) restores
         # it from there first. None = node0-local state only.
-        self.checkpoint_store = (Path(checkpoint_store).expanduser()
-                                 if checkpoint_store not in (None, "") else None)
+        self.store = _as_store(checkpoint_store)
+        self.checkpoint_store = None if self.store is None else self.store.root
         self.last_store_sync: dict[str, Any] | None = None
         restored = self._restore_from_checkpoint_store()
         self.journal = Journal(self.state_dir / "reconfig", wall_clock=wall_clock)
@@ -716,58 +725,23 @@ class IslandController:
 
     # ------------------------------------------------ checkpoint store (Q4, C5)
     def _restore_from_checkpoint_store(self) -> dict[str, Any] | None:
-        """Before the journal opens: with a store holding a complete copy
-        (``STORE-MANIFEST.json`` written last) and NO journal in the local state dir
-        (fresh machine), copy the store into the state dir. A local journal always
-        wins (an in-place restart is at least as new as its last sync; dropping
-        local records could hide a RECOVERY_REQUIRED terminal)."""
-        store = self.checkpoint_store
-        if store is None:
+        """Before the journal opens: with NO journal in the local state dir (fresh
+        machine), restore the store's flat copy (``resume.restore_flat_mirror``). A
+        local journal always wins (an in-place restart is at least as new as its last
+        sync; dropping local records could hide a RECOVERY_REQUIRED terminal)."""
+        if self.store is None or (self.state_dir / "reconfig" / "journal.jsonl").exists():
             return None
-        local_journal = self.state_dir / "reconfig" / "journal.jsonl"
-        if local_journal.exists():
-            return None
-        manifest = store / STORE_MANIFEST
-        if not manifest.is_file():
-            return None
-        info = json.loads(manifest.read_text(encoding="utf-8"))
-        files = info.get("files")
-        if files is not None:
-            # rl-resume-from-checkpoint 1.3: every copied file is checked against the
-            # sha256 written at sync time before anything is restored (fail closed).
-            from .resume import StoreIntegrityError, copy_verified, sha256_file
-
-            bad = [rel for rel, meta in sorted(files.items())
-                   if not (store / rel).is_file() or sha256_file(store / rel) != meta["sha256"]]
-            if bad:
-                raise StoreIntegrityError(f"checkpoint store {store}: {len(bad)} file(s) differ from "
-                                          f"{STORE_MANIFEST}: {bad[:8]}")
-            self.state_dir.mkdir(parents=True, exist_ok=True)
-            for rel in sorted(files):
-                copy_verified(store / rel, self.state_dir / rel)
-            return {"restored_from": {k: info.get(k) for k in ("incarnation", "reason", "config_epoch",
-                                                                  "wall_time", "seq")},
-                    "verified_files": len(files)}
-        self.state_dir.mkdir(parents=True, exist_ok=True)
-        for child in store.iterdir():
-            if child.name in (STORE_MANIFEST, STORE_ROUND_CUTS):
-                continue  # round cuts are read in place from the store (M4)
-            target = self.state_dir / child.name
-            if child.is_dir():
-                shutil.copytree(child, target, dirs_exist_ok=True)
-            else:
-                shutil.copy2(child, target)
-        return {"restored_from": {k: info.get(k) for k in ("incarnation", "reason", "config_epoch",
-                                                              "wall_time", "seq")}}
+        return restore_flat_mirror(self.store, self.state_dir)
 
     def sync_checkpoint_store(self, reason: str, *, skip_if_recovery: bool = False) -> bool:
-        """Copy the state dir (journal, epochs, cuts, ledger, inbox...) to the store and
-        write ``STORE-MANIFEST.json`` last (a reader trusts the copy only with it). Runs
-        under the record lock so no journal line is torn by a concurrent append. A
-        failing sync is logged + remembered (``last_store_sync``), never fatal: the
-        store is a durability aid, the island's truth stays the local journal."""
-        store = self.checkpoint_store
-        if store is None:
+        """Mirror the state dir (journal, epochs, cuts, ledger, inbox...) into the store
+        (``resume.sync_flat_mirror``: manifest last) under the record lock, so no
+        journal line is torn by a concurrent append; then commit the store outside
+        the lock (a Modal commit may take minutes and must not block the journal).
+        A failing copy is logged + remembered (``last_store_sync``) and returns False;
+        a failing commit only sets ``commit_error`` (the copy is on the store). Never
+        fatal: the store is a durability aid, the island's truth stays the local journal."""
+        if self.store is None:
             return False
         with self._record_lock:
             if skip_if_recovery and self.recovery_required:
@@ -777,29 +751,21 @@ class IslandController:
                     "seq": int(self.journal.records[-1].get("seq", 0)) if self.journal.records else 0,
                     "layout": self.layout, "state_dir": str(self.state_dir)}
             try:
-                from .resume import copy_verified
-
-                store.mkdir(parents=True, exist_ok=True)
-                files: dict[str, dict[str, Any]] = {}
-                for path in sorted(self.state_dir.rglob("*")):
-                    rel = path.relative_to(self.state_dir)
-                    if (not path.is_file() or rel.parts[0] == STORE_MANIFEST
-                            or path.name == "journal.lock" or path.name.endswith(".tmp")):
-                        continue
-                    # rl-resume-from-checkpoint 1.3: the copy is re-hashed against the source
-                    digest, size = copy_verified(path, store / rel)
-                    files[str(rel)] = {"sha256": digest, "bytes": size}
-                info["files"] = files
-                tmp = store / (STORE_MANIFEST + ".tmp")
-                tmp.write_text(json.dumps(info, sort_keys=True), encoding="utf-8")
-                tmp.replace(store / STORE_MANIFEST)
+                info = sync_flat_mirror(self.store, self.state_dir, info)
             except Exception as exc:  # noqa: BLE001 - never fail the commit on the copy
                 self.last_store_sync = {**info, "ok": False, "error": repr(exc)}
                 logging.getLogger(__name__).warning(
-                    "checkpoint store sync (%s) to %s failed: %r", reason, store, exc)
+                    "checkpoint store sync (%s) to %s failed: %r", reason, self.store.root, exc)
                 return False
-            self.last_store_sync = {**info, "ok": True}
-            return True
+        commit_error = None
+        try:
+            self.store.commit()
+        except Exception as exc:  # noqa: BLE001 - the copy is written; Modal also commits at exit
+            commit_error = repr(exc)
+            logging.getLogger(__name__).warning(
+                "checkpoint store commit (%s) of %s failed: %r", reason, self.store.root, exc)
+        self.last_store_sync = {**info, "ok": True, "commit_error": commit_error}
+        return True
 
     def set_on_watchdog(self, handler: Callable[[str, str], None] | None) -> None:
         self._on_watchdog = handler
