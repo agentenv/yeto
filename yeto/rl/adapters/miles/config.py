@@ -1140,6 +1140,9 @@ def translate_run_config(
 RELEASE_EXPORTER_SAVE_HF = "/tmp/yeto-rl-unused-save-hf/rollout_{rollout_id}"
 
 
+SAMPLER_ONLY_FLAG = "--debug-rollout-only"
+
+
 def sample_buffer_argv(role: str, *, max_policy_age: int) -> tuple[str, ...]:
     """L4.6: a sampler writes the buffer and builds no trainer model
     (``--debug-rollout-only``: rollout GPUs only, engines serve the base weights);
@@ -1148,7 +1151,7 @@ def sample_buffer_argv(role: str, *, max_policy_age: int) -> tuple[str, ...]:
 
     argv = rollout_argv(role, max_policy_age=max_policy_age)
     if role == SAMPLER:
-        return (*argv, "--debug-rollout-only")
+        return (*argv, SAMPLER_ONLY_FLAG)
     return (*argv, "--save-hf", RELEASE_EXPORTER_SAVE_HF)
 
 
@@ -1221,6 +1224,11 @@ def validate_parsed_args(
     cells = counter(args)
     if cells != 1:
         raise SingleCellError(f"actor TrainGroup would have {cells} cells; ports require exactly 1")
+    if SAMPLER_ONLY_FLAG in launch.argv:
+        # A sampler island (L4.6) asked for --debug-rollout-only: Miles places the
+        # rollout engines only and builds no trainer, so the trainer partition of the
+        # request is unused by design, not rewritten.
+        return
     check_placement_not_rewritten(launch.placement, args)
 
 
