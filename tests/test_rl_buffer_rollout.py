@@ -67,6 +67,48 @@ def test_rollout_function_paths_name_classes_of_the_plugin_module():
     assert classes["BufferReaderRolloutFn"] == ["BaseRolloutFn"]
 
 
+def _import_plugin_with_stub_miles(monkeypatch, registry):
+    """Import buffer_rollout_miles against minimal stand-ins for the Miles modules."""
+    import importlib
+    import types
+
+    class _Base:
+        def __init__(self, input):
+            self.constructor_input = input
+
+    stubs = {
+        "miles.rollout.base_types": dict(BaseRolloutFn=_Base, RolloutFnConstructorInput=object,
+                                         RolloutFnInput=object, RolloutFnTrainOutput=object),
+        "miles.rollout.inference_rollout.inference_rollout_common": dict(InferenceRolloutFn=_Base),
+        "miles.utils.function_registry": dict(load_function=lambda path: registry.get(path) if path else None),
+        "miles.utils.types": dict(Sample=object),
+    }
+    for name, attrs in stubs.items():
+        monkeypatch.setitem(sys.modules, name, types.SimpleNamespace(**attrs))
+    plugin = "yeto.rl.adapters.miles.buffer_rollout_miles"
+    monkeypatch.setitem(sys.modules, plugin, None)  # teardown restores the state before the test
+    del sys.modules[plugin]
+    return importlib.import_module(plugin)
+
+
+def test_reader_round_calls_the_metadata_hooks(monkeypatch):
+    """L5.4 j: a trainer that reads the buffer must still run Miles' end-of-round hooks,
+    or the driver finds no rollout metadata for the round."""
+    calls = []
+    registry = {"filter": lambda args, data: calls.append(("filter", data)),
+                "all": lambda args, samples, source: calls.append(("all", samples, source))}
+    plugin = _import_plugin_with_stub_miles(monkeypatch, registry)
+    reader = plugin.BufferReaderRolloutFn.__new__(plugin.BufferReaderRolloutFn)
+    reader.args = args = type("A", (), {"rollout_sample_filter_path": "filter",
+                                             "rollout_all_samples_process_path": "all"})()
+    groups = [["s0", "s1"], ["s2", "s3"]]
+    reader._run_round_hooks(groups)
+    assert calls == [("filter", groups), ("all", groups, None)]
+    args.rollout_sample_filter_path = args.rollout_all_samples_process_path = None
+    reader._run_round_hooks(groups)
+    assert len(calls) == 2
+
+
 def test_island_env():
     assert br.island_env("sampler", store_root="/s", sampler_id="s0") == {
         br.BUFFER_ROOT_ENV: "/s", br.SAMPLER_ID_ENV: "s0"}

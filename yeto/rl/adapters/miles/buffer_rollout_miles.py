@@ -19,6 +19,7 @@ from miles.rollout.base_types import (
     RolloutFnTrainOutput,
 )
 from miles.rollout.inference_rollout.inference_rollout_common import InferenceRolloutFn
+from miles.utils.function_registry import load_function
 from miles.utils.types import Sample
 
 from .buffer_rollout import (
@@ -75,7 +76,7 @@ class BufferReaderRolloutFn(BaseRolloutFn):
 
     def __init__(self, input: RolloutFnConstructorInput) -> None:
         super().__init__(input)
-        args = input.args
+        args = self.args = input.args
         age = os.environ.get(MAX_POLICY_AGE_ENV)
         if age is None:
             raise SampleBufferRolloutError(f"{MAX_POLICY_AGE_ENV} is not set")
@@ -96,4 +97,14 @@ class BufferReaderRolloutFn(BaseRolloutFn):
         samples = [[Sample.from_dict(d) for d in renumber_group(
             group, position=position, samples_per_group=self.samples_per_group)]
             for position, group in groups]
+        self._run_round_hooks(samples)
         return RolloutFnTrainOutput(samples=samples, metrics=report.metrics())
+
+    def _run_round_hooks(self, samples: list[list[Any]]) -> None:
+        """Call the end-of-round hooks Miles' generating rollout calls, so the yeto
+        rollout metadata reaches the driver. Every selected group is trained, so the
+        kept groups and all groups are the same list; there is no data source."""
+        if f := load_function(self.args.rollout_sample_filter_path):
+            f(self.args, samples)
+        if f := load_function(self.args.rollout_all_samples_process_path):
+            f(self.args, samples, None)
