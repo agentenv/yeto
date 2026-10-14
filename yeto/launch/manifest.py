@@ -85,3 +85,22 @@ def _no_sync_events_dir(args) -> Path:
     from .. import runs
 
     return runs.run_dir(args.cluster_prefix) / "events"
+
+
+def _record_trainer_start(args, events_dir) -> dict | None:
+    """rl-trainer-cold-start-cost L0.2: copy each island's ``trainer_start_summary``
+    from the settled tapes into ``run_manifest.json`` (``trainer_start``), where the
+    scheduler reads ``T_s`` of the last run.  Never fails the run."""
+
+    from .. import runs
+    from ..rl.engine import start_phases
+
+    try:
+        summaries = start_phases.summaries_from_events(
+            start_phases.read_tape_records(sorted(Path(events_dir).glob("*.jsonl"))))
+        path = runs.run_dir(args.cluster_prefix) / "run_manifest.json"
+        if start_phases.write_manifest_summary(path, summaries):
+            return summaries
+    except (OSError, ValueError) as e:
+        print(f"[launcher] could not record trainer start phases: {e}", file=sys.stderr)
+    return None

@@ -71,7 +71,9 @@ from .launch.fleet import (
 )
 from .launch.teardown import collect_diagnostics_parallel, teardown_island
 from .launch.verda import _rename_hook, launch_verda_island, prepare_verda_islands
-from .launch.manifest import _dashboard_fleet_log, _no_sync_events_dir, _write_run_manifest
+from .launch.manifest import (
+    _dashboard_fleet_log, _no_sync_events_dir, _record_trainer_start, _write_run_manifest,
+)
 
 # Re-exported: callers and tests reach these as ``yeto.launcher.<name>``.
 from .launch import REPO_ROOT  # noqa: F401
@@ -635,6 +637,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 no_sync_incomplete.extend(settle_echo_tapes(
                     event_collectors, echo_names, modal_cfgs, events_dir,
                     modal_tape_dir=modal_tape_dir))
+                _record_trainer_start(args, events_dir)
 
         try:
             exit_codes = controller.run()

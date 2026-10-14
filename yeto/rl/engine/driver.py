@@ -1300,6 +1300,9 @@ class IslandDriver:
     # rl-per-island-tasks: this island's task ids and prompt-file SHA256, written
     # into rl_driver_start as ``island_tasks`` only when the island has its own list.
     island_tasks: Mapping[str, Any] | None = None
+    # rl-trainer-cold-start-cost L0: the island's StartPhases; the first
+    # optimizer step records ``first_step_done`` (None: not recorded).
+    start_phases: Any = None
 
     def _export_eval_version(self, rollout_id: int, *, final: bool) -> None:
         state = self.published_state
@@ -1414,6 +1417,8 @@ class IslandDriver:
         started = time.monotonic()
         receipt = self.trainer.train_step(batch)
         train_seconds = time.monotonic() - started
+        if self.start_phases is not None:
+            self.start_phases.mark_once("first_step_done")
         raw = self.trainer.step_metrics()
         metrics = raw if isinstance(raw, TrainStepMetrics) else TrainStepMetrics(**dict(raw))
         rollout_fraction = getattr(batch, "cross_version_truncated_fraction", None)

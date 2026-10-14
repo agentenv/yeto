@@ -113,28 +113,32 @@ def test_ports_setup_reuses_the_image_forks_and_still_verifies():
     assert f'm["commit"] == "{c}"' in miles
     reuse, fallback = miles[decision:].split("\nelse\n", 1)
     assert f"[yeto-setup] image provides miles {c}" in reuse
-    assert f'peft.__version__ == "{rl.MILES_PEFT_VERSION}"' in reuse
+    assert f"{rl.MILES_NEXT_IMAGE_MANIFEST} peft version {rl.MILES_PEFT_VERSION}" in reuse
+    assert f'peft.__version__ == "{rl.MILES_PEFT_VERSION}"' in reuse  # fallback only
     assert f"pip install -q 'peft=={rl.MILES_PEFT_VERSION}'" in reuse
     assert "pip install -q --no-deps -e ~/miles" not in reuse
     assert fallback == (
         f"python3 -m pip install -q --no-deps -e ~/miles 'peft=={rl.MILES_PEFT_VERSION}'\nfi"
     )
     # SGLang: reuse /sgl-workspace/sglang only if it is exactly the pinned,
-    # clean fork checkout that `import sglang` resolves to; else clone.
+    # clean fork checkout and the image manifest names it there (no import:
+    # L2.3); without a manifest entry the import check is the fallback.
     s = rl.SGLANG_NEXT_COMMIT
+    assert sglang.startswith("SGLANG_IN_IMAGE=0\nif ")
     guard, rest = sglang.split("; then\n", 1)
-    assert guard.startswith("if ")
     for needle in (
         f'[ "$(git -C /sgl-workspace/sglang rev-parse HEAD 2>/dev/null)" = {s} ]',
         f'= {rl.SGLANG_NEXT_REPOSITORY} ]',
         "git -C /sgl-workspace/sglang status --porcelain --untracked-files=all",
-        "import os, sys, sglang",
         "[ ! -e ~/sglang ]",
     ):
         assert needle in guard
+    check, rest = rest.split('\nfi\nif [ "$SGLANG_IN_IMAGE" = 1 ]; then\n', 1)
+    assert f"{rl.MILES_NEXT_IMAGE_MANIFEST} sglang commit {s} /sgl-workspace/sglang" in check
+    match, absent = check.split("\n0) ", 1)[1].split("\n3)\n", 1)
+    assert "import sglang" not in match and "SGLANG_IN_IMAGE=1" in match
+    assert "import os, sys, sglang" in absent and "image_manifest_fallback" in absent
     reuse, fallback = rest.split("\nelse\n", 1)
-    assert "ln -sfn /sgl-workspace/sglang ~/sglang" in reuse
-    assert f"git -C ~/sglang fetch --depth 1 origin {s}" in fallback
     assert fallback.endswith("pip install -q --no-deps -e ~/sglang/python\nfi")
 
 

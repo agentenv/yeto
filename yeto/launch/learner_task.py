@@ -9,7 +9,7 @@ from ..gpu_spec import ClusterSpec
 from . import REPO_ROOT
 from .remote_setup import (
     HF_TOKEN_ENV, HF_TOKEN_PATH, HUNYUAN3D_ROOT, HUNYUAN3D_SETUP, NVME_ENV, NVME_SETUP,
-    PROTENIX_SETUP, TORCH_SETUP, WAN_TUNING, causal_kernel_setup_steps,
+    PROTENIX_SETUP, TORCH_SETUP, WAN_TUNING, causal_kernel_setup_steps, model_prefetch,
 )
 from .topology import multinode_network_tier
 from .loss import pickled_loss_path
@@ -374,15 +374,7 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
     elif is_local_reference(repo):
         prefetch = ": # local model; no Hub prefetch"
     else:
-        revision_flag = (
-            f" --revision {shlex.quote(args.model_revision)}"
-            if getattr(args, "model_revision", None)
-            else ""
-        )
-        prefetch = (
-            f"(nohup huggingface-cli download {shlex.quote(repo)}{revision_flag} "
-            ">/tmp/hf-prefetch.log 2>&1 &) || true"
-        )
+        prefetch = model_prefetch(repo, getattr(args, "model_revision", None))
     run = (
         f"{NVME_ENV}\n"
         f"{HF_TOKEN_ENV}\n"
