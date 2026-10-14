@@ -35,6 +35,7 @@ from yeto.protocol import PartialMessageGenerationLost
 from yeto.rl.elastic_client import LeaveReason
 
 from .driver import SyncBoundary, SyncStart
+from .sync_timing import SyncTiming, unix_now
 
 if TYPE_CHECKING:
     from .driver import IslandDriver
@@ -507,6 +508,7 @@ class FullParameterSync:
         self.finished = False
         self.closed = False
         self._driver: IslandDriver | None = None
+        self._timing = SyncTiming(None, None)  # L5.6, set by each boundary
 
     @property
     def actor(self) -> RoleStream:
@@ -519,6 +521,7 @@ class FullParameterSync:
 
     def boundary(self, driver: IslandDriver, *, rollout_id: int, stats: Any) -> SyncBoundary:
         del stats
+        self._timing = SyncTiming(None, None)
         self.terminal = self.run(self._boundary(rollout_id))
         versions = self.pairing.fragment_versions()
         state = self.actor.resident_state(rollout_id + 1)
@@ -530,6 +533,7 @@ class FullParameterSync:
                 "sync/fragment_versions": list(versions),
                 "sync/global_policy_hash": state.policy_tensor_hash(),
                 "sync/inflight_pairs": len(self.pairing.inflight),
+                **self._timing.fields(),
             },
         )
         return SyncBoundary(state=state, stop=self.terminal)
@@ -544,9 +548,15 @@ class FullParameterSync:
         )
         before = pairing.fragment_versions()
         pairing.submit_ready()
+        submit_ts = unix_now()
         await pairing.commit_staged_broadcasts()
         if pairing.profile.sweep:
             await self._wait_for_sweep(before)
+            # Broadcasts are staged in the background, so the receive time
+            # is not separated: the wait includes it.
+            self._timing = SyncTiming(submit_ts, unix_now())
+        else:
+            self._timing = SyncTiming(submit_ts, None)  # streaming: no global wait
         if pairing.any_finalizing:
             await pairing.finish_without_more_training()
             return True

@@ -31,6 +31,7 @@ import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
+from .rl.engine.merge_metrics import MergeMetricsFolder
 from .wandb_logger import NullRun, WandbRun
 
 log = logging.getLogger("wandb-tape")
@@ -42,6 +43,19 @@ POLICY_SWEEP_LEDGER_EVENT = "policy_sweep_ledger"
 
 def _is_merge_record(record: dict) -> bool:
     return "step" in record and record.get("event") != POLICY_SWEEP_LEDGER_EVENT
+
+
+def _is_elastic_record(record: dict) -> bool:
+    """An elastic syncer tape line (``kind`` key, see syncer/src/elastic.rs)."""
+    return "kind" in record and "step" not in record
+
+
+def record_metrics(rec: dict, folder: MergeMetricsFolder) -> dict | None:
+    """Metrics to log for one tape record, or None. Elastic records go
+    through ``folder`` and log only once per outer step (L5.5)."""
+    if _is_elastic_record(rec):
+        return folder.feed(rec)
+    return tape_metrics(rec)
 
 
 def tape_metrics(rec: dict) -> dict:
@@ -268,6 +282,7 @@ class TapeForwarder:
         start = self.offsets.read() if self.offsets is not None else 0
         if start:
             log.info("resuming the event tape at byte %d", start)
+        folder = MergeMetricsFolder()
         try:
             for rec in follow_jsonl(
                 self.tape_path,
@@ -275,7 +290,9 @@ class TapeForwarder:
                 on_offset=None if self.offsets is None else self.offsets.record,
                 stop=self._stop,
             ):
-                self.run.log(tape_metrics(rec))
+                metrics = record_metrics(rec, folder)
+                if metrics is not None:
+                    self.run.log(metrics)
                 if _is_merge_record(rec):
                     self.records += 1
         except Exception as e:  # noqa: BLE001 - telemetry never breaks the run
@@ -295,6 +312,7 @@ def replay(
 ) -> int:
     """Log every record of a finished tape; returns the merge-record count."""
     count = 0
+    folder = MergeMetricsFolder()
     with open(os.path.expanduser(str(tape_path)), encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
@@ -305,7 +323,9 @@ def replay(
             except json.JSONDecodeError as e:
                 log.warning("skipping unparsable event-tape line: %s", e)
                 continue
-            run.log(tape_metrics(rec))
+            metrics = record_metrics(rec, folder)
+            if metrics is not None:
+                run.log(metrics)
             if _is_merge_record(rec):
                 count += 1
     run.summary({"sync/tape_records": count})

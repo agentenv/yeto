@@ -575,6 +575,9 @@ class ElasticIslandClient:
         self.ack: JoinAck | None = None
         self.errors: list[str] = []
         self.latest_base: ElasticBase | None = None
+        # L5.6: (Unix time it became visible to the island, seconds from header to last byte)
+        # of ``latest_base``; set together with it under ``_base_cv``.
+        self.latest_base_timing: tuple[float, float] | None = None
         self._verdict_cv = threading.Condition()
         self._verdicts: list[SampleVerdict] = []
         self._index_lock = threading.Lock()  # one SAMPLE_INDEX in flight: replies are in order
@@ -646,8 +649,16 @@ class ElasticIslandClient:
 
     def _reader(self) -> None:
         while not self._stop.is_set():
+            header_at = 0.0
+
+            def limit(msg_type: int) -> int:
+                nonlocal header_at
+                header_at = time.monotonic()  # header read; payload follows
+                return _frame_limit(msg_type)
+
             try:
-                t, payload = read_frame(self.sock, _frame_limit)
+                t, payload = read_frame(self.sock, limit)
+                recv_seconds = time.monotonic() - header_at
             except (OSError, ConnectionError, ValueError) as exc:
                 if not self._stop.is_set():
                     self.errors.append(f"connection: {exc}")
@@ -685,6 +696,7 @@ class ElasticIslandClient:
                     self._base_seq += 1
                     if self.latest_base is None or msg.outer_version >= self.latest_base.outer_version:
                         self.latest_base = msg
+                        self.latest_base_timing = (time.time(), recv_seconds)
                     self._base_cv.notify_all()
             self._on_event({"event": "rl_elastic_received", "type": t, **_fields(msg)})
 
