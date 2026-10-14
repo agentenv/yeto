@@ -12,6 +12,7 @@ from pathlib import Path
 
 from ..gpu_spec import ClusterSpec
 from . import REPO_ROOT
+from .code_pack import code_workdir
 from .remote_setup import HF_TOKEN_PATH
 from .syncer import critic_syncer_address, island_hmac_secret
 from .credentials import SECRET_ENV_NAMES, _secret_value, registry_login_for
@@ -124,7 +125,7 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         memory_gib_override=getattr(args, "modal_memory_gib", None),
         tape_subdir=(modal_tape_subdir(args.cluster_prefix, learner_id)
                      if getattr(args, "modal_tape_volume", None) else None),
-        workdir=str(REPO_ROOT),
+        workdir=code_workdir(args),
         # Opt-in overrides (default: Modal runner defaults, 10 retries / 24 h).
         # Acceptance runs pass --modal-retries 0 so a learner exit is final
         # (no re-run billing) and --modal-timeout-s as the Modal-side hard stop.

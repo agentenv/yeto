@@ -254,6 +254,9 @@ _ISLAND = (
     island_flag("--learner-generation", type=int, default=0),
     island_flag("--reward-sha256", required=True),
     island_flag("--source-sha256", required=True),
+    # rl-identity-tiering L9.5: the run code pack digest; the island refuses to start
+    # when its workdir is not that pack.
+    island_flag("--code-pack-digest", default=None),
     island_flag("--global-rounds", type=int, required=True),
     island_flag(
         "--parameter-mode",

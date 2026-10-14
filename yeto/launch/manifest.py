@@ -37,8 +37,13 @@ def _code_identity_manifest(args) -> dict:
     from ..rl.engine.algorithm import AlgorithmSpec
     from ..provenance import CODE_PACK_MODE_SOURCE_TREE
 
-    out = {"code_pack_digest": getattr(args, "source_sha256", None),
-           "code_pack_mode": CODE_PACK_MODE_SOURCE_TREE}
+    pack = getattr(args, "code_pack", None)
+    if pack is not None:  # L9.4: the run code pack replaces the transition value
+        out = {"code_pack_digest": pack.digest, "code_pack_mode": pack.mode,
+               "code_pack": pack.record()}
+    else:
+        out = {"code_pack_digest": getattr(args, "source_sha256", None),
+               "code_pack_mode": CODE_PACK_MODE_SOURCE_TREE}
     raw = getattr(args, "rl_algorithm_spec_json", None)
     if raw:
         out["semantic_sha256"] = AlgorithmSpec.from_dict(json.loads(raw)).semantic_sha256()

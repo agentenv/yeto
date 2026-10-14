@@ -37,6 +37,16 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def verify_island_code_pack(digest: str | None, tree: str | Path | None = None) -> None:
+    """rl-identity-tiering L9.5: refuse to start when the workdir is not the run pack."""
+
+    if not digest:
+        return
+    from yeto.codepack import verify_tree
+
+    verify_tree(tree if tree is not None else Path(__file__).resolve().parents[4], digest)
+
+
 def parse_args(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -1979,9 +1989,15 @@ def run_miles(
     _configure_grad_audit(args, miles_args)
     require_ports_router_mode(miles_args)
     miles_args.yeto_rl_island_tasks = dict(island_tasks) if island_tasks else None
-    # rl-identity-tiering L9.1 (transition): until the run code pack exists, the
-    # code identity is the attested source tree hash (checked at startup).
-    miles_args.yeto_rl_code_pack_digest = args.source_sha256
+    # rl-identity-tiering: the run code pack digest (L9.4, checked at startup), else
+    # (L9.1 transition) the attested source tree hash.
+    if getattr(args, "code_pack_digest", None):
+        from yeto.codepack import CODE_PACK_MODE_GIT_PATCH
+
+        miles_args.yeto_rl_code_pack_digest = args.code_pack_digest
+        miles_args.yeto_rl_code_pack_mode = CODE_PACK_MODE_GIT_PATCH
+    else:
+        miles_args.yeto_rl_code_pack_digest = args.source_sha256
     _run_ports(
         args,
         miles_args,
@@ -2199,6 +2215,7 @@ def main(argv=None) -> None:
     )
 
     verify_source_tree_sha256(args.source_sha256)
+    verify_island_code_pack(getattr(args, "code_pack_digest", None))
     if not is_immutable_commit(args.model_revision):
         raise ValueError("RL model revision must be an immutable commit")
     if not is_local_reference(args.data) and not is_immutable_commit(

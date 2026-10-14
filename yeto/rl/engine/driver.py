@@ -625,9 +625,9 @@ class IslandDriver:
 
         if not self.code_pack_digest:
             return {}
+        mode = getattr(self, "code_pack_mode", None) or CODE_PACK_MODE_SOURCE_TREE
         return {"semantic_sha256": self.algorithm.semantic_sha256(),
-                "code_pack_digest": self.code_pack_digest,
-                "code_pack_mode": CODE_PACK_MODE_SOURCE_TREE}
+                "code_pack_digest": self.code_pack_digest, "code_pack_mode": mode}
 
     # -- helpers used by sync sessions -----------------------------------
     def apply_policy(
@@ -1315,6 +1315,7 @@ class IslandDriver:
     # rl-identity-tiering L9.1: this island's code identity, written into
     # rl_driver_start with ``semantic_sha256`` only when set.
     code_pack_digest: str | None = None
+    code_pack_mode: str | None = None  # None: the L9.1 transition (source tree hash)
 
     def _export_eval_version(self, rollout_id: int, *, final: bool) -> None:
         state = self.published_state
