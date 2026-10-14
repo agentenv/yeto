@@ -35,6 +35,7 @@ from yeto.rl.engine.fake_lifecycle import BufferFedFakeRollout, FakeRoundCuts, F
 from yeto.rl.engine.journal import Journal
 from yeto.rl.engine.resume import FLAT_MANIFEST, CheckpointStore, write_snapshot
 from yeto.rl.engine.sample_buffer import BUFFER_DIR, INDEX, CommittedBacklog, FileSampleBuffer
+from yeto.rl.engine.start_phases import SUBMITTED_ENV
 from yeto.rl.engine.trainer_lifecycle import BacklogStats, Hold, LifecycleState, Start, Stop
 from yeto.rl.engine.trainer_loop import FINISHED, LOOP_KIND, TrainerLoop
 from yeto.rl.engine.trainer_remote import (
@@ -372,9 +373,11 @@ def test_modal_islands_spawn_per_incarnation_and_release_an_orphan(tmp_path, mon
     ops, tails = _ModalOps(), []
     islands = ModalTrainerIslands(ops, _Cfg(), name="run-a-l1", jobs_path=tmp_path / "jobs.json",
                                   tail=lambda call_id, label, events: tails.append((call_id, label)),
-                                  sleep=lambda s: None)
+                                  sleep=lambda s: None, clock=lambda: 1700000000.25)
     job = islands.launch(3, None)
-    assert ops.spawned[0].envs == {"BASE": "1", **island_env(3, None)}
+    # phase ``submitted`` of the incarnation is its spawn, not the build of the held task
+    assert ops.spawned[0].envs == {"BASE": "1", **island_env(3, None),
+                                   SUBMITTED_ENV: "1700000000.250"}
     assert tails == [("fc-1", "run-a-l1-i3")]
     job.events.feed("[run-a-l1-i3] " + event_echo.format_record(
         {"island_id": 1, "time_unix": 0.0, "event": "rl_trainer_lifecycle", "incarnation": 3}))
