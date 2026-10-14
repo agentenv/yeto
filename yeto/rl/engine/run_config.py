@@ -392,6 +392,9 @@ class ServingConfig:
     page_size: Any = None
     max_running_requests: Any = None
     chunked_prefill_size: Any = None
+    # rl-trainer-cold-start-cost L8.2: opt-in SGLang snapshot flags on the
+    # sampler (rollout) engines; refused without a recorded compatibility pass.
+    sampler_snapshot: bool = False
 
 
 @dataclass(frozen=True)
@@ -950,6 +953,7 @@ def resolve_rl_run_config(
             page_size=getattr(args, "sglang_page_size", None),
             max_running_requests=getattr(args, "sglang_max_running_requests", None),
             chunked_prefill_size=getattr(args, "sglang_chunked_prefill_size", None),
+            sampler_snapshot=bool(getattr(args, "rl_sampler_snapshot", False)),
         ),
         ports=NetworkPorts(
             rollout_engine_base_port=getattr(args, "rollout_engine_base_port", None),
