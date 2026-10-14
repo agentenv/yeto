@@ -657,6 +657,24 @@ def _check_dense_full_sweep(args, *, yeto_policy_sync: bool) -> None:
         raise ValueError("dense full-parameter mode requires --syncer-profile-sha256")
 
 
+def _trajectory_evidence_kind(args) -> str:
+    """The evidence kind of a dense full-parameter island, chosen by its reward.
+
+    The SecRLEnv reward binds the grader's signed verdict as evidence.  Any
+    other reward function (for example a GSM8K answer check) binds its own
+    output, ``sample.reward``; a sample that still carries a grader verdict is
+    rejected there.  Terminal-Bench 2.1 runs the SAO sync, whose runtime
+    contract names its own evidence kind.
+    """
+
+    from yeto.rl import SECRLENV_REWARD
+    from yeto.rl.trajectory_evidence import REWARD_FUNCTION_EVIDENCE_KIND
+
+    if args.reward_function == SECRLENV_REWARD:
+        return "secrlenv"
+    return REWARD_FUNCTION_EVIDENCE_KIND
+
+
 def _private_trajectory_evidence_dir(args) -> Path:
     """A fresh owner-only directory for this island's trajectory evidence."""
 
@@ -1839,7 +1857,7 @@ def run_miles(
             miles_args.yeto_rl_trajectory_evidence_dir = str(
                 _private_trajectory_evidence_dir(args)
             )
-            miles_args.yeto_rl_trajectory_evidence_kind = "secrlenv"
+            miles_args.yeto_rl_trajectory_evidence_kind = _trajectory_evidence_kind(args)
             miles_args.yeto_rl_trajectory_evidence_schema_version = 1
             setattr(
                 miles_args,
