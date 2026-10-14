@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from yeto.rl.engine import recovery
-from yeto.rl.engine.recovery import CUT_KEY, MANUAL, PERIODIC, ConsistentCut
+from yeto.rl.engine.recovery import CUT_KEY, FINAL_TRIGGERS, MANUAL, PERIODIC, ConsistentCut
 from yeto.rl.engine.resume import ROUND_CUTS  # under the checkpoint store (not under the state dir)
 
 ISLAND = "local"  # round cuts run without an outer syncer: one island, the local one
@@ -109,15 +109,21 @@ class RoundCutCheckpoint:
 
         return should_cut(int(rollout_id), every=self.every, final=final)
 
-    def save(self, driver: Any, *, rollout_id: int, final: bool = False) -> dict[str, Any] | None:
+    def save(self, driver: Any, *, rollout_id: int, final: bool = False,
+             trigger: str | None = None) -> dict[str, Any] | None:
         """Cut the trainer at the safe point before rollout ``rollout_id`` (= the published
         version), point the state dir at it, sync the store. Returns the pointer, or None
         when nothing was cut (not due, no publication yet, already cut at this rollout,
-        island RECOVERY_REQUIRED). Raises on a refused/failed cut (the caller logs it)."""
+        island RECOVERY_REQUIRED). Raises on a refused/failed cut (the caller logs it).
+
+        ``trigger`` names a final cut's trigger (default ``MANUAL``; ``SCHEDULED`` for
+        a stop the trainer scheduler ordered); a periodic cut takes none."""
         import time
 
         from yeto.rl.engine.resume import directory_bytes
 
+        if trigger is not None and (not final or trigger not in FINAL_TRIGGERS):
+            raise RoundCutError(f"cut trigger {trigger!r} needs final=True and one of {FINAL_TRIGGERS}")
         ctl = self.controller
         if ctl.recovery_required or driver.published_version is None:
             return None
@@ -161,7 +167,7 @@ class RoundCutCheckpoint:
             "final": bool(final),
         }
         cut = ConsistentCut(
-            checkpoint_id=cut_id, trigger=MANUAL if final else PERIODIC,
+            checkpoint_id=cut_id, trigger=(trigger or MANUAL) if final else PERIODIC,
             outer_step=info["outer_version"], island_steps={ISLAND: info["local_step"]},
             completed_groups=consumed_n, completed_groups_digest=consumed_sha)
         saved = recovery.save(cut, store=ctl.store, write=lambda record: self._write_and_sync(info, record))

@@ -35,11 +35,17 @@ CUT_KEY = "consistent_cut"
 
 # Trigger of each save path: InFlightSaver.save (reclaim, via handle_notice) -> PREEMPT;
 # InFlightSaver.rehearse and RoundCutCheckpoint.save(final=False) -> PERIODIC;
-# RoundCutCheckpoint.save(final=True) (last round or our own stop) -> MANUAL.
+# RoundCutCheckpoint.save(final=True) (last round or our own stop) -> MANUAL;
+# RoundCutCheckpoint.save(final=True, trigger=SCHEDULED) (a stop the trainer
+# scheduler ordered, rl-trainer-start-stop D3) -> SCHEDULED.
+# Resume treats every trigger alike: a committed cut is complete.
 PREEMPT = "preempt"
 PERIODIC = "periodic"
 MANUAL = "manual"
-TRIGGERS = (PREEMPT, PERIODIC, MANUAL)
+SCHEDULED = "scheduled"
+TRIGGERS = (PREEMPT, PERIODIC, MANUAL, SCHEDULED)
+# Triggers of a cut taken at the end of an incarnation (not a periodic one).
+FINAL_TRIGGERS = (PREEMPT, MANUAL, SCHEDULED)
 
 
 @dataclass(frozen=True)
