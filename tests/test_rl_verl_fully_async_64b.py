@@ -327,6 +327,9 @@ def test_driver_runs_fully_async_rounds_with_carry_over_and_discard(tmp_path):
     assert carry[2]["over_age_discarded_groups"] == 1 and carry[2]["over_age_discarded_tokens"] == 10
     cutoff = [e for e in events if e["event"] == "rl_rollout_cutoff"]
     assert [e["rollout_id"] for e in cutoff] == [2]
+    gates = [e for e in events if e["event"] == "offpolicy_gate"]
+    assert [e["rollout_id"] for e in gates] == [0, 1, 2]
+    assert {(e["backend"], e["granularity"]) for e in gates} == {("verl", "trajectory")}
     trained = [e for e in events if e["event"] == "rl_round_trained"]
     assert [e["aborted_in_flight_groups"] for e in trained] == [0, 0, 1]  # never null (async10)
     checks = [e for e in events if e["event"] == "rl_publication_check"]

@@ -342,6 +342,25 @@ def test_driver_tapes_offpolicy_gate_as_its_own_event():
     assert oc.TRUNCATED_BY_TURN not in emitted[1][1]
 
 
+
+@pytest.mark.parametrize("backend, label", [("verl", "verl"), ("miles", "miles"),
+                                            (None, "unknown")])
+def test_driver_labels_offpolicy_gate_with_the_batch_backend(backend, label):
+    from yeto.rl.engine.driver import IslandDriver
+    from yeto.rl.engine.ports import RolloutBatchHandle
+
+    emitted = []
+    fake = SimpleNamespace(emit=lambda name, **kw: emitted.append((name, kw)),
+                           clock=lambda: 0.0, _labels=lambda: {})
+    batch = RolloutBatchHandle(
+        rollout_id=1, policy_version=1, policy_hash="h", groups=(), completed=0, aborted=0,
+        carry_over={oc.GATE_DROPPED_LENGTHS: {}, oc.GATE_GRANULARITY: oc.GRANULARITY_TRAJECTORY},
+        backend=backend)
+    IslandDriver._emit_carry_over(fake, 1, batch)
+    assert emitted[0][0] == oc.OFFPOLICY_GATE_EVENT
+    assert emitted[0][1]["backend"] == label
+    assert emitted[0][1]["granularity"] == oc.GRANULARITY_TRAJECTORY
+
 # -- L6.9 A_hard >= 2 ----------------------------------------------------------
 
 

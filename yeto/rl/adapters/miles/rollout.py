@@ -460,6 +460,7 @@ def handle_from_metadata(
         aborted_in_flight_tokens=payload.get("aborted_in_flight_tokens"),
         aborted_in_flight_unknown_groups=payload.get("aborted_in_flight_unknown_groups"),
         abort_mechanism=MILES_ABORT_MECHANISM,
+        backend="miles",
         tool_wait_seconds=(
             float(payload["tool_wait_seconds"]) if "tool_wait_seconds" in payload else None
         ),

@@ -1263,7 +1263,7 @@ class IslandDriver:
         fields = dict(fields)
         groups = getattr(batch, "groups", ()) or ()
         gate = gate_from_carry_over(fields, kept=len(groups),
-                                    backend=getattr(batch, "backend", None) or "miles")
+                                    backend=getattr(batch, "backend", None) or "unknown")
         if gate:  # rl-offpolicy-correction-passthrough D6: its own event per round
             self.emit(OFFPOLICY_GATE_EVENT, rollout_id=rollout_id,
                       policy_version=int(getattr(batch, "policy_version", rollout_id)),
