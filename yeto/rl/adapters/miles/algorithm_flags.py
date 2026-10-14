@@ -276,6 +276,11 @@ _UNMAPPED = [
     "--value-target-type",
     "--hl-gauss-sigma-ratio",
     "--value-reward-range",  # two values; translation constant, never absorbed
+    # The streaming-SAO switches of the TB2.1 fork (agentenv/miles 16a9bea4)
+    # are not in the ports pin: ports carries the SAO recipe as the algorithm
+    # spec (yeto.rl.algos.sao.sao_algorithm_spec), so they are refused.
+    "--sao-online-recipe",
+    "--sao-compaction",
 ]
 
 MAPPINGS: dict[str, FlagMapping] = {row.flag: row for row in _builtin_rows()}

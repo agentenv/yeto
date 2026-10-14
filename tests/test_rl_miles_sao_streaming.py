@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -7,20 +8,13 @@ import pytest
 
 from yeto.protocol import PullRequest
 from yeto.rl.local_learner import ComponentIdentity
-from yeto.rl.adapters.miles.publish import (
-    get_current_published_policy_identity,
-    set_current_published_policy_identity,
-)
 from yeto.rl.adapters.miles.full_parameter.role_stream import (
     MilesFullParameterRoleStream,
-    RoleRoundResult,
     RoleStreamConfig,
     role_stream_session_contract_hash,
 )
-from yeto.rl.adapters.miles.models.sao_streaming import (
-    MilesSaoStreamingConfig,
-    MilesSaoStreamingPolicySync,
-)
+from yeto.rl.adapters.miles.full_parameter.session import FullParameterSyncConfig
+from yeto.rl.engine.full_parameter_sync import FullParameterSync
 
 
 class _Remote:
@@ -70,9 +64,9 @@ def _role_config(
 def test_role_sessions_are_domain_separated_and_dual_config_is_lockstep():
     actor = _role_config("actor", port=30100)
     critic = _role_config("critic", port=30101)
-    config = MilesSaoStreamingConfig(actor, critic)
+    config = FullParameterSyncConfig((actor, critic))
 
-    assert config.actor.role == "actor"
+    assert tuple(config.by_role()) == ("actor", "critic")
     assert role_stream_session_contract_hash("1" * 64, actor) != (
         role_stream_session_contract_hash("1" * 64, critic)
     )
@@ -95,17 +89,13 @@ def test_role_sessions_are_domain_separated_and_dual_config_is_lockstep():
         )
     )
     with pytest.raises(ValueError, match="distinct syncer ports"):
-        MilesSaoStreamingConfig(actor, _role_config("critic", port=30100))
+        FullParameterSyncConfig((actor, _role_config("critic", port=30100)))
     with pytest.raises(ValueError, match="lockstep"):
-        MilesSaoStreamingConfig(
-            actor,
-            _role_config("critic", port=30101, fragments=3, total_steps=6),
+        FullParameterSyncConfig(
+            (actor, _role_config("critic", port=30101, fragments=3, total_steps=6))
         )
     with pytest.raises(ValueError, match="lockstep"):
-        MilesSaoStreamingConfig(
-            actor,
-            replace(critic, pipeline_depth=1),
-        )
+        FullParameterSyncConfig((actor, replace(critic, pipeline_depth=1)))
 
 
 class _Client:
@@ -176,193 +166,30 @@ def test_role_stream_uses_sao_round_horizon_not_critic_adam_update_count():
     stream.release_candidate(candidates[0])
 
 
-class _FakeRoleStream:
-    def __init__(self, role: str, events: list[object]) -> None:
-        self.role = role
-        self.events = events
-        self.hashes = [
-            ("1" if role == "actor" else "8") * 64,
-            ("2" if role == "actor" else "9") * 64,
-            ("3" if role == "actor" else "a") * 64,
-        ]
-        self.round = 0
-        self.fragment_versions = (0, 0)
-        self.final_acknowledged = False
-        self.fail_ack_once = False
+def test_sao_island_builds_the_two_role_streaming_full_parameter_sync():
+    """SAO on ports is the shared full-parameter sync with actor and critic (P0-D8)."""
 
-    @property
-    def content_hash(self):
-        return self.hashes[self.round]
+    from yeto.rl.adapters.miles.entry import build_sync
 
-    @property
-    def finalizing(self):
-        return self.round == 2
-
-    async def initialize(self, model):
-        self.events.append(("initialize", self.role, model))
-
-    async def complete_local_round(self, *, rollout_id, trajectories):
-        self.round += 1
-        self.fragment_versions = (self.round, self.round)
-        terminal = self.round == 2
-        self.events.append(("train-boundary", self.role, rollout_id))
-        return RoleRoundResult(self.role, object(), (), (), terminal)
-
-    def ready_submission_candidates(self):
-        return ()
-
-    async def stage_available_broadcasts(self):
-        return ()
-
-    @property
-    def staged_fragment_versions(self):
-        return ()
-
-    def has_staged_broadcast(self, _fragment_id, _version):
-        return False
-
-    async def apply_staged_broadcast(self, _fragment_id, _version):
-        raise AssertionError("fake role has no staged broadcast")
-
-    async def wait_and_apply_final(self):
-        self.events.append(("final-apply", self.role))
-
-    def discard_detached_submission_cut(self):
-        self.events.append(("discard-submission", self.role))
-
-    def acknowledge_final(self):
-        if self.fail_ack_once:
-            self.fail_ack_once = False
-            self.events.append(("final-ack-failed", self.role))
-            raise RuntimeError(f"{self.role} ACK failed once")
-        if self.final_acknowledged:
-            self.events.append(("final-ack-replay", self.role))
-            return
-        self.events.append(("final-ack", self.role))
-        self.final_acknowledged = True
-
-    def close(self):
-        self.events.append(("close", self.role))
-
-
-@pytest.mark.asyncio
-async def test_actor_and_critic_commit_together_but_only_actor_forms_rollout_identity(
-    tmp_path,
-):
-    events = []
-    config = MilesSaoStreamingConfig(
-        _role_config("actor", port=30100),
-        _role_config("critic", port=30101),
+    config = FullParameterSyncConfig(
+        (_role_config("actor", port=30100), _role_config("critic", port=30101))
     )
-    args = SimpleNamespace(
-        start_rollout_id=0,
-        yeto_rl_trajectory_evidence_dir=str(tmp_path),
-        yeto_rl_event_tape=str(tmp_path / "events.jsonl"),
-        yeto_rl_learner_id=0,
-        yeto_rl_sync_preset="sao-streaming-full",
-        wandb=False,
+    args = SimpleNamespace(yeto_rl_full_parameter_config=config)
+    groups = {"actor": object(), "critic": object()}
+
+    sync, progress = build_sync(
+        args, yeto_policy_sync=True, runner=SimpleNamespace(run=asyncio.run), groups=groups
     )
-    sync = MilesSaoStreamingPolicySync(args, config)
-    sync.actor = _FakeRoleStream("actor", events)
-    sync.critic = _FakeRoleStream("critic", events)
-    sync._trajectory_evidence = lambda _rollout_id: object()
-    sync._record_round = lambda pending: events.append(
-        ("round", pending.rollout_id, pending.terminal)
-    )
-    sync._record_publication = lambda *, terminal: events.append(
-        ("publication", sync.published_rollout_id, terminal)
-    )
-    actor_model = object()
-    critic_model = object()
-    versions = []
-    identities = []
-    rollout_args = SimpleNamespace(yeto_rl_sync_preset="sao-streaming-full")
-    engine = SimpleNamespace(
-        update_weight_version=_Remote(
-            lambda token: versions.append(token) or events.append(("token", token))
+
+    assert isinstance(sync, FullParameterSync) and progress is None
+    assert sync.pairing.profile.roles == ("actor", "critic")
+    assert not sync.pairing.profile.sweep
+    assert sync.pairing.profile.local_horizon == 2
+    assert sync.actor is sync.pairing.streams["actor"]
+    with pytest.raises(ValueError, match="exactly one trainer group"):
+        build_sync(
+            args,
+            yeto_policy_sync=True,
+            runner=SimpleNamespace(run=asyncio.run),
+            groups={"actor": object()},
         )
-    )
-
-    def install_rollout_identity(version, policy_hash):
-        identities.append((version, policy_hash))
-        return set_current_published_policy_identity(
-            rollout_args,
-            policy_version=version,
-            policy_hash=policy_hash,
-        )
-
-    rollout_manager = SimpleNamespace(
-        set_external_policy_identity=_Remote(install_rollout_identity),
-    )
-
-    await sync.initialize(
-        actor_model=actor_model,
-        critic_model=critic_model,
-        rollout_manager=rollout_manager,
-    )
-    publication_info = SimpleNamespace(rollout_engines=[engine])
-    await sync.after_inference_publication(
-        rollout_id=None,
-        actor_model=actor_model,
-        publication_info=publication_info,
-    )
-    assert get_current_published_policy_identity(args, expected_policy_version=0) == (
-        0,
-        "1" * 64,
-    )
-    assert rollout_args.yeto_rl_policy_token == f"yeto:0:{'1' * 64}"
-
-    assert not await sync.after_local_train(
-        rollout_id=0,
-        actor_model=actor_model,
-        critic_model=critic_model,
-        rollout_data=object(),
-    )
-    await sync.after_inference_publication(
-        rollout_id=0,
-        actor_model=actor_model,
-        publication_info=publication_info,
-    )
-    assert versions[-1] == f"yeto:1:{'2' * 64}"
-    assert rollout_args.yeto_rl_policy_token == versions[-1]
-    assert "9" * 64 not in versions[-1]
-
-    assert await sync.after_local_train(
-        rollout_id=1,
-        actor_model=actor_model,
-        critic_model=critic_model,
-        rollout_data=object(),
-    )
-    assert not any(event[0] == "final-ack" for event in events)
-    sync.critic.fail_ack_once = True
-    with pytest.raises(RuntimeError, match="terminal ACK publication failed"):
-        await sync.after_inference_publication(
-            rollout_id=1,
-            actor_model=actor_model,
-            publication_info=publication_info,
-        )
-    assert sync.actor.final_acknowledged
-    assert not sync.critic.final_acknowledged
-    assert sync.pending_publication is not None
-    assert not sync.finished
-    await sync.after_inference_publication(
-        rollout_id=1,
-        actor_model=actor_model,
-        publication_info=publication_info,
-    )
-    assert identities[-1] == (2, "3" * 64)
-    terminal_token_indices = [
-        index
-        for index, event in enumerate(events)
-        if event[0] == "token" and event[1].startswith("yeto:2:")
-    ]
-    ack_indices = [
-        index for index, event in enumerate(events) if event[0] == "final-ack"
-    ]
-    assert len(terminal_token_indices) == 2
-    assert ack_indices and all(
-        index > terminal_token_indices[0] for index in ack_indices
-    )
-
-    await sync.finalize()
-    assert events[-2:] == [("close", "actor"), ("close", "critic")]

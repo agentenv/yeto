@@ -95,7 +95,7 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--sync-preset",
-        choices=["strict-avg", "decoupled", "dense-full"],
+        choices=["strict-avg", "decoupled", "dense-full", "sao-streaming-full"],
         default="strict-avg",
     )
     parser.add_argument("--fragments", type=int, default=1)
@@ -106,6 +106,17 @@ def parse_args(argv=None):
         help="full-parameter mode: the launcher-computed syncer semantic profile hash "
         "(yeto.syncer_profile), bound into every role's HELLO",
     )
+    # The SAO streaming run contract (P0-1.7b.3).  These three flags move into
+    # the flag schema (adapters/miles/run_flags.py, P0-4.7) when that merges.
+    parser.add_argument(
+        "--sao-streaming-runtime",
+        default=None,
+        metavar="PATH",
+        help="--sync-preset sao-streaming-full: the immutable SAO streaming runtime "
+        "contract (yeto.rl.sao_streaming_runtime)",
+    )
+    parser.add_argument("--sao-streaming-runtime-sha256", default=None, metavar="HEX")
+    parser.add_argument("--sao-context-sha256", default=None, metavar="HEX")
     parser.add_argument("--pipeline", type=int, default=1)
     parser.add_argument("--local-horizon", type=int, default=1)
     parser.add_argument("--total-fragment-steps", type=int, default=None)
@@ -326,8 +337,23 @@ def parse_args(argv=None):
         args.lora_r is None or args.lora_targets is None
     ):
         parser.error("LoRA mode requires --lora-r and --lora-targets")
-    if (args.parameter_mode == "full") != (args.sync_preset == "dense-full"):
-        parser.error("--parameter-mode full requires --sync-preset dense-full")
+    from yeto.rl.engine.selection import FULL_PARAMETER_SYNC_PRESETS, SAO_STREAMING_SYNC_PRESET
+
+    if (args.parameter_mode == "full") != (args.sync_preset in FULL_PARAMETER_SYNC_PRESETS):
+        parser.error(
+            "--parameter-mode full requires a full-parameter --sync-preset "
+            f"({', '.join(sorted(FULL_PARAMETER_SYNC_PRESETS))})"
+        )
+    sao_runtime = (
+        args.sao_streaming_runtime,
+        args.sao_streaming_runtime_sha256,
+        args.sao_context_sha256,
+    )
+    if (args.sync_preset == SAO_STREAMING_SYNC_PRESET) != all(value is not None for value in sao_runtime):
+        parser.error(
+            "--sync-preset sao-streaming-full requires --sao-streaming-runtime, "
+            "--sao-streaming-runtime-sha256 and --sao-context-sha256, and only it takes them"
+        )
     if not args.eval_only and not args.inner_lr > 0:
         # A zero LR would only surface as the zero-LR invariant failing round 1.
         parser.error(f"--inner-lr must be > 0 for a training run (got {args.inner_lr})")
@@ -791,6 +817,34 @@ def _is_sha256(value: Any) -> bool:
     return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
 
 
+def _full_parameter_mode(parameter_mode: str, sync_preset: str) -> bool:
+    """True for a full-parameter island; mode and preset must agree."""
+
+    from yeto.rl.engine.selection import FULL_PARAMETER_SYNC_PRESETS
+
+    full_preset = sync_preset in FULL_PARAMETER_SYNC_PRESETS
+    if (parameter_mode == "full") != full_preset:
+        raise ValueError("a full-parameter sync preset and full parameter mode must be selected together")
+    return full_preset
+
+
+def _check_full_parameter_sync(args, *, rl_engine: str, yeto_policy_sync: bool) -> None:
+    """Every full-parameter island runs the ports full-parameter sync (P0-D8)."""
+
+    if rl_engine != "ports":
+        raise ValueError("full-parameter training runs only on the ports engine")
+    if not yeto_policy_sync:
+        raise ValueError("full-parameter training requires Yeto policy sync")
+    if getattr(args, "eval_only", False):
+        raise ValueError("full-parameter mode does not run eval-only")
+    if int(getattr(args, "rl_max_policy_age", 0) or 0) != 0:
+        # The round's trajectory evidence binds one behavior policy (the
+        # published cut); mixed-version batches need an evidence format that
+        # records each trajectory's version first.  This applies to dense-full
+        # as well as to SAO streaming; P0-S lifts it for both.
+        raise ValueError("full-parameter training does not support --rl-max-policy-age > 0 yet")
+
+
 def _check_dense_full_sweep(args, *, rl_engine: str, yeto_policy_sync: bool) -> None:
     """Dense full-parameter GRPO is the strict-sweep profile of the ports
     full-parameter sync (P0-D8): one role, H=1, whole-round fragment sweeps.
@@ -800,12 +854,7 @@ def _check_dense_full_sweep(args, *, rl_engine: str, yeto_policy_sync: bool) -> 
     the start version and the launcher owns the roster.
     """
 
-    if rl_engine != "ports":
-        raise ValueError("dense full-parameter GRPO runs only on the ports engine")
-    if not yeto_policy_sync:
-        raise ValueError("dense full-parameter GRPO requires Yeto policy sync")
-    if getattr(args, "eval_only", False):
-        raise ValueError("dense full-parameter mode does not run eval-only")
+    _check_full_parameter_sync(args, rl_engine=rl_engine, yeto_policy_sync=yeto_policy_sync)
     if args.optimizer_steps != 1 or getattr(args, "local_horizon", 1) != 1:
         raise ValueError("the dense full-parameter strict sweep requires H=1")
     if (
@@ -880,7 +929,31 @@ def _dense_full_sync_config(
     return FullParameterSyncConfig((actor,), sweep=True)
 
 
-def _require_unquantized_dense_full_rollout_model(model_path: str | Path) -> None:
+def _load_sao_streaming_runtime(args):
+    """Load the hash-bound SAO streaming contract before any GPU work."""
+
+    from yeto.rl.adapters.miles.full_parameter.sao_binding import sao_sync_config
+    from yeto.rl.sao_streaming_runtime import load_sao_streaming_runtime
+
+    runtime = load_sao_streaming_runtime(
+        args.sao_streaming_runtime,
+        expected_sha256=args.sao_streaming_runtime_sha256,
+        expected_sao_context_sha256=args.sao_context_sha256,
+    )
+    if runtime.actor.learner_id != args.learner_id:
+        raise ValueError("SAO streaming runtime names a different learner")
+    if not getattr(args, "critic_syncer", None):
+        raise ValueError("SAO streaming requires --critic-syncer")
+    runtime = runtime.with_syncer_addresses(
+        actor=_syncer_address(args.syncer),
+        critic=_syncer_address(args.critic_syncer),
+    )
+    # Fail closed on the role pairing before any GPU work; bound later.
+    sao_sync_config(runtime)
+    return runtime
+
+
+def _require_unquantized_full_parameter_rollout_model(model_path: str | Path) -> None:
     """Enable the pinned SGLang BF16 hook fallback only for an exact safe model.
 
     The public SGLang pin used by the Milestone-1 gate predates the optional
@@ -892,7 +965,7 @@ def _require_unquantized_dense_full_rollout_model(model_path: str | Path) -> Non
 
     config_path = Path(model_path) / "config.json"
     if not config_path.is_file():
-        raise ValueError("dense full-parameter rollout model has no config.json")
+        raise ValueError("full-parameter rollout model has no config.json")
 
     def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         result: dict[str, Any] = {}
@@ -908,9 +981,9 @@ def _require_unquantized_dense_full_rollout_model(model_path: str | Path) -> Non
             object_pairs_hook=unique_object,
         )
     except (OSError, UnicodeError, ValueError) as exc:
-        raise ValueError("dense full-parameter rollout config is malformed") from exc
+        raise ValueError("full-parameter rollout config is malformed") from exc
     if not isinstance(config, dict):
-        raise TypeError("dense full-parameter rollout config must be an object")
+        raise TypeError("full-parameter rollout config must be an object")
     configured = sorted(
         name
         for name in _DENSE_FULL_QUANTIZATION_CONFIG_KEYS
@@ -2274,15 +2347,18 @@ def run_miles(
         from yeto.rl.adapters.miles.state import require_run_plugin
 
         require_run_plugin()
+    from yeto.rl.engine.selection import DENSE_FULL_SYNC_PRESET, SAO_STREAMING_SYNC_PRESET
+
     parameter_mode = getattr(args, "parameter_mode", "lora")
     sync_preset = getattr(args, "sync_preset", "strict-avg")
-    dense_full = parameter_mode == "full" or sync_preset == "dense-full"
-    if dense_full and not (
-        parameter_mode == "full" and sync_preset == "dense-full"
-    ):
-        raise ValueError("dense-full sync and full parameter mode must be selected together")
+    full_parameter = _full_parameter_mode(parameter_mode, sync_preset)
+    dense_full = sync_preset == DENSE_FULL_SYNC_PRESET
+    sao_runtime = None
     if dense_full:
         _check_dense_full_sweep(args, rl_engine=rl_engine, yeto_policy_sync=yeto_policy_sync)
+    elif sync_preset == SAO_STREAMING_SYNC_PRESET:
+        _check_full_parameter_sync(args, rl_engine=rl_engine, yeto_policy_sync=yeto_policy_sync)
+        sao_runtime = _load_sao_streaming_runtime(args)
 
     if (
         yeto_policy_sync
@@ -2296,7 +2372,7 @@ def run_miles(
         and args.lora_targets == "attention-routed-experts"
     )
     expert_full = int(getattr(args, "expert_full_count", 0) or 0) > 0
-    if dense_full and expert_full:
+    if full_parameter and expert_full:
         raise ValueError("full-parameter mode cannot also select expert-full tuning")
 
     def require_env(name: str, value: str) -> None:
@@ -2305,8 +2381,8 @@ def run_miles(
             raise ValueError(f"{name} must be unset or {value}, got {current!r}")
         os.environ[name] = value
 
-    if dense_full:
-        _require_unquantized_dense_full_rollout_model(
+    if full_parameter:
+        _require_unquantized_full_parameter_rollout_model(
             rollout_model_path or model_path
         )
         require_env("MILES_EXPERIMENTAL_FT_TRAINER", "0")
@@ -2350,7 +2426,7 @@ def run_miles(
         # from the aliased AutoConfig instead (FN-IMAGE-PLAN option (c)).
         if rl_engine != "ports":
             raise ValueError("Qwen3.8-Flash-Next runs only on the ports engine")
-        if dense_full or expert_full or clone_only_lora:
+        if full_parameter or expert_full or clone_only_lora:
             raise ValueError("the Qwen3.8-Flash-Next recipe is native-LoRA only")
         if yeto_policy_sync:
             raise ValueError(
@@ -2373,7 +2449,7 @@ def run_miles(
         )
         provider = model_bridge.to_megatron_provider(load_weights=False)
         provider.finalize()
-        attention_specs = () if dense_full else derive_peft_lora_specs(
+        attention_specs = () if full_parameter else derive_peft_lora_specs(
             model_path,
             None,
             rank=args.lora_r,
@@ -2401,8 +2477,8 @@ def run_miles(
                     )
                 )
             )
-        canonical_targets = [] if dense_full else adapter_targets(attention_specs)
-        miles_targets = [] if dense_full else megatron_adapter_targets(
+        canonical_targets = [] if full_parameter else adapter_targets(attention_specs)
+        miles_targets = [] if full_parameter else megatron_adapter_targets(
             attention_specs,
             model_bridge,
             standard_grouped_experts=clone_only_lora,
@@ -2479,19 +2555,20 @@ def run_miles(
             or ()
         )
     if yeto_policy_sync:
-        if dense_full:
+        if full_parameter:
             from yeto.provenance import file_sha256
 
             model_config_path = Path(model_path) / "config.json"
             if not model_config_path.is_file():
                 raise ValueError("full-parameter model has no config.json")
             model_config_hash = file_sha256(model_config_path)
-            training_contract_hash = _dense_full_training_contract_sha256(
-                args,
-                miles_argv,
-                model_config_sha256=model_config_hash,
-                prompt_data_sha256=file_sha256(prompt_path),
-            )
+            if dense_full:
+                training_contract_hash = _dense_full_training_contract_sha256(
+                    args,
+                    miles_argv,
+                    model_config_sha256=model_config_hash,
+                    prompt_data_sha256=file_sha256(prompt_path),
+                )
             layout_hash = model_config_hash
             lora_config_hash = _canonical_sha256(
                 {
@@ -2571,9 +2648,7 @@ def run_miles(
                 _private_trajectory_evidence_dir(args)
             )
             miles_args.yeto_rl_trajectory_evidence_kind = "secrlenv"
-            miles_args.yeto_rl_trajectory_evidence_schema_version = (
-                2 if bool(getattr(miles_args, "sao_compaction", False)) else 1
-            )
+            miles_args.yeto_rl_trajectory_evidence_schema_version = 1
             setattr(
                 miles_args,
                 CONFIG_ATTRIBUTE,
@@ -2583,6 +2658,25 @@ def run_miles(
                     training_contract_sha256=training_contract_hash,
                 ),
             )
+        elif sao_runtime is not None:
+            from yeto.rl.adapters.miles.full_parameter.sao_binding import (
+                bind_sao_streaming_runtime,
+            )
+
+            # Two-role (actor + critic) full-parameter sync; the ports rollout
+            # hook writes the round evidence the runtime directory names.
+            # The contract names a fresh evidence directory under the island's
+            # run root; the island creates that root, the bind the directory
+            # (0o700, checked there).  A root that already exists may be
+            # readable by others (the evidence directory is private), but no
+            # one else may write to it: they could replace the directory.
+            evidence_root = sao_runtime.trajectory_evidence_dir.parent
+            evidence_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if evidence_root.stat().st_mode & 0o022:
+                raise ValueError(
+                    f"SAO trajectory evidence root {evidence_root} is writable by others"
+                )
+            bind_sao_streaming_runtime(miles_args, sao_runtime)
         elif sync_preset == "decoupled":
             from yeto.protocol import layout_fingerprint
             from yeto.rl.core import build_rl_fragment_layout

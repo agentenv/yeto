@@ -17,7 +17,8 @@ from .contracts import TrajectoryEnvelope
 _LEGACY_SCHEMA = 1
 _SCHEMA = 2
 _SHA256 = frozenset("0123456789abcdef")
-_EVIDENCE_KINDS = frozenset({"secrlenv", "terminal-bench-2.1"})
+EVIDENCE_KINDS = frozenset({"secrlenv", "terminal-bench-2.1"})
+EVIDENCE_SCHEMA_VERSIONS = frozenset({_LEGACY_SCHEMA, _SCHEMA})
 _LEGACY_ENVELOPE_FIELDS = (
     "trajectory_id",
     "task_id",
@@ -80,7 +81,7 @@ def build_trajectory_batch_evidence(
     _nonnegative_int("rollout_id", rollout_id)
     _sha256("behavior_policy_hash", behavior_policy_hash)
     _sha256("reward_contract_hash", reward_contract_hash)
-    if evidence_kind not in _EVIDENCE_KINDS:
+    if evidence_kind not in EVIDENCE_KINDS:
         raise ValueError(f"unsupported trajectory evidence kind: {evidence_kind!r}")
     if not groups or any(
         not isinstance(group, Sequence)
@@ -768,7 +769,7 @@ def _validate_batch_evidence(evidence: TrajectoryBatchEvidence) -> None:
         raise ValueError("trajectory evidence trained-token count is invalid")
     if evidence.schema_version not in {_LEGACY_SCHEMA, _SCHEMA}:
         raise ValueError("trajectory evidence schema is unsupported")
-    if evidence.evidence_kind not in _EVIDENCE_KINDS:
+    if evidence.evidence_kind not in EVIDENCE_KINDS:
         raise ValueError("trajectory evidence kind is unsupported")
     if (
         evidence.schema_version == _LEGACY_SCHEMA

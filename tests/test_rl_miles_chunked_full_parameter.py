@@ -380,7 +380,7 @@ async def test_sao_local_round_receipts_are_role_generic_and_content_bound():
         learner_generation=5,
         trajectories=_evidence(
             rollout_id=17,
-            behavior_policy_hash=relabeled.content_hash,
+            behavior_policy_hash=relabeled.policy_hash,
         ),
         role="actor",
         expected_local_step_generation=4,
@@ -388,7 +388,9 @@ async def test_sao_local_round_receipts_are_role_generic_and_content_bound():
     )
     assert actor_group.calls == [(9, 17)]
     assert actor_receipt.algorithm == "sao"
-    assert actor_receipt.base_policy_hash == actor_anchor.content_hash
+    # ports publishes the cut identity (policy_tensor_hash), so the receipt
+    # binds the relabeled anchor's identity, not its content.
+    assert actor_receipt.base_policy_hash == relabeled.policy_hash
     assert actor_receipt.optimizer_steps == 3
 
     critic_adapter = MilesChunkedFullParameterAdapter.create(
@@ -430,13 +432,13 @@ async def test_sao_local_round_receipts_are_role_generic_and_content_bound():
         # critic parameter identity.
         trajectories=_evidence(
             rollout_id=17,
-            behavior_policy_hash=actor_anchor.content_hash,
+            behavior_policy_hash=relabeled.policy_hash,
         ),
         role="critic",
         expected_local_step_generation=7,
         expected_optimizer_steps=2,
     )
-    assert critic_receipt.base_policy_hash == critic_anchor.content_hash
+    assert critic_receipt.base_policy_hash == critic_anchor.policy_hash
     assert critic_receipt.input_batch_hash == actor_receipt.input_batch_hash
     assert critic_receipt.trajectory_ids == actor_receipt.trajectory_ids
 
@@ -491,7 +493,7 @@ async def test_sao_actor_local_round_rejects_wrong_behavior_or_rank_progress():
             learner_generation=0,
             trajectories=_evidence(
                 rollout_id=8,
-                behavior_policy_hash=anchor.content_hash,
+                behavior_policy_hash=anchor.policy_hash,
             ),
             role="actor",
             expected_local_step_generation=2,

@@ -156,6 +156,12 @@ def record_trained_groups(args: Any, data: Sequence[Sequence[Any]]) -> None:
 
     refresh_segment_counts([s for group in data for s in _flat(group)])
     setattr(args, _TRAINED_ATTR, {_group_key(group) for group in data})
+    # Full-parameter islands (P0-D8): bind the exact accepted batch, after the
+    # final loss masks, for the role streams to read at the round boundary.
+    from .full_parameter.evidence import evidence_enabled, persist_published_round_evidence
+
+    if evidence_enabled(args):
+        persist_published_round_evidence(args, data, current_policy_token())
 
 
 def _reward(args: Any, sample: Any) -> float:

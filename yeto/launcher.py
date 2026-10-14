@@ -670,22 +670,43 @@ def rl_dense_sweep(args) -> bool:
             and getattr(args, "rl_sync_preset", None) == "dense-full")
 
 
-def _syncer_policy_sweep(args) -> str:
-    """dense-full: strict P-fragment policy sweeps, HELLO bound to the profile hash."""
-    if not rl_dense_sweep(args):
-        return ""
-    return f" --policy-sweep-fragments {args.fragments} --require-profile-binding"
+def rl_sao_streaming(args) -> bool:
+    return (getattr(args, "training_mode", "sft") == "rl"
+            and getattr(args, "rl_sync_preset", None) == "sao-streaming-full")
+
+
+def _syncer_profile_binding(args) -> str:
+    """Full-parameter presets bind every HELLO to the syncer's semantic profile.
+
+    dense-full adds strict P-fragment policy sweeps; sao-streaming-full adds the
+    frozen contract's timeouts and the publishable final checkpoint."""
+    if rl_dense_sweep(args):
+        return f" --policy-sweep-fragments {args.fragments} --require-profile-binding"
+    if rl_sao_streaming(args):
+        profile = args.rl_sao_manifest.profile
+        return (f" --quorum-timeout-s {profile.quorum_timeout_s}"
+                f" --final-ack-timeout-s {profile.final_ack_timeout_s}"
+                " --mark-final-checkpoint --require-profile-binding")
+    return ""
 
 
 def rl_syncer_profile(args, num_learners: int):
-    """The semantic profile of :func:`_rl_role_syncer_command` for a dense
-    sweep, as the Rust syncer hashes it (yeto.syncer_profile). Islands send
-    its sha256 in HELLO (``--syncer-profile-sha256``, P0-1.7b.1-Q6)."""
+    """The semantic profile of :func:`_rl_role_syncer_command` for a
+    full-parameter preset, as the Rust syncer hashes it (yeto.syncer_profile).
+    Islands send its sha256 in HELLO (``--syncer-profile-sha256``,
+    P0-1.7b.1-Q6; the SAO runtime contracts carry the same hash)."""
     from .syncer_profile import SYNCER_SEMANTIC_PROFILE_SCHEMA, SyncerSemanticProfile
 
-    if not rl_dense_sweep(args):
-        raise ValueError("only the dense-full syncer is bound to a semantic profile")
-    timeout = _rl_quorum_timeout_s(args) or SYNCER_DEFAULT_QUORUM_TIMEOUT_S
+    if rl_dense_sweep(args):
+        quorum_timeout = _rl_quorum_timeout_s(args) or SYNCER_DEFAULT_QUORUM_TIMEOUT_S
+        final_ack_timeout = quorum_timeout
+        sweep_fragments, mark_final = args.fragments, False
+    elif rl_sao_streaming(args):
+        frozen = args.rl_sao_manifest.profile
+        quorum_timeout, final_ack_timeout = frozen.quorum_timeout_s, frozen.final_ack_timeout_s
+        sweep_fragments, mark_final = None, True
+    else:
+        raise ValueError("only full-parameter syncers are bound to a semantic profile")
     return SyncerSemanticProfile.from_mapping({
         "schema": SYNCER_SEMANTIC_PROFILE_SCHEMA,
         "learners": num_learners,
@@ -697,16 +718,16 @@ def rl_syncer_profile(args, num_learners: int):
         "min_round_interval_ms": 0,
         "sync_interval_steps": args.sync_interval_steps,
         "delta_correction": args.delta_correction,
-        "quorum_timeout_s": timeout,
-        "final_ack_timeout_s": timeout,
+        "quorum_timeout_s": quorum_timeout,
+        "final_ack_timeout_s": final_ack_timeout,
         "total_steps": args.rl_total_fragment_steps,
-        "policy_sweep_fragments": args.fragments,
+        "policy_sweep_fragments": sweep_fragments,
         "outer_lr": args.outer_lr,
         "outer_momentum": args.outer_momentum,
         "checkpoint_enabled": True,
         "checkpoint_every": 1,
         "resume": False,  # not hashed (v2): fresh start and restart agree
-        "mark_final_checkpoint": False,
+        "mark_final_checkpoint": mark_final,
         "learner_budget_steps": None,
         "max_base_lag": 0,
         "learner_weight": "equal",
@@ -945,7 +966,7 @@ def _rl_role_syncer_command(args, num_learners: int, binary: str,
         f"{_syncer_quorum_timeout(args)}"
         f"{_syncer_island_scheduling(args)}"
         f"{_syncer_expected_contract(args)}"
-        f"{_syncer_policy_sweep(args)}"
+        f"{_syncer_profile_binding(args)}"
         f" --outer-lr {args.outer_lr}"
         f" --outer-momentum {args.outer_momentum}"
         " --max-base-lag 0 --learner-weight equal"
@@ -2391,6 +2412,103 @@ def _default_session_server_port(args) -> None:
         args.session_server_port = [DEFAULT_SESSION_SERVER_PORT]
 
 
+def _f32_shortest(value: float) -> float:
+    """The shortest decimal of an f32 value, as the Rust syncer parses it back."""
+    return float(f"{value:.7g}")
+
+
+def _adopt_contract_settings(args, adopted: dict, *, source: str) -> None:
+    """Set launch settings a frozen contract owns.
+
+    A setting at its CLI default takes the contract value; any other value
+    that differs from the contract is a conflict, not silently overridden.
+    (A value typed equal to the CLI default cannot be told apart from the
+    default and is treated as not given.)"""
+    import argparse
+
+    from .cli import _add_launch_args
+
+    parser = argparse.ArgumentParser()
+    _add_launch_args(parser)
+    conflicts = []
+    for dest, value in adopted.items():
+        given = getattr(args, dest)
+        if given != parser.get_default(dest) and given != value:
+            conflicts.append(f"--{dest.replace('_', '-')} {given} (contract: {value})")
+    if conflicts:
+        raise ValueError(f"settings conflict with the {source}: " + "; ".join(conflicts))
+    for dest, value in adopted.items():
+        setattr(args, dest, value)
+
+
+def _prepare_sao_streaming(args, *, num_islands: int) -> None:
+    """sao-streaming-full (P0-1.7b.3): actor and critic full-parameter streams.
+
+    The contract bundle freezes the syncer semantic profile; the launcher
+    adopts it, starts one syncer per role with exactly that profile and checks
+    that its own rendering hashes to the frozen value."""
+    from .rl.sao_streaming_manifest import load_sao_streaming_manifest
+
+    problems = []
+    if getattr(args, "rl_engine", "ports") != "ports":
+        problems.append("--rl-engine ports")
+    if getattr(args, "rl_placement", "colocated") != "fixed-partition":
+        problems.append("--rl-placement fixed-partition (dedicated rollout GPUs)")
+    if not getattr(args, "rl_sao_contracts", None):
+        problems.append("--rl-sao-contracts <final manifest>")
+    if args.experimental_rl_sync:
+        problems.append("no --experimental-rl-sync")
+    if island_scheduling_mode(args) != "legacy":
+        problems.append("--rl-island-scheduling legacy (no fragment frames in elastic mode)")
+    if rl_trainable_roles(args) != ("actor", "critic"):
+        problems.append("an algorithm with a critic (the SAO spec trains actor and critic)")
+    if getattr(args, "rl_single_island_no_sync", False):
+        problems.append("the role syncers (no --rl-single-island-no-sync)")
+    if problems:
+        raise ValueError("--rl-sync-preset sao-streaming-full requires " + "; ".join(problems))
+    manifest = load_sao_streaming_manifest(args.rl_sao_contracts)
+    profile = manifest.profile
+    if profile.learners != num_islands:
+        raise ValueError(f"the SAO contracts name {profile.learners} islands, the launch "
+                         f"has {num_islands}")
+    served = tuple((role, ROLE_SYNCERS[role].port) for role in rl_trainable_roles(args))
+    if any(island.role_ports != served for island in manifest.islands):
+        raise ValueError("the SAO contracts name role syncer ports the launch does not "
+                         f"serve ({served})")
+    horizons = {island.local_horizon for island in manifest.islands}
+    if len(horizons) != 1:
+        raise ValueError("the SAO contracts name different local horizons per island")
+    adopted = {
+        "quorum": profile.quorum,
+        "grace_ms": profile.grace_ms,
+        "grace_gamma": profile.grace_gamma,
+        "grace_tau": profile.grace_tau,
+        "pipeline": profile.pipeline,
+        "sync_interval_steps": profile.sync_interval_steps,
+        "delta_correction": profile.delta_correction,
+        # The syncer takes the outer optimizer settings as f32.
+        "outer_lr": _f32_shortest(profile.outer_lr),
+        "outer_momentum": _f32_shortest(profile.outer_momentum),
+        "fragments": manifest.expected_fragments,
+        "local_rl_rounds_per_sync": horizons.pop(),
+    }
+    _adopt_contract_settings(args, adopted, source="SAO contracts")
+    args.rl_sao_manifest = manifest
+    args.rl_total_fragment_steps = profile.total_steps
+    rendered = rl_syncer_profile(args, num_islands)
+    if rendered.sha256 != profile.sha256:
+        raise ValueError("the launcher's role syncers do not reproduce the frozen SAO "
+                         "syncer profile")
+
+
+def sao_contract_mounts(args, learner_id: int) -> dict[str, str]:
+    """This island's runtime contract and layout attestation, at the paths the
+    contract names."""
+    island = args.rl_sao_manifest.island(learner_id)
+    return {shipped.container_path: str(shipped.host_path)
+            for shipped in (island.runtime, island.layout_attestation)}
+
+
 def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
     """dense-full (P0-D8): one actor role swept as whole-model fragments.
 
@@ -2539,7 +2657,7 @@ def _prepare_rl_args(
         if args.local_rl_rounds_per_sync != 1:
             raise ValueError(f"--rl-sync-preset {args.rl_sync_preset} requires "
                              "--local-rl-rounds-per-sync 1 (strict sweep H=1)")
-    elif args.local_rl_rounds_per_sync < 2:
+    elif args.rl_sync_preset == "decoupled" and args.local_rl_rounds_per_sync < 2:
         raise ValueError("decoupled RL requires at least 2 local RL rounds per sync")
     if args.seq_len < 2:
         raise ValueError("RL v0 requires --seq-len >= 2")
@@ -2944,6 +3062,8 @@ def _prepare_rl_args(
     args.rl_total_fragment_steps = args.total_steps
     if args.rl_sync_preset != "dense-full" and getattr(args, "rl_parameter_layout_sha256", None):
         raise ValueError("--rl-parameter-layout-sha256 only applies to --rl-sync-preset dense-full")
+    if args.rl_sync_preset != "sao-streaming-full" and getattr(args, "rl_sao_contracts", None):
+        raise ValueError("--rl-sao-contracts only applies to --rl-sync-preset sao-streaming-full")
     if args.rl_sync_preset == "decoupled":
         if args.experimental_rl_sync:
             raise ValueError("decoupled RL does not accept --experimental-rl-sync")
@@ -2964,6 +3084,8 @@ def _prepare_rl_args(
         args.rl_total_fragment_steps = args.total_steps * args.fragments
     elif args.rl_sync_preset == "dense-full":
         _prepare_dense_full_sweep(args, num_islands=len(specs))
+    elif args.rl_sync_preset == "sao-streaming-full":
+        _prepare_sao_streaming(args, num_islands=len(specs))
     elif not args.experimental_rl_sync:
         args.fragments = 1
         args.quorum = len(specs)
@@ -4079,9 +4201,16 @@ def island_uses_ports_megatron(args) -> bool:
 from yeto.hw.catalog import COMPAT_GROUP_ENV, compat_group  # noqa: E402
 
 
-def _rl_trainable_island_flags(args, num_learners: int) -> str:
-    """LoRA rank/targets, or for dense-full the full-parameter sweep identity:
-    the probed layout hash, the frozen roster size and the syncer profile hash."""
+def _rl_trainable_island_flags(args, learner_id: int, num_learners: int) -> str:
+    """LoRA rank/targets; for dense-full the full-parameter sweep identity (the
+    probed layout hash, the frozen roster size and the syncer profile hash);
+    for sao-streaming-full this island's hash-bound runtime contract."""
+    if rl_sao_streaming(args):
+        island = args.rl_sao_manifest.island(learner_id)
+        return (" --parameter-mode full"
+                f" --sao-streaming-runtime {shlex.quote(island.runtime.container_path)}"
+                f" --sao-streaming-runtime-sha256 {island.runtime.sha256}"
+                f" --sao-context-sha256 {island.context_sha256}")
     if not rl_dense_sweep(args):
         return f" --lora-r {args.lora_r} --lora-targets {args.lora_targets}"
     return (" --parameter-mode full"
@@ -4156,7 +4285,7 @@ def make_miles_island_task(
         f" --pipeline-parallel {args.pipeline_parallel}"
         f" --rollout-num-gpus-per-engine {args.rollout_num_gpus_per_engine}"
         f" --sglang-mem-fraction-static {args.sglang_mem_fraction_static}"
-        + _rl_trainable_island_flags(args, num_learners)
+        + _rl_trainable_island_flags(args, learner_id, num_learners)
         + f" --inner-lr {args.inner_lr}"
         f" --seq-len {args.seq_len}"
         f" --seed {args.seed}"
@@ -4332,6 +4461,8 @@ def make_miles_island_task(
     local_token = os.path.expanduser(HF_TOKEN_PATH)
     if os.path.isfile(local_token):
         file_mounts[HF_TOKEN_PATH] = local_token
+    if rl_sao_streaming(args):
+        file_mounts.update(sao_contract_mounts(args, learner_id))
     if codex_launch is not None:
         codex_flags, codex_envs, codex_mounts = codex_launch
         flags += codex_flags

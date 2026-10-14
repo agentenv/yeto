@@ -42,10 +42,7 @@ from yeto.rl.engine.progress import (
 )
 from yeto.rl.compaction import validate_compaction_segments
 from yeto.rl.engine.events import append_tape_event as _append_rl_event
-from yeto.rl.adapters.miles.publish import (
-    _policy_token,
-    get_current_published_policy_identity,
-)
+from yeto.rl.adapters.miles.publish import _policy_token
 
 
 def _validate_rollout_groups(data: object, groups: int, samples: int) -> None:
@@ -74,10 +71,7 @@ def _validate_rollout_groups(data: object, groups: int, samples: int) -> None:
 
 
 def _policy_token_for_rollout(args, rollout_id: int) -> str:
-    if getattr(args, "yeto_rl_sync_preset", "strict-avg") not in {
-        "decoupled",
-        "sao-streaming-full",
-    }:
+    if getattr(args, "yeto_rl_sync_preset", "strict-avg") != "decoupled":
         return _policy_token(rollout_id)
     token = getattr(args, "yeto_rl_policy_token", None)
     if token is None:
@@ -688,45 +682,6 @@ def _attach_eval_scalar_metrics(output: Any) -> list[dict[str, Any]]:
     return results
 
 
-def _persist_trajectory_evidence(args: Any, rollout_id: int, groups: Any) -> None:
-    """Persist the closed accepted batch before Miles discards Sample metadata."""
-
-    directory = getattr(args, "yeto_rl_trajectory_evidence_dir", None)
-    if directory is None:
-        return
-    _, policy_hash = get_current_published_policy_identity(
-        args,
-        expected_policy_version=rollout_id,
-    )
-    reward_hash = getattr(args, "yeto_rl_reward_sha256", None)
-    evidence_kind = getattr(args, "yeto_rl_trajectory_evidence_kind", None)
-    if evidence_kind not in {"secrlenv", "terminal-bench-2.1"}:
-        raise RuntimeError(
-            "trajectory evidence kind is not bound by the launch context"
-        )
-    evidence_schema_version = getattr(
-        args, "yeto_rl_trajectory_evidence_schema_version", None
-    )
-    if evidence_schema_version not in {1, 2}:
-        raise RuntimeError(
-            "trajectory evidence schema is not bound by the launch context"
-        )
-    from yeto.rl.trajectory_evidence import (
-        build_trajectory_batch_evidence,
-        write_trajectory_batch_evidence,
-    )
-
-    evidence = build_trajectory_batch_evidence(
-        groups,
-        rollout_id=rollout_id,
-        behavior_policy_hash=policy_hash,
-        reward_contract_hash=reward_hash,
-        evidence_kind=evidence_kind,
-        schema_version=evidence_schema_version,
-    )
-    write_trajectory_batch_evidence(directory, evidence)
-
-
 def generate_rollout(args, rollout_id: int, data_source, evaluation: bool = False):
     """Keep Miles rollout, adding group/version queue contracts."""
 
@@ -818,7 +773,6 @@ def generate_rollout(args, rollout_id: int, data_source, evaluation: bool = Fals
         except StrictRlInvariantError as error:
             _record_strict_failure(args, error)
             raise
-        _persist_trajectory_evidence(args, rollout_id, output.samples)
         consumed = {_group_indices(group) for group in output.samples}
         data_source.buffer[:] = [
             group

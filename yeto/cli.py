@@ -747,10 +747,20 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     rl.add_argument("--local-rl-rounds-per-sync", type=int, default=1)
     rl.add_argument(
         "--rl-sync-preset",
-        choices=["strict-avg", "decoupled", "dense-full"],
+        choices=["strict-avg", "decoupled", "dense-full", "sao-streaming-full"],
         default="strict-avg",
         help="dense-full: full-parameter GRPO as strict whole-model fragment sweeps "
-        "(ports engine, --rl-placement fixed-partition, --rl-parameter-layout-sha256)",
+        "(ports engine, --rl-placement fixed-partition, --rl-parameter-layout-sha256); "
+        "sao-streaming-full: full-parameter SAO, actor and critic streams "
+        "(ports engine, --rl-placement fixed-partition, --rl-sao-contracts)",
+    )
+    rl.add_argument(
+        "--rl-sao-contracts",
+        default=None,
+        metavar="MANIFEST",
+        help="sao-streaming-full only: the final manifest written by "
+        "tools/probes/build_tbench21_sao_streaming_contracts.py finalize (frozen "
+        "syncer profile, one runtime contract and layout attestation per island)",
     )
     rl.add_argument(
         "--rl-parameter-layout-sha256",

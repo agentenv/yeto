@@ -151,11 +151,14 @@ def test_conflict_names_flag_and_both_values():
 
 
 @pytest.mark.parametrize("flag", ["--gamma", "--value-clip", "--lambd", "--use-routing-replay",
-                                  "--rollout-temperature", "--partial-rollout"])
+                                  "--rollout-temperature", "--partial-rollout",
+                                  # P0-1.7b.3: TB2.1-fork SAO switches; ports uses the spec
+                                  "--sao-online-recipe", "--sao-compaction"])
 def test_unmapped_objective_flag_rejected(flag):
     if flag in af.mapped_flags():
         pytest.skip(f"{flag} is mapped by a registered extension (EXTENSION_FLAGS)")
-    argv = [flag] if flag in ("--use-routing-replay", "--partial-rollout") else [flag, "0.9"]
+    switches = ("--use-routing-replay", "--partial-rollout", "--sao-compaction")
+    argv = [flag] if flag in switches else [flag, "0.9"]
     with pytest.raises(mc.MilesConfigError, match=flag):
         mc.check_extra_argv(argv)
     with pytest.raises(af.UnmappedAlgorithmFlag, match=flag):

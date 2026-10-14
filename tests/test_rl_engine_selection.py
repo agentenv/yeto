@@ -30,6 +30,19 @@ def test_supported_r0_combinations_pass():
         assert ports_rejections(sync_preset=preset, lora_targets="attention") == []
 
 
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        dict(sync_preset="sao-streaming-full", parameter_mode="full"),
+        dict(extra_argv=("--sao-dis-eps-low", "0.8", "--sao-dis-eps-high", "3.0")),
+    ],
+)
+def test_sao_runs_on_ports(kwargs):
+    # P0-1.7b.3: SAO streaming is the two-role full-parameter sync; the SAO
+    # flags are algorithm-spec flags the Miles translation absorbs.
+    assert ports_rejections(**kwargs) == []
+
+
 def test_ppo_is_not_routed_to_legacy():
     # rl-algo-critic-family 3.1: the critic is decided by the algorithm spec,
     # the capability declaration and the critic rejections, not by routing.
@@ -40,9 +53,9 @@ def test_ppo_is_not_routed_to_legacy():
 @pytest.mark.parametrize(
     "kwargs, reason",
     [
-        (dict(sync_preset="sao-streaming-full"), "SAO"),
-        (dict(extra_argv=("--sao-compaction",)), "SAO"),
         (dict(sync_preset="dense-full", parameter_mode="full", island_scheduling="elastic"), "elastic"),
+        (dict(sync_preset="sao-streaming-full", parameter_mode="full",
+              island_scheduling="elastic"), "elastic"),
         (dict(model_recipe="deepseek-v4-flash"), "DeepSeek V4"),
         (dict(lora_targets="attention-routed-experts"), "DeepSeek V4"),
         (dict(expert_full_count=4), "DeepSeek V4"),
@@ -306,7 +319,6 @@ def test_learner_parser_rejects_unsupported_ports_runs(extra, capsys):
     [
         (("--use-critic",), "critic"),
         (("--advantage-estimator", "gspo"), "non-GRPO"),
-        (("--sao-compaction",), "SAO"),
         (("--rollout-num-gpus", "4"), "fixed partition"),
     ],
 )
