@@ -358,3 +358,45 @@ def test_convert_paths_reads_directories_and_writes_rows(tmp_path):
 
     assert len(rows) == 1
     assert rows[0]["messages"][1]["content"] == "answer"
+
+
+def test_codex_session_tool_calls_become_tool_messages():
+    row = row_from_session_events(
+        [
+            {"type": "event_msg", "payload": {"type": "user_message", "message": "make page"}},
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "arguments": '{"cmd":"ls"}',
+                    "call_id": "c1",
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {"type": "function_call_output", "call_id": "c1", "output": "a.txt"},
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "name": "apply_patch",
+                    "input": "*** Begin Patch",
+                    "call_id": "c2",
+                },
+            },
+            {
+                "type": "response_item",
+                "payload": {"type": "custom_tool_call_output", "call_id": "c2", "output": "Success"},
+            },
+            {"type": "event_msg", "payload": {"type": "agent_message", "message": "done"}},
+        ]
+    )
+
+    msgs = row["messages"]
+    assert [m["role"] for m in msgs] == ["user", "assistant", "tool", "assistant", "tool", "assistant"]
+    assert msgs[1]["tool_calls"][0]["function"] == {"name": "exec_command", "arguments": '{"cmd":"ls"}'}
+    assert msgs[2] == {"role": "tool", "content": "a.txt", "tool_call_id": "c1"}
+    assert msgs[3]["tool_calls"][0]["function"] == {"name": "apply_patch", "arguments": "*** Begin Patch"}
+    assert msgs[4]["tool_call_id"] == "c2"
