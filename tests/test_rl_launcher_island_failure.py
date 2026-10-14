@@ -15,8 +15,8 @@ from test_rl_algorithm_provenance import _fake_sky, _launcher_args  # noqa: F401
 @pytest.fixture(autouse=True)
 def _no_modal_listing(monkeypatch):
     # provider listing after teardown: nothing listed (= stopped) unless a test says so
-    monkeypatch.setattr(launcher, "_list_modal_apps", lambda: [])
-    monkeypatch.setattr(launcher, "MODAL_STOP_VERIFY_DELAY_S", 0.0)
+    monkeypatch.setattr("yeto.launch.modal_islands._list_modal_apps", lambda: [])
+    monkeypatch.setattr("yeto.launch.modal_islands.MODAL_STOP_VERIFY_DELAY_S", 0.0)
 
 
 class Status:
@@ -57,7 +57,7 @@ def _setup(monkeypatch, tmp_path, *, failing, clock, record, succeeding=()):
     monkeypatch.setattr(launcher, "_tail_modal", lambda *a, **k: None)
     monkeypatch.setattr(launcher, "FAILED_RUN_DRAIN_S", 0.0, raising=False)
     monkeypatch.setattr(launcher.subprocess, "run", lambda *a, **k: None)
-    monkeypatch.setattr(launcher, "terminate_and_verify",
+    monkeypatch.setattr("yeto.launch.teardown.terminate_and_verify",
                         lambda sky, name, **k: record.append(("terminate", name)) or True)
     monkeypatch.setattr(modal_runner, "resolve_syncer_for_modal", lambda addr, public: addr)
 
@@ -135,7 +135,7 @@ def _setup(monkeypatch, tmp_path, *, failing, clock, record, succeeding=()):
     sky.launch = lambda task, **kw: f"rid-{kw.get('cluster_name')}"
     sky.stream_and_get = lambda rid: (1, types.SimpleNamespace(head_ip="10.0.0.1"))
     # the launcher probes every syncer port before starting islands (s13-g3b)
-    monkeypatch.setattr(launcher, "tcp_probe", lambda host, port, **kw: (True, f"{host}:{port} reachable"))
+    monkeypatch.setattr("yeto.launch.syncer.tcp_probe", lambda host, port, **kw: (True, f"{host}:{port} reachable"))
 
 
 @pytest.mark.parametrize("provider", ["modal", "sky"])
@@ -221,7 +221,7 @@ def _run_one_modal(monkeypatch, tmp_path, listing):
                           gpu="modal:1xa100")
     args.keep, args.recover_timeout = False, 0.0
     app = modal_runner.modal_app_name(args.cluster_prefix)
-    monkeypatch.setattr(launcher, "_list_modal_apps", lambda: listing(app))
+    monkeypatch.setattr("yeto.launch.modal_islands._list_modal_apps", lambda: listing(app))
     code = launcher.run(args)
     from yeto import runs
 

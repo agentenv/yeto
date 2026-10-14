@@ -183,7 +183,7 @@ def _fake_sky(monkeypatch):
 
 def test_hmac_key_is_secret_on_syncer_task(monkeypatch, tmp_path):
     _fake_sky(monkeypatch)
-    monkeypatch.setattr(launcher, "build_syncer_binary", lambda: tmp_path / "yeto-syncer")
+    monkeypatch.setattr("yeto.launch.syncer.build_syncer_binary", lambda: tmp_path / "yeto-syncer")
     import platform
     monkeypatch.setattr(platform, "system", lambda: "Linux")
     monkeypatch.setattr(platform, "machine", lambda: "x86_64")

@@ -213,6 +213,14 @@ ISLAND_ARGS_READERS = {
 RUN_WIDE_READERS = {"_prepare_sao_streaming", "_prepare_dense_full_sweep"}
 
 
+def _launcher_layer_tree() -> ast.Module:
+    """yeto/launcher.py and the yeto/launch package it composes, as one module."""
+    launcher_py = Path(inspect.getsourcefile(launcher))
+    files = [launcher_py, *sorted((launcher_py.parent / "launch").glob("*.py"))]
+    body = [node for f in files for node in ast.parse(f.read_text(encoding="utf-8")).body]
+    return ast.Module(body=body, type_ignores=[])
+
+
 def _placement_readers(tree: ast.AST) -> set[str]:
     """Functions that read a placement value from a variable named ``args``
     (``args.rl_placement`` or ``getattr(args, "rl_placement", ...)``)."""
@@ -237,13 +245,13 @@ def _placement_readers(tree: ast.AST) -> set[str]:
 
 
 def test_launcher_reads_placement_values_only_from_island_args():
-    tree = ast.parse(Path(inspect.getsourcefile(launcher)).read_text(encoding="utf-8"))
+    tree = _launcher_layer_tree()
     assert _placement_readers(tree) == ISLAND_ARGS_READERS | RUN_WIDE_READERS
 
 
 def test_island_tasks_are_built_only_through_island_task():
     """Every island task factory call passes the island's args (_island_task)."""
-    tree = ast.parse(Path(inspect.getsourcefile(launcher)).read_text(encoding="utf-8"))
+    tree = _launcher_layer_tree()
     callers = set()
     for func in ast.walk(tree):
         if isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):

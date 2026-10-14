@@ -740,7 +740,7 @@ def test_unverified_sky_disables_verda_recovery_only(monkeypatch, capsys):
     import yeto.sky_patches as patches
 
     monkeypatch.setattr(patches, "ensure_local_pth", lambda repo: ("/x/yeto_sky_patches.pth", False))
-    monkeypatch.setattr(launcher, "remote_sky_api_server", lambda: None)
+    monkeypatch.setattr("yeto.launch.verda.remote_sky_api_server", lambda: None)
     assert launcher.prepare_verda_islands(["l0"])["no_recover"] == set()
     # Hook only now written: a running server may be unpatched -> no recovery.
     monkeypatch.setattr(patches, "ensure_local_pth", lambda repo: ("/x/yeto_sky_patches.pth", True))
@@ -748,7 +748,7 @@ def test_unverified_sky_disables_verda_recovery_only(monkeypatch, capsys):
     assert prep["no_recover"] == {"l0"} and prep["pth_written"] == "/x/yeto_sky_patches.pth"
     # Remote API server: cannot be patched from here.
     monkeypatch.setattr(patches, "ensure_local_pth", lambda repo: ("/x/yeto_sky_patches.pth", False))
-    monkeypatch.setattr(launcher, "remote_sky_api_server", lambda: "https://sky.example.com")
+    monkeypatch.setattr("yeto.launch.verda.remote_sky_api_server", lambda: "https://sky.example.com")
     prep = launcher.prepare_verda_islands(["l0"])
     assert prep["no_recover"] == {"l0"} and "remote" in capsys.readouterr().err
 
@@ -792,7 +792,7 @@ def test_diagnostics_never_block_teardown(tmp_path, monkeypatch, mode):
 
     monkeypatch.setenv("YETO_TEARDOWN_DIAG", "1")
     downs = []
-    monkeypatch.setattr(launcher, "terminate_and_verify", lambda sky, c, **kw: downs.append(c) or True)
+    monkeypatch.setattr("yeto.launch.teardown.terminate_and_verify", lambda sky, c, **kw: downs.append(c) or True)
     collect = lambda c, head=False: launcher.collect_teardown_diagnostics(  # noqa: E731
         c, str(tmp_path), head=head, run=run, timeout=1)
     assert launcher.teardown_island(None, "c1", collect=collect) is True
@@ -917,7 +917,7 @@ def test_local_pth_for_the_sky_api_server(tmp_path, monkeypatch, capsys):
     assert remove_local_pth(path, "/other/worktree") is True and not os.path.exists(path)
     ensure_local_pth(str(REPO), site_dir=str(tmp_path))
     assert uninstall(site_dir=str(tmp_path)) == path and not os.path.exists(path)
-    monkeypatch.setattr(launcher, "remote_sky_api_server", lambda: None)
+    monkeypatch.setattr("yeto.launch.verda.remote_sky_api_server", lambda: None)
 
     monkeypatch.setattr(vp, "verified_for_current_sky", lambda: (True, ""))
     monkeypatch.setattr("yeto.shape.providers.write_verda_sky_catalog", lambda: "/tmp/x.csv")

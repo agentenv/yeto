@@ -87,7 +87,7 @@ def test_other_clouds_are_untouched_by_the_in_vm_path(monkeypatch, gpu):
     """The feature is keyed on IN_VM_DOCKER_CLOUDS only: with the set emptied the
     Nebius/AWS task is identical, and the normal task carries no in-VM markers."""
     _, task = _task_for(gpu, monkeypatch, env=LOGIN)
-    monkeypatch.setattr(launcher, "IN_VM_DOCKER_CLOUDS", frozenset())
+    monkeypatch.setattr("yeto.launch.rl_island_task.IN_VM_DOCKER_CLOUDS", frozenset())
     _, plain = _task_for(gpu, monkeypatch, env=LOGIN)
     for attr in ("setup", "run", "envs", "secrets", "num_nodes", "file_mounts"):
         assert getattr(task, attr) == getattr(plain, attr), attr

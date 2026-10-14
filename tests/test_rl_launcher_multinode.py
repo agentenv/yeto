@@ -195,7 +195,7 @@ def test_failure_path_teardown_verifies_every_node(monkeypatch):
         seen[cluster] = kw.get("num_nodes")
         return True
 
-    monkeypatch.setattr(launcher, "terminate_and_verify", fake_tv)
+    monkeypatch.setattr("yeto.launch.teardown.terminate_and_verify", fake_tv)
     monkeypatch.setitem(__import__("sys").modules, "sky", object())
     launcher.SkySDKOps(nodes_by_cluster={"isl-l0": 2}).down("isl-l0")
     launcher.SkySDKOps().down("other")

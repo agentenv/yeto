@@ -279,7 +279,8 @@ def _flag_literals(path: Path) -> set[str]:
 
 
 def test_launcher_flag_literals_are_schema_flags_or_pinned_non_rl_flags():
-    literals = (_flag_literals(REPO / "yeto/launcher.py")
+    launcher_layer = [REPO / "yeto/launcher.py", *sorted((REPO / "yeto/launch").glob("*.py"))]
+    literals = (set().union(*map(_flag_literals, launcher_layer))
                 | _flag_literals(REPO / "yeto/rl/adapters/miles/launch_flags.py"))
     island = {o for a in island_entry.build_parser()._actions for o in a.option_strings}
     launch = {o for a in _launch_parser()._actions for o in a.option_strings}
