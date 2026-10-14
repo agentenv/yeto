@@ -209,11 +209,13 @@ class FileSampleBuffer:
                     f"consumed cursor {cursor} outside {self._watermark}..{self._read} (watermark..selected)")
             self._watermark = int(cursor)
 
-    def backlog(self, current_version: int) -> BacklogStats:
-        """Samples not yet selected."""
+    def backlog(self, current_version: int, *, start: int | None = None) -> BacklogStats:
+        """Samples from ``start`` on; default: the samples not yet selected here.
+        A head that does not read the buffer passes the trainer's committed
+        watermark (:class:`CommittedBacklog`)."""
         with self._lock:
             self.refresh()
-            pending = self._entries[self._read:]
+            pending = self._entries[self._read if start is None else max(0, int(start)):]
             versions = Counter(e.behavior_version for e in pending)
             oldest = min(versions) if versions else None
             since = self.clock() - self.arrival_window_s
@@ -259,3 +261,30 @@ class FileSampleBuffer:
         if self._poller is not None:
             self._poller.join()
             self._poller = None
+
+
+class CommittedBacklog:
+    """The head's view of a buffer the trainer reads elsewhere (rl-trainer-start-stop
+    L5.3c, D4). The backlog starts at the consumed watermark the trainer committed
+    into its newest cut (``watermark()``, e.g. ``StoreCutLog.watermark``), not at a
+    cursor of this process. While a trainer runs, the samples it selected after its
+    newest cut still count as backlog (at most the rounds between two cuts)."""
+
+    def __init__(self, buffer: FileSampleBuffer, watermark: Callable[[], int | None]) -> None:
+        self.buffer = buffer
+        self._watermark = watermark
+
+    def backlog(self, current_version: int) -> BacklogStats:
+        return self.buffer.backlog(current_version, start=self._watermark() or 0)
+
+    def append(self, entry: SampleIndexEntry) -> None:
+        self.buffer.append(entry)
+
+    def select(self, consumer: str, limit: int) -> list[Selected]:
+        raise SampleBufferError("the head does not select: the trainer island reads the buffer")
+
+    def commit_consumed(self, cursor: int) -> None:
+        raise SampleBufferError("the head does not commit: the trainer island writes the watermark")
+
+    def on_arrival(self, callback: Callable[[], None]) -> None:
+        self.buffer.on_arrival(callback)

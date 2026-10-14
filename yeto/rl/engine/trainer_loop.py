@@ -15,6 +15,9 @@
    * ``Hold`` while ``TRAINING`` with at least one batch: train ``rounds_per_tick``
      rounds and return at the round boundary.
 
+A ``Stop(FINISHED)`` with no trainer running (the data ended with less than one
+batch left) ends the loop too; it is journaled as ``finished`` (no incarnation).
+
 The loop journals each start and stop (kind ``trainer_loop``) in the controller
 journal next to the scheduler state (kind ``trainer_scheduler_state``). After a head
 restart, :meth:`TrainerLoop.restore` reads both back: the scheduler continues with
@@ -64,6 +67,7 @@ STARTED = "started"
 READY = "ready"
 STOPPED = "stopped"
 ORPHANED = "orphaned"
+FINISHED = "finished"  # the data ended with no trainer running (incarnation None)
 
 Record = Callable[..., Any]  # journal.append(kind, **fields)
 
@@ -170,12 +174,18 @@ class TrainerLoop:
             self._journal(READY, plan.incarnation, version=self.handle.start_version)
             return
         if self.handle.state is not LifecycleState.STOPPED:
-            self.lifecycle.stop(self.handle, LeaveReason.FAILED)  # not ready in time
+            try:
+                self.lifecycle.stop(self.handle, LeaveReason.INFRA_FAILED)  # not ready in time
+            except LifecycleError:
+                pass  # no cut for a failure: the lifecycle released it; journaled below
         self._note_failure()
 
     def _stop(self, reason: LeaveReason) -> None:
         handle = self.handle
         if handle is None or handle.state is LifecycleState.STOPPED:
+            if reason is LeaveReason.FINISHED:  # the data ended, nothing left to train
+                self.finished = True
+                self._journal(FINISHED, None, remainder=self.buffer.backlog(self.current_version()).samples)
             return
         try:
             self.lifecycle.stop(handle, reason)
@@ -211,12 +221,14 @@ class TrainerLoop:
                       cut=None if cut is None else cut.cut_id,
                       trigger=None if cut is None else cut.trigger,
                       version=handle.trained_version,
+                      released=getattr(handle, "released", None),
                       error=None if handle.error is None else repr(handle.error))
 
     # ------------------------------------------------------------ journal (D8)
-    def _journal(self, event: str, incarnation: int, **fields: Any) -> None:
+    def _journal(self, event: str, incarnation: int | None, **fields: Any) -> None:
         if self._record is not None:
-            self._record(LOOP_KIND, event=event, incarnation=int(incarnation), **fields)
+            self._record(LOOP_KIND, event=event,
+                         incarnation=None if incarnation is None else int(incarnation), **fields)
 
     def restore(self, records: Iterable[Mapping[str, Any]]) -> bool:
         """Continue after a head restart. Returns False for a new run (no records)."""
@@ -226,7 +238,9 @@ class TrainerLoop:
         for r in records:
             if r.get("kind") != LOOP_KIND:
                 continue
-            if r["event"] == STARTED:
+            if r["event"] == FINISHED:
+                self.finished = True
+            elif r["event"] == STARTED:
                 self.started += 1
                 open_incarnation = int(r["incarnation"])
             elif r["event"] in (STOPPED, ORPHANED):
