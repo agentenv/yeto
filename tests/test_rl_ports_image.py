@@ -70,7 +70,7 @@ def test_build_inputs_match_the_pins():
 def test_commits_and_digest_are_pinned_together_with_the_build_record():
     """Commit pins, tag, Dockerfile ARGs and the image digest move together:
     the latest build record must name exactly the pinned commits and digest."""
-    record_dir = REPO / "openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-14-17aeb5c-2fa8801"
+    record_dir = REPO / "openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-14-44d41ef-2fa8801"
     record = json.loads((record_dir / "build-record.json").read_text())
     assert record["miles_commit"] == rl.MILES_NEXT_COMMIT
     assert record["sglang_commit"] == rl.SGLANG_NEXT_COMMIT
@@ -285,6 +285,52 @@ def test_layer_drops_megatron_bridges_eager_modelopt_import():
     assert {"megatron.bridge.models", "megatron.bridge.models.conversion.auto_bridge"} <= imported
     script = (REPO / "scripts/build_miles_ports_image.sh").read_text()
     assert ml.MEGATRON_BRIDGE_COMMIT in script and "lazy-modelopt" in script
+
+
+def _make_layer_module():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("make_layer", REPO / "docker/miles-ports/make_layer.py")
+    ml = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ml)
+    return ml
+
+
+def test_patched_files_applies_a_patch_to_the_commits_files(tmp_path):
+    ml = _make_layer_module()
+    repo = tmp_path / "repo"
+    run = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True, text=True)
+    (repo / "pkg").mkdir(parents=True)
+    run("init", "-q")
+    (repo / "pkg/a.py").write_text("import heavy\n\n\ndef f():\n    return heavy.x\n")
+    (repo / "pkg/b.py").write_text("untouched\n")
+    run("add", "-A")
+    run("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base")
+    head = run("rev-parse", "HEAD").stdout.strip()
+    (repo / "pkg/a.py").write_text("def f():\n    import heavy\n\n    return heavy.x\n")
+    patch = tmp_path / "lazy.patch"
+    patch.write_text(run("diff").stdout)
+    (repo / "pkg/a.py").write_text("worktree edits are ignored\n")
+
+    assert ml.patched_files(repo, head, patch) == {"pkg/a.py": b"def f():\n    import heavy\n\n    return heavy.x\n"}
+
+
+def test_megatron_lm_patch_drops_the_module_level_modelopt_imports():
+    """L2.2: the three Megatron-LM imports a trainer process ran (traced in the image) become lazy."""
+    ml = _make_layer_module()
+    patch = ml.MEGATRON_LM_PATCH.read_text()
+    files = [line[len("--- a/"):] for line in patch.splitlines() if line.startswith("--- a/")]
+    assert files == ["megatron/post_training/checkpointing.py", "megatron/training/checkpointing.py",
+                     "megatron/training/training.py"]
+    removed = {line[1:] for line in patch.splitlines() if line.startswith("-") and not line.startswith("---")}
+    assert {"import modelopt", "    from modelopt.torch.opt.plugins import save_modelopt_state, save_sharded_modelopt_state",
+            "    from modelopt.torch.distill.plugins.megatron import get_tensor_shapes_adjust_fn_for_distillation",
+            } <= removed
+    added = [line[1:] for line in patch.splitlines() if line.startswith("+") and not line.startswith("+++")]
+    # every modelopt import the patch adds sits in a function body (indented)
+    assert all(line.startswith("    ") for line in added if re.match(r"\s*(import|from) modelopt", line))
+    script = (REPO / "scripts/build_miles_ports_image.sh").read_text()
+    assert ml.MEGATRON_LM_COMMIT in script and "megatron_lm_lazy_modelopt.patch" in script
 
 
 def test_gpu_exact_needs_modal_islands():

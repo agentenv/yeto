@@ -19,7 +19,7 @@
 FROM docker.io/radixark/miles@sha256:4d69750720eb1a4b99976a3fed45ed018e1fc4fff3d240667fa17d258dfc6e0c
 
 ARG MILES_REPOSITORY=https://github.com/michaellchung/miles
-ARG MILES_COMMIT=17aeb5cb51635b9ba6ef4ca10db95762695c7e03
+ARG MILES_COMMIT=44d41efd0a0428cb12b4ee34422de6f5e1ccb9d9
 ARG SGLANG_REPOSITORY=https://github.com/michaellchung/sglang
 ARG SGLANG_COMMIT=2fa880182eefdb31e64d8ea70317be27f9f32121
 # setuptools-scm version of SGLANG_COMMIT (describe v0.5.20-69-g4e4148f1b);
@@ -51,6 +51,13 @@ RUN cd /sgl-workspace/sglang \
 # wheel unpack); island setup then reads it from the manifest, not by import.
 ARG PEFT_VERSION=0.20.0
 RUN pip install --no-deps "peft==$PEFT_VERSION"
+
+# Lazy modelopt (rl-trainer-cold-start-cost L2.2), as the crane layer: the
+# Megatron-Bridge package __init__ and the Megatron-LM patch.
+COPY megatron_bridge_init.py /opt/sglang/lib/python3.12/site-packages/megatron/bridge/__init__.py
+COPY megatron_lm_lazy_modelopt.patch /tmp/
+RUN cd /root/Megatron-LM && git apply /tmp/megatron_lm_lazy_modelopt.patch \
+ && rm /tmp/megatron_lm_lazy_modelopt.patch
 
 # Provenance (written by the build script: component SHAs + base digests).
 COPY --from=manifest image-manifest.json /opt/yeto/image-manifest.json

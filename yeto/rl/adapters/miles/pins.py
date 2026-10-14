@@ -49,10 +49,11 @@ MILES_NEXT_UPSTREAM_COMMIT = "9e4260de047a704208535c0e90c531929879ab40"
 # transport (95533a0cd, 5f7ac4e32, 587bd258a; P0-1.7b.2) + SAO streaming
 # primitives ported from agentenv/miles d5eb5e82a: content identity, per-role
 # chunks, critic group RPC (P0-1.7b.3)).
-# s24-miles-import (17aeb5cb5 = 386ae3b07 + light Ray actors stay off
-# megatron_utils (rl-trainer-cold-start-cost L2.1) + the master port is held
-# until use (S23 defect 9)).
-MILES_NEXT_COMMIT = "17aeb5cb51635b9ba6ef4ca10db95762695c7e03"
+# s24-miles-import2 (44d41efd0 = 17aeb5cb5 + the megatron_utils package
+# import stays light, so RayWorkerManager no longer loads megatron.bridge
+# (rl-trainer-cold-start-cost L2.2)).  17aeb5cb5 = 386ae3b07 + light Ray actors
+# stay off megatron_utils (L2.1) + the master port is held until use (S23 defect 9).
+MILES_NEXT_COMMIT = "44d41efd0a0428cb12b4ee34422de6f5e1ccb9d9"
 # sgl-project/sglang ``sglang-miles`` head when radixark/miles@9e4260d was
 # committed (upstream's Dockerfile follows that branch unpinned).
 SGLANG_NEXT_REPOSITORY = "https://github.com/michaellchung/sglang"
@@ -105,6 +106,8 @@ MILES_FORK_LINEAGE: tuple[str, ...] = (
     "386ae3b07138ccd45ce4a07fc0383587f7968a3a",
     # 17aeb5cb5 = + lazy imports for light actors, master port held (S24 L2.1); no loss path.
     "17aeb5cb51635b9ba6ef4ca10db95762695c7e03",
+    # 44d41efd0 = + megatron_utils runtime patches moved out of the package init (S24 L2.2); no loss path.
+    "44d41efd0a0428cb12b4ee34422de6f5e1ccb9d9",
 )
 
 
@@ -143,13 +146,16 @@ MILES_NEXT_BASE_IMAGE = (
 # every SHA.  PUBLIC on ghcr.io/michaellchung since 2026-10-07 (anonymous
 # pull); a private image needs SKYPILOT_DOCKER_{USERNAME,PASSWORD,SERVER} or
 # --rl-image-private (yeto.launcher.registry_login_for; read:packages token).
-# Tag 17aeb5c-2fa8801; (S24 L2.1-L2.4: Miles s24-miles-import, peft 0.20.0 and the
+# Tag 44d41ef-2fa8801; (S24 L2.2: Miles s24-miles-import2 and the lazy-modelopt
+# Megatron-LM patch in the layer; previous 17aeb5c-2fa8801 @sha256:b304f857...;
+# build record openspec/changes/rl-infra-spec/evidence/ports-image/
+# 2026-10-14-44d41ef-2fa8801/). Earlier: tag 17aeb5c-2fa8801; (S24 L2.1-L2.4: Miles s24-miles-import, peft 0.20.0 and the
 # lazy-modelopt Megatron-Bridge __init__ in the layer; previous 386ae3b-2fa8801
 # @sha256:bcd5ffd3...; build record openspec/changes/rl-infra-spec/evidence/
 # ports-image/2026-10-14-17aeb5c-2fa8801/). Earlier: tag 386ae3b-2fa8801; (S23 P0-1.11 GPU run: Miles s23-sao-streaming-roles; previous 64b591a-2fa8801 @sha256:fa2413be...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-14-386ae3b-2fa8801/). Earlier: (S19 #1: critic family + algo-supplement metrics baked in; previous ddce209-2fa8801 @sha256:9c252c38...) (S18 ARU-3: Miles s18-agentic-suspend = 2f7871fb2 + --agentic-suspend-between-turns; previous 2f7871f-2fa8801 @sha256:62b4f164..., efbbc63-2fa8801 @sha256:a7990076..., 8bc5223-4e4148f @sha256:4aeafd77...) ghcr.io/michaellchung (public package); linux/amd64 only.
 MILES_NEXT_IMAGE = (
     "docker:ghcr.io/michaellchung/yeto-miles-ports@sha256:"
-    "b304f85736eace7b4e9647b9af11def88e496f47c77d2c931798b06d467c9395"
+    "5b9dc2a9e6e315d73dabfbc6faae428b59cc01aabec6189645a5c8c80d6e3721"
 )
 MILES_NEXT_IMAGE_MANIFEST = "/opt/yeto/image-manifest.json"
 # Nebius VM images whose /var/lib/docker already holds a docker image's
