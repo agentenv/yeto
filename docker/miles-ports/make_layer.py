@@ -17,6 +17,10 @@ checkouts only in pure-Python files (checked below), so the layer:
 * replaces the base's ``megatron/bridge/__init__.py`` (Megatron-Bridge
   8cd3466) with ``megatron_bridge_init.py``: the same file without its eager
   ``import modelopt.torch`` (rl-trainer-cold-start-cost L2.2),
+* rewrites the Megatron-LM files (/root/Megatron-LM, base commit a84b105)
+  touched by ``megatron_lm_lazy_modelopt.patch`` -- the patch applied to the
+  commit's files from ``--megatron-lm-src`` -- so a trainer process does not
+  import modelopt unless a model uses it (L2.2),
 * adds /opt/yeto/image-manifest.json with every component SHA.
 
 Approximate docker equivalent (unverified): docker/miles-ports/Dockerfile.
@@ -48,6 +52,10 @@ EXEMPT_PREFIXES = ("test/", "tests/", "docs/")
 # layer writes over its package __init__ (see megatron_bridge_init.py).
 MEGATRON_BRIDGE_COMMIT = "8cd3466d14d2337c8492827b3712482c2b3e4866"
 MEGATRON_BRIDGE_INIT = Path(__file__).with_name("megatron_bridge_init.py")
+# Megatron-LM as the base checks it out (/root/Megatron-LM, on sys.path) and
+# the patch the layer applies to it (see the comments it adds).
+MEGATRON_LM_COMMIT = "a84b105473eca9c9c6e49dbf1c8aa460c5cf796e"
+MEGATRON_LM_PATCH = Path(__file__).with_name("megatron_lm_lazy_modelopt.patch")
 
 
 def git(repo: Path, *argv: str) -> str:
@@ -128,6 +136,20 @@ def wheel_files(wheel: Path) -> dict[str, bytes]:
     return files
 
 
+def patched_files(src: Path, commit: str, patch: Path) -> dict[str, bytes]:
+    """``{repo path: bytes}`` of the files ``patch`` touches, as ``commit`` plus the patch."""
+    paths = [line.split("\t")[-1] for line in subprocess.run(
+        ["git", "apply", "--numstat", str(patch)], check=True, capture_output=True, text=True
+    ).stdout.splitlines()]
+    with tempfile.TemporaryDirectory(prefix="img-patch-") as tmp:
+        archive = subprocess.run(["git", "-C", str(src), "archive", commit, *paths],
+                                 check=True, capture_output=True).stdout
+        with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+            tar.extractall(tmp, filter="data")
+        subprocess.run(["git", "apply", str(patch.resolve())], cwd=tmp, check=True, capture_output=True)
+        return {p: Path(tmp, p).read_bytes() for p in paths}
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--manifest-json", required=True, help="image-manifest.json content file")
@@ -145,6 +167,8 @@ def main() -> None:
                    help="dir with the base image's sglang site-packages metadata")
     p.add_argument("--wheel", type=Path, action="append", default=[],
                    help="pure-Python wheel unpacked into site-packages (repeatable)")
+    p.add_argument("--megatron-lm-src", type=Path, required=True,
+                   help=f"clone containing Megatron-LM {MEGATRON_LM_COMMIT[:7]} (the base's checkout)")
     p.add_argument("--mtime", type=int, required=True)
     p.add_argument("--out", type=Path, required=True)
     a = p.parse_args()
@@ -226,6 +250,8 @@ def main() -> None:
             add_file(f"{SITE}/{name}", data)
 
     add_file(f"{SITE}/megatron/bridge/__init__.py", MEGATRON_BRIDGE_INIT.read_bytes())
+    for name, data in patched_files(a.megatron_lm_src, MEGATRON_LM_COMMIT, MEGATRON_LM_PATCH).items():
+        add_file(f"root/Megatron-LM/{name}", data)
 
     add_dir("opt/yeto")
     add_file("opt/yeto/image-manifest.json", Path(a.manifest_json).read_bytes())
