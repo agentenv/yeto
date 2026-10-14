@@ -55,7 +55,10 @@ class ConsistentCut:
     ``outer_step`` is the outer (syncer / published) version, ``island_steps`` the
     local training step of each island at the cut, ``completed_groups`` the number
     of prompt groups already consumed and ``completed_groups_digest`` their sorted
-    sha256 (``resume.consumed_digest``). ``checkpoint_id`` names the payload."""
+    sha256 (``resume.consumed_digest``). ``checkpoint_id`` names the payload.
+    ``buffer_watermark`` is the consumed position of the durable sample buffer
+    (rl-trainer-start-stop D4; None = the run does not read a sample buffer, and
+    the record then has no such key)."""
 
     checkpoint_id: str
     trigger: str
@@ -63,19 +66,25 @@ class ConsistentCut:
     island_steps: Mapping[str, int] = field(default_factory=dict)
     completed_groups: int | None = None
     completed_groups_digest: str | None = None
+    buffer_watermark: int | None = None
 
     def __post_init__(self) -> None:
         if self.trigger not in TRIGGERS:
             raise ValueError(f"cut trigger {self.trigger!r} is not one of {TRIGGERS}")
         if not self.checkpoint_id:
             raise ValueError("a consistent cut needs a checkpoint id")
+        if self.buffer_watermark is not None and int(self.buffer_watermark) < 0:
+            raise ValueError("buffer watermark must be >= 0")
 
     def to_record(self) -> dict[str, Any]:
-        return {"schema": CUT_SCHEMA, "checkpoint_id": self.checkpoint_id, "trigger": self.trigger,
-                "outer_step": self.outer_step,
-                "island_steps": {str(k): int(v) for k, v in sorted(self.island_steps.items())},
-                "completed_groups": self.completed_groups,
-                "completed_groups_digest": self.completed_groups_digest}
+        record = {"schema": CUT_SCHEMA, "checkpoint_id": self.checkpoint_id, "trigger": self.trigger,
+                  "outer_step": self.outer_step,
+                  "island_steps": {str(k): int(v) for k, v in sorted(self.island_steps.items())},
+                  "completed_groups": self.completed_groups,
+                  "completed_groups_digest": self.completed_groups_digest}
+        if self.buffer_watermark is not None:
+            record["buffer_watermark"] = int(self.buffer_watermark)
+        return record
 
     @classmethod
     def from_record(cls, record: Mapping[str, Any]) -> ConsistentCut:
@@ -85,7 +94,8 @@ class ConsistentCut:
                    outer_step=record.get("outer_step"),
                    island_steps={str(k): int(v) for k, v in (record.get("island_steps") or {}).items()},
                    completed_groups=record.get("completed_groups"),
-                   completed_groups_digest=record.get("completed_groups_digest"))
+                   completed_groups_digest=record.get("completed_groups_digest"),
+                   buffer_watermark=record.get("buffer_watermark"))
 
 
 Writer = Callable[[dict[str, Any]], Mapping[str, Any]]

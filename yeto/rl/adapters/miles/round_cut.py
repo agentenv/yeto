@@ -72,6 +72,9 @@ class RoundCutCheckpoint:
         self.pending_lr_check: dict[str, Any] | None = None
         # set by resume(): where the rollout data source continues (the cut's cursor)
         self.resume_data_cursor: dict[str, int] | None = None
+        # rl-trainer-start-stop D4: the durable sample buffer's consumed watermark,
+        # written into the cut record (None: the run reads no sample buffer)
+        self.buffer_watermark: Any = None  # callable() -> int | None
 
     # ---------------------------------------------------------------- pointer
     @property
@@ -169,7 +172,8 @@ class RoundCutCheckpoint:
         cut = ConsistentCut(
             checkpoint_id=cut_id, trigger=(trigger or MANUAL) if final else PERIODIC,
             outer_step=info["outer_version"], island_steps={ISLAND: info["local_step"]},
-            completed_groups=consumed_n, completed_groups_digest=consumed_sha)
+            completed_groups=consumed_n, completed_groups_digest=consumed_sha,
+            buffer_watermark=self.buffer_watermark() if callable(self.buffer_watermark) else None)
         saved = recovery.save(cut, store=ctl.store, write=lambda record: self._write_and_sync(info, record))
         info[CUT_KEY] = saved[CUT_KEY]
         synced = saved["synced"]
