@@ -4,6 +4,7 @@ import queue
 import socket
 import struct
 import threading
+import time
 
 import pytest
 import torch
@@ -29,6 +30,7 @@ from yeto.protocol import (
     FinalFragment,
     FinalManifest,
     SyncerClient,
+    _Outbound,
     decode_final_manifest,
     encode_final_manifest,
     read_frame,
@@ -288,3 +290,37 @@ def test_torch_finalization_overwrites_blended_local_values_with_raw_global():
     assert client.acknowledged == manifest
     for name in params:
         assert torch.equal(params[name], authoritative[name])
+
+
+def test_send_progress_counts_bytes_the_sender_thread_wrote():
+    client_sock, server_sock = socket.socketpair()
+    client = SyncerClient(("unused", 0), 0, _layout(1), dtype=DTYPE_F32)
+    client._gen = 1
+    client._connected.set()
+    client._queues = [queue.Queue()]
+    assert client.send_progress().bytes_sent == 0
+    sent = threading.Event()
+    client._queues[0].put(_Outbound(b"x" * 100, sent))
+    client._queues[0].put(_Outbound(b"y" * 20))
+    progress = client.send_progress()
+    assert (progress.bytes_sent, progress.queued_chunks, progress.connected) == (0, 2, True)
+    sender = threading.Thread(
+        target=client._send_loop,
+        args=(1, client_sock, client._queues[0]),
+        daemon=True,
+    )
+    sender.start()
+    try:
+        received = b""
+        while len(received) < 120:
+            received += server_sock.recv(4096)
+        assert sent.wait(1.0)
+        deadline = time.monotonic() + 1.0
+        while client.send_progress().bytes_sent < 120 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        progress = client.send_progress()
+        assert (progress.bytes_sent, progress.queued_chunks, progress.reconnects) == (120, 0, 0)
+    finally:
+        client.close()
+        server_sock.close()
+        sender.join(timeout=1)

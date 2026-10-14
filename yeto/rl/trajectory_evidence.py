@@ -17,6 +17,16 @@ New evidence is schema 4 when the caller names each trajectory's policy (the
 ports rollout hook) and schema 3 otherwise.  Schema 1 and 2 files remain
 readable: their structure and batch hash are checked, but the HMAC that was
 mixed into their outcome hashes is not (and cannot be) re-verified.
+
+Evidence kinds name where a trajectory's reward comes from:
+
+* ``secrlenv`` and ``terminal-bench-2.1`` -- a trusted grader verdict carried
+  in the sample metadata; the reward must equal the verdict.
+* ``reward-function`` -- the output of the island's hash-bound reward function
+  (``sample.reward``), e.g. a GSM8K answer check.  There is no separate
+  verdict to verify: the evidence binds the reward, the prompt and the tokens,
+  and the reward function itself is bound by ``reward_contract_hash``.
+  Trajectories of this kind must not carry a grader verdict.
 """
 
 from __future__ import annotations
@@ -40,7 +50,9 @@ _PER_TRAJECTORY_POLICY_SCHEMA = 4
 _LAYERED_SCHEMAS = frozenset({_SIGNED_LAYERED_SCHEMA, _SCHEMA, _PER_TRAJECTORY_POLICY_SCHEMA})
 _READABLE_SCHEMAS = frozenset({_LEGACY_SCHEMA, *_LAYERED_SCHEMAS})
 _SHA256 = frozenset("0123456789abcdef")
-EVIDENCE_KINDS = frozenset({"secrlenv", "terminal-bench-2.1"})
+REWARD_FUNCTION_EVIDENCE_KIND = "reward-function"
+EVIDENCE_KINDS = frozenset({"secrlenv", "terminal-bench-2.1", REWARD_FUNCTION_EVIDENCE_KIND})
+_GRADER_VERDICT_KEYS = ("secrlenv_trusted_outcome", "tbench_trusted_outcome")
 # The launch context still names the signed-era layout (1 or 2) it was
 # attested with; it must be bound, but new evidence is schema 3 or 4.
 LAUNCH_CONTEXT_SCHEMA_VERSIONS = frozenset({_LEGACY_SCHEMA, _SIGNED_LAYERED_SCHEMA})
@@ -218,7 +230,7 @@ def build_trajectory_batch_evidence(
                         "compaction-marked trajectory was not preserved as segments"
                     )
 
-                verified = _verified_outcome(metadata, evidence_kind)
+                verified = _trajectory_outcome(sample, metadata, evidence_kind)
                 outcome_identity = (
                     verified.task_id,
                     verified.episode_id,
@@ -457,9 +469,19 @@ def read_trajectory_batch_evidence(path: str | Path) -> TrajectoryBatchEvidence:
     return evidence
 
 
+def _trajectory_outcome(
+    sample: Any, metadata: Mapping[str, Any], evidence_kind: str
+) -> _VerifiedOutcome:
+    if evidence_kind == REWARD_FUNCTION_EVIDENCE_KIND:
+        return _reward_function_outcome(sample, metadata)
+    return _verified_outcome(metadata, evidence_kind)
+
+
 def _verified_outcome(
     metadata: Mapping[str, Any], evidence_kind: str
 ) -> _VerifiedOutcome:
+    """The trusted grader verdict of a ``secrlenv`` or Terminal-Bench sample."""
+
     if evidence_kind == "terminal-bench-2.1":
         if "secrlenv_trusted_outcome" in metadata:
             raise ValueError("trajectory metadata mixes benchmark evidence kinds")
@@ -500,6 +522,51 @@ def _verified_outcome(
         sample_id=None,
         reward=reward,
         canonical=_canonical(outcome),
+    )
+
+
+def _reward_function_outcome(
+    sample: Any, metadata: Mapping[str, Any]
+) -> _VerifiedOutcome:
+    """The outcome of a trajectory scored by the island's reward function.
+
+    The reward is ``sample.reward`` as the reward function wrote it.  The task
+    is the prompt (by content hash) and the episode is the logical sample.
+    """
+
+    if any(key in metadata for key in _GRADER_VERDICT_KEYS):
+        raise ValueError(
+            "reward-function trajectory carries a grader verdict; "
+            "bind the grader's evidence kind instead"
+        )
+    reward = getattr(sample, "reward", None)
+    if (
+        isinstance(reward, bool)
+        or not isinstance(reward, (int, float))
+        or not math.isfinite(float(reward))
+    ):
+        raise ValueError("reward-function trajectory has no finite scalar reward")
+    prompt = json.dumps(
+        getattr(sample, "prompt", None), sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    task_id = "prompt-sha256:" + hashlib.sha256(prompt).hexdigest()
+    episode_id = f"sample:{getattr(sample, 'index', None)}"
+    canonical = json.dumps(
+        {
+            "kind": REWARD_FUNCTION_EVIDENCE_KIND,
+            "task_id": task_id,
+            "episode_id": episode_id,
+            "reward": float(reward),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return _VerifiedOutcome(
+        task_id=task_id,
+        episode_id=episode_id,
+        sample_id=None,
+        reward=float(reward),
+        canonical=canonical,
     )
 
 
@@ -639,11 +706,10 @@ def _active_token_evidence(
 def _outcome_evidence_hash(
     evidence_kind: str, verified: _VerifiedOutcome
 ) -> str:
-    domain = (
-        b"yeto-tbench-verdict-evidence-v2\0"
-        if evidence_kind == "terminal-bench-2.1"
-        else b"yeto-secrlenv-cleanup-evidence-v2\0"
-    )
+    domain = {
+        "terminal-bench-2.1": b"yeto-tbench-verdict-evidence-v2\0",
+        REWARD_FUNCTION_EVIDENCE_KIND: b"yeto-reward-function-evidence-v1\0",
+    }.get(evidence_kind, b"yeto-secrlenv-cleanup-evidence-v2\0")
     return _hash_parts(domain, verified.canonical)
 
 

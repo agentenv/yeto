@@ -70,6 +70,8 @@ class RoundCutCheckpoint:
         self.allow_config_change = bool(allow_config_change)
         self.next_lr = next_lr  # callable(driver) -> list[float] | None
         self.pending_lr_check: dict[str, Any] | None = None
+        # set by resume(): where the rollout data source continues (the cut's cursor)
+        self.resume_data_cursor: dict[str, int] | None = None
 
     # ---------------------------------------------------------------- pointer
     @property
@@ -247,6 +249,7 @@ class RoundCutCheckpoint:
         in_flight = self._restore_in_flight(driver, manifest, rid)
         if in_flight is not None:
             checks["in_flight"] = in_flight
+        self.resume_data_cursor = _cut_data_cursor(manifest)
         driver.local_step = int(info["local_step"])
         self.resumed = dict(info)
         if info.get("lr_at_next_round") is not None:
@@ -313,6 +316,21 @@ class RoundCutCheckpoint:
                     ok=problem is None)
         if problem is not None:
             raise RoundCutError(problem)
+
+
+def _cut_data_cursor(manifest: Any) -> dict[str, int] | None:
+    """The data source position recorded at the cut (None when incomplete).
+
+    Under fully_async the background worker keeps drawing prompts after the
+    round's trained groups were reported, and the cut puts the untrained ones
+    back into the data buffer. The position to resume from is therefore the
+    one read at the cut, not the one the batch ledger recorded for the round."""
+    from .rollout_meta_hook import _CURSOR_FIELDS
+
+    data = dict(getattr(manifest, "data", None) or {})
+    if not all(isinstance(data.get(f), int) for f in _CURSOR_FIELDS):
+        return None
+    return {f: int(data[f]) for f in _CURSOR_FIELDS}
 
 
 def wire_round_cuts(driver: Any, *, controller: Any, source: Any, **options: Any) -> RoundCutCheckpoint | None:

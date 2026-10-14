@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import sys
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
@@ -32,8 +33,11 @@ from yeto.rl.adapters.miles.models.chunked_full_parameter import (
 from yeto.rl.adapters.miles.full_parameter.inbound_sink import MilesRayInboundChunkSink
 from yeto.rl.engine.policy_digest import PolicyDigest, TrainerResidentState, WeightsChanged
 from yeto.rl.engine.trainable_state import LAYOUT_FRAGMENTS, UnsupportedLayoutError
-from yeto.rl.local_learner import ComponentIdentity
+from yeto.rl.local_learner import ComponentIdentity, layout_stream_role
 from yeto.rl.trajectory_evidence import TrajectoryBatchEvidence
+
+# Seconds between progress lines while an island waits for its initial cut.
+INITIAL_CUT_REPORT_SECONDS = 30.0
 
 _LOWER_HEX = frozenset("0123456789abcdef")
 
@@ -318,7 +322,7 @@ class MilesFullParameterRoleStream:
             group,
             policy_version=0,
             algorithm=self.config.algorithm,
-            stream_role=self.config.role,
+            stream_role=layout_stream_role(self.config.algorithm, self.config.role),
             components=(self.config.component,),
             minimum_fragments=self.config.expected_fragments,
             expected_fragments=self.config.expected_fragments,
@@ -357,7 +361,14 @@ class MilesFullParameterRoleStream:
                         raise RuntimeError(
                             f"{self.config.algorithm} {self.config.role} initial fragment was not queued"
                         )
-            authoritative = self._wait_for_initial_fragments(client, adapter)
+            # Wait off the event loop: an island initializes its roles
+            # concurrently, and each role's initial cut needs every island's
+            # INIT for that role. A blocking wait here would stop this
+            # island's other role from connecting, and two islands blocked
+            # on different roles deadlock (s23-g3-sao-main-20261014a).
+            authoritative = await asyncio.to_thread(
+                self._wait_for_initial_fragments, client, adapter
+            )
             adapter.verify_initial_fragments(initial, authoritative)
         except BaseException:
             client.close()
@@ -380,9 +391,12 @@ class MilesFullParameterRoleStream:
         client,
         adapter: MilesChunkedFullParameterAdapter,
     ) -> tuple[StoredAuthoritativeFragment, ...]:
-        deadline = time.monotonic() + self.config.wait_timeout
+        started = time.monotonic()
+        deadline = started + self.config.wait_timeout
+        next_report = started + INITIAL_CUT_REPORT_SECONDS
         observed: dict[int, StoredAuthoritativeFragment] = {}
         count = adapter.layout.fragments.num_fragments
+        self._report_initial_cut(client, observed, count, started, "waiting")
         while len(observed) < count:
             client.check_health()
             for update in client.drain_updates():
@@ -393,12 +407,49 @@ class MilesFullParameterRoleStream:
                     )
                 observed[stored.fragment_id] = stored
             if len(observed) < count:
-                if time.monotonic() >= deadline:
+                now = time.monotonic()
+                if now >= next_report:
+                    self._report_initial_cut(client, observed, count, started, "waiting")
+                    next_report = now + INITIAL_CUT_REPORT_SECONDS
+                if now >= deadline:
+                    self._report_initial_cut(client, observed, count, started, "timed out")
                     raise TimeoutError(
                         f"{self.config.algorithm} {self.config.role} timed out waiting for initial cut"
                     )
                 time.sleep(self.config.poll_seconds)
+        self._report_initial_cut(client, observed, count, started, "received")
         return tuple(observed[index] for index in range(count))
+
+    def _report_initial_cut(
+        self,
+        client,
+        observed: Mapping[int, StoredAuthoritativeFragment],
+        count: int,
+        started: float,
+        state: str,
+    ) -> None:
+        """One stderr line on the initial cut: how much of INIT_PARAMS left
+        this island and how much of the broadcast came back."""
+
+        progress_of = getattr(client, "send_progress", None)
+        progress = progress_of() if callable(progress_of) else None
+        sent = (
+            ""
+            if progress is None
+            else (
+                f"; sent {progress.bytes_sent / 2**20:.1f} MiB, "
+                f"{progress.queued_chunks} chunk(s) queued, "
+                f"{progress.reconnects} redial(s), "
+                f"connected={progress.connected}"
+            )
+        )
+        print(
+            f"[yeto-initial-cut] learner {self.config.learner_id} {state}: "
+            f"{len(observed)}/{count} fragment(s) after "
+            f"{time.monotonic() - started:.0f}s{sent}",
+            file=sys.stderr,
+            flush=True,
+        )
 
     @staticmethod
     def _stored_update(update) -> StoredAuthoritativeFragment:

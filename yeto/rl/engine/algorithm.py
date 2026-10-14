@@ -1792,10 +1792,13 @@ def resolve_ports_algorithm(args: Any) -> "AlgorithmSpec":
 
 # rl-algo-critic-family (user decision 2026-10-07): the critic mechanisms may be
 # allowed (still explicitly, via --rl-allow-unverified-mechanism) on several
-# islands / with outer sync, but only under the strict-avg preset, whose
-# critic channel is the second syncer (DualStrictAvgSync, design D4).
+# islands / with outer sync, but only under a preset with a critic channel:
+# strict-avg, whose critic channel is the second syncer (DualStrictAvgSync,
+# design D4), and sao-streaming-full, whose critic role has its own syncer
+# (P0-D8, 2026-10-13; the preset requires the critic).
 # decoupled + critic stays refused (critic_run_problems). Every other
 # unverified mechanism keeps D11 as written.
+CRITIC_CHANNEL_SYNC_PRESETS = frozenset({"strict-avg", "sao-streaming-full"})
 CRITIC_STRICT_AVG_ALLOWANCES = frozenset({
     "advantage_estimators:ppo",
     "execution:critic",
@@ -1815,8 +1818,8 @@ def check_unverified_allowance(
 ) -> tuple[str, ...]:
     """D11 as written: refused with multiple islands *or* any outer sync.
 
-    Exception (critic family, design D4): when ``sync_preset == "strict-avg"``
-    and every name is in :data:`CRITIC_STRICT_AVG_ALLOWANCES` (with
+    Exception (critic family, design D4): when ``sync_preset`` has a critic
+    channel (:data:`CRITIC_CHANNEL_SYNC_PRESETS`) and every name is in :data:`CRITIC_STRICT_AVG_ALLOWANCES` (with
     ``execution:critic`` among them), the allowance is accepted on several
     islands / with outer sync. ``sync_preset=None`` (caller does not know the
     preset) keeps D11 as written.
@@ -1834,7 +1837,7 @@ def check_unverified_allowance(
             f"(known: {sorted(allowance_names())})"
         )
     if islands != 1 or outer_sync:
-        if (sync_preset == "strict-avg" and "execution:critic" in names
+        if (sync_preset in CRITIC_CHANNEL_SYNC_PRESETS and "execution:critic" in names
                 and set(names) <= CRITIC_STRICT_AVG_ALLOWANCES):
             return names
         raise AlgorithmSpecError(

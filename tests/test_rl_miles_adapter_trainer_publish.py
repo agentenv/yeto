@@ -11,7 +11,12 @@ import pytest
 from yeto.rl.contracts import InferencePublicationManifest, LocalStepReceipt
 from yeto.rl.adapters.miles.publish import MilesPublisher, PublicationError
 from yeto.rl.adapters.miles.rollout import PolicyTokenMismatch, policy_token
-from yeto.rl.adapters.miles.state_plugin import APPLIED_LRS, GRAD_NORM, STEP_LOSSES
+from yeto.rl.adapters.miles.state_plugin import (
+    ACTOR_RECORDERS,
+    APPLIED_LRS,
+    GRAD_NORM,
+    STEP_LOSSES,
+)
 from yeto.rl.adapters.miles.trainer import MilesTrainerGroup, TrainStepError, batch_hash
 from yeto.rl.engine.ports import (
     GroupMetadata,
@@ -90,6 +95,55 @@ def test_train_step_receipt_and_release():
     assert receipt.base_policy_version == 3 and receipt.base_policy_hash == H
     assert receipt.input_batch_hash == batch_hash(handle()) and receipt.parameter_layout_hash == L
     assert t.last_grad_norm == 0.3
+
+
+def test_full_parameter_trainer_installs_actor_recorders_once_before_training():
+    """A full-parameter actor calls no LoRA state plugin, so nothing else
+    installs the per-step recorders; without them no applied LR is recorded."""
+
+    actor = FakeActorGroup()
+    t = MilesTrainerGroup(
+        args=SimpleNamespace(num_steps_per_rollout=1, offload_train=True),
+        actor_model=actor, learner_id=0, learner_generation=0,
+        parameter_layout_hash=lambda: L,
+        release_refs=lambda args, pack: None,
+        install_actor_recorders=True,
+    )
+    t.train_step(handle())
+    t.train_step(handle())
+    trains = [i for i, call in enumerate(actor.calls) if call[0] == "train"]
+    assert actor.calls[: trains[0]] == [("plugin", ACTOR_RECORDERS)]
+    assert actor.calls.count(("plugin", ACTOR_RECORDERS)) == 1
+
+
+def test_full_parameter_trainer_refuses_to_train_without_recorders():
+    class NoRecorderActor(FakeActorGroup):
+        async def run_plugin(self, fn_path, kwargs=None):
+            if fn_path == ACTOR_RECORDERS:
+                self.calls.append(("plugin", fn_path))
+                return [False]
+            return await super().run_plugin(fn_path, kwargs)
+
+    actor, released = NoRecorderActor(), []
+    t = MilesTrainerGroup(
+        args=SimpleNamespace(num_steps_per_rollout=1, offload_train=True),
+        actor_model=actor, learner_id=0, learner_generation=0,
+        parameter_layout_hash=lambda: L,
+        release_refs=lambda args, pack: released.append(pack),
+        install_actor_recorders=True,
+    )
+    with pytest.raises(TrainStepError, match="recorders could not be installed"):
+        t.train_step(handle())
+    assert actor.calls == [("plugin", ACTOR_RECORDERS)] and released == ["PACK"]
+
+
+def test_only_a_full_parameter_sync_installs_actor_recorders():
+    from yeto.rl.adapters.miles.entry import _is_full_parameter_sync
+    from yeto.rl.engine.full_parameter_sync import FullParameterSync
+
+    assert _is_full_parameter_sync(object.__new__(FullParameterSync))
+    assert not _is_full_parameter_sync(object())
+    assert not _is_full_parameter_sync(None)
 
 
 def test_token_mismatch_rejected_before_training_and_refs_released():

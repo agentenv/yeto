@@ -241,3 +241,96 @@ def test_schema_3_records_every_layered_field():
     item = _batch().envelopes[0]
     assert set(asdict(item)) == set(trajectory_evidence._LAYERED_ENVELOPE_FIELDS)
     assert item.active_token_count == item.response_token_count
+
+
+def _reward_function_sample(*, group_index, index, value, prompt="2+2?"):
+    """A sample scored by an ordinary reward function (e.g. GSM8K): no grader
+    verdict in the metadata, the reward is ``sample.reward``."""
+
+    return SimpleNamespace(
+        group_index=group_index,
+        index=index,
+        status=SimpleNamespace(value="completed"),
+        metadata={},
+        prompt=[{"role": "user", "content": prompt}],
+        reward=value,
+        tokens=[101, 102 + index, 103 + index],
+        response_length=2,
+        rollout_log_probs=[-0.25, -0.5],
+    )
+
+
+def test_reward_function_evidence_binds_the_reward_function_output(tmp_path):
+    groups = [
+        [
+            _reward_function_sample(group_index=4, index=0, value=1.0),
+            _reward_function_sample(group_index=4, index=1, value=0.0),
+        ]
+    ]
+    evidence = build_trajectory_batch_evidence(
+        groups,
+        rollout_id=2,
+        behavior_policy_hash="a" * 64,
+        reward_contract_hash="b" * 64,
+        evidence_kind="reward-function",
+        behavior_policy_of=lambda _segments: (2, "a" * 64),
+        max_policy_age=0,
+    )
+
+    assert evidence.schema_version == 4
+    assert evidence.evidence_kind == "reward-function"
+    assert [item.reward for item in evidence.envelopes] == [1.0, 0.0]
+    assert [item.behavior_policy_version for item in evidence.envelopes] == [2, 2]
+    # one prompt group shares one task identity
+    assert len({item.task_id for item in evidence.envelopes}) == 1
+    assert evidence.envelopes[0].task_id.startswith("prompt-sha256:")
+    path = write_trajectory_batch_evidence(tmp_path / "private", evidence)
+    assert read_trajectory_batch_evidence(path) == evidence
+
+
+def test_reward_function_evidence_hash_changes_with_the_reward():
+    def build(value):
+        return build_trajectory_batch_evidence(
+            [[_reward_function_sample(group_index=0, index=0, value=value)]],
+            rollout_id=1,
+            behavior_policy_hash="a" * 64,
+            reward_contract_hash="b" * 64,
+            evidence_kind="reward-function",
+        )
+
+    assert build(1.0).input_batch_hash != build(0.0).input_batch_hash
+
+
+@pytest.mark.parametrize("value", (None, True, float("nan"), {"score": 1.0}))
+def test_reward_function_evidence_requires_a_finite_scalar_reward(value):
+    with pytest.raises(ValueError, match="finite scalar reward"):
+        build_trajectory_batch_evidence(
+            [[_reward_function_sample(group_index=0, index=0, value=value)]],
+            rollout_id=1,
+            behavior_policy_hash="a" * 64,
+            reward_contract_hash="b" * 64,
+            evidence_kind="reward-function",
+        )
+
+
+def test_grader_verdict_cannot_be_downgraded_to_reward_function_evidence():
+    # A SecRLEnv sample keeps its trusted-grader evidence kind.
+    with pytest.raises(ValueError, match="grader verdict"):
+        build_trajectory_batch_evidence(
+            [[_sample(group_index=0, index=0, value=1.0)]],
+            rollout_id=1,
+            behavior_policy_hash="a" * 64,
+            reward_contract_hash="b" * 64,
+            evidence_kind="reward-function",
+        )
+
+
+def test_secrlenv_evidence_still_rejects_a_sample_without_a_verdict():
+    with pytest.raises(reward.UntrustedOutcome):
+        build_trajectory_batch_evidence(
+            [[_reward_function_sample(group_index=0, index=0, value=1.0)]],
+            rollout_id=1,
+            behavior_policy_hash="a" * 64,
+            reward_contract_hash="b" * 64,
+            evidence_kind="secrlenv",
+        )

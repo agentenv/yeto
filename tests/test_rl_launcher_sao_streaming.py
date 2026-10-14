@@ -24,16 +24,6 @@ UNVERIFIED = ("execution:critic", "advantage_estimators:ppo", "features:sao_dis"
               "features:value_hl_gauss", "features:critic_multi_update")
 
 
-@pytest.fixture(autouse=True)
-def _declared_sao_mechanisms(monkeypatch):
-    """The SAO mechanisms are not declared for outer-sync runs yet (only the
-    single-island allowance exists); these tests cover the launch wiring."""
-    from yeto.rl.engine import algorithm
-
-    monkeypatch.setattr(algorithm, "check_unverified_allowance",
-                        lambda allowed, **_kwargs: tuple(allowed))
-
-
 def _write(path, payload) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     data = json.dumps(payload, sort_keys=True).encode()
@@ -96,6 +86,38 @@ def _plan(tmp_path, extra=()):
 def _flag(command: str, flag: str) -> str:
     tokens = shlex.split(command)
     return tokens[tokens.index(flag) + 1]
+
+
+def test_head_controller_reloads_the_contract_bundle(tmp_path, monkeypatch):
+    """The head replays the launch args as JSON, which drops the loaded
+    bundle; the head must reload it to render the role syncers
+    (s23-g3-sao-probe-20261014a: AttributeError rl_sao_manifest)."""
+    from yeto import cli, launcher
+
+    args, plan = _plan(tmp_path)
+    seen = {}
+
+    class Syncer:
+        def __init__(self, head_args, num_learners):
+            seen["command"] = launcher.syncer_command(head_args, num_learners)
+
+        def start(self):
+            pass
+
+        def start_log_forwarder(self):
+            pass
+
+        def start_tape_forwarder(self, _args):
+            pass
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(launcher, "LocalSyncer", Syncer)
+    monkeypatch.setattr(launcher, "run", lambda *_a, **_k: 0)
+    assert cli.cmd_head(json.dumps(cli._serializable_args(args))) == 0
+    assert seen["command"] == launcher.syncer_command(args, 2)
+    assert "--require-profile-binding" in str(seen["command"])
 
 
 def test_role_syncers_serve_exactly_the_frozen_profile(tmp_path):

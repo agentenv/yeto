@@ -29,7 +29,7 @@ from test_rl_dense_sweep_real_syncer import (  # noqa: F401
     _wait,
     syncer_binary,
 )
-from test_rl_launcher_sao_streaming import _declared_sao_mechanisms, _manifest, _sao_args  # noqa: F401
+from test_rl_launcher_sao_streaming import _manifest, _sao_args
 from test_rl_sao_streaming_runtime import _syncer_profile
 
 pytestmark = pytest.mark.skipif(not Path(CARGO).exists(), reason="needs cargo to build the syncer")

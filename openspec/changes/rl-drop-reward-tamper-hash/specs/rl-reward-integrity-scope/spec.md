@@ -27,6 +27,21 @@ Newly written trajectory evidence SHALL use schema 3, and its outcome hash MUST 
 - **WHEN** a batch of trajectory evidence is written
 - **THEN** the schema_version of the evidence is 3, and the hash input has no mac
 
+### Requirement: Trajectory evidence names the source of its reward
+Trajectory evidence SHALL record an evidence kind that names where each reward comes from. The kinds `secrlenv` and `terminal-bench-2.1` bind a trusted grader verdict, and the reward MUST equal that verdict. The kind `reward-function` binds the output of the island's reward function (`sample.reward`); the reward function itself is bound by `reward_contract_hash`. So evidence is either a trusted grader verdict or a reward function output, and it is not always a grader verdict. A dense full-parameter island SHALL choose the kind from its reward function: the SecRLEnv reward selects `secrlenv`, and every other reward function selects `reward-function`. Terminal-Bench 2.1 keeps the kind named in its SAO runtime contract.
+
+#### Scenario: A GSM8K island writes reward-function evidence
+- **WHEN** a dense full-parameter island runs with `--reward-function yeto.rl.gsm8k_reward:score`
+- **THEN** each round's evidence has kind `reward-function`, every trajectory reward equals `sample.reward`, and the full-parameter round record reads that evidence
+
+#### Scenario: A grader verdict is not downgraded
+- **WHEN** a sample carries a SecRLEnv or Terminal-Bench verdict and the evidence kind is `reward-function`
+- **THEN** building the evidence fails, so a trusted-grader run cannot drop its verdict check
+
+#### Scenario: A non-scalar reward is rejected
+- **WHEN** `sample.reward` is missing, a boolean, not finite, or not a number
+- **THEN** building `reward-function` evidence fails
+
 ### Requirement: Compatibility hashes and island authentication are unchanged
 The composition and values of `BackendIdentity`, `session_contract_hash`, `lr_schedule_sha256`, the algorithm hash, `training_contract_hash`, and `reward_contract_hash` MUST NOT change. The island HELLO HMAC and the per-frame HMAC in elastic mode MUST stay.
 

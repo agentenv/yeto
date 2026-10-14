@@ -358,6 +358,7 @@ def test_export_and_restore_buffered_groups_and_agentic_references(monkeypatch):
     report = in_flight.import_in_flight(target, exported["entries"], max_policy_age=1, current_version=4,
                                         completed_group_ids=["g2"], sample_from_dict=dict)
     assert report["resumed_groups"] == 1 and report["resumed"] == 2
+    assert report["resumed_group_ids"] == ["g1"]
     assert report["reasons"] == {"group_already_completed": 2, in_flight.AGENTIC_SESSION_LOST: 1}
     restored = target.data_source.buffer[0]
     assert [m["index"] for m in restored] == [10, 11] and restored[0]["metadata"]["task_id"] == "task-1"
@@ -366,6 +367,7 @@ def test_export_and_restore_buffered_groups_and_agentic_references(monkeypatch):
     report = in_flight.import_in_flight(target, exported["entries"], max_policy_age=1, current_version=5,
                                         sample_from_dict=dict)
     assert report["resumed_groups"] == 0 and report["reasons"]["policy_age_exceeded"] == 4
+    assert report["resumed_group_ids"] == []
     # restored under limit 0: everything discarded and reported
     report = in_flight.import_in_flight(target, exported["entries"], max_policy_age=0, current_version=4,
                                         sample_from_dict=dict)

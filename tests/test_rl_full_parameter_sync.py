@@ -677,3 +677,157 @@ def test_close_defaults_to_the_p5_finished_code():
 
     # P5 code table: 0 is FINISHED (LeaveReason.FINISHED once P5 merges).
     assert inspect.signature(FullParameterSync.close).parameters["reason"].default == 0
+
+
+def test_layout_stream_role_splits_only_role_lane_algorithms():
+    from yeto.rl.local_learner import layout_stream_role
+
+    assert layout_stream_role("grpo", "actor") is None
+    assert layout_stream_role("sao", "actor") == "actor"
+    assert layout_stream_role("sao", "critic") == "critic"
+    with pytest.raises(ValueError, match="no trainable role"):
+        layout_stream_role("grpo", "critic")
+    with pytest.raises(ValueError, match="no trainable role"):
+        layout_stream_role("dpo", "actor")
+
+
+@pytest.mark.parametrize(("algorithm", "role", "expected"), [
+    ("grpo", "actor", None),
+    ("sao", "critic", "critic"),
+])
+def test_role_stream_initializes_dense_with_the_plain_layout(monkeypatch, algorithm, role, expected):
+    # P0-1.11 G3-fp probe: the dense (grpo) actor stream passed stream_role="actor",
+    # which ParameterLayout.create refuses for non-SAO algorithms.
+    from yeto.rl.adapters.miles.full_parameter import role_stream as module
+    from yeto.rl.local_learner import ComponentIdentity, ParameterLayout, ParameterSpec
+
+    seen = {}
+
+    class Stop(Exception):
+        pass
+
+    async def fake_initialize(group, **kwargs):
+        seen.update(kwargs)
+        ParameterLayout.create(
+            algorithm=kwargs["algorithm"],
+            components=kwargs["components"],
+            specs=(ParameterSpec(role, "w", (2,), "float32", 2, "tp0"),),
+            num_fragments=1,
+            fragment_strategy="owner_affine",
+            stream_role=kwargs["stream_role"],
+        )
+        raise Stop
+
+    monkeypatch.setattr(module.MilesChunkedFullParameterAdapter, "initialize", fake_initialize)
+    config = replace(
+        _role_stream_config(role, 30100),
+        algorithm=algorithm,
+        component=ComponentIdentity(role, "a" * 40, "c" * 64),
+    )
+    with pytest.raises(Stop):
+        asyncio.run(module.MilesFullParameterRoleStream(config).initialize(object()))
+    assert seen["stream_role"] == expected
+
+
+def test_initial_cut_wait_leaves_the_event_loop_to_the_other_role(monkeypatch):
+    # s23-g3-sao-main-20261014a: the actor stream of island 0 and the critic
+    # stream of island 1 each blocked the event loop while waiting for their
+    # initial cut, so neither island connected its other role: deadlock.
+    from yeto.rl.adapters.miles.full_parameter import role_stream as module
+
+    seen = []
+
+    class Client:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def install_inbound_chunk_sink(self, _sink):
+            pass
+
+        def start(self):
+            pass
+
+        def check_health(self):
+            pass
+
+        def drain_updates(self):
+            seen.append("drain after peer" if "peer" in seen else "drain")
+            return []
+
+        def send_progress(self):
+            from yeto.protocol import SendProgress
+
+            return SendProgress(bytes_sent=0, queued_chunks=0, reconnects=0, connected=True)
+
+        def close(self):
+            pass
+
+    adapter = SimpleNamespace(
+        layout=SimpleNamespace(
+            layout_hash="1" * 64, fragments=SimpleNamespace(num_fragments=2)
+        ),
+        fragment_sink=lambda _initial, ray_module=None: SimpleNamespace(release_all=lambda: 0),
+        release=lambda _initial: None,
+    )
+
+    async def fake_initialize(_group, **_kwargs):
+        return adapter, object()
+
+    monkeypatch.setattr(module.MilesChunkedFullParameterAdapter, "initialize", fake_initialize)
+    monkeypatch.setattr(module, "SyncerClient", Client)
+    monkeypatch.setattr(module, "MilesRayInboundChunkSink", lambda sink: sink)
+    config = replace(_role_stream_config("actor", 30100), learner_id=1, wait_timeout=0.5)
+
+    async def peer():
+        await asyncio.sleep(0.05)
+        seen.append("peer")
+
+    async def both():
+        return await asyncio.gather(
+            module.MilesFullParameterRoleStream(config).initialize(object()),
+            peer(),
+            return_exceptions=True,
+        )
+
+    initialized, _ = asyncio.run(both())
+    assert isinstance(initialized, TimeoutError)
+    assert "drain after peer" in seen
+
+
+def test_role_stream_reports_initial_cut_upload_progress_on_timeout(monkeypatch, capsys):
+    # P0-1.11 run 20261014c: the initial cut timed out after 900 s with no
+    # sign of how much INIT_PARAMS had left the island; the wait now reports it.
+    from yeto.protocol import SendProgress
+    from yeto.rl.adapters.miles.full_parameter import role_stream as module
+
+    class StalledClient:
+        def check_health(self):
+            pass
+
+        def drain_updates(self):
+            return []
+
+        def send_progress(self):
+            return SendProgress(
+                bytes_sent=3 * 2**20, queued_chunks=7, reconnects=1, connected=True
+            )
+
+    monkeypatch.setattr(module, "INITIAL_CUT_REPORT_SECONDS", 0.0)
+    config = replace(_role_stream_config("actor", 30100), wait_timeout=0.05)
+    adapter = SimpleNamespace(
+        layout=SimpleNamespace(fragments=SimpleNamespace(num_fragments=2))
+    )
+    stream = module.MilesFullParameterRoleStream(config)
+
+    with pytest.raises(TimeoutError, match="initial cut"):
+        stream._wait_for_initial_fragments(StalledClient(), adapter)
+
+    lines = [
+        line for line in capsys.readouterr().err.splitlines()
+        if line.startswith("[yeto-initial-cut]")
+    ]
+    assert lines[0].startswith("[yeto-initial-cut] learner 0 waiting: 0/2 fragment(s)")
+    assert "timed out: 0/2 fragment(s)" in lines[-1]
+    assert lines[-1].endswith(
+        "sent 3.0 MiB, 7 chunk(s) queued, 1 redial(s), connected=True"
+    )

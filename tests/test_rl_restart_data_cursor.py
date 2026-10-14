@@ -317,3 +317,59 @@ def test_strict_fresh_start_without_ledger_does_not_seek(tmp_path):
     driver.run()
     assert pool.seeks == [] and syncer.version == rounds
     _close(driver, ctl)
+
+
+# ------------------------------------------------- P0-S: resume from a round cut
+_CUT = {"sample_offset": 35, "epoch_id": 0, "sample_group_index": 35, "sample_index": 280}
+
+
+def _cut_resume_driver(*, ledger_cursor, landed_shift=0):
+    from yeto.rl.engine.bridges import LocalOnlySync
+    from yeto.rl.engine.driver import IslandDriver
+
+    sync = LocalOnlySync(6)
+    sync.round_cuts = SimpleNamespace(resume_data_cursor=dict(_CUT))
+    seeks, events = [], []
+
+    def seek(cursor):
+        seeks.append(dict(cursor))
+        return {**cursor, "sample_offset": cursor["sample_offset"] + landed_shift}
+
+    fake = SimpleNamespace(
+        sync=sync, rollout=SimpleNamespace(seek_data_cursor=seek),
+        ledger=SimpleNamespace(restart_cursor=lambda rid: ledger_cursor, state=lambda rid: "outer_recorded"),
+        emit=lambda event, **fields: events.append((event, fields)))
+    return IslandDriver._restore_data_cursor, fake, seeks, events
+
+
+def test_round_cut_resume_seeks_to_the_cut_cursor_without_a_ledger_cursor():
+    """GPU s23-g3-ps-b-20261014a: under fully_async the ledger recorded no cursor for
+    rollout 2 and the resume was refused; the cut's own cursor is the resume point."""
+    restore, fake, seeks, events = _cut_resume_driver(ledger_cursor=None)
+    restore(fake, 3)
+    assert seeks == [_CUT]
+    assert events == [("rl_data_cursor_restored",
+                       {"rollout_id": 3, "source": "round_cut", "data_cursor": _CUT})]
+
+
+def test_round_cut_cursor_wins_over_the_ledger_record():
+    """The background worker drew past the round's record; the cut put those groups
+    back into the buffer, so continuing from the ledger cursor would re-draw them."""
+    restore, fake, seeks, _ = _cut_resume_driver(ledger_cursor={**_CUT, "sample_offset": 30})
+    restore(fake, 3)
+    assert seeks == [_CUT]
+
+
+def test_round_cut_resume_refuses_a_seek_that_lands_elsewhere():
+    restore, fake, _, _ = _cut_resume_driver(ledger_cursor=None, landed_shift=1)
+    with pytest.raises(DriverError, match="the cut's cursor"):
+        restore(fake, 3)
+
+
+def test_cut_data_cursor_needs_all_four_fields():
+    from yeto.rl.adapters.miles.round_cut import _cut_data_cursor
+    from yeto.rl.engine.bridges import LocalOnlySync
+
+    assert _cut_data_cursor(SimpleNamespace(data={**_CUT, "buffer_length": 23})) == _CUT
+    assert _cut_data_cursor(SimpleNamespace(data={"sample_offset": 35})) is None
+    assert LocalOnlySync(6).resume_data_cursor() is None  # no round cuts wired

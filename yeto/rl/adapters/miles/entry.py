@@ -666,15 +666,19 @@ def build_sync(
     return StrictAvgSync(miles_args.yeto_rl_bridge_config, progress=progress), progress
 
 
+def _is_full_parameter_sync(sync: Any) -> bool:
+    from yeto.rl.engine.full_parameter_sync import FullParameterSync
+
+    return isinstance(sync, FullParameterSync)
+
+
 def _policy_state_for(sync: Any, **lora: Any) -> Any:
     """The full-parameter actor cut for a FullParameterSync island, else LoRA state."""
-
-    from yeto.rl.engine.full_parameter_sync import FullParameterSync
 
     from .full_parameter.session import MilesFullParameterPolicyState
     from .state import MilesPolicyState
 
-    if isinstance(sync, FullParameterSync):
+    if _is_full_parameter_sync(sync):
         return MilesFullParameterPolicyState(sync)
     return MilesPolicyState(**lora)
 
@@ -781,6 +785,7 @@ def compose_island(
             critic_model=critic_model,
             release_refs=release_refs,
             runner=runner,
+            install_actor_recorders=_is_full_parameter_sync(sync),
         ),
         policy_state=policy_state,
         publisher=MilesPublisher(

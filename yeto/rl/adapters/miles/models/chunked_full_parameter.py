@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from typing import Any, Protocol
 
 from yeto.rl.contracts import LocalStepReceipt
@@ -135,6 +136,60 @@ class AuthoritativeFragmentSink:
         return sum(fragment.release() for fragment in self._stored.values())
 
 
+LAYOUT_PROBE_LOG_PREFIX = "[yeto-layout-probe] "
+
+
+def layout_attestation_record(
+    adapter: MilesChunkedFullParameterAdapter,
+    components: Sequence[ComponentIdentity],
+) -> dict[str, object]:
+    """One role's layout in the role shape of a SAO layout attestation.
+
+    The fields are those ``yeto.rl.sao_streaming_runtime`` checks for each
+    role (``miles.sao-streaming-layouts.v2``); ``component`` is the single
+    component the layout was derived for.
+    """
+
+    if len(components) != 1:
+        raise ValueError("a layout attestation record names exactly one component")
+    (component,) = components
+    layout = adapter.layout
+    fragments = []
+    for fragment_id, fragment in enumerate(layout.fragments.fragments):
+        role, shard_id = layout.fragment_owner(fragment_id)
+        fragments.append(
+            {
+                "fragment_id": fragment_id,
+                "role": role,
+                "shard_id": shard_id,
+                "parameter_count": len(layout.fragment_specs(fragment_id)),
+                "scalar_count": fragment.numel,
+                "payload_bytes": fragment.numel * 4,
+            }
+        )
+    return {
+        "role": component.role,
+        "component": {
+            "model_revision": component.model_revision,
+            "config_sha256": component.config_hash,
+        },
+        "parameter_layout_sha256": layout.layout_hash,
+        "expected_fragments": layout.fragments.num_fragments,
+        "parameter_tensor_count": adapter.expected_parameter_tensor_count,
+        "parameter_scalar_count": adapter.expected_parameter_scalar_count,
+        "fragments": fragments,
+        "manifests": [
+            {
+                "topology": asdict(manifest.topology),
+                "source_layout_sha256": manifest.layout_hash,
+                "parameter_count": len(manifest.specs),
+                "scalar_count": sum(spec.numel for spec in manifest.specs),
+            }
+            for manifest in adapter.manifests
+        ],
+    }
+
+
 @dataclass(frozen=True)
 class MilesChunkedFullParameterAdapter:
     layout: ParameterLayout
@@ -184,6 +239,18 @@ class MilesChunkedFullParameterAdapter:
         ):
             fragment_bytes = tuple(
                 fragment.numel * 4 for fragment in adapter.layout.fragments.fragments
+            )
+            # The refusal doubles as a layout probe: print the observed layout
+            # in the shape of a layout attestation, so a probe run with a
+            # placeholder hash yields the real values to freeze.
+            print(
+                LAYOUT_PROBE_LOG_PREFIX
+                + json.dumps(
+                    layout_attestation_record(adapter, components),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                flush=True,
             )
             raise RuntimeError(
                 "Miles full-parameter layout differs from the frozen probe: "

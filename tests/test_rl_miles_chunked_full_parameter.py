@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import struct
 import sys
 import types
@@ -46,7 +47,9 @@ from yeto.protocol import (
 )
 from yeto.rl.adapters.miles.full_parameter.inbound_sink import MilesRayInboundChunkSink
 from yeto.rl.adapters.miles.models.chunked_full_parameter import (
+    LAYOUT_PROBE_LOG_PREFIX,
     MilesChunkedFullParameterAdapter,
+    layout_attestation_record,
 )
 from yeto.rl.trajectory_evidence import TrajectoryBatchEvidence
 
@@ -201,6 +204,60 @@ def test_initialize_rejects_probe_layout_drift_before_install_or_export():
             )
         )
     assert group.installed is False
+
+
+def test_layout_refusal_prints_the_observed_layout_as_an_attestation_record(capsys):
+    class Group:
+        async def full_parameter_shard_manifests(self):
+            return (manifest(1, (99, 1), role="critic"), manifest(0, (100, 1), role="critic"))
+
+        async def install_full_parameter_fragment_plans(self, _plans):
+            raise AssertionError("layout drift must fail before plan installation")
+
+    with pytest.raises(RuntimeError, match="differs from the frozen probe"):
+        asyncio.run(
+            MilesChunkedFullParameterAdapter.initialize(
+                Group(),
+                policy_version=0,
+                algorithm="sao",
+                stream_role="critic",
+                components=(component("critic"),),
+                minimum_fragments=2,
+                expected_fragments=2,
+                expected_layout_hash="c" * 64,
+                max_fragment_bytes=400,
+                max_chunk_bytes=64,
+            )
+        )
+    lines = [
+        line
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith(LAYOUT_PROBE_LOG_PREFIX)
+    ]
+    assert len(lines) == 1
+    record = json.loads(lines[0][len(LAYOUT_PROBE_LOG_PREFIX) :])
+    expected = MilesChunkedFullParameterAdapter.create(
+        (manifest(0, (100, 1), role="critic"), manifest(1, (99, 1), role="critic")),
+        algorithm="sao",
+        stream_role="critic",
+        components=(component("critic"),),
+        minimum_fragments=2,
+        max_fragment_bytes=400,
+        max_chunk_bytes=64,
+    )
+    assert record == layout_attestation_record(expected, (component("critic"),))
+    assert record["role"] == "critic"
+    assert record["component"] == {"model_revision": "a" * 40, "config_sha256": "b" * 64}
+    assert record["parameter_layout_sha256"] == expected.layout.layout_hash
+    assert record["expected_fragments"] == expected.layout.fragments.num_fragments
+    assert [fragment["fragment_id"] for fragment in record["fragments"]] == list(
+        range(record["expected_fragments"])
+    )
+    assert sum(f["scalar_count"] for f in record["fragments"]) == 201
+    assert record["parameter_scalar_count"] == 201
+    assert record["parameter_tensor_count"] == 4
+    assert all(f["payload_bytes"] == 4 * f["scalar_count"] for f in record["fragments"])
+    assert len(record["manifests"]) == 2
 
 
 def _cut(adapter, values, *, policy_version, generation, ray):

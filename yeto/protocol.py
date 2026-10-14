@@ -428,6 +428,20 @@ class _StreamedInboundFragment:
     payload: StreamedInboundPayload
 
 
+@dataclass(frozen=True)
+class SendProgress:
+    """Outbound progress of one SyncerClient, for upload diagnostics.
+
+    ``bytes_sent`` counts bytes handed to the kernel by ``sendall`` across
+    every connection group; ``queued_chunks`` is what the live group's send
+    queues still hold; ``reconnects`` counts redial attempts."""
+
+    bytes_sent: int
+    queued_chunks: int
+    reconnects: int
+    connected: bool
+
+
 @dataclass
 class _Outbound:
     data: bytes | bytearray
@@ -546,6 +560,8 @@ class SyncerClient:
         self._failure = threading.Event()  # set by any thread of the live group
         self._closed = threading.Event()
         self._reconnects_used = 0
+        self._bytes_sent = 0
+        self._bytes_sent_lock = threading.Lock()
         self._reset_bcasts_on_reconnect = False
         self._supervisor: threading.Thread | None = None
 
@@ -689,6 +705,8 @@ class SyncerClient:
             self._failure.wait()
             if self._closed.is_set() or self.shutdown.is_set():
                 return
+            _connect_log(f"connection to syncer {self.addr[0]}:{self.addr[1]} lost "
+                         f"(learner {self.learner_id}): {self._last_err!r}; redialing")
             self._teardown_group()
             backoff = RECONNECT_BACKOFF_START
             while True:
@@ -706,9 +724,13 @@ class SyncerClient:
                 backoff = min(backoff * 2.0, RECONNECT_BACKOFF_CAP)
                 try:
                     self._connect_group(patient=False)
+                    _connect_log(f"reconnected to syncer {self.addr[0]}:{self.addr[1]} "
+                                 f"(redial {self._reconnects_used})")
                     break
                 except (OSError, ConnectionError) as e:
                     self._last_err = e
+                    _connect_log(f"redial {self._reconnects_used} to syncer failed: "
+                                 f"{type(e).__name__}: {e}")
 
     def close(self) -> None:
         self._closed.set()
@@ -742,6 +764,19 @@ class SyncerClient:
             ) from self._err
         if self._err is not None:
             raise RuntimeError(f"syncer connection failed: {self._err}") from self._err
+
+    def send_progress(self) -> SendProgress:
+        with self._lock:
+            queued = sum(q.qsize() for q in self._queues)
+            connected = self._connected.is_set()
+        with self._bytes_sent_lock:
+            sent = self._bytes_sent
+        return SendProgress(
+            bytes_sent=sent,
+            queued_chunks=queued,
+            reconnects=self._reconnects_used,
+            connected=connected,
+        )
 
     # -- learner-facing API ------------------------------------------------------
 
@@ -1309,6 +1344,8 @@ class SyncerClient:
                 if item is None:
                     return
                 sock.sendall(item.data)
+                with self._bytes_sent_lock:
+                    self._bytes_sent += len(item.data)
                 if item.sent is not None:
                     item.sent.set()
         except BaseException as e:
