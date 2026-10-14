@@ -947,3 +947,20 @@ def test_miles_trainer_group_publish_offloaded_follows_offload_train():
     assert prop.fget(SimpleNamespace(_args=SimpleNamespace(colocate=True, offload_train=True)))
     assert not prop.fget(SimpleNamespace(_args=SimpleNamespace(colocate=True, offload_train=False)))
     assert not prop.fget(SimpleNamespace(_args=SimpleNamespace(colocate=False, offload_train=True)))
+
+
+def test_first_optimizer_step_records_the_last_start_phase_once(tmp_path):
+    from yeto.rl.engine.start_phases import START_PHASES, StartPhases
+
+    emitted = []
+    clock = iter(range(100, 200))
+    phases = StartPhases(lambda event, **f: emitted.append((event, f)), clock=lambda: float(next(clock)))
+    for name in START_PHASES[:-1]:
+        phases.mark(name)
+    driver = _driver(_engine(), LocalOnlySync(3), tmp_path)
+    driver.start_phases = phases
+    driver.run()
+    names = [f["phase"] for e, f in emitted if e == "trainer_start_phase"]
+    assert names == list(START_PHASES)
+    [summary] = [f for e, f in emitted if e == "trainer_start_summary"]
+    assert summary["total_s"] == 6.0 and summary["missing"] == []

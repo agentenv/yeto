@@ -12,6 +12,8 @@ checkouts only in pure-Python files (checked below), so the layer:
   fork repository (opaque whiteout hides the base history),
 * rewrites SGLang's editable-install metadata (dist-info, .pth, finder,
   ``sglang/_version.py``) for the fork's setuptools-scm version,
+* unpacks extra pure-Python wheels (``--wheel``, e.g. peft) into the base's
+  site-packages, as ``pip install --no-deps`` would,
 * adds /opt/yeto/image-manifest.json with every component SHA.
 
 Approximate docker equivalent (unverified): docker/miles-ports/Dockerfile.
@@ -30,6 +32,7 @@ import os
 import subprocess
 import tarfile
 import tempfile
+import zipfile
 from pathlib import Path
 
 SITE = "opt/sglang/lib/python3.12/site-packages"
@@ -93,6 +96,31 @@ def version_file(version: str) -> bytes:
     ).encode()
 
 
+def wheel_files(wheel: Path) -> dict[str, bytes]:
+    """``{site-packages relative path: bytes}`` of a pure-Python wheel.
+
+    Only ``*-none-any`` wheels without a ``.data`` directory are accepted:
+    those install by unpacking alone (no scripts, headers or compiled code).
+    An ``INSTALLER`` file is added, as pip writes one.
+    """
+
+    if not wheel.name.endswith("-none-any.whl"):
+        raise SystemExit(f"{wheel.name}: only pure-Python (*-none-any) wheels are supported")
+    files: dict[str, bytes] = {}
+    with zipfile.ZipFile(wheel) as archive:
+        for name in archive.namelist():
+            if name.endswith("/"):
+                continue
+            if ".data/" in name.split(".dist-info/")[0]:
+                raise SystemExit(f"{wheel.name}: has a .data directory ({name}); not supported")
+            files[name] = archive.read(name)
+    dist_info = {n.split("/")[0] for n in files if n.split("/")[0].endswith(".dist-info")}
+    if len(dist_info) != 1:
+        raise SystemExit(f"{wheel.name}: expected one .dist-info directory, found {sorted(dist_info)}")
+    files[f"{dist_info.pop()}/INSTALLER"] = b"yeto-make-layer\n"
+    return files
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--manifest-json", required=True, help="image-manifest.json content file")
@@ -108,6 +136,8 @@ def main() -> None:
     p.add_argument("--sglang-version", required=True)
     p.add_argument("--sglang-base-metadata", type=Path, required=True,
                    help="dir with the base image's sglang site-packages metadata")
+    p.add_argument("--wheel", type=Path, action="append", default=[],
+                   help="pure-Python wheel unpacked into site-packages (repeatable)")
     p.add_argument("--mtime", type=int, required=True)
     p.add_argument("--out", type=Path, required=True)
     a = p.parse_args()
@@ -183,6 +213,10 @@ def main() -> None:
     for name, data in files.items():
         add_file(f"{SITE}/{name}", data)
     add_file("sgl-workspace/sglang/python/sglang/_version.py", version_file(new))
+
+    for wheel in a.wheel:
+        for name, data in sorted(wheel_files(wheel).items()):
+            add_file(f"{SITE}/{name}", data)
 
     add_dir("opt/yeto")
     add_file("opt/yeto/image-manifest.json", Path(a.manifest_json).read_bytes())

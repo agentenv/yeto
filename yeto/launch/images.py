@@ -109,6 +109,59 @@ def parse_image_spec(value: str | None):
     return images
 
 
+# Exit codes of the image-manifest check (:func:`image_manifest_check`).
+MANIFEST_MATCH, MANIFEST_ABSENT, MANIFEST_MISMATCH = 0, 3, 4
+# Stdlib-only: reading the manifest must not import the packages it describes
+# (``import peft`` ~27 s, ``import sglang`` ~18 s; coldstart-gpu-review 6.1).
+_MANIFEST_CHECK_PY = """\
+import json, os, sys
+path, package, key, want, want_path = sys.argv[1:6]
+try:
+    entry = json.load(open(path)).get(package) or {}
+except FileNotFoundError:
+    sys.exit(3)
+have = entry.get(key)
+if have is None:
+    sys.exit(3)
+if have != want:
+    print(f"[yeto-setup] image manifest {path}: {package} {key} {have} "
+          f"!= pinned {want}", file=sys.stderr)
+    sys.exit(4)
+if want_path and os.path.realpath(entry.get("path", "")) != os.path.realpath(want_path):
+    print(f"[yeto-setup] image manifest {path}: {package} path {entry.get('path')} "
+          f"!= {want_path}", file=sys.stderr)
+    sys.exit(4)
+"""
+
+
+def image_manifest_check(package: str, key: str, want: str, *, fallback: str,
+                         path: str = "", on_pass: str = ":") -> str:
+    """Shell lines: check ``package`` against the image manifest, without importing it.
+
+    Manifest entry equal to ``want`` (and at ``path`` when given): run
+    ``on_pass``.  Manifest or entry absent: record ``image_manifest_fallback``
+    and run ``fallback`` (the old import check).  Different value: fail the
+    setup (before Ray starts), naming the package and both values.
+    """
+
+    from ..rl import MILES_NEXT_IMAGE_MANIFEST
+    from ..rl.engine.start_phases import shell_event
+
+    argv = " ".join(shlex.quote(a) for a in (MILES_NEXT_IMAGE_MANIFEST, package, key, want, path))
+    event = shell_event("image_manifest_fallback",
+                        {"package": package, "manifest": MILES_NEXT_IMAGE_MANIFEST,
+                         "check": "import"})
+    return (
+        f"rc=0; python3 -c {shlex.quote(_MANIFEST_CHECK_PY)} {argv} || rc=$?\n"
+        'case "$rc" in\n'
+        f"{MANIFEST_MATCH}) echo '[yeto-setup] image manifest: {package} {key} {want}'; {on_pass} ;;\n"
+        f"{MANIFEST_ABSENT})\n{event}\n{fallback} ;;\n"
+        f"*) echo \"[yeto-setup] image manifest check of {package} failed (exit $rc); "
+        "refusing to start\" >&2; exit 1 ;;\n"
+        "esac"
+    )
+
+
 def _miles_source_setup(overlay: str | None = None) -> tuple[str, str]:
     """Return the (miles_setup, sglang_setup) remote steps of the pinned Miles/SGLang forks.
 
@@ -159,14 +212,17 @@ def _miles_source_setup(overlay: str | None = None) -> tuple[str, str]:
     # PYTHONPATH) becomes a link to it.  Any other image, or an existing
     # ~/sglang directory, gets the clone + install at ~/sglang as before.
     image_root = shlex.quote(MILES_NEXT_IMAGE_SGLANG_ROOT)
-    sglang_in_image = (
+    sglang_checkout_in_image = (
         f'{{ [ ! -e ~/sglang ] || [ "$(readlink ~/sglang)" = {image_root} ]; }} && '
         f'[ "$(git -C {image_root} rev-parse HEAD 2>/dev/null)" = '
         f"{SGLANG_NEXT_COMMIT} ] && "
         f'[ "$(git -C {image_root} config --get remote.origin.url)" = '
         f"{shlex.quote(SGLANG_NEXT_REPOSITORY)} ] && "
         f'[ -z "$(git -C {image_root} status --porcelain '
-        '--untracked-files=all)" ] && '
+        '--untracked-files=all)" ]'
+    )
+    # Fallback for an image without a manifest entry: the old import check.
+    sglang_import_ok = (
         "python3 -c 'import os, sys, sglang; sys.exit(0 if os.path.realpath("
         f'sglang.__file__).startswith("{MILES_NEXT_IMAGE_SGLANG_ROOT}/python/'
         "\") else 1)'"
@@ -193,6 +249,15 @@ def _miles_source_setup(overlay: str | None = None) -> tuple[str, str]:
         f"sys.exit(0 if peft.__version__ == \"{MILES_PEFT_VERSION}\" else 1)' "
         "2>/dev/null"
     )
+    peft_check = image_manifest_check(
+        "peft", "version", MILES_PEFT_VERSION,
+        fallback=f"{peft_ok} || python3 -m pip install -q 'peft=={MILES_PEFT_VERSION}'",
+    )
+    sglang_check = image_manifest_check(
+        "sglang", "commit", SGLANG_NEXT_COMMIT, path=MILES_NEXT_IMAGE_SGLANG_ROOT,
+        on_pass="SGLANG_IN_IMAGE=1",
+        fallback=f"if {sglang_import_ok}; then SGLANG_IN_IMAGE=1; fi",
+    )
     return (
         "set -e\n"
         "MILES_REFRESHED=0\n"
@@ -202,13 +267,17 @@ def _miles_source_setup(overlay: str | None = None) -> tuple[str, str]:
         + f"if {miles_in_image}; then\n"
         f"echo \"[yeto-setup] image provides miles {MILES_NEXT_COMMIT} "
         f'({manifest}); editable install kept"\n'
-        f"{peft_ok} || python3 -m pip install -q 'peft=={MILES_PEFT_VERSION}'\n"
+        f"{peft_check}\n"
         "else\n"
         "python3 -m pip install -q --no-deps -e ~/miles "
         f"'peft=={MILES_PEFT_VERSION}'\n"
         "fi"
         + (f"\n{_miles_overlay().overlay_setup(overlay)}" if overlay else ""),
-        f"if {sglang_in_image}; then\n"
+        "SGLANG_IN_IMAGE=0\n"
+        f"if {sglang_checkout_in_image}; then\n"
+        f"{sglang_check}\n"
+        "fi\n"
+        'if [ "$SGLANG_IN_IMAGE" = 1 ]; then\n'
         f"ln -sfn {image_root} ~/sglang\n"
         f"echo '[yeto-setup] image provides sglang {SGLANG_NEXT_COMMIT}'\n"
         "else\n"

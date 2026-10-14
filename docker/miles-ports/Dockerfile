@@ -47,5 +47,10 @@ RUN cd /sgl-workspace/sglang \
  && SETUPTOOLS_SCM_PRETEND_VERSION="$SGLANG_VERSION" \
     SGLANG_BUILD_RUST_EXTS=none pip install -e "python[all]" --no-deps
 
+# peft at the pinned MILES_PEFT_VERSION, no deps (as the build script's
+# wheel unpack); island setup then reads it from the manifest, not by import.
+ARG PEFT_VERSION=0.20.0
+RUN pip install --no-deps "peft==$PEFT_VERSION"
+
 # Provenance (written by the build script: component SHAs + base digests).
 COPY --from=manifest image-manifest.json /opt/yeto/image-manifest.json

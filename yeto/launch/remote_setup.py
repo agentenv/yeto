@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 from pathlib import Path
 
 
@@ -285,3 +286,31 @@ def causal_kernel_setup_steps(args) -> list[str]:
             ]
         )
     return steps
+
+
+MODEL_PREFETCH_LOG = "/tmp/hf-prefetch.log"
+
+
+def model_prefetch(repo: str, revision: str | None) -> str:
+    """Background Hub prefetch of ``repo`` into the HF cache (setup step).
+
+    ``huggingface_hub.snapshot_download`` through the image's python3: the
+    ``huggingface-cli`` the old step called is deprecated and exits 1 in the
+    ports image (coldstart-gpu-review 6.2 #6).  A failure does not stop the
+    run (the island downloads again in the foreground); it is recorded as
+    ``model_prefetch_failed`` with the exit code (start_phases.shell_event).
+    """
+
+    from ..rl.engine.start_phases import shell_event
+
+    fetch_py = (
+        "from huggingface_hub import snapshot_download; "
+        f"snapshot_download(repo_id={repo!r}, revision={revision!r})"
+    )
+    failed = shell_event("model_prefetch_failed", {"model": repo, "log": MODEL_PREFETCH_LOG},
+                         {"exit_code": "$rc"})
+    body = (
+        f"python3 -c {shlex.quote(fetch_py)} >{MODEL_PREFETCH_LOG} 2>&1; rc=$?\n"
+        f'if [ "$rc" != 0 ]; then\n{failed}\nfi'
+    )
+    return f"(nohup sh -c {shlex.quote(body)} >/dev/null 2>&1 &)"
