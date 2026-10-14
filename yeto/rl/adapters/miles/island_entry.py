@@ -2110,12 +2110,18 @@ def _run_ports(
     from yeto.rl.core import canonical_layout_hash
     from yeto.rl.adapters.miles.entry import run_ports_island
 
-    lora_config_hash = _lora_config_hash(args, canonical_targets)
-    if native_lora_export is not None:
+    if getattr(miles_args, "yeto_rl_parameter_mode", None) == "full":
+        # run_miles already bound the full-parameter identity (model config
+        # hash); there is no LoRA rank or adapter layout to derive here.
+        lora_config_hash = miles_args.yeto_rl_lora_config_hash
+        layout_hash = miles_args.yeto_rl_layout_hash
+        print(f"[rl] full-parameter identity: layout={layout_hash}", flush=True)
+    elif native_lora_export is not None:
         if specs:
             raise ValueError("native LoRA export must not carry predicted specs")
         if yeto_policy_sync:
             raise ValueError("native LoRA export runs only without Yeto policy sync")
+        lora_config_hash = _lora_config_hash(args, canonical_targets)
         layout_hash = None
         miles_args.yeto_rl_native_lora_export = native_lora_export
         print(
@@ -2124,6 +2130,7 @@ def _run_ports(
             flush=True,
         )
     else:
+        lora_config_hash = _lora_config_hash(args, canonical_targets)
         layout_hash = canonical_layout_hash(specs)
         print(
             f"[rl] expected LoRA layout: {len(specs)} tensors, hash={layout_hash}: "
