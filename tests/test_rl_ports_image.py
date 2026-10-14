@@ -265,6 +265,28 @@ def test_pure_python_check_rejects_build_inputs(tmp_path):
                 ml.check_pure_python(repo, base, head, pkgs)
 
 
+def test_layer_drops_megatron_bridges_eager_modelopt_import():
+    """L2.2: the trainer imports megatron.bridge without paying for modelopt (21-30 s)."""
+    import ast
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("make_layer", REPO / "docker/miles-ports/make_layer.py")
+    ml = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ml)
+    tree = ast.parse(ml.MEGATRON_BRIDGE_INIT.read_text())
+    imported = set()
+    for node in ast.walk(tree):  # module level and inside try/if: all run at import time
+        if isinstance(node, ast.Import):
+            imported |= {a.name for a in node.names}
+        elif isinstance(node, ast.ImportFrom):
+            imported.add(node.module)
+    assert not any(name.split(".")[0] == "modelopt" for name in imported)
+    # the rest of the package init is untouched: bridges still register
+    assert {"megatron.bridge.models", "megatron.bridge.models.conversion.auto_bridge"} <= imported
+    script = (REPO / "scripts/build_miles_ports_image.sh").read_text()
+    assert ml.MEGATRON_BRIDGE_COMMIT in script and "lazy-modelopt" in script
+
+
 def test_gpu_exact_needs_modal_islands():
     from yeto.gpu_spec import parse_gpu_spec
 

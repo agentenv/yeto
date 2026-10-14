@@ -14,6 +14,9 @@ checkouts only in pure-Python files (checked below), so the layer:
   ``sglang/_version.py``) for the fork's setuptools-scm version,
 * unpacks extra pure-Python wheels (``--wheel``, e.g. peft) into the base's
   site-packages, as ``pip install --no-deps`` would,
+* replaces the base's ``megatron/bridge/__init__.py`` (Megatron-Bridge
+  8cd3466) with ``megatron_bridge_init.py``: the same file without its eager
+  ``import modelopt.torch`` (rl-trainer-cold-start-cost L2.2),
 * adds /opt/yeto/image-manifest.json with every component SHA.
 
 Approximate docker equivalent (unverified): docker/miles-ports/Dockerfile.
@@ -41,6 +44,10 @@ SITE = "opt/sglang/lib/python3.12/site-packages"
 # pyproject.toml, setup.cfg, requirements*, sgl-kernel/**, rust/**, csrc,
 # .cu/.cpp -- changes what a real install builds and needs a docker build.
 EXEMPT_PREFIXES = ("test/", "tests/", "docs/")
+# Megatron-Bridge as the base installs it (pip, not editable) and the file the
+# layer writes over its package __init__ (see megatron_bridge_init.py).
+MEGATRON_BRIDGE_COMMIT = "8cd3466d14d2337c8492827b3712482c2b3e4866"
+MEGATRON_BRIDGE_INIT = Path(__file__).with_name("megatron_bridge_init.py")
 
 
 def git(repo: Path, *argv: str) -> str:
@@ -217,6 +224,8 @@ def main() -> None:
     for wheel in a.wheel:
         for name, data in sorted(wheel_files(wheel).items()):
             add_file(f"{SITE}/{name}", data)
+
+    add_file(f"{SITE}/megatron/bridge/__init__.py", MEGATRON_BRIDGE_INIT.read_bytes())
 
     add_dir("opt/yeto")
     add_file("opt/yeto/image-manifest.json", Path(a.manifest_json).read_bytes())
