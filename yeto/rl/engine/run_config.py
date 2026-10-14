@@ -758,7 +758,6 @@ def resolve_rl_run_config(
 
     eval_config = _resolve_eval(
         args,
-        parameter_mode=parameter_mode,
         prompt_path=prompt_path,
         eval_prompt_path=eval_prompt_path,
         yeto_policy_sync=yeto_policy_sync,
@@ -1068,7 +1067,7 @@ def _lora_dropout(args, parameter_mode: str) -> float:
     return value
 
 
-def ports_training_eval(args, *, parameter_mode: str | None) -> bool:
+def ports_training_eval(args) -> bool:
     """Training-time heldout eval on a ports island (not eval-only).
 
     Dense full-parameter islands use the same driver evaluation (rollout 0,
@@ -1087,7 +1086,6 @@ def ports_training_eval(args, *, parameter_mode: str | None) -> bool:
 def _resolve_eval(
     args,
     *,
-    parameter_mode: str,
     prompt_path,
     eval_prompt_path,
     yeto_policy_sync: bool,
@@ -1100,7 +1098,7 @@ def _resolve_eval(
     if eval_interval <= 0:
         raise ValueError("evaluation interval must be positive")
     eval_only = getattr(args, "eval_only", False)
-    ports_train_eval = ports_training_eval(args, parameter_mode=parameter_mode)
+    ports_train_eval = ports_training_eval(args)
     if eval_only:
         if eval_interval != 1:
             raise ValueError("SSH evaluation must be one separate eval-only run")

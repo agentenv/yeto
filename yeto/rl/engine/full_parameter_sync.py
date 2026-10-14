@@ -31,6 +31,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
+from yeto.protocol import PartialMessageGenerationLost
+
 from .driver import SyncBoundary, SyncStart
 
 if TYPE_CHECKING:
@@ -193,11 +195,19 @@ class RolePairing:
 
         if self.failure is None:
             self.failure = error
+        for note in self.close_all():
+            error.add_note(note)
+
+    def close_all(self) -> list[str]:
+        """Close every role even when one close raises; one note per failure."""
+
+        notes = []
         for role, stream in self.streams.items():
             try:
                 stream.close()
-            except Exception as close_error:  # noqa: BLE001 - fail-stop cleanup
-                error.add_note(f"{role} close failed: {type(close_error).__name__}: {close_error}")
+            except Exception as close_error:  # noqa: BLE001 - every role must close
+                notes.append(f"{role} close failed: {type(close_error).__name__}: {close_error}")
+        return notes
 
     async def gather_roles(self, make: Any) -> dict[str, Any]:
         """Run ``make(role, stream)`` for every role; fail-stop all on any error."""
@@ -297,8 +307,6 @@ class RolePairing:
         observed: Mapping[str, Any | None],
         produced: dict[str, list[Any]],
     ) -> None:
-        from yeto.protocol import PartialMessageGenerationLost
-
         for role, stream in self.streams.items():
             replayed = _retained_replay(pair.candidates[role], observed.get(role))
             if replayed is None:
@@ -350,7 +358,7 @@ class RolePairing:
                 if key[0] != self.profile.total_fragment_steps
                 and all(stream.has_staged_broadcast(key[1], key[0]) for stream in self.streams.values())
             ]
-            if self.profile.sweep and ready and len(ready) != len(self._sweep_keys(ready[0][0])):
+            if self.profile.sweep and ready and not self._is_whole_sweep([key for key, _ in ready]):
                 return {role: RoleProgress() for role in self.streams}
             for key, pair in ready:
                 await self._apply_pair(key, pair, applied)
@@ -359,11 +367,19 @@ class RolePairing:
             raise
         return {role: RoleProgress(applied_fragments=tuple(dict.fromkeys(v))) for role, v in applied.items()}
 
-    def _sweep_keys(self, key: LogicalKey) -> list[LogicalKey]:
-        """Keys of the in-flight sweep (same local step) that ``key`` belongs to."""
+    def _is_whole_sweep(self, ready: list[LogicalKey]) -> bool:
+        """Strict sweep: ``ready`` is all P fragments of one local step.
 
-        local_step = self.inflight[key].candidates["actor"].local_step
-        return [k for k, pair in self.inflight.items() if pair.candidates["actor"].local_step == local_step]
+        Counting only the keys already in flight is not enough: while the
+        syncer has permitted part of a sweep, the in-flight keys of that local
+        step are themselves partial."""
+
+        local_step = self.inflight[ready[0]].candidates["actor"].local_step
+        sweep = [key for key, pair in self.inflight.items()
+                 if pair.candidates["actor"].local_step == local_step]
+        return (len(sweep) == self.profile.fragments
+                and sorted(ready) == sorted(sweep)
+                and {key[1] for key in sweep} == set(range(self.profile.fragments)))
 
     async def _apply_pair(
         self, key: LogicalKey, pair: PairedSubmission, applied: dict[str, list[int]]
@@ -457,6 +473,8 @@ def _retained_replay(retained: Any, observed: Any | None) -> Any | None:
 
 # LEAVE reason of a clean finish (P5 code 0, FINISHED).  P5 owns the full code
 # table; this session only forwards the code it is closed with.
+# TODO(P5 rl-island-graceful-leave): once yeto/rl/engine/leave_reason.py lands,
+# replace this constant with LeaveReason.FINISHED (an IntEnum equal to 0).
 REASON_FINISHED = 0
 
 
@@ -528,10 +546,11 @@ class FullParameterSync:
                 rollout_id=rollout_id, trajectories=trajectories
             )
         )
+        before = pairing.fragment_versions()
         pairing.submit_ready()
         await pairing.commit_staged_broadcasts()
         if pairing.profile.sweep:
-            await self._wait_for_sweep()
+            await self._wait_for_sweep(before)
         if pairing.any_finalizing:
             await pairing.finish_without_more_training()
             return True
@@ -539,12 +558,19 @@ class FullParameterSync:
             stream.discard_detached_submission_cut()
         return False
 
-    async def _wait_for_sweep(self) -> None:
-        """Strict sweep: block until this local step's whole sweep is applied."""
+    async def _wait_for_sweep(self, before: tuple[int, ...]) -> None:
+        """Strict sweep: block until all P fragments of this local step are
+        applied, i.e. every fragment version moved past ``before``.  An empty
+        in-flight set alone proves nothing: the syncer may not have permitted
+        the rest of the sweep yet."""
 
         pairing = self.pairing
         deadline = time.monotonic() + pairing.profile.wait_timeout
-        while pairing.inflight and not pairing.any_finalizing:
+
+        def applied() -> bool:
+            return all(now > then for now, then in zip(pairing.fragment_versions(), before, strict=True))
+
+        while not applied() and not pairing.any_finalizing:
             if time.monotonic() >= deadline:
                 error = TimeoutError("dense sweep was not applied before the wait timeout")
                 pairing.fail_stop(error)
@@ -575,10 +601,12 @@ class FullParameterSync:
         if self.closed:
             return
         self.closed = True
-        for stream in self.pairing.streams.values():
-            stream.close()
+        failures = self.pairing.close_all()
         if self._driver is not None:
             self._driver.emit(
                 "rl_sync_closed",
-                **{"sync/leave_reason": int(reason), "sync/finished": self.finished},
+                **{"sync/leave_reason": int(reason), "sync/finished": self.finished,
+                   **({"sync/close_failures": failures} if failures else {})},
             )
+        if failures:
+            raise RuntimeError("full-parameter role close failed: " + "; ".join(failures))

@@ -8,9 +8,9 @@ from test_rl_sao_streaming_runtime import _syncer_profile
 from yeto.rl.engine.island_ledger import contract_fields
 from yeto.syncer_profile import SyncerSemanticProfile
 
-LEGACY = "b904a25c417a24deef77b8526c4e982a13a35c65d331a4cafb74e579b584d4b7"
+LEGACY = "85a50d0e4fd5103b81a2295536fca0e5ad96cd50531fb1396208af8459be571e"
 # Golden for the Rust side (elastic defaults 0.75 / 0.5 / 900 / 1 / 2 on the SAO profile).
-ELASTIC_DEFAULT = "4b61bb37c3dfafce169058a26f4e76dd1fcaad257c115ea468133916a24560b8"
+ELASTIC_DEFAULT = "c677c127b1ad3e1da179863ee02b6b2e1bc232edb03b088bad62251e5d8d9ba5"
 
 
 def _elastic(**kw):

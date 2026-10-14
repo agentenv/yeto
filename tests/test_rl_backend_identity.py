@@ -95,19 +95,10 @@ def test_bridges_send_the_identity_bound_contract():
         assert "backend_identity_sha256" in {f.name for f in dataclasses.fields(cls)}
 
 
-def test_dense_and_sao_training_contracts_reference_the_identity():
-    from yeto.rl import local_learner
-
-    src = Path(local_learner.__file__).read_text()
-    assert "backend_identity_sha256" in src
+def test_full_parameter_session_contracts_reference_the_identity():
     from yeto.rl.adapters.miles.full_parameter import role_stream
-    from yeto.rl.adapters.miles.models import full_parameter_dense
 
-    assert (
-        full_parameter_dense._legacy_identity_sha256()
-        == miles_identity.backend_identity("legacy").sha256()
-    )
-    # P0-D5/D8: every full-parameter role stream (SAO today) binds the ports identity.
+    # P0-D5/D8: every full-parameter role stream (dense and SAO) binds the ports identity.
     assert 'backend_identity("ports").sha256()' in Path(role_stream.__file__).read_text()
 
 

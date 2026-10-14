@@ -643,15 +643,75 @@ def _resume_if_exists(checkpoint: str) -> str:
     return f"$(test -f {checkpoint} && echo --resume)"
 
 
-def _syncer_quorum_timeout(args) -> str:
-    """``--rl-elastic-quorum-timeout-s`` (3.8): the syncer's --quorum-timeout-s,
-    the same value the island's pause budget uses; "" by default (syncer 900 s)."""
+# syncer/src/main.rs default of --quorum-timeout-s (also the final-ACK timeout
+# when --final-ack-timeout-s is omitted, as the launcher does).
+SYNCER_DEFAULT_QUORUM_TIMEOUT_S = 900
+
+
+def _rl_quorum_timeout_s(args) -> int | None:
+    """``--rl-elastic-quorum-timeout-s`` (3.8) as whole seconds; None = syncer default."""
     value = getattr(args, "rl_elastic_quorum_timeout_s", None)
     if value is None or not getattr(args, "rl_elastic", False):
-        return ""
+        return None
     if float(value) != int(value):
         raise ValueError("--rl-elastic-quorum-timeout-s must be whole seconds (syncer u64)")
-    return f" --quorum-timeout-s {int(value)}"
+    return int(value)
+
+
+def _syncer_quorum_timeout(args) -> str:
+    """The syncer's --quorum-timeout-s, the same value the island's pause
+    budget uses; "" by default (syncer 900 s)."""
+    value = _rl_quorum_timeout_s(args)
+    return "" if value is None else f" --quorum-timeout-s {value}"
+
+
+def rl_dense_sweep(args) -> bool:
+    return (getattr(args, "training_mode", "sft") == "rl"
+            and getattr(args, "rl_sync_preset", None) == "dense-full")
+
+
+def _syncer_policy_sweep(args) -> str:
+    """dense-full: strict P-fragment policy sweeps, HELLO bound to the profile hash."""
+    if not rl_dense_sweep(args):
+        return ""
+    return f" --policy-sweep-fragments {args.fragments} --require-profile-binding"
+
+
+def rl_syncer_profile(args, num_learners: int):
+    """The semantic profile of :func:`_rl_role_syncer_command` for a dense
+    sweep, as the Rust syncer hashes it (yeto.syncer_profile). Islands send
+    its sha256 in HELLO (``--syncer-profile-sha256``, P0-1.7b.1-Q6)."""
+    from .syncer_profile import SYNCER_SEMANTIC_PROFILE_SCHEMA, SyncerSemanticProfile
+
+    if not rl_dense_sweep(args):
+        raise ValueError("only the dense-full syncer is bound to a semantic profile")
+    timeout = _rl_quorum_timeout_s(args) or SYNCER_DEFAULT_QUORUM_TIMEOUT_S
+    return SyncerSemanticProfile.from_mapping({
+        "schema": SYNCER_SEMANTIC_PROFILE_SCHEMA,
+        "learners": num_learners,
+        "quorum": args.quorum,
+        "grace_ms": args.grace_ms,
+        "grace_gamma": args.grace_gamma,
+        "grace_tau": args.grace_tau,
+        "pipeline": args.pipeline,
+        "min_round_interval_ms": 0,
+        "sync_interval_steps": args.sync_interval_steps,
+        "delta_correction": args.delta_correction,
+        "quorum_timeout_s": timeout,
+        "final_ack_timeout_s": timeout,
+        "total_steps": args.rl_total_fragment_steps,
+        "policy_sweep_fragments": args.fragments,
+        "outer_lr": args.outer_lr,
+        "outer_momentum": args.outer_momentum,
+        "checkpoint_enabled": True,
+        "checkpoint_every": 1,
+        "resume": False,  # not hashed (v2): fresh start and restart agree
+        "mark_final_checkpoint": False,
+        "learner_budget_steps": None,
+        "max_base_lag": 0,
+        "learner_weight": "equal",
+        "require_profile_binding": True,
+    })
 
 
 _ISLAND_SCHEDULING_PARAMS = (
@@ -885,6 +945,7 @@ def _rl_role_syncer_command(args, num_learners: int, binary: str,
         f"{_syncer_quorum_timeout(args)}"
         f"{_syncer_island_scheduling(args)}"
         f"{_syncer_expected_contract(args)}"
+        f"{_syncer_policy_sweep(args)}"
         f" --outer-lr {args.outer_lr}"
         f" --outer-momentum {args.outer_momentum}"
         " --max-base-lag 0 --learner-weight equal"
@@ -2330,6 +2391,43 @@ def _default_session_server_port(args) -> None:
         args.session_server_port = [DEFAULT_SESSION_SERVER_PORT]
 
 
+def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
+    """dense-full (P0-D8): one actor role swept as whole-model fragments.
+
+    The syncer's strict policy-sweep profile fixes its merge semantics
+    (every island per round, no grace, serial rounds, plain averaging);
+    the fragment count P comes from the Miles layout probe."""
+    problems = []
+    if getattr(args, "rl_engine", "ports") != "ports":
+        problems.append("--rl-engine ports")
+    if getattr(args, "rl_placement", "colocated") != "fixed-partition":
+        problems.append("--rl-placement fixed-partition (dedicated rollout GPUs)")
+    if not re.fullmatch(r"[0-9a-f]{64}", getattr(args, "rl_parameter_layout_sha256", None) or ""):
+        problems.append("--rl-parameter-layout-sha256 <64 lowercase hex>")
+    if args.experimental_rl_sync:
+        problems.append("no --experimental-rl-sync")
+    if args.local_rl_rounds_per_sync != 1 or int(getattr(args, "rl_optimizer_steps", 1) or 1) != 1:
+        problems.append("--local-rl-rounds-per-sync 1 and one optimizer step (strict sweep H=1)")
+    if args.fragments < 1:
+        problems.append("--fragments >= 1")
+    if island_scheduling_mode(args) != "legacy":
+        problems.append("--rl-island-scheduling legacy (no fragment frames in elastic mode)")
+    if rl_needs_critic(args):
+        problems.append("a critic-free algorithm (dense-full trains the actor only)")
+    if problems:
+        raise ValueError("--rl-sync-preset dense-full requires " + "; ".join(problems))
+    args.quorum = num_islands
+    args.grace_ms = 0
+    args.pipeline = 1
+    args.sync_interval_steps = 0.0
+    args.delta_correction = "none"
+    args.outer_lr = 1.0
+    args.outer_momentum = 0.0
+    args.merge_alpha = 0.0
+    args.wire_dtype = "f32"
+    args.rl_total_fragment_steps = args.total_steps * args.fragments
+
+
 def _prepare_rl_args(
     args,
     *,
@@ -2437,9 +2535,10 @@ def _prepare_rl_args(
         )
     if not args.inner_lr > 0:
         raise ValueError(f"RL requires --inner-lr > 0 (got {args.inner_lr})")
-    if args.rl_sync_preset == "strict-avg":
+    if args.rl_sync_preset in ("strict-avg", "dense-full"):
         if args.local_rl_rounds_per_sync != 1:
-            raise ValueError("RL v0 requires --local-rl-rounds-per-sync 1")
+            raise ValueError(f"--rl-sync-preset {args.rl_sync_preset} requires "
+                             "--local-rl-rounds-per-sync 1 (strict sweep H=1)")
     elif args.local_rl_rounds_per_sync < 2:
         raise ValueError("decoupled RL requires at least 2 local RL rounds per sync")
     if args.seq_len < 2:
@@ -2843,6 +2942,8 @@ def _prepare_rl_args(
     if getattr(args, "learner_image", None) is not None:
         raise ValueError("RL uses digest-pinned --rl-image, not --learner-image")
     args.rl_total_fragment_steps = args.total_steps
+    if args.rl_sync_preset != "dense-full" and getattr(args, "rl_parameter_layout_sha256", None):
+        raise ValueError("--rl-parameter-layout-sha256 only applies to --rl-sync-preset dense-full")
     if args.rl_sync_preset == "decoupled":
         if args.experimental_rl_sync:
             raise ValueError("decoupled RL does not accept --experimental-rl-sync")
@@ -2861,6 +2962,8 @@ def _prepare_rl_args(
         args.merge_alpha = 0.0
         args.wire_dtype = "f32"
         args.rl_total_fragment_steps = args.total_steps * args.fragments
+    elif args.rl_sync_preset == "dense-full":
+        _prepare_dense_full_sweep(args, num_islands=len(specs))
     elif not args.experimental_rl_sync:
         args.fragments = 1
         args.quorum = len(specs)
@@ -3976,6 +4079,17 @@ def island_uses_ports_megatron(args) -> bool:
 from yeto.hw.catalog import COMPAT_GROUP_ENV, compat_group  # noqa: E402
 
 
+def _rl_trainable_island_flags(args, num_learners: int) -> str:
+    """LoRA rank/targets, or for dense-full the full-parameter sweep identity:
+    the probed layout hash, the frozen roster size and the syncer profile hash."""
+    if not rl_dense_sweep(args):
+        return f" --lora-r {args.lora_r} --lora-targets {args.lora_targets}"
+    return (" --parameter-mode full"
+            f" --parameter-layout-sha256 {args.rl_parameter_layout_sha256}"
+            f" --num-learners {num_learners}"
+            f" --syncer-profile-sha256 {rl_syncer_profile(args, num_learners).sha256}")
+
+
 def make_miles_island_task(
     args,
     spec: ClusterSpec,
@@ -4042,9 +4156,8 @@ def make_miles_island_task(
         f" --pipeline-parallel {args.pipeline_parallel}"
         f" --rollout-num-gpus-per-engine {args.rollout_num_gpus_per_engine}"
         f" --sglang-mem-fraction-static {args.sglang_mem_fraction_static}"
-        f" --lora-r {args.lora_r}"
-        f" --lora-targets {args.lora_targets}"
-        f" --inner-lr {args.inner_lr}"
+        + _rl_trainable_island_flags(args, num_learners)
+        + f" --inner-lr {args.inner_lr}"
         f" --seq-len {args.seq_len}"
         f" --seed {args.seed}"
         f" --wan-streams {args.wan_streams}"

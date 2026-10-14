@@ -15,7 +15,6 @@ from yeto.rl.local_learner import (
     ParameterLayout,
     ParameterSpec,
     advance_parameter_cut_version,
-    dense_sweep_session_contract_hash,
     parameter_cut_from_fragment_flats,
 )
 
@@ -119,43 +118,6 @@ def test_grpo_layout_is_actor_only_deterministic_and_role_qualified():
     assert set(first.fragments.tensor_names()) == {
         f"actor::global::{spec.name}" for spec in actor_specs()
     }
-
-
-def test_dense_session_contract_binds_semantics_profile_and_full_roster():
-    layout = grpo_layout()
-    same_schema_new_model = ParameterLayout.create(
-        algorithm="grpo",
-        components=(ComponentIdentity("actor", "f" * 40, CONFIG_HASH),),
-        specs=actor_specs(),
-        num_fragments=2,
-    )
-    contract = dense_sweep_session_contract_hash(
-        layout,
-        policy_rounds=3,
-        learner_generations={0: 7, 1: 9},
-    )
-    assert len(contract) == 32
-    assert contract != dense_sweep_session_contract_hash(
-        same_schema_new_model,
-        policy_rounds=3,
-        learner_generations={0: 7, 1: 9},
-    )
-    assert contract != dense_sweep_session_contract_hash(
-        layout,
-        policy_rounds=4,
-        learner_generations={0: 7, 1: 9},
-    )
-    assert contract != dense_sweep_session_contract_hash(
-        layout,
-        policy_rounds=3,
-        learner_generations={0: 7, 1: 10},
-    )
-    assert contract != dense_sweep_session_contract_hash(
-        layout,
-        policy_rounds=3,
-        learner_generations={0: 7, 1: 9},
-        training_contract_hash="1" * 64,
-    )
 
 
 def test_sao_layout_adds_critic_without_changing_the_connector_contract():

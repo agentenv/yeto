@@ -4,13 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import socket
 import struct
-import subprocess
 import sys
 import types
 from dataclasses import replace
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -47,8 +44,7 @@ from yeto.protocol import (
     MSG_FINAL_FRAGMENT,
     SyncerClient,
 )
-from yeto.rl.adapters.miles.models.dense_sweep_wire import _MilesRayInboundChunkSink
-from yeto.rl.adapters.miles.models.dense_sweep_wire import DenseSweepConfig, DenseSweepWire
+from yeto.rl.adapters.miles.full_parameter.inbound_sink import MilesRayInboundChunkSink
 from yeto.rl.adapters.miles.models.chunked_full_parameter import (
     MilesChunkedFullParameterAdapter,
 )
@@ -581,7 +577,7 @@ def test_inbound_chunks_commit_directly_to_exact_typed_miles_refs():
         num_streams=2,
     )
     client._gen = 7
-    client.install_inbound_chunk_sink(_MilesRayInboundChunkSink(sink))
+    client.install_inbound_chunk_sink(MilesRayInboundChunkSink(sink))
     expected_descriptor = next(
         descriptor
         for shard in anchor.transport_cut.shards
@@ -648,7 +644,7 @@ def test_inbound_chunks_commit_directly_to_exact_typed_miles_refs():
     assert 14 not in client._reasm
     assert len(ray.objects) == object_count
 
-    transactional = _MilesRayInboundChunkSink(sink)
+    transactional = MilesRayInboundChunkSink(sink)
     aborted = transactional.begin_message(15, 1)
     transactional.bind_fragment(
         aborted,
@@ -665,134 +661,6 @@ def test_inbound_chunks_commit_directly_to_exact_typed_miles_refs():
     transactional.release_all()
     assert sink._stored == {}
     assert len(ray.objects) == before_abort - len(expected_descriptor.chunks)
-
-
-def test_real_syncer_initial_and_terminal_cuts_stream_to_miles_refs(tmp_path):
-    root = Path(__file__).resolve().parent.parent
-    subprocess.run(["cargo", "build", "-q"], cwd=root / "syncer", check=True)
-    binary = root / "syncer/target/debug/yeto-syncer"
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
-    checkpoint = tmp_path / "streamed-sweep.ckpt"
-    process = subprocess.Popen(
-        [
-            str(binary),
-            "--port",
-            str(port),
-            "--learners",
-            "1",
-            "--quorum",
-            "1",
-            "--grace-ms",
-            "0",
-            "--pipeline",
-            "1",
-            "--sync-interval-steps",
-            "0",
-            "--delta-correction",
-            "none",
-            "--total-steps",
-            "2",
-            "--policy-sweep-fragments",
-            "2",
-            "--outer-lr",
-            "1",
-            "--outer-momentum",
-            "0",
-            "--max-base-lag",
-            "0",
-            "--learner-weight",
-            "equal",
-            "--checkpoint-path",
-            str(checkpoint),
-            "--checkpoint-every",
-            "1",
-            "--resume",
-            "--quorum-timeout-s",
-            "10",
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-    ray = FakeRay()
-    adapter = MilesChunkedFullParameterAdapter.create(
-        (manifest(0, (32,)), manifest(1, (32,))),
-        algorithm="grpo",
-        components=(component(),),
-        minimum_fragments=2,
-        max_fragment_bytes=256,
-        max_chunk_bytes=256,
-    )
-    anchor = adapter.validate_cut(
-        _cut(adapter, {0: 0, 1: 0}, policy_version=0, generation=0, ray=ray),
-        0,
-        0,
-    )
-    local = adapter.validate_cut(
-        _cut(adapter, {0: 1, 1: 1}, policy_version=0, generation=1, ray=ray),
-        0,
-        1,
-    )
-    wire = DenseSweepWire(
-        adapter.layout.fragments,
-        DenseSweepConfig(
-            ("127.0.0.1", port),
-            0,
-            7,
-            1,
-            wan_streams=2,
-            wait_timeout=15,
-            poll_seconds=0.001,
-            max_fragment_bytes=256,
-        ),
-    )
-    initial_sink = adapter.fragment_sink(anchor, ray_module=ray)
-    update_sink = adapter.fragment_sink(anchor, ray_module=ray)
-    try:
-        initial = wire.start(
-            {
-                fragment_id: adapter.fragment_parts(
-                    anchor,
-                    fragment_id,
-                    ray_module=ray,
-                )
-                for fragment_id in range(2)
-            },
-            payload_sink=initial_sink,
-        )
-        adapter.verify_initial_fragments(anchor, initial)
-        pending = wire.exchange(
-            base_policy_version=0,
-            trained_tokens=17,
-            sweep_update_id="a" * 64,
-            delta_parts={
-                fragment_id: adapter.delta_parts(
-                    anchor,
-                    local,
-                    fragment_id,
-                    ray_module=ray,
-                )
-                for fragment_id in range(2)
-            },
-            payload_sink=update_sink,
-        )
-        assert pending.terminal
-        assert all(
-            item is update_sink._stored[(index, index + 1)]
-            for index, item in enumerate(pending.payloads)
-        )
-        assert all(value.dtype == torch.float32 for value in ray.objects.values())
-        wire.commit_applied(pending)
-        assert process.wait(timeout=10) == 0
-    finally:
-        wire.close()
-        initial_sink.release_all()
-        update_sink.release_all()
-        if process.poll() is None:
-            process.kill()
-            process.wait(timeout=5)
 
 
 @pytest.mark.asyncio
