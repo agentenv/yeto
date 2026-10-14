@@ -17,7 +17,7 @@ from test_rl_multinode_round_cut import NEXT, _checkpoint, _Driver, _Ledger, _tr
 from test_rl_reconfig_recovery import _ctl
 
 from tests.buffer_rollout_procs import sample
-from tests.rl_cut_fakes import make_rank, train_step
+from tests.rl_cut_fakes import make_rank, params, train_step
 from yeto.rl.adapters.miles import buffer_rollout as br
 from yeto.rl.adapters.miles.entry import _wire_sample_buffer
 from yeto.rl.engine.recovery import CUT_KEY
@@ -279,3 +279,66 @@ def test_sampler_and_trainer_processes_crash_and_continue_at_the_watermark(tmp_p
     assert json.loads(cut.read_text()) == {"next": 4, "watermark": 8}
     index = [json.loads(line) for line in (store / "sample-buffer/index.jsonl").read_text().splitlines()]
     assert [e["sample_id"].split("-")[0] for e in index] == ["s0"] * 6 + ["s1"] * 2
+
+
+# ---------------------------------------------------------------- full-parameter stop and restart
+def _round_batch(rollout_id):
+    return torch.randn(3, 6, generator=torch.Generator().manual_seed(100 + rollout_id))
+
+
+def test_full_parameter_trainer_stops_at_a_scheduled_cut_and_continues_without_retraining(tmp_path):
+    """L5.4 k blocker (T-FCUT): a full-parameter trainer stopped by the scheduler cuts
+    (trigger SCHEDULED); the next incarnation restores it, continues the policy version
+    and the buffer position, trains no group twice and ends bitwise equal to a run
+    that never stopped."""
+    from yeto.rl.engine.recovery import SCHEDULED
+
+    rounds, stop_at = 4, NEXT
+    torch.manual_seed(99)
+    reference = make_rank(0, full=True)
+    for rid in range(rounds):
+        train_step(reference, _round_batch(rid))
+
+    reader, pool = _reader_link(tmp_path)  # 6 groups of version 1, 2 per round
+    writer = br.GroupWriter(_buffer(tmp_path / "buf"), "s1")
+    for g in range(6, 2 * rounds):
+        writer.write(_group(g, 1), group_key=f"g{g}")
+    args = type("Args", (), {"rollout_function_path": br.ROLLOUT_FUNCTION_PATHS["trainer"]})()
+    store, trained = tmp_path / "store", []
+    torch.manual_seed(99)
+    rank_a = make_rank(0, full=True)
+    for rid in range(stop_at):
+        groups, _ = reader.take(rid, 2, current_version=1)
+        trained += [pos for pos, _ in groups]
+        train_step(rank_a, _round_batch(rid))
+    reader.take(stop_at, 2, current_version=1)  # selected ahead, never trained by A
+    ctl_a = _ctl(tmp_path / "a/state", {"t": 1000.0}, checkpoint_store=store)
+    driver_a = _Driver(rank_a, published=stop_at, local_step=stop_at)
+    cp_a = _checkpoint(ctl_a, driver_a, _trainer(rank_a), _Ledger(stop_at))
+    _wire_sample_buffer(cp_a, driver=type("D", (), {"rollout": pool})(), miles_args=args)
+    info = cp_a.save(driver_a, rollout_id=stop_at, final=True, trigger=SCHEDULED)
+    assert info[CUT_KEY]["trigger"] == SCHEDULED and info["final"]
+    assert info[CUT_KEY]["buffer_watermark"] == 2 * stop_at
+    ctl_a.close()
+
+    torch.manual_seed(12345)  # the new incarnation's process starts with other RNG state
+    rank_b = make_rank(9, full=True)  # and other initial weights
+    ctl_b = _ctl(tmp_path / "b/state", {"t": 2000.0}, checkpoint_store=store)
+    reader_b = br.BatchReader(_buffer(tmp_path / "buf"), max_policy_age=1, wait_s=0.0, poll_s=0.0)
+    br.register_reader(reader_b)
+    driver_b = _Driver(rank_b)
+    cp_b = _checkpoint(ctl_b, driver_b, _trainer(rank_b), _Ledger(stop_at))
+    _wire_sample_buffer(cp_b, driver=type("D", (), {"rollout": pool})(), miles_args=args)
+    resumed = cp_b.resume(driver_b)
+    assert resumed["next_rollout_id"] == stop_at and driver_b.local_step == stop_at
+    event = dict(driver_b.events)["rl_resume"]
+    assert event["policy_version"] == stop_at and event["checks"]["policy_hash"] == "same"
+    for rid in range(stop_at, rounds):
+        groups, _ = reader_b.take(rid, 2, current_version=1)
+        trained += [pos for pos, _ in groups]
+        train_step(rank_b, _round_batch(rid))
+    ctl_b.close()
+
+    assert trained == list(range(2 * rounds))  # every group once, in order: none trained twice
+    for name, value in params(reference).items():
+        assert torch.equal(value, params(rank_b)[name]), name
