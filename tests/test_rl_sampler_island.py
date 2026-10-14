@@ -435,3 +435,34 @@ def test_groups_from_restarted_samplers_get_unique_buffer_identities(tmp_path):
     assert [pos for pos, _ in again] == [pos for pos, _ in taken]
     with pytest.raises(br.SampleBufferRolloutError, match="samples per group 1"):
         br.renumber_group(taken[0][1], position=0, samples_per_group=1)
+
+
+def test_sampler_debug_rollout_only_is_not_a_placement_rewrite():
+    """L5.4 GPU run s24-l54-pair-20261014e: a fixed-partition sampler island asked
+    for --debug-rollout-only and was refused as a rewritten placement."""
+    import dataclasses
+
+    from yeto.rl.adapters.miles import config as mc
+    from yeto.rl.adapters.miles.placement import PlacementRewriteError
+
+    launch = mc.translate_run_config(_make_miles_config(), _algorithm_spec())
+    ns = SimpleNamespace(use_session_server=False, partial_rollout=False, indep_dp=False,
+                         debug_rollout_only=True, colocate=launch.placement.kind == "colocated",
+                         actor_num_nodes=1, actor_num_gpus_per_node=launch.placement.trainer_gpus,
+                         rollout_num_gpus=launch.placement.rollout_gpus)
+    with pytest.raises(PlacementRewriteError, match="debug_rollout_only=True"):
+        mc.validate_parsed_args(ns, launch, num_cells=lambda _a: 1)
+    sampler = dataclasses.replace(launch, argv=(*launch.argv, mc.SAMPLER_ONLY_FLAG))
+    mc.validate_parsed_args(ns, sampler, num_cells=lambda _a: 1)
+
+
+def _make_miles_config():
+    from tests.test_rl_miles_adapter_config import make_config
+
+    return make_config()
+
+
+def _algorithm_spec():
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+
+    return AlgorithmSpec()
