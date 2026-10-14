@@ -1528,6 +1528,12 @@ def cmd_head(payload: str) -> int:
     from .gpu_spec import parse_gpu_spec
 
     args = argparse.Namespace(**json.loads(payload))
+    if getattr(args, "rl_sao_contracts", None):
+        # The loaded SAO contract bundle is not JSON: reload it on the head
+        # from the workdir copy (its host paths are relative to the workdir).
+        from .rl.sao_streaming_manifest import load_sao_streaming_manifest
+
+        args.rl_sao_manifest = load_sao_streaming_manifest(args.rl_sao_contracts)
     # Same count launcher.run uses: --gpu islands plus --external-learners
     # seats; without the seats the syncer rejects every manual joiner.
     num_learners = len(parse_gpu_spec(args.gpu)) + (getattr(args, "external_learners", 0) or 0)
