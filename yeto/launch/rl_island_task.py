@@ -207,6 +207,8 @@ def make_miles_island_task(
         flags += f" --apply-chat-template-kwargs {shlex.quote(chat_kwargs)}"
     if not getattr(args, "sglang_deterministic_inference", True):
         flags += " --no-sglang-deterministic-inference"
+    if getattr(args, "rl_sampler_snapshot", False):
+        flags += " --rl-sampler-snapshot"
     if args.custom_generate_function_path:
         flags += (
             " --custom-generate-function-path "

@@ -608,6 +608,12 @@ def _prepare_rl_args(
             raise ValueError(f"RL --{name.replace('_', '-')} must be positive")
     if not 0.0 < args.sglang_mem_fraction_static < 1.0:
         raise ValueError("RL --sglang-mem-fraction-static must be between 0 and 1")
+    if getattr(args, "rl_sampler_snapshot", False):
+        # L8.2 (design D5): refuse before any GPU is provisioned; the island
+        # translation re-checks against the placement it actually builds.
+        from yeto.rl.adapters.miles import sampler_snapshot
+
+        sampler_snapshot.check_launch(getattr(args, "rl_placement", "colocated"))
     if (
         getattr(args, "sglang_deterministic_inference", True)
         and getattr(args, "sglang_attention_backend", None) in {"dsv4", "compressed"}
