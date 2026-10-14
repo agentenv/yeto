@@ -672,14 +672,20 @@ def _is_full_parameter_sync(sync: Any) -> bool:
     return isinstance(sync, FullParameterSync)
 
 
-def _policy_state_for(sync: Any, **lora: Any) -> Any:
-    """The full-parameter actor cut for a FullParameterSync island, else LoRA state."""
+def _policy_state_for(sync: Any, *, full_parameter: bool = False, **lora: Any) -> Any:
+    """The full-parameter actor cut for a FullParameterSync island; a trainer-side
+    full-parameter digest for a no-sync full-parameter island (L4.6); else LoRA state."""
 
     from .full_parameter.session import MilesFullParameterPolicyState
-    from .state import MilesPolicyState
+    from .state import MilesFullParameterLocalPolicyState, MilesPolicyState
 
     if _is_full_parameter_sync(sync):
         return MilesFullParameterPolicyState(sync)
+    if full_parameter:
+        return MilesFullParameterLocalPolicyState(
+            actor_model=lora["actor_model"], base_model_revision=lora["base_model_revision"],
+            config_hash=lora["config_hash"], expected_layout_hash=lora["expected_layout_hash"],
+            runner=lora.get("runner"))
     return MilesPolicyState(**lora)
 
 
@@ -745,8 +751,11 @@ def compose_island(
             raise DriverError("rollout requested before any complete publication")
         return parse_policy_snapshot_token(driver.expected_token)
 
+    full_parameter = _is_full_parameter_sync(sync) or getattr(
+        miles_args, "yeto_rl_parameter_mode", None) == "full"
     policy_state = _policy_state_for(
         sync,
+        full_parameter=full_parameter,
         actor_model=actor_model,
         base_model_revision=base_model_revision,
         config_hash=lora_config_hash,
@@ -785,7 +794,7 @@ def compose_island(
             critic_model=critic_model,
             release_refs=release_refs,
             runner=runner,
-            install_actor_recorders=_is_full_parameter_sync(sync),
+            install_actor_recorders=full_parameter,
         ),
         policy_state=policy_state,
         publisher=MilesPublisher(
