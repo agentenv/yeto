@@ -57,6 +57,7 @@ from . import progress as legacy_progress
 from .pause_audit import PAUSABLE_PHASE
 from .sync_timing import SyncTiming, unix_now
 from .backend_identity import config_island_contract_sha256
+from .policy_digest import is_resident
 from .driver import IslandDriver, SyncBoundary, SyncStart
 from .leave_reason import sendable
 from .trainable_state import TrainableState
@@ -86,7 +87,10 @@ def _local_state(driver: Any, version: int) -> Any:
     state = resident(policy_version=version) if callable(resident) else None
     if state is not None:
         return state
-    return TrainableState.from_lora(_at_version(_lora(driver.export_local()), version))
+    exported = driver.export_local()
+    if is_resident(exported):  # a full-parameter trainer exports no tensors at all
+        return exported.with_version(version)
+    return TrainableState.from_lora(_at_version(_lora(exported), version))
 
 
 # ---------------------------------------------------------------------------
