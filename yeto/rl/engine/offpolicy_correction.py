@@ -48,6 +48,10 @@ GATE_KEPT = "kept"
 GATE_GROUP_DROPPED = "group_dropped"  # gap over A_hard at consumption, whole group
 GATE_UNKNOWN_VERSION_DROPPED = "unknown_version_dropped"
 GATE_REASONS = (GATE_KEPT, GATE_GROUP_DROPPED, GATE_UNKNOWN_VERSION_DROPPED)
+# Groups the backend dropped as stale inside its own buffer (Miles --fully-async
+# ``stale_dropped_groups``), counted apart from the yeto gate drops. Present only
+# when the backend reported the count; no lengths (the backend does not give them).
+GATE_BACKEND_STALE_DROPPED = "backend_stale_dropped"
 # Response-length bucket edges (tokens) of the dropped-trajectory histogram.
 # Fixed in code so that rounds and runs stay comparable.
 DROPPED_LENGTH_EDGES = (256, 1024, 4096, 16384)
@@ -351,6 +355,9 @@ def gate_from_carry_over(fields: dict[str, Any], *, kept: int, backend: str
               GATE_GROUP_DROPPED: int(fields.get("over_age_discarded_groups", 0) or 0),
               GATE_UNKNOWN_VERSION_DROPPED:
                   int(fields.get("unknown_version_discarded_groups", 0) or 0)}
+    backend_stale = fields.get("stale_dropped_groups")
+    if isinstance(backend_stale, int):  # None = the backend did not expose it
+        counts[GATE_BACKEND_STALE_DROPPED] = backend_stale
     if turns is not None:
         turns = {int(k): tuple(v) for k, v in turns.items()}
     return offpolicy_gate_event(backend=backend, counts=counts, dropped_lengths=lengths,

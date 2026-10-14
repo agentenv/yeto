@@ -433,3 +433,16 @@ def test_miles_rollout_handle_keeps_the_gate_inputs():
     assert gate["counts"] == {"group_dropped": 1, "kept": 3, "unknown_version_dropped": 0}
     assert gate["truncation_by_turn"]["0"]["truncated"] == 1
     assert oc.GATE_DROPPED_LENGTHS not in fields
+
+
+@pytest.mark.parametrize("stale, expected", [(2, 2), (0, 0), (None, None)])
+def test_miles_buffer_stale_drops_count_apart_from_the_gate(stale, expected):
+    # GOAL §6: Miles' own --fully-async buffer drops get their own reason code
+    from yeto.rl.adapters.miles.rollout import _carry_over_fields
+
+    payload = {"max_policy_age": 1, "over_age_discarded_groups": 1, "stale_dropped_groups": stale,
+               oc.GATE_DROPPED_LENGTHS: {"group_dropped": [300], "unknown_version_dropped": []}}
+    gate = oc.gate_from_carry_over(_carry_over_fields(payload), kept=3, backend="miles")
+    assert gate["counts"]["group_dropped"] == 1
+    assert gate["counts"].get(oc.GATE_BACKEND_STALE_DROPPED) == expected
+    assert oc.GATE_BACKEND_STALE_DROPPED not in gate["dropped_length_histogram"]
