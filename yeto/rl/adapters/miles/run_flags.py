@@ -183,6 +183,16 @@ _ROLLOUT_ENGINE = (
     shared_flag("--sglang-page-size", type=int, default=None),
     shared_flag("--sglang-max-running-requests", type=int, default=None),
     shared_flag("--sglang-chunked-prefill-size", type=int, default=None),
+    shared_flag(
+        "--rl-sampler-snapshot",
+        action="store_true",
+        help=(
+            "ports, fixed partition: start the sampler (rollout) SGLang engines with "
+            "--enable-memory-saver --enable-weights-cpu-backup (GPU snapshot mode); "
+            "off by default. Refused unless sampler_snapshot_compat.json records a "
+            "pass for the pinned SGLang commit and the NCCL weight-update path"
+        ),
+    ),
 )
 
 _AGENT = (

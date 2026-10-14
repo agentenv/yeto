@@ -45,6 +45,7 @@ from .algorithm_flags import (
     objective_flags,
 )
 from .placement import PlacementRequest, check_placement_not_rewritten
+from . import sampler_snapshot
 from .binding import filter_argv
 
 ROLLOUT_META_HOOK_PATH = (
@@ -423,6 +424,7 @@ LEAF_POLICY: dict[str, _Check] = {
     "serving.page_size": _ok,
     "serving.max_running_requests": _ok,
     "serving.chunked_prefill_size": _ok,
+    "serving.sampler_snapshot": _ok,  # gated in translate_run_config (sampler_snapshot)
     "ports.rollout_engine_base_port": _must_be_none(
         "upstream Miles has no --rollout-engine-base-port (fork-only port isolation, task 1.4b)"
     ),
@@ -954,6 +956,11 @@ def translate_run_config(
                 values.extend((flag, str(value)))
     if serving.deterministic_inference:
         values.append("--sglang-enable-deterministic-inference")
+    if getattr(serving, "sampler_snapshot", False):
+        try:
+            values.extend(sampler_snapshot.snapshot_argv(request, extra_argv=extra_argv))
+        except sampler_snapshot.SamplerSnapshotRefused as exc:
+            raise MilesConfigError(str(exc)) from exc
     if parallel.uneven_pipeline_layers is not None:
         first_layers, last_layers = parallel.uneven_pipeline_layers
         values.extend(
