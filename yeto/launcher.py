@@ -225,6 +225,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         # Checked first: the flag must never turn an SFT launch syncer-less.
         raise ValueError("--rl-single-island-no-sync requires --training-mode rl")
     from . import launch_preflight, sky_patches
+    from .launch import trainer_loop
 
     # launch-preflight-guards 1.3: thread count before anything touches a cloud.
     args._launch_preflight_manifest = {"preflight": {"threads": launch_preflight.thread_preflight(args)}}
@@ -234,6 +235,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     prepare_run_code_pack(args)
     # 2.3 / 3.1 / 3.6: memory estimate, island overrides, negative-test resume guard.
     launch_preflight.pre_cloud_checks(args, threads=False)
+    trainer_loop.check(args)  # rl-trainer-start-stop L5.3b: refuse before any launch
     _write_run_manifest(args)
     head_mode = local_syncer is not None
     # --rl-single-island-no-sync: one ports island, no syncer at all
@@ -245,11 +247,16 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     nodes_by_cluster = dict(zip(learner_cluster_names(args.cluster_prefix, specs),
                                 (s.num_nodes for s in specs)))  # rl-multinode-island D10
     no_sync_incomplete: list[str] = []
+    # rl-trainer-start-stop L5.3c: the trainer scheduler starts and stops this island
+    # (one Modal call per incarnation); the fleet controller never sees it.
+    held = trainer_loop.held_island(args)
+    held_name = None if held is None else learner_cluster_names(args.cluster_prefix, specs)[held]
+    held_cfg = None
     # Islands whose tape travels over the log stream (no fetchable
     # ~/yeto-output): every Modal RL ports island, and a no-sync island.
     echo_names = {
         name for name, spec in zip(learner_cluster_names(args.cluster_prefix, specs), specs)
-        if _echoes_events(args, spec)
+        if _echoes_events(args, spec) and name != held_name
     }
     events_dir = _no_sync_events_dir(args) if echo_names else None
     if echo_names:
@@ -404,6 +411,11 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
 
                 cfg = build_modal_island_config(role_args(args, role), spec, m, task, modal_addr)
                 print(f"[launcher] {name} dials {island_syncer_addrs(cfg.envs)}", flush=True)
+                if name == held_name:
+                    held_cfg = cfg  # defined on the app below; the scheduler spawns it
+                    print(f"[launcher] {name} is the trainer island: the trainer scheduler "
+                          "starts and stops it", flush=True)
+                    continue
                 tasks[name] = cfg
                 modal_cfgs[name] = cfg
                 continue
@@ -461,13 +473,14 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         ]
         for t in threads:
             t.start()
-        if modal_cfgs:
+        if modal_cfgs or held_cfg is not None:
             from .modal_runner import ModalIslandOps, ModalOps, modal_app_name
 
             modal_ops = ModalOps(modal_app_name(prefix))
-            for cfg in modal_cfgs.values():
+            for cfg in [*modal_cfgs.values(), *([] if held_cfg is None else [held_cfg])]:
                 modal_ops.define(cfg)
-            print(f"[launcher] deploying Modal app {modal_ops.app_name} ({len(modal_cfgs)} island(s))")
+            print(f"[launcher] deploying Modal app {modal_ops.app_name} "
+                  f"({len(modal_cfgs) + (held_cfg is not None)} island(s))")
             modal_ops.deploy()
             modal_island_ops = ModalIslandOps(modal_ops)
             for name, cfg in modal_cfgs.items():
@@ -640,7 +653,10 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                     modal_tape_dir=modal_tape_dir))
 
         try:
-            exit_codes = controller.run()
+            exit_codes = trainer_loop.run_with_trainer_loop(
+                args, controller.run,
+                island=None if held_name is None else trainer_loop.TrainerIsland(
+                    held_name, specs[held].cloud, held_cfg, modal_ops))
         except RunStalled as error:
             print(f"[launcher] ERROR: {error}; stopping the run (exit {RUN_STALLED_EXIT})",
                   file=sys.stderr)

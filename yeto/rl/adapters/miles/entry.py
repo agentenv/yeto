@@ -1022,13 +1022,42 @@ def _wire_round_cuts(driver, *, elastic, miles_args, algorithm, base_model_revis
                    else {"ref_load": str(ref_load), "base_model_revision": base_model_revision}),
     )
     config = getattr(miles_args, "yeto_rl_resume", None) or {}
-    wire_round_cuts(driver, controller=controller, source=source,
-                    every=int(getattr(elastic, "every", None) or config.get("every")
-                              or getattr(miles_args, "yeto_rl_resume_every", None) or 1),
-                    fingerprint=run_fingerprint_of(miles_args, algorithm),
-                    allow_config_change=bool(getattr(elastic, "allow_config_change", False)
-                                             or config.get("allow_config_change", False)),
-                    next_lr=next_lr_for(miles_args))
+    checkpoint = wire_round_cuts(
+        driver, controller=controller, source=source,
+        every=int(getattr(elastic, "every", None) or config.get("every")
+                  or getattr(miles_args, "yeto_rl_resume_every", None) or 1),
+        fingerprint=run_fingerprint_of(miles_args, algorithm),
+        allow_config_change=bool(getattr(elastic, "allow_config_change", False)
+                                 or config.get("allow_config_change", False)),
+        next_lr=next_lr_for(miles_args))
+    _wire_sample_buffer(checkpoint, driver=driver, miles_args=miles_args)
+
+
+def _wire_sample_buffer(checkpoint: Any, *, driver: Any, miles_args: Any) -> None:
+    """L4.5: a trainer whose rollout reads the durable sample buffer writes the
+    consumed watermark into each round cut and continues there after a restore."""
+    from .buffer_rollout import ROLLOUT_FUNCTION_PATHS, TRAINER, wire_sample_buffer
+
+    if getattr(miles_args, "rollout_function_path", None) != ROLLOUT_FUNCTION_PATHS[TRAINER]:
+        return
+    if checkpoint is None:
+        raise RuntimeError("a trainer that reads the sample buffer needs round cuts "
+                           "(a checkpoint store and no outer syncer) to keep its watermark")
+    wire_sample_buffer(checkpoint, driver.rollout)
+
+
+def run_commanded_trainer(driver: Any) -> Any:
+    """One incarnation of a trainer the head's scheduler starts and stops
+    (``trainer_remote``): commands come through the round-cut store."""
+    from yeto.rl.engine.trainer_remote import run_commanded_island
+
+    controller = getattr(getattr(driver.sync, "round_cuts", None), "controller", None)
+    store = getattr(controller, "store", None)
+    if store is None:
+        raise RuntimeError("a trainer started by the head's scheduler needs round cuts "
+                           "(a checkpoint store and no outer syncer)")
+    run_commanded_island(driver, store=store)
+    return driver.published_state
 
 
 def _wire_trainer_rebuild(driver, *, elastic, miles_args, algorithm, actor_model,
@@ -2010,6 +2039,10 @@ def run_ports_island(
             ))
             return driver.published_state
         startup.__exit__(None, None, None)  # the driver's own heartbeat starts in run()
+        from yeto.rl.engine import trainer_remote
+
+        if trainer_remote.commanded():  # rl-trainer-start-stop L5.3c: the head starts/stops us
+            return run_commanded_trainer(driver)
         return driver.run()
     except BaseException as exc:
         error = exc

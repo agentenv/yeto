@@ -105,6 +105,9 @@ class LocalOnlySync:
         # rl-resume-from-checkpoint: our own stop after this many rounds (exclusive
         # rollout id; None = run to num_rollout). A final cut is kept at the stop.
         self.stop_after: int | None = None
+        # rl-trainer-start-stop D3: trigger of the final cut (None = MANUAL); the
+        # trainer lifecycle sets SCHEDULED for a stop the trainer scheduler ordered.
+        self.final_trigger: str | None = None
 
     def start(self, driver: IslandDriver) -> SyncStart:
         resumed = self.round_cuts.resume(driver) if self.round_cuts is not None else None
@@ -119,8 +122,9 @@ class LocalOnlySync:
         if self.round_cuts is None:
             return
         try:
-            info = (self.round_cuts.save(driver, rollout_id=rollout_id, final=True) if final
-                    else self.round_cuts.save(driver, rollout_id=rollout_id))
+            info = (self.round_cuts.save(driver, rollout_id=rollout_id, final=True,
+                                         **({"trigger": self.final_trigger} if self.final_trigger else {}))
+                    if final else self.round_cuts.save(driver, rollout_id=rollout_id))
         except Exception as error:  # noqa: BLE001
             driver.emit("rl_round_cut", rollout_id=rollout_id, ok=False, error=repr(error)[:2000])
             return
