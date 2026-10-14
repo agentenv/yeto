@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypeVar
 
+from yeto.rl.engine.convertible import NodeSpec, parse_node_spec, validate_nodes
 from yeto.rl.engine.journal import Journal
 from yeto.rl.engine.trainer_lifecycle import CutLog, DurableSampleBuffer, TrainerLifecycle
 from yeto.rl.engine.trainer_loop import TrainerLoop, TrainerLoopThread, next_incarnation
@@ -38,6 +39,7 @@ S1 = "s1"
 MODES = (OFF, S1)
 DEFAULT_INTERVAL_S = 30.0
 DEFAULT_START_SECONDS = 600.0
+TRAINER_PRECISION = "bf16"  # the trainer's precision; a convertible node must match it
 JOURNAL_DIR = "trainer-loop"
 
 T = TypeVar("T")
@@ -79,6 +81,34 @@ def add_arguments(group) -> None:
     group.add_argument(
         "--rl-trainer-start-seconds", type=float, default=DEFAULT_START_SECONDS,
         help="configured trainer start time T_s (seconds); a measured start replaces it")
+    group.add_argument(
+        "--rl-node-class", action="append", default=[], metavar="NAME=CLASS[:spot][:PRECISION]",
+        help="node class of one node (rollout, trainer, convertible; rl-trainer-start-stop "
+        "D7). A node without ':spot' follows --spot/--on-demand. A convertible node must be "
+        f"on-demand and at the trainer precision ({TRAINER_PRECISION}). Repeat per node")
+
+
+def node_specs(args) -> list[NodeSpec]:
+    """``--rl-node-class`` entries; a node is spot if it says so or the run is spot."""
+    run_spot = bool(getattr(args, "spot", False))
+    specs = []
+    for text in getattr(args, "rl_node_class", None) or ():
+        spec = parse_node_spec(text)
+        if run_spot and not spec.spot:
+            spec = NodeSpec(spec.name, spec.node_class, spot=True,
+                            precision=spec.precision, capacity=spec.capacity)
+        specs.append(spec)
+    return specs
+
+
+def check_node_classes(args) -> list[NodeSpec]:
+    """Refuse a launch whose node classes break the class rule (L7.1)."""
+    try:
+        specs = node_specs(args)
+        validate_nodes(specs, trainer_precision=TRAINER_PRECISION)
+    except ValueError as exc:  # NodeClassError, or a bad capacity number
+        raise SystemExit(f"--rl-node-class: {exc}") from None
+    return specs
 
 
 def enabled(args) -> bool:
@@ -92,7 +122,9 @@ def journal_dir(args) -> Path:
 
 
 def check(args) -> None:
-    """Refuse the switch without a trainer island binding (before any launch)."""
+    """Refuse bad node classes, and the switch without a trainer island binding
+    (before any launch)."""
+    check_node_classes(args)
     if not enabled(args):
         return
     if binding_factory is None:
