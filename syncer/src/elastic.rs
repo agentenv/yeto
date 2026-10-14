@@ -738,6 +738,8 @@ pub enum TapeEvent {
         /// Same entries normalized to sum 1 (what merge_avg applies).
         weights: Vec<(u32, u64, f64)>,
         absent: Vec<u32>,
+        /// Deltas rejected since the previous outer step: (island, reason).
+        rejected: Vec<(u32, &'static str)>,
     },
 }
 
@@ -782,20 +784,22 @@ impl TapeEvent {
                 f64_json(*cap_arrived),
                 f64_json(*cap_total)
             ),
-            Self::OuterStep { base_version, arrived, cap_arrived, cap_total, timed_out, raw_weights, weights, absent } => {
+            Self::OuterStep { base_version, arrived, cap_arrived, cap_total, timed_out, raw_weights, weights, absent, rejected } => {
                 let fmt = |v: &Vec<(u32, u64, f64)>| -> String {
                     v.iter().map(|(i, b, w)| format!("[{i},{b},{}]", f64_json(*w))).collect::<Vec<_>>().join(",")
                 };
                 let w = fmt(raw_weights);
                 let nw = fmt(weights);
                 let a: Vec<String> = absent.iter().map(u32::to_string).collect();
+                let rj: Vec<String> = rejected.iter().map(|(i, r)| format!("[{i},\"{r}\"]")).collect();
                 format!(
-                    "\"base_version\":{base_version},\"arrived\":{arrived},\"cap_arrived\":{},\"cap_total\":{},\"timed_out\":{timed_out},\"raw_weights\":[{}],\"weights\":[{}],\"absent\":[{}]",
+                    "\"base_version\":{base_version},\"arrived\":{arrived},\"cap_arrived\":{},\"cap_total\":{},\"timed_out\":{timed_out},\"raw_weights\":[{}],\"weights\":[{}],\"absent\":[{}],\"rejected\":[{}]",
                     f64_json(*cap_arrived),
                     f64_json(*cap_total),
                     w,
                     nw,
-                    a.join(",")
+                    a.join(","),
+                    rj.join(",")
                 )
             }
         };
@@ -816,6 +820,55 @@ impl TapeEvent {
     }
 }
 
+/// Wall-clock fields added to each tape line when it is written (L5.7).
+///
+/// The coordinator stays clock-free (its tape is compared with the Python
+/// ledger); the server stamps each event as it flushes it, under the same
+/// lock and right after the event was created. The round starts at the
+/// previous `outer_step` line (or when the clock was made).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TapeClock {
+    round_start_unix: f64,
+    last_arrival: Option<u32>,
+}
+
+impl TapeClock {
+    pub fn new(now_unix: f64) -> Self {
+        Self { round_start_unix: now_unix, last_arrival: None }
+    }
+
+    /// Extra JSON fields for `ev` written at `now_unix` (leading comma
+    /// included): `time_unix` on every event; `arrival_offset_s` on
+    /// accepted and carried deltas; `step_seconds` and
+    /// `last_arrival_island` on `outer_step`, which also starts a new round.
+    pub fn stamp(&mut self, ev: &TapeEvent, now_unix: f64) -> String {
+        let mut out = format!(",\"time_unix\":{}", f64_json(now_unix));
+        let offset = now_unix - self.round_start_unix;
+        match ev {
+            TapeEvent::DeltaAccepted { island_id } | TapeEvent::DeltaCarriedOver { island_id, .. } => {
+                self.last_arrival = Some(*island_id);
+                out += &format!(",\"arrival_offset_s\":{}", f64_json(offset));
+            }
+            TapeEvent::OuterStep { .. } => {
+                let last = self.last_arrival.take().map(|i| i.to_string()).unwrap_or_else(|| "null".into());
+                out += &format!(",\"step_seconds\":{},\"last_arrival_island\":{last}", f64_json(offset));
+                self.round_start_unix = now_unix;
+            }
+            _ => {}
+        }
+        out
+    }
+}
+
+impl TapeEvent {
+    /// `to_json` plus the clock fields from `TapeClock::stamp`.
+    pub fn to_json_stamped(&self, syncer_epoch: u64, clock: &mut TapeClock, now_unix: f64) -> String {
+        let mut line = self.to_json(syncer_epoch);
+        line.pop(); // closing brace
+        line + &clock.stamp(self, now_unix) + "}"
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct StepPlan {
     pub base_version: u64,
@@ -832,6 +885,9 @@ pub struct ElasticCoordinator {
     members: BTreeMap<u32, Member>,
     pending: BTreeMap<u32, Delta>,
     carried: BTreeMap<u32, (Delta, u64)>,
+    /// Rejections since the last outer step (L5.5 merge metrics; not
+    /// checkpointed, a restart starts the count again).
+    rejected: Vec<(u32, &'static str)>,
     pub tape: Vec<TapeEvent>,
     /// Ledger of uncommitted deltas dropped by LEAVE / lease expiry
     /// (persisted by the D-S6 checkpoint).
@@ -1019,6 +1075,7 @@ impl ElasticCoordinator {
             members: BTreeMap::new(),
             pending: BTreeMap::new(),
             carried: BTreeMap::new(),
+            rejected: Vec::new(),
             tape: Vec::new(),
             dropped: Vec::new(),
             published: BTreeMap::new(),
@@ -1191,6 +1248,9 @@ impl ElasticCoordinator {
                 }
             }
         };
+        if let TapeEvent::DeltaRejected { island_id, reason } = ev {
+            self.rejected.push((island_id, reason));
+        }
         self.tape.push(ev);
         self.tape.last().unwrap()
     }
@@ -1252,6 +1312,7 @@ impl ElasticCoordinator {
             raw_weights: raw,
             weights: weights.clone(),
             absent,
+            rejected: std::mem::take(&mut self.rejected),
         });
         Some(StepPlan { base_version, weights })
     }
@@ -1750,5 +1811,68 @@ mod tests {
         c.submit(delta(2, 2));
         let plan = c.try_advance(false).unwrap();
         assert_eq!(plan.weights, vec![(1, 2, 0.5), (2, 2, 0.5)]);
+    }
+
+    /// L5.5: weights, carried discount and rejected reasons per outer step,
+    /// against hand-computed values (w = tokens^2 / steps).
+    #[test]
+    fn outer_step_records_merge_shares_carry_and_rejections() {
+        let mut c = ElasticCoordinator::new(params(), 30.0, 0).unwrap();
+        for i in 1..=3 {
+            c.join(i, 1.0, 0.0).unwrap();
+        }
+        c.submit(Delta { island_id: 1, base_version: 0, c_tokens: 10, c_steps: 1 });
+        c.submit(Delta { island_id: 2, base_version: 0, c_tokens: 20, c_steps: 2 });
+        let plan = c.try_advance(true).unwrap(); // v0 -> v1, island 3 absent
+        assert_eq!(plan.weights, vec![(1, 0, 100.0 / 300.0), (2, 0, 200.0 / 300.0)]);
+        match c.tape.last().unwrap() {
+            TapeEvent::OuterStep { rejected, .. } => assert!(rejected.is_empty()),
+            e => panic!("{e:?}"),
+        }
+
+        c.submit(Delta { island_id: 3, base_version: 0, c_tokens: 30, c_steps: 1 }); // lag 1
+        c.submit(Delta { island_id: 1, base_version: 1, c_tokens: 10, c_steps: 1 });
+        c.submit(Delta { island_id: 9, base_version: 1, c_tokens: 10, c_steps: 1 });
+        c.submit(Delta { island_id: 2, base_version: 5, c_tokens: 10, c_steps: 1 });
+        let plan = c.try_advance(true).unwrap();
+        // raw: island 1 = 100; island 3 carried = 900 * 0.5 = 450.
+        let mut got = plan.weights.clone();
+        got.sort_by_key(|x| x.0);
+        assert_eq!(got, vec![(1, 1, 100.0 / 550.0), (3, 0, 450.0 / 550.0)]);
+        let ev = c.tape.last().unwrap();
+        let TapeEvent::OuterStep { raw_weights, rejected, .. } = ev else { panic!("{ev:?}") };
+        assert!(raw_weights.contains(&(3, 0, 450.0)));
+        assert_eq!(rejected, &vec![(9, "not_member"), (2, "unknown_version")]);
+        assert!(ev.to_json(0).ends_with(",\"rejected\":[[9,\"not_member\"],[2,\"unknown_version\"]]}"));
+    }
+
+    /// L5.7: time_unix on every line; arrival offset on deltas; step
+    /// duration and last arrival on outer_step, which restarts the round.
+    #[test]
+    fn tape_clock_stamps_arrival_offsets_and_step_duration() {
+        let mut clock = TapeClock::new(100.0);
+        let join = TapeEvent::PoolJoin { island_id: 1, catch_up: false, base_version: 0, membership_epoch: 1 };
+        assert_eq!(clock.stamp(&join, 100.5), ",\"time_unix\":100.5");
+        let acc = TapeEvent::DeltaAccepted { island_id: 1 };
+        assert_eq!(clock.stamp(&acc, 101.5), ",\"time_unix\":101.5,\"arrival_offset_s\":1.5");
+        let carry = TapeEvent::DeltaCarriedOver { island_id: 3, base: 0, lag: 1, discount: 0.5 };
+        assert_eq!(clock.stamp(&carry, 103.0), ",\"time_unix\":103.0,\"arrival_offset_s\":3.0");
+        let step = TapeEvent::OuterStep {
+            base_version: 1,
+            arrived: 1,
+            cap_arrived: 1.0,
+            cap_total: 2.0,
+            timed_out: false,
+            raw_weights: vec![],
+            weights: vec![],
+            absent: vec![],
+            rejected: vec![],
+        };
+        let line = step.to_json_stamped(7, &mut clock, 104.0);
+        assert!(line.starts_with("{\"kind\":\"outer_step\",\"syncer_epoch\":7,"));
+        assert!(line.ends_with(",\"time_unix\":104.0,\"step_seconds\":4.0,\"last_arrival_island\":3}"));
+        assert_eq!(clock.stamp(&acc, 104.25), ",\"time_unix\":104.25,\"arrival_offset_s\":0.25");
+        clock.stamp(&step, 105.0);
+        assert!(clock.stamp(&step, 106.0).ends_with("\"step_seconds\":1.0,\"last_arrival_island\":null"));
     }
 }

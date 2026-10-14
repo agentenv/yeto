@@ -55,6 +55,7 @@ from yeto.rl.elastic_client import (
 
 from . import progress as legacy_progress
 from .pause_audit import PAUSABLE_PHASE
+from .sync_timing import SyncTiming, unix_now
 from .backend_identity import config_island_contract_sha256
 from .driver import IslandDriver, SyncBoundary, SyncStart
 from .leave_reason import sendable
@@ -293,6 +294,7 @@ class StrictAvgSync:
         self.bridge: StrictRlBridge | None = None
         self.current: CanonicalLoraState | None = None
         self.permit = None
+        self._submit_ts: float | None = None  # L5.6: when the last PUSH was handed over
 
     def _apply(self, driver: IslandDriver, state: CanonicalLoraState) -> TrainableState:
         return driver.apply_policy(
@@ -346,12 +348,18 @@ class StrictAvgSync:
         # The strict delta is taken against the exact base version.
         local = _at_version(_lora(driver.export_local()), rollout_id)
         self.bridge.submit_local_state(self.permit, self.current, local, stats)
+        self._submit_ts = unix_now()
         self.bridge.release_current(rollout_id)
         self.current = None
 
     def _await(self, driver, *, rollout_id) -> CanonicalLoraState:
         driver.phase("wait_global", policy_version=rollout_id + 1)
-        return self.bridge.wait_for_global_policy(rollout_id + 1)
+        current = self.bridge.wait_for_global_policy(rollout_id + 1)
+        # The strict client receives broadcasts in the background, so the
+        # receive time is not separated: the wait includes it.
+        timing = SyncTiming(self._submit_ts, unix_now())
+        driver.emit("rl_sync_timing", rollout_id=rollout_id, outer_sync="strict", **timing.fields())
+        return current
 
     def _commit(self, driver, current: CanonicalLoraState) -> SyncBoundary:
         state = self._apply(driver, current)
@@ -482,6 +490,15 @@ class ElasticAvgSync:
             if ev["event"] == "elastic_rejoin_failed" and limit and ev.get("failures", 0) >= limit:
                 # 0.27: the launcher reads this as "left the elastic pool" (exit 7)
                 driver.emit("elastic_left_pool", reason="rejoin_exhausted", failures=ev["failures"])
+
+    def _base_timing(self, submit_ts: float, base) -> SyncTiming:
+        """L5.6 timing of ``base``; the client records receive time only
+        for its latest base, so an older one has no global_ready_ts."""
+        timing = getattr(self.client, "latest_base_timing", None)
+        if timing is None or getattr(self.client, "latest_base", None) is not base:
+            return SyncTiming(submit_ts, None)
+        ready_ts, recv_seconds = timing
+        return SyncTiming(submit_ts, ready_ts, recv_seconds)
 
     def _wait(self, newer_than):
         base = self.client.wait_base(newer_than=newer_than, timeout_s=self.base_wait_s)
@@ -615,10 +632,15 @@ class ElasticAvgSync:
             self.client.raise_if_finished()
             self.client.delta_tensor(base_version=sent_on, c_tokens=int(stats.action_tokens),
                                      c_steps=self.config.local_optimizer_steps, update=update)
+            submit_ts = unix_now()
             if self.progress is not None:
                 self.progress.commit_round(stats)
             driver.phase("wait_global", base_version=sent_on)
-            state = self._apply(driver, self._wait(sent_on), rollout_id + 1)
+            base = self._wait(sent_on)
+            driver.emit("rl_sync_timing", rollout_id=rollout_id, outer_sync="elastic",
+                        base_version=int(base.outer_version),
+                        **self._base_timing(submit_ts, base).fields())
+            state = self._apply(driver, base, rollout_id + 1)
             self._maybe_pause_link(driver)
         except ElasticFinished as done:
             return self._finished(driver, done, rollout_id=rollout_id, sent_on=sent_on)
@@ -733,6 +755,9 @@ class _CriticDriverView:
 
     def phase(self, name: str, **fields: Any) -> None:
         self.driver.phase(f"critic_{name}", **fields)
+
+    def emit(self, event: str, **fields: Any) -> None:
+        self.driver.emit(event, channel="critic", **fields)
 
 
 class DualStrictAvgSync:
@@ -931,6 +956,8 @@ class DecoupledSync:
         self.action_tokens = 0
         self.finished = False
         self._driver: IslandDriver | None = None
+        # Wall seconds blocked on the syncer in the current boundary (L5.6).
+        self._remote_wait_seconds = 0.0
 
     # legacy-compatible helpers ------------------------------------------
     def _append_event(self, event: dict[str, Any]) -> None:
@@ -1066,7 +1093,7 @@ class DecoupledSync:
         return SyncBoundary(self._snapshot_state(self.snapshot), stop=True)
 
     def _finish(self, *, policy_version, stats) -> SyncBoundary:
-        manifest, final = self.bridge.wait_for_final_cut(policy_version=policy_version)
+        manifest, final = self._remote_wait(self.bridge.wait_for_final_cut, policy_version=policy_version)
         return self._commit_final_cut(
             manifest,
             final,
@@ -1093,17 +1120,30 @@ class DecoupledSync:
         import time
 
         started = time.monotonic()
+        self._remote_wait_seconds = 0.0
         result = self._boundary(driver, rollout_id=rollout_id, stats=stats)
         self._append_event(
             {
                 "event": "rl_sync_hook",
                 "rl/rollout_id": rollout_id,
                 "sync/hook_seconds": time.monotonic() - started,
-                "sync/remote_quorum_wait_seconds": 0.0,
+                "sync/remote_quorum_wait_seconds": self._remote_wait_seconds,
                 "sync/finalization": result.stop,
             }
         )
         return result
+
+    def _remote_wait(self, call, *args, **kwargs):
+        """Run a bridge call that blocks on the syncer and add its wall time
+        to this boundary's ``sync/remote_quorum_wait_seconds`` (L5.6). A
+        normal decoupled round does not block, so the value stays 0 there."""
+        import time
+
+        started = time.monotonic()
+        try:
+            return call(*args, **kwargs)
+        finally:
+            self._remote_wait_seconds += time.monotonic() - started
 
     def _boundary(self, driver, *, rollout_id, stats) -> SyncBoundary:
         if (
@@ -1123,8 +1163,8 @@ class DecoupledSync:
             self._record_local_round(stats, rollout_id=rollout_id)
             return self._finish(policy_version=next_rollout_id, stats=stats)
         if getattr(self.args, "yeto_rl_learner_budget_steps", None) == self.optimizer_steps:
-            consolidation = self.bridge.consolidate_budget(
-                local, optimizer_steps=self.optimizer_steps, action_tokens=self.action_tokens
+            consolidation = self._remote_wait(
+                self.bridge.consolidate_budget, local, optimizer_steps=self.optimizer_steps, action_tokens=self.action_tokens
             )
             stats = replace(
                 stats,

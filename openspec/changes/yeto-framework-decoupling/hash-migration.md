@@ -279,3 +279,8 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
 - Affected golden samples (3 of 8): `grpo_tis.json` — `algorithm_sha256` `5a8a5a9f…` → `27df1133…` (the default-spec hash), with the derived launcher/learner/execution-profile fields; `drgrpo.json` and `seq_adv_maxrl.json` — `algorithm_spec` text only (new field names), hashes unchanged. The other 5 samples and `fake_engine_tapes.json` are unchanged.
 - Hash boundary: runs with a TIS (or other non-default) correction group recorded before this change carry the old hash; runs after it carry the hash of the same spec without its correction group. Compare across the boundary by the recorded `algorithm_spec`, not by hash. Phase 2 (L6b.1) puts the group back into the hash at the same version boundary as the `rl-identity-tiering` semantic hash.
 - Accepted by the main agent (SESSION24 GOAL §6). Regenerated with `python tests/decoupling_golden.py --write`; the diff touches only these 3 files.
+
+## S24 L5.6 island sync timing (branch s24-l5-measure, 2026-10-14)
+
+- Only change: `fake_engine_tapes.json` `strict_progress.tape` gains one `rl_sync_timing` event (rl-trainer-start-stop L5.6: `sync/submit_ts`, `sync/global_ready_ts`, `sync/recv_seconds`, `sync/sync_wait_seconds`; all four are scrubbed to `<VOLATILE>`). The 8 config samples, algorithm hashes and contract hashes are unchanged.
+- Regenerated with `python tests/decoupling_golden.py --write`; the diff is 11 added lines.

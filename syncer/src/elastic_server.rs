@@ -62,6 +62,11 @@ fn group_label(g: &str) -> &str {
     if g.is_empty() { "未声明" } else { g }
 }
 
+/// Seconds since the Unix epoch (tape `time_unix`).
+fn unix_now() -> f64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(f64::NAN, |d| d.as_secs_f64())
+}
+
 fn hex32(h: &[u8; 32]) -> String {
     if h.iter().all(|b| *b == 0) {
         return "<not declared>".into();
@@ -121,6 +126,7 @@ struct Shared {
     flushed: usize,
     round_started: Instant,
     tape: Option<std::fs::File>,
+    tape_clock: crate::elastic::TapeClock,
     key: Vec<u8>,
     outer_lr: f32,
     outer_momentum: f32,
@@ -269,7 +275,7 @@ impl Shared {
         let new = &self.coord.tape[self.flushed..];
         if let Some(f) = self.tape.as_mut() {
             for ev in new {
-                writeln!(f, "{}", ev.to_json(self.coord.syncer_epoch))?;
+                writeln!(f, "{}", ev.to_json_stamped(self.coord.syncer_epoch, &mut self.tape_clock, unix_now()))?;
             }
             f.flush()?;
         }
@@ -306,8 +312,8 @@ impl Shared {
         let island_json = island.map(|i| i.to_string()).unwrap_or_else(|| "null".into());
         let secs = if seconds.is_finite() { format!("{seconds:?}") } else { "null".into() };
         let line = format!(
-            "{{\"kind\":\"transfer\",\"syncer_epoch\":{},\"direction\":\"{direction}\",\"msg\":\"{name}\",\"island_id\":{island_json},\"bytes\":{bytes},\"seconds\":{secs},\"outer_version\":{}}}",
-            self.coord.syncer_epoch, self.coord.outer_version
+            "{{\"kind\":\"transfer\",\"syncer_epoch\":{},\"direction\":\"{direction}\",\"msg\":\"{name}\",\"island_id\":{island_json},\"bytes\":{bytes},\"seconds\":{secs},\"outer_version\":{},\"time_unix\":{:?}}}",
+            self.coord.syncer_epoch, self.coord.outer_version, unix_now()
         );
         if let Some(f) = self.tape.as_mut() {
             writeln!(f, "{line}")?;
@@ -600,6 +606,7 @@ pub async fn run(listener: TcpListener, cfg: ElasticServerConfig) -> Result<(u64
         compat_group: None,
         flushed: 0,
         round_started: Instant::now(),
+        tape_clock: crate::elastic::TapeClock::new(unix_now()),
         tape,
         key: cfg.key.clone(),
         outer_lr: cfg.outer_lr,
