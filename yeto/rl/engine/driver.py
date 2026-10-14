@@ -1324,6 +1324,9 @@ class IslandDriver:
     # rl_driver_start with ``semantic_sha256`` only when set.
     code_pack_digest: str | None = None
     code_pack_mode: str | None = None  # None: the L9.1 transition (source tree hash)
+    # rl-trainer-cold-start-cost L0: the island's StartPhases; the first
+    # optimizer step records ``first_step_done`` (None: not recorded).
+    start_phases: Any = None
 
     def _export_eval_version(self, rollout_id: int, *, final: bool) -> None:
         state = self.published_state
@@ -1438,6 +1441,8 @@ class IslandDriver:
         started = time.monotonic()
         receipt = self.trainer.train_step(batch)
         train_seconds = time.monotonic() - started
+        if self.start_phases is not None:
+            self.start_phases.mark_once("first_step_done")
         raw = self.trainer.step_metrics()
         metrics = raw if isinstance(raw, TrainStepMetrics) else TrainStepMetrics(**dict(raw))
         rollout_fraction = getattr(batch, "cross_version_truncated_fraction", None)
