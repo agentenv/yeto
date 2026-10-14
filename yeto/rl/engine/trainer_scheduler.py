@@ -4,8 +4,10 @@
   ``Q_on = A_hard + 1``. With the optional ``alpha`` (allowed start-cost share)
   ``Q_on = min(Q_s1, A_hard + 1)``, ``Q_s1 = ceil(T_s * (1 - alpha) / (alpha * T_b))``.
   ``alpha`` has no default.
-* Stop (``STOPPED``) when the backlog is empty and the trainer has been idle for
-  ``T_idle = T_s``; stop (``FINISHED``) when the data ended and the backlog is empty.
+* Stop (``STOPPED``) when the backlog is below one batch and the trainer has been idle for
+  ``T_idle = T_s``; stop (``FINISHED``) when the data ended and less than one batch
+  is left (a remainder below one batch is never trained). At the data end a cold
+  trainer starts for the full batches left, also below ``Q_on``.
 * ``T_s`` is the last measured start (``trainer_start_summary.total_s``, the event of
   rl-trainer-cold-start-cost L0.1) or, without a measurement, the configured value.
 * Prices are accepted and ignored (S3 is not in this change).
@@ -114,19 +116,23 @@ class S1Scheduler:
 
     def _decide(self, backlog: BacklogStats, state: LifecycleState, now: float,
                 t_s: float, q_on: float) -> Decision:
-        empty = backlog.samples == 0
+        if backlog.data_ended and backlog.batches < 1:
+            # less than one batch is left and none will come: nothing more to train
+            if state is not LifecycleState.TRAINING and state not in _STARTABLE:
+                return Hold()  # a start or a drain is under way
+            self.idle_since = None
+            return Stop(LeaveReason.FINISHED)
         if state in _STARTABLE:
             self.idle_since = None
-            if backlog.batches >= q_on or (backlog.data_ended and not empty):
-                return Start()  # at the data end, train the remainder below Q_on
+            if backlog.batches >= q_on or backlog.data_ended:
+                return Start()  # at the data end, train the full batches below Q_on
             return Hold()
         if state is not LifecycleState.TRAINING:
             return Hold()
-        if not empty:
+        if backlog.batches >= 1:
             self.idle_since = None
             return Hold()
-        if backlog.data_ended:
-            return Stop(LeaveReason.FINISHED)
+        # below one batch the trainer cannot train: it is idle
         if self.idle_since is None:
             self.idle_since = now
         if now - self.idle_since >= t_s:

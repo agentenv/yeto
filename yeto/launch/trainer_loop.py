@@ -13,11 +13,12 @@ Inputs and outputs of the loop on the head:
 * ``A_hard``: ``--rl-max-policy-age``;
 * the trainer island itself: a :class:`CloudTrainerBinding` from
   :data:`binding_factory`. It acquires a trainer island per incarnation and
-  releases it (sky / Modal launch layer), and gives the sample buffer and the cut
-  log of the run.
+  releases it, and gives the sample buffer and the cut log of the run.
 
-No binding factory is set yet: with the switch on, the launcher refuses before
-anything runs.
+The launcher holds back the island ``--rl-trainer-island`` (index into ``--gpu``):
+the fleet controller does not start it; the binding starts one per incarnation.
+Only a Modal trainer island is bound (``yeto.launch.trainer_island``); :func:`check`
+refuses anything else before any launch.
 """
 
 from __future__ import annotations
@@ -32,6 +33,8 @@ from yeto.rl.engine.journal import Journal
 from yeto.rl.engine.trainer_lifecycle import CutLog, DurableSampleBuffer, TrainerLifecycle
 from yeto.rl.engine.trainer_loop import TrainerLoop, TrainerLoopThread, next_incarnation
 from yeto.rl.engine.trainer_scheduler import S1Config, S1Scheduler
+
+from .trainer_island import TrainerIsland
 
 OFF = "off"
 S1 = "s1"
@@ -64,8 +67,17 @@ class CloudTrainerBinding:
     after_restore: Callable[[], None] | None = None
 
 
-# (args) -> CloudTrainerBinding. None until the cloud layer lands (L5.4).
-binding_factory: Callable[[Any], CloudTrainerBinding] | None = None
+def default_binding(args, island: TrainerIsland | None) -> CloudTrainerBinding:
+    if island is None or island.cloud != "modal":
+        raise SystemExit("--rl-trainer-scheduler: the trainer island must be a Modal island "
+                         f"(got {None if island is None else island.cloud}); sky is not bound yet")
+    from .trainer_island import modal_binding
+
+    return modal_binding(args, island, journal_dir=journal_dir(args))
+
+
+# (args, held-back trainer island) -> CloudTrainerBinding
+binding_factory: Callable[[Any, TrainerIsland | None], CloudTrainerBinding] | None = default_binding
 
 
 def add_arguments(group) -> None:
@@ -76,6 +88,15 @@ def add_arguments(group) -> None:
     group.add_argument(
         "--rl-trainer-scheduler-interval", type=float, default=DEFAULT_INTERVAL_S,
         help="seconds between two scheduler decisions on the head")
+    group.add_argument(
+        "--rl-trainer-island", type=int, default=None, metavar="M",
+        help="with --rl-trainer-scheduler: the island (index into --gpu) the scheduler starts "
+        "and stops; the fleet does not start it. Must be a Modal island with a "
+        "modal-volume:// --rl-checkpoint-store")
+    group.add_argument(
+        "--rl-trainer-command-poll-seconds", type=float, default=None,
+        help="seconds between two reads of the command file on the trainer island and of "
+        "the island events on the head (default 5)")
     group.add_argument(
         "--rl-trainer-start-seconds", type=float, default=DEFAULT_START_SECONDS,
         help="configured trainer start time T_s (seconds); a measured start replaces it")
@@ -91,15 +112,41 @@ def journal_dir(args) -> Path:
     return runs.run_dir(args.cluster_prefix) / JOURNAL_DIR
 
 
+def held_island(args) -> int | None:
+    """Index (into ``--gpu``) of the island the scheduler owns; None with the switch off."""
+    return args.rl_trainer_island if enabled(args) else None
+
+
 def check(args) -> None:
     """Refuse the switch without a trainer island binding (before any launch)."""
     if not enabled(args):
         return
     if binding_factory is None:
         raise SystemExit(f"--rl-trainer-scheduler {args.rl_trainer_scheduler}: no trainer "
-                         "island binding to the cloud layer yet (rl-trainer-start-stop L5.4)")
+                         "island binding to the cloud layer")
     if args.rl_trainer_scheduler_interval <= 0:
         raise SystemExit("--rl-trainer-scheduler-interval must be positive")
+    if binding_factory is default_binding:
+        _check_modal_island(args)
+
+
+def _check_modal_island(args) -> None:
+    from yeto.gpu_spec import parse_gpu_spec
+
+    m = getattr(args, "rl_trainer_island", None)
+    if m is None:
+        raise SystemExit("--rl-trainer-scheduler needs --rl-trainer-island M (the island it "
+                         "starts and stops)")
+    specs = parse_gpu_spec(args.gpu)
+    if not 0 <= m < len(specs):
+        raise SystemExit(f"--rl-trainer-island {m}: --gpu has {len(specs)} island(s)")
+    if specs[m].cloud != "modal":
+        raise SystemExit(f"--rl-trainer-island {m} is a {specs[m].cloud} island; only a Modal "
+                         "trainer island is bound to the scheduler (sky: not implemented)")
+    if not str(getattr(args, "rl_checkpoint_store", None) or "").startswith("modal-volume://"):
+        raise SystemExit("--rl-trainer-scheduler needs a modal-volume:// --rl-checkpoint-store: "
+                         "the head reads the cuts and the sample buffer there and writes the "
+                         "trainer commands there")
 
 
 def build(args, binding: CloudTrainerBinding, journal: Journal) -> TrainerLoop:
@@ -120,16 +167,18 @@ def build(args, binding: CloudTrainerBinding, journal: Journal) -> TrainerLoop:
     return loop
 
 
-def run_with_trainer_loop(args, run: Callable[[], T], *,
-                          factory: Callable[[Any], CloudTrainerBinding] | None = None) -> T:
+def run_with_trainer_loop(args, run: Callable[[], T], *, island: TrainerIsland | None = None,
+                          factory: Callable[[Any, TrainerIsland | None], CloudTrainerBinding]
+                          | None = None) -> T:
     """``run()`` (the fleet controller); with the switch on, the trainer loop ticks
-    on its own thread meanwhile and stops the trainer when ``run`` returns."""
+    on its own thread meanwhile and stops the trainer when ``run`` returns.
+    ``island``: the held-back trainer island (:func:`held_island`)."""
     if not enabled(args):
         return run()
     factory = binding_factory if factory is None else factory
     if factory is None:
         check(args)  # raises
-    binding = factory(args)
+    binding = factory(args, island)
     with Journal(journal_dir(args)) as journal:
         runner = TrainerLoopThread(build(args, binding, journal),
                                    args.rl_trainer_scheduler_interval).start()

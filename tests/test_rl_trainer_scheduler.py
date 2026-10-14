@@ -99,7 +99,8 @@ def test_data_end_finishes_and_trains_the_remainder():
     assert s.decide(ended, TRAINING) == Hold()
     done = BacklogStats(batches=0.0, samples=0, data_ended=True)
     assert s.decide(done, TRAINING) == Stop(LeaveReason.FINISHED)
-    assert s.decide(done, COLD) == Hold()
+    # nothing left: a stopped (or never started) trainer also finishes the run (L5.3c)
+    assert s.decide(done, COLD) == Stop(LeaveReason.FINISHED)
 
 
 def test_transition_states_hold_and_prices_are_ignored():

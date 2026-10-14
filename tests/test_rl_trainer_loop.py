@@ -267,6 +267,7 @@ def test_switch_off_by_default_runs_unchanged(tmp_path, monkeypatch):
 
 def test_switch_on_without_a_binding_refuses(tmp_path, monkeypatch):
     args = _args(tmp_path, monkeypatch, "s1")
+    monkeypatch.setattr(launch_loop, "binding_factory", None)
     with pytest.raises(SystemExit, match="no trainer island binding"):
         launch_loop.check(args)
 
@@ -279,7 +280,7 @@ def test_switch_on_runs_the_loop_beside_the_controller(tmp_path, monkeypatch):
     cloud.new_buffer()
     FakeSampler(cloud.buffer, cloud.published).produce(2 * BATCH)
 
-    def binding(_args):
+    def binding(_args, _island):
         return launch_loop.CloudTrainerBinding(
             lifecycle=lambda first: DriverLifecycle(cloud.build, membership=cloud.membership,
                                                     cuts=cloud.cuts, release=cloud.release,
