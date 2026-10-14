@@ -41,7 +41,7 @@ def trainer(store: str, cut_path: str, log_path: str, rounds: int, groups: int, 
         if rid == crash:
             os._exit(3)  # crash after consuming, before the train step and the cut
         with open(log_path, "a") as fh:  # the train step
-            fh.write(json.dumps({"rollout_id": rid, "groups": [g[0]["group_index"] for g in taken],
+            fh.write(json.dumps({"rollout_id": rid, "groups": [g[0]["group_index"] for _, g in taken],
                                  "stale": report.stale_groups}) + "\n")
         cut = {"next": rid + 1, "watermark": reader.watermark_before(rid + 1)}
         tmp = cut_path + ".tmp"

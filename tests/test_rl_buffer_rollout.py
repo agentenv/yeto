@@ -118,7 +118,7 @@ def test_reader_passes_over_groups_older_than_the_limit(tmp_path):
         writer.write(_group(g, version), group_key=f"g{g}")
     reader = br.BatchReader(_buffer(tmp_path), max_policy_age=2, wait_s=0.0, poll_s=0.0)
     groups, report = reader.take(0, 2, current_version=5)  # floor = 3
-    assert [g[0]["group_index"] for g in groups] == [1, 3]
+    assert [(pos, g[0]["group_index"]) for pos, g in groups] == [(1, 1), (3, 3)]
     assert (report.stale_groups, report.start, report.end, report.behavior_versions) == (2, 0, 4, {3: 1, 4: 1})
 
 
@@ -165,7 +165,7 @@ def test_watermark_covers_only_rounds_below_the_cut(tmp_path):
     assert reader.buffer.watermark == 4
     assert reader.reset(2) == 2
     groups, _ = reader.take(1, 2, current_version=1)
-    assert [g[0]["group_index"] for g in groups] == [2, 3]
+    assert [pos for pos, _ in groups] == [2, 3]
 
 
 # ---------------------------------------------------------------- round cut

@@ -27,6 +27,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from . import sample_roles
+from .sample_roles import SampleBufferConfig
+
 PARAMETER_MODES = frozenset({"lora", "full"})
 RECIPE_GENERIC = "generic"
 RECIPE_QWEN3_5 = "qwen3_5"
@@ -459,6 +462,9 @@ class RLRunConfig:
     # and the load-window length for ``timeline.load_windows`` (None = no hook).
     edge_costs_path: str | None = None
     elastic_window_s: float | None = None
+    # rl-trainer-start-stop L4.6 (--rl-sample-role sampler|trainer): the island
+    # writes or reads the durable sample buffer. None = role both (unchanged).
+    sample_buffer: SampleBufferConfig | None = None
 
 
 # --------------------------------------------------------------------------
@@ -996,6 +1002,7 @@ def resolve_rl_run_config(
         edge_costs_path=getattr(args, "rl_edge_costs_path", None) or None,
         elastic_window_s=(float(args.rl_elastic_window_s)
                           if getattr(args, "rl_elastic_window_s", None) else None),
+        sample_buffer=sample_roles.resolve(args, groups_per_round=args.groups_per_round),
     )
 
 
