@@ -134,3 +134,33 @@ def test_store_path_must_be_visible(tmp_path: Path) -> None:
     with pytest.raises(CodePackError, match="no code pack store"):
         codepack.pack_store_for("gs://bucket/x")
     assert isinstance(codepack.pack_store_for(str(tmp_path)), DirPackStore)
+
+
+def test_modal_volume_pack_store_creates_the_volume_on_put(monkeypatch):
+    import sys
+    import types
+
+    from yeto import codepack
+
+    calls = []
+
+    class _Batch:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def put_file(self, fileobj, path):
+            calls.append(("put", path))
+
+    class _Volume:
+        @staticmethod
+        def from_name(name, create_if_missing=False):
+            calls.append(("from_name", name, create_if_missing))
+            return types.SimpleNamespace(batch_upload=lambda force: _Batch())
+
+    monkeypatch.setitem(sys.modules, "modal", types.SimpleNamespace(Volume=_Volume))
+    store = codepack._ModalVolumePackStore("modal-volume://vol/run")
+    assert store.put("abc", b"x") == "modal-volume://vol/run/code_packs/abc.tar"
+    assert calls == [("from_name", "vol", True), ("put", "/run/code_packs/abc.tar")]

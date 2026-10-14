@@ -363,14 +363,16 @@ class _ModalVolumePackStore:
         self.base = store_uri.rstrip("/")
         self.name, self.prefix = parse_modal_volume_uri(store_uri)
 
-    def _volume(self):
+    def _volume(self, *, create: bool = False):
         import modal
 
-        return modal.Volume.from_name(self.name)
+        return modal.Volume.from_name(self.name, create_if_missing=create)
 
     def put(self, digest: str, data: bytes) -> str:
+        # The pack is made before the first island starts, so the run's Volume may not
+        # exist yet; create it as the island launch would (modal_runner).
         rel = "/".join(p for p in (self.prefix, PACK_DIR, f"{digest}.tar") if p)
-        with self._volume().batch_upload(force=True) as batch:
+        with self._volume(create=True).batch_upload(force=True) as batch:
             batch.put_file(io.BytesIO(data), "/" + rel)
         return f"{self.base}/{PACK_DIR}/{digest}.tar"
 
