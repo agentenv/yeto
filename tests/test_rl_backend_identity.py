@@ -100,10 +100,15 @@ def test_dense_and_sao_training_contracts_reference_the_identity():
 
     src = Path(local_learner.__file__).read_text()
     assert "backend_identity_sha256" in src
-    from yeto.rl.adapters.miles.models import full_parameter_dense, sao_streaming
+    from yeto.rl.adapters.miles.full_parameter import role_stream
+    from yeto.rl.adapters.miles.models import full_parameter_dense
 
-    for module in (full_parameter_dense, sao_streaming):
-        assert module._legacy_identity_sha256() == miles_identity.backend_identity("legacy").sha256()
+    assert (
+        full_parameter_dense._legacy_identity_sha256()
+        == miles_identity.backend_identity("legacy").sha256()
+    )
+    # P0-D5/D8: every full-parameter role stream (SAO today) binds the ports identity.
+    assert 'backend_identity("ports").sha256()' in Path(role_stream.__file__).read_text()
 
 
 def test_lr_schedule_is_bound_into_the_island_contract():

@@ -44,6 +44,7 @@ def ports_rejections(
     advantage_estimator: str = "grpo",
     extra_argv: Sequence[str] = (),
     placement: str = "colocated",
+    island_scheduling: str = "legacy",
 ) -> list[str]:
     """Reasons the combination is outside the R0 ports matrix (empty = OK)."""
 
@@ -51,8 +52,12 @@ def ports_rejections(
     facts = _extra_argv_facts(extra_argv)
     if model_kind != "causal-lm":
         reasons.append(f"model kind {model_kind!r} (ports supports causal LMs only)")
-    if tuning != "lora" or parameter_mode != "lora" or sync_preset == "dense-full":
-        reasons.append("full-parameter / dense-full training")
+    full_parameter = tuning == "full" or parameter_mode == "full" or sync_preset == "dense-full"
+    if full_parameter and island_scheduling == "elastic":
+        # P0-D7 follow-up (tasks 1.7b.6): the elastic syncer has no fragment frames yet.
+        reasons.append("full-parameter training with --rl-island-scheduling elastic")
+    elif tuning not in ("lora", "full") or parameter_mode not in ("lora", "full"):
+        reasons.append(f"tuning {tuning!r} / parameter mode {parameter_mode!r}")
     if "sao" in str(sync_preset) or facts.streaming_compaction:
         reasons.append("SAO (streaming compaction)")
     elif sync_preset not in PORTS_SYNC_PRESETS and sync_preset != "dense-full":

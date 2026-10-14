@@ -54,9 +54,6 @@ PRE_LR_FIX_GOLDEN: dict[str, list[list[str]]] = {
         ["raise", "5c181811a084f5208586d91c742273c9e0daa627da6a012ab5a3be6cfcdb6ce3"],
         ["raise", "726b9ea19fdfccb7dfd45d3ef9b4549f158559fa0b47fbf01f761e1d00737e58"],
     ],
-    "test_miles_dense_full_parameter_argv_and_runtime_contract": [
-        ["argv", "7e5f890e1356602e3dfe08bb5510c65d8b83e8ed9cab365e40070dafc57d639f"],
-    ],
 }
 
 # Current golden (regenerated for fix-decoupled-lr-schedule 1.3).
@@ -79,18 +76,11 @@ GOLDEN: dict[str, list[list[str]]] = {
         ["raise", "5c181811a084f5208586d91c742273c9e0daa627da6a012ab5a3be6cfcdb6ce3"],
         ["raise", "726b9ea19fdfccb7dfd45d3ef9b4549f158559fa0b47fbf01f761e1d00737e58"],
     ],
-    "test_miles_dense_full_parameter_argv_and_runtime_contract": [
-        ["argv", "918e66056fadaebd6ddc68c0c0fae934680e98da965b1dc2ae0954b20b0221fc"],
-    ],
 }
 
 CASES = {
     "test_miles_argv_uses_provider_capabilities_without_model_family_branches": (
         "monkeypatch",
-    ),
-    "test_miles_dense_full_parameter_argv_and_runtime_contract": (
-        "monkeypatch",
-        "tmp_path",
     ),
     "test_miles_argv_preserves_mrope_provider_configuration": (),
 }

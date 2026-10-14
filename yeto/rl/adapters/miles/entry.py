@@ -204,7 +204,9 @@ if NEVER_DECLARABLE & set(MILES_DECLARED):  # pragma: no cover - guarded by test
 # .../evidence/ports-image/2026-10-02-m3a27).
 # Derived from the single lineage in pins.py (0.7): 0af62f4d and every later commit.
 _PINS_0AF62F4D_PLUS = miles_fork_lineage_from("0af62f4d48ed6a5b185c257578d8f7e22312aa87")
-_PINS_SUPP = frozenset({"64b591a4bec1ffa37fb089d3e3b99c84773b1ffc"})
+# 64b591a4b and later: 56068bd56 adds only full-parameter state/transport files
+# (no loss_hub or training-loss file), so the G1 evidence carries over by code diff.
+_PINS_SUPP = miles_fork_lineage_from("64b591a4bec1ffa37fb089d3e3b99c84773b1ffc")
 MILES_DECLARED_PINS: dict[str, frozenset[str]] = {
     # before 0af62f4d the LoRA bridge ignored calculate_per_token_loss (g1c:
     # grad_norm bit-identical to the baseline)
@@ -212,7 +214,7 @@ MILES_DECLARED_PINS: dict[str, frozenset[str]] = {
     "features:over_sampling": _PINS_0AF62F4D_PLUS,
     "features:overlong_filter": _PINS_0AF62F4D_PLUS,
     "features:clip_higher": _PINS_0AF62F4D_PLUS,
-    # rl-algo-supplement phase 1 G1 ran on 64b591a4b only (S19 #13); 5.2 re-ran clip_higher there too.
+    # rl-algo-supplement phase 1 G1 ran on 64b591a4b (S19 #13); 5.2 re-ran clip_higher there too.
     **{m: _PINS_SUPP for m in ("losses:cispo", "losses:sapo", "losses:gmpo", "features:dual_clip",
                                "features:kl_unbiased", "corrections:opsm_rollout",
                                "features:rollout_logprobs_as_old")},
@@ -594,8 +596,27 @@ def preflight(profile: Any, algorithm: AlgorithmSpec, capabilities: EngineCapabi
     )
 
 
-def build_sync(miles_args: Any, *, yeto_policy_sync: bool) -> tuple[Any, Any]:
-    """(sync session, progress store) for the preset the learner selected."""
+def build_sync(
+    miles_args: Any,
+    *,
+    yeto_policy_sync: bool,
+    runner: Any = None,
+    groups: Mapping[str, Any] | None = None,
+) -> tuple[Any, Any]:
+    """(sync session, progress store) for the preset the learner selected.
+
+    A full-parameter island (P0-D8) gets the one :class:`FullParameterSync`
+    over its trainable-role ``groups``; its progress lives in the syncer.
+    """
+
+    from .full_parameter.session import CONFIG_ATTRIBUTE, build_full_parameter_sync
+
+    if getattr(miles_args, CONFIG_ATTRIBUTE, None) is not None:
+        if not yeto_policy_sync:
+            raise ValueError("full-parameter training requires Yeto policy sync")
+        if runner is None or groups is None:
+            raise ValueError("full-parameter sync needs the event-loop runner and trainer groups")
+        return build_full_parameter_sync(miles_args, runner=runner, groups=groups), None
 
     from yeto.rl.engine.bridges import (
         DecoupledIslandProgress,
@@ -632,6 +653,19 @@ def build_sync(miles_args: Any, *, yeto_policy_sync: bool) -> tuple[Any, Any]:
         raise ValueError("strict-avg with a critic needs the critic syncer (--critic-syncer); "
                          "the actor syncer alone would leave the critics unaveraged")
     return StrictAvgSync(miles_args.yeto_rl_bridge_config, progress=progress), progress
+
+
+def _policy_state_for(sync: Any, **lora: Any) -> Any:
+    """The full-parameter actor cut for a FullParameterSync island, else LoRA state."""
+
+    from yeto.rl.engine.full_parameter_sync import FullParameterSync
+
+    from .full_parameter.session import MilesFullParameterPolicyState
+    from .state import MilesPolicyState
+
+    if isinstance(sync, FullParameterSync):
+        return MilesFullParameterPolicyState(sync)
+    return MilesPolicyState(**lora)
 
 
 def compose_island(
@@ -684,7 +718,6 @@ def compose_island(
     from .placement import MilesPlacement
     from .publish import MilesPublisher
     from .rollout import MilesRolloutPool
-    from .state import MilesPolicyState
     from .trainer import MilesTrainerGroup
 
     holder: dict[str, IslandDriver] = {}
@@ -697,7 +730,8 @@ def compose_island(
             raise DriverError("rollout requested before any complete publication")
         return parse_policy_snapshot_token(driver.expected_token)
 
-    policy_state = MilesPolicyState(
+    policy_state = _policy_state_for(
+        sync,
         actor_model=actor_model,
         base_model_revision=base_model_revision,
         config_hash=lora_config_hash,
@@ -1917,7 +1951,10 @@ def run_ports_island(
             await dispatcher.dispatch(rollout_id)
             return {}
 
-        sync, progress = build_sync(miles_args, yeto_policy_sync=yeto_policy_sync)
+        groups = {"actor": actor} if critic is None else {"actor": actor, "critic": critic}
+        sync, progress = build_sync(
+            miles_args, yeto_policy_sync=yeto_policy_sync, runner=runner, groups=groups
+        )
         driver = compose_island(
             miles_args=miles_args,
             launch=launch,

@@ -28,6 +28,9 @@ from yeto.rl.adapters.miles.models.chunked_full_parameter import (
     ReferencedPolicyCut,
     StoredAuthoritativeFragment,
 )
+from yeto.rl.adapters.miles.full_parameter.role_stream import (
+    validate_optimizer_apply_transition,
+)
 from yeto.rl.trajectory_evidence import read_trajectory_batch_evidence
 
 
@@ -305,10 +308,12 @@ class MilesFullParameterDenseSync:
         optimizer_before = tuple(await actor_model.full_parameter_optimizer_states())
         await self.adapter.apply(actor_model, target, commit_token=update_id)
         optimizer_after = tuple(await actor_model.full_parameter_optimizer_states())
-        _validate_optimizer_apply_transition(
+        validate_optimizer_apply_transition(
             optimizer_before,
             optimizer_after,
+            role="actor",
             base_policy_version=rollout_id,
+            base_local_generation=1,
             target_policy_version=rollout_id + 1,
         )
         pending_publication.applied = True
@@ -580,33 +585,6 @@ def _sweep_update_id(
         separators=(",", ":"),
     ).encode()
     return hashlib.sha256(b"yeto-dense-sweep-update-v1\0" + payload).hexdigest()
-
-
-def _validate_optimizer_apply_transition(
-    before: tuple[Any, ...],
-    after: tuple[Any, ...],
-    *,
-    base_policy_version: int,
-    target_policy_version: int,
-) -> None:
-    if not before or len(before) != len(after):
-        raise RuntimeError("dense global apply returned incomplete Adam evidence")
-    volatile = {"installed_policy_version", "local_step_generation"}
-    for old, new in zip(before, after, strict=True):
-        old_values = vars(old)
-        new_values = vars(new)
-        if (
-            set(old_values) != set(new_values)
-            or old.installed_policy_version != base_policy_version
-            or old.local_step_generation != 1
-            or new.installed_policy_version != target_policy_version
-            or new.local_step_generation != 0
-            or any(
-                old_values[name] != new_values[name]
-                for name in old_values.keys() - volatile
-            )
-        ):
-            raise RuntimeError("dense global apply changed local Adam state")
 
 
 def create_miles_full_parameter_dense_sync(args) -> MilesFullParameterDenseSync:

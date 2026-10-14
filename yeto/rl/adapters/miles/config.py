@@ -282,7 +282,7 @@ def check_harness_reward_scope(scope: Any) -> None:
 
 
 def _check_parameter_mode(value, _config):
-    return None if value == "lora" else "only the LoRA parameter layout is implemented"
+    return None if value in ("lora", "full") else f"parameter mode {value!r}"
 
 
 def _check_lora_targets(value, _config):
@@ -645,6 +645,26 @@ def critic_load_argv(config: Any, algorithm: AlgorithmSpec) -> list[str]:
     return []
 
 
+def _lora_argv(trainable: Any, *, colocated: bool) -> list[str]:
+    """Upstream LoRA flags (miles/utils/lora/arguments.py); none in full-parameter mode."""
+
+    if trainable.parameter_mode != "lora":
+        return []
+    return [
+        "--lora-rank", str(trainable.lora_rank),
+        "--lora-alpha", str(trainable.lora_rank),
+        # "0" (default argv unchanged) unless --rl-lora-dropout
+        "--lora-dropout", (format(trainable.lora_dropout, "g")
+                           if getattr(trainable, "lora_dropout", 0.0) else "0"),
+        "--lora-type", "canonical_lora",
+        "--target-modules", ",".join(trainable.target_modules),
+        # upstream applies the LoRA base CPU backup only under colocate
+        # (utils/lora/utils.py:39-41); a LoRA fixed partition drops it.
+        *(["--lora-base-cpu-backup"] if colocated else []),
+        "--sglang-max-lora-rank", str(trainable.lora_rank),
+    ]
+
+
 def translate_run_config(
     config: Any,
     algorithm: AlgorithmSpec,
@@ -780,22 +800,7 @@ def translate_run_config(
         "--rotary-base", str(geometry.rotary_base),
         "--rotary-percent", str(geometry.rotary_percent),
         "--vocab-size", str(geometry.vocab_size),
-        # LoRA (upstream miles/utils/lora/arguments.py)
-        "--lora-rank", str(trainable.lora_rank),
-        "--lora-alpha", str(trainable.lora_rank),
-        # "0" (default argv unchanged) unless --rl-lora-dropout
-        "--lora-dropout", (format(trainable.lora_dropout, "g")
-                           if getattr(trainable, "lora_dropout", 0.0) else "0"),
-        "--lora-type", "canonical_lora",
-        "--target-modules", ",".join(trainable.target_modules),
-        # upstream applies the LoRA base CPU backup only under colocate
-        # (utils/lora/utils.py:39-41); a LoRA fixed partition drops it.
-        *(
-            []
-            if request.kind != "colocated" and trainable.parameter_mode == "lora"
-            else ["--lora-base-cpu-backup"]
-        ),
-        "--sglang-max-lora-rank", str(trainable.lora_rank),
+        *_lora_argv(trainable, colocated=request.kind == "colocated"),
         # placement
         "--actor-num-nodes", str(parallel.actor_num_nodes),
         "--actor-num-gpus-per-node", str(parallel.actor_num_gpus_per_node),

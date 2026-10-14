@@ -52,8 +52,10 @@ def test_legacy_syncer_command_is_byte_identical(head_launcher):
         for n in (1, 2, 4):
             assert launcher.syncer_command(args, n) == head_launcher.syncer_command(args, n).replace(
                 "mkdir -p ~/yeto-output && ", "mkdir -p ~/yeto-output && " + HMAC_CHECK, 1)
-            assert (launcher.critic_syncer_command(args, n)
-                    == HMAC_CHECK + head_launcher.critic_syncer_command(args, n))
+            # P0-D8: one command per role; the HMAC check sits once in front.
+            commands = launcher.role_syncer_commands(args, n)
+            assert list(commands) == ["actor"]
+            assert launcher.syncer_command(args, n).endswith(HMAC_CHECK + commands["actor"])
     assert launcher.syncer_command(_sft(), 2) == (
         head_launcher.syncer_command(_sft(), 2) + " --allow-unauthenticated-islands")
 
@@ -89,8 +91,8 @@ def test_elastic_syncer_flags_and_defaults():
         "--rl-syncer-epoch", "4")), 3)
     assert (" --island-scheduling-mode elastic --quorum-theta 0.6 --carry-gamma 0.25"
             " --soft-deadline-s 300 --q-min 2 --max-carry-lag 1 --syncer-epoch 4") in cmd
-    assert "--island-scheduling-mode elastic" in launcher.critic_syncer_command(
-        _args(("--rl-island-scheduling", "elastic")), 2)
+    assert "--island-scheduling-mode elastic" in launcher.role_syncer_commands(
+        _args(("--rl-island-scheduling", "elastic")), 2)["actor"]
     assert " --rl-island-scheduling elastic --rl-syncer-epoch 0" in launcher._ports_infra_flags(
         _args(("--rl-island-scheduling", "elastic")))[1]
 

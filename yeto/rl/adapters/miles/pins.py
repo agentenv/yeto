@@ -53,7 +53,10 @@ MILES_NEXT_UPSTREAM_COMMIT = "9e4260de047a704208535c0e90c531929879ab40"
 # failed surplus group no longer fails the abort (S17 N17 A/B).
 # s19-critic-algosup (64b591a4b = ddce20992 + critic family + algo-supplement metrics; S19 #1,
 # local fork branch, not pushed; built into the image from the local clone).
-MILES_NEXT_COMMIT = "64b591a4bec1ffa37fb089d3e3b99c84773b1ffc"
+# s23-full-parameter-rpc (56068bd56 = 64b591a4b + full-parameter shard state,
+# transport and TrainerController methods ported from agentenv/miles e25048edd;
+# P0-1.7b.1, needed by full-parameter DiLoCo on the ports engine).
+MILES_NEXT_COMMIT = "56068bd561df6658e929fe1b2ca051b5385d3d9b"
 # sgl-project/sglang ``sglang-miles`` head when radixark/miles@9e4260d was
 # committed (upstream's Dockerfile follows that branch unpinned).
 SGLANG_NEXT_REPOSITORY = "https://github.com/michaellchung/sglang"
@@ -95,6 +98,8 @@ MILES_FORK_LINEAGE: tuple[str, ...] = (
     # 64b591a4b = + critic family + rl-algo-supplement metrics (S19 #1); new flags
     # default off, loss bitwise unchanged with defaults.
     "64b591a4bec1ffa37fb089d3e3b99c84773b1ffc",
+    # 56068bd56 = + full-parameter shard state and transport (P0-1.7b.1); no loss path.
+    "56068bd561df6658e929fe1b2ca051b5385d3d9b",
 )
 
 

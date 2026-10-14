@@ -33,7 +33,17 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from .trainable_state import LAYOUT_LORA, TrainableState, require_supported_layout
+from .trainable_state import (
+    LAYOUT_FRAGMENTS,
+    LAYOUT_LORA,
+    TrainableState,
+    UnsupportedLayoutError,
+    require_supported_layout,
+)
+
+# Layouts a trainer-resident handle can stand for.  ``fragments`` (full
+# parameters, P0-D1) never materializes: its tensors stay chunked in the trainer.
+RESIDENT_LAYOUTS = frozenset({LAYOUT_LORA, LAYOUT_FRAGMENTS})
 
 POLICY_TENSOR_PREFIX = b"yeto-rl-policy-tensors-v1\0"
 PAYLOAD_PREFIX = b"yeto-rl-publication-payload-v1\0"
@@ -187,7 +197,7 @@ class TrainerResidentState:
     _cache: dict = field(default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        require_supported_layout(self.layout, {LAYOUT_LORA})
+        require_supported_layout(self.layout, RESIDENT_LAYOUTS)
 
     # -- identities (no tensors needed) -----------------------------------
     def policy_tensor_hash(self) -> str:
@@ -214,6 +224,8 @@ class TrainerResidentState:
 
     # -- lazy full state ----------------------------------------------------
     def materialize(self) -> TrainableState:
+        if self.layout == LAYOUT_FRAGMENTS:
+            raise UnsupportedLayoutError(self.layout, frozenset({LAYOUT_LORA}))
         state = self._cache.get("state")
         if state is None:
             state = self.materialize_fn(self.policy_version)
