@@ -16,6 +16,7 @@ import sys
 import time
 from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import Any
 
 import torch
@@ -40,24 +41,17 @@ from . import (
     CODEX_PACKAGE_MANIFEST_SHA256,
     CODEX_SUBMIT_TOOL_SCHEMA_SHA256,
     CODEX_TERMINAL_EXEC_TOOL_SCHEMA_SHA256,
-    MILES_BASE_COMMIT,
-    MILES_BUNDLE_PATH,
-    MILES_BUNDLE_SHA256,
-    MILES_COMMIT,
     MILES_NEXT_COMMIT,
     MILES_NEXT_REPOSITORY,
     MILES_PEFT_VERSION,
-    MILES_REPOSITORY,
     SECRLENV_AGENTS,
     SECRLENV_GENERATE,
     SECRLENV_GROUP_FILTER,
     SECRLENV_INFRASTRUCTURE_REPLACEMENTS,
     SECRLENV_REWARD,
     SECRLENV_ZERO_VARIANCE_REPLACEMENTS,
-    SGLANG_COMMIT,
     SGLANG_NEXT_COMMIT,
     SGLANG_NEXT_REPOSITORY,
-    SGLANG_REPOSITORY,
     SIGNED_CODEX_AGENTS,
     TMS_PRELOAD_BASE_BINARY_SHA256,
     TMS_PRELOAD_PATCH_BASE_COMMIT,
@@ -103,6 +97,16 @@ _HOST = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9.-]*\Z")
 _NETWORK_INTERFACE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}\Z")
 _DOCKER_DIGEST = re.compile(r".+@sha256:[0-9a-f]{64}\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+# The Miles/SGLang forks every island checks out (the ports engine pins).
+_PINNED_MILES = MappingProxyType({
+    "repository": MILES_NEXT_REPOSITORY,
+    "commit": MILES_NEXT_COMMIT,
+    "peft_version": MILES_PEFT_VERSION,
+})
+_PINNED_SGLANG = MappingProxyType({
+    "repository": SGLANG_NEXT_REPOSITORY,
+    "commit": SGLANG_NEXT_COMMIT,
+})
 _REVISION = re.compile(r"[0-9a-f]{40}\Z")
 _SAFE_IMAGE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._/:@-]+\Z")
 _EVAL_DATASET_NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}\Z")
@@ -1096,19 +1100,9 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     if not _NETWORK_INTERFACE.fullmatch(str(plan.get("network_interface", "eno3"))):
         raise HarnessError("plan has an invalid network interface")
     _docker_ref(str(plan.get("docker_image", "")))
-    if plan.get("miles") != {
-        "repository": MILES_REPOSITORY,
-        "base_commit": MILES_BASE_COMMIT,
-        "commit": MILES_COMMIT,
-        "bundle_path": MILES_BUNDLE_PATH,
-        "bundle_sha256": MILES_BUNDLE_SHA256,
-        "peft_version": MILES_PEFT_VERSION,
-    }:
+    if plan.get("miles") != _PINNED_MILES:
         raise HarnessError("plan does not use the current pinned Miles revision")
-    if plan.get("sglang") != {
-        "repository": SGLANG_REPOSITORY,
-        "commit": SGLANG_COMMIT,
-    }:
+    if plan.get("sglang") != _PINNED_SGLANG:
         raise HarnessError("plan does not use the current pinned SGLang revision")
     jit_cache = plan.get("jit_cache")
     if jit_cache is not None:
@@ -1119,12 +1113,9 @@ def _validate_plan(plan: dict[str, Any]) -> None:
     learner = plan.get("learner")
     if not isinstance(learner, dict):
         raise HarnessError("plan has no learner configuration")
-    # Legacy plans never carry the key (their digest is unchanged); only an
-    # explicit ports selection is recorded.
-    if "rl_engine" in plan:
-        if plan["rl_engine"] != "ports":
-            raise HarnessError("plan rl_engine must be absent (legacy) or 'ports'")
-        _require_ports_plan(learner)
+    if plan.get("rl_engine") != "ports":
+        raise HarnessError("plan rl_engine must be 'ports'")
+    _require_ports_plan(learner)
     daemon = plan.get("secrlenv_daemon")
     if learner.get("custom_agent_function_path") in SECRLENV_AGENTS:
         if not isinstance(daemon, dict):
@@ -1731,18 +1722,9 @@ def prepare(namespace) -> Path:
         "syncer_port": syncer_port,
         "network_interface": network_interface,
         "docker_image": _docker_ref(args.rl_image),
-        "miles": {
-            "repository": MILES_REPOSITORY,
-            "base_commit": MILES_BASE_COMMIT,
-            "commit": MILES_COMMIT,
-            "bundle_path": MILES_BUNDLE_PATH,
-            "bundle_sha256": MILES_BUNDLE_SHA256,
-            "peft_version": MILES_PEFT_VERSION,
-        },
-        "sglang": {
-            "repository": SGLANG_REPOSITORY,
-            "commit": SGLANG_COMMIT,
-        },
+        "rl_engine": "ports",
+        "miles": dict(_PINNED_MILES),
+        "sglang": dict(_PINNED_SGLANG),
         "source_sha256": args.source_sha256,
         "reward_sha256": args.reward_sha256,
         "syncer_source_sha256": _syncer_source_sha256(),
@@ -1996,8 +1978,6 @@ def prepare(namespace) -> Path:
                 args.expert_selection_contract_sha256
             ),
         )
-    if getattr(args, "rl_engine", "ports") == "ports":
-        plan["rl_engine"] = "ports"
     _validate_plan(plan)
     _write_plan(plan_path, plan)
     print(f"prepared {plan_path}")
@@ -2279,26 +2259,6 @@ def _attest_local(plan: dict[str, Any]) -> None:
     from ..provenance import file_sha256, python_spec_sha256, verify_source_tree_sha256
 
     verify_source_tree_sha256(plan["source_sha256"])
-    miles = plan["miles"]
-    bundle_path = REPO_ROOT / miles["bundle_path"]
-    if (
-        bundle_path.is_symlink()
-        or not bundle_path.is_file()
-        or file_sha256(bundle_path) != miles["bundle_sha256"]
-    ):
-        raise HarnessError("Miles source bundle changed after plan preparation")
-    try:
-        listed = subprocess.run(
-            ["git", "bundle", "list-heads", str(bundle_path)],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=15,
-        ).stdout.splitlines()
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise HarnessError("cannot attest the Miles source bundle") from exc
-    if listed != [f"{miles['commit']} refs/heads/codex/qwen38-tito"]:
-        raise HarnessError("Miles source bundle head identity drifted")
     if _syncer_source_sha256() != plan["syncer_source_sha256"]:
         raise HarnessError("syncer source changed after the plan was prepared")
     tms_patch = plan.get("tms_preload_patch")
@@ -2561,8 +2521,6 @@ mv "$RUN/control/deploying.sha256" "$RUN/control/plan.sha256" 2>/dev/null || \
 
 
 def _host_setup_script(plan: dict[str, Any], gpus_per_node: int) -> str:
-    sglang = plan["sglang"]
-    miles = plan["miles"]
     learner = plan["learner"]
     if learner.get("model_manifest_sha256"):
         model_manifest_check = (
@@ -2627,46 +2585,11 @@ docker image inspect {shlex.quote(plan['docker_image'])} >/dev/null
 
 
 def _source_checkout_script(plan: dict[str, Any]) -> str:
-    """Miles/SGLang checkout steps; ``plan['rl_engine']`` selects the path."""
+    """Checkout steps of the pinned Miles and SGLang forks the plan names."""
 
-    rl_engine = plan.get("rl_engine", "legacy")
-    if rl_engine == "ports":
-        return _ports_source_checkout_script()
-    if rl_engine != "legacy":
-        raise HarnessError(f"unknown rl_engine {rl_engine!r}")
-    sglang = plan["sglang"]
-    miles = plan["miles"]
-    return f"""if [ ! -d "$RUN/miles/.git" ]; then
-  rmdir "$RUN/miles"
-  git clone --no-checkout {shlex.quote(MILES_REPOSITORY)} "$RUN/miles"
-fi
-MILES_BUNDLE="$RUN/source/{miles['bundle_path']}"
-test -f "$MILES_BUNDLE" && test ! -L "$MILES_BUNDLE"
-printf '%s  %s\n' {shlex.quote(miles['bundle_sha256'])} "$MILES_BUNDLE" | sha256sum --check -
-git -C "$RUN/miles" remote set-url origin {shlex.quote(MILES_REPOSITORY)}
-git -C "$RUN/miles" fetch --depth 1 origin {shlex.quote(miles['base_commit'])}
-git -C "$RUN/miles" checkout --detach {shlex.quote(miles['base_commit'])}
-git -C "$RUN/miles" bundle verify "$MILES_BUNDLE" >/dev/null
-git -C "$RUN/miles" fetch "$MILES_BUNDLE" {shlex.quote(miles['commit'])}
-git -C "$RUN/miles" checkout --detach {shlex.quote(miles['commit'])}
-test "$(git -C "$RUN/miles" rev-parse HEAD)" = {shlex.quote(miles['commit'])}
-test -z "$(git -C "$RUN/miles" status --porcelain --untracked-files=all)"
-if [ ! -d "$RUN/sglang/.git" ]; then
-  rmdir "$RUN/sglang"
-  git clone --no-checkout {shlex.quote(sglang['repository'])} "$RUN/sglang"
-fi
-git -C "$RUN/sglang" remote set-url origin {shlex.quote(SGLANG_REPOSITORY)}
-git -C "$RUN/sglang" fetch --depth 1 origin {shlex.quote(sglang['commit'])}
-git -C "$RUN/sglang" checkout --detach {shlex.quote(sglang['commit'])}
-"""
-
-
-def _ports_source_checkout_script() -> str:
     lines = []
-    for name, repository, commit in (
-        ("miles", MILES_NEXT_REPOSITORY, MILES_NEXT_COMMIT),
-        ("sglang", SGLANG_NEXT_REPOSITORY, SGLANG_NEXT_COMMIT),
-    ):
+    for name in ("miles", "sglang"):
+        repository, commit = plan[name]["repository"], plan[name]["commit"]
         path = f'"$RUN/{name}"'
         lines += [
             f'if [ ! -d "$RUN/{name}/.git" ]; then',
@@ -3315,9 +3238,6 @@ def _learner_argv(plan: dict[str, Any], learner_id: int) -> list[str]:
         )
     if learner.get("rl_offload_train"):
         values.append("--rl-offload-train")
-    # Absent key = legacy plan (digest-compatible); the learner defaults to
-    # ports, so the engine is always passed explicitly.
-    values.extend(("--rl-engine", plan.get("rl_engine", "legacy")))
     if learner.get("data_revision") is not None:
         values.extend(("--data-revision", learner["data_revision"]))
     if learner.get("expert_parallel") is not None:
@@ -3571,12 +3491,12 @@ done
     if learner.get("rl_model_recipe") == "deepseek-v4-flash":
         attention_env = ""
         expert_env = (
-            "--env YETO_DSV4_EXPERT_FULL=1 "
+            "--env YETO_DSV4_EXPERT_FULL_PORTS=1 "
             f"--env YETO_DSV4_EXPERT_FULL_COUNT={learner['expert_full_count']} "
             f"--env YETO_DSV4_EXPERT_FULL_LR={learner['expert_full_lr']} "
             "--env NVTE_GROUPED_LINEAR_SINGLE_PARAM=0 "
             if expert_full
-            else "--env YETO_DSV4_CLONE_ONLY_LORA=1 "
+            else "--env YETO_DSV4_CLONE_ONLY_LORA_PORTS=1 "
         )
         recipe_env = (
             "  --env YETO_DSV4_EXPERT_CLONE=1 "
@@ -4278,11 +4198,9 @@ def _run_algorithm_provenance(
     Taken from what the islands actually ran: every island's
     ``rl_engine_selected`` events must carry one and the same canonical
     AlgorithmSpec (whose hash matches the recorded one) and the same
-    unverified-mechanism allowances.  Legacy runs record none.
+    unverified-mechanism allowances.
     """
 
-    if plan.get("rl_engine", "legacy") != "ports":
-        return None, ()
     from .engine.algorithm import AlgorithmSpec
 
     seen: set[tuple[str, str, tuple[str, ...]]] = set()
@@ -4847,7 +4765,6 @@ def verify(plan_path: str | Path, export_dir: str | None = None) -> None:
             fragments=learner.get("fragments", 1),
             pipeline=learner.get("pipeline", 1),
             local_horizon=learner.get("local_horizon", 1),
-            rl_engine=plan.get("rl_engine", "legacy"),
             algorithm_spec=algorithm_spec,
             unverified_mechanisms=unverified,
         )

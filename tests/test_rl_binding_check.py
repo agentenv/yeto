@@ -6,7 +6,6 @@ from __future__ import annotations
 import pytest
 
 from yeto.rl.adapters.miles import binding
-from yeto.rl.adapters.miles.algorithm_flags import legacy_algorithm_argv
 from yeto.rl.engine import algorithm as alg
 from yeto.rl.engine.algorithm import AlgorithmSpec, SamplingSpec
 from yeto.rl.engine.cut import AlgorithmIdentity
@@ -48,12 +47,6 @@ def test_old_and_new_names_give_the_same_new_hash(name):
     from_old, from_new = build(old_name), build(neutral)
     assert from_old.dynamic_sampling_filter == neutral
     assert from_old.sha256() == from_new.sha256() == new_hash != old_hash
-
-
-def test_miles_argv_is_byte_identical_to_the_pre_rename_argv():
-    spec = SPECS["v1_bounded_r2"][0](B_OLD)
-    assert legacy_algorithm_argv(spec)[2:] == ["--dynamic-sampling-filter-path", B_OLD]
-    assert binding.filter_argv(alg.STOCK_NONZERO_STD_FILTER) == ["--dynamic-sampling-filter-path", S_OLD]
 
 
 def test_old_version_island_is_refused():

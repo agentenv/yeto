@@ -39,6 +39,7 @@ from . import delivery
 from .gpu_spec import ClusterSpec, parse_gpu_spec
 from .models import MODEL_WEIGHT_GB
 from .rl.engine.run_flags import CLI, rl_forward_pairs, rl_option, rl_option_pairs
+from .rl.engine.selection import FULL_PARAMETER_SYNC_PRESET, SAO_STREAMING_SYNC_PRESET
 
 SYNCER_PORT = 29400
 # rl-algo-critic-family 4.2.1 (design D4 plan a): a critic algorithm runs a
@@ -668,18 +669,18 @@ def _syncer_quorum_timeout(args) -> str:
 
 def rl_dense_sweep(args) -> bool:
     return (getattr(args, "training_mode", "sft") == "rl"
-            and getattr(args, "rl_sync_preset", None) == "dense-full")
+            and getattr(args, "rl_sync_preset", None) == FULL_PARAMETER_SYNC_PRESET)
 
 
 def rl_sao_streaming(args) -> bool:
     return (getattr(args, "training_mode", "sft") == "rl"
-            and getattr(args, "rl_sync_preset", None) == "sao-streaming-full")
+            and getattr(args, "rl_sync_preset", None) == SAO_STREAMING_SYNC_PRESET)
 
 
 def _syncer_profile_binding(args) -> str:
     """Full-parameter presets bind every HELLO to the syncer's semantic profile.
 
-    dense-full adds strict P-fragment policy sweeps; sao-streaming-full adds the
+    full-parameter adds strict P-fragment policy sweeps; sao-streaming-full adds the
     frozen contract's timeouts and the publishable final checkpoint."""
     if rl_dense_sweep(args):
         return f" --policy-sweep-fragments {args.fragments} --require-profile-binding"
@@ -1365,7 +1366,7 @@ def resolve_default_rl_image(args) -> None:
             return
         from .rl import default_rl_image
 
-        args.rl_image = default_rl_image(getattr(args, "rl_engine", "ports"))
+        args.rl_image = default_rl_image()
 
 
 def prepare_launch_args(
@@ -1684,6 +1685,13 @@ def _rl_backend_image_ok(args) -> bool:
     return bool(check and check(getattr(args, "rl_image", None) or ""))
 
 
+def _miles_overlay():
+    """The Miles adapter's overlay module (source patches on the ~/miles checkout)."""
+    from .rl.engine import backends
+
+    return backends.module("overlay", "miles")
+
+
 def _rl_backend_module(args, role: str):
     """Adapter module for ``role`` of the selected training backend (decoupling 5.4).
 
@@ -1695,7 +1703,7 @@ def _rl_backend_module(args, role: str):
     return backends.module(role, getattr(args, "rl_backend", None) or backends.DEFAULT_BACKEND)
 
 
-def _prepare_ports_algorithm(args, rl_engine: str) -> None:
+def _prepare_ports_algorithm(args) -> None:
     """rl-algorithm-capabilities D8/D9/D11, before any cloud or GPU work.
 
     ports: build the run's AlgorithmSpec once (``--rl-algorithm-spec`` or the
@@ -1705,7 +1713,7 @@ def _prepare_ports_algorithm(args, rl_engine: str) -> None:
     allowance (a launched run always has outer sync, design D11); keep the
     canonical JSON + expected hash every island receives. An island whose
     learner absorbs extra argv into a different hash is refused there
-    (``rl_algorithm_mismatch``). legacy: the ports-only options are refused.
+    (``rl_algorithm_mismatch``).
     """
 
     from .rl.engine.algorithm import (
@@ -1716,20 +1724,13 @@ def _prepare_ports_algorithm(args, rl_engine: str) -> None:
     )
     from .rl.engine.capabilities import CapabilityMismatch
 
-    if rl_engine != "ports" and (
-        getattr(args, "rl_placement", "colocated") != "colocated"
-        or (getattr(args, "rl_standby_gpus", 0) or 0) != 0
-    ):
-        raise ValueError("--rl-placement/--rl-standby-gpus only apply to --rl-engine ports")
-    _check_ports_infra_switches(args, rl_engine)
+    _check_ports_infra_switches(args)
     steps = getattr(args, "rl_optimizer_steps", 1)
     if steps is None:
         steps = 1
     if type(steps) is not int or steps < 1:
         raise ValueError(f"--rl-optimizer-steps must be a positive int (got {steps!r})")
     if steps != 1:
-        if rl_engine != "ports":
-            raise ValueError("--rl-optimizer-steps > 1 only applies to --rl-engine ports")
         samples = int(args.rollout_batch_size) * int(args.n_samples_per_prompt)
         if samples % steps:
             # run_config: rollout_batch_size * n_samples == global_batch * optimizer_steps
@@ -1737,12 +1738,8 @@ def _prepare_ports_algorithm(args, rl_engine: str) -> None:
                 f"--rl-optimizer-steps {steps} must divide --rollout-batch-size * "
                 f"--n-samples-per-prompt ({samples}) into equal optimizer batches"
             )
-    if rl_engine != "ports" and getattr(args, "rl_single_island_no_sync", False):
-        raise ValueError("--rl-single-island-no-sync only applies to --rl-engine ports")
     try:
-        spec = resolve_ports_algorithm(args, rl_engine=rl_engine)
-        if spec is None:
-            return
+        spec = resolve_ports_algorithm(args)
         problems = spec.rejections()
         # Run-configuration checks of the follow-up changes and the Miles
         # adapter's declaration, before any cloud resource exists (the learner
@@ -1908,7 +1905,7 @@ NODE0_LOCAL_CHECKPOINT_WARNING = (
 )
 
 
-def _check_resume_launch_flags(args, rl_engine: str) -> bool:
+def _check_resume_launch_flags(args) -> bool:
     """rl-resume-from-checkpoint: True when ``--rl-checkpoint-store`` is the non-elastic
     resume store (``--rl-single-island-no-sync``, ports). Validates the cadence flags."""
     store = getattr(args, "rl_checkpoint_store", None)
@@ -1929,8 +1926,8 @@ def _check_resume_launch_flags(args, rl_engine: str) -> bool:
         return False
     if not store:
         return False
-    if not getattr(args, "rl_single_island_no_sync", False) or rl_engine != "ports":
-        raise ValueError("--rl-checkpoint-store without --rl-elastic needs --rl-engine ports and "
+    if not getattr(args, "rl_single_island_no_sync", False):
+        raise ValueError("--rl-checkpoint-store without --rl-elastic needs "
                          "--rl-single-island-no-sync (multi-island resume: rl-resume-from-checkpoint 3.3)")
     rl_checkpoint_store_plan(args)  # validates the form
     return True
@@ -2017,7 +2014,7 @@ EVAL_ISLAND_DATA_PATH = "~/yeto-rl/eval-heldout.jsonl"
 EVAL_INLINE_MAX_BYTES = 96 * 1024  # shipped inline in the run command (ARG_MAX headroom)
 
 
-def _check_ports_eval(args, rl_engine: str) -> int | None:
+def _check_ports_eval(args) -> int | None:
     """``--rl-eval-*``: the launcher's ONE eval source (ports LoRA heldout eval).
 
     Returns the eval interval (None when eval is off) — the same value the
@@ -2034,8 +2031,6 @@ def _check_ports_eval(args, rl_engine: str) -> int | None:
         if given:
             raise ValueError(", ".join(given) + " need --rl-eval-interval")
         return None
-    if rl_engine != "ports":
-        raise ValueError("--rl-eval-interval only applies to --rl-engine ports")
     if type(interval) is not int or interval <= 0:
         raise ValueError(f"--rl-eval-interval must be a positive int (got {interval!r})")
     missing = [flag for name, flag in _EVAL_LAUNCH_FLAGS if getattr(args, name, None) is None]
@@ -2067,20 +2062,18 @@ def _check_ports_eval(args, rl_engine: str) -> int | None:
     return interval
 
 
-def _check_ports_infra_switches(args, rl_engine: str) -> None:
-    """``--rl-overlap-eval`` / ``--rl-elastic`` (rl-infra-spec 2.3 / 3.x): opt-in,
-    ports-only; the elastic manifest is read here so a bad file fails locally."""
+def _check_ports_infra_switches(args) -> None:
+    """``--rl-overlap-eval`` / ``--rl-elastic`` (rl-infra-spec 2.3 / 3.x): opt-in;
+    the elastic manifest is read here so a bad file fails locally."""
 
     from .rl.engine.execution_profile import check_elastic_placement, check_overlap_eval
 
     from .rl.engine.execution_profile import UNKNOWN
 
     placement = getattr(args, "rl_placement", "colocated") or "colocated"
-    _check_test_tool_delay(args, rl_engine)
-    eval_interval = _check_ports_eval(args, rl_engine)
+    _check_test_tool_delay(args)
+    eval_interval = _check_ports_eval(args)
     if getattr(args, "rl_overlap_eval", False):
-        if rl_engine != "ports":
-            raise ValueError("--rl-overlap-eval only applies to --rl-engine ports")
         # Same check the island's execution profile applies, run before any
         # resource is provisioned, on the values the launcher really forwards:
         # --rl-placement is the island's launch.placement.kind and
@@ -2089,35 +2082,27 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
         # learner never sets it), so that one stays with the island's check.
         check_overlap_eval(placement_kind=placement, eval_interval=eval_interval,
                            eval_uses_snapshots=UNKNOWN)
-    if getattr(args, "rl_debug_dump", False) and rl_engine != "ports":
-        raise ValueError("--rl-debug-dump needs --rl-engine ports")
-    if getattr(args, "rl_observe_timeline", False) and rl_engine != "ports":
-        raise ValueError("--rl-observe-timeline only applies to --rl-engine ports")
     sample_s = getattr(args, "rl_resource_sample_interval", None)
-    if sample_s is not None and (rl_engine != "ports" or sample_s < 0):
-        raise ValueError("--rl-resource-sample-interval needs --rl-engine ports and a value >= 0")
+    if sample_s is not None and sample_s < 0:
+        raise ValueError("--rl-resource-sample-interval needs a value >= 0")
     _rl_backend_module(args, "elastic_hook").check_recommend_flags(args)
     dropout = getattr(args, "rl_lora_dropout", None)
-    if dropout is not None and (rl_engine != "ports" or not 0.0 <= dropout < 1.0):
-        raise ValueError("--rl-lora-dropout needs --rl-engine ports and a value in [0, 1)")
+    if dropout is not None and not 0.0 <= dropout < 1.0:
+        raise ValueError("--rl-lora-dropout needs a value in [0, 1)")
     expert_rank = getattr(args, "rl_lora_expert_rank", None)
-    if expert_rank is not None and (rl_engine != "ports" or expert_rank < 0):
-        raise ValueError("--rl-lora-expert-rank needs --rl-engine ports and a value >= 0")
+    if expert_rank is not None and expert_rank < 0:
+        raise ValueError("--rl-lora-expert-rank needs a value >= 0")
     ref_load = getattr(args, "rl_megatron_ref_load", None)
-    if ref_load is not None and (rl_engine != "ports" or not ref_load.startswith("/")
+    if ref_load is not None and (not ref_load.startswith("/")
                                  or any(c.isspace() for c in ref_load)):
-        raise ValueError("--rl-megatron-ref-load needs --rl-engine ports and an absolute path "
-                         "without whitespace")
-    if getattr(args, "rl_boot_only", False) and (
-            rl_engine != "ports" or not getattr(args, "rl_single_island_no_sync", False)):
-        raise ValueError("--rl-boot-only needs --rl-engine ports and --rl-single-island-no-sync")
+        raise ValueError("--rl-megatron-ref-load needs an absolute path without whitespace")
+    if getattr(args, "rl_boot_only", False) and not getattr(args, "rl_single_island_no_sync", False):
+        raise ValueError("--rl-boot-only needs --rl-single-island-no-sync")
     pre_run = getattr(args, "rl_island_pre_run", None)
     if pre_run is not None:
-        if rl_engine != "ports" or not getattr(args, "rl_single_island_no_sync", False):
-            raise ValueError("--rl-island-pre-run needs --rl-engine ports and --rl-single-island-no-sync")
+        if not getattr(args, "rl_single_island_no_sync", False):
+            raise ValueError("--rl-island-pre-run needs --rl-single-island-no-sync")
         args.rl_island_pre_run_script = read_island_pre_run(pre_run)
-    if getattr(args, "rl_deterministic_trainer", False) and rl_engine != "ports":
-        raise ValueError("--rl-deterministic-trainer only applies to --rl-engine ports")
     given = [flag for name, flag in _ELASTIC_LAUNCH_FLAGS + _ELASTIC_PAUSE_FLAGS
              if getattr(args, name, None) is not None]
     if getattr(args, "rl_elastic_tool_wait_board", False):
@@ -2126,7 +2111,7 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
         given.append("--rl-elastic-trainer-edges")
     if getattr(args, "rl_elastic_accept_rebind", False):
         given.append("--rl-elastic-accept-rebind")
-    resume_store = _check_resume_launch_flags(args, rl_engine)
+    resume_store = _check_resume_launch_flags(args)
     if getattr(args, "rl_checkpoint_store", None) and not resume_store:
         given.append("--rl-checkpoint-store")
     if getattr(args, "rl_elastic_declare_cells", False):
@@ -2162,8 +2147,6 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
         if given:
             raise ValueError(", ".join(given) + " need --rl-elastic")
         return
-    if rl_engine != "ports":
-        raise ValueError("--rl-elastic only applies to --rl-engine ports")
     missing = [flag for name, flag in _ELASTIC_LAUNCH_FLAGS
                if name not in ("rl_elastic_attestation", "rl_elastic_cells")
                and not getattr(args, name, None)]
@@ -2202,15 +2185,13 @@ def _check_ports_infra_switches(args, rl_engine: str) -> None:
         )
 
 
-def _check_test_tool_delay(args, rl_engine: str) -> None:
+def _check_test_tool_delay(args) -> None:
     """``--rl-test-tool-delay-s`` (TEST ONLY): the tool-wait workload's delay."""
     from .rl.tool_wait_workload import GENERATE_PATH
 
     delay = getattr(args, "rl_test_tool_delay_s", None)
     if delay is None:
         return
-    if rl_engine != "ports":
-        raise ValueError("--rl-test-tool-delay-s only applies to --rl-engine ports")
     if not delay > 0:
         raise ValueError("--rl-test-tool-delay-s must be positive")
     if getattr(args, "custom_generate_function_path", None) != GENERATE_PATH:
@@ -2343,8 +2324,6 @@ def _ports_infra_flags(args) -> tuple[str, str]:
 def _ports_algorithm_flags(args) -> tuple[str, str]:
     """(run prelude, learner flags) carrying the algorithm to a ports island."""
 
-    if getattr(args, "rl_engine", "ports") != "ports":
-        return "", ""
     expected = getattr(args, "rl_expected_algorithm_sha256", None)
     if expected is None:
         return "", ""
@@ -2438,8 +2417,6 @@ def _prepare_sao_streaming(args, *, num_islands: int) -> None:
     from .rl.sao_streaming_manifest import load_sao_streaming_manifest
 
     problems = []
-    if getattr(args, "rl_engine", "ports") != "ports":
-        problems.append("--rl-engine ports")
     if getattr(args, "rl_placement", "colocated") != "fixed-partition":
         problems.append("--rl-placement fixed-partition (dedicated rollout GPUs)")
     if not getattr(args, "rl_sao_contracts", None):
@@ -2498,14 +2475,12 @@ def sao_contract_mounts(args, learner_id: int) -> dict[str, str]:
 
 
 def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
-    """dense-full (P0-D8): one actor role swept as whole-model fragments.
+    """full-parameter preset (P0-D8): one actor role swept as whole-model fragments.
 
     The syncer's strict policy-sweep profile fixes its merge semantics
     (every island per round, no grace, serial rounds, plain averaging);
     the fragment count P comes from the Miles layout probe."""
     problems = []
-    if getattr(args, "rl_engine", "ports") != "ports":
-        problems.append("--rl-engine ports")
     if getattr(args, "rl_placement", "colocated") != "fixed-partition":
         problems.append("--rl-placement fixed-partition (dedicated rollout GPUs)")
     if not re.fullmatch(r"[0-9a-f]{64}", getattr(args, "rl_parameter_layout_sha256", None) or ""):
@@ -2519,9 +2494,9 @@ def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
     if island_scheduling_mode(args) != "legacy":
         problems.append("--rl-island-scheduling legacy (no fragment frames in elastic mode)")
     if rl_needs_critic(args):
-        problems.append("a critic-free algorithm (dense-full trains the actor only)")
+        problems.append("a critic-free algorithm (the strict sweep trains the actor only)")
     if problems:
-        raise ValueError("--rl-sync-preset dense-full requires " + "; ".join(problems))
+        raise ValueError(f"--rl-sync-preset {FULL_PARAMETER_SYNC_PRESET} requires " + "; ".join(problems))
     args.quorum = num_islands
     args.grace_ms = 0
     args.pipeline = 1
@@ -2585,23 +2560,19 @@ def _prepare_rl_args(
 
     from .models import resolve_model_kind
 
-    rl_engine = getattr(args, "rl_engine", "ports")
-    if rl_engine not in ("legacy", "ports"):
-        raise ValueError(f"--rl-engine must be legacy or ports, got {rl_engine!r}")
-    if rl_engine == "ports":
-        from .rl.engine.selection import require_ports_supported
+    from .rl.engine.selection import require_ports_supported
 
-        # Rejected before any cloud or GPU work (spec rl-engine-selection).
-        require_ports_supported(
-            sync_preset=args.rl_sync_preset,
-            model_kind=resolve_model_kind(args.model, args.model_kind),
-            tuning=args.tuning,
-            expert_full_count=getattr(args, "expert_full_count", 0) or 0,
-            rollout_num_gpus=getattr(args, "rollout_num_gpus", None),
-            placement=getattr(args, "rl_placement", "colocated"),
-            island_scheduling=getattr(args, "rl_island_scheduling", "legacy"),
-        )
-    _prepare_ports_algorithm(args, rl_engine)
+    # Rejected before any cloud or GPU work (spec rl-engine-selection).
+    require_ports_supported(
+        sync_preset=args.rl_sync_preset,
+        model_kind=resolve_model_kind(args.model, args.model_kind),
+        tuning=args.tuning,
+        expert_full_count=getattr(args, "expert_full_count", 0) or 0,
+        rollout_num_gpus=getattr(args, "rollout_num_gpus", None),
+        placement=getattr(args, "rl_placement", "colocated"),
+        island_scheduling=getattr(args, "rl_island_scheduling", "legacy"),
+    )
+    _prepare_ports_algorithm(args)
     if resolve_model_kind(args.model, args.model_kind) != "causal-lm":
         raise ValueError("RL v0 supports only causal language models")
     if args.tuning != "lora":
@@ -2639,7 +2610,7 @@ def _prepare_rl_args(
         )
     if not args.inner_lr > 0:
         raise ValueError(f"RL requires --inner-lr > 0 (got {args.inner_lr})")
-    if args.rl_sync_preset in ("strict-avg", "dense-full"):
+    if args.rl_sync_preset in ("strict-avg", FULL_PARAMETER_SYNC_PRESET):
         if args.local_rl_rounds_per_sync != 1:
             raise ValueError(f"--rl-sync-preset {args.rl_sync_preset} requires "
                              "--local-rl-rounds-per-sync 1 (strict sweep H=1)")
@@ -3046,9 +3017,10 @@ def _prepare_rl_args(
     if getattr(args, "learner_image", None) is not None:
         raise ValueError("RL uses digest-pinned --rl-image, not --learner-image")
     args.rl_total_fragment_steps = args.total_steps
-    if args.rl_sync_preset != "dense-full" and getattr(args, "rl_parameter_layout_sha256", None):
-        raise ValueError("--rl-parameter-layout-sha256 only applies to --rl-sync-preset dense-full")
-    if args.rl_sync_preset != "sao-streaming-full" and getattr(args, "rl_sao_contracts", None):
+    if args.rl_sync_preset != FULL_PARAMETER_SYNC_PRESET and getattr(args, "rl_parameter_layout_sha256", None):
+        raise ValueError("--rl-parameter-layout-sha256 only applies to "
+                         f"--rl-sync-preset {FULL_PARAMETER_SYNC_PRESET}")
+    if args.rl_sync_preset != SAO_STREAMING_SYNC_PRESET and getattr(args, "rl_sao_contracts", None):
         raise ValueError("--rl-sao-contracts only applies to --rl-sync-preset sao-streaming-full")
     if args.rl_sync_preset == "decoupled":
         if args.experimental_rl_sync:
@@ -3068,9 +3040,9 @@ def _prepare_rl_args(
         args.merge_alpha = 0.0
         args.wire_dtype = "f32"
         args.rl_total_fragment_steps = args.total_steps * args.fragments
-    elif args.rl_sync_preset == "dense-full":
+    elif args.rl_sync_preset == FULL_PARAMETER_SYNC_PRESET:
         _prepare_dense_full_sweep(args, num_islands=len(specs))
-    elif args.rl_sync_preset == "sao-streaming-full":
+    elif args.rl_sync_preset == SAO_STREAMING_SYNC_PRESET:
         _prepare_sao_streaming(args, num_islands=len(specs))
     elif not args.experimental_rl_sync:
         args.fragments = 1
@@ -3098,8 +3070,7 @@ def _prepare_rl_args(
         _rl_checkpoint_mount(args.rl_completed_groups_path)
 
     provenance = getattr(args, "_provenance", None)
-    if provenance and rl_engine == "ports":
-        # Legacy provenance stays byte-identical; ports is recorded.
+    if provenance:
         provenance["rl_engine"] = "ports"
     if provenance:
         for name in ("model", "dataset"):
@@ -3523,12 +3494,9 @@ def registry_login_for(args, environ=None) -> dict[str, str] | None:
     from .rl import default_rl_image
 
     environ = os.environ if environ is None else environ
-    engine = getattr(args, "rl_engine", "ports") or "ports"
     # before prepare_launch_args (the head CLI) --rl-image may still be unset
-    image = getattr(args, "rl_image", None) or default_rl_image(engine)
+    image = getattr(args, "rl_image", None) or default_rl_image()
     explicit = bool(getattr(args, "rl_image_private", False))
-    if not explicit and engine != "ports":
-        return None
     login = registry_credentials(image, environ)
     if login is None and explicit:
         login = docker_config_login(image)
@@ -3547,158 +3515,113 @@ def _sky_docker_login_config(login: dict[str, str]):
     return DockerLoginConfig.from_env_vars(login)
 
 
-def _miles_source_setup(rl_engine: str = "ports", overlay: str | None = None) -> tuple[str, str]:
-    """Return the (miles_setup, sglang_setup) remote steps for ``rl_engine``.
+def _miles_source_setup(overlay: str | None = None) -> tuple[str, str]:
+    """Return the (miles_setup, sglang_setup) remote steps of the pinned Miles/SGLang forks.
 
-    ``overlay`` (ports only, default None = off): a :mod:`yeto.rl.adapters.miles.overlay`
+    ``overlay`` (default None = off): a :mod:`yeto.rl.adapters.miles.overlay`
     patch applied to the image's ~/miles after the checkout checks.
     """
 
     from .rl import (
-        MILES_BASE_COMMIT,
-        MILES_BUNDLE_PATH,
-        MILES_BUNDLE_SHA256,
-        MILES_COMMIT,
         MILES_NEXT_COMMIT,
         MILES_NEXT_IMAGE_MANIFEST,
         MILES_NEXT_IMAGE_SGLANG_ROOT,
         MILES_NEXT_REPOSITORY,
         MILES_PEFT_VERSION,
-        MILES_REPOSITORY,
-        SGLANG_COMMIT,
         SGLANG_NEXT_COMMIT,
         SGLANG_NEXT_REPOSITORY,
-        SGLANG_REPOSITORY,
     )
 
-    if overlay is not None and rl_engine != "ports":
-        raise ValueError("a Miles overlay needs the ports engine")
-    if rl_engine == "ports":
-        from .rl.adapters.miles.overlay import overlay_setup
-
-        def checkout(
-            path: str, repository: str, commit: str, refreshed_flag: str = ""
-        ) -> str:
-            repo = shlex.quote(repository)
-            # ``refreshed_flag``: shell variable set to 1 when the checkout
-            # had to move to the pin (so the caller knows the image's
-            # install of it can no longer be trusted as-is).
-            mark = f"{refreshed_flag}=1\n" if refreshed_flag else ""
-            return (
-                f"if [ ! -d {path}/.git ]; then git clone --no-checkout "
-                f"{repo} {path}; fi\n"
-                f"git -C {path} remote set-url origin {repo}\n"
-                f'test "$(git -C {path} config --get remote.origin.url)" = '
-                f"{repo}\n"
-                # MILES_NEXT_IMAGE already has the pinned fork checked out
-                # at ~/miles (/root/miles); only fetch when it is not HEAD.
-                f'if [ "$(git -C {path} rev-parse HEAD 2>/dev/null)" != '
-                f"{commit} ]; then\n"
-                f"git -C {path} fetch --depth 1 origin {commit}\n"
-                f"git -C {path} checkout --detach {commit}\n"
-                + mark
-                + "fi\n"
-                f'test "$(git -C {path} rev-parse HEAD)" = {commit}\n'
-                f'test "$(git -C {path} rev-parse --abbrev-ref HEAD)" = HEAD\n'
-                f'test -z "$(git -C {path} status --porcelain '
-                '--untracked-files=all)"\n'
-            )
-
-        # MILES_NEXT_IMAGE ships the pinned SGLang fork installed editable
-        # at /sgl-workspace/sglang: ~/sglang (first on the island's
-        # PYTHONPATH) becomes a link to it.  Any other image, or an existing
-        # ~/sglang directory, gets the clone + install at ~/sglang as before.
-        image_root = shlex.quote(MILES_NEXT_IMAGE_SGLANG_ROOT)
-        sglang_in_image = (
-            f'{{ [ ! -e ~/sglang ] || [ "$(readlink ~/sglang)" = {image_root} ]; }} && '
-            f'[ "$(git -C {image_root} rev-parse HEAD 2>/dev/null)" = '
-            f"{SGLANG_NEXT_COMMIT} ] && "
-            f'[ "$(git -C {image_root} config --get remote.origin.url)" = '
-            f"{shlex.quote(SGLANG_NEXT_REPOSITORY)} ] && "
-            f'[ -z "$(git -C {image_root} status --porcelain '
-            '--untracked-files=all)" ] && '
-            "python3 -c 'import os, sys, sglang; sys.exit(0 if os.path.realpath("
-            f'sglang.__file__).startswith("{MILES_NEXT_IMAGE_SGLANG_ROOT}/python/'
-            "\") else 1)'"
-        )
-        # MILES_NEXT_IMAGE also ships the pinned Miles fork installed
-        # editable at /root/miles (= ~/miles) and records it in
-        # MILES_NEXT_IMAGE_MANIFEST.  When ~/miles was already at the pin
-        # (no fetch above) and the manifest names that commit at that path,
-        # the image's install is kept: the editable re-install is skipped
-        # and only a missing/other peft is (re)installed.  Any other image,
-        # a moved checkout, or a manifest mismatch gets the full install.
-        manifest = shlex.quote(MILES_NEXT_IMAGE_MANIFEST)
-        miles_in_image = (
-            '[ "$MILES_REFRESHED" = 0 ] && '
-            f"python3 -c 'import json, os, sys; "
-            f'm = json.load(open("{MILES_NEXT_IMAGE_MANIFEST}"))["miles"]; '
-            f'sys.exit(0 if m["commit"] == "{MILES_NEXT_COMMIT}" and '
-            'os.path.realpath(m["path"]) == '
-            "os.path.realpath(os.path.expanduser(\"~/miles\")) else 1)' "
-            "2>/dev/null"
-        )
-        peft_ok = (
-            "python3 -c 'import peft, sys; "
-            f"sys.exit(0 if peft.__version__ == \"{MILES_PEFT_VERSION}\" else 1)' "
-            "2>/dev/null"
-        )
+    def checkout(
+        path: str, repository: str, commit: str, refreshed_flag: str = ""
+    ) -> str:
+        repo = shlex.quote(repository)
+        # ``refreshed_flag``: shell variable set to 1 when the checkout
+        # had to move to the pin (so the caller knows the image's
+        # install of it can no longer be trusted as-is).
+        mark = f"{refreshed_flag}=1\n" if refreshed_flag else ""
         return (
-            "set -e\n"
-            "MILES_REFRESHED=0\n"
-            + checkout(
-                "~/miles", MILES_NEXT_REPOSITORY, MILES_NEXT_COMMIT, "MILES_REFRESHED"
-            )
-            + f"if {miles_in_image}; then\n"
-            f"echo \"[yeto-setup] image provides miles {MILES_NEXT_COMMIT} "
-            f'({manifest}); editable install kept"\n'
-            f"{peft_ok} || python3 -m pip install -q 'peft=={MILES_PEFT_VERSION}'\n"
-            "else\n"
-            "python3 -m pip install -q --no-deps -e ~/miles "
-            f"'peft=={MILES_PEFT_VERSION}'\n"
-            "fi"
-            + (f"\n{overlay_setup(overlay)}" if overlay else ""),
-            f"if {sglang_in_image}; then\n"
-            f"ln -sfn {image_root} ~/sglang\n"
-            f"echo '[yeto-setup] image provides sglang {SGLANG_NEXT_COMMIT}'\n"
-            "else\n"
-            + checkout("~/sglang", SGLANG_NEXT_REPOSITORY, SGLANG_NEXT_COMMIT)
-            + "python3 -m pip install -q --no-deps -e ~/sglang/python\n"
-            "fi",
+            f"if [ ! -d {path}/.git ]; then git clone --no-checkout "
+            f"{repo} {path}; fi\n"
+            f"git -C {path} remote set-url origin {repo}\n"
+            f'test "$(git -C {path} config --get remote.origin.url)" = '
+            f"{repo}\n"
+            # MILES_NEXT_IMAGE already has the pinned fork checked out
+            # at ~/miles (/root/miles); only fetch when it is not HEAD.
+            f'if [ "$(git -C {path} rev-parse HEAD 2>/dev/null)" != '
+            f"{commit} ]; then\n"
+            f"git -C {path} fetch --depth 1 origin {commit}\n"
+            f"git -C {path} checkout --detach {commit}\n"
+            + mark
+            + "fi\n"
+            f'test "$(git -C {path} rev-parse HEAD)" = {commit}\n'
+            f'test "$(git -C {path} rev-parse --abbrev-ref HEAD)" = HEAD\n'
+            f'test -z "$(git -C {path} status --porcelain '
+            '--untracked-files=all)"\n'
         )
-    if rl_engine != "legacy":
-        raise ValueError(f"unknown rl_engine {rl_engine!r}")
-    miles_setup = (
+
+    # MILES_NEXT_IMAGE ships the pinned SGLang fork installed editable
+    # at /sgl-workspace/sglang: ~/sglang (first on the island's
+    # PYTHONPATH) becomes a link to it.  Any other image, or an existing
+    # ~/sglang directory, gets the clone + install at ~/sglang as before.
+    image_root = shlex.quote(MILES_NEXT_IMAGE_SGLANG_ROOT)
+    sglang_in_image = (
+        f'{{ [ ! -e ~/sglang ] || [ "$(readlink ~/sglang)" = {image_root} ]; }} && '
+        f'[ "$(git -C {image_root} rev-parse HEAD 2>/dev/null)" = '
+        f"{SGLANG_NEXT_COMMIT} ] && "
+        f'[ "$(git -C {image_root} config --get remote.origin.url)" = '
+        f"{shlex.quote(SGLANG_NEXT_REPOSITORY)} ] && "
+        f'[ -z "$(git -C {image_root} status --porcelain '
+        '--untracked-files=all)" ] && '
+        "python3 -c 'import os, sys, sglang; sys.exit(0 if os.path.realpath("
+        f'sglang.__file__).startswith("{MILES_NEXT_IMAGE_SGLANG_ROOT}/python/'
+        "\") else 1)'"
+    )
+    # MILES_NEXT_IMAGE also ships the pinned Miles fork installed
+    # editable at /root/miles (= ~/miles) and records it in
+    # MILES_NEXT_IMAGE_MANIFEST.  When ~/miles was already at the pin
+    # (no fetch above) and the manifest names that commit at that path,
+    # the image's install is kept: the editable re-install is skipped
+    # and only a missing/other peft is (re)installed.  Any other image,
+    # a moved checkout, or a manifest mismatch gets the full install.
+    manifest = shlex.quote(MILES_NEXT_IMAGE_MANIFEST)
+    miles_in_image = (
+        '[ "$MILES_REFRESHED" = 0 ] && '
+        f"python3 -c 'import json, os, sys; "
+        f'm = json.load(open("{MILES_NEXT_IMAGE_MANIFEST}"))["miles"]; '
+        f'sys.exit(0 if m["commit"] == "{MILES_NEXT_COMMIT}" and '
+        'os.path.realpath(m["path"]) == '
+        "os.path.realpath(os.path.expanduser(\"~/miles\")) else 1)' "
+        "2>/dev/null"
+    )
+    peft_ok = (
+        "python3 -c 'import peft, sys; "
+        f"sys.exit(0 if peft.__version__ == \"{MILES_PEFT_VERSION}\" else 1)' "
+        "2>/dev/null"
+    )
+    return (
         "set -e\n"
-        f"MILES_BUNDLE=~/sky_workdir/{MILES_BUNDLE_PATH}\n"
-        'test -f "$MILES_BUNDLE" && test ! -L "$MILES_BUNDLE"\n'
-        f"printf '%s  %s\\n' {MILES_BUNDLE_SHA256} \"$MILES_BUNDLE\" "
-        "| sha256sum --check -\n"
-        f"if [ ! -d ~/miles/.git ]; then git clone --no-checkout "
-        f"{shlex.quote(MILES_REPOSITORY)} ~/miles; fi\n"
-        # An image may ship its own Miles clone from another remote (the
-        # public radixark/miles images do); the runtime verifier requires
-        # the pinned repository as origin.
-        f"git -C ~/miles remote set-url origin {shlex.quote(MILES_REPOSITORY)}\n"
-        f"git -C ~/miles fetch --depth 1 origin {MILES_BASE_COMMIT}\n"
-        f"git -C ~/miles checkout --detach {MILES_BASE_COMMIT}\n"
-        'git -C ~/miles bundle verify "$MILES_BUNDLE" >/dev/null\n'
-        f'git -C ~/miles fetch "$MILES_BUNDLE" {MILES_COMMIT}\n'
-        f"git -C ~/miles checkout --detach {MILES_COMMIT}\n"
-        f'test "$(git -C ~/miles rev-parse HEAD)" = {MILES_COMMIT}\n'
-        'test -z "$(git -C ~/miles status --porcelain --untracked-files=all)"\n'
-        f"python3 -m pip install -q --no-deps -e ~/miles "
-        f"'peft=={MILES_PEFT_VERSION}'"
+        "MILES_REFRESHED=0\n"
+        + checkout(
+            "~/miles", MILES_NEXT_REPOSITORY, MILES_NEXT_COMMIT, "MILES_REFRESHED"
+        )
+        + f"if {miles_in_image}; then\n"
+        f"echo \"[yeto-setup] image provides miles {MILES_NEXT_COMMIT} "
+        f'({manifest}); editable install kept"\n'
+        f"{peft_ok} || python3 -m pip install -q 'peft=={MILES_PEFT_VERSION}'\n"
+        "else\n"
+        "python3 -m pip install -q --no-deps -e ~/miles "
+        f"'peft=={MILES_PEFT_VERSION}'\n"
+        "fi"
+        + (f"\n{_miles_overlay().overlay_setup(overlay)}" if overlay else ""),
+        f"if {sglang_in_image}; then\n"
+        f"ln -sfn {image_root} ~/sglang\n"
+        f"echo '[yeto-setup] image provides sglang {SGLANG_NEXT_COMMIT}'\n"
+        "else\n"
+        + checkout("~/sglang", SGLANG_NEXT_REPOSITORY, SGLANG_NEXT_COMMIT)
+        + "python3 -m pip install -q --no-deps -e ~/sglang/python\n"
+        "fi",
     )
-    sglang_setup = (
-        f"if [ ! -d ~/sglang/.git ]; then git clone --no-checkout "
-        f"{shlex.quote(SGLANG_REPOSITORY)} ~/sglang; fi\n"
-        f"git -C ~/sglang fetch --depth 1 {shlex.quote(SGLANG_REPOSITORY)} "
-        f"{SGLANG_COMMIT}\n"
-        f"git -C ~/sglang checkout --detach {SGLANG_COMMIT}\n"
-        "python3 -m pip install -q --no-deps -e ~/sglang/python"
-    )
-    return miles_setup, sglang_setup
 
 
 # --- Stock Codex run bundle (ports engine; design R-SCOPE / T3 G2) ---------------
@@ -3942,11 +3865,6 @@ def codex_harness_launch(args, environ=None) -> tuple[str, dict[str, str], dict[
         args, environ, custom_agent == CODEX_OPENENV_AGENT or (synthetic and custom_agent is None))
     if custom_agent not in SIGNED_CODEX_AGENTS:
         return None
-    if getattr(args, "rl_engine", "ports") != "ports":
-        raise ValueError(
-            "the signed Codex harness requires the direct SSH harness so its "
-            "Linux binary can be attested and frozen into the run bundle"
-        )
     bundle_dir = getattr(args, "codex_bundle_dir", None) or environ.get(CODEX_BUNDLE_DIR_ENV)
     if not bundle_dir:
         raise ValueError(
@@ -4166,32 +4084,15 @@ def rl_island_cpus(args, cloud: str | None = None):
     return RL_ISLAND_MIN_CPUS
 
 
-def island_uses_ports_megatron(args) -> bool:
-    """Whether the island image ships the editable Megatron-LM at
-    PORTS_MEGATRON_PATH: the ports engine always (its default and any
-    override are ports images), the legacy engine only when it is pointed at
-    the ports image (MILES_NEXT_IMAGE) instead of its own MILES_IMAGE."""
-    if getattr(args, "rl_engine", "ports") == "ports":
-        return True
-    from .rl import MILES_NEXT_IMAGE
-
-    image = (getattr(args, "rl_image", None) or "").strip()
-
-    def strip(ref):
-        return ref[len("docker:"):] if ref.startswith("docker:") else ref
-
-    return bool(image) and strip(image) == strip(MILES_NEXT_IMAGE)
-
-
 from yeto.hw.catalog import COMPAT_GROUP_ENV, compat_group  # noqa: E402
 
 
 def _rl_trainable_island_flags(args, learner_id: int, num_learners: int) -> str:
-    """LoRA rank/targets; for dense-full the full-parameter sweep identity (the
+    """LoRA rank/targets; for the full-parameter preset the sweep identity (the
     probed layout hash, the frozen roster size and the syncer profile hash);
     for sao-streaming-full this island's hash-bound runtime contract.
 
-    dense-full trains every parameter, unless DeepSeek V4 expert-full selects
+    the full-parameter preset trains every parameter, unless DeepSeek V4 expert-full selects
     the LoRA hybrid (attention LoRA plus clone experts, P0 1.7b.2)."""
     if rl_sao_streaming(args):
         island = args.rl_sao_manifest.island(learner_id)
@@ -4324,9 +4225,6 @@ def make_miles_island_task(
         )
     if args.rl_offload_train:
         flags += " --rl-offload-train"
-    # Always explicit: the learner's own default is ports, so a legacy run
-    # must say so (and an older remote learner must not guess).
-    flags += f" --rl-engine {getattr(args, 'rl_engine', 'ports')}"
     algorithm_prelude, algorithm_flags = _ports_algorithm_flags(args)
     flags += algorithm_flags
     if args.expert_parallel is not None:
@@ -4408,12 +4306,8 @@ def make_miles_island_task(
             " --initial-adapter-sha256 "
             f"{shlex.quote(args.rl_initial_adapter_sha256)}"
         )
-    from .rl.adapters.miles.overlay import resolve_overlay
-
     if getattr(_rl_backend_module(args, "launch_flags"), "NEEDS_MILES_SOURCE", True):
-        miles_setup, sglang_setup = _miles_source_setup(
-            getattr(args, "rl_engine", "ports"), resolve_overlay(args)
-        )
+        miles_setup, sglang_setup = _miles_source_setup(_miles_overlay().resolve_overlay(args))
     else:  # rl-verl-backend: the engine image carries its own pinned source
         miles_setup = sglang_setup = ": # no Miles/SGLang checkout for this backend"
     model = resolve(args.model)
@@ -4495,13 +4389,10 @@ def make_miles_island_task(
             }
         )
     if getattr(args, "expert_full_count", 0):
-        # Each Miles layout has its own expert-full runtime (sitecustomize).
-        runtime_flag = ("YETO_DSV4_EXPERT_FULL_PORTS"
-                        if getattr(args, "rl_engine", "ports") == "ports" else "YETO_DSV4_EXPERT_FULL")
         envs.update(
             {
                 "YETO_DSV4_EXPERT_CLONE": "1",
-                runtime_flag: "1",
+                "YETO_DSV4_EXPERT_FULL_PORTS": "1",
                 "YETO_DSV4_EXPERT_FULL_COUNT": str(args.expert_full_count),
                 "YETO_DSV4_EXPERT_FULL_LR": str(args.expert_full_lr),
                 "NVTE_GROUPED_LINEAR_SINGLE_PARAM": "0",
@@ -4553,10 +4444,8 @@ def make_miles_island_task(
         prefetch = f'[ -n "$YETO_MODEL_STORE_HIT" ] || {prefetch}'
     setup_steps.append(prefetch)
     # Ports images (radixark/miles) ship their own Miles at /root/miles on
-    # PYTHONPATH; the pinned fork checkout must shadow it.  Legacy unchanged.
-    island_pythonpath = (
-        "$HOME/miles:" if getattr(args, "rl_engine", "ports") == "ports" else ""
-    )
+    # PYTHONPATH; the pinned fork checkout must shadow it.
+    island_pythonpath = "$HOME/miles:"
     # Ports images install Megatron-LM with `pip install -e .`, whose editable
     # finder maps only megatron.core and megatron.training; megatron.
     # post_training (imported by megatron.training.get_model whenever
@@ -4565,18 +4454,7 @@ def make_miles_island_task(
     # launchers always put the checkout on PYTHONPATH; do the same, after
     # our own sources so it shadows nothing of ours.  The driver's
     # PYTHONPATH reaches every Ray actor through the job runtime_env.
-    # S14 G4/G5 (s14-dlr-legacy-20261007b/c): the legacy engine run in the
-    # ports image (--rl-image MILES_NEXT_IMAGE) needs the same checkout on
-    # PYTHONPATH, so it is added whenever the island image is the ports
-    # image, whatever the engine; legacy in its own MILES_IMAGE is unchanged.
-    # Necessary but NOT sufficient for legacy there: agentenv/miles imports
-    # megatron.training.tokenizer.tokenizer._vocab_size_with_padding, which
-    # the image's Megatron-LM (core 0.19, used by the ports fork via
-    # megatron.core.tokenizers.utils.build_tokenizer) no longer has (run c
-    # failed identically with the path present).  Legacy needs MILES_IMAGE.
-    island_megatron_path = (
-        f":{PORTS_MEGATRON_PATH}" if island_uses_ports_megatron(args) else ""
-    )
+    island_megatron_path = f":{PORTS_MEGATRON_PATH}"
     # Private --rl-image (registry_login_for: SKYPILOT_DOCKER_* in the
     # environment, or --rl-image-private): the login goes into the task SECRETS, SkyPilot's supported
     # form: every Task load re-derives the DockerLoginConfig from them
@@ -5457,12 +5335,6 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         # The critic syncer shares the actor syncer's host: swap it too, or a
         # Modal island behind --syncer-public-addr dials the private address.
         envs["CRITIC_SYNCER_ADDR"] = critic_syncer_address(syncer_addr)
-    if rl and getattr(args, "rl_engine", "ports") != "ports":
-        # Legacy Miles' own router launch misses its 30 s deadline on Modal's
-        # CPUs (see yeto.rl.adapters.miles.island_entry.start_external_sglang_router).  Upstream
-        # Miles (ports) launches its router as a Ray worker with a 120 s
-        # budget and has no external router mode.
-        envs["YETO_RL_EXTERNAL_ROUTER"] = "1"
     for item in getattr(args, "modal_env", None) or []:
         key, sep, value = str(item).partition("=")
         if not sep or not key:
@@ -8136,21 +8008,16 @@ NO_SYNC_INCOMPLETE_EXIT = 3
 def _echoes_events(args, spec) -> bool:
     """Whether this island's tape is echoed to its log and rebuilt locally."""
 
-    return (
-        getattr(args, "training_mode", "sft") == "rl"
-        and getattr(args, "rl_engine", "ports") == "ports"
-    )  # every ports RL island (sky too): rl_learner_finalized tells the launcher
-    # that a later non-zero exit is a shutdown error, not an island failure
+    # Every RL island (sky too): rl_learner_finalized tells the launcher that a
+    # later non-zero exit is a shutdown error, not an island failure.
+    return getattr(args, "training_mode", "sft") == "rl"
 
 
-def _miles_overlay_manifest(args, engine: str) -> dict:
+def _miles_overlay_manifest(args) -> dict:
     """``miles_overlay`` for the run manifest; absent (old manifests unchanged) when off."""
 
-    if engine != "ports":
-        return {}
-    from .rl.adapters.miles.overlay import overlay_record, resolve_overlay
-
-    record = overlay_record(resolve_overlay(args))
+    overlay = _miles_overlay()
+    record = overlay.overlay_record(overlay.resolve_overlay(args))
     return {"miles_overlay": record} if record else {}
 
 
@@ -8162,20 +8029,19 @@ def _write_run_manifest(args) -> dict | None:
     from . import rl as _rl
     from . import runs
 
-    engine = getattr(args, "rl_engine", "ports")
     manifest = {
-        "rl_engine": engine,
+        "rl_engine": "ports",
         "rl_image": getattr(args, "rl_image", None),
-        "miles_commit": _rl.MILES_NEXT_COMMIT if engine == "ports" else _rl.MILES_COMMIT,
-        "sglang_commit": getattr(_rl, "SGLANG_NEXT_COMMIT", None) if engine == "ports" else None,
+        "miles_commit": _rl.MILES_NEXT_COMMIT,
+        "sglang_commit": _rl.SGLANG_NEXT_COMMIT,
         "source_sha256": getattr(args, "source_sha256", None),
         "cluster_prefix": args.cluster_prefix,
-        **_miles_overlay_manifest(args, engine),
+        **_miles_overlay_manifest(args),
         # launch-preflight-guards: preflight readings, negative_test, island_overrides
         **(getattr(args, "_launch_preflight_manifest", None) or {}),
         "written_unix": time.time(),
     }
-    print(f"[launcher] RL engine {engine}: image {manifest['rl_image']}, "
+    print(f"[launcher] RL image {manifest['rl_image']}, "
           f"miles {manifest['miles_commit']}, sglang {manifest['sglang_commit']}", flush=True)
     if manifest.get("miles_overlay"):
         print(f"[launcher] Miles code = {manifest['miles_overlay']['summary']} "
@@ -8286,7 +8152,7 @@ def dry_run_plan(args) -> dict:
     return {
         "dry_run": True,
         "training_mode": getattr(args, "training_mode", "sft"),
-        "rl_engine": getattr(args, "rl_engine", None) if rl else None,
+        "rl_engine": "ports" if rl else None,
         "controller": "head" if head else "local",
         "islands": len(specs) + external,
         "external_learners": external,

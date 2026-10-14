@@ -250,7 +250,7 @@ def test_allowance_strict_avg_critic_on_two_islands_decoupled_still_refused():
 
     names = ["execution:critic", "features:gae_length_adaptive"]
     assert check_unverified_allowance(names, islands=2, outer_sync=True, sync_preset="strict-avg") == tuple(sorted(names))
-    for preset in ("decoupled", None, "dense-full"):
+    for preset in ("decoupled", None, "full-parameter"):
         with pytest.raises(AlgorithmSpecError, match="single-island"):
             check_unverified_allowance(names, islands=2, outer_sync=True, sync_preset=preset)
     # a non-critic unverified mechanism keeps D11, even with the critic under strict-avg

@@ -21,9 +21,9 @@ DEVICE_FAMILY = "nvidia"
 PARAM_MAP_SHA256 = param_map_sha256(PARAM_MAP)
 
 
-def backend_identity(rl_engine: str = "ports", *, device_family: str | None = None,
+def backend_identity(*, device_family: str | None = None,
                      train_backend: str = "fsdp2", compat_group: str | None = None) -> BackendIdentity:
-    """Identity of a verl island (``rl_engine`` is accepted for the Miles-shaped call sites).
+    """Identity of a verl island.
 
     ``device_family`` None means "read it from this node's accelerator", so an
     Ascend island declares ``ascend`` without any call site change. The family

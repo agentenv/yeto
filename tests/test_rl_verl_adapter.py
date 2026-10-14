@@ -159,7 +159,7 @@ def test_param_map_hash_is_stable_and_feeds_the_identity():
     assert param_map_sha256(dict(pn.PARAM_MAP)) == verl_identity.PARAM_MAP_SHA256
     from yeto.rl.adapters.miles import identity as miles_identity
 
-    assert ident.sha256() != miles_identity.backend_identity("ports").sha256()
+    assert ident.sha256() != miles_identity.backend_identity().sha256()
 
 
 def test_miles_and_verl_session_contracts_differ_for_the_same_layout():
@@ -167,7 +167,7 @@ def test_miles_and_verl_session_contracts_differ_for_the_same_layout():
     from yeto.rl.engine.backend_identity import session_contract_hash
 
     fp = bytes(range(32))
-    a = session_contract_hash(fp, miles_identity.backend_identity("ports").sha256())
+    a = session_contract_hash(fp, miles_identity.backend_identity().sha256())
     b = session_contract_hash(fp, verl_identity.backend_identity().sha256())
     c = session_contract_hash(fp, verl_identity.backend_identity().sha256())
     assert a != b and b == c

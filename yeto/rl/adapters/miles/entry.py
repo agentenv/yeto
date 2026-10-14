@@ -28,6 +28,7 @@ from typing import Any
 
 from yeto.rl.engine.algorithm import BOUNDED_NONZERO_STD_FILTER, STOCK_NONZERO_STD_FILTER, AlgorithmSpec
 from yeto.rl.engine.capabilities import R0_MECHANISMS, EngineCapabilities, ExecutionCapabilities
+from yeto.rl.engine.events import append_tape_event
 from .traits import MILES_TRAITS
 from . import LoopRunner
 from .config import MilesConfigError, check_harness_reward_scope
@@ -1475,10 +1476,8 @@ def refuse_partial_island_preflight(elastic: Any, topology: Any, miles_args: Any
         return
     error = getattr(controller, "recovery_required", None) or f"island topology: {why}"
     try:
-        from yeto.rl.adapters.miles.legacy.engine import _append_rl_event
-
         epochs = getattr(getattr(controller, "journal", None), "epochs", None)
-        _append_rl_event(miles_args, {
+        append_tape_event(miles_args, {
             "event": "rl_reconfiguration", "rollout_id": None, "result": "RECOVERY_REQUIRED",
             "error": str(error), "config_epoch": getattr(epochs, "config_epoch", None),
         })
@@ -1533,10 +1532,8 @@ def reconcile_gpu_pool_preflight(elastic: Any, topology: Any, miles_args: Any, *
 
     def refuse(error: str) -> None:
         try:
-            from yeto.rl.adapters.miles.legacy.engine import _append_rl_event
-
             epochs = getattr(getattr(controller, "journal", None), "epochs", None)
-            _append_rl_event(miles_args, {
+            append_tape_event(miles_args, {
                 "event": "rl_reconfiguration", "rollout_id": None, "result": "RECOVERY_REQUIRED",
                 "error": str(error), "config_epoch": getattr(epochs, "config_epoch", None),
             })
@@ -1836,7 +1833,6 @@ def run_ports_island(
     """
 
     from yeto.rl import MILES_NEXT_COMMIT
-    from yeto.rl.adapters.miles.legacy.engine import _append_rl_event
 
     from .state import require_run_plugin
 
@@ -1870,7 +1866,7 @@ def run_ports_island(
     # fleet-dashboard 8.4: heartbeat/resource sampling from here until driver.run()
     # takes over (same opt-in intervals as the driver's; tape unchanged when unset)
     startup = StartupTelemetry(
-        lambda event, **fields: _append_rl_event(miles_args, {"event": event, **fields}),
+        lambda event, **fields: append_tape_event(miles_args, {"event": event, **fields}),
         heartbeat_interval_s=getattr(miles_args, "yeto_rl_heartbeat_interval_s", None),
         resource_interval_s=getattr(miles_args, "yeto_rl_resource_sample_interval_s", None),
     ).__enter__()  # stopped before driver.run() and in the finally below
@@ -1895,7 +1891,7 @@ def run_ports_island(
 
     from .rollout import RayMetadataSink
 
-    _append_rl_event(
+    append_tape_event(
         miles_args,
         selection_event(
             launch=launch,

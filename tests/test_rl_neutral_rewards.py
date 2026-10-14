@@ -266,6 +266,9 @@ def test_register_conflict_rejected():
 # -- 3.9 math graders: test-only copy -------------------------------------------------
 
 MILES_PIN_CHECKOUT = Path("/home/michael/work/miles-fr1")
+# The Miles commit tests/vendor/miles_math_utils.py was copied from (the pin of
+# the removed legacy engine); the copy stays byte-identical to that file.
+VENDOR_SOURCE_COMMIT = "ae475060fa670145aef75d678809039ae999cb97"
 
 
 def test_runtime_code_never_imports_the_vendor_copy():
@@ -285,13 +288,11 @@ def test_vendor_copy_is_marked_and_matches_the_pinned_source():
 
     text = (REPO / "tests/vendor/miles_math_utils.py").read_text()
     assert "许可证待核实、不进 main" in text.splitlines()[0]
-    from yeto.rl import MILES_COMMIT
-
     if not (MILES_PIN_CHECKOUT / ".git").exists():
         pytest.skip("no local Miles checkout to compare the copy with")
     pinned = subprocess.run(
         ["git", "-C", str(MILES_PIN_CHECKOUT), "show",
-         f"{MILES_COMMIT}:miles/rollout/rm_hub/math_utils.py"],
+         f"{VENDOR_SOURCE_COMMIT}:miles/rollout/rm_hub/math_utils.py"],
         capture_output=True, text=True)
     if pinned.returncode != 0:
         pytest.skip("pinned Miles commit not in the local checkout")
@@ -307,11 +308,11 @@ def test_math_reward_with_vendor_copy_matches_pinned_miles_graders(tmp_path):
     """
     import subprocess
 
-    from yeto.rl import MILES_COMMIT, math_reward
+    from yeto.rl import math_reward
 
     pinned = subprocess.run(
         ["git", "-C", str(MILES_PIN_CHECKOUT), "show",
-         f"{MILES_COMMIT}:miles/rollout/rm_hub/math_utils.py"],
+         f"{VENDOR_SOURCE_COMMIT}:miles/rollout/rm_hub/math_utils.py"],
         capture_output=True, text=True)
     if pinned.returncode != 0:
         pytest.skip("pinned Miles commit not available locally")

@@ -8,25 +8,14 @@ from typing import NamedTuple
 
 
 class MilesRevisionPins(NamedTuple):
-    """Expected Miles checkout identity for one ``--rl-engine`` path."""
+    """Expected Miles checkout identity (``revision.verify_miles_revision``)."""
 
     repository: str
     commit: str
 
-MILES_REPOSITORY = "https://github.com/agentenv/miles"
-MILES_BASE_COMMIT = "6062afe0a9d5d6471e8395dedc81c78dd9f4a84f"
-MILES_COMMIT = "ae475060fa670145aef75d678809039ae999cb97"
-MILES_BUNDLE_PATH = "yeto/rl/vendor/miles-qwen38.bundle"
-MILES_BUNDLE_SHA256 = "da3464d3c389f7e2cb3e390119b3c42c2f130d94a0711f9c95608f3243826cc6"
 MILES_PEFT_VERSION = "0.20.0"
-SGLANG_REPOSITORY = "https://github.com/agentenv/sglang"
-SGLANG_COMMIT = "e1b57eb8e7749235c987cc6b1b2824ce3265369b"
-MILES_IMAGE = (
-    "docker:ghcr.io/agentenv/miles@sha256:"
-    "80c20538b63f76defde06ad5d4cfa564ae6f261110696eb1864470cb835e1590"
-)
 
-# Ports engine (``--rl-engine ports``): upstream Miles plus yeto compatibility
+# Ports engine (the only Miles engine): upstream Miles plus yeto compatibility
 # commits on michaellchung/miles ``yeto/ports``; fetched directly, no bundle.
 MILES_NEXT_REPOSITORY = "https://github.com/michaellchung/miles"
 MILES_NEXT_UPSTREAM_COMMIT = "9e4260de047a704208535c0e90c531929879ab40"
@@ -123,7 +112,6 @@ TMS_PRELOAD_PATCH_COMMIT = "d7a3a51bce723a80736dabf233017b927de03df8"
 TMS_PRELOAD_BASE_BINARY_SHA256 = (
     "c26551247616cabb0bb79dbd26abb61a688a4bb47c9b6a6f9873cfc98093640d"
 )
-MILES_LEGACY_PINS = MilesRevisionPins(MILES_REPOSITORY, MILES_COMMIT)
 MILES_NEXT_PINS = MilesRevisionPins(MILES_NEXT_REPOSITORY, MILES_NEXT_COMMIT)
 # radixark/miles:dev multi-arch index (upstream docker/Dockerfile at
 # radixark 9e4260d, sglang v0.5.20 base): the base MILES_NEXT_IMAGE extends
@@ -163,14 +151,13 @@ NEBIUS_BAKED_IMAGES: dict[str, dict[str, str]] = {
 MILES_NEXT_IMAGE_SGLANG_ROOT = "/sgl-workspace/sglang"
 
 
-def default_rl_image(rl_engine: str) -> str:
-    """The digest-pinned ``--rl-image`` default for an RL engine.
+def default_rl_image() -> str:
+    """The digest-pinned ``--rl-image`` default.
 
-    Legacy keeps the agentenv fork image (private ghcr.io/agentenv).  Ports
-    uses MILES_NEXT_IMAGE: upstream Miles' image with the pinned
-    michaellchung forks preinstalled, public on ghcr.io/michaellchung (a
-    registry login is injected only via SKYPILOT_DOCKER_* or
-    --rl-image-private; see yeto.launcher.registry_login_for).
+    MILES_NEXT_IMAGE: upstream Miles' image with the pinned michaellchung
+    forks preinstalled, public on ghcr.io/michaellchung (a registry login is
+    injected only via SKYPILOT_DOCKER_* or --rl-image-private; see
+    yeto.launcher.registry_login_for).
     """
 
-    return MILES_NEXT_IMAGE if rl_engine == "ports" else MILES_IMAGE
+    return MILES_NEXT_IMAGE

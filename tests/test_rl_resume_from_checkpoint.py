@@ -354,12 +354,12 @@ def test_launcher_modal_store_is_a_volume_or_an_error():
     aws = _args(["--gpu", "aws:1xh100@us-east-1"] + base + ["--rl-checkpoint-store", "modal-volume://v"])
     with pytest.raises(ValueError, match="only mounts on Modal"):
         launcher.check_cloud_prerequisites(_specs(aws.gpu), args=aws, modal_ok=True)
-    assert launcher._check_resume_launch_flags(args, "ports") is True
+    assert launcher._check_resume_launch_flags(args) is True
     multi = _args(["--gpu", "modal:1xh100", "--training-mode", "rl", "--rl-checkpoint-store", "modal-volume://v"])
     with pytest.raises(ValueError, match="single-island-no-sync"):
-        launcher._check_resume_launch_flags(multi, "ports")
+        launcher._check_resume_launch_flags(multi)
     with pytest.raises(ValueError, match="needs --rl-checkpoint-store"):
-        launcher._check_resume_launch_flags(_args(["--rl-cut-every", "2"]), "ports")
+        launcher._check_resume_launch_flags(_args(["--rl-cut-every", "2"]))
 
 
 def test_modal_island_config_mounts_the_store_volume(monkeypatch, tmp_path):

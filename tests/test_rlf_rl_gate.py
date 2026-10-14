@@ -348,33 +348,3 @@ def test_tape_trajectory_rewards_fail_closed(tmp_path):
         collect_rollout_samples_from_tape(tape)
 
 
-def test_emit_sample_outcomes_writes_tape(tmp_path, monkeypatch):
-    from types import SimpleNamespace
-    from yeto.rl.adapters.miles.models import rollout_legacy_port as legacy_engine
-    tape = tmp_path / "rl-island-0.jsonl"
-    monkeypatch.setattr("yeto.rl.wandb_rl.tee", lambda *a, **k: None)
-    args = SimpleNamespace(yeto_rl_event_tape=str(tape), yeto_rl_learner_id=0,
-                           yeto_rl_policy_version=0)
-
-    class _Sample:
-        def __init__(self, reward, metadata):
-            self._d = {"reward": reward, "metadata": metadata}
-
-        def to_dict(self):
-            return self._d
-
-    groups = [
-        [_Sample(1.0, {"success": True, "rlf_task_id": "fixture-ctf-ezshell"}),
-         _Sample(0.0, {"success": False})],
-        [_Sample(None, {"success": False})],  # no numeric reward -> skipped
-    ]
-    legacy_engine._emit_sample_outcomes(args, groups)
-    events = [json.loads(line) for line in tape.read_text().splitlines()]
-    outcomes = [e for e in events if e["event"] == "rl_sample_outcome"]
-    assert len(outcomes) == 2
-    assert outcomes[0]["reward"] == 1.0 and outcomes[0]["success"] is True
-    assert outcomes[0]["task_id"] == "fixture-ctf-ezshell"
-    assert outcomes[1]["success"] is False
-    # no tape configured: no-op, no crash
-    legacy_engine._emit_sample_outcomes(
-        SimpleNamespace(yeto_rl_event_tape=None, yeto_rl_policy_version=0), groups)

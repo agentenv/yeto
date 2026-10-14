@@ -514,7 +514,7 @@ def test_eval_only_emits_no_lr_schedule():
         rc.LrSchedule("linear", 0)
 
 
-@pytest.mark.parametrize("preset", ["strict-avg", "dense-full"])
+@pytest.mark.parametrize("preset", ["strict-avg", "full-parameter"])
 def test_strict_lr_schedule_is_linear_over_rounds_times_steps(preset):
     assert rc.resolve_lr_schedule(
         **_schedule_args(sync_preset=preset, global_rounds=3, optimizer_steps=2)

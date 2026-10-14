@@ -334,20 +334,6 @@ def register_flag(row: FlagMapping) -> None:
 # --------------------------------------------------------------------------
 
 
-def legacy_algorithm_argv(spec: AlgorithmSpec) -> list[str]:
-    """Miles argv fragment emitted by legacy ``build_miles_argv`` for this spec
-    (moved from ``AlgorithmSpec.to_legacy_argv``, decoupling 4.3/E14)."""
-
-    argv = ["--advantage-estimator", spec.advantage_estimator]
-    if spec.kl_coef is not None:
-        argv += ["--kl-coef", str(spec.kl_coef)]
-    if spec.dynamic_sampling_filter is not None:
-        from .binding import filter_argv
-
-        argv += filter_argv(spec.dynamic_sampling_filter)
-    return argv
-
-
 def algorithm_argv(spec: AlgorithmSpec) -> list[str]:
     """Non-default algorithm flags beyond the R0-positioned ones."""
 
@@ -517,7 +503,7 @@ def dry_run(argv: Sequence[str] | None = None) -> dict[str, Any]:
     args = parser.parse_args(argv)
     result: dict[str, Any] = {}
     try:
-        base = resolve_ports_algorithm(args, rl_engine="ports")
+        base = resolve_ports_algorithm(args)
         spec, remaining, absorbed = absorb_extra_argv(base, shlex.split(args.extra))
         # models a single-island G1 smoke without outer sync (D11)
         allow = check_unverified_allowance(

@@ -307,66 +307,6 @@ def test_worker_specs_keep_native_outside_yeto_and_partition_federated_prompts(
     assert decoupled_specs == federated_specs
 
 
-def test_federated_workers_use_disjoint_miles_host_ports(tmp_path):
-    args = benchmark.build_parser().parse_args(
-        [
-            "--model",
-            "org/model",
-            "--model-revision",
-            "a" * 40,
-            "--data",
-            "org/data",
-            "--data-revision",
-            "b" * 40,
-            "--reward-function",
-            "pkg.reward:score",
-            "--pipeline-parallel",
-            "2",
-            "--rl-engine",
-            "legacy",
-        ]
-    )
-    args._active_seed = 17
-    arm = benchmark.select_arms("2", 2, 4)[2]
-    combined = tmp_path / "combined.jsonl"
-    island_paths = (tmp_path / "island-0.jsonl", tmp_path / "island-1.jsonl")
-    for path in island_paths:
-        path.write_text("{}\n", encoding="utf-8")
-    workers = benchmark.worker_specs(arm, combined, island_paths)
-
-    payloads = [
-        benchmark.worker_payload(
-            args,
-            worker,
-            arm=arm,
-            run_dir=tmp_path,
-            model_path=tmp_path / "model",
-            syncer="127.0.0.1:30000",
-            reward_sha256="c" * 64,
-        )
-        for worker in workers
-    ]
-
-    assert [
-        payload["arguments"]["rollout_engine_base_port"] for payload in payloads
-    ] == [21100, 22100]
-    assert [payload["arguments"]["sglang_router_port"] for payload in payloads] == [
-        21000,
-        22000,
-    ]
-    assert [
-        payload["arguments"]["sglang_router_prometheus_port"] for payload in payloads
-    ] == [21001, 22001]
-    assert [payload["arguments"]["train_master_base_port"] for payload in payloads] == [
-        21002,
-        22002,
-    ]
-    assert {payload["arguments"]["expert_parallel"] for payload in payloads} == {1}
-    assert {payload["arguments"]["pipeline_parallel"] for payload in payloads} == {
-        2
-    }
-
-
 def test_reward_summary_uses_standard_pass_at_k_estimator():
     result = benchmark.summarize_rewards(
         [[1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]],
@@ -591,52 +531,21 @@ def test_dry_run_does_not_import_ray_or_materialize_data(monkeypatch, capsys):
             "2",
             "--pipeline-parallel",
             "2",
-            "--rl-engine",
-            "legacy",
             "--dry-run",
         ]
     )
 
     assert result == 0
     output = capsys.readouterr().out
-    assert "native-miles-m2" in output
+    assert "native-miles-m2" not in output  # the native arm went with the legacy engine
     assert "yeto-single-m2" in output
     assert "yeto-federated-m2" in output
-    plan = json.loads(output.split("PLAN_JSON ", 1)[1])
+    plan = json.loads(output.split("PLAN_JSON ", 1)[1].splitlines()[0])
     assert plan["fairness"]["same_total_gpus"]
     assert plan["fairness"]["same_expert_parallel"]
     assert plan["fairness"]["same_pipeline_parallel"]
     assert plan["expert_parallel"] == 1
     assert plan["pipeline_parallel"] == 2
-
-
-def test_dry_run_can_select_only_the_current_native_miles_arm(capsys):
-    assert benchmark.main(
-        [
-            "--model",
-            "org/model",
-            "--model-revision",
-            "a" * 40,
-            "--data",
-            "org/data",
-            "--data-revision",
-            "b" * 40,
-            "--reward-function",
-            "yeto_miles_cybergym.reward:score",
-            "--arms",
-            "native",
-            "--islands",
-            "2",
-            "--rl-engine",
-            "legacy",
-            "--dry-run",
-        ]
-    ) == 0
-
-    output = capsys.readouterr().out
-    assert "native-miles-m2" in output
-    assert "yeto-single-m2" not in output
-    assert "yeto-federated-m2" not in output
 
 
 def test_dry_run_works_when_script_is_invoked_outside_repo(tmp_path):
@@ -997,16 +906,14 @@ def test_ports_islands_do_not_share_the_dashboard_column_directory(tmp_path):
     workers = benchmark.worker_specs(single, tmp_path / "all", ())
     run_dir = tmp_path / "run"
 
-    def dump(worker, engine):
-        extra = benchmark.miles_extra_argv(worker, run_dir, 3, engine)
+    def dump(worker):
+        extra = benchmark.miles_extra_argv(worker, run_dir, 3)
         return Path(extra[extra.index("--save-debug-rollout-data") + 1])
 
-    legacy = [dump(w, "legacy") for w in workers]
-    ports = [dump(w, "ports") for w in workers]
-    assert legacy[0] == run_dir / "rollouts" / "island-0" / "{rollout_id}.pt"
+    ports = [dump(w) for w in workers]
     assert len({p.parent.parent for p in ports}) == len(workers)
     for worker, path in zip(workers, ports):
-        assert path.parent == benchmark.rollout_dump_dir(run_dir, worker.learner_id, "ports")
+        assert path.parent == benchmark.rollout_dump_dir(run_dir, worker.learner_id)
 
 
 def test_native_miles_adapter_names_are_mapped_to_the_exact_peft_contract():
@@ -1487,23 +1394,15 @@ def _benchmark_argv(*extra):
     ]
 
 
-def test_rl_engine_defaults_to_ports_and_keeps_legacy_resume_identity(monkeypatch):
+def test_resume_identity_names_the_ports_engine(monkeypatch):
     import yeto.benchmark_resume
 
     monkeypatch.setattr(
         yeto.benchmark_resume, "implementation_fingerprint", lambda *a, **k: "0" * 64
     )
-    assert benchmark.build_parser().parse_args(_benchmark_argv()).rl_engine == "ports"
-    # An explicit legacy run keeps the pre-ports identity (no rl_engine field),
-    # so existing legacy work dirs still resume with --rl-engine legacy.
-    legacy = benchmark.build_parser().parse_args(_benchmark_argv("--rl-engine", "legacy"))
     ports = benchmark.build_parser().parse_args(_benchmark_argv())
-    for args in (legacy, ports):
-        args.eval_samples_per_prompt = args.samples_per_group
-    arms = benchmark.select_arms(legacy.islands, legacy.gpus_per_island, legacy.groups_per_island)
-    legacy_identity = benchmark._resume_identity(legacy, arms)
-    assert "rl_engine" not in legacy_identity
-    assert "rl_engine" not in legacy_identity["arguments"]
+    ports.eval_samples_per_prompt = ports.samples_per_group
+    arms = benchmark.select_arms(ports.islands, ports.gpus_per_island, ports.groups_per_island)
     ports_identity = benchmark._resume_identity(ports, arms)
     from yeto.rl import MILES_NEXT_COMMIT
 
@@ -1513,7 +1412,7 @@ def test_rl_engine_defaults_to_ports_and_keeps_legacy_resume_identity(monkeypatc
 
 def test_rl_engine_ports_dry_run_records_selection_and_rejects_native(capsys):
     assert benchmark.main(
-        _benchmark_argv("--arms", "single,federated", "--rl-engine", "ports", "--dry-run")
+        _benchmark_argv("--arms", "single,federated", "--dry-run")
     ) == 0
     assert "RL_ENGINE ports" in capsys.readouterr().out
     with pytest.raises(SystemExit, match="native arm"):
@@ -1523,25 +1422,6 @@ def test_rl_engine_ports_dry_run_records_selection_and_rejects_native(capsys):
     output = capsys.readouterr().out
     assert "RL_ENGINE ports" in output
     assert "native-miles" not in output and "yeto-decoupled" in output
-    assert benchmark.main(_benchmark_argv("--rl-engine", "legacy", "--dry-run")) == 0
-    output = capsys.readouterr().out
-    assert "native-miles" in output and "RL_ENGINE" not in output
-
-
-def test_legacy_worker_payload_passes_the_engine_explicitly(tmp_path):
-    for engine in ("legacy", "ports"):
-        args = benchmark.build_parser().parse_args(_benchmark_argv("--rl-engine", engine))
-        args._active_seed = 17
-        arm = benchmark.select_arms("2", 2, 4)[2]
-        island_paths = (tmp_path / "island-0.jsonl", tmp_path / "island-1.jsonl")
-        for path in island_paths:
-            path.write_text("{}\n", encoding="utf-8")
-        worker = benchmark.worker_specs(arm, tmp_path / "combined.jsonl", island_paths)[0]
-        payload = benchmark.worker_payload(
-            args, worker, arm=arm, run_dir=tmp_path, model_path=tmp_path / "model",
-            syncer="127.0.0.1:30000", reward_sha256="c" * 64,
-        )
-        assert payload["arguments"]["rl_engine"] == engine
 
 
 def test_learner_budget_override_is_decoupled_only_and_not_below_global_rounds():

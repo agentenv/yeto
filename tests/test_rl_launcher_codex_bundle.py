@@ -142,13 +142,6 @@ def test_non_codex_runs_are_untouched():
     assert L.codex_harness_launch(args, environ={}) is None
 
 
-def test_codex_on_legacy_engine_still_needs_the_ssh_harness():
-    args = _codex_args()
-    args.rl_engine = "legacy"
-    with pytest.raises(ValueError, match="direct SSH harness"):
-        L.codex_harness_launch(args, environ={L.CODEX_BUNDLE_DIR_ENV: "/x"})
-
-
 def test_codex_on_ports_fails_closed_without_bundle_provider_or_with_compaction(bundle, monkeypatch):
     args = _codex_args()
     with pytest.raises(ValueError, match=L.CODEX_BUNDLE_DIR_ENV):

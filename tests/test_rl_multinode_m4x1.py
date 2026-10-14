@@ -65,7 +65,7 @@ def test_s1run_m4x1_h100_and_store_required():
 @pytest.mark.parametrize("case", ["m4a1", "m4b1"])
 def test_launcher_accepts_m4x1_argv(case):
     _, argv = _dry(case, ITYPE=A_ITYPE, M4B_ITYPE=B_ITYPE)
-    launcher._check_ports_infra_switches(build_parser().parse_args(argv), "ports")
+    launcher._check_ports_infra_switches(build_parser().parse_args(argv))
 
 
 def _u(i):

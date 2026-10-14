@@ -311,7 +311,4 @@ def test_launcher_forwards_rl_debug_dump_for_ports_only():
     assert " --rl-debug-dump" in L._ports_infra_flags(args)[1]
     args.rl_debug_dump = False
     assert " --rl-debug-dump" not in L._ports_infra_flags(args)[1]
-    args.rl_debug_dump = True
-    import pytest
-    with pytest.raises(ValueError, match="--rl-debug-dump needs --rl-engine ports"):
-        L._check_ports_infra_switches(args, "legacy")
+

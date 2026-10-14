@@ -2,16 +2,15 @@
 
 The strict-avg and decoupled protocol state machines are reused unchanged:
 ``yeto.rl.bridge.StrictRlBridge`` and ``yeto.rl.decoupled.DecoupledRlBridge``.
-What this module replaces is ``yeto.rl.adapters.miles.legacy.engine.MilesPolicySync`` /
-``DecoupledMilesPolicySync``: every call into Miles internals (actor
+Every call into Miles internals (actor
 ``apply_trainable_state``/``export_trainable_state``, SGLang
 ``update_weight_version``) goes through the ``PolicyState`` port (via
 ``driver.apply_policy``) and the ``Publisher`` port (via ``driver.publish``).
 
-Island progress checkpoints keep the legacy on-disk formats (strict schema 3,
+Island progress checkpoints keep their on-disk formats (strict schema 3,
 decoupled schema 4) through the core progress module
-(:mod:`yeto.rl.engine.progress`, shared with the legacy engine); they never
-contain LoRA tensors or optimizer state.
+(:mod:`yeto.rl.engine.progress`); they never contain LoRA tensors or
+optimizer state.
 
 Sync modes (rl-code-quality-cleanup 2.6; the one place these rules are written
 down, kept identical in openspec spec ``rl-codebase-consistency``).  The island

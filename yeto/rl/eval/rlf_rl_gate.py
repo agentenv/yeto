@@ -10,7 +10,7 @@ One gate run, in this order:
    the S17-verified harness stack; LoRA, 1xGPU) with
    ``--custom-rm-path yeto.rl.adapters.miles.rewards.rlf_success`` and
    ``--advantage-estimator grpo`` (both already fixed by
-   ``island_entry.build_miles_argv``) and the W4 RLF environment provider
+   the Miles run translation) and the W4 RLF environment provider
    (``YETO_HARNESS_ENVIRONMENT_PROVIDER=yeto.cloud.modal_reward_env:rlf_modal_provider``
    + ``YETO_RLF_CTF_TASKS_DIR`` / ``YETO_RLF_CTF_FLAGS_JSON``).  The 30B
    capability surface is covered separately by the 5.6 baseline; 30B RL
@@ -208,7 +208,7 @@ def collect_rollout_samples_from_tape(
     reports per-sample records which the driver tapes as
     ``rl_trajectory_reward`` behind ``--rl-observe-timeline``):
 
-    - ``rl_sample_outcome`` (legacy engine hook, 054c20d5);
+    - ``rl_sample_outcome`` (tapes of the removed legacy engine, 054c20d5);
     - ``rl_trajectory_reward`` (rl-fn-codex-rollout 1.0 observe-only pipeline;
       ``sample_index`` fills ``index``).
     """

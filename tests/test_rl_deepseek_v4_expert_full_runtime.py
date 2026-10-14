@@ -442,58 +442,6 @@ def test_pp2_hybrid_export_preserves_metrics_from_megatron_main_rank(
     assert not hasattr(state.telemetry, "prompt")
     assert not hasattr(state.telemetry, "secret_numeric")
 
-    # Exercise the deployed scalar path end to end: Miles' producer capture,
-    # the metrics-owner Ray export, the round event, and the W&B projection.
-    from yeto.rl.adapters.miles.legacy.engine import DecoupledMilesPolicySync, MilesPolicySync
-    from yeto.rl.wandb_rl import STEP_KEY, TRAIN_STEP_KEY, event_metrics
-
-    hook = MilesPolicySync(
-        SimpleNamespace(
-            rollout_batch_size=1,
-            n_samples_per_prompt=2,
-            yeto_rl_learner_id=0,
-        )
-    )
-    hook._rollout_batches = lambda _data: [
-        {
-            "response_lengths": [1, 2],
-            "sample_indices": [0, 1],
-            "raw_reward": [0.0, 1.0],
-        }
-    ]
-    hook._rollout_metrics = lambda _rollout_id: {
-        "active_groups": 1,
-        "cancelled_groups": 0,
-        "tool_wait_seconds": 0.0,
-        "group_p50_seconds": 1.0,
-        "group_p95_seconds": 1.0,
-        "group_p99_seconds": 1.0,
-        "rollout_seconds": 2.0,
-    }
-    stats = hook._round_stats(0, object(), state)
-    events = []
-    recorder = object.__new__(DecoupledMilesPolicySync)
-    recorder.snapshot = SimpleNamespace(
-        policy_hash="private-policy-hash",
-        fragment_versions=(0,),
-    )
-    recorder._append_event = events.append
-    recorder._record_local_round(stats, rollout_id=0)
-
-    assert event_metrics(events[0]) == {
-        "train/loss": -0.4,
-        "train/pg_loss": -0.5,
-        "train/grad_norm": 1.25,
-        "train/train_rollout_kl": 0.125,
-        "train/ess_ratio": 0.875,
-        "train/pg_clipfrac": 0.25,
-        "train/lr": 1e-6,
-        "rl/reward_mean": 0.5,
-        "rl/pass_rate": 0.5,
-        TRAIN_STEP_KEY: 17,
-        STEP_KEY: 0,
-    }
-
 
 def test_train_telemetry_extractor_is_closed_finite_and_step_bound():
     telemetry = runtime._extract_train_telemetry(

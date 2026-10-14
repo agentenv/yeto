@@ -27,7 +27,7 @@ JOIN_GOLDEN = ("03000000000000000100000007000000000000000000000000000440"
                + "ab" * 32
                + "0b0000006e76696469612d68313030d76ccd494a9ee9bb15d43cdcafb727ab8d0c651b9b81c6481e80ff4084314b4c")  # s19-compat: + compat_group "nvidia-h100"
 
-MILES = backend_identity("ports")
+MILES = backend_identity()
 VERL = BackendIdentity("verl", "0" * 40, "nvidia", param_map_sha256({"verl": "map"}), "nvidia-h100")
 
 

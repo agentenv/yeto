@@ -13,7 +13,7 @@ from pathlib import Path
 
 from yeto.provenance import source_tree_sha256
 from yeto.rl.local_learner import ComponentIdentity
-from yeto.rl.adapters.miles.legacy.engine import miles_execution_source_sha256
+from yeto.rl.adapters.miles.revision import miles_execution_source_sha256
 from yeto.rl.adapters.miles.models.chunked_full_parameter import MilesChunkedFullParameterAdapter
 from yeto.rl.adapters.miles.models.full_parameter_probe import _hardware_identity, _write_private_json
 

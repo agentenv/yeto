@@ -217,9 +217,9 @@ def test_each_flag_is_defined_by_exactly_one_side():
 
 
 def test_rl_image_help_shows_the_pinned_image():
-    from yeto.rl.adapters.miles.pins import MILES_IMAGE
+    from yeto.rl.adapters.miles.pins import MILES_NEXT_IMAGE
 
-    assert MILES_IMAGE in _actions_by_option(_launch_parser())["--rl-image"].help
+    assert MILES_NEXT_IMAGE in _actions_by_option(_launch_parser())["--rl-image"].help
 
 
 def test_island_entry_has_no_hand_written_flags():
@@ -250,7 +250,7 @@ def test_forward_tables_name_flags_of_both_layers():
 # flag renamed in the schema but still spelled the old way in the launcher fails.
 _NON_RL_LITERALS = frozenset({
     "--abbrev-ref", "--adapter-dir", "--add", "--address", "--allow-unattested-legacy-adapter",
-    "--allow-unauthenticated-islands", "--bind", "--cap-add", "--carry-gamma", "--check",
+    "--allow-unauthenticated-islands", "--bind", "--cap-add", "--carry-gamma",
     "--checkpoint-every", "--checkpoint-path", "--codex-harness-binary", "--config-json",
     "--create", "--dashboard-host", "--dearmor", "--depth", "--detach", "--dtype",
     "--entrypoint", "--expected-island-contract", "--final-ack-timeout-s", "--final-grace-s", "--follow", "--force",

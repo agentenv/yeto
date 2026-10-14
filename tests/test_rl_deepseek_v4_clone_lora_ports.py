@@ -335,37 +335,22 @@ _DSV4_FLAGS = ("YETO_DSV4_EXPERT_CLONE", "YETO_DSV4_CLONE_ONLY_LORA", "YETO_DSV4
 
 
 @pytest.mark.parametrize(("flag", "expected"), [
-    ("YETO_DSV4_CLONE_ONLY_LORA_PORTS", "ports"),
-    ("YETO_DSV4_CLONE_ONLY_LORA", "legacy"),
+    ("YETO_DSV4_CLONE_ONLY_LORA_PORTS", ["ports"]),
+    ("YETO_DSV4_CLONE_ONLY_LORA", []),  # the legacy-layout switch is gone
 ])
-def test_sitecustomize_picks_the_clone_only_runtime_for_the_miles_layout(monkeypatch, flag, expected):
+def test_sitecustomize_installs_the_ports_clone_only_runtime(monkeypatch, flag, expected):
     calls = []
     monkeypatch.setattr(ports_runtime, "install_clone_only", lambda: calls.append("ports"))
-    monkeypatch.setattr(clone_lora, "install", lambda: calls.append("legacy"))
     for name in _DSV4_FLAGS:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv(flag, "1")
 
     runpy.run_path(str(ROOT / "sitecustomize.py"), run_name="_sitecustomize_clone_only_test")
 
-    assert calls == [expected]
+    assert calls == expected
 
 
-def test_sitecustomize_refuses_both_clone_only_runtimes(monkeypatch):
-    for name in _DSV4_FLAGS:
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("YETO_DSV4_CLONE_ONLY_LORA", "1")
-    monkeypatch.setenv("YETO_DSV4_CLONE_ONLY_LORA_PORTS", "1")
-
-    with pytest.raises(RuntimeError, match="mutually exclusive"):
-        runpy.run_path(str(ROOT / "sitecustomize.py"), run_name="_sitecustomize_both_clone_test")
-
-
-@pytest.mark.parametrize(("engine", "runtime", "other"), [
-    ("ports", "YETO_DSV4_CLONE_ONLY_LORA_PORTS", "YETO_DSV4_CLONE_ONLY_LORA"),
-    ("legacy", "YETO_DSV4_CLONE_ONLY_LORA", "YETO_DSV4_CLONE_ONLY_LORA_PORTS"),
-])
-def test_island_entry_switches_on_the_clone_only_runtime_of_its_engine(monkeypatch, engine, runtime, other):
+def test_island_entry_switches_on_the_ports_clone_only_runtime(monkeypatch):
     from yeto.rl.adapters.miles import island_entry
 
     for name in (*_DSV4_FLAGS, "SGLANG_OPT_FUSE_WQA_WKV"):
@@ -373,12 +358,12 @@ def test_island_entry_switches_on_the_clone_only_runtime_of_its_engine(monkeypat
         monkeypatch.setenv(name, "")
         monkeypatch.delenv(name)
 
-    island_entry._configure_deepseek_v4_env(SimpleNamespace(), rl_engine=engine, clone_only_lora=True,
+    island_entry._configure_deepseek_v4_env(SimpleNamespace(), clone_only_lora=True,
                                             expert_full=False)
 
-    assert os.environ[runtime] == "1" and other not in os.environ
+    assert os.environ["YETO_DSV4_CLONE_ONLY_LORA_PORTS"] == "1"
     assert os.environ["YETO_DSV4_EXPERT_CLONE"] == "1"
-    monkeypatch.setenv(other, "1")
-    with pytest.raises(ValueError, match="other Miles layout"):
-        island_entry._configure_deepseek_v4_env(SimpleNamespace(), rl_engine=engine, clone_only_lora=True,
+    monkeypatch.setenv("YETO_DSV4_CLONE_ONLY_LORA_PORTS", "0")
+    with pytest.raises(ValueError, match="must be unset or 1"):
+        island_entry._configure_deepseek_v4_env(SimpleNamespace(), clone_only_lora=True,
                                                 expert_full=False)

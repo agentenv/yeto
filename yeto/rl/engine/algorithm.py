@@ -1,9 +1,8 @@
 """``AlgorithmSpec``: yeto-owned algorithm description with a canonical SHA256.
 
 Pure Python; no torch/ray/miles imports. The spec is translated to engine
-arguments only by adapters (the legacy mapping used by
-``yeto.rl.adapters.miles.island_entry.build_miles_argv`` is documented by
-``miles_adapter.algorithm_flags.legacy_algorithm_argv``, decoupling 4.3/E14).
+arguments only by adapters (``yeto.rl.adapters.miles.algorithm_flags``,
+decoupling 4.3/E14).
 
 Structure (change ``rl-algorithm-capabilities``, design D1/D2/D7):
 
@@ -1756,29 +1755,15 @@ _builtin_rejections()
 # --------------------------------------------------------------------------
 
 
-def resolve_ports_algorithm(args: Any, *, rl_engine: str) -> "AlgorithmSpec | None":
+def resolve_ports_algorithm(args: Any) -> "AlgorithmSpec":
     """Base spec of a run (before extra-argv absorption).
 
     ``--rl-algorithm-spec PATH`` (v1 or v2 JSON) gives the base; without it
     the spec comes from the legacy CLI exactly as in R0. Legacy CLI algorithm
-    options given together with the file must agree with it. The ports-only
-    options are refused on the legacy engine (returns None there).
+    options given together with the file must agree with it.
     """
 
     path = getattr(args, "rl_algorithm_spec", None)
-    allow = list(getattr(args, "rl_allow_unverified_mechanism", None) or ())
-    if rl_engine != "ports":
-        used = [name for name, value in (
-            ("--rl-algorithm-spec", path),
-            ("--rl-allow-unverified-mechanism", allow),
-            ("--rl-expected-algorithm-sha256",
-             getattr(args, "rl_expected_algorithm_sha256", None)),
-        ) if value]
-        if used:
-            raise AlgorithmSpecError(
-                f"{', '.join(used)} only apply to --rl-engine ports (legacy is unchanged)"
-            )
-        return None
     legacy = AlgorithmSpec.from_legacy_args(args)
     if not path:
         return legacy

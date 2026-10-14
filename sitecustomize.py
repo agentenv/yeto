@@ -11,34 +11,14 @@ if os.environ.get("YETO_DSV4_EXPERT_CLONE") == "1":
 
     install()
 
-# Each legacy/ports flag pair patches a different Miles layout; both at once is
-# a launcher bug.
-for _legacy, _ports in (
-    ("YETO_DSV4_CLONE_ONLY_LORA", "YETO_DSV4_CLONE_ONLY_LORA_PORTS"),
-    ("YETO_DSV4_EXPERT_FULL", "YETO_DSV4_EXPERT_FULL_PORTS"),
-):
-    if os.environ.get(_legacy) == "1" and os.environ.get(_ports) == "1":
-        raise RuntimeError(f"{_legacy} and {_ports} are mutually exclusive")
-del _legacy, _ports
-
-if os.environ.get("YETO_DSV4_CLONE_ONLY_LORA") == "1":
-    from yeto.rl.adapters.miles.models.deepseek_v4.clone_lora import install
-
-    install()
-
 if os.environ.get("YETO_DSV4_CLONE_ONLY_LORA_PORTS") == "1":
-    # Same recipe on the ports Miles layout (P0 1.7b.2b).
+    # Clone-only expert LoRA on the ports Miles layout (P0 1.7b.2b).
     from yeto.rl.adapters.miles.models.deepseek_v4.ports_runtime import install_clone_only
 
     install_clone_only()
 
-if os.environ.get("YETO_DSV4_EXPERT_FULL") == "1":
-    from yeto.rl.adapters.miles.models.deepseek_v4.expert_full_runtime import install
-
-    install()
-
 if os.environ.get("YETO_DSV4_EXPERT_FULL_PORTS") == "1":
-    # Same recipe on the ports Miles layout (P0 1.7b.2).
+    # Expert-full on the ports Miles layout (P0 1.7b.2).
     from yeto.rl.adapters.miles.models.deepseek_v4.ports_runtime import install
 
     install()

@@ -88,10 +88,9 @@ def resolve_overlay(args) -> str | None:
     choice = getattr(args, "rl_miles_overlay", None) or "auto"
     if choice not in OVERLAY_CHOICES:
         raise ValueError(f"--rl-miles-overlay must be one of {OVERLAY_CHOICES}, got {choice!r}")
-    if (getattr(args, "training_mode", "sft") != "rl"
-            or getattr(args, "rl_engine", "ports") != "ports" or choice == "off"):
+    if getattr(args, "training_mode", "sft") != "rl" or choice == "off":
         if choice == CRITIC_C357:
-            raise ValueError("--rl-miles-overlay critic-c357 needs --training-mode rl on the ports engine")
+            raise ValueError("--rl-miles-overlay critic-c357 needs --training-mode rl")
         return None
     if choice == CRITIC_C357:
         if MILES_NEXT_COMMIT != CRITIC_C357_BASE_COMMIT:

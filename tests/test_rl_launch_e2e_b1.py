@@ -48,7 +48,7 @@ def test_eval_knobs_need_the_eval_interval(tmp_path, monkeypatch):
     from yeto import launcher
 
     with pytest.raises(ValueError, match="need --rl-eval-interval"):
-        launcher._check_ports_infra_switches(_cli(("--rl-eval-temperature", "0")), "ports")
+        launcher._check_ports_infra_switches(_cli(("--rl-eval-temperature", "0")))
 
 
 def test_default_run_carries_no_eval_flags(tmp_path, monkeypatch):
@@ -197,7 +197,7 @@ def test_declare_cells_needs_names(tmp_path):
     with pytest.raises(ValueError, match="needs --rl-elastic-cells"):
         launcher._check_ports_infra_switches(_cli((
             "--rl-placement", "fixed-partition", "--rl-elastic", "--rl-elastic-resources", str(res),
-            "--rl-elastic-initial-config", "c0", "--rl-elastic-declare-cells")), "ports")
+            "--rl-elastic-initial-config", "c0", "--rl-elastic-declare-cells")))
 
 
 # ---------------------------------------------------------------- item 4: tool-wait workload
@@ -228,7 +228,7 @@ def test_tool_delay_needs_the_workload_generate(tmp_path, monkeypatch):
     from yeto import launcher
 
     with pytest.raises(ValueError, match="needs --custom-generate-function-path"):
-        launcher._check_ports_infra_switches(_cli(("--rl-test-tool-delay-s", "30")), "ports")
+        launcher._check_ports_infra_switches(_cli(("--rl-test-tool-delay-s", "30")))
     run = island_run(BASE, monkeypatch)
     assert "YETO_RL_TEST_TOOL_DELAY_S" not in run
 
@@ -341,12 +341,11 @@ def test_injection_switches_are_refused_without_elastic_or_restart():
     for extra in (("--rl-test-inject-stop-failures", "1"), ("--rl-elastic-state-dir", "/v"),
                   ("--rl-test-inject-lora-perturb", "0.01"), ("--rl-test-inject-undrain-fail", "1")):
         with pytest.raises(ValueError, match="need --rl-elastic"):
-            launcher._check_ports_infra_switches(_cli(extra), "ports")
+            launcher._check_ports_infra_switches(_cli(extra))
     with pytest.raises(ValueError, match="needs --rl-elastic-restart-attempts"):
-        launcher._check_ports_infra_switches(_cli(("--rl-test-kill-learner-at", "COMMITTED")),
-                                             "ports")
+        launcher._check_ports_infra_switches(_cli(("--rl-test-kill-learner-at", "COMMITTED")))
     with pytest.raises(ValueError, match="must be one of"):
-        launcher._check_ports_infra_switches(_cli(("--rl-test-kill-learner-at", "NOPE")), "ports")
+        launcher._check_ports_infra_switches(_cli(("--rl-test-kill-learner-at", "NOPE")))
 
 
 # ---------------------------------------------------------------- item 7: A5 as two 3-GPU islands
@@ -473,7 +472,7 @@ def test_trainer_edges_need_elastic():
     from yeto import launcher
 
     with pytest.raises(ValueError, match="need --rl-elastic"):
-        launcher._check_ports_infra_switches(_cli(("--rl-elastic-trainer-edges",)), "ports")
+        launcher._check_ports_infra_switches(_cli(("--rl-elastic-trainer-edges",)))
 
 
 # ---------------------------------------------------------------- E2 cut injections (patch v1)
@@ -537,9 +536,7 @@ def test_lora_dropout_range_is_checked():
     from yeto import launcher
 
     with pytest.raises(ValueError, match="--rl-lora-dropout"):
-        launcher._check_ports_infra_switches(_cli(("--rl-lora-dropout", "1.0")), "ports")
-    with pytest.raises(ValueError, match="--rl-lora-dropout"):
-        launcher._check_ports_infra_switches(_cli(("--rl-lora-dropout", "0.05")), "legacy")
+        launcher._check_ports_infra_switches(_cli(("--rl-lora-dropout", "1.0")))
 
 
 # ---------------------------------------------------------------- Miles router under --rl-elastic
@@ -634,9 +631,9 @@ def test_timeouts_need_elastic_and_positive_values():
     from yeto import launcher
 
     with pytest.raises(ValueError, match="need --rl-elastic"):
-        launcher._check_ports_infra_switches(_cli(("--rl-elastic-drain-timeout-s", "5")), "ports")
+        launcher._check_ports_infra_switches(_cli(("--rl-elastic-drain-timeout-s", "5")))
     with pytest.raises(ValueError, match="must be positive"):
-        launcher._check_ports_infra_switches(_cli(("--rl-elastic-drain-timeout-s", "0")), "ports")
+        launcher._check_ports_infra_switches(_cli(("--rl-elastic-drain-timeout-s", "0")))
 
 
 def test_hold_and_tool_wait_switches_reach_the_island(tmp_path, monkeypatch):
@@ -664,7 +661,7 @@ def test_tool_side_effect_log_switch_reaches_the_island(tmp_path, monkeypatch):
     assert env["YETO_RL_TEST_TOOL_SIDE_EFFECT_LOG"] == "1"
     with pytest.raises(ValueError, match="needs --rl-test-inject-tool-wait-s"):
         launcher._check_ports_infra_switches(
-            _cli(("--rl-elastic", "--rl-elastic-tool-wait-board", "--rl-test-tool-side-effect-log")), "ports")
+            _cli(("--rl-elastic", "--rl-elastic-tool-wait-board", "--rl-test-tool-side-effect-log")))
 
 
 def test_hold_and_tool_wait_switch_validation(tmp_path):
@@ -676,14 +673,14 @@ def test_hold_and_tool_wait_switch_validation(tmp_path):
     for extra in (("--rl-test-hold-before-check-s", "5", "--rl-test-inject-lora-perturb", "0.01"),
                   ("--rl-test-inject-tool-wait-s", "5", "--rl-elastic-tool-wait-board")):
         with pytest.raises(ValueError, match="need --rl-elastic"):
-            launcher._check_ports_infra_switches(_cli(extra), "ports")
+            launcher._check_ports_infra_switches(_cli(extra))
     with pytest.raises(ValueError, match="must be positive"):
         launcher._check_ports_infra_switches(
             _cli(_elastic(tmp_path) + ("--rl-elastic-tool-wait-board",
-                                       "--rl-test-inject-tool-wait-s", "0")), "ports")
+                                       "--rl-test-inject-tool-wait-s", "0")))
     with pytest.raises(ValueError, match="needs --rl-elastic-tool-wait-board"):
         launcher._check_ports_infra_switches(
-            _cli(_elastic(tmp_path) + ("--rl-test-inject-tool-wait-s", "5")), "ports")
+            _cli(_elastic(tmp_path) + ("--rl-test-inject-tool-wait-s", "5")))
     with pytest.raises(ValueError, match="another --rl-test"):
         launcher._check_ports_infra_switches(
-            _cli(_elastic(tmp_path) + ("--rl-test-hold-before-check-s", "5")), "ports")
+            _cli(_elastic(tmp_path) + ("--rl-test-hold-before-check-s", "5")))

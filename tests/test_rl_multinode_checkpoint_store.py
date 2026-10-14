@@ -172,7 +172,7 @@ def test_store_flag_flows_from_cli_to_the_learner_and_needs_elastic(tmp_path, mo
     # rl-resume-from-checkpoint: without --rl-elastic the store is the resume store, which
     # needs --rl-single-island-no-sync (ports); a multi-island run is still refused
     with pytest.raises(ValueError, match="--rl-checkpoint-store without --rl-elastic needs"):
-        launcher._check_ports_infra_switches(_cli(("--rl-checkpoint-store", "s3://b/x")), "ports")
+        launcher._check_ports_infra_switches(_cli(("--rl-checkpoint-store", "s3://b/x")))
     parsed = learner.parse_args(_learner_argv(ELASTIC_LEARNER + ("--rl-elastic-checkpoint-store", "/mnt/s")))
     miles_args = SimpleNamespace()
     learner.apply_ports_infra_switches(parsed, miles_args, {})

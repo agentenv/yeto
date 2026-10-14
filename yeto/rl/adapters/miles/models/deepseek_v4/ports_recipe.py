@@ -1,7 +1,7 @@
 """Ports Miles argv of the expanded DeepSeek V4 Flash recipe (P0 1.7b.2).
 
-The legacy translation (``island_entry._legacy_miles_argv``) carries the same
-recipe for the legacy Miles fork.  Two of its flags exist only there:
+The removed legacy translation carried the same recipe for the agentenv Miles
+fork.  Two of its flags existed only there:
 ``--moe-router-freeze-gate`` (LoRA already freezes every base parameter except
 the clone experts expert-full unfreezes) and
 ``--freeze-e-score-correction-bias`` (here: Megatron's

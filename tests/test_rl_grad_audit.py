@@ -176,22 +176,16 @@ def test_ports_recorder_arms_from_train_one_step(tmp_path, monkeypatch):
     assert not sp._arm_grad_audit(train_one_step, (args, 2, 0, None, chunks), {"optimizer": opt})
 
 
-def test_learner_wires_legacy_hook_and_ports_directory(tmp_path, monkeypatch):
+def test_learner_wires_the_audit_directory(tmp_path, monkeypatch):
     from yeto.rl.adapters.miles import island_entry as learner
 
     args = SimpleNamespace(audit_dir=str(tmp_path / "audit"))
     monkeypatch.delenv(ga.GRAD_AUDIT_ENV, raising=False)
-    assert not learner._configure_grad_audit(args, SimpleNamespace(), "legacy")
+    assert not learner._configure_grad_audit(args, SimpleNamespace())
     monkeypatch.setenv(ga.GRAD_AUDIT_ENV, "1")
-    legacy = SimpleNamespace(custom_megatron_before_train_step_hook_path=None)
-    assert learner._configure_grad_audit(args, legacy, "legacy")
-    assert legacy.custom_megatron_before_train_step_hook_path == ga.HOOK_PATH
-    assert legacy.yeto_rl_grad_audit_dir == str(tmp_path / "audit")
     ports = SimpleNamespace()
-    assert learner._configure_grad_audit(args, ports, "ports")
+    assert learner._configure_grad_audit(args, ports)
+    assert ports.yeto_rl_grad_audit_dir == str(tmp_path / "audit")
     assert not hasattr(ports, "custom_megatron_before_train_step_hook_path")
-    with pytest.raises(ValueError, match="conflicts"):
-        learner._configure_grad_audit(
-            args, SimpleNamespace(custom_megatron_before_train_step_hook_path="x.y"), "legacy")
     with pytest.raises(ValueError, match="audit_dir"):
-        learner._configure_grad_audit(SimpleNamespace(audit_dir=None), SimpleNamespace(), "legacy")
+        learner._configure_grad_audit(SimpleNamespace(audit_dir=None), SimpleNamespace())
