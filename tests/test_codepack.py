@@ -134,3 +134,41 @@ def test_store_path_must_be_visible(tmp_path: Path) -> None:
     with pytest.raises(CodePackError, match="no code pack store"):
         codepack.pack_store_for("gs://bucket/x")
     assert isinstance(codepack.pack_store_for(str(tmp_path)), DirPackStore)
+
+
+def test_modal_volume_store_creates_the_volume_on_put(monkeypatch: pytest.MonkeyPatch) -> None:
+    # the first start stores the pack before the island creates the checkpoint volume
+    import io
+    import sys
+    import types
+
+    calls: list[tuple[str, bool]] = []
+    stored: dict[str, bytes] = {}
+
+    class _Batch:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def put_file(self, f: io.BytesIO, path: str) -> None:
+            stored[path] = f.read()
+
+    class _Volume:
+        def batch_upload(self, force: bool = False) -> _Batch:
+            return _Batch()
+
+        def read_file(self, path: str):
+            yield stored[path]
+
+    def from_name(name: str, create_if_missing: bool = False) -> _Volume:
+        calls.append((name, create_if_missing))
+        return _Volume()
+
+    monkeypatch.setitem(sys.modules, "modal", types.SimpleNamespace(Volume=types.SimpleNamespace(from_name=from_name)))
+    store = codepack._ModalVolumePackStore("modal-volume://vol/run")
+    uri = store.put("abc", b"pack")
+    assert uri == "modal-volume://vol/run/code_packs/abc.tar"
+    assert store.get(uri) == b"pack"
+    assert calls == [("vol", True), ("vol", False)]
