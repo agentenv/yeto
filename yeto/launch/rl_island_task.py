@@ -45,6 +45,12 @@ from .codex import (
 )
 
 
+def submitted_unix() -> float:
+    """Phase ``submitted`` of the island being built (a seam for byte-equal task tests)."""
+
+    return time.time()
+
+
 def _rl_trainable_island_flags(args, learner_id: int, num_learners: int) -> str:
     """LoRA rank/targets; for the full-parameter preset the sweep identity (the
     probed layout hash, the frozen roster size and the syncer profile hash);
@@ -308,7 +314,7 @@ def make_miles_island_task(
            if rl_needs_critic(args) and syncer_addr != "none" else {}),
         "LEARNER_ID": str(learner_id),
         # rl-trainer-cold-start-cost L0: phase ``submitted`` (launcher clock)
-        SUBMITTED_ENV: f"{time.time():.3f}",
+        SUBMITTED_ENV: f"{submitted_unix():.3f}",
         # decoupling 7.7a: "<vendor>-<card>" from the card catalog; an unknown
         # card raises here, before any cloud spend (no default).
         COMPAT_GROUP_ENV: compat_group(spec.gpu),
