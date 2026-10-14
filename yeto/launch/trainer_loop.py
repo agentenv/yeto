@@ -32,7 +32,13 @@ from typing import Any, TypeVar
 
 from yeto.rl.engine.convertible import NodeSpec, parse_node_spec, validate_nodes
 from yeto.rl.engine.journal import Journal
-from yeto.rl.engine.trainer_loop import TrainerLoop, TrainerLoopThread, next_incarnation
+from yeto.rl.engine.trainer_loop import (
+    DEFAULT_MAX_CONSECUTIVE_FAILURES,
+    TrainerLoop,
+    TrainerLoopGaveUp,
+    TrainerLoopThread,
+    next_incarnation,
+)
 from yeto.rl.engine.trainer_scheduler import S1Config, S1Scheduler
 
 from .trainer_island import CloudTrainerBinding, TrainerIsland
@@ -83,6 +89,11 @@ def add_arguments(group) -> None:
         "--rl-trainer-drain-seconds", type=float, default=DEFAULT_DRAIN_SECONDS,
         help="after the fleet (the samplers) ended: max seconds the scheduler keeps the "
         "trainer to consume the rest of the buffer before it stops it (default 3600)")
+    group.add_argument(
+        "--rl-trainer-max-failures", type=int, default=DEFAULT_MAX_CONSECUTIVE_FAILURES,
+        help="trainer incarnations that may fail in a row (no trained round between them) "
+        "before the scheduler stops, releases the trainer and fails the run (default "
+        f"{DEFAULT_MAX_CONSECUTIVE_FAILURES}); a trained round resets the count")
     group.add_argument(
         "--rl-trainer-start-seconds", type=float, default=DEFAULT_START_SECONDS,
         help="configured trainer start time T_s (seconds); a measured start replaces it")
@@ -148,6 +159,8 @@ def check(args) -> None:
         raise SystemExit("--rl-trainer-scheduler-interval must be positive")
     if getattr(args, "rl_trainer_drain_seconds", DEFAULT_DRAIN_SECONDS) < 0:
         raise SystemExit("--rl-trainer-drain-seconds must be >= 0")
+    if getattr(args, "rl_trainer_max_failures", DEFAULT_MAX_CONSECUTIVE_FAILURES) < 1:
+        raise SystemExit("--rl-trainer-max-failures must be >= 1")
     if binding_factory is default_binding:
         _check_modal_island(args)
 
@@ -182,7 +195,9 @@ def build(args, binding: CloudTrainerBinding, journal: Journal) -> TrainerLoop:
     loop = TrainerLoop(scheduler=scheduler, lifecycle=binding.lifecycle(next_incarnation(records)),
                        buffer=binding.buffer, cuts=binding.cuts, record=journal.append,
                        data_ended=binding.data_ended, release_orphan=binding.release_orphan,
-                       spec=binding.spec)
+                       spec=binding.spec,
+                       max_consecutive_failures=int(getattr(
+                           args, "rl_trainer_max_failures", DEFAULT_MAX_CONSECUTIVE_FAILURES)))
     if loop.restore(records):
         print(f"[launcher] trainer scheduler continues from {journal.dir}", flush=True)
     if binding.after_restore is not None:
@@ -192,7 +207,8 @@ def build(args, binding: CloudTrainerBinding, journal: Journal) -> TrainerLoop:
 
 def run_with_trainer_loop(args, run: Callable[[], T], *, island: TrainerIsland | None = None,
                           factory: Callable[[Any, TrainerIsland | None], CloudTrainerBinding]
-                          | None = None) -> T:
+                          | None = None,
+                          abort: Callable[[BaseException], None] | None = None) -> T:
     """``run()`` (the fleet controller); with the switch on, the trainer loop ticks
     on its own thread meanwhile. ``island``: the held-back trainer island
     (:func:`held_island`).
@@ -200,7 +216,11 @@ def run_with_trainer_loop(args, run: Callable[[], T], *, island: TrainerIsland |
     When ``run`` returns, the fleet (the samplers) has ended: the data ended. The
     loop keeps ticking up to ``--rl-trainer-drain-seconds`` so the trainer consumes
     the rest of the buffer and the loop finishes (backlog under one batch); then
-    the trainer is stopped. When ``run`` raises, the trainer is stopped at once."""
+    the trainer is stopped. When ``run`` raises, the trainer is stopped at once.
+
+    ``abort(error)``: called once from the loop thread when the loop gives up
+    (:class:`TrainerLoopGaveUp`); the fleet controller then ends ``run`` with that
+    error so the samplers stop too. Without it the error is raised after ``run``."""
     if not enabled(args):
         return run()
     factory = binding_factory if factory is None else factory
@@ -212,10 +232,16 @@ def run_with_trainer_loop(args, run: Callable[[], T], *, island: TrainerIsland |
     binding = dataclasses.replace(
         binding, data_ended=lambda: fleet_ended.is_set() or bool(cloud_data_ended()))
     with Journal(journal_dir(args)) as journal:
+        def on_error(error: BaseException) -> None:
+            if abort is not None and isinstance(error, TrainerLoopGaveUp):
+                abort(error)
+
         runner = TrainerLoopThread(build(args, binding, journal),
-                                   args.rl_trainer_scheduler_interval).start()
+                                   args.rl_trainer_scheduler_interval, on_error=on_error).start()
         try:
             result = run()
+            if isinstance(runner.error, TrainerLoopGaveUp):
+                raise runner.error
             fleet_ended.set()
             drain_s = float(getattr(args, "rl_trainer_drain_seconds", DEFAULT_DRAIN_SECONDS))
             if not runner.join(drain_s):

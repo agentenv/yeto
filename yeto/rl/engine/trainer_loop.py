@@ -18,6 +18,10 @@
 A ``Stop(FINISHED)`` with no trainer running (the data ended with less than one
 batch left) ends the loop too; it is journaled as ``finished`` (no incarnation).
 
+After ``max_consecutive_failures`` failed incarnations in a row (no trained round
+between them) the loop releases the trainer, journals ``gave_up`` and raises
+:class:`TrainerLoopGaveUp`; a trained round resets the count.
+
 The loop journals each start and stop (kind ``trainer_loop``) in the controller
 journal next to the scheduler state (kind ``trainer_scheduler_state``). After a head
 restart, :meth:`TrainerLoop.restore` reads both back: the scheduler continues with
@@ -68,6 +72,14 @@ READY = "ready"
 STOPPED = "stopped"
 ORPHANED = "orphaned"
 FINISHED = "finished"  # the data ended with no trainer running (incarnation None)
+GAVE_UP = "gave_up"  # too many incarnations failed in a row: the loop stopped
+
+DEFAULT_MAX_CONSECUTIVE_FAILURES = 3
+
+
+class TrainerLoopGaveUp(RuntimeError):
+    """``max_consecutive_failures`` incarnations failed in a row with no trained
+    round between them; the loop stopped starting new ones."""
 
 Record = Callable[..., Any]  # journal.append(kind, **fields)
 
@@ -97,9 +109,12 @@ class TrainerLoop:
                  release_orphan: Callable[[int], None] | None = None,
                  spec: Mapping[str, Any] | None = None,
                  rounds_per_tick: int = 1, ready_timeout_s: float = 1800.0,
+                 max_consecutive_failures: int = DEFAULT_MAX_CONSECUTIVE_FAILURES,
                  clock: Callable[[], float] = time.monotonic) -> None:
         if rounds_per_tick < 1:
             raise ValueError("rounds_per_tick must be positive")
+        if max_consecutive_failures < 1:
+            raise ValueError("max_consecutive_failures must be positive")
         self.scheduler = scheduler
         self.lifecycle = lifecycle
         self.buffer = buffer
@@ -115,6 +130,9 @@ class TrainerLoop:
         self.started = 0  # incarnations started by this loop or a head before it
         self.finished = False  # stopped with FINISHED: nothing more to do
         self._journaled_stops: set[int] = set()  # incarnations with a stopped record
+        # failed incarnations since the last trained round; at the limit the loop gives up
+        self.max_consecutive_failures = int(max_consecutive_failures)
+        self.consecutive_failures = 0
 
     # ------------------------------------------------------------ state
     @property
@@ -140,6 +158,7 @@ class TrainerLoop:
         if self.finished:
             return Hold()
         self._note_failure()
+        self._give_up_at_limit()
         backlog = self.backlog()
         decision = self.scheduler.decide(backlog, self.state)
         if isinstance(decision, Start):
@@ -148,7 +167,21 @@ class TrainerLoop:
             self._stop(decision.reason)
         elif self.state is LifecycleState.TRAINING and backlog.batches >= 1:
             self._train()
+        self._give_up_at_limit()
         return decision
+
+    def _give_up_at_limit(self) -> None:
+        """Stop the loop after ``max_consecutive_failures`` failed incarnations in a
+        row: release a trainer still up, journal it and raise (no new Start)."""
+        if self.consecutive_failures < self.max_consecutive_failures:
+            return
+        self.close(LeaveReason.INFRA_FAILED)
+        self.finished = True
+        self._journal(GAVE_UP, None if self.handle is None else self.handle.incarnation,
+                      failures=self.consecutive_failures, limit=self.max_consecutive_failures)
+        raise TrainerLoopGaveUp(
+            f"{self.consecutive_failures} trainer incarnations failed in a row "
+            f"(limit {self.max_consecutive_failures}); the trainer loop stopped")
 
     def close(self, reason: LeaveReason = LeaveReason.STOPPED) -> None:
         """Stop a running trainer (run end or head shutdown)."""
@@ -168,6 +201,7 @@ class TrainerLoop:
             self.handle = self.lifecycle.start(plan, resume_from=resume)
         except Exception as error:  # noqa: BLE001 - the lifecycle stopped it with its P5 code
             self.handle = None
+            self.consecutive_failures += 1
             self._journal(STOPPED, plan.incarnation, reason=None, error=repr(error))
             return
         if self.lifecycle.ready(self.handle, self._clock() + self.ready_timeout_s):
@@ -202,6 +236,8 @@ class TrainerLoop:
         except LifecycleError:
             self._note_failure()
             return
+        if receipt.rounds > 0:
+            self.consecutive_failures = 0  # a trained round: the trainer works
         if receipt.data_ended:
             self._stop(LeaveReason.FINISHED)
 
@@ -214,6 +250,8 @@ class TrainerLoop:
 
     def _journal_stop(self, handle: TrainerHandle) -> None:
         self._journaled_stops.add(handle.incarnation)
+        if handle.error is not None or handle.leave_reason is LeaveReason.INFRA_FAILED:
+            self.consecutive_failures += 1
         cut = handle.cut
         reason = handle.leave_reason
         self._journal(STOPPED, handle.incarnation,
@@ -259,11 +297,13 @@ class TrainerLoopThread:
     :meth:`stop` or the loop finished. A tick error ends the thread; ``error``
     holds it."""
 
-    def __init__(self, loop: TrainerLoop, interval_s: float) -> None:
+    def __init__(self, loop: TrainerLoop, interval_s: float,
+                 on_error: Callable[[BaseException], None] | None = None) -> None:
         if interval_s <= 0:
             raise ValueError("interval_s must be positive")
         self.loop = loop
         self.interval_s = float(interval_s)
+        self._on_error = on_error  # told once, on this thread, after a tick error
         self.error: BaseException | None = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="trainer-scheduler-loop", daemon=True)
@@ -294,3 +334,5 @@ class TrainerLoopThread:
                 self._stop.wait(self.interval_s)
         except BaseException as error:  # noqa: BLE001 - reported to the launcher
             self.error = error
+            if self._on_error is not None:
+                self._on_error(error)

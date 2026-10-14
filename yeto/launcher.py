@@ -66,7 +66,8 @@ from .launch.modal_islands import (
 )
 from .launch.fleet import (
     CONTAINER_CHANGED_EXIT, DEFAULT_RL_STALL_TIMEOUT_S, FAILED_RUN_DRAIN_S, ISLAND_FAILED_EXIT,
-    RUN_STALLED_EXIT, TEARDOWN_UNVERIFIED_EXIT, FixedRosterIslandAbandoned, FleetController,
+    RUN_STALLED_EXIT, TEARDOWN_UNVERIFIED_EXIT, TRAINER_GAVE_UP_EXIT, FixedRosterIslandAbandoned,
+    FleetController,
     RunStalled, controller_fixed_roster,
 )
 from .launch.teardown import collect_diagnostics_parallel, teardown_island
@@ -664,7 +665,15 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             exit_codes = trainer_loop.run_with_trainer_loop(
                 args, controller.run,
                 island=None if held_name is None else trainer_loop.TrainerIsland(
-                    held_name, specs[held].cloud, held_cfg, modal_ops))
+                    held_name, specs[held].cloud, held_cfg, modal_ops),
+                abort=controller.abort)
+        except trainer_loop.TrainerLoopGaveUp as error:
+            # the trainer scheduler released the trainer and stopped; the samplers
+            # cannot finish the run usefully: tear everything down
+            print(f"[launcher] ERROR: {error}; stopping the run (exit {TRAINER_GAVE_UP_EXIT})",
+                  file=sys.stderr)
+            drain_tapes(min(NO_SYNC_EVENT_DRAIN_S, FAILED_RUN_DRAIN_S))
+            return CONTAINER_CHANGED_EXIT if container_changed() else TRAINER_GAVE_UP_EXIT
         except RunStalled as error:
             print(f"[launcher] ERROR: {error}; stopping the run (exit {RUN_STALLED_EXIT})",
                   file=sys.stderr)

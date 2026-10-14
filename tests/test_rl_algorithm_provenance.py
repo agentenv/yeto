@@ -889,6 +889,9 @@ def test_modal_two_islands_with_syncer_rebuild_tapes_and_fail_closed(monkeypatch
         def run(self):
             return {name: "JobStatus.SUCCEEDED" for name in self.learners}
 
+        def abort(self, error):  # the trainer scheduler's give-up hook
+            raise AssertionError(f"unexpected abort: {error!r}")
+
     monkeypatch.setattr(launcher, "FleetController", Controller)
     args = _launcher_args("ports", ("--controller", "local", "--rl-image",
                                     "docker:ghcr.io/x/y@sha256:" + "a" * 64),
