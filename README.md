@@ -288,6 +288,9 @@ for a fleet, the metric tables, the debugging map, and the failure policy.
     python3 -m pytest tests/          # includes a real syncer+learner loop
     (cd syncer && cargo test)
 
+Commit messages must be English. Install the local check once per clone:
+`pre-commit install --hook-type commit-msg` (details: `docs/EVIDENCE_STORAGE.md`).
+
 CI runs three jobs on every PR and push to main: the Rust syncer suite, the
 Python suite on CPU, and a **GPU smoke test** on a self-hosted runner
 (`[self-hosted, gpu]` labels) — the real syncer plus two real learners
