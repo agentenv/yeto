@@ -29,6 +29,13 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from yeto.rl.engine.offpolicy_correction import (
+    GATE_DROPPED_LENGTHS,
+    GATE_GRANULARITY,
+    GATE_GROUP_DROPPED,
+    GATE_UNKNOWN_VERSION_DROPPED,
+    GRANULARITY_TRAJECTORY,
+)
 from yeto.rl.engine.overlap import ROLLOUT_OVERLAP_MODE
 
 from .fully_async_translate import (
@@ -285,9 +292,17 @@ class RoundCollector:
                 "unknown_groups": sum(1 for v in self.discarded if v.unknown)}
 
     def carry_over_fields(self) -> dict[str, Any]:
-        """The round's ``rl_rollout_carry_over`` fields (Miles names, carry_over.CARRY_FIELDS)."""
+        """The round's ``rl_rollout_carry_over`` fields (Miles names, carry_over.CARRY_FIELDS).
+
+        Also the ``offpolicy_gate`` inputs the driver turns into its own event
+        (rl-offpolicy-correction-passthrough D5/D6): verl has no drop by version
+        at consumption, so this collector is it (a group more than ``limit``
+        versions behind is dropped whole). verl gives versions per trajectory,
+        so the granularity is ``trajectory``; truncation by turn is not reported.
+        """
         carried = [v for v in self.kept if v.versions and min(v.versions) < self.current_outer]
         over_age = [v for v in self.discarded if not v.unknown]
+        unknown = [v for v in self.discarded if v.unknown]
         return {
             "execution_mode": ROLLOUT_OVERLAP_MODE,
             "max_policy_age": self.limit,
@@ -297,14 +312,17 @@ class RoundCollector:
             "over_age_discarded_groups": len(over_age),
             "over_age_discarded_trajectories": sum(v.meta.n for v in over_age),
             "over_age_discarded_tokens": sum(sum(v.meta.lengths) for v in over_age),
-            "unknown_version_discarded_groups": sum(1 for v in self.discarded if v.unknown),
+            "unknown_version_discarded_groups": len(unknown),
             "cross_version_tokens": sum(v.older_tokens for v in self.kept),
             "trained_response_tokens": sum(sum(v.meta.lengths) for v in self.kept),
             "resumed_trajectories": sum(v.resumed for v in self.kept),
             "segment_token_mismatches": sum(v.segment_mismatches for v in self.kept),
             "discard_reasons": sorted({v.reason for v in self.discarded if v.reason})[:5],
+            GATE_DROPPED_LENGTHS: {
+                GATE_GROUP_DROPPED: [n for v in over_age for n in v.meta.lengths],
+                GATE_UNKNOWN_VERSION_DROPPED: [n for v in unknown for n in v.meta.lengths]},
+            GATE_GRANULARITY: GRANULARITY_TRAJECTORY,
         }
-
 
 def group_metadata(collector: RoundCollector, rollout_id: int, published: Mapping[int, str]):
     """Kept groups as :class:`GroupMetadata`; the policy token names the oldest version

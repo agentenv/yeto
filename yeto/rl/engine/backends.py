@@ -97,6 +97,7 @@ _REGISTRY: dict[str, BackendEntry] = {
         "identity": f"{_VERL}.identity",
         "image": f"{_VERL}.image",
         "policy_age": f"{_VERL}.policy_age",
+        "offpolicy_correction": f"{_VERL}.offpolicy_correction",
     }),
 }
 
