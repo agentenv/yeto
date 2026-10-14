@@ -139,7 +139,8 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None) -> int:
             follower=follower, buffer=open_buffer(environ), emit=emit,
             generate=lambda rollout_id: runner.run(generate(rollout_id)),
             num_rollouts=int(miles_args.num_rollout),
-            max_backlog_groups=int(config.max_backlog_groups))
+            max_backlog_groups=int(config.max_backlog_groups),
+            min_round_s=config.min_round_s)
         emit("rl_sampler_start", store=config.store, num_rollouts=int(miles_args.num_rollout),
              max_backlog_groups=int(config.max_backlog_groups))
         return loop.run()

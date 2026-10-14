@@ -87,6 +87,10 @@ def add_arguments(group) -> None:
         "--rl-trainer-start-seconds", type=float, default=DEFAULT_START_SECONDS,
         help="configured trainer start time T_s (seconds); a measured start replaces it")
     group.add_argument(
+        "--rl-trainer-start-seconds-fixed", action="store_true",
+        help="keep --rl-trainer-start-seconds as T_s after a start was measured (an override "
+        "for check runs; the measured start is still journaled)")
+    group.add_argument(
         "--rl-node-class", action="append", default=[], metavar="NAME=CLASS[:spot][:PRECISION]",
         help="node class of one node (rollout, trainer, convertible; rl-trainer-start-stop "
         "D7). A node without ':spot' follows --spot/--on-demand. A convertible node must be "
@@ -172,7 +176,8 @@ def build(args, binding: CloudTrainerBinding, journal: Journal) -> TrainerLoop:
     records = journal.records
     scheduler = S1Scheduler(
         S1Config(a_hard=int(getattr(args, "rl_max_policy_age", 0) or 0),
-                 start_seconds=float(args.rl_trainer_start_seconds)),
+                 start_seconds=float(args.rl_trainer_start_seconds),
+                 fixed_start_seconds=bool(getattr(args, "rl_trainer_start_seconds_fixed", False))),
         start_events=binding.start_events, record=journal.append)
     loop = TrainerLoop(scheduler=scheduler, lifecycle=binding.lifecycle(next_incarnation(records)),
                        buffer=binding.buffer, cuts=binding.cuts, record=journal.append,

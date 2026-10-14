@@ -29,7 +29,9 @@ class SamplerLoop:
                  generate: Callable[[int], None], num_rollouts: int,
                  max_backlog_groups: int, emit: Callable[..., None],
                  poll_s: float = DEFAULT_POLL_S, sleep: Callable[[float], None] = time.sleep,
-                 should_stop: Callable[[], bool] = lambda: False) -> None:
+                 should_stop: Callable[[], bool] = lambda: False,
+                 min_round_s: float | None = None,
+                 clock: Callable[[], float] = time.monotonic) -> None:
         if int(max_backlog_groups) < 1:
             raise ValueError("max_backlog_groups must be >= 1")
         self.follower = follower
@@ -41,6 +43,8 @@ class SamplerLoop:
         self.poll_s = float(poll_s)
         self.sleep = sleep
         self.should_stop = should_stop
+        self.min_round_s = None if min_round_s is None else float(min_round_s)
+        self.clock = clock
 
     def backlog(self) -> int:
         """Groups in the buffer after the trainer's read position of its last release
@@ -77,6 +81,15 @@ class SamplerLoop:
                 return False
             self.sleep(self.poll_s)
 
+    def _throttle(self, started: float, *, last: bool) -> None:
+        """Keep ``min_round_s`` between two round starts (not after the last round)."""
+        if self.min_round_s is None or last:
+            return
+        rest = self.min_round_s - (self.clock() - started)
+        if rest > 0:
+            self.emit("rl_sampler_throttle", sleep_s=round(rest, 3))
+            self.sleep(rest)
+
     def run(self, start: int = 0) -> int:
         """Generate rounds ``start .. num_rollouts - 1``; returns the rounds generated."""
         done = 0
@@ -85,12 +98,14 @@ class SamplerLoop:
                 self.emit("rl_sampler_stopped", rollout_id=rollout_id, rounds=done)
                 return done
             before = len(self.buffer)
+            started = self.clock()
             self.generate(rollout_id)
             self.buffer.refresh()
             self.emit("rl_sampler_round", rollout_id=rollout_id,
                       policy_version=self.follower.version,
                       groups=len(self.buffer) - before, buffer_end=len(self.buffer))
             done += 1
+            self._throttle(started, last=rollout_id == self.num_rollouts - 1)
         self.buffer.mark_data_end()
         self.emit("rl_sampler_data_end", rounds=done, buffer_end=len(self.buffer))
         return done
