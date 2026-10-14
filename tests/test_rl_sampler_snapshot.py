@@ -91,14 +91,6 @@ def test_translation_refuses_extra_sglang_config(monkeypatch):
         ss.snapshot_argv(request, extra_argv=("--sglang-config", "x.yaml"))
 
 
-def test_launch_gate_refuses_before_provisioning():
-    with pytest.raises(ss.SamplerSnapshotRefused, match="fixed-partition"):
-        ss.check_launch("colocated", records=(DISTRIBUTED_PASS,))
-    with pytest.raises(ss.SamplerSnapshotRefused, match="no recorded pass"):
-        ss.check_launch("fixed-partition", records=())
-    ss.check_launch("fixed-partition", records=(DISTRIBUTED_PASS,))
-
-
 def test_cli_flag_is_off_by_default_and_parses():
     from yeto import cli
 

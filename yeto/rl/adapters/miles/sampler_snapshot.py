@@ -92,17 +92,6 @@ def require_recorded_pass(
     )
 
 
-def check_launch(placement: str, *, records: Sequence[CompatRecord] | None = None) -> None:
-    """Launcher-side gate (before provisioning): fixed partition and a recorded NCCL-path pass."""
-
-    if placement != "fixed-partition":
-        raise SamplerSnapshotRefused(
-            "sampler snapshot mode refused: --rl-sampler-snapshot needs --rl-placement "
-            "fixed-partition (dedicated sampler engines)"
-        )
-    require_recorded_pass(UPDATE_PATH_DISTRIBUTED, records=records)
-
-
 def sglang_config_arg(rollout_gpus: int) -> str:
     """Inline ``--sglang-config`` value: Miles' default single group plus the snapshot flags.
 
