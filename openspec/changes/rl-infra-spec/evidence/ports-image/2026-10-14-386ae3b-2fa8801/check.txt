@@ -1,0 +1,9 @@
+Identity check of ghcr.io/michaellchung/yeto-miles-ports@sha256:bcd5ffd3c51be496f3d10cc8c42e6010ecd902e1b449b0e42b1f71c2f40ab1ad (2026-10-14).
+scripts/check_miles_ports_image.sh timed out (900 s) on the full `crane export`; the yeto overlay layer
+(sha256:d763045a4a9dd71f834b665780d43cc6889f78f1cbdc479fb6c4389f8bd6e429, the image's last layer) was checked directly:
+PASS root/miles/.git/HEAD = 386ae3b07138ccd45ce4a07fc0383587f7968a3a
+PASS sgl-workspace/sglang/.git/HEAD = 2fa880182eefdb31e64d8ea70317be27f9f32121
+PASS sglang _version.py = 0.5.21.dev70+g2fa8801
+PASS /opt/yeto/image-manifest.json miles/sglang commits and tag 386ae3b-2fa8801
+PASS labels ai.yeto.miles.commit / ai.yeto.sglang.commit
+PASS anonymous pull of the manifest (HTTP 200): the package is public

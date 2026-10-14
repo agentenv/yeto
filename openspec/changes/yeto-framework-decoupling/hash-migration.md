@@ -262,3 +262,8 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
 ## S23 P2 删奖励签名（rl-drop-reward-tamper-hash，分支 s23-t8，2026-10-13）
 
 只变 codex_harness 一个标准样本的 `plugins` 一项：`codex_openenv_subprocess_agent_function.py` 源码哈希 `8bc115e4…` → `6055fcc8…`（删除向 worker 清除奖励密钥变量的 `scrubbed_environment`）。算法哈希、契约哈希、argv 哈希不变。已按 COORDINATION §5 P2-Q5 接受。`python tests/decoupling_golden.py --write` 后 diff 只有这 1 行。
+
+## S23 P0-1.11 GPU run image pin (branch s23-g2-pins, 2026-10-14)
+
+- `MILES_NEXT_COMMIT` 56068bd56 → 386ae3b07 (michaellchung/miles `s23-sao-streaming-roles`: 56068bd56 + LoRA-hybrid full-parameter transport 95533a0cd/5f7ac4e32/587bd258a + SAO streaming primitives). No loss_hub or training-loss file changes. `MILES_NEXT_IMAGE` `@sha256:fa2413be…` → `@sha256:bcd5ffd3…` (tag 386ae3b-2fa8801, public; build record `openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-14-386ae3b-2fa8801/`).
+- Golden: in all 8 samples, `backend_identity` (engine_commit, sha256) and `ports_runtime_fingerprint` change with the Miles commit, as with every earlier pin change. The three rollout_meta_hook plugin `source_sha256` entries also change `a4d7d0d5…` → `1188451c…`: the P0-S changes to `rollout_meta_hook.py` on s23-final had not been re-recorded (one of the expected failures listed under P0-1.7b.1-Q7). Algorithm hashes, contract hashes, Miles argv and `fake_engine_tapes.json` are unchanged. Regenerated with `python tests/decoupling_golden.py --write`; the diff is 48 lines.

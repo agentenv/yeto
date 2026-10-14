@@ -45,7 +45,11 @@ MILES_NEXT_UPSTREAM_COMMIT = "9e4260de047a704208535c0e90c531929879ab40"
 # s23-full-parameter-rpc (56068bd56 = 64b591a4b + full-parameter shard state,
 # transport and TrainerController methods ported from agentenv/miles e25048edd;
 # P0-1.7b.1, needed by full-parameter DiLoCo on the ports engine).
-MILES_NEXT_COMMIT = "56068bd561df6658e929fe1b2ca051b5385d3d9b"
+# s23-sao-streaming-roles (386ae3b07 = 56068bd56 + LoRA-hybrid full-parameter
+# transport (95533a0cd, 5f7ac4e32, 587bd258a; P0-1.7b.2) + SAO streaming
+# primitives ported from agentenv/miles d5eb5e82a: content identity, per-role
+# chunks, critic group RPC (P0-1.7b.3)).
+MILES_NEXT_COMMIT = "386ae3b07138ccd45ce4a07fc0383587f7968a3a"
 # sgl-project/sglang ``sglang-miles`` head when radixark/miles@9e4260d was
 # committed (upstream's Dockerfile follows that branch unpinned).
 SGLANG_NEXT_REPOSITORY = "https://github.com/michaellchung/sglang"
@@ -89,6 +93,13 @@ MILES_FORK_LINEAGE: tuple[str, ...] = (
     "64b591a4bec1ffa37fb089d3e3b99c84773b1ffc",
     # 56068bd56 = + full-parameter shard state and transport (P0-1.7b.1); no loss path.
     "56068bd561df6658e929fe1b2ca051b5385d3d9b",
+    # 95533a0cd / 5f7ac4e32 / 587bd258a = + LoRA actor opt-in to the full-parameter
+    # transport, base-weight publish for a LoRA hybrid (P0-1.7b.2); no loss path.
+    "95533a0cd2097175980afa4a9c43a817512ebca6",
+    "5f7ac4e32ba3131ebf92a77bd6571c467bfa6220",
+    "587bd258a350cc4757e3e774436eb48085d808cc",
+    # 386ae3b07 = + SAO streaming primitives (P0-1.7b.3); no loss path.
+    "386ae3b07138ccd45ce4a07fc0383587f7968a3a",
 )
 
 
@@ -127,10 +138,10 @@ MILES_NEXT_BASE_IMAGE = (
 # every SHA.  PUBLIC on ghcr.io/michaellchung since 2026-10-07 (anonymous
 # pull); a private image needs SKYPILOT_DOCKER_{USERNAME,PASSWORD,SERVER} or
 # --rl-image-private (yeto.launcher.registry_login_for; read:packages token).
-# Tag 64b591a-2fa8801; (S19 #1: critic family + algo-supplement metrics baked in; previous ddce209-2fa8801 @sha256:9c252c38...) (S18 ARU-3: Miles s18-agentic-suspend = 2f7871fb2 + --agentic-suspend-between-turns; previous 2f7871f-2fa8801 @sha256:62b4f164..., efbbc63-2fa8801 @sha256:a7990076..., 8bc5223-4e4148f @sha256:4aeafd77...) ghcr.io/michaellchung (public package); linux/amd64 only.
+# Tag 386ae3b-2fa8801; (S23 P0-1.11 GPU run: Miles s23-sao-streaming-roles; previous 64b591a-2fa8801 @sha256:fa2413be...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-14-386ae3b-2fa8801/). Earlier: (S19 #1: critic family + algo-supplement metrics baked in; previous ddce209-2fa8801 @sha256:9c252c38...) (S18 ARU-3: Miles s18-agentic-suspend = 2f7871fb2 + --agentic-suspend-between-turns; previous 2f7871f-2fa8801 @sha256:62b4f164..., efbbc63-2fa8801 @sha256:a7990076..., 8bc5223-4e4148f @sha256:4aeafd77...) ghcr.io/michaellchung (public package); linux/amd64 only.
 MILES_NEXT_IMAGE = (
     "docker:ghcr.io/michaellchung/yeto-miles-ports@sha256:"
-    "fa2413be4c4fcf066437f946365f01392d6f884002f8fa19c770c12c08f2acf0"
+    "bcd5ffd3c51be496f3d10cc8c42e6010ecd902e1b449b0e42b1f71c2f40ab1ad"
 )
 MILES_NEXT_IMAGE_MANIFEST = "/opt/yeto/image-manifest.json"
 # Nebius VM images whose /var/lib/docker already holds a docker image's
