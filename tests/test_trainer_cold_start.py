@@ -159,6 +159,28 @@ def test_no_summary_leaves_the_manifest_alone(tmp_path, monkeypatch):
     assert not (tmp_path / "run_manifest.json").exists()
 
 
+
+def test_sky_islands_record_t_s_from_teardown_diagnostics(tmp_path, monkeypatch):
+    """Non-echo sky islands: T_s comes from the island tapes the pre-teardown
+    diagnostics fetched into <diag root>/<cluster>/ (other tapes ignored)."""
+    from yeto import runs
+
+    monkeypatch.setattr(runs, "run_dir", lambda prefix: tmp_path)
+    diag = tmp_path / "diag"
+    for cluster, island, total in (("r-0", 0, 90.0), ("r-1", 1, 140.5)):
+        (diag / cluster).mkdir(parents=True)
+        (diag / cluster / f"rl-island-{island}.jsonl").write_text(json.dumps(
+            {"event": sp.START_SUMMARY_EVENT, "island_id": island, "total_s": total,
+             "missing": [], "phases": {}}) + "\n")
+    (diag / "r-1" / "yeto-tape.jsonl").write_text(json.dumps(
+        {"event": sp.START_SUMMARY_EVENT, "island_id": 7, "total_s": 1.0}) + "\n")
+    args = SimpleNamespace(cluster_prefix="r")
+    assert set(launch_manifest._record_sky_trainer_start(args, ["r-0", "r-1"], str(diag))) == {"0", "1"}
+    manifest = json.loads((tmp_path / "run_manifest.json").read_text())
+    assert sp.t_s_from_manifest(manifest) == 140.5
+    assert launch_manifest._record_sky_trainer_start(args, ["r-9"], str(diag)) is None
+
+
 # --------------------------------------------- L2.3 manifest, not imports
 
 
