@@ -729,6 +729,71 @@ def test_role_stream_initializes_dense_with_the_plain_layout(monkeypatch, algori
     assert seen["stream_role"] == expected
 
 
+def test_initial_cut_wait_leaves_the_event_loop_to_the_other_role(monkeypatch):
+    # s23-g3-sao-main-20261014a: the actor stream of island 0 and the critic
+    # stream of island 1 each blocked the event loop while waiting for their
+    # initial cut, so neither island connected its other role: deadlock.
+    from yeto.rl.adapters.miles.full_parameter import role_stream as module
+
+    seen = []
+
+    class Client:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def install_inbound_chunk_sink(self, _sink):
+            pass
+
+        def start(self):
+            pass
+
+        def check_health(self):
+            pass
+
+        def drain_updates(self):
+            seen.append("drain after peer" if "peer" in seen else "drain")
+            return []
+
+        def send_progress(self):
+            from yeto.protocol import SendProgress
+
+            return SendProgress(bytes_sent=0, queued_chunks=0, reconnects=0, connected=True)
+
+        def close(self):
+            pass
+
+    adapter = SimpleNamespace(
+        layout=SimpleNamespace(
+            layout_hash="1" * 64, fragments=SimpleNamespace(num_fragments=2)
+        ),
+        fragment_sink=lambda _initial, ray_module=None: SimpleNamespace(release_all=lambda: 0),
+        release=lambda _initial: None,
+    )
+
+    async def fake_initialize(_group, **_kwargs):
+        return adapter, object()
+
+    monkeypatch.setattr(module.MilesChunkedFullParameterAdapter, "initialize", fake_initialize)
+    monkeypatch.setattr(module, "SyncerClient", Client)
+    monkeypatch.setattr(module, "MilesRayInboundChunkSink", lambda sink: sink)
+    config = replace(_role_stream_config("actor", 30100), learner_id=1, wait_timeout=0.5)
+
+    async def peer():
+        await asyncio.sleep(0.05)
+        seen.append("peer")
+
+    async def both():
+        return await asyncio.gather(
+            module.MilesFullParameterRoleStream(config).initialize(object()),
+            peer(),
+            return_exceptions=True,
+        )
+
+    initialized, _ = asyncio.run(both())
+    assert isinstance(initialized, TimeoutError)
+    assert "drain after peer" in seen
+
+
 def test_role_stream_reports_initial_cut_upload_progress_on_timeout(monkeypatch, capsys):
     # P0-1.11 run 20261014c: the initial cut timed out after 900 s with no
     # sign of how much INIT_PARAMS had left the island; the wait now reports it.

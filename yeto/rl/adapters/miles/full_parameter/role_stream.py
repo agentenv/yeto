@@ -361,7 +361,14 @@ class MilesFullParameterRoleStream:
                         raise RuntimeError(
                             f"{self.config.algorithm} {self.config.role} initial fragment was not queued"
                         )
-            authoritative = self._wait_for_initial_fragments(client, adapter)
+            # Wait off the event loop: an island initializes its roles
+            # concurrently, and each role's initial cut needs every island's
+            # INIT for that role. A blocking wait here would stop this
+            # island's other role from connecting, and two islands blocked
+            # on different roles deadlock (s23-g3-sao-main-20261014a).
+            authoritative = await asyncio.to_thread(
+                self._wait_for_initial_fragments, client, adapter
+            )
             adapter.verify_initial_fragments(initial, authoritative)
         except BaseException:
             client.close()
