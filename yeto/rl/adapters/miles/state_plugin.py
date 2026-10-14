@@ -30,7 +30,7 @@ import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 CANONICAL_PREFIX = "base_model.model."
 OPTIMIZER_MODES = ("preserve", "reset")
@@ -87,6 +87,114 @@ class AdapterBinding:
     parameter: Any  # torch.nn.Parameter registered in the model
     to_hf: Callable[[Any], Any]  # megatron tensor -> canonical HF tensor
     from_hf: Callable[[Any], Any]  # canonical HF tensor -> megatron-shaped tensor
+    # One parameter holding several experts; ``name`` is its representative
+    # and the policy tensors come from :class:`PackedAdapterPolicy`.
+    packed: bool = False
+
+
+# --------------------------------------------------------------------------
+# Packed adapters with a sparse sync policy
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PackedSlotWrites:
+    """Writes into one packed master: zero ``frozen``, copy each ``(slot, value)``."""
+
+    frozen: slice
+    updates: tuple[tuple[int, Any], ...]
+
+
+class PackedAdapterPolicy(Protocol):
+    """A model whose adapter parameters pack several experts each.
+
+    Megatron-Bridge binds a packed parameter to one representative canonical
+    name but exports one tensor per expert.  The sync policy carries only the
+    per-expert tensors in :meth:`carried_names`; the other slots are frozen at
+    zero.  A model runtime registers its policy with
+    :func:`register_packed_adapter_policy`; the model details stay there.
+    """
+
+    def packed_name(self, side: Any) -> str | None:
+        """Representative name of a packed Bridge adapter side, else ``None``."""
+
+    def is_expert_name(self, name: str) -> bool:
+        """Whether ``name`` is one expert's slice of a packed adapter."""
+
+    def carried_names(self) -> frozenset[str]:
+        """Every per-expert name the sync policy carries (all ranks, all stages)."""
+
+    def check_frozen_slots(self, name: str, master: Any) -> None:
+        """Raise if a frozen slot of this rank's packed FP32 master is nonzero."""
+
+    def slot_writes(self, name: str, packed_shape: tuple[int, ...], tensors: Mapping[str, Any]) -> PackedSlotWrites:
+        """This rank's writes of the carried tensors into the packed parameter."""
+
+    def carried_bytes(self, packed: Sequence[tuple[str, tuple[int, ...]]]) -> int:
+        """FP32 bytes of the carried tensors, given ``(name, shape)`` of local packed bindings."""
+
+
+_PACKED_POLICY: PackedAdapterPolicy | None = None
+
+
+def register_packed_adapter_policy(policy: PackedAdapterPolicy) -> None:
+    """Install the process's packed-adapter policy once.
+
+    A second registration of the same type keeps the first policy; another
+    type is refused.
+    """
+
+    global _PACKED_POLICY
+    if _PACKED_POLICY is None:
+        _PACKED_POLICY = policy
+    elif type(_PACKED_POLICY) is not type(policy):
+        raise StatePluginError(
+            f"packed-adapter policy {type(_PACKED_POLICY).__name__} is already registered"
+        )
+
+
+def packed_adapter_policy() -> PackedAdapterPolicy | None:
+    return _PACKED_POLICY
+
+
+# One run_plugin return carries the whole policy; above this the export needs
+# a chunked transport, which the packed path does not have yet.
+MAX_PACKED_EXPORT_BYTES = 2 * 1024**3
+
+
+def _packed_policy_for(actor: Any, bindings: Sequence[AdapterBinding]) -> PackedAdapterPolicy | None:
+    """The registered policy when these bindings include a packed parameter.
+
+    Export and apply both call this before touching any state, so an
+    unsupported actor is refused before a partial write.
+    """
+
+    packed = [b for b in bindings if b.packed]
+    if not packed:
+        return None
+    if _PACKED_POLICY is None:  # pragma: no cover - bindings come from the policy
+        raise StatePluginError("packed adapter bindings without a packed-adapter policy")
+    has_distributed, _owned = distributed_ranges(getattr(actor, "optimizer", None))
+    if has_distributed or not all(has_complete_master(b.parameter) for b in packed):
+        raise StatePluginError("packed adapters need complete FP32 masters, not a distributed optimizer")
+    return _PACKED_POLICY
+
+
+def _require_packed_export_fits(policy: PackedAdapterPolicy, bindings: Sequence[AdapterBinding]) -> None:
+    size = policy.carried_bytes([(b.name, tuple(b.parameter.shape)) for b in bindings if b.packed])
+    if size > MAX_PACKED_EXPORT_BYTES:
+        raise StatePluginError(
+            f"packed adapter export is about {size / 1024**3:.1f} GiB, above the "
+            f"{MAX_PACKED_EXPORT_BYTES / 1024**3:.0f} GiB single-return limit; it needs chunked transport"
+        )
+
+
+def _require_carried(policy: PackedAdapterPolicy, names: Iterable[str], what: str) -> None:
+    expert_names = {name for name in names if policy.is_expert_name(name)}
+    carried = policy.carried_names()
+    if expert_names != carried:
+        missing, extra = sorted(carried - expert_names), sorted(expert_names - carried)
+        raise StatePluginError(f"{what} packed expert LoRA mismatch: missing={missing[:4]}, extra={extra[:4]}")
 
 
 # --------------------------------------------------------------------------
@@ -393,6 +501,10 @@ def _canonical(name: str) -> str:
     return name if name.startswith(CANONICAL_PREFIX) else CANONICAL_PREFIX + name
 
 
+def _no_conversion(_tensor: Any) -> Any:
+    raise StatePluginError("a packed adapter converts through its PackedAdapterPolicy")
+
+
 def adapter_bindings(actor: Any) -> tuple[AdapterBinding, ...]:
     """Resolve (and cache) adapter bindings via Megatron-Bridge conversion tasks.
 
@@ -412,11 +524,17 @@ def adapter_bindings(actor: Any) -> tuple[AdapterBinding, ...]:
     if build_tasks is None:
         raise StatePluginError("Megatron-Bridge lacks adapter conversion tasks")
     bindings = []
+    policy = packed_adapter_policy()
     tasks_by_base = build_tasks(actor.model)
     for base_name in sorted(tasks_by_base):
         for task in sorted(tasks_by_base[base_name], key=lambda t: t.adapter_key or ""):
             for side in (task.linear_in_task, task.linear_out_task):
                 if side.param_weight is None:
+                    continue
+                packed_name = None if policy is None else policy.packed_name(side)
+                if packed_name is not None:
+                    bindings.append(AdapterBinding(_canonical(packed_name), side.param_weight,
+                                                   _no_conversion, _no_conversion, packed=True))
                     continue
                 # names only: the model copy has the master's shape
                 converted = side.mapping.megatron_to_hf(side.param_weight, side.megatron_module)
@@ -730,7 +848,8 @@ def _export_state(actor: Any, *, policy_version: int) -> dict[str, Any] | None:
     params = [b.parameter for b in bindings]
     tensors: dict[str, Any] = {}
     with torch.no_grad():
-        if _model_parallel(actor):
+        # Packed parameters export one tensor per expert only through the Bridge.
+        if _model_parallel(actor) or _packed_policy_for(actor, bindings) is not None:
             tensors = _collective_export(actor, bindings)
         else:
             masters = full_masters(getattr(actor, "optimizer", None), params)
@@ -762,13 +881,26 @@ def _collective_export(actor: Any, bindings: Sequence[AdapterBinding]) -> dict[s
     names: set[str] = set()
     params = [b.parameter for b in bindings]
     opt = getattr(actor, "optimizer", None)
+    policy = _packed_policy_for(actor, bindings)
+    if policy is not None:
+        _require_packed_export_fits(policy, bindings)
     # DistributedOptimizer (e.g. EP>1 with dense DP>1): no main_param on the
     # parameter; gather the full FP32 master within each owning leaf's DP group.
     masters = full_masters(opt, params) if needs_gather(opt, params) else None
+    if policy is not None:
+        # Frozen slots are checked once in the packed masters; the per-expert
+        # copies of frozen experts are dropped from the export below.
+        for b, master in zip(bindings, masters or [master_of(p) for p in params], strict=True):
+            if b.packed:
+                policy.check_frozen_slots(b.name, master)
+        carried = policy.carried_names()
+        expected = {b.name for b in bindings if not b.packed}
     with masters_as_module_parameters(actor.model, params, masters):
         with megatron_bridge_utils.patch_megatron_model(actor.model):
             for item in bridge.export_adapter_weights(actor.model, cpu=False, show_progress=False):
                 name = _canonical(item[0])
+                if policy is not None and policy.is_expert_name(name) and name not in carried:
+                    continue
                 names.add(name)
                 if retain:
                     value = item[1].detach().to(device="cpu", dtype=torch.float32).contiguous()
@@ -779,6 +911,8 @@ def _collective_export(actor: Any, bindings: Sequence[AdapterBinding]) -> dict[s
     # Local bindings only cover this rank's stage; the exported name set is global.
     if retain and not expected <= names:
         raise StatePluginError(f"collective LoRA export misses local tensors: {sorted(expected - names)[:4]}")
+    if policy is not None:
+        _require_carried(policy, names, "exported")
     return tensors
 
 
@@ -890,8 +1024,14 @@ def _apply_state(
         raise StatePluginError("Flash-Next native LoRA has no apply_state contract (no-sync only)")
     bindings = adapter_bindings(actor)
     params = [b.parameter for b in bindings]
-    local = {b.name for b in bindings}
+    policy = _packed_policy_for(actor, bindings)
+    unpacked = [b for b in bindings if not b.packed]
+    packed = [b for b in bindings if b.packed]
+    local = {b.name for b in unpacked}
     incoming = set(tensors)
+    if policy is not None:
+        _require_carried(policy, incoming, "applied")
+        incoming = {name for name in incoming if not policy.is_expert_name(name)}
     # Under PP a rank holds a stage; every local tensor must be supplied and
     # (single-stage) nothing unknown may be supplied.
     missing = sorted(local - incoming)
@@ -899,18 +1039,26 @@ def _apply_state(
     if missing or extra:
         raise StatePluginError(f"global LoRA mapping mismatch: missing={missing[:4]}, extra={extra[:4]}")
     with torch.no_grad():
-        targets = {}
-        for b in bindings:
-            value = tensors[b.name]
+        for name, value in tensors.items():
             if value.dtype != torch.float32 or not torch.isfinite(value).all().item():
-                raise StatePluginError(f"{b.name!r} is not finite FP32")
-            target = b.from_hf(value.to(device=b.parameter.device))
+                raise StatePluginError(f"{name!r} is not finite FP32")
+        targets = {}
+        for b in unpacked:
+            target = b.from_hf(tensors[b.name].to(device=b.parameter.device))
             if target.numel() != b.parameter.numel():
                 raise StatePluginError(f"global LoRA shape mismatch for {b.name!r}")
             targets[b.name] = target.reshape(b.parameter.shape)
+        slot_writes = [
+            (master_of(b.parameter), policy.slot_writes(b.name, tuple(b.parameter.shape), tensors))
+            for b in packed
+        ]
         scheduler_samples = align_scheduler(actor, local_step)
         opt = getattr(actor, "optimizer", None)
-        sharded = write_masters(opt, params, [targets[b.name] for b in bindings])
+        sharded = write_masters(opt, [b.parameter for b in unpacked], [targets[b.name] for b in unpacked])
+        for master, writes in slot_writes:
+            master[writes.frozen].zero_()
+            for slot, value in writes.updates:
+                master[slot].copy_(value)
         if not sharded:
             _copy_masters_to_model(actor, bindings)
     _barrier()

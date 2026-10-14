@@ -288,22 +288,12 @@ def _check_parameter_mode(value, _config):
     return None if value in ("lora", "full") else f"parameter mode {value!r}"
 
 
-def _check_lora_targets(value, _config):
-    if value == "attention-routed-experts":
-        return "routed-expert (DSV4 clone) LoRA is legacy-only"
+def _check_expert_full(value, config):
+    """Expert-full rides the full-parameter transport, which needs DP=1."""
+
+    if value and config.parallel.data_parallel != 1:
+        return "expert-full tuning (full-parameter LoRA hybrid) requires DP=1"
     return None
-
-
-def _check_recipe(value, _config):
-    from yeto.rl.engine.run_config import RECIPE_DEEPSEEK_V4_FLASH
-
-    if value == RECIPE_DEEPSEEK_V4_FLASH:
-        return "the DeepSeek V4 recipe is legacy-only"
-    return None
-
-
-def _check_expert_full(value, _config):
-    return "expert-full tuning is legacy-only" if value else None
 
 
 def _check_sglang_tp(value, config):
@@ -327,7 +317,7 @@ _GEOMETRY_FIELDS = (
 LEAF_POLICY: dict[str, _Check] = {
     "hf_checkpoint": _ok,
     "ref_load": _ok,
-    "model_recipe.name": _check_recipe,
+    "model_recipe.name": _ok,
     "model_recipe.provider_class": _ok,
     "model_recipe.training_attention_backend": _ok,
     "model_recipe.gdn.gated_delta_net": _ok,
@@ -365,7 +355,7 @@ LEAF_POLICY: dict[str, _Check] = {
     "trainable.lora_rank": _ok,
     "trainable.lora_dropout": _ok,
     "trainable.lora_expert_rank": _ok,
-    "trainable.lora_targets": _check_lora_targets,
+    "trainable.lora_targets": _ok,
     "trainable.target_modules": _ok,
     "trainable.expert_full_count": _check_expert_full,
     "data.prompt_path": _ok,
@@ -649,7 +639,11 @@ def critic_load_argv(config: Any, algorithm: AlgorithmSpec) -> list[str]:
 
 
 def _lora_argv(trainable: Any, *, colocated: bool) -> list[str]:
-    """Upstream LoRA flags (miles/utils/lora/arguments.py); none in full-parameter mode."""
+    """Upstream LoRA flags (miles/utils/lora/arguments.py); none in full-parameter mode.
+
+    Expert-full trains base parameters too, so a restored base CPU backup would
+    undo published cuts; Miles refuses the backup for the LoRA hybrid.
+    """
 
     if trainable.parameter_mode != "lora":
         return []
@@ -659,11 +653,13 @@ def _lora_argv(trainable: Any, *, colocated: bool) -> list[str]:
         # "0" (default argv unchanged) unless --rl-lora-dropout
         "--lora-dropout", (format(trainable.lora_dropout, "g")
                            if getattr(trainable, "lora_dropout", 0.0) else "0"),
-        "--lora-type", "canonical_lora",
+        # DSV4 clone-only LoRA keeps one packed adapter per grouped-expert
+        # linear (standard LoRA); canonical LoRA splits it per projection.
+        "--lora-type", "lora" if trainable.routed_expert_lora else "canonical_lora",
         "--target-modules", ",".join(trainable.target_modules),
         # upstream applies the LoRA base CPU backup only under colocate
         # (utils/lora/utils.py:39-41); a LoRA fixed partition drops it.
-        *(["--lora-base-cpu-backup"] if colocated else []),
+        *(["--lora-base-cpu-backup"] if colocated and not trainable.expert_full else []),
         "--sglang-max-lora-rank", str(trainable.lora_rank),
     ]
 
@@ -732,8 +728,9 @@ def translate_run_config(
         )
     dynamic_filter = _algorithm_filter(config, algorithm)
 
-    from yeto.rl.engine.run_config import RECIPE_QWEN3_5, RECIPE_QWEN3_8_NEXT
+    from yeto.rl.engine.run_config import RECIPE_DEEPSEEK_V4_FLASH, RECIPE_QWEN3_5, RECIPE_QWEN3_8_NEXT
     from .lr_schedule import lr_schedule_argv
+    from .models.deepseek_v4 import ports_recipe as deepseek_v4
 
     geometry = config.geometry
     parallel = config.parallel
@@ -783,6 +780,9 @@ def translate_run_config(
             "--hidden-dropout",
             "0.0",
         ]
+    elif recipe.name == RECIPE_DEEPSEEK_V4_FLASH:
+        model_name = deepseek_v4.MODEL_NAME
+        model_recipe_values = deepseek_v4.recipe_argv(trainable)
     else:
         model_name = recipe.provider_class
 

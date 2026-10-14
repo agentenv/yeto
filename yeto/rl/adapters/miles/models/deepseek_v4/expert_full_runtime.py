@@ -223,7 +223,7 @@ class _ChunkApplyContext:
     next_chunk: int = 0
 
 
-def _expert_count() -> int:
+def configured_expert_count() -> int:
     raw = os.environ.get("YETO_DSV4_EXPERT_FULL_COUNT")
     try:
         count = int(raw or "")
@@ -343,7 +343,7 @@ def make_hybrid_trainable_state(
         raise ValueError("policy version must be non-negative")
     if not tensors:
         raise ValueError("trainable state is empty")
-    _validate_hybrid_names(tensors, _expert_count())
+    _validate_hybrid_names(tensors, configured_expert_count())
     canonical = {}
     for name, tensor in sorted(tensors.items()):
         if not isinstance(tensor, torch.Tensor):
@@ -921,7 +921,7 @@ def _merge_chunked_export_fragments(
                 # this releases that transport copy before the next chunk.
                 fragment.chunk_refs[chunk_index] = None
     tensors = dict(sorted(tensors.items()))
-    _validate_hybrid_names(tensors, _expert_count())
+    _validate_hybrid_names(tensors, configured_expert_count())
     layout_hash = module._layout_hash(tensors)
     return _OwnedTrainableState(
         policy_version=root.policy_version,
@@ -1083,7 +1083,7 @@ def install_on_lora_utils(module: ModuleType) -> None:
         lora = original(args)
         return wrap_attention_lora_with_expert_full(
             lora,
-            configure_kwargs={"expert_count": _expert_count()},
+            configure_kwargs={"expert_count": configured_expert_count()},
         )
 
     module.create_lora_instance = create_lora_instance
@@ -1119,10 +1119,12 @@ def install_on_arguments(module: ModuleType) -> None:
     module._yeto_expert_full_installed = True
 
 
-def install_on_model(module: ModuleType) -> None:
-    if getattr(module, "_yeto_expert_full_installed", False):
-        return
-    original = module.get_megatron_optimizer
+def wrap_expert_full_optimizer(original):
+    """``get_megatron_optimizer`` with the expert LR group and complete FP32 masters.
+
+    Shared by the legacy and ports Miles layouts: both call Megatron's factory
+    with keyword arguments from their model module.
+    """
 
     def get_megatron_optimizer(
         *,
@@ -1157,6 +1159,14 @@ def install_on_model(module: ModuleType) -> None:
         )
         _validate_complete_optimizer_masters(model_chunks, optimizer)
         return optimizer
+
+    return get_megatron_optimizer
+
+
+def install_on_model(module: ModuleType) -> None:
+    if getattr(module, "_yeto_expert_full_installed", False):
+        return
+    get_megatron_optimizer = wrap_expert_full_optimizer(module.get_megatron_optimizer)
 
     def capture_external_train_metrics(args, metrics):
         # This symbol is the exact call target in Miles' head-gated train loop;
@@ -1272,7 +1282,7 @@ def _expert_specs(actor) -> tuple[Any, ...]:
     return tuple(
         spec
         for spec in _expected_specs(actor)
-        if selected_expert_hf_name(spec.name, expert_count=_expert_count())
+        if selected_expert_hf_name(spec.name, expert_count=configured_expert_count())
     )
 
 
@@ -1345,7 +1355,7 @@ def _expert_views(actor) -> dict[str, Any]:
     mapped_parameters = set()
     tasks = filter_selected_expert_tasks(
         _actor_bridge(actor).get_conversion_tasks(actor.model),
-        expert_count=_expert_count(),
+        expert_count=configured_expert_count(),
     )
     for task in tasks:
         parameter = getattr(task, "param_weight", None)
@@ -1677,7 +1687,7 @@ def _apply_policy_specs(actor, state, specs) -> None:
                     del mapped
             elif selected_expert_hf_name(
                 spec.name,
-                expert_count=_expert_count(),
+                expert_count=configured_expert_count(),
             ):
                 target = views.get(spec.name)
                 if target is not None:
@@ -2116,7 +2126,7 @@ def install_on_actor_group(module: ModuleType) -> None:
     module._yeto_expert_full_installed = True
 
 
-def _weight_iterator_task_bridge(iterator):
+def weight_iterator_task_bridge(iterator):
     cached = getattr(iterator, "_yeto_expert_full_task_bridge", None)
     if cached is not None:
         return cached
@@ -2137,6 +2147,61 @@ def _weight_iterator_task_bridge(iterator):
     return cached
 
 
+def expected_expert_task_count(expert_count: int) -> int:
+    """Selected clone-expert conversion tasks: per layer, fc1 and fc2 per local offset."""
+
+    return NUM_LAYERS * min(expert_count, CLONES_PER_EXPERT_RANK) * 2
+
+
+def export_selected_expert_weights(
+    module: ModuleType,
+    iterator,
+    weights,
+    *,
+    export_kwargs: Mapping[str, Any] | None = None,
+    materialize: bool = True,
+):
+    """``(hf_name, weight, megatron_names)`` of the selected clone experts only.
+
+    Shared by the legacy and ports weight iterators (``module`` is the Miles
+    Bridge iterator module).  Every EP rank exports the same local expert
+    offsets so the Bridge export collectives align; a non-sending rank
+    (``materialize=False``) still runs them and yields nothing.  The task
+    Bridge reads the trainer checkpoint, never a quantized rollout one.
+    """
+
+    expert_count = configured_expert_count()
+    task_bridge = weight_iterator_task_bridge(iterator)
+    renamed = {module.strip_param_name_prefix(name): value for name, value in weights.items()}
+    with module.megatron_bridge_utils.patch_megatron_model(iterator.model):
+        tasks = filter_collective_expert_tasks(
+            task_bridge.get_conversion_tasks(iterator.model), expert_count=expert_count
+        )
+        expected = expected_expert_task_count(expert_count)
+        if len(tasks) != expected:
+            raise RuntimeError(
+                f"expert-full publish found {len(tasks)} conversion tasks, expected {expected}"
+            )
+        named_weights = task_bridge.export_hf_weights(
+            iterator.model,
+            cpu=False,
+            conversion_tasks=module._process_conversion_tasks(tasks, renamed),
+            merge_adapter_weights=False,
+            **dict(export_kwargs or {}),
+        )
+        if not materialize:
+            for _ in named_weights:
+                pass
+            return
+        selected = (
+            item for item in named_weights
+            if selected_expert_hf_name(item[0], expert_count=expert_count)
+        )
+        for item in iterator._postprocess_and_quantize(selected, "base"):
+            if not module.is_lora_weight_name(item[0]):
+                yield item
+
+
 def install_on_weight_iterator(module: ModuleType) -> None:
     if getattr(module, "_yeto_expert_full_installed", False):
         return
@@ -2146,47 +2211,13 @@ def install_on_weight_iterator(module: ModuleType) -> None:
         if weight_type != "base":
             yield from original(self, megatron_local_weights, weight_type=weight_type)
             return
-        renamed = {
-            module.strip_param_name_prefix(name): value
-            for name, value in megatron_local_weights.items()
-        }
-        with module.megatron_bridge_utils.patch_megatron_model(self.model):
-            expert_count = _expert_count()
-            task_bridge = _weight_iterator_task_bridge(self)
-            tasks = filter_collective_expert_tasks(
-                task_bridge.get_conversion_tasks(self.model),
-                expert_count=expert_count,
-            )
-            expected = NUM_LAYERS * min(expert_count, CLONES_PER_EXPERT_RANK) * 2
-            if len(tasks) != expected:
-                raise RuntimeError(
-                    f"expert-full base sync found {len(tasks)} conversion tasks, "
-                    f"expected {expected}"
-                )
-            tasks = module._process_conversion_tasks(tasks, renamed)
-            named_weights = task_bridge.export_hf_weights(
-                self.model,
-                cpu=False,
-                conversion_tasks=tasks,
-                merge_adapter_weights=False,
-            )
-            named_weights = (
-                item
-                for item in named_weights
-                if selected_expert_hf_name(item[0], expert_count=expert_count)
-            )
-            named_weights = self._postprocess_and_quantize(named_weights, weight_type)
-            named_weights = (
-                (hf_name, weight, megatron_name)
-                for hf_name, weight, megatron_name in named_weights
-                if not module.is_lora_weight_name(hf_name)
-            )
-            groups = module.get_atomic_update_groups(self.args, self.model_name)
-            units = module._stream_atomic_units(named_weights, groups)
-            yield from module._chunk_atomic_units_by_size(
-                units,
-                chunk_size=self.args.update_weight_buffer_size,
-            )
+        named_weights = export_selected_expert_weights(module, self, megatron_local_weights)
+        groups = module.get_atomic_update_groups(self.args, self.model_name)
+        units = module._stream_atomic_units(named_weights, groups)
+        yield from module._chunk_atomic_units_by_size(
+            units,
+            chunk_size=self.args.update_weight_buffer_size,
+        )
 
     module.HfWeightIteratorBridge.get_hf_weight_chunks = get_hf_weight_chunks
     module._yeto_expert_full_installed = True
@@ -2219,7 +2250,7 @@ def install() -> None:
         ),
     )
     for fullname, installer in targets:
-        _install_or_defer(fullname, installer)
+        install_or_defer(fullname, installer)
 
 
 class _Loader(importlib.abc.Loader):
@@ -2258,7 +2289,7 @@ class _Finder(importlib.abc.MetaPathFinder):
 _FINDERS: list[_Finder] = []
 
 
-def _install_or_defer(fullname: str, installer) -> None:
+def install_or_defer(fullname: str, installer) -> None:
     loaded = sys.modules.get(fullname)
     if loaded is not None:
         installer(loaded)

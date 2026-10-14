@@ -219,8 +219,6 @@ def test_algorithm_disagreement_rejected():
         ("agent", "tito_allowed_append_roles", ("tool",), "agent.tito_allowed_append_roles"),
         ("trainable", "parameter_mode", "adapter", "trainable.parameter_mode"),
         ("trainable", "expert_full_count", 4, "trainable.expert_full_count"),
-        ("trainable", "lora_targets", "attention-routed-experts", "trainable.lora_targets"),
-        ("model_recipe", "name", rc.RECIPE_DEEPSEEK_V4_FLASH, "model_recipe.name"),
         ("serving", "tp_size", 4, "serving.tp_size"),
     ],
 )
@@ -236,6 +234,49 @@ def test_full_parameter_mode_emits_no_lora_flags():
     cfg = sub(make_config(), "trainable", parameter_mode="full", target_modules=())
     argv = mc.translate_run_config(cfg, AlgorithmSpec()).argv
     assert not [token for token in argv if "lora" in token or token == "--target-modules"]
+
+
+def _deepseek_v4_expert_full_config():
+    cfg = make_config()
+    cfg = sub(cfg, "model_recipe", name=rc.RECIPE_DEEPSEEK_V4_FLASH)
+    cfg = sub(cfg, "parallel", data_parallel=1)
+    return sub(cfg, "trainable", expert_full_count=4)
+
+
+def test_deepseek_v4_expert_full_is_a_full_parameter_lora_hybrid():
+    # P0 1.7b.2: the recipe flags plus Adam and the Miles LoRA-hybrid transport.
+    argv = list(mc.translate_run_config(_deepseek_v4_expert_full_config(), AlgorithmSpec()).argv)
+
+    assert argv[argv.index("--model-name") + 1] == "deepseekv4"
+    assert argv[argv.index("--optimizer") + 1] == "adam"
+    assert argv[argv.index("--moe-router-bias-update-rate") + 1] == "0"
+    assert "--full-parameter-lora-hybrid" in argv
+    assert "--lora-base-cpu-backup" not in argv  # Miles refuses it for the hybrid
+    assert argv[argv.index("--lora-rank") + 1] == "8"
+    flags = [token for token in argv if token.startswith("--")]
+    assert len(flags) == len(set(flags)), "a recipe flag is emitted twice"
+
+
+def test_deepseek_v4_recipe_without_expert_full_has_no_hybrid_flags():
+    cfg = sub(_deepseek_v4_expert_full_config(), "trainable", expert_full_count=0)
+    argv = mc.translate_run_config(cfg, AlgorithmSpec()).argv
+
+    assert "--full-parameter-lora-hybrid" not in argv
+    assert "--optimizer" not in argv
+
+
+def test_deepseek_v4_clone_only_lora_uses_packed_expert_adapters():
+    # P0 1.7b.2b: standard LoRA keeps one packed adapter per grouped-expert linear.
+    cfg = sub(_deepseek_v4_expert_full_config(), "trainable", expert_full_count=0,
+              lora_targets="attention-routed-experts")
+    argv = list(mc.translate_run_config(cfg, AlgorithmSpec()).argv)
+
+    assert argv[argv.index("--lora-type") + 1] == "lora"
+    assert "--no-sglang-lora-use-virtual-experts" in argv
+    assert "--full-parameter-lora-hybrid" not in argv
+    plain = mc.translate_run_config(sub(cfg, "trainable", lora_targets="attention"), AlgorithmSpec()).argv
+    assert plain[list(plain).index("--lora-type") + 1] == "canonical_lora"
+    assert "--no-sglang-lora-use-virtual-experts" not in plain
 
 
 def test_unknown_config_field_rejected_by_name():

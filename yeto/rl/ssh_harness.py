@@ -1022,8 +1022,6 @@ def _require_ports_plan(learner: dict[str, Any]) -> None:
     try:
         require_ports_supported(
             sync_preset=learner.get("sync_preset", "strict-avg"),
-            model_recipe=learner.get("rl_model_recipe", "generic"),
-            lora_targets=learner.get("lora_targets"),
             expert_full_count=learner.get("expert_full_count", 0) or 0,
             rollout_num_gpus=learner.get("rollout_num_gpus"),
         )

@@ -339,11 +339,15 @@ def parse_args(argv=None):
         parser.error("LoRA mode requires --lora-r and --lora-targets")
     from yeto.rl.engine.selection import FULL_PARAMETER_SYNC_PRESETS, SAO_STREAMING_SYNC_PRESET
 
-    if (args.parameter_mode == "full") != (args.sync_preset in FULL_PARAMETER_SYNC_PRESETS):
+    if args.parameter_mode == "full" and args.sync_preset not in FULL_PARAMETER_SYNC_PRESETS:
         parser.error(
             "--parameter-mode full requires a full-parameter --sync-preset "
             f"({', '.join(sorted(FULL_PARAMETER_SYNC_PRESETS))})"
         )
+    if args.sync_preset == "dense-full" and not _trains_base_parameters(args):
+        parser.error("--sync-preset dense-full requires --parameter-mode full or --expert-full-count")
+    if args.sync_preset == SAO_STREAMING_SYNC_PRESET and args.parameter_mode != "full":
+        parser.error("--sync-preset sao-streaming-full requires --parameter-mode full")
     sao_runtime = (
         args.sao_streaming_runtime,
         args.sao_streaming_runtime_sha256,
@@ -770,8 +774,6 @@ def _require_ports_supported(args, extra_argv: Sequence[str] = ()) -> None:
     require_ports_supported(
         sync_preset=getattr(args, "sync_preset", "strict-avg"),
         parameter_mode=getattr(args, "parameter_mode", "lora"),
-        model_recipe=getattr(args, "rl_model_recipe", "generic"),
-        lora_targets=getattr(args, "lora_targets", None),
         expert_full_count=getattr(args, "expert_full_count", 0) or 0,
         rollout_num_gpus=getattr(args, "rollout_num_gpus", None),
         placement=getattr(args, "rl_placement", "colocated"),
@@ -813,19 +815,78 @@ _DENSE_FULL_QUANTIZATION_CONFIG_KEYS = frozenset(
 )
 
 
+def _require_env(name: str, value: str) -> None:
+    current = os.environ.get(name)
+    if current not in (None, value):
+        raise ValueError(f"{name} must be unset or {value}, got {current!r}")
+    os.environ[name] = value
+
+
+def _require_layout_runtime(legacy_flag: str, *, rl_engine: str) -> None:
+    """Switch on the runtime of this engine's Miles layout (``<flag>`` or ``<flag>_PORTS``)."""
+
+    runtime, other = (f"{legacy_flag}_PORTS", legacy_flag)
+    if rl_engine != "ports":
+        runtime, other = other, runtime
+    if os.environ.get(other) not in (None, "0"):
+        raise ValueError(f"{other} selects the other Miles layout's runtime")
+    _require_env(runtime, "1")
+
+
+def _configure_deepseek_v4_env(args, *, rl_engine: str, clone_only_lora: bool, expert_full: bool) -> None:
+    """Process-wide switches the DeepSeek V4 runtime patches read (sitecustomize).
+
+    Ray workers inherit them; clone-only LoRA and expert-full each pick the
+    runtime of the engine's Miles layout.
+    """
+
+    if clone_only_lora or expert_full:
+        _require_env("YETO_DSV4_EXPERT_CLONE", "1")
+    if clone_only_lora:
+        _require_layout_runtime("YETO_DSV4_CLONE_ONLY_LORA", rl_engine=rl_engine)
+    if clone_only_lora or expert_full:
+        if os.environ.get("SGLANG_OPT_FUSE_WQA_WKV") not in (None, "0"):
+            raise ValueError("SGLANG_OPT_FUSE_WQA_WKV must be unset or 0 for V4 attention LoRA")
+        os.environ["SGLANG_OPT_FUSE_WQA_WKV"] = "0"
+    if expert_full:
+        _require_layout_runtime("YETO_DSV4_EXPERT_FULL", rl_engine=rl_engine)
+        _require_env("YETO_DSV4_EXPERT_FULL_COUNT", str(args.expert_full_count))
+        _require_env("YETO_DSV4_EXPERT_FULL_LR", str(args.expert_full_lr))
+        _require_env("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0")
+
+
+def _trains_base_parameters(args) -> bool:
+    """Full-parameter or DeepSeek V4 expert-full: the full-parameter sync carries the cut."""
+
+    return (
+        getattr(args, "parameter_mode", "lora") == "full"
+        or int(getattr(args, "expert_full_count", 0) or 0) > 0
+    )
+
+
 def _is_sha256(value: Any) -> bool:
     return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
 
 
-def _full_parameter_mode(parameter_mode: str, sync_preset: str) -> bool:
-    """True for a full-parameter island; mode and preset must agree."""
+def _full_parameter_mode(args, sync_preset: str) -> bool:
+    """True for a full-parameter island.
 
-    from yeto.rl.engine.selection import FULL_PARAMETER_SYNC_PRESETS
+    Full parameter mode needs a full-parameter preset, and a full-parameter
+    preset needs full parameter mode, except that the dense-full sweep also
+    carries the DeepSeek V4 expert-full LoRA hybrid (P0 1.7b.2).
+    """
 
+    from yeto.rl.engine.selection import DENSE_FULL_SYNC_PRESET, FULL_PARAMETER_SYNC_PRESETS
+
+    full_mode = getattr(args, "parameter_mode", "lora") == "full"
     full_preset = sync_preset in FULL_PARAMETER_SYNC_PRESETS
-    if (parameter_mode == "full") != full_preset:
-        raise ValueError("a full-parameter sync preset and full parameter mode must be selected together")
-    return full_preset
+    if full_mode and not full_preset:
+        raise ValueError("full parameter mode needs a full-parameter sync preset")
+    if full_preset and not _trains_base_parameters(args):
+        raise ValueError(f"the {sync_preset} sync needs full parameter mode or expert-full tuning")
+    if full_preset and not full_mode and sync_preset != DENSE_FULL_SYNC_PRESET:
+        raise ValueError(f"the {sync_preset} sync needs full parameter mode")
+    return full_mode
 
 
 def _check_full_parameter_sync(args, *, rl_engine: str, yeto_policy_sync: bool) -> None:
@@ -994,6 +1055,42 @@ def _require_unquantized_full_parameter_rollout_model(model_path: str | Path) ->
         )
 
 
+def _expert_full_contract(args: Any) -> dict[str, Any]:
+    """Expert-full selection that reaches Miles through the environment, not argv.
+
+    Empty for dense full-parameter runs, so their contract hash is unchanged.
+    """
+
+    count = int(getattr(args, "expert_full_count", 0) or 0)
+    if not count:
+        return {}
+    return {
+        "expert_full": {
+            "count": count,
+            "lr": float(args.expert_full_lr),
+            "selection_sha256": args.expert_selection_sha256,
+            "selection_contract_sha256": args.expert_selection_contract_sha256,
+        }
+    }
+
+
+def _lora_config_hash(args: Any, canonical_targets: Sequence[str]) -> str:
+    """The LoRA identity hash; expert-full adds its expert selection.
+
+    Plain LoRA keeps the canonical hash unchanged, so existing identities hold.
+    """
+
+    from yeto.rl.core import canonical_lora_config_hash
+
+    base = canonical_lora_config_hash(rank=args.lora_r, target_modules=canonical_targets)
+    expert_full = _expert_full_contract(args)
+    if not expert_full:
+        return base
+    return _canonical_sha256(
+        {"schema": "yeto-lora-expert-full-config-v1", "lora_config_sha256": base, **expert_full}
+    )
+
+
 def _dense_full_training_contract_sha256(
     args: Any,
     miles_argv: Sequence[str],
@@ -1030,6 +1127,7 @@ def _dense_full_training_contract_sha256(
     )
     return _canonical_sha256(
         {
+            **_expert_full_contract(args),
             "schema": "yeto-dense-full-training-contract-v4",
             "shared_miles_argv": shared_argv,
             "rollout_seed_contract": rollout_seed_contract,
@@ -2345,12 +2443,21 @@ def run_miles(
         from yeto.rl.adapters.miles.state import require_run_plugin
 
         require_run_plugin()
-    from yeto.rl.engine.selection import DENSE_FULL_SYNC_PRESET, SAO_STREAMING_SYNC_PRESET
+    from yeto.rl.engine.selection import (
+        DENSE_FULL_SYNC_PRESET,
+        FULL_PARAMETER_SYNC_PRESETS,
+        SAO_STREAMING_SYNC_PRESET,
+    )
 
     parameter_mode = getattr(args, "parameter_mode", "lora")
     sync_preset = getattr(args, "sync_preset", "strict-avg")
-    full_parameter = _full_parameter_mode(parameter_mode, sync_preset)
+    full_parameter = _full_parameter_mode(args, sync_preset)
+    # P0-D8: every full-parameter preset runs the one full-parameter sync; the
+    # dense-full strict sweep also carries DeepSeek V4 expert-full (P0 1.7b.2).
+    full_parameter_sync = sync_preset in FULL_PARAMETER_SYNC_PRESETS
     dense_full = sync_preset == DENSE_FULL_SYNC_PRESET
+    if rl_engine == "ports" and _trains_base_parameters(args) and not full_parameter_sync:
+        raise ValueError("ports expert-full tuning needs the dense-full sync")
     sao_runtime = None
     if dense_full:
         _check_dense_full_sweep(args, rl_engine=rl_engine, yeto_policy_sync=yeto_policy_sync)
@@ -2373,37 +2480,15 @@ def run_miles(
     if full_parameter and expert_full:
         raise ValueError("full-parameter mode cannot also select expert-full tuning")
 
-    def require_env(name: str, value: str) -> None:
-        current = os.environ.get(name)
-        if current not in (None, value):
-            raise ValueError(f"{name} must be unset or {value}, got {current!r}")
-        os.environ[name] = value
-
     if full_parameter:
         _require_unquantized_full_parameter_rollout_model(
             rollout_model_path or model_path
         )
-        require_env("MILES_EXPERIMENTAL_FT_TRAINER", "0")
-
-    if clone_only_lora or expert_full:
-        require_env("YETO_DSV4_EXPERT_CLONE", "1")
-    if clone_only_lora:
-        require_env("YETO_DSV4_CLONE_ONLY_LORA", "1")
-    if clone_only_lora or expert_full:
-        fuse_wqa_wkv = os.environ.get("SGLANG_OPT_FUSE_WQA_WKV")
-        if fuse_wqa_wkv not in (None, "0"):
-            raise ValueError(
-                "SGLANG_OPT_FUSE_WQA_WKV must be unset or 0 for V4 attention LoRA"
-            )
-        os.environ["SGLANG_OPT_FUSE_WQA_WKV"] = "0"
-    if expert_full:
-        require_env("YETO_DSV4_EXPERT_FULL", "1")
-        require_env(
-            "YETO_DSV4_EXPERT_FULL_COUNT",
-            str(args.expert_full_count),
-        )
-        require_env("YETO_DSV4_EXPERT_FULL_LR", str(args.expert_full_lr))
-        require_env("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "0")
+    if full_parameter_sync:
+        _require_env("MILES_EXPERIMENTAL_FT_TRAINER", "0")
+    _configure_deepseek_v4_env(
+        args, rl_engine=rl_engine, clone_only_lora=clone_only_lora, expert_full=expert_full
+    )
 
     if getattr(args, "rl_model_recipe", "generic") == "deepseek-v4-flash":
         from yeto.rl.adapters.miles.models.deepseek_v4.bridge import ensure_deepseek_v4_bridge
@@ -2553,7 +2638,7 @@ def run_miles(
             or ()
         )
     if yeto_policy_sync:
-        if full_parameter:
+        if full_parameter_sync:
             from yeto.provenance import file_sha256
 
             model_config_path = Path(model_path) / "config.json"
@@ -2567,6 +2652,7 @@ def run_miles(
                     model_config_sha256=model_config_hash,
                     prompt_data_sha256=file_sha256(prompt_path),
                 )
+        if full_parameter:
             layout_hash = model_config_hash
             lora_config_hash = _canonical_sha256(
                 {
@@ -2575,16 +2661,10 @@ def run_miles(
                 }
             )
         else:
-            from yeto.rl.core import (
-                canonical_layout_hash,
-                canonical_lora_config_hash,
-            )
+            from yeto.rl.core import canonical_layout_hash
 
             layout_hash = canonical_layout_hash(specs)
-            lora_config_hash = canonical_lora_config_hash(
-                rank=args.lora_r,
-                target_modules=canonical_targets,
-            )
+            lora_config_hash = _lora_config_hash(args, canonical_targets)
         miles_args.yeto_rl_trust_remote_code = args.trust_remote_code
         miles_args.yeto_rl_model = args.model
         miles_args.yeto_rl_data = args.data
@@ -2754,7 +2834,7 @@ def run_miles(
 
     if yeto_policy_sync:
         _configure_applied_lr(
-            args, miles_args, rl_engine, dense_full=dense_full
+            args, miles_args, rl_engine, full_parameter_sync=full_parameter_sync
         )
     _configure_grad_audit(args, miles_args, rl_engine)
 
@@ -2803,7 +2883,7 @@ def _reject_lr_schedule_overrides(extra_argv: Sequence[str]) -> None:
             )
 
 
-def _configure_applied_lr(args, miles_args, rl_engine: str, *, dense_full: bool) -> bool:
+def _configure_applied_lr(args, miles_args, rl_engine: str, *, full_parameter_sync: bool) -> bool:
     """Legacy: record each optimizer step's applied LR (zero-LR invariant, D4).
 
     Ports reads it in the state plugin's ``train_one_step`` recorder. Legacy
@@ -2814,7 +2894,7 @@ def _configure_applied_lr(args, miles_args, rl_engine: str, *, dense_full: bool)
 
     from yeto.rl import applied_lr
 
-    if rl_engine == "ports" or dense_full or getattr(args, "eval_only", False):
+    if rl_engine == "ports" or full_parameter_sync or getattr(args, "eval_only", False):
         return False
     existing = getattr(miles_args, "custom_megatron_before_train_step_hook_path", None)
     if existing and existing != applied_lr.HOOK_PATH:
@@ -2980,12 +3060,10 @@ def _run_ports(
     learns it from the first export (before any receipt) and pins it after.
     """
 
-    from yeto.rl.core import canonical_layout_hash, canonical_lora_config_hash
+    from yeto.rl.core import canonical_layout_hash
     from yeto.rl.adapters.miles.entry import run_ports_island
 
-    lora_config_hash = canonical_lora_config_hash(
-        rank=args.lora_r, target_modules=canonical_targets
-    )
+    lora_config_hash = _lora_config_hash(args, canonical_targets)
     if native_lora_export is not None:
         if specs:
             raise ValueError("native LoRA export must not carry predicted specs")
