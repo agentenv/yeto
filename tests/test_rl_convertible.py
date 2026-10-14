@@ -7,7 +7,13 @@ import argparse
 import pytest
 
 from yeto.launch import trainer_loop as launch_loop
-from yeto.rl.adapters.miles.convertible import MilesConversionPort
+from yeto.rl.adapters.miles import LoopRunner
+from yeto.rl.adapters.miles.convertible import (
+    MilesConversionPort,
+    engine_requests_inflight,
+    miles_conversion_port,
+)
+from yeto.rl.adapters.miles.publish import MilesPublisher, PublicationError, engine_checksum_digest
 from yeto.rl.engine.convertible import (
     CONVERSION_DECISION_KIND,
     ConversionError,
@@ -309,8 +315,8 @@ class FakeController:
     async def offload(self, tags=None):
         self.log.append(("offload", tuple(tags)))
 
-    async def onload_weights(self):
-        self.log.append("onload_weights")
+    async def onload(self, tags=None):
+        self.log.append(("onload", tuple(tags)))
 
     async def onload_kv(self):
         self.log.append("onload_kv")
@@ -342,7 +348,7 @@ def test_miles_port_call_order_both_directions():
         load_weights=lambda v: (log.append(("load_weights", v)), f"sha-{v}")[1],
         collect_inflight=lambda: (log.append("collect"), [InflightTrajectory("t9")])[1],
         set_admission=lambda on: log.append(("admission", on)),
-        memory_tags=lambda: ["weights", "kv_cache", "cuda_graph"])
+        memory_tags=lambda: ["weights", "kv_cache", "cuda_graph"], weight_tags=lambda: ["weights"])
     clock = Clock()
     node = ConvertibleNode(NodeSpec("c0", NodeClass.CONVERTIBLE), port, clock=clock)
     r = node.to_trainer(Buffer())
@@ -350,5 +356,91 @@ def test_miles_port_call_order_both_directions():
     node.to_rollout(5, expected_checksum="sha-5")
     assert log == [("admission", False), "collect", "abort_all",
                    ("offload", ("weights", "kv_cache", "cuda_graph")), "trainer.onload",
-                   "trainer.offload", "onload_weights", ("load_weights", 5), "onload_kv",
+                   "trainer.offload", ("onload", ("weights",)), ("load_weights", 5), "onload_kv",
+                   ("admission", True)]
+
+
+class ChecksumController(FakeController):
+    """Engines whose ``check_weights(checksum)`` body is the last loaded version."""
+
+    def __init__(self, log, engines=1):
+        super().__init__(log)
+        self.loaded = None
+        self.engines = engines
+        self.skew = False
+
+    async def check_weights(self, action):
+        assert action == "checksum"
+        bodies = [{"w": f"v{self.loaded}", "e": i if self.skew else 0} for i in range(self.engines)]
+        return bodies
+
+
+def _publisher(log, controller):
+    async def update_weights(args, actor, executor, ctrl):
+        log.append("update_weights")
+        ctrl.loaded = 7
+
+    return MilesPublisher(args=argparse.Namespace(offload_rollout=True), actor_model=None,
+                          rollout_executor=None, inference_controller=controller,
+                          update_weights=update_weights, flatten_checksums=list,
+                          runner=LoopRunner())
+
+
+def test_publisher_load_version_returns_the_engine_checksum_digest():
+    log: list = []
+    controller = ChecksumController(log, engines=2)
+    publisher = _publisher(log, controller)
+    assert publisher.published_checksum is None
+    digest = publisher.load_version(7)
+    assert digest == engine_checksum_digest({"e": 0, "w": "v7"})
+    assert log == ["update_weights"]  # no onload, no KV: the port does those
+    publisher._reference = ("token", {"w": "v7", "e": 0})
+    assert publisher.published_checksum == digest
+
+
+def test_publisher_load_version_fails_when_engines_differ():
+    log: list = []
+    controller = ChecksumController(log, engines=2)
+    controller.skew = True
+    with pytest.raises(PublicationError, match="2 different weight checksums"):
+        _publisher(log, controller).load_version(7)
+
+
+class FakePool:
+    def __init__(self, log, sample):
+        self.log = log
+        self.sample = sample
+
+    def load_sample(self):
+        return self.sample
+
+    def set_admission(self, open_):
+        self.log.append(("admission", open_))
+
+
+def test_engine_requests_inflight_counts_running_and_queued_or_nothing_when_unknown():
+    assert [t.trajectory_id for t in engine_requests_inflight(
+        FakePool([], {"running_requests": 2, "queued_requests": 1}))] == [
+        "engine-request-0", "engine-request-1", "engine-request-2"]
+    assert engine_requests_inflight(FakePool([], None)) == []
+    assert engine_requests_inflight(FakePool([], {"running_requests": None})) == []
+
+
+def test_miles_conversion_port_wires_publisher_pool_and_trainer():
+    log: list = []
+    controller = ChecksumController(log)
+    publisher = _publisher(log, controller)
+    port = miles_conversion_port(controller=controller,
+                                 rollout=FakePool(log, {"running_requests": 1, "queued_requests": 0}),
+                                 trainer=FakeTrainer(log), publisher=publisher, run=_run)
+    port._memory_tags = lambda: ["weights", "kv_cache", "cuda_graph"]
+    port._weight_tags = lambda: ["weights"]
+    node = ConvertibleNode(NodeSpec("c0", NodeClass.CONVERTIBLE), port, clock=Clock())
+    assert node.to_trainer(Buffer()).cut.dropped == ("engine-request-0",)
+    expected = engine_checksum_digest({"e": 0, "w": "v7"})
+    receipt = node.to_rollout(7, expected_checksum=expected)
+    assert receipt.weight_checksum == expected
+    assert log == [("admission", False), "abort_all",
+                   ("offload", ("weights", "kv_cache", "cuda_graph")), "trainer.onload",
+                   "trainer.offload", ("onload", ("weights",)), "update_weights", "onload_kv",
                    ("admission", True)]

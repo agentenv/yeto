@@ -1025,6 +1025,11 @@ class MilesRolloutPool:
 
         _resolve(_call(source, method, sorted(members)))
 
+    def set_admission(self, open_: bool) -> None:
+        """Convertible node (rl-trainer-start-stop L7.2): close (False) or open (True)
+        harness admission to this pool's running members (no-op without a board)."""
+        self._harness_admission("open_admission" if open_ else "close_admission", self.members())
+
     def _offload_after_rollout(self) -> None:
         """Upstream ``train.py`` serial colocated branch (--offload-rollout)."""
 

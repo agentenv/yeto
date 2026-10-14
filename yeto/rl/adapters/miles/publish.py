@@ -342,6 +342,14 @@ def _default_flatten() -> Callable[[Any], list[dict[str, Any]]]:
     return flatten_inference_engine_checksums
 
 
+def engine_checksum_digest(body: dict[str, Any]) -> str:
+    """One engine's flattened weight checksum body as one sha256 (key-sorted JSON):
+    the value a convertible node compares after loading a published version."""
+    return hashlib.sha256(
+        json.dumps(body, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+
+
 async def _maybe_await(value: Any) -> Any:
     """The trainer hook may be sync (tests, fakes) or a coroutine (real Miles
     policy state, which must not block the running loop)."""
@@ -527,6 +535,43 @@ class MilesPublisher:
             checksums = {ids[i]: dict(sorted(b.items())) for i, b in enumerate(bodies)}
         return members, checksums
 
+
+    # -- convertible node (rl-trainer-start-stop L7.2) --------------------------
+    @property
+    def published_checksum(self) -> str | None:
+        """Digest of the weight checksum every engine reported at the last full
+        publication (None: no publication yet, checksums off, or engines differed)."""
+        return None if self._reference is None else engine_checksum_digest(self._reference[1])
+
+    def load_version(self, version: int) -> str:
+        """Load the trainer's weights of published ``version`` into this node's
+        engines and return the digest of their common weight checksum.
+
+        For a convertible node going back to rollout: the caller has offloaded the
+        trainer (``update_weights`` reads its host backups) and given the engines
+        their weight memory back; KV onload, version stamping and admission stay
+        with the caller. Engines with different checksums fail the load."""
+        return self._runner.run(self._load_version(version))
+
+    async def _load_version(self, version: int) -> str:
+        update_weights = self._update_weights_to(version)
+        try:
+            await update_weights(self._args, self._actor, self._executor, self._controller)
+        except Exception as exc:
+            raise PublicationError(f"upstream update_weights failed: {exc}",
+                                   cause=PublicationCause.UPDATE_FAILED) from exc
+        raw = await self._controller.check_weights(action="checksum")
+        try:
+            bodies = (self._flatten or _default_flatten())(raw)
+        except AssertionError as exc:
+            raise PublicationError(f"engine weight checksum failed: {exc}",
+                                   cause=PublicationCause.PAYLOAD_MISMATCH) from exc
+        digests = {engine_checksum_digest(dict(b)) for b in bodies}
+        if len(digests) != 1:
+            raise PublicationError(
+                f"{len(bodies)} engines reported {len(digests)} different weight checksums "
+                f"after loading version {version}", cause=PublicationCause.PAYLOAD_MISMATCH)
+        return digests.pop()
 
     # -- member publication (3.5) ---------------------------------------------
     def publish_members(
