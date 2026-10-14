@@ -130,6 +130,25 @@ def test_lr_schedule_is_bound_into_the_island_contract():
     assert miles_lr_schedule_sha256(SimpleNamespace(lr=1e-5)) is None
 
 
+def test_island_contract_binds_algorithm_spec():
+    """rl-code-quality-cleanup 4.8: the AlgorithmSpec hash is part of the island
+    contract; islands that run different algorithms declare different contracts."""
+    from yeto.rl.engine.backend_identity import island_contract_sha256, lr_schedule_sha256
+
+    sha = miles_identity.backend_identity("ports").sha256()
+    lr = lr_schedule_sha256("constant", 12, 1e-5)
+    alg_a, alg_b = "a" * 64, "b" * 64
+    assert island_contract_sha256(sha, None, None) == sha  # nothing declared: old identity
+    assert island_contract_sha256(None, lr, alg_a) is None
+    contracts = {island_contract_sha256(sha, lr, None), island_contract_sha256(sha, lr, alg_a),
+                 island_contract_sha256(sha, lr, alg_b), island_contract_sha256(sha, None, alg_a)}
+    assert len(contracts) == 4 and sha not in contracts
+    # an undeclared slot never collides with the other slot's value
+    assert island_contract_sha256(sha, alg_a, None) != island_contract_sha256(sha, None, alg_a)
+    with pytest.raises(ValueError):
+        island_contract_sha256(sha, lr, "not-a-hash")
+
+
 def test_bridge_configs_bind_lr_schedule_into_hello_and_join(monkeypatch):
     from types import SimpleNamespace
 
@@ -139,7 +158,8 @@ def test_bridge_configs_bind_lr_schedule_into_hello_and_join(monkeypatch):
     from yeto.rl.engine.bridges import ElasticAvgSync
 
     for cls in (bridge.BridgeConfig, decoupled.DecoupledBridgeConfig):
-        assert "lr_schedule_sha256" in {f.name for f in dataclasses.fields(cls)}
+        assert {"lr_schedule_sha256", "algorithm_spec_sha256"} <= {
+            f.name for f in dataclasses.fields(cls)}
     sha = miles_identity.backend_identity("ports").sha256()
     lr = lr_schedule_sha256("constant", 1, 1e-5)
     seen = []
@@ -151,7 +171,7 @@ def test_bridge_configs_bind_lr_schedule_into_hello_and_join(monkeypatch):
     monkeypatch.setattr(ec, "ElasticIslandClient", Spy)
     monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "k")
     cfg = SimpleNamespace(syncer_addr=("x", 0), learner_id=1, backend_identity_sha256=sha,
-                          lr_schedule_sha256=lr, expected_specs=(), global_rounds=1,
-                          local_optimizer_steps=1)
+                          lr_schedule_sha256=lr, algorithm_spec_sha256="e" * 64,
+                          expected_specs=(), global_rounds=1, local_optimizer_steps=1)
     ElasticAvgSync(cfg)._client()
-    assert seen == [island_contract_sha256(sha, lr)]
+    assert seen == [island_contract_sha256(sha, lr, "e" * 64)]

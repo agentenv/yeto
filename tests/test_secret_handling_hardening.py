@@ -180,11 +180,11 @@ def test_launcher_passes_the_pinned_contract_to_the_syncer():
 
 
 def test_cli_validates_the_pinned_contract():
-    from yeto import cli
+    from yeto.rl.engine.run_flags import sha256_hex_arg
 
-    assert cli._sha256_hex_arg(GOOD) == GOOD
+    assert sha256_hex_arg(GOOD) == GOOD
     with pytest.raises(Exception):
-        cli._sha256_hex_arg("ABC")
+        sha256_hex_arg("ABC")
 
 
 # --------------------------------------------------------------------------- D3 token boundary

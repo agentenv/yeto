@@ -20,318 +20,27 @@ from typing import Any
 
 from yeto.rl.bridge import BridgeConfig
 from yeto.rl.decoupled import DecoupledBridgeConfig
+from yeto.rl.engine.run_flags import ISLAND, add_rl_flags, rl_option_pairs
 from yeto.rl.adapters.miles.models.deepseek_v4.expert_full import expert_full_specs
 from yeto.rl.export import adapter_targets, derive_peft_lora_specs
 from yeto.rl.adapters.miles.legacy.engine import verify_miles_revision
 
 
-def parse_args(argv=None):
-    parser = argparse.ArgumentParser(prog="python3 -m yeto.rl.adapters.miles.island_entry")
-    parser.add_argument("--model", required=True)
-    parser.add_argument("--rollout-model", default=None)
-    parser.add_argument("--rollout-model-revision", default=None)
-    parser.add_argument(
-        "--rl-model-recipe",
-        choices=["generic", "deepseek-v4-flash"],
-        default="generic",
-    )
-    parser.add_argument(
-        "--rl-training-attention-backend",
-        choices=["auto", "flash", "fused", "unfused"],
-        default="auto",
-    )
-    parser.add_argument("--expert-full-count", type=int, default=0)
-    parser.add_argument("--expert-full-lr", type=float, default=1e-6)
-    parser.add_argument("--expert-selection-sha256", default=None)
-    parser.add_argument("--expert-selection-contract-sha256", default=None)
-    parser.add_argument("--model-revision", required=True)
-    parser.add_argument("--data", required=True)
-    parser.add_argument("--data-revision", default=None)
-    parser.add_argument("--eval-data", default=None)
-    parser.add_argument("--eval-dataset-name", default=None)
-    parser.add_argument("--eval-data-sha256", default=None)
-    parser.add_argument("--eval-only", action="store_true")
-    parser.add_argument("--eval-interval", type=int, default=None)
-    parser.add_argument("--eval-samples-per-prompt", type=int, default=None)
-    parser.add_argument("--eval-temperature", type=float, default=None)
-    parser.add_argument("--eval-top-p", type=float, default=None)
-    parser.add_argument("--eval-max-prompt-len", type=int, default=None)
-    parser.add_argument("--eval-max-response-len", type=int, default=None)
-    parser.add_argument("--eval-max-context-len", type=int, default=None)
-    # Required unless --rl-single-island-no-sync (checked after parsing).
-    parser.add_argument("--syncer", default=None)
-    # rl-algo-critic-family 4.2.1: the critic channel's syncer (critic algorithms only).
-    parser.add_argument("--critic-syncer", default=None)
-    parser.add_argument(
-        "--rl-echo-events",
-        action="store_true",
-        help=(
-            "ports: echo every event-tape record to stdout as 'YETO_RL_EVENT <json>' "
-            "(the launcher sets it for Modal islands, whose ~/yeto-output is not fetchable)"
-        ),
-    )
-    parser.add_argument(
-        "--rl-single-island-no-sync",
-        action="store_true",
-        help=(
-            "ports only: one island with no syncer and no outer sync (G1 smoke "
-            "entry for --rl-allow-unverified-mechanism, design D11); refused "
-            "with --syncer, several learners or a non-default sync preset"
-        ),
-    )
-    parser.add_argument("--learner-id", type=int, required=True)
-    parser.add_argument("--num-learners", type=int, default=1)
-    parser.add_argument("--learner-generation", type=int, default=0)
-    parser.add_argument("--reward-function", required=True)
-    parser.add_argument("--rl-prompt-column", default=None)
-    parser.add_argument("--rl-label-column", default=None)
-    parser.add_argument("--reward-sha256", required=True)
-    parser.add_argument("--source-sha256", required=True)
-    parser.add_argument("--global-rounds", type=int, required=True)
-    parser.add_argument(
-        "--parameter-mode",
-        choices=["lora", "full"],
-        default="lora",
-    )
-    parser.add_argument(
-        "--sync-preset",
-        choices=["strict-avg", "decoupled", "dense-full", "sao-streaming-full"],
-        default="strict-avg",
-    )
-    parser.add_argument("--fragments", type=int, default=1)
-    parser.add_argument("--parameter-layout-sha256", default=None)
-    parser.add_argument(
-        "--syncer-profile-sha256",
-        default=None,
-        help="full-parameter mode: the launcher-computed syncer semantic profile hash "
-        "(yeto.syncer_profile), bound into every role's HELLO",
-    )
-    # The SAO streaming run contract (P0-1.7b.3).  These three flags move into
-    # the flag schema (adapters/miles/run_flags.py, P0-4.7) when that merges.
-    parser.add_argument(
-        "--sao-streaming-runtime",
-        default=None,
-        metavar="PATH",
-        help="--sync-preset sao-streaming-full: the immutable SAO streaming runtime "
-        "contract (yeto.rl.sao_streaming_runtime)",
-    )
-    parser.add_argument("--sao-streaming-runtime-sha256", default=None, metavar="HEX")
-    parser.add_argument("--sao-context-sha256", default=None, metavar="HEX")
-    parser.add_argument("--pipeline", type=int, default=1)
-    parser.add_argument("--local-horizon", type=int, default=1)
-    parser.add_argument("--total-fragment-steps", type=int, default=None)
-    parser.add_argument("--initial-adapter", default=None)
-    parser.add_argument("--initial-adapter-sha256", default=None)
-    parser.add_argument("--groups-per-round", type=int, required=True)
-    parser.add_argument("--samples-per-group", type=int, required=True)
-    parser.add_argument("--over-sampling-batch-size", type=int, required=True)
-    parser.add_argument("--dynamic-sampling-filter-path", default=None)
-    parser.add_argument("--dynamic-sampling-max-replacements", type=int, default=None)
-    parser.add_argument(
-        "--secrlenv-max-infrastructure-replacements", type=int, default=None
-    )
-    parser.add_argument("--rl-offload-train", action="store_true")
-    parser.add_argument("--rl-distributed-timeout-minutes", type=int, default=10)
-    parser.add_argument("--optimizer-steps", type=int, required=True)
-    parser.add_argument("--rollout-max-response-len", type=int, required=True)
-    parser.add_argument("--apply-chat-template-kwargs", type=json.loads, default=None)
-    parser.add_argument("--custom-generate-function-path", default=None)
-    parser.add_argument("--custom-agent-function-path", default=None)
-    parser.add_argument("--codex-harness-contract", type=json.loads, default=None)
-    parser.add_argument(
-        "--codex-reasoning-effort",
-        choices=["xhigh"],
-        default=None,
-    )
-    parser.add_argument("--agent-max-seq-len", type=int, default=None)
-    parser.add_argument("--use-session-server", action="store_true")
-    parser.add_argument("--session-server-ip", default=None)
-    parser.add_argument("--session-server-port", type=int, nargs="+", default=None)
-    parser.add_argument("--session-server-workers", type=int, default=None)
-    parser.add_argument("--tito-model", default=None)
-    parser.add_argument("--codex-backend-profile", default=None)
-    parser.add_argument("--codex-exclude-reasoning-from-loss", action="store_true")
-    parser.add_argument(
-        "--tito-allowed-append-roles",
-        nargs="+",
-        choices=["tool", "user", "system"],
-        default=None,
-    )
-    parser.add_argument("--completed-groups-path", required=True)
-    parser.add_argument("--event-tape", required=True)
-    parser.add_argument("--audit-dir", default=None)
-    parser.add_argument("--actor-num-nodes", type=int, required=True)
-    parser.add_argument("--actor-num-gpus-per-node", type=int, required=True)
-    parser.add_argument("--tensor-parallel", type=int, default=1)
-    parser.add_argument("--pipeline-parallel", type=int, default=1)
-    parser.add_argument("--expert-parallel", type=int, default=None)
-    parser.add_argument("--rollout-num-gpus-per-engine", type=int, default=1)
-    parser.add_argument("--rollout-num-gpus", type=int, default=None)
-    # rl-infra-spec 2.1 (ports only): LoRA fixed partition + reserved standby
-    # GPUs, read by engine.run_config.resolve_rl_run_config.
-    parser.add_argument(
-        "--rl-placement", choices=["colocated", "fixed-partition"], default="colocated"
-    )
-    parser.add_argument("--rl-standby-gpus", type=int, default=0)
-    # rl-infra-spec 2.3 / 3.x (ports only, off by default; the default island
-    # and its Miles argv are unchanged): eval||train overlap and the E1
-    # elastic rollout controller.
-    parser.add_argument("--rl-overlap-eval", action="store_true")
-    # 1.7 observation: per-round timeline labels (entry observe=...), off by default.
-    parser.add_argument("--rl-observe-timeline", action="store_true")
-    # ports: Miles rollout/train debug dumps next to the event tape (flat .pt
-    # names, so the Modal tape mirror picks them up).
-    parser.add_argument("--rl-debug-dump", action="store_true")
-    # fleet-dashboard 2.1/2.2 (ports only): rl_heartbeat / rl_resource_sample
-    # periods in seconds; default None = 30 / 60 with --rl-observe-timeline,
-    # else off (0 disables explicitly).
-    parser.add_argument("--rl-heartbeat-interval", type=float, default=None)
-    parser.add_argument("--rl-resource-sample-interval", type=float, default=None)
+def build_parser() -> argparse.ArgumentParser:
+    """The island argv parser: the schema's island flags plus the hook-owned ones."""
+
     from yeto.rl.adapters.miles.elastic_hook import add_recommend_arguments
-    add_recommend_arguments(parser)  # D2 elastic hook
-    # ports LoRA training-time dropout (default 0 = unchanged argv)
-    parser.add_argument("--rl-lora-dropout", type=float, default=None)
-    # Flash-Next native recipe: routed-expert LoRA rank (default: profile's 8)
-    parser.add_argument("--rl-lora-expert-rank", type=int, default=None)
-    # Print the attestation runtime_fingerprint (same Miles argv as the island)
-    # and exit before Ray/GPU (ports only).
-    parser.add_argument("--rl-print-attestation-fingerprint", action="store_true")
-    parser.add_argument("--rl-boot-only", action="store_true")
-    # E2 plan-v2 §0 determinism: Megatron --deterministic-mode + DETERMINISM_ENV
-    # in the learner and every Ray worker; off by default.
-    parser.add_argument("--rl-deterministic-trainer", action="store_true")
-    # 3.3 X5: wire the island's ToolWaitBoard actor into the elastic pool (needs a
-    # rollout workload that records tool waits, e.g. yeto.rl.tool_wait_workload).
-    parser.add_argument("--rl-elastic-tool-wait-board", action="store_true")
-    parser.add_argument("--rl-elastic", action="store_true")
-    parser.add_argument("--rl-elastic-resources", default=None, metavar="PATH")
-    parser.add_argument("--rl-elastic-attestation", default=None, metavar="PATH")
-    parser.add_argument("--rl-elastic-state-dir", default=None, metavar="PATH")
-    parser.add_argument("--rl-elastic-initial-config", default=None, metavar="NAME")
-    parser.add_argument("--rl-elastic-cells", default=None, metavar="ID[,ID...]")
-    # rl-multinode-island: GPUs per island node when the island spans nodes (the
-    # launcher sends it for --gpu cloud:NxGxgpu with N > 1); None = single node.
-    parser.add_argument("--rl-island-gpus-per-node", type=int, default=None)
-    # rl-multinode-island Q2 (mixed rollout/trainer nodes): the role -> logical
-    # bundle map derived by the launcher from the elastic cfg placement; None =
-    # the leading-bundle layout (trainer first, then rollout, then standby).
-    parser.add_argument("--rl-island-bundle-map", default=None, metavar="JSON")
-    # ruling 2026-10-04 v2: explicit cross-node TP opt-ins (default: TP stays in a node)
-    parser.add_argument("--rl-allow-cross-node-tp", action="store_true")
-    parser.add_argument("--rl-allow-cross-node-engine-tp", action="store_true")
-    # fork F-R1: declare --rl-elastic-cells as the fork's rollout cells (map rollout_cells).
-    parser.add_argument("--rl-elastic-declare-cells", action="store_true")
-    # E3 4.7: enable trainer DP-change / role-transfer edges (drops --balance-data,
-    # wires MilesTrainerOps and the pool GPU ids)
-    parser.add_argument("--rl-elastic-trainer-edges", action="store_true")
-    # rl-multinode-island Q6: accept a changed GPU uuid pool (rebind) at startup
-    parser.add_argument("--rl-elastic-accept-rebind", action="store_true")
-    # 3.8 strict pause budget inputs (defaults: syncer 900 s, margin 0.5).
-    # rl-inter-island-scheduling 0.13 (launcher forwards only "elastic")
-    parser.add_argument("--rl-island-scheduling", choices=("legacy", "elastic"), default="legacy")
-    # S17 N16: LR schedule choice (yeto.rl.engine.run_config.resolve_lr_schedule)
-    parser.add_argument("--rl-lr-schedule", choices=("auto", "linear", "constant"), default="auto")
-    parser.add_argument("--rl-max-policy-age", type=int, default=0)
-    # decoupling 7.7a: "<vendor>-<card>" from the launcher's card catalog
-    # (yeto.hw.catalog); falls back to $YETO_RL_COMPAT_GROUP, unset -> error.
-    parser.add_argument("--rl-compat-group", default=None)
-    parser.add_argument("--rl-syncer-epoch", type=int, default=0)
-    parser.add_argument("--rl-elastic-quorum-timeout-s", type=float, default=None)
-    parser.add_argument("--rl-elastic-idle-flow-timeout-s", type=float, default=None)
-    parser.add_argument("--rl-elastic-pause-margin", type=float, default=None)
-    # controller D4 timeouts (defaults: controller.Timeouts, T_drain 120 s, T_recovery 900 s)
-    parser.add_argument("--rl-elastic-drain-timeout-s", type=float, default=None)
-    parser.add_argument("--rl-elastic-recovery-timeout-s", type=float, default=None)
-    # 3.7 restart recovery: consecutive unverified recoveries before RECOVERY_REQUIRED
-    parser.add_argument("--rl-elastic-max-recovery-attempts", type=int, default=None)
-    # rl-multinode-island Q4 (C5): off-island copy of the state dir (journal/cuts/ledger),
-    # synced after every commit point and restored on an empty state dir (machine replaced)
-    parser.add_argument("--rl-elastic-checkpoint-store", default=None, metavar="PATH")
-    # rl-resume-from-checkpoint (S17 C4): resume across launches WITHOUT --rl-elastic
-    # (single island, no sync). The store path is on the island (a Modal Volume mount, a
-    # bucket mount or a shared path); round cuts + a hashed state snapshot + LATEST go there.
-    parser.add_argument("--rl-resume-store", default=None, metavar="PATH")
-    parser.add_argument("--rl-resume-state-dir", default="~/yeto-rl/resume-state", metavar="PATH")
-    parser.add_argument("--rl-cut-every", type=int, default=None)
-    parser.add_argument("--rl-cut-keep", type=int, default=None)
-    parser.add_argument("--rl-resume-allow-config-change", action="store_true")
-    parser.add_argument("--rl-stop-after-rounds", type=int, default=None)
-    parser.add_argument("--sglang-tp-size", type=int, default=None)
-    parser.add_argument("--sglang-dp-size", type=int, default=None)
-    parser.add_argument("--sglang-ep-size", type=int, default=None)
-    parser.add_argument("--sglang-mem-fraction-static", type=float, default=0.4)
-    parser.add_argument("--sglang-attention-backend", default=None)
-    parser.add_argument(
-        "--sglang-deterministic-inference",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-    )
-    parser.add_argument("--sglang-page-size", type=int, default=None)
-    parser.add_argument("--sglang-max-running-requests", type=int, default=None)
-    parser.add_argument("--sglang-chunked-prefill-size", type=int, default=None)
-    parser.add_argument("--use-rollout-routing-replay", action="store_true")
-    parser.add_argument("--lora-r", type=int, default=None)
-    parser.add_argument(
-        "--lora-targets",
-        choices=[
-            "auto",
-            "attention",
-            "attention-routed-experts",
-            "all-linear",
-        ],
-        default=None,
-    )
-    parser.add_argument("--inner-lr", type=float, required=True)
-    parser.add_argument("--seq-len", type=int, required=True)
-    parser.add_argument("--seed", type=int, required=True)
-    parser.add_argument("--wan-streams", type=int, default=4)
-    parser.add_argument("--miles-root", required=True)
-    parser.add_argument(
-        "--rl-engine",
-        choices=["legacy", "ports"],
-        default="ports",
-        help="RL engine path (default ports); ports rejects unsupported combinations at startup",
-    )
-    # rl-algorithm-capabilities D8/D9/D11 (ports only; refused on legacy).
-    parser.add_argument(
-        "--rl-algorithm-spec",
-        default=None,
-        help="AlgorithmSpec JSON (v1 or v2) for --rl-engine ports",
-    )
-    parser.add_argument(
-        "--rl-expected-algorithm-sha256",
-        default=None,
-        help="algorithm hash the launcher expects every island to build (ports)",
-    )
-    parser.add_argument(
-        "--rl-allow-unverified-mechanism",
-        action="append",
-        default=None,
-        metavar="NAME",
-        help="single-island smoke: admit an expressible but undeclared mechanism (ports)",
-    )
-    # rl-algo-critic-family D5: the critic warm-up stage product the main stage loads
-    parser.add_argument("--rl-critic-load", default=None, metavar="DIR",
-                        help="critic warm-up checkpoint (ports main stage --critic-load)")
-    parser.add_argument("--rl-critic-init-sha256", default=None, metavar="HEX",
-                        help="content SHA256 of --rl-critic-load (critic_warmup.checkpoint_sha256)")
-    # rl-algo-critic-family 5.3: without --rl-critic-load, a critic algorithm with
-    # a warm-up runs stage W itself before the main stage (critic_warmup.run_ports_warmup)
-    parser.add_argument("--rl-critic-warmup-dir", default="~/yeto-rl/critic-warmup",
-                        metavar="DIR",
-                        help="stage-W product cache (one product per algorithm + initial actor)")
-    parser.add_argument("--rl-critic-baseline-run", action="store_true",
-                        help=argparse.SUPPRESS)  # set by run_critic_baseline: no tape echo
-    parser.add_argument("--rl-critic-baseline-rounds", type=int, default=0, metavar="N",
-                        help="critic warm-up: first run N rounds of the same algorithm without "
-                             "the warm-up (randomly initialized value head) as the explained-"
-                             "variance baseline (own event tape / completed-groups path; "
-                             "--rl-single-island-no-sync only)")
-    parser.add_argument("--megatron-ref-load", default=None)
-    parser.add_argument("--trust-remote-code", action="store_true")
     from yeto.wandb_logger import add_arguments as add_wandb_arguments
 
+    parser = argparse.ArgumentParser(prog="python3 -m yeto.rl.adapters.miles.island_entry")
+    add_rl_flags(parser, ISLAND)  # yeto/rl/engine/run_flags.py (P0 4.7)
+    add_recommend_arguments(parser)  # D2 elastic hook
     add_wandb_arguments(parser)
+    return parser
+
+
+def parse_args(argv=None):
+    parser = build_parser()
     args = parser.parse_args(argv)
     if args.parameter_mode == "lora" and (
         args.lora_r is None or args.lora_targets is None
@@ -415,19 +124,19 @@ def build_ports_launch(args, run_config, extra_argv=()):
                                 max_policy_age=int(getattr(args, "rl_max_policy_age", 0) or 0))
 
 
-_ELASTIC_COMPANIONS = (
-    ("rl_elastic_resources", "--rl-elastic-resources"),
-    ("rl_elastic_attestation", "--rl-elastic-attestation"),
-    ("rl_elastic_state_dir", "--rl-elastic-state-dir"),
-    ("rl_elastic_initial_config", "--rl-elastic-initial-config"),
-    ("rl_elastic_cells", "--rl-elastic-cells"),
-    ("rl_elastic_quorum_timeout_s", "--rl-elastic-quorum-timeout-s"),
-    ("rl_elastic_idle_flow_timeout_s", "--rl-elastic-idle-flow-timeout-s"),
-    ("rl_elastic_pause_margin", "--rl-elastic-pause-margin"),
-    ("rl_elastic_drain_timeout_s", "--rl-elastic-drain-timeout-s"),
-    ("rl_elastic_recovery_timeout_s", "--rl-elastic-recovery-timeout-s"),
-    ("rl_elastic_max_recovery_attempts", "--rl-elastic-max-recovery-attempts"),
-    ("rl_elastic_checkpoint_store", "--rl-elastic-checkpoint-store"),
+_ELASTIC_COMPANIONS = rl_option_pairs(
+    "rl_elastic_resources",
+    "rl_elastic_attestation",
+    "rl_elastic_state_dir",
+    "rl_elastic_initial_config",
+    "rl_elastic_cells",
+    "rl_elastic_quorum_timeout_s",
+    "rl_elastic_idle_flow_timeout_s",
+    "rl_elastic_pause_margin",
+    "rl_elastic_drain_timeout_s",
+    "rl_elastic_recovery_timeout_s",
+    "rl_elastic_max_recovery_attempts",
+    "rl_elastic_checkpoint_store",
 )
 _ELASTIC_PAUSE = ("rl_elastic_quorum_timeout_s", "rl_elastic_idle_flow_timeout_s",
                   "rl_elastic_pause_margin", "rl_elastic_drain_timeout_s",
@@ -2637,6 +2346,8 @@ def run_miles(
             )
             or ()
         )
+    # 4.8: part of the island contract; placement capabilities stay out of it.
+    algorithm_spec_sha256 = None if ports_algorithm is None else ports_algorithm.sha256()
     if yeto_policy_sync:
         if full_parameter_sync:
             from yeto.provenance import file_sha256
@@ -2799,6 +2510,7 @@ def run_miles(
                 learner_budget_steps=miles_args.yeto_rl_learner_budget_steps,
                 backend_identity_sha256=_backend_identity_sha256(args),
                 lr_schedule_sha256=miles_lr_schedule_sha256(miles_args),
+                algorithm_spec_sha256=algorithm_spec_sha256,
                 compat_group=_island_compat_group(args),
             )
         else:
@@ -2819,6 +2531,7 @@ def run_miles(
                 send_initial_params=not getattr(args, "eval_only", False),
                 backend_identity_sha256=_backend_identity_sha256(args),
                 lr_schedule_sha256=miles_lr_schedule_sha256(miles_args),
+                algorithm_spec_sha256=algorithm_spec_sha256,
                 compat_group=_island_compat_group(args),
             )
             if getattr(args, "rl_island_scheduling", "legacy") == "elastic":

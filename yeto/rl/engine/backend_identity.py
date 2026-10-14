@@ -88,7 +88,10 @@ def session_contract_hash(layout_fingerprint: bytes, identity_sha256: str) -> by
 
 
 LR_SCHEDULE_SCHEMA = "yeto-lr-schedule-v1"
-ISLAND_CONTRACT_DOMAIN = b"yeto-rl-island-contract-v1\0"
+# v2 (rl-code-quality-cleanup 4.8): the AlgorithmSpec hash is a third slot.
+ISLAND_CONTRACT_DOMAIN = b"yeto-rl-island-contract-v2\0"
+# Slot value of an undeclared LR schedule or algorithm (not a reachable sha256).
+_UNDECLARED = bytes(32)
 
 
 def lr_schedule_sha256(decay_style: str, decay_iters: int | None, lr: Any,
@@ -113,27 +116,52 @@ IDENTITY_TEST_SALT_DOMAIN = b"yeto-rl-identity-test-salt-v1\0"
 
 
 def island_contract_sha256(identity_sha256: str | None, lr_schedule: str | None,
+                           algorithm_spec: str | None = None,
                            test_salt: str | None = None) -> str | None:
     """What an island declares to the syncer as its identity (HELLO session
     contract and elastic JOIN): the backend identity, bound to the LR schedule
-    hash when the adapter supplies one.  ``lr_schedule`` None keeps the plain
-    backend identity (old behaviour, e.g. verl until its adapter supplies it).
+    hash and the AlgorithmSpec hash (``AlgorithmSpec.sha256()``) when the
+    adapter supplies them.  With neither declared the plain backend identity
+    is kept (e.g. verl until its adapter supplies them).
+
+    The algorithm slot is the spec's canonical hash only.  Placement
+    capabilities (``with_partitioned_serial`` and the like) are not part of
+    the spec, so islands that differ only in placement (colocated vs
+    fixed-partition) declare the same contract (rl-mixed-island-placement Q4).
 
     ``test_salt`` (launch-preflight-guards 3.3, TEST ONLY): the
     ``identity_test_salt`` of a negative-test island; mixed into the result so
     the island declares a different identity.  None (default) = unchanged."""
     if identity_sha256 is None:
         return None
-    if lr_schedule is None:
+    if lr_schedule is None and algorithm_spec is None:
         out = identity_sha256
     else:
-        ident = bytes.fromhex(_sha256_hex(identity_sha256, "backend identity sha256"))
-        lr = bytes.fromhex(_sha256_hex(lr_schedule, "lr schedule sha256"))
-        out = hashlib.sha256(ISLAND_CONTRACT_DOMAIN + ident + lr).hexdigest()
+        out = hashlib.sha256(
+            ISLAND_CONTRACT_DOMAIN
+            + bytes.fromhex(_sha256_hex(identity_sha256, "backend identity sha256"))
+            + _contract_slot(lr_schedule, "lr schedule sha256")
+            + _contract_slot(algorithm_spec, "algorithm spec sha256")).hexdigest()
     if test_salt is None:
         return out
     return hashlib.sha256(IDENTITY_TEST_SALT_DOMAIN + bytes.fromhex(out)
                           + str(test_salt).encode("utf-8")).hexdigest()
+
+
+def _contract_slot(value: str | None, what: str) -> bytes:
+    return _UNDECLARED if value is None else bytes.fromhex(_sha256_hex(value, what))
+
+
+def config_island_contract_sha256(config: Any) -> str | None:
+    """:func:`island_contract_sha256` of a sync bridge config (strict, decoupled
+    or elastic), salted by this island's ``identity_test_salt`` override."""
+    from yeto.island_overrides import identity_test_salt
+
+    return island_contract_sha256(
+        getattr(config, "backend_identity_sha256", None),
+        getattr(config, "lr_schedule_sha256", None),
+        getattr(config, "algorithm_spec_sha256", None),
+        test_salt=identity_test_salt())
 
 
 def check_identity_match(local: BackendIdentity, peer: BackendIdentity) -> None:

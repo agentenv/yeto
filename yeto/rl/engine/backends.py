@@ -73,6 +73,7 @@ _REGISTRY: dict[str, BackendEntry] = {
         "selection_argv": f"{_MILES}.selection_argv",
         "harness_glue": f"{_MILES}.harness_glue.codex_openenv",
         "launch_flags": f"{_MILES}.launch_flags",
+        "run_flags": f"{_MILES}.run_flags",
         "run_config_rules": f"{_MILES}.run_config_rules",
         "binding": f"{_MILES}.binding",
         "identity": f"{_MILES}.identity",

@@ -311,7 +311,7 @@ def test_launcher_forwards_strict_pause_inputs_to_learner_and_syncer(tmp_path):
                  "--rl-elastic-idle-flow-timeout-s", "300", "--rl-elastic-pause-margin", "0.25"))
     launcher._check_ports_infra_switches(args, "ports")
     _, flags = launcher._ports_infra_flags(args)
-    assert flags.endswith(" --rl-elastic-quorum-timeout-s 120 --rl-elastic-idle-flow-timeout-s"
+    assert flags.endswith(" --rl-elastic-quorum-timeout-s 120.0 --rl-elastic-idle-flow-timeout-s"
                           " 300.0 --rl-elastic-pause-margin 0.25")
     assert launcher._syncer_quorum_timeout(args) == " --quorum-timeout-s 120"
     island = [t.replace("~/yeto-rl", "/y") for t in flags.split()]

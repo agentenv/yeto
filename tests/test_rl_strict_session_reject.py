@@ -39,6 +39,9 @@ LR_LINEAR = lr_schedule_sha256("linear", 3, 1e-5)
 LR_CONSTANT = lr_schedule_sha256("constant", 3, 1e-5)
 VERL_LINEAR = island_contract_sha256(VERL_ID, LR_LINEAR)
 VERL_CONSTANT = island_contract_sha256(VERL_ID, LR_CONSTANT)
+# rl-code-quality-cleanup 4.8: same backend and LR schedule, different AlgorithmSpec
+VERL_ALGO_A = island_contract_sha256(VERL_ID, LR_CONSTANT, "a" * 64)
+VERL_ALGO_B = island_contract_sha256(VERL_ID, LR_CONSTANT, "b" * 64)
 
 
 def _start(binary, port, checkpoint, rounds, *, learners, event_tape):
@@ -95,9 +98,10 @@ H200_ID = "c" * 64
 
 @pytest.mark.parametrize("good,intruder,group", [(VERL_ID, MILES_ID, "nvidia-h100"),
                                                  (VERL_LINEAR, VERL_CONSTANT, "nvidia-h100"),
+                                                 (VERL_ALGO_A, VERL_ALGO_B, "nvidia-h100"),
                                                  (VERL_ID, H200_ID, "nvidia-h200"),
                                                  (VERL_ID, H200_ID, "ascend-910b")],
-                         ids=["backend-identity", "lr-schedule", "compat-h200", "compat-ascend"])
+                         ids=["backend-identity", "lr-schedule", "algorithm-spec", "compat-h200", "compat-ascend"])
 def test_mismatched_hello_is_refused_without_stopping_the_session(syncer_binary, tmp_path,
                                                                     good, intruder, group):
     port = _port()
