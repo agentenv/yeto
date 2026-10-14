@@ -224,6 +224,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         # Checked first: the flag must never turn an SFT launch syncer-less.
         raise ValueError("--rl-single-island-no-sync requires --training-mode rl")
     from . import launch_preflight, sky_patches
+    from .launch import trainer_loop
 
     # launch-preflight-guards 1.3: thread count before anything touches a cloud.
     args._launch_preflight_manifest = {"preflight": {"threads": launch_preflight.thread_preflight(args)}}
@@ -231,6 +232,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     prepare_launch_args(args)
     # 2.3 / 3.1 / 3.6: memory estimate, island overrides, negative-test resume guard.
     launch_preflight.pre_cloud_checks(args, threads=False)
+    trainer_loop.check(args)  # rl-trainer-start-stop L5.3b: refuse before any launch
     _write_run_manifest(args)
     head_mode = local_syncer is not None
     # --rl-single-island-no-sync: one ports island, no syncer at all
@@ -637,7 +639,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                     modal_tape_dir=modal_tape_dir))
 
         try:
-            exit_codes = controller.run()
+            exit_codes = trainer_loop.run_with_trainer_loop(args, controller.run)
         except RunStalled as error:
             print(f"[launcher] ERROR: {error}; stopping the run (exit {RUN_STALLED_EXIT})",
                   file=sys.stderr)
