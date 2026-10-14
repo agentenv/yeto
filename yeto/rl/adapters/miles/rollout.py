@@ -493,7 +493,7 @@ def handle_from_metadata(
 
 _CARRY_OVER_KEYS = (
     # P0-S overlap: Miles fully_async stale drops (None = unknown)
-    "stale_dropped_groups",
+    "stale_dropped_groups", "execution_mode",
     "max_policy_age", "carried_out_groups", "cross_version_tokens", "trained_response_tokens",
     "cross_version_scored_tokens", "cross_version_unscored_samples",
     # 5.5: distribution of the cross-version IS ratio (calibrates warn/fallback)

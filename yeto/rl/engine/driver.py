@@ -1245,14 +1245,16 @@ class IslandDriver:
     def _emit_carry_over(self, rollout_id: int, batch: Any) -> None:
         """agentic-rollout-utilization 4.1: one ``rl_rollout_carry_over`` per round of a
         limit > 0 run (carried in / back, discarded over the limit, cross-version
-        tokens and truncation). Limit 0: nothing (default tapes unchanged)."""
+        tokens and truncation). Limit 0: nothing (default tapes unchanged).
+        A rollout that overlaps training (fully_async) reports its own
+        ``execution_mode``; it replaces the profile's step-scheduling label."""
         fields = getattr(batch, "carry_over", None)
         if not fields:
             return
         groups = getattr(batch, "groups", ()) or ()
         self.emit("rl_rollout_carry_over", rollout_id=rollout_id,
                   policy_version=int(getattr(batch, "policy_version", rollout_id)),
-                  t=self.clock(), **self._labels(), **dict(fields),
+                  t=self.clock(), **{**self._labels(), **dict(fields)},
                   trained_groups_with_older_tokens=sum(
                       1 for g in groups if getattr(g, "policy_versions", None)
                       and min(g.policy_versions) < rollout_id),

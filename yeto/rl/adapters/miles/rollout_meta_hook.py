@@ -983,10 +983,12 @@ def extract_rollout_metadata(
                 payload["buffer_length"] = buffer_length
         submitted = submitted_groups(args, data_source)
         if round_counts is not None:
+            from yeto.rl.engine.overlap import ROLLOUT_OVERLAP_MODE
+
             # P0-S overlap: groups drawn this round finish in later rounds, so
             # the draws and Miles' stale drops are reported as they are
             # (stale_dropped_groups None = unknown), not balanced per round.
-            payload.update(round_counts)
+            payload.update(round_counts, execution_mode=ROLLOUT_OVERLAP_MODE)
         elif submitted is not None and payload.get("max_policy_age"):
             # 4.1: under partial rollout the abort does not discard; the groups
             # submitted (new + resubmitted from the buffer) and not completed

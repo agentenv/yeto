@@ -318,6 +318,8 @@ def test_driver_runs_fully_async_rounds_with_carry_over_and_discard(tmp_path):
     events = _events(tmp_path / "tape.jsonl")
     carry = [e for e in events if e["event"] == "rl_rollout_carry_over"]
     assert [e["rollout_id"] for e in carry] == [0, 1, 2]
+    # the profile stays partitioned-serial; the overlapped rounds say so (P0-S-fix B)
+    assert {e["execution_mode"] for e in carry} == {"partitioned-overlap"}
     assert carry[1]["carried_in_groups"] == 1 and carry[1]["resumed_trajectories"] == 2
     assert carry[1]["cross_version_tokens"] == 4  # 2 tokens at v0 x 2 responses
     assert carry[2]["over_age_discarded_groups"] == 1 and carry[2]["over_age_discarded_tokens"] == 10

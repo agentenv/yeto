@@ -56,7 +56,6 @@ class PromptLedger:
         self.executor = executor
         self.untrained: dict[int, list[Any]] = {}
         self.drawn_since_report = 0
-        self._stale_reported: int | None = None
         self._get_samples: Callable[..., Any] = data_source.get_samples
         self._add_samples: Callable[..., Any] = data_source.add_samples
         data_source.get_samples = self._drawn
@@ -81,18 +80,21 @@ class PromptLedger:
 
     def take_round_counts(self) -> dict[str, Any]:
         """Groups drawn since the last report and stale groups Miles dropped
-        since then (``None`` = unknown: Miles did not expose the count)."""
+        this round (``None`` = unknown: Miles did not expose the count).
+
+        Miles' ``_metric_stale_groups`` is a per-step counter: its
+        ``get_metrics`` resets it right after this hook runs (in ``_drain``),
+        so the value read here is already this round's count, not a running
+        total."""
         counts: dict[str, Any] = {"submitted_groups": self.drawn_since_report}
         self.drawn_since_report = 0
         rollout_fn = getattr(self.executor, "generate_rollout", None)
-        stale_total = getattr(getattr(rollout_fn, "_output", None), "_metric_stale_groups", None)
-        if not isinstance(stale_total, int):
+        stale = getattr(getattr(rollout_fn, "_output", None), "_metric_stale_groups", None)
+        if not isinstance(stale, int):
             logger.warning("fully_async stale-group count is not exposed by Miles; reported unknown")
             counts["stale_dropped_groups"] = None
             return counts
-        previous = self._stale_reported or 0
-        counts["stale_dropped_groups"] = stale_total - previous
-        self._stale_reported = stale_total
+        counts["stale_dropped_groups"] = stale
         return counts
 
 
