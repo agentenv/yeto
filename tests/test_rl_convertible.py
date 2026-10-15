@@ -137,8 +137,12 @@ def test_launcher_refuses_convertible_on_a_spot_run():
         launch_loop.check(args)
     ok = _launch_args(["--on-demand", "--rl-node-class", "island1=convertible",
                        "--rl-node-class", "island2=rollout:spot:fp8"])
-    launch_loop.check(ok)
     assert [s.spot for s in launch_loop.node_specs(ok)] == [False, True]
+    # L7.5: a declared convertible island makes a convertible pool, which needs every
+    # island convertible (a rollout-only node would need a LoRA sampler release)
+    ok.gpu, ok.rl_checkpoint_store = "modal:1xh100,modal:1xh100,modal:1xh100", "modal-volume://v/p"
+    with pytest.raises(SystemExit, match="every --gpu island convertible"):
+        launch_loop.check(ok)
 
 
 # ---------------------------------------------------------------- L7.2 cut rule

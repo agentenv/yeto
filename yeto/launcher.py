@@ -965,7 +965,7 @@ def dry_run_plan(args) -> dict:
 
                 entry["island_role"] = {"role": role, "billing": billing(role),
                                         "rejoin": rejoin_source(role)}
-            if sample_roles.is_pair(args):  # L5.4: per-island role, learner 0 of 1
+            if sample_roles.is_store_coupled(args):  # L5.4/L7.5: per-island role, learner 0 of 1
                 entry["sample_role"] = sample_roles.island_args(
                     args, learner_id, len(specs)).rl_sample_role
             if learner_id == trainer_loop.held_island(args):
@@ -997,7 +997,8 @@ def dry_run_plan(args) -> dict:
         "outer_sync": not no_sync,
         # rl-trainer-start-stop L5.3b/L5.4: the head's scheduler and the island it owns
         "trainer_scheduler": (None if not trainer_loop.enabled(args) else {
-            "mode": args.rl_trainer_scheduler, "island": trainer_loop.held_island(args),
+            "mode": trainer_loop.scheduler_mode(args), "island": trainer_loop.held_island(args),
+            "convertible_pool": trainer_loop.convertible_pool(args),
             "interval_s": args.rl_trainer_scheduler_interval}),
         "algorithm_spec_sha256": getattr(args, "rl_expected_algorithm_sha256", None),
         "algorithm_spec": getattr(args, "rl_algorithm_spec_json", None),

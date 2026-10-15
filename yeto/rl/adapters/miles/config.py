@@ -782,7 +782,14 @@ def translate_run_config(
     columns = config.data.columns
     request = placement_request(config)
     sample_buffer = getattr(config, "sample_buffer", None)
-    if (sample_buffer is not None and sample_buffer.role == "trainer"
+    from .buffer_rollout import CONVERTIBLE
+
+    if sample_buffer is not None and sample_buffer.role == CONVERTIBLE:
+        # L7.5: trainer and engines share the GPUs; the converted node loads its own
+        # trained weights into its engines (no release through the store)
+        if trainable.parameter_mode != "lora" or request.kind != "colocated":
+            raise MilesConfigError("--rl-sample-role convertible needs LoRA on a colocated island")
+    elif (sample_buffer is not None and sample_buffer.role == "trainer"
             and trainable.parameter_mode == "lora" and request.kind == "colocated"
             and request.trainer_gpus != 1):
         # A colocated trainer is asleep (process groups destroyed) when it publishes;
@@ -1150,12 +1157,15 @@ SAMPLER_ONLY_FLAG = "--debug-rollout-only"
 def sample_buffer_argv(role: str, *, max_policy_age: int) -> tuple[str, ...]:
     """L4.6: a sampler writes the buffer and builds no trainer model
     (``--debug-rollout-only``: rollout GPUs only, engines serve the base weights);
-    a trainer reads the buffer and can export HF snapshots for its releases."""
-    from .buffer_rollout import SAMPLER, rollout_argv
+    a trainer reads the buffer and can export HF snapshots for its releases; a
+    convertible node (L7.5) does both with one switchable rollout function."""
+    from .buffer_rollout import CONVERTIBLE, SAMPLER, rollout_argv
 
     argv = rollout_argv(role, max_policy_age=max_policy_age)
     if role == SAMPLER:
         return (*argv, SAMPLER_ONLY_FLAG)
+    if role == CONVERTIBLE:  # L7.5: trainer and engines on the same GPUs, no release export
+        return argv
     return (*argv, "--save-hf", RELEASE_EXPORTER_SAVE_HF)
 
 

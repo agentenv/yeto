@@ -327,12 +327,14 @@ class TrainerLoopThread:
     holds it."""
 
     def __init__(self, loop: TrainerLoop, interval_s: float,
-                 on_error: Callable[[BaseException], None] | None = None) -> None:
+                 on_error: Callable[[BaseException], None] | None = None,
+                 on_finished: Callable[[], None] | None = None) -> None:
         if interval_s <= 0:
             raise ValueError("interval_s must be positive")
         self.loop = loop
         self.interval_s = float(interval_s)
         self._on_error = on_error  # told once, on this thread, after a tick error
+        self._on_finished = on_finished  # told once, on this thread, when the loop finished
         self.error: BaseException | None = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="trainer-scheduler-loop", daemon=True)
@@ -361,6 +363,8 @@ class TrainerLoopThread:
             while not self.loop.finished and not self._stop.is_set():
                 self.loop.tick()
                 self._stop.wait(self.interval_s)
+            if self.loop.finished and self._on_finished is not None:
+                self._on_finished()
         except BaseException as error:  # noqa: BLE001 - reported to the launcher
             self.error = error
             if self._on_error is not None:

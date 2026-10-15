@@ -53,17 +53,18 @@ from typing import Any
 from yeto.rl.engine.policy_versions import engine_version_number
 from yeto.rl.engine.trainer_lifecycle import SampleIndexEntry
 
-SAMPLER, TRAINER = "sampler", "trainer"
-ROLES = (SAMPLER, TRAINER)
+SAMPLER, TRAINER, CONVERTIBLE = "sampler", "trainer", "convertible"
+ROLES = (SAMPLER, TRAINER, CONVERTIBLE)
 
 BUFFER_ROOT_ENV = "YETO_SAMPLE_BUFFER_ROOT"  # checkpoint store path holding sample-buffer/
 SAMPLER_ID_ENV = "YETO_SAMPLE_BUFFER_SAMPLER_ID"  # prefix of the sample ids a sampler writes
 WAIT_ENV = "YETO_SAMPLE_BUFFER_WAIT_S"  # reader: max seconds to wait for a full round
 POLL_ENV = "YETO_SAMPLE_BUFFER_POLL_S"  # reader: seconds between index reads while waiting
 MAX_POLICY_AGE_ENV = "YETO_SAMPLE_BUFFER_MAX_POLICY_AGE"
+SHARD_ENV = "YETO_SAMPLE_BUFFER_SHARD"  # convertible node: its own shard of the index
 # the rollout functions run in Ray workers, which inherit the raylet's environment:
 # connect_island_ray forwards these to every worker
-ISLAND_ENVS = (BUFFER_ROOT_ENV, SAMPLER_ID_ENV, WAIT_ENV, POLL_ENV, MAX_POLICY_AGE_ENV)
+ISLAND_ENVS = (BUFFER_ROOT_ENV, SAMPLER_ID_ENV, WAIT_ENV, POLL_ENV, MAX_POLICY_AGE_ENV, SHARD_ENV)
 
 DEFAULT_WAIT_S = 3600.0
 DEFAULT_POLL_S = 2.0
@@ -73,7 +74,10 @@ _MODULE = "yeto.rl.adapters.miles.buffer_rollout_miles"
 ROLLOUT_FUNCTION_PATHS = {
     SAMPLER: f"{_MODULE}.BufferWriterRolloutFn",
     TRAINER: f"{_MODULE}.BufferReaderRolloutFn",
+    CONVERTIBLE: f"{_MODULE}.ConvertibleRolloutFn",
 }
+# the rollout functions that read the buffer (the trainer keeps a watermark)
+READER_FUNCTION_PATHS = (ROLLOUT_FUNCTION_PATHS[TRAINER], ROLLOUT_FUNCTION_PATHS[CONVERTIBLE])
 PAYLOAD_SCHEMA = "yeto.rl.sample-buffer-payload/v1"
 _NDARRAY = "__ndarray__"
 
@@ -98,23 +102,30 @@ def rollout_argv(role: str | None, *, max_policy_age: int, fully_async: bool = F
     if rollout_function_path is not None:
         raise ValueError(f"the sample buffer rollout replaces the rollout function; "
                          f"{rollout_function_path!r} was also given")
-    if role == TRAINER and int(max_policy_age) < 1:
+    if role in (TRAINER, CONVERTIBLE) and int(max_policy_age) < 1:
         raise ValueError("a trainer that reads the sample buffer trains on samples of earlier "
                          f"versions: it needs max_policy_age >= 1 (got {max_policy_age})")
     return ("--rollout-function-path", ROLLOUT_FUNCTION_PATHS[role])
 
 
 def island_env(role: str, *, store_root: str, sampler_id: str | None = None,
-               max_policy_age: int | None = None, wait_s: float | None = None) -> dict[str, str]:
-    """The environment the launch layer exports on the island (read in the rollout process)."""
+               max_policy_age: int | None = None, wait_s: float | None = None,
+               shard: str | None = None) -> dict[str, str]:
+    """The environment the launch layer exports on the island (read in the rollout
+    process). A convertible node writes like a sampler, into its own ``shard`` of
+    the index, and reads like a trainer."""
     if role not in ROLES:
         raise ValueError(f"sample buffer role {role!r}: expected one of {ROLES}")
     env = {BUFFER_ROOT_ENV: str(store_root)}
-    if role == SAMPLER:
+    if role in (SAMPLER, CONVERTIBLE):
         if not sampler_id:
             raise ValueError("a sampler needs a sampler id (sample id prefix)")
         env[SAMPLER_ID_ENV] = str(sampler_id)
-    else:
+    if role == CONVERTIBLE:
+        if not shard:
+            raise ValueError("a convertible node needs its buffer shard name")
+        env[SHARD_ENV] = str(shard)
+    if role in (TRAINER, CONVERTIBLE):
         if max_policy_age is None:
             raise ValueError("a trainer needs max_policy_age")
         env[MAX_POLICY_AGE_ENV] = str(int(max_policy_age))
@@ -123,16 +134,21 @@ def island_env(role: str, *, store_root: str, sampler_id: str | None = None,
     return env
 
 
-def open_buffer(environ: Mapping[str, str] | None = None, *, batch_size: int = 1) -> Any:
-    """The island's buffer, from :data:`BUFFER_ROOT_ENV` (store chosen by ``store_for``)."""
+def open_buffer(environ: Mapping[str, str] | None = None, *, batch_size: int = 1,
+                shard: str | None = None, create_index: bool = True) -> Any:
+    """The island's buffer, from :data:`BUFFER_ROOT_ENV` (store chosen by ``store_for``);
+    with ``shard``, the writer of that shard of the index; ``create_index=False``
+    for a reader whose index another host writes."""
     from yeto.rl.engine.resume import store_for
-    from yeto.rl.engine.sample_buffer import FileSampleBuffer
+    from yeto.rl.engine.sample_buffer import INDEX, FileSampleBuffer, shard_index
 
     env = os.environ if environ is None else environ
     root = env.get(BUFFER_ROOT_ENV)
     if not root:
         raise SampleBufferRolloutError(f"{BUFFER_ROOT_ENV} is not set")
-    return FileSampleBuffer(store_for(root, environ=env), batch_size=batch_size)
+    return FileSampleBuffer(store_for(root, environ=env), batch_size=batch_size,
+                            index=INDEX if shard is None else shard_index(shard),
+                            create_index=create_index)
 
 
 # ---------------------------------------------------------------------- payload
@@ -348,6 +364,24 @@ class BatchReader:
 
 # ---------------------------------------------------------------------- executor link
 _ACTIVE: dict[str, BatchReader] = {}
+# the mode of a convertible node's rollout function (``ConvertibleRolloutFn``):
+# SAMPLER generates into the node's shard, TRAINER reads the buffer
+_MODE: dict[str, str] = {CONVERTIBLE: SAMPLER}
+
+
+def convertible_mode() -> str:
+    return _MODE[CONVERTIBLE]
+
+
+def executor_set_mode(_executor: Any, mode: str) -> str:
+    """Runs INSIDE the rollout executor actor (``__ray_call__``): switch a
+    convertible node's rollout function between generating (``sampler``) and
+    reading the buffer (``trainer``). Returns the previous mode."""
+    if mode not in (SAMPLER, TRAINER):
+        raise SampleBufferRolloutError(f"convertible rollout mode {mode!r}: expected "
+                                       f"{SAMPLER} or {TRAINER}")
+    previous, _MODE[CONVERTIBLE] = _MODE[CONVERTIBLE], mode
+    return previous
 
 
 def register_reader(reader: BatchReader) -> None:

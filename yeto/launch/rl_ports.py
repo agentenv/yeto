@@ -79,9 +79,10 @@ def _prepare_ports_algorithm(args) -> None:
         no_sync = bool(getattr(args, "rl_single_island_no_sync", False))
         from ..rl.engine import sample_roles
 
-        # L5.4: a store-coupled sampler/trainer pair is two no-sync islands
-        # (sample_roles.check_pair holds its own rules).
-        no_sync_islands = 2 if sample_roles.is_pair(args) else 1
+        # L5.4: a store-coupled sampler/trainer pair is two no-sync islands; a
+        # convertible pool (L7.5) is two or more (sample_roles holds their own rules).
+        no_sync_islands = (islands if sample_roles.is_convertible_pool(args)
+                           else 2 if sample_roles.is_pair(args) else 1)
         if no_sync and (islands != no_sync_islands or getattr(args, "rl_sync_preset", "strict-avg")
                         != "strict-avg" or getattr(args, "rl_initial_adapter", None)):
             raise AlgorithmSpecError(
@@ -372,7 +373,9 @@ def _check_ports_infra_switches(args) -> None:
         raise ValueError("--rl-boot-only needs --rl-single-island-no-sync")
     from ..rl.engine import sample_roles
 
-    if sample_roles.is_pair(args):  # L5.4 --rl-island-sample-role: per-island roles
+    if sample_roles.is_convertible_pool(args):  # L7.5: every island convertible
+        sample_roles.check_pool(args, rl_island_count(args))
+    elif sample_roles.is_pair(args):  # L5.4 --rl-island-sample-role: per-island roles
         sample_roles.check_pair(args, rl_island_count(args))
     else:
         sample_roles.check_launch(args)  # L4.6 --rl-sample-role (both checks nothing)

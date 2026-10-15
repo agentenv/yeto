@@ -84,7 +84,10 @@ class CloudTrainerBinding:
     ``release`` gives it back). ``release_orphan(incarnation)`` gives back the island
     a dead head started. ``data_ended`` tells the samplers finished.
     ``after_restore()`` runs after the journal is read back and an orphan released
-    (e.g. reset the head's buffer to the watermark of the newest cut)."""
+    (e.g. reset the head's buffer to the watermark of the newest cut).
+    ``wrap_scheduler(scheduler, record)`` decorates the S1 scheduler (a convertible
+    pool holds a start no node may take); ``on_finished()`` runs once the loop
+    finished (a convertible pool ends its nodes)."""
 
     lifecycle: Callable[[int], TrainerLifecycle]
     buffer: DurableSampleBuffer
@@ -94,6 +97,8 @@ class CloudTrainerBinding:
     start_events: Callable[[], Iterable[Mapping[str, Any]]] | None = None
     spec: Mapping[str, Any] | None = None
     after_restore: Callable[[], None] | None = None
+    wrap_scheduler: Callable[[Any, Callable[..., None]], Any] | None = None
+    on_finished: Callable[[], None] | None = None
     needs_first_policy: Callable[[], bool] | None = None
 
 

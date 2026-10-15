@@ -52,7 +52,8 @@ def _flag(tokens: list[str], flag: str) -> str:
 def test_pair_plan_has_no_syncer_and_the_trainer_island_is_held():
     _, plan = _plan()
     assert (plan["syncer"], plan["outer_sync"], plan["role_syncers"]) == (None, False, [])
-    assert plan["trainer_scheduler"] == {"mode": "s1", "island": 1, "interval_s": 30.0}
+    assert plan["trainer_scheduler"] == {"mode": "s1", "island": 1, "interval_s": 30.0,
+                                         "convertible_pool": False}
     sampler, trainer = plan["island_requests"]
     assert (sampler["sample_role"], trainer["sample_role"]) == ("sampler", "trainer")
     assert "held_by_trainer_scheduler" not in sampler

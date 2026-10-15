@@ -1048,10 +1048,11 @@ def _wire_round_cuts(driver, *, elastic, miles_args, algorithm, base_model_revis
 
 def _wire_sample_buffer(checkpoint: Any, *, driver: Any, miles_args: Any) -> None:
     """L4.5: a trainer whose rollout reads the durable sample buffer writes the
-    consumed watermark into each round cut and continues there after a restore."""
-    from .buffer_rollout import ROLLOUT_FUNCTION_PATHS, TRAINER, wire_sample_buffer
+    consumed watermark into each round cut and continues there after a restore
+    (also a convertible node, L7.5, whose rollout function reads in trainer mode)."""
+    from .buffer_rollout import READER_FUNCTION_PATHS, wire_sample_buffer
 
-    if getattr(miles_args, "rollout_function_path", None) != ROLLOUT_FUNCTION_PATHS[TRAINER]:
+    if getattr(miles_args, "rollout_function_path", None) not in READER_FUNCTION_PATHS:
         return
     if checkpoint is None:
         raise RuntimeError("a trainer that reads the sample buffer needs round cuts "
@@ -2055,46 +2056,63 @@ def run_ports_island(
             return {}
 
         groups = {"actor": actor} if critic is None else {"actor": actor, "critic": critic}
-        sync, progress = build_sync(
-            miles_args, yeto_policy_sync=yeto_policy_sync, runner=runner, groups=groups
-        )
-        driver = compose_island(
-            miles_args=miles_args,
-            launch=launch,
-            algorithm=algorithm,
-            inference_controller=controller,
-            rollout_executor=executor,
-            actor_model=actor,
-            learner_id=learner_id,
-            base_model_revision=base_model_revision,
-            lora_config_hash=lora_config_hash,
-            layout_hash=layout_hash,
-            sync=sync,
-            progress=progress,
-            metadata=RayMetadataSink(),
-            capabilities=capabilities,
-            runner=runner,
-            evaluate=lambda rollout_id: runner.run(evaluate(rollout_id)),
-            eval_interval=getattr(miles_args, "eval_interval", None),
-            profile=profile,
-            observe=bool(getattr(miles_args, "yeto_rl_observe_timeline", False)),
-            evaluate_start=(
-                loop_eval_starter(runner, evaluate, time.monotonic)
-                if profile.execution_mode == "partitioned-overlap"
-                else None
-            ),
-            elastic=elastic,
-            critic_model=critic,
-        )
-        # fleet-dashboard 2.1/2.2: opt-in heartbeat / resource sampler periods
-        driver.heartbeat_interval_s = getattr(miles_args, "yeto_rl_heartbeat_interval_s", None)
-        driver.resource_sample_interval_s = getattr(
-            miles_args, "yeto_rl_resource_sample_interval_s", None)
-        eval_wiring.attach(driver, miles_args, eval_guard)  # rl-eval-difficulty-buckets 2.2/5.2
-        driver.island_tasks = getattr(miles_args, "yeto_rl_island_tasks", None)  # P3
-        driver.code_pack_digest = getattr(miles_args, "yeto_rl_code_pack_digest", None)
-        driver.code_pack_mode = getattr(miles_args, "yeto_rl_code_pack_mode", None)
-        driver.start_phases = start_phases  # L0: first_step_done
+
+        def build_driver() -> Any:
+            """A fresh island driver over the components (one per trainer incarnation
+            of a convertible node, rl-trainer-start-stop L7.5; once otherwise)."""
+            sync, progress = build_sync(
+                miles_args, yeto_policy_sync=yeto_policy_sync, runner=runner, groups=groups
+            )
+            driver = compose_island(
+                miles_args=miles_args,
+                launch=launch,
+                algorithm=algorithm,
+                inference_controller=controller,
+                rollout_executor=executor,
+                actor_model=actor,
+                learner_id=learner_id,
+                base_model_revision=base_model_revision,
+                lora_config_hash=lora_config_hash,
+                layout_hash=layout_hash,
+                sync=sync,
+                progress=progress,
+                metadata=RayMetadataSink(),
+                capabilities=capabilities,
+                runner=runner,
+                evaluate=lambda rollout_id: runner.run(evaluate(rollout_id)),
+                eval_interval=getattr(miles_args, "eval_interval", None),
+                profile=profile,
+                observe=bool(getattr(miles_args, "yeto_rl_observe_timeline", False)),
+                evaluate_start=(
+                    loop_eval_starter(runner, evaluate, time.monotonic)
+                    if profile.execution_mode == "partitioned-overlap"
+                    else None
+                ),
+                elastic=elastic,
+                critic_model=critic,
+            )
+            # fleet-dashboard 2.1/2.2: opt-in heartbeat / resource sampler periods
+            driver.heartbeat_interval_s = getattr(miles_args, "yeto_rl_heartbeat_interval_s", None)
+            driver.resource_sample_interval_s = getattr(
+                miles_args, "yeto_rl_resource_sample_interval_s", None)
+            eval_wiring.attach(driver, miles_args, eval_guard)  # rl-eval-difficulty-buckets 2.2/5.2
+            driver.island_tasks = getattr(miles_args, "yeto_rl_island_tasks", None)  # P3
+            driver.code_pack_digest = getattr(miles_args, "yeto_rl_code_pack_digest", None)
+            driver.code_pack_mode = getattr(miles_args, "yeto_rl_code_pack_mode", None)
+            driver.start_phases = start_phases  # L0: first_step_done
+            return driver
+
+        from .convertible import convertible_node_name
+
+        if convertible_node_name(miles_args) is not None:
+            # rl-trainer-start-stop L7.5: rollout node until the head converts it
+            from .convertible import run_convertible_node
+
+            startup.__exit__(None, None, None)
+            return run_convertible_node(miles_args, build_driver=build_driver,
+                                        controller=controller, executor=executor, actor=actor,
+                                        runner=runner)
+        driver = build_driver()
         if e2_plan is not None:  # TEST ONLY: E2 GPU harness instead of the training loop
             from .e2_harness import HarnessContext, run_harness
 

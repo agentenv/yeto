@@ -554,14 +554,20 @@ _RESUME = (
                 help="with --rl-checkpoint-store and no --rl-elastic: stop after N rounds "
                 "with a final cut (our own stop; the next launch resumes)"),
     # rl-trainer-start-stop L4.6: sampler / trainer islands over the durable sample buffer
-    shared_flag("--rl-sample-role", choices=("both", "sampler", "trainer"), default="both",
+    shared_flag("--rl-sample-role", choices=("both", "sampler", "trainer", "convertible"),
+                default="both",
                 help="both (default): the island generates and trains as before. sampler: the "
                 "island only generates and writes each group to the sample buffer in "
                 "--rl-checkpoint-store (no trainer model, no trainer GPU) and loads every policy "
                 "the trainer releases. trainer: the island trains on groups read from the buffer "
                 "(needs --rl-max-policy-age >= 1) and releases every published policy. Both need "
                 "--rl-single-island-no-sync and the same --rl-checkpoint-store; full-parameter "
-                "mode only"),
+                "mode only. convertible: set per island by the launcher for islands declared "
+                "--rl-node-class islandM=convertible (colocated LoRA; generates until the "
+                "head's scheduler converts it to trainer)"),
+    shared_flag("--rl-convertible-node", default=None, metavar="NAME",
+                help="--rl-sample-role convertible: this island's node name (set by the "
+                "launcher per island; buffer shard and convertible/<NAME>/ channel)"),
     shared_flag("--rl-sampler-max-backlog-rounds", type=int, default=None, metavar="N",
                 help="--rl-sample-role sampler: wait while the buffer holds N rounds the trainer "
                 "has not read (as of its last release); default 4"),

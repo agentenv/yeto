@@ -242,9 +242,11 @@ def apply_sample_role(args, miles_args, environ=None) -> None:
         return
     config = sample_roles.resolve(args, groups_per_round=args.groups_per_round)
     miles_args.yeto_rl_sample_buffer = config
+    node = getattr(args, "rl_convertible_node", None)  # L7.5: a convertible node's own shard
     (os.environ if environ is None else environ).update(island_env(
-        config.role, store_root=config.store, sampler_id=f"island{int(args.learner_id)}",
-        max_policy_age=int(getattr(args, "rl_max_policy_age", 0) or 0), wait_s=config.wait_s))
+        config.role, store_root=config.store, sampler_id=node or f"island{int(args.learner_id)}",
+        max_policy_age=int(getattr(args, "rl_max_policy_age", 0) or 0), wait_s=config.wait_s,
+        shard=node))
 
 
 def apply_ports_infra_switches(args, miles_args, environ=None) -> None:

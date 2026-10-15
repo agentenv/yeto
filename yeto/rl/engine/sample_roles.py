@@ -8,7 +8,12 @@ An island has one sample role:
   loads each policy the trainer releases (:mod:`.policy_release`) and keeps
   generating with the last one while the trainer is stopped, up to a backlog cap;
 * ``trainer``: the island trains on groups read from the buffer and releases
-  every published policy for the samplers.
+  every published policy for the samplers;
+* ``convertible`` (L7.5): a colocated LoRA island that generates into its own
+  shard of the buffer, and converts to trainer in place when the head's
+  scheduler selects it (``yeto.rl.engine.convertible_remote``). An island is
+  convertible when it is declared so (``--rl-node-class islandM=convertible``);
+  a launch whose islands are all convertible is a *convertible pool*.
 
 The sampler and the trainer mount the same checkpoint store (the buffer and the
 releases live there). They are either separate single-island launches
@@ -26,8 +31,8 @@ import copy
 from dataclasses import dataclass
 from typing import Any
 
-BOTH, SAMPLER, TRAINER = "both", "sampler", "trainer"
-SAMPLE_ROLES = (BOTH, SAMPLER, TRAINER)
+BOTH, SAMPLER, TRAINER, CONVERTIBLE = "both", "sampler", "trainer", "convertible"
+SAMPLE_ROLES = (BOTH, SAMPLER, TRAINER, CONVERTIBLE)
 
 # groups a sampler may have ahead of the trainer's last released read position,
 # in units of one round (rollout batch), when --rl-sampler-max-backlog-rounds is unset
@@ -58,9 +63,38 @@ def sample_role(args: Any) -> str:
     return role
 
 
+def node_name(island: int) -> str:
+    """The node name of island ``island`` (``--rl-node-class NAME=...``, buffer shard)."""
+    return f"island{int(island)}"
+
+
+def convertible_islands(args: Any) -> list[int]:
+    """Indexes of the islands declared ``--rl-node-class islandM=convertible``."""
+    from .convertible import NodeClass, parse_node_spec
+
+    out = []
+    for text in getattr(args, "rl_node_class", None) or ():
+        spec = parse_node_spec(text)
+        if spec.node_class is NodeClass.CONVERTIBLE:
+            if not spec.name.startswith("island") or not spec.name[6:].isdigit():
+                raise ValueError(f"--rl-node-class {text!r}: a convertible node is an island "
+                                 "named islandM (M: index into --gpu)")
+            out.append(int(spec.name[6:]))
+    return sorted(out)
+
+
+def is_convertible_pool(args: Any) -> bool:
+    """Whether the launch declares convertible islands (the declaration enables the
+    convertible pool: no other switch)."""
+    return bool(convertible_islands(args))
+
+
 def island_roles(args: Any, num_islands: int) -> dict[int, str]:
-    """``--rl-island-sample-role ISLAND:ROLE`` entries as {island: role}; {} without
-    them. Raises ValueError on a malformed, out-of-range or repeated entry."""
+    """{island: role} from ``--rl-island-sample-role ISLAND:ROLE`` entries, or the
+    convertible islands of a convertible pool; {} without them. Raises ValueError on
+    a malformed, out-of-range or repeated entry."""
+    if is_convertible_pool(args):
+        return {m: CONVERTIBLE for m in convertible_islands(args)}
     roles: dict[int, str] = {}
     for item in getattr(args, "rl_island_sample_role", None) or ():
         island, sep, role = str(item).partition(":")
@@ -82,6 +116,12 @@ def is_pair(args: Any) -> bool:
     return bool(getattr(args, "rl_island_sample_role", None))
 
 
+def is_store_coupled(args: Any) -> bool:
+    """A pair or a convertible pool: no syncer, each island is its own one-learner
+    no-sync island over the shared checkpoint store."""
+    return is_pair(args) or is_convertible_pool(args)
+
+
 def island_args(args: Any, island: int, num_islands: int) -> Any:
     """``args`` as island ``island`` of a pair sees it: a copy with its
     ``rl_sample_role``, keeping only its own role's option (the sampler's backlog
@@ -91,7 +131,11 @@ def island_args(args: Any, island: int, num_islands: int) -> Any:
         return args
     out = copy.copy(args)
     out.rl_sample_role = roles[island]
-    if out.rl_sample_role == SAMPLER:
+    if out.rl_sample_role == CONVERTIBLE:
+        out.rl_convertible_node = node_name(island)
+        out.rl_sampler_max_backlog_rounds = None
+        out.rl_sampler_min_round_seconds = None
+    elif out.rl_sample_role == SAMPLER:
         out.rl_sample_wait_s = None
     else:
         out.rl_sampler_max_backlog_rounds = None
@@ -103,7 +147,7 @@ def island_learner(args: Any, island: int, num_learners: int) -> tuple[int, int]
     """``(learner id, number of learners)`` the island command carries. A pair
     island is a one-learner no-sync island: (0, 1). The launcher keeps ``island``
     for the cluster / Modal function name, the tape and the volumes."""
-    return (0, 1) if is_pair(args) else (island, num_learners)
+    return (0, 1) if is_store_coupled(args) else (island, num_learners)
 
 
 def buffer_full_parameter(args: Any) -> bool:
@@ -139,6 +183,32 @@ def check_pair(args: Any, num_islands: int) -> None:
         check_launch(island_args(args, m, num_islands))
 
 
+def check_pool(args: Any, num_islands: int) -> None:
+    """Launch checks of a convertible pool: at least two islands, every island
+    declared convertible, no other role switch, ``--rl-single-island-no-sync``,
+    LoRA on colocated islands (the trainer and the engines share the GPUs); then
+    every island's own role checks."""
+    islands = convertible_islands(args)
+    if num_islands < 2 or islands != list(range(num_islands)):
+        raise ValueError("--rl-node-class islandM=convertible: a convertible pool declares every "
+                         f"--gpu island convertible, at least two (got {num_islands} island(s), "
+                         f"convertible {islands}); the last rollout node is never converted")
+    if getattr(args, "rl_island_sample_role", None) or sample_role(args) != BOTH:
+        raise ValueError("a convertible pool sets the island roles itself; drop "
+                         "--rl-island-sample-role / --rl-sample-role")
+    if int(getattr(args, "external_learners", 0) or 0):
+        raise ValueError("a convertible pool does not take external learners")
+    if not getattr(args, "rl_single_island_no_sync", False):
+        raise ValueError("a convertible pool needs --rl-single-island-no-sync: there is no "
+                         "syncer; the islands share the --rl-checkpoint-store")
+    if getattr(args, "tuning", "lora") != "lora" or \
+            (getattr(args, "rl_placement", None) or "colocated") != "colocated":
+        raise ValueError("a convertible node trains and generates on the same GPUs: it needs "
+                         "--tuning lora and colocated placement")
+    for m in range(num_islands):
+        check_launch(island_args(args, m, num_islands))
+
+
 def check_launch(args: Any) -> None:
     """Launch-side checks of one island's role, before any cloud work. ``both``
     checks nothing (a pair checks each island with :func:`check_pair`)."""
@@ -158,8 +228,8 @@ def check_launch(args: Any) -> None:
                          "buffer and the policy releases live in it)")
     if getattr(args, "rl_elastic", False):
         raise ValueError(f"--rl-sample-role {role} does not support --rl-elastic")
-    if role == TRAINER and not int(getattr(args, "rl_max_policy_age", 0) or 0) >= 1:
-        raise ValueError("--rl-sample-role trainer trains on samples of earlier versions: "
+    if role in (TRAINER, CONVERTIBLE) and not int(getattr(args, "rl_max_policy_age", 0) or 0) >= 1:
+        raise ValueError(f"--rl-sample-role {role} trains on samples of earlier versions: "
                          "it needs --rl-max-policy-age >= 1")
     rounds = getattr(args, "rl_sampler_max_backlog_rounds", None)
     if rounds is not None and (role != SAMPLER or int(rounds) < 1):
@@ -170,8 +240,10 @@ def check_launch(args: Any) -> None:
         raise ValueError("--rl-sampler-min-round-seconds needs --rl-sample-role sampler "
                          "and a value > 0")
     wait_s = getattr(args, "rl_sample_wait_s", None)
-    if wait_s is not None and (role != TRAINER or not float(wait_s) > 0):
+    if wait_s is not None and (role not in (TRAINER, CONVERTIBLE) or not float(wait_s) > 0):
         raise ValueError("--rl-sample-wait-s needs --rl-sample-role trainer and a value > 0")
+    if role == CONVERTIBLE and not getattr(args, "rl_convertible_node", None):
+        raise ValueError("--rl-sample-role convertible needs --rl-convertible-node NAME")
 
 
 def resolve(args: Any, *, groups_per_round: int) -> SampleBufferConfig | None:
@@ -202,6 +274,8 @@ def island_flags(args: Any) -> str:
     if role == BOTH:
         return ""
     flags = f" --rl-sample-role {role}"
+    if role == CONVERTIBLE:
+        flags += f" --rl-convertible-node {args.rl_convertible_node}"
     if getattr(args, "rl_sampler_max_backlog_rounds", None) is not None:
         flags += f" --rl-sampler-max-backlog-rounds {int(args.rl_sampler_max_backlog_rounds)}"
     if getattr(args, "rl_sampler_min_round_seconds", None) is not None:

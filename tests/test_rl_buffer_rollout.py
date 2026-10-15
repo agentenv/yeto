@@ -65,6 +65,28 @@ def test_rollout_function_paths_name_classes_of_the_plugin_module():
         assert module == "yeto.rl.adapters.miles.buffer_rollout_miles" and name in classes
     assert classes["BufferWriterRolloutFn"] == ["InferenceRolloutFn"]
     assert classes["BufferReaderRolloutFn"] == ["BaseRolloutFn"]
+    assert classes["ConvertibleRolloutFn"] == ["BufferWriterRolloutFn"]
+
+
+def test_convertible_rollout_switches_between_generating_and_reading(monkeypatch):
+    """L7.5: a convertible node generates into its shard (sampler mode) until it
+    converts; in trainer mode the same function reads the buffer."""
+    plugin = _import_plugin_with_stub_miles(monkeypatch, {})
+    fn = plugin.ConvertibleRolloutFn.__new__(plugin.ConvertibleRolloutFn)
+    fn._round = lambda input: ("read", input)
+    monkeypatch.setattr(plugin.BufferWriterRolloutFn, "__call__",
+                        lambda self, input: ("generated", input), raising=False)
+    assert br.convertible_mode() == br.SAMPLER and fn(1) == ("generated", 1)
+    assert br.executor_set_mode(None, br.TRAINER) == br.SAMPLER
+    try:
+        assert fn(2) == ("read", 2)
+    finally:
+        br.executor_set_mode(None, br.SAMPLER)
+    with pytest.raises(br.SampleBufferRolloutError):
+        br.executor_set_mode(None, "both")
+    monkeypatch.delenv(br.SHARD_ENV, raising=False)
+    with pytest.raises(br.SampleBufferRolloutError, match=br.SHARD_ENV):
+        fn._open_writer_buffer()
 
 
 def _import_plugin_with_stub_miles(monkeypatch, registry):
@@ -98,7 +120,7 @@ def test_reader_round_calls_the_metadata_hooks(monkeypatch):
     registry = {"filter": lambda args, data: calls.append(("filter", data)),
                 "all": lambda args, samples, source: calls.append(("all", samples, source))}
     plugin = _import_plugin_with_stub_miles(monkeypatch, registry)
-    reader = plugin.BufferReaderRolloutFn.__new__(plugin.BufferReaderRolloutFn)
+    reader = plugin._BufferRound.__new__(plugin._BufferRound)
     reader.args = args = type("A", (), {"rollout_sample_filter_path": "filter",
                                              "rollout_all_samples_process_path": "all"})()
     groups = [["s0", "s1"], ["s2", "s3"]]
@@ -116,6 +138,12 @@ def test_island_env():
         br.BUFFER_ROOT_ENV: "/s", br.MAX_POLICY_AGE_ENV: "2", br.WAIT_ENV: "30"}
     with pytest.raises(ValueError):
         br.island_env("sampler", store_root="/s")
+    assert br.island_env("convertible", store_root="/s", sampler_id="island1", shard="island1",
+                         max_policy_age=2) == {
+        br.BUFFER_ROOT_ENV: "/s", br.SAMPLER_ID_ENV: "island1", br.SHARD_ENV: "island1",
+        br.MAX_POLICY_AGE_ENV: "2"}
+    with pytest.raises(ValueError, match="shard"):
+        br.island_env("convertible", store_root="/s", sampler_id="i", max_policy_age=2)
 
 
 # ---------------------------------------------------------------- payload and entry

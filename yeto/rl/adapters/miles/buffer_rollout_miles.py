@@ -28,10 +28,13 @@ from .buffer_rollout import (
     MAX_POLICY_AGE_ENV,
     POLL_ENV,
     SAMPLER_ID_ENV,
+    SHARD_ENV,
+    TRAINER,
     WAIT_ENV,
     BatchReader,
     GroupWriter,
     SampleBufferRolloutError,
+    convertible_mode,
     open_buffer,
     register_reader,
     renumber_group,
@@ -55,7 +58,10 @@ class BufferWriterRolloutFn(InferenceRolloutFn):
             raise SampleBufferRolloutError(f"{SAMPLER_ID_ENV} is not set")
         # a per-process suffix: a restarted sampler repeats Miles group indexes, so the
         # sample ids stay unique; the trainer renumbers groups by buffer position
-        self._writer = GroupWriter(open_buffer(), f"{sampler_id}-{uuid.uuid4().hex[:8]}")
+        self._writer = GroupWriter(self._open_writer_buffer(), f"{sampler_id}-{uuid.uuid4().hex[:8]}")
+
+    def _open_writer_buffer(self) -> Any:
+        return open_buffer()
 
     async def _call_train(self, input: Any) -> Any:
         output = await super()._call_train(input)
@@ -71,19 +77,20 @@ class BufferWriterRolloutFn(InferenceRolloutFn):
             self._writer.write([s.to_dict() for s in samples], group_key=key)
 
 
-class BufferReaderRolloutFn(BaseRolloutFn):
-    """Trainer: the round is selected from the buffer, nothing is generated."""
+class _BufferRound:
+    """Selects one training round from the buffer (the reader side of both the
+    trainer island and a convertible node in trainer mode)."""
 
-    def __init__(self, input: RolloutFnConstructorInput) -> None:
-        super().__init__(input)
-        args = self.args = input.args
+    def __init__(self, args: Any, *, create_index: bool = True) -> None:
         age = os.environ.get(MAX_POLICY_AGE_ENV)
         if age is None:
             raise SampleBufferRolloutError(f"{MAX_POLICY_AGE_ENV} is not set")
+        self.args = args
         self.groups = int(args.rollout_batch_size)
         self.samples_per_group = int(args.n_samples_per_prompt)
         self.reader = BatchReader(
-            open_buffer(batch_size=self.groups), max_policy_age=int(age),
+            open_buffer(batch_size=self.groups, create_index=create_index),
+            max_policy_age=int(age),
             wait_s=float(os.environ.get(WAIT_ENV, DEFAULT_WAIT_S)),
             poll_s=float(os.environ.get(POLL_ENV, DEFAULT_POLL_S)))
         register_reader(self.reader)
@@ -108,3 +115,40 @@ class BufferReaderRolloutFn(BaseRolloutFn):
             f(self.args, samples)
         if f := load_function(self.args.rollout_all_samples_process_path):
             f(self.args, samples, None)
+
+
+class BufferReaderRolloutFn(BaseRolloutFn):
+    """Trainer: the round is selected from the buffer, nothing is generated."""
+
+    def __init__(self, input: RolloutFnConstructorInput) -> None:
+        super().__init__(input)
+        self.args = input.args
+        self._round = _BufferRound(input.args)
+        self.reader = self._round.reader
+
+    def __call__(self, input: RolloutFnInput) -> RolloutFnTrainOutput:
+        return self._round(input)
+
+
+class ConvertibleRolloutFn(BufferWriterRolloutFn):
+    """Convertible node (rl-trainer-start-stop L7.5): in ``sampler`` mode Miles
+    generates the round and every group goes to this node's shard of the index;
+    in ``trainer`` mode the round is read from the buffer like
+    :class:`BufferReaderRolloutFn`. The node switches the mode in this process
+    (``buffer_rollout.executor_set_mode``) when it converts."""
+
+    def __init__(self, input: RolloutFnConstructorInput) -> None:
+        super().__init__(input)
+        # the head merges the shards into the index: this node never writes it
+        self._round = _BufferRound(input.args, create_index=False)
+
+    def _open_writer_buffer(self) -> Any:
+        shard = os.environ.get(SHARD_ENV)
+        if not shard:
+            raise SampleBufferRolloutError(f"{SHARD_ENV} is not set")
+        return open_buffer(shard=shard)
+
+    def __call__(self, input: RolloutFnInput) -> Any:
+        if convertible_mode() == TRAINER:
+            return self._round(input)
+        return super().__call__(input)

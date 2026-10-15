@@ -20,6 +20,12 @@ the fleet controller does not start it; the binding starts one per incarnation
 (``yeto.launch.trainer_island``): a Modal island with a ``modal-volume://`` store,
 or a sky island (not Verda) with an ``s3://`` store. :func:`check` refuses anything
 else before any launch.
+
+A convertible pool (every island declared ``--rl-node-class islandM=convertible``,
+rl-trainer-start-stop L7.5) turns the loop on by the declaration alone: no island is
+held back, a convertible node becomes the trainer (``yeto.launch.convertible_pool``),
+and ``T_s`` defaults to the conversion time
+(:data:`~.convertible_pool.DEFAULT_CONVERT_START_SECONDS`) until one is measured.
 """
 
 from __future__ import annotations
@@ -102,8 +108,10 @@ def add_arguments(group) -> None:
         "before the scheduler stops, releases the trainer and fails the run (default "
         f"{DEFAULT_MAX_CONSECUTIVE_FAILURES}); a trained round resets the count")
     group.add_argument(
-        "--rl-trainer-start-seconds", type=float, default=DEFAULT_START_SECONDS,
-        help="configured trainer start time T_s (seconds); a measured start replaces it")
+        "--rl-trainer-start-seconds", type=float, default=None,
+        help="configured trainer start time T_s (seconds); a measured start replaces it "
+        f"(default {DEFAULT_START_SECONDS:g}; a convertible pool: the conversion time, "
+        "60 s until one is measured)")
     group.add_argument(
         "--rl-trainer-start-seconds-fixed", action="store_true",
         help="keep --rl-trainer-start-seconds as T_s after a start was measured (an override "
@@ -112,7 +120,9 @@ def add_arguments(group) -> None:
         "--rl-node-class", action="append", default=[], metavar="NAME=CLASS[:spot][:PRECISION]",
         help="node class of one node (rollout, trainer, convertible; rl-trainer-start-stop "
         "D7). A node without ':spot' follows --spot/--on-demand. A convertible node must be "
-        f"on-demand and at the trainer precision ({TRAINER_PRECISION}). Repeat per node")
+        f"on-demand and at the trainer precision ({TRAINER_PRECISION}). Repeat per node. "
+        "Declaring every --gpu island convertible (NAME islandM) runs a convertible pool: "
+        "the trainer scheduler converts the best node to trainer and back, no other switch")
 
 
 def node_specs(args) -> list[NodeSpec]:
@@ -138,8 +148,34 @@ def check_node_classes(args) -> list[NodeSpec]:
     return specs
 
 
+def convertible_pool(args) -> bool:
+    from . import convertible_pool as pool
+
+    return pool.enabled(args)
+
+
 def enabled(args) -> bool:
-    return (getattr(args, "rl_trainer_scheduler", OFF) or OFF) != OFF
+    """The trainer loop runs: ``--rl-trainer-scheduler`` or a convertible pool."""
+    return (getattr(args, "rl_trainer_scheduler", OFF) or OFF) != OFF or convertible_pool(args)
+
+
+def scheduler_mode(args) -> str:
+    """The scheduler that decides (S1 is the only one; a convertible pool uses it)."""
+    mode = getattr(args, "rl_trainer_scheduler", OFF) or OFF
+    return S1 if mode == OFF and convertible_pool(args) else mode
+
+
+def start_seconds(args) -> float:
+    """Configured ``T_s``: the flag, else the conversion time of a convertible pool,
+    else the cold-start default."""
+    value = getattr(args, "rl_trainer_start_seconds", None)
+    if value is not None:
+        return float(value)
+    if convertible_pool(args):
+        from .convertible_pool import DEFAULT_CONVERT_START_SECONDS
+
+        return DEFAULT_CONVERT_START_SECONDS
+    return DEFAULT_START_SECONDS
 
 
 def journal_dir(args) -> Path:
@@ -149,8 +185,9 @@ def journal_dir(args) -> Path:
 
 
 def held_island(args) -> int | None:
-    """Index (into ``--gpu``) of the island the scheduler owns; None with the switch off."""
-    return args.rl_trainer_island if enabled(args) else None
+    """Index (into ``--gpu``) of the island the scheduler owns; None with the switch off
+    and for a convertible pool (a node converts; nothing is held back)."""
+    return args.rl_trainer_island if enabled(args) and not convertible_pool(args) else None
 
 
 def check(args) -> None:
@@ -159,7 +196,11 @@ def check(args) -> None:
     check_node_classes(args)
     if not enabled(args):
         return
-    if binding_factory is None:
+    if convertible_pool(args):
+        from . import convertible_pool as pool
+
+        pool.check(args)
+    elif binding_factory is None:
         raise SystemExit(f"--rl-trainer-scheduler {args.rl_trainer_scheduler}: no trainer "
                          "island binding to the cloud layer")
     if args.rl_trainer_scheduler_interval <= 0:
@@ -170,7 +211,7 @@ def check(args) -> None:
         raise SystemExit("--rl-trainer-max-failures must be >= 1")
     if getattr(args, "rl_trainer_ready_seconds", DEFAULT_READY_SECONDS) <= 0:
         raise SystemExit("--rl-trainer-ready-seconds must be positive")
-    if binding_factory is default_binding:
+    if binding_factory is default_binding and not convertible_pool(args):
         _check_trainer_island(args)
 
 
@@ -201,9 +242,11 @@ def build(args, binding: CloudTrainerBinding, journal: Journal) -> TrainerLoop:
     records = journal.records
     scheduler = S1Scheduler(
         S1Config(a_hard=int(getattr(args, "rl_max_policy_age", 0) or 0),
-                 start_seconds=float(args.rl_trainer_start_seconds),
+                 start_seconds=start_seconds(args),
                  fixed_start_seconds=bool(getattr(args, "rl_trainer_start_seconds_fixed", False))),
         start_events=binding.start_events, record=journal.append)
+    if binding.wrap_scheduler is not None:
+        scheduler = binding.wrap_scheduler(scheduler, journal.append)
     loop = TrainerLoop(scheduler=scheduler, lifecycle=binding.lifecycle(next_incarnation(records)),
                        buffer=binding.buffer, cuts=binding.cuts, record=journal.append,
                        data_ended=binding.data_ended, release_orphan=binding.release_orphan,
@@ -237,6 +280,10 @@ def run_with_trainer_loop(args, run: Callable[[], T], *, island: TrainerIsland |
     error so the samplers stop too. Without it the error is raised after ``run``."""
     if not enabled(args):
         return run()
+    if factory is None and convertible_pool(args):
+        from . import convertible_pool as pool
+
+        factory = lambda a, _island: pool.binding(a, journal_dir=journal_dir(a))  # noqa: E731
     factory = binding_factory if factory is None else factory
     if factory is None:
         check(args)  # raises
@@ -251,7 +298,8 @@ def run_with_trainer_loop(args, run: Callable[[], T], *, island: TrainerIsland |
                 abort(error)
 
         runner = TrainerLoopThread(build(args, binding, journal),
-                                   args.rl_trainer_scheduler_interval, on_error=on_error).start()
+                                   args.rl_trainer_scheduler_interval, on_error=on_error,
+                                   on_finished=binding.on_finished).start()
         try:
             result = run()
             if isinstance(runner.error, TrainerLoopGaveUp):
@@ -264,6 +312,8 @@ def run_with_trainer_loop(args, run: Callable[[], T], *, island: TrainerIsland |
             return result
         finally:
             runner.stop()
+            if binding.on_finished is not None and not runner.loop.finished:
+                binding.on_finished()  # the run ended early: end the nodes too
             if runner.error is not None:
                 print(f"[launcher] trainer scheduler stopped on error: {runner.error!r}",
                       file=sys.stderr, flush=True)
