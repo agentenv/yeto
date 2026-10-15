@@ -124,10 +124,14 @@ def test_binding_merges_shards_counts_fresh_samples_and_selects_by_rule(tmp_path
 
     args = _args()
     files = MemFiles()
-    binding = convertible_pool.binding(args, journal_dir=tmp_path, files=files)
-    profiles = convertible_pool.node_profiles(args)
+    from yeto.launch import trainer_loop
+
+    nodes = trainer_loop.node_specs(args)
+    binding = convertible_pool.binding(args, journal_dir=tmp_path, files=files, nodes=nodes,
+                                       precision=trainer_loop.TRAINER_PRECISION)
+    profiles = convertible_pool.node_profiles(args, nodes)
     assert [(p.name, p.gpu, p.gpus, p.gpu_memory_gb, p.domain) for p in profiles] == [
-        ("island0", "H100", 1, 80, "modal"), ("island1", "H100", 1, 80, "modal")]
+        ("island0", "H100", 1, 79.18, "modal"), ("island1", "H100", 1, 79.18, "modal")]
 
     def line(pos, version):
         return json.dumps({"schema": "yeto.rl.sample-buffer/v1", "pos": pos, "sample_id": f"s{pos}",

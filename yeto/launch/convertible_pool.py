@@ -16,12 +16,12 @@ islands. A sky island would need the head to read its bucket store: not bound ye
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from yeto.rl.engine.convertible import NodeProfile, TrainerNeeds
+from yeto.rl.engine.convertible import NodeProfile, NodeSpec, TrainerNeeds
 from yeto.rl.engine.convertible_remote import ConvertibleGate, ConvertibleIslands
 from yeto.rl.engine.sample_buffer import BUFFER_DIR, INDEX, CommittedBacklog, FileSampleBuffer, merge_shards
 from yeto.rl.engine.sample_roles import convertible_islands, node_name
@@ -60,15 +60,14 @@ def check(args: Any) -> None:
                          "buffer, the cuts and the node channels live there")
 
 
-def node_profiles(args: Any) -> list[NodeProfile]:
-    """The declared profile of every convertible node, from ``--rl-node-class`` and
-    the island's ``--gpu`` entry (GPU type, count, memory, network domain)."""
+def node_profiles(args: Any, nodes: Sequence[NodeSpec]) -> list[NodeProfile]:
+    """The declared profile of every convertible node, from its ``--rl-node-class``
+    entry (``nodes``: ``trainer_loop.node_specs``) and the island's ``--gpu`` entry
+    (GPU type, count, memory, network domain)."""
     from yeto.gpu_spec import parse_gpu_spec
-    from yeto.launcher import GPU_MEM_GB
+    from yeto.memory_estimate import gpu_capacity_gib
 
-    from .trainer_loop import node_specs
-
-    declared = {s.name: s for s in node_specs(args)}
+    declared = {s.name: s for s in nodes}
     specs = parse_gpu_spec(args.gpu)
     out = []
     for m in convertible_islands(args):
@@ -76,19 +75,17 @@ def node_profiles(args: Any) -> list[NodeProfile]:
         gpu = str(spec.gpu).rstrip("!")
         domain = spec.cloud if not getattr(spec, "region", None) else f"{spec.cloud}/{spec.region}"
         out.append(NodeProfile(node.name, spot=node.spot, precision=node.precision, gpu=gpu,
-                               gpus=int(spec.gpus_per_node), gpu_memory_gb=GPU_MEM_GB.get(gpu),
+                               gpus=int(spec.gpus_per_node), gpu_memory_gb=gpu_capacity_gib(gpu),
                                domain=domain))
     return out
 
 
-def trainer_needs(args: Any) -> TrainerNeeds:
+def trainer_needs(args: Any, precision: str) -> TrainerNeeds:
     """Precision, GPUs and memory a trainer node needs; the memory is the launch's
     per-GPU estimate (None when not estimated: level 1 then checks spot and
     precision only)."""
     from yeto.gpu_spec import parse_gpu_spec
     from yeto.memory_estimate import estimate_for_launch
-
-    from .trainer_loop import TRAINER_PRECISION
 
     specs = parse_gpu_spec(args.gpu)
     peaks = []
@@ -100,7 +97,7 @@ def trainer_needs(args: Any) -> TrainerNeeds:
         if est.get("estimated") and est.get("peak_gib") is not None:
             peaks.append(float(est["peak_gib"]))
     gpus = int(getattr(args, "actor_num_gpus_per_node", 0) or specs[0].gpus_per_node)
-    return TrainerNeeds(precision=TRAINER_PRECISION, memory_gb=max(peaks) if peaks else None,
+    return TrainerNeeds(precision=precision, memory_gb=max(peaks) if peaks else None,
                         gpus=gpus, domains=(PARAMETER_SOURCE_DOMAIN,))
 
 
@@ -132,9 +129,11 @@ class MergedBacklog:
         return getattr(self.inner, name)
 
 
-def binding(args: Any, *, journal_dir: Path, files: Any = None) -> Any:
-    """The :class:`~.trainer_island.CloudTrainerBinding` of a convertible pool
-    (``files`` replaces the Modal Volume in tests)."""
+def binding(args: Any, *, journal_dir: Path, nodes: Sequence[NodeSpec], precision: str,
+            files: Any = None) -> Any:
+    """The :class:`~.trainer_island.CloudTrainerBinding` of a convertible pool.
+    ``nodes``: the declared node classes; ``precision``: the trainer's; ``files``
+    replaces the Modal Volume in tests."""
     from .storage import MODAL_CHECKPOINT_STORE_MOUNT, modal_checkpoint_store
     from .trainer_island import CloudTrainerBinding, MirrorStore, ModalVolumeFiles
 
@@ -142,7 +141,8 @@ def binding(args: Any, *, journal_dir: Path, files: Any = None) -> Any:
         volume, mount = modal_checkpoint_store(args)
         files = ModalVolumeFiles(volume, mount[len(MODAL_CHECKPOINT_STORE_MOUNT):])
     poll_s = float(getattr(args, "rl_trainer_command_poll_seconds", None) or 5.0)
-    islands = ConvertibleIslands(files, node_profiles(args), trainer_needs(args), poll_s=poll_s)
+    islands = ConvertibleIslands(files, node_profiles(args, nodes), trainer_needs(args, precision),
+                                 poll_s=poll_s)
     cuts = StoreCutLog(files)
     mirror = MirrorStore(Path(journal_dir) / MIRROR_DIR, files, [f"{BUFFER_DIR}/{INDEX}"])
     lifecycles: list[RemoteTrainerLifecycle] = []

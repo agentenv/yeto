@@ -283,7 +283,9 @@ def run_with_trainer_loop(args, run: Callable[[], T], *, island: TrainerIsland |
     if factory is None and convertible_pool(args):
         from . import convertible_pool as pool
 
-        factory = lambda a, _island: pool.binding(a, journal_dir=journal_dir(a))  # noqa: E731
+        def factory(a: Any, _island: TrainerIsland | None) -> CloudTrainerBinding:
+            return pool.binding(a, journal_dir=journal_dir(a), nodes=node_specs(a),
+                                precision=TRAINER_PRECISION)
     factory = binding_factory if factory is None else factory
     if factory is None:
         check(args)  # raises
