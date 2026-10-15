@@ -30,6 +30,13 @@ Arrival notification is by polling the index (``poll`` / ``start_polling``).
 Limits of this first implementation: one consumer; with ``index.jsonl``,
 concurrent appenders must share one host (``flock``); the version gate on
 selection is the consumer's job (P0-S ``max_policy_age``).
+
+Appenders on several hosts (convertible nodes, rl-trainer-start-stop L7.5c): each
+appender writes its own shard index ``shards/<shard>.jsonl`` (same line format,
+one writer per file) next to the shared payloads, and one merger -- the head --
+appends the new shard lines to ``index.jsonl`` (:func:`merge_shards`). The
+merged line keeps ``shard`` and ``shard_pos``, so a restarted merger continues
+where the index ends. Shards exist for the ``index.jsonl`` layout only.
 """
 
 from __future__ import annotations
@@ -41,7 +48,7 @@ import re
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +61,7 @@ BUFFER_DIR = "sample-buffer"
 INDEX = "index.jsonl"
 INDEX_OBJECTS = "index"
 PAYLOADS = "payloads"
+SHARDS = "shards"
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]")
 _POS_DIGITS = 12
 # create-if-absent races lost in a row before an append gives up (another writer
@@ -72,12 +80,19 @@ def payload_name(sample_id: str) -> str:
 class JsonlIndex:
     """The index as ``index.jsonl`` in a shared directory (see the module doc)."""
 
-    def __init__(self, store: CheckpointStore) -> None:
+    def __init__(self, store: CheckpointStore, *, index: str = INDEX, create_index: bool = True) -> None:
+        """``index``: the index file under ``sample-buffer/`` (a shard writer
+        passes :func:`shard_index`). ``create_index=False``: a reader that must not
+        write the index, not even an empty one (on a store mount whose commit would
+        replace the merger's index)."""
         self.store = store
         self.root = Path(store.root) / BUFFER_DIR
         (self.root / PAYLOADS).mkdir(parents=True, exist_ok=True)
-        self.path = self.root / INDEX
-        self.path.touch(exist_ok=True)
+        self.path = self.root / index
+        if create_index:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            if not self.path.exists():
+                self.path.touch()
         self._offset = 0  # bytes of complete lines read
 
     def write_payload(self, name: str, data: bytes) -> str:
@@ -98,6 +113,8 @@ class JsonlIndex:
 
     def read_new(self) -> list[dict[str, Any]]:
         self.store.reload()
+        if not self.path.exists():  # a reader before the first merge
+            return []
         with open(self.path, "rb") as fh:
             return list(self._lines(fh))
 
@@ -188,12 +205,16 @@ class ObjectIndex:
         raise SampleBufferError(f"{self.prefix}: lost {_MAX_CREATE_RACES} appends in a row to other writers")
 
 
-def index_for(store: CheckpointStore | ObjectStore) -> JsonlIndex | ObjectIndex:
+def index_for(store: CheckpointStore | ObjectStore, *, index: str = INDEX,
+              create_index: bool = True) -> JsonlIndex | ObjectIndex:
     """:class:`ObjectIndex` for an object store or a store with an object API
-    (``CheckpointStore.objects``); :class:`JsonlIndex` for a shared directory."""
-    if isinstance(store, CheckpointStore):
-        return JsonlIndex(store) if store.objects is None else ObjectIndex(store.objects)
-    return ObjectIndex(store)
+    (``CheckpointStore.objects``); :class:`JsonlIndex` for a shared directory.
+    ``index``/``create_index``: see :class:`JsonlIndex` (shards need that layout)."""
+    if isinstance(store, CheckpointStore) and store.objects is None:
+        return JsonlIndex(store, index=index, create_index=create_index)
+    if index != INDEX:
+        raise SampleBufferError(f"index {index!r}: shard indexes need a shared-directory store")
+    return ObjectIndex(store.objects if isinstance(store, CheckpointStore) else store)
 
 
 class FileSampleBuffer:
@@ -204,11 +225,13 @@ class FileSampleBuffer:
     ``arrival_window_s``: the window of ``BacklogStats.arrival_rate``."""
 
     def __init__(self, store: CheckpointStore | ObjectStore, *, batch_size: int,
-                 arrival_window_s: float = 60.0, clock: Callable[[], float] = time.time) -> None:
+                 arrival_window_s: float = 60.0, clock: Callable[[], float] = time.time,
+                 index: str = INDEX, create_index: bool = True) -> None:
+        """``index``/``create_index``: see :class:`JsonlIndex`."""
         if batch_size < 1:
             raise ValueError("batch_size must be positive")
         self.store = store
-        self.index = index_for(store)
+        self.index = index_for(store, index=index, create_index=create_index)
         self.batch_size = int(batch_size)
         self.arrival_window_s = float(arrival_window_s)
         self.clock = clock
@@ -377,6 +400,52 @@ class FileSampleBuffer:
         if self._poller is not None:
             self._poller.join()
             self._poller = None
+
+
+def shard_index(shard: str) -> str:
+    """The index file of one appender's shard (relative to ``sample-buffer/``)."""
+    name = _SAFE_NAME.sub("_", str(shard))
+    if not name:
+        raise ValueError("shard name is empty")
+    return f"{SHARDS}/{name}.jsonl"
+
+
+def _complete_lines(data: bytes) -> list[dict]:
+    """The JSON records of the complete lines (a torn last line is skipped)."""
+    end = data.rfind(b"\n")
+    return [json.loads(raw) for raw in data[:end + 1].splitlines() if raw.strip()] if end >= 0 else []
+
+
+def merge_shards(files, shards: Iterable[str]) -> int:
+    """Append the new lines of each shard index to ``index.jsonl`` (the caller is the
+    only writer of the index). ``files``: store access with ``read(rel)`` /
+    ``write(rel, data)`` (``trainer_remote.StoreFiles``). New lines of all shards
+    are merged in their ``appended_at`` order; returns the number merged."""
+    index_rel = f"{BUFFER_DIR}/{INDEX}"
+    index = files.read(index_rel) or b""
+    end = index.rfind(b"\n")
+    index = index[:end + 1]  # the merger writes whole lines; a torn tail is not ours
+    merged = Counter()
+    lines = _complete_lines(index)
+    if any(r.get("end") for r in lines):
+        raise SampleBufferError("merge after the data end")
+    for record in lines:
+        if record.get("shard") is not None:
+            merged[record["shard"]] += 1
+    new: list[dict] = []
+    for shard in shards:
+        records = [r for r in _complete_lines(files.read(f"{BUFFER_DIR}/{shard_index(shard)}") or b"")
+                   if not r.get("end")]
+        for shard_pos, record in enumerate(records[merged[shard]:], start=merged[shard]):
+            new.append({**record, "shard": shard, "shard_pos": shard_pos})
+    if not new:
+        return 0
+    new.sort(key=lambda r: (float(r.get("appended_at", 0.0)), r["shard"], r["shard_pos"]))
+    out = [index]
+    for pos, record in enumerate(new, start=len(lines)):
+        out.append((json.dumps({**record, "pos": pos}, sort_keys=True) + "\n").encode())
+    files.write(index_rel, b"".join(out))
+    return len(new)
 
 
 class CommittedBacklog:

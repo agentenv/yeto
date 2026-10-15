@@ -33,6 +33,7 @@ is the time it does neither rollout nor training.
 from __future__ import annotations
 
 import enum
+import math
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -364,6 +365,154 @@ class NodePool:
 
 
 # ---------------------------------------------------------------------------
+# Node selection: which convertible nodes become the trainer (GOAL §7.1 item 14)
+# ---------------------------------------------------------------------------
+# Training speed rank of a GPU type (higher trains faster). An unknown type ranks 0.
+GPU_TRAIN_RANK: Mapping[str, int] = {"B300": 6, "B200": 5, "H200": 4, "H100": 3, "A100": 2,
+                                     "L40S": 1}
+
+
+def gpu_train_rank(gpu: str | None) -> int:
+    """Rank of a GPU type name (``H100``, ``H100!``, ``H100-80GB``); 0 when unknown."""
+    if not gpu:
+        return 0
+    head = str(gpu).upper().rstrip("!").split("-")[0].split(":")[0]
+    return GPU_TRAIN_RANK.get(head, 0)
+
+
+@dataclass(frozen=True)
+class NodeProfile:
+    """What the selection knows of one node. Declared: ``spot``, ``precision``
+    (None: the trainer precision), ``gpu`` type, ``gpus`` on the node,
+    ``gpu_memory_gb`` per GPU, network ``domain`` (e.g. ``modal`` or
+    ``aws/us-east-1``). Measured (None: not reported yet): ``inflight`` trajectories
+    on the node and its rollout ``capacity`` (groups per second)."""
+
+    name: str
+    spot: bool = False
+    precision: str | None = None
+    gpu: str | None = None
+    gpus: int = 1
+    gpu_memory_gb: float | None = None
+    domain: str | None = None
+    inflight: int | None = None
+    capacity: float | None = None
+
+
+@dataclass(frozen=True)
+class TrainerNeeds:
+    """What a trainer on one node needs. ``memory_gb``: trainer state per GPU (None:
+    not checked); ``gpus``: GPUs one trainer node must hold for its TP/DP layout;
+    ``domains``: network domains of the running trainer and of the parameter source
+    (the store holding the newest cut)."""
+
+    precision: str
+    memory_gb: float | None = None
+    gpus: int = 1
+    domains: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class RankedNode:
+    """A node that passed the hard conditions, with its sort key (lower first) and
+    the value of each level, for the journal."""
+
+    name: str
+    key: tuple[Any, ...]
+    levels: Mapping[str, Any]
+
+
+def hard_condition_failure(node: NodeProfile, needs: TrainerNeeds) -> str | None:
+    """Level 1 (hard conditions): on-demand, trainer precision, trainer state fits
+    in GPU memory. Returns the first failed condition, or None."""
+    if node.spot:
+        return "spot"
+    if node.precision is not None and node.precision != needs.precision:
+        return f"precision {node.precision} != trainer {needs.precision}"
+    if needs.memory_gb is not None and node.gpu_memory_gb is not None \
+            and node.gpu_memory_gb < needs.memory_gb:
+        return f"gpu memory {node.gpu_memory_gb:g} GB < trainer state {needs.memory_gb:g} GB"
+    return None
+
+
+def rank_nodes(nodes: Iterable[NodeProfile], needs: TrainerNeeds
+               ) -> tuple[list[RankedNode], dict[str, str]]:
+    """Order the candidate nodes by the five selection levels (GOAL §7.1 item 14):
+
+    1. hard conditions (:func:`hard_condition_failure`); a failing node is refused;
+    2. same network domain as the running trainer or the parameter source first;
+    3. enough GPUs on the node for the trainer layout first, then the faster GPU type
+       (:data:`GPU_TRAIN_RANK`: B200/H200 before H100);
+    4. fewer in-flight trajectories first (less work lost by the conversion);
+    5. smaller rollout capacity first (less rollout lost after the conversion).
+
+    A level that is not known (no domain declared, nothing measured yet) sorts after
+    the known values of that level. The name breaks the last tie. Returns the ranked
+    nodes and ``{name: reason}`` of the refused ones."""
+    ranked: list[RankedNode] = []
+    refused: dict[str, str] = {}
+    domains = set(needs.domains)
+    for node in nodes:
+        reason = hard_condition_failure(node, needs)
+        if reason is not None:
+            refused[node.name] = reason
+            continue
+        near = None if node.domain is None or not domains else node.domain in domains
+        fits = node.gpus >= needs.gpus
+        rank = gpu_train_rank(node.gpu)
+        key = (0 if near else 1 if near is False else 2,
+               0 if fits else 1, -rank,
+               math.inf if node.inflight is None else int(node.inflight),
+               math.inf if node.capacity is None else float(node.capacity),
+               node.name)
+        ranked.append(RankedNode(node.name, key, {
+            "near_trainer": near, "fits_layout": fits, "gpu": node.gpu, "gpu_rank": rank,
+            "inflight": node.inflight, "capacity": node.capacity}))
+    ranked.sort(key=lambda r: r.key)
+    return ranked, refused
+
+
+@dataclass(frozen=True)
+class Selection:
+    """The group a conversion takes (empty: hold, see ``note``), the ranking it
+    came from, the refused nodes, and the rollout capacity it takes away."""
+
+    group: tuple[str, ...]
+    ranking: tuple[RankedNode, ...]
+    refused: Mapping[str, str]
+    lost_capacity: float = 0.0
+    note: str = ""
+
+    def record(self) -> dict[str, Any]:
+        return {"group": list(self.group), "note": self.note, "lost_capacity": self.lost_capacity,
+                "ranking": [{"node": r.name, **dict(r.levels)} for r in self.ranking],
+                "refused": dict(self.refused)}
+
+
+def select_group(candidates: Iterable[NodeProfile], needs: TrainerNeeds, *, group_size: int,
+                 rollout_nodes: Iterable[str]) -> Selection:
+    """The best ``group_size`` convertible nodes by :func:`rank_nodes`.
+
+    ``candidates`` are the convertible nodes doing rollout; ``rollout_nodes`` are all
+    nodes doing rollout (convertible or not). Holds when fewer than ``group_size``
+    candidates pass the hard conditions, or when the group would leave no node doing
+    rollout (the last rollout node is never converted)."""
+    if group_size < 1:
+        raise ValueError(f"group_size must be >= 1, got {group_size}")
+    candidates = list(candidates)
+    ranked, refused = rank_nodes(candidates, needs)
+    if len(ranked) < group_size:
+        return Selection((), tuple(ranked), refused,
+                         note=f"hold:only {len(ranked)} eligible convertible nodes doing rollout")
+    group = tuple(r.name for r in ranked[:group_size])
+    if not set(rollout_nodes) - set(group):
+        return Selection((), tuple(ranked), refused, note="hold:last_rollout_node")
+    by_name = {c.name: c for c in candidates}
+    lost = sum(by_name[n].capacity or 0.0 for n in group)
+    return Selection(group, tuple(ranked), refused, lost_capacity=lost)
+
+
+# ---------------------------------------------------------------------------
 # L7.3 Scheduler over convertible nodes
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
@@ -385,13 +534,19 @@ class ConversionScheduler:
 
     A start that would convert the last rollout-capable node holds instead. Each
     decision carries the rollout capacity it takes away (negative: gives back)
-    and the capacity after it, and is journaled with the pool capacity."""
+    and the capacity after it, and is journaled with the pool capacity. The group
+    is chosen by :func:`select_group` (five levels, GOAL §7.1 item 14); the
+    ranking goes into the journal record."""
 
     inner: TrainerScheduler
     pool: NodePool
     group_size: int = 1
     record: Callable[..., None] | None = None
     events: list[dict[str, Any]] = field(default_factory=list)
+    # selection (GOAL §7.1 item 14): what a trainer needs, and each node's profile
+    needs: TrainerNeeds = TrainerNeeds(precision="bf16")
+    profiles: Callable[[str], NodeProfile | None] | None = None
+    last_selection: Selection | None = None
 
     def __post_init__(self) -> None:
         if self.group_size < 1:
@@ -405,6 +560,7 @@ class ConversionScheduler:
     def decide(self, backlog: BacklogStats,
                prices: Mapping[str, float] | None = None) -> ConversionDecision:
         state = self.lifecycle_state()
+        self.last_selection = None
         decision = self.inner.decide(backlog, state, prices)
         out = ConversionDecision(capacity_after=self.pool.capacity())
         if isinstance(decision, Start):
@@ -423,22 +579,31 @@ class ConversionScheduler:
                         decision={"to_trainer": list(out.to_trainer),
                                   "to_rollout": list(out.to_rollout),
                                   "lost_capacity": out.lost_capacity,
-                                  "capacity_after": out.capacity_after, "note": out.note})
+                                  "capacity_after": out.capacity_after, "note": out.note},
+                        **({"selection": self.last_selection.record()}
+                           if self.last_selection is not None
+                           and (out.to_trainer or out.note.startswith("hold:")) else {}))
         return out
 
     def _plan_to_trainer(self) -> ConversionDecision:
-        candidates = [n.name for n in self.pool.in_role(Role.ROLLOUT)]
-        if len(candidates) < self.group_size:
-            return ConversionDecision(capacity_after=self.pool.capacity(),
-                                      note=f"hold:only {len(candidates)} convertible nodes doing rollout")
-        # Convert the smallest capacities first: the least rollout lost.
-        group = tuple(sorted(candidates, key=lambda n: (self.pool.specs[n].capacity, n))[:self.group_size])
-        try:
-            lost = self.pool.check_conversion(group)
-        except LastRolloutNodeError:
-            return ConversionDecision(capacity_after=self.pool.capacity(), note="hold:last_rollout_node")
-        return ConversionDecision(to_trainer=group, lost_capacity=lost,
+        candidates = [self._profile(n.name) for n in self.pool.in_role(Role.ROLLOUT)]
+        selection = select_group(candidates, self.needs, group_size=self.group_size,
+                                 rollout_nodes=self.pool.doing_rollout())
+        self.last_selection = selection
+        if not selection.group:
+            return ConversionDecision(capacity_after=self.pool.capacity(), note=selection.note)
+        lost = self.pool.check_conversion(selection.group)
+        return ConversionDecision(to_trainer=selection.group, lost_capacity=lost,
                                   capacity_after=self.pool.capacity() - lost)
+
+    def _profile(self, name: str) -> NodeProfile:
+        """The node's profile (``profiles``), else one from its spec (declared
+        capacity, nothing measured)."""
+        profile = self.profiles(name) if self.profiles is not None else None
+        if profile is not None:
+            return profile
+        spec = self.pool.specs[name]
+        return NodeProfile(name, spot=spec.spot, precision=spec.precision, capacity=spec.capacity)
 
     def apply(self, decision: ConversionDecision, buffer: SampleSink, *, version: int | None = None,
               expected_checksum: str | None = None) -> list[ConversionReceipt]:
