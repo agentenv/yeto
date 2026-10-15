@@ -54,6 +54,13 @@ def _weight_tags() -> list[str]:
     return [GPU_MEMORY_TYPE_WEIGHTS]
 
 
+def _kv_tags() -> list[str]:
+    """What ``InferenceController.onload_kv`` takes back: KV cache and CUDA graphs."""
+    from sglang.srt.constants import GPU_MEMORY_TYPE_CUDA_GRAPH, GPU_MEMORY_TYPE_KV_CACHE
+
+    return [GPU_MEMORY_TYPE_KV_CACHE, GPU_MEMORY_TYPE_CUDA_GRAPH]
+
+
 def _all_memory_tags() -> list[str]:
     from sglang.srt.constants import (
         GPU_MEMORY_TYPE_CUDA_GRAPH,
@@ -165,14 +172,21 @@ class DriverHandoffPort:
     themselves, in the upstream colocated order: after the round is read the
     engines release their memory (``_offload_after_rollout``), the trainer wakes to
     train, sleeps again, and the engines take the new weights and their KV cache
-    back (``MilesPublisher._publish``). So the port does not move memory:
+    back (``MilesPublisher._publish``). The driver's first publication expects the
+    engines of a fresh boot: weights resident, KV cache and CUDA graphs released
+    (it loads the weights, then ``onload_kv``; a KV cache that is still resident
+    makes SGLang fail with ``KeyError: 'kv_cache'``, GPU run s24-conv-20261015b).
+    So the port:
 
     * ``stop_requests``: close admission, count the requests on the engines, abort
       them (Miles regenerates aborted groups; at a round boundary there are none);
-    * ``release_rollout``: the rollout function reads the buffer from now on
-      (``executor_set_mode(trainer)``); the engines release at the first round;
-    * ``onload_trainer`` / ``offload_trainer``: nothing (each round wakes the trainer;
-      the drained incarnation left it asleep after its last publication);
+    * ``release_rollout``: release the KV cache and CUDA graphs (the weights stay),
+      and the rollout function reads the buffer from now on
+      (``executor_set_mode(trainer)``);
+    * ``onload_trainer``: wake the trainer (``--offload-train``), so the fresh driver
+      restores a cut into an awake model as in a fresh process (an earlier
+      incarnation on this node left it asleep after its last publication);
+    * ``offload_trainer``: nothing (the drained incarnation put it to sleep);
     * ``resume_rollout(version)``: the rollout function generates again, the engines
       load the trained ``version`` once more from the trainer (``load_version``, the
       L7.4 path) and their checksum is read (``served_checksum``); the node compares
@@ -181,11 +195,12 @@ class DriverHandoffPort:
     """
 
     def __init__(self, *, controller: Any, pool: Any, run: Callable[[Awaitable[Any]], Any],
-                 publisher: Callable[[], Any]) -> None:
+                 publisher: Callable[[], Any], wake_trainer: Callable[[], None]) -> None:
         self._controller = controller
         self._pool = pool
         self._run = run
         self._publisher = publisher  # the publisher of the current incarnation's driver
+        self._wake_trainer = wake_trainer
 
     def _set_mode(self, mode: str) -> None:
         from .buffer_rollout import executor_set_mode
@@ -201,10 +216,11 @@ class DriverHandoffPort:
     def release_rollout(self) -> None:
         from .buffer_rollout import TRAINER
 
+        self._run(self._controller.offload(tags=_kv_tags()))
         self._set_mode(TRAINER)
 
     def onload_trainer(self) -> None:
-        pass
+        self._wake_trainer()
 
     def offload_trainer(self) -> None:
         pass
@@ -319,8 +335,13 @@ def run_convertible_node(miles_args: Any, *, build_driver: Callable[[], Any], co
     runner.run(boot())
     emit("rl_convertible_node_start", node=name, store=miles_args.yeto_rl_sample_buffer.store,
          rounds=int(miles_args.num_rollout))
+    def wake_trainer() -> None:
+        if getattr(miles_args, "offload_train", False):  # Megatron wake_up asserts it
+            runner.run(actor.onload())
+
     port = DriverHandoffPort(controller=controller, pool=pool, run=runner.run,
-                             publisher=lambda: current["driver"].publisher)
+                             publisher=lambda: current["driver"].publisher,
+                             wake_trainer=wake_trainer)
     agent = ConvertibleNodeAgent(
         name=name, files=files, node=ConvertibleNode(NodeSpec(name, NodeClass.CONVERTIBLE), port),
         generate=generate, run_stint=run_stint, published_checksum=published_checksum,

@@ -517,6 +517,9 @@ def test_miles_convertible_node_boots_generates_converts_and_ends(tmp_path, monk
         async def onload_kv(self):
             log.append("onload_kv")
 
+        async def offload(self, tags=None):
+            log.append(("offload", tuple(tags)))
+
     class Executor:
         async def get(self, rid):
             log.append(("get", rid))
@@ -525,6 +528,9 @@ def test_miles_convertible_node_boots_generates_converts_and_ends(tmp_path, monk
     class Actor:
         async def run_plugin(self, name, kw):
             log.append(("plugin", kw))
+
+        async def onload(self):
+            log.append("wake_trainer")
 
     class Runner:
         def run(self, coro):
@@ -585,13 +591,14 @@ def test_miles_convertible_node_boots_generates_converts_and_ends(tmp_path, monk
     monkeypatch.setattr(rollout, "_release", lambda pack: log.append(("release", pack)))
     monkeypatch.setattr(publish, "_default_update_weights", lambda: update_weights)
     monkeypatch.setattr(trainer_remote, "IslandTrainerAgent", Agent)
+    monkeypatch.setattr(mconv, "_kv_tags", lambda: ["kv_cache", "cuda_graph"])
     monkeypatch.setenv(br.SHARD_ENV, "island0")
     monkeypatch.setenv(trainer_remote.POLL_ENV, "0.01")
     store = tmp_path / "store"
     files = LocalStoreFiles(CheckpointStore(str(store)))
     miles_args = types.SimpleNamespace(
         yeto_rl_sample_buffer=SampleBufferConfig(role="convertible", store=str(store)),
-        num_rollout=1, rollout_batch_size=4, offload_rollout=True,
+        num_rollout=1, rollout_batch_size=4, offload_rollout=True, offload_train=True,
         yeto_rl_event_tape=str(tmp_path / "tape.jsonl"), yeto_rl_learner_id=0)
     NodeCommandWriter(files, "island0")
     import threading as _t
@@ -614,8 +621,31 @@ def test_miles_convertible_node_boots_generates_converts_and_ends(tmp_path, monk
     assert ("get", 0) in log and ("release", "pack") in log
     i = log.index("abort_all")
     assert log[i - 1] == ("admission", False)
+    # the driver's first publication needs a fresh-boot engine: weights in, KV out
+    assert log[i + 1:i + 3] == [("offload", ("kv_cache", "cuda_graph")), "wake_trainer"]
     assert ("load_version", 2) in log and log[-1] == ("admission", True)
     back = [e for e in _events(files, "island0") if e.get("direction") == "to_rollout"][0]
     assert back["version"] == 2 and back["weight_checksum"] == "sha-2"
     status = json.loads(files.read(node_path("island0", "status.json")))
     assert status["role"] == EXITED and status["served_version"] == 2
+
+
+def test_store_writes_are_retried_on_os_errors():
+    from yeto.rl.engine.convertible_remote import write_retrying
+
+    class Flaky(MemFiles):
+        def __init__(self, fails):
+            super().__init__()
+            self.fails = fails
+
+        def write(self, rel, data):
+            if self.fails:
+                self.fails -= 1
+                raise PermissionError(1, "Operation not permitted")
+            super().write(rel, data)
+
+    files = Flaky(2)
+    write_retrying(files, "a", b"x", wait=lambda s: None)
+    assert files.read("a") == b"x"
+    with pytest.raises(PermissionError):
+        write_retrying(Flaky(9), "a", b"x", wait=lambda s: None)

@@ -157,7 +157,26 @@ class NodeEventLog:
     def append(self, record: Mapping[str, Any]) -> None:
         with self._lock:
             self.records.append({"seq": len(self.records) + 1, **record})
-            self.files.write(self.path, _jsonl(self.records))
+            write_retrying(self.files, self.path, _jsonl(self.records))
+
+
+WRITE_ATTEMPTS = 4
+WRITE_RETRY_DELAY_S = 1.0
+
+
+def write_retrying(files: StoreFiles, rel: str, data: bytes, *,
+                   wait: Callable[[float], Any] = threading.Event().wait) -> None:
+    """``files.write`` retried on an OS error: a Modal Volume mount refused the
+    rename of the temporary file now and then (``PermissionError``, GPU run
+    s24-conv-20261015b) while the container reloaded the volume."""
+    for attempt in range(WRITE_ATTEMPTS):
+        try:
+            files.write(rel, data)
+            return
+        except OSError:
+            if attempt + 1 == WRITE_ATTEMPTS:
+                raise
+            wait(WRITE_RETRY_DELAY_S * (attempt + 1))
 
 
 def append_trainer_command(files: StoreFiles, incarnation: int, verb: str, *,
@@ -352,16 +371,18 @@ class ConvertibleNodeAgent:
                 "generation_done": self.generation_done, "stints": self.stints}
 
     def _write_status(self, **extra: Any) -> None:
+        """Best effort: the status is an observation the head reads again; a write
+        that fails after its retries is reported and the next one replaces it."""
         with self._status_lock:
-            self.files.write(node_path(self.name, "status.json"),
-                             json.dumps({**self.status(), **extra}, sort_keys=True).encode())
+            try:
+                write_retrying(self.files, node_path(self.name, "status.json"),
+                               json.dumps({**self.status(), **extra}, sort_keys=True).encode())
+            except OSError as error:
+                print(f"[convertible] node {self.name}: status write failed: {error!r}", flush=True)
 
     def _heartbeat(self) -> None:
         while not self._stop.wait(self.status_s):
-            try:
-                self._write_status()
-            except Exception as error:  # noqa: BLE001 - the next beat retries
-                print(f"[convertible] node {self.name}: status write failed: {error!r}", flush=True)
+            self._write_status()
 
 
 class _NoBuffer:
