@@ -131,8 +131,9 @@ def test_lr_schedule_is_bound_into_the_island_contract():
 
 
 def test_island_contract_binds_algorithm_spec():
-    """rl-code-quality-cleanup 4.8: the AlgorithmSpec hash is part of the island
-    contract; islands that run different algorithms declare different contracts."""
+    """rl-code-quality-cleanup 4.8 (contract v3: the semantic hash, L9.7): the
+    algorithm is part of the island contract; islands that run different
+    algorithms declare different contracts."""
     from yeto.rl.engine.backend_identity import island_contract_sha256, lr_schedule_sha256
 
     sha = miles_identity.backend_identity().sha256()
@@ -158,7 +159,7 @@ def test_bridge_configs_bind_lr_schedule_into_hello_and_join(monkeypatch):
     from yeto.rl.engine.bridges import ElasticAvgSync
 
     for cls in (bridge.BridgeConfig, decoupled.DecoupledBridgeConfig):
-        assert {"lr_schedule_sha256", "algorithm_spec_sha256"} <= {
+        assert {"lr_schedule_sha256", "algorithm_semantic_sha256", "code_pack_digest"} <= {
             f.name for f in dataclasses.fields(cls)}
     sha = miles_identity.backend_identity().sha256()
     lr = lr_schedule_sha256("constant", 1, 1e-5)
@@ -171,7 +172,8 @@ def test_bridge_configs_bind_lr_schedule_into_hello_and_join(monkeypatch):
     monkeypatch.setattr(ec, "ElasticIslandClient", Spy)
     monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "k")
     cfg = SimpleNamespace(syncer_addr=("x", 0), learner_id=1, backend_identity_sha256=sha,
-                          lr_schedule_sha256=lr, algorithm_spec_sha256="e" * 64,
+                          lr_schedule_sha256=lr, algorithm_semantic_sha256="e" * 64,
+                          code_pack_digest="f" * 64,
                           expected_specs=(), global_rounds=1, local_optimizer_steps=1)
     ElasticAvgSync(cfg)._client()
-    assert seen == [island_contract_sha256(sha, lr, "e" * 64)]
+    assert seen == [island_contract_sha256(sha, lr, "e" * 64, "f" * 64)]

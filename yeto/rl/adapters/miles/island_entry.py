@@ -1482,6 +1482,13 @@ def _backend_identity_sha256(args) -> str:
 from yeto.hw.catalog import HARDWARE_EVENT  # noqa: E402
 
 
+def _island_code_pack_digest(args) -> str | None:
+    """rl-identity-tiering: the run code pack digest (L9.4, checked at startup),
+    else (L9.1 transition) the attested source tree hash. Both are lowercase
+    sha256 hex; the value is the fourth slot of the island contract (L9.7)."""
+    return getattr(args, "code_pack_digest", None) or getattr(args, "source_sha256", None)
+
+
 def _island_compat_group(args) -> str:
     """Decoupling 7.7a: this island's compat_group, logged once with the driver
     and CUDA versions (recorded only; they never cause a refusal)."""
@@ -1810,8 +1817,13 @@ def run_miles(
             )
             or ()
         )
-    # 4.8: part of the island contract; placement capabilities stay out of it.
+    # The full-parameter sync contracts bind the spec hash (4.8). The island
+    # contract v3 (strict, decoupled, elastic) binds the semantic hash and the
+    # run code pack instead (rl-identity-tiering L9.7); placement capabilities
+    # stay out of both.
     algorithm_spec_sha256 = ports_algorithm.sha256()
+    algorithm_semantic_sha256 = ports_algorithm.semantic_sha256()
+    code_pack_digest = _island_code_pack_digest(args)
     if yeto_policy_sync:
         if full_parameter_sync:
             from yeto.provenance import file_sha256
@@ -1974,7 +1986,8 @@ def run_miles(
                 learner_budget_steps=miles_args.yeto_rl_learner_budget_steps,
                 backend_identity_sha256=_backend_identity_sha256(args),
                 lr_schedule_sha256=miles_lr_schedule_sha256(miles_args),
-                algorithm_spec_sha256=algorithm_spec_sha256,
+                algorithm_semantic_sha256=algorithm_semantic_sha256,
+                code_pack_digest=code_pack_digest,
                 compat_group=_island_compat_group(args),
             )
         else:
@@ -1995,7 +2008,8 @@ def run_miles(
                 send_initial_params=not getattr(args, "eval_only", False),
                 backend_identity_sha256=_backend_identity_sha256(args),
                 lr_schedule_sha256=miles_lr_schedule_sha256(miles_args),
-                algorithm_spec_sha256=algorithm_spec_sha256,
+                algorithm_semantic_sha256=algorithm_semantic_sha256,
+                code_pack_digest=code_pack_digest,
                 compat_group=_island_compat_group(args),
             )
             if getattr(args, "rl_island_scheduling", "legacy") == "elastic":
@@ -2013,15 +2027,11 @@ def run_miles(
     _configure_grad_audit(args, miles_args)
     require_ports_router_mode(miles_args)
     miles_args.yeto_rl_island_tasks = dict(island_tasks) if island_tasks else None
-    # rl-identity-tiering: the run code pack digest (L9.4, checked at startup), else
-    # (L9.1 transition) the attested source tree hash.
+    miles_args.yeto_rl_code_pack_digest = code_pack_digest
     if getattr(args, "code_pack_digest", None):
         from yeto.codepack import CODE_PACK_MODE_GIT_PATCH
 
-        miles_args.yeto_rl_code_pack_digest = args.code_pack_digest
         miles_args.yeto_rl_code_pack_mode = CODE_PACK_MODE_GIT_PATCH
-    else:
-        miles_args.yeto_rl_code_pack_digest = args.source_sha256
     _run_ports(
         args,
         miles_args,
@@ -2238,8 +2248,12 @@ def main(argv=None) -> None:
         verify_source_tree_sha256,
     )
 
-    verify_source_tree_sha256(args.source_sha256)
-    verify_island_code_pack(getattr(args, "code_pack_digest", None))
+    # rl-identity-tiering D6: with a run code pack the pack digest check replaces
+    # the source tree check (the launcher attests --source-sha256 on the pack tree).
+    if getattr(args, "code_pack_digest", None):
+        verify_island_code_pack(args.code_pack_digest)
+    else:
+        verify_source_tree_sha256(args.source_sha256)
     if not is_immutable_commit(args.model_revision):
         raise ValueError("RL model revision must be an immutable commit")
     if not is_local_reference(args.data) and not is_immutable_commit(

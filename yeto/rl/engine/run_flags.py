@@ -573,8 +573,9 @@ _SCHEDULING = (
                 "stepping, late deltas carried over with a discount, join/leave)"),
     cli_flag("--rl-island-contract-sha256", default=None,
              type=sha256_hex_arg,
-             help="secret-handling-hardening: island contract (backend identity bound to "
-             "the LR schedule and the AlgorithmSpec hash) pinned by the head; the syncer refuses islands whose "
+             help="secret-handling-hardening: island contract v3 (backend identity bound to "
+             "the LR schedule, the AlgorithmSpec semantic hash and the run code pack "
+             "digest) pinned by the head; the syncer refuses islands whose "
              "contract differs, even when they connect first. Default: first island decides"),
     shared_flag("--rl-max-policy-age", type=int, default=0,
                 help="agentic-rollout-utilization: how many published policy versions a "
