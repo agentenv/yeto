@@ -48,8 +48,10 @@ def test_golden_samples_keep_both_old_hashes_and_carry_the_identity():
         if path.name == "fake_engine_tapes.json":
             continue
         sample = json.loads(path.read_text())
-        # the identity is a parallel hash: algorithm/contract hashes do not include it
-        assert sample["backend_identity"]["sha256"] == expected.sha256(), path.name
+        # the identity is a parallel hash; the golden keeps it without the engine
+        # commit (rl-identity-tiering L9.10, design D5)
+        recorded = {k: v for k, v in expected.to_dict().items() if k != "engine_commit"}
+        assert sample["backend_identity"] == {**recorded, "compat_group": "nvidia-h100"}, path.name
         assert sample["algorithm_sha256"] == sample["execution_profile"]["profile"]["algorithm_spec_sha256"]
 
 
