@@ -115,6 +115,14 @@ def test_s3_object_store_keys_carry_the_store_prefix():
             s3_store.S3ObjectStore(bad, client=s3)
 
 
+def test_s3_list_skips_directory_markers_of_a_bucket_mount():
+    s3 = FakeS3()
+    store = s3_store.S3ObjectStore(URI, client=s3)
+    s3.objects[("bkt", "runs/a/policy-releases/r1-v0/")] = b""  # goofys mkdir
+    store.write("policy-releases/r1-v0/RELEASE.json", b"{}")
+    assert store.list("policy-releases/r1-v0/") == ["policy-releases/r1-v0/RELEASE.json"]
+
+
 def test_s3_create_without_conditional_writes_falls_back_to_check_and_put():
     s3 = FakeS3(conditional=False)
     store = s3_store.S3ObjectStore(URI, client=s3)

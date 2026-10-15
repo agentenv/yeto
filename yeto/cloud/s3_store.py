@@ -139,7 +139,8 @@ class S3ObjectStore:
             kwargs["StartAfter"] = self._key(start_after)
         keys = []
         for page in self.client.get_paginator("list_objects_v2").paginate(**kwargs):
-            keys += [item["Key"][strip:] for item in page.get("Contents", ())]
+            # a key ending in "/" is a directory marker a bucket mount (goofys) wrote: not an object
+            keys += [item["Key"][strip:] for item in page.get("Contents", ()) if not item["Key"].endswith("/")]
         return keys
 
     def delete(self, key: str) -> None:
