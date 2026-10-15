@@ -48,6 +48,7 @@ from .state_plugin import (
     _STEP_LOSSES,
     StatePluginError,
     install_grad_norm_recorder,
+    refresh_actor_backup,
     trainer_resident,
 )
 
@@ -797,9 +798,7 @@ def _restore(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_
         raise CutPluginError("LR scheduler progress after restore differs from the cut")
     backend.set_megatron_counters(shard.get("megatron_counters") or {})
     set_miles_counters(actor, shard.get("miles_counters") or {})
-    backuper = getattr(actor, "weights_backuper", None)
-    if backuper is not None:  # colocated update_weights reads the CPU backup
-        backuper.backup("actor")
+    refresh_actor_backup(actor)  # colocated update_weights may read the CPU backup
     for n, p in named:
         if not p.requires_grad:
             raise CutPluginError(f"adapter parameter {n!r} no longer requires grad")
@@ -947,9 +946,7 @@ def _restore_resharded(actor, *, directory, files, cut_id, source_dp, rng_policy
         raise CutPluginError("LR scheduler progress after restore differs from the cut")
     backend.set_megatron_counters(first.get("megatron_counters") or {})
     set_miles_counters(actor, first.get("miles_counters") or {})  # same counter on the resharded (E3) path
-    backuper = getattr(actor, "weights_backuper", None)
-    if backuper is not None:
-        backuper.backup("actor")
+    refresh_actor_backup(actor)
     if own_rng is not None:
         backend.restore_rng(own_rng)
     with torch.no_grad():
