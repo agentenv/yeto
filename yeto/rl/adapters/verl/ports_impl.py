@@ -253,6 +253,7 @@ class VerlRolloutPool:
             rollout_id=rollout_id, policy_version=version, policy_hash=digest,
             groups=tuple(metas), completed=len(metas), aborted=0, payload=batch,
             batch_summary=summary, data_cursor=self.data_cursor(),
+            backend="verl",
         )
 
     def abort(self) -> None:

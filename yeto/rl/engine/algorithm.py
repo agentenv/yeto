@@ -116,6 +116,18 @@ LOSS_AGGREGATIONS = ["default", "token", "constant"]
 KL_PLACEMENTS = ("none", "reward", "loss")
 KL_ESTIMATORS = ("k1", "k2", "k3", "low_var_kl")
 CORRECTION_METHODS = ["none", "tis", "opsm", "custom"]
+# rl-offpolicy-correction-passthrough D1/D3: neutral correction fields.
+CORRECTION_LEVELS = ("token", "sequence", "geometric")
+# Optional ratio masks on top of method='tis' (default none, design A2).
+RATIO_MASKS = ("none", "icepop", "mis")
+# The correction group as every pre-D1 hash saw a default spec. sha256() hashes
+# a default group as this constant, so default specs keep their hash (D8, L6b.1).
+DEFAULT_CORRECTION_IDENTITY = (
+    ("function", None), ("method", "none"), ("mismatch_metrics", False), ("opsm_delta", None),
+    ("tis_clip", None), ("tis_clip_low", None), ("use_rollout_logprobs", False),
+)
+# Pre-D1 names of the bounds, still accepted on input (constructor and JSON).
+CORRECTION_FIELD_ALIASES = {"tis_clip": "upper", "tis_clip_low": "lower"}
 DYNAMIC_SAMPLING_FILTERS = {
     BOUNDED_NONZERO_STD_FILTER, STOCK_NONZERO_STD_FILTER, SECRLENV_GROUP_CHECK_FILTER,
 }
@@ -787,10 +799,28 @@ class KlSpec(_Group):
 
 @dataclass(frozen=True)
 class CorrectionSpec(_Group):
+    """Off-policy / mismatch correction (rl-offpolicy-correction-passthrough D1).
+
+    The neutral fields are written in full because the backends have
+    different defaults: ``level`` (token | sequence | geometric), ``lower`` and
+    ``upper`` (the importance-weight bounds; ``upper`` is the truncation bound
+    ``C``), ``veto``, ``batch_normalize`` and ``ratio_mask`` (none | icepop |
+    mis, on top of ``method='tis'``). Adapters map them to backend settings;
+    yeto never computes the weights. ``tis_clip`` / ``tis_clip_low`` are the
+    pre-D1 names of ``upper`` / ``lower``: accepted on input, read-only after.
+
+    Phase 1 (design D8): the group does not enter ``AlgorithmSpec.sha256()``;
+    the run manifest and the island tapes record it instead.
+    """
+
     GROUP = "correction"
     method: str = "none"  # none | tis | opsm | custom (custom tis function)
-    tis_clip: float | None = None
-    tis_clip_low: float | None = None
+    level: str = "token"
+    lower: float | None = None
+    upper: float | None = None
+    veto: float | None = None
+    batch_normalize: bool = False
+    ratio_mask: str = "none"
     opsm_delta: float | None = None
     function: PluginRef | None = None  # --custom-tis-function-path
     use_rollout_logprobs: bool = False
@@ -800,22 +830,43 @@ class CorrectionSpec(_Group):
     def __post_init__(self) -> None:
         s = object.__setattr__
         s(self, "method", _choice("correction.method", self.method, CORRECTION_METHODS))
-        s(self, "tis_clip", _number("correction.tis_clip", self.tis_clip, low=0.0, low_open=True))
-        s(self, "tis_clip_low", _number("correction.tis_clip_low", self.tis_clip_low, low=0.0))
+        s(self, "level", _choice("correction.level", self.level, CORRECTION_LEVELS))
+        s(self, "ratio_mask", _choice("correction.ratio_mask", self.ratio_mask, RATIO_MASKS))
+        s(self, "upper", _number("correction.upper", self.upper, low=0.0, low_open=True))
+        s(self, "lower", _number("correction.lower", self.lower, low=0.0))
+        s(self, "veto", _number("correction.veto", self.veto, low=0.0, low_open=True))
         s(self, "opsm_delta",
           _number("correction.opsm_delta", self.opsm_delta, low=0.0, low_open=True))
         s(self, "function", _plugin("correction.function", self.function))
+        _boolean("correction.batch_normalize", self.batch_normalize)
         _boolean("correction.use_rollout_logprobs", self.use_rollout_logprobs)
         _boolean("correction.mismatch_metrics", self.mismatch_metrics)
         if self.method == "custom" and self.function is None:
             raise AlgorithmSpecError("correction.function is required for correction.method='custom'")
         if self.method != "custom" and self.function is not None:
             raise AlgorithmSpecError("correction.function requires correction.method='custom'")
-        if self.method not in ("tis", "custom") and (
-            self.tis_clip is not None or self.tis_clip_low is not None
-        ):
+        weighting = self.method in ("tis", "custom")
+        if not weighting and (self.upper is not None or self.lower is not None):
             raise AlgorithmSpecError(
-                "correction.tis_clip/tis_clip_low require correction.method tis or custom"
+                "correction.upper/lower (tis_clip/tis_clip_low) require correction.method "
+                "tis or custom"
+            )
+        if not weighting:
+            given = [name for name, default in (("level", "token"), ("veto", None),
+                                                ("batch_normalize", False))
+                     if getattr(self, name) != default]
+            if given:
+                raise AlgorithmSpecError(
+                    f"{', '.join('correction.' + n for n in given)} require correction.method "
+                    "tis or custom"
+                )
+        if self.ratio_mask != "none" and self.method != "tis":
+            raise AlgorithmSpecError(
+                f"correction.ratio_mask={self.ratio_mask!r} requires correction.method='tis'"
+            )
+        if self.level == "geometric" and self.ratio_mask != "mis" and self.method == "tis":
+            raise AlgorithmSpecError(
+                "correction.level='geometric' needs correction.ratio_mask='mis'"
             )
         if self.method == "none" and self.opsm_delta is not None:
             raise AlgorithmSpecError(
@@ -824,16 +875,53 @@ class CorrectionSpec(_Group):
             )
         if self.method == "opsm" and self.opsm_delta is None:
             raise AlgorithmSpecError("correction.opsm_delta is required for correction.method='opsm'")
-        if self.method == "tis" and (self.tis_clip is None or self.tis_clip_low is None):
+        if self.method == "tis" and (self.upper is None or self.lower is None):
             raise AlgorithmSpecError(
-                "correction.tis_clip and correction.tis_clip_low are required for "
-                "correction.method='tis' (no engine default is inherited)"
+                "correction.upper and correction.lower (tis_clip, tis_clip_low) are required "
+                "for correction.method='tis' (no engine default is inherited)"
             )
-        if self.mismatch_metrics and self.method not in ("tis", "custom"):
+        if self.mismatch_metrics and not weighting:
             raise AlgorithmSpecError(
                 "correction.mismatch_metrics needs a tis/custom correction function"
             )
         self._normalize_ext()
+
+    @property
+    def tis_clip(self) -> float | None:
+        return self.upper
+
+    @property
+    def tis_clip_low(self) -> float | None:
+        return self.lower
+
+    @classmethod
+    def from_dict(cls, payload: Any):
+        if isinstance(payload, Mapping):
+            payload = _rename_correction_aliases(dict(payload))
+        return super().from_dict(payload)
+
+
+def _rename_correction_aliases(values: dict[str, Any]) -> dict[str, Any]:
+    for alias, name in CORRECTION_FIELD_ALIASES.items():
+        if alias not in values:
+            continue
+        value = values.pop(alias)
+        if name in values and values[name] != value:
+            raise AlgorithmSpecError(
+                f"correction.{alias} is the old name of correction.{name}; give one of them")
+        values[name] = value
+    return values
+
+
+_correction_init = CorrectionSpec.__init__
+
+
+def _correction_init_with_aliases(self, *args: Any, **kwargs: Any) -> None:
+    _correction_init(self, *args, **_rename_correction_aliases(kwargs))
+
+
+# The pre-D1 keyword names stay accepted; dataclasses.replace() sees only fields.
+CorrectionSpec.__init__ = _correction_init_with_aliases  # type: ignore[method-assign]
 
 
 @dataclass(frozen=True)
@@ -1267,12 +1355,29 @@ class AlgorithmSpec:
         return self.default_at(path)
 
     def canonical_json(self) -> str:
+        """The full spec (correction group included): manifests, tapes, islands."""
         return json.dumps(
             self.to_dict(), sort_keys=True, separators=(",", ":"), allow_nan=False
         )
 
+    def identity_dict(self) -> dict[str, Any]:
+        """The payload of :meth:`sha256` (rl-offpolicy-correction-passthrough D8, L6b.1).
+
+        The correction group is hashed as written. A default group is hashed
+        as the pre-D1 default group (:data:`DEFAULT_CORRECTION_IDENTITY`), so
+        every spec whose correction group is the default keeps its hash.
+        """
+
+        out = self.to_dict()
+        if "correction" in out and self.correction.is_default():
+            out["correction"] = dict(DEFAULT_CORRECTION_IDENTITY)
+        return out
+
     def sha256(self) -> str:
-        return hashlib.sha256(self.canonical_json().encode("utf-8")).hexdigest()
+        payload = json.dumps(
+            self.identity_dict(), sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     @property
     def schema(self) -> str:

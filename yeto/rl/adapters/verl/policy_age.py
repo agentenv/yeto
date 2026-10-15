@@ -17,9 +17,11 @@ from __future__ import annotations
 from yeto.rl.engine.policy_age import PolicyAgeSupport, validate_limit
 
 # 6.4b (10-09): stage 2 through the fully_async path (rollouter + trainer on
-# separate GPUs).  The largest limit is 1 -- the only one the pre-launch review
-# (rl-verl-backend 6.6) tests; sub-agent decision, raise after a GPU pass.
-SUPPORT = PolicyAgeSupport(backend="verl", stage=2, max_policy_age=1)
+# separate GPUs).  rl-offpolicy-correction-passthrough L6.9: the cap was 1;
+# decoupled PPO needs A_hard >= 2. verl has no upper bound of its own
+# (staleness_threshold = N, fully_async_translate.staleness_threshold_for);
+# 4 matches the Miles cap. Limits above 1 are not yet run on GPU (L6.10).
+SUPPORT = PolicyAgeSupport(backend="verl", stage=2, max_policy_age=4)
 
 
 def policy_age_overrides(limit: int, *, groups_per_round: int | None = None) -> tuple[str, ...]:

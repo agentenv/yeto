@@ -30,6 +30,11 @@ from typing import Any, Protocol
 from collections.abc import Mapping
 from types import SimpleNamespace
 
+from yeto.rl.engine.offpolicy_correction import (
+    GATE_DROPPED_LENGTHS,
+    GATE_GRANULARITY,
+    TRUNCATED_BY_TURN,
+)
 from yeto.rl.engine.policy_versions import PublishedPolicies
 from yeto.rl.engine.ports import GroupMetadata, RolloutBatchHandle, over_sampling_fields
 from .traits import MILES_ABORT_MECHANISM
@@ -460,6 +465,7 @@ def handle_from_metadata(
         aborted_in_flight_tokens=payload.get("aborted_in_flight_tokens"),
         aborted_in_flight_unknown_groups=payload.get("aborted_in_flight_unknown_groups"),
         abort_mechanism=MILES_ABORT_MECHANISM,
+        backend="miles",
         tool_wait_seconds=(
             float(payload["tool_wait_seconds"]) if "tool_wait_seconds" in payload else None
         ),
@@ -507,6 +513,8 @@ _CARRY_OVER_KEYS = (
     "resumed_groups", "resumed_done_groups", "suspend_expired_trajectories",
     "policy_age_exceeded_trajectories", "suspended_trajectories", "suspended_env_seconds",
     "suspend_retried_turns",
+    # rl-offpolicy-correction-passthrough D5/D6: the driver pops these into ``offpolicy_gate``
+    GATE_DROPPED_LENGTHS, GATE_GRANULARITY, TRUNCATED_BY_TURN,
 )
 
 

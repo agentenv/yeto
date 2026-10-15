@@ -273,6 +273,12 @@ design D6：去耦合后 `AlgorithmSpec.sha256()` 按中立名与新源码重新
 - Only change: the source hash of `yeto/rl/adapters/miles/rollout_meta_hook.py` `1188451c…` → `a4fa982b…` (the three plugin entries in `plugins`, all 8 samples). Cause: fully_async rounds now report `execution_mode` on the carry-over event (ff6105fc). `algorithm_sha256`, contract hashes, `ports_runtime_fingerprint` and the Miles argv are unchanged.
 - Regenerated with `python tests/decoupling_golden.py --write`.
 
+## S24 L6.2 correction group out of the hash (rl-offpolicy-correction-passthrough D8, branch s24-l6-core, 2026-10-14)
+
+- Cause: in phase 1 the correction group is recorded in the run manifest and island tapes, not hashed. `AlgorithmSpec.sha256()` hashes a fixed default correction group (`identity_dict()`); `canonical_json()` still carries the full group, now with the neutral field names (`level`, `lower`, `upper`, `veto`, `batch_normalize`, `ratio_mask`; `tis_clip`/`tis_clip_low` are accepted input aliases). A custom correction function's source hash stays in the identity as a plugin reference.
+- Affected golden samples (3 of 8): `grpo_tis.json` — `algorithm_sha256` `5a8a5a9f…` → `27df1133…` (the default-spec hash), with the derived launcher/learner/execution-profile fields; `drgrpo.json` and `seq_adv_maxrl.json` — `algorithm_spec` text only (new field names), hashes unchanged. The other 5 samples and `fake_engine_tapes.json` are unchanged.
+- Hash boundary: runs with a TIS (or other non-default) correction group recorded before this change carry the old hash; runs after it carry the hash of the same spec without its correction group. Compare across the boundary by the recorded `algorithm_spec`, not by hash. Phase 2 (L6b.1) puts the group back into the hash at the same version boundary as the `rl-identity-tiering` semantic hash.
+- Accepted by the main agent (SESSION24 GOAL §6). Regenerated with `python tests/decoupling_golden.py --write`; the diff touches only these 3 files.
 ## S24 cold-start image pin (branch s24-image, 2026-10-14)
 
 - `MILES_NEXT_COMMIT` 386ae3b07 → 17aeb5cb5 (michaellchung/miles `s24-miles-import`: light Ray actors stay off `megatron_utils`, rl-trainer-cold-start-cost L2.1; master port held until use, S23 defect 9). No loss path change; appended to `MILES_FORK_LINEAGE`. `MILES_NEXT_IMAGE` `@sha256:bcd5ffd3…` → `@sha256:b304f857…` (tag 17aeb5c-2fa8801; the layer also carries peft 0.20.0 and the lazy-modelopt Megatron-Bridge `__init__.py`, L2.2–L2.4; build record `openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-14-17aeb5c-2fa8801/`).

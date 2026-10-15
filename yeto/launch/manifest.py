@@ -49,6 +49,9 @@ def _write_run_manifest(args) -> dict | None:
         # launch-preflight-guards: preflight readings, negative_test, island_overrides
         **(getattr(args, "_launch_preflight_manifest", None) or {}),
         "island_placements": rl_island_placement_records(args),
+        # rl-offpolicy-correction-passthrough D8: correction group per island
+        **({"offpolicy_correction": args._offpolicy_correction_manifest}
+           if getattr(args, "_offpolicy_correction_manifest", None) else {}),
         "written_unix": time.time(),
     }
     print(f"[launcher] RL image {manifest['rl_image']}, "

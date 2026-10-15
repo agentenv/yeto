@@ -444,6 +444,7 @@ def verify_ports_algorithm(args, miles_args, launch) -> None:
             f"island {args.learner_id} algorithm hash {actual} differs from the launcher's "
             f"expected {expected.lower()}; refusing to join outer sync"
         )
+    _append_correction_record(args, miles_args, algorithm)
     miles_args.yeto_rl_algorithm_absorbed_flags = dict(launch.absorbed_flags)
     miles_args.yeto_rl_outer_sync = not getattr(args, "rl_single_island_no_sync", False)
     # INFRA compares it with the runtime AlgorithmSpec before connect_island_ray
@@ -454,6 +455,29 @@ def verify_ports_algorithm(args, miles_args, launch) -> None:
     miles_args.yeto_rl_unverified_mechanisms = tuple(
         sorted(set(getattr(args, "rl_allow_unverified_mechanism", None) or ()))
     )
+
+
+def _append_correction_record(args, miles_args, algorithm) -> None:
+    """rl-offpolicy-correction-passthrough D8: the island tape records the full
+    correction group, the Miles values and ``prox_anchor``. A field Miles
+    cannot map refuses the start (phase 2, L6b.2), after the record and its
+    ``correction_config_warning`` events are on the tape."""
+    from yeto.rl.engine.offpolicy_correction import (CORRECTION_RECORD_EVENT, correction_record,
+                                                     refuse_correction_warnings)
+
+    from .offpolicy_correction import BACKEND, correction_mapping
+
+    if algorithm.correction.is_default():
+        return  # default tapes unchanged; the run manifest still records the group
+    mapping = correction_mapping(algorithm)
+    _append_ports_event(args, miles_args, {
+        "event": CORRECTION_RECORD_EVENT,
+        **correction_record(algorithm.correction, mapping, backend=BACKEND),
+    })
+    warnings = [warning.event() for warning in mapping.warnings]
+    for warning in warnings:
+        _append_ports_event(args, miles_args, warning)
+    refuse_correction_warnings(warnings)
 
 
 def _require_ports_supported(args, extra_argv: Sequence[str] = ()) -> None:
