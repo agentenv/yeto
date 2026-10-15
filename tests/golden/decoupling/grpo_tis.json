@@ -1,7 +1,7 @@
 {
- "algorithm_sha256": "27df1133c924e7a337e90246c7e1e30699017f461e9f35b1dd165a0263e65bea",
- "algorithm_sha256_launcher_expected": "27df1133c924e7a337e90246c7e1e30699017f461e9f35b1dd165a0263e65bea",
- "algorithm_sha256_learner_ports_spec": "27df1133c924e7a337e90246c7e1e30699017f461e9f35b1dd165a0263e65bea",
+ "algorithm_sha256": "6a33a8e904537257d7d58517557368c7c1663beb0c042c1f714c06b0a231ce77",
+ "algorithm_sha256_launcher_expected": "6a33a8e904537257d7d58517557368c7c1663beb0c042c1f714c06b0a231ce77",
+ "algorithm_sha256_learner_ports_spec": "6a33a8e904537257d7d58517557368c7c1663beb0c042c1f714c06b0a231ce77",
  "algorithm_spec": {
   "advantage": {
    "estimator": "grpo",
@@ -65,10 +65,10 @@
   "sha256": "aeee22abefe0a1e756fe8e23e5f2af3931a3eee946b355bc0044cace2a365ea6"
  },
  "execution_profile": {
-  "contract_hash": "sha256:67aee42a1a530e9b32695039266e1cef5393816354f3dd9363a6467a31823d43",
+  "contract_hash": "sha256:a0805cacf3cfc5d515caa8418aa031c5f1ec1d2c3bd6ef56f6b67e71c95ce740",
   "profile": {
    "algorithm_contract": "on-policy",
-   "algorithm_spec_sha256": "27df1133c924e7a337e90246c7e1e30699017f461e9f35b1dd165a0263e65bea",
+   "algorithm_spec_sha256": "6a33a8e904537257d7d58517557368c7c1663beb0c042c1f714c06b0a231ce77",
    "allowed_overlap": [],
    "execution_mode": "partitioned-serial",
    "groups_per_batch": 4,
@@ -84,7 +84,7 @@
    "schema": "yeto-rl-execution-profile-v1"
   }
  },
- "launch_algorithm_sha256": "27df1133c924e7a337e90246c7e1e30699017f461e9f35b1dd165a0263e65bea",
+ "launch_algorithm_sha256": "6a33a8e904537257d7d58517557368c7c1663beb0c042c1f714c06b0a231ce77",
  "launch_cli": [
   "--rl-placement",
   "fixed-partition",
