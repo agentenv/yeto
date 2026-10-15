@@ -30,6 +30,7 @@ This module imports Miles only inside :func:`run_sampler_island`.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -60,6 +61,10 @@ from .release_plugin import WRITE_LORA_ADAPTER
 SAMPLER_TRAIN_PARALLEL_CONFIG = {"dp_size": 1}
 BASE_POLICY_VERSION = 0  # the engines start with the base weights: policy version 0
 ADAPTER_REQUEST_TIMEOUT_S = 600.0
+# A fixed greedy request each LoRA load answers (rl_sampler_policy_loaded.probe):
+# its token log-probabilities show that the served adapter changed with the version.
+PROBE_PROMPT = "Question: Natalia sold 48 clips in April and half as many in May. How many clips did she sell in total?\nAnswer:"
+PROBE_TOKENS = 16
 
 
 def _buffer_config(miles_args: Any, role: str) -> Any:
@@ -91,6 +96,20 @@ async def _post_engine(engine: Any, endpoint: str, payload: dict[str, Any],
     return body
 
 
+async def probe_generate(engine: Any, adapter: str, timeout_s: float = 120.0) -> dict[str, Any]:
+    """One greedy :data:`PROBE_PROMPT` request under ``adapter``, sent to the engine
+    directly: the output text digest and the sum of its token log-probabilities."""
+    body = await _post_engine(engine, "generate", {
+        "text": PROBE_PROMPT, "lora_path": adapter, "return_logprob": True,
+        "sampling_params": {"max_new_tokens": PROBE_TOKENS, "temperature": 0.0}}, timeout_s)
+    body = body[0] if isinstance(body, list) else body
+    logprobs = [float(t[0]) for t in body.get("meta_info", {}).get("output_token_logprobs") or []
+                if t and t[0] is not None]
+    text = str(body.get("text", ""))
+    return {"text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()[:16],
+            "text": text[:120], "logprob_sum": round(sum(logprobs), 6), "tokens": len(logprobs)}
+
+
 class EngineReleaseLoader:
     """Loads a release into every rollout engine (``PolicyFollower`` load hook).
 
@@ -103,6 +122,7 @@ class EngineReleaseLoader:
                  lora: bool = False, post: Callable[..., Any] = _post_engine,
                  warmup: Callable[[Any, str, float], Any] = default_lora_warmup,
                  flatten: Callable[[Any], list[dict[str, Any]]] | None = None,
+                 probe: Callable[[Any, str], Any] | None = probe_generate,
                  warmup_timeout_s: float = 120.0) -> None:
         self.controller = controller
         self.executor = executor
@@ -111,6 +131,8 @@ class EngineReleaseLoader:
         self.post = post
         self.warmup = warmup
         self.flatten = flatten
+        self.probe = probe
+        self.last_probe: dict[str, Any] | None = None  # LoRA: the first engine's probe answer
         self.warmup_timeout_s = float(warmup_timeout_s)
         self.adapter = lora_adapter_name() if self.lora else None
         self._adapter_loaded = False  # the engines hold the adapter of an earlier release
@@ -156,6 +178,8 @@ class EngineReleaseLoader:
         """Warm the adapter into every engine's LoRA pool, then read the checksums."""
         await asyncio.gather(*(self.warmup(e, self.adapter, self.warmup_timeout_s) for e in engines))
         bodies = await read_engine_checksums(self.controller, self.flatten)
+        if self.probe is not None:
+            self.last_probe = dict(await self.probe(engines[0], self.adapter))
         return weight_view_digest(bodies, lora=True)
 
     async def _load(self, path: str | None, version: int) -> list[Any]:
@@ -244,7 +268,8 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None) -> int:
             num_rollouts=int(miles_args.num_rollout),
             max_backlog_groups=int(config.max_backlog_groups),
             min_round_s=config.min_round_s, require_release=lora,
-            loaded_fields=lambda: {"served_checksum": loader.last_checksum})
+            loaded_fields=lambda: {"served_checksum": loader.last_checksum,
+                                   "probe": loader.last_probe})
         emit("rl_sampler_start", store=config.store, num_rollouts=int(miles_args.num_rollout),
              max_backlog_groups=int(config.max_backlog_groups), weights=loader.weights)
         return loop.run()

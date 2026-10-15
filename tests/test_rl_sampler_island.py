@@ -432,8 +432,12 @@ def _lora_loader(log, engines, bodies):
 
     controller.check_weights = check_weights
     executor = SimpleNamespace(set_weight_version=lambda v: log.append(("executor", v)))
+    async def probe(engine, adapter):
+        log.append(("probe", engine.server_url))
+        return {"logprob_sum": -1.5}
+
     return si.EngineReleaseLoader(controller, executor, asyncio.run, lora=True, post=post,
-                                  warmup=warmup, flatten=lambda raw: raw)
+                                  warmup=warmup, flatten=lambda raw: raw, probe=probe)
 
 
 def test_lora_engine_load_hot_swaps_the_adapter_and_reads_it_back(tmp_path):
@@ -451,8 +455,8 @@ def test_lora_engine_load_hot_swaps_the_adapter_and_reads_it_back(tmp_path):
     assert log == [("lock",), ("load_lora_adapter", "e0", path), ("load_lora_adapter", "e1", path),
                    ("stamp", "e0", "0"), ("stamp", "e1", "0"), ("end", {"c0": "x"}),
                    ("executor", 0), ("warmup", "e0", "miles_lora"), ("warmup", "e1", "miles_lora"),
-                   ("checksum",)]
-    assert loader.last_checksum == expected
+                   ("checksum",), ("probe", "e0")]
+    assert loader.last_checksum == expected and loader.last_probe == {"logprob_sum": -1.5}
     log.clear()
     second = releases.release(1, "h1", _write_adapter, weights=LORA)  # no trainer checksum
     loader(second, releases.resolve(second))
@@ -464,6 +468,20 @@ def test_lora_engine_load_hot_swaps_the_adapter_and_reads_it_back(tmp_path):
     full = releases.release(3, "h3", _write_weights)
     with pytest.raises(br.SampleBufferRolloutError, match="holds full weights"):
         loader(full, releases.resolve(full))
+
+
+def test_probe_generate_digests_the_greedy_answer(monkeypatch):
+    sent = []
+
+    async def post(engine, endpoint, payload, timeout_s):
+        sent.append((endpoint, payload["lora_path"], payload["sampling_params"]["temperature"]))
+        return {"text": " 72", "meta_info": {"output_token_logprobs": [[-0.5, 1, None],
+                                                                       [-0.25, 2, None]]}}
+
+    monkeypatch.setattr(si, "_post_engine", post)
+    answer = asyncio.run(si.probe_generate(SimpleNamespace(server_url="e0"), "miles_lora"))
+    assert sent == [("generate", "miles_lora", 0.0)]
+    assert (answer["logprob_sum"], answer["tokens"], answer["text"]) == (-0.75, 2, " 72")
 
 
 def test_engines_without_a_served_adapter_give_no_lora_checksum():
