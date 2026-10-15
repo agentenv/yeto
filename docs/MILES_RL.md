@@ -1021,6 +1021,8 @@ the run exit 3. A synced run still fetches its checkpoint first.
 | 4 | a fixed-roster RL island could not be recovered |
 | 5 | the Modal app was not confirmed stopped after teardown |
 | 6 | the run stalled: no island event for `--rl-stall-timeout` seconds (default 900, 0 disables) and not every island finalized |
+| 7 | Modal moved an island to a different container mid-run |
+| 8 | the trainer scheduler gave up: `--rl-trainer-max-failures` (default 3) trainer incarnations failed in a row |
 
 For exit 5, every row of `modal app list` with the run's app name must be
 `stopped` with 0 tasks; an earlier run's row with the same name counts too.

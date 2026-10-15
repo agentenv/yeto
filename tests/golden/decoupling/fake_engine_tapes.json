@@ -2161,6 +2161,17 @@
     "time_unix": "<VOLATILE>"
    },
    {
+    "event": "rl_sync_timing",
+    "island_id": 0,
+    "outer_sync": "strict",
+    "rollout_id": 0,
+    "sync/global_ready_ts": "<VOLATILE>",
+    "sync/recv_seconds": "<VOLATILE>",
+    "sync/submit_ts": "<VOLATILE>",
+    "sync/sync_wait_seconds": "<VOLATILE>",
+    "time_unix": "<VOLATILE>"
+   },
+   {
     "event": "rl_driver_phase",
     "island_id": 0,
     "optimizer": "reset",

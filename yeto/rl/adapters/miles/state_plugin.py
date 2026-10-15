@@ -40,6 +40,8 @@ EXPORT_STATE = f"{_PLUGIN_MODULE}.export_state"
 # rl-publish-fastpath: export + hash on the trainer, return only the digests.
 EXPORT_DIGEST = f"{_PLUGIN_MODULE}.export_digest"
 WEIGHTS_VERSION = f"{_PLUGIN_MODULE}.weights_version"
+# A no-sync full-parameter island (L4.6): per-rank digest of every model parameter.
+EXPORT_FULL_DIGEST = f"{_PLUGIN_MODULE}.export_full_digest"
 
 # rl-publish-fastpath D3: version of the weights this trainer process holds.
 # Kept in each trainer process (module state), bumped on every path that writes
@@ -654,6 +656,56 @@ def export_digest(
     )
     return {"policy_version": int(policy_version), "digest": digest.to_wire(),
             "export_seconds": export_seconds, "weights": current_weights_version()}
+
+
+FULL_SHARD_PREFIX = b"yeto-rl-full-parameter-shard-v1\0"
+
+
+def export_full_digest(actor: Any, *, policy_version: int) -> dict[str, Any]:
+    """Plugin of a no-sync full-parameter island: hash this rank's model shard.
+
+    Every rank returns its own shard digest (name, dtype, shape and raw bytes of
+    each local parameter, sorted by name); the caller combines the ranks in
+    ``run_plugin`` order.  No tensor leaves the trainer and no collective runs.
+    The main rank also reports its weights version (rl-publish-fastpath D3).
+    """
+
+    import hashlib
+    import time
+
+    import torch
+
+    install_grad_norm_recorder()
+    started = time.monotonic()
+    digest = hashlib.sha256(FULL_SHARD_PREFIX)
+    total = 0
+    count = 0
+    with trainer_resident(actor):
+        named: dict[str, Any] = {}
+        for index, chunk in enumerate(actor.model):
+            for name, param in chunk.named_parameters():
+                named[f"{index}.{name}"] = param
+        for name in sorted(named):
+            value = named[name].detach()
+            if value.device.type != "cpu":
+                value = value.to("cpu")
+            value = value.contiguous()
+            encoded = name.encode("utf-8")
+            digest.update(len(encoded).to_bytes(4, "little"))
+            digest.update(encoded)
+            digest.update(f"{value.dtype}|{list(value.shape)}".encode("ascii"))
+            raw = value.view(torch.uint8) if value.dim() else value.reshape(1).view(torch.uint8)
+            digest.update(memoryview(raw.numpy()).cast("B"))
+            total += raw.numel()
+            count += 1
+    return {
+        "policy_version": int(policy_version),
+        "shard_hash": digest.hexdigest(),
+        "shard_bytes": total,
+        "shard_tensors": count,
+        "hash_seconds": round(time.monotonic() - started, 3),
+        "weights": current_weights_version() if _is_main_rank(actor) else None,
+    }
 
 
 def is_native_flash_next(actor: Any) -> bool:
