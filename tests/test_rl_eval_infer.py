@@ -164,6 +164,18 @@ def test_loader_starts_once_then_swaps_adapter(monkeypatch, tmp_path):
     assert all(p is not None for p in loader.procs.values())
 
 
+def test_loader_start_base_serves_without_lora(monkeypatch, tmp_path):
+    loader, spawned, http, _ = _loader(monkeypatch, tmp_path)
+    out = loader.start_base()
+    assert "sglang_start_s" in out and len(spawned) == 2
+    assert not any(a.startswith("--enable-lora") or "lora" in a for a in spawned[0])
+    session = json.loads(spawned[1][-1])
+    assert session["lora_rank"] == 0 and session["lora_adapter_path"] is None
+    assert not [c for c in http.calls if "lora" in c[1]]
+    with pytest.raises(RuntimeError, match="already started"):
+        loader.start_base()
+
+
 def test_loader_fails_closed(monkeypatch, tmp_path):
     loader, *_ = _loader(monkeypatch, tmp_path, refuse=True)
     with pytest.raises(RuntimeError, match="refused the adapter"):

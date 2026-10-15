@@ -657,7 +657,7 @@ def test_legacy_preflight_forwarder_matches_legacy_failure_classes(monkeypatch):
     env = dict(adapter._OPENENV_IDENTITY_ENV)
     preflight.forward_legacy_openenv_preflight(None, "qwen35_08b", env)
     with pytest.raises(ValueError, match="requires backend profile"):
-        preflight.forward_legacy_openenv_preflight(None, "qwen38", env)
+        preflight.forward_legacy_openenv_preflight(None, "deepseekv4", env)
     with pytest.raises(ValueError, match="environment drifted"):
         preflight.forward_legacy_openenv_preflight(None, "qwen35_08b", {k: v for k, v in env.items() if "MODEL_REVISION" not in k})
     pins = preflight.required_pin_updates()
@@ -772,14 +772,13 @@ def test_openenv_profile_pin_relaxed_to_allowlist(monkeypatch):
     from yeto.rl.harness.codex import pins
 
     assert adapter.IMAGE_BACKEND_PROFILE_NAME == pins.OPENENV_BACKEND_PROFILE == "qwen35_08b"
-    assert set(pins.OPENENV_BACKEND_PROFILES) == {"qwen35_08b", "qwen35", "qwen38_next", "qwen38_next_4layer", "qwen3_30b_a3b"}  # rlf-codex-rl 5.6
+    assert set(pins.OPENENV_BACKEND_PROFILES) == {"qwen35_08b", "qwen35", "qwen38", "qwen38_next", "qwen38_next_4layer", "qwen3_30b_a3b"}  # rlf-codex-rl 5.6; S24 27B
     # the identity derives from the selected profile (codex_backend allowlist), per profile
     assert adapter.profile_identity("qwen35_08b") == (cb.QWEN35_08B_MODEL, cb.QWEN35_08B_REVISION)
     assert adapter.profile_identity("qwen38_next_4layer") == (cb.QWEN38_NEXT_4LAYER_MODEL, cb.QWEN38_NEXT_4LAYER_REVISION)
     assert adapter.profile_identity("qwen38_next") == (cb.QWEN38_NEXT_MODEL, cb.QWEN38_NEXT_REVISION)
     assert adapter.profile_identity("qwen35") == (cb.QWEN35_MODEL, cb.QWEN35_REVISION)  # S17 M1: 4B allowlisted
-    with pytest.raises(ValueError, match="requires backend profile"):
-        adapter.profile_identity("qwen38")
+    assert adapter.profile_identity("qwen38") == (cb.QWEN38_MODEL, cb.QWEN38_REVISION)  # S24: 27B allowlisted
     with pytest.raises(ValueError, match="requires backend profile"):
         adapter.profile_identity("deepseekv4")
     # drift of an allowlisted profile is still refused
@@ -800,7 +799,7 @@ def test_openenv_runtime_profile_resolution():
     assert adapter.resolve_backend_profile(env={}) == "qwen35_08b"
     assert adapter.resolve_backend_profile(env={adapter.RUNTIME_PROFILE_ENV: "deepseekv4"}) == "qwen35_08b"
     with pytest.raises(ValueError, match="requires backend profile"):
-        adapter.resolve_backend_profile("qwen38", env={})
+        adapter.resolve_backend_profile("deepseekv4", env={})
     # the image record is independent of the runtime profile
     assert adapter._OPENENV_IDENTITY_ENV["YETO_CODEX_OPENENV_BACKEND_PROFILE"] == "qwen35_08b"
     assert adapter._OPENENV_IDENTITY_ENV["YETO_CODEX_OPENENV_MODEL_ID"] == "Qwen/Qwen3.5-0.8B"
@@ -811,7 +810,7 @@ def test_legacy_preflight_accepts_fn_profiles_against_image_env():
     for name in ("qwen38_next_4layer", "qwen38_next", "qwen35_08b"):
         preflight.forward_legacy_openenv_preflight(None, name, env)
     with pytest.raises(ValueError, match="requires backend profile"):
-        preflight.forward_legacy_openenv_preflight(None, "qwen38", env)
+        preflight.forward_legacy_openenv_preflight(None, "deepseekv4", env)
     # the image record is still enforced for the FN profile
     with pytest.raises(ValueError, match="environment drifted"):
         preflight.forward_legacy_openenv_preflight(
