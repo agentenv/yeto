@@ -467,6 +467,9 @@ LEAF_POLICY: dict[str, _Check] = {
     # L4.6: the buffer rollout functions (translate_run_config); the island
     # environment and the sampler loop read the rest.
     "sample_buffer": _ok,
+    # translated below (Megatron full recompute / Miles dynamic batching)
+    "train_memory.activation_recompute": _ok,
+    "train_memory.max_tokens_per_gpu": _ok,
     **{f"sample_buffer.{name}": _ok
        for name in ("role", "store", "max_backlog_groups", "wait_s", "min_round_s")},
 }
@@ -1005,6 +1008,7 @@ def translate_run_config(
     if timeout_s is not None:
         # A27: bounded weight-update group rendezvous (fork image-m3a27+).
         values.extend(("--update-weight-group-timeout-s", f"{float(timeout_s):g}"))
+    values.extend(train_memory_argv(config.train_memory))
     if getattr(config, "deterministic_trainer", False):
         values.append("--deterministic-mode")  # Megatron deterministic kernels (E2 plan-v2 §0)
     if config.data.chat_template_kwargs:
@@ -1152,6 +1156,20 @@ RELEASE_EXPORTER_SAVE_HF = "/tmp/yeto-rl-unused-save-hf/rollout_{rollout_id}"
 
 
 SAMPLER_ONLY_FLAG = "--debug-rollout-only"
+
+
+def train_memory_argv(memory: Any) -> tuple[str, ...]:
+    """Megatron full uniform recompute (one layer per chunk) and Miles dynamic
+    batching; the same values the validated Flash-Next recipe uses."""
+
+    values: list[str] = []
+    if memory.activation_recompute:
+        values.extend(("--recompute-granularity", "full", "--recompute-method", "uniform",
+                       "--recompute-num-layers", "1"))
+    if memory.max_tokens_per_gpu is not None:
+        values.extend(("--use-dynamic-batch-size",
+                       "--max-tokens-per-gpu", str(memory.max_tokens_per_gpu)))
+    return tuple(values)
 
 
 def sample_buffer_argv(role: str, *, max_policy_age: int) -> tuple[str, ...]:

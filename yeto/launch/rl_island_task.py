@@ -147,7 +147,10 @@ def make_miles_island_task(
         + _rl_trainable_island_flags(args, learner_id, num_learners)
         + f" --inner-lr {args.inner_lr}"
         f" --seq-len {args.seq_len}"
-        f" --seed {args.seed}"
+        + (" --rl-activation-recompute" if getattr(args, "rl_activation_recompute", False) else "")
+        + (f" --rl-max-tokens-per-gpu {int(args.rl_max_tokens_per_gpu)}"
+           if getattr(args, "rl_max_tokens_per_gpu", None) is not None else "")
+        + f" --seed {args.seed}"
         f" --wan-streams {args.wan_streams}"
         " --miles-root ~/miles"
     )

@@ -402,6 +402,27 @@ _TINY_QWEN3 = {
 }
 
 
+def test_train_memory_defaults_keep_argv_and_flags_translate():
+    default = mc.translate_run_config(make_config(), AlgorithmSpec()).argv
+    for flag in ("--recompute-granularity", "--use-dynamic-batch-size", "--max-tokens-per-gpu"):
+        assert flag not in default
+    memory = rc.TrainMemoryConfig(activation_recompute=True, max_tokens_per_gpu=32768)
+    argv = mc.translate_run_config(make_config(train_memory=memory), AlgorithmSpec()).argv
+    joined = " ".join(argv)
+    assert ("--recompute-granularity full --recompute-method uniform "
+            "--recompute-num-layers 1") in joined
+    assert "--use-dynamic-batch-size --max-tokens-per-gpu 32768" in joined
+
+
+def test_train_memory_from_args_refuses_a_budget_below_seq_len():
+    args = SimpleNamespace(seq_len=32768, rl_activation_recompute=True, rl_max_tokens_per_gpu=16384)
+    with pytest.raises(ValueError, match="below --seq-len"):
+        rc._train_memory(args)
+    args.rl_max_tokens_per_gpu = 32768
+    assert rc._train_memory(args) == rc.TrainMemoryConfig(True, 32768)
+    assert rc._train_memory(SimpleNamespace(seq_len=8)) == rc.TrainMemoryConfig()
+
+
 @pytest.mark.ray_local  # upstream parse_args can start Ray on this machine
 @pytest.mark.parametrize("colocated", [True, False])
 def test_upstream_parse_args_accepts_translation(tmp_path, colocated):
