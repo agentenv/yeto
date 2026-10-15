@@ -290,3 +290,50 @@ def test_sky_binding_needs_the_held_task(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="no sky task"):
         sky_binding(args, TrainerIsland("b", "nebius"), journal_dir=Path(tmp_path),
                     files=LocalStoreFiles(CheckpointStore(tmp_path)))
+
+
+def test_loop_starts_a_trainer_for_the_samplers_first_policy(tmp_path, monkeypatch):
+    """LoRA samplers wait for a first release: the buffer stays empty, S1 alone would
+    never start. The loop starts one and keeps it until it trained a round."""
+    from yeto.rl.engine.trainer_loop import FIRST_POLICY
+
+    fake, ops, islands, binding, lifecycle = _setup(tmp_path, monkeypatch)
+    clock = _Clock()
+    journal = Journal(tmp_path / "head" / "journal")
+    loop = _loop(islands, lifecycle, binding.cuts, binding.buffer, clock, journal)
+    released = {"v": False}
+    loop._needs_first_policy = lambda: not released["v"]
+
+    assert _ticks(loop, 1) == [Start] and loop.state is LifecycleState.TRAINING  # S1 alone: Hold
+    released["v"] = True  # the warm-up publication reached the store
+    assert loop.handle.incarnation == 0 and loop.handle.rounds == 0
+    clock.now += 10 * T_S
+    assert _ticks(loop, 3) == [Hold, Hold, Hold] and loop.state is LifecycleState.TRAINING  # kept
+    sampler = FakeSampler(fake.sampler_buffer, fake.published)
+    sampler.produce(BATCH)
+    assert _ticks(loop, 1) == [Hold] and loop.handle.rounds == 1
+    assert _ticks(loop, 1) == [Hold]  # idle from here
+    clock.now += T_S
+    assert _ticks(loop, 1) == [Stop]
+    assert loop.state is LifecycleState.STOPPED and loop.handle.leave_reason is LeaveReason.STOPPED
+    assert [r["incarnation"] for r in journal.records
+            if r["kind"] == LOOP_KIND and r["event"] == FIRST_POLICY] == [0]
+    journal.close()
+
+
+def test_first_policy_probe_reads_the_release_store_until_one_is_there():
+    from yeto.launch.trainer_island import first_policy_probe
+
+    reads = []
+    store = {}
+
+    class _Files:
+        def read(self, rel):
+            reads.append(rel)
+            return store.get(rel)
+
+    probe = first_policy_probe(_Files())
+    assert probe() is True
+    store["policy-releases/LATEST.json"] = b"{}"
+    assert probe() is False and probe() is False
+    assert reads == ["policy-releases/LATEST.json"] * 2

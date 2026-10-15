@@ -73,6 +73,7 @@ STOPPED = "stopped"
 ORPHANED = "orphaned"
 FINISHED = "finished"  # the data ended with no trainer running (incarnation None)
 GAVE_UP = "gave_up"  # too many incarnations failed in a row: the loop stopped
+FIRST_POLICY = "first_policy"  # a start (or a kept trainer) for the samplers' first policy
 
 DEFAULT_MAX_CONSECUTIVE_FAILURES = 3
 
@@ -100,13 +101,18 @@ class TrainerLoop:
     ``record`` / ``records``: the controller journal (``Journal.append`` and
     ``Journal.records``). ``data_ended`` tells the samplers will append nothing more.
     ``release_orphan(incarnation)`` gives back the cards of a trainer the dead head
-    started (cloud layer)."""
+    started (cloud layer). ``needs_first_policy()`` is True while the samplers wait
+    for a first policy release (a LoRA sampler serves no adapter before it): the
+    buffer then stays empty and S1 would never start the trainer, so the loop
+    starts one, and keeps it until it trained a round (no idle stop of a trainer
+    that only published the first policy)."""
 
     def __init__(self, *, scheduler: TrainerScheduler, lifecycle: TrainerLifecycle,
                  buffer: DurableSampleBuffer, cuts: CutLog,
                  record: Record | None = None,
                  data_ended: Callable[[], bool] = lambda: False,
                  release_orphan: Callable[[int], None] | None = None,
+                 needs_first_policy: Callable[[], bool] | None = None,
                  spec: Mapping[str, Any] | None = None,
                  rounds_per_tick: int = 1, ready_timeout_s: float = 1800.0,
                  max_consecutive_failures: int = DEFAULT_MAX_CONSECUTIVE_FAILURES,
@@ -122,6 +128,9 @@ class TrainerLoop:
         self._record = record
         self._data_ended = data_ended
         self._release_orphan = release_orphan
+        self._needs_first_policy = needs_first_policy
+        self._first_policy_incarnation: int | None = None
+        self._start_for_first_policy = False
         self.spec = dict(spec or {})
         self.rounds_per_tick = int(rounds_per_tick)
         self.ready_timeout_s = float(ready_timeout_s)
@@ -160,7 +169,7 @@ class TrainerLoop:
         self._note_failure()
         self._give_up_at_limit()
         backlog = self.backlog()
-        decision = self.scheduler.decide(backlog, self.state)
+        decision = self._for_first_policy(self.scheduler.decide(backlog, self.state), backlog)
         if isinstance(decision, Start):
             self._start()
         elif isinstance(decision, Stop):
@@ -168,6 +177,22 @@ class TrainerLoop:
         elif self.state is LifecycleState.TRAINING and backlog.batches >= 1:
             self._train()
         self._give_up_at_limit()
+        return decision
+
+    def _for_first_policy(self, decision: Decision, backlog: BacklogStats) -> Decision:
+        """Start a trainer for the samplers' first policy; keep that incarnation
+        until it trained a round (see the class doc)."""
+        if self._needs_first_policy is None or backlog.data_ended:
+            return decision
+        handle = self.handle
+        if (isinstance(decision, Stop) and decision.reason is LeaveReason.STOPPED
+                and handle is not None and handle.rounds == 0
+                and handle.incarnation == self._first_policy_incarnation):
+            return Hold()
+        if (isinstance(decision, Hold) and self.state in (LifecycleState.COLD, LifecycleState.STOPPED)
+                and self._needs_first_policy()):
+            self._start_for_first_policy = True
+            return Start()
         return decision
 
     def _give_up_at_limit(self) -> None:
@@ -192,6 +217,10 @@ class TrainerLoop:
     def _start(self) -> None:
         resume = self.cuts.latest()
         plan = self.lifecycle.plan_start(self.spec)
+        if self._start_for_first_policy:
+            self._start_for_first_policy = False
+            self._first_policy_incarnation = plan.incarnation
+            self._journal(FIRST_POLICY, plan.incarnation)
         # journal first: a head that dies during the start sees the orphan
         self._journal(STARTED, plan.incarnation,
                       resume_cut=None if resume is None else resume.cut_id,

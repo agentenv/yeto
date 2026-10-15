@@ -207,7 +207,7 @@ def build(args, binding: CloudTrainerBinding, journal: Journal) -> TrainerLoop:
     loop = TrainerLoop(scheduler=scheduler, lifecycle=binding.lifecycle(next_incarnation(records)),
                        buffer=binding.buffer, cuts=binding.cuts, record=journal.append,
                        data_ended=binding.data_ended, release_orphan=binding.release_orphan,
-                       spec=binding.spec,
+                       spec=binding.spec, needs_first_policy=binding.needs_first_policy,
                        ready_timeout_s=float(getattr(
                            args, "rl_trainer_ready_seconds", DEFAULT_READY_SECONDS)),
                        max_consecutive_failures=int(getattr(

@@ -35,6 +35,8 @@ from pathlib import Path
 from typing import Any
 
 from yeto.rl import event_echo
+from yeto.rl.engine.policy_release import LATEST as RELEASE_LATEST
+from yeto.rl.engine.policy_release import RELEASE_DIR
 from yeto.rl.engine.resume import CheckpointStore
 from yeto.rl.engine.sample_buffer import BUFFER_DIR, INDEX, CommittedBacklog, FileSampleBuffer
 from yeto.rl.engine.start_phases import SUBMITTED_ENV
@@ -89,6 +91,7 @@ class CloudTrainerBinding:
     start_events: Callable[[], Iterable[Mapping[str, Any]]] | None = None
     spec: Mapping[str, Any] | None = None
     after_restore: Callable[[], None] | None = None
+    needs_first_policy: Callable[[], bool] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -577,4 +580,25 @@ def _binding(args: Any, files: StoreFiles, islands: Any, *, journal_dir: Path) -
 
     return CloudTrainerBinding(
         lifecycle=lifecycle, buffer=CommittedBacklog(buffer, watermark), cuts=cuts,
-        release_orphan=islands.release_incarnation, start_events=islands.start_events)
+        release_orphan=islands.release_incarnation, start_events=islands.start_events,
+        needs_first_policy=first_policy_probe(files) if samplers_wait_for_a_policy(args) else None)
+
+
+def samplers_wait_for_a_policy(args: Any) -> bool:
+    """A LoRA sampler serves no adapter before the first policy release
+    (``sampler_island``: ``require_release``); a full-parameter one serves the base."""
+    return getattr(args, "tuning", "lora") == "lora"
+
+
+def first_policy_probe(files: StoreFiles) -> Callable[[], bool]:
+    """True while the store has no policy release (``policy-releases/LATEST.json``);
+    once one is there it stays False without reading the store again."""
+    seen = False
+
+    def needs_first_policy() -> bool:
+        nonlocal seen
+        if not seen:
+            seen = files.read(f"{RELEASE_DIR}/{RELEASE_LATEST}") is not None
+        return not seen
+
+    return needs_first_policy
