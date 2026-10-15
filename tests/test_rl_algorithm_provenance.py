@@ -287,11 +287,11 @@ def test_export_cli_reads_spec_file(tmp_path, monkeypatch):
 
 
 def test_selection_event_records_absorbed_flags_and_allowance():
-    launch = _launch(AlgorithmSpec(), ("--eps-clip-high", "0.28", "--use-rollout-logprobs"))
+    launch = _launch(AlgorithmSpec(), ("--eps-clip-high", "0.28", "--normalize-advantages"))
     event = selection_event(launch=launch, algorithm=launch.algorithm, miles_commit="x",
                             unverified_mechanisms=("features:clip_higher",))
     assert event["rl/algorithm_absorbed_flags"] == {"--eps-clip-high": "0.28",
-                                                    "--use-rollout-logprobs": True}
+                                                    "--normalize-advantages": True}
     assert event["rl/unverified_mechanisms"] == ["features:clip_higher"]
     assert event["rl/algorithm_spec_sha256"] == launch.algorithm.sha256()
     plain = selection_event(launch=_launch(AlgorithmSpec()), algorithm=AlgorithmSpec(),
@@ -888,6 +888,9 @@ def test_modal_two_islands_with_syncer_rebuild_tapes_and_fail_closed(monkeypatch
 
         def run(self):
             return {name: "JobStatus.SUCCEEDED" for name in self.learners}
+
+        def abort(self, error):  # the trainer scheduler's give-up hook
+            raise AssertionError(f"unexpected abort: {error!r}")
 
     monkeypatch.setattr(launcher, "FleetController", Controller)
     args = _launcher_args("ports", ("--controller", "local", "--rl-image",

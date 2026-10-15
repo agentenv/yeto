@@ -603,6 +603,9 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         default=30,
         help="fleet-controller health poll interval (seconds)",
     )
+    from .launch import trainer_loop as _trainer_loop
+
+    _trainer_loop.add_arguments(infra)
 
     # W&B telemetry. One group per fleet (this run's name), one run per
     # island plus one for the syncer's event tape; see docs/WANDB.md.

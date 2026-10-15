@@ -33,7 +33,12 @@ from __future__ import annotations
 
 from yeto.rl.engine.policy_age import STAGE_NAMES, PolicyAgeError, PolicyAgeSupport, validate_limit
 
-SUPPORT = PolicyAgeSupport(backend="miles", stage=3, max_policy_age=1)
+# rl-offpolicy-correction-passthrough L6.9: the cap was 1 (the only limit
+# measured on GPU). Decoupled PPO needs A_hard >= 2. Miles itself has no upper
+# bound (--max-weight-staleness and --agentic-suspend-max-rounds take any int);
+# 4 bounds the rollout compute a dropped group can waste. Sub-agent decision,
+# 2026-10-14; limits above 1 are not yet run on GPU (L6.10).
+SUPPORT = PolicyAgeSupport(backend="miles", stage=3, max_policy_age=4)
 
 PARTIAL_ROLLOUT_FLAGS = ("--partial-rollout",)
 AGENTIC_GENERATE = "miles.rollout.generate_hub.agentic_tool_call.generate"

@@ -529,6 +529,15 @@ _RESUME = (
              "there after every commit point and restores from it when its state dir "
              "is empty (machine replaced). Without it the state stays on node0's local "
              "disk (warning on a multi-node island)"),
+    # rl-identity-tiering L9.4-L9.6
+    cli_flag("--rl-code-pack", choices=["off", "git-patch"], default="off",
+             help="git-patch: pack the local git tree (commit + dirty patch with untracked "
+             "files) once at the first start, store it in --rl-checkpoint-store and ship it "
+             "as every island's workdir; resumed and replacement islands get the same pack"),
+    cli_flag("--rl-code-pack-upgrade", default=None, metavar="REASON",
+             help="with --rl-code-pack git-patch on an existing run: switch the run to a pack "
+             "of the current local tree; refused unless the algorithm semantic hash is "
+             "unchanged; the manifest records the old -> new pack and REASON"),
     # rl-resume-from-checkpoint (S17 C4)
     shared_flag("--rl-cut-every", type=int, default=None,
                 help="with --rl-checkpoint-store: keep a round cut every N rounds (plus the "
@@ -542,6 +551,24 @@ _RESUME = (
     shared_flag("--rl-stop-after-rounds", type=int, default=None,
                 help="with --rl-checkpoint-store and no --rl-elastic: stop after N rounds "
                 "with a final cut (our own stop; the next launch resumes)"),
+    # rl-trainer-start-stop L4.6: sampler / trainer islands over the durable sample buffer
+    shared_flag("--rl-sample-role", choices=("both", "sampler", "trainer"), default="both",
+                help="both (default): the island generates and trains as before. sampler: the "
+                "island only generates and writes each group to the sample buffer in "
+                "--rl-checkpoint-store (no trainer model, no trainer GPU) and loads every policy "
+                "the trainer releases. trainer: the island trains on groups read from the buffer "
+                "(needs --rl-max-policy-age >= 1) and releases every published policy. Both need "
+                "--rl-single-island-no-sync and the same --rl-checkpoint-store; full-parameter "
+                "mode only"),
+    shared_flag("--rl-sampler-max-backlog-rounds", type=int, default=None, metavar="N",
+                help="--rl-sample-role sampler: wait while the buffer holds N rounds the trainer "
+                "has not read (as of its last release); default 4"),
+    shared_flag("--rl-sampler-min-round-seconds", type=float, default=None, metavar="S",
+                help="--rl-sample-role sampler: start one round at most every S seconds (a "
+                "throttle; a check run uses it to make the trainer idle); default no throttle"),
+    shared_flag("--rl-sample-wait-s", type=float, default=None, metavar="S",
+                help="--rl-sample-role trainer: max seconds to wait for one full round from "
+                "the buffer (default 3600)"),
 )
 
 _SCHEDULING = (

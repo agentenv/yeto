@@ -37,6 +37,16 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def verify_island_code_pack(digest: str | None, tree: str | Path | None = None) -> None:
+    """rl-identity-tiering L9.5: refuse to start when the workdir is not the run pack."""
+
+    if not digest:
+        return
+    from yeto.codepack import verify_tree
+
+    verify_tree(tree if tree is not None else Path(__file__).resolve().parents[4], digest)
+
+
 def parse_args(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -50,10 +60,12 @@ def parse_args(argv=None):
         SAO_STREAMING_SYNC_PRESET,
     )
 
-    if args.parameter_mode == "full" and args.sync_preset not in FULL_PARAMETER_SYNC_PRESETS:
+    if (args.parameter_mode == "full" and args.sync_preset not in FULL_PARAMETER_SYNC_PRESETS
+            and not _buffer_island(args)):
         parser.error(
             "--parameter-mode full requires a full-parameter --sync-preset "
-            f"({', '.join(sorted(FULL_PARAMETER_SYNC_PRESETS))})"
+            f"({', '.join(sorted(FULL_PARAMETER_SYNC_PRESETS))}) or a no-sync "
+            "--rl-sample-role sampler / trainer island"
         )
     if args.sync_preset == FULL_PARAMETER_SYNC_PRESET and not _trains_base_parameters(args):
         parser.error(
@@ -218,6 +230,23 @@ def _elastic_cells(value: str | None) -> tuple[str, ...]:
     return tuple(c.strip() for c in (value or "").split(",") if c.strip())
 
 
+def apply_sample_role(args, miles_args, environ=None) -> None:
+    """L4.6 (--rl-sample-role sampler|trainer): the buffer config on ``miles_args``
+    and the environment of the buffer rollout functions (forwarded to the Ray
+    workers by ``connect_island_ray``). Role ``both`` sets nothing."""
+    from yeto.rl.engine import sample_roles
+
+    from .buffer_rollout import island_env
+
+    if sample_roles.sample_role(args) == sample_roles.BOTH:
+        return
+    config = sample_roles.resolve(args, groups_per_round=args.groups_per_round)
+    miles_args.yeto_rl_sample_buffer = config
+    (os.environ if environ is None else environ).update(island_env(
+        config.role, store_root=config.store, sampler_id=f"island{int(args.learner_id)}",
+        max_policy_age=int(getattr(args, "rl_max_policy_age", 0) or 0), wait_s=config.wait_s))
+
+
 def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
     """Carry the opt-in 2.3/3.x switches onto ``miles_args`` before any rollout
     process starts. Without them nothing is set (default path unchanged)."""
@@ -238,6 +267,7 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
                    custom_agent=getattr(miles_args, "custom_agent_function_path", None),
                    recompute_prefill=bool(getattr(miles_args, "recompute_logprobs_via_prefill", False)))
         miles_args.yeto_rl_max_policy_age = int(args.rl_max_policy_age)
+    apply_sample_role(args, miles_args, environ)
     observe = bool(getattr(args, "rl_observe_timeline", False))
     if observe:
         miles_args.yeto_rl_observe_timeline = True
@@ -397,14 +427,20 @@ class AlgorithmMismatchError(RuntimeError):
 def verify_ports_algorithm(args, miles_args, launch) -> None:
     """D9/D11: before the island joins outer sync (no bridge exists yet).
 
-    Plugins are re-hashed and imported; the island's algorithm hash is
+    Plugins are re-hashed and imported (a stale source hash: warning event,
+    rl-identity-tiering L9.2); the island's algorithm hash is
     compared with ``--rl-expected-algorithm-sha256`` (mismatch: event +
     refusal; missing: warning event, for manually started islands);
     absorbed flags and unverified allowances are recorded.
     """
 
     algorithm = launch.algorithm
-    algorithm.verify_plugins()
+    for warning in algorithm.verify_plugins():
+        _append_ports_event(args, miles_args, {
+            "event": "rl_plugin_source_mismatch",
+            "level": "warning",
+            "message": warning,
+        })
     from yeto.rl.engine.algorithm import island_problems
 
     problems = island_problems(algorithm, {
@@ -444,6 +480,7 @@ def verify_ports_algorithm(args, miles_args, launch) -> None:
             f"island {args.learner_id} algorithm hash {actual} differs from the launcher's "
             f"expected {expected.lower()}; refusing to join outer sync"
         )
+    _append_correction_record(args, miles_args, algorithm)
     miles_args.yeto_rl_algorithm_absorbed_flags = dict(launch.absorbed_flags)
     miles_args.yeto_rl_outer_sync = not getattr(args, "rl_single_island_no_sync", False)
     # INFRA compares it with the runtime AlgorithmSpec before connect_island_ray
@@ -454,6 +491,25 @@ def verify_ports_algorithm(args, miles_args, launch) -> None:
     miles_args.yeto_rl_unverified_mechanisms = tuple(
         sorted(set(getattr(args, "rl_allow_unverified_mechanism", None) or ()))
     )
+
+
+def _append_correction_record(args, miles_args, algorithm) -> None:
+    """rl-offpolicy-correction-passthrough D8: the island tape records the full
+    correction group, the Miles values and ``prox_anchor``; each field Miles
+    cannot map gets a ``correction_config_warning`` (phase 1: no refusal)."""
+    from yeto.rl.engine.offpolicy_correction import CORRECTION_RECORD_EVENT, correction_record
+
+    from .offpolicy_correction import BACKEND, correction_mapping
+
+    if algorithm.correction.is_default():
+        return  # default tapes unchanged; the run manifest still records the group
+    mapping = correction_mapping(algorithm)
+    _append_ports_event(args, miles_args, {
+        "event": CORRECTION_RECORD_EVENT,
+        **correction_record(algorithm.correction, mapping, backend=BACKEND),
+    })
+    for warning in mapping.warnings:
+        _append_ports_event(args, miles_args, warning.event())
 
 
 def _require_ports_supported(args, extra_argv: Sequence[str] = ()) -> None:
@@ -598,6 +654,23 @@ def _is_sha256(value: Any) -> bool:
     return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
 
 
+def _full_parameter_identity(model_config_sha256: str) -> tuple[str, str]:
+    """``(layout hash, config hash)`` of a full-parameter island: no LoRA layout,
+    the model config is the identity."""
+
+    return model_config_sha256, _canonical_sha256(
+        {"schema": "yeto-full-parameter-mode-v1", "model_config_sha256": model_config_sha256}
+    )
+
+
+def _buffer_island(args) -> bool:
+    """A no-sync sampler / trainer island (L4.6): it has no outer sync, so full
+    parameter mode runs without the full-parameter sync preset."""
+    from yeto.rl.engine.sample_roles import BOTH, sample_role
+
+    return bool(getattr(args, "rl_single_island_no_sync", False)) and sample_role(args) != BOTH
+
+
 def _full_parameter_mode(args, sync_preset: str) -> bool:
     """True for a full-parameter island.
 
@@ -610,8 +683,9 @@ def _full_parameter_mode(args, sync_preset: str) -> bool:
 
     full_mode = getattr(args, "parameter_mode", "lora") == "full"
     full_preset = sync_preset in FULL_PARAMETER_SYNC_PRESETS
-    if full_mode and not full_preset:
-        raise ValueError("full parameter mode needs a full-parameter sync preset")
+    if full_mode and not full_preset and not _buffer_island(args):
+        raise ValueError("full parameter mode needs a full-parameter sync preset "
+                         "(or a no-sync --rl-sample-role sampler / trainer island)")
     if full_preset and not _trains_base_parameters(args):
         raise ValueError(f"the {sync_preset} sync needs full parameter mode or expert-full tuning")
     if full_preset and not full_mode and sync_preset != FULL_PARAMETER_SYNC_PRESET:
@@ -1623,7 +1697,7 @@ def run_miles(
     # full-parameter strict sweep also carries DeepSeek V4 expert-full (P0 1.7b.2).
     full_parameter_sync = sync_preset in FULL_PARAMETER_SYNC_PRESETS
     dense_full = sync_preset == FULL_PARAMETER_SYNC_PRESET
-    if _trains_base_parameters(args) and not full_parameter_sync:
+    if _trains_base_parameters(args) and not full_parameter_sync and not _buffer_island(args):
         raise ValueError(f"expert-full tuning needs the {FULL_PARAMETER_SYNC_PRESET} sync")
     sao_runtime = None
     if dense_full:
@@ -1785,13 +1859,7 @@ def run_miles(
                     args, miles_argv, model_config_sha256=model_config_hash
                 )
         if full_parameter:
-            layout_hash = model_config_hash
-            lora_config_hash = _canonical_sha256(
-                {
-                    "schema": "yeto-full-parameter-mode-v1",
-                    "model_config_sha256": model_config_hash,
-                }
-            )
+            layout_hash, lora_config_hash = _full_parameter_identity(model_config_hash)
         else:
             from yeto.rl.core import canonical_layout_hash
 
@@ -1973,6 +2041,26 @@ def run_miles(
     _configure_grad_audit(args, miles_args)
     require_ports_router_mode(miles_args)
     miles_args.yeto_rl_island_tasks = dict(island_tasks) if island_tasks else None
+    if full_parameter and not yeto_policy_sync:
+        # A no-sync buffer island (L4.6) trains every parameter without the sync
+        # block above: bind the same full-parameter identity for _run_ports.
+        from yeto.provenance import file_sha256
+
+        model_config_path = Path(model_path) / "config.json"
+        if not model_config_path.is_file():
+            raise ValueError("full-parameter model has no config.json")
+        miles_args.yeto_rl_parameter_mode = parameter_mode
+        miles_args.yeto_rl_layout_hash, miles_args.yeto_rl_lora_config_hash = (
+            _full_parameter_identity(file_sha256(model_config_path)))
+    # rl-identity-tiering: the run code pack digest (L9.4, checked at startup), else
+    # (L9.1 transition) the attested source tree hash.
+    if getattr(args, "code_pack_digest", None):
+        from yeto.codepack import CODE_PACK_MODE_GIT_PATCH
+
+        miles_args.yeto_rl_code_pack_digest = args.code_pack_digest
+        miles_args.yeto_rl_code_pack_mode = CODE_PACK_MODE_GIT_PATCH
+    else:
+        miles_args.yeto_rl_code_pack_digest = args.source_sha256
     _run_ports(
         args,
         miles_args,
@@ -2167,6 +2255,13 @@ def _run_ports(
     apply_ports_infra_switches(args, miles_args)
     if _run_test_debug_rollout_replay(args, miles_args):
         return
+    from yeto.rl.engine.sample_roles import SAMPLER, sample_role
+
+    if sample_role(args) == SAMPLER:  # L4.6: generate into the sample buffer, never train
+        from yeto.rl.adapters.miles.sampler_island import run_sampler_island
+
+        run_sampler_island(miles_args)
+        return
     run_ports_island(
         miles_args,
         launch,
@@ -2190,6 +2285,7 @@ def main(argv=None) -> None:
     )
 
     verify_source_tree_sha256(args.source_sha256)
+    verify_island_code_pack(getattr(args, "code_pack_digest", None))
     if not is_immutable_commit(args.model_revision):
         raise ValueError("RL model revision must be an immutable commit")
     if not is_local_reference(args.data) and not is_immutable_commit(

@@ -183,6 +183,16 @@ _ROLLOUT_ENGINE = (
     shared_flag("--sglang-page-size", type=int, default=None),
     shared_flag("--sglang-max-running-requests", type=int, default=None),
     shared_flag("--sglang-chunked-prefill-size", type=int, default=None),
+    shared_flag(
+        "--rl-sampler-snapshot",
+        action="store_true",
+        help=(
+            "ports, fixed partition: start the sampler (rollout) SGLang engines with "
+            "--enable-memory-saver --enable-weights-cpu-backup (GPU snapshot mode); "
+            "off by default. Refused unless sampler_snapshot_compat.json records a "
+            "pass for the pinned SGLang commit and the NCCL weight-update path"
+        ),
+    ),
 )
 
 _AGENT = (
@@ -254,6 +264,9 @@ _ISLAND = (
     island_flag("--learner-generation", type=int, default=0),
     island_flag("--reward-sha256", required=True),
     island_flag("--source-sha256", required=True),
+    # rl-identity-tiering L9.5: the run code pack digest; the island refuses to start
+    # when its workdir is not that pack.
+    island_flag("--code-pack-digest", default=None),
     island_flag("--global-rounds", type=int, required=True),
     island_flag(
         "--parameter-mode",

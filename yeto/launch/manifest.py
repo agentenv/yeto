@@ -29,6 +29,27 @@ def _island_tasks_manifest(args) -> dict:
     return {"island_tasks": {str(island): data.record() for island, data in sorted(plan.items())}}
 
 
+def _code_identity_manifest(args) -> dict:
+    """rl-identity-tiering L9.1 dual write: ``semantic_sha256`` of the prepared
+    algorithm spec and ``code_pack_digest`` (transition: the source tree hash).
+    ``semantic_sha256`` is absent when no spec was prepared."""
+
+    from ..rl.engine.algorithm import AlgorithmSpec
+    from ..provenance import CODE_PACK_MODE_SOURCE_TREE
+
+    pack = getattr(args, "code_pack", None)
+    if pack is not None:  # L9.4: the run code pack replaces the transition value
+        out = {"code_pack_digest": pack.digest, "code_pack_mode": pack.mode,
+               "code_pack": pack.record()}
+    else:
+        out = {"code_pack_digest": getattr(args, "source_sha256", None),
+               "code_pack_mode": CODE_PACK_MODE_SOURCE_TREE}
+    raw = getattr(args, "rl_algorithm_spec_json", None)
+    if raw:
+        out["semantic_sha256"] = AlgorithmSpec.from_dict(json.loads(raw)).semantic_sha256()
+    return out
+
+
 def _write_run_manifest(args) -> dict | None:
     """Record the engine pins actually used (launch.log + <run dir>/run_manifest.json)."""
 
@@ -43,12 +64,16 @@ def _write_run_manifest(args) -> dict | None:
         "miles_commit": _rl.MILES_NEXT_COMMIT,
         "sglang_commit": _rl.SGLANG_NEXT_COMMIT,
         "source_sha256": getattr(args, "source_sha256", None),
+        **_code_identity_manifest(args),
         "cluster_prefix": args.cluster_prefix,
         **_miles_overlay_manifest(args),
         **_island_tasks_manifest(args),
         # launch-preflight-guards: preflight readings, negative_test, island_overrides
         **(getattr(args, "_launch_preflight_manifest", None) or {}),
         "island_placements": rl_island_placement_records(args),
+        # rl-offpolicy-correction-passthrough D8: correction group per island
+        **({"offpolicy_correction": args._offpolicy_correction_manifest}
+           if getattr(args, "_offpolicy_correction_manifest", None) else {}),
         "written_unix": time.time(),
     }
     print(f"[launcher] RL image {manifest['rl_image']}, "
@@ -85,3 +110,37 @@ def _no_sync_events_dir(args) -> Path:
     from .. import runs
 
     return runs.run_dir(args.cluster_prefix) / "events"
+
+
+def _record_trainer_start(args, events_dir) -> dict | None:
+    """rl-trainer-cold-start-cost L0.2: copy each island's ``trainer_start_summary``
+    from the settled tapes into ``run_manifest.json`` (``trainer_start``), where the
+    scheduler reads ``T_s`` of the last run.  Never fails the run."""
+
+    return _record_trainer_start_from(args, sorted(Path(events_dir).glob("*.jsonl")))
+
+
+def _record_sky_trainer_start(args, clusters, diag_root: str | None = None) -> dict | None:
+    """``trainer_start`` for sky islands whose tape is not echoed to the launcher:
+    read the island tapes (``rl-island-*.jsonl``) that the pre-teardown diagnostics
+    fetched into ``<diag_root>/<cluster>/``.  Never fails the run."""
+
+    from .teardown import TEARDOWN_DIAG_DIR
+
+    root = Path(diag_root or TEARDOWN_DIAG_DIR).expanduser()
+    tapes = [p for c in clusters for p in sorted((root / c).glob("rl-island-*.jsonl"))]
+    return _record_trainer_start_from(args, tapes) if tapes else None
+
+
+def _record_trainer_start_from(args, tapes) -> dict | None:
+    from .. import runs
+    from ..rl.engine import start_phases
+
+    try:
+        summaries = start_phases.summaries_from_events(start_phases.read_tape_records(tapes))
+        path = runs.run_dir(args.cluster_prefix) / "run_manifest.json"
+        if start_phases.write_manifest_summary(path, summaries):
+            return summaries
+    except (OSError, ValueError) as e:
+        print(f"[launcher] could not record trainer start phases: {e}", file=sys.stderr)
+    return None

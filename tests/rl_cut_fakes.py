@@ -113,10 +113,24 @@ class LoraModule(torch.nn.Module):
         return self.base(x) + self.drop(x) @ self.lora_A.T @ self.lora_B.T
 
 
-def make_rank(seed=0, *, args=None, coord=None):
+class FullModule(torch.nn.Module):
+    """A full-parameter trainer: every parameter trains, none is a LoRA adapter."""
+
+    def __init__(self, seed):
+        super().__init__()
+        g = torch.Generator().manual_seed(seed)
+        self.first = torch.nn.Parameter(torch.randn(4, 6, generator=g) * 0.1)
+        self.second = torch.nn.Parameter(torch.randn(6, 4, generator=g) * 0.1)
+        self.drop = torch.nn.Dropout(0.3)
+
+    def forward(self, x):
+        return self.drop(x) @ self.first.T @ self.second.T
+
+
+def make_rank(seed=0, *, args=None, coord=None, full=False):
     torch.manual_seed(1234)  # frozen base identical in every build
-    module = LoraModule(seed)
-    opt = torch.optim.Adam([module.lora_A, module.lora_B], lr=0.1)
+    module = FullModule(seed) if full else LoraModule(seed)
+    opt = torch.optim.Adam([p for p in module.parameters() if p.requires_grad], lr=0.1)
     return SimpleNamespace(
         args=args or SimpleNamespace(fp16=False, bf16=False, global_batch_size=GBS),
         model=[module],
@@ -138,7 +152,8 @@ def train_step(rank, batch):
 
 
 def params(rank):
-    return {n: p.detach().clone() for n, p in rank.model[0].named_parameters() if "lora" in n}
+    """The trainable parameters (LoRA adapters, or every parameter of a full-parameter rank)."""
+    return {n: p.detach().clone() for n, p in rank.model[0].named_parameters() if p.requires_grad}
 
 
 class LazyStateDistOptBackend(TorchCutBackend):

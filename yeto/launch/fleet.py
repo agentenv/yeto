@@ -76,8 +76,10 @@ TEARDOWN_UNVERIFIED_EXIT = 5
 # Modal moved an island to a different container mid-run (preempted/rescheduled and the
 # run script re-ran): the run is failed and the Modal app stopped. Registered exit codes:
 # 1 failed, 2 artifact not fetchable, 3 incomplete tape, 4 island failed, 5 teardown
-# unverified, 6 stalled, 7 Modal container id changed.
+# unverified, 6 stalled, 7 Modal container id changed, 8 trainer scheduler gave up.
 CONTAINER_CHANGED_EXIT = 7
+# The trainer scheduler stopped after too many failed trainer incarnations in a row.
+TRAINER_GAVE_UP_EXIT = 8
 
 
 class FleetController:
@@ -171,6 +173,7 @@ class FleetController:
         # writes it): once it exists no island is relaunched any more.
         self.stop_flag = stop_flag
         self.poll_interval = poll_interval
+        self._abort_error: BaseException | None = None  # set by abort()
         self.recover_timeout = recover_timeout
         self.on_relaunch = on_relaunch
         self.thread_cls = thread_cls
@@ -244,15 +247,23 @@ class FleetController:
             "exit": None,
         }
 
+    def abort(self, error: BaseException) -> None:
+        """Ask :meth:`run` (any thread) to end with ``error`` at its next poll, e.g.
+        the trainer scheduler gave up; the launcher then tears the run down."""
+        self._abort_error = error
+
     def run(self) -> dict:
         """Poll until every learner is done or abandoned.
 
         Returns {learner name: final status string}; raises RuntimeError
-        (after downing the syncer) if every learner was abandoned.
+        (after downing the syncer) if every learner was abandoned, and the
+        :meth:`abort` error when one was set.
         """
         for name in self.learners:
             self._fleet("island_ready", name, initial=True)
         while True:
+            if self._abort_error is not None:
+                raise self._abort_error
             self._fleet("cost_tick")
             if self.syncer is not None:
                 self._poll(self.syncer, is_syncer=True)

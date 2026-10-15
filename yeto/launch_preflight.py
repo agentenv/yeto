@@ -362,6 +362,13 @@ def add_cli_args(p) -> None:
                    "the latest weights and the cut) or droppable (spot, comes back from the syncer "
                    "base, never from a checkpoint store); repeatable; an island without a role is "
                    "an anchor; replaces --spot")
+    g.add_argument("--rl-island-sample-role", action="append", default=None, metavar="ISLAND:ROLE",
+                   help="rl-trainer-start-stop L5.4: one launch of a sampler island and a trainer "
+                   "island over one --rl-checkpoint-store (ROLE sampler or trainer, one entry per "
+                   "--gpu island; exactly two islands). Needs --rl-single-island-no-sync: no "
+                   "syncer, each island runs as a one-learner no-sync island with that "
+                   "--rl-sample-role. Combine with --rl-trainer-scheduler s1 "
+                   "--rl-trainer-island M to start and stop the trainer island")
     g.add_argument("--rl-negative-test-run", action="store_true",
                    help="mark this run as a negative-test run (required by --rl-island-override); "
                    "a normal run refuses to resume its checkpoint store and `yeto merge` refuses "

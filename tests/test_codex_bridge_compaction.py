@@ -299,6 +299,10 @@ async def _drive(cls, monkeypatch, **kw):
 
 
 def test_off_stock_bridge_unchanged_and_compactionrl_without_trigger_is_byte_identical(monkeypatch):
+    # created_at is wall-clock seconds; a run that crosses a second boundary
+    # would differ, so pin the clock this module reads (monotonic stays real).
+    monkeypatch.setattr(harness, "time", SimpleNamespace(time=lambda: 1_700_000_000.0,
+                                                         monotonic=harness.time.monotonic))
     _env(monkeypatch, on=False)
     stock_requests, stock_raw, stock_metrics = _run(_drive(harness._ResponsesBridge, monkeypatch))
     _env(monkeypatch, on=True, t_comp=10)  # never triggers below C-10

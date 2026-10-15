@@ -122,7 +122,8 @@ def test_island_task_model_store(monkeypatch):
     task = _island_task(args, monkeypatch)
     env = model_store_env("org/model", "a" * 40)
     assert env in task.setup
-    assert '[ -n "$YETO_MODEL_STORE_HIT" ] || (nohup huggingface-cli download' in task.setup
+    assert '[ -n "$YETO_MODEL_STORE_HIT" ] || (nohup sh -c ' in task.setup
+    assert 'snapshot_download' in task.setup and 'huggingface-cli' not in task.setup
     # both ranks export it before the learner / worker snapshot fetch
     assert task.run.index(env) < task.run.index("set -e") < task.run.index("snapshot_download")
     plain = _cli(["--gpu", "nebius:2x1xl40s@eu-north1"])

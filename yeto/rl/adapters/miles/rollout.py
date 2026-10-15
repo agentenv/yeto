@@ -30,6 +30,11 @@ from typing import Any, Protocol
 from collections.abc import Mapping
 from types import SimpleNamespace
 
+from yeto.rl.engine.offpolicy_correction import (
+    GATE_DROPPED_LENGTHS,
+    GATE_GRANULARITY,
+    TRUNCATED_BY_TURN,
+)
 from yeto.rl.engine.policy_versions import PublishedPolicies
 from yeto.rl.engine.ports import GroupMetadata, RolloutBatchHandle, over_sampling_fields
 from .traits import MILES_ABORT_MECHANISM
@@ -361,6 +366,10 @@ class RayMetadataSink:
     def sink_spec(self) -> str:
         return f"ray:{self.name}"
 
+    def discard(self) -> int:
+        """Drop every pushed record (a sampler island has no consumer); returns the count."""
+        return len(self._ray.get(self._actor.take_all.remote()))
+
     def set_policy_token(self, token: str) -> None:
         self._ray.get(self._actor.set_token.remote(token))
 
@@ -460,6 +469,7 @@ def handle_from_metadata(
         aborted_in_flight_tokens=payload.get("aborted_in_flight_tokens"),
         aborted_in_flight_unknown_groups=payload.get("aborted_in_flight_unknown_groups"),
         abort_mechanism=MILES_ABORT_MECHANISM,
+        backend="miles",
         tool_wait_seconds=(
             float(payload["tool_wait_seconds"]) if "tool_wait_seconds" in payload else None
         ),
@@ -507,6 +517,8 @@ _CARRY_OVER_KEYS = (
     "resumed_groups", "resumed_done_groups", "suspend_expired_trajectories",
     "policy_age_exceeded_trajectories", "suspended_trajectories", "suspended_env_seconds",
     "suspend_retried_turns",
+    # rl-offpolicy-correction-passthrough D5/D6: the driver pops these into ``offpolicy_gate``
+    GATE_DROPPED_LENGTHS, GATE_GRANULARITY, TRUNCATED_BY_TURN,
 )
 
 
@@ -1024,6 +1036,11 @@ class MilesRolloutPool:
         from yeto.rl.engine.tool_wait import _call, _resolve
 
         _resolve(_call(source, method, sorted(members)))
+
+    def set_admission(self, open_: bool) -> None:
+        """Convertible node (rl-trainer-start-stop L7.2): close (False) or open (True)
+        harness admission to this pool's running members (no-op without a board)."""
+        self._harness_admission("open_admission" if open_ else "close_admission", self.members())
 
     def _offload_after_rollout(self) -> None:
         """Upstream ``train.py`` serial colocated branch (--offload-rollout)."""

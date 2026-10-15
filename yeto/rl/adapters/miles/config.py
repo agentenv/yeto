@@ -45,6 +45,7 @@ from .algorithm_flags import (
     objective_flags,
 )
 from .placement import PlacementRequest, check_placement_not_rewritten
+from . import sampler_snapshot
 from .binding import filter_argv
 
 ROLLOUT_META_HOOK_PATH = (
@@ -423,6 +424,7 @@ LEAF_POLICY: dict[str, _Check] = {
     "serving.page_size": _ok,
     "serving.max_running_requests": _ok,
     "serving.chunked_prefill_size": _ok,
+    "serving.sampler_snapshot": _ok,  # gated in translate_run_config (sampler_snapshot)
     "ports.rollout_engine_base_port": _must_be_none(
         "upstream Miles has no --rollout-engine-base-port (fork-only port isolation, task 1.4b)"
     ),
@@ -462,6 +464,11 @@ LEAF_POLICY: dict[str, _Check] = {
     # d2-wire: read by the yeto-side ElasticHook only; no Miles option.
     "edge_costs_path": _ok,
     "elastic_window_s": _ok,
+    # L4.6: the buffer rollout functions (translate_run_config); the island
+    # environment and the sampler loop read the rest.
+    "sample_buffer": _ok,
+    **{f"sample_buffer.{name}": _ok
+       for name in ("role", "store", "max_backlog_groups", "wait_s", "min_round_s")},
 }
 
 
@@ -594,6 +601,18 @@ def reject_fault_tolerance_flags(tokens: Sequence[str]) -> None:
             )
 
 
+def _refuse_decoupled_ppo_breakers(tokens: Sequence[str]) -> None:
+    """rl-offpolicy-correction-passthrough D2: flags that remove pi_prox or mask
+    tokens by version are refused, with the flag named."""
+    from .offpolicy_correction import refuse_forbidden_argv
+    from yeto.rl.engine.offpolicy_correction import CorrectionConfigError
+
+    try:
+        refuse_forbidden_argv(tokens)
+    except CorrectionConfigError as exc:
+        raise MilesConfigError(str(exc)) from exc
+
+
 def check_extra_argv(extra_argv: Sequence[str], algorithm: AlgorithmSpec | None = None):
     """Refuse FT/adapter-owned flags; absorb mapped algorithm flags.
 
@@ -604,6 +623,7 @@ def check_extra_argv(extra_argv: Sequence[str], algorithm: AlgorithmSpec | None 
     """
 
     reject_fault_tolerance_flags(extra_argv)
+    _refuse_decoupled_ppo_breakers(extra_argv)
     mapped = mapped_flags()
     unmapped_objective = objective_flags() - mapped
     for flag in _flags(extra_argv):
@@ -761,7 +781,13 @@ def translate_run_config(
     agent = config.agent
     columns = config.data.columns
     request = placement_request(config)
-    rollout_overlap = max_policy_age > 0 and request.kind != "colocated"
+    sample_buffer = getattr(config, "sample_buffer", None)
+    if sample_buffer is not None and trainable.parameter_mode != "full":
+        # the sampler loads each release as a full HF checkpoint (update_weights_from_disk)
+        raise MilesConfigError(f"--rl-sample-role {sample_buffer.role} supports full-parameter "
+                               "mode only (a LoRA release cannot be loaded by the sampler yet)")
+    # a buffer island selects its own rollout function, so never Miles' fully_async
+    rollout_overlap = max_policy_age > 0 and request.kind != "colocated" and sample_buffer is None
 
     if request.kind == "colocated":
         placement_values = ["--colocate"]
@@ -913,6 +939,8 @@ def translate_run_config(
             max_policy_age, agentic=bool(getattr(config.agent, "custom_agent_function_path", None)),
             overlap=rollout_overlap))
     values.extend(critic_load_argv(config, algorithm))
+    if sample_buffer is not None:
+        values.extend(sample_buffer_argv(sample_buffer.role, max_policy_age=max_policy_age))
 
     evaluation = config.eval
     if evaluation is not None:
@@ -941,6 +969,11 @@ def translate_run_config(
                 values.extend((flag, str(value)))
     if serving.deterministic_inference:
         values.append("--sglang-enable-deterministic-inference")
+    if getattr(serving, "sampler_snapshot", False):
+        try:
+            values.extend(sampler_snapshot.snapshot_argv(request, extra_argv=extra_argv))
+        except sampler_snapshot.SamplerSnapshotRefused as exc:
+            raise MilesConfigError(str(exc)) from exc
     if parallel.uneven_pipeline_layers is not None:
         first_layers, last_layers = parallel.uneven_pipeline_layers
         values.extend(
@@ -1078,6 +1111,7 @@ def translate_run_config(
                 values.extend((flag, engine))
     values.extend(extra_argv)
     reject_fault_tolerance_flags(values[1:])  # generated argv never carries FT flags
+    _refuse_decoupled_ppo_breakers(values)  # also when the spec emitted the flag
     # IR-1: the final argv never pairs the session server with partial rollout
     # (also re-checked on the parsed namespace by validate_parsed_args).
     check_session_server_partial_rollout(agent.use_session_server, "--partial-rollout" in values)
@@ -1098,6 +1132,27 @@ def translate_run_config(
         algorithm=algorithm,
         absorbed_flags=dict(absorbed),
     )
+
+
+# Miles builds the HF snapshot exporter (actor.export_hf) only when one of its HF
+# outputs is set. yeto never calls save_model, so this path is never written; the
+# trainer's policy releases call export_hf with their own directory.
+RELEASE_EXPORTER_SAVE_HF = "/tmp/yeto-rl-unused-save-hf/rollout_{rollout_id}"
+
+
+SAMPLER_ONLY_FLAG = "--debug-rollout-only"
+
+
+def sample_buffer_argv(role: str, *, max_policy_age: int) -> tuple[str, ...]:
+    """L4.6: a sampler writes the buffer and builds no trainer model
+    (``--debug-rollout-only``: rollout GPUs only, engines serve the base weights);
+    a trainer reads the buffer and can export HF snapshots for its releases."""
+    from .buffer_rollout import SAMPLER, rollout_argv
+
+    argv = rollout_argv(role, max_policy_age=max_policy_age)
+    if role == SAMPLER:
+        return (*argv, SAMPLER_ONLY_FLAG)
+    return (*argv, "--save-hf", RELEASE_EXPORTER_SAVE_HF)
 
 
 def _full_parameter_optimizer_attrs(trainable: Any) -> dict[str, Any]:
@@ -1169,6 +1224,11 @@ def validate_parsed_args(
     cells = counter(args)
     if cells != 1:
         raise SingleCellError(f"actor TrainGroup would have {cells} cells; ports require exactly 1")
+    if SAMPLER_ONLY_FLAG in launch.argv:
+        # A sampler island (L4.6) asked for --debug-rollout-only: Miles places the
+        # rollout engines only and builds no trainer, so the trainer partition of the
+        # request is unused by design, not rewritten.
+        return
     check_placement_not_rewritten(launch.placement, args)
 
 

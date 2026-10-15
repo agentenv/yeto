@@ -86,6 +86,7 @@ from .execution_profile import (
     train_blockers,
 )
 from .leave_reason import leave_reason_for
+from .offpolicy_correction import OFFPOLICY_GATE_EVENT, gate_from_carry_over
 from .overlap import EvalOverlap, EvalStarter, overlap_refusal
 from .ports import (
     Placement,
@@ -615,7 +616,19 @@ class IslandDriver:
             runtime_fingerprint=self.capabilities.runtime_fingerprint,
             **({"eval_guard": dict(self.eval_guard_report)} if self.eval_guard_report else {}),
             **({"island_tasks": dict(self.island_tasks)} if self.island_tasks else {}),
+            **self._code_identity(),
         )
+
+    def _code_identity(self) -> dict[str, str]:
+        """rl-identity-tiering L9.1 dual write; absent without a code digest."""
+
+        from yeto.provenance import CODE_PACK_MODE_SOURCE_TREE
+
+        if not self.code_pack_digest:
+            return {}
+        mode = getattr(self, "code_pack_mode", None) or CODE_PACK_MODE_SOURCE_TREE
+        return {"semantic_sha256": self.algorithm.semantic_sha256(),
+                "code_pack_digest": self.code_pack_digest, "code_pack_mode": mode}
 
     # -- helpers used by sync sessions -----------------------------------
     def apply_policy(
@@ -1259,7 +1272,14 @@ class IslandDriver:
         fields = getattr(batch, "carry_over", None)
         if not fields:
             return
+        fields = dict(fields)
         groups = getattr(batch, "groups", ()) or ()
+        gate = gate_from_carry_over(fields, kept=len(groups),
+                                    backend=getattr(batch, "backend", None) or "unknown")
+        if gate:  # rl-offpolicy-correction-passthrough D6: its own event per round
+            self.emit(OFFPOLICY_GATE_EVENT, rollout_id=rollout_id,
+                      policy_version=int(getattr(batch, "policy_version", rollout_id)),
+                      t=self.clock(), **self._labels(), **gate)
         self.emit("rl_rollout_carry_over", rollout_id=rollout_id,
                   policy_version=int(getattr(batch, "policy_version", rollout_id)),
                   t=self.clock(), **{**self._labels(), **dict(fields)},
@@ -1300,6 +1320,13 @@ class IslandDriver:
     # rl-per-island-tasks: this island's task ids and prompt-file SHA256, written
     # into rl_driver_start as ``island_tasks`` only when the island has its own list.
     island_tasks: Mapping[str, Any] | None = None
+    # rl-identity-tiering L9.1: this island's code identity, written into
+    # rl_driver_start with ``semantic_sha256`` only when set.
+    code_pack_digest: str | None = None
+    code_pack_mode: str | None = None  # None: the L9.1 transition (source tree hash)
+    # rl-trainer-cold-start-cost L0: the island's StartPhases; the first
+    # optimizer step records ``first_step_done`` (None: not recorded).
+    start_phases: Any = None
 
     def _export_eval_version(self, rollout_id: int, *, final: bool) -> None:
         state = self.published_state
@@ -1414,6 +1441,8 @@ class IslandDriver:
         started = time.monotonic()
         receipt = self.trainer.train_step(batch)
         train_seconds = time.monotonic() - started
+        if self.start_phases is not None:
+            self.start_phases.mark_once("first_step_done")
         raw = self.trainer.step_metrics()
         metrics = raw if isinstance(raw, TrainStepMetrics) else TrainStepMetrics(**dict(raw))
         rollout_fraction = getattr(batch, "cross_version_truncated_fraction", None)

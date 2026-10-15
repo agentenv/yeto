@@ -69,10 +69,10 @@ FILE_REF = PluginRef.from_path("yeto.rl.engine.algorithm.plugin_source_sha256")
         (lambda: KlSpec(unbiased="yes"), "kl.unbiased"),
         (lambda: AdvantageSpec(estimator="dapo"), "advantage.estimator"),
         (lambda: AdvantageSpec(whiten=1), "advantage.whiten"),
-        (lambda: CorrectionSpec(method="tis"), "correction.tis_clip"),
+        (lambda: CorrectionSpec(method="tis"), "correction.upper"),
         (lambda: CorrectionSpec(method="opsm"), "correction.opsm_delta"),
         (lambda: CorrectionSpec(method="bogus"), "correction.method"),
-        (lambda: CorrectionSpec(method="tis", tis_clip=-1, tis_clip_low=0), "correction.tis_clip"),
+        (lambda: CorrectionSpec(method="tis", tis_clip=-1, tis_clip_low=0), "correction.upper"),
         (lambda: SamplingSpec(max_replacements=-1, filter=BOUNDED_NONZERO_STD_FILTER),
          "sampling.max_replacements"),
         (lambda: SamplingSpec(over_sampling_batch_size=0), "sampling.over_sampling_batch_size"),
@@ -155,7 +155,6 @@ def test_r0_golden_hashes_unchanged():
         dict(advantage=AdvantageSpec(std_normalization=False)),
         dict(advantage=AdvantageSpec(estimator="gspo")),
         dict(kl=KlSpec(placement="loss", coef=0.01, estimator="k1")),
-        dict(correction=CorrectionSpec(method="opsm", opsm_delta=1e-4)),
         dict(sampling=SamplingSpec(over_sampling_batch_size=8)),
         dict(execution=ExecutionSpec(needs_rollout_logprobs=True)),
         dict(entropy_coef=0.01),
@@ -167,6 +166,14 @@ def test_new_field_switches_to_v2_and_changes_hash(change):
     assert json.loads(spec.canonical_json())["schema"] == ALGORITHM_SPEC_SCHEMA_V2
     assert spec.sha256() != AlgorithmSpec().sha256()
     assert spec.sha256() != BOUNDED.sha256()
+
+
+def test_correction_group_switches_to_v2_but_keeps_hash():
+    # rl-offpolicy-correction-passthrough D8 (phase 1): the group is recorded,
+    # not hashed.
+    spec = AlgorithmSpec(correction=CorrectionSpec(method="opsm", opsm_delta=1e-4))
+    assert json.loads(spec.canonical_json())["schema"] == ALGORITHM_SPEC_SCHEMA_V2
+    assert spec.sha256() == AlgorithmSpec().sha256()
 
 
 def test_int_float_and_order_equivalence():
@@ -219,12 +226,12 @@ def test_plugin_hash_matches():
         assert FILE_REF.sha256 == hashlib.sha256(handle.read()).hexdigest()
 
 
-def test_plugin_hash_mismatch_reports_both():
+def test_plugin_hash_mismatch_warns_with_both():
+    # rl-identity-tiering L9.2: a stale hash is a warning, not a reject.
     bad = PluginRef(FILE_REF.path, "0" * 64)
-    with pytest.raises(PluginIdentityError, match=f"spec {'0' * 64}, runtime {FILE_REF.sha256}"):
-        bad.verify()
-    with pytest.raises(PluginIdentityError):
-        AlgorithmSpec(plugins=(bad,)).verify_plugins()
+    assert f"spec {'0' * 64}, runtime {FILE_REF.sha256}" in bad.verify()
+    assert AlgorithmSpec(plugins=(bad,)).verify_plugins() == (bad.verify(),)
+    assert FILE_REF.verify() is None
 
 
 def test_plugin_import_failure():
