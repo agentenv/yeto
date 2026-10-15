@@ -1,6 +1,7 @@
 """Launch side of the run code pack (rl-identity-tiering L9.4-L9.6).
 
-With ``--rl-code-pack git-patch`` the launcher resolves the run's pack before it
+With ``--rl-code-pack git-patch`` (also the ``auto`` default when the checkpoint
+store is a ``scheme://`` URI) the launcher resolves the run's pack before it
 writes the run manifest: the first start makes and stores one; every later start
 (resume, a new launcher process for the same run) takes the pack the old manifest
 names. The unpacked pack becomes the workdir of every island (sky ``workdir`` and the
@@ -17,6 +18,8 @@ from pathlib import Path
 from . import REPO_ROOT
 
 CODE_PACK_OFF = "off"
+CODE_PACK_GIT_PATCH = "git-patch"
+CODE_PACK_AUTO = "auto"
 CODE_PACK_CACHE = Path("~/.cache/yeto/codepacks")
 
 
@@ -29,6 +32,19 @@ def code_workdir(args) -> str:
 def code_pack_island_flag(args) -> str:
     pack = getattr(args, "code_pack", None)
     return f" --code-pack-digest {pack.digest}" if pack is not None else ""
+
+
+def code_pack_mode(args) -> str:
+    """The run's pack mode. ``auto`` (the default) packs when the checkpoint store is a
+    ``scheme://`` URI (bucket, ``modal-volume://``): the launcher can write the pack
+    there. A path store is often visible on the islands only, so ``auto`` leaves it
+    off; ``git-patch`` asks for it explicitly."""
+
+    mode = getattr(args, "rl_code_pack", None) or CODE_PACK_OFF
+    if mode != CODE_PACK_AUTO:
+        return mode
+    store = str(getattr(args, "rl_checkpoint_store", None) or "")
+    return CODE_PACK_GIT_PATCH if "://" in store else CODE_PACK_OFF
 
 
 def _previous_manifest(cluster_prefix: str) -> dict | None:
@@ -54,13 +70,14 @@ def prepare_run_code_pack(args, *, store=None, repo: str | Path | None = None,
                           cache_root: str | Path | None = None) -> None:
     """Resolve the run pack and point the launch at it (sets ``args.code_pack``,
     ``args.code_pack_tree`` and re-attests ``args.source_sha256`` on the pack tree).
-    No-op unless ``--rl-code-pack git-patch`` on an RL launch."""
+    No-op unless the pack mode (:func:`code_pack_mode`) is git-patch on an RL launch."""
 
-    mode = getattr(args, "rl_code_pack", None) or CODE_PACK_OFF
+    mode = code_pack_mode(args)
     upgrade = getattr(args, "rl_code_pack_upgrade", None)
     if mode == CODE_PACK_OFF or getattr(args, "training_mode", "sft") != "rl":
         if upgrade is not None:
-            raise ValueError("--rl-code-pack-upgrade requires --rl-code-pack git-patch")
+            raise ValueError("--rl-code-pack-upgrade requires --rl-code-pack git-patch "
+                             "(or auto with a bucket / modal-volume:// checkpoint store)")
         return
     from .. import codepack
     from ..provenance import source_tree_sha256

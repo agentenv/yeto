@@ -530,10 +530,12 @@ _RESUME = (
              "is empty (machine replaced). Without it the state stays on node0's local "
              "disk (warning on a multi-node island)"),
     # rl-identity-tiering L9.4-L9.6
-    cli_flag("--rl-code-pack", choices=["off", "git-patch"], default="off",
+    cli_flag("--rl-code-pack", choices=["auto", "off", "git-patch"], default="auto",
              help="git-patch: pack the local git tree (commit + dirty patch with untracked "
              "files) once at the first start, store it in --rl-checkpoint-store and ship it "
-             "as every island's workdir; resumed and replacement islands get the same pack"),
+             "as every island's workdir; resumed and replacement islands get the same pack. "
+             "auto (default): git-patch when --rl-checkpoint-store is a bucket or "
+             "modal-volume:// URI, else off"),
     cli_flag("--rl-code-pack-upgrade", default=None, metavar="REASON",
              help="with --rl-code-pack git-patch on an existing run: switch the run to a pack "
              "of the current local tree; refused unless the algorithm semantic hash is "

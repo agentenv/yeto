@@ -112,7 +112,30 @@ def test_upgrade_refused_when_semantic_hash_changes(launch):
         launch("--rl-code-pack-upgrade", "hotfix")
 
 
-def test_off_by_default_and_upgrade_needs_pack():
+@pytest.mark.parametrize("mode,store,expected", [
+    ("auto", "s3://bucket/run", "git-patch"),
+    ("auto", "modal-volume://vol/run", "git-patch"),
+    ("auto", "/mnt/shared/run", "off"),  # a path may be visible on the islands only
+    ("auto", None, "off"),
+    ("off", "s3://bucket/run", "off"),
+    ("git-patch", "/mnt/shared/run", "git-patch"),
+])
+def test_auto_packs_a_run_with_a_uri_store(mode, store, expected):
+    args = types.SimpleNamespace(rl_code_pack=mode, rl_checkpoint_store=store)
+    assert code_pack.code_pack_mode(args) == expected
+
+
+def test_launcher_default_is_auto():
+    import argparse
+
+    from yeto.rl.engine.run_flags import CLI, add_rl_flags
+
+    parser = argparse.ArgumentParser()
+    add_rl_flags(parser, CLI)
+    assert parser.parse_args([]).rl_code_pack == "auto"
+
+
+def test_off_and_upgrade_needs_pack():
     args = types.SimpleNamespace(training_mode="rl", rl_code_pack="off",
                                  rl_code_pack_upgrade=None)
     code_pack.prepare_run_code_pack(args)
