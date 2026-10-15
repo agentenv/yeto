@@ -1338,12 +1338,15 @@ def connect_island_ray(*, environ=None, ray_module=None, miles_args=None) -> str
     for key in (OVERRIDE_ENV, NEGATIVE_RUN_ENV):  # launch-preflight-guards: negative-test island
         if environ.get(key):  # (identity_test_salt is read where the sync client is built)
             env_vars[key] = environ[key]
-    from yeto.rl.engine.resume import STORE_IMPL_ENV
+    from yeto.rl.engine.resume import STORE_ENV_PREFIX, STORE_IMPL_ENV
 
     from .buffer_rollout import ISLAND_ENVS as SAMPLE_BUFFER_ENVS
 
     for key in (*SAMPLE_BUFFER_ENVS, STORE_IMPL_ENV):  # L4.6: the buffer rollout functions
         if environ.get(key):  # open the store inside the rollout executor actor
+            env_vars[key] = environ[key]
+    for key in environ:  # the store's own settings (yeto.cloud.*: Volume name, s3 URI/credentials)
+        if key.startswith(STORE_ENV_PREFIX) and environ[key]:
             env_vars[key] = environ[key]
     if environ.get(ELASTIC_METADATA_ENV) == "1":
         # --rl-elastic: the rollout metadata hook runs inside Ray workers, which

@@ -28,11 +28,13 @@ This module does not import Miles (it is tested without it).
 
 Limits (first implementation):
 
-* one sampler island writes a buffer (``FileSampleBuffer`` serializes appenders
-  with ``flock``, which holds only on one host) and one trainer reads it;
+* one trainer reads a buffer; on a shared directory (``index.jsonl``) one
+  sampler island writes it (``flock`` holds only on one host);
 * the buffer lives in the checkpoint store (:func:`~yeto.rl.engine.resume.store_for`
-  at ``BUFFER_ROOT_ENV``): across hosts both islands must mount the same store
-  (bucket mount or Modal Volume); visibility is the store's ``commit``/``reload``;
+  at ``BUFFER_ROOT_ENV``): a Modal Volume or a shared directory that both islands
+  mount (visibility is the store's ``commit``/``reload``), or an ``s3://`` store
+  read and written by object key (``CheckpointStore.objects``), not through its
+  bucket mount;
 * the trainer does no evaluation through the buffer (eval rounds are refused);
 * ``--fully-async`` is not supported on either side (it selects its own rollout
   function).

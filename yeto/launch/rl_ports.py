@@ -376,6 +376,10 @@ def _check_ports_infra_switches(args) -> None:
         sample_roles.check_pair(args, rl_island_count(args))
     else:
         sample_roles.check_launch(args)  # L4.6 --rl-sample-role (both checks nothing)
+    from .storage import store_object_envs
+
+    for cloud in {s.cloud for s in parse_gpu_spec(args.gpu)} if getattr(args, "gpu", None) else ():
+        store_object_envs(args, cloud)  # raises without the s3 store credentials
     pre_run = getattr(args, "rl_island_pre_run", None)
     if pre_run is not None:
         if not getattr(args, "rl_single_island_no_sync", False):

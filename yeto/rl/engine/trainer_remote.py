@@ -5,9 +5,11 @@ function, a sky cluster). Each incarnation is a fresh island. Two channels conne
 them, both existing paths:
 
 * commands, head -> island: a JSON-lines file per incarnation in the run's
-  checkpoint store (``trainer-control/inc-<n>.jsonl``). The island already mounts
-  that store for its cuts and the sample buffer; the head writes it through the
-  store's own client (Modal Volume upload, bucket, local directory);
+  checkpoint store (``trainer-control/inc-<n>.jsonl``), rewritten whole by the
+  head through the store's own client (Modal Volume upload, S3 put, local
+  directory). The island reads it through its store mount, or through the
+  store's object API when the store has one (``CheckpointStore.objects``: a
+  bucket mount may serve a stale copy of an object another host replaced);
 * events, island -> head: ``rl_trainer_lifecycle`` records in the island's event
   tape, which the island already echoes on its log stream (``yeto.rl.event_echo``).
 
@@ -335,7 +337,7 @@ def run_commanded_island(driver: Any, *, store: CheckpointStore,
     """Island entry: the incarnation and the cut to restore come from the
     environment the cloud layer set for this incarnation."""
     environ = os.environ if environ is None else environ
-    files = LocalStoreFiles(store)
+    files = LocalStoreFiles(store) if store.objects is None else store.objects
     incarnation = int(environ[INCARNATION_ENV])
     watermark = getattr(getattr(driver.sync, "round_cuts", None), "buffer_watermark", None)
     return IslandTrainerAgent(

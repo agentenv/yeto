@@ -24,6 +24,12 @@ trainer has one, ``engine_checksum`` (the digest of the trainer engines' weight
 read-back after this publish; a sampler that reads its own engines back after
 the load must get the same value).
 
+A store with an object API (``CheckpointStore.objects``: an S3 bucket whose
+mount may serve a stale copy of a replaced object) is read through that API:
+``LATEST.json`` by key, and a release's weight files downloaded into a local
+cache directory before the load. The trainer still writes through the mount
+(each file is new and written once).
+
 A trainer that publishes the same version and hash again (a restart) releases
 nothing. A trainer restored from an older cut publishes an older version with
 other weights (a new lineage): that is a new release with a higher ``seq``.
@@ -46,6 +52,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from .object_store import ObjectStore
 from .resume import CheckpointStore, _write_json_atomic
 
 SCHEMA = "yeto.rl.policy-release/v1"
@@ -57,6 +64,7 @@ FULL = "full"
 LORA = "lora"
 WEIGHT_FORMATS = (FULL, LORA)
 _DIGEST_CHUNK = 1 << 20
+DEFAULT_CACHE_DIR = "~/.cache/yeto/policy-releases"
 
 
 class PolicyReleaseError(RuntimeError):
@@ -110,22 +118,55 @@ def check_release_files(release: PolicyRelease, directory: Path) -> None:
 
 
 class PolicyReleaseStore:
-    """Writes (trainer) and reads (sampler) the releases in one store."""
+    """Writes (trainer) and reads (sampler) the releases in one store.
+    ``cache_dir``: where a store with an object API downloads a release to."""
 
     def __init__(self, store: CheckpointStore, *, keep: int = 2,
-                 clock: Callable[[], float] = time.time) -> None:
+                 clock: Callable[[], float] = time.time,
+                 cache_dir: str | os.PathLike[str] = DEFAULT_CACHE_DIR) -> None:
         if int(keep) < 1:
             raise ValueError("keep must be >= 1")
         self.store = store
         self.keep = int(keep)
         self.clock = clock
         self.root = Path(store.root) / RELEASE_DIR
+        self.cache_dir = Path(cache_dir).expanduser()
 
     def resolve(self, release: PolicyRelease) -> Path:
-        """The release's weight directory as this island mounts the store."""
-        return self.root / release.path
+        """The release's weight directory on this island: in the store mount, or
+        downloaded from the store's object API."""
+        objects = self.store.objects
+        return self.root / release.path if objects is None else self._download(objects, release)
+
+    def _download(self, objects: ObjectStore, release: PolicyRelease) -> Path:
+        """Download every object of the release into ``cache_dir/<path>`` (once:
+        a complete download is renamed into place) and drop older downloads."""
+        target = self.cache_dir / release.path
+        if not target.is_dir():
+            prefix = f"{RELEASE_DIR}/{release.path}/"
+            keys = objects.list(prefix)
+            if not keys:
+                raise PolicyReleaseError(f"release r{release.seq}-v{release.version}: no objects under {prefix}")
+            staging = self.cache_dir / f".{release.path}.partial"
+            shutil.rmtree(staging, ignore_errors=True)
+            for key in keys:
+                data = objects.read(key)
+                if data is None:
+                    raise PolicyReleaseError(f"release object {key} disappeared during the download")
+                path = staging / key[len(prefix):]
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(data)
+            staging.replace(target)
+        for old in self.cache_dir.iterdir():
+            if old.is_dir() and old.name != release.path:
+                shutil.rmtree(old, ignore_errors=True)
+        return target
 
     def latest(self) -> PolicyRelease | None:
+        objects = self.store.objects
+        if objects is not None:
+            raw = objects.read(f"{RELEASE_DIR}/{LATEST}")
+            return None if raw is None else PolicyRelease.from_record(json.loads(raw))
         self.store.reload()
         path = self.root / LATEST
         if not path.is_file():

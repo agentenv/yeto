@@ -192,8 +192,12 @@ def test_held_trainer_drains_the_buffer_after_the_fleet_ended(tmp_path, monkeypa
     assert finished.is_set() and seen[-1] is True
 
 
-def test_pair_plan_on_sky_holds_the_trainer_cluster_over_an_s3_store():
+def test_pair_plan_on_sky_holds_the_trainer_cluster_over_an_s3_store(monkeypatch):
+    from yeto.cloud import s3_store
     from yeto.launcher import dry_run_plan
+
+    monkeypatch.setenv(s3_store.KEY_ID_ENV, "AKIDSTORE")  # the islands' store credential
+    monkeypatch.setenv(s3_store.SECRET_ENV, "store-secret")
 
     base = tuple("s3://yeto-ckpt/run-a" if t == STORE else t for t in PAIR)
     args = _args(("--rl-placement", "fixed-partition", "--rl-rollout-gpus", "1"),

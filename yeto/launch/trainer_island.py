@@ -12,10 +12,12 @@ gives the scheduler loop one trainer island per incarnation:
   run's ``modal-volume://`` checkpoint store;
 * sky (:func:`sky_binding`): :class:`SkyTrainerIslands` launches the held-back
   task as a new cluster per incarnation (``<island>-i<n>``), tails the job log, and
-  tears the cluster down at release (verified at the cloud). :class:`S3StoreFiles`
-  reads and writes the run's ``s3://`` checkpoint store, which the island mounts;
-* both: the head's buffer view is the sample buffer index mirrored from the store,
-  backlog counted from the consumed watermark the trainer committed: the running
+  tears the cluster down at release (verified at the cloud). The head reads and
+  writes the run's ``s3://`` checkpoint store through its object API
+  (``yeto.cloud.s3_store``); the islands use the same API for the sample buffer,
+  the commands and the policy release pointer (not their bucket mount);
+* both: the head's buffer view is the sample buffer index (Modal: mirrored from
+  the Volume; s3: read by object key), backlog counted from the consumed watermark the trainer committed: the running
   incarnation's reported one, else the newest cut's (``CommittedBacklog``). The
   incarnation ids (Modal call, sky cluster) are kept in the head's run directory,
   so a restarted head can release an orphan. Each incarnation's events are also
@@ -35,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from yeto.rl import event_echo
+from yeto.rl.engine.object_store import ObjectStore
 from yeto.rl.engine.policy_release import LATEST as RELEASE_LATEST
 from yeto.rl.engine.policy_release import RELEASE_DIR
 from yeto.rl.engine.resume import CheckpointStore
@@ -133,42 +136,6 @@ class ModalVolumeFiles:
     def write(self, rel: str, data: bytes) -> None:
         with self._vol().batch_upload(force=True) as batch:
             batch.put_file(io.BytesIO(data), self._path(rel))
-
-
-class S3StoreFiles:
-    """:class:`~yeto.rl.engine.trainer_remote.StoreFiles` over an ``s3://BUCKET[/PREFIX]``
-    checkpoint store via boto3 (credentials from the usual AWS environment). The
-    island mounts the bucket and uses ``PREFIX`` as its store root, so a path
-    relative to the store root is the key ``PREFIX/<rel>``."""
-
-    def __init__(self, store_uri: str, *, client: Any = None) -> None:
-        scheme, _, rest = str(store_uri).partition("://")
-        bucket, _, prefix = rest.strip("/").partition("/")
-        if scheme != "s3" or not bucket:
-            raise ValueError(f"{store_uri!r} is not an s3://BUCKET[/PREFIX] store")
-        self.bucket = bucket
-        self.prefix = prefix.strip("/")
-        self._client = client
-
-    def _s3(self) -> Any:
-        if self._client is None:
-            import boto3
-
-            self._client = boto3.client("s3")
-        return self._client
-
-    def _key(self, rel: str) -> str:
-        return f"{self.prefix}/{rel}" if self.prefix else rel
-
-    def read(self, rel: str) -> bytes | None:
-        client = self._s3()
-        try:
-            return client.get_object(Bucket=self.bucket, Key=self._key(rel))["Body"].read()
-        except client.exceptions.NoSuchKey:
-            return None
-
-    def write(self, rel: str, data: bytes) -> None:
-        self._s3().put_object(Bucket=self.bucket, Key=self._key(rel), Body=data)
 
 
 class MirrorStore(CheckpointStore):
@@ -549,11 +516,13 @@ def modal_binding(args: Any, island: TrainerIsland, *, journal_dir: Path,
 
 
 def sky_binding(args: Any, island: TrainerIsland, *, journal_dir: Path,
-                files: StoreFiles | None = None, islands: Any = None) -> CloudTrainerBinding:
+                files: ObjectStore | None = None, islands: Any = None) -> CloudTrainerBinding:
     """The :class:`CloudTrainerBinding` of a sky trainer island with an ``s3://``
     checkpoint store (``files`` / ``islands`` replace the SDKs in tests)."""
     if files is None:
-        files = S3StoreFiles(str(args.rl_checkpoint_store))
+        from yeto.cloud.s3_store import head_objects
+
+        files = head_objects(str(args.rl_checkpoint_store))
     if islands is None:
         if island.sky_task is None:
             raise ValueError(f"trainer island {island.name}: no sky task to launch")
@@ -561,13 +530,18 @@ def sky_binding(args: Any, island: TrainerIsland, *, journal_dir: Path,
                                     name=island.name, jobs_path=Path(journal_dir) / JOBS_FILE,
                                     poll_s=getattr(args, "rl_trainer_command_poll_seconds", None),
                                     events_dir=island.events_dir)
-    return _binding(args, files, islands, journal_dir=journal_dir)
+    buffer = FileSampleBuffer(files, batch_size=int(args.rollout_batch_size))  # by object key
+    return _binding(args, files, islands, journal_dir=journal_dir, buffer=buffer)
 
 
-def _binding(args: Any, files: StoreFiles, islands: Any, *, journal_dir: Path) -> CloudTrainerBinding:
+def _binding(args: Any, files: StoreFiles, islands: Any, *, journal_dir: Path,
+             buffer: FileSampleBuffer | None = None) -> CloudTrainerBinding:
+    """``buffer``: the head's view of the sample buffer; default: the index
+    mirrored from ``files`` (a store the head reads by whole file only)."""
     cuts = StoreCutLog(files)
-    mirror = MirrorStore(Path(journal_dir) / MIRROR_DIR, files, [f"{BUFFER_DIR}/{INDEX}"])
-    buffer = FileSampleBuffer(mirror, batch_size=int(args.rollout_batch_size))
+    if buffer is None:
+        mirror = MirrorStore(Path(journal_dir) / MIRROR_DIR, files, [f"{BUFFER_DIR}/{INDEX}"])
+        buffer = FileSampleBuffer(mirror, batch_size=int(args.rollout_batch_size))
     poll_s = float(getattr(args, "rl_trainer_command_poll_seconds", None) or 5.0)
     lifecycles: list[RemoteTrainerLifecycle] = []
 

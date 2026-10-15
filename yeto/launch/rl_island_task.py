@@ -28,7 +28,7 @@ from .credentials import registry_login_for, split_secret_envs
 from .storage import (
     ELASTIC_CHECKPOINT_STORE_MOUNT, NODE0_LOCAL_CHECKPOINT_WARNING, RL_INITIAL_ADAPTER_PATH,
     _rl_checkpoint_mount, _rl_checkpoint_storage_name, modal_volume_store_env, model_store_env,
-    model_store_filesystem, nebius_baked_image_id, rl_checkpoint_store_plan,
+    model_store_filesystem, nebius_baked_image_id, rl_checkpoint_store_plan, store_object_envs,
 )
 from .island_tasks import island_task_data
 from .rl_ports import _ports_algorithm_flags
@@ -388,6 +388,9 @@ def make_miles_island_task(
         )
     if getattr(args, "rl_initial_adapter", None) is not None:
         setup_steps.append(f"chmod -R a-w {RL_INITIAL_ADAPTER_PATH}")
+    store_envs = store_object_envs(args, spec.cloud)
+    if store_envs:  # the store's object API (yeto.cloud.s3_store) needs boto3 in the image
+        setup_steps.append(STORE_CLIENT_SETUP)
     sandbox_secret = modal_sandbox_secret_name(args, spec)
     if codex_launch is not None and envs.get(HARNESS_ENVIRONMENT_PROVIDER_ENV) in MODAL_SANDBOX_PROVIDERS:
         if sandbox_secret is None:
@@ -509,6 +512,7 @@ def make_miles_island_task(
             ">/dev/null 2>&1; do sleep 5; done\n"
             "fi"
     )
+    envs.update(store_envs)
     envs, env_secrets = split_secret_envs(envs)
     in_vm_docker = spec.cloud in IN_VM_DOCKER_CLOUDS
     if in_vm_docker:
@@ -577,6 +581,12 @@ def make_miles_island_task(
     if storage_mounts:
         task.set_storage_mounts(storage_mounts)
     return task
+
+
+STORE_CLIENT_SETUP = (
+    'python -c "import boto3" 2>/dev/null || pip install -q boto3 '
+    "|| { echo '[yeto-setup] boto3 install failed: the s3 store object API is unavailable' >&2; exit 1; }"
+)
 
 
 def _worker_node_ip_flag(cloud: str) -> str:

@@ -26,7 +26,6 @@ from yeto.launch import trainer_loop as launch_loop
 from yeto.launch.trainer_island import (
     JOBS_FILE,
     IslandEvents,
-    S3StoreFiles,
     SkyTrainerIslands,
     TrainerIsland,
     sky_binding,
@@ -36,6 +35,7 @@ from yeto.rl.elastic_client import LeaveReason
 from yeto.rl.engine import recovery
 from yeto.rl.engine.fake_lifecycle import FakeSampler
 from yeto.rl.engine.journal import Journal
+from yeto.rl.engine.object_store import DirectoryObjectStore
 from yeto.rl.engine.resume import FLAT_MANIFEST, CheckpointStore
 from yeto.rl.engine.sample_buffer import FileSampleBuffer
 from yeto.rl.engine.start_phases import SUBMITTED_ENV
@@ -107,11 +107,21 @@ class _SkyOps:
             collector.feed(event_echo.format_record(record))
 
 
+class _ObjectStoreMount(CheckpointStore):
+    """An island's ``S3Store``: the mount plus an object API over the same keys."""
+
+    def __init__(self, root):
+        super().__init__(root)
+        self.objects = DirectoryObjectStore(root)
+
+
 def _setup(tmp_path, monkeypatch):
     store_root = tmp_path / "store"
     store_root.mkdir()
     (store_root / FLAT_MANIFEST).write_text("{}")
-    fake = _FakeIslands(store_root, FileSampleBuffer(CheckpointStore(store_root), batch_size=BATCH))
+    # the s3 layout: islands and head use the buffer by object key (a directory here)
+    fake = _FakeIslands(store_root, FileSampleBuffer(_ObjectStoreMount(store_root), batch_size=BATCH),
+                        store_factory=_ObjectStoreMount)
     ops = _SkyOps(fake)
     args = _args(tmp_path, monkeypatch, ["--rl-trainer-island", "1"])
     args.rl_checkpoint_store = "s3://bucket/runs/a"
@@ -119,7 +129,7 @@ def _setup(tmp_path, monkeypatch):
     islands = SkyTrainerIslands(_Task(), ops, name="run-a-l1-eu-north1", jobs_path=journal_dir / JOBS_FILE,
                                 events_dir=tmp_path / "events", clock=lambda: 1700000000.5)
     binding = sky_binding(args, TrainerIsland("run-a-l1-eu-north1", "nebius"), journal_dir=journal_dir,
-                          files=LocalStoreFiles(CheckpointStore(store_root)), islands=islands)
+                          files=DirectoryObjectStore(store_root), islands=islands)
     lifecycle = binding.lifecycle(0)
     lifecycle.poll_s, lifecycle.exit_grace_s = 0.005, 0.2
     return fake, ops, islands, binding, lifecycle
@@ -225,37 +235,6 @@ def test_island_events_skip_a_replayed_record_and_write_the_tape(tmp_path):
     assert len((tmp_path / "t.jsonl").read_text().splitlines()) == 1
 
 
-class _S3:
-    class exceptions:
-        class NoSuchKey(Exception):
-            pass
-
-    def __init__(self) -> None:
-        self.objects: dict[tuple[str, str], bytes] = {}
-
-    def get_object(self, Bucket, Key):
-        if (Bucket, Key) not in self.objects:
-            raise self.exceptions.NoSuchKey(Key)
-        data = self.objects[(Bucket, Key)]
-        return {"Body": type("B", (), {"read": lambda self: data})()}
-
-    def put_object(self, Bucket, Key, Body):
-        self.objects[(Bucket, Key)] = Body
-
-
-def test_s3_store_files_use_the_store_prefix():
-    s3 = _S3()
-    files = S3StoreFiles("s3://bkt/runs/a/", client=s3)
-    assert files.read("trainer-control/inc-0.jsonl") is None
-    files.write("trainer-control/inc-0.jsonl", b"1")
-    assert s3.objects == {("bkt", "runs/a/trainer-control/inc-0.jsonl"): b"1"}
-    assert files.read("trainer-control/inc-0.jsonl") == b"1"
-    assert S3StoreFiles("s3://bkt", client=s3)._key("x") == "x"
-    for bad in ("modal-volume://v/p", "s3://", "/local/path"):
-        with pytest.raises(ValueError):
-            S3StoreFiles(bad)
-
-
 def test_check_binds_a_sky_trainer_island_to_an_s3_store(tmp_path, monkeypatch):
     args = _args(tmp_path, monkeypatch, ["--rl-trainer-island", "1"])
     with pytest.raises(SystemExit, match="nebius trainer island needs a s3://"):
@@ -289,7 +268,7 @@ def test_sky_binding_needs_the_held_task(tmp_path, monkeypatch):
     args.rl_checkpoint_store = "s3://bucket/runs/a"
     with pytest.raises(ValueError, match="no sky task"):
         sky_binding(args, TrainerIsland("b", "nebius"), journal_dir=Path(tmp_path),
-                    files=LocalStoreFiles(CheckpointStore(tmp_path)))
+                    files=DirectoryObjectStore(tmp_path))
 
 
 def test_loop_starts_a_trainer_for_the_samplers_first_policy(tmp_path, monkeypatch):

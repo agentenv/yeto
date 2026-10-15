@@ -76,9 +76,11 @@ class _FakeIslands:
     """The cloud: ``launch`` starts an island thread; its events travel as echo
     lines. ``die_at`` makes one incarnation's island exit without a stopped event."""
 
-    def __init__(self, store_root: Path, sampler_buffer: FileSampleBuffer) -> None:
+    def __init__(self, store_root: Path, sampler_buffer: FileSampleBuffer, *,
+                 store_factory=CheckpointStore) -> None:
         self.store_root = store_root
         self.sampler_buffer = sampler_buffer
+        self.store_factory = store_factory  # the island's store (``store_for``)
         self.engine = None
         self.rollouts: list = []
         self.launched: list[tuple[int, str | None]] = []
@@ -92,7 +94,7 @@ class _FakeIslands:
     def launch(self, incarnation, resume_from):
         env = island_env(incarnation, resume_from)  # what the island would read
         self.launched.append((incarnation, resume_from and resume_from.cut_id))
-        store = CheckpointStore(self.store_root)
+        store = self.store_factory(self.store_root)
         buffer = FileSampleBuffer(store, batch_size=BATCH)  # the trainer's own reader
         cuts = _StoreRoundCuts(self.store_root, watermark=lambda: buffer.watermark)
         buffer.reset_to(0 if resume_from is None else resume_from.watermark)
