@@ -731,3 +731,13 @@ def test_upstream_parse_args_accepts_critic_family_on_pinned_image(tmp_path, fam
     assert not missing, missing
     if spec.critic is not None and spec.critic.critic_updates_per_step not in (None, 1):
         assert args.num_critic_epochs == spec.critic.critic_updates_per_step
+
+
+def test_dynamic_batching_refused_for_bshd_gated_delta_net_models():
+    cfg = make_config(train_memory=rc.TrainMemoryConfig(max_tokens_per_gpu=32768))
+    recipe = dataclasses.replace(cfg.model_recipe, gdn=rc.GdnRecipe(gated_delta_net=True))
+    with pytest.raises(mc.MilesConfigError, match="qkv-format bshd"):
+        mc.translate_run_config(dataclasses.replace(cfg, model_recipe=recipe), AlgorithmSpec())
+    recompute_only = dataclasses.replace(
+        cfg, model_recipe=recipe, train_memory=rc.TrainMemoryConfig(activation_recompute=True))
+    assert "--recompute-granularity" in mc.translate_run_config(recompute_only, AlgorithmSpec()).argv

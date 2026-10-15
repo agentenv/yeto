@@ -1008,6 +1008,12 @@ def translate_run_config(
     if timeout_s is not None:
         # A27: bounded weight-update group rendezvous (fork image-m3a27+).
         values.extend(("--update-weight-group-timeout-s", f"{float(timeout_s):g}"))
+    if config.train_memory.max_tokens_per_gpu is not None and recipe.gdn.gated_delta_net:
+        # Miles miles_validate_args: dynamic batch size is not supported for bshd
+        raise MilesConfigError(
+            "--rl-max-tokens-per-gpu needs packed (thd) sequences; this gated-delta-net "
+            f"model trains with --qkv-format {recipe.gdn.qkv_format}"
+        )
     values.extend(train_memory_argv(config.train_memory))
     if getattr(config, "deterministic_trainer", False):
         values.append("--deterministic-mode")  # Megatron deterministic kernels (E2 plan-v2 §0)
