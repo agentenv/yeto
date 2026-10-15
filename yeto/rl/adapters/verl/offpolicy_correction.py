@@ -17,7 +17,8 @@ ratio_mask=mis              ``rollout_rs=token_k1|seq_mean_k1``,
 batch_normalize             ``rollout_is_batch_normalize=True``
 ==========================  =====================================================
 
-Rows verl cannot express give a :class:`CorrectionWarning` (phase 1 runs on):
+Rows verl cannot express give a :class:`CorrectionWarning`; phase 2 (L6b.2) refuses
+the start on them:
 ``lower > 0`` on plain TIS (verl clamps the upper side only), level
 ``sequence`` with the MIS mask (verl has the geometric mean only), ``veto``,
 ``opsm``, a custom function, and the MIS mask (denominator).

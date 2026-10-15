@@ -193,7 +193,7 @@ def test_icepop_translation_and_hash():
         "--custom-tis-function-path", mc.ICEPOP_PATH, "--get-mismatch-metrics",
     ]
     assert s.correction.function.sha256 == mc.ICEPOP_SOURCE_SHA256
-    assert icepop(low=0.4).sha256() == s.sha256()  # phase 1 (D8): bounds are not hashed
+    assert icepop(low=0.4).sha256() != s.sha256()  # L6b.1: the bounds are hashed
 
 
 @pytest.mark.parametrize(
@@ -310,7 +310,7 @@ def test_opsm_source_identity():
     trainer, rollout = opsm(), opsm(source="rollout")
     assert trainer.correction.opsm_old_logprob_source == "trainer"
     assert opsm(source="trainer").sha256() == trainer.sha256()
-    assert trainer.sha256() == rollout.sha256()  # phase 1 (D8): recorded, not hashed
+    assert trainer.sha256() != rollout.sha256()  # L6b.1: the group is hashed
     assert json.loads(rollout.canonical_json())["correction"]["opsm_old_logprob_source"] == "rollout"
     # Not selecting OPSM: the field (at its default) does not affect the hash.
     assert spec(opsm_old_logprob_source="trainer").sha256() == AlgorithmSpec().sha256()
@@ -358,8 +358,8 @@ def test_mis_translation():
         "tis_lower_bound": 0.999, "tis_mode": "mask", "tis_upper_bound": 1.001, "use_rs": False,
     }
     assert s.correction.function.sha256 == PluginRef.from_path(mc.MIS_PATH).sha256
-    # phase 1 (D8): MIS fields are recorded, not hashed
-    assert mis(mode="clip", low=0.5).sha256() == mis(mode="mask", low=0.5).sha256()
+    # L6b.1: MIS fields are hashed
+    assert mis(mode="clip", low=0.5).sha256() != mis(mode="mask", low=0.5).sha256()
 
 
 def test_runtime_attrs_unchanged_without_mis():

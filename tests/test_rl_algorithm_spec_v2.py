@@ -168,12 +168,11 @@ def test_new_field_switches_to_v2_and_changes_hash(change):
     assert spec.sha256() != BOUNDED.sha256()
 
 
-def test_correction_group_switches_to_v2_but_keeps_hash():
-    # rl-offpolicy-correction-passthrough D8 (phase 1): the group is recorded,
-    # not hashed.
+def test_correction_group_switches_to_v2_and_is_hashed():
+    # rl-offpolicy-correction-passthrough L6b.1: the group is hashed.
     spec = AlgorithmSpec(correction=CorrectionSpec(method="opsm", opsm_delta=1e-4))
     assert json.loads(spec.canonical_json())["schema"] == ALGORITHM_SPEC_SCHEMA_V2
-    assert spec.sha256() == AlgorithmSpec().sha256()
+    assert spec.sha256() != AlgorithmSpec().sha256()
 
 
 def test_int_float_and_order_equivalence():

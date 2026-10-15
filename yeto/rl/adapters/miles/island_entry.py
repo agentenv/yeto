@@ -459,9 +459,11 @@ def verify_ports_algorithm(args, miles_args, launch) -> None:
 
 def _append_correction_record(args, miles_args, algorithm) -> None:
     """rl-offpolicy-correction-passthrough D8: the island tape records the full
-    correction group, the Miles values and ``prox_anchor``; each field Miles
-    cannot map gets a ``correction_config_warning`` (phase 1: no refusal)."""
-    from yeto.rl.engine.offpolicy_correction import CORRECTION_RECORD_EVENT, correction_record
+    correction group, the Miles values and ``prox_anchor``. A field Miles
+    cannot map refuses the start (phase 2, L6b.2), after the record and its
+    ``correction_config_warning`` events are on the tape."""
+    from yeto.rl.engine.offpolicy_correction import (CORRECTION_RECORD_EVENT, correction_record,
+                                                     refuse_correction_warnings)
 
     from .offpolicy_correction import BACKEND, correction_mapping
 
@@ -472,8 +474,10 @@ def _append_correction_record(args, miles_args, algorithm) -> None:
         "event": CORRECTION_RECORD_EVENT,
         **correction_record(algorithm.correction, mapping, backend=BACKEND),
     })
-    for warning in mapping.warnings:
-        _append_ports_event(args, miles_args, warning.event())
+    warnings = [warning.event() for warning in mapping.warnings]
+    for warning in warnings:
+        _append_ports_event(args, miles_args, warning)
+    refuse_correction_warnings(warnings)
 
 
 def _require_ports_supported(args, extra_argv: Sequence[str] = ()) -> None:

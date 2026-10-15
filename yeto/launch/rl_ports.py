@@ -120,19 +120,17 @@ def _prepare_ports_algorithm(args) -> None:
 
 def _offpolicy_correction_manifest(args, spec) -> dict:
     """rl-offpolicy-correction-passthrough D8/L6.5: every island's correction
-    record and the warnings (unmappable fields, island differences). Phase 1
-    prints the warnings and goes on; the run manifest keeps both."""
+    record. A warning (unmappable field, island difference) refuses the launch
+    (phase 2, L6b.2)."""
 
-    from ..rl.engine.offpolicy_correction import run_correction_manifest
+    from ..rl.engine.offpolicy_correction import (refuse_correction_warnings,
+                                                  run_correction_manifest)
     from .topology import rl_island_args
 
     backends = {str(m): getattr(rl_island_args(args, m), "rl_backend", None) or "miles"
                 for m in range(rl_island_count(args))}
     section = run_correction_manifest(spec, backends)
-    for warning in section["warnings"]:
-        print("[launcher] correction_config_warning: "
-              + json.dumps({k: v for k, v in warning.items() if k != "event"}, sort_keys=True),
-              flush=True)
+    refuse_correction_warnings(section["warnings"])
     return section
 
 

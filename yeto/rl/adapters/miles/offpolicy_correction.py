@@ -16,8 +16,8 @@ ratio_mask=mis        the same with the MIS function; mask mode, ``level``,
 opsm                  ``--use-opsm --opsm-delta``
 ====================  ==========================================================
 
-Rows Miles cannot express give a :class:`CorrectionWarning` (phase 1 runs
-on): ``level`` other than token without the MIS mask, and ``veto`` /
+Rows Miles cannot express give a :class:`CorrectionWarning`; phase 2 (L6b.2)
+refuses the start on them: ``level`` other than token without the MIS mask, and ``veto`` /
 ``batch_normalize`` without the MIS mask.
 
 Decoupled PPO (design D2) needs pi_prox, which Miles recomputes on the

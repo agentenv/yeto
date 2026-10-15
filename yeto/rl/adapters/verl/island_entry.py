@@ -407,11 +407,13 @@ def fully_async_plan(limit: int, overrides: list[str], spec_dict: dict | None, a
 
 def append_correction_record(args, spec_dict: dict | None) -> None:
     """rl-offpolicy-correction-passthrough D8 (as Miles' island entry): the island
-    tape records the full correction group, the verl values and ``prox_anchor``;
-    each field verl cannot map gets a ``correction_config_warning``."""
+    tape records the full correction group, the verl values and ``prox_anchor``.
+    A field verl cannot map refuses the start (phase 2, L6b.2), after the record
+    and its ``correction_config_warning`` events are on the tape."""
     from yeto.rl.engine.algorithm import AlgorithmSpec
     from yeto.rl.engine.events import append_tape_event
-    from yeto.rl.engine.offpolicy_correction import CORRECTION_RECORD_EVENT, correction_record
+    from yeto.rl.engine.offpolicy_correction import (CORRECTION_RECORD_EVENT, correction_record,
+                                                     refuse_correction_warnings)
 
     from .offpolicy_correction import BACKEND, correction_mapping
 
@@ -423,8 +425,10 @@ def append_correction_record(args, spec_dict: dict | None) -> None:
                            yeto_rl_learner_id=args.learner_id)
     append_tape_event(tape, {"event": CORRECTION_RECORD_EVENT,
                              **correction_record(spec.correction, mapping, backend=BACKEND)})
-    for warning in mapping.warnings:
-        append_tape_event(tape, warning.event())
+    warnings = [warning.event() for warning in mapping.warnings]
+    for warning in warnings:
+        append_tape_event(tape, warning)
+    refuse_correction_warnings(warnings)
 
 
 def _override_value(overrides, key):

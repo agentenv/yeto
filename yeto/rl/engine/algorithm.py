@@ -120,9 +120,9 @@ CORRECTION_METHODS = ["none", "tis", "opsm", "custom"]
 CORRECTION_LEVELS = ("token", "sequence", "geometric")
 # Optional ratio masks on top of method='tis' (default none, design A2).
 RATIO_MASKS = ("none", "icepop", "mis")
-# The correction group as every pre-D1 hash saw a default spec (design D8:
-# phase 1 hashes this constant instead of the real group).
-PHASE1_CORRECTION_IDENTITY = (
+# The correction group as every pre-D1 hash saw a default spec. sha256() hashes
+# a default group as this constant, so default specs keep their hash (D8, L6b.1).
+DEFAULT_CORRECTION_IDENTITY = (
     ("function", None), ("method", "none"), ("mismatch_metrics", False), ("opsm_delta", None),
     ("tis_clip", None), ("tis_clip_low", None), ("use_rollout_logprobs", False),
 )
@@ -1361,26 +1361,16 @@ class AlgorithmSpec:
         )
 
     def identity_dict(self) -> dict[str, Any]:
-        """The payload of :meth:`sha256` (rl-offpolicy-correction-passthrough D8).
+        """The payload of :meth:`sha256` (rl-offpolicy-correction-passthrough D8, L6b.1).
 
-        Phase 1 leaves the correction group out of the hash: it is replaced
-        by the pre-D1 default group, so every spec whose correction group is
-        the default keeps its hash. A custom correction function stays in the
-        identity as a plugin reference (its source hash, design D8). Phase 2
-        (L6b.1) puts the group back under a hash migration.
+        The correction group is hashed as written. A default group is hashed
+        as the pre-D1 default group (:data:`DEFAULT_CORRECTION_IDENTITY`), so
+        every spec whose correction group is the default keeps its hash.
         """
 
-        if self.correction.is_default():
-            view = self
-        else:
-            plugins = list(self.plugins)
-            function = self.correction.function
-            if function is not None and function.path not in {p.path for p in plugins}:
-                plugins.append(function)
-            view = self.replace(correction=CorrectionSpec(), plugins=plugins)
-        out = view.to_dict()
-        if "correction" in out:
-            out["correction"] = dict(PHASE1_CORRECTION_IDENTITY)
+        out = self.to_dict()
+        if "correction" in out and self.correction.is_default():
+            out["correction"] = dict(DEFAULT_CORRECTION_IDENTITY)
         return out
 
     def sha256(self) -> str:

@@ -135,7 +135,9 @@ def test_fully_async_plan_runs_the_correction_mapping(limit, tmp_path):
     args = SimpleNamespace(groups_per_round=8, samples_per_group=4, global_rounds=3,
                            event_tape=str(tape), learner_id=0)
     out, keys = fully_async_plan(limit, vconf.build_overrides(run), spec.to_dict(), args, "none")
-    append_correction_record(args, spec.to_dict())
+    # L6b.2: lower > 0 cannot map on verl; the tape keeps the record, the start is refused
+    with pytest.raises(oc.CorrectionConfigError, match="lower on backend 'verl'"):
+        append_correction_record(args, spec.to_dict())
     append_correction_record(args, AlgorithmSpec().to_dict())  # default: tape unchanged
     # D8: the island tape records the group, the verl values and prox_anchor
     events = [json.loads(line) for line in tape.read_text().splitlines()]

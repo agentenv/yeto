@@ -1,5 +1,5 @@
-"""rl-offpolicy-correction-passthrough phase 1 (CPU): neutral correction fields,
-phase-1 hash, Miles mapping, decoupled PPO refusals, cross-island warning,
+"""rl-offpolicy-correction-passthrough (CPU): neutral correction fields,
+hash (L6b.1), Miles mapping, decoupled PPO refusals, refusals (L6b.2),
 offpolicy_gate, A_hard >= 2, start-version gap and observe-only bounds."""
 
 from __future__ import annotations
@@ -75,7 +75,7 @@ def test_valid_specs():
                .rejections())
 
 
-# -- L6.2 phase-1 hash and records -------------------------------------------
+# -- L6.2 / L6b.1 hash and records -------------------------------------------
 
 
 @pytest.mark.parametrize("correction", [
@@ -85,12 +85,21 @@ def test_valid_specs():
     CorrectionSpec(method="tis", lower=0.5, upper=2.0, ratio_mask="mis", veto=1e-4),
     CorrectionSpec(method="opsm", opsm_delta=1e-4),
 ])
-def test_correction_group_does_not_change_the_hash(correction):
+def test_correction_group_changes_the_hash(correction):
+    # L6b.1: the correction group is in the hash
     base = AlgorithmSpec(entropy_coef=0.01)
     spec = base.replace(correction=correction)
-    assert spec.sha256() == base.sha256()
-    # the full group still travels to the islands
+    assert spec.sha256() != base.sha256()
     assert AlgorithmSpec.from_dict(json.loads(spec.canonical_json())) == spec
+
+
+def test_each_correction_field_changes_the_hash():
+    tis = AlgorithmSpec(correction=CorrectionSpec(method="tis", lower=0.0, upper=2.0))
+    variants = [tis.replace(correction=CorrectionSpec(method="tis", lower=0.0, upper=5.0)),
+                tis.replace(correction=CorrectionSpec(method="tis", lower=0.5, upper=2.0)),
+                tis.replace(correction=CorrectionSpec(method="tis", lower=0.0, upper=2.0,
+                                                      level="sequence"))]
+    assert len({tis.sha256(), *(v.sha256() for v in variants)}) == 4
 
 
 def test_default_hashes_are_unchanged():
@@ -136,7 +145,8 @@ def test_backend_without_mapping_is_recorded_and_warned():
         backends.unregister("fake")
 
 
-def test_island_tape_gets_record_and_warnings(tmp_path):
+def test_island_tape_gets_record_and_warnings_then_refuses(tmp_path):
+    # L6b.2: the tape keeps the record and the warning; the island start is refused
     from yeto.rl.adapters.miles import island_entry
 
     events = []
@@ -147,7 +157,8 @@ def test_island_tape_gets_record_and_warnings(tmp_path):
                                                AlgorithmSpec())
         assert events == []  # default tapes unchanged
         spec = decoupled(level="sequence")
-        island_entry._append_correction_record(SimpleNamespace(), SimpleNamespace(), spec)
+        with pytest.raises(oc.CorrectionConfigError, match="level on backend 'miles'"):
+            island_entry._append_correction_record(SimpleNamespace(), SimpleNamespace(), spec)
     finally:
         island_entry._append_ports_event = island_entry_append
     assert events[0]["event"] == oc.CORRECTION_RECORD_EVENT
@@ -253,15 +264,27 @@ def test_different_prox_anchor_is_listed():
                                       "1": _record(2.0, "per_step")}) is None
 
 
-def test_launcher_manifest_section(capsys):
+def test_launcher_manifest_section():
     from tests.test_rl_launcher import _args
     from yeto.launch.rl_ports import _offpolicy_correction_manifest
 
     args = _args([])
-    section = _offpolicy_correction_manifest(args, decoupled(level="sequence"))
-    assert "0" in section["islands"]
-    assert {w["field"] for w in section["warnings"]} == {"level"}
-    assert "correction_config_warning" in capsys.readouterr().out
+    section = _offpolicy_correction_manifest(args, decoupled())
+    assert "0" in section["islands"] and section["warnings"] == []
+    # L6b.2: an unmappable field refuses the launch
+    with pytest.raises(ValueError, match="level on backend 'miles'"):
+        _offpolicy_correction_manifest(args, decoupled(level="sequence"))
+
+
+def test_refuse_names_every_warning():
+    oc.refuse_correction_warnings([])
+    cross = oc.compare_island_records({"0": _record(2.0, "per_step"),
+                                       "1": _record(5.0, "per_step")})
+    unmappable = oc.CorrectionWarning("veto", "verl", "no mapping").event()
+    with pytest.raises(oc.CorrectionConfigError) as exc:
+        oc.refuse_correction_warnings([unmappable, cross])
+    assert "veto on backend 'verl': no mapping" in str(exc.value)
+    assert "islands differ in ['upper']" in str(exc.value)
 
 
 # -- L6.8 offpolicy_gate --------------------------------------------------------

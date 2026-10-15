@@ -1,5 +1,5 @@
 """Off-policy correction pass-through: the backend-neutral part
-(change ``rl-offpolicy-correction-passthrough``, phase 1).
+(change ``rl-offpolicy-correction-passthrough``).
 
 yeto does not compute importance weights. A backend adapter maps the neutral
 ``CorrectionSpec`` (design D1) to its own settings and returns a
@@ -8,6 +8,8 @@ yeto does not compute importance weights. A backend adapter maps the neutral
 * :class:`CorrectionMapping` / :class:`CorrectionWarning` -- the mapped
   values, the proximal-policy anchor (``prox_anchor``, design D2) and the
   fields the backend could not map (``correction_config_warning``, D3);
+* :func:`refuse_correction_warnings` -- phase 2 (L6b.2): an unmappable field
+  or an island difference refuses the launch;
 * :class:`ForbiddenSetting` / :func:`refuse_forbidden` -- backend settings
   that break decoupled PPO (Miles ``--use-rollout-logprobs``, verl
   ``bypass_mode=True``, ...). They are refused at launch with the setting
@@ -20,8 +22,9 @@ yeto does not compute importance weights. A backend adapter maps the neutral
 * :func:`cross_version_bounds` / :func:`staleness_correction` -- the
   observe-only cross-version IS takes its bounds and name from the spec (D7).
 
-Phase 1 warns on unmappable settings and on island differences; it does not
-refuse them (phase 2, L6b.2, will).
+Phase 1 warned on unmappable settings and on island differences. Phase 2
+(L6b.2) refuses them: the launcher refuses the run manifest's warnings and each
+island refuses the fields its backend cannot map.
 """
 
 from __future__ import annotations
@@ -136,6 +139,26 @@ def refuse_forbidden(present: Iterable[str], forbidden: Iterable[ForbiddenSettin
             raise CorrectionConfigError(table[setting].message())
 
 
+def refuse_correction_warnings(warnings: Sequence[Mapping[str, Any]]) -> None:
+    """Phase 2 (L6b.2): raise :class:`CorrectionConfigError` naming every
+    ``correction_config_warning`` (unmappable field, backend without a
+    mapping, difference between islands). No warnings: no-op."""
+
+    if not warnings:
+        return
+    lines = []
+    for warning in warnings:
+        if warning.get("scope") == "cross_island":
+            lines.append(f"islands differ in {sorted(warning.get('differences') or {})}: "
+                         f"{warning.get('reason')}")
+        else:
+            lines.append(f"{warning.get('field')} on backend {warning.get('backend')!r}: "
+                         f"{warning.get('reason')}")
+    raise CorrectionConfigError(
+        "correction settings refused (rl-offpolicy-correction-passthrough L6b.2): "
+        + "; ".join(lines))
+
+
 # --------------------------------------------------------------------------
 # manifest / tape record and the cross-island comparison (D2, D8)
 # --------------------------------------------------------------------------
@@ -163,7 +186,7 @@ def compare_island_records(records: Mapping[str, Mapping[str, Any]]) -> dict[str
     """One ``correction_config_warning`` listing every field that differs
     between islands (group fields and ``prox_anchor``), or None.
 
-    ``records``: island name -> :func:`correction_record`. Phase 1 warns only.
+    ``records``: island name -> :func:`correction_record`.
     """
 
     if len(records) < 2:
@@ -209,7 +232,8 @@ def run_correction_manifest(spec: AlgorithmSpec,
     ``island_backends``: island name -> backend. Returns the record of every
     island and the ``correction_config_warning`` events: one per field a
     backend cannot map, one per backend without a mapping, and at most one
-    for differences between islands. Phase 1: warnings only.
+    for differences between islands. The caller refuses them
+    (:func:`refuse_correction_warnings`).
     """
 
     records: dict[str, dict[str, Any]] = {}
