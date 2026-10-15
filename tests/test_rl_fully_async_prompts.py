@@ -146,3 +146,56 @@ def test_overlap_round_report_carries_the_ledger_counts(monkeypatch):
     from yeto.rl.adapters.miles.rollout import _carry_over_fields
 
     assert _carry_over_fields(sent[0])["execution_mode"] == "partitioned-overlap"
+
+
+class _FullyAsyncFn:
+    """Miles FullyAsyncRolloutFn's shape: a worker that submits ``_generate_group``
+    tasks and waits on them with asyncio.wait (which never cancels them)."""
+
+    def __init__(self) -> None:
+        self._worker = None
+        self._output = None
+        self.ended: list[int] = []
+
+    async def _generate_group(self, index: int) -> None:
+        try:
+            await asyncio.sleep(3600)  # a long agentic trajectory
+        finally:
+            self.ended.append(index)  # the agent's finally ends its trajectory
+
+    async def worker_loop(self, groups: int) -> None:
+        active = {asyncio.create_task(self._generate_group(i)) for i in range(groups)}
+        while True:
+            await asyncio.wait(active, return_when=asyncio.FIRST_COMPLETED)
+
+
+def test_cut_cancels_the_generation_the_stopped_worker_submitted(executor):
+    """S24 T-TB2 j: stopping only the worker left its group tasks generating while the
+    next worker submitted a full budget again (in flight 29 -> 146 over four cuts)."""
+    rollout_fn = _FullyAsyncFn()
+    other = _FullyAsyncFn()  # another rollout function's generation is not touched
+    executor.generate_rollout = rollout_fn
+    executor.data_source.get_samples(3)
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+
+    async def start():
+        rollout_fn._worker = asyncio.create_task(rollout_fn.worker_loop(3))
+        foreign = asyncio.create_task(other._generate_group(99))
+        await asyncio.sleep(0)
+        return foreign
+
+    foreign = asyncio.run_coroutine_threadsafe(start(), loop).result()
+    try:
+        assert prompts.requeue_untrained(executor, timeout_s=5.0) == 3
+        assert sorted(rollout_fn.ended) == [0, 1, 2]
+        assert not foreign.done() and other.ended == []
+    finally:
+        async def stop_foreign():
+            foreign.cancel()
+            await asyncio.wait({foreign})
+
+        asyncio.run_coroutine_threadsafe(stop_foreign(), loop).result()
+        loop.call_soon_threadsafe(loop.stop)
+    assert rollout_fn._worker is None
