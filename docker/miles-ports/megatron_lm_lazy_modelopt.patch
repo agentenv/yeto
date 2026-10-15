@@ -1,0 +1,190 @@
+diff --git a/megatron/post_training/checkpointing.py b/megatron/post_training/checkpointing.py
+index 19df61b..70106de 100644
+--- a/megatron/post_training/checkpointing.py
++++ b/megatron/post_training/checkpointing.py
+@@ -5,15 +5,7 @@ import os
+ from pathlib import Path
+ from typing import Optional, Tuple, Union
+ 
+-import modelopt
+-import modelopt.torch.opt as mto
+ import torch.nn as nn
+-from modelopt.torch.opt.plugins import (
+-    restore_sharded_modelopt_state as restore_sharded_modelopt_state_legacy,
+-)
+-from modelopt.torch.opt.plugins.mcore_dist_checkpointing import (
+-    _load_extra_state_from_sharded_checkpoint,
+-)
+ 
+ from megatron.core import dist_checkpointing
+ from megatron.core.dist_checkpointing.serialization import _legacy_common_state_exists
+@@ -22,7 +14,11 @@ from megatron.training import get_args
+ from megatron.training.checkpointing import _load_base_checkpoint, load_checkpoint
+ from megatron.training.utils import print_rank_0
+ 
+-from .utils import print_distributed_quant_summary
++# yeto miles-ports image (rl-trainer-cold-start-cost L2.2): Megatron-LM a84b105 imported
++# modelopt (and .utils, which imports it) at module top.  megatron.training's
++# get_model imports this module for has_modelopt_state, a file check that needs
++# no modelopt, so every trainer paid for modelopt.  The functions that use
++# modelopt import it themselves.
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -109,6 +105,11 @@ def load_modelopt_state(model: nn.Module, load_dir: Optional[str] = None) -> Non
+         model: the model to load the modelopt_state into
+         load_dir: optionally provide a different loading path
+     """
++    import modelopt.torch.opt as mto
++    from modelopt.torch.opt.plugins import (
++        restore_sharded_modelopt_state as restore_sharded_modelopt_state_legacy,
++    )
++
+     args = get_args()
+     load_dir = load_dir or args.load
+ 
+@@ -162,6 +163,8 @@ def load_modelopt_checkpoint(
+             When loading an .nemo sharded checkpoint, this is usually `model.`. Otherwise, this is
+             typically an empty string.
+     """
++    from .utils import print_distributed_quant_summary
++
+ 
+     def _remove_prefix_state_dict_pre_hook(
+         state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+@@ -213,6 +216,12 @@ def restore_sharded_modelopt_state(model: list[nn.Module], checkpoint_name: str
+     """Temporary function. Copy of modelopt.torch.opt.plugins.restore_sharded_modelopt_state.
+     Will be removed once modelopt.torch.opt.plugins.restore_sharded_modelopt_state is up to date.
+     """
++    import modelopt
++    import modelopt.torch.opt as mto
++    from modelopt.torch.opt.plugins.mcore_dist_checkpointing import (
++        _load_extra_state_from_sharded_checkpoint,
++    )
++
+     if len(model) > 1:
+         raise ValueError("sharded_modelopt_state does not support virtual pipeline parallel!")
+ 
+diff --git a/megatron/training/checkpointing.py b/megatron/training/checkpointing.py
+index 41865c5..8d4cc10 100644
+--- a/megatron/training/checkpointing.py
++++ b/megatron/training/checkpointing.py
+@@ -3,6 +3,7 @@
+ """Input/output checkpointing."""
+ 
+ import contextlib
++import importlib.util
+ import inspect
+ import multiprocessing
+ import os
+@@ -67,14 +68,31 @@ except ImportError:
+ 
+ 
+ # [ModelOpt]: Import
+-try:
+-    from modelopt.torch.opt.plugins import save_modelopt_state, save_sharded_modelopt_state
+-
+-    from megatron.post_training.utils import print_distributed_quant_summary
+-
+-    has_nvidia_modelopt = True
+-except Exception:
+-    has_nvidia_modelopt = False
++# yeto miles-ports image (rl-trainer-cold-start-cost L2.2): Megatron-LM a84b105 imported
++# modelopt at module top here, which every trainer process paid for (21-30 s).
++# Every use below is a no-op for a model ModelOpt has not converted
++# (save_modelopt_state / save_sharded_modelopt_state return early on
++# ``not is_converted``; the quant summary has nothing to report), and only
++# modelopt's own code converts a model.  So while modelopt is not imported in
++# this process, skipping them is exact; once it is, they run as before.
++has_nvidia_modelopt = importlib.util.find_spec("modelopt") is not None
++
++
++def _modelopt_api():
++    """ModelOpt checkpoint helpers, or None when no model here can carry ModelOpt state."""
++    if not has_nvidia_modelopt or "modelopt" not in sys.modules:
++        return None
++    try:
++        from modelopt.torch.opt.plugins import save_modelopt_state, save_sharded_modelopt_state
++
++        from megatron.post_training.utils import print_distributed_quant_summary
++    except Exception:
++        return None
++    return types.SimpleNamespace(
++        save_modelopt_state=save_modelopt_state,
++        save_sharded_modelopt_state=save_sharded_modelopt_state,
++        print_distributed_quant_summary=print_distributed_quant_summary,
++    )
+ 
+ 
+ _CHECKPOINT_VERSION = None
+@@ -882,8 +900,8 @@ def save_checkpoint(
+                 verify_integrity=args.verify_integrity,
+             )
+             # [ModelOpt]: save sharded modelopt_state
+-            if has_nvidia_modelopt:
+-                save_sharded_modelopt_state(model, checkpoint_name, (args.ckpt_format, 1))
++            if (modelopt_api := _modelopt_api()) is not None:
++                modelopt_api.save_sharded_modelopt_state(model, checkpoint_name, (args.ckpt_format, 1))
+         elif ckpt_type == CheckpointType.GLOBAL and ckpt_format in ["torch_dcp", "fsdp_dtensor"]:
+             if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+                 # TODO Handle non-empty directories (e.g., after a crash during saving).
+@@ -940,11 +958,11 @@ def save_checkpoint(
+                 )
+         else:
+             # [ModelOpt]: Inject modelopt_state into state_dict
+-            if has_nvidia_modelopt:
++            if (modelopt_api := _modelopt_api()) is not None:
+                 if ckpt_type == CheckpointType.LOCAL:
+                     print_rank_0('WARNING: Local checkpointing does not support nvidia_modelopt.')
+                 else:
+-                    save_modelopt_state(model, state_dict)
++                    modelopt_api.save_modelopt_state(model, state_dict)
+ 
+             end_ckpt = time()
+             logger.debug(
+@@ -2570,7 +2588,8 @@ def load_checkpoint(
+                 log_printed = True
+ 
+     if has_nvidia_modelopt:
+-        print_distributed_quant_summary(model, msg="After loading checkpoint")
++        if (modelopt_api := _modelopt_api()) is not None:
++            modelopt_api.print_distributed_quant_summary(model, msg="After loading checkpoint")
+ 
+         # Load teacher model in Distillation mode.
+         if getattr(args, "export_kd_teacher_load", None):
+diff --git a/megatron/training/training.py b/megatron/training/training.py
+index d64ae84..eb51d7d 100644
+--- a/megatron/training/training.py
++++ b/megatron/training/training.py
+@@ -13,6 +13,7 @@ import argparse
+ import copy
+ import dataclasses
+ import functools
++import importlib.util
+ import gc
+ import inspect
+ import logging
+@@ -204,12 +205,18 @@ try:
+ except ImportError:
+     has_rl_utils = False
+ 
+-try:
+-    from modelopt.torch.distill.plugins.megatron import get_tensor_shapes_adjust_fn_for_distillation
++# yeto miles-ports image (rl-trainer-cold-start-cost L2.2): Megatron-LM a84b105 imported
++# modelopt at module top here, which every trainer process paid for (21-30 s).
++# The distillation helper is now imported where a modelopt-enabled run uses it.
++has_nvidia_modelopt = importlib.util.find_spec("modelopt") is not None
+ 
+-    has_nvidia_modelopt = True
+-except ImportError:
+-    has_nvidia_modelopt = False
++
++def get_tensor_shapes_adjust_fn_for_distillation(*args, **kwargs):
++    from modelopt.torch.distill.plugins.megatron import (
++        get_tensor_shapes_adjust_fn_for_distillation as adjust_fn,
++    )
++
++    return adjust_fn(*args, **kwargs)
+ 
+ try:
+     from megatron.core.distributed import TorchFullyShardedDataParallel as torch_FSDP

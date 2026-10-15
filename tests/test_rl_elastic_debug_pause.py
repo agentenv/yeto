@@ -53,6 +53,7 @@ def test_default_off_island_task_envs_unchanged(monkeypatch, tmp_path):
     from yeto.gpu_spec import parse_gpu_spec
 
     _fake_sky(monkeypatch)
+    monkeypatch.setattr("yeto.launch.rl_island_task.submitted_unix", lambda: 1.0)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "k")
     base = ("--gpu", "modal:1xh100,modal:1xh100", "--rl-engine", "ports", "--rl-island-scheduling", "elastic")
