@@ -344,8 +344,10 @@ class ConvertibleNodeAgent:
             inflight = self.inflight()
         except Exception:  # noqa: BLE001 - an observation; unknown is reported as None
             inflight = None
+        # a node that finished generating gives no rollout capacity away by converting
+        capacity = 0.0 if self.generation_done else self.capacity
         return {"node": self.name, "role": self.role, "at": round(self.clock(), 3),
-                "inflight": inflight, "capacity": self.capacity, "rounds": self.rounds,
+                "inflight": inflight, "capacity": capacity, "rounds": self.rounds,
                 "groups": self.groups, "served_version": self.served_version,
                 "generation_done": self.generation_done, "stints": self.stints}
 

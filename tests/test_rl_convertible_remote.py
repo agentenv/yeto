@@ -319,7 +319,8 @@ def test_node_converts_trains_and_comes_back_with_the_trained_version():
     summary = [e for e in events if e["event"] == "trainer_start_summary"]
     assert len(summary) == 1 and summary[0]["kind"] == "conversion" and summary[0]["total_s"] >= 0
     status = json.loads(files.read(node_path("n0", "status.json")))
-    assert status["role"] == EXITED and status["generation_done"] and status["capacity"] == 2.0
+    assert status["role"] == EXITED and status["generation_done"] and status["capacity"] == 0.0
+    assert agent.capacity == 2.0  # measured; reported as 0 once generation is done
 
 
 def test_node_stint_failure_fails_the_node():
