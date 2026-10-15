@@ -217,6 +217,26 @@ def test_miles_argv_of_a_lora_sampler_and_trainer():
     assert flag_value(trainer.argv, "--save-hf") == mc.RELEASE_EXPORTER_SAVE_HF
 
 
+def test_miles_argv_of_a_convertible_node_is_lora_colocated_with_the_switchable_rollout():
+    """L7.5: a convertible node keeps the colocated LoRA argv (trainer and engines on
+    the same GPUs); only the rollout function changes; no release exporter."""
+    from tests.test_rl_miles_adapter_config import flag_value, make_config, sub
+    from yeto.rl.adapters.miles import config as mc
+
+    base = mc.translate_run_config(make_config(), _tolerant(), max_policy_age=1)
+    cfg = dataclasses.replace(make_config(), sample_buffer=sample_roles.SampleBufferConfig(
+        role="convertible", store="/mnt/store"))
+    node = mc.translate_run_config(cfg, _tolerant(), max_policy_age=1)
+    assert flag_value(node.argv, "--rollout-function-path") == br.ROLLOUT_FUNCTION_PATHS["convertible"]
+    assert "--colocate" in node.argv and "--save-hf" not in node.argv
+    assert "--debug-rollout-only" not in node.argv
+    assert [a for a in node.argv if a not in base.argv] == [
+        "--rollout-function-path", br.ROLLOUT_FUNCTION_PATHS["convertible"]]
+    full = sub(cfg, "trainable", parameter_mode="full", target_modules=())
+    with pytest.raises(mc.MilesConfigError, match="LoRA on a colocated island"):
+        mc.translate_run_config(full, _tolerant(), max_policy_age=1)
+
+
 # ---------------------------------------------------------------- releases
 def test_release_is_committed_by_latest_and_republish_is_a_no_op(tmp_path):
     releases = PolicyReleaseStore(CheckpointStore(tmp_path), keep=2, clock=lambda: 1.0)

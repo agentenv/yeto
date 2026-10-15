@@ -488,3 +488,133 @@ def _catch(fn, errors):
 
 
 _ = CONVERTING  # imported for the role names
+
+
+# ---------------------------------------------------------------- Miles node wiring (fakes)
+def test_miles_convertible_node_boots_generates_converts_and_ends(tmp_path, monkeypatch):
+    """run_convertible_node over fake Miles components: boot (version 0 weights + KV),
+    a rollout round into the shard, one conversion with a stubbed trainer
+    incarnation (published version 2), the way back (load_version + checksum),
+    then the end command."""
+    import types
+
+    from yeto.rl.adapters.miles import buffer_rollout as br
+    from yeto.rl.adapters.miles import convertible as mconv
+    from yeto.rl.adapters.miles import publish, rollout
+    from yeto.rl.engine import trainer_remote
+    from yeto.rl.engine.sample_roles import SampleBufferConfig
+
+    log = []
+
+    class Controller:
+        async def prepare_rollout(self, rid):
+            log.append(("prepare_rollout", rid))
+
+        async def abort_all(self):
+            log.append("abort_all")
+
+        async def onload_kv(self):
+            log.append("onload_kv")
+
+    class Executor:
+        async def get(self, rid):
+            log.append(("get", rid))
+            return "pack"
+
+    class Actor:
+        async def run_plugin(self, name, kw):
+            log.append(("plugin", kw))
+
+    class Runner:
+        def run(self, coro):
+            import asyncio
+
+            return asyncio.run(coro)
+
+    class Pool:
+        def __init__(self, **kw):
+            pass
+
+        def load_sample(self):
+            return {"running_requests": 3, "queued_requests": 1}
+
+        def set_admission(self, open_):
+            log.append(("admission", open_))
+
+        def members(self):
+            return frozenset()
+
+        def _in_executor(self, fn, *a):
+            return fn(None, *a)
+
+    class Sink:
+        def discard(self):
+            return 0
+
+    class Publisher:
+        published_checksum = "sha-2"
+
+        def load_version(self, v):
+            log.append(("load_version", v))
+
+        def served_checksum(self):
+            return "sha-2"
+
+    driver = types.SimpleNamespace(publisher=Publisher(), sync=types.SimpleNamespace(
+        round_cuts=types.SimpleNamespace(controller=types.SimpleNamespace(store=object()),
+                                         buffer_watermark=lambda v: 0)))
+
+    class Agent:
+        def __init__(self, drv, *, commands, incarnation, resume_from, emit, **kw):
+            self.handle = None
+            self.emit, self.incarnation = emit, incarnation
+
+        def run(self):
+            assert br.convertible_mode() == br.TRAINER  # reading the buffer while training
+            h = TrainerHandle(StartPlan(self.incarnation), resume_from=None, clock=lambda: 0.0)
+            h.start_version, h.published_version = 0, 2
+            self.emit(EVENT, **lifecycle_event(h, READY, seq=0))
+            return h
+
+    async def update_weights(*a):
+        log.append("update_weights")
+
+    monkeypatch.setattr(rollout, "MilesRolloutPool", Pool)
+    monkeypatch.setattr(rollout, "RayMetadataSink", Sink)
+    monkeypatch.setattr(rollout, "_release", lambda pack: log.append(("release", pack)))
+    monkeypatch.setattr(publish, "_default_update_weights", lambda: update_weights)
+    monkeypatch.setattr(trainer_remote, "IslandTrainerAgent", Agent)
+    monkeypatch.setenv(br.SHARD_ENV, "island0")
+    monkeypatch.setenv(trainer_remote.POLL_ENV, "0.01")
+    store = tmp_path / "store"
+    files = LocalStoreFiles(CheckpointStore(str(store)))
+    miles_args = types.SimpleNamespace(
+        yeto_rl_sample_buffer=SampleBufferConfig(role="convertible", store=str(store)),
+        num_rollout=1, rollout_batch_size=4, offload_rollout=True,
+        yeto_rl_event_tape=str(tmp_path / "tape.jsonl"), yeto_rl_learner_id=0)
+    NodeCommandWriter(files, "island0")
+    import threading as _t
+
+    def drive():
+        _until(lambda: files.read(node_path("island0", "status.json")) and json.loads(
+            files.read(node_path("island0", "status.json")))["generation_done"])
+        NodeCommandWriter(files, "island0").send(TO_TRAINER, incarnation=0)
+        _until(lambda: any(e.get("direction") == "to_rollout" for e in _events(files, "island0")))
+        NodeCommandWriter(files, "island0").send(END)
+
+    t = _t.Thread(target=drive, daemon=True)
+    t.start()
+    stints = mconv.run_convertible_node(miles_args, build_driver=lambda: driver,
+                                        controller=Controller(), executor=Executor(),
+                                        actor=Actor(), runner=Runner())
+    t.join(5)
+    assert stints == 1 and br.convertible_mode() == br.SAMPLER
+    assert log[:3] == [("plugin", {"next_version": 0}), "update_weights", "onload_kv"]
+    assert ("get", 0) in log and ("release", "pack") in log
+    i = log.index("abort_all")
+    assert log[i - 1] == ("admission", False)
+    assert ("load_version", 2) in log and log[-1] == ("admission", True)
+    back = [e for e in _events(files, "island0") if e.get("direction") == "to_rollout"][0]
+    assert back["version"] == 2 and back["weight_checksum"] == "sha-2"
+    status = json.loads(files.read(node_path("island0", "status.json")))
+    assert status["role"] == EXITED and status["served_version"] == 2
