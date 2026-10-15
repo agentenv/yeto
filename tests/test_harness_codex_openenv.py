@@ -913,3 +913,23 @@ def test_a_group_with_an_infrastructure_member_never_reaches_the_advantage():
     assert tbench_reward.check_group(None, good).keep is True  # mixed rewards: kept
     out = tbench_reward.check_group(None, [*good, infra])
     assert out.keep is False and out.reason == "group_has_aborted" and infra.status == "ABORTED"
+
+
+def test_tb2_group_check_is_a_bound_neutral_filter():
+    import json as _json
+
+    from yeto.rl.adapters.miles import binding
+    from yeto.rl.engine.algorithm import TBENCH_GROUP_CHECK_FILTER, AlgorithmSpec, normalize_filter_name
+
+    assert normalize_filter_name("yeto.rl.harness.codex.tbench_reward.check_group") == TBENCH_GROUP_CHECK_FILTER
+    assert binding.filter_argv(TBENCH_GROUP_CHECK_FILTER) == [
+        "--dynamic-sampling-filter-path", "yeto.rl.harness.codex.tbench_reward.check_group"]
+    from importlib import import_module
+
+    module, _, name = binding.filter_path(TBENCH_GROUP_CHECK_FILTER).rpartition(".")
+    assert getattr(import_module(module), name) is tbench_reward.check_group
+    raw = _json.loads((Path(__file__).resolve().parents[1]
+                       / "examples/rl_algorithms/decoupled-ppo-c2-agentic-tb2.json").read_text())
+    spec = AlgorithmSpec.from_json(_json.dumps(raw)) if hasattr(AlgorithmSpec, "from_json") else AlgorithmSpec.from_dict(raw)
+    assert spec.sampling.filter == TBENCH_GROUP_CHECK_FILTER and spec.sampling.over_sampling_batch_size == 8
+    assert spec.correction.upper == 2.0 and spec.execution.max_policy_staleness == 4
