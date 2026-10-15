@@ -1,22 +1,26 @@
 """Cloud binding of the trainer scheduler: the trainer island on Modal
-(rl-trainer-start-stop L5.3c).
+(rl-trainer-start-stop L5.3c) or on a sky cloud.
 
 With ``--rl-trainer-scheduler s1`` the launcher holds back the island named by
-``--rl-trainer-island``: its Modal function is defined on the run's app but the
-fleet controller does not start it. :func:`modal_binding` gives the scheduler loop:
+``--rl-trainer-island``: the fleet controller does not start it. The binding
+gives the scheduler loop one trainer island per incarnation:
 
-* :class:`ModalTrainerIslands` (``trainer_remote.TrainerIslands``): each
-  incarnation spawns the held-back function with the incarnation environment
+* Modal (:func:`modal_binding`): :class:`ModalTrainerIslands` spawns the held-back
+  function (defined on the run's app) with the incarnation environment
   (``trainer_remote.island_env``), tails its log stream for the island events, and
-  cancels the call at release. The call ids are kept in the head's run directory,
-  so a restarted head can release an orphan;
-* :class:`ModalVolumeFiles`: the head's reads and writes in the run's
-  ``modal-volume://`` checkpoint store (commands, cut pointers, the buffer index);
-* the head's buffer view: the sample buffer index mirrored from the Volume,
+  cancels the call at release. :class:`ModalVolumeFiles` reads and writes the
+  run's ``modal-volume://`` checkpoint store;
+* sky (:func:`sky_binding`): :class:`SkyTrainerIslands` launches the held-back
+  task as a new cluster per incarnation (``<island>-i<n>``), tails the job log, and
+  tears the cluster down at release (verified at the cloud). :class:`S3StoreFiles`
+  reads and writes the run's ``s3://`` checkpoint store, which the island mounts;
+* both: the head's buffer view is the sample buffer index mirrored from the store,
   backlog counted from the consumed watermark the trainer committed: the running
-  incarnation's reported one, else the newest cut's (``CommittedBacklog``).
-
-Sky trainer islands are not bound yet (``check`` refuses them).
+  incarnation's reported one, else the newest cut's (``CommittedBacklog``). The
+  incarnation ids (Modal call, sky cluster) are kept in the head's run directory,
+  so a restarted head can release an orphan. Each incarnation's events are also
+  written to ``<events dir>/<island>-i<n>.jsonl``, where the launcher reads the
+  start-phase summary (``trainer_start``) for the run manifest.
 """
 
 from __future__ import annotations
@@ -26,7 +30,7 @@ import json
 import threading
 import time
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +52,9 @@ JOBS_FILE = "trainer-islands.json"  # in the trainer loop's journal dir: incarna
 MIRROR_DIR = "buffer-mirror"
 RELEASE_CHECKS = 12
 RELEASE_CHECK_DELAY_S = 5.0
+# A release during provisioning cancels the launch request; wait this long for
+# the request to end before tearing the cluster down (it may still come up).
+PROVISION_CANCEL_WAIT_S = 600.0
 
 
 @dataclass
@@ -58,6 +65,9 @@ class TrainerIsland:
     cloud: str
     modal_cfg: Any = None  # modal_runner.ModalIslandConfig
     modal_ops: Any = None  # modal_runner.ModalOps (app deployed)
+    sky_task: Any = None  # sky.Task of a sky island (not launched by the fleet)
+    spec: Any = None  # gpu_spec.ClusterSpec of the island
+    events_dir: Path | None = None  # the run's echoed-tape dir (None: no tape files)
 
 
 @dataclass
@@ -122,6 +132,42 @@ class ModalVolumeFiles:
             batch.put_file(io.BytesIO(data), self._path(rel))
 
 
+class S3StoreFiles:
+    """:class:`~yeto.rl.engine.trainer_remote.StoreFiles` over an ``s3://BUCKET[/PREFIX]``
+    checkpoint store via boto3 (credentials from the usual AWS environment). The
+    island mounts the bucket and uses ``PREFIX`` as its store root, so a path
+    relative to the store root is the key ``PREFIX/<rel>``."""
+
+    def __init__(self, store_uri: str, *, client: Any = None) -> None:
+        scheme, _, rest = str(store_uri).partition("://")
+        bucket, _, prefix = rest.strip("/").partition("/")
+        if scheme != "s3" or not bucket:
+            raise ValueError(f"{store_uri!r} is not an s3://BUCKET[/PREFIX] store")
+        self.bucket = bucket
+        self.prefix = prefix.strip("/")
+        self._client = client
+
+    def _s3(self) -> Any:
+        if self._client is None:
+            import boto3
+
+            self._client = boto3.client("s3")
+        return self._client
+
+    def _key(self, rel: str) -> str:
+        return f"{self.prefix}/{rel}" if self.prefix else rel
+
+    def read(self, rel: str) -> bytes | None:
+        client = self._s3()
+        try:
+            return client.get_object(Bucket=self.bucket, Key=self._key(rel))["Body"].read()
+        except client.exceptions.NoSuchKey:
+            return None
+
+    def write(self, rel: str, data: bytes) -> None:
+        self._s3().put_object(Bucket=self.bucket, Key=self._key(rel), Body=data)
+
+
 class MirrorStore(CheckpointStore):
     """A read-only local copy of some store files: ``reload`` copies ``paths`` from
     ``files`` (whole files). Lets :class:`FileSampleBuffer` read an index that
@@ -154,12 +200,17 @@ class MirrorStore(CheckpointStore):
 # ---------------------------------------------------------------------------
 class IslandEvents:
     """Feeds on an island's log stream (``collector.feed`` like ``TapeCollector``);
-    keeps the ``rl_trainer_lifecycle`` and start-phase events."""
+    keeps the ``rl_trainer_lifecycle`` and start-phase events. A record seen before
+    is skipped (a reconnected sky log tail replays the job log from its start).
+    With ``tape``, every new event is also appended to that file (one JSON record
+    per line)."""
 
-    def __init__(self) -> None:
+    def __init__(self, tape: Path | None = None) -> None:
         self._lock = threading.Lock()
         self._new: list[dict[str, Any]] = []
         self.all: list[dict[str, Any]] = []
+        self.tape = None if tape is None else Path(tape)
+        self._seen: set[str] = set()
 
     def feed(self, chunk: Any) -> None:
         for line in str(chunk).splitlines():
@@ -168,14 +219,50 @@ class IslandEvents:
                 continue
             record = json.loads(raw)
             with self._lock:
+                if raw in self._seen:
+                    continue
+                self._seen.add(raw)
                 self.all.append(record)
                 if record.get("event") == EVENT:
                     self._new.append(record)
+                self._append_to_tape(raw)
+
+    def _append_to_tape(self, raw: str) -> None:
+        if self.tape is None:
+            return
+        try:
+            self.tape.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.tape, "a", encoding="utf-8") as fh:
+                fh.write(raw + "\n")
+        except OSError as error:  # the in-memory events still drive the scheduler
+            print(f"[launcher] trainer event tape {self.tape}: {error}", flush=True)
 
     def take(self) -> list[dict[str, Any]]:
         with self._lock:
             out, self._new = self._new, []
             return out
+
+
+def incarnation_tape(events_dir: Path | None, name: str, incarnation: int) -> Path | None:
+    """Where the head writes the events of one trainer incarnation (None: nowhere)."""
+    return None if events_dir is None else Path(events_dir) / f"{name}-i{int(incarnation)}.jsonl"
+
+
+def read_jobs(path: Path) -> dict[str, str]:
+    """``{incarnation: cloud id}`` the head recorded (Modal call id, sky cluster)."""
+    path = Path(path)
+    if not path.is_file():
+        return {}
+    return dict(json.loads(path.read_text(encoding="utf-8")))
+
+
+def save_job(path: Path, incarnation: int, cloud_id: str) -> None:
+    path = Path(path)
+    jobs = {**read_jobs(path), str(int(incarnation)): str(cloud_id)}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(jobs, sort_keys=True), encoding="utf-8")
+    tmp.replace(path)
 
 
 @dataclass
@@ -192,7 +279,7 @@ class ModalTrainerIslands:
     (default: the launcher's ``_tail_modal`` on a daemon thread)."""
 
     def __init__(self, modal_ops: Any, cfg: Any, *, name: str, jobs_path: Path,
-                 poll_s: float | None = None,
+                 poll_s: float | None = None, events_dir: Path | None = None,
                  tail: Callable[[str, str, IslandEvents], None] | None = None,
                  sleep: Callable[[float], None] = time.sleep,
                  clock: Callable[[], float] = time.time) -> None:
@@ -201,6 +288,7 @@ class ModalTrainerIslands:
         self.name = name
         self.jobs_path = Path(jobs_path)
         self.poll_s = poll_s
+        self.events_dir = events_dir
         self._tail = tail or self._tail_thread
         self.sleep = sleep
         self.clock = clock
@@ -214,7 +302,8 @@ class ModalTrainerIslands:
                 SUBMITTED_ENV: f"{self.clock():.3f}"}
         call_id = self.modal_ops.spawn(replace(self.cfg, envs=envs))
         self._save_call(incarnation, call_id)
-        job = _Job(int(incarnation), str(call_id), IslandEvents())
+        job = _Job(int(incarnation), str(call_id),
+                   IslandEvents(incarnation_tape(self.events_dir, self.name, incarnation)))
         self.jobs.append(job)
         print(f"[launcher] trainer incarnation {incarnation} on Modal as {self.name} "
               f"(call {call_id}, resume {None if resume_from is None else resume_from.cut_id})",
@@ -259,16 +348,10 @@ class ModalTrainerIslands:
         return False
 
     def _calls(self) -> dict[str, str]:
-        if not self.jobs_path.is_file():
-            return {}
-        return dict(json.loads(self.jobs_path.read_text(encoding="utf-8")))
+        return read_jobs(self.jobs_path)
 
     def _save_call(self, incarnation: int, call_id: str) -> None:
-        calls = {**self._calls(), str(int(incarnation)): str(call_id)}
-        self.jobs_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.jobs_path.with_name(self.jobs_path.name + ".tmp")
-        tmp.write_text(json.dumps(calls, sort_keys=True), encoding="utf-8")
-        tmp.replace(self.jobs_path)
+        save_job(self.jobs_path, incarnation, call_id)
 
     def _tail_thread(self, call_id: str, label: str, collector: IslandEvents) -> None:
         from .modal_islands import _tail_modal
@@ -277,11 +360,176 @@ class ModalTrainerIslands:
                          name=f"tail-{label}", daemon=True).start()
 
 
+class SkyIslandOps:
+    """The sky calls of :class:`SkyTrainerIslands` (tests inject a fake with the
+    same methods). ``submit`` returns a request id at once; ``wait`` blocks until
+    the cluster is up and the job submitted and returns the job id."""
+
+    def __init__(self, args: Any, spec: Any) -> None:
+        self.args = args
+        self.spec = spec
+
+    def submit(self, task: Any, cluster: str) -> Any:
+        import sky
+
+        from .sky_ops import submit_island_launch
+
+        return submit_island_launch(sky, self.args, self.spec, task, cluster)
+
+    def wait(self, request: Any, task: Any, cluster: str) -> int:
+        import sky
+
+        from .sky_ops import maybe_install_nebius_reclaim_hook
+
+        launched = sky.stream_and_get(request)
+        maybe_install_nebius_reclaim_hook(task, launched, cluster)
+        return int(launched[0])
+
+    def cancel(self, request: Any) -> None:
+        import sky
+
+        sky.get(sky.api_cancel(request))
+
+    def job_alive(self, cluster: str, job_id: int) -> bool:
+        from .sky_ops import SkySDKOps
+
+        return SkySDKOps().job_alive(cluster, job_id)
+
+    def down(self, cluster: str) -> bool:
+        """Tear the cluster down (diagnostics first) and confirm it at the cloud."""
+        import sky
+
+        from .teardown import teardown_island
+
+        return teardown_island(sky, cluster, num_nodes=int(getattr(self.spec, "num_nodes", 1) or 1))
+
+    def tail(self, cluster: str, job_id: int, label: str, collector: IslandEvents) -> None:
+        from .sky_ops import _tail
+
+        threading.Thread(target=_tail, args=(cluster, job_id, label, collector),
+                         name=f"tail-{label}", daemon=True).start()
+
+
+@dataclass
+class _SkyJob:
+    incarnation: int
+    cluster: str
+    events: IslandEvents
+    request: Any = None
+    job_id: int | None = None
+    error: BaseException | None = None
+    provisioning: threading.Thread | None = None
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+class SkyTrainerIslands:
+    """:class:`~yeto.rl.engine.trainer_remote.TrainerIslands` on a sky cloud (module doc).
+
+    Each incarnation is a new cluster ``<island>-i<n>`` launched from the held-back
+    task with the incarnation environment. ``launch`` only submits the request:
+    provisioning runs on a daemon thread (the island counts as alive meanwhile),
+    which starts the log tail once the job is submitted. ``release`` cancels a
+    launch still provisioning and tears the cluster down."""
+
+    def __init__(self, task: Any, ops: SkyIslandOps, *, name: str, jobs_path: Path,
+                 poll_s: float | None = None, events_dir: Path | None = None,
+                 clock: Callable[[], float] = time.time,
+                 cancel_wait_s: float = PROVISION_CANCEL_WAIT_S) -> None:
+        self.task = task
+        self.ops = ops
+        self.name = name
+        self.jobs_path = Path(jobs_path)
+        self.poll_s = poll_s
+        self.events_dir = events_dir
+        self.clock = clock
+        self.cancel_wait_s = float(cancel_wait_s)
+        self.jobs: list[_SkyJob] = []
+
+    def cluster_name(self, incarnation: int) -> str:
+        from .sky_ops import sky_cluster_name
+
+        return sky_cluster_name(f"{self.name}-i{int(incarnation)}")
+
+    # -- TrainerIslands --------------------------------------------------------
+    def launch(self, incarnation: int, resume_from: CutRef | None) -> _SkyJob:
+        cluster = self.cluster_name(incarnation)
+        # sky snapshots the task at submit: the shared task carries this
+        # incarnation's environment only for the submit call below.
+        self.task.update_envs({**island_env(incarnation, resume_from, poll_s=self.poll_s),
+                               SUBMITTED_ENV: f"{self.clock():.3f}"})
+        save_job(self.jobs_path, incarnation, cluster)  # before any spend: a dead head finds it
+        job = _SkyJob(int(incarnation), cluster,
+                      IslandEvents(incarnation_tape(self.events_dir, self.name, incarnation)))
+        job.request = self.ops.submit(self.task, cluster)
+        self.jobs.append(job)
+        print(f"[launcher] trainer incarnation {incarnation} on sky as {cluster} "
+              f"(resume {None if resume_from is None else resume_from.cut_id})", flush=True)
+        job.provisioning = threading.Thread(target=self._provision, args=(job,),
+                                            name=f"provision-{cluster}", daemon=True)
+        job.provisioning.start()
+        return job
+
+    def events(self, job: _SkyJob) -> list[Mapping[str, Any]]:
+        return job.events.take()
+
+    def alive(self, job: _SkyJob) -> bool:
+        with job.lock:
+            if job.error is not None:
+                return False
+            if job.job_id is None:
+                return True  # still provisioning
+            job_id = job.job_id
+        return self.ops.job_alive(job.cluster, job_id)
+
+    def release(self, job: _SkyJob) -> bool:
+        provisioning = job.provisioning
+        if provisioning is not None and provisioning.is_alive():
+            try:
+                self.ops.cancel(job.request)
+            except Exception as error:  # noqa: BLE001 - the teardown below decides
+                print(f"[launcher] cancel of the launch of {job.cluster} failed: {error}",
+                      flush=True)
+            provisioning.join(self.cancel_wait_s)
+        return self._down(job.cluster)
+
+    def release_incarnation(self, incarnation: int) -> bool:
+        cluster = read_jobs(self.jobs_path).get(str(int(incarnation)))
+        if cluster is None:
+            print(f"[launcher] trainer incarnation {incarnation}: no sky cluster recorded; "
+                  "nothing to release", flush=True)
+            return False
+        return self._down(cluster)
+
+    def start_events(self) -> list[Mapping[str, Any]]:
+        """Every event of every incarnation (``trainer_start_summary`` gives T_s)."""
+        return [e for job in self.jobs for e in job.events.all]
+
+    # -- internals -------------------------------------------------------------
+    def _provision(self, job: _SkyJob) -> None:
+        try:
+            job_id = self.ops.wait(job.request, self.task, job.cluster)
+        except BaseException as error:  # noqa: BLE001 - reported as the island ending
+            print(f"[launcher] launch of trainer cluster {job.cluster} failed: {error}", flush=True)
+            with job.lock:
+                job.error = error
+            return
+        with job.lock:
+            job.job_id = job_id
+        self.ops.tail(job.cluster, job_id, f"{self.name}-i{job.incarnation}", job.events)
+
+    def _down(self, cluster: str) -> bool:
+        try:
+            return bool(self.ops.down(cluster))
+        except Exception as error:  # noqa: BLE001 - not confirmed: the caller reports it
+            print(f"[launcher] teardown of trainer cluster {cluster} failed: {error}", flush=True)
+            return False
+
+
 # ---------------------------------------------------------------------------
 # Binding
 # ---------------------------------------------------------------------------
 def modal_binding(args: Any, island: TrainerIsland, *, journal_dir: Path,
-                  files: StoreFiles | None = None, islands: Any = None) -> Any:
+                  files: StoreFiles | None = None, islands: Any = None) -> CloudTrainerBinding:
     """The :class:`CloudTrainerBinding` of a Modal trainer
     island (``files`` / ``islands`` replace the SDK in tests)."""
     from .storage import MODAL_CHECKPOINT_STORE_MOUNT, modal_checkpoint_store
@@ -292,7 +540,28 @@ def modal_binding(args: Any, island: TrainerIsland, *, journal_dir: Path,
     if islands is None:
         islands = ModalTrainerIslands(island.modal_ops, island.modal_cfg, name=island.name,
                                       jobs_path=Path(journal_dir) / JOBS_FILE,
-                                      poll_s=getattr(args, "rl_trainer_command_poll_seconds", None))
+                                      poll_s=getattr(args, "rl_trainer_command_poll_seconds", None),
+                                      events_dir=island.events_dir)
+    return _binding(args, files, islands, journal_dir=journal_dir)
+
+
+def sky_binding(args: Any, island: TrainerIsland, *, journal_dir: Path,
+                files: StoreFiles | None = None, islands: Any = None) -> CloudTrainerBinding:
+    """The :class:`CloudTrainerBinding` of a sky trainer island with an ``s3://``
+    checkpoint store (``files`` / ``islands`` replace the SDKs in tests)."""
+    if files is None:
+        files = S3StoreFiles(str(args.rl_checkpoint_store))
+    if islands is None:
+        if island.sky_task is None:
+            raise ValueError(f"trainer island {island.name}: no sky task to launch")
+        islands = SkyTrainerIslands(island.sky_task, SkyIslandOps(args, island.spec),
+                                    name=island.name, jobs_path=Path(journal_dir) / JOBS_FILE,
+                                    poll_s=getattr(args, "rl_trainer_command_poll_seconds", None),
+                                    events_dir=island.events_dir)
+    return _binding(args, files, islands, journal_dir=journal_dir)
+
+
+def _binding(args: Any, files: StoreFiles, islands: Any, *, journal_dir: Path) -> CloudTrainerBinding:
     cuts = StoreCutLog(files)
     mirror = MirrorStore(Path(journal_dir) / MIRROR_DIR, files, [f"{BUFFER_DIR}/{INDEX}"])
     buffer = FileSampleBuffer(mirror, batch_size=int(args.rollout_batch_size))

@@ -24,7 +24,6 @@ callers reach as ``yeto.launcher.<name>`` are re-exported below.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import shlex
@@ -46,8 +45,7 @@ from .launch.syncer import (
     syncer_status_reader,
 )
 from .launch.storage import (
-    droppable_rejoins_in_new_container, model_store_filesystem, model_store_sky_config,
-    resumes_in_new_container,
+    droppable_rejoins_in_new_container, resumes_in_new_container,
 )
 from .launch.island_tasks import island_task_plan
 from .launch.args import prepare_launch_args
@@ -55,6 +53,7 @@ from .launch.rl_island_task import _echoes_events, make_miles_island_task
 from .launch.learner_task import make_learner_task
 from .launch.sky_ops import (
     SkySDKOps, _tail, learner_cluster_names, maybe_install_nebius_reclaim_hook, sky_cluster_name,
+    submit_island_launch,
 )
 from .launch.tapes import (
     excuse_departed_islands, settle_echo_tapes, syncer_pool_departures, wait_for_tapes,
@@ -107,6 +106,7 @@ from .launch.storage import (  # noqa: F401
     ELASTIC_CHECKPOINT_STORE_MOUNT, ELASTIC_ISLAND_STATE_DIR, MODEL_STORE_MOUNT,
     RL_HEAD_INITIAL_ADAPTER_PATH, _rl_checkpoint_storage_name, modal_checkpoint_store,
     modal_volume_store_env, model_store_env, nebius_baked_image_id, rl_checkpoint_store_plan,
+    model_store_filesystem, model_store_sky_config,
 )
 from .launch.island_tasks import island_task_data  # noqa: F401
 from .launch.rl_ports import (  # noqa: F401
@@ -260,6 +260,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     held = trainer_loop.held_island(args)
     held_name = None if held is None else learner_cluster_names(args.cluster_prefix, specs)[held]
     held_cfg = None
+    held_task = None
     # Islands whose tape travels over the log stream (no fetchable
     # ~/yeto-output): every Modal RL ports island, and a no-sync island.
     echo_names = {
@@ -427,6 +428,11 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 tasks[name] = cfg
                 modal_cfgs[name] = cfg
                 continue
+            if name == held_name:
+                held_task = task  # the scheduler launches one cluster per incarnation
+                print(f"[launcher] {name} is the trainer island: the trainer scheduler "
+                      "starts and stops it", flush=True)
+                continue
             tasks[name] = task
             print(f"[launcher] {name} dials {island_syncer_addrs(getattr(task, 'envs', None))}", flush=True)
             alloc = (rl_island_spec(rl_island_args(args, m), spec)
@@ -440,20 +446,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 # refresh + bounded backoff on capacity failures.
                 rids[name] = (m, ("verda", spec))
                 continue
-            store_fs = (model_store_filesystem(getattr(args, "model_store", None), spec.cloud, spec.region)
-                        if getattr(args, "training_mode", "sft") == "rl" else None)
-            if store_fs:
-                from sky import skypilot_config
-
-                store_cfg = skypilot_config.override_skypilot_config(
-                    model_store_sky_config(store_fs, spec.region))
-            else:
-                store_cfg = contextlib.nullcontext()
-            with store_cfg:  # the request snapshots the client config at submit
-                rids[name] = (
-                    m,
-                    sky.launch(task, cluster_name=name, retry_until_up=args.retry_until_up),
-                )
+            rids[name] = (m, submit_island_launch(sky, args, spec, task, name))
 
         results = {}
         errors = {}
@@ -665,7 +658,8 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             exit_codes = trainer_loop.run_with_trainer_loop(
                 args, controller.run,
                 island=None if held_name is None else trainer_loop.TrainerIsland(
-                    held_name, specs[held].cloud, held_cfg, modal_ops),
+                    held_name, specs[held].cloud, held_cfg, modal_ops, sky_task=held_task,
+                    spec=specs[held], events_dir=events_dir),
                 abort=controller.abort)
         except trainer_loop.TrainerLoopGaveUp as error:
             # the trainer scheduler released the trainer and stopped; the samplers

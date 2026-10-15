@@ -190,3 +190,18 @@ def test_held_trainer_drains_the_buffer_after_the_fleet_ended(tmp_path, monkeypa
     assert launch_loop.run_with_trainer_loop(args, lambda: "codes",
                                              factory=lambda a, i: binding) == "codes"
     assert finished.is_set() and seen[-1] is True
+
+
+def test_pair_plan_on_sky_holds_the_trainer_cluster_over_an_s3_store():
+    from yeto.launcher import dry_run_plan
+
+    base = tuple("s3://yeto-ckpt/run-a" if t == STORE else t for t in PAIR)
+    args = _args(("--rl-placement", "fixed-partition", "--rl-rollout-gpus", "1"),
+                 gpu="nebius:2xh100@eu-north1,nebius:2xh100@eu-north1", base=base)
+    plan = dry_run_plan(args)
+    assert plan["trainer_scheduler"]["island"] == 1
+    sampler, trainer = plan["island_requests"]
+    assert trainer["held_by_trainer_scheduler"] is True and "held_by_trainer_scheduler" not in sampler
+    for request in (sampler, trainer):
+        tokens = _island_tokens(request["learner_command"])
+        assert _flag(tokens, "--rl-resume-store") == "~/yeto-checkpoint-store/run-a"

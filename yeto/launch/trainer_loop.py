@@ -16,9 +16,10 @@ Inputs and outputs of the loop on the head:
   releases it, and gives the sample buffer and the cut log of the run.
 
 The launcher holds back the island ``--rl-trainer-island`` (index into ``--gpu``):
-the fleet controller does not start it; the binding starts one per incarnation.
-Only a Modal trainer island is bound (``yeto.launch.trainer_island``); :func:`check`
-refuses anything else before any launch.
+the fleet controller does not start it; the binding starts one per incarnation
+(``yeto.launch.trainer_island``): a Modal island with a ``modal-volume://`` store,
+or a sky island (not Verda) with an ``s3://`` store. :func:`check` refuses anything
+else before any launch.
 """
 
 from __future__ import annotations
@@ -49,6 +50,7 @@ MODES = (OFF, S1)
 DEFAULT_INTERVAL_S = 30.0
 DEFAULT_START_SECONDS = 600.0
 DEFAULT_DRAIN_SECONDS = 3600.0
+DEFAULT_READY_SECONDS = 1800.0
 TRAINER_PRECISION = "bf16"  # the trainer's precision; a convertible node must match it
 JOURNAL_DIR = "trainer-loop"
 
@@ -56,12 +58,12 @@ T = TypeVar("T")
 
 
 def default_binding(args, island: TrainerIsland | None) -> CloudTrainerBinding:
-    if island is None or island.cloud != "modal":
-        raise SystemExit("--rl-trainer-scheduler: the trainer island must be a Modal island "
-                         f"(got {None if island is None else island.cloud}); sky is not bound yet")
-    from .trainer_island import modal_binding
+    if island is None:
+        raise SystemExit("--rl-trainer-scheduler: no trainer island was held back")
+    from .trainer_island import modal_binding, sky_binding
 
-    return modal_binding(args, island, journal_dir=journal_dir(args))
+    binding = modal_binding if island.cloud == "modal" else sky_binding
+    return binding(args, island, journal_dir=journal_dir(args))
 
 
 # (args, held-back trainer island) -> CloudTrainerBinding
@@ -79,8 +81,8 @@ def add_arguments(group) -> None:
     group.add_argument(
         "--rl-trainer-island", type=int, default=None, metavar="M",
         help="with --rl-trainer-scheduler: the island (index into --gpu) the scheduler starts "
-        "and stops; the fleet does not start it. Must be a Modal island with a "
-        "modal-volume:// --rl-checkpoint-store")
+        "and stops; the fleet does not start it. A Modal island needs a modal-volume:// "
+        "--rl-checkpoint-store, a sky island (not Verda) an s3:// one")
     group.add_argument(
         "--rl-trainer-command-poll-seconds", type=float, default=None,
         help="seconds between two reads of the command file on the trainer island and of "
@@ -89,6 +91,11 @@ def add_arguments(group) -> None:
         "--rl-trainer-drain-seconds", type=float, default=DEFAULT_DRAIN_SECONDS,
         help="after the fleet (the samplers) ended: max seconds the scheduler keeps the "
         "trainer to consume the rest of the buffer before it stops it (default 3600)")
+    group.add_argument(
+        "--rl-trainer-ready-seconds", type=float, default=DEFAULT_READY_SECONDS,
+        help="max seconds from a trainer start to the island's ready event (provisioning, "
+        "start, cut restore) before the start counts as failed (default "
+        f"{DEFAULT_READY_SECONDS:.0f})")
     group.add_argument(
         "--rl-trainer-max-failures", type=int, default=DEFAULT_MAX_CONSECUTIVE_FAILURES,
         help="trainer incarnations that may fail in a row (no trained round between them) "
@@ -161,11 +168,13 @@ def check(args) -> None:
         raise SystemExit("--rl-trainer-drain-seconds must be >= 0")
     if getattr(args, "rl_trainer_max_failures", DEFAULT_MAX_CONSECUTIVE_FAILURES) < 1:
         raise SystemExit("--rl-trainer-max-failures must be >= 1")
+    if getattr(args, "rl_trainer_ready_seconds", DEFAULT_READY_SECONDS) <= 0:
+        raise SystemExit("--rl-trainer-ready-seconds must be positive")
     if binding_factory is default_binding:
-        _check_modal_island(args)
+        _check_trainer_island(args)
 
 
-def _check_modal_island(args) -> None:
+def _check_trainer_island(args) -> None:
     from yeto.gpu_spec import parse_gpu_spec
 
     m = getattr(args, "rl_trainer_island", None)
@@ -175,13 +184,16 @@ def _check_modal_island(args) -> None:
     specs = parse_gpu_spec(args.gpu)
     if not 0 <= m < len(specs):
         raise SystemExit(f"--rl-trainer-island {m}: --gpu has {len(specs)} island(s)")
-    if specs[m].cloud != "modal":
-        raise SystemExit(f"--rl-trainer-island {m} is a {specs[m].cloud} island; only a Modal "
-                         "trainer island is bound to the scheduler (sky: not implemented)")
-    if not str(getattr(args, "rl_checkpoint_store", None) or "").startswith("modal-volume://"):
-        raise SystemExit("--rl-trainer-scheduler needs a modal-volume:// --rl-checkpoint-store: "
-                         "the head reads the cuts and the sample buffer there and writes the "
-                         "trainer commands there")
+    cloud = specs[m].cloud
+    if cloud == "verda":
+        raise SystemExit(f"--rl-trainer-island {m} is a Verda island; the scheduler launches "
+                         "a cluster per trainer start, which the Verda launch path does not do")
+    store = str(getattr(args, "rl_checkpoint_store", None) or "")
+    scheme = "modal-volume" if cloud == "modal" else "s3"
+    if not store.startswith(f"{scheme}://"):
+        raise SystemExit(f"--rl-trainer-scheduler with a {cloud} trainer island needs a "
+                         f"{scheme}:// --rl-checkpoint-store: the head reads the cuts and the "
+                         "sample buffer there and writes the trainer commands there")
 
 
 def build(args, binding: CloudTrainerBinding, journal: Journal) -> TrainerLoop:
@@ -196,6 +208,8 @@ def build(args, binding: CloudTrainerBinding, journal: Journal) -> TrainerLoop:
                        buffer=binding.buffer, cuts=binding.cuts, record=journal.append,
                        data_ended=binding.data_ended, release_orphan=binding.release_orphan,
                        spec=binding.spec,
+                       ready_timeout_s=float(getattr(
+                           args, "rl_trainer_ready_seconds", DEFAULT_READY_SECONDS)),
                        max_consecutive_failures=int(getattr(
                            args, "rl_trainer_max_failures", DEFAULT_MAX_CONSECUTIVE_FAILURES)))
     if loop.restore(records):

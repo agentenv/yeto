@@ -406,10 +406,10 @@ def _args(tmp_path, monkeypatch, extra=()):
     return args
 
 
-def test_check_refuses_without_a_modal_trainer_island(tmp_path, monkeypatch):
+def test_check_refuses_without_a_bound_trainer_island(tmp_path, monkeypatch):
     with pytest.raises(SystemExit, match="needs --rl-trainer-island"):
         launch_loop.check(_args(tmp_path, monkeypatch))
-    with pytest.raises(SystemExit, match="only a Modal"):
+    with pytest.raises(SystemExit, match="nebius trainer island needs a s3://"):
         launch_loop.check(_args(tmp_path, monkeypatch, ["--rl-trainer-island", "1"]))
     args = _args(tmp_path, monkeypatch, ["--rl-trainer-island", "0"])
     launch_loop.check(args)
