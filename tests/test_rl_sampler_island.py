@@ -190,7 +190,7 @@ def test_miles_argv_of_the_sampler_and_the_trainer():
 
 
 def test_miles_argv_of_a_lora_sampler_and_trainer():
-    from tests.test_rl_miles_adapter_config import flag_value, make_config
+    from tests.test_rl_miles_adapter_config import flag_value, make_config, sub
     from yeto.rl.adapters.miles import config as mc
 
     base = mc.translate_run_config(make_config(), _tolerant())
@@ -204,7 +204,11 @@ def test_miles_argv_of_a_lora_sampler_and_trainer():
     assert [a for a in sampler.argv if a not in base.argv] == [
         "--rollout-function-path", br.ROLLOUT_FUNCTION_PATHS["sampler"], "--debug-rollout-only"]
     assert flag_value(sampler.argv, "--lora-rank") == flag_value(base.argv, "--lora-rank")
-    trainer = mc.translate_run_config(buffer_config("trainer"), _tolerant(), max_policy_age=1)
+    with pytest.raises(mc.MilesConfigError, match="partitioned placement"):
+        mc.translate_run_config(buffer_config("trainer"), _tolerant(), max_policy_age=1)
+    partitioned = dataclasses.replace(sub(buffer_config("trainer"), "serving", offload_train=False),
+                                      parallel=make_config(colocated=False).parallel)
+    trainer = mc.translate_run_config(partitioned, _tolerant(), max_policy_age=1)
     assert flag_value(trainer.argv, "--save-hf") == mc.RELEASE_EXPORTER_SAVE_HF
 
 
