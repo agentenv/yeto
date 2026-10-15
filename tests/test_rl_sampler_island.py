@@ -18,9 +18,12 @@ from yeto.rl.adapters.miles import sampler_island as si
 from yeto.rl.engine import sample_roles
 from yeto.rl.engine.policy_release import (
     LATEST,
+    LORA,
     RELEASE_DIR,
     PolicyFollower,
+    PolicyReleaseError,
     PolicyReleaseStore,
+    directory_digest,
 )
 from yeto.rl.engine.resume import CheckpointStore
 from yeto.rl.engine.sample_buffer import FileSampleBuffer
@@ -33,6 +36,11 @@ def _group(g, version):
 
 def _write_weights(directory: Path) -> None:
     (directory / "model.safetensors").write_text("w")
+
+
+def _write_adapter(directory: Path, value: str = "a") -> None:
+    (directory / "adapter_config.json").write_text('{"r": 8}')
+    (directory / "adapter_model.safetensors").write_text(value)
 
 
 # ---------------------------------------------------------------- roles and launch
@@ -181,14 +189,23 @@ def test_miles_argv_of_the_sampler_and_the_trainer():
     assert "--fully-async" not in mc.translate_run_config(partitioned, _tolerant(), max_policy_age=1).argv
 
 
-def test_miles_argv_refuses_a_lora_buffer_island():
-    from tests.test_rl_miles_adapter_config import make_config
+def test_miles_argv_of_a_lora_sampler_and_trainer():
+    from tests.test_rl_miles_adapter_config import flag_value, make_config
     from yeto.rl.adapters.miles import config as mc
 
-    cfg = dataclasses.replace(make_config(), sample_buffer=sample_roles.SampleBufferConfig(
-        role="sampler", store="/mnt/store", max_backlog_groups=4))
-    with pytest.raises(mc.MilesConfigError, match="full-parameter mode only"):
-        mc.translate_run_config(cfg, _tolerant())
+    base = mc.translate_run_config(make_config(), _tolerant())
+    assert flag_value(base.argv, "--lora-rank") is not None
+
+    def buffer_config(role, **kw):
+        return dataclasses.replace(make_config(), sample_buffer=sample_roles.SampleBufferConfig(
+            role=role, store="/mnt/store", **kw))
+
+    sampler = mc.translate_run_config(buffer_config("sampler", max_backlog_groups=4), _tolerant())
+    assert [a for a in sampler.argv if a not in base.argv] == [
+        "--rollout-function-path", br.ROLLOUT_FUNCTION_PATHS["sampler"], "--debug-rollout-only"]
+    assert flag_value(sampler.argv, "--lora-rank") == flag_value(base.argv, "--lora-rank")
+    trainer = mc.translate_run_config(buffer_config("trainer"), _tolerant(), max_policy_age=1)
+    assert flag_value(trainer.argv, "--save-hf") == mc.RELEASE_EXPORTER_SAVE_HF
 
 
 # ---------------------------------------------------------------- releases
@@ -206,6 +223,30 @@ def test_release_is_committed_by_latest_and_republish_is_a_no_op(tmp_path):
     rewind = releases.release(1, "h1b", _write_weights)  # restored from an older cut
     assert (rewind.seq, rewind.version) == (3, 1)
     assert sorted(p.name for p in (tmp_path / RELEASE_DIR).iterdir()) == [LATEST, "r2-v2", "r3-v1"]
+
+
+def test_lora_release_records_the_file_digest_and_the_follower_checks_it(tmp_path):
+    releases = PolicyReleaseStore(CheckpointStore(tmp_path))
+    with pytest.raises(ValueError, match="weights must be one of"):
+        releases.release(1, "h1", _write_adapter, weights="delta")
+    full = releases.release(1, "h1", _write_weights)
+    assert (full.weights, full.sha256, full.engine_checksum) == ("full", None, None)
+    lora = releases.release(2, "h2", _write_adapter, weights=LORA, engine_checksum="c2")
+    directory = releases.resolve(lora)
+    assert (lora.weights, lora.engine_checksum) == (LORA, "c2")
+    assert lora.sha256 == directory_digest(directory) and releases.latest() == lora
+    other = tmp_path / "other"
+    other.mkdir()
+    _write_adapter(other, "b")
+    assert directory_digest(other) != lora.sha256  # the bytes count, not only the names
+    loaded = []
+    follower = PolicyFollower(releases, lambda r, d: loaded.append(r.seq))
+    (directory / "adapter_model.safetensors").write_text("tampered")
+    with pytest.raises(PolicyReleaseError, match="weight files sha256"):
+        follower.refresh()
+    assert loaded == [] and follower.release is None
+    _write_adapter(directory)
+    assert follower.refresh().seq == 2 and loaded == [2]
 
 
 def test_follower_loads_each_new_release_once_and_keeps_the_version_on_failure(tmp_path):
@@ -277,6 +318,22 @@ def test_sampler_loads_releases_and_waits_at_the_backlog_cap(tmp_path):
     assert sampler.served == [1, 2]
     assert sampler.names().count("rl_sampler_backlog_full") == 2
     assert buffer.data_ended and sampler.names()[-1] == "rl_sampler_data_end"
+
+
+def test_lora_sampler_waits_for_the_first_release(tmp_path):
+    releases = PolicyReleaseStore(CheckpointStore(tmp_path))
+    sampler = _Sampler(tmp_path, releases, max_backlog_groups=100, rounds=2)
+    sampler.loop.require_release = True
+    sampler.loop.loaded_fields = lambda: {"served_checksum": "s"}
+    sampler.on_sleep = lambda: releases.release(0, "h0", _write_adapter, weights=LORA)
+    assert sampler.loop.run() == 2
+    assert sampler.sleeps == 1 and sampler.served == [0]
+    names = sampler.names()
+    assert names[:3] == ["rl_sampler_waiting_policy", "rl_sampler_policy_loaded",
+                         "rl_sampler_policy_ready"]
+    loaded = dict(sampler.events)["rl_sampler_policy_loaded"]
+    assert (loaded["weights"], loaded["served_checksum"], loaded["seq"]) == (LORA, "s", 1)
+    assert loaded["sha256"] == releases.latest().sha256
 
 
 def test_sampler_throttle_keeps_min_round_seconds_between_round_starts(tmp_path):
@@ -359,6 +416,66 @@ def test_engine_load_runs_under_the_update_lock_in_publisher_order(tmp_path):
     assert [step[0] for step in log] == ["lock", "stamp", "stamp", "end", "executor"]
 
 
+def _lora_loader(log, engines, bodies):
+    async def post(engine, endpoint, payload):
+        log.append((endpoint, engine.server_url, payload.get("lora_path")))
+        return {"success": True}
+
+    async def warmup(engine, adapter, timeout_s):
+        log.append(("warmup", engine.server_url, adapter))
+
+    controller = _Controller(log, engines)
+
+    async def check_weights(action):
+        log.append(("checksum",))
+        return bodies
+
+    controller.check_weights = check_weights
+    executor = SimpleNamespace(set_weight_version=lambda v: log.append(("executor", v)))
+    return si.EngineReleaseLoader(controller, executor, asyncio.run, lora=True, post=post,
+                                  warmup=warmup, flatten=lambda raw: raw)
+
+
+def test_lora_engine_load_hot_swaps_the_adapter_and_reads_it_back(tmp_path):
+    from yeto.rl.adapters.miles.publish import weight_view_digest
+
+    log = []
+    body = {"model.w": "base", "lora:miles_lora:q_proj:0:A": "a1"}
+    loader = _lora_loader(log, [_Engine(log, "e0"), _Engine(log, "e1")], [body, dict(body)])
+    releases = PolicyReleaseStore(CheckpointStore(tmp_path))
+    expected = weight_view_digest([body], lora=True)
+    assert expected == weight_view_digest([{"lora:miles_lora:q_proj:0:A": "a1"}], lora=False)
+    first = releases.release(0, "h0", _write_adapter, weights=LORA, engine_checksum=expected)
+    loader(first, releases.resolve(first))
+    path = str(releases.resolve(first))
+    assert log == [("lock",), ("load_lora_adapter", "e0", path), ("load_lora_adapter", "e1", path),
+                   ("stamp", "e0", "0"), ("stamp", "e1", "0"), ("end", {"c0": "x"}),
+                   ("executor", 0), ("warmup", "e0", "miles_lora"), ("warmup", "e1", "miles_lora"),
+                   ("checksum",)]
+    assert loader.last_checksum == expected
+    log.clear()
+    second = releases.release(1, "h1", _write_adapter, weights=LORA)  # no trainer checksum
+    loader(second, releases.resolve(second))
+    assert [step[0] for step in log[:5]] == ["lock", "unload_lora_adapter", "unload_lora_adapter",
+                                            "load_lora_adapter", "load_lora_adapter"]
+    third = releases.release(2, "h2", _write_adapter, weights=LORA, engine_checksum="other")
+    with pytest.raises(br.SampleBufferRolloutError, match="the trainer published other"):
+        loader(third, releases.resolve(third))
+    full = releases.release(3, "h3", _write_weights)
+    with pytest.raises(br.SampleBufferRolloutError, match="holds full weights"):
+        loader(full, releases.resolve(full))
+
+
+def test_engines_without_a_served_adapter_give_no_lora_checksum():
+    from yeto.rl.adapters.miles.publish import weight_view_digest
+
+    assert weight_view_digest([{"model.w": "base"}], lora=True) is None
+    assert weight_view_digest([], lora=False) is None
+    lora = {"lora:miles_lora:q_proj:0:A": "a1"}
+    assert weight_view_digest([lora, {"lora:miles_lora:q_proj:0:A": "a2"}], lora=True) is None
+    assert weight_view_digest([{"model.w": "x"}], lora=False) is not None
+
+
 def test_engine_load_aborts_the_lock_when_an_engine_disagrees(tmp_path):
     log = []
     loader = _loader(log, [_Engine(log, "e0"), _Engine(log, "e1", version_after="9")])
@@ -395,6 +512,61 @@ def test_releasing_publisher_releases_every_publish(tmp_path):
     assert (latest.version, latest.buffer_selected) == (1, 6)
     assert [f["seq"] for e, f in events if e == "rl_policy_released"] == [1, 2]
     assert publisher.verify_serving_policy == "inner-attr"
+
+
+def test_releasing_publisher_records_the_lora_adapter_checksum(tmp_path):
+    from yeto.rl.adapters.miles.publish import weight_view_digest
+
+    body = {"model.w": "base", "lora:miles_lora:q_proj:0:A": "a1"}
+    inner = SimpleNamespace(publish=lambda state: None,
+                            last_engine_checksums={"e0": body, "e1": dict(body)})
+    events = []
+    publisher = si.ReleasingPublisher(
+        inner, PolicyReleaseStore(CheckpointStore(tmp_path)),
+        export=lambda v, d: _write_adapter(d), read_position=lambda: 0,
+        emit=lambda e, **f: events.append((e, f)), weights=LORA)
+    publisher.publish(_State(0, "h0"))
+    latest = PolicyReleaseStore(CheckpointStore(tmp_path)).latest()
+    assert latest.weights == LORA and latest.engine_checksum == weight_view_digest([body], lora=True)
+    assert events[0][1]["sha256"] == latest.sha256
+    inner.last_engine_checksums = {"e0": {"model.w": "base"}}  # adapter never served
+    publisher.publish(_State(1, "h1"))
+    assert PolicyReleaseStore(CheckpointStore(tmp_path)).latest().engine_checksum is None
+
+
+def test_wire_policy_releases_exports_only_the_adapter_in_lora_mode(tmp_path):
+    from yeto.rl.adapters.miles.release_plugin import WRITE_LORA_ADAPTER
+
+    driver = SimpleNamespace(publisher=SimpleNamespace(publish=lambda s: None),
+                             emit=lambda event, **fields: None,
+                             rollout=SimpleNamespace(_in_executor=lambda fn, *a: fn(None, *a)))
+    args = SimpleNamespace(lora_rank=8, yeto_rl_sample_buffer=sample_roles.SampleBufferConfig(
+        role="trainer", store=str(tmp_path)))
+    calls = []
+
+    def run_plugin(fn_path, kwargs):
+        calls.append((fn_path, kwargs))
+        _write_adapter(Path(kwargs["path"]))
+
+    actor = SimpleNamespace(run_plugin=run_plugin)
+    wired = si.wire_policy_releases(driver, miles_args=args, actor_model=actor,
+                                    runner=SimpleNamespace(run=lambda value: value))
+    br._ACTIVE.pop(br.TRAINER, None)
+    wired.publish(_State(0, "h0"))
+    assert calls == [(WRITE_LORA_ADAPTER, {"path": str(tmp_path / RELEASE_DIR / "r1-v0")})]
+    assert PolicyReleaseStore(CheckpointStore(tmp_path)).latest().weights == LORA
+
+
+def test_release_plugin_writes_the_adapter_with_the_snapshot_publisher(tmp_path):
+    from yeto.rl.adapters.miles import release_plugin
+
+    written = []
+    actor = SimpleNamespace(snapshot_publisher=SimpleNamespace(
+        write_adapter=lambda adapter, path: written.append((adapter, path))))
+    assert release_plugin.write_lora_adapter(actor, path=str(tmp_path)) == {"path": str(tmp_path)}
+    assert written == [(None, tmp_path)]
+    with pytest.raises(RuntimeError, match="snapshot publisher"):
+        release_plugin.write_lora_adapter(SimpleNamespace(snapshot_publisher=None), path="x")
 
 
 def test_wire_policy_releases_only_on_a_trainer_island(tmp_path):

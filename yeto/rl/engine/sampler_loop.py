@@ -9,6 +9,9 @@ buffer (the engine's rollout function does the write). Before each round it:
    sampler keeps the last version and stops at the cap; a newer release (the
    trainer runs again) lifts the wait.
 
+With ``require_release`` (a LoRA sampler: its engines serve no adapter until
+the first release is loaded) step 2 also waits until a release is loaded.
+
 After the last round it marks the data end, so the trainer stops after reading
 the rest. The loop is engine-neutral: ``generate(rollout_id)`` runs one round.
 """
@@ -31,7 +34,9 @@ class SamplerLoop:
                  poll_s: float = DEFAULT_POLL_S, sleep: Callable[[float], None] = time.sleep,
                  should_stop: Callable[[], bool] = lambda: False,
                  min_round_s: float | None = None,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+                 clock: Callable[[], float] = time.monotonic,
+                 require_release: bool = False,
+                 loaded_fields: Callable[[], dict[str, Any]] = dict) -> None:
         if int(max_backlog_groups) < 1:
             raise ValueError("max_backlog_groups must be >= 1")
         self.follower = follower
@@ -45,6 +50,8 @@ class SamplerLoop:
         self.should_stop = should_stop
         self.min_round_s = None if min_round_s is None else float(min_round_s)
         self.clock = clock
+        self.require_release = bool(require_release)
+        self.loaded_fields = loaded_fields  # extra fields of rl_sampler_policy_loaded
 
     def backlog(self) -> int:
         """Groups in the buffer after the trainer's read position of its last release
@@ -57,14 +64,29 @@ class SamplerLoop:
     def _load_newest(self) -> None:
         loaded = self.follower.refresh()
         if loaded is not None:
-            self.emit("rl_sampler_policy_loaded", policy_version=loaded.version,
-                      policy_hash=loaded.policy_hash, buffer_selected=loaded.buffer_selected)
+            self.emit("rl_sampler_policy_loaded", seq=loaded.seq, policy_version=loaded.version,
+                      policy_hash=loaded.policy_hash, buffer_selected=loaded.buffer_selected,
+                      weights=loaded.weights, sha256=loaded.sha256, **self.loaded_fields())
 
     def _admit(self, rollout_id: int) -> bool:
         """True when the round may start; False when asked to stop while waiting."""
         waiting_since = None
+        waiting_policy_since = None
         while True:
             self._load_newest()
+            if self.require_release and self.follower.release is None:
+                if waiting_policy_since is None:
+                    waiting_policy_since = time.monotonic()
+                    self.emit("rl_sampler_waiting_policy", rollout_id=rollout_id)
+                if self.should_stop():
+                    return False
+                self.sleep(self.poll_s)
+                continue
+            if waiting_policy_since is not None:
+                self.emit("rl_sampler_policy_ready", rollout_id=rollout_id,
+                          waited_s=round(time.monotonic() - waiting_policy_since, 3),
+                          policy_version=self.follower.version)
+                waiting_policy_since = None
             backlog = self.backlog()
             if backlog < self.max_backlog_groups:
                 if waiting_since is not None:

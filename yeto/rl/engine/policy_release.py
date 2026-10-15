@@ -8,14 +8,21 @@ hand-off needs no new network path. Layout under ``policy-releases/``:
 
 * ``r<seq>-v<version>/``: the weights in the engine's load format, written by
   the engine adapter, then ``RELEASE.json`` in it (the release record). ``seq``
-  counts the releases of the store (1, 2, ...);
+  counts the releases of the store (1, 2, ...). ``weights`` names the format:
+  ``full`` (a whole HF checkpoint) or ``lora`` (an HF/PEFT adapter directory the
+  sampler hot-swaps over its base weights);
 * ``LATEST.json``: a copy of the newest release record, written last. It is the
   commit point: a reader never sees a release whose weights are incomplete.
 
 The record carries the policy version (the engine weight version the sampler
-stamps), the version-independent policy hash and the trainer's buffer read
+stamps), the version-independent policy hash, the trainer's buffer read
 position when it released (``buffer_selected``; the sampler's backlog is the
-buffer length minus this position).
+buffer length minus this position), ``sha256`` (the digest of the weight files,
+:func:`directory_digest`; the sampler checks it before it loads; LoRA releases
+only: reading a whole checkpoint back is as slow as loading it) and, when the
+trainer has one, ``engine_checksum`` (the digest of the trainer engines' weight
+read-back after this publish; a sampler that reads its own engines back after
+the load must get the same value).
 
 A trainer that publishes the same version and hash again (a restart) releases
 nothing. A trainer restored from an older cut publishes an older version with
@@ -28,7 +35,9 @@ appears and the sampler keeps the last version.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
 import shutil
 import time
@@ -44,6 +53,10 @@ RELEASE_DIR = "policy-releases"
 LATEST = "LATEST.json"
 RECORD = "RELEASE.json"
 _RELEASE_NAME = re.compile(r"r(\d+)-v\d+")
+FULL = "full"
+LORA = "lora"
+WEIGHT_FORMATS = (FULL, LORA)
+_DIGEST_CHUNK = 1 << 20
 
 
 class PolicyReleaseError(RuntimeError):
@@ -58,6 +71,9 @@ class PolicyRelease:
     path: str  # relative to the release root: "r<seq>-v<version>"
     buffer_selected: int | None = None
     released_at: float = 0.0
+    weights: str = FULL
+    sha256: str | None = None  # None: not digested (a full checkpoint)
+    engine_checksum: str | None = None
     schema: str = SCHEMA
 
     @classmethod
@@ -65,6 +81,32 @@ class PolicyRelease:
         if record.get("schema") != SCHEMA:
             raise PolicyReleaseError(f"release schema {record.get('schema')!r} != {SCHEMA}")
         return cls(**{k: record[k] for k in record if k in cls.__dataclass_fields__})
+
+
+def directory_digest(directory: Path) -> str:
+    """sha256 over every file under ``directory`` except the release record:
+    relative path, size and bytes, in sorted path order."""
+    digest = hashlib.sha256()
+    root = Path(directory)
+    files = sorted(p for p in root.rglob("*") if p.is_file() and p.relative_to(root) != Path(RECORD))
+    for path in files:
+        relative = path.relative_to(root).as_posix().encode("utf-8")
+        digest.update(len(relative).to_bytes(8, "big") + relative)
+        digest.update(os.path.getsize(path).to_bytes(8, "big"))
+        with path.open("rb") as handle:
+            while chunk := handle.read(_DIGEST_CHUNK):
+                digest.update(chunk)
+    return digest.hexdigest()
+
+
+def check_release_files(release: PolicyRelease, directory: Path) -> None:
+    """Raise when the weight files differ from the ones the trainer released."""
+    if release.sha256 is None:
+        return
+    actual = directory_digest(directory)
+    if actual != release.sha256:
+        raise PolicyReleaseError(f"release r{release.seq}-v{release.version}: weight files "
+                                 f"sha256 {actual} != released {release.sha256}")
 
 
 class PolicyReleaseStore:
@@ -91,13 +133,16 @@ class PolicyReleaseStore:
         return PolicyRelease.from_record(json.loads(path.read_text(encoding="utf-8")))
 
     def release(self, version: int, policy_hash: str, write: Callable[[Path], None], *,
-                buffer_selected: int | None = None) -> PolicyRelease | None:
+                buffer_selected: int | None = None, weights: str = FULL,
+                engine_checksum: str | None = None) -> PolicyRelease | None:
         """Write the weights with ``write(directory)``, then the record, then LATEST.
 
         Returns None (writes nothing) when the latest release is this version and hash."""
         version = int(version)
         if not policy_hash:
             raise ValueError("policy_hash must be non-empty")
+        if weights not in WEIGHT_FORMATS:
+            raise ValueError(f"weights must be one of {WEIGHT_FORMATS}, not {weights!r}")
         latest = self.latest()
         if latest is not None and (latest.version, latest.policy_hash) == (version, policy_hash):
             return None
@@ -110,7 +155,9 @@ class PolicyReleaseStore:
         write(directory)
         record = PolicyRelease(seq=seq, version=version, policy_hash=str(policy_hash), path=name,
                                buffer_selected=None if buffer_selected is None else int(buffer_selected),
-                               released_at=round(self.clock(), 3))
+                               released_at=round(self.clock(), 3), weights=weights,
+                               sha256=directory_digest(directory) if weights == LORA else None,
+                               engine_checksum=engine_checksum or None)
         _write_json_atomic(directory / RECORD, asdict(record))
         self.store.commit()  # the weights and the record are durable before LATEST names them
         _write_json_atomic(self.root / LATEST, asdict(record))
@@ -136,6 +183,7 @@ class PolicyFollower:
 
     ``load(release, directory)`` loads the weights and stamps ``release.version``
     on every engine (raises on any failure; the served release is then unchanged).
+    The weight files are checked against the record's ``sha256`` first.
     ``version`` is the version the engines serve before any release (the base
     policy, 0)."""
 
@@ -153,7 +201,9 @@ class PolicyFollower:
         self.last_seen = latest
         if latest is None or (self.release is not None and latest.seq == self.release.seq):
             return None
-        self._load(latest, self.releases.resolve(latest))
+        directory = self.releases.resolve(latest)
+        check_release_files(latest, directory)
+        self._load(latest, directory)
         self.version = latest.version
         self.release = latest
         return latest

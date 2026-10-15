@@ -782,10 +782,6 @@ def translate_run_config(
     columns = config.data.columns
     request = placement_request(config)
     sample_buffer = getattr(config, "sample_buffer", None)
-    if sample_buffer is not None and trainable.parameter_mode != "full":
-        # the sampler loads each release as a full HF checkpoint (update_weights_from_disk)
-        raise MilesConfigError(f"--rl-sample-role {sample_buffer.role} supports full-parameter "
-                               "mode only (a LoRA release cannot be loaded by the sampler yet)")
     # a buffer island selects its own rollout function, so never Miles' fully_async
     rollout_overlap = max_policy_age > 0 and request.kind != "colocated" and sample_buffer is None
 

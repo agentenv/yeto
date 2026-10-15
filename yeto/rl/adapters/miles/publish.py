@@ -350,6 +350,28 @@ def engine_checksum_digest(body: dict[str, Any]) -> str:
     ).hexdigest()
 
 
+def weight_view_digest(bodies: list[dict[str, Any]], *, lora: bool) -> str | None:
+    """The digest a policy release records and its sampler compares: of the whole
+    checksum body (full parameter) or of its ``lora:*`` keys (LoRA: the base is the
+    same HF checkpoint on both sides). None when there is no body, the engines
+    disagree, or a LoRA body holds no adapter key (the adapter was never served)."""
+    views = [lora_keys(dict(b)) if lora else dict(b) for b in bodies]
+    if not views or not views[0] or any(v != views[0] for v in views):
+        return None
+    return engine_checksum_digest(views[0])
+
+
+async def read_engine_checksums(controller: Any, flatten: Callable[[Any], list[dict[str, Any]]]
+                                | None = None) -> list[dict[str, Any]]:
+    """Every rollout engine's flattened weight checksum body (``check_weights``)."""
+    raw = await controller.check_weights(action="checksum")
+    try:
+        return [dict(b) for b in (flatten or _default_flatten())(raw)]
+    except AssertionError as exc:
+        raise PublicationError(f"engine weight checksum failed: {exc}",
+                               cause=PublicationCause.PAYLOAD_MISMATCH) from exc
+
+
 async def _maybe_await(value: Any) -> Any:
     """The trainer hook may be sync (tests, fakes) or a coroutine (real Miles
     policy state, which must not block the running loop)."""
@@ -529,12 +551,7 @@ class MilesPublisher:
 
         checksums = None
         if self._verify_checksums:
-            raw = await self._controller.check_weights(action="checksum")
-            try:
-                bodies = (self._flatten or _default_flatten())(raw)
-            except AssertionError as exc:
-                raise PublicationError(f"engine weight checksum failed: {exc}",
-                                       cause=PublicationCause.PAYLOAD_MISMATCH) from exc
+            bodies = await read_engine_checksums(self._controller, self._flatten)
             if len(bodies) != len(engines):
                 raise PublicationError(
                     f"{len(engines) - len(bodies)} engines returned no weight checksum"
@@ -585,13 +602,8 @@ class MilesPublisher:
                                members: frozenset[str]) -> str:
         if lora_mode(self._args):
             await self._warm_up_lora(engines, ids, [], sorted(members))
-        raw = await self._controller.check_weights(action="checksum")
-        try:
-            bodies = (self._flatten or _default_flatten())(raw)
-        except AssertionError as exc:
-            raise PublicationError(f"engine weight checksum failed: {exc}",
-                                   cause=PublicationCause.PAYLOAD_MISMATCH) from exc
-        digests = {engine_checksum_digest(dict(b)) for b in bodies}
+        bodies = await read_engine_checksums(self._controller, self._flatten)
+        digests = {engine_checksum_digest(b) for b in bodies}
         if len(digests) != 1:
             raise PublicationError(
                 f"{len(bodies)} engines reported {len(digests)} different weight checksums",
