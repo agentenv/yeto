@@ -377,13 +377,16 @@ def _rejection_matrix(ctx: HarnessContext, rec: _Recorder, *, source: Any, cut_i
         return lambda: path.write_bytes(data)
 
     ident = expect.algorithm
+    # (d) another algorithm, (e) another runtime attrs hash. A cut with a semantic
+    # hash (rl-identity-tiering L9.8) is compared by it, not by the plugin source hashes.
+    other_algorithm = (replace(ident, semantic_sha256="0" * 64) if ident.semantic_sha256
+                       else replace(ident, algorithm_spec_sha256="0" * 64))
     cases: list[tuple[str, Callable[[], Callable[[], None] | None], Any]] = [
         ("a", lambda: flip_last(directory / own.path), expect),
         ("b", lambda: truncate(directory / own.path), expect),
         ("c", lambda: None, replace(expect, local_step=expect.local_step + 1)),
-        ("d", lambda: None, replace(expect, algorithm=replace(ident, algorithm_spec_sha256="0" * 64))),
-        ("e", lambda: None, replace(expect, algorithm=replace(
-            ident, plugin_sha256=tuple(sorted((*ident.plugin_sha256, "yeto.rl.algos.e2_probe@" + "0" * 64)))))),
+        ("d", lambda: None, replace(expect, algorithm=other_algorithm)),
+        ("e", lambda: None, replace(expect, algorithm=replace(ident, runtime_attrs_sha256="0" * 64))),
     ]
     if layout["dp"] > 1:
         if peer is None:

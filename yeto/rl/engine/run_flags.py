@@ -529,6 +529,17 @@ _RESUME = (
              "there after every commit point and restores from it when its state dir "
              "is empty (machine replaced). Without it the state stays on node0's local "
              "disk (warning on a multi-node island)"),
+    # rl-identity-tiering L9.4-L9.6
+    cli_flag("--rl-code-pack", choices=["auto", "off", "git-patch"], default="auto",
+             help="git-patch: pack the local git tree (commit + dirty patch with untracked "
+             "files) once at the first start, store it in --rl-checkpoint-store and ship it "
+             "as every island's workdir; resumed and replacement islands get the same pack. "
+             "auto (default): git-patch when --rl-checkpoint-store is a bucket or "
+             "modal-volume:// URI, else off"),
+    cli_flag("--rl-code-pack-upgrade", default=None, metavar="REASON",
+             help="with --rl-code-pack git-patch on an existing run: switch the run to a pack "
+             "of the current local tree; refused unless the algorithm semantic hash is "
+             "unchanged; the manifest records the old -> new pack and REASON"),
     # rl-resume-from-checkpoint (S17 C4)
     shared_flag("--rl-cut-every", type=int, default=None,
                 help="with --rl-checkpoint-store: keep a round cut every N rounds (plus the "
@@ -564,8 +575,9 @@ _SCHEDULING = (
                 "stepping, late deltas carried over with a discount, join/leave)"),
     cli_flag("--rl-island-contract-sha256", default=None,
              type=sha256_hex_arg,
-             help="secret-handling-hardening: island contract (backend identity bound to "
-             "the LR schedule and the AlgorithmSpec hash) pinned by the head; the syncer refuses islands whose "
+             help="secret-handling-hardening: island contract v3 (backend identity bound to "
+             "the LR schedule, the AlgorithmSpec semantic hash and the run code pack "
+             "digest) pinned by the head; the syncer refuses islands whose "
              "contract differs, even when they connect first. Default: first island decides"),
     shared_flag("--rl-max-policy-age", type=int, default=0,
                 help="agentic-rollout-utilization: how many published policy versions a "

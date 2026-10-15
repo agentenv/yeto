@@ -86,10 +86,11 @@ def test_valid_specs():
     CorrectionSpec(method="opsm", opsm_delta=1e-4),
 ])
 def test_correction_group_changes_the_hash(correction):
-    # L6b.1: the correction group is in the hash
+    # L6b.1: the correction group is in the hash (and in the semantic hash)
     base = AlgorithmSpec(entropy_coef=0.01)
     spec = base.replace(correction=correction)
     assert spec.sha256() != base.sha256()
+    assert spec.semantic_sha256() != base.semantic_sha256()
     assert AlgorithmSpec.from_dict(json.loads(spec.canonical_json())) == spec
 
 

@@ -6,7 +6,7 @@ import os
 import shlex
 
 from ..gpu_spec import ClusterSpec
-from . import REPO_ROOT
+from .code_pack import code_workdir
 from .remote_setup import (
     HF_TOKEN_ENV, HF_TOKEN_PATH, HUNYUAN3D_ROOT, HUNYUAN3D_SETUP, NVME_ENV, NVME_SETUP,
     PROTENIX_SETUP, TORCH_SETUP, WAN_TUNING, causal_kernel_setup_steps, model_prefetch,
@@ -392,7 +392,7 @@ def make_learner_task(args, spec: ClusterSpec, learner_id: int, num_learners: in
         envs=envs,
         **({"secrets": env_secrets} if env_secrets else {}),
         num_nodes=spec.num_nodes,
-        workdir=str(REPO_ROOT),
+        workdir=code_workdir(args),
         file_mounts=file_mounts,
     )
     infra = f"{spec.cloud}/{spec.region}" if spec.region else spec.cloud
