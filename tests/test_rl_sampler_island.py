@@ -420,7 +420,7 @@ def test_engine_load_runs_under_the_update_lock_in_publisher_order(tmp_path):
     assert [step[0] for step in log] == ["lock", "stamp", "stamp", "end", "executor"]
 
 
-def _lora_loader(log, engines, bodies):
+def _lora_loader(log, engines, bodies, staging=None):
     async def post(engine, endpoint, payload):
         log.append((endpoint, engine.server_url, payload.get("lora_path")))
         return {"success": True}
@@ -441,7 +441,8 @@ def _lora_loader(log, engines, bodies):
         return {"logprob_sum": -1.5}
 
     return si.EngineReleaseLoader(controller, executor, asyncio.run, lora=True, post=post,
-                                  warmup=warmup, flatten=lambda raw: raw, probe=probe)
+                                  warmup=warmup, flatten=lambda raw: raw, probe=probe,
+                                  staging_root=staging)
 
 
 def test_lora_engine_load_hot_swaps_the_adapter_and_reads_it_back(tmp_path):
@@ -449,13 +450,18 @@ def test_lora_engine_load_hot_swaps_the_adapter_and_reads_it_back(tmp_path):
 
     log = []
     body = {"model.w": "base", "lora:miles_lora:q_proj:0:A": "a1"}
-    loader = _lora_loader(log, [_Engine(log, "e0"), _Engine(log, "e1")], [body, dict(body)])
-    releases = PolicyReleaseStore(CheckpointStore(tmp_path))
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    loader = _lora_loader(log, [_Engine(log, "e0"), _Engine(log, "e1")], [body, dict(body)],
+                          staging=str(staging))
+    releases = PolicyReleaseStore(CheckpointStore(tmp_path / "store"))
     expected = weight_view_digest([body], lora=True)
     assert expected == weight_view_digest([{"lora:miles_lora:q_proj:0:A": "a1"}], lora=False)
     first = releases.release(0, "h0", _write_adapter, weights=LORA, engine_checksum=expected)
     loader(first, releases.resolve(first))
-    path = str(releases.resolve(first))
+    # the engines load a local copy: no file on the store stays open (Modal Volume reload)
+    (path,) = [str(p) for p in staging.iterdir()]
+    assert (Path(path) / "adapter_model.safetensors").read_text() == "a"
     assert log == [("lock",), ("load_lora_adapter", "e0", path), ("load_lora_adapter", "e1", path),
                    ("stamp", "e0", "0"), ("stamp", "e1", "0"), ("end", {"c0": "x"}),
                    ("executor", 0), ("warmup", "e0", "miles_lora"), ("warmup", "e1", "miles_lora"),
@@ -466,6 +472,8 @@ def test_lora_engine_load_hot_swaps_the_adapter_and_reads_it_back(tmp_path):
     loader(second, releases.resolve(second))
     assert [step[0] for step in log[:5]] == ["lock", "unload_lora_adapter", "unload_lora_adapter",
                                             "load_lora_adapter", "load_lora_adapter"]
+    (served,) = [str(p) for p in staging.iterdir()]  # the v0 copy was removed after the unload
+    assert served != path and log[3][2] == served
     third = releases.release(2, "h2", _write_adapter, weights=LORA, engine_checksum="other")
     with pytest.raises(br.SampleBufferRolloutError, match="the trainer published other"):
         loader(third, releases.resolve(third))

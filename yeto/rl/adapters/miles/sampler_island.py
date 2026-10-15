@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import shutil
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -123,7 +125,7 @@ class EngineReleaseLoader:
                  warmup: Callable[[Any, str, float], Any] = default_lora_warmup,
                  flatten: Callable[[Any], list[dict[str, Any]]] | None = None,
                  probe: Callable[[Any, str], Any] | None = probe_generate,
-                 warmup_timeout_s: float = 120.0) -> None:
+                 warmup_timeout_s: float = 120.0, staging_root: str | None = None) -> None:
         self.controller = controller
         self.executor = executor
         self.run = run
@@ -136,6 +138,8 @@ class EngineReleaseLoader:
         self.warmup_timeout_s = float(warmup_timeout_s)
         self.adapter = lora_adapter_name() if self.lora else None
         self._adapter_loaded = False  # the engines hold the adapter of an earlier release
+        self.staging_root = staging_root  # local copies of loaded adapters (None: system temp)
+        self._staged: Path | None = None  # the local copy the engines serve
         self.last_checksum: str | None = None  # LoRA: the engines' lora:* read-back digest
 
     @property
@@ -165,14 +169,31 @@ class EngineReleaseLoader:
             await asyncio.gather(*(e.update_weights_from_disk(model_path=path, weight_version=stamp)
                                    for e in engines))
             return
-        if self._adapter_loaded:
-            await asyncio.gather(*(self.post(e, "unload_lora_adapter", {"lora_name": self.adapter})
+        # SGLang keeps the adapter files open (safetensors mmap); open files on a Modal
+        # Volume make every later reload fail, so no new release is ever seen
+        # (T-LSMP g). The engines load a local copy; the previous copy is removed
+        # once its adapter is unloaded.
+        staged = Path(tempfile.mkdtemp(prefix=f"v{int(version)}-", dir=self.staging_root))
+        shutil.copytree(path, staged, dirs_exist_ok=True)
+        try:
+            if self._adapter_loaded:
+                await asyncio.gather(*(self.post(e, "unload_lora_adapter", {"lora_name": self.adapter})
+                                       for e in engines))
+                self._adapter_loaded = False
+                self._drop_staged()
+            await asyncio.gather(*(self.post(e, "load_lora_adapter",
+                                             {"lora_name": self.adapter, "lora_path": str(staged)})
                                    for e in engines))
-            self._adapter_loaded = False
-        await asyncio.gather(*(self.post(e, "load_lora_adapter",
-                                         {"lora_name": self.adapter, "lora_path": path})
-                               for e in engines))
+        except BaseException:
+            shutil.rmtree(staged, ignore_errors=True)
+            raise
         self._adapter_loaded = True
+        self._staged = staged
+
+    def _drop_staged(self) -> None:
+        if self._staged is not None:
+            shutil.rmtree(self._staged, ignore_errors=True)
+            self._staged = None
 
     async def _read_back_adapter(self, engines: list[Any]) -> str | None:
         """Warm the adapter into every engine's LoRA pool, then read the checksums."""
