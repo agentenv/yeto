@@ -562,12 +562,19 @@ async def _run(
                 tito = adapter.mirror_tito_counters(metrics, board)
                 handed_off = True
                 return {**adapter.infrastructure_metadata(str(exc), episode_id=episode_id, metrics=metrics), **fields, **tito, **segments}
+            except Exception as exc:  # noqa: BLE001 - e.g. the sandbox shut down under the worker
+                # Environment failure, not a policy outcome: infrastructure (no reward, group dropped)
+                # instead of an exception that fails the whole rollout step.  The finally block
+                # deletes the pre-created sessions (not handed off).
+                return {**adapter.infrastructure_metadata(f"worker: {type(exc).__name__}: {exc}", episode_id=episode_id), **fields}
             tito = adapter.mirror_tito_counters(untrusted.get("metrics"), board)
             try:
                 signed = await _abortable(trajectory_id, "verify", adapter.finish_trusted(
                     untrusted, lease.verifier, task_id=task_id, sample_id=sample_id))
             except _AbortedSurplus:
                 return {**adapter.infrastructure_metadata(ABORTED_STATUS, episode_id=episode_id), **fields}
+            except Exception as exc:  # noqa: BLE001 - verifier sandbox gone (Modal ConflictError / NotFoundError)
+                return {**adapter.infrastructure_metadata(f"verify: {type(exc).__name__}: {exc}", episode_id=episode_id), **fields}
             signed["expected_policy_version"] = expected_version
             signed.update(trajectory_started_at=started_at, trajectory_ended_at=time.time(),
                           sandbox_start_seconds=sandbox_start_seconds)

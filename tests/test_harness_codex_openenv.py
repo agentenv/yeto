@@ -837,3 +837,79 @@ def test_subprocess_run_records_phase_timing(monkeypatch):
     assert totals["judge_seconds"] is not None and totals["judge_seconds"] >= 0
     assert record["sandbox_start_seconds"] >= 0
     assert record["trajectory_started_at"] <= record["trajectory_ended_at"]
+
+
+# ---------------------------------------------------------------- S24 T-TB2: infrastructure never reaches reward or advantage
+
+class ConflictError(Exception):
+    """Stand-in for ``modal.exception.ConflictError`` ("Modal Sandbox is shutting down")."""
+
+
+class NotFoundError(Exception):
+    """Stand-in for ``modal.exception.NotFoundError`` (sandbox already shut down)."""
+
+
+def _assert_infrastructure(result: dict[str, Any], reason: str) -> None:
+    assert tbench_reward.INFRASTRUCTURE_KEY in result and tbench_outcome.OUTCOME_KEY not in result
+    assert reason in result[tbench_reward.INFRASTRUCTURE_KEY]
+    sample = SimpleNamespace(metadata=result, status=None)
+    assert _run(tbench_reward.reward_func(None, sample)) == 0.0 and sample.status == "ABORTED"
+    assert "success" not in result
+
+
+def test_sandbox_shutdown_at_acquire_is_infrastructure(monkeypatch):
+    provider, _ = _configure(monkeypatch, FakeTerminalEnvironment(passed=True))
+
+    async def gone(task_id, trajectory_id):
+        raise ConflictError("Modal Sandbox is shutting down.")
+
+    monkeypatch.setattr(provider, "acquire", gone)
+    _assert_infrastructure(_run(subprocess_agent.run("http://miles", "p", {}, _metadata())), "ConflictError")
+
+
+@pytest.mark.parametrize("exc,reason", [
+    (lambda: subprocess_agent.adapter.harness.CodexHarnessError(
+        "terminal_exec output exceeded its signed boundary"), "exceeded its signed boundary"),
+    (lambda: NotFoundError("Modal Sandbox with container ID ta-x not found"), "worker: NotFoundError"),
+])
+def test_worker_failures_are_infrastructure_and_release_the_sandbox(monkeypatch, exc, reason):
+    provider, board = _configure(monkeypatch, FakeTerminalEnvironment(passed=True))
+
+    async def fail(*_a, **_k):
+        raise exc()
+
+    monkeypatch.setattr(subprocess_agent, "_drive_worker", fail)
+    _assert_infrastructure(_run(subprocess_agent.run("http://miles", "p", {}, _metadata())), reason)
+    assert provider.destroyed == 1 and board.open == 0
+
+
+def test_verifier_sandbox_gone_is_infrastructure_not_a_crash(monkeypatch):
+    env = FakeTerminalEnvironment(passed=True)
+    provider, board = _configure(monkeypatch, env)
+
+    async def gone(*_a, **_k):
+        raise NotFoundError("Modal Sandbox with container ID ta-x not found")
+
+    monkeypatch.setattr(subprocess_agent.adapter, "finish_trusted", gone)
+    _assert_infrastructure(_run(subprocess_agent.run("http://miles", "p", {}, _metadata())), "verify: NotFoundError")
+    assert provider.destroyed == 1 and board.open == 0
+
+
+def test_a_group_with_an_infrastructure_member_never_reaches_the_advantage():
+    """The TB2 group filter (``--dynamic-sampling-filter-path ...tbench_reward.check_group``) drops the
+    whole group before Miles computes rewards-to-advantages; Miles itself does not mask ABORTED samples."""
+    from yeto.rl.harness.codex.codex_openenv_agent_function import infrastructure_metadata
+
+    def passed(i):
+        env = FakeTerminalEnvironment(passed=bool(i % 2))
+        return dict(_run(subprocess_agent.adapter.finish_trusted(
+            {"status": "completed", "metrics": {}, "episode_id": f"e{i}"}, env, task_id="fix-git",
+            sample_id=f"s{i}")))
+
+    good = [SimpleNamespace(metadata={**passed(i), "trajectory_id": f"t{i}"}, status=None, rollout_id=None)
+            for i in range(3)]
+    infra = SimpleNamespace(metadata={**infrastructure_metadata("verify: NotFoundError: gone", episode_id="e9"),
+                                      "trajectory_id": "t9"}, status=None, rollout_id=None)
+    assert tbench_reward.check_group(None, good).keep is True  # mixed rewards: kept
+    out = tbench_reward.check_group(None, [*good, infra])
+    assert out.keep is False and out.reason == "group_has_aborted" and infra.status == "ABORTED"
