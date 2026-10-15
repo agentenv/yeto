@@ -247,9 +247,20 @@ class RoundCutCheckpoint:
                                     f"({n}, {sha}) differ from the pointer's "
                                     f"({info.get('consumed_groups')}, {info['consumed_prompt_ids_digest']})")
             checks["consumed_prompt_ids_digest"] = "same"
+        backend_fingerprint = self.source.backend_fingerprint
+        if self.allow_config_change:
+            # The backend fingerprint hashes the whole Miles argv, so a longer run
+            # (--num-rollout, --lr-decay-iters) changes it; allowed changes are recorded.
+            from yeto.rl.engine.cut import load_manifest
+
+            saved = load_manifest(self.root, info["cut_id"]).runtime.get("backend_fingerprint")
+            if saved != backend_fingerprint:
+                checks["backend_fingerprint"] = {"result": "changed(allowed)", "cut": saved,
+                                                 "run": backend_fingerprint}
+                backend_fingerprint = saved
         expect = RestoreExpectation(
             algorithm=self.source.identity, layout=dict(self.trainer.actual_layout()),
-            backend_fingerprint=self.source.backend_fingerprint,
+            backend_fingerprint=backend_fingerprint,
             local_step=int(info["local_step"]), policy_version=int(info["policy_version"]),
             epoch=self._epoch(),
         )
@@ -325,7 +336,8 @@ class RoundCutCheckpoint:
 
     def check_first_round(self, driver: Any, *, rollout_id: int, applied_lrs: Any) -> None:
         """Design §4.5, on the boundary of the first resumed round (before it is recorded
-        or published): the trained learning rate continues bitwise. Raises."""
+        or published): the trained learning rate continues bitwise. Raises, unless
+        ``allow_config_change`` (the event then records the difference)."""
         from yeto.rl.engine.resume import check_lr_continues
 
         pending = self.pending_lr_check
@@ -336,8 +348,8 @@ class RoundCutCheckpoint:
         driver.emit("rl_resume_check", rollout_id=int(rollout_id), check="lr_at_next_round",
                     expected=pending["expected"],
                     applied=None if applied_lrs is None else [float(x) for x in applied_lrs],
-                    ok=problem is None)
-        if problem is not None:
+                    ok=problem is None, allowed=problem is not None and self.allow_config_change)
+        if problem is not None and not self.allow_config_change:
             raise RoundCutError(problem)
 
 
