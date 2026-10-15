@@ -27,7 +27,8 @@ QWEN35_KWARGS = {"clear_thinking": False}
 
 def _validate_qwen38(**overrides):
     values = {
-        "tito_model": "qwen38",
+        "tito_model": "qwen38small",
+        "codex_backend_profile": "qwen38",
         "rl_model_recipe": "generic",
         "model": QWEN38_MODEL,
         "model_revision": QWEN38_REVISION,
@@ -80,7 +81,7 @@ def test_qwen38_stock_codex_profile_is_closed_and_defensively_copied():
 def test_qwen38_stock_codex_backend_contract_binds_xhigh_native_profile():
     assert stock_codex_backend_contract("qwen38", 32768) == {
         "profile": "qwen38",
-        "tito_model": "qwen38",
+        "tito_model": "qwen38small",
         "model": "qwen38",
         "max_tokens": 32768,
         "reasoning_effort": "xhigh",

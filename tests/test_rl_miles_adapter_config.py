@@ -574,7 +574,7 @@ def test_lr_schedule_flags_are_adapter_owned():
 
 # ---------------------------------------------------------------- rl-fn-codex-rollout 1.0: append roles by tokenizer family
 
-@pytest.mark.parametrize("tito_model,ok", [("qwen35", True), ("qwen4exp", True), ("qwen38", True), ("deepseekv4", True),
+@pytest.mark.parametrize("tito_model,ok", [("qwen35", True), ("qwen4exp", True), ("qwen38small", True), ("deepseekv4", True),
                                            ("nosuchfamily", False)])
 def test_stock_codex_append_roles_resolve_by_tito_family(tito_model, ok):
     """``--tito-model`` is a tokenizer family (``qwen4exp`` for Flash-Next), not a

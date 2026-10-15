@@ -420,6 +420,22 @@ def test_completion_accepts_parser_whitespace_but_rejects_real_prose(monkeypatch
         prose_bridge._translate_completion(prose_completion)
 
 
+def test_only_opted_in_profiles_keep_prose_before_the_tool_call(monkeypatch):
+    from yeto.rl.codex_backend import _PROFILES
+
+    assert [name for name, p in _PROFILES.items() if p.get("allow_prose_with_tool_call")] == ["qwen38"]
+    assert harness.ALLOW_PROSE_WITH_TOOL_CALL is False  # module default profile stays strict
+    _set_bridge_env(monkeypatch)
+    completion = _completion("terminal.exec", '{"command":"id"}', "call-prose", "inspect", 12)
+    completion["choices"][0]["message"]["content"] = "I found the cause; checking it now."
+    monkeypatch.setattr(harness, "ALLOW_PROSE_WITH_TOOL_CALL", True)
+    bridge = harness._ResponsesBridge("http://127.0.0.1:1", "task", {"max_tokens": 64},
+                                      harness.legacy.AgentMetrics(), max_seq_len=None)
+    output = bridge._translate_completion(copy.deepcopy(completion))
+    assert output[-1]["type"] == "function_call" and output[-1]["name"] == "terminal_exec"
+    assert bridge._messages[-1]["content"] == "I found the cause; checking it now."
+
+
 def test_miles_fake_stream_preserves_length_as_sequence_policy_boundary(monkeypatch):
     _set_bridge_env(monkeypatch)
     completion = _completion(
