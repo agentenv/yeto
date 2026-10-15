@@ -310,6 +310,8 @@ def test_store_object_envs_only_for_sky_islands_with_a_sample_role(monkeypatch):
         monkeypatch.setenv(key, value)
     trainer = SimpleNamespace(rl_checkpoint_store=URI, rl_sample_role="trainer")
     assert store_object_envs(trainer, "nebius")[s3_store.URI_ENV] == URI
+    assert store_object_envs(trainer, "nebius")[s3_store.STAGE_ENV] == s3_store.DEFAULT_STAGE
+    assert s3_store.STAGE_ENV not in store_object_envs(trainer, "nebius", num_nodes=2)  # ranks on 2 disks
     assert store_object_envs(trainer, "modal") == {}
     assert store_object_envs(SimpleNamespace(rl_checkpoint_store=URI, rl_sample_role="both"), "nebius") == {}
     assert store_object_envs(SimpleNamespace(rl_checkpoint_store="modal-volume://v/p",
@@ -317,3 +319,94 @@ def test_store_object_envs_only_for_sky_islands_with_a_sample_role(monkeypatch):
     monkeypatch.delenv(s3_store.KEY_ID_ENV)
     with pytest.raises(ValueError, match="store credentials"):
         store_object_envs(trainer, "nebius")
+
+
+# ---------------------------------------------------------------- staged cuts (TreeMirror)
+class _RecordingObjects(DirectoryObjectStore):
+    def __init__(self, root):
+        super().__init__(root)
+        self.writes: list[str] = []
+        self.deletes: list[str] = []
+
+    def write(self, key, data):
+        self.writes.append(key)
+        super().write(key, data)
+
+    def delete(self, key):
+        self.deletes.append(key)
+        super().delete(key)
+
+
+def _mirror(root, objects):
+    from yeto.rl.engine.object_store import TreeMirror
+
+    return TreeMirror(root, objects, subtrees=s3_store.STAGED_SUBTREES, pointers=s3_store.POINTER_FILES)
+
+
+def test_tree_mirror_pushes_pointers_last_once_and_deletes_pruned(tmp_path):
+    objects = _RecordingObjects(tmp_path / "bucket")
+    a = tmp_path / "a"
+    (a / "state" / "00000000").mkdir(parents=True)
+    (a / "LATEST").write_text("0")
+    (a / "state" / "00000000" / "x").write_text("x")
+    (a / "round-cuts" / "r1").mkdir(parents=True)
+    (a / "round-cuts" / "r1" / "shard").write_bytes(b"s" * 10)
+    (a / "x.tmp").write_text("partial")
+    _mirror(a, objects).push()
+    assert objects.writes == ["round-cuts/r1/shard", "state/00000000/x", "LATEST"]
+    objects.writes.clear()
+    _mirror(a, objects).push()  # another process of the host: nothing new
+    assert objects.writes == []
+    (a / "LATEST").write_text("1")
+    import shutil
+    shutil.rmtree(a / "round-cuts" / "r1")
+    _mirror(a, objects).push()
+    assert objects.writes == ["LATEST"] and objects.deletes == ["round-cuts/r1/shard"]
+
+
+def test_tree_mirror_pull_fetches_missing_keys_and_every_pointer(tmp_path):
+    objects = DirectoryObjectStore(tmp_path / "bucket")
+    objects.write("LATEST", b"0")
+    objects.write("state/00000000/x", b"x")
+    objects.write("policy-releases/LATEST.json", b"{}")  # not a staged subtree
+    b = tmp_path / "b"
+    mirror = _mirror(b, objects)
+    mirror.pull()
+    assert (b / "LATEST").read_bytes() == b"0" and (b / "state" / "00000000" / "x").read_bytes() == b"x"
+    assert not (b / "policy-releases").exists()
+    objects.write("LATEST", b"1")
+    mirror.pull()
+    assert (b / "LATEST").read_bytes() == b"1"
+    rec = _RecordingObjects(tmp_path / "bucket")
+    _mirror(b, rec).push()  # pulled files are not uploaded again
+    assert rec.writes == []
+
+
+def test_staged_s3_store_carries_snapshots_and_cuts_between_hosts(tmp_path):
+    """The trainer of one incarnation snapshots its state dir and a round cut on its
+    own disk; commit uploads them; the next incarnation (another host) restores."""
+    from yeto.rl.engine.resume import ROUND_CUTS, ResumeController
+
+    s3 = FakeS3()
+    env = {STORE_IMPL_ENV: s3_store.STORE_IMPL, s3_store.URI_ENV: URI}
+
+    def store(host):
+        return store_for(tmp_path / "mount", environ={**env, s3_store.STAGE_ENV: str(tmp_path / host)}, client=s3)
+
+    first = store("host-a")
+    assert first.staged and first.root == tmp_path / "host-a" / "bkt" / "runs" / "a"
+    ctl = ResumeController(state_dir=tmp_path / "state-a", store=first)
+    cut = first.root / ROUND_CUTS / "r000001-x"
+    cut.mkdir(parents=True)
+    (cut / "shard-0.pt").write_bytes(b"w" * 100)
+    (ctl.state_dir / "round-cut.json").write_text(json.dumps({"cut_id": "r000001-x", "next_rollout_id": 1}))
+    assert ctl.sync_checkpoint_store("round_cut")
+    assert ctl.last_store_sync["commit_s"] >= 0
+    assert ("bkt", "runs/a/round-cuts/r000001-x/shard-0.pt") in s3.objects
+    assert ("bkt", "runs/a/LATEST") in s3.objects
+    assert not (tmp_path / "mount").exists()
+
+    second = ResumeController(state_dir=tmp_path / "state-b", store=store("host-b"))
+    assert second.restored["seq"] == 0
+    assert json.loads((tmp_path / "state-b" / "round-cut.json").read_text())["cut_id"] == "r000001-x"
+    assert (second.store.root / ROUND_CUTS / "r000001-x" / "shard-0.pt").read_bytes() == b"w" * 100

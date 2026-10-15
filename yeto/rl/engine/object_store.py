@@ -107,3 +107,114 @@ class DirectoryObjectStore:
 
     def delete(self, key: str) -> None:
         self._path(key).unlink(missing_ok=True)
+
+
+PUSHED_STATE = ".yeto-pushed.json"  # in the mirror root: what the object store holds of it
+
+
+class TreeMirror:
+    """A local directory that stands for some subtrees of an object store.
+
+    Code that writes files under ``root`` and then commits (round cuts, snapshots,
+    ``LATEST``, policy releases) keeps working on a local disk; :meth:`push` makes
+    the commit visible as objects and :meth:`pull` makes another host's commit
+    visible here. Files are whole objects, so nothing is appended or rewritten in
+    place on the object store.
+
+    * ``push`` uploads every file under ``root`` that is new or changed since the
+      last push (size and mtime), the pointer files (``pointers``, by file name)
+      after every other file, so a reader that follows a pointer finds what it
+      names; then it deletes the objects of files removed here (a prune). It
+      returns the seconds it took.
+    * ``pull`` downloads the keys under ``subtrees`` that are missing here, and
+      every pointer file again (pointers are the only rewritten objects).
+
+    What was pushed or pulled is kept in :data:`PUSHED_STATE` under ``root`` (under
+    ``flock``), so several processes of one host share one mirror without
+    uploading each other's files again. Every writer of the subtrees must be on
+    this host (one-node islands: a rank on another node writes to its own disk)."""
+
+    def __init__(self, root: str | os.PathLike[str], objects: ObjectStore, *,
+                 subtrees: tuple[str, ...], pointers: frozenset[str]) -> None:
+        self.root = Path(root).expanduser()
+        self.objects = objects
+        self.subtrees = tuple(subtrees)
+        self.pointers = frozenset(pointers)
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def _locked(self):
+        import contextlib
+        import fcntl
+
+        @contextlib.contextmanager
+        def held():
+            with open(self.root / (PUSHED_STATE + ".lock"), "a+b") as fh:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+        return held()
+
+    def _state(self) -> dict[str, list[int]]:
+        import json
+
+        path = self.root / PUSHED_STATE
+        return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+
+    def _save_state(self, state: dict[str, list[int]]) -> None:
+        import json
+
+        tmp = self.root / (PUSHED_STATE + TMP_SUFFIX)
+        tmp.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, self.root / PUSHED_STATE)
+
+    def _local_files(self) -> dict[str, list[int]]:
+        out = {}
+        for path in self.root.rglob("*"):
+            rel = path.relative_to(self.root).as_posix()
+            if (path.is_file() and not path.name.endswith(TMP_SUFFIX)
+                    and not rel.startswith(PUSHED_STATE)):
+                st = path.stat()
+                out[rel] = [st.st_size, st.st_mtime_ns]
+        return out
+
+    def push(self) -> float:
+        import time
+
+        started = time.monotonic()
+        with self._locked():
+            state = self._state()
+            local = self._local_files()
+            changed = [rel for rel, stamp in local.items() if state.get(rel) != stamp]
+            changed.sort(key=lambda rel: (rel.rsplit("/", 1)[-1] in self.pointers, rel))
+            for rel in changed:
+                self.objects.write(rel, (self.root / rel).read_bytes())
+                state[rel] = local[rel]
+                self._save_state(state)
+            for rel in sorted(set(state) - set(local)):
+                self.objects.delete(rel)
+                del state[rel]
+            self._save_state(state)
+        return time.monotonic() - started
+
+    def pull(self) -> None:
+        with self._locked():
+            state = self._state()
+            for subtree in self.subtrees:
+                for key in self.objects.list(subtree):
+                    path = self.root / key
+                    pointer = key.rsplit("/", 1)[-1] in self.pointers
+                    if path.is_file() and not pointer:
+                        continue
+                    data = self.objects.read(key)
+                    if data is None:  # deleted since the listing (a prune)
+                        continue
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    tmp = path.with_name(path.name + TMP_SUFFIX)
+                    tmp.write_bytes(data)
+                    os.replace(tmp, path)
+                    st = path.stat()
+                    state[key] = [st.st_size, st.st_mtime_ns]
+            self._save_state(state)

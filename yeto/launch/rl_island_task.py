@@ -388,7 +388,7 @@ def make_miles_island_task(
         )
     if getattr(args, "rl_initial_adapter", None) is not None:
         setup_steps.append(f"chmod -R a-w {RL_INITIAL_ADAPTER_PATH}")
-    store_envs = store_object_envs(args, spec.cloud)
+    store_envs = store_object_envs(args, spec.cloud, spec.num_nodes)
     if store_envs:  # the store's object API (yeto.cloud.s3_store) needs boto3 in the image
         setup_steps.append(STORE_CLIENT_SETUP)
     sandbox_secret = modal_sandbox_secret_name(args, spec)

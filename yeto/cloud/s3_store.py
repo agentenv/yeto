@@ -9,6 +9,11 @@ exports on the island:
 * ``YETO_RL_STORE_IMPL=yeto.cloud.s3_store:store_from_env`` and
   :data:`URI_ENV` (the store URI): ``resume.store_for`` then builds an
   :class:`S3Store` (the bucket mount plus ``objects``);
+* :data:`STAGE_ENV` on a one-node island: the store's ``root`` is then a local
+  directory mirrored to the object store (``object_store.TreeMirror``): round
+  cuts, snapshots and policy releases are written to local disk and uploaded by
+  ``commit`` (pointer files last), and ``reload`` downloads the newest committed
+  cut. The bucket mount carries nothing of the run then;
 * the store credentials, :data:`CREDENTIAL_ENVS`, and optionally
   :data:`ENDPOINT_ENV` / :data:`REGION_ENV`. They are copied from the launcher's
   environment, never from its cloud credential files: an island must not hold
@@ -24,9 +29,10 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
-from yeto.rl.engine.object_store import ObjectStoreError, check_key
+from yeto.rl.engine.object_store import ObjectStoreError, TreeMirror, check_key
 from yeto.rl.engine.resume import STORE_IMPL_ENV, BucketMountStore
 
 STORE_IMPL = "yeto.cloud.s3_store:store_from_env"  # value of resume.STORE_IMPL_ENV
@@ -36,9 +42,15 @@ REGION_ENV = "YETO_RL_STORE_S3_REGION"
 KEY_ID_ENV = "YETO_RL_STORE_S3_ACCESS_KEY_ID"
 SECRET_ENV = "YETO_RL_STORE_S3_SECRET_ACCESS_KEY"
 TOKEN_ENV = "YETO_RL_STORE_S3_SESSION_TOKEN"
+STAGE_ENV = "YETO_RL_STORE_S3_STAGE"  # a local directory: cuts and releases by object API
 CREDENTIAL_ENVS = (KEY_ID_ENV, SECRET_ENV, TOKEN_ENV)
 SECRET_ENVS = frozenset({SECRET_ENV, TOKEN_ENV})  # shipped as task secrets, not plain envs
 SETTING_ENVS = (ENDPOINT_ENV, REGION_ENV)
+DEFAULT_STAGE = "~/.cache/yeto/store-stage"
+# what a staged store pulls at start (the newest committed cut: LATEST, its snapshot, the
+# cuts) and the pointer files it uploads last (resume.LATEST, policy_release.LATEST)
+STAGED_SUBTREES = ("LATEST", "state/", "round-cuts/")
+POINTER_FILES = frozenset({"LATEST", "LATEST.json"})
 
 # S3 error codes of a conditional write that lost to an existing object
 _CREATE_LOST = frozenset({"PreconditionFailed", "ConditionalRequestConflict"})
@@ -149,16 +161,22 @@ class S3ObjectStore:
 
 class S3Store(BucketMountStore):
     """The bucket mount of an ``s3://`` store, plus its object API (``objects``,
-    built on first use from the store credentials)."""
+    built on first use from the store credentials). With ``stage`` (a local
+    directory), ``root`` is that directory, mirrored to the object store by
+    ``commit`` / ``reload`` instead of the mount (see the module doc)."""
 
     def __init__(self, root: str | os.PathLike[str], uri: str, *, environ: Mapping[str, str],
-                 client: Any = None) -> None:
+                 client: Any = None, stage: str | os.PathLike[str] | None = None) -> None:
+        bucket, prefix = parse_s3_uri(uri)
+        if stage is not None:
+            root = Path(stage).expanduser() / bucket / prefix
         super().__init__(root)
         self.uri = uri
-        parse_s3_uri(uri)
+        self.staged = stage is not None
         self._environ = dict(environ)
         self._client = client
         self._objects: S3ObjectStore | None = None
+        self._mirror: TreeMirror | None = None
 
     @property
     def objects(self) -> S3ObjectStore:  # type: ignore[override]
@@ -167,8 +185,21 @@ class S3Store(BucketMountStore):
             self._objects = S3ObjectStore(self.uri, client=client)
         return self._objects
 
+    def _tree(self) -> TreeMirror:
+        if self._mirror is None:
+            self._mirror = TreeMirror(self.root, self.objects, subtrees=STAGED_SUBTREES,
+                                      pointers=POINTER_FILES)
+        return self._mirror
+
+    def commit(self) -> float:
+        return self._tree().push() if self.staged else super().commit()
+
+    def reload(self) -> None:
+        if self.staged:
+            self._tree().pull()
+
     def describe(self) -> dict[str, Any]:
-        return {**super().describe(), "uri": self.uri}
+        return {**super().describe(), "uri": self.uri, "staged": self.staged}
 
 
 def store_from_env(path: str | os.PathLike[str], *, environ: Mapping[str, str], client: Any = None) -> S3Store:
@@ -176,7 +207,7 @@ def store_from_env(path: str | os.PathLike[str], *, environ: Mapping[str, str], 
     uri = environ.get(URI_ENV)
     if not uri:
         raise ValueError(f"s3 checkpoint store selected but {URI_ENV} is not set")
-    return S3Store(path, uri, environ=environ, client=client)
+    return S3Store(path, uri, environ=environ, client=client, stage=environ.get(STAGE_ENV) or None)
 
 
 def head_objects(uri: str, *, environ: Mapping[str, str] | None = None, client: Any = None) -> S3ObjectStore:
@@ -185,16 +216,17 @@ def head_objects(uri: str, *, environ: Mapping[str, str] | None = None, client: 
     return S3ObjectStore(uri, client=client or _client(env, require_credentials=False))
 
 
-def island_envs(uri: str, environ: Mapping[str, str] | None = None) -> dict[str, str]:
+def island_envs(uri: str, environ: Mapping[str, str] | None = None, *, stage: bool = False) -> dict[str, str]:
     """The environment of an island that uses the store's object API: the store
-    hook, the URI, and the store settings and credentials of the launcher's
-    environment. Raises ValueError without store credentials."""
+    hook, the URI, the local stage directory when ``stage`` (one-node islands),
+    and the store settings and credentials of the launcher's environment. Raises
+    ValueError without store credentials."""
     env = os.environ if environ is None else environ
     parse_s3_uri(uri)
     if not has_store_credentials(env):
         raise ValueError(f"an island that uses the s3 store {uri} needs store credentials: set "
                          f"{KEY_ID_ENV} and {SECRET_ENV} (a key limited to the store's bucket) on the "
                          "launcher; the island never uses the launcher's cloud credentials")
-    out = {STORE_IMPL_ENV: STORE_IMPL, URI_ENV: uri}
+    out = {STORE_IMPL_ENV: STORE_IMPL, URI_ENV: uri, **({STAGE_ENV: DEFAULT_STAGE} if stage else {})}
     out.update({name: env[name] for name in (*SETTING_ENVS, *CREDENTIAL_ENVS) if env.get(name)})
     return out
