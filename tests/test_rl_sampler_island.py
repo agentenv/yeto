@@ -204,8 +204,13 @@ def test_miles_argv_of_a_lora_sampler_and_trainer():
     assert [a for a in sampler.argv if a not in base.argv] == [
         "--rollout-function-path", br.ROLLOUT_FUNCTION_PATHS["sampler"], "--debug-rollout-only"]
     assert flag_value(sampler.argv, "--lora-rank") == flag_value(base.argv, "--lora-rank")
-    with pytest.raises(mc.MilesConfigError, match="partitioned placement"):
-        mc.translate_run_config(buffer_config("trainer"), _tolerant(), max_policy_age=1)
+    two_gpus = buffer_config("trainer")
+    assert two_gpus.parallel.colocated and mc.placement_request(two_gpus).trainer_gpus == 2
+    one_gpu = sub(two_gpus, "parallel", actor_num_gpus_per_node=1)
+    colocated = mc.translate_run_config(one_gpu, _tolerant(), max_policy_age=1)
+    assert flag_value(colocated.argv, "--save-hf") == mc.RELEASE_EXPORTER_SAVE_HF
+    with pytest.raises(mc.MilesConfigError, match="one trainer GPU only"):
+        mc.translate_run_config(two_gpus, _tolerant(), max_policy_age=1)
     partitioned = dataclasses.replace(sub(buffer_config("trainer"), "serving", offload_train=False),
                                       parallel=make_config(colocated=False).parallel)
     trainer = mc.translate_run_config(partitioned, _tolerant(), max_policy_age=1)
@@ -595,6 +600,33 @@ def test_release_plugin_writes_the_adapter_with_the_snapshot_publisher(tmp_path)
         write_adapter=lambda adapter, path: written.append((adapter, path))))
     assert release_plugin.write_lora_adapter(actor, path=str(tmp_path)) == {"path": str(tmp_path)}
     assert written == [(None, tmp_path)]
+    # an asleep colocated actor: groups reloaded, memory saver disabled, groups destroyed
+    import sys
+    calls = []
+
+    class _Saver:
+        def disable(self):
+            import contextlib
+
+            @contextlib.contextmanager
+            def cm():
+                calls.append("disable")
+                yield
+                calls.append("enable")
+            return cm()
+
+    fake_pg = SimpleNamespace(reload_process_groups=lambda: calls.append("reload"),
+                              destroy_process_groups=lambda: calls.append("destroy"))
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setitem(sys.modules, "miles", SimpleNamespace())
+        mp.setitem(sys.modules, "miles.utils", SimpleNamespace())
+        mp.setitem(sys.modules, "miles.utils.reloadable_process_group", fake_pg)
+        mp.setitem(sys.modules, "torch_memory_saver", SimpleNamespace(torch_memory_saver=_Saver()))
+        asleep = SimpleNamespace(args=SimpleNamespace(offload_train=True), _asleep=True,
+                                 snapshot_publisher=SimpleNamespace(
+                                     write_adapter=lambda a, p: calls.append("write")))
+        release_plugin.write_lora_adapter(asleep, path=str(tmp_path))
+    assert calls == ["reload", "disable", "write", "enable", "destroy"]
     with pytest.raises(RuntimeError, match="snapshot publisher"):
         release_plugin.write_lora_adapter(SimpleNamespace(snapshot_publisher=None), path="x")
 

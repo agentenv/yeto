@@ -783,12 +783,13 @@ def translate_run_config(
     request = placement_request(config)
     sample_buffer = getattr(config, "sample_buffer", None)
     if (sample_buffer is not None and sample_buffer.role == "trainer"
-            and trainable.parameter_mode == "lora" and request.kind == "colocated"):
-        # the LoRA release export (release_plugin) gathers over the trainer's NCCL
-        # groups, which a colocated trainer has released when it publishes
-        # (T-LSMP c: CUDA invalid argument in all_gather_object)
-        raise MilesConfigError("--rl-sample-role trainer with LoRA needs a partitioned "
-                               "placement (--rl-placement fixed-partition)")
+            and trainable.parameter_mode == "lora" and request.kind == "colocated"
+            and request.trainer_gpus != 1):
+        # A colocated trainer is asleep (process groups destroyed) when it publishes;
+        # release_plugin reloads them for the LoRA export as Miles' update_weights
+        # does. GPU-verified on one rank only (T-LSMP i); more ranks stay refused.
+        raise MilesConfigError("--rl-sample-role trainer with LoRA and a colocated placement "
+                               "supports one trainer GPU only; use --rl-placement fixed-partition")
     # a buffer island selects its own rollout function, so never Miles' fully_async
     rollout_overlap = max_policy_age > 0 and request.kind != "colocated" and sample_buffer is None
 
