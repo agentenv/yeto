@@ -41,7 +41,14 @@ from yeto.rl.engine.object_store import ObjectStore
 from yeto.rl.engine.policy_release import LATEST as RELEASE_LATEST
 from yeto.rl.engine.policy_release import RELEASE_DIR
 from yeto.rl.engine.resume import CheckpointStore
-from yeto.rl.engine.sample_buffer import BUFFER_DIR, INDEX, CommittedBacklog, FileSampleBuffer
+from yeto.rl.engine.sample_buffer import (
+    BUFFER_DIR,
+    INDEX,
+    CommittedBacklog,
+    FileSampleBuffer,
+    UnmergedShards,
+    needs_shards,
+)
 from yeto.rl.engine.start_phases import SUBMITTED_ENV
 from yeto.rl.engine.trainer_lifecycle import CutLog, CutRef, DurableSampleBuffer, TrainerLifecycle
 from yeto.rl.engine.trainer_remote import (
@@ -73,6 +80,7 @@ class TrainerIsland:
     sky_task: Any = None  # sky.Task of a sky island (not launched by the fleet)
     spec: Any = None  # gpu_spec.ClusterSpec of the island
     events_dir: Path | None = None  # the run's echoed-tape dir (None: no tape files)
+    ssh: Any = None  # ssh_trainer_island.SshTrainerSpec of an SSH island (cloud "ssh")
 
 
 @dataclass
@@ -534,8 +542,17 @@ def sky_binding(args: Any, island: TrainerIsland, *, journal_dir: Path,
                                     name=island.name, jobs_path=Path(journal_dir) / JOBS_FILE,
                                     poll_s=getattr(args, "rl_trainer_command_poll_seconds", None),
                                     events_dir=island.events_dir)
+    return object_store_binding(args, files, islands, journal_dir=journal_dir)
+
+
+def object_store_binding(args: Any, files: ObjectStore, islands: Any, *,
+                         journal_dir: Path) -> CloudTrainerBinding:
+    """The binding over a store the head reads by object key (sky, SSH islands).
+    A sharded buffer (OSS) also counts the shard records the trainer has not
+    merged yet: a stopped trainer merges nothing (N3.6)."""
     buffer = FileSampleBuffer(files, batch_size=int(args.rollout_batch_size))  # by object key
-    return _binding(args, files, islands, journal_dir=journal_dir, buffer=buffer)
+    unmerged = UnmergedShards(files) if needs_shards(files) else None
+    return _binding(args, files, islands, journal_dir=journal_dir, buffer=buffer, unmerged=unmerged)
 
 
 def head_store_objects(uri: str) -> ObjectStore:
@@ -550,7 +567,8 @@ def head_store_objects(uri: str) -> ObjectStore:
 
 
 def _binding(args: Any, files: StoreFiles, islands: Any, *, journal_dir: Path,
-             buffer: FileSampleBuffer | None = None) -> CloudTrainerBinding:
+             buffer: FileSampleBuffer | None = None,
+             unmerged: UnmergedShards | None = None) -> CloudTrainerBinding:
     """``buffer``: the head's view of the sample buffer; default: the index
     mirrored from ``files`` (a store the head reads by whole file only)."""
     cuts = StoreCutLog(files)
@@ -568,7 +586,7 @@ def _binding(args: Any, files: StoreFiles, islands: Any, *, journal_dir: Path,
         return consumed_watermark(cuts, lifecycles[-1] if lifecycles else None)
 
     return CloudTrainerBinding(
-        lifecycle=lifecycle, buffer=CommittedBacklog(buffer, watermark), cuts=cuts,
+        lifecycle=lifecycle, buffer=CommittedBacklog(buffer, watermark, unmerged=unmerged), cuts=cuts,
         release_orphan=islands.release_incarnation, start_events=islands.start_events,
         needs_first_policy=first_policy_probe(files) if samplers_wait_for_a_policy(args) else None)
 

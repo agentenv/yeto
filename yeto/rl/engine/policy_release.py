@@ -67,6 +67,9 @@ from .resume import CheckpointStore, _write_json_atomic
 
 SCHEMA = "yeto.rl.policy-release/v1"
 RELEASE_DIR = "policy-releases"
+# W4A8 releases re-quantized from the BF16 ones (yeto.rl.quant.release); a W4A8
+# sampler follows this directory, a BF16 sampler the default one.
+W4A8_RELEASE_DIR = "policy-releases-w4a8"
 LATEST = "LATEST.json"
 RECORD = "RELEASE.json"
 _RELEASE_NAME = re.compile(r"r(\d+)-v\d+")
@@ -94,6 +97,9 @@ class PolicyRelease:
     engine_checksum: str | None = None
     files: dict[str, int] | None = None  # weight file (relative path) -> size in bytes
     buffer_shards: dict[str, int] | None = None  # sampler shard -> trainer read position
+    # A release made from another one (a W4A8 re-quantization of a BF16 release):
+    # {"release_dir", "seq", "version", "policy_hash", "scheme", ...}; None: trained weights.
+    derived_from: dict[str, Any] | None = None
     schema: str = SCHEMA
 
     @classmethod
@@ -162,18 +168,24 @@ def check_release_files(release: PolicyRelease, directory: Path) -> None:
 
 class PolicyReleaseStore:
     """Writes (trainer) and reads (sampler) the releases in one store.
-    ``cache_dir``: where a store with an object API downloads a release to."""
+    ``cache_dir``: where a store with an object API downloads a release to.
+    ``release_dir``: the release directory in the store (``W4A8_RELEASE_DIR``
+    for re-quantized releases)."""
 
     def __init__(self, store: CheckpointStore, *, keep: int = 2,
                  clock: Callable[[], float] = time.time,
-                 cache_dir: str | os.PathLike[str] = DEFAULT_CACHE_DIR) -> None:
+                 cache_dir: str | os.PathLike[str] = DEFAULT_CACHE_DIR,
+                 release_dir: str = RELEASE_DIR) -> None:
         if int(keep) < 1:
             raise ValueError("keep must be >= 1")
         self.store = store
         self.keep = int(keep)
         self.clock = clock
-        self.root = Path(store.root) / RELEASE_DIR
+        self.release_dir = str(release_dir)
+        self.root = Path(store.root) / self.release_dir
         self.cache_dir = Path(cache_dir).expanduser()
+        if self.release_dir != RELEASE_DIR:  # its own cache: the prune below drops other directories
+            self.cache_dir /= self.release_dir
 
     def resolve(self, release: PolicyRelease) -> Path:
         """The release's weight directory on this island: in the store mount, or
@@ -192,7 +204,7 @@ class PolicyReleaseStore:
         The recorded files are checked against the object sizes first."""
         target = self.cache_dir / release.path
         if not target.is_dir():
-            prefix = f"{RELEASE_DIR}/{release.path}/"
+            prefix = f"{self.release_dir}/{release.path}/"
             keys = objects.list(prefix)
             if not keys:
                 raise ReleaseIncomplete(f"release r{release.seq}-v{release.version}: no objects under {prefix}")
@@ -219,7 +231,7 @@ class PolicyReleaseStore:
     def latest(self) -> PolicyRelease | None:
         objects = self.store.objects
         if objects is not None:
-            raw = objects.read(f"{RELEASE_DIR}/{LATEST}")
+            raw = objects.read(f"{self.release_dir}/{LATEST}")
             return None if raw is None else PolicyRelease.from_record(json.loads(raw))
         self.store.reload()
         path = self.root / LATEST
@@ -230,7 +242,8 @@ class PolicyReleaseStore:
     def release(self, version: int, policy_hash: str, write: Callable[[Path], None], *,
                 buffer_selected: int | None = None, weights: str = FULL,
                 engine_checksum: str | None = None,
-                buffer_shards: dict[str, int] | None = None) -> PolicyRelease | None:
+                buffer_shards: dict[str, int] | None = None,
+                derived_from: dict[str, Any] | None = None) -> PolicyRelease | None:
         """Write the weights with ``write(directory)``, then the record (it lists the
         weight files and their sizes), then LATEST.
 
@@ -256,7 +269,8 @@ class PolicyReleaseStore:
                                sha256=directory_digest(directory) if weights == LORA else None,
                                engine_checksum=engine_checksum or None, files=file_sizes(directory),
                                buffer_shards=None if buffer_shards is None else
-                               {str(k): int(v) for k, v in sorted(buffer_shards.items())})
+                               {str(k): int(v) for k, v in sorted(buffer_shards.items())},
+                               derived_from=None if derived_from is None else dict(derived_from))
         _write_json_atomic(directory / RECORD, asdict(record))
         self.store.commit()  # the weights and the record are durable before LATEST names them
         _write_json_atomic(self.root / LATEST, asdict(record))

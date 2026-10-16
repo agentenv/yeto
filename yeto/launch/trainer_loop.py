@@ -71,6 +71,10 @@ def default_binding(args, island: TrainerIsland | None) -> CloudTrainerBinding:
         raise SystemExit("--rl-trainer-scheduler: no trainer island was held back")
     from .trainer_island import modal_binding, sky_binding
 
+    if island.cloud == "ssh":
+        from .ssh_trainer_island import ssh_binding
+
+        return ssh_binding(args, island, journal_dir=journal_dir(args))
     binding = modal_binding if island.cloud == "modal" else sky_binding
     return binding(args, island, journal_dir=journal_dir(args))
 

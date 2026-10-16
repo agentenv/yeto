@@ -243,6 +243,54 @@ def shard_names(objects: ObjectStore) -> list[str]:
     return sorted(key[len(prefix):] for key in objects.list(prefix))
 
 
+def _entry(record: dict[str, Any]) -> SampleIndexEntry:
+    return SampleIndexEntry(
+        sample_id=record["sample_id"], behavior_version=int(record["behavior_version"]),
+        payload_ref=record["payload_ref"], tokens=int(record["tokens"]),
+        appended_at=float(record["appended_at"]))
+
+
+class UnmergedShards:
+    """The head's read-only view of the sampler shard records that the consumer
+    has not merged into the index yet (rl-cross-site-sample-store N3.6).
+
+    The head reads the merged index only, and only the trainer merges. With the
+    trainer scheduler on, a stopped trainer merges nothing, so without this view
+    the head would never see a backlog and never start the trainer again.
+    :meth:`pending` reads every shard by object key (never writes) and returns
+    the records at or above the merged count of their shard."""
+
+    def __init__(self, objects: ObjectStore) -> None:
+        self.objects = objects
+        self._readers: dict[str, ObjectIndex] = {}
+        self._records: dict[str, list[SampleIndexEntry]] = {}
+        self._dropped: dict[str, int] = {}  # records already merged and forgotten here
+        self._ended: set[str] = set()
+
+    def pending(self, merged: dict[str, int]) -> tuple[list[SampleIndexEntry], bool]:
+        """(records not merged yet, every named shard has ended). ``merged``: the
+        merged records per shard (:meth:`FileSampleBuffer.shard_positions` of
+        the index length)."""
+        names = shard_names(self.objects)
+        for shard in names:
+            reader = self._readers.get(shard)
+            if reader is None:
+                reader = self._readers[shard] = ObjectIndex(self.objects, prefix=shard_prefix(shard))
+                self._records[shard], self._dropped[shard] = [], 0
+            for record in reader.read_new():
+                if record.get("end"):
+                    self._ended.add(shard)
+                else:
+                    self._records[shard].append(_entry(record))
+        out: list[SampleIndexEntry] = []
+        for shard, records in self._records.items():
+            done = max(0, int(merged.get(shard, 0)) - self._dropped[shard])
+            del records[:done]
+            self._dropped[shard] += done
+            out.extend(records)
+        return out, bool(names) and self._ended >= set(names)
+
+
 def index_for(store: CheckpointStore | ObjectStore, *, index: str = INDEX,
               create_index: bool = True) -> JsonlIndex | ObjectIndex:
     """:class:`ObjectIndex` for an object store or a store with an object API
@@ -343,10 +391,7 @@ class FileSampleBuffer:
                 self._ended = True
                 continue
             self._shard_of.append(record.get("shard"))
-            self._entries.append(SampleIndexEntry(
-                sample_id=record["sample_id"], behavior_version=int(record["behavior_version"]),
-                payload_ref=record["payload_ref"], tokens=int(record["tokens"]),
-                appended_at=float(record["appended_at"])))
+            self._entries.append(_entry(record))
 
     # ---------------------------------------------------------------- reading
     def refresh(self) -> int:
@@ -440,21 +485,30 @@ class FileSampleBuffer:
                     f"consumed cursor {cursor} outside {self._watermark}..{self._read} (watermark..selected)")
             self._watermark = int(cursor)
 
-    def backlog(self, current_version: int, *, start: int | None = None) -> BacklogStats:
+    def backlog(self, current_version: int, *, start: int | None = None,
+                unmerged: UnmergedShards | None = None) -> BacklogStats:
         """Samples from ``start`` on; default: the samples not yet selected here.
         A head that does not read the buffer passes the trainer's committed
-        watermark (:class:`CommittedBacklog`)."""
+        watermark (:class:`CommittedBacklog`). ``unmerged``: also count the
+        shard records not merged yet (their end counts as the data end)."""
         with self._lock:
             self.refresh()
             pending = self._entries[self._read if start is None else max(0, int(start)):]
+            ended = self._ended
+            if unmerged is not None:
+                extra, shards_ended = unmerged.pending(self.shard_positions(len(self._entries)))
+                pending = pending + extra
+                ended = ended or shards_ended
             versions = Counter(e.behavior_version for e in pending)
             oldest = min(versions) if versions else None
             since = self.clock() - self.arrival_window_s
             recent = sum(1 for e in self._entries if e.appended_at >= since)
+            if unmerged is not None:
+                recent += sum(1 for e in extra if e.appended_at >= since)
             return BacklogStats(
                 batches=len(pending) / self.batch_size, samples=len(pending), oldest_version=oldest,
                 version_histogram=dict(sorted(versions.items())),
-                arrival_rate=recent / self.arrival_window_s, data_ended=self._ended,
+                arrival_rate=recent / self.arrival_window_s, data_ended=ended,
                 max_version_gap=None if oldest is None else int(current_version) - oldest)
 
     # ---------------------------------------------------------------- arrival
@@ -569,12 +623,16 @@ class CommittedBacklog:
     cursor of this process. While a trainer runs, the samples it selected after its
     newest cut still count as backlog (at most the rounds between two cuts)."""
 
-    def __init__(self, buffer: FileSampleBuffer, watermark: Callable[[], int | None]) -> None:
+    def __init__(self, buffer: FileSampleBuffer, watermark: Callable[[], int | None],
+                 *, unmerged: UnmergedShards | None = None) -> None:
+        """``unmerged``: on a sharded object store, the shard records the trainer
+        has not merged yet (they count as backlog)."""
         self.buffer = buffer
         self._watermark = watermark
+        self.unmerged = unmerged
 
     def backlog(self, current_version: int) -> BacklogStats:
-        return self.buffer.backlog(current_version, start=self._watermark() or 0)
+        return self.buffer.backlog(current_version, start=self._watermark() or 0, unmerged=self.unmerged)
 
     def append(self, entry: SampleIndexEntry) -> None:
         self.buffer.append(entry)
