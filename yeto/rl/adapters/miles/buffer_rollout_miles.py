@@ -61,7 +61,7 @@ class BufferWriterRolloutFn(InferenceRolloutFn):
         self._writer = GroupWriter(self._open_writer_buffer(), f"{sampler_id}-{uuid.uuid4().hex[:8]}")
 
     def _open_writer_buffer(self) -> Any:
-        return open_buffer()
+        return open_buffer(sampler=True)
 
     async def _call_train(self, input: Any) -> Any:
         output = await super()._call_train(input)
@@ -81,7 +81,10 @@ class _BufferRound:
     """Selects one training round from the buffer (the reader side of both the
     trainer island and a convertible node in trainer mode)."""
 
-    def __init__(self, args: Any, *, create_index: bool = True) -> None:
+    def __init__(self, args: Any, *, create_index: bool = True, merge_shards: bool = True) -> None:
+        """``merge_shards``: the trainer merges the sampler shards of an object
+        store (``open_buffer(reader=True)``); a convertible node does not (the
+        head merges its pool's shards)."""
         age = os.environ.get(MAX_POLICY_AGE_ENV)
         if age is None:
             raise SampleBufferRolloutError(f"{MAX_POLICY_AGE_ENV} is not set")
@@ -89,7 +92,7 @@ class _BufferRound:
         self.groups = int(args.rollout_batch_size)
         self.samples_per_group = int(args.n_samples_per_prompt)
         self.reader = BatchReader(
-            open_buffer(batch_size=self.groups, create_index=create_index),
+            open_buffer(batch_size=self.groups, create_index=create_index, reader=merge_shards),
             max_policy_age=int(age),
             wait_s=float(os.environ.get(WAIT_ENV, DEFAULT_WAIT_S)),
             poll_s=float(os.environ.get(POLL_ENV, DEFAULT_POLL_S)))
@@ -140,7 +143,7 @@ class ConvertibleRolloutFn(BufferWriterRolloutFn):
     def __init__(self, input: RolloutFnConstructorInput) -> None:
         super().__init__(input)
         # the head merges the shards into the index: this node never writes it
-        self._round = _BufferRound(input.args, create_index=False)
+        self._round = _BufferRound(input.args, create_index=False, merge_shards=False)
 
     def _open_writer_buffer(self) -> Any:
         shard = os.environ.get(SHARD_ENV)

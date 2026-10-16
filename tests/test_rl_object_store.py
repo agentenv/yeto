@@ -31,7 +31,9 @@ def _error(code: str, op: str) -> ClientError:
 
 class FakeS3:
     """The boto3 S3 client calls the store makes, over a dict. ``conditional``:
-    False answers a conditional put with NotImplemented (an endpoint without it)."""
+    False answers a conditional put with NotImplemented (an endpoint without it).
+    Multipart uploads keep their parts until completed (``uploads``); ranged and
+    ETag-pinned reads behave like S3's."""
 
     class exceptions:
         class NoSuchKey(Exception):
@@ -41,11 +43,25 @@ class FakeS3:
         self.objects: dict[tuple[str, str], bytes] = {}
         self.conditional = conditional
         self.lock = threading.Lock()
+        self.uploads: dict[str, dict[int, bytes]] = {}
+        self.calls: list[str] = []
 
-    def get_object(self, Bucket, Key):
+    @staticmethod
+    def etag(data: bytes) -> str:
+        import hashlib
+
+        return '"' + hashlib.md5(data).hexdigest() + '"'
+
+    def get_object(self, Bucket, Key, Range=None, IfMatch=None):
         if (Bucket, Key) not in self.objects:
             raise self.exceptions.NoSuchKey(Key)
         data = self.objects[(Bucket, Key)]
+        if IfMatch is not None and IfMatch != self.etag(data):
+            raise _error("PreconditionFailed", "GetObject")
+        if Range is not None:
+            first, last = (int(x) for x in Range.removeprefix("bytes=").split("-"))
+            data = data[first:last + 1]
+        self.calls.append("get_object")
         return {"Body": type("Body", (), {"read": lambda self: data})()}
 
     def put_object(self, Bucket, Key, Body, IfNoneMatch=None):
@@ -56,14 +72,41 @@ class FakeS3:
                 if (Bucket, Key) in self.objects:
                     raise _error("PreconditionFailed", "PutObject")
             self.objects[(Bucket, Key)] = bytes(Body)
+            self.calls.append("put_object")
 
     def head_object(self, Bucket, Key):
         if (Bucket, Key) not in self.objects:
             raise _error("404", "HeadObject")
-        return {}
+        data = self.objects[(Bucket, Key)]
+        return {"ContentLength": len(data), "ETag": self.etag(data)}
 
     def delete_object(self, Bucket, Key):
         self.objects.pop((Bucket, Key), None)
+
+    def create_multipart_upload(self, Bucket, Key):
+        with self.lock:
+            upload_id = f"u{len(self.uploads)}"
+            self.uploads[upload_id] = {}
+            self.calls.append("create_multipart_upload")
+        return {"UploadId": upload_id}
+
+    def upload_part(self, Bucket, Key, UploadId, PartNumber, Body):
+        with self.lock:
+            self.uploads[UploadId][PartNumber] = bytes(Body)
+            self.calls.append("upload_part")
+        return {"ETag": self.etag(bytes(Body))}
+
+    def complete_multipart_upload(self, Bucket, Key, UploadId, MultipartUpload):
+        parts = self.uploads.pop(UploadId)
+        numbers = [p["PartNumber"] for p in MultipartUpload["Parts"]]
+        assert numbers == sorted(parts) == list(range(1, len(parts) + 1))
+        assert [p["ETag"] for p in MultipartUpload["Parts"]] == [self.etag(parts[n]) for n in numbers]
+        self.objects[(Bucket, Key)] = b"".join(parts[n] for n in numbers)
+        self.calls.append("complete_multipart_upload")
+
+    def abort_multipart_upload(self, Bucket, Key, UploadId):
+        self.uploads.pop(UploadId, None)
+        self.calls.append("abort_multipart_upload")
 
     def get_paginator(self, name):
         assert name == "list_objects_v2"
@@ -331,6 +374,10 @@ class _RecordingObjects(DirectoryObjectStore):
     def write(self, key, data):
         self.writes.append(key)
         super().write(key, data)
+
+    def write_file(self, key, source):
+        self.writes.append(key)
+        super().write_file(key, source)
 
     def delete(self, key):
         self.deletes.append(key)

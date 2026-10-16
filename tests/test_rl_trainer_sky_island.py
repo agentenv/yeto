@@ -237,7 +237,7 @@ def test_island_events_skip_a_replayed_record_and_write_the_tape(tmp_path):
 
 def test_check_binds_a_sky_trainer_island_to_an_s3_store(tmp_path, monkeypatch):
     args = _args(tmp_path, monkeypatch, ["--rl-trainer-island", "1"])
-    with pytest.raises(SystemExit, match="nebius trainer island needs a s3://"):
+    with pytest.raises(SystemExit, match=r"trainer island 1 \(nebius\) does not reach"):
         launch_loop.check(args)  # the run's store is a Modal Volume
     args.rl_checkpoint_store = "s3://bucket/runs/a"
     launch_loop.check(args)

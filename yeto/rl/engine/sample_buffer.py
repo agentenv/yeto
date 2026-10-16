@@ -36,7 +36,20 @@ appender writes its own shard index ``shards/<shard>.jsonl`` (same line format,
 one writer per file) next to the shared payloads, and one merger -- the head --
 appends the new shard lines to ``index.jsonl`` (:func:`merge_shards`). The
 merged line keeps ``shard`` and ``shard_pos``, so a restarted merger continues
-where the index ends. Shards exist for the ``index.jsonl`` layout only.
+where the index ends.
+
+Sampler islands on several sites (rl-cross-site-sample-store): an object store
+without reliable create-if-absent between hosts (``objects.buffer_shards``, OSS)
+gives each sampler island its own shard, ``shards/<shard>/<pos>.json`` (one
+writer per shard, same record format), and names the shard once under
+``shard-names/``. The consumer -- the trainer, the one reader of the buffer --
+is the only writer of ``index/`` (``FileSampleBuffer(merge_shards=True)``): each
+refresh first appends the new records of every named shard (by ``appended_at``,
+then shard name), keeping ``shard`` and ``shard_pos``, and an ``end`` record
+once every shard has ended. The consumed watermark stays one position in the
+merged index; :meth:`FileSampleBuffer.shard_positions` turns it into the
+per-shard positions (the merged index is durable, so a restore from a cut
+resumes every shard where that cut left it).
 """
 
 from __future__ import annotations
@@ -62,6 +75,7 @@ INDEX = "index.jsonl"
 INDEX_OBJECTS = "index"
 PAYLOADS = "payloads"
 SHARDS = "shards"
+SHARD_NAMES = "shard-names"
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]")
 _POS_DIGITS = 12
 # create-if-absent races lost in a row before an append gives up (another writer
@@ -151,11 +165,14 @@ class JsonlIndex:
 class ObjectIndex:
     """The index as one object per record, ``index/<pos>.json`` (see the module doc)."""
 
-    def __init__(self, objects: ObjectStore) -> None:
+    def __init__(self, objects: ObjectStore, *, prefix: str = f"{BUFFER_DIR}/{INDEX_OBJECTS}/",
+                 start: int = 0) -> None:
+        """``prefix``: the record keys (a shard passes its own); ``start``: the
+        position of the first record to read (a merger skips merged records)."""
         self.objects = objects
-        self.prefix = f"{BUFFER_DIR}/{INDEX_OBJECTS}/"
-        self._last_key = ""  # the newest record key read
-        self._next = 0  # the position of the next record to read
+        self.prefix = prefix
+        self._next = int(start)  # the position of the next record to read
+        self._last_key = self.key(self._next - 1) if self._next else ""  # the newest record key read
 
     def key(self, pos: int) -> str:
         return f"{self.prefix}{int(pos):0{_POS_DIGITS}d}.json"
@@ -205,16 +222,44 @@ class ObjectIndex:
         raise SampleBufferError(f"{self.prefix}: lost {_MAX_CREATE_RACES} appends in a row to other writers")
 
 
+def _objects_of(store: CheckpointStore | ObjectStore) -> ObjectStore | None:
+    return store.objects if isinstance(store, CheckpointStore) else store
+
+
+def needs_shards(store: CheckpointStore | ObjectStore) -> bool:
+    """Whether every sampler island must write its own shard of this store's buffer."""
+    objects = _objects_of(store)
+    return bool(getattr(objects, "buffer_shards", False))
+
+
+def shard_prefix(shard: str) -> str:
+    """The record keys of one sampler island's shard on an object store."""
+    return f"{BUFFER_DIR}/{SHARDS}/{_shard_name(shard)}/"
+
+
+def shard_names(objects: ObjectStore) -> list[str]:
+    """The shards named on an object store, sorted."""
+    prefix = f"{BUFFER_DIR}/{SHARD_NAMES}/"
+    return sorted(key[len(prefix):] for key in objects.list(prefix))
+
+
 def index_for(store: CheckpointStore | ObjectStore, *, index: str = INDEX,
               create_index: bool = True) -> JsonlIndex | ObjectIndex:
     """:class:`ObjectIndex` for an object store or a store with an object API
     (``CheckpointStore.objects``); :class:`JsonlIndex` for a shared directory.
-    ``index``/``create_index``: see :class:`JsonlIndex` (shards need that layout)."""
-    if isinstance(store, CheckpointStore) and store.objects is None:
+    ``index``/``create_index``: see :class:`JsonlIndex`. A shard index
+    (:func:`shard_index`) on an object store is that shard's own keys
+    (:func:`shard_prefix`); the shard is named under ``shard-names/``."""
+    objects = _objects_of(store)
+    if objects is None:
         return JsonlIndex(store, index=index, create_index=create_index)
-    if index != INDEX:
-        raise SampleBufferError(f"index {index!r}: shard indexes need a shared-directory store")
-    return ObjectIndex(store.objects if isinstance(store, CheckpointStore) else store)
+    if index == INDEX:
+        return ObjectIndex(objects)
+    shard = _shard_of_index(index)
+    name_key = f"{BUFFER_DIR}/{SHARD_NAMES}/{shard}"
+    if create_index and not objects.exists(name_key):
+        objects.write(name_key, b"")
+    return ObjectIndex(objects, prefix=shard_prefix(shard))
 
 
 class FileSampleBuffer:
@@ -226,12 +271,22 @@ class FileSampleBuffer:
 
     def __init__(self, store: CheckpointStore | ObjectStore, *, batch_size: int,
                  arrival_window_s: float = 60.0, clock: Callable[[], float] = time.time,
-                 index: str = INDEX, create_index: bool = True) -> None:
-        """``index``/``create_index``: see :class:`JsonlIndex`."""
+                 index: str = INDEX, create_index: bool = True, merge_shards: bool = False) -> None:
+        """``index``/``create_index``: see :class:`JsonlIndex`. ``merge_shards``:
+        this buffer (the consumer) merges the sampler shards of an object store
+        into the index on every refresh (see the module doc); it must be the
+        only one that does."""
         if batch_size < 1:
             raise ValueError("batch_size must be positive")
         self.store = store
         self.index = index_for(store, index=index, create_index=create_index)
+        self.shard = _shard_of_index(index) if index != INDEX else None  # the shard this buffer writes
+        if merge_shards and (self.shard is not None or not isinstance(self.index, ObjectIndex)):
+            raise SampleBufferError("only the index of an object store merges shards")
+        self._merge = merge_shards
+        self._shard_of: list[str | None] = []  # the shard of each position (merged records)
+        self._shard_readers: dict[str, ObjectIndex] = {}
+        self._shards_ended: set[str] = set()
         self.batch_size = int(batch_size)
         self.arrival_window_s = float(arrival_window_s)
         self.clock = clock
@@ -287,6 +342,7 @@ class FileSampleBuffer:
             if record.get("end"):
                 self._ended = True
                 continue
+            self._shard_of.append(record.get("shard"))
             self._entries.append(SampleIndexEntry(
                 sample_id=record["sample_id"], behavior_version=int(record["behavior_version"]),
                 payload_ref=record["payload_ref"], tokens=int(record["tokens"]),
@@ -294,10 +350,46 @@ class FileSampleBuffer:
 
     # ---------------------------------------------------------------- reading
     def refresh(self) -> int:
-        """Read the records other writers added; returns the number of samples."""
+        """Read the records other writers added (after merging the shards, when this
+        buffer merges); returns the number of samples."""
         with self._lock:
             self._absorb(self.index.read_new())
+            if self._merge:
+                self._merge_shards()
             return len(self._entries)
+
+    def _merge_shards(self) -> None:
+        objects = self.index.objects
+        new: list[dict[str, Any]] = []
+        for shard in shard_names(objects):
+            reader = self._shard_readers.get(shard)
+            if reader is None:  # first seen here: skip what an earlier merger merged
+                done = sum(1 for s in self._shard_of if s == shard)
+                reader = self._shard_readers[shard] = ObjectIndex(objects, prefix=shard_prefix(shard),
+                                                                  start=done)
+            for record in reader.read_new():
+                if record.get("end"):
+                    self._shards_ended.add(shard)
+                else:
+                    new.append({**record, "shard": shard, "shard_pos": int(record["pos"])})
+        if self._ended:
+            if new:
+                raise SampleBufferError(f"shard records after the data end: {json.dumps(new[0])[:200]}")
+            return
+        new.sort(key=lambda r: (float(r.get("appended_at", 0.0)), r["shard"], r["shard_pos"]))
+        for record in new:
+            self._write_record(lambda pos, record=record: {**record, "pos": pos})
+        if self._shard_readers and self._shards_ended >= set(self._shard_readers):
+            self._write_record(lambda pos: {"schema": SCHEMA, "pos": pos, "end": True})
+
+    def shard_positions(self, cursor: int) -> dict[str, int]:
+        """{shard: records of that shard below merged position ``cursor``}: the
+        per-shard form of a consumed watermark or read cursor ({} for a buffer
+        without merged shards)."""
+        with self._lock:
+            if not 0 <= int(cursor) <= len(self._entries):
+                raise SampleBufferError(f"cursor {cursor} outside the index (0..{len(self._entries)})")
+            return dict(sorted(Counter(s for s in self._shard_of[:int(cursor)] if s is not None).items()))
 
     def __len__(self) -> int:
         with self._lock:
@@ -402,12 +494,26 @@ class FileSampleBuffer:
             self._poller = None
 
 
-def shard_index(shard: str) -> str:
-    """The index file of one appender's shard (relative to ``sample-buffer/``)."""
+def _shard_name(shard: str) -> str:
     name = _SAFE_NAME.sub("_", str(shard))
     if not name:
         raise ValueError("shard name is empty")
-    return f"{SHARDS}/{name}.jsonl"
+    return name
+
+
+def shard_index(shard: str) -> str:
+    """The index of one appender's shard (relative to ``sample-buffer/``): the
+    file of a shared-directory store; on an object store, :func:`index_for` maps
+    it to :func:`shard_prefix`."""
+    return f"{SHARDS}/{_shard_name(shard)}.jsonl"
+
+
+def _shard_of_index(index: str) -> str:
+    """The shard name of a :func:`shard_index` value."""
+    head, _, name = index.partition("/")
+    if head != SHARDS or not name.endswith(".jsonl") or "/" in name:
+        raise SampleBufferError(f"index {index!r} is not a shard index")
+    return name[:-len(".jsonl")]
 
 
 def _complete_lines(data: bytes) -> list[dict]:

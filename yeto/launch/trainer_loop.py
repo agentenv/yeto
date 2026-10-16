@@ -17,8 +17,11 @@ Inputs and outputs of the loop on the head:
 
 The launcher holds back the island ``--rl-trainer-island`` (index into ``--gpu``):
 the fleet controller does not start it; the binding starts one per incarnation
-(``yeto.launch.trainer_island``): a Modal island with a ``modal-volume://`` store,
-or a sky island (not Verda) with an ``s3://`` store. :func:`check` refuses anything
+(``yeto.launch.trainer_island``): a Modal island or a sky island (not Verda). The
+head reads the cuts and the buffer and writes the trainer commands in the
+``--rl-checkpoint-store``, so the store is one the head reads by API
+(``modal-volume://``, ``s3://`` or ``oss://``) that the trainer island and every
+sampler island reach (``storage.store_unreachable_reason``). :func:`check` refuses anything
 else before any launch.
 
 A convertible pool (every island declared ``--rl-node-class islandM=convertible``,
@@ -87,8 +90,9 @@ def add_arguments(group) -> None:
     group.add_argument(
         "--rl-trainer-island", type=int, default=None, metavar="M",
         help="with --rl-trainer-scheduler: the island (index into --gpu) the scheduler starts "
-        "and stops; the fleet does not start it. A Modal island needs a modal-volume:// "
-        "--rl-checkpoint-store, a sky island (not Verda) an s3:// one")
+        "and stops; the fleet does not start it. Every island must reach the "
+        "--rl-checkpoint-store: modal-volume:// on Modal islands, s3:// or oss:// on sky "
+        "islands (not Verda)")
     group.add_argument(
         "--rl-trainer-command-poll-seconds", type=float, default=None,
         help="seconds between two reads of the command file on the trainer island and of "
@@ -229,12 +233,23 @@ def _check_trainer_island(args) -> None:
     if cloud == "verda":
         raise SystemExit(f"--rl-trainer-island {m} is a Verda island; the scheduler launches "
                          "a cluster per trainer start, which the Verda launch path does not do")
+    from .storage import HEAD_READABLE_STORE_SCHEMES, store_unreachable_reason
+
     store = str(getattr(args, "rl_checkpoint_store", None) or "")
-    scheme = "modal-volume" if cloud == "modal" else "s3"
-    if not store.startswith(f"{scheme}://"):
-        raise SystemExit(f"--rl-trainer-scheduler with a {cloud} trainer island needs a "
-                         f"{scheme}:// --rl-checkpoint-store: the head reads the cuts and the "
-                         "sample buffer there and writes the trainer commands there")
+    if store.partition("://")[0] not in HEAD_READABLE_STORE_SCHEMES or "://" not in store:
+        raise SystemExit(f"--rl-trainer-scheduler needs a --rl-checkpoint-store the head reads "
+                         f"({', '.join(s + '://' for s in HEAD_READABLE_STORE_SCHEMES)}): the head "
+                         f"reads the cuts and the sample buffer there and writes the trainer "
+                         f"commands there (got {store or 'none'!r})")
+    from yeto.rl.engine.sample_roles import SAMPLER, island_roles
+
+    samplers = [i for i, role in island_roles(args, len(specs)).items() if role == SAMPLER]
+    for i in [m, *sorted(samplers)]:
+        reason = store_unreachable_reason(store, specs[i].cloud)
+        if reason is not None:
+            role = "trainer island" if i == m else "sampler island"
+            raise SystemExit(f"--rl-trainer-scheduler: {role} {i} ({specs[i].cloud}) does not reach "
+                             f"--rl-checkpoint-store {store}: {reason}")
 
 
 def build(args, binding: CloudTrainerBinding, journal: Journal) -> TrainerLoop:

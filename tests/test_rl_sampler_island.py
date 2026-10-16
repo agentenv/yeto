@@ -272,10 +272,14 @@ def test_lora_release_records_the_file_digest_and_the_follower_checks_it(tmp_pat
     assert directory_digest(other) != lora.sha256  # the bytes count, not only the names
     loaded = []
     follower = PolicyFollower(releases, lambda r, d: loaded.append(r.seq))
-    (directory / "adapter_model.safetensors").write_text("tampered")
+    weights = directory / "adapter_model.safetensors"
+    original = weights.read_bytes()
+    weights.write_bytes(b"x" * len(original))  # same size: only the digest tells
     with pytest.raises(PolicyReleaseError, match="weight files sha256"):
         follower.refresh()
     assert loaded == [] and follower.release is None
+    weights.write_bytes(original + b"tail")  # another size: not complete, kept for a later refresh
+    assert follower.refresh() is None and "1 of 2 files" in follower.incomplete
     _write_adapter(directory)
     assert follower.refresh().seq == 2 and loaded == [2]
 

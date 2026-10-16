@@ -39,6 +39,8 @@ SECRET_ENV_NAMES = frozenset({
     "YETO_SANDBOX_MODAL_TOKEN_ID", "YETO_SANDBOX_MODAL_TOKEN_SECRET", "YETO_ISLAND_HMAC_KEY",
     # yeto.cloud.s3_store.SECRET_ENVS: the s3 store credential (a test keeps them equal)
     "YETO_RL_STORE_S3_SECRET_ACCESS_KEY", "YETO_RL_STORE_S3_SESSION_TOKEN",
+    # yeto.cloud.oss_store.SECRET_ENVS: the oss store credential
+    "YETO_RL_STORE_OSS_ACCESS_KEY_SECRET", "YETO_RL_STORE_OSS_SECURITY_TOKEN",
 })
 
 

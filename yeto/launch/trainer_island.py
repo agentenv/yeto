@@ -523,11 +523,10 @@ def modal_binding(args: Any, island: TrainerIsland, *, journal_dir: Path,
 def sky_binding(args: Any, island: TrainerIsland, *, journal_dir: Path,
                 files: ObjectStore | None = None, islands: Any = None) -> CloudTrainerBinding:
     """The :class:`CloudTrainerBinding` of a sky trainer island with an ``s3://``
-    checkpoint store (``files`` / ``islands`` replace the SDKs in tests)."""
+    or ``oss://`` checkpoint store (``files`` / ``islands`` replace the SDKs in
+    tests)."""
     if files is None:
-        from yeto.cloud.s3_store import head_objects
-
-        files = head_objects(str(args.rl_checkpoint_store))
+        files = head_store_objects(str(args.rl_checkpoint_store))
     if islands is None:
         if island.sky_task is None:
             raise ValueError(f"trainer island {island.name}: no sky task to launch")
@@ -537,6 +536,17 @@ def sky_binding(args: Any, island: TrainerIsland, *, journal_dir: Path,
                                     events_dir=island.events_dir)
     buffer = FileSampleBuffer(files, batch_size=int(args.rollout_batch_size))  # by object key
     return _binding(args, files, islands, journal_dir=journal_dir, buffer=buffer)
+
+
+def head_store_objects(uri: str) -> ObjectStore:
+    """The head's object API of an ``s3://`` or ``oss://`` checkpoint store."""
+    from yeto.cloud import oss_store
+
+    if oss_store.is_oss_uri(uri):
+        return oss_store.head_objects(uri)
+    from yeto.cloud.s3_store import head_objects
+
+    return head_objects(uri)
 
 
 def _binding(args: Any, files: StoreFiles, islands: Any, *, journal_dir: Path,
