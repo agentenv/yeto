@@ -470,3 +470,26 @@ def test_a_node_without_a_jump_host_uses_plain_ssh():
                 cards_per_node=8, hbm_gib=141, host_memory_gib=2048)
     assert node.ssh_options() == []
     assert node.preflight_commands()[0][0] == "nvidia-smi"
+
+
+# --- N1.1: the launcher validates the inventory before any cloud work --------
+
+
+def test_the_launch_flag_validates_the_inventory_file(tmp_path):
+    from types import SimpleNamespace
+
+    from yeto.launch.rl_args import _prepare_node_inventory
+
+    path = tmp_path / "nodes.yaml"
+    path.write_text(json.dumps({"nodes": [_inventory_node()]}))
+    args = SimpleNamespace(rl_node_inventory=str(path))
+    _prepare_node_inventory(args)
+    assert [node.name for node in args.rl_node_inventory_nodes] == ["ascend00"]
+
+    path.write_text(json.dumps({"nodes": [_inventory_node(device_family=None)]}))
+    with pytest.raises(InventoryError, match="device_family is required"):
+        _prepare_node_inventory(SimpleNamespace(rl_node_inventory=str(path)))
+
+    unset = SimpleNamespace(rl_node_inventory=None)
+    _prepare_node_inventory(unset)
+    assert unset.rl_node_inventory_nodes is None
