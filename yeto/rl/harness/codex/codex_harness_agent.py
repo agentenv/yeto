@@ -60,6 +60,11 @@ BACKEND_CHAT_TEMPLATE_KWARGS = _BACKEND_PROFILE["chat_template_kwargs"]
 # qwen3_30b_a3b cyber baseline pins 8192 bytes; profiles without a declaration
 # keep the signed 32 KiB default.
 MAX_TOOL_OUTPUT_BYTES = int(_BACKEND_PROFILE.get("tool_output_bytes", 32_768))
+# S24 T-TB2: Qwen3.8-27B habitually writes one line of prose before its tool
+# call.  Profiles that opt in keep that prose in the assistant message (TITO
+# history stays exactly what the model generated); Codex still sees only the
+# tool call.  Every other profile keeps the strict DSV4 rule.
+ALLOW_PROSE_WITH_TOOL_CALL = bool(_BACKEND_PROFILE.get("allow_prose_with_tool_call", False))
 CODEX_TOOL_OUTPUT_TOKEN_LIMIT = 65_536
 MAX_APP_SERVER_FRAME_BYTES = 2 * 1024 * 1024
 MAX_MILES_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -1567,7 +1572,7 @@ class _ResponsesBridge:
         calls = message.get("tool_calls")
         if not isinstance(content, str) or not isinstance(reasoning, str) or not reasoning:
             raise CodexModelFailure("DSV4 did not return thinking content")
-        if content.strip():
+        if content.strip() and not ALLOW_PROSE_WITH_TOOL_CALL:
             raise CodexModelFailure("DSV4 mixed prose with the required tool call")
         if not isinstance(calls, list) or len(calls) != 1:
             raise CodexModelFailure("DSV4 must return exactly one tool call")

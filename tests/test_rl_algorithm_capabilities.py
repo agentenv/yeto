@@ -138,7 +138,8 @@ R0_MECHANISMS_P0 = {
 }
 # Moved from the removed legacy engine (P0-1.7b.4-Q1); declared with the R0
 # filters, it needs SecRLEnv episode evidence, so no CPU candidate exercises it.
-SECRLENV_FILTER_P0 = {f"dynamic_sampling_filters:{alg.SECRLENV_GROUP_CHECK_FILTER}"}
+SECRLENV_FILTER_P0 = {f"dynamic_sampling_filters:{alg.SECRLENV_GROUP_CHECK_FILTER}",
+                      f"dynamic_sampling_filters:{alg.TBENCH_GROUP_CHECK_FILTER}"}  # S24 T-TB2
 # P0 built-ins without a candidate, with the reason.
 EXEMPT = {"advantage_estimators:ppo": "critic: refused by the rejection matrix"}
 

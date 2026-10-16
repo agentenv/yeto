@@ -20,6 +20,7 @@ Runs inside the rollout executor actor (``__ray_call__``). Import-light.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import logging
 import threading
@@ -120,9 +121,13 @@ def requeue_untrained(executor: Any, *, timeout_s: float = WORKER_STOP_TIMEOUT_S
     """Stop the background worker and return every drawn, untrained group to
     the data source, reset for a fresh generation. Returns the group count.
 
-    Generation tasks still running keep their own (original) samples; the data
-    source gets reset copies, so nothing a stale task writes reaches them. The
-    rollout function starts a new worker on its next call."""
+    The worker's group generation tasks are cancelled and awaited too: the new
+    worker submits a full budget again, so a task left running would keep
+    generating outside the in-flight budget (S24 T-TB2: about one budget leaked
+    per cut). A task that does not settle in time still holds its own
+    (original) samples; the data source gets reset copies, so nothing it
+    writes reaches them. The rollout function starts a new worker on its next
+    call."""
     source = getattr(executor, "data_source", None)
     ledger = getattr(getattr(source, "__self__", source), _LEDGER_ATTR, None)
     if ledger is None:
@@ -154,3 +159,30 @@ def _stop_worker(rollout_fn: Any, timeout_s: float) -> None:
         if time.monotonic() > deadline:
             raise PromptLedgerError("the fully_async worker did not stop in time")
         time.sleep(0.05)
+    # Cancelling the worker does not cancel the group tasks it submitted
+    # (asyncio.wait never cancels what it waits on).
+    stopped = asyncio.run_coroutine_threadsafe(_cancel_generation(rollout_fn, timeout_s), loop)
+    left = stopped.result(timeout=timeout_s + 5.0)
+    if left:
+        logger.warning("fully_async: %d group generation task(s) did not stop in %.0f s", left, timeout_s)
+
+
+def _is_generation_of(task: "asyncio.Task[Any]", rollout_fn: Any) -> bool:
+    coro = task.get_coro()
+    frame = getattr(coro, "cr_frame", None)
+    return (getattr(coro, "__qualname__", "").endswith("._generate_group")
+            and frame is not None and frame.f_locals.get("self") is rollout_fn)
+
+
+async def _cancel_generation(rollout_fn: Any, timeout_s: float) -> int:
+    """On the rollout loop: cancel this rollout function's group generation tasks
+    (each cancels its sample tasks; an agent's ``finally`` ends its trajectory)
+    and wait for them; returns how many are still running after ``timeout_s``."""
+    tasks = [t for t in asyncio.all_tasks() if not t.done() and _is_generation_of(t, rollout_fn)]
+    for task in tasks:
+        task.cancel()
+    if not tasks:
+        return 0
+    _done, pending = await asyncio.wait(tasks, timeout=timeout_s)
+    logger.info("fully_async: cancelled %d group generation task(s) at the cut", len(tasks))
+    return len(pending)

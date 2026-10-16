@@ -37,6 +37,7 @@ from yeto.rl.engine.algorithm import (
     LEGACY_FILTER_NAMES,
     SECRLENV_GROUP_CHECK_FILTER,
     STOCK_NONZERO_STD_FILTER,
+    TBENCH_GROUP_CHECK_FILTER,
 )
 
 BINDING_SCHEMA = "yeto-backend-binding-v1"
@@ -47,12 +48,13 @@ FILTER_PATHS: dict[str, str] = {
     STOCK_NONZERO_STD_FILTER:
         "miles.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std",
     SECRLENV_GROUP_CHECK_FILTER: SECRLENV_GROUP_FILTER,
+    TBENCH_GROUP_CHECK_FILTER: "yeto.rl.harness.codex.tbench_reward.check_group",
 }
 
 # Filters whose input must carry signed environment evidence (the SecRLEnv
 # group check refuses any group without it), so the fixed CPU input of check
 # ③ cannot exercise them; checks ① and ② still run.
-EVIDENCE_FILTERS = frozenset({SECRLENV_GROUP_CHECK_FILTER})
+EVIDENCE_FILTERS = frozenset({SECRLENV_GROUP_CHECK_FILTER, TBENCH_GROUP_CHECK_FILTER})
 
 
 class BindingError(RuntimeError):

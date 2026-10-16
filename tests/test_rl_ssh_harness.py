@@ -2160,7 +2160,8 @@ def test_harness_freezes_stock_codex_identity_and_binary_mount():
             "rollout_model": None,
             "rollout_model_revision": None,
             "rl_model_recipe": "generic",
-            "tito_model": "qwen38",
+            "tito_model": "qwen38small",
+            "codex_backend_profile": "qwen38",
             "apply_chat_template_kwargs": {
                 "enable_thinking": True,
                 "preserve_thinking": True,
@@ -2188,7 +2189,7 @@ def test_harness_freezes_stock_codex_identity_and_binary_mount():
     qwen_args = parse_learner_args(_learner_argv(qwen, 0)[3:])
     assert qwen_args.model == QWEN38_MODEL
     assert qwen_args.model_revision == QWEN38_REVISION
-    assert qwen_args.tito_model == "qwen38"
+    assert qwen_args.tito_model == "qwen38small"
     assert qwen_args.apply_chat_template_kwargs == {
         "enable_thinking": True,
         "preserve_thinking": True,

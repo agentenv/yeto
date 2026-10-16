@@ -56,11 +56,16 @@ STOCK_NONZERO_STD_FILTER = "nonzero_reward_std"
 # outcomes, rejects non-trainable groups and asks the backend to rerun the
 # same task once; zero-variance groups follow the bounded rule.
 SECRLENV_GROUP_CHECK_FILTER = "secrlenv_group_check"
+# Terminal-Bench group check (S24 T-TB2): validates the signed TB2 outcomes and
+# drops a group with any infrastructure (aborted) member or zero reward
+# variance, so an environment failure never reaches the advantage.
+TBENCH_GROUP_CHECK_FILTER = "tbench_group_check"
 LEGACY_FILTER_NAMES = {
     "yeto.rl.filters.bounded_nonzero_reward_std": BOUNDED_NONZERO_STD_FILTER,
     "miles.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std":
         STOCK_NONZERO_STD_FILTER,
     "yeto.rl.harness.codex.reward.check_group": SECRLENV_GROUP_CHECK_FILTER,
+    "yeto.rl.harness.codex.tbench_reward.check_group": TBENCH_GROUP_CHECK_FILTER,
 }
 
 
@@ -70,7 +75,8 @@ def normalize_filter_name(name: str | None) -> str | None:
 # v1 (R0) vocabulary: what the flat v1 fields can express.
 SUPPORTED_ADVANTAGE_ESTIMATORS = frozenset({"grpo", "ppo"})  # ppo: rl-algo-critic-family 2.2
 SUPPORTED_LOSSES = frozenset({"policy_loss"})
-SUPPORTED_FILTERS = frozenset({BOUNDED_NONZERO_STD_FILTER, SECRLENV_GROUP_CHECK_FILTER})
+SUPPORTED_FILTERS = frozenset({BOUNDED_NONZERO_STD_FILTER, SECRLENV_GROUP_CHECK_FILTER,
+                               TBENCH_GROUP_CHECK_FILTER})
 
 # v2 vocabulary: what the structured spec can *express* (upstream Miles
 # ``arguments.py`` choices at MILES_NEXT_COMMIT). Expressible is not
@@ -132,6 +138,7 @@ DEFAULT_CORRECTION_IDENTITY = (
 CORRECTION_FIELD_ALIASES = {"tis_clip": "upper", "tis_clip_low": "lower"}
 DYNAMIC_SAMPLING_FILTERS = {
     BOUNDED_NONZERO_STD_FILTER, STOCK_NONZERO_STD_FILTER, SECRLENV_GROUP_CHECK_FILTER,
+    TBENCH_GROUP_CHECK_FILTER,
 }
 # Plugins may only live in yeto or in Miles' own (built-in) namespace (D7).
 PLUGIN_NAMESPACES = ["yeto.", "miles."]

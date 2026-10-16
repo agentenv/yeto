@@ -402,6 +402,27 @@ _TINY_QWEN3 = {
 }
 
 
+def test_train_memory_defaults_keep_argv_and_flags_translate():
+    default = mc.translate_run_config(make_config(), AlgorithmSpec()).argv
+    for flag in ("--recompute-granularity", "--use-dynamic-batch-size", "--max-tokens-per-gpu"):
+        assert flag not in default
+    memory = rc.TrainMemoryConfig(activation_recompute=True, max_tokens_per_gpu=32768)
+    argv = mc.translate_run_config(make_config(train_memory=memory), AlgorithmSpec()).argv
+    joined = " ".join(argv)
+    assert ("--recompute-granularity full --recompute-method uniform "
+            "--recompute-num-layers 1") in joined
+    assert "--use-dynamic-batch-size --max-tokens-per-gpu 32768" in joined
+
+
+def test_train_memory_from_args_refuses_a_budget_below_seq_len():
+    args = SimpleNamespace(seq_len=32768, rl_activation_recompute=True, rl_max_tokens_per_gpu=16384)
+    with pytest.raises(ValueError, match="below --seq-len"):
+        rc._train_memory(args)
+    args.rl_max_tokens_per_gpu = 32768
+    assert rc._train_memory(args) == rc.TrainMemoryConfig(True, 32768)
+    assert rc._train_memory(SimpleNamespace(seq_len=8)) == rc.TrainMemoryConfig()
+
+
 @pytest.mark.ray_local  # upstream parse_args can start Ray on this machine
 @pytest.mark.parametrize("colocated", [True, False])
 def test_upstream_parse_args_accepts_translation(tmp_path, colocated):
@@ -574,7 +595,7 @@ def test_lr_schedule_flags_are_adapter_owned():
 
 # ---------------------------------------------------------------- rl-fn-codex-rollout 1.0: append roles by tokenizer family
 
-@pytest.mark.parametrize("tito_model,ok", [("qwen35", True), ("qwen4exp", True), ("qwen38", True), ("deepseekv4", True),
+@pytest.mark.parametrize("tito_model,ok", [("qwen35", True), ("qwen4exp", True), ("qwen38small", True), ("deepseekv4", True),
                                            ("nosuchfamily", False)])
 def test_stock_codex_append_roles_resolve_by_tito_family(tito_model, ok):
     """``--tito-model`` is a tokenizer family (``qwen4exp`` for Flash-Next), not a
@@ -710,3 +731,13 @@ def test_upstream_parse_args_accepts_critic_family_on_pinned_image(tmp_path, fam
     assert not missing, missing
     if spec.critic is not None and spec.critic.critic_updates_per_step not in (None, 1):
         assert args.num_critic_epochs == spec.critic.critic_updates_per_step
+
+
+def test_dynamic_batching_refused_for_bshd_gated_delta_net_models():
+    cfg = make_config(train_memory=rc.TrainMemoryConfig(max_tokens_per_gpu=32768))
+    recipe = dataclasses.replace(cfg.model_recipe, gdn=rc.GdnRecipe(gated_delta_net=True))
+    with pytest.raises(mc.MilesConfigError, match="qkv-format bshd"):
+        mc.translate_run_config(dataclasses.replace(cfg, model_recipe=recipe), AlgorithmSpec())
+    recompute_only = dataclasses.replace(
+        cfg, model_recipe=recipe, train_memory=rc.TrainMemoryConfig(activation_recompute=True))
+    assert "--recompute-granularity" in mc.translate_run_config(recompute_only, AlgorithmSpec()).argv
