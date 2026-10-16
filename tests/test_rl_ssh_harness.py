@@ -2583,6 +2583,7 @@ def test_start_attests_secrlenv_daemons_before_host_gpu_setup(tmp_path, monkeypa
         "_start_secrlenv_daemons",
         lambda _plan: events.append("daemon"),
     )
+    monkeypatch.setattr(ssh_harness, "_check_island_cards", lambda _plan: None)
     monkeypatch.setattr(ssh_harness, "_host_setup_script", lambda *_args: "setup")
     monkeypatch.setattr(
         ssh_harness,
@@ -2609,6 +2610,7 @@ def test_start_sets_up_a_dedicated_syncer_without_gpu_requirements(
 
     monkeypatch.setattr(ssh_harness, "deploy", lambda _path: None)
     monkeypatch.setattr(ssh_harness, "_start_secrlenv_daemons", lambda _plan: None)
+    monkeypatch.setattr(ssh_harness, "_check_island_cards", lambda _plan: None)
     monkeypatch.setattr(
         ssh_harness, "_host_setup_script", lambda *_args: "learner-setup"
     )

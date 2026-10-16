@@ -58,6 +58,8 @@ from . import (
     TMS_PRELOAD_PATCH_COMMIT,
     TMS_PRELOAD_PATCH_REPOSITORY,
 )
+from ..gpu_spec import UnknownCard, canonical_card, device_family_of
+from ..hw import card_tools
 from .core import CanonicalTensorSpec, canonical_state, policy_hash, tensors_from_flat
 
 PLAN_SCHEMA = 2
@@ -332,6 +334,28 @@ _EVENT_EVIDENCE_FIELDS = {
 
 class HarnessError(RuntimeError):
     pass
+
+
+# The accelerator an older plan (and the acceptance runs so far) implies. The
+# harness is no longer pinned to it: rl-ssh-node-pool lets an island record any
+# card the yeto catalog knows, and the card tool of its device family runs in
+# the host preflight.
+DEFAULT_ACCELERATOR = "H200"
+
+
+def _plan_accelerator(plan: dict[str, Any]) -> str:
+    """The card every island of the plan records."""
+    islands = plan.get("islands") or []
+    cards = {island.get("accelerator", DEFAULT_ACCELERATOR) for island in islands
+             if isinstance(island, dict)}
+    if len(cards) > 1:
+        raise HarnessError("all acceptance islands must record the same accelerator, "
+                           f"got {sorted(cards)}")
+    return canonical_card(cards.pop()) if cards else DEFAULT_ACCELERATOR
+
+
+def _plan_device_family(plan: dict[str, Any]) -> str:
+    return device_family_of(_plan_accelerator(plan))
 
 
 def _learner_count(plan: dict[str, Any]) -> int:
@@ -912,7 +936,7 @@ def _validate_jit_cache_root(value: str) -> str:
 def _jit_cache_compatibility_sha256(plan: dict[str, Any]) -> str:
     identity = {
         "schema": JIT_CACHE_SCHEMA,
-        "accelerator": "H200",
+        "accelerator": _plan_accelerator(plan),
         "docker_image": plan.get("docker_image"),
         "miles_commit": plan.get("miles", {}).get("commit"),
         "sglang_commit": plan.get("sglang", {}).get("commit"),
@@ -929,6 +953,17 @@ def _jit_cache_contract(
         "host_root": _validate_jit_cache_root(host_root),
         "compatibility_sha256": _jit_cache_compatibility_sha256(plan),
     }
+
+
+def _require_cuda_jit_cache(plan: dict[str, Any]) -> None:
+    """The JIT cache keys the compiled kernels by the ``nvidia-smi`` runtime
+    identity, so it stays an NVIDIA-only feature until a card tool of the
+    other families supplies the same identity."""
+    family = _plan_device_family(plan)
+    if family != "cuda":
+        raise HarnessError(f"--jit-cache-root is implemented for cuda islands only, "
+                           f"this plan records a {family} card "
+                           f"({_plan_accelerator(plan)})")
 
 
 def _validate_jit_cache(value: Any, plan: dict[str, Any]) -> None:
@@ -1073,17 +1108,19 @@ def _validate_plan(plan: dict[str, Any]) -> None:
             raise HarnessError("each island needs hosts and a positive GPU count")
         node_counts.add(len(hosts))
         gpu_counts.add(gpus)
-        accelerator = island.get("accelerator", "H200")
-        if accelerator != "H200":
-            raise HarnessError("the direct SSH RL harness is pinned to H200")
-        accelerators.add(accelerator)
+        accelerator = island.get("accelerator", DEFAULT_ACCELERATOR)
+        try:
+            accelerators.add(canonical_card(accelerator))
+        except UnknownCard as exc:
+            raise HarnessError(str(exc)) from None
         all_hosts.extend(_validate_target(host) for host in hosts)
     if len(node_counts) != 1:
         raise HarnessError("all acceptance islands must use the same node count")
     if len(gpu_counts) != 1:
         raise HarnessError("all acceptance islands must use the same GPU count")
-    if accelerators != {"H200"}:
-        raise HarnessError("all acceptance islands must record H200")
+    if len(accelerators) != 1:
+        raise HarnessError("all acceptance islands must record the same accelerator, "
+                           f"got {sorted(accelerators)}")
     if len(set(all_hosts)) != len(all_hosts):
         raise HarnessError("each SSH target may belong to only one island")
     _syncer_host(plan)
@@ -1534,7 +1571,15 @@ def _strip_separator(values: Sequence[str]) -> list[str]:
     return values[1:] if values[:1] == ["--"] else values
 
 
-def _parse_islands(values: Sequence[str], gpus_per_node: int) -> list[dict[str, Any]]:
+def _parse_islands(
+    values: Sequence[str],
+    gpus_per_node: int,
+    accelerator: str = DEFAULT_ACCELERATOR,
+) -> list[dict[str, Any]]:
+    try:
+        accelerator = canonical_card(accelerator)
+    except UnknownCard as exc:
+        raise HarnessError(str(exc)) from None
     if not values or gpus_per_node <= 0:
         raise HarnessError(
             "prepare requires one or more --host groups and positive GPUs per node"
@@ -1547,7 +1592,7 @@ def _parse_islands(values: Sequence[str], gpus_per_node: int) -> list[dict[str, 
         if not hosts:
             raise HarnessError("each --host must contain at least one SSH target")
         islands.append(
-            {"hosts": hosts, "gpus_per_node": gpus_per_node, "accelerator": "H200"}
+            {"hosts": hosts, "gpus_per_node": gpus_per_node, "accelerator": accelerator}
         )
     if len({len(island["hosts"]) for island in islands}) != 1:
         raise HarnessError("all --host groups must contain the same number of nodes")
@@ -1573,7 +1618,8 @@ def _resolved_launch_args(namespace, islands):
         if _has_option(launch_args, reserved):
             raise HarnessError(f"{reserved} is set by the SSH harness")
     gpu = ",".join(
-        f"ssh:{len(island['hosts'])}x{island['gpus_per_node']}xh200@island-{index}"
+        f"ssh:{len(island['hosts'])}x{island['gpus_per_node']}x"
+        f"{island.get('accelerator', DEFAULT_ACCELERATOR).lower()}@island-{index}"
         for index, island in enumerate(islands)
     )
     argv = [
@@ -1601,7 +1647,11 @@ def _resolved_launch_args(namespace, islands):
 
 def prepare(namespace) -> Path:
     run_id = _validate_run_id(namespace.run_id)
-    islands = _parse_islands(namespace.host, namespace.gpus_per_node)
+    islands = _parse_islands(
+        namespace.host,
+        namespace.gpus_per_node,
+        getattr(namespace, "accelerator", DEFAULT_ACCELERATOR),
+    )
     remote_root = _validate_remote_path(namespace.remote_root, "--remote-root")
     if namespace.remote_env_file is not None:
         _validate_remote_path(namespace.remote_env_file, "--remote-env-file")
@@ -1694,6 +1744,12 @@ def prepare(namespace) -> Path:
         "reward_sha256": args.reward_sha256,
         "syncer_source_sha256": _syncer_source_sha256(),
         "tms_preload_patch": tms_preload_patch,
+        # Optional: the HBM GiB per card the operator declares. Set, the
+        # device-family preflight also compares the HBM capacity; absent, it
+        # compares the card name and the card count only. Older plans have no
+        # such key, so their digest is unchanged.
+        **({"hbm_gib_per_card": float(namespace.hbm_gib)}
+           if getattr(namespace, "hbm_gib", None) is not None else {}),
         "tms_train_disk_backup": tms_train_disk_backup,
         "learner": {
             "model": args.model,
@@ -1868,6 +1924,7 @@ def prepare(namespace) -> Path:
         }
     jit_cache_root = getattr(namespace, "jit_cache_root", None)
     if jit_cache_root is not None:
+        _require_cuda_jit_cache(plan)
         plan["jit_cache"] = _jit_cache_contract(jit_cache_root, plan)
     daemon_source_root = getattr(namespace, "secrlenv_source_root", None)
     if args.custom_agent_function_path in SECRLENV_AGENTS:
@@ -2480,6 +2537,54 @@ mv "$RUN/control/deploying.sha256" "$RUN/control/plan.sha256" 2>/dev/null || \
     print(f"deployed {plan['run_id']} to {len(_deployment_hosts(plan))} host(s)")
 
 
+def _card_tool_check_script(plan: dict[str, Any], gpus_per_node: int) -> str:
+    """Remote lines that refuse a node whose card tool is missing or sees too
+    few cards. The full card, count and HBM comparison runs on the controller
+    (:func:`_check_island_cards`), which can parse the output."""
+    family = _plan_device_family(plan)
+    if family == "cuda":
+        return ('command -v nvidia-smi >/dev/null\n'
+                'test "$(nvidia-smi --query-gpu=index --format=csv,noheader | wc -l)" '
+                f'-ge {gpus_per_node}\n')
+    tool = card_tools.preflight_commands(family)[0][0]
+    if family == "npu":
+        count = ('test "$(npu-smi info -l | grep -c \'^[[:space:]]*NPU ID\')" '
+                 f'-ge {gpus_per_node}\n')
+    else:
+        count = ('test "$(ppu-smi --query-gpu=index --format=csv,noheader | wc -l)" '
+                 f'-ge {gpus_per_node}\n')
+    return f"command -v {tool} >/dev/null\n{count}"
+
+
+def _card_tool_script(plan: dict[str, Any]) -> str:
+    """Remote line printing the card tool output the controller parses."""
+    family = _plan_device_family(plan)
+    return "\n".join(shlex.join(command)
+                      for command in card_tools.preflight_commands(family))
+
+
+def _check_island_cards(plan: dict[str, Any]) -> None:
+    """Device-family preflight (rl-ssh-node-pool): refuse the launch before any
+    accelerator process starts when a node's cards differ from the plan."""
+    family = _plan_device_family(plan)
+    card = _plan_accelerator(plan)
+    hbm_gib = plan.get("hbm_gib_per_card")
+    script = _card_tool_script(plan)
+    for island in plan["islands"]:
+        for target in island["hosts"]:
+            result = _ssh(plan, target, script, capture=True, check=False)
+            if result.returncode != 0:
+                raise HarnessError(
+                    f"the {family} card tool failed on {target}: "
+                    f"{(result.stderr or '').strip()[:200]!r}")
+            try:
+                card_tools.check_cards(family, result.stdout, card=card,
+                                       count=island["gpus_per_node"], hbm_gib=hbm_gib,
+                                       node=target)
+            except (card_tools.CardMismatch, card_tools.CardToolError) as exc:
+                raise HarnessError(str(exc)) from None
+
+
 def _host_setup_script(plan: dict[str, Any], gpus_per_node: int) -> str:
     learner = plan["learner"]
     if learner.get("model_manifest_sha256"):
@@ -2503,6 +2608,7 @@ test "$TMS_BASE_ACTUAL" = {shlex.quote(tms_patch['base_binary_sha256'])}
         tms_patch_check = ""
     jit_cache = plan.get("jit_cache")
     if jit_cache is not None:
+        _require_cuda_jit_cache(plan)
         cache_names = " ".join(shlex.quote(name) for name, _ in JIT_CACHE_MOUNTS)
         jit_cache_setup = f"""JIT_CACHE_ROOT={shlex.quote(jit_cache['host_root'])}
 JIT_CACHE_COMPAT={shlex.quote(jit_cache['compatibility_sha256'])}
@@ -2528,14 +2634,13 @@ chmod 0600 "$RUN/control/jit-cache-host-path"
 """
     else:
         jit_cache_setup = ""
+    card_tool_check = _card_tool_check_script(plan, gpus_per_node)
     return f"""set -euo pipefail
 {_remote_vars(plan)}
 test "$(cat "$RUN/control/plan.sha256")" = {shlex.quote(_plan_digest(plan))}
 command -v docker >/dev/null
 command -v git >/dev/null
-command -v nvidia-smi >/dev/null
-test "$(nvidia-smi --query-gpu=index --format=csv,noheader | wc -l)" -ge {gpus_per_node}
-docker info >/dev/null
+{card_tool_check}docker info >/dev/null
 {model_manifest_check}mkdir -p "$HOME/.cache/huggingface" "$RUN/miles" "$RUN/sglang"
 if ! docker image inspect {shlex.quote(plan['docker_image'])} >/dev/null 2>&1; then
   docker pull {shlex.quote(plan['docker_image'])}
@@ -3555,6 +3660,7 @@ def _start_island(plan: dict[str, Any], learner_id: int) -> None:
 def start(plan_path: str | Path) -> None:
     _, plan = load_plan(plan_path)
     deploy(plan_path)
+    _check_island_cards(plan)
     _start_secrlenv_daemons(plan)
     for island in plan["islands"]:
         for target in island["hosts"]:
@@ -4720,6 +4826,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="comma-separated SSH nodes for one island; repeat for each island",
     )
     prepare_parser.add_argument("--gpus-per-node", type=int, default=1)
+    prepare_parser.add_argument("--accelerator", default=DEFAULT_ACCELERATOR)
+    prepare_parser.add_argument("--hbm-gib", type=float, default=None)
     prepare_parser.add_argument(
         "--syncer-host",
         default=None,
