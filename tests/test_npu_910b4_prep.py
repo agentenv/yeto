@@ -78,7 +78,7 @@ def test_an_unknown_card_is_still_refused():
 
 def test_every_launchable_card_has_a_compat_group():
     for card in gpu_spec._GPU_CANONICAL.values():
-        vendor = "ascend" if device_type_of(card) == "npu" else "nvidia"
+        vendor = catalog.VENDOR_BY_DEVICE_FAMILY[gpu_spec.device_family_of(card)]
         assert catalog.compat_group(card) == f"{vendor}-{card.lower()}"
 
 
