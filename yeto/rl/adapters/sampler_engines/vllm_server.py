@@ -110,8 +110,22 @@ class VllmServerEngine(ServerEngine):
         return body
 
     def generate(self, prompts: Sequence[str], sampling: SamplingParams) -> list[list[Completion]]:
+        return self._complete(list(prompts), sampling)
+
+    def generate_tokens(self, prompts: Sequence[Sequence[int]], sampling: SamplingParams, *,
+                        stop_token_ids: Sequence[int] = ()) -> list[list[Completion]]:
+        """Token-id prompts (a list of id lists as ``prompt``), for the records
+        proxy (S25 N10.5). vLLM does not re-tokenize an id prompt, so the
+        template's own BOS tokens are not doubled."""
+        ids = [[int(t) for t in p] for p in prompts]
+        extra = {"stop_token_ids": [int(t) for t in stop_token_ids]} if stop_token_ids else {}
+        out = self._complete(ids, sampling, **extra)
+        return [[Completion(c.token_ids, c.logprobs, c.text, c.finish_reason, prompt_token_ids=tuple(ids[i]))
+                 for c in group] for i, group in enumerate(out)]
+
+    def _complete(self, prompts: list[Any], sampling: SamplingParams, **extra: Any) -> list[list[Completion]]:
         n = int(sampling.n)
-        body = self.call("POST", "/v1/completions", self._body(list(prompts), sampling))
+        body = self.call("POST", "/v1/completions", self._body(prompts, sampling, **extra))
         choices = sorted(body.get("choices") or [], key=lambda c: int(c["index"]))
         if len(choices) != len(prompts) * n:
             raise SamplerEngineError(f"vllm returned {len(choices)} choices for {len(prompts)} x {n}")

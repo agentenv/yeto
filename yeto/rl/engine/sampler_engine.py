@@ -215,6 +215,22 @@ class SamplerEngine(Protocol):
         ...
 
 
+@runtime_checkable
+class TokenSamplerEngine(SamplerEngine, Protocol):
+    """Optional capability: generate from prompt token ids (S25 N10.5).
+
+    The records proxy renders the chat template once and sends the ids, so the
+    engine never re-tokenizes the prompt and the recorded prompt tokens are the
+    tokens the engine conditioned on. ``stop_token_ids``: ids that end a turn in
+    the served chat template; an adapter returns the stop token in
+    ``token_ids`` when the engine reports it (the proxy handles both cases)."""
+
+    def generate_tokens(self, prompts: Sequence[Sequence[int]], sampling: SamplingParams, *,
+                        stop_token_ids: Sequence[int] = ()) -> list[list[Completion]]:
+        """``sampling.n`` completions for each token-id prompt, in prompt order."""
+        ...
+
+
 # ---------------------------------------------------------------------- provenance
 UNKNOWN = "unknown"
 
