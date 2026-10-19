@@ -33,6 +33,7 @@ from typing import Any, Mapping
 
 from ..gpu_spec import DEVICE_FAMILIES, UnknownCard, canonical_card, device_family_of
 from ..hw import card_tools
+from ..hw.catalog import UnknownCardType, compat_group
 
 # Fabrics an inventory may declare. "tcp" is Ethernet without RDMA; "roce" and
 # "ib" are RDMA over Ethernet and InfiniBand; "hccs" is the Ascend on-node
@@ -75,6 +76,11 @@ class Node:
     def hbm_gib_per_node(self) -> float:
         return self.hbm_gib * self.cards_per_node
 
+    @property
+    def compat_group(self) -> str:
+        """Compatibility group with device family and HBM, e.g. ``ascend-910b4-64g``."""
+        return compat_group(self.card, hbm_gib=self.hbm_gib)
+
     def ssh_options(self) -> list[str]:
         """``ssh`` options that reach this node, ``ProxyJump`` included.
 
@@ -96,7 +102,7 @@ class Node:
         """Manifest / event-tape row of this node (no SSH user, no mounts)."""
         return {"name": self.name, "device_family": self.device_family, "card": self.card,
                 "cards_per_node": self.cards_per_node, "hbm_gib": self.hbm_gib,
-                "host_memory_gib": self.host_memory_gib, "fabric": self.fabric,
+                "compat_group": self.compat_group, "host_memory_gib": self.host_memory_gib, "fabric": self.fabric,
                 "runtime": self.runtime, "behind_jump_host": self.proxy_jump is not None}
 
 
@@ -164,7 +170,7 @@ def parse_node(raw: Any, *, index: int) -> Node:
     roles = raw.get("roles") or ()
     if not isinstance(roles, (list, tuple)) or not all(isinstance(r, str) for r in roles):
         raise InventoryError(f"node {name}: roles must be a list of strings, got {roles!r}")
-    return Node(
+    node = Node(
         name=name,
         host=_require_text(raw["host"], name, "host"),
         device_family=family,
@@ -184,6 +190,11 @@ def parse_node(raw: Any, *, index: int) -> Node:
         price_per_card_hour=(float(price) if price is not None else None),
         roles=tuple(roles),
     )
+    try:
+        node.compat_group  # noqa: B018 - an unknown HBM variant fails here, not at launch
+    except UnknownCardType as exc:
+        raise InventoryError(f"node {name}: {exc}") from None
+    return node
 
 
 def parse_inventory(document: Any) -> list[Node]:
