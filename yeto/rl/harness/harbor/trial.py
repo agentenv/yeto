@@ -28,6 +28,12 @@ from .pins import CODEX_VERSION
 
 TrialConfigBuilder = Callable[[AgentTask, str], Any]
 
+# Providers Harbor does not ship, loaded by ``EnvironmentConfig.import_path``
+# (Harbor unchanged).  Key = ``AgentTask.provider``.
+CUSTOM_PROVIDERS: Mapping[str, str] = {
+    "boat": "yeto.rl.harness.harbor.boat_env:BoatEnvironment",
+}
+
 # The agent sees a dummy key: the endpoint is yeto's recorder / Miles' session
 # server, which does not authenticate the agent.
 AGENT_API_KEY = "dummy"
@@ -63,7 +69,10 @@ def build_trial_config(task: AgentTask, endpoint: str, settings: HarborSettings)
 
     try:
         path = task_dir(settings.tasks_dir, task)
-        env_type = EnvironmentType(task.provider)
+        if task.provider in CUSTOM_PROVIDERS:
+            env_target: dict[str, Any] = {"import_path": CUSTOM_PROVIDERS[task.provider]}
+        else:
+            env_target = {"type": EnvironmentType(task.provider)}
     except (FileNotFoundError, ValueError) as exc:  # TrustViolation (escape) is not caught: it stops the run
         raise HarnessConfigError(str(exc)) from exc
     kwargs: dict[str, Any] = {}
@@ -81,7 +90,7 @@ def build_trial_config(task: AgentTask, endpoint: str, settings: HarborSettings)
             env=agent_env(task.agent, endpoint),
             kwargs=kwargs,
         ),
-        environment=EnvironmentConfig(type=env_type, delete=True, kwargs=dict(settings.provider_kwargs)),
+        environment=EnvironmentConfig(**env_target, delete=True, kwargs=dict(settings.provider_kwargs)),
         trials_dir=settings.trials_dir,
         timeout_multiplier=settings.timeout_multiplier,
     )
