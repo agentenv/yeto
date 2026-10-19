@@ -129,6 +129,18 @@ class ReleaseIncomplete(PolicyReleaseError):
     """A release whose files are not all present with their recorded sizes yet."""
 
 
+class ReleaseNotLoaded(PolicyReleaseError):
+    """The load hook did not take this release, and the sampler may go on: the
+    release scheme is not the one the engine serves, or a post-load check
+    failed (``yeto.rl.engine.sampler_checks``). The follower keeps its served
+    release and tries the newest one again on the next refresh. ``reason`` is
+    a short machine-readable cause."""
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
 def file_sizes(directory: Path) -> dict[str, int]:
     """{relative path: size} of every file under ``directory`` but the record."""
     root = Path(directory)

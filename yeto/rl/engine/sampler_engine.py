@@ -119,12 +119,15 @@ class SamplingParams:
 @dataclass(frozen=True)
 class Completion:
     """One completion: response tokens, the log-probability of each sampled
-    token (same length), the response text and why it ended."""
+    token (same length), the response text and why it ended.
+    ``prompt_token_ids``: the prompt as the engine tokenized it (empty when the
+    engine does not return it; the trainer then tokenizes the prompt text)."""
 
     token_ids: tuple[int, ...]
     logprobs: tuple[float, ...]
     text: str
     finish_reason: str
+    prompt_token_ids: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         if len(self.token_ids) != len(self.logprobs):
