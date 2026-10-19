@@ -518,6 +518,10 @@ def make_miles_island_task(
     envs.update(store_envs)
     envs, env_secrets = split_secret_envs(envs)
     in_vm_docker = spec.cloud in IN_VM_DOCKER_CLOUDS
+    if in_vm_docker and code_workdir(args) is None:
+        # the in-VM `docker run` bind-mounts the host ~/sky_workdir over the image's link
+        raise ValueError(f"--rl-code-pack release is not supported on {spec.cloud} "
+                         "(in-VM docker mounts the host workdir)")
     if in_vm_docker:
         # C block: sky's docker runtime is unavailable here; the same setup
         # and run execute inside `docker run` of the same pinned image.

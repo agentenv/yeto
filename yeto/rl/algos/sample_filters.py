@@ -41,10 +41,8 @@ from collections.abc import Sequence
 from typing import Any
 
 from .reward_pipeline import (
-    SAMPLE_FILTERS_PATH,
     RewardPipelineError,
     expected_algorithm_sha256,
-    plugin_sha,
     read_plugins,
     runtime_attrs_delivered,
 )
@@ -95,12 +93,6 @@ def apply_sample_filters(args: Any, data: Sequence[Sequence[Any]]) -> dict[str, 
     config = read_plugins(args, required=False)
     if not config or not config.get("overlong_filter"):
         return None
-    actual = plugin_sha(SAMPLE_FILTERS_PATH)
-    if config.get("sample_filters_sha256") != actual:
-        raise RewardPipelineError(
-            f"sample filters source {actual} differs from the spec's "
-            f"{config.get('sample_filters_sha256')}"
-        )
     counts = {OVERLONG_FILTER: overlong_filter(data)}
     setattr(args, FILTER_COUNTS_ATTR, counts)
     return counts

@@ -37,14 +37,28 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def verify_island_code_pack(digest: str | None, tree: str | Path | None = None) -> None:
-    """rl-identity-tiering L9.5: refuse to start when the workdir is not the run pack."""
+def verify_island_code_pack(digest: str | None, tree: str | Path | None = None, *,
+                            mode: str | None = None, release_manifest: str | Path | None = None,
+                            log=print) -> dict | None:
+    """rl-identity-tiering L9.5: refuse to start when the workdir is not the run pack.
+
+    Release mode (L9.12): the tree must be the image's source root with the source
+    hash its build recorded; returns the release manifest. The image digest
+    (``digest``) is checked by the registry pull, not here."""
 
     if not digest:
-        return
-    from yeto.codepack import verify_tree
+        return None
+    from yeto import codepack
 
-    verify_tree(tree if tree is not None else Path(__file__).resolve().parents[4], digest)
+    root = Path(tree) if tree is not None else Path(__file__).resolve().parents[4]
+    if mode == codepack.CODE_PACK_MODE_RELEASE:
+        manifest = codepack.verify_release_tree(root, release_manifest or codepack.RELEASE_MANIFEST)
+        log(f"[yeto-island] code pack release {digest} ok: commit {manifest.get('yeto_commit')}, "
+            f"tree {root.resolve()}")
+        return manifest
+    codepack.verify_tree(root, digest)
+    log(f"[yeto-island] code pack {digest} ok: tree {root}")
+    return None
 
 
 def parse_args(argv=None):
@@ -2076,7 +2090,8 @@ def run_miles(
     if getattr(args, "code_pack_digest", None):
         from yeto.codepack import CODE_PACK_MODE_GIT_PATCH
 
-        miles_args.yeto_rl_code_pack_mode = CODE_PACK_MODE_GIT_PATCH
+        miles_args.yeto_rl_code_pack_mode = (getattr(args, "code_pack_mode", None)
+                                             or CODE_PACK_MODE_GIT_PATCH)
     _run_ports(
         args,
         miles_args,
@@ -2303,7 +2318,10 @@ def main(argv=None) -> None:
     # rl-identity-tiering D6: with a run code pack the pack digest check replaces
     # the source tree check (the launcher attests --source-sha256 on the pack tree).
     if getattr(args, "code_pack_digest", None):
-        verify_island_code_pack(args.code_pack_digest)
+        release = verify_island_code_pack(args.code_pack_digest,
+                                          mode=getattr(args, "code_pack_mode", None))
+        if release is not None:  # the launcher's --source-sha256 is its local tree, not the image's
+            args.source_sha256 = release["source_tree_sha256"]
     else:
         verify_source_tree_sha256(args.source_sha256)
     if not is_immutable_commit(args.model_revision):

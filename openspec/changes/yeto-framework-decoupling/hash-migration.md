@@ -312,3 +312,8 @@ One version boundary for rl-offpolicy-correction-passthrough L6b and rl-identity
 - Other samples: only the removed code-hash fields change. `fake_engine_tapes.json` is unchanged.
 - Check: with a comment appended to `reward_pipeline.py`, `seq_adv.py` and `rollout_meta_hook.py`, `tests/test_decoupling_golden.py` passes without a re-record (CPU, 2026-10-15). Regenerated with `python tests/decoupling_golden.py --write`.
 - Integration (branch s24p2-integ, 2026-10-15): s24p2-tb2 was cut before this hash boundary. After the merge the golden files carry no plugin `source_sha256`, so its `codex_harness.json` change (6055fcc8… → 8a78b597…) has no effect; `python tests/decoupling_golden.py --write` on the merged tree reproduces the s24p2-hash golden files unchanged. `CODEX_HARNESS_AGENT_SHA256` is not a golden field and keeps the s24p2-tb2 value.
+
+## S24 item 7: L9.11 runtime plugin hash checks removed (branch s24p3-hash, 2026-10-19)
+
+- No semantic or contract hash changes. The translated `runtime_attrs` drop `reward_pipeline.pipeline_sha256` and `sample_filters_sha256`; the `yeto_algo_plugins` digest over that config changes with it. Golden: only `seq_adv_maxrl.json` changes (the `<CODE-HASH>` mask is gone; the digest is now a real value).
+- `examples/rl_algorithms/dapo-like.json` and `dr-grpo.json` reference plugins by path only (their `sha256` fields were stale after this change), so their `algorithm_sha256` changes; no golden uses them.
