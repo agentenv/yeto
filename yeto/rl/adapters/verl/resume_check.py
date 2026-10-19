@@ -1,10 +1,16 @@
 """verl / FSDP2 binding of the resume assertions (S25 N7.6; A-TRN report #8).
 
 The checks live in :mod:`yeto.rl.engine.resume_manifest`; this module only maps
-a verl FSDP actor worker onto them. verl's ``ActorRolloutRefWorker`` holds the
-FSDP2-wrapped actor, its ``torch.optim`` optimizer and LR scheduler as
-``actor_module_fsdp``, ``actor_optimizer`` and ``actor_lr_scheduler`` (attribute
-names from verl's fsdp worker; not yet checked against a live verl build).
+a verl FSDP actor worker onto them (:func:`train_handles`). Two worker shapes:
+
+* the engine worker of the pinned verl (``engine_workers.ActorRolloutRefWorker``):
+  ``worker.actor.engine`` holds ``module`` / ``optimizer`` / ``lr_scheduler``
+  (``workers/engine/fsdp/transformer_impl.py``);
+* the legacy fsdp worker: ``actor_module_fsdp`` / ``actor_optimizer`` /
+  ``actor_lr_scheduler``.
+
+Attribute names are read from the verl source; not yet checked on a live verl build.
+The cut save/restore path that uses these handles is :mod:`.cut`.
 
 Each rank reads its own FSDP2 shard (``DTensor.to_local``), so the per-rank
 state is keyed by rank. Use:
@@ -19,6 +25,7 @@ one :class:`ResumeManifest` before writing; every rank then checks its own entry
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from yeto.rl.engine.resume_manifest import (
@@ -31,21 +38,50 @@ from yeto.rl.engine.resume_manifest import (
     torch_optimizer_state,
 )
 
+ENGINE_ATTRS = ("module", "optimizer", "lr_scheduler")
 WORKER_ATTRS = ("actor_module_fsdp", "actor_optimizer", "actor_lr_scheduler")
+
+
+@dataclass(frozen=True)
+class TrainHandles:
+    """The FSDP2 actor module, its ``torch.optim`` optimizer and LR scheduler on one rank."""
+
+    module: Any
+    optimizer: Any
+    scheduler: Any
+
+
+def _engine_of(worker: Any) -> Any:
+    inner = getattr(worker, "worker_dict", None)  # ray fused worker: {role: worker}
+    if inner:
+        worker = next((w for w in inner.values() if hasattr(w, "actor")), worker)
+    return getattr(getattr(worker, "actor", None), "engine", None) or worker
+
+
+def train_handles(worker: Any) -> TrainHandles:
+    """Resolve the train handles of a verl worker (engine or legacy shape, see module doc)."""
+    if all(getattr(worker, a, None) is not None for a in WORKER_ATTRS):
+        return TrainHandles(*(getattr(worker, a) for a in WORKER_ATTRS))
+    engine = _engine_of(worker)
+    missing = [a for a in ENGINE_ATTRS if getattr(engine, a, None) is None]
+    if missing:
+        raise ResumeAssertionError(f"verl worker {type(worker).__name__} lacks {missing} (engine) and "
+                                   f"{list(WORKER_ATTRS)} (legacy); cannot check the resumed optimizer")
+    return TrainHandles(*(getattr(engine, a) for a in ENGINE_ATTRS))
 
 
 def rank_label(rank: int) -> str:
     return f"rank{int(rank)}"
 
 
+def handles_rank_state(handles: TrainHandles, *, samples: int = DEFAULT_SAMPLES) -> OptimizerResumeState:
+    return torch_optimizer_state(handles.optimizer, handles.module.named_parameters(), handles.scheduler,
+                                 samples=samples)
+
+
 def worker_rank_state(worker: Any, *, samples: int = DEFAULT_SAMPLES) -> OptimizerResumeState:
     """This rank's optimizer/scheduler state of a verl FSDP actor worker."""
-    missing = [a for a in WORKER_ATTRS if getattr(worker, a, None) is None]
-    if missing:
-        raise ResumeAssertionError(f"verl worker {type(worker).__name__} lacks {missing}; "
-                                   "cannot check the resumed optimizer")
-    return torch_optimizer_state(worker.actor_optimizer, worker.actor_module_fsdp.named_parameters(),
-                                 worker.actor_lr_scheduler, samples=samples)
+    return handles_rank_state(train_handles(worker), samples=samples)
 
 
 def worker_manifest(worker: Any, *, rank: int, global_step: int, data_watermark: int,

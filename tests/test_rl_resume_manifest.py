@@ -344,8 +344,42 @@ def test_miles_cut_records_and_checks_the_resume_manifest(tmp_path):
     state = next(iter(resume.ranks.values()))
     assert {s.max for s in state.adam_steps.values()} == {2} and state.moments
     train_step(fresh, torch.randn(3, 6))
+    with pytest.raises(ResumeAssertionError, match="never compared"):
+        trainer._check_first_step_after_resume(1)
+    trainer._resume_reference = resume  # the refused check consumed nothing else
+    trainer.confirm_resumed_data_cursor({"sample_offset": 4})  # the cursor the driver landed on
     trainer._check_first_step_after_resume(1)  # step 2 -> 3, scheduler 2*GBS -> 3*GBS
     assert trainer._resume_reference is None
+
+
+def test_miles_restore_compares_the_landed_cursor_not_the_cut(tmp_path):
+    """T-REV2: the watermark is compared with the cursor the driver actually restored."""
+    from tests.rl_cut_fakes import make_rank
+
+    RankGroup, _context, _expect, _trained_rank, _trainer = _miles()
+    _trainer(RankGroup([_trained_rank()])).save_cut(epoch=1, context=_context(tmp_path))
+    trainer = _trainer(RankGroup([make_rank(9)]))
+    trainer.restore_cut("cut-a", epoch=1, root=str(tmp_path), expect=_expect())
+    with pytest.raises(ResumeAssertionError, match="data watermark 0 != saved 4"):
+        trainer.confirm_resumed_data_cursor({"sample_offset": 0})  # data source restarted at 0
+    trainer.confirm_resumed_data_cursor({"sample_offset": 4})
+
+
+def test_run_wide_reference_for_a_dp_change():
+    from yeto.rl.engine.resume_manifest import GroupSteps, OptimizerResumeState, restore_problems, run_wide_reference
+
+    def state(step, progress=6):
+        return OptimizerResumeState({"named": GroupSteps(step, step)}, progress, (1e-3,), {})
+
+    saved = ResumeManifest(3, 12, 2, {"dp0": state(3), "dp1": state(3)})
+    ref = run_wide_reference(saved, ["a", "b", "c"])
+    assert sorted(ref.ranks) == ["a", "b", "c"] and ref.global_step == 3
+    now = ResumeManifest(3, 12, 2, {"a": state(3), "b": state(0), "c": state(3, progress=0)})
+    problems = restore_problems(ref, now, check_data_watermark=False)
+    assert any("b/named: Adam step 0 != expected 3 (Adam step was reset)" in p for p in problems)
+    assert any("c: scheduler progress 0 != saved 6 (scheduler was reset)" in p for p in problems)
+    with pytest.raises(ResumeAssertionError, match="disagree"):
+        run_wide_reference(ResumeManifest(3, 12, 2, {"dp0": state(3), "dp1": state(2)}), ["a"])
 
 
 def test_miles_restore_refuses_a_reset_adam_step(tmp_path):
@@ -374,6 +408,7 @@ def test_miles_first_step_without_advance_is_refused(tmp_path):
     fresh = make_rank(9)
     trainer = _trainer(RankGroup([fresh]))
     trainer.restore_cut("cut-a", epoch=1, root=str(tmp_path), expect=_expect())
+    trainer.confirm_resumed_data_cursor({"sample_offset": 4})
     with pytest.raises(ResumeAssertionError, match="Adam step 2 != expected 3"):
         trainer._check_first_step_after_resume(1)  # no optimizer step was taken
 

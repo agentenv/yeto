@@ -1035,6 +1035,9 @@ def _restore_resharded(actor, *, directory, files, cut_id, source_dp, rng_policy
         "rng_digest": state_digest(backend.capture_rng()),
         "optimizer_names": sorted(export.get("entries", {})),
         "adapter_names": sorted(names),
+        # S25 N7.6: run-wide resume assertions (Adam step, scheduler, LRs) at the new DP
+        "path": shard_name(coord),
+        "resume": resume_rank_state(actor, export),
     }
 
 

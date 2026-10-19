@@ -277,13 +277,17 @@ def save_problems(manifest: ResumeManifest) -> list[str]:
     return out
 
 
-def restore_problems(saved: ResumeManifest, now: ResumeManifest) -> list[str]:
-    """Restored state vs the saved one; every item must match exactly (LR within 1e-12 relative)."""
+def restore_problems(saved: ResumeManifest, now: ResumeManifest, *, check_data_watermark: bool = True) -> list[str]:
+    """Restored state vs the saved one; every item must match exactly (LR within 1e-12 relative).
+
+    ``check_data_watermark=False`` is for a backend whose data cursor is restored
+    after the optimizer (Miles: the driver seeks the rollout data source later);
+    it must then call :func:`data_watermark_problems` with the cursor that landed."""
     out = []
     if now.global_step != saved.global_step:
         out.append(f"global step {now.global_step} != saved {saved.global_step}")
-    if now.data_watermark != saved.data_watermark:
-        out.append(f"data watermark {now.data_watermark} != saved {saved.data_watermark}")
+    if check_data_watermark:
+        out += data_watermark_problems(saved, now.data_watermark)
     if now.scheduler_increment != saved.scheduler_increment:
         out.append(f"scheduler increment {now.scheduler_increment} != saved {saved.scheduler_increment}")
     problems, pairs = _rank_pairs(saved, now)
@@ -306,16 +310,52 @@ def restore_problems(saved: ResumeManifest, now: ResumeManifest) -> list[str]:
     return out
 
 
+def data_watermark_problems(saved: ResumeManifest, restored_offset: int) -> list[str]:
+    """The data position the run actually resumed from (``sample_offset`` of the
+    restored data cursor) vs the one recorded at the cut."""
+    if int(restored_offset) != saved.data_watermark:
+        return [f"data watermark {int(restored_offset)} != saved {saved.data_watermark}"]
+    return []
+
+
+def run_wide_reference(saved: ResumeManifest, labels: Iterable[str]) -> ResumeManifest:
+    """Reference for a restore at a different data-parallel size (ranks re-sliced).
+
+    Per-rank moment fingerprints have no counterpart there, but the run-wide
+    counters do: every saved rank must agree on the Adam step of each group, the
+    scheduler progress and the applied LRs, and every restored rank (``labels``)
+    must then show those values. Moments are left out (checked by the backend's
+    own slice comparison). Raises when the saved ranks disagree."""
+    states = list(saved.ranks.values())
+    if not states:
+        raise ResumeAssertionError("resume manifest has no rank state")
+    first = states[0]
+    for state in states[1:]:
+        same = (state.adam_steps == first.adam_steps and state.scheduler_progress == first.scheduler_progress
+                and len(state.lrs) == len(first.lrs) and all(_lr_close(a, b) for a, b in zip(state.lrs, first.lrs)))
+        if not same:
+            raise ResumeAssertionError("saved ranks disagree on Adam step / scheduler progress / LRs; "
+                                       "no run-wide reference for a resharded restore")
+    shared = OptimizerResumeState(first.adam_steps, first.scheduler_progress, first.lrs, {})
+    return ResumeManifest(saved.global_step, saved.data_watermark, saved.scheduler_increment,
+                          {str(label): shared for label in labels}, saved.schema)
+
+
 def first_step_problems(saved: ResumeManifest, now: ResumeManifest, *, steps: int = 1,
+                        optimizer_steps: int | None = None,
                         expected_lrs: Mapping[str, Sequence[float]] | None = None) -> list[str]:
-    """After ``steps`` optimizer steps on the restored state: every counter advanced by exactly ``steps``."""
+    """After ``steps`` run steps on the restored state: the global step advanced by
+    ``steps``, the LR scheduler by ``steps * scheduler_increment`` and every Adam step
+    by ``optimizer_steps`` (default ``steps``; verl takes several optimizer steps,
+    one per mini-batch, per scheduler step)."""
+    adam_advance = steps if optimizer_steps is None else int(optimizer_steps)
     out = []
     if now.global_step != saved.global_step + steps:
         out.append(f"global step {now.global_step} != saved {saved.global_step} + {steps}")
     problems, pairs = _rank_pairs(saved, now)
     out += problems
     for rank, s, n in pairs:
-        out += _step_problems(rank, s.adam_steps, n.adam_steps, steps)
+        out += _step_problems(rank, s.adam_steps, n.adam_steps, adam_advance)
         want = s.scheduler_progress + steps * saved.scheduler_increment
         if n.scheduler_progress != want:
             out.append(f"{rank}: scheduler progress {n.scheduler_progress} != expected {want}")
@@ -338,9 +378,15 @@ def require_restored(saved: ResumeManifest, now: ResumeManifest) -> None:
     require(restore_problems(saved, now), "restored optimizer does not continue the cut; refusing to resume")
 
 
+def require_data_watermark(saved: ResumeManifest, restored_offset: int) -> None:
+    require(data_watermark_problems(saved, restored_offset), "restored data cursor does not continue the cut")
+
+
 def require_first_step(saved: ResumeManifest, now: ResumeManifest, *, steps: int = 1,
+                       optimizer_steps: int | None = None,
                        expected_lrs: Mapping[str, Sequence[float]] | None = None) -> None:
-    require(first_step_problems(saved, now, steps=steps, expected_lrs=expected_lrs),
+    require(first_step_problems(saved, now, steps=steps, optimizer_steps=optimizer_steps,
+                                expected_lrs=expected_lrs),
             "first step after resume did not advance the optimizer by exactly the steps taken")
 
 
