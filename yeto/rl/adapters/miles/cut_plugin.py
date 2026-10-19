@@ -499,6 +499,55 @@ def train_state_digest(snap: Mapping[str, Any]) -> str:
     return state_digest({k: v for k, v in snap.items() if k != "miles_counters"})
 
 
+def _entry_moments(entry: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Moment tensors of one named-export entry (fork-M5 ``tensors`` or a plain ``state``)."""
+    return entry.get("tensors") or entry.get("state") or {}
+
+
+def _entry_step(entry: Mapping[str, Any]) -> Any:
+    """Adam step of one named-export entry: per-parameter state (torch Adam) or the
+    group hyper-parameters (TE/apex fused Adam); None before the first step."""
+    for source in (entry.get("scalars"), entry.get("state"), entry.get("hyper")):
+        if isinstance(source, Mapping) and source.get("step") is not None:
+            return source["step"]
+    return None
+
+
+def resume_rank_state(actor: Any, optimizer_named: Any) -> dict[str, Any]:
+    """This rank's :class:`~yeto.rl.engine.resume_manifest.OptimizerResumeState` (as a dict),
+    read from the named optimizer export and the Megatron LR scheduler (S25 N7.6)."""
+    from yeto.rl.engine.resume_manifest import build_rank_state, scheduler_progress_of
+
+    entries = (optimizer_named or {}).get("entries") or {}
+    steps = [s for s in (_entry_step(e) for e in entries.values()) if s is not None]
+    lrs = [float(g["lr"]) for g in getattr(actor.optimizer, "param_groups", ()) if "lr" in g]
+    return build_rank_state(
+        steps_by_group={"named": steps},
+        scheduler_progress=scheduler_progress_of(actor.opt_param_scheduler),
+        lrs=lrs,
+        moments_by_name={n: _entry_moments(e) for n, e in entries.items()},
+    ).to_dict()
+
+
+def resume_state(actor: Any) -> dict[str, Any]:
+    """Plugin: ``{"path": shard name, "resume": rank state}`` of the live trainer (first-step check)."""
+    import torch
+
+    try:
+        backend = _backend(actor)
+        coord = _require(actor, backend)
+        with trainer_resident(actor):
+            named = _adapters(actor, backend)
+            with torch.no_grad():
+                exported = backend.export_optimizer(actor.optimizer, named)
+            return {"path": shard_name(coord), "resume": resume_rank_state(actor, exported)}
+    except Exception as error:  # noqa: BLE001 -- returned, not raised (see save_cut_shard)
+        return {REFUSED: f"{type(error).__name__}: {error}", REFUSAL_KIND: "failed_before_write"}
+
+
+RESUME_STATE = f"{_MODULE}.resume_state"
+
+
 def _snapshot(actor: Any, backend: Any, named: list) -> dict[str, Any]:
     return {
         "adapter": {n: p.detach().to("cpu").clone() for n, p in named},
@@ -590,6 +639,7 @@ def _save(actor: Any, *, directory: str, cut_id: str) -> dict[str, Any]:
         "adapter_tensors": len(named),
         "adapter_names": sorted(n for n, _ in named),
         "optimizer_names": sorted((snap["optimizer_named"] or {}).get("entries", {})),
+        "resume": resume_rank_state(actor, snap["optimizer_named"]),
     }
 
 
@@ -829,6 +879,7 @@ def _restore(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_
         "state_digest": state_digest(snap),
         "rng_digest": state_digest(rng_now),
         "components": component_digests({"state": snap, "rng": rng_now}),
+        "resume": resume_rank_state(actor, snap["optimizer_named"]),
     }
     saved_snap = {k: shard.get(k) for k in snap}
     if state_digest(saved_snap) != summary["state_digest"]:

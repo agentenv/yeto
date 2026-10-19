@@ -260,6 +260,10 @@ class CutManifest:
     # cut (InFlightTrajectory.to_dict()); written only under a policy-age limit
     # > 0 and serialized only when non-empty (default manifests unchanged).
     in_flight: tuple[Mapping[str, Any], ...] = ()
+    # S25 N7.6: ResumeManifest.to_dict() (yeto.rl.engine.resume_manifest);
+    # serialized only when non-empty. Restoring a cut without it is refused
+    # by the backends that write it.
+    resume: Mapping[str, Any] = field(default_factory=dict)
 
     def body(self) -> dict[str, Any]:
         return {
@@ -276,6 +280,7 @@ class CutManifest:
             "rank_summaries": [_jsonable(s) for s in self.rank_summaries],
             **({"backend_state": _jsonable(self.backend_state)} if self.backend_state else {}),
             **({"in_flight": [_jsonable(t) for t in self.in_flight]} if self.in_flight else {}),
+            **({"resume": _jsonable(self.resume)} if self.resume else {}),
         }
 
     def digest(self) -> str:
@@ -309,6 +314,7 @@ class CutManifest:
                 rank_summaries=tuple(raw.get("rank_summaries") or ()),
                 backend_state=raw.get("backend_state") or {},
                 in_flight=tuple(raw.get("in_flight") or ()),
+                resume=raw.get("resume") or {},
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise CutError(f"malformed cut manifest: {exc}") from exc
