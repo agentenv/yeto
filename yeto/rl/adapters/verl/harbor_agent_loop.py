@@ -26,17 +26,16 @@ Configuration (worker environment):
   HARBOR_TASKS_DIR          Harbor task directories (required)
   HARBOR_TRIALS_DIR         trial output (default /tmp/harbor_trials)
   HARBOR_ENV_KWARGS         JSON provider kwargs (default {})
+  HARBOR_TIMEOUT_MULTIPLIER Harbor timeout multiplier (default 1.0)
   YETO_HARBOR_MAX_IN_FLIGHT sandboxes per worker process (default 64)
 """
 
 from __future__ import annotations
 
 import importlib
-import json
 import os
 import uuid
 from functools import lru_cache, partial
-from pathlib import Path
 from typing import Any
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopMetrics, AgentLoopOutput, register
@@ -75,14 +74,7 @@ def _recorder_from_env() -> TokenRecorder:
 
 
 def _harness_from_env() -> AgentHarness:
-    if not os.environ.get("HARBOR_TASKS_DIR"):
-        raise HarnessConfigError("set HARBOR_TASKS_DIR to the Harbor task directories")
-    settings = HarborSettings(
-        tasks_dir=Path(os.environ["HARBOR_TASKS_DIR"]),
-        trials_dir=Path(os.environ.get("HARBOR_TRIALS_DIR", "/tmp/harbor_trials")),
-        provider_kwargs=json.loads(os.environ.get("HARBOR_ENV_KWARGS", "{}") or "{}"),
-    )
-    return HarborHarness(partial(build_trial_config, settings=settings))
+    return HarborHarness(partial(build_trial_config, settings=HarborSettings.from_env()))
 
 
 def agent_task_row(kwargs: dict[str, Any]) -> dict[str, Any]:

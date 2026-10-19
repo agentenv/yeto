@@ -131,9 +131,13 @@ Credentials: `BOAT_API_KEY`, else the boat CLI token in
 - `docker exec -e` values land in boat's command history (90 days): pass
   no secrets as exec env.
 - Miles backend: the Miles example maps `HARBOR_ENV_TYPE` to Harbor's
-  `EnvironmentType` and rejects `boat`; only the yeto builder
-  (`build_trial_config`, verl path and `scripts/harbor_boat_trial.py`) uses
-  boat today (not wired for Miles).
+  `EnvironmentType` and rejects `boat`. The yeto agent function
+  (`adapters/miles/harbor_agent.py`) therefore builds the `TrialConfig` for
+  `CUSTOM_PROVIDERS` with the verl builder (`build_trial_config`,
+  `HarborSettings.from_env()`); Harbor's built-in providers keep the
+  example's builder. The example's harness bindings (terminus-2 TITO
+  kwargs, claude-code, opencode) do not apply on boat: only agents that
+  `agent_env` wires (OpenAI base URL: codex, oracle, nop) run there.
 
 Verified 2026-10-19 (`scripts/harbor_boat_trial.py`, Harbor `oracle` and
 `nop` agents, no model endpoint): 6 TB2 tasks (fix-git, regex-log,
@@ -142,3 +146,9 @@ git-multibranch): oracle reward 1 on all 6, nop reward 0 on all 6, the same
 as the earlier Modal record of the self-written harness (official solutions
 1, empty 0). 15-36 s per trial; 102 billable s for the final 12 trials.
 `boat list` empty afterwards. Codex + model endpoint on boat: not verified.
+
+Miles path, 2026-10-19: the Miles agent function
+(`harbor_agent.run`, with the real Miles example module and Harbor, no
+rollout worker or session server) plus `reward_func`, `HARBOR_ENV_TYPE=boat`:
+fix-git and regex-log, oracle reward 1 on both, nop reward 0 on both
+(outcome ok); 30 billable s. A full Miles training run on boat: not verified.

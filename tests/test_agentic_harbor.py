@@ -510,3 +510,57 @@ def test_verl_island_entry_refuses_agentic_argv():
             "--custom-agent-function-path", "x.y.run"]
     with pytest.raises(ValueError, match="--custom-agent-function-path"):
         island_entry.main(argv)
+
+
+def test_miles_custom_provider_uses_the_yeto_builder(miles_stubs, monkeypatch, tmp_path):
+    """boat: the example rejects it (EnvironmentType), so yeto builds the TrialConfig."""
+    mod, example = miles_stubs
+    (tmp_path / "fix-git").mkdir()
+    monkeypatch.setenv("HARBOR_ENV_TYPE", "boat")
+    monkeypatch.setenv("HARBOR_TASKS_DIR", str(tmp_path))
+    monkeypatch.setenv("HARBOR_ENV_KWARGS", '{"ttl_s": 600}')
+    monkeypatch.setenv("AGENT_TIMEOUT", "900")
+    built = []
+
+    def yeto_builder(task, endpoint, settings):
+        built.append((task.agent, task.provider, task.budget.agent_timeout_s, endpoint,
+                      settings.tasks_dir, dict(settings.provider_kwargs)))
+        return SimpleNamespace(agent=SimpleNamespace(env={}, kwargs={}))
+
+    monkeypatch.setattr(mod, "build_trial_config", yeto_builder)
+
+    class Trial(_FakeTrial):
+        result = _result({"reward": 1.0})
+
+    monkeypatch.setattr(mod, "HarborHarness",
+                        lambda build: __import__("yeto.rl.harness.harbor", fromlist=["x"]).HarborHarness(
+                            build, trial_cls=Trial))
+    out = _run(mod.run("http://ss", metadata={"instance_id": "fix-git", "agent_name": "oracle"}))
+    assert built == [("oracle", "boat", 900.0, "http://ss/v1", tmp_path, {"ttl_s": 600})]
+    assert example.calls == ["key"]  # the example's builder is not called
+    assert (out[OUTCOME_KEY], out["reward"]) == ("ok", 1.0)
+
+
+def test_miles_builtin_provider_keeps_the_example_builder(miles_stubs):
+    mod, example = miles_stubs
+    task = mod.task_from_metadata({"instance_id": "fix-git", "agent_name": "terminus-2"})
+    assert task.agent == "terminus-2" and task.provider == "modal"
+    build = mod.trial_config_builder(task, example, {"instance_id": "fix-git"}, {})
+    build(task, "http://ss/v1")
+    assert example.calls == [("terminus-2", "http://ss/v1")]
+
+
+def test_harbor_settings_from_env(monkeypatch, tmp_path):
+    from yeto.rl.harness.harbor import HarborSettings
+
+    monkeypatch.delenv("HARBOR_TASKS_DIR", raising=False)
+    with pytest.raises(HarnessConfigError, match="HARBOR_TASKS_DIR"):
+        HarborSettings.from_env()
+    monkeypatch.setenv("HARBOR_TASKS_DIR", str(tmp_path))
+    monkeypatch.setenv("HARBOR_ENV_KWARGS", "[1]")
+    with pytest.raises(HarnessConfigError, match="JSON object"):
+        HarborSettings.from_env()
+    monkeypatch.setenv("HARBOR_ENV_KWARGS", "")
+    monkeypatch.setenv("HARBOR_TIMEOUT_MULTIPLIER", "2")
+    settings = HarborSettings.from_env()
+    assert (settings.tasks_dir, settings.provider_kwargs, settings.timeout_multiplier) == (tmp_path, {}, 2.0)
