@@ -1,0 +1,56 @@
+# Python packages yeto-ppu-train adds on top of the PPU base image (S25 N0.2).
+# Installed with `-c /opt/yeto/image/base-constraints.txt`: a package that would
+# replace a base package (torch, triton, sglang, fla, transformers, ...) fails
+# the build instead of changing the base. ray is the one deliberate exception
+# (see versions.lock.json "decisions").
+#
+# Miles cc76e2391 requirements.txt, without the CUDA-only entries the PPU base
+# cannot use: nvidia-resiliency-ext, torchft-nightly (pins its own torch),
+# ring_flash_attn (needs a flash_attn CUDA build).
+accelerate
+blake3==1.0.9
+blobfile
+datasets
+httpx[http2]
+kubernetes_asyncio
+mcp[cli]
+memray
+omegaconf
+onnxscript
+openai
+pillow
+polars==1.42.1
+psycopg[binary]
+pybase64
+pylatexenc
+pyyaml
+qwen_vl_utils
+ray[default]==2.56.0
+safetensors>=0.8.0
+sglang-router>=0.2.3
+tensorboard
+tqdm
+typing_extensions>=4.5
+wandb
+xxhash==3.7.1
+zstandard==0.25.0
+# verl acad9875 requirements.txt, runtime part (no dev tools, no TransferQueue).
+codetiming
+dill
+fastapi
+hydra-core
+latex2sympy2_extended
+math_verify
+numpy>=2.0.0
+pandas
+pyarrow>=19.0.0
+tensordict>=0.8.0,<=0.10.0,!=0.9.0
+torchdata
+uvicorn
+# yeto runtime (pyproject dependencies without torch / transformers, which the
+# base pins; yeto itself runs from source, see the Dockerfile).
+cloudpickle
+huggingface-hub>=0.34
+peft==0.20.0
+protobuf
+sentencepiece

@@ -1,0 +1,252 @@
+"""Stage-1 plan expansion and consistency checks (S25 T-STAGE1). CPU only, no SSH."""
+
+from __future__ import annotations
+
+import copy
+import shlex
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+import yaml
+
+from yeto.rl import stage1
+
+REPO = Path(__file__).resolve().parents[1]
+PLAN = REPO / "examples" / "stage1" / "glm53-flash-ppu.yaml"
+
+
+@pytest.fixture(scope="module")
+def shipped():
+    return stage1.expand(stage1.load_plan(PLAN))
+
+
+def _variant(tmp_path: Path, edit) -> stage1.Expanded:
+    """Expand a copy of the shipped plan after ``edit(doc)`` changed it."""
+    doc = yaml.safe_load(PLAN.read_text())
+    edit(doc)
+    (tmp_path / "ppu-inventory.yaml").write_text((PLAN.parent / "ppu-inventory.yaml").read_text())
+    path = tmp_path / "plan.yaml"
+    path.write_text(yaml.safe_dump(doc))
+    return stage1.expand(stage1.load_plan(path))
+
+
+def test_shipped_plan_is_consistent(shipped):
+    assert shipped.errors == []
+    assert shipped.trainer["cards"] == 24
+    assert shipped.trainer["miles"]["layout"] == {"tp": 4, "pp": 3, "cp": 1, "ep": 8, "etp": 1, "dp": 2,
+                                                  "expert_dp": 1}
+    assert [e["node"] for e in shipped.sampler["engines"]] == ["ppu4"]
+
+
+def test_names_agree_across_roles(shipped):
+    run = shipped.store["run"]
+    assert run.endswith("/s25-stage1-glm53-ppu") and run.startswith("oss://")
+    req = shipped.requant["argv"]
+    assert req[req.index("--store") + 1] == run
+    assert "--target-dir" not in req  # the directory follows the template's scheme
+    island = shipped.trainer["miles"]["island_argv"]
+    assert island[island.index("--rl-resume-store") + 1] == run
+    for step in shipped.steps:
+        if step.script.startswith("docker run"):
+            assert f"YETO_RL_STORE={run}" in step.script
+            assert "yeto-s25-stage1-glm53-ppu-" in step.script
+
+
+def test_sampler_command_comes_from_the_adapter(shipped):
+    engine = shipped.sampler["engines"][0]
+    argv = engine["engine_argv"]  # the island entry starts this server
+    assert argv[argv.index("--tp") + 1] == "8"
+    assert argv[argv.index("--model-path") + 1].endswith("mxfp4-experts-70e86a0")
+    assert "--speculative-algorithm" not in argv  # no NEXTN in stage 1
+    assert argv[argv.index("--moe-runner-backend") + 1] == "triton"
+    assert engine["env"]["MX_PATCH"] == "1"
+    assert engine["url"] == "http://10.0.0.77:30000"
+    assert engine["argv"][-2:] == ["--spec", engine["spec_path"]]
+
+
+def test_max_tokens_is_one_value_everywhere(shipped):
+    island = shipped.trainer["miles"]["island_argv"]
+    margs = shipped.trainer["miles"]["megatron_args"]
+    assert island[island.index("--rollout-max-response-len") + 1] == "4096"
+    assert margs[margs.index("--rollout-max-response-len") + 1] == "4096"
+    assert "data.max_response_length=4096" in shipped.trainer["verl"]["overrides"]
+    assert shipped.sampler["sampling"]["max_tokens"] == 4096
+
+
+def test_trainer_is_bf16_with_host_optimizer(shipped):
+    margs = " ".join(shipped.trainer["miles"]["megatron_args"])
+    assert "--bf16" in margs and "fp8" not in margs
+    assert "--optimizer-cpu-offload" in margs
+    assert "--use-precision-aware-optimizer" in margs  # Megatron asserts it with CPU offload
+    island = shipped.trainer["miles"]["island_argv"]
+    assert island[island.index("--rl-optimizer-offload-fraction") + 1] == "1.0"
+    assert stage1.island_optimizer(island) == {"distributed_optimizer": True, "optimizer_offload_fraction": 1.0}
+    assert "--decoder-first-pipeline-num-layers 15 --decoder-last-pipeline-num-layers 15" in margs
+    assert shipped.trainer["miles"]["drop_model_args"] == []  # TE stays the default (ruling 10-19 (3))
+
+
+def test_island_argv_parses_with_the_island_parser(shipped):
+    assert stage1._check_island_argv(shipped.trainer["miles"]["island_argv"]) is None
+
+
+def test_steps_order_and_staging(shipped):
+    names = [s.name for s in shipped.steps]
+    assert names[:4] == [f"preflight-ppu{i}" for i in range(1, 5)]
+    assert names.index("stage-sampler_initial-ppu1") < names.index("trainer-ppu1")  # requant template on node 0
+    assert names.index("sampler-spec-ppu4") < names.index("sampler-ppu4") < names.index("trainer-ppu1")
+    assert names[-3:] == ["trainer-ppu1", "trainer-ppu2", "trainer-ppu3"]
+    assert [s.name for s in shipped.steps if s.service] == ["sampler-ppu4", *names[-3:]]
+    assert "yeto.rl.quant.release" in shipped.steps[-3].script  # node 0 side process
+    for step in shipped.steps:
+        if step.script.startswith("docker run"):
+            shlex.split(step.script)  # quotable as one command
+
+
+def test_gaps_block_run_until_wired(shipped, capsys):
+    assert any("N0.2" in g for g in shipped.gaps)
+    assert not any("refuses this layout" in g for g in shipped.gaps)  # trainer-only island accepted (T-INTEG2)
+    # Left: N0.2 (image) and N0.2b (docker device flags); N7.1d closed (T-N71D:
+    # the island keeps the distributed optimizer and offloads Adam to the host).
+    assert len(shipped.gaps) == 2 and not any("N7.1d" in g for g in shipped.gaps)
+    assert stage1.main(["run", str(PLAN), "--confirm-machines-free"]) == 2
+    assert "run refused" in capsys.readouterr().err
+
+
+def test_plan_command_prints_without_ssh(capsys):
+    assert stage1.main(["plan", str(PLAN), "--json"]) == 0
+    assert '"schema": "yeto.stage1/v1"' in capsys.readouterr().out
+
+
+def test_run_needs_confirmation(monkeypatch, shipped, capsys):
+    clean = copy.copy(shipped)
+    clean.gaps = []
+    monkeypatch.setattr(stage1, "expand", lambda plan, hf_config=None: clean)
+    calls = []
+    monkeypatch.setattr(stage1, "run_steps", lambda out: calls.append(out) or 0)
+    assert stage1.main(["run", str(PLAN)]) == 2
+    assert "--confirm-machines-free" in capsys.readouterr().err
+    assert stage1.main(["run", str(PLAN), "--confirm-machines-free"]) == 0
+    assert calls == [clean]
+
+
+def test_run_steps_stops_at_first_failure(shipped):
+    seen = []
+
+    class Done:
+        def __init__(self, rc):
+            self.returncode = rc
+
+    def runner(argv, input=None, text=True):
+        seen.append(argv)
+        return Done(1 if len(seen) == 2 else 0)
+
+    assert stage1.run_steps(shipped, runner=runner) == 1
+    assert len(seen) == 2 and seen[0][-3:] == ["ppu1", "bash", "-s"]
+
+
+def test_run_steps_starts_services_and_waits_for_the_trainer(shipped):
+    started = []
+
+    class Proc:
+        stdin = None
+
+        def __init__(self, argv):
+            self.argv = argv
+
+        def wait(self):
+            return 0 if "ppu1" in self.argv else 9
+
+    def runner(argv, input=None, text=True):
+        return SimpleNamespace(returncode=0)
+
+    assert stage1.run_steps(shipped, runner=runner,
+                            starter=lambda argv, script: started.append(argv) or Proc(argv)) == 0
+    assert len(started) == 4  # the sampler and the three trainer nodes
+
+
+@pytest.mark.parametrize("edit, message", [
+    (lambda d: d["trainer"]["miles"].update(pp_layers=[15, 15, 14]), "sum to 44"),
+    (lambda d: d["trainer"]["miles"].update(pp_layers=[23, 22]), "2 stages"),
+    (lambda d: d["sampling"].update(repetition_penalty=1.1), "repetition_penalty"),
+    (lambda d: d["quant"].update(release_dir="policy-releases-w4a8"), "release_dir"),
+    (lambda d: d["quant"].update(scheme="w4a8-int4-channel"), "is scheme mxfp4-g32-rtn"),
+    (lambda d: d["sampler"].update(renames_weight_packed=False), "weight_packed"),
+    (lambda d: d["sampler"].update(engine_version="0.5.18"), "engine version"),
+    (lambda d: d["sampler"].update(max_model_len=4096), "max_model_len"),
+    (lambda d: d["model"]["sampler_initial"].update(revision="aeb9adf"), "revision aeb9adf"),
+    (lambda d: d["model"]["bf16_source"].update(local_dir="/data/models/bf16"), "bf16_source revision"),
+    (lambda d: d["roles"].update(sampler=["ppu3", "ppu4"]), "both trainer and sampler"),
+    (lambda d: d["rendezvous"].update(ppu2="ppu2"), "not an IP address"),
+    (lambda d: d["rendezvous"].update(ppu2="10.0.0.99"), "differs from the inventory address"),
+    (lambda d: d["trainer"]["miles"].update(optimizer_offload_fraction=0.0), "exceeds the usable"),
+    (lambda d: d.update(store="s3://bucket/x"), "oss://"),
+])
+def test_contradictions_are_errors(tmp_path, edit, message):
+    out = _variant(tmp_path, edit)
+    assert any(message in e for e in out.errors), out.errors
+
+
+def test_layout_megatron_refuses(tmp_path):
+    with pytest.raises(stage1.Stage1Error, match="inside one node"):
+        _variant(tmp_path, lambda d: d["trainer"]["miles"].update(ep=12, pp=1, tp=1, pp_layers=[45]))
+    with pytest.raises(stage1.Stage1Error, match="multiple"):
+        _variant(tmp_path, lambda d: d["trainer"]["miles"].update(tp=5))
+
+
+def test_te_fallback_drops_te_only_model_args(tmp_path):
+    out = _variant(tmp_path, lambda d: d["trainer"]["miles"].update(transformer_impl="local"))
+    assert out.errors == []
+    assert out.trainer["miles"]["drop_model_args"] == ["--moe-grouped-gemm", "--moe-permute-fusion"]
+    model_args = out.trainer["miles"]["model_args"]
+    assert "--no-gradient-accumulation-fusion" in model_args and "--moe-grouped-gemm" not in model_args
+    island = out.trainer["miles"]["island_argv"]
+    assert island[island.index("--rl-transformer-impl") + 1] == "local"
+
+
+def test_direct_head_access_keeps_the_oss_gap(tmp_path):
+    out = _variant(tmp_path, lambda d: d.update(store_access={"head": "direct"}))
+    assert any("OSS" in g for g in out.gaps)
+    assert not any(s.name == "head-store-relay" for s in out.steps)
+    with pytest.raises(stage1.Stage1Error, match="not an inventory node"):
+        _variant(tmp_path, lambda d: d.update(store_access={"head": "relay", "relay": "boat"}))
+
+
+def test_verl_backend_expands(tmp_path):
+    out = _variant(tmp_path, lambda d: d["trainer"].update(backend="verl"))
+    assert out.errors == []
+    assert "trainer.nnodes=3" in out.trainer["verl"]["overrides"]
+    assert any("verl" in g for g in out.gaps)
+
+
+def test_memory_figures_of_the_plan_match_the_estimator(shipped):
+    # N7.1c: the plan's 78.7 GiB/card and 1196 GiB/node (推算) agree with the estimator.
+    mem = shipped.trainer["miles"]["memory_estimate"]
+    assert mem["plan"]["basis"] == "推算" and mem["plan"]["fits"]
+    assert mem["plan"]["weights_grads_gib_per_card"] == pytest.approx(78.7, abs=0.1)
+    assert mem["plan"]["host_optimizer_gib_per_node"] == pytest.approx(1196, rel=0.02)
+    assert mem["island"] == mem["plan"]  # N7.1d: the island runs the plan's optimizer
+
+
+def test_an_island_without_optimizer_offload_is_a_gap(tmp_path):
+    def edit(doc):
+        doc["trainer"]["miles"]["optimizer_offload_fraction"] = 0.0
+        doc["trainer"]["miles"].pop("memory_estimate", None)
+    out = _variant(tmp_path, edit)
+    assert "--rl-optimizer-offload-fraction" not in out.trainer["miles"]["island_argv"]
+    assert any("N7.1d" in g and "does not fit" in g for g in out.gaps)
+
+
+def test_island_optimizer_follows_the_island_translation():
+    full = ["--parameter-mode", "full"]
+    assert stage1.island_optimizer(full) == {"distributed_optimizer": False, "optimizer_offload_fraction": 0.0}
+    no_sync = [*full, "--rl-single-island-no-sync", "--rl-sample-role", "trainer"]
+    assert stage1.island_optimizer(no_sync)["distributed_optimizer"]
+    assert stage1.island_optimizer(["--rl-single-island-no-sync"])["distributed_optimizer"]  # LoRA
+
+
+def test_memory_figure_that_disagrees_is_an_error(tmp_path):
+    def edit(doc):
+        doc["trainer"]["miles"]["memory_estimate"]["host_optimizer_gib_per_node"] = 600
+    out = _variant(tmp_path, edit)
+    assert any("host_optimizer_gib_per_node = 600" in e for e in out.errors)

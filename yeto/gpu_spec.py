@@ -61,6 +61,9 @@ _CARD_DEVICE_TYPE = {"910B": "npu", "910B4": "npu", "910B2": "npu",
 # communication variables. It is not the torch device type: a PPU card has
 # family ``ppu`` and device type ``cuda``.
 DEVICE_FAMILIES = ("cuda", "npu", "ppu")
+# Environment variable the island launcher sets to the node's device family;
+# yeto.accel.device_family reads it (torch cannot tell a PPU from a GPU).
+DEVICE_FAMILY_ENV = "YETO_DEVICE_FAMILY"
 _CARD_DEVICE_FAMILY = {**{card: "npu" for card in _CARD_DEVICE_TYPE},
                        "810E": "ppu", "M890": "ppu"}
 

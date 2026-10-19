@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from yeto.rl.contracts import InferencePublicationManifest, LocalStepReceipt
-from yeto.rl.engine import mismatch_criteria
+from yeto.rl.engine import mismatch_criteria, offpolicy_source
 from yeto.rl.engine.ports import GroupMetadata, PlacementDescription, PublicationResult, RolloutBatchHandle
 from yeto.rl.engine.trainable_state import TrainableState
 
@@ -269,6 +269,38 @@ class VerlTrainerGroup:
     def __init__(self, island: VerlIsland):
         self.island = island
         self._metrics = None
+        self._cut_trainer = None
+
+    # ---- cut verbs (S25 N7.6; .cut) ----
+    def _cuts(self):
+        if self._cut_trainer is None:
+            from .cut import VerlCutTrainer, optimizer_steps_per_round
+
+            self._cut_trainer = VerlCutTrainer(
+                self.island.call_workers,
+                optimizer_steps_per_round=optimizer_steps_per_round(self.island.trainer.config))
+        return self._cut_trainer
+
+    def layout(self) -> dict[str, int]:
+        return self.actual_layout()
+
+    def actual_layout(self) -> dict[str, int]:
+        from .cut import common_layout, remote_rank_layout
+
+        return common_layout(self.island.call_workers(remote_rank_layout))
+
+    def save_cut(self, *, epoch: int, context) -> str:
+        return self._cuts().save_cut(epoch=epoch, context=context)
+
+    def restore_cut(self, cut_id: str, *, epoch: int, root: str, expect, shared_filesystem: bool = True):
+        return self._cuts().restore_cut(cut_id, epoch=epoch, root=root, expect=expect,
+                                        shared_filesystem=shared_filesystem)
+
+    def confirm_resumed_data_cursor(self, cursor) -> None:
+        self._cuts().confirm_resumed_data_cursor(cursor)
+
+    def reshard_problems(self, plan, **_: object) -> list[str]:
+        return ["verl FSDP2 cuts restore at the same world size only (no DP change)"]
 
     def onload(self) -> None:
         return None
@@ -319,6 +351,8 @@ class VerlTrainerGroup:
             train_step=batch.rollout_id,
             applied_lrs=None if lr is None else (lr,),
         )
+        if grad_norm is not None and self._cut_trainer is not None:
+            self._cut_trainer.check_first_step(1)  # no-op unless a restore is pending
         ids = tuple(s for g in batch.groups for s in g.sample_ids)
         return LocalStepReceipt(
             algorithm="grpo", learner_id=isl.learner_id, learner_generation=0,
@@ -477,3 +511,45 @@ def criteria_from_trainer_batch(isl: VerlIsland, kv_batch) -> None:
     isl.last_criteria = crit
     isl.append_jsonl(f"verl-criteria-{isl.learner_id}.jsonl", crit)
     isl.emit("rl_mismatch_criteria", **{k: v for k, v in crit.items()})
+    if "error" not in crit:
+        try:
+            provenances, read = _row_field(kv_batch, "provenance")
+            event = source_event(train_lp, infer_lp, mask, provenances, read,
+                                 rollout_id=step, trainer_version=step, tis_upper=isl.tis_upper)
+        except Exception as exc:  # noqa: BLE001 - archival, training continues
+            event = source_error(exc, rollout_id=step, trainer_version=step)
+        _emit_offpolicy_source(isl, event)
+
+
+def _row_field(kv_batch, name: str) -> tuple[list | None, str]:
+    """Per-row values of a non-tensor field (``HarborAgentLoop`` puts ``provenance``
+    in ``extra_fields``); ``(None, reason)`` when the batch has none.  That verl's
+    TransferQueue keeps ``extra_fields`` under their own names is not verified."""
+    import transfer_queue as tq
+
+    try:
+        data = tq.kv_batch_get(keys=kv_batch.keys, partition_id=kv_batch.partition_id, select_fields=[name])
+        return list(data[name]), "ok"
+    except Exception as exc:  # noqa: BLE001 - the rows then group under ``unknown``
+        return None, f"missing: {type(exc).__name__}: {str(exc)[:200]}"
+
+
+def source_event(train_lp, infer_lp, mask, provenances, provenance_read: str, *, rollout_id: int,
+                 trainer_version: int, tis_upper: float) -> dict:
+    """The ``offpolicy_source`` event of one verl step (padded tensors, same width)."""
+    event = offpolicy_source.offpolicy_source_event(
+        offpolicy_source.masked_source_samples(train_lp.float().tolist(), infer_lp.float().tolist(),
+                                               mask.tolist(), provenances=provenances),
+        rollout_id=rollout_id, trainer_version=trainer_version, backend="verl", tis_upper=tis_upper)
+    event["provenance_read"] = provenance_read
+    return event
+
+
+def source_error(exc: Exception, *, rollout_id: int, trainer_version: int) -> dict:
+    return {"schema": offpolicy_source.SCHEMA, "rollout_id": int(rollout_id), "trainer_version": int(trainer_version),
+            "backend": "verl", "error": f"{type(exc).__name__}: {str(exc)[:300]}", "sources": []}
+
+
+def _emit_offpolicy_source(isl: VerlIsland, event: dict) -> None:
+    isl.append_jsonl(f"verl-offpolicy-source-{isl.learner_id}.jsonl", event)
+    isl.emit(offpolicy_source.OFFPOLICY_SOURCE_EVENT, **event)

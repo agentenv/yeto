@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import threading
 import time
 from collections.abc import Callable, Iterable, Mapping
@@ -555,11 +556,16 @@ def object_store_binding(args: Any, files: ObjectStore, islands: Any, *,
     return _binding(args, files, islands, journal_dir=journal_dir, buffer=buffer, unmerged=unmerged)
 
 
-def head_store_objects(uri: str) -> ObjectStore:
-    """The head's object API of an ``s3://`` or ``oss://`` checkpoint store."""
-    from yeto.cloud import oss_store
+def head_store_objects(uri: str, environ: Mapping[str, str] | None = None) -> ObjectStore:
+    """The head's object API of an ``s3://`` or ``oss://`` checkpoint store. An
+    ``oss://`` store goes through the relay node of ``oss_relay.RELAY_ENV`` when
+    it is set (a bucket the head cannot reach directly), else directly."""
+    from yeto.cloud import oss_relay, oss_store
 
     if oss_store.is_oss_uri(uri):
+        relay = oss_relay.relay_from_env(os.environ if environ is None else environ)
+        if relay is not None:
+            return oss_relay.RelayOssObjectStore(uri, relay)
         return oss_store.head_objects(uri)
     from yeto.cloud.s3_store import head_objects
 

@@ -16,6 +16,8 @@ import time
 from verl.trainer.ppo.v1.trainer_base import register_trainer
 from verl.trainer.ppo.v1.trainer_sync import PPOTrainerSync
 
+from . import advantage  # noqa: F401 - registers the yeto_grpo estimator in the trainer process
+
 
 @register_trainer("yeto_sync")
 class YetoSyncTrainer(PPOTrainerSync):

@@ -46,7 +46,7 @@ from yeto.rl.quant.release import RequantReleaser
 
 
 def node(name="ppu0", host="u@10.0.0.1", **kw) -> Node:
-    base = dict(device_family="ppu", card="PPU", cards_per_node=8, hbm_gib=144.0, host_memory_gib=2048.0,
+    base = dict(device_family="ppu", cpu_arch="x86_64", card="PPU", cards_per_node=8, hbm_gib=144.0, host_memory_gib=2048.0,
                 runtime="rootfs", fabric="roce", interface="eth0")
     return Node(name=name, host=host, **(base | kw))
 
@@ -60,8 +60,8 @@ def spec(nodes=None, **kw) -> SshTrainerSpec:
 def test_spec_refuses_mixed_families_docker_and_empty():
     with pytest.raises(SshIslandError, match="device family"):
         spec([node(), node("n1", "h1", device_family="npu")])
-    with pytest.raises(SshIslandError, match="docker"):
-        spec([node(runtime="docker")])
+    with pytest.raises(SshIslandError, match="docker_args"):
+        spec([node(runtime="docker", image="img")])
     with pytest.raises(SshIslandError, match="at least one node"):
         SshTrainerSpec(nodes=(), run_id="r", command=("x",), workdir="/")
 
@@ -73,7 +73,7 @@ def test_spec_is_refused_when_the_memory_plan_does_not_fit():
     with pytest.raises(MemoryPlanError, match="does not fit"):
         ssh_trainer_spec(small, shape=shape, plan_overrides={"seq_len": 8192}, run_id="r", command=("x",),
                          workdir="/")
-    ok = ssh_trainer_spec([node(name=f"n{i}", host=f"h{i}") for i in range(8)], shape=shape,
+    ok = ssh_trainer_spec([node(name=f"n{i}", host=f"h{i}", address=f"10.0.0.{i + 1}") for i in range(8)], shape=shape,
                           plan_overrides={"seq_len": 8192, "offload": "full"}, run_id="r", command=("x",),
                           workdir="/")
     assert ok.memory["fits"] and ok.memory["label"].startswith("derived")
@@ -89,10 +89,19 @@ def test_start_script_runs_torchrun_with_rank_rendezvous_and_comm_env():
         assert "--nnodes=2" in script and "--master-addr=10.0.0.1" in script and "--nproc-per-node=8" in script
         assert "export NCCL_SOCKET_IFNAME=eth0" in script and "export NCCL_IB_DISABLE=0" in script
         assert "export YETO_X=1" in script and "setsid bash -c" in script
+        assert f"export YETO_DEVICE_FAMILY={s.nodes[0].device_family}" in script
     assert "--node-rank=0" in script0 and "--node-rank=1" in script1
     assert "yeto.rl.quant.release" in script0 and "--loop" in script0 and "--no-awq" in script0
     assert "yeto.rl.quant.release" not in script1
     assert "'a b'" in script0  # arguments are quoted
+
+
+def test_env_cannot_override_the_inventory_device_family():
+    family = spec().device_family
+    other = "npu" if family != "npu" else "ppu"
+    with pytest.raises(SshIslandError, match="inventory decides"):
+        spec(env={"YETO_DEVICE_FAMILY": other})
+    assert spec(env={"YETO_DEVICE_FAMILY": family}).device_family == family
 
 
 def test_requant_argv_needs_both_awq_inputs():
@@ -115,11 +124,13 @@ class FakeProc:
 
 
 class FakeOps(SshOps):
-    def __init__(self, card_rc=0):
-        self.runs, self.starts, self.card_rc = [], [], card_rc
+    def __init__(self, card_rc=0, uname="x86_64"):
+        self.runs, self.starts, self.card_rc, self.uname = [], [], card_rc, uname
 
     def run(self, n, script, *, timeout=300.0):
         self.runs.append((n.name, script))
+        if script == "uname -m":
+            return subprocess.CompletedProcess([], 0, stdout=self.uname + "\n", stderr="")
         rc = self.card_rc if "smi" in script else 0
         return subprocess.CompletedProcess([], rc, stdout="cards", stderr="")
 
@@ -155,6 +166,22 @@ def test_preflight_fails_when_no_card_tool_answers(tmp_path, checked_cards):
     islands = SshTrainerIslands(spec(), name="t", jobs_path=tmp_path / "j.json", ops=FakeOps(card_rc=127))
     with pytest.raises(SshIslandError, match="no card tool"):
         islands.launch(1, None)
+
+
+@pytest.mark.parametrize("uname", ["aarch64", "ppc64le"])
+def test_preflight_refuses_a_node_of_another_cpu_arch(tmp_path, checked_cards, uname):
+    ops = FakeOps(uname=uname)
+    islands = SshTrainerIslands(spec(), name="t", jobs_path=tmp_path / "j.json", ops=ops)
+    with pytest.raises(SshIslandError, match=f"ppu0: uname -m reports '?{uname}'?.*cpu_arch x86_64"):
+        islands.launch(1, None)
+    assert not ops.starts and not checked_cards
+
+
+def test_preflight_accepts_the_docker_spelling_of_an_arch(tmp_path, checked_cards):
+    islands = SshTrainerIslands(spec(nodes=[node(cpu_arch="aarch64")]), name="t",
+                                jobs_path=tmp_path / "j.json", ops=FakeOps(uname="aarch64"))
+    islands.preflight()
+    assert islands.checked
 
 
 def test_ssh_binding_reads_a_sharded_store_by_key(tmp_path, checked_cards):
@@ -257,7 +284,8 @@ def test_each_bf16_release_becomes_one_w4a8_release_the_sampler_follows(tmp_path
     assert rec.version == 1 and rec.policy_hash == "ha+w4a8-int4-channel" and rec.buffer_selected == 10
     assert rec.buffer_shards == {"npu": 4}
     assert rec.derived_from == {"release_dir": "policy-releases", "seq": 1, "version": 1, "policy_hash": "ha",
-                                "scheme": "w4a8-int4-channel", "awq": "none"}
+                                "scheme": "w4a8-int4-channel", "awq": "none", "awq_source": None,
+                                "expert_matrices": None}
     assert releaser.sync() is None and len(calls) == 1  # converted once
     loaded = []
     follower = PolicyFollower(PolicyReleaseStore(store, release_dir=W4A8_RELEASE_DIR),
@@ -303,6 +331,7 @@ def test_release_cli_one_pass_with_the_real_converter(world):
     assert done.returncode == 0, done.stderr
     rec = PolicyReleaseStore(store, release_dir=W4A8_RELEASE_DIR).latest()
     assert rec.version == 1 and rec.derived_from["awq"] == "fixed-artefact"
+    assert "recipe.yaml" in rec.derived_from["awq_source"] and rec.derived_from["expert_matrices"] == 6
     out = store.root / W4A8_RELEASE_DIR / rec.path
     shards = sorted(p.name for p in original.glob("*.safetensors"))
     assert shards and sorted(p.name for p in out.glob("*.safetensors")) == shards

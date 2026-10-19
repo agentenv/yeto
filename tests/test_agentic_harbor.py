@@ -430,8 +430,10 @@ def test_verl_loop_token_mask_alignment_with_fake_trial(verl_loop):
     loop = _make_loop(loop_mod, recorder, harness)
     out = _run(loop.run({"temperature": 1.0, "top_p": 1.0}, **_ROW))
 
-    assert recorder.opened == [("traj-1", {"temperature": 1.0, "top_p": 1.0})] and recorder.closed == ["traj-1"]
-    assert _FakeTrial.configs == [{"url": "http://recorder/traj-1/v1"}]  # agent talks to the recorder
+    ((session, sampling),) = recorder.opened
+    assert session.startswith("traj-1-") and sampling == {"temperature": 1.0, "top_p": 1.0}
+    assert recorder.closed == [session]  # one session per sample: verl repeats a row n times
+    assert _FakeTrial.configs == [{"url": f"http://recorder/{session}/v1"}]  # agent talks to the recorder
     assert out.prompt_ids == [5, 6, 7]
     assert out.response_ids == [40, 41, 42, 90, 91, 43, 2]
     assert out.response_mask == [1, 1, 1, 0, 0, 1, 1]

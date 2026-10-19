@@ -1,0 +1,133 @@
+# Stage 1 of the S25 goal: GLM5.3-Flash (glm5_next) bf16 full-parameter RL on
+# 4 PPU nodes; the trainer and the sampler both run on PPU, the head runs on
+# this server, the cross-site store is Alibaba OSS.
+#
+#   yeto-stage1 plan  examples/stage1/glm53-flash-ppu.yaml   # expand + check, no SSH
+#   yeto-stage1 run   examples/stage1/glm53-flash-ppu.yaml --confirm-machines-free
+#
+# Every number marked "estimate" is computed, not measured
+# (SESSION25/analysis/A-TRN-ppu-training.md, A-INF-sampler-integration.md).
+# Nothing in this file was run on a PPU.
+
+run_id: s25-stage1-glm53-ppu
+inventory: ppu-inventory.yaml          # relative to this file
+rounds: 3                              # the stage-1 closed loop: 3 RL rounds
+seed: 17
+
+# Rendezvous (eth0) address of each node. The order ppu1..ppu4 = 10.0.0.74..77
+# is assumed from the survey listing; runbook step 1 checks it.
+rendezvous:
+  ppu1: 10.0.0.74
+  ppu2: 10.0.0.75
+  ppu3: 10.0.0.76
+  ppu4: 10.0.0.77
+
+roles:
+  trainer: [ppu1, ppu2, ppu3]          # 24 cards, one pipeline stage per node
+  sampler: [ppu4]                      # 8 cards, one SGLang TP8 engine
+
+model:
+  name: GLM5.3-Flash
+  architecture: glm5_next
+  num_layers: 45                       # 34 KDA + 11 DSA MLA; layer 45 carries MTP
+  params_b: 321                        # 642,652,083,504 B bf16 index / 2
+  expert_params_b: 304                 # A-QNT estimate
+  bf16_source:
+    revision: cecb5eeb9c6b32404a0dd930df81de2c239bdd84
+    origin: modal-volume://apex-w4a8-full/source/cecb5eeb9c6b32404a0dd930df81de2c239bdd84
+    staged: oss://oss-pai-ircyeaqtnfjw11wby2-cn-wulanchabu/yeto/models/apex-flash-1-bf16-cecb5ee/
+    local_dir: /data/models/apex-flash-1-bf16-cecb5ee
+  sampler_initial:                     # round 0: the HF MXFP4 export, not our re-quantizer
+    repo: yetalabs/apex-flash-1-mxfp4-experts
+    revision: 70e86a0
+    staged: oss://oss-pai-ircyeaqtnfjw11wby2-cn-wulanchabu/yeto/models/apex-flash-1-mxfp4-experts-70e86a0/
+    local_dir: /data/models/apex-flash-1-mxfp4-experts-70e86a0
+
+quant:                                  # rounds >= 1: N8.5 re-quantizes each bf16 release
+  scheme: mxfp4-g32-rtn
+  format: mxfp4-pack-quantized
+  release_dir: policy-releases-mxfp4-g32-rtn
+  expected_expert_matrices: 36288       # A-INF post-load check 1
+
+store: oss://oss-pai-ircyeaqtnfjw11wby2-cn-wulanchabu/yeto/s25-stage1
+# The bucket accepts intranet endpoints only. The head on this server reaches
+# it through ppu1: ossutil on ppu1 over SSH (yeto.cloud.oss_relay; main-agent
+# ruling 10-19). With a public endpoint or CNAME, set head: direct.
+store_access:
+  head: relay
+  relay: ppu1
+
+images:
+  sampler: inference-xpu-pytorch-opt:v0.5.17
+  trainer: null                         # N0.2 (T-N02) builds it; until then `run` refuses
+  docker_device_args: []                # PPU device flags of `docker run` (N0.2b, not known yet)
+
+trainer:
+  backend: miles                        # first backend; verl below is written, not first
+  miles:
+    commit: cc76e2391
+    megatron: radixark/Megatron-LM@miles-main
+    mbridge: 89eb108
+    workdir: /data/yeto/miles
+    tp: 4
+    sequence_parallel: true
+    pp: 3
+    pp_layers: [15, 15, 15]             # first / middle / last stage
+    cp: 1
+    ep: 8                               # inside one node
+    etp: 1
+    optimizer_offload_fraction: 1.0     # Adam state + FP32 master on the host
+    memory_estimate:                    # 推算 (T-STAGE1); `plan` checks them against the estimator (N7.1c)
+      weights_grads_gib_per_card: 78.7  # bf16 weights + fp32 main grads, worst stage
+      host_optimizer_gib_per_node: 1196 # 12 B/param x owned share x 8 cards
+    transformer_impl: transformer_engine  # main-agent ruling 10-19 (3): TE stays default; `local` is the N7.5 fallback
+    recompute: full
+    max_tokens_per_gpu: 8192
+    lr: 1.0e-6
+  verl:
+    commit: null                        # pinned by N7.2/N10.3 work; not chosen yet
+    strategy: fsdp2
+    fsdp_size: 24
+    ulysses: 1                          # glm5_next has no Ulysses path (N7.1)
+    param_offload: false
+    optimizer_offload: true
+    lr: 1.0e-6
+
+sampler:
+  engine: sglang
+  engine_version: 0.5.17
+  topology: tp8
+  tp: 8
+  precision: mxfp4
+  max_model_len: 8192
+  port: 30000
+  moe_runner_backend: triton            # report item 4: flashinfer cutlass MoE crashes in graph capture
+  hierarchical_cache: false             # report item 5
+  nextn: false                          # A-INF items 2 and 8
+  renames_weight_packed: true           # MXFP4 stores experts as *.weight_packed; runbook step S5 checks the count
+  in_place_reload: false                # restart per version until runbook step S6 passes
+
+sampling:                               # one value for every source of the run
+  max_tokens: 4096
+  max_prompt_len: 1024
+  temperature: 1.0
+  top_p: 1.0
+  top_k: -1
+  repetition_penalty: 1.0               # neutral: penalties change the behaviour distribution
+  frequency_penalty: 0.0
+  presence_penalty: 0.0
+
+task:                                   # main-agent ruling: GSM8K first, TB2/Codex with N10.9
+  data: zhuzilin/gsm8k
+  data_revision: 0cbd9f31d91ac21a7613dcbc7fef992adac459ae
+  reward: yeto.rl.gsm8k_reward:score
+  rollout_batch_size: 16
+  n_samples_per_prompt: 8
+  # The engine sampler island reads prompts from a local JSONL on the sampler
+  # node (staged from the dataset revision above; runbook S5). Column names
+  # follow the Miles GSM8K examples (--input-key messages --label-key label),
+  # not checked against this revision.
+  prompts_jsonl: /data/datasets/gsm8k-0cbd9f3/train.jsonl
+  input_key: messages
+  label_key: label
+  prompt_format: chat

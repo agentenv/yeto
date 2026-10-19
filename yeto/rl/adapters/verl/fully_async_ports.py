@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from yeto.rl.contracts import InferencePublicationManifest, LocalStepReceipt
+from yeto.rl.engine.offpolicy_source import OFFPOLICY_SOURCE_EVENT
 from yeto.rl.engine.ports import PlacementDescription, PublicationResult, RolloutBatchHandle
 
 from . import publish as pub
@@ -180,6 +181,10 @@ class FullyAsyncTrainerGroup:
         if isl.last_criteria:
             isl.append_jsonl(f"verl-criteria-{isl.learner_id}.jsonl", isl.last_criteria)
             isl.emit("rl_mismatch_criteria", **isl.last_criteria)
+        if source := out.get("offpolicy_source"):
+            source = {**source, "rollout_id": int(batch.rollout_id)}
+            isl.append_jsonl(f"verl-offpolicy-source-{isl.learner_id}.jsonl", source)
+            isl.emit(OFFPOLICY_SOURCE_EVENT, **source)
 
         def metric(*suffixes):
             for key, value in metrics.items():

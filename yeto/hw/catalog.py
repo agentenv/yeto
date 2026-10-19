@@ -2,6 +2,12 @@
 (yeto-framework-decoupling 7.7a, design D9a-1).
 
 ``compat_group`` is ``"<vendor>-<card>"`` in lower case, e.g. ``nvidia-h100``.
+With the HBM size (S25 N2.1) it is ``"<vendor>-<card>-<N>g"``, e.g.
+``ascend-910b4-64g``: the 910B4 ships with 32 GiB and with 64 GiB (the user's
+cluster changed from one to the other on 2026-10-16), and the two must not
+merge. The vendor names the device family one to one
+(:data:`DEVICE_FAMILY_BY_VENDOR`; a PPU is ``thead``), so the group always
+carries the device family.
 Phase 1 rule: two islands may merge only when their groups are identical
 (H100 and H200 are different groups).  The value comes from this catalog,
 never from a cloud name; an unknown card is an error before launch (no
@@ -35,6 +41,17 @@ CARD_VENDOR: Mapping[str, str] = {
     "810E": "thead", "M890": "thead",
 }
 
+# Nominal HBM sizes (GiB) a card ships with. Read from our machines: 910B4
+# 64 GiB (inventory, 2026-10-16) and 32 GiB (ModelArts), M890 144 GiB
+# (ppu-smi 147456 MiB, SESSION25/N0.1-ppu-survey.md). The others are public
+# product figures, not read on our nodes. 810E: not known, so any reported
+# size is used as is (rounded).
+CARD_HBM_GIB: Mapping[str, tuple[int, ...]] = {
+    "910B": (32, 64), "910B4": (32, 64), "910B2": (64,), "910B3": (64,), "910C": (128,),
+    "810E": (), "M890": (144,),
+    "H100": (80,), "H200": (141,), "A100": (40, 80), "A100-80GB": (80,), "B200": (180,),
+}
+
 # torch device type -> device family in the backend identity. A PPU is absent
 # on purpose: its torch device type is "cuda", so only the card name tells it
 # apart from an NVIDIA GPU (see VENDOR_BY_DEVICE_FAMILY).
@@ -43,6 +60,7 @@ DEVICE_FAMILY_BY_DEVICE_TYPE: Mapping[str, str] = {"cuda": "nvidia", "npu": "asc
 # Launcher device family (yeto.gpu_spec.DEVICE_FAMILIES) -> vendor.
 VENDOR_BY_DEVICE_FAMILY: Mapping[str, str] = {"cuda": "nvidia", "npu": "ascend",
                                               "ppu": "thead"}
+DEVICE_FAMILY_BY_VENDOR: Mapping[str, str] = {v: k for k, v in VENDOR_BY_DEVICE_FAMILY.items()}
 
 
 def device_family(device_type: str | None = None) -> str:
@@ -92,10 +110,45 @@ def _canonical(card: str) -> str:
                           f"(known: {sorted(CARD_VENDOR)}); cannot derive compat_group")
 
 
-def compat_group(card: str) -> str:
-    """``"H100"`` -> ``"nvidia-h100"``; unknown card -> :class:`UnknownCardType`."""
+def nominal_hbm_gib(card: str, reported_gib: float) -> int:
+    """The nominal HBM size of ``card`` that a reported (usable) size belongs to.
+
+    Card tools report the size minus the driver reservation, so the largest
+    nominal size within ``card_tools.HBM_TOLERANCE`` below the report wins.
+    A card without known sizes returns the report rounded; a report that fits
+    no known size raises :class:`UnknownCardType`."""
+    from .card_tools import hbm_matches  # noqa: PLC0415 - card_tools imports gpu_spec
+
     name = _canonical(card)
-    return f"{CARD_VENDOR[name]}-{name.lower()}"
+    if not reported_gib or reported_gib <= 0:
+        raise UnknownCardType(f"{name}: HBM size must be positive, got {reported_gib!r}")
+    sizes = CARD_HBM_GIB.get(name, ())
+    if not sizes:
+        return int(round(reported_gib))
+    fitting = [size for size in sizes if hbm_matches(size, reported_gib) and reported_gib <= size * 1.02]
+    if not fitting:
+        raise UnknownCardType(f"{name} with {reported_gib:g} GiB HBM is not a known variant "
+                              f"(known sizes: {list(sizes)} GiB); cannot derive compat_group")
+    return max(fitting)
+
+
+def compat_group(card: str, hbm_gib: float | None = None) -> str:
+    """``"H100"`` -> ``"nvidia-h100"``; with ``hbm_gib``: ``("910B4", 61.9)`` ->
+    ``"ascend-910b4-64g"``. Unknown card or HBM variant -> :class:`UnknownCardType`."""
+    name = _canonical(card)
+    group = f"{CARD_VENDOR[name]}-{name.lower()}"
+    if hbm_gib is None:
+        return group
+    return f"{group}-{nominal_hbm_gib(name, float(hbm_gib))}g"
+
+
+def compat_group_family(group: str) -> str:
+    """The launcher device family (``cuda``/``npu``/``ppu``) of a compat group."""
+    vendor = validate_compat_group(group).split("-", 1)[0]
+    try:
+        return DEVICE_FAMILY_BY_VENDOR[vendor]
+    except KeyError:
+        raise ValueError(f"compat_group {group!r}: unknown vendor {vendor!r}") from None
 
 
 def validate_compat_group(value: str) -> str:

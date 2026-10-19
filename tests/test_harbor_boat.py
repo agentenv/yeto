@@ -285,6 +285,54 @@ def test_file_transfer_goes_through_staging_and_docker_cp(tmp_path: Path):
     assert any("rm -rf" in c for c in fake.commands)  # staging is cleaned up
 
 
+class _CleanupFails(FakeBoat):
+    """The staging cleanup command cannot start (boat API error); ``transfer_fails``: get_file too."""
+
+    def __init__(self, *, transfer_fails: bool) -> None:
+        super().__init__()
+        self.transfer_fails = transfer_fails
+        self.cleanups = 0
+
+    def start_command(self, sandbox_id: str, command: str) -> int:
+        if command.startswith("sudo -n rm -"):
+            self.cleanups += 1
+            raise BoatError("command API: 503")
+        return super().start_command(sandbox_id, command)
+
+    def get_file(self, sandbox_id: str, path: str) -> bytes:
+        if self.transfer_fails:
+            raise BoatError("file API: 502")
+        return super().get_file(sandbox_id, path)
+
+
+def _download(fake: FakeBoat, tmp_path: Path, which: str) -> None:
+    sandbox = _sandbox(fake)
+
+    async def go():
+        await sandbox.start(SPEC)
+        try:
+            if which == "bytes":
+                await sandbox.download_bytes("/logs/verifier/reward.txt")
+            else:
+                await sandbox.download_dir("/logs/verifier", tmp_path / "out")
+        finally:
+            await sandbox.close()
+
+    asyncio.run(go())
+
+
+@pytest.mark.parametrize("which", ["bytes", "dir"])
+def test_a_failed_download_keeps_its_error_when_the_cleanup_also_fails(tmp_path: Path, which: str):
+    fake = _CleanupFails(transfer_fails=True)
+    with pytest.raises(BoatError, match="file API: 502"):  # not the cleanup's 503
+        _download(fake, tmp_path, which)
+    assert fake.cleanups == 1 and fake.deleted  # cleanup tried, VM deleted
+
+    fake = _CleanupFails(transfer_fails=False)  # after a good transfer the cleanup error is raised
+    with pytest.raises(BoatError, match="command API: 503"):
+        _download(fake, tmp_path, which)
+
+
 def test_pack_and_extract_round_trip(tmp_path: Path):
     (tmp_path / "a" / "empty").mkdir(parents=True)
     (tmp_path / "a" / "f").write_text("x")

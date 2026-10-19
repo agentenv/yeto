@@ -133,13 +133,20 @@ class RunReceipt:
 class SampleIndexEntry:
     """One sample in the durable buffer: its id, the policy version that produced it
     (behavior version, P0-S schema 4) and where its payload is. One sample per
-    entry; the cross-island group index is ``sample_pool.SampleIndexEntry``."""
+    entry; the cross-island group index is ``sample_pool.SampleIndexEntry``.
+
+    ``provenance``: the source of the sample (``sampler_engine.Provenance``
+    record: device family, card, engine and version, precision, quantization
+    scheme, topology); None for entries written before it existed or by a
+    sampler that does not set it (read as ``unknown``). Data only: it never
+    enters a hash or the version gate (rl-hetero-sampler-engines D3)."""
 
     sample_id: str
     behavior_version: int
     payload_ref: str
     tokens: int = 0
     appended_at: float = 0.0
+    provenance: Mapping[str, str] | None = field(default=None, compare=False, hash=False)
 
 
 @dataclass(frozen=True)
