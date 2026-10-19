@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from yeto.launch import stage1
+from yeto.rl import stage1
 
 REPO = Path(__file__).resolve().parents[1]
 PLAN = REPO / "examples" / "stage1" / "glm53-flash-ppu.yaml"

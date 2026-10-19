@@ -50,8 +50,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .node_inventory import InventoryError, Node, load_inventory
-from .topology import island_comm_env
+from yeto.launch.node_inventory import InventoryError, Node, load_inventory
+from yeto.launch.topology import island_comm_env
 
 PLAN_SCHEMA = "yeto.stage1/v1"
 BACKENDS = ("miles", "verl")
@@ -419,7 +419,7 @@ def expand(plan: Stage1Plan, *, hf_config: str | Path | None = None) -> Expanded
                    "sampling": dict(sampling), "engines": sampler_runs}
 
     # Re-quantizer (node 0 of the trainer, a side process of the island) ---
-    from .ssh_trainer_island import requant_argv  # noqa: PLC0415
+    from yeto.launch.ssh_trainer_island import requant_argv  # noqa: PLC0415
 
     argv = [*requant_argv(store, str(model["sampler_initial"]["local_dir"]), python="python3"),
             "--target-dir", str(quant["release_dir"])]
