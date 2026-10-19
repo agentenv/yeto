@@ -18,8 +18,8 @@ Recorded per configuration:
   * ``backend_identity`` without the engine commit.
 
 No code hash is recorded (rl-identity-tiering D5, L9.10): no plugin source
-hash, no ``ports_runtime_fingerprint``, no engine commit, and the code-derived
-hashes in ``runtime_attrs`` (:data:`CODE_HASH_KEYS`) are masked. The run code
+hash, no ``ports_runtime_fingerprint``, no engine commit; since L9.11 the
+translated ``runtime_attrs`` carry no plugin source hash either. The run code
 pack pins code; a plugin-only change needs no re-record. Specs built here carry
 plugin references without a source hash, so their hashes do not depend on code.
 
@@ -79,34 +79,6 @@ def _plugin_entry(path: str, recorded_sha: str | None) -> dict[str, Any]:
         except ValueError:
             entry["module_file"] = "<outside-repo>/" + file.name
     return entry
-
-
-# Hashes in the translated runtime attrs that change with plugin source code
-# (L9.10 masks them): the reward pipeline's merged stage source hash, and the
-# yeto_algo_plugins digest taken over a config that contains it.
-CODE_HASH_KEYS = ("pipeline_sha256",)
-CODE_HASH_MASK = "<CODE-HASH>"
-
-
-def _mask_code_hashes(attrs: dict[str, Any]) -> dict[str, Any]:
-    def walk(value: Any) -> tuple[Any, bool]:
-        if isinstance(value, dict):
-            out, masked = {}, False
-            for key, item in value.items():
-                if key in CODE_HASH_KEYS and item is not None:
-                    out[key], hit = CODE_HASH_MASK, True
-                else:
-                    out[key], hit = walk(item)
-                masked = masked or hit
-            if masked and isinstance(out.get("sha256"), str):  # digest over masked content
-                out["sha256"] = CODE_HASH_MASK
-            return out, masked
-        if isinstance(value, list):
-            items = [walk(v) for v in value]
-            return [v for v, _ in items], any(hit for _, hit in items)
-        return value, False
-
-    return walk(attrs)[0]
 
 
 def _spec_plugins(node: Any, out: dict[str, str | None]) -> None:
@@ -384,8 +356,7 @@ def record_config(config: Config) -> dict[str, Any]:
         "execution_profile": _execution_profile(args, launch, spec,
                                                 yeto_policy_sync=yeto_policy_sync),
         "placement": json.loads(norm(json.dumps(_jsonable(launch.placement)))),
-        "runtime_attrs": _mask_code_hashes(
-            json.loads(norm(json.dumps(_jsonable(dict(launch.runtime_attrs)))))),
+        "runtime_attrs": json.loads(norm(json.dumps(_jsonable(dict(launch.runtime_attrs))))),
         "plugins": plugins_of(json.loads(spec.canonical_json()), argv),
         # Phase 5 (design D7); without the engine commit (L9.10, design D5).
         "backend_identity": _backend_identity(),

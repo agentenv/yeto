@@ -300,12 +300,11 @@
     "reward_pipeline": {
      "advantage_params": {},
      "advantage_transform": "maxrl",
-     "pipeline_sha256": "<CODE-HASH>",
      "reward_shapers": []
     },
     "schema": "yeto-algo-plugins-v1"
    },
-   "sha256": "<CODE-HASH>"
+   "sha256": "4cb0160ab062621ca62ef3516fb1ef6deec073db97a13c4e04484c4a60ca60a8"
   },
   "yeto_rl_dynamic_sampling_max_replacements": null
  },

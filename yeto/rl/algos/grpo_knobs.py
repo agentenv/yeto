@@ -290,13 +290,11 @@ def plugins_config(spec) -> dict[str, Any] | None:
             "reward_shapers": _shapers_json(spec.advantage.reward_shapers),
             "advantage_transform": spec.advantage.transform,
             "advantage_params": dict(spec.advantage.transform_params),
-            "pipeline_sha256": rp.pipeline_sha256(),
         }
     if spec.loss.aggregation == "constant":
         config["reducer"] = {"denominator": spec.loss.constant_denominator}
     if spec.sampling.overlong_filter:
         config["overlong_filter"] = True
-        config["sample_filters_sha256"] = rp.plugin_sha(rp.SAMPLE_FILTERS_PATH)
     if not config:
         return None
     config["algorithm_spec_sha256"] = spec.sha256()

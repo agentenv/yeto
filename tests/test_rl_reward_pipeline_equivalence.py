@@ -52,7 +52,7 @@ def _args(estimator="grpo", *, rewards_normalization=True, std=True, n=4, batch=
     # is the "identity" configuration compared with the built-in path.
     setattr(args, rp.PIPELINE_ATTR, rp.plugins_payload({
         "reward_pipeline": {"reward_shapers": [], "advantage_transform": "grpo_default",
-                            "advantage_params": {}, "pipeline_sha256": rp.pipeline_sha256()},
+                            "advantage_params": {}},
         "algorithm_spec_sha256": spec.sha256(),
     }))
     return args
