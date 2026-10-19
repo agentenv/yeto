@@ -55,6 +55,7 @@ resumes every shard where that cut left it).
 from __future__ import annotations
 
 import fcntl
+import heapq
 import json
 import os
 import re
@@ -405,24 +406,30 @@ class FileSampleBuffer:
 
     def _merge_shards(self) -> None:
         objects = self.index.objects
-        new: list[dict[str, Any]] = []
+        new: list[list[dict[str, Any]]] = []  # per shard, in shard order
         for shard in shard_names(objects):
             reader = self._shard_readers.get(shard)
             if reader is None:  # first seen here: skip what an earlier merger merged
                 done = sum(1 for s in self._shard_of if s == shard)
                 reader = self._shard_readers[shard] = ObjectIndex(objects, prefix=shard_prefix(shard),
                                                                   start=done)
+            records = []
             for record in reader.read_new():
                 if record.get("end"):
                     self._shards_ended.add(shard)
                 else:
-                    new.append({**record, "shard": shard, "shard_pos": int(record["pos"])})
+                    records.append({**record, "shard": shard, "shard_pos": int(record["pos"])})
+            new.append(records)
         if self._ended:
-            if new:
-                raise SampleBufferError(f"shard records after the data end: {json.dumps(new[0])[:200]}")
+            if first := next((r for records in new for r in records), None):
+                raise SampleBufferError(f"shard records after the data end: {json.dumps(first)[:200]}")
             return
-        new.sort(key=lambda r: (float(r.get("appended_at", 0.0)), r["shard"], r["shard_pos"]))
-        for record in new:
+        # Interleave by appended_at but keep every shard in its own order: the merged
+        # records of a shard must stay a prefix of it, because a restarted merger
+        # resumes each shard after its merged count (a clock step back would
+        # otherwise merge a later record first, then skip the earlier one).
+        merged = heapq.merge(*new, key=lambda r: (float(r.get("appended_at", 0.0)), r["shard"]))
+        for record in merged:
             self._write_record(lambda pos, record=record: {**record, "pos": pos})
         if self._shard_readers and self._shards_ended >= set(self._shard_readers):
             self._write_record(lambda pos: {"schema": SCHEMA, "pos": pos, "end": True})

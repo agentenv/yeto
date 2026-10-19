@@ -224,7 +224,9 @@ class PolicyReleaseStore:
             check_complete(release, staging)
             staging.replace(target)
         for old in self.cache_dir.iterdir():
-            if old.is_dir() and old.name != release.path:
+            # The cache of another release directory (e.g. W4A8_RELEASE_DIR under the
+            # default one) belongs to another store: never drop it here.
+            if old.is_dir() and old.name != release.path and not old.name.startswith(RELEASE_DIR):
                 shutil.rmtree(old, ignore_errors=True)
         return target
 

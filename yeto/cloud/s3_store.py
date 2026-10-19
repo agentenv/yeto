@@ -246,11 +246,16 @@ class S3ObjectStore:
         size, etag = int(head["ContentLength"]), head.get("ETag")
         part = self.transfer.part_for(size)
         full = self._key(key)
+        if size <= part:
+            # One GET reads one version; no pin, so a rewritten pointer file is read
+            # as it is now instead of failing the pull.
+            data = self.read(key)
+            if data is None:  # deleted since the HEAD (a prune)
+                return False
+            Path(target).write_bytes(data)
+            return True
         pin = {"IfMatch": etag} if etag else {}
         with open(target, "wb") as fh:
-            if size <= part:
-                fh.write(self.client.get_object(Bucket=self.bucket, Key=full, **pin)["Body"].read())
-                return True
             fh.truncate(size)
 
             def fetch(offset: int) -> None:

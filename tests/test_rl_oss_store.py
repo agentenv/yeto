@@ -17,7 +17,8 @@ from yeto.cloud.s3_store import MIN_PART_BYTES, TransferSettings
 from yeto.launch.credentials import SECRET_ENV_NAMES, split_secret_envs
 from yeto.launch.storage import rl_checkpoint_store_plan, store_object_envs, store_unreachable_reason
 from yeto.rl.engine.object_store import ObjectStoreError, TreeMirror
-from yeto.rl.engine.policy_release import LATEST, RECORD, RELEASE_DIR, PolicyFollower, PolicyReleaseStore
+from yeto.rl.engine.policy_release import (LATEST, RECORD, RELEASE_DIR, W4A8_RELEASE_DIR, PolicyFollower,
+                                          PolicyReleaseStore)
 from yeto.rl.engine.resume import STORE_IMPL_ENV, CheckpointStore, store_for
 from yeto.rl.engine.sample_buffer import FileSampleBuffer, SampleBufferError, needs_shards, shard_index
 from yeto.rl.engine.sampler_loop import SamplerLoop
@@ -172,6 +173,20 @@ def test_the_merged_index_ends_when_every_shard_ended():
     assert trainer.refresh() == 2 and trainer.data_ended
 
 
+def test_a_clock_step_back_in_one_shard_keeps_that_shard_in_order():
+    """The merged records of a shard stay a prefix of it, so a restarted merger
+    (which resumes each shard after its merged count) neither skips nor repeats."""
+    objects = _objects()
+    a = FileSampleBuffer(objects, batch_size=1, index=shard_index("a"))
+    a.append(_entry("a0", appended_at=5.0))
+    a.append(_entry("a1", appended_at=1.0))  # the sampler host's clock stepped back
+    trainer = FileSampleBuffer(objects, batch_size=1, merge_shards=True)
+    assert [s.entry.sample_id for s in trainer.select("t", 10)] == ["a0", "a1"]
+    a.append(_entry("a2", appended_at=6.0))
+    again = FileSampleBuffer(objects, batch_size=1, merge_shards=True)
+    assert [s.entry.sample_id for s in again.select("t", 10)] == ["a0", "a1", "a2"]
+
+
 def test_a_sampler_caps_its_backlog_on_its_own_shard(tmp_path):
     objects = _objects()
     store = CheckpointStore(tmp_path / "releases")
@@ -220,6 +235,21 @@ def test_a_reader_never_loads_a_partial_release(tmp_path):
     fake.objects[("bkt", key)] = held
     assert follower.refresh().version == 2 and follower.incomplete is None
     assert loaded == [(1, b"one"), (2, b"two-two")]
+
+
+def test_a_bf16_follower_keeps_the_w4a8_download_of_the_same_cache(tmp_path):
+    fake = FakeOss()
+    trainer = store_for("/t", environ=_env(tmp_path / "trainer"), client=fake)
+    sampler = store_for("/s", environ=_env(tmp_path / "sampler"), client=fake)
+    cache = tmp_path / "cache"
+    for release_dir in (RELEASE_DIR, W4A8_RELEASE_DIR):
+        PolicyReleaseStore(trainer, release_dir=release_dir).release(
+            1, "h1", lambda d: (d / "w").write_bytes(b"w"))
+    w4a8 = PolicyReleaseStore(sampler, cache_dir=cache, release_dir=W4A8_RELEASE_DIR)
+    kept = w4a8.resolve(w4a8.latest())
+    bf16 = PolicyReleaseStore(sampler, cache_dir=cache)
+    bf16.resolve(bf16.latest())
+    assert (kept / "w").is_file()
 
 
 def test_a_mirror_uploads_data_then_the_release_record_then_the_pointer(tmp_path):
@@ -290,6 +320,22 @@ def test_a_download_fails_when_the_object_is_replaced_midway(tmp_path):
     objects.write("k", b"x" * (2 * MIN_PART_BYTES))
     with pytest.raises(Exception, match="PreconditionFailed"):
         objects.read_file("k", tmp_path / "out")
+
+
+def test_a_small_object_is_read_as_it_is_now_and_a_vanished_one_is_missing(tmp_path):
+    class Rewriting(FakeOss):
+        def get_object(self, Bucket, Key, Range=None, IfMatch=None):
+            if Key.endswith("LATEST.json"):  # a pointer rewritten after the HEAD
+                self.objects[(Bucket, Key)] = b"new"
+            if Key.endswith("gone"):  # pruned after the HEAD
+                self.objects.pop((Bucket, Key), None)
+            return super().get_object(Bucket, Key, Range=Range, IfMatch=IfMatch)
+
+    objects = _objects(Rewriting())
+    objects.write("LATEST.json", b"old")
+    assert objects.read_file("LATEST.json", tmp_path / "latest") and (tmp_path / "latest").read_bytes() == b"new"
+    objects.write("gone", b"x")
+    assert objects.read_file("gone", tmp_path / "gone") is False
 
 
 def test_transfer_settings_keep_a_300_gb_file_within_the_part_limit():
