@@ -54,6 +54,7 @@ resumes every shard where that cut left it).
 
 from __future__ import annotations
 
+import dataclasses
 import fcntl
 import heapq
 import json
@@ -248,7 +249,7 @@ def _entry(record: dict[str, Any]) -> SampleIndexEntry:
     return SampleIndexEntry(
         sample_id=record["sample_id"], behavior_version=int(record["behavior_version"]),
         payload_ref=record["payload_ref"], tokens=int(record["tokens"]),
-        appended_at=float(record["appended_at"]))
+        appended_at=float(record["appended_at"]), provenance=record.get("provenance"))
 
 
 class UnmergedShards:
@@ -364,12 +365,13 @@ class FileSampleBuffer:
         if entry.payload_ref and not self.index.has_payload(entry.payload_ref):
             raise SampleBufferError(f"sample {entry.sample_id}: payload {entry.payload_ref} is missing")
         if entry.appended_at == 0.0:
-            entry = SampleIndexEntry(entry.sample_id, entry.behavior_version, entry.payload_ref,
-                                     entry.tokens, self.clock())
+            entry = dataclasses.replace(entry, appended_at=self.clock())
+        # ``provenance`` is written only when set, so a line without it reads as before.
+        source = {} if entry.provenance is None else {"provenance": dict(entry.provenance)}
         self._write_record(lambda pos: {"schema": SCHEMA, "pos": pos, "sample_id": entry.sample_id,
                                         "behavior_version": int(entry.behavior_version),
                                         "payload_ref": entry.payload_ref, "tokens": int(entry.tokens),
-                                        "appended_at": float(entry.appended_at)})
+                                        "appended_at": float(entry.appended_at), **source})
 
     def mark_data_end(self) -> None:
         """The samplers will append nothing more."""

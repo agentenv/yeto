@@ -147,10 +147,14 @@ def main(argv: list[str] | None = None) -> int:
         smoothing, awq = AwqSmoothing.from_artefact(Path(a.recipe), Path(a.awq_scales)), "fixed-artefact"
     else:
         p.error("give --recipe and --awq-scales (option R2) or --no-awq (option R1)")
+    from .requant import CheckpointLayout
+
+    # The scheme tag follows the template format (W4A8 int4 or MXFP4), so readers can check it (N8.3).
+    scheme = CheckpointLayout.load(Path(a.template)).scheme.name
     store = store_for(a.store)
     releaser = RequantReleaser(PolicyReleaseStore(store, keep=a.keep, release_dir=a.source_dir),
                                PolicyReleaseStore(store, keep=a.keep, release_dir=a.target_dir),
-                               requantizer(Path(a.template), smoothing), awq=awq)
+                               requantizer(Path(a.template), smoothing), scheme=scheme, awq=awq)
     if a.loop:
         releaser.run(threading.Event(), a.poll_seconds)
     else:
