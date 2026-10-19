@@ -16,14 +16,20 @@ What the plan expands (all derived from one place, so the names agree):
 * nodes and roles: trainer nodes, sampler nodes, card counts, rendezvous
   addresses;
 * trainer, first backend Miles/Megatron: the parallel layout (TP x PP x EP,
-  the pipeline layer split), the Megatron arguments the glm5_next recipe must
-  give, the yeto Miles island argv; second backend verl/FSDP2: the trainer
-  overrides (written, not the first backend);
-* sampler: the SGLang TP8 server argv and environment from the
-  ``sglang-server`` adapter itself (:mod:`yeto.rl.adapters.sampler_engines`);
+  the pipeline layer split), the model arguments of the yeto glm5_next recipe
+  (:mod:`yeto.rl.adapters.miles.models.glm5_next`), the parallel and optimizer
+  arguments, the yeto Miles island argv, and the island as an SSH trainer
+  island (:class:`~yeto.launch.ssh_trainer_island.SshTrainerSpec`: Ray on
+  every node in a docker container, the island entry on node 0); second
+  backend verl/FSDP2: the trainer overrides (written, not the first backend);
+* sampler: the engine sampler island's spec file and command
+  (``python -m yeto.rl.engine.engine_sampler``), which starts the SGLang TP8
+  server of the ``sglang-server`` adapter (:mod:`yeto.rl.adapters.sampler_engines`);
 * re-quantizer: the :mod:`yeto.rl.quant.release` argv (N8.5 MXFP4 RTN), with
   the release directory named after the scheme;
-* store: the run directory on OSS and the OSS staging paths of the weights;
+* store: the run directory on OSS, the OSS staging paths of the weights, and
+  how the head reaches the store (``store_access``: through a relay node,
+  :mod:`yeto.cloud.oss_relay`, or directly);
 * steps: the ordered per-node scripts of the run (preflight, staging, sampler,
   trainer).
 
@@ -38,6 +44,7 @@ Nothing here was run against a PPU node.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import importlib
 import importlib.util
 import ipaddress
@@ -51,7 +58,9 @@ from pathlib import Path
 from typing import Any
 
 from yeto.launch.node_inventory import InventoryError, Node, load_inventory
-from yeto.launch.topology import island_comm_env
+from yeto.rl.adapters.miles.models import glm5_next
+from yeto.rl.adapters.sampler_engines.from_spec import FACTORY as ENGINE_FACTORY
+from yeto.rl.engine.telemetry import DEVICE_FAMILY_ENV
 
 PLAN_SCHEMA = "yeto.stage1/v1"
 BACKENDS = ("miles", "verl")
@@ -59,6 +68,8 @@ NEUTRAL_PENALTIES = {"repetition_penalty": 1.0, "frequency_penalty": 0.0, "prese
 RAY_PORT = 6379
 HOST_USABLE_FRACTION = 0.85  # as yeto.rl.fullparam.memory.TrainPlan.host_usable_fraction
 RELEASE_DIR_PREFIX = "policy-releases-"
+HEAD_ACCESS = ("relay", "direct")  # how the head reaches the store (store_access.head)
+RAY_JOIN_TIMEOUT_S = 600
 
 
 class Stage1Error(ValueError):
@@ -132,9 +143,11 @@ class Step:
     node: str | None
     script: str
     purpose: str
+    service: bool = False  # runs for the whole run (started, not waited for)
 
     def record(self) -> dict[str, Any]:
-        return {"name": self.name, "node": self.node, "purpose": self.purpose, "script": self.script}
+        return {"name": self.name, "node": self.node, "purpose": self.purpose, "script": self.script,
+                "service": self.service}
 
 
 @dataclass
@@ -144,6 +157,7 @@ class Expanded:
     sampler: dict[str, Any] = field(default_factory=dict)
     requant: dict[str, Any] = field(default_factory=dict)
     store: dict[str, Any] = field(default_factory=dict)
+    trainer_spec: Any = None  # the SshTrainerSpec the trainer steps come from
     steps: list[Step] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     gaps: list[str] = field(default_factory=list)
@@ -203,8 +217,8 @@ def megatron_static_gib(model: Mapping[str, Any], layout: Mapping[str, int]) -> 
 
 def megatron_args(model: Mapping[str, Any], miles: Mapping[str, Any], layout: Mapping[str, int],
                   sampling: Mapping[str, Any]) -> list[str]:
-    """The Megatron arguments the Miles glm5_next recipe must pass on top of the
-    model arguments (Miles ``scripts/models/glm5.3-flash.py``)."""
+    """The parallel, recompute and optimizer arguments of the run, on top of the
+    model arguments of the glm5_next recipe (``glm5_next.model_argv``)."""
     split = [int(x) for x in miles["pp_layers"]]
     args = ["--tensor-model-parallel-size", str(layout["tp"]),
             "--pipeline-model-parallel-size", str(layout["pp"]),
@@ -221,18 +235,12 @@ def megatron_args(model: Mapping[str, Any], miles: Mapping[str, Any], layout: Ma
              "--max-tokens-per-gpu", str(int(miles["max_tokens_per_gpu"])),
              "--optimizer", "adam", "--lr", repr(float(miles["lr"])), "--lr-decay-style", "constant",
              "--use-distributed-optimizer", "--bf16",
-             "--rollout-max-response-len", str(int(sampling["max_tokens"])),
-             "--transformer-impl", str(miles["transformer_impl"])]
+             "--rollout-max-response-len", str(int(sampling["max_tokens"]))]
     fraction = float(miles.get("optimizer_offload_fraction") or 0.0)
     if fraction > 0:
         args += ["--optimizer-cpu-offload", "--optimizer-offload-fraction", repr(fraction),
                  "--overlap-cpu-optimizer-d2h-h2d"]
-    if miles["transformer_impl"] == "local":  # N7.5 fallback: no TE kernels
-        args.append("--no-gradient-accumulation-fusion")
     return args
-
-
-TE_ONLY_MODEL_ARGS = ("--moe-grouped-gemm", "--moe-permute-fusion")  # N7.5 E6, E7
 
 
 def verl_overrides(verl: Mapping[str, Any], trainer_nodes: Sequence[Node], task: Mapping[str, Any],
@@ -359,13 +367,12 @@ def expand(plan: Stage1Plan, *, hf_config: str | Path | None = None) -> Expanded
     per_node = trainers[0].cards_per_node if trainers else 0
     miles = _section(trainer_cfg, "miles")
     layout = megatron_layout(miles, cards, per_node)
-    common_env = {"YETO_RL_DEVICE_FAMILY": trainers[0].device_family, "YETO_RUN_ID": plan.run_id,
+    common_env = {DEVICE_FAMILY_ENV: trainers[0].device_family, "YETO_RUN_ID": plan.run_id,
                   "YETO_RL_STORE": store, "HF_HUB_OFFLINE": "1"}
-    comm = island_comm_env(trainers[0].device_family, trainers[0].fabric, trainers[0].interface,
-                           num_nodes=len(trainers))
-    trainer_env = {**common_env, **comm, "TORCHINDUCTOR_COMPILE_THREADS": "1"}
+    trainer_env = {**common_env, "TORCHINDUCTOR_COMPILE_THREADS": "1"}
     model_dir = str(model["bf16_source"]["local_dir"])
-    state_dir = f"/data/yeto/{plan.run_id}"
+    state_dir = state_dir_of(plan)
+    impl = str(miles["transformer_impl"])
     island_argv = ["python3", "-m", "yeto.rl.adapters.miles.island_entry",
                    "--model", model_dir, "--model-revision", str(model["bf16_source"]["revision"]),
                    "--data", str(task["data"]), "--data-revision", str(task["data_revision"]),
@@ -376,6 +383,7 @@ def expand(plan: Stage1Plan, *, hf_config: str | Path | None = None) -> Expanded
                    "--inner-lr", repr(float(miles["lr"])), "--seed", str(int(plan.doc.get("seed", 0))),
                    "--parameter-mode", "full", "--rl-sample-role", "trainer",
                    "--rl-resume-store", store,
+                   "--rl-model-recipe", glm5_next.MODEL_NAME, "--rl-transformer-impl", impl,
                    "--tensor-parallel", str(layout["tp"]), "--pipeline-parallel", str(layout["pp"]),
                    "--expert-parallel", str(layout["ep"]),
                    "--miles-root", str(miles["workdir"]),
@@ -391,13 +399,18 @@ def expand(plan: Stage1Plan, *, hf_config: str | Path | None = None) -> Expanded
                    "--completed-groups-path", f"{state_dir}/island-checkpoint.pt",
                    "--event-tape", f"{state_dir}/events.jsonl", "--audit-dir", f"{state_dir}/audit",
                    *_provenance_args(str(task["reward"]))]
+    try:
+        model_args = glm5_next.model_argv(num_layers=int(model["num_layers"]), transformer_impl=impl)
+    except ValueError as error:
+        raise Stage1Error(f"plan: trainer.miles.transformer_impl: {error}") from None
     out.trainer = {
         "backend": backend, "nodes": [n.name for n in trainers], "cards": cards,
         "image": images.get("trainer"), "env": trainer_env,
         "miles": {"commit": miles["commit"], "megatron": miles["megatron"], "mbridge": miles["mbridge"],
                   "layout": layout, "static_memory_estimate": megatron_static_gib(model, layout),
+                  "model_args": model_args,
                   "megatron_args": megatron_args(model, miles, layout, sampling),
-                  "drop_model_args": list(TE_ONLY_MODEL_ARGS) if miles["transformer_impl"] == "local" else [],
+                  "drop_model_args": list(glm5_next.TE_ONLY_ARGV) if impl == glm5_next.LOCAL else [],
                   "island_argv": island_argv},
         "verl": {"commit": _section(trainer_cfg, "verl").get("commit"),
                  "overrides": verl_overrides(_section(trainer_cfg, "verl"), trainers, task, sampling, model_dir)},
@@ -409,8 +422,12 @@ def expand(plan: Stage1Plan, *, hf_config: str | Path | None = None) -> Expanded
     sampler_runs = []
     for node in samplers:
         engine = _sampler_engine(plan, node)
-        sampler_runs.append({"node": node.name, "argv": engine.argv(engine.config.base_dir),
-                             "env": {**common_env, "YETO_RL_DEVICE_FAMILY": node.device_family, **engine.env()},
+        env = {**common_env, DEVICE_FAMILY_ENV: node.device_family, **engine.env()}
+        sampler_runs.append({"node": node.name, "engine_argv": engine.argv(engine.config.base_dir), "env": env,
+                             "spec_path": f"{state_dir}/sampler-{node.name}.json",
+                             "spec": sampler_spec(plan, node, engine),
+                             "argv": ["python3", "-m", "yeto.rl.engine.engine_sampler",
+                                      "--spec", f"{state_dir}/sampler-{node.name}.json"],
                              "url": f"http://{rendezvous.get(node.name)}:{engine.config.port}"})
     out.sampler = {"engine": sampler_cfg["engine"], "engine_version": sampler_cfg["engine_version"],
                    "image": images.get("sampler"), "topology": sampler_cfg["topology"],
@@ -426,10 +443,117 @@ def expand(plan: Stage1Plan, *, hf_config: str | Path | None = None) -> Expanded
     out.requant = {"node": trainers[0].name if trainers else None, "scheme": quant["scheme"],
                    "format": quant["format"], "argv": argv, "loop_argv": [*argv, "--loop"]}
 
+    out.store["head_access"] = head_store_access(plan)
+    out.trainer_spec = trainer_island_spec(plan, out, trainers) if backend == "miles" and trainers else None
     out.steps = _steps(plan, out, trainers, samplers)
     out.errors = check(plan, out)
     out.gaps = gaps(plan, out)
     return out
+
+
+def state_dir_of(plan: Stage1Plan) -> str:
+    """The run's state directory on every node (``/data`` is on every node)."""
+    return f"/data/yeto/{plan.run_id}"
+
+
+def sampler_spec(plan: Stage1Plan, node: Node, engine: Any) -> dict[str, Any]:
+    """The engine sampler island's spec file (``engine_sampler_entry``)."""
+    sampling, task, quant = plan.section("sampling"), plan.section("task"), plan.section("quant")
+    config, options = engine.config, engine.options
+    server = {f.name: getattr(config, f.name) for f in dataclasses.fields(config)}
+    server["base_dir"] = str(config.base_dir)
+    server["extra_args"] = list(config.extra_args)
+    server["extra_env"] = dict(config.extra_env)
+    state_dir = state_dir_of(plan)
+    return {
+        "sampler_id": f"{plan.run_id}-{node.name}",
+        "engine": {"factory": ENGINE_FACTORY, "adapter": f"{plan.section('sampler')['engine']}-server",
+                   "server": server,
+                   "options": {k: list(v) if isinstance(v, tuple) else v
+                               for k, v in dataclasses.asdict(options).items()}},
+        "sampling": {"max_tokens": int(sampling["max_tokens"]), "temperature": float(sampling["temperature"]),
+                     "top_p": float(sampling["top_p"]), "top_k": int(sampling["top_k"]),
+                     "n": int(task["n_samples_per_prompt"]), "seed": int(plan.doc.get("seed", 0)),
+                     **{k: float(sampling.get(k, v)) for k, v in NEUTRAL_PENALTIES.items()}},
+        "num_rollouts": int(plan.doc["rounds"]),
+        # decision T-GAPS 10-19: one round ahead of the trainer at most (stage 1 runs on-policy)
+        "max_backlog_groups": int(task["rollout_batch_size"]),
+        "max_prompt_tokens": int(sampling["max_prompt_len"]),
+        "base_version": 0, "base_dir": str(config.base_dir),
+        "store": run_store(plan), "release_dir": str(quant["release_dir"]),
+        "prompts": {"path": str(_get(task, "prompts_jsonl", "task")), "input_key": str(_get(task, "input_key", "task")),
+                    "label_key": str(_get(task, "label_key", "task")),
+                    "groups_per_round": int(task["rollout_batch_size"]),
+                    "format": str(task.get("prompt_format", "chat")), "trust_remote_code": True},
+        "reward": str(task["reward"]), "reward_kind": "miles",
+        "checks": {"expected_expert_matrices": int(quant["expected_expert_matrices"])},
+        "event_tape": f"{state_dir}/sampler-{node.name}/events.jsonl",
+    }
+
+
+def head_store_access(plan: Stage1Plan) -> dict[str, Any]:
+    """How the head on this server reaches the run store (``store_access``):
+    ``relay`` = ``ossutil`` on a relay node over SSH (:mod:`yeto.cloud.oss_relay`;
+    main-agent ruling 10-19), ``direct`` = the OSS endpoint from this server."""
+    from yeto.cloud.oss_relay import RELAY_ENV, Relay, relay_shell  # noqa: PLC0415
+
+    access = plan.doc.get("store_access") or {"head": "direct"}
+    mode = str(access.get("head", "direct"))
+    if mode not in HEAD_ACCESS:
+        raise Stage1Error(f"plan: store_access.head {mode!r} is not one of {HEAD_ACCESS}")
+    if mode == "direct":
+        return {"mode": mode, "env": {}}
+    name = str(access.get("relay") or "")
+    node = next((n for n in plan.nodes if n.name == name), None)
+    if node is None:
+        raise Stage1Error(f"plan: store_access.relay {name!r} is not an inventory node")
+    relay = Relay(node.host, str(access.get("ossutil") or "ossutil"))
+    return {"mode": mode, "relay": node.name, "relay_host": node.host, "env": {RELAY_ENV: node.host},
+            "check": relay_shell(relay, f"{relay.ossutil} ls -s {shlex.quote(run_store(plan) + '/')} | tail -n 3")}
+
+
+def trainer_island_spec(plan: Stage1Plan, out: Expanded, trainers: Sequence[Node]) -> Any:
+    """The Miles trainer island as an SSH trainer island (``SshTrainerSpec``):
+    Ray on every trainer node, the island entry on node 0 after every node
+    joined, the re-quantizer as node 0's side process; one docker container per
+    node. Unset image or device flags show as placeholders (gaps N0.2/N0.2b)."""
+    from yeto.launch.ssh_trainer_island import SshTrainerSpec  # noqa: PLC0415
+
+    images, rendezvous = plan.section("images"), plan.section("rendezvous")
+    nodes = tuple(n if n.address else dataclasses.replace(n, address=str(rendezvous.get(n.name)))
+                  for n in trainers)
+    island = shlex.join(out.trainer["miles"]["island_argv"])
+    join = (f"python3 -c {shlex.quote(_RAY_JOIN)} \"$SKYPILOT_NUM_NODES\" {RAY_JOIN_TIMEOUT_S}")
+    script = (
+        "set -eu\n"
+        "head=$(echo \"$SKYPILOT_NODE_IPS\" | sed -n 1p)\n"
+        "me=$(echo \"$SKYPILOT_NODE_IPS\" | sed -n \"$((SKYPILOT_NODE_RANK + 1))p\")\n"
+        "if [ \"$SKYPILOT_NODE_RANK\" = 0 ]; then\n"
+        f"  ray start --head --port={RAY_PORT} --node-ip-address=\"$me\" --num-gpus=\"$SKYPILOT_NUM_GPUS_PER_NODE\"\n"
+        f"  {join}\n"
+        f"  exec {island}\n"
+        "fi\n"
+        f"exec ray start --address=\"$head:{RAY_PORT}\" --node-ip-address=\"$me\" "
+        "--num-gpus=\"$SKYPILOT_NUM_GPUS_PER_NODE\" --block\n")
+    try:
+        return SshTrainerSpec(
+            nodes=nodes, run_id=plan.run_id, workdir=str(_section(plan.section("trainer"), "miles")["workdir"]),
+            run_script=script, env=out.trainer["env"], requant=tuple(out.requant["argv"]),
+            image=images.get("trainer") or "<trainer-image-unset>",
+            docker_args=tuple(images.get("docker_device_args") or ("<docker-device-args-unset>",)))
+    except Exception as error:  # SshIslandError: reported as a check error, not a crash
+        raise Stage1Error(f"trainer island: {error}") from None
+
+
+# Rank 0 waits until every trainer node joined Ray (argv: node count, timeout seconds).
+_RAY_JOIN = ("import sys, time, ray\n"
+             "ray.init(address=\"auto\")\n"
+             "want, deadline = int(sys.argv[1]), time.time() + float(sys.argv[2])\n"
+             "alive = lambda: sum(n[\"Alive\"] for n in ray.nodes())\n"
+             "while alive() < want:\n"
+             "    if time.time() > deadline:\n"
+             "        sys.exit(f\"only {alive()} of {want} nodes joined Ray\")\n"
+             "    time.sleep(5)\n")
 
 
 def _verl_memory(trainers: Sequence[Node], plan: Stage1Plan, sampling: Mapping[str, Any],
@@ -448,8 +572,8 @@ def _verl_memory(trainers: Sequence[Node], plan: Stage1Plan, sampling: Mapping[s
 
 def _steps(plan: Stage1Plan, out: Expanded, trainers: Sequence[Node], samplers: Sequence[Node]) -> list[Step]:
     from yeto.hw.card_tools import preflight_commands  # noqa: PLC0415
+    from yeto.launch.ssh_trainer_island import container_name, remote_paths, start_script  # noqa: PLC0415
 
-    rendezvous = plan.section("rendezvous")
     steps: list[Step] = []
     for node in plan.nodes:
         tools = "\n".join(shlex.join(c) for c in preflight_commands(node.device_family))
@@ -457,6 +581,10 @@ def _steps(plan: Stage1Plan, out: Expanded, trainers: Sequence[Node], samplers: 
                           f"set -eu\n{tools}\nip -4 -o addr show {node.interface or 'eth0'}\n"
                           "df -h /data\nfree -g\n",
                           "cards match the inventory; rendezvous address and /data present"))
+    access = out.store["head_access"]
+    if access["mode"] == "relay":
+        steps.append(Step("head-store-relay", None, f"set -eu\n{access['check']}\n",
+                          f"the head reads the run store through {access['relay']} (ossutil over SSH)"))
     # The re-quantizer on trainer node 0 reads the MXFP4 export as its template.
     for key, nodes in (("bf16_source", trainers), ("sampler_initial", (*samplers, *trainers[:1]))):
         src = plan.section("model")[key]
@@ -468,29 +596,27 @@ def _steps(plan: Stage1Plan, out: Expanded, trainers: Sequence[Node], samplers: 
                               f"{key} weights on the node's /data (revision {src['revision']})"))
     for run in out.sampler["engines"]:
         node = next(n for n in samplers if n.name == run["node"])
+        spec_json = json.dumps(run["spec"], indent=1, sort_keys=True)
+        steps.append(Step(f"sampler-spec-{node.name}", node.name,
+                          f"set -eu\nmkdir -p {shlex.quote(str(Path(run['spec_path']).parent))}\n"
+                          f"cat > {shlex.quote(run['spec_path'])} <<'YETO_SAMPLER_SPEC'\n{spec_json}\n"
+                          "YETO_SAMPLER_SPEC\n",
+                          "the engine sampler island's spec file"))
         steps.append(Step(f"sampler-{node.name}", node.name,
                           _docker(plan, node, "sampler", out.sampler["image"], run["argv"], run["env"]),
-                          "SGLang TP8 engine on the round-0 MXFP4 weights (the yeto engine sampler "
-                          "island drives it)"))
-    head = trainers[0] if trainers else None
-    for rank, node in enumerate(trainers):
-        ip = rendezvous.get(node.name)
-        ray = (["ray", "start", "--head", f"--port={RAY_PORT}", f"--node-ip-address={ip}",
-                f"--num-gpus={node.cards_per_node}", "--block"] if rank == 0 else
-               ["ray", "start", f"--address={rendezvous.get(head.name)}:{RAY_PORT}",
-                f"--node-ip-address={ip}", f"--num-gpus={node.cards_per_node}", "--block"])
-        steps.append(Step(f"trainer-ray-{node.name}", node.name,
-                          _docker(plan, node, "trainer-ray", out.trainer["image"], ray, out.trainer["env"]),
-                          "Ray node of the Miles trainer island"))
-    if head is not None:
-        island = out.trainer["miles"]["island_argv"]
-        steps.append(Step("trainer-island", head.name,
-                          _docker(plan, head, "trainer", out.trainer["image"], island, out.trainer["env"]),
-                          "yeto Miles island entry, sample role trainer; reads samples from the store"))
-        steps.append(Step("requant-sidecar", head.name,
-                          _docker(plan, head, "requant", out.trainer["image"], out.requant["loop_argv"],
-                                  out.trainer["env"]),
-                          "re-quantize every bf16 release to MXFP4 RTN under the scheme's release dir"))
+                          "engine sampler island: starts SGLang TP8 on the round-0 MXFP4 weights, runs the "
+                          "post-load checks, writes groups to the store, follows the MXFP4 releases",
+                          service=True))
+    spec = out.trainer_spec
+    if spec is not None:
+        paths = remote_paths(plan.run_id, "trainer", 0)
+        for rank, node in enumerate(spec.nodes):
+            steps.append(Step(f"trainer-{node.name}", node.name,
+                              start_script(spec, rank, {}, paths,
+                                           container=container_name(plan.run_id, "trainer", 0, rank)),
+                              ("Ray head, then the yeto Miles island entry (sample role trainer) and the "
+                               "MXFP4 re-quantizer side process" if rank == 0 else "Ray worker of the trainer island"),
+                              service=True))
     return steps
 
 
@@ -519,6 +645,8 @@ def check(plan: Stage1Plan, out: Expanded) -> list[str]:
             ipaddress.ip_address(str(ip))
         except ValueError:
             errors.append(f"{node.name}: rendezvous address {ip!r} is not an IP address")
+        if node.address is not None and node.address != str(ip):
+            errors.append(f"{node.name}: rendezvous address {ip} differs from the inventory address {node.address}")
     if len({(n.device_family, n.card, n.cards_per_node) for n in trainers}) > 1:
         errors.append("trainer nodes differ in device family, card or card count")
 
@@ -654,36 +782,71 @@ def gaps(plan: Stage1Plan, out: Expanded) -> list[str]:
         if gap := _check_island_argv(out.trainer["miles"]["island_argv"]):
             found.append(gap)
         recipes = _miles_recipes()
-        if not any("glm5" in r for r in recipes):
-            found.append(f"Miles island: no glm5_next model recipe passes trainer.miles.megatron_args "
+        if glm5_next.MODEL_NAME not in recipes:
+            found.append(f"Miles island: no {glm5_next.MODEL_NAME} model recipe "
                          f"(--rl-model-recipe choices: {recipes})")
-        found.append("head launcher: `yeto launch` does not start an SSH trainer island from the "
-                     "inventory yet (N1.3); the trainer-island step runs the island entry directly")
+        if gap := _full_parameter_layout_gap(plan, out):
+            found.append(gap)
     else:
         if not out.trainer["verl"]["commit"]:
             found.append("trainer.verl.commit is unset (verl pin)")
         found.append("verl backend: no SSH launch path for the verl trainer island and no cut save path (N7.6 verl)")
-    store = out.store["run"]
-    if store.startswith("oss://"):
+    if out.store["run"].startswith("oss://") and out.store["head_access"]["mode"] == "direct":
         found.append("head on this server cannot reach the intranet-only OSS bucket (PublicEndpointForbidden): "
-                     "needs a CNAME/public endpoint or a relay through ppu1 (runbook N3.5)")
+                     "set store_access.head: relay (through ppu1) or give a public endpoint/CNAME (runbook N3.5)")
     return found
+
+
+def _full_parameter_layout_gap(plan: Stage1Plan, out: Expanded) -> str | None:
+    """The Miles island's own full-parameter layout rule (``run_config``)."""
+    from yeto.rl.engine.run_config import full_parameter_layout_problem  # noqa: PLC0415
+
+    argv = out.trainer["miles"]["island_argv"]
+    problem = full_parameter_layout_problem(
+        data_parallel=out.trainer["miles"]["layout"]["dp"],
+        actor_num_nodes=int(argv[argv.index("--actor-num-nodes") + 1]),
+        rollout_gpus=int(argv[argv.index("--rollout-num-gpus") + 1]),
+        rollout_gpus_per_engine=1)  # the island's default; it gives no engine
+    if problem is None:
+        return None
+    return (f"Miles island: the full-parameter mode refuses this layout ({problem}; run_config Milestone 1): "
+            f"{len(plan.nodes_of('trainer'))} trainer nodes, DP {out.trainer['miles']['layout']['dp']}, "
+            "samples from the store instead of colocated engines")
 
 
 # --------------------------------------------------------------------- CLI
 
 def run_steps(out: Expanded, *, ssh: Sequence[str] = ("ssh", "-o", "BatchMode=yes"),
-              runner=subprocess.run) -> int:
-    """Run the steps in order; stop at the first failure."""
+              runner=subprocess.run, starter=None) -> int:
+    """Run the steps in order; stop at the first failure. A service step is
+    started (``starter``, default ``subprocess.Popen``) and not waited for; after
+    the last step the run waits for the first trainer node's service, whose
+    exit is the run's exit (the other services are then left to the operator:
+    runbook S11 stops them)."""
+    starter = starter or (lambda argv, script: subprocess.Popen(  # noqa: S603
+        argv, stdin=subprocess.PIPE, text=True))
     hosts = {n.name: n.host for n in out.plan.nodes}
+    services: list[tuple[Step, Any]] = []
     for step in out.steps:
         print(f"[yeto-stage1] step {step.name} on {step.node or 'head'}: {step.purpose}", flush=True)
         argv = ["bash", "-c", step.script] if step.node is None else [*ssh, hosts[step.node], "bash", "-s"]
+        if step.service:
+            proc = starter(argv, step.script)
+            if step.node is not None and getattr(proc, "stdin", None) is not None:
+                proc.stdin.write(step.script)
+                proc.stdin.close()
+            services.append((step, proc))
+            continue
         rc = runner(argv, input=None if step.node is None else step.script, text=True).returncode
         if rc != 0:
             print(f"[yeto-stage1] step {step.name} failed (exit {rc}); later steps not run", file=sys.stderr)
             return rc
-    return 0
+    trainer = next((p for step, p in services if step.name.startswith("trainer-")), None)
+    if trainer is None:
+        return 0
+    rc = trainer.wait()
+    print(f"[yeto-stage1] trainer island ended (exit {rc})", file=sys.stderr if rc else sys.stdout, flush=True)
+    return rc
 
 
 def main(argv: list[str] | None = None) -> int:

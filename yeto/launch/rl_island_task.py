@@ -104,6 +104,11 @@ def make_miles_island_task(
         f" --model {shlex.quote(args.model)}"
         f" --rl-model-recipe {shlex.quote(args.rl_model_recipe)}"
         + (
+            f" --rl-transformer-impl {args.rl_transformer_impl}"
+            if getattr(args, "rl_transformer_impl", "transformer_engine") != "transformer_engine"
+            else ""
+        )
+        + (
             f" --rl-training-attention-backend {args.rl_training_attention_backend}"
             if getattr(args, "rl_training_attention_backend", "auto") not in (None, "auto")
             else ""

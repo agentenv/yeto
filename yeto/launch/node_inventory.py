@@ -19,14 +19,23 @@ Example::
         host_memory_gib: 1024
         fabric: roce
         interface: eth0
+        address: 172.28.11.10
         mounts: {/mnt/shared: /mnt/shared}
         image: REGISTRY/yeto-ascend:TAG
         runtime: docker
+        docker_args: [--device, /dev/davinci0, ...]
         price_per_card_hour: 0.0
+
+``address`` is the node's IP on the cluster network (the ``interface``), which
+the other nodes dial for rendezvous; ``host`` may be an SSH alias that only the
+head resolves. ``docker_args`` are the device flags of ``docker run`` for the
+node's device family (a ``runtime: docker`` trainer island refuses to start
+without them).
 """
 
 from __future__ import annotations
 
+import ipaddress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -44,8 +53,8 @@ RUNTIMES = ("docker", "rootfs")
 
 _REQUIRED = ("name", "host", "device_family", "card", "cards_per_node", "hbm_gib",
              "host_memory_gib")
-_KNOWN = _REQUIRED + ("proxy_jump", "fabric", "interface", "mounts", "image", "runtime",
-                      "price_per_card_hour", "roles")
+_KNOWN = _REQUIRED + ("proxy_jump", "fabric", "interface", "address", "mounts", "image", "runtime",
+                      "docker_args", "price_per_card_hour", "roles")
 
 
 class InventoryError(ValueError):
@@ -66,9 +75,11 @@ class Node:
     proxy_jump: str | None = None
     fabric: str = "tcp"
     interface: str | None = None
+    address: str | None = None  # IP on the cluster network (rendezvous); None: not declared
     mounts: Mapping[str, str] = field(default_factory=dict)
     image: str | None = None
     runtime: str = "docker"
+    docker_args: tuple[str, ...] = ()  # device flags of `docker run` (runtime docker)
     price_per_card_hour: float | None = None
     roles: tuple[str, ...] = ()
 
@@ -162,6 +173,16 @@ def parse_node(raw: Any, *, index: int) -> Node:
             isinstance(k, str) and isinstance(v, str) for k, v in mounts.items()):
         raise InventoryError(f"node {name}: mounts must be a map of host path to "
                              f"container path, got {mounts!r}")
+    address = raw.get("address")
+    if address is not None:
+        try:
+            address = str(ipaddress.ip_address(_require_text(address, name, "address")))
+        except ValueError:
+            raise InventoryError(f"node {name}: address must be an IP address (the rendezvous "
+                                 f"address on the cluster network), got {address!r}") from None
+    docker_args = raw.get("docker_args") or ()
+    if not isinstance(docker_args, (list, tuple)) or not all(isinstance(a, str) for a in docker_args):
+        raise InventoryError(f"node {name}: docker_args must be a list of strings, got {docker_args!r}")
     price = raw.get("price_per_card_hour")
     if price is not None and (isinstance(price, bool) or not isinstance(price, (int, float))
                               or price < 0):
@@ -183,10 +204,12 @@ def parse_node(raw: Any, *, index: int) -> Node:
         fabric=fabric,
         interface=(_require_text(raw["interface"], name, "interface")
                    if raw.get("interface") is not None else None),
+        address=address,
         mounts=dict(mounts),
         image=(_require_text(raw["image"], name, "image")
                if raw.get("image") is not None else None),
         runtime=runtime,
+        docker_args=tuple(docker_args),
         price_per_card_hour=(float(price) if price is not None else None),
         roles=tuple(roles),
     )

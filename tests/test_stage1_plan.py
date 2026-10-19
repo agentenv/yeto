@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import shlex
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -54,13 +55,14 @@ def test_names_agree_across_roles(shipped):
 
 def test_sampler_command_comes_from_the_adapter(shipped):
     engine = shipped.sampler["engines"][0]
-    argv = engine["argv"]
+    argv = engine["engine_argv"]  # the island entry starts this server
     assert argv[argv.index("--tp") + 1] == "8"
     assert argv[argv.index("--model-path") + 1].endswith("mxfp4-experts-70e86a0")
     assert "--speculative-algorithm" not in argv  # no NEXTN in stage 1
     assert argv[argv.index("--moe-runner-backend") + 1] == "triton"
     assert engine["env"]["MX_PATCH"] == "1"
     assert engine["url"] == "http://10.0.0.77:30000"
+    assert engine["argv"][-2:] == ["--spec", engine["spec_path"]]
 
 
 def test_max_tokens_is_one_value_everywhere(shipped):
@@ -87,9 +89,11 @@ def test_island_argv_parses_with_the_island_parser(shipped):
 def test_steps_order_and_staging(shipped):
     names = [s.name for s in shipped.steps]
     assert names[:4] == [f"preflight-ppu{i}" for i in range(1, 5)]
-    assert names.index("stage-sampler_initial-ppu1") < names.index("requant-sidecar")  # template on node 0
-    assert names.index("sampler-ppu4") < names.index("trainer-island")
-    assert names[-1] == "requant-sidecar"
+    assert names.index("stage-sampler_initial-ppu1") < names.index("trainer-ppu1")  # requant template on node 0
+    assert names.index("sampler-spec-ppu4") < names.index("sampler-ppu4") < names.index("trainer-ppu1")
+    assert names[-3:] == ["trainer-ppu1", "trainer-ppu2", "trainer-ppu3"]
+    assert [s.name for s in shipped.steps if s.service] == ["sampler-ppu4", *names[-3:]]
+    assert "yeto.rl.quant.release" in shipped.steps[-3].script  # node 0 side process
     for step in shipped.steps:
         if step.script.startswith("docker run"):
             shlex.split(step.script)  # quotable as one command
@@ -97,7 +101,7 @@ def test_steps_order_and_staging(shipped):
 
 def test_gaps_block_run_until_wired(shipped, capsys):
     assert any("N0.2" in g for g in shipped.gaps)
-    assert any("OSS" in g for g in shipped.gaps)
+    assert any("DP=1" in g for g in shipped.gaps)  # Miles full-parameter rule (T-GAPS finding)
     assert stage1.main(["run", str(PLAN), "--confirm-machines-free"]) == 2
     assert "run refused" in capsys.readouterr().err
 
@@ -134,6 +138,26 @@ def test_run_steps_stops_at_first_failure(shipped):
     assert len(seen) == 2 and seen[0][-3:] == ["ppu1", "bash", "-s"]
 
 
+def test_run_steps_starts_services_and_waits_for_the_trainer(shipped):
+    started = []
+
+    class Proc:
+        stdin = None
+
+        def __init__(self, argv):
+            self.argv = argv
+
+        def wait(self):
+            return 0 if "ppu1" in self.argv else 9
+
+    def runner(argv, input=None, text=True):
+        return SimpleNamespace(returncode=0)
+
+    assert stage1.run_steps(shipped, runner=runner,
+                            starter=lambda argv, script: started.append(argv) or Proc(argv)) == 0
+    assert len(started) == 4  # the sampler and the three trainer nodes
+
+
 @pytest.mark.parametrize("edit, message", [
     (lambda d: d["trainer"]["miles"].update(pp_layers=[15, 15, 14]), "sum to 44"),
     (lambda d: d["trainer"]["miles"].update(pp_layers=[23, 22]), "2 stages"),
@@ -147,6 +171,7 @@ def test_run_steps_stops_at_first_failure(shipped):
     (lambda d: d["model"]["bf16_source"].update(local_dir="/data/models/bf16"), "bf16_source revision"),
     (lambda d: d["roles"].update(sampler=["ppu3", "ppu4"]), "both trainer and sampler"),
     (lambda d: d["rendezvous"].update(ppu2="ppu2"), "not an IP address"),
+    (lambda d: d["rendezvous"].update(ppu2="10.0.0.99"), "differs from the inventory address"),
     (lambda d: d["trainer"]["miles"].update(optimizer_offload_fraction=0.0), "activations"),
     (lambda d: d.update(store="s3://bucket/x"), "oss://"),
 ])
@@ -166,7 +191,18 @@ def test_te_fallback_drops_te_only_model_args(tmp_path):
     out = _variant(tmp_path, lambda d: d["trainer"]["miles"].update(transformer_impl="local"))
     assert out.errors == []
     assert out.trainer["miles"]["drop_model_args"] == ["--moe-grouped-gemm", "--moe-permute-fusion"]
-    assert "--no-gradient-accumulation-fusion" in out.trainer["miles"]["megatron_args"]
+    model_args = out.trainer["miles"]["model_args"]
+    assert "--no-gradient-accumulation-fusion" in model_args and "--moe-grouped-gemm" not in model_args
+    island = out.trainer["miles"]["island_argv"]
+    assert island[island.index("--rl-transformer-impl") + 1] == "local"
+
+
+def test_direct_head_access_keeps_the_oss_gap(tmp_path):
+    out = _variant(tmp_path, lambda d: d.update(store_access={"head": "direct"}))
+    assert any("OSS" in g for g in out.gaps)
+    assert not any(s.name == "head-store-relay" for s in out.steps)
+    with pytest.raises(stage1.Stage1Error, match="not an inventory node"):
+        _variant(tmp_path, lambda d: d.update(store_access={"head": "relay", "relay": "boat"}))
 
 
 def test_verl_backend_expands(tmp_path):

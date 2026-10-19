@@ -50,6 +50,12 @@ quant:                                  # rounds >= 1: N8.5 re-quantizes each bf
   expected_expert_matrices: 36288       # A-INF post-load check 1
 
 store: oss://oss-pai-ircyeaqtnfjw11wby2-cn-wulanchabu/yeto/s25-stage1
+# The bucket accepts intranet endpoints only. The head on this server reaches
+# it through ppu1: ossutil on ppu1 over SSH (yeto.cloud.oss_relay; main-agent
+# ruling 10-19). With a public endpoint or CNAME, set head: direct.
+store_access:
+  head: relay
+  relay: ppu1
 
 images:
   sampler: inference-xpu-pytorch-opt:v0.5.17
@@ -114,3 +120,11 @@ task:                                   # main-agent ruling: GSM8K first, TB2/Co
   reward: yeto.rl.gsm8k_reward:score
   rollout_batch_size: 16
   n_samples_per_prompt: 8
+  # The engine sampler island reads prompts from a local JSONL on the sampler
+  # node (staged from the dataset revision above; runbook S5). Column names
+  # follow the Miles GSM8K examples (--input-key messages --label-key label),
+  # not checked against this revision.
+  prompts_jsonl: /data/datasets/gsm8k-0cbd9f3/train.jsonl
+  input_key: messages
+  label_key: label
+  prompt_format: chat

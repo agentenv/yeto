@@ -39,9 +39,16 @@ _MODE = (
     ),
     shared_flag(
         "--rl-model-recipe",
-        choices=["generic", "deepseek-v4-flash"],
+        choices=["generic", "deepseek-v4-flash", "glm5_next"],
         default="generic",
         help="model-specific Miles memory/kernel contract",
+    ),
+    shared_flag(
+        "--rl-transformer-impl",
+        choices=["transformer_engine", "local"],
+        default="transformer_engine",
+        help="Megatron layer implementation of the glm5_next recipe: transformer_engine "
+        "(default) or local, the TE-free fallback (no grouped GEMM, no permute fusion)",
     ),
     shared_flag(
         "--rl-training-attention-backend",

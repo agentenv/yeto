@@ -327,6 +327,7 @@ LEAF_POLICY: dict[str, _Check] = {
     "model_recipe.training_attention_backend": _ok,
     "model_recipe.gdn.gated_delta_net": _ok,
     "model_recipe.gdn.qkv_format": _ok,
+    "model_recipe.transformer_impl": _ok,
     **{f"geometry.{name}": _ok for name in _GEOMETRY_FIELDS},
     **{
         f"geometry.moe.{name}": _ok
@@ -771,8 +772,14 @@ def translate_run_config(
         )
     dynamic_filter = _algorithm_filter(config, algorithm)
 
-    from yeto.rl.engine.run_config import RECIPE_DEEPSEEK_V4_FLASH, RECIPE_QWEN3_5, RECIPE_QWEN3_8_NEXT
+    from yeto.rl.engine.run_config import (
+        RECIPE_DEEPSEEK_V4_FLASH,
+        RECIPE_GLM5_NEXT,
+        RECIPE_QWEN3_5,
+        RECIPE_QWEN3_8_NEXT,
+    )
     from .lr_schedule import lr_schedule_argv
+    from .models import glm5_next
     from .models.deepseek_v4 import ports_recipe as deepseek_v4
 
     geometry = config.geometry
@@ -840,6 +847,8 @@ def translate_run_config(
             "--hidden-dropout",
             "0.0",
         ]
+    elif recipe.name == RECIPE_GLM5_NEXT:
+        model_name = glm5_next.MODEL_NAME  # the model flags replace the geometry below
     elif recipe.name == RECIPE_DEEPSEEK_V4_FLASH:
         model_name = deepseek_v4.MODEL_NAME
         model_recipe_values = deepseek_v4.recipe_argv(trainable)
@@ -1130,6 +1139,10 @@ def translate_run_config(
         for flag in ("--sglang-tp-size", "--sglang-ep-size"):
             if flag not in values:
                 values.extend((flag, engine))
+    if recipe.name == RECIPE_GLM5_NEXT:
+        # the plugin spec replaces the Bridge-geometry model flags
+        values = glm5_next.apply_recipe(values, glm5_next.model_argv(
+            num_layers=geometry.num_layers, transformer_impl=recipe.transformer_impl))
     values.extend(extra_argv)
     reject_fault_tolerance_flags(values[1:])  # generated argv never carries FT flags
     _refuse_decoupled_ppo_breakers(values)  # also when the spec emitted the flag

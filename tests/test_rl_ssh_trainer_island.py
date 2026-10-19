@@ -60,8 +60,8 @@ def spec(nodes=None, **kw) -> SshTrainerSpec:
 def test_spec_refuses_mixed_families_docker_and_empty():
     with pytest.raises(SshIslandError, match="device family"):
         spec([node(), node("n1", "h1", device_family="npu")])
-    with pytest.raises(SshIslandError, match="docker"):
-        spec([node(runtime="docker")])
+    with pytest.raises(SshIslandError, match="docker_args"):
+        spec([node(runtime="docker", image="img")])
     with pytest.raises(SshIslandError, match="at least one node"):
         SshTrainerSpec(nodes=(), run_id="r", command=("x",), workdir="/")
 
@@ -73,7 +73,7 @@ def test_spec_is_refused_when_the_memory_plan_does_not_fit():
     with pytest.raises(MemoryPlanError, match="does not fit"):
         ssh_trainer_spec(small, shape=shape, plan_overrides={"seq_len": 8192}, run_id="r", command=("x",),
                          workdir="/")
-    ok = ssh_trainer_spec([node(name=f"n{i}", host=f"h{i}") for i in range(8)], shape=shape,
+    ok = ssh_trainer_spec([node(name=f"n{i}", host=f"h{i}", address=f"10.0.0.{i + 1}") for i in range(8)], shape=shape,
                           plan_overrides={"seq_len": 8192, "offload": "full"}, run_id="r", command=("x",),
                           workdir="/")
     assert ok.memory["fits"] and ok.memory["label"].startswith("derived")

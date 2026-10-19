@@ -1,11 +1,12 @@
 # Stage-1 node inventory: 4 x PPU nodes, 8 x ZW-M890P 144 GiB each
 # (SESSION25/N0.1-ppu-survey.md, read-only survey 2026-10-16).
 # host = the SSH alias in ~/.ssh/config of the head (this server). The aliases
-# do not resolve on the nodes; the stage-1 plan gives each node's rendezvous
-# address (eth0) separately.
+# do not resolve on the nodes; address = the node's eth0 IP, which the other
+# nodes dial (the plan's rendezvous section must agree).
 nodes:
   - name: ppu1
     host: ppu1
+    address: 10.0.0.74                # eth0; order assumed, runbook S1 checks it
     device_family: ppu
     card: M890
     cards_per_node: 8
@@ -19,6 +20,7 @@ nodes:
     roles: [trainer]
   - name: ppu2
     host: ppu2
+    address: 10.0.0.75                # eth0; order assumed, runbook S1 checks it
     device_family: ppu
     card: M890
     cards_per_node: 8
@@ -32,6 +34,7 @@ nodes:
     roles: [trainer]
   - name: ppu3
     host: ppu3
+    address: 10.0.0.76                # eth0; order assumed, runbook S1 checks it
     device_family: ppu
     card: M890
     cards_per_node: 8
@@ -45,6 +48,7 @@ nodes:
     roles: [trainer]
   - name: ppu4
     host: ppu4
+    address: 10.0.0.77                # eth0; order assumed, runbook S1 checks it
     device_family: ppu
     card: M890
     cards_per_node: 8

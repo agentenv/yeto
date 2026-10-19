@@ -21,7 +21,8 @@ start on the base weights with the post-load checks (:mod:`.sampler_checks`;
 a failure there stops the island), the follower and the loop. The caller
 starts the resource sampler of its device family
 (``telemetry.ResourceSampler`` with ``card_telemetry.collector_for``) and
-calls ``island.run()``.
+calls ``island.run()``. The process entry (``python -m yeto.rl.engine.engine_sampler
+--spec SPEC.json``, :func:`main`) does both from a spec file (:mod:`.engine_sampler_entry`).
 """
 
 from __future__ import annotations
@@ -196,3 +197,15 @@ def build_engine_sampler(config: EngineSamplerConfig, *, engine: SamplerEngine,
                        min_round_s=config.min_round_s, loaded_fields=loader.loaded_fields,
                        ready=lambda: loader.ready, **extra)
     return EngineSamplerIsland(loop=loop, loader=loader, follower=follower, round=engine_round)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Process entry: build the island from a spec file and run it
+    (:mod:`.engine_sampler_entry`)."""
+    from .engine_sampler_entry import main as entry_main  # noqa: PLC0415 - keeps this module's imports lean
+
+    return entry_main(argv)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
