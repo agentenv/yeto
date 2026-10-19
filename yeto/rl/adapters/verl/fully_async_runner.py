@@ -120,6 +120,24 @@ class _YetoTrainerMixin:
         crit["param_version"] = int(self.current_param_version)
         return crit
 
+    def _yeto_offpolicy_source(self, batch) -> dict:
+        """Per-source log-prob mismatch of the step (S25 N2.5); ``rollout_id`` is set by the driver."""
+        from .ports_impl import source_error, source_event
+
+        version = int(self.current_param_version)
+        try:
+            train_lp, infer_lp = batch.batch["old_log_probs"], batch.batch["rollout_log_probs"]
+            mask = batch.batch["response_mask"]
+            width = min(train_lp.shape[-1], infer_lp.shape[-1], mask.shape[-1])
+            provenance = batch.non_tensor_batch.get("provenance")
+            return source_event(train_lp[..., :width], infer_lp[..., :width], mask[..., :width],
+                                None if provenance is None else list(provenance),
+                                "ok" if provenance is not None else "missing: no provenance field",
+                                rollout_id=-1, trainer_version=version,
+                                tis_upper=float(getattr(self, "yeto_tis_upper", 2.0)))
+        except Exception as exc:  # noqa: BLE001 - archival, training continues
+            return source_error(exc, rollout_id=-1, trainer_version=version)
+
     def yeto_configure(self, tis_upper: float, thresholds_key) -> None:
         self.yeto_tis_upper = float(tis_upper)
         self.yeto_thresholds_key = tuple(thresholds_key)
@@ -132,6 +150,7 @@ class _YetoTrainerMixin:
         batch = self._fit_compute_reward(batch)
         batch = self._fit_compute_log_prob(batch)
         criteria = self._yeto_criteria(batch)  # 6.4b item 6: re-hooked after old log-probs
+        source = self._yeto_offpolicy_source(batch)
         batch = self._fit_compute_ref_log_prob(batch)
         batch = self._fit_compute_critic(batch)
         batch = self._fit_compute_advantage(batch)
@@ -146,7 +165,8 @@ class _YetoTrainerMixin:
         self.global_steps += 1
         numeric = {k: float(v) for k, v in self.metrics.items()
                    if isinstance(v, (int, float)) and not isinstance(v, bool)}
-        return {"metrics": numeric, "criteria": criteria, "param_version": int(self.current_param_version)}
+        return {"metrics": numeric, "criteria": criteria, "offpolicy_source": source,
+                "param_version": int(self.current_param_version)}
 
     async def yeto_push_weights(self):
         t0 = time.time()

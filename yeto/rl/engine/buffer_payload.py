@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import base64
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from .policy_versions import engine_version_number
@@ -95,6 +95,41 @@ def group_entry_fields(samples: Sequence[Mapping[str, Any]]) -> tuple[int, int]:
         oldest = version if oldest is None else min(oldest, version)
         tokens += length
     return int(oldest), tokens
+
+
+PROMPT_TOKENIZED_BY = "prompt_tokenized_by"  # metadata: who produced the prompt ids
+
+
+def complete_prompt_tokens(sample: Mapping[str, Any],
+                           tokenize: Callable[[str], Sequence[int]] | None) -> dict[str, Any]:
+    """Trainer side of ``metadata.prompt_tokens_known`` (S25 N2.3 payload).
+
+    An engine that does not return the prompt ids (SGLang text input) writes
+    ``tokens`` = response only and ``prompt_tokens_known`` False.  The trainer
+    then tokenizes the prompt text itself: ``tokens`` becomes
+    ``tokenize(prompt) + response`` and ``metadata.prompt_tokenized_by`` is
+    ``trainer``.  ``tokenize`` must match the engine's own text tokenization
+    (SGLang and vLLM default to the HF tokenizer with special tokens); that
+    match is not verified on a real engine.  Without ``tokenize`` such a
+    sample is refused: training on response-only ``tokens`` would read the
+    response as the prompt.  A sample with known prompt ids is returned as is.
+    """
+    metadata = sample.get("metadata") or {}
+    if metadata.get("prompt_tokens_known", True):
+        return dict(sample)
+    where = f"sample {sample.get('index')}"
+    if tokenize is None:
+        raise SampleBufferRolloutError(f"{where}: the engine gave no prompt ids and this reader has no "
+                                       "tokenizer to rebuild them")
+    response = list(sample.get("tokens") or ())
+    if len(response) != int(sample.get("response_length") or 0):
+        raise SampleBufferRolloutError(f"{where}: prompt_tokens_known is False but tokens has "
+                                       f"{len(response)} ids for response_length {sample.get('response_length')}")
+    prompt = [int(t) for t in tokenize(str(sample.get("prompt") or ""))]
+    if not prompt:
+        raise SampleBufferRolloutError(f"{where}: the prompt text tokenizes to no ids")
+    return {**sample, "tokens": prompt + response,
+            "metadata": {**metadata, PROMPT_TOKENIZED_BY: "trainer"}}
 
 
 class GroupWriter:

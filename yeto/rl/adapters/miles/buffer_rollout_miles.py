@@ -22,6 +22,9 @@ from miles.rollout.inference_rollout.inference_rollout_common import InferenceRo
 from miles.utils.function_registry import load_function
 from miles.utils.types import Sample
 
+from yeto.rl.engine.buffer_payload import complete_prompt_tokens
+from yeto.rl.engine.offpolicy_source import flat_metrics, offpolicy_source_event, payload_source_sample
+
 from .buffer_rollout import (
     DEFAULT_POLL_S,
     DEFAULT_WAIT_S,
@@ -97,6 +100,7 @@ class _BufferRound:
             wait_s=float(os.environ.get(WAIT_ENV, DEFAULT_WAIT_S)),
             poll_s=float(os.environ.get(POLL_ENV, DEFAULT_POLL_S)))
         register_reader(self.reader)
+        self._tokenizer: Any = None
 
     def __call__(self, input: RolloutFnInput) -> RolloutFnTrainOutput:
         if input.evaluation:
@@ -104,11 +108,26 @@ class _BufferRound:
                                            "set --eval-function-path or disable eval")
         groups, report = self.reader.take(input.rollout_id, self.groups,
                                           current_version=input.weight_version)
+        groups = [(position, [complete_prompt_tokens(d, self._tokenize) for d in group])
+                  for position, group in groups]
+        source = offpolicy_source_event(
+            (payload_source_sample(d) for _, group in groups for d in group),
+            rollout_id=input.rollout_id, backend="miles",
+            trainer_version=-1 if input.weight_version is None else int(input.weight_version))
         samples = [[Sample.from_dict(d) for d in renumber_group(
             group, position=position, samples_per_group=self.samples_per_group)]
             for position, group in groups]
         self._run_round_hooks(samples)
-        return RolloutFnTrainOutput(samples=samples, metrics=report.metrics())
+        return RolloutFnTrainOutput(samples=samples, metrics={**report.metrics(), **flat_metrics(source)})
+
+    def _tokenize(self, text: str) -> list[int]:
+        """Prompt ids for a sample whose engine gave none (loads the tokenizer on first use)."""
+        if self._tokenizer is None:
+            from miles.utils.processing_utils import load_tokenizer
+
+            self._tokenizer = load_tokenizer(self.args.hf_checkpoint, chat_template_path=self.args.chat_template_path,
+                                             trust_remote_code=True)
+        return list(self._tokenizer(text, add_special_tokens=True)["input_ids"])
 
     def _run_round_hooks(self, samples: list[list[Any]]) -> None:
         """Call the end-of-round hooks Miles' generating rollout calls, so the yeto
