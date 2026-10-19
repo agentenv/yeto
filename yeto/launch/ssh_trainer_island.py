@@ -52,6 +52,7 @@ from yeto.rl.engine.start_phases import SUBMITTED_ENV
 from yeto.rl.engine.trainer_lifecycle import CutRef
 from yeto.rl.engine.trainer_remote import island_env
 
+from ..gpu_spec import DEVICE_FAMILY_ENV
 from .node_inventory import Node
 from .topology import island_comm_env
 from .trainer_island import (
@@ -164,7 +165,8 @@ def start_script(spec: SshTrainerSpec, rank: int, env: Mapping[str, str], paths:
         "set -eu\n"
         f"mkdir -p \"{paths['dir']}\"\n"
         f"cd {shlex.quote(spec.workdir)}\n"
-        + _exports({**comm, **spec.env, **env})
+        # The learner reads the family to pick its card type and collective backend (accel).
+        + _exports({DEVICE_FAMILY_ENV: node.device_family, **comm, **spec.env, **env})
         + f"rm -f \"{paths['rc']}\"\n"
         # Job control is off in a non-interactive shell, so the background setsid
         # is not a group leader: it does not fork, and $! is the new group's id.

@@ -89,6 +89,7 @@ def test_start_script_runs_torchrun_with_rank_rendezvous_and_comm_env():
         assert "--nnodes=2" in script and "--master-addr=10.0.0.1" in script and "--nproc-per-node=8" in script
         assert "export NCCL_SOCKET_IFNAME=eth0" in script and "export NCCL_IB_DISABLE=0" in script
         assert "export YETO_X=1" in script and "setsid bash -c" in script
+        assert f"export YETO_DEVICE_FAMILY={s.nodes[0].device_family}" in script
     assert "--node-rank=0" in script0 and "--node-rank=1" in script1
     assert "yeto.rl.quant.release" in script0 and "--loop" in script0 and "--no-awq" in script0
     assert "yeto.rl.quant.release" not in script1

@@ -17,6 +17,7 @@ from yeto.rl.fullparam.fsdp2 import (
     FullParamConfigError,
     check_ulysses,
     decoder_layers,
+    init_distributed,
     shard_model,
     train_step,
     verl_overrides,
@@ -69,7 +70,7 @@ def build(config: dict) -> torch.nn.Module:
 
 def _worker(rank: int, world: int, init_file: str, config: dict, offload: str, out: str) -> None:
     torch.set_num_threads(1)
-    dist.init_process_group("gloo", init_method=f"file://{init_file}", rank=rank, world_size=world)
+    init_distributed("cpu", init_method=f"file://{init_file}", rank=rank, world_size=world)
     try:
         torch.manual_seed(0)
         model = build(config)
@@ -160,3 +161,20 @@ def test_verl_overrides_full_parameter():
     assert "actor_rollout_ref.actor.fsdp_config.fsdp_size=8" in ov
     assert "actor_rollout_ref.actor.fsdp_config.optimizer_offload=false" in ov
     assert "actor_rollout_ref.actor.fsdp_config.fsdp_size=-1" in verl_overrides(FullParamConfig())
+
+
+def test_backends_follow_the_device_family():
+    from yeto.rl.fullparam.fsdp2 import BACKENDS
+
+    assert BACKENDS == {"cpu": "gloo", "cuda": "nccl", "ppu": "nccl", "npu": "hccl"}
+
+
+def test_init_distributed_passes_the_family_backend_and_card(monkeypatch):
+    import yeto.rl.fullparam.fsdp2 as fsdp2
+
+    calls = []
+    monkeypatch.setattr(fsdp2.accel, "bind_family_device", lambda family: torch.device("cuda", 1))
+    monkeypatch.setattr(dist, "init_process_group", lambda **kw: calls.append(kw))
+    device = fsdp2.init_distributed("ppu", rank=0, world_size=1)
+    assert device == torch.device("cuda", 1)
+    assert calls == [{"backend": "nccl", "device_id": torch.device("cuda", 1), "rank": 0, "world_size": 1}]

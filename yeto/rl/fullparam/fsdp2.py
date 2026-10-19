@@ -36,11 +36,13 @@ from typing import Any
 import torch
 from torch import nn
 
+from ... import accel
 from .memory import OFFLOAD_MODES
 
-# The collective backend of each device family (D4). PPU keeps the CUDA device
-# name and NCCL API (over ACCL-P; not verified on a PPU machine).
-BACKENDS = {"cpu": "gloo", "cuda": "nccl", "ppu": "nccl", "npu": "hccl"}
+# The collective backend of each device family (D4), from yeto.accel. PPU keeps
+# the CUDA device name and NCCL API (over ACCL-P); NPU uses torch_npu + HCCL.
+# Neither is verified on its machine.
+BACKENDS = {family: accel.family_dist_backend(family) for family in accel.FAMILY_DEVICE_TYPES}
 
 
 class FullParamConfigError(ValueError):
@@ -95,6 +97,25 @@ def decoder_layers(model: nn.Module) -> list[nn.Module]:
     if not layers:
         raise FullParamConfigError(f"{type(model).__name__}: no module of _no_split_modules {sorted(names)}")
     return layers
+
+
+def init_distributed(family: str | None = None, **kwargs: Any) -> torch.device:
+    """Bind this rank's card and join the default process group.
+
+    ``family``: ``"cuda"``, ``"ppu"``, ``"npu"`` or ``"cpu"``; default
+    ``$YETO_DEVICE_FAMILY``, else auto-detected (accel.device_family). The
+    backend follows the family (:data:`BACKENDS`); an accelerator rank passes
+    its card as ``device_id``. ``kwargs`` go to ``init_process_group``
+    (``init_method``, ``rank``, ``world_size``). Returns the bound device.
+    """
+    import torch.distributed as dist
+
+    family = accel.device_family(family)
+    device = accel.bind_family_device(family)
+    if accel.is_accelerator(device):
+        kwargs.setdefault("device_id", device)
+    dist.init_process_group(backend=BACKENDS[family], **kwargs)
+    return device
 
 
 def shard_model(model: nn.Module, cfg: FullParamConfig, mesh: Any = None) -> nn.Module:
