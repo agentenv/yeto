@@ -176,6 +176,55 @@ def test_cancelled_exec_stops_the_command_and_close_still_deletes():
     assert fake.stopped and fake.deleted == ["bx_1"]
 
 
+def test_cancel_during_create_still_deletes_the_vm():
+    import threading
+
+    gate = threading.Event()
+
+    class SlowCreate(FakeBoat):
+        def create(self, **kwargs) -> str:
+            gate.wait(5)
+            return super().create(**kwargs)
+
+    fake = SlowCreate()
+    sandbox = _sandbox(fake)
+
+    async def go():
+        task = asyncio.create_task(sandbox.start(SPEC))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        gate.set()  # the create returns after the cancel
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(go())
+    assert fake.created == 1 and fake.deleted == ["bx_1"] and not fake.live
+
+
+def test_cancel_during_usage_read_still_deletes_the_vm():
+    fake = FakeBoat()
+    sandbox = _sandbox(fake)
+
+    async def go():
+        await sandbox.start(SPEC)
+        def slow_usage(sandbox_id: str) -> float:
+            import time
+            time.sleep(0.1)
+            return 1.0
+
+        fake.usage_seconds = slow_usage
+        task = asyncio.create_task(sandbox.close())
+        await asyncio.sleep(0.02)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0.3)  # the shielded delete finishes in the background
+
+    asyncio.run(go())
+    assert fake.deleted == ["bx_1"] and not fake.live
+
+
 def test_file_transfer_goes_through_staging_and_docker_cp(tmp_path: Path):
     fake = FakeBoat()
     sandbox = _sandbox(fake)

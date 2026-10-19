@@ -19,6 +19,7 @@ The boat client is synchronous; calls run in a worker thread.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import io
 import logging
 import shlex
@@ -94,15 +95,27 @@ class BoatSandbox:
         await self._quota.acquire()
         self._holds_slot = True
         try:
-            self.sandbox_id = await asyncio.to_thread(
-                self._client.create, machine_type=self._machine_type, ttl_seconds=self._ttl_s,
-                idempotency_key=f"yeto-{self._name}-{uuid.uuid4().hex}")
+            await self._create()
             logger.info("boat sandbox %s created for %s (%s)", self.sandbox_id, self._name,
                         self._machine_type)
             await self._wait_ready()
             await self._run_container(spec)
         except BaseException:
             await self.close()
+            raise
+
+    async def _create(self) -> None:
+        # The create runs in a thread that a cancellation cannot stop.  On cancel,
+        # wait for that thread so its sandbox id is known and close() deletes the
+        # VM; otherwise it would run unseen until its TTL.
+        create = asyncio.ensure_future(asyncio.to_thread(
+            self._client.create, machine_type=self._machine_type, ttl_seconds=self._ttl_s,
+            idempotency_key=f"yeto-{self._name}-{uuid.uuid4().hex}"))
+        try:
+            self.sandbox_id = await asyncio.shield(create)
+        except asyncio.CancelledError:
+            with contextlib.suppress(Exception):
+                self.sandbox_id = await create
             raise
 
     async def _wait_ready(self) -> None:
@@ -146,12 +159,8 @@ class BoatSandbox:
         sandbox_id, self.sandbox_id = self.sandbox_id, None
         try:
             if sandbox_id is not None:
-                try:
-                    self.usage_seconds = await asyncio.to_thread(self._client.usage_seconds, sandbox_id)
-                except Exception:  # usage is a metric; never block the delete
-                    logger.warning("boat usage read failed for %s", sandbox_id)
-                await asyncio.shield(asyncio.to_thread(self._client.delete, sandbox_id))
-                logger.info("boat sandbox %s deleted (%s billable s)", sandbox_id, self.usage_seconds)
+                # One shielded step: a cancel during the usage read must not skip the delete.
+                await asyncio.shield(self._read_usage_and_delete(sandbox_id))
         except Exception:
             # ttlSeconds still stops it; `boat list` shows it for manual cleanup.
             logger.exception("boat sandbox %s delete failed; delete it by hand", sandbox_id)
@@ -159,6 +168,14 @@ class BoatSandbox:
             if self._holds_slot:
                 self._holds_slot = False
                 self._quota.release()
+
+    async def _read_usage_and_delete(self, sandbox_id: str) -> None:
+        try:
+            self.usage_seconds = await asyncio.to_thread(self._client.usage_seconds, sandbox_id)
+        except Exception:  # usage is a metric; never block the delete
+            logger.warning("boat usage read failed for %s", sandbox_id)
+        await asyncio.to_thread(self._client.delete, sandbox_id)
+        logger.info("boat sandbox %s deleted (%s billable s)", sandbox_id, self.usage_seconds)
 
     # -- exec ----------------------------------------------------------------
 
