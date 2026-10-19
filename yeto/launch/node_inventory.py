@@ -2,9 +2,10 @@
 
 One file describes every node the launcher may use, on-premises or rented:
 the SSH target, an optional jump host, the device family, the CPU
-architecture, the card model and count, the HBM size per card, the host memory (the trainer offload plan reads
-it), the fabric, shared mounts, the container image and an optional declared
-price. The core stays neutral: provider differences live in the file.
+architecture, the card model and count, the HBM size per card, the host
+memory (the trainer offload plan reads it), the fabric, shared mounts, the
+container image and an optional declared price. The core stays neutral:
+provider differences live in the file.
 
 ``cpu_arch`` (``x86_64`` or ``aarch64``) selects the image (S25 N1.6): a node
 without ``image`` takes ``images[cpu_arch]`` from the top of the file, and a
