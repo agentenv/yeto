@@ -38,8 +38,6 @@ _DIST_BACKENDS = {"cuda": "nccl", "npu": "hccl", "cpu": "gloo"}
 # torch_npu and HCCL. The collective backend follows from the device type.
 FAMILY_DEVICE_TYPES = {"cuda": "cuda", "ppu": "cuda", "npu": "npu", "cpu": "cpu"}
 
-# Set by the island launcher from the node inventory; overrides auto-detection.
-FAMILY_ENV = DEVICE_FAMILY_ENV
 
 
 def register_backends() -> None:
@@ -108,7 +106,7 @@ def device_family(explicit: str | None = None) -> str:
     """The device family of this rank: ``explicit``, else ``$YETO_DEVICE_FAMILY``,
     else the detected torch device type (a PPU then reads as ``"cuda"``,
     which selects the same runtime)."""
-    family = explicit or os.environ.get(FAMILY_ENV) or available_type()
+    family = explicit or os.environ.get(DEVICE_FAMILY_ENV)  # set by the island launcher or available_type()
     if family not in FAMILY_DEVICE_TYPES:
         raise ValueError(f"unknown device family {family!r} (known: {sorted(FAMILY_DEVICE_TYPES)})")
     return family

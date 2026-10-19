@@ -16,6 +16,7 @@ import pytest
 import torch
 
 from yeto import accel
+from yeto.gpu_spec import DEVICE_FAMILY_ENV
 
 
 class FakeOutOfMemory(RuntimeError):
@@ -319,15 +320,15 @@ def test_family_maps_to_device_type_and_backend(family, device_type, backend):
 def test_unknown_family_is_refused(monkeypatch):
     with pytest.raises(ValueError, match="unknown device family"):
         accel.family_dist_backend("tpu")
-    monkeypatch.setenv(accel.FAMILY_ENV, "tpu")
+    monkeypatch.setenv(DEVICE_FAMILY_ENV, "tpu")
     with pytest.raises(ValueError, match="unknown device family"):
         accel.device_family()
 
 
 def test_device_family_precedence(no_cuda, npu, monkeypatch):
-    monkeypatch.delenv(accel.FAMILY_ENV, raising=False)
+    monkeypatch.delenv(DEVICE_FAMILY_ENV, raising=False)
     assert accel.device_family() == "npu"  # auto-detect
-    monkeypatch.setenv(accel.FAMILY_ENV, "ppu")
+    monkeypatch.setenv(DEVICE_FAMILY_ENV, "ppu")
     assert accel.device_family() == "ppu"  # the launcher's inventory value wins
     assert accel.device_family("cuda") == "cuda"  # an explicit flag wins over both
 

@@ -10,6 +10,7 @@ import torch
 import torch.distributed as dist
 
 from yeto import accel
+from yeto.gpu_spec import DEVICE_FAMILY_ENV
 from yeto.megatron import learner
 
 
@@ -52,7 +53,7 @@ def test_init_distributed_follows_the_family(megatron_stub, monkeypatch, family,
 
 
 def test_family_comes_from_the_launcher_env(megatron_stub, monkeypatch):
-    monkeypatch.setenv(accel.FAMILY_ENV, "npu")
+    monkeypatch.setenv(DEVICE_FAMILY_ENV, "npu")
     monkeypatch.setattr(accel, "bind_family_device", lambda fam, rank: torch.device("cpu"))
     learner._init_distributed(_args(None))
     assert megatron_stub[0] == ("pg", {"backend": "hccl"})
