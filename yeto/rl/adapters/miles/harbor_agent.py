@@ -14,6 +14,13 @@ recording, TITO) are used as they are.  yeto replaces only two hooks:
 * ``--custom-rm-path yeto.rl.adapters.miles.harbor_agent.reward_func``: reads
   the yeto outcome and marks ABORTED samples.
 
+Providers Harbor does not ship (``trial.CUSTOM_PROVIDERS``, e.g. ``boat``):
+the example maps ``HARBOR_ENV_TYPE`` to Harbor's ``EnvironmentType`` and
+rejects them.  For these the ``TrialConfig`` comes from yeto's
+``build_trial_config`` (the verl builder) with ``HarborSettings.from_env()``;
+the example's harness bindings are not applied, so only agents that
+``trial.agent_env`` wires (OpenAI base URL: codex, oracle, nop, ...) run there.
+
 The example module is imported by name (``harbor_agent_function``): the Miles
 launcher puts the example directory on the workers' PYTHONPATH
 (``launch_common.agentic_pythonpath_dirs``).
@@ -23,7 +30,7 @@ from __future__ import annotations
 
 import importlib
 import os
-from functools import lru_cache
+from functools import lru_cache, partial
 from typing import Any
 
 from yeto.rl.agentic import (
@@ -35,7 +42,8 @@ from yeto.rl.agentic import (
     run_agent_task,
 )
 from yeto.rl.agentic.trust import check_agent_env
-from yeto.rl.harness.harbor import CODEX_VERSION, HarborHarness
+from yeto.rl.harness.harbor import CODEX_VERSION, HarborHarness, HarborSettings, build_trial_config
+from yeto.rl.harness.harbor.trial import CUSTOM_PROVIDERS, TrialConfigBuilder
 
 EXAMPLE_MODULE = "harbor_agent_function"
 AGENT_FUNCTION = "yeto.rl.adapters.miles.harbor_agent.run"
@@ -61,11 +69,14 @@ def _example() -> Any:
 
 def task_from_metadata(metadata: dict[str, Any]) -> AgentTask:
     """Miles sample metadata (``instance_id``, ``agent_name``) -> :class:`AgentTask`."""
+    # Miles names the agent ``agent_name``; the default must use the same key or
+    # it would shadow the sample's value in ``AgentTask.from_mapping``.
     defaults = {
-        "agent": DEFAULT_AGENT,
+        "agent_name": DEFAULT_AGENT,
         "provider": os.environ.get("HARBOR_ENV_TYPE", "").strip().lower(),
         "wall_clock_s": float(os.environ.get("AGENT_TRIAL_TIMEOUT", 7200)),
         "model_name": os.environ.get("AGENT_MODEL_NAME", "model"),
+        "agent_timeout_s": os.environ.get("AGENT_TIMEOUT") or None,  # as the example reads it
     }
     try:
         return AgentTask.from_mapping(metadata, defaults=defaults)
@@ -91,6 +102,14 @@ def example_config_builder(example: Any, metadata: dict[str, Any], request_kwarg
     return build
 
 
+def trial_config_builder(task: AgentTask, example: Any, metadata: dict[str, Any],
+                         request_kwargs: dict[str, Any]) -> TrialConfigBuilder:
+    """The example's builder for Harbor's providers; yeto's for :data:`CUSTOM_PROVIDERS`."""
+    if task.provider in CUSTOM_PROVIDERS:
+        return partial(build_trial_config, settings=HarborSettings.from_env())
+    return example_config_builder(example, metadata, request_kwargs)
+
+
 async def run(base_url: str, prompt: Any = None, request_kwargs: dict[str, Any] | None = None,
               metadata: dict[str, Any] | None = None, **_: Any) -> dict[str, Any]:
     """Miles ``--custom-agent-function-path`` entry: one Harbor trial under the yeto outer layer."""
@@ -99,9 +118,9 @@ async def run(base_url: str, prompt: Any = None, request_kwargs: dict[str, Any] 
     del prompt  # Harbor reads the instruction from the task directory
     metadata = metadata or {}
     example = _example()
-    example._ensure_provider_key()  # the example's credential contract (key file -> SDK env var)
+    example._ensure_provider_key()  # the example's credential contract (key file -> SDK env var); no-op for boat
     task = task_from_metadata(metadata)
-    harness = HarborHarness(example_config_builder(example, metadata, request_kwargs or {}))
+    harness = HarborHarness(trial_config_builder(task, example, metadata, request_kwargs or {}))
     trajectory = await run_agent_task(task, harness, openai_session_url(base_url), gate())
     return trajectory.to_metadata()
 

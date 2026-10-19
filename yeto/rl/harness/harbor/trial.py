@@ -5,8 +5,10 @@ launch, tool exec, verifier, teardown).  This module only translates at the
 two edges and is shared by both backends:
 
 * :class:`HarborHarness` implements ``yeto.rl.agentic.AgentHarness``; the
-  ``TrialConfig`` builder is injected (Miles: the Miles example's builder;
-  verl: :func:`build_trial_config`), so are the ``Trial`` class (CPU tests).
+  ``TrialConfig`` builder is injected (verl: :func:`build_trial_config`;
+  Miles: the Miles example's builder for Harbor's built-in providers,
+  :func:`build_trial_config` for :data:`CUSTOM_PROVIDERS`), so is the
+  ``Trial`` class (CPU tests).
 * :func:`verdict_from_result` reads a Harbor ``TrialResult`` into the neutral
   :class:`~yeto.rl.agentic.TrialVerdict`; it uses attribute access only, so
   any object of the same shape works.
@@ -16,6 +18,8 @@ Harbor is imported lazily: the yeto core and CPU tests do not need it.
 
 from __future__ import annotations
 
+import json
+import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -48,6 +52,31 @@ class HarborSettings:
     provider_kwargs: Mapping[str, Any] = field(default_factory=dict)
     timeout_multiplier: float = 1.0
 
+    @classmethod
+    def from_env(cls) -> HarborSettings:
+        """Worker settings from the environment; both backends read the same variables.
+
+        ``HARBOR_TASKS_DIR`` (required), ``HARBOR_TRIALS_DIR`` (default
+        ``/tmp/harbor_trials``), ``HARBOR_ENV_KWARGS`` (JSON object, provider
+        kwargs), ``HARBOR_TIMEOUT_MULTIPLIER`` (default 1.0).
+        """
+        tasks_dir = os.environ.get("HARBOR_TASKS_DIR", "").strip()
+        if not tasks_dir:
+            raise HarnessConfigError("set HARBOR_TASKS_DIR to the Harbor task directories")
+        try:
+            provider_kwargs = json.loads(os.environ.get("HARBOR_ENV_KWARGS", "") or "{}")
+            multiplier = float(os.environ.get("HARBOR_TIMEOUT_MULTIPLIER", "") or 1.0)
+        except ValueError as exc:
+            raise HarnessConfigError(f"bad Harbor environment variable: {exc}") from exc
+        if not isinstance(provider_kwargs, dict):
+            raise HarnessConfigError("HARBOR_ENV_KWARGS must be a JSON object")
+        return cls(
+            tasks_dir=Path(tasks_dir),
+            trials_dir=Path(os.environ.get("HARBOR_TRIALS_DIR", "") or "/tmp/harbor_trials"),
+            provider_kwargs=provider_kwargs,
+            timeout_multiplier=multiplier,
+        )
+
 
 def agent_env(agent: str, endpoint: str) -> dict[str, str]:
     """Environment that points an installed agent at ``endpoint`` (OpenAI base URL).
@@ -63,7 +92,11 @@ def agent_env(agent: str, endpoint: str) -> dict[str, str]:
 
 
 def build_trial_config(task: AgentTask, endpoint: str, settings: HarborSettings) -> Any:
-    """yeto's own ``TrialConfig`` builder (verl backend; Miles uses the Miles example's)."""
+    """yeto's own ``TrialConfig`` builder.
+
+    verl uses it for every provider; Miles uses it for :data:`CUSTOM_PROVIDERS`
+    (the Miles example only accepts Harbor's built-in ``EnvironmentType``).
+    """
     from harbor.models.environment_type import EnvironmentType
     from harbor.models.trial.config import AgentConfig, EnvironmentConfig, TaskConfig, TrialConfig
 
