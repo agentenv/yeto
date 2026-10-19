@@ -24,7 +24,14 @@ from typing import Any
 
 from yeto.rl.engine.convertible import NodeProfile, NodeSpec, TrainerNeeds
 from yeto.rl.engine.convertible_remote import ConvertibleGate, ConvertibleIslands, write_pool_backlog
-from yeto.rl.engine.sample_buffer import BUFFER_DIR, INDEX, CommittedBacklog, FileSampleBuffer, merge_shards
+from yeto.rl.engine.sample_buffer import (
+    BUFFER_DIR,
+    INDEX,
+    CommittedBacklog,
+    FileSampleBuffer,
+    merge_shards,
+    shard_lengths,
+)
 from yeto.rl.engine.sample_roles import convertible_islands, node_name
 from yeto.rl.engine.trainer_remote import RemoteTrainerLifecycle, StoreCutLog, consumed_watermark
 
@@ -121,6 +128,9 @@ class MergedBacklog:
     def backlog(self, current_version: int) -> Any:
         """The trainable backlog; also written for the nodes (``write_pool_backlog``:
         a node does not start a round while it is at the node's cap)."""
+        # read before the merge: a group appended in between is merged and counted
+        # again by the nodes (the cap errs on the side of waiting)
+        counted = shard_lengths(self.files, self.nodes)
         merge_shards(self.files, self.nodes)
         stats = self.inner.backlog(current_version)
         floor = int(current_version) - int(self.max_policy_age)
@@ -128,7 +138,7 @@ class MergedBacklog:
         if fresh != stats.samples:
             stats = replace(stats, samples=fresh, batches=fresh / self.inner.buffer.batch_size)
         write_pool_backlog(self.files, groups=stats.samples, version=current_version,
-                           at=self.clock())
+                           at=self.clock(), shards=counted)
         return stats
 
     def __getattr__(self, name: str) -> Any:

@@ -416,6 +416,14 @@ def _complete_lines(data: bytes) -> list[dict]:
     return [json.loads(raw) for raw in data[:end + 1].splitlines() if raw.strip()] if end >= 0 else []
 
 
+def shard_lengths(files, shards: Iterable[str]) -> dict[str, int]:
+    """The complete sample records in each shard index (``files`` as in
+    :func:`merge_shards`)."""
+    return {str(shard): sum(1 for r in _complete_lines(
+                files.read(f"{BUFFER_DIR}/{shard_index(shard)}") or b"") if not r.get("end"))
+            for shard in shards}
+
+
 def merge_shards(files, shards: Iterable[str]) -> int:
     """Append the new lines of each shard index to ``index.jsonl`` (the caller is the
     only writer of the index). ``files``: store access with ``read(rel)`` /

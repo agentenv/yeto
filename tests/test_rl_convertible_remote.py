@@ -658,14 +658,31 @@ def test_pool_backlog_gate_holds_at_the_cap_and_ignores_a_missing_or_stale_count
     files, clock = MemFiles(), Clock()
     gate = PoolBacklogGate(files, 8, stale_s=60.0, clock=clock)
     assert gate() and gate.last is None  # the head has not counted yet
-    write_pool_backlog(files, groups=7, version=2, at=clock.t)
-    assert gate() and gate.last == {"groups": 7, "version": 2, "at": clock.t}
-    write_pool_backlog(files, groups=8, version=2, at=clock.t)
+    write_pool_backlog(files, groups=7, version=2, at=clock.t, shards={"n0": 0, "n1": 0})
+    assert gate() and gate.backlog == 7 and gate.last["shards"] == {"n0": 0, "n1": 0}
+    write_pool_backlog(files, groups=8, version=2, at=clock.t, shards={"n0": 0, "n1": 0})
     assert not gate()
     clock.t += 61.0  # the head stopped writing: do not stall the node
-    assert gate()
+    assert gate() and gate.backlog is None
     with pytest.raises(ValueError):
         PoolBacklogGate(files, 0)
+
+
+def test_pool_backlog_gate_adds_the_groups_appended_since_the_heads_count(tmp_path):
+    """The head counts between trainer rounds only; groups the nodes wrote since
+    then count too (GPU run s24-final-conv-20261019d ran past the cap)."""
+    from yeto.rl.engine.convertible_remote import PoolBacklogGate, write_pool_backlog
+
+    files, clock = LocalStoreFiles(CheckpointStore(str(tmp_path))), Clock()
+    n0 = FileSampleBuffer(CheckpointStore(str(tmp_path)), batch_size=4, index=shard_index("n0"))
+    for i in range(2):
+        _write(n0, f"a{i}")
+    write_pool_backlog(files, groups=5, version=1, at=clock.t, shards={"n0": 2, "n1": 0})
+    gate = PoolBacklogGate(files, 8, clock=clock)
+    assert gate() and gate.backlog == 5
+    for i in range(3):
+        _write(n0, f"b{i}")
+    assert not gate() and gate.backlog == 8  # 5 counted + 3 appended since
 
 
 def test_node_follows_releases_and_waits_while_the_pool_backlog_is_full():
@@ -739,7 +756,8 @@ def test_merged_backlog_writes_the_trainable_count_for_the_nodes(tmp_path):
     merged = MergedBacklog(files, ("n0",), Inner(), max_policy_age=1, clock=lambda: 50.0)
     stats = merged.backlog(3)
     assert stats.samples == 8 and stats.batches == 2.0  # the v0 groups are too old to train
-    assert json.loads(files.read(POOL_BACKLOG_PATH)) == {"groups": 8, "version": 3, "at": 50.0}
+    assert json.loads(files.read(POOL_BACKLOG_PATH)) == {"groups": 8, "version": 3, "at": 50.0,
+                                                         "shards": {"n0": 0}}
 
 
 def test_miles_convertible_node_follows_another_nodes_release_but_not_its_own(tmp_path, monkeypatch):
@@ -865,7 +883,7 @@ def test_miles_convertible_node_follows_another_nodes_release_but_not_its_own(tm
     monkeypatch.setenv(br.SHARD_ENV, "island0")
     monkeypatch.setenv(trainer_remote.POLL_ENV, "0.01")
     files = LocalStoreFiles(CheckpointStore(str(store)))
-    write_pool_backlog(files, groups=0, version=1, at=__import__("time").time())
+    write_pool_backlog(files, groups=0, version=1, at=__import__("time").time(), shards={})
     tape = tmp_path / "tape.jsonl"
     miles_args = types.SimpleNamespace(
         yeto_rl_sample_buffer=SampleBufferConfig(role="convertible", store=str(store),

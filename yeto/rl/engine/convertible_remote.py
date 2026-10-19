@@ -94,8 +94,9 @@ DEFAULT_STALE_S = 300.0
 DEFAULT_RELEASE_TIMEOUT_S = 600.0
 # a node whose generation is done exits on its own after this long without a command
 DEFAULT_IDLE_EXIT_S = 1800.0
-# a pool backlog record older than this does not hold a node back (the head may be gone)
-DEFAULT_BACKLOG_STALE_S = 120.0
+# a pool backlog record older than this does not hold a node back (the head may be
+# gone). Long: the head writes no record while its trainer loop waits for a round.
+DEFAULT_BACKLOG_STALE_S = 1800.0
 POOL_BACKLOG_PATH = f"{CONVERTIBLE_DIR}/backlog.json"
 
 
@@ -194,18 +195,25 @@ def write_retrying(files: StoreFiles, rel: str, data: bytes, *,
             wait(WRITE_RETRY_DELAY_S * (attempt + 1))
 
 
-def write_pool_backlog(files: StoreFiles, *, groups: int, version: int, at: float) -> None:
-    """Head side: the trainable groups not read yet (``groups``) at policy ``version``."""
+def write_pool_backlog(files: StoreFiles, *, groups: int, version: int, at: float,
+                       shards: Mapping[str, int]) -> None:
+    """Head side: the trainable groups not read yet (``groups``) at policy ``version``,
+    counted over ``shards`` (records per node shard when it counted)."""
     files.write(POOL_BACKLOG_PATH, json.dumps(
-        {"groups": int(groups), "version": int(version), "at": round(float(at), 3)},
-        sort_keys=True).encode())
+        {"groups": int(groups), "version": int(version), "at": round(float(at), 3),
+         "shards": {str(k): int(v) for k, v in shards.items()}}, sort_keys=True).encode())
 
 
 class PoolBacklogGate:
     """Island side: may this node start a rollout round? Yes while the pool backlog
-    the head wrote last is below ``max_groups``, or when there is no fresh record
-    (no count yet, or older than ``stale_s``: a head that stopped writing must not
-    stall the nodes). ``last`` is the record read by the last call."""
+    is below ``max_groups``. The backlog is the head's last count plus the groups
+    the nodes appended to their shards since that count: the head counts only
+    between trainer rounds, and a count from before the newest rounds let a fast
+    node run past the cap (GPU run s24-final-conv-20261019d). Groups the trainer
+    read since the count still count (the cap errs on the side of waiting). No
+    record (no count yet) or one older than ``stale_s`` (the head is gone) does
+    not hold the node. ``last`` is the record read by the last call; ``backlog``
+    the groups it gave."""
 
     def __init__(self, files: StoreFiles, max_groups: int, *,
                  stale_s: float = DEFAULT_BACKLOG_STALE_S,
@@ -217,13 +225,20 @@ class PoolBacklogGate:
         self.stale_s = float(stale_s)
         self.clock = clock
         self.last: dict[str, Any] | None = None
+        self.backlog: int | None = None
 
     def __call__(self) -> bool:
+        from .sample_buffer import shard_lengths
+
         raw = self.files.read(POOL_BACKLOG_PATH)
         self.last = None if not raw else json.loads(raw)
+        self.backlog = None
         if self.last is None or self.clock() - float(self.last.get("at", 0.0)) > self.stale_s:
             return True
-        return int(self.last["groups"]) < self.max_groups
+        counted = {str(k): int(v) for k, v in (self.last.get("shards") or {}).items()}
+        now = shard_lengths(self.files, counted)
+        self.backlog = int(self.last["groups"]) + sum(max(0, now[k] - counted[k]) for k in counted)
+        return self.backlog < self.max_groups
 
 
 def append_trainer_command(files: StoreFiles, incarnation: int, verb: str, *,
@@ -382,7 +397,7 @@ class ConvertibleNodeAgent:
             return True
         if self.waiting_since is None:
             self.waiting_since = self.clock()
-            self._event("node_backlog_full")
+            self._event("node_backlog_full", backlog=getattr(self.admit, "backlog", None))
             self._write_status()
         return False
 
