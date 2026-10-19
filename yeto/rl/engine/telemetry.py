@@ -2,8 +2,8 @@
 
 ``HeartbeatThread`` writes ``rl_heartbeat`` (phase, rollout_id, policy_version,
 pid, uptime_s) every ``interval_s``; ``ResourceSampler`` writes
-``rl_resource_sample`` (per-GPU NVML index/uuid/util/memory/power plus the
-process RSS). Both run on daemon threads, only call ``emit`` (the tape writer
+``rl_resource_sample`` (per-card index/uuid/util/memory/power from the
+device family's card tool, plus the process RSS). Both run on daemon threads, only call ``emit`` (the tape writer
 is lock-protected), never block the training loop, and stop cleanly on
 ``stop()``. When NVML cannot be loaded the sampler writes exactly one
 ``available: false`` record and stops. Both are opt-in (the driver starts
@@ -22,12 +22,16 @@ import threading
 import time
 from typing import Any, Callable, Mapping
 
+from yeto.hw.card_telemetry import CardCollector, collector_for
+
 HEARTBEAT_EVENT = "rl_heartbeat"
 RESOURCE_EVENT = "rl_resource_sample"
 DEFAULT_HEARTBEAT_INTERVAL_S = 30.0
 DEFAULT_RESOURCE_INTERVAL_S = 60.0
 # Per-GPU keys of an available ``rl_resource_sample`` (None = not readable).
 GPU_SAMPLE_KEYS = ("index", "uuid", "util_pct", "mem_used_mb", "mem_total_mb", "power_w")
+# The island's launcher device family (cuda / npu / ppu): selects the card collector.
+DEVICE_FAMILY_ENV = "YETO_RL_DEVICE_FAMILY"
 
 Emit = Callable[..., None]
 
@@ -121,88 +125,74 @@ def _cpu_rss_bytes() -> int | None:
         return None
 
 
-def _safe(fn: Callable[[], Any]) -> Any:
-    try:
-        return fn()
-    except Exception:  # noqa: BLE001 - one unreadable field is None, not a failed sample
-        return None
-
-
 class ResourceSampler(_Periodic):
-    """2.2: ``rl_resource_sample`` every ``interval_s`` (NVML), single fallback record."""
+    """2.2: ``rl_resource_sample`` every ``interval_s``, single fallback record.
+
+    The card source is a :class:`yeto.hw.card_telemetry.CardCollector` of the
+    island's device family (S25 N2.2): ``collector`` when given, else the one of
+    ``$YETO_RL_DEVICE_FAMILY`` (``cuda`` when unset: NVML through
+    ``nvml_loader``, as before). A collector that cannot open writes one
+    ``available: false`` record that names the reason, and no thread starts."""
 
     name = "yeto-resource-sampler"
 
     def __init__(self, emit: Emit, *, interval_s: float = DEFAULT_RESOURCE_INTERVAL_S,
                  nvml_loader: Callable[[], Any] = load_nvml,
+                 collector: CardCollector | None = None,
                  rss: Callable[[], int | None] = _cpu_rss_bytes,
                  clock: Callable[[], float] = time.monotonic,
                  labels: Callable[[], Mapping[str, Any]] | None = None, **kw: Any):
         super().__init__(interval_s, **kw)
         self._emit = emit
-        self._loader = nvml_loader
+        family = os.environ.get(DEVICE_FAMILY_ENV) or "cuda"
+        self._collector = collector or collector_for(family, nvml_loader=nvml_loader)
         self._rss = rss
         self._clock = clock
         self._labels = labels or (lambda: {})
-        self._nvml: Any = None
         self.available: bool | None = None
         self._peak_lock = threading.Lock()
         self._peak_gpu: int | None = None
         self._peak_rss: int | None = None
 
-    def _ensure_nvml(self) -> bool:
+    @property
+    def source(self) -> str:
+        return self._collector.source
+
+    def _ensure_open(self) -> bool:
         if self.available is None:
             try:
-                self._nvml = self._loader()
+                self._collector.open()
                 self.available = True
-            except Exception as error:  # noqa: BLE001 - ImportError, NVMLError, ...
+            except Exception as error:  # noqa: BLE001 - ImportError, NVMLError, tool missing ...
                 self.available = False
-                self._emit(RESOURCE_EVENT, available=False, t=self._clock(),
+                self._emit(RESOURCE_EVENT, available=False, t=self._clock(), source=self.source,
                            reason=f"{type(error).__name__}: {error}"[:300], **self._labels())
         return bool(self.available)
 
     def start(self) -> "ResourceSampler":
-        # Probe NVML once up front: an unavailable source is recorded at start
-        # (single ``available: false`` record) and no thread is started.
-        if self._ensure_nvml():
+        # Probe the source once up front: an unavailable source is recorded at
+        # start (single ``available: false`` record) and no thread is started.
+        if self._ensure_open():
             super().start()
         return self
 
     def sample_gpus(self) -> list[dict[str, Any]]:
-        nv = self._nvml
-        gpus = []
-        self._used_bytes: list[int] = []
-        for index in range(int(nv.nvmlDeviceGetCount())):
-            handle = nv.nvmlDeviceGetHandleByIndex(index)
-            mem = _safe(lambda: nv.nvmlDeviceGetMemoryInfo(handle))
-            util = _safe(lambda: nv.nvmlDeviceGetUtilizationRates(handle))
-            power = _safe(lambda: nv.nvmlDeviceGetPowerUsage(handle))
-            uuid = _safe(lambda: nv.nvmlDeviceGetUUID(handle))
-            if mem is not None:
-                self._used_bytes.append(int(mem.used))
-            gpus.append({
-                "index": index,
-                "uuid": uuid.decode() if isinstance(uuid, bytes) else uuid,
-                "util_pct": None if util is None else int(util.gpu),
-                "mem_used_mb": None if mem is None else int(mem.used) / 2**20,
-                "mem_total_mb": None if mem is None else int(mem.total) / 2**20,
-                "power_w": None if power is None else float(power) / 1000.0,
-            })
-        return gpus
+        return self._collector.sample()
 
     def tick(self) -> bool:
-        if not self._ensure_nvml():
+        if not self._ensure_open():
             return False  # one ``available: false`` record, then no more sampling
         gpus = self.sample_gpus()
         rss = self._rss()
-        used = self._used_bytes
+        used = [int(card["mem_used_mb"] * 2**20) for card in gpus
+                if card.get("mem_used_mb") is not None]
         with self._peak_lock:
             if used:
                 self._peak_gpu = max(self._peak_gpu or 0, max(used))
             if rss is not None:
                 self._peak_rss = max(self._peak_rss or 0, int(rss))
         self._emit(RESOURCE_EVENT, available=True, t=self._clock(), pid=os.getpid(),
-                   gpus=gpus, cpu_rss_bytes=rss, **self._labels())
+                   source=self.source, gpus=gpus, cpu_rss_bytes=rss, **self._labels())
         return True
 
     def take_peaks(self) -> dict[str, int]:
