@@ -266,6 +266,7 @@ def run_convertible_node(miles_args: Any, *, build_driver: Callable[[], Any], co
         StoreCutLog,
     )
 
+    from .cut_plugin import REWIND_SCHEDULER
     from .publish import _default_update_weights, lora_mode
     from .rollout import MilesRolloutPool, RayMetadataSink, _release
     from .sampler_island import EngineReleaseLoader, release_store
@@ -314,6 +315,13 @@ def run_convertible_node(miles_args: Any, *, build_driver: Callable[[], Any], co
 
     def run_stint(incarnation: int, resume_from: Any, emit_event: Callable[..., None]) -> Any:
         store.reload()  # the newest cut may come from another node
+        if current.get("driver") is not None:
+            # this node trained before: the new driver restores the newest cut into the
+            # same trainer, whose LR scheduler the earlier stint stepped (GPU run
+            # s24-final-conv-20261019c: "LR scheduler already at 96")
+            rewound = runner.run(actor.run_plugin(REWIND_SCHEDULER, {}))
+            emit("rl_convertible_scheduler_rewound", node=name, incarnation=incarnation,
+                 ranks=rewound)
         driver = current["driver"] = build_driver()
         controller_ = getattr(getattr(driver.sync, "round_cuts", None), "controller", None)
         if getattr(controller_, "store", None) is None:

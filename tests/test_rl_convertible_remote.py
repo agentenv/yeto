@@ -744,7 +744,9 @@ def test_merged_backlog_writes_the_trainable_count_for_the_nodes(tmp_path):
 
 def test_miles_convertible_node_follows_another_nodes_release_but_not_its_own(tmp_path, monkeypatch):
     """A node in rollout loads the newest release (another node's trainer released
-    it); after its own stint it serves its own release and does not load it again."""
+    it); after its own stint it serves its own release and does not load it again.
+    Converted a second time, it rewinds its trainer's LR scheduler before the
+    restore."""
     import types
 
     from yeto.rl.adapters.miles import buffer_rollout as br
@@ -791,9 +793,12 @@ def test_miles_convertible_node_follows_another_nodes_release_but_not_its_own(tm
         async def get(self, rid):
             return "pack"
 
+    plugins = []
+
     class Actor:
         async def run_plugin(self, name, kw):
-            pass
+            plugins.append(name.rsplit(".", 1)[-1])
+            return [{"rewound_from": 3}]
 
         async def onload(self):
             pass
@@ -873,10 +878,16 @@ def test_miles_convertible_node_follows_another_nodes_release_but_not_its_own(tm
         raw = files.read(node_path("island0", "status.json"))
         return json.loads(raw) if raw else {}
 
+    def back(incarnation):
+        return any(e.get("direction") == "to_rollout" and e.get("incarnation") == incarnation
+                   for e in _events(files, "island0"))
+
     def drive():
         _until(lambda: status().get("rounds", 0) >= 1)
         NodeCommandWriter(files, "island0").send(TO_TRAINER, incarnation=0)
-        _until(lambda: any(e.get("direction") == "to_rollout" for e in _events(files, "island0")))
+        _until(lambda: back(0))
+        NodeCommandWriter(files, "island0").send(TO_TRAINER, incarnation=1)  # the same node again
+        _until(lambda: back(1))
         _until(lambda: status().get("generation_done"))
         NodeCommandWriter(files, "island0").send(END)
 
@@ -884,8 +895,10 @@ def test_miles_convertible_node_follows_another_nodes_release_but_not_its_own(tm
     t.start()
     assert mconv.run_convertible_node(miles_args, build_driver=lambda: driver,
                                       controller=Controller(), executor=Executor(),
-                                      actor=Actor(), runner=Runner()) == 1
+                                      actor=Actor(), runner=Runner()) == 2
     t.join(5)
+    # the second stint restores into the trainer the first one stepped: scheduler rewound once
+    assert plugins == ["align_weight_version", "rewind_scheduler"]
     assert built == [(True, True)]  # LoRA, and the engines already hold the boot adapter
     assert loads == [1]  # n1's release once; its own v2 release is not loaded again
     assert status()["served_version"] == 2
@@ -895,3 +908,5 @@ def test_miles_convertible_node_follows_another_nodes_release_but_not_its_own(tm
     assert loaded[0]["served_checksum"] == "sha-1" == loaded[0]["engine_checksum"]
     start = [e for e in tape_events if e["event"] == "rl_convertible_node_start"][0]
     assert start["max_backlog_groups"] == 16
+    rewound = [e for e in tape_events if e["event"] == "rl_convertible_scheduler_rewound"]
+    assert [(e["incarnation"], e["ranks"]) for e in rewound] == [(1, [{"rewound_from": 3}])]
