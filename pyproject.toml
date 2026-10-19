@@ -62,6 +62,7 @@ yeto-diffusion-export = "yeto.diffusion.export:main"
 yeto-diffusion-sample = "yeto.diffusion.sample:main"
 yeto-rl-export = "yeto.rl.export:main"
 yeto-rl-ssh = "yeto.rl.ssh_harness:main"
+yeto-stage1 = "yeto.launch.stage1:main"
 yeto-protenix-export-batch = "yeto.diffusion.protenix_export:main"
 yeto-hunyuan3d-export-batch = "yeto.diffusion.hunyuan3d_export:main"
 

@@ -1,0 +1,58 @@
+# Stage-1 node inventory: 4 x PPU nodes, 8 x ZW-M890P 144 GiB each
+# (SESSION25/N0.1-ppu-survey.md, read-only survey 2026-10-16).
+# host = the SSH alias in ~/.ssh/config of the head (this server). The aliases
+# do not resolve on the nodes; the stage-1 plan gives each node's rendezvous
+# address (eth0) separately.
+nodes:
+  - name: ppu1
+    host: ppu1
+    device_family: ppu
+    card: M890
+    cards_per_node: 8
+    hbm_gib: 144
+    host_memory_gib: 2266
+    fabric: roce
+    interface: eth0
+    mounts: {/data: /data}
+    image: inference-xpu-pytorch-opt:v0.5.17
+    runtime: docker
+    roles: [trainer]
+  - name: ppu2
+    host: ppu2
+    device_family: ppu
+    card: M890
+    cards_per_node: 8
+    hbm_gib: 144
+    host_memory_gib: 2266
+    fabric: roce
+    interface: eth0
+    mounts: {/data: /data}
+    image: inference-xpu-pytorch-opt:v0.5.17
+    runtime: docker
+    roles: [trainer]
+  - name: ppu3
+    host: ppu3
+    device_family: ppu
+    card: M890
+    cards_per_node: 8
+    hbm_gib: 144
+    host_memory_gib: 2266
+    fabric: roce
+    interface: eth0
+    mounts: {/data: /data}
+    image: inference-xpu-pytorch-opt:v0.5.17
+    runtime: docker
+    roles: [trainer]
+  - name: ppu4
+    host: ppu4
+    device_family: ppu
+    card: M890
+    cards_per_node: 8
+    hbm_gib: 144
+    host_memory_gib: 2266
+    fabric: roce
+    interface: eth0
+    mounts: {/data: /data}
+    image: inference-xpu-pytorch-opt:v0.5.17
+    runtime: docker
+    roles: [sampler]
