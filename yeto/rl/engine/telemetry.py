@@ -22,6 +22,7 @@ import threading
 import time
 from typing import Any, Callable, Mapping
 
+from yeto.gpu_spec import DEVICE_FAMILY_ENV
 from yeto.hw.card_telemetry import CardCollector, collector_for
 
 HEARTBEAT_EVENT = "rl_heartbeat"
@@ -31,7 +32,6 @@ DEFAULT_RESOURCE_INTERVAL_S = 60.0
 # Per-GPU keys of an available ``rl_resource_sample`` (None = not readable).
 GPU_SAMPLE_KEYS = ("index", "uuid", "util_pct", "mem_used_mb", "mem_total_mb", "power_w")
 # The island's launcher device family (cuda / npu / ppu): selects the card collector.
-DEVICE_FAMILY_ENV = "YETO_RL_DEVICE_FAMILY"
 
 Emit = Callable[..., None]
 
@@ -130,7 +130,7 @@ class ResourceSampler(_Periodic):
 
     The card source is a :class:`yeto.hw.card_telemetry.CardCollector` of the
     island's device family (S25 N2.2): ``collector`` when given, else the one of
-    ``$YETO_RL_DEVICE_FAMILY`` (``cuda`` when unset: NVML through
+    ``$YETO_DEVICE_FAMILY`` (``cuda`` when unset: NVML through
     ``nvml_loader``, as before). A collector that cannot open writes one
     ``available: false`` record that names the reason, and no thread starts."""
 

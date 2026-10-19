@@ -271,7 +271,6 @@ def test_loader_serves_a_release_only_after_all_checks_pass(tmp_path):
     ("silent_skip", "expert_count"),  # the engine loaded fewer experts (A-INF item 1)
     ("wrong_answers", "fixed_prompts"),
     ("probe_jump", "logprob_probe"),
-    ("release_short", "release_expert_count"),
 ])
 def test_a_failed_check_marks_the_engine_not_ready_and_restarts_next_time(tmp_path, fault, step):
     from yeto.rl.engine.policy_release import ReleaseNotLoaded
@@ -281,7 +280,7 @@ def test_a_failed_check_marks_the_engine_not_ready_and_restarts_next_time(tmp_pa
     events = []
     loader = _loader(engine, events, max_probe_jump=0.5)
     loader.start(None, 0)
-    release = _w4a8_release(releases, 1, experts=3 if fault == "release_short" else 4)
+    release = _w4a8_release(releases, 1)
     if fault == "silent_skip":
         engine.expert_matrices = 0
     elif fault == "wrong_answers":
@@ -295,6 +294,36 @@ def test_a_failed_check_marks_the_engine_not_ready_and_restarts_next_time(tmp_pa
     assert failed["step"] == step and failed["failures"] == 1
     with pytest.raises(SamplerLoadFatal):  # second failure in a row: the island stops
         loader(release, releases.resolve(release))
+
+
+def test_a_release_with_the_wrong_expert_count_keeps_the_served_weights(tmp_path):
+    """The release is refused before the engine is touched: v0 stays served and ready."""
+    from yeto.rl.engine.policy_release import ReleaseNotLoaded
+
+    releases = PolicyReleaseStore(CheckpointStore(tmp_path))
+    engine = FakeEngine(identity=W4A8, answers=ANSWERS, expert_matrices=4)
+    events = []
+    loader = _loader(engine, events)
+    loader.start(None, 0)
+    bad = _w4a8_release(releases, 1, experts=3)
+    with pytest.raises(ReleaseNotLoaded, match="release_expert_count") as refused:
+        loader(bad, releases.resolve(bad))
+    assert refused.value.reason == "release_refused:release_expert_count"
+    assert loader.ready and engine.served_version() == 0
+    (failed,) = [f for n, f in events if n == LOAD_CHECK_FAILED_EVENT]
+    assert failed["engine_touched"] is False and failed["kept_version"] == 0
+    assert failed["detail"] == {"in_release": 3, "expected": 4}
+
+    good = _w4a8_release(releases, 2)  # the engine was never touched: an in-place load follows
+    loader(good, releases.resolve(good))
+    assert loader.ready and engine.served_version() == 2 and loader.failures == 0
+    checked = [f for n, f in events if n == "rl_sampler_load_checked"]
+    assert checked[-1]["reload_mode"] == "in_place"
+
+    with pytest.raises(ReleaseNotLoaded):
+        loader(bad, releases.resolve(bad))
+    with pytest.raises(SamplerLoadFatal):  # still counted: a run that only publishes bad releases stops
+        loader(bad, releases.resolve(bad))
 
 
 def test_an_engine_error_inside_a_check_is_a_failed_check(tmp_path):

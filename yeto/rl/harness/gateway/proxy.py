@@ -75,6 +75,11 @@ class RecordsProxy:
     def close(self, trajectory_id: str) -> None:
         self.gateway.close(trajectory_id)
 
+    def forget(self, trajectory_id: str) -> None:
+        """Drop the trajectory's state in the gateway and the backend (after close and records)."""
+        self.gateway.forget(trajectory_id)
+        self.backend.forget(trajectory_id)
+
     # ------------------------------------------------------------------ HTTP
     def app(self, *, public_url: str = "") -> Any:
         from aiohttp import web

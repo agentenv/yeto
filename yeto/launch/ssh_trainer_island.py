@@ -17,7 +17,9 @@ One incarnation = one trainer process per node, started over SSH:
 2. each node runs, in a new session (one process group), the trainer with the
    incarnation environment (``trainer_remote.island_env``), the
    collective-communication variables of its family and fabric
-   (``topology.island_comm_env``) and the run's environment. The trainer is
+   (``topology.island_comm_env``), the run's environment and the inventory's
+   device family (``YETO_DEVICE_FAMILY``: the telemetry's card collector and the
+   learner's device follow it). The trainer is
    either ``command`` under ``torchrun`` or ``run_script``, a bash script that
    reads the sky task variables (``SKYPILOT_NODE_RANK``, ``SKYPILOT_NODE_IPS``,
    ``SKYPILOT_NUM_NODES``, ``SKYPILOT_NUM_GPUS_PER_NODE``), so the run script
@@ -142,6 +144,9 @@ class SshTrainerSpec:
         if len(self.nodes) > 1:
             for node in self.nodes:
                 rendezvous_address(node)  # raises on a node the others cannot dial
+        if self.env.get(DEVICE_FAMILY_ENV, self.device_family) != self.device_family:
+            raise SshIslandError(f"env sets {DEVICE_FAMILY_ENV}={self.env[DEVICE_FAMILY_ENV]}, but the "
+                                 f"inventory nodes are {self.device_family}; the inventory decides")
 
     @property
     def device_family(self) -> str:

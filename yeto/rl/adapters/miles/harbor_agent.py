@@ -82,7 +82,7 @@ def task_from_metadata(metadata: dict[str, Any]) -> AgentTask:
     defaults = {
         "agent_name": DEFAULT_AGENT,
         "provider": os.environ.get("HARBOR_ENV_TYPE", "").strip().lower(),
-        "wall_clock_s": float(os.environ.get("AGENT_TRIAL_TIMEOUT", 7200)),
+        "wall_clock_s": float(os.environ.get("AGENT_TRIAL_TIMEOUT", "7200")),
         "model_name": os.environ.get("AGENT_MODEL_NAME", "model"),
         "agent_timeout_s": os.environ.get("AGENT_TIMEOUT") or None,  # as the example reads it
     }

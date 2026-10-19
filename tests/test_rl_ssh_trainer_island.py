@@ -96,6 +96,14 @@ def test_start_script_runs_torchrun_with_rank_rendezvous_and_comm_env():
     assert "'a b'" in script0  # arguments are quoted
 
 
+def test_env_cannot_override_the_inventory_device_family():
+    family = spec().device_family
+    other = "npu" if family != "npu" else "ppu"
+    with pytest.raises(SshIslandError, match="inventory decides"):
+        spec(env={"YETO_DEVICE_FAMILY": other})
+    assert spec(env={"YETO_DEVICE_FAMILY": family}).device_family == family
+
+
 def test_requant_argv_needs_both_awq_inputs():
     assert "--recipe" in requant_argv("s", "t", recipe="r.yaml", awq_scales="d")
     with pytest.raises(SshIslandError, match="both"):

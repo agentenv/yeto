@@ -160,3 +160,59 @@ def offpolicy_source_event(samples: Iterable[SourceSample], *, rollout_id: int,
     return {"schema": SCHEMA, "rollout_id": int(rollout_id), "trainer_version": int(trainer_version),
             "backend": str(backend), "tis_upper": float(tis_upper), "consumed": consumed,
             "sources": sources}
+
+
+def payload_source_sample(sample: Mapping[str, Any], *, train_logprobs: Sequence[float] = (),
+                          rollout_logprobs: Sequence[float] | None = None) -> SourceSample:
+    """A :class:`SourceSample` from a buffer payload sample (``metadata.provenance``
+    and ``metadata.finish_reason``, as the engine sampler island writes them).
+
+    Without ``train_logprobs`` the sample counts in ``samples`` and ``finish``
+    only (its ratio fields stay empty): the reader side of a backend whose
+    training process does not hand its log-probs back (Miles).
+    """
+    metadata = sample.get("metadata") or {}
+    rollout: list[float] = []
+    if train_logprobs:
+        rollout = list(sample.get("rollout_log_probs") or () if rollout_logprobs is None else rollout_logprobs)
+    return SourceSample(provenance=metadata.get("provenance"), train_logprobs=list(train_logprobs),
+                        rollout_logprobs=rollout, finish_reason=metadata.get("finish_reason"))
+
+
+def flat_metrics(event: Mapping[str, Any], prefix: str = OFFPOLICY_SOURCE_EVENT) -> dict[str, float]:
+    """The numeric per-source fields of an event as ``<prefix>/<key>/<field>`` metrics."""
+    out: dict[str, float] = {}
+    for entry in event["sources"]:
+        for name in ("samples", "tokens", "ratio_p50", "ratio_p99", "tis_clipfrac", "abs_diff_mean",
+                     "k3", "truncated_share", "loop_abort_share"):
+            value = entry.get(name)
+            if isinstance(value, (int, float)):
+                out[f"{prefix}/{entry['key']}/{name}"] = float(value)
+    return out
+
+
+def masked_source_samples(train_logprobs: Sequence[Sequence[float]], rollout_logprobs: Sequence[Sequence[float]],
+                          masks: Sequence[Sequence[float]], *,
+                          provenances: Sequence[Mapping[str, str] | None] | None = None,
+                          finish_reasons: Sequence[str | None] | None = None) -> list[SourceSample]:
+    """One :class:`SourceSample` per row of a padded trainer batch (nested lists,
+    e.g. ``tensor.tolist()``), keeping only the tokens whose mask is set.
+
+    ``provenances`` / ``finish_reasons``: per row, or None when the batch does
+    not carry them (the rows then group under ``unknown``).
+    """
+    rows = len(masks)
+    if len(train_logprobs) != rows or len(rollout_logprobs) != rows:
+        raise ValueError(f"{len(train_logprobs)} train rows, {len(rollout_logprobs)} rollout rows, {rows} mask rows")
+    for name, values in (("provenances", provenances), ("finish_reasons", finish_reasons)):
+        if values is not None and len(values) != rows:
+            raise ValueError(f"{len(values)} {name} for {rows} rows")
+    out = []
+    for row in range(rows):
+        keep = [i for i, m in enumerate(masks[row]) if m]
+        out.append(SourceSample(
+            provenance=None if provenances is None else provenances[row],
+            train_logprobs=[float(train_logprobs[row][i]) for i in keep],
+            rollout_logprobs=[float(rollout_logprobs[row][i]) for i in keep],
+            finish_reason=None if finish_reasons is None else finish_reasons[row]))
+    return out
