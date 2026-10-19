@@ -140,6 +140,8 @@ def tape_metrics(rec: dict) -> dict:
         metrics[f"{learner}/c_steps"] = float(accounted_steps)
         metrics[f"{learner}/c_tokens"] = float(accounted_tokens)
         metrics[f"{learner}/base_version"] = float(responder.get("base_version", 0))
+        if "recv_seconds" in responder:  # upload time of this push (D4 timing)
+            metrics[f"{learner}/push_recv_seconds"] = float(responder["recv_seconds"])
     # A missing island logs an explicit 0 so its participation curve shows
     # the dropout instead of flatlining at its last contributed value.
     for learner_id in missed:
