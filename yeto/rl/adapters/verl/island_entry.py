@@ -28,6 +28,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from . import config as vconf
+from . import run_config_rules
 from .pins import VERL_COMMIT, VERL_ROOT, expected_versions
 from .reward_fn import function_for
 
@@ -250,6 +251,7 @@ def ensure_ray_cpus(min_cpus: int = MIN_RAY_CPUS) -> dict:
 
 def main(argv=None) -> int:
     args, ignored = parse_args(sys.argv[1:] if argv is None else argv)
+    run_config_rules.refuse_agentic_argv(ignored)  # S25 N10.4: never ignore agentic flags
     OUTPUT.mkdir(parents=True, exist_ok=True)
     lid = args.learner_id
     t0 = time.time()
