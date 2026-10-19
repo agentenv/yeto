@@ -30,6 +30,7 @@ import ray
 from verl.experimental.fully_async_policy import fully_async_main as fa_main
 from verl.experimental.fully_async_policy.fully_async_trainer import FullyAsyncTrainer
 
+from . import advantage  # noqa: F401 - registers the yeto_grpo estimator in the trainer process
 from .fully_async_round import RESUME_CALLS_KEY
 
 _TrainerBase = getattr(FullyAsyncTrainer, "__ray_actor_class__", FullyAsyncTrainer)
