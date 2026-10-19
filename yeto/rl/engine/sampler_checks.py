@@ -31,10 +31,14 @@ silently (A-INF items 1, 2, 3, 5). :class:`PortReleaseLoader` is the
 5. checks that the engine reports the release version (``served_version``).
 
 Only then is the release served. A failed step writes
-``sampler_load_check_failed``, marks the engine not ready (the loop generates
-nothing) and raises ``ReleaseNotLoaded`` so the follower tries again; after
-``max_consecutive_failures`` failures it raises :class:`SamplerLoadFatal` and
-the island stops with the reason.
+``sampler_load_check_failed`` and raises ``ReleaseNotLoaded`` so the follower
+tries again; after ``max_consecutive_failures`` failures in a row it raises
+:class:`SamplerLoadFatal` and the island stops with the reason. A step that
+failed after the engine was touched (load, post-load checks) marks the engine
+not ready (the loop generates nothing) and the next load restarts it. A
+release refused before the engine was touched (scheme, release expert count)
+leaves the engine serving its checked version (``ready`` unchanged; the event
+carries ``engine_touched: false`` and ``kept_version``).
 """
 
 from __future__ import annotations
@@ -254,6 +258,7 @@ class PortReleaseLoader:
         self.clock = clock
         self.ready = False  # True after a load whose checks all passed
         self.failures = 0
+        self._restart = False  # a failed load or check left the engine in an unknown state
         self.last_load: dict[str, Any] | None = None  # reload_mode, pause_s, checks
 
     @property
@@ -280,15 +285,29 @@ class PortReleaseLoader:
         self._serve(release, Path(directory), int(release.version), first=False)
 
     def _fail(self, version: int, step: str, detail: Any) -> None:
+        """A load or check failed: the engine holds unchecked weights, so it stops serving."""
         self.ready = False
+        self._restart = True
+        self._count_failure(version, step, detail, engine_touched=True)
+        raise ReleaseNotLoaded(f"v{version}: {step} failed: {str(detail)[:300]}",
+                               reason=f"check_failed:{step}")
+
+    def _refuse(self, version: int, step: str, detail: Any) -> None:
+        """The release failed a check before the engine was touched: the engine
+        keeps serving its checked version (``ready`` is unchanged)."""
+        kept = self.engine.served_version() if self.ready else None
+        self._count_failure(version, step, detail, engine_touched=False, kept_version=kept)
+        raise ReleaseNotLoaded(f"v{version}: {step} failed: {str(detail)[:300]}; "
+                               f"keeping v{kept}", reason=f"release_refused:{step}")
+
+    def _count_failure(self, version: int, step: str, detail: Any, **fields: Any) -> None:
         self.failures += 1
         self.emit(LOAD_CHECK_FAILED_EVENT, policy_version=version, step=step, detail=detail,
-                  failures=self.failures, max_consecutive_failures=self.max_consecutive_failures)
+                  failures=self.failures, max_consecutive_failures=self.max_consecutive_failures,
+                  **fields)
         if self.failures >= self.max_consecutive_failures:
             raise SamplerLoadFatal(f"post-load checks failed {self.failures} times in a row "
                                    f"(last: {step} for v{version}): {str(detail)[:300]}")
-        raise ReleaseNotLoaded(f"v{version}: {step} failed: {str(detail)[:300]}",
-                               reason=f"check_failed:{step}")
 
     def _serve(self, release: PolicyRelease | None, directory: Path | None, version: int,
                *, first: bool) -> None:
@@ -296,9 +315,9 @@ class PortReleaseLoader:
         if directory is not None and expected is not None:
             in_release = count_release_experts(directory)
             if in_release is not None and in_release != expected:
-                self._fail(version, "release_expert_count",
-                           {"in_release": in_release, "expected": expected})
-        restart = first or self.failures > 0  # after a failed check: restart, never patch in place
+                self._refuse(version, "release_expert_count",
+                             {"in_release": in_release, "expected": expected})
+        restart = first or self._restart  # after a failed load or check: restart, never patch in place
         self.ready = False  # the engine holds unchecked weights from here until the checks pass
         started = self.clock()
         try:
@@ -319,6 +338,7 @@ class PortReleaseLoader:
         self.checks.accept()
         self.ready = True
         self.failures = 0
+        self._restart = False
         self.last_load = {"reload_mode": report.reload_mode, "pause_s": round(report.pause_s, 3),
                           "load_and_check_s": round(self.clock() - started, 3),
                           "scheme": self.scheme, "checks": results, **dict(report.detail)}
