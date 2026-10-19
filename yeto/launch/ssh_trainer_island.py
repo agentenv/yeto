@@ -67,6 +67,7 @@ from yeto.rl.engine.start_phases import SUBMITTED_ENV
 from yeto.rl.engine.trainer_lifecycle import CutRef
 from yeto.rl.engine.trainer_remote import island_env
 
+from ..gpu_spec import DEVICE_FAMILY_ENV
 from .node_inventory import InventoryError, Node
 from .topology import island_comm_env
 from .trainer_island import (
@@ -254,7 +255,9 @@ def start_script(spec: SshTrainerSpec, rank: int, env: Mapping[str, str], paths:
     ``container``: the docker container name (docker nodes)."""
     node = spec.nodes[rank]
     comm = island_comm_env(node.device_family, node.fabric, node.interface, num_nodes=len(spec.nodes))
-    full_env = {**comm, **spec.env, **env, **(skypilot_env(spec, rank) if spec.run_script else {})}
+    # The learner reads the family to pick its card type and collective backend (accel).
+    full_env = {DEVICE_FAMILY_ENV: node.device_family, **comm, **spec.env, **env,
+                **(skypilot_env(spec, rank) if spec.run_script else {})}
     if spec.docker:
         if container is None:
             raise SshIslandError("a docker node needs its container name")

@@ -293,3 +293,68 @@ def test_fork_rng_without_a_device_forks_no_cards_on_cpu(
     with accel.fork_rng(None):
         pass
     assert recorded_fork == [{"devices": []}]
+
+
+# --- device family (S25 N7.7) --------------------------------------------
+
+
+@pytest.fixture
+def fake_cuda(monkeypatch):
+    stub = FakeAccelerator()
+    monkeypatch.setattr(torch, "cuda", stub)
+    return stub
+
+
+@pytest.mark.parametrize(("family", "device_type", "backend"), [
+    ("cuda", "cuda", "nccl"),
+    ("ppu", "cuda", "nccl"),  # CUDA device name, NCCL API over ACCL-P (not verified)
+    ("npu", "npu", "hccl"),
+    ("cpu", "cpu", "gloo"),
+])
+def test_family_maps_to_device_type_and_backend(family, device_type, backend):
+    assert accel.family_device_type(family) == device_type
+    assert accel.family_dist_backend(family) == backend
+
+
+def test_unknown_family_is_refused(monkeypatch):
+    with pytest.raises(ValueError, match="unknown device family"):
+        accel.family_dist_backend("tpu")
+    monkeypatch.setenv(accel.FAMILY_ENV, "tpu")
+    with pytest.raises(ValueError, match="unknown device family"):
+        accel.device_family()
+
+
+def test_device_family_precedence(no_cuda, npu, monkeypatch):
+    monkeypatch.delenv(accel.FAMILY_ENV, raising=False)
+    assert accel.device_family() == "npu"  # auto-detect
+    monkeypatch.setenv(accel.FAMILY_ENV, "ppu")
+    assert accel.device_family() == "ppu"  # the launcher's inventory value wins
+    assert accel.device_family("cuda") == "cuda"  # an explicit flag wins over both
+
+
+def test_ppu_binds_a_cuda_card(fake_cuda, monkeypatch):
+    monkeypatch.setenv("LOCAL_RANK", "2")
+    bound = accel.bind_family_device("ppu")
+    assert bound == torch.device("cuda", 2)
+    assert fake_cuda.bound == [torch.device("cuda", 2)]
+    assert accel.current_device("ppu") == torch.device("cuda", 3)
+
+
+def test_npu_binds_through_torch_npu(npu, monkeypatch):
+    monkeypatch.setattr(torch, "device", device)  # "npu" is unregistered without torch_npu
+    bound = accel.bind_family_device("npu", local_rank=1)
+    assert (bound.type, bound.index) == ("npu", 1)
+    assert npu.bound == [bound]
+    assert (accel.current_device("npu").type, accel.current_device("npu").index) == ("npu", 3)
+
+
+def test_npu_without_torch_npu_is_a_clear_error(monkeypatch):
+    monkeypatch.delattr(torch, "npu", raising=False)
+    monkeypatch.setattr(accel, "register_backends", lambda: None)
+    with pytest.raises(RuntimeError, match="torch_npu"):
+        accel.bind_family_device("npu", local_rank=0)
+
+
+def test_cpu_family_binds_nothing(fake_cuda):
+    assert accel.bind_family_device("cpu", local_rank=5) == torch.device("cpu")
+    assert fake_cuda.bound == []

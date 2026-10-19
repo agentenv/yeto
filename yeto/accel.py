@@ -19,6 +19,8 @@ from types import ModuleType
 
 import torch
 
+from .gpu_spec import DEVICE_FAMILY_ENV
+
 # Visible-card environment variables, in accelerator auto-detection priority.
 _VISIBLE_DEVICE_ENVS = {
     "cuda": "CUDA_VISIBLE_DEVICES",
@@ -26,8 +28,18 @@ _VISIBLE_DEVICE_ENVS = {
 }
 _ACCELERATORS = tuple(_VISIBLE_DEVICE_ENVS)
 
-# torch.distributed backend per device family.
+# torch.distributed backend per torch device type.
 _DIST_BACKENDS = {"cuda": "nccl", "npu": "hccl", "cpu": "gloo"}
+
+# Inventory device family (gpu_spec.DEVICE_FAMILIES, plus "cpu") -> the torch
+# device type its learner runs on. A PPU keeps the CUDA device name and the
+# NCCL API (served by ACCL-P), so it shares the "cuda" runtime: an inference
+# from the vendor documentation, not verified on a PPU machine. NPU uses
+# torch_npu and HCCL. The collective backend follows from the device type.
+FAMILY_DEVICE_TYPES = {"cuda": "cuda", "ppu": "cuda", "npu": "npu", "cpu": "cpu"}
+
+# Set by the island launcher from the node inventory; overrides auto-detection.
+FAMILY_ENV = DEVICE_FAMILY_ENV
 
 
 def register_backends() -> None:
@@ -90,6 +102,60 @@ def dist_backend(device: torch.device | None = None) -> str:
     """The collective backend matching the selected device or this node."""
     device_type = available_type() if device is None else device.type
     return _DIST_BACKENDS.get(device_type, "gloo")
+
+
+def device_family(explicit: str | None = None) -> str:
+    """The device family of this rank: ``explicit``, else ``$YETO_DEVICE_FAMILY``,
+    else the detected torch device type (a PPU then reads as ``"cuda"``,
+    which selects the same runtime)."""
+    family = explicit or os.environ.get(FAMILY_ENV) or available_type()
+    if family not in FAMILY_DEVICE_TYPES:
+        raise ValueError(f"unknown device family {family!r} (known: {sorted(FAMILY_DEVICE_TYPES)})")
+    return family
+
+
+def family_device_type(family: str) -> str:
+    """torch device type of a device family (``"ppu"`` -> ``"cuda"``)."""
+    try:
+        return FAMILY_DEVICE_TYPES[family]
+    except KeyError:
+        raise ValueError(f"unknown device family {family!r} (known: {sorted(FAMILY_DEVICE_TYPES)})") from None
+
+
+def family_dist_backend(family: str) -> str:
+    """torch.distributed backend of a device family (nccl, hccl or gloo)."""
+    return _DIST_BACKENDS[family_device_type(family)]
+
+
+def bind_family_device(family: str, local_rank: int | None = None) -> torch.device:
+    """Select this rank's local card of ``family`` and return it.
+
+    The CPU family returns ``cpu`` and binds nothing. ``local_rank`` defaults
+    to ``$LOCAL_RANK``.
+    """
+    device_type = family_device_type(family)
+    if device_type == "cpu":
+        return torch.device("cpu")
+    register_backends()
+    module = getattr(torch, device_type, None)
+    if module is None:
+        raise RuntimeError(f"device family {family!r} needs torch.{device_type}; "
+                           + ("install the torch_npu build matching this torch and CANN release"
+                              if device_type == "npu" else "this torch build has no CUDA runtime"))
+    if local_rank is None:
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    device = torch.device(device_type, local_rank)
+    module.set_device(device)
+    return device
+
+
+def current_device(family: str) -> torch.device:
+    """The card this rank already selected in ``family`` (``cpu`` for the CPU)."""
+    device_type = family_device_type(family)
+    if device_type == "cpu":
+        return torch.device("cpu")
+    register_backends()
+    return torch.device(device_type, getattr(torch, device_type).current_device())
 
 
 def detect(explicit: str | None) -> torch.device:
