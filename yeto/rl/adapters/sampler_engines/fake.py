@@ -43,7 +43,8 @@ class FakeEngine:
                  in_place: bool = True, expert_matrices: int | None = 36_288,
                  weight_gib: float | None = None, answers: Mapping[str, str] | None = None,
                  tokens_for: Callable[[str, int], int] = lambda prompt, i: 4 + i,
-                 token_ids_for: Callable[[str, int, int], list[int]] | None = None) -> None:
+                 token_ids_for: Callable[[str, int, int], list[int]] | None = None,
+                 token_reply: Callable[[tuple[int, ...], int], Sequence[int]] | None = None) -> None:
         self._identity = identity
         self._max_model_len = int(max_model_len)
         self.in_place = bool(in_place)
@@ -52,6 +53,8 @@ class FakeEngine:
         self.answers = dict(answers or {})
         self.tokens_for = tokens_for
         self.token_ids_for = token_ids_for
+        self.token_reply = token_reply  # generate_tokens: (prompt ids, sample index) -> reply ids
+        self.token_requests: list[tuple[tuple[tuple[int, ...], ...], SamplingParams, tuple[int, ...]]] = []
         self.probe_shift = 0.0  # added to every score log-prob (a "silently wrong" load)
         self.fail_load: str | None = None  # raise this message on the next load
         self._version: int | None = None
@@ -108,6 +111,34 @@ class FakeEngine:
                 logprobs = tuple(-_unit(prompt, i, k, self._version) for k in range(len(ids)))
                 group.append(Completion(token_ids=tuple(ids), logprobs=logprobs, text=text,
                                         finish_reason=finish))
+            out.append(group)
+        return out
+
+    def generate_tokens(self, prompts: Sequence[Sequence[int]], sampling: SamplingParams, *,
+                        stop_token_ids: Sequence[int] = ()) -> list[list[Completion]]:
+        """Token-id prompts. The reply is ``token_reply(prompt, i)`` cut at the
+        first stop token (kept) and at ``max_tokens``; text is left empty, so a
+        caller must decode the ids itself (as the records proxy does)."""
+        if self._version is None or self.stopped:
+            raise SamplerEngineError("fake engine is not serving")
+        stops = {int(t) for t in stop_token_ids}
+        keyed = [tuple(int(t) for t in p) for p in prompts]
+        self.token_requests.append((tuple(keyed), sampling, tuple(sorted(stops))))
+        out = []
+        for prompt in keyed:
+            group = []
+            for i in range(int(sampling.n)):
+                reply = (list(self.token_reply(prompt, i)) if self.token_reply
+                         else [int(_unit(prompt, i, k) * 1000) for k in range(int(self.tokens_for(str(prompt), i)))])
+                ids: list[int] = []
+                for token in reply[: sampling.max_tokens]:
+                    ids.append(int(token))
+                    if token in stops:
+                        break
+                finish = FINISH_STOP if (ids and ids[-1] in stops) or len(ids) < sampling.max_tokens else FINISH_LENGTH
+                logprobs = tuple(-_unit(prompt, i, k, self._version) for k in range(len(ids)))
+                group.append(Completion(token_ids=tuple(ids), logprobs=logprobs, text="",
+                                        finish_reason=finish, prompt_token_ids=prompt))
             out.append(group)
         return out
 

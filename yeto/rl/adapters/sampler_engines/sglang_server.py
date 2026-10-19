@@ -162,9 +162,30 @@ class SGLangServerEngine(ServerEngine):
     def generate(self, prompts: Sequence[str], sampling: SamplingParams) -> list[list[Completion]]:
         n = int(sampling.n)
         texts = [p for p in prompts for _ in range(n)]  # one request per sample: order is explicit
-        items = self._generate_raw(texts, sampling.replace(n=1))
+        return self._completions(self._generate_raw(texts, sampling.replace(n=1)), len(prompts), n)
+
+    def generate_tokens(self, prompts: Sequence[Sequence[int]], sampling: SamplingParams, *,
+                        stop_token_ids: Sequence[int] = ()) -> list[list[Completion]]:
+        """Token-id prompts (``input_ids``), for the records proxy (S25 N10.5)."""
+        n = int(sampling.n)
+        inputs = [[int(t) for t in p] for p in prompts for _ in range(n)]
+        params = self._params(sampling.replace(n=1))
+        if stop_token_ids:
+            params["stop_token_ids"] = [int(t) for t in stop_token_ids]
+        body = self.call("POST", "/generate", {"input_ids": inputs, "sampling_params": params,
+                                               "return_logprob": True})
+        items = body if isinstance(body, list) else [body]
+        if len(items) != len(inputs):
+            raise SamplerEngineError(f"sglang returned {len(items)} outputs for {len(inputs)} inputs")
+        completions = self._completions(items, len(prompts), n)
+        return [[c if c.prompt_token_ids else Completion(c.token_ids, c.logprobs, c.text, c.finish_reason,
+                                                         prompt_token_ids=tuple(inputs[i * n]))
+                 for c in group] for i, group in enumerate(completions)]
+
+    @staticmethod
+    def _completions(items: Sequence[dict[str, Any]], prompts: int, n: int) -> list[list[Completion]]:
         out: list[list[Completion]] = []
-        for i in range(len(prompts)):
+        for i in range(prompts):
             group = []
             for item in items[i * n:(i + 1) * n]:
                 meta = item.get("meta_info") or {}
