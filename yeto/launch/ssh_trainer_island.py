@@ -9,7 +9,8 @@ Ascend machines that yeto reaches by SSH and does not provision.
 
 One incarnation = one trainer process per node, started over SSH:
 
-1. before the first start, every node runs its device family's card tool and
+1. before the first start, every node's ``uname -m`` must equal its
+   ``cpu_arch`` (``Node.check_cpu_arch``) and its device family's card tool
    must match the inventory (``Node.check_cards``); the memory estimate of the
    plan (:mod:`yeto.rl.fullparam.memory`) is checked when the spec is built
    (:func:`ssh_trainer_spec`), so a plan that does not fit never reaches a node;
@@ -66,7 +67,7 @@ from yeto.rl.engine.start_phases import SUBMITTED_ENV
 from yeto.rl.engine.trainer_lifecycle import CutRef
 from yeto.rl.engine.trainer_remote import island_env
 
-from .node_inventory import Node
+from .node_inventory import InventoryError, Node
 from .topology import island_comm_env
 from .trainer_island import (
     JOBS_FILE,
@@ -342,8 +343,16 @@ class SshTrainerIslands:
 
     # -- preflight ----------------------------------------------------------------
     def preflight(self) -> None:
-        """Every node's cards must match the inventory (raises before any start)."""
+        """Every node's CPU architecture and cards must match the inventory
+        (raises before any start)."""
         for node in self.spec.nodes:
+            done = self.ops.run(node, "uname -m", timeout=60.0)
+            if done.returncode != 0:
+                raise SshIslandError(f"node {node.name}: uname -m failed (rc {done.returncode})")
+            try:
+                node.check_cpu_arch(done.stdout)
+            except InventoryError as exc:
+                raise SshIslandError(str(exc)) from None
             for argv in node.preflight_commands():
                 done = self.ops.run(node, shlex.join(argv), timeout=120.0)
                 if done.returncode == 0:

@@ -73,7 +73,7 @@ HBM Capacity(MB)               : 65536
 
 def _inventory_node(**overrides) -> dict:
     node = {"name": "ascend00", "host": "user@172.28.11.10", "device_family": "npu",
-            "card": "910B4", "cards_per_node": 8, "hbm_gib": 64,
+            "cpu_arch": "aarch64", "card": "910B4", "cards_per_node": 8, "hbm_gib": 64,
             "host_memory_gib": 1024, "fabric": "roce", "interface": "eth0",
             "image": "registry.example/yeto-ascend:1"}
     node.update(overrides)
@@ -88,7 +88,7 @@ def test_inventory_reads_every_declared_field(tmp_path):
     path.write_text(json.dumps({"nodes": [
         _inventory_node(proxy_jump="user@bastion", mounts={"/mnt/shared": "/mnt/shared"},
                         price_per_card_hour=1.5, roles=["trainer"]),
-        _inventory_node(name="ppu00", host="user@ppu00", device_family="ppu", card="810E",
+        _inventory_node(name="ppu00", host="user@ppu00", device_family="ppu", cpu_arch="x86_64", card="810E",
                         cards_per_node=16, hbm_gib=64, host_memory_gib=2048,
                         fabric="roce", interface="hpn0",
                         image="registry.example/yeto-ppu:1"),
@@ -133,6 +133,68 @@ def test_inventory_refuses_a_card_of_another_device_family():
 def test_inventory_refuses_a_bad_field(overrides, message):
     with pytest.raises(InventoryError, match=message):
         parse_inventory({"nodes": [_inventory_node(**overrides)]})
+
+
+# --- N1.6 cpu_arch and image selection -------------------------------------
+
+
+def test_inventory_requires_cpu_arch_and_normalizes_docker_spellings():
+    with pytest.raises(InventoryError, match="ascend00: cpu_arch is required"):
+        parse_inventory({"nodes": [_inventory_node(cpu_arch=None)]})
+    with pytest.raises(InventoryError, match="cpu_arch 'riscv64' is unknown"):
+        parse_inventory({"nodes": [_inventory_node(cpu_arch="riscv64")]})
+    node = parse_inventory({"nodes": [_inventory_node(cpu_arch="arm64")]})[0]
+    assert node.cpu_arch == "aarch64" and node.record()["cpu_arch"] == "aarch64"
+
+
+def test_inventory_selects_the_image_of_the_node_arch():
+    images = {"arm64": "reg.example/yeto-npu-sampler:1", "x86_64": "reg.example/yeto-ppu-train:1"}
+    nodes = parse_inventory({"images": images, "nodes": [
+        _inventory_node(image=None),
+        _inventory_node(name="ppu00", host="user@ppu00", device_family="ppu", cpu_arch="x86_64",
+                        card="810E", image=None),
+        _inventory_node(name="ascend01", host="user@h1", image="site/own-ascend:2"),
+    ]})
+    assert [n.image for n in nodes] == ["reg.example/yeto-npu-sampler:1",
+                                        "reg.example/yeto-ppu-train:1", "site/own-ascend:2"]
+
+
+@pytest.mark.parametrize("overrides, message", [
+    ({"image": "reg.example/yeto-ppu-train:1@sha256:ab"}, "x86_64 image ppu-train; the node is aarch64"),
+    ({"cpu_arch": "x86_64", "image": "reg.example/yeto-npu-sampler:1"},
+     "aarch64 image npu-sampler; the node is x86_64"),
+    ({"image": None}, "set image, or images.aarch64"),
+])
+def test_inventory_refuses_an_image_of_another_arch(overrides, message):
+    document = {"images": {"x86_64": "reg.example/yeto-ppu-train:1"},
+                "nodes": [_inventory_node(**overrides)]}
+    with pytest.raises(InventoryError, match=message):
+        parse_inventory(document)
+
+
+def test_inventory_refuses_a_catalog_image_of_another_device_family():
+    with pytest.raises(InventoryError, match="ppu image ppu-train; the node is device_family cuda"):
+        parse_inventory({"nodes": [_inventory_node(device_family="cuda", cpu_arch="x86_64",
+                                                   card="H200", image="r/yeto-ppu-train:1")]})
+
+
+@pytest.mark.parametrize("document, message", [
+    ({"images": {"sparc": "r/x:1"}, "nodes": []}, "images: cpu_arch 'sparc' is unknown"),
+    ({"images": {"arm64": "r/a:1", "aarch64": "r/b:1"}, "nodes": []}, "aarch64 is listed twice"),
+    ({"images": ["r/x:1"], "nodes": []}, "images must be a map"),
+    ({"image": "r/x:1", "nodes": []}, "unknown top-level inventory field"),
+])
+def test_inventory_refuses_a_bad_images_map(document, message):
+    with pytest.raises(InventoryError, match=message):
+        parse_inventory(document)
+
+
+def test_node_checks_uname_against_cpu_arch():
+    node = parse_inventory({"nodes": [_inventory_node()]})[0]
+    node.check_cpu_arch("aarch64\n")
+    node.check_cpu_arch("arm64")
+    with pytest.raises(InventoryError, match="uname -m reports x86_64, the inventory declares cpu_arch aarch64"):
+        node.check_cpu_arch("x86_64\n")
 
 
 def test_inventory_accepts_a_rootfs_node_without_an_image():
@@ -466,7 +528,7 @@ def test_every_ssh_and_copy_to_a_jump_host_node_goes_through_the_bastion():
 
 
 def test_a_node_without_a_jump_host_uses_plain_ssh():
-    node = Node(name="n0", host="user@n0", device_family="cuda", card="H200",
+    node = Node(name="n0", host="user@n0", device_family="cuda", cpu_arch="x86_64", card="H200",
                 cards_per_node=8, hbm_gib=141, host_memory_gib=2048)
     assert node.ssh_options() == []
     assert node.preflight_commands()[0][0] == "nvidia-smi"

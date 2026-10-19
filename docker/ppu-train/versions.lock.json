@@ -1,0 +1,44 @@
+{
+  "image": "yeto-ppu-train",
+  "cpu_arch": "x86_64",
+  "device_family": "ppu",
+  "base_image": {
+    "name": "inference-xpu-pytorch-opt:v0.5.17",
+    "reference": null,
+    "note": "registry path and digest unknown: read on ppu1 with docker inspect (N0.1 saw the tag only)"
+  },
+  "python": null,
+  "packages": {
+    "torch": {"version": "2.10.0", "import": "torch"},
+    "triton": {"version": "3.6.0", "import": "triton"},
+    "flash-linear-attention": {"version": "1.0.0", "import": "fla"},
+    "sglang": {"version": "0.5.17", "import": "sglang"},
+    "transformers": {"version": "5.12.1", "import": "transformers"},
+    "ray": {"version": "2.56.0", "import": "ray"},
+    "peft": {"version": "0.20.0", "import": "peft"},
+    "compressed-tensors": {"version": null, "import": "compressed_tensors"},
+    "megatron-core": {"version": null, "import": "megatron.core.transformer.hyper_connection"},
+    "mbridge": {"version": null, "import": "mbridge"},
+    "miles": {"version": null, "import": "miles"},
+    "verl": {"version": null, "import": "verl"},
+    "transformer-engine": {"version": null, "import": "transformer_engine.pytorch", "optional": true},
+    "tilelang": {"version": "0.1.14", "import": "tilelang", "optional": true}
+  },
+  "commits": {
+    "megatron": null,
+    "mbridge": "89eb10887887bc74853f89a4de258c0702932a1c",
+    "megatron_bridge": "2e09c234a3272285140224d0d698593418b55ba5",
+    "miles": "cc76e23915b2132ecfff65b97331fd83b02637e6",
+    "verl": "acad9875a8bdfc81afbcb0a50d146b2630f44093"
+  },
+  "required_files": [],
+  "decisions": [
+    "ray: the base has 2.31.0, Miles cc76e2391 requires >= 2.56.0. The image installs ray 2.56.0 (Miles floor). Not checked: sglang 0.5.17 with ray 2.56. The NPU sampler talks HTTP, not Ray, so the two images need not share a ray version.",
+    "fla: the base 1.0.0 is kept; Miles pins 0.5.2 plus a KDA patch. Compatibility of Miles glm5_next kda.py with fla 1.0.0 is the first PPU probe (N7.5).",
+    "TransformerEngine: recorded, optional. Megatron runs with TE by default; --transformer-impl local is the fallback (main agent 10-19). The PPU probe decides.",
+    "tilelang: optional; the DSA SparseMLA path needs it, its PPU support is unknown.",
+    "megatron commit: not pinned (Miles' image follows radixark/Megatron-LM miles-main); the build requires MEGATRON_COMMIT and records it.",
+    "compressed-tensors: recorded, not pinned, until the base's version is read (A-INF item 6 asks for a pin).",
+    "yeto: not installed as a package (pyproject pins torch < 2.9 and transformers 5.13); it runs from /opt/yeto/src via the release layer."
+  ]
+}

@@ -46,7 +46,7 @@ from yeto.rl.quant.release import RequantReleaser
 
 
 def node(name="ppu0", host="u@10.0.0.1", **kw) -> Node:
-    base = dict(device_family="ppu", card="PPU", cards_per_node=8, hbm_gib=144.0, host_memory_gib=2048.0,
+    base = dict(device_family="ppu", cpu_arch="x86_64", card="PPU", cards_per_node=8, hbm_gib=144.0, host_memory_gib=2048.0,
                 runtime="rootfs", fabric="roce", interface="eth0")
     return Node(name=name, host=host, **(base | kw))
 
@@ -115,11 +115,13 @@ class FakeProc:
 
 
 class FakeOps(SshOps):
-    def __init__(self, card_rc=0):
-        self.runs, self.starts, self.card_rc = [], [], card_rc
+    def __init__(self, card_rc=0, uname="x86_64"):
+        self.runs, self.starts, self.card_rc, self.uname = [], [], card_rc, uname
 
     def run(self, n, script, *, timeout=300.0):
         self.runs.append((n.name, script))
+        if script == "uname -m":
+            return subprocess.CompletedProcess([], 0, stdout=self.uname + "\n", stderr="")
         rc = self.card_rc if "smi" in script else 0
         return subprocess.CompletedProcess([], rc, stdout="cards", stderr="")
 
@@ -155,6 +157,22 @@ def test_preflight_fails_when_no_card_tool_answers(tmp_path, checked_cards):
     islands = SshTrainerIslands(spec(), name="t", jobs_path=tmp_path / "j.json", ops=FakeOps(card_rc=127))
     with pytest.raises(SshIslandError, match="no card tool"):
         islands.launch(1, None)
+
+
+@pytest.mark.parametrize("uname", ["aarch64", "ppc64le"])
+def test_preflight_refuses_a_node_of_another_cpu_arch(tmp_path, checked_cards, uname):
+    ops = FakeOps(uname=uname)
+    islands = SshTrainerIslands(spec(), name="t", jobs_path=tmp_path / "j.json", ops=ops)
+    with pytest.raises(SshIslandError, match=f"ppu0: uname -m reports '?{uname}'?.*cpu_arch x86_64"):
+        islands.launch(1, None)
+    assert not ops.starts and not checked_cards
+
+
+def test_preflight_accepts_the_docker_spelling_of_an_arch(tmp_path, checked_cards):
+    islands = SshTrainerIslands(spec(nodes=[node(cpu_arch="aarch64")]), name="t",
+                                jobs_path=tmp_path / "j.json", ops=FakeOps(uname="aarch64"))
+    islands.preflight()
+    assert islands.checked
 
 
 def test_ssh_binding_reads_a_sharded_store_by_key(tmp_path, checked_cards):
