@@ -16,8 +16,9 @@ One incarnation = one ``torchrun`` per node, started over SSH:
 2. each node runs, in a new session (one process group), the trainer command
    under ``torchrun`` with the incarnation environment
    (``trainer_remote.island_env``), the collective-communication variables of
-   its family and fabric (``topology.island_comm_env``) and the run's
-   environment. Node 0 also runs the W4A8 re-quantizer side process
+   its family and fabric (``topology.island_comm_env``), the run's
+   environment and the inventory's device family (``YETO_DEVICE_FAMILY``:
+   the telemetry's card collector and the learner's device follow it). Node 0 also runs the W4A8 re-quantizer side process
    (``yeto.rl.quant.release --loop``) when the spec has one: each BF16 release
    becomes a W4A8 release in the store, which W4A8 samplers follow;
 3. the SSH session streams node 0's log to the head (``IslandEvents`` reads the
@@ -52,6 +53,7 @@ from yeto.rl.engine.start_phases import SUBMITTED_ENV
 from yeto.rl.engine.trainer_lifecycle import CutRef
 from yeto.rl.engine.trainer_remote import island_env
 
+from ..gpu_spec import DEVICE_FAMILY_ENV
 from .node_inventory import Node
 from .topology import island_comm_env
 from .trainer_island import (
@@ -108,6 +110,9 @@ class SshTrainerSpec:
                                  "(the trainer image's device flags are task N0.2b); use runtime: rootfs")
         if len({n.cards_per_node for n in self.nodes}) != 1:
             raise SshIslandError("trainer nodes must have the same number of cards")
+        if self.env.get(DEVICE_FAMILY_ENV, self.device_family) != self.device_family:
+            raise SshIslandError(f"env sets {DEVICE_FAMILY_ENV}={self.env[DEVICE_FAMILY_ENV]}, but the "
+                                 f"inventory nodes are {self.device_family}; the inventory decides")
 
     @property
     def device_family(self) -> str:
@@ -164,7 +169,8 @@ def start_script(spec: SshTrainerSpec, rank: int, env: Mapping[str, str], paths:
         "set -eu\n"
         f"mkdir -p \"{paths['dir']}\"\n"
         f"cd {shlex.quote(spec.workdir)}\n"
-        + _exports({**comm, **spec.env, **env})
+        # The learner reads the family to pick its card type and collective backend (accel).
+        + _exports({DEVICE_FAMILY_ENV: node.device_family, **comm, **spec.env, **env})
         + f"rm -f \"{paths['rc']}\"\n"
         # Job control is off in a non-interactive shell, so the background setsid
         # is not a group leader: it does not fork, and $! is the new group's id.
