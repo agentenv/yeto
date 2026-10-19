@@ -236,6 +236,19 @@ class BatchConfig:
 
 
 @dataclass(frozen=True)
+class TrainMemoryConfig:
+    """Trainer activation-memory knobs (--rl-activation-recompute,
+    --rl-max-tokens-per-gpu). Defaults keep the historical argv: no
+    recompute, fixed micro batches."""
+
+    # Recompute every layer's activations in backward (keep only layer inputs).
+    activation_recompute: bool = False
+    # Token budget of one packed micro batch per GPU (dynamic batching);
+    # None = fixed micro batches of --micro-batch-size samples.
+    max_tokens_per_gpu: int | None = None
+
+
+@dataclass(frozen=True)
 class AlgorithmConfig:
     advantage_estimator: str
     reward_function: str  # "package.module:function"
@@ -465,6 +478,7 @@ class RLRunConfig:
     # rl-trainer-start-stop L4.6 (--rl-sample-role sampler|trainer): the island
     # writes or reads the durable sample buffer. None = role both (unchanged).
     sample_buffer: SampleBufferConfig | None = None
+    train_memory: TrainMemoryConfig = TrainMemoryConfig()
 
 
 # --------------------------------------------------------------------------
@@ -1003,6 +1017,20 @@ def resolve_rl_run_config(
         elastic_window_s=(float(args.rl_elastic_window_s)
                           if getattr(args, "rl_elastic_window_s", None) else None),
         sample_buffer=sample_roles.resolve(args, groups_per_round=args.groups_per_round),
+        train_memory=_train_memory(args),
+    )
+
+
+def _train_memory(args) -> TrainMemoryConfig:
+    max_tokens = getattr(args, "rl_max_tokens_per_gpu", None)
+    if max_tokens is not None and int(max_tokens) < int(args.seq_len):
+        # a sample longer than the budget would not fit in any micro batch
+        raise ValueError(
+            f"--rl-max-tokens-per-gpu {max_tokens} is below --seq-len {args.seq_len}"
+        )
+    return TrainMemoryConfig(
+        activation_recompute=bool(getattr(args, "rl_activation_recompute", False)),
+        max_tokens_per_gpu=int(max_tokens) if max_tokens is not None else None,
     )
 
 

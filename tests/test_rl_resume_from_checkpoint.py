@@ -17,6 +17,7 @@ from tests.rl_cut_fakes import make_rank, params, train_step
 from yeto.cloud import modal_ckpt_store as mcs
 from yeto.rl.adapters.miles.rebuild_wiring import CutSource
 from yeto.rl.adapters.miles.round_cut import POINTER, RoundCutCheckpoint, RoundCutError
+from yeto.rl.engine.cut import CutError
 from yeto.rl.engine import resume as rs
 from yeto.rl.engine.bridges import LocalOnlySync
 from yeto.rl.engine.controller import STORE_MANIFEST
@@ -58,10 +59,10 @@ def _rctl(tmp_path, name, store, keep=2):
     return rs.ResumeController(state_dir=tmp_path / name / "state", store=store, keep=keep)
 
 
-def _cp(ctl, driver, trainer, ledger, **kw):
+def _cp(ctl, driver, trainer, ledger, *, backend_fingerprint="miles@0af62f4d", **kw):
     source = CutSource(driver=lambda: driver, trainer=trainer, rollout=_Pool(), ledger=ledger,
                        algorithm=SimpleNamespace(sha256=lambda: "a" * 64, to_legacy_runtime_attrs=lambda: {}),
-                       backend_fingerprint="miles@0af62f4d", cut_root="", global_batch_size=ARGS.global_batch_size)
+                       backend_fingerprint=backend_fingerprint, cut_root="", global_batch_size=ARGS.global_batch_size)
     kw.setdefault("fingerprint", dict(FP))
     kw.setdefault("next_lr", lambda d: getattr(d, "last_applied_lrs", None))
     return RoundCutCheckpoint(controller=ctl, source=source, trainer=trainer, **kw)
@@ -231,6 +232,30 @@ def test_resume_refuses_a_changed_config_unless_allowed(tmp_path):
                allow_config_change=True)
     cp_c.resume(driver_c)
     assert driver_c.events[-1][1]["config_diff"] == {"seed": {"cut": 17, "now": 1}}
+
+
+def test_longer_run_changes_backend_fingerprint_and_lr_only_when_allowed(tmp_path):
+    """A longer run changes the Miles argv (--num-rollout, --lr-decay-iters) and so the
+    backend fingerprint and the next learning rate: refused by default, recorded when
+    --rl-resume-allow-config-change is given."""
+    store = _store(tmp_path / "store")
+    _r, _c, driver_a, cp_a = _trained_island(tmp_path, store, 2)
+    cp_a.save(driver_a, rollout_id=2)
+    rank_b = make_rank(9)
+    cp_b = _cp(_rctl(tmp_path, "b", store), _Driver(rank_b), _trainer(rank_b), _Ledger(2),
+               backend_fingerprint="miles@longer")
+    with pytest.raises(CutError, match="backend fingerprint differs"):
+        cp_b.resume(_Driver(rank_b))
+    driver_c = _Driver(rank_b)
+    cp_c = _cp(_rctl(tmp_path, "c", store), driver_c, _trainer(rank_b), _Ledger(2),
+               backend_fingerprint="miles@longer", allow_config_change=True)
+    cp_c.resume(driver_c)
+    resumed = [ev for name, ev in driver_c.events if name == "rl_resume"][-1]
+    assert resumed["checks"]["backend_fingerprint"] == {
+        "result": "changed(allowed)", "cut": "miles@0af62f4d", "run": "miles@longer"}
+    cp_c.check_first_round(driver_c, rollout_id=2, applied_lrs=(1e-5,))
+    check = [ev for name, ev in driver_c.events if name == "rl_resume_check"][-1]
+    assert check["ok"] is False and check["allowed"] is True
 
 
 def test_resume_refuses_lr_jump_and_ledger_drift(tmp_path):

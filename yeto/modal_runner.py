@@ -720,6 +720,108 @@ class HostMemSampler:
               f"peak gpu used MiB {self.peak_gpu}", flush=True)
 
 
+NCCL_TRACE_PREFIX_DEFAULT = "/tmp/nccl_trace_rank_"
+PY_SPY_CANDIDATES = ("py-spy", "/opt/sglang/bin/py-spy")
+
+
+class HangStackDumper:
+    """Capture every Python process's stack when a collective times out.
+
+    Opt-in via env ``YETO_HANG_STACK_DUMP=1``.  PyTorch's NCCL watchdog
+    writes a flight-recorder file (``TORCH_NCCL_DEBUG_INFO_TEMP_FILE`` +
+    rank) on a collective timeout when ``TORCH_NCCL_DUMP_ON_TIMEOUT=1``.
+    The rank that timed out then aborts, but a peer stuck on the host side
+    (S24 L1.1: TP rank 1 never enqueued the reduce-scatter) prints nothing.
+    This thread polls for the flight-recorder file and, on its first
+    appearance, runs ``py-spy dump`` on every Python process in the
+    container, twice (``repeat_s`` apart, to tell a hang from slow
+    progress).  Output goes to the tape dir so the tape Volume carries it
+    home."""
+
+    def __init__(self, out_dir: str, rank: int, *, trace_prefix: str = NCCL_TRACE_PREFIX_DEFAULT,
+                 poll_s: float = 5.0, repeat_s: float = 20.0, py_spy: str | None = None,
+                 proc: str = "/proc"):
+        self.out_dir, self.rank, self.trace_prefix = out_dir, rank, trace_prefix
+        self.poll_s, self.repeat_s, self.proc = poll_s, repeat_s, proc
+        self.py_spy = py_spy or next((p for p in (_which(c) for c in PY_SPY_CANDIDATES) if p), None)
+        self.dumps = 0
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    @classmethod
+    def from_env(cls, env: dict, out_dir: str, rank: int) -> "HangStackDumper | None":
+        if str(env.get("YETO_HANG_STACK_DUMP", "")).strip() not in {"1", "true", "yes"}:
+            return None
+        prefix = env.get("TORCH_NCCL_DEBUG_INFO_TEMP_FILE") or NCCL_TRACE_PREFIX_DEFAULT
+        return cls(out_dir, rank, trace_prefix=prefix)
+
+    def triggered(self) -> list[str]:
+        folder, stem = os.path.split(self.trace_prefix)
+        try:
+            return sorted(os.path.join(folder, n) for n in os.listdir(folder or ".") if n.startswith(stem))
+        except OSError:
+            return []
+
+    def python_pids(self) -> list[tuple[int, str]]:
+        out = []
+        for name in os.listdir(self.proc):
+            if not name.isdigit() or int(name) == os.getpid():
+                continue
+            try:
+                with open(os.path.join(self.proc, name, "cmdline"), "rb") as f:
+                    cmd = f.read().replace(b"\0", b" ").decode(errors="replace").strip()
+            except OSError:
+                continue
+            if cmd.startswith("ray::") or "python" in cmd.split(" ", 1)[0]:
+                out.append((int(name), cmd[:200]))
+        return sorted(out)
+
+    def dump(self, reason: str) -> str:
+        self.dumps += 1
+        path = os.path.join(self.out_dir, f"hang-stacks-rank{self.rank}-{self.dumps}.txt")
+        os.makedirs(self.out_dir, exist_ok=True)
+        with open(path, "w") as f:
+            f.write(f"# {reason} at {time.time():.3f} (py-spy={self.py_spy})\n")
+            for pid, cmd in self.python_pids():
+                f.write(f"\n===== pid {pid}: {cmd}\n")
+                f.flush()
+                if self.py_spy is None:
+                    f.write("py-spy not found\n")
+                    continue
+                try:
+                    res = subprocess.run([self.py_spy, "dump", "--pid", str(pid)],
+                                         capture_output=True, text=True, timeout=60)
+                    f.write(res.stdout + res.stderr)
+                except (OSError, subprocess.SubprocessError) as exc:
+                    f.write(f"py-spy failed: {exc}\n")
+        print(f"[modal-hang-stacks] rank {self.rank}: {reason}; wrote {path}", flush=True)
+        return path
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self.poll_s):
+            files = self.triggered()
+            if files:
+                self.dump(f"NCCL flight-recorder file(s) {files}")
+                if not self._stop.wait(self.repeat_s):
+                    self.dump("repeat")
+                return
+
+    def start(self) -> None:
+        print(f"[modal-hang-stacks] rank {self.rank}: watching {self.trace_prefix}* "
+              f"(py-spy={self.py_spy})", flush=True)
+        self._thread = threading.Thread(target=self._loop, daemon=True, name="modal-hang-stacks")
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+
+def _which(cmd: str) -> str | None:
+    import shutil
+
+    return cmd if os.path.isabs(cmd) and os.access(cmd, os.X_OK) else shutil.which(cmd)
+
+
 def island_main(cfg_json: str) -> int:
     """Body of the Modal function: runs in the container. Returns the run
     script's exit code (nonzero raises so Modal records the failure)."""
@@ -757,9 +859,14 @@ def island_main(cfg_json: str) -> int:
         hostmem = HostMemSampler(interval, f"{TAPE_SOURCE_DIR}/modal-hostmem-rank{rank}.jsonl",
                                  node_rank=rank)
         hostmem.start()
+    stacks = HangStackDumper.from_env(env, TAPE_SOURCE_DIR, rank)
+    if stacks is not None:
+        stacks.start()
     try:
         return _island_body(cfg, rank, ips, all_ips, env, tape)
     finally:
+        if stacks is not None:
+            stacks.stop()
         if hostmem is not None:
             hostmem.stop()
         if tape is not None:

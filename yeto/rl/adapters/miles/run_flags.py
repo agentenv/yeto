@@ -155,6 +155,20 @@ _RUN_CONTROL = (
 
 _ROLLOUT_ENGINE = (
     shared_flag(
+        "--rl-activation-recompute",
+        action="store_true",
+        help="ports: Megatron full uniform activation recompute (one layer per "
+        "chunk); trades about one extra forward for activation memory. Off by default",
+    ),
+    shared_flag(
+        "--rl-max-tokens-per-gpu",
+        type=int,
+        default=None,
+        help="ports: Miles dynamic batching, packing samples into micro batches of "
+        "at most this many tokens per GPU (must be >= --seq-len). Default: fixed "
+        "micro batches",
+    ),
+    shared_flag(
         "--rl-distributed-timeout-minutes",
         type=int,
         default=10,

@@ -166,11 +166,13 @@ def resolve_serving(tito_model: str) -> dict[str, Any]:
 
 def sglang_argv(cfg: InferConfig, *, rank: int, targets: list[str], python: str = sys.executable,
                 serving: Mapping[str, Any] | None = None) -> list[str]:
+    """``rank == 0`` serves the base model alone (no LoRA flags): the baseline shape."""
     argv = [python, "-m", "sglang.launch_server", "--model-path", cfg.base_model,
             "--host", cfg.host, "--port", str(cfg.sglang_port), "--trust-remote-code",
-            "--context-length", str(cfg.context_length), "--mem-fraction-static", str(cfg.mem_fraction_static),
-            "--enable-lora", "--max-lora-rank", str(rank), "--lora-target-modules", *targets,
-            "--max-loaded-loras", "2", "--max-loras-per-batch", "1"]
+            "--context-length", str(cfg.context_length), "--mem-fraction-static", str(cfg.mem_fraction_static)]
+    if rank:
+        argv += ["--enable-lora", "--max-lora-rank", str(rank), "--lora-target-modules", *targets,
+                 "--max-loaded-loras", "2", "--max-loras-per-batch", "1"]
     if cfg.revision and not Path(cfg.base_model).exists():
         argv += ["--revision", cfg.revision]
     serving = serving or {}
@@ -185,7 +187,8 @@ def sglang_argv(cfg: InferConfig, *, rank: int, targets: list[str], python: str 
 
 def session_server_config(cfg: InferConfig, *, rank: int, serving: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """``miles.rollout.session.config.SessionServerConfig`` fields, as the training island sets them
-    (``compute_session_server_config``) for a LoRA codex run without replay / speculative decoding."""
+    (``compute_session_server_config``) for a LoRA codex run without replay / speculative decoding.
+    ``rank == 0`` with no adapter path is Miles' only LoRA-free shape (``is_lora_enabled``)."""
     serving = serving or {}
     kwargs = dict(cfg.chat_template_kwargs)
     for key, value in (serving.get("chat_template_kwargs") or {}).items():
@@ -266,6 +269,12 @@ class SglangSessionLoader:
         session_s = self._wait("session-server", f"{self.cfg.session_url}/health")
         self.served = {"rank": rank, "targets": list(targets)}
         return {"sglang_start_s": sglang_s, "session_server_start_s": session_s, "serving": serving}
+
+    def start_base(self) -> dict[str, Any]:
+        """Serve the base model without LoRA (baseline runs: no stored policy to load)."""
+        if self.served is not None:
+            raise RuntimeError(f"serving already started: {self.served}")
+        return self._start(0, [])
 
     def load(self, manifest: Mapping[str, Any], files_dir: Path) -> str:
         version = int(manifest["policy_version"])

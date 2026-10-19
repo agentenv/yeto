@@ -29,6 +29,7 @@ from typing import Any
 from yeto.rl.engine.algorithm import (
     BOUNDED_NONZERO_STD_FILTER,
     SECRLENV_GROUP_CHECK_FILTER,
+    TBENCH_GROUP_CHECK_FILTER,
     STOCK_NONZERO_STD_FILTER,
     AlgorithmSpec,
 )
@@ -274,6 +275,7 @@ def miles_capabilities(
         placements={"colocated"},
         dynamic_sampling_filters={
             BOUNDED_NONZERO_STD_FILTER, STOCK_NONZERO_STD_FILTER, SECRLENV_GROUP_CHECK_FILTER,
+            TBENCH_GROUP_CHECK_FILTER,
         },
         execution_modes={"colocated-serial"},
         execution=ExecutionCapabilities(

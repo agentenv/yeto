@@ -33,7 +33,8 @@ SPECS = {
 
 
 def test_every_legacy_name_normalizes_to_a_neutral_name():
-    assert set(alg.LEGACY_FILTER_NAMES) == {B_OLD, S_OLD, SECRLENV_GROUP_FILTER}
+    assert set(alg.LEGACY_FILTER_NAMES) == {B_OLD, S_OLD, SECRLENV_GROUP_FILTER,
+                                          "yeto.rl.harness.codex.tbench_reward.check_group"}
     for old, new in alg.LEGACY_FILTER_NAMES.items():
         assert alg.normalize_filter_name(old) == new
         assert alg.normalize_filter_name(new) == new
