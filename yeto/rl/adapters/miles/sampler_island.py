@@ -48,7 +48,7 @@ from yeto.rl.engine.policy_release import (
 from yeto.rl.engine.policy_versions import engine_weight_version
 from yeto.rl.engine.sample_roles import CONVERTIBLE, SAMPLER, TRAINER
 
-from .buffer_rollout import SampleBufferRolloutError, executor_read_cursor, open_buffer
+from .buffer_rollout import SampleBufferRolloutError, executor_read_cursor, executor_read_shards, open_buffer
 from .publish import (
     _engine_id,
     _maybe_await,
@@ -290,7 +290,7 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None) -> int:
         follower = PolicyFollower(release_store(config, environ), loader,
                                   version=BASE_POLICY_VERSION)
         loop = SamplerLoop(
-            follower=follower, buffer=open_buffer(environ), emit=emit,
+            follower=follower, buffer=open_buffer(environ, sampler=True), emit=emit,
             generate=lambda rollout_id: runner.run(generate(rollout_id)),
             num_rollouts=int(miles_args.num_rollout),
             max_backlog_groups=int(config.max_backlog_groups),
@@ -325,11 +325,16 @@ class ReleasingPublisher:
     def __init__(self, inner: Any, releases: PolicyReleaseStore,
                  export: Callable[[int, Path], None],
                  read_position: Callable[[], int | None], emit: Callable[..., None],
-                 *, weights: str = FULL) -> None:
+                 *, weights: str = FULL,
+                 read_shards: Callable[[], dict[str, int] | None] | None = None) -> None:
+        """``read_shards``: the trainer's read position per sampler shard (None
+        without merged shards), released with every policy for the samplers'
+        backlog caps."""
         self.inner = inner
         self.releases = releases
         self.export = export
         self.read_position = read_position
+        self.read_shards = read_shards
         self.emit = emit
         self.weights = weights
 
@@ -343,13 +348,15 @@ class ReleasingPublisher:
         result = self.inner.publish(state, **kwargs)
         version = int(state.policy_version)
         position = self.read_position()
-        if position is None:  # nothing read yet in this process: keep the last known position
+        shards = self.read_shards() if self.read_shards is not None and position is not None else None
+        if position is None:  # nothing read yet in this process: keep the last known positions
             latest = self.releases.latest()
             position = None if latest is None else latest.buffer_selected
+            shards = None if latest is None else latest.buffer_shards
         release = self.releases.release(version, state.policy_tensor_hash(),
                                         lambda directory: self.export(version, directory),
                                         buffer_selected=position, weights=self.weights,
-                                        engine_checksum=self._engine_checksum())
+                                        engine_checksum=self._engine_checksum(), buffer_shards=shards)
         if release is not None:
             self.emit("rl_policy_released", seq=release.seq, policy_version=version,
                       policy_hash=release.policy_hash, buffer_selected=release.buffer_selected,
@@ -383,6 +390,7 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
 
     publisher = ReleasingPublisher(driver.publisher, release_store(config, environ), export,
                                    read_position=lambda: in_executor(executor_read_cursor),
+                                   read_shards=lambda: in_executor(executor_read_shards),
                                    emit=driver.emit, weights=LORA if lora else FULL)
     driver.publisher = publisher
     return publisher

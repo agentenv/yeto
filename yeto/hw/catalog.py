@@ -27,11 +27,22 @@ CARD_VENDOR: Mapping[str, str] = {
     "T4": "nvidia",
     # Ascend NPU. 910B4 is the model the user bought (decision 2026-10-10);
     # "910B" stays as the family-level name earlier code already used.
-    "910B": "ascend", "910B4": "ascend",
+    "910B": "ascend", "910B4": "ascend", "910B2": "ascend", "910B3": "ascend",
+    "910C": "ascend",
+    # Alibaba T-Head PPU (rl-ssh-node-pool D2). torch reports device type
+    # "cuda" on these cards, so the vendor comes from the card name only
+    # (infra-drafts/SESSION24/T-PPU-gaps.md 2.1).
+    "810E": "thead", "M890": "thead",
 }
 
-# torch device type -> device family in the backend identity.
+# torch device type -> device family in the backend identity. A PPU is absent
+# on purpose: its torch device type is "cuda", so only the card name tells it
+# apart from an NVIDIA GPU (see VENDOR_BY_DEVICE_FAMILY).
 DEVICE_FAMILY_BY_DEVICE_TYPE: Mapping[str, str] = {"cuda": "nvidia", "npu": "ascend"}
+
+# Launcher device family (yeto.gpu_spec.DEVICE_FAMILIES) -> vendor.
+VENDOR_BY_DEVICE_FAMILY: Mapping[str, str] = {"cuda": "nvidia", "npu": "ascend",
+                                              "ppu": "thead"}
 
 
 def device_family(device_type: str | None = None) -> str:
