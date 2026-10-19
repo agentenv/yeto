@@ -7,8 +7,8 @@
 | `ppu-train/` | `yeto-ppu-train` | x86_64 | ppu | trainer + sampler | written, never built (S25 N0.2) |
 | `npu-sampler/` | `yeto-npu-sampler` | aarch64 | npu | sampler | written, never built (S25 N0.2) |
 
-`yeto/launch/images.py` is the catalog the launcher reads. A node of the SSH
-inventory declares `cpu_arch`; a node with no `image` takes the inventory's
+`yeto/launch/engine_images.py` is the catalog the launcher reads. A node of
+the SSH inventory declares `cpu_arch`; a node with no `image` takes the inventory's
 `images[cpu_arch]`, and a node whose image is a catalog image of another
 architecture or device family is refused before any SSH (N1.6).
 

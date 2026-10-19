@@ -10,7 +10,7 @@ provider differences live in the file.
 ``cpu_arch`` (``x86_64`` or ``aarch64``) selects the image (S25 N1.6): a node
 without ``image`` takes ``images[cpu_arch]`` from the top of the file, and a
 node whose image is a yeto catalog image of another architecture or device
-family is refused (``yeto.launch.images``). The trainer preflight also
+family is refused (``yeto.launch.engine_images``). The trainer preflight also
 compares ``uname -m`` with ``cpu_arch``.
 
 Example::
@@ -43,7 +43,7 @@ from typing import Any, Mapping
 
 from ..gpu_spec import DEVICE_FAMILIES, UnknownCard, canonical_card, device_family_of
 from ..hw import card_tools
-from . import images as image_catalog
+from . import engine_images as image_catalog
 
 # Fabrics an inventory may declare. "tcp" is Ethernet without RDMA; "roce" and
 # "ib" are RDMA over Ethernet and InfiniBand; "hccs" is the Ascend on-node

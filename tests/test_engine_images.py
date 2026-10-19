@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from yeto.launch import images
+from yeto.launch import engine_images as images
 from yeto.rl.adapters.miles import pins as miles_pins
 from yeto.rl.adapters.verl import pins as verl_pins
 
