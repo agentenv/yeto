@@ -24,7 +24,7 @@ from typing import Any
 from harbor.environments.base import BaseEnvironment, ExecResult
 from harbor.environments.capabilities import EnvironmentCapabilities
 
-from .boat_client import process_client, process_quota
+from .boat_client import BoatQuota, process_client, process_quota
 from .boat_sandbox import BoatSandbox, ContainerSpec, machine_type_for
 
 BOAT_IMPORT_PATH = "yeto.rl.harness.harbor.boat_env:BoatEnvironment"
@@ -35,18 +35,21 @@ class BoatEnvironment(BaseEnvironment):
 
     Extra kwargs (``EnvironmentConfig.kwargs``): ``machine_type`` (default: the
     smallest that fits the task), ``ttl_s`` (VM auto-stop, a backstop for a
-    lost delete), ``client`` (a :class:`~.boat_client.BoatClient`, for tests).
+    lost delete), ``client`` (a :class:`~.boat_client.BoatClient`) and
+    ``quota`` (a :class:`~.boat_client.BoatQuota`), both for tests.  Without
+    ``quota`` the environment takes the process quota, so it must be built
+    inside the running loop (Harbor builds it in ``Trial.create``).
     """
 
     def __init__(self, *args: Any, machine_type: str | None = None, ttl_s: int | None = None,
-                 client: Any = None, **kwargs: Any) -> None:
+                 client: Any = None, quota: BoatQuota | None = None, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         sandbox_kwargs: dict[str, Any] = {}
         if ttl_s is not None:
             sandbox_kwargs["ttl_s"] = ttl_s
         self._sandbox = BoatSandbox(
             client if client is not None else process_client(),
-            process_quota(),
+            quota if quota is not None else process_quota(),
             name=self.session_id,
             machine_type=machine_type or machine_type_for(self._effective_memory_mb, self._effective_cpus),
             **sandbox_kwargs,

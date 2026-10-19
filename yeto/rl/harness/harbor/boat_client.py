@@ -11,7 +11,8 @@ logged or put in an exception message.
 
 Quota (box_20 plan, read from ``GET /limits`` on 2026-10-19): 100 active
 sandboxes, 12 starts per minute, 60 per hour, 200 per day.  :class:`BoatQuota`
-holds the first two per process; :func:`check_in_flight_cap` refuses an
+holds the first two per process (per event loop, see :func:`process_quota`);
+:func:`check_in_flight_cap` refuses an
 admission gate larger than the active-sandbox cap.  The hourly and daily caps
 are left to the server (a refused create raises :class:`BoatQuotaError`).
 """
@@ -29,6 +30,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
+
+from yeto.rl.agentic.loop_local import LoopLocal
 
 API_HOST = "https://boat.dev/api/v1"
 API_KEY_ENV = "BOAT_API_KEY"
@@ -226,7 +229,6 @@ class BoatQuota:
         self._active.release()
 
 
-_process_quota: BoatQuota | None = None
 _process_client: SdkBoatClient | None = None
 
 
@@ -239,8 +241,13 @@ def process_client() -> SdkBoatClient:
 
 
 def process_quota() -> BoatQuota:
-    """The quota shared by every boat sandbox of this process (created on first use)."""
-    global _process_quota
-    if _process_quota is None:
-        _process_quota = BoatQuota.from_env()
-    return _process_quota
+    """The quota shared by every boat sandbox of this process's event loop.
+
+    It holds asyncio primitives, so it is kept per running loop
+    (:class:`~yeto.rl.agentic.loop_local.LoopLocal`); a training worker runs
+    one loop, so this is one quota per process.  Call it inside a running loop.
+    """
+    return _process_quota.get()
+
+
+_process_quota: LoopLocal[BoatQuota] = LoopLocal(BoatQuota.from_env)

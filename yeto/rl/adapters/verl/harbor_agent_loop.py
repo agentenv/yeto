@@ -21,13 +21,32 @@ one-token placeholder with mask 0 and reward 0, flagged in ``extra_fields``.
 It adds no policy-gradient tokens, but it still counts in its GRPO group's
 reward mean; a group-level drop on verl is not implemented (not verified).
 
-Configuration (worker environment):
-  YETO_AGENTIC_RECORDER     ``module:callable`` returning a TokenRecorder (required)
+Configuration (worker environment; pass it to the Ray workers, e.g. through
+``ray_kwargs.ray_init.runtime_env.env_vars``):
+  YETO_AGENTIC_RECORDER     ``module:callable`` returning a TokenRecorder (required).
+                            verl builds the agent loop once per sample, so the
+                            callable is called per sample; return a shared object.
   HARBOR_TASKS_DIR          Harbor task directories (required)
   HARBOR_TRIALS_DIR         trial output (default /tmp/harbor_trials)
-  HARBOR_ENV_KWARGS         JSON provider kwargs (default {})
+  HARBOR_ENV_TYPE           sandbox provider of rows without ``agent_task.provider``
+                            (``boat``, ``modal``, ``docker``, ...; same name as Miles)
+  HARBOR_ENV_KWARGS         JSON provider kwargs (default {}); boat: ``machine_type``
+                            (default: smallest that fits the task), ``ttl_s``
   HARBOR_TIMEOUT_MULTIPLIER Harbor timeout multiplier (default 1.0)
   YETO_HARBOR_MAX_IN_FLIGHT sandboxes per worker process (default 64)
+  YETO_BOAT_MAX_ACTIVE, YETO_BOAT_STARTS_PER_MINUTE
+                            boat caps per worker process (``boat_client``)
+
+Concurrency: verl runs ``rollout.agent.num_workers`` worker processes, so the
+account holds up to ``num_workers * YETO_HARBOR_MAX_IN_FLIGHT`` sandboxes.  For
+boat, a worker refuses a ``YETO_HARBOR_MAX_IN_FLIGHT`` above
+``YETO_BOAT_MAX_ACTIVE``; keeping ``num_workers * YETO_BOAT_MAX_ACTIVE`` within
+the plan (box_20: 100 active, 12 starts per minute) is the launcher's job.
+
+The admission gate and the boat quota hold asyncio primitives and are kept
+per event loop (:class:`~yeto.rl.agentic.loop_local.LoopLocal`).  verl runs
+``AgentLoopWorker`` as a Ray async actor (one loop per process), so in a
+worker they are per process.
 """
 
 from __future__ import annotations
@@ -35,7 +54,7 @@ from __future__ import annotations
 import importlib
 import os
 import uuid
-from functools import lru_cache, partial
+from functools import partial
 from typing import Any
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopMetrics, AgentLoopOutput, register
@@ -54,15 +73,27 @@ from yeto.rl.agentic import (
     join_turns,
     run_agent_task,
 )
+from yeto.rl.agentic.loop_local import LoopLocal
 from yeto.rl.harness.harbor import HarborHarness, HarborSettings, build_trial_config
+from yeto.rl.harness.harbor.boat_client import check_in_flight_cap
 
 AGENT_LOOP_NAME = "yeto_harbor"
 RECORDER_ENV = "YETO_AGENTIC_RECORDER"
+PROVIDER_ENV = "HARBOR_ENV_TYPE"
+MAX_IN_FLIGHT_ENV = "YETO_HARBOR_MAX_IN_FLIGHT"
+_DEFAULT_MAX_IN_FLIGHT = 64
 
 
-@lru_cache(maxsize=1)
+def _max_in_flight() -> int:
+    return int(os.environ.get(MAX_IN_FLIGHT_ENV, _DEFAULT_MAX_IN_FLIGHT))
+
+
+_gates: LoopLocal[AdmissionGate] = LoopLocal(lambda: AdmissionGate(_max_in_flight()))
+
+
 def _gate() -> AdmissionGate:
-    return AdmissionGate(int(os.environ.get("YETO_HARBOR_MAX_IN_FLIGHT", 64)))
+    """The admission gate of this worker's event loop (one sandbox per admitted sample)."""
+    return _gates.get()
 
 
 def _recorder_from_env() -> TokenRecorder:
@@ -75,6 +106,23 @@ def _recorder_from_env() -> TokenRecorder:
 
 def _harness_from_env() -> AgentHarness:
     return HarborHarness(partial(build_trial_config, settings=HarborSettings.from_env()))
+
+
+def task_from_row(kwargs: dict[str, Any]) -> AgentTask:
+    """The sample's :class:`AgentTask`; ``HARBOR_ENV_TYPE`` fills a missing provider.
+
+    A boat task is refused (configuration error, fails the batch) when this
+    worker's gate admits more sandboxes than its boat quota holds.
+    """
+    row = agent_task_row(kwargs)
+    provider = os.environ.get(PROVIDER_ENV, "").strip().lower()
+    try:
+        task = AgentTask.from_mapping(row, defaults={"provider": provider or None})
+        if task.provider == "boat":
+            check_in_flight_cap(_max_in_flight())
+    except ValueError as exc:
+        raise HarnessConfigError(str(exc)) from exc
+    return task
 
 
 def agent_task_row(kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -102,7 +150,7 @@ class HarborAgentLoop(AgentLoopBase):
         self._harness = self.harness_factory()
 
     async def run(self, sampling_params: dict[str, Any], **kwargs: Any) -> AgentLoopOutput:
-        task = AgentTask.from_mapping(agent_task_row(kwargs))
+        task = task_from_row(kwargs)
         trajectory_id = task.trajectory_id or uuid.uuid4().hex
         endpoint = await self._recorder.open(trajectory_id, sampling_params)
         try:

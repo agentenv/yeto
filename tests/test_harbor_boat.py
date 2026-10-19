@@ -393,7 +393,7 @@ def test_boat_environment_on_harbor_interface(tmp_path: Path):
         environment_dir=tmp_path, environment_name="t1", session_id="t1__x__env",
         trial_paths=TrialPaths(trial_dir=tmp_path / "trial"),
         task_env_config=EnvironmentConfig(docker_image="img:1", memory_mb=2048, cpus=1),
-        client=fake)
+        client=fake, quota=BoatQuota(2, 12))
     assert env.type() == "boat" and not env.capabilities.mounted
 
     async def go():

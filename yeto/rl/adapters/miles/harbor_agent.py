@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import importlib
 import os
-from functools import lru_cache, partial
+from functools import partial
 from typing import Any
 
 from yeto.rl.agentic import (
@@ -41,6 +41,7 @@ from yeto.rl.agentic import (
     Outcome,
     run_agent_task,
 )
+from yeto.rl.agentic.loop_local import LoopLocal
 from yeto.rl.agentic.trust import check_agent_env
 from yeto.rl.harness.harbor import CODEX_VERSION, HarborHarness, HarborSettings, build_trial_config
 from yeto.rl.harness.harbor.trial import CUSTOM_PROVIDERS, TrialConfigBuilder
@@ -57,10 +58,17 @@ class UntrustedAgentOutcome(RuntimeError):
     """A sample reached the reward hook without a yeto outcome (the agent function raised)."""
 
 
-@lru_cache(maxsize=1)
+_gates: LoopLocal[AdmissionGate] = LoopLocal(
+    lambda: AdmissionGate(int(os.environ.get(MAX_IN_FLIGHT_ENV, _DEFAULT_MAX_IN_FLIGHT))))
+
+
 def gate() -> AdmissionGate:
-    """One gate per rollout-worker process (one sandbox per admitted trajectory)."""
-    return AdmissionGate(int(os.environ.get(MAX_IN_FLIGHT_ENV, _DEFAULT_MAX_IN_FLIGHT)))
+    """The gate of the rollout loop (one sandbox per admitted trajectory).
+
+    Miles runs its rollout on one event loop, so this is one gate per worker
+    process; it is kept per loop because it holds an ``asyncio.Semaphore``.
+    """
+    return _gates.get()
 
 
 def _example() -> Any:
