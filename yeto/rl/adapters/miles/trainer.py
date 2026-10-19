@@ -293,6 +293,9 @@ class MilesTrainerGroup:
         self.optimizer_steps_total = 0
         # S25 N7.6: the restored cut's resume manifest until the first step after it is checked
         self._resume_reference: Any = None
+        # ... and whether the data cursor the driver restored was compared with it
+        # (confirm_resumed_data_cursor); the first step refuses an unconfirmed one.
+        self._resume_cursor_confirmed = True
         # A LoRA actor installs its step recorders through the state plugins
         # the publisher calls before the first step; a full-parameter actor
         # calls none of them, so the trainer installs the recorders itself.
@@ -410,9 +413,13 @@ class MilesTrainerGroup:
     def _check_first_step_after_resume(self, steps: int) -> None:
         """The first round after ``restore_cut`` advanced every rank's Adam step and the
         LR scheduler by exactly ``steps`` optimizer steps (S25 N7.6; A-TRN report #8)."""
-        from yeto.rl.engine.resume_manifest import ResumeManifest, require_first_step
+        from yeto.rl.engine.resume_manifest import ResumeAssertionError, ResumeManifest, require_first_step
         from .cut_plugin import RESUME_STATE
 
+        if not self._resume_cursor_confirmed:
+            raise ResumeAssertionError(
+                "first step after resume, but the restored data cursor was never compared with the cut's "
+                "data watermark (confirm_resumed_data_cursor not called); refusing to continue")
         saved, self._resume_reference = self._resume_reference, None
         results = [dict(r) for r in self._run(self._actor.run_plugin(RESUME_STATE, {}))]
         now = ResumeManifest(
@@ -422,6 +429,19 @@ class MilesTrainerGroup:
             ranks=self._rank_resume_states(results, "first step after resume"),
         )
         require_first_step(saved, now, steps=steps)
+
+    def confirm_resumed_data_cursor(self, cursor: Mapping[str, int]) -> None:
+        """Compare the data cursor the run actually resumed from with the restored
+        cut's data watermark (S25 N7.6). Called by whoever restored the cursor
+        after ``restore_cut`` / ``restore_cut_resharded``: the driver after its
+        seek landed (restart), or the trainer rebuild after its live re-read.
+        A no-op when no restore is pending its first step."""
+        from yeto.rl.engine.resume_manifest import require_data_watermark
+
+        if self._resume_reference is None:
+            return
+        require_data_watermark(self._resume_reference, int(cursor["sample_offset"]))
+        self._resume_cursor_confirmed = True
 
     def _install_actor_recorders(self) -> None:
         """Record every optimizer step's applied LR and grad norm in the actor
@@ -940,12 +960,15 @@ class MilesTrainerGroup:
         require(resume_problems, "restored optimizer does not continue the cut; refusing to resume")
         self._restore_critic_cut(cut_dir(root, cut_id) / "critic", manifest)
         self._resume_reference = reference
+        self._resume_cursor_confirmed = False
         return manifest
 
     def _restored_resume(self, manifest: Any, expect: Any,
                          results: list[Mapping[str, Any]]) -> tuple[Any, list[str]]:
         """The cut's resume manifest and every resume assertion the restored ranks fail
-        (S25 N7.6; A-TRN report #8: a silently reset Adam step)."""
+        (S25 N7.6; A-TRN report #8: a silently reset Adam step). The data watermark is
+        not checked here: the data cursor is restored after this call, by the driver
+        or the trainer rebuild, which then call :meth:`confirm_resumed_data_cursor`."""
         from yeto.rl.engine.cut import CutError
         from yeto.rl.engine.resume_manifest import ResumeManifest, restore_problems
 
@@ -955,11 +978,30 @@ class MilesTrainerGroup:
         saved = ResumeManifest.from_dict(manifest.resume)
         now = ResumeManifest(
             global_step=int(expect.local_step),
-            data_watermark=int(manifest.data["sample_offset"]),  # the cursor the driver restores
+            data_watermark=saved.data_watermark,  # unused: check_data_watermark=False
             scheduler_increment=saved.scheduler_increment,
             ranks=self._rank_resume_states(results, "restore_cut"),
         )
-        return saved, restore_problems(saved, now)
+        return saved, restore_problems(saved, now, check_data_watermark=False)
+
+    def _resharded_resume(self, manifest: Any, expect: Any, results: list[Mapping[str, Any]]) -> Any:
+        """Resume assertions for a DP change (S25 N7.6). Shard names and optimizer
+        ranges change, so per-rank moment fingerprints have no counterpart; the
+        run-wide counters (global step, every rank's Adam step, LR scheduler
+        progress, applied LRs) must still continue the cut. Moments are covered by
+        the plugin's slice check; the data watermark by confirm_resumed_data_cursor."""
+        from yeto.rl.engine.cut import CutError
+        from yeto.rl.engine.resume_manifest import ResumeManifest, require, restore_problems, run_wide_reference
+
+        if not manifest.resume:
+            raise CutError(f"cut {manifest.cut_id!r} has no resume manifest (written before S25 N7.6); "
+                           "refusing to resume without the optimizer-continuity checks")
+        ranks = self._rank_resume_states(results, "restore_cut_resharded")
+        reference = run_wide_reference(ResumeManifest.from_dict(manifest.resume), ranks)
+        now = ResumeManifest(int(expect.local_step), reference.data_watermark, reference.scheduler_increment, ranks)
+        require(restore_problems(reference, now, check_data_watermark=False),
+                "resharded optimizer does not continue the cut; refusing to resume")
+        return reference
 
     def restore_cut_resharded(self, cut_id: str, *, epoch: int, root: str, expect: Any, plan: Any,
                               certified: Any = None, shared_filesystem: bool = True) -> dict[str, Any]:
@@ -1024,10 +1066,10 @@ class MilesTrainerGroup:
             c = r["coord"]
             if expected.get((c["tp"], c["pp"], c["dp"])) != r["rng"]:
                 raise CutError(f"rank {c}: RNG {r['rng']} does not follow the recorded mapping")
+        reference = self._resharded_resume(manifest, expect, results)
         self._reshard_plan = plan  # every later batch is guarded (batch_guard_problems)
-        # DP change: shard names and optimizer ranges change, so the per-rank resume
-        # manifest has no counterpart; the resharded restore keeps its own slice checks.
-        self._resume_reference = None
+        self._resume_reference = reference
+        self._resume_cursor_confirmed = False
         return {"manifest": manifest, "plan": plan.to_dict(), "rng_mapping": mapping,
                 "full_state_digests": {f"tp{k[0]}_pp{k[1]}": g[0]["full_state_digest"]
                                        for k, g in sorted(by_group.items())},

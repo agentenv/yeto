@@ -373,7 +373,11 @@ def context_problems(
         out.append(f"invalid cut_id {cut_id!r}")
     if not algorithm.algorithm_spec_sha256:
         out.append("algorithm: algorithm_spec_sha256 missing")
-    for key in DATA_CURSOR_FIELDS:
+    # A backend whose data source has fewer position fields (verl: sample_offset
+    # only) names them in ``cursor_fields``; sample_offset (the data watermark) is
+    # always required.
+    fields = tuple(data.get("cursor_fields") or DATA_CURSOR_FIELDS)
+    for key in dict.fromkeys(("sample_offset", *fields)):
         if not isinstance(data.get(key), int):
             out.append(f"data: cursor field {key!r} missing")
     buffered = data.get("buffer_length")

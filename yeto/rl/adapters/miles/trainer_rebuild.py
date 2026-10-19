@@ -118,6 +118,14 @@ def live_cursor(rollout: Any, when: str) -> dict[str, int]:
     return dict(cursor)
 
 
+def confirm_resumed_cursor(trainer: Any, cursor: Mapping[str, int]) -> None:
+    """Hand the data cursor the rebuilt trainer continues from to its resume
+    assertions (S25 N7.6: compared with the cut's data watermark)."""
+    confirm = getattr(trainer, "confirm_resumed_data_cursor", None)
+    if callable(confirm):
+        confirm(cursor)
+
+
 def rebuild_preconditions(args: Any) -> list[str]:
     out = []
     if getattr(args, "requested_load", None) is not None:
@@ -276,6 +284,7 @@ def rebuild_same_shape(
             if now != layout:
                 raise RuntimeError(f"layout changed across a same-shape rebuild: {layout} -> {now}")
             manifest = restore()
+            confirm_resumed_cursor(trainer, after)
         except Exception as error:  # noqa: BLE001
             attempts.append({"attempt": attempt, "stage": "after_rebuild", "error": repr(error)})
             raise RecoveryRequired(f"trainer unusable after rebuild: {error}", attempts=attempts) from error
@@ -388,7 +397,9 @@ def rebuild_resharded(
         now = trainer.actual_layout()
         if now != dict(layout):
             raise RuntimeError(f"{stage}: running layout {now} != expected {dict(layout)}")
-        return generation, restore()
+        restored = restore()
+        confirm_resumed_cursor(trainer, after)
+        return generation, restored
 
     fallback_view = old_view
     try:
