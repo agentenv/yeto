@@ -25,7 +25,9 @@ do not need the 300 GB original.
 Work split: :func:`requantize_checkpoint` takes a subset of output shards, so
 several workers can each write their own shards. :func:`transform_tensor`
 works on any row slice of a 2-D weight with the same result rows, which is the
-basis for quantizing on the trainer ranks (D7, task N8.2; not done here).
+basis for quantizing on the trainer ranks (D7, task N8.2, :mod:`.shards`).
+The source may be per-expert (HF checkpoint) or the trainer's stacked native
+layout (:mod:`.stacked`, task N8.5b).
 
 Status: W4A8 transform rules checked bit for bit against the original artefact
 on layer 30 (router, shared experts, norm, one routed expert); MXFP4 rules
@@ -58,6 +60,9 @@ from safetensors.torch import save_file
 from .awq import AwqSmoothing
 from .int4 import QMAX, QMIN, quantize_per_channel
 from .mxfp4 import GROUP_SIZE, quantize_mxfp4, unpack_fp4
+from .schemes import MXFP4_G32_RTN as MXFP4_NAME
+from .schemes import W4A8_INT4_CHANNEL as W4A8_NAME
+from .stacked import StackedSourceIndex
 
 INDEX_FILE = "model.safetensors.index.json"
 LAYOUT_FILE = "layout.json"
@@ -123,7 +128,7 @@ class QuantScheme:
 
 
 class _Int4Channel(QuantScheme):
-    name = "w4a8-int4-channel"
+    name = W4A8_NAME
     rtn_only = False
     format = "int-quantized"
     data_suffix = WEIGHT_SUFFIX
@@ -148,7 +153,7 @@ class _Int4Channel(QuantScheme):
 
 
 class _Mxfp4Group32(QuantScheme):
-    name = "mxfp4-g32-rtn"
+    name = MXFP4_NAME
     rtn_only = True
     format = "mxfp4-pack-quantized"
     data_suffix = PACKED_SUFFIX
@@ -269,6 +274,11 @@ class CheckpointLayout:
         return {self.source_of(n) for n in self.tensors}
 
     def shards(self) -> dict[str, list[str]]:
+        """Output shard -> its tensor names (sorted); do not modify the result."""
+        return self._shards
+
+    @cached_property
+    def _shards(self) -> dict[str, list[str]]:
         out: dict[str, list[str]] = defaultdict(list)
         for name, spec in self.tensors.items():
             out[spec.shard].append(name)
@@ -315,23 +325,53 @@ def transform_tensor(
     return {module + scheme.data_suffix: data, module + SCALE_SUFFIX: scale}
 
 
+def check_smoothing(layout: CheckpointLayout, smoothing: AwqSmoothing) -> None:
+    """Refuse AWQ smoothing for a round-to-nearest-only scheme (MXFP4)."""
+    if layout.scheme.rtn_only and smoothing.enabled:
+        raise LayoutError(f"{layout.scheme.name} is round-to-nearest only; use no AWQ smoothing")
+
+
 class _SourceReader:
-    """Lazy reader over a sharded safetensors source checkpoint."""
+    """Lazy reader over a sharded safetensors source checkpoint.
+
+    A source in the trainer's native stacked layout (``mlp.experts.gate_up_proj``
+    ``[E, 2I, H]`` and ``mlp.experts.down_proj`` ``[E, H, I]``, :mod:`.stacked`)
+    is read under the per-expert names of the target layout; each per-expert
+    matrix is sliced from the stacked tensor on read.
+    """
 
     def __init__(self, source_dir: Path) -> None:
         self.dir = Path(source_dir)
         index = self.dir / INDEX_FILE
         if index.is_file():
-            self.weight_map: dict[str, str] = json.loads(index.read_text())["weight_map"]
+            stored: dict[str, str] = json.loads(index.read_text())["weight_map"]
         else:
-            self.weight_map = {n: p.name for p in sorted(self.dir.glob("*.safetensors")) for n in read_header(p)}
+            stored = {n: p.name for p in sorted(self.dir.glob("*.safetensors")) for n in read_header(p)}
+        headers: dict[str, dict[str, Any]] = {}
+
+        def shape_of(name: str) -> list[int]:
+            shard = stored[name]
+            if shard not in headers:
+                headers[shard] = read_header(self.dir / shard)
+            return headers[shard][name]["shape"]
+
+        self.stacked = StackedSourceIndex.from_names(stored, shape_of)
+        self.stored = stored
+        self.weight_map: dict[str, str] = {n: s for n, s in stored.items() if n not in self.stacked.stacked_names}
+        for name, view in self.stacked.views.items():
+            self.weight_map[name] = stored[view.stored]
         self._open: dict[str, Any] = {}
 
-    def get(self, name: str) -> torch.Tensor:
-        shard = self.weight_map[name]
+    def _file(self, shard: str) -> Any:
         if shard not in self._open:
             self._open[shard] = safe_open(str(self.dir / shard), framework="pt", device="cpu")
-        return self._open[shard].get_tensor(name)
+        return self._open[shard]
+
+    def get(self, name: str) -> torch.Tensor:
+        view = self.stacked.views.get(name)
+        if view is None:
+            return self._file(self.weight_map[name]).get_tensor(name)
+        return view.read(self._file(self.stored[view.stored]).get_slice(view.stored))
 
     def close(self) -> None:
         self._open.clear()
@@ -354,8 +394,7 @@ def requantize_checkpoint(
     The source must provide exactly the layout's source tensors.
     """
     layout = CheckpointLayout.load(template_dir)
-    if layout.scheme.rtn_only and smoothing.enabled:
-        raise LayoutError(f"{layout.scheme.name} is round-to-nearest only; use no AWQ smoothing")
+    check_smoothing(layout, smoothing)
     source = _SourceReader(source_dir)
     expected = layout.source_names()
     missing, extra = expected - set(source.weight_map), set(source.weight_map) - expected
@@ -381,11 +420,8 @@ def requantize_checkpoint(
                 if name not in produced:
                     src = layout.source_of(name)
                     produced.update(transform_tensor(src, source.get(src), layout, smoothing))
-            tensors = {n: produced[n].contiguous() for n in all_shards[shard]}
-            _check_against_layout(tensors, layout)
-            tmp = out_dir / (shard + ".tmp")
-            save_file(tensors, str(tmp), metadata={"format": "pt"})
-            os.replace(tmp, out_dir / shard)
+            tensors = {n: produced[n] for n in all_shards[shard]}
+            write_output_shard(out_dir, shard, tensors, layout)
             stats["shards"] += 1
             stats["quantized"] += sum(n in quantized for n in tensors)
             stats["tensors"] += len(tensors)
@@ -394,6 +430,22 @@ def requantize_checkpoint(
     if shards is None:
         finalize_checkpoint(template_dir, out_dir)
     return stats
+
+
+def write_output_shard(out_dir: Path, shard: str, tensors: Mapping[str, torch.Tensor], layout: CheckpointLayout) -> None:
+    """Check ``tensors`` (exactly the layout's tensors of ``shard``) and write the shard file atomically.
+
+    The single-process converter and the merge of per-rank parts
+    (:mod:`.shards`) both write through here, so equal tensors give equal bytes.
+    """
+    expected = layout.shards().get(shard)
+    if expected is None or set(tensors) != set(expected):
+        raise LayoutError(f"{shard}: tensors differ from the layout's tensors of this shard")
+    tensors = {n: t.contiguous() for n, t in tensors.items()}
+    _check_against_layout(tensors, layout)
+    tmp = Path(out_dir) / (shard + ".tmp")
+    save_file(tensors, str(tmp), metadata={"format": "pt"})
+    os.replace(tmp, Path(out_dir) / shard)
 
 
 def finalize_checkpoint(template_dir: Path, out_dir: Path) -> None:

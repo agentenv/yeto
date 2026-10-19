@@ -257,7 +257,8 @@ def test_each_bf16_release_becomes_one_w4a8_release_the_sampler_follows(tmp_path
     assert rec.version == 1 and rec.policy_hash == "ha+w4a8-int4-channel" and rec.buffer_selected == 10
     assert rec.buffer_shards == {"npu": 4}
     assert rec.derived_from == {"release_dir": "policy-releases", "seq": 1, "version": 1, "policy_hash": "ha",
-                                "scheme": "w4a8-int4-channel", "awq": "none"}
+                                "scheme": "w4a8-int4-channel", "awq": "none", "awq_source": None,
+                                "expert_matrices": None}
     assert releaser.sync() is None and len(calls) == 1  # converted once
     loaded = []
     follower = PolicyFollower(PolicyReleaseStore(store, release_dir=W4A8_RELEASE_DIR),
@@ -303,6 +304,7 @@ def test_release_cli_one_pass_with_the_real_converter(world):
     assert done.returncode == 0, done.stderr
     rec = PolicyReleaseStore(store, release_dir=W4A8_RELEASE_DIR).latest()
     assert rec.version == 1 and rec.derived_from["awq"] == "fixed-artefact"
+    assert "recipe.yaml" in rec.derived_from["awq_source"] and rec.derived_from["expert_matrices"] == 6
     out = store.root / W4A8_RELEASE_DIR / rec.path
     shards = sorted(p.name for p in original.glob("*.safetensors"))
     assert shards and sorted(p.name for p in out.glob("*.safetensors")) == shards

@@ -17,9 +17,10 @@ One incarnation = one ``torchrun`` per node, started over SSH:
    under ``torchrun`` with the incarnation environment
    (``trainer_remote.island_env``), the collective-communication variables of
    its family and fabric (``topology.island_comm_env``) and the run's
-   environment. Node 0 also runs the W4A8 re-quantizer side process
+   environment. Node 0 also runs the re-quantizer side process
    (``yeto.rl.quant.release --loop``) when the spec has one: each BF16 release
-   becomes a W4A8 release in the store, which W4A8 samplers follow;
+   becomes a release of the template's scheme (W4A8 or MXFP4) in that scheme's
+   directory of the store, which samplers of that scheme follow;
 3. the SSH session streams node 0's log to the head (``IslandEvents`` reads the
    trainer events from it); the other nodes' logs go to local files;
 4. release kills each node's process group (TERM, then KILL after a grace
