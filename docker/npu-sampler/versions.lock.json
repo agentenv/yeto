@@ -1,0 +1,47 @@
+{
+  "image": "yeto-npu-sampler",
+  "cpu_arch": "aarch64",
+  "device_family": "npu",
+  "base_image": {
+    "name": "quay.io/ascend/vllm-ascend:v0.30.0rc1",
+    "reference": null,
+    "note": "digest unknown: no pull was made from this host (npu1 reaches hf-mirror, quay was not tested)"
+  },
+  "python": "3.12",
+  "packages": {
+    "torch": {"version": "2.10.0", "import": "torch"},
+    "torch-npu": {"version": "2.10.0.post4", "import": "torch_npu"},
+    "vllm": {"version": "0.30.0", "import": "vllm"},
+    "vllm-ascend": {"version": "0.30.0rc1", "import": "vllm_ascend"},
+    "triton-ascend": {"version": "3.2.2", "import": null, "optional": true},
+    "transformers": {"version": null, "import": "transformers"},
+    "compressed-tensors": {"version": null, "import": "compressed_tensors"},
+    "safetensors": {"version": null, "import": "safetensors"}
+  },
+  "commits": {},
+  "cann": {
+    "version": "9.",
+    "version_files": [
+      "/usr/local/Ascend/ascend-toolkit/latest/version.cfg",
+      "/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/ascend_toolkit_install.info"
+    ]
+  },
+  "driver": {
+    "min": "26.0",
+    "enforce": false,
+    "version_file": "/usr/local/Ascend/driver/version.info"
+  },
+  "required_files": [
+    "/usr/local/Ascend/driver/version.info",
+    "/opt/yeto/image/fixes.json"
+  ],
+  "decisions": [
+    "CANN gap, chosen option A: the container carries its own CANN user-space (the official vllm-ascend image) and uses the host driver as it is. Reasons: (1) the user already ran this stack on ModelArts without touching a host driver; (2) npu1 is shared with a colleague and is in use, so a driver upgrade needs the owner's consent and a reboot; (3) a container can be removed, a driver cannot. The host keeps CANN 8.0.1; nothing in the container reads it.",
+    "CANN gap, option B (not chosen, kept as the fallback): upgrade the npu1 driver and firmware to the Ascend HDK release that matches CANN 9.2 (26.0.RC1 per the vllm-ascend matrix) and then run either the container or a rootfs. Take this only if option A fails on the driver, and only with the machine owner's agreement.",
+    "driver minimum: recorded, not enforced (enforce false). The container's CANN user-space usually runs on an older driver, but the exact floor for CANN 9.2 on driver 24.1.0.3 is unknown. The first NPU probe reads the driver version and tries `import torch_npu` plus one small device operation; if it fails, option B applies and enforce becomes true with the measured floor.",
+    "cann version: the check only requires a 9.x toolkit in the container, because the base image may ship 9.1 or 9.2 depending on when it was built.",
+    "triton-ascend: optional; the GLM5.3 sampler path uses vllm-ascend's own kernels, and this entry only records what the base carries.",
+    "W4A8 checkpoint: the sampler loads the int-quantized `checkpoint/` directory, not `checkpoint-packed/` (the user's 10-15 result). This is an engine-adapter rule, not an image check.",
+    "transformers / compressed-tensors: recorded, not pinned, until the base image's versions are read."
+  ]
+}

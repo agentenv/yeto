@@ -1,4 +1,4 @@
-"""Memory estimate of one full-parameter FSDP2 training step (S25 N7.1, design D2).
+"""Memory estimate of one full-parameter training step (S25 N7.1 FSDP2, N7.1b Megatron).
 
 Every number here is derived from formulas, not measured. The launcher uses
 the estimate to refuse a plan before it reaches any node: a plan whose
@@ -34,6 +34,30 @@ group, ``T`` tokens per sequence, ``U`` Ulysses degree):
   source read, not run at this size). A sparse DSA kernel removes them; none
   exists for training on PPU or NPU yet (N7.0).
 
+Megatron (``framework="megatron"``, N7.1b; the PPU stage-1 backend, A-TRN §4).
+``W`` cards, tensor parallel ``TP`` (sequence parallel assumed on), pipeline
+``PP``, expert parallel ``EP`` (expert tensor parallel 1), context parallel
+``CP``. Figures are for the worst pipeline stage (``ceil(layers / PP)``
+layers; every parameter is spread over the layers, embedding and output-layer
+skew is not modelled):
+
+* local parameters: dense ``(P - E) x f / TP`` plus experts ``E x f / EP``
+  (``E`` = routed-expert parameters, ``f`` = the stage's layer fraction);
+* BF16 parameters (2 B) and the main gradients (``grad_bytes``) on every
+  local parameter;
+* optimizer: ``param_bytes`` 4 adds a 4 B FP32 master copy to the
+  ``state_bytes`` Adam state; with the distributed optimizer this is divided
+  by the data-parallel size of its group (dense ``W / (TP x PP)``, CP
+  included; experts ``W / (EP x PP)``), without it it is per local parameter;
+* activations with full recomputation: stage 0 of 1F1B holds ``PP`` micro
+  batches, so ``ceil(layers / PP) x PP x mbs x T / (TP x CP) x streams x hidden
+  x 2 B``; mHC keeps ``hc_mult`` (4) residual streams, so this term is 4 times
+  that of a one-stream model; the last stage adds the logits split by ``TP``;
+* Miles' DSA layer does not support CP (``dsa.py`` NotImplementedError), so a
+  DSA model with ``CP > 1`` is refused.
+
+Every output carries ``basis: "推算"`` (derived, not measured).
+
 Not modelled: allocator fragmentation, collective buffers, the runtime's own
 reserve (covered by ``device_usable_fraction``), CPU optimizer step time.
 
@@ -53,18 +77,20 @@ import json
 import sys
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import MISSING, asdict, dataclass, field, replace
 from typing import Any
 
 GIB = 1024**3
 OFFLOAD_MODES = ("none", "optimizer", "full")
 DSA_PATHS = ("none", "hf_dense", "sparse_kernel")
+FRAMEWORKS = ("fsdp2", "megatron")
 PLAN_STATUS = {
     "none": "FSDP2 standard path",
     "optimizer": "needs a host optimizer step; not implemented in yeto or verl",
     "full": "FSDP2 CPUOffloadPolicy (optimizer step on the host CPU)",
 }
 LABEL = "derived from formulas, not measured"
+BASIS = "推算"  # the dashboard / report word for LABEL
 
 
 class MemoryPlanError(ValueError):
@@ -78,7 +104,8 @@ class ModelShape:
     ``params``: trained parameters; ``largest_layer_params``: the largest
     decoder layer (the unit FSDP2 gathers); ``head_counts``: every head count
     Ulysses must divide; ``dsa_layers`` / ``index_heads`` / ``index_kpool``:
-    the DSA indexer (0 layers: no DSA)."""
+    the DSA indexer (0 layers: no DSA); ``expert_params`` / ``num_experts``:
+    the routed experts that Megatron splits by expert parallel (0: dense)."""
 
     params: int
     largest_layer_params: int
@@ -90,6 +117,8 @@ class ModelShape:
     dsa_layers: int = 0
     index_heads: int = 0
     index_kpool: int = 1
+    expert_params: int = 0
+    num_experts: int = 0
     source: str = "manual"
 
     def __post_init__(self) -> None:
@@ -99,12 +128,18 @@ class ModelShape:
                 raise MemoryPlanError(f"model shape: {name} must be positive, got {getattr(self, name)}")
         if self.largest_layer_params > self.params:
             raise MemoryPlanError("model shape: largest_layer_params exceeds params")
+        if not 0 <= self.expert_params <= self.params or self.num_experts < 0:
+            raise MemoryPlanError("model shape: expert_params must be in [0, params], num_experts >= 0")
+        if bool(self.expert_params) != bool(self.num_experts):
+            raise MemoryPlanError("model shape: expert_params and num_experts go together")
 
 
 @dataclass(frozen=True)
 class TrainPlan:
     """One trainer island and how it trains. ``fsdp_size`` 0 means all cards in
-    one shard group; a smaller divisor replicates groups (HSDP)."""
+    one shard group; a smaller divisor replicates groups (HSDP). ``tp`` /
+    ``pp`` / ``ep`` / ``cp`` / ``distributed_optimizer`` apply to
+    ``framework="megatron"`` only."""
 
     cards: int
     cards_per_node: int
@@ -126,14 +161,57 @@ class TrainPlan:
     device_usable_fraction: float = 0.92
     host_usable_fraction: float = 0.85
     host_reserve_gib: float = 64.0  # per node: OS, data loader, the requant sidecar
+    framework: str = "fsdp2"
+    tp: int = 1
+    pp: int = 1
+    ep: int = 1
+    cp: int = 1
+    distributed_optimizer: bool = True
 
     @property
     def shard_group(self) -> int:
         return self.fsdp_size or self.cards
 
 
+def _check_megatron_form(plan: TrainPlan, shape: ModelShape) -> None:
+    for name in ("tp", "pp", "ep", "cp"):
+        if int(getattr(plan, name)) <= 0:
+            raise MemoryPlanError(f"{name} must be positive, got {getattr(plan, name)}")
+    if plan.offload != "none":
+        raise MemoryPlanError("megatron: only offload none is modelled (Megatron optimizer CPU "
+                              "offload is not)")
+    if plan.ulysses != 1 or plan.fsdp_size:
+        raise MemoryPlanError("megatron: use cp instead of ulysses, and no fsdp_size")
+    W = plan.cards
+    if W % (plan.tp * plan.pp * plan.cp):
+        raise MemoryPlanError(f"megatron: tp x pp x cp = {plan.tp * plan.pp * plan.cp} does not divide "
+                              f"cards {W}")
+    if W % (plan.ep * plan.pp):
+        raise MemoryPlanError(f"megatron: ep x pp = {plan.ep * plan.pp} does not divide cards {W}")
+    if plan.pp > shape.num_layers:
+        raise MemoryPlanError(f"megatron: pp {plan.pp} exceeds the {shape.num_layers} layers")
+    if plan.ep > 1 and not shape.num_experts:
+        raise MemoryPlanError("megatron: ep > 1 needs a model with routed experts")
+    if shape.num_experts and shape.num_experts % plan.ep:
+        raise MemoryPlanError(f"megatron: ep {plan.ep} does not divide {shape.num_experts} experts")
+    if plan.seq_len % (plan.tp * plan.cp):
+        raise MemoryPlanError(f"megatron: tp x cp = {plan.tp * plan.cp} does not divide seq_len "
+                              f"{plan.seq_len} (sequence parallel)")
+    for heads in shape.head_counts:
+        if heads % plan.tp:
+            raise MemoryPlanError(f"megatron: tp {plan.tp} does not divide a head count {heads}")
+    if shape.dsa_layers and plan.cp > 1:
+        raise MemoryPlanError("megatron: the Miles DSA layer does not support cp > 1")
+
+
 def check_plan_form(plan: TrainPlan, shape: ModelShape) -> None:
     """Refuse a plan that is not well formed (raises :class:`MemoryPlanError`)."""
+    if plan.framework not in FRAMEWORKS:
+        raise MemoryPlanError(f"framework must be one of {FRAMEWORKS}, got {plan.framework!r}")
+    if plan.framework == "megatron":
+        _check_megatron_form(plan, shape)
+    elif (plan.tp, plan.pp, plan.ep, plan.cp) != (1, 1, 1, 1):
+        raise MemoryPlanError("tp / pp / ep / cp apply to framework megatron only")
     if plan.offload not in OFFLOAD_MODES:
         raise MemoryPlanError(f"offload must be one of {OFFLOAD_MODES}, got {plan.offload!r}")
     if plan.dsa_path not in DSA_PATHS:
@@ -204,7 +282,10 @@ class Estimate:
     def summary(self) -> dict[str, Any]:
         return {
             "label": self.label,
-            "plan_status": PLAN_STATUS[self.plan.offload],
+            "basis": BASIS,
+            "framework": self.plan.framework,
+            "plan_status": (PLAN_STATUS[self.plan.offload] if self.plan.framework == "fsdp2"
+                            else "Megatron (no offload)"),
             "device_gib_per_card": round(self.total("device") / GIB, 1),
             "device_usable_gib": round(self.device_limit / GIB, 1),
             "host_gib_per_node": round(self.total("host") / GIB, 1),
@@ -222,6 +303,8 @@ class Estimate:
 def estimate(shape: ModelShape, plan: TrainPlan) -> Estimate:
     """The per-card device and per-node host memory of one training step."""
     check_plan_form(plan, shape)
+    if plan.framework == "megatron":
+        return _estimate_megatron(shape, plan)
     est = Estimate(shape, plan)
     P, N, per_node = shape.params, plan.shard_group, plan.cards_per_node
     sharded = P / N
@@ -267,6 +350,50 @@ def estimate(shape: ModelShape, plan: TrainPlan) -> Estimate:
     return est
 
 
+def _estimate_megatron(shape: ModelShape, plan: TrainPlan) -> Estimate:
+    """Megatron variant of :func:`estimate` (module doc, N7.1b)."""
+    est = Estimate(shape, plan)
+
+    def add(name: str, value: float, formula: str) -> None:
+        est.items[name] = Item(float(value), formula, "device")
+
+    W, tp, pp, ep, cp = plan.cards, plan.tp, plan.pp, plan.ep, plan.cp
+    stage_layers = -(-shape.num_layers // pp)
+    f = stage_layers / shape.num_layers
+    dense = (shape.params - shape.expert_params) * f / tp
+    experts = shape.expert_params * f / ep
+    local = dense + experts
+    where = f"stage of {stage_layers}/{shape.num_layers} layers"
+    add("params_local_bf16", 2 * local, f"2 B x (dense/TP({tp}) + experts/EP({ep})), {where}")
+    gb = plan.grad_bytes
+    add("main_grads_local", gb * local, f"{gb} B x local params")
+    per_param = (4 if plan.param_bytes == 4 else 0) + plan.state_bytes
+    if plan.distributed_optimizer:
+        dp_dense, dp_expert = W // (tp * pp), W // (ep * pp)
+        add("optimizer_shard", per_param * (dense / dp_dense + experts / dp_expert),
+            f"{per_param} B x (dense local / DP({dp_dense}) + expert local / expert DP({dp_expert})), "
+            f"distributed optimizer")
+    else:
+        add("optimizer_local", per_param * local, f"{per_param} B x local params (no distributed optimizer)")
+    tokens = plan.seq_len * plan.micro_batch_seqs / (tp * cp)
+    add("layer_inputs", stage_layers * pp * tokens * shape.residual_streams * shape.hidden_size * 2,
+        f"stage layers({stage_layers}) x in-flight micro batches PP({pp}) x T*mbs/(TP*CP)({tokens:.0f}) "
+        f"x streams({shape.residual_streams}, mHC) x hidden({shape.hidden_size}) x 2 B")
+    if not plan.chunked_loss:
+        lb = 4 if plan.logits_fp32 else 2
+        logit_tokens = plan.seq_len * plan.micro_batch_seqs / cp
+        add("logits_and_grad", logit_tokens * shape.vocab_size / tp * lb * 2,
+            f"T*mbs/CP x vocab({shape.vocab_size})/TP x {lb} B x 2 (last stage)")
+    add("working_set_margin", plan.activation_margin_gib * GIB,
+        "configured: recomputed layer working set (KDA, MoE all-to-all, attention); not measured")
+    if shape.dsa_layers and plan.dsa_path == "hf_dense":
+        T, b = plan.seq_len, plan.micro_batch_seqs
+        dense_terms = b * T * T * 5 + b * T * shape.index_heads * -(-T // shape.index_kpool) * 4
+        add("dsa_dense_terms", dense_terms,
+            "mask mbs*T*T*5 B + indexer scores mbs*T*heads*T/kpool*4 B (dense DSA fallback)")
+    return est
+
+
 def check(shape: ModelShape, plan: TrainPlan) -> Estimate:
     """:func:`estimate`, raising :class:`MemoryPlanError` when the plan does not fit."""
     est = estimate(shape, plan)
@@ -300,7 +427,7 @@ def shape_from_hf_config(config: Mapping[str, Any], *, include_vision: bool = Fa
         except ValueError:  # a multimodal wrapper (e.g. glm5_next): count its language model
             model = transformers.AutoModelForImageTextToText.from_config(hf)
     tc = _text_config(hf)
-    total, per_layer = 0, Counter()
+    total, experts, per_layer = 0, 0, Counter()
     for name, p in model.named_parameters():
         parts = name.split(".")
         is_vision = "language_model" not in parts and "lm_head" not in parts and any(
@@ -308,6 +435,8 @@ def shape_from_hf_config(config: Mapping[str, Any], *, include_vision: bool = Fa
         if is_vision and not include_vision:
             continue
         total += p.numel()
+        if "experts" in parts and "shared_experts" not in parts:
+            experts += p.numel()
         if "layers" in parts and not is_vision:
             per_layer[int(parts[parts.index("layers") + 1])] += p.numel()
     layer_types = list(getattr(tc, "layer_types", None) or [])
@@ -323,6 +452,9 @@ def shape_from_hf_config(config: Mapping[str, Any], *, include_vision: bool = Fa
         dsa_layers=layer_types.count("deepseek_sparse_attention"),
         index_heads=int(getattr(tc, "index_n_heads", 0) or 0),
         index_kpool=int(getattr(tc, "index_kpool", 1) or 1),
+        expert_params=experts,
+        num_experts=int(getattr(tc, "n_routed_experts", None) or getattr(tc, "num_experts", None) or 0)
+        if experts else 0,
         source=f"{type(model).__name__} on meta (transformers {transformers.__version__})",
     )
 
@@ -361,8 +493,8 @@ def main(argv: list[str] | None = None) -> int:
         flag = "--" + name.replace("_", "-")
         if f.type == "bool":
             ap.add_argument(flag, type=lambda s: s.lower() in ("1", "true", "yes"), default=f.default)
-        elif name in ("cards", "cards_per_node"):
-            ap.add_argument(flag, type=int, required=True)
+        elif f.default is MISSING:  # cards, cards_per_node, hbm_gib, host_memory_gib
+            ap.add_argument(flag, type=types[f.type], required=True)
         elif name == "seq_len":
             ap.add_argument(flag, type=int, default=None)
         else:

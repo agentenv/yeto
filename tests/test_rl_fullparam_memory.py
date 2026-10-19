@@ -116,3 +116,78 @@ def test_shape_from_hf_config_counts_a_tiny_model():
     assert shape.largest_layer_params == layer
     assert shape.params == 2 * layer + 2 * 64 * 32 + 32  # embed + lm_head + final norm
     assert shape.head_counts == (2, 4) and shape.dsa_layers == 0 and GIB == 1024**3
+
+
+# --- N7.1b Megatron variant -------------------------------------------------
+
+# Synthetic MoE: 1000 params, 600 of them in 8 routed experts, 4 layers.
+MOE = ModelShape(params=1000, largest_layer_params=250, num_layers=4, hidden_size=8, vocab_size=16,
+                 residual_streams=4, head_counts=(4,), expert_params=600, num_experts=8)
+MEG = TrainPlan(cards=16, cards_per_node=8, hbm_gib=144, host_memory_gib=1024, seq_len=64,
+                framework="megatron", tp=2, pp=2, ep=4, chunked_loss=True, activation_margin_gib=0.0)
+
+
+def test_megatron_state_splits_dense_by_tp_pp_and_experts_by_ep_pp():
+    est = estimate(MOE, MEG)
+    dense, experts = 400 / 2 / 2, 600 / 4 / 2  # (P - E) / TP / PP, E / EP / PP
+    assert est.items["params_local_bf16"].bytes == pytest.approx(2 * (dense + experts))
+    assert est.items["main_grads_local"].bytes == pytest.approx(4 * (dense + experts))
+    # 4 B master + 8 B Adam; dense DP = 16 / (2*2) = 4, expert DP = 16 / (4*2) = 2
+    assert est.items["optimizer_shard"].bytes == pytest.approx(12 * (dense / 4 + experts / 2))
+    plain = estimate(MOE, replace(MEG, distributed_optimizer=False))
+    assert plain.items["optimizer_local"].bytes == pytest.approx(12 * (dense + experts))
+    assert "gathered_layers" not in est.items and est.total("host") == 0
+
+
+def test_megatron_activations_count_pp_micro_batches_and_mhc_streams():
+    est = estimate(MOE, MEG)
+    # 2 stage layers x 2 in flight x 64/(TP 2 x CP 1) tokens x 4 streams x 8 hidden x 2 B
+    assert est.items["layer_inputs"].bytes == 2 * 2 * 32 * 4 * 8 * 2
+    one_stream = estimate(replace(MOE, residual_streams=1), MEG)
+    assert est.items["layer_inputs"].bytes == 4 * one_stream.items["layer_inputs"].bytes
+
+
+def test_megatron_uneven_pipeline_uses_the_largest_stage():
+    est = estimate(replace(MOE, num_layers=5, largest_layer_params=200), replace(MEG, pp=2))
+    assert "stage of 3/5 layers" in est.items["params_local_bf16"].formula
+
+
+def test_megatron_output_is_labelled_derived():
+    summary = estimate(MOE, MEG).summary()
+    assert summary["basis"] == "推算" and summary["framework"] == "megatron"
+    assert estimate(GLM, PPU).summary()["basis"] == "推算"
+
+
+@pytest.mark.parametrize("change, match", [
+    ({"ep": 3}, "ep x pp = 6 does not divide cards 16"),
+    ({"tp": 3}, "tp x pp x cp = 6 does not divide"),
+    ({"offload": "full"}, "only offload none"),
+    ({"ulysses": 2}, "use cp instead of ulysses"),
+    ({"pp": 8, "ep": 2}, "pp 8 exceeds the 4 layers"),
+    ({"framework": "deepspeed"}, "framework must be one of"),
+])
+def test_malformed_megatron_plans_are_refused(change, match):
+    with pytest.raises(MemoryPlanError, match=match):
+        estimate(MOE, replace(MEG, **change))
+
+
+def test_megatron_refuses_cp_with_dsa_and_fsdp2_refuses_megatron_knobs():
+    with pytest.raises(MemoryPlanError, match="DSA layer does not support cp"):
+        estimate(replace(MOE, dsa_layers=1, index_heads=4), replace(MEG, cp=2, pp=1, ep=8))
+    with pytest.raises(MemoryPlanError, match="megatron only"):
+        estimate(GLM, replace(PPU, tp=2))
+    with pytest.raises(MemoryPlanError, match="go together"):
+        replace(MOE, num_experts=0)
+
+
+def test_megatron_glm_on_32_ppu_cards_needs_bf16_optimizer_state():
+    """GLM5.3-Flash on 4 PPU nodes (32 x 144 GiB), TP4 EP32, 32K tokens. The
+    routed-expert share (95 % of parameters) is an assumption of this test, not
+    counted: expert DP is 32 / (EP 32 x PP 1) = 1, so FP32 Adam on the experts
+    is not divided by the distributed optimizer."""
+    glm = replace(GLM, expert_params=int(GLM.params * 0.95), num_experts=288)
+    plan = TrainPlan(cards=32, cards_per_node=8, hbm_gib=144, host_memory_gib=2048, seq_len=32768,
+                     framework="megatron", tp=4, ep=32, dsa_path="sparse_kernel", chunked_loss=True)
+    fp32 = estimate(glm, plan)
+    assert not fp32.fits and "optimizer_shard" in fp32.problems()[0]
+    assert estimate(glm, replace(plan, param_bytes=2, state_bytes=4)).fits
