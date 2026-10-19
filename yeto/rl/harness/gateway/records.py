@@ -211,6 +211,13 @@ class RecordingBackend:
                 "sessions": [{"session_id": sid, "samples": [seg.sample() for seg in s.segments]} for sid, s in sessions],
                 "counters": dict(self.counters.get(trajectory_id, Counter()))}
 
+    def forget(self, trajectory_id: str) -> None:
+        """Drop everything recorded for the trajectory (after its records were read)."""
+        for session_id in [sid for sid, s in self.sessions.items() if s.trajectory_id == trajectory_id]:
+            del self.sessions[session_id]
+        self.tools.pop(trajectory_id, None)
+        self.counters.pop(trajectory_id, None)
+
     # -------------------------------------------------------------- internals
     def _prompt(self, session: _Session, segment: Segment, context: list[Message]) -> _Prompt:
         """What to append before the next sample (the whole prompt on a segment's first turn)."""

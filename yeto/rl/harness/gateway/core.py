@@ -167,6 +167,11 @@ class Gateway:
         for chain in registry.chains:
             self._board("exit_session", chain.session_id)
 
+    def forget(self, trajectory_id: str) -> None:
+        """Drop the trajectory's chain state (after :meth:`close`; a long-lived gateway would grow)."""
+        self.registries.pop(trajectory_id, None)
+        self.invalidated.pop(trajectory_id, None)
+
     def snapshot(self, trajectory_id: str) -> dict[str, Any]:
         snap = self.registry(trajectory_id).snapshot()
         snap["invalidated"] = self.invalidated.get(trajectory_id)
