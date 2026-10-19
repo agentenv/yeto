@@ -20,19 +20,20 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import contextlib
 import io
 import logging
 import shlex
 import tarfile
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeVar
 
 from .boat_client import FAILED_STATES, READY_STATES, BoatClient, BoatError, BoatQuota
 
 logger = logging.getLogger(__name__)
+T = TypeVar("T")
 
 CONTAINER = "main"
 STAGING_DIR = "/tmp/yeto-xfer"  # the boat file API only reaches /home/user and /tmp
@@ -258,10 +259,8 @@ class BoatSandbox:
         s = shlex.quote(staged)
         await self._checked(f"mkdir -p {STAGING_DIR} && {DOCKER} cp -L {CONTAINER}:{shlex.quote(source_path)} {s} "
                             f"&& sudo -n chmod a+r {s}", f"download {source_path}")
-        try:
-            return await asyncio.to_thread(self._client.get_file, sandbox_id, staged)
-        finally:
-            await self.vm_exec(f"sudo -n rm -f {s}", timeout_s=60)
+        return await self._then_clean(asyncio.to_thread(self._client.get_file, sandbox_id, staged),
+                                      f"sudo -n rm -f {s}")
 
     async def download_dir(self, source_dir: str, target_dir: Path) -> None:
         sandbox_id = self._require_started()
@@ -271,11 +270,26 @@ class BoatSandbox:
             f"mkdir -p {s} && {DOCKER} cp {CONTAINER}:{shlex.quote(source_dir.rstrip('/') + '/.')} {s} && "
             f"sudo -n tar -czf {s}.tar.gz -C {s} . && sudo -n chmod a+r {s}.tar.gz",
             f"download dir {source_dir}")
-        try:
-            archive = await asyncio.to_thread(self._client.get_file, sandbox_id, f"{staged}.tar.gz")
-        finally:
-            await self.vm_exec(f"sudo -n rm -rf {s} {s}.tar.gz", timeout_s=60)
+        archive = await self._then_clean(asyncio.to_thread(self._client.get_file, sandbox_id, f"{staged}.tar.gz"),
+                                         f"sudo -n rm -rf {s} {s}.tar.gz")
         await asyncio.to_thread(extract_dir, archive, target_dir)
+
+    async def _then_clean(self, work: Awaitable[T], cleanup: str) -> T:
+        """Await ``work``, then run the VM ``cleanup`` command.
+
+        When ``work`` raises, a failing cleanup is logged and the original
+        error propagates (a ``finally`` would replace it with the cleanup's).
+        """
+        try:
+            result = await work
+        except BaseException:
+            try:
+                await self.vm_exec(cleanup, timeout_s=60)
+            except Exception:  # the work's error is the one to report
+                logger.warning("boat staging cleanup failed after an error: %s", cleanup, exc_info=True)
+            raise
+        await self.vm_exec(cleanup, timeout_s=60)
+        return result
 
     def _require_started(self) -> str:
         if self.sandbox_id is None:
