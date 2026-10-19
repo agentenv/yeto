@@ -212,7 +212,9 @@ class ModalIslandConfig:
     registry_creds: dict[str, str] | None = None
     timeout_s: int = DEFAULT_TIMEOUT_S
     retries: int = DEFAULT_RETRIES
-    workdir: str = str(REPO_ROOT)
+    # None: ship no local tree (release mode, L9.12: the image holds the code and
+    # links CONTAINER_WORKDIR to it).
+    workdir: str | None = str(REPO_ROOT)
     python_version: str = "3.12"
     # Stock Codex run bundle (ports engine, signed Codex agent): a local dir
     # holding the attested binary / package manifest / app-server schema,
@@ -1011,12 +1013,13 @@ class ModalOps:
         image = image.env({"HOME": "/root", "PYTHONUNBUFFERED": "1"})
         # add_local_* with copy=False must be the last steps: Modal rejects
         # any build step after one (the files are mounted at start-up).
-        image = image.add_local_dir(
-            cfg.workdir,
-            CONTAINER_WORKDIR,
-            copy=False,
-            ignore=MODAL_WORKDIR_IGNORE,
-        )
+        if cfg.workdir is not None:
+            image = image.add_local_dir(
+                cfg.workdir,
+                CONTAINER_WORKDIR,
+                copy=False,
+                ignore=MODAL_WORKDIR_IGNORE,
+            )
         if cfg.codex_dir and cfg.codex_mount:
             # Codex run bundle (sky: file_mounts[codex_mount] = codex_dir).
             image = image.add_local_dir(cfg.codex_dir, cfg.codex_mount, copy=False)

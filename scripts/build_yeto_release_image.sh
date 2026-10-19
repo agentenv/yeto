@@ -14,7 +14,6 @@
 # Registry auth: crane reads ~/.docker/config.json; nothing is printed.
 # Writes: $OUT/{layer.tar,release-manifest.json,build-record.json[,image.tar]}
 #
-# Status: written for L9.12, not run yet (no image built or pushed).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 PUSH=0; [ "${1:-}" = "--push" ] && PUSH=1
@@ -40,20 +39,29 @@ PY
 case "$BASE_IMAGE" in *@sha256:*) ;; *) echo "base image is not pinned by digest: $BASE_IMAGE" >&2; exit 1;; esac
 
 # The layer: `git archive` of the commit (tracked files only, file times = the
-# commit time, so the same commit gives the same layer bytes) plus the release
-# manifest the island reads to know its own code identity.
+# commit time, so the same commit gives the same layer bytes), the release
+# manifest the island checks its tree against (yeto.codepack.verify_release_tree),
+# and /root/sky_workdir -> /opt/yeto/src (island scripts `cd ~/sky_workdir`; the
+# launcher ships no local tree in release mode).
+git archive --format=tar --prefix="$PREFIX/" "$YETO_COMMIT" > "$OUT/source.tar"
+mkdir -p "$OUT/tree" && tar -xf "$OUT/source.tar" -C "$OUT/tree"
+SOURCE_TREE_SHA=$(cd "$OUT/tree/$PREFIX" && python3 -c \
+  'import sys; sys.path.insert(0, "."); from yeto.provenance import source_tree_sha256; print(source_tree_sha256("yeto"))')
+rm -rf "$OUT/tree"
 python3 - "$OUT/release-manifest.json" <<PY
 import json, sys
 json.dump({"schema": "yeto-release-v1", "yeto_commit": "$YETO_COMMIT",
-           "base_image": "$BASE_IMAGE", "source_root": "/$PREFIX"},
+           "base_image": "$BASE_IMAGE", "source_root": "/$PREFIX",
+           "source_tree_sha256": "$SOURCE_TREE_SHA"},
           open(sys.argv[1], "w"), indent=1, sort_keys=True)
 PY
-git archive --format=tar --prefix="$PREFIX/" "$YETO_COMMIT" > "$OUT/source.tar"
-mkdir -p "$OUT/extra/opt/yeto"
+COMMIT_TIME=$(git log -1 --format=%ct "$YETO_COMMIT")
+mkdir -p "$OUT/extra/opt/yeto" "$OUT/extra/root"
 cp "$OUT/release-manifest.json" "$OUT/extra/opt/yeto/release-manifest.json"
-touch -d "@$(git log -1 --format=%ct "$YETO_COMMIT")" "$OUT/extra/opt/yeto/release-manifest.json"
-tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$(git log -1 --format=%ct "$YETO_COMMIT")" \
-    -C "$OUT/extra" -cf "$OUT/extra.tar" opt
+ln -s "/$PREFIX" "$OUT/extra/root/sky_workdir"
+touch -h -d "@$COMMIT_TIME" "$OUT/extra/opt/yeto/release-manifest.json" "$OUT/extra/root/sky_workdir"
+tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$COMMIT_TIME" \
+    -C "$OUT/extra" -cf "$OUT/extra.tar" opt/yeto/release-manifest.json root/sky_workdir
 tar --concatenate --file="$OUT/source.tar" "$OUT/extra.tar"
 mv "$OUT/source.tar" "$OUT/layer.tar"
 LAYER_SHA=$(sha256sum "$OUT/layer.tar" | cut -d' ' -f1)

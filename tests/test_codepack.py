@@ -172,3 +172,84 @@ def test_modal_volume_store_creates_the_volume_on_put(monkeypatch: pytest.Monkey
     assert uri == "modal-volume://vol/run/code_packs/abc.tar"
     assert store.get(uri) == b"pack"
     assert calls == [("vol", True), ("vol", False)]
+
+
+# ---------------------------------------------------------------------------
+# release mode (L9.12)
+# ---------------------------------------------------------------------------
+IMAGE = "ghcr.io/x/yeto-release@sha256:" + "a" * 64
+OTHER_IMAGE = "ghcr.io/x/yeto-release@sha256:" + "b" * 64
+
+
+def test_release_pack_is_the_image_digest() -> None:
+    pack = codepack.release_pack("docker:" + IMAGE)
+    assert (pack.mode, pack.digest, pack.pack_uri, pack.commit) == ("release", "a" * 64, IMAGE, None)
+    assert codepack.CodePack.from_record(pack.record()) == pack
+    for bad in ("ghcr.io/x/yeto-release:tag", "ghcr.io/x@sha256:abc", "@sha256:" + "a" * 64):
+        with pytest.raises(CodePackError, match="pinned by digest"):
+            codepack.release_pack(bad)
+
+
+def _release(previous, image=IMAGE, **kw):
+    return codepack.resolve_run_pack(previous=previous, repo=".", store=None, cache_root=".",
+                                     release_image=image, log=lambda _m: None, **kw)
+
+
+def test_release_run_reuses_its_image_and_refuses_another(repo: Path, tmp_path: Path) -> None:
+    first = _release(None, semantic_sha256="s")
+    assert not first.reused and first.tree is None
+    manifest = {"code_pack": first.pack.record(), "semantic_sha256": "s"}
+    assert _release(manifest, semantic_sha256="s").reused
+    with pytest.raises(CodePackError, match="--rl-code-pack-upgrade"):
+        _release(manifest, OTHER_IMAGE, semantic_sha256="s")
+    with pytest.raises(CodePackError, match="semantic hash changes"):
+        _release(manifest, OTHER_IMAGE, semantic_sha256="t", upgrade_reason="new release")
+    up = _release(manifest, OTHER_IMAGE, semantic_sha256="s", upgrade_reason="new release")
+    (step,) = up.pack.upgrades
+    assert (step["from"], step["to"], up.pack.mode) == ("a" * 64, "b" * 64, "release")
+    # a git-patch start of a release run is refused (it would fetch the image as a tar)
+    with pytest.raises(CodePackError, match="release image"):
+        codepack.resolve_run_pack(previous=manifest, repo=repo, store=DirPackStore(tmp_path / "s"),
+                                  cache_root=tmp_path / "c", semantic_sha256="s",
+                                  log=lambda _m: None)
+
+
+def test_git_patch_run_moves_to_release_only_by_upgrade(repo: Path, tmp_path: Path) -> None:
+    store = DirPackStore(tmp_path / "store")
+    dev = codepack.resolve_run_pack(previous=None, repo=repo, store=store, cache_root=tmp_path / "c",
+                                    semantic_sha256="s", log=lambda _m: None)
+    manifest = {"code_pack": dev.pack.record(), "semantic_sha256": "s"}
+    with pytest.raises(CodePackError, match="--rl-code-pack-upgrade"):
+        _release(manifest, semantic_sha256="s")
+    up = _release(manifest, semantic_sha256="s", upgrade_reason="ship release")
+    (step,) = up.pack.upgrades
+    assert (step["from_mode"], step["to_mode"]) == ("git-patch", "release")
+
+
+def _release_tree(tmp_path: Path) -> tuple[Path, Path]:
+    import json
+
+    from yeto.provenance import source_tree_sha256
+
+    src = tmp_path / "opt" / "yeto" / "src"
+    (src / "yeto").mkdir(parents=True)
+    (src / "yeto" / "a.py").write_text("A = 1\n")
+    manifest = tmp_path / "release-manifest.json"
+    manifest.write_text(json.dumps({"schema": codepack.RELEASE_SCHEMA, "yeto_commit": "c" * 40,
+                                    "source_root": str(src),
+                                    "source_tree_sha256": source_tree_sha256(src / "yeto")}))
+    return src, manifest
+
+
+def test_verify_release_tree(tmp_path: Path) -> None:
+    src, manifest = _release_tree(tmp_path)
+    link = tmp_path / "sky_workdir"
+    link.symlink_to(src)  # the image links ~/sky_workdir to the source root
+    assert codepack.verify_release_tree(link, manifest)["yeto_commit"] == "c" * 40
+    with pytest.raises(CodePackError, match="not the image source root"):
+        codepack.verify_release_tree(tmp_path, manifest)  # a shipped local tree
+    (src / "yeto" / "a.py").write_text("A = 2\n")
+    with pytest.raises(CodePackError, match="hashes to"):
+        codepack.verify_release_tree(src, manifest)
+    with pytest.raises(CodePackError, match="not a yeto release image"):
+        codepack.verify_release_tree(src, tmp_path / "missing.json")

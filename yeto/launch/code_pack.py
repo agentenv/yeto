@@ -8,6 +8,14 @@ names. The unpacked pack becomes the workdir of every island (sky ``workdir`` an
 Modal ``add_local_dir``), so a local tree that changes after the first start does not
 reach replacement or resumed islands. Islands check the tree against
 ``--code-pack-digest`` before they start.
+
+With ``--rl-code-pack release`` (L9.12) the run pack is the ``--rl-image`` itself: a
+release image built by ``scripts/build_yeto_release_image.sh`` (yeto in an image
+layer at ``/opt/yeto/src``, with ``~/sky_workdir`` linked to it). Its digest is the
+pack digest; nothing is uploaded and no local tree is shipped (no sky ``workdir``,
+no Modal ``add_local_dir``). Islands check the image tree against its release
+manifest (``--code-pack-mode release``). The syncer head still runs from the local
+tree; release mode covers the islands only.
 """
 
 from __future__ import annotations
@@ -20,18 +28,29 @@ from . import REPO_ROOT
 CODE_PACK_OFF = "off"
 CODE_PACK_GIT_PATCH = "git-patch"
 CODE_PACK_AUTO = "auto"
+CODE_PACK_RELEASE = "release"
 CODE_PACK_CACHE = Path("~/.cache/yeto/codepacks")
 
 
-def code_workdir(args) -> str:
-    """The directory shipped as the island workdir: the run pack tree, else the repo."""
+def is_release(args) -> bool:
+    pack = getattr(args, "code_pack", None)
+    return pack is not None and pack.mode == CODE_PACK_RELEASE
 
+
+def code_workdir(args) -> str | None:
+    """The directory shipped as the island workdir: the run pack tree, else the repo;
+    None in release mode (the code is in the island image)."""
+
+    if is_release(args):
+        return None
     return str(getattr(args, "code_pack_tree", None) or REPO_ROOT)
 
 
 def code_pack_island_flag(args) -> str:
     pack = getattr(args, "code_pack", None)
-    return f" --code-pack-digest {pack.digest}" if pack is not None else ""
+    if pack is None:
+        return ""
+    return f" --code-pack-digest {pack.digest}" + (" --code-pack-mode release" if is_release(args) else "")
 
 
 def code_pack_mode(args) -> str:
@@ -70,17 +89,36 @@ def prepare_run_code_pack(args, *, store=None, repo: str | Path | None = None,
                           cache_root: str | Path | None = None) -> None:
     """Resolve the run pack and point the launch at it (sets ``args.code_pack``,
     ``args.code_pack_tree`` and re-attests ``args.source_sha256`` on the pack tree).
-    No-op unless the pack mode (:func:`code_pack_mode`) is git-patch on an RL launch."""
+    No-op unless the pack mode (:func:`code_pack_mode`) is git-patch or release on an
+    RL launch. In release mode ``args.code_pack_tree`` is None and
+    ``args.source_sha256`` stays the launcher's value (the island checks the image
+    tree against the image's release manifest instead)."""
 
     mode = code_pack_mode(args)
     upgrade = getattr(args, "rl_code_pack_upgrade", None)
     if mode == CODE_PACK_OFF or getattr(args, "training_mode", "sft") != "rl":
         if upgrade is not None:
-            raise ValueError("--rl-code-pack-upgrade requires --rl-code-pack git-patch "
+            raise ValueError("--rl-code-pack-upgrade requires --rl-code-pack git-patch or release "
                              "(or auto with a bucket / modal-volume:// checkpoint store)")
         return
     from .. import codepack
     from ..provenance import source_tree_sha256
+
+    if mode == CODE_PACK_RELEASE:
+        if (getattr(args, "rl_backend", None) or "miles") != "miles":
+            raise ValueError("--rl-code-pack release needs the miles backend (the release "
+                             "image is built on the miles-ports engine image)")
+        try:
+            resolved = codepack.resolve_run_pack(
+                previous=_previous_manifest(args.cluster_prefix), repo=repo or REPO_ROOT,
+                store=None, cache_root=Path(cache_root or CODE_PACK_CACHE).expanduser(),
+                semantic_sha256=_semantic_sha256(args), upgrade_reason=upgrade,
+                release_image=str(getattr(args, "rl_image", None) or ""))
+        except codepack.CodePackError as e:
+            raise ValueError(f"--rl-code-pack release: {e}") from None
+        args.code_pack = resolved.pack
+        args.code_pack_tree = None
+        return
 
     if store is None:
         store_uri = getattr(args, "rl_checkpoint_store", None)

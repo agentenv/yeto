@@ -20,6 +20,12 @@ on a mismatch. The pack changes only through :func:`upgrade_record` (explicit
 upgrade): it requires an equal semantic hash and appends "pack A -> pack B" to the
 manifest record.
 
+Release mode (L9.12): the code is a layer of the island image
+(``scripts/build_yeto_release_image.sh``); the image digest is the pack digest and
+nothing is uploaded (:func:`release_pack`). The island checks its tree against the
+image's release manifest (:func:`verify_release_tree`); the registry pull by digest
+checks the image itself.
+
 Storage backends are pluggable (:func:`register_pack_store`); this module holds the
 neutral core and a directory backend. Cloud backends live with their cloud code.
 """
@@ -42,6 +48,11 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable, Mapping, Protocol
 
 CODE_PACK_MODE_GIT_PATCH = "git-patch"
+CODE_PACK_MODE_RELEASE = "release"
+CODE_PACK_MODES = (CODE_PACK_MODE_GIT_PATCH, CODE_PACK_MODE_RELEASE)
+# Written into the release image layer by scripts/build_yeto_release_image.sh.
+RELEASE_MANIFEST = "/opt/yeto/release-manifest.json"
+RELEASE_SCHEMA = "yeto-release-v1"
 PACK_INFO = "CODEPACK.json"
 PACK_DIR = "code_packs"
 PACK_FORMAT = 1
@@ -59,9 +70,11 @@ class CodePackError(RuntimeError):
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class CodePack:
-    """What the run manifest records for one pack."""
+    """What the run manifest records for one pack. A release pack has no commit on
+    the launcher side (the island reads it from the image's release manifest), no
+    patch, and the image reference as ``pack_uri``."""
 
-    commit: str
+    commit: str | None
     dirty: bool
     patch_sha: str
     digest: str
@@ -76,9 +89,10 @@ class CodePack:
 
     @classmethod
     def from_record(cls, record: Mapping[str, Any]) -> "CodePack":
-        if record.get("mode") != CODE_PACK_MODE_GIT_PATCH:
-            raise CodePackError(f"code pack mode {record.get('mode')!r} is not {CODE_PACK_MODE_GIT_PATCH!r}")
-        return cls(commit=str(record["commit"]), dirty=bool(record["dirty"]),
+        if record.get("mode") not in CODE_PACK_MODES:
+            raise CodePackError(f"code pack mode {record.get('mode')!r} is not one of {CODE_PACK_MODES}")
+        commit = record.get("commit")
+        return cls(commit=None if commit is None else str(commit), dirty=bool(record["dirty"]),
                    patch_sha=str(record["patch_sha"]), digest=str(record["digest"]),
                    pack_uri=record.get("pack_uri"), mode=str(record["mode"]),
                    upgrades=tuple(dict(u) for u in record.get("upgrades") or ()))
@@ -422,21 +436,71 @@ def upgrade_record(old: CodePack, new: CodePack, *, old_semantic: str | None,
     step = {"from": old.digest, "to": new.digest, "from_commit": old.commit,
             "to_commit": new.commit, "semantic_sha256": new_semantic, "reason": reason,
             "unix": time.time() if now is None else now}
+    if old.mode != new.mode:
+        step["from_mode"], step["to_mode"] = old.mode, new.mode
     return CodePack(commit=new.commit, dirty=new.dirty, patch_sha=new.patch_sha,
-                    digest=new.digest, pack_uri=new.pack_uri,
+                    digest=new.digest, pack_uri=new.pack_uri, mode=new.mode,
                     upgrades=(*old.upgrades, step))
+
+
+# ---------------------------------------------------------------------------
+# release mode (L9.12)
+# ---------------------------------------------------------------------------
+def release_image_digest(image_ref: str) -> str:
+    """The sha256 hex of ``<repo>@sha256:<hex>`` (a release image is pinned by digest)."""
+
+    repo, sep, digest = image_ref.removeprefix("docker:").partition("@sha256:")
+    if not repo or not sep or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest.lower()):
+        raise CodePackError(f"release image must be pinned by digest (<repo>@sha256:<64 hex>), "
+                            f"got {image_ref!r}")
+    return digest.lower()
+
+
+def release_pack(image_ref: str) -> CodePack:
+    """The pack record of a release image: its digest is the pack digest."""
+
+    ref = image_ref.removeprefix("docker:")
+    return CodePack(commit=None, dirty=False, patch_sha="", digest=release_image_digest(ref),
+                    pack_uri=ref, mode=CODE_PACK_MODE_RELEASE)
+
+
+def verify_release_tree(tree: str | os.PathLike[str],
+                        manifest_path: str | os.PathLike[str] = RELEASE_MANIFEST) -> dict[str, Any]:
+    """Island check in release mode: ``tree`` is the image's source root and its
+    ``yeto`` package hashes to the value the image build recorded. Returns the
+    release manifest (``yeto_commit``, ``source_tree_sha256``, ...)."""
+
+    from .provenance import source_tree_sha256
+
+    try:
+        manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise CodePackError(f"release mode: no readable release manifest at {manifest_path} "
+                            f"({e}); the island image is not a yeto release image") from e
+    if manifest.get("schema") != RELEASE_SCHEMA:
+        raise CodePackError(f"release manifest schema {manifest.get('schema')!r} is not {RELEASE_SCHEMA!r}")
+    root = Path(tree).resolve()
+    if root != Path(str(manifest.get("source_root"))).resolve():
+        raise CodePackError(f"release mode: island code runs from {root}, not the image source "
+                            f"root {manifest.get('source_root')} (a local tree was shipped?)")
+    actual = source_tree_sha256(root / "yeto")
+    if actual != manifest.get("source_tree_sha256"):
+        raise CodePackError(f"release mode: {root}/yeto hashes to {actual}, the image build "
+                            f"recorded {manifest.get('source_tree_sha256')}")
+    return manifest
 
 
 @dataclass(frozen=True)
 class RunPack:
     pack: CodePack
-    tree: Path
+    tree: Path | None  # None for a release pack: the code is in the image
     reused: bool
 
 
 def resolve_run_pack(*, previous: Mapping[str, Any] | None, repo: str | os.PathLike[str],
                      store: PackStore, cache_root: str | os.PathLike[str],
                      semantic_sha256: str | None, upgrade_reason: str | None = None,
+                     release_image: str | None = None,
                      log: Callable[[str], None] = print) -> RunPack:
     """The pack this start of the run uses.
 
@@ -444,15 +508,27 @@ def resolve_run_pack(*, previous: Mapping[str, Any] | None, repo: str | os.PathL
     * a pack in ``previous``: take that same pack (resume / replacement), even when
       the local tree changed since;
     * with ``upgrade_reason``: make a pack from the local tree and switch to it
-      only under :func:`upgrade_record`'s rule."""
+      only under :func:`upgrade_record`'s rule.
+
+    With ``release_image`` the candidate pack is that image (:func:`release_pack`)
+    instead of the local tree, and nothing is stored. A run started on one pack
+    moves to another (another image, or between modes) only by an explicit upgrade."""
 
     old_record = (previous or {}).get("code_pack")
+    if release_image is not None:
+        return _resolve_release_pack(old_record, previous, release_image,
+                                     semantic_sha256=semantic_sha256,
+                                     upgrade_reason=upgrade_reason, log=log)
     if not old_record:
         pack, data = make_and_store(repo, store)
         log(f"[codepack] new run pack {pack.digest[:16]} (commit {pack.commit[:12]}"
             f"{', dirty' if pack.dirty else ''}) -> {pack.pack_uri}")
         return RunPack(pack, unpack(data, pack.digest, cache_root), reused=False)
     old = CodePack.from_record(old_record)
+    if old.mode == CODE_PACK_MODE_RELEASE and upgrade_reason is None:
+        raise CodePackError(f"this run uses the release image {old.pack_uri}; resume it with "
+                            "--rl-code-pack release and that --rl-image, or switch with "
+                            "--rl-code-pack-upgrade")
     if upgrade_reason is not None:
         candidate, data = make_and_store(repo, store)
         if candidate.digest == old.digest:
@@ -464,6 +540,26 @@ def resolve_run_pack(*, previous: Mapping[str, Any] | None, repo: str | os.PathL
         return RunPack(new, unpack(data, new.digest, cache_root), reused=False)
     log(f"[codepack] reusing run pack {old.digest[:16]} from the run manifest")
     return RunPack(old, fetch_tree(old, store, cache_root), reused=True)
+
+
+def _resolve_release_pack(old_record, previous, release_image: str, *,
+                          semantic_sha256: str | None, upgrade_reason: str | None,
+                          log: Callable[[str], None]) -> RunPack:
+    candidate = release_pack(release_image)
+    if not old_record:
+        log(f"[codepack] release run pack {candidate.digest[:16]} = image {candidate.pack_uri}")
+        return RunPack(candidate, None, reused=False)
+    old = CodePack.from_record(old_record)
+    if old.digest == candidate.digest and old.mode == candidate.mode:
+        log(f"[codepack] reusing release run pack {old.digest[:16]} from the run manifest")
+        return RunPack(old, None, reused=True)
+    if upgrade_reason is None:
+        raise CodePackError(f"this run's pack is {old.mode} {old.digest[:16]}, not the release image "
+                            f"{candidate.pack_uri}; switch only with --rl-code-pack-upgrade")
+    new = upgrade_record(old, candidate, old_semantic=(previous or {}).get("semantic_sha256"),
+                         new_semantic=semantic_sha256, reason=upgrade_reason)
+    log(f"[codepack] upgrade {old.digest[:16]} -> release {new.digest[:16]}: {upgrade_reason}")
+    return RunPack(new, None, reused=False)
 
 
 # ---------------------------------------------------------------------------
