@@ -101,7 +101,7 @@ def test_steps_order_and_staging(shipped):
 
 def test_gaps_block_run_until_wired(shipped, capsys):
     assert any("N0.2" in g for g in shipped.gaps)
-    assert not any("full-parameter" in g for g in shipped.gaps)  # trainer-only island accepted (T-INTEG2)
+    assert not any("refuses this layout" in g for g in shipped.gaps)  # trainer-only island accepted (T-INTEG2)
     # Left: N0.2 (image), N0.2b (docker device flags), and N7.1d: the island runs
     # full-parameter Megatron without the distributed optimizer or optimizer offload.
     assert len(shipped.gaps) == 3 and "N7.1d" in shipped.gaps[2]
@@ -175,7 +175,7 @@ def test_run_steps_starts_services_and_waits_for_the_trainer(shipped):
     (lambda d: d["roles"].update(sampler=["ppu3", "ppu4"]), "both trainer and sampler"),
     (lambda d: d["rendezvous"].update(ppu2="ppu2"), "not an IP address"),
     (lambda d: d["rendezvous"].update(ppu2="10.0.0.99"), "differs from the inventory address"),
-    (lambda d: d["trainer"]["miles"].update(optimizer_offload_fraction=0.0), "activations"),
+    (lambda d: d["trainer"]["miles"].update(optimizer_offload_fraction=0.0), "exceeds the usable"),
     (lambda d: d.update(store="s3://bucket/x"), "oss://"),
 ])
 def test_contradictions_are_errors(tmp_path, edit, message):

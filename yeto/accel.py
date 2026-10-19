@@ -106,7 +106,8 @@ def device_family(explicit: str | None = None) -> str:
     """The device family of this rank: ``explicit``, else ``$YETO_DEVICE_FAMILY``,
     else the detected torch device type (a PPU then reads as ``"cuda"``,
     which selects the same runtime)."""
-    family = explicit or os.environ.get(DEVICE_FAMILY_ENV)  # set by the island launcher or available_type()
+    # The island launcher sets the variable from the node inventory.
+    family = explicit or os.environ.get(DEVICE_FAMILY_ENV) or available_type()
     if family not in FAMILY_DEVICE_TYPES:
         raise ValueError(f"unknown device family {family!r} (known: {sorted(FAMILY_DEVICE_TYPES)})")
     return family
