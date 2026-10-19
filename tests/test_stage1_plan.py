@@ -44,7 +44,7 @@ def test_names_agree_across_roles(shipped):
     assert run.endswith("/s25-stage1-glm53-ppu") and run.startswith("oss://")
     req = shipped.requant["argv"]
     assert req[req.index("--store") + 1] == run
-    assert req[req.index("--target-dir") + 1] == "policy-releases-mxfp4-g32-rtn"
+    assert "--target-dir" not in req  # the directory follows the template's scheme
     island = shipped.trainer["miles"]["island_argv"]
     assert island[island.index("--rl-resume-store") + 1] == run
     for step in shipped.steps:

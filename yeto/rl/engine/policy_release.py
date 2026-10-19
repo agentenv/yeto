@@ -62,14 +62,15 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from yeto.rl.quant.schemes import BF16, RELEASE_DIR, W4A8_INT4_CHANNEL, release_dir_for
+
 from .object_store import ObjectStore, download_file, object_size
 from .resume import CheckpointStore, _write_json_atomic
 
 SCHEMA = "yeto.rl.policy-release/v1"
-RELEASE_DIR = "policy-releases"
-# W4A8 releases re-quantized from the BF16 ones (yeto.rl.quant.release); a W4A8
-# sampler follows this directory, a BF16 sampler the default one.
-W4A8_RELEASE_DIR = "policy-releases-w4a8"
+# Releases re-quantized from the BF16 ones (yeto.rl.quant.release) live in
+# release_dir_for(scheme); a sampler follows the directory of the scheme it serves.
+W4A8_RELEASE_DIR = release_dir_for(W4A8_INT4_CHANNEL)
 LATEST = "LATEST.json"
 RECORD = "RELEASE.json"
 _RELEASE_NAME = re.compile(r"r(\d+)-v\d+")
@@ -107,6 +108,24 @@ class PolicyRelease:
         if record.get("schema") != SCHEMA:
             raise PolicyReleaseError(f"release schema {record.get('schema')!r} != {SCHEMA}")
         return cls(**{k: record[k] for k in record if k in cls.__dataclass_fields__})
+
+
+def release_scheme(release: PolicyRelease) -> str:
+    """The weight scheme of a release: ``derived_from.scheme`` of a derived
+    release, else :data:`~yeto.rl.quant.schemes.BF16` (trained weights)."""
+    return str((release.derived_from or {}).get("scheme") or BF16)
+
+
+class SchemeMismatch(PolicyReleaseError):
+    """A release whose weight scheme is not the one the reader serves."""
+
+
+def check_release_scheme(release: PolicyRelease, expected: str) -> None:
+    """Raise :class:`SchemeMismatch` when ``release`` is not of scheme ``expected``."""
+    actual = release_scheme(release)
+    if actual != expected:
+        raise SchemeMismatch(f"release r{release.seq}-v{release.version} has weight scheme {actual!r}; "
+                             f"this reader serves {expected!r} (it follows the wrong release directory?)")
 
 
 def directory_digest(directory: Path) -> str:
@@ -181,8 +200,8 @@ def check_release_files(release: PolicyRelease, directory: Path) -> None:
 class PolicyReleaseStore:
     """Writes (trainer) and reads (sampler) the releases in one store.
     ``cache_dir``: where a store with an object API downloads a release to.
-    ``release_dir``: the release directory in the store (``W4A8_RELEASE_DIR``
-    for re-quantized releases)."""
+    ``release_dir``: the release directory in the store
+    (:func:`~yeto.rl.quant.schemes.release_dir_for` of the scheme)."""
 
     def __init__(self, store: CheckpointStore, *, keep: int = 2,
                  clock: Callable[[], float] = time.time,
@@ -312,11 +331,15 @@ class PolicyFollower:
     on every engine (raises on any failure; the served release is then unchanged).
     The weight files are checked against the record's ``sha256`` first.
     ``version`` is the version the engines serve before any release (the base
-    policy, 0)."""
+    policy, 0). ``scheme``: the weight scheme the engines serve; a release of
+    another scheme raises :class:`SchemeMismatch` before any file is read
+    (None: no check, for callers that check in ``load``)."""
 
     def __init__(self, releases: PolicyReleaseStore,
-                 load: Callable[[PolicyRelease, Path], None], *, version: int = 0) -> None:
+                 load: Callable[[PolicyRelease, Path], None], *, version: int = 0,
+                 scheme: str | None = None) -> None:
         self.releases = releases
+        self.scheme = scheme
         self._load = load
         self.version = int(version)
         self.release: PolicyRelease | None = None  # the release the engines serve
@@ -331,6 +354,8 @@ class PolicyFollower:
         self.last_seen = latest
         if latest is None or (self.release is not None and latest.seq == self.release.seq):
             return None
+        if self.scheme is not None:
+            check_release_scheme(latest, self.scheme)
         try:
             directory = self.releases.resolve(latest)
         except ReleaseIncomplete as error:

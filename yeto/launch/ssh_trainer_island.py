@@ -23,7 +23,8 @@ One incarnation = one trainer process per node, started over SSH:
    of a sky island (e.g. Ray head on rank 0, Ray workers on the others) runs
    unchanged. Node 0 also runs the re-quantizer side process
    (``yeto.rl.quant.release --loop``) when the spec has one: each BF16 release
-   becomes a quantized release in the store, which quantized samplers follow;
+   becomes a release of the template's scheme (W4A8 or MXFP4) in that scheme's
+   directory of the store, which samplers of that scheme follow;
    on ``runtime: docker`` nodes the trainer runs in a container
    (``docker run --network host``) of the spec's image with the node's mounts
    and the device flags of its family (``docker_args``; a docker island

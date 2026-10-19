@@ -28,4 +28,11 @@ Modules:
 * :mod:`.awq`: the fixed AWQ smoothing (R2) and the no-smoothing fallback (R1).
 * :mod:`.requant`: the checkpoint layout and its scheme, the per-tensor
   transform, the shard-by-shard converter, and the tensor-by-tensor comparison.
+* :mod:`.schemes`: the scheme names and their release directories (no torch).
+* :mod:`.stacked`: the trainer-native stacked expert layout -> per-expert names.
+* :mod:`.shards`: per-rank quantization into part files and their merge (R3).
+* :mod:`.release`: the side process that turns BF16 releases into quantized ones.
+
+Trainer adapters: :mod:`yeto.rl.adapters.miles.quant_shards` (Megatron) and
+:mod:`yeto.rl.adapters.verl.quant_shards` (FSDP2).
 """

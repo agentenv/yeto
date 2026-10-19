@@ -61,13 +61,13 @@ from yeto.launch.node_inventory import InventoryError, Node, load_inventory
 from yeto.rl.adapters.miles.models import glm5_next
 from yeto.rl.adapters.sampler_engines.from_spec import FACTORY as ENGINE_FACTORY
 from yeto.rl.engine.telemetry import DEVICE_FAMILY_ENV
+from yeto.rl.quant.schemes import release_dir_for
 
 PLAN_SCHEMA = "yeto.stage1/v1"
 BACKENDS = ("miles", "verl")
 NEUTRAL_PENALTIES = {"repetition_penalty": 1.0, "frequency_penalty": 0.0, "presence_penalty": 0.0}
 RAY_PORT = 6379
 HOST_USABLE_FRACTION = 0.85  # as yeto.rl.fullparam.memory.TrainPlan.host_usable_fraction
-RELEASE_DIR_PREFIX = "policy-releases-"
 HEAD_ACCESS = ("relay", "direct")  # how the head reaches the store (store_access.head)
 RAY_JOIN_TIMEOUT_S = 600
 
@@ -438,8 +438,9 @@ def expand(plan: Stage1Plan, *, hf_config: str | Path | None = None) -> Expanded
     # Re-quantizer (node 0 of the trainer, a side process of the island) ---
     from yeto.launch.ssh_trainer_island import requant_argv  # noqa: PLC0415
 
-    argv = [*requant_argv(store, str(model["sampler_initial"]["local_dir"]), python="python3"),
-            "--target-dir", str(quant["release_dir"])]
+    # The release directory follows the template's scheme (quant.schemes); the
+    # plan's release_dir is checked against it, not passed to the re-quantizer.
+    argv = requant_argv(store, str(model["sampler_initial"]["local_dir"]), python="python3")
     out.requant = {"node": trainers[0].name if trainers else None, "scheme": quant["scheme"],
                    "format": quant["format"], "argv": argv, "loop_argv": [*argv, "--loop"]}
 
@@ -695,8 +696,6 @@ def check(plan: Stage1Plan, out: Expanded) -> list[str]:
     requant = out.requant["argv"]
     if requant[requant.index("--store") + 1] != out.store["run"]:
         errors.append("re-quantizer --store is not the run store")
-    if requant[requant.index("--target-dir") + 1] != quant["release_dir"]:
-        errors.append("re-quantizer --target-dir is not quant.release_dir")
 
     # Store.
     store = out.store["run"]
@@ -749,8 +748,9 @@ def _check_scheme(quant: Mapping[str, Any], sampler_cfg: Mapping[str, Any]) -> l
         return [f"quant.format {quant['format']!r} is not a re-quantizer scheme (known: {sorted(SCHEMES)})"]
     if scheme.name != quant["scheme"]:
         errors.append(f"quant.format {quant['format']} is scheme {scheme.name}, the plan says {quant['scheme']}")
-    if quant["release_dir"] != RELEASE_DIR_PREFIX + scheme.name:
-        errors.append(f"quant.release_dir {quant['release_dir']!r} is not {RELEASE_DIR_PREFIX + scheme.name!r}")
+    if quant["release_dir"] != release_dir_for(scheme.name):
+        errors.append(f"quant.release_dir {quant['release_dir']!r} is not {release_dir_for(scheme.name)!r} "
+                      "(the re-quantizer writes to its scheme's directory)")
     if not scheme.name.startswith(str(sampler_cfg["precision"])):
         errors.append(f"sampler precision {sampler_cfg['precision']} does not match scheme {scheme.name}")
     if scheme.data_suffix.endswith("weight_packed") and not sampler_cfg.get("renames_weight_packed"):
