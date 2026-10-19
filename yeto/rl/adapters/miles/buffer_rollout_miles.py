@@ -122,11 +122,10 @@ class _BufferRound:
 
     def _tokenize(self, text: str) -> list[int]:
         """Prompt ids for a sample whose engine gave none (loads the tokenizer on first use)."""
-        if self._tokenizer is None:
-            from miles.utils.processing_utils import load_tokenizer
+        if self._tokenizer is None:  # the one Miles tokenizer load yeto allows (test_provenance)
+            from .rollout_meta_hook import _load_miles_tokenizer
 
-            self._tokenizer = load_tokenizer(self.args.hf_checkpoint, chat_template_path=self.args.chat_template_path,
-                                             trust_remote_code=True)
+            self._tokenizer = _load_miles_tokenizer(self.args)
         return list(self._tokenizer(text, add_special_tokens=True)["input_ids"])
 
     def _run_round_hooks(self, samples: list[list[Any]]) -> None:
