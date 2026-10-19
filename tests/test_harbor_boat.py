@@ -6,6 +6,7 @@ import asyncio
 import io
 import re
 import tarfile
+import threading
 from pathlib import Path
 
 import pytest
@@ -165,8 +166,9 @@ def test_cancelled_exec_stops_the_command_and_close_still_deletes():
     async def go():
         await sandbox.start(SPEC)
         task = asyncio.create_task(sandbox.exec("agent-run"))
-        for _ in range(20):
-            await asyncio.sleep(0)
+        # start_command runs in a worker thread: wait until it has run, not a fixed number of yields
+        while not any("agent-run" in command for command in fake.commands):
+            await asyncio.sleep(0.001)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -174,6 +176,36 @@ def test_cancelled_exec_stops_the_command_and_close_still_deletes():
 
     asyncio.run(go())
     assert fake.stopped and fake.deleted == ["bx_1"]
+
+
+def test_cancel_while_the_command_starts_still_stops_it():
+    fake = FakeBoat(hang_on="agent-run")
+    sandbox = _sandbox(fake)
+    started, release = threading.Event(), threading.Event()
+    real_start = fake.start_command
+
+    def slow_start(sandbox_id, command):
+        if "agent-run" in command:
+            started.set()
+            release.wait(5)
+        return real_start(sandbox_id, command)
+
+    fake.start_command = slow_start
+
+    async def go():
+        await sandbox.start(SPEC)
+        task = asyncio.create_task(sandbox.exec("agent-run"))
+        await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await sandbox.close()
+
+    asyncio.run(go())
+    agent_pid = next(i for i, command in enumerate(fake.commands, 1) if "agent-run" in command)
+    assert fake.stopped == [agent_pid]
+    assert fake.deleted == ["bx_1"]
 
 
 def test_cancel_during_create_still_deletes_the_vm():

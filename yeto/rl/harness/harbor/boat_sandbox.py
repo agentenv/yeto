@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextlib
 import io
 import logging
 import shlex
@@ -182,7 +183,14 @@ class BoatSandbox:
     async def vm_exec(self, command: str, *, timeout_s: float | None) -> ExecOutput:
         """Run ``command`` on the VM; past ``timeout_s`` it is stopped and RuntimeError raised."""
         sandbox_id = self._require_started()
-        process_id = await asyncio.to_thread(self._client.start_command, sandbox_id, command)
+        start = asyncio.ensure_future(asyncio.to_thread(self._client.start_command, sandbox_id, command))
+        try:
+            process_id = await asyncio.shield(start)
+        except asyncio.CancelledError:
+            # The command may already be running on the VM: stop it once its id is known.
+            with contextlib.suppress(Exception):
+                await self._stop_command(sandbox_id, await start)
+            raise
         loop = asyncio.get_running_loop()
         deadline = None if timeout_s is None else loop.time() + timeout_s
         try:
