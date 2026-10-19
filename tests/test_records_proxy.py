@@ -258,6 +258,28 @@ def test_length_truncated_turn_and_changed_tools_fail_closed(qwen):
         asyncio.run(proxy.handle("responses", responses_body([user_item("go")], tools=[]), trajectory_id="t"))
 
 
+def test_signed_repetition_penalty_is_refused_not_dropped():
+    from yeto.rl.engine.sampler_engine import SamplingConfigError
+    from yeto.rl.harness.gateway.records import sampling_params
+
+    with pytest.raises(SamplingConfigError, match="repetition_penalty"):
+        sampling_params({**SIGNED, "repetition_penalty": 1.1})
+
+
+def test_a_reload_during_a_turn_fails_closed(qwen):
+    model = ScriptedModel(qwen, SCRIPT)
+    engine = engine_for(model)
+
+    def reply_then_reload(prompt, index):
+        engine.start(None, 4)  # the engine serves a new version while the turn runs
+        return model(prompt, index)
+
+    engine.token_reply = reply_then_reload
+    proxy = RecordsProxy(engine, qwen, model="policy", signed_sampling=SIGNED)
+    with pytest.raises(RecordsMismatch, match="served version changed"):
+        asyncio.run(proxy.handle("responses", responses_body([user_item("go")]), trajectory_id="t"))
+
+
 def test_backend_refuses_an_engine_without_token_input(qwen):
     class TextOnly:
         pass

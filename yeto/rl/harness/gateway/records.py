@@ -72,6 +72,7 @@ def sampling_params(signed: Mapping[str, Any]) -> SamplingParams:
         top_p=float(signed.get("top_p", 1.0)), top_k=int(signed.get("top_k", -1)),
         seed=None if signed.get("seed") is None else int(signed["seed"]),
         stop=(stop,) if isinstance(stop, str) else tuple(stop),
+        repetition_penalty=float(signed.get("repetition_penalty", 1.0)),
         frequency_penalty=float(signed.get("frequency_penalty", 0.0)),
         presence_penalty=float(signed.get("presence_penalty", 0.0)),
     ).check()
@@ -198,8 +199,9 @@ class RecordingBackend:
                 pending = self._prompt(session, segment, context)
             completion = await self._sample(session, segment, pending, params, kind=KIND_ACTION)
             segment.n_context = len(context) + 1
+            prompt_tokens = len(segment.token_ids) - len(completion.token_ids)
         message = self._parse(completion)
-        return self._chat_response(session_id, message, completion, prompt_tokens=len(segment.token_ids) - len(completion.token_ids))
+        return self._chat_response(session_id, message, completion, prompt_tokens=prompt_tokens)
 
     # -------------------------------------------------------------- records
     def records(self, trajectory_id: str) -> dict[str, Any]:
@@ -288,8 +290,12 @@ class RecordingBackend:
         if room < 1:
             raise ContextFull(f"prompt has {len(prompt)} tokens; max_model_len is {self.engine.max_model_len}")
         params = params.replace(max_tokens=min(params.max_tokens, room))
+        version = self.engine.served_version()
         (group,) = await asyncio.to_thread(self.engine.generate_tokens, [prompt], params,
                                            stop_token_ids=self.template.stop_token_ids)
+        if self.engine.served_version() != version:  # a reload during the call: version unknown
+            raise RecordsMismatch(f"served version changed from {version} during the turn; "
+                                  "the turn's behavior version is unknown")
         completion = group[0]
         if completion.prompt_token_ids and tuple(completion.prompt_token_ids) != tuple(prompt):
             raise RecordsMismatch("the engine reports other prompt ids than the proxy sent")
@@ -306,7 +312,7 @@ class RecordingBackend:
         segment.turns.append(TurnRecord(
             turn=session.turns, kind=kind, prompt_added=pending.tail, completion=tuple(completion.token_ids),
             logprobs=tuple(completion.logprobs), finish_reason=completion.finish_reason,
-            policy_version=self.engine.served_version(), provenance=provenance.to_record(), render_diff=pending.render_diff))
+            policy_version=version, provenance=provenance.to_record(), render_diff=pending.render_diff))
         session.turns += 1
         return completion
 
