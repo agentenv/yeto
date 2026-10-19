@@ -274,7 +274,7 @@ def miles_stubs(monkeypatch):
     monkeypatch.setitem(sys.modules, "harbor_agent_function", example)
     monkeypatch.setenv("HARBOR_ENV_TYPE", "modal")
     mod = importlib.import_module("yeto.rl.adapters.miles.harbor_agent")
-    mod.gate.cache_clear()
+    mod._gates.clear()
     return mod, example
 
 
@@ -379,7 +379,7 @@ def verl_loop(monkeypatch):
     monkeypatch.setitem(sys.modules, "verl.experimental.agent_loop.agent_loop", mod)
     monkeypatch.delitem(sys.modules, "yeto.rl.adapters.verl.harbor_agent_loop", raising=False)
     loop_mod = importlib.import_module("yeto.rl.adapters.verl.harbor_agent_loop")
-    loop_mod._gate.cache_clear()
+    loop_mod._gates.clear()
     yield loop_mod, mod
     sys.modules.pop("yeto.rl.adapters.verl.harbor_agent_loop", None)  # bound to the stub
 
@@ -450,11 +450,14 @@ def test_verl_loop_aborts_on_misaligned_tokens_and_infra_errors(verl_loop):
     bad = [_turn([5, 6], [40]), _turn([5, 6, 77, 1], [41])]  # history rewritten (compaction)
     _FakeTrial.result = _result({"reward": 1.0})
     loop = _make_loop(loop_mod, _Recorder(bad), HarborHarness(lambda t, u: {}, trial_cls=_FakeTrial))
-    out = _run(loop.run({}, **_ROW))
+
+    async def run_and_snapshot():
+        return await loop.run({}, **_ROW), loop_mod._gate().metrics.snapshot()  # the gate is per loop
+
+    out, snap = _run(run_and_snapshot())
     assert out.extra_fields[OUTCOME_KEY] == "aborted" and out.extra_fields["outcome_reason"].startswith(
         "token_alignment")
     assert (out.response_mask, out.reward_score) == ([0], 0.0)  # placeholder: no loss tokens
-    snap = loop_mod._gate().metrics.snapshot()
     assert (snap["harness_outcome_ok_total"], snap["harness_outcome_aborted_total"]) == (0, 1)
 
     _FakeTrial.result = _result(None, "VerifierTimeoutError")

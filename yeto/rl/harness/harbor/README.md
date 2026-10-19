@@ -103,6 +103,22 @@ sample is a mask-0 placeholder with reward 0; it still counts in its GRPO
 group mean. The verl launcher and island entry refuse the Miles agentic flags
 (`--custom-agent-function-path`, `--use-session-server`, `--tito-model`, ...).
 
+boat on verl: `HARBOR_ENV_TYPE=boat` (or `provider: boat` in the row; the row
+wins), `HARBOR_ENV_KWARGS='{"machine_type": "small"}'` (optional). Each of
+`rollout.agent.num_workers` worker processes admits up to
+`YETO_HARBOR_MAX_IN_FLIGHT` sandboxes and refuses a value above
+`YETO_BOAT_MAX_ACTIVE`; keep `num_workers * YETO_BOAT_MAX_ACTIVE` within the
+plan. The admission gate and the boat quota are kept per event loop
+(`yeto/rl/agentic/loop_local.py`); verl's `AgentLoopWorker` is a Ray async
+actor, so that is one per worker process. verl builds the agent loop once per
+sample: `YETO_AGENTIC_RECORDER` should return a shared recorder.
+
+Verified 2026-10-19 (T-N108C): `HarborAgentLoop.run()` (verl agent-loop
+module stubbed, configuration from the env variables above) on boat, fix-git
+and regex-log: oracle reward 1 on both, nop reward 0 on both, outcome ok;
+41 billable s, `boat list` empty afterwards. The recorder returned one
+synthetic turn (oracle/nop call no model). A verl training run: not verified.
+
 ## boat sandbox provider (N10.8)
 
 `provider: boat` maps to `EnvironmentConfig.import_path =
