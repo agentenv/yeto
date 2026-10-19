@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass
@@ -77,6 +78,9 @@ DEFAULT_POLL_S = 5.0
 # A log stream may deliver the island's last lines after the cloud reports the call
 # ended: wait this long for the stopped event before calling the exit a failure.
 DEFAULT_EXIT_GRACE_S = 60.0
+# after interrupt(): max seconds a stop waits for the trainer's cut before the
+# island is released without one (its rounds after the last cut are trained again)
+DEFAULT_INTERRUPTED_DRAIN_S = 600.0
 
 RUN, STOP = "run", "stop"
 
@@ -395,20 +399,32 @@ class RemoteHandle(TrainerHandle):
 class RemoteTrainerLifecycle:
     """:class:`~.trainer_lifecycle.TrainerLifecycle` over a trainer island per
     incarnation (see the module doc). Waits poll the events every ``poll_s``; an
-    island that ended without a stopped event is a failure after ``exit_grace_s``."""
+    island that ended without a stopped event is a failure after ``exit_grace_s``.
+
+    :meth:`interrupt` (the head shuts down, e.g. ``yeto stop-run``): a ``run`` that
+    waits for its rounds returns at once with a :class:`LifecycleError` (a round
+    can wait for samples that no longer come), and a stop waits at most
+    ``interrupted_drain_s`` for the trainer's cut, then releases the island."""
 
     def __init__(self, islands: TrainerIslands, files: StoreFiles, *, first_incarnation: int = 0,
                  poll_s: float = DEFAULT_POLL_S, exit_grace_s: float = DEFAULT_EXIT_GRACE_S,
+                 interrupted_drain_s: float = DEFAULT_INTERRUPTED_DRAIN_S,
                  clock: Callable[[], float] = time.monotonic,
                  sleep: Callable[[float], None] = time.sleep) -> None:
         self.islands = islands
         self.files = files
         self.poll_s = float(poll_s)
         self.exit_grace_s = float(exit_grace_s)
+        self.interrupted_drain_s = float(interrupted_drain_s)
+        self._interrupted = threading.Event()
         self.clock = clock
         self.sleep = sleep
         self._next_incarnation = int(first_incarnation)
         self.current: RemoteHandle | None = None
+
+    def interrupt(self) -> None:
+        """Stop waiting for rounds (any thread); see the class doc."""
+        self._interrupted.set()
 
     def running_watermark(self) -> int | None:
         """The consumed position the running incarnation reported (None when no
@@ -448,9 +464,11 @@ class RemoteTrainerLifecycle:
         self._raise_if_ended(handle)
         first = handle.rounds
         seq = handle.commands.send(RUN, rounds=until.rounds)
-        self._wait(handle, lambda: handle.acked >= seq, math.inf)
+        self._wait(handle, lambda: handle.acked >= seq or self._interrupted.is_set(), math.inf)
         if handle.error is not None:
             raise LifecycleError(f"incarnation {handle.incarnation} failed") from handle.error
+        if handle.acked < seq and not handle.island_ended:
+            raise LifecycleError(f"incarnation {handle.incarnation}: run interrupted")
         assert handle.start_version is not None
         return RunReceipt(rounds=handle.rounds - first, first_version=handle.start_version + first,
                           trained_version=handle.start_version + handle.rounds,
@@ -463,7 +481,13 @@ class RemoteTrainerLifecycle:
         if not handle.island_ended:
             handle.requested_reason = reason
             handle.commands.send(STOP, reason=reason)
-            self._wait(handle, lambda: False, math.inf)
+            deadline = (self.clock() + self.interrupted_drain_s if self._interrupted.is_set()
+                        else math.inf)
+            self._wait(handle, lambda: False, deadline)
+            if not handle.island_ended:
+                print(f"[trainer] incarnation {handle.incarnation}: no cut within "
+                      f"{self.interrupted_drain_s:.0f} s of the stop; releasing the island",
+                      flush=True)
         if handle.error is not None:
             raise LifecycleError(f"incarnation {handle.incarnation} failed") from handle.error
         return handle.cut

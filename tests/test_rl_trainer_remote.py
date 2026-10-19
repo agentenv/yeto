@@ -12,6 +12,7 @@ import argparse
 import json
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -435,3 +436,76 @@ def test_modal_binding_reads_the_volume_and_backlog(tmp_path, monkeypatch):
     assert binding.release_orphan == islands.release_incarnation
     assert isinstance(binding.lifecycle(5), RemoteTrainerLifecycle)
     assert binding.lifecycle(5).plan_start({}).incarnation == 5
+
+
+class _SilentIslands:
+    """A trainer island that runs but never answers (its round waits for samples
+    that no longer come)."""
+
+    def __init__(self):
+        self.released = []
+
+    def launch(self, incarnation, resume_from):
+        return {"incarnation": incarnation}
+
+    def events(self, job):
+        return []
+
+    def alive(self, job):
+        return True
+
+    def release(self, job):
+        self.released.append(job["incarnation"])
+        return True
+
+
+def test_interrupt_ends_a_run_wait_and_bounds_the_stop_drain(tmp_path, capsys):
+    from yeto.rl.engine.trainer_lifecycle import LifecycleError, StopCondition
+
+    islands = _SilentIslands()
+    files = LocalStoreFiles(CheckpointStore(tmp_path))
+    lifecycle = RemoteTrainerLifecycle(islands, files, poll_s=POLL, interrupted_drain_s=0.05)
+    handle = lifecycle.start(lifecycle.plan_start({}), resume_from=None)
+    errors = []
+
+    def run():
+        try:
+            lifecycle.run(handle, None, StopCondition(1))
+        except LifecycleError as error:
+            errors.append(error)
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(0.1)
+    assert thread.is_alive()  # waits for the round
+    lifecycle.interrupt()
+    thread.join(5)
+    assert not thread.is_alive() and "interrupted" in str(errors[0])
+    lifecycle.stop(handle, LeaveReason.STOPPED)  # returns: no cut within the bound
+    assert handle.state is LifecycleState.STOPPED and handle.cut is None
+    assert islands.released == [0]
+    assert "no cut within" in capsys.readouterr().out
+    verbs = [c.verb for c in CommandReader(files, 0).poll()]
+    assert verbs == ["run", "stop"]
+
+
+def test_loop_thread_stop_interrupts_the_lifecycle_before_the_join():
+    from yeto.rl.engine.trainer_loop import TrainerLoopThread
+
+    calls = []
+    release = threading.Event()
+
+    class Loop:
+        finished = False
+        lifecycle = SimpleNamespace(interrupt=lambda: (calls.append("interrupt"), release.set()))
+
+        def tick(self):
+            release.wait(5)  # a tick blocked in a run wait until interrupted
+
+        def close(self, reason):
+            calls.append(("close", reason))
+
+    runner = TrainerLoopThread(Loop(), 0.01).start()
+    threading.Event().wait(0.05)
+    runner.stop(timeout=5)
+    assert calls == ["interrupt", ("close", LeaveReason.STOPPED)]

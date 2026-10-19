@@ -219,7 +219,8 @@ def test_miles_argv_of_a_lora_sampler_and_trainer():
 
 def test_miles_argv_of_a_convertible_node_is_lora_colocated_with_the_switchable_rollout():
     """L7.5: a convertible node keeps the colocated LoRA argv (trainer and engines on
-    the same GPUs); only the rollout function changes; no release exporter."""
+    the same GPUs); the rollout function changes, and the release exporter is on
+    (the node releases what it trains for the other nodes)."""
     from tests.test_rl_miles_adapter_config import flag_value, make_config, sub
     from yeto.rl.adapters.miles import config as mc
 
@@ -228,10 +229,11 @@ def test_miles_argv_of_a_convertible_node_is_lora_colocated_with_the_switchable_
         role="convertible", store="/mnt/store"))
     node = mc.translate_run_config(cfg, _tolerant(), max_policy_age=1)
     assert flag_value(node.argv, "--rollout-function-path") == br.ROLLOUT_FUNCTION_PATHS["convertible"]
-    assert "--colocate" in node.argv and "--save-hf" not in node.argv
+    assert "--colocate" in node.argv and flag_value(node.argv, "--save-hf") == mc.RELEASE_EXPORTER_SAVE_HF
     assert "--debug-rollout-only" not in node.argv
     assert [a for a in node.argv if a not in base.argv] == [
-        "--rollout-function-path", br.ROLLOUT_FUNCTION_PATHS["convertible"]]
+        "--rollout-function-path", br.ROLLOUT_FUNCTION_PATHS["convertible"],
+        "--save-hf", mc.RELEASE_EXPORTER_SAVE_HF]
     full = sub(cfg, "trainable", parameter_mode="full", target_modules=())
     with pytest.raises(mc.MilesConfigError, match="LoRA on a colocated island"):
         mc.translate_run_config(full, _tolerant(), max_policy_age=1)
@@ -735,3 +737,50 @@ def test_ray_metadata_sink_discard_drops_every_record():
     sink._ray = SimpleNamespace(get=lambda x: x)
     sink._actor = _Actor()
     assert sink.discard() == 2
+
+
+def test_lora_loader_of_a_convertible_node_unloads_the_boot_adapter_first(tmp_path):
+    log = []
+    body = {"lora:miles_lora:q_proj:0:A": "a1"}
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    loader = _lora_loader(log, [_Engine(log, "e0")], [body], staging=str(staging))
+    assert si.EngineReleaseLoader(None, None, None, lora=True, adapter_loaded=True)._adapter_loaded
+    assert not si.EngineReleaseLoader(None, None, None, adapter_loaded=True)._adapter_loaded
+    loader._adapter_loaded = True  # what adapter_loaded=True sets
+    releases = PolicyReleaseStore(CheckpointStore(tmp_path / "store"))
+    first = releases.release(1, "h1", _write_adapter, weights=LORA)
+    loader(first, releases.resolve(first))
+    assert [step[0] for step in log[:3]] == ["lock", "unload_lora_adapter", "load_lora_adapter"]
+
+
+def test_wire_policy_releases_on_a_convertible_node(tmp_path):
+    driver = SimpleNamespace(publisher=SimpleNamespace(publish=lambda s: None),
+                             emit=lambda event, **fields: None,
+                             rollout=SimpleNamespace(_in_executor=lambda fn, *a: fn(None, *a)))
+    args = SimpleNamespace(lora_rank=8, yeto_rl_sample_buffer=sample_roles.SampleBufferConfig(
+        role="convertible", store=str(tmp_path)))
+    actor = SimpleNamespace(run_plugin=lambda fn_path, kwargs: _write_adapter(Path(kwargs["path"])))
+    wired = si.wire_policy_releases(driver, miles_args=args, actor_model=actor,
+                                    runner=SimpleNamespace(run=lambda value: value))
+    assert driver.publisher is wired
+    br._ACTIVE.pop(br.TRAINER, None)
+    wired.publish(_State(0, "h0"))
+    assert PolicyReleaseStore(CheckpointStore(tmp_path)).latest().weights == LORA
+
+
+def test_convertible_nodes_get_a_backlog_cap_at_least_one_start_wave():
+    node = SimpleNamespace(rl_sample_role="convertible", rl_resume_store="/mnt/store",
+                           rl_max_policy_age=3)
+    # default: max(4, a_hard + 2) rounds; S1 starts at up to a_hard + 1 rounds
+    assert sample_roles.resolve(node, groups_per_round=4).max_backlog_groups == 20
+    node.rl_max_policy_age = 1
+    assert sample_roles.resolve(node, groups_per_round=4).max_backlog_groups == 16
+    node.rl_sampler_max_backlog_rounds = 2
+    assert sample_roles.resolve(node, groups_per_round=4).max_backlog_groups == 8
+    launch = _launch_args(rl_sample_role="convertible", rl_convertible_node="island0",
+                          rl_max_policy_age=2, rl_sampler_max_backlog_rounds=2)
+    with pytest.raises(ValueError, match="at least 3"):
+        sample_roles.check_launch(launch)
+    launch.rl_sampler_max_backlog_rounds = 3
+    sample_roles.check_launch(launch)

@@ -46,8 +46,9 @@ def run_dir(name: str) -> Path:
 
 
 def stop_flag_path(name: str) -> Path:
-    """``<run_dir>/STOP``: while it exists the fleet controller relaunches no island
-    (``yeto stop-run`` writes it; it does not stop or tear down anything itself)."""
+    """``<run_dir>/STOP``: while it exists the fleet controller relaunches no island,
+    and at its next poll it ends the run (the launcher tears it down). ``yeto
+    stop-run`` only writes it; the run's worker does the rest."""
     return run_dir(name) / "STOP"
 
 

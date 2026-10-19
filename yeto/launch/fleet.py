@@ -76,10 +76,19 @@ TEARDOWN_UNVERIFIED_EXIT = 5
 # Modal moved an island to a different container mid-run (preempted/rescheduled and the
 # run script re-ran): the run is failed and the Modal app stopped. Registered exit codes:
 # 1 failed, 2 artifact not fetchable, 3 incomplete tape, 4 island failed, 5 teardown
-# unverified, 6 stalled, 7 Modal container id changed, 8 trainer scheduler gave up.
+# unverified, 6 stalled, 7 Modal container id changed, 8 trainer scheduler gave up,
+# 9 stopped on the STOP flag.
 CONTAINER_CHANGED_EXIT = 7
 # The trainer scheduler stopped after too many failed trainer incarnations in a row.
 TRAINER_GAVE_UP_EXIT = 8
+
+
+class RunStopRequested(RuntimeError):
+    """``yeto stop-run`` wrote the run's STOP flag: the run ends and is torn down."""
+
+
+# Exit code when the run ended on its STOP flag (``yeto stop-run``).
+RUN_STOPPED_EXIT = 9
 
 
 class FleetController:
@@ -256,8 +265,11 @@ class FleetController:
         """Poll until every learner is done or abandoned.
 
         Returns {learner name: final status string}; raises RuntimeError
-        (after downing the syncer) if every learner was abandoned, and the
-        :meth:`abort` error when one was set.
+        (after downing the syncer) if every learner was abandoned, the
+        :meth:`abort` error when one was set, and :class:`RunStopRequested`
+        when the STOP flag appears while islands still run (the launcher then
+        stops the trainer with a cut and tears the run down; before, the
+        worker kept supervising the live islands until it was killed).
         """
         for name in self.learners:
             self._fleet("island_ready", name, initial=True)
@@ -273,6 +285,10 @@ class FleetController:
                 self._poll(rec, is_syncer=False)
             if all(r["state"] in (DONE, ABANDONED) for r in self.learners.values()):
                 break
+            if self.stop_flag is not None and os.path.exists(self.stop_flag):
+                print(f"[launcher] STOP flag {self.stop_flag} present; ending the run",
+                      file=sys.stderr)
+                raise RunStopRequested(f"STOP flag {self.stop_flag}")
             self._check_stall()
             self.ops.sleep(self.poll_interval)
         exit_codes = {name: rec["exit"] for name, rec in self.learners.items()}
