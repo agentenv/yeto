@@ -65,9 +65,9 @@ from .launch.modal_islands import (
 )
 from .launch.fleet import (
     CONTAINER_CHANGED_EXIT, DEFAULT_RL_STALL_TIMEOUT_S, FAILED_RUN_DRAIN_S, ISLAND_FAILED_EXIT,
-    RUN_STALLED_EXIT, TEARDOWN_UNVERIFIED_EXIT, TRAINER_GAVE_UP_EXIT, FixedRosterIslandAbandoned,
-    FleetController,
-    RunStalled, controller_fixed_roster,
+    RUN_STALLED_EXIT, RUN_STOPPED_EXIT, TEARDOWN_UNVERIFIED_EXIT, TRAINER_GAVE_UP_EXIT,
+    FixedRosterIslandAbandoned, FleetController,
+    RunStalled, RunStopRequested, controller_fixed_roster,
 )
 from .launch.teardown import collect_diagnostics_parallel, teardown_island
 from .launch.verda import _rename_hook, launch_verda_island, prepare_verda_islands
@@ -673,6 +673,13 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                   file=sys.stderr)
             drain_tapes(min(NO_SYNC_EVENT_DRAIN_S, FAILED_RUN_DRAIN_S))
             return CONTAINER_CHANGED_EXIT if container_changed() else RUN_STALLED_EXIT
+        except RunStopRequested as error:
+            # yeto stop-run: the trainer loop has stopped its trainer (cut) on the way
+            # out; secure the tapes (bounded), then the finally block tears down
+            print(f"[launcher] {error}: stopping the run (exit {RUN_STOPPED_EXIT})",
+                  file=sys.stderr)
+            drain_tapes(min(NO_SYNC_EVENT_DRAIN_S, FAILED_RUN_DRAIN_S))
+            return RUN_STOPPED_EXIT
         except FixedRosterIslandAbandoned as error:
             # A fixed-roster island failed for good: the run cannot finish.
             # Secure the tapes (bounded), then the finally block tears every

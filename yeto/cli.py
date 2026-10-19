@@ -899,7 +899,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     stop_run = sub.add_parser(
         "stop-run",
-        help="forbid relaunching islands of a run (writes <run dir>/STOP; stops/tears down nothing)")
+        help="stop a run: writes <run dir>/STOP; the run's worker then relaunches no island, "
+        "stops the trainer with a cut, tears the run down and exits (exit 9)")
     stop_run.add_argument("run", help="run name (its --cluster-prefix)")
 
     # Internal: the detached background worker `launch` spawns.
