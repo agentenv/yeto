@@ -62,7 +62,8 @@ CORE_FILES = (
 )
 # Backend adapters: name -> directory.  Each must not import the others.
 ADAPTER_DIRS = {"miles": ("yeto/rl/adapters/miles",),
-                "verl": ("yeto/rl/adapters/verl",)}
+                "verl": ("yeto/rl/adapters/verl",),
+                "sampler_engines": ("yeto/rl/adapters/sampler_engines",)}
 # Cloud / launch layer (audit A8, A9, C1-C3).
 CLOUD_FILES = ("yeto/launcher.py", "yeto/modal_runner.py", "yeto/cli.py",
                "yeto/rl/stage_w_entry.py")
