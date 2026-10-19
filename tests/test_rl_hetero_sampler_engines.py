@@ -297,6 +297,40 @@ def test_a_failed_check_marks_the_engine_not_ready_and_restarts_next_time(tmp_pa
         loader(release, releases.resolve(release))
 
 
+def test_an_engine_error_inside_a_check_is_a_failed_check(tmp_path):
+    from yeto.rl.engine.policy_release import ReleaseNotLoaded
+    from yeto.rl.engine.sampler_engine import SamplerEngineError
+
+    releases = PolicyReleaseStore(CheckpointStore(tmp_path))
+    engine = FakeEngine(identity=W4A8, answers=ANSWERS, expert_matrices=4)
+    events = []
+    loader = _loader(engine, events)
+    loader.start(None, 0)
+
+    def broken_score(prompt, continuation):
+        raise SamplerEngineError("HTTP 500")
+
+    engine.score = broken_score
+    release = _w4a8_release(releases, 1)
+    with pytest.raises(ReleaseNotLoaded, match="checks"):
+        loader(release, releases.resolve(release))
+    assert not loader.ready  # the engine now holds v1 weights that were never checked
+    assert [f["step"] for n, f in events if n == LOAD_CHECK_FAILED_EVENT] == ["checks"]
+
+
+def test_probe_of_a_load_that_failed_another_check_is_not_the_next_base(tmp_path):
+    releases = PolicyReleaseStore(CheckpointStore(tmp_path))
+    engine = FakeEngine(identity=W4A8, answers=ANSWERS, expert_matrices=4)
+    loader = _loader(engine, [], max_probe_jump=0.5)
+    loader.start(None, 0)
+    base = list(loader.checks._last_probe)
+    engine.answers = {}  # fixed prompts fail; the probe itself passes
+    release = _w4a8_release(releases, 1)
+    with pytest.raises(Exception, match="fixed_prompts"):
+        loader(release, releases.resolve(release))
+    assert loader.checks._last_probe == base
+
+
 def test_engine_that_reports_no_count_needs_memory_or_an_explicit_waiver(tmp_path):
     engine = FakeEngine(identity=W4A8, answers=ANSWERS, expert_matrices=None)
     checks = PostLoadChecks(expected_expert_matrices=4)

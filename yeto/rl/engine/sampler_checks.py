@@ -151,6 +151,7 @@ class PostLoadChecks:
     max_probe_jump: float | None = None
     reference_probe: Sequence[float] | None = None  # round-0 per-pair mean log-probs
     _last_probe: list[float] | None = field(default=None, init=False, repr=False)
+    _pending_probe: list[float] | None = field(default=None, init=False, repr=False)
 
     def pairs(self) -> list[tuple[str, str]]:
         if self.probe_pairs is not None:
@@ -218,9 +219,14 @@ class PostLoadChecks:
             out["mean_abs_jump"] = round(jump, 6)
         out["max_probe_jump"] = self.max_probe_jump
         out["passed"] = jump is None or self.max_probe_jump is None or jump <= self.max_probe_jump
-        if out["passed"]:
-            self._last_probe = means
+        self._pending_probe = means if out["passed"] else None
         return out
+
+    def accept(self) -> None:
+        """Make the last probe the next comparison base; only after every check of the load passed
+        (a probe of weights that failed another check must not become the base)."""
+        if self._pending_probe is not None:
+            self._last_probe, self._pending_probe = self._pending_probe, None
 
     def run(self, engine: SamplerEngine, *, expected_experts: int | None) -> list[dict[str, Any]]:
         results = [self.expert_count(engine, expected_experts)]
@@ -293,19 +299,24 @@ class PortReleaseLoader:
                 self._fail(version, "release_expert_count",
                            {"in_release": in_release, "expected": expected})
         restart = first or self.failures > 0  # after a failed check: restart, never patch in place
+        self.ready = False  # the engine holds unchecked weights from here until the checks pass
         started = self.clock()
         try:
             report = (self.engine.start(directory, version) if restart
                       else self.engine.load(directory, version))
         except SamplerEngineError as error:
             self._fail(version, "load", f"{type(error).__name__}: {error}")
-        results = self.checks.run(self.engine, expected_experts=expected)
+        try:
+            results = self.checks.run(self.engine, expected_experts=expected)
+        except SamplerEngineError as error:  # an engine call of a check failed: a failed check
+            self._fail(version, "checks", f"{type(error).__name__}: {error}")
         served = self.engine.served_version()
         results.append({"name": "served_version", "passed": served == version,
                         "served": served, "expected": version})
         failed = [r for r in results if not r["passed"]]
         if failed:
             self._fail(version, failed[0]["name"], failed)
+        self.checks.accept()
         self.ready = True
         self.failures = 0
         self.last_load = {"reload_mode": report.reload_mode, "pause_s": round(report.pause_s, 3),

@@ -48,7 +48,7 @@ class LoopGuard:
         if keep is None or keep >= len(completion.token_ids):
             return completion
         # The text of the kept tokens is not known without the tokenizer; the
-        # sample's text is the engine text marked as cut (training reads tokens).
+        # sample keeps the full engine text; finish_reason marks the cut (training reads tokens).
         return Completion(token_ids=completion.token_ids[:keep], logprobs=completion.logprobs[:keep],
                           text=completion.text, finish_reason=FINISH_LOOP_ABORT,
                           prompt_token_ids=completion.prompt_token_ids)
