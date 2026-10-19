@@ -161,7 +161,8 @@ def test_megatron_output_is_labelled_derived():
 @pytest.mark.parametrize("change, match", [
     ({"ep": 3}, "ep x pp = 6 does not divide cards 16"),
     ({"tp": 3}, "tp x pp x cp = 6 does not divide"),
-    ({"offload": "full"}, "only offload none"),
+    ({"offload": "full"}, "offload is an FSDP2 mode"),
+    ({"optimizer_offload_fraction": 1.5}, r"must be in \[0, 1\]"),
     ({"ulysses": 2}, "use cp instead of ulysses"),
     ({"pp": 8, "ep": 2}, "pp 8 exceeds the 4 layers"),
     ({"framework": "deepspeed"}, "framework must be one of"),
@@ -171,11 +172,28 @@ def test_malformed_megatron_plans_are_refused(change, match):
         estimate(MOE, replace(MEG, **change))
 
 
+def test_megatron_optimizer_offload_moves_state_and_master_to_the_host():
+    # N7.1c: fraction F of (8 B Adam + 4 B master) leaves the card; host = per card x cards_per_node.
+    dense, experts = 400 / 2 / 2, 600 / 4 / 2
+    owned = dense / 4 + experts / 2
+    full = estimate(MOE, replace(MEG, optimizer_offload_fraction=1.0))
+    assert full.items["optimizer_shard"].bytes == pytest.approx(0)
+    assert full.items["host_optimizer_offload"].bytes == pytest.approx(12 * owned * 8)
+    assert full.items["host_optimizer_offload"].where == "host"
+    half = estimate(MOE, replace(MEG, optimizer_offload_fraction=0.5, offload_master=False))
+    assert half.items["optimizer_shard"].bytes == pytest.approx((12 - 4) * owned)
+    assert half.total("host") == pytest.approx(4 * owned * 8)
+    assert "optimizer offload 0.5" in half.summary()["plan_status"]
+    assert "incl. FP32 master" in full.summary()["plan_status"]
+
+
 def test_megatron_refuses_cp_with_dsa_and_fsdp2_refuses_megatron_knobs():
     with pytest.raises(MemoryPlanError, match="DSA layer does not support cp"):
         estimate(replace(MOE, dsa_layers=1, index_heads=4), replace(MEG, cp=2, pp=1, ep=8))
     with pytest.raises(MemoryPlanError, match="megatron only"):
         estimate(GLM, replace(PPU, tp=2))
+    with pytest.raises(MemoryPlanError, match="optimizer_offload_fraction applies to framework megatron"):
+        estimate(GLM, replace(PPU, optimizer_offload_fraction=0.5))
     with pytest.raises(MemoryPlanError, match="go together"):
         replace(MOE, num_experts=0)
 

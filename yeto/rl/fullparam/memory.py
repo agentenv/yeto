@@ -49,6 +49,13 @@ skew is not modelled):
   ``state_bytes`` Adam state; with the distributed optimizer this is divided
   by the data-parallel size of its group (dense ``W / (TP x PP)``, CP
   included; experts ``W / (EP x PP)``), without it it is per local parameter;
+* optimizer host offload (N7.1c; Megatron ``--optimizer-cpu-offload
+  --optimizer-offload-fraction F``): the fraction ``F`` of the Adam state
+  moves to the host, and with ``offload_master`` also that fraction of the
+  FP32 master. Host memory per node is the offloaded bytes of one card times
+  ``cards_per_node`` (every card of a node offloads the same share). Not
+  modelled: FP32 gradient copies or pinned staging buffers that the CPU
+  optimizer may keep on the host (Megatron source not checked for this);
 * activations with full recomputation: stage 0 of 1F1B holds ``PP`` micro
   batches, so ``ceil(layers / PP) x PP x mbs x T / (TP x CP) x streams x hidden
   x 2 B``; mHC keeps ``hc_mult`` (4) residual streams, so this term is 4 times
@@ -138,7 +145,8 @@ class ModelShape:
 class TrainPlan:
     """One trainer island and how it trains. ``fsdp_size`` 0 means all cards in
     one shard group; a smaller divisor replicates groups (HSDP). ``tp`` /
-    ``pp`` / ``ep`` / ``cp`` / ``distributed_optimizer`` apply to
+    ``pp`` / ``ep`` / ``cp`` / ``distributed_optimizer`` /
+    ``optimizer_offload_fraction`` / ``offload_master`` apply to
     ``framework="megatron"`` only."""
 
     cards: int
@@ -167,6 +175,8 @@ class TrainPlan:
     ep: int = 1
     cp: int = 1
     distributed_optimizer: bool = True
+    optimizer_offload_fraction: float = 0.0  # share of the optimizer on the host (Megatron)
+    offload_master: bool = True  # the offloaded share includes the FP32 master copy
 
     @property
     def shard_group(self) -> int:
@@ -178,8 +188,11 @@ def _check_megatron_form(plan: TrainPlan, shape: ModelShape) -> None:
         if int(getattr(plan, name)) <= 0:
             raise MemoryPlanError(f"{name} must be positive, got {getattr(plan, name)}")
     if plan.offload != "none":
-        raise MemoryPlanError("megatron: only offload none is modelled (Megatron optimizer CPU "
-                              "offload is not)")
+        raise MemoryPlanError("megatron: offload is an FSDP2 mode; use optimizer_offload_fraction "
+                              "(Megatron --optimizer-offload-fraction)")
+    if not 0.0 <= plan.optimizer_offload_fraction <= 1.0:
+        raise MemoryPlanError(f"megatron: optimizer_offload_fraction must be in [0, 1], "
+                              f"got {plan.optimizer_offload_fraction}")
     if plan.ulysses != 1 or plan.fsdp_size:
         raise MemoryPlanError("megatron: use cp instead of ulysses, and no fsdp_size")
     W = plan.cards
@@ -212,6 +225,9 @@ def check_plan_form(plan: TrainPlan, shape: ModelShape) -> None:
         _check_megatron_form(plan, shape)
     elif (plan.tp, plan.pp, plan.ep, plan.cp) != (1, 1, 1, 1):
         raise MemoryPlanError("tp / pp / ep / cp apply to framework megatron only")
+    if plan.framework != "megatron" and plan.optimizer_offload_fraction:
+        raise MemoryPlanError("optimizer_offload_fraction applies to framework megatron only "
+                              "(FSDP2: offload)")
     if plan.offload not in OFFLOAD_MODES:
         raise MemoryPlanError(f"offload must be one of {OFFLOAD_MODES}, got {plan.offload!r}")
     if plan.dsa_path not in DSA_PATHS:
@@ -285,7 +301,7 @@ class Estimate:
             "basis": BASIS,
             "framework": self.plan.framework,
             "plan_status": (PLAN_STATUS[self.plan.offload] if self.plan.framework == "fsdp2"
-                            else "Megatron (no offload)"),
+                            else _megatron_status(self.plan)),
             "device_gib_per_card": round(self.total("device") / GIB, 1),
             "device_usable_gib": round(self.device_limit / GIB, 1),
             "host_gib_per_node": round(self.total("host") / GIB, 1),
@@ -354,8 +370,8 @@ def _estimate_megatron(shape: ModelShape, plan: TrainPlan) -> Estimate:
     """Megatron variant of :func:`estimate` (module doc, N7.1b)."""
     est = Estimate(shape, plan)
 
-    def add(name: str, value: float, formula: str) -> None:
-        est.items[name] = Item(float(value), formula, "device")
+    def add(name: str, value: float, formula: str, where: str = "device") -> None:
+        est.items[name] = Item(float(value), formula, where)
 
     W, tp, pp, ep, cp = plan.cards, plan.tp, plan.pp, plan.ep, plan.cp
     stage_layers = -(-shape.num_layers // pp)
@@ -367,14 +383,23 @@ def _estimate_megatron(shape: ModelShape, plan: TrainPlan) -> Estimate:
     add("params_local_bf16", 2 * local, f"2 B x (dense/TP({tp}) + experts/EP({ep})), {where}")
     gb = plan.grad_bytes
     add("main_grads_local", gb * local, f"{gb} B x local params")
-    per_param = (4 if plan.param_bytes == 4 else 0) + plan.state_bytes
     if plan.distributed_optimizer:
         dp_dense, dp_expert = W // (tp * pp), W // (ep * pp)
-        add("optimizer_shard", per_param * (dense / dp_dense + experts / dp_expert),
-            f"{per_param} B x (dense local / DP({dp_dense}) + expert local / expert DP({dp_expert})), "
-            f"distributed optimizer")
+        owned = dense / dp_dense + experts / dp_expert
+        owned_text = (f"(dense local / DP({dp_dense}) + expert local / expert DP({dp_expert})), "
+                      "distributed optimizer")
     else:
-        add("optimizer_local", per_param * local, f"{per_param} B x local params (no distributed optimizer)")
+        owned, owned_text = local, "local params (no distributed optimizer)"
+    master = 4 if plan.param_bytes == 4 else 0
+    F = plan.optimizer_offload_fraction
+    host_per_param = F * (plan.state_bytes + (master if plan.offload_master else 0))
+    card_per_param = plan.state_bytes + master - host_per_param
+    name = "optimizer_shard" if plan.distributed_optimizer else "optimizer_local"
+    add(name, card_per_param * owned, f"{card_per_param:g} B x {owned_text}, on the card")
+    if F:
+        what = "Adam state + FP32 master" if plan.offload_master and master else "Adam state"
+        add("host_optimizer_offload", host_per_param * owned * plan.cards_per_node,
+            f"{F:g} x {what} ({host_per_param:g} B) x {owned_text} x cards_per_node", "host")
     tokens = plan.seq_len * plan.micro_batch_seqs / (tp * cp)
     add("layer_inputs", stage_layers * pp * tokens * shape.residual_streams * shape.hidden_size * 2,
         f"stage layers({stage_layers}) x in-flight micro batches PP({pp}) x T*mbs/(TP*CP)({tokens:.0f}) "
@@ -392,6 +417,13 @@ def _estimate_megatron(shape: ModelShape, plan: TrainPlan) -> Estimate:
         add("dsa_dense_terms", dense_terms,
             "mask mbs*T*T*5 B + indexer scores mbs*T*heads*T/kpool*4 B (dense DSA fallback)")
     return est
+
+
+def _megatron_status(plan: TrainPlan) -> str:
+    if not plan.optimizer_offload_fraction:
+        return "Megatron (no optimizer offload)"
+    master = " incl. FP32 master" if plan.offload_master and plan.param_bytes == 4 else ""
+    return f"Megatron (optimizer offload {plan.optimizer_offload_fraction:g}{master} on the host)"
 
 
 def check(shape: ModelShape, plan: TrainPlan) -> Estimate:

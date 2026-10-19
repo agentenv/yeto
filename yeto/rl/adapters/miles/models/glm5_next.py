@@ -30,13 +30,16 @@ TRANSFORMER_IMPLS = (TRANSFORMER_ENGINE, LOCAL)
 SPEC = ("miles_plugins.models.glm5_next.glm5_next", "get_glm5_next_spec")
 NUM_LAYERS = 45
 FIRST_K_DENSE_REPLACE = 3
+HIDDEN_SIZE = 4096
+VOCAB_SIZE = 154880
+NUM_EXPERTS = 288
 
 # N7.5 E6/E7: flags that exist only with TransformerEngine.
 TE_ONLY_ARGV: tuple[str, ...] = ("--moe-grouped-gemm", "--moe-permute-fusion")
 LOCAL_ARGV: tuple[str, ...] = ("--transformer-impl", LOCAL, "--no-gradient-accumulation-fusion")
 
 _MODEL_ARGV: tuple[str, ...] = (
-    "--hidden-size", "4096",
+    "--hidden-size", str(HIDDEN_SIZE),
     "--ffn-hidden-size", "12288",
     "--num-attention-heads", "64",
     "--multi-latent-attention",
@@ -47,7 +50,7 @@ _MODEL_ARGV: tuple[str, ...] = (
     "--v-head-dim", "256",
     "--kv-channels", "256",
     "--qk-layernorm",
-    "--num-experts", "288",
+    "--num-experts", str(NUM_EXPERTS),
     "--moe-router-topk", "8",
     "--moe-router-score-function", "sigmoid",
     "--moe-router-pre-softmax",
@@ -57,7 +60,7 @@ _MODEL_ARGV: tuple[str, ...] = (
     "--moe-ffn-hidden-size", "2048",
     "--moe-shared-expert-intermediate-size", "2048",
     "--moe-router-dtype", "fp32",
-    "--vocab-size", "154880",
+    "--vocab-size", str(VOCAB_SIZE),
     "--rotary-base", "10000",
     "--rope-type", "rope",
     "--no-rope-fusion",

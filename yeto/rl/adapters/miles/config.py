@@ -1217,8 +1217,10 @@ def _full_parameter_optimizer_attrs(trainable: Any) -> dict[str, Any]:
     flat slice of the owned range even at DP=1, and the full-parameter shard
     manifest (Miles ``full_parameter_state._master_parameter``) refuses it as
     an incomplete master. The attribute is applied in ``preprocess_args``,
-    after Miles' defaults and before Megatron's ``validate_args``. Full mode is
-    DP=1 only (``resolve_rl_run_config``), so no master is DP-sharded either way.
+    after Miles' defaults and before Megatron's ``validate_args``. With engines
+    on the island full mode is DP=1; a trainer-only island (samples from the
+    store) may run DP>1, and then every DP replica keeps the whole optimizer
+    state of its local parameters (more device memory; stage-1 gap N7.1d).
     """
 
     if trainable.parameter_mode != "full":

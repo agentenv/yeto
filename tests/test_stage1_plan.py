@@ -102,7 +102,9 @@ def test_steps_order_and_staging(shipped):
 def test_gaps_block_run_until_wired(shipped, capsys):
     assert any("N0.2" in g for g in shipped.gaps)
     assert not any("full-parameter" in g for g in shipped.gaps)  # trainer-only island accepted (T-INTEG2)
-    assert len(shipped.gaps) == 2  # only N0.2 (image) and N0.2b (docker device flags) need the machines
+    # Left: N0.2 (image), N0.2b (docker device flags), and N7.1d: the island runs
+    # full-parameter Megatron without the distributed optimizer or optimizer offload.
+    assert len(shipped.gaps) == 3 and "N7.1d" in shipped.gaps[2]
     assert stage1.main(["run", str(PLAN), "--confirm-machines-free"]) == 2
     assert "run refused" in capsys.readouterr().err
 
@@ -211,3 +213,19 @@ def test_verl_backend_expands(tmp_path):
     assert out.errors == []
     assert "trainer.nnodes=3" in out.trainer["verl"]["overrides"]
     assert any("verl" in g for g in out.gaps)
+
+
+def test_memory_figures_of_the_plan_match_the_estimator(shipped):
+    # N7.1c: the plan's 78.7 GiB/card and 1196 GiB/node (推算) agree with the estimator.
+    mem = shipped.trainer["miles"]["memory_estimate"]
+    assert mem["plan"]["basis"] == "推算" and mem["plan"]["fits"]
+    assert mem["plan"]["weights_grads_gib_per_card"] == pytest.approx(78.7, abs=0.1)
+    assert mem["plan"]["host_optimizer_gib_per_node"] == pytest.approx(1196, rel=0.02)
+    assert not mem["island"]["fits"]  # no distributed optimizer, no offload (gap N7.1d)
+
+
+def test_memory_figure_that_disagrees_is_an_error(tmp_path):
+    def edit(doc):
+        doc["trainer"]["miles"]["memory_estimate"]["host_optimizer_gib_per_node"] = 600
+    out = _variant(tmp_path, edit)
+    assert any("host_optimizer_gib_per_node = 600" in e for e in out.errors)

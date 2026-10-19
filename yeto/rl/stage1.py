@@ -67,7 +67,7 @@ PLAN_SCHEMA = "yeto.stage1/v1"
 BACKENDS = ("miles", "verl")
 NEUTRAL_PENALTIES = {"repetition_penalty": 1.0, "frequency_penalty": 0.0, "presence_penalty": 0.0}
 RAY_PORT = 6379
-HOST_USABLE_FRACTION = 0.85  # as yeto.rl.fullparam.memory.TrainPlan.host_usable_fraction
+MEMORY_TOLERANCE = 0.02  # plan memory figures vs the estimator (both 推算)
 HEAD_ACCESS = ("relay", "direct")  # how the head reaches the store (store_access.head)
 RAY_JOIN_TIMEOUT_S = 600
 
@@ -200,19 +200,49 @@ def megatron_layout(miles: Mapping[str, Any], trainer_cards: int, cards_per_node
             "expert_dp": dp * tp * cp // (ep * etp)}
 
 
-def megatron_static_gib(model: Mapping[str, Any], layout: Mapping[str, int]) -> dict[str, float]:
-    """Per-card static memory of the layout, estimate (A-TRN §2.1 method):
-    bf16 weights + fp32 main grads = 6 B/param on the card; Adam + fp32 master
-    = 12 B/param, sharded over the data-parallel group, on the host when
-    offloaded. Activations are not included."""
-    experts = float(model["expert_params_b"]) * 1e9
-    dense = float(model["params_b"]) * 1e9 - experts
-    per_card = experts / (layout["pp"] * layout["ep"] * layout["etp"]) + dense / (layout["pp"] * layout["tp"])
-    optimizer_card = (experts / (layout["pp"] * layout["ep"] * layout["etp"] * layout["expert_dp"])
-                      + dense / (layout["pp"] * layout["tp"] * layout["dp"])) * 12
-    gib = 2.0 ** 30
-    return {"params_per_card_b": round(per_card / 1e9, 2), "weights_grads_gib": round(per_card * 6 / gib, 1),
-            "optimizer_gib_per_card": round(optimizer_card / gib, 1)}
+def megatron_memory(model: Mapping[str, Any], miles: Mapping[str, Any], layout: Mapping[str, int],
+                    trainers: Sequence[Node], sampling: Mapping[str, Any],
+                    hf_config: str | Path | None = None) -> dict[str, Any]:
+    """Memory of the Miles layout from the estimator (``yeto.rl.fullparam.memory``,
+    framework megatron, N7.1c), all figures "推算".
+
+    ``plan``: the layout as the plan writes it (distributed optimizer, the
+    plan's optimizer offload fraction, FP32 master offloaded with the Adam
+    state). ``island``: what the Miles island runs today in full-parameter mode
+    (distributed optimizer off, no optimizer offload; ``island_optimizer_gap``).
+    Without ``hf_config`` the shape takes hidden size and vocabulary from the
+    glm5_next recipe and one residual stream; the static items (weights, grads,
+    optimizer) do not depend on them, the activation items do."""
+    from yeto.rl.fullparam.memory import ModelShape, TrainPlan, estimate, shape_from_hf_config  # noqa: PLC0415
+
+    params = int(float(model["params_b"]) * 1e9)
+    experts = int(float(model["expert_params_b"]) * 1e9)
+    if hf_config is not None:
+        hf = shape_from_hf_config(json.loads(Path(hf_config).read_text()))
+        shape = dataclasses.replace(hf, params=params, expert_params=experts,
+                                    num_experts=hf.num_experts or glm5_next.NUM_EXPERTS)
+    else:
+        shape = ModelShape(params=params, largest_layer_params=params // int(model["num_layers"]),
+                           num_layers=int(model["num_layers"]), hidden_size=glm5_next.HIDDEN_SIZE,
+                           vocab_size=glm5_next.VOCAB_SIZE, expert_params=experts,
+                           num_experts=glm5_next.NUM_EXPERTS, source="stage-1 plan + glm5_next recipe")
+    node = trainers[0]
+    base = TrainPlan(framework="megatron", cards=sum(n.cards_per_node for n in trainers),
+                     cards_per_node=node.cards_per_node, hbm_gib=node.hbm_gib,
+                     host_memory_gib=node.host_memory_gib,
+                     seq_len=int(miles["max_tokens_per_gpu"]), tp=layout["tp"], pp=layout["pp"],
+                     ep=layout["ep"], cp=layout["cp"], dsa_path="sparse_kernel",  # Miles DSA layer, no dense mask
+                     optimizer_offload_fraction=float(miles.get("optimizer_offload_fraction") or 0.0))
+    out = {}
+    for key, plan in (("plan", base),
+                      ("island", dataclasses.replace(base, distributed_optimizer=False,
+                                                     optimizer_offload_fraction=0.0))):
+        est = estimate(shape, plan)
+        static = sum(est.items[k].bytes for k in ("params_local_bf16", "main_grads_local")) / 2**30
+        out[key] = {**est.summary(), "weights_grads_gib_per_card": round(static, 1),
+                    "host_optimizer_gib_per_node": round(est.total("host") / 2**30, 1)}
+    out["shape_source"] = shape.source
+    return out
 
 
 def megatron_args(model: Mapping[str, Any], miles: Mapping[str, Any], layout: Mapping[str, int],
@@ -407,7 +437,7 @@ def expand(plan: Stage1Plan, *, hf_config: str | Path | None = None) -> Expanded
         "backend": backend, "nodes": [n.name for n in trainers], "cards": cards,
         "image": images.get("trainer"), "env": trainer_env,
         "miles": {"commit": miles["commit"], "megatron": miles["megatron"], "mbridge": miles["mbridge"],
-                  "layout": layout, "static_memory_estimate": megatron_static_gib(model, layout),
+                  "layout": layout, "memory_estimate": megatron_memory(model, miles, layout, trainers, sampling, hf_config),
                   "model_args": model_args,
                   "megatron_args": megatron_args(model, miles, layout, sampling),
                   "drop_model_args": list(glm5_next.TE_ONLY_ARGV) if impl == glm5_next.LOCAL else [],
@@ -722,20 +752,15 @@ def check(plan: Stage1Plan, out: Expanded) -> list[str]:
     if verl_max != [f"data.max_response_length={int(sampling['max_tokens'])}"]:
         errors.append("verl data.max_response_length differs from sampling.max_tokens")
 
-    # Static memory estimate must leave room for activations (A-TRN §2.3).
-    mem = out.trainer["miles"]["static_memory_estimate"]
-    hbm = trainers[0].hbm_gib if trainers else 0
-    on_card = mem["weights_grads_gib"] + (0 if float(miles.get("optimizer_offload_fraction") or 0) >= 1
-                                          else mem["optimizer_gib_per_card"])
-    if on_card > 0.75 * hbm:
-        errors.append(f"static memory estimate {on_card:.1f} GiB/card leaves under 25 % of {hbm:g} GiB "
-                      "for activations")
-    fraction = float(miles.get("optimizer_offload_fraction") or 0)
-    if trainers and fraction > 0:
-        host = mem["optimizer_gib_per_card"] * fraction * trainers[0].cards_per_node
-        if host > HOST_USABLE_FRACTION * trainers[0].host_memory_gib:
-            errors.append(f"offloaded optimizer estimate {host:.0f} GiB/node exceeds "
-                          f"{HOST_USABLE_FRACTION:.0%} of {trainers[0].host_memory_gib:g} GiB host memory")
+    # Memory (N7.1c): the estimator decides; the plan's own figures must agree with it.
+    mem = out.trainer["miles"]["memory_estimate"]["plan"]
+    errors += [f"Miles memory estimate (推算): {p}" for p in mem["problems"]]
+    stated = miles.get("memory_estimate") or {}
+    for key, ours in (("weights_grads_gib_per_card", mem["weights_grads_gib_per_card"]),
+                      ("host_optimizer_gib_per_node", mem["host_optimizer_gib_per_node"])):
+        if key in stated and abs(float(stated[key]) - ours) > MEMORY_TOLERANCE * max(ours, 1.0):
+            errors.append(f"trainer.miles.memory_estimate.{key} = {stated[key]} GiB, the estimator gives "
+                          f"{ours} GiB (推算; tolerance {MEMORY_TOLERANCE:.0%})")
     return errors
 
 
@@ -787,6 +812,8 @@ def gaps(plan: Stage1Plan, out: Expanded) -> list[str]:
                          f"(--rl-model-recipe choices: {recipes})")
         if gap := _full_parameter_layout_gap(plan, out):
             found.append(gap)
+        if gap := _island_optimizer_gap(out):
+            found.append(gap)
     else:
         if not out.trainer["verl"]["commit"]:
             found.append("trainer.verl.commit is unset (verl pin)")
@@ -812,6 +839,20 @@ def _full_parameter_layout_gap(plan: Stage1Plan, out: Expanded) -> str | None:
         return None
     return (f"Miles island: the full-parameter mode refuses this layout ({problem}): "
             f"{len(plan.nodes_of('trainer'))} trainer nodes, DP {out.trainer['miles']['layout']['dp']}")
+
+
+def _island_optimizer_gap(out: Expanded) -> str | None:
+    """The Miles island in full-parameter mode turns the distributed optimizer off
+    (``adapters.miles.config._full_parameter_optimizer_attrs``: whole FP32
+    masters for the shard manifest) and has no optimizer-offload flag, so the
+    plan's ``megatron_args`` offload is not what the island runs."""
+    island = out.trainer["miles"]["memory_estimate"]["island"]
+    if island["fits"]:
+        return None
+    return ("Miles island runs full-parameter Megatron without the distributed optimizer and without "
+            "optimizer CPU offload (no island flag; the plan's megatron_args are not passed): estimator "
+            f"(推算) {island['device_gib_per_card']} GiB/card > {island['device_usable_gib']} GiB usable "
+            "(N7.1d)")
 
 
 # --------------------------------------------------------------------- CLI

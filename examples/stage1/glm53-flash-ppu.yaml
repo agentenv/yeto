@@ -76,7 +76,10 @@ trainer:
     cp: 1
     ep: 8                               # inside one node
     etp: 1
-    optimizer_offload_fraction: 1.0     # Adam state on the host (estimate: 1.2 TiB/node of 2266 GiB)
+    optimizer_offload_fraction: 1.0     # Adam state + FP32 master on the host
+    memory_estimate:                    # 推算 (T-STAGE1); `plan` checks them against the estimator (N7.1c)
+      weights_grads_gib_per_card: 78.7  # bf16 weights + fp32 main grads, worst stage
+      host_optimizer_gib_per_node: 1196 # 12 B/param x owned share x 8 cards
     transformer_impl: transformer_engine  # main-agent ruling 10-19 (3): TE stays default; `local` is the N7.5 fallback
     recompute: full
     max_tokens_per_gpu: 8192
