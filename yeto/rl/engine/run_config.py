@@ -541,11 +541,27 @@ def _rules():
 
 
 def full_parameter_layout_problem(*, data_parallel: int, actor_num_nodes: int, rollout_gpus: Any,
-                                  rollout_gpus_per_engine: Any) -> str | None:
-    """Why the Miles full-parameter mode refuses this layout (Milestone 1: one
-    node, DP=1, dedicated evenly partitioned engines); None when it accepts it."""
+                                  rollout_gpus_per_engine: Any, sample_role: str = sample_roles.BOTH
+                                  ) -> str | None:
+    """Why the Miles full-parameter mode refuses this layout; None when it accepts it.
+
+    Two layouts are accepted:
+
+    * samples from the store (``--rl-sample-role trainer``): a trainer-only
+      island. Any node count and any DP; the island starts no inference engine
+      (``--rollout-num-gpus`` absent or 0), so no card is shared with one;
+    * engines on the island (Milestone 1): one node, DP=1 and dedicated, evenly
+      partitioned engines. A full-parameter trainer never shares its cards with
+      engines (no colocated placement).
+    """
+    if sample_role == sample_roles.TRAINER:
+        if rollout_gpus not in (None, 0):
+            return ("a full-parameter trainer that reads samples from the store starts no "
+                    "inference engine: --rollout-num-gpus must be 0 or absent")
+        return None
     if data_parallel != 1:
-        return "dense full-parameter GRPO requires DP=1"
+        return ("dense full-parameter GRPO with engines on the island requires DP=1 "
+                "(read samples from the store, --rl-sample-role trainer, for DP>1)")
     if (
         actor_num_nodes != 1
         or type(rollout_gpus) is not int
@@ -554,8 +570,9 @@ def full_parameter_layout_problem(*, data_parallel: int, actor_num_nodes: int, r
         or rollout_gpus_per_engine < 1
         or rollout_gpus % rollout_gpus_per_engine
     ):
-        return ("Milestone-1 dense full-parameter mode requires one node and "
-                "dedicated, evenly partitioned inference engines")
+        return ("full-parameter mode with engines on the island requires one node and "
+                "dedicated, evenly partitioned inference engines (never colocated); "
+                "read samples from the store (--rl-sample-role trainer) for more nodes")
     return None
 
 
@@ -679,10 +696,14 @@ def resolve_rl_run_config(
     if parameter_mode == "full":
         rollout_gpus = getattr(args, "rollout_num_gpus", None)
         rollout_gpus_per_engine = getattr(args, "rollout_num_gpus_per_engine", None)
+        role = sample_roles.sample_role(args)
         if problem := full_parameter_layout_problem(
                 data_parallel=data_parallel, actor_num_nodes=args.actor_num_nodes,
-                rollout_gpus=rollout_gpus, rollout_gpus_per_engine=rollout_gpus_per_engine):
+                rollout_gpus=rollout_gpus, rollout_gpus_per_engine=rollout_gpus_per_engine,
+                sample_role=role):
             raise ValueError(problem)
+        if role == sample_roles.TRAINER:
+            rollout_gpus = 0  # trainer-only island (Miles --debug-train-only): no engine
         if qwen35_recipe and (
             rollout_gpus_per_engine != 1
             or getattr(args, "sglang_tp_size", None) not in {None, 1}

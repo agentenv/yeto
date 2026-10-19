@@ -101,7 +101,8 @@ def test_steps_order_and_staging(shipped):
 
 def test_gaps_block_run_until_wired(shipped, capsys):
     assert any("N0.2" in g for g in shipped.gaps)
-    assert any("DP=1" in g for g in shipped.gaps)  # Miles full-parameter rule (T-GAPS finding)
+    assert not any("full-parameter" in g for g in shipped.gaps)  # trainer-only island accepted (T-INTEG2)
+    assert len(shipped.gaps) == 2  # only N0.2 (image) and N0.2b (docker device flags) need the machines
     assert stage1.main(["run", str(PLAN), "--confirm-machines-free"]) == 2
     assert "run refused" in capsys.readouterr().err
 

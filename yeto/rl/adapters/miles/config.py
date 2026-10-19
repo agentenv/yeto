@@ -812,6 +812,9 @@ def translate_run_config(
 
     if request.kind == "colocated":
         placement_values = ["--colocate"]
+    elif request.trainer_only:
+        # Samples come from the store: Miles starts no engine and syncs no weights.
+        placement_values = ["--debug-train-only"]
     else:
         placement_values = ["--rollout-num-gpus", str(request.rollout_gpus)]
         if trainable.parameter_mode == "lora":

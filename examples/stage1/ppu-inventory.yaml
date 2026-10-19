@@ -8,6 +8,7 @@ nodes:
     host: ppu1
     address: 10.0.0.74                # eth0; order assumed, runbook S1 checks it
     device_family: ppu
+    cpu_arch: x86_64                  # assumed (PPU base image is x86_64); trainer preflight checks uname -m
     card: M890
     cards_per_node: 8
     hbm_gib: 144
@@ -22,6 +23,7 @@ nodes:
     host: ppu2
     address: 10.0.0.75                # eth0; order assumed, runbook S1 checks it
     device_family: ppu
+    cpu_arch: x86_64                  # assumed (PPU base image is x86_64); trainer preflight checks uname -m
     card: M890
     cards_per_node: 8
     hbm_gib: 144
@@ -36,6 +38,7 @@ nodes:
     host: ppu3
     address: 10.0.0.76                # eth0; order assumed, runbook S1 checks it
     device_family: ppu
+    cpu_arch: x86_64                  # assumed (PPU base image is x86_64); trainer preflight checks uname -m
     card: M890
     cards_per_node: 8
     hbm_gib: 144
@@ -50,6 +53,7 @@ nodes:
     host: ppu4
     address: 10.0.0.77                # eth0; order assumed, runbook S1 checks it
     device_family: ppu
+    cpu_arch: x86_64                  # assumed (PPU base image is x86_64); trainer preflight checks uname -m
     card: M890
     cards_per_node: 8
     hbm_gib: 144

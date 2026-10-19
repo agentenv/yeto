@@ -237,6 +237,18 @@ def test_full_parameter_mode_emits_no_lora_flags():
 
 
 
+def test_trainer_only_full_parameter_island_starts_no_engine():
+    # S25 T-INTEG2: a full-parameter trainer that reads the store (DP>1, no engine).
+    cfg = sub(make_config(), "trainable", parameter_mode="full", target_modules=())
+    cfg = sub(cfg, "parallel", dedicated_rollout_gpus=0, visible_gpus_per_node=2)
+    assert not cfg.parallel.colocated
+    request = mc.placement_request(cfg)
+    assert request.trainer_only
+    argv = mc.translate_run_config(cfg, AlgorithmSpec()).argv
+    assert "--debug-train-only" in argv
+    assert "--colocate" not in argv and "--rollout-num-gpus" not in argv
+
+
 def test_full_parameter_mode_turns_the_distributed_optimizer_off():
     # Miles' set_default_megatron_args forces the distributed optimizer on for
     # Adam, which leaves each FP32 master a flat slice; the full-parameter

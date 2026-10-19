@@ -73,7 +73,7 @@ def test_compat_group_carries_family_and_hbm():
 
 
 def _inventory(**node):
-    base = {"name": "npu1", "host": "u@h", "device_family": "npu", "card": "910B4",
+    base = {"name": "npu1", "host": "u@h", "device_family": "npu", "cpu_arch": "aarch64", "card": "910B4",
             "cards_per_node": 8, "hbm_gib": 64, "host_memory_gib": 1024, "image": "img"}
     return parse_inventory({"nodes": [{**base, **node}]})
 

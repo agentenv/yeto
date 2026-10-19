@@ -138,22 +138,29 @@ def test_island_parser_takes_the_recipe_and_transformer_impl():
 
 
 def test_full_parameter_layout_rule_is_shared():
-    assert full_parameter_layout_problem(data_parallel=2, actor_num_nodes=3, rollout_gpus=0,
-                                         rollout_gpus_per_engine=1) == "dense full-parameter GRPO requires DP=1"
+    # Engines on the island (Milestone 1): one node, DP 1, dedicated engines.
+    assert "requires DP=1" in full_parameter_layout_problem(
+        data_parallel=2, actor_num_nodes=3, rollout_gpus=0, rollout_gpus_per_engine=1)
     assert full_parameter_layout_problem(data_parallel=1, actor_num_nodes=1, rollout_gpus=8,
                                          rollout_gpus_per_engine=8) is None
+    # Samples from the store: any node count and DP, but no engine on the island.
+    assert full_parameter_layout_problem(data_parallel=2, actor_num_nodes=3, rollout_gpus=0,
+                                         rollout_gpus_per_engine=1, sample_role="trainer") is None
+    assert "must be 0" in full_parameter_layout_problem(
+        data_parallel=2, actor_num_nodes=3, rollout_gpus=8, rollout_gpus_per_engine=8,
+        sample_role="trainer")
 
 
 # ------------------------------------------------------------ gap 5: SSH trainer island
 def _node(name="ppu1", **kw) -> Node:
-    base = dict(host=name, device_family="ppu", card="M890", cards_per_node=8, hbm_gib=144.0,
+    base = dict(host=name, device_family="ppu", cpu_arch="x86_64", card="M890", cards_per_node=8, hbm_gib=144.0,
                 host_memory_gib=2266.0, fabric="roce", interface="eth0", runtime="docker",
                 image="img:1", mounts={"/data": "/data"}, docker_args=("--device", "/dev/x"))
     return Node(name=name, **(base | kw))
 
 
 def test_inventory_reads_address_and_docker_args():
-    raw = {"name": "n", "host": "ppu1", "device_family": "ppu", "card": "M890", "cards_per_node": 8,
+    raw = {"name": "n", "host": "ppu1", "device_family": "ppu", "cpu_arch": "x86_64", "card": "M890", "cards_per_node": 8,
            "hbm_gib": 144, "host_memory_gib": 2266, "image": "i", "address": "10.0.0.74",
            "docker_args": ["--device", "/dev/a"]}
     node = parse_inventory({"nodes": [raw]})[0]

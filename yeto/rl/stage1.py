@@ -806,12 +806,12 @@ def _full_parameter_layout_gap(plan: Stage1Plan, out: Expanded) -> str | None:
         data_parallel=out.trainer["miles"]["layout"]["dp"],
         actor_num_nodes=int(argv[argv.index("--actor-num-nodes") + 1]),
         rollout_gpus=int(argv[argv.index("--rollout-num-gpus") + 1]),
-        rollout_gpus_per_engine=1)  # the island's default; it gives no engine
+        rollout_gpus_per_engine=1,  # the island's default; it gives no engine
+        sample_role=argv[argv.index("--rl-sample-role") + 1])
     if problem is None:
         return None
-    return (f"Miles island: the full-parameter mode refuses this layout ({problem}; run_config Milestone 1): "
-            f"{len(plan.nodes_of('trainer'))} trainer nodes, DP {out.trainer['miles']['layout']['dp']}, "
-            "samples from the store instead of colocated engines")
+    return (f"Miles island: the full-parameter mode refuses this layout ({problem}): "
+            f"{len(plan.nodes_of('trainer'))} trainer nodes, DP {out.trainer['miles']['layout']['dp']}")
 
 
 # --------------------------------------------------------------------- CLI
