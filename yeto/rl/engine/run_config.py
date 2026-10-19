@@ -244,15 +244,17 @@ class BatchConfig:
 
 @dataclass(frozen=True)
 class TrainMemoryConfig:
-    """Trainer activation-memory knobs (--rl-activation-recompute,
-    --rl-max-tokens-per-gpu). Defaults keep the historical argv: no
-    recompute, fixed micro batches."""
+    """Trainer memory knobs (--rl-activation-recompute, --rl-max-tokens-per-gpu,
+    --rl-optimizer-offload-fraction). Defaults keep the historical argv: no
+    recompute, fixed micro batches, optimizer state on the device."""
 
     # Recompute every layer's activations in backward (keep only layer inputs).
     activation_recompute: bool = False
     # Token budget of one packed micro batch per GPU (dynamic batching);
     # None = fixed micro batches of --micro-batch-size samples.
     max_tokens_per_gpu: int | None = None
+    # Share of the optimizer state kept and updated on the host (0 = none).
+    optimizer_offload_fraction: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -1078,9 +1080,13 @@ def _train_memory(args) -> TrainMemoryConfig:
         raise ValueError(
             f"--rl-max-tokens-per-gpu {max_tokens} is below --seq-len {args.seq_len}"
         )
+    offload = float(getattr(args, "rl_optimizer_offload_fraction", 0.0) or 0.0)
+    if not 0.0 <= offload <= 1.0:
+        raise ValueError(f"--rl-optimizer-offload-fraction {offload} is not in [0, 1]")
     return TrainMemoryConfig(
         activation_recompute=bool(getattr(args, "rl_activation_recompute", False)),
         max_tokens_per_gpu=int(max_tokens) if max_tokens is not None else None,
+        optimizer_offload_fraction=offload,
     )
 
 

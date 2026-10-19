@@ -176,6 +176,14 @@ _ROLLOUT_ENGINE = (
         "micro batches",
     ),
     shared_flag(
+        "--rl-optimizer-offload-fraction",
+        type=float,
+        default=0.0,
+        help="ports: share (0, 1] of the Adam state (FP32 masters and moments) "
+        "that Megatron keeps and updates on the host (--optimizer-cpu-offload, "
+        "with the distributed optimizer). Default 0: all on the device",
+    ),
+    shared_flag(
         "--rl-distributed-timeout-minutes",
         type=int,
         default=10,

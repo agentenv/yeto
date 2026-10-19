@@ -150,7 +150,8 @@ def build_ports_launch(args, run_config, extra_argv=()):
         ),
     )
     return translate_run_config(run_config, base_algorithm, extra_argv=tuple(extra_argv),
-                                max_policy_age=int(getattr(args, "rl_max_policy_age", 0) or 0))
+                                max_policy_age=int(getattr(args, "rl_max_policy_age", 0) or 0),
+                                full_parameter_sync=not _buffer_island(args))
 
 
 _ELASTIC_COMPANIONS = rl_option_pairs(

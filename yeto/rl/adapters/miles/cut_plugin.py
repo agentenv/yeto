@@ -26,7 +26,7 @@ ep, etp_size, edp, edp_size) must match on restore, and a range-tagged
 (DistributedOptimizer) shard is written back only onto identical per-parameter
 ranges of the rebuilt optimizer -- no peer shard is read (TP/PP>1 and EP>1
 included). Refused like fork-M5: fp16 (loss-scaler state not saved),
-precision-aware optimizer, partial DistOpt instances, CP>1, and a trainer
+precision-aware optimizer (except as the FP32 CPU-offload path), partial DistOpt instances, CP>1, and a trainer
 whose trainable parameters mix LoRA adapters with others; the DP-resharding
 restore also refuses EP>1 and TP/PP>1 with DistOpt. A full-parameter shard
 holds the whole model copy on every DP rank plus this rank's optimizer range
@@ -232,7 +232,7 @@ def config_problems(args: Any, coord: Mapping[str, int] | None = None, *, reshar
     if getattr(args, "fp16", False):
         out.append("--fp16 keeps a dynamic loss-scaler state that the cut does not carry")
     if getattr(args, "use_precision_aware_optimizer", False):
-        out.append("--use-precision-aware-optimizer stores scaled/low-precision state (not supported)")
+        out += _precision_aware_problems(args)
     if int(getattr(args, "num_distributed_optimizer_instances", 1) or 1) > 1:
         out.append("--num-distributed-optimizer-instances > 1 (partial DP optimizer groups)")
     cp = int((coord or {}).get("cp_size") or getattr(args, "context_parallel_size", 1) or 1)
@@ -247,6 +247,26 @@ def config_problems(args: Any, coord: Mapping[str, int] | None = None, *, reshar
     if reshard and ep > 1:
         out.append("DP resharding with EP>1 is not supported (same-shape cuts are)")
     return out
+
+
+_FP32_NAMES = ("fp32", "float32", "torch.float32")
+
+
+def _precision_aware_problems(args: Any) -> list[str]:
+    """The precision-aware optimizer is carried only as Megatron's CPU-offload path with FP32 state.
+
+    ``--optimizer-cpu-offload`` requires ``--use-precision-aware-optimizer``;
+    its HybridDeviceOptimizer keeps standalone FP32 masters and moments, which
+    the fork's name-keyed export reads unscaled (Miles ``dp_invariant_state``,
+    s25-distopt). On the device the precision-aware path keeps scaled or
+    low-precision state, which a cut does not represent.
+    """
+    if not getattr(args, "optimizer_cpu_offload", False):
+        return ["--use-precision-aware-optimizer without --optimizer-cpu-offload stores scaled/low-precision "
+                "state (not supported)"]
+    low = [name for name in ("main_params_dtype", "exp_avg_dtype", "exp_avg_sq_dtype")
+           if str(getattr(args, name, "fp32")) not in _FP32_NAMES]
+    return [f"--optimizer-cpu-offload with non-FP32 {low} (not supported)"] if low else []
 
 
 def _require(actor: Any, backend: Any, *, reshard: bool = False) -> dict[str, int]:

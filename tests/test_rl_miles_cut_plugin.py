@@ -147,6 +147,15 @@ def test_unsupported_configurations(args, match):
     assert any(match in p for p in config_problems(args))
 
 
+def test_the_fp32_cpu_offload_path_of_the_precision_aware_optimizer_is_carried():
+    # N7.1d: Megatron's --optimizer-cpu-offload requires --use-precision-aware-optimizer.
+    offload = dict(use_precision_aware_optimizer=True, optimizer_cpu_offload=True, use_distributed_optimizer=True)
+    assert not config_problems(SimpleNamespace(**offload))
+    assert not config_problems(SimpleNamespace(**offload, main_params_dtype="torch.float32"))
+    low = config_problems(SimpleNamespace(**offload, exp_avg_dtype="torch.bfloat16"))
+    assert any("exp_avg_dtype" in p for p in low)
+
+
 def test_ep_is_carried_by_same_shape_cuts_but_not_by_resharding():
     args = SimpleNamespace(expert_model_parallel_size=2, use_distributed_optimizer=True)
     assert not config_problems(args)

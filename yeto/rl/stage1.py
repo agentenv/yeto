@@ -200,16 +200,32 @@ def megatron_layout(miles: Mapping[str, Any], trainer_cards: int, cards_per_node
             "expert_dp": dp * tp * cp // (ep * etp)}
 
 
+def island_optimizer(argv: Sequence[str]) -> dict[str, Any]:
+    """The optimizer the Miles island runs for this argv (``adapters.miles.config``):
+    a no-sync trainer island in full-parameter mode keeps Miles' distributed
+    optimizer (only the full-parameter sync needs whole FP32 masters, N7.1d);
+    ``--rl-optimizer-offload-fraction`` sets the host share of the Adam state."""
+    def value(flag: str, default: str) -> str:
+        return argv[argv.index(flag) + 1] if flag in argv else default
+
+    no_sync_island = "--rl-single-island-no-sync" in argv and value("--rl-sample-role", "both") != "both"
+    whole_masters = value("--parameter-mode", "lora") == "full" and not no_sync_island
+    return {"distributed_optimizer": not whole_masters,
+            "optimizer_offload_fraction": float(value("--rl-optimizer-offload-fraction", "0"))}
+
+
 def megatron_memory(model: Mapping[str, Any], miles: Mapping[str, Any], layout: Mapping[str, int],
                     trainers: Sequence[Node], sampling: Mapping[str, Any],
-                    hf_config: str | Path | None = None) -> dict[str, Any]:
+                    hf_config: str | Path | None = None, *,
+                    island: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Memory of the Miles layout from the estimator (``yeto.rl.fullparam.memory``,
     framework megatron, N7.1c), all figures "推算".
 
     ``plan``: the layout as the plan writes it (distributed optimizer, the
     plan's optimizer offload fraction, FP32 master offloaded with the Adam
-    state). ``island``: what the Miles island runs today in full-parameter mode
-    (distributed optimizer off, no optimizer offload; ``island_optimizer_gap``).
+    state). ``island``: the optimizer the Miles island argv runs
+    (:func:`island_optimizer`; default: the plan's); ``island_optimizer_gap``
+    blocks the run when it does not fit.
     Without ``hf_config`` the shape takes hidden size and vocabulary from the
     glm5_next recipe and one residual stream; the static items (weights, grads,
     optimizer) do not depend on them, the activation items do."""
@@ -235,8 +251,7 @@ def megatron_memory(model: Mapping[str, Any], miles: Mapping[str, Any], layout: 
                      optimizer_offload_fraction=float(miles.get("optimizer_offload_fraction") or 0.0))
     out = {}
     for key, plan in (("plan", base),
-                      ("island", dataclasses.replace(base, distributed_optimizer=False,
-                                                     optimizer_offload_fraction=0.0))):
+                      ("island", dataclasses.replace(base, **(island or {})))):
         est = estimate(shape, plan)
         static = sum(est.items[k].bytes for k in ("params_local_bf16", "main_grads_local")) / 2**30
         out[key] = {**est.summary(), "weights_grads_gib_per_card": round(static, 1),
@@ -268,8 +283,10 @@ def megatron_args(model: Mapping[str, Any], miles: Mapping[str, Any], layout: Ma
              "--rollout-max-response-len", str(int(sampling["max_tokens"]))]
     fraction = float(miles.get("optimizer_offload_fraction") or 0.0)
     if fraction > 0:
-        args += ["--optimizer-cpu-offload", "--optimizer-offload-fraction", repr(fraction),
-                 "--overlap-cpu-optimizer-d2h-h2d"]
+        from yeto.rl.adapters.miles.config import OPTIMIZER_OFFLOAD_ARGV  # noqa: PLC0415
+
+        args += [a for a in OPTIMIZER_OFFLOAD_ARGV if a not in args]
+        args += ["--optimizer-offload-fraction", repr(fraction)]
     return args
 
 
@@ -403,6 +420,7 @@ def expand(plan: Stage1Plan, *, hf_config: str | Path | None = None) -> Expanded
     model_dir = str(model["bf16_source"]["local_dir"])
     state_dir = state_dir_of(plan)
     impl = str(miles["transformer_impl"])
+    offload = float(miles.get("optimizer_offload_fraction") or 0.0)
     island_argv = ["python3", "-m", "yeto.rl.adapters.miles.island_entry",
                    "--model", model_dir, "--model-revision", str(model["bf16_source"]["revision"]),
                    "--data", str(task["data"]), "--data-revision", str(task["data_revision"]),
@@ -426,6 +444,7 @@ def expand(plan: Stage1Plan, *, hf_config: str | Path | None = None) -> Expanded
                    "--actor-num-nodes", str(len(trainers)), "--actor-num-gpus-per-node", str(per_node),
                    "--rollout-num-gpus", "0",
                    "--rl-activation-recompute", "--rl-max-tokens-per-gpu", str(int(miles["max_tokens_per_gpu"])),
+                   *(("--rl-optimizer-offload-fraction", repr(offload)) if offload > 0 else ()),
                    "--completed-groups-path", f"{state_dir}/island-checkpoint.pt",
                    "--event-tape", f"{state_dir}/events.jsonl", "--audit-dir", f"{state_dir}/audit",
                    *_provenance_args(str(task["reward"]))]
@@ -437,7 +456,8 @@ def expand(plan: Stage1Plan, *, hf_config: str | Path | None = None) -> Expanded
         "backend": backend, "nodes": [n.name for n in trainers], "cards": cards,
         "image": images.get("trainer"), "env": trainer_env,
         "miles": {"commit": miles["commit"], "megatron": miles["megatron"], "mbridge": miles["mbridge"],
-                  "layout": layout, "memory_estimate": megatron_memory(model, miles, layout, trainers, sampling, hf_config),
+                  "layout": layout, "memory_estimate": megatron_memory(model, miles, layout, trainers, sampling, hf_config,
+                                                     island=island_optimizer(island_argv)),
                   "model_args": model_args,
                   "megatron_args": megatron_args(model, miles, layout, sampling),
                   "drop_model_args": list(glm5_next.TE_ONLY_ARGV) if impl == glm5_next.LOCAL else [],
@@ -752,6 +772,12 @@ def check(plan: Stage1Plan, out: Expanded) -> list[str]:
     if verl_max != [f"data.max_response_length={int(sampling['max_tokens'])}"]:
         errors.append("verl data.max_response_length differs from sampling.max_tokens")
 
+    # N7.1d: the island runs the plan's optimizer (megatron_args are the reference).
+    runs = island_optimizer(island)
+    planned = {"distributed_optimizer": "--use-distributed-optimizer" in margs,
+               "optimizer_offload_fraction": float(miles.get("optimizer_offload_fraction") or 0.0)}
+    if runs != planned:
+        errors.append(f"Miles island optimizer {runs} differs from the plan's megatron_args {planned}")
     # Memory (N7.1c): the estimator decides; the plan's own figures must agree with it.
     mem = out.trainer["miles"]["memory_estimate"]["plan"]
     errors += [f"Miles memory estimate (推算): {p}" for p in mem["problems"]]
@@ -842,17 +868,16 @@ def _full_parameter_layout_gap(plan: Stage1Plan, out: Expanded) -> str | None:
 
 
 def _island_optimizer_gap(out: Expanded) -> str | None:
-    """The Miles island in full-parameter mode turns the distributed optimizer off
-    (``adapters.miles.config._full_parameter_optimizer_attrs``: whole FP32
-    masters for the shard manifest) and has no optimizer-offload flag, so the
-    plan's ``megatron_args`` offload is not what the island runs."""
+    """The optimizer the Miles island argv runs (:func:`island_optimizer`) must fit:
+    the plan's ``megatron_args`` are the reference, the island translates its own
+    flags (``--rl-optimizer-offload-fraction``; the distributed optimizer stays
+    on for a no-sync trainer island)."""
     island = out.trainer["miles"]["memory_estimate"]["island"]
     if island["fits"]:
         return None
-    return ("Miles island runs full-parameter Megatron without the distributed optimizer and without "
-            "optimizer CPU offload (no island flag; the plan's megatron_args are not passed): estimator "
-            f"(推算) {island['device_gib_per_card']} GiB/card > {island['device_usable_gib']} GiB usable "
-            "(N7.1d)")
+    runs = island_optimizer(out.trainer["miles"]["island_argv"])
+    return (f"Miles island optimizer {runs} does not fit: estimator (推算) {island['device_gib_per_card']} "
+            f"GiB/card > {island['device_usable_gib']} GiB usable (N7.1d)")
 
 
 # --------------------------------------------------------------------- CLI

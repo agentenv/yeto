@@ -3,7 +3,8 @@
 CPU protocol test, NOT GPU evidence. Every rank is simulated in one process
 with duck-typed Megatron DistOpt leaves (``gbuf_ranges``, main-param shards,
 Adam moments) and the REAL fork-M5 helpers (``dp_invariant_state`` at the
-Miles image pin, read from a local Miles checkout; skipped when absent).
+Miles image pin and at the stage-1 branch s25-distopt, read from a local Miles
+checkout; skipped when absent).
 save -> fresh rebuild -> restore -> re-export must be element-wise equal, and
 the full FP32 masters gathered for the republish (state_plugin.full_masters)
 must equal the pre-cut ones. A different DP/EP layout is refused.
@@ -11,6 +12,7 @@ must equal the pre-cut ones. A different DP/EP layout is refused.
 
 from __future__ import annotations
 
+import dataclasses
 import importlib.util
 import os
 import subprocess
@@ -23,26 +25,42 @@ import torch
 from yeto.rl.adapters.miles import cut_plugin as cp
 from yeto.rl.adapters.miles import state_plugin as sp
 
-MILES_CHECKOUT = os.environ.get("YETO_MILES_CHECKOUT", "/home/michael/work/miles-m3")
-MILES_PIN = "c35702e"
 DPS_PATH = "miles/backends/megatron_utils/lora/dp_invariant_state.py"
+# The fork-M5 helpers at the Miles image pin, and at the stage-1 fork branch that
+# carries the CPU-offload (HybridDeviceOptimizer) state (S25 N7.1d, not pushed).
+DPS_SOURCES = {
+    "m5-c35702e": (os.environ.get("YETO_MILES_CHECKOUT", "/home/michael/work/miles-m3"), "c35702e"),
+    "s25-distopt": (os.environ.get("YETO_MILES_DISTOPT_CHECKOUT", "/home/michael/work/miles-next"), "s25-distopt"),
+}
 
 
-def _load_dps():
+def _load_dps(checkout, ref):
     try:
-        src = subprocess.run(["git", "-C", MILES_CHECKOUT, "show", f"{MILES_PIN}:{DPS_PATH}"],
+        src = subprocess.run(["git", "-C", checkout, "show", f"{ref}:{DPS_PATH}"],
                              capture_output=True, check=True, text=True).stdout
     except (OSError, subprocess.CalledProcessError):
         return None
-    spec = importlib.util.spec_from_loader("_yeto_test_dps", loader=None)
+    spec = importlib.util.spec_from_loader(f"_yeto_test_dps_{ref.replace('-', '_')}", loader=None)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     exec(compile(src, DPS_PATH, "exec"), module.__dict__)  # noqa: S102 - pinned local source
     return module
 
 
-DPS = _load_dps()
-needs_dps = pytest.mark.skipif(DPS is None, reason="Miles checkout with the fork-M5 helpers not available")
+_LOADED = {label: _load_dps(*source) for label, source in DPS_SOURCES.items()}
+DPS = None  # set per test by the ``dps`` fixture
+
+
+@pytest.fixture(params=sorted(DPS_SOURCES))
+def dps(request, monkeypatch):
+    module = _LOADED[request.param]
+    if module is None:
+        pytest.skip(f"Miles checkout with the fork-M5 helpers at {DPS_SOURCES[request.param]} not available")
+    monkeypatch.setattr(sys.modules[__name__], "DPS", module)
+    return module
+
+
+needs_dps = pytest.mark.usefixtures("dps")
 
 
 class _Range:
@@ -253,6 +271,38 @@ def test_save_restore_reexport_is_elementwise_equal(tmp_path, layout):
     for got, want in zip(_gathered_masters(fresh), masters, strict=True):
         for a, b in zip(got, want, strict=True):
             assert torch.equal(a, b)
+
+
+@needs_dps
+@pytest.mark.parametrize("layout", ["pp2dp2", "ep2"])
+def test_resume_manifest_samples_each_rank_own_ranges_and_survives_the_cut(tmp_path, layout):
+    # N7.6 under the sharded optimizer (N7.1d): every rank records the moments of the
+    # parameters it owns a range of, and the restored rank reproduces them exactly.
+    from yeto.rl.engine.resume_manifest import OptimizerResumeState, restore_problems, ResumeManifest
+
+    ranks = _world(layout)
+    _train(ranks)
+    files = _save(ranks, tmp_path)
+    saved = {f["path"]: OptimizerResumeState.from_dict(f["resume"]) for f in files}
+    for rank, f in zip(ranks, files, strict=True):
+        owned = set(_export(rank)["entries"])
+        assert saved[f["path"]].moments and set(saved[f["path"]].moments) <= owned
+    fresh = _world(layout)
+    restored = {}
+    for rank in fresh:
+        out = cp.restore_cut_shard(rank, directory=str(tmp_path), files=files, cut_id="c1")
+        assert "refused" not in out, out
+        restored[out["path"]] = OptimizerResumeState.from_dict(out["resume"])
+
+    def manifest(states):
+        return ResumeManifest(global_step=1, data_watermark=8, scheduler_increment=8, ranks=states)
+
+    assert restore_problems(manifest(saved), manifest(restored)) == []
+    # a rank that records another rank's moments (here: none of its own) is caught
+    first, last = sorted(saved)[0], sorted(saved)[-1]
+    swapped = {**restored, first: dataclasses.replace(restored[first], moments=restored[last].moments)}
+    assert saved[first].moments != saved[last].moments
+    assert any(first in p for p in restore_problems(manifest(saved), manifest(swapped)))
 
 
 @needs_dps

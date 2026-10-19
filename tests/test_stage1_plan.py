@@ -78,6 +78,10 @@ def test_trainer_is_bf16_with_host_optimizer(shipped):
     margs = " ".join(shipped.trainer["miles"]["megatron_args"])
     assert "--bf16" in margs and "fp8" not in margs
     assert "--optimizer-cpu-offload" in margs
+    assert "--use-precision-aware-optimizer" in margs  # Megatron asserts it with CPU offload
+    island = shipped.trainer["miles"]["island_argv"]
+    assert island[island.index("--rl-optimizer-offload-fraction") + 1] == "1.0"
+    assert stage1.island_optimizer(island) == {"distributed_optimizer": True, "optimizer_offload_fraction": 1.0}
     assert "--decoder-first-pipeline-num-layers 15 --decoder-last-pipeline-num-layers 15" in margs
     assert shipped.trainer["miles"]["drop_model_args"] == []  # TE stays the default (ruling 10-19 (3))
 
@@ -102,9 +106,9 @@ def test_steps_order_and_staging(shipped):
 def test_gaps_block_run_until_wired(shipped, capsys):
     assert any("N0.2" in g for g in shipped.gaps)
     assert not any("refuses this layout" in g for g in shipped.gaps)  # trainer-only island accepted (T-INTEG2)
-    # Left: N0.2 (image), N0.2b (docker device flags), and N7.1d: the island runs
-    # full-parameter Megatron without the distributed optimizer or optimizer offload.
-    assert len(shipped.gaps) == 3 and "N7.1d" in shipped.gaps[2]
+    # Left: N0.2 (image) and N0.2b (docker device flags); N7.1d closed (T-N71D:
+    # the island keeps the distributed optimizer and offloads Adam to the host).
+    assert len(shipped.gaps) == 2 and not any("N7.1d" in g for g in shipped.gaps)
     assert stage1.main(["run", str(PLAN), "--confirm-machines-free"]) == 2
     assert "run refused" in capsys.readouterr().err
 
@@ -221,7 +225,24 @@ def test_memory_figures_of_the_plan_match_the_estimator(shipped):
     assert mem["plan"]["basis"] == "推算" and mem["plan"]["fits"]
     assert mem["plan"]["weights_grads_gib_per_card"] == pytest.approx(78.7, abs=0.1)
     assert mem["plan"]["host_optimizer_gib_per_node"] == pytest.approx(1196, rel=0.02)
-    assert not mem["island"]["fits"]  # no distributed optimizer, no offload (gap N7.1d)
+    assert mem["island"] == mem["plan"]  # N7.1d: the island runs the plan's optimizer
+
+
+def test_an_island_without_optimizer_offload_is_a_gap(tmp_path):
+    def edit(doc):
+        doc["trainer"]["miles"]["optimizer_offload_fraction"] = 0.0
+        doc["trainer"]["miles"].pop("memory_estimate", None)
+    out = _variant(tmp_path, edit)
+    assert "--rl-optimizer-offload-fraction" not in out.trainer["miles"]["island_argv"]
+    assert any("N7.1d" in g and "does not fit" in g for g in out.gaps)
+
+
+def test_island_optimizer_follows_the_island_translation():
+    full = ["--parameter-mode", "full"]
+    assert stage1.island_optimizer(full) == {"distributed_optimizer": False, "optimizer_offload_fraction": 0.0}
+    no_sync = [*full, "--rl-single-island-no-sync", "--rl-sample-role", "trainer"]
+    assert stage1.island_optimizer(no_sync)["distributed_optimizer"]
+    assert stage1.island_optimizer(["--rl-single-island-no-sync"])["distributed_optimizer"]  # LoRA
 
 
 def test_memory_figure_that_disagrees_is_an_error(tmp_path):
