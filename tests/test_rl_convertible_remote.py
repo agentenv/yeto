@@ -649,3 +649,249 @@ def test_store_writes_are_retried_on_os_errors():
     assert files.read("a") == b"x"
     with pytest.raises(PermissionError):
         write_retrying(Flaky(9), "a", b"x", wait=lambda s: None)
+
+
+# ---------------------------------------------------------------- follow + backlog cap
+def test_pool_backlog_gate_holds_at_the_cap_and_ignores_a_missing_or_stale_count():
+    from yeto.rl.engine.convertible_remote import PoolBacklogGate, write_pool_backlog
+
+    files, clock = MemFiles(), Clock()
+    gate = PoolBacklogGate(files, 8, stale_s=60.0, clock=clock)
+    assert gate() and gate.last is None  # the head has not counted yet
+    write_pool_backlog(files, groups=7, version=2, at=clock.t)
+    assert gate() and gate.last == {"groups": 7, "version": 2, "at": clock.t}
+    write_pool_backlog(files, groups=8, version=2, at=clock.t)
+    assert not gate()
+    clock.t += 61.0  # the head stopped writing: do not stall the node
+    assert gate()
+    with pytest.raises(ValueError):
+        PoolBacklogGate(files, 0)
+
+
+def test_node_follows_releases_and_waits_while_the_pool_backlog_is_full():
+    files, clock = MemFiles(), Clock()
+    admit = iter([True, False, False, True, True])
+    follows = iter([None, 3, None, None, None])
+    calls = []
+    node = ConvertibleNode(NodeSpec("n0", NodeClass.CONVERTIBLE), HandoffPort([]))
+
+    def generate():
+        calls.append("round")
+        return RolloutRound(4, 2.0)
+
+    def follow():
+        calls.append("follow")
+        return next(follows)
+
+    def wait(seconds):
+        clock.t += 1.0
+
+    agent = ConvertibleNodeAgent(
+        name="n0", files=files, node=node, generate=generate, run_stint=FakeStint(files),
+        published_checksum=lambda: None, follow=follow, admit=lambda: next(admit),
+        max_rounds=3, poll_s=0.001, status_s=3600, idle_exit_s=0.0, clock=clock, wait=wait)
+    agent.run()
+    # follow runs before every admission check; a held round is not generated
+    assert calls == ["follow", "round", "follow", "follow", "follow", "round", "follow", "round"]
+    assert agent.rounds == 3 and agent.served_version == 3
+    events = [e["event"] for e in _events(files, "n0")]
+    assert events.count("node_backlog_full") == 1  # once per wait, not per poll
+    admitted = [e for e in _events(files, "n0") if e["event"] == "node_backlog_admitted"]
+    assert len(admitted) == 1 and admitted[0]["waited_s"] == 2.0
+
+
+def test_after_stint_runs_once_the_node_is_back_to_rollout():
+    files, log = MemFiles(), []
+    order = []
+    node = ConvertibleNode(NodeSpec("n0", NodeClass.CONVERTIBLE), HandoffPort(log))
+    agent = ConvertibleNodeAgent(
+        name="n0", files=files, node=node, generate=lambda: RolloutRound(4, 2.0),
+        run_stint=FakeStint(files), published_checksum=lambda: None,
+        after_stint=lambda: order.append(("after_stint", list(log))), max_rounds=0,
+        poll_s=0.001, status_s=0.05, idle_exit_s=3600)
+    thread = threading.Thread(target=agent.run, daemon=True)
+    thread.start()
+    NodeCommandWriter(files, "n0").send(TO_TRAINER, incarnation=0)
+    append_trainer_command(files, 0, RUN, rounds=1)
+    _until(lambda: _phase(files, "n0", TRAINED))
+    append_trainer_command(files, 0, STOP, reason="STOPPED")
+    _until(lambda: agent.role == ROLLOUT and agent.stints == 1)
+    NodeCommandWriter(files, "n0").send(END)
+    thread.join(5)
+    # once the engines serve the trained version, before the next rollout round
+    assert order == [("after_stint", ["stop_requests", "release_rollout", "onload_trainer",
+                                      "offload_trainer", ("resume_rollout", 1),
+                                      "accept_requests"])]
+
+
+def test_merged_backlog_writes_the_trainable_count_for_the_nodes(tmp_path):
+    from yeto.launch.convertible_pool import MergedBacklog
+    from yeto.rl.engine.convertible_remote import POOL_BACKLOG_PATH
+
+    class Inner:
+        buffer = type("B", (), {"batch_size": 4})()
+
+        def backlog(self, current_version):
+            return BacklogStats(batches=3.0, samples=12, oldest_version=0,
+                                version_histogram={0: 4, 2: 8})
+
+    files = MemFiles()
+    merged = MergedBacklog(files, ("n0",), Inner(), max_policy_age=1, clock=lambda: 50.0)
+    stats = merged.backlog(3)
+    assert stats.samples == 8 and stats.batches == 2.0  # the v0 groups are too old to train
+    assert json.loads(files.read(POOL_BACKLOG_PATH)) == {"groups": 8, "version": 3, "at": 50.0}
+
+
+def test_miles_convertible_node_follows_another_nodes_release_but_not_its_own(tmp_path, monkeypatch):
+    """A node in rollout loads the newest release (another node's trainer released
+    it); after its own stint it serves its own release and does not load it again."""
+    import types
+
+    from yeto.rl.adapters.miles import buffer_rollout as br
+    from yeto.rl.adapters.miles import convertible as mconv
+    from yeto.rl.adapters.miles import publish, rollout
+    from yeto.rl.adapters.miles import sampler_island as si
+    from yeto.rl.engine import trainer_remote
+    from yeto.rl.engine.convertible_remote import write_pool_backlog
+    from yeto.rl.engine.policy_release import LORA, PolicyReleaseStore
+    from yeto.rl.engine.sample_roles import SampleBufferConfig
+
+    store = tmp_path / "store"
+    releases = PolicyReleaseStore(CheckpointStore(str(store)))
+
+    def adapter(directory):
+        (directory / "adapter_model.safetensors").write_text("a")
+
+    releases.release(1, "h1", adapter, weights=LORA, engine_checksum="sha-1")  # node n1 trained v1
+    loads, built = [], []
+
+    class Loader:
+        def __init__(self, controller, executor, run, *, lora=False, adapter_loaded=False):
+            built.append((lora, adapter_loaded))
+            self.last_checksum, self.last_probe = None, None
+
+        def __call__(self, release, directory):
+            loads.append(release.version)
+            self.last_checksum = release.engine_checksum
+
+    class Controller:
+        async def prepare_rollout(self, rid):
+            pass
+
+        async def abort_all(self):
+            pass
+
+        async def onload_kv(self):
+            pass
+
+        async def offload(self, tags=None):
+            pass
+
+    class Executor:
+        async def get(self, rid):
+            return "pack"
+
+    class Actor:
+        async def run_plugin(self, name, kw):
+            pass
+
+        async def onload(self):
+            pass
+
+    class Runner:
+        def run(self, coro):
+            import asyncio
+
+            return asyncio.run(coro)
+
+    class Pool:
+        def __init__(self, **kw):
+            pass
+
+        def load_sample(self):
+            return None
+
+        def set_admission(self, open_):
+            pass
+
+        def _in_executor(self, fn, *a):
+            return fn(None, *a)
+
+    class Sink:
+        def discard(self):
+            return 0
+
+    class Publisher:
+        published_checksum = "sha-2"
+
+        def load_version(self, v):
+            pass
+
+        def served_checksum(self):
+            return "sha-2"
+
+    driver = types.SimpleNamespace(publisher=Publisher(), sync=types.SimpleNamespace(
+        round_cuts=types.SimpleNamespace(controller=types.SimpleNamespace(store=object()),
+                                         buffer_watermark=lambda v: 0)))
+
+    class Agent:
+        def __init__(self, drv, *, commands, incarnation, resume_from, emit, **kw):
+            self.handle = None
+            self.emit, self.incarnation = emit, incarnation
+
+        def run(self):
+            # this node's trainer publishes v2 and releases it (ReleasingPublisher)
+            releases.release(2, "h2", adapter, weights=LORA, engine_checksum="sha-2")
+            h = TrainerHandle(StartPlan(self.incarnation), resume_from=None, clock=lambda: 0.0)
+            h.start_version, h.published_version = 1, 2
+            self.emit(EVENT, **lifecycle_event(h, READY, seq=0))
+            return h
+
+    async def update_weights(*a):
+        pass
+
+    monkeypatch.setattr(rollout, "MilesRolloutPool", Pool)
+    monkeypatch.setattr(rollout, "RayMetadataSink", Sink)
+    monkeypatch.setattr(rollout, "_release", lambda pack: None)
+    monkeypatch.setattr(publish, "_default_update_weights", lambda: update_weights)
+    monkeypatch.setattr(trainer_remote, "IslandTrainerAgent", Agent)
+    monkeypatch.setattr(si, "EngineReleaseLoader", Loader)
+    monkeypatch.setattr(mconv, "_kv_tags", lambda: ["kv_cache", "cuda_graph"])
+    monkeypatch.setenv(br.SHARD_ENV, "island0")
+    monkeypatch.setenv(trainer_remote.POLL_ENV, "0.01")
+    files = LocalStoreFiles(CheckpointStore(str(store)))
+    write_pool_backlog(files, groups=0, version=1, at=__import__("time").time())
+    tape = tmp_path / "tape.jsonl"
+    miles_args = types.SimpleNamespace(
+        yeto_rl_sample_buffer=SampleBufferConfig(role="convertible", store=str(store),
+                                                 max_backlog_groups=16),
+        num_rollout=2, rollout_batch_size=4, offload_rollout=True, offload_train=True,
+        lora_rank=16, yeto_rl_event_tape=str(tape), yeto_rl_learner_id=0)
+    NodeCommandWriter(files, "island0")
+
+    def status():
+        raw = files.read(node_path("island0", "status.json"))
+        return json.loads(raw) if raw else {}
+
+    def drive():
+        _until(lambda: status().get("rounds", 0) >= 1)
+        NodeCommandWriter(files, "island0").send(TO_TRAINER, incarnation=0)
+        _until(lambda: any(e.get("direction") == "to_rollout" for e in _events(files, "island0")))
+        _until(lambda: status().get("generation_done"))
+        NodeCommandWriter(files, "island0").send(END)
+
+    t = threading.Thread(target=drive, daemon=True)
+    t.start()
+    assert mconv.run_convertible_node(miles_args, build_driver=lambda: driver,
+                                      controller=Controller(), executor=Executor(),
+                                      actor=Actor(), runner=Runner()) == 1
+    t.join(5)
+    assert built == [(True, True)]  # LoRA, and the engines already hold the boot adapter
+    assert loads == [1]  # n1's release once; its own v2 release is not loaded again
+    assert status()["served_version"] == 2
+    tape_events = [json.loads(line) for line in tape.read_text().splitlines()]
+    loaded = [e for e in tape_events if e["event"] == "rl_convertible_policy_loaded"]
+    assert len(loaded) == 1 and loaded[0]["policy_version"] == 1
+    assert loaded[0]["served_checksum"] == "sha-1" == loaded[0]["engine_checksum"]
+    start = [e for e in tape_events if e["event"] == "rl_convertible_node_start"][0]
+    assert start["max_backlog_groups"] == 16

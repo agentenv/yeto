@@ -243,11 +243,18 @@ def run_convertible_node(miles_args: Any, *, build_driver: Callable[[], Any], co
                          environ: Any = None) -> Any:
     """Island entry of a convertible pool node: boot the engines with the base
     weights (policy version 0), then run :class:`~yeto.rl.engine.convertible_remote.ConvertibleNodeAgent`
-    until the head ends the run. Returns the number of trainer incarnations run."""
+    until the head ends the run. Returns the number of trainer incarnations run.
+
+    In rollout the node loads the newest policy release of the store before each
+    round (the LoRA adapter the trainer of any node released, through
+    :class:`.sampler_island.EngineReleaseLoader`, the sampler island's path), and
+    holds a round back while the pool backlog is at its cap
+    (:class:`~yeto.rl.engine.convertible_remote.PoolBacklogGate`)."""
     import os
 
     from yeto.rl.engine.convertible import ConvertibleNode, NodeClass, NodeSpec
-    from yeto.rl.engine.convertible_remote import ConvertibleNodeAgent, RolloutRound
+    from yeto.rl.engine.convertible_remote import ConvertibleNodeAgent, PoolBacklogGate, RolloutRound
+    from yeto.rl.engine.policy_release import PolicyFollower
     from yeto.rl.engine.events import append_tape_event
     from yeto.rl.engine.resume import store_for
     from yeto.rl.engine.trainer_remote import (
@@ -259,13 +266,15 @@ def run_convertible_node(miles_args: Any, *, build_driver: Callable[[], Any], co
         StoreCutLog,
     )
 
-    from .publish import _default_update_weights
+    from .publish import _default_update_weights, lora_mode
     from .rollout import MilesRolloutPool, RayMetadataSink, _release
+    from .sampler_island import EngineReleaseLoader, release_store
     from .state_plugin import ALIGN_WEIGHT_VERSION
 
     env = os.environ if environ is None else environ
     name = convertible_node_name(miles_args)
-    store = store_for(miles_args.yeto_rl_sample_buffer.store, environ=env)
+    config = miles_args.yeto_rl_sample_buffer
+    store = store_for(config.store, environ=env)
     files = LocalStoreFiles(store)
     metadata = RayMetadataSink()
     pool = MilesRolloutPool(inference_controller=controller, rollout_executor=executor,
@@ -332,9 +341,38 @@ def run_convertible_node(miles_args: Any, *, build_driver: Callable[[], Any], co
             return None
         return int(sample["running_requests"]) + int(sample.get("queued_requests") or 0)
 
+    # the engines serve the adapter the trainer pushed at boot: the first release
+    # loaded replaces it (unload, then load from the release directory)
+    loader = EngineReleaseLoader(controller, executor, runner.run, lora=lora_mode(miles_args),
+                                 adapter_loaded=True)
+    releases = release_store(config, env)
+    follower = PolicyFollower(releases, loader, version=0)
+
+    def follow() -> int | None:
+        """Load the newest release when another node's trainer released one."""
+        loaded = follower.refresh()
+        if loaded is None:
+            return None
+        emit("rl_convertible_policy_loaded", node=name, seq=loaded.seq,
+             policy_version=loaded.version, policy_hash=loaded.policy_hash,
+             engine_checksum=loaded.engine_checksum, served_checksum=loader.last_checksum,
+             probe=loader.last_probe)
+        return loaded.version
+
+    def after_stint() -> None:
+        """The engines serve what this node's trainer published last, which is also
+        the newest release (one trainer at a time): follow from there."""
+        latest = releases.latest()
+        follower.last_seen = latest
+        if latest is not None:
+            follower.release, follower.version = latest, latest.version
+
+    cap = config.max_backlog_groups
+    admit = (lambda: True) if cap is None else PoolBacklogGate(files, int(cap))
+
     runner.run(boot())
-    emit("rl_convertible_node_start", node=name, store=miles_args.yeto_rl_sample_buffer.store,
-         rounds=int(miles_args.num_rollout))
+    emit("rl_convertible_node_start", node=name, store=config.store,
+         rounds=int(miles_args.num_rollout), max_backlog_groups=cap)
     def wake_trainer() -> None:
         if getattr(miles_args, "offload_train", False):  # Megatron wake_up asserts it
             runner.run(actor.onload())
@@ -345,5 +383,6 @@ def run_convertible_node(miles_args: Any, *, build_driver: Callable[[], Any], co
     agent = ConvertibleNodeAgent(
         name=name, files=files, node=ConvertibleNode(NodeSpec(name, NodeClass.CONVERTIBLE), port),
         generate=generate, run_stint=run_stint, published_checksum=published_checksum,
-        inflight=inflight, emit=emit, max_rounds=int(miles_args.num_rollout), poll_s=poll_s)
+        inflight=inflight, emit=emit, follow=follow, admit=admit, after_stint=after_stint,
+        max_rounds=int(miles_args.num_rollout), poll_s=poll_s)
     return agent.run()

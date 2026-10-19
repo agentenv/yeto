@@ -572,7 +572,10 @@ _RESUME = (
                 "launcher per island; buffer shard and convertible/<NAME>/ channel)"),
     shared_flag("--rl-sampler-max-backlog-rounds", type=int, default=None, metavar="N",
                 help="--rl-sample-role sampler: wait while the buffer holds N rounds the trainer "
-                "has not read (as of its last release); default 4"),
+                "has not read (as of its last release); default 4. Convertible pool: a node "
+                "does not start a round while the trainable backlog the head counted is N "
+                "rounds; default max(4, --rl-max-policy-age + 2), at least "
+                "--rl-max-policy-age + 1"),
     shared_flag("--rl-sampler-min-round-seconds", type=float, default=None, metavar="S",
                 help="--rl-sample-role sampler: start one round at most every S seconds (a "
                 "throttle; a check run uses it to make the trainer idle); default no throttle"),
