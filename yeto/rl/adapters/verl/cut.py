@@ -231,7 +231,7 @@ def restore_rank(handles: TrainHandles, *, directory: str, files: Sequence[Mappi
         raise CutError(f"rank {rank}: {entry.path} checksum differs from the manifest")
     if any(state for state in handles.optimizer.state.values()):
         raise CutError("restore_cut needs a freshly built trainer (the optimizer already has state)")
-    saved = torch.load(path, map_location="cpu", weights_only=False)
+    saved = torch.load(path, map_location="cpu", weights_only=True)
     if saved.get("schema") != RANK_FILE_SCHEMA or saved.get("cut_id") != cut_id or saved.get("rank") != rank:
         raise CutError(f"rank {rank}: {entry.path} is not this rank's file of cut {cut_id!r}")
 

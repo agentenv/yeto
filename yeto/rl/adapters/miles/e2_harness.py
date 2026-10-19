@@ -288,6 +288,8 @@ def _run(ctx: HarnessContext, rec: _Recorder) -> None:
                     trainer, args=ctx.miles_args, rollout_executor=ctx.rollout_executor,
                     actor=ctx.actor, run=ctx.runner.run, restore=restore_with_rejections,
                     rollout=driver.rollout, worker_manager=ctx.worker_manager, rebuild=ctx.rebuild,
+                    # arm B replays the frozen batch B3, drawn at the cut's data position
+                    resumed_cursor=dict(manifest.data),
                 )
 
             if colocated:

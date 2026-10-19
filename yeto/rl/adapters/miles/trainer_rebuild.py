@@ -230,8 +230,14 @@ def rebuild_same_shape(
     max_attempts: int = 2,
     critic: SwappableActor | None = None,
     critic_trainer_id: str = "critic",
+    resumed_cursor: Mapping[str, int] | None = None,
 ) -> RebuildResult:
     """Dispose + rebuild the trainer (same shape) and restore the cut via ``restore()``.
+
+    ``resumed_cursor`` is the data position the next batch starts from, compared
+    with the cut's data watermark after the restore (S25 N7.6); default: the
+    live data cursor read after the rebuild. Only a caller that replays a batch
+    drawn at the cut (the E2 harness) passes the cut's cursor.
 
     ``trainer`` is the :class:`~.trainer.MilesTrainerGroup`; its layout is
     read back from the running ranks before and after. ``restore`` calls
@@ -284,7 +290,7 @@ def rebuild_same_shape(
             if now != layout:
                 raise RuntimeError(f"layout changed across a same-shape rebuild: {layout} -> {now}")
             manifest = restore()
-            confirm_resumed_cursor(trainer, after)
+            confirm_resumed_cursor(trainer, after if resumed_cursor is None else resumed_cursor)
         except Exception as error:  # noqa: BLE001
             attempts.append({"attempt": attempt, "stage": "after_rebuild", "error": repr(error)})
             raise RecoveryRequired(f"trainer unusable after rebuild: {error}", attempts=attempts) from error
