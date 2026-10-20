@@ -31,7 +31,9 @@ import modal
 HERE = Path(__file__).resolve()
 REPO = HERE.parents[3] if len(HERE.parents) > 3 else Path("/")  # in the container the module sits at /root
 WORKDIR = "/root/sky_workdir"
-PLAN = "examples/stage1/glm5next-mini-modal.yaml"
+# T-G1B: YETO_G1_PLAN=examples/stage1/glm5next-mini-modal-dense.yaml (set at deploy time;
+# the image env carries it into every container, so all of them plan the same file)
+PLAN = os.environ.get("YETO_G1_PLAN", "examples/stage1/glm5next-mini-modal.yaml")
 IMAGE = ("ghcr.io/michaellchung/yeto-miles-ports@sha256:"
          "5b9dc2a9e6e315d73dabfbc6faae428b59cc01aabec6189645a5c8c80d6e3721")
 MILES_COMMIT = "1618b5c38db80e17ec928cfa47fe832cb18565fc"  # s25-distopt
@@ -64,7 +66,7 @@ image = (
         f"python3 -c \"{_PATCH_SGLANG}\"",
     )
     # not PYTHONPATH: Modal's own runtime path must stay intact; subprocesses get it (_env)
-    .env({"HOME": "/root", "PYTHONUNBUFFERED": "1", "HF_HOME": "/data/models/hf"})
+    .env({"HOME": "/root", "PYTHONUNBUFFERED": "1", "HF_HOME": "/data/models/hf", "YETO_G1_PLAN": PLAN})
     .add_local_dir(str(REPO), WORKDIR, copy=False,
                    ignore=[".git", ".g1-build", ".venv", ".claude", "syncer/target", "**/__pycache__",
                            "**/*.pyc", "evidence*", "openspec", "data"])
@@ -329,6 +331,94 @@ def requant_island(tag: str) -> int:
     return rc
 
 
+# --------------------------------------------------------------------- release digests (T-G1B)
+def _tensor_digests(directory: Path) -> dict[str, str]:
+    """sha256 of every tensor's bytes in the safetensors files of ``directory``."""
+    import hashlib
+
+    out: dict[str, str] = {}
+    for file in sorted(directory.glob("*.safetensors")):
+        with open(file, "rb") as f:
+            size = int.from_bytes(f.read(8), "little")
+            header = json.loads(f.read(size))
+            base = 8 + size
+            for name, meta in sorted(header.items(), key=lambda kv: kv[1]["data_offsets"][0]
+                                     if kv[0] != "__metadata__" else -1):
+                if name == "__metadata__":
+                    continue
+                begin, end = meta["data_offsets"]
+                f.seek(base + begin)
+                digest, left = hashlib.sha256(), end - begin
+                while left:
+                    chunk = f.read(min(left, 1 << 24))
+                    digest.update(chunk)
+                    left -= len(chunk)
+                out[name] = digest.hexdigest()
+    return out
+
+
+def _summarize(digests: dict[str, str]) -> dict:
+    import hashlib
+
+    def combined(names: list[str]) -> str:
+        h = hashlib.sha256()
+        for name in names:
+            h.update(f"{name}={digests[name]}\n".encode())
+        return h.hexdigest()
+
+    experts = sorted(n for n in digests if ".mlp.experts." in n)
+    others = sorted(n for n in digests if ".mlp.experts." not in n)
+    return {"tensors": len(digests), "expert_tensors": len(experts), "experts_sha256": combined(experts),
+            "others_sha256": combined(others)}
+
+
+@app.function(image=image, volumes=VOLUMES, cpu=4, memory=8192, timeout=3 * 3600)
+def release_hasher(tag: str, base_dir: str, store_root: str, release_dirs: list[str], poll_s: float = 20.0) -> int:
+    """Digest each release as soon as it is complete (the store keeps only the newest 2):
+    per tensor sha256, plus combined digests of the routed-expert tensors and of the rest.
+    Writes ``<tag>/release-digests.jsonl`` and ``<tag>/tensors/<dir>/<release>.json``."""
+    log = _log_dir(tag)
+    out = log / "release-digests.jsonl"
+    seen: set[str] = set()
+
+    def record(kind: str, name: str, directory: Path, extra: dict) -> None:
+        began = time.time()
+        try:
+            digests = _tensor_digests(directory)
+        except Exception as error:  # noqa: BLE001 - pruned or still open: record, go on
+            row = {"kind": kind, "release": name, "error": repr(error)}
+        else:
+            target = log / "tensors" / kind / f"{name}.json"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps(digests, indent=0, sort_keys=True))
+            row = {"kind": kind, "release": name, **extra, **_summarize(digests),
+                   "hash_s": round(time.time() - began, 1)}
+        row["time_unix"] = time.time()
+        with open(out, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row) + "\n")
+        print(f"[g1b] {json.dumps(row)}", flush=True)
+        _commit(tag)
+
+    record("base", Path(base_dir).name, Path(base_dir), {})
+    while True:
+        try:
+            store.reload()
+        except Exception as error:  # noqa: BLE001 - an open file blocks the reload; retry
+            print(f"[g1b] reload failed: {error}", flush=True)
+        for kind in release_dirs:
+            root = Path(store_root) / kind
+            # RELEASE.json is written after the weights (weights -> record -> commit -> LATEST)
+            for marker in sorted(root.glob("*/RELEASE.json")) if root.is_dir() else ():
+                name = marker.parent.name
+                if f"{kind}/{name}" in seen:
+                    continue
+                seen.add(f"{kind}/{name}")
+                meta = json.loads(marker.read_text())
+                record(kind, name, root / name, {"version": meta.get("version"),
+                                                 "policy_hash": meta.get("policy_hash")})
+        time.sleep(poll_s)
+
+
 @app.function(image=image, volumes=VOLUMES, cpu=1, memory=1024, timeout=3 * 3600)
 def orchestrate(tag: str, cut_after: int = 2) -> dict:
     """Sampler for the whole run; trainer A stops after ``cut_after`` rounds (cut),
@@ -340,6 +430,10 @@ def orchestrate(tag: str, cut_after: int = 2) -> dict:
         store.commit()
     sampler = sampler_island.spawn(f"{tag}/sampler")
     requant = requant_island.spawn(f"{tag}/requant")
+    plan = _plan(_log_dir(f"{tag}/orchestrate"))
+    spec = plan["sampler"]["engines"][0]["spec"]
+    hasher = release_hasher.spawn(f"{tag}/hashes", str(spec["base_dir"]), str(spec["store"]),
+                                  ["policy-releases", str(spec["release_dir"])])
     sampler_rc: object = None
 
     def sampler_done() -> bool:
@@ -377,6 +471,7 @@ def orchestrate(tag: str, cut_after: int = 2) -> dict:
             time.sleep(30)
     time.sleep(90)  # the re-quantizer's last log mirror
     requant.cancel()
+    hasher.cancel()
     result = {"trainer_a": first, "trainer_b": second, "sampler": sampler_rc}
     print(json.dumps(result, default=str), flush=True)
     out = Path(f"/data/logs/{tag}")
