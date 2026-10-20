@@ -462,3 +462,11 @@ def test_sampler_spot_needs_a_pair():
     args.controller = "local"
     with pytest.raises(ValueError, match="--rl-sampler-spot needs --rl-island-sample-role"):
         _prepare_rl_args(args)
+
+
+def test_a_failed_marker_write_in_the_signal_handler_does_not_raise(tmp_path, capsys):
+    from yeto.rl.engine.sampler_resume import write_reclaim_marker
+
+    env = {RECLAIM_MARKER_ENV: str(tmp_path / "missing-dir" / "marker")}
+    write_reclaim_marker(env, _signal.SIGINT)  # T-C1 run b: the runner raced the same temp name
+    assert "reclaim marker not written" in capsys.readouterr().out

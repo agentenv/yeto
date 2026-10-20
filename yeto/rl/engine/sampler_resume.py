@@ -32,6 +32,7 @@ outlives the island's own tape. Engine-neutral.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import uuid
@@ -155,11 +156,17 @@ def reclaim_marker(environ: Mapping[str, str]) -> Path:
 
 
 def write_reclaim_marker(environ: Mapping[str, str], signum: int) -> Path:
-    """Write the reclaim marker (what the Modal runner writes on its signal)."""
+    """Write the reclaim marker (what the Modal runner writes on its signal). The
+    runner may write it at the same moment: the temp file is per process, and a
+    failed write is reported, never raised (it runs in a signal handler; the
+    runner's marker serves as well)."""
     path = reclaim_marker(environ)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps({"signal": int(signum), "time": time.time()}) + "\n")
-    tmp.replace(path)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(json.dumps({"signal": int(signum), "time": time.time()}) + "\n")
+        tmp.replace(path)
+    except OSError as error:
+        print(f"[sampler-island] reclaim marker not written ({error})", flush=True)
     return path
 
 
