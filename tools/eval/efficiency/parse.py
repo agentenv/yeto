@@ -383,10 +383,15 @@ def _read(path: Path) -> str:
     return path.read_text(errors="replace") if path.is_file() else ""
 
 
+NOT_RUN_TAPES = ("yeto", "store")
+
+
 def _tape_events(raw: Path) -> list[dict[str, Any]]:
     seen, rows = set(), []
     for path in sorted(raw.rglob("*.jsonl")):
-        if "verl-" in path.name:
+        # miles_local.sh pulls a copy of the repo (raw/yeto, whose test fixtures are
+        # tapes of other runs) and the checkpoint store next to the run's own tapes
+        if "verl-" in path.name or path.relative_to(raw).parts[0] in NOT_RUN_TAPES:
             continue
         for row in tape_rows(_read(path)):
             key = json.dumps(row, sort_keys=True, default=str)  # the same event pulled from two sources

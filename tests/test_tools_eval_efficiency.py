@@ -369,3 +369,11 @@ def test_parse_bare_verl_async_rows_lag_one_version():
 def test_bare_miles_reads_prompts_in_file_order_like_yeto():
     for arm in ("bare-miles-sync", "bare-miles-async"):
         assert "--rollout-shuffle" not in spec.bare_script(SPEC, spec.Arm.parse(arm), "r")
+
+
+def test_tape_events_skip_the_repo_copy_and_the_store(tmp_path):
+    row = {"event": "rl_local_round", "local_round_id": 1, "time_unix": 1.0}
+    for sub in ("tape-direct/l0", "yeto/tests/fixtures", "store/x"):
+        (tmp_path / sub).mkdir(parents=True)
+        (tmp_path / sub / "rl-island-0.jsonl").write_text(json.dumps({**row, "src": sub}) + "\n")
+    assert [r.get("src") for r in parse._tape_events(tmp_path)] == ["tape-direct/l0"]
