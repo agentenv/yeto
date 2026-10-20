@@ -216,10 +216,15 @@ def judge_e4(ev: Evidence, v: Verdict, cfg: dict) -> None:
                 (e.get("mismatch") or {}).get("abs_diff", (e.get("mismatch") or {}).get("tis_abs")) for e in rt),
             {"ratio_or_tis": ratio})
     # two distinct drop points, each counted once: the round collector's over-age discard
-    # (rl_rollout_carry_over, both backends) and the Miles buffer reader passing over stale
-    # groups (sample_buffer/stale_groups in the round labels)
+    # (rl_rollout_carry_over, both backends) and the Miles buffer reader passing over
+    # stale groups, which no yeto event reports: buffer positions consumed (the last
+    # release's buffer_selected) minus groups trained (round labels; the S25 C1 C6 count)
     carried = numeric_sum(ev.of(t, "rl_rollout_carry_over"), "over_age_discarded_groups")
-    passed_over = numeric_sum(ev.of(t, "rl_round_labels"), "stale_groups")
+    passed_over = 0.0
+    releases = ev.of(t, "rl_policy_released")
+    if ev.backend == "miles" and releases and releases[-1].get("buffer_selected") is not None:
+        trained_groups = numeric_sum(ev.of(t, "rl_round_labels"), "rl/groups")
+        passed_over = float(releases[-1]["buffer_selected"]) - trained_groups
     dropped = carried + passed_over
     v.check("over_age_drop", "at least one group older than max_policy_age was dropped, not trained", dropped >= 1,
             dropped)
@@ -242,12 +247,14 @@ def _over_age_trained(ev: Evidence, trainer: str, age: int) -> int:
                 for versions in (r.get("versions") or {}).values():
                     over += min(versions) < r["rollout_id"] - age
         return over
-    for e in ev.of(trainer, "rl_group_policies"):
-        current = e.get("policy_version")
-        for g in e.get("groups") or []:
-            oldest = g.get("oldest_version", g.get("min_version")) if isinstance(g, dict) else None
-            if current is not None and oldest is not None:
-                over += oldest < current - age
+    # Miles: one rl_group_policies record per trained round, in round order: [group, token,
+    # [versions]]; the round trains at its base policy version (rl_local_round)
+    bases = [r.get("base_policy_version") for r in ev.of(trainer, "rl_local_round")]
+    for record, base in zip(ev.of(trainer, "rl_group_policies"), bases):
+        for group in record.get("groups") or []:
+            versions = group[2] if isinstance(group, (list, tuple)) and len(group) > 2 else []
+            if base is not None and versions:
+                over += min(versions) < int(base) - age
     return over
 
 
