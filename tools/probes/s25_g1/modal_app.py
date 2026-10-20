@@ -73,17 +73,35 @@ def _hf_secret() -> modal.Secret:
     return modal.Secret.from_dict({"HF_TOKEN": token.read_text().strip()} if token.is_file() else {})
 
 
+LOCAL_LOGS = Path("/tmp/g1-logs")  # container disk: an open file on the Volume blocks every reload
+
+
 def _log_dir(tag: str) -> Path:
-    path = Path("/data/store/logs") / tag
+    path = LOCAL_LOGS / tag
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
-def _commit() -> None:
+def _commit(tag: str | None = None) -> None:
+    """Copy the local logs of ``tag`` to the store Volume (closed files only), then commit."""
     try:
+        if tag is not None:
+            shutil.copytree(LOCAL_LOGS / tag, Path("/data/store/logs") / tag, dirs_exist_ok=True,
+                            ignore=shutil.ignore_patterns("*.sock", "*.pid"))
         store.commit()
     except Exception as error:  # noqa: BLE001 - evidence copy only
-        print(f"[g1] store commit failed: {error}", flush=True)
+        print(f"[g1] log mirror/commit failed: {error}", flush=True)
+
+
+def _mirror_every(tag: str, seconds: float = 180.0) -> None:
+    import threading
+
+    def loop() -> None:
+        while True:
+            time.sleep(seconds)
+            _commit(tag)
+
+    threading.Thread(target=loop, daemon=True).start()
 
 
 def _sh(cmd: str, log: Path | None = None, env: dict | None = None, check: bool = True) -> str:
@@ -187,7 +205,7 @@ def smoke_run(tag: str) -> None:
         nvml.terminate()
     (log / "smoke.json").write_text(json.dumps(record, indent=1, default=str))
     print(json.dumps(record, default=str)[:4000], flush=True)
-    _commit()
+    _commit(tag)
 
 
 @app.local_entrypoint()
@@ -202,6 +220,7 @@ def sampler_island(tag: str) -> int:
     log = _log_dir(tag)
     _gpu_facts(log, 1)
     nvml = _nvml_sampler(log / "nvml.csv")
+    _mirror_every(tag)
     plan = _plan(log)
     run = plan["sampler"]["engines"][0]
     spec_path = Path(run["spec_path"])
@@ -215,7 +234,7 @@ def sampler_island(tag: str) -> int:
     state = Path(run["spec"]["event_tape"]).parent
     if state.is_dir():
         shutil.copytree(state, log / "state", dirs_exist_ok=True)
-    _commit()
+    _commit(tag)
     return rc
 
 
@@ -224,6 +243,7 @@ def trainer_island(tag: str, stop_after_rounds: int | None = None) -> int:
     log = _log_dir(tag)
     _gpu_facts(log, 2)
     nvml = _nvml_sampler(log / "nvml.csv")
+    _mirror_every(tag)
     plan = _plan(log)
     trainer = plan["trainer"]
     env = _env(trainer["env"])
@@ -253,7 +273,7 @@ def trainer_island(tag: str, stop_after_rounds: int | None = None) -> int:
     shutil.copytree(f"/data/yeto/{plan['run_id']}", log / "state", dirs_exist_ok=True,
                     ignore=shutil.ignore_patterns("*.pt", "*.safetensors"))
     _sh("cp -r /tmp/ray/session_latest/logs " + shlex.quote(str(log / "ray-logs")) + " || true", check=False)
-    _commit()
+    _commit(tag)
     return rc
 
 
@@ -300,8 +320,9 @@ def orchestrate(tag: str, cut_after: int = 2) -> dict:
             time.sleep(30)
     result = {"trainer_a": first, "trainer_b": second, "sampler": sampler_rc}
     print(json.dumps(result, default=str), flush=True)
-    _log_dir(tag)
-    Path(f"/data/store/logs/{tag}/orchestrate.json").write_text(json.dumps(result, default=str))
+    out = Path(f"/data/store/logs/{tag}")
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "orchestrate.json").write_text(json.dumps(result, default=str))
     _commit()
     return result
 
