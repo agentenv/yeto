@@ -202,3 +202,18 @@ def test_mini_island_argv_translates_to_a_miles_argv_on_cpu(tmp_path):
     assert miles[miles.index("--num-experts") + 1] == "32" and miles.count("--num-experts") == 1
     assert miles[miles.index("--moe-layer-freq") + 1] == "[0,1,1,1]"
     assert miles[miles.index("--megatron-to-hf-mode") + 1] == "raw"
+
+
+def test_align_weight_version_is_a_no_op_on_a_trainer_only_island():
+    from types import SimpleNamespace
+
+    from yeto.rl.adapters.miles.state_plugin import align_weight_version
+
+    align_weight_version(SimpleNamespace(weight_updater=None, args=SimpleNamespace(debug_train_only=True)),
+                         next_version=3)
+    with pytest.raises(RuntimeError, match="no weight_updater"):
+        align_weight_version(SimpleNamespace(weight_updater=None, args=SimpleNamespace(debug_train_only=False)),
+                             next_version=3)
+    updater = SimpleNamespace(weight_version=0)
+    align_weight_version(SimpleNamespace(weight_updater=updater, args=None), next_version=3)
+    assert updater.weight_version == 2

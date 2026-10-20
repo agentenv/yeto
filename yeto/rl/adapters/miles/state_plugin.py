@@ -1828,6 +1828,11 @@ def align_weight_version(actor: Any, *, next_version: int) -> None:
 
     updater = getattr(actor, "weight_updater", None)
     if updater is None:
+        if getattr(getattr(actor, "args", None), "debug_train_only", False):
+            # trainer-only island (Miles --debug-train-only): no engine and no weight
+            # updater; update_weights returns early and the policy release carries
+            # the version (Modal run-11 failed here)
+            return
         raise RuntimeError("the trainer has no weight_updater to carry the policy version")
     updater.weight_version = int(next_version) - 1
 
