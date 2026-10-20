@@ -5,7 +5,8 @@ base + Python 3.12, the pinned fork checked out at ``VERL_COMMIT``, all
 dependencies from the fork's own ``uv.lock`` (``uv sync --frozen
 --all-packages --extra vllm --extra fsdp``), plus yeto's one-hook local patch
 (``patch_verl``).  ``--rl-image verl-build:<commit>`` selects it; Modal caches
-the layers, so only the first run builds.  yeto's own image default
+the layers, so only the first run builds. yeto's object-store client (boto3,
+``STORE_CLIENT_REQUIREMENTS``) is added to the same venv.  yeto's own image default
 (ghcr.io/michaellchung/yeto-miles-ports) is unchanged.
 """
 
@@ -13,8 +14,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .pins import (VERL_BASE_IMAGE, VERL_COMMIT, VERL_PYTHON, VERL_REPOSITORY, VERL_ROOT,
-                   VERL_UV_VERSION)
+from .pins import (STORE_CLIENT_REQUIREMENTS, VERL_BASE_IMAGE, VERL_COMMIT, VERL_PYTHON, VERL_REPOSITORY,
+                   VERL_ROOT, VERL_UV_VERSION)
 
 VENV_BIN = f"{VERL_ROOT}/.venv/bin"
 
@@ -28,6 +29,12 @@ def build_commands(commit: str = VERL_COMMIT) -> list[str]:
         f"cd {VERL_ROOT} && UV_PYTHON=/usr/local/bin/python{VERL_PYTHON} uv sync --frozen --all-packages"
         " --extra vllm --extra fsdp",
     ]
+
+
+def store_client_commands() -> list[str]:
+    """An island over an s3:// or oss:// store reads it with boto3 (S25 C3V); its own
+    layer, so the cached verl build above stays valid."""
+    return [f"uv pip install --python {VENV_BIN}/python " + " ".join(STORE_CLIENT_REQUIREMENTS)]
 
 
 def image_env() -> dict[str, str]:
@@ -46,6 +53,7 @@ def modal_image(modal, commit: str = VERL_COMMIT):
         .apt_install("git", "build-essential", "curl", "libnuma1")
         .pip_install(f"uv=={VERL_UV_VERSION}")
         .run_commands(*build_commands(commit))
+        .run_commands(*store_client_commands())
         .add_local_file(str(patch), "/workspace/patch_verl.py", copy=True)
         .run_commands(f"{VENV_BIN}/python /workspace/patch_verl.py {VERL_ROOT}")
         .env(image_env())
