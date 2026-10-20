@@ -58,8 +58,18 @@ Spawn = Callable[[Sequence[str], Mapping[str, str]], Process]
 Http = Callable[[str, str, Any, float], tuple[int, Any]]
 
 
+def _ignore_sigint() -> None:
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+
 def popen_spawn(argv: Sequence[str], env: Mapping[str, str]) -> Process:
-    return subprocess.Popen(list(argv), env={**os.environ, **env})  # noqa: S603
+    """Start the server with SIGINT ignored (inherited by its workers). A cloud
+    reclaim (Modal ``container stop``) sends SIGINT to every process of the
+    container: the island turns it into the reclaim marker and leaves after
+    the round in progress, so the server must not die under that round
+    (T-E2V eval-e2-verl-e2v-a). ``stop()`` still ends it with SIGTERM."""
+    return subprocess.Popen(list(argv), env={**os.environ, **env},  # noqa: S603
+                            preexec_fn=_ignore_sigint)  # noqa: PLW1509 - only resets one signal
 
 
 def httpx_call(method: str, url: str, body: Any, timeout_s: float) -> tuple[int, Any]:

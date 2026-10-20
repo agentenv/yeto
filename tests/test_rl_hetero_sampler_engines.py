@@ -652,3 +652,15 @@ def test_probe_without_pairs_passes_every_load():
         result = checks.logprob_probe(engine=None)
         checks.accept()
         assert result == {"name": "logprob_probe", "passed": True, "detail": "no probe pairs"}
+
+
+def test_server_process_ignores_the_reclaim_sigint():
+    """T-E2V: a cloud reclaim sends SIGINT to every process of the container; the
+    engine server must survive it so the island can finish its round and leave."""
+    import sys
+
+    from yeto.rl.adapters.sampler_engines.server import popen_spawn
+
+    probe = popen_spawn([sys.executable, "-c", "import signal, sys; "
+                         "sys.exit(7 if signal.getsignal(signal.SIGINT) is signal.SIG_IGN else 3)"], {})
+    assert probe.wait(timeout=60) == 7
