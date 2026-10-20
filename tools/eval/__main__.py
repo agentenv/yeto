@@ -49,8 +49,10 @@ def cmd_list(_args) -> int:
 def cmd_run(args) -> int:
     cell = cells.get(args.capability, args.backend)
     run_dir = Path(args.out) / args.run_id
-    if (run_dir / "cell.json").exists() and not args.dry_run:
-        raise SystemExit(f"{run_dir} already used")
+    if not args.dry_run:
+        if (run_dir / "cell.json").exists():
+            raise SystemExit(f"{run_dir} already used")
+        _preflight(args.run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
     sha = subprocess.run(["git", "-C", str(Path(__file__).resolve().parents[2]), "rev-parse", "HEAD"],
                          capture_output=True, text=True).stdout.strip()
@@ -62,15 +64,12 @@ def cmd_run(args) -> int:
         if args.dry_run:
             print(json.dumps(cell.config, indent=1))
             return 0
-        _preflight(args.run_id)
         from . import modal_verl
 
         summary = modal_verl.run(cell, args.run_id, run_dir)
     else:
         from . import miles
 
-        if not args.dry_run:
-            _preflight(args.run_id)
         summary = miles.run(cell, args.run_id, run_dir, dry_run=args.dry_run)
         if args.dry_run:
             print((run_dir / "dry-run.log").read_text())
