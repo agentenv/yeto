@@ -146,7 +146,9 @@ def parse_verl(metrics_jsonl: str, log_text: str = "", *, samples_per_round: int
         rec = recs.setdefault(rnd, _record(rnd))
         if rnd == step:
             _set(p, rec, "t_end_unix", ends.get(step), "console step line (harness time prefix)")
-        gen, key = _first(d, ("timing_s/gen",))
+        # fully_async: the trainer's timing_s/gen only pulls finished samples from the
+        # queue; the rollouter's active time in the version window is the generation
+        gen, key = _first(d, ("fully_async/rollouter/active_time",) if mode == "async" else ("timing_s/gen",))
         _set(p, rec, "gen_s", gen, key)
         parts = [k for k in ("timing_s/old_log_prob", "timing_s/update_actor") if d.get(k) is not None]
         if parts:
@@ -283,7 +285,7 @@ YETO_SEGMENT = {"generate": "gen_s", "train": "train_s", "publish": "weight_sync
 
 
 def parse_yeto(events: list[dict[str, Any]], *, mode: str, framework_parsed: Parsed | None = None,
-               framework_round_offset: int = 0) -> Parsed:
+               framework_round_offset: int = 0, skip: frozenset[str] = frozenset()) -> Parsed:
     """yeto tape -> rounds; ``framework_parsed`` (the framework's own log in the
     same run, e.g. Miles perf lines) fills fields the tape does not carry. Its
     round ``rollout_id + framework_round_offset`` is the tape's ``rollout_id``:
@@ -317,7 +319,8 @@ def parse_yeto(events: list[dict[str, Any]], *, mode: str, framework_parsed: Par
         seg = dict(spans.get(rid) or phases.get(rid) or {})
         src = "rl_timeline_span" if rid in spans else "rl_driver_phase (marker to next marker)"
         for task, name in YETO_SEGMENT.items():
-            _set(p, rec, name, seg.get(task), f"{src} {task}")
+            if name not in skip:
+                _set(p, rec, name, seg.get(task), f"{src} {task}")
         if mode == "async":
             _set(p, rec, "wait_s", seg.get("wait"), f"{src} kind=wait")
         _set(p, rec, "gen_tokens", lr.get("action_tokens"), "rl_local_round.action_tokens")
@@ -328,7 +331,8 @@ def parse_yeto(events: list[dict[str, Any]], *, mode: str, framework_parsed: Par
             _set(p, rec, "dropped_samples", drops.get(rid), "rl_rollout_carry_over.over_age_discarded_groups (groups)")
         f = fw.get(rid + framework_round_offset, {})
         for name in ROUND_FIELDS:  # what the tape lacks, from the framework's own log of the same run
-            if rec[name] is None and f.get(name) is not None and name not in ("round", "t_end_unix", "round_s"):
+            if rec[name] is None and f.get(name) is not None and name not in ("round", "t_end_unix", "round_s") \
+                    and name not in skip:
                 _set(p, rec, name, f[name], "framework log: " + framework_parsed.sources[name])
         p.rounds.append(rec)
         p.segments_raw.append({k: round(v, 3) for k, v in seg.items()})
@@ -419,7 +423,11 @@ def parse_run(run_dir: Path) -> dict[str, Any]:
     else:
         log = _read(arm_dir / "main.log") or _read(raw / "launch.ts.log")
         fw = parse_miles(log, rollout_cards=c["rollout"], mode=mode)
-    parsed = parse_yeto(_tape_events(raw), mode=mode, framework_parsed=fw,
+    # yeto+verl fully_async: the driver's generate phase (and verl's timing_s/gen) only
+    # pull finished samples from the rollouter queue, and yeto logs no per-round
+    # rollouter time, so generation time stays missing
+    skip = frozenset({"gen_s"}) if plan["framework"] == "verl" and mode == "async" else frozenset()
+    parsed = parse_yeto(_tape_events(raw), mode=mode, framework_parsed=fw, skip=skip,
                         framework_round_offset=1 if plan["framework"] == "verl" else 0) \
         if plan["system"] == "yeto" else fw
     if meta.get("rc") is None and _read(raw / "rc").strip().lstrip("-").isdigit():
