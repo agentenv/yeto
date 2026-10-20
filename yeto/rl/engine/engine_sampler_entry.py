@@ -31,7 +31,17 @@ The spec (:class:`SamplerSpec`, every key below is required unless marked):
   ``reward_kind`` is ``"miles"``;
 * ``checks``: :class:`~.sampler_checks.PostLoadChecks` keyword overrides
   (optional; e.g. ``expected_expert_matrices``);
-* ``event_tape``: the JSONL tape file of the island's events.
+* ``event_tape``: the JSONL tape file of the island's events; each
+  incarnation writes its own file next to it (``events.<incarnation>.jsonl``),
+  so a replacement container never overwrites an earlier one's tape.
+
+Replacement (S25 G1C): the process is one incarnation of the sampler
+(``sampler_resume.new_incarnation``). It reads where the earlier incarnations
+got to from the buffer (``sampler_resume.resume_point``), starts at the next
+round, and writes ``rl_sampler_join`` / ``rl_sampler_leave`` plus one member
+record per incarnation in the buffer store. With ``YETO_SPOT_RECLAIM_MARKER``
+set, SIGINT/SIGTERM write the reclaim marker; the island then starts no new
+round, writes no more groups and leaves as PREEMPTED.
 
 Nothing here was run on a PPU or NPU node.
 """
@@ -106,6 +116,11 @@ class JsonlPrompts:
         self.input_key, self.label_key = input_key, label_key
         self.groups_per_round = int(groups_per_round)
         self.render = render
+
+    def cursor(self, rollout_id: int) -> dict[str, int]:
+        """The data position after round ``rollout_id`` drew its prompts (the
+        ``sampler_round`` record; rounds draw by rollout id, so it only documents)."""
+        return {"row_offset": (int(rollout_id) + 1) * self.groups_per_round}
 
     def __call__(self, rollout_id: int) -> list[PromptItem]:
         start = int(rollout_id) * self.groups_per_round
@@ -191,6 +206,12 @@ def build_stores(spec: Mapping[str, Any], environ: Mapping[str, str] | None = No
     return releases, FileSampleBuffer(buffer_store, batch_size=1, index=index)  # as open_buffer(sampler=True)
 
 
+def incarnation_tape(path: str | Path, incarnation: str) -> Path:
+    """``events.jsonl`` -> ``events.<incarnation>.jsonl`` (one tape per incarnation)."""
+    tape = Path(path).expanduser()
+    return tape.with_name(f"{tape.stem}.{incarnation}{tape.suffix or '.jsonl'}")
+
+
 def tape_writer(path: str | Path, sampler_id: str) -> Callable[..., None]:
     from yeto.rl.event_echo import append_record  # noqa: PLC0415
 
@@ -219,16 +240,52 @@ def island_config(spec: Mapping[str, Any]) -> EngineSamplerConfig:
 
 
 def run(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
-        resource_sampler: Callable[[Callable[..., None]], Any] | None = None) -> int:
-    """Build every part of the island from ``spec``, run it, stop the engine;
-    returns the rounds the loop ran. ``resource_sampler(emit)`` returns a
-    started telemetry thread (default: ``telemetry.ResourceSampler`` of the
-    island's device family; None from the factory = no telemetry)."""
+        resource_sampler: Callable[[Callable[..., None]], Any] | None = None,
+        incarnation: str | None = None) -> int:
+    """Build every part of the island from ``spec``, run it from the resume
+    point, stop the engine; returns the rounds this incarnation ran.
+    ``resource_sampler(emit)`` returns a started telemetry thread (default:
+    ``telemetry.ResourceSampler`` of the island's device family; None from the
+    factory = no telemetry)."""
+    import os  # noqa: PLC0415
+
+    from yeto.rl.elastic_client import LeaveReason  # noqa: PLC0415
+
+    from .sampler_resume import (  # noqa: PLC0415
+        RECLAIM_MARKER_ENV,
+        ReclaimWatcher,
+        SamplerMembership,
+        install_marker_signals,
+        new_incarnation,
+        reclaim_marker,
+        reclaim_requested,
+        resume_point,
+    )
+
+    env = os.environ if environ is None else environ
     config = island_config(spec)
-    emit = tape_writer(_require(spec, "event_tape"), config.sampler_id)
+    incarnation = incarnation or new_incarnation()
+    tape = incarnation_tape(_require(spec, "event_tape"), incarnation)
+    emit = tape_writer(tape, config.sampler_id)
     releases, buffer = build_stores(spec, environ)
     prompts, reward = build_prompts(spec), build_reward(spec)
     checks = PostLoadChecks(**dict(spec.get("checks") or {}))
+    reclaim_marker(env).unlink(missing_ok=True)  # a restarted machine keeps its /tmp
+    if env.get(RECLAIM_MARKER_ENV):
+        install_marker_signals(env)
+    buffer.refresh()
+    resume = resume_point(buffer.entries(), config.sampler_id)
+    from .resume import store_for  # noqa: PLC0415
+
+    member_store = store_for(str(spec.get("buffer_root") or spec["store"]), environ=environ)
+    membership = SamplerMembership(member_store, config.sampler_id, incarnation, resume, emit)
+    reclaimed = lambda: reclaim_requested(env)  # noqa: E731
+    island = None
+
+    def leave(reason: LeaveReason, **detail: Any) -> None:
+        version = None if island is None else island.follower.version
+        membership.leave(reason.name, policy_version=version, buffer_end=len(buffer), **detail)
+
     engine = build_engine(spec)
     if resource_sampler is None:
         from .telemetry import ResourceSampler  # noqa: PLC0415
@@ -237,11 +294,28 @@ def run(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
             return ResourceSampler(lambda event, **fields: sink(event, **fields)).start()
 
     telemetry = resource_sampler(emit)
+    watcher = ReclaimWatcher(reclaimed, lambda: leave(LeaveReason.PREEMPTED)).start()
     try:
         island = build_engine_sampler(config, engine=engine, releases=releases, buffer=buffer, emit=emit,
-                                      prompts=prompts, reward=reward, checks=checks)
-        return island.run()
+                                      prompts=prompts, reward=reward, checks=checks,
+                                      should_stop=reclaimed, incarnation=incarnation, resume=resume,
+                                      data_cursor=getattr(prompts, "cursor", None))
+        latest = releases.latest()
+        membership.join(tape=str(tape), latest_release=None if latest is None else
+                        {"seq": latest.seq, "policy_version": latest.version})
+        rounds = 0 if buffer.data_ended else island.run()
+        leave(LeaveReason.PREEMPTED if reclaimed() else LeaveReason.FINISHED, rounds=rounds,
+              dropped_groups=island.round.dropped_groups)
+        return rounds
+    except BaseException as error:
+        try:
+            leave(LeaveReason.PREEMPTED if reclaimed() else LeaveReason.INFRA_FAILED,
+                  error=f"{type(error).__name__}: {error}"[:300])
+        except Exception:  # noqa: BLE001 - the original error is the one to report
+            pass
+        raise
     finally:
+        watcher.stop()
         try:
             engine.stop()
         finally:

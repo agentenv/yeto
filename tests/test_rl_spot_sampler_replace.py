@@ -149,7 +149,7 @@ def test_a_writer_without_resume_writes_as_before(tmp_path):
     writer = br.SamplerRoundWriter(FileSampleBuffer(store, batch_size=1), "n0", incarnation="a",
                                    resume=False)
     writer.write_round(0, _round(0, 1), None)
-    writer.write_round(0, _round(0, 1), None)
+    writer.write_round(0, [("r0-again", _round(0, 1)[0][1])], None)  # payload names stay unique
     assert writer.seek(object(), shuffle=True) is None
     assert len(FileSampleBuffer(store, batch_size=1)) == 2
 

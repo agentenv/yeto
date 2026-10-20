@@ -66,9 +66,10 @@ def test_engine_sampler_entry_runs_the_island_from_a_spec(tmp_path):
     reader = FileSampleBuffer(CheckpointStore(tmp_path / "store"), batch_size=1)
     reader.refresh()
     assert len(reader.select("t", 10)) == 4  # 2 rounds x 2 prompts
-    events = [json.loads(line) for line in (tmp_path / "tape" / "events.jsonl").read_text().splitlines()]
+    [tape] = (tmp_path / "tape").glob("events.*.jsonl")  # one tape per incarnation
+    events = [json.loads(line) for line in tape.read_text().splitlines()]
     names = [e["event"] for e in events]
-    assert names[0] == "rl_sampler_start" and names.count("rl_sampler_engine_round") == 2
+    assert names[0] == "rl_sampler_start" and "rl_sampler_join" in names and names.count("rl_sampler_engine_round") == 2
     assert all(e["sampler_id"] == "ppu4" for e in events)
 
 

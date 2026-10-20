@@ -16,6 +16,13 @@ vllm-ascend on 910B. Per round (:class:`EngineRound`):
    (:class:`~.sampler_engine.Provenance`) in the index entry;
 6. write ``rl_sampler_engine_round`` (finish reasons, tokens, provenance key).
 
+Replacement (S25 G1C, the engine-sampler side of C1's :mod:`.sampler_resume`):
+each group's sample id carries the incarnation, the round and the prompt row,
+so a new incarnation never writes an earlier one's payload name; each index
+entry carries a :class:`~.sampler_resume.SamplerRound` record; a round already
+in the buffer is never generated or written again (:class:`~.sampler_resume.RoundGuard`);
+after the reclaim marker no group is written.
+
 :func:`build_engine_sampler` wires the island: the start checks, the engine
 start on the base weights with the post-load checks (:mod:`.sampler_checks`;
 a failure there stops the island), the follower and the loop. The caller
@@ -47,6 +54,7 @@ from .sampler_engine import (
     SamplingParams,
 )
 from .sampler_loop import SamplerLoop
+from .sampler_resume import RoundGuard, SamplerResume, SamplerRound
 
 ROUND_EVENT = "rl_sampler_engine_round"
 START_EVENT = "rl_sampler_start"
@@ -91,7 +99,15 @@ class EngineRound:
     def __init__(self, engine: SamplerEngine, writer: GroupWriter, *,
                  prompts: Callable[[int], Sequence[PromptItem]], reward: Reward,
                  sampling: SamplingParams, provenance: Provenance, emit: Callable[..., None],
-                 loop_guard: LoopGuard | None = None) -> None:
+                 loop_guard: LoopGuard | None = None, incarnation: str | None = None,
+                 resume: SamplerResume | None = None,
+                 data_cursor: Callable[[int], Mapping[str, int]] | None = None,
+                 reclaimed: Callable[[], bool] = lambda: False) -> None:
+        """``incarnation``: this process's id (``sampler_resume.new_incarnation``);
+        with it, sample ids are ``<sampler>-<incarnation>-r<round>-<prompt id>`` and
+        every entry carries its round record. ``resume``: where the earlier
+        incarnations got to (its rounds are refused). ``data_cursor(rollout_id)``:
+        the prompt source's position after the round drew its prompts."""
         self.engine = engine
         self.writer = writer
         self.prompts = prompts
@@ -100,9 +116,24 @@ class EngineRound:
         self.provenance = provenance
         self.emit = emit
         self.loop_guard = loop_guard
+        self.incarnation = None if incarnation is None else str(incarnation)
+        self.guard = None if resume is None else RoundGuard(resume)
+        self.data_cursor = data_cursor
+        self.reclaimed = reclaimed
+        self.dropped_groups = 0  # groups not written because the island is leaving
+
+    def _round_record(self, rollout_id: int, last: bool) -> dict[str, Any] | None:
+        if self.incarnation is None:
+            return None
+        cursor = None if self.data_cursor is None else self.data_cursor(rollout_id)
+        return SamplerRound(self.writer.sampler_id, self.incarnation, rollout_id,
+                            data_cursor=cursor, last=last).record()
 
     def __call__(self, rollout_id: int) -> None:
-        items = list(self.prompts(int(rollout_id)))
+        rollout_id = int(rollout_id)
+        if self.guard is not None:
+            self.guard.check(rollout_id)
+        items = list(self.prompts(rollout_id))
         version = self.engine.served_version()
         if version is None:
             raise SamplerEngineError("the engine serves no version; it cannot generate")
@@ -114,6 +145,7 @@ class EngineRound:
         record = self.provenance.to_record()
         finish: Counter[str] = Counter()
         tokens = 0
+        scored = []
         for position, (item, group) in enumerate(zip(items, groups)):
             if len(group) != self.sampling.n:
                 raise SamplerEngineError(f"prompt {item.prompt_id}: {len(group)} completions, "
@@ -128,11 +160,23 @@ class EngineRound:
                     item, completion, reward=self.reward(item, completion), version=version,
                     provenance=record, group_index=position,
                     index=position * self.sampling.n + j))
-            self.writer.write(samples, group_key=f"r{int(rollout_id)}-{item.prompt_id}",
-                              provenance=record)
-        self.emit(ROUND_EVENT, rollout_id=int(rollout_id), policy_version=version,
-                  groups=len(items), samples=sum(finish.values()), response_tokens=tokens,
-                  finish=dict(sorted(finish.items())), source=self.provenance.key())
+            scored.append((item, samples))
+        prefix = "" if self.incarnation is None else f"{self.incarnation}-"
+        written = 0
+        for position, (item, samples) in enumerate(scored):
+            if self.reclaimed():  # leaving: the replacement owns the shard from now on
+                self.dropped_groups += len(scored) - position
+                break
+            self.writer.write(samples, group_key=f"{prefix}r{rollout_id}-{item.prompt_id}",
+                              provenance=record,
+                              sampler_round=self._round_record(rollout_id, position == len(scored) - 1))
+            written += 1
+        if written and self.guard is not None:
+            self.guard.written(rollout_id)
+        self.emit(ROUND_EVENT, rollout_id=rollout_id, policy_version=version,
+                  groups=written, samples=sum(finish.values()), response_tokens=tokens,
+                  finish=dict(sorted(finish.items())), source=self.provenance.key(),
+                  dropped_groups=len(scored) - written)
 
 
 @dataclass
@@ -159,7 +203,12 @@ class EngineSamplerIsland:
     follower: PolicyFollower
     round: EngineRound
 
-    def run(self, start: int = 0) -> int:
+    resume: SamplerResume | None = None
+
+    def run(self, start: int | None = None) -> int:
+        """Rounds from ``start`` (default: the resume point, else 0)."""
+        if start is None:
+            start = 0 if self.resume is None else self.resume.next_rollout_id
         return self.loop.run(start)
 
 
@@ -168,7 +217,10 @@ def build_engine_sampler(config: EngineSamplerConfig, *, engine: SamplerEngine,
                          prompts: Callable[[int], Sequence[PromptItem]], reward: Reward,
                          checks: PostLoadChecks | None = None,
                          should_stop: Callable[[], bool] = lambda: False,
-                         sleep: Callable[[float], None] | None = None) -> EngineSamplerIsland:
+                         sleep: Callable[[float], None] | None = None,
+                         incarnation: str | None = None, resume: SamplerResume | None = None,
+                         data_cursor: Callable[[int], Mapping[str, int]] | None = None,
+                         ) -> EngineSamplerIsland:
     """Check the sampling against the engine, start it on the base weights,
     run the post-load checks, and return the wired island (module doc)."""
     sampling = config.sampling.check()
@@ -188,7 +240,8 @@ def build_engine_sampler(config: EngineSamplerConfig, *, engine: SamplerEngine,
     follower = PolicyFollower(releases, loader, version=int(config.base_version))
     engine_round = EngineRound(engine, GroupWriter(buffer, config.sampler_id), prompts=prompts,
                                reward=reward, sampling=sampling, provenance=provenance, emit=emit,
-                               loop_guard=config.loop_guard)
+                               loop_guard=config.loop_guard, incarnation=incarnation,
+                               resume=resume, data_cursor=data_cursor, reclaimed=should_stop)
     extra = {} if sleep is None else {"sleep": sleep}
     loop = SamplerLoop(follower=follower, buffer=buffer, generate=engine_round,
                        num_rollouts=int(config.num_rollouts),
@@ -196,7 +249,8 @@ def build_engine_sampler(config: EngineSamplerConfig, *, engine: SamplerEngine,
                        poll_s=config.poll_s, should_stop=should_stop,
                        min_round_s=config.min_round_s, loaded_fields=loader.loaded_fields,
                        ready=lambda: loader.ready, **extra)
-    return EngineSamplerIsland(loop=loop, loader=loader, follower=follower, round=engine_round)
+    return EngineSamplerIsland(loop=loop, loader=loader, follower=follower, round=engine_round,
+                               resume=resume)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
