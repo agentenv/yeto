@@ -206,3 +206,36 @@ def test_malformed_tool_call_is_a_trained_zero_not_an_abort(verl_loop, qwen, exc
         assert sum(out.response_mask) > 0
     else:
         assert sum(out.response_mask) == 0  # another exit cause stays an infrastructure abort
+
+
+def test_context_full_is_a_trained_zero_not_an_abort(verl_loop, qwen):
+    """The conversation outgrows the context: the proxy answers 409, Codex exits; the policy's budget (N10.9)."""
+    from yeto.rl.adapters.verl.rollout_engine import VerlRolloutEngine
+
+    loop_mod, _ = verl_loop
+
+    def run(max_model_len: int, client: FakeVerlClient):
+        engine = VerlRolloutEngine(max_model_len=max_model_len, identity=IDENTITY)
+        recorder = ProxyTokenRecorder(RecordsProxy(engine, qwen, model="policy", signed_sampling=SIGNED,
+                                                   max_chains=1))
+        agent = ExitOnErrorAgent()
+        loop = _make_loop(loop_mod, recorder, agent, prompt_length=4096, response_length=4096)
+        loop.server_manager = client
+
+        async def go():
+            try:
+                return await loop.run(VERL_SAMPLING, **ROW)
+            finally:
+                await recorder.aclose()
+
+        return asyncio.run(go()), agent
+
+    probe = FakeVerlClient(ScriptedModel(qwen, copy.deepcopy(SCRIPT)))
+    run(8192, probe)
+    second = probe.calls[1]["prompt_ids"]
+    # room for the second turn, not for the third prompt (which adds the tool output)
+    limit = len(second) + 40
+    out, agent = run(limit, FakeVerlClient(ScriptedModel(qwen, copy.deepcopy(SCRIPT))))
+    assert 409 in agent.statuses
+    assert out.extra_fields[OUTCOME_KEY] == "policy_limit" and out.reward_score == 0.0
+    assert "context_full" in out.extra_fields["outcome_reason"] and sum(out.response_mask) > 0

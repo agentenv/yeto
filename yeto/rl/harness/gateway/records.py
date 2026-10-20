@@ -85,8 +85,10 @@ class TurnRecord:
     engine returned it). ``stop_added``: a stop token the engine did not
     return, added with mask 0. ``render_diff``: first position where the
     stream differs from a fresh tokenization (None: aligned). ``parse_error``:
-    the completion is not valid model output for the template (the agent got
-    an HTTP 400 for this call; the sampled ids stay in the stream)."""
+    the policy failed after this completion: the completion is not valid
+    model output for the template (HTTP 400), or the next prompt no longer
+    fits the context (``context_full: ...``, HTTP 409).  The sampled ids stay
+    in the stream."""
 
     turn: int
     kind: str
@@ -303,7 +305,13 @@ class RecordingBackend:
         prompt = [*segment.token_ids, *pending.stop, *pending.tail]
         room = int(self.engine.max_model_len) - len(prompt)
         if room < 1:
-            raise ContextFull(f"prompt has {len(prompt)} tokens; max_model_len is {self.engine.max_model_len}")
+            message = f"prompt has {len(prompt)} tokens; max_model_len is {self.engine.max_model_len}"
+            # The policy filled its own context (a budget, like a token cap): mark it on the last
+            # sampled turn so the outer layer trains it as a 0 instead of an infrastructure abort.
+            if segment.turns:
+                segment.turns[-1].parse_error = f"context_full: {message}"
+            self.counters[session.trajectory_id]["context_full"] += 1
+            raise ContextFull(message)
         params = params.replace(max_tokens=min(params.max_tokens, room))
         version = self.engine.served_version()
         (group,) = await asyncio.to_thread(self.engine.generate_tokens, [prompt], params,

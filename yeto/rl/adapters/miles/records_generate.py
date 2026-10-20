@@ -26,7 +26,7 @@ Rollout-process environment (besides the Harbor/boat variables of
   YETO_RECORDS_PROXY_HOST/PORT/PUBLIC_BASE/SECRET_FILE   (``gateway.recorder``)
   YETO_RECORDS_TEMPLATE, YETO_RECORDS_TOKENIZER, YETO_RECORDS_MODEL,
   YETO_RECORDS_SAMPLING, YETO_RECORDS_MAX_MODEL_LEN, YETO_RECORDS_CARD
-                                (same meaning as ``adapters.verl.rollout_engine``)
+                                (``gateway.records_env``)
   YETO_SGLANG_ROUTER_URL        ``http://<ip>:<port>`` of Miles' router (default: from
                                 ``--sglang-router-ip`` / ``--sglang-router-port``)
 
@@ -164,7 +164,7 @@ class SGLangRouterEngine:
 
 def records_proxy_from_env() -> Any:
     """``YETO_RECORDS_PROXY`` callable: a RecordsProxy over Miles' router (module doc)."""
-    from yeto.rl.adapters.verl.rollout_engine import (
+    from yeto.rl.harness.gateway.records_env import (
         CARD_ENV,
         MAX_MODEL_LEN_ENV,
         MODEL_ENV,
