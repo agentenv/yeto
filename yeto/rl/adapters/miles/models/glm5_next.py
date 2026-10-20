@@ -50,7 +50,6 @@ _MODEL_ARGV: tuple[str, ...] = (
     "--v-head-dim", "256",
     "--kv-channels", "256",
     "--qk-layernorm",
-    "--num-experts", str(NUM_EXPERTS),
     "--moe-router-topk", "8",
     "--moe-router-score-function", "sigmoid",
     "--moe-router-pre-softmax",
@@ -93,6 +92,20 @@ def moe_layer_freq(num_layers: int = NUM_LAYERS, first_k_dense_replace: int = FI
     return "[" + ",".join(["0"] * first_k_dense_replace + ["1"] * (num_layers - first_k_dense_replace)) + "]"
 
 
+def checkpoint_geometry(config: dict) -> dict[str, int]:
+    """``num_layers``, ``first_k_dense_replace`` and ``num_experts`` of an HF
+    ``config.json`` (the text config of ``Glm5NextForConditionalGeneration``),
+    as :func:`model_argv` keywords; a key the config lacks keeps the default."""
+    text = config.get("text_config") or config
+    out = {}
+    for key, hf_key in (("num_layers", "num_hidden_layers"),
+                        ("first_k_dense_replace", "first_k_dense_replace"),
+                        ("num_experts", "n_routed_experts")):
+        if text.get(hf_key) is not None:
+            out[key] = int(text[hf_key])
+    return out
+
+
 def check_transformer_impl(transformer_impl: str) -> str:
     if transformer_impl not in TRANSFORMER_IMPLS:
         raise ValueError(f"transformer_impl must be one of {TRANSFORMER_IMPLS}, got {transformer_impl!r}")
@@ -100,11 +113,16 @@ def check_transformer_impl(transformer_impl: str) -> str:
 
 
 def model_argv(*, num_layers: int = NUM_LAYERS, first_k_dense_replace: int = FIRST_K_DENSE_REPLACE,
-               transformer_impl: str = TRANSFORMER_ENGINE) -> list[str]:
+               num_experts: int = NUM_EXPERTS, transformer_impl: str = TRANSFORMER_ENGINE) -> list[str]:
     """The model arguments of the recipe (module doc) and the run arguments the
-    model needs (:data:`RUN_ARGV`)."""
+    model needs (:data:`RUN_ARGV`). ``num_layers``, ``first_k_dense_replace`` and
+    ``num_experts`` default to GLM5.3-Flash; a cut-down checkpoint (e.g. Miles'
+    4-layer CI model) passes its own (:func:`checkpoint_geometry`)."""
     impl = check_transformer_impl(transformer_impl)
+    if int(num_experts) < 1:
+        raise ValueError(f"num_experts must be >= 1, got {num_experts}")
     return ["--spec", *SPEC, "--num-layers", str(int(num_layers)), *_MODEL_ARGV,
+            "--num-experts", str(int(num_experts)),
             "--moe-layer-freq", moe_layer_freq(num_layers, first_k_dense_replace),
             *(TE_ONLY_ARGV if impl == TRANSFORMER_ENGINE else LOCAL_ARGV), *RUN_ARGV]
 

@@ -1,0 +1,131 @@
+# Stage-1 mini rehearsal (S25 T-G1) on Modal H100: the same plan schema and
+# the same generated commands as glm53-flash-ppu.yaml; only the nodes
+# (Modal containers) and the store (a Modal Volume through the yeto store
+# hook, not OSS) differ. Model: Miles' 4-layer GLM5.3-Flash CI checkpoint cut
+# to 32 routed experts per MoE layer (tools/probes/s25_g1/make_mini.py).
+#
+#   yeto-stage1 plan examples/stage1/glm5next-mini-modal.yaml
+#   modal run tools/probes/s25_g1/modal_app.py::...   (the driver reads this plan)
+
+run_id: s25-g1-mini
+inventory: modal-mini-inventory.yaml
+rounds: 3
+seed: 17
+
+rendezvous:
+  modal-trainer: 127.0.0.1
+  modal-sampler: 127.0.0.1
+
+roles:
+  trainer: [modal-trainer]
+  sampler: [modal-sampler]
+
+model:
+  name: GLM5.3-Flash-4layer-e32
+  architecture: glm5_next
+  num_layers: 4                        # KDA, DSA, KDA, DSA
+  first_k_dense_replace: 1
+  num_experts: 32                      # cut from 288 (make_mini.py)
+  params_b: 5.3                        # 推算: 10.5 GB bf16 / 2
+  expert_params_b: 2.4                 # 3 MoE layers x 32 x 3 x 4096 x 2048
+  bf16_source:
+    revision: 7fb7883207fe73ea04430ac392f6ffe2b9f936c4   # CharyZeng/GLM-5.3-Flash-4layer, then cut
+    origin: hf://CharyZeng/GLM-5.3-Flash-4layer@7fb7883207fe73ea04430ac392f6ffe2b9f936c4
+    staged: modal-volume://yeto-s25-g1-models/glm5next-mini-bf16-7fb7883
+    local_dir: /data/models/glm5next-mini-bf16-7fb7883
+  sampler_initial:                     # round 0: our N8.5 converter on the bf16 mini model
+    repo: local/glm5next-mini-mxfp4-r0-7fb7883
+    revision: 7fb7883
+    staged: modal-volume://yeto-s25-g1-models/glm5next-mini-mxfp4-r0-7fb7883
+    local_dir: /data/models/glm5next-mini-mxfp4-r0-7fb7883
+
+quant:
+  scheme: mxfp4-g32-rtn
+  format: mxfp4-pack-quantized
+  release_dir: policy-releases-mxfp4-g32-rtn
+  expected_expert_matrices: 288        # 3 MoE layers x 32 experts x (gate, up, down)
+  frozen_pattern: '^model\.visual\.'   # Miles trains the text model only; the vision tower stays the base
+
+store: /data/store/s25-g1
+store_backend: modal-volume            # the only difference from OSS: the store hook and its Volume
+store_volume: yeto-s25-g1-store
+store_access:
+  head: direct
+
+images:
+  sampler: ghcr.io/michaellchung/yeto-miles-ports@sha256:5b9dc2a9e6e315d73dabfbc6faae428b59cc01aabec6189645a5c8c80d6e3721
+  trainer: ghcr.io/michaellchung/yeto-miles-ports@sha256:5b9dc2a9e6e315d73dabfbc6faae428b59cc01aabec6189645a5c8c80d6e3721
+  docker_device_args: [--gpus, all]    # unused on Modal; the containers get the GPUs
+
+trainer:
+  backend: miles
+  miles:
+    commit: 1618b5c38db80e17ec928cfa47fe832cb18565fc   # s25-distopt, checked out in the image
+    megatron: radixark/Megatron-LM@a84b105
+    mbridge: image
+    workdir: /root/miles
+    tp: 1
+    sequence_parallel: false
+    pp: 1
+    pp_layers: [4]
+    cp: 1
+    ep: 2
+    etp: 1
+    optimizer_offload_fraction: 1.0
+    memory_estimate:                   # 推算; `plan` checks them
+      weights_grads_gib_per_card: 22.9
+      host_optimizer_gib_per_node: 59.2
+    transformer_impl: transformer_engine
+    recompute: full
+    max_tokens_per_gpu: 8192
+    lr: 1.0e-6
+  verl:
+    commit: null
+    strategy: fsdp2
+    fsdp_size: 2
+    ulysses: 1
+    param_offload: false
+    optimizer_offload: true
+    lr: 1.0e-6
+
+sampler:
+  engine: sglang
+  engine_version: 0.5.21.dev70+g2fa8801
+  python: python3
+  topology: tp1
+  tp: 1
+  precision: mxfp4
+  max_model_len: 4096
+  port: 30000
+  moe_runner_backend: triton
+  hierarchical_cache: false
+  nextn: false
+  renames_weight_packed: true          # the yeto hook in the image renames (sglang_load_report)
+  load_report: true                    # the hook reports loaded expert matrices (post-load check 1)
+  in_place_reload: false
+  extra_env:
+    PYTHONPATH: /root/sky_workdir
+  checks:
+    require_fixed_answers: false       # a cut 4-layer model cannot answer GSM8K
+    fixed_max_tokens: 64
+
+sampling:
+  max_tokens: 512
+  max_prompt_len: 512
+  temperature: 1.0
+  top_p: 1.0
+  top_k: -1
+  repetition_penalty: 1.0
+  frequency_penalty: 0.0
+  presence_penalty: 0.0
+
+task:
+  data: zhuzilin/gsm8k
+  data_revision: 0cbd9f31d91ac21a7613dcbc7fef992adac459ae
+  reward: yeto.rl.gsm8k_reward:score
+  rollout_batch_size: 4
+  n_samples_per_prompt: 4
+  prompts_jsonl: /data/models/datasets/gsm8k-0cbd9f3/train.jsonl
+  input_key: messages
+  label_key: label
+  prompt_format: chat

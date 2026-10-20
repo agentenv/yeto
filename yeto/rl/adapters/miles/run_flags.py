@@ -389,6 +389,13 @@ _ISLAND = (
     island_flag("--wan-streams", type=int, default=4),
     island_flag("--miles-root", required=True),
     island_flag(
+        "--miles-commit",
+        default=None,
+        metavar="SHA",
+        help="Full commit the --miles-root checkout must be at (default: the pinned "
+        "MILES_NEXT_COMMIT); a run whose image carries another Miles commit names it here",
+    ),
+    island_flag(
         "--rl-expected-algorithm-sha256",
         default=None,
         help="algorithm hash the launcher expects every island to build (ports)",

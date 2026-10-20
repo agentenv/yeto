@@ -337,3 +337,27 @@ def test_cli_template_convert_compare(world, capsys):
     assert main(["compare", str(out), str(world["original"]), "--match", r"experts\.\d+\."]) == 0
     rep = json.loads(capsys.readouterr().out)
     assert rep["fp4_match_share"] == 1.0 and rep["e8m0_match_share"] == 1.0 and rep["tensors"] == 3 * 3 * E  # packed + scale, plus the BF16 MTP experts
+
+
+def test_reference_checkpoint_serves_as_template(world):
+    # stage 1 passes the round-0 MXFP4 export (no layout.json) as --template
+    out = world["tmp"] / "out-ckpt-template"
+    requantize_checkpoint(world["source"], world["original"], out, AwqSmoothing.none())
+    rep = compare_checkpoints(out, world["original"])
+    assert rep["unequal_tensors"] == 0 and rep["fp4_match_share"] == 1.0
+
+
+def test_frozen_tensors_come_from_the_base_only_when_named(world):
+    partial = world["tmp"] / "release-without-lm-head"
+    _write_ckpt(partial, {n: t for n, t in world["src"].items() if n != "lm_head.weight"},
+                lambda n: "model-00001-of-00001.safetensors")
+    with pytest.raises(LayoutError, match="1 missing"):
+        requantize_checkpoint(partial, world["template"], world["tmp"] / "a", AwqSmoothing.none())
+    with pytest.raises(LayoutError, match="1 missing"):
+        requantize_checkpoint(partial, world["template"], world["tmp"] / "b", AwqSmoothing.none(),
+                              frozen=(world["source"], r"^model\.visual\."))
+    out = world["tmp"] / "c"
+    stats = requantize_checkpoint(partial, world["template"], out, AwqSmoothing.none(),
+                                  frozen=(world["source"], r"^lm_head\."))
+    assert stats["frozen_from_base"] == 1
+    assert compare_checkpoints(out, world["original"])["unequal_tensors"] == 0

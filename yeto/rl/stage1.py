@@ -179,6 +179,27 @@ class Expanded:
         }
 
 
+# Where the run store lives: Alibaba OSS (stage 1 on PPU), or a Modal Volume
+# mounted at the store path in every container (the Modal rehearsal, S25 T-G1),
+# reached through the yeto store hook (resume.STORE_IMPL_ENV).
+STORE_BACKENDS = {"oss": None, "modal-volume": "yeto.cloud.modal_ckpt_store:store_from_env"}
+
+
+def store_env(plan: Stage1Plan) -> dict[str, str]:
+    """Environment every node needs for the store backend (none for OSS here: the
+    nodes' ossutil/OSS configuration is set up on the node, runbook S4)."""
+    backend = str(plan.doc.get("store_backend") or "oss")
+    if STORE_BACKENDS.get(backend) is None:
+        return {}
+    from yeto.cloud.modal_ckpt_store import MODAL_VOLUME_ENV  # noqa: PLC0415
+    from yeto.rl.engine.resume import STORE_IMPL_ENV  # noqa: PLC0415
+
+    volume = str(plan.doc.get("store_volume") or "")
+    if not volume:
+        raise Stage1Error("plan: store_backend modal-volume needs store_volume (the Volume name)")
+    return {STORE_IMPL_ENV: STORE_BACKENDS[backend], MODAL_VOLUME_ENV: volume}
+
+
 def run_store(plan: Stage1Plan) -> str:
     """The run directory on the store: ``<store>/<run_id>``."""
     return f"{str(_get(plan.doc, 'store', 'plan')).rstrip('/')}/{plan.run_id}"
@@ -236,12 +257,13 @@ def megatron_memory(model: Mapping[str, Any], miles: Mapping[str, Any], layout: 
     if hf_config is not None:
         hf = shape_from_hf_config(json.loads(Path(hf_config).read_text()))
         shape = dataclasses.replace(hf, params=params, expert_params=experts,
-                                    num_experts=hf.num_experts or glm5_next.NUM_EXPERTS)
+                                    num_experts=hf.num_experts or int(model.get("num_experts", glm5_next.NUM_EXPERTS)))
     else:
         shape = ModelShape(params=params, largest_layer_params=params // int(model["num_layers"]),
                            num_layers=int(model["num_layers"]), hidden_size=glm5_next.HIDDEN_SIZE,
                            vocab_size=glm5_next.VOCAB_SIZE, expert_params=experts,
-                           num_experts=glm5_next.NUM_EXPERTS, source="stage-1 plan + glm5_next recipe")
+                           num_experts=int(model.get("num_experts", glm5_next.NUM_EXPERTS)),
+                           source="stage-1 plan + glm5_next recipe")
     node = trainers[0]
     base = TrainPlan(framework="megatron", cards=sum(n.cards_per_node for n in trainers),
                      cards_per_node=node.cards_per_node, hbm_gib=node.hbm_gib,
@@ -326,9 +348,12 @@ def _sampler_engine(plan: Stage1Plan, node: Node):
         quant_scheme=str(q["scheme"]), topology=str(s["topology"]),
         max_model_len=int(s["max_model_len"]), host="0.0.0.0", port=int(s["port"]),
         extra_args=tuple(extra), expected_format=str(q["format"]),
-        in_place_reload=bool(s.get("in_place_reload")))
+        in_place_reload=bool(s.get("in_place_reload")), python=str(s.get("python") or "python"),
+        extra_env={str(k): str(v) for k, v in (s.get("extra_env") or {}).items()})
     options = SGLangOptions(tp=int(s["tp"]), nextn=bool(s.get("nextn")),
-                            renames_weight_packed=bool(s.get("renames_weight_packed")))
+                            renames_weight_packed=bool(s.get("renames_weight_packed")),
+                            load_report_dir=(f"{state_dir_of(plan)}/sampler-{node.name}/load-report"
+                                             if s.get("load_report") else None))
     return SGLangServerEngine(config, options)
 
 
@@ -415,7 +440,7 @@ def expand(plan: Stage1Plan, *, hf_config: str | Path | None = None) -> Expanded
     miles = _section(trainer_cfg, "miles")
     layout = megatron_layout(miles, cards, per_node)
     common_env = {DEVICE_FAMILY_ENV: trainers[0].device_family, "YETO_RUN_ID": plan.run_id,
-                  "YETO_RL_STORE": store, "HF_HUB_OFFLINE": "1"}
+                  "YETO_RL_STORE": store, "HF_HUB_OFFLINE": "1", **store_env(plan)}
     trainer_env = {**common_env, "TORCHINDUCTOR_COMPILE_THREADS": "1"}
     model_dir = str(model["bf16_source"]["local_dir"])
     state_dir = state_dir_of(plan)
@@ -435,6 +460,7 @@ def expand(plan: Stage1Plan, *, hf_config: str | Path | None = None) -> Expanded
                    "--tensor-parallel", str(layout["tp"]), "--pipeline-parallel", str(layout["pp"]),
                    "--expert-parallel", str(layout["ep"]),
                    "--miles-root", str(miles["workdir"]),
+                   *(("--miles-commit", str(miles["commit"])) if len(str(miles["commit"])) == 40 else ()),
                    "--trust-remote-code",
                    "--learner-id", "0", "--num-learners", "1", "--rl-single-island-no-sync",
                    "--global-rounds", str(int(plan.doc["rounds"])),
@@ -449,7 +475,10 @@ def expand(plan: Stage1Plan, *, hf_config: str | Path | None = None) -> Expanded
                    "--event-tape", f"{state_dir}/events.jsonl", "--audit-dir", f"{state_dir}/audit",
                    *_provenance_args(str(task["reward"]))]
     try:
-        model_args = glm5_next.model_argv(num_layers=int(model["num_layers"]), transformer_impl=impl)
+        model_args = glm5_next.model_argv(
+            num_layers=int(model["num_layers"]),
+            first_k_dense_replace=int(model.get("first_k_dense_replace", glm5_next.FIRST_K_DENSE_REPLACE)),
+            num_experts=int(model.get("num_experts", glm5_next.NUM_EXPERTS)), transformer_impl=impl)
     except ValueError as error:
         raise Stage1Error(f"plan: trainer.miles.transformer_impl: {error}") from None
     out.trainer = {
@@ -490,7 +519,11 @@ def expand(plan: Stage1Plan, *, hf_config: str | Path | None = None) -> Expanded
 
     # The release directory follows the template's scheme (quant.schemes); the
     # plan's release_dir is checked against it, not passed to the re-quantizer.
-    argv = requant_argv(store, str(model["sampler_initial"]["local_dir"]), python="python3")
+    # quant.frozen_pattern: tensors the trainer does not export (read from the bf16 source)
+    frozen = quant.get("frozen_pattern")
+    argv = requant_argv(store, str(model["sampler_initial"]["local_dir"]), python="python3",
+                        frozen_base=str(model["bf16_source"]["local_dir"]) if frozen else None,
+                        frozen_pattern=str(frozen) if frozen else None)
     out.requant = {"node": trainers[0].name if trainers else None, "scheme": quant["scheme"],
                    "format": quant["format"], "argv": argv, "loop_argv": [*argv, "--loop"]}
 
@@ -537,7 +570,10 @@ def sampler_spec(plan: Stage1Plan, node: Node, engine: Any) -> dict[str, Any]:
                     "groups_per_round": int(task["rollout_batch_size"]),
                     "format": str(task.get("prompt_format", "chat")), "trust_remote_code": True},
         "reward": str(task["reward"]), "reward_kind": "miles",
-        "checks": {"expected_expert_matrices": int(quant["expected_expert_matrices"])},
+        # sampler.checks: further PostLoadChecks overrides (e.g. require_fixed_answers for a
+        # cut-down rehearsal model); the expected expert count always comes from quant
+        "checks": {**dict(plan.section("sampler").get("checks") or {}),
+                   "expected_expert_matrices": int(quant["expected_expert_matrices"])},
         "event_tape": f"{state_dir}/sampler-{node.name}/events.jsonl",
     }
 
@@ -729,7 +765,8 @@ def check(plan: Stage1Plan, out: Expanded) -> list[str]:
     if f"tp{int(sampler_cfg['tp'])}" != sampler_cfg["topology"]:
         errors.append(f"sampler topology {sampler_cfg['topology']} does not match TP {sampler_cfg['tp']}")
     image = str(plan.section("images").get("sampler") or "")
-    if not image.endswith(f":v{sampler_cfg['engine_version']}"):
+    # a tag must name the engine version; a digest pins the image itself (the version is recorded in the plan)
+    if not image.endswith(f":v{sampler_cfg['engine_version']}") and "@sha256:" not in image:
         errors.append(f"sampler image {image!r} does not carry engine version v{sampler_cfg['engine_version']}")
     if int(sampler_cfg["max_model_len"]) < int(sampling["max_prompt_len"]) + int(sampling["max_tokens"]):
         errors.append("sampler max_model_len is shorter than max_prompt_len + max_tokens")
@@ -749,8 +786,13 @@ def check(plan: Stage1Plan, out: Expanded) -> list[str]:
 
     # Store.
     store = out.store["run"]
-    if not store.startswith("oss://"):
+    backend = str(plan.doc.get("store_backend") or "oss")
+    if backend not in STORE_BACKENDS:
+        errors.append(f"store_backend {backend!r} is not one of {sorted(STORE_BACKENDS)}")
+    elif backend == "oss" and not store.startswith("oss://"):
         errors.append(f"store {store!r} is not an oss:// URI (stage 1: Alibaba OSS)")
+    elif backend == "modal-volume" and not store.startswith("/"):
+        errors.append(f"store {store!r}: a modal-volume store is the absolute mount path in the containers")
     if not store.endswith("/" + plan.run_id):
         errors.append("store run directory does not end with the run id")
     bucket = store.split("/")[2] if store.startswith("oss://") else None
