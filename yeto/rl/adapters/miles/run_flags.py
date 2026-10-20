@@ -315,9 +315,27 @@ _ISLAND = (
     island_flag("--parameter-layout-sha256", default=None),
     island_flag(
         "--sweep-push-dtype",
-        choices=("f32", "bf16"),
+        choices=("f32", "bf16", "int8"),
         default="f32",
         help="full-parameter sweep: wire dtype of pushed outer deltas (syncer masters stay f32)",
+    ),
+    island_flag(
+        "--sweep-push-int8-block",
+        type=int,
+        default=128,
+        help="full-parameter sweep, int8 pushes: values per f32 absmax scale",
+    ),
+    island_flag(
+        "--sweep-overlap",
+        action="store_true",
+        help="full-parameter sweep: train the next round while the sweep syncs, then "
+        "rebase onto the new global weights (needs --rl-max-policy-age >= 1)",
+    ),
+    island_flag(
+        "--bcast-delta",
+        action="store_true",
+        help="strict-avg / full-parameter sweep: accept bf16 downlink deltas against the "
+        "shared f32 anchor (the syncer runs --bcast-delta-full-every)",
     ),
     island_flag(
         "--syncer-profile-sha256",

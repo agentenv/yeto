@@ -814,7 +814,13 @@ def _dense_full_sync_config(
 
     from yeto.rl.adapters.miles.full_parameter.role_stream import RoleStreamConfig
     from yeto.rl.adapters.miles.full_parameter.session import FullParameterSyncConfig
+    from yeto.rl.engine.sync_overlap import required_policy_age
     from yeto.rl.local_learner import ComponentIdentity
+
+    overlap = bool(getattr(args, "sweep_overlap", False))
+    if overlap and int(getattr(args, "rl_max_policy_age", 0) or 0) < required_policy_age(0):
+        raise ValueError("--sweep-overlap rollouts are one outer step stale: it needs "
+                         f"--rl-max-policy-age >= {required_policy_age(0)}")
 
     actor = RoleStreamConfig(
         algorithm="grpo",
@@ -838,7 +844,10 @@ def _dense_full_sync_config(
         pipeline_depth=1,
         algorithm_spec_sha256=algorithm_spec_sha256,
         wan_streams=args.wan_streams,
-        push_bf16=getattr(args, "sweep_push_dtype", "f32") == "bf16",
+        push_dtype=getattr(args, "sweep_push_dtype", "f32"),
+        push_int8_block=int(getattr(args, "sweep_push_int8_block", 128)),
+        bcast_delta=bool(getattr(args, "bcast_delta", False)),
+        overlap=overlap,
     )
     return FullParameterSyncConfig((actor,), sweep=True)
 
@@ -2099,6 +2108,7 @@ def run_miles(
                 algorithm_semantic_sha256=algorithm_semantic_sha256,
                 code_pack_digest=code_pack_digest,
                 compat_group=_island_compat_group(args),
+                bcast_delta=bool(getattr(args, "bcast_delta", False)),
             )
             if getattr(args, "rl_island_scheduling", "legacy") == "elastic":
                 # rl-inter-island-scheduling 0.15 (legacy sets nothing)

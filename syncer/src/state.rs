@@ -146,6 +146,8 @@ pub struct GlobalState {
     pub delta_correction: Option<merge::Heloco>,
     /// Spectrum flattener. Torch mode owns one persistent child process.
     iso_backend: IsoBackend,
+    /// bf16 downlink anchors (S26 E3); in memory only, never checkpointed.
+    pub downlink: Option<std::sync::Mutex<crate::downlink::DownlinkAnchors>>,
 }
 
 /// A merge whose deterministic learner reduction has completed but whose
@@ -344,6 +346,7 @@ impl GlobalState {
             wire_dtype,
             delta_correction: None,
             iso_backend: IsoBackend::start(iso_backend_config)?,
+            downlink: None,
         })
     }
 

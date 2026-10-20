@@ -81,6 +81,11 @@ class RoleStream(Protocol):
     def staged_fragment_versions(self) -> tuple[tuple[int, int], ...]: ...
     def has_staged_broadcast(self, fragment_id: int, version: int) -> bool: ...
     async def apply_staged_broadcast(self, fragment_id: int, version: int) -> tuple[int, ...]: ...
+    # S26 E3 sync/train overlap (profile.overlap) only:
+    #   complete_local_round(..., hold_submission=True) keeps the round base and
+    #   the previous submission; apply_staged_broadcast(..., rebase=True) applies
+    #   G + (current - base) with G as the anchor; finish_rebase() makes the
+    #   rebased cut the submission; mark_round_base() pins the next round base.
     async def wait_and_apply_final(self) -> None: ...
     def acknowledge_final(self) -> None: ...
     def discard_detached_submission_cut(self) -> None: ...
@@ -99,6 +104,8 @@ class FullParameterSyncProfile:
     wait_timeout: float
     poll_seconds: float
     sweep: bool = False
+    # S26 E3: train round k+1 while sweep k syncs; rebase at the next boundary.
+    overlap: bool = False
 
     def __post_init__(self) -> None:
         if not self.roles or len(set(self.roles)) != len(self.roles):
@@ -107,6 +114,13 @@ class FullParameterSyncProfile:
             raise ValueError("the actor is the published role and must come first")
         if self.sweep and (self.roles != ("actor",) or self.local_horizon != 1):
             raise ValueError("a dense strict sweep has one actor role and H=1")
+        if self.overlap and not self.sweep:
+            raise ValueError("sync/train overlap needs the dense strict sweep")
+
+    @property
+    def total_rounds(self) -> int:
+        """Local rounds of a sweep profile (one sweep per round)."""
+        return self.total_fragment_steps // self.fragments
 
     @property
     def effective_pipeline_depth(self) -> int:
@@ -131,6 +145,7 @@ class FullParameterSyncProfile:
             wait_timeout=min(config.wait_timeout for config in configs.values()),
             poll_seconds=min(config.poll_seconds for config in configs.values()),
             sweep=sweep,
+            overlap=bool(getattr(first, "overlap", False)),
         )
 
 
@@ -389,9 +404,12 @@ class RolePairing:
         step, fragment_id, _base = key
         if not pair.complete:
             raise RuntimeError("broadcast arrived before every paired PUSH was retained")
-        results = await asyncio.gather(
-            *(stream.apply_staged_broadcast(fragment_id, step) for stream in self.streams.values())
-        )
+        if self.profile.overlap:
+            calls = (stream.apply_staged_broadcast(fragment_id, step, rebase=True)
+                     for stream in self.streams.values())
+        else:
+            calls = (stream.apply_staged_broadcast(fragment_id, step) for stream in self.streams.values())
+        results = await asyncio.gather(*calls)
         for role, fragments in zip(self.streams, results, strict=True):
             applied[role].extend(fragments)
             if self.streams[role].fragment_versions[fragment_id] != step:
@@ -509,6 +527,8 @@ class FullParameterSync:
         self.closed = False
         self._driver: IslandDriver | None = None
         self._timing = SyncTiming(None, None)  # L5.6, set by each boundary
+        # Overlap: fragment versions before the sweep still in flight.
+        self._pending_sweep: tuple[int, ...] | None = None
 
     @property
     def actor(self) -> RoleStream:
@@ -539,6 +559,8 @@ class FullParameterSync:
         return SyncBoundary(state=state, stop=self.terminal)
 
     async def _boundary(self, rollout_id: int) -> bool:
+        if self.pairing.profile.overlap:
+            return await self._overlap_boundary(rollout_id)
         pairing = self.pairing
         trajectories = self.trajectories(rollout_id)
         await pairing.gather_roles(
@@ -562,6 +584,53 @@ class FullParameterSync:
             return True
         for stream in pairing.streams.values():
             stream.discard_detached_submission_cut()
+        return False
+
+    async def _overlap_boundary(self, rollout_id: int) -> bool:
+        """Streaming-DiLoCo overlap (S26 E3; one more outer step of staleness).
+
+        Round k's delta (``current - base``) is pushed at boundary k and the
+        island trains round k+1 at once. At boundary k+1 the island first
+        waits for sweep k (``G_k``), then rebases its trainer in place:
+        ``theta <- G_k + (theta_local_{k+1} - base_k)`` with ``G_k`` as the
+        anchor, so the next push is exactly round k+1's progress and round
+        k's delta is never counted twice. The terminal round waits for the
+        final cut like the strict sweep."""
+
+        pairing = self.pairing
+        trajectories = self.trajectories(rollout_id)
+        hold = self._pending_sweep is not None
+        await pairing.gather_roles(
+            lambda _role, stream: stream.complete_local_round(
+                rollout_id=rollout_id, trajectories=trajectories, hold_submission=hold
+            )
+        )
+        wait_ts = unix_now()
+        if hold:
+            await self._wait_for_sweep(self._pending_sweep)
+            self._pending_sweep = None
+            if not pairing.any_finalizing:
+                for stream in pairing.streams.values():
+                    stream.finish_rebase()
+        rebased_ts = unix_now()
+        if pairing.any_finalizing:
+            await pairing.finish_without_more_training()
+            return True
+        before = pairing.fragment_versions()
+        pairing.submit_ready()
+        submit_ts = unix_now()
+        if rollout_id + 1 >= pairing.profile.total_rounds:
+            # Terminal round: nothing trains after it, so wait for the cut.
+            await pairing.commit_staged_broadcasts()
+            await self._wait_for_sweep(before)
+            self._timing = SyncTiming(submit_ts, unix_now())
+            await pairing.finish_without_more_training()
+            return True
+        self._pending_sweep = before
+        for stream in pairing.streams.values():
+            stream.mark_round_base()
+        # This boundary blocked only on the previous sweep (wait + rebase).
+        self._timing = SyncTiming(wait_ts, rebased_ts if hold else None)
         return False
 
     async def _wait_for_sweep(self, before: tuple[int, ...]) -> None:

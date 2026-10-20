@@ -97,6 +97,10 @@ pub struct Config {
     /// are unchanged, so this is deliberately not part of the semantic
     /// profile hash.
     pub async_checkpoint: bool,
+    /// S26 E3: full-f32 refresh period of bf16 downlink deltas (sessions
+    /// with `DTYPE_FLAG_BCAST_DELTA`). Wire encoding only: merges, versions
+    /// and checkpoints are unchanged, so it is not in the profile hash.
+    pub bcast_delta_full_every: Option<u64>,
     pub resume: bool,
     /// Create the adjacent final marker only for a completed terminal cut.
     pub mark_final_checkpoint: bool,
@@ -746,6 +750,9 @@ fn validate_config(cfg: &Config) -> Result<()> {
             );
         }
     }
+    if matches!(cfg.bcast_delta_full_every, Some(n) if n < 2) {
+        bail!("--bcast-delta-full-every must be at least 2");
+    }
     if cfg.async_checkpoint {
         if cfg.policy_sweep_fragments.is_none() {
             bail!("--async-checkpoint requires --policy-sweep-fragments");
@@ -1015,11 +1022,7 @@ fn negotiated_payload_limits(layout: &Layout, dtype: u8) -> Result<(u64, u64)> {
     for fragment in &layout.fragments {
         let numel = fragment.numel()?;
         let init_bytes = tensor_nbytes(bulk_dtype(dtype), numel)? as u64;
-        let delta_bytes = if dtype == DTYPE_Q4 {
-            q4_nbytes(numel)?
-        } else {
-            tensor_nbytes(push_dtype(dtype), numel)?
-        } as u64;
+        let delta_bytes = max_push_nbytes(dtype, numel)? as u64;
         max_init = max_init.max(
             4u64.checked_add(init_bytes)
                 .context("INIT_PARAMS payload limit overflow")?,
@@ -1164,7 +1167,7 @@ fn parse_hello(payload: &[u8], expected_learners: u32) -> Result<ParsedHello> {
         bail!("connection generation must be nonzero");
     }
     let dtype = r.u8()?;
-    if !matches!(dtype, DTYPE_F32 | DTYPE_BF16 | DTYPE_Q4 | DTYPE_F32_PUSH_BF16) {
+    if !valid_session_dtype(dtype) {
         bail!("unsupported session dtype {dtype}");
     }
     let num_fragments = r.u32()?;
@@ -1735,23 +1738,9 @@ async fn dispatch_inner(
                 .with_context(|| format!("PUSH_FRAGMENT for unknown fragment {fragment_id}"))?;
             let numel = fragment.numel()?;
             let bytes = r.rest();
-            let expected = if group.dtype == DTYPE_Q4 {
-                q4_nbytes(numel)?
-            } else {
-                tensor_nbytes(push_dtype(group.dtype), numel)?
-            };
-            if bytes.len() != expected {
-                bail!(
-                    "PUSH_FRAGMENT fragment {fragment_id} has {} delta bytes, expected {expected}",
-                    bytes.len()
-                );
-            }
             let mut outer_gradient = Vec::new();
-            if group.dtype == DTYPE_Q4 {
-                decode_q4(bytes, numel, &mut outer_gradient)?;
-            } else {
-                decode_tensor(push_dtype(group.dtype), bytes, &mut outer_gradient)?;
-            }
+            decode_push(group.dtype, bytes, numel, &mut outer_gradient)
+                .with_context(|| format!("PUSH_FRAGMENT fragment {fragment_id}"))?;
             // Every wire dtype carries learner_delta = local - raw_anchor.
             // Merge math consumes the corresponding outer gradient with the
             // opposite sign and never reconstructs a full learner parameter.
@@ -1897,6 +1886,17 @@ async fn send_fragment_until_cutoff(
     dtype: u8,
     budget_cutoff: &BudgetCutoff,
 ) -> Result<bool> {
+    if let Some(encoded) = recovery_bcast(st, p, msg_type) {
+        return send_tensor_until_cutoff(
+            group,
+            msg_type,
+            &encoded.prefix,
+            encoded.dtype,
+            &encoded.values,
+            budget_cutoff,
+        )
+        .await;
+    }
     let mut prefix = [0u8; 12];
     prefix[..4].copy_from_slice(&(p as u32).to_le_bytes());
     prefix[4..].copy_from_slice(&st.versions[p].to_le_bytes());
@@ -1909,6 +1909,17 @@ async fn send_fragment_until_cutoff(
         budget_cutoff,
     )
     .await
+}
+
+/// A BCAST outside publication (initial cut, HELLO/reconnect recovery) on a
+/// bf16-downlink session: always FULL, carrying the shared anchor.
+fn recovery_bcast(st: &GlobalState, p: usize, msg_type: u8) -> Option<crate::downlink::EncodedBcast> {
+    if msg_type != MSG_BCAST_FRAGMENT {
+        return None;
+    }
+    st.downlink
+        .as_ref()
+        .map(|anchors| anchors.lock().unwrap().resend(p, st.versions[p], &st.params[p]))
 }
 
 async fn send_pull_until_cutoff(
@@ -3481,16 +3492,31 @@ async fn publish_round(
     // its exact f32 cut immediately after the scheduler reaches quiescence.
     if t < cfg.total_steps {
         let dtype = bulk_dtype(st.wire_dtype);
+        // bf16 downlink: encode this version once (advancing the shared
+        // anchor) and send the same bytes to every learner.
+        let published = match &st.downlink {
+            Some(anchors) => Some(anchors.lock().unwrap().publish(p, st.versions[p], &st.params[p])?),
+            None => None,
+        };
         for group in current_groups(registry) {
-            match send_fragment_until_cutoff(
-                st,
-                &group,
-                p,
-                MSG_BCAST_FRAGMENT,
-                dtype,
-                budget_cutoff,
-            )
-            .await
+            let sent = match &published {
+                Some(encoded) => {
+                    send_tensor_until_cutoff(
+                        &group,
+                        MSG_BCAST_FRAGMENT,
+                        &encoded.prefix,
+                        encoded.dtype,
+                        &encoded.values,
+                        budget_cutoff,
+                    )
+                    .await
+                }
+                None => {
+                    send_fragment_until_cutoff(st, &group, p, MSG_BCAST_FRAGMENT, dtype, budget_cutoff)
+                        .await
+                }
+            };
+            match sent
             {
                 Ok(true) => {}
                 Ok(false) => break,
@@ -3697,8 +3723,8 @@ async fn complete_round_async(
 fn new_state_for(group: &Arc<Group>, cfg: &Config) -> Result<GlobalState> {
     if let Some(fragments) = cfg.policy_sweep_fragments {
         // Masters and every BCAST/FINAL stay f32; only push deltas may be bf16.
-        if !matches!(group.dtype, DTYPE_F32 | DTYPE_F32_PUSH_BF16) {
-            bail!("--policy-sweep-fragments requires an FP32 HELLO session (optionally with bf16 pushes)");
+        if bulk_dtype(group.dtype) != DTYPE_F32 {
+            bail!("--policy-sweep-fragments requires an FP32 HELLO session (optionally with bf16/int8 pushes)");
         }
         if group.layout.fragments.len() != fragments as usize {
             bail!(
@@ -3717,6 +3743,17 @@ fn new_state_for(group: &Arc<Group>, cfg: &Config) -> Result<GlobalState> {
     )?;
     st.policy_sweep_fragments = cfg.policy_sweep_fragments;
     st.session_contract_hash = Some(group.session_contract_hash);
+    match (bcast_delta(group.dtype), cfg.bcast_delta_full_every) {
+        (true, Some(full_every)) => {
+            st.downlink = Some(Mutex::new(crate::downlink::DownlinkAnchors::new(
+                group.layout.fragments.len(),
+                full_every,
+            )?));
+        }
+        (true, None) => bail!("session asks for bf16 downlink deltas, but --bcast-delta-full-every is unset"),
+        (false, Some(_)) => bail!("--bcast-delta-full-every is set, but the session has no bf16 downlink deltas"),
+        (false, None) => {}
+    }
     if cfg.delta_correction {
         st.delta_correction = Some(crate::merge::Heloco::default());
     }
@@ -4055,6 +4092,11 @@ async fn send_fragment(
     msg_type: u8,
     dtype: u8,
 ) -> Result<()> {
+    if let Some(encoded) = recovery_bcast(st, p, msg_type) {
+        return group
+            .send_tensor_large(msg_type, &encoded.prefix, encoded.dtype, &encoded.values)
+            .await;
+    }
     let mut prefix = [0u8; 12];
     prefix[..4].copy_from_slice(&(p as u32).to_le_bytes());
     prefix[4..].copy_from_slice(&st.versions[p].to_le_bytes());
@@ -4697,6 +4739,7 @@ mod tests {
             checkpoint_path: None,
             checkpoint_every: 0,
             async_checkpoint: false,
+            bcast_delta_full_every: None,
             resume: false,
             mark_final_checkpoint: false,
             learner_budget_steps: None,
@@ -5972,13 +6015,13 @@ mod tests {
 
     #[tokio::test]
     async fn updated_broadcast_propagates_local_errors_but_tolerates_closed_streams() {
-        let invalid_state = broadcast_test_state(255);
+        let invalid_state = broadcast_test_state(9);
         let (connected, _receiver) = streaming_test_group(DTYPE_F32, false);
         let error = broadcast_updated_fragment(&invalid_state, &registry_with_group(connected), 0)
             .await
             .unwrap_err();
         assert!(
-            format!("{error:#}").contains("unknown tensor dtype 255"),
+            format!("{error:#}").contains("unknown tensor dtype 9"),
             "unexpected error: {error:#}"
         );
 

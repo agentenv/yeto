@@ -786,6 +786,60 @@ class MilesChunkedFullParameterAdapter:
         )
         return self.validate_cut(target, target_policy_version, 0)
 
+    def rebase_fragment(
+        self,
+        stored: StoredAuthoritativeFragment,
+        current: ReferencedPolicyCut,
+        base: ReferencedPolicyCut,
+        *,
+        ray_module=None,
+    ) -> StoredAuthoritativeFragment:
+        """Sync/train overlap: ``stored + (current - base)`` for one fragment.
+
+        The result is stored like an inbound authoritative fragment (same
+        id, version and provenance, fresh Ray refs) so ``assemble_mixed_target``
+        validates and applies it unchanged. The caller keeps ``stored`` as
+        the anchor and releases the result after the apply."""
+
+        import numpy as np
+        from miles.backends.megatron_utils.full_parameter_state import (
+            _resolve_ray_module,
+        )
+
+        from yeto.rl.engine.sync_overlap import rebase_values
+
+        fragment_id = stored.fragment_id
+        for cut in (current, base):
+            if cut.layout_hash != self.layout.layout_hash:
+                raise ValueError("Miles rebase cut layout changed")
+        owner = _fragment_owner_shard(current.transport_cut, fragment_id)
+        if (
+            stored.parameter_layout_hash != self.layout.layout_hash
+            or stored.topology != owner.topology
+            or stored.plan_hash != owner.plan_hash
+        ):
+            raise ValueError("authoritative fragment provenance changed")
+        ray = _resolve_ray_module(ray_module)
+        chunks = sorted(zip(stored.descriptor.chunks, stored.refs, strict=True),
+                        key=lambda row: row[0].flat_offset)
+        anchor_parts, offset = [], 0
+        for descriptor, reference in chunks:
+            if reference is None or descriptor.flat_offset != offset:
+                raise ValueError("authoritative fragment chunks are released or not contiguous")
+            value = ray.get(reference)
+            anchor_parts.append(value.detach().to("cpu").reshape(-1).numpy())
+            offset += descriptor.numel
+
+        def flat(cut: ReferencedPolicyCut) -> np.ndarray:
+            raw = b"".join(bytes(part) for part in self.fragment_parts(
+                cut, fragment_id, ray_module=ray_module)())
+            return np.frombuffer(raw, dtype="<f4")
+
+        values = rebase_values(np.concatenate(anchor_parts).astype("<f4", copy=False),
+                               flat(current), flat(base))
+        sink = AuthoritativeFragmentSink(current, ray_module=ray_module)
+        return sink(fragment_id, stored.version, values.tobytes())
+
     async def apply(
         self,
         group: MilesChunkedFullParameterGroup,

@@ -74,6 +74,10 @@ def _rl_trainable_island_flags(args, learner_id: int, num_learners: int) -> str:
              f" --syncer-profile-sha256 {rl_syncer_profile(args, num_learners).sha256}")
     if getattr(args, "rl_sync_push_dtype", "f32") != "f32":
         sweep += f" --sweep-push-dtype {args.rl_sync_push_dtype}"
+    if getattr(args, "rl_sync_overlap", False):
+        sweep += " --sweep-overlap"
+    if getattr(args, "rl_sync_push_dtype", "f32") == "int8":
+        sweep += f" --sweep-push-int8-block {int(getattr(args, 'rl_sync_push_int8_block', 128))}"
     if getattr(args, "expert_full_count", 0):
         return lora + sweep
     return " --parameter-mode full" + sweep
@@ -152,6 +156,7 @@ def make_miles_island_task(
         f" --rollout-num-gpus-per-engine {args.rollout_num_gpus_per_engine}"
         f" --sglang-mem-fraction-static {args.sglang_mem_fraction_static}"
         + _rl_trainable_island_flags(args, learner_id, num_learners)
+        + (" --bcast-delta" if int(getattr(args, "rl_sync_bcast_delta_full_every", 0) or 0) else "")
         + f" --inner-lr {args.inner_lr}"
         f" --seq-len {args.seq_len}"
         + (" --rl-activation-recompute" if getattr(args, "rl_activation_recompute", False) else "")

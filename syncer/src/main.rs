@@ -2,6 +2,7 @@ mod elastic;
 mod elastic_server;
 mod iso_worker;
 mod merge;
+mod downlink;
 mod protocol;
 mod server;
 mod state;
@@ -102,6 +103,11 @@ struct Args {
     /// round is broadcast only after its checkpoint is durable.
     #[arg(long, default_value_t = false)]
     async_checkpoint: bool,
+    /// Learners whose session asks for bf16 downlink deltas get a full f32
+    /// BCAST every N-th version of a fragment (N >= 2). Unset: such
+    /// sessions are refused.
+    #[arg(long)]
+    bcast_delta_full_every: Option<u64>,
     /// Resume from --checkpoint-path if it exists.
     #[arg(long, default_value_t = false)]
     resume: bool,
@@ -278,6 +284,7 @@ fn main() -> anyhow::Result<()> {
         checkpoint_path: args.checkpoint_path,
         checkpoint_every: args.checkpoint_every,
         async_checkpoint: args.async_checkpoint,
+        bcast_delta_full_every: args.bcast_delta_full_every,
         resume: args.resume,
         mark_final_checkpoint: args.mark_final_checkpoint,
         learner_budget_steps: args.learner_budget_steps,

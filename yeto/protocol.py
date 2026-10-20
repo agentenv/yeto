@@ -37,6 +37,9 @@ import time
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 
+from .downlink import HEADER_LEN as DOWNLINK_HEADER_LEN
+from .downlink import DownlinkAnchors, DownlinkChunkSink
+from .downlink import tensor_nbytes as downlink_tensor_nbytes
 from .fragments import MERGE_ISO, FragmentLayout
 
 MAGIC = 0xD170C0DE
@@ -71,6 +74,15 @@ DTYPE_Q4 = 3
 # delta bytes; the client rounds them (round-to-nearest-even, as the syncer's
 # ``half::bf16::from_f32``) on the way out.
 DTYPE_F32_PUSH_BF16 = 4
+# Session dtype 5 (S26 E3): PUSH_FRAGMENT deltas travel as block-scaled int8
+# (``f32_bytes_to_i8``); INIT/BCAST/FINAL stay f32. Callers hand f32 bytes.
+DTYPE_F32_PUSH_I8 = 5
+# Session-dtype flag (S26 E3): BCAST_FRAGMENT carries bf16 downlink deltas
+# between f32 refreshes (yeto/downlink.py). Only on f32-bulk sessions.
+DTYPE_FLAG_BCAST_DELTA = 0x80
+I8_BLOCK_MIN = 32
+I8_BLOCK_MAX = 1 << 20
+DEFAULT_I8_BLOCK = 128
 
 CHUNK_SIZE = 4 * 1024 * 1024
 MAX_HANDSHAKE_FRAME = 16 * 1024 * 1024
@@ -92,22 +104,103 @@ _FINAL_ACK = struct.Struct("<HQ")  # revision, global_step
 _BUDGET_DONE = struct.Struct("<Q")  # local steps
 
 
+def session_base(dtype: int) -> int:
+    """The session dtype without its flags."""
+    return dtype & ~DTYPE_FLAG_BCAST_DELTA
+
+
+def bcast_delta(dtype: int) -> bool:
+    """Whether the session receives bf16 downlink deltas."""
+    return bool(dtype & DTYPE_FLAG_BCAST_DELTA)
+
+
+def valid_session_dtype(dtype: int) -> bool:
+    base = session_base(dtype)
+    if base in (DTYPE_F32, DTYPE_F32_PUSH_BF16, DTYPE_F32_PUSH_I8):
+        return 0 <= dtype <= 0xFF
+    return base in (DTYPE_BF16, DTYPE_Q4) and not bcast_delta(dtype)
+
+
 def bulk_dtype(dtype: int) -> int:
     """Dtype of INIT_PARAMS/BCAST_FRAGMENT tensors for a session dtype.
 
     Q4 applies only to push deltas (small dynamic range); full parameter
-    payloads would not survive 4 bits, so they travel as bf16.
+    payloads would not survive 4 bits, so they travel as bf16. A downlink
+    session's BCAST is reconstructed to f32 before callers see it.
     """
-    if dtype == DTYPE_Q4:
+    base = session_base(dtype)
+    if base == DTYPE_Q4:
         return DTYPE_BF16
-    if dtype == DTYPE_F32_PUSH_BF16:
+    if base in (DTYPE_F32_PUSH_BF16, DTYPE_F32_PUSH_I8):
         return DTYPE_F32
-    return dtype
+    return base
 
 
 def push_wire_dtype(dtype: int) -> int:
     """Dtype of unquantized PUSH_FRAGMENT deltas on the wire for a session dtype."""
-    return DTYPE_BF16 if dtype == DTYPE_F32_PUSH_BF16 else dtype
+    base = session_base(dtype)
+    return DTYPE_BF16 if base == DTYPE_F32_PUSH_BF16 else base
+
+
+def i8_nbytes(numel: int, block: int) -> int:
+    """Encoded size of an int8 push: u32 block, then per block f32 scale + i8s."""
+    if not I8_BLOCK_MIN <= block <= I8_BLOCK_MAX:
+        raise ValueError(f"int8 block size {block} outside {I8_BLOCK_MIN}..{I8_BLOCK_MAX}")
+    return 4 + 4 * -(-numel // block) + numel
+
+
+def f32_bytes_to_i8(data: bytes | bytearray | memoryview, block: int, *, header: bool = True) -> bytes:
+    """Quantize little-endian f32 values to block-scaled int8 (syncer ``decode_i8``).
+
+    Per block of ``block`` values (the last may be shorter): f32 scale =
+    absmax / 127, then ``round_half_even(x / scale)`` clipped to [-127, 127].
+    Decoding ``q * scale`` errs by at most absmax / 254 per element (plus f32
+    rounding). Blocks must start at multiples of ``block`` values; with
+    ``header`` the u32 block size is prepended.
+    """
+    import numpy as np
+
+    i8_nbytes(0, block)  # validates the block size
+    values = np.frombuffer(data, dtype="<f4")
+    if not np.isfinite(values).all():
+        raise ValueError("int8 push delta contains a non-finite value")
+    count = values.size
+    full = count - count % block
+    parts = [struct.pack("<I", block)] if header else []
+
+    def encode(chunk: np.ndarray) -> None:  # chunk: (blocks, width)
+        absmax = np.abs(chunk).max(axis=1)
+        scale = (absmax / np.float32(127)).astype(np.float32)
+        safe = np.where(scale > 0, scale, np.float32(1))
+        q = np.clip(np.rint(chunk / safe[:, None]), -127, 127).astype(np.int8)
+        q[scale == 0] = 0
+        rows = np.empty((chunk.shape[0], 4 + chunk.shape[1]), dtype=np.uint8)
+        rows[:, :4] = scale.astype("<f4").view(np.uint8).reshape(-1, 4)
+        rows[:, 4:] = q.view(np.uint8)
+        parts.append(rows.tobytes())
+
+    if full:
+        encode(values[:full].reshape(-1, block))
+    if count > full:
+        encode(values[full:].reshape(1, -1))
+    return b"".join(parts)
+
+
+def _f32_parts_to_i8(parts: Iterable[bytes | bytearray | memoryview], block: int) -> Iterator[bytes]:
+    """Stream ``f32_bytes_to_i8`` over parts; blocks may span part boundaries."""
+    yield struct.pack("<I", block)
+    span = 4 * block
+    carry = b""
+    for part in parts:
+        data = carry + bytes(part)
+        whole = len(data) - len(data) % span
+        carry = data[whole:]
+        if whole:
+            yield f32_bytes_to_i8(data[:whole], block, header=False)
+    if len(carry) % 4:
+        raise ValueError("f32 push delta ends mid-value")
+    if carry:
+        yield f32_bytes_to_i8(carry, block, header=False)
 
 
 def f32_bytes_to_bf16(data: bytes | bytearray | memoryview) -> bytes:
@@ -206,8 +299,8 @@ def seal_hello(body: bytes, key: bytes | None) -> bytes:
     The legacy syncer with a key refuses a HELLO without this trailer."""
     if not key:
         return body
-    import hmac
     import hashlib
+    import hmac
 
     return body + hmac.new(key, HELLO_MAC_DOMAIN + body, hashlib.sha256).digest()
 
@@ -515,11 +608,13 @@ class SyncerClient:
         syncer_profile_hash: bytes | None = None,
         hmac_key: bytes | None = None,
         compat_group: str | None = None,
+        push_i8_block: int = DEFAULT_I8_BLOCK,
     ):
         if not 0 <= learner_id <= 0xFFFF_FFFF:
             raise ValueError(f"learner_id must fit u32, got {learner_id}")
-        if dtype not in (DTYPE_F32, DTYPE_BF16, DTYPE_Q4, DTYPE_F32_PUSH_BF16):
+        if not valid_session_dtype(dtype):
             raise ValueError(f"unsupported session dtype {dtype}")
+        i8_nbytes(0, push_i8_block)  # validates the int8 block size
         if layout.num_fragments < 1:
             raise ValueError("layout must contain at least one fragment")
         if not 0 <= num_streams <= 256:
@@ -537,6 +632,11 @@ class SyncerClient:
         self.learner_id = learner_id
         self.layout = layout
         self.dtype = dtype
+        self._push_base = session_base(dtype)
+        self.push_i8_block = push_i8_block
+        # S26 E3: f32 anchors of a bf16-downlink session (yeto/downlink.py).
+        self._downlink = DownlinkAnchors(layout.num_fragments) if bcast_delta(dtype) else None
+        self._bcast_prefix = 12 + (DOWNLINK_HEADER_LEN if self._downlink is not None else 0)
         self.num_streams = num_streams
         self.session_contract_hash = session_contract_hash
         self.syncer_profile_hash = syncer_profile_hash
@@ -548,7 +648,7 @@ class SyncerClient:
         self.max_reconnects = max_reconnects
         self.finalization_timeout = finalization_timeout
         self._max_bcast_payload = max(
-            12 + _tensor_nbytes(bulk_dtype(dtype), fragment.numel)
+            self._bcast_prefix + _tensor_nbytes(bulk_dtype(dtype), fragment.numel)
             for fragment in layout.fragments
         )
         self._max_final_payload = max(
@@ -870,9 +970,9 @@ class SyncerClient:
         numel = self.layout.fragments[fragment_id].numel
         expected = (
             _q4_nbytes(numel)
-            if self.dtype == DTYPE_Q4
-            # dtype 4 callers pass f32 bytes; the client rounds them below
-            else _tensor_nbytes(DTYPE_F32 if self.dtype == DTYPE_F32_PUSH_BF16 else self.dtype, numel)
+            if self._push_base == DTYPE_Q4
+            # dtypes 4/5 callers pass f32 bytes; the client encodes them below
+            else _tensor_nbytes(bulk_dtype(self.dtype), numel)
         )
         if len(tensor_bytes) != expected:
             raise ValueError(
@@ -890,8 +990,10 @@ class SyncerClient:
             c_steps,
             c_tokens,
         )
-        if self.dtype == DTYPE_F32_PUSH_BF16:
+        if self._push_base == DTYPE_F32_PUSH_BF16:
             tensor_bytes = f32_bytes_to_bf16(tensor_bytes)
+        elif self._push_base == DTYPE_F32_PUSH_I8:
+            tensor_bytes = f32_bytes_to_i8(tensor_bytes, self.push_i8_block)
         self._send_large(MSG_PUSH_FRAGMENT, head + tensor_bytes)
 
     def push_fragment_parts(
@@ -923,12 +1025,14 @@ class SyncerClient:
         if c_steps < 1:
             raise ValueError("c_steps must be positive")
         numel = self.layout.fragments[fragment_id].numel
-        expected = (
-            _q4_nbytes(numel)
-            if self.dtype == DTYPE_Q4
-            else _tensor_nbytes(push_wire_dtype(self.dtype), numel)
-        )
-        if self.dtype == DTYPE_F32_PUSH_BF16:
+        if self._push_base == DTYPE_Q4:
+            expected = _q4_nbytes(numel)
+        elif self._push_base == DTYPE_F32_PUSH_I8:
+            expected = i8_nbytes(numel, self.push_i8_block)
+            tensor_parts = _f32_parts_to_i8(tensor_parts, self.push_i8_block)
+        else:
+            expected = _tensor_nbytes(push_wire_dtype(self.dtype), numel)
+        if self._push_base == DTYPE_F32_PUSH_BF16:
             tensor_parts = _f32_parts_to_bf16(tensor_parts)
         head = struct.pack(
             "<IIQIQQIQ",
@@ -1033,6 +1137,9 @@ class SyncerClient:
                 raise TypeError(
                     "inbound chunk sink does not implement the transaction API"
                 )
+        if sink is not None and self._downlink is not None:
+            sink = DownlinkChunkSink(
+                sink, self._downlink, [f.numel for f in self.layout.fragments], MSG_BCAST_FRAGMENT)
         with self._reasm_lock:
             if self._reasm:
                 raise RuntimeError("cannot replace inbound chunk sink mid-message")
@@ -1542,6 +1649,13 @@ class SyncerClient:
                 dtype,
                 self.layout.fragments[fragment_id].numel,
             )
+            if msg_type == MSG_BCAST_FRAGMENT and self._downlink is not None:
+                # The downlink header (kind, base version, digest) is part of
+                # the payload the wrapping sink decodes; its kind fixes the size.
+                if len(data) < tensor_start + DOWNLINK_HEADER_LEN:
+                    raise ValueError("first downlink fragment chunk is header-truncated")
+                expected_payload = DOWNLINK_HEADER_LEN + downlink_tensor_nbytes(
+                    data[tensor_start], self.layout.fragments[fragment_id].numel)
             if length != 12 + expected_payload:
                 raise ValueError(
                     f"streamed fragment {fragment_id} has {length - 12} tensor "
@@ -1810,15 +1924,19 @@ class SyncerClient:
             fid, version = struct.unpack_from("<IQ", payload)
             if fid >= self.layout.num_fragments:
                 raise ValueError(f"BCAST_FRAGMENT for unknown fragment {fid}")
-            expected = _tensor_nbytes(
-                bulk_dtype(self.dtype), self.layout.fragments[fid].numel
-            )
-            if len(payload) - 12 != expected:
-                raise ValueError(
-                    f"BCAST_FRAGMENT {fid} has {len(payload) - 12} tensor bytes, "
-                    f"expected {expected}"
+            if self._downlink is not None:
+                data = self._downlink.decode_whole(
+                    fid, version, payload[12:], self.layout.fragments[fid].numel)
+            else:
+                expected = _tensor_nbytes(
+                    bulk_dtype(self.dtype), self.layout.fragments[fid].numel
                 )
-            data = payload[12:]
+                if len(payload) - 12 != expected:
+                    raise ValueError(
+                        f"BCAST_FRAGMENT {fid} has {len(payload) - 12} tensor bytes, "
+                        f"expected {expected}"
+                    )
+                data = payload[12:]
             digest = hashlib.sha256(data).digest()
             with self._bcast_lock:
                 seen = self._bcast_seen[fid]

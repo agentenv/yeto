@@ -851,11 +851,37 @@ _SYNC = (
     ),
     cli_flag(
         "--rl-sync-push-dtype",
-        choices=("f32", "bf16"),
+        choices=("f32", "bf16", "int8"),
         default="f32",
         help="full-parameter only: wire dtype of the islands' pushed outer deltas "
-        "(pseudo-gradients). bf16 halves upload bytes; the syncer keeps f32 masters, "
-        "momentum and f32 BCAST/FINAL (default f32 = exact)",
+        "(pseudo-gradients). bf16 halves upload bytes, int8 (block absmax scale, see "
+        "--rl-sync-push-int8-block) quarters them; the syncer keeps f32 masters, "
+        "momentum and f32 FINAL (default f32 = exact)",
+    ),
+    cli_flag(
+        "--rl-sync-overlap",
+        action="store_true",
+        help="full-parameter only (E2 option): train the next round while the "
+        "sweep syncs, then rebase the trainer onto the new global weights "
+        "(theta <- G_k + local progress). Rollouts are one outer step staler: "
+        "--rl-max-policy-age is raised to at least 1 and the algorithm spec must "
+        "tolerate it (checked before launch)",
+    ),
+    cli_flag(
+        "--rl-sync-push-int8-block",
+        type=int,
+        default=128,
+        help="full-parameter only, with --rl-sync-push-dtype int8: values per f32 "
+        "scale (32..1048576; error <= block absmax / 254 per value)",
+    ),
+    cli_flag(
+        "--rl-sync-bcast-delta-full-every",
+        type=int,
+        default=0,
+        help="full-parameter only: above 0, the syncer sends each new fragment "
+        "version as a bf16 delta against the islands' shared f32 anchor, with an "
+        "exact f32 refresh every N-th version (N >= 2; digest-checked, a mismatch "
+        "reconnects for f32). 0 = always f32",
     ),
     cli_flag(
         "--rl-sync-checkpoint-every",

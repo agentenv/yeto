@@ -21,7 +21,13 @@ import torch
 
 from test_rl_algorithm_provenance import _fake_sky, _launcher_args, _no_modal_listing  # noqa: F401
 from yeto.fragments import MERGE_RDA, Fragment, FragmentLayout
-from yeto.protocol import DTYPE_F32, DTYPE_F32_PUSH_BF16, SyncerClient
+from yeto.protocol import (
+    DTYPE_F32,
+    DTYPE_F32_PUSH_BF16,
+    DTYPE_F32_PUSH_I8,
+    DTYPE_FLAG_BCAST_DELTA,
+    SyncerClient,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 CARGO = shutil.which("cargo") or str(Path.home() / ".cargo/bin/cargo")
@@ -78,10 +84,11 @@ def _layout() -> FragmentLayout:
     return FragmentLayout([Fragment(MERGE_RDA, [(f"actor.w{i}", NUMEL)]) for i in range(FRAGMENTS)])
 
 
-def _client(port: int, profile_hash: str, dtype: int = DTYPE_F32) -> SyncerClient:
+def _client(port: int, profile_hash: str, dtype: int = DTYPE_F32, *,
+            max_reconnects: int = 0, push_i8_block: int = 128) -> SyncerClient:
     return SyncerClient(("127.0.0.1", port), 0, _layout(), dtype=dtype, num_streams=1,
-                        connect_timeout=10, max_reconnects=0, finalization_timeout=20,
-                        syncer_profile_hash=bytes.fromhex(profile_hash))
+                        connect_timeout=10, max_reconnects=max_reconnects, finalization_timeout=20,
+                        syncer_profile_hash=bytes.fromhex(profile_hash), push_i8_block=push_i8_block)
 
 
 def _f32(values: list[float]) -> bytes:
@@ -161,10 +168,18 @@ STREAMED = ("--rl-sync-fragment-pipeline", str(FRAGMENTS), "--rl-sync-async-chec
 
 
 def _run_sweeps(binary: Path, tmp_path: Path, extra: tuple[str, ...], sweeps: int,
-                dtype: int = DTYPE_F32):
-    """Drive ``sweeps`` strict sweeps; return (max PULLs seen at once, finals, checkpoint)."""
+                dtype: int = DTYPE_F32, *, after_sweep=None, max_reconnects: int = 0,
+                push_i8_block: int = 128, updates: dict | None = None, sink=None):
+    """Drive ``sweeps`` strict sweeps; return (max PULLs seen at once, finals, checkpoint).
+
+    ``updates`` collects every BCAST the client accepted, as
+    ``{(fragment_id, version): f32 bytes}``; ``after_sweep(client, sweep)``
+    runs once all pushes of a sweep are queued."""
     process, port, profile_hash = _start_syncer(binary, tmp_path, *extra, total_steps=sweeps)
-    client = _client(port, profile_hash, dtype)
+    client = _client(port, profile_hash, dtype, max_reconnects=max_reconnects,
+                     push_i8_block=push_i8_block)
+    if sink is not None:
+        client.install_inbound_chunk_sink(sink)
     concurrent = 0
     try:
         client.start()
@@ -195,7 +210,11 @@ def _run_sweeps(binary: Path, tmp_path: Path, extra: tuple[str, ...], sweeps: in
                     client.push_fragment(fid, permit.global_step, permit.round_attempt,
                                          base, sweep, 1, 7, _f32(delta))
                     permit.pushed = True
+            if after_sweep is not None:
+                after_sweep(client, sweep)
         manifest, finals = client.wait_for_final_fragments(timeout=30)
+        if updates is not None:
+            updates.update({(u.fragment_id, u.version): bytes(u.data) for u in client.drain_updates()})
         result = {f.fragment_id: bytes(f.data) for f in finals}
         client.acknowledge_finalization(manifest)
         assert process.wait(timeout=15) == 0
@@ -270,3 +289,146 @@ def test_bf16_push_flag_reaches_the_island_command():
     args = _dense_args("--rl-sync-push-dtype", "bf16")
     assert "--sweep-push-dtype bf16" in _rl_trainable_island_flags(args, 0, 1)
     assert "--sweep-push-dtype" not in _rl_trainable_island_flags(_dense_args(), 0, 1)
+
+
+def _tail(data: bytes) -> torch.Tensor:
+    return torch.frombuffer(bytearray(data), dtype=torch.float32)
+
+
+def test_int8_pushes_stay_within_their_block_error_of_the_f32_sweep(syncer_binary, tmp_path):
+    """E3: int8 outer deltas change results only by half a scale step per delta."""
+    exact_dir, int8_dir = tmp_path / "f32", tmp_path / "int8"
+    exact_dir.mkdir()
+    int8_dir.mkdir()
+    exact = _run_sweeps(syncer_binary, exact_dir, STREAMED, sweeps=3)
+    quantized = _run_sweeps(syncer_binary, int8_dir,
+                            (*STREAMED, "--rl-sync-push-dtype", "int8", "--rl-sync-push-int8-block", "32"),
+                            sweeps=3, dtype=DTYPE_F32_PUSH_I8, push_i8_block=32)
+    assert exact[1] == quantized[1] == [5, 6]
+    for fid, data in exact[2].items():
+        want, got = _tail(data)[-NUMEL:], _tail(quantized[2][fid])[-NUMEL:]
+        # Three sweeps; each delta's absmax < 2, so error <= 3 * 2 / 254.
+        assert torch.allclose(got, want, rtol=0, atol=3 * 2.0 / 254), fid
+        assert not torch.equal(got, want), "int8 pushes must actually quantize"
+
+
+def _downlink_run(binary, tmp_path, full_every: int, sweeps: int, **kwargs):
+    updates: dict = {}
+    result = _run_sweeps(binary, tmp_path,
+                         (*STREAMED, "--rl-sync-bcast-delta-full-every", str(full_every)),
+                         sweeps=sweeps, dtype=DTYPE_F32 | DTYPE_FLAG_BCAST_DELTA,
+                         updates=updates, **kwargs)
+    return result, updates
+
+
+def test_bf16_downlink_tracks_the_exact_broadcasts_and_leaves_the_merge_exact(syncer_binary, tmp_path):
+    """E3: BCAST deltas change only what islands hold between f32 refreshes;
+    the syncer's masters, versions, FINAL and checkpoint stay bit-identical."""
+    exact_dir, delta_dir = tmp_path / "f32", tmp_path / "delta"
+    exact_dir.mkdir()
+    delta_dir.mkdir()
+    exact_updates: dict = {}
+    exact = _run_sweeps(syncer_binary, exact_dir, STREAMED, sweeps=4, updates=exact_updates)
+    delta, delta_updates = _downlink_run(syncer_binary, delta_dir, 3, sweeps=4)
+    assert exact[1] == delta[1] == [7, 8]
+    assert exact[2] == delta[2], "FINAL must be the exact f32 masters"
+    assert exact[3] == delta[3], "checkpoints must not depend on the downlink"
+    assert set(exact_updates) == set(delta_updates)
+    # Fragment 0 publishes versions 1, 3, 5, 7: FULL, DELTA, DELTA, FULL (M=3).
+    kinds = {}
+    for key, data in sorted(delta_updates.items()):
+        want, got = _tail(exact_updates[key]), _tail(data)
+        kinds[key] = "full" if torch.equal(got, want) else "delta"
+        # one bf16 rounding of (theta - anchor), |theta - anchor| < 4 here
+        assert torch.allclose(got, want, rtol=0, atol=4.0 / 256), key
+    assert [kinds[(0, v)] for v in (0, 1, 3, 5, 7)] == ["full", "full", "delta", "delta", "full"]
+    assert [kinds[(1, v)] for v in (0, 2, 4, 6)] == ["full", "full", "delta", "delta"]
+
+
+def test_bf16_downlink_anchor_mismatch_reconnects_and_resyncs_with_f32(syncer_binary, tmp_path):
+    """E3 fallback: a learner whose anchor drifted fails the digest check,
+    reconnects, receives the shared anchor as FULL, and the run finishes
+    with the same exact result."""
+    exact_dir, delta_dir = tmp_path / "f32", tmp_path / "delta"
+    exact_dir.mkdir()
+    delta_dir.mkdir()
+    exact = _run_sweeps(syncer_binary, exact_dir, STREAMED, sweeps=4)
+    corrupted, reconnects = [], []
+
+    def corrupt(client, sweep):
+        if sweep == 4:
+            reconnects.append(client._reconnects_used)
+        if sweep != 1:
+            return
+        _wait(lambda: client._downlink.version(0) == 1, "fragment 0 version 1 never arrived")
+        held = client._downlink._held[0]
+        held.values = held.values.copy()
+        held.values[0] += 1e-3
+        corrupted.append(client.connection_generation)
+
+    delta, _ = _downlink_run(syncer_binary, delta_dir, 100, sweeps=4, after_sweep=corrupt,
+                             max_reconnects=5)
+    assert corrupted and reconnects and reconnects[0] >= 1, "the digest mismatch must reconnect"
+    assert exact[1] == delta[1] and exact[2] == delta[2] and exact[3] == delta[3]
+
+
+def test_bf16_downlink_and_int8_flags_reach_syncer_and_island_commands():
+    from yeto import launcher
+    from yeto.launch.rl_island_task import _rl_trainable_island_flags
+
+    args = _dense_args("--rl-sync-push-dtype", "int8", "--rl-sync-push-int8-block", "64",
+                       "--rl-sync-bcast-delta-full-every", "4")
+    island = _rl_trainable_island_flags(args, 0, 1)
+    assert "--sweep-push-dtype int8" in island and "--sweep-push-int8-block 64" in island
+    command = launcher.role_syncer_commands(args, 1, binary="yeto-syncer")["actor"]
+    assert "--bcast-delta-full-every 4" in command
+    plain = _dense_args()
+    assert "--bcast-delta" not in launcher.role_syncer_commands(plain, 1, binary="yeto-syncer")["actor"]
+    with pytest.raises(ValueError, match="--rl-sync-bcast-delta-full-every 0"):
+        _dense_args("--rl-sync-bcast-delta-full-every", "1")
+    with pytest.raises(ValueError, match="--rl-sync-push-int8-block only with"):
+        _dense_args("--rl-sync-push-int8-block", "64")
+
+
+class _BytesSink:
+    """Minimal transactional inbound sink: assembles the f32 fragment bytes."""
+
+    def begin_message(self, message_id, total_bytes):
+        return {"buf": bytearray(), "bound": None}
+
+    def bind_fragment(self, tx, msg_type, fragment_id, version, payload_bytes):
+        tx["bound"] = payload_bytes
+
+    def stage_chunk(self, tx, payload):
+        return bytes(payload)
+
+    def consume_staged_chunk(self, tx, offset, token, nbytes):
+        self.consume_chunk(tx, offset, token)
+
+    def consume_chunk(self, tx, offset, payload):
+        assert offset == len(tx["buf"])
+        tx["buf"] += bytes(payload)
+
+    def finish_message(self, tx):
+        import hashlib
+
+        from yeto.protocol import StreamedInboundPayload
+
+        assert len(tx["buf"]) == tx["bound"]
+        return StreamedInboundPayload(bytes(tx["buf"]), hashlib.sha256(tx["buf"]).digest())
+
+    def abort_message(self, tx, staged_tokens):
+        tx["buf"].clear()
+
+
+def test_bf16_downlink_through_a_streaming_sink_matches_the_buffered_path(syncer_binary, tmp_path):
+    """E3: the Miles path streams BCAST chunks into a transactional sink; the
+    downlink wrapper must hand it the same f32 anchor bytes."""
+    buffered_dir, streamed_dir = tmp_path / "buffered", tmp_path / "streamed"
+    buffered_dir.mkdir()
+    streamed_dir.mkdir()
+    buffered, buffered_updates = _downlink_run(syncer_binary, buffered_dir, 3, sweeps=3)
+    streamed, streamed_updates = _downlink_run(syncer_binary, streamed_dir, 3, sweeps=3,
+                                               sink=_BytesSink())
+    assert buffered[2] == streamed[2]
+    assert buffered_updates == streamed_updates

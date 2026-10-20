@@ -153,14 +153,33 @@ _FULL_PARAMETER_SYNC_DEFAULTS = (
     ("rl_sync_async_checkpoint", False, "--rl-sync-async-checkpoint"),
     ("rl_sync_push_dtype", "f32", "--rl-sync-push-dtype"),
     ("rl_sync_checkpoint_every", 1, "--rl-sync-checkpoint-every"),
+    ("rl_sync_push_int8_block", 128, "--rl-sync-push-int8-block"),
+    ("rl_sync_overlap", False, "--rl-sync-overlap"),
 )
 
 
 def _refuse_full_parameter_sync_options(args) -> None:
-    """The S26 E3 sync options exist only for the full-parameter preset."""
+    """The S26 E3 sync options exist only for the full-parameter preset
+    (the bf16 downlink also for strict-avg, see ``_check_bcast_delta``)."""
     for dest, default, option in _FULL_PARAMETER_SYNC_DEFAULTS:
         if getattr(args, dest, default) != default:
             raise ValueError(f"{option} only applies to --rl-sync-preset {FULL_PARAMETER_SYNC_PRESET}")
+
+
+def _check_bcast_delta(args) -> None:
+    """S26 E3 bf16 downlink: a legacy-scheduled strict-avg or full-parameter
+    syncer only (the elastic server and SAO have no downlink anchors)."""
+    full_every = int(getattr(args, "rl_sync_bcast_delta_full_every", 0) or 0)
+    if full_every == 0:
+        return
+    if full_every < 2:
+        raise ValueError("--rl-sync-bcast-delta-full-every 0 (off) or >= 2")
+    if args.rl_sync_preset not in ("strict-avg", FULL_PARAMETER_SYNC_PRESET):
+        raise ValueError("--rl-sync-bcast-delta-full-every only applies to --rl-sync-preset "
+                         f"strict-avg or {FULL_PARAMETER_SYNC_PRESET}")
+    if island_scheduling_mode(args) != "legacy" or args.experimental_rl_sync:
+        raise ValueError("--rl-sync-bcast-delta-full-every needs --rl-island-scheduling legacy "
+                         "and no --experimental-rl-sync")
 
 
 def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
@@ -190,6 +209,11 @@ def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
     checkpoint_every = int(getattr(args, "rl_sync_checkpoint_every", 1))
     if checkpoint_every != 1 and (checkpoint_every < 1 or checkpoint_every % max(args.fragments, 1)):
         problems.append("--rl-sync-checkpoint-every 1 or a multiple of --fragments")
+    int8_block = int(getattr(args, "rl_sync_push_int8_block", 128))
+    if not 32 <= int8_block <= 1 << 20:
+        problems.append("--rl-sync-push-int8-block between 32 and 1048576")
+    elif int8_block != 128 and getattr(args, "rl_sync_push_dtype", "f32") != "int8":
+        problems.append("--rl-sync-push-int8-block only with --rl-sync-push-dtype int8")
     if problems:
         raise ValueError(f"--rl-sync-preset {FULL_PARAMETER_SYNC_PRESET} requires " + "; ".join(problems))
     args.quorum = num_islands
@@ -339,6 +363,15 @@ def _prepare_rl_args(
     # what the selected backend supports before any cloud or GPU work.
     from ..rl.engine.policy_age import validate_limit
 
+    if args.rl_sync_preset == FULL_PARAMETER_SYNC_PRESET and getattr(args, "rl_sync_overlap", False):
+        # S26 E3: sync/train overlap adds one outer step of staleness; raise the
+        # limit to the new minimum here so every check below (backend support,
+        # and the preflight's algorithm-spec staleness) validates it at launch.
+        from ..rl.engine.sync_overlap import required_policy_age
+
+        required = required_policy_age(0)
+        if int(getattr(args, "rl_max_policy_age", 0) or 0) < required:
+            args.rl_max_policy_age = required
     max_policy_age = validate_limit(getattr(args, "rl_max_policy_age", 0) or 0)
     policy_age_module = _rl_backend_module(args, "policy_age")
     policy_age_module.SUPPORT.check(max_policy_age)
@@ -748,6 +781,7 @@ def _prepare_rl_args(
         raise ValueError("--rl-sao-contracts only applies to --rl-sync-preset sao-streaming-full")
     if args.rl_sync_preset != FULL_PARAMETER_SYNC_PRESET:
         _refuse_full_parameter_sync_options(args)
+    _check_bcast_delta(args)
     if args.rl_sync_preset == "decoupled":
         if args.experimental_rl_sync:
             raise ValueError("decoupled RL does not accept --experimental-rl-sync")

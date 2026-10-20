@@ -150,6 +150,12 @@ def _syncer_checkpoint_every(args) -> int:
     return int(getattr(args, "rl_sync_checkpoint_every", 1)) if rl_dense_sweep(args) else 1
 
 
+def _syncer_bcast_delta(args) -> str:
+    """S26 E3 bf16 downlink deltas (checked by rl_args._check_bcast_delta)."""
+    full_every = int(getattr(args, "rl_sync_bcast_delta_full_every", 0) or 0)
+    return f" --bcast-delta-full-every {full_every}" if full_every else ""
+
+
 def rl_dense_sweep(args) -> bool:
     return (getattr(args, "training_mode", "sft") == "rl"
             and getattr(args, "rl_sync_preset", None) == FULL_PARAMETER_SYNC_PRESET)
@@ -448,6 +454,7 @@ def _rl_role_syncer_command(args, num_learners: int, binary: str,
         f"{_syncer_island_scheduling(args)}"
         f"{_syncer_expected_contract(args)}"
         f"{_syncer_profile_binding(args)}"
+        f"{_syncer_bcast_delta(args)}"
         f" --outer-lr {args.outer_lr}"
         f" --outer-momentum {args.outer_momentum}"
         " --max-base-lag 0 --learner-weight equal"

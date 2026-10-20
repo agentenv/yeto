@@ -32,7 +32,7 @@ or allocation overflows are errors rather than panics.
 
 | type | name | direction | payload |
 |---:|---|---|---|
-| 1 | HELLO | learner → syncer | protocol_version:u16 (=4), learner_id:u32, connection_generation:u64, dtype:u8 (1=f32, 2=bf16, 3=q4, 4=f32 with bf16 pushes), num_fragments:u32, per-fragment layout, layout_fingerprint:[u8;32], session_contract_hash:[u8;32], optional syncer_profile_hash:[u8;32], num_streams:u16, optional compat_group trailer (`b"YCG1"`, u32 length, 1–64 bytes utf-8) |
+| 1 | HELLO | learner → syncer | protocol_version:u16 (=4), learner_id:u32, connection_generation:u64, dtype:u8 (1=f32, 2=bf16, 3=q4, 4=f32 with bf16 pushes, 5=f32 with int8 pushes; flag 0x80 = bf16 downlink deltas), num_fragments:u32, per-fragment layout, layout_fingerprint:[u8;32], session_contract_hash:[u8;32], optional syncer_profile_hash:[u8;32], num_streams:u16, optional compat_group trailer (`b"YCG1"`, u32 length, 1–64 bytes utf-8) |
 | 2 | INIT_PARAMS | learner → syncer | fragment_id:u32, full tensor bytes; only learner 0 may initialize |
 | 3 | PULL_REQ | syncer → learner | fragment_id:u32, global_step:u64, round_attempt:u32 |
 | 4 | PUSH_FRAGMENT | learner → syncer | learner_id:u32, fragment_id:u32, global_step:u64, round_attempt:u32, base_version:u64, local_step:u64, c_steps:u32, c_tokens:u64, base-relative learner-delta bytes |
@@ -229,6 +229,30 @@ Dtype 4 keeps INIT, BCAST and FINAL exact f32 and sends only PUSH deltas as
 bf16 (round-to-nearest-even). The syncer decodes and negates them like dtype 2
 and keeps f32 masters and momentum. The full-parameter policy sweep accepts
 dtype 1 or 4 (S26 E3, `--rl-sync-push-dtype bf16`).
+
+## int8 pushes over an f32 session (dtype 5)
+
+Dtype 5 sends PUSH deltas as block-scaled int8: u32 block size B
+(32..1048576), then per block of B values (the last block may be shorter) an
+f32 scale (block absmax / 127) and one i8 per value (`-128` is invalid).
+A value decodes to `q * scale`, so its error is at most absmax / 254. The
+learner picks B (launcher `--rl-sync-push-int8-block`, default 128); it is
+bound into the role-stream session contract. INIT, BCAST and FINAL stay f32.
+
+## bf16 downlink deltas (dtype flag 0x80)
+
+On an f32-bulk session (dtype 1, 4 or 5) the flag 0x80 changes BCAST_FRAGMENT
+to `fragment_id:u32, version:u64, kind:u8, base_version:u64,
+anchor_sha256:[u8;32]`, then the tensor: kind 0 (FULL) carries f32 values,
+kind 1 (DELTA) carries `bf16(theta - anchor)`. Syncer and learner hold the
+same f32 anchor per fragment: FULL sets it, DELTA adds the decoded delta in
+f32; the digest is checked after every update. Every N-th version of a
+fragment is FULL (`--bcast-delta-full-every N`, N >= 2; the syncer refuses a
+flagged session without it and the reverse). Initial and reconnect re-sends
+are always FULL with the shared anchor. A learner with a missing or wrong
+anchor drops its connection, and the reconnect re-send restores it. The
+syncer's masters, momentum, checkpoints and FINAL are unchanged and exact;
+anchors are not checkpointed, so a resumed syncer starts with FULL.
 
 ## Q4 pushes
 
