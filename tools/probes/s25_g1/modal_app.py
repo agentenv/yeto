@@ -28,9 +28,14 @@ from pathlib import Path
 
 import modal
 
+
 HERE = Path(__file__).resolve()
 REPO = HERE.parents[3] if len(HERE.parents) > 3 else Path("/")  # in the container the module sits at /root
 WORKDIR = "/root/sky_workdir"
+# run_limits.py sits next to this file locally and under the mounted tree in a container
+sys.path.insert(0, str(HERE.parent) if (HERE.parent / "run_limits.py").is_file()
+                else f"{WORKDIR}/tools/probes/s25_g1")
+from run_limits import Deadline, wait_until  # noqa: E402
 # T-G1B: YETO_G1_PLAN=examples/stage1/glm5next-mini-modal-dense.yaml (set at deploy time;
 # the image env carries it into every container, so all of them plan the same file)
 PLAN = os.environ.get("YETO_G1_PLAN", "examples/stage1/glm5next-mini-modal.yaml")
@@ -239,6 +244,10 @@ def smoke(tag: str = "smoke-1") -> None:
 @app.function(image=image, volumes=VOLUMES, gpu=f"{GPU_NAME}!:1", cpu=8, memory=65536, timeout=7200,
               max_inputs=1)  # a fresh container per call: trainer B must not inherit A's disk or Ray
 def sampler_island(tag: str) -> int:
+    # Modal may run this input again in a new container (a lost worker): each container
+    # keeps its own log directory, so a replacement never overwrites the first one's logs
+    container = os.environ.get("MODAL_TASK_ID") or f"t{int(time.time())}"
+    tag = f"{tag}/{container}"
     log = _log_dir(tag)
     _gpu_facts(log, 1)
     nvml = _nvml_sampler(log / "nvml.csv")
@@ -419,11 +428,21 @@ def release_hasher(tag: str, base_dir: str, store_root: str, release_dirs: list[
         time.sleep(poll_s)
 
 
+RUN_LIMIT_S = 100 * 60  # whole run (g1b-1: trainers about 40 min, sampler first start about 6 min)
+SAMPLER_DRAIN_S = 5 * 60  # after both trainers returned 0: the sampler only ends its last round
+
+
 @app.function(image=image, volumes=VOLUMES, cpu=1, memory=1024, timeout=3 * 3600)
-def orchestrate(tag: str, cut_after: int = 2) -> dict:
+def orchestrate(tag: str, cut_after: int = 2, run_limit_s: float = RUN_LIMIT_S,
+                sampler_drain_s: float = SAMPLER_DRAIN_S) -> dict:
     """Sampler for the whole run; trainer A stops after ``cut_after`` rounds (cut),
     trainer B resumes in a new container. A trainer that fails cancels the sampler;
-    a sampler that fails cancels the running trainer (no card waits for nothing)."""
+    a sampler that fails cancels the running trainer (no card waits for nothing).
+    Two wall-clock limits (``run_limits``): the whole run (``run_limit_s``: a lost
+    container that Modal runs again, or a hang, cancels every call), and the sampler
+    after both trainers returned 0 (``sampler_drain_s``)."""
+    deadline = Deadline(run_limit_s)
+    limits: list[str] = []
     run_store = Path("/data/store/s25-g1")  # the plan's store: every run starts from an empty one
     if run_store.exists():
         shutil.rmtree(run_store)
@@ -438,6 +457,8 @@ def orchestrate(tag: str, cut_after: int = 2) -> dict:
 
     def sampler_done() -> bool:
         nonlocal sampler_rc
+        if sampler_rc is not None:
+            return True
         try:
             sampler_rc = sampler.get(timeout=0)
             return True
@@ -456,6 +477,10 @@ def orchestrate(tag: str, cut_after: int = 2) -> dict:
                 pass
             except Exception as error:  # noqa: BLE001
                 return f"error: {error}"
+            if deadline.passed():
+                call.cancel()
+                limits.append(f"{sub}: run limit {run_limit_s:g} s passed")
+                return "cancelled: run limit"
             if sampler_done() and sampler_rc != 0:
                 call.cancel()
                 return "cancelled: sampler ended with " + str(sampler_rc)
@@ -466,13 +491,15 @@ def orchestrate(tag: str, cut_after: int = 2) -> dict:
         if not sampler_done():
             sampler.cancel()
             sampler_rc = "cancelled"
-    else:
-        while not sampler_done():
-            time.sleep(30)
+    elif not wait_until(sampler_done, sampler_drain_s, deadline=deadline):
+        sampler.cancel()
+        limits.append(f"sampler: not done {sampler_drain_s:g} s after both trainers returned 0")
+        sampler_rc = "cancelled: drain limit"
     time.sleep(90)  # the re-quantizer's last log mirror
     requant.cancel()
     hasher.cancel()
-    result = {"trainer_a": first, "trainer_b": second, "sampler": sampler_rc}
+    result = {"trainer_a": first, "trainer_b": second, "sampler": sampler_rc, "limits": limits,
+              "wall_s": round(run_limit_s - deadline.left(), 1)}
     print(json.dumps(result, default=str), flush=True)
     out = Path(f"/data/logs/{tag}")
     out.mkdir(parents=True, exist_ok=True)
