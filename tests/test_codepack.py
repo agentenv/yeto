@@ -98,6 +98,25 @@ def test_unpack_keeps_a_tree_another_launch_placed_first(repo: Path, monkeypatch
     assert [p.name for p in cache.iterdir()] == [first.name]  # no staging dir left behind
 
 
+def test_an_unpacked_tree_can_be_zipped_for_a_remote_api_server(repo: Path) -> None:
+    # T-C1b: the pack's entries carry mtime 0; sky zips the workdir it uploads to a
+    # remote API server and ZIP refuses times before 1980
+    import os
+    import zipfile
+
+    pack, data = codepack.build_pack(repo)
+    cache = repo.parent / "cache"
+    tree = codepack.unpack(data, pack.digest, cache)
+    files = [p for p in tree.rglob("*") if p.is_file()]
+    assert files and all(p.stat().st_mtime == codepack.UNPACKED_MTIME for p in files)
+    with zipfile.ZipFile(repo.parent / "upload.zip", "w") as zf:
+        for p in files:
+            zf.write(p, p.relative_to(tree))
+    os.utime(files[0], (0, 0))  # a tree unpacked before the fix is stamped on reuse
+    assert codepack.unpack(data, pack.digest, cache) == tree
+    assert files[0].stat().st_mtime == codepack.UNPACKED_MTIME
+
+
 def test_unpack_rejects_wrong_bytes(repo: Path) -> None:
     pack, data = codepack.build_pack(repo)
     with pytest.raises(CodePackError, match="does not have digest"):

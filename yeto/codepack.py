@@ -241,9 +241,23 @@ def _safe_member(member: tarfile.TarInfo) -> None:
             raise CodePackError(f"code pack symlink {member.name!r} leaves the tree")
 
 
+# The pack's entries carry mtime 0 (a deterministic tar); an unpacked tree gets this
+# time instead. sky zips a workdir it uploads to a remote API server, and ZIP refuses
+# timestamps before 1980 ("ZIP does not support timestamps before 1980", T-C1b).
+UNPACKED_MTIME = 946684800  # 2000-01-01T00:00:00Z
+
+
+def _stamp_times(tree: Path) -> None:
+    """Give every entry of ``tree`` :data:`UNPACKED_MTIME` (links themselves, not
+    their targets). The digest covers names and bytes only, so it is unchanged."""
+    for path in [tree, *tree.rglob("*")]:
+        os.utime(path, (UNPACKED_MTIME, UNPACKED_MTIME), follow_symlinks=False)
+
+
 def unpack(data: bytes, digest: str, cache_root: str | os.PathLike[str]) -> Path:
     """Check ``data`` against ``digest`` and unpack it to ``<cache_root>/<digest>``
-    (reused when already there and intact). Returns the tree."""
+    (reused when already there and intact; a tree unpacked before
+    :data:`UNPACKED_MTIME` existed gets its times now). Returns the tree."""
 
     if hashlib.sha256(data).hexdigest() != digest.lower():
         raise CodePackError(f"downloaded code pack does not have digest {digest}")
@@ -251,6 +265,7 @@ def unpack(data: bytes, digest: str, cache_root: str | os.PathLike[str]) -> Path
     if dest.is_dir():
         try:
             verify_tree(dest, digest)
+            _stamp_times(dest)
             return dest
         except CodePackError:
             shutil.rmtree(dest)
@@ -262,6 +277,7 @@ def unpack(data: bytes, digest: str, cache_root: str | os.PathLike[str]) -> Path
             for member in members:
                 _safe_member(member)
             tar.extractall(staging, members=members, filter="tar")
+        _stamp_times(staging)
         verify_tree(staging, digest)
         try:
             staging.rename(dest)
