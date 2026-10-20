@@ -103,6 +103,9 @@ sampler:
   renames_weight_packed: true          # the yeto hook in the image renames (sglang_load_report)
   load_report: true                    # the hook reports loaded expert matrices (post-load check 1)
   in_place_reload: false
+  # SGLang fuses the BF16 shared expert into the routed FusedMoE as expert 32; under the
+  # MXFP4 MoE method that slot is packed U8, so the BF16 shared weights do not fit (smoke-2)
+  extra_args: [--disable-shared-experts-fusion]
   extra_env:
     PYTHONPATH: /root/sky_workdir
   checks:

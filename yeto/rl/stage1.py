@@ -341,6 +341,7 @@ def _sampler_engine(plan: Stage1Plan, node: Node):
     extra = ["--moe-runner-backend", str(s["moe_runner_backend"])]
     if s.get("hierarchical_cache"):
         extra.append("--enable-hierarchical-cache")
+    extra += [str(a) for a in s.get("extra_args") or ()]  # further engine flags of the plan
     config = ServerConfig(
         base_dir=Path(plan.section("model")["sampler_initial"]["local_dir"]),
         card_model=node.card, device_family=node.device_family,

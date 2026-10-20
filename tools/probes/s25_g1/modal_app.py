@@ -98,7 +98,8 @@ def _sh(cmd: str, log: Path | None = None, env: dict | None = None, check: bool 
     return out
 
 
-def _gpu_facts(log: Path, want: int) -> dict:
+def _gpu_facts(log_dir: Path, want: int) -> dict:
+    log = log_dir / "gpu.txt"
     out = _sh("nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv,noheader", log)
     names = [line.split(",")[1].strip() for line in out.strip().splitlines()]
     if len(names) != want or not all(GPU_NAME in n for n in names):
@@ -170,7 +171,10 @@ def smoke_run(tag: str) -> None:
 
         sample = engine.generate(["Question: What is 2 + 3?\nAnswer:"],
                                  SamplingParams(max_tokens=32, temperature=1.0, n=2, seed=1).check())
+        from yeto.rl.adapters.sampler_engines.sglang_load_report import read_reports
+
         record = {**facts, "start_s": round(started, 1), "load_report": report.detail, "checks": results,
+                  "hook_report": read_reports(run["spec"]["engine"]["options"]["load_report_dir"]),
                   "sample": [[c.text for c in g] for g in sample]}
         engine.stop()
     except Exception as error:  # noqa: BLE001 - the record is the evidence
