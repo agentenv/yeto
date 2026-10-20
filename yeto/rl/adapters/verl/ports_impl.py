@@ -522,16 +522,35 @@ def criteria_from_trainer_batch(isl: VerlIsland, kv_batch) -> None:
 
 
 def _row_field(kv_batch, name: str) -> tuple[list | None, str]:
-    """Per-row values of a non-tensor field (``HarborAgentLoop`` puts ``provenance``
-    in ``extra_fields``); ``(None, reason)`` when the batch has none.  That verl's
-    TransferQueue keeps ``extra_fields`` under their own names is not verified."""
+    """Per-row values of one ``extra_fields`` entry (``HarborAgentLoop`` puts
+    ``provenance`` there); ``(None, reason)`` when the batch has none.
+
+    verl's TransferQueue agent loop (``agent_loop_tq._agent_loop_postprocess``)
+    stores ``AgentLoopOutput.as_dict()``, so the entry sits inside the
+    ``extra_fields`` record of each row, not under its own name (the classic
+    agent loop flattens it into ``non_tensor_batch``; the fully async runner
+    reads that).  The batch is read by the record name."""
     import transfer_queue as tq
 
     try:
-        data = tq.kv_batch_get(keys=kv_batch.keys, partition_id=kv_batch.partition_id, select_fields=[name])
-        return list(data[name]), "ok"
+        data = tq.kv_batch_get(keys=kv_batch.keys, partition_id=kv_batch.partition_id,
+                               select_fields=["extra_fields"])
+        rows = extra_field_values(list(data["extra_fields"]), name)
     except Exception as exc:  # noqa: BLE001 - the rows then group under ``unknown``
         return None, f"missing: {type(exc).__name__}: {str(exc)[:200]}"
+    if all(v is None for v in rows):
+        return None, f"missing: no {name!r} in extra_fields"
+    return rows, "ok"
+
+
+def extra_field_values(records: list, name: str) -> list:
+    """``record[name]`` of each row's ``extra_fields`` (``None`` where absent).  A
+    TransferQueue read can return each record wrapped in a ``NonTensorData``."""
+    values = []
+    for record in records:
+        record = getattr(record, "data", record)
+        values.append(record.get(name) if isinstance(record, dict) else None)
+    return values
 
 
 def source_event(train_lp, infer_lp, mask, provenances, provenance_read: str, *, rollout_id: int,

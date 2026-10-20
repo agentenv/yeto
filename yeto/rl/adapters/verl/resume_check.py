@@ -4,7 +4,7 @@ The checks live in :mod:`yeto.rl.engine.resume_manifest`; this module only maps
 a verl FSDP actor worker onto them (:func:`train_handles`). Two worker shapes:
 
 * the engine worker of the pinned verl (``engine_workers.ActorRolloutRefWorker``):
-  ``worker.actor.engine`` holds ``module`` / ``optimizer`` / ``lr_scheduler``
+  ``worker.actor.engine`` (a bare ``TrainingWorker``: ``worker.engine``) holds ``module`` / ``optimizer`` / ``lr_scheduler``
   (``workers/engine/fsdp/transformer_impl.py``);
 * the legacy fsdp worker: ``actor_module_fsdp`` / ``actor_optimizer`` /
   ``actor_lr_scheduler``.
@@ -55,7 +55,8 @@ def _engine_of(worker: Any) -> Any:
     inner = getattr(worker, "worker_dict", None)  # ray fused worker: {role: worker}
     if inner:
         worker = next((w for w in inner.values() if hasattr(w, "actor")), worker)
-    return getattr(getattr(worker, "actor", None), "engine", None) or worker
+    actor = getattr(worker, "actor", None) or worker  # ActorRolloutRefWorker.actor is a TrainingWorker
+    return getattr(actor, "engine", None) or worker
 
 
 def train_handles(worker: Any) -> TrainHandles:

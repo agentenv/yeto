@@ -23,7 +23,7 @@ import torch.multiprocessing as mp
 
 from tests import test_rl_quant_mxfp4 as mx
 from tests import test_rl_quant_requant as w4
-from yeto.rl.adapters.miles.quant_shards import hf_slices, megatron_expert_slices
+from yeto.rl.adapters.miles.quant_shards import checkpoint_name, hf_slices, megatron_expert_slices
 from yeto.rl.adapters.verl.quant_shards import fsdp2_slices, shard0_rows
 from yeto.rl.engine.policy_release import (
     RELEASE_DIR,
@@ -225,7 +225,9 @@ def _megatron_rank(src: dict[str, torch.Tensor], ep_rank: int, num_local: int, s
 def test_megatron_expert_parallel_ranks_merge_to_the_same_bytes(world):
     src, out = world["src"], world["tmp"] / "megatron"
     parts = out / PART_DIR
-    non_expert = [(n, t) for n, t in src.items() if not _PER_EXPERT.match(n)]
+    # non-expert weights as Miles convert_to_hf emits them (SGLang names, no model.language_model.)
+    non_expert = [(n.replace("model.language_model.", "model.", 1), t) for n, t in src.items() if not _PER_EXPERT.match(n)]
+    assert any(n.startswith("model.layers.") for n, _ in non_expert)
     for ep_rank in (0, 1):  # E = 2: one local expert per rank; rank 1 uses the sequential-MLP names
         slices = list(megatron_expert_slices(_megatron_rank(src, ep_rank, 1, sequential=ep_rank == 1),
                                              ep_rank=ep_rank, num_local_experts=1))
@@ -380,3 +382,11 @@ def test_follower_refuses_a_release_of_another_scheme_before_reading_it(tmp_path
     bf16.release(4, "h4", lambda d: (d / "model.safetensors").write_text("y"))
     with pytest.raises(SchemeMismatch, match="'bf16'"):
         PolicyFollower(bf16, lambda r, d: None, scheme="w4a8-int4-channel").refresh()
+
+
+def test_miles_convert_to_hf_names_map_to_checkpoint_names():
+    assert checkpoint_name("model.layers.3.mlp.gate.weight") == "model.language_model.layers.3.mlp.gate.weight"
+    assert checkpoint_name("model.embed_tokens.weight") == "model.language_model.embed_tokens.weight"
+    assert checkpoint_name("model.norm.weight") == "model.language_model.norm.weight"
+    for unchanged in ("lm_head.weight", "model.language_model.norm.weight", "model.visual.blocks.0.attn.qkv.weight"):
+        assert checkpoint_name(unchanged) == unchanged
