@@ -263,7 +263,15 @@ def unpack(data: bytes, digest: str, cache_root: str | os.PathLike[str]) -> Path
                 _safe_member(member)
             tar.extractall(staging, members=members, filter="tar")
         verify_tree(staging, digest)
-        staging.rename(dest)
+        try:
+            staging.rename(dest)
+        except OSError:
+            # another process (a second launch from the same checkout) unpacked the
+            # same digest first: keep its tree when it is intact
+            if not dest.is_dir():
+                raise
+            verify_tree(dest, digest)
+            shutil.rmtree(staging, ignore_errors=True)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise

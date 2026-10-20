@@ -77,6 +77,27 @@ def test_verify_tree_rejects_changed_tree(repo: Path) -> None:
         codepack.verify_tree(tree, pack.digest)
 
 
+def test_unpack_keeps_a_tree_another_launch_placed_first(repo: Path, monkeypatch) -> None:
+    # S25 T-EVAL: two launches from one checkout unpack the same digest at once; the
+    # later rename finds the earlier tree in place (ENOTEMPTY) and must reuse it
+    pack, data = codepack.build_pack(repo)
+    cache = repo.parent / "cache"
+    first = codepack.unpack(data, pack.digest, cache)
+    real_is_dir = Path.is_dir
+    calls = {"n": 0}
+
+    def racing_is_dir(self: Path) -> bool:  # the first existence check misses the tree
+        if self == first and calls["n"] == 0:
+            calls["n"] += 1
+            return False
+        return real_is_dir(self)
+
+    monkeypatch.setattr(Path, "is_dir", racing_is_dir)
+    assert codepack.unpack(data, pack.digest, cache) == first
+    assert codepack.verify_tree(first, pack.digest) == pack.digest
+    assert [p.name for p in cache.iterdir()] == [first.name]  # no staging dir left behind
+
+
 def test_unpack_rejects_wrong_bytes(repo: Path) -> None:
     pack, data = codepack.build_pack(repo)
     with pytest.raises(CodePackError, match="does not have digest"):
