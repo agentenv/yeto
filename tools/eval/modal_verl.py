@@ -392,6 +392,10 @@ def build_app(run: str, cfg: dict):
     import modal
 
     sys.path.insert(0, str(REPO))
+    from modal._vendor import cloudpickle
+
+    # the container functions travel by value: `tools` is not importable in the images
+    cloudpickle.register_pickle_by_value(sys.modules[__name__])
     from yeto.rl.adapters.miles.pins import MILES_NEXT_IMAGE
     from yeto.rl.adapters.verl.image import modal_image
 
@@ -414,9 +418,9 @@ def build_app(run: str, cfg: dict):
                                 volumes=vols, name="sampler", serialized=True)(sampler),
         "trainer": app.function(image=verl_image, gpu=gpu, cpu=16.0, memory=65536, timeout=timeout, retries=0,
                                 volumes=vols, secrets=[hmac], name="trainer", serialized=True)(trainer),
-        # max_inputs=1: every phase in a fresh container (a warm one keeps ~/yeto-output: C4 run c)
+        # single_use_containers: every phase in a fresh container (a warm one keeps ~/yeto-output: C4 run c)
         "island": app.function(image=verl_image, gpu=gpu, cpu=8.0, memory=49152, timeout=timeout, retries=0,
-                               volumes=vols, max_inputs=1, name="island", serialized=True)(island),
+                               volumes=vols, single_use_containers=True, name="island", serialized=True)(island),
         "collect": app.function(image=cpu_image, cpu=1.0, memory=2048, timeout=900, volumes=vols,
                                 name="collect", serialized=True)(collect),
     }
