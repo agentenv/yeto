@@ -364,3 +364,8 @@ def test_parse_bare_verl_async_rows_lag_one_version():
     assert [r["t_end_unix"] for r in p.rounds] == [101.0, 102.0, 103.0]
     assert [r["reward_mean"] for r in p.rounds] == [0.5, 0.5, None]
     assert [r["samples"] for r in p.rounds] == [4, 4, 4]
+
+
+def test_bare_miles_reads_prompts_in_file_order_like_yeto():
+    for arm in ("bare-miles-sync", "bare-miles-async"):
+        assert "--rollout-shuffle" not in spec.bare_script(SPEC, spec.Arm.parse(arm), "r")

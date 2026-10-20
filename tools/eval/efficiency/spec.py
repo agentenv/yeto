@@ -275,7 +275,9 @@ def miles_bare_argv(spec: EffSpec, mode: str) -> list[str]:
         "--finetune", "--no-load-optim", "--no-load-rng", "--no-save-optim", "--no-save-rng",
         # rollout
         "--prompt-data", f"{DATA_DIR}/train.jsonl", "--input-key", "prompt", "--label-key", "label",
-        "--apply-chat-template", "--rollout-shuffle", "--rollout-seed", str(spec.seed),
+        # no --rollout-shuffle (the recipe has it): yeto's Miles argv leaves rollout_shuffle
+        # False (eff01-yeto-miles-* Miles arg dump), and both arms must read prompts in one order
+        "--apply-chat-template", "--rollout-seed", str(spec.seed),
         "--custom-rm-path", "eff_reward.score",
         "--num-rollout", str(spec.rounds), "--rollout-batch-size", str(spec.groups_per_round),
         "--n-samples-per-prompt", str(spec.samples_per_group),
