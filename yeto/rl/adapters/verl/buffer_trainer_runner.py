@@ -130,7 +130,8 @@ class YetoBufferTaskRunner(YetoFullyAsyncTaskRunner):
         store = store_for(section["store"], environ=environ)
         # S25 C3: a synced trainer reads its lane of the buffer (section "lane": "M/N")
         buffer = open_trainer_buffer(store, batch_size=1, create_index=False,
-                                     lane=BufferLane.parse(section.get("lane")))
+                                     lane=BufferLane.parse(section.get("lane")),
+                                     shards=section.get("shards"))
         releases = PolicyReleaseStore(store_for(section.get("release_store") or section["store"],
                                                 environ=environ))
         shape = RowShape(int(config.data.max_prompt_length), int(config.data.max_response_length),

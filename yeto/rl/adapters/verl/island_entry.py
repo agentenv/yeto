@@ -73,6 +73,13 @@ def parse_args(argv):
     p.add_argument("--rl-sample-role", default=None)
     p.add_argument("--rl-resume-store", default=None)
     p.add_argument("--rl-sample-wait-s", type=float, default=None)
+    # S26 E9.4: the pair flags the launcher forwards per island (sample_roles.island_flags);
+    # a sampler island of a verl launch runs the engine sampler (.sampler_entry)
+    p.add_argument("--rl-sampler-node", default=None)
+    p.add_argument("--rl-buffer-shards", default=None, type=lambda text: [s for s in text.split(",") if s])
+    p.add_argument("--rl-sampler-data-slot", default=None)
+    p.add_argument("--rl-sampler-max-backlog-rounds", type=int, default=None)
+    p.add_argument("--rl-sampler-min-round-seconds", type=float, default=None)
     # S25 C3: a synced trainer island (syncer, learner m of N) reads lane m of the
     # buffer in this store; the launcher forwards both (yeto.rl.engine.merged_release)
     p.add_argument("--rl-sample-store", default=None)
@@ -289,6 +296,15 @@ def main(argv=None) -> int:
     if manifest["problems"]:
         print(f"[yeto-verl] runtime check failed: {manifest['problems']}", file=sys.stderr, flush=True)
         return 2
+    from yeto.rl.engine import sample_roles
+
+    if sample_roles.sample_role(args) == sample_roles.SAMPLER:  # S26 E9.4: no verl trainer here
+        from .sampler_entry import SamplerIslandError, run_sampler_island
+
+        try:
+            return run_sampler_island(args, manifest=manifest, card=_threshold_card(manifest), output=OUTPUT)
+        except SamplerIslandError as error:  # the island flags are incomplete
+            raise SystemExit(str(error)) from None
 
     ray_info = ensure_ray_cpus()
     (OUTPUT / f"verl-ray-{lid}.json").write_text(json.dumps(ray_info, indent=1))
@@ -406,9 +422,11 @@ def sample_buffer_section(args) -> dict | None:
     role = sample_roles.sample_role(args)
     if role == sample_roles.BOTH:
         return None
+    if role == sample_roles.SAMPLER:
+        return None  # main() runs the engine sampler (.sampler_entry) instead of verl
     if role != sample_roles.TRAINER:
-        raise SystemExit(f"--rl-sample-role {role}: a verl island only trains from the buffer; "
-                         "run the sampler as the engine sampler island (yeto.rl.engine.engine_sampler)")
+        raise SystemExit(f"--rl-sample-role {role}: a verl island trains from the buffer or "
+                         "runs the engine sampler (role sampler)")
     if int(args.rl_max_policy_age or 0) < 1:
         raise SystemExit("--rl-sample-role trainer needs --rl-max-policy-age >= 1 (the fully_async path)")
     try:
@@ -417,7 +435,8 @@ def sample_buffer_section(args) -> dict | None:
     except ValueError as error:
         raise SystemExit(str(error)) from None
     config = sample_roles.resolve(args, groups_per_round=args.groups_per_round)
-    return {"store": config.store, "wait_s": config.wait_s, "lane": None if lane is None else lane.env()}
+    return {"store": config.store, "wait_s": config.wait_s, "lane": None if lane is None else lane.env(),
+            **({"shards": list(args.rl_buffer_shards)} if getattr(args, "rl_buffer_shards", None) else {})}
 
 
 def fully_async_plan(limit: int, overrides: list[str], spec_dict: dict | None, args, sync: str):

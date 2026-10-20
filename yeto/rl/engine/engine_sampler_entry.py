@@ -20,7 +20,10 @@ The spec (:class:`SamplerSpec`, every key below is required unless marked):
   needs the store environment of :mod:`yeto.cloud.oss_store`);
   ``release_dir``: the release directory the sampler follows (optional,
   default ``policy-releases``); ``buffer_root``: the store holding
-  ``sample-buffer/`` (optional, default ``store``);
+  ``sample-buffer/`` (optional, default ``store``); ``buffer_shards``: the
+  sampler shards of a run with several samplers on one shared directory
+  (optional; the sampler writes its own shard, the trainer merges them, as
+  ``--rl-buffer-shards`` on the Miles sampler);
 * ``prompts``: ``{"path": JSONL, "input_key", "label_key", "groups_per_round",
   "format": "text" | "chat"}`` -- round ``r`` takes the
   ``groups_per_round`` rows after row ``r * groups_per_round`` (wrapping);
@@ -219,7 +222,10 @@ def build_stores(spec: Mapping[str, Any], environ: Mapping[str, str] | None = No
                                   release_dir=str(spec.get("release_dir") or RELEASE_DIR))
     buffer_store = store_for(str(spec.get("buffer_root") or store), environ=environ)
     sampler_id = str(_require(spec, "sampler_id"))
-    index = shard_index(sampler_id) if needs_shards(buffer_store) else INDEX
+    shards = [str(s) for s in spec.get("buffer_shards") or ()]
+    if shards and sampler_id not in shards:
+        raise SamplerSpecError(f"sampler {sampler_id!r} is not one of the buffer shards {shards}")
+    index = shard_index(sampler_id) if needs_shards(buffer_store) or shards else INDEX
     return releases, FileSampleBuffer(buffer_store, batch_size=1, index=index)  # as open_buffer(sampler=True)
 
 

@@ -356,12 +356,16 @@ def index_for(store: CheckpointStore | ObjectStore, *, index: str = INDEX,
 
 def open_trainer_buffer(store: CheckpointStore | ObjectStore, *, batch_size: int,
                         lane: BufferLane | None = None, create_index: bool = True,
-                        **kwargs: Any) -> "FileSampleBuffer":
+                        shards: Iterable[str] | None = None, **kwargs: Any) -> "FileSampleBuffer":
     """The buffer of a trainer (the reader): it merges the sampler shards of a
-    store that shards (:func:`needs_shards`) unless it is a synced trainer other
-    than the publisher (``merged_release.merges_shards``); ``lane``: its lane."""
+    store that shards (:func:`needs_shards`), or the named ``shards`` of several
+    sampler islands on one shared directory (the data ends once every named
+    shard ended), unless it is a synced trainer other than the publisher
+    (``merged_release.merges_shards``); ``lane``: its lane."""
+    named = tuple(shards or ())
+    merge = (needs_shards(store) or bool(named)) and merges_shards(lane)
     return FileSampleBuffer(store, batch_size=batch_size, create_index=create_index, lane=lane,
-                            merge_shards=needs_shards(store) and merges_shards(lane), **kwargs)
+                            merge_shards=merge, expected_shards=named if merge and named else None, **kwargs)
 
 
 class FileSampleBuffer:

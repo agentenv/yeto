@@ -353,8 +353,10 @@ def test_island_entry_plans_a_buffer_trainer_and_refuses_other_roles():
                                                 "--rl-single-island-no-sync",
                                                 "--rl-max-policy-age", "1", "--rl-sample-wait-s", "60"))
     assert section == {"store": "/s", "wait_s": 60.0, "lane": None}
+    # S26 E9.4: a sampler island runs the engine sampler (no buffer section); other roles stop
+    assert sample_buffer_section(_entry_args("--rl-sample-role", "sampler", "--rl-resume-store", "/s")) is None
     with pytest.raises(SystemExit, match="engine sampler"):
-        sample_buffer_section(_entry_args("--rl-sample-role", "sampler", "--rl-resume-store", "/s"))
+        sample_buffer_section(_entry_args("--rl-sample-role", "convertible", "--rl-resume-store", "/s"))
     with pytest.raises(SystemExit, match="max-policy-age"):
         sample_buffer_section(_entry_args("--rl-sample-role", "trainer", "--rl-resume-store", "/s"))
 
