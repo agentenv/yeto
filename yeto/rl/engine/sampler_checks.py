@@ -204,6 +204,8 @@ class PostLoadChecks:
                 and len(groups) == len(self.fixed_prompts), "answers": answers}
 
     def logprob_probe(self, engine: SamplerEngine) -> dict[str, Any]:
+        if not self.pairs():  # no fixed prompts and no probe pairs: nothing to score or compare
+            return {"name": "logprob_probe", "passed": True, "detail": "no probe pairs"}
         means = []
         for prompt, continuation in self.pairs():
             logprobs = engine.score(prompt, continuation)

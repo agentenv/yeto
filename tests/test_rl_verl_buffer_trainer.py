@@ -350,9 +350,122 @@ def test_island_entry_plans_a_buffer_trainer_and_refuses_other_roles():
 
     assert sample_buffer_section(_entry_args()) is None
     section = sample_buffer_section(_entry_args("--rl-sample-role", "trainer", "--rl-resume-store", "/s",
+                                                "--rl-single-island-no-sync",
                                                 "--rl-max-policy-age", "1", "--rl-sample-wait-s", "60"))
-    assert section == {"store": "/s", "wait_s": 60.0}
+    assert section == {"store": "/s", "wait_s": 60.0, "lane": None}
     with pytest.raises(SystemExit, match="engine sampler"):
         sample_buffer_section(_entry_args("--rl-sample-role", "sampler", "--rl-resume-store", "/s"))
     with pytest.raises(SystemExit, match="max-policy-age"):
         sample_buffer_section(_entry_args("--rl-sample-role", "trainer", "--rl-resume-store", "/s"))
+
+
+def test_island_entry_plans_a_synced_trainer_lane_and_refuses_partial_flags():
+    from yeto.rl.adapters.verl.island_entry import sample_buffer_section
+
+    synced = ("--rl-sample-role", "trainer", "--syncer", "h:1", "--rl-max-policy-age", "2")
+    section = sample_buffer_section(_entry_args(*synced, "--rl-sample-store", "/s", "--rl-sample-lanes", "2"))
+    assert section == {"store": "/s", "wait_s": None, "lane": "0/2"}
+    for extra, message in ((("--rl-sample-store", "/s"), "needs --rl-sample-store and --rl-sample-lanes"),
+                           (("--rl-sample-store", "/s", "--rl-sample-lanes", "2", "--rl-resume-store", "/s"),
+                            "not --rl-resume-store")):
+        with pytest.raises(SystemExit, match=message):
+            sample_buffer_section(_entry_args(*synced, *extra))
+    with pytest.raises(SystemExit, match="need --rl-sample-role trainer with a syncer"):
+        sample_buffer_section(_entry_args("--rl-sample-role", "trainer", "--rl-single-island-no-sync",
+                                          "--rl-max-policy-age", "1", "--rl-resume-store", "/s",
+                                          "--rl-sample-lanes", "2"))
+
+
+# ---------------------------------------------------------------------- synced trainers (S25 C3)
+class _State:
+    """A published policy state: local version, hash, the LoRA tensors."""
+
+    def __init__(self, version, tensors, label):
+        import hashlib
+
+        self.policy_version, self._tensors = version, tensors
+        self.label, self._digest = label, hashlib.sha256(label.encode()).hexdigest()
+
+    def policy_tensor_hash(self):
+        return self._digest
+
+    def to_lora(self):
+        return type("L", (), {"tensors": self._tensors})
+
+
+def _synced_publisher(tmp_path, store, lane, events):
+    from yeto.rl.adapters.verl.fully_async_ports import FullyAsyncIsland
+    from yeto.rl.engine.merged_release import BufferLane, lane_cursor_log
+
+    actor = FakeBufferActor()
+    island = FullyAsyncIsland(actor, learner_id=lane, limit=2, required=1,
+                              out_dir=str(tmp_path / f"out{lane}"), readback_dir=str(tmp_path / "rb"))
+    (tmp_path / f"out{lane}").mkdir(exist_ok=True)
+    island.emit = lambda event, **f: events.append((event, f))
+    buffer = FileSampleBuffer(store, batch_size=1, lane=BufferLane(lane, 2))
+    _, publisher, _ = install_buffer_ports(
+        island, buffer=buffer, releases=PolicyReleaseStore(store), shape=SHAPE, base_dir=tmp_path,
+        cursor_log=lane_cursor_log(buffer))
+    def merge(base, tensors, directory):
+        (directory / "model.safetensors").write_bytes(b"w")
+        return {}
+
+    publisher.merge = merge
+    driver = type("D", (), {"outer_version": None})()
+    publisher.bind(driver)
+    return actor, island, publisher, driver
+
+
+def test_only_the_publisher_releases_each_new_merged_version_once(tmp_path):
+    store = CheckpointStore(tmp_path / "store")
+    nonzero = {NAMES[0]: torch.ones(2, 4), NAMES[1]: torch.ones(4, 2)}
+    zero = {NAMES[0]: torch.ones(2, 4), NAMES[1]: torch.zeros(4, 2)}
+    events = {0: [], 1: []}
+    islands = {m: _synced_publisher(tmp_path, store, m, events[m]) for m in (0, 1)}
+    # (local version, outer version of the applied base): base, a local round without a
+    # merge, merges 1 and 2, then merge 4 (merge 3 missed: a gap)
+    steps = [(0, 0, zero), (1, 0, nonzero), (2, 1, nonzero), (3, 2, nonzero), (4, 4, nonzero)]
+    for local, outer, tensors in steps:
+        for m, (actor, island, publisher, driver) in islands.items():
+            actor.param_version = local
+            driver.outer_version = outer
+            publisher.publish(_State(local, tensors, f"h{outer}-{local}"))
+    released = [f for e, f in events[0] if e == "rl_policy_released"]
+    assert [(f["policy_version"], f["local_version"]) for f in released] == [(1, 2), (2, 3), (4, 4)]
+    assert all(f["origin"] == {"kind": "merged", "learner_id": 0, "num_learners": 2,
+                               "local_version": f["local_version"]} for f in released)
+    assert [f for e, f in events[0] if e == "rl_policy_release_gap"] == [{"previous_version": 2, "policy_version": 4}]
+    assert not [e for e, _ in events[1] if e == "rl_policy_released"]
+    assert ("rl_policy_release_role", {"learner_id": 1, "num_learners": 2, "publisher": False}) in events[1]
+    latest = PolicyReleaseStore(store).latest()
+    assert (latest.seq, latest.version, latest.policy_hash) == (3, 4, _State(4, {}, "h4-4").policy_tensor_hash())
+    # both islands pair each merged version with the first local version that applied it
+    for _, island, publisher, _ in islands.values():
+        assert publisher.feed.merged.to_dict() == {"0": 0, "1": 2, "2": 3, "4": 4}
+
+
+def test_a_synced_feed_reads_its_lane_translates_merged_versions_and_logs_each_round(tmp_path):
+    store = CheckpointStore(tmp_path / "store")
+    writer = GroupWriter(FileSampleBuffer(store, batch_size=1), "s0")
+    for i, version in enumerate((0, 0, 1, 1, 3, 3)):  # merged behavior versions
+        writer.write([_sample(version, index=0)], group_key=f"g{i}")
+    events = []
+    actor, island, publisher, driver = _synced_publisher(tmp_path, store, 1, events)
+    for local, outer in ((0, 0), (1, 1), (2, 1)):  # merge 1 applied at local 1; local 2 trains on
+        actor.param_version = local
+        driver.outer_version = outer
+        publisher.publish(_State(local, {NAMES[1]: torch.zeros(4, 2)}, f"h{local}"))
+    feed = publisher.feed
+    pulled = []
+    for _ in range(3):
+        meta = feed.pull()
+        pulled.append((meta["uid"], meta["min_steps"]))
+        feed.keep() if None not in meta["min_steps"] else feed.drop()
+    # lane 1 of 2: positions 1, 3, 5; merged v0 -> local 0, v1 -> local 1, v3 never applied here
+    assert pulled == [("buf1", (0,)), ("buf3", (1,)), ("buf5", (None,))]
+    island.call("yeto_assemble")  # the round's collection ended: one lane cursor line
+    lane_file = tmp_path / "store" / "sample-buffer" / "lanes" / "1-of-2.jsonl"
+    assert _lines(lane_file) == [{"rollout_id": 2, "positions": [1, 3], "cursor": 6}]
+    # a restarted island continues after the recorded cursor
+    again = _synced_publisher(tmp_path, store, 1, [])[2].feed
+    assert again.buffer.read_cursor == 6

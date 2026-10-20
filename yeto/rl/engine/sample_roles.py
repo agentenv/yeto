@@ -102,11 +102,24 @@ def check_synced_trainers(args: Any, num_islands: int) -> None:
                          "convertible nodes")
     if getattr(args, "tuning", "lora") != "lora":
         raise ValueError("synced trainers merge LoRA deltas: they need --tuning lora")
-    store = str(getattr(args, "rl_checkpoint_store", None) or "")
-    if store.startswith(("s3://", "oss://")):
-        raise ValueError(f"--rl-checkpoint-store {store}: synced trainers read buffer lanes from "
-                         "a shared directory store (a Modal Volume or a shared path), not an "
-                         "object store")
+
+
+def check_sample_store(args: Any) -> None:
+    """Island-side check: ``--rl-sample-store`` / ``--rl-sample-lanes`` belong to a
+    synced trainer island, which needs both (the launcher forwards them) and no
+    ``--rl-resume-store``; its learner id must name one of the lanes."""
+    store, lanes = getattr(args, "rl_sample_store", None), getattr(args, "rl_sample_lanes", None)
+    if not is_synced_trainer(args):
+        if store is not None or lanes is not None:
+            raise ValueError("--rl-sample-store / --rl-sample-lanes need --rl-sample-role trainer "
+                             "with a syncer (no --rl-single-island-no-sync)")
+        return
+    if not store or lanes is None or int(lanes) < 2:
+        raise ValueError("a synced trainer island needs --rl-sample-store and --rl-sample-lanes "
+                         ">= 2 (the launcher forwards both)")
+    if getattr(args, "rl_resume_store", None):
+        raise ValueError("a synced trainer island takes --rl-sample-store, not --rl-resume-store")
+    buffer_lane(args)  # learner id inside 0..lanes-1
 
 
 def node_name(island: int) -> str:

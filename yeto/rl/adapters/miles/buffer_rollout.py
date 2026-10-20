@@ -60,7 +60,15 @@ from yeto.rl.engine.buffer_payload import (  # noqa: F401
     encode_group,
     group_entry_fields,
 )
-from yeto.rl.engine.merged_release import LANE_ENV, BufferLane, LaneCursorLog, gate_version
+from yeto.rl.engine.merged_release import (
+    LANE_ENV,
+    BufferLane,
+    LaneCursorLog,
+    ObjectLaneCursorLog,
+    gate_version,
+    lane_cursor_log,
+    merges_shards,
+)
 
 SAMPLER, TRAINER, CONVERTIBLE = "sampler", "trainer", "convertible"
 ROLES = (SAMPLER, TRAINER, CONVERTIBLE)
@@ -170,19 +178,13 @@ def open_buffer(environ: Mapping[str, str] | None = None, *, batch_size: int = 1
     lane = BufferLane.parse(env.get(LANE_ENV)) if reader else None
     return FileSampleBuffer(store, batch_size=batch_size,
                             index=INDEX if shard is None else shard_index(shard),
-                            create_index=create_index, merge_shards=merge and lane is None,
+                            create_index=create_index, merge_shards=merge and merges_shards(lane),
                             lane=lane)
 
 
-def open_lane_log(buffer: Any) -> LaneCursorLog | None:
+def open_lane_log(buffer: Any) -> LaneCursorLog | ObjectLaneCursorLog | None:
     """The lane cursor log of a lane reader (None for a single reader)."""
-    lane = getattr(buffer, "lane", None)
-    if lane is None:
-        return None
-    from yeto.rl.engine.sample_buffer import BUFFER_DIR
-
-    store = buffer.store
-    return LaneCursorLog(f"{store.root}/{BUFFER_DIR}", lane, commit=store.commit)
+    return lane_cursor_log(buffer)
 
 
 def renumber_group(samples: Sequence[dict[str, Any]], *, position: int,
@@ -236,7 +238,7 @@ class BatchReader:
                  poll_s: float = DEFAULT_POLL_S, consumer: str = TRAINER_CONSUMER,
                  clock: Callable[[], float] = time.monotonic,
                  sleep: Callable[[float], None] = time.sleep,
-                 cursor_log: LaneCursorLog | None = None) -> None:
+                 cursor_log: LaneCursorLog | ObjectLaneCursorLog | None = None) -> None:
         """``cursor_log``: a synced trainer's lane cursor (:mod:`yeto.rl.engine.merged_release`):
         the reader continues after its last line and appends one per round."""
         if int(max_policy_age) < 1:

@@ -31,6 +31,7 @@ token, ``meta_info.finish_reason.type``); teacher-forced scores from
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,7 +50,17 @@ from .server import ServerConfig, ServerEngine
 
 TOPOLOGY_TP8 = "tp8"
 TOPOLOGY_DP8 = "dp8"
-SGLANG_TOPOLOGIES = (TOPOLOGY_TP8, TOPOLOGY_DP8)
+_TOPOLOGY = re.compile(r"(tp|dp)([1-9][0-9]*)")
+
+
+def sglang_topology(tp: int, *, dp_attention: bool = False) -> str:
+    """The topology label of one SGLang instance over ``tp`` cards: ``tp<N>``, or
+    ``dp<N>`` with DP attention (``--dp N --enable-dp-attention``)."""
+    return f"{'dp' if dp_attention else 'tp'}{int(tp)}"
+
+
+def is_dp_attention(topology: str) -> bool:
+    return topology.startswith("dp")
 
 
 @dataclass
@@ -80,11 +91,16 @@ class SGLangServerEngine(ServerEngine):
     def __init__(self, config: ServerConfig, options: SGLangOptions | None = None, **kw: Any) -> None:
         super().__init__(config, **kw)
         self.options = options or SGLangOptions()
-        if config.topology not in SGLANG_TOPOLOGIES:
-            raise SamplerEngineError(f"sglang topology {config.topology!r} is not supported "
-                                     f"(known: {SGLANG_TOPOLOGIES}; PD disaggregation is not used)")
-        if config.topology == TOPOLOGY_DP8 and self.options.nextn:
-            raise SamplerEngineError("sglang dp8 + DeepEP cannot run NEXTN (A-INF item 8); "
+        # The topology is the source label of every sample: it must name the real
+        # layout, tp<N> or dp<N> with N = the instance's card count (options.tp).
+        match = _TOPOLOGY.fullmatch(config.topology)
+        if match is None or int(match.group(2)) != int(self.options.tp):
+            raise SamplerEngineError(
+                f"sglang topology {config.topology!r} does not match TP {self.options.tp}: expected "
+                f"{sglang_topology(self.options.tp)!r} or {sglang_topology(self.options.tp, dp_attention=True)!r} "
+                "(PD disaggregation is not used)")
+        if is_dp_attention(config.topology) and self.options.nextn:
+            raise SamplerEngineError("sglang DP attention + DeepEP cannot run NEXTN (A-INF item 8); "
                                      "turn one of them off")
 
     def argv(self, model_dir: Path) -> list[str]:
@@ -93,7 +109,7 @@ class SGLangServerEngine(ServerEngine):
                 "--host", c.host, "--port", str(c.port), "--tp", str(o.tp),
                 "--context-length", str(c.max_model_len),
                 "--served-model-name", o.served_model_name, "--trust-remote-code"]
-        if c.topology == TOPOLOGY_DP8:
+        if is_dp_attention(c.topology):
             argv += ["--dp", str(o.tp), "--enable-dp-attention", "--moe-a2a-backend", "deepep"]
         if o.nextn:
             argv += ["--speculative-algorithm", "NEXTN"]

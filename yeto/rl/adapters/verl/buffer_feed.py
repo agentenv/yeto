@@ -25,7 +25,20 @@ data, without verl or Ray:
 
 Every pulled group is recorded once (``record``) with its buffer position, so a
 run can show that no group was consumed twice. The buffer positions are those of
-the trainer's single read cursor (``FileSampleBuffer.select``).
+the trainer's read cursor (``FileSampleBuffer.select``).
+
+Synced trainers (S25 C3, ``yeto.rl.engine.merged_release``): the buffer is a
+lane reader (positions ``p % N == m`` only) and the feed keeps the lane cursor
+(``cursor_log``): it continues after the last recorded round, and
+:meth:`BufferFeed.close_round` records the round's trained positions when its
+collection ends, before the round trains (at most once, as the Miles reader).
+The groups carry the *merged* version as behavior version;
+:class:`MergedVersions` turns it into the island's local policy version (the
+first local version that applied that merge, whose weights are the merged
+policy), and the version map turns that into verl's ``param_version``. So the
+``max_policy_age`` judgement counts local versions: equal to merged versions
+when every round merges, stricter when an island trains several rounds per
+merge (elastic sync).
 
 :func:`group_rows` builds the rows the way verl's agent loop postprocess pads
 them (``AgentLoopWorker._postprocess``): prompts left-padded to the prompt
@@ -58,6 +71,32 @@ UID_PREFIX = "buf"
 
 class BufferFeedError(SampleBufferRolloutError):
     """A buffer group cannot become verl rows."""
+
+
+class MergedVersions:
+    """Synced trainers: merged (syncer outer) version -> the first local policy
+    version of this island that applied it (module doc). Merged versions only
+    increase; a local version pairs with one merged version."""
+
+    def __init__(self) -> None:
+        self._local: dict[int, int] = {}
+
+    def record(self, merged: int, local: int) -> bool:
+        """Record one publication; True when ``merged`` is new on this island."""
+        merged, local = int(merged), int(local)
+        if merged in self._local:
+            return False
+        if self._local and (merged < max(self._local) or local <= self._local[max(self._local)]):
+            raise BufferFeedError(f"merged v{merged} at local v{local} after merged v{max(self._local)} "
+                                  f"at local v{self._local[max(self._local)]}: versions must increase")
+        self._local[merged] = local
+        return True
+
+    def local(self, merged: int) -> int | None:
+        return self._local.get(int(merged))
+
+    def to_dict(self) -> dict[str, int]:
+        return {str(k): v for k, v in sorted(self._local.items())}
 
 
 @dataclass(frozen=True)
@@ -167,7 +206,11 @@ class BufferFeed:
                  tokenize: Callable[[str], Sequence[int]] | None = None, wait_s: float = 3600.0,
                  poll_s: float = 2.0, consumer: str = TRAINER_CONSUMER,
                  clock: Callable[[], float] = time.monotonic,
-                 sleep: Callable[[float], None] = time.sleep) -> None:
+                 sleep: Callable[[float], None] = time.sleep,
+                 cursor_log: Any = None, merged: MergedVersions | None = None) -> None:
+        """``cursor_log``: a synced trainer's lane cursor log
+        (``merged_release.lane_cursor_log``); ``merged``: a synced trainer's
+        merged version pairing (module doc)."""
         self.buffer = buffer
         self.vmap = vmap
         self.shape = shape
@@ -181,6 +224,11 @@ class BufferFeed:
         self.sleep = sleep
         self._last: _Pulled | None = None
         self.pulled_positions: list[int] = []
+        self.cursor_log = cursor_log
+        self.merged = merged
+        self._round_kept: list[int] = []  # trained positions of the round being collected
+        if cursor_log is not None:
+            self.buffer.reset_to(cursor_log.last_cursor())
 
     def __call__(self, name: str, *args: Any) -> Any:
         """``call(name)`` for the three queue methods (:data:`QUEUE_METHODS`)."""
@@ -207,6 +255,11 @@ class BufferFeed:
             self.sleep(self.poll_s)
 
     def _local(self, version: int) -> int | None:
+        if self.merged is not None:
+            local = self.merged.local(version)
+            if local is None:  # a merge this island never applied: unknown
+                return None
+            version = local
         try:
             return self.vmap().local(version)
         except VerlTranslationError:
@@ -243,6 +296,7 @@ class BufferFeed:
         self.add_group(group_rows(last.samples, uid=f"{UID_PREFIX}{last.position}",
                                   param_versions=last.param_versions, shape=self.shape,
                                   tokenize=self.tokenize))
+        self._round_kept.append(last.position)
         self.record({**last.record, "kept": True})
 
     def drop(self) -> None:
@@ -254,21 +308,39 @@ class BufferFeed:
         last, self._last = self._last, None
         return last
 
+    def close_round(self, rollout_id: int) -> None:
+        """The round's collection ended (before it trains): record its trained
+        positions and the read position in the lane cursor log (module doc)."""
+        if self._last is not None:
+            raise BufferFeedError("round closed with a pulled group not kept or dropped")
+        kept, self._round_kept = self._round_kept, []
+        if self.cursor_log is not None:
+            self.cursor_log.append(int(rollout_id), kept, int(self.buffer.read_cursor))
+
     def read_cursor(self) -> int:
         """The buffer position after the last pulled group (released to the
         samplers for their backlog cap)."""
         return int(self.buffer.read_cursor)
 
 
+ASSEMBLE_METHOD = "yeto_assemble"  # the rollout port's call after a round's collection
+
+
 class BufferCall:
     """The island's ``call(method, *args)``: the queue calls go to the feed, every
-    other call to the trainer actor (``actor_call``)."""
+    other call to the trainer actor (``actor_call``). ``round_id()``: the round
+    being collected; its collection ends at the assemble call, where the feed
+    closes the round (:meth:`BufferFeed.close_round`)."""
 
-    def __init__(self, feed: BufferFeed, actor_call: Callable[..., Any]) -> None:
+    def __init__(self, feed: BufferFeed, actor_call: Callable[..., Any],
+                 round_id: Callable[[], int] | None = None) -> None:
         self.feed = feed
         self.actor_call = actor_call
+        self.round_id = round_id
 
     def __call__(self, name: str, *args: Any, **kwargs: Any) -> Any:
         if name in QUEUE_METHODS:
             return self.feed(name, *args)
+        if name == ASSEMBLE_METHOD and self.round_id is not None:
+            self.feed.close_round(self.round_id())
         return self.actor_call(name, *args, **kwargs)

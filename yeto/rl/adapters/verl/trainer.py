@@ -339,6 +339,8 @@ def run_fully_async_island(call, start_rollouter, plan: dict, cfg: dict, *, buff
         policy_state=VerlPolicyState(island), publisher=publisher, placement=placement,
         capabilities=verl_capabilities(_fingerprint(cfg), fully_async_limit=limit), algorithm=spec,
         sync=sync, events=tape, profile=profile)
+    if buffer_ports is not None:
+        publisher.bind(driver)  # synced buffer trainers release the driver's merged version
     state = driver.run()
     result = {"learner_id": learner_id, "rounds_completed": driver.rounds_completed,
               "final_policy_version": state.policy_version,

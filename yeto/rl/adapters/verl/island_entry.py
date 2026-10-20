@@ -72,6 +72,10 @@ def parse_args(argv):
     p.add_argument("--rl-sample-role", default=None)
     p.add_argument("--rl-resume-store", default=None)
     p.add_argument("--rl-sample-wait-s", type=float, default=None)
+    # S25 C3: a synced trainer island (syncer, learner m of N) reads lane m of the
+    # buffer in this store; the launcher forwards both (yeto.rl.engine.merged_release)
+    p.add_argument("--rl-sample-store", default=None)
+    p.add_argument("--rl-sample-lanes", type=int, default=None)
     args, ignored = p.parse_known_args(argv)
     return args, ignored
 
@@ -393,8 +397,13 @@ def sample_buffer_section(args) -> dict | None:
                          "run the sampler as the engine sampler island (yeto.rl.engine.engine_sampler)")
     if int(args.rl_max_policy_age or 0) < 1:
         raise SystemExit("--rl-sample-role trainer needs --rl-max-policy-age >= 1 (the fully_async path)")
+    try:
+        sample_roles.check_sample_store(args)
+        lane = sample_roles.buffer_lane(args)
+    except ValueError as error:
+        raise SystemExit(str(error)) from None
     config = sample_roles.resolve(args, groups_per_round=args.groups_per_round)
-    return {"store": config.store, "wait_s": config.wait_s}
+    return {"store": config.store, "wait_s": config.wait_s, "lane": None if lane is None else lane.env()}
 
 
 def fully_async_plan(limit: int, overrides: list[str], spec_dict: dict | None, args, sync: str):

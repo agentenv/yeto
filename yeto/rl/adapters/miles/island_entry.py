@@ -212,22 +212,10 @@ def _check_ports_infra_switches(args) -> None:
 
 
 def _check_sample_store(args) -> None:
-    """S25 C3: ``--rl-sample-store`` / ``--rl-sample-lanes`` belong to a synced
-    trainer island (``yeto.rl.engine.merged_release``)."""
-    from yeto.rl.engine.sample_roles import buffer_lane, is_synced_trainer
+    """S25 C3: ``--rl-sample-store`` / ``--rl-sample-lanes`` (engine-neutral rule)."""
+    from yeto.rl.engine.sample_roles import check_sample_store
 
-    store, lanes = getattr(args, "rl_sample_store", None), getattr(args, "rl_sample_lanes", None)
-    if not is_synced_trainer(args):
-        if store is not None or lanes is not None:
-            raise ValueError("--rl-sample-store / --rl-sample-lanes need --rl-sample-role trainer "
-                             "with a syncer (no --rl-single-island-no-sync)")
-        return
-    if not store or lanes is None or int(lanes) < 2:
-        raise ValueError("a synced trainer island needs --rl-sample-store and --rl-sample-lanes "
-                         ">= 2 (the launcher forwards both)")
-    if getattr(args, "rl_resume_store", None):
-        raise ValueError("a synced trainer island takes --rl-sample-store, not --rl-resume-store")
-    buffer_lane(args)  # learner id inside 0..lanes-1
+    check_sample_store(args)
 
 
 def _check_resume_switches(args) -> None:

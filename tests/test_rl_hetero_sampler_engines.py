@@ -624,3 +624,31 @@ def test_stop_sends_sigterm(tmp_path):
     engine.stop()
     assert process.signals == [signal.SIGTERM] and engine.last_exit["normal"]
     engine.stop()  # idempotent
+
+
+def test_sglang_topology_names_the_real_layout(tmp_path):
+    """S25 N2-fix: the source label is tp<N>/dp<N> with N = --tp, not tp8 for every layout."""
+    spawned = []
+    http = _Http({("GET", "/health"): {}})
+    one = SGLangServerEngine(_config(tmp_path, topology="tp1"), SGLangOptions(tp=1),
+                             spawn=lambda a, e: spawned.append(a) or _Process(), http=http, sleep=lambda s: None)
+    assert one.identity.topology == "tp1"
+    one.start(None, 0)
+    argv = spawned[0]
+    assert argv[argv.index("--tp") + 1] == "1" and "--dp" not in argv
+    dp = SGLangServerEngine(_config(tmp_path, topology="dp4"), SGLangOptions(tp=4),
+                            spawn=lambda a, e: spawned.append(a) or _Process(), http=http, sleep=lambda s: None)
+    dp.start(None, 0)
+    assert spawned[1][spawned[1].index("--dp") + 1] == "4"
+    for topology, tp in (("tp8", 1), ("tp1", 8), ("pd8", 8), ("tp", 8)):
+        with pytest.raises(SamplerEngineError, match="does not match TP"):
+            SGLangServerEngine(_config(tmp_path, topology=topology), SGLangOptions(tp=tp))
+
+
+def test_probe_without_pairs_passes_every_load():
+    """S25 N2-fix: no fixed prompts and no probe pairs: the second load divided by zero."""
+    checks = PostLoadChecks(expected_expert_matrices=None, fixed_prompts=())
+    for _ in range(2):
+        result = checks.logprob_probe(engine=None)
+        checks.accept()
+        assert result == {"name": "logprob_probe", "passed": True, "detail": "no probe pairs"}

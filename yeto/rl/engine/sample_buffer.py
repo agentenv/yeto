@@ -68,7 +68,7 @@ from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
-from .merged_release import BufferLane
+from .merged_release import BufferLane, merges_shards
 from .object_store import ObjectStore
 from .resume import CheckpointStore
 from .trainer_lifecycle import BacklogStats, SampleIndexEntry, Selected
@@ -314,6 +314,16 @@ def index_for(store: CheckpointStore | ObjectStore, *, index: str = INDEX,
     return ObjectIndex(objects, prefix=shard_prefix(shard))
 
 
+def open_trainer_buffer(store: CheckpointStore | ObjectStore, *, batch_size: int,
+                        lane: BufferLane | None = None, create_index: bool = True,
+                        **kwargs: Any) -> "FileSampleBuffer":
+    """The buffer of a trainer (the reader): it merges the sampler shards of a
+    store that shards (:func:`needs_shards`) unless it is a synced trainer other
+    than the publisher (``merged_release.merges_shards``); ``lane``: its lane."""
+    return FileSampleBuffer(store, batch_size=batch_size, create_index=create_index, lane=lane,
+                            merge_shards=needs_shards(store) and merges_shards(lane), **kwargs)
+
+
 class FileSampleBuffer:
     """:class:`~yeto.rl.engine.trainer_lifecycle.DurableSampleBuffer` over a store
     (a :class:`CheckpointStore`, or an :class:`ObjectStore` at the store root).
@@ -331,10 +341,11 @@ class FileSampleBuffer:
         only one that does. ``lane``: this consumer is one of several synced
         trainers and selects only the positions of its lane
         (:mod:`.merged_release`); the read cursor and the watermark stay
-        positions of the whole index."""
-        if lane is not None and (merge_shards or _objects_of(store) is not None):
-            raise SampleBufferError("a lane reader needs a shared-directory store (no object "
-                                    "index, no shard merge): see yeto.rl.engine.merged_release")
+        positions of the whole index. Of the lane readers only the publisher's
+        lane merges shards (``merged_release.merges_shards``)."""
+        if lane is not None and merge_shards and not merges_shards(lane):
+            raise SampleBufferError(f"buffer lane {lane.env()}: only the publisher's lane merges the "
+                                    "sampler shards (yeto.rl.engine.merged_release)")
         self.lane = lane
         if batch_size < 1:
             raise ValueError("batch_size must be positive")

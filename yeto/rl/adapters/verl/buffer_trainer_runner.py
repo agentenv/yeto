@@ -110,7 +110,8 @@ class YetoBufferTaskRunner(YetoFullyAsyncTaskRunner):
         from yeto.island_credential_guard import check_island_credentials
         from yeto.rl.engine.policy_release import PolicyReleaseStore
         from yeto.rl.engine.resume import store_for
-        from yeto.rl.engine.sample_buffer import FileSampleBuffer
+        from yeto.rl.engine.merged_release import BufferLane, lane_cursor_log
+        from yeto.rl.engine.sample_buffer import open_trainer_buffer
 
         from .buffer_feed import RowShape
         from .buffer_ports import install_buffer_ports
@@ -127,7 +128,9 @@ class YetoBufferTaskRunner(YetoFullyAsyncTaskRunner):
 
         environ = dict(os.environ)
         store = store_for(section["store"], environ=environ)
-        buffer = FileSampleBuffer(store, batch_size=1, create_index=False)
+        # S25 C3: a synced trainer reads its lane of the buffer (section "lane": "M/N")
+        buffer = open_trainer_buffer(store, batch_size=1, create_index=False,
+                                     lane=BufferLane.parse(section.get("lane")))
         releases = PolicyReleaseStore(store_for(section.get("release_store") or section["store"],
                                                 environ=environ))
         shape = RowShape(int(config.data.max_prompt_length), int(config.data.max_response_length),
@@ -137,7 +140,8 @@ class YetoBufferTaskRunner(YetoFullyAsyncTaskRunner):
             return install_buffer_ports(island, buffer=buffer, releases=releases, shape=shape,
                                         base_dir=plan["model_path"], tokenize=tokenizer.encode,
                                         wait_s=float(section.get("wait_s") or 3600.0),
-                                        poll_s=float(section.get("poll_s") or 2.0))
+                                        poll_s=float(section.get("poll_s") or 2.0),
+                                        cursor_log=lane_cursor_log(buffer))
 
         return run_fully_async_island(call, None, plan, OmegaConf.to_container(config, resolve=True),
                                       buffer_ports=ports)

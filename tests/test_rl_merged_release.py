@@ -20,13 +20,16 @@ from yeto.rl.engine.merged_release import (
     BufferLane,
     LaneCursorLog,
     MergedReleaseGuard,
+    ObjectLaneCursorLog,
     gate_version,
     is_publisher,
+    lane_cursor_log,
     merged_version,
+    merges_shards,
 )
 from yeto.rl.engine.policy_release import PolicyReleaseStore
 from yeto.rl.engine.resume import CheckpointStore
-from yeto.rl.engine.sample_buffer import FileSampleBuffer, SampleBufferError
+from yeto.rl.engine.sample_buffer import FileSampleBuffer, SampleBufferError, open_trainer_buffer
 from yeto.rl.engine.trainer_lifecycle import SampleIndexEntry
 
 
@@ -62,10 +65,66 @@ def test_two_lane_readers_split_one_buffer_without_overlap(tmp_path):
     assert [s.position for s in again.select("trainer", 2)] == [4, 6]
 
 
-def test_lane_reader_refuses_an_object_store_and_a_shard_merge(tmp_path):
-    with pytest.raises(SampleBufferError, match="shared-directory"):
-        FileSampleBuffer(CheckpointStore(tmp_path), batch_size=1, lane=BufferLane(0, 2),
+def test_only_the_publishers_lane_merges_shards(tmp_path):
+    assert merges_shards(None) and merges_shards(BufferLane(0, 2)) and not merges_shards(BufferLane(1, 2))
+    with pytest.raises(SampleBufferError, match="only the publisher's lane merges"):
+        FileSampleBuffer(CheckpointStore(tmp_path), batch_size=1, lane=BufferLane(1, 2),
                          merge_shards=True)
+
+
+# ---------------------------------------------------------------- object stores (S3, OSS)
+def _s3_store(tmp_path, s3):
+    from yeto.cloud import s3_store
+    from yeto.rl.engine.resume import STORE_IMPL_ENV, store_for
+
+    env = {STORE_IMPL_ENV: s3_store.STORE_IMPL, s3_store.URI_ENV: "s3://bkt/runs/a"}
+    return store_for(tmp_path / "mount", environ=env, client=s3)
+
+
+def test_lane_readers_and_cursors_on_an_s3_store_use_the_object_api(tmp_path):
+    from test_rl_object_store import FakeS3
+
+    s3 = FakeS3()
+    _fill(FileSampleBuffer(_s3_store(tmp_path, s3), batch_size=1), 6)
+
+    def reader(m):
+        buffer = open_trainer_buffer(_s3_store(tmp_path, s3), batch_size=1, lane=BufferLane(m, 2))
+        return br.BatchReader(buffer, max_policy_age=2, cursor_log=lane_cursor_log(buffer))
+
+    first = [reader(m) for m in range(2)]
+    assert all(isinstance(r.cursor_log, ObjectLaneCursorLog) for r in first)
+    taken = [[p for p, _ in r.take(0, 2, current_version=0)[0]] for r in first]
+    assert taken == [[0, 2], [1, 3]]
+    keys = sorted(k for _, k in s3.objects if "/lanes/" in k)
+    assert keys == ["runs/a/sample-buffer/lanes/0-of-2/0000000000.json",
+                    "runs/a/sample-buffer/lanes/1-of-2/0000000000.json"]
+    assert not (tmp_path / "mount").exists()  # nothing through the mount
+    # a restarted lane reader continues after its last round (at most once)
+    again = reader(1)
+    assert again.buffer.read_cursor == 4
+    assert [p for p, _ in again.take(1, 1, current_version=0)[0]] == [5]
+    assert again.cursor_log.last_cursor() == 6
+    assert len([k for _, k in s3.objects if "/lanes/1-of-2/" in k]) == 2
+
+
+def test_on_an_oss_store_the_publisher_merges_and_the_other_lane_reads_the_merged_index():
+    from test_rl_oss_store import _entry, _objects
+
+    from yeto.rl.engine.sample_buffer import shard_index
+
+    objects = _objects()
+    sampler = FileSampleBuffer(objects, batch_size=1, index=shard_index("s0"))
+    for i in range(4):
+        ref = sampler.write_payload(f"s{i}", br.encode_group([{"tokens": [i]}]))
+        sampler.append(SampleIndexEntry(f"s{i}", 0, ref, appended_at=float(i)))
+    other = open_trainer_buffer(objects, batch_size=1, lane=BufferLane(1, 2))
+    assert other.select("trainer", 10) == []  # nothing merged yet: lane 1 does not merge
+    publisher = open_trainer_buffer(objects, batch_size=1, lane=BufferLane(0, 2))
+    assert [s.position for s in publisher.select("trainer", 10)] == [0, 2]
+    assert [s.entry.sample_id for s in other.select("trainer", 10)] == ["s1", "s3"]
+    log = lane_cursor_log(other)
+    log.append(0, [1, 3], other.read_cursor)
+    assert lane_cursor_log(open_trainer_buffer(objects, batch_size=1, lane=BufferLane(1, 2))).last_cursor() == 4
 
 
 def test_reader_continues_after_its_lane_cursor_and_never_retrains(tmp_path):
@@ -212,11 +271,15 @@ def test_a_trainer_may_sync_a_sampler_may_not():
 @pytest.mark.parametrize("kw,islands,message", [
     ({}, 1, "at least two islands"),
     ({"tuning": "full"}, 2, "--tuning lora"),
-    ({"rl_checkpoint_store": "s3://b/p"}, 2, "object store"),
 ])
 def test_synced_trainer_refusals(kw, islands, message):
     with pytest.raises(ValueError, match=message):
         sample_roles.check_synced_trainers(_role_args(**kw), islands)
+
+
+@pytest.mark.parametrize("store", ["s3://b/p", "oss://b/p", "modal-volume://v/p"])
+def test_synced_trainers_take_an_object_store(store):
+    sample_roles.check_synced_trainers(_role_args(rl_checkpoint_store=store), 2)
 
 
 def test_buffer_lane_of_island_args():

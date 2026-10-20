@@ -34,13 +34,28 @@ version (:func:`gate_version`).
 
 Buffer: the trainers read disjoint *lanes* of the one buffer: trainer m of N
 trains the positions ``p`` with ``p % N == m`` (:class:`BufferLane`), so no
-group is trained by two islands. The store must be a shared directory (local
-disk, Modal Volume, a bucket mount that appends): a store read through an object
-API (``CheckpointStore.objects``) is refused for now. A trainer keeps its lane
-cursor in ``sample-buffer/lanes/<m>-of-<N>.jsonl`` (one line per round, written
-when the round is selected), and a restarted or re-joined trainer continues
-after it: a group selected by a round that did not finish is lost, never
-trained twice (at most once).
+group is trained by two islands. A trainer keeps its lane cursor, one record per
+round, written when the round is selected (:func:`lane_cursor_log`), and a
+restarted or re-joined trainer continues after it: a group selected by a round
+that did not finish is lost, never trained twice (at most once).
+
+Stores: a shared directory (local disk, Modal Volume) or an object store read
+through its object API (``CheckpointStore.objects``: S3, OSS). Each lane has one
+writer, so every layout below has one writer per file or key:
+
+* lane cursor: ``sample-buffer/lanes/<m>-of-<N>.jsonl`` in a directory
+  (:class:`LaneCursorLog`, appended); ``sample-buffer/lanes/<m>-of-<N>/<seq>.json``
+  in an object store (:class:`ObjectLaneCursorLog`, one new object per round:
+  an object store cannot append);
+* buffer index: on a store whose samplers write their own shards
+  (``objects.buffer_shards``, OSS), the index has one writer, the merger
+  (``sample_buffer`` module doc). With synced trainers the publisher merges
+  (:func:`merges_shards`) and the other trainers only read the merged index;
+  so a lane whose publisher is stopped waits for the publisher's return;
+* releases: written by the publisher only, through the store mount, in the
+  order of ``PolicyReleaseStore.release`` (weights, record, commit, then
+  ``LATEST.json``), so a sampler that reads ``LATEST.json`` by key sees a
+  complete release. Nothing here needs a cross-host lock or create-if-absent.
 
 Failures:
 
@@ -96,8 +111,18 @@ class BufferLane:
         lane = cls(int(index), int(count))
         return None if lane.count == 1 else lane
 
+    def name(self) -> str:
+        return f"{self.index}-of-{self.count}"
+
     def file_name(self) -> str:
-        return f"{self.index}-of-{self.count}.jsonl"
+        return f"{self.name()}.jsonl"
+
+
+def merges_shards(lane: BufferLane | None) -> bool:
+    """Whether this trainer merges the sampler shards into the buffer index (on a
+    store that shards, ``sample_buffer.needs_shards``): a single trainer does, and
+    of synced trainers only the publisher (module doc: one index writer)."""
+    return lane is None or lane.index == PUBLISHER_LEARNER_ID
 
 
 def is_publisher(learner_id: int, num_learners: int) -> bool:
@@ -143,7 +168,7 @@ class MergedReleaseGuard:
 
 
 class LaneCursorLog:
-    """The lane cursor of one synced trainer, durable in the store.
+    """The lane cursor of one synced trainer, durable in a shared-directory store.
 
     One JSON line per selected round: ``{"rollout_id", "positions", "cursor"}``
     (``cursor``: the buffer read position after the round). :meth:`last_cursor`
@@ -168,8 +193,64 @@ class LaneCursorLog:
 
     def append(self, rollout_id: int, positions: list[int], cursor: int) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        line = json.dumps({"rollout_id": int(rollout_id), "positions": [int(p) for p in positions],
-                           "cursor": int(cursor)}, sort_keys=True)
+        line = _record(rollout_id, positions, cursor)
         with self.path.open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")
         self.commit()
+
+
+def _record(rollout_id: int, positions: list[int], cursor: int) -> str:
+    return json.dumps({"rollout_id": int(rollout_id), "positions": [int(p) for p in positions],
+                       "cursor": int(cursor)}, sort_keys=True)
+
+
+class ObjectLaneCursorLog:
+    """The lane cursor of one synced trainer in an object store (module doc).
+
+    Round ``k`` of this lane (counted over every start of the lane) is the object
+    ``<prefix><k>.json`` with the record of :class:`LaneCursorLog`. One writer per
+    lane, so the next sequence number is the count of the listed objects; the
+    write is a plain put (no create-if-absent between hosts needed)."""
+
+    def __init__(self, objects: Any, prefix: str, lane: BufferLane) -> None:
+        self.objects = objects
+        self.prefix = f"{prefix.rstrip('/')}/{LANES_DIR}/{lane.name()}/"
+        self._keys: list[str] | None = None
+
+    def _listed(self) -> list[str]:
+        if self._keys is None:
+            self._keys = sorted(self.objects.list(self.prefix))
+        return self._keys
+
+    def last_cursor(self) -> int:
+        for key in reversed(self._listed()):
+            raw = self.objects.read(key)
+            try:
+                return int(json.loads(raw)["cursor"])
+            except (TypeError, ValueError, KeyError):
+                continue  # an unreadable object (should not happen: a put is atomic)
+        return 0
+
+    def append(self, rollout_id: int, positions: list[int], cursor: int) -> None:
+        keys = self._listed()
+        key = f"{self.prefix}{len(keys):010d}.json"
+        self.objects.write(key, _record(rollout_id, positions, cursor).encode())
+        keys.append(key)
+
+
+def lane_cursor_log(buffer: Any) -> LaneCursorLog | ObjectLaneCursorLog | None:
+    """The lane cursor log of a lane reader (``FileSampleBuffer`` with a lane; None
+    for a single reader): in the store's object API when it has one, else in the
+    store directory (committed after each line)."""
+    lane = getattr(buffer, "lane", None)
+    if lane is None:
+        return None
+    from .resume import CheckpointStore  # noqa: PLC0415
+    from .sample_buffer import BUFFER_DIR  # noqa: PLC0415 - sample_buffer imports this module
+
+    store = buffer.store  # a CheckpointStore, or an ObjectStore at the store root
+    objects = store.objects if isinstance(store, CheckpointStore) else store
+    if objects is not None:
+        return ObjectLaneCursorLog(objects, BUFFER_DIR, lane)
+    return LaneCursorLog(f"{store.root}/{BUFFER_DIR}", lane, commit=store.commit)
+
