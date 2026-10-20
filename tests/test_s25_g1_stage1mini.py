@@ -149,6 +149,8 @@ def test_mini_modal_plan_has_no_errors_and_uses_the_volume_store():
                               "expected_expert_matrices": 288}
     assert spec["engine"]["options"]["load_report_dir"].endswith("/load-report")
     assert "--frozen-base" in out.requant["argv"]
+    assert argv[argv.index("--megatron-ref-load") + 1] == out.trainer["torch_dist"]
+    assert out.trainer["convert_argv"][out.trainer["convert_argv"].index("--save") + 1] == out.trainer["torch_dist"]
     # the PPU plan keeps OSS and passes no --miles-commit for its short commit
     ppu = expand(load_plan(REPO / "examples/stage1/glm53-flash-ppu.yaml"))
     assert ppu.errors == [] and "--miles-commit" not in ppu.trainer["miles"]["island_argv"]
@@ -198,3 +200,4 @@ def test_mini_island_argv_translates_to_a_miles_argv_on_cpu(tmp_path):
         assert flag in miles
     assert miles[miles.index("--num-experts") + 1] == "32" and miles.count("--num-experts") == 1
     assert miles[miles.index("--moe-layer-freq") + 1] == "[0,1,1,1]"
+    assert miles[miles.index("--megatron-to-hf-mode") + 1] == "raw"

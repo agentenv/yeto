@@ -489,6 +489,8 @@ def expand(plan: Stage1Plan, *, hf_config: str | Path | None = None) -> Expanded
                    "--tensor-parallel", str(layout["tp"]), "--pipeline-parallel", str(layout["pp"]),
                    "--expert-parallel", str(layout["ep"]),
                    "--miles-root", str(miles["workdir"]),
+                   *(("--megatron-ref-load", str(model["bf16_source"]["torch_dist"]))
+                     if model["bf16_source"].get("torch_dist") else ()),
                    *(("--miles-commit", str(miles["commit"])) if len(str(miles["commit"])) == 40 else ()),
                    "--trust-remote-code",
                    "--learner-id", "0", "--num-learners", "1", "--rl-single-island-no-sync",
@@ -518,8 +520,17 @@ def expand(plan: Stage1Plan, *, hf_config: str | Path | None = None) -> Expanded
             num_experts=int(model.get("num_experts", glm5_next.NUM_EXPERTS)), transformer_impl=impl)
     except ValueError as error:
         raise Stage1Error(f"plan: trainer.miles.transformer_impl: {error}") from None
+    torch_dist = model["bf16_source"].get("torch_dist")
+    convert_argv = None if not torch_dist else [
+        "torchrun", "--nproc-per-node", str(per_node), f"{miles['workdir']}/tools/convert_hf_to_torch_dist.py",
+        *model_args, "--hf-checkpoint", model_dir, "--save", str(torch_dist),
+        "--tensor-model-parallel-size", str(layout["tp"]), "--pipeline-model-parallel-size", str(layout["pp"]),
+        "--expert-model-parallel-size", str(min(layout["ep"], per_node))]
     out.trainer = {
         "backend": backend, "nodes": [n.name for n in trainers], "cards": cards,
+        # Miles trains glm5_next from a Megatron torch_dist checkpoint (raw mode); converted once
+        # on trainer node 0 (one node's cards; not run for the 45-layer model)
+        "torch_dist": torch_dist, "convert_argv": convert_argv,
         "image": images.get("trainer"), "env": trainer_env,
         "miles": {"commit": miles["commit"], "megatron": miles["megatron"], "mbridge": miles["mbridge"],
                   "layout": layout, "memory_estimate": megatron_memory(model, miles, layout, trainers, sampling, hf_config,
@@ -721,6 +732,14 @@ def _steps(plan: Stage1Plan, out: Expanded, trainers: Sequence[Node], samplers: 
                               f"ossutil cp -r -u {shlex.quote(src['staged'])} {shlex.quote(src['local_dir'])}/\n"
                               f"test -f {shlex.quote(src['local_dir'])}/model.safetensors.index.json\n",
                               f"{key} weights on the node's /data (revision {src['revision']})"))
+    if out.trainer.get("convert_argv") and trainers:
+        node, dst = trainers[0], str(out.trainer["torch_dist"])
+        convert = _docker(plan, node, "convert", out.trainer["image"], out.trainer["convert_argv"],
+                          out.trainer["env"])
+        steps.append(Step(f"convert-torch-dist-{node.name}", node.name,
+                          f"set -eu\nif [ \"$(cat {shlex.quote(dst)}/latest_checkpointed_iteration.txt 2>/dev/null)\" "
+                          f"!= release ]; then\n{convert}\nfi\n",
+                          "bf16 source -> Megatron torch_dist (Miles converter; the island's --megatron-ref-load)"))
     for run in out.sampler["engines"]:
         node = next(n for n in samplers if n.name == run["node"])
         spec_json = json.dumps(run["spec"], indent=1, sort_keys=True)
@@ -912,6 +931,9 @@ def gaps(plan: Stage1Plan, out: Expanded) -> list[str]:
         if gap := _module_gap(module, what):
             found.append(gap)
     if out.trainer["backend"] == "miles":
+        if not out.trainer.get("torch_dist"):
+            found.append("model.bf16_source.torch_dist is unset: Miles trains glm5_next only from a "
+                         "Megatron torch_dist checkpoint (Megatron-Bridge cannot load glm5_next)")
         if gap := _check_island_argv(out.trainer["miles"]["island_argv"]):
             found.append(gap)
         recipes = _miles_recipes()

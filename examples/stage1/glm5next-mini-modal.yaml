@@ -33,6 +33,7 @@ model:
     origin: hf://CharyZeng/GLM-5.3-Flash-4layer@7fb7883207fe73ea04430ac392f6ffe2b9f936c4
     staged: modal-volume://yeto-s25-g1-models/glm5next-mini-bf16-7fb7883
     local_dir: /data/models/glm5next-mini-bf16-7fb7883
+    torch_dist: /data/models/glm5next-mini-bf16-7fb7883_torch_dist   # Miles converter output (convert step)
   sampler_initial:                     # round 0: our N8.5 converter on the bf16 mini model
     repo: local/glm5next-mini-mxfp4-r0-7fb7883
     revision: 7fb7883

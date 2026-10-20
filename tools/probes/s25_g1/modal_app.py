@@ -253,6 +253,17 @@ def trainer_island(tag: str, stop_after_rounds: int | None = None) -> int:
     (log / "argv.json").write_text(json.dumps({"island": island, "requant": plan["requant"]["loop_argv"],
                                                "env": trainer["env"]}, indent=1))
     Path("/data/yeto", plan["run_id"]).mkdir(parents=True, exist_ok=True)
+    marker = Path(str(trainer["torch_dist"])) / "latest_checkpointed_iteration.txt"
+    if trainer.get("convert_argv") and not (marker.is_file() and marker.read_text().strip() == "release"):
+        began_convert = time.time()
+        with open(log / "convert.log", "w", encoding="utf-8") as f:
+            crc = subprocess.run(trainer["convert_argv"], env={**env, "PYTHONPATH": f"/root/miles:{env['PYTHONPATH']}"},
+                                 cwd=WORKDIR, stdout=f, stderr=subprocess.STDOUT).returncode
+        (log / "convert.json").write_text(json.dumps({"rc": crc, "wall_s": round(time.time() - began_convert, 1)}))
+        models.commit()  # trainer B (a new container) loads the same torch_dist
+        if crc != 0:
+            _commit(tag)
+            return 90
     _sh("ray start --head --port=6379 --node-ip-address=127.0.0.1 --num-gpus=2 --disable-usage-stats",
         log / "ray.log", env=env)
     began = time.time()

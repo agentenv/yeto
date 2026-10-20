@@ -870,7 +870,9 @@ def translate_run_config(
         "--train-backend", "megatron",
         "--hf-checkpoint", config.hf_checkpoint,
         "--ref-load", config.ref_load,
-        "--megatron-to-hf-mode", "bridge",
+        # glm5_next: Megatron-Bridge has no glm5_next bridge; Miles loads the torch_dist
+        # checkpoint and exports through its own converters (raw)
+        "--megatron-to-hf-mode", "raw" if recipe.name == RECIPE_GLM5_NEXT else "bridge",
         "--model-name", model_name,
         *model_recipe_values,
         "--num-layers", str(geometry.num_layers),
