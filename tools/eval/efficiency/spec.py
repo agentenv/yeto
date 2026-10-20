@@ -296,7 +296,10 @@ def miles_bare_argv(spec: EffSpec, mode: str) -> list[str]:
         "--recompute-granularity", "full", "--recompute-method", "uniform", "--recompute-num-layers", "1",
         "--use-dynamic-batch-size", "--max-tokens-per-gpu", str(max(9216, spec.seq_len)),
         "--attention-dropout", "0.0", "--hidden-dropout", "0.0",
-        "--accumulate-allreduce-grads-in-fp32", "--attention-softmax-in-fp32", "--attention-backend", "flash",
+        "--accumulate-allreduce-grads-in-fp32", "--attention-softmax-in-fp32",
+        # yeto's generic recipe (Qwen3) trains with "unfused": TE's flash path picks the
+        # FlashAttention cute kernel, which fails to compile on A10G (sm86, eff01-bare-miles-sync-a).
+        "--attention-backend", "unfused",
         "--bf16",
         # SGLang
         "--rollout-num-gpus-per-engine", "1", "--sglang-mem-fraction-static", str(spec.mem_fraction),
