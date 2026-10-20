@@ -1,8 +1,9 @@
 # Harbor harness for agentic RL (S25 N10.1-N10.4)
 
 Status: Harbor trials with the oracle/nop agents ran on boat sandboxes (see
-"boat sandbox provider"). **No model-driven (codex) trajectory has run yet
-(not verified).**
+"boat sandbox provider"). Codex trajectories with a real model ran on boat
+on 2026-10-20 (see "Codex + records proxy"). A training run on either
+backend: not verified.
 
 ## Who does what
 
@@ -168,3 +169,27 @@ Miles path, 2026-10-19: the Miles agent function
 rollout worker or session server) plus `reward_func`, `HARBOR_ENV_TYPE=boat`:
 fix-git and regex-log, oracle reward 1 on both, nop reward 0 on both
 (outcome ok); 30 billable s. A full Miles training run on boat: not verified.
+
+## Codex + records proxy (N10.7 smoke, 2026-10-20)
+
+Codex 0.145.0 refuses `wire_api = "chat"` ("no longer supported"): it only
+speaks the Responses API, so the records proxy (Responses -> Chat, N10.5) is
+its path to a chat-template engine. Codex first tries a WebSocket on
+`/v1/responses` (5 attempts, the proxy answers 405), then uses HTTP POST.
+
+What the yeto side sets for Codex: `reasoning_summary=none` and
+`web_search=disabled` (`trial.CODEX_KWARGS`); the proxy leaves Codex's
+`namespace` (sub-agent) tools out of the prompt; the `qwen38` template merges
+Codex's two leading system messages (instructions + developer message).
+
+Run: `scripts/modal_records_endpoint.py` (Qwen3.8-27B bf16, SGLang TP1 on one
+H100, records proxy behind a Modal tunnel and a secret path prefix);
+Harbor `codex` on boat small VMs; driver and raw data in
+`infra-drafts/SESSION25/logs/T-G2/`. Miles path (agent function + reward
+hook, proxy in place of the session server): fix-git and
+log-summary-date-ranges, reward 1 on both. verl path (`HarborAgentLoop.run`,
+verl module stubbed, HTTP recorder over the proxy): openssl-selfsigned-cert 1,
+fix-git 1, regex-log 0 (twice), sqlite-db-truncate 0. All 8 outcome ok; every
+recorded turn re-tokenizes to the same ids as the stream (render drift 0);
+`boat list` empty afterwards. The regex-log runs ended on one reply that hit
+the 8192-token cap (`length_capped_turns`).

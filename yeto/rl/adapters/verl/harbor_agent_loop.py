@@ -81,6 +81,7 @@ from yeto.rl.agentic import (
 )
 from yeto.rl.agentic.loop_local import LoopLocal
 from yeto.rl.agentic.types import TokenTurn
+from yeto.rl.engine.sampler_engine import FINISH_LENGTH
 from yeto.rl.harness.harbor import HarborHarness, HarborSettings, build_trial_config
 from yeto.rl.harness.harbor.boat_client import check_in_flight_cap
 
@@ -232,6 +233,8 @@ class HarborAgentLoop(AgentLoopBase):
                 "outcome_reason": trajectory.reason,
                 "policy_version": trajectory.policy_version,
                 "truncated": segments.truncated,
+                # Model calls that hit their token cap (the agent then saw a cut reply).
+                "length_capped_turns": sum(t.finish_reason == FINISH_LENGTH for t in turns),
                 "agent_metrics": metadata["agent_metrics"],
                 "provenance": turn_provenance(turns),
             },

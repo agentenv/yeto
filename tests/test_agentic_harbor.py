@@ -10,6 +10,7 @@ import asyncio
 import importlib
 import sys
 import types
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -424,7 +425,7 @@ def test_verl_loop_token_mask_alignment_with_fake_trial(verl_loop):
     loop_mod, _ = verl_loop
     from yeto.rl.harness.harbor import HarborHarness
 
-    turns = [_turn([5, 6, 7], [40, 41, 42], [-0.1, -0.2, -0.3]),
+    turns = [replace(_turn([5, 6, 7], [40, 41, 42], [-0.1, -0.2, -0.3]), finish_reason="length"),
              _turn([5, 6, 7, 40, 41, 42, 90, 91], [43, 2], [-0.4, -0.5])]
     recorder = _Recorder(turns)
     _FakeTrial.result, _FakeTrial.configs = _result({"reward": 1.0}), []
@@ -445,6 +446,7 @@ def test_verl_loop_token_mask_alignment_with_fake_trial(verl_loop):
     assert out.prompt_ids + out.response_ids == list(turns[-1].prompt_ids + turns[-1].completion_ids)
     assert out.reward_score == 1.0 and out.num_turns == 4
     assert out.extra_fields[OUTCOME_KEY] == "ok" and out.extra_fields["truncated"] is False
+    assert out.extra_fields["length_capped_turns"] == 1  # the first call hit its token cap
 
 
 def test_verl_loop_aborts_on_misaligned_tokens_and_infra_errors(verl_loop):

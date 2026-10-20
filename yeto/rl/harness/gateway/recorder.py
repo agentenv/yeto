@@ -74,7 +74,8 @@ def turns_from_records(records: Mapping[str, Any]) -> list[TokenTurn]:
                 turns.append(TokenTurn(prompt_ids=tuple(ids[:cursor]), completion_ids=completion,
                                        completion_logprobs=tuple(float(x) for x in turn["logprobs"]),
                                        policy_version=turn.get("policy_version"),
-                                       provenance=turn.get("provenance")))
+                                       provenance=turn.get("provenance"),
+                                       finish_reason=turn.get("finish_reason")))
                 cursor, pending_stop = end, len(turn.get("stop_added") or ())
             if cursor + pending_stop != len(ids):
                 raise TokenAlignmentError(f"segment {sample['segment']} has {len(ids) - cursor - pending_stop} "
