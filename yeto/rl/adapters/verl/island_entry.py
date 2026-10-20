@@ -68,7 +68,8 @@ def parse_args(argv):
     p.add_argument("--rl-echo-events", action="store_true")
     p.add_argument("--rl-max-policy-age", type=int, default=0)
     # S25 C2: a trainer island over the sample buffer (sample_roles; the sampler is
-    # the engine sampler island, yeto.rl.engine.engine_sampler)
+    # the engine sampler island, yeto.rl.engine.engine_sampler). --rl-resume-store
+    # names the buffer's store there, and the round-cut store otherwise (N7.6b)
     p.add_argument("--rl-sample-role", default=None)
     p.add_argument("--rl-resume-store", default=None)
     p.add_argument("--rl-sample-wait-s", type=float, default=None)
@@ -76,6 +77,12 @@ def parse_args(argv):
     # buffer in this store; the launcher forwards both (yeto.rl.engine.merged_release)
     p.add_argument("--rl-sample-store", default=None)
     p.add_argument("--rl-sample-lanes", type=int, default=None)
+    # N7.6b round cuts (same flags as the Miles island)
+    p.add_argument("--rl-resume-state-dir", default=None)
+    p.add_argument("--rl-cut-every", type=int, default=None)
+    p.add_argument("--rl-cut-keep", type=int, default=None)
+    p.add_argument("--rl-stop-after-rounds", type=int, default=None)
+    p.add_argument("--rl-resume-allow-config-change", action="store_true")
     args, ignored = p.parse_known_args(argv)
     return args, ignored
 
@@ -326,6 +333,12 @@ def main(argv=None) -> int:
         sync = "strict"
     if sync != "none" and not args.syncer:
         raise SystemExit("--syncer is required unless --rl-single-island-no-sync")
+    from .round_cuts import resume_config
+
+    try:
+        resume = resume_config(args)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     asserted_keys = vconf.ASSERTED_KEYS
     if limit:  # agentic-rollout-utilization 6.4b: fully_async path
         overrides, asserted_keys = fully_async_plan(limit, overrides, spec_dict, args, sync)
@@ -351,6 +364,7 @@ def main(argv=None) -> int:
         "publish_selftest": os.environ.get("YETO_VERL_PUBLISH_SELFTEST") == "1", "run_config": run.to_dict(), "overrides": overrides,
         "asserted": {k: _override_value(overrides, k) for k in asserted_keys},
         "max_policy_age": limit, "fully_async": bool(limit),
+        "resume": resume,
         "versions": manifest["versions"],
         **({"sample_buffer": buffer_section} if buffer_section else {}),
     }

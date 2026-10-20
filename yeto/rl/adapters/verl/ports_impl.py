@@ -216,6 +216,10 @@ class VerlRolloutPool:
         padded = data.to_padded_tensor()
         uids = [str(u) for u in padded.pop("uid").tolist()]
         prompt_sha = hashlib.sha256(padded["prompts"].cpu().numpy().tobytes()).hexdigest()
+        # the same digest independent of arrival order (rows sorted): compares the prompts two
+        # runs drew for one round (T-C4: a resumed island vs a continuous one)
+        prompt_set_sha = hashlib.sha256(b"".join(sorted(
+            row.tobytes() for row in padded["prompts"].cpu().numpy()))).hexdigest()
         gen_steps = sorted({int(tag.get("global_steps", -1)) for tag in batch.tags})
         rewards = padded["rm_scores"].float().sum(-1).tolist()
         lengths = padded["response_mask"].float().sum(-1).tolist()
@@ -246,7 +250,8 @@ class VerlRolloutPool:
             "rollout_id": rollout_id, "policy_token": token, "groups": len(metas),
             "samples": len(uids), "reward_mean": float(np.mean(rewards)) if rewards else None,
             "gen_seconds": gen_seconds, "expected_policy_version": expected_policy_version,
-            "prompts_sha256": prompt_sha, "sample_submit_global_steps": gen_steps,
+            "prompts_sha256": prompt_sha, "prompt_set_sha256": prompt_set_sha,
+            "sample_submit_global_steps": gen_steps,
             "trainer_global_step": t.global_steps, "rewards": rewards, "uids": uids,
             "data_cursor": self.data_cursor()})
         return RolloutBatchHandle(
@@ -352,7 +357,11 @@ class VerlTrainerGroup:
             applied_lrs=None if lr is None else (lr,),
         )
         if grad_norm is not None and self._cut_trainer is not None:
-            self._cut_trainer.check_first_step(1)  # no-op unless a restore is pending
+            pending = self._cut_trainer.resume_reference is not None
+            self._cut_trainer.check_first_step(1)  # no-op unless a restore is pending; raises on a problem
+            if pending:
+                isl.emit("rl_resume_check", rollout_id=batch.rollout_id, check="first_step", ok=True,
+                         optimizer_steps=self._cut_trainer.optimizer_steps_per_round)
         ids = tuple(s for g in batch.groups for s in g.sample_ids)
         return LocalStepReceipt(
             algorithm="grpo", learner_id=isl.learner_id, learner_generation=0,

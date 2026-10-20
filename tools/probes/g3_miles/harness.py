@@ -616,6 +616,28 @@ def _hdo_report(optimizer) -> dict:
     return {"leaves": rep}
 
 
+def stale_report(optimizer) -> dict:
+    """Per HDO parameter: does the tensor the sub-optimizer steps equal the HDO's "master_param"?
+    (the old export read the master; N7.6c reads the stepped tensor)"""
+    from miles.backends.megatron_utils.lora import dp_invariant_state as dps
+
+    stale, same = [], 0
+    for leaf in getattr(optimizer, "chained_optimizers", [optimizer]):
+        hdo = getattr(leaf, "optimizer", None)
+        if not hasattr(hdo, "sub_optimizers"):
+            continue
+        for param, state in hdo.state.items():
+            master = state.get("master_param")
+            if not torch.is_tensor(master):
+                continue
+            inner = dps._hdo_inner_param(hdo, param)
+            if torch.equal(inner.detach().cpu().reshape(-1), master.detach().cpu().reshape(-1)):
+                same += 1
+            else:
+                stale.append({"shape": list(param.shape), "dtype": str(param.dtype)})
+    return {"stepped_equals_master": same, "stepped_differs_from_master": len(stale), "differs": stale[:40]}
+
+
 def param_digest(model) -> dict:
     h = hashlib.sha256()
     norms = {}
@@ -704,9 +726,17 @@ def phase_n71d(ns) -> None:
     elif ns.mode.startswith("resume2"):
         files = json.loads((cut_dir / "files.json").read_text())
         saved = ResumeManifest.from_dict(json.loads((cut_dir / "resume_manifest.json").read_text()))
+        inject = ns.mode.endswith("inj")
+        if inject:  # T-C4 N7.6c: put the T-G3 bug back (the restore leaves the HDO stepping its stale host copy)
+            from miles.backends.megatron_utils.lora import dp_invariant_state as dps
+
+            dps._bind_masters_to_stepped_tensors = lambda hdo: None
         summary = cut_plugin.restore_cut_shard(actor, directory=str(cut_dir), files=files, cut_id="g3-cut-3")
         if cut_plugin.REFUSED in summary:
             raise RuntimeError(f"restore_cut refused: {summary}")
+        if inject:
+            res["injected"] = "dp_invariant_state._bind_masters_to_stepped_tensors = no-op"
+            res["stale_vs_master"] = stale_report(optimizer)
         res["restore_summary"] = {k: summary.get(k) for k in ("path", "scheduler_samples", "resume", "diff",
                                                               "optimizer_cut_vs_reexport")}
         res["restore_digest_equal"] = summary.get("state_digest") == next(
