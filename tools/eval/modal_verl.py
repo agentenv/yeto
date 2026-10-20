@@ -162,7 +162,18 @@ def sampler(run: str, cfg: dict) -> dict:
     began = time.time()
     meta: dict[str, Any] = {"gpu": names, "container": os.environ.get("MODAL_TASK_ID"), "cfg": cfg,
                             "incarnation": incarnation}
-    tape = Path("/tmp/sampler-tape.jsonl")
+    from yeto.rl.engine import engine_sampler_entry as entry
+    from yeto.rl.engine.sampler_resume import (
+        DEFAULT_RECLAIM_MARKER,
+        RECLAIM_MARKER_ENV,
+        new_incarnation,
+        reclaim_requested,
+    )
+
+    os.environ[RECLAIM_MARKER_ENV] = DEFAULT_RECLAIM_MARKER  # the reclaim signal writes the marker
+    island_incarnation = new_incarnation()
+    tape = Path("/tmp/sampler-tape.jsonl")  # the entry writes sampler-tape.<incarnation>.jsonl
+    tape = entry.incarnation_tape(tape, island_incarnation)
     try:
         import pandas as pd
         import sglang
@@ -179,10 +190,6 @@ def sampler(run: str, cfg: dict) -> dict:
                 text = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True,
                                                enable_thinking=False)
                 handle.write(json.dumps({"text": text, "label": str(row["label"])}) + "\n")
-        from yeto.rl.engine import engine_sampler_entry as entry
-        from yeto.rl.engine.engine_sampler import build_engine_sampler
-        from yeto.rl.engine.sampler_checks import PostLoadChecks
-
         spec = {
             "sampler_id": "eval-sglang-0",
             "engine": {"factory": "yeto.rl.adapters.sampler_engines.from_spec:build", "adapter": "sglang-server",
@@ -201,39 +208,34 @@ def sampler(run: str, cfg: dict) -> dict:
                         "groups_per_round": cfg["groups_per_round"], "format": "text"},
             "reward": "yeto.rl.gsm8k_reward:score", "reward_kind": "miles",
             "checks": {"expected_expert_matrices": None, "fixed_prompts": []},
-            "event_tape": str(tape),
+            "event_tape": "/tmp/sampler-tape.jsonl",
         }
         (out / "spec.json").write_text(json.dumps(spec, indent=1))
-        config = entry.island_config(spec)
-        write = entry.tape_writer(spec["event_tape"], config.sampler_id)
+        meta["island_incarnation"] = island_incarnation
 
-        def emit(event: str, **fields: Any) -> None:
-            write(event, **fields)
+        def on_event(event: str, **fields: Any) -> None:
             if event == "rl_sampler_round":  # the local driver's reclaim trigger
                 control[f"{run}/sampler/round"] = {"incarnation": incarnation, **{
                     k: fields.get(k) for k in ("rollout_id", "groups")}}
 
-        releases, buffer = entry.build_stores(spec)
-        engine = entry.build_engine(spec)
         done_keys = [f"{run}/done/{i}" for i in range(cfg["learners"])]
         deadline = began + cfg["timeout_s"] - 300
 
-        def should_stop() -> bool:
+        def trainers_done() -> bool:
             return all(control.get(k, False) for k in done_keys) or time.time() > deadline
 
-        try:
-            island = build_engine_sampler(config, engine=engine, releases=releases, buffer=buffer, emit=emit,
-                                          prompts=entry.build_prompts(spec), reward=entry.build_reward(spec),
-                                          checks=PostLoadChecks(**spec["checks"]), should_stop=should_stop)
-            meta["rounds"] = island.run()
-        finally:
-            engine.stop()
+        # the production entry: resumes after the rounds earlier incarnations wrote,
+        # turns the reclaim signal into the marker and leaves PREEMPTED (S25 G1C)
+        meta["rounds"] = entry.run(spec, incarnation=island_incarnation, stop=trainers_done, on_event=on_event)
+        meta["reclaimed"] = reclaim_requested(os.environ)
     except BaseException as exc:  # noqa: BLE001 - recorded, then re-raised
         meta["error"] = f"{type(exc).__name__}: {exc}"
         raise
     finally:
         nvml.terminate()
         _finish(out, meta, began, {"sampler-tape.jsonl": tape})
+    # reclaimed: stay up until Modal stops the container, so Modal runs the input again
+    entry.hold_after_reclaim(hold_s=900.0)
     return meta
 
 

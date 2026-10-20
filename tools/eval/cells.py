@@ -55,11 +55,10 @@ _MILES = {"gpu": "A10G", "hard_s": 3000, "rollout_batch_size": 16, "n_samples": 
 CELLS: dict[str, Cell] = {c.key: c for c in (
     Cell("E1", "verl", "modal_verl", 1, {**_VERL_ISLAND, "phases": ["c"]}),
     Cell("E1", "miles", "miles_local", 1, {**_MILES, "rounds": 4, "islands": 1}),
-    # E2: the S25 C1 shape (two samplers, one reclaimed after it wrote round 1) on Miles; the
-    # neutral engine sampler (verl's sampler island) has no rejoin path: expected to fail
+    # E2: the S25 C1 shape (two samplers, one reclaimed after it wrote round 1) on Miles; verl's
+    # sampler island is the neutral engine sampler, which resumes after a reclaim since S25 G1C
     Cell("E2", "verl", "modal_verl", 2,
-         {**_VERL, "kind": "buffer", "max_policy_age": 2, "max_backlog_groups": 12, "reclaim_after_round": 1},
-         supported=False, note="engine sampler island: no LEAVE/JOIN, no resume after a reclaim (S25 C1 is Miles only)"),
+         {**_VERL, "kind": "buffer", "max_policy_age": 2, "max_backlog_groups": 12, "reclaim_after_round": 1}),
     Cell("E2", "miles", "miles_local", 3,
          {**_MILES, "rounds": 8, "islands": 3, "samplers": 2, "max_policy_age": 4, "reclaim_label": "l0",
           "reclaim_round": 1, "reclaim_component": "l0"}),

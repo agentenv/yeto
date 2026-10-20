@@ -220,9 +220,12 @@ def build_engine_sampler(config: EngineSamplerConfig, *, engine: SamplerEngine,
                          sleep: Callable[[float], None] | None = None,
                          incarnation: str | None = None, resume: SamplerResume | None = None,
                          data_cursor: Callable[[int], Mapping[str, int]] | None = None,
+                         reclaimed: Callable[[], bool] | None = None,
                          ) -> EngineSamplerIsland:
     """Check the sampling against the engine, start it on the base weights,
-    run the post-load checks, and return the wired island (module doc)."""
+    run the post-load checks, and return the wired island (module doc).
+    ``should_stop``: the loop starts no new round. ``reclaimed``: also stop
+    writing the current round's groups (default: ``should_stop``)."""
     sampling = config.sampling.check()
     check_sampling_fits(sampling, engine, max_prompt_tokens=config.max_prompt_tokens)
     provenance = Provenance.of(engine.identity, sampler_id=config.sampler_id, sampling=sampling)
@@ -241,7 +244,8 @@ def build_engine_sampler(config: EngineSamplerConfig, *, engine: SamplerEngine,
     engine_round = EngineRound(engine, GroupWriter(buffer, config.sampler_id), prompts=prompts,
                                reward=reward, sampling=sampling, provenance=provenance, emit=emit,
                                loop_guard=config.loop_guard, incarnation=incarnation,
-                               resume=resume, data_cursor=data_cursor, reclaimed=should_stop)
+                               resume=resume, data_cursor=data_cursor,
+                               reclaimed=should_stop if reclaimed is None else reclaimed)
     extra = {} if sleep is None else {"sleep": sleep}
     loop = SamplerLoop(follower=follower, buffer=buffer, generate=engine_round,
                        num_rollouts=int(config.num_rollouts),

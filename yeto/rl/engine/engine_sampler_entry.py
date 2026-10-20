@@ -241,12 +241,15 @@ def island_config(spec: Mapping[str, Any]) -> EngineSamplerConfig:
 
 def run(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
         resource_sampler: Callable[[Callable[..., None]], Any] | None = None,
-        incarnation: str | None = None) -> int:
+        incarnation: str | None = None, stop: Callable[[], bool] | None = None,
+        on_event: Callable[..., None] | None = None) -> int:
     """Build every part of the island from ``spec``, run it from the resume
     point, stop the engine; returns the rounds this incarnation ran.
     ``resource_sampler(emit)`` returns a started telemetry thread (default:
     ``telemetry.ResourceSampler`` of the island's device family; None from the
-    factory = no telemetry)."""
+    factory = no telemetry). ``stop()``: the caller's own end condition (no new
+    round starts; the island leaves FINISHED, not PREEMPTED). ``on_event(event,
+    **fields)`` sees every tape record after it is written."""
     import os  # noqa: PLC0415
 
     from yeto.rl.elastic_client import LeaveReason  # noqa: PLC0415
@@ -266,7 +269,13 @@ def run(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
     config = island_config(spec)
     incarnation = incarnation or new_incarnation()
     tape = incarnation_tape(_require(spec, "event_tape"), incarnation)
-    emit = tape_writer(tape, config.sampler_id)
+    write = tape_writer(tape, config.sampler_id)
+
+    def emit(event: str, **fields: Any) -> None:
+        write(event, **fields)
+        if on_event is not None:
+            on_event(event, **fields)
+
     releases, buffer = build_stores(spec, environ)
     prompts, reward = build_prompts(spec), build_reward(spec)
     checks = PostLoadChecks(**dict(spec.get("checks") or {}))
@@ -298,7 +307,8 @@ def run(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
     try:
         island = build_engine_sampler(config, engine=engine, releases=releases, buffer=buffer, emit=emit,
                                       prompts=prompts, reward=reward, checks=checks,
-                                      should_stop=reclaimed, incarnation=incarnation, resume=resume,
+                                      should_stop=lambda: reclaimed() or (stop is not None and stop()),
+                                      reclaimed=reclaimed, incarnation=incarnation, resume=resume,
                                       data_cursor=getattr(prompts, "cursor", None))
         latest = releases.latest()
         membership.join(tape=str(tape), latest_release=None if latest is None else
@@ -333,6 +343,26 @@ def load_spec(path: str | Path) -> dict[str, Any]:
     return doc
 
 
+RECLAIM_HOLD_S = 300.0  # after a reclaim LEAVE: wait this long for the cloud to stop the container
+
+
+def hold_after_reclaim(environ: Mapping[str, str] | None = None, *, hold_s: float = RECLAIM_HOLD_S,
+                       sleep: Callable[[float], None] = time.sleep) -> bool:
+    """After a reclaim the process stays up until the cloud stops the container:
+    a clean early exit could end the cloud's input as finished instead of letting
+    the cloud run the island again (as the Miles sampler island does). Returns
+    whether a reclaim was requested (False: returns at once)."""
+    import os  # noqa: PLC0415
+
+    from .sampler_resume import reclaim_requested  # noqa: PLC0415
+
+    if not reclaim_requested(os.environ if environ is None else environ):
+        return False
+    print(f"[engine-sampler] reclaimed: waiting up to {hold_s:g} s for the container to stop", flush=True)
+    sleep(hold_s)
+    return True
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m yeto.rl.engine.engine_sampler",
                                      description="run an engine sampler island from a spec file")
@@ -345,4 +375,5 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"[engine-sampler] spec rejected: {error}", file=sys.stderr)
         return 2
     print(f"[engine-sampler] done: {rounds} round(s)", flush=True)
+    hold_after_reclaim()
     return 0

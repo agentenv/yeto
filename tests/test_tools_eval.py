@@ -17,7 +17,7 @@ from tools.eval.verdict import Verdict
 def test_matrix_covers_every_capability_and_backend():
     assert {(c.capability, c.backend) for c in cells.CELLS.values()} == {
         (cap, b) for cap in cells.CAPABILITIES for b in cells.BACKENDS}
-    assert [c.key for c in cells.CELLS.values() if not c.supported] == ["E2-verl"]
+    assert [c.key for c in cells.CELLS.values() if not c.supported] == []
     with pytest.raises(SystemExit):
         cells.get("E9", "verl")
 

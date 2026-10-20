@@ -150,3 +150,29 @@ def test_reclaim_marker_stops_writes_and_leaves_preempted(tmp_path):
     [tape] = (tmp_path / "tape").glob("events.*.jsonl")
     leave = [e for e in _tape(tape) if e["event"] == "rl_sampler_leave"]
     assert len(leave) == 1 and leave[0]["reason"] == "PREEMPTED"
+
+
+def test_caller_stop_ends_the_island_finished_and_on_event_sees_the_tape(tmp_path):
+    """T-E2V: the eval harness's end condition (trainers done) stops the loop
+    without a reclaim: the round in progress is still written and the island
+    leaves FINISHED; on_event sees every record written to the tape."""
+    spec = _spec(tmp_path)
+    seen = []
+    rounds = entry.run(spec, resource_sampler=lambda emit: None, incarnation="aaaa0001",
+                       stop=lambda: any(e == "rl_sampler_round" for e, _ in seen),
+                       on_event=lambda event, **fields: seen.append((event, fields)))
+    assert rounds == 1
+    assert [e.sampler_round["rollout_id"] for e in _buffer(tmp_path).entries()] == [0, 0]
+    [tape] = (tmp_path / "tape").glob("events.*.jsonl")
+    assert [e["event"] for e in _tape(tape)] == [e for e, _ in seen]
+    assert [f["reason"] for e, f in seen if e == "rl_sampler_leave"] == ["FINISHED"]
+
+
+def test_hold_after_reclaim_only_when_the_marker_is_there(tmp_path):
+    """A reclaimed engine sampler process does not exit cleanly at once (the cloud
+    could end its input as finished instead of running it again)."""
+    env = {RECLAIM_MARKER_ENV: str(tmp_path / "marker")}
+    slept = []
+    assert entry.hold_after_reclaim(env, hold_s=5.0, sleep=slept.append) is False and slept == []
+    (tmp_path / "marker").write_text("{}")
+    assert entry.hold_after_reclaim(env, hold_s=5.0, sleep=slept.append) is True and slept == [5.0]

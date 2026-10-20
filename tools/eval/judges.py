@@ -141,6 +141,9 @@ def judge_e2(ev: Evidence, v: Verdict, cfg: dict) -> None:
     during = [e for e in ev.of(t, "rl_round_trained")
               if stop_t and joins and len(joins) >= 2 and stop_t < float(e["time_unix"]) < float(joins[-1]["time_unix"])]
     v.check("trainer", f"the trainer trained all {cfg['rounds']} rounds", len(trained) == cfg["rounds"], trained)
+    bases = [r.get("base_policy_version") for r in ev.of(t, "rl_local_round")]
+    v.check("versions", "the trainer's policy version advanced by one every round (0..R-1, no restart)",
+            bases == list(range(cfg["rounds"])), bases)
     v.metrics.update(trainer_rounds_during_replacement=len(during), sampler_rounds=len(rounds),
                      buffer_groups=len(ids))
     _rc_ok(ev, v)
