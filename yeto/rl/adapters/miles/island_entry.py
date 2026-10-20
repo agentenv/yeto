@@ -1526,18 +1526,6 @@ def run_miles(
         write_boot_only_marker(args, ports_launch, run_config, ref_probe)
         return  # boot-only: exit 0 before Ray/GPU work; no training
 
-    if getattr(args, "codex_exclude_reasoning_from_loss", False):
-        # S17 WP6: read by rollout_meta_hook.record_trained_groups in the
-        # rollout process (with or without Yeto policy sync); absent (default) == reasoning counted, no-op.
-        miles_args.yeto_rl_codex_reasoning_in_loss = False
-        from yeto.rl.codex_backend import stock_codex_reasoning_markers
-
-        miles_args.yeto_rl_codex_reasoning_markers = list(
-            stock_codex_reasoning_markers(
-                getattr(args, "codex_backend_profile", None) or args.tito_model
-            )
-            or ()
-        )
     # The full-parameter sync contracts bind the spec hash (4.8). The island
     # contract v3 (strict, decoupled, elastic) binds the semantic hash and the
     # run code pack instead (rl-identity-tiering L9.7); placement capabilities
@@ -1586,21 +1574,8 @@ def run_miles(
                 spec.name for spec in specs
             )
         miles_args.yeto_rl_reward_sha256 = args.reward_sha256
-        miles_args.yeto_rl_codex_harness_contract = getattr(
-            args,
-            "codex_harness_contract",
-            None,
-        )
-        miles_args.yeto_rl_codex_backend_profile = getattr(
-            args,
-            "codex_backend_profile",
-            None,
-        )
         miles_args.yeto_rl_dynamic_sampling_max_replacements = getattr(
             args, "dynamic_sampling_max_replacements", None
-        )
-        miles_args.yeto_rl_secrlenv_max_infrastructure_replacements = getattr(
-            args, "secrlenv_max_infrastructure_replacements", None
         )
         miles_args.yeto_rl_completed_groups_path = args.completed_groups_path
         miles_args.yeto_rl_event_tape = args.event_tape

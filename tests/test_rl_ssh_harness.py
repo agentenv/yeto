@@ -589,61 +589,6 @@ def test_plan_rejects_previous_pipeline_identity_schema():
         ssh_harness._validate_plan(plan)
 
 
-def test_prepare_cli_exposes_final_secrlenv_eval_controls():
-    args = ssh_harness.build_parser().parse_args(
-        [
-            "prepare",
-            "--host",
-            "root@h200-n1,root@h200-n2",
-            "--run-id",
-            "flaky100",
-            "--final-ack-timeout-s",
-            "21600",
-            "--eval-checkpoint-host",
-            "root@h200-n6",
-            "--eval-checkpoint-path",
-            "yeto-rl-ssh-data/train/state/state.ckpt",
-            "--eval-checkpoint-sha256",
-            "f" * 64,
-            "--eval-checkpoint-size-bytes",
-            "138632000000",
-            "--eval-checkpoint-global-step",
-            "8",
-            "--eval-dataset-name",
-            "flaky100",
-            "--eval-interval",
-            "1",
-            "--eval-samples-per-prompt",
-            "2",
-            "--eval-temperature",
-            "0.7",
-            "--eval-top-p",
-            "0.95",
-            "--eval-max-prompt-len",
-            "4096",
-            "--eval-max-response-len",
-            "32768",
-            "--eval-max-context-len",
-            "32768",
-        ]
-    )
-
-    assert args.final_ack_timeout_s == 21600
-    assert args.eval_checkpoint_host == "root@h200-n6"
-    assert args.eval_checkpoint_path.endswith("train/state/state.ckpt")
-    assert args.eval_checkpoint_sha256 == "f" * 64
-    assert args.eval_checkpoint_size_bytes == 138_632_000_000
-    assert args.eval_checkpoint_global_step == 8
-    assert args.eval_dataset_name == "flaky100"
-    assert args.eval_interval == 1
-    assert args.eval_samples_per_prompt == 2
-    assert args.eval_temperature == 0.7
-    assert args.eval_top_p == 0.95
-    assert args.eval_max_prompt_len == 4096
-    assert args.eval_max_response_len == 32768
-    assert args.eval_max_context_len == 32768
-
-
 def test_plan_requires_the_patched_sglang_pin():
     plan = _plan()
     plan.pop("sglang")
