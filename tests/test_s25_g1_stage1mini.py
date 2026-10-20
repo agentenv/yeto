@@ -240,3 +240,23 @@ def test_cut_state_walk_does_not_touch_the_chained_optimizer_property():
     with side_effect_free_state(chained):
         expert.optimizer.state["new"] = {}
     assert "new" not in expert.optimizer.state and dense.optimizer.state == {"a": {"step": 1}}
+
+
+def test_cut_coverage_groups_dense_tensors_over_the_ep_ranks():
+    from yeto.rl.adapters.miles.trainer import optimizer_coverage_problems
+
+    dense, expert = "decoder.layers.0.mlp.linear_fc1.weight", "decoder.layers.1.mlp.experts.linear_fc1.weight0"
+    shared = "decoder.layers.1.mlp.shared_experts.linear_fc1.weight"
+
+    def rank(ep, optimized):
+        return {"coord": {"tp": 0, "pp": 0, "ep": ep}, "adapter_names": [dense, shared, expert],
+                "optimizer_names": optimized}
+
+    # EP2 x DP2: the dense DistOpt shards split over both EP ranks; each rank owns its experts
+    ok = [rank(0, [dense, expert]), rank(1, [shared, expert])]
+    assert optimizer_coverage_problems(ok) == []
+    bad = [rank(0, [dense, expert]), rank(1, [shared])]
+    problems = optimizer_coverage_problems(bad)
+    assert problems == [f"tp0/pp0/ep1: no optimizer state for ['{expert}']"]
+    assert bad[1]["has_optimizer_state"] is False and "has_optimizer_state" not in bad[0]
+    assert optimizer_coverage_problems([]) == ["no rank reported any adapter tensor"]

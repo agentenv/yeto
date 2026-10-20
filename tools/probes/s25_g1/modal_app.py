@@ -13,7 +13,7 @@ differ from the PPU plan.
 
 ``smoke`` and ``launch`` spawn and return; the local client may exit
 (never kill a ``.remote()`` caller: memory modal-detach-kill-cancels).
-Raw logs go to the store Volume under ``logs/<tag>/``.
+Raw logs go to the Volume ``yeto-s25-g1-logs`` under ``<tag>/``.
 """
 from __future__ import annotations
 
@@ -41,7 +41,10 @@ GPU_NAME = "H100"
 app = modal.App("yeto-s25-g1-stage1mini")
 models = modal.Volume.from_name(MODELS_VOLUME, create_if_missing=True, version=2)
 store = modal.Volume.from_name(STORE_VOLUME, create_if_missing=True, version=2)
-VOLUMES = {"/data/models": models, "/data/store": store}
+# Logs go to their own Volume: the islands reload the store Volume, and a reload
+# drops this container's uncommitted copies there (run-16 lost its log mirror).
+logs = modal.Volume.from_name("yeto-s25-g1-logs", create_if_missing=True, version=2)
+VOLUMES = {"/data/models": models, "/data/store": store, "/data/logs": logs}
 
 _PATCH_SGLANG = (
     "import importlib.util, sys; sys.path.insert(0, '/tmp/yeto-slr');"
@@ -82,13 +85,21 @@ def _log_dir(tag: str) -> Path:
     return path
 
 
+def _copy_files(src: Path, dst: Path) -> None:
+    """Copy file contents only (no copystat: a Volume refuses some metadata calls)."""
+    for path in src.rglob("*"):
+        if path.is_file() and path.suffix not in (".sock", ".pid"):
+            target = dst / path.relative_to(src)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(path, target)
+
+
 def _commit(tag: str | None = None) -> None:
     """Copy the local logs of ``tag`` to the store Volume (closed files only), then commit."""
     try:
         if tag is not None:
-            shutil.copytree(LOCAL_LOGS / tag, Path("/data/store/logs") / tag, dirs_exist_ok=True,
-                            ignore=shutil.ignore_patterns("*.sock", "*.pid"))
-        store.commit()
+            _copy_files(LOCAL_LOGS / tag, Path("/data/logs") / tag)
+        logs.commit()
     except Exception as error:  # noqa: BLE001 - evidence copy only
         print(f"[g1] log mirror/commit failed: {error}", flush=True)
 
@@ -223,7 +234,8 @@ def smoke(tag: str = "smoke-1") -> None:
 
 
 # --------------------------------------------------------------------- the islands
-@app.function(image=image, volumes=VOLUMES, gpu=f"{GPU_NAME}!:1", cpu=8, memory=65536, timeout=7200)
+@app.function(image=image, volumes=VOLUMES, gpu=f"{GPU_NAME}!:1", cpu=8, memory=65536, timeout=7200,
+              max_inputs=1)  # a fresh container per call: trainer B must not inherit A's disk or Ray
 def sampler_island(tag: str) -> int:
     log = _log_dir(tag)
     _gpu_facts(log, 1)
@@ -248,7 +260,8 @@ def sampler_island(tag: str) -> int:
     return rc
 
 
-@app.function(image=image, volumes=VOLUMES, gpu=f"{GPU_NAME}!:2", cpu=12, memory=163840, timeout=3600)
+@app.function(image=image, volumes=VOLUMES, gpu=f"{GPU_NAME}!:2", cpu=12, memory=163840, timeout=3600,
+              max_inputs=1)  # a fresh container per call: trainer B must not inherit A's disk or Ray
 def trainer_island(tag: str, stop_after_rounds: int | None = None, convert_only: bool = False) -> int:
     log = _log_dir(tag)
     _gpu_facts(log, 2)
@@ -283,6 +296,7 @@ def trainer_island(tag: str, stop_after_rounds: int | None = None, convert_only:
         nvml.terminate()
         _commit(tag)
         return 0
+    _sh("ray stop --force || true", log / "ray.log", env=env, check=False)
     _sh("ray start --head --port=6379 --node-ip-address=127.0.0.1 --num-gpus=2 --disable-usage-stats",
         log / "ray.log", env=env)
     began = time.time()
@@ -361,10 +375,10 @@ def orchestrate(tag: str, cut_after: int = 2) -> dict:
     requant.cancel()
     result = {"trainer_a": first, "trainer_b": second, "sampler": sampler_rc}
     print(json.dumps(result, default=str), flush=True)
-    out = Path(f"/data/store/logs/{tag}")
+    out = Path(f"/data/logs/{tag}")
     out.mkdir(parents=True, exist_ok=True)
     (out / "orchestrate.json").write_text(json.dumps(result, default=str))
-    _commit()
+    logs.commit()
     return result
 
 
