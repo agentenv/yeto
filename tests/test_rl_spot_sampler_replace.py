@@ -427,3 +427,38 @@ def test_the_reclaim_signal_writes_the_marker_instead_of_raising(tmp_path):
     assert not reclaim_requested(env)
     handlers[_signal.SIGINT](_signal.SIGINT, None)  # Modal's SIGINT reaches the island process
     assert reclaim_requested(env) and '"signal": 2' in (tmp_path / "marker").read_text()
+
+
+def test_sampler_spot_bills_only_the_samplers_and_adds_no_spot_volume(monkeypatch):
+    from yeto.cloud import s3_store
+    from yeto.gpu_spec import parse_gpu_spec
+    from yeto.launch.rl_island_task import make_miles_island_task
+    from yeto.launcher import _island_task, _prepare_rl_args
+
+    monkeypatch.setenv(s3_store.KEY_ID_ENV, "AKIDSTORE")
+    monkeypatch.setenv(s3_store.SECRET_ENV, "store-secret")
+    gpu = "nebius:1xh100@eu-north1,nebius:1xh100@eu-north1"
+    base = ("--rl-single-island-no-sync", "--tuning", "lora", "--rl-island-sample-role", "0:sampler",
+            "--rl-island-sample-role", "1:trainer", "--rl-max-policy-age", "2",
+            "--rl-algorithm-spec", "examples/rl_algorithms/decoupled-ppo-c2.json",
+            "--rl-checkpoint-store", "s3://yeto-ckpt/run-a", "--on-demand", "--rl-sampler-spot")
+    args = _launcher_args("ports", base, gpu=gpu)
+    args.controller = "local"
+    _prepare_rl_args(args)
+    spots, volumes = [], []
+    for m, spec in enumerate(parse_gpu_spec(args.gpu)):
+        task = _island_task(make_miles_island_task, args, spec, m, 2, "none", {})
+        spots.append(task.resources.use_spot)
+        volumes.append(sorted(getattr(task, "storage_mounts", None) or {}))
+    # the sampler gets the store mount only, like the trainer: no legacy --spot volume
+    assert spots == [True, False] and volumes[0] == volumes[1] and len(volumes[0]) == 1
+
+
+def test_sampler_spot_needs_a_pair():
+    from yeto.launcher import _prepare_rl_args
+
+    args = _launcher_args("ports", ("--rl-single-island-no-sync", "--rl-sampler-spot"),
+                          gpu="modal:1xh100")
+    args.controller = "local"
+    with pytest.raises(ValueError, match="--rl-sampler-spot needs --rl-island-sample-role"):
+        _prepare_rl_args(args)

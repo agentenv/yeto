@@ -380,6 +380,9 @@ def _check_ports_infra_switches(args) -> None:
         sample_roles.check_pair(args, rl_island_count(args))
     else:
         sample_roles.check_launch(args)  # L4.6 --rl-sample-role (both checks nothing)
+    if getattr(args, "rl_sampler_spot", False) and not sample_roles.is_pair(args):
+        raise ValueError("--rl-sampler-spot needs --rl-island-sample-role (it bills the sampler "
+                         "islands of a pair as spot)")
     from .storage import store_object_envs
 
     for cloud in {s.cloud for s in parse_gpu_spec(args.gpu)} if getattr(args, "gpu", None) else ():
