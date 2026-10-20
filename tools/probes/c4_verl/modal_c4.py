@@ -60,12 +60,15 @@ def _sh(cmd: str, log) -> int:
     return subprocess.run(cmd, shell=True, stdout=log, stderr=subprocess.STDOUT).returncode
 
 
-@app.function(gpu=GPU, cpu=8.0, memory=49152, timeout=40 * 60, volumes={"/vol": vol})
+# max_inputs=1: every phase gets a fresh container (a reused warm container kept the
+# previous phase's ~/yeto-output and its stale Volume view: run c4-verl-20261020c b).
+@app.function(gpu=GPU, cpu=8.0, memory=49152, timeout=40 * 60, volumes={"/vol": vol}, max_inputs=1)
 def island(run: str, phase: str, gpu: str) -> dict:
     import shutil
     import subprocess
     import time
 
+    vol.reload()  # see the store the previous phase committed
     want_name, group = EXPECT[gpu]
     out = f"/vol/{run}/{phase}"
     os.makedirs(out, exist_ok=True)
