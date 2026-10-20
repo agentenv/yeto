@@ -177,6 +177,11 @@ class PostLoadChecks:
         if loaded is not None:
             return {"name": "expert_count", "passed": int(loaded) == int(expected),
                     "loaded": int(loaded), "expected": int(expected)}
+        if int(expected) == 0:
+            # S26 E6: a dense model has no routed experts; the release index count (0) was
+            # compared before the load, so there is nothing an engine report could add.
+            return {"name": "expert_count", "passed": True, "expected": 0,
+                    "detail": "no routed experts (dense model); release index count checked"}
         gib = engine.weight_gib_per_card()
         want = self.expected_weight_gib_per_card
         if gib is not None and want is not None:

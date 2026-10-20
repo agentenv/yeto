@@ -13,7 +13,7 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-from tests.test_rl_quant_scope import dense_shapes, moe_shapes
+from tests.test_rl_quant_scope import H, dense_shapes, moe_shapes
 from yeto.rl.engine.policy_release import PolicyReleaseStore
 from yeto.rl.engine.resume import CheckpointStore
 from yeto.rl.quant import tiers
@@ -359,3 +359,83 @@ def test_island_task_forwards_the_tier_only_when_set(monkeypatch, tier):
     _prepare_rl_args(args)
     task = make_miles_island_task(args, parse_gpu_spec(args.gpu)[0], 0, 1, "127.0.0.1:29400")
     assert ("--rl-rollout-quant-tier 1" in task.run) is (tier == 1)
+
+
+MILES_NEXT = Path("/home/michael/work/miles-next")
+
+
+@pytest.mark.skipif(not (MILES_NEXT / "miles/utils/workers/process_utils.py").is_file(), reason="no miles-next checkout")
+def test_ignore_list_reaches_the_sglang_server_process(dense, tmp_path, monkeypatch):
+    """Tier 1, item 4 of the GPU review: the last hop. Miles' CommandActor starts
+    ``sglang.launch_server`` with ``process_utils.launch_bound_subprocess(["/bin/sh", "-c",
+    "exec <cmd>"], envs={})`` (ray_worker_manager.py:754, command_actor.py:22), whose child env
+    is ``{**os.environ, **envs}``. The actor's os.environ holds the job runtime_env entries
+    (connect_island_ray, tested above). This runs Miles' own function and reads the
+    variable from the started process."""
+    import importlib
+    import sys
+
+    from yeto.rl.adapters.miles.entry import rollout_quant_env
+
+    monkeypatch.syspath_prepend(str(MILES_NEXT))
+    monkeypatch.setenv("PYTHONPATH", f"{MILES_NEXT}:{os.environ.get('PYTHONPATH', '')}")
+    for key, value in rollout_quant_env(SimpleNamespace(yeto_rollout_quant_tier=1, hf_checkpoint=str(dense))).items():
+        monkeypatch.setenv(key, value)  # what the Ray worker's environment holds
+    process_utils = importlib.import_module("miles.utils.workers.process_utils")
+    out = tmp_path / "seen.txt"
+    cmd = f"exec {sys.executable} -c \"import os; open('{out}', 'w').write(os.environ['SGLANG_FP8_IGNORED_LAYERS'])\""
+    process = process_utils.launch_bound_subprocess(["/bin/sh", "-c", cmd], envs={})
+    assert process.wait(timeout=60) == 0
+    assert out.read_text() == os.environ["SGLANG_FP8_IGNORED_LAYERS"]
+    assert "model.layers.1.self_attn.v_proj" in out.read_text().split(",")
+
+
+QWEN3_4B = json.loads((Path(__file__).parent / "data" / "qwen3_4b_instruct_2507_weights.json").read_text())
+
+
+@pytest.mark.skipif(not (MILES_NEXT / "miles/backends/megatron_utils/megatron_to_hf/qwen2.py").is_file(),
+                    reason="no miles-next checkout")
+def test_miles_raw_export_names_equal_the_hf_base_names():
+    """Item 5 of the GPU review (raw path): every Megatron parameter of Qwen3-4B (TE layout,
+    tied embeddings: no output_layer) through Miles' own ``convert_qwen2_to_hf`` gives exactly
+    the tensor names of the HF base index. The Qwen3-4B launch uses Miles' bridge export
+    (Megatron-Bridge, not in this checkout); that path is checked on the first release."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "miles_qwen2_to_hf", MILES_NEXT / "miles/backends/megatron_utils/megatron_to_hf/qwen2.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    c = QWEN3_4B
+    head_dim, groups, heads = 4, 2, 4
+    args = SimpleNamespace(kv_channels=head_dim, hidden_size=8, num_attention_heads=heads, num_query_groups=groups)
+    params = {"module.module.embedding.word_embeddings.weight": torch.zeros(4, 8),
+              "module.module.decoder.final_layernorm.weight": torch.zeros(8)}
+    for i in range(c["num_hidden_layers"]):
+        p = f"module.module.decoder.layers.{i}."
+        params.update({p + "self_attention.linear_qkv.weight": torch.zeros(groups * (heads // groups + 2) * head_dim, 8),
+                       p + "self_attention.linear_qkv.layer_norm_weight": torch.zeros(8),
+                       p + "self_attention.linear_proj.weight": torch.zeros(8, 8),
+                       p + "self_attention.q_layernorm.weight": torch.zeros(head_dim),
+                       p + "self_attention.k_layernorm.weight": torch.zeros(head_dim),
+                       p + "mlp.linear_fc1.weight": torch.zeros(16, 8),
+                       p + "mlp.linear_fc1.layer_norm_weight": torch.zeros(8),
+                       p + "mlp.linear_fc2.weight": torch.zeros(8, 8)})
+    names = {hf for name, param in params.items() for hf, _ in module.convert_qwen2_to_hf(args, name, param)}
+    assert c["tie_word_embeddings"] and "lm_head.weight" not in c["weight_names"]
+    assert names == set(c["weight_names"])
+
+
+def test_tied_lm_head_in_an_export_is_dropped(tmp_path):
+    """Item 5 fallback: an exporter that writes the tied head anyway still converts."""
+    shapes = dense_shapes()
+    base = write_checkpoint(tmp_path / "base", shapes, {"num_hidden_layers": 2, "tie_word_embeddings": True})
+    export = write_checkpoint(tmp_path / "export", {**shapes, "lm_head.weight": [32, H]},
+                              {"num_hidden_layers": 2, "tie_word_embeddings": True})
+    save_scoped_template(base, tmp_path / "t", FP8_FFN_CHANNEL)
+    stats = requantize_checkpoint(export, tmp_path / "t", tmp_path / "out", AwqSmoothing.none())
+    assert stats["dropped_tied_lm_head"] == 1 and "lm_head.weight" not in _read(tmp_path / "out")
+    untied = write_checkpoint(tmp_path / "base2", shapes, {"num_hidden_layers": 2})
+    save_scoped_template(untied, tmp_path / "t2", FP8_FFN_CHANNEL)
+    with pytest.raises(LayoutError, match="1 extra"):
+        requantize_checkpoint(export, tmp_path / "t2", tmp_path / "out2", AwqSmoothing.none())

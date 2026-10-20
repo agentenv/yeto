@@ -529,6 +529,10 @@ def requantize_checkpoint(
     alias = {n: n.replace(_COMPOSITE_PREFIX, _TEXT_PREFIX, 1) for n in missing
              if n.startswith(_COMPOSITE_PREFIX) and n.replace(_COMPOSITE_PREFIX, _TEXT_PREFIX, 1) in extra}
     missing, extra = missing - set(alias), extra - set(alias.values())
+    # A trainer may export the tied output head that the HF base omits (tie_word_embeddings):
+    # the layout has no lm_head, the engine ties it to the embeddings, so it is dropped.
+    tied = {n for n in extra if n.endswith("lm_head.weight")} if _ties_embeddings(template_dir) else set()
+    extra -= tied
     base, filled = None, set()
     if frozen is not None and missing:
         matcher = re.compile(frozen[1])
@@ -551,7 +555,7 @@ def requantize_checkpoint(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     stats = {"shards": 0, "tensors": 0, "quantized": 0, "frozen_from_base": len(filled),
-             "renamed_from_text_prefix": len(alias)}
+             "renamed_from_text_prefix": len(alias), "dropped_tied_lm_head": len(tied)}
 
     def read(name: str) -> torch.Tensor:
         return base.get(name) if name in filled else source.get(alias.get(name, name))
@@ -577,6 +581,14 @@ def requantize_checkpoint(
     if shards is None:
         finalize_checkpoint(template_dir, out_dir)
     return stats
+
+
+def _ties_embeddings(template_dir: Path) -> bool:
+    config = Path(template_dir) / "config.json"
+    if not config.is_file():
+        return False
+    doc = json.loads(config.read_text())
+    return bool(doc.get("tie_word_embeddings") or (doc.get("text_config") or {}).get("tie_word_embeddings"))
 
 
 def write_output_shard(out_dir: Path, shard: str, tensors: Mapping[str, torch.Tensor], layout: CheckpointLayout) -> None:
