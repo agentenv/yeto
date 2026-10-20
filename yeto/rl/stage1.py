@@ -467,7 +467,9 @@ def expand(plan: Stage1Plan, *, hf_config: str | Path | None = None) -> Expanded
     layout = megatron_layout(miles, cards, per_node)
     common_env = {DEVICE_FAMILY_ENV: trainers[0].device_family, "YETO_RUN_ID": plan.run_id,
                   "YETO_RL_STORE": store, "HF_HUB_OFFLINE": "1", **store_env(plan)}
-    trainer_env = {**common_env, "TORCHINDUCTOR_COMPILE_THREADS": "1"}
+    trainer_env = {**common_env, "TORCHINDUCTOR_COMPILE_THREADS": "1",
+                   # trainer.miles.extra_env: image-specific settings (e.g. PYTHONPATH)
+                   **{str(k): str(v) for k, v in (_section(trainer_cfg, "miles").get("extra_env") or {}).items()}}
     model_dir = str(model["bf16_source"]["local_dir"])
     state_dir = state_dir_of(plan)
     impl = str(miles["transformer_impl"])

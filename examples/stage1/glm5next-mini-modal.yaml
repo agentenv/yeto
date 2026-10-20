@@ -65,6 +65,10 @@ trainer:
     megatron: radixark/Megatron-LM@a84b105
     mbridge: image
     workdir: /root/miles
+    extra_env:
+      # Megatron's get_model imports megatron.post_training (modelopt check), which the
+      # image's editable megatron_core install does not expose (Modal run-10)
+      PYTHONPATH: /root/Megatron-LM:/root/sky_workdir
     tp: 1
     sequence_parallel: false
     pp: 1
