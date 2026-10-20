@@ -162,10 +162,12 @@ def run_fwd_bwd(model, tokens: torch.Tensor, *, capture: list | None = None, for
     mask[:, -1] = 0
 
     def loss_func(output):
+        if capture is not None:
+            logits = output.detach().float().clone()  # vocab_parallel_cross_entropy edits its input in place
         token_loss = tensor_parallel.vocab_parallel_cross_entropy(output.float(), labels)
         loss = (token_loss * mask).sum() / mask.sum()
         if capture is not None:
-            capture.append((output.detach(), token_loss.detach()))
+            capture.append((logits, token_loss.detach()))
         return loss, {"loss": loss.detach()}
 
     def step(data_iter, chunk):
@@ -203,7 +205,7 @@ def named(model) -> dict[str, torch.Tensor]:
 def local_to_te(name: str) -> str:
     from miles.backends.megatron_utils.named_weights import local_expert_name_to_grouped
 
-    name = local_expert_name_to_grouped(name)
+    name = te_canonical(local_expert_name_to_grouped(name), set())
     # dense MLP: TE fuses the pre-MLP RMSNorm into linear_fc1 (layer_norm_weight)
     name = re.sub(r"(decoder\.layers\.\d+)\.pre_mlp_layernorm\.weight$", r"\1.PRE_MLP_NORM", name)
     return name
@@ -339,6 +341,10 @@ def phase_n75(ns) -> None:
                       "peak_mem_gib": torch.cuda.max_memory_allocated() / 2**30}
     zero(model, optimizer)
 
+    pre = [None] * dist.get_world_size()
+    dist.all_gather_object(pre, info)
+    if dist.get_rank() == 0:
+        (out / f"info-{ns.tag}.json").write_text(json.dumps(pre, indent=1, default=str))
     # N8.2 on the same (unchanged) weights
     try:
         info["n82"] = n82(args, model, out / f"n82-{ns.tag}")
@@ -438,14 +444,36 @@ def fake_original(source: dict[str, torch.Tensor], scheme: str, out: Path, smoot
     return out
 
 
+def prepare_reference(source: dict[str, torch.Tensor], scheme: str, d: Path, smooth: str | None) -> dict:
+    """Rank 0: template, BF16 source, AWQ factors and the single-process reference output under ``d``."""
+    from safetensors.torch import save_file
+
+    from yeto.rl.quant.awq import AwqSmoothing
+    from yeto.rl.quant.requant import CheckpointLayout, requantize_checkpoint
+
+    orig = fake_original(source, scheme, d / "original", smooth)
+    CheckpointLayout.from_checkpoint(orig).save_template(orig, d / "template")
+    (d / "bf16").mkdir(parents=True, exist_ok=True)
+    save_file({n: t.contiguous() for n, t in source.items()}, str(d / "bf16" / "model.safetensors"),
+              metadata={"format": "pt"})
+    if scheme == "w4a8" and smooth:
+        (d / "awq-scales").mkdir(exist_ok=True)
+        factors = (0.8 + 0.4 * torch.rand(source[smooth + ".weight"].numel(),
+                                          generator=torch.Generator().manual_seed(7))).double()
+        torch.save(factors, d / "awq-scales" / f"{smooth}.pt")
+    smoothing = (AwqSmoothing.from_artefact(d / "original" / "recipe.yaml", d / "awq-scales")
+                 if scheme == "w4a8" and smooth else AwqSmoothing.none())
+    t0 = time.perf_counter()
+    requantize_checkpoint(d / "bf16", d / "template", d / "reference", smoothing)
+    return {"single_process_s": time.perf_counter() - t0}
+
+
 def n82(args, model, out: Path) -> dict:
     from megatron.core import parallel_state as mps
-    from safetensors.torch import save_file
 
     from yeto.rl.adapters.miles.quant_shards import hf_slices, megatron_expert_slices
     from yeto.rl.quant.awq import AwqSmoothing
-    from yeto.rl.quant.requant import CheckpointLayout, requantize_checkpoint
-    from yeto.rl.quant.shards import SourceSlice, requantize_distributed, torch_barrier
+    from yeto.rl.quant.shards import SourceSlice, requantize_distributed
 
     rank, world = dist.get_rank(), dist.get_world_size()
     ep_rank, ep_size = mps.get_expert_model_parallel_rank(), mps.get_expert_model_parallel_world_size()
@@ -469,26 +497,19 @@ def n82(args, model, out: Path) -> dict:
         d = out / scheme
         r: dict = {}
         try:
+            err = None
             if rank == 0:
-                orig = fake_original(source, scheme, d / "original", smooth)
-                CheckpointLayout.from_checkpoint(orig).save_template(orig, d / "template")
-                (d / "bf16").mkdir(parents=True, exist_ok=True)
-                save_file({n: t.contiguous() for n, t in source.items()}, str(d / "bf16" / "model.safetensors"),
-                          metadata={"format": "pt"})
-                if scheme == "w4a8" and smooth:
-                    (d / "awq-scales").mkdir(exist_ok=True)
-                    s = (0.8 + 0.4 * torch.rand(source[smooth + ".weight"].numel(),
-                                                generator=torch.Generator().manual_seed(7))).double()
-                    torch.save(s, d / "awq-scales" / f"{smooth}.pt")
-            dist.barrier()
+                try:
+                    r.update(prepare_reference(source, scheme, d, smooth))
+                except Exception as exc:  # noqa: BLE001 -- re-raised below after telling the peer
+                    err = exc
+            if err is not None:
+                signal_failure()
+                raise err
+            checked_barrier()  # raises PeerFailed on rank 1 when rank 0 failed above
             smoothing = (AwqSmoothing.from_artefact(d / "original" / "recipe.yaml", d / "awq-scales")
                          if scheme == "w4a8" and smooth else AwqSmoothing.none())
             r["awq"] = bool(scheme == "w4a8" and smooth)
-            if rank == 0:
-                t0 = time.perf_counter()
-                requantize_checkpoint(d / "bf16", d / "template", d / "reference", smoothing)
-                r["single_process_s"] = time.perf_counter() - t0
-            dist.barrier()
             # distributed: experts from the yeto adapter on Megatron-local names; non-experts once (rank 0)
             mine = list(megatron_expert_slices(((n.removeprefix("module.").removeprefix("module."), p)
                                                 for n, p in local.items()),
@@ -507,11 +528,13 @@ def n82(args, model, out: Path) -> dict:
                 try:
                     t0 = time.perf_counter()
                     stats = requantize_distributed(slices, d / "template", dst, smoothing, rank=rank,
-                                                   world_size=world, barrier=torch_barrier)
+                                                   world_size=world, barrier=checked_barrier)
                     r[variant] = {"ok": True, "s": time.perf_counter() - t0, "part": stats.get("part")}
+                except PeerFailed as exc:
+                    r[variant] = {"ok": False, "error": f"PeerFailed: {exc}"}
                 except Exception as exc:  # noqa: BLE001
                     r[variant] = {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:600]}"}
-                    # a rank that failed early leaves the others in a barrier: resync before the next variant
+                    signal_failure()  # pairs with the peer's next checked_barrier
                 dist.barrier()
                 if rank == 0 and r[variant]["ok"]:
                     r[variant]["byte_equal"] = compare_dirs(d / "reference", dst)
@@ -520,6 +543,22 @@ def n82(args, model, out: Path) -> dict:
             r["traceback"] = traceback.format_exc()[-3000:]
         res[scheme] = r
     return res
+
+
+class PeerFailed(RuntimeError):
+    pass
+
+
+def checked_barrier() -> None:
+    """Barrier that also carries "a rank failed": every rank either reaches it or calls signal_failure()."""
+    flag = torch.zeros(1, device="cuda")
+    dist.all_reduce(flag, op=dist.ReduceOp.MAX)
+    if flag.item() > 0:
+        raise PeerFailed("another rank failed in requantize_distributed")
+
+
+def signal_failure() -> None:
+    dist.all_reduce(torch.ones(1, device="cuda"), op=dist.ReduceOp.MAX)
 
 
 def compare_dirs(a: Path, b: Path) -> dict:
@@ -560,7 +599,10 @@ def _hdo_report(optimizer) -> dict:
                 "is_hdo": isinstance(inner, HybridDeviceOptimizer)}
         if isinstance(inner, HybridDeviceOptimizer):
             fp32 = list(inner.param_to_fp32_param.values()) if getattr(inner, "param_to_fp32_param", None) else []
+            copies = list(getattr(inner, "gpu_params_map_cpu_copy", {}).values())
             item.update(
+                host_copies=len(copies), host_copies_pinned=sum(bool(c.is_pinned()) for c in copies),
+                host_copy_dtypes=sorted({str(c.dtype) for c in copies}),
                 fp32_params=len(fp32), fp32_devices=sorted({str(p.device) for p in fp32}),
                 fp32_pinned=sum(bool(p.is_pinned()) for p in fp32 if p.device.type == "cpu"),
                 fp32_dtypes=sorted({str(p.dtype) for p in fp32}),

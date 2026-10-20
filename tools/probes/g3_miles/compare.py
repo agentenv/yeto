@@ -82,6 +82,18 @@ def n75(out: Path) -> dict:
     return v
 
 
+def _beyond_noise(c5, c5b, rs) -> list:
+    """Parameters whose final norm after resume differs from cont5 by more than 5x the cont5/cont5b noise."""
+    a, b, c = (x[0]["final_params"]["norms"] for x in (c5, c5b, rs))
+    out = []
+    for n in a:
+        noise = abs(b[n] - a[n]) / max(a[n], 1e-30)
+        res = abs(c[n] - a[n]) / max(a[n], 1e-30)
+        if res > 5 * noise + 1e-6:
+            out.append({"name": n, "resume_rel": res, "noise_rel": noise, "norm": a[n]})
+    return sorted(out, key=lambda x: -x["resume_rel"])
+
+
 def n71d(out: Path) -> dict:
     load = lambda m: json.loads((out / f"n71d-{m}.json").read_text()) if (out / f"n71d-{m}.json").exists() else None  # noqa: E731
     c5, c5b, r3, rs = load("cont5"), load("cont5b"), load("run3"), load("resume2")
@@ -113,6 +125,7 @@ def n71d(out: Path) -> dict:
                 "loss_abs": {s["step"]: abs(s["loss_mean_dp"] - steps[s["step"]]["loss_mean_dp"]) for s in rs[0]["steps"]},
                 "grad_norm_abs": {s["step"]: abs(s["grad_norm"] - steps[s["step"]]["grad_norm"]) for s in rs[0]["steps"]},
                 "lr": {s["step"]: (s["lr"], steps[s["step"]]["lr"]) for s in rs[0]["steps"]},
+                "beyond_5x_noise": _beyond_noise(c5, c5b, rs) if c5b else None,
                 "param_norm_max_rel": max(
                     abs(a["final_params"]["norms"][n] - b["final_params"]["norms"][n]) / max(b["final_params"]["norms"][n], 1e-30)
                     for a, b in zip(rs, c5) for n in b["final_params"]["norms"])}
