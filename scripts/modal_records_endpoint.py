@@ -36,6 +36,7 @@ MODELS_MOUNT = "/mnt/models"
 RESULTS_VOLUME = "yeto-s25-records-endpoint"
 RESULTS_MOUNT = "/mnt/results"
 CONTROL_DICT = "yeto-records-endpoint-control"
+CONTAINER_WORKDIR = "/root/sky_workdir"  # yeto source in the container (modal_eval_island.WORKDIR_MOUNT)
 PROXY_PORT = 8000
 SGLANG_PORT = 30000
 
@@ -65,6 +66,7 @@ def serve(config: dict[str, Any]) -> dict[str, Any]:
 
     import modal
 
+    sys.path.insert(0, CONTAINER_WORKDIR)
     from yeto.cloud.modal_eval_island import _image_paths
 
     _image_paths()
@@ -159,12 +161,37 @@ def serve(config: dict[str, Any]) -> dict[str, Any]:
     return {"run_name": config["run_name"], "trajectories": len(trajectories)}
 
 
-def build_app(workdir: str, gpu: str, timeout_s: int) -> tuple[Any, Any]:
+def check(config: dict[str, Any]) -> dict[str, Any]:
+    """CPU container: image imports, checkpoint files and the template, no engine."""
+    sys.path.insert(0, CONTAINER_WORKDIR)
+    from yeto.cloud.modal_eval_island import _image_paths
+
+    _image_paths()
+    import aiohttp
+    import sglang
+
+    from yeto.rl.adapters.sampler_engines.sglang_server import SGLangServerEngine  # noqa: F401
+    from yeto.rl.harness.chat_templates import ChatTemplate, check_alignment
+    from yeto.rl.harness.gateway.proxy import RecordsProxy  # noqa: F401
+
+    model_dir = Path(MODELS_MOUNT) / config["model_subdir"]
+    template = ChatTemplate.load(config["template"], tokenizer_path=str(model_dir))
+    messages = [{"role": "system", "content": "a"}, {"role": "system", "content": "b"},
+                {"role": "user", "content": "hi"}]
+    return {"sglang": sglang.__version__, "aiohttp": aiohttp.__version__,
+            "shards": len(list(model_dir.glob("*.safetensors"))),
+            "stop_token_ids": template.stop_token_ids,
+            "aligned": check_alignment(template, messages).aligned}
+
+
+def build_app(workdir: str, gpu: str, timeout_s: int) -> tuple[Any, Any, Any]:
     import modal
 
     sys.path.insert(0, workdir)
     from yeto.cloud.modal_eval_island import WORKDIR_MOUNT
     from yeto.rl.adapters.miles.pins import MILES_NEXT_IMAGE
+
+    assert WORKDIR_MOUNT == CONTAINER_WORKDIR
 
     image = (modal.Image.from_registry(MILES_NEXT_IMAGE.removeprefix("docker:"))
              .env({"HOME": "/root", "PYTHONUNBUFFERED": "1"})
@@ -177,12 +204,14 @@ def build_app(workdir: str, gpu: str, timeout_s: int) -> tuple[Any, Any]:
     fn = app.function(image=image, gpu=gpu, cpu=8.0, memory=65536, timeout=timeout_s, retries=0,
                       volumes={MODELS_MOUNT: models.read_only(), RESULTS_MOUNT: results},
                       name="serve", serialized=True)(serve)
-    return app, fn
+    checker = app.function(image=image, cpu=2.0, memory=8192, timeout=600, retries=0,
+                           volumes={MODELS_MOUNT: models.read_only()}, name="check")(check)
+    return app, fn, checker
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("action", choices=("launch", "stop", "url"))
+    parser.add_argument("action", choices=("check", "launch", "stop", "url"))
     parser.add_argument("--run-name", required=True)
     parser.add_argument("--secret-file", type=Path, help="launch: file holding the path secret")
     parser.add_argument("--gpu", default="H100!")
@@ -198,11 +227,16 @@ def main() -> None:
     if args.action == "url":
         print(control.get(f"{args.run_name}/url", ""))
         return
+    if args.action == "check":
+        app, _, checker = build_app(args.workdir, args.gpu, timeout_s=600)
+        with modal.enable_output(), app.run():
+            print(json.dumps(checker.remote(dict(DEFAULTS))))
+        return
     secret = args.secret_file.read_text().strip()
     if len(secret) < 24:
         raise SystemExit("the path secret must have at least 24 characters")
     config = {**DEFAULTS, "run_name": args.run_name, "secret": secret, "max_serve_s": args.max_serve_s}
-    app, fn = build_app(args.workdir, args.gpu, timeout_s=args.max_serve_s + 1800)
+    app, fn, _ = build_app(args.workdir, args.gpu, timeout_s=args.max_serve_s + 1800)
     with modal.enable_output(), app.run(detach=True):
         call = fn.spawn(config)
     print(json.dumps({"function_call_id": call.object_id, "run_name": args.run_name}))
