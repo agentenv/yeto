@@ -90,10 +90,13 @@ def layout_for(world: int) -> dict[str, int]:
 # --------------------------------------------------------------------------
 
 
-def _state_options() -> Any:
+def _state_options(*, load: bool = False) -> Any:
+    """Local shards of the trainable state. A load is not strict: the cut holds no
+    frozen base weights (LoRA), which a strict load reports as missing (GPU T-C4).
+    ``restore_rank`` checks the trainable names against the cut before loading."""
     from torch.distributed.checkpoint.state_dict import StateDictOptions
 
-    return StateDictOptions(full_state_dict=False, ignore_frozen_params=True)
+    return StateDictOptions(full_state_dict=False, ignore_frozen_params=True, strict=not load)
 
 
 def _is_dtensor(value: Any) -> bool:
@@ -278,7 +281,7 @@ def restore_rank(handles: TrainHandles, *, directory: str, files: Sequence[Mappi
         "param_groups": saved["optim"]["param_groups"],
     }
     set_state_dict(handles.module, handles.optimizer, model_state_dict=model_sd, optim_state_dict=optim_sd,
-                   options=_state_options())
+                   options=_state_options(load=True))
     handles.scheduler.load_state_dict(saved["scheduler"])
     _set_rng_state(saved["rng"])
     return {"path": entry.path, **_rank_summary(handles, rank=rank, world=world, digest=_digest(handles))}

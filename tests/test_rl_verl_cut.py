@@ -310,3 +310,35 @@ def test_digest_reads_the_tensors_the_optimizer_steps():
     with torch.no_grad():
         first.add_(1.0)
     assert vcut._digest(h) != before
+
+
+def test_frozen_base_weights_are_not_in_the_cut_and_do_not_block_the_restore(tmp_path):
+    """LoRA shape: frozen base weights are skipped at save; a strict load would report
+    them missing (GPU T-C4 a, 2026-10-20)."""
+
+    def frozen_model():
+        model = _model()
+        model[0].weight.requires_grad_(False)
+        return model
+
+    def handles(model):
+        opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=1e-2)
+        return TrainHandles(model, opt, torch.optim.lr_scheduler.LambdaLR(opt, lambda s: 1.0 / (1 + s)))
+
+    trained = handles(frozen_model())
+    for r in range(CUT):
+        _round(trained, r)
+    worker = SimpleNamespace(module=trained.module, optimizer=trained.optimizer, lr_scheduler=trained.scheduler)
+    vcut.VerlCutTrainer(lambda fn, *a: [fn(worker, *a)], optimizer_steps_per_round=K).save_cut(
+        epoch=1, context=_context(tmp_path))
+    saved = torch.load(tmp_path / "cut-v" / vcut.rank_file(0), weights_only=True)["model"]
+    assert "0.weight" not in saved and "0.bias" in saved
+    fresh = handles(frozen_model())
+    fresh_worker = SimpleNamespace(module=fresh.module, optimizer=fresh.optimizer, lr_scheduler=fresh.scheduler)
+    vcut.VerlCutTrainer(lambda fn, *a: [fn(fresh_worker, *a)], optimizer_steps_per_round=K).restore_cut(
+        "cut-v", epoch=1, root=str(tmp_path), expect=_expect())
+    for (name, p), (_, q) in zip(trained.module.named_parameters(), fresh.module.named_parameters()):
+        if p.requires_grad:  # the frozen base keeps the fresh build's values (both from seed 0 here)
+            assert torch.equal(p, q), name
+            for key in ("exp_avg", "exp_avg_sq", "step"):
+                assert torch.equal(trained.optimizer.state[p][key], fresh.optimizer.state[q][key]), key

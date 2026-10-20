@@ -69,6 +69,11 @@ def island(run: str, phase: str, gpu: str) -> dict:
     want_name, group = EXPECT[gpu]
     out = f"/vol/{run}/{phase}"
     os.makedirs(out, exist_ok=True)
+    done = f"{out}/result.json"
+    if os.path.isfile(done):  # Modal restarts an input after a preemption: never rerun a finished phase
+        previous = json.load(open(done))
+        if previous.get("rc") == 0:
+            return {**previous, "reused_after_restart": True}
     log = open(f"{out}/container.log", "a")
     name = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
                           capture_output=True, text=True).stdout.strip()
