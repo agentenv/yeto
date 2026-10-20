@@ -153,3 +153,12 @@ def test_mini_modal_plan_has_no_errors_and_uses_the_volume_store():
     ppu = expand(load_plan(REPO / "examples/stage1/glm53-flash-ppu.yaml"))
     assert ppu.errors == [] and "--miles-commit" not in ppu.trainer["miles"]["island_argv"]
     assert "--frozen-base" not in ppu.requant["argv"]
+
+
+def test_island_argv_check_runs_the_island_combination_rules():
+    from yeto.rl.stage1 import _check_island_argv, expand, load_plan
+
+    argv = expand(load_plan(REPO / "examples/stage1/glm5next-mini-modal.yaml")).trainer["miles"]["island_argv"]
+    assert "--rollout-num-gpus" not in argv and _check_island_argv(argv) is None
+    problem = _check_island_argv([*argv, "--rollout-num-gpus", "0"])
+    assert problem and "fixed-partition" in problem

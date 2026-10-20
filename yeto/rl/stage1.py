@@ -404,20 +404,26 @@ class _ParseError(Exception):
 
 
 def _check_island_argv(argv: Sequence[str]) -> str | None:
-    """Parse the Miles island argv with the island's own parser."""
-    from yeto.rl.adapters.miles.island_entry import build_parser  # noqa: PLC0415
+    """Parse the Miles island argv with the island's own ``parse_args``: the parser
+    plus its combination checks (e.g. the ports placement rules; Modal run-1 failed
+    on one that the bare parser accepted)."""
+    import argparse  # noqa: PLC0415
+    from unittest import mock  # noqa: PLC0415
 
-    parser = build_parser()
+    from yeto.rl.adapters.miles.island_entry import build_parser, parse_args  # noqa: PLC0415
 
-    def fail(message: str) -> None:
+    def fail(_parser: Any, message: str) -> None:
         raise _ParseError(message)
 
-    parser.error = fail  # type: ignore[method-assign] - no usage dump, no exit
-    try:
-        _, unknown = parser.parse_known_args(list(argv[3:]))
-    except _ParseError as exc:
-        return f"Miles island argv does not parse: {exc}"
-    return f"Miles island argv: flags unknown to island_entry: {unknown}" if unknown else None
+    with mock.patch.object(argparse.ArgumentParser, "error", fail):  # no usage dump, no exit
+        try:
+            _, unknown = build_parser().parse_known_args(list(argv[3:]))
+            if unknown:
+                return f"Miles island argv: flags unknown to island_entry: {unknown}"
+            parse_args(list(argv[3:]))
+        except _ParseError as exc:
+            return f"Miles island argv does not parse: {exc}"
+    return None
 
 
 def expand(plan: Stage1Plan, *, hf_config: str | Path | None = None) -> Expanded:
@@ -468,8 +474,9 @@ def expand(plan: Stage1Plan, *, hf_config: str | Path | None = None) -> Expanded
                    "--groups-per-round", str(int(task["rollout_batch_size"])),
                    "--over-sampling-batch-size", str(int(task["rollout_batch_size"])),
                    "--optimizer-steps", "1",
+                   # trainer-only island: no --rollout-num-gpus (the ports check refuses any value,
+                   # 0 included, without --rl-placement fixed-partition; Modal run-1)
                    "--actor-num-nodes", str(len(trainers)), "--actor-num-gpus-per-node", str(per_node),
-                   "--rollout-num-gpus", "0",
                    "--rl-activation-recompute", "--rl-max-tokens-per-gpu", str(int(miles["max_tokens_per_gpu"])),
                    *(("--rl-optimizer-offload-fraction", repr(offload)) if offload > 0 else ()),
                    "--completed-groups-path", f"{state_dir}/island-checkpoint.pt",
@@ -901,7 +908,7 @@ def _full_parameter_layout_gap(plan: Stage1Plan, out: Expanded) -> str | None:
     problem = full_parameter_layout_problem(
         data_parallel=out.trainer["miles"]["layout"]["dp"],
         actor_num_nodes=int(argv[argv.index("--actor-num-nodes") + 1]),
-        rollout_gpus=int(argv[argv.index("--rollout-num-gpus") + 1]),
+        rollout_gpus=(int(argv[argv.index("--rollout-num-gpus") + 1]) if "--rollout-num-gpus" in argv else None),
         rollout_gpus_per_engine=1,  # the island's default; it gives no engine
         sample_role=argv[argv.index("--rl-sample-role") + 1])
     if problem is None:
