@@ -239,7 +239,7 @@ def sampler_island(tag: str) -> int:
 
 
 @app.function(image=image, volumes=VOLUMES, gpu=f"{GPU_NAME}!:2", cpu=12, memory=163840, timeout=3600)
-def trainer_island(tag: str, stop_after_rounds: int | None = None) -> int:
+def trainer_island(tag: str, stop_after_rounds: int | None = None, convert_only: bool = False) -> int:
     log = _log_dir(tag)
     _gpu_facts(log, 2)
     nvml = _nvml_sampler(log / "nvml.csv")
@@ -265,6 +265,12 @@ def trainer_island(tag: str, stop_after_rounds: int | None = None) -> int:
         if crc != 0:
             _commit(tag)
             return 90
+    if convert_only:
+        _sh(f"ls -la {shlex.quote(str(trainer['torch_dist']))}; du -sh {shlex.quote(str(trainer['torch_dist']))}",
+            log / "convert-out.txt", check=False)
+        nvml.terminate()
+        _commit(tag)
+        return 0
     _sh("ray start --head --port=6379 --node-ip-address=127.0.0.1 --num-gpus=2 --disable-usage-stats",
         log / "ray.log", env=env)
     began = time.time()
@@ -339,6 +345,12 @@ def orchestrate(tag: str, cut_after: int = 2) -> dict:
     (out / "orchestrate.json").write_text(json.dumps(result, default=str))
     _commit()
     return result
+
+
+@app.local_entrypoint()
+def convert(tag: str = "convert-1") -> None:
+    call = trainer_island.spawn(tag, None, True)
+    print(f"spawned convert {call.object_id}")
 
 
 @app.local_entrypoint()
