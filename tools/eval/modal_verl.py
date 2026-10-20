@@ -217,6 +217,8 @@ def sampler(run: str, cfg: dict) -> dict:
             if event == "rl_sampler_round":  # the local driver's reclaim trigger
                 control[f"{run}/sampler/round"] = {"incarnation": incarnation, **{
                     k: fields.get(k) for k in ("rollout_id", "groups")}}
+            elif event == "rl_sampler_leave":  # save the tape now: a reclaimed container may die soon
+                _finish(out, {**meta, "leave": fields.get("reason")}, began, {"sampler-tape.jsonl": tape})
 
         done_keys = [f"{run}/done/{i}" for i in range(cfg["learners"])]
         deadline = began + cfg["timeout_s"] - 300
