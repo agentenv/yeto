@@ -69,11 +69,14 @@ class CutSource:
     restore must match (``RestoreExpectation``); shared by the 4.4 same-shape
     rebuilder and E3's ``MilesTrainerOps`` (4.7)."""
 
+    # backend check of an in-flight export: problems refuse the cut (None: no check;
+    # the Miles adapter overrides it with its export check)
+    check_in_flight: Callable[[Mapping[str, Any]], list[str]] | None = None
+
     def __init__(self, *, driver: Any, trainer: Any, rollout: Any, ledger: Any, algorithm: Any,
                  backend_fingerprint: str, cut_root: str, global_batch_size: int,
                  ref_model: Mapping[str, Any] | None = None,
-                 shared_filesystem: bool = True,
-                 check_in_flight: Callable[[Mapping[str, Any]], list[str]] | None = None) -> None:
+                 shared_filesystem: bool = True) -> None:
         self.driver_ref = driver  # the driver, or a zero-arg callable returning it
         self.trainer = trainer
         self.rollout = rollout
@@ -83,8 +86,6 @@ class CutSource:
         self.cut_root = cut_root
         self.global_batch_size = int(global_batch_size)
         self.shared_filesystem = shared_filesystem
-        # backend check of an in-flight export (problems refuse the cut); None: no check
-        self.check_in_flight = check_in_flight
 
     @property
     def driver(self) -> Any:

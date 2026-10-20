@@ -35,11 +35,11 @@ from yeto.rl.engine.round_cut import CutSource as _CoreCutSource
 class CutSource(_CoreCutSource):
     """:class:`yeto.rl.engine.round_cut.CutSource` with the Miles in-flight export check."""
 
-    def __init__(self, **kwargs: Any) -> None:
+    @staticmethod
+    def check_in_flight(exported: Mapping[str, Any]) -> list[str]:
         from .in_flight import check_export
 
-        kwargs.setdefault("check_in_flight", check_export)
-        super().__init__(**kwargs)
+        return check_export(exported)
 
 
 def make_trainer_rebuilder(

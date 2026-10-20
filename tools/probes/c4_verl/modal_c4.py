@@ -28,7 +28,8 @@ import modal
 RUN = os.environ.get("C4_RUN", "unset")
 YETO = os.environ.get("C4_YETO", "/home/michael/work/s25-c4-cut-ctl")
 GPU = os.environ.get("C4_GPU", "A10G")
-EXPECT = {"A10G": ("A10G", "nvidia-a10g"), "L4": ("L4", "nvidia-l4"), "H100!": ("H100", "nvidia-h100")}
+# Modal A10G reports "NVIDIA A10"
+EXPECT = {"A10G": ("NVIDIA A10", "nvidia-a10g"), "L4": ("L4", "nvidia-l4"), "H100!": ("H100", "nvidia-h100")}
 sys.path.insert(0, YETO)
 from yeto.rl.adapters.verl.image import modal_image  # noqa: E402
 
