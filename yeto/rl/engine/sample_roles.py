@@ -151,6 +151,13 @@ def island_args(args: Any, island: int, num_islands: int) -> Any:
     if out.rl_sample_role in (SAMPLER, TRAINER):
         out.rl_sampler_node = node_name(island) if out.rl_sample_role == SAMPLER else None
         out.rl_buffer_shards = buffer_shards(args, num_islands)
+        samplers = len(sampler_islands(args, num_islands))
+        if out.rl_sample_role == SAMPLER and samplers > 1:
+            # the trainer trains --total-steps rounds; the samplers share them, so each
+            # one reaches its data end (check_pair needs an even split)
+            out.total_steps = int(args.total_steps) // samplers
+            if getattr(args, "rl_total_fragment_steps", None) is not None:
+                out.rl_total_fragment_steps = out.total_steps * int(getattr(args, "fragments", 1) or 1)
     if out.rl_sample_role == CONVERTIBLE:
         out.rl_convertible_node = node_name(island)
         out.rl_sampler_min_round_seconds = None  # a node keeps its backlog cap
@@ -182,8 +189,9 @@ def check_pair(args: Any, num_islands: int) -> None:
     """Launch checks of a store-coupled pair (nothing outside a pair): every
     island has a role, exactly one trainer and at least one sampler,
     ``--rl-single-island-no-sync`` (no syncer), no ``--rl-sample-role`` and no
-    external learner; several samplers take no trainer scheduler (the head reads
-    no sampler shard of a shared directory); then every island's own role checks
+    external learner; several samplers split ``--total-steps`` evenly (each
+    generates its share of the trainer's rounds) and take no trainer scheduler
+    (the head reads no sampler shard of a shared directory); then every island's own role checks
     on its island args."""
     roles = island_roles(args, num_islands)
     if not roles:
@@ -193,7 +201,11 @@ def check_pair(args: Any, num_islands: int) -> None:
         raise ValueError("--rl-island-sample-role: a pair gives every --gpu island a role, "
                          f"at least one {SAMPLER} and exactly one {TRAINER} (got {num_islands} "
                          f"island(s), roles {dict(sorted(roles.items()))})")
-    if values.count(SAMPLER) > 1 and getattr(args, "rl_trainer_scheduler", None) not in (None, "off"):
+    samplers = values.count(SAMPLER)
+    if samplers > 1 and int(getattr(args, "total_steps", 0) or 0) % samplers:
+        raise ValueError(f"--total-steps {args.total_steps}: {samplers} sampler islands share the "
+                         "trainer's rounds; it must be a multiple of the sampler count")
+    if samplers > 1 and getattr(args, "rl_trainer_scheduler", None) not in (None, "off"):
         raise ValueError("--rl-trainer-scheduler with several sampler islands is not supported "
                          "(the head does not read the sampler shards); drop the scheduler")
     if sample_role(args) != BOTH:

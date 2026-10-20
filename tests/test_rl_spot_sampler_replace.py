@@ -288,7 +288,7 @@ GROUP = ("--rl-single-island-no-sync", "--tuning", "lora", "--lora-r", "16",
          "--rl-island-sample-role", "0:sampler", "--rl-island-sample-role", "1:sampler",
          "--rl-island-sample-role", "2:trainer", "--rl-max-policy-age", "2",
          "--rl-algorithm-spec", "examples/rl_algorithms/decoupled-ppo-c2.json",
-         "--rl-checkpoint-store", STORE, "--cluster-prefix", "c1-spot")
+         "--rl-checkpoint-store", STORE, "--cluster-prefix", "c1-spot", "--total-steps", "4")
 
 
 def _args(extra=()):
@@ -317,6 +317,14 @@ def test_one_trainer_and_two_samplers_get_their_node_and_the_shards():
     tokens = [_tokens(i["learner_command"]) for i in plan["island_requests"]]
     assert [_flag(t, "--rl-sampler-node") for t in tokens] == ["island0", "island1", None]
     assert {_flag(t, "--rl-buffer-shards") for t in tokens} == {"island0,island1"}
+    # the trainer trains --total-steps rounds; each of the two samplers generates half
+    assert [_flag(t, "--global-rounds") for t in tokens] == ["2", "2", "4"]
+    assert [_flag(t, "--total-fragment-steps") for t in tokens] == ["2", "2", "4"]
+
+
+def test_the_samplers_split_the_rounds_evenly():
+    with pytest.raises(ValueError, match="multiple of the sampler count"):
+        _args(("--total-steps", "3"))
 
 
 def test_the_island_resolves_its_sampler_id_and_the_shards():
