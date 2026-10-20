@@ -140,6 +140,28 @@ def main_fully_async(argv: list[str] | None = None) -> None:
     fully_async_hydra_entry(fa_main)()
 
 
+def main_buffer_trainer(argv: list[str] | None = None) -> None:
+    """S25 C2: the fully_async hydra config and fix-ups as :func:`main_fully_async`,
+    with :class:`~.buffer_trainer_runner.YetoBufferTaskRunner`: a trainer island
+    over the sample buffer (the plan's ``sample_buffer`` section), no rollouter."""
+    import verl.trainer.main_ppo as main_ppo
+    from verl.experimental.fully_async_policy import fully_async_main as fa_main
+
+    plan = _plan_and_ray()
+
+    def run_ppo(config, task_runner_class=None):
+        from yeto.rl.adapters.verl.buffer_trainer_runner import YetoBufferTaskRunner
+
+        runner = ray.remote(num_cpus=1)(YetoBufferTaskRunner)
+        result = ray.get(runner.remote().run.remote(config, plan))
+        print("[yeto-verl] island result " + json.dumps(result, sort_keys=True, default=str), flush=True)
+
+    main_ppo.run_ppo = run_ppo
+    if argv is not None:
+        sys.argv = [sys.argv[0], *argv]
+    fully_async_hydra_entry(fa_main)()
+
+
 def fully_async_hydra_entry(fa_main):
     """``fa_main.main`` re-decorated with an absolute config directory.
 

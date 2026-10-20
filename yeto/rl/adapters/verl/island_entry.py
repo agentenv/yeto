@@ -67,6 +67,11 @@ def parse_args(argv):
     p.add_argument("--rl-island-lease-s", type=float, default=None)
     p.add_argument("--rl-echo-events", action="store_true")
     p.add_argument("--rl-max-policy-age", type=int, default=0)
+    # S25 C2: a trainer island over the sample buffer (sample_roles; the sampler is
+    # the engine sampler island, yeto.rl.engine.engine_sampler)
+    p.add_argument("--rl-sample-role", default=None)
+    p.add_argument("--rl-resume-store", default=None)
+    p.add_argument("--rl-sample-wait-s", type=float, default=None)
     args, ignored = p.parse_known_args(argv)
     return args, ignored
 
@@ -252,6 +257,7 @@ def ensure_ray_cpus(min_cpus: int = MIN_RAY_CPUS) -> dict:
 def main(argv=None) -> int:
     args, ignored = parse_args(sys.argv[1:] if argv is None else argv)
     run_config_rules.refuse_agentic_argv(ignored)  # S25 N10.4: never ignore agentic flags
+    buffer_section = sample_buffer_section(args)  # S25 C2: refused roles stop before any work
     OUTPUT.mkdir(parents=True, exist_ok=True)
     lid = args.learner_id
     t0 = time.time()
@@ -342,6 +348,7 @@ def main(argv=None) -> int:
         "asserted": {k: _override_value(overrides, k) for k in asserted_keys},
         "max_policy_age": limit, "fully_async": bool(limit),
         "versions": manifest["versions"],
+        **({"sample_buffer": buffer_section} if buffer_section else {}),
     }
     plan_path = work / f"plan-{lid}.json"
     plan_path.write_text(json.dumps(plan, indent=1, default=str))
@@ -357,7 +364,7 @@ def main(argv=None) -> int:
     env["YETO_VERL_READBACK_DIR"] = str(readback)
     env["VERL_FILE_LOGGER_PATH"] = str(OUTPUT / f"verl-file-logger-{lid}.jsonl")
     readback.mkdir(parents=True, exist_ok=True)
-    entry = "main_fully_async" if limit else "main"
+    entry = "main_buffer_trainer" if buffer_section else "main_fully_async" if limit else "main"
     cmd = [sys.executable, "-c", f"from yeto.rl.adapters.verl.verl_main import {entry}; {entry}()", *overrides]
     print("[yeto-verl] " + " ".join(shlex.quote(c) for c in cmd), flush=True)
     log = OUTPUT / f"verl-train-{lid}.log"
@@ -370,6 +377,24 @@ def main(argv=None) -> int:
         code = proc.wait()
     print(f"[yeto-verl] island {lid} exit {code} after {time.time() - t0:.0f}s", flush=True)
     return code
+
+
+def sample_buffer_section(args) -> dict | None:
+    """The plan's ``sample_buffer`` section of a buffer trainer (S25 C2); None for
+    role ``both``. A verl island is never a sampler: a sampler island runs the
+    engine sampler (``python -m yeto.rl.engine.engine_sampler``) on any engine."""
+    from yeto.rl.engine import sample_roles
+
+    role = sample_roles.sample_role(args)
+    if role == sample_roles.BOTH:
+        return None
+    if role != sample_roles.TRAINER:
+        raise SystemExit(f"--rl-sample-role {role}: a verl island only trains from the buffer; "
+                         "run the sampler as the engine sampler island (yeto.rl.engine.engine_sampler)")
+    if int(args.rl_max_policy_age or 0) < 1:
+        raise SystemExit("--rl-sample-role trainer needs --rl-max-policy-age >= 1 (the fully_async path)")
+    config = sample_roles.resolve(args, groups_per_round=args.groups_per_round)
+    return {"store": config.store, "wait_s": config.wait_s}
 
 
 def fully_async_plan(limit: int, overrides: list[str], spec_dict: dict | None, args, sync: str):
