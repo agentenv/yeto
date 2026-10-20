@@ -337,8 +337,15 @@ def run(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
         membership.join(tape=str(tape), latest_release=None if latest is None else
                         {"seq": latest.seq, "policy_version": latest.version})
         rounds = 0 if buffer.data_ended else island.run()
-        leave(LeaveReason.PREEMPTED if reclaimed() else LeaveReason.FINISHED, rounds=rounds,
+        preempted = reclaimed()
+        leave(LeaveReason.PREEMPTED if preempted else LeaveReason.FINISHED, rounds=rounds,
               dropped_groups=island.round.dropped_groups)
+        if not preempted:
+            from yeto.rl.event_echo import FINALIZED_EVENT  # noqa: PLC0415
+
+            # a launcher island's complete tape ends with this record (yeto.launch.tapes);
+            # a reclaimed incarnation's tape stays open: the next incarnation continues
+            emit(FINALIZED_EVENT, rounds=rounds)
         return rounds
     except BaseException as error:
         try:

@@ -150,6 +150,8 @@ def test_reclaim_marker_stops_writes_and_leaves_preempted(tmp_path):
     [tape] = (tmp_path / "tape").glob("events.*.jsonl")
     leave = [e for e in _tape(tape) if e["event"] == "rl_sampler_leave"]
     assert len(leave) == 1 and leave[0]["reason"] == "PREEMPTED"
+    # the next incarnation continues: this tape is not complete (S26 E9)
+    assert not any(e["event"] == "rl_learner_finalized" for e in _tape(tape))
 
 
 def test_caller_stop_ends_the_island_finished_and_on_event_sees_the_tape(tmp_path):
@@ -166,6 +168,9 @@ def test_caller_stop_ends_the_island_finished_and_on_event_sees_the_tape(tmp_pat
     [tape] = (tmp_path / "tape").glob("events.*.jsonl")
     assert [e["event"] for e in _tape(tape)] == [e for e, _ in seen]
     assert [f["reason"] for e, f in seen if e == "rl_sampler_leave"] == ["FINISHED"]
+    # S26 E9 G1 (e9-g1-i, launcher exit 3): a finished island's tape ends with the
+    # record the launcher requires of every island tape
+    assert seen[-1] == ("rl_learner_finalized", {"rounds": 1})
 
 
 def test_hold_after_reclaim_only_when_the_marker_is_there(tmp_path):
