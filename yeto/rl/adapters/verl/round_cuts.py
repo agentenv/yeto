@@ -73,9 +73,8 @@ def resume_config(args: Any) -> dict[str, Any] | None:
     if not getattr(args, "rl_single_island_no_sync", False):
         raise ValueError("--rl-resume-store needs --rl-single-island-no-sync (a synced island "
                          "resumes from the syncer)")
-    if int(getattr(args, "rl_max_policy_age", 0) or 0):
-        raise ValueError("--rl-resume-store is not wired for the verl fully_async path "
-                         "(--rl-max-policy-age > 0)")
+    # --rl-max-policy-age > 0 (the fully_async path) cuts too since S26 E9.2
+    # (.fully_async_cut: the rollouter skips the consumed prompts on resume)
     return {
         "store": str(store),
         "state_dir": str(getattr(args, "rl_resume_state_dir", None) or DEFAULT_STATE_DIR),

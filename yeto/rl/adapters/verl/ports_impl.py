@@ -39,6 +39,7 @@ from yeto.rl.engine.ports import GroupMetadata, PlacementDescription, Publicatio
 from yeto.rl.engine.trainable_state import TrainableState
 
 from . import publish as pub
+from .cut import CutPorts
 from .param_names import train_to_canonical
 
 MEMBER = "vllm-0"
@@ -268,7 +269,7 @@ class VerlRolloutPool:
         return frozenset({MEMBER})
 
 
-class VerlTrainerGroup:
+class VerlTrainerGroup(CutPorts):
     publish_offloaded = False
 
     def __init__(self, island: VerlIsland):
@@ -276,36 +277,14 @@ class VerlTrainerGroup:
         self._metrics = None
         self._cut_trainer = None
 
-    # ---- cut verbs (S25 N7.6; .cut) ----
-    def _cuts(self):
-        if self._cut_trainer is None:
-            from .cut import VerlCutTrainer, optimizer_steps_per_round
+    # ---- cut verbs (S25 N7.6; .cut.CutPorts) ----
+    def _cut_calls(self):
+        return self.island.call_workers
 
-            self._cut_trainer = VerlCutTrainer(
-                self.island.call_workers,
-                optimizer_steps_per_round=optimizer_steps_per_round(self.island.trainer.config))
-        return self._cut_trainer
+    def _optimizer_steps_per_round(self) -> int:
+        from .cut import optimizer_steps_per_round
 
-    def layout(self) -> dict[str, int]:
-        return self.actual_layout()
-
-    def actual_layout(self) -> dict[str, int]:
-        from .cut import common_layout, remote_rank_layout
-
-        return common_layout(self.island.call_workers(remote_rank_layout))
-
-    def save_cut(self, *, epoch: int, context) -> str:
-        return self._cuts().save_cut(epoch=epoch, context=context)
-
-    def restore_cut(self, cut_id: str, *, epoch: int, root: str, expect, shared_filesystem: bool = True):
-        return self._cuts().restore_cut(cut_id, epoch=epoch, root=root, expect=expect,
-                                        shared_filesystem=shared_filesystem)
-
-    def confirm_resumed_data_cursor(self, cursor) -> None:
-        self._cuts().confirm_resumed_data_cursor(cursor)
-
-    def reshard_problems(self, plan, **_: object) -> list[str]:
-        return ["verl FSDP2 cuts restore at the same world size only (no DP change)"]
+        return optimizer_steps_per_round(self.island.trainer.config)
 
     def onload(self) -> None:
         return None
@@ -356,12 +335,8 @@ class VerlTrainerGroup:
             train_step=batch.rollout_id,
             applied_lrs=None if lr is None else (lr,),
         )
-        if grad_norm is not None and self._cut_trainer is not None:
-            pending = self._cut_trainer.resume_reference is not None
-            self._cut_trainer.check_first_step(1)  # no-op unless a restore is pending; raises on a problem
-            if pending:
-                isl.emit("rl_resume_check", rollout_id=batch.rollout_id, check="first_step", ok=True,
-                         optimizer_steps=self._cut_trainer.optimizer_steps_per_round)
+        if grad_norm is not None:
+            self._check_first_step_after_resume(batch.rollout_id, isl.emit)
         ids = tuple(s for g in batch.groups for s in g.sample_ids)
         return LocalStepReceipt(
             algorithm="grpo", learner_id=isl.learner_id, learner_generation=0,

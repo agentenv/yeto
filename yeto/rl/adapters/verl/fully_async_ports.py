@@ -38,6 +38,8 @@ from yeto.rl.engine.offpolicy_source import OFFPOLICY_SOURCE_EVENT
 from yeto.rl.engine.ports import PlacementDescription, PublicationResult, RolloutBatchHandle
 
 from . import publish as pub
+from .cut import CutPorts
+from .fully_async_cut import FullyAsyncDataCursor
 from .fully_async_round import (DISCARD_MECHANISM, FULLY_ASYNC_PLACEMENT, RoundCollector,
                                 SampleMeta, group_metadata)
 from .fully_async_translate import VersionMap
@@ -56,8 +58,13 @@ class FullyAsyncIsland:
     def __init__(self, call: Callable[..., Any], *, learner_id: int, limit: int, required: int,
                  out_dir: str, readback_dir: str, emit=None, start_rollouter=None,
                  base_model_revision: str = "", lora_config_hash: str = "", layout_hash: str = "",
-                 expected_specs=()):
+                 expected_specs=(), seek_rollouter=None, optimizer_steps_per_round: int | None = None):
+        """``seek_rollouter(prompts)``: skip that many prompts of the rollouter's data
+        before it starts (``fully_async_cut.skip_rollouter_prompts``; round cuts, S26
+        E9.2). ``optimizer_steps_per_round``: the resume first-step check."""
         self.call = call
+        self.seek_rollouter = seek_rollouter
+        self.optimizer_steps_per_round = optimizer_steps_per_round
         self.base_model_revision = base_model_revision
         self.lora_config_hash = lora_config_hash
         self.layout_hash = layout_hash
@@ -96,6 +103,17 @@ class FullyAsyncRolloutPool:
     def __init__(self, island: FullyAsyncIsland, *, max_pulls_factor: int = 8):
         self.island = island
         self.max_pulls = max_pulls_factor * island.required
+        self._cursor = FullyAsyncDataCursor(island.seek_rollouter)
+
+    def data_cursor(self) -> dict[str, int]:
+        """Prompts the rounds took from the queue (kept or discarded; .fully_async_cut)."""
+        return self._cursor.cursor()
+
+    def seek_data_cursor(self, cursor) -> dict[str, int]:
+        self._cursor.started = self.island.rollouter_started
+        landed = self._cursor.seek(cursor)
+        self.island.emit("rl_verl_data_seek", data_cursor=landed, fully_async=True)
+        return landed
 
     def generate(self, rollout_id: int, *, expected_policy_version: str | None = None) -> RolloutBatchHandle:
         isl = self.island
@@ -116,6 +134,7 @@ class FullyAsyncRolloutPool:
             if meta is None:
                 raise RuntimeError(f"rollout {rollout_id}: rollouter ended the queue")
             pulled += 1
+            self._cursor.consume(1)
             keep = collector.offer(SampleMeta(**meta))
             isl.call("yeto_keep_last" if keep else "yeto_drop_last")
         queue = isl.call("yeto_assemble")
@@ -154,12 +173,22 @@ class FullyAsyncRolloutPool:
         return frozenset({MEMBER})
 
 
-class FullyAsyncTrainerGroup:
+class FullyAsyncTrainerGroup(CutPorts):
     publish_offloaded = False
 
     def __init__(self, island: FullyAsyncIsland):
         self.island = island
         self._metrics = None
+        self._cut_trainer = None
+
+    # ---- cut verbs (S26 E9.2; .cut.CutPorts over the trainer actor's worker group) ----
+    def _cut_calls(self):
+        return self.island.call_workers
+
+    def _optimizer_steps_per_round(self) -> int:
+        if self.island.optimizer_steps_per_round is None:
+            raise RuntimeError("this fully_async island was built without round cuts")
+        return int(self.island.optimizer_steps_per_round)
 
     def onload(self) -> None:
         return None
@@ -197,6 +226,8 @@ class FullyAsyncTrainerGroup:
             grad_norm=float("nan") if grad_norm is None else grad_norm, loss=metric("pg_loss"),
             pg_loss=metric("pg_loss"), lr=lr, clip_fraction=metric("pg_clipfrac"),
             train_step=batch.rollout_id, applied_lrs=None if lr is None else (lr,))
+        if grad_norm is not None:
+            self._check_first_step_after_resume(batch.rollout_id, isl.emit)
         ids = tuple(s for g in batch.groups for s in g.sample_ids)
         return LocalStepReceipt(
             algorithm="grpo", learner_id=isl.learner_id, learner_generation=0,
