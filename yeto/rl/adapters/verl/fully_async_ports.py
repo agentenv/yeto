@@ -100,9 +100,15 @@ class FullyAsyncIsland:
 
 
 class FullyAsyncRolloutPool:
-    def __init__(self, island: FullyAsyncIsland, *, max_pulls_factor: int = 8):
+    def __init__(self, island: FullyAsyncIsland, *, max_pulls_factor: int = 8,
+                 queue_end_is_buffer_end: bool = False):
+        """``queue_end_is_buffer_end``: the queue is the sample buffer (a buffer
+        trainer): its end is the samplers' data end, so a round it cannot fill
+        raises :class:`~yeto.rl.engine.buffer_payload.SampleBufferExhausted` and
+        the run ends FINISHED (S26 E9.3), not a failure."""
         self.island = island
         self.max_pulls = max_pulls_factor * island.required
+        self.queue_end_is_buffer_end = bool(queue_end_is_buffer_end)
         self._cursor = FullyAsyncDataCursor(island.seek_rollouter)
 
     def data_cursor(self) -> dict[str, int]:
@@ -132,6 +138,12 @@ class FullyAsyncRolloutPool:
                                    f"{len(collector.kept)}/{isl.required} within the policy-age limit")
             meta = isl.call("yeto_pull_sample")
             if meta is None:
+                if self.queue_end_is_buffer_end:
+                    from yeto.rl.engine.buffer_payload import SampleBufferExhausted
+
+                    raise SampleBufferExhausted(
+                        f"rollout {rollout_id}: the sample buffer ended with {len(collector.kept)}/"
+                        f"{isl.required} trainable groups for this round")
                 raise RuntimeError(f"rollout {rollout_id}: rollouter ended the queue")
             pulled += 1
             self._cursor.consume(1)

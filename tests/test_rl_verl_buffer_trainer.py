@@ -528,3 +528,28 @@ def test_two_shard_samplers_drain_their_backlog_through_the_verl_release(tmp_pat
     assert all(set(s) <= {"island0", "island1"} and sum(s.values()) == r["buffer_selected"]
                for s, r in zip(shards, [r for r in releases if r["released"]]))
     assert PolicyReleaseStore(store).latest().buffer_shards == shards[-1]
+
+
+def test_verl_buffer_trainer_ends_finished_when_the_samplers_end_early(tmp_path):
+    """S26 E9 G1 (e9-g1-h): the buffer ended with groups passed over as too old, so
+    the trainer could not fill its last round. On verl that was "rollouter ended
+    the queue" (INFRA_FAILED); it is the buffer's end: the run ends FINISHED."""
+    store_dir = tmp_path / "store"
+    store = CheckpointStore(store_dir)
+    base, _weights = _base(tmp_path, dtype=torch.float32)
+    engine = FakeEngine(max_model_len=64)
+    config = EngineSamplerConfig(sampler_id="island0", num_rollouts=4, max_backlog_groups=8,
+                                 sampling=SamplingParams(max_tokens=6, n=2), max_prompt_tokens=32, poll_s=0.01)
+    sampler = build_engine_sampler(
+        config, engine=engine, releases=PolicyReleaseStore(store), buffer=FileSampleBuffer(store, batch_size=1),
+        emit=lambda n, **f: None,
+        prompts=lambda r: [PromptItem(f"p{r}", f"prompt {r}", label="x")], reward=lambda item, c: float(len(c.token_ids) % 2),
+        checks=PostLoadChecks(expected_expert_matrices=None, fixed_prompts=(), probe_pairs=(("Q", " 7"),)),
+        should_stop=lambda: False, sleep=lambda s: time.sleep(0.005))
+    sampler.run()  # 4 groups, then the data end
+    driver, _island, _publisher = _trainer(tmp_path, store_dir, FakeBufferActor(), rounds=3, required=2, base=base)
+    driver.run()
+    assert driver.rounds_completed == 2
+    events = _lines(tmp_path / "tape.jsonl")
+    exhausted = [e for e in events if e["event"] == "rl_buffer_exhausted"]
+    assert [e["rollout_id"] for e in exhausted] == [2] and "SampleBufferExhausted" in exhausted[0]["error"]

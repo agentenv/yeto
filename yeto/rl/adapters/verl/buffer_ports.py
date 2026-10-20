@@ -213,4 +213,4 @@ def install_buffer_ports(island: FullyAsyncIsland, *, buffer: Any, releases: Pol
     island.call = BufferCall(feed, actor_call, round_id=lambda: int(island.published[0]))
     island.start_rollouter = None  # no rollouter: the samplers run elsewhere
     publisher = BufferReleasePublisher(island, releases, feed, base_dir=base_dir, lane=lane)
-    return FullyAsyncRolloutPool(island), publisher, BufferPlacement()
+    return FullyAsyncRolloutPool(island, queue_end_is_buffer_end=True), publisher, BufferPlacement()
