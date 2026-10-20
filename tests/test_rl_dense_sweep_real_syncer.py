@@ -432,3 +432,92 @@ def test_bf16_downlink_through_a_streaming_sink_matches_the_buffered_path(syncer
                                                sink=_BytesSink())
     assert buffered[2] == streamed[2]
     assert buffered_updates == streamed_updates
+
+
+def _overlap_island_run(binary: Path, tmp_path: Path, extra: tuple[str, ...], dtype: int,
+                        sweeps: int, progress: dict[tuple[int, int], list[float]]):
+    """One overlap island (E3 item 3) against the real syncer.
+
+    Round s trains before sweep s-1 comes back; at boundary s the island waits
+    for G_{s-1}, rebases ``theta <- G_{s-1} + (theta - base)`` and pushes
+    ``theta - G_{s-1}``. Returns (FINAL bytes, the island's anchors per sweep,
+    redials used)."""
+    process, port, profile_hash = _start_syncer(binary, tmp_path, *extra, total_steps=sweeps)
+    client = _client(port, profile_hash, dtype)
+    init = {fid: torch.tensor([float(fid) + 0.125 * i for i in range(NUMEL)]) for fid in range(FRAGMENTS)}
+    anchors: dict[int, dict[int, torch.Tensor]] = {}
+    held: dict[tuple[int, int], torch.Tensor] = {}
+    try:
+        client.start()
+        for fid in range(FRAGMENTS):
+            client.send_init(fid, _f32(init[fid].tolist()))
+        anchor = dict(init)  # what the last push was measured against
+        theta = {fid: init[fid] + torch.tensor(progress[(1, fid)]) for fid in range(FRAGMENTS)}
+        for sweep in range(1, sweeps + 1):
+            if sweep > 1:
+                # Round `sweep` trained from `base` while sweep-1 was in flight.
+                base = dict(theta)
+                theta = {fid: base[fid] + torch.tensor(progress[(sweep, fid)]) for fid in range(FRAGMENTS)}
+
+                def got_sweep():
+                    client.check_health()
+                    held.update({(u.fragment_id, u.version): _tail(bytes(u.data))
+                                 for u in client.drain_updates()})
+                    return all((fid, (sweep - 2) * FRAGMENTS + fid + 1) in held for fid in range(FRAGMENTS))
+
+                _wait(got_sweep, f"sweep {sweep - 1} never came back")
+                anchor = {fid: held[(fid, (sweep - 2) * FRAGMENTS + fid + 1)] for fid in range(FRAGMENTS)}
+                anchors[sweep - 1] = anchor
+                theta = {fid: anchor[fid] + (theta[fid] - base[fid]) for fid in range(FRAGMENTS)}
+            permits: dict[int, object] = {}
+
+            def gather():
+                client.check_health()
+                permits.update({p.fragment_id: p for p in client.drain_pulls()})
+                return len(permits) == FRAGMENTS
+
+            _wait(gather, f"no PULLs for sweep {sweep}")
+            for fid, permit in sorted(permits.items()):
+                base_version = 0 if sweep == 1 else (sweep - 2) * FRAGMENTS + fid + 1
+                client.push_fragment(fid, permit.global_step, permit.round_attempt, base_version,
+                                     sweep, 1, 7, _f32((theta[fid] - anchor[fid]).tolist()))
+        manifest, finals = client.wait_for_final_fragments(timeout=30)
+        result = {f.fragment_id: _tail(bytes(f.data)) for f in finals}
+        client.acknowledge_finalization(manifest)
+        redials = client._reconnects_used
+        assert process.wait(timeout=15) == 0
+    finally:
+        client.close()
+        log = _stop(process)
+    assert "syncer semantic profile" not in log, log
+    return init, result, anchors, redials
+
+
+def test_overlap_with_bf16_downlink_counts_each_round_once_without_a_resync(syncer_binary, tmp_path):
+    """E3: overlap + bf16 BCAST deltas. The island rebases on a bf16-tracked
+    anchor, but it pushes ``theta - anchor`` against that same anchor, so the
+    syncer's f32 masters still get every round's progress exactly once; the
+    downlink error stays out of the masters and never triggers a resync."""
+    sweeps = 4
+    progress = {(s, fid): [0.5 + fid + 0.03125 * s + 0.001 * i for i in range(NUMEL)]
+                for s in range(1, sweeps + 1) for fid in range(FRAGMENTS)}
+    exact_dir, delta_dir = tmp_path / "f32", tmp_path / "delta"
+    exact_dir.mkdir()
+    delta_dir.mkdir()
+    init, exact, exact_anchors, exact_redials = _overlap_island_run(
+        syncer_binary, exact_dir, STREAMED, DTYPE_F32, sweeps, progress)
+    _, delta, delta_anchors, delta_redials = _overlap_island_run(
+        syncer_binary, delta_dir, (*STREAMED, "--rl-sync-bcast-delta-full-every", "3"),
+        DTYPE_F32 | DTYPE_FLAG_BCAST_DELTA, sweeps, progress)
+    assert exact_redials == delta_redials == 0, "no DownlinkResync expected"
+    for fid in range(FRAGMENTS):
+        want = init[fid] + sum(torch.tensor(progress[(s, fid)]) for s in range(1, sweeps + 1))
+        # (anchor + p) - anchor in f32 is p up to an ulp of the anchor: no bf16 error.
+        assert torch.allclose(exact[fid], want, rtol=0, atol=1e-5), fid
+        assert torch.allclose(delta[fid], want, rtol=0, atol=1e-5), fid
+        for sweep, anchors in exact_anchors.items():
+            got = delta_anchors[sweep][fid]
+            # one bf16 rounding of (G - previous anchor); |G - previous anchor| < 4
+            assert torch.allclose(got, anchors[fid], rtol=0, atol=4.0 / 256), (sweep, fid)
+    assert any(not torch.equal(delta_anchors[s][f], exact_anchors[s][f])
+               for s in delta_anchors for f in range(FRAGMENTS)), "the downlink must actually round"
