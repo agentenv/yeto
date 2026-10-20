@@ -32,8 +32,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import shutil
 import tempfile
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -236,16 +238,41 @@ class EngineReleaseLoader:
         return engines
 
 
-def run_sampler_island(miles_args: Any, *, environ: Any = None) -> int:
-    """Run the sampler island to its data end; returns the rounds generated."""
+LEAVE_HOLD_S = 300.0  # after a reclaim LEAVE: wait this long for the cloud to stop the container
+
+
+def run_sampler_island(miles_args: Any, *, environ: Any = None,
+                       sleep: Callable[[float], None] = time.sleep) -> int:
+    """Run the sampler island to its data end; returns the rounds generated.
+
+    A replacement incarnation (S25 C1) continues after the newest round its
+    island has in the buffer (``sampler_resume``), loads the newest policy
+    release before its first round, and writes ``rl_sampler_join`` / a member
+    record. On the reclaim marker (Modal SIGINT/SIGTERM, written by the Modal
+    runner) it starts no new round, writes no more groups, writes
+    ``rl_sampler_leave`` with reason PREEMPTED and waits for the cloud to stop
+    the container (at most :data:`LEAVE_HOLD_S`)."""
     from miles.ray.placement_group import create_rollout_components
     from miles.utils.async_utils import Disposer
     from miles.utils.orchestration_utils import init_orchestration_script
 
+    from yeto.rl.elastic_client import LeaveReason
     from yeto.rl.engine.events import append_tape_event
+    from yeto.rl.engine.resume import store_for
     from yeto.rl.engine.sampler_loop import SamplerLoop
+    from yeto.rl.engine.sampler_resume import (
+        JOIN_EVENT,
+        LEAVE_EVENT,
+        Member,
+        new_incarnation,
+        reclaim_marker,
+        reclaim_requested,
+        resume_point,
+        write_member,
+    )
 
     from . import LoopRunner
+    from .buffer_rollout import INCARNATION_ENV, SAMPLER_ID_ENV
     from .entry import connect_island_ray
     from .rollout import RayMetadataSink, _release
 
@@ -254,9 +281,22 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None) -> int:
         raise SampleBufferRolloutError("run_sampler_island needs --rl-sample-role sampler")
     if not getattr(miles_args, "debug_rollout_only", False):
         raise SampleBufferRolloutError("a sampler island runs Miles with --debug-rollout-only")
+    env = os.environ if environ is None else environ
 
     def emit(event: str, **fields: Any) -> None:
         append_tape_event(miles_args, {"event": event, **fields})
+
+    # one incarnation id for this process and its rollout workers (forwarded to Ray)
+    sampler_id = env.get(SAMPLER_ID_ENV)
+    if not sampler_id:
+        raise SampleBufferRolloutError(f"{SAMPLER_ID_ENV} is not set")
+    incarnation = env[INCARNATION_ENV] = new_incarnation()
+    reclaim_marker(env).unlink(missing_ok=True)  # a restarted machine keeps its /tmp
+    buffer = open_buffer(env, sampler=True)
+    resume = resume_point(buffer.entries(), sampler_id)
+    store = store_for(config.store, environ=environ)
+    member = Member(sampler=sampler_id, incarnation=incarnation, joined_at=time.time(),
+                    resume=resume.fields())
 
     connect_island_ray(miles_args=miles_args)
     # The rollout process's metadata hook pushes each round's group records to this
@@ -280,7 +320,16 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None) -> int:
         _release(await executor.get(rollout_id))  # the rollout function wrote the groups
         metadata.discard()  # the groups are in the buffer; nobody here reads the records
 
+    def leave(reason: LeaveReason, rounds: int, **detail: Any) -> None:
+        member.left_at, member.leave_reason, member.rounds = time.time(), reason.name, rounds
+        member.policy_version = follower.version
+        member.detail = detail
+        emit(LEAVE_EVENT, sampler=sampler_id, incarnation=incarnation, reason=reason.name,
+             rounds=rounds, policy_version=follower.version, buffer_end=len(buffer), **detail)
+        write_member(store, member)
+
     error: BaseException | None = None
+    follower = None
     try:
         controller, executor = runner.run(init())
         lora = lora_mode(miles_args)
@@ -289,19 +338,41 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None) -> int:
             loader.stamp(BASE_POLICY_VERSION)  # until the first release is loaded
         follower = PolicyFollower(release_store(config, environ), loader,
                                   version=BASE_POLICY_VERSION)
+        reclaimed = lambda: reclaim_requested(env)  # noqa: E731
         loop = SamplerLoop(
-            follower=follower, buffer=open_buffer(environ, sampler=True), emit=emit,
+            follower=follower, buffer=buffer, emit=emit,
             generate=lambda rollout_id: runner.run(generate(rollout_id)),
             num_rollouts=int(miles_args.num_rollout),
             max_backlog_groups=int(config.max_backlog_groups),
-            min_round_s=config.min_round_s, require_release=lora,
+            min_round_s=config.min_round_s, require_release=lora, should_stop=reclaimed,
             loaded_fields=lambda: {"served_checksum": loader.last_checksum,
                                    "probe": loader.last_probe})
+        latest = follower.releases.latest()
+        emit(JOIN_EVENT, sampler=sampler_id, incarnation=incarnation,
+             latest_release=None if latest is None else {"seq": latest.seq, "policy_version": latest.version},
+             **resume.fields())
+        write_member(store, member)
         emit("rl_sampler_start", store=config.store, num_rollouts=int(miles_args.num_rollout),
-             max_backlog_groups=int(config.max_backlog_groups), weights=loader.weights)
-        return loop.run()
+             max_backlog_groups=int(config.max_backlog_groups), weights=loader.weights,
+             start_rollout_id=resume.next_rollout_id)
+        if buffer.data_ended:  # an earlier incarnation finished and marked the data end
+            rounds = 0
+        else:
+            rounds = loop.run(start=resume.next_rollout_id)
+        if reclaimed():
+            leave(LeaveReason.PREEMPTED, rounds)
+            _hold_until_stopped(sleep, LEAVE_HOLD_S)
+        else:
+            leave(LeaveReason.FINISHED, rounds)
+        return rounds
     except BaseException as exc:
         error = exc
+        if follower is not None:
+            try:
+                leave(LeaveReason.PREEMPTED if reclaim_requested(env) else LeaveReason.INFRA_FAILED,
+                      -1, error=f"{type(exc).__name__}: {exc}"[:300])
+            except Exception:  # noqa: BLE001 - the original error is the one to report
+                pass
         raise
     finally:
         try:
@@ -309,6 +380,15 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None) -> int:
                                           None if error is None else error.__traceback__))
         finally:
             runner.close()
+
+
+def _hold_until_stopped(sleep: Callable[[float], None], hold_s: float) -> None:
+    """After a reclaim LEAVE the process stays up until the cloud stops the
+    container: an early clean exit could end the cloud's input as finished
+    instead of letting the cloud run the island again."""
+    print(f"[sampler-island] reclaimed: waiting up to {hold_s:g} s for the container to stop",
+          flush=True)
+    sleep(float(hold_s))
 
 
 # ---------------------------------------------------------------------- trainer side

@@ -156,7 +156,7 @@ def test_each_sampler_writes_its_own_shard_and_the_trainer_merges_them():
     assert len(again) == 4
     # a reader that does not merge (the head) sees the merged index only
     assert len(FileSampleBuffer(objects, batch_size=1)) == 4
-    with pytest.raises(SampleBufferError, match="only the index of an object store merges"):
+    with pytest.raises(SampleBufferError, match="a shard writer does not merge"):
         FileSampleBuffer(objects, batch_size=1, index=shard_index("x"), merge_shards=True)
 
 
