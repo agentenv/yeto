@@ -372,16 +372,19 @@ def test_ignore_list_reaches_the_sglang_server_process(dense, tmp_path, monkeypa
     is ``{**os.environ, **envs}``. The actor's os.environ holds the job runtime_env entries
     (connect_island_ray, tested above). This runs Miles' own function and reads the
     variable from the started process."""
-    import importlib
+    import importlib.util
     import sys
 
     from yeto.rl.adapters.miles.entry import rollout_quant_env
 
-    monkeypatch.syspath_prepend(str(MILES_NEXT))
     monkeypatch.setenv("PYTHONPATH", f"{MILES_NEXT}:{os.environ.get('PYTHONPATH', '')}")
     for key, value in rollout_quant_env(SimpleNamespace(yeto_rollout_quant_tier=1, hf_checkpoint=str(dense))).items():
         monkeypatch.setenv(key, value)  # what the Ray worker's environment holds
-    process_utils = importlib.import_module("miles.utils.workers.process_utils")
+    # loaded from its file, so no real ``miles`` package lands in sys.modules (other tests fake it)
+    spec = importlib.util.spec_from_file_location("miles_process_utils",
+                                                  MILES_NEXT / "miles/utils/workers/process_utils.py")
+    process_utils = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(process_utils)
     out = tmp_path / "seen.txt"
     cmd = f"exec {sys.executable} -c \"import os; open('{out}', 'w').write(os.environ['SGLANG_FP8_IGNORED_LAYERS'])\""
     process = process_utils.launch_bound_subprocess(["/bin/sh", "-c", cmd], envs={})
