@@ -142,14 +142,18 @@ class GroupWriter:
         self.sampler_id = str(sampler_id)
 
     def write(self, samples: Sequence[Mapping[str, Any]], *, group_key: str,
-              provenance: Mapping[str, str] | None = None) -> SampleIndexEntry:
-        """``provenance``: the sampler's source record for the index entry (S25 N2.4)."""
+              provenance: Mapping[str, str] | None = None,
+              sampler_round: Mapping[str, Any] | None = None) -> SampleIndexEntry:
+        """``provenance``: the sampler's source record for the index entry (S25 N2.4);
+        ``sampler_round``: the round record a replacement sampler resumes from
+        (``sampler_resume.SamplerRound.record()``, S25 C1)."""
         behavior_version, tokens = group_entry_fields(samples)
         sample_id = f"{self.sampler_id}-{group_key}"
         ref = self.buffer.write_payload(sample_id, encode_group(samples))
         entry = SampleIndexEntry(sample_id=sample_id, behavior_version=behavior_version,
                                  payload_ref=ref, tokens=tokens,
-                                 provenance=None if provenance is None else dict(provenance))
+                                 provenance=None if provenance is None else dict(provenance),
+                                 sampler_round=None if sampler_round is None else dict(sampler_round))
         self.buffer.append(entry)
         return entry
 
