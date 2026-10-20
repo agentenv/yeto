@@ -195,11 +195,12 @@ def _island_task(task_factory, args, spec, m, num_learners, syncer_addr, overrid
 
 
 def _resume_marker_env(iargs, cloud: str | None) -> dict[str, str]:
-    """A resumable island on Modal (``--rl-resume-store``): the reclaim marker path
+    """A resumable island on Modal (``--rl-checkpoint-store`` without
+    ``--rl-elastic``: the island's ``--rl-resume-store``): the reclaim marker path
     (S26 E9.1). Modal signals only the container's main process (the runner), so
     the runner writes the marker and the driver's watcher thread -- in a Ray actor
     on verl -- writes the store's preemption notice."""
-    if cloud != "modal" or not getattr(iargs, "rl_resume_store", None):
+    if cloud != "modal" or not getattr(iargs, "rl_checkpoint_store", None) or getattr(iargs, "rl_elastic", False):
         return {}
     from .rl.engine.sampler_resume import DEFAULT_RECLAIM_MARKER, RECLAIM_MARKER_ENV
 

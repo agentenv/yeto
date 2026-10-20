@@ -87,10 +87,13 @@ def test_unreadable_marker_still_writes_the_notice(tmp_path):
 def test_launcher_sets_the_marker_path_on_resumable_modal_islands_only():
     from yeto.launcher import _resume_marker_env
 
-    resumable = SimpleNamespace(rl_resume_store="modal-volume://v/run")
+    resumable = SimpleNamespace(rl_checkpoint_store="modal-volume://v/run", rl_elastic=False)
     assert _resume_marker_env(resumable, "modal") == {RECLAIM_MARKER_ENV: "/tmp/yeto-reclaim-requested"}
     assert _resume_marker_env(resumable, "nebius") == {}
-    assert _resume_marker_env(SimpleNamespace(rl_resume_store=None), "modal") == {}
+    assert _resume_marker_env(SimpleNamespace(rl_checkpoint_store=None), "modal") == {}
+    # --rl-elastic keeps its own checkpoint store and LEAVE path
+    assert _resume_marker_env(SimpleNamespace(rl_checkpoint_store="modal-volume://v/run", rl_elastic=True),
+                              "modal") == {}
 
 
 def test_runner_turns_the_signal_into_the_marker_when_the_launcher_set_it():
