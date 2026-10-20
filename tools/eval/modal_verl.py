@@ -400,7 +400,7 @@ def build_app(run: str, cfg: dict):
     sampler_image = (modal.Image.from_registry(MILES_NEXT_IMAGE.removeprefix("docker:"))
                      .env({"HOME": "/root", "PYTHONUNBUFFERED": "1"})
                      .add_local_dir(str(REPO), WORKDIR, copy=False, ignore=ignore))
-    verl_image = (modal_image(modal).env({"PYTHONUNBUFFERED": "1", "PYTHONPATH": WORKDIR})
+    verl_image = (modal_image(modal).env({"PYTHONUNBUFFERED": "1"})
                   .add_local_dir(str(REPO), WORKDIR, copy=False, ignore=ignore))
     cpu_image = modal.Image.debian_slim(python_version="3.12")
     app = modal.App(APP_PREFIX + run)
@@ -500,6 +500,8 @@ def run(cell, run_id: str, run_dir: Path) -> dict[str, Any]:
 
     # one detached app for the whole run: a killed driver never cancels a spawned call
     with modal.enable_output(), app.run(detach=True):
+        app_id = app.app_id  # an ephemeral app is stopped by id (`modal app stop <name>` misses it)
+        (run_dir / "app_id.txt").write_text(f"{app_id}\n")
         calls: dict[str, Any] = {}
         if cfg["kind"] == "island":  # c (control) beside a; b after a, from a's store
             for phase in [p for p in cfg["phases"] if p != "b"]:
@@ -522,7 +524,7 @@ def run(cell, run_id: str, run_dir: Path) -> dict[str, Any]:
                                          log)["collect"]
     wall = time.time() - began
     pulled = _modal_cli("volume", "get", "--force", RESULTS_VOLUME, run_id, str(raw), timeout=1800)
-    stopped = _modal_cli("app", "stop", "-y", APP_PREFIX + run_id, timeout=120)  # only our own app
+    stopped = _modal_cli("app", "stop", "-y", app_id, timeout=120)  # only our own app
     summary = {"calls": results, "reclaim": reclaim, "wall_s": round(wall, 1),
                "pull_rc": pulled.returncode, "stop_rc": stopped.returncode}
     (run_dir / "driver.json").write_text(json.dumps(summary, indent=1, default=str))
