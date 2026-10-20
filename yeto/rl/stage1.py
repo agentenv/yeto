@@ -655,6 +655,9 @@ def trainer_island_spec(plan: Stage1Plan, out: Expanded, trainers: Sequence[Node
         "if [ \"$SKYPILOT_NODE_RANK\" = 0 ]; then\n"
         f"  ray start --head --port={RAY_PORT} --node-ip-address=\"$me\" --num-gpus=\"$SKYPILOT_NUM_GPUS_PER_NODE\"\n"
         f"  {join}\n"
+        # the island forwards its own environment (sample buffer, store) to the Ray
+        # actors only when RAY_ADDRESS names the cluster (entry.connect_island_ray)
+        f"  export RAY_ADDRESS=\"$me:{RAY_PORT}\"\n"
         f"  exec {island}\n"
         "fi\n"
         f"exec ray start --address=\"$head:{RAY_PORT}\" --node-ip-address=\"$me\" "

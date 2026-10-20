@@ -259,7 +259,9 @@ def trainer_island(tag: str, stop_after_rounds: int | None = None) -> int:
     with open(log / "requant.log", "w", encoding="utf-8") as rq, open(log / "trainer.log", "w", encoding="utf-8") as f:
         requant = subprocess.Popen(plan["requant"]["loop_argv"], env=env, cwd=WORKDIR, stdout=rq,
                                    stderr=subprocess.STDOUT)
-        rc = subprocess.run(island, env=env, cwd=WORKDIR, stdout=f, stderr=subprocess.STDOUT).returncode
+        # as the stage-1 node script does: the island forwards its env to the Ray actors
+        rc = subprocess.run(island, env={**env, "RAY_ADDRESS": "127.0.0.1:6379"}, cwd=WORKDIR, stdout=f,
+                            stderr=subprocess.STDOUT).returncode
         requant.terminate()
         try:
             requant.wait(timeout=60)
