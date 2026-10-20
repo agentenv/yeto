@@ -480,10 +480,16 @@ def ssh_binding(args: Any, island: TrainerIsland, *, journal_dir: Path, files: A
 
 
 def requant_argv(store: str, template: str, *, recipe: str | None = None, awq_scales: str | None = None,
-                 python: str = "python") -> tuple[str, ...]:
+                 python: str = "python", frozen_base: str | None = None,
+                 frozen_pattern: str | None = None) -> tuple[str, ...]:
     """The one-pass argv of :mod:`yeto.rl.quant.release` (R2 with ``recipe`` and
-    ``awq_scales``; R1 without). The start script adds ``--loop`` for the side process."""
+    ``awq_scales``; R1 without; ``frozen_base``/``frozen_pattern``: untrained
+    tensors the release omits). The start script adds ``--loop`` for the side process."""
     argv = [python, "-m", "yeto.rl.quant.release", "--store", store, "--template", template]
+    if bool(frozen_base) != bool(frozen_pattern):
+        raise SshIslandError("give both frozen_base and frozen_pattern, or neither")
+    if frozen_base:
+        argv += ["--frozen-base", frozen_base, "--frozen-pattern", frozen_pattern]
     if recipe or awq_scales:
         if not (recipe and awq_scales):
             raise SshIslandError("give both recipe and awq_scales (R2), or neither (R1)")

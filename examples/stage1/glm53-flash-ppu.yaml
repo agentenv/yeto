@@ -37,6 +37,7 @@ model:
     origin: modal-volume://apex-w4a8-full/source/cecb5eeb9c6b32404a0dd930df81de2c239bdd84
     staged: oss://oss-pai-ircyeaqtnfjw11wby2-cn-wulanchabu/yeto/models/apex-flash-1-bf16-cecb5ee/
     local_dir: /data/models/apex-flash-1-bf16-cecb5ee
+    torch_dist: /data/models/apex-flash-1-bf16-cecb5ee_torch_dist   # Miles converter output (convert step)
   sampler_initial:                     # round 0: the HF MXFP4 export, not our re-quantizer
     repo: yetalabs/apex-flash-1-mxfp4-experts
     revision: 70e86a0

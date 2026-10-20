@@ -1,0 +1,31 @@
+# Stage-1 mini rehearsal on Modal (S25 T-G1): one trainer container with
+# 2 x H100 and one sampler container with 1 x H100. "host" is a label only:
+# the Modal driver (tools/probes/s25_g1/modal_app.py) starts the containers,
+# not SSH. /data/models and /data/store are Modal Volumes in each container.
+nodes:
+  - name: modal-trainer
+    host: modal-trainer
+    address: 127.0.0.1
+    device_family: cuda
+    cpu_arch: x86_64
+    card: H100
+    cards_per_node: 2
+    hbm_gib: 80
+    host_memory_gib: 400
+    mounts: {/data: /data}
+    image: ghcr.io/michaellchung/yeto-miles-ports@sha256:5b9dc2a9e6e315d73dabfbc6faae428b59cc01aabec6189645a5c8c80d6e3721
+    runtime: docker
+    roles: [trainer]
+  - name: modal-sampler
+    host: modal-sampler
+    address: 127.0.0.1
+    device_family: cuda
+    cpu_arch: x86_64
+    card: H100
+    cards_per_node: 1
+    hbm_gib: 80
+    host_memory_gib: 100
+    mounts: {/data: /data}
+    image: ghcr.io/michaellchung/yeto-miles-ports@sha256:5b9dc2a9e6e315d73dabfbc6faae428b59cc01aabec6189645a5c8c80d6e3721
+    runtime: docker
+    roles: [sampler]

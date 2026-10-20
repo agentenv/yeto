@@ -170,11 +170,16 @@ def build_prompts(spec: Mapping[str, Any]) -> JsonlPrompts:
 
 def miles_reward(score: Callable[..., Any]) -> Reward:
     """A Miles reward (``async score(args, sample)``) as an engine-sampler reward:
-    the sample carries ``response``, ``label`` and a ``metadata`` dict."""
+    the sample carries ``response``, ``label``, a ``metadata`` dict, ``tokens``
+    (prompt ids when the engine gave them, then the response ids) and
+    ``response_length``, as a Miles ``Sample`` does."""
 
     def reward(item: PromptItem, completion: Completion) -> float:
+        response = list(getattr(completion, "token_ids", ()))
+        prompt_ids = list(getattr(completion, "prompt_token_ids", ()))
         sample = types.SimpleNamespace(prompt=item.prompt, response=completion.text, label=item.label,
-                                       metadata=dict(item.metadata))
+                                       metadata=dict(item.metadata), tokens=prompt_ids + response,
+                                       response_length=len(response))
         value = score(None, sample)
         return float(asyncio.run(value) if inspect.isawaitable(value) else value)
 

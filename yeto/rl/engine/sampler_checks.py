@@ -149,6 +149,9 @@ class PostLoadChecks:
     allow_unverified_count: bool = False
     fixed_prompts: Sequence[FixedPrompt] = GSM8K_FIXED_PROMPTS
     fixed_max_tokens: int = 2048
+    # False only for a model that cannot answer (a cut-down rehearsal model): a missing
+    # answer is recorded, the other fixed-prompt problems still fail the check
+    require_fixed_answers: bool = True
     forbidden_markers: Sequence[str] = ()
     max_unreadable_share: float = 0.05
     probe_pairs: Sequence[tuple[str, str]] | None = None  # None: fixed prompts + their answers
@@ -193,15 +196,17 @@ class PostLoadChecks:
             problems = []
             if not text.strip():
                 problems.append("empty")
-            if not _contains_answer(text, item.answer):
+            answered = _contains_answer(text, item.answer)
+            if not answered and self.require_fixed_answers:
                 problems.append("answer missing")
             if _unreadable_share(text) > self.max_unreadable_share:
                 problems.append("unreadable characters")
             problems += [f"marker {m!r}" for m in self.forbidden_markers if m in text]
-            answers.append({"answer": item.answer, "ok": not problems, "problems": problems,
-                            "text": text[:160]})
+            answers.append({"answer": item.answer, "answered": answered, "ok": not problems,
+                            "problems": problems, "text": text[:160]})
         return {"name": "fixed_prompts", "passed": all(a["ok"] for a in answers)
-                and len(groups) == len(self.fixed_prompts), "answers": answers}
+                and len(groups) == len(self.fixed_prompts), "answers": answers,
+                "answers_required": bool(self.require_fixed_answers)}
 
     def logprob_probe(self, engine: SamplerEngine) -> dict[str, Any]:
         if not self.pairs():  # no fixed prompts and no probe pairs: nothing to score or compare

@@ -778,6 +778,13 @@ def resolve_rl_run_config(
     elif recipe == RECIPE_GLM5_NEXT:
         if parameter_mode != "full":
             raise ValueError("the glm5_next recipe is full-parameter only")
+        if getattr(args, "megatron_ref_load", None) is None:
+            # Miles loads an HF checkpoint only through Megatron-Bridge, which has no
+            # glm5_next bridge (Modal run-7): train from the converted torch_dist checkpoint
+            raise ValueError(
+                "the glm5_next recipe needs --megatron-ref-load <dir> (Miles "
+                "tools/convert_hf_to_torch_dist.py output; Megatron-Bridge cannot load glm5_next)"
+            )
         # Megatron picks the backend (Miles run_glm5_3_flash.py passes none)
         recipe_name, attention_backend = RECIPE_GLM5_NEXT, "auto"
     elif fn_variant is not None:

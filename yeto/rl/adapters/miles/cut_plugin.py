@@ -165,8 +165,13 @@ def _state_dicts(optimizer: Any) -> list[Any]:
         if obj is None or id(obj) in seen:
             continue
         seen.add(id(obj))
-        stack.extend(getattr(obj, "chained_optimizers", None) or ())
-        stack.append(getattr(obj, "optimizer", None))
+        chained = getattr(obj, "chained_optimizers", None)
+        if chained:
+            # Megatron's ChainedOptimizer.optimizer asserts a single member (an MoE model
+            # chains the dense and the expert optimizer; Modal run-14 failed the cut here)
+            stack.extend(chained)
+        else:
+            stack.append(getattr(obj, "optimizer", None))
         state = getattr(obj, "state", None)
         if isinstance(state, Mapping):
             out.append(state)

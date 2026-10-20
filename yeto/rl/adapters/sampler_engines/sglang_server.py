@@ -6,7 +6,10 @@ Vendor facts handled here (A-INF §3; none verified on a PPU by this code):
 * item 1: SGLang's ``load_weights`` does not map ``weight_packed`` to
   ``weight``; expert weights stored as ``weight_packed`` are skipped without an
   error. A release whose index names ``*.weight_packed`` is refused unless the
-  image carries the rename patch (``renames_weight_packed=True``);
+  image carries the rename patch (``renames_weight_packed=True``). The yeto
+  patch (:mod:`.sglang_load_report`, applied to the image's model file) renames
+  when ``YETO_SGLANG_RENAME_WEIGHT_PACKED=1`` and, with ``load_report_dir``,
+  reports the expert matrices each rank loaded (post-load check 1);
 * item 5: an MXFP4 export with ``quantization_config.format == "dense"``
   (llmcompressor 0.14) is read wrongly; ``dense`` is refused for every
   quantized scheme;
@@ -46,6 +49,7 @@ from yeto.rl.engine.sampler_engine import (
     SamplingParams,
 )
 
+from . import sglang_load_report
 from .server import ServerConfig, ServerEngine
 
 TOPOLOGY_TP8 = "tp8"
@@ -70,6 +74,8 @@ class SGLangOptions:
     renames_weight_packed: bool = False  # the image patches the weight_packed -> weight map
     warmup_batch_sizes: tuple[int, ...] = ()
     served_model_name: str = "yeto-policy"
+    # the yeto load-report patch writes each rank's loaded expert count here (None: no report)
+    load_report_dir: str | None = None
 
 
 def _finish(meta: dict[str, Any]) -> str:
@@ -119,7 +125,26 @@ class SGLangServerEngine(ServerEngine):
         env = super().env()
         if self.config.precision == "mxfp4":
             env["MX_PATCH"] = "1"  # item 7
+        if self.options.renames_weight_packed:
+            env[sglang_load_report.RENAME_ENV] = "1"
+        if self.options.load_report_dir:
+            env[sglang_load_report.REPORT_DIR_ENV] = str(self.options.load_report_dir)
         return env
+
+    def start(self, release_dir: Path | None, version: int):
+        if self.options.load_report_dir:  # reports of an earlier server must not count for this one
+            sglang_load_report.clear_reports(self.options.load_report_dir)
+        return super().start(release_dir, version)
+
+    def loaded_expert_matrices(self) -> int | None:
+        if not self.options.load_report_dir:
+            return None
+        report = sglang_load_report.read_reports(self.options.load_report_dir)
+        if report is None:
+            return None
+        if report["ranks"] < int(self.options.tp):
+            return 0  # a rank that did not report loaded nothing we can vouch for
+        return int(report["expert_matrices"])
 
     def preflight(self, model_dir: Path) -> None:
         super().preflight(model_dir)
