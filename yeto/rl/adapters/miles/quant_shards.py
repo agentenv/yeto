@@ -19,9 +19,16 @@ exactly one rank per replica group passes those with :func:`hf_slices`, which
 renames them to the checkpoint names (``model.language_model.layers.*``; module doc of
 :mod:`yeto.rl.quant.shards`, "Ownership").
 
+Both functions hand host (CPU) copies to the quantizer: the CPU path is the one
+checked byte for byte against the single-process converter (GPU T-G3, 2026-10-20);
+a GPU expert slice with W4A8 AWQ failed there (factors on the host), and GPU
+quantization bytes were not compared for W4A8.
+
 Limits (explicit errors): expert tensor parallelism must be 1 (a column split of
 ``linear_fc2`` would cut the W4A8 per-row scale). Status: CPU tests with
-synthetic Megatron names; not run inside Miles.
+synthetic Megatron names; on 2xH100 inside a real Miles/Megatron glm5_next
+(TP2, EP2; TE grouped and local sequential experts) the merged W4A8 (R2 AWQ)
+and MXFP4 outputs equal the single-process output byte for byte (T-G3).
 """
 
 from __future__ import annotations
@@ -61,7 +68,7 @@ def megatron_expert_slices(named_params: Iterable[tuple[str, torch.Tensor]], *, 
             raise ValueError(f"{name}: local expert {local} >= num_local_experts {num_local_experts}")
         expert = int(ep_rank) * int(num_local_experts) + local
         prefix = f"{hf_layer_prefix}{int(layer_offset) + int(match['layer'])}.mlp.experts"
-        weight = tensor.detach()
+        weight = tensor.detach().cpu()
         if (match["fc"] or match["fc2"]) == "1":
             for hf_name, part in split_gate_up(prefix, expert, weight):
                 yield SourceSlice(hf_name, part)
@@ -86,4 +93,4 @@ def checkpoint_name(name: str) -> str:
 def hf_slices(named_tensors: Iterable[tuple[str, torch.Tensor]]) -> Iterator[SourceSlice]:
     """Whole tensors from Miles ``convert_to_hf``, renamed to checkpoint names (:func:`checkpoint_name`)."""
     for name, tensor in named_tensors:
-        yield SourceSlice(checkpoint_name(name), tensor.detach())
+        yield SourceSlice(checkpoint_name(name), tensor.detach().cpu())
