@@ -28,7 +28,8 @@ This module does not import Miles (it is tested without it).
 
 Limits (first implementation):
 
-* one trainer reads a buffer; on a shared directory (``index.jsonl``) one
+* one trainer reads a buffer, or synced trainers read one lane each
+  (:mod:`yeto.rl.engine.merged_release`); on a shared directory (``index.jsonl``) one
   sampler island writes it (``flock`` holds only on one host);
 * the buffer lives in the checkpoint store (:func:`~yeto.rl.engine.resume.store_for`
   at ``BUFFER_ROOT_ENV``): a Modal Volume or a shared directory that both islands
@@ -59,6 +60,7 @@ from yeto.rl.engine.buffer_payload import (  # noqa: F401
     encode_group,
     group_entry_fields,
 )
+from yeto.rl.engine.merged_release import LANE_ENV, BufferLane, LaneCursorLog, gate_version
 
 SAMPLER, TRAINER, CONVERTIBLE = "sampler", "trainer", "convertible"
 ROLES = (SAMPLER, TRAINER, CONVERTIBLE)
@@ -71,7 +73,8 @@ MAX_POLICY_AGE_ENV = "YETO_SAMPLE_BUFFER_MAX_POLICY_AGE"
 SHARD_ENV = "YETO_SAMPLE_BUFFER_SHARD"  # convertible node: its own shard of the index
 # the rollout functions run in Ray workers, which inherit the raylet's environment:
 # connect_island_ray forwards these to every worker
-ISLAND_ENVS = (BUFFER_ROOT_ENV, SAMPLER_ID_ENV, WAIT_ENV, POLL_ENV, MAX_POLICY_AGE_ENV, SHARD_ENV)
+ISLAND_ENVS = (BUFFER_ROOT_ENV, SAMPLER_ID_ENV, WAIT_ENV, POLL_ENV, MAX_POLICY_AGE_ENV, SHARD_ENV,
+               LANE_ENV)
 
 DEFAULT_WAIT_S = 3600.0
 DEFAULT_POLL_S = 2.0
@@ -111,10 +114,10 @@ def rollout_argv(role: str | None, *, max_policy_age: int, fully_async: bool = F
 
 def island_env(role: str, *, store_root: str, sampler_id: str | None = None,
                max_policy_age: int | None = None, wait_s: float | None = None,
-               shard: str | None = None) -> dict[str, str]:
+               shard: str | None = None, lane: BufferLane | None = None) -> dict[str, str]:
     """The environment the launch layer exports on the island (read in the rollout
     process). A convertible node writes like a sampler, into its own ``shard`` of
-    the index, and reads like a trainer."""
+    the index, and reads like a trainer. ``lane``: a synced trainer's buffer lane."""
     if role not in ROLES:
         raise ValueError(f"sample buffer role {role!r}: expected one of {ROLES}")
     env = {BUFFER_ROOT_ENV: str(store_root)}
@@ -132,6 +135,10 @@ def island_env(role: str, *, store_root: str, sampler_id: str | None = None,
         env[MAX_POLICY_AGE_ENV] = str(int(max_policy_age))
         if wait_s is not None:
             env[WAIT_ENV] = f"{float(wait_s):g}"
+    if lane is not None:
+        if role != TRAINER:
+            raise ValueError("only a trainer reads a buffer lane")
+        env[LANE_ENV] = lane.env()
     return env
 
 
@@ -160,9 +167,22 @@ def open_buffer(environ: Mapping[str, str] | None = None, *, batch_size: int = 1
             if not shard:
                 raise SampleBufferRolloutError(f"{SAMPLER_ID_ENV} is not set (the sampler's buffer shard)")
         merge = reader
+    lane = BufferLane.parse(env.get(LANE_ENV)) if reader else None
     return FileSampleBuffer(store, batch_size=batch_size,
                             index=INDEX if shard is None else shard_index(shard),
-                            create_index=create_index, merge_shards=merge)
+                            create_index=create_index, merge_shards=merge and lane is None,
+                            lane=lane)
+
+
+def open_lane_log(buffer: Any) -> LaneCursorLog | None:
+    """The lane cursor log of a lane reader (None for a single reader)."""
+    lane = getattr(buffer, "lane", None)
+    if lane is None:
+        return None
+    from yeto.rl.engine.sample_buffer import BUFFER_DIR
+
+    store = buffer.store
+    return LaneCursorLog(f"{store.root}/{BUFFER_DIR}", lane, commit=store.commit)
 
 
 def renumber_group(samples: Sequence[dict[str, Any]], *, position: int,
@@ -215,7 +235,10 @@ class BatchReader:
     def __init__(self, buffer: Any, *, max_policy_age: int, wait_s: float = DEFAULT_WAIT_S,
                  poll_s: float = DEFAULT_POLL_S, consumer: str = TRAINER_CONSUMER,
                  clock: Callable[[], float] = time.monotonic,
-                 sleep: Callable[[float], None] = time.sleep) -> None:
+                 sleep: Callable[[float], None] = time.sleep,
+                 cursor_log: LaneCursorLog | None = None) -> None:
+        """``cursor_log``: a synced trainer's lane cursor (:mod:`yeto.rl.engine.merged_release`):
+        the reader continues after its last line and appends one per round."""
         if int(max_policy_age) < 1:
             raise ValueError("max_policy_age must be >= 1")
         self.buffer = buffer
@@ -226,6 +249,11 @@ class BatchReader:
         self.clock = clock
         self.sleep = sleep
         self._ends: dict[int, int] = {}  # rollout id -> buffer position after its round
+        # a synced trainer gates on the merged version it last published (set_gate_version)
+        self.gate_version: int | None = None
+        self.cursor_log = cursor_log
+        if cursor_log is not None:
+            self.buffer.reset_to(cursor_log.last_cursor())
 
     def take(self, rollout_id: int, groups: int, *, current_version: int | None
              ) -> tuple[list[tuple[int, list[dict[str, Any]]]], TakeReport]:
@@ -240,6 +268,7 @@ class BatchReader:
         out: list[tuple[int, list[dict[str, Any]]]] = []
         versions: dict[int, int] = {}
         stale = 0
+        current_version = gate_version(current_version, self.gate_version)
         floor = None if current_version is None else int(current_version) - self.max_policy_age
         while len(out) < groups:
             selected = self.buffer.select(self.consumer, groups - len(out))
@@ -264,6 +293,8 @@ class BatchReader:
             raise SampleBufferRolloutError(f"rollout {rollout_id}: the sample buffer ended "
                                            f"with no trainable group (position {end})")
         self._ends[rollout_id] = end
+        if self.cursor_log is not None:
+            self.cursor_log.append(rollout_id, [position for position, _ in out], end)
         return out, TakeReport(rollout_id=rollout_id, groups=len(out), stale_groups=stale,
                                start=start, end=end, behavior_versions=dict(sorted(versions.items())),
                                wait_s=round(self.clock() - started, 3))
@@ -338,6 +369,17 @@ def executor_read_shards(_executor: Any) -> dict[str, int] | None:
     if reader is None:
         return None
     return reader.buffer.shard_positions(reader.buffer.read_cursor) or None
+
+
+def executor_set_gate_version(_executor: Any, version: int) -> int | None:
+    """Runs INSIDE the rollout executor actor: a synced trainer's merged version,
+    the version its ``max_policy_age`` gate compares against. Returns the previous
+    one (None before the reader exists: nothing to set)."""
+    reader = _ACTIVE.get(TRAINER)
+    if reader is None:
+        return None
+    previous, reader.gate_version = reader.gate_version, int(version)
+    return previous
 
 
 def executor_reset(_executor: Any, watermark: int) -> int:

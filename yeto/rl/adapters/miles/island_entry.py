@@ -192,6 +192,7 @@ def _check_ports_infra_switches(args) -> None:
     if getattr(args, "rl_elastic_declare_cells", False) and not getattr(args, "rl_elastic", False):
         raise ValueError("--rl-elastic-declare-cells needs --rl-elastic")
     _check_resume_switches(args)
+    _check_sample_store(args)
     if not getattr(args, "rl_elastic", False):
         if given:
             raise ValueError(", ".join(given) + " need --rl-elastic")
@@ -208,6 +209,25 @@ def _check_ports_infra_switches(args) -> None:
         value = getattr(args, name, None)
         if value is not None and not value > 0:
             raise ValueError(f"--{name.replace('_', '-')} must be positive")
+
+
+def _check_sample_store(args) -> None:
+    """S25 C3: ``--rl-sample-store`` / ``--rl-sample-lanes`` belong to a synced
+    trainer island (``yeto.rl.engine.merged_release``)."""
+    from yeto.rl.engine.sample_roles import buffer_lane, is_synced_trainer
+
+    store, lanes = getattr(args, "rl_sample_store", None), getattr(args, "rl_sample_lanes", None)
+    if not is_synced_trainer(args):
+        if store is not None or lanes is not None:
+            raise ValueError("--rl-sample-store / --rl-sample-lanes need --rl-sample-role trainer "
+                             "with a syncer (no --rl-single-island-no-sync)")
+        return
+    if not store or lanes is None or int(lanes) < 2:
+        raise ValueError("a synced trainer island needs --rl-sample-store and --rl-sample-lanes "
+                         ">= 2 (the launcher forwards both)")
+    if getattr(args, "rl_resume_store", None):
+        raise ValueError("a synced trainer island takes --rl-sample-store, not --rl-resume-store")
+    buffer_lane(args)  # learner id inside 0..lanes-1
 
 
 def _check_resume_switches(args) -> None:
@@ -261,7 +281,8 @@ def apply_sample_role(args, miles_args, environ=None) -> None:
     (os.environ if environ is None else environ).update(island_env(
         config.role, store_root=config.store, sampler_id=node or f"island{int(args.learner_id)}",
         max_policy_age=int(getattr(args, "rl_max_policy_age", 0) or 0), wait_s=config.wait_s,
-        shard=node))
+        shard=node, lane=sample_roles.buffer_lane(args)))
+    miles_args.yeto_rl_sample_lane = sample_roles.buffer_lane(args)  # S25 C3: None off a synced trainer
 
 
 def apply_ports_infra_switches(args, miles_args, environ=None) -> None:

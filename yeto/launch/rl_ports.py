@@ -255,6 +255,20 @@ def _check_resume_launch_flags(args) -> bool:
             raise ValueError(f"{flag} needs --rl-checkpoint-store")
     if getattr(args, "rl_resume_allow_config_change", False) and not store:
         raise ValueError("--rl-resume-allow-config-change needs --rl-checkpoint-store")
+    from ..rl.engine.sample_roles import is_synced_trainer
+
+    if store and not elastic and is_synced_trainer(args):
+        # S25 C3: the store holds the sample buffer and the releases of synced trainers
+        # (forwarded as --rl-sample-store); multi-island round cuts do not exist
+        for name, flag in (("rl_cut_every", "--rl-cut-every"), ("rl_cut_keep", "--rl-cut-keep"),
+                           ("rl_stop_after_rounds", "--rl-stop-after-rounds")):
+            if getattr(args, name, None) is not None:
+                raise ValueError(f"{flag}: synced trainers write no round cuts (multi-island "
+                                 "resume: rl-resume-from-checkpoint 3.3)")
+        if getattr(args, "rl_resume_allow_config_change", False):
+            raise ValueError("--rl-resume-allow-config-change: synced trainers write no round cuts")
+        rl_checkpoint_store_plan(args)  # validates the form
+        return False
     if elastic:
         for name, flag in (("rl_cut_keep", "--rl-cut-keep"), ("rl_stop_after_rounds", "--rl-stop-after-rounds")):
             if getattr(args, name, None) is not None:
@@ -378,6 +392,7 @@ def _check_ports_infra_switches(args) -> None:
     elif sample_roles.is_pair(args):  # L5.4 --rl-island-sample-role: per-island roles
         sample_roles.check_pair(args, rl_island_count(args))
     else:
+        sample_roles.check_synced_trainers(args, rl_island_count(args))  # S25 C3
         sample_roles.check_launch(args)  # L4.6 --rl-sample-role (both checks nothing)
     from .storage import store_object_envs
 
@@ -397,7 +412,8 @@ def _check_ports_infra_switches(args) -> None:
     if getattr(args, "rl_elastic_accept_rebind", False):
         given.append("--rl-elastic-accept-rebind")
     resume_store = _check_resume_launch_flags(args)
-    if getattr(args, "rl_checkpoint_store", None) and not resume_store:
+    if getattr(args, "rl_checkpoint_store", None) and not resume_store \
+            and not sample_roles.is_synced_trainer(args):
         given.append("--rl-checkpoint-store")
     if getattr(args, "rl_elastic_declare_cells", False):
         given.append("--rl-elastic-declare-cells")
@@ -531,6 +547,7 @@ def _ports_infra_flags(args) -> tuple[str, str]:
     if getattr(args, "rl_max_policy_age", 0):  # 0 (default) adds nothing
         flags += f" --rl-max-policy-age {int(args.rl_max_policy_age)}"
     from ..rl.engine.sample_roles import island_flags as sample_role_flags
+    from ..rl.engine.sample_roles import is_synced_trainer as sample_role_is_synced_trainer
 
     flags += sample_role_flags(args)  # L4.6: role both (default) adds nothing
     if (getattr(args, "rl_lr_schedule", None) or "auto") != "auto":  # auto adds nothing
@@ -542,6 +559,11 @@ def _ports_infra_flags(args) -> tuple[str, str]:
     resume_store = (rl_checkpoint_store_plan(args)
                     if getattr(args, "rl_checkpoint_store", None) and not getattr(args, "rl_elastic", False)
                     else None)
+    if resume_store is not None and sample_role_is_synced_trainer(args):
+        # S25 C3: synced trainers mount the store for the buffer and the releases only
+        flags += (f" --rl-sample-store {shlex.quote(resume_store[0])}"
+                  f" --rl-sample-lanes {rl_island_count(args)}")
+        resume_store = None
     if resume_store is not None:  # rl-resume-from-checkpoint: non-elastic resume store
         flags += f" --rl-resume-store {shlex.quote(resume_store[0])}"
         for name, flag in (("rl_cut_keep", "--rl-cut-keep"), ("rl_stop_after_rounds", "--rl-stop-after-rounds")):

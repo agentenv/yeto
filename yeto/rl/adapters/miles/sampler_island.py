@@ -9,7 +9,9 @@
   while it trains), every successful publish
   is also released into the store (:class:`ReleasingPublisher`): a full-parameter
   trainer exports an HF checkpoint (``actor.export_hf``), a LoRA trainer only its
-  adapter (:mod:`.release_plugin`), into the release directory.
+  adapter (:mod:`.release_plugin`), into the release directory. Synced trainers
+  (several islands and a syncer): only learner 0 releases, with the merged
+  version (:mod:`yeto.rl.engine.merged_release`).
 
 Engine weight load (the order of the publisher, ``publish.MilesPublisher``):
 under the controller's update lock, every engine loads the release, then the
@@ -45,10 +47,17 @@ from yeto.rl.engine.policy_release import (
     PolicyRelease,
     PolicyReleaseStore,
 )
+from yeto.rl.engine.merged_release import MergedReleaseGuard, is_publisher, merged_version
 from yeto.rl.engine.policy_versions import engine_weight_version
 from yeto.rl.engine.sample_roles import CONVERTIBLE, SAMPLER, TRAINER
 
-from .buffer_rollout import SampleBufferRolloutError, executor_read_cursor, executor_read_shards, open_buffer
+from .buffer_rollout import (
+    SampleBufferRolloutError,
+    executor_read_cursor,
+    executor_read_shards,
+    executor_set_gate_version,
+    open_buffer,
+)
 from .publish import (
     _engine_id,
     _maybe_await,
@@ -326,10 +335,19 @@ class ReleasingPublisher:
                  export: Callable[[int, Path], None],
                  read_position: Callable[[], int | None], emit: Callable[..., None],
                  *, weights: str = FULL,
-                 read_shards: Callable[[], dict[str, int] | None] | None = None) -> None:
+                 read_shards: Callable[[], dict[str, int] | None] | None = None,
+                 version_of: Callable[[Any], int] | None = None,
+                 guard: MergedReleaseGuard | None = None,
+                 origin: Callable[[Any], dict[str, Any]] | None = None) -> None:
         """``read_shards``: the trainer's read position per sampler shard (None
         without merged shards), released with every policy for the samplers'
-        backlog caps."""
+        backlog caps. Synced trainers (:mod:`yeto.rl.engine.merged_release`):
+        ``version_of(state)`` is the merged version to release (default: the
+        policy version), ``guard`` keeps the release versions increasing and
+        ``origin(state)`` is the release record's ``origin``."""
+        self.version_of = version_of or (lambda state: int(state.policy_version))
+        self.guard = guard
+        self.origin = origin
         self.inner = inner
         self.releases = releases
         self.export = export
@@ -346,7 +364,15 @@ class ReleasingPublisher:
 
     def publish(self, state: Any, **kwargs: Any) -> Any:
         result = self.inner.publish(state, **kwargs)
-        version = int(state.policy_version)
+        version = int(self.version_of(state))
+        if self.guard is not None:
+            latest = self.releases.latest()
+            if self.guard.check(version, None if latest is None else latest.version) == "stale":
+                self.emit("rl_policy_release_skipped", policy_version=version,
+                          local_version=int(state.policy_version),
+                          latest_version=None if latest is None else latest.version,
+                          reason="not_newer_than_latest")
+                return result
         position = self.read_position()
         shards = self.read_shards() if self.read_shards is not None and position is not None else None
         if position is None:  # nothing read yet in this process: keep the last known positions
@@ -356,9 +382,11 @@ class ReleasingPublisher:
         release = self.releases.release(version, state.policy_tensor_hash(),
                                         lambda directory: self.export(version, directory),
                                         buffer_selected=position, weights=self.weights,
-                                        engine_checksum=self._engine_checksum(), buffer_shards=shards)
+                                        engine_checksum=self._engine_checksum(), buffer_shards=shards,
+                                        origin=None if self.origin is None else self.origin(state))
         if release is not None:
             self.emit("rl_policy_released", seq=release.seq, policy_version=version,
+                      local_version=int(state.policy_version), origin=release.origin,
                       policy_hash=release.policy_hash, buffer_selected=release.buffer_selected,
                       weights=release.weights, sha256=release.sha256,
                       engine_checksum=release.engine_checksum)
@@ -368,10 +396,35 @@ class ReleasingPublisher:
         return getattr(self.inner, name)
 
 
+class GateVersionPublisher:
+    """A synced trainer's publisher (:mod:`yeto.rl.engine.merged_release`): after
+    each publish, the island's buffer reader gates ``max_policy_age`` on the merged
+    version (``set_gate_version(version)``). Every other attribute is the wrapped
+    publisher's."""
+
+    def __init__(self, inner: Any, set_gate_version: Callable[[int], Any],
+                 version_of: Callable[[Any], int]) -> None:
+        self.inner = inner
+        self.set_gate_version = set_gate_version
+        self.version_of = version_of
+
+    def publish(self, state: Any, **kwargs: Any) -> Any:
+        result = self.inner.publish(state, **kwargs)
+        self.set_gate_version(int(self.version_of(state)))
+        return result
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.inner, name)
+
+
 def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runner: Any,
                          environ: Any = None) -> ReleasingPublisher | None:
     """A trainer island (``--rl-sample-role trainer``) releases every publish; so does
-    the trainer of a convertible node (the other nodes follow the releases)."""
+    the trainer of a convertible node (the other nodes follow the releases).
+
+    Synced trainers (a buffer lane on ``miles_args.yeto_rl_sample_lane``): every
+    island gates on the merged version; only the publisher (learner id 0) releases,
+    with the merged version (:mod:`yeto.rl.engine.merged_release`)."""
     config = _buffer_config(miles_args, TRAINER) or _buffer_config(miles_args, CONVERTIBLE)
     if config is None:
         return None
@@ -379,6 +432,27 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
     if not callable(in_executor):
         raise SampleBufferRolloutError(f"rollout pool {type(driver.rollout).__name__} cannot "
                                        "run code in the rollout executor")
+    lane = getattr(miles_args, "yeto_rl_sample_lane", None)
+    synced: dict[str, Any] = {}
+    if lane is not None:
+        def version_of(state: Any) -> int:
+            return merged_version(driver, state)
+
+        def origin(state: Any) -> dict[str, Any]:
+            return {"kind": "merged", "learner_id": lane.index, "num_learners": lane.count,
+                    "local_version": int(state.policy_version)}
+
+        def on_gap(previous: int, version: int) -> None:
+            driver.emit("rl_policy_release_gap", previous_version=previous, policy_version=version)
+
+        driver.publisher = GateVersionPublisher(
+            driver.publisher, lambda v: in_executor(executor_set_gate_version, int(v)), version_of)
+        publisher_island = is_publisher(lane.index, lane.count)
+        driver.emit("rl_policy_release_role", learner_id=lane.index, num_learners=lane.count,
+                    publisher=publisher_island)
+        if not publisher_island:
+            return None
+        synced = {"version_of": version_of, "guard": MergedReleaseGuard(on_gap), "origin": origin}
 
     lora = lora_mode(miles_args)
 
@@ -391,6 +465,6 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
     publisher = ReleasingPublisher(driver.publisher, release_store(config, environ), export,
                                    read_position=lambda: in_executor(executor_read_cursor),
                                    read_shards=lambda: in_executor(executor_read_shards),
-                                   emit=driver.emit, weights=LORA if lora else FULL)
+                                   emit=driver.emit, weights=LORA if lora else FULL, **synced)
     driver.publisher = publisher
     return publisher

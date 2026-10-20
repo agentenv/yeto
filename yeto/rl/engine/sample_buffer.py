@@ -27,7 +27,8 @@ per cut lineage, and samples consumed after the last cut are consumed again.
 
 Arrival notification is by polling the index (``poll`` / ``start_polling``).
 
-Limits of this first implementation: one consumer; with ``index.jsonl``,
+Limits of this first implementation: one consumer (or one per lane: synced
+trainer islands read disjoint lanes, :mod:`.merged_release`); with ``index.jsonl``,
 concurrent appenders must share one host (``flock``); the version gate on
 selection is the consumer's job (P0-S ``max_policy_age``).
 
@@ -67,6 +68,7 @@ from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
+from .merged_release import BufferLane
 from .object_store import ObjectStore
 from .resume import CheckpointStore
 from .trainer_lifecycle import BacklogStats, SampleIndexEntry, Selected
@@ -321,11 +323,19 @@ class FileSampleBuffer:
 
     def __init__(self, store: CheckpointStore | ObjectStore, *, batch_size: int,
                  arrival_window_s: float = 60.0, clock: Callable[[], float] = time.time,
-                 index: str = INDEX, create_index: bool = True, merge_shards: bool = False) -> None:
+                 index: str = INDEX, create_index: bool = True, merge_shards: bool = False,
+                 lane: BufferLane | None = None) -> None:
         """``index``/``create_index``: see :class:`JsonlIndex`. ``merge_shards``:
         this buffer (the consumer) merges the sampler shards of an object store
         into the index on every refresh (see the module doc); it must be the
-        only one that does."""
+        only one that does. ``lane``: this consumer is one of several synced
+        trainers and selects only the positions of its lane
+        (:mod:`.merged_release`); the read cursor and the watermark stay
+        positions of the whole index."""
+        if lane is not None and (merge_shards or _objects_of(store) is not None):
+            raise SampleBufferError("a lane reader needs a shared-directory store (no object "
+                                    "index, no shard merge): see yeto.rl.engine.merged_release")
+        self.lane = lane
         if batch_size < 1:
             raise ValueError("batch_size must be positive")
         self.store = store
@@ -481,9 +491,13 @@ class FileSampleBuffer:
             elif consumer != self._consumer:
                 raise SampleBufferError(f"buffer is read by {self._consumer!r}, not {consumer!r}")
             self.refresh()
-            stop = min(len(self._entries), self._read + max(0, int(limit)))
-            out = [Selected(pos, self._entries[pos]) for pos in range(self._read, stop)]
-            self._read = stop
+            out: list[Selected] = []
+            pos = self._read
+            while len(out) < max(0, int(limit)) and pos < len(self._entries):
+                if self.lane is None or self.lane.owns(pos):
+                    out.append(Selected(pos, self._entries[pos]))
+                pos += 1
+            self._read = pos
             return out
 
     def commit_consumed(self, cursor: int) -> None:

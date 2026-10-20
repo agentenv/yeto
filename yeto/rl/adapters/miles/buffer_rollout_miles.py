@@ -39,6 +39,7 @@ from .buffer_rollout import (
     SampleBufferRolloutError,
     convertible_mode,
     open_buffer,
+    open_lane_log,
     register_reader,
     renumber_group,
 )
@@ -94,8 +95,9 @@ class _BufferRound:
         self.args = args
         self.groups = int(args.rollout_batch_size)
         self.samples_per_group = int(args.n_samples_per_prompt)
+        buffer = open_buffer(batch_size=self.groups, create_index=create_index, reader=merge_shards)
         self.reader = BatchReader(
-            open_buffer(batch_size=self.groups, create_index=create_index, reader=merge_shards),
+            buffer, cursor_log=open_lane_log(buffer),
             max_policy_age=int(age),
             wait_s=float(os.environ.get(WAIT_ENV, DEFAULT_WAIT_S)),
             poll_s=float(os.environ.get(POLL_ENV, DEFAULT_POLL_S)))

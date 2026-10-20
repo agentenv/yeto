@@ -21,6 +21,15 @@ releases live there). They are either separate single-island launches
 (``--rl-island-sample-role 0:sampler --rl-island-sample-role 1:trainer``, L5.4):
 there is no syncer, and each island runs as its own one-learner, no-sync island
 (learner id 0 of 1) whose role comes from its island args (:func:`island_args`).
+Synced trainers (S25 C3, :mod:`.merged_release`): a launch of N >= 2 islands
+with ``--rl-sample-role trainer`` and a syncer (strict or elastic sync, no
+``--rl-single-island-no-sync``): every island is a trainer, learner m of N, and
+reads lane m of the buffer; the island with learner id 0 releases the merged
+policy. The store reaches the island as ``--rl-sample-store`` (buffer and
+releases only: multi-island round cuts do not exist), the trainer count as
+``--rl-sample-lanes``. The samplers are separate
+no-sync launches over the same store.
+
 This module is engine-neutral; the Miles mapping is in
 ``adapters.miles.buffer_rollout``.
 """
@@ -62,6 +71,42 @@ def sample_role(args: Any) -> str:
     if role not in SAMPLE_ROLES:
         raise ValueError(f"--rl-sample-role {role!r}: expected one of {SAMPLE_ROLES}")
     return role
+
+
+def is_synced_trainer(args: Any) -> bool:
+    """A trainer island of a synced multi-island launch (module doc)."""
+    return sample_role(args) == TRAINER and not getattr(args, "rl_single_island_no_sync", False)
+
+
+def buffer_lane(args: Any) -> Any:
+    """The buffer lane of a synced trainer island (island args: ``learner_id`` and
+    ``--rl-sample-lanes``, the trainer count the launcher forwards); None for every
+    other island."""
+    from .merged_release import BufferLane
+
+    if not is_synced_trainer(args):
+        return None
+    count = int(getattr(args, "rl_sample_lanes", None) or 1)
+    return None if count == 1 else BufferLane(int(getattr(args, "learner_id", 0) or 0), count)
+
+
+def check_synced_trainers(args: Any, num_islands: int) -> None:
+    """Launch checks of synced trainers (module doc), before the per-role checks."""
+    if not is_synced_trainer(args):
+        return
+    if int(num_islands) < 2:
+        raise ValueError("--rl-sample-role trainer without --rl-single-island-no-sync is a synced "
+                         f"multi-island launch: it needs at least two islands (got {num_islands})")
+    if is_pair(args) or is_convertible_pool(args):
+        raise ValueError("synced trainers do not combine with --rl-island-sample-role or "
+                         "convertible nodes")
+    if getattr(args, "tuning", "lora") != "lora":
+        raise ValueError("synced trainers merge LoRA deltas: they need --tuning lora")
+    store = str(getattr(args, "rl_checkpoint_store", None) or "")
+    if store.startswith(("s3://", "oss://")):
+        raise ValueError(f"--rl-checkpoint-store {store}: synced trainers read buffer lanes from "
+                         "a shared directory store (a Modal Volume or a shared path), not an "
+                         "object store")
 
 
 def node_name(island: int) -> str:
@@ -221,14 +266,17 @@ def check_launch(args: Any) -> None:
             if getattr(args, dest, None) is not None:
                 raise ValueError(f"{flag} needs --rl-sample-role sampler or trainer")
         return
-    if not getattr(args, "rl_single_island_no_sync", False):
+    if not getattr(args, "rl_single_island_no_sync", False) and role != TRAINER:
         raise ValueError(f"--rl-sample-role {role} needs --rl-single-island-no-sync: a sampler "
-                         "and a trainer are separate no-sync islands over one store")
+                         "is a no-sync island over the store (only trainers may sync)")
     if not getattr(args, "rl_checkpoint_store", None):
         raise ValueError(f"--rl-sample-role {role} needs --rl-checkpoint-store (the sample "
                          "buffer and the policy releases live in it)")
     if getattr(args, "rl_elastic", False):
-        raise ValueError(f"--rl-sample-role {role} does not support --rl-elastic")
+        # --rl-elastic is placement reconfiguration (T/R cells), not the island sync:
+        # synced trainers use --rl-island-scheduling elastic (or strict sync)
+        raise ValueError(f"--rl-sample-role {role} does not support --rl-elastic "
+                         "(placement reconfiguration)")
     if role in (TRAINER, CONVERTIBLE) and not int(getattr(args, "rl_max_policy_age", 0) or 0) >= 1:
         raise ValueError(f"--rl-sample-role {role} trains on samples of earlier versions: "
                          "it needs --rl-max-policy-age >= 1")
@@ -269,14 +317,15 @@ def _max_backlog_rounds(args: Any, role: str) -> int | None:
 
 
 def resolve(args: Any, *, groups_per_round: int) -> SampleBufferConfig | None:
-    """The island's buffer config (island side: the store is ``--rl-resume-store``)."""
+    """The island's buffer config (island side: the store is ``--rl-resume-store``,
+    or ``--rl-sample-store`` on a synced trainer)."""
     role = sample_role(args)
     if role == BOTH:
         return None
-    store = getattr(args, "rl_resume_store", None)
+    store = getattr(args, "rl_sample_store", None) or getattr(args, "rl_resume_store", None)
     if not store:
         raise ValueError(f"--rl-sample-role {role} needs the checkpoint store "
-                         "(--rl-resume-store on the island)")
+                         "(--rl-resume-store, or --rl-sample-store on a synced trainer)")
     rounds = _max_backlog_rounds(args, role)
     wait_s = getattr(args, "rl_sample_wait_s", None)
     min_round_s = getattr(args, "rl_sampler_min_round_seconds", None)

@@ -372,6 +372,11 @@ _ISLAND = (
     # bucket mount or a shared path); round cuts + a hashed state snapshot + LATEST go there.
     island_flag("--rl-resume-store", default=None, metavar="PATH"),
     island_flag("--rl-resume-state-dir", default="~/yeto-rl/resume-state", metavar="PATH"),
+    # S25 C3: a synced trainer island (--rl-sample-role trainer with a syncer): the
+    # store of the sample buffer and the policy releases (no round cuts), and the
+    # number of synced trainers (its buffer lane is learner id of that count)
+    island_flag("--rl-sample-store", default=None, metavar="PATH"),
+    island_flag("--rl-sample-lanes", type=int, default=None, metavar="N"),
     island_flag("--lora-r", type=int, default=None),
     island_flag(
         "--lora-targets",
