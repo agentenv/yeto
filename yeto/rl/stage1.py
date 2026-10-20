@@ -523,7 +523,8 @@ def expand(plan: Stage1Plan, *, hf_config: str | Path | None = None) -> Expanded
     torch_dist = model["bf16_source"].get("torch_dist")
     convert_argv = None if not torch_dist else [
         "torchrun", "--nproc-per-node", str(per_node), f"{miles['workdir']}/tools/convert_hf_to_torch_dist.py",
-        *model_args, "--hf-checkpoint", model_dir, "--save", str(torch_dist),
+        # model arguments only: the converter's parser has no run flags (--qkv-format; Modal run-8)
+        *glm5_next.model_argv_without_run_flags(model_args), "--hf-checkpoint", model_dir, "--save", str(torch_dist),
         "--tensor-model-parallel-size", str(layout["tp"]), "--pipeline-model-parallel-size", str(layout["pp"]),
         "--expert-model-parallel-size", str(min(layout["ep"], per_node))]
     out.trainer = {

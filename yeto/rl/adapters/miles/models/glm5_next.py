@@ -130,6 +130,13 @@ def model_argv(*, num_layers: int = NUM_LAYERS, first_k_dense_replace: int = FIR
             *(TE_ONLY_ARGV if impl == TRANSFORMER_ENGINE else LOCAL_ARGV), *RUN_ARGV]
 
 
+def model_argv_without_run_flags(argv: Sequence[str]) -> list[str]:
+    """:func:`model_argv` without :data:`RUN_ARGV` (Miles' checkpoint converter
+    parses the model arguments only)."""
+    run = {group[0] for group in _flag_groups(RUN_ARGV)}
+    return [token for group in _flag_groups(argv) if group[0] not in run for token in group]
+
+
 def _flag_groups(argv: Sequence[str]) -> Iterator[list[str]]:
     group: list[str] = []
     for token in argv:

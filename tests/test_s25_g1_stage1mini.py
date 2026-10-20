@@ -151,6 +151,7 @@ def test_mini_modal_plan_has_no_errors_and_uses_the_volume_store():
     assert "--frozen-base" in out.requant["argv"]
     assert argv[argv.index("--megatron-ref-load") + 1] == out.trainer["torch_dist"]
     assert out.trainer["convert_argv"][out.trainer["convert_argv"].index("--save") + 1] == out.trainer["torch_dist"]
+    assert "--qkv-format" not in out.trainer["convert_argv"] and "--spec" in out.trainer["convert_argv"]
     # the PPU plan keeps OSS and passes no --miles-commit for its short commit
     ppu = expand(load_plan(REPO / "examples/stage1/glm53-flash-ppu.yaml"))
     assert ppu.errors == [] and "--miles-commit" not in ppu.trainer["miles"]["island_argv"]
