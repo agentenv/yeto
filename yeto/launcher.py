@@ -189,8 +189,21 @@ def _island_task(task_factory, args, spec, m, num_learners, syncer_addr, overrid
     io.apply_to_task(task, {**io.island_env(args, m, overrides),
                             **(droppable.role_env(role, spec.cloud, spec.region) if role else {}),
                             **sample_roles.island_env(iargs),
-                            **_spot_sampler_cloud_env(iargs, getattr(spec, "cloud", None))})
+                            **_spot_sampler_cloud_env(iargs, getattr(spec, "cloud", None)),
+                            **_resume_marker_env(iargs, getattr(spec, "cloud", None))})
     return task
+
+
+def _resume_marker_env(iargs, cloud: str | None) -> dict[str, str]:
+    """A resumable island on Modal (``--rl-resume-store``): the reclaim marker path
+    (S26 E9.1). Modal signals only the container's main process (the runner), so
+    the runner writes the marker and the driver's watcher thread -- in a Ray actor
+    on verl -- writes the store's preemption notice."""
+    if cloud != "modal" or not getattr(iargs, "rl_resume_store", None):
+        return {}
+    from .rl.engine.sampler_resume import DEFAULT_RECLAIM_MARKER, RECLAIM_MARKER_ENV
+
+    return {RECLAIM_MARKER_ENV: DEFAULT_RECLAIM_MARKER}
 
 
 def _spot_sampler_cloud_env(iargs, cloud: str | None) -> dict[str, str]:

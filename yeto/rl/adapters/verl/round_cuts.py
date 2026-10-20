@@ -15,7 +15,9 @@ and no outer syncer (``--rl-single-island-no-sync``),
 * triggers of the final cut: ``MANUAL`` (last round, our own stop),
   ``SCHEDULED`` (the head's trainer scheduler stopped us:
   ``trainer_remote`` commands, :func:`run_driver`); a preemption signal only
-  writes a marker (``install_preempt_handler``): the next launch resumes from
+  writes a marker (``install_preempt_handler`` on the main thread; in a Ray
+  actor ``watch_preempt_marker`` turns the Modal runner's reclaim marker file
+  into the same notice, S26 E9.1): the next launch resumes from
   the newest complete cut.
 
 The resume assertions of :mod:`.cut` run on this path: the restored rank digests
@@ -130,7 +132,7 @@ def wire_round_cuts(driver: Any, resume: ResumeWiring | None, *, plan: Mapping[s
     if resume is None:
         return None
     from yeto.rl.engine import round_cut
-    from yeto.rl.engine.resume import install_preempt_handler
+    from yeto.rl.engine.resume import install_preempt_handler, watch_preempt_marker
 
     controller = resume.controller
     source = round_cut.CutSource(
@@ -146,9 +148,13 @@ def wire_round_cuts(driver: Any, resume: ResumeWiring | None, *, plan: Mapping[s
     driver.sync.stop_after = resume.config.get("stop_after")
     # the handler needs the main thread (verl: the task runner actor's); [] when it is not
     signals = install_preempt_handler(controller, emit=driver.emit) if install_signals else []
+    # S26 E9.1: the signal reaches the container's main process, not this actor; the
+    # Modal runner writes the reclaim marker and this thread turns it into the notice
+    watcher = watch_preempt_marker(controller) if install_signals else None
     driver.emit("rl_round_cuts_wired", backend="verl", every=checkpoint.every,
                 keep=int(controller.keep), stop_after=driver.sync.stop_after,
                 store=str(controller.checkpoint_store), preempt_signals=list(signals),
+                preempt_marker_watch=watcher is not None,
                 restored_store=controller.restored is not None)
     return checkpoint
 
