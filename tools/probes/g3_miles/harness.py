@@ -685,9 +685,9 @@ def phase_n71d(ns) -> None:
                               scheduler_increment=args.global_batch_size,
                               ranks={str(s["path"]): OptimizerResumeState.from_dict(s["resume"]) for s in summaries})
 
-    if ns.mode in ("cont5", "cont5b"):
+    if ns.mode.startswith("cont5"):
         res["steps"] = train_steps(args, model, optimizer, scheduler, 1, 5, out)
-    elif ns.mode == "run3":
+    elif ns.mode.startswith("run3"):
         res["steps"] = train_steps(args, model, optimizer, scheduler, 1, 3, out)
         summary = cut_plugin.save_cut_shard(actor, directory=str(cut_dir), cut_id="g3-cut-3")
         if cut_plugin.REFUSED in summary:
@@ -701,7 +701,7 @@ def phase_n71d(ns) -> None:
             (cut_dir / "files.json").write_text(json.dumps(summaries, default=str))
             (cut_dir / "resume_manifest.json").write_text(json.dumps(m.to_dict()))
         res["hdo_after_save"] = hdo_report(optimizer)
-    elif ns.mode == "resume2":
+    elif ns.mode.startswith("resume2"):
         files = json.loads((cut_dir / "files.json").read_text())
         saved = ResumeManifest.from_dict(json.loads((cut_dir / "resume_manifest.json").read_text()))
         summary = cut_plugin.restore_cut_shard(actor, directory=str(cut_dir), files=files, cut_id="g3-cut-3")

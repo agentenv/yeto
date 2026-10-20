@@ -59,6 +59,14 @@ if [[ "$PHASES" == pre ]]; then
   run pre-n75-te 600 $TR $H --phase n75 --impl te --tag te --out "$OUT/n75"
   run pre-n71d 400 $TR $H --phase n71d --mode cont5 --out "$OUT/n71d" --cut-dir "$OUT/n71d/cut"
 fi
+if [[ "$PHASES" == n71d-noise ]]; then  # more samples of the run-to-run spread (cut in a second directory)
+  export NCCL_ALGO=Ring CUBLAS_WORKSPACE_CONFIG=:4096:8 NVIDIA_TF32_OVERRIDE=0
+  for m in cont5c cont5d; do
+    run n71d-$m 600 $TR $H --phase n71d --mode $m --out "$OUT/n71d" --cut-dir "$OUT/n71d/cut"
+  done
+  run n71d-run3b 600 $TR $H --phase n71d --mode run3b --out "$OUT/n71d" --cut-dir "$OUT/n71d/cutb"
+  run n71d-resume2b 600 $TR $H --phase n71d --mode resume2b --out "$OUT/n71d" --cut-dir "$OUT/n71d/cutb"
+fi
 if [[ "$PHASES" == all || "$PHASES" == n75 ]]; then
   run n75-te 1200 $TR $H --phase n75 --impl te --tag te --out "$OUT/n75"
   run n75-te2 900 $TR $H --phase n75 --impl te --tag te2 --weights-from "$OUT/n75" --out "$OUT/n75"
