@@ -27,7 +27,8 @@ Rollout-process environment (besides the Harbor/boat variables of
   YETO_RECORDS_TEMPLATE, YETO_RECORDS_TOKENIZER, YETO_RECORDS_MODEL,
   YETO_RECORDS_SAMPLING, YETO_RECORDS_MAX_MODEL_LEN, YETO_RECORDS_CARD
                                 (same meaning as ``adapters.verl.rollout_engine``)
-  YETO_SGLANG_ROUTER_URL        ``http://<ip>:<port>`` of Miles' router (the launcher sets it)
+  YETO_SGLANG_ROUTER_URL        ``http://<ip>:<port>`` of Miles' router (default: from
+                                ``--sglang-router-ip`` / ``--sglang-router-port``)
 
 Policy version: Miles' synchronous loop updates the engines between
 rollouts, never during one; the proxy records version None and the trainer's
@@ -212,7 +213,10 @@ async def generate(input: Any) -> Any:
     """Miles ``--custom-generate-function-path`` (module doc)."""
     from miles.rollout.base_types import GenerateFnOutput
 
-    sample = await run_sample(input.sample, input.sampling_params, input.args, recorder=_recorders.get())
+    args = input.args
+    # Miles' router address is an argument, not an env variable; the proxy is built from env once per loop.
+    os.environ.setdefault(ROUTER_URL_ENV, f"http://{args.sglang_router_ip}:{args.sglang_router_port}")
+    sample = await run_sample(input.sample, input.sampling_params, args, recorder=_recorders.get())
     return GenerateFnOutput(samples=sample)
 
 
