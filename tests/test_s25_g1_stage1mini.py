@@ -162,3 +162,39 @@ def test_island_argv_check_runs_the_island_combination_rules():
     assert "--rollout-num-gpus" not in argv and _check_island_argv(argv) is None
     problem = _check_island_argv([*argv, "--rollout-num-gpus", "0"])
     assert problem and "fixed-partition" in problem
+
+
+_MINI_TEXT_CONFIG = {
+    "model_type": "glm5_next_text", "num_hidden_layers": 4, "first_k_dense_replace": 1, "hidden_size": 4096,
+    "intermediate_size": 12288, "num_attention_heads": 64, "num_key_value_heads": 64, "n_routed_experts": 32,
+    "n_shared_experts": 1, "moe_intermediate_size": 2048, "num_experts_per_tok": 8, "vocab_size": 154880,
+    "max_position_embeddings": 1048576, "rms_norm_eps": 1e-5, "q_lora_rank": 1536, "kv_lora_rank": 512,
+    "qk_head_dim": 256, "qk_rope_head_dim": 0, "v_head_dim": 256, "hidden_act": "silu", "attention_bias": False,
+}
+
+
+def test_mini_island_argv_translates_to_a_miles_argv_on_cpu(tmp_path):
+    """The island path up to the Miles argv (Modal runs 1-3 each failed one step of it)."""
+    from yeto.rl.adapters.miles.island_entry import build_ports_launch, parse_args
+    from yeto.rl.engine.run_config import resolve_rl_run_config
+    from yeto.rl.stage1 import expand, load_plan
+
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text(json.dumps({"model_type": "glm5_next", "text_config": _MINI_TEXT_CONFIG}))
+    prompts = tmp_path / "p.jsonl"
+    prompts.write_text('{"messages": [{"role": "user", "content": "hi"}], "label": "1"}\n')
+    argv = expand(load_plan(REPO / "examples/stage1/glm5next-mini-modal.yaml")).trainer["miles"]["island_argv"][3:]
+    argv = [str(model) if a == "/data/models/glm5next-mini-bf16-7fb7883" else a for a in argv]
+    argv = [str(REPO / a) if a.startswith("examples/rl_algorithms/") else a for a in argv]
+    args = parse_args(argv)
+    provider = glm5_next.glm5_next_provider(model)
+    config = resolve_rl_run_config(args, model_path=model, prompt_path=prompts, provider=provider,
+                                   target_modules=[], yeto_policy_sync=False, verify_ref_load=False)
+    assert config.geometry.num_layers == 4 and config.geometry.moe.num_experts == 32
+    miles = list(build_ports_launch(args, config, []).argv)
+    for flag in ("--debug-train-only", "--use-distributed-optimizer", "--optimizer-cpu-offload",
+                 "--use-precision-aware-optimizer", "--use-tis"):
+        assert flag in miles
+    assert miles[miles.index("--num-experts") + 1] == "32" and miles.count("--num-experts") == 1
+    assert miles[miles.index("--moe-layer-freq") + 1] == "[0,1,1,1]"

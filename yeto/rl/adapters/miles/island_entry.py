@@ -1800,6 +1800,18 @@ def run_miles(
         )
         attention_specs = specs = ()
         canonical_targets = flash_next.target_modules()
+    elif getattr(args, "rl_model_recipe", "generic") == "glm5_next":
+        # AutoBridge cannot read glm5_next (transformers has no such model type);
+        # Miles trains it through its plugin spec, so the island reads the geometry
+        # from config.json (models/glm5_next.provider_view). Full-parameter only.
+        from yeto.rl.adapters.miles.models import glm5_next as glm5_next_recipe
+
+        if not full_parameter:
+            raise ValueError("the glm5_next recipe is full-parameter only")
+        model_bridge = None
+        provider = glm5_next_recipe.glm5_next_provider(model_path)
+        attention_specs = specs = ()
+        canonical_targets = []
     else:
         from megatron.bridge import AutoBridge
 

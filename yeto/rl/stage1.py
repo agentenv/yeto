@@ -185,6 +185,10 @@ class Expanded:
 STORE_BACKENDS = {"oss": None, "modal-volume": "yeto.cloud.modal_ckpt_store:store_from_env"}
 
 
+# GRPO + token-level TIS, execution.max_policy_staleness 2 (relative to the yeto workdir).
+DEFAULT_ALGORITHM_SPEC = "examples/rl_algorithms/decoupled-ppo-c2.json"
+
+
 def store_env(plan: Stage1Plan) -> dict[str, str]:
     """Environment every node needs for the store backend (none for OSS here: the
     nodes' ossutil/OSS configuration is set up on the node, runbook S4)."""
@@ -473,6 +477,10 @@ def expand(plan: Stage1Plan, *, hf_config: str | Path | None = None) -> Expanded
                    *(("--miles-commit", str(miles["commit"])) if len(str(miles["commit"])) == 40 else ()),
                    "--trust-remote-code",
                    "--learner-id", "0", "--num-learners", "1", "--rl-single-island-no-sync",
+                   # samples come from the buffer, one round ahead at most (sampler max_backlog_groups);
+                   # a policy age >= 1 needs an algorithm spec that tolerates it (TIS correction)
+                   "--rl-max-policy-age", "1",
+                   "--rl-algorithm-spec", str(miles.get("algorithm_spec") or DEFAULT_ALGORITHM_SPEC),
                    "--global-rounds", str(int(plan.doc["rounds"])),
                    "--groups-per-round", str(int(task["rollout_batch_size"])),
                    "--over-sampling-batch-size", str(int(task["rollout_batch_size"])),

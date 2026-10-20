@@ -21,7 +21,10 @@ Not run on a PPU; the argv was compared with the Miles script by reading only.
 
 from __future__ import annotations
 
+import dataclasses
+import json
 from collections.abc import Iterator, Sequence
+from pathlib import Path
 
 MODEL_NAME = "glm5_next"
 TRANSFORMER_ENGINE = "transformer_engine"
@@ -148,3 +151,103 @@ def apply_recipe(argv: Sequence[str], recipe: Sequence[str]) -> list[str]:
         override.add("--no-gradient-accumulation-fusion")
     kept = [token for group in _flag_groups(argv[1:]) if group[0] not in override for token in group]
     return [*argv[:1], *kept, *recipe]
+
+
+# ---------------------------------------------------------------- provider view
+# Megatron-Bridge's AutoBridge cannot read a glm5_next checkpoint: transformers
+# 5.12.1 has no such model type (Modal run-3), and Miles trains it through its
+# plugin spec, not through the Bridge. The island only needs the geometry that
+# ``run_config.resolve_rl_run_config`` reads, so it takes this read-only view of
+# the checkpoint's config.json (the same approach as the Flash-Next view).
+MODEL_TYPES = frozenset({"glm5_next", "glm5_next_text"})
+
+
+@dataclasses.dataclass(frozen=True)
+class Glm5NextModelProvider:
+    """Read-only stand-in for a Megatron-Bridge provider (the fields run_config reads)."""
+
+    num_layers: int
+    hidden_size: int
+    num_attention_heads: int
+    num_query_groups: int
+    kv_channels: int
+    ffn_hidden_size: int
+    num_moe_experts: int
+    moe_ffn_hidden_size: int
+    moe_router_topk: int
+    moe_layer_freq: tuple[int, ...]
+    moe_shared_expert_intermediate_size: int
+    vocab_size: int
+    seq_length: int
+    max_position_embeddings: int
+    layernorm_epsilon: float
+    q_lora_rank: int
+    kv_lora_rank: int
+    qk_head_dim: int
+    qk_pos_emb_head_dim: int
+    v_head_dim: int
+    rotary_base: int = 10000  # the recipe's --rotary-base (the checkpoint has no RoPE dims: qk_rope_head_dim 0)
+    rotary_percent: float = 1.0
+    share_embeddings_and_output_weights: bool = False
+    multi_latent_attention: bool = True
+    qk_layernorm: bool = True
+    gated_linear_unit: bool = True
+    add_bias_linear: bool = False
+    add_qkv_bias: bool = False
+    normalization: str = "RMSNorm"
+    position_embedding_type: str = "rope"
+
+    def finalize(self) -> None:  # provider API parity; nothing to derive
+        return None
+
+
+def is_glm5_next(model_path: str | Path) -> bool:
+    path = Path(model_path) / "config.json"
+    if not path.is_file():
+        return False
+    try:
+        return json.loads(path.read_text(encoding="utf-8")).get("model_type") in MODEL_TYPES
+    except (OSError, ValueError):
+        return False
+
+
+def provider_view(config: dict) -> Glm5NextModelProvider:
+    """The provider view of a glm5_next ``config.json`` (module section above)."""
+    if config.get("model_type") not in MODEL_TYPES:
+        raise ValueError(f"not a glm5_next config: model_type={config.get('model_type')!r}")
+    text = config.get("text_config") or config
+    layers = int(text["num_hidden_layers"])
+    dense = int(text.get("first_k_dense_replace", FIRST_K_DENSE_REPLACE))
+    if text.get("hidden_act", "silu") != "silu":
+        raise ValueError(f"glm5_next expects SwiGLU (silu), got {text.get('hidden_act')!r}")
+    if bool(text.get("attention_bias", False)):
+        raise ValueError("glm5_next expects bias-free linears")
+    max_positions = int(text["max_position_embeddings"])
+    return Glm5NextModelProvider(
+        num_layers=layers,
+        hidden_size=int(text["hidden_size"]),
+        num_attention_heads=int(text["num_attention_heads"]),
+        num_query_groups=int(text.get("num_key_value_heads", text["num_attention_heads"])),
+        kv_channels=int(text["v_head_dim"]),
+        ffn_hidden_size=int(text["intermediate_size"]),
+        num_moe_experts=int(text["n_routed_experts"]),
+        moe_ffn_hidden_size=int(text["moe_intermediate_size"]),
+        moe_router_topk=int(text["num_experts_per_tok"]),
+        moe_layer_freq=tuple([0] * dense + [1] * (layers - dense)),
+        moe_shared_expert_intermediate_size=int(text["moe_intermediate_size"]) * int(text.get("n_shared_experts", 1)),
+        vocab_size=int(text["vocab_size"]),
+        seq_length=max_positions,
+        max_position_embeddings=max_positions,
+        layernorm_epsilon=float(text["rms_norm_eps"]),
+        q_lora_rank=int(text["q_lora_rank"]),
+        kv_lora_rank=int(text["kv_lora_rank"]),
+        qk_head_dim=int(text["qk_head_dim"]),
+        qk_pos_emb_head_dim=int(text.get("qk_rope_head_dim", 0)),
+        v_head_dim=int(text["v_head_dim"]),
+        share_embeddings_and_output_weights=bool(config.get("tie_word_embeddings", False)
+                                                 or text.get("tie_word_embeddings", False)),
+    )
+
+
+def glm5_next_provider(model_path: str | Path) -> Glm5NextModelProvider:
+    return provider_view(json.loads((Path(model_path) / "config.json").read_text(encoding="utf-8")))
