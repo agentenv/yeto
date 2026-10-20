@@ -26,7 +26,6 @@ from __future__ import annotations
 import json
 import os
 import secrets
-import shlex
 import shutil
 import subprocess
 import sys
@@ -403,8 +402,7 @@ def build_app(run: str, cfg: dict):
                      .add_local_dir(str(REPO), WORKDIR, copy=False, ignore=ignore))
     verl_image = (modal_image(modal).env({"PYTHONUNBUFFERED": "1", "PYTHONPATH": WORKDIR})
                   .add_local_dir(str(REPO), WORKDIR, copy=False, ignore=ignore))
-    cpu_image = modal.Image.debian_slim(python_version="3.12").add_local_dir(
-        str(REPO / "yeto"), f"{WORKDIR}/yeto", copy=False, ignore=["**/__pycache__"])
+    cpu_image = modal.Image.debian_slim(python_version="3.12")
     app = modal.App(APP_PREFIX + run)
     store = modal.Volume.from_name(STORE_VOLUME, create_if_missing=True, version=2)
     results = modal.Volume.from_name(RESULTS_VOLUME, create_if_missing=True, version=2)
@@ -457,8 +455,8 @@ def _wait_calls(calls: dict, deadline: float, log: Path, on_poll=None) -> dict[s
             try:
                 results[name] = call.get(timeout=0)
                 _log(log, f"{name} returned {json.dumps(results[name], default=str)[:300]}")
-            except TimeoutError:
-                pass
+            except (TimeoutError, modal.exception.TimeoutError):
+                pass  # still running
             except modal.exception.OutputExpiredError:
                 results[name] = {"error": "output expired"}
             except Exception as exc:  # noqa: BLE001 - a failed call is a result
@@ -486,25 +484,7 @@ def run(cell, run_id: str, run_dir: Path) -> dict[str, Any]:
     control[f"{run_id}/started"] = time.time()
     app, fns = build_app(run_id, cfg)
     began = time.time()
-    with modal.enable_output(), app.run(detach=True):
-        calls: dict[str, Any] = {}
-        if cfg["kind"] == "island":
-            calls["chain"] = None  # phases run in order from here (a, then b; c beside them)
-            if "c" in cfg["phases"]:
-                calls["island-c"] = fns["island"].spawn(run_id, cfg, "c")
-            first = [p for p in cfg["phases"] if p != "c"]
-            if first:
-                calls["island-" + first[0]] = fns["island"].spawn(run_id, cfg, first[0])
-            calls.pop("chain")
-        else:
-            if cfg["learners"] > 1:
-                calls["syncer"] = fns["syncer"].spawn(run_id, cfg)
-            calls["sampler"] = fns["sampler"].spawn(run_id, cfg)
-            for i in range(cfg["learners"]):
-                calls[f"trainer{i}"] = fns["trainer"].spawn(run_id, cfg, i)
-    _log(log, f"spawned {sorted(calls)} app {APP_PREFIX + run_id}")
-    deadline = began + cfg["timeout_s"] + 600
-    reclaim = {"done": cfg.get("reclaim_after_round") is None}
+    reclaim: dict[str, Any] = {"done": cfg.get("reclaim_after_round") is None}
 
     def maybe_reclaim() -> None:
         if reclaim["done"]:
@@ -518,17 +498,28 @@ def run(cell, run_id: str, run_dir: Path) -> dict[str, Any]:
             _log(run_dir / "reclaim.log", f"stop container={container} rc={result.returncode} "
                  f"after rollout {progress.get('rollout_id')} {result.stdout.strip()} {result.stderr.strip()}")
 
-    results = _wait_calls(calls, deadline, log, maybe_reclaim)
-    if cfg["kind"] == "island" and "b" in cfg["phases"]:
-        if (results.get("island-a") or {}).get("rc") == 0:
-            with modal.enable_output(), app.run(detach=True):
-                call_b = fns["island"].spawn(run_id, cfg, "b")
-            results.update(_wait_calls({"island-b": call_b}, time.time() + cfg["timeout_s"] + 600, log))
-        else:
-            results["island-b"] = {"error": "phase a failed; b not run"}
+    # one detached app for the whole run: a killed driver never cancels a spawned call
     with modal.enable_output(), app.run(detach=True):
-        collect_call = fns["collect"].spawn(run_id)
-    results["collect"] = _wait_calls({"collect": collect_call}, time.time() + 1200, log)["collect"]
+        calls: dict[str, Any] = {}
+        if cfg["kind"] == "island":  # c (control) beside a; b after a, from a's store
+            for phase in [p for p in cfg["phases"] if p != "b"]:
+                calls[f"island-{phase}"] = fns["island"].spawn(run_id, cfg, phase)
+        else:
+            if cfg["learners"] > 1:
+                calls["syncer"] = fns["syncer"].spawn(run_id, cfg)
+            calls["sampler"] = fns["sampler"].spawn(run_id, cfg)
+            for i in range(cfg["learners"]):
+                calls[f"trainer{i}"] = fns["trainer"].spawn(run_id, cfg, i)
+        _log(log, f"spawned {sorted(calls)} app {APP_PREFIX + run_id}")
+        results = _wait_calls(calls, began + cfg["timeout_s"] + 600, log, maybe_reclaim)
+        if "b" in cfg.get("phases", ()):
+            if (results.get("island-a") or {}).get("rc") == 0:
+                call_b = fns["island"].spawn(run_id, cfg, "b")
+                results.update(_wait_calls({"island-b": call_b}, time.time() + cfg["timeout_s"] + 600, log))
+            else:
+                results["island-b"] = {"error": "phase a failed; b not run"}
+        results["collect"] = _wait_calls({"collect": fns["collect"].spawn(run_id)}, time.time() + 1200,
+                                         log)["collect"]
     wall = time.time() - began
     pulled = _modal_cli("volume", "get", "--force", RESULTS_VOLUME, run_id, str(raw), timeout=1800)
     stopped = _modal_cli("app", "stop", "-y", APP_PREFIX + run_id, timeout=120)  # only our own app
@@ -547,6 +538,3 @@ def card_seconds(raw: Path) -> float:
             total += float(data.get("seconds") or 0.0)
     return total
 
-
-def describe(cell) -> str:
-    return shlex.join(["modal", "app", APP_PREFIX + "<run>", json.dumps(cell.config, sort_keys=True)])
