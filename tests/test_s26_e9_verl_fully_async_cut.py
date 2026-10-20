@@ -126,3 +126,26 @@ def test_trainer_group_without_cuts_refuses_to_cut():
     port = FullyAsyncTrainerGroup(SimpleNamespace(call_workers=lambda fn, *a: [], optimizer_steps_per_round=None))
     with pytest.raises(RuntimeError, match="without round cuts"):
         port._cuts()
+
+
+def test_a_fully_async_round_cut_takes_the_pool_with_a_policy_age(tmp_path):
+    """S26 E9 G2 (e9-g2-b): with --rl-max-policy-age > 0 the cut asks the rollout
+    pool for its in-flight work; the fully_async pool had no export, so every cut
+    was refused (RebuildRefused). It now exports nothing (queued groups are
+    generated again after a resume) and the cut context is built."""
+    from yeto.rl.adapters.verl.fully_async_ports import FullyAsyncRolloutPool
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+    from yeto.rl.engine.round_cut import CutSource
+
+    island = SimpleNamespace(required=2, rollouter_started=True, seek_rollouter=None,
+                             emit=lambda event, **f: None)
+    pool = FullyAsyncRolloutPool(island)
+    pool._cursor.consume(5)
+    state = SimpleNamespace(policy_version=3, policy_tensor_hash=lambda: "h" * 64)
+    driver = SimpleNamespace(published_state=state, published_version=3, local_step=3,
+                             profile=SimpleNamespace(max_policy_age=2), at_safe_point=True, expected_token="yeto:3:h")
+    source = CutSource(driver=driver, trainer=None, rollout=pool, ledger=None, algorithm=AlgorithmSpec(),
+                       backend_fingerprint="sha256:" + "0" * 64, cut_root="", global_batch_size=1)
+    context = source.context("r000003-x")
+    assert context.data == {"sample_offset": 5, "buffer_length": 0}
+    assert tuple(context.in_flight) == () and context.ledger["max_policy_age"] == 2

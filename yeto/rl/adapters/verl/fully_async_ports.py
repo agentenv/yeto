@@ -115,6 +115,14 @@ class FullyAsyncRolloutPool:
         """Prompts the rounds took from the queue (kept or discarded; .fully_async_cut)."""
         return self._cursor.cursor()
 
+    def export_in_flight(self) -> dict[str, Any]:
+        """A round cut's in-flight work (``round_cut.CutSource``): none is carried.
+        Every group a round pulled is kept for that round or dropped, so the
+        driver holds no pulled group at the cut; the groups still queued in the
+        rollouter are generated again after a resume, from the data cursor
+        (:mod:`.fully_async_cut`)."""
+        return {"entries": [], "buffer_groups": 0}
+
     def seek_data_cursor(self, cursor) -> dict[str, int]:
         self._cursor.started = self.island.rollouter_started
         landed = self._cursor.seek(cursor)
