@@ -29,7 +29,7 @@ from pathlib import Path
 import modal
 
 HERE = Path(__file__).resolve()
-REPO = HERE.parents[3]
+REPO = HERE.parents[3] if len(HERE.parents) > 3 else Path("/")  # in the container the module sits at /root
 WORKDIR = "/root/sky_workdir"
 PLAN = "examples/stage1/glm5next-mini-modal.yaml"
 IMAGE = ("ghcr.io/michaellchung/yeto-miles-ports@sha256:"
@@ -134,8 +134,15 @@ def _env(extra: dict) -> dict:
 def prep() -> str:
     out = subprocess.run(["python3", f"{WORKDIR}/tools/probes/s25_g1/make_mini.py", "/data/models"],
                          capture_output=True, text=True, cwd=WORKDIR, env=_env({}))
+    text = out.stdout[-6000:] + "\nSTDERR:\n" + out.stderr[-4000:]
+    Path("/data/models/prep.log").write_text(text)
     models.commit()
-    return out.stdout[-6000:] + "\nSTDERR:\n" + out.stderr[-4000:]
+    return text
+
+
+@app.local_entrypoint()
+def prep_main() -> None:
+    print(prep.remote())
 
 
 # --------------------------------------------------------------------- sampler smoke
