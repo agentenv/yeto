@@ -261,8 +261,10 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
     from yeto.rl.engine.resume import store_for
     from yeto.rl.engine.sampler_loop import SamplerLoop
     from yeto.rl.engine.sampler_resume import (
+        RECLAIM_MARKER_ENV,
         ReclaimWatcher,
         SamplerMembership,
+        install_marker_signals,
         new_incarnation,
         reclaim_marker,
         reclaim_requested,
@@ -290,6 +292,8 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
         raise SampleBufferRolloutError(f"{SAMPLER_ID_ENV} is not set")
     incarnation = env[INCARNATION_ENV] = new_incarnation()
     reclaim_marker(env).unlink(missing_ok=True)  # a restarted machine keeps its /tmp
+    if env.get(RECLAIM_MARKER_ENV):  # set by the launcher on a pair's sampler island
+        install_marker_signals(env)
     buffer = open_buffer(env, sampler=True)
     resume = resume_point(buffer.entries(), sampler_id)
     membership = SamplerMembership(store_for(config.store, environ=environ), sampler_id,

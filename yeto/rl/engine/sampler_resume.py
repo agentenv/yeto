@@ -154,6 +154,35 @@ def reclaim_marker(environ: Mapping[str, str]) -> Path:
     return Path(environ.get(RECLAIM_MARKER_ENV) or DEFAULT_RECLAIM_MARKER)
 
 
+def write_reclaim_marker(environ: Mapping[str, str], signum: int) -> Path:
+    """Write the reclaim marker (what the Modal runner writes on its signal)."""
+    path = reclaim_marker(environ)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps({"signal": int(signum), "time": time.time()}) + "\n")
+    tmp.replace(path)
+    return path
+
+
+def install_marker_signals(environ: Mapping[str, str], signal_mod: Any = None) -> list[str]:
+    """On the island's main thread: SIGINT and SIGTERM write the reclaim marker
+    instead of raising ``KeyboardInterrupt``. Modal signals the whole container,
+    so the island process gets the reclaim signal next to the runner; without
+    this it dies inside its round and leaves as INFRA_FAILED (T-C1 run a).
+    Returns the signals handled ([] off the main thread)."""
+    import signal as _signal
+
+    sig = signal_mod or _signal
+    if threading.current_thread() is not threading.main_thread():
+        return []
+    done = []
+    for name in ("SIGINT", "SIGTERM"):
+        num = getattr(sig, name, None)
+        if num is not None:
+            sig.signal(num, lambda signum, _frame: write_reclaim_marker(environ, signum))
+            done.append(name)
+    return done
+
+
 def reclaim_requested(environ: Mapping[str, str]) -> bool:
     """The Modal runner wrote the reclaim marker (the container got SIGINT/SIGTERM)."""
     return reclaim_marker(environ).exists()
