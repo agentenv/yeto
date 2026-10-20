@@ -718,7 +718,10 @@ class IslandDriver:
                 f"v{manifest.target_policy_version} {manifest.target_policy_hash}"
             )
         members = frozenset(self.rollout.members())
-        if not members or result.members != members:
+        # an engineless pool (trainer-only island) has no member to acknowledge;
+        # every other pool must have at least one and all must acknowledge
+        engineless = bool(getattr(self.rollout, "engineless", False))
+        if (not members and not engineless) or result.members != members:
             missing = sorted(members - result.members)
             raise PublicationError(
                 f"partial publication of policy v{rollout_id}; unacknowledged "
@@ -1694,7 +1697,8 @@ class IslandDriver:
                 or manifest.target_policy_hash != cut_policy_hash):
             raise PublicationError("re-publication after rebuild acknowledged another policy")
         members = frozenset(self.rollout.members())
-        if not members or result_pub.members != members:
+        engineless = bool(getattr(self.rollout, "engineless", False))
+        if (not members and not engineless) or result_pub.members != members:
             raise PublicationError(
                 f"partial re-publication after rebuild; missing {sorted(members - result_pub.members)}"
             )
