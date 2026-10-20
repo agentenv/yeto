@@ -455,7 +455,10 @@ def expand(plan: Stage1Plan, *, hf_config: str | Path | None = None) -> Expanded
     offload = float(miles.get("optimizer_offload_fraction") or 0.0)
     island_argv = ["python3", "-m", "yeto.rl.adapters.miles.island_entry",
                    "--model", model_dir, "--model-revision", str(model["bf16_source"]["revision"]),
-                   "--data", str(task["data"]), "--data-revision", str(task["data_revision"]),
+                   # task.data_local: the dataset staged on the node (the nodes run with HF_HUB_OFFLINE=1,
+                   # where a Hub id does not load; Modal run-2); a local path takes no revision
+                   *(("--data", str(task["data_local"])) if task.get("data_local") else
+                     ("--data", str(task["data"]), "--data-revision", str(task["data_revision"]))),
                    "--reward-function", str(task["reward"]),
                    "--samples-per-group", str(int(task["n_samples_per_prompt"])),
                    "--rollout-max-response-len", str(int(sampling["max_tokens"])),

@@ -129,6 +129,7 @@ task:
   rollout_batch_size: 4
   n_samples_per_prompt: 4
   prompts_jsonl: /data/models/datasets/gsm8k-0cbd9f3/train.jsonl
+  data_local: /data/models/datasets/gsm8k-0cbd9f3/train.jsonl   # the same rows for the trainer (offline nodes)
   input_key: messages
   label_key: label
   prompt_format: chat

@@ -126,7 +126,11 @@ def _nvml_sampler(path: Path) -> subprocess.Popen:
 
 def _env(extra: dict) -> dict:
     path = ":".join(p for p in (WORKDIR, os.environ.get("PYTHONPATH", "")) if p)
-    return {**os.environ, "PYTHONPATH": path, **{k: str(v) for k, v in extra.items()}}
+    # The island's Python cannot import the Modal client; the Volume store commits and
+    # reloads through this interpreter (yeto.cloud.modal_ckpt_store, as yeto.modal_runner does).
+    runner = {"YETO_MODAL_PYTHON": sys.executable,
+              "YETO_MODAL_SYSPATH": os.pathsep.join(p for p in sys.path if p)}
+    return {**os.environ, "PYTHONPATH": path, **runner, **{k: str(v) for k, v in extra.items()}}
 
 
 # --------------------------------------------------------------------- prep (CPU)
