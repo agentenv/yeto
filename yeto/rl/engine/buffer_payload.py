@@ -27,6 +27,30 @@ class SampleBufferRolloutError(RuntimeError):
     pass
 
 
+class SampleBufferExhausted(SampleBufferRolloutError):
+    """The samplers ended the buffer and no trainable group is left for the round
+    (S26 E9.3). The trainer's run ends normally (FINISHED) before this round; it
+    is not a failure: e.g. groups were passed over as older than max_policy_age,
+    so the data holds fewer rounds than --total-steps."""
+
+
+def is_buffer_exhausted(error: BaseException | None) -> bool:
+    """Whether ``error`` is (or wraps) :class:`SampleBufferExhausted`.
+
+    The reader raises it in the rollout process; it reaches the driver wrapped
+    (a Ray task error keeps it as ``cause`` or as a dual subclass), so the cause
+    chain is followed and the class is matched by name as well."""
+    seen: set[int] = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, SampleBufferExhausted) or any(
+                c.__name__ == SampleBufferExhausted.__name__ for c in type(error).__mro__):
+            return True
+        cause = getattr(error, "cause", None)
+        error = cause if isinstance(cause, BaseException) else (error.__cause__ or error.__context__)
+    return False
+
+
 def _encode_value(value: Any) -> Any:
     tolist = getattr(value, "tolist", None)
     if callable(tolist) and hasattr(value, "dtype") and hasattr(value, "shape"):

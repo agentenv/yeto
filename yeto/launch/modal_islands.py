@@ -301,6 +301,23 @@ def container_set_poller_for(args, modal_ops, modal_cfgs, on_change, *, start: b
     return poller.start() if start else poller
 
 
+def container_log_follower_for(args, modal_ops, modal_cfgs, route, *, poller, start: bool = True):
+    """The follower of rescheduled containers' logs (modal_runner.ContainerLogFollower),
+    only when a new container is expected (no failing container guard: ``poller``
+    is None) and the ops can stream one container. None otherwise."""
+    if poller is not None or modal_ops is None or not modal_cfgs:
+        return None
+    if not (callable(getattr(modal_ops, "list_container_ids", None))
+            and callable(getattr(modal_ops, "stream_container_logs", None))):
+        return None
+    from ..modal_runner import ContainerLogFollower
+
+    expected = sum(max(1, int(getattr(cfg, "num_nodes", 1) or 1)) for cfg in modal_cfgs.values())
+    follower = ContainerLogFollower(modal_ops.list_container_ids, modal_ops.stream_container_logs,
+                                    expected, route=route)
+    return follower.start() if start else follower
+
+
 def effective_recover_timeout(args) -> float:
     """The fleet controller's learner relaunch budget.
 

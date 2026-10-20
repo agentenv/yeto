@@ -210,6 +210,9 @@ def island_args(args: Any, island: int, num_islands: int) -> Any:
         out.rl_sampler_node = node_name(island) if out.rl_sample_role == SAMPLER else None
         out.rl_buffer_shards = buffer_shards(args, num_islands)
         samplers = len(sampler_islands(args, num_islands))
+        # each sampler island draws its own slot of the data (S26 E9.3)
+        out.rl_sampler_data_slot = (DataSlot(sampler_islands(args, num_islands).index(island), samplers).env()
+                                    if out.rl_sample_role == SAMPLER and samplers > 1 else None)
         if out.rl_sample_role == SAMPLER and getattr(args, "rl_sampler_spot", False):
             # spot billing without the legacy --spot volume: the buffer is the sampler's
             # durable state (S25 C1)
@@ -424,4 +427,52 @@ def island_flags(args: Any) -> str:
         flags += f" --rl-sampler-node {args.rl_sampler_node}"
     if getattr(args, "rl_buffer_shards", None):
         flags += f" --rl-buffer-shards {','.join(args.rl_buffer_shards)}"
+    if getattr(args, "rl_sampler_data_slot", None):
+        flags += f" --rl-sampler-data-slot {args.rl_sampler_data_slot}"
     return flags
+
+
+# ---------------------------------------------------------------- data slots (S26 E9.3)
+@dataclass(frozen=True)
+class DataSlot:
+    """Which part of the prompt data one sampler island draws from.
+
+    Several sampler islands of one run read the same data with the same seed;
+    without a split they draw the same prompts in the same order (S25 C1: every
+    prompt sampled twice). Sampler ``index`` of ``count`` keeps the rows whose
+    original row number ``i`` has ``i % count == index``: the samplers draw
+    disjoint prompts, each in the data order (or its own seeded shuffle), and a
+    replacement incarnation of a sampler keeps its slot, so its resume cursor
+    stays valid. ``DataSlot(0, 1)`` is the whole data."""
+
+    index: int = 0
+    count: int = 1
+
+    def __post_init__(self) -> None:
+        if not (int(self.count) >= 1 and 0 <= int(self.index) < int(self.count)):
+            raise ValueError(f"data slot {self.index}/{self.count}: need 0 <= index < count")
+
+    @classmethod
+    def parse(cls, text: str | None) -> "DataSlot":
+        """``"index/count"`` (``None`` or empty: the whole data)."""
+        if not text:
+            return cls()
+        index, sep, count = str(text).partition("/")
+        if not sep:
+            raise ValueError(f"data slot {text!r}: expected 'index/count'")
+        return cls(int(index), int(count))
+
+    def env(self) -> str:
+        return f"{self.index}/{self.count}"
+
+    @property
+    def whole(self) -> bool:
+        return self.count == 1
+
+    def rows(self, rows: list) -> list:
+        """The rows of this slot, in their original order."""
+        out = list(rows[self.index::self.count])
+        if not out:
+            raise ValueError(f"data slot {self.env()} of {len(rows)} rows is empty")
+        return out
+

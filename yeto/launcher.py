@@ -60,7 +60,7 @@ from .launch.tapes import (
 )
 from .launch.modal_islands import (
     _modal_tape_run_dir, _tail_modal, _verify_modal_app_stopped, build_modal_island_config,
-    container_set_poller_for, effective_recover_timeout, pull_modal_tapes,
+    container_log_follower_for, container_set_poller_for, effective_recover_timeout, pull_modal_tapes,
     require_modal_for_gpu_exact,
 )
 from .launch.fleet import (
@@ -617,6 +617,17 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         container_poller = container_set_poller_for(args, modal_ops, modal_cfgs, on_container_change)
         if container_poller is not None:
             container_guards.append(container_poller)
+
+        def route_container(learner_id: int):
+            # the island of a rescheduled container's lines (unique learner id only:
+            # the islands of a pair all run as learner 0)
+            names = [n for n, cfg in modal_cfgs.items() if int(cfg.learner_id) == int(learner_id)]
+            if len(names) != 1:
+                return None
+            return names[0], (event_collectors.get(names[0]) if names[0] in echo_names else None)
+
+        # daemon threads; each container's log ends when the app stops
+        container_log_follower_for(args, modal_ops, modal_cfgs, route_container, poller=container_poller)
 
         from . import runs
         from .modal_runner import RoutingOps

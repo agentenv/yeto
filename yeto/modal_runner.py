@@ -1194,6 +1194,19 @@ class ModalOps:
         for entry in modal.FunctionCall.from_id(call_id).logs.stream():
             yield getattr(entry, "message", str(entry))
 
+    def stream_container_logs(self, container_id: str):
+        """The log lines of one container (``modal container logs``; follows while it
+        runs). The function-call stream of :meth:`stream_logs` does not deliver the
+        lines of a container that Modal started after a reschedule (S25 C1)."""
+        proc = subprocess.Popen([sys.executable, "-m", "modal", "container", "logs", str(container_id)],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        try:
+            assert proc.stdout is not None
+            yield from proc.stdout
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+
 
 CONTAINER_LINE_RE = re.compile(r"\[modal-island (\d+)\] rank (\d+) container (\S+)")
 
@@ -1285,6 +1298,94 @@ class ContainerSetPoller:
 
     def start(self) -> "ContainerSetPoller":
         threading.Thread(target=self.run, daemon=True, name="modal-container-set").start()
+        return self
+
+    def stop(self) -> None:
+        self._stop.set()
+
+
+class ContainerLogFollower:
+    """Follows the logs of the Modal containers the call log streams miss (S26 E9.3).
+
+    After ``modal container stop`` (or a real reclaim) Modal runs the island's
+    input again in a new container, and the function-call log stream never
+    delivers that container's lines (S19, S25 C1), so the launcher showed only
+    the first container. Every ``interval_s`` this lists the app's running
+    containers; the first ``expected`` ids are the baseline (the call streams
+    show them); for every later id it prints one launcher warning and streams
+    that container's own log (``stream_container(id)``) on a daemon thread.
+
+    Each line is printed with a ``[<label>]`` prefix. The label is
+    ``container <id>`` until the container prints its island line
+    (``[modal-island N] rank R container ID``); then ``route(N)`` may name the
+    island and give its event collector (``(label, collector)`` or None), and
+    later lines go to that collector as well."""
+
+    def __init__(self, list_ids, stream_container, expected: int, *, route=None,
+                 interval_s: float = 30.0, out=None) -> None:
+        self.list_ids, self.stream_container = list_ids, stream_container
+        self.expected_count = max(1, int(expected))
+        self.route = route or (lambda _learner: None)
+        self.interval_s = float(interval_s)
+        self.out = out
+        self.baseline: set[str] | None = None
+        self.seen: set[str] = set()
+        self.followed: list[str] = []
+        self.threads: list[threading.Thread] = []
+        self._stop = threading.Event()
+
+    def _print(self, text: str) -> None:
+        print(text, file=self.out if self.out is not None else sys.stdout, flush=True)
+
+    def poll_once(self) -> list[str]:
+        """List once; returns the container ids it started to follow."""
+        try:
+            ids = self.list_ids()
+        except Exception as exc:  # noqa: BLE001 - a failed list is skipped
+            self._print(f"[launcher] container list failed: {exc}")
+            return []
+        if ids is None:
+            return []
+        ids = set(ids)
+        if self.baseline is None:
+            self.seen |= ids
+            if len(self.seen) >= self.expected_count:
+                self.baseline = set(self.seen)
+            return []
+        new = sorted(ids - self.baseline - set(self.followed))
+        for cid in new:
+            self.followed.append(cid)
+            self._print(f"[launcher] WARNING: new Modal container {cid} (an island was rescheduled); "
+                        "following its log")
+            thread = threading.Thread(target=self.follow, args=(cid,), daemon=True,
+                                      name=f"modal-container-log-{cid}")
+            thread.start()
+            self.threads.append(thread)
+        return new
+
+    def follow(self, cid: str) -> None:
+        label, collector = f"container {cid}", None
+        try:
+            for line in self.stream_container(cid):
+                text = str(line).rstrip("\n")
+                m = CONTAINER_LINE_RE.search(text)
+                if m and m.group(3) == cid and collector is None:
+                    routed = self.route(int(m.group(1)))
+                    if routed is not None:
+                        label, collector = routed
+                for part in text.split("\n"):
+                    self._print(f"[{label}] {part.rstrip()}")
+                if collector is not None:
+                    collector.feed(text)
+        except Exception as exc:  # noqa: BLE001 - the run goes on without this log
+            self._print(f"[launcher] log of container {cid} ended: {exc}")
+
+    def run(self) -> None:
+        while not self._stop.wait(self.interval_s):
+            self.poll_once()
+
+    def start(self) -> "ContainerLogFollower":
+        threading.Thread(target=self.run, daemon=True, name="modal-container-logs").start()
         return self
 
     def stop(self) -> None:

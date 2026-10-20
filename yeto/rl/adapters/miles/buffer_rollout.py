@@ -55,6 +55,7 @@ from typing import Any
 from yeto.rl.engine.buffer_payload import (  # noqa: F401
     PAYLOAD_SCHEMA,
     GroupWriter,
+    SampleBufferExhausted,
     SampleBufferRolloutError,
     decode_group,
     encode_group,
@@ -69,6 +70,7 @@ from yeto.rl.engine.merged_release import (
     lane_cursor_log,
     merges_shards,
 )
+from yeto.rl.engine.sample_roles import DataSlot
 
 SAMPLER, TRAINER, CONVERTIBLE = "sampler", "trainer", "convertible"
 ROLES = (SAMPLER, TRAINER, CONVERTIBLE)
@@ -82,6 +84,7 @@ SHARD_ENV = "YETO_SAMPLE_BUFFER_SHARD"  # convertible node: its own shard of the
 # S25 C1: several sampler islands on one shared directory (a Modal Volume): each
 # sampler writes its own shard, the trainer merges these shards (comma list)
 SHARDS_ENV = "YETO_SAMPLE_BUFFER_SHARDS"
+DATA_SLOT_ENV = "YETO_SAMPLE_BUFFER_DATA_SLOT"  # sampler: "index/count" of the prompt data (S26 E9.3)
 INCARNATION_ENV = "YETO_SAMPLER_INCARNATION"  # set by the sampler island before Ray starts
 # the rollout functions run in Ray workers, which inherit the raylet's environment:
 # connect_island_ray forwards these to every worker
@@ -127,13 +130,14 @@ def rollout_argv(role: str | None, *, max_policy_age: int, fully_async: bool = F
 def island_env(role: str, *, store_root: str, sampler_id: str | None = None,
                max_policy_age: int | None = None, wait_s: float | None = None,
                shard: str | None = None, shards: Sequence[str] | None = None,
-               lane: BufferLane | None = None) -> dict[str, str]:
+               lane: BufferLane | None = None, data_slot: str | None = None) -> dict[str, str]:
     """The environment the launch layer exports on the island (read in the rollout
     process). A convertible node writes like a sampler, into its own ``shard`` of
     the index, and reads like a trainer. ``shards``: the sampler shards of a
     launch with several sampler islands (a sampler writes the one named by its
     sampler id, the trainer merges them all). ``lane``: a synced trainer's
-    buffer lane."""
+    buffer lane. ``data_slot``: a sampler's slot of the prompt data
+    (``sample_roles.DataSlot``; several sampler islands draw disjoint prompts)."""
     if role not in ROLES:
         raise ValueError(f"sample buffer role {role!r}: expected one of {ROLES}")
     env = {BUFFER_ROOT_ENV: str(store_root)}
@@ -161,6 +165,10 @@ def island_env(role: str, *, store_root: str, sampler_id: str | None = None,
         if role != TRAINER:
             raise ValueError("only a trainer reads a buffer lane")
         env[LANE_ENV] = lane.env()
+    if data_slot:
+        if role != SAMPLER:
+            raise ValueError("only a sampler island draws a data slot")
+        env[DATA_SLOT_ENV] = DataSlot.parse(data_slot).env()
     return env
 
 
@@ -238,6 +246,33 @@ def renumber_group(samples: Sequence[dict[str, Any]], *, position: int,
 
 
 # ---------------------------------------------------------------------- sampler side
+def apply_data_slot(data_source: Any, slot: DataSlot, *, shuffle: bool) -> int:
+    """Keep only ``slot``'s rows in a Miles ``RolloutDataSource`` (S26 E9.3).
+
+    Called once, before the first round and before a resume seek: the dataset's
+    original rows become the slot's rows, and the current epoch's order is made
+    again from them (the same seeded shuffle, over the slot). The data cursor of
+    a later round then counts in slot rows, so a replacement incarnation with
+    the same slot seeks to the same place. Returns the slot's row count."""
+    source = getattr(data_source, "__self__", data_source)
+    dataset = getattr(source, "dataset", None)
+    if slot.whole or dataset is None:
+        return len(dataset) if dataset is not None else 0
+    origin = getattr(dataset, "origin_samples", None)
+    if origin is None:
+        raise SampleBufferRolloutError(
+            f"cannot split data source {type(source).__name__} into slot {slot.env()} "
+            "(its dataset has no origin_samples)")
+    if int(getattr(source, "sample_offset", 0) or 0) or int(getattr(source, "epoch_id", 0) or 0):
+        raise SampleBufferRolloutError("the data slot is applied before the first draw")
+    dataset.origin_samples = slot.rows(origin)
+    dataset.samples = list(dataset.origin_samples)
+    if shuffle:
+        dataset.epoch_id = None  # force the reshuffle of the current epoch over the slot
+        dataset.shuffle(int(source.epoch_id))
+    return len(dataset.samples)
+
+
 _DATA_CURSOR_FIELDS = ("sample_offset", "epoch_id", "sample_group_index", "sample_index")
 
 
@@ -395,8 +430,9 @@ class BatchReader:
             self.sleep(self.poll_s)
         end = self.buffer.read_cursor
         if not out:
-            raise SampleBufferRolloutError(f"rollout {rollout_id}: the sample buffer ended "
-                                           f"with no trainable group (position {end})")
+            raise SampleBufferExhausted(f"rollout {rollout_id}: the sample buffer ended "
+                                        f"with no trainable group (position {end}, {stale} passed "
+                                        "over as too old)")
         self._ends[rollout_id] = end
         if self.cursor_log is not None:
             self.cursor_log.append(rollout_id, [position for position, _ in out], end)

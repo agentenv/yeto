@@ -24,6 +24,8 @@ The spec (:class:`SamplerSpec`, every key below is required unless marked):
 * ``prompts``: ``{"path": JSONL, "input_key", "label_key", "groups_per_round",
   "format": "text" | "chat"}`` -- round ``r`` takes the
   ``groups_per_round`` rows after row ``r * groups_per_round`` (wrapping);
+  optional ``"data_slot": "I/N"``: the sampler draws only rows ``i % N == I``
+  (``sample_roles.DataSlot``; several samplers of one run draw disjoint prompts);
   ``chat`` applies the tokenizer's chat template of ``tokenizer`` (default
   ``base_dir``) to a message list (``trust_remote_code``: optional, false);
 * ``reward``: ``"module:function"`` called as ``function(item, completion)``
@@ -62,6 +64,7 @@ from typing import Any
 
 from .engine_sampler import EngineSamplerConfig, PromptItem, Reward, build_engine_sampler
 from .sampler_checks import PostLoadChecks
+from .sample_roles import DataSlot
 from .sampler_engine import Completion, SamplerEngine, SamplingParams
 
 PROMPT_FORMATS = ("text", "chat")
@@ -105,12 +108,20 @@ class JsonlPrompts:
     """``prompts(rollout_id)`` over a local JSONL file (module doc)."""
 
     def __init__(self, path: str | Path, *, input_key: str, label_key: str | None, groups_per_round: int,
-                 render: Callable[[Any], str] = str) -> None:
+                 render: Callable[[Any], str] = str, data_slot: str | None = None) -> None:
         self.path = Path(path)
-        self.rows = [json.loads(line) for line in self.path.read_text(encoding="utf-8").splitlines()
-                     if line.strip()]
-        if not self.rows:
+        rows = list(enumerate(json.loads(line) for line in self.path.read_text(encoding="utf-8").splitlines()
+                              if line.strip()))
+        if not rows:
             raise SamplerSpecError(f"prompts file {self.path} has no rows")
+        try:
+            self.slot = DataSlot.parse(data_slot)
+            rows = self.slot.rows(rows)
+        except ValueError as error:
+            raise SamplerSpecError(f"prompts.data_slot: {error}") from None
+        # the prompt ids keep the file's row numbers, so two slots never share one
+        self.row_numbers = [i for i, _ in rows]
+        self.rows = [row for _, row in rows]
         if int(groups_per_round) < 1:
             raise SamplerSpecError("prompts.groups_per_round must be >= 1")
         self.input_key, self.label_key = input_key, label_key
@@ -126,8 +137,8 @@ class JsonlPrompts:
         start = int(rollout_id) * self.groups_per_round
         items = []
         for offset in range(self.groups_per_round):
-            index = (start + offset) % len(self.rows)
-            row = self.rows[index]
+            index = self.row_numbers[(start + offset) % len(self.rows)]
+            row = self.rows[(start + offset) % len(self.rows)]
             if self.input_key not in row:
                 raise SamplerSpecError(f"{self.path} row {index} has no {self.input_key!r}")
             items.append(PromptItem(prompt_id=f"row{index}", prompt=self.render(row[self.input_key]),
@@ -163,7 +174,8 @@ def build_prompts(spec: Mapping[str, Any]) -> JsonlPrompts:
         render = chat_renderer(tokenizer, remote_code=bool(prompts.get("trust_remote_code", False)))
     return JsonlPrompts(_require(prompts, "path", "prompts"), input_key=str(_require(prompts, "input_key", "prompts")),
                         label_key=prompts.get("label_key"),
-                        groups_per_round=int(_require(prompts, "groups_per_round", "prompts")), render=render)
+                        groups_per_round=int(_require(prompts, "groups_per_round", "prompts")), render=render,
+                        data_slot=prompts.get("data_slot"))
 
 
 # ------------------------------------------------------------------- reward

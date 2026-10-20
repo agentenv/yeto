@@ -26,6 +26,7 @@ from yeto.rl.engine.sampler_resume import new_incarnation, reclaim_requested
 from yeto.rl.engine.offpolicy_source import flat_metrics, offpolicy_source_event, payload_source_sample
 
 from .buffer_rollout import (
+    DATA_SLOT_ENV,
     DEFAULT_POLL_S,
     DEFAULT_WAIT_S,
     INCARNATION_ENV,
@@ -36,8 +37,10 @@ from .buffer_rollout import (
     TRAINER,
     WAIT_ENV,
     BatchReader,
+    DataSlot,
     SampleBufferRolloutError,
     SamplerRoundWriter,
+    apply_data_slot,
     convertible_mode,
     open_buffer,
     open_lane_log,
@@ -76,6 +79,9 @@ class BufferWriterRolloutFn(InferenceRolloutFn):
                                           incarnation=incarnation, resume=self.resumable,
                                           reclaimed=lambda: reclaim_requested(os.environ))
         self._shuffle = bool(getattr(input.args, "rollout_shuffle", False))  # the seek re-shuffles
+        # several sampler islands draw disjoint slots of the data (S26 E9.3); before any seek
+        apply_data_slot(self.data_source, DataSlot.parse(os.environ.get(DATA_SLOT_ENV)),
+                        shuffle=self._shuffle)
 
     def _open_writer_buffer(self) -> Any:
         return open_buffer(sampler=True)
