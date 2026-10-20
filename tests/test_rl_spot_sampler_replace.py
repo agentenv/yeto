@@ -408,3 +408,22 @@ def test_the_reclaim_watcher_leaves_once_while_the_loop_is_still_in_a_round(tmp_
     assert (leave["reason"], leave["rounds"], leave["in_flight_rollout_id"]) == ("PREEMPTED", 2, 4)
     record = (tmp_path / "sample-buffer/members/island0/b.json").read_text()
     assert '"leave_reason": "PREEMPTED"' in record and '"joined_at": 7.0' in record
+
+
+def test_the_reclaim_signal_writes_the_marker_instead_of_raising(tmp_path):
+    from yeto.rl.engine.sampler_resume import install_marker_signals
+
+    handlers = {}
+
+    class Sig:
+        SIGINT, SIGTERM = _signal.SIGINT, _signal.SIGTERM
+
+        @staticmethod
+        def signal(num, fn):
+            handlers[num] = fn
+
+    env = {RECLAIM_MARKER_ENV: str(tmp_path / "marker")}
+    assert install_marker_signals(env, signal_mod=Sig) == ["SIGINT", "SIGTERM"]
+    assert not reclaim_requested(env)
+    handlers[_signal.SIGINT](_signal.SIGINT, None)  # Modal's SIGINT reaches the island process
+    assert reclaim_requested(env) and '"signal": 2' in (tmp_path / "marker").read_text()
