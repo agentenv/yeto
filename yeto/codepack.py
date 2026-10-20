@@ -190,7 +190,8 @@ def build_pack(repo: str | os.PathLike[str]) -> tuple[CodePack, bytes]:
     files = pack_file_list(root)
     patch_sha = hashlib.sha256(patch).hexdigest()
     info = {"format": PACK_FORMAT, "mode": CODE_PACK_MODE_GIT_PATCH, "commit": commit,
-            "dirty": bool(patch), "patch_sha": patch_sha, "files": files}
+            "dirty": bool(patch), "patch_sha": patch_sha, "files": files,
+            "executables": _executables(root, files)}
     data = _tar_bytes(root, files, info)
     pack = CodePack(commit=commit, dirty=bool(patch), patch_sha=patch_sha,
                     digest=hashlib.sha256(data).hexdigest())
@@ -221,9 +222,34 @@ def tree_digest(tree: str | os.PathLike[str]) -> str:
     return hashlib.sha256(_tar_bytes(root, files, info)).hexdigest()
 
 
-def verify_tree(tree: str | os.PathLike[str], expected: str) -> str:
-    """Refuse a tree whose rebuilt tar does not have the digest ``expected``."""
+def _executables(root: Path, files: Iterable[str]) -> list[str]:
+    """The listed regular files with an executable bit (the pack records them as 0o755)."""
+    return [n for n in files
+            if not (root / n).is_symlink() and os.stat(root / n).st_mode & 0o111]
 
+
+def restore_executables(tree: str | os.PathLike[str]) -> list[str]:
+    """Set the executable bit again on the files the pack info lists as executable
+    and returns the ones it changed. A transport may drop the bit: sky's workdir
+    upload to a remote API server goes through a zip that the server unpacks
+    without file modes (T-C1b). A pack without the list (older packs) is left alone."""
+    root = Path(tree)
+    fixed = []
+    for name in read_pack_info(root).get("executables") or []:
+        path = root / name
+        if path.is_file() and not path.is_symlink():
+            mode = os.stat(path).st_mode
+            if not mode & 0o111:
+                os.chmod(path, mode | 0o755)
+                fixed.append(name)
+    return fixed
+
+
+def verify_tree(tree: str | os.PathLike[str], expected: str) -> str:
+    """Refuse a tree whose rebuilt tar does not have the digest ``expected``
+    (after :func:`restore_executables`: modes are part of the digest)."""
+
+    restore_executables(tree)
     actual = tree_digest(tree)
     if actual != expected.lower():
         raise CodePackError(f"code pack digest mismatch: run manifest has {expected.lower()}, "
