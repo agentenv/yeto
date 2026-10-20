@@ -129,12 +129,32 @@ def wants_host_hook(task_envs) -> bool:
     return bool(doc) and doc.get("role") == droppable.DROPPABLE and doc.get("cloud") == "nebius"
 
 
+def _server_credentials(cluster: str) -> dict[str, Any]:
+    """The cluster's SSH credentials from a remote sky API server (the cluster yaml
+    stays on the server), as ``sky status`` gets them; the private key is written
+    to the client's per-cluster key file, as the sky CLI does."""
+    from sky.client import sdk
+    from sky.utils import cluster_utils
+
+    records = sdk.stream_and_get(sdk.status([cluster], _include_credentials=True))
+    creds = dict(next((r.get("credentials") for r in records if r.get("name") == cluster), None) or {})
+    if not creds:
+        raise RuntimeError(f"the sky API server returned no SSH credentials for {cluster}")
+    cluster_utils.SSHConfigHelper.generate_local_key_file(cluster, creds)
+    return creds
+
+
 def _host_runner(handle: Any) -> Any:
-    """A sky SSH runner on the VM HOST (docker_user=None), not in the container."""
+    """A sky SSH runner on the VM HOST (docker_user=None), not in the container.
+    The credentials come from the local cluster yaml (sky API server on this
+    machine), else from the remote API server (T-C1b)."""
     from sky.backends import backend_utils
     from sky.utils import command_runner
 
-    creds = backend_utils.ssh_credential_from_yaml(handle.cluster_yaml, None, handle.ssh_user)
+    if os.path.exists(os.path.expanduser(handle.cluster_yaml)):
+        creds = backend_utils.ssh_credential_from_yaml(handle.cluster_yaml, None, handle.ssh_user)
+    else:
+        creds = _server_credentials(handle.cluster_name)
     creds.pop("docker_user", None)
     ip = handle.head_ip
     return command_runner.SSHCommandRunner((ip, 22), **creds)

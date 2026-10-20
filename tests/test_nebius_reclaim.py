@@ -8,6 +8,8 @@ import subprocess
 import threading
 from types import SimpleNamespace
 
+import pytest
+
 from yeto import launcher
 from yeto.cloud import droppable as dr
 from yeto.cloud import nebius_reclaim as nr
@@ -156,3 +158,28 @@ def test_launcher_installs_hook_only_for_nebius_droppable(monkeypatch):
         assert launcher.maybe_install_nebius_reclaim_hook(SimpleNamespace(envs=envs), (7, "H"), "c") is None
     assert launcher.maybe_install_nebius_reclaim_hook(neb, (7, None), "c2") is False
     assert len(seen) == 1
+
+
+def test_host_runner_takes_credentials_from_a_remote_api_server(monkeypatch, tmp_path):
+    # T-C1b: with the sky API server on another machine the cluster yaml is not here
+    pytest.importorskip("sky")
+    from sky.utils import command_runner
+
+    from yeto.cloud import nebius_reclaim as nr
+
+    asked = []
+    key = tmp_path / "c.key"
+    key.write_text("key\n")
+
+    def server_credentials(cluster):
+        asked.append(cluster)
+        return {"ssh_user": "ubuntu", "ssh_private_key": str(key),
+                "ssh_control_name": "c", "ssh_proxy_command": None, "docker_user": "root"}
+
+    monkeypatch.setattr(nr, "_server_credentials", server_credentials)
+    handle = SimpleNamespace(cluster_yaml=str(tmp_path / "missing.yml"), cluster_name="c-1",
+                             ssh_user="ubuntu", head_ip="10.0.0.5")
+    runner = nr._host_runner(handle)
+    assert asked == ["c-1"] and isinstance(runner, command_runner.SSHCommandRunner)
+    assert runner.ip == "10.0.0.5" and runner.ssh_user == "ubuntu"
+    assert getattr(runner, "docker_user", None) is None  # the HOST, not the container
