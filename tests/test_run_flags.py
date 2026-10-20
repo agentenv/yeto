@@ -250,7 +250,7 @@ def test_forward_tables_name_flags_of_both_layers():
 # flag renamed in the schema but still spelled the old way in the launcher fails.
 _NON_RL_LITERALS = frozenset({
     "--abbrev-ref", "--adapter-dir", "--add", "--address", "--allow-unattested-legacy-adapter",
-    "--allow-unauthenticated-islands", "--bind", "--cap-add", "--carry-gamma",
+    "--allow-unauthenticated-islands", "--async-checkpoint", "--bind", "--cap-add", "--carry-gamma",
     "--checkpoint-every", "--checkpoint-path", "--codex-harness-binary", "--config-json",
     "--create", "--dashboard-host", "--dearmor", "--depth", "--detach", "--dtype",
     "--entrypoint", "--expected-island-contract", "--final-ack-timeout-s", "--final-grace-s", "--follow", "--force",

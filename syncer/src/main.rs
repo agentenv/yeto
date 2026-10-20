@@ -98,6 +98,10 @@ struct Args {
     /// Write the snapshot every N outer steps (0 disables).
     #[arg(long, default_value_t = 8)]
     checkpoint_every: u64,
+    /// Policy sweep: write per-round checkpoints off the scheduler; each
+    /// round is broadcast only after its checkpoint is durable.
+    #[arg(long, default_value_t = false)]
+    async_checkpoint: bool,
     /// Resume from --checkpoint-path if it exists.
     #[arg(long, default_value_t = false)]
     resume: bool,
@@ -273,6 +277,7 @@ fn main() -> anyhow::Result<()> {
         final_state: args.final_state,
         checkpoint_path: args.checkpoint_path,
         checkpoint_every: args.checkpoint_every,
+        async_checkpoint: args.async_checkpoint,
         resume: args.resume,
         mark_final_checkpoint: args.mark_final_checkpoint,
         learner_budget_steps: args.learner_budget_steps,

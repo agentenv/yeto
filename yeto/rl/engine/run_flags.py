@@ -842,6 +842,20 @@ _SYNC = (
         "(ports engine, --rl-placement fixed-partition, --rl-sao-contracts)",
     ),
     cli_flag(
+        "--rl-sync-fragment-pipeline",
+        type=int,
+        default=1,
+        help="full-parameter only: fragment rounds the syncer gathers at once "
+        "(1..--fragments). Above 1, fragment k+1 uploads while fragment k merges "
+        "and downloads; merge results are unchanged (default 1 = serial)",
+    ),
+    cli_flag(
+        "--rl-sync-async-checkpoint",
+        action="store_true",
+        help="full-parameter only: the syncer writes each per-round checkpoint off "
+        "its scheduler and broadcasts that round only once the checkpoint is durable",
+    ),
+    cli_flag(
         "--rl-initial-adapter",
         default=None,
         help="local final PEFT adapter for a fresh Decoupled RL phase",

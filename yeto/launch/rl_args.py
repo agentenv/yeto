@@ -169,11 +169,16 @@ def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
         problems.append("--rl-island-scheduling legacy (no fragment frames in elastic mode)")
     if rl_needs_critic(args):
         problems.append("a critic-free algorithm (the strict sweep trains the actor only)")
+    fragment_pipeline = int(getattr(args, "rl_sync_fragment_pipeline", 1))
+    if not 1 <= fragment_pipeline <= max(args.fragments, 1):
+        problems.append("--rl-sync-fragment-pipeline between 1 and --fragments")
     if problems:
         raise ValueError(f"--rl-sync-preset {FULL_PARAMETER_SYNC_PRESET} requires " + "; ".join(problems))
     args.quorum = num_islands
     args.grace_ms = 0
-    args.pipeline = 1
+    # Fragment rounds of one sweep are independent (H=1, plain average), so the
+    # syncer may gather several at once; it still commits them in step order.
+    args.pipeline = fragment_pipeline
     args.sync_interval_steps = 0.0
     args.delta_correction = "none"
     args.outer_lr = 1.0

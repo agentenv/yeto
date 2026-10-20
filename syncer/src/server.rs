@@ -91,6 +91,12 @@ pub struct Config {
     /// the quiescent cut between rounds, resumed from when `resume` is set.
     pub checkpoint_path: Option<std::path::PathBuf>,
     pub checkpoint_every: u64,
+    /// Policy-sweep only: persist each per-round checkpoint on a blocking
+    /// writer instead of the scheduler, and broadcast that round only after
+    /// the write is durable. Merge results, versions, and checkpoint bytes
+    /// are unchanged, so this is deliberately not part of the semantic
+    /// profile hash.
+    pub async_checkpoint: bool,
     pub resume: bool,
     /// Create the adjacent final marker only for a completed terminal cut.
     pub mark_final_checkpoint: bool,
@@ -702,8 +708,11 @@ fn validate_config(cfg: &Config) -> Result<()> {
         if cfg.total_steps == 0 {
             bail!("--policy-sweep-fragments requires positive --total-steps");
         }
-        if cfg.pipeline != 1 {
-            bail!("--policy-sweep-fragments requires --pipeline 1");
+        // Fragment rounds of one sweep are independent (H=1, plain average,
+        // no momentum), so up to P of them may gather concurrently; commits
+        // stay in strict step order.
+        if cfg.pipeline == 0 || cfg.pipeline > fragments {
+            bail!("--policy-sweep-fragments requires --pipeline between 1 and the fragment count");
         }
         if !cfg.total_steps.is_multiple_of(u64::from(fragments)) {
             bail!("--total-steps must be divisible by --policy-sweep-fragments");
@@ -731,6 +740,14 @@ fn validate_config(cfg: &Config) -> Result<()> {
                 "--policy-sweep-fragments requires --checkpoint-path and \
                  --checkpoint-every 1 for crash-safe sweeps"
             );
+        }
+    }
+    if cfg.async_checkpoint {
+        if cfg.policy_sweep_fragments.is_none() {
+            bail!("--async-checkpoint requires --policy-sweep-fragments");
+        }
+        if cfg.learner_budget_steps.is_some() {
+            bail!("--async-checkpoint does not support --learner-budget-steps");
         }
     }
     Ok(())
@@ -2116,12 +2133,15 @@ async fn scheduler(
     let mut computing = tokio::task::JoinSet::<Result<ComputedRound>>::new();
     let mut ready: BTreeMap<u64, ComputedRound> = BTreeMap::new();
     let mut busy_fragments: HashSet<usize> = HashSet::new();
+    // --async-checkpoint: the committed round whose checkpoint is in flight.
+    let mut publishing: Option<PendingPublish> = None;
     let mut cutoff_established = false;
     let mut first_budget_report: Option<(Member, u64)> = None;
     'outer: while next_t <= cfg.total_steps
         || !inflight.is_empty()
         || !computing.is_empty()
         || !ready.is_empty()
+        || publishing.is_some()
     {
         if budget_cutoff.deadline().is_some() {
             cutoff_established = true;
@@ -2138,17 +2158,37 @@ async fn scheduler(
             let completed = take_next_commit(&mut ready, next_commit_t)
                 .context("ready commit disappeared after linearization")?;
             let p = completed.round.p;
-            commit_round(
-                &cfg,
-                &mut st,
-                &registry,
-                &mut last_sync_secs,
-                completed,
-                &budget_cutoff,
-            )
-            .await?;
-            if !busy_fragments.remove(&p) {
-                bail!("fragment {p} lost its busy ownership at commit");
+            if cfg.async_checkpoint {
+                // At most one checkpoint write is outstanding: the snapshot
+                // of t must be durable before t+1 is snapshotted, which also
+                // bounds host memory to one extra copy of the state.
+                if let Some(pending) = publishing.take() {
+                    settle_pending_publish(
+                        &cfg,
+                        &st,
+                        &registry,
+                        &mut last_sync_secs,
+                        pending,
+                        &budget_cutoff,
+                        &mut busy_fragments,
+                    )
+                    .await?;
+                }
+                let committed = apply_round_commit(&cfg, &mut st, completed)?;
+                publishing = Some(start_async_checkpoint(&cfg, &st, committed)?);
+            } else {
+                commit_round(
+                    &cfg,
+                    &mut st,
+                    &registry,
+                    &mut last_sync_secs,
+                    completed,
+                    &budget_cutoff,
+                )
+                .await?;
+                if !busy_fragments.remove(&p) {
+                    bail!("fragment {p} lost its busy ownership at commit");
+                }
             }
             next_commit_t = next_commit_t
                 .checked_add(1)
@@ -2349,7 +2389,19 @@ async fn scheduler(
         if next_fragment_available {
             earliest = Some(earliest.map_or(next_launch, |d| d.min(next_launch)));
         }
-        let wake = match earliest {
+        let wake = if let Some(pending) = publishing.as_mut() {
+            // Same event-first bias; a durable checkpoint outranks compute
+            // so the oldest committed round is exposed first.
+            let sleep_until = earliest.map(tokio::time::Instant::from_std);
+            tokio::select! {
+                biased;
+                event = events.recv() => SchedulerWake::Event(event),
+                written = &mut pending.write => SchedulerWake::Durable(written),
+                result = computing.join_next(), if !computing.is_empty() => SchedulerWake::Computed(result),
+                _ = sleep_until_opt(sleep_until) => SchedulerWake::Deadline,
+            }
+        } else {
+            match earliest {
             Some(deadline) if !computing.is_empty() => tokio::select! {
                 biased;
                 wake = prefer_event_over_compute(events.recv(), computing.join_next()) => wake,
@@ -2364,9 +2416,27 @@ async fn scheduler(
                 prefer_event_over_compute(events.recv(), computing.join_next()).await
             }
             None => continue,
+            }
         };
         match wake {
             SchedulerWake::Deadline => continue,
+            SchedulerWake::Durable(written) => {
+                let pending = publishing
+                    .take()
+                    .context("durable checkpoint without a pending publish")?;
+                finish_pending_publish(
+                    &cfg,
+                    &st,
+                    &registry,
+                    &mut last_sync_secs,
+                    pending.committed,
+                    pending.write_started,
+                    written,
+                    &budget_cutoff,
+                    &mut busy_fragments,
+                )
+                .await?;
+            }
             SchedulerWake::Computed(Some(result)) => {
                 let completed = result.context("iso compute task panicked")??;
                 let t = completed.round.t;
@@ -2469,6 +2539,20 @@ async fn scheduler(
                     // slots in existing rounds. The helper revalidates the
                     // generation because catch-up awaits socket writers and
                     // a newer HELLO may supersede this one meanwhile.
+                    // Catch-up must never expose a round whose checkpoint
+                    // is not yet durable.
+                    if let Some(pending) = publishing.take() {
+                        settle_pending_publish(
+                            &cfg,
+                            &st,
+                            &registry,
+                            &mut last_sync_secs,
+                            pending,
+                            &budget_cutoff,
+                            &mut busy_fragments,
+                        )
+                        .await?;
+                    }
                     if st.global_step < cfg.total_steps {
                         send_all_fragments(&st, &group, &budget_cutoff).await;
                     }
@@ -2553,6 +2637,18 @@ async fn scheduler(
                                 // Catch-up must precede a replay even when the
                                 // disconnect event wins the race with the queued
                                 // replacement HELLO.
+                                if let Some(pending) = publishing.take() {
+                                    settle_pending_publish(
+                                        &cfg,
+                                        &st,
+                                        &registry,
+                                        &mut last_sync_secs,
+                                        pending,
+                                        &budget_cutoff,
+                                        &mut busy_fragments,
+                                    )
+                                    .await?;
+                                }
                                 if st.global_step < cfg.total_steps {
                                     send_all_fragments(&st, &group, &budget_cutoff).await;
                                 }
@@ -2640,6 +2736,7 @@ async fn scheduler(
     if next_commit_t != cfg.total_steps.saturating_add(1)
         || st.global_step != cfg.total_steps
         || !busy_fragments.is_empty()
+        || publishing.is_some()
     {
         bail!(
             "non-quiescent terminal cut: next_commit_t={next_commit_t} global_step={} busy={:?}",
@@ -2935,6 +3032,14 @@ enum SchedulerWake {
     Deadline,
     Event(Option<Event>),
     Computed(Option<std::result::Result<Result<ComputedRound>, tokio::task::JoinError>>),
+    Durable(std::result::Result<Result<()>, tokio::task::JoinError>),
+}
+
+async fn sleep_until_opt(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
 }
 
 type ComputeJoin = Option<std::result::Result<Result<ComputedRound>, tokio::task::JoinError>>;
@@ -3189,6 +3294,24 @@ fn prepare_round_compute(cfg: &Config, st: &GlobalState, round: &Round) -> Resul
     st.prepare_merge(round.p, round.base_version, &outer_gradients, &weights)
 }
 
+/// A round whose merge is applied to `GlobalState` but not yet externally
+/// visible: no BCAST, no tape record, no log line.
+struct CommittedRound {
+    t: u64,
+    p: usize,
+    base_version: u64,
+    attempt: u32,
+    started: Instant,
+    expected_members: Vec<Member>,
+    quorum_size: usize,
+    quorum_ms: Option<u64>,
+    grace_ms: Option<u64>,
+    pushes: HashMap<Member, Push>,
+    gnorm: f64,
+    compute_secs: f64,
+    sync_start: Instant,
+}
+
 /// Commit an already-computed round. Called only for the contiguous t prefix,
 /// so Nesterov, versions, ledger, event tape, checkpoint, and broadcast all
 /// share one deterministic order even when SVD completion is out of order.
@@ -3200,6 +3323,26 @@ async fn commit_round(
     completed: ComputedRound,
     budget_cutoff: &BudgetCutoff,
 ) -> Result<()> {
+    let committed = apply_round_commit(cfg, st, completed)?;
+    let mut checkpoint_ms = None;
+    if checkpoint_before_broadcast(cfg) {
+        if let Some(path) = cfg.checkpoint_path.as_ref() {
+            let checkpoint_start = Instant::now();
+            st.save_checkpoint(path)?;
+            checkpoint_ms = Some(checkpoint_start.elapsed().as_millis() as u64);
+            info!(step = committed.t, path = %path.display(), "checkpoint committed");
+        }
+    }
+    publish_round(cfg, st, registry, last_sync_secs, committed, checkpoint_ms, budget_cutoff).await
+}
+
+/// Apply the merge, version, step, and ledger updates of the next contiguous
+/// round. Nothing leaves the process here.
+fn apply_round_commit(
+    cfg: &Config,
+    st: &mut GlobalState,
+    completed: ComputedRound,
+) -> Result<CommittedRound> {
     let ComputedRound {
         round,
         merge,
@@ -3237,7 +3380,6 @@ async fn commit_round(
     st.global_step = t;
     let mut ordered_pushes: Vec<_> = pushes.iter().collect();
     ordered_pushes.sort_unstable_by_key(|(member, _)| **member);
-    let responders: Vec<Member> = ordered_pushes.iter().map(|(member, _)| **member).collect();
     for (_, push) in ordered_pushes {
         if let Some(fragments) = cfg.policy_sweep_fragments {
             st.record_fragment_merge(
@@ -3252,15 +3394,52 @@ async fn commit_round(
             st.record_merge(push.learner_id, push.c_steps, push.c_tokens);
         }
     }
+    Ok(CommittedRound {
+        t,
+        p,
+        base_version,
+        attempt,
+        started,
+        expected_members,
+        quorum_size,
+        quorum_ms,
+        grace_ms,
+        pushes,
+        gnorm,
+        compute_secs,
+        sync_start,
+    })
+}
 
-    let checkpoint_each_round = checkpoint_before_broadcast(cfg);
-    if checkpoint_each_round {
-        if let Some(path) = cfg.checkpoint_path.as_ref() {
-            st.save_checkpoint(path)?;
-            info!(step = t, path = %path.display(), "checkpoint committed");
-        }
-    }
-
+/// Expose a committed round: BCAST its fragment, log it, append its tape
+/// record, and write the periodic (non-per-round) checkpoint. A per-round
+/// checkpoint must already be durable when this is called.
+async fn publish_round(
+    cfg: &Config,
+    st: &GlobalState,
+    registry: &Registry,
+    last_sync_secs: &mut f64,
+    committed: CommittedRound,
+    checkpoint_ms: Option<u64>,
+    budget_cutoff: &BudgetCutoff,
+) -> Result<()> {
+    let CommittedRound {
+        t,
+        p,
+        base_version,
+        attempt,
+        started,
+        expected_members,
+        quorum_size,
+        quorum_ms,
+        grace_ms,
+        pushes,
+        gnorm,
+        compute_secs,
+        sync_start,
+    } = committed;
+    let mut responders: Vec<Member> = pushes.keys().copied().collect();
+    responders.sort_unstable();
     // A disconnected learner can catch up after reconnecting. Deterministic
     // local encoding/allocation failures must terminate the coordinator
     // instead of silently committing a cut that was never broadcastable.
@@ -3318,6 +3497,7 @@ async fn commit_round(
             quorum_ms,
             grace_ms,
             sync_ms,
+            checkpoint_ms,
             &pushes,
             gnorm,
             ms,
@@ -3330,13 +3510,104 @@ async fn commit_round(
     // have also been broadcast; the terminal cut is delivered by FINAL.
     // A crash-resume loses those gathers; their fragments simply merge on
     // a later cycle, which the quorum design already tolerates.
-    if !checkpoint_each_round {
+    if !checkpoint_before_broadcast(cfg) {
         if let Some(path) = &cfg.checkpoint_path {
             if cfg.checkpoint_every > 0 && t % cfg.checkpoint_every == 0 {
                 st.save_checkpoint(path)?;
                 info!(step = t, path = %path.display(), "checkpoint written");
             }
         }
+    }
+    Ok(())
+}
+
+/// A committed round whose per-round checkpoint is being written by a
+/// blocking task (`--async-checkpoint`). Its fragment stays busy and its
+/// BCAST is withheld until the write is durable, so no learner can observe
+/// a version a crash could lose.
+struct PendingPublish {
+    committed: CommittedRound,
+    write_started: Instant,
+    write: tokio::task::JoinHandle<Result<()>>,
+}
+
+/// Snapshot the just-committed state and start persisting it off the
+/// scheduler thread.
+fn start_async_checkpoint(
+    cfg: &Config,
+    st: &GlobalState,
+    committed: CommittedRound,
+) -> Result<PendingPublish> {
+    let path = cfg
+        .checkpoint_path
+        .clone()
+        .context("--async-checkpoint requires --checkpoint-path")?;
+    let write_started = Instant::now();
+    let bytes = st.encode_checkpoint()?;
+    let write = tokio::task::spawn_blocking(move || {
+        crate::state::write_checkpoint_bytes(&path, &bytes)
+    });
+    Ok(PendingPublish {
+        committed,
+        write_started,
+        write,
+    })
+}
+
+/// Wait for a pending per-round checkpoint, then publish its round. A failed
+/// write fails the coordinator before the round becomes visible; the
+/// previous checkpoint stays the resume point.
+async fn settle_pending_publish(
+    cfg: &Config,
+    st: &GlobalState,
+    registry: &Registry,
+    last_sync_secs: &mut f64,
+    pending: PendingPublish,
+    budget_cutoff: &BudgetCutoff,
+    busy_fragments: &mut HashSet<usize>,
+) -> Result<()> {
+    let PendingPublish {
+        committed,
+        write_started,
+        write,
+    } = pending;
+    finish_pending_publish(
+        cfg,
+        st,
+        registry,
+        last_sync_secs,
+        committed,
+        write_started,
+        write.await,
+        budget_cutoff,
+        busy_fragments,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn finish_pending_publish(
+    cfg: &Config,
+    st: &GlobalState,
+    registry: &Registry,
+    last_sync_secs: &mut f64,
+    committed: CommittedRound,
+    write_started: Instant,
+    written: std::result::Result<Result<()>, tokio::task::JoinError>,
+    budget_cutoff: &BudgetCutoff,
+    busy_fragments: &mut HashSet<usize>,
+) -> Result<()> {
+    let (t, p) = (committed.t, committed.p);
+    written
+        .context("async checkpoint task panicked")?
+        .with_context(|| format!("async checkpoint for step {t} failed; step {t} not broadcast"))?;
+    let checkpoint_ms = Some(write_started.elapsed().as_millis() as u64);
+    if let Some(path) = cfg.checkpoint_path.as_ref() {
+        info!(step = t, path = %path.display(), "checkpoint committed");
+    }
+    publish_round(cfg, st, registry, last_sync_secs, committed, checkpoint_ms, budget_cutoff).await?;
+    if !busy_fragments.remove(&p) {
+        bail!("fragment {p} lost its busy ownership at publish");
     }
     Ok(())
 }
@@ -3359,6 +3630,30 @@ async fn complete_round(
     };
     let cutoff = BudgetCutoff::new(false, Duration::ZERO);
     commit_round(cfg, st, registry, last_sync_secs, completed, &cutoff).await
+}
+
+/// Test twin of `complete_round` through the `--async-checkpoint` path.
+#[cfg(test)]
+async fn complete_round_async(
+    cfg: &Config,
+    st: &mut GlobalState,
+    registry: &Registry,
+    last_sync_secs: &mut f64,
+    round: Round,
+) -> Result<()> {
+    let prepared = prepare_round_compute(cfg, st, &round)?;
+    let compute_start = Instant::now();
+    let merge = prepared.compute().await?;
+    let completed = ComputedRound {
+        round,
+        merge,
+        compute_secs: compute_start.elapsed().as_secs_f64(),
+    };
+    let cutoff = BudgetCutoff::new(false, Duration::ZERO);
+    let mut busy = HashSet::from([completed.round.p]);
+    let committed = apply_round_commit(cfg, st, completed)?;
+    let pending = start_async_checkpoint(cfg, st, committed)?;
+    settle_pending_publish(cfg, st, registry, last_sync_secs, pending, &cutoff, &mut busy).await
 }
 
 fn new_state_for(group: &Arc<Group>, cfg: &Config) -> Result<GlobalState> {
@@ -3856,6 +4151,7 @@ fn append_tape(
     quorum_ms: Option<u64>,
     grace_ms: Option<u64>,
     sync_ms: u64,
+    checkpoint_ms: Option<u64>,
     pushes: &HashMap<Member, Push>,
     gnorm: f64,
     ms: u64,
@@ -3932,9 +4228,10 @@ fn append_tape(
         .map(|byte| format!("{byte:02x}"))
         .collect();
     let merge_seconds = sync_ms as f64 / 1000.0;
+    let checkpoint_field = checkpoint_tape_field(checkpoint_ms);
     let sweep_fields = policy_sweep_event_fields(step, policy_sweep_fragments);
     let line = format!(
-        "{{\"protocol_version\":{PROTOCOL_VERSION},\"delta_semantics\":\"local_minus_raw_anchor\",\"sync/layout_hash\":\"{layout_hash}\",\"sync/base_version\":{launch_base_version},\"sync/responders\":{},\"sync/quorum\":{quorum},\"sync/rejected_stale_updates\":0,\"sync/merge_seconds\":{merge_seconds},\"sync/global_delta_norm\":{gnorm},\"step\":{step},\"fragment\":{fragment}{sweep_fields},\"launch_base_version\":{launch_base_version},\"attempt\":{attempt},\"gnorm\":{gnorm},\"ms\":{ms},\"quorum\":{quorum},\"expected\":{},\"expected_members\":{},\"responded\":{},\"responded_members\":{},\"missed_grace\":{},\"missed_members\":{},\"quorum_ms\":{quorum_ms},\"grace_ms\":{grace_ms},\"sync_ms\":{sync_ms},\"time_unix\":{:?},\"responders\":[{}]}}\n",
+        "{{\"protocol_version\":{PROTOCOL_VERSION},\"delta_semantics\":\"local_minus_raw_anchor\",\"sync/layout_hash\":\"{layout_hash}\",\"sync/base_version\":{launch_base_version},\"sync/responders\":{},\"sync/quorum\":{quorum},\"sync/rejected_stale_updates\":0,\"sync/merge_seconds\":{merge_seconds},\"sync/global_delta_norm\":{gnorm},\"step\":{step},\"fragment\":{fragment}{sweep_fields},\"launch_base_version\":{launch_base_version},\"attempt\":{attempt},\"gnorm\":{gnorm},\"ms\":{ms},\"quorum\":{quorum},\"expected\":{},\"expected_members\":{},\"responded\":{},\"responded_members\":{},\"missed_grace\":{},\"missed_members\":{},\"quorum_ms\":{quorum_ms},\"grace_ms\":{grace_ms},\"sync_ms\":{sync_ms}{checkpoint_field},\"time_unix\":{:?},\"responders\":[{}]}}\n",
         responded.len(),
         json_ids(&expected_learners),
         json_members(expected_members),
@@ -3952,6 +4249,12 @@ fn append_tape(
         .and_then(|mut f| f.write_all(line.as_bytes()))
         .with_context(|| format!("append event tape {}", path.display()))?;
     Ok(())
+}
+
+/// Optional top-level tape field: wall time of the per-round checkpoint
+/// (synchronous save, or snapshot + async write until durable).
+fn checkpoint_tape_field(checkpoint_ms: Option<u64>) -> String {
+    checkpoint_ms.map_or_else(String::new, |ms| format!(",\"checkpoint_ms\":{ms}"))
 }
 
 fn json_ids(ids: &[u32]) -> String {
@@ -4354,6 +4657,7 @@ mod tests {
             final_state: None,
             checkpoint_path: None,
             checkpoint_every: 0,
+            async_checkpoint: false,
             resume: false,
             mark_final_checkpoint: false,
             learner_budget_steps: None,
@@ -4618,10 +4922,30 @@ mod tests {
         assert!(format!("{:#}", validate_config(&invalid).unwrap_err())
             .contains("requires positive --total-steps"));
 
+        let mut streamed = sweep_test_config(2, 4);
+        streamed.pipeline = 2;
+        streamed.async_checkpoint = true;
+        assert!(validate_config(&streamed).is_ok());
+        for pipeline in [0, 3] {
+            invalid = sweep_test_config(2, 4);
+            invalid.pipeline = pipeline;
+            assert!(format!("{:#}", validate_config(&invalid).unwrap_err())
+                .contains("requires --pipeline between 1 and the fragment count"));
+        }
+        let mut legacy_async = round_test_config(3);
+        legacy_async.async_checkpoint = true;
+        assert!(format!("{:#}", validate_config(&legacy_async).unwrap_err())
+            .contains("--async-checkpoint requires --policy-sweep-fragments"));
         invalid = sweep_test_config(2, 4);
-        invalid.pipeline = 2;
+        invalid.async_checkpoint = true;
+        invalid.learner_budget_steps = Some(1);
         assert!(format!("{:#}", validate_config(&invalid).unwrap_err())
-            .contains("requires --pipeline 1"));
+            .contains("does not support --learner-budget-steps"));
+        // Async persistence is not semantic: the profile hash ignores it.
+        let mut hashed = sweep_test_config(2, 4);
+        let before = hashed.semantic_profile_hash();
+        hashed.async_checkpoint = true;
+        assert_eq!(before, hashed.semantic_profile_hash());
 
         invalid = sweep_test_config(3, 4);
         assert!(
@@ -5241,6 +5565,120 @@ mod tests {
         assert_eq!(final_reload.ledger.get(&0).unwrap().merges, 2);
         assert_eq!(final_reload.params, resumed.params);
 
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    fn unique_test_directory(tag: &str) -> std::path::PathBuf {
+        let directory = std::env::temp_dir().join(format!(
+            "yeto-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    #[tokio::test]
+    async fn async_checkpoint_matches_the_synchronous_path_bit_for_bit() {
+        let directory = unique_test_directory("async-checkpoint-equal");
+        let learner = member(0, 30);
+        let mut outputs = Vec::new();
+        for asynchronous in [false, true] {
+            let checkpoint = directory.join(format!("state-{asynchronous}.ckpt"));
+            let tape = directory.join(format!("tape-{asynchronous}.jsonl"));
+            let (group, mut frames) = streaming_test_group(DTYPE_F32, false);
+            let registry = registry_with_group(group);
+            let mut config = round_test_config(4);
+            config.pipeline = 2;
+            config.checkpoint_path = Some(checkpoint.clone());
+            config.checkpoint_every = 1;
+            config.async_checkpoint = asynchronous;
+            config.event_tape = Some(tape.clone());
+            let mut state = two_fragment_streaming_state();
+            let mut sync_seconds = 0.0;
+            for step in 1..=2u64 {
+                let round = sweep_test_round(step, (step - 1) as usize, 1, step, learner);
+                if asynchronous {
+                    complete_round_async(&config, &mut state, &registry, &mut sync_seconds, round)
+                        .await
+                        .unwrap();
+                } else {
+                    complete_round(&config, &mut state, &registry, &mut sync_seconds, round)
+                        .await
+                        .unwrap();
+                }
+                // Every non-terminal round is broadcast exactly once.
+                assert_eq!(
+                    chunked_inner_type(&frames.try_recv().unwrap()),
+                    MSG_BCAST_FRAGMENT
+                );
+            }
+            let tape_text = std::fs::read_to_string(&tape).unwrap();
+            assert_eq!(tape_text.lines().count(), 2);
+            assert!(tape_text.lines().all(|line| line.contains("\"checkpoint_ms\":")));
+            outputs.push((state.params.clone(), std::fs::read(&checkpoint).unwrap()));
+            // The snapshot encoder writes exactly the streaming file format.
+            let mut on_disk = two_fragment_streaming_state();
+            on_disk.load_checkpoint(&checkpoint).unwrap();
+            assert_eq!(on_disk.encode_checkpoint().unwrap(), std::fs::read(&checkpoint).unwrap());
+        }
+        assert_eq!(outputs[0].0, outputs[1].0);
+        assert_eq!(outputs[0].1, outputs[1].1);
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[tokio::test]
+    async fn async_checkpoint_failure_withholds_broadcast_and_keeps_previous_checkpoint() {
+        let directory = unique_test_directory("async-checkpoint-failure");
+        let checkpoint = directory.join("state.ckpt");
+        let learner = member(0, 30);
+        let (group, mut frames) = streaming_test_group(DTYPE_F32, false);
+        let registry = registry_with_group(group);
+        let mut config = round_test_config(4);
+        config.pipeline = 2;
+        config.checkpoint_path = Some(checkpoint.clone());
+        config.checkpoint_every = 1;
+        config.async_checkpoint = true;
+        let mut state = two_fragment_streaming_state();
+        let mut sync_seconds = 0.0;
+        complete_round_async(
+            &config,
+            &mut state,
+            &registry,
+            &mut sync_seconds,
+            sweep_test_round(1, 0, 1, 1, learner),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            chunked_inner_type(&frames.try_recv().unwrap()),
+            MSG_BCAST_FRAGMENT
+        );
+        // The atomic writer creates this exact temporary path; a directory
+        // there makes the next write fail deterministically.
+        std::fs::create_dir(checkpoint.with_extension("tmp")).unwrap();
+        let error = complete_round_async(
+            &config,
+            &mut state,
+            &registry,
+            &mut sync_seconds,
+            sweep_test_round(2, 1, 1, 1, learner),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("step 2 not broadcast"));
+        assert!(matches!(
+            frames.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        // The resume point is still the last durable, broadcast cut.
+        let mut recovered = two_fragment_streaming_state();
+        recovered.load_checkpoint(&checkpoint).unwrap();
+        assert_eq!(recovered.global_step, 1);
+        assert_eq!(recovered.versions, vec![1, 0]);
         std::fs::remove_dir_all(&directory).ok();
     }
 
@@ -6227,6 +6665,7 @@ mod tests {
             Some(11),
             Some(22),
             33,
+            None,
             &pushes,
             0.5,
             44,
@@ -6275,6 +6714,7 @@ mod tests {
             Some(1),
             Some(0),
             2,
+            None,
             &pushes,
             0.5,
             3,
@@ -6303,6 +6743,7 @@ mod tests {
             Some(1),
             Some(0),
             2,
+            None,
             &pushes,
             0.5,
             3,
@@ -6410,6 +6851,7 @@ mod tests {
             Some(1),
             Some(0),
             2,
+            None,
             &pushes,
             0.5,
             3,

@@ -259,7 +259,7 @@ class SyncerSemanticProfile:
             raise ValueError("syncer profile resume requires checkpointing")
         if self.policy_sweep_fragments is not None:
             fragments = self.policy_sweep_fragments
-            if self.pipeline != 1 or self.total_steps % fragments:
+            if not 1 <= self.pipeline <= fragments or self.total_steps % fragments:
                 raise ValueError("syncer profile policy sweep schedule is invalid")
 
     def validate_sao(self) -> None:

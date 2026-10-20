@@ -161,7 +161,8 @@ def _syncer_profile_binding(args) -> str:
     full-parameter adds strict P-fragment policy sweeps; sao-streaming-full adds the
     frozen contract's timeouts and the publishable final checkpoint."""
     if rl_dense_sweep(args):
-        return f" --policy-sweep-fragments {args.fragments} --require-profile-binding"
+        async_checkpoint = " --async-checkpoint" if getattr(args, "rl_sync_async_checkpoint", False) else ""
+        return f" --policy-sweep-fragments {args.fragments} --require-profile-binding{async_checkpoint}"
     if rl_sao_streaming(args):
         profile = args.rl_sao_manifest.profile
         return (f" --quorum-timeout-s {profile.quorum_timeout_s}"
