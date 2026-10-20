@@ -242,6 +242,10 @@ def verl_bare_overrides(spec: EffSpec, mode: str, run_id: str) -> list[str]:
         "actor_rollout_ref.hybrid_engine=False",
         "actor_rollout_ref.rollout.mode=async",
         "actor_rollout_ref.rollout.checkpoint_engine.backend=nccl",
+        # The fork's disaggregated sender drops the PEFT config of unmerged LoRA params
+        # (engine_workers.update_weights), so the rollout would load them as base
+        # weights; merged LoRA sends full weights, the fork's working LoRA path.
+        "actor_rollout_ref.model.lora.merge=True",
         "rollout.nnodes=1",
         f"rollout.n_gpus_per_node={c['rollout']}",
         f"rollout.total_rollout_steps={spec.groups_per_round * spec.rounds}",
@@ -381,6 +385,10 @@ def bare_script(spec: EffSpec, arm: Arm, run_id: str) -> str:
     if arm.framework == "verl":
         lines += [f"cd {VERL_ROOT}", f"export VERL_FILE_LOGGER_PATH={OUT_DIR}/verl-metrics.jsonl",
                   f"export PYTHONPATH={EFF_DIR}",
+                  # Modal: the trainer allocates NCCL host buffers with cuMem, the
+                  # rollout-side receiver falls back to /dev/shm and cannot attach
+                  # (eff01-bare-verl-async-d, NCCL_DEBUG=INFO); both use /dev/shm.
+                  *(["export NCCL_CUMEM_HOST_ENABLE=0"] if arm.mode == "async" else []),
                   "exec python3 -m " + verl_bare_entry(arm.mode) + " " + shlex.join(
                       verl_bare_overrides(spec, arm.mode, run_id))]
     else:

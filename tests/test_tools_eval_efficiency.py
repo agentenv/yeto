@@ -340,3 +340,9 @@ def test_cli_plan_and_unregistered_run(tmp_path, monkeypatch, capsys):
     (tmp_path / "ledger.md").write_text("nothing registered\n")
     with pytest.raises(SystemExit, match="not pre-registered"):
         cli.main(["eff-run", "qwen3-0.6b", "--arm", "bare-verl-sync", "--run-id", "eff-x", "--out", str(tmp_path)])
+
+
+def test_bare_verl_async_uses_the_fork_working_lora_sync():
+    script = spec.bare_script(SPEC, spec.Arm.parse("bare-verl-async"), "r")
+    assert "actor_rollout_ref.model.lora.merge=True" in script and "export NCCL_CUMEM_HOST_ENABLE=0" in script
+    assert "NCCL_CUMEM_HOST_ENABLE" not in spec.bare_script(SPEC, spec.Arm.parse("bare-verl-sync"), "r")

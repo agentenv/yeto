@@ -2,7 +2,8 @@
 arms and yeto+verl (yeto+Miles runs through the yeto launcher, ``miles_local.sh``).
 
 One GPU container per run, ``<gpu>:<cards>``, in the framework's image (the
-same image the yeto arm of that framework uses). The container:
+image the yeto arm of that framework uses; for verl the bare arms skip yeto's
+source patch). The container:
 
 1. checks every visible GPU is the asked type (``modal_verl._gpu``);
 2. samples NVML every second into ``nvml.csv`` (index, util, memory, power);
@@ -111,7 +112,9 @@ def build_app(run: str, plan: dict):
     from yeto.rl.adapters.verl.image import modal_image
 
     if plan["image"] == "verl":
-        image = modal_image(modal).env({"PYTHONUNBUFFERED": "1"})
+        # bare arms run the fork as shipped: yeto's patch replaces the LoRA weight-sync
+        # sender with an import of yeto (eff01-bare-verl-async-a/d)
+        image = modal_image(modal, patched=plan["system"] == "yeto").env({"PYTHONUNBUFFERED": "1"})
         if plan["system"] == "yeto":
             image = image.add_local_dir(str(mv.REPO), mv.WORKDIR, copy=False, ignore=MOUNT_IGNORE)
     else:
