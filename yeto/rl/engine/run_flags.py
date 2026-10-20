@@ -863,9 +863,9 @@ _SYNC = (
         action="store_true",
         help="full-parameter only (E2 option): train the next round while the "
         "sweep syncs, then rebase the trainer onto the new global weights "
-        "(theta <- G_k + local progress). Rollouts are one outer step staler: "
-        "--rl-max-policy-age is raised to at least 1 and the algorithm spec must "
-        "tolerate it (checked before launch)",
+        "(theta <- G_k + local progress). The local weights lag the global policy "
+        "by one outer step; rollouts stay on-policy, so --rl-max-policy-age stays 0. "
+        "Needs --rl-sync-fragment-pipeline equal to --fragments",
     ),
     cli_flag(
         "--rl-sync-push-int8-block",

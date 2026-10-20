@@ -214,6 +214,12 @@ def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
         problems.append("--rl-sync-push-int8-block between 32 and 1048576")
     elif int8_block != 128 and getattr(args, "rl_sync_push_dtype", "f32") != "int8":
         problems.append("--rl-sync-push-int8-block only with --rl-sync-push-dtype int8")
+    if getattr(args, "rl_sync_overlap", False):
+        from ..rl.engine.sync_overlap import overlap_option_problems
+
+        problems += overlap_option_problems(
+            max_policy_age=getattr(args, "rl_max_policy_age", 0) or 0,
+            fragment_pipeline=fragment_pipeline, fragments=args.fragments)
     if problems:
         raise ValueError(f"--rl-sync-preset {FULL_PARAMETER_SYNC_PRESET} requires " + "; ".join(problems))
     args.quorum = num_islands
@@ -363,15 +369,6 @@ def _prepare_rl_args(
     # what the selected backend supports before any cloud or GPU work.
     from ..rl.engine.policy_age import validate_limit
 
-    if args.rl_sync_preset == FULL_PARAMETER_SYNC_PRESET and getattr(args, "rl_sync_overlap", False):
-        # S26 E3: sync/train overlap adds one outer step of staleness; raise the
-        # limit to the new minimum here so every check below (backend support,
-        # and the preflight's algorithm-spec staleness) validates it at launch.
-        from ..rl.engine.sync_overlap import required_policy_age
-
-        required = required_policy_age(0)
-        if int(getattr(args, "rl_max_policy_age", 0) or 0) < required:
-            args.rl_max_policy_age = required
     max_policy_age = validate_limit(getattr(args, "rl_max_policy_age", 0) or 0)
     policy_age_module = _rl_backend_module(args, "policy_age")
     policy_age_module.SUPPORT.check(max_policy_age)

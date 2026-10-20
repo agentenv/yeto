@@ -840,6 +840,42 @@ class MilesChunkedFullParameterAdapter:
         sink = AuthoritativeFragmentSink(current, ray_module=ray_module)
         return sink(fragment_id, stored.version, values.tobytes())
 
+    def relabel_local_progress(
+        self,
+        cut: ReferencedPolicyCut,
+        *,
+        local_rounds: int,
+    ) -> ReferencedPolicyCut:
+        """Sync/train overlap: label a rebased cut with its local progress.
+
+        ``apply`` resets the local step generation to 0, but a rebased cut
+        (``G + (current - base)``) still holds ``local_rounds`` rounds of
+        progress over its anchor ``G``, and Miles pushes only cuts with
+        progress (generation >= 1). Values, chunk hashes and refs are shared
+        with ``cut`` (fresh ref lists, so releasing one leaves the other);
+        only the generation label changes."""
+
+        from dataclasses import replace
+
+        from miles.ray.full_parameter_transport import FullParameterChunkedCut
+
+        if isinstance(local_rounds, bool) or not isinstance(local_rounds, int) or local_rounds < 1:
+            raise ValueError("a rebased cut needs at least one local round")
+        if cut.layout_hash != self.layout.layout_hash or cut.local_step_generation != 0:
+            raise ValueError("only an applied (generation 0) cut is relabeled")
+        transport = cut.transport_cut
+        relabeled = FullParameterChunkedCut(
+            policy_version=transport.policy_version,
+            local_step_generation=local_rounds,
+            parameter_layout_hash=transport.parameter_layout_hash,
+            shards=tuple(
+                replace(shard, local_step_generation=local_rounds,
+                        chunk_refs=[list(references) for references in shard.chunk_refs])
+                for shard in transport.shards
+            ),
+        )
+        return self.validate_cut(relabeled, cut.policy_version, local_rounds)
+
     async def apply(
         self,
         group: MilesChunkedFullParameterGroup,

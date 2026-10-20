@@ -99,7 +99,8 @@ class RoleStreamConfig:
     push_int8_block: int = DEFAULT_I8_BLOCK
     bcast_delta: bool = False
     # S26 E3: train round k+1 while sweep k syncs, then rebase the trainer
-    # (see FullParameterSync._overlap_boundary); one more outer step stale.
+    # (see FullParameterSync._overlap_boundary); the local weights lag the
+    # global policy by one outer step (yeto.rl.engine.sync_overlap).
     overlap: bool = False
 
     @property
@@ -653,16 +654,20 @@ class MilesFullParameterRoleStream:
         return (fragment_id,)
 
     def finish_rebase(self) -> None:
-        """Overlap: the rebased cut is the next submission (``G + progress``)."""
+        """Overlap: the rebased cut is the next submission (``G + progress``).
 
-        if not self.config.overlap or self.current is None:
+        The applied cut has generation 0; the submission is the same weights
+        labeled with the rounds trained since the round base."""
+
+        if not self.config.overlap or self.current is None or self.adapter is None:
             raise RuntimeError(f"{self.config.role} finish_rebase outside overlap")
         previous_submission = self.submission_cut
-        self.submission_cut = self.current
+        self.submission_cut = self.adapter.relabel_local_progress(
+            self.current, local_rounds=self.local_rounds - self._rounds_at_base)
         self.submission_fragment_versions = self.fragment_versions
         self.submission_rounds = self.local_rounds
         self.submission_tokens = self.action_tokens
-        self._release_cuts(previous_submission, keep=(self.current, self._round_base))
+        self._release_cuts(previous_submission, keep=(self.current, self.submission_cut, self._round_base))
 
     def mark_round_base(self) -> None:
         """Overlap: pin the cut the next local round starts from."""

@@ -814,13 +814,7 @@ def _dense_full_sync_config(
 
     from yeto.rl.adapters.miles.full_parameter.role_stream import RoleStreamConfig
     from yeto.rl.adapters.miles.full_parameter.session import FullParameterSyncConfig
-    from yeto.rl.engine.sync_overlap import required_policy_age
     from yeto.rl.local_learner import ComponentIdentity
-
-    overlap = bool(getattr(args, "sweep_overlap", False))
-    if overlap and int(getattr(args, "rl_max_policy_age", 0) or 0) < required_policy_age(0):
-        raise ValueError("--sweep-overlap rollouts are one outer step stale: it needs "
-                         f"--rl-max-policy-age >= {required_policy_age(0)}")
 
     actor = RoleStreamConfig(
         algorithm="grpo",
@@ -847,7 +841,9 @@ def _dense_full_sync_config(
         push_dtype=getattr(args, "sweep_push_dtype", "f32"),
         push_int8_block=int(getattr(args, "sweep_push_int8_block", 128)),
         bcast_delta=bool(getattr(args, "bcast_delta", False)),
-        overlap=overlap,
+        # The rollout policy age stays 0 (``_check_dense_full_sweep``); the
+        # overlap's outer-step lag is bound into the session contract.
+        overlap=bool(getattr(args, "sweep_overlap", False)),
     )
     return FullParameterSyncConfig((actor,), sweep=True)
 

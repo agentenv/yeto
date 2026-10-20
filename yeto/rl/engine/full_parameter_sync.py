@@ -612,26 +612,52 @@ class FullParameterSync:
             if not pairing.any_finalizing:
                 for stream in pairing.streams.values():
                     stream.finish_rebase()
-        rebased_ts = unix_now()
         if pairing.any_finalizing:
             await pairing.finish_without_more_training()
             return True
         before = pairing.fragment_versions()
-        pairing.submit_ready()
-        submit_ts = unix_now()
         if rollout_id + 1 >= pairing.profile.total_rounds:
             # Terminal round: nothing trains after it, so wait for the cut.
+            pairing.submit_ready()
+            submit_ts = unix_now()
             await pairing.commit_staged_broadcasts()
             await self._wait_for_sweep(before)
             self._timing = SyncTiming(submit_ts, unix_now())
             await pairing.finish_without_more_training()
             return True
+        await self._push_whole_sweep(before)
         self._pending_sweep = before
         for stream in pairing.streams.values():
             stream.mark_round_base()
-        # This boundary blocked only on the previous sweep (wait + rebase).
-        self._timing = SyncTiming(wait_ts, rebased_ts if hold else None)
+        # This boundary blocked on the previous sweep (wait + rebase) and on
+        # handing every fragment of this sweep to the wire.
+        self._timing = SyncTiming(wait_ts, unix_now())
         return False
+
+    async def _push_whole_sweep(self, before: tuple[int, ...]) -> None:
+        """Overlap: submit every fragment of the sweep after ``before`` before
+        training on. A PULL that arrives later would otherwise wait for the
+        next boundary, a whole local round, and stall the sweep. The syncer
+        sends all P PULLs at once with ``--pipeline P`` (required by the
+        launcher), so this waits only for their arrival."""
+
+        pairing = self.pairing
+        fragments = pairing.profile.fragments
+        steps = {version + fragments if version else fragment_id + 1
+                 for fragment_id, version in enumerate(before)}
+        deadline = time.monotonic() + pairing.profile.wait_timeout
+
+        def pushed() -> bool:
+            return steps <= {key[0] for key, pair in pairing.inflight.items() if pair.complete}
+
+        pairing.submit_ready()
+        while not pushed():
+            if time.monotonic() >= deadline:
+                error = TimeoutError("overlap could not submit the whole sweep before the wait timeout")
+                pairing.fail_stop(error)
+                raise error
+            await asyncio.sleep(pairing.profile.poll_seconds)
+            pairing.submit_ready()
 
     async def _wait_for_sweep(self, before: tuple[int, ...]) -> None:
         """Strict sweep: block until all P fragments of this local step are

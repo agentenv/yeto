@@ -329,7 +329,7 @@ _ISLAND = (
         "--sweep-overlap",
         action="store_true",
         help="full-parameter sweep: train the next round while the sweep syncs, then "
-        "rebase onto the new global weights (needs --rl-max-policy-age >= 1)",
+        "rebase onto the new global weights (rollout policy age stays 0)",
     ),
     island_flag(
         "--bcast-delta",
