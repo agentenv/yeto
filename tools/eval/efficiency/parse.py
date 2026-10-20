@@ -417,6 +417,8 @@ def parse_run(run_dir: Path) -> dict[str, Any]:
     parsed = parse_yeto(_tape_events(raw), mode=mode, framework_parsed=fw,
                         framework_round_offset=1 if plan["framework"] == "verl" else 0) \
         if plan["system"] == "yeto" else fw
+    if meta.get("rc") is None and _read(raw / "rc").strip().lstrip("-").isdigit():
+        meta["rc"] = int(_read(raw / "rc"))  # miles_local.sh: the launcher's exit code
     start = meta.get("start_unix") or _utc_file(raw / "start_utc.txt")
     end = meta.get("end_unix") or _utc_file(raw / "end_utc.txt")
     return {"arm": plan["arm"], "run_id": plan["run_id"], "fingerprint": plan["fingerprint"], "mode": mode,
