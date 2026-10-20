@@ -215,12 +215,12 @@ def judge_e4(ev: Evidence, v: Verdict, cfg: dict) -> None:
             len(rt) == cfg["rounds"] and finite(ratio) and finite(
                 (e.get("mismatch") or {}).get("abs_diff", (e.get("mismatch") or {}).get("tis_abs")) for e in rt),
             {"ratio_or_tis": ratio})
-    dropped = (numeric_sum(ev.of(t, "rl_rollout_carry_over"), "over_age_discarded_groups")
-               + numeric_sum(ev.of(t, "rl_round_labels") + rt + ev.of(t, "rl_local_round"), "stale_groups")
-               + numeric_sum(ev.of(t, "offpolicy_gate"), "group_dropped"))
-    if ev.backend == "verl":
-        files = find_all(ev.files.get(t, ev.run_dir), "verl-fa-rollout-*.jsonl")
-        dropped += numeric_sum([r.get("carry_over") or {} for p in files for r in jsonl(p)], "over_age_discarded_groups")
+    # two distinct drop points, each counted once: the round collector's over-age discard
+    # (rl_rollout_carry_over, both backends) and the Miles buffer reader passing over stale
+    # groups (sample_buffer/stale_groups in the round labels)
+    carried = numeric_sum(ev.of(t, "rl_rollout_carry_over"), "over_age_discarded_groups")
+    passed_over = numeric_sum(ev.of(t, "rl_round_labels"), "stale_groups")
+    dropped = carried + passed_over
     v.check("over_age_drop", "at least one group older than max_policy_age was dropped, not trained", dropped >= 1,
             dropped)
     over = _over_age_trained(ev, t, age)
@@ -230,7 +230,8 @@ def judge_e4(ev: Evidence, v: Verdict, cfg: dict) -> None:
             len({e.get("policy_version") for e in loads}) >= 2, sorted({e.get("policy_version") for e in loads}))
     _rc_ok(ev, v, ignore=("sampler_launch", "sampler-0", "sampler-1"))
     _gpu(ev, v, cfg)
-    v.metrics.update(over_age_dropped_groups=dropped, ratio_p50=ratio, **_round_metrics(ev, t))
+    v.metrics.update(over_age_discarded_groups=carried, stale_passed_over_groups=passed_over, ratio_p50=ratio,
+                     **_round_metrics(ev, t))
 
 
 def _over_age_trained(ev: Evidence, trainer: str, age: int) -> int:

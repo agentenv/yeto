@@ -30,7 +30,10 @@ def _gpu(cfg: dict, n: int) -> str:
 
 
 def _common(cfg: dict, run_id: str, prefix: str) -> str:
-    return (f"launch --training-mode rl --rl-engine ports --modal-gpu-exact --modal-retries 0 --modal-cpu 8 "
+    # --preflight-threads off: Modal islands put no SkyPilot threads on this host; the scripts
+    # check the host thread count (< 3000) before the launch instead
+    return (f"launch --training-mode rl --rl-engine ports --preflight-threads off "
+            f"--modal-gpu-exact --modal-retries 0 --modal-cpu 8 "
             f"--modal-memory 64 --modal-tape-volume {TAPE_VOLUME} --controller local --cluster-prefix {prefix} "
             f"--tuning lora --lora-r {cfg['lora_r']} --rl-observe-timeline {MODEL} {DATA} "
             f"--rl-checkpoint-store modal-volume://{STORE_VOLUME}/{run_id} "
