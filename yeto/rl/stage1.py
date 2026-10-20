@@ -189,6 +189,21 @@ STORE_BACKENDS = {"oss": None, "modal-volume": "yeto.cloud.modal_ckpt_store:stor
 DEFAULT_ALGORITHM_SPEC = "examples/rl_algorithms/decoupled-ppo-c2.json"
 
 
+def expected_algorithm_sha256(island_argv: Sequence[str]) -> str:
+    """The AlgorithmSpec hash the island computes from this argv (the launcher's
+    ``resolve_ports_algorithm(args).sha256()``). The spec path is resolved against
+    the yeto tree, where the island runs."""
+    from yeto.launch import REPO_ROOT  # noqa: PLC0415
+    from yeto.rl.adapters.miles.island_entry import parse_args  # noqa: PLC0415
+    from yeto.rl.engine.algorithm import resolve_ports_algorithm  # noqa: PLC0415
+
+    argv = list(island_argv[3:])
+    i = argv.index("--rl-algorithm-spec") + 1
+    if not Path(argv[i]).is_absolute():
+        argv[i] = str(Path(REPO_ROOT) / argv[i])
+    return resolve_ports_algorithm(parse_args(argv)).sha256()
+
+
 def store_env(plan: Stage1Plan) -> dict[str, str]:
     """Environment every node needs for the store backend (none for OSS here: the
     nodes' ossutil/OSS configuration is set up on the node, runbook S4)."""
@@ -493,6 +508,9 @@ def expand(plan: Stage1Plan, *, hf_config: str | Path | None = None) -> Expanded
                    "--completed-groups-path", f"{state_dir}/island-checkpoint.pt",
                    "--event-tape", f"{state_dir}/events.jsonl", "--audit-dir", f"{state_dir}/audit",
                    *_provenance_args(str(task["reward"]))]
+    # The launcher pins the island's AlgorithmSpec hash (--rl-expected-algorithm-sha256);
+    # the trainer-only island refuses to start without it (Modal run-5).
+    island_argv += ["--rl-expected-algorithm-sha256", expected_algorithm_sha256(island_argv)]
     try:
         model_args = glm5_next.model_argv(
             num_layers=int(model["num_layers"]),
