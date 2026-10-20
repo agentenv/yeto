@@ -39,6 +39,7 @@ import torch.distributed as dist
 HERE = Path(__file__).resolve().parent
 MILES = Path(os.environ.get("G3_MILES", "/g3/miles"))
 sys.path.insert(0, str(MILES / "scripts" / "models"))
+sys.path.insert(0, str(MILES / "miles" / "utils" / "external_utils"))  # model_args_utils
 
 SEQ = 1024  # tokens of the packed sequence (one sample)
 TIMING_SEQ = 4096

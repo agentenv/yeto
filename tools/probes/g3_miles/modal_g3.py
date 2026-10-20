@@ -26,7 +26,7 @@ HARD_S = int(os.environ.get("G3_HARD", "3600"))
 
 image = (
     modal.Image.from_registry(IMAGE_REF).entrypoint([])
-    .env({"PYTHONPATH": "/g3/miles:/g3/yeto", "CUDA_DEVICE_MAX_CONNECTIONS": "1", "G3_MILES": "/g3/miles",
+    .env({"PYTHONPATH": "/g3/miles:/g3/yeto:/root/Megatron-LM", "CUDA_DEVICE_MAX_CONNECTIONS": "1", "G3_MILES": "/g3/miles",
           "PYTHONUNBUFFERED": "1"})
     .add_local_dir(MILES, "/g3/miles", copy=False, ignore=[".git", "**/__pycache__", "tests", "docs", "examples"])
     .add_local_dir(os.path.join(YETO, "yeto"), "/g3/yeto/yeto", copy=False, ignore=["**/__pycache__"])
@@ -77,7 +77,7 @@ du -sh "$OUT"; echo CHAIN DONE
 
 
 @app.function(image=image, gpu=GPU, cpu=16.0, memory=65536, timeout=HARD_S, volumes={"/vol": vol})
-def chain(run: str, phases: str) -> int:
+def chain(run: str, phases: str, expect_gpu: str) -> int:
     import subprocess
     import threading
     import time
@@ -96,7 +96,7 @@ def chain(run: str, phases: str) -> int:
     threading.Thread(target=committer, daemon=True).start()
     t0 = time.time()
     rc = subprocess.call(["bash", "-c", CHAIN], env={**os.environ, "OUT": out, "PHASES": phases,
-                                                     "EXPECT_GPU": EXPECT_GPU})
+                                                     "EXPECT_GPU": expect_gpu})
     with open(f"{out}/chain.rc", "w") as fh:
         fh.write(f"{rc} {time.time() - t0:.0f}s\n")
     stop.set()
@@ -107,5 +107,5 @@ def chain(run: str, phases: str) -> int:
 @app.local_entrypoint()
 def main(phases: str = "all"):
     assert RUN != "unset", "set G3_RUN"
-    call = chain.spawn(RUN, phases)
+    call = chain.spawn(RUN, phases, EXPECT_GPU)  # module globals are re-read in the container
     print("spawned", RUN, call.object_id, flush=True)
