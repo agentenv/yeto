@@ -135,8 +135,12 @@ def wire_round_cuts(driver: Any, resume: ResumeWiring | None, *, plan: Mapping[s
     if checkpoint is None:
         raise ValueError("verl round cuts need the driver's sync to be LocalOnlySync")
     driver.sync.stop_after = resume.config.get("stop_after")
-    if install_signals:
-        install_preempt_handler(controller, emit=driver.emit)
+    # the handler needs the main thread (verl: the task runner actor's); [] when it is not
+    signals = install_preempt_handler(controller, emit=driver.emit) if install_signals else []
+    driver.emit("rl_round_cuts_wired", backend="verl", every=checkpoint.every,
+                keep=int(controller.keep), stop_after=driver.sync.stop_after,
+                store=str(controller.checkpoint_store), preempt_signals=list(signals),
+                restored_store=controller.restored is not None)
     return checkpoint
 
 
