@@ -14,8 +14,9 @@ This adapter renames them to the per-expert HF source names of the
 quantization layout; the neutral code (:mod:`yeto.rl.quant.shards`) does the rest.
 
 Non-expert weights are not mapped here: Miles already converts them to HF names
-for the sampler weight update (``convert_to_hf``); exactly one rank per
-replica group passes those with :func:`hf_slices` (module doc of
+for the sampler weight update (``convert_to_hf``, SGLang names ``model.layers.*``);
+exactly one rank per replica group passes those with :func:`hf_slices`, which
+renames them to the checkpoint names (``model.language_model.layers.*``; module doc of
 :mod:`yeto.rl.quant.shards`, "Ownership").
 
 Limits (explicit errors): expert tensor parallelism must be 1 (a column split of
@@ -68,7 +69,21 @@ def megatron_expert_slices(named_params: Iterable[tuple[str, torch.Tensor]], *, 
             yield SourceSlice(expert_weight_name(prefix, expert, DOWN), weight)
 
 
+def checkpoint_name(name: str) -> str:
+    """Miles ``convert_to_hf`` name -> GLM-5.3 checkpoint name.
+
+    ``convert_to_hf`` emits the SGLang weight-update names (``model.layers.<l>...``,
+    ``model.embed_tokens``, ``model.norm``); the GLM-5.3 checkpoint, and so the
+    quantization layout, keeps the text model under ``model.language_model.``
+    (the same rule as Miles ``Glm5NextBridge._nest_language_model``). Names that
+    already carry it, ``model.visual.*`` and top-level names (``lm_head.weight``)
+    are unchanged."""
+    if name.startswith("model.") and not name.startswith(("model.language_model.", "model.visual.")):
+        return "model.language_model." + name[len("model."):]
+    return name
+
+
 def hf_slices(named_tensors: Iterable[tuple[str, torch.Tensor]]) -> Iterator[SourceSlice]:
-    """Whole tensors already in HF names (Miles ``convert_to_hf`` output)."""
+    """Whole tensors from Miles ``convert_to_hf``, renamed to checkpoint names (:func:`checkpoint_name`)."""
     for name, tensor in named_tensors:
-        yield SourceSlice(name, tensor.detach())
+        yield SourceSlice(checkpoint_name(name), tensor.detach())
