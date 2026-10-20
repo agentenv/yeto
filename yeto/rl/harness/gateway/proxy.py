@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import secrets
+from contextvars import ContextVar
 from typing import Any
 
 from yeto.rl.compaction import CompactionConfig
@@ -28,6 +29,11 @@ from yeto.rl.harness.chat_templates import ChatTemplate, TemplateError
 from .core import AdmissionClosed, Gateway, GatewayConfig, GatewayError, SamplingOverrideError, TrajectoryInvalid
 from .records import RecordingBackend
 from .translate import OMITTED_TOOL_TYPES, UnsupportedShape
+
+# The trajectory whose request is being served.  Engine calls run in a thread
+# started by ``asyncio.to_thread``, which copies this context: an engine that
+# owns no version of its own (verl's rollout) can tag what it saw per trajectory.
+CURRENT_TRAJECTORY: ContextVar[str | None] = ContextVar("records_proxy_trajectory", default=None)
 
 Message = dict[str, Any]
 
@@ -68,7 +74,11 @@ class RecordsProxy:
 
     async def handle(self, entry: str, body: dict[str, Any], *, trajectory_id: str) -> dict[str, Any]:
         self.backend.declare_tools(trajectory_id, chat_tools(entry, body))
-        return await self.gateway.handle(entry, body, trajectory_id=trajectory_id)
+        token = CURRENT_TRAJECTORY.set(trajectory_id)
+        try:
+            return await self.gateway.handle(entry, body, trajectory_id=trajectory_id)
+        finally:
+            CURRENT_TRAJECTORY.reset(token)
 
     def records(self, trajectory_id: str) -> dict[str, Any]:
         out = self.backend.records(trajectory_id)

@@ -17,6 +17,8 @@ Registered templates:
   ``ChatTemplate.load("glm5", tokenizer_path=...)``; whether GLM5.3 uses the
   same template is not verified;
 * ``qwen3``: the Qwen3 hermes tool-call format; the small CPU stand-in;
+* ``qwen3_2507``: Qwen3-4B-Instruct-2507 (non-thinking Qwen3, hermes JSON tool
+  calls, no reasoning block); the Codex system messages are merged into one;
 * ``qwen38``: Qwen3.8 (Qwen3.5 family) XML tool calls (``<tool_call><function=name>
   <parameter=k>v</parameter></function></tool_call>``), thinking kept in every
   turn (``preserve_thinking``). Load with the checkpoint's tokenizer
@@ -184,6 +186,10 @@ register_template(TemplateSpec(
     # The Qwen3 template drops the reasoning of turns before the last user turn.
     keeps_history_reasoning=False,
     verified="Qwen3-0.6B tokenizer (CPU stand-in)"))
+register_template(TemplateSpec(
+    name="qwen3_2507", tokenizer="Qwen/Qwen3-4B-Instruct-2507", parser=parse_qwen3,
+    stop_tokens=("<|im_end|>", "<|endoftext|>"),
+    verified="Qwen3-4B-Instruct-2507@cdbee75f tokenizer (S25 T-N109)", merge_leading_system=True))
 register_template(TemplateSpec(
     name="qwen38", tokenizer="Qwen/Qwen3.8-27B", parser=parse_qwen38,
     stop_tokens=("<|im_end|>", "<|endoftext|>"),

@@ -52,6 +52,21 @@ DEFAULTS: dict[str, Any] = {
     "max_serve_s": 3600,
 }
 
+# Model presets: the Modal Volume holding the checkpoint and the DEFAULTS keys that differ.
+MODELS: dict[str, dict[str, Any]] = {
+    "qwen38-27b": {"volume": MODELS_VOLUME, "config": {}},
+    # S25 N10.9: full-parameter agentic RL model.  Sampling is the trainer's
+    # (temperature 1, no top-p / top-k truncation), so the pass rate measured
+    # here is the one the RL rollouts see.
+    "qwen3-4b-2507": {"volume": "yeto-fn-models", "config": {
+        "model_subdir": "hf/Qwen3-4B-Instruct-2507/cdbee75f",
+        "served_model_name": "Qwen3-4B-Instruct-2507",
+        "template": "qwen3_2507",
+        "template_kwargs": {},
+        "signed_sampling": {"temperature": 1.0, "top_p": 1.0, "top_k": -1, "max_tokens": 4096},
+    }},
+}
+
 
 def _gpu_names() -> list[str]:
     out = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
@@ -184,7 +199,7 @@ def check(config: dict[str, Any]) -> dict[str, Any]:
             "aligned": check_alignment(template, messages).aligned}
 
 
-def build_app(workdir: str, gpu: str, timeout_s: int) -> tuple[Any, Any, Any]:
+def build_app(workdir: str, gpu: str, timeout_s: int, models_volume: str = MODELS_VOLUME) -> tuple[Any, Any, Any]:
     import modal
 
     sys.path.insert(0, workdir)
@@ -199,7 +214,7 @@ def build_app(workdir: str, gpu: str, timeout_s: int) -> tuple[Any, Any, Any]:
                             ignore=[".git", ".venv", ".claude", "**/__pycache__", "**/*.pyc", "s1-runs",
                                     "syncer/target"]))
     app = modal.App(APP_NAME)
-    models = modal.Volume.from_name(MODELS_VOLUME)
+    models = modal.Volume.from_name(models_volume)
     results = modal.Volume.from_name(RESULTS_VOLUME, create_if_missing=True)
     fn = app.function(image=image, gpu=gpu, cpu=8.0, memory=65536, timeout=timeout_s, retries=0,
                       volumes={MODELS_MOUNT: models.read_only(), RESULTS_MOUNT: results},
@@ -215,6 +230,7 @@ def main() -> None:
     parser.add_argument("--run-name", required=True)
     parser.add_argument("--secret-file", type=Path, help="launch: file holding the path secret")
     parser.add_argument("--gpu", default="H100!")
+    parser.add_argument("--model", choices=sorted(MODELS), default="qwen38-27b")
     parser.add_argument("--max-serve-s", type=int, default=DEFAULTS["max_serve_s"])
     parser.add_argument("--workdir", default=str(Path(__file__).resolve().parents[1]))
     args = parser.parse_args()
@@ -227,16 +243,19 @@ def main() -> None:
     if args.action == "url":
         print(control.get(f"{args.run_name}/url", ""))
         return
+    preset = MODELS[args.model]
+    defaults = {**DEFAULTS, **preset["config"]}
     if args.action == "check":
-        app, _, checker = build_app(args.workdir, args.gpu, timeout_s=600)
+        app, _, checker = build_app(args.workdir, args.gpu, timeout_s=600, models_volume=preset["volume"])
         with modal.enable_output(), app.run():
-            print(json.dumps(checker.remote(dict(DEFAULTS))))
+            print(json.dumps(checker.remote(defaults)))
         return
     secret = args.secret_file.read_text().strip()
     if len(secret) < 24:
         raise SystemExit("the path secret must have at least 24 characters")
-    config = {**DEFAULTS, "run_name": args.run_name, "secret": secret, "max_serve_s": args.max_serve_s}
-    app, fn, _ = build_app(args.workdir, args.gpu, timeout_s=args.max_serve_s + 1800)
+    config = {**defaults, "run_name": args.run_name, "secret": secret, "max_serve_s": args.max_serve_s}
+    app, fn, _ = build_app(args.workdir, args.gpu, timeout_s=args.max_serve_s + 1800,
+                           models_volume=preset["volume"])
     with modal.enable_output(), app.run(detach=True):
         call = fn.spawn(config)
     print(json.dumps({"function_call_id": call.object_id, "run_name": args.run_name}))
