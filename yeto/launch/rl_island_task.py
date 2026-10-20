@@ -38,11 +38,7 @@ from ..rl.engine.start_phases import SUBMITTED_ENV, shell_mark, shell_reset
 from .in_vm_docker import (
     DOCKER_LOGIN_UNSET, IN_VM_DOCKER_CLOUDS, in_vm_docker_run, in_vm_docker_setup,
 )
-from .codex import (
-    HARNESS_ENVIRONMENT_PROVIDER_ENV, MODAL_CLIENT_SETUP, MODAL_SANDBOX_PROVIDERS,
-    SANDBOX_TOKEN_IN_ISLAND_CHECK, codex_harness_launch, modal_sandbox_secret_name,
-    require_sandbox_modal_token,
-)
+from .harness_env import check_compaction_launch
 
 
 def submitted_unix() -> float:
@@ -96,7 +92,7 @@ def make_miles_island_task(
     ):
         raise ValueError("RL task requires prepared source and reward provenance")
     island_data, island_data_sha256, data_mounts = island_task_data(args, learner_id)
-    codex_launch = codex_harness_launch(args)  # None unless a signed Codex agent
+    check_compaction_launch(args)
     # --rl-island-use-gpus-per-node: island rules see M GPUs/node; resources stay physical.
     island = rl_island_spec(args, spec)
 
@@ -195,11 +191,6 @@ def make_miles_island_task(
             " --dynamic-sampling-max-replacements "
             f"{args.dynamic_sampling_max_replacements}"
         )
-    if getattr(args, "secrlenv_max_infrastructure_replacements", None) is not None:
-        flags += (
-            " --secrlenv-max-infrastructure-replacements "
-            f"{args.secrlenv_max_infrastructure_replacements}"
-        )
     if args.rl_offload_train:
         flags += " --rl-offload-train"
     algorithm_prelude, algorithm_flags = _ports_algorithm_flags(args)
@@ -254,20 +245,6 @@ def make_miles_island_task(
             flags += f" --session-server-workers {int(args.session_server_workers)}"
         if args.tito_model:
             flags += f" --tito-model {shlex.quote(args.tito_model)}"
-        if getattr(args, "codex_backend_profile", None):
-            flags += (
-                " --codex-backend-profile "
-                f"{shlex.quote(args.codex_backend_profile)}"
-            )
-        if getattr(args, "codex_exclude_reasoning_from_loss", False):
-            flags += " --codex-exclude-reasoning-from-loss"
-        if getattr(args, "codex_reasoning_effort", None):
-            # The learner's _preflight_codex_harness re-validates the stock
-            # profile (xhigh) and fails closed without it.
-            flags += (
-                " --codex-reasoning-effort "
-                f"{shlex.quote(args.codex_reasoning_effort)}"
-            )
         if getattr(args, "tito_allowed_append_roles", None):
             roles = " ".join(
                 shlex.quote(role) for role in args.tito_allowed_append_roles
@@ -319,10 +296,6 @@ def make_miles_island_task(
         file_mounts[HF_TOKEN_PATH] = local_token
     if rl_sao_streaming(args):
         file_mounts.update(sao_contract_mounts(args, learner_id))
-    if codex_launch is not None:
-        codex_flags, codex_envs, codex_mounts = codex_launch
-        flags += codex_flags
-        file_mounts.update(codex_mounts)
     envs = {
         "SYNCER_ADDR": syncer_addr,
         **({"CRITIC_SYNCER_ADDR": critic_syncer_address(syncer_addr)}
@@ -378,8 +351,6 @@ def make_miles_island_task(
     for name in ("CYBERGYM_REWARD_SCHEME", "CYBERGYM_REWARD_VIEW"):
         if os.environ.get(name):
             envs[name] = os.environ[name]
-    if codex_launch is not None:
-        envs.update(codex_envs)
     envs.update(elastic_debug_delay_env(args))  # 0.25 ({} unless the test switch is given)
     envs.update(elastic_debug_pause_env(args))  # link-pause test switch ({} by default)
     if getattr(args, "wandb", False):
@@ -401,15 +372,6 @@ def make_miles_island_task(
     store_envs = store_object_envs(args, spec.cloud, spec.num_nodes)
     if store_envs:  # the store's object API (yeto.cloud.s3_store) needs boto3 in the image
         setup_steps.append(STORE_CLIENT_SETUP)
-    sandbox_secret = modal_sandbox_secret_name(args, spec)
-    if codex_launch is not None and envs.get(HARNESS_ENVIRONMENT_PROVIDER_ENV) in MODAL_SANDBOX_PROVIDERS:
-        if sandbox_secret is None:
-            require_sandbox_modal_token(envs)
-        else:
-            # The token comes from the named Modal Secret at container start;
-            # the island re-checks it before anything else runs.
-            setup_steps.append(SANDBOX_TOKEN_IN_ISLAND_CHECK)
-        setup_steps.append(MODAL_CLIENT_SETUP)
     store_fs = model_store_filesystem(getattr(args, "model_store", None), spec.cloud, spec.region)
     store_env = ""
     if (spec.cloud == "modal" and getattr(args, "modal_model_volume", None)

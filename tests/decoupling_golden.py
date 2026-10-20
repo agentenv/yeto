@@ -234,47 +234,6 @@ def _fn_cli(_tmp: Path) -> tuple[str, ...]:
     return tuple(fta._argv("2x8"))
 
 
-def _codex_cli(_tmp: Path) -> tuple[str, ...]:
-    from yeto.rl import CODEX_OPENENV_AGENT
-    from yeto.rl.codex_backend import QWEN35_08B_MODEL, QWEN35_08B_REVISION
-
-    return BASE + (
-        "--model", QWEN35_08B_MODEL, "--model-revision", QWEN35_08B_REVISION,
-        "--lora-targets", "attention",
-        "--custom-generate-function-path", "miles.rollout.generate_hub.agentic_tool_call.generate",
-        "--custom-agent-function-path", CODEX_OPENENV_AGENT,
-        "--codex-reasoning-effort", "xhigh", "--codex-backend-profile", "qwen35_08b",
-        "--use-session-server", "--tito-model", "qwen35",
-        "--tito-allowed-append-roles", "tool", "user", "--agent-max-seq-len", "128",
-    )
-
-
-def _codex_bundle(mp, tmp: Path) -> None:
-    """The fake Codex bundle of ``test_rl_launcher_codex_bundle.bundle`` (contract
-    attestation stubbed to the pinned values; no 310 MB binary, no network)."""
-    import test_rl_launcher_codex_bundle as cb
-    import yeto.rl.ssh_harness as sh
-    from yeto import launcher as L
-
-    root = tmp / "codex-bundle" / "codex"
-    root.mkdir(parents=True)
-    for name in ("codex-x86_64-unknown-linux-musl", "codex-package.json",
-                 "codex_app_server_protocol.v2.schemas.json"):
-        (root / name).write_bytes(b"x")
-    mp.setattr(sh, "_codex_harness_contract", lambda _ns, args: cb._synthetic_contract(args))
-    mp.setenv(L.CODEX_BUNDLE_DIR_ENV, str(root))
-    mp.setenv(L.HARNESS_ENVIRONMENT_PROVIDER_ENV, cb.PROVIDER)
-    mp.delenv(L.CODEX_COMPACTION_ENV, raising=False)
-    mp.delenv(L.HARNESS_PREFLIGHT_ENV, raising=False)
-    # The reasoning / tool-call parser names are resolved by Miles
-    # (miles.utils.chat_template_utils), which this host must not import: the two
-    # values are recorded as explicit placeholders, everything else is yeto's own.
-    from yeto.rl.adapters.miles import config as mc
-
-    mp.setattr(mc, "_resolve_tito_parsers", lambda model: (
-        "<MILES-RESOLVED-REASONING-PARSER>", "<MILES-RESOLVED-TOOL-CALL-PARSER>"))
-
-
 CONFIGS: tuple[Config, ...] = (
     Config("grpo_default", "GRPO 默认（ports，固定分区，strict-avg）", lambda t: BASE),
     Config("grpo_tis", "GRPO + TIS 失配修正（tis_clip 2.0）",
@@ -285,8 +244,6 @@ CONFIGS: tuple[Config, ...] = (
            lambda t: BASE + ("--rl-algorithm-spec", str(REPO / DRGRPO_EVIDENCE))),
     Config("seq_adv_maxrl", "seq_adv：MaxRL 优势变换（含奖励流水线插件）",
            lambda t: BASE + ("--rl-algorithm-spec", _spec_file(t, "maxrl", _maxrl_spec))),
-    Config("codex_harness", "codex harness（ports，Qwen3.5-0.8B，假 bundle 合同）", _codex_cli,
-           patch=_codex_bundle),
     Config("elastic", "岛内弹性模式（--rl-elastic，单配置资源表）",
            lambda t: BASE + _elastic(t)),
     Config("fn_2x8", "Flash-Next 2×8 正式训练形状（fntrain.sh print 2x8）", _fn_cli, fn=True),

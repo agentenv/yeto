@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from yeto.rl import trajectory_evidence
-from yeto.rl.harness.codex import reward
+from yeto.rl import secrlenv_outcome as reward
 from yeto.rl.trajectory_evidence import (
     build_trajectory_batch_evidence,
     read_trajectory_batch_evidence,

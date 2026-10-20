@@ -12,7 +12,6 @@ import sys
 import tempfile
 import time
 from collections.abc import Mapping, Sequence
-from decimal import Decimal, DecimalException
 from pathlib import Path
 from typing import Any
 
@@ -764,24 +763,6 @@ def _check_dense_full_sweep(args, *, yeto_policy_sync: bool) -> None:
         raise ValueError("dense full-parameter mode requires --syncer-profile-sha256")
 
 
-def _trajectory_evidence_kind(args) -> str:
-    """The evidence kind of a dense full-parameter island, chosen by its reward.
-
-    The SecRLEnv reward binds the grader's signed verdict as evidence.  Any
-    other reward function (for example a GSM8K answer check) binds its own
-    output, ``sample.reward``; a sample that still carries a grader verdict is
-    rejected there.  Terminal-Bench 2.1 runs the SAO sync, whose runtime
-    contract names its own evidence kind.
-    """
-
-    from yeto.rl import SECRLENV_REWARD
-    from yeto.rl.trajectory_evidence import REWARD_FUNCTION_EVIDENCE_KIND
-
-    if args.reward_function == SECRLENV_REWARD:
-        return "secrlenv"
-    return REWARD_FUNCTION_EVIDENCE_KIND
-
-
 def _private_trajectory_evidence_dir(args) -> Path:
     """A fresh owner-only directory for this island's trajectory evidence."""
 
@@ -1017,91 +998,11 @@ def _dense_full_training_contract_sha256(
             "yeto_source_sha256": args.source_sha256,
             "miles_backend_identity_sha256": _backend_identity_sha256(args),
             "reward_sha256": args.reward_sha256,
-            "codex_harness_contract": getattr(
-                args,
-                "codex_harness_contract",
-                None,
-            ),
+            # The Codex harness contract left with the harness (S26 E0.5); the
+            # key stays so the v6 contract hash of existing runs is unchanged.
+            "codex_harness_contract": None,
         }
     )
-
-
-def _strict_json_file_semantics(path: Path) -> tuple[Any, ...]:
-    """Parse exact, typed JSON semantics independent of object-key order."""
-
-    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        value: dict[str, Any] = {}
-        for name, item in pairs:
-            if name in value:
-                raise ValueError(f"duplicate JSON object key: {name!r}")
-            value[name] = item
-        return value
-
-    def finite_number(name: str) -> None:
-        raise ValueError(f"non-finite JSON number: {name}")
-
-    try:
-        value = json.loads(
-            path.read_bytes(),
-            object_pairs_hook=unique_object,
-            parse_constant=finite_number,
-            parse_float=Decimal,
-            parse_int=Decimal,
-        )
-    except (OSError, UnicodeError, ValueError, DecimalException) as exc:
-        raise ValueError("Codex app-server schema is malformed JSON") from exc
-
-    def typed_semantics(item: Any) -> tuple[Any, ...]:
-        if item is None:
-            return ("null",)
-        if isinstance(item, bool):
-            return ("boolean", item)
-        if isinstance(item, Decimal):
-            return ("number", item)
-        if isinstance(item, str):
-            return ("string", item)
-        if isinstance(item, list):
-            return ("array", tuple(typed_semantics(value) for value in item))
-        if isinstance(item, dict):
-            return (
-                "object",
-                tuple(
-                    sorted(
-                        (name, typed_semantics(value))
-                        for name, value in item.items()
-                    )
-                ),
-            )
-        raise TypeError(f"unsupported parsed JSON value: {type(item).__name__}")
-
-    return typed_semantics(value)
-
-
-def _canonical_schema_sha256(path: Path) -> str | None:
-    from yeto.provenance import canonical_json_sha256
-
-    try:
-        return canonical_json_sha256(path)
-    except (OSError, ValueError):
-        return None
-
-
-def _verify_live_codex_app_server_schema(pinned: Path, generated: Path) -> None:
-    try:
-        pinned_semantics = _strict_json_file_semantics(pinned)
-        generated_semantics = _strict_json_file_semantics(generated)
-    except ValueError as exc:
-        raise ValueError("live stock Codex app-server schema drifted") from exc
-    if generated_semantics != pinned_semantics:
-        raise ValueError("live stock Codex app-server schema drifted")
-
-
-def _preflight_codex_openenv_adapter(args, profile_name: str) -> None:
-    """Attest the in-tree OpenEnv adapter (forwarded to harness.codex.preflight)."""
-
-    from yeto.rl.harness.codex.preflight import forward_legacy_openenv_preflight
-
-    forward_legacy_openenv_preflight(args, profile_name)
 
 
 def miles_revision_pins(args: Any) -> Any:
@@ -1116,279 +1017,6 @@ def miles_revision_pins(args: Any) -> Any:
     if not is_immutable_commit(commit) or len(str(commit)) != 40:
         raise ValueError(f"--miles-commit must be a full 40-hex commit, got {commit!r}")
     return MilesRevisionPins(MILES_NEXT_REPOSITORY, str(commit).lower())
-
-
-def _preflight_codex_harness(args) -> None:
-    """Fail before model allocation if the signed Codex surface has drifted."""
-
-    from yeto.rl import (
-        CODEX_APP_SERVER_PROTOCOL_REVISION,
-        CODEX_APP_SERVER_SCHEMA_SHA256,
-        CODEX_BASE_INSTRUCTIONS_SHA256,
-        CODEX_CLI_VERSION,
-        CODEX_CONTAINER_APP_SERVER_SCHEMA_PATH,
-        CODEX_CONTAINER_BINARY_PATH,
-        CODEX_DYNAMIC_TOOLS_SCHEMA_SHA256,
-        CODEX_HARNESS_AGENT,
-        CODEX_HARNESS_AGENT_SHA256,
-        CODEX_LINUX_BINARY_SHA256,
-        CODEX_LINUX_BINARY_SIZE_BYTES,
-        CODEX_LINUX_TARGET,
-        CODEX_NPM_PACKAGE,
-        CODEX_NPM_TARBALL_SHA256,
-        CODEX_OPENENV_AGENT,
-        CODEX_OPENENV_IDENTITY_ENV,
-        CODEX_PACKAGE_MANIFEST_SHA256,
-        CODEX_SUBMIT_TOOL_SCHEMA_SHA256,
-        CODEX_TERMINAL_EXEC_TOOL_SCHEMA_SHA256,
-        SIGNED_CODEX_AGENTS,
-    )
-
-    contract = getattr(args, "codex_harness_contract", None)
-    if args.custom_agent_function_path not in SIGNED_CODEX_AGENTS:
-        if contract is not None:
-            raise ValueError(
-                "--codex-harness-contract requires a signed Codex agent"
-            )
-        return
-    if not isinstance(contract, dict):
-        raise ValueError("the signed Codex agent requires its harness contract")
-    required = {
-        "agent_function_path",
-        "agent_source_sha256",
-        "controller_binary_path",
-        "controller_package_manifest_path",
-        "controller_app_server_schema_path",
-        "bundle_binary_path",
-        "bundle_package_manifest_path",
-        "bundle_app_server_schema_path",
-        "container_binary_path",
-        "container_app_server_schema_path",
-        "binary_sha256",
-        "binary_size_bytes",
-        "cli_version",
-        "npm_package",
-        "target",
-        "npm_tarball_sha256",
-        "package_manifest_sha256",
-        "app_server_protocol_revision",
-        "app_server_schema_sha256",
-        "base_instructions_sha256",
-        "terminal_exec_tool_schema_sha256",
-        "submit_tool_schema_sha256",
-        "dynamic_tools_schema_sha256",
-        "reasoning_effort",
-        "backend",
-    }
-    if args.custom_agent_function_path == CODEX_OPENENV_AGENT:
-        required.add("openenv_identity_env")
-    if set(contract) != required:
-        raise ValueError("stock Codex harness contract shape drifted")
-    pinned = {
-        "agent_function_path": CODEX_HARNESS_AGENT,
-        "agent_source_sha256": CODEX_HARNESS_AGENT_SHA256,
-        "container_binary_path": CODEX_CONTAINER_BINARY_PATH,
-        "container_app_server_schema_path": (
-            CODEX_CONTAINER_APP_SERVER_SCHEMA_PATH
-        ),
-        "binary_sha256": CODEX_LINUX_BINARY_SHA256,
-        "binary_size_bytes": CODEX_LINUX_BINARY_SIZE_BYTES,
-        "cli_version": CODEX_CLI_VERSION,
-        "npm_package": CODEX_NPM_PACKAGE,
-        "target": CODEX_LINUX_TARGET,
-        "npm_tarball_sha256": CODEX_NPM_TARBALL_SHA256,
-        "package_manifest_sha256": CODEX_PACKAGE_MANIFEST_SHA256,
-        "app_server_protocol_revision": CODEX_APP_SERVER_PROTOCOL_REVISION,
-        "app_server_schema_sha256": CODEX_APP_SERVER_SCHEMA_SHA256,
-        "base_instructions_sha256": CODEX_BASE_INSTRUCTIONS_SHA256,
-        "terminal_exec_tool_schema_sha256": (
-            CODEX_TERMINAL_EXEC_TOOL_SCHEMA_SHA256
-        ),
-        "submit_tool_schema_sha256": CODEX_SUBMIT_TOOL_SCHEMA_SHA256,
-        "dynamic_tools_schema_sha256": CODEX_DYNAMIC_TOOLS_SCHEMA_SHA256,
-        "reasoning_effort": "xhigh",
-    }
-    if any(contract.get(name) != expected for name, expected in pinned.items()):
-        raise ValueError("stock Codex runtime identity drifted")
-    if (
-        args.custom_agent_function_path == CODEX_OPENENV_AGENT
-        and contract.get("openenv_identity_env") != CODEX_OPENENV_IDENTITY_ENV
-    ):
-        raise ValueError("stock Codex OpenEnv surface identity drifted")
-    from yeto.rl.codex_backend import (
-        stock_codex_backend_contract_with_reasoning_policy,
-        validate_stock_codex_fields,
-    )
-
-    profile_name = getattr(args, "codex_backend_profile", None) or args.tito_model
-    expected_backend = stock_codex_backend_contract_with_reasoning_policy(
-        profile_name,
-        args.rollout_max_response_len,
-        not getattr(args, "codex_exclude_reasoning_from_loss", False),
-    )
-    validate_stock_codex_fields(
-        tito_model=args.tito_model,
-        codex_backend_profile=profile_name,
-        rl_model_recipe=args.rl_model_recipe,
-        model=args.model,
-        model_revision=args.model_revision,
-        rollout_model=getattr(args, "rollout_model", None),
-        rollout_model_revision=getattr(args, "rollout_model_revision", None),
-        apply_chat_template_kwargs=args.apply_chat_template_kwargs,
-        tito_allowed_append_roles=args.tito_allowed_append_roles,
-        codex_reasoning_effort=args.codex_reasoning_effort,
-        # The signed Qwen rollout backend profile predates full-parameter
-        # training and uses ``attention`` only as its legacy tuning-profile
-        # discriminator.  Full mode emits no LoRA runtime flags below.
-        lora_targets=(
-            args.lora_targets
-            if getattr(args, "parameter_mode", "lora") == "lora"
-            else "attention"
-        ),
-        expert_full_count=getattr(args, "expert_full_count", 0),
-        lora_expert_rank=(
-            int(getattr(args, "rl_lora_expert_rank", None) or 0)
-            if getattr(args, "parameter_mode", "lora") == "lora"
-            else 0
-        ),
-    )
-    if contract.get("backend") != expected_backend:
-        raise ValueError("stock Codex backend/TITO identity drifted")
-    from yeto.provenance import file_sha256
-
-    # OpenEnv owns and attests its adapter inside the pinned Miles source.  The
-    # legacy SecRLEnv-backed Codex adapter remains an optional integration, but
-    # it must not be required for the independent Terminal-Bench path.
-    if args.custom_agent_function_path != CODEX_OPENENV_AGENT:
-        try:
-            from yeto.rl.harness.codex import codex_harness_agent
-
-            live_identity = codex_harness_agent.codex_harness_identity()
-        except (
-            ImportError,
-            AttributeError,
-            TypeError,
-            ValueError,
-            RuntimeError,
-        ) as exc:
-            raise ValueError("cannot attest the Yeto Codex harness adapter") from exc
-        identity_names = (
-            "base_instructions_sha256",
-            "terminal_exec_tool_schema_sha256",
-            "submit_tool_schema_sha256",
-            "dynamic_tools_schema_sha256",
-        )
-        if live_identity != {name: contract.get(name) for name in identity_names}:
-            raise ValueError("Yeto Codex adapter identity drifted")
-
-        adapter_path = Path(codex_harness_agent.__file__)
-        if adapter_path.is_symlink() or not adapter_path.is_file():
-            raise ValueError("Yeto Codex adapter source identity drifted")
-        adapter_path = adapter_path.resolve()
-        if file_sha256(adapter_path) != contract.get("agent_source_sha256"):
-            raise ValueError("Yeto Codex adapter source identity drifted")
-    binary = Path(CODEX_CONTAINER_BINARY_PATH)
-    manifest = Path("/opt/yeto/codex/codex-package.json")
-    schema = Path(CODEX_CONTAINER_APP_SERVER_SCHEMA_PATH)
-    if (
-        binary.is_symlink()
-        or not binary.is_file()
-        or binary.stat().st_size != CODEX_LINUX_BINARY_SIZE_BYTES
-        or file_sha256(binary) != CODEX_LINUX_BINARY_SHA256
-        or manifest.is_symlink()
-        or not manifest.is_file()
-        or file_sha256(manifest) != CODEX_PACKAGE_MANIFEST_SHA256
-        or schema.is_symlink()
-        or not schema.is_file()
-        or _canonical_schema_sha256(schema) != CODEX_APP_SERVER_SCHEMA_SHA256
-    ):
-        raise ValueError("mounted stock Codex artifact does not match its Yeto pin")
-    try:
-        version = subprocess.run(
-            [str(binary), "--version"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=15,
-        ).stdout.strip()
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise ValueError("cannot execute the pinned stock Codex binary") from exc
-    if version != CODEX_CLI_VERSION:
-        raise ValueError("stock Codex executable version drifted")
-    try:
-        with tempfile.TemporaryDirectory(prefix="yeto-codex-schema-") as temporary:
-            root = Path(temporary)
-            output = root / "schema"
-            subprocess.run(
-                [
-                    str(binary),
-                    "app-server",
-                    "generate-json-schema",
-                    "--experimental",
-                    "--out",
-                    str(output),
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            generated_schema = (
-                output / "codex_app_server_protocol.v2.schemas.json"
-            )
-            if (
-                generated_schema.is_symlink()
-                or not generated_schema.is_file()
-            ):
-                raise ValueError("live stock Codex app-server schema drifted")
-            _verify_live_codex_app_server_schema(schema, generated_schema)
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise ValueError("cannot verify the stock Codex app-server schema") from exc
-    expected_env = {
-        "YETO_CODEX_BINARY_PATH": CODEX_CONTAINER_BINARY_PATH,
-        "YETO_CODEX_BINARY_SHA256": CODEX_LINUX_BINARY_SHA256,
-        "YETO_CODEX_BINARY_SIZE_BYTES": str(CODEX_LINUX_BINARY_SIZE_BYTES),
-        "YETO_CODEX_VERSION": CODEX_CLI_VERSION,
-        "YETO_CODEX_APP_SERVER_PROTOCOL_REVISION": (
-            CODEX_APP_SERVER_PROTOCOL_REVISION
-        ),
-        "YETO_CODEX_APP_SERVER_SCHEMA_SHA256": CODEX_APP_SERVER_SCHEMA_SHA256,
-        "YETO_CODEX_BASE_INSTRUCTIONS_SHA256": contract[
-            "base_instructions_sha256"
-        ],
-        "YETO_CODEX_TERMINAL_EXEC_TOOL_SCHEMA_SHA256": contract[
-            "terminal_exec_tool_schema_sha256"
-        ],
-        "YETO_CODEX_SUBMIT_TOOL_SCHEMA_SHA256": contract[
-            "submit_tool_schema_sha256"
-        ],
-        "YETO_CODEX_DYNAMIC_TOOLS_SCHEMA_SHA256": contract[
-            "dynamic_tools_schema_sha256"
-        ],
-        "YETO_CODEX_REASONING_EFFORT": "xhigh",
-        "YETO_CODEX_BACKEND_MAX_TOKENS": str(args.rollout_max_response_len),
-        "YETO_CODEX_BACKEND_REASONING_EFFORT": expected_backend[
-            "reasoning_effort"
-        ],
-        "YETO_CODEX_BACKEND_THINKING": "enabled",
-        "YETO_CODEX_CHAT_TEMPLATE": expected_backend["chat_template"],
-        "YETO_CODEX_CHAT_TEMPLATE_KWARGS": json.dumps(
-            expected_backend["chat_template_kwargs"],
-            sort_keys=True,
-            separators=(",", ":"),
-        ),
-        "YETO_CODEX_TITO_ALLOWED_APPEND_ROLES": "tool,user",
-        "YETO_CODEX_HARNESS_CONTRACT_SHA256": _canonical_sha256(contract),
-    }
-    mismatched = [
-        name for name, expected in expected_env.items() if os.getenv(name) != expected
-    ]
-    if mismatched:
-        raise ValueError(
-            "stock Codex container environment drifted: " + ", ".join(mismatched)
-        )
-    if args.custom_agent_function_path == CODEX_OPENENV_AGENT:
-        _preflight_codex_openenv_adapter(args, profile_name)
 
 
 def _miles_callable(spec: str) -> str:
@@ -1989,6 +1617,7 @@ def run_miles(
         miles_args.external_policy_sync_run_until_stop = sync_preset == "decoupled"
         if dense_full:
             from yeto.rl.adapters.miles.full_parameter.session import CONFIG_ATTRIBUTE
+            from yeto.rl.trajectory_evidence import REWARD_FUNCTION_EVIDENCE_KIND
 
             miles_args.external_policy_identity_setter_path = (
                 "yeto.rl.adapters.miles.publish.set_current_published_policy_identity"
@@ -1996,7 +1625,7 @@ def run_miles(
             miles_args.yeto_rl_trajectory_evidence_dir = str(
                 _private_trajectory_evidence_dir(args)
             )
-            miles_args.yeto_rl_trajectory_evidence_kind = _trajectory_evidence_kind(args)
+            miles_args.yeto_rl_trajectory_evidence_kind = REWARD_FUNCTION_EVIDENCE_KIND
             miles_args.yeto_rl_trajectory_evidence_schema_version = 1
             setattr(
                 miles_args,
@@ -2258,7 +1887,7 @@ def _run_test_debug_rollout_replay(args, miles_args) -> bool:
     from yeto.rl.adapters.miles.entry import connect_island_ray
 
     # same job runtime_env as the ports island (PYTHONPATH -> pinned Miles/Megatron in the actors)
-    connect_island_ray(miles_args=miles_args)
+    connect_island_ray()
     print(f"[rl] TEST ONLY: upstream Miles train loop on {miles_args.load_debug_rollout_data}", flush=True)
     asyncio.run(with_disposer(module.train, miles_args))
     print("[rl] TEST ONLY: upstream Miles train loop finished", flush=True)
@@ -2383,7 +2012,6 @@ def main(argv=None) -> None:
         verify_miles_revision(miles_root)  # the pinned MILES_NEXT_PINS
     else:
         verify_miles_revision(miles_root, expected=pins)
-    _preflight_codex_harness(args)
     probe_syncers(args)
 
     from miles.utils.misc import load_function
@@ -2393,16 +2021,6 @@ def main(argv=None) -> None:
         load_function(args.custom_generate_function_path)
     if args.custom_agent_function_path:
         load_function(args.custom_agent_function_path)
-    from yeto.rl import CODEX_HARNESS_AGENT, SECRLENV_AGENT
-
-    if args.custom_agent_function_path in {
-        SECRLENV_AGENT,
-        CODEX_HARNESS_AGENT,
-    }:
-        from yeto.rl.harness.codex.client import require_daemon_ready
-
-        require_daemon_ready()
-        print("[rl] secrlenv episode daemon ready")
     from huggingface_hub import snapshot_download
 
     from yeto.models import resolve

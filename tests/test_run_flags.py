@@ -251,10 +251,10 @@ def test_forward_tables_name_flags_of_both_layers():
 _NON_RL_LITERALS = frozenset({
     "--abbrev-ref", "--adapter-dir", "--add", "--address", "--allow-unattested-legacy-adapter",
     "--allow-unauthenticated-islands", "--bind", "--cap-add", "--carry-gamma",
-    "--checkpoint-every", "--checkpoint-path", "--codex-harness-binary", "--config-json",
+    "--checkpoint-every", "--checkpoint-path", "--config-json",
     "--create", "--dashboard-host", "--dearmor", "--depth", "--detach", "--dtype",
     "--entrypoint", "--expected-island-contract", "--final-ack-timeout-s", "--final-grace-s", "--follow", "--force",
-    "--format", "--get", "--global", "--gpus", "--head", "--ignore-installed",
+    "--format", "--get", "--global", "--gpus", "--head",
     "--include-dashboard", "--index-url", "--ipc", "--island-lease-s",
     "--island-scheduling-mode", "--json", "--learner-weight", "--learners", "--level",
     "--manifest-path", "--mark-final-checkpoint", "--master", "--matrix-merge",

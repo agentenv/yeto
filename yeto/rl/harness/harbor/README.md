@@ -18,8 +18,8 @@ backend: not verified.
 | verl backend: `HarborAgentLoop(AgentLoopBase)`, registered as `yeto_harbor` | yeto (verl unchanged) | `yeto/rl/adapters/verl/harbor_agent_loop.py` |
 | Token recorder in front of the sampler (verl) | yeto, N10.5 (not written) | port: `yeto/rl/agentic/recorder.py` |
 
-The self-written Codex harness (`yeto/rl/harness/codex/`) is not deleted (user
-decision pending). New code does not import it.
+The self-written Codex harness (`yeto/rl/harness/codex/`) was removed in S26
+E0.5; the last commit with it is tagged `s26-pre-harness-removal`.
 
 ## Outcome rule
 

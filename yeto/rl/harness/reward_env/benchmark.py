@@ -96,7 +96,7 @@ class JudgeResult:
 
 
 class JudgeHandle(Protocol):
-    """What the judge runner needs from a sandbox (``tb2_provider.SandboxHandle`` fits)."""
+    """What the judge runner needs from a sandbox."""
 
     def exec(self, command: str, *, timeout_s: float, workdir: str | None = None) -> Any: ...
 
@@ -124,7 +124,7 @@ class BenchmarkAdapter(Protocol):
 
 _REGISTRY: dict[str, Callable[..., BenchmarkAdapter]] = {}
 # benchmark name -> module of this package that registers it (lazy, no import cost)
-_BUILTIN_MODULES = {"tb2": "tb2", "swebench-verified": "swebench_verified"}
+_BUILTIN_MODULES = {"swebench-verified": "swebench_verified"}
 
 
 def register(name: str, factory: Callable[..., BenchmarkAdapter]) -> None:

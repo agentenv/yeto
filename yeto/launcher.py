@@ -125,13 +125,8 @@ from .launch.images import (  # noqa: F401
 from .launch.in_vm_docker import (  # noqa: F401
     DOCKER_LOGIN_UNSET, IN_VM_DOCKER_CLOUDS, in_vm_docker_image, in_vm_docker_run,
 )
-from .launch.codex import (  # noqa: F401
-    CODEX_BUNDLE_DIR_ENV, CODEX_COMPACTION_ENV, CODEX_CONTAINER_DIR,
-    HARNESS_ENVIRONMENT_PROVIDER_ENV, HARNESS_PASSTHROUGH_ENV, HARNESS_PREFLIGHT_ENV,
-    HEAD_CODEX_BUNDLE_PATH, MODAL_CLIENT_SETUP, MODAL_SANDBOX_PROVIDER, MODAL_SANDBOX_PROVIDERS,
-    PREBAKED_MODAL_SANDBOX_PROVIDER, SANDBOX_MODAL_TOKEN_ENVS, SANDBOX_TOKEN_IN_ISLAND_CHECK,
-    codex_bundle_contract, codex_harness_launch, codex_head_staging, modal_sandbox_secret_name,
-    require_sandbox_modal_token,
+from .launch.harness_env import (  # noqa: F401
+    check_compaction_launch, compactionrl_launch_env, modal_sandbox_secret_name,
 )
 from .launch.rl_island_task import _worker_node_ip_flag  # noqa: F401
 from .launch.diffusion_sample import make_diffusion_sample_task, run_diffusion_sample  # noqa: F401

@@ -7,7 +7,6 @@ harness counts + admission, driver -> pool policy token, 1.7 schema.
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import json
 import time
 from types import SimpleNamespace
@@ -15,7 +14,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from yeto.rl.engine import run_config as rc
 from yeto.rl.engine.algorithm import AlgorithmSpec
 from yeto.rl.engine.bridges import LocalOnlySync
 from yeto.rl.engine.driver import EventTape, IslandDriver, PolicyIdentityError, policy_token
@@ -53,11 +51,11 @@ NAME = "base_model.model.layer.lora_A.weight"
 # ---------------------------------------------------------------------------
 def test_ir1_agent_flags_pass_through_with_agentic_generate():
     c = sub(make_config(), "agent", custom_generate_function_path=AGENTIC,
-            custom_agent_function_path="yeto.rl.harness.codex.codex_openenv_agent_function",
+            custom_agent_function_path="yeto.rl.adapters.miles.harbor_agent.run",
             agent_max_seq_len=8192)
     argv = cfg.translate_run_config(c, AlgorithmSpec()).argv
     i = argv.index("--custom-agent-function-path")
-    assert argv[i + 1] == "yeto.rl.harness.codex.codex_openenv_agent_function"
+    assert argv[i + 1] == "yeto.rl.adapters.miles.harbor_agent.run"
     assert argv[argv.index("--max-seq-len") + 1] == "8192"
     assert argv[argv.index("--custom-generate-function-path") + 1] == AGENTIC
 
@@ -80,20 +78,6 @@ def test_ir1_append_roles_rejected_with_template_reason():
             tito_allowed_append_roles=("tool",))
     with pytest.raises(cfg.UnmappedConfigError, match=r"decided by the --tito-model template \(allowed_append_roles\)"):
         cfg.translate_run_config(c, AlgorithmSpec())
-
-
-def test_ir1_append_roles_accepted_for_signed_codex_agent_when_equal_to_profile():
-    from yeto.rl import CODEX_OPENENV_AGENT
-    c = sub(make_config(), "agent", use_session_server=True, tito_model="qwen35",
-            custom_generate_function_path=AGENTIC, custom_agent_function_path=CODEX_OPENENV_AGENT,
-            tito_allowed_append_roles=("tool", "user"))
-    stub = lambda _m: (None, None)  # noqa: E731 - no miles checkout in the CPU venv
-    launch = cfg.translate_run_config(c, AlgorithmSpec(), tito_parser_resolver=stub)
-    assert "--tito-allowed-append-roles" not in " ".join(map(str, launch.argv))
-    assert "--tito-model" in launch.argv
-    bad = sub(c, "agent", tito_allowed_append_roles=("tool",))
-    with pytest.raises(cfg.UnmappedConfigError, match=r"fix the\s+append roles"):
-        cfg.translate_run_config(bad, AlgorithmSpec(), tito_parser_resolver=stub)
 
 
 def test_ir1_session_server_and_partial_rollout_are_mutually_exclusive():
