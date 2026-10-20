@@ -57,9 +57,12 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
+from . import scope as quant_scope
 from .awq import AwqSmoothing
+from .fp8 import FP8_DTYPE, quantize_fp8_per_channel
 from .int4 import QMAX, QMIN, quantize_per_channel
 from .mxfp4 import GROUP_SIZE, quantize_mxfp4, unpack_fp4
+from .schemes import FP8_FFN_CHANNEL as FP8_NAME
 from .schemes import MXFP4_G32_RTN as MXFP4_NAME
 from .schemes import W4A8_INT4_CHANNEL as W4A8_NAME
 from .stacked import StackedSourceIndex
@@ -80,6 +83,7 @@ _DTYPES = {
     "I32": torch.int32,
     "I64": torch.int64,
     "U8": torch.uint8,
+    "F8_E4M3": FP8_DTYPE,
     "BOOL": torch.bool,
 }
 _DTYPE_NAMES = {v: k for k, v in _DTYPES.items()}
@@ -170,9 +174,36 @@ class _Mxfp4Group32(QuantScheme):
         return quantize_mxfp4(weight)
 
 
+class _Fp8Channel(QuantScheme):
+    """FP8 E4M3 weights per output channel, dynamic per-token FP8 activations (W8A8, S26 E6 tier 2)."""
+
+    name = FP8_NAME
+    rtn_only = True
+    format = "float-quantized"
+    data_suffix = WEIGHT_SUFFIX
+    data_dtype = "F8_E4M3"
+    weight_scheme = {"num_bits": 8, "type": "float", "symmetric": True, "strategy": "channel",
+                     "group_size": None, "dynamic": False}
+
+    def check_pair(self, module: str, data: TensorSpec, scale: TensorSpec) -> None:
+        if scale.shape != (data.shape[0], 1) or scale.dtype not in ("F32", "BF16"):
+            raise LayoutError(f"{module}: scale {scale.dtype}{scale.shape} is not per-channel [{data.shape[0]}, 1]")
+
+    def quantize(self, weight: torch.Tensor, scale: TensorSpec) -> tuple[torch.Tensor, torch.Tensor]:
+        return quantize_fp8_per_channel(weight, scale_dtype=_DTYPES[scale.dtype])
+
+    def check_values(self, name: str, data: torch.Tensor) -> None:
+        if torch.isnan(data.to(torch.float32)).any():
+            raise LayoutError(f"{name}: FP8 weight holds NaN")
+
+
 W4A8_INT4_CHANNEL = _Int4Channel()
 MXFP4_G32_RTN = _Mxfp4Group32()
-SCHEMES = {s.format: s for s in (W4A8_INT4_CHANNEL, MXFP4_G32_RTN)}
+FP8_FFN_CHANNEL = _Fp8Channel()
+SCHEMES = {s.format: s for s in (W4A8_INT4_CHANNEL, MXFP4_G32_RTN, FP8_FFN_CHANNEL)}
+# Schemes whose target layout is derived from the BF16 checkpoint and the scope
+# rule (:func:`scoped_layout`) instead of a reference artefact.
+SCOPED_SCHEMES = {FP8_FFN_CHANNEL.name: FP8_FFN_CHANNEL}
 
 
 @dataclass
@@ -297,6 +328,85 @@ def read_header(path: Path) -> dict[str, dict[str, Any]]:
         header = json.loads(f.read(n))
     header.pop("__metadata__", None)
     return header
+
+
+def _fp8_quantization_config(ignore: list[str]) -> dict[str, Any]:
+    """The compressed-tensors config of :data:`FP8_FFN_CHANNEL` (llm-compressor ``FP8_DYNAMIC``)."""
+    scheme = FP8_FFN_CHANNEL
+    return {
+        "quant_method": "compressed-tensors",
+        "format": scheme.format,
+        "quantization_status": "compressed",
+        "config_groups": {"group_0": {
+            "targets": ["Linear"],
+            "format": scheme.format,
+            "weights": {**scheme.weight_scheme, "observer": "minmax"},
+            "input_activations": {"num_bits": 8, "type": "float", "symmetric": True, "strategy": "token",
+                                  "group_size": None, "dynamic": True, "observer": None},
+            "output_activations": None,
+        }},
+        "ignore": ignore,
+        "kv_cache_scheme": None,
+    }
+
+
+def scoped_layout(source_dir: Path, scheme_name: str) -> tuple[CheckpointLayout, str]:
+    """The target layout of a scoped scheme, derived from the BF16 checkpoint ``source_dir``.
+
+    Every in-scope linear (:mod:`.scope`: FFN of a dense model, routed experts of a MoE
+    model) becomes ``<module>.weight`` in the scheme's data dtype plus an FP32
+    ``<module>.weight_scale [out, 1]`` in the same shard; every other tensor keeps its
+    name, dtype, shape and shard. The config ``ignore`` lists every out-of-scope linear by
+    name, and ``lm_head``. Returns the layout and the model kind.
+    """
+    scheme = SCOPED_SCHEMES.get(scheme_name)
+    if scheme is None:
+        raise LayoutError(f"{scheme_name!r} is not a scoped scheme; known: {', '.join(SCOPED_SCHEMES)}")
+    source = _SourceReader(Path(source_dir))
+    if source.stacked.stacked_names:
+        raise LayoutError(f"{source_dir}: a scoped layout is derived from a per-expert HF checkpoint, "
+                          "not from the stacked trainer layout")
+    headers: dict[str, dict[str, Any]] = {}
+    for shard in sorted(set(source.weight_map.values())):
+        headers.update(read_header(Path(source_dir) / shard))
+    kind = quant_scope.model_kind_of(Path(source_dir))
+    shapes = {n: headers[n]["shape"] for n in source.weight_map}
+    quantized = [m for m in quant_scope.linear_modules(shapes) if quant_scope.in_scope(m, kind)]
+    if not quantized:
+        raise LayoutError(f"{source_dir}: no in-scope linear module for a {kind} model")
+    quant_scope.check_quantized(quantized, kind, what=f"the {scheme.name} layout")
+    tensors: dict[str, TensorSpec] = {}
+    for name, shard in source.weight_map.items():
+        tensors[name] = TensorSpec(headers[name]["dtype"], tuple(headers[name]["shape"]), shard)
+    for module in quantized:
+        data = tensors[module + WEIGHT_SUFFIX]
+        tensors[module + WEIGHT_SUFFIX] = TensorSpec(scheme.data_dtype, data.shape, data.shard)
+        if module + SCALE_SUFFIX in tensors:
+            raise LayoutError(f"{module}: the BF16 source already has a weight_scale")
+        tensors[module + SCALE_SUFFIX] = TensorSpec("F32", (data.shape[0], 1), data.shard)
+    # ``lm_head`` is listed even when tied to the embeddings and absent from the
+    # checkpoint (llm-compressor does the same): no loader may treat it as quantized.
+    config = _fp8_quantization_config(sorted(set(quant_scope.ignored_modules(shapes, kind)) | {"lm_head"}))
+    layout = CheckpointLayout(tensors, config)
+    layout.validate()
+    return layout, kind
+
+
+def save_scoped_template(source_dir: Path, template_dir: Path, scheme_name: str) -> CheckpointLayout:
+    """Write the template of a scoped scheme: ``layout.json`` plus the source's metadata files,
+    with ``config.json`` carrying the scheme's ``quantization_config``."""
+    layout, _kind = scoped_layout(source_dir, scheme_name)
+    layout.save_template(Path(source_dir), Path(template_dir))
+    config_path = Path(template_dir) / "config.json"
+    config = json.loads(config_path.read_text())
+    config["quantization_config"] = layout.quantization_config
+    _write_text_atomic(config_path, json.dumps(config, indent=2, sort_keys=True))
+    return layout
+
+
+def check_layout_scope(layout: CheckpointLayout, kind: str) -> None:
+    """Refuse a layout that quantizes a module outside the scope rule (:mod:`.scope`)."""
+    quant_scope.check_quantized(layout.quantized_modules, kind, what=f"the {layout.scheme.name} layout")
 
 
 def metadata_files(ckpt_dir: Path) -> list[Path]:
@@ -595,6 +705,10 @@ def main(argv: list[str] | None = None) -> int:
     t = sub.add_parser("template", help="record the layout of a reference quantized checkpoint (W4A8 or MXFP4)")
     t.add_argument("checkpoint")
     t.add_argument("template_dir")
+    st = sub.add_parser("scoped-template", help="derive the template of a scoped scheme (FP8 FFN) from a BF16 checkpoint")
+    st.add_argument("--source", required=True)
+    st.add_argument("--out", required=True)
+    st.add_argument("--scheme", default=FP8_NAME, choices=sorted(SCOPED_SCHEMES))
     c = sub.add_parser("convert", help="BF16 checkpoint -> quantized checkpoint in the template layout")
     c.add_argument("--source", required=True)
     c.add_argument("--template", required=True)
@@ -615,6 +729,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "template":
         CheckpointLayout.from_checkpoint(Path(args.checkpoint)).save_template(Path(args.checkpoint), Path(args.template_dir))
         result: Any = {"template": args.template_dir}
+    elif args.cmd == "scoped-template":
+        layout = save_scoped_template(Path(args.source), Path(args.out), args.scheme)
+        result = {"template": args.out, "scheme": args.scheme, "quantized_modules": len(layout.quantized_modules),
+                  "ignored_linears": len(layout.quantization_config["ignore"])}
     elif args.cmd == "convert":
         shards = args.shards.split(",") if args.shards else None
         result = requantize_checkpoint(Path(args.source), Path(args.template), Path(args.out), _smoothing_from_args(args), shards)

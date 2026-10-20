@@ -11,6 +11,8 @@ silently (A-INF items 1, 2, 3, 5). :class:`PortReleaseLoader` is the
    the engine keeps its version);
 2. counts the routed-expert matrices in the release index and compares them
    with the expected count (release record, else the check config);
+   an FP8 release (``fp8-w8a8-channel``, S26 E6 tier 2) must quantize only the
+   in-scope linears (:func:`yeto.rl.quant.tiers.check_release_scope`);
 3. loads the release (``engine.load``; a retry after a failed check restarts
    the engine with ``engine.start``);
 4. runs the three post-load checks of :class:`PostLoadChecks`:
@@ -51,6 +53,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from yeto.rl.quant.schemes import FP8_FFN_CHANNEL
 
 from .policy_release import PolicyRelease, ReleaseNotLoaded
 from .sampler_engine import SamplerEngine, SamplerEngineError, SamplingParams
@@ -324,6 +328,15 @@ class PortReleaseLoader:
             if in_release is not None and in_release != expected:
                 self._refuse(version, "release_expert_count",
                              {"in_release": in_release, "expected": expected})
+        if directory is not None and self.scheme == FP8_FFN_CHANNEL:
+            # S26 E6 tier 2: only in-scope linears may be FP8 (yeto.rl.quant.scope)
+            from yeto.rl.quant.scope import QuantScopeError
+            from yeto.rl.quant.tiers import check_release_scope
+
+            try:
+                check_release_scope(directory)
+            except QuantScopeError as error:
+                self._refuse(version, "quant_scope", str(error))
         restart = first or self._restart  # after a failed load or check: restart, never patch in place
         self.ready = False  # the engine holds unchecked weights from here until the checks pass
         started = self.clock()

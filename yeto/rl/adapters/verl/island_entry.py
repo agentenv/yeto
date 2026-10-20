@@ -23,9 +23,12 @@ import os
 import shlex
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
+
+from yeto.rl.quant.tiers import TIER_TRAINER_FP8
 
 from . import config as vconf
 from . import run_config_rules
@@ -83,6 +86,8 @@ def parse_args(argv):
     p.add_argument("--rl-cut-keep", type=int, default=None)
     p.add_argument("--rl-stop-after-rounds", type=int, default=None)
     p.add_argument("--rl-resume-allow-config-change", action="store_true")
+    # S26 E6: rollout quantization tier (yeto.rl.quant.tiers; the launcher validated it)
+    p.add_argument("--rl-rollout-quant-tier", type=int, choices=(0, 1, 2, 3), default=0)
     args, ignored = p.parse_known_args(argv)
     return args, ignored
 
@@ -340,6 +345,11 @@ def main(argv=None) -> int:
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     asserted_keys = vconf.ASSERTED_KEYS
+    quant_overrides, quant_summary = rollout_quant_overrides(
+        args.rl_rollout_quant_tier, Path(model_path), colocated=buffer_section is None)
+    overrides += quant_overrides
+    if quant_overrides:
+        asserted_keys = (*asserted_keys, "actor_rollout_ref.rollout.quantization")
     if limit:  # agentic-rollout-utilization 6.4b: fully_async path
         overrides, asserted_keys = fully_async_plan(limit, overrides, spec_dict, args, sync)
         append_correction_record(args, spec_dict)
@@ -367,6 +377,7 @@ def main(argv=None) -> int:
         "resume": resume,
         "versions": manifest["versions"],
         **({"sample_buffer": buffer_section} if buffer_section else {}),
+        "rollout_quant": quant_summary,
     }
     plan_path = work / f"plan-{lid}.json"
     plan_path.write_text(json.dumps(plan, indent=1, default=str))
@@ -386,15 +397,56 @@ def main(argv=None) -> int:
     cmd = [sys.executable, "-c", f"from yeto.rl.adapters.verl.verl_main import {entry}; {entry}()", *overrides]
     print("[yeto-verl] " + " ".join(shlex.quote(c) for c in cmd), flush=True)
     log = OUTPUT / f"verl-train-{lid}.log"
-    with log.open("a") as handle:
-        proc = subprocess.Popen(cmd, env=env, cwd=VERL_ROOT if Path(VERL_ROOT).is_dir() else None,
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-        for line in proc.stdout:
-            sys.stdout.write(line)
-            handle.write(line)
-        code = proc.wait()
+    stop_releaser = threading.Event()
+    if args.rl_rollout_quant_tier == TIER_TRAINER_FP8:  # S26 E6 tier 2: BF16 releases -> FP8 releases
+        start_trainer_releaser(buffer_section, Path(model_path), work / "fp8-template", stop_releaser)
+    try:
+        with log.open("a") as handle:
+            proc = subprocess.Popen(cmd, env=env, cwd=VERL_ROOT if Path(VERL_ROOT).is_dir() else None,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+            for line in proc.stdout:
+                sys.stdout.write(line)
+                handle.write(line)
+            code = proc.wait()
+    finally:
+        stop_releaser.set()
     print(f"[yeto-verl] island {lid} exit {code} after {time.time() - t0:.0f}s", flush=True)
     return code
+
+
+def rollout_quant_overrides(tier: int, model_path: Path, *, colocated: bool) -> tuple[list[str], dict]:
+    """S26 E6: the vLLM overrides of rollout quantization tier 1 on a colocated island, and the
+    plan record. Tier 1 is checked against the checkpoint first (scope rule; refused with
+    SystemExit before verl starts). On a buffer trainer the rollout runs on the sampler
+    island, so no override is added; tier 2 starts the releaser instead."""
+    from yeto.rl.quant import tiers
+    from yeto.rl.quant.scope import QuantScopeError
+
+    summary: dict = {"tier": tier, "name": tiers.TIER_NAMES[tier]}
+    if tier != tiers.TIER_ONLINE_FP8 or not colocated:
+        return [], summary
+    try:
+        plan = tiers.online_plan(model_path)
+    except QuantScopeError as error:
+        raise SystemExit(f"[yeto-verl] {error}") from None
+    summary.update(plan.summary())
+    print(f"[yeto-verl] {tiers.describe(tier)}: {json.dumps(plan.summary())}", flush=True)
+    return tiers.vllm_online_overrides(plan, tiers.num_hidden_layers(model_path)), summary
+
+
+def start_trainer_releaser(buffer_section: dict | None, base_dir: Path, template_dir: Path,
+                           stop: threading.Event) -> threading.Thread:
+    """S26 E6 tier 2 on a buffer trainer: convert every BF16 release of the store into an
+    FP8 release (``yeto.rl.quant.release.scoped_releaser``) in a thread of this process."""
+    from yeto.rl.engine.resume import store_for
+    from yeto.rl.quant.release import scoped_releaser, start_scoped_releaser
+    from yeto.rl.quant.schemes import FP8_FFN_CHANNEL
+
+    if not buffer_section:
+        raise SystemExit("--rl-rollout-quant-tier 2 needs --rl-sample-role trainer on a verl island")
+    store = store_for(buffer_section.get("release_store") or buffer_section["store"])
+    releaser = scoped_releaser(store, base_dir, template_dir, FP8_FFN_CHANNEL)
+    return start_scoped_releaser(releaser, stop)
 
 
 def sample_buffer_section(args) -> dict | None:

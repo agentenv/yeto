@@ -220,6 +220,8 @@ def make_miles_island_task(
         value = getattr(args, name, None)
         if value is not None:
             flags += f" {flag} {shlex.quote(str(value))}"
+    if getattr(args, "rl_rollout_quant_tier", 0):  # S26 E6 (validated by the launcher)
+        flags += f" --rl-rollout-quant-tier {int(args.rl_rollout_quant_tier)}"
     if args.use_rollout_routing_replay:
         flags += " --use-rollout-routing-replay"
     if getattr(args, "apply_chat_template_kwargs", None):

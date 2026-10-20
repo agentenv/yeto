@@ -1300,8 +1300,10 @@ def connect_island_ray(*, environ=None, ray_module=None, miles_args=None) -> str
     """
 
     environ = os.environ if environ is None else environ
+    quant_env = rollout_quant_env(miles_args)  # S26 E6 tier 1: checked before any engine starts
     address = environ.get("RAY_ADDRESS")
     if not address:
+        environ.update(quant_env)  # a Ray the driver starts inherits the driver's environment
         return None
     if ray_module is None:
         import ray as ray_module
@@ -1361,8 +1363,22 @@ def connect_island_ray(*, environ=None, ray_module=None, miles_args=None) -> str
         from yeto.rl.harness.codex.preflight import worker_runtime_env
 
         env_vars.update(worker_runtime_env(miles_args, environ))
+    env_vars.update(quant_env)
     ray_module.init(address=address, runtime_env={"env_vars": env_vars})
     return address
+
+
+def rollout_quant_env(miles_args: Any) -> dict[str, str]:
+    """S26 E6 tier 1: the SGLang ignore list for ``miles_args.hf_checkpoint``, after the
+    scope check (:func:`yeto.rl.quant.tiers.online_plan` raises before any engine starts).
+    Empty for every other tier and for a trainer-only island (no rollout engine)."""
+    from yeto.rl.quant import tiers
+
+    if miles_args is None or getattr(miles_args, "yeto_rollout_quant_tier", 0) != tiers.TIER_ONLINE_FP8:
+        return {}
+    plan = tiers.online_plan(Path(miles_args.hf_checkpoint))
+    print(f"[rl] {tiers.describe(tiers.TIER_ONLINE_FP8)}: {json.dumps(plan.summary())}", flush=True)
+    return tiers.sglang_online_env(plan)
 
 
 # E2 plan-v2 §0 determinism environment (with Megatron --deterministic-mode);

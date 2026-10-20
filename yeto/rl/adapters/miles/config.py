@@ -37,6 +37,7 @@ from yeto.rl.engine.algorithm import (
     normalize_filter_name,
     AlgorithmSpec,
 )
+from yeto.rl.quant.tiers import TIER_ONLINE_FP8, sglang_online_argv
 from .lr_schedule import LR_SCHEDULE_FLAGS
 from .algorithm_flags import (
     OBJECTIVE_FLAGS,
@@ -427,6 +428,7 @@ LEAF_POLICY: dict[str, _Check] = {
     "serving.max_running_requests": _ok,
     "serving.chunked_prefill_size": _ok,
     "serving.sampler_snapshot": _ok,  # gated in translate_run_config (sampler_snapshot)
+    "serving.rollout_quant_tier": _ok,  # S26 E6: SGLang flags in translate_run_config
     "ports.rollout_engine_base_port": _must_be_none(
         "upstream Miles has no --rollout-engine-base-port (fork-only port isolation, task 1.4b)"
     ),
@@ -1004,6 +1006,10 @@ def translate_run_config(
                 values.extend((flag, str(value)))
     if serving.deterministic_inference:
         values.append("--sglang-enable-deterministic-inference")
+    if getattr(serving, "rollout_quant_tier", 0) == TIER_ONLINE_FP8:
+        # S26 E6 tier 1: SGLang quantizes the in-scope linears itself; the ignore list
+        # travels in the workers' environment (entry.connect_island_ray).
+        values.extend(sglang_online_argv())
     if getattr(serving, "sampler_snapshot", False):
         try:
             values.extend(sampler_snapshot.snapshot_argv(request, extra_argv=extra_argv))
@@ -1174,6 +1180,7 @@ def translate_run_config(
         rollout_overlap=rollout_overlap,
         runtime_attrs={
             **algorithm.to_legacy_runtime_attrs(),
+            "yeto_rollout_quant_tier": int(getattr(serving, "rollout_quant_tier", 0) or 0),
             **_full_parameter_optimizer_attrs(trainable, config.train_memory,
                                               full_parameter_sync=full_parameter_sync),
             # rl-algo-critic-family 4.1: receipt init source (warm-up product)

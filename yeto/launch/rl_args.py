@@ -212,6 +212,9 @@ def _prepare_rl_args(
             raise ValueError("--codex-reasoning-effort requires --training-mode rl")
         return
 
+    from yeto.rl.quant.tiers import validate_launch as _validate_quant_tier
+
+    _validate_quant_tier(args)  # S26 E6: refused before any cloud spend
     _prepare_node_inventory(args)
 
     from ..adapter_lifecycle import directory_sha256, selected_parent
