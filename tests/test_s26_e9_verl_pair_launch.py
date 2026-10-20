@@ -115,6 +115,9 @@ def test_one_launch_gives_one_sampler_and_one_trainer(monkeypatch):
     from yeto.rl.engine.engine_sampler_entry import island_config
 
     assert island_config(spec).sampler_id == "island0"  # the entry accepts the spec
+    from yeto.rl.adapters.sampler_engines import from_spec
+
+    assert spec["engine"]["factory"] == from_spec.FACTORY
 
 
 def test_two_samplers_get_shards_and_disjoint_data_slots(monkeypatch):

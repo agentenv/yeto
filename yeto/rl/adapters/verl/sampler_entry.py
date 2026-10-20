@@ -33,9 +33,11 @@ from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
-from yeto.rl.adapters.sampler_engines.from_spec import FACTORY as ENGINE_FACTORY
 from yeto.rl.engine.sample_roles import DEFAULT_MAX_BACKLOG_ROUNDS
 
+# the spec names the engine factory by its import path; an adapter does not import
+# another adapter (import boundaries, yeto/rl/engine/README.md)
+ENGINE_FACTORY = "yeto.rl.adapters.sampler_engines.from_spec:build"
 ENGINE_ADAPTER = "vllm-server"
 MAX_PROMPT_TOKENS = 512  # the verl island's max_prompt (island_entry.main)
 # launcher --reward-function spelling -> the Miles-style reward the engine sampler calls
