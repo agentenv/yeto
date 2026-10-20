@@ -235,14 +235,18 @@ def incarnation_tape(path: str | Path, incarnation: str) -> Path:
     return tape.with_name(f"{tape.stem}.{incarnation}{tape.suffix or '.jsonl'}")
 
 
-def tape_writer(path: str | Path, sampler_id: str) -> Callable[..., None]:
+def tape_writer(path: str | Path, sampler_id: str, island_id: int | None = None) -> Callable[..., None]:
+    """``island_id``: the launcher island this sampler runs as; its records then
+    carry it, so the launcher accepts the file as the island's event tape
+    (``yeto.rl.event_echo.REQUIRED_KEYS``)."""
     from yeto.rl.event_echo import append_record  # noqa: PLC0415
 
     tape = Path(path).expanduser()
     tape.parent.mkdir(parents=True, exist_ok=True)
+    head = {"sampler_id": sampler_id} if island_id is None else {"island_id": int(island_id), "sampler_id": sampler_id}
 
     def emit(event: str, **fields: Any) -> None:
-        append_record(tape, {"sampler_id": sampler_id, "time_unix": time.time(), "event": event, **fields})
+        append_record(tape, {**head, "time_unix": time.time(), "event": event, **fields})
 
     return emit
 
@@ -292,7 +296,7 @@ def run(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
     config = island_config(spec)
     incarnation = incarnation or new_incarnation()
     tape = incarnation_tape(_require(spec, "event_tape"), incarnation)
-    write = tape_writer(tape, config.sampler_id)
+    write = tape_writer(tape, config.sampler_id, spec.get("island_id"))
 
     def emit(event: str, **fields: Any) -> None:
         write(event, **fields)

@@ -181,3 +181,18 @@ def test_hold_after_reclaim_only_when_the_marker_is_there(tmp_path):
     assert entry.hold_after_reclaim(env, hold_s=5.0, sleep=slept.append) is False and slept == []
     (tmp_path / "marker").write_text("{}")
     assert entry.hold_after_reclaim(env, hold_s=5.0, sleep=slept.append) is True and slept == [5.0]
+
+
+def test_a_launcher_island_tape_is_recovered_complete(tmp_path):
+    """S26 E9 G1 (e9-g1-j, exit 3): with the spec's island_id every record carries
+    it, so the launcher's tape recovery accepts the file and sees the finalized
+    record; without it the records are discarded as not island tape lines."""
+    from yeto.rl.event_echo import TapeCollector
+
+    spec = {**_spec(tmp_path, rounds=1), "island_id": 0}
+    assert entry.run(spec, resource_sampler=lambda emit: None, incarnation="aaaa0001") == 1
+    [tape] = (tmp_path / "tape").glob("events.*.jsonl")
+    assert all(r["island_id"] == 0 for r in _tape(tape))
+    collector = TapeCollector(tmp_path / "events" / "l0.jsonl", fresh=False)
+    assert collector.recover_from_file(tape) is True
+    assert collector.discarded == 0 and collector.count == len(_tape(tape))

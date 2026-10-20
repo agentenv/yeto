@@ -104,6 +104,8 @@ def sampler_spec(args: Any, *, model_path: str, prompts_path: str, card_model: s
         "reward": sampler_reward(args.reward_function), "reward_kind": "miles",
         "checks": {"expected_expert_matrices": None, "fixed_prompts": []},
         "event_tape": str(event_tape),
+        # the launcher reads this tape as the island's tape (records need island_id)
+        "island_id": int(getattr(args, "learner_id", 0) or 0),
     }
     if getattr(args, "rl_sampler_data_slot", None):
         spec["prompts"]["data_slot"] = str(args.rl_sampler_data_slot)

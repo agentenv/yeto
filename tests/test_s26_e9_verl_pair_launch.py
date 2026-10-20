@@ -109,6 +109,7 @@ def test_one_launch_gives_one_sampler_and_one_trainer(monkeypatch):
     spec = sampler_entry.sampler_spec(sampler, model_path="/m", prompts_path="/p.jsonl", card_model="A10G",
                                       engine_version="0.x", event_tape="/t/events.jsonl", python="python3")
     assert spec["sampler_id"] == "island0" and spec["store"] == sampler.rl_resume_store
+    assert spec["island_id"] == 0  # the launcher reads the sampler tape as island tape
     assert spec["engine"]["adapter"] == "vllm-server" and spec["num_rollouts"] == 4
     assert spec["max_backlog_groups"] == 4 * sample_roles.DEFAULT_MAX_BACKLOG_ROUNDS
     assert spec["reward"] == "yeto.rl.gsm8k_reward:score" and "buffer_shards" not in spec
