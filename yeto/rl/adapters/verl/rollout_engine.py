@@ -27,9 +27,12 @@ Environment of :func:`records_proxy_from_env`:
 
 Policy version: verl's synchronous trainer updates the rollout weights only
 between steps, never while a batch is generated, so a turn cannot straddle a
-reload.  The rollout reply carries verl's ``global_steps`` only in the fully
-async mode; :meth:`VerlRolloutEngine.served_version` therefore returns None
-(unknown) and the trainer's step log is the version record.
+reload.  Each rollout reply carries the weights' ``global_steps``; the engine
+keeps them per trajectory (the records proxy's ``CURRENT_TRAJECTORY``) and
+``HarborAgentLoop`` reports their min / max as the sample's
+``min_global_steps`` / ``max_global_steps`` (verl's V1 trainer requires both).
+:meth:`VerlRolloutEngine.served_version` returns None: the version is known
+only after a reply, not before it.
 
 Finish reason: verl reports ``completed`` for both an end token and the token
 cap.  A reply that ends without a stop token and fills ``max_tokens`` is
@@ -75,6 +78,8 @@ class VerlRolloutEngine:
         self._identity = identity
         self._client: Any = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._steps: dict[str, list[int]] = {}
+        self.last_global_steps: int | None = None
 
     # ------------------------------------------------------------ binding
     def bind(self, client: Any, loop: asyncio.AbstractEventLoop) -> None:
@@ -86,6 +91,10 @@ class VerlRolloutEngine:
     @property
     def bound(self) -> bool:
         return self._client is not None
+
+    def pop_steps(self, trajectory: str) -> list[int]:
+        """The ``global_steps`` of every reply sampled for ``trajectory`` (and forget them)."""
+        return self._steps.pop(trajectory, [])
 
     # ------------------------------------------------------------ engine port
     @property
@@ -104,18 +113,22 @@ class VerlRolloutEngine:
         """Called from a worker thread (the records backend uses ``asyncio.to_thread``)."""
         if self._client is None or self._loop is None:
             raise SamplerEngineError("VerlRolloutEngine is not bound to verl's rollout client")
+        from yeto.rl.harness.gateway.proxy import CURRENT_TRAJECTORY
+
+        trajectory = CURRENT_TRAJECTORY.get()  # copied into this thread by asyncio.to_thread
         stops = {int(t) for t in stop_token_ids}
         out: list[list[Completion]] = []
         for prompt in prompts:
             group = []
             for _ in range(int(sampling.n)):
                 future = asyncio.run_coroutine_threadsafe(
-                    self._generate(list(prompt), sampling, sorted(stops)), self._loop)
+                    self._generate(list(prompt), sampling, sorted(stops), trajectory), self._loop)
                 group.append(future.result(timeout=CALL_TIMEOUT_S))
             out.append(group)
         return out
 
-    async def _generate(self, prompt: list[int], sampling: SamplingParams, stops: list[int]) -> Completion:
+    async def _generate(self, prompt: list[int], sampling: SamplingParams, stops: list[int],
+                        trajectory: str | None = None) -> Completion:
         params: dict[str, Any] = {
             "temperature": float(sampling.temperature), "top_p": float(sampling.top_p),
             "top_k": int(sampling.top_k), "repetition_penalty": float(sampling.repetition_penalty),
@@ -127,6 +140,11 @@ class VerlRolloutEngine:
                                              sampling_params=params)
         if getattr(output, "stop_reason", None) == "aborted":
             raise SamplerEngineError("verl rollout aborted the request")
+        steps = (getattr(output, "extra_fields", None) or {}).get("global_steps")
+        if steps is not None:
+            self.last_global_steps = int(steps)
+            if trajectory is not None:
+                self._steps.setdefault(trajectory, []).append(int(steps))
         tokens = tuple(int(t) for t in output.token_ids)
         logprobs = output.log_probs
         if logprobs is None or len(logprobs) != len(tokens):
@@ -164,6 +182,26 @@ def finish_reason(tokens: Sequence[int], stops: set[int] | Sequence[int], max_to
     if tokens and int(tokens[-1]) in set(stops):
         return FINISH_STOP
     return FINISH_LENGTH if len(tokens) >= max_tokens else FINISH_STOP
+
+
+def _engine_of(recorder: Any) -> Any:
+    engine = getattr(getattr(getattr(recorder, "proxy", None), "backend", None), "engine", None)
+    return engine if isinstance(engine, VerlRolloutEngine) else None
+
+
+def weight_steps(recorder: Any, trajectory: str) -> tuple[int, int] | None:
+    """``(min, max)`` verl ``global_steps`` of the trajectory's replies; None without a verl engine.
+
+    A trajectory with no reply (aborted before its first call) gets the
+    latest step the engine saw: in the synchronous trainer that is the batch's.
+    Before the engine saw any reply it gets ``(0, 0)``: verl's V1 trainer
+    needs an integer, and such a row is an ABORTED placeholder (no loss tokens).
+    """
+    engine = _engine_of(recorder)
+    if engine is None:
+        return None
+    steps = engine.pop_steps(trajectory) or ([engine.last_global_steps] if engine.last_global_steps is not None else [])
+    return (min(steps), max(steps)) if steps else (0, 0)
 
 
 def bind_rollout_client(recorder: Any, client: Any) -> None:

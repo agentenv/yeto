@@ -54,7 +54,8 @@ class FakeVerlClient:
         if self.aborted:
             return SimpleNamespace(token_ids=[], log_probs=None, stop_reason="aborted")
         ids = self.model(tuple(prompt_ids), 0)
-        return SimpleNamespace(token_ids=ids, log_probs=[-0.25] * len(ids), stop_reason="completed")
+        return SimpleNamespace(token_ids=ids, log_probs=[-0.25] * len(ids), stop_reason="completed",
+                               extra_fields={"global_steps": 3})
 
 
 def _verl_proxy(template) -> tuple[RecordsProxy, Any]:
@@ -101,6 +102,9 @@ def test_agent_loop_samples_through_verls_client_behind_the_path_secret(verl_loo
     assert trained and all(lp == -0.25 for lp in trained)
     assert out.extra_fields["provenance"]["engine"] == "verl-rollout"
     assert out.extra_fields["length_capped_turns"] == 0
+    # verl V1 needs the weights' step range per sample
+    assert out.extra_fields["min_global_steps"] == out.extra_fields["max_global_steps"] == 3
+    assert engine.pop_steps(endpoint.split("/t/")[1].split("/")[0]) == []  # taken by the loop
 
 
 def test_an_aborted_verl_request_aborts_the_sample(verl_loop, qwen):
@@ -119,6 +123,7 @@ def test_an_aborted_verl_request_aborts_the_sample(verl_loop, qwen):
 
     out = asyncio.run(go())
     assert out.extra_fields[OUTCOME_KEY] == "aborted" and sum(out.response_mask) == 0
+    assert out.extra_fields["min_global_steps"] == out.extra_fields["max_global_steps"] == 0  # no reply seen
 
 
 def test_unbound_engine_and_short_secret_fail_closed(qwen):

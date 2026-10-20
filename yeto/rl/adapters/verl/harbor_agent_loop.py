@@ -86,7 +86,7 @@ from yeto.rl.engine.sampler_engine import FINISH_LENGTH
 from yeto.rl.harness.harbor import HarborHarness, HarborSettings, build_trial_config
 from yeto.rl.harness.harbor.boat_client import check_in_flight_cap
 
-from .rollout_engine import bind_rollout_client
+from .rollout_engine import bind_rollout_client, weight_steps
 from .run_config_rules import AGENTIC_ADV_ESTIMATOR as YETO_GRPO
 
 logger = logging.getLogger(__name__)
@@ -220,10 +220,10 @@ class HarborAgentLoop(AgentLoopBase):
                 trajectory = _abort(trajectory, f"token_alignment: {exc}")
         if segments is not None and len(segments.prompt_ids) > self.prompt_length:
             trajectory, segments = _abort(trajectory, "prompt_exceeds_prompt_length"), None
-        return self._output(trajectory, segments, turns)
+        return self._output(trajectory, segments, turns, steps=weight_steps(recorder, session))
 
     def _output(self, trajectory: AgentTrajectory, segments: TokenSegments | None,
-                turns: Sequence[TokenTurn]) -> AgentLoopOutput:
+                turns: Sequence[TokenTurn], *, steps: tuple[int, int] | None = None) -> AgentLoopOutput:
         if segments is None:
             segments = self._placeholder()
         metadata = trajectory.to_metadata()
@@ -244,6 +244,8 @@ class HarborAgentLoop(AgentLoopBase):
                 "length_capped_turns": sum(t.finish_reason == FINISH_LENGTH for t in turns),
                 "agent_metrics": metadata["agent_metrics"],
                 "provenance": turn_provenance(turns),
+                # verl V1 reads both for its staleness metrics; recorders without verl's rollout leave them out
+                **({"min_global_steps": steps[0], "max_global_steps": steps[1]} if steps else {}),
             },
         )
 
