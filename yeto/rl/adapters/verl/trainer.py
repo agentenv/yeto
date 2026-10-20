@@ -275,11 +275,15 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
     return result
 
 
-def run_fully_async_island(call, start_rollouter, plan: dict, cfg: dict) -> dict:
+def run_fully_async_island(call, start_rollouter, plan: dict, cfg: dict, *, buffer_ports=None) -> dict:
     """agentic-rollout-utilization 6.4b: the yeto driver over the fully_async ports.
 
     ``call(method, *args)`` reaches the trainer actor; ``start_rollouter`` starts the
-    rollouter's generation loop (called once, after the first verified publication)."""
+    rollouter's generation loop (called once, after the first verified publication).
+
+    ``buffer_ports(island)``: a buffer trainer (S25 C2, ``buffer_ports.install_buffer_ports``
+    bound to the run's buffer and release store) returns ``(rollout, publisher,
+    placement)``; the trainer port and the policy state stay the fully_async ones."""
     from yeto.rl.core import canonical_layout_hash, canonical_lora_config_hash
     from yeto.rl.engine.algorithm import AlgorithmSpec
     from yeto.rl.engine.driver import EventTape, IslandDriver
@@ -317,16 +321,22 @@ def run_fully_async_island(call, start_rollouter, plan: dict, cfg: dict) -> dict
     tape.append({"event": "rl_verl_island_start", "plan": plan, "backend_identity": identity.to_dict(),
                  "backend_identity_sha256": identity_sha, "layout_hash": layout_hash,
                  "lora_config_hash": lora_hash, "n_specs": len(specs), "asserted": asserted,
-                 "fully_async": True, "max_policy_age": limit, "init_seconds": time.time() - t0})
+                 "fully_async": True, "max_policy_age": limit, "init_seconds": time.time() - t0,
+                 **({"sample_role": "trainer"} if buffer_ports is not None else {})})
     sync = build_sync(plan, specs, lora_hash=lora_hash, layout_hash=layout_hash, identity_sha256=identity_sha,
                       compat_group=identity.compat_group)
     spec = AlgorithmSpec.from_dict(plan["algorithm_spec"]) if plan.get("algorithm_spec") else AlgorithmSpec()
     profile = execution_profile_for(spec, limit, groups_per_round=int(plan["groups_per_round"]),
                                     samples_per_group=int(plan["samples_per_group"]), sync=plan["sync"])
-    publisher = FullyAsyncPublisher(island, strict=bool(plan.get("publish_strict", True)))
+    if buffer_ports is None:
+        rollout, publisher, placement = (FullyAsyncRolloutPool(island),
+                                         FullyAsyncPublisher(island, strict=bool(plan.get("publish_strict", True))),
+                                         FullyAsyncPlacement())
+    else:
+        rollout, publisher, placement = buffer_ports(island)
     driver = IslandDriver(
-        learner_id=learner_id, rollout=FullyAsyncRolloutPool(island), trainer=FullyAsyncTrainerGroup(island),
-        policy_state=VerlPolicyState(island), publisher=publisher, placement=FullyAsyncPlacement(),
+        learner_id=learner_id, rollout=rollout, trainer=FullyAsyncTrainerGroup(island),
+        policy_state=VerlPolicyState(island), publisher=publisher, placement=placement,
         capabilities=verl_capabilities(_fingerprint(cfg), fully_async_limit=limit), algorithm=spec,
         sync=sync, events=tape, profile=profile)
     state = driver.run()
