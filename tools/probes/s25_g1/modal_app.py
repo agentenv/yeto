@@ -274,25 +274,31 @@ def trainer_island(tag: str, stop_after_rounds: int | None = None, convert_only:
     _sh("ray start --head --port=6379 --node-ip-address=127.0.0.1 --num-gpus=2 --disable-usage-stats",
         log / "ray.log", env=env)
     began = time.time()
-    with open(log / "requant.log", "w", encoding="utf-8") as rq, open(log / "trainer.log", "w", encoding="utf-8") as f:
-        requant = subprocess.Popen(plan["requant"]["loop_argv"], env=env, cwd=WORKDIR, stdout=rq,
-                                   stderr=subprocess.STDOUT)
+    # The re-quantizer runs in its own container (requant_island), not as a side process
+    # here: a Modal Volume reload in this container (its poll) discards this container's
+    # uncommitted writes, and it removed a release directory while Miles wrote it (run-12).
+    with open(log / "trainer.log", "w", encoding="utf-8") as f:
         # as the stage-1 node script does: the island forwards its env to the Ray actors
         rc = subprocess.run(island, env={**env, "RAY_ADDRESS": "127.0.0.1:6379"}, cwd=WORKDIR, stdout=f,
                             stderr=subprocess.STDOUT).returncode
-        requant.terminate()
-        try:
-            requant.wait(timeout=60)
-        except subprocess.TimeoutExpired:
-            requant.kill()
-        final = subprocess.run(plan["requant"]["argv"], env=env, cwd=WORKDIR, stdout=rq,
-                               stderr=subprocess.STDOUT).returncode
     nvml.terminate()
-    (log / "rc.json").write_text(json.dumps({"rc": rc, "final_requant_rc": final,
-                                             "wall_s": round(time.time() - began, 1)}))
+    (log / "rc.json").write_text(json.dumps({"rc": rc, "wall_s": round(time.time() - began, 1)}))
     shutil.copytree(f"/data/yeto/{plan['run_id']}", log / "state", dirs_exist_ok=True,
                     ignore=shutil.ignore_patterns("*.pt", "*.safetensors"))
     _sh("cp -r /tmp/ray/session_latest/logs " + shlex.quote(str(log / "ray-logs")) + " || true", check=False)
+    _commit(tag)
+    return rc
+
+
+@app.function(image=image, volumes=VOLUMES, cpu=8, memory=65536, timeout=3 * 3600)
+def requant_island(tag: str) -> int:
+    """The plan's re-quantizer loop (node: its own CPU container; same argv)."""
+    log = _log_dir(tag)
+    _mirror_every(tag, 60.0)
+    plan = _plan(log)
+    with open(log / "requant.log", "w", encoding="utf-8") as f:
+        rc = subprocess.run(plan["requant"]["loop_argv"], env=_env(plan["trainer"]["env"]), cwd=WORKDIR,
+                            stdout=f, stderr=subprocess.STDOUT).returncode
     _commit(tag)
     return rc
 
@@ -303,6 +309,7 @@ def orchestrate(tag: str, cut_after: int = 2) -> dict:
     trainer B resumes in a new container. A trainer that fails cancels the sampler;
     a sampler that fails cancels the running trainer (no card waits for nothing)."""
     sampler = sampler_island.spawn(f"{tag}/sampler")
+    requant = requant_island.spawn(f"{tag}/requant")
     sampler_rc: object = None
 
     def sampler_done() -> bool:
@@ -338,6 +345,8 @@ def orchestrate(tag: str, cut_after: int = 2) -> dict:
     else:
         while not sampler_done():
             time.sleep(30)
+    time.sleep(90)  # the re-quantizer's last log mirror
+    requant.cancel()
     result = {"trainer_a": first, "trainer_b": second, "sampler": sampler_rc}
     print(json.dumps(result, default=str), flush=True)
     out = Path(f"/data/store/logs/{tag}")
