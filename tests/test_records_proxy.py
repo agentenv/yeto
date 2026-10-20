@@ -58,6 +58,14 @@ def glm() -> ChatTemplate:
     return _template("glm5")
 
 
+@pytest.fixture(scope="module")
+def qwen3_2507() -> ChatTemplate:
+    return _template("qwen3_2507")
+
+
+FIXTURES = {"qwen3": "qwen", "glm5": "glm", "qwen3_2507": "qwen3_2507"}
+
+
 def call(call_id: str, cmd: str) -> dict[str, Any]:
     return {"id": call_id, "type": "function", "function": {"name": "shell", "arguments": json.dumps({"cmd": cmd})}}
 
@@ -154,13 +162,15 @@ def run_codex(proxy: Any, trajectory_id: str, *, turns: int = 3) -> list[dict[st
 
 
 # ---------------------------------------------------------------------- N10.5 records
-@pytest.mark.parametrize("name", ["qwen3", "glm5"])
+@pytest.mark.parametrize("name", ["qwen3", "glm5", "qwen3_2507"])
 def test_codex_responses_loop_records_one_aligned_stream(name, request):
-    template = request.getfixturevalue("qwen" if name == "qwen3" else "glm")
+    template = request.getfixturevalue(FIXTURES[name])
     engine = engine_for(ScriptedModel(template, SCRIPT))
     proxy = RecordsProxy(engine, template, model="policy", signed_sampling=SIGNED, max_chains=1)
     outputs = run_codex(proxy, "t1")
-    assert [o["type"] for o in outputs[0]["output"]] == ["reasoning", "function_call"]
+    # Qwen3-4B-Instruct-2507 has no reasoning block: its template renders no reasoning.
+    first = ["function_call"] if name == "qwen3_2507" else ["reasoning", "function_call"]
+    assert [o["type"] for o in outputs[0]["output"]] == first
     assert outputs[-1]["output"][-1]["content"][0]["text"] == "The file says hello."
 
     records = proxy.records("t1")
@@ -363,9 +373,9 @@ def test_codex_namespace_and_hosted_tools_are_left_out_other_types_refused():
     assert responses_to_messages(body) == [{"role": "user", "content": "hi"}]
 
 
-@pytest.mark.parametrize("name", ["qwen3", "glm5"])
+@pytest.mark.parametrize("name", ["qwen3", "glm5", "qwen3_2507"])
 def test_template_rendering_matches_tokenizer_ids_token_by_token(name, request):
-    template = request.getfixturevalue("qwen" if name == "qwen3" else "glm")
+    template = request.getfixturevalue(FIXTURES[name])
     tools = chat_tools("responses", {"tools": TOOLS})
     for end in range(2, len(CONVERSATION) + 1):
         report = check_alignment(template, CONVERSATION[:end], tools=tools)
