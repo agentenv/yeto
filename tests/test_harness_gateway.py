@@ -115,7 +115,7 @@ def test_signed_sampling_cannot_be_overridden_and_unsupported_shapes_fail_closed
         run(gw.handle("chat", {**base, "model": "other"}, trajectory_id="x3"))
     resp = {"store": False, "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "u"}]}]}
     for bad in ({**resp, "store": True}, {**resp, "parallel_tool_calls": True}, {**resp, "reasoning": {"summary": "auto"}},
-                {**resp, "tools": [{"type": "web_search"}]}, {**resp, "input": resp["input"] + [{"type": "compaction"}]}):
+                {**resp, "tools": [{"type": "local_shell"}]}, {**resp, "input": resp["input"] + [{"type": "compaction"}]}):
         with pytest.raises(UnsupportedShape):
             run(gw.handle("responses", bad, trajectory_id="x4"))
     with pytest.raises(UnsupportedShape):

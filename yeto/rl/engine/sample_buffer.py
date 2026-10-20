@@ -27,7 +27,8 @@ per cut lineage, and samples consumed after the last cut are consumed again.
 
 Arrival notification is by polling the index (``poll`` / ``start_polling``).
 
-Limits of this first implementation: one consumer; with ``index.jsonl``,
+Limits of this first implementation: one consumer (or one per lane: synced
+trainer islands read disjoint lanes, :mod:`.merged_release`); with ``index.jsonl``,
 concurrent appenders must share one host (``flock``); the version gate on
 selection is the consumer's job (P0-S ``max_policy_age``).
 
@@ -67,6 +68,7 @@ from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
+from .merged_release import BufferLane, merges_shards
 from .object_store import ObjectStore
 from .resume import CheckpointStore
 from .trainer_lifecycle import BacklogStats, SampleIndexEntry, Selected
@@ -96,12 +98,15 @@ def payload_name(sample_id: str) -> str:
 class JsonlIndex:
     """The index as ``index.jsonl`` in a shared directory (see the module doc)."""
 
-    def __init__(self, store: CheckpointStore, *, index: str = INDEX, create_index: bool = True) -> None:
+    def __init__(self, store: CheckpointStore, *, index: str = INDEX, create_index: bool = True,
+                 reload: bool = True) -> None:
         """``index``: the index file under ``sample-buffer/`` (a shard writer
         passes :func:`shard_index`). ``create_index=False``: a reader that must not
         write the index, not even an empty one (on a store mount whose commit would
-        replace the merger's index)."""
+        replace the merger's index). ``reload=False``: :meth:`read_new` does not
+        reload the store (a merger's shard reader: the merger reloaded it once)."""
         self.store = store
+        self._reload = bool(reload)
         self.root = Path(store.root) / BUFFER_DIR
         (self.root / PAYLOADS).mkdir(parents=True, exist_ok=True)
         self.path = self.root / index
@@ -128,28 +133,57 @@ class JsonlIndex:
         return (self.root / ref).is_file()
 
     def read_new(self) -> list[dict[str, Any]]:
-        self.store.reload()
-        if not self.path.exists():  # a reader before the first merge
+        if self._reload:
+            self.store.reload()
+        if not self.path.exists():  # a reader before the first merge (or a shard not created yet)
             return []
         with open(self.path, "rb") as fh:
             return list(self._lines(fh))
 
     def append(self, absorb: Callable[[list[dict[str, Any]]], None],
                make: Callable[[], dict[str, Any]]) -> None:
+        self.append_many(absorb, lambda: [make()])
+
+    def append_many(self, absorb: Callable[[list[dict[str, Any]]], None],
+                    make: Callable[[], list[dict[str, Any]]]) -> None:
+        """Append ``make()``'s records with one write, one fsync and one store
+        commit (a merger appends a whole refresh at once: one Modal Volume commit
+        per record would cost seconds each)."""
         with open(self.path, "r+b") as fh:
             fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
             try:
                 absorb(list(self._lines(fh)))
-                record = make()
+                records = make()
                 fh.truncate(self._offset)  # drop a torn last line
                 fh.seek(self._offset)
-                fh.write((json.dumps(record, sort_keys=True) + "\n").encode())
+                fh.write(b"".join((json.dumps(r, sort_keys=True) + "\n").encode() for r in records))
                 fh.flush()
                 os.fsync(fh.fileno())
                 absorb(list(self._lines(fh)))
             finally:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
         self.store.commit()
+
+    # ------------------------------------------------------------ shards (merger side)
+    def shard_names(self) -> list[str]:
+        """The shard index files under ``sample-buffer/shards/``, sorted."""
+        return sorted(p.name[:-len(".jsonl")] for p in (self.root / SHARDS).glob("*.jsonl"))
+
+    def shard_reader(self, shard: str, start: int) -> "JsonlIndex":
+        """A reader of one shard's index file that skips its first ``start``
+        records (merged before)."""
+        reader = JsonlIndex(self.store, index=shard_index(shard), create_index=False, reload=False)
+        if start:
+            skipped = 0
+            if reader.path.exists():
+                with open(reader.path, "rb") as fh:
+                    for _ in reader._lines(fh):
+                        skipped += 1
+                        if skipped == start:
+                            break
+            if skipped < start:
+                raise SampleBufferError(f"shard {shard}: {skipped} records, but {start} are merged")
+        return reader
 
     def _lines(self, fh) -> Iterator[dict[str, Any]]:
         fh.seek(self._offset)
@@ -223,6 +257,13 @@ class ObjectIndex:
                 return
         raise SampleBufferError(f"{self.prefix}: lost {_MAX_CREATE_RACES} appends in a row to other writers")
 
+    # ------------------------------------------------------------ shards (merger side)
+    def shard_names(self) -> list[str]:
+        return shard_names(self.objects)
+
+    def shard_reader(self, shard: str, start: int) -> "ObjectIndex":
+        return ObjectIndex(self.objects, prefix=shard_prefix(shard), start=start)
+
 
 def _objects_of(store: CheckpointStore | ObjectStore) -> ObjectStore | None:
     return store.objects if isinstance(store, CheckpointStore) else store
@@ -249,7 +290,8 @@ def _entry(record: dict[str, Any]) -> SampleIndexEntry:
     return SampleIndexEntry(
         sample_id=record["sample_id"], behavior_version=int(record["behavior_version"]),
         payload_ref=record["payload_ref"], tokens=int(record["tokens"]),
-        appended_at=float(record["appended_at"]), provenance=record.get("provenance"))
+        appended_at=float(record["appended_at"]), provenance=record.get("provenance"),
+        sampler_round=record.get("sampler_round"))
 
 
 class UnmergedShards:
@@ -312,6 +354,16 @@ def index_for(store: CheckpointStore | ObjectStore, *, index: str = INDEX,
     return ObjectIndex(objects, prefix=shard_prefix(shard))
 
 
+def open_trainer_buffer(store: CheckpointStore | ObjectStore, *, batch_size: int,
+                        lane: BufferLane | None = None, create_index: bool = True,
+                        **kwargs: Any) -> "FileSampleBuffer":
+    """The buffer of a trainer (the reader): it merges the sampler shards of a
+    store that shards (:func:`needs_shards`) unless it is a synced trainer other
+    than the publisher (``merged_release.merges_shards``); ``lane``: its lane."""
+    return FileSampleBuffer(store, batch_size=batch_size, create_index=create_index, lane=lane,
+                            merge_shards=needs_shards(store) and merges_shards(lane), **kwargs)
+
+
 class FileSampleBuffer:
     """:class:`~yeto.rl.engine.trainer_lifecycle.DurableSampleBuffer` over a store
     (a :class:`CheckpointStore`, or an :class:`ObjectStore` at the store root).
@@ -321,21 +373,40 @@ class FileSampleBuffer:
 
     def __init__(self, store: CheckpointStore | ObjectStore, *, batch_size: int,
                  arrival_window_s: float = 60.0, clock: Callable[[], float] = time.time,
-                 index: str = INDEX, create_index: bool = True, merge_shards: bool = False) -> None:
+                 index: str = INDEX, create_index: bool = True, merge_shards: bool = False,
+                 expected_shards: Iterable[str] | None = None,
+                 lane: BufferLane | None = None) -> None:
         """``index``/``create_index``: see :class:`JsonlIndex`. ``merge_shards``:
-        this buffer (the consumer) merges the sampler shards of an object store
-        into the index on every refresh (see the module doc); it must be the
-        only one that does."""
+        this buffer (the consumer) merges the sampler shards into the index on
+        every refresh (see the module doc); it must be the only one that does.
+        On a shared directory the shards are ``shards/<shard>.jsonl`` files (one
+        sampler island writes each; S25 C1: several sampler islands on one
+        Modal Volume, where ``flock`` does not hold across containers).
+        ``expected_shards``: the shards that must all end before the merged index
+        ends (None: the shards seen so far), so an early-ending sampler cannot
+        end the data before a slower one has written its first record.
+        ``lane``: this consumer is one of several synced trainers and selects
+        only the positions of its lane (:mod:`.merged_release`); the read cursor
+        and the watermark stay positions of the whole index. Of the lane readers
+        only the publisher's lane merges shards (``merged_release.merges_shards``)."""
+        if lane is not None and merge_shards and not merges_shards(lane):
+            raise SampleBufferError(f"buffer lane {lane.env()}: only the publisher's lane merges the "
+                                    "sampler shards (yeto.rl.engine.merged_release)")
+        self.lane = lane
         if batch_size < 1:
             raise ValueError("batch_size must be positive")
         self.store = store
         self.index = index_for(store, index=index, create_index=create_index)
         self.shard = _shard_of_index(index) if index != INDEX else None  # the shard this buffer writes
-        if merge_shards and (self.shard is not None or not isinstance(self.index, ObjectIndex)):
-            raise SampleBufferError("only the index of an object store merges shards")
+        if merge_shards and self.shard is not None:
+            raise SampleBufferError("a shard writer does not merge shards (only the consumer's index does)")
+        if expected_shards is not None and not merge_shards:
+            raise SampleBufferError("expected_shards needs merge_shards")
         self._merge = merge_shards
+        self._expected_shards = (None if expected_shards is None
+                                 else frozenset(_shard_name(s) for s in expected_shards))
         self._shard_of: list[str | None] = []  # the shard of each position (merged records)
-        self._shard_readers: dict[str, ObjectIndex] = {}
+        self._shard_readers: dict[str, JsonlIndex | ObjectIndex] = {}
         self._shards_ended: set[str] = set()
         self.batch_size = int(batch_size)
         self.arrival_window_s = float(arrival_window_s)
@@ -355,8 +426,14 @@ class FileSampleBuffer:
 
     # ---------------------------------------------------------------- writing
     def write_payload(self, sample_id: str, data: bytes) -> str:
-        """Store one payload; returns the ``payload_ref`` for its index entry."""
-        return self.index.write_payload(payload_name(sample_id), data)
+        """Store one payload; returns the ``payload_ref`` for its index entry.
+        A payload is written once: a name already in the store is refused (a
+        replacement sampler must never overwrite a group an index entry names)."""
+        name = payload_name(sample_id)
+        if self.index.has_payload(f"{PAYLOADS}/{name}"):
+            raise SampleBufferError(f"payload {name} is already in the sample buffer; "
+                                    "a payload is never overwritten")
+        return self.index.write_payload(name, data)
 
     def read_payload(self, payload_ref: str) -> bytes:
         return self.index.read_payload(payload_ref)
@@ -368,6 +445,8 @@ class FileSampleBuffer:
             entry = dataclasses.replace(entry, appended_at=self.clock())
         # ``provenance`` is written only when set, so a line without it reads as before.
         source = {} if entry.provenance is None else {"provenance": dict(entry.provenance)}
+        if entry.sampler_round is not None:
+            source["sampler_round"] = dict(entry.sampler_round)
         self._write_record(lambda pos: {"schema": SCHEMA, "pos": pos, "sample_id": entry.sample_id,
                                         "behavior_version": int(entry.behavior_version),
                                         "payload_ref": entry.payload_ref, "tokens": int(entry.tokens),
@@ -385,6 +464,22 @@ class FileSampleBuffer:
 
         with self._lock:
             self.index.append(self._absorb, record)
+
+    def _write_records(self, records: list[dict[str, Any]]) -> None:
+        """Append ``records`` (without ``pos``) at the next positions: one write on
+        a shared directory, one object per record on an object store."""
+        def make() -> list[dict]:
+            if self._ended:
+                raise SampleBufferError("append after the data end")
+            start = len(self._entries)
+            return [{**record, "pos": start + i} for i, record in enumerate(records)]
+
+        with self._lock:
+            if isinstance(self.index, JsonlIndex):
+                self.index.append_many(self._absorb, make)
+                return
+            for record in records:  # an object store: one create-if-absent per record
+                self._write_record(lambda pos, record=record: {**record, "pos": pos})
 
     def _absorb(self, records: list[dict[str, Any]]) -> None:
         for record in records:
@@ -407,14 +502,12 @@ class FileSampleBuffer:
             return len(self._entries)
 
     def _merge_shards(self) -> None:
-        objects = self.index.objects
         new: list[list[dict[str, Any]]] = []  # per shard, in shard order
-        for shard in shard_names(objects):
+        for shard in self.index.shard_names():
             reader = self._shard_readers.get(shard)
             if reader is None:  # first seen here: skip what an earlier merger merged
                 done = sum(1 for s in self._shard_of if s == shard)
-                reader = self._shard_readers[shard] = ObjectIndex(objects, prefix=shard_prefix(shard),
-                                                                  start=done)
+                reader = self._shard_readers[shard] = self.index.shard_reader(shard, done)
             records = []
             for record in reader.read_new():
                 if record.get("end"):
@@ -430,11 +523,12 @@ class FileSampleBuffer:
         # records of a shard must stay a prefix of it, because a restarted merger
         # resumes each shard after its merged count (a clock step back would
         # otherwise merge a later record first, then skip the earlier one).
-        merged = heapq.merge(*new, key=lambda r: (float(r.get("appended_at", 0.0)), r["shard"]))
-        for record in merged:
-            self._write_record(lambda pos, record=record: {**record, "pos": pos})
-        if self._shard_readers and self._shards_ended >= set(self._shard_readers):
-            self._write_record(lambda pos: {"schema": SCHEMA, "pos": pos, "end": True})
+        merged = list(heapq.merge(*new, key=lambda r: (float(r.get("appended_at", 0.0)), r["shard"])))
+        expected = set(self._shard_readers) if self._expected_shards is None else self._expected_shards
+        if expected and self._shards_ended >= expected:
+            merged.append({"schema": SCHEMA, "end": True})
+        if merged:
+            self._write_records(merged)
 
     def shard_positions(self, cursor: int) -> dict[str, int]:
         """{shard: records of that shard below merged position ``cursor``}: the
@@ -448,6 +542,11 @@ class FileSampleBuffer:
     def __len__(self) -> int:
         with self._lock:
             return len(self._entries)
+
+    def entries(self) -> list[SampleIndexEntry]:
+        """The entries read so far, in buffer order (a copy)."""
+        with self._lock:
+            return list(self._entries)
 
     @property
     def data_ended(self) -> bool:
@@ -481,9 +580,13 @@ class FileSampleBuffer:
             elif consumer != self._consumer:
                 raise SampleBufferError(f"buffer is read by {self._consumer!r}, not {consumer!r}")
             self.refresh()
-            stop = min(len(self._entries), self._read + max(0, int(limit)))
-            out = [Selected(pos, self._entries[pos]) for pos in range(self._read, stop)]
-            self._read = stop
+            out: list[Selected] = []
+            pos = self._read
+            while len(out) < max(0, int(limit)) and pos < len(self._entries):
+                if self.lane is None or self.lane.owns(pos):
+                    out.append(Selected(pos, self._entries[pos]))
+                pos += 1
+            self._read = pos
             return out
 
     def commit_consumed(self, cursor: int) -> None:

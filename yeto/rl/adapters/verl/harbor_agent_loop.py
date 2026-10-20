@@ -80,10 +80,13 @@ from yeto.rl.agentic import (
     run_agent_task,
 )
 from yeto.rl.agentic.loop_local import LoopLocal
+from yeto.rl.agentic.outcome import policy_output_failure
 from yeto.rl.agentic.types import TokenTurn
+from yeto.rl.engine.sampler_engine import FINISH_LENGTH
 from yeto.rl.harness.harbor import HarborHarness, HarborSettings, build_trial_config
 from yeto.rl.harness.harbor.boat_client import check_in_flight_cap
 
+from .rollout_engine import bind_rollout_client, weight_steps
 from .run_config_rules import AGENTIC_ADV_ESTIMATOR as YETO_GRPO
 
 logger = logging.getLogger(__name__)
@@ -190,6 +193,9 @@ class HarborAgentLoop(AgentLoopBase):
     async def run(self, sampling_params: dict[str, Any], **kwargs: Any) -> AgentLoopOutput:
         task = task_from_row(kwargs)
         recorder = self.recorder_factory()
+        client = getattr(self, "server_manager", None)
+        if client is not None:  # a recorder over verl's own rollout needs verl's client (N10.9)
+            bind_rollout_client(recorder, client)
         session = recorder_session_id(task)
         endpoint = await recorder.open(session, sampling_params)
         try:
@@ -203,6 +209,8 @@ class HarborAgentLoop(AgentLoopBase):
         except TokenAlignmentError as exc:
             if trajectory.outcome is not Outcome.ABORTED:
                 trajectory = _abort(trajectory, f"token_alignment: {exc}")
+        else:
+            trajectory = _policy_output_failure(trajectory, turns)
 
         segments: TokenSegments | None = None
         if trajectory.outcome is not Outcome.ABORTED:
@@ -212,10 +220,10 @@ class HarborAgentLoop(AgentLoopBase):
                 trajectory = _abort(trajectory, f"token_alignment: {exc}")
         if segments is not None and len(segments.prompt_ids) > self.prompt_length:
             trajectory, segments = _abort(trajectory, "prompt_exceeds_prompt_length"), None
-        return self._output(trajectory, segments, turns)
+        return self._output(trajectory, segments, turns, steps=weight_steps(recorder, session))
 
     def _output(self, trajectory: AgentTrajectory, segments: TokenSegments | None,
-                turns: Sequence[TokenTurn]) -> AgentLoopOutput:
+                turns: Sequence[TokenTurn], *, steps: tuple[int, int] | None = None) -> AgentLoopOutput:
         if segments is None:
             segments = self._placeholder()
         metadata = trajectory.to_metadata()
@@ -232,8 +240,12 @@ class HarborAgentLoop(AgentLoopBase):
                 "outcome_reason": trajectory.reason,
                 "policy_version": trajectory.policy_version,
                 "truncated": segments.truncated,
+                # Model calls that hit their token cap (the agent then saw a cut reply).
+                "length_capped_turns": sum(t.finish_reason == FINISH_LENGTH for t in turns),
                 "agent_metrics": metadata["agent_metrics"],
                 "provenance": turn_provenance(turns),
+                # verl V1 reads both for its staleness metrics; recorders without verl's rollout leave them out
+                **({"min_global_steps": steps[0], "max_global_steps": steps[1]} if steps else {}),
             },
         )
 
@@ -241,6 +253,14 @@ class HarborAgentLoop(AgentLoopBase):
         pad = self.tokenizer.pad_token_id
         pad = self.tokenizer.eos_token_id if pad is None else pad
         return TokenSegments(prompt_ids=(pad,), response_ids=(pad,), response_mask=(0,), response_logprobs=(0.0,))
+
+
+def _policy_output_failure(trajectory: AgentTrajectory, turns: Sequence[TokenTurn]) -> AgentTrajectory:
+    """A malformed model reply that ended the agent is a 0 reward, not ABORTED (N10.9)."""
+    updated = policy_output_failure(trajectory, [t.policy_error for t in turns if t.policy_error])
+    if updated.outcome is not trajectory.outcome:
+        _gate().metrics.reclassify(trajectory.outcome, updated.outcome)
+    return updated
 
 
 def _abort(trajectory: AgentTrajectory, reason: str) -> AgentTrajectory:

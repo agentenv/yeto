@@ -372,6 +372,11 @@ _ISLAND = (
     # bucket mount or a shared path); round cuts + a hashed state snapshot + LATEST go there.
     island_flag("--rl-resume-store", default=None, metavar="PATH"),
     island_flag("--rl-resume-state-dir", default="~/yeto-rl/resume-state", metavar="PATH"),
+    # S25 C3: a synced trainer island (--rl-sample-role trainer with a syncer): the
+    # store of the sample buffer and the policy releases (no round cuts), and the
+    # number of synced trainers (its buffer lane is learner id of that count)
+    island_flag("--rl-sample-store", default=None, metavar="PATH"),
+    island_flag("--rl-sample-lanes", type=int, default=None, metavar="N"),
     island_flag("--lora-r", type=int, default=None),
     island_flag(
         "--lora-targets",
@@ -388,6 +393,13 @@ _ISLAND = (
     island_flag("--seed", type=int, required=True),
     island_flag("--wan-streams", type=int, default=4),
     island_flag("--miles-root", required=True),
+    island_flag(
+        "--miles-commit",
+        default=None,
+        metavar="SHA",
+        help="Full commit the --miles-root checkout must be at (default: the pinned "
+        "MILES_NEXT_COMMIT); a run whose image carries another Miles commit names it here",
+    ),
     island_flag(
         "--rl-expected-algorithm-sha256",
         default=None,

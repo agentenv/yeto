@@ -476,6 +476,9 @@ def handle_from_metadata(
         nonzero_advantages=(
             int(payload["nonzero_advantages"]) if "nonzero_advantages" in payload else None
         ),
+        buffer_stale_groups=(
+            int(payload["buffer_stale_groups"]) if "buffer_stale_groups" in payload else None
+        ),
         policy_age_violation=(
             int(payload["policy_age_violation"]) if "policy_age_violation" in payload else None
         ),
@@ -1068,7 +1071,16 @@ class MilesRolloutPool:
     def abort(self) -> None:
         self._run(self._controller.abort_all())
 
+    @property
+    def engineless(self) -> bool:
+        """True on a trainer-only island (Miles --debug-train-only): samples come
+        from the store and no engine serves a policy, so a publication has no
+        members to acknowledge it (the driver accepts an empty member set)."""
+        return bool(getattr(self._args, "debug_train_only", False))
+
     def members(self) -> frozenset[str]:
+        if self.engineless:
+            return frozenset()
         return self._run(running_members(self._controller))
 
     # -- E1 membership verbs (3.4) ---------------------------------------------

@@ -132,12 +132,13 @@ class RequantReleaser:
             stop.wait(poll_s)
 
 
-def requantizer(template_dir: Path, smoothing: Any) -> Requantize:
-    """The converter of :mod:`.requant` bound to one template and AWQ smoothing."""
+def requantizer(template_dir: Path, smoothing: Any, frozen: tuple[Path, str] | None = None) -> Requantize:
+    """The converter of :mod:`.requant` bound to one template and AWQ smoothing
+    (``frozen``: base checkpoint and name pattern of untrained tensors the release omits)."""
     from .requant import requantize_checkpoint
 
     def run(source: Path, out: Path) -> Any:
-        return requantize_checkpoint(Path(source), Path(template_dir), Path(out), smoothing)
+        return requantize_checkpoint(Path(source), Path(template_dir), Path(out), smoothing, frozen=frozen)
 
     return run
 
@@ -156,7 +157,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--keep", type=int, default=2)
     p.add_argument("--loop", action="store_true")
     p.add_argument("--poll-seconds", type=float, default=10.0)
+    p.add_argument("--frozen-base", help="BF16 checkpoint that supplies untrained tensors the release omits")
+    p.add_argument("--frozen-pattern", help="regular expression of those tensor names (with --frozen-base)")
     a = p.parse_args(argv)
+    if bool(a.frozen_base) != bool(a.frozen_pattern):
+        p.error("give --frozen-base and --frozen-pattern together")
+    frozen = (Path(a.frozen_base), a.frozen_pattern) if a.frozen_base else None
     if a.no_awq:
         smoothing, awq = AwqSmoothing.none(), AWQ_NONE
     elif a.recipe and a.awq_scales:
@@ -172,7 +178,7 @@ def main(argv: list[str] | None = None) -> int:
     store = store_for(a.store)
     releaser = RequantReleaser(PolicyReleaseStore(store, keep=a.keep, release_dir=release_dir_for(BF16)),
                                PolicyReleaseStore(store, keep=a.keep, release_dir=release_dir_for(scheme)),
-                               requantizer(Path(a.template), smoothing), scheme=scheme, awq=awq,
+                               requantizer(Path(a.template), smoothing, frozen), scheme=scheme, awq=awq,
                                awq_source=smoothing.source if smoothing.enabled else None,
                                expert_matrices=len(layout.quantized_modules))
     if a.loop:

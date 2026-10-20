@@ -363,12 +363,17 @@ def add_cli_args(p) -> None:
                    "base, never from a checkpoint store); repeatable; an island without a role is "
                    "an anchor; replaces --spot")
     g.add_argument("--rl-island-sample-role", action="append", default=None, metavar="ISLAND:ROLE",
-                   help="rl-trainer-start-stop L5.4: one launch of a sampler island and a trainer "
+                   help="rl-trainer-start-stop L5.4: one launch of sampler islands and a trainer "
                    "island over one --rl-checkpoint-store (ROLE sampler or trainer, one entry per "
-                   "--gpu island; exactly two islands). Needs --rl-single-island-no-sync: no "
+                   "--gpu island; exactly one trainer, one or more samplers; several samplers "
+                   "split --total-steps). Needs --rl-single-island-no-sync: no "
                    "syncer, each island runs as a one-learner no-sync island with that "
-                   "--rl-sample-role. Combine with --rl-trainer-scheduler s1 "
+                   "--rl-sample-role. With one sampler, combine with --rl-trainer-scheduler s1 "
                    "--rl-trainer-island M to start and stop the trainer island")
+    g.add_argument("--rl-sampler-spot", action="store_true",
+                   help="with --rl-island-sample-role: the sampler islands use spot (preemptible) "
+                   "capacity, the trainer island stays on demand; a reclaimed sampler island is "
+                   "started again and continues after its last round in the buffer")
     g.add_argument("--rl-negative-test-run", action="store_true",
                    help="mark this run as a negative-test run (required by --rl-island-override); "
                    "a normal run refuses to resume its checkpoint store and `yeto merge` refuses "

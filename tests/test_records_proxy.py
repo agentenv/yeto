@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import os
 from typing import Any
 
 import pytest
@@ -19,10 +20,11 @@ import pytest
 from yeto.rl.adapters.sampler_engines.fake import FakeEngine
 from yeto.rl.compaction import CompactionConfig
 from yeto.rl.engine.sampler_engine import SamplingParams, TokenSamplerEngine
-from yeto.rl.harness.chat_templates import ChatTemplate, TemplateError, check_alignment, parse_glm, parse_qwen3
+from yeto.rl.harness.chat_templates import ChatTemplate, TemplateError, check_alignment, parse_glm, parse_qwen3, parse_qwen38
 from yeto.rl.harness.gateway import Gateway, GatewayConfig
 from yeto.rl.harness.gateway.proxy import RecordsProxy, chat_tools
 from yeto.rl.harness.gateway.records import RecordingBackend, RecordsMismatch
+from yeto.rl.harness.gateway.translate import UnsupportedShape, responses_to_messages
 
 SIGNED = {"temperature": 1.0, "top_p": 1.0, "max_tokens": 256}
 TOOLS = [{"type": "function", "name": "shell", "description": "run a command",
@@ -36,6 +38,16 @@ def _template(name: str) -> ChatTemplate:
         pytest.skip(f"{name} tokenizer not available: {exc}")
 
 
+# The Qwen3.8-27B tokenizer files (not on the HF hub cache by default).
+QWEN38_TOKENIZER = os.environ.get("YETO_QWEN38_TOKENIZER", "")
+
+
+def _template_at(name: str, path: str) -> ChatTemplate:
+    if not path:
+        pytest.skip(f"set YETO_QWEN38_TOKENIZER to run the {name} template tests")
+    return ChatTemplate.load(name, tokenizer_path=path)
+
+
 @pytest.fixture(scope="module")
 def qwen() -> ChatTemplate:
     return _template("qwen3")
@@ -44,6 +56,14 @@ def qwen() -> ChatTemplate:
 @pytest.fixture(scope="module")
 def glm() -> ChatTemplate:
     return _template("glm5")
+
+
+@pytest.fixture(scope="module")
+def qwen3_2507() -> ChatTemplate:
+    return _template("qwen3_2507")
+
+
+FIXTURES = {"qwen3": "qwen", "glm5": "glm", "qwen3_2507": "qwen3_2507"}
 
 
 def call(call_id: str, cmd: str) -> dict[str, Any]:
@@ -142,13 +162,15 @@ def run_codex(proxy: Any, trajectory_id: str, *, turns: int = 3) -> list[dict[st
 
 
 # ---------------------------------------------------------------------- N10.5 records
-@pytest.mark.parametrize("name", ["qwen3", "glm5"])
+@pytest.mark.parametrize("name", ["qwen3", "glm5", "qwen3_2507"])
 def test_codex_responses_loop_records_one_aligned_stream(name, request):
-    template = request.getfixturevalue("qwen" if name == "qwen3" else "glm")
+    template = request.getfixturevalue(FIXTURES[name])
     engine = engine_for(ScriptedModel(template, SCRIPT))
     proxy = RecordsProxy(engine, template, model="policy", signed_sampling=SIGNED, max_chains=1)
     outputs = run_codex(proxy, "t1")
-    assert [o["type"] for o in outputs[0]["output"]] == ["reasoning", "function_call"]
+    # Qwen3-4B-Instruct-2507 has no reasoning block: its template renders no reasoning.
+    first = ["function_call"] if name == "qwen3_2507" else ["reasoning", "function_call"]
+    assert [o["type"] for o in outputs[0]["output"]] == first
     assert outputs[-1]["output"][-1]["content"][0]["text"] == "The file says hello."
 
     records = proxy.records("t1")
@@ -339,9 +361,21 @@ CONVERSATION = [
 ]
 
 
-@pytest.mark.parametrize("name", ["qwen3", "glm5"])
+def test_codex_namespace_and_hosted_tools_are_left_out_other_types_refused():
+    # Codex 0.145.0 sends its sub-agent tools as a namespace and a hosted web_search tool.
+    namespace = {"type": "namespace", "name": "multi_agent_v1", "tools": [TOOLS[0]]}
+    tools = chat_tools("responses", {"tools": [*TOOLS, namespace, {"type": "web_search"}]})
+    assert [t["function"]["name"] for t in tools] == ["shell"]
+    with pytest.raises(UnsupportedShape):
+        chat_tools("responses", {"tools": [{"type": "custom", "name": "apply_patch"}]})
+    body = {"store": False, "parallel_tool_calls": False, "tools": [*TOOLS, namespace, {"type": "web_search"}],
+            "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}]}
+    assert responses_to_messages(body) == [{"role": "user", "content": "hi"}]
+
+
+@pytest.mark.parametrize("name", ["qwen3", "glm5", "qwen3_2507"])
 def test_template_rendering_matches_tokenizer_ids_token_by_token(name, request):
-    template = request.getfixturevalue("qwen" if name == "qwen3" else "glm")
+    template = request.getfixturevalue(FIXTURES[name])
     tools = chat_tools("responses", {"tools": TOOLS})
     for end in range(2, len(CONVERSATION) + 1):
         report = check_alignment(template, CONVERSATION[:end], tools=tools)
@@ -366,6 +400,33 @@ def test_parsers_fail_closed_on_malformed_tool_calls():
         parse_qwen3("<tool_call>\nnot json\n</tool_call>")
     with pytest.raises(TemplateError):
         parse_glm("r</think><tool_call><arg_key>a</arg_key><arg_value>1</arg_value></tool_call>")
+    with pytest.raises(TemplateError):
+        parse_qwen38('r\n</think>\n\n<tool_call>\n{"name": "f", "arguments": {}}\n</tool_call>')
+
+
+def test_qwen38_merges_codex_system_messages_and_template_refusals_fail_closed():
+    template = _template_at("qwen38", QWEN38_TOKENIZER)
+    tools = chat_tools("responses", {"tools": TOOLS})
+    # Codex: instructions + a developer message, both "system" in the gateway form.
+    messages = [{"role": "system", "content": "a"}, {"role": "system", "content": "b"}, {"role": "user", "content": "u"}]
+    text = template.render(messages, tools=tools, add_generation_prompt=True)
+    assert "a\n\nb" in text and text.count("<|im_start|>system") == 1
+    assert check_alignment(template, messages, tools=tools).aligned
+    with pytest.raises(TemplateError, match="refused"):
+        template.render([*messages, {"role": "system", "content": "late"}], add_generation_prompt=True)
+
+
+def test_qwen38_parser_reads_the_xml_tool_call_format():
+    # The Qwen3.8 template's own rendering of one assistant turn (after "<think>\n").
+    text = ("look first\n</think>\n\nChecking.\n\n<tool_call>\n<function=exec_command>\n"
+            "<parameter=cmd>\nls -la\nwc -l x\n</parameter>\n<parameter=n>\n3\n</parameter>\n"
+            "</function>\n</tool_call>\n<tool_call>\n<function=noop>\n</function>\n</tool_call>")
+    parsed = parse_qwen38(text)
+    assert parsed["reasoning_content"] == "look first"
+    assert parsed["content"] == "Checking."
+    assert [c["function"]["name"] for c in parsed["tool_calls"]] == ["exec_command", "noop"]
+    assert json.loads(parsed["tool_calls"][0]["function"]["arguments"]) == {"cmd": "ls -la\nwc -l x", "n": 3}
+    assert parse_qwen38("still thinking") == {"role": "assistant", "content": "", "reasoning_content": "still thinking"}
 
 
 # ---------------------------------------------------------------------- adapters

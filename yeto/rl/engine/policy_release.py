@@ -40,6 +40,9 @@ cache directory before the load (streamed to disk: a release may be hundreds of
 GB). The trainer still writes through the mount
 (each file is new and written once).
 
+Synced trainers (several islands merged by a syncer) release through one
+publisher, with the merged version: :mod:`.merged_release`.
+
 A trainer that publishes the same version and hash again (a restart) releases
 nothing. A trainer restored from an older cut publishes an older version with
 other weights (a new lineage): that is a new release with a higher ``seq``.
@@ -101,6 +104,9 @@ class PolicyRelease:
     # A release made from another one (a W4A8 re-quantization of a BF16 release):
     # {"release_dir", "seq", "version", "policy_hash", "scheme", ...}; None: trained weights.
     derived_from: dict[str, Any] | None = None
+    # Who released it when the trainers sync (S25 C3, yeto.rl.engine.merged_release):
+    # {"kind": "merged", "learner_id", "num_learners", "local_version"}; None: one trainer.
+    origin: dict[str, Any] | None = None
     schema: str = SCHEMA
 
     @classmethod
@@ -276,7 +282,8 @@ class PolicyReleaseStore:
                 buffer_selected: int | None = None, weights: str = FULL,
                 engine_checksum: str | None = None,
                 buffer_shards: dict[str, int] | None = None,
-                derived_from: dict[str, Any] | None = None) -> PolicyRelease | None:
+                derived_from: dict[str, Any] | None = None,
+                origin: dict[str, Any] | None = None) -> PolicyRelease | None:
         """Write the weights with ``write(directory)``, then the record (it lists the
         weight files and their sizes), then LATEST.
 
@@ -303,7 +310,8 @@ class PolicyReleaseStore:
                                engine_checksum=engine_checksum or None, files=file_sizes(directory),
                                buffer_shards=None if buffer_shards is None else
                                {str(k): int(v) for k, v in sorted(buffer_shards.items())},
-                               derived_from=None if derived_from is None else dict(derived_from))
+                               derived_from=None if derived_from is None else dict(derived_from),
+                               origin=None if origin is None else dict(origin))
         _write_json_atomic(directory / RECORD, asdict(record))
         self.store.commit()  # the weights and the record are durable before LATEST names them
         _write_json_atomic(self.root / LATEST, asdict(record))

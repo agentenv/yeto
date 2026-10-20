@@ -95,3 +95,4 @@ openspec/changes/*/evidence/**/*.pyc
 openspec/**/*.jsonl
 openspec/**/*.out
 openspec/**/*.err
+.g1-build/

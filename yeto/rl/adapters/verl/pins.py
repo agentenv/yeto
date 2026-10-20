@@ -20,6 +20,10 @@ EXPECTED_VERSIONS = {
     "peft": "0.19.1",
 }
 
+# yeto's object-store client (s3:// and oss:// checkpoint stores: yeto.cloud.s3_store),
+# not in the fork's uv.lock; the same pin as yeto's pyproject (a test keeps them equal).
+STORE_CLIENT_REQUIREMENTS = ("boto3==1.43.104",)
+
 # --- Ascend NPU stack (rl-verl-backend 3.11/3.14) ----------------------------
 #
 # The NPU stack is a second, separate image: vLLM 0.23 + torch 2.10 + CANN

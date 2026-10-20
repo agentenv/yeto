@@ -44,7 +44,7 @@ from yeto.rl.agentic import (
 from yeto.rl.agentic.loop_local import LoopLocal
 from yeto.rl.agentic.trust import check_agent_env
 from yeto.rl.harness.harbor import CODEX_VERSION, HarborHarness, HarborSettings, build_trial_config
-from yeto.rl.harness.harbor.trial import CUSTOM_PROVIDERS, TrialConfigBuilder
+from yeto.rl.harness.harbor.trial import CODEX_KWARGS, CUSTOM_PROVIDERS, TrialConfigBuilder
 
 EXAMPLE_MODULE = "harbor_agent_function"
 AGENT_FUNCTION = "yeto.rl.adapters.miles.harbor_agent.run"
@@ -105,6 +105,8 @@ def example_config_builder(example: Any, metadata: dict[str, Any], request_kwarg
             # The example has no codex binding; its default (OPENAI_BASE_URL) is
             # what Harbor's codex agent reads.  Pin the build: Harbor's default is @latest.
             config.agent.kwargs.setdefault("version", task.agent_version or CODEX_VERSION)
+            for key, value in CODEX_KWARGS.items():
+                config.agent.kwargs.setdefault(key, value)
         return config
 
     return build

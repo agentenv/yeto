@@ -192,6 +192,7 @@ def _check_ports_infra_switches(args) -> None:
     if getattr(args, "rl_elastic_declare_cells", False) and not getattr(args, "rl_elastic", False):
         raise ValueError("--rl-elastic-declare-cells needs --rl-elastic")
     _check_resume_switches(args)
+    _check_sample_store(args)
     if not getattr(args, "rl_elastic", False):
         if given:
             raise ValueError(", ".join(given) + " need --rl-elastic")
@@ -208,6 +209,13 @@ def _check_ports_infra_switches(args) -> None:
         value = getattr(args, name, None)
         if value is not None and not value > 0:
             raise ValueError(f"--{name.replace('_', '-')} must be positive")
+
+
+def _check_sample_store(args) -> None:
+    """S25 C3: ``--rl-sample-store`` / ``--rl-sample-lanes`` (engine-neutral rule)."""
+    from yeto.rl.engine.sample_roles import check_sample_store
+
+    check_sample_store(args)
 
 
 def _check_resume_switches(args) -> None:
@@ -258,10 +266,14 @@ def apply_sample_role(args, miles_args, environ=None) -> None:
     config = sample_roles.resolve(args, groups_per_round=args.groups_per_round)
     miles_args.yeto_rl_sample_buffer = config
     node = getattr(args, "rl_convertible_node", None)  # L7.5: a convertible node's own shard
+    # a pair island runs as learner 0: its sampler id is its node name (S25 C1)
+    sampler = node or getattr(args, "rl_sampler_node", None) or f"island{int(args.learner_id)}"
     (os.environ if environ is None else environ).update(island_env(
-        config.role, store_root=config.store, sampler_id=node or f"island{int(args.learner_id)}",
+        config.role, store_root=config.store, sampler_id=sampler,
         max_policy_age=int(getattr(args, "rl_max_policy_age", 0) or 0), wait_s=config.wait_s,
-        shard=node))
+        shard=node, shards=getattr(args, "rl_buffer_shards", None),
+        lane=sample_roles.buffer_lane(args)))
+    miles_args.yeto_rl_sample_lane = sample_roles.buffer_lane(args)  # S25 C3: None off a synced trainer
 
 
 def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
@@ -1092,6 +1104,20 @@ def _preflight_codex_openenv_adapter(args, profile_name: str) -> None:
     forward_legacy_openenv_preflight(args, profile_name)
 
 
+def miles_revision_pins(args: Any) -> Any:
+    """The Miles commit the island checks for ``--miles-commit`` (full SHA); None
+    without it (``verify_miles_revision`` then checks the pinned MILES_NEXT_PINS)."""
+    from yeto.provenance import is_immutable_commit
+    from yeto.rl.adapters.miles.pins import MILES_NEXT_REPOSITORY, MilesRevisionPins
+
+    commit = getattr(args, "miles_commit", None)
+    if not commit:
+        return None
+    if not is_immutable_commit(commit) or len(str(commit)) != 40:
+        raise ValueError(f"--miles-commit must be a full 40-hex commit, got {commit!r}")
+    return MilesRevisionPins(MILES_NEXT_REPOSITORY, str(commit).lower())
+
+
 def _preflight_codex_harness(args) -> None:
     """Fail before model allocation if the signed Codex surface has drifted."""
 
@@ -1787,6 +1813,18 @@ def run_miles(
         )
         attention_specs = specs = ()
         canonical_targets = flash_next.target_modules()
+    elif getattr(args, "rl_model_recipe", "generic") == "glm5_next":
+        # AutoBridge cannot read glm5_next (transformers has no such model type);
+        # Miles trains it through its plugin spec, so the island reads the geometry
+        # from config.json (models/glm5_next.provider_view). Full-parameter only.
+        from yeto.rl.adapters.miles.models import glm5_next as glm5_next_recipe
+
+        if not full_parameter:
+            raise ValueError("the glm5_next recipe is full-parameter only")
+        model_bridge = None
+        provider = glm5_next_recipe.glm5_next_provider(model_path)
+        attention_specs = specs = ()
+        canonical_targets = []
     else:
         from megatron.bridge import AutoBridge
 
@@ -2340,7 +2378,11 @@ def main(argv=None) -> None:
     miles_root = str(Path(args.miles_root).expanduser().resolve())
     if miles_root not in sys.path:
         sys.path.insert(0, miles_root)
-    verify_miles_revision(miles_root)
+    pins = miles_revision_pins(args)
+    if pins is None:
+        verify_miles_revision(miles_root)  # the pinned MILES_NEXT_PINS
+    else:
+        verify_miles_revision(miles_root, expected=pins)
     _preflight_codex_harness(args)
     probe_syncers(args)
 

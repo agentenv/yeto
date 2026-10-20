@@ -9,7 +9,9 @@
   while it trains), every successful publish
   is also released into the store (:class:`ReleasingPublisher`): a full-parameter
   trainer exports an HF checkpoint (``actor.export_hf``), a LoRA trainer only its
-  adapter (:mod:`.release_plugin`), into the release directory.
+  adapter (:mod:`.release_plugin`), into the release directory. Synced trainers
+  (several islands and a syncer): only learner 0 releases, with the merged
+  version (:mod:`yeto.rl.engine.merged_release`).
 
 Engine weight load (the order of the publisher, ``publish.MilesPublisher``):
 under the controller's update lock, every engine loads the release, then the
@@ -32,8 +34,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import shutil
 import tempfile
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -45,10 +49,17 @@ from yeto.rl.engine.policy_release import (
     PolicyRelease,
     PolicyReleaseStore,
 )
+from yeto.rl.engine.merged_release import MergedReleaseGuard, is_publisher, merged_version
 from yeto.rl.engine.policy_versions import engine_weight_version
 from yeto.rl.engine.sample_roles import CONVERTIBLE, SAMPLER, TRAINER
 
-from .buffer_rollout import SampleBufferRolloutError, executor_read_cursor, executor_read_shards, open_buffer
+from .buffer_rollout import (
+    SampleBufferRolloutError,
+    executor_read_cursor,
+    executor_read_shards,
+    executor_set_gate_version,
+    open_buffer,
+)
 from .publish import (
     _engine_id,
     _maybe_await,
@@ -236,16 +247,42 @@ class EngineReleaseLoader:
         return engines
 
 
-def run_sampler_island(miles_args: Any, *, environ: Any = None) -> int:
-    """Run the sampler island to its data end; returns the rounds generated."""
+LEAVE_HOLD_S = 300.0  # after a reclaim LEAVE: wait this long for the cloud to stop the container
+
+
+def run_sampler_island(miles_args: Any, *, environ: Any = None,
+                       sleep: Callable[[float], None] = time.sleep) -> int:
+    """Run the sampler island to its data end; returns the rounds generated.
+
+    A replacement incarnation (S25 C1) continues after the newest round its
+    island has in the buffer (``sampler_resume``), loads the newest policy
+    release before its first round, and writes ``rl_sampler_join`` / a member
+    record. On the reclaim marker (Modal SIGINT/SIGTERM, written by the Modal
+    runner) it starts no new round, writes no more groups, writes
+    ``rl_sampler_leave`` with reason PREEMPTED and waits for the cloud to stop
+    the container (at most :data:`LEAVE_HOLD_S`)."""
     from miles.ray.placement_group import create_rollout_components
     from miles.utils.async_utils import Disposer
     from miles.utils.orchestration_utils import init_orchestration_script
 
+    from yeto.rl.elastic_client import LeaveReason
     from yeto.rl.engine.events import append_tape_event
+    from yeto.rl.engine.resume import store_for
     from yeto.rl.engine.sampler_loop import SamplerLoop
+    from yeto.rl.engine.sampler_resume import (
+        RECLAIM_MARKER_ENV,
+        ReclaimWatcher,
+        SamplerMembership,
+        acknowledge_reclaim,
+        clear_reclaim_files,
+        install_marker_signals,
+        new_incarnation,
+        reclaim_requested,
+        resume_point,
+    )
 
     from . import LoopRunner
+    from .buffer_rollout import INCARNATION_ENV, SAMPLER_ID_ENV
     from .entry import connect_island_ray
     from .rollout import RayMetadataSink, _release
 
@@ -254,9 +291,24 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None) -> int:
         raise SampleBufferRolloutError("run_sampler_island needs --rl-sample-role sampler")
     if not getattr(miles_args, "debug_rollout_only", False):
         raise SampleBufferRolloutError("a sampler island runs Miles with --debug-rollout-only")
+    env = os.environ if environ is None else environ
 
     def emit(event: str, **fields: Any) -> None:
         append_tape_event(miles_args, {"event": event, **fields})
+
+    # one incarnation id for this process and its rollout workers (forwarded to Ray)
+    sampler_id = env.get(SAMPLER_ID_ENV)
+    if not sampler_id:
+        raise SampleBufferRolloutError(f"{SAMPLER_ID_ENV} is not set")
+    incarnation = env[INCARNATION_ENV] = new_incarnation()
+    clear_reclaim_files(env)  # a restarted machine keeps its /tmp
+    if env.get(RECLAIM_MARKER_ENV):  # set by the launcher on a pair's sampler island
+        install_marker_signals(env)
+    buffer = open_buffer(env, sampler=True)
+    resume = resume_point(buffer.entries(), sampler_id)
+    membership = SamplerMembership(store_for(config.store, environ=environ), sampler_id,
+                                   incarnation, resume, emit)
+    progress = {"rollout_id": None, "rounds": 0}  # the round in flight, rounds done here
 
     connect_island_ray(miles_args=miles_args)
     # The rollout process's metadata hook pushes each round's group records to this
@@ -276,11 +328,27 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None) -> int:
         return controller, executor
 
     async def generate(rollout_id: int) -> None:
+        progress["rollout_id"] = rollout_id
         await controller.prepare_rollout(rollout_id)
         _release(await executor.get(rollout_id))  # the rollout function wrote the groups
         metadata.discard()  # the groups are in the buffer; nobody here reads the records
+        progress["rounds"] += 1
+        progress["rollout_id"] = None
+
+    def leave(reason: LeaveReason, **detail: Any) -> None:
+        membership.leave(reason.name, rounds=progress["rounds"],
+                         policy_version=None if follower is None else follower.version,
+                         in_flight_rollout_id=progress["rollout_id"], **detail)
 
     error: BaseException | None = None
+    follower = None
+    reclaimed = lambda: reclaim_requested(env)  # noqa: E731
+
+    def leave_reclaimed() -> None:
+        leave(LeaveReason.PREEMPTED)
+        acknowledge_reclaim(env)  # a host hook (Nebius) lets the VM stop once the LEAVE is stored
+
+    watcher = ReclaimWatcher(reclaimed, leave_reclaimed).start()
     try:
         controller, executor = runner.run(init())
         lora = lora_mode(miles_args)
@@ -290,25 +358,53 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None) -> int:
         follower = PolicyFollower(release_store(config, environ), loader,
                                   version=BASE_POLICY_VERSION)
         loop = SamplerLoop(
-            follower=follower, buffer=open_buffer(environ, sampler=True), emit=emit,
+            follower=follower, buffer=buffer, emit=emit,
             generate=lambda rollout_id: runner.run(generate(rollout_id)),
             num_rollouts=int(miles_args.num_rollout),
             max_backlog_groups=int(config.max_backlog_groups),
-            min_round_s=config.min_round_s, require_release=lora,
+            min_round_s=config.min_round_s, require_release=lora, should_stop=reclaimed,
             loaded_fields=lambda: {"served_checksum": loader.last_checksum,
                                    "probe": loader.last_probe})
+        latest = follower.releases.latest()
+        membership.join(latest_release=None if latest is None else
+                        {"seq": latest.seq, "policy_version": latest.version})
         emit("rl_sampler_start", store=config.store, num_rollouts=int(miles_args.num_rollout),
-             max_backlog_groups=int(config.max_backlog_groups), weights=loader.weights)
-        return loop.run()
+             max_backlog_groups=int(config.max_backlog_groups), weights=loader.weights,
+             start_rollout_id=resume.next_rollout_id)
+        if buffer.data_ended:  # an earlier incarnation finished and marked the data end
+            rounds = 0
+        else:
+            rounds = loop.run(start=resume.next_rollout_id)
+        if reclaimed():
+            leave_reclaimed()  # the LEAVE is a no-op when the watcher already left
+            _hold_until_stopped(sleep, LEAVE_HOLD_S)
+        else:
+            leave(LeaveReason.FINISHED)
+        return rounds
     except BaseException as exc:
         error = exc
+        try:
+            leave(LeaveReason.PREEMPTED if reclaimed() else LeaveReason.INFRA_FAILED,
+                  error=f"{type(exc).__name__}: {exc}"[:300])
+        except Exception:  # noqa: BLE001 - the original error is the one to report
+            pass
         raise
     finally:
+        watcher.stop()
         try:
             runner.run(disposer.__aexit__(None if error is None else type(error), error,
                                           None if error is None else error.__traceback__))
         finally:
             runner.close()
+
+
+def _hold_until_stopped(sleep: Callable[[float], None], hold_s: float) -> None:
+    """After a reclaim LEAVE the process stays up until the cloud stops the
+    container: an early clean exit could end the cloud's input as finished
+    instead of letting the cloud run the island again."""
+    print(f"[sampler-island] reclaimed: waiting up to {hold_s:g} s for the container to stop",
+          flush=True)
+    sleep(float(hold_s))
 
 
 # ---------------------------------------------------------------------- trainer side
@@ -326,10 +422,19 @@ class ReleasingPublisher:
                  export: Callable[[int, Path], None],
                  read_position: Callable[[], int | None], emit: Callable[..., None],
                  *, weights: str = FULL,
-                 read_shards: Callable[[], dict[str, int] | None] | None = None) -> None:
+                 read_shards: Callable[[], dict[str, int] | None] | None = None,
+                 version_of: Callable[[Any], int] | None = None,
+                 guard: MergedReleaseGuard | None = None,
+                 origin: Callable[[Any], dict[str, Any]] | None = None) -> None:
         """``read_shards``: the trainer's read position per sampler shard (None
         without merged shards), released with every policy for the samplers'
-        backlog caps."""
+        backlog caps. Synced trainers (:mod:`yeto.rl.engine.merged_release`):
+        ``version_of(state)`` is the merged version to release (default: the
+        policy version), ``guard`` keeps the release versions increasing and
+        ``origin(state)`` is the release record's ``origin``."""
+        self.version_of = version_of or (lambda state: int(state.policy_version))
+        self.guard = guard
+        self.origin = origin
         self.inner = inner
         self.releases = releases
         self.export = export
@@ -346,7 +451,15 @@ class ReleasingPublisher:
 
     def publish(self, state: Any, **kwargs: Any) -> Any:
         result = self.inner.publish(state, **kwargs)
-        version = int(state.policy_version)
+        version = int(self.version_of(state))
+        if self.guard is not None:
+            latest = self.releases.latest()
+            if self.guard.check(version, None if latest is None else latest.version) == "stale":
+                self.emit("rl_policy_release_skipped", policy_version=version,
+                          local_version=int(state.policy_version),
+                          latest_version=None if latest is None else latest.version,
+                          reason="not_newer_than_latest")
+                return result
         position = self.read_position()
         shards = self.read_shards() if self.read_shards is not None and position is not None else None
         if position is None:  # nothing read yet in this process: keep the last known positions
@@ -356,9 +469,11 @@ class ReleasingPublisher:
         release = self.releases.release(version, state.policy_tensor_hash(),
                                         lambda directory: self.export(version, directory),
                                         buffer_selected=position, weights=self.weights,
-                                        engine_checksum=self._engine_checksum(), buffer_shards=shards)
+                                        engine_checksum=self._engine_checksum(), buffer_shards=shards,
+                                        origin=None if self.origin is None else self.origin(state))
         if release is not None:
             self.emit("rl_policy_released", seq=release.seq, policy_version=version,
+                      local_version=int(state.policy_version), origin=release.origin,
                       policy_hash=release.policy_hash, buffer_selected=release.buffer_selected,
                       weights=release.weights, sha256=release.sha256,
                       engine_checksum=release.engine_checksum)
@@ -368,10 +483,35 @@ class ReleasingPublisher:
         return getattr(self.inner, name)
 
 
+class GateVersionPublisher:
+    """A synced trainer's publisher (:mod:`yeto.rl.engine.merged_release`): after
+    each publish, the island's buffer reader gates ``max_policy_age`` on the merged
+    version (``set_gate_version(version)``). Every other attribute is the wrapped
+    publisher's."""
+
+    def __init__(self, inner: Any, set_gate_version: Callable[[int], Any],
+                 version_of: Callable[[Any], int]) -> None:
+        self.inner = inner
+        self.set_gate_version = set_gate_version
+        self.version_of = version_of
+
+    def publish(self, state: Any, **kwargs: Any) -> Any:
+        result = self.inner.publish(state, **kwargs)
+        self.set_gate_version(int(self.version_of(state)))
+        return result
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.inner, name)
+
+
 def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runner: Any,
                          environ: Any = None) -> ReleasingPublisher | None:
     """A trainer island (``--rl-sample-role trainer``) releases every publish; so does
-    the trainer of a convertible node (the other nodes follow the releases)."""
+    the trainer of a convertible node (the other nodes follow the releases).
+
+    Synced trainers (a buffer lane on ``miles_args.yeto_rl_sample_lane``): every
+    island gates on the merged version; only the publisher (learner id 0) releases,
+    with the merged version (:mod:`yeto.rl.engine.merged_release`)."""
     config = _buffer_config(miles_args, TRAINER) or _buffer_config(miles_args, CONVERTIBLE)
     if config is None:
         return None
@@ -379,6 +519,27 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
     if not callable(in_executor):
         raise SampleBufferRolloutError(f"rollout pool {type(driver.rollout).__name__} cannot "
                                        "run code in the rollout executor")
+    lane = getattr(miles_args, "yeto_rl_sample_lane", None)
+    synced: dict[str, Any] = {}
+    if lane is not None:
+        def version_of(state: Any) -> int:
+            return merged_version(driver, state)
+
+        def origin(state: Any) -> dict[str, Any]:
+            return {"kind": "merged", "learner_id": lane.index, "num_learners": lane.count,
+                    "local_version": int(state.policy_version)}
+
+        def on_gap(previous: int, version: int) -> None:
+            driver.emit("rl_policy_release_gap", previous_version=previous, policy_version=version)
+
+        driver.publisher = GateVersionPublisher(
+            driver.publisher, lambda v: in_executor(executor_set_gate_version, int(v)), version_of)
+        publisher_island = is_publisher(lane.index, lane.count)
+        driver.emit("rl_policy_release_role", learner_id=lane.index, num_learners=lane.count,
+                    publisher=publisher_island)
+        if not publisher_island:
+            return None
+        synced = {"version_of": version_of, "guard": MergedReleaseGuard(on_gap), "origin": origin}
 
     lora = lora_mode(miles_args)
 
@@ -391,6 +552,6 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
     publisher = ReleasingPublisher(driver.publisher, release_store(config, environ), export,
                                    read_position=lambda: in_executor(executor_read_cursor),
                                    read_shards=lambda: in_executor(executor_read_shards),
-                                   emit=driver.emit, weights=LORA if lora else FULL)
+                                   emit=driver.emit, weights=LORA if lora else FULL, **synced)
     driver.publisher = publisher
     return publisher

@@ -28,7 +28,8 @@ This module does not import Miles (it is tested without it).
 
 Limits (first implementation):
 
-* one trainer reads a buffer; on a shared directory (``index.jsonl``) one
+* one trainer reads a buffer, or synced trainers read one lane each
+  (:mod:`yeto.rl.engine.merged_release`); on a shared directory (``index.jsonl``) one
   sampler island writes it (``flock`` holds only on one host);
 * the buffer lives in the checkpoint store (:func:`~yeto.rl.engine.resume.store_for`
   at ``BUFFER_ROOT_ENV``): a Modal Volume or a shared directory that both islands
@@ -59,6 +60,15 @@ from yeto.rl.engine.buffer_payload import (  # noqa: F401
     encode_group,
     group_entry_fields,
 )
+from yeto.rl.engine.merged_release import (
+    LANE_ENV,
+    BufferLane,
+    LaneCursorLog,
+    ObjectLaneCursorLog,
+    gate_version,
+    lane_cursor_log,
+    merges_shards,
+)
 
 SAMPLER, TRAINER, CONVERTIBLE = "sampler", "trainer", "convertible"
 ROLES = (SAMPLER, TRAINER, CONVERTIBLE)
@@ -69,9 +79,14 @@ WAIT_ENV = "YETO_SAMPLE_BUFFER_WAIT_S"  # reader: max seconds to wait for a full
 POLL_ENV = "YETO_SAMPLE_BUFFER_POLL_S"  # reader: seconds between index reads while waiting
 MAX_POLICY_AGE_ENV = "YETO_SAMPLE_BUFFER_MAX_POLICY_AGE"
 SHARD_ENV = "YETO_SAMPLE_BUFFER_SHARD"  # convertible node: its own shard of the index
+# S25 C1: several sampler islands on one shared directory (a Modal Volume): each
+# sampler writes its own shard, the trainer merges these shards (comma list)
+SHARDS_ENV = "YETO_SAMPLE_BUFFER_SHARDS"
+INCARNATION_ENV = "YETO_SAMPLER_INCARNATION"  # set by the sampler island before Ray starts
 # the rollout functions run in Ray workers, which inherit the raylet's environment:
 # connect_island_ray forwards these to every worker
-ISLAND_ENVS = (BUFFER_ROOT_ENV, SAMPLER_ID_ENV, WAIT_ENV, POLL_ENV, MAX_POLICY_AGE_ENV, SHARD_ENV)
+ISLAND_ENVS = (BUFFER_ROOT_ENV, SAMPLER_ID_ENV, WAIT_ENV, POLL_ENV, MAX_POLICY_AGE_ENV, SHARD_ENV,
+               SHARDS_ENV, INCARNATION_ENV, LANE_ENV)
 
 DEFAULT_WAIT_S = 3600.0
 DEFAULT_POLL_S = 2.0
@@ -111,10 +126,14 @@ def rollout_argv(role: str | None, *, max_policy_age: int, fully_async: bool = F
 
 def island_env(role: str, *, store_root: str, sampler_id: str | None = None,
                max_policy_age: int | None = None, wait_s: float | None = None,
-               shard: str | None = None) -> dict[str, str]:
+               shard: str | None = None, shards: Sequence[str] | None = None,
+               lane: BufferLane | None = None) -> dict[str, str]:
     """The environment the launch layer exports on the island (read in the rollout
     process). A convertible node writes like a sampler, into its own ``shard`` of
-    the index, and reads like a trainer."""
+    the index, and reads like a trainer. ``shards``: the sampler shards of a
+    launch with several sampler islands (a sampler writes the one named by its
+    sampler id, the trainer merges them all). ``lane``: a synced trainer's
+    buffer lane."""
     if role not in ROLES:
         raise ValueError(f"sample buffer role {role!r}: expected one of {ROLES}")
     env = {BUFFER_ROOT_ENV: str(store_root)}
@@ -132,7 +151,22 @@ def island_env(role: str, *, store_root: str, sampler_id: str | None = None,
         env[MAX_POLICY_AGE_ENV] = str(int(max_policy_age))
         if wait_s is not None:
             env[WAIT_ENV] = f"{float(wait_s):g}"
+    if shards:
+        if role == CONVERTIBLE:
+            raise ValueError("a convertible pool names its shards per node, not with shards")
+        if role == SAMPLER and sampler_id not in shards:
+            raise ValueError(f"sampler {sampler_id!r} is not one of the buffer shards {list(shards)}")
+        env[SHARDS_ENV] = ",".join(shards)
+    if lane is not None:
+        if role != TRAINER:
+            raise ValueError("only a trainer reads a buffer lane")
+        env[LANE_ENV] = lane.env()
     return env
+
+
+def buffer_shards(environ: Mapping[str, str]) -> tuple[str, ...]:
+    """The sampler shards of :data:`SHARDS_ENV` (() when unset)."""
+    return tuple(s.strip() for s in (environ.get(SHARDS_ENV) or "").split(",") if s.strip())
 
 
 def open_buffer(environ: Mapping[str, str] | None = None, *, batch_size: int = 1,
@@ -142,9 +176,11 @@ def open_buffer(environ: Mapping[str, str] | None = None, *, batch_size: int = 1
     with ``shard``, the writer of that shard of the index; ``create_index=False``
     for a reader whose index another host writes.
 
-    On a store that needs one shard per sampler island (``sample_buffer.needs_shards``):
+    On a store that needs one shard per sampler island (``sample_buffer.needs_shards``),
+    or with :data:`SHARDS_ENV` (several sampler islands on one shared directory):
     ``sampler`` opens the shard named by :data:`SAMPLER_ID_ENV`, and ``reader``
-    (the trainer) merges the shards into the index."""
+    (the trainer) merges the shards into the index (with :data:`SHARDS_ENV`, the
+    data ends once every named shard has ended)."""
     from yeto.rl.engine.resume import store_for
     from yeto.rl.engine.sample_buffer import INDEX, FileSampleBuffer, needs_shards, shard_index
 
@@ -154,15 +190,25 @@ def open_buffer(environ: Mapping[str, str] | None = None, *, batch_size: int = 1
         raise SampleBufferRolloutError(f"{BUFFER_ROOT_ENV} is not set")
     store = store_for(root, environ=env)
     merge = False
-    if needs_shards(store) and shard is None:
+    named = buffer_shards(env)
+    if (needs_shards(store) or named) and shard is None:
         if sampler:
             shard = env.get(SAMPLER_ID_ENV)
             if not shard:
                 raise SampleBufferRolloutError(f"{SAMPLER_ID_ENV} is not set (the sampler's buffer shard)")
         merge = reader
+    lane = BufferLane.parse(env.get(LANE_ENV)) if reader else None
+    merge = merge and merges_shards(lane)
     return FileSampleBuffer(store, batch_size=batch_size,
                             index=INDEX if shard is None else shard_index(shard),
-                            create_index=create_index, merge_shards=merge)
+                            create_index=create_index, merge_shards=merge,
+                            expected_shards=named if merge and named else None,
+                            lane=lane)
+
+
+def open_lane_log(buffer: Any) -> LaneCursorLog | ObjectLaneCursorLog | None:
+    """The lane cursor log of a lane reader (None for a single reader)."""
+    return lane_cursor_log(buffer)
 
 
 def renumber_group(samples: Sequence[dict[str, Any]], *, position: int,
@@ -191,6 +237,85 @@ def renumber_group(samples: Sequence[dict[str, Any]], *, position: int,
     return out
 
 
+# ---------------------------------------------------------------------- sampler side
+_DATA_CURSOR_FIELDS = ("sample_offset", "epoch_id", "sample_group_index", "sample_index")
+
+
+def seek_data_source(data_source: Any, cursor: Mapping[str, int], *, shuffle: bool) -> None:
+    """Put a Miles ``RolloutDataSource`` at ``cursor`` the way its ``load`` does
+    (the four position fields, then the epoch's shuffle). Raises when the source
+    does not have the fields (a source this resume does not know)."""
+    source = getattr(data_source, "__self__", data_source)
+    missing = [f for f in _DATA_CURSOR_FIELDS if not isinstance(getattr(source, f, None), int)]
+    if missing or set(cursor) != set(_DATA_CURSOR_FIELDS):
+        raise SampleBufferRolloutError(
+            f"cannot seek data source {type(source).__name__} to {dict(cursor)} "
+            f"(missing fields {missing})")
+    for name in _DATA_CURSOR_FIELDS:
+        setattr(source, name, int(cursor[name]))
+    if shuffle and getattr(source, "dataset", None) is not None:
+        source.dataset.shuffle(int(cursor["epoch_id"]))
+
+
+class SamplerRoundWriter:
+    """The sampler's buffer writes, resumable across incarnations (S25 C1).
+
+    Opened in the rollout process. On open it reads where this sampler's earlier
+    incarnations got to (:func:`~yeto.rl.engine.sampler_resume.resume_point`);
+    :meth:`seek` puts the data source at the resume cursor before the first
+    round; :meth:`write_round` writes one round's finished groups, each with its
+    :class:`~yeto.rl.engine.sampler_resume.SamplerRound` record. After the
+    reclaim marker appears (the island is leaving) nothing more is written: an
+    old incarnation must not write while its replacement writes the same shard."""
+
+    def __init__(self, buffer: Any, sampler_id: str, *, incarnation: str, resume: bool = True,
+                 reclaimed: Callable[[], bool] = lambda: False) -> None:
+        """``resume=False``: write as before (a convertible node: no resume
+        point, no round check, no seek)."""
+        from yeto.rl.engine.sampler_resume import RoundGuard, resume_point
+
+        self.buffer = buffer
+        self.sampler_id = str(sampler_id)
+        self.incarnation = str(incarnation)
+        self.reclaimed = reclaimed
+        self.resume = resume_point(buffer.entries() if resume else (), self.sampler_id)
+        self.guard = RoundGuard(self.resume) if resume else None
+        self._writer = GroupWriter(buffer, f"{self.sampler_id}-{self.incarnation}")
+        self._sought = False
+        self.dropped_groups = 0  # groups not written because the island is leaving
+
+    def seek(self, data_source: Any, *, shuffle: bool) -> dict[str, int] | None:
+        """Before the first round only: the resume cursor applied (None: none)."""
+        if self._sought or self.guard is None:
+            return None
+        self._sought = True
+        cursor = self.resume.data_cursor
+        if cursor is not None:
+            seek_data_source(data_source, cursor, shuffle=shuffle)
+        return cursor
+
+    def write_round(self, rollout_id: int, groups: Sequence[tuple[str, list[dict[str, Any]]]],
+                    data_cursor: Mapping[str, int] | None) -> int:
+        """Write ``groups`` (``(group key, samples)``, aborted groups already left
+        out) of round ``rollout_id``; returns the groups written."""
+        from yeto.rl.engine.sampler_resume import SamplerRound
+
+        if self.guard is not None:
+            self.guard.check(rollout_id)
+        written = 0
+        for i, (key, samples) in enumerate(groups):
+            if self.reclaimed():
+                self.dropped_groups += len(groups) - i
+                break
+            record = SamplerRound(self.sampler_id, self.incarnation, int(rollout_id),
+                                  data_cursor=data_cursor, last=i == len(groups) - 1)
+            self._writer.write(samples, group_key=key, sampler_round=record.record())
+            written += 1
+        if written and self.guard is not None:
+            self.guard.written(rollout_id)
+        return written
+
+
 # ---------------------------------------------------------------------- trainer side
 @dataclass
 class TakeReport:
@@ -215,7 +340,10 @@ class BatchReader:
     def __init__(self, buffer: Any, *, max_policy_age: int, wait_s: float = DEFAULT_WAIT_S,
                  poll_s: float = DEFAULT_POLL_S, consumer: str = TRAINER_CONSUMER,
                  clock: Callable[[], float] = time.monotonic,
-                 sleep: Callable[[float], None] = time.sleep) -> None:
+                 sleep: Callable[[float], None] = time.sleep,
+                 cursor_log: LaneCursorLog | ObjectLaneCursorLog | None = None) -> None:
+        """``cursor_log``: a synced trainer's lane cursor (:mod:`yeto.rl.engine.merged_release`):
+        the reader continues after its last line and appends one per round."""
         if int(max_policy_age) < 1:
             raise ValueError("max_policy_age must be >= 1")
         self.buffer = buffer
@@ -226,6 +354,11 @@ class BatchReader:
         self.clock = clock
         self.sleep = sleep
         self._ends: dict[int, int] = {}  # rollout id -> buffer position after its round
+        # a synced trainer gates on the merged version it last published (set_gate_version)
+        self.gate_version: int | None = None
+        self.cursor_log = cursor_log
+        if cursor_log is not None:
+            self.buffer.reset_to(cursor_log.last_cursor())
 
     def take(self, rollout_id: int, groups: int, *, current_version: int | None
              ) -> tuple[list[tuple[int, list[dict[str, Any]]]], TakeReport]:
@@ -240,6 +373,7 @@ class BatchReader:
         out: list[tuple[int, list[dict[str, Any]]]] = []
         versions: dict[int, int] = {}
         stale = 0
+        current_version = gate_version(current_version, self.gate_version)
         floor = None if current_version is None else int(current_version) - self.max_policy_age
         while len(out) < groups:
             selected = self.buffer.select(self.consumer, groups - len(out))
@@ -264,6 +398,8 @@ class BatchReader:
             raise SampleBufferRolloutError(f"rollout {rollout_id}: the sample buffer ended "
                                            f"with no trainable group (position {end})")
         self._ends[rollout_id] = end
+        if self.cursor_log is not None:
+            self.cursor_log.append(rollout_id, [position for position, _ in out], end)
         return out, TakeReport(rollout_id=rollout_id, groups=len(out), stale_groups=stale,
                                start=start, end=end, behavior_versions=dict(sorted(versions.items())),
                                wait_s=round(self.clock() - started, 3))
@@ -338,6 +474,17 @@ def executor_read_shards(_executor: Any) -> dict[str, int] | None:
     if reader is None:
         return None
     return reader.buffer.shard_positions(reader.buffer.read_cursor) or None
+
+
+def executor_set_gate_version(_executor: Any, version: int) -> int | None:
+    """Runs INSIDE the rollout executor actor: a synced trainer's merged version,
+    the version its ``max_policy_age`` gate compares against. Returns the previous
+    one (None before the reader exists: nothing to set)."""
+    reader = _ACTIVE.get(TRAINER)
+    if reader is None:
+        return None
+    previous, reader.gate_version = reader.gate_version, int(version)
+    return previous
 
 
 def executor_reset(_executor: Any, watermark: int) -> int:

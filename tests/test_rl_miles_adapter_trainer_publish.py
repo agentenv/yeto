@@ -574,3 +574,21 @@ def test_gspo_and_gmpo_clip_fraction_unchanged_by_unconditional_drain(variant, m
     t.train_step(handle())
     assert t.step_metrics().clip_fraction == 0.25
     assert state_plugin._STEP_LOSSES == []
+
+
+def test_trainer_only_island_publishes_without_engines(monkeypatch):
+    """--debug-train-only: no engine update, no stamp; the release is the publication."""
+    from yeto.rl.adapters.miles import publish as publish_module
+
+    calls = []
+
+    async def miles_update_weights(args, actor, executor, ctl, **kw):
+        calls.append("update_weights")
+
+    monkeypatch.setattr(publish_module, "_default_update_weights", lambda: miles_update_weights)
+    pub = MilesPublisher(
+        args=SimpleNamespace(debug_train_only=True), actor_model=PluginActor(calls), rollout_executor=object(),
+        inference_controller=Controller([]), flatten_checksums=flatten,
+    )
+    result = pub.publish(state())
+    assert calls == [] and result.members == frozenset() and pub.last_engine_checksums is None
