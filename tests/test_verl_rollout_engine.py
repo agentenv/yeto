@@ -133,3 +133,71 @@ def test_unbound_engine_and_short_secret_fail_closed(qwen):
     assert finish_reason((5, 7), {7}, 2) == FINISH_STOP
     assert finish_reason((5, 6), {7}, 2) == FINISH_LENGTH
     assert finish_reason((5,), {7}, 2) == FINISH_STOP
+
+
+class ExitOnErrorAgent(CodexLikeAgent):
+    """Codex on a 400: the turn fails and the agent process exits non-zero (Harbor's verdict)."""
+
+    def __init__(self, exception_type: str = "NonZeroAgentExitCodeError") -> None:
+        super().__init__()
+        self.exception_type = exception_type
+        self.statuses: list[int] = []
+
+    async def run(self, task: Any, endpoint: str) -> Any:
+        import aiohttp
+
+        from test_records_proxy import echo, responses_body, tool_output, user_item
+
+        from yeto.rl.agentic import TrialVerdict
+
+        self.endpoints.append(endpoint)
+        items = [user_item("read a.txt")]
+        async with aiohttp.ClientSession() as http:
+            for turn in range(3):
+                async with http.post(f"{endpoint}/responses", json=responses_body(copy.deepcopy(items))) as reply:
+                    self.statuses.append(reply.status)
+                    if reply.status != 200:
+                        return TrialVerdict(rewards=None, exception_type=self.exception_type)
+                    response = await reply.json()
+                items += echo(response["output"])
+                items += [tool_output(o["call_id"], f"result {turn}")
+                          for o in response["output"] if o["type"] == "function_call"]
+        return TrialVerdict(rewards={"reward": 1.0})
+
+
+class MalformedSecondReply(ScriptedModel):
+    """The second reply is a tool call that is not JSON (as Qwen3-4B wrote with heredocs)."""
+
+    def __call__(self, prompt: tuple[int, ...], index: int) -> list[int]:
+        if len(self.replies) == len(SCRIPT) - 1:
+            self.replies.pop(0)
+            return self.template.encode('<tool_call>\n{"name": "shell", "arguments": {"cmd": "cat > a\nb"}\n</tool_call>') + \
+                [self.template.encode("<|im_end|>")[0]]
+        return super().__call__(prompt, index)
+
+
+@pytest.mark.parametrize("exception_type,outcome", [("NonZeroAgentExitCodeError", "policy_limit"),
+                                                    ("EnvironmentStartTimeoutError", "aborted")])
+def test_malformed_tool_call_is_a_trained_zero_not_an_abort(verl_loop, qwen, exception_type, outcome):
+    loop_mod, _ = verl_loop
+    proxy, _ = _verl_proxy(qwen)
+    recorder = ProxyTokenRecorder(proxy)
+    agent = ExitOnErrorAgent(exception_type)
+    loop = _make_loop(loop_mod, recorder, agent, prompt_length=4096, response_length=4096)
+    loop.server_manager = FakeVerlClient(MalformedSecondReply(qwen, copy.deepcopy(SCRIPT)))
+
+    async def go():
+        try:
+            return await loop.run(VERL_SAMPLING, **ROW)
+        finally:
+            await recorder.aclose()
+
+    out = asyncio.run(go())
+    assert agent.statuses == [200, 400]
+    assert out.extra_fields[OUTCOME_KEY] == outcome and out.reward_score == 0.0
+    if outcome == "policy_limit":
+        # the malformed reply was sampled and is trained (mask 1) as part of a 0-reward sample
+        assert out.extra_fields["outcome_reason"].startswith("policy_output_error")
+        assert sum(out.response_mask) > 0
+    else:
+        assert sum(out.response_mask) == 0  # another exit cause stays an infrastructure abort

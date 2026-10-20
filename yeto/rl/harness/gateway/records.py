@@ -41,7 +41,7 @@ from yeto.rl.engine.sampler_engine import (
     SamplingParams,
     TokenSamplerEngine,
 )
-from yeto.rl.harness.chat_templates import ChatTemplate, first_difference
+from yeto.rl.harness.chat_templates import ChatTemplate, TemplateError, first_difference
 
 from .core import GatewayError
 
@@ -84,7 +84,9 @@ class TurnRecord:
     ``completion``: the sampled ids (mask 1, stop token included when the
     engine returned it). ``stop_added``: a stop token the engine did not
     return, added with mask 0. ``render_diff``: first position where the
-    stream differs from a fresh tokenization (None: aligned)."""
+    stream differs from a fresh tokenization (None: aligned). ``parse_error``:
+    the completion is not valid model output for the template (the agent got
+    an HTTP 400 for this call; the sampled ids stay in the stream)."""
 
     turn: int
     kind: str
@@ -96,6 +98,7 @@ class TurnRecord:
     provenance: dict[str, str]
     stop_added: tuple[int, ...] = ()
     render_diff: int | None = None
+    parse_error: str | None = None
 
 
 @dataclass
@@ -200,7 +203,12 @@ class RecordingBackend:
             completion = await self._sample(session, segment, pending, params, kind=KIND_ACTION)
             segment.n_context = len(context) + 1
             prompt_tokens = len(segment.token_ids) - len(completion.token_ids)
-        message = self._parse(completion)
+        try:
+            message = self._parse(completion)
+        except TemplateError as exc:  # malformed model output: the policy's failure (N10.9)
+            segment.turns[-1].parse_error = str(exc)[:500]
+            self.counters[session.trajectory_id]["policy_output_errors"] += 1
+            raise
         return self._chat_response(session_id, message, completion, prompt_tokens=prompt_tokens)
 
     # -------------------------------------------------------------- records

@@ -124,6 +124,9 @@ class TokenTurn:
     ``Provenance.to_record()``) are what the recorder knows about the call;
     None when it does not record them.  ``finish_reason``: the engine's reason
     (``stop`` / ``length``; ``length`` = the call hit its token cap).
+    ``policy_error``: why the recorder refused the reply as malformed model
+    output (e.g. a tool call that is not valid JSON); the tokens were sampled
+    and are kept, the agent got an error for that call.
     """
 
     prompt_ids: tuple[int, ...]
@@ -132,6 +135,7 @@ class TokenTurn:
     policy_version: int | None = None
     provenance: Mapping[str, str] | None = None
     finish_reason: str | None = None
+    policy_error: str | None = None
 
     def __post_init__(self) -> None:
         if len(self.completion_ids) != len(self.completion_logprobs):

@@ -80,6 +80,7 @@ from yeto.rl.agentic import (
     run_agent_task,
 )
 from yeto.rl.agentic.loop_local import LoopLocal
+from yeto.rl.agentic.outcome import policy_output_failure
 from yeto.rl.agentic.types import TokenTurn
 from yeto.rl.engine.sampler_engine import FINISH_LENGTH
 from yeto.rl.harness.harbor import HarborHarness, HarborSettings, build_trial_config
@@ -208,6 +209,8 @@ class HarborAgentLoop(AgentLoopBase):
         except TokenAlignmentError as exc:
             if trajectory.outcome is not Outcome.ABORTED:
                 trajectory = _abort(trajectory, f"token_alignment: {exc}")
+        else:
+            trajectory = _policy_output_failure(trajectory, turns)
 
         segments: TokenSegments | None = None
         if trajectory.outcome is not Outcome.ABORTED:
@@ -248,6 +251,14 @@ class HarborAgentLoop(AgentLoopBase):
         pad = self.tokenizer.pad_token_id
         pad = self.tokenizer.eos_token_id if pad is None else pad
         return TokenSegments(prompt_ids=(pad,), response_ids=(pad,), response_mask=(0,), response_logprobs=(0.0,))
+
+
+def _policy_output_failure(trajectory: AgentTrajectory, turns: Sequence[TokenTurn]) -> AgentTrajectory:
+    """A malformed model reply that ended the agent is a 0 reward, not ABORTED (N10.9)."""
+    updated = policy_output_failure(trajectory, [t.policy_error for t in turns if t.policy_error])
+    if updated.outcome is not trajectory.outcome:
+        _gate().metrics.reclassify(trajectory.outcome, updated.outcome)
+    return updated
 
 
 def _abort(trajectory: AgentTrajectory, reason: str) -> AgentTrajectory:

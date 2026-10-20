@@ -13,8 +13,11 @@ Harbor falls through to ABORTED, which is the safe direction.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import replace
+
 from .trust import verified_reward
-from .types import Outcome, TrialVerdict
+from .types import AgentTrajectory, Outcome, TrialVerdict
 
 # The policy ran out of its own budget: time, or sequence/context length.
 POLICY_LIMIT_EXCEPTIONS = frozenset({
@@ -29,6 +32,27 @@ POLICY_LIMIT_EXCEPTIONS = frozenset({
 
 # Reason given when the outer wall-clock cap fires (the harness never returned).
 WALL_CLOCK_REASON = "wall_clock_cap"
+
+# The agent process exited non-zero.  On its own this is ABORTED (could be the
+# sandbox); with a recorded malformed model reply it is the policy's failure.
+AGENT_EXIT_EXCEPTIONS = frozenset({"NonZeroAgentExitCodeError"})
+POLICY_OUTPUT_ERROR_REASON = "policy_output_error"
+
+
+def policy_output_failure(trajectory: AgentTrajectory, policy_errors: Sequence[str]) -> AgentTrajectory:
+    """ABORTED by the agent's exit after the recorder refused a malformed model reply -> POLICY_LIMIT, reward 0.
+
+    S25 N10.9 (main agent decision): a tool call that is not valid JSON is the
+    policy's own failure, trained as a 0 reward, not an infrastructure abort.
+    Fail closed: only the agent-exit exception, and only with a recorded
+    refusal, is re-classified; every other ABORTED stays ABORTED.
+    """
+    verdict = trajectory.verdict
+    if (trajectory.outcome is not Outcome.ABORTED or not policy_errors or verdict is None
+            or verdict.exception_type not in AGENT_EXIT_EXCEPTIONS):
+        return trajectory
+    return replace(trajectory, outcome=Outcome.POLICY_LIMIT, reward=0.0,
+                   reason=f"{POLICY_OUTPUT_ERROR_REASON}: {policy_errors[0][:200]}")
 
 
 def classify(verdict: TrialVerdict, *, reward_range: tuple[float, float] = (0.0, 1.0)) -> tuple[Outcome, float, str]:
