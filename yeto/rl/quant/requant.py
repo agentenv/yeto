@@ -382,6 +382,9 @@ class _SourceReader:
         self._open.clear()
 
 
+_COMPOSITE_PREFIX, _TEXT_PREFIX = "model.language_model.", "model."
+
+
 def requantize_checkpoint(
     source_dir: Path,
     template_dir: Path,
@@ -410,6 +413,12 @@ def requantize_checkpoint(
     source = _SourceReader(source_dir)
     expected = layout.source_names()
     missing, extra = expected - set(source.weight_map), set(source.weight_map) - expected
+    # Miles' raw glm5_next export names the text model "model.layers..."; the HF
+    # composite checkpoint (and so the layout) has "model.language_model.layers..."
+    # (Modal run-14). Only an exact one-to-one prefix match is taken as the same tensor.
+    alias = {n: n.replace(_COMPOSITE_PREFIX, _TEXT_PREFIX, 1) for n in missing
+             if n.startswith(_COMPOSITE_PREFIX) and n.replace(_COMPOSITE_PREFIX, _TEXT_PREFIX, 1) in extra}
+    missing, extra = missing - set(alias), extra - set(alias.values())
     base, filled = None, set()
     if frozen is not None and missing:
         matcher = re.compile(frozen[1])
@@ -431,10 +440,11 @@ def requantize_checkpoint(
     quantized = set(layout.quantized_weights())
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    stats = {"shards": 0, "tensors": 0, "quantized": 0, "frozen_from_base": len(filled)}
+    stats = {"shards": 0, "tensors": 0, "quantized": 0, "frozen_from_base": len(filled),
+             "renamed_from_text_prefix": len(alias)}
 
     def read(name: str) -> torch.Tensor:
-        return base.get(name) if name in filled else source.get(name)
+        return base.get(name) if name in filled else source.get(alias.get(name, name))
 
     try:
         for shard in selected:

@@ -361,3 +361,14 @@ def test_frozen_tensors_come_from_the_base_only_when_named(world):
                                   frozen=(world["source"], r"^lm_head\."))
     assert stats["frozen_from_base"] == 1
     assert compare_checkpoints(out, world["original"])["unequal_tensors"] == 0
+
+
+def test_text_model_prefix_of_a_miles_raw_export_is_accepted(world):
+    # Miles' raw glm5_next export writes "model.layers..."; the layout has "model.language_model.layers..."
+    raw = world["tmp"] / "raw-export"
+    _write_ckpt(raw, {n.replace("model.language_model.", "model.", 1): t for n, t in world["src"].items()},
+                lambda n: "model-00001-of-00001.safetensors")
+    out = world["tmp"] / "out-raw"
+    stats = requantize_checkpoint(raw, world["template"], out, AwqSmoothing.none())
+    assert stats["renamed_from_text_prefix"] == sum(n.startswith("model.language_model.") for n in world["src"])
+    assert compare_checkpoints(out, world["original"])["unequal_tensors"] == 0

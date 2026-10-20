@@ -357,6 +357,13 @@ def orchestrate(tag: str, cut_after: int = 2) -> dict:
 
 
 @app.local_entrypoint()
+def requant(tag: str = "requant-1") -> None:
+    """Start (or restart) only the re-quantizer loop of a running rehearsal."""
+    call = requant_island.spawn(tag)
+    print(f"spawned requant {call.object_id}")
+
+
+@app.local_entrypoint()
 def convert(tag: str = "convert-1") -> None:
     call = trainer_island.spawn(tag, None, True)
     print(f"spawned convert {call.object_id}")
