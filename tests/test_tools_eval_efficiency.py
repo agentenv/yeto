@@ -78,6 +78,10 @@ def test_bare_entry_points_follow_the_official_recipes():
 def test_yeto_arms_use_the_same_policy_age_and_partition():
     assert "--rl-max-policy-age 1" in " ".join(spec.yeto_verl_argv(SPEC, "async", "/t"))
     assert "--rl-max-policy-age" not in " ".join(spec.yeto_verl_argv(SPEC, "sync", "/t"))
+    # async needs an algorithm spec that tolerates the policy age (the default allows 0)
+    argv = spec.yeto_verl_argv(SPEC, "async", "/t")
+    algo = argv[argv.index("--rl-algorithm-spec") + 1]
+    assert algo.endswith(spec.ALGORITHM_SPEC) and (Path(__file__).parents[1] / spec.ALGORITHM_SPEC).is_file()
     args = spec.yeto_miles_launcher_args(SPEC, "async", "r1")
     assert "--gpu modal:2xa10g" in args and "--rl-placement fixed-partition --rl-rollout-gpus 1" in args
     assert "--gpu modal:1xa10g" in spec.yeto_miles_launcher_args(SPEC, "sync", "r1")

@@ -322,6 +322,8 @@ def miles_bare_script(mode: str) -> str:
 
 
 # ====================================================================== yeto arms
+YETO_WORKDIR = "/root/sky_workdir"  # modal_verl.WORKDIR: the repo inside the yeto+verl container
+ALGORITHM_SPEC = "examples/rl_algorithms/decoupled-ppo-c2.json"  # token TIS 2.0, max_policy_staleness 2
 def yeto_verl_argv(spec: EffSpec, mode: str, tape: str) -> list[str]:
     """``island_entry`` arguments of the yeto+verl arm (the T-EVAL E1 shape)."""
     argv = ["-m", "yeto.rl.adapters.verl.island_entry", "--model", spec.model, "--model-revision",
@@ -334,7 +336,10 @@ def yeto_verl_argv(spec: EffSpec, mode: str, tape: str) -> list[str]:
     if spec.chat_template_kwargs:
         argv += ["--apply-chat-template-kwargs", json.dumps(spec.chat_template_kwargs)]
     if mode == "async":
-        argv += ["--rl-max-policy-age", str(spec.max_policy_age)]
+        # The default algorithm spec allows no staleness (island_entry rejects age 1,
+        # eff01-yeto-verl-async-a); use the yeto+Miles arm's spec: token TIS 2.0, staleness 2.
+        argv += ["--rl-max-policy-age", str(spec.max_policy_age),
+                 "--rl-algorithm-spec", f"{YETO_WORKDIR}/{ALGORITHM_SPEC}"]
     return argv
 
 
