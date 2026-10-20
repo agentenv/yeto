@@ -300,7 +300,7 @@ def miles_bare_argv(spec: EffSpec, mode: str) -> list[str]:
         "--tensor-model-parallel-size", "1", "--pipeline-model-parallel-size", "1",
         "--context-parallel-size", "1", "--expert-model-parallel-size", "1", "--expert-tensor-parallel-size", "1",
         "--recompute-granularity", "full", "--recompute-method", "uniform", "--recompute-num-layers", "1",
-        "--use-dynamic-batch-size", "--max-tokens-per-gpu", str(max(9216, spec.seq_len)),
+        "--use-dynamic-batch-size", "--max-tokens-per-gpu", str(max_tokens_per_gpu(spec)),
         "--attention-dropout", "0.0", "--hidden-dropout", "0.0",
         "--accumulate-allreduce-grads-in-fp32", "--attention-softmax-in-fp32",
         # yeto's generic recipe (Qwen3) trains with "unfused": TE's flash path picks the
@@ -327,9 +327,16 @@ def miles_bare_script(mode: str) -> str:
     return "train.py" if mode == "sync" else "train_async.py"
 
 
+def max_tokens_per_gpu(spec: EffSpec) -> int:
+    """Miles dynamic-batching budget (run_qwen3_4b.py: 9216), never below one sample."""
+    return max(9216, spec.seq_len)
+
+
 # ====================================================================== yeto arms
 YETO_WORKDIR = "/root/sky_workdir"  # modal_verl.WORKDIR: the repo inside the yeto+verl container
 ALGORITHM_SPEC = "examples/rl_algorithms/decoupled-ppo-c2.json"  # token TIS 2.0, max_policy_staleness 2
+# the same with the bare Miles recipe's clip range (--eps-clip 0.2 --eps-clip-high 0.28)
+MILES_ALGORITHM_SPEC = "tools/eval/efficiency/algo-eff-miles.json"
 def yeto_verl_argv(spec: EffSpec, mode: str, tape: str) -> list[str]:
     """``island_entry`` arguments of the yeto+verl arm (the T-EVAL E1 shape)."""
     argv = ["-m", "yeto.rl.adapters.verl.island_entry", "--model", spec.model, "--model-revision",
@@ -351,7 +358,7 @@ def yeto_verl_argv(spec: EffSpec, mode: str, tape: str) -> list[str]:
 
 def yeto_miles_launcher_args(spec: EffSpec, mode: str, run_id: str) -> str:
     """The yeto launcher arguments of the yeto+Miles arm (``tools/eval/miles_local.sh`` ARGS)."""
-    from ..miles import DATA, SPEC, STORE_VOLUME, TAPE_VOLUME
+    from ..miles import DATA, STORE_VOLUME, TAPE_VOLUME
 
     card = {"A10G": "a10g", "H100!": "h100", "L4": "l4"}[spec.gpu]
     c = cards(mode)
@@ -366,8 +373,13 @@ def yeto_miles_launcher_args(spec: EffSpec, mode: str, run_id: str) -> str:
             f"--rollout-max-response-len {spec.max_response_len} --seq-len {spec.seq_len} "
             f"--inner-lr {spec.lr} --seed {spec.seed} --sglang-mem-fraction-static {spec.mem_fraction} "
             f"--gpu modal:{c['total']}x{card} --rl-single-island-no-sync --total-steps {spec.rounds} "
-            # TIS (upper 2.0) in both modes, as in the bare arms; tolerates staleness 2 >= max_policy_age
-            f"--trust-remote-code {SPEC}")
+            # Miles recipe settings of the bare arm (S26 GOAL §6: the bare framework's official
+            # settings win): no deterministic inference, constant LR, full recompute, dynamic
+            # batching, gradient-accumulation fusion; dropout 0 is the generic recipe's own
+            "--no-sglang-deterministic-inference --rl-lr-schedule constant --rl-activation-recompute "
+            f"--rl-max-tokens-per-gpu {max_tokens_per_gpu(spec)} --rl-gradient-accumulation-fusion "
+            # TIS (upper 2.0) and eps_clip_high 0.28 as in the bare arms; staleness 2 >= max_policy_age
+            f"--trust-remote-code --rl-algorithm-spec {MILES_ALGORITHM_SPEC}")
     if kwargs:
         args += f" --apply-chat-template-kwargs {shlex.quote(kwargs)}"
     if mode == "async":
