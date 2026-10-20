@@ -314,6 +314,12 @@ _ISLAND = (
     island_flag("--fragments", type=int, default=1),
     island_flag("--parameter-layout-sha256", default=None),
     island_flag(
+        "--sweep-push-dtype",
+        choices=("f32", "bf16"),
+        default="f32",
+        help="full-parameter sweep: wire dtype of pushed outer deltas (syncer masters stay f32)",
+    ),
+    island_flag(
         "--syncer-profile-sha256",
         default=None,
         help="full-parameter mode: the launcher-computed syncer semantic profile hash "

@@ -21,6 +21,7 @@ from typing import Any
 
 from yeto.protocol import (
     DTYPE_F32,
+    DTYPE_F32_PUSH_BF16,
     FinalManifest,
     PullRequest,
     SyncerClient,
@@ -82,6 +83,8 @@ class RoleStreamConfig:
     poll_seconds: float = 0.01
     max_fragment_bytes: int = 2 << 30
     max_chunk_bytes: int = 256 << 20
+    # S26 E3: push outer deltas as bf16 (session dtype 4); BCAST/FINAL stay f32.
+    push_bf16: bool = False
 
     def __post_init__(self) -> None:
         if not self.algorithm.isidentifier():
@@ -219,7 +222,7 @@ def role_stream_session_contract_hash(
             "pipeline_depth": config.pipeline_depth,
             "local_horizon": config.local_horizon,
             "optimizer_steps_per_round": config.optimizer_steps_per_round,
-            "wire_dtype": "fp32",
+            "wire_dtype": "fp32-push-bf16" if config.push_bf16 else "fp32",
         },
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -334,7 +337,7 @@ class MilesFullParameterRoleStream:
             self.config.syncer_addr,
             self.config.learner_id,
             adapter.layout.fragments,
-            dtype=DTYPE_F32,
+            dtype=DTYPE_F32_PUSH_BF16 if self.config.push_bf16 else DTYPE_F32,
             num_streams=self.config.wan_streams,
             max_reconnects=None,
             session_contract_hash=role_stream_session_contract_hash(

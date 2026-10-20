@@ -838,6 +838,7 @@ def _dense_full_sync_config(
         pipeline_depth=1,
         algorithm_spec_sha256=algorithm_spec_sha256,
         wan_streams=args.wan_streams,
+        push_bf16=getattr(args, "sweep_push_dtype", "f32") == "bf16",
     )
     return FullParameterSyncConfig((actor,), sweep=True)
 

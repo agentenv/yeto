@@ -57,6 +57,10 @@ pub const DTYPE_BF16: u8 = 2;
 /// base-relative learner deltas; INIT_PARAMS and BCAST_FRAGMENT travel as
 /// bf16 (see `bulk_dtype`, docs/PROTOCOL.md v4).
 pub const DTYPE_Q4: u8 = 3;
+/// Session dtype 4 (S26 E3): PUSH_FRAGMENT deltas travel as bf16 while
+/// INIT_PARAMS, BCAST_FRAGMENT and FINAL stay exact f32. The syncer keeps f32
+/// masters and momentum; only the learner's outer gradient is rounded.
+pub const DTYPE_F32_PUSH_BF16: u8 = 4;
 
 /// Values per q4 scale block (f32 absmax scale + 128 nibble bytes each).
 pub const Q4_BLOCK: usize = 256;
@@ -64,7 +68,17 @@ pub const Q4_BLOCK: usize = 256;
 /// Dtype of INIT_PARAMS/BCAST_FRAGMENT tensors for a session dtype: q4
 /// applies only to push deltas; full parameter payloads stay bf16.
 pub fn bulk_dtype(dtype: u8) -> u8 {
-    if dtype == DTYPE_Q4 {
+    match dtype {
+        DTYPE_Q4 => DTYPE_BF16,
+        DTYPE_F32_PUSH_BF16 => DTYPE_F32,
+        other => other,
+    }
+}
+
+/// Dtype of PUSH_FRAGMENT deltas for an unquantized session dtype (q4 has
+/// its own block codec).
+pub fn push_dtype(dtype: u8) -> u8 {
+    if dtype == DTYPE_F32_PUSH_BF16 {
         DTYPE_BF16
     } else {
         dtype
@@ -417,6 +431,9 @@ mod tests {
         assert_eq!(bulk_dtype(DTYPE_Q4), DTYPE_BF16);
         assert_eq!(bulk_dtype(DTYPE_BF16), DTYPE_BF16);
         assert_eq!(bulk_dtype(DTYPE_F32), DTYPE_F32);
+        assert_eq!(bulk_dtype(DTYPE_F32_PUSH_BF16), DTYPE_F32);
+        assert_eq!(push_dtype(DTYPE_F32_PUSH_BF16), DTYPE_BF16);
+        assert_eq!(push_dtype(DTYPE_F32), DTYPE_F32);
     }
 
     #[test]

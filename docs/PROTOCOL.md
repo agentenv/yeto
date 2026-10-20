@@ -32,7 +32,7 @@ or allocation overflows are errors rather than panics.
 
 | type | name | direction | payload |
 |---:|---|---|---|
-| 1 | HELLO | learner → syncer | protocol_version:u16 (=4), learner_id:u32, connection_generation:u64, dtype:u8 (1=f32, 2=bf16, 3=q4), num_fragments:u32, per-fragment layout, layout_fingerprint:[u8;32], session_contract_hash:[u8;32], optional syncer_profile_hash:[u8;32], num_streams:u16, optional compat_group trailer (`b"YCG1"`, u32 length, 1–64 bytes utf-8) |
+| 1 | HELLO | learner → syncer | protocol_version:u16 (=4), learner_id:u32, connection_generation:u64, dtype:u8 (1=f32, 2=bf16, 3=q4, 4=f32 with bf16 pushes), num_fragments:u32, per-fragment layout, layout_fingerprint:[u8;32], session_contract_hash:[u8;32], optional syncer_profile_hash:[u8;32], num_streams:u16, optional compat_group trailer (`b"YCG1"`, u32 length, 1–64 bytes utf-8) |
 | 2 | INIT_PARAMS | learner → syncer | fragment_id:u32, full tensor bytes; only learner 0 may initialize |
 | 3 | PULL_REQ | syncer → learner | fragment_id:u32, global_step:u64, round_attempt:u32 |
 | 4 | PUSH_FRAGMENT | learner → syncer | learner_id:u32, fragment_id:u32, global_step:u64, round_attempt:u32, base_version:u64, local_step:u64, c_steps:u32, c_tokens:u64, base-relative learner-delta bytes |
@@ -222,6 +222,13 @@ BCAST carries the updated full fragment. The learner applies
 The coordinator is one sequential scheduler actor. Pipelined rounds target
 distinct fragments, and merge + version update + broadcast for a completion
 is serialized. No two completions mutate one fragment concurrently.
+
+## bf16 pushes over an f32 session (dtype 4)
+
+Dtype 4 keeps INIT, BCAST and FINAL exact f32 and sends only PUSH deltas as
+bf16 (round-to-nearest-even). The syncer decodes and negates them like dtype 2
+and keeps f32 masters and momentum. The full-parameter policy sweep accepts
+dtype 1 or 4 (S26 E3, `--rl-sync-push-dtype bf16`).
 
 ## Q4 pushes
 

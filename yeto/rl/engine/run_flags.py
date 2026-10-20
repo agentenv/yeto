@@ -850,6 +850,22 @@ _SYNC = (
         "and downloads; merge results are unchanged (default 1 = serial)",
     ),
     cli_flag(
+        "--rl-sync-push-dtype",
+        choices=("f32", "bf16"),
+        default="f32",
+        help="full-parameter only: wire dtype of the islands' pushed outer deltas "
+        "(pseudo-gradients). bf16 halves upload bytes; the syncer keeps f32 masters, "
+        "momentum and f32 BCAST/FINAL (default f32 = exact)",
+    ),
+    cli_flag(
+        "--rl-sync-checkpoint-every",
+        type=int,
+        default=1,
+        help="full-parameter only: syncer checkpoint interval in fragment steps "
+        "(1, or a multiple of --fragments). Above 1, only checkpointed steps are "
+        "persisted before their broadcast; a crash resumes at the newest checkpoint",
+    ),
+    cli_flag(
         "--rl-sync-async-checkpoint",
         action="store_true",
         help="full-parameter only: the syncer writes each per-round checkpoint off "

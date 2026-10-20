@@ -21,7 +21,7 @@ import torch
 
 from test_rl_algorithm_provenance import _fake_sky, _launcher_args, _no_modal_listing  # noqa: F401
 from yeto.fragments import MERGE_RDA, Fragment, FragmentLayout
-from yeto.protocol import DTYPE_F32, SyncerClient
+from yeto.protocol import DTYPE_F32, DTYPE_F32_PUSH_BF16, SyncerClient
 
 ROOT = Path(__file__).resolve().parent.parent
 CARGO = shutil.which("cargo") or str(Path.home() / ".cargo/bin/cargo")
@@ -78,8 +78,8 @@ def _layout() -> FragmentLayout:
     return FragmentLayout([Fragment(MERGE_RDA, [(f"actor.w{i}", NUMEL)]) for i in range(FRAGMENTS)])
 
 
-def _client(port: int, profile_hash: str) -> SyncerClient:
-    return SyncerClient(("127.0.0.1", port), 0, _layout(), dtype=DTYPE_F32, num_streams=1,
+def _client(port: int, profile_hash: str, dtype: int = DTYPE_F32) -> SyncerClient:
+    return SyncerClient(("127.0.0.1", port), 0, _layout(), dtype=dtype, num_streams=1,
                         connect_timeout=10, max_reconnects=0, finalization_timeout=20,
                         syncer_profile_hash=bytes.fromhex(profile_hash))
 
@@ -160,10 +160,11 @@ def test_launcher_dense_syncer_refuses_another_profile_hash(syncer_binary, tmp_p
 STREAMED = ("--rl-sync-fragment-pipeline", str(FRAGMENTS), "--rl-sync-async-checkpoint")
 
 
-def _run_sweeps(binary: Path, tmp_path: Path, extra: tuple[str, ...], sweeps: int):
+def _run_sweeps(binary: Path, tmp_path: Path, extra: tuple[str, ...], sweeps: int,
+                dtype: int = DTYPE_F32):
     """Drive ``sweeps`` strict sweeps; return (max PULLs seen at once, finals, checkpoint)."""
     process, port, profile_hash = _start_syncer(binary, tmp_path, *extra, total_steps=sweeps)
-    client = _client(port, profile_hash)
+    client = _client(port, profile_hash, dtype)
     concurrent = 0
     try:
         client.start()
@@ -232,3 +233,40 @@ def test_streamed_flags_bind_the_profile_and_are_full_parameter_only():
             != launcher.rl_syncer_profile(streamed, 1).sha256)
     with pytest.raises(ValueError, match="--rl-sync-fragment-pipeline between 1 and --fragments"):
         _dense_args("--rl-sync-fragment-pipeline", str(FRAGMENTS + 1))
+
+
+def test_bf16_pushes_stay_within_bf16_error_of_the_f32_sweep(syncer_binary, tmp_path):
+    """E3: bf16 outer deltas change results only by bf16 rounding of each delta."""
+    exact_dir, bf16_dir = tmp_path / "f32", tmp_path / "bf16"
+    exact_dir.mkdir()
+    bf16_dir.mkdir()
+    exact = _run_sweeps(syncer_binary, exact_dir, STREAMED, sweeps=3)
+    rounded = _run_sweeps(syncer_binary, bf16_dir, (*STREAMED, "--rl-sync-push-dtype", "bf16"),
+                          sweeps=3, dtype=DTYPE_F32_PUSH_BF16)
+    assert exact[1] == rounded[1] == [5, 6]  # versions are unchanged
+    for fid, data in exact[2].items():
+        want = torch.frombuffer(bytearray(data), dtype=torch.float32)[-NUMEL:]
+        got = torch.frombuffer(bytearray(rounded[2][fid]), dtype=torch.float32)[-NUMEL:]
+        # Three sweeps, each delta < 2 in magnitude, bf16 error <= 2^-8 relative.
+        assert torch.allclose(got, want, rtol=0, atol=3 * 2.0 / 256), fid
+        assert not torch.equal(got, want), "bf16 pushes must actually round"
+
+
+def test_sweep_checkpoint_interval_reaches_the_syncer_and_its_profile():
+    every = 2 * FRAGMENTS
+    args = _dense_args("--rl-sync-checkpoint-every", str(every), total_steps=4)
+    from yeto import launcher
+
+    command = launcher.role_syncer_commands(args, 1, binary="yeto-syncer")["actor"]
+    assert f"--checkpoint-every {every}" in command
+    assert launcher.rl_syncer_profile(args, 1).checkpoint_every == every
+    with pytest.raises(ValueError, match="--rl-sync-checkpoint-every 1 or a multiple"):
+        _dense_args("--rl-sync-checkpoint-every", str(FRAGMENTS + 1))
+
+
+def test_bf16_push_flag_reaches_the_island_command():
+    from yeto.launch.rl_island_task import _rl_trainable_island_flags
+
+    args = _dense_args("--rl-sync-push-dtype", "bf16")
+    assert "--sweep-push-dtype bf16" in _rl_trainable_island_flags(args, 0, 1)
+    assert "--sweep-push-dtype" not in _rl_trainable_island_flags(_dense_args(), 0, 1)

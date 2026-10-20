@@ -34,7 +34,7 @@ import socket
 import struct
 import threading
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 
 from .fragments import MERGE_ISO, FragmentLayout
@@ -66,6 +66,11 @@ DTYPE_BF16 = 2
 # base-relative learner deltas; INIT_PARAMS and BCAST_FRAGMENT stay bf16
 # (see bulk_dtype and docs/PROTOCOL.md v4).
 DTYPE_Q4 = 3
+# Session dtype 4 (S26 E3): PUSH_FRAGMENT deltas travel as bf16; INIT_PARAMS,
+# BCAST_FRAGMENT and FINAL stay exact f32. Callers still hand the client f32
+# delta bytes; the client rounds them (round-to-nearest-even, as the syncer's
+# ``half::bf16::from_f32``) on the way out.
+DTYPE_F32_PUSH_BF16 = 4
 
 CHUNK_SIZE = 4 * 1024 * 1024
 MAX_HANDSHAKE_FRAME = 16 * 1024 * 1024
@@ -93,7 +98,40 @@ def bulk_dtype(dtype: int) -> int:
     Q4 applies only to push deltas (small dynamic range); full parameter
     payloads would not survive 4 bits, so they travel as bf16.
     """
-    return DTYPE_BF16 if dtype == DTYPE_Q4 else dtype
+    if dtype == DTYPE_Q4:
+        return DTYPE_BF16
+    if dtype == DTYPE_F32_PUSH_BF16:
+        return DTYPE_F32
+    return dtype
+
+
+def push_wire_dtype(dtype: int) -> int:
+    """Dtype of unquantized PUSH_FRAGMENT deltas on the wire for a session dtype."""
+    return DTYPE_BF16 if dtype == DTYPE_F32_PUSH_BF16 else dtype
+
+
+def f32_bytes_to_bf16(data: bytes | bytearray | memoryview) -> bytes:
+    """Round little-endian f32 values to bf16 (nearest, ties to even)."""
+    import numpy as np  # noqa: PLC0415 - keep the protocol import light
+
+    bits = np.frombuffer(data, dtype="<u4").astype(np.uint64)
+    rounded = (bits + 0x7FFF + ((bits >> 16) & 1)) >> 16
+    nan = (bits & 0x7FFF_FFFF) > 0x7F80_0000
+    rounded[nan] = (bits[nan] >> 16) | 0x40  # keep NaN quiet, never round to inf
+    return rounded.astype("<u2").tobytes()
+
+
+def _f32_parts_to_bf16(parts: Iterable[bytes | bytearray | memoryview]) -> Iterator[bytes]:
+    """Stream ``f32_bytes_to_bf16`` over parts whose boundaries may split a value."""
+    carry = b""
+    for part in parts:
+        data = carry + bytes(part)
+        whole = len(data) - len(data) % 4
+        carry = data[whole:]
+        if whole:
+            yield f32_bytes_to_bf16(data[:whole])
+    if carry:
+        raise ValueError("f32 push delta ends mid-value")
 
 
 def layout_fingerprint(layout: FragmentLayout) -> bytes:
@@ -480,7 +518,7 @@ class SyncerClient:
     ):
         if not 0 <= learner_id <= 0xFFFF_FFFF:
             raise ValueError(f"learner_id must fit u32, got {learner_id}")
-        if dtype not in (DTYPE_F32, DTYPE_BF16, DTYPE_Q4):
+        if dtype not in (DTYPE_F32, DTYPE_BF16, DTYPE_Q4, DTYPE_F32_PUSH_BF16):
             raise ValueError(f"unsupported session dtype {dtype}")
         if layout.num_fragments < 1:
             raise ValueError("layout must contain at least one fragment")
@@ -833,7 +871,8 @@ class SyncerClient:
         expected = (
             _q4_nbytes(numel)
             if self.dtype == DTYPE_Q4
-            else _tensor_nbytes(self.dtype, numel)
+            # dtype 4 callers pass f32 bytes; the client rounds them below
+            else _tensor_nbytes(DTYPE_F32 if self.dtype == DTYPE_F32_PUSH_BF16 else self.dtype, numel)
         )
         if len(tensor_bytes) != expected:
             raise ValueError(
@@ -851,6 +890,8 @@ class SyncerClient:
             c_steps,
             c_tokens,
         )
+        if self.dtype == DTYPE_F32_PUSH_BF16:
+            tensor_bytes = f32_bytes_to_bf16(tensor_bytes)
         self._send_large(MSG_PUSH_FRAGMENT, head + tensor_bytes)
 
     def push_fragment_parts(
@@ -885,8 +926,10 @@ class SyncerClient:
         expected = (
             _q4_nbytes(numel)
             if self.dtype == DTYPE_Q4
-            else _tensor_nbytes(self.dtype, numel)
+            else _tensor_nbytes(push_wire_dtype(self.dtype), numel)
         )
+        if self.dtype == DTYPE_F32_PUSH_BF16:
+            tensor_parts = _f32_parts_to_bf16(tensor_parts)
         head = struct.pack(
             "<IIQIQQIQ",
             self.learner_id,

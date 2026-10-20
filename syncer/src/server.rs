@@ -735,10 +735,14 @@ fn validate_config(cfg: &Config) -> Result<()> {
         // --resume is not required here: a fresh sweep has no checkpoint yet and
         // --resume refuses a missing file (see check_resume_checkpoint). The
         // launcher adds --resume only when the checkpoint exists.
-        if cfg.checkpoint_path.is_none() || cfg.checkpoint_every != 1 {
+        if cfg.checkpoint_path.is_none()
+            || cfg.checkpoint_every == 0
+            || (cfg.checkpoint_every != 1
+                && !cfg.checkpoint_every.is_multiple_of(u64::from(fragments)))
+        {
             bail!(
                 "--policy-sweep-fragments requires --checkpoint-path and \
-                 --checkpoint-every 1 for crash-safe sweeps"
+                 --checkpoint-every 1 or a multiple of the fragment count"
             );
         }
     }
@@ -758,6 +762,20 @@ fn validate_config(cfg: &Config) -> Result<()> {
 /// profile; otherwise a process crash can expose version t and resume at t-1.
 fn checkpoint_before_broadcast(cfg: &Config) -> bool {
     cfg.checkpoint_path.is_some() && cfg.checkpoint_every == 1
+}
+
+/// Whether step `t` must be durable before its BCAST. Per-round checkpoints
+/// always are; a policy sweep with `--checkpoint-every N` (N a multiple of
+/// the fragment count) persists only every N-th step, at sweep boundaries,
+/// and broadcasts the other steps without a durable record (a crash resumes
+/// at the newest checkpoint; islands ahead of it fail closed on their next
+/// push's local-step check).
+fn persist_before_broadcast(cfg: &Config, t: u64) -> bool {
+    checkpoint_before_broadcast(cfg)
+        || (cfg.policy_sweep_fragments.is_some()
+            && cfg.checkpoint_path.is_some()
+            && cfg.checkpoint_every > 0
+            && t.is_multiple_of(cfg.checkpoint_every))
 }
 
 fn validate_policy_sweep_push(push: &Push, fragments: u32) -> Result<()> {
@@ -1000,7 +1018,7 @@ fn negotiated_payload_limits(layout: &Layout, dtype: u8) -> Result<(u64, u64)> {
         let delta_bytes = if dtype == DTYPE_Q4 {
             q4_nbytes(numel)?
         } else {
-            tensor_nbytes(dtype, numel)?
+            tensor_nbytes(push_dtype(dtype), numel)?
         } as u64;
         max_init = max_init.max(
             4u64.checked_add(init_bytes)
@@ -1146,7 +1164,7 @@ fn parse_hello(payload: &[u8], expected_learners: u32) -> Result<ParsedHello> {
         bail!("connection generation must be nonzero");
     }
     let dtype = r.u8()?;
-    if !matches!(dtype, DTYPE_F32 | DTYPE_BF16 | DTYPE_Q4) {
+    if !matches!(dtype, DTYPE_F32 | DTYPE_BF16 | DTYPE_Q4 | DTYPE_F32_PUSH_BF16) {
         bail!("unsupported session dtype {dtype}");
     }
     let num_fragments = r.u32()?;
@@ -1720,7 +1738,7 @@ async fn dispatch_inner(
             let expected = if group.dtype == DTYPE_Q4 {
                 q4_nbytes(numel)?
             } else {
-                tensor_nbytes(group.dtype, numel)?
+                tensor_nbytes(push_dtype(group.dtype), numel)?
             };
             if bytes.len() != expected {
                 bail!(
@@ -1732,7 +1750,7 @@ async fn dispatch_inner(
             if group.dtype == DTYPE_Q4 {
                 decode_q4(bytes, numel, &mut outer_gradient)?;
             } else {
-                decode_tensor(group.dtype, bytes, &mut outer_gradient)?;
+                decode_tensor(push_dtype(group.dtype), bytes, &mut outer_gradient)?;
             }
             // Every wire dtype carries learner_delta = local - raw_anchor.
             // Merge math consumes the corresponding outer gradient with the
@@ -2102,7 +2120,7 @@ async fn scheduler(
 
     // Persist a fresh version zero before its first BCAST. A resumed cut is
     // already committed and only needs to be rebroadcast.
-    if checkpoint_each_round {
+    if checkpoint_each_round || cfg.policy_sweep_fragments.is_some() {
         if let Some(path) = cfg.checkpoint_path.as_ref() {
             if !cfg.resume || !path.exists() {
                 st.save_checkpoint(path)?;
@@ -2175,7 +2193,23 @@ async fn scheduler(
                     .await?;
                 }
                 let committed = apply_round_commit(&cfg, &mut st, completed)?;
-                publishing = Some(start_async_checkpoint(&cfg, &st, committed)?);
+                if persist_before_broadcast(&cfg, committed.t) {
+                    publishing = Some(start_async_checkpoint(&cfg, &st, committed)?);
+                } else {
+                    publish_round(
+                        &cfg,
+                        &st,
+                        &registry,
+                        &mut last_sync_secs,
+                        committed,
+                        None,
+                        &budget_cutoff,
+                    )
+                    .await?;
+                    if !busy_fragments.remove(&p) {
+                        bail!("fragment {p} lost its busy ownership at commit");
+                    }
+                }
             } else {
                 commit_round(
                     &cfg,
@@ -3325,7 +3359,7 @@ async fn commit_round(
 ) -> Result<()> {
     let committed = apply_round_commit(cfg, st, completed)?;
     let mut checkpoint_ms = None;
-    if checkpoint_before_broadcast(cfg) {
+    if persist_before_broadcast(cfg, committed.t) {
         if let Some(path) = cfg.checkpoint_path.as_ref() {
             let checkpoint_start = Instant::now();
             st.save_checkpoint(path)?;
@@ -3510,7 +3544,8 @@ async fn publish_round(
     // have also been broadcast; the terminal cut is delivered by FINAL.
     // A crash-resume loses those gathers; their fragments simply merge on
     // a later cycle, which the quorum design already tolerates.
-    if !checkpoint_before_broadcast(cfg) {
+    // Policy sweeps persist only before broadcast (see persist_before_broadcast).
+    if cfg.policy_sweep_fragments.is_none() && !checkpoint_before_broadcast(cfg) {
         if let Some(path) = &cfg.checkpoint_path {
             if cfg.checkpoint_every > 0 && t % cfg.checkpoint_every == 0 {
                 st.save_checkpoint(path)?;
@@ -3652,14 +3687,18 @@ async fn complete_round_async(
     let cutoff = BudgetCutoff::new(false, Duration::ZERO);
     let mut busy = HashSet::from([completed.round.p]);
     let committed = apply_round_commit(cfg, st, completed)?;
+    if !persist_before_broadcast(cfg, committed.t) {
+        return publish_round(cfg, st, registry, last_sync_secs, committed, None, &cutoff).await;
+    }
     let pending = start_async_checkpoint(cfg, st, committed)?;
     settle_pending_publish(cfg, st, registry, last_sync_secs, pending, &cutoff, &mut busy).await
 }
 
 fn new_state_for(group: &Arc<Group>, cfg: &Config) -> Result<GlobalState> {
     if let Some(fragments) = cfg.policy_sweep_fragments {
-        if group.dtype != DTYPE_F32 {
-            bail!("--policy-sweep-fragments requires an FP32 HELLO session");
+        // Masters and every BCAST/FINAL stay f32; only push deltas may be bf16.
+        if !matches!(group.dtype, DTYPE_F32 | DTYPE_F32_PUSH_BF16) {
+            bail!("--policy-sweep-fragments requires an FP32 HELLO session (optionally with bf16 pushes)");
         }
         if group.layout.fragments.len() != fragments as usize {
             bail!(
@@ -4978,13 +5017,21 @@ mod tests {
 
         for mutate in [
             |config: &mut Config| config.checkpoint_path = None,
-            |config: &mut Config| config.checkpoint_every = 2,
+            |config: &mut Config| config.checkpoint_every = 0,
+            |config: &mut Config| config.checkpoint_every = 3,
         ] {
             invalid = sweep_test_config(2, 4);
             mutate(&mut invalid);
             assert!(format!("{:#}", validate_config(&invalid).unwrap_err())
                 .contains("requires --checkpoint-path"));
         }
+        // Sweep-aligned checkpoint intervals are accepted.
+        let mut interval = sweep_test_config(2, 4);
+        interval.checkpoint_every = 4;
+        assert!(validate_config(&interval).is_ok());
+        assert!(persist_before_broadcast(&interval, 4));
+        assert!(!persist_before_broadcast(&interval, 2));
+        assert!(persist_before_broadcast(&sweep_test_config(2, 4), 1));
     }
 
     #[test]
@@ -5579,6 +5626,83 @@ mod tests {
         ));
         std::fs::create_dir_all(&directory).unwrap();
         directory
+    }
+
+    #[test]
+    fn bf16_push_session_rounds_only_the_delta_within_bf16_error() {
+        // dtype 4 decodes pushes as bf16 and keeps every bulk payload f32.
+        assert_eq!(bulk_dtype(DTYPE_F32_PUSH_BF16), DTYPE_F32);
+        let delta: Vec<f32> = (0..4096)
+            .map(|i| ((i as f32) * 0.37).sin() * 10f32.powi((i % 9) - 4))
+            .collect();
+        let mut wire = Vec::new();
+        encode_tensor(push_dtype(DTYPE_F32_PUSH_BF16), &delta, &mut wire).unwrap();
+        assert_eq!(wire.len(), delta.len() * 2);
+        let mut decoded = Vec::new();
+        decode_tensor(push_dtype(DTYPE_F32_PUSH_BF16), &wire, &mut decoded).unwrap();
+        for (exact, rounded) in delta.iter().zip(&decoded) {
+            // bf16 keeps 8 significant bits: round-to-nearest error <= 2^-8 relative.
+            assert!((exact - rounded).abs() <= exact.abs() * (1.0 / 256.0));
+        }
+        // A merge of bf16 deltas into f32 masters stays within the same bound
+        // per learner, so a two-learner average is off by at most that much.
+        let master = 1.0f32;
+        for (exact, rounded) in delta.iter().zip(&decoded) {
+            let merged_exact = master + exact;
+            let merged = master + rounded;
+            assert!((merged_exact - merged).abs() <= exact.abs() / 256.0 + f32::EPSILON * 2.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn sweep_checkpoint_interval_persists_only_sweep_aligned_steps() {
+        let directory = unique_test_directory("sweep-checkpoint-interval");
+        let learner = member(0, 30);
+        for asynchronous in [false, true] {
+            let checkpoint = directory.join(format!("state-{asynchronous}.ckpt"));
+            let (group, mut frames) = streaming_test_group(DTYPE_F32, false);
+            let registry = registry_with_group(group);
+            let mut config = sweep_test_config(2, 8);
+            config.checkpoint_path = Some(checkpoint.clone());
+            config.checkpoint_every = 4;
+            config.async_checkpoint = asynchronous;
+            let mut state = two_fragment_sweep_state();
+            state.save_checkpoint(&checkpoint).unwrap(); // version zero
+            let mut sync_seconds = 0.0;
+            for step in 1..=6u64 {
+                let fragment = ((step - 1) % 2) as usize;
+                let mut round = sweep_test_round(step, fragment, step.div_ceil(2), 1, learner);
+                let base = state.versions[fragment];
+                round.base_version = base;
+                for push in round.pushes.values_mut() {
+                    push.base_version = base;
+                }
+                if asynchronous {
+                    complete_round_async(&config, &mut state, &registry, &mut sync_seconds, round)
+                        .await
+                        .unwrap();
+                } else {
+                    complete_round(&config, &mut state, &registry, &mut sync_seconds, round)
+                        .await
+                        .unwrap();
+                }
+                assert_eq!(
+                    chunked_inner_type(&frames.try_recv().unwrap()),
+                    MSG_BCAST_FRAGMENT
+                );
+                let mut on_disk = two_fragment_sweep_state();
+                on_disk.load_checkpoint(&checkpoint).unwrap();
+                // Only step 4 (a sweep boundary and a multiple of 4) is durable.
+                let expected = if step >= 4 { 4 } else { 0 };
+                assert_eq!(on_disk.global_step, expected, "step {step}");
+            }
+            // The newest checkpoint resumes exactly at its sweep boundary.
+            let mut resumed = two_fragment_sweep_state();
+            resumed.load_checkpoint(&checkpoint).unwrap();
+            validate_resumed_policy_sweep(&config, &resumed).unwrap();
+            assert_eq!(resumed.versions, vec![3, 4]);
+        }
+        std::fs::remove_dir_all(&directory).ok();
     }
 
     #[tokio::test]

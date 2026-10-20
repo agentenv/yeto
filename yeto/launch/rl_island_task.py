@@ -72,6 +72,8 @@ def _rl_trainable_island_flags(args, learner_id: int, num_learners: int) -> str:
     sweep = (f" --parameter-layout-sha256 {args.rl_parameter_layout_sha256}"
              f" --num-learners {num_learners}"
              f" --syncer-profile-sha256 {rl_syncer_profile(args, num_learners).sha256}")
+    if getattr(args, "rl_sync_push_dtype", "f32") != "f32":
+        sweep += f" --sweep-push-dtype {args.rl_sync_push_dtype}"
     if getattr(args, "expert_full_count", 0):
         return lora + sweep
     return " --parameter-mode full" + sweep

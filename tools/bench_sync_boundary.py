@@ -3,8 +3,9 @@
 Runs the real Rust syncer on localhost with two in-process learners and a
 synthetic f32 model, and times each strict sweep from the first push to the
 last updated fragment received by every learner. It compares the serial
-profile (pipeline 1, checkpoint on the scheduler) with the streamed profile
-(pipeline P, ``--async-checkpoint``).
+profile (pipeline 1, checkpoint on the scheduler), the streamed profile
+(pipeline P, ``--async-checkpoint``), and streamed plus bf16 pushes and a
+checkpoint every second sweep.
 
 These are local CPU numbers: loopback transfer and a local NVMe checkpoint.
 They show where the boundary time goes on this machine; they do not predict
@@ -28,7 +29,7 @@ from pathlib import Path
 import numpy as np
 
 from yeto.fragments import MERGE_RDA, Fragment, FragmentLayout
-from yeto.protocol import DTYPE_F32, SyncerClient
+from yeto.protocol import DTYPE_F32, DTYPE_F32_PUSH_BF16, SyncerClient
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -40,7 +41,7 @@ def _free_port() -> int:
 
 
 def _syncer(binary: Path, workdir: Path, *, port: int, learners: int, fragments: int,
-            sweeps: int, streamed: bool) -> subprocess.Popen:
+            sweeps: int, streamed: bool, checkpoint_every: int) -> subprocess.Popen:
     command = [
         str(binary), "--port", str(port), "--learners", str(learners),
         "--quorum", str(learners), "--grace-ms", "0",
@@ -49,7 +50,7 @@ def _syncer(binary: Path, workdir: Path, *, port: int, learners: int, fragments:
         "--total-steps", str(sweeps * fragments), "--policy-sweep-fragments", str(fragments),
         "--outer-lr", "1", "--outer-momentum", "0", "--max-base-lag", "0",
         "--learner-weight", "equal", "--checkpoint-path", str(workdir / "state.ckpt"),
-        "--checkpoint-every", "1", "--event-tape", str(workdir / "tape.jsonl"),
+        "--checkpoint-every", str(checkpoint_every), "--event-tape", str(workdir / "tape.jsonl"),
         "--allow-unauthenticated-islands",  # loopback-only benchmark
     ]
     if streamed:
@@ -59,9 +60,9 @@ def _syncer(binary: Path, workdir: Path, *, port: int, learners: int, fragments:
 
 
 def _learner(learner_id: int, port: int, layout: FragmentLayout, numel: int, sweeps: int,
-             timings: list[list[float]], errors: list[BaseException]) -> None:
+             timings: list[list[float]], errors: list[BaseException], dtype: int) -> None:
     fragments = len(layout.fragments)
-    client = SyncerClient(("127.0.0.1", port), learner_id, layout, dtype=DTYPE_F32,
+    client = SyncerClient(("127.0.0.1", port), learner_id, layout, dtype=dtype,
                           num_streams=1, connect_timeout=30, max_reconnects=0,
                           finalization_timeout=600)
     rng = np.random.default_rng(learner_id)
@@ -107,18 +108,29 @@ def _learner(learner_id: int, port: int, layout: FragmentLayout, numel: int, swe
         client.close()
 
 
-def run(binary: Path, *, streamed: bool, learners: int, fragments: int, numel: int,
+PROFILES = {
+    "serial": {"streamed": False, "dtype": DTYPE_F32, "sweeps_per_checkpoint": 0},
+    "streamed": {"streamed": True, "dtype": DTYPE_F32, "sweeps_per_checkpoint": 0},
+    "streamed+bf16+ckpt/2sweeps": {"streamed": True, "dtype": DTYPE_F32_PUSH_BF16,
+                                   "sweeps_per_checkpoint": 2},
+}
+
+
+def run(binary: Path, *, profile: str, learners: int, fragments: int, numel: int,
         sweeps: int) -> dict:
+    options = PROFILES[profile]
+    streamed, dtype = options["streamed"], options["dtype"]
+    every = options["sweeps_per_checkpoint"] * fragments or 1
     layout = FragmentLayout([Fragment(MERGE_RDA, [(f"w{i}", numel)]) for i in range(fragments)])
     with tempfile.TemporaryDirectory(prefix="e3-bench-", dir="/tmp") as tmp:
         workdir = Path(tmp)
         port = _free_port()
         process = _syncer(binary, workdir, port=port, learners=learners, fragments=fragments,
-                          sweeps=sweeps, streamed=streamed)
+                          sweeps=sweeps, streamed=streamed, checkpoint_every=every)
         timings: list[list[float]] = [[] for _ in range(learners)]
         errors: list[BaseException] = []
         threads = [threading.Thread(target=_learner, args=(i, port, layout, numel, sweeps,
-                                                           timings, errors))
+                                                           timings, errors, dtype))
                    for i in range(learners)]
         for thread in threads:
             thread.start()
@@ -134,10 +146,10 @@ def run(binary: Path, *, streamed: bool, learners: int, fragments: int, numel: i
     steady = [max(per[i] for per in timings) for i in range(1, sweeps - 1)] or \
         [max(per[i] for per in timings) for i in range(sweeps)]
     return {
-        "profile": "streamed" if streamed else "serial",
+        "profile": profile,
         "boundary_s_per_sweep": [round(x, 3) for x in steady],
         "boundary_s_median": round(statistics.median(steady), 3),
-        "checkpoint_ms_median": statistics.median(r["checkpoint_ms"] for r in tape),
+        "checkpoints_written": sum("checkpoint_ms" in r for r in tape),
         "sync_ms_median": statistics.median(r["sync_ms"] for r in tape),
     }
 
@@ -150,9 +162,9 @@ def main() -> None:
     parser.add_argument("--floats-per-fragment", type=int, default=32 * 1024 * 1024)
     parser.add_argument("--sweeps", type=int, default=4)
     args = parser.parse_args()
-    results = [run(args.binary, streamed=streamed, learners=args.learners,
+    results = [run(args.binary, profile=profile, learners=args.learners,
                    fragments=args.fragments, numel=args.floats_per_fragment, sweeps=args.sweeps)
-               for streamed in (False, True)]
+               for profile in PROFILES]
     print(json.dumps({"note": "CPU localhost numbers; not GPU or WAN timings",
                       "learners": args.learners, "fragments": args.fragments,
                       "floats_per_fragment": args.floats_per_fragment, "results": results},

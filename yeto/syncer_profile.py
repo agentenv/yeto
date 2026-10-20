@@ -261,6 +261,10 @@ class SyncerSemanticProfile:
             fragments = self.policy_sweep_fragments
             if not 1 <= self.pipeline <= fragments or self.total_steps % fragments:
                 raise ValueError("syncer profile policy sweep schedule is invalid")
+            if self.checkpoint_every != 1 and (
+                    self.checkpoint_every < 1 or self.checkpoint_every % fragments):
+                raise ValueError("syncer profile policy sweep checkpoint interval must be "
+                                 "1 or a multiple of the fragment count")
 
     def validate_sao(self) -> None:
         """Enforce the paired actor/critic fail-closed server profile."""

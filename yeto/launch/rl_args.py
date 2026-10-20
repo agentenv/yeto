@@ -148,6 +148,21 @@ def sao_contract_mounts(args, learner_id: int) -> dict[str, str]:
             for shipped in (island.runtime, island.layout_attestation)}
 
 
+_FULL_PARAMETER_SYNC_DEFAULTS = (
+    ("rl_sync_fragment_pipeline", 1, "--rl-sync-fragment-pipeline"),
+    ("rl_sync_async_checkpoint", False, "--rl-sync-async-checkpoint"),
+    ("rl_sync_push_dtype", "f32", "--rl-sync-push-dtype"),
+    ("rl_sync_checkpoint_every", 1, "--rl-sync-checkpoint-every"),
+)
+
+
+def _refuse_full_parameter_sync_options(args) -> None:
+    """The S26 E3 sync options exist only for the full-parameter preset."""
+    for dest, default, option in _FULL_PARAMETER_SYNC_DEFAULTS:
+        if getattr(args, dest, default) != default:
+            raise ValueError(f"{option} only applies to --rl-sync-preset {FULL_PARAMETER_SYNC_PRESET}")
+
+
 def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
     """full-parameter preset (P0-D8): one actor role swept as whole-model fragments.
 
@@ -172,6 +187,9 @@ def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
     fragment_pipeline = int(getattr(args, "rl_sync_fragment_pipeline", 1))
     if not 1 <= fragment_pipeline <= max(args.fragments, 1):
         problems.append("--rl-sync-fragment-pipeline between 1 and --fragments")
+    checkpoint_every = int(getattr(args, "rl_sync_checkpoint_every", 1))
+    if checkpoint_every != 1 and (checkpoint_every < 1 or checkpoint_every % max(args.fragments, 1)):
+        problems.append("--rl-sync-checkpoint-every 1 or a multiple of --fragments")
     if problems:
         raise ValueError(f"--rl-sync-preset {FULL_PARAMETER_SYNC_PRESET} requires " + "; ".join(problems))
     args.quorum = num_islands
@@ -728,6 +746,8 @@ def _prepare_rl_args(
                          f"--rl-sync-preset {FULL_PARAMETER_SYNC_PRESET}")
     if args.rl_sync_preset != SAO_STREAMING_SYNC_PRESET and getattr(args, "rl_sao_contracts", None):
         raise ValueError("--rl-sao-contracts only applies to --rl-sync-preset sao-streaming-full")
+    if args.rl_sync_preset != FULL_PARAMETER_SYNC_PRESET:
+        _refuse_full_parameter_sync_options(args)
     if args.rl_sync_preset == "decoupled":
         if args.experimental_rl_sync:
             raise ValueError("decoupled RL does not accept --experimental-rl-sync")
