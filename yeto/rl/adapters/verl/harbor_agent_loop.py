@@ -85,6 +85,7 @@ from yeto.rl.engine.sampler_engine import FINISH_LENGTH
 from yeto.rl.harness.harbor import HarborHarness, HarborSettings, build_trial_config
 from yeto.rl.harness.harbor.boat_client import check_in_flight_cap
 
+from .rollout_engine import bind_rollout_client
 from .run_config_rules import AGENTIC_ADV_ESTIMATOR as YETO_GRPO
 
 logger = logging.getLogger(__name__)
@@ -191,6 +192,9 @@ class HarborAgentLoop(AgentLoopBase):
     async def run(self, sampling_params: dict[str, Any], **kwargs: Any) -> AgentLoopOutput:
         task = task_from_row(kwargs)
         recorder = self.recorder_factory()
+        client = getattr(self, "server_manager", None)
+        if client is not None:  # a recorder over verl's own rollout needs verl's client (N10.9)
+            bind_rollout_client(recorder, client)
         session = recorder_session_id(task)
         endpoint = await recorder.open(session, sampling_params)
         try:
