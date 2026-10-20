@@ -152,6 +152,11 @@ def island_args(args: Any, island: int, num_islands: int) -> Any:
         out.rl_sampler_node = node_name(island) if out.rl_sample_role == SAMPLER else None
         out.rl_buffer_shards = buffer_shards(args, num_islands)
         samplers = len(sampler_islands(args, num_islands))
+        if out.rl_sample_role == SAMPLER and getattr(args, "rl_sampler_spot", False):
+            # spot billing without the legacy --spot volume: the buffer is the sampler's
+            # durable state (S25 C1)
+            out.spot = True
+            out.spot_without_volume = True
         if out.rl_sample_role == SAMPLER and samplers > 1:
             # the trainer trains --total-steps rounds; the samplers share them, so each
             # one reaches its data end (check_pair needs an even split)
@@ -205,6 +210,8 @@ def check_pair(args: Any, num_islands: int) -> None:
     if samplers > 1 and int(getattr(args, "total_steps", 0) or 0) % samplers:
         raise ValueError(f"--total-steps {args.total_steps}: {samplers} sampler islands share the "
                          "trainer's rounds; it must be a multiple of the sampler count")
+    if getattr(args, "rl_sampler_spot", False) and getattr(args, "spot", False):
+        raise ValueError("--rl-sampler-spot bills only the samplers as spot; it does not take --spot")
     if samplers > 1 and getattr(args, "rl_trainer_scheduler", None) not in (None, "off"):
         raise ValueError("--rl-trainer-scheduler with several sampler islands is not supported "
                          "(the head does not read the sampler shards); drop the scheduler")
