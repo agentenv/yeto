@@ -382,3 +382,29 @@ def test_the_modal_runner_turns_the_signal_into_the_marker_on_a_sampler(monkeypa
     env = {RECLAIM_MARKER_ENV: "/tmp/yeto-reclaim-requested"}
     assert mr.run_island_script(["x"], env, popen=lambda c, env, **k: None, signal_mod=Sig) == 0
     assert seen == [env]
+
+
+def test_the_reclaim_watcher_leaves_once_while_the_loop_is_still_in_a_round(tmp_path):
+    import threading
+
+    from yeto.rl.engine.sampler_resume import ReclaimWatcher, SamplerMembership
+
+    store = CheckpointStore(tmp_path)
+    events = []
+    membership = SamplerMembership(store, "island0", "b", resume_point([], "island0"),
+                                   lambda e, **f: events.append((e, f)), clock=lambda: 7.0)
+    membership.join(latest_release={"seq": 3, "policy_version": 3})
+    flag = threading.Event()
+    watcher = ReclaimWatcher(flag.is_set, lambda: membership.leave("PREEMPTED", rounds=2,
+                                                                   in_flight_rollout_id=4),
+                             poll_s=0.01).start()
+    flag.set()
+    assert watcher.fired.wait(2.0)
+    watcher.stop()
+    assert membership.leave("FINISHED") is False  # the exit path after the watcher: no second LEAVE
+    names = [e for e, _ in events]
+    assert names == ["rl_sampler_join", "rl_sampler_leave"]
+    leave = events[1][1]
+    assert (leave["reason"], leave["rounds"], leave["in_flight_rollout_id"]) == ("PREEMPTED", 2, 4)
+    record = (tmp_path / "sample-buffer/members/island0/b.json").read_text()
+    assert '"leave_reason": "PREEMPTED"' in record and '"joined_at": 7.0' in record
