@@ -18,8 +18,9 @@ An island has one sample role:
 The sampler and the trainer mount the same checkpoint store (the buffer and the
 releases live there). They are either separate single-island launches
 (``--rl-sample-role``), or one launch of two islands, a *store-coupled pair*
-(``--rl-island-sample-role 0:sampler --rl-island-sample-role 1:trainer``, L5.4):
-there is no syncer, and each island runs as its own one-learner, no-sync island
+(``--rl-island-sample-role 0:sampler --rl-island-sample-role 1:trainer``, L5.4),
+or one launch of one trainer and several sampler islands (S25 C1: each sampler
+writes its own shard of the buffer, :func:`buffer_shards`): there is no syncer, and each island runs as its own one-learner, no-sync island
 (learner id 0 of 1) whose role comes from its island args (:func:`island_args`).
 Synced trainers (S25 C3, :mod:`.merged_release`): a launch of N >= 2 islands
 with ``--rl-sample-role trainer`` and a syncer (strict or elastic sync, no
@@ -171,8 +172,22 @@ def island_roles(args: Any, num_islands: int) -> dict[int, str]:
 
 
 def is_pair(args: Any) -> bool:
-    """Whether the launch is a store-coupled sampler/trainer pair."""
+    """Whether the launch is a store-coupled group: one trainer island and one or
+    more sampler islands (``--rl-island-sample-role``; "pair" for short)."""
     return bool(getattr(args, "rl_island_sample_role", None))
+
+
+def sampler_islands(args: Any, num_islands: int) -> list[int]:
+    """The sampler islands of a pair, sorted."""
+    return sorted(m for m, role in island_roles(args, num_islands).items() if role == SAMPLER)
+
+
+def buffer_shards(args: Any, num_islands: int) -> list[str] | None:
+    """The buffer shards of a pair with several sampler islands (S25 C1): one per
+    sampler island, named by its node name; None with one sampler (it writes the
+    index itself, as before)."""
+    samplers = sampler_islands(args, num_islands)
+    return [node_name(m) for m in samplers] if len(samplers) > 1 else None
 
 
 def is_store_coupled(args: Any) -> bool:
@@ -191,6 +206,21 @@ def island_args(args: Any, island: int, num_islands: int) -> Any:
         return args
     out = copy.copy(args)
     out.rl_sample_role = roles[island]
+    if out.rl_sample_role in (SAMPLER, TRAINER):
+        out.rl_sampler_node = node_name(island) if out.rl_sample_role == SAMPLER else None
+        out.rl_buffer_shards = buffer_shards(args, num_islands)
+        samplers = len(sampler_islands(args, num_islands))
+        if out.rl_sample_role == SAMPLER and getattr(args, "rl_sampler_spot", False):
+            # spot billing without the legacy --spot volume: the buffer is the sampler's
+            # durable state (S25 C1)
+            out.spot = True
+            out.spot_without_volume = True
+        if out.rl_sample_role == SAMPLER and samplers > 1:
+            # the trainer trains --total-steps rounds; the samplers share them, so each
+            # one reaches its data end (check_pair needs an even split)
+            out.total_steps = int(args.total_steps) // samplers
+            if getattr(args, "rl_total_fragment_steps", None) is not None:
+                out.rl_total_fragment_steps = out.total_steps * int(getattr(args, "fragments", 1) or 1)
     if out.rl_sample_role == CONVERTIBLE:
         out.rl_convertible_node = node_name(island)
         out.rl_sampler_min_round_seconds = None  # a node keeps its backlog cap
@@ -219,17 +249,30 @@ def buffer_full_parameter(args: Any) -> bool:
 
 
 def check_pair(args: Any, num_islands: int) -> None:
-    """Launch checks of a store-coupled pair (nothing outside a pair): exactly two
-    islands, one sampler and one trainer, ``--rl-single-island-no-sync`` (no
-    syncer), no ``--rl-sample-role`` and no external learner; then every island's
-    own role checks on its island args."""
+    """Launch checks of a store-coupled pair (nothing outside a pair): every
+    island has a role, exactly one trainer and at least one sampler,
+    ``--rl-single-island-no-sync`` (no syncer), no ``--rl-sample-role`` and no
+    external learner; several samplers split ``--total-steps`` evenly (each
+    generates its share of the trainer's rounds) and take no trainer scheduler
+    (the head reads no sampler shard of a shared directory); then every island's own role checks
+    on its island args."""
     roles = island_roles(args, num_islands)
     if not roles:
         return
-    if num_islands != 2 or sorted(roles.values()) != [SAMPLER, TRAINER] or len(roles) != 2:
-        raise ValueError("--rl-island-sample-role: a pair is two --gpu islands, one "
-                         f"{SAMPLER} and one {TRAINER} (got {num_islands} island(s), roles "
-                         f"{dict(sorted(roles.items()))})")
+    values = list(roles.values())
+    if len(roles) != num_islands or values.count(TRAINER) != 1 or values.count(SAMPLER) < 1:
+        raise ValueError("--rl-island-sample-role: a pair gives every --gpu island a role, "
+                         f"at least one {SAMPLER} and exactly one {TRAINER} (got {num_islands} "
+                         f"island(s), roles {dict(sorted(roles.items()))})")
+    samplers = values.count(SAMPLER)
+    if samplers > 1 and int(getattr(args, "total_steps", 0) or 0) % samplers:
+        raise ValueError(f"--total-steps {args.total_steps}: {samplers} sampler islands share the "
+                         "trainer's rounds; it must be a multiple of the sampler count")
+    if getattr(args, "rl_sampler_spot", False) and getattr(args, "spot", False):
+        raise ValueError("--rl-sampler-spot bills only the samplers as spot; it does not take --spot")
+    if samplers > 1 and getattr(args, "rl_trainer_scheduler", None) not in (None, "off"):
+        raise ValueError("--rl-trainer-scheduler with several sampler islands is not supported "
+                         "(the head does not read the sampler shards); drop the scheduler")
     if sample_role(args) != BOTH:
         raise ValueError("--rl-island-sample-role replaces --rl-sample-role; give only one")
     if int(getattr(args, "external_learners", 0) or 0):
@@ -350,6 +393,18 @@ def resolve(args: Any, *, groups_per_round: int) -> SampleBufferConfig | None:
                      else None))
 
 
+def island_env(args: Any) -> dict[str, str]:
+    """The environment a pair's sampler island gets from the launcher ({} for
+    every other island; ``args`` are the island args): the reclaim marker path,
+    so the Modal runner turns the reclaim signal into that file and the sampler
+    leaves without being signalled (S25 C1)."""
+    if sample_role(args) != SAMPLER or not getattr(args, "rl_sampler_node", None):
+        return {}
+    from .sampler_resume import DEFAULT_RECLAIM_MARKER, RECLAIM_MARKER_ENV
+
+    return {RECLAIM_MARKER_ENV: DEFAULT_RECLAIM_MARKER}
+
+
 def island_flags(args: Any) -> str:
     """The learner flags the launcher forwards (empty for ``both``); ``args`` are
     the island args (:func:`island_args`)."""
@@ -365,4 +420,8 @@ def island_flags(args: Any) -> str:
         flags += f" --rl-sampler-min-round-seconds {float(args.rl_sampler_min_round_seconds)!r}"
     if getattr(args, "rl_sample_wait_s", None) is not None:
         flags += f" --rl-sample-wait-s {float(args.rl_sample_wait_s)!r}"
+    if getattr(args, "rl_sampler_node", None):
+        flags += f" --rl-sampler-node {args.rl_sampler_node}"
+    if getattr(args, "rl_buffer_shards", None):
+        flags += f" --rl-buffer-shards {','.join(args.rl_buffer_shards)}"
     return flags

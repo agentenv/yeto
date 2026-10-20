@@ -126,8 +126,10 @@ def role_args(args, role: str | None):
 
 def island_keeps_spot_volume(args) -> bool:
     """The legacy ``--spot`` per-island volume (completed groups, re-synced on a
-    rebuild) is a resume from an archive; a droppable island must not get it."""
-    return bool(getattr(args, "spot", False)) and getattr(args, "_island_role", None) != DROPPABLE
+    rebuild) is a resume from an archive; a droppable island must not get it, nor
+    a spot sampler island (``spot_without_volume``: its state is the buffer)."""
+    return (bool(getattr(args, "spot", False)) and getattr(args, "_island_role", None) != DROPPABLE
+            and not getattr(args, "spot_without_volume", False))
 
 
 def role_env(role: str | None, cloud: str, region: str | None) -> dict[str, str]:

@@ -187,7 +187,8 @@ def _island_task(task_factory, args, spec, m, num_learners, syncer_addr, overrid
     learner_id, island_learners = sample_roles.island_learner(args, m, num_learners)
     task = task_factory(iargs, spec, learner_id, island_learners, syncer_addr)
     io.apply_to_task(task, {**io.island_env(args, m, overrides),
-                            **(droppable.role_env(role, spec.cloud, spec.region) if role else {})})
+                            **(droppable.role_env(role, spec.cloud, spec.region) if role else {}),
+                            **sample_roles.island_env(iargs)})
     return task
 
 

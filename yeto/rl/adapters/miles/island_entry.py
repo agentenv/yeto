@@ -266,10 +266,13 @@ def apply_sample_role(args, miles_args, environ=None) -> None:
     config = sample_roles.resolve(args, groups_per_round=args.groups_per_round)
     miles_args.yeto_rl_sample_buffer = config
     node = getattr(args, "rl_convertible_node", None)  # L7.5: a convertible node's own shard
+    # a pair island runs as learner 0: its sampler id is its node name (S25 C1)
+    sampler = node or getattr(args, "rl_sampler_node", None) or f"island{int(args.learner_id)}"
     (os.environ if environ is None else environ).update(island_env(
-        config.role, store_root=config.store, sampler_id=node or f"island{int(args.learner_id)}",
+        config.role, store_root=config.store, sampler_id=sampler,
         max_policy_age=int(getattr(args, "rl_max_policy_age", 0) or 0), wait_s=config.wait_s,
-        shard=node, lane=sample_roles.buffer_lane(args)))
+        shard=node, shards=getattr(args, "rl_buffer_shards", None),
+        lane=sample_roles.buffer_lane(args)))
     miles_args.yeto_rl_sample_lane = sample_roles.buffer_lane(args)  # S25 C3: None off a synced trainer
 
 
