@@ -215,7 +215,7 @@ def sampler_island(tag: str) -> int:
     return rc
 
 
-@app.function(image=image, volumes=VOLUMES, gpu=f"{GPU_NAME}!:2", cpu=12, memory=163840, timeout=5400)
+@app.function(image=image, volumes=VOLUMES, gpu=f"{GPU_NAME}!:2", cpu=12, memory=163840, timeout=3600)
 def trainer_island(tag: str, stop_after_rounds: int | None = None) -> int:
     log = _log_dir(tag)
     _gpu_facts(log, 2)
@@ -253,18 +253,52 @@ def trainer_island(tag: str, stop_after_rounds: int | None = None) -> int:
     return rc
 
 
-@app.function(image=image, cpu=1, memory=1024, timeout=3 * 3600)
+@app.function(image=image, volumes=VOLUMES, cpu=1, memory=1024, timeout=3 * 3600)
 def orchestrate(tag: str, cut_after: int = 2) -> dict:
+    """Sampler for the whole run; trainer A stops after ``cut_after`` rounds (cut),
+    trainer B resumes in a new container. A trainer that fails cancels the sampler;
+    a sampler that fails cancels the running trainer (no card waits for nothing)."""
     sampler = sampler_island.spawn(f"{tag}/sampler")
-    first = trainer_island.remote(f"{tag}/trainer-a", cut_after)
-    second = trainer_island.remote(f"{tag}/trainer-b", None) if first == 0 else None
-    if first != 0 or second != 0:  # no trainer will release again: do not leave the sampler card waiting
-        sampler.cancel()
-        sampler_rc = "cancelled"
+    sampler_rc: object = None
+
+    def sampler_done() -> bool:
+        nonlocal sampler_rc
+        try:
+            sampler_rc = sampler.get(timeout=0)
+            return True
+        except TimeoutError:
+            return False
+        except Exception as error:  # noqa: BLE001 - the sampler call failed
+            sampler_rc = f"error: {error}"
+            return True
+
+    def run_trainer(sub: str, stop: int | None) -> object:
+        call = trainer_island.spawn(f"{tag}/{sub}", stop)
+        while True:
+            try:
+                return call.get(timeout=30)
+            except TimeoutError:
+                pass
+            except Exception as error:  # noqa: BLE001
+                return f"error: {error}"
+            if sampler_done() and sampler_rc != 0:
+                call.cancel()
+                return "cancelled: sampler ended with " + str(sampler_rc)
+
+    first = run_trainer("trainer-a", cut_after)
+    second = run_trainer("trainer-b", None) if first == 0 else None
+    if first != 0 or second != 0:
+        if not sampler_done():
+            sampler.cancel()
+            sampler_rc = "cancelled"
     else:
-        sampler_rc = sampler.get()
+        while not sampler_done():
+            time.sleep(30)
     result = {"trainer_a": first, "trainer_b": second, "sampler": sampler_rc}
-    print(json.dumps(result), flush=True)
+    print(json.dumps(result, default=str), flush=True)
+    _log_dir(tag)
+    Path(f"/data/store/logs/{tag}/orchestrate.json").write_text(json.dumps(result, default=str))
+    _commit()
     return result
 
 
