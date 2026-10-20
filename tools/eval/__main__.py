@@ -94,7 +94,7 @@ def judge(run_dir: Path) -> Verdict:
     rate = cells.A10G_USD_PER_HOUR if cfg.get("gpu") == "A10G" else 5.3
     verdict.run.update(code_sha=cell_doc.get("code_sha"), wall_s=run_doc.get("wall_s"),
                        card_seconds=round(seconds, 1), usd_estimate=round(seconds / 3600 * rate, 3),
-                       usd_rate=f"{rate}/card-hour (list price estimate, not a bill)")
+                       usd_rate=f"{rate}/container-hour incl. CPU+memory (list-price estimate, not a bill)")
     try:
         ev = evidence.load(run_dir)
         judges.JUDGES[cell.capability](ev, verdict, cfg)

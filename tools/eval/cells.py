@@ -19,7 +19,9 @@ CAPABILITIES = {
     "E5": "round cut: SCHEDULED stop + resume assertions",
 }
 BACKENDS = ("miles", "verl")
-A10G_USD_PER_HOUR = 1.10  # Modal list price used by the S25 C2/C3V estimates (not a bill)
+# all-in estimate per A10G container hour: GPU $1.10 + the CPU (8-16 cores) and memory
+# (32-64 GiB) the harness requests, which Modal bills too (list prices; not a bill)
+A10G_USD_PER_HOUR = 2.0
 
 
 @dataclass(frozen=True)
