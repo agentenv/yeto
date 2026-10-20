@@ -271,3 +271,42 @@ class _Cfg(dict):
     """Attribute + ``get`` access, like an omegaconf node."""
 
     __getattr__ = dict.__getitem__
+
+
+# ---------------------------------------------------------------- N7.6c: digest over the stepped state
+
+
+def test_restore_whose_optimizer_steps_a_stale_snapshot_is_refused(tmp_path, monkeypatch):
+    """Inject the T-G3 bug shape: after the load the module holds the cut's weights, but the
+    optimizer steps a snapshot taken when the fresh trainer was built. The restore digest
+    reads the stepped tensors, so the restore is refused (a module-side digest would match)."""
+    import torch.distributed.checkpoint.state_dict as dcp_sd
+
+    real = dcp_sd.set_state_dict
+
+    def load_then_step_stale(module, optimizer, **kwargs):
+        stale = {id(p): p.detach().clone() for p in module.parameters()}  # build-time values
+        real(module, optimizer, **kwargs)
+        for group in optimizer.param_groups:
+            for i, param in enumerate(group["params"]):
+                copy = torch.nn.Parameter(stale[id(param)])
+                optimizer.state[copy] = optimizer.state.pop(param)
+                group["params"][i] = copy
+
+    monkeypatch.setattr(dcp_sd, "set_state_dict", load_then_step_stale)
+    trainer, fresh = _single(tmp_path)
+    saved = torch.load(tmp_path / "cut-v" / vcut.rank_file(0), weights_only=True)["model"]
+    with pytest.raises(ResumeAssertionError, match="loaded train state differs from the cut"):
+        trainer.restore_cut("cut-v", epoch=1, root=str(tmp_path), expect=_expect())
+    for name, p in fresh.module.named_parameters():  # the module copy alone looks restored
+        assert torch.equal(p.detach(), saved[name]), name
+
+
+def test_digest_reads_the_tensors_the_optimizer_steps():
+    h = _handles(_model())
+    _round(h, 0)
+    before = vcut._digest(h)
+    first = h.optimizer.param_groups[0]["params"][0]
+    with torch.no_grad():
+        first.add_(1.0)
+    assert vcut._digest(h) != before

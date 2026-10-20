@@ -206,6 +206,7 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
     from yeto.rl.engine.driver import EventTape, IslandDriver
     from yeto.rl.export import adapter_targets, derive_peft_lora_specs
 
+    from . import round_cuts
     from .identity import backend_identity
     from .ports_impl import (VerlIsland, VerlPlacement, VerlPolicyState, VerlPublisher,
                              VerlRolloutPool, VerlTrainerGroup)
@@ -256,16 +257,20 @@ def run_island(trainer, agent_loop_manager, plan: dict, cfg: dict) -> dict:
     spec = (AlgorithmSpec.from_dict(plan["algorithm_spec"]) if plan.get("algorithm_spec")
             else AlgorithmSpec())
     publisher = VerlPublisher(island, strict=bool(plan.get("publish_strict", True)))
+    # N7.6b: round cuts (--rl-resume-store): the store is restored before the driver
+    # is built, so the driver's ledger is the restored one
+    resume = round_cuts.resume_wiring_for(plan, runtime_fingerprint=_fingerprint(cfg))
     driver = IslandDriver(
         learner_id=learner_id, rollout=VerlRolloutPool(island), trainer=VerlTrainerGroup(island),
         policy_state=VerlPolicyState(island),
         publisher=_TestExitPublisher(publisher, plan.get("test_exit_after_version"), tape),
         placement=VerlPlacement(), capabilities=_capabilities(_fingerprint(cfg)), algorithm=spec,
-        sync=sync, events=tape)
+        sync=sync, events=tape, ledger=None if resume is None else resume.ledger)
+    round_cuts.wire_round_cuts(driver, resume, plan=plan, algorithm=spec)
     if plan.get("publish_selftest"):
         tape.append({"event": "rl_verl_publish_selftest",
                      **publish_selftest(island, publisher, VerlPolicyState(island), specs)})
-    state = driver.run()
+    state = round_cuts.run_driver(driver, resume)
     result = {"learner_id": learner_id, "rounds_completed": driver.rounds_completed,
               "final_policy_version": state.policy_version,
               "final_policy_tensor_hash": state.policy_tensor_hash(),
