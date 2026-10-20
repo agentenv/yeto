@@ -532,6 +532,9 @@ def expand(plan: Stage1Plan, *, hf_config: str | Path | None = None) -> Expanded
         # Miles trains glm5_next from a Megatron torch_dist checkpoint (raw mode); converted once
         # on trainer node 0 (one node's cards; not run for the 45-layer model)
         "torch_dist": torch_dist, "convert_argv": convert_argv,
+        # the converter imports megatron.post_training, which the editable megatron_core
+        # install does not expose; Miles' own converter call puts the checkout first (run-9)
+        "convert_env": {"PYTHONPATH": f"{miles.get('megatron_path', '/root/Megatron-LM')}:{miles['workdir']}"},
         "image": images.get("trainer"), "env": trainer_env,
         "miles": {"commit": miles["commit"], "megatron": miles["megatron"], "mbridge": miles["mbridge"],
                   "layout": layout, "memory_estimate": megatron_memory(model, miles, layout, trainers, sampling, hf_config,
@@ -736,7 +739,7 @@ def _steps(plan: Stage1Plan, out: Expanded, trainers: Sequence[Node], samplers: 
     if out.trainer.get("convert_argv") and trainers:
         node, dst = trainers[0], str(out.trainer["torch_dist"])
         convert = _docker(plan, node, "convert", out.trainer["image"], out.trainer["convert_argv"],
-                          out.trainer["env"])
+                          {**out.trainer["env"], **out.trainer["convert_env"]})
         steps.append(Step(f"convert-torch-dist-{node.name}", node.name,
                           f"set -eu\nif [ \"$(cat {shlex.quote(dst)}/latest_checkpointed_iteration.txt 2>/dev/null)\" "
                           f"!= release ]; then\n{convert}\nfi\n",

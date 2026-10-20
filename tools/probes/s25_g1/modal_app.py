@@ -257,7 +257,8 @@ def trainer_island(tag: str, stop_after_rounds: int | None = None) -> int:
     if trainer.get("convert_argv") and not (marker.is_file() and marker.read_text().strip() == "release"):
         began_convert = time.time()
         with open(log / "convert.log", "w", encoding="utf-8") as f:
-            crc = subprocess.run(trainer["convert_argv"], env={**env, "PYTHONPATH": f"/root/miles:{env['PYTHONPATH']}"},
+            path = f"{trainer['convert_env']['PYTHONPATH']}:{env['PYTHONPATH']}"
+            crc = subprocess.run(trainer["convert_argv"], env={**env, "PYTHONPATH": path},
                                  cwd=WORKDIR, stdout=f, stderr=subprocess.STDOUT).returncode
         (log / "convert.json").write_text(json.dumps({"rc": crc, "wall_s": round(time.time() - began_convert, 1)}))
         models.commit()  # trainer B (a new container) loads the same torch_dist
@@ -344,3 +345,15 @@ def orchestrate(tag: str, cut_after: int = 2) -> dict:
 def launch(tag: str = "run-1", cut_after: int = 2) -> None:
     call = orchestrate.spawn(tag, cut_after)
     print(f"spawned orchestrate {call.object_id}")
+
+
+@app.function(image=image, volumes={"/data/models": models}, cpu=2, memory=8192, timeout=900)
+def cpu_shell(cmd: str) -> str:
+    """CPU-only inspection of the image (no GPU)."""
+    r = subprocess.run(["bash", "-lc", cmd], capture_output=True, text=True, cwd=WORKDIR, env=_env({}))
+    return r.stdout[-20000:] + "\nSTDERR:\n" + r.stderr[-4000:]
+
+
+@app.local_entrypoint()
+def shell(cmd: str) -> None:
+    print(cpu_shell.remote(cmd))
