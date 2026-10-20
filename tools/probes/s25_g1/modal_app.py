@@ -334,6 +334,10 @@ def orchestrate(tag: str, cut_after: int = 2) -> dict:
     """Sampler for the whole run; trainer A stops after ``cut_after`` rounds (cut),
     trainer B resumes in a new container. A trainer that fails cancels the sampler;
     a sampler that fails cancels the running trainer (no card waits for nothing)."""
+    run_store = Path("/data/store/s25-g1")  # the plan's store: every run starts from an empty one
+    if run_store.exists():
+        shutil.rmtree(run_store)
+        store.commit()
     sampler = sampler_island.spawn(f"{tag}/sampler")
     requant = requant_island.spawn(f"{tag}/requant")
     sampler_rc: object = None
