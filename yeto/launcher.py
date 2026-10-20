@@ -188,8 +188,21 @@ def _island_task(task_factory, args, spec, m, num_learners, syncer_addr, overrid
     task = task_factory(iargs, spec, learner_id, island_learners, syncer_addr)
     io.apply_to_task(task, {**io.island_env(args, m, overrides),
                             **(droppable.role_env(role, spec.cloud, spec.region) if role else {}),
-                            **sample_roles.island_env(iargs)})
+                            **sample_roles.island_env(iargs),
+                            **_spot_sampler_cloud_env(iargs, getattr(spec, "cloud", None))})
     return task
+
+
+def _spot_sampler_cloud_env(iargs, cloud: str | None) -> dict[str, str]:
+    """A spot sampler island on Nebius: the VM stop reaches the sampler through the
+    host unit of ``yeto.cloud.nebius_reclaim`` (Modal signals the container itself)."""
+    from .rl.engine import sample_roles
+
+    if cloud != "nebius" or not getattr(iargs, "spot", False) or not sample_roles.island_env(iargs):
+        return {}
+    from .cloud import nebius_reclaim
+
+    return nebius_reclaim.spot_sampler_env()
 
 
 def _ssh_trainer_spec(args, spec: ClusterSpec, task):

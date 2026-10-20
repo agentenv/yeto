@@ -190,7 +190,8 @@ def build_pack(repo: str | os.PathLike[str]) -> tuple[CodePack, bytes]:
     files = pack_file_list(root)
     patch_sha = hashlib.sha256(patch).hexdigest()
     info = {"format": PACK_FORMAT, "mode": CODE_PACK_MODE_GIT_PATCH, "commit": commit,
-            "dirty": bool(patch), "patch_sha": patch_sha, "files": files}
+            "dirty": bool(patch), "patch_sha": patch_sha, "files": files,
+            "executables": _executables(root, files)}
     data = _tar_bytes(root, files, info)
     pack = CodePack(commit=commit, dirty=bool(patch), patch_sha=patch_sha,
                     digest=hashlib.sha256(data).hexdigest())
@@ -221,9 +222,34 @@ def tree_digest(tree: str | os.PathLike[str]) -> str:
     return hashlib.sha256(_tar_bytes(root, files, info)).hexdigest()
 
 
-def verify_tree(tree: str | os.PathLike[str], expected: str) -> str:
-    """Refuse a tree whose rebuilt tar does not have the digest ``expected``."""
+def _executables(root: Path, files: Iterable[str]) -> list[str]:
+    """The listed regular files with an executable bit (the pack records them as 0o755)."""
+    return [n for n in files
+            if not (root / n).is_symlink() and os.stat(root / n).st_mode & 0o111]
 
+
+def restore_executables(tree: str | os.PathLike[str]) -> list[str]:
+    """Set the executable bit again on the files the pack info lists as executable
+    and returns the ones it changed. A transport may drop the bit: sky's workdir
+    upload to a remote API server goes through a zip that the server unpacks
+    without file modes (T-C1b). A pack without the list (older packs) is left alone."""
+    root = Path(tree)
+    fixed = []
+    for name in read_pack_info(root).get("executables") or []:
+        path = root / name
+        if path.is_file() and not path.is_symlink():
+            mode = os.stat(path).st_mode
+            if not mode & 0o111:
+                os.chmod(path, mode | 0o755)
+                fixed.append(name)
+    return fixed
+
+
+def verify_tree(tree: str | os.PathLike[str], expected: str) -> str:
+    """Refuse a tree whose rebuilt tar does not have the digest ``expected``
+    (after :func:`restore_executables`: modes are part of the digest)."""
+
+    restore_executables(tree)
     actual = tree_digest(tree)
     if actual != expected.lower():
         raise CodePackError(f"code pack digest mismatch: run manifest has {expected.lower()}, "
@@ -241,9 +267,23 @@ def _safe_member(member: tarfile.TarInfo) -> None:
             raise CodePackError(f"code pack symlink {member.name!r} leaves the tree")
 
 
+# The pack's entries carry mtime 0 (a deterministic tar); an unpacked tree gets this
+# time instead. sky zips a workdir it uploads to a remote API server, and ZIP refuses
+# timestamps before 1980 ("ZIP does not support timestamps before 1980", T-C1b).
+UNPACKED_MTIME = 946684800  # 2000-01-01T00:00:00Z
+
+
+def _stamp_times(tree: Path) -> None:
+    """Give every entry of ``tree`` :data:`UNPACKED_MTIME` (links themselves, not
+    their targets). The digest covers names and bytes only, so it is unchanged."""
+    for path in [tree, *tree.rglob("*")]:
+        os.utime(path, (UNPACKED_MTIME, UNPACKED_MTIME), follow_symlinks=False)
+
+
 def unpack(data: bytes, digest: str, cache_root: str | os.PathLike[str]) -> Path:
     """Check ``data`` against ``digest`` and unpack it to ``<cache_root>/<digest>``
-    (reused when already there and intact). Returns the tree."""
+    (reused when already there and intact; a tree unpacked before
+    :data:`UNPACKED_MTIME` existed gets its times now). Returns the tree."""
 
     if hashlib.sha256(data).hexdigest() != digest.lower():
         raise CodePackError(f"downloaded code pack does not have digest {digest}")
@@ -251,6 +291,7 @@ def unpack(data: bytes, digest: str, cache_root: str | os.PathLike[str]) -> Path
     if dest.is_dir():
         try:
             verify_tree(dest, digest)
+            _stamp_times(dest)
             return dest
         except CodePackError:
             shutil.rmtree(dest)
@@ -262,6 +303,7 @@ def unpack(data: bytes, digest: str, cache_root: str | os.PathLike[str]) -> Path
             for member in members:
                 _safe_member(member)
             tar.extractall(staging, members=members, filter="tar")
+        _stamp_times(staging)
         verify_tree(staging, digest)
         try:
             staging.rename(dest)

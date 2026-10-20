@@ -47,6 +47,9 @@ DROPPED_EVENT = "rl_sampler_groups_dropped"  # groups not written after the leav
 MEMBERS_DIR = "sample-buffer/members"  # one record per sampler incarnation, under the store root
 RECLAIM_MARKER_ENV = "YETO_SPOT_RECLAIM_MARKER"  # written by the Modal runner on the reclaim signal
 DEFAULT_RECLAIM_MARKER = "/tmp/yeto-reclaim-requested"
+# Set where a host hook waits for the sampler's answer before the VM stops
+# (Nebius: yeto.cloud.nebius_reclaim writes the marker and waits for this file).
+RECLAIM_ACK_ENV = "YETO_RECLAIM_ACK_FILE"
 
 
 class SamplerResumeError(RuntimeError):
@@ -190,6 +193,29 @@ def install_marker_signals(environ: Mapping[str, str], signal_mod: Any = None) -
     return done
 
 
+def clear_reclaim_files(environ: Mapping[str, str]) -> None:
+    """Remove a reclaim marker and ack left from an earlier boot (a restarted VM keeps /tmp)."""
+    reclaim_marker(environ).unlink(missing_ok=True)
+    ack = environ.get(RECLAIM_ACK_ENV)
+    if ack:
+        Path(ack).unlink(missing_ok=True)
+
+
+def acknowledge_reclaim(environ: Mapping[str, str]) -> Path | None:
+    """Write the ack file a host hook waits for (``RECLAIM_ACK_ENV``) once the
+    LEAVE is durable, so the host lets the VM stop; None when no hook waits."""
+    ack = environ.get(RECLAIM_ACK_ENV)
+    if not ack:
+        return None
+    path = Path(ack)
+    try:
+        path.write_text(f"{time.time():.3f}\n")
+    except OSError as error:
+        print(f"[sampler-island] reclaim ack not written ({error})", flush=True)
+        return None
+    return path
+
+
 def reclaim_requested(environ: Mapping[str, str]) -> bool:
     """The Modal runner wrote the reclaim marker (the container got SIGINT/SIGTERM)."""
     return reclaim_marker(environ).exists()
@@ -210,14 +236,25 @@ class Member:
     detail: dict[str, Any] = field(default_factory=dict)
 
 
+def member_key(member: Member) -> str:
+    return f"{MEMBERS_DIR}/{member.sampler}/{member.incarnation}.json"
+
+
 def write_member(store: Any, member: Member) -> Path:
     """Write (or rewrite) the incarnation's member record and commit the store.
     One file per incarnation: an old and a new incarnation never write the same
-    file (a Modal Volume keeps the last commit of a file)."""
-    path = Path(store.root) / MEMBERS_DIR / member.sampler / f"{member.incarnation}.json"
+    file (a Modal Volume keeps the last commit of a file). A store with an object
+    API (s3, OSS) gets the record by object: its staged mirror does not carry
+    ``sample-buffer/``, so a file would stay on the island's disk."""
+    data = (json.dumps(asdict(member), sort_keys=True) + "\n").encode()
+    objects = getattr(store, "objects", None)
+    if objects is not None:
+        objects.write(member_key(member), data)
+        return Path(member_key(member))
+    path = Path(store.root) / member_key(member)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(asdict(member), sort_keys=True) + "\n")
+    tmp.write_bytes(data)
     tmp.replace(path)
     store.commit()
     return path
