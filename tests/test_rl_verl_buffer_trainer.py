@@ -234,8 +234,10 @@ def _trainer(tmp_path, store_dir, actor, *, rounds, required, base, buffer=None)
     tape = EventTape(tmp_path / "tape.jsonl", 0)
     island.emit = lambda event, **f: tape.append({"event": event, **f})
     store = CheckpointStore(store_dir)
+    if buffer is None:  # not ``or``: an empty FileSampleBuffer is falsy (len 0)
+        buffer = FileSampleBuffer(store, batch_size=1, create_index=False)
     rollout, publisher, placement = install_buffer_ports(
-        island, buffer=buffer or FileSampleBuffer(store, batch_size=1, create_index=False),
+        island, buffer=buffer,
         releases=PolicyReleaseStore(store), shape=bf.RowShape(64, 16, 0), base_dir=base,
         tokenize=lambda text: [7, 8], poll_s=0.01, wait_s=30)
     profile = far.execution_profile_for(TOLERANT, 1, groups_per_round=required, samples_per_group=2, sync="none")
@@ -496,13 +498,26 @@ def test_two_shard_samplers_drain_their_backlog_through_the_verl_release(tmp_pat
             reward=lambda item, c: float(len(c.token_ids) % 2),
             checks=PostLoadChecks(expected_expert_matrices=None, fixed_prompts=(), probe_pairs=(("Q", " 7"),)),
             should_stop=done.is_set, sleep=lambda s: time.sleep(0.005))
-        threads.append(threading.Thread(target=sampler.run, daemon=True))
+        def run(_sampler=sampler, _sid=sid):
+            try:
+                _sampler.run()
+            except BaseException as error:  # noqa: BLE001 - surfaced by the assert below
+                events.append((_sid, "crashed", {"error": repr(error)}))
+                raise
+
+        threads.append(threading.Thread(target=run, daemon=True))
         threads[-1].start()
     trainer_buffer = open_trainer_buffer(store, batch_size=1, create_index=False, shards=["island0", "island1"])
     driver, _island, _publisher = _trainer(tmp_path, store_dir, FakeBufferActor(), rounds=3, required=2,
                                            base=base, buffer=trainer_buffer)
     try:
         driver.run()
+    except Exception:
+        listing = sorted(str(p.relative_to(store_dir)) for p in (store_dir / "sample-buffer").rglob("*.jsonl"))
+        raise AssertionError(f"buffer {len(trainer_buffer)} shards {trainer_buffer.index.shard_names()} "
+                             f"files {listing}; "
+                             f"sampler events: {[(sid, n) for sid, n, _f in events][-20:]}; "
+                             f"crashes: {[f for _sid, n, f in events if n == 'crashed']}")
     finally:
         done.set()
         for t in threads:
