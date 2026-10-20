@@ -261,14 +261,12 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
     from yeto.rl.engine.resume import store_for
     from yeto.rl.engine.sampler_loop import SamplerLoop
     from yeto.rl.engine.sampler_resume import (
-        JOIN_EVENT,
-        LEAVE_EVENT,
-        Member,
+        ReclaimWatcher,
+        SamplerMembership,
         new_incarnation,
         reclaim_marker,
         reclaim_requested,
         resume_point,
-        write_member,
     )
 
     from . import LoopRunner
@@ -294,9 +292,9 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
     reclaim_marker(env).unlink(missing_ok=True)  # a restarted machine keeps its /tmp
     buffer = open_buffer(env, sampler=True)
     resume = resume_point(buffer.entries(), sampler_id)
-    store = store_for(config.store, environ=environ)
-    member = Member(sampler=sampler_id, incarnation=incarnation, joined_at=time.time(),
-                    resume=resume.fields())
+    membership = SamplerMembership(store_for(config.store, environ=environ), sampler_id,
+                                   incarnation, resume, emit)
+    progress = {"rollout_id": None, "rounds": 0}  # the round in flight, rounds done here
 
     connect_island_ray(miles_args=miles_args)
     # The rollout process's metadata hook pushes each round's group records to this
@@ -316,20 +314,22 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
         return controller, executor
 
     async def generate(rollout_id: int) -> None:
+        progress["rollout_id"] = rollout_id
         await controller.prepare_rollout(rollout_id)
         _release(await executor.get(rollout_id))  # the rollout function wrote the groups
         metadata.discard()  # the groups are in the buffer; nobody here reads the records
+        progress["rounds"] += 1
+        progress["rollout_id"] = None
 
-    def leave(reason: LeaveReason, rounds: int, **detail: Any) -> None:
-        member.left_at, member.leave_reason, member.rounds = time.time(), reason.name, rounds
-        member.policy_version = follower.version
-        member.detail = detail
-        emit(LEAVE_EVENT, sampler=sampler_id, incarnation=incarnation, reason=reason.name,
-             rounds=rounds, policy_version=follower.version, buffer_end=len(buffer), **detail)
-        write_member(store, member)
+    def leave(reason: LeaveReason, **detail: Any) -> None:
+        membership.leave(reason.name, rounds=progress["rounds"],
+                         policy_version=None if follower is None else follower.version,
+                         in_flight_rollout_id=progress["rollout_id"], **detail)
 
     error: BaseException | None = None
     follower = None
+    reclaimed = lambda: reclaim_requested(env)  # noqa: E731
+    watcher = ReclaimWatcher(reclaimed, lambda: leave(LeaveReason.PREEMPTED)).start()
     try:
         controller, executor = runner.run(init())
         lora = lora_mode(miles_args)
@@ -338,7 +338,6 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
             loader.stamp(BASE_POLICY_VERSION)  # until the first release is loaded
         follower = PolicyFollower(release_store(config, environ), loader,
                                   version=BASE_POLICY_VERSION)
-        reclaimed = lambda: reclaim_requested(env)  # noqa: E731
         loop = SamplerLoop(
             follower=follower, buffer=buffer, emit=emit,
             generate=lambda rollout_id: runner.run(generate(rollout_id)),
@@ -348,10 +347,8 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
             loaded_fields=lambda: {"served_checksum": loader.last_checksum,
                                    "probe": loader.last_probe})
         latest = follower.releases.latest()
-        emit(JOIN_EVENT, sampler=sampler_id, incarnation=incarnation,
-             latest_release=None if latest is None else {"seq": latest.seq, "policy_version": latest.version},
-             **resume.fields())
-        write_member(store, member)
+        membership.join(latest_release=None if latest is None else
+                        {"seq": latest.seq, "policy_version": latest.version})
         emit("rl_sampler_start", store=config.store, num_rollouts=int(miles_args.num_rollout),
              max_backlog_groups=int(config.max_backlog_groups), weights=loader.weights,
              start_rollout_id=resume.next_rollout_id)
@@ -360,21 +357,21 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
         else:
             rounds = loop.run(start=resume.next_rollout_id)
         if reclaimed():
-            leave(LeaveReason.PREEMPTED, rounds)
+            leave(LeaveReason.PREEMPTED)  # no-op when the watcher already left
             _hold_until_stopped(sleep, LEAVE_HOLD_S)
         else:
-            leave(LeaveReason.FINISHED, rounds)
+            leave(LeaveReason.FINISHED)
         return rounds
     except BaseException as exc:
         error = exc
-        if follower is not None:
-            try:
-                leave(LeaveReason.PREEMPTED if reclaim_requested(env) else LeaveReason.INFRA_FAILED,
-                      -1, error=f"{type(exc).__name__}: {exc}"[:300])
-            except Exception:  # noqa: BLE001 - the original error is the one to report
-                pass
+        try:
+            leave(LeaveReason.PREEMPTED if reclaimed() else LeaveReason.INFRA_FAILED,
+                  error=f"{type(exc).__name__}: {exc}"[:300])
+        except Exception:  # noqa: BLE001 - the original error is the one to report
+            pass
         raise
     finally:
+        watcher.stop()
         try:
             runner.run(disposer.__aexit__(None if error is None else type(error), error,
                                           None if error is None else error.__traceback__))

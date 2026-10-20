@@ -32,8 +32,10 @@ outlives the island's own tape. Engine-neutral.
 from __future__ import annotations
 
 import json
+import threading
+import time
 import uuid
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -183,3 +185,72 @@ def write_member(store: Any, member: Member) -> Path:
     tmp.replace(path)
     store.commit()
     return path
+
+
+class SamplerMembership:
+    """One incarnation's JOIN and LEAVE: the tape events and the member record.
+    :meth:`leave` acts once (the reclaim watcher and the island's exit path may
+    both call it); later calls return False."""
+
+    def __init__(self, store: Any, sampler: str, incarnation: str, resume: SamplerResume,
+                 emit: Callable[..., None], clock: Callable[[], float] = time.time) -> None:
+        self.store = store
+        self.emit = emit
+        self.clock = clock
+        self.member = Member(sampler=sampler, incarnation=incarnation, joined_at=clock(),
+                             resume=resume.fields())
+        self._lock = threading.Lock()
+        self.left = False
+
+    def join(self, **fields: Any) -> None:
+        m = self.member
+        self.emit(JOIN_EVENT, sampler=m.sampler, incarnation=m.incarnation, **m.resume, **fields)
+        write_member(self.store, m)
+
+    def leave(self, reason: str, *, rounds: int | None = None, policy_version: int | None = None,
+              **detail: Any) -> bool:
+        with self._lock:
+            if self.left:
+                return False
+            self.left = True
+            m = self.member
+            m.left_at, m.leave_reason, m.rounds = self.clock(), str(reason), rounds
+            m.policy_version, m.detail = policy_version, dict(detail)
+            self.emit(LEAVE_EVENT, sampler=m.sampler, incarnation=m.incarnation, reason=str(reason),
+                      rounds=rounds, policy_version=policy_version, **detail)
+            write_member(self.store, m)
+            return True
+
+
+class ReclaimWatcher:
+    """Polls ``reclaimed()`` on a daemon thread and calls ``on_reclaim()`` once, at
+    once: the cloud stops the container a few seconds after its signal (Modal:
+    30 s), while the island's loop may still be inside a round."""
+
+    def __init__(self, reclaimed: Callable[[], bool], on_reclaim: Callable[[], Any], *,
+                 poll_s: float = 0.5) -> None:
+        self.reclaimed = reclaimed
+        self.on_reclaim = on_reclaim
+        self.poll_s = float(poll_s)
+        self._stop = threading.Event()
+        self.fired = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="sampler-reclaim-watcher", daemon=True)
+
+    def start(self) -> "ReclaimWatcher":
+        self._thread.start()
+        return self
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=5.0)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            if self.reclaimed():
+                self.fired.set()
+                try:
+                    self.on_reclaim()
+                except Exception as error:  # noqa: BLE001 - the island loop still stops on the marker
+                    print(f"[sampler-island] reclaim handler failed: {error!r}", flush=True)
+                return
+            self._stop.wait(self.poll_s)
