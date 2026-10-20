@@ -361,10 +361,12 @@ def open_trainer_buffer(store: CheckpointStore | ObjectStore, *, batch_size: int
     store that shards (:func:`needs_shards`), or the named ``shards`` of several
     sampler islands on one shared directory (the data ends once every named
     shard ended), unless it is a synced trainer other than the publisher
-    (``merged_release.merges_shards``); ``lane``: its lane."""
+    (``merged_release.merges_shards``); ``lane``: its lane. A merging trainer
+    is the only writer of the index, so it creates the index even with
+    ``create_index=False`` (no sampler writes ``index.jsonl`` then)."""
     named = tuple(shards or ())
     merge = (needs_shards(store) or bool(named)) and merges_shards(lane)
-    return FileSampleBuffer(store, batch_size=batch_size, create_index=create_index, lane=lane,
+    return FileSampleBuffer(store, batch_size=batch_size, create_index=create_index or merge, lane=lane,
                             merge_shards=merge, expected_shards=named if merge and named else None, **kwargs)
 
 

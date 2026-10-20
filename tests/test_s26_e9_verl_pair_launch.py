@@ -255,3 +255,25 @@ def test_synced_group_lists_samplers_only():
                                  rl_node_class=None)
     with pytest.raises(ValueError, match="sampler islands only"):
         sample_roles.check_synced_group(args, 3)
+
+
+def test_verl_trainer_buffer_merges_shards_without_a_sampler_index(tmp_path):
+    """G1 (e9-g1-d) root cause: the verl buffer trainer opens its buffer with
+    create_index=False; with named shards no sampler writes index.jsonl, so the
+    merging trainer must create it (it is the index's only writer)."""
+    from tests.test_rl_spot_sampler_replace import _cursor, _round
+    from yeto.rl.adapters.miles import buffer_rollout as br
+    from yeto.rl.engine.resume import CheckpointStore
+    from yeto.rl.engine.sample_buffer import FileSampleBuffer, open_trainer_buffer
+
+    writer = br.SamplerRoundWriter(FileSampleBuffer(CheckpointStore(tmp_path), batch_size=1,
+                                                    index="shards/island0.jsonl"), "island0", incarnation="a")
+    writer.write_round(0, _round(0, 3), _cursor(3))
+    assert not (tmp_path / "sample-buffer/index.jsonl").exists()
+    trainer = open_trainer_buffer(CheckpointStore(tmp_path), batch_size=1, create_index=False,
+                                  shards=["island0", "island1"])
+    assert len(trainer.select("t", 3)) == 3
+    assert (tmp_path / "sample-buffer/index.jsonl").exists()
+    # a plain (single-sampler) reader still never creates the index
+    reader = open_trainer_buffer(CheckpointStore(tmp_path / "plain"), batch_size=1, create_index=False)
+    assert not reader._merge and not (tmp_path / "plain/sample-buffer/index.jsonl").exists()
