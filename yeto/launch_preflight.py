@@ -185,6 +185,24 @@ def thread_message(count: ThreadCount, cfg: ThreadConfig, headline: str) -> str:
     ])
 
 
+def thread_relaxations(cfg: ThreadConfig) -> dict:
+    """The thread settings that are looser than the defaults, as ``{name: [value, default]}``.
+
+    The check is on by default; a run may only loosen it with an explicit flag, and the
+    launcher prints and records every loosened value (empty dict: defaults or stricter)."""
+
+    relaxed = {}
+    if cfg.mode == "off":
+        relaxed["mode"] = ["off", DEFAULT_THREAD_MODE]
+    if cfg.start > DEFAULT_THREAD_START:
+        relaxed["start"] = [cfg.start, DEFAULT_THREAD_START]
+    if cfg.hard > DEFAULT_THREAD_HARD:
+        relaxed["hard"] = [cfg.hard, DEFAULT_THREAD_HARD]
+    if cfg.mode == "wait" and cfg.wait_s > DEFAULT_THREAD_WAIT_S:
+        relaxed["wait_s"] = [cfg.wait_s, DEFAULT_THREAD_WAIT_S]
+    return relaxed
+
+
 def thread_preflight(args, *, counter: Callable[[], ThreadCount] | None = None,
                      clock: Callable[[], float] = time.monotonic,
                      sleep: Callable[[float], None] = time.sleep,
@@ -197,10 +215,15 @@ def thread_preflight(args, *, counter: Callable[[], ThreadCount] | None = None,
 
     out = sys.stderr if out is None else out
     cfg = ThreadConfig.from_args(args)
+    relaxed = thread_relaxations(cfg)
+    if relaxed:
+        print("[preflight] WARNING: thread preflight RELAXED by explicit flags: "
+              + ", ".join(f"{k} {v[0]} (default {v[1]})" for k, v in relaxed.items()),
+              file=out, flush=True)
     if cfg.mode == "off":
         print("[preflight] WARNING: thread preflight is OFF (--preflight-threads off); the "
               "s1run thread guard may tear down this run", file=out, flush=True)
-        return {"mode": "off", "disabled": True}
+        return {"mode": "off", "disabled": True, "relaxed": relaxed}
     counter = counter or count_threads
     started = clock()
     count = counter()
@@ -233,7 +256,7 @@ def thread_preflight(args, *, counter: Callable[[], ThreadCount] | None = None,
           f"(SkyPilot API server {count.sky_api if count.sky_api_found else 'not found'})",
           file=out, flush=True)
     return {"mode": cfg.mode, "start": cfg.start, "hard": cfg.hard, "wait_s": cfg.wait_s,
-            "waited": waited, "readings": readings, **count.to_dict()}
+            "waited": waited, "readings": readings, "relaxed": relaxed, **count.to_dict()}
 
 
 # ---------------------------------------------------------------------------

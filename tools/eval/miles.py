@@ -30,9 +30,11 @@ def _gpu(cfg: dict, n: int) -> str:
 
 
 def _common(cfg: dict, run_id: str, prefix: str) -> str:
-    # --preflight-threads off: Modal islands put no SkyPilot threads on this host; the scripts
-    # check the host thread count (< 3000) before the launch instead
-    return (f"launch --training-mode rl --rl-engine ports --preflight-threads off "
+    # the launcher thread preflight stays on (default wait); a cell may loosen it only with
+    # explicit flags in cfg["preflight_args"] (e.g. "--preflight-thread-start 2950"), which the
+    # launcher prints and records in the run manifest
+    preflight = cfg.get("preflight_args", "")
+    return (f"launch --training-mode rl --rl-engine ports {preflight + ' ' if preflight else ''}"
             f"--modal-gpu-exact --modal-retries 0 --modal-cpu 8 "
             f"--modal-memory 64 --modal-tape-volume {TAPE_VOLUME} --controller local --cluster-prefix {prefix} "
             f"--tuning lora --lora-r {cfg['lora_r']} --rl-observe-timeline {MODEL} {DATA} "
