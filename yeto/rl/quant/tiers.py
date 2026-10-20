@@ -37,8 +37,8 @@ Where each tier runs:
   checkpoint transfer to make smaller, and a LoRA release carries no base
   weights to convert.
 
-FP8 needs compute capability 8.9 or newer (Ada, Hopper); the launcher refuses
-cards that are known to lack it.
+FP8 needs compute capability 8.9 or newer (Ada, Hopper, Blackwell); the launcher
+accepts only the cards of :data:`FP8_CARDS` for tiers 1 and 2.
 
 Status: CPU tests only (tests/test_rl_quant_tiers.py). NOT VERIFIED on a GPU:
 SGLang online FP8 with an in-place BF16 weight update (Miles colocated), the
@@ -74,8 +74,9 @@ VLLM_KV_CACHE_DTYPE = "fp8"
 VLLM_FP8_CONFIG = {"activation_scheme": "dynamic", "fmt": "e4m3", "quant_method": "fp8",
                    "weight_block_size": [128, 128]}
 
-# Cards without FP8 tensor cores (compute capability < 8.9), by catalog name.
-NO_FP8_CARDS = frozenset({"A100", "A100-80GB", "A10G", "A10", "V100", "T4", "A6000", "RTXA6000", "A40"})
+# Cards with FP8 tensor cores (compute capability >= 8.9), by canonical name
+# (``yeto.gpu_spec``). Any other card is refused, also NPUs and PPUs (not checked).
+FP8_CARDS = frozenset({"L4", "L40S", "RTX-6000-Ada", "RTX-PRO-6000", "H100", "H200", "B200"})
 
 
 class QuantTierError(ValueError):
@@ -103,10 +104,10 @@ def validate_launch(args: Any) -> int:
     if tier == TIER_4BIT:
         raise QuantTierError(f"{FLAG} 3 (4-bit) is an interface only in this version (large models; "
                              "H100 has no FP4 units); use tier 0, 1 or 2")
-    card = str(getattr(args, "gpu", None) or "").split(":")[0].strip().upper()
-    if card in NO_FP8_CARDS:
-        raise QuantTierError(f"{FLAG} {tier} needs FP8 tensor cores (compute capability >= 8.9, "
-                             f"e.g. H100, H200, L4); --gpu {card} has none")
+    cards = _cards(getattr(args, "gpu", None))
+    if lacking := sorted(cards - FP8_CARDS):
+        raise QuantTierError(f"{FLAG} {tier} needs FP8 tensor cores (compute capability >= 8.9: "
+                             f"{', '.join(sorted(FP8_CARDS))}); --gpu names {', '.join(lacking)}")
     if tier == TIER_TRAINER_FP8:
         if not getattr(args, "rl_island_sample_role", None):
             raise QuantTierError(
@@ -116,6 +117,19 @@ def validate_launch(args: Any) -> int:
             raise QuantTierError(f"{FLAG} 2 needs --tuning full: a LoRA release carries no base weights "
                                  "to convert (tier 1 quantizes the base once in the engine)")
     return tier
+
+
+def _cards(gpu: Any) -> set[str]:
+    """Canonical card names of a ``--gpu`` spec; empty when there is none (auto fleet)
+    or it does not parse (the launcher reports that itself)."""
+    if not gpu:
+        return set()
+    from yeto.gpu_spec import parse_gpu_spec
+
+    try:
+        return {cluster.gpu for cluster in parse_gpu_spec(str(gpu))}
+    except ValueError:
+        return set()
 
 
 # ---------------------------------------------------------------- tier 1 engine plans

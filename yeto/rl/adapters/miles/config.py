@@ -1180,7 +1180,9 @@ def translate_run_config(
         rollout_overlap=rollout_overlap,
         runtime_attrs={
             **algorithm.to_legacy_runtime_attrs(),
-            "yeto_rollout_quant_tier": int(getattr(serving, "rollout_quant_tier", 0) or 0),
+            # S26 E6: only a quantized tier adds the attribute (tier 0 keeps the argv golden)
+            **({"yeto_rollout_quant_tier": int(serving.rollout_quant_tier)}
+               if getattr(serving, "rollout_quant_tier", 0) else {}),
             **_full_parameter_optimizer_attrs(trainable, config.train_memory,
                                               full_parameter_sync=full_parameter_sync),
             # rl-algo-critic-family 4.1: receipt init source (warm-up product)

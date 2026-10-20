@@ -71,21 +71,22 @@ def _read(directory: Path) -> dict[str, torch.Tensor]:
 
 # ---------------------------------------------------------------- launch refusals
 def _args(**kw):
-    base = {"rl_rollout_quant_tier": 1, "gpu": "H100!:1", "tuning": "full", "rl_island_sample_role": None}
+    base = {"rl_rollout_quant_tier": 1, "gpu": "modal:1xh100", "tuning": "full", "rl_island_sample_role": None}
     return SimpleNamespace(**{**base, **kw})
 
 
 def test_tier_0_and_1_pass_and_tier_3_is_refused():
-    assert tiers.validate_launch(_args(rl_rollout_quant_tier=0, gpu="A100")) == 0
+    assert tiers.validate_launch(_args(rl_rollout_quant_tier=0, gpu="aws:1xa100")) == 0
     assert tiers.validate_launch(_args()) == 1
-    assert tiers.validate_launch(_args(gpu="L4:1", tuning="lora")) == 1
+    assert tiers.validate_launch(_args(gpu="aws:1xl4@us-east-1,nebius:2x8xh200", tuning="lora")) == 1
+    assert tiers.validate_launch(_args(gpu=None)) == 1  # auto fleet: the planner picks the card
     with pytest.raises(QuantTierError, match="interface only"):
         tiers.validate_launch(_args(rl_rollout_quant_tier=3))
     with pytest.raises(QuantTierError, match="expected one of"):
         tiers.validate_launch(_args(rl_rollout_quant_tier=4))
 
 
-@pytest.mark.parametrize("gpu", ["A100:8", "A10G", "a100-80gb:2"])
+@pytest.mark.parametrize("gpu", ["aws:1xa100", "modal:1xa10g", "modal:1xh100,aws:2xa100-80gb", "ssh:1x8x910b4"])
 def test_cards_without_fp8_are_refused(gpu):
     with pytest.raises(QuantTierError, match="FP8 tensor cores"):
         tiers.validate_launch(_args(gpu=gpu))
@@ -103,7 +104,7 @@ def test_tier_2_needs_sampler_islands_and_full_parameters():
 def test_launcher_runs_the_tier_check_before_anything_else():
     from yeto.launch.rl_args import _prepare_rl_args
 
-    args = SimpleNamespace(training_mode="rl", rl_rollout_quant_tier=3, rl_image=None, gpu="H100:1")
+    args = SimpleNamespace(training_mode="rl", rl_rollout_quant_tier=3, rl_image=None, gpu="modal:1xh100")
     with pytest.raises(QuantTierError, match="interface only"):
         _prepare_rl_args(args)
 
@@ -322,3 +323,39 @@ def test_moe_release_expert_count_matches_the_sampler_index_check(moe, tmp_path)
     assert out["model.layers.1.mlp.gate.weight"].dtype == torch.bfloat16
     assert out["model.layers.1.mlp.shared_expert.up_proj.weight"].dtype == torch.bfloat16
     assert out["model.layers.1.mlp.experts.1.up_proj.weight"].dtype == torch.float8_e4m3fn
+
+
+def test_miles_translation_adds_sglang_flags_only_for_tier_1():
+    from tests.test_rl_miles_adapter_config import make_config, sub
+    from yeto.rl.adapters.miles import config as mc
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+
+    base = mc.translate_run_config(make_config(), AlgorithmSpec())
+    assert "--sglang-quantization" not in base.argv and "yeto_rollout_quant_tier" not in base.runtime_attrs
+    tier1 = mc.translate_run_config(sub(make_config(), "serving", rollout_quant_tier=1), AlgorithmSpec())
+    argv = list(tier1.argv)
+    assert argv[argv.index("--sglang-quantization") + 1] == "fp8"
+    assert argv[argv.index("--sglang-kv-cache-dtype") + 1] == "fp8_e4m3"
+    assert tier1.runtime_attrs["yeto_rollout_quant_tier"] == 1
+    tier2 = mc.translate_run_config(sub(make_config(), "serving", rollout_quant_tier=2), AlgorithmSpec())
+    assert "--sglang-quantization" not in tier2.argv and tier2.runtime_attrs["yeto_rollout_quant_tier"] == 2
+
+
+@pytest.mark.parametrize("tier", [0, 1])
+def test_island_task_forwards_the_tier_only_when_set(monkeypatch, tier):
+    import sys
+    import types
+
+    from tests import test_rl_launcher as tl
+    from yeto.gpu_spec import parse_gpu_spec
+    from yeto.launch.rl_args import _prepare_rl_args
+    from yeto.launcher import make_miles_island_task
+
+    monkeypatch.setitem(sys.modules, "sky", types.SimpleNamespace(
+        Task=tl._Task, Resources=tl._Resources, Storage=tl._Storage, StorageMode=tl._StorageMode))
+    args = tl._args(("--gpu", "aws:1xh100@us-east-1", "--rl-rollout-quant-tier", str(tier)))
+    args.model_revision, args.data_revision = "a" * 40, "b" * 40
+    args.source_sha256, args.reward_sha256 = "c" * 64, "d" * 64
+    _prepare_rl_args(args)
+    task = make_miles_island_task(args, parse_gpu_spec(args.gpu)[0], 0, 1, "127.0.0.1:29400")
+    assert ("--rl-rollout-quant-tier 1" in task.run) is (tier == 1)
