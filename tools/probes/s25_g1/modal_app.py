@@ -93,12 +93,20 @@ def _commit(tag: str | None = None) -> None:
         print(f"[g1] log mirror/commit failed: {error}", flush=True)
 
 
-def _mirror_every(tag: str, seconds: float = 180.0) -> None:
+def _mirror_every(tag: str, seconds: float = 180.0, state: list | None = None) -> None:
+    """Mirror the logs (and, once known, ``state[0]``: the island's local state dir with its
+    tape) every ``seconds``; a cancelled container keeps what was mirrored last."""
     import threading
 
     def loop() -> None:
         while True:
             time.sleep(seconds)
+            if state:
+                try:
+                    shutil.copytree(state[0], LOCAL_LOGS / tag / "state", dirs_exist_ok=True,
+                                    ignore=shutil.ignore_patterns("*.pt", "*.safetensors"))
+                except Exception as error:  # noqa: BLE001
+                    print(f"[g1] state copy failed: {error}", flush=True)
             _commit(tag)
 
     threading.Thread(target=loop, daemon=True).start()
@@ -220,9 +228,11 @@ def sampler_island(tag: str) -> int:
     log = _log_dir(tag)
     _gpu_facts(log, 1)
     nvml = _nvml_sampler(log / "nvml.csv")
-    _mirror_every(tag)
+    state_dir: list = []
+    _mirror_every(tag, 120.0, state_dir)
     plan = _plan(log)
     run = plan["sampler"]["engines"][0]
+    state_dir.append(Path(run["spec"]["event_tape"]).parent)
     spec_path = Path(run["spec_path"])
     spec_path.parent.mkdir(parents=True, exist_ok=True)
     spec_path.write_text(json.dumps(run["spec"], indent=1))
@@ -243,8 +253,10 @@ def trainer_island(tag: str, stop_after_rounds: int | None = None, convert_only:
     log = _log_dir(tag)
     _gpu_facts(log, 2)
     nvml = _nvml_sampler(log / "nvml.csv")
-    _mirror_every(tag)
+    state_dir: list = []
+    _mirror_every(tag, 120.0, state_dir)
     plan = _plan(log)
+    state_dir.append(Path("/data/yeto", plan["run_id"]))
     trainer = plan["trainer"]
     env = _env(trainer["env"])
     island = list(trainer["miles"]["island_argv"])

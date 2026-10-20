@@ -217,3 +217,26 @@ def test_align_weight_version_is_a_no_op_on_a_trainer_only_island():
     updater = SimpleNamespace(weight_version=0)
     align_weight_version(SimpleNamespace(weight_updater=updater, args=None), next_version=3)
     assert updater.weight_version == 2
+
+
+def test_cut_state_walk_does_not_touch_the_chained_optimizer_property():
+    from types import SimpleNamespace
+
+    from yeto.rl.adapters.miles.cut_plugin import _state_dicts, side_effect_free_state
+
+    class Chained:
+        def __init__(self, members):
+            self.chained_optimizers = members
+            self.state = {}
+
+        @property
+        def optimizer(self):  # Megatron asserts len(chained_optimizers) == 1
+            raise AssertionError("ChainedOptimizer has more than one optimizer when accessing self.optimizer")
+
+    dense = SimpleNamespace(optimizer=SimpleNamespace(state={"a": {"step": 1}}), state=None)
+    expert = SimpleNamespace(optimizer=SimpleNamespace(state={}), state=None)
+    chained = Chained([dense, expert])
+    assert len(_state_dicts(chained)) == 3
+    with side_effect_free_state(chained):
+        expert.optimizer.state["new"] = {}
+    assert "new" not in expert.optimizer.state and dense.optimizer.state == {"a": {"step": 1}}
