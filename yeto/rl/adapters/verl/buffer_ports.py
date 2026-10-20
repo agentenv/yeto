@@ -140,15 +140,16 @@ class BufferReleasePublisher:
         merge: dict[str, Any] = {}
         release = None
         position = self.feed.read_cursor()
+        shards = self.feed.read_shards()
         released = self._release_version(state)
         if released is not None and not is_base_adapter(released, tensors):
             def write(directory: Path) -> None:
                 merge.update(self.merge(self.base_dir, tensors, directory))
 
             release = self.releases.release(released, digest, write, buffer_selected=position,
-                                            weights=FULL, origin=self._origin(state))
+                                            buffer_shards=shards, weights=FULL, origin=self._origin(state))
         record = {"policy_version": version, "param_version": param_version, "policy_hash": digest,
-                  "released": release is not None, "buffer_selected": position,
+                  "released": release is not None, "buffer_selected": position, "buffer_shards": shards,
                   "seconds": round(self.clock() - started, 3), "merge": merge or None,
                   "version_map": isl.vmap.to_dict()}
         if self.lane is not None:
