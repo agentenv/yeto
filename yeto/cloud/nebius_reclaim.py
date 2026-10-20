@@ -106,11 +106,26 @@ def install_command(container: str = CONTAINER, notice: str = NOTICE_FILE, ack: 
     )
 
 
+def spot_sampler_env() -> dict[str, str]:
+    """The environment of a spot sampler island on Nebius (S25 C1b): the sampler's
+    reclaim marker is the notice file the host unit writes, and the sampler
+    writes the ack file once its LEAVE is stored. The two env names of this
+    module also tell :func:`wants_host_hook` to install the unit."""
+    from yeto.rl.engine.sampler_resume import RECLAIM_ACK_ENV, RECLAIM_MARKER_ENV
+
+    assert RECLAIM_ACK_ENV == ACK_ENV
+    return {RECLAIM_MARKER_ENV: NOTICE_FILE, NOTICE_ENV: NOTICE_FILE, ACK_ENV: ACK_FILE}
+
+
 def wants_host_hook(task_envs) -> bool:
-    """True for a droppable island on Nebius (from the task's YETO_ISLAND_ROLE)."""
+    """True for a droppable island on Nebius (from the task's YETO_ISLAND_ROLE) and
+    for a Nebius spot sampler island (:func:`spot_sampler_env`)."""
     from yeto.cloud import droppable
 
-    doc = droppable.env_role(dict(task_envs or {}))
+    envs = dict(task_envs or {})
+    if envs.get(NOTICE_ENV) == NOTICE_FILE and envs.get(ACK_ENV) == ACK_FILE:
+        return True
+    doc = droppable.env_role(envs)
     return bool(doc) and doc.get("role") == droppable.DROPPABLE and doc.get("cloud") == "nebius"
 
 

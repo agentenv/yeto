@@ -273,9 +273,10 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
         RECLAIM_MARKER_ENV,
         ReclaimWatcher,
         SamplerMembership,
+        acknowledge_reclaim,
+        clear_reclaim_files,
         install_marker_signals,
         new_incarnation,
-        reclaim_marker,
         reclaim_requested,
         resume_point,
     )
@@ -300,7 +301,7 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
     if not sampler_id:
         raise SampleBufferRolloutError(f"{SAMPLER_ID_ENV} is not set")
     incarnation = env[INCARNATION_ENV] = new_incarnation()
-    reclaim_marker(env).unlink(missing_ok=True)  # a restarted machine keeps its /tmp
+    clear_reclaim_files(env)  # a restarted machine keeps its /tmp
     if env.get(RECLAIM_MARKER_ENV):  # set by the launcher on a pair's sampler island
         install_marker_signals(env)
     buffer = open_buffer(env, sampler=True)
@@ -342,7 +343,12 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
     error: BaseException | None = None
     follower = None
     reclaimed = lambda: reclaim_requested(env)  # noqa: E731
-    watcher = ReclaimWatcher(reclaimed, lambda: leave(LeaveReason.PREEMPTED)).start()
+
+    def leave_reclaimed() -> None:
+        leave(LeaveReason.PREEMPTED)
+        acknowledge_reclaim(env)  # a host hook (Nebius) lets the VM stop once the LEAVE is stored
+
+    watcher = ReclaimWatcher(reclaimed, leave_reclaimed).start()
     try:
         controller, executor = runner.run(init())
         lora = lora_mode(miles_args)
@@ -370,7 +376,7 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
         else:
             rounds = loop.run(start=resume.next_rollout_id)
         if reclaimed():
-            leave(LeaveReason.PREEMPTED)  # no-op when the watcher already left
+            leave_reclaimed()  # the LEAVE is a no-op when the watcher already left
             _hold_until_stopped(sleep, LEAVE_HOLD_S)
         else:
             leave(LeaveReason.FINISHED)

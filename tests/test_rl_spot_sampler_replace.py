@@ -445,13 +445,56 @@ def test_sampler_spot_bills_only_the_samplers_and_adds_no_spot_volume(monkeypatc
     args = _launcher_args("ports", base, gpu=gpu)
     args.controller = "local"
     _prepare_rl_args(args)
-    spots, volumes = [], []
+    from yeto.cloud import nebius_reclaim
+
+    spots, volumes, hooks, markers = [], [], [], []
     for m, spec in enumerate(parse_gpu_spec(args.gpu)):
         task = _island_task(make_miles_island_task, args, spec, m, 2, "none", {})
         spots.append(task.resources.use_spot)
         volumes.append(sorted(getattr(task, "storage_mounts", None) or {}))
+        hooks.append(nebius_reclaim.wants_host_hook(task.envs))
+        markers.append(task.envs.get(RECLAIM_MARKER_ENV))
     # the sampler gets the store mount only, like the trainer: no legacy --spot volume
     assert spots == [True, False] and volumes[0] == volumes[1] and len(volumes[0]) == 1
+    # Nebius stops the VM without signalling the container: the host unit writes the
+    # sampler's marker (S25 C1b); the on-demand trainer gets no unit
+    assert hooks == [True, False] and markers == [nebius_reclaim.NOTICE_FILE, None]
+
+
+def test_an_on_demand_sampler_on_nebius_gets_no_host_unit():
+    from yeto.launcher import _spot_sampler_cloud_env
+
+    sampler = SimpleNamespace(rl_sample_role="sampler", rl_sampler_node="island0", spot=False)
+    assert _spot_sampler_cloud_env(sampler, "nebius") == {}
+    sampler.spot = True
+    assert _spot_sampler_cloud_env(sampler, "modal") == {}  # Modal signals the container
+    assert _spot_sampler_cloud_env(sampler, "nebius")
+
+
+def test_the_reclaim_ack_is_written_only_where_a_host_hook_waits(tmp_path):
+    from yeto.rl.engine.sampler_resume import RECLAIM_ACK_ENV, acknowledge_reclaim, clear_reclaim_files
+
+    assert acknowledge_reclaim({}) is None
+    env = {RECLAIM_MARKER_ENV: str(tmp_path / "notice"), RECLAIM_ACK_ENV: str(tmp_path / "ack")}
+    assert acknowledge_reclaim(env) == tmp_path / "ack" and (tmp_path / "ack").exists()
+    (tmp_path / "notice").write_text("1\n")
+    clear_reclaim_files(env)  # a restarted VM keeps /tmp: the next incarnation starts clean
+    assert not (tmp_path / "notice").exists() and not (tmp_path / "ack").exists()
+
+
+def test_member_records_go_by_object_on_an_object_store(tmp_path):
+    from yeto.rl.engine.object_store import DirectoryObjectStore
+
+    class StagedStore(CheckpointStore):  # an s3/OSS store: its stage does not carry sample-buffer/
+        def __init__(self, root, objects):
+            super().__init__(root)
+            self.objects = objects
+
+    objects = DirectoryObjectStore(tmp_path / "bucket")
+    store = StagedStore(tmp_path / "stage", objects)
+    write_member(store, Member("island0", "a", 1.0, {"next_rollout_id": 0}, leave_reason="PREEMPTED"))
+    assert '"leave_reason": "PREEMPTED"' in objects.read("sample-buffer/members/island0/a.json").decode()
+    assert not (tmp_path / "stage" / "sample-buffer").exists()
 
 
 def test_sampler_spot_needs_a_pair():
