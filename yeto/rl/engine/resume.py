@@ -594,12 +594,16 @@ def watch_preempt_marker(controller: "ResumeController", *, environ: Mapping[str
     marker = reclaim_marker(env)
 
     def on_reclaim() -> None:
+        rank = 0
         try:
-            signum = int(json.loads(marker.read_text(encoding="utf-8")).get("signal"))
-            name = signal_name(signum)
+            doc = json.loads(marker.read_text(encoding="utf-8"))
+            name = signal_name(int(doc.get("signal")))
+            rank = int(doc.get("rank") or 0)
         except (OSError, ValueError, TypeError, AttributeError):
             name = "unknown"
-        record = write_preempt_marker(controller.checkpoint_store, signal_name=f"{name} (reclaim marker)",
+        # a multi-node island: the Modal runner of rank>0 relays its signal to rank 0
+        source = "reclaim marker" if rank == 0 else f"reclaim marker, rank {rank}"
+        record = write_preempt_marker(controller.checkpoint_store, signal_name=f"{name} ({source})",
                                       incarnation=controller.incarnation, rollout_id=None,
                                       store=controller.store)
         print(f"[yeto] rl_preempt_notice {json.dumps(record, sort_keys=True)}", file=out or sys.stdout,

@@ -138,3 +138,64 @@ def test_verl_island_in_an_actor_thread_watches_the_marker(tmp_path, monkeypatch
     notices = Path(resume.controller.checkpoint_store) / "preempt-notices"
     assert _wait(lambda: any(notices.glob("*.json")))
     assert json.loads(next(notices.glob("*.json")).read_text())["signal"] == "SIGINT (reclaim marker)"
+
+
+def test_rank1_reclaim_reaches_the_rank0_driver_through_the_relay(tmp_path):
+    """Known limit fixed: a reclaim of a rank>0 container of a multi-node island is
+    relayed by its runner to rank 0, whose marker the driver watcher turns into the notice."""
+    from yeto import modal_runner
+
+    marker0, marker1 = tmp_path / "reclaim0", tmp_path / "reclaim1"
+    controller = _controller(tmp_path)
+    watcher = watch_preempt_marker(controller, environ={RECLAIM_MARKER_ENV: str(marker0)}, poll_s=0.02,
+                                   out=io.StringIO())
+    relay = modal_runner.ReclaimRelay(
+        lambda num, peer: modal_runner._write_reclaim_marker(str(marker0), num, time.time, from_rank=peer),
+        port=0, host="127.0.0.1").start()
+    try:
+        env1 = {RECLAIM_MARKER_ENV: str(marker1), "SKYPILOT_NODE_RANK": "1",
+                "SKYPILOT_NODE_IPS": "127.0.0.1\n127.0.0.2",
+                modal_runner.RECLAIM_RELAY_PORT_ENV: str(relay.port)}
+        handlers = {}
+        sig = SimpleNamespace(SIGINT=signal.SIGINT, SIGTERM=signal.SIGTERM,
+                              signal=lambda num, fn: handlers.__setitem__(num, fn))
+
+        class Proc:
+            def wait(self):
+                handlers[signal.SIGINT](signal.SIGINT, None)
+                return 0
+
+        assert modal_runner._run_forwarding_to_learner(["true"], env1, popen=lambda cmd, env: Proc(),
+                                                       sig=sig) == 0
+        assert marker1.exists() and marker0.exists()
+        notices = tmp_path / "store" / "preempt-notices"
+        assert _wait(lambda: any(notices.glob("*.json")))
+        record = json.loads(next(notices.glob("*.json")).read_text())
+        assert record["signal"] == "SIGINT (reclaim marker, rank 1)"
+    finally:
+        relay.stop()
+        watcher.stop()
+
+
+def test_rank0_of_a_multi_node_island_starts_the_relay(tmp_path):
+    from yeto import modal_runner
+
+    env = {RECLAIM_MARKER_ENV: str(tmp_path / "m"), "SKYPILOT_NODE_RANK": "0",
+           "SKYPILOT_NODE_IPS": "127.0.0.1\n127.0.0.2", modal_runner.RECLAIM_RELAY_PORT_ENV: "0"}
+    seen = {}
+    sig = SimpleNamespace(SIGINT=signal.SIGINT, SIGTERM=signal.SIGTERM, signal=lambda num, fn: None)
+
+    class Proc:
+        def wait(self):
+            seen["relay"] = [t.name for t in threading.enumerate() if t.name == "reclaim-relay"]
+            return 0
+
+    assert modal_runner._run_forwarding_to_learner(["true"], env, popen=lambda cmd, env: Proc(), sig=sig) == 0
+    assert seen["relay"] == ["reclaim-relay"]
+    assert not any(t.name == "reclaim-relay" for t in threading.enumerate())
+
+
+def test_relay_send_fails_softly_when_rank0_is_gone():
+    from yeto import modal_runner
+
+    assert modal_runner.send_reclaim_to_rank0("127.0.0.1", 1, 2, 1, timeout_s=0.2, attempts=1) is False

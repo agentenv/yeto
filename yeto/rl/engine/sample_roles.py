@@ -28,8 +28,12 @@ with ``--rl-sample-role trainer`` and a syncer (strict or elastic sync, no
 reads lane m of the buffer; the island with learner id 0 releases the merged
 policy. The store reaches the island as ``--rl-sample-store`` (buffer and
 releases only: multi-island round cuts do not exist), the trainer count as
-``--rl-sample-lanes``. The samplers are separate
-no-sync launches over the same store.
+``--rl-sample-lanes``. The samplers are separate no-sync launches over the
+same store, or (S26 E9.4) islands of the same launch, a *synced group*
+(``--rl-sample-role trainer --rl-island-sample-role M:sampler``, a syncer): the
+listed islands are no-sync samplers (learner 0 of 1, like a pair's samplers)
+and every other island is a synced trainer, learner k of K in island order
+(:func:`synced_group_learners`).
 
 This module is engine-neutral; the Miles mapping is in
 ``adapters.miles.buffer_rollout``.
@@ -98,11 +102,37 @@ def check_synced_trainers(args: Any, num_islands: int) -> None:
     if int(num_islands) < 2:
         raise ValueError("--rl-sample-role trainer without --rl-single-island-no-sync is a synced "
                          f"multi-island launch: it needs at least two islands (got {num_islands})")
-    if is_pair(args) or is_convertible_pool(args):
-        raise ValueError("synced trainers do not combine with --rl-island-sample-role or "
-                         "convertible nodes")
+    if is_convertible_pool(args):
+        raise ValueError("synced trainers do not combine with convertible nodes")
     if getattr(args, "tuning", "lora") != "lora":
         raise ValueError("synced trainers merge LoRA deltas: they need --tuning lora")
+    if is_synced_group(args):
+        check_synced_group(args, num_islands)
+
+
+def check_synced_group(args: Any, num_islands: int) -> None:
+    """Launch checks of a synced group (module doc): ``--rl-island-sample-role``
+    names only samplers, at least two trainers remain, and the samplers split the
+    trainers' rounds evenly; then every island's own role checks."""
+    listed = _listed_roles(args, num_islands)
+    if any(role != SAMPLER for role in listed.values()):
+        raise ValueError("--rl-island-sample-role with --rl-sample-role trainer names the sampler "
+                         f"islands only (every other island is a synced trainer); got {listed}")
+    trainers = len(synced_group_learners(args, num_islands))
+    if trainers < 2:
+        raise ValueError(f"a synced group needs at least two trainer islands (got {trainers}); "
+                         "one trainer with samplers is a pair (--rl-single-island-no-sync)")
+    samplers = len(listed)
+    if (trainers * int(getattr(args, "total_steps", 0) or 0)) % samplers:
+        raise ValueError(f"--total-steps {args.total_steps}: {samplers} sampler islands share the "
+                         f"rounds of {trainers} trainers; trainers x total steps must be a multiple "
+                         "of the sampler count")
+    if int(getattr(args, "external_learners", 0) or 0):
+        raise ValueError("a synced group does not take external learners")
+    if getattr(args, "rl_trainer_scheduler", None) not in (None, "off"):
+        raise ValueError("--rl-trainer-scheduler does not combine with a synced group")
+    for m in range(num_islands):
+        check_launch(island_args(args, m, num_islands))
 
 
 def check_sample_store(args: Any) -> None:
@@ -155,6 +185,14 @@ def island_roles(args: Any, num_islands: int) -> dict[int, str]:
     a malformed, out-of-range or repeated entry."""
     if is_convertible_pool(args):
         return {m: CONVERTIBLE for m in convertible_islands(args)}
+    roles = _listed_roles(args, num_islands)
+    if is_synced_group(args):
+        # the listed islands are samplers; every other island is a synced trainer
+        return {m: roles.get(m, TRAINER) for m in range(int(num_islands))}
+    return roles
+
+
+def _listed_roles(args: Any, num_islands: int) -> dict[int, str]:
     roles: dict[int, str] = {}
     for item in getattr(args, "rl_island_sample_role", None) or ():
         island, sep, role = str(item).partition(":")
@@ -173,8 +211,32 @@ def island_roles(args: Any, num_islands: int) -> dict[int, str]:
 
 def is_pair(args: Any) -> bool:
     """Whether the launch is a store-coupled group: one trainer island and one or
-    more sampler islands (``--rl-island-sample-role``; "pair" for short)."""
-    return bool(getattr(args, "rl_island_sample_role", None))
+    more sampler islands (``--rl-island-sample-role`` without a synced trainer
+    role; "pair" for short)."""
+    return bool(getattr(args, "rl_island_sample_role", None)) and not is_synced_group(args)
+
+
+def is_synced_group(args: Any) -> bool:
+    """S26 E9.4: one launch of synced trainers and their sampler islands
+    (``--rl-sample-role trainer`` with a syncer and ``--rl-island-sample-role
+    M:sampler``; module doc)."""
+    return bool(getattr(args, "rl_island_sample_role", None)) and is_synced_trainer(args)
+
+
+def synced_group_learners(args: Any, num_islands: int) -> dict[int, int]:
+    """{trainer island: learner id} of a synced group: the trainers in island order
+    are learners 0..K-1 (learner 0 releases the merged policy); {} otherwise."""
+    if not is_synced_group(args):
+        return {}
+    trainers = [m for m, role in sorted(island_roles(args, num_islands).items()) if role == TRAINER]
+    return {m: k for k, m in enumerate(trainers)}
+
+
+def syncer_learner_count(args: Any, num_islands: int) -> int:
+    """The learners the syncer waits for among the launch's islands: the trainers
+    of a synced group, every island otherwise (a no-sync launch has no syncer)."""
+    learners = synced_group_learners(args, num_islands)
+    return len(learners) if learners else int(num_islands)
 
 
 def sampler_islands(args: Any, num_islands: int) -> list[int]:
@@ -204,6 +266,8 @@ def island_args(args: Any, island: int, num_islands: int) -> Any:
     roles = island_roles(args, num_islands)
     if not roles:
         return args
+    if is_synced_group(args):
+        return _synced_group_island_args(args, island, num_islands, roles)
     out = copy.copy(args)
     out.rl_sample_role = roles[island]
     if out.rl_sample_role in (SAMPLER, TRAINER):
@@ -235,11 +299,52 @@ def island_args(args: Any, island: int, num_islands: int) -> Any:
     return out
 
 
-def island_learner(args: Any, island: int, num_learners: int) -> tuple[int, int]:
+def _synced_group_island_args(args: Any, island: int, num_islands: int, roles: dict[int, str]) -> Any:
+    """Island args of a synced group. A trainer keeps the synced args (its lane and
+    the sampler shards); a sampler becomes a pair-style no-sync sampler over the
+    same store: legacy scheduling (no syncer), its node name and data slot, and
+    its share of the trainers' rounds."""
+    from ...launch.syncer import _ISLAND_SCHEDULING_PARAMS
+
+    samplers = sampler_islands(args, num_islands)
+    out = copy.copy(args)
+    out.rl_island_sample_role = None  # the island is no group: its role is below
+    out.rl_sample_role = roles[island]
+    out.rl_buffer_shards = buffer_shards(args, num_islands)
+    out.rl_synced_trainers = len(synced_group_learners(args, num_islands))
+    if out.rl_sample_role == TRAINER:
+        out.rl_sampler_node = None
+        out.rl_sampler_data_slot = None
+        out.rl_sampler_max_backlog_rounds = None
+        out.rl_sampler_min_round_seconds = None
+        return out
+    out.rl_single_island_no_sync = True
+    out.rl_island_scheduling = None
+    for name, _flag in _ISLAND_SCHEDULING_PARAMS:
+        setattr(out, name, None)
+    out.rl_sampler_node = node_name(island)
+    out.rl_sampler_data_slot = (DataSlot(samplers.index(island), len(samplers)).env()
+                                if len(samplers) > 1 else None)
+    out.rl_sample_wait_s = None
+    out.total_steps = out.rl_synced_trainers * int(args.total_steps) // len(samplers)
+    if getattr(args, "rl_total_fragment_steps", None) is not None:
+        out.rl_total_fragment_steps = out.total_steps * int(getattr(args, "fragments", 1) or 1)
+    return out
+
+
+def island_learner(args: Any, island: int, num_learners: int,
+                   num_islands: int | None = None) -> tuple[int, int]:
     """``(learner id, number of learners)`` the island command carries. A pair
-    island is a one-learner no-sync island: (0, 1). The launcher keeps ``island``
-    for the cluster / Modal function name, the tape and the volumes."""
-    return (0, 1) if is_store_coupled(args) else (island, num_learners)
+    island is a one-learner no-sync island: (0, 1); so is a synced group's sampler,
+    and its trainers are learners 0..K-1 (:func:`synced_group_learners`). The
+    launcher keeps ``island`` for the cluster / Modal function name, the tape and
+    the volumes."""
+    if is_store_coupled(args):
+        return 0, 1
+    learners = synced_group_learners(args, num_learners if num_islands is None else num_islands)
+    if learners:
+        return (learners[island], len(learners)) if island in learners else (0, 1)
+    return island, num_learners
 
 
 def buffer_full_parameter(args: Any) -> bool:

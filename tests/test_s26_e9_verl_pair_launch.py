@@ -170,3 +170,88 @@ def test_trainer_buffer_merges_named_shards(tmp_path):
     assert buffer._merge and set(buffer._expected_shards) == {"island0", "island1"}
     plain = open_trainer_buffer(store_for(str(tmp_path / "one")), batch_size=1)
     assert not plain._merge and plain._expected_shards is None
+
+
+def _group(monkeypatch, gpus, samplers, total_steps=4):
+    """One launch of synced trainers plus sampler islands (S26 E9.4 synced group)."""
+    from tests.test_rl_launcher import _Resources, _Storage, _StorageMode, _Task
+    from yeto import launcher
+    from yeto.gpu_spec import parse_gpu_spec
+    from yeto.launch.rl_island_task import make_miles_island_task
+
+    monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "k" * 64)  # test key; elastic islands sign messages
+    monkeypatch.setitem(sys.modules, "sky", types.SimpleNamespace(
+        Task=_Task, Resources=_Resources, Storage=_Storage, StorageMode=_StorageMode))
+    extra = ["--rl-backend", "verl", "--rl-checkpoint-store", STORE, "--rl-max-policy-age", "2",
+             "--reward-function", "gsm8k_reward:score", "--total-steps", str(total_steps),
+             "--gpu", ",".join(["modal:1xa10g"] * gpus), "--rl-sample-role", "trainer",
+             "--rl-island-scheduling", "elastic"]
+    for m in samplers:
+        extra += ["--rl-island-sample-role", f"{m}:sampler"]
+    args = _cli(tuple(extra))
+    launcher._prepare_rl_args(args)
+    args.model_revision, args.data_revision = "a" * 40, "b" * 40
+    args.source_sha256, args.reward_sha256 = "c" * 64, "d" * 64
+    specs = parse_gpu_spec(args.gpu)
+    learners = sample_roles.syncer_learner_count(args, len(specs))
+    out = []
+    for m in range(len(specs)):
+        task = launcher._island_task(make_miles_island_task, args, specs[m], m, learners, "127.0.0.1:1", {})
+        line = next(l for l in task.run.splitlines() if "-m yeto.rl.adapters.verl.island_entry" in l)
+        argv = shlex.split(line.split("-m yeto.rl.adapters.verl.island_entry", 1)[1]
+                           .replace("$LEARNER_ID", task.envs["LEARNER_ID"]).replace("$SYNCER_ADDR", "127.0.0.1:1"))
+        out.append((island_entry.parse_args(argv)[0], task, line))
+    return args, learners, out
+
+
+def test_one_launch_starts_synced_trainers_and_their_sampler(monkeypatch):
+    """Known limit fixed: synced trainers and a sampler start from one command."""
+    args, learners, ((t0, _, l0), (t1, _, l1), (s, s_task, s_line)) = _group(monkeypatch, 3, [2])
+    assert sample_roles.is_synced_group(args) and not sample_roles.is_pair(args)
+    assert learners == 2  # the syncer waits for the two trainers only
+    for k, t in enumerate((t0, t1)):
+        assert t.rl_sample_role == "trainer" and t.learner_id == k and t.rl_sample_lanes == 2
+        assert t.rl_sample_store and t.rl_resume_store is None
+        assert island_entry.sample_buffer_section(t)["lane"] == f"{k}/2"
+        assert "shards" not in island_entry.sample_buffer_section(t)  # one sampler writes the index
+    assert "--rl-island-scheduling elastic" in l0 and "--syncer" in l1
+    assert s.rl_sample_role == "sampler" and s.rl_sampler_node == "island2"
+    assert s.rl_resume_store == t0.rl_sample_store  # the same store
+    assert "--rl-single-island-no-sync" in s_line and "--rl-island-scheduling" not in s_line
+    assert s_task.envs["LEARNER_ID"] == "0" and s_task.envs.get("YETO_SPOT_RECLAIM_MARKER")
+    spec = sampler_entry.sampler_spec(s, model_path="/m", prompts_path="/p", card_model="A10G",
+                                      engine_version="v", event_tape="/t")
+    assert spec["num_rollouts"] == 8  # the rounds of both trainers (2 x 4)
+
+
+def test_synced_group_with_two_samplers_shards_and_slots(monkeypatch):
+    _args, learners, islands = _group(monkeypatch, 4, [0, 3])
+    (s0, _, _), (t0, _, _), (t1, _, _), (s1, _, _) = islands
+    assert learners == 2 and (t0.learner_id, t1.learner_id) == (0, 1)
+    assert island_entry.sample_buffer_section(t0)["shards"] == ["island0", "island3"]
+    assert (s0.rl_sampler_data_slot, s1.rl_sampler_data_slot) == ("0/2", "1/2")
+    for s in (s0, s1):
+        spec = sampler_entry.sampler_spec(s, model_path="/m", prompts_path="/p", card_model="A10G",
+                                          engine_version="v", event_tape="/t")
+        assert spec["num_rollouts"] == 4  # 2 trainers x 4 rounds over 2 samplers
+
+
+@pytest.mark.parametrize("gpus,samplers,steps,match", [
+    (2, [1], 4, "at least two trainer"),
+    (3, [2], 3, None),  # 2 x 3 rounds over one sampler: fine
+    (4, [2, 3], 3, None),  # 2 x 3 = 6 over 2 samplers: fine
+])
+def test_synced_group_launch_checks(monkeypatch, gpus, samplers, steps, match):
+    if match is None:
+        _group(monkeypatch, gpus, samplers, total_steps=steps)
+        return
+    with pytest.raises((ValueError, SystemExit), match=match):
+        _group(monkeypatch, gpus, samplers, total_steps=steps)
+
+
+def test_synced_group_lists_samplers_only():
+    args = types.SimpleNamespace(rl_island_sample_role=["0:trainer", "2:sampler"], rl_sample_role="trainer",
+                                 rl_single_island_no_sync=False, tuning="lora", total_steps=4,
+                                 rl_node_class=None)
+    with pytest.raises(ValueError, match="sampler islands only"):
+        sample_roles.check_synced_group(args, 3)

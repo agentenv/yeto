@@ -184,7 +184,7 @@ def _island_task(task_factory, args, spec, m, num_learners, syncer_addr, overrid
     iargs = droppable.role_args(io.island_args(rl_island_args(args, m), m, overrides), role)
     # L5.4 pair: the island's sample role; it runs as learner 0 of 1 (no syncer).
     iargs = sample_roles.island_args(iargs, m, rl_island_count(args))
-    learner_id, island_learners = sample_roles.island_learner(args, m, num_learners)
+    learner_id, island_learners = sample_roles.island_learner(args, m, num_learners, rl_island_count(args))
     task = task_factory(iargs, spec, learner_id, island_learners, syncer_addr)
     io.apply_to_task(task, {**io.island_env(args, m, overrides),
                             **(droppable.role_env(role, spec.cloud, spec.region) if role else {}),
@@ -318,7 +318,10 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     # counts them in --learners and its port is already public, so they
     # simply dial in with the printed join command.
     external = max(0, getattr(args, "external_learners", 0) or 0)
-    num_learners = len(specs) + external
+    from .rl.engine import sample_roles
+
+    # S26 E9.4: the sampler islands of a synced group are no learners of the syncer
+    num_learners = sample_roles.syncer_learner_count(args, len(specs)) + external
     require_modal_for_gpu_exact(args, specs)
     warn_if_model_wont_fit(args, specs)
     prefix = args.cluster_prefix
@@ -1015,13 +1018,15 @@ def dry_run_plan(args) -> dict:
         if rl:
             role = _island_role(args, specs, learner_id)
             task = _island_task(make_miles_island_task, args, spec, learner_id,
-                                len(specs) + external, "$SYNCER_ADDR", island_overrides, role)
+                                sample_roles.syncer_learner_count(args, len(specs)) + external,
+                                "$SYNCER_ADDR", island_overrides, role)
             if role is not None:
                 from .cloud.droppable import billing, rejoin_source
 
                 entry["island_role"] = {"role": role, "billing": billing(role),
                                         "rejoin": rejoin_source(role)}
-            if sample_roles.is_store_coupled(args):  # L5.4/L7.5: per-island role, learner 0 of 1
+            if sample_roles.is_store_coupled(args) or sample_roles.is_synced_group(args):
+                # L5.4/L7.5: per-island role, learner 0 of 1; S26 E9.4: synced group
                 entry["sample_role"] = sample_roles.island_args(
                     args, learner_id, len(specs)).rl_sample_role
             if learner_id == trainer_loop.held_island(args):

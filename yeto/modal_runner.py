@@ -951,22 +951,121 @@ def _run_forwarding_to_learner(cmd: list[str], env: dict, *, popen, sig, clock=t
     marker file the learner's watcher thread picks up. Nothing is signalled: the
     learner and the Ray processes keep running until the platform kills the
     container, so the rollout executor can answer the in-flight export."""
-    proc = popen(cmd, env=env)
     path = env.get("YETO_SPOT_RECLAIM_MARKER") or "/tmp/yeto-reclaim-requested"
+    rank, node_ips = _node_rank_and_ips(env)
+    relay = None
+    if rank == 0 and len(node_ips) > 1:
+        # S26 E9.1: the driver runs on rank 0; a reclaim of a rank>0 container reaches
+        # it only through this relay (the peer runner sends its signal over the cluster net)
+        relay = ReclaimRelay(lambda num, peer: _write_reclaim_marker(path, num, clock, from_rank=peer),
+                             port=reclaim_relay_port(env)).start()
+    proc = popen(cmd, env=env)
 
     def forward(num, _frame):
-        try:
-            tmp = f"{path}.tmp"
-            with open(tmp, "w", encoding="utf-8") as fh:
-                fh.write(json.dumps({"signal": int(num), "time": clock()}) + "\n")
-            os.replace(tmp, path)
-            print(f"[modal-island] signal {num}: reclaim marker {path} written for the learner", flush=True)
-        except OSError as exc:
-            print(f"[modal-island] signal {num}: reclaim marker not written ({exc})", flush=True)
+        _write_reclaim_marker(path, num, clock, from_rank=rank)
+        if rank > 0 and node_ips:
+            send_reclaim_to_rank0(node_ips[0], reclaim_relay_port(env), num, rank)
 
     for name in ("SIGINT", "SIGTERM"):
         sig.signal(getattr(sig, name), forward)
-    return proc.wait()
+    try:
+        return proc.wait()
+    finally:
+        if relay is not None:
+            relay.stop()
+
+
+RECLAIM_RELAY_PORT_ENV = "YETO_RECLAIM_RELAY_PORT"
+RECLAIM_RELAY_PORT_DEFAULT = 29417
+
+
+def reclaim_relay_port(env: dict) -> int:
+    return int(env.get(RECLAIM_RELAY_PORT_ENV) or RECLAIM_RELAY_PORT_DEFAULT)
+
+
+def _node_rank_and_ips(env: dict) -> tuple[int, list[str]]:
+    """This container's rank and the cluster's node ips (from :func:`skypilot_env`)."""
+    ips = [ip for ip in (env.get("SKYPILOT_NODE_IPS") or "").splitlines() if ip.strip()]
+    return int(env.get("SKYPILOT_NODE_RANK") or 0), ips
+
+
+def _write_reclaim_marker(path: str, num: int, clock, *, from_rank: int) -> None:
+    """Write the reclaim marker the learner's watcher polls; report, never raise
+    (it runs in a signal handler or the relay thread)."""
+    try:
+        tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"signal": int(num), "time": clock(), "rank": int(from_rank)}) + "\n")
+        os.replace(tmp, path)
+        print(f"[modal-island] signal {num} (rank {from_rank}): reclaim marker {path} written for the learner",
+              flush=True)
+    except OSError as exc:
+        print(f"[modal-island] signal {num} (rank {from_rank}): reclaim marker not written ({exc})", flush=True)
+
+
+def send_reclaim_to_rank0(host: str, port: int, num: int, rank: int, *, timeout_s: float = 2.0,
+                          attempts: int = 3) -> bool:
+    """A rank>0 runner tells rank 0's relay that this container is being reclaimed.
+    Short timeouts: it runs inside Modal's grace window. Returns True once acked."""
+    msg = (json.dumps({"signal": int(num), "rank": int(rank)}) + "\n").encode()
+    for attempt in range(attempts):
+        try:
+            with socket.create_connection((host, port), timeout=timeout_s) as conn:
+                conn.sendall(msg)
+                conn.settimeout(timeout_s)
+                if conn.recv(16).startswith(b"ok"):
+                    print(f"[modal-island] signal {num}: relayed to rank 0 at {host}:{port}", flush=True)
+                    return True
+        except OSError as exc:
+            print(f"[modal-island] signal {num}: relay to rank 0 failed (attempt {attempt + 1}: {exc})",
+                  flush=True)
+            time.sleep(0.2)
+    return False
+
+
+class ReclaimRelay:
+    """On rank 0 of a multi-node island: accept reclaim messages from peer runners
+    and hand each to ``on_reclaim(signal, rank)`` (which writes the local marker)."""
+
+    def __init__(self, on_reclaim, *, port: int, host: str = "0.0.0.0") -> None:
+        self.on_reclaim, self.host, self.port = on_reclaim, host, port
+        self._sock: socket.socket | None = None
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+
+    def start(self) -> "ReclaimRelay":
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((self.host, self.port))
+        sock.listen(8)
+        sock.settimeout(0.5)
+        self._sock, self.port = sock, sock.getsockname()[1]
+        self._thread = threading.Thread(target=self._serve, name="reclaim-relay", daemon=True)
+        self._thread.start()
+        print(f"[modal-island] reclaim relay listening on port {self.port}", flush=True)
+        return self
+
+    def _serve(self) -> None:
+        while not self._stop.is_set():
+            try:
+                conn, _addr = self._sock.accept()
+            except (socket.timeout, OSError):
+                continue
+            with conn:
+                try:
+                    conn.settimeout(2.0)
+                    doc = json.loads(conn.makefile("r", encoding="utf-8").readline())
+                    self.on_reclaim(int(doc["signal"]), int(doc["rank"]))
+                    conn.sendall(b"ok\n")
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    print(f"[modal-island] reclaim relay: bad message ({exc})", flush=True)
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._sock is not None:
+            self._sock.close()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
 
 
 class ModalOps:
