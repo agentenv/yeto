@@ -995,7 +995,10 @@ def _write_reclaim_marker(path: str, num: int, clock, *, from_rank: int) -> None
     try:
         tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
-            fh.write(json.dumps({"signal": int(num), "time": clock(), "rank": int(from_rank)}) + "\n")
+            record = {"signal": int(num), "time": clock()}
+            if from_rank:  # relayed from a rank>0 container (the driver names it)
+                record["rank"] = int(from_rank)
+            fh.write(json.dumps(record) + "\n")
         os.replace(tmp, path)
         print(f"[modal-island] signal {num} (rank {from_rank}): reclaim marker {path} written for the learner",
               flush=True)
