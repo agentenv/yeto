@@ -54,7 +54,9 @@ _BOUNDED_FILTER_STATE_ATTR = "_yeto_bounded_filter_state"
 # rollout's metadata by the driver-side reader, so they are never attributed
 # to the next round.
 ROUND_META_SCHEMA = "yeto-rl-round-metadata-v1"
-ROUND_METADATA_KEYS = frozenset({"nonzero_advantages"})
+# buffer_stale_groups: groups the sample-buffer reader passed over this round
+# because they were older than max_policy_age (consumed, not trained)
+ROUND_METADATA_KEYS = frozenset({"nonzero_advantages", "buffer_stale_groups"})
 
 
 def current_round_id(samples: Sequence[Any] = (), sink: str | None = None) -> int | None:

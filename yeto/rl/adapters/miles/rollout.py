@@ -476,6 +476,9 @@ def handle_from_metadata(
         nonzero_advantages=(
             int(payload["nonzero_advantages"]) if "nonzero_advantages" in payload else None
         ),
+        buffer_stale_groups=(
+            int(payload["buffer_stale_groups"]) if "buffer_stale_groups" in payload else None
+        ),
         policy_age_violation=(
             int(payload["policy_age_violation"]) if "policy_age_violation" in payload else None
         ),

@@ -217,14 +217,22 @@ def judge_e4(ev: Evidence, v: Verdict, cfg: dict) -> None:
             {"ratio_or_tis": ratio})
     # two distinct drop points, each counted once: the round collector's over-age discard
     # (rl_rollout_carry_over, both backends) and the Miles buffer reader passing over
-    # stale groups, which no yeto event reports: buffer positions consumed (the last
-    # release's buffer_selected) minus groups trained (round labels; the S25 C1 C6 count)
+    # stale groups (rl_buffer_stale_skipped, one per round)
     carried = numeric_sum(ev.of(t, "rl_rollout_carry_over"), "over_age_discarded_groups")
-    passed_over = 0.0
+    skipped = ev.of(t, "rl_buffer_stale_skipped")
+    passed_over = numeric_sum(skipped, "stale_groups")
+    # cross-check (the reading before the event existed): buffer positions consumed (the
+    # last release's buffer_selected) minus groups trained (round labels; S25 C1 C6 count)
+    legacy = None
     releases = ev.of(t, "rl_policy_released")
     if ev.backend == "miles" and releases and releases[-1].get("buffer_selected") is not None:
-        trained_groups = numeric_sum(ev.of(t, "rl_round_labels"), "rl/groups")
-        passed_over = float(releases[-1]["buffer_selected"]) - trained_groups
+        legacy = float(releases[-1]["buffer_selected"]) - numeric_sum(ev.of(t, "rl_round_labels"), "rl/groups")
+    if ev.backend == "miles":
+        v.check("stale_event", "the Miles buffer reader taped rl_buffer_stale_skipped every round",
+                len(skipped) == cfg["rounds"], len(skipped))
+        if legacy is not None:
+            v.check("stale_cross_check", "taped passed-over groups = consumed positions - trained groups",
+                    passed_over == legacy, {"event": passed_over, "consumed_minus_trained": legacy})
     dropped = carried + passed_over
     v.check("over_age_drop", "at least one group older than max_policy_age was dropped, not trained", dropped >= 1,
             dropped)
@@ -235,7 +243,8 @@ def judge_e4(ev: Evidence, v: Verdict, cfg: dict) -> None:
             len({e.get("policy_version") for e in loads}) >= 2, sorted({e.get("policy_version") for e in loads}))
     _rc_ok(ev, v, ignore=("sampler_launch", "sampler-0", "sampler-1"))
     _gpu(ev, v, cfg)
-    v.metrics.update(over_age_discarded_groups=carried, stale_passed_over_groups=passed_over, ratio_p50=ratio,
+    v.metrics.update(over_age_discarded_groups=carried, stale_passed_over_groups=passed_over,
+                     stale_consumed_minus_trained=legacy, ratio_p50=ratio,
                      **_round_metrics(ev, t))
 
 

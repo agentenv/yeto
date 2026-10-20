@@ -227,3 +227,27 @@ def test_miles_switches_are_derived_from_the_limit():
     assert row.translate(AlgorithmSpec(execution=ExecutionSpec(max_policy_staleness=1))) == []
     with pytest.raises((AlgorithmSpecError, ValueError), match="rl-max-policy-age"):
         af.absorb_extra_argv(AlgorithmSpec(), ["--partial-rollout"])
+
+
+def test_driver_tapes_the_buffer_readers_stale_groups_per_round(tmp_path):
+    """T-EVAL E4: groups a sample-buffer reader passed over as too old reach the
+    tape as rl_buffer_stale_skipped (one per round, 0 included); an engine that
+    does not report them tapes nothing."""
+    import dataclasses
+
+    stale = {0: 0, 1: 3, 2: 1}
+    driver = _driver(tmp_path, 1)
+    original = driver.rollout.generate
+
+    def gen(rid, **kw):
+        return dataclasses.replace(original(rid, **kw), buffer_stale_groups=stale[rid])
+
+    driver.rollout.generate = gen
+    driver.run()
+    events = [json.loads(l) for l in (tmp_path / "e.jsonl").read_text().splitlines()]
+    skipped = [e for e in events if e["event"] == "rl_buffer_stale_skipped"]
+    assert [(e["rollout_id"], e["stale_groups"], e["max_policy_age"]) for e in skipped] == [
+        (0, 0, 1), (1, 3, 1), (2, 1, 1)]
+    (tmp_path / "x").mkdir()
+    _driver(tmp_path / "x", 1).run()
+    assert '"rl_buffer_stale_skipped"' not in (tmp_path / "x" / "e.jsonl").read_text()

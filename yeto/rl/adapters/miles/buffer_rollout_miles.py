@@ -44,7 +44,7 @@ from .buffer_rollout import (
     register_reader,
     renumber_group,
 )
-from .rollout_meta_hook import data_cursor
+from .rollout_meta_hook import data_cursor, record_round_metadata
 
 
 def _flat(group: Any) -> list[Any]:
@@ -136,6 +136,8 @@ class _BufferRound:
         samples = [[Sample.from_dict(d) for d in renumber_group(
             group, position=position, samples_per_group=self.samples_per_group)]
             for position, group in groups]
+        record_round_metadata(self.args, int(input.rollout_id),
+                              buffer_stale_groups=int(report.stale_groups))
         self._run_round_hooks(samples)
         return RolloutFnTrainOutput(samples=samples, metrics={**report.metrics(), **flat_metrics(source)})
 

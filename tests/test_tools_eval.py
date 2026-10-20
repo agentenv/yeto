@@ -89,3 +89,47 @@ def test_run_refuses_unregistered_run_id(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "LEDGER", ledger)
     with pytest.raises(SystemExit, match="not pre-registered"):
         cli._preflight("eval-unregistered")
+
+
+class _E4Evidence:
+    """Just the event reads judge_e4 makes (one Miles trainer, one sampler)."""
+    backend = "miles"
+
+    def __init__(self, trainer_events, sampler_events):
+        self.events = {"trainer": trainer_events, "sampler-0": sampler_events}
+
+    def trainers(self):
+        return ["trainer"]
+
+    def samplers(self):
+        return ["sampler-0"]
+
+    def of(self, component, name):
+        return [e for e in self.events.get(component, []) if e["event"] == name]
+
+
+@pytest.mark.parametrize("stale,consumed,checks", [
+    ((0, 16, 0, 0), 80, {"stale_event": True, "stale_cross_check": True, "over_age_drop": True}),
+    ((0, 15, 0, 0), 80, {"stale_event": True, "stale_cross_check": False, "over_age_drop": True}),
+    ((), 80, {"stale_event": False, "stale_cross_check": False, "over_age_drop": False}),
+])
+def test_e4_miles_reads_the_stale_event_and_cross_checks_consumed_minus_trained(monkeypatch, stale, consumed,
+                                                                                checks):
+    from tools.eval import judges
+
+    for name in ("_rc_ok", "_gpu"):
+        monkeypatch.setattr(judges, name, lambda *a, **kw: None)
+    monkeypatch.setattr(judges, "_round_metrics", lambda ev, t: {})
+    rounds = 4
+    trainer = [{"event": "rl_round_trained", "rollout_id": r, "mismatch": {"tis": 1.0, "tis_abs": 0.01}}
+               for r in range(rounds)]
+    trainer += [{"event": "rl_local_round", "base_policy_version": r} for r in range(rounds)]
+    trainer += [{"event": "rl_round_labels", "rollout_id": r, "rl/groups": 16} for r in range(rounds)]
+    trainer += [{"event": "rl_buffer_stale_skipped", "rollout_id": r, "stale_groups": n, "max_policy_age": 1}
+                for r, n in enumerate(stale)]
+    trainer += [{"event": "rl_policy_released", "policy_version": rounds, "buffer_selected": consumed}]
+    monkeypatch.setattr(judges, "_trained_rounds", lambda ev, t: list(range(rounds)))
+    sampler = [{"event": "rl_sampler_policy_loaded", "policy_version": v} for v in (0, 1)]
+    v = Verdict("E4", "miles", "r", True)
+    judges.judge_e4(_E4Evidence(trainer, sampler), v, {"rounds": rounds, "max_policy_age": 1})
+    assert {c.id: c.passed for c in v.criteria if c.id in checks} == checks
