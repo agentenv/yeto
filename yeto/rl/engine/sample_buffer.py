@@ -405,8 +405,14 @@ class FileSampleBuffer:
 
     # ---------------------------------------------------------------- writing
     def write_payload(self, sample_id: str, data: bytes) -> str:
-        """Store one payload; returns the ``payload_ref`` for its index entry."""
-        return self.index.write_payload(payload_name(sample_id), data)
+        """Store one payload; returns the ``payload_ref`` for its index entry.
+        A payload is written once: a name already in the store is refused (a
+        replacement sampler must never overwrite a group an index entry names)."""
+        name = payload_name(sample_id)
+        if self.index.has_payload(f"{PAYLOADS}/{name}"):
+            raise SampleBufferError(f"payload {name} is already in the sample buffer; "
+                                    "a payload is never overwritten")
+        return self.index.write_payload(name, data)
 
     def read_payload(self, payload_ref: str) -> bytes:
         return self.index.read_payload(payload_ref)
