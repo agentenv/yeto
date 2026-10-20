@@ -128,13 +128,24 @@ def parse_verl(metrics_jsonl: str, log_text: str = "", *, samples_per_round: int
     """verl FileLogger rows (+ console step lines for end times)."""
     p = Parsed()
     ends = _step_ends(log_text, VERL_STEP_LINE)
+    recs: dict[int, dict[str, Any]] = {}
+    segs: dict[int, dict[str, float]] = {}
     for line in metrics_jsonl.splitlines():
         if not line.strip():
             continue
         row = json.loads(line)
         d, step = row.get("data") or {}, int(row["step"])
-        rec = _record(step)
-        _set(p, rec, "t_end_unix", ends.get(step), "console step line (harness time prefix)")
+        rnd = step
+        if mode == "async" and "training/global_step" in d:
+            # bare fully_async logs a step's training metrics one parameter version
+            # later (row step N+1, training/global_step N) and never logs the last
+            # step's; the rows without it carry the weight sync that ends version N.
+            rnd = int(d["training/global_step"])
+        elif mode == "async" and step == 0:
+            continue  # the weight sync before the first training step
+        rec = recs.setdefault(rnd, _record(rnd))
+        if rnd == step:
+            _set(p, rec, "t_end_unix", ends.get(step), "console step line (harness time prefix)")
         gen, key = _first(d, ("timing_s/gen",))
         _set(p, rec, "gen_s", gen, key)
         parts = [k for k in ("timing_s/old_log_prob", "timing_s/update_actor") if d.get(k) is not None]
@@ -161,10 +172,13 @@ def parse_verl(metrics_jsonl: str, log_text: str = "", *, samples_per_round: int
         _set(p, rec, "dropped_samples", dropped, key)
         generated, key = _first(d, ("fully_async/count/total_generated_samples",))
         _set(p, rec, "generated_samples", generated, key)
-        p.rounds.append(rec)
-        p.segments_raw.append({k: float(v) for k, v in d.items() if k.startswith("timing_s/")
-                               and isinstance(v, (int, float))})
-    p.rounds.sort(key=lambda r: r["round"])
+        segs.setdefault(rnd, {}).update({k: float(v) for k, v in d.items() if k.startswith("timing_s/")
+                                         and isinstance(v, (int, float))})
+    for rec in recs.values():  # a step whose metrics verl never logged still trained one fixed batch
+        _set(p, rec, "samples", samples_per_round if rec["samples"] is None else rec["samples"],
+             "config: samples per step (verl trains a fixed batch)")
+    p.rounds = [recs[r] for r in sorted(recs)]
+    p.segments_raw = [segs[r] for r in sorted(recs)]
     _round_s_from_ends(p)
     na = {"sampler_update_s"}
     if mode == "sync":

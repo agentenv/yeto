@@ -202,4 +202,8 @@ def _missing(by_arm: dict[str, list[dict]]) -> list[str]:
         if a in by_arm:
             src = by_arm[a][0]["sources"]
             rows.append(f"- {a}: " + "; ".join(f"{k}: {v}" for k, v in src.items()))
+            partial = {k: v for s in by_arm[a] for k, v in (s.get("rate_rounds") or {}).items()}
+            if partial:
+                rows.append(f"  - {a}: rates over the steady rounds that report the value: "
+                            + "; ".join(f"{k} {v}" for k, v in partial.items()))
     return rows + [""]

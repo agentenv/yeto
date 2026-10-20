@@ -58,11 +58,16 @@ def summarize(parsed: dict[str, Any], *, prices_path: Path = PRICES) -> dict[str
                          "rc": parsed.get("rc")}
     wall = _sum_all(steady, "round_s")
     s["steady_wall_s"] = round(wall, 3) if wall is not None else None
+    s["rate_rounds"] = {}
     for key, out in (("gen_tokens", "gen_tok_per_card_s"), ("train_tokens", "train_tok_per_card_s"),
                      ("samples", "samples_per_s")):
-        total = _sum_all(steady, key)
-        denom = (wall * (cards if key != "samples" else 1)) if wall else None
-        s[out] = round(total / denom, 3) if total is not None and denom else None
+        # over the steady rounds that report the value (bare verl fully_async never
+        # logs its last step's batch); the round count is kept when it is fewer
+        known = [r for r in steady if r.get(key) is not None and r.get("round_s") is not None]
+        time_s = sum(r["round_s"] for r in known) * (cards if key != "samples" else 1)
+        s[out] = round(sum(r[key] for r in known) / time_s, 3) if known and time_s else None
+        if known and len(known) < len(steady):
+            s["rate_rounds"][out] = f"{len(known)}/{len(steady)}"
     s["round_s_median"] = _median(_vals(steady, "round_s"))
     s["round_s_range"] = [min(_vals(steady, "round_s")), max(_vals(steady, "round_s"))] if _vals(steady, "round_s") \
         else None

@@ -346,3 +346,21 @@ def test_bare_verl_async_uses_the_fork_working_lora_sync():
     script = spec.bare_script(SPEC, spec.Arm.parse("bare-verl-async"), "r")
     assert "actor_rollout_ref.model.lora.merge=True" in script and "export NCCL_CUMEM_HOST_ENABLE=0" in script
     assert "NCCL_CUMEM_HOST_ENABLE" not in spec.bare_script(SPEC, spec.Arm.parse("bare-verl-sync"), "r")
+
+
+def test_parse_bare_verl_async_rows_lag_one_version():
+    # fork acad9875 fully_async: weight-sync row at version N, training row of step N at N+1,
+    # the last step's training row never written
+    rows = [{"step": 0, "data": {"fully_async/rollouter/active_time": 9.0}}]
+    for v in range(1, 4):
+        rows.append({"step": v, "data": {"fully_async/rollouter/active_time": 1.0}})
+        if v > 1:
+            rows.append({"step": v, "data": {"training/global_step": v - 1, "response_length/mean": 10.0,
+                                             "critic/score/mean": 0.5}})
+    log = "\n".join(f"{100 + v}.0 (FullyAsyncTrainer) step:{v} - x:1" for v in range(4))
+    p = parse.parse_verl("\n".join(json.dumps(r) for r in rows), log, samples_per_round=4, trainer_cards=1,
+                         mode="async")
+    assert [r["round"] for r in p.rounds] == [1, 2, 3]
+    assert [r["t_end_unix"] for r in p.rounds] == [101.0, 102.0, 103.0]
+    assert [r["reward_mean"] for r in p.rounds] == [0.5, 0.5, None]
+    assert [r["samples"] for r in p.rounds] == [4, 4, 4]
