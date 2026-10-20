@@ -42,6 +42,10 @@ CUSTOM_PROVIDERS: Mapping[str, str] = {
 # server, which does not authenticate the agent.
 AGENT_API_KEY = "dummy"
 
+# Harbor codex CLI flags: the gateway serves no reasoning summaries (it refuses
+# ``reasoning.summary`` other than none) and no hosted web search.
+CODEX_KWARGS: Mapping[str, str] = {"reasoning_summary": "none", "web_search": "disabled"}
+
 
 @dataclass(frozen=True)
 class HarborSettings:
@@ -112,6 +116,8 @@ def build_trial_config(task: AgentTask, endpoint: str, settings: HarborSettings)
     version = task.agent_version or (CODEX_VERSION if task.agent == "codex" else None)
     if version is not None:
         kwargs["version"] = version
+    if task.agent == "codex":
+        kwargs.update(CODEX_KWARGS)
     if task.budget.max_seq_len is not None and task.agent.startswith("terminus"):
         kwargs["max_seq_len"] = task.budget.max_seq_len
     return TrialConfig(

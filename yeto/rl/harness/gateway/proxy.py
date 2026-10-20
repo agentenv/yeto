@@ -27,18 +27,21 @@ from yeto.rl.harness.chat_templates import ChatTemplate, TemplateError
 
 from .core import AdmissionClosed, Gateway, GatewayConfig, GatewayError, SamplingOverrideError, TrajectoryInvalid
 from .records import RecordingBackend
-from .translate import UnsupportedShape
+from .translate import OMITTED_TOOL_TYPES, UnsupportedShape
 
 Message = dict[str, Any]
 
 
 def chat_tools(entry: str, body: dict[str, Any]) -> list[Message]:
-    """The request's tool schemas in Chat form (Responses tools are flat)."""
+    """The request's tool schemas in Chat form (Responses tools are flat).
+    Types in :data:`OMITTED_TOOL_TYPES` are left out of the prompt."""
     tools = body.get("tools") or []
     if entry != "responses":
         return list(tools)
     out = []
     for tool in tools:
+        if isinstance(tool, dict) and tool.get("type") in OMITTED_TOOL_TYPES:
+            continue
         if not isinstance(tool, dict) or tool.get("type") != "function":
             raise UnsupportedShape(f"unsupported tool {tool!r}")
         function = {k: tool[k] for k in ("name", "description", "parameters") if k in tool}

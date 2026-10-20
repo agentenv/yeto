@@ -286,6 +286,7 @@ def test_miles_agent_function_wraps_the_example_with_the_outer_layer(miles_stubs
         @classmethod
         async def create(cls, config):
             seen["version"] = config.agent.kwargs["version"]
+            seen["summary"] = config.agent.kwargs["reasoning_summary"]
             return cls(config)
 
     Trial.result = _result({"reward": 1.0})
@@ -295,6 +296,7 @@ def test_miles_agent_function_wraps_the_example_with_the_outer_layer(miles_stubs
     out = _run(mod.run("http://ss:30000/sessions/s1", metadata={"instance_id": "fix-git"}))
     assert example.calls == ["key", ("codex", "http://ss:30000/sessions/s1/v1")]
     assert seen["version"] == "0.145.0"  # Harbor's default would be @latest
+    assert seen["summary"] == "none"  # the gateway refuses reasoning summaries
     assert (out[OUTCOME_KEY], out["reward"]) == ("ok", 1.0)
 
     Trial.result = _result(None, "EnvironmentStartTimeoutError")

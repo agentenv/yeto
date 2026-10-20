@@ -16,7 +16,13 @@ Registered templates:
   one (same template family). Load the real checkpoint with
   ``ChatTemplate.load("glm5", tokenizer_path=...)``; whether GLM5.3 uses the
   same template is not verified;
-* ``qwen3``: the Qwen3 hermes tool-call format; the small CPU stand-in.
+* ``qwen3``: the Qwen3 hermes tool-call format; the small CPU stand-in;
+* ``qwen38``: Qwen3.8 (Qwen3.5 family) XML tool calls (``<tool_call><function=name>
+  <parameter=k>v</parameter></function></tool_call>``), thinking kept in every
+  turn (``preserve_thinking``). Load with the checkpoint's tokenizer
+  (``tokenizer_path``); a deployment may set ``reasoning_effort`` by
+  replacing ``template_kwargs`` (xhigh / medium / low; the template's default
+  is xhigh).
 
 :func:`check_alignment` is the N10.6 check: the template rendering, tokenized
 the way the proxy sends it, must equal the tokenizer's own
@@ -117,6 +123,23 @@ def parse_qwen3(text: str) -> Message:
     return _assistant(content, reasoning, calls)
 
 
+_QWEN38_CALL = re.compile(r"<tool_call>\s*<function=([^>\n]+)>(.*?)</function>\s*</tool_call>", re.S)
+_QWEN38_PARAM = re.compile(r"<parameter=([^>\n]+)>\n?(.*?)\n?</parameter>", re.S)
+
+
+def parse_qwen38(text: str) -> Message:
+    """Qwen3.8 output after the ``<think>\\n`` generation prompt."""
+    reasoning, rest = _split_reasoning(text, opened=True)
+    calls = []
+    for index, match in enumerate(_QWEN38_CALL.finditer(rest)):
+        arguments = {k.strip(): _glm_value(v) for k, v in _QWEN38_PARAM.findall(match.group(2))}
+        calls.append(_tool_call(_call_id(text, index), match.group(1).strip(), arguments))
+    if rest.count("<tool_call>") != len(calls):
+        raise TemplateError(f"Qwen3.8 tool call is not <function=...> XML: {rest[rest.find('<tool_call>'):][:80]!r}")
+    content = rest.split("<tool_call>", 1)[0].strip()
+    return _assistant(content, reasoning, calls)
+
+
 # ---------------------------------------------------------------------- registry
 @dataclass(frozen=True)
 class TemplateSpec:
@@ -124,7 +147,10 @@ class TemplateSpec:
     an assistant turn (sent to the engine as stop token ids).
     ``keeps_history_reasoning``: with ``template_kwargs`` the template renders
     the reasoning of every earlier turn (gateway ``ChainRegistry`` input).
-    ``verified``: what the token alignment check ran on (free text)."""
+    ``verified``: what the token alignment check ran on (free text).
+    ``merge_leading_system``: join the leading system messages into one (the
+    template accepts a single system message; Codex sends its instructions
+    and a developer message, both system in the gateway form)."""
 
     name: str
     tokenizer: str
@@ -133,6 +159,7 @@ class TemplateSpec:
     template_kwargs: Mapping[str, Any] = field(default_factory=dict)
     keeps_history_reasoning: bool = True
     verified: str = "not verified"
+    merge_leading_system: bool = False
 
 
 TEMPLATES: dict[str, TemplateSpec] = {}
@@ -157,9 +184,26 @@ register_template(TemplateSpec(
     # The Qwen3 template drops the reasoning of turns before the last user turn.
     keeps_history_reasoning=False,
     verified="Qwen3-0.6B tokenizer (CPU stand-in)"))
+register_template(TemplateSpec(
+    name="qwen38", tokenizer="Qwen/Qwen3.8-27B", parser=parse_qwen38,
+    stop_tokens=("<|im_end|>", "<|endoftext|>"),
+    template_kwargs={"enable_thinking": True, "preserve_thinking": True},
+    verified="Qwen3.8-27B@1d4bf0f2 tokenizer (S25 T-G2)", merge_leading_system=True))
 
 
 # ---------------------------------------------------------------------- template
+def _merge_leading_system(messages: Sequence[Message]) -> list[Message]:
+    head = 0
+    while head < len(messages) and messages[head].get("role") == "system":
+        head += 1
+    if head < 2:
+        return list(messages)
+    if any(not isinstance(m.get("content"), str) for m in messages[:head]):
+        raise TemplateError("cannot merge system messages with non-text content")
+    merged = {"role": "system", "content": "\n\n".join(m["content"] for m in messages[:head])}
+    return [merged, *messages[head:]]
+
+
 def _render_ready(messages: Sequence[Message]) -> list[Message]:
     """Canonical messages -> template input: tool-call arguments as objects."""
     out = []
@@ -208,9 +252,18 @@ class ChatTemplate:
 
     def render(self, messages: Sequence[Message], *, tools: Sequence[Message] | None = None,
                add_generation_prompt: bool) -> str:
-        return self.tokenizer.apply_chat_template(
-            _render_ready(messages), tools=list(tools) if tools else None, tokenize=False,
-            add_generation_prompt=add_generation_prompt, **dict(self.spec.template_kwargs))
+        import jinja2  # comes with transformers
+
+        try:
+            return self.tokenizer.apply_chat_template(
+                self._ready(messages), tools=list(tools) if tools else None, tokenize=False,
+                add_generation_prompt=add_generation_prompt, **dict(self.spec.template_kwargs))
+        except jinja2.TemplateError as exc:  # raise_exception(...): the template refuses the conversation
+            raise TemplateError(f"{self.spec.name} template refused the conversation: {exc}") from exc
+
+    def _ready(self, messages: Sequence[Message]) -> list[Message]:
+        ready = _render_ready(messages)
+        return _merge_leading_system(ready) if self.spec.merge_leading_system else ready
 
     def encode(self, text: str) -> list[int]:
         """Token ids of rendered text; the template writes its own BOS tokens."""
@@ -252,7 +305,7 @@ def check_alignment(template: ChatTemplate, messages: Sequence[Message], *,
     text = template.render(messages, tools=tools, add_generation_prompt=add_generation_prompt)
     ours = template.encode(text)
     reference = template.tokenizer.apply_chat_template(
-        _render_ready(messages), tools=list(tools) if tools else None, tokenize=True,
+        template._ready(messages), tools=list(tools) if tools else None, tokenize=True,
         add_generation_prompt=add_generation_prompt, **dict(template.spec.template_kwargs))
     if isinstance(reference, Mapping):
         reference = reference["input_ids"]
