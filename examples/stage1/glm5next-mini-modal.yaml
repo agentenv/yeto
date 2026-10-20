@@ -110,7 +110,7 @@ sampler:
   in_place_reload: false
   # SGLang fuses the BF16 shared expert into the routed FusedMoE as expert 32; under the
   # MXFP4 MoE method that slot is packed U8, so the BF16 shared weights do not fit (smoke-2)
-  extra_args: [--disable-shared-experts-fusion]
+  extra_args: [--disable-shared-experts-fusion, --cuda-graph-max-bs, "16"]   # 16 = 4 prompts x 4 samples; capture took 118 s at the default sizes
   extra_env:
     PYTHONPATH: /root/sky_workdir
   checks:
