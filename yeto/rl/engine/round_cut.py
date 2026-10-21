@@ -248,6 +248,7 @@ class RoundCutCheckpoint:
         # E1: prepared cuts a busy commit made the safe point skip; their trainer-side
         # writers are collected (and their files dropped) at the next cut, when done
         self._abandoned: list[_PreparedCut] = []
+        self._declined: int | None = None  # rollout whose prepare met a running commit
 
     # ---------------------------------------------------------------- pointer
     @property
@@ -320,6 +321,7 @@ class RoundCutCheckpoint:
         if driver.published_version is None or self._skip(driver, rollout_id, final=final):
             return False
         if not final and self._commit is not None and self._commit[0].is_alive():
+            self._declined = int(rollout_id)  # save() skips it if still busy, else _unprepared_wake
             return False  # save() skips this periodic cut (_commit_busy)
         if int(state.policy_version) != int(rollout_id):
             raise RoundCutError(f"prepared cut {rollout_id} for policy v{state.policy_version}")
@@ -344,6 +346,24 @@ class RoundCutCheckpoint:
         if callable(emit):
             emit("rl_cut_skipped", rollout_id=int(rollout_id), reason="previous cut still committing",
                  committing=self._commit[1].get("cut_id"), skipped_total=self.skipped_busy)
+        return True
+
+    def _unprepared_wake(self, driver: Any, rollout_id: int, prepared: "_PreparedCut | None", *,
+                         final: bool) -> bool:
+        """E1: skip a periodic cut whose prepare was declined (it met a running commit)
+        when it would wake the offloaded trainer
+        (~2 s on the Modal A10G sync run e1a7) and a committed cut already exists; the
+        next safe point cuts again. The final cut and the first cut are always taken."""
+        declined, self._declined = self._declined, None
+        if final or declined != int(rollout_id) or prepared is not None:
+            return False
+        if self.pointer() is None or not getattr(driver, "_trainer_offloaded", False):
+            return False
+        self.skipped_busy += 1
+        emit = getattr(driver, "emit", None)
+        if callable(emit):
+            emit("rl_cut_skipped", rollout_id=int(rollout_id), reason="not prepared before the trainer offloaded",
+                 skipped_total=self.skipped_busy)
         return True
 
     def _defer(self, final: bool) -> bool:
@@ -497,6 +517,9 @@ class RoundCutCheckpoint:
                 self._abandoned.append(prepared)
             return None
         self._reap_abandoned()
+        if self._unprepared_wake(driver, rollout_id, prepared, final=final):
+            self._abandon(prepared)
+            return None
         if int(driver.published_version) != int(rollout_id):
             self._abandon(prepared)
             raise RoundCutError(f"safe point {rollout_id} != published version {driver.published_version}")

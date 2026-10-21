@@ -803,3 +803,30 @@ def test_a_prepared_cut_skipped_while_committing_is_collected_at_the_next_cut(tm
     assert trainer.calls[:2] == ["start_cut", "finish_cut"] and cp._abandoned == []
     assert info["store_commit"] == "inline" and info["cut_id"] == skipped.name
     assert rs.read_latest(store.root)["cut_id"] == info["cut_id"]
+
+
+def test_a_cut_declined_at_prepare_does_not_wake_the_offloaded_trainer(tmp_path):
+    """E1: prepare met a running commit; when the commit is done by the safe point the
+    periodic cut is skipped instead of waking the offloaded trainer for it."""
+    import threading
+
+    store = _store(tmp_path / "store", _Vol())
+    rank, driver, trainer, cp, first = _island_with_first_cut(tmp_path, store)
+    driver._trainer_offloaded = True
+    gate = threading.Event()
+    busy = threading.Thread(target=gate.wait, daemon=True)
+    busy.start()
+    cp._commit = (busy, {"cut_id": first["cut_id"]})
+    state = SimpleNamespace(policy_version=2, policy_tensor_hash=lambda: _hash(rank))
+    assert cp.prepare(driver, rollout_id=2, state=state) is False
+    gate.set()
+    busy.join()
+    _publish(driver, 2, _hash(rank))
+    assert cp.save(driver, rollout_id=2) is None and trainer.calls == []
+    assert driver.events[-1][0] == "rl_cut_skipped"
+    assert driver.events[-1][1]["reason"] == "not prepared before the trainer offloaded"
+    # a cut that was never declined still wakes the trainer (no silent loss of cuts)
+    train_step(rank, torch.randn(3, 6, generator=torch.Generator().manual_seed(7)))
+    driver.local_step = 3
+    _publish(driver, 3, _hash(rank))
+    assert cp.save(driver, rollout_id=3)["trainer_onloaded_for_cut"] is True
