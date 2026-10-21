@@ -13,8 +13,10 @@ Quota (box_20 plan, read from ``GET /limits`` on 2026-10-19): 100 active
 sandboxes, 12 starts per minute, 60 per hour, 200 per day.  :class:`BoatQuota`
 holds the first two per process (per event loop, see :func:`process_quota`);
 :func:`check_in_flight_cap` refuses an
-admission gate larger than the active-sandbox cap.  The hourly and daily caps
-are left to the server (a refused create raises :class:`BoatQuotaError`).
+admission gate larger than the active-sandbox cap.  The hourly cap is held
+too when ``YETO_BOAT_STARTS_PER_HOUR`` is set (S26 E8: a burst past it got
+HTTP 429 for 75 s of retries, then the trial was ABORTED); the daily cap is
+left to the server (a refused create raises :class:`BoatQuotaError`).
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ import asyncio
 import collections
 import json
 import os
+import random
 import time
 import urllib.error
 import urllib.request
@@ -42,6 +45,7 @@ MAX_ACTIVE_SANDBOXES = 100
 MAX_STARTS_PER_MINUTE = 12
 MAX_ACTIVE_ENV = "YETO_BOAT_MAX_ACTIVE"
 MAX_STARTS_ENV = "YETO_BOAT_STARTS_PER_MINUTE"
+MAX_STARTS_HOUR_ENV = "YETO_BOAT_STARTS_PER_HOUR"  # unset = not held here (server refuses)
 
 READY_STATES = frozenset({"ready", "idle", "running"})
 FAILED_STATES = frozenset({"archiving", "archived", "error", "cancelled"})
@@ -123,7 +127,8 @@ class SdkBoatClient:
                 if exc.status not in self._CREATE_RETRY_STATUSES or last:
                     cls = BoatQuotaError if exc.status in (402, 429) else BoatError
                     raise cls(f"boat create failed: HTTP {exc.status} {exc.reason}") from None
-                self._sleep(min(60.0, 5.0 * 2 ** attempt))
+                # Jitter: concurrent creates refused together must not retry in lockstep.
+                self._sleep(min(60.0, 5.0 * 2 ** attempt) * random.uniform(0.5, 1.0))
         raise AssertionError("unreachable")
 
     def state(self, sandbox_id: str) -> str:
@@ -185,28 +190,45 @@ def check_in_flight_cap(max_in_flight: int) -> int:
 
 
 class BoatQuota:
-    """Per-process guard: at most ``max_active`` live sandboxes, ``starts_per_minute`` creates.
+    """Per-process guard: at most ``max_active`` live sandboxes, ``starts_per_minute`` creates
+    (and ``starts_per_hour`` when given).
 
-    The active cap is a semaphore held from create to delete; the start rate
-    is a sliding 60 s window.  Several processes share one account, so set the
-    per-process caps so their sum stays within the plan.
+    The active cap is a semaphore held from create to delete; the start rates
+    are sliding 60 s / 3600 s windows.  Several processes share one account,
+    so set the per-process caps so their sum stays within the plan.
     """
 
-    def __init__(self, max_active: int, starts_per_minute: int, *,
+    def __init__(self, max_active: int, starts_per_minute: int, *, starts_per_hour: int | None = None,
                  clock: Callable[[], float] = time.monotonic) -> None:
-        if max_active <= 0 or starts_per_minute <= 0:
+        if max_active <= 0 or starts_per_minute <= 0 or (starts_per_hour is not None and starts_per_hour <= 0):
             raise ValueError("boat quota limits must be positive")
         self.max_active = max_active
         self.starts_per_minute = starts_per_minute
+        self.starts_per_hour = starts_per_hour
         self._active = asyncio.Semaphore(max_active)
-        self._starts: collections.deque[float] = collections.deque()
+        self._starts: collections.deque[float] = collections.deque()  # last hour (or minute) of starts
         self._lock = asyncio.Lock()
         self._clock = clock
 
     @classmethod
     def from_env(cls) -> BoatQuota:
+        hourly = os.environ.get(MAX_STARTS_HOUR_ENV, "").strip()
         return cls(int(os.environ.get(MAX_ACTIVE_ENV, MAX_ACTIVE_SANDBOXES)),
-                   int(os.environ.get(MAX_STARTS_ENV, MAX_STARTS_PER_MINUTE)))
+                   int(os.environ.get(MAX_STARTS_ENV, MAX_STARTS_PER_MINUTE)),
+                   starts_per_hour=int(hourly) if hourly else None)
+
+    def _wait_s(self, now: float) -> float:
+        """Seconds until one more start fits every window (0 = now)."""
+        horizon = 3600.0 if self.starts_per_hour is not None else 60.0
+        while self._starts and now - self._starts[0] >= horizon:
+            self._starts.popleft()
+        wait = 0.0
+        last_minute = [t for t in self._starts if now - t < 60.0]
+        if len(last_minute) >= self.starts_per_minute:
+            wait = max(wait, 60.0 - (now - last_minute[-self.starts_per_minute]))
+        if self.starts_per_hour is not None and len(self._starts) >= self.starts_per_hour:
+            wait = max(wait, 3600.0 - (now - self._starts[-self.starts_per_hour]))
+        return wait
 
     async def acquire(self) -> None:
         """Take one active slot and one start; the caller must :meth:`release` the slot."""
@@ -215,12 +237,11 @@ class BoatQuota:
             async with self._lock:
                 while True:
                     now = self._clock()
-                    while self._starts and now - self._starts[0] >= 60.0:
-                        self._starts.popleft()
-                    if len(self._starts) < self.starts_per_minute:
+                    wait = self._wait_s(now)
+                    if wait <= 0.0:
                         self._starts.append(now)
                         return
-                    await asyncio.sleep(60.0 - (now - self._starts[0]))
+                    await asyncio.sleep(wait)
         except BaseException:
             self._active.release()
             raise
