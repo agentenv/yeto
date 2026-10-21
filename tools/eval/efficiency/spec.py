@@ -84,6 +84,8 @@ class EffSpec:
     # (fair control), "every-round" is the product default (a round cut every round).
     # Not in the control fingerprint: it does not change what the bare arms run.
     checkpoint: str = "final"
+    # yeto+Miles only, observation (E1): --rl-profile-trainer (not in the fingerprint)
+    profile_trainer: bool = False
 
     @property
     def samples_per_round(self) -> int:
@@ -149,7 +151,7 @@ def cards(mode: str) -> dict[str, int]:
 def control_fingerprint(spec: EffSpec) -> str:
     """sha256 over every shared value except the repeat count (a report refuses
     to compare runs whose fingerprints differ)."""
-    doc = {k: v for k, v in spec.to_dict().items() if k not in ("repeats", "timeout_s", "checkpoint")}
+    doc = {k: v for k, v in spec.to_dict().items() if k not in ("repeats", "timeout_s", "checkpoint", "profile_trainer")}
     return hashlib.sha256(json.dumps(doc, sort_keys=True).encode()).hexdigest()
 
 
@@ -411,6 +413,8 @@ def yeto_miles_launcher_args(spec: EffSpec, mode: str, run_id: str) -> str:
             f"--rl-max-tokens-per-gpu {max_tokens_per_gpu(spec)} --rl-gradient-accumulation-fusion "
             # TIS (upper 2.0) and eps_clip_high 0.28 as in the bare arms; staleness 2 >= max_policy_age
             f"--trust-remote-code --rl-algorithm-spec {MILES_ALGORITHM_SPEC}")
+    if spec.profile_trainer:
+        args += " --rl-profile-trainer"
     if kwargs:
         args += f" --apply-chat-template-kwargs {shlex.quote(kwargs)}"
     if mode == "async":

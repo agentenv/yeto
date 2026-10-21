@@ -495,6 +495,9 @@ _RUNTIME = (
     # 1.7 observation: per-round timeline labels (entry observe=...), off by default.
     shared_flag("--rl-observe-timeline", action="store_true",
                 help="ports: record per-round timeline labels (rl-infra-spec 1.7); off by default"),
+    shared_flag("--rl-profile-trainer", action="store_true",
+                help="ports, observation only (E1): per training step, print where the trainer "
+                "process spends its time (stack samples, GC pauses, CUDA allocator counters)"),
     shared_flag("--rl-resource-sample-interval", type=float, default=None, metavar="SECONDS",
                 help="ports: NVML rl_resource_sample period forwarded to the learner "
                 "(default: learner default, 60 s with --rl-observe-timeline; 0 = off)"),
