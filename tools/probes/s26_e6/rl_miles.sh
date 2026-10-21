@@ -27,7 +27,9 @@ case $G in
   t1-lora)  ARGS="$COMMON --cluster-prefix $P --gpu modal:1xh100 --rl-single-island-no-sync $LORA --rl-rollout-quant-tier 1" ;;
   t1n-lora) ARGS="$COMMON --cluster-prefix $P --gpu modal:1xh100 --rl-single-island-no-sync $LORA --rl-rollout-quant-tier 1 --rl-rollout-quant-fp8-source trainer" ;;
   t0-pair|t2-pair)
-    PAIR="$COMMON --cluster-prefix $P --gpu modal:1xh100,modal:1xh100 --rl-single-island-no-sync \
+    # a full-parameter sampler island needs dedicated engines (fixed partition: 1 actor + 1 engine card)
+    PAIR="$COMMON --cluster-prefix $P --gpu modal:2xh100,modal:1xh100 --rl-placement fixed-partition --rl-rollout-gpus 1 \
+--rl-single-island-no-sync \
 --rl-island-sample-role 0:sampler --rl-island-sample-role 1:trainer --tuning full --modal-memory 128 \
 --rl-max-policy-age 1 --rl-cut-every 1 --rl-code-pack git-patch --rl-sampler-max-backlog-rounds 2 --rl-sample-wait-s 900"
     ISLANDS=2

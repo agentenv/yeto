@@ -107,6 +107,7 @@ def gate(run: str, cfg: dict) -> dict:
                 from yeto.rl.quant import tiers  # noqa: PLC0415
 
                 ignore_file = Path("/tmp/e6-quant/native-ignore.json")
+                ignore_file.parent.mkdir(parents=True, exist_ok=True)
                 ignore_file.write_text(json.dumps(tiers.native_ignore_list(tiers.online_plan(Path(base)))))
                 convert += ["--ignored-layers-file", str(ignore_file)]
             subprocess.run(convert, check=True, cwd="/root/miles", stdout=subprocess.DEVNULL)
