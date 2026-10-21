@@ -721,6 +721,7 @@ def translate_run_config(
     extra_argv: Sequence[str] = (),
     tito_parser_resolver: Callable[[str], tuple[str | None, str | None]] | None = None,
     max_policy_age: int = 0,
+    async_buffer_rounds: int | None = None,
     full_parameter_sync: bool = True,
 ) -> MilesLaunchArgs:
     """Pure translation of an ``RLRunConfig`` into upstream Miles argv.
@@ -732,6 +733,10 @@ def translate_run_config(
     rollout with training through Miles' fully_async (P0-S), so the
     all-samples metadata hook and the carry-over buffer filter are not set:
     the trained-groups hook reports the round instead.
+
+    ``async_buffer_rounds`` (--rl-async-buffer-rounds, S26 E2): None keeps
+    Miles' fully_async buffer default; K >= 1 sets the buffer to K rounds of
+    groups (``--async-data-buffer-capacity-factor K``). Only with overlap.
 
     ``full_parameter_sync`` (default True): a full-parameter trainer feeds the
     ports full-parameter sync, which needs whole FP32 masters; False for a
@@ -982,6 +987,17 @@ def translate_run_config(
         values.extend(policy_age_argv(
             max_policy_age, agentic=bool(getattr(config.agent, "custom_agent_function_path", None)),
             overlap=rollout_overlap))
+    if async_buffer_rounds is not None:
+        if not rollout_overlap:
+            raise MilesConfigError(
+                "--rl-async-buffer-rounds needs generation that overlaps training "
+                "(--rl-max-policy-age > 0 on a partitioned island without a sample buffer)")
+        if int(async_buffer_rounds) < 1:
+            raise MilesConfigError(
+                f"--rl-async-buffer-rounds must be >= 1, got {async_buffer_rounds}")
+        from .offpolicy_correction import BUFFER_CAPACITY_FLAG
+
+        values.extend((BUFFER_CAPACITY_FLAG, str(int(async_buffer_rounds))))
     values.extend(critic_load_argv(config, algorithm))
     if sample_buffer is not None:
         values.extend(sample_buffer_argv(sample_buffer.role, max_policy_age=max_policy_age))

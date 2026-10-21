@@ -149,6 +149,27 @@ def test_partitioned_limit_overlaps_rollout_through_miles_fully_async():
     assert not colocated.rollout_overlap and "--partial-rollout" in colocated.argv
 
 
+def test_async_buffer_rounds_sets_the_fully_async_buffer_only_with_overlap():
+    from tests.test_rl_miles_adapter_config import make_config, sub
+    from yeto.rl.adapters.miles import config as mc
+
+    partitioned = sub(make_config(colocated=False), "serving", offload_train=False)
+    default = mc.translate_run_config(partitioned, _tolerant(), max_policy_age=1)
+    assert "--async-data-buffer-capacity-factor" not in default.argv  # Miles default kept
+    sized = mc.translate_run_config(partitioned, _tolerant(), max_policy_age=1,
+                                    async_buffer_rounds=4)
+    i = sized.argv.index("--async-data-buffer-capacity-factor")
+    assert sized.argv[i + 1] == "4"
+    with pytest.raises(mc.MilesConfigError, match="overlaps training"):
+        mc.translate_run_config(partitioned, _tolerant(), async_buffer_rounds=2)
+    with pytest.raises(mc.MilesConfigError, match="overlaps training"):
+        mc.translate_run_config(make_config(), _tolerant(), max_policy_age=1,
+                                async_buffer_rounds=2)
+    with pytest.raises(mc.MilesConfigError, match=">= 1"):
+        mc.translate_run_config(partitioned, _tolerant(), max_policy_age=1,
+                                async_buffer_rounds=0)
+
+
 def test_parsed_fully_async_is_accepted_only_for_an_overlapped_launch():
     from tests.test_rl_miles_adapter_config import make_config, sub
     from yeto.rl.adapters.miles import config as mc
