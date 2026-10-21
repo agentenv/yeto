@@ -834,7 +834,8 @@ class MilesRolloutPool:
             self._prompt_ledger_installed = True
         self._run(self._controller.prepare_rollout(rollout_id))
         data_pack = self._run(self._executor.get(rollout_id))
-        self._offload_after_rollout()
+        if not self.defer_offload:
+            self._offload_after_rollout()
         try:
             payload = self._metadata.take(rollout_id)
             handle = handle_from_metadata(
@@ -1044,6 +1045,17 @@ class MilesRolloutPool:
         """Convertible node (rl-trainer-start-stop L7.2): close (False) or open (True)
         harness admission to this pool's running members (no-op without a board)."""
         self._harness_admission("open_admission" if open_ else "close_admission", self.members())
+
+    # E1: set by a driver that runs the --offload-rollout step in its own phase
+    # (offload_after_generate); other callers keep the offload inside generate
+    defer_offload = False
+
+    @property
+    def offloads_after_generate(self) -> bool:
+        return self._args is not None and bool(getattr(self._args, "offload_rollout", False))
+
+    def offload_after_generate(self) -> None:
+        self._offload_after_rollout()
 
     def _offload_after_rollout(self) -> None:
         """Upstream ``train.py`` serial colocated branch (--offload-rollout)."""

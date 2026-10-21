@@ -998,3 +998,18 @@ def test_colocated_publish_offloaded_prepares_a_due_cut_before_offloading(tmp_pa
     assert ("prepare", 2, 2, True, False) in order
     phases = [e["phase"] for e in _events(tmp_path / "events.jsonl") if e["event"] == "rl_driver_phase"]
     assert phases[4:8] == ["train", "sync", "checkpoint", "offload"]
+
+
+def test_rollout_offload_after_generate_runs_in_its_own_phase(tmp_path):
+    """E1: Miles --offload-rollout frees the engine memory after generating; the
+    driver times it as its own phase so "generate" matches Miles' rollout_time."""
+    engine = _engine()
+    calls = []
+    engine.rollout.offloads_after_generate = True
+    engine.rollout.offload_after_generate = lambda: calls.append("offload_rollout")
+    driver = _driver(engine, LocalOnlySync(2), tmp_path)
+    driver.run()
+    assert calls == ["offload_rollout"] * 2 and engine.rollout.defer_offload is True
+    phases = [e["phase"] for e in _events(tmp_path / "events.jsonl") if e["event"] == "rl_driver_phase"]
+    i = phases.index("generate")
+    assert phases[i + 1] == "rollout_offload"

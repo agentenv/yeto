@@ -123,6 +123,7 @@ _PHASE_ROLE = {
     "eval": "rollout",
     "offload": "trainer",
     "checkpoint": "trainer",
+    "rollout_offload": "rollout",
     "onload": "trainer",
 }
 _PHASE_TASK = {"sync": "outer_sync"}
@@ -890,11 +891,20 @@ class IslandDriver:
                 f"generation of rollout {rollout_id}",
             )
         self.phase("generate", rollout_id=rollout_id, policy_version=rollout_id)
+        offload_rollout = getattr(self.rollout, "offload_after_generate", None)
+        split_offload = callable(offload_rollout) and bool(getattr(self.rollout, "offloads_after_generate", False))
+        if split_offload:
+            self.rollout.defer_offload = True
         with self._load_sampler(rollout_id):
             # IR-3: the rollout side learns the target policy token up front.
             batch = self.rollout.generate(
                 rollout_id, expected_policy_version=self.expected_token
             )
+        # E1: a colocated rollout that frees its memory after generating (Miles
+        # --offload-rollout) does it in its own phase, not inside "generate"
+        if split_offload:
+            self.phase("rollout_offload", rollout_id=rollout_id)
+            offload_rollout()
         if batch.rollout_id != rollout_id or batch.policy_version != rollout_id:
             raise PolicyIdentityError(
                 f"rollout pool returned rollout {batch.rollout_id} "
