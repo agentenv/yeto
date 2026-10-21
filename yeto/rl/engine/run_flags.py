@@ -642,8 +642,8 @@ _SCHEDULING = (
                 help="--rl-max-policy-age N > 0 with generation that overlaps training "
                 "(partitioned island): the finished-group buffer holds K rounds of groups, "
                 "so generation runs at most about K rounds ahead and the realised policy "
-                "age stays near min(K, N). Default: the backend default. Refused without "
-                "overlap"),
+                "age stays near min(K, N). Default: K = N (a deeper buffer only adds groups "
+                "that are too old when trained). Refused without overlap"),
     # S17 N16: LR schedule choice (yeto.rl.engine.run_config.resolve_lr_schedule)
     shared_flag("--rl-lr-schedule", choices=("auto", "linear", "constant"), default="auto",
                 help="island optimizer LR schedule: auto (default) = constant for decoupled "

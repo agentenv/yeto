@@ -734,9 +734,11 @@ def translate_run_config(
     all-samples metadata hook and the carry-over buffer filter are not set:
     the trained-groups hook reports the round instead.
 
-    ``async_buffer_rounds`` (--rl-async-buffer-rounds, S26 E2): None keeps
-    Miles' fully_async buffer default; K >= 1 sets the buffer to K rounds of
-    groups (``--async-data-buffer-capacity-factor K``). Only with overlap.
+    ``async_buffer_rounds`` (--rl-async-buffer-rounds, S26 E2): K >= 1 sets the
+    fully_async buffer to K rounds of groups (``--async-data-buffer-capacity-factor
+    K``); None (default) uses K = ``max_policy_age``, not Miles' own default 2,
+    which at age 1 dropped about half of the generated groups as too old
+    (SESSION26 E2). Only with overlap.
 
     ``full_parameter_sync`` (default True): a full-parameter trainer feeds the
     ports full-parameter sync, which needs whole FP32 masters; False for a
@@ -987,6 +989,8 @@ def translate_run_config(
         values.extend(policy_age_argv(
             max_policy_age, agentic=bool(getattr(config.agent, "custom_agent_function_path", None)),
             overlap=rollout_overlap))
+    if async_buffer_rounds is None and rollout_overlap:
+        async_buffer_rounds = max_policy_age  # S26 E2 default: buffer depth = A_hard
     if async_buffer_rounds is not None:
         if not rollout_overlap:
             raise MilesConfigError(

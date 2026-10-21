@@ -129,6 +129,13 @@ def _tolerant():
                          correction=CorrectionSpec(method="tis", tis_clip=2.0, tis_clip_low=0.0))
 
 
+def _tolerant4():
+    from yeto.rl.engine.algorithm import AlgorithmSpec, CorrectionSpec, ExecutionSpec
+
+    return AlgorithmSpec(execution=ExecutionSpec(max_policy_staleness=4),
+                         correction=CorrectionSpec(method="tis", tis_clip=2.0, tis_clip_low=0.0))
+
+
 def test_partitioned_limit_overlaps_rollout_through_miles_fully_async():
     from tests.test_rl_miles_adapter_config import make_config, sub
     from yeto.rl.adapters.miles import config as mc
@@ -140,7 +147,8 @@ def test_partitioned_limit_overlaps_rollout_through_miles_fully_async():
     overlap = mc.translate_run_config(partitioned, _tolerant(), max_policy_age=1)
     assert not strict.rollout_overlap and overlap.rollout_overlap
     assert [a for a in overlap.argv if a not in strict.argv] == [
-        "--fully-async", "--max-weight-staleness"]  # "1" already occurs in the argv
+        "--fully-async", "--max-weight-staleness",
+        "--async-data-buffer-capacity-factor"]  # "1" already occurs in the argv
     for flag in ("--rollout-all-samples-process-path", "--buffer-filter-path", "--partial-rollout"):
         assert flag not in overlap.argv
     assert "--rollout-sample-filter-path" in overlap.argv
@@ -155,7 +163,12 @@ def test_async_buffer_rounds_sets_the_fully_async_buffer_only_with_overlap():
 
     partitioned = sub(make_config(colocated=False), "serving", offload_train=False)
     default = mc.translate_run_config(partitioned, _tolerant(), max_policy_age=1)
-    assert "--async-data-buffer-capacity-factor" not in default.argv  # Miles default kept
+    i = default.argv.index("--async-data-buffer-capacity-factor")  # default: A_hard
+    assert default.argv[i + 1] == "1"
+    age4 = mc.translate_run_config(partitioned, _tolerant4(), max_policy_age=4)
+    assert age4.argv[age4.argv.index("--async-data-buffer-capacity-factor") + 1] == "4"
+    strict = mc.translate_run_config(partitioned, _tolerant())
+    assert "--async-data-buffer-capacity-factor" not in strict.argv
     sized = mc.translate_run_config(partitioned, _tolerant(), max_policy_age=1,
                                     async_buffer_rounds=4)
     i = sized.argv.index("--async-data-buffer-capacity-factor")
