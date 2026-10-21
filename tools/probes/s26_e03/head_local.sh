@@ -36,7 +36,7 @@ export YETO_ISLAND_HMAC_KEY=${YETO_ISLAND_HMAC_KEY:-$(openssl rand -hex 32)}
 [ -n "${MODAL_TOKEN_ID:-}" ] || { echo "abort: no modal token"; exit 65; }
 export YETO_RUNS_DIR=$R/runs PYTHONPATH=$R/yeto
 if [ "${PLAN_ONLY:-0}" = 1 ]; then
-  echo "PLAN_ONLY run=$P case=$CASE app=$APP head=$HEAD_CL steps=$STEPS hard=${HARD}s wd=${WD}s code=$REPO@$(cat $R/yeto_sha.txt|cut -c1-8) threads=$T"
+  echo "PLAN_ONLY run=$P case=$CASE app=$APP head=$HEAD_CL hard=${HARD}s wd=${WD}s code=$REPO@$(cat $R/yeto_sha.txt|cut -c1-8) threads=$T"
   (cd $R/yeto && eval "$PY -m yeto.cli $(cat $R/args.txt) --dry-run") > $R/plan.json 2> $R/plan.err; echo "dry-run rc=$?"; tail -3 $R/plan.err
   /usr/bin/python3 -c "import json,sys;p=json.load(open(sys.argv[1]));[print(i['learner_id'],i.get('island_overrides'),i['memory_estimate'].get('peak_gib'),i['memory_estimate'].get('fits'),[t for t in i['learner_command'].split(' --') if t.startswith(('rl-lr','rl-max-policy','rl-island-sched','rl-algorithm','rl-stall','modal-launcher','no-island'))]) for i in p['island_requests']]" $R/plan.json
   exit 0
