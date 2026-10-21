@@ -85,6 +85,11 @@ def test_yeto_arms_use_the_same_policy_age_and_partition():
     args = spec.yeto_miles_launcher_args(SPEC, "async", "r1")
     assert "--gpu modal:2xa10g" in args and "--rl-placement fixed-partition --rl-rollout-gpus 1" in args
     assert "--gpu modal:1xa10g" in spec.yeto_miles_launcher_args(SPEC, "sync", "r1")
+    # E1: on the bare arms' GPU model (an A10G container is refused)
+    assert "--modal-gpu-name 'NVIDIA A10' " in args
+    from tools.eval import modal_verl
+
+    assert spec.GPU_MODELS == modal_verl.GPU_NAMES
     # only the final round cut, as the bare arms keep no periodic checkpoint (E1)
     assert f"--rl-cut-every {SPEC.rounds} " in spec.yeto_miles_launcher_args(SPEC, "sync", "r1")
     every = spec.get_spec(SPEC.name, checkpoint="every-round")

@@ -373,6 +373,16 @@ def cut_every(spec: EffSpec) -> int:
     return spec.rounds if spec.checkpoint == "final" else 1
 
 
+# E1: the GPU model every arm must run on, per spec.gpu (as tools/eval/modal_verl.GPU_NAMES:
+# Modal "A10G" containers are an NVIDIA A10 or an A10G, and the A10G trains slower)
+GPU_MODELS = {"A10G": "NVIDIA A10", "L4": "L4", "H100!": "H100"}
+
+
+def gpu_name_arg(spec: EffSpec) -> str:
+    """The launcher option that pins the yeto+Miles arm to the bare arms' GPU model."""
+    return f"--modal-gpu-name {shlex.quote(GPU_MODELS[spec.gpu])} "
+
+
 def yeto_miles_launcher_args(spec: EffSpec, mode: str, run_id: str) -> str:
     """The yeto launcher arguments of the yeto+Miles arm (``tools/eval/miles_local.sh`` ARGS)."""
     from ..miles import DATA, STORE_VOLUME, TAPE_VOLUME
@@ -381,6 +391,7 @@ def yeto_miles_launcher_args(spec: EffSpec, mode: str, run_id: str) -> str:
     c = cards(mode)
     kwargs = json.dumps(spec.chat_template_kwargs) if spec.chat_template_kwargs else ""
     args = (f"launch --training-mode rl --rl-engine ports --preflight-threads off --modal-gpu-exact "
+            f"{gpu_name_arg(spec)}"
             # container resources as the bare arms' (modal_eff: 8 CPU + 48 GiB per card)
             f"--modal-retries 0 --modal-cpu {8 * c['total']} --modal-memory {48 * c['total']} "
             f"--modal-tape-volume {TAPE_VOLUME} "
