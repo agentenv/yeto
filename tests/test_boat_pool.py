@@ -538,26 +538,34 @@ def test_pool_reuse_applies_the_new_tasks_codex_cache_choice():
 
 
 def _run_cache_setup(tmp_path, *, apt_ok: bool, has_curl: bool, has_rg: bool, has_node: bool = False,
-                     node_runs: bool = True):
-    """Run CODEX_CACHE_SETUP with its absolute paths moved under tmp_path and a fake apt-get."""
+                     node_runs: bool = True, has_nvm: bool = False):
+    """Run both cache-hit steps (glibc) with absolute paths moved under tmp_path and a fake apt-get.
+
+    Returns (exit code, commands on the plain PATH, commands after ``. ~/.nvm/nvm.sh``, apt calls, local bin).
+    """
     import os
     import shutil
     import subprocess
 
-    from yeto.rl.harness.harbor.boat_sandbox import CODEX_CACHE_SETUP
+    from yeto.rl.harness.harbor.boat_sandbox import CODEX_CACHE_SETUP, codex_cache_nvm
 
     local_bin, mount, core = tmp_path / "usr-local-bin", tmp_path / "opt-yeto-codex", tmp_path / "core"
+    home = tmp_path / "home"
+    home.mkdir()
+    if has_nvm:
+        (home / ".nvm").mkdir()
     musl = mount / "vendor/x86_64-unknown-linux-musl"
     (musl / "codex-path").mkdir(parents=True)
     (mount / "bin").mkdir()
     (mount / "node/bin").mkdir(parents=True)
-    for path in (musl / "codex-path/rg", mount / "bin/codex", mount / "node/bin/node", mount / "node/bin/npm"):
+    for path in (musl / "codex-path/rg", mount / "bin/codex", mount / "node/bin/node", mount / "node/bin/npm",
+                 mount / "node/bin/npx"):
         path.write_text("#!/bin/sh\necho stub\n")
         path.chmod(0o755)
     if not node_runs:  # e.g. the image's glibc is older than the Node build needs
         (mount / "node/bin/node").write_text("#!/bin/sh\nexit 1\n")
     core.mkdir()
-    for tool in ("mkdir", "ln", "rm", "grep", "ldd", "sh", "chmod"):
+    for tool in ("mkdir", "ln", "rm", "grep", "ldd", "sh", "chmod", "mv"):
         os.symlink(shutil.which(tool), core / tool)
     calls = tmp_path / "apt-calls"
     apt = core / "apt-get"
@@ -572,33 +580,54 @@ def _run_cache_setup(tmp_path, *, apt_ok: bool, has_curl: bool, has_rg: bool, ha
         if present:
             (core / name).write_text("#!/bin/sh\n")
             (core / name).chmod(0o755)
-    script = CODEX_CACHE_SETUP.replace("/usr/local/bin", str(local_bin)).replace("/opt/yeto-codex", str(mount))
-    proc = subprocess.run(["/bin/bash", "-c", script], env={"PATH": f"{local_bin}:{core}"},
-                          capture_output=True, text=True, check=False)
-    tools = {name for name in ("codex", "curl", "rg", "node", "npm")
-             if (local_bin / name).exists() or (core / name).exists()}
-    return proc.returncode, tools, calls.read_text() if calls.exists() else "", local_bin
+
+    def move(script: str) -> str:
+        return script.replace("/usr/local/bin", str(local_bin)).replace("/opt/yeto-codex", str(mount))
+
+    env = {"PATH": f"{local_bin}:{core}", "HOME": str(home)}
+    proc = subprocess.run(["/bin/bash", "-c", move(CODEX_CACHE_SETUP)], env=env, capture_output=True, text=True,
+                          check=False)
+    if proc.returncode == 0:
+        assert proc.stdout.strip().endswith("yeto-libc=glibc")
+        proc = subprocess.run(["/bin/bash", "-c", move(codex_cache_nvm("22.23.3"))], env=env,
+                              capture_output=True, text=True, check=False)
+    names = "codex curl rg node npm npx"
+    listing = f"for c in {names}; do if command -v $c >/dev/null 2>&1; then echo $c; fi; done"
+    views = []
+    for prefix in ("", "if [ -s ~/.nvm/nvm.sh ]; then . ~/.nvm/nvm.sh; fi; "):
+        out = subprocess.run(["/bin/bash", "-c", prefix + listing], env=env, capture_output=True, text=True,
+                             check=True)
+        views.append(set(out.stdout.split()))
+    return proc.returncode, views[0], views[1], calls.read_text() if calls.exists() else "", local_bin
 
 
 @pytest.mark.parametrize("has_curl,has_rg,has_node", [(False, False, False), (True, True, True), (True, False, False)])
 def test_codex_cache_setup_leaves_the_same_tools_as_harbors_install(tmp_path, has_curl, has_rg, has_node):
-    code, tools, apt_calls, local_bin = _run_cache_setup(tmp_path, apt_ok=True, has_curl=has_curl, has_rg=has_rg,
-                                                         has_node=has_node)
+    code, plain, nvm, apt_calls, local_bin = _run_cache_setup(tmp_path, apt_ok=True, has_curl=has_curl,
+                                                              has_rg=has_rg, has_node=has_node)
     assert code == 0
-    # Harbor's codex install leaves codex, curl, ripgrep and node/npm on PATH (agents/installed/codex.py).
-    assert tools == {"codex", "curl", "rg", "node", "npm"}
-    if not has_node:
-        assert "opt-yeto-codex/node/bin" in str((local_bin / "node").resolve())
+    # Harbor's install on glibc (measured on boat, logs/E8/tools-compare-merge2.jsonl): curl and rg on the
+    # plain PATH; node, npm and codex only after ". ~/.nvm/nvm.sh".
+    image_node = {"node", "npm"} if has_node else set()
+    assert plain == {"curl", "rg"} | image_node
+    assert nvm == {"codex", "curl", "rg", "node", "npm", "npx"}
+    assert not (local_bin / "node").exists() and not (local_bin / "codex").exists()
     assert ("install -y curl" in apt_calls) is (not has_curl)  # only when the image lacks it
     if not has_rg:
         assert (local_bin / "rg").resolve().name == "rg" and "codex-path" in str((local_bin / "rg").resolve())
 
 
 def test_codex_cache_setup_failure_leaves_no_codex_so_harbor_installs(tmp_path):
-    code, tools, _, _ = _run_cache_setup(tmp_path, apt_ok=False, has_curl=False, has_rg=True)
-    assert code != 0 and "codex" not in tools
+    code, plain, nvm, _, _ = _run_cache_setup(tmp_path, apt_ok=False, has_curl=False, has_rg=True)
+    assert code != 0 and "codex" not in plain | nvm
+
+
+def test_codex_cache_refuses_an_image_that_already_has_nvm(tmp_path):
+    code, plain, nvm, _, _ = _run_cache_setup(tmp_path, apt_ok=True, has_curl=True, has_rg=True, has_nvm=True)
+    assert code != 0 and "codex" not in plain | nvm
 
 
 def test_codex_cache_setup_node_that_cannot_run_falls_back(tmp_path):
-    code, tools, _, _ = _run_cache_setup(tmp_path, apt_ok=True, has_curl=True, has_rg=True, node_runs=False)
-    assert code != 0 and "codex" not in tools
+    code, plain, nvm, _, _ = _run_cache_setup(tmp_path, apt_ok=True, has_curl=True, has_rg=True,
+                                              node_runs=False)
+    assert code != 0 and "codex" not in plain | nvm

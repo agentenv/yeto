@@ -114,18 +114,28 @@ class CodexCache:
         )
 
 
-# Run as root in the task container on a cache hit.  Harbor's codex install
-# (agents/installed/codex.py) also leaves curl, ripgrep and node/npm in the
-# container, and TB2 verifiers call curl (84+ tests) and node (3+), so the
-# tool set must match:
-# * rg: from the Codex bundle;
+# On a cache hit the container must end up with the same commands, in the same
+# places, as Harbor's own codex install (agents/installed/codex.py).  Measured
+# on boat (SESSION26/logs/E8/tools-compare-merge2.jsonl): on glibc images
+# Harbor leaves curl and ripgrep on the plain PATH (what a verifier's test.sh
+# sees), while node, npm and codex live only under ``~/.nvm`` and are on PATH
+# only after ``. ~/.nvm/nvm.sh`` (what Harbor's codex run does).  Harbor's
+# root symlink step finds nothing because root's shell never loads nvm.
+#
+# Step 1, CODEX_CACHE_SETUP, as root:
+# * rg: from the Codex bundle, when the image lacks it;
 # * curl: installed the way Harbor installs it, when the image lacks it;
-# * node/npm: on musl (Alpine) ``apk add nodejs npm`` as Harbor does; else the
-#   cached Node 22 build (Harbor: ``nvm install 22``), when the image lacks it.
-# The codex link comes last; on any failure it is removed, so Harbor falls
-# back to its own full install.
+# * musl (Alpine): ``apk add nodejs npm`` as Harbor does, and codex on the
+#   plain PATH (Harbor's ``npm install -g`` puts it there);
+# * glibc: only check that the cached Node runs (the image's glibc may be too old).
+# It prints ``yeto-libc=musl`` or ``yeto-libc=glibc`` last.
+# Step 2, CODEX_CACHE_NVM (glibc only), as the task's default user: a minimal
+# ``~/.nvm`` whose nvm.sh puts the cached node, npm, npx and codex on PATH.
+# Either step failing leaves no codex reachable, so Harbor's version probe
+# misses and it runs its full install.
 _MUSL = "/opt/yeto-codex/vendor/x86_64-unknown-linux-musl"
 _NODE = "/opt/yeto-codex/node/bin"
+_LIBC_MARK = "yeto-libc="
 CODEX_CACHE_SETUP = (
     "set -e; mkdir -p /usr/local/bin; "
     "if ldd --version 2>&1 | grep -qi musl || [ -f /etc/alpine-release ]; then musl=1; else musl=0; fi; "
@@ -134,14 +144,33 @@ CODEX_CACHE_SETUP = (
     "if [ $musl = 1 ]; then apk add --no-cache curl; "
     "elif command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y curl; "
     "elif command -v yum >/dev/null 2>&1; then yum install -y curl; fi; fi; "
-    "if [ $musl = 1 ]; then { command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; } "
-    "|| apk add --no-cache nodejs npm; else "
-    "command -v node >/dev/null 2>&1 || ln -sf " + _NODE + "/node /usr/local/bin/node; "
-    "command -v npm >/dev/null 2>&1 || ln -sf " + _NODE + "/npm /usr/local/bin/npm; fi; "
-    "command -v curl >/dev/null 2>&1 && command -v rg >/dev/null 2>&1 && node --version >/dev/null 2>&1 && "
-    "command -v npm >/dev/null 2>&1 && "
-    "ln -sf /opt/yeto-codex/bin/codex /usr/local/bin/codex || { rm -f /usr/local/bin/codex; exit 1; }"
+    "command -v curl >/dev/null 2>&1 && command -v rg >/dev/null 2>&1 || exit 1; "
+    "if [ $musl = 1 ]; then "
+    "{ command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; } || apk add --no-cache nodejs npm; "
+    "node --version >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 && "
+    "ln -sf /opt/yeto-codex/bin/codex /usr/local/bin/codex || { rm -f /usr/local/bin/codex; exit 1; }; "
+    "echo " + _LIBC_MARK + "musl; "
+    "else " + _NODE + "/node --version >/dev/null 2>&1 || exit 1; echo " + _LIBC_MARK + "glibc; fi"
 )
+
+
+def codex_cache_nvm(node_version: str) -> str:
+    """Step 2 (glibc): a minimal ``~/.nvm`` for the default user; refuses an image that already has one."""
+    bin_rel = f"versions/node/v{node_version}/bin"
+    nvm_sh = (f'export NVM_DIR="$HOME/.nvm"\n'
+              f'case ":$PATH:" in *":$NVM_DIR/{bin_rel}:"*) ;; *) PATH="$NVM_DIR/{bin_rel}:$PATH" ;; esac\n'
+              f"export PATH\n")
+    return (
+        'set -e; [ -n "$HOME" ] && [ ! -e "$HOME/.nvm" ] || exit 1; t="$HOME/.nvm.yeto-tmp"; rm -rf "$t"; '
+        f'mkdir -p "$t/{bin_rel}"; '
+        f'for b in node npm npx; do [ -e {_NODE}/$b ] && ln -s {_NODE}/$b "$t/{bin_rel}/$b"; done; '
+        f'ln -s /opt/yeto-codex/bin/codex "$t/{bin_rel}/codex"; '
+        f"printf {shlex.quote(nvm_sh)} > \"$t/nvm.sh\"; "
+        'mv -T "$t" "$HOME/.nvm"; '
+        '( . "$HOME/.nvm/nvm.sh" && node --version && command -v npm && codex --version ) >/dev/null 2>&1 '
+        '|| { rm -rf "$HOME/.nvm"; exit 1; }'
+    )
+
 
 CODEX_CACHE_ROOT = "/var/cache/yeto-codex"  # outside the staging dir: recycle keeps it
 CODEX_MOUNT = "/opt/yeto-codex"
@@ -298,6 +327,8 @@ class BoatSandbox:
             started = time.monotonic()
             linked = await self.exec(CODEX_CACHE_SETUP, user="root", timeout_s=600,
                                      env={"DEBIAN_FRONTEND": "noninteractive"})
+            if linked.return_code == 0 and f"{_LIBC_MARK}glibc" in linked.stdout:
+                linked = await self.exec(codex_cache_nvm(cache.node_version), timeout_s=60)
             self.timings["codex_link_s"] = time.monotonic() - started
             if linked.return_code != 0:
                 # No codex on PATH now: Harbor runs its full install (curl and ripgrep included).
