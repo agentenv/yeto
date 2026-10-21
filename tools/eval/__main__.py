@@ -228,9 +228,9 @@ def main(argv: list[str] | None = None) -> int:
     er.add_argument("--run-id", required=True)
     er.add_argument("--out", default=str(EFF_OUT))
     er.add_argument("--dry-run", action="store_true")
-    er.add_argument("--checkpoint", choices=("final", "every-round"), default="final",
+    er.add_argument("--checkpoint", choices=("final", "every-round", "default"), default="final",
                     help="yeto+Miles round cuts: only at the end (fair control) or every round "
-                         "(product default)")
+                         "or the product default interval (no --rl-cut-every)")
     er.add_argument("--profile-trainer", action="store_true",
                     help="yeto+Miles arms: --rl-profile-trainer (observation only, E1)")
     er.set_defaults(fn=cmd_eff_run)

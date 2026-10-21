@@ -49,3 +49,29 @@ def test_the_flag_is_forwarded_to_the_island_and_set_on_the_miles_args():
     miles_args = SimpleNamespace()
     island_entry.apply_ports_infra_switches(island_args, miles_args)
     assert miles_args.yeto_rl_profile_trainer is True
+
+
+def test_phase_profile_prints_each_finished_phase(capsys, monkeypatch):
+    from yeto.rl.engine import phase_profile
+
+    monkeypatch.setitem(phase_profile._STATE, "thread", None)
+    phase_profile.on_phase("train", 0)  # disabled: nothing
+    import threading
+
+    phase_profile.enable()  # from this thread; the phases come from another one
+
+    def busy_driver():
+        phase_profile.on_phase("train", 1)
+        end = time.perf_counter() + 0.05
+        while time.perf_counter() < end:
+            sum(range(1000))
+        phase_profile.on_phase("sync", 1)
+
+    driver = threading.Thread(target=busy_driver)
+    driver.start()
+    driver.join()
+    (line,) = [l for l in capsys.readouterr().out.splitlines() if l.startswith("yeto phase profile ")]
+    record = json.loads(line[len("yeto phase profile "):])
+    assert record["phase"] == "train" and record["rollout_id"] == 1 and record["wall_s"] >= 0.05
+    assert record["samples"] >= 1 and any("busy_driver" in label for label, _ in record["top"]), record
+    phase_profile._STATE["thread"].phase = None

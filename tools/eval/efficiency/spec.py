@@ -362,17 +362,18 @@ def yeto_verl_argv(spec: EffSpec, mode: str, tape: str) -> list[str]:
     return argv
 
 
-CHECKPOINT_MODES = ("final", "every-round")
+CHECKPOINT_MODES = ("final", "every-round", "default")
 
 
-def cut_every(spec: EffSpec) -> int:
+def cut_every(spec: EffSpec) -> int | None:
     """Round-cut interval of the yeto+Miles arm: ``final`` cuts only at the end (the
-    bare arms keep no checkpoint), ``every-round`` is the product default.
+    bare arms keep no checkpoint), ``every-round`` cuts every round, ``default`` passes
+    no interval (the product default, ``yeto.rl.engine.resume.DEFAULT_CUT_EVERY``).
     The yeto+verl arm sets no checkpoint store and fully_async refuses cuts, so it
     has no round cut in either mode."""
     if spec.checkpoint not in CHECKPOINT_MODES:
         raise ValueError(f"checkpoint must be one of {CHECKPOINT_MODES}, got {spec.checkpoint!r}")
-    return spec.rounds if spec.checkpoint == "final" else 1
+    return {"final": spec.rounds, "every-round": 1, "default": None}[spec.checkpoint]
 
 
 # E1: the GPU model every arm must run on, per spec.gpu (as tools/eval/modal_verl.GPU_NAMES:
@@ -400,7 +401,7 @@ def yeto_miles_launcher_args(spec: EffSpec, mode: str, run_id: str) -> str:
             f"--controller local --cluster-prefix {run_id} --tuning lora --lora-r {spec.lora_r} "
             f"--rl-observe-timeline --model {spec.model} --model-revision {spec.model_revision} {DATA} "
             f"--rl-checkpoint-store modal-volume://{STORE_VOLUME}/{run_id} "
-            f"--rl-cut-every {cut_every(spec)} "
+            f"{'' if cut_every(spec) is None else f'--rl-cut-every {cut_every(spec)} '}"
             "--reward-function gsm8k_reward:score --fragments 1 --pipeline 1 "
             f"--rollout-batch-size {spec.groups_per_round} --n-samples-per-prompt {spec.samples_per_group} "
             f"--rollout-max-response-len {spec.max_response_len} --seq-len {spec.seq_len} "

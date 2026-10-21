@@ -117,6 +117,11 @@ class CutSource:
             settled, token = bool(driver.at_safe_point), driver.expected_token
         if state is None or version is None:
             raise RebuildRefused("no published policy to cut")
+        if getattr(state, "verified", True) is False:
+            # E1: a cut carries the policy's content hash (resume checks it); a round
+            # whose publication was not hashed is never committed as a cut
+            raise RebuildRefused(f"the publication of policy v{version} was not verified "
+                                 "(no content hash); see --rl-verify-every-round")
         cursor = (self.rollout.data_cursor()
                   if callable(getattr(self.rollout, "data_cursor", None)) else None)
         if cursor is None:
