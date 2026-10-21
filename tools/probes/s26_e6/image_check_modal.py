@@ -2,7 +2,8 @@
 
 Asserts in the image: the SGLang and Miles checkouts are at the pins, the
 image manifest names the same commits, the SGLang FP8 activation-cast fix is
-in Qwen2 MLP / Qwen3 attention, and Miles has the FP8 ignore list.
+in Qwen2 MLP / Qwen3 attention, the compressed-tensors FP8 in-place reload
+is there and its unit test passes, and Miles has the FP8 ignore list.
 
     python tools/probes/s26_e6/image_check_modal.py
 """
@@ -35,6 +36,15 @@ def check(pins: dict) -> dict:
         "miles_fp8_ignore": Path("/root/miles/miles/utils/fp8_ignore.py").is_file()
         and "is_ignored(key, ignored)" in Path("/root/miles/tools/convert_hf_to_fp8.py").read_text(),
     }
+    scheme = Path("/sgl-workspace/sglang/python/sglang/srt/layers/quantization/compressed_tensors/"
+                  "schemes/compressed_tensors_w8a8_fp8.py")
+    result["fp8_reload_fix"] = "def restore_weights_before_loading" in scheme.read_text()
+    reload_test = subprocess.run(
+        ["/opt/sglang/bin/python", "-m", "pytest", "-q", "-p", "no:cacheprovider",
+         "test/registered/unit/layers/quantization/test_compressed_tensors_fp8_reload.py"],
+        cwd="/sgl-workspace/sglang", capture_output=True, text=True)
+    result["fp8_reload_test_rc"] = reload_test.returncode
+    result["fp8_reload_test_tail"] = reload_test.stdout.strip().splitlines()[-1:] if reload_test.stdout else []
     helper = subprocess.run(
         ["/opt/sglang/bin/python", "-c",
          "import torch; from sglang.srt.true_on_policy.config import dense_activation_cast_dtype as f; "
@@ -43,6 +53,7 @@ def check(pins: dict) -> dict:
     result["ok"] = (result["sglang_head"] == result["manifest_sglang"] == pins["sglang"]
                     and result["miles_head"] == result["manifest_miles"] == pins["miles"]
                     and all(result["cast_fix"].values()) and result["miles_fp8_ignore"]
+                    and result["fp8_reload_fix"] and reload_test.returncode == 0
                     and helper.returncode == 0)
     return result
 

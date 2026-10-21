@@ -26,7 +26,8 @@ def snapshot_config(*, colocated: bool = False):
 
 
 # The G-L8 passes were recorded on SGLang 2fa880182 (S24). The pin moved to 10afe11a7
-# (S26 E6: the FP8 activation-cast fix in Qwen2/Qwen3 only); until G-L8 is re-run on it
+# and 754605964 (S26 E6: the FP8 activation-cast fix in Qwen2/Qwen3, the compressed-tensors
+# FP8 in-place reload); until G-L8 is re-run on it
 # the snapshot mode is refused, as for any commit without a record.
 VERIFIED_SGLANG_COMMIT = "2fa880182eefdb31e64d8ea70317be27f9f32121"
 

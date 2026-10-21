@@ -67,7 +67,9 @@ SGLANG_NEXT_UPSTREAM_COMMIT = "571212b636baca45e10fa3b4da11a289123f3235"
 # parallel_tool_calls=false under tool_choice=auto: at most one tool call; S17 N17).
 # yeto/fp8-act-cast (10afe11a7 = 2fa880182 + Qwen2 MLP / Qwen3 attention leave the
 # activation alone in front of an FP8 projection; S26 E6).
-SGLANG_NEXT_COMMIT = "10afe11a7ef2b53cedd9895cc4450474d85108b9"
+# yeto/fp8-act-cast (754605964 = 10afe11a7 + compressed-tensors TENSOR/CHANNEL FP8 linears
+# reload in place through update_weights_from_disk; S26 E6 tier 2 sampler).
+SGLANG_NEXT_COMMIT = "754605964776322226a073763a6f636aa8233932"
 # Fork lineage on michaellchung/miles yeto/ports, oldest first; the single
 # source for every "this fork commit carries X" set (rl-code-quality-cleanup
 # 0.7).  Each entry is the previous one plus the change named here; the newest
@@ -152,7 +154,10 @@ MILES_NEXT_BASE_IMAGE = (
 # every SHA.  PUBLIC on ghcr.io/michaellchung since 2026-10-07 (anonymous
 # pull); a private image needs SKYPILOT_DOCKER_{USERNAME,PASSWORD,SERVER} or
 # --rl-image-private (yeto.launcher.registry_login_for; read:packages token).
-# Tag 9462de5-10afe11; (S26 E6: Miles FP8 ignore list + SGLang FP8 activation
+# Tag 9462de5-7546059; (S26 E6: SGLang compressed-tensors FP8 in-place reload;
+# previous 9462de5-10afe11 @sha256:6e0a97d2...; build record
+# openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-21-9462de5-7546059/).
+# Earlier: tag 9462de5-10afe11; (S26 E6: Miles FP8 ignore list + SGLang FP8 activation
 # cast fix; previous 44d41ef-2fa8801 @sha256:5b9dc2a9...; build record
 # openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-21-9462de5-10afe11/).
 # Earlier: tag 44d41ef-2fa8801; (S24 L2.2: Miles s24-miles-import2 and the lazy-modelopt
@@ -164,7 +169,7 @@ MILES_NEXT_BASE_IMAGE = (
 # ports-image/2026-10-14-17aeb5c-2fa8801/). Earlier: tag 386ae3b-2fa8801; (S23 P0-1.11 GPU run: Miles s23-sao-streaming-roles; previous 64b591a-2fa8801 @sha256:fa2413be...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-14-386ae3b-2fa8801/). Earlier: (S19 #1: critic family + algo-supplement metrics baked in; previous ddce209-2fa8801 @sha256:9c252c38...) (S18 ARU-3: Miles s18-agentic-suspend = 2f7871fb2 + --agentic-suspend-between-turns; previous 2f7871f-2fa8801 @sha256:62b4f164..., efbbc63-2fa8801 @sha256:a7990076..., 8bc5223-4e4148f @sha256:4aeafd77...) ghcr.io/michaellchung (public package); linux/amd64 only.
 MILES_NEXT_IMAGE = (
     "docker:ghcr.io/michaellchung/yeto-miles-ports@sha256:"
-    "6e0a97d203cdd062c9f2fa35b6b834575cf05ee1f71fb45e921d8803b620f072"
+    "37acaca3e1eee8adc61bf3edbbd706ece36e40e9b7fd5463e54f56e3f4cc9b2b"
 )
 MILES_NEXT_IMAGE_MANIFEST = "/opt/yeto/image-manifest.json"
 # Nebius VM images whose /var/lib/docker already holds a docker image's
