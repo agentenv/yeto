@@ -86,6 +86,49 @@ class PolicyDigest:
         )
 
 
+class DeferredDigest:
+    """A :class:`PolicyDigest` whose hashes are still being computed in the trainer
+    (E1, sync colocated mode: the trainer hashes while it offloads). The layout
+    (``specs``) is known at once; the first read of a hash calls ``resolve`` once
+    (it waits for the trainer) and the values are those of the eager digest."""
+
+    def __init__(self, specs: Sequence[tuple[str, tuple[int, ...]]], resolve: Callable[[], "PolicyDigest"]):
+        self.specs = tuple((str(n), tuple(int(d) for d in s)) for n, s in specs)
+        self._resolve = resolve
+        self._done: PolicyDigest | None = None
+
+    def resolved(self) -> "PolicyDigest":
+        if self._done is None:
+            done = self._resolve()
+            if done.specs != self.specs:
+                raise PolicyDigestError("the deferred digest's layout changed while it was hashed")
+            self._done = done
+        return self._done
+
+    @property
+    def is_resolved(self) -> bool:
+        return self._done is not None
+
+    @property
+    def policy_tensor_hash(self) -> str:
+        return self.resolved().policy_tensor_hash
+
+    @property
+    def payload_hash(self) -> str:
+        return self.resolved().payload_hash
+
+    @property
+    def payload_bytes(self) -> int:
+        return self.resolved().payload_bytes
+
+    @property
+    def hash_seconds(self) -> float:
+        return self.resolved().hash_seconds
+
+    def to_wire(self) -> dict[str, Any]:
+        return self.resolved().to_wire()
+
+
 def _raw(tensor: Any, name: str) -> memoryview:
     import torch
 

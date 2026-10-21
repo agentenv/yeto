@@ -311,3 +311,54 @@ def test_export_digest_is_stable_across_rounds_with_the_reused_buffer():
     first = ps.export_digest(policy_version=2).policy_tensor_hash()
     assert ps.export_digest(policy_version=2).policy_tensor_hash() == first == \
         ps.export(policy_version=2).policy_tensor_hash()
+
+
+# E1: sync colocated mode hashes the staged policy while the trainer offloads
+def test_deferred_digest_is_the_eager_digest_and_is_collected_once():
+    ranks, group, ps = make()
+    for r in ranks:
+        r.train_step()
+    eager = ps.export_digest(policy_version=2)
+    group.calls.clear()
+    deferred = ps.export_digest(policy_version=2, deferred=True)
+    assert group.calls == [sp.EXPORT_DIGEST] and not deferred.digest.is_resolved
+    assert deferred.tensor_names == eager.tensor_names and deferred.layout_hash == eager.layout_hash
+    for r in ranks:  # the trainer trains on (or offloads): the staged copy is hashed
+        r.train_step()
+    assert deferred.policy_tensor_hash() == eager.policy_tensor_hash()
+    assert _payload_of(deferred) == _payload_of(eager)
+    assert deferred.digest.to_wire() == {**eager.digest.to_wire(), "hash_seconds": deferred.digest.hash_seconds}
+    assert group.calls == [sp.EXPORT_DIGEST, sp.COLLECT_DIGEST]
+    deferred.policy_tensor_hash()
+    assert group.calls == [sp.EXPORT_DIGEST, sp.COLLECT_DIGEST]  # resolved once
+
+
+def test_a_new_export_waits_for_the_deferred_hash_of_the_reused_buffer():
+    ranks, group, ps = make()
+    first = ps.export_digest(policy_version=1)
+    deferred = ps.export_digest(policy_version=1, deferred=True)
+    for r in ranks:
+        r.train_step()
+    other = ps.export_digest(policy_version=2)  # overwrites the staging buffer
+    assert other.policy_tensor_hash() != first.policy_tensor_hash()
+    assert deferred.policy_tensor_hash() == first.policy_tensor_hash()
+
+
+def test_collecting_another_version_is_refused():
+    ranks, group, ps = make()
+    ps.export_digest(policy_version=1, deferred=True)
+    with pytest.raises(Exception, match="v1, not v3"):
+        ps._collect_digest(3)
+
+
+def test_the_driver_defers_only_for_a_colocated_offloading_trainer(monkeypatch):
+    ranks, group, ps = make()
+    driver = _Driver(ps, fast=False)
+    from yeto.rl.engine.driver import defer_digest
+
+    assert defer_digest(driver) is False
+    driver.colocated = driver.publish_offloaded = True
+    state = IslandDriver.export_local_resident(driver, policy_version=0)
+    assert not state.digest.is_resolved
+    monkeypatch.setenv("YETO_RL_DEFERRED_DIGEST", "0")
+    assert defer_digest(driver) is False

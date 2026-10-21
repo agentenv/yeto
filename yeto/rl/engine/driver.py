@@ -368,6 +368,18 @@ def _pooled_reward(batch: RolloutBatchHandle) -> tuple[float, float]:
     return mean, math.sqrt(max(0.0, second - mean * mean))
 
 
+def defer_digest(driver: Any) -> bool:
+    """E1: a colocated trainer that offloads for the publication hashes the policy
+    while it offloads (``deferred`` digest, read at the publication). Needs a
+    policy state that supports it; ``YETO_RL_DEFERRED_DIGEST=0`` turns it off."""
+    import os
+
+    if os.environ.get("YETO_RL_DEFERRED_DIGEST", "1").strip().lower() in {"0", "false", "no", "off"}:
+        return False
+    return (bool(getattr(driver, "colocated", False)) and bool(getattr(driver, "publish_offloaded", False))
+            and bool(getattr(driver.policy_state, "supports_deferred_digest", False)))
+
+
 class IslandDriver:
     def __init__(
         self,
@@ -687,6 +699,8 @@ class IslandDriver:
         export_digest = getattr(self.policy_state, "export_digest", None)
         if not callable(export_digest):
             return None
+        if defer_digest(self):
+            return export_digest(policy_version=int(policy_version), deferred=True)
         return export_digest(policy_version=int(policy_version))
 
     # -- per-round steps -------------------------------------------------

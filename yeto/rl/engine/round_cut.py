@@ -109,8 +109,9 @@ class CutSource:
 
         driver = self.driver
         if pending is not None:
+            # the token is read last (below): a deferred digest (E1) hashes meanwhile
             version, state = int(pending[0]), pending[1]
-            settled, token = True, policy_token(version, state.policy_tensor_hash())
+            settled, token = True, None
         else:
             version, state = driver.published_version, driver.published_state
             settled, token = bool(driver.at_safe_point), driver.expected_token
@@ -152,6 +153,8 @@ class CutSource:
             policy_version=int(state.policy_version),
             policy_hash=state.policy_tensor_hash(),
         )
+        if token is None:
+            token = policy_token(version, progress.policy_hash)
         return CutContext(
             root=self.cut_root, cut_id=cut_id, backend_fingerprint=self.backend_fingerprint,
             progress=progress, algorithm=self.identity, data=data, ledger=summary,
