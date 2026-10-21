@@ -20,7 +20,7 @@ AGE=${BASH_REMATCH[1]}; BUF=${BASH_REMATCH[4]:-$AGE}
 case ${BASH_REMATCH[2]} in t2) SPEC=algo-tis2-age4.json;; t5) SPEC=algo-tis5-age4.json;; ais5) SPEC=algo-ais5-age4.json;; esac
 ARGS="launch --training-mode rl --rl-engine ports --modal-gpu-exact --modal-retries 0 --modal-cpu 8 \
 --modal-tape-volume yeto-event-tapes --model Qwen/Qwen3-0.6B --model-revision c1899de289a04d12100db370d81485cdf75e47ca \
---rl-allow-local-data --data $D/gsm8k-tasks512.jsonl --reward-function yeto.rl.gsm8k_reward:score --pipeline 1 \
+--rl-allow-local-data --data tools/probes/s26_e03/gsm8k-tasks512.jsonl --reward-function yeto.rl.gsm8k_reward:score --pipeline 1 \
 --n-samples-per-prompt 8 --rollout-max-response-len 1024 --seq-len 1536 --inner-lr 1e-5 --seed ${SEED:-17} \
 --total-steps 10 --apply-chat-template-kwargs '{\"enable_thinking\": false}' --trust-remote-code \
 --rl-algorithm-spec $D/$SPEC --rl-placement fixed-partition --rl-rollout-gpus 1 --cluster-prefix $P \
