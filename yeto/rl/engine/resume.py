@@ -30,6 +30,7 @@ What a save describes and the one save path are in :mod:`yeto.rl.engine.recovery
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -144,6 +145,12 @@ class CheckpointStore:
 
     def reload(self) -> None:
         return None
+
+    def writing(self) -> contextlib.AbstractContextManager[None]:
+        """Held while a writer builds files it has not committed yet. A store whose
+        reload can drop uncommitted local writes (a Modal Volume) does not reload
+        while any writer of the same volume holds it."""
+        return contextlib.nullcontext()
 
     def describe(self) -> dict[str, Any]:
         return {"kind": self.kind, "root": str(self.root)}
