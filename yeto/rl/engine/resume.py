@@ -369,13 +369,27 @@ def prune(store_root: Path, *, keep: int, cut_ids_of: Callable[[Path], str | Non
             shutil.rmtree(p, ignore_errors=True)
             deleted.append(f"{STATE_DIR}/{p.name}")
     wanted = {cid for cid in (cut_ids_of(p) for p in kept) if cid}
+    # E1: a cut newer than every kept one may be being written right now (a periodic
+    # cut is captured while the previous cut commits in the background): not pruned
+    newest = max((r for r in map(_cut_rollout, wanted) if r is not None), default=None)
     cuts = root / ROUND_CUTS
     if cuts.is_dir():
         for p in sorted(cuts.iterdir()):
+            rollout = _cut_rollout(p.name)
+            if newest is not None and rollout is not None and rollout > newest:
+                continue
             if p.is_dir() and p.name not in wanted:
                 shutil.rmtree(p, ignore_errors=True)
                 deleted.append(f"{ROUND_CUTS}/{p.name}")
     return deleted
+
+
+def _cut_rollout(cut_id: str) -> int | None:
+    """Rollout id of a round cut named ``r<rollout:06d>-<incarnation>`` (None: other name)."""
+    head, sep, _ = cut_id.partition("-")
+    if not sep or not head.startswith("r") or not head[1:].isdigit():
+        return None
+    return int(head[1:])
 
 
 def directory_bytes(path: Path) -> int:

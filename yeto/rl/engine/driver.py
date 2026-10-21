@@ -1638,6 +1638,11 @@ class IslandDriver:
             self.elastic_hook.at_safe_point(self, rollout_id)
         if not self.controller.has_pending() and not self.controller.recovery_required:
             return None
+        # E1: a reconfiguration syncs the checkpoint store itself; no round cut may still
+        # be committing it in the background
+        join_commit = getattr(getattr(self.sync, "round_cuts", None), "join_commit", None)
+        if callable(join_commit):
+            join_commit(self)
         epoch_before = self.config_epoch
         self.phase("reconfigure", rollout_id=rollout_id, config_epoch=epoch_before)
         from .controller import RecoveryRequired

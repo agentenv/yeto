@@ -846,6 +846,13 @@ class MilesTrainerGroup:
 
     def finish_cut(self, pending: Mapping[str, Any]) -> str:
         """Collect the shards of :meth:`start_cut` and commit the manifest; returns the cut id."""
+        return self.collect_cut(pending)()
+
+    def collect_cut(self, pending: Mapping[str, Any]) -> Callable[[], str]:
+        """E1: the trainer part of :meth:`finish_cut` (collect and check every rank's
+        shard summary, build the manifest). Returns the commit of that manifest: plain
+        filesystem work (no trainer call), so the caller may run it on another thread.
+        Raises like :meth:`finish_cut` before anything is committed."""
         from yeto.rl.engine.cut import CutError, CutFile, CutManifest, commit_manifest
         from .cut_plugin import FINISH_CUT_SHARD
 
@@ -895,8 +902,13 @@ class MilesTrainerGroup:
         )
         if problems:
             raise CutError("refusing an incomplete cut: " + "; ".join(problems))
-        commit_manifest(context.root, manifest, check_files=context.shared_filesystem)
-        return cut_id
+        root, check_files = context.root, context.shared_filesystem
+
+        def commit() -> str:
+            commit_manifest(root, manifest, check_files=check_files)
+            return cut_id
+
+        return commit
 
     def _resume_manifest(self, context: "CutContext", summaries: list[Mapping[str, Any]]) -> Any:
         """Resume manifest of this cut: run counters plus every rank's optimizer state (S25 N7.6)."""

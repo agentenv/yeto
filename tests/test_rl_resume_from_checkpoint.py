@@ -565,6 +565,10 @@ class _CountingTrainer:
         self.calls.append("finish_cut")
         return self.inner.finish_cut(pending)
 
+    def collect_cut(self, pending):
+        self.calls.append("collect_cut")
+        return self.inner.collect_cut(pending)
+
     def onload(self):
         self.calls.append("onload")
 
@@ -625,7 +629,7 @@ def test_prepared_cut_is_written_in_the_background_without_waking_the_trainer(tm
     assert info["prepared_before_offload"] is True and info["store_commit"] == "deferred"
     assert cp.pointer()["cut_id"] == first["cut_id"]  # not pointed at until complete
     done = cp.join_commit(driver)
-    assert done["ok"] is True and done["cut_id"] == info["cut_id"] and trainer.calls[-1] == "finish_cut"
+    assert done["ok"] is True and done["cut_id"] == info["cut_id"] and trainer.calls[-1] == "collect_cut"
     assert driver.events[-1][0] == "rl_cut_committed" and driver.events[-1][1]["ok"] is True
     assert cp.pointer()["cut_id"] == info["cut_id"]
     assert rs.read_latest(store.root)["cut_id"] == info["cut_id"]
@@ -754,3 +758,19 @@ def test_a_periodic_cut_never_waits_for_the_commit_it_starts(tmp_path):
     assert final["store_commit"] == "inline" and rs.read_latest(store.root)["cut_id"] == final["cut_id"]
     committed = [f["cut_id"] for e, f in driver.events if e == "rl_cut_committed"]
     assert committed == ["r000002-" + cp.controller.incarnation["id"], info["cut_id"]]  # v2, then v3
+
+
+def test_prune_keeps_a_cut_newer_than_every_kept_one(tmp_path):
+    """E1: a periodic cut is captured while the previous one commits in the background;
+    the commit's prune must not delete the newer cut being written."""
+    root = tmp_path / "store"
+    for seq, cut_id in ((1, "r000002-aa"), (2, "r000004-aa")):
+        (root / rs.STATE_DIR / f"{seq:08d}").mkdir(parents=True)
+        (root / rs.STATE_DIR / f"{seq:08d}" / "cut").write_text(cut_id)
+    for cut_id in ("r000001-aa", "r000002-aa", "r000004-aa", "r000006-aa"):
+        (root / rs.ROUND_CUTS / cut_id).mkdir(parents=True)
+    (root / rs.LATEST).write_text(json.dumps({"seq": 2}))
+    deleted = rs.prune(root, keep=1, cut_ids_of=lambda p: (p / "cut").read_text())
+    assert sorted(deleted) == [f"{rs.ROUND_CUTS}/r000001-aa", f"{rs.ROUND_CUTS}/r000002-aa",
+                               f"{rs.STATE_DIR}/00000001"]
+    assert sorted(p.name for p in (root / rs.ROUND_CUTS).iterdir()) == ["r000004-aa", "r000006-aa"]

@@ -400,35 +400,61 @@ class RoundCutCheckpoint:
                 **({"error": result["error"]} if result.get("error") else {}))
 
     def _complete_deferred(self, deferred: dict[str, Any]) -> dict[str, Any]:
+        """Collect the pending cut's shards from the trainer (this thread: the trainer
+        is driven from here), then commit its manifest, point the state dir at it and
+        commit the store in the background (:meth:`_commit_in_background`)."""
+        import time
+
+        info = deferred["info"]
+        started = time.monotonic()
+        try:
+            collect = getattr(self.trainer, "collect_cut", None)
+            if callable(collect):
+                commit_manifest = collect(deferred["pending"])
+            else:
+                self.trainer.finish_cut(deferred["pending"])
+                commit_manifest = None
+        except Exception as error:  # noqa: BLE001 - the previous cut stays the pointed one
+            self._drop_unpointed(info["cut_id"])
+            return {"cut_id": info["cut_id"], "rollout_id": deferred["rollout_id"], "ok": False,
+                    "error": repr(error)[:2000]}
+        self._commit_in_background(deferred, commit_manifest)
+        return {"cut_id": info["cut_id"], "rollout_id": deferred["rollout_id"],
+                "collect_s": round(time.monotonic() - started, 3)}
+
+    def _commit_in_background(self, deferred: dict[str, Any], commit_manifest: Any) -> None:
+        """E1: off the round's critical path: the cut manifest (``commit_manifest``, None
+        when the trainer committed it already), the pointer with the cut record, the
+        state dir copied into the store, the store commit. Until the pointer moves the
+        previous cut stays the pointed one; a failure before that drops the new cut's
+        files. The outcome lands in the result box, reported by :meth:`join_commit`."""
+        import threading
         import time
 
         from yeto.rl.engine.resume import directory_bytes
 
         info, cut = deferred["info"], deferred["cut"]
-        started = time.monotonic()
-        try:
-            self.trainer.finish_cut(deferred["pending"])
-            saved = recovery.save(cut, store=self.controller.store,
-                                  write=lambda record: self._write_and_sync(info, record, defer=True))
-        except Exception as error:  # noqa: BLE001 - the previous cut stays the pointed one
-            self._drop_unpointed(info["cut_id"])
-            return {"cut_id": info["cut_id"], "rollout_id": deferred["rollout_id"], "ok": False,
-                    "error": repr(error)[:2000]}
-        out = {"cut_id": info["cut_id"], "rollout_id": deferred["rollout_id"],
-               "finish_s": round(time.monotonic() - started, 3),
-               "cut_bytes": directory_bytes(Path(self.root) / info["cut_id"])}
-        if saved["synced"]:
-            self._commit_in_background(info["cut_id"])
-            return out
-        return {**out, "ok": False, "error": (getattr(self.controller, "last_store_sync", None) or {}).get("error")}
-
-    def _commit_in_background(self, cut_id: str) -> None:
-        import threading
-
+        cut_id = info["cut_id"]
         box: dict[str, Any] = {"cut_id": cut_id}
 
         def run() -> None:
-            box["result"] = self.controller.commit_checkpoint_store()
+            started = time.monotonic()
+            try:
+                if commit_manifest is not None:
+                    commit_manifest()
+                saved = recovery.save(cut, store=self.controller.store,
+                                      write=lambda record: self._write_and_sync(info, record, defer=True))
+            except Exception as error:  # noqa: BLE001 - reported at the next join
+                self._drop_unpointed(cut_id)
+                box["result"] = {"ok": False, "error": repr(error)[:2000]}
+                return
+            done = {"finish_s": round(time.monotonic() - started, 3),
+                    "cut_bytes": directory_bytes(Path(self.root) / cut_id)}
+            if not saved["synced"]:
+                box["result"] = {**done, "ok": False, "error": (
+                    getattr(self.controller, "last_store_sync", None) or {}).get("error")}
+                return
+            box["result"] = {**done, **dict(self.controller.commit_checkpoint_store() or {})}
 
         thread = threading.Thread(target=run, name=f"yeto-cut-commit-{cut_id}", daemon=True)
         self._commit = (thread, box)
