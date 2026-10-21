@@ -508,6 +508,9 @@ def yeto_miles_islands_launcher_args(spec: EffSpec, islands: int, run_id: str, *
             "--no-sglang-deterministic-inference --rl-lr-schedule constant --rl-activation-recompute "
             f"--rl-max-tokens-per-gpu {max_tokens_per_gpu(spec)} --rl-gradient-accumulation-fusion "
             f"--trust-remote-code --rl-algorithm-spec {MILES_ALGORITHM_SPEC} "
+            # elastic: the multi-island LoRA path with real-card runs (S24 d4, S25 c3); legacy
+            # scheduling hung in the first apply on both islands (e11-yeto-2i-1, no round in 13 min)
+            "--rl-island-scheduling elastic "
             f"--rl-placement fixed-partition --rl-rollout-gpus {per // 2} "
             f"--rl-max-policy-age {spec.max_policy_age}")
     if kwargs:
