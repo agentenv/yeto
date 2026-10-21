@@ -27,15 +27,18 @@ case $G in
   t1-lora)  ARGS="$COMMON --cluster-prefix $P --gpu modal:1xh100 --rl-single-island-no-sync $LORA --rl-rollout-quant-tier 1" ;;
   t1n-lora) ARGS="$COMMON --cluster-prefix $P --gpu modal:1xh100 --rl-single-island-no-sync $LORA --rl-rollout-quant-tier 1 --rl-rollout-quant-fp8-source trainer" ;;
   t0-pair|t2-pair)
-    # a full-parameter sampler island needs dedicated engines (fixed partition: 1 actor + 1 engine card; the launcher applies it to every island)
-    PAIR="$COMMON --cluster-prefix $P --gpu modal:2xh100,modal:2xh100 --rl-placement fixed-partition --rl-rollout-gpus 1 \
---rl-single-island-no-sync \
---rl-island-sample-role 0:sampler --rl-island-sample-role 1:trainer --tuning full --modal-memory 128 \
---rl-max-policy-age 1 --rl-cut-every 1 --rl-code-pack git-patch --rl-sampler-max-backlog-rounds 2 --rl-sample-wait-s 900"
-    ISLANDS=2
-    if [ $G = t2-pair ]; then ARGS="$PAIR --rl-rollout-quant-tier 2"; else ARGS="$PAIR"; fi ;;
+    # Two launches on one store (as S25 C3): the trainer island reads samples and starts no
+    # engine (1 card); a full-parameter sampler island needs dedicated engines (fixed
+    # partition, 1 actor + 1 engine card). One launch with --rl-island-sample-role cannot
+    # give the two islands different placements for full parameters.
+    ROLE="$COMMON --rl-single-island-no-sync --tuning full --modal-memory 128 --rl-max-policy-age 1"
+    Q=""; [ $G = t2-pair ] && Q="--rl-rollout-quant-tier 2"
+    ARGS="$ROLE --cluster-prefix $P --gpu modal:1xh100 --rl-sample-role trainer --rl-sample-wait-s 900 $Q"
+    SARGS="$ROLE --cluster-prefix $P-s --gpu modal:2xh100 --rl-placement fixed-partition --rl-rollout-gpus 1 \
+--rl-sample-role sampler --rl-sampler-max-backlog-rounds 2 --total-steps 12 $Q"
+    ISLANDS=2 ;;
   *) echo "abort: group $G"; exit 65 ;;
 esac
 mkdir -p "$(dirname $R)"
-export P R REPO ARGS STOREVOL ISLANDS HARD=${HARD:-3600} PY=/home/michael/work/gpu-head/venv/bin/python
+export P R REPO ARGS ${SARGS:+SARGS} STOREVOL ISLANDS HARD=${HARD:-3600} PY=/home/michael/work/gpu-head/venv/bin/python
 exec bash "$HERE/miles_local.sh"

@@ -98,6 +98,10 @@ def test_tier_2_needs_sampler_islands_and_full_parameters():
     with pytest.raises(QuantTierError, match="--tuning full"):
         tiers.validate_launch(_args(rl_rollout_quant_tier=2, rl_island_sample_role=["1:sampler"], tuning="lora"))
     assert tiers.validate_launch(_args(rl_rollout_quant_tier=2, rl_island_sample_role=["1:sampler"])) == 2
+    for role in ("sampler", "trainer"):  # one launch per role on a shared store (S25 C3 shape)
+        assert tiers.validate_launch(_args(rl_rollout_quant_tier=2, rl_sample_role=role)) == 2
+    with pytest.raises(QuantTierError, match="store-coupled"):
+        tiers.validate_launch(_args(rl_rollout_quant_tier=2, rl_sample_role="both"))
     assert tiers.release_scheme(2) == FP8_FFN_CHANNEL and tiers.release_scheme(1) == "bf16"
 
 

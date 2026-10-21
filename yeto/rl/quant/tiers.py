@@ -139,10 +139,12 @@ def validate_launch(args: Any) -> int:
     if fp8_source(args) == FP8_SOURCE_TRAINER and tier != TIER_ONLINE_FP8:
         raise QuantTierError(f"{SOURCE_FLAG} trainer applies to tier 1 only (got {FLAG} {tier})")
     if tier == TIER_TRAINER_FP8:
-        if not getattr(args, "rl_island_sample_role", None):
+        role = getattr(args, "rl_sample_role", None) or "both"
+        if not getattr(args, "rl_island_sample_role", None) and role not in ("sampler", "trainer"):
             raise QuantTierError(
                 f"{FLAG} 2 converts each trainer release and ships it to a sampler island: it needs "
-                "store-coupled islands (--rl-island-sample-role). Colocated islands use tier 1")
+                "store-coupled islands (--rl-island-sample-role, or one launch per role with "
+                "--rl-sample-role). Colocated islands use tier 1")
         if getattr(args, "tuning", "lora") != "full":
             raise QuantTierError(f"{FLAG} 2 needs --tuning full: a LoRA release carries no base weights "
                                  "to convert (tier 1 quantizes the base once in the engine)")
