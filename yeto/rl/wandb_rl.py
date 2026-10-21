@@ -28,6 +28,7 @@ STEP_METRICS = {
     "train/*": TRAIN_STEP_KEY,
     "rl/*": STEP_KEY,
     "eval/*": STEP_KEY,
+    "sync/*": STEP_KEY,
 }
 
 # Closed output surface. Input aliases are limited to namespaced scalar fields
@@ -115,11 +116,40 @@ def _non_negative_step(event: dict[str, Any], aliases: tuple[str, ...]) -> int |
     return None
 
 
+# S26 E3b: per-sweep sync diagnostics of a full-parameter island, on the
+# global policy-version axis (rl/step).
+_SYNC_ROUND_OUTPUTS = (
+    "sync/sync_wait_seconds",
+    "sync/upload_mbps",
+    "sync/upload_min_stream_mbps",
+    "sync/upload_active_streams",
+    "sync/wait_after_upload_seconds",
+    "sync/stream_stalls",
+)
+
+
+def _sync_round_metrics(event: dict[str, Any]) -> dict[str, Any] | None:
+    step = _non_negative_step(event, ("policy_version",))
+    if step is None:
+        return None
+    metrics = {
+        key: value
+        for key in _SYNC_ROUND_OUTPUTS
+        if (value := _finite_scalar(event, (key,))) is not None
+    }
+    if not metrics:
+        return None
+    metrics[STEP_KEY] = step
+    return metrics
+
+
 def event_metrics(event: dict[str, Any]) -> dict[str, Any] | None:
     """Project one event onto the explicit scalar-only W&B surface."""
 
     global _derived_step_logged
     event_name = event.get("event")
+    if event_name == "rl_full_parameter_round":
+        return _sync_round_metrics(event)
     if event_name not in {"rl_local_round", "rl_eval_result", "rl_round_trained"}:
         return None
 

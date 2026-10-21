@@ -176,13 +176,15 @@ def test_every_rust_tape_field_is_consumed_or_deliberately_skipped():
     # The responders literal is built first, the record literal last.
     responder_fmt, record_fmt = body.split("let line = format!(", 1)
     top_level = set(re.findall(r'\\"(\w+)\\":', record_fmt))
+    optional = source.split("fn checkpoint_tape_field(", 1)[1].split("\nfn ", 1)[0]
+    top_level |= set(re.findall(r'\\"(\w+)\\":', optional))
     responder_keys = set(re.findall(r'\\"(\w+)\\":', responder_fmt))
     assert responder_keys, "could not find the responder literal in append_tape"
 
     consumed_top = {
         "step", "fragment", "attempt", "gnorm", "ms", "sync_ms", "quorum",
         "expected", "responded", "missed_grace", "launch_base_version",
-        "quorum_ms", "grace_ms", "responders",
+        "quorum_ms", "grace_ms", "responders", "checkpoint_ms",
     }
     # Constants and the member-identity mirrors of the id lists: nothing a
     # time series can be drawn from.
