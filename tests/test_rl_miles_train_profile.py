@@ -31,13 +31,18 @@ def test_the_flag_reaches_the_launcher_args_and_the_eval_spec():
     assert spec.control_fingerprint(sp) == spec.control_fingerprint(spec.get_spec("qwen3-0.6b"))
 
 
-def test_the_flag_is_forwarded_to_the_island_and_set_on_the_miles_args():
+def test_the_flag_is_forwarded_to_the_island_and_set_on_the_miles_args(monkeypatch):
     import argparse
     from types import SimpleNamespace
 
     from yeto.launch import rl_ports
     from yeto.rl.adapters.miles import island_entry
+    from yeto.rl.engine import phase_profile
     from yeto.rl.engine.run_flags import ISLAND, add_rl_flags
+
+    # the switch starts the process-wide phase sampler; keep it out of later tests
+    # (it printed "yeto phase profile" lines into test_rl_reconfig_e1's CLI output)
+    monkeypatch.setitem(phase_profile._STATE, "thread", None)
 
     _prelude, flags = rl_ports._ports_infra_flags(argparse.Namespace(rl_profile_trainer=True))
     assert " --rl-profile-trainer" in flags
