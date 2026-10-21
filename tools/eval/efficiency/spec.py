@@ -84,6 +84,9 @@ class EffSpec:
     # (fair control), "every-round" is the product default (a round cut every round).
     # Not in the control fingerprint: it does not change what the bare arms run.
     checkpoint: str = "final"
+    # cards per run: 0 keeps the E0 shape (sync 1, async 1 rollout + 1 trainer); E11
+    # (whole-cluster comparison) sets the total, split evenly between rollout and trainer in async
+    cards: int = 0
 
     @property
     def samples_per_round(self) -> int:
@@ -140,16 +143,24 @@ def get_spec(preset: str, **overrides: Any) -> EffSpec:
     return replace(PRESETS[preset], **overrides) if overrides else PRESETS[preset]
 
 
-def cards(mode: str) -> dict[str, int]:
-    """Cards per role: sync colocates both on one card; async has one of each."""
-    return {"total": 1, "rollout": 1, "trainer": 1, "colocated": True} if mode == "sync" else \
-        {"total": 2, "rollout": 1, "trainer": 1, "colocated": False}
+def cards(mode: str, total: int = 0) -> dict[str, int]:
+    """Cards per role: sync colocates both on every card; async splits them evenly
+    (``total`` 0: one card for sync, one of each role for async)."""
+    if mode == "sync":
+        n = total or 1
+        return {"total": n, "rollout": n, "trainer": n, "colocated": True}
+    n = total or 2
+    if n % 2:
+        raise ValueError(f"async needs an even card count (rollout + trainer halves), got {n}")
+    return {"total": n, "rollout": n // 2, "trainer": n // 2, "colocated": False}
 
 
 def control_fingerprint(spec: EffSpec) -> str:
     """sha256 over every shared value except the repeat count (a report refuses
     to compare runs whose fingerprints differ)."""
     doc = {k: v for k, v in spec.to_dict().items() if k not in ("repeats", "timeout_s", "checkpoint")}
+    if not spec.cards:
+        doc.pop("cards")  # the E0 shape: fingerprints from before the field existed stay valid
     return hashlib.sha256(json.dumps(doc, sort_keys=True).encode()).hexdigest()
 
 
@@ -168,7 +179,7 @@ def _model_path(spec: EffSpec) -> str:
 # ====================================================================== bare verl
 def verl_bare_overrides(spec: EffSpec, mode: str, run_id: str) -> list[str]:
     """Hydra overrides of the bare verl arm (recipe groups in the recipe's order)."""
-    c = cards(mode)
+    c = cards(mode, spec.cards)
     data = [
         "algorithm.adv_estimator=grpo",
         "algorithm.use_kl_in_reward=False",
@@ -271,7 +282,7 @@ def verl_bare_entry(mode: str) -> str:
 # ====================================================================== bare Miles
 def miles_bare_argv(spec: EffSpec, mode: str) -> list[str]:
     """Miles arguments after the model flags (the container prepends ``$MODEL_ARGS``)."""
-    c = cards(mode)
+    c = cards(mode, spec.cards)
     model = _model_path(spec)
     argv = [
         # checkpoint: bridge mode loads the HF checkpoint directly (run_qwen3_4b.py --megatron-to-hf-mode bridge)
@@ -388,7 +399,7 @@ def yeto_miles_launcher_args(spec: EffSpec, mode: str, run_id: str) -> str:
     from ..miles import DATA, STORE_VOLUME, TAPE_VOLUME
 
     card = {"A10G": "a10g", "H100!": "h100", "L4": "l4"}[spec.gpu]
-    c = cards(mode)
+    c = cards(mode, spec.cards)
     kwargs = json.dumps(spec.chat_template_kwargs) if spec.chat_template_kwargs else ""
     args = (f"launch --training-mode rl --rl-engine ports --preflight-threads off --modal-gpu-exact "
             f"{gpu_name_arg(spec)}"
@@ -424,7 +435,7 @@ def yeto_miles_launcher_args(spec: EffSpec, mode: str, run_id: str) -> str:
 # ====================================================================== plans
 def bare_script(spec: EffSpec, arm: Arm, run_id: str) -> str:
     """The bash script a bare container runs (after eff_prep.py staged model and data)."""
-    c = cards(arm.mode)
+    c = cards(arm.mode, spec.cards)
     lines = ["set -euo pipefail", f"mkdir -p {OUT_DIR}",
              f"python3 {EFF_DIR}/eff_prep.py {EFF_DIR}/spec.json > {OUT_DIR}/prep.json"]
     if arm.framework == "verl":
@@ -456,7 +467,7 @@ def bare_script(spec: EffSpec, arm: Arm, run_id: str) -> str:
 def plan(spec: EffSpec, arm_name: str, run_id: str) -> dict[str, Any]:
     """Everything one run of an arm needs (written to ``arm.json`` before the launch)."""
     arm = Arm.parse(arm_name)
-    c = cards(arm.mode)
+    c = cards(arm.mode, spec.cards)
     doc: dict[str, Any] = {
         "arm": arm.name, "system": arm.system, "framework": arm.framework, "mode": arm.mode, "run_id": run_id,
         "spec": spec.to_dict(), "fingerprint": control_fingerprint(spec), "cards": c, "gpu": spec.gpu,

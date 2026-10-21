@@ -419,3 +419,19 @@ def test_tape_events_skip_the_repo_copy_and_the_store(tmp_path):
         (tmp_path / sub).mkdir(parents=True)
         (tmp_path / sub / "rl-island-0.jsonl").write_text(json.dumps({**row, "src": sub}) + "\n")
     assert [r.get("src") for r in parse._tape_events(tmp_path)] == ["tape-direct/l0"]
+
+
+def test_cards_whole_cluster_split():
+    from tools.eval.efficiency import spec as S
+
+    assert S.cards("sync") == {"total": 1, "rollout": 1, "trainer": 1, "colocated": True}
+    assert S.cards("async") == {"total": 2, "rollout": 1, "trainer": 1, "colocated": False}
+    assert S.cards("async", 4) == {"total": 4, "rollout": 2, "trainer": 2, "colocated": False}
+    assert S.cards("sync", 4)["trainer"] == 4
+    with pytest.raises(ValueError):
+        S.cards("async", 3)
+    base = S.get_spec("qwen3-4b-instruct-2507")
+    # cards=0 keeps the fingerprint of runs made before the field existed
+    assert S.control_fingerprint(base) != S.control_fingerprint(S.get_spec("qwen3-4b-instruct-2507", cards=4))
+    plan = S.plan(S.get_spec("qwen3-4b-instruct-2507", cards=4), "bare-miles-async", "e11-x")
+    assert "--rollout-num-gpus 2" in plan["script"] and "--actor-num-gpus-per-node 2" in plan["script"]
