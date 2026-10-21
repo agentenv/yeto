@@ -33,7 +33,10 @@ case $G in
     # give the two islands different placements for full parameters.
     ROLE="$COMMON --rl-single-island-no-sync --tuning full --modal-memory 128 --rl-max-policy-age 1"
     Q=""; [ $G = t2-pair ] && Q="--rl-rollout-quant-tier 2"
-    ARGS="$ROLE --cluster-prefix $P --gpu modal:1xh100 --rl-sample-role trainer --rl-sample-wait-s 900 $Q"
+    # full-parameter Adam state of 4B does not fit next to activations on one H100
+    # (e6-t0-pair-a: CUDA OOM in round 2): it lives on the host
+    ARGS="$ROLE --cluster-prefix $P --gpu modal:1xh100 --rl-sample-role trainer --rl-sample-wait-s 900 \
+--rl-optimizer-offload-fraction 1.0 $Q"
     SARGS="$ROLE --cluster-prefix $P-s --gpu modal:2xh100 --rl-placement fixed-partition --rl-rollout-gpus 1 \
 --rl-sample-role sampler --rl-sampler-max-backlog-rounds 2 --total-steps 12 $Q"
     ISLANDS=2 ;;
