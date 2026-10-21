@@ -42,7 +42,9 @@ launcher puts the example directory on the workers' PYTHONPATH
 
 from __future__ import annotations
 
+import asyncio
 import importlib
+import logging
 import os
 import uuid
 import weakref
@@ -66,6 +68,8 @@ from yeto.rl.agentic.trust import check_agent_env
 from yeto.rl.harness.gateway.gate_relay import GateRelay
 from yeto.rl.harness.harbor import CODEX_VERSION, HarborHarness, HarborSettings, build_trial_config
 from yeto.rl.harness.harbor.trial import CODEX_KWARGS, CUSTOM_PROVIDERS, TrialConfigBuilder, setup_retries_from_env
+
+logger = logging.getLogger(__name__)
 
 EXAMPLE_MODULE = "harbor_agent_function"
 AGENT_FUNCTION = "yeto.rl.adapters.miles.harbor_agent.run"
@@ -94,6 +98,7 @@ def gate() -> AdmissionGate:
 
 # --------------------------------------------------------------- suspension
 
+TEST_HOLD_EXTRA_ENV = "YETO_TEST_SUSPEND_HOLD_EXTRA_S"  # test only, see test_hold_extra_s
 RELAY_PORT_ENV = "YETO_HARBOR_GATE_RELAY_PORT"
 RELAY_HOST_ENV = "YETO_HARBOR_GATE_RELAY_HOST"
 RELAY_PUBLIC_HOST_ENV = "YETO_HARBOR_GATE_RELAY_PUBLIC_HOST"
@@ -185,7 +190,26 @@ async def suspend(args: Any) -> None:
 async def resume(args: Any) -> None:
     """Miles hook at the start of the next round: open the gate."""
     del args
+    extra = test_hold_extra_s()
+    if extra > 0:
+        logger.warning("TEST ONLY: %s=%s keeps the gate closed %.0f s longer", TEST_HOLD_EXTRA_ENV,
+                       os.environ.get(TEST_HOLD_EXTRA_ENV), extra)
+        await asyncio.sleep(extra)
     turn_gate().open()
+
+
+def test_hold_extra_s(environ: Any = None) -> float:
+    """Test-only extra hold before the gate reopens (default 0 = off).
+
+    A GPU check needs the agent's held model call to outlast Codex's stream
+    idle limit (300 s), longer than one training step of a small model (E9.5 R3)."""
+    raw = str((os.environ if environ is None else environ).get(TEST_HOLD_EXTRA_ENV, "") or "").strip()
+    if not raw:
+        return 0.0
+    value = float(raw)
+    if value < 0:
+        raise HarnessConfigError(f"{TEST_HOLD_EXTRA_ENV} must be >= 0, got {raw!r}")
+    return value
 
 
 def _example() -> Any:

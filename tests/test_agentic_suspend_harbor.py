@@ -530,3 +530,32 @@ def test_relay_port_zero_binds_any_free_port():
     _run(go())
     with pytest.raises(RelayError, match="fixed relay port"):
         GateRelay(TurnGate(), port=(1, 2), public_base="https://t")
+
+
+def test_test_only_hold_is_off_by_default_and_delays_the_reopen(monkeypatch):
+    import asyncio
+
+    import pytest
+
+    from yeto.rl.adapters.miles import harbor_agent as mod
+
+    assert mod.test_hold_extra_s({}) == 0.0
+    assert mod.test_hold_extra_s({mod.TEST_HOLD_EXTRA_ENV: "420"}) == 420.0
+    with pytest.raises(mod.HarnessConfigError):
+        mod.test_hold_extra_s({mod.TEST_HOLD_EXTRA_ENV: "-1"})
+    slept, events = [], []
+
+    async def fake_sleep(s):
+        slept.append(s)
+
+    class Gate:
+        def open(self):
+            events.append(("open", list(slept)))
+
+    monkeypatch.setattr(mod, "turn_gate", lambda: Gate())
+    monkeypatch.setattr(mod.asyncio, "sleep", fake_sleep)
+    monkeypatch.delenv(mod.TEST_HOLD_EXTRA_ENV, raising=False)
+    asyncio.run(mod.resume(None))
+    monkeypatch.setenv(mod.TEST_HOLD_EXTRA_ENV, "420")
+    asyncio.run(mod.resume(None))
+    assert events == [("open", []), ("open", [420.0])]  # opened only after the extra hold
