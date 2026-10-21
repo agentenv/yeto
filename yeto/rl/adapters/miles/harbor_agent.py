@@ -77,6 +77,8 @@ logger = logging.getLogger(__name__)
 EXAMPLE_MODULE = "harbor_agent_function"
 AGENT_FUNCTION = "yeto.rl.adapters.miles.harbor_agent.run"
 REWARD_FUNCTION = "yeto.rl.adapters.miles.harbor_agent.reward_func"
+# The example's generate.RolloutFn plus boat VM cleanup at RolloutExecutor.dispose().
+ROLLOUT_FUNCTION = "yeto.rl.adapters.miles.harbor_rollout.RolloutFn"
 DEFAULT_AGENT = "codex"  # N10.7: Harbor's built-in codex agent
 MAX_IN_FLIGHT_ENV = "YETO_HARBOR_MAX_IN_FLIGHT"
 _DEFAULT_MAX_IN_FLIGHT = 64
@@ -383,10 +385,11 @@ async def reward_func(args: Any, samples: Any, **_: Any) -> float | list[float]:
 
 def train_args(*, tito_model: str, session_server_workers: int, session_server_port: int = 30000,
                session_server_external_host: str = "") -> str:
-    """Miles train.py flags: the example's ``agentic_train_args`` with the two yeto hooks.
+    """Miles train.py flags: the example's ``agentic_train_args`` with the yeto hooks.
 
     Same flags as ``launch_common.agentic_train_args`` (checked by a CPU test
-    against the pinned Miles source) except the agent function and reward hook.
+    against the pinned Miles source) except the agent function, reward hook and
+    rollout function (:mod:`.harbor_rollout`).
     ``check_no_aborted`` drops a group with an ABORTED sample before training.
     """
     external = f"--session-server-external-host {session_server_external_host} " if session_server_external_host else ""
@@ -394,7 +397,7 @@ def train_args(*, tito_model: str, session_server_workers: int, session_server_p
         "--custom-generate-function-path miles.rollout.generate_hub.agentic_tool_call.generate "
         f"--custom-agent-function-path {AGENT_FUNCTION} "
         f"--custom-rm-path {REWARD_FUNCTION} "
-        "--rollout-function-path generate.RolloutFn "
+        f"--rollout-function-path {ROLLOUT_FUNCTION} "
         "--dynamic-sampling-filter-path miles.rollout.filter_hub.dynamic_sampling_filters.check_no_aborted "
         f"--tito-model {tito_model} "
         "--use-session-server "

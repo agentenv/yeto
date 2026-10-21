@@ -338,7 +338,8 @@ def test_miles_train_args_match_the_example_except_the_yeto_hooks(monkeypatch):
     theirs = launch_common.agentic_train_args(**kw).split()
     ours = harbor_agent.train_args(**kw).split()
     swap = {"harbor_agent_function.run": harbor_agent.AGENT_FUNCTION,
-            "generate.reward_func": harbor_agent.REWARD_FUNCTION}
+            "generate.reward_func": harbor_agent.REWARD_FUNCTION,
+            "generate.RolloutFn": harbor_agent.ROLLOUT_FUNCTION}
     assert ours == [swap.get(token, token) for token in theirs]
 
 
