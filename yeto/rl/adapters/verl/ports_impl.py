@@ -63,19 +63,27 @@ def _peft_module(worker):
     return getattr(module, "_fsdp_wrapped_module", module)
 
 
+def _lora_tensors(worker_dict) -> tuple[dict, set]:
+    """({canonical name: full LoRA tensor on its device}, parameter dtypes); collective
+    (``full_tensor``): every rank calls it."""
+    peft = _peft_module(_inner_worker(worker_dict))
+    out, dtypes = {}, set()
+    for name, param in peft.named_parameters():
+        if ".lora_" not in name:
+            continue
+        dtypes.add(str(param.dtype))
+        full = param.full_tensor() if hasattr(param, "full_tensor") else param
+        out[train_to_canonical(name)] = full.detach()
+    return out, dtypes
+
+
 def remote_export_lora(worker_dict):
     """(canonical f32 CPU tensors, info) from the actor's PEFT model."""
     import torch
 
-    peft = _peft_module(_inner_worker(worker_dict))
-    out, dtypes = {}, set()
     with torch.no_grad():
-        for name, param in peft.named_parameters():
-            if ".lora_" not in name:
-                continue
-            dtypes.add(str(param.dtype))
-            full = param.full_tensor() if hasattr(param, "full_tensor") else param
-            out[train_to_canonical(name)] = full.detach().to("cpu", torch.float32).clone()
+        tensors, dtypes = _lora_tensors(worker_dict)
+        out = {name: value.to("cpu", torch.float32).clone() for name, value in tensors.items()}
     return out, {"param_dtypes": sorted(dtypes), "count": len(out)}
 
 
@@ -89,28 +97,51 @@ def digest_lora_tensors(tensors, *, base_model_revision: str, lora_config_hash: 
 
     import time
 
-    from yeto.rl.core import canonical_state
+    from concurrent.futures import ThreadPoolExecutor
+
+    from yeto.rl.core import canonical_state_from_owned_tensors
     from yeto.rl.engine.policy_digest import digest_canonical_tensors
 
     started = time.monotonic()
-    state = canonical_state(0, tensors, base_model_revision=base_model_revision,
-                            lora_config_hash=lora_config_hash, layout_hash=layout_hash,
-                            expected_specs=expected_specs)
-    digest = digest_canonical_tensors(state.tensors, base_model_revision=state.base_model_revision,
-                                      lora_config_hash=state.lora_config_hash,
-                                      layout_hash=state.layout_hash)
+    # E1: ``tensors`` are this call's own copies (the trainer's export), so the
+    # validation keeps them without a second clone; the values are the same
+    state = canonical_state_from_owned_tensors(
+        0, tensors, base_model_revision=base_model_revision, lora_config_hash=lora_config_hash,
+        layout_hash=layout_hash, expected_specs=expected_specs)
+    # E1: the bf16 send checksum runs in its own thread beside the two digest streams
+    # (hashlib releases the GIL); each function is unchanged, so the values are too
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="yeto-lora-checksum") as pool:
+        checksum = pool.submit(pub.lora_checksum, dict(state.tensors))
+        digest = digest_canonical_tensors(state.tensors, base_model_revision=state.base_model_revision,
+                                          lora_config_hash=state.lora_config_hash,
+                                          layout_hash=state.layout_hash)
+        lora_checksum = checksum.result()
     return {"digest": digest.to_wire(), "layout_hash": state.layout_hash,
-            "lora_checksum": pub.lora_checksum(dict(state.tensors)),
+            "lora_checksum": lora_checksum,
             "export_seconds": round(time.monotonic() - started, 3)}
 
 
 def remote_export_digest(worker_dict, kwargs: dict):
-    """All ranks gather the LoRA (``full_tensor`` is collective); rank 0 hashes it."""
+    """All ranks gather the LoRA (``full_tensor`` is collective); rank 0 hashes it.
+
+    E1: rank 0 stages the tensors in one reusable pinned buffer (one GPU
+    synchronization, :func:`~yeto.rl.engine.policy_digest.stage_f32_on_host`); they
+    are hashed here and dropped, never returned."""
+    import torch
     import torch.distributed as dist
 
-    tensors, _info = remote_export_lora(worker_dict)
-    if dist.is_available() and dist.is_initialized() and dist.get_rank() != 0:
-        return None
+    from yeto.rl.engine.policy_digest import HostStaging, stage_f32_on_host
+
+    with torch.no_grad():
+        tensors, _dtypes = _lora_tensors(worker_dict)
+        if dist.is_available() and dist.is_initialized() and dist.get_rank() != 0:
+            return None
+        worker = _inner_worker(worker_dict)
+        staging = getattr(worker, "_yeto_digest_staging", None)
+        if staging is None:
+            staging = HostStaging()
+            setattr(worker, "_yeto_digest_staging", staging)
+        tensors = stage_f32_on_host(tensors, staging)
     return digest_lora_tensors(tensors, **kwargs)
 
 

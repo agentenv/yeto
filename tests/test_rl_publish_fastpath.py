@@ -257,3 +257,55 @@ def test_resident_state_type_guards():
     d = PolicyDigest("a" * 64, "b" * 64, 8, ((NAMES[0], (2, 1)),))
     with pytest.raises(ValueError):
         TrainerResidentState("full", REV, CFG, "c" * 64, 0, d, lambda v: None)
+
+
+# E1: the digest path stages the tensors in one reusable host buffer
+def _mixed_tensors(seed=0):
+    g = torch.Generator().manual_seed(seed)
+    return {
+        "b.bf16": torch.randn(8, 3, generator=g).to(torch.bfloat16),
+        "a.f32_transposed": torch.randn(5, 7, generator=g).t(),
+        "c.f16": torch.randn(4, generator=g).to(torch.float16),
+        "d.scalar": torch.tensor(1.5),
+    }
+
+
+def test_staged_copies_are_the_per_tensor_copies_bit_for_bit():
+    from yeto.rl.engine.policy_digest import HostStaging, stage_f32_on_host
+
+    tensors = _mixed_tensors()
+    plain = stage_f32_on_host(tensors)
+    staging = HostStaging(pin=False)
+    staged = stage_f32_on_host(tensors, staging)
+    assert list(staged) == sorted(tensors) == list(plain)
+    for name, value in tensors.items():
+        want = value.detach().to("cpu", torch.float32).contiguous()
+        for got in (plain[name], staged[name]):
+            assert got.dtype == torch.float32 and got.is_contiguous() and got.shape == want.shape
+            assert torch.equal(got.view(torch.int32) if got.dim() else got, want.view(torch.int32) if want.dim() else want)
+    kw = dict(base_model_revision=REV, lora_config_hash=CFG, layout_hash="0" * 64)
+    assert digest_canonical_tensors(staged, **kw) == digest_canonical_tensors(plain, **kw)
+    # the buffer is reused (and grown) by the next call; each call's values are its own
+    bigger = {**_mixed_tensors(1), "e.more": torch.randn(64)}
+    again = stage_f32_on_host(bigger, staging)
+    assert all(torch.equal(again[n], stage_f32_on_host(bigger)[n]) for n in bigger)
+
+
+@pytest.mark.parametrize("staged", [False, True])
+def test_staging_names_the_first_non_finite_tensor(staged):
+    from yeto.rl.engine.policy_digest import HostStaging, NonFiniteTensor, stage_f32_on_host
+
+    tensors = _mixed_tensors()
+    tensors["c.f16"][1] = float("inf")
+    tensors["b.bf16"][0, 0] = float("nan")
+    with pytest.raises(NonFiniteTensor, match="'b.bf16' contains NaN or Inf"):
+        stage_f32_on_host(tensors, HostStaging(pin=False) if staged else None)
+
+
+def test_export_digest_is_stable_across_rounds_with_the_reused_buffer():
+    ranks, group, ps = make()
+    for r in ranks:
+        r.train_step()
+    first = ps.export_digest(policy_version=2).policy_tensor_hash()
+    assert ps.export_digest(policy_version=2).policy_tensor_hash() == first == \
+        ps.export(policy_version=2).policy_tensor_hash()

@@ -648,6 +648,16 @@ def export_state(actor: Any, *, policy_version: int) -> dict[str, Any] | None:
         return _export_state(actor, policy_version=policy_version)
 
 
+def _digest_staging(actor: Any) -> Any:
+    """The pinned host buffer this trainer's digests reuse every round (E1)."""
+    from yeto.rl.engine.policy_digest import HostStaging
+
+    staging = getattr(actor, "_yeto_digest_staging", None)
+    if staging is None:
+        staging = actor._yeto_digest_staging = HostStaging()
+    return staging
+
+
 def export_digest(
     actor: Any, *, policy_version: int, base_model_revision: str, lora_config_hash: str,
 ) -> dict[str, Any] | None:
@@ -661,7 +671,10 @@ def export_digest(
     import time
 
     started = time.monotonic()
-    exported = export_state(actor, policy_version=policy_version)
+    install_grad_norm_recorder()
+    with trainer_resident(actor):
+        # E1: the tensors are only hashed here, so they may be staged in one pinned buffer
+        exported = _export_state(actor, policy_version=policy_version, staging=_digest_staging(actor))
     export_seconds = round(time.monotonic() - started, 3)
     if exported is None:
         return None
@@ -912,9 +925,14 @@ def _tp_ep_leader(actor: Any) -> bool:
     )
 
 
-def _export_state(actor: Any, *, policy_version: int) -> dict[str, Any] | None:
+def _export_state(actor: Any, *, policy_version: int, staging: Any = None) -> dict[str, Any] | None:
+    """``staging`` (a :class:`~yeto.rl.engine.policy_digest.HostStaging`): copy the
+    tensors into its pinned buffer with one GPU synchronization; the result is then
+    only valid until the next call with it (digest path, E1). Same values either way."""
 
     import torch
+
+    from yeto.rl.engine.policy_digest import NonFiniteTensor, stage_f32_on_host
 
     if is_native_flash_next(actor):
         return _export_flash_next(actor, policy_version=policy_version)
@@ -931,12 +949,10 @@ def _export_state(actor: Any, *, policy_version: int) -> dict[str, Any] | None:
                 tensors[b.name] = b.to_hf(master)
         if not _is_main_rank(actor):
             return None
-        out = {}
-        for name, value in sorted(tensors.items()):
-            value = value.detach().to(device="cpu", dtype=torch.float32).contiguous().clone()
-            if not torch.isfinite(value).all().item():
-                raise StatePluginError(f"{name!r} contains NaN or Inf")
-            out[name] = value
+        try:
+            out = stage_f32_on_host(tensors, staging)
+        except NonFiniteTensor as error:
+            raise StatePluginError(str(error)) from None
     assert_grad_flow_intact(actor.model, params)
     return {"policy_version": int(policy_version), "tensors": out}
 

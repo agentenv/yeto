@@ -159,6 +159,83 @@ def digest_canonical_tensors(
                         hash_seconds=round(time.monotonic() - started, 3))
 
 
+class NonFiniteTensor(ValueError):
+    """A tensor staged by :func:`stage_f32_on_host` holds NaN or Inf (``name`` says which)."""
+
+    def __init__(self, name: str):
+        super().__init__(f"{name!r} contains NaN or Inf")
+        self.name = name
+
+
+class HostStaging:
+    """One reusable pinned host buffer for :func:`stage_f32_on_host` (E1).
+
+    Allocating pinned memory costs milliseconds per call; the policy keeps the
+    same size every round, so the owner (the trainer process) keeps one of
+    these and the buffer is reallocated only when the policy grows."""
+
+    def __init__(self, *, pin: bool = True) -> None:
+        self._pin = pin
+        self._buffer = None
+
+    def flat(self, numel: int):
+        import torch
+
+        if self._buffer is None or self._buffer.numel() < numel:
+            pin = self._pin and torch.cuda.is_available()
+            self._buffer = torch.empty(numel, dtype=torch.float32, pin_memory=pin)
+        return self._buffer[:numel]
+
+
+def stage_f32_on_host(tensors: Mapping[str, Any], staging: HostStaging | None = None) -> dict[str, Any]:
+    """Canonical CPU f32 contiguous copies of ``tensors`` (sorted by name), bit for bit
+    the values of ``t.detach().to("cpu", torch.float32).contiguous()`` per tensor.
+
+    E1: with ``staging`` and every tensor on one device, the f32 conversion and the
+    finite check run on that device (the GPU) and the copies go to the pinned host
+    buffer asynchronously, with ONE synchronization for all of them (the per-tensor
+    path waits once per tensor: ~400 waits for a Qwen3-0.6B LoRA). No extra device
+    buffer is held: a tensor already f32 and contiguous is copied as it is. The
+    returned tensors are views of ``staging``'s buffer and are valid until the next
+    call with the same ``staging``: hash them, do not keep them (``torch.save`` of a
+    view would also write the whole buffer). Without ``staging`` (or with tensors on
+    several devices) each tensor is copied on its own, as before. Raises
+    :class:`NonFiniteTensor` naming the first non-finite tensor in name order, like
+    the per-tensor check."""
+
+    import torch
+
+    names = sorted(tensors)
+    values = [tensors[n].detach() for n in names]
+    devices = {v.device for v in values}
+    if staging is None or len(devices) != 1:
+        out = {}
+        for name, value in zip(names, values):
+            value = value.to(device="cpu", dtype=torch.float32).contiguous().clone()
+            if not torch.isfinite(value).all().item():
+                raise NonFiniteTensor(name)
+            out[name] = value
+        return out
+    flat = staging.flat(sum(v.numel() for v in values))
+    out, finite, offset = {}, [], 0
+    for name, value in zip(names, values):
+        source = value.to(dtype=torch.float32).contiguous()
+        finite.append(torch.isfinite(source).all())
+        view = flat[offset:offset + source.numel()].view(source.shape)
+        view.copy_(source, non_blocking=True)
+        out[name] = view
+        offset += source.numel()
+    device = next(iter(devices))
+    ok = bool(torch.stack(finite).all().item()) if finite else True
+    if device.type == "cuda":
+        torch.cuda.current_stream(device).synchronize()  # the copies to the host are complete
+    if not ok:
+        for name, check in zip(names, finite):
+            if not bool(check.item()):
+                raise NonFiniteTensor(name)
+    return out
+
+
 def layout_hash_of(specs: Sequence[tuple[str, tuple[int, ...]]]) -> str:
     """The canonical layout hash rebuilt from (name, shape) only."""
 

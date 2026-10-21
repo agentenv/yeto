@@ -85,3 +85,31 @@ def test_driver_switch_turns_the_fast_path_off(monkeypatch):
     assert is_resident(driver.export_local_resident(policy_version=0))
     monkeypatch.setenv("YETO_RL_PUBLISH_FASTPATH", "0")
     assert driver.export_local_resident(policy_version=0) is None
+
+
+def test_worker_digest_with_the_staged_export_equals_the_full_export():
+    """E1: the worker stages its LoRA in one host buffer for the digest; the digest
+    and the bf16 send checksum equal those of the full export, round after round."""
+    from types import SimpleNamespace
+
+    from yeto.rl.adapters.verl import ports_impl as pi
+
+    gen = torch.Generator().manual_seed(3)
+    params = {
+        "base_model.model.layers.0.q_proj.lora_A.default.weight":
+            torch.nn.Parameter(torch.randn(4, 8, generator=gen).to(torch.bfloat16)),
+        "base_model.model.layers.0.q_proj.lora_B.default.weight":
+            torch.nn.Parameter(torch.randn(4, 8, generator=gen).t()),  # not contiguous
+        "base_model.model.layers.0.q_proj.base_layer.weight": torch.nn.Parameter(torch.randn(2, 2, generator=gen)),
+    }
+    peft = SimpleNamespace(named_parameters=lambda: list(params.items()))
+    worker = SimpleNamespace(actor=SimpleNamespace(engine=SimpleNamespace(module=peft)))
+    tensors, _info = pi.remote_export_lora(worker)
+    specs = tuple(CanonicalTensorSpec(n, tuple(t.shape), "float32", t.numel()) for n, t in sorted(tensors.items()))
+    kwargs = {**IDS, "layout_hash": canonical_layout_hash(specs), "expected_specs": specs}
+    want = digest_lora_tensors(tensors, **kwargs)
+    for _ in range(2):  # the second round reuses the worker's buffer
+        got = pi.remote_export_digest(worker, kwargs)
+        assert {k: v for k, v in got.items() if k != "export_seconds"} == \
+            {k: v for k, v in want.items() if k != "export_seconds"}
+    assert getattr(worker, "_yeto_digest_staging", None) is not None
