@@ -111,8 +111,8 @@ def validate(cfg: VerlRunConfig, *, expected_commit: str = VERL_COMMIT) -> None:
             "确需如此请显式 allow_sampling_shift")
     if cfg.groups_per_round <= 0 or cfg.samples_per_group <= 0 or cfg.total_rounds <= 0:
         raise VerlConfigError("groups_per_round / samples_per_group / total_rounds 必须为正")
-    if cfg.n_gpus != 1:
-        raise VerlConfigError("verl 后端第一版每岛只支持 1 张卡（V1/V2 范围）")
+    if cfg.n_gpus < 1:
+        raise VerlConfigError(f"n_gpus 必须 >= 1（单节点岛的卡数），得到 {cfg.n_gpus}")
     if cfg.model_dtype not in ("fp32", "bf16"):
         raise VerlConfigError(f"model_dtype 必须是 fp32 或 bf16，得到 {cfg.model_dtype!r}")
 

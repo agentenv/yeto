@@ -25,6 +25,19 @@ from .codex import CODEX_CONTAINER_DIR, modal_sandbox_secret_name
 from .fleet import TEARDOWN_UNVERIFIED_EXIT
 
 
+def verl_needs_nccl_shm_off(args, spec: ClusterSpec) -> bool:
+    """A verl island with several cards in one Modal container runs NCCL with
+    its shared-memory transport off.
+
+    S26 E9 e9-g2-a: on a 2-card Modal container verl's NCCL checkpoint engine
+    failed attaching ``/dev/shm/nccl-*`` ("No such file or directory", NCCL
+    system error); the same run with ``NCCL_SHM_DISABLE=1`` passed (e9-g2-d/e).
+    NCCL then uses P2P/sockets between the two local ranks. Miles islands are
+    not changed (no failure seen there)."""
+    backend = getattr(args, "rl_backend", None) or "miles"
+    return backend == "verl" and int(spec.gpus_per_node or 1) > 1
+
+
 def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, syncer_addr: str):
     """Turn the sky task the factory built for this island into the Modal
     island config: same run script, same envs (syncer address swapped for
@@ -50,6 +63,8 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         # The critic syncer shares the actor syncer's host: swap it too, or a
         # Modal island behind --syncer-public-addr dials the private address.
         envs["CRITIC_SYNCER_ADDR"] = critic_syncer_address(syncer_addr)
+    if rl and verl_needs_nccl_shm_off(args, spec):
+        envs.setdefault("NCCL_SHM_DISABLE", "1")  # --modal-env below still overrides it
     for item in getattr(args, "modal_env", None) or []:
         key, sep, value = str(item).partition("=")
         if not sep or not key:

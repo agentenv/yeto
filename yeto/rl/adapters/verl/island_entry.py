@@ -24,8 +24,10 @@ import shlex
 import subprocess
 import sys
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 from . import config as vconf
 from . import run_config_rules
@@ -237,6 +239,16 @@ def _ray_resources(address: str) -> dict:
     return {}
 
 
+def island_gpus(ray_info: Mapping[str, Any]) -> int:
+    """GPUs of this single-node island: the island-local Ray's ``GPU`` resource
+    (the launcher starts it with every card of the container), else 1.
+
+    S26 E9 G3: the sync island used ``n_gpus=1`` always, so a 2-card container
+    trained on one rank (e9-g3-a); every card now joins the FSDP2 group."""
+    resources = ray_info.get("after") or ray_info.get("before") or {}
+    return max(1, int(resources.get("GPU", 0)))
+
+
 def ensure_ray_cpus(min_cpus: int = MIN_RAY_CPUS) -> dict:
     """verl needs more Ray CPU slots than a small container reports.
 
@@ -336,7 +348,7 @@ def main(argv=None) -> int:
         gpu_memory_utilization=float(os.environ.get("YETO_VERL_GPU_MEM", "0.5")),
         reward_path=str(Path(__file__).with_name("reward_fn.py")),
         reward_name=function_for(args.reward_function), chat_template_kwargs=chat,
-        experiment_name=f"yeto-verl-{lid}")
+        n_gpus=island_gpus(ray_info), experiment_name=f"yeto-verl-{lid}")
     overrides = vconf.build_overrides(run) + [
         "actor_rollout_ref.rollout.agent.num_workers=2",
         "reward.num_workers=2",
