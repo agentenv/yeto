@@ -1,8 +1,0 @@
-task_id: fixture-ctf-ezshell
-challenge_slug: fixture-ctf-ezshell
-domain: ctf
-category: misc
-grader_mode: flag
-target_service: target
-target_port: 31337
-target_os: linux
