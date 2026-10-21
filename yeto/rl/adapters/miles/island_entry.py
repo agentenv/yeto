@@ -1633,6 +1633,40 @@ def probe_syncers(args, *, connect=None, attempts: int = 10, delay: float = 3.0,
     return addrs
 
 
+def probe_wan_link(args, *, probe=None) -> None:
+    """S26 E3b: measure this container's link to the actor syncer before any
+    model work; exit EXIT_SLOW_LINK below the configured rates so the launcher
+    can request another container. Off unless a minimum rate is set."""
+    min_up = float(getattr(args, "wan_probe_min_mbps", 0.0) or 0.0)
+    min_down = float(getattr(args, "wan_probe_min_down_mbps", 0.0) or 0.0)
+    if min_up <= 0 and min_down <= 0:
+        return
+    from yeto.protocol import island_hmac_key_from_env
+    from yeto.wan_probe import EXIT_SLOW_LINK, PROBE_EVENT, PROBE_MARKER, probe_link
+
+    result = (probe or probe_link)(
+        _syncer_address(args.syncer),
+        streams=max(1, int(args.wan_streams)),
+        bytes_per_direction=int(getattr(args, "wan_probe_mib", 256)) << 20,
+        key=island_hmac_key_from_env(),
+    )
+    accepted = result.accepted(min_up, min_down)
+    record = {"event": PROBE_EVENT, "accepted": accepted,
+              "wan_probe/min_upload_mbps": min_up, "wan_probe/min_download_mbps": min_down,
+              **result.fields()}
+    print(f"{PROBE_MARKER} {'accepted' if accepted else 'rejected'}: up {result.upload_mbps:.1f} MB/s "
+          f"(min {min_up}), down {result.download_mbps:.1f} MB/s (min {min_down}), "
+          f"{result.streams} stream(s){'' if result.error is None else '; ' + result.error}", flush=True)
+    if getattr(args, "event_tape", None):
+        from yeto.rl.engine.driver import EventTape
+
+        if getattr(args, "rl_echo_events", False):
+            install_event_echo()  # the launcher reads the verdict from the log stream
+        EventTape(args.event_tape, int(getattr(args, "learner_id", 0) or 0)).append(record)
+    if not accepted:
+        raise SystemExit(EXIT_SLOW_LINK)
+
+
 def require_ports_router_mode(miles_args) -> None:
     """Upstream Miles owns the SGLang router.
 
@@ -2394,6 +2428,7 @@ def main(argv=None) -> None:
         verify_miles_revision(miles_root, expected=pins)
     _preflight_codex_harness(args)
     probe_syncers(args)
+    probe_wan_link(args)
 
     from miles.utils.misc import load_function
 

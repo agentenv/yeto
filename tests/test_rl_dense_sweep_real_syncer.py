@@ -633,3 +633,67 @@ def test_stalled_stream_redials_and_the_replayed_push_keeps_the_exact_result(
     assert progress.stalls >= 1 and progress.reconnects >= 1
     assert list(manifest.versions) == exact[1]
     assert result == exact[2]
+
+
+def _initial_values(fid: int) -> list[float]:
+    return [float(fid) + 0.125 * i for i in range(NUMEL)]
+
+
+def test_init_interrupted_by_a_redial_is_replayed_and_the_result_stays_exact(syncer_binary, tmp_path):
+    """E3b (s26-e3b-p06-C32a): learner 0's group died after INIT of fragment 0
+    and before fragment 1, so the syncer never finished initializing and no
+    island got the initial cut. The client now replays INIT on the next group
+    until the initial cut arrives; the result matches an undisturbed run. A
+    link probe on the same port (yeto.wan_probe) leaves the session alone."""
+    from yeto.protocol import island_hmac_key_from_env
+    from yeto.wan_probe import probe_link
+
+    exact = _run_sweeps(syncer_binary, tmp_path, STREAMED, sweeps=3)
+    run_dir = tmp_path / "replay"
+    run_dir.mkdir()
+    process, port, profile_hash = _start_syncer(syncer_binary, run_dir, *STREAMED, total_steps=3)
+    client = SyncerClient(("127.0.0.1", port), 0, _layout(), dtype=DTYPE_F32, num_streams=2,
+                          connect_timeout=10, max_reconnects=5, finalization_timeout=20,
+                          syncer_profile_hash=bytes.fromhex(profile_hash), stream_stall_timeout=30.0)
+    killed = []
+
+    def parts_for(fid: int):
+        if fid == 1 and not killed:
+            killed.append(client.connection_generation)
+            client._poison_outbound_generation(client._gen, ConnectionError("test: group died mid-INIT"))
+        return [_f32(_initial_values(fid))]
+
+    try:
+        def listening() -> bool:
+            try:
+                socket.create_connection(("127.0.0.1", port), timeout=1).close()
+            except OSError:
+                return False
+            return True
+
+        _wait(listening, "syncer listening")
+        good = probe_link(("127.0.0.1", port), streams=2, bytes_per_direction=8 << 20,
+                          key=island_hmac_key_from_env(), timeout=30)
+        assert good.error is None and good.upload_mbps > 0 and good.download_mbps > 0
+        bad = probe_link(("127.0.0.1", port), streams=1, bytes_per_direction=1 << 20,
+                         key=b"wrong key", timeout=10)
+        assert bad.error is not None and not bad.accepted(0.0, 0.0)
+        client.start()
+        assert client.send_initial_fragments(parts_for) is False
+        replays = 0
+        while client._bcasts.qsize() < FRAGMENTS:
+            client.check_health()
+            if client.init_replay_due():
+                replays += client.send_initial_fragments(parts_for)
+            time.sleep(0.02)
+        client.mark_initial_cut_received()
+        assert killed and replays == 1 and client.connection_generation != killed[0]
+        manifest, finals = _sweep_until_final(client, sweeps=3)
+        result = {f.fragment_id: bytes(f.data) for f in finals}
+        client.acknowledge_finalization(manifest)
+        assert process.wait(timeout=15) == 0
+    finally:
+        client.close()
+        _stop(process)
+    assert list(manifest.versions) == exact[1]
+    assert result == exact[2]

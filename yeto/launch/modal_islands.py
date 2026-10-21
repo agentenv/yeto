@@ -315,3 +315,15 @@ def effective_recover_timeout(args) -> float:
     if getattr(args, "modal_retries", None) == 0 and not getattr(args, "modal_launcher_relaunch", False):
         return 0
     return args.recover_timeout
+
+
+def wan_probe_relaunches(args) -> int:
+    """New containers per island after a rejected link probe (S26 E3b);
+    0 when no island runs the probe."""
+    if not (float(getattr(args, "wan_probe_min_mbps", 0.0) or 0.0) > 0
+            or float(getattr(args, "wan_probe_min_down_mbps", 0.0) or 0.0) > 0):
+        return 0
+    count = int(getattr(args, "wan_probe_relaunches", 2))
+    if count < 0:
+        raise ValueError("--wan-probe-relaunches must be >= 0")
+    return count

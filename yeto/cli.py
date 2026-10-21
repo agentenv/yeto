@@ -454,6 +454,29 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "one stream holds bytes with no progress for this many seconds (also sets "
         "TCP_USER_TIMEOUT); the fragment is pushed again on the replayed PULL. 0 = off",
     )
+    sync.add_argument(
+        "--wan-probe-min-mbps",
+        type=float,
+        default=0.0,
+        help="Miles RL islands: before loading the model, measure the upload rate to the "
+        "actor syncer over --wan-streams connections; below this MB/s the island exits "
+        "(code 75) and the launcher requests another container (--wan-probe-relaunches). 0 = off",
+    )
+    sync.add_argument(
+        "--wan-probe-min-down-mbps",
+        type=float,
+        default=0.0,
+        help="like --wan-probe-min-mbps, for the download rate from the syncer. 0 = off",
+    )
+    sync.add_argument("--wan-probe-mib", type=int, default=256,
+                      help="bytes per direction of the link probe, in MiB")
+    sync.add_argument(
+        "--wan-probe-relaunches",
+        type=int,
+        default=2,
+        help="containers the launcher may request again per island after a rejected link "
+        "probe (also under --no-island-relaunch: the island never joined the session)",
+    )
 
     infra = p.add_argument_group("infrastructure")
     infra.add_argument(

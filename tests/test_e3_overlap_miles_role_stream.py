@@ -266,6 +266,15 @@ class _Client:
             self.pull_sweep(0, 1)
         return True
 
+    def send_initial_fragments(self, parts_for) -> bool:
+        return all(self.send_init_parts(f, parts_for(f)) for f in range(P))
+
+    def init_replay_due(self) -> bool:
+        return False
+
+    def mark_initial_cut_received(self) -> None:
+        pass
+
     def check_health(self) -> None:
         assert not self.closed
 

@@ -45,6 +45,10 @@ pub const MSG_ELASTIC_BASE: u8 = 23;
 pub const MSG_SAMPLE_VERDICT: u8 = 24;
 /// Elastic: run finished (final outer_version + base policy hash).
 pub const MSG_FINISHED: u8 = 25;
+/// S26 E3b: link-bandwidth probe. First and only frame of its own connection
+/// (never part of a learner session): the island uploads N bytes, the syncer
+/// acknowledges with the u64 byte count, then streams M bytes back.
+pub const MSG_BW_PROBE: u8 = 26;
 
 /// Version of the final-artifact handshake carried inside FINAL_MANIFEST and
 /// FINAL_ACK. Keeping this in the payload makes incompatible peers fail with

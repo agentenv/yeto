@@ -227,3 +227,35 @@ def test_island_parser_accepts_the_transport_flags():
 
     assert rl_option("wan_stream_schedule", ISLAND) == "--wan-stream-schedule"
     assert rl_option("wan_stall_timeout", ISLAND) == "--wan-stall-timeout"
+
+
+def test_tcp_user_timeout_waits_for_the_initial_cut():
+    if not hasattr(socket, "TCP_USER_TIMEOUT"):
+        pytest.skip("Linux-only socket option")
+    with socket.create_server(("127.0.0.1", 0)) as server:
+        addr = server.getsockname()
+        client = SyncerClient(addr, 0, _layout(), num_streams=1, stream_stall_timeout=2.0)
+        early = client._dial(5)
+        try:
+            assert early.getsockopt(socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT) == 0
+            client._socks = [early]
+            client.mark_initial_cut_received()
+            assert early.getsockopt(socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT) == 2000
+            late = client._dial(5)
+            assert late.getsockopt(socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT) == 2000
+            late.close()
+        finally:
+            early.close()
+
+
+def test_init_replay_is_due_only_on_a_new_group_before_the_initial_cut():
+    client = SyncerClient(("127.0.0.1", 1), 0, _layout(), num_streams=1)
+    client._connected.set()
+    client.connection_generation = 11
+    assert client.init_replay_due()
+    client._init_generation = 11
+    assert not client.init_replay_due()
+    client.connection_generation = 12
+    assert client.init_replay_due()
+    client.mark_initial_cut_received()
+    assert not client.init_replay_due()

@@ -62,6 +62,15 @@ def _wan_transport_flags(args) -> str:
         raise ValueError("--wan-stall-timeout must be >= 0 (0 = off)")
     if stall > 0:
         flags += f" --wan-stall-timeout {stall!r}"
+    min_up = float(getattr(args, "wan_probe_min_mbps", 0.0) or 0.0)
+    min_down = float(getattr(args, "wan_probe_min_down_mbps", 0.0) or 0.0)
+    if min_up < 0 or min_down < 0:
+        raise ValueError("--wan-probe-min-mbps / --wan-probe-min-down-mbps must be >= 0 (0 = off)")
+    if min_up > 0 or min_down > 0:
+        mib = int(getattr(args, "wan_probe_mib", 256))
+        if not 1 <= mib <= 1024:
+            raise ValueError("--wan-probe-mib must be between 1 and 1024")
+        flags += f" --wan-probe-min-mbps {min_up!r} --wan-probe-min-down-mbps {min_down!r} --wan-probe-mib {mib}"
     return flags
 
 

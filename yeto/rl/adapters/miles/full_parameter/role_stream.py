@@ -400,27 +400,23 @@ class MilesFullParameterRoleStream:
         client.install_inbound_chunk_sink(MilesRayInboundChunkSink(sink))
         try:
             client.start()
+            init_parts = None
             if self.config.learner_id == 0:
-                for fragment_id in range(adapter.layout.fragments.num_fragments):
-                    queued = client.send_init_parts(
-                        fragment_id,
-                        adapter.fragment_parts(
-                            initial,
-                            fragment_id,
-                            ray_module=self.ray_module,
-                        )(),
-                    )
-                    if queued is not True:
-                        raise RuntimeError(
-                            f"{self.config.algorithm} {self.config.role} initial fragment was not queued"
-                        )
+                def init_parts(fragment_id: int):
+                    return adapter.fragment_parts(
+                        initial, fragment_id, ray_module=self.ray_module
+                    )()
+
+                # An outage here is not fatal: the wait below replays INIT on
+                # the next connection group until the initial cut arrives.
+                client.send_initial_fragments(init_parts)
             # Wait off the event loop: an island initializes its roles
             # concurrently, and each role's initial cut needs every island's
             # INIT for that role. A blocking wait here would stop this
             # island's other role from connecting, and two islands blocked
             # on different roles deadlock (s23-g3-sao-main-20261014a).
             authoritative = await asyncio.to_thread(
-                self._wait_for_initial_fragments, client, adapter
+                self._wait_for_initial_fragments, client, adapter, init_parts
             )
             adapter.verify_initial_fragments(initial, authoritative)
         except BaseException:
@@ -443,6 +439,7 @@ class MilesFullParameterRoleStream:
         self,
         client,
         adapter: MilesChunkedFullParameterAdapter,
+        init_parts=None,
     ) -> tuple[StoredAuthoritativeFragment, ...]:
         started = time.monotonic()
         deadline = started + self.config.wait_timeout
@@ -452,6 +449,11 @@ class MilesFullParameterRoleStream:
         self._report_initial_cut(client, observed, count, started, "waiting")
         while len(observed) < count:
             client.check_health()
+            if init_parts is not None and client.init_replay_due():
+                # S26 E3b (s26-e3b-p06-C32a): the group carrying INIT died
+                # before the syncer applied it; send it again on this group.
+                self._report_initial_cut(client, observed, count, started, "replaying INIT")
+                client.send_initial_fragments(init_parts)
             for update in client.drain_updates():
                 stored = self._stored_update(update)
                 if update.version != 0 or stored.fragment_id in observed:
@@ -471,6 +473,7 @@ class MilesFullParameterRoleStream:
                     )
                 time.sleep(self.config.poll_seconds)
         self._report_initial_cut(client, observed, count, started, "received")
+        client.mark_initial_cut_received()
         return tuple(observed[index] for index in range(count))
 
     def _report_initial_cut(

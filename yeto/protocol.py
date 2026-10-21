@@ -60,6 +60,8 @@ MSG_FINAL_MANIFEST = 11
 MSG_FINAL_ACK = 12
 MSG_FINAL_FRAGMENT = 13
 MSG_BUDGET_DONE = 14
+# S26 E3b: link-bandwidth probe connection (yeto/wan_probe.py; syncer serve_bw_probe).
+MSG_BW_PROBE = 26
 
 FINALIZATION_REVISION = 1
 FINALIZATION_TIMEOUT = 900.0
@@ -659,6 +661,12 @@ class SyncerClient:
         self._meters = [StreamMeter() for _ in range(num_streams + 1)]
         self._upload_drained_at: float | None = None
         self._stalls = 0
+        # S26 E3b: set once the initial cut arrived. Before that a redial must
+        # replay INIT_PARAMS (learner 0), and TCP_USER_TIMEOUT stays unset:
+        # the multi-GB INIT upload and initial broadcast must not be reset by
+        # the kernel on a slow link (s26-e3b-p06-C32a).
+        self._initial_cut_received = threading.Event()
+        self._init_generation: int | None = None
         self.session_contract_hash = session_contract_hash
         self.syncer_profile_hash = syncer_profile_hash
         # secret-handling-hardening: HELLO carries an HMAC when the island has
@@ -733,7 +741,7 @@ class SyncerClient:
         sock.settimeout(None)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         enable_tcp_keepalive(sock)
-        if self.stream_stall_timeout is not None:
+        if self.stream_stall_timeout is not None and self._initial_cut_received.is_set():
             set_tcp_user_timeout(sock, self.stream_stall_timeout)
         return sock
 
@@ -960,6 +968,55 @@ class SyncerClient:
         return self._upload_drained_at
 
     # -- learner-facing API ------------------------------------------------------
+
+    def send_initial_fragments(
+        self,
+        parts_for: Callable[[int], Iterable[bytes | bytearray | memoryview]],
+    ) -> bool:
+        """Learner 0: stream INIT_PARAMS of every fragment on the live group.
+
+        ``parts_for(fragment_id)`` returns a fresh part iterable each call, so
+        the same INIT can be replayed after a redial. Returns True when every
+        fragment was queued on one connection generation; False on an outage
+        (nothing to undo: the syncer ignores INIT it already applied, and a
+        partial INIT of a dead generation is dropped by the syncer)."""
+        generation = self.connection_generation
+        try:
+            for fragment_id in range(self.layout.num_fragments):
+                if self.send_init_parts(fragment_id, parts_for(fragment_id)) is not True:
+                    return False
+        except PartialMessageGenerationLost:
+            return False
+        if generation != self.connection_generation:
+            return False
+        self._init_generation = generation
+        return True
+
+    def init_replay_due(self) -> bool:
+        """True when the live group never carried a complete INIT and the
+        initial cut has not arrived yet (learner 0 must send INIT again)."""
+        with self._lock:
+            live = self._connected.is_set()
+            generation = self.connection_generation
+        return (
+            live
+            and not self._initial_cut_received.is_set()
+            and generation != self._init_generation
+        )
+
+    def mark_initial_cut_received(self) -> None:
+        """The initial cut arrived: INIT is no longer replayed, and the stall
+        timeout now also bounds unacknowledged data in the kernel."""
+        self._initial_cut_received.set()
+        if self.stream_stall_timeout is None:
+            return
+        with self._lock:
+            socks = list(self._socks)
+        for sock in socks:
+            try:
+                set_tcp_user_timeout(sock, self.stream_stall_timeout)
+            except OSError:
+                pass  # a dying socket; the group is being replaced anyway
 
     def send_init(self, fragment_id: int, tensor_bytes: bytes) -> None:
         if not 0 <= fragment_id < self.layout.num_fragments:

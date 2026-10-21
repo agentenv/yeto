@@ -1260,8 +1260,8 @@ async fn handle_connection(
     stream.set_nodelay(true)?;
     let (mut rd, mut wr) = stream.into_split();
     let first = match read_frame_limited(&mut rd, |msg_type| match msg_type {
-        MSG_HELLO | MSG_DATA_HELLO => Ok(MAX_HELLO_FRAME),
-        other => bail!("first frame must be HELLO/DATA_HELLO, got {other}"),
+        MSG_HELLO | MSG_DATA_HELLO | MSG_BW_PROBE => Ok(MAX_HELLO_FRAME),
+        other => bail!("first frame must be HELLO/DATA_HELLO/BW_PROBE, got {other}"),
     })
     .await
     {
@@ -1466,8 +1466,98 @@ async fn handle_connection(
             tokio::spawn(writer_task(wr, rx));
             read_loop(&mut rd, &group, &event_tx, &budget_cutoff).await
         }
-        t => bail!("first frame must be HELLO/DATA_HELLO, got {t}"),
+        MSG_BW_PROBE => {
+            let request = open_hello(hello_auth.key.as_deref(), &first.payload)
+                .and_then(parse_bw_probe);
+            let (upload, download) = match request {
+                Ok(sizes) => sizes,
+                Err(error) => {
+                    let message = format!("invalid BW_PROBE: {error:#}");
+                    let _ = send_direct(&mut wr, MSG_ERROR, message.as_bytes()).await;
+                    return Err(error);
+                }
+            };
+            let Some(_slot) = BwProbeSlot::acquire() else {
+                let message = "too many concurrent BW_PROBE connections";
+                send_direct(&mut wr, MSG_ERROR, message.as_bytes()).await?;
+                bail!(message);
+            };
+            tokio::time::timeout(BW_PROBE_TIMEOUT, serve_bw_probe(&mut rd, &mut wr, upload, download))
+                .await
+                .context("BW_PROBE timed out")?
+        }
+        t => bail!("first frame must be HELLO/DATA_HELLO/BW_PROBE, got {t}"),
     }
+}
+
+/// Largest upload or download one BW_PROBE connection may ask for.
+const BW_PROBE_MAX_BYTES: u64 = 1 << 30;
+const BW_PROBE_MAX_CONNECTIONS: usize = 64;
+const BW_PROBE_TIMEOUT: Duration = Duration::from_secs(300);
+static BW_PROBE_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+
+/// One of at most BW_PROBE_MAX_CONNECTIONS concurrent probe connections.
+struct BwProbeSlot;
+
+impl BwProbeSlot {
+    fn acquire() -> Option<Self> {
+        let previous = BW_PROBE_ACTIVE.fetch_add(1, Ordering::AcqRel);
+        if previous >= BW_PROBE_MAX_CONNECTIONS {
+            BW_PROBE_ACTIVE.fetch_sub(1, Ordering::AcqRel);
+            return None;
+        }
+        Some(BwProbeSlot)
+    }
+}
+
+impl Drop for BwProbeSlot {
+    fn drop(&mut self) {
+        BW_PROBE_ACTIVE.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// BW_PROBE body (after the HELLO-style HMAC trailer is removed):
+/// u64 upload bytes, u64 download bytes, both at most BW_PROBE_MAX_BYTES.
+fn parse_bw_probe(body: &[u8]) -> Result<(u64, u64)> {
+    if body.len() != 16 {
+        bail!("BW_PROBE body has {} bytes, expected 16", body.len());
+    }
+    let upload = u64::from_le_bytes(body[0..8].try_into().unwrap());
+    let download = u64::from_le_bytes(body[8..16].try_into().unwrap());
+    if upload > BW_PROBE_MAX_BYTES || download > BW_PROBE_MAX_BYTES {
+        bail!("BW_PROBE asks for more than {BW_PROBE_MAX_BYTES} bytes per direction");
+    }
+    Ok((upload, download))
+}
+
+/// Read and discard `upload` raw bytes, acknowledge with their count, then
+/// write `download` zero bytes and close. Nothing touches session state.
+async fn serve_bw_probe(
+    rd: &mut (impl tokio::io::AsyncReadExt + Unpin),
+    wr: &mut OwnedWriteHalf,
+    upload: u64,
+    download: u64,
+) -> Result<()> {
+    let mut buf = vec![0u8; 1 << 20];
+    let mut remaining = upload;
+    while remaining > 0 {
+        let want = remaining.min(buf.len() as u64) as usize;
+        let got = rd.read(&mut buf[..want]).await?;
+        if got == 0 {
+            bail!("BW_PROBE upload ended after {} of {upload} bytes", upload - remaining);
+        }
+        remaining -= got as u64;
+    }
+    wr.write_all(&upload.to_le_bytes()).await?;
+    buf.fill(0);
+    let mut remaining = download;
+    while remaining > 0 {
+        let take = remaining.min(buf.len() as u64) as usize;
+        wr.write_all(&buf[..take]).await?;
+        remaining -= take as u64;
+    }
+    wr.shutdown().await?;
+    Ok(())
 }
 
 async fn send_direct(wr: &mut OwnedWriteHalf, msg_type: u8, payload: &[u8]) -> Result<()> {
@@ -4411,6 +4501,28 @@ mod hello_auth_tests {
     }
 
     #[test]
+    fn bw_probe_body_is_two_bounded_sizes() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&5u64.to_le_bytes());
+        body.extend_from_slice(&7u64.to_le_bytes());
+        assert_eq!(parse_bw_probe(&body).unwrap(), (5, 7));
+        assert!(parse_bw_probe(&body[..15]).is_err());
+        let mut too_big = Vec::new();
+        too_big.extend_from_slice(&(BW_PROBE_MAX_BYTES + 1).to_le_bytes());
+        too_big.extend_from_slice(&0u64.to_le_bytes());
+        assert!(parse_bw_probe(&too_big).is_err());
+    }
+
+    #[test]
+    fn bw_probe_slots_are_bounded() {
+        let slots: Vec<_> = (0..BW_PROBE_MAX_CONNECTIONS).map(|_| BwProbeSlot::acquire()).collect();
+        assert!(slots.iter().all(Option::is_some));
+        assert!(BwProbeSlot::acquire().is_none());
+        drop(slots);
+        assert!(BwProbeSlot::acquire().is_some());
+    }
+
+    #[test]
     fn open_hello_accepts_the_right_key_only() {
         let body = b"hello body bytes";
         assert_eq!(open_hello(Some(b"k"), &sealed(b"k", body)).unwrap(), body);
@@ -4951,7 +5063,7 @@ mod tests {
             }
             let mut stream = stream.expect("legacy syncer did not start");
             // A correctly sealed elastic payload (epoch 0) still must not be
-            // accepted: legacy only knows HELLO/DATA_HELLO as a first frame.
+            // accepted: legacy only knows HELLO/DATA_HELLO/BW_PROBE as a first frame.
             let payload = crate::elastic::seal(&key, msg_type, 0u64.to_le_bytes().to_vec());
             let mut frame = MAGIC.to_le_bytes().to_vec();
             frame.push(msg_type);
@@ -4968,7 +5080,7 @@ mod tests {
             assert_eq!(reply.get(4), Some(&MSG_ERROR), "type {msg_type}");
             let text = String::from_utf8_lossy(&reply[13..]);
             assert!(
-                text.contains(&format!("first frame must be HELLO/DATA_HELLO, got {msg_type}")),
+                text.contains(&format!("first frame must be HELLO/DATA_HELLO/BW_PROBE, got {msg_type}")),
                 "type {msg_type}: {text}"
             );
             assert!(!server.is_finished(), "type {msg_type}: server exited");

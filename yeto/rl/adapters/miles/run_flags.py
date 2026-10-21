@@ -418,6 +418,9 @@ _ISLAND = (
     island_flag("--wan-streams", type=int, default=4),
     island_flag("--wan-stream-schedule", choices=("rr", "adaptive"), default="rr"),
     island_flag("--wan-stall-timeout", type=float, default=0.0),
+    island_flag("--wan-probe-min-mbps", type=float, default=0.0),
+    island_flag("--wan-probe-min-down-mbps", type=float, default=0.0),
+    island_flag("--wan-probe-mib", type=int, default=256),
     island_flag("--miles-root", required=True),
     island_flag(
         "--miles-commit",
