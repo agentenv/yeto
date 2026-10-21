@@ -34,10 +34,7 @@ case $G in
   t0-full|t1n-full)
     Q=""; [ $G = t1n-full ] && Q="--rl-rollout-quant-tier 1 --rl-rollout-quant-fp8-source trainer"
     ARGS="$COMMON --cluster-prefix $P --gpu modal:2xh100 --rl-single-island-no-sync --tuning full \
---modal-memory 200 --rl-optimizer-offload-fraction 1.0 --rl-placement fixed-partition --rl-rollout-gpus 1 $Q"
-    # the round cut's DP-invariant state export refuses the host (precision-aware) optimizer
-    # (e6-t1n-full-b): this group runs without the checkpoint store
-    ARGS=${ARGS/--rl-checkpoint-store modal-volume:\/\/$STOREVOL\/$P /} ;;
+--modal-memory 200 --rl-optimizer-offload-fraction 1.0 --rl-placement fixed-partition --rl-rollout-gpus 1 $Q" ;;
   t0-pair|t2-pair)
     # Two launches on one store (as S25 C3): the trainer island reads samples and starts no
     # engine (1 card); a full-parameter sampler island needs dedicated engines (fixed

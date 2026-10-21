@@ -129,6 +129,8 @@ class ModalVolumeStore(CheckpointStore):
                     self._volume().reload()
             except Exception as exc:  # noqa: BLE001 - reload is best effort (open files block it)
                 logging.getLogger(__name__).warning("modal volume reload failed: %r", exc)
+            else:  # logged so a remount can be lined up with a writer's failure (e6-t2-pair-e)
+                logging.getLogger(__name__).info("modal volume reloaded: %s", self.volume_name)
 
     def describe(self) -> dict[str, Any]:
         return {**super().describe(), "volume": self.volume_name}

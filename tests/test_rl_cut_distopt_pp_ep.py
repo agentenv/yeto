@@ -31,6 +31,8 @@ DPS_PATH = "miles/backends/megatron_utils/lora/dp_invariant_state.py"
 DPS_SOURCES = {
     "m5-c35702e": (os.environ.get("YETO_MILES_CHECKOUT", "/home/michael/work/miles-m3"), "c35702e"),
     "s25-distopt": (os.environ.get("YETO_MILES_DISTOPT_CHECKOUT", "/home/michael/work/miles-next"), "s25-distopt"),
+    # S26 E6 fork branch: side-effect-free reads plus the ported CPU-offload state
+    "s26-e6-fp8": (os.environ.get("YETO_MILES_E6_CHECKOUT", "/home/michael/work/miles-s26-e6-fp8"), "ed5f64fd7"),
 }
 
 

@@ -310,6 +310,33 @@ def test_colocated_trainer_is_woken_for_the_cut(tmp_path):
     assert calls == ["on", "off"] and info["trainer_onloaded_for_cut"] is True
 
 
+def test_a_volume_reload_never_runs_inside_a_round_cut(tmp_path, monkeypatch):
+    """S26 E6 (e6-t2-pair-e): another process of the container reloaded the Modal
+    Volume while the trainer ranks wrote a cut; the remount made the shard's
+    makedirs fail (EPERM) and the island exited 134. The cut holds the store's
+    writer guard from the first shard to the commit, so the reload is skipped."""
+    monkeypatch.setenv(mcs.GUARD_DIR_ENV, str(tmp_path / "guard"))
+    (tmp_path / "guard").mkdir()
+    vol = _Vol()
+    store = _store(tmp_path / "store", vol)
+    other = _store(tmp_path / "store", vol)  # e.g. the sample buffer's store object
+    _r, _c, driver, cp = _trained_island(tmp_path, store, 2)
+    save_cut, seen = cp.trainer.save_cut, []
+
+    def save_with_a_concurrent_reload(**kw):
+        before = vol.reloads
+        other.reload()  # what a reload loop in another thread/process does mid-cut
+        seen.append(vol.reloads - before)
+        return save_cut(**kw)
+
+    cp.trainer.save_cut = save_with_a_concurrent_reload
+    info = cp.save(driver, rollout_id=2)
+    assert seen == [0] and info["store_synced"]
+    before = vol.reloads
+    other.reload()  # after the commit the reload runs again
+    assert vol.reloads == before + 1
+
+
 def test_local_only_sync_stop_after_and_final_cut():
     sync = LocalOnlySync(6)
     sync.stop_after = 3
