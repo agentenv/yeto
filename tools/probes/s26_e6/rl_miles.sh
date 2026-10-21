@@ -5,7 +5,8 @@
 #   t0-lora / t1-lora   1 colocated island, LoRA r=32, tier 0 / tier 1 (SGLang online FP8 + ignore list)
 #   t1n-lora            1 colocated island, LoRA r=32, tier 1 trainer source (engines on Miles'
 #                       block-FP8 base + ignore list)
-#   t0-full / t1n-full  1 island, full parameters, 2 training cards + 1 dedicated engine card
+#   t0-full / t1n-full  1 island, full parameters, 1 training card + 1 dedicated engine card
+#                       (engines on the island need DP=1; Adam state on the host, 200 GiB)
 #                       (fixed partition): Miles' own full-parameter update every round; tier 0 /
 #                       tier 1 trainer source (Miles block-quantizes each update, ignore list)
 #   t0-pair / t2-pair   trainer island (2 H100) + sampler island (1 actor + 1 engine H100), full
@@ -32,8 +33,8 @@ case $G in
   t1n-lora) ARGS="$COMMON --cluster-prefix $P --gpu modal:1xh100 --rl-single-island-no-sync $LORA --rl-rollout-quant-tier 1 --rl-rollout-quant-fp8-source trainer" ;;
   t0-full|t1n-full)
     Q=""; [ $G = t1n-full ] && Q="--rl-rollout-quant-tier 1 --rl-rollout-quant-fp8-source trainer"
-    ARGS="$COMMON --cluster-prefix $P --gpu modal:3xh100 --rl-single-island-no-sync --tuning full \
---modal-memory 128 --rl-placement fixed-partition --rl-rollout-gpus 1 $Q" ;;
+    ARGS="$COMMON --cluster-prefix $P --gpu modal:2xh100 --rl-single-island-no-sync --tuning full \
+--modal-memory 200 --rl-optimizer-offload-fraction 1.0 --rl-placement fixed-partition --rl-rollout-gpus 1 $Q" ;;
   t0-pair|t2-pair)
     # Two launches on one store (as S25 C3): the trainer island reads samples and starts no
     # engine (1 card); a full-parameter sampler island needs dedicated engines (fixed
