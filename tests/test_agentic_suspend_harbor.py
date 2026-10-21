@@ -271,8 +271,10 @@ def test_miles_suspend_hook_fails_closed_without_the_relay(miles_stubs, monkeypa
     assert mod.relay_settings({mod.RELAY_PORT_ENV: "0"}).ports == (0,)
 
 
-def test_miles_trial_runs_through_the_relay_and_survives_a_round_boundary(miles_stubs, monkeypatch):
+def test_miles_trial_runs_through_the_relay_and_survives_a_round_boundary(miles_stubs, monkeypatch, tmp_path):
     mod, _ = miles_stubs
+    sample_log = tmp_path / "logs" / "samples.jsonl"
+    monkeypatch.setenv(mod.SAMPLE_LOG_ENV, str(sample_log))
     monkeypatch.setenv(mod.RELAY_PORT_ENV, "0")
     monkeypatch.setenv(mod.RELAY_HOST_ENV, "127.0.0.1")
     mod._turn_gates.clear()
@@ -319,6 +321,33 @@ def test_miles_trial_runs_through_the_relay_and_survives_a_round_boundary(miles_
     metrics = out["agent_metrics"]
     assert metrics["suspensions"] == 1 and metrics["suspended_seconds"] > 0
     assert suspended_references() == []  # the trajectory left the gate
+    [line] = sample_log.read_text().splitlines()
+    record = json.loads(line)
+    assert record["trajectory_id"] == seen["refs"][0]["trajectory_id"]
+    assert (record["task_id"], record["outcome"], record["reward"]) == ("fix-git", "ok", 1.0)
+    assert (record["suspensions"], record["suspend_retried_turns"]) == (1, 0)
+    assert record["suspended_seconds"] == metrics["suspended_seconds"]
+
+
+def test_sample_log_is_off_by_default_and_defaults_suspension_counts(miles_stubs, tmp_path):
+    mod, _ = miles_stubs
+    task = mod.task_from_metadata({"instance_id": "fix-git"})
+    metadata = {OUTCOME_KEY: "aborted", "outcome_reason": "time limit", "reward": 0.0, "agent_metrics": {}}
+    record = mod.sample_log_record(task, "t1", metadata)
+    assert (record["outcome"], record["outcome_reason"]) == ("aborted", "time limit")
+    assert (record["suspensions"], record["suspended_seconds"], record["suspend_retried_turns"]) == (0, 0, 0)
+    mod.append_sample_log(record, environ={})  # unset: nothing written anywhere
+    path = tmp_path / "s.jsonl"
+    mod.append_sample_log(record, environ={mod.SAMPLE_LOG_ENV: str(path)})
+    mod.append_sample_log(record, environ={mod.SAMPLE_LOG_ENV: str(path)})
+    assert [json.loads(line)["trajectory_id"] for line in path.read_text().splitlines()] == ["t1", "t1"]
+
+
+def test_sample_log_write_failure_does_not_fail_the_trajectory(miles_stubs, tmp_path):
+    mod, _ = miles_stubs
+    blocker = tmp_path / "file"
+    blocker.write_text("")
+    mod.append_sample_log({"trajectory_id": "t1"}, environ={mod.SAMPLE_LOG_ENV: str(blocker / "s.jsonl")})
 
 
 async def _resume_later(mod, delay=0.1):

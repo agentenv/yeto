@@ -44,8 +44,10 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 import logging
 import os
+import time
 import uuid
 import weakref
 from dataclasses import dataclass
@@ -95,6 +97,55 @@ def gate() -> AdmissionGate:
     process; it is kept per loop because it holds an ``asyncio.Semaphore``.
     """
     return _gates.get()
+
+
+# --------------------------------------------------------------- sample log
+
+SAMPLE_LOG_ENV = "YETO_AGENTIC_SAMPLE_LOG"
+_SUSPENSION_METRICS = ("suspensions", "suspended_seconds", "suspend_retried_turns")
+
+
+def sample_log_record(task: AgentTask, trajectory_id: str, metadata: dict[str, Any]) -> dict[str, Any]:
+    """One trajectory's outcome and suspension counts (no prompt, transcript or credentials).
+
+    The suspension counts are 0 when the trajectory was never suspended
+    (:meth:`SuspendLedger.metrics` leaves them out then).
+    """
+    agent_metrics = metadata.get("agent_metrics") or {}
+    return {
+        "time": round(time.time(), 3),
+        "pid": os.getpid(),
+        "trajectory_id": trajectory_id,
+        "task_id": task.task_id,
+        "policy_version": metadata.get("policy_version"),
+        "outcome": metadata.get(OUTCOME_KEY),
+        "outcome_reason": metadata.get("outcome_reason"),
+        "reward": metadata.get("reward"),
+        **{name: agent_metrics.get(name, 0) for name in _SUSPENSION_METRICS},
+    }
+
+
+def append_sample_log(record: dict[str, Any], environ: Any = None) -> None:
+    """Append ``record`` as one JSON line to ``$YETO_AGENTIC_SAMPLE_LOG``; off when unset.
+
+    One ``write`` per line on an ``O_APPEND`` file, so rollout processes
+    sharing the file do not interleave lines.  A write failure is logged and
+    never fails the trajectory.
+    """
+    environ = os.environ if environ is None else environ
+    path = str(environ.get(SAMPLE_LOG_ENV, "") or "").strip()
+    if not path:
+        return
+    line = (json.dumps(record, sort_keys=True, default=str) + "\n").encode()
+    try:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        try:
+            os.write(fd, line)
+        finally:
+            os.close(fd)
+    except OSError:
+        logger.exception("could not append the agentic sample log %s", path)
 
 
 # --------------------------------------------------------------- suspension
@@ -277,14 +328,16 @@ async def run(base_url: str, prompt: Any = None, request_kwargs: dict[str, Any] 
                             setup_retries=setup_retries_from_env())
     session_url = openai_session_url(base_url)
     settings = relay_settings()
-    if settings is None:
-        trajectory = await run_agent_task(task, harness, session_url, gate())
-        return trajectory.to_metadata()
-    turns = turn_gate()
     # Miles repeats a row n_samples_per_prompt times with the same metadata.
     suffix = uuid.uuid4().hex[:12]
-    ledger = turns.register(f"{task.trajectory_id}-{suffix}" if task.trajectory_id else uuid.uuid4().hex,
-                            task_id=task.task_id)
+    trajectory_id = f"{task.trajectory_id}-{suffix}" if task.trajectory_id else uuid.uuid4().hex
+    if settings is None:
+        trajectory = await run_agent_task(task, harness, session_url, gate())
+        result = trajectory.to_metadata()
+        append_sample_log(sample_log_record(task, trajectory_id, result))
+        return result
+    turns = turn_gate()
+    ledger = turns.register(trajectory_id, task_id=task.task_id)
     relay = _relay(settings, session_url)
     endpoint = await relay.open(session_url, ledger)
     try:
@@ -295,7 +348,9 @@ async def run(base_url: str, prompt: Any = None, request_kwargs: dict[str, Any] 
     updated = after_suspension(trajectory, ledger)
     if updated.outcome is not trajectory.outcome:
         gate().metrics.reclassify(trajectory.outcome, updated.outcome)
-    return updated.to_metadata()
+    result = updated.to_metadata()
+    append_sample_log(sample_log_record(task, trajectory_id, result))
+    return result
 
 
 def _mark_aborted(sample: Any) -> None:
