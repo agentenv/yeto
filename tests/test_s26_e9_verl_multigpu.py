@@ -62,3 +62,31 @@ def test_modal_island_config_carries_the_default(monkeypatch, tmp_path, extra, w
     task = SimpleNamespace(envs={}, secrets={}, file_mounts={}, run="true", setup="")
     cfg = modal_islands.build_modal_island_config(args, spec, 0, task, "none")
     assert cfg.envs["NCCL_SHM_DISABLE"] == want
+
+
+def _write_readbacks(root: str, n: int) -> None:
+    import os
+
+    from yeto.rl.adapters.verl import vllm_readback as rb
+
+    os.environ[rb.READBACK_ENV] = root
+    for _ in range(n):
+        rb.after_add_lora(SimpleNamespace(), 1)  # a broken manager: the error record is written
+
+
+def test_readback_from_several_vllm_replicas_at_once(tmp_path):
+    """e9b-g3-a: two vLLM replicas (one per card) wrote readback-v0.json through one
+    shared tmp name; the second os.replace raised FileNotFoundError inside vLLM."""
+    import json
+    import multiprocessing
+
+    (tmp_path / "expected_version").write_text("0")
+    ctx = multiprocessing.get_context("fork")
+    procs = [ctx.Process(target=_write_readbacks, args=(str(tmp_path), 200)) for _ in range(2)]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(60)
+    assert [p.exitcode for p in procs] == [0, 0]
+    assert json.loads((tmp_path / "readback-v0.json").read_text())["version"] == "0"
+    assert not list(tmp_path.glob("*.tmp"))
