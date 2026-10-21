@@ -144,6 +144,19 @@ impl DownlinkAnchors {
         })
     }
 
+    /// Encode a newly committed `version` of fragment `p` as FULL (exact f32)
+    /// and reset the shared anchor to it.
+    pub fn publish_full(&mut self, p: usize, version: u64, params: &[f32]) -> EncodedBcast {
+        match self.anchors.get_mut(p) {
+            Some(slot) => Self::reset(slot, p, version, params),
+            None => EncodedBcast {
+                prefix: prefix(p, version, KIND_FULL, version, &digest_f32(params)),
+                dtype: DTYPE_F32,
+                values: Arc::new(params.to_vec()),
+            },
+        }
+    }
+
     /// FULL re-send for recovery (HELLO / reconnect): the anchor every other
     /// learner holds, when it is at `version`; otherwise the exact params.
     pub fn resend(&self, p: usize, version: u64, params: &[f32]) -> EncodedBcast {

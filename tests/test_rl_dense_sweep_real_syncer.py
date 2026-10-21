@@ -521,3 +521,19 @@ def test_overlap_with_bf16_downlink_counts_each_round_once_without_a_resync(sync
             assert torch.allclose(got, anchors[fid], rtol=0, atol=4.0 / 256), (sweep, fid)
     assert any(not torch.equal(delta_anchors[s][f], exact_anchors[s][f])
                for s in delta_anchors for f in range(FRAGMENTS)), "the downlink must actually round"
+
+
+def test_bf16_downlink_sends_each_fragments_final_version_exact(syncer_binary, tmp_path):
+    """E3 (s26-e3-p06-D8): the last BCAST of a fragment has the same version as
+    its FINAL. Islands keep one copy per (fragment, version) and refuse a
+    second copy with other bytes, so that BCAST must be the exact f32 masters
+    even when the FULL cadence (here M=100) would send a bf16 delta."""
+    delta, updates = _downlink_run(syncer_binary, tmp_path, 100, sweeps=4)
+    final_versions, finals = delta[1], delta[2]
+    assert final_versions == [7, 8]
+    # Fragment 0's FINAL version 7 was also broadcast; fragment 1's version 8
+    # is the terminal step, which only FINAL carries.
+    assert updates[(0, 7)] == finals[0]
+    assert (1, 8) not in updates
+    # Earlier versions still travel as bf16 deltas.
+    assert any(updates[(0, v)] != finals[0] for v in (3, 5))

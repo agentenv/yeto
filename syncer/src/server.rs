@@ -3495,7 +3495,19 @@ async fn publish_round(
         // bf16 downlink: encode this version once (advancing the shared
         // anchor) and send the same bytes to every learner.
         let published = match &st.downlink {
-            Some(anchors) => Some(anchors.lock().unwrap().publish(p, st.versions[p], &st.params[p])?),
+            Some(anchors) => {
+                // The last version of each fragment is also its FINAL version.
+                // Islands key stored fragments by (fragment, version) and
+                // refuse a second copy with other bytes, so that broadcast
+                // must carry the exact f32 masters (FULL), not a bf16 delta.
+                let last_version = t + st.params.len() as u64 > cfg.total_steps;
+                let mut anchors = anchors.lock().unwrap();
+                Some(if last_version {
+                    anchors.publish_full(p, st.versions[p], &st.params[p])
+                } else {
+                    anchors.publish(p, st.versions[p], &st.params[p])?
+                })
+            }
             None => None,
         };
         for group in current_groups(registry) {
