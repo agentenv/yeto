@@ -534,3 +534,56 @@ def test_pool_reuse_applies_the_new_tasks_codex_cache_choice():
 
     asyncio.run(go())
     assert sum("yeto-codex-fetch" in c for c in fake.commands) == 1
+
+
+def _run_cache_setup(tmp_path, *, apt_ok: bool, has_curl: bool, has_rg: bool):
+    """Run CODEX_CACHE_SETUP with its absolute paths moved under tmp_path and a fake apt-get."""
+    import os
+    import shutil
+    import subprocess
+
+    from yeto.rl.harness.harbor.boat_sandbox import CODEX_CACHE_SETUP
+
+    local_bin, mount, core = tmp_path / "usr-local-bin", tmp_path / "opt-yeto-codex", tmp_path / "core"
+    musl = mount / "vendor/x86_64-unknown-linux-musl"
+    (musl / "codex-path").mkdir(parents=True)
+    (mount / "bin").mkdir()
+    for path in (musl / "codex-path/rg", mount / "bin/codex"):
+        path.write_text("#!/bin/sh\necho stub\n")
+        path.chmod(0o755)
+    core.mkdir()
+    for tool in ("mkdir", "ln", "rm", "grep", "ldd", "sh", "chmod"):
+        os.symlink(shutil.which(tool), core / tool)
+    calls = tmp_path / "apt-calls"
+    apt = core / "apt-get"
+    install_curl = f"printf '#!/bin/sh\\n' > {local_bin}/curl; chmod 755 {local_bin}/curl" if apt_ok else "exit 100"
+    apt.write_text(f'#!/bin/sh\necho "$@" >> {calls}\n[ "$1" = update ] && exit 0\n{install_curl}\n')
+    apt.chmod(0o755)
+    local_bin.mkdir()
+    if has_curl:
+        (core / "curl").write_text("#!/bin/sh\n")
+        (core / "curl").chmod(0o755)
+    if has_rg:
+        (core / "rg").write_text("#!/bin/sh\n")
+        (core / "rg").chmod(0o755)
+    script = CODEX_CACHE_SETUP.replace("/usr/local/bin", str(local_bin)).replace("/opt/yeto-codex", str(mount))
+    proc = subprocess.run(["/bin/bash", "-c", script], env={"PATH": f"{local_bin}:{core}"},
+                          capture_output=True, text=True, check=False)
+    tools = {name for name in ("codex", "curl", "rg") if (local_bin / name).exists() or (core / name).exists()}
+    return proc.returncode, tools, calls.read_text() if calls.exists() else "", local_bin
+
+
+@pytest.mark.parametrize("has_curl,has_rg", [(False, False), (True, True), (True, False)])
+def test_codex_cache_setup_leaves_the_same_tools_as_harbors_install(tmp_path, has_curl, has_rg):
+    code, tools, apt_calls, local_bin = _run_cache_setup(tmp_path, apt_ok=True, has_curl=has_curl, has_rg=has_rg)
+    assert code == 0
+    # Harbor's codex install leaves codex, curl and ripgrep on PATH (agents/installed/codex.py).
+    assert tools == {"codex", "curl", "rg"}
+    assert ("install -y curl" in apt_calls) is (not has_curl)  # only when the image lacks it
+    if not has_rg:
+        assert (local_bin / "rg").resolve().name == "rg" and "codex-path" in str((local_bin / "rg").resolve())
+
+
+def test_codex_cache_setup_failure_leaves_no_codex_so_harbor_installs(tmp_path):
+    code, tools, _, _ = _run_cache_setup(tmp_path, apt_ok=False, has_curl=False, has_rg=True)
+    assert code != 0 and "codex" not in tools

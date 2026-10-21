@@ -104,6 +104,24 @@ class CodexCache:
         )
 
 
+# Run as root in the task container on a cache hit.  Harbor's codex install
+# (agents/installed/codex.py) also leaves curl and ripgrep in the container,
+# and many TB2 verifiers call curl, so the tool set must match: rg comes from
+# the Codex bundle, curl is installed the way Harbor installs it when the
+# image lacks it.  On failure the codex link is removed, so Harbor falls back
+# to its own full install.
+_MUSL = "/opt/yeto-codex/vendor/x86_64-unknown-linux-musl"
+CODEX_CACHE_SETUP = (
+    "set -e; mkdir -p /usr/local/bin; "
+    "command -v rg >/dev/null 2>&1 || ln -sf " + _MUSL + "/codex-path/rg /usr/local/bin/rg; "
+    "if ! command -v curl >/dev/null 2>&1; then "
+    "if ldd --version 2>&1 | grep -qi musl || [ -f /etc/alpine-release ]; then apk add --no-cache curl; "
+    "elif command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y curl; "
+    "elif command -v yum >/dev/null 2>&1; then yum install -y curl; fi; fi; "
+    "command -v curl >/dev/null 2>&1 && command -v rg >/dev/null 2>&1 && "
+    "ln -sf /opt/yeto-codex/bin/codex /usr/local/bin/codex || { rm -f /usr/local/bin/codex; exit 1; }"
+)
+
 CODEX_CACHE_ROOT = "/var/cache/yeto-codex"  # outside the staging dir: recycle keeps it
 CODEX_MOUNT = "/opt/yeto-codex"
 
@@ -248,10 +266,14 @@ class BoatSandbox:
         self.timings.update(_parse_phase_mark(result.stdout))
         self.image = spec.image
         if self.timings.get("codex_cache") == 1.0:
-            linked = await self.exec(f"mkdir -p /usr/local/bin && ln -sf {CODEX_MOUNT}/bin/codex /usr/local/bin/codex",
-                                     user="root", timeout_s=60)
+            started = time.monotonic()
+            linked = await self.exec(CODEX_CACHE_SETUP, user="root", timeout_s=600,
+                                     env={"DEBIAN_FRONTEND": "noninteractive"})
+            self.timings["codex_link_s"] = time.monotonic() - started
             if linked.return_code != 0:
-                logger.warning("boat Codex cache: link failed on %s; Harbor will install Codex", self.sandbox_id)
+                # No codex on PATH now: Harbor runs its full install (curl and ripgrep included).
+                logger.warning("boat Codex cache: setup failed on %s; Harbor will install Codex: %s",
+                               self.sandbox_id, (linked.stderr or linked.stdout)[-500:])
                 self.timings["codex_cache"] = 0.0
         elif cache is not None:
             logger.warning("boat Codex cache: fetch failed on %s (see /tmp/yeto-codex-fetch.log on the VM); "
