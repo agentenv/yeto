@@ -692,11 +692,6 @@ def _device_copy_plan(actor: Any, named: list) -> tuple[bool, str]:
 
     if os.environ.get(DEVICE_COPY_ENV, "1").strip().lower() in {"0", "false", "no", "off"}:
         return False, "disabled"
-    if getattr(getattr(actor, "args", None), "offload_train", False):
-        # --offload-train: the trainer sleeps right after the cut (colocated) and the
-        # writer's reads of the device copies then fail ("CUDA error: invalid
-        # argument", 5 of 6 cuts of GPU run e1g-yeto-miles-sync-1)
-        return False, "offload_train"
     devices = {p.device for _, p in named}
     if len(devices) != 1 or next(iter(devices)).type != "cuda":
         return False, "not_cuda"
@@ -704,7 +699,17 @@ def _device_copy_plan(actor: Any, named: list) -> tuple[bool, str]:
     free, _total = torch.cuda.mem_get_info(next(iter(devices)))
     if free < 2 * need + DEVICE_COPY_HEADROOM_BYTES:
         return False, f"low_device_memory(free={free},need={need})"
+    if _sleeps_after_cut(actor):
+        # --offload-train: the trainer sleeps right after the cut (colocated), so nothing
+        # may read the device copies later (they failed with "CUDA error: invalid
+        # argument" in GPU run e1g-yeto-miles-sync-1): they are staged on the host
+        # before the capture returns (_stage)
+        return True, "ok_staged"
     return True, "ok"
+
+
+def _sleeps_after_cut(actor: Any) -> bool:
+    return bool(getattr(getattr(actor, "args", None), "offload_train", False))
 
 
 # --------------------------------------------------------------------------
@@ -828,18 +833,21 @@ def _remove_partial(directory: str, coord: Mapping[str, int]) -> None:
 
 
 def _write_background(captured: dict[str, Any], *, directory: str, cut_id: str) -> dict[str, Any]:
-    """Thread of the trainer process: device copies to shared host memory, then the
-    writer process serializes, hashes and summarizes them. When the writer process
-    fails (it died, the state did not pickle, ...) this thread writes the same shard
-    itself and the summary's ``writer`` says so (``mode=thread``, ``fallback``)."""
+    """Thread of the trainer process: the state to the host and into one shared buffer
+    (:func:`_pack`), then the writer process serializes, hashes and summarizes it.
+    When the writer process fails (it died, the state did not pickle, ...) this thread
+    writes the same shard itself and the summary's ``writer`` says so (``mode=thread``,
+    ``fallback``)."""
     try:
-        host = _on_host(captured)
+        try:
+            skeleton, layout, flat = _pack(_on_host(captured))
+        finally:
+            _STAGING.free.set()  # a staged snapshot (sync cuts) is copied out or dropped
     except CutPluginError as error:
         return {REFUSED: str(error), REFUSAL_KIND: "refused"}
     fallback = "disabled"
     if _writer_enabled():
         try:
-            skeleton, layout, flat = _pack(host)
             result = _writer_pool().submit(_write_packed, skeleton, layout, flat,
                                            directory=directory, cut_id=cut_id).result()
             return {**result, "writer": {"mode": "process"}}
@@ -847,9 +855,105 @@ def _write_background(captured: dict[str, Any], *, directory: str, cut_id: str) 
             _drop_writer_pool()
             fallback = f"writer process failed: {error!r}"[:500]
             print("yeto cut writer fallback " + repr({"cut_id": cut_id, "reason": fallback}), flush=True)
-            _remove_partial(directory, host["coord"])
-    return {**_write_refusing(host, directory=directory, cut_id=cut_id),
+            _remove_partial(directory, captured["coord"])
+    return {**_write_refusing(_unpack(skeleton, layout, flat), directory=directory, cut_id=cut_id),
             "writer": {"mode": "thread", "fallback": fallback}}
+
+
+class _Staging:
+    """The reused host buffer of :func:`_stage` (pinned when CUDA is available) and
+    whether a staged snapshot still lives in it (set again once :func:`_pack` copied
+    it out). One per trainer process."""
+
+    ALIGN = 64
+
+    def __init__(self) -> None:
+        import threading
+
+        self.buffer = None
+        self.free = threading.Event()
+        self.free.set()
+
+    def flat(self, nbytes: int):
+        import torch
+
+        if self.buffer is None or self.buffer.numel() < nbytes:
+            self.buffer = None
+            self.buffer = torch.empty(nbytes, dtype=torch.uint8, pin_memory=torch.cuda.is_available())
+        return self.buffer
+
+
+_STAGING = _Staging()
+STAGING_WAIT_S = 600.0
+
+
+def _tensors(value: Any, out: list) -> list:
+    import torch
+
+    if isinstance(value, torch.Tensor):
+        out.append(value)
+    elif isinstance(value, Mapping):
+        for v in value.values():
+            _tensors(v, out)
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            _tensors(v, out)
+    return out
+
+
+def _stage(snap: Any, *, include_cpu: bool = False) -> Any:
+    """``snap`` with every contiguous non-CPU tensor replaced by a view of the
+    process's staging buffer holding its exact bytes (copied asynchronously, ONE
+    synchronization at the end); other tensors (CPU unless ``include_cpu``, a test
+    hook; non-contiguous) are copied to the host on their own as :func:`to_host` does. The views are valid until
+    :func:`_pack` copies them out (the writer thread then marks the buffer free)."""
+    import torch
+
+    if not _STAGING.free.wait(STAGING_WAIT_S):
+        raise CutPluginError("the previous cut's staged state was never handed to its writer")
+    stageable = [t for t in _tensors(snap, [])
+                 if (include_cpu or t.device.type != "cpu") and t.is_contiguous()]
+    if not stageable:
+        return to_host(snap)
+    _STAGING.free.clear()
+    align = _Staging.ALIGN
+    offsets, total = {}, 0
+    for t in stageable:
+        if id(t) not in offsets:
+            offsets[id(t)] = total
+            total += -(-t.numel() * t.element_size() // align) * align
+    flat = _STAGING.flat(total)
+    views: dict[int, Any] = {}
+
+    def staged(value: Any) -> Any:
+        if isinstance(value, torch.Tensor):
+            if id(value) in offsets:
+                if id(value) not in views:
+                    start = offsets[id(value)]
+                    view = flat[start:start + value.numel() * value.element_size()].view(value.dtype)
+                    view = view.view(value.shape)
+                    view.copy_(value, non_blocking=True)
+                    views[id(value)] = view
+                return views[id(value)]
+            return value if value.device.type == "cpu" else value.to("cpu")
+        if isinstance(value, dict):
+            return {k: staged(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [staged(v) for v in value]
+        if isinstance(value, tuple):
+            return tuple(staged(v) for v in value)
+        return value
+
+    try:
+        out = staged(snap)
+        devices = {t.device for t in stageable if t.device.type == "cuda"}
+        for device in devices:
+            torch.cuda.synchronize(device)  # every staged copy is complete
+    except BaseException:
+        _STAGING.free.set()
+        raise
+    return out
+
 
 
 _PACKED = "__yeto_packed__"
@@ -873,8 +977,13 @@ def _pack(value: Any) -> tuple[Any, list, Any]:
         key = t.untyped_storage().data_ptr()
         owners[key] = owners.get(key, 0) + 1
 
+    staging = _STAGING.buffer
+    staged_ptr = None if staging is None else staging.untyped_storage().data_ptr()
+
     def packable(t: Any) -> bool:
         storage = t.untyped_storage()
+        if staged_ptr is not None and storage.data_ptr() == staged_ptr and t.device.type == "cpu":
+            return t.is_contiguous() and t.numel() > 0  # a view of the staging buffer: copied out
         return (t.device.type == "cpu" and t.is_contiguous() and t.storage_offset() == 0
                 and storage.nbytes() == t.numel() * t.element_size() and owners[storage.data_ptr()] == 1
                 and t.numel() > 0)
@@ -980,7 +1089,9 @@ def _capture(actor: Any, *, cut_id: str, device_copy: bool = False) -> dict[str,
         if snap is None:
             snap = _snapshot(actor, backend, named)
         ready = None
-        if on_device and any(p.is_cuda for _, p in named):
+        if on_device and _sleeps_after_cut(actor):
+            snap = _stage(snap)  # host views; the device copies are dropped here
+        elif on_device and any(p.is_cuda for _, p in named):
             ready = torch.cuda.Event()
             ready.record()
         marks.append(time.monotonic())
