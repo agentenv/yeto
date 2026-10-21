@@ -37,6 +37,13 @@ CODEX_LINUX_X64_SHA512 = (
     "ace4f6a32c07f36d53c37dbe101f37b9990312c5a0c7b1e2feba2631ee656c0"
 )
 
+# Node for the boat Codex cache (S26 E8).  Harbor's codex install runs
+# ``nvm install 22``, i.e. the newest 22.x on the day it runs; on 2026-10-21
+# that is v22.23.3 (nodejs.org/dist/index.json).  sha256 from SHASUMS256.txt.
+NODE_VERSION = "22.23.3"
+NODE_LINUX_X64_URL = f"https://nodejs.org/dist/v{NODE_VERSION}/node-v{NODE_VERSION}-linux-x64.tar.gz"
+NODE_LINUX_X64_SHA256 = "1084aa36196bba4c3a5e69a1ee388a6e4ff729dad09445fbcd434b28fe3c24af"
+
 
 def install_spec(extra: str = "modal") -> str:
     """``uv pip install`` requirement for the pinned build (uv: the branch has a uv-workspace dependency)."""

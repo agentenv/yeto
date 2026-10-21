@@ -76,15 +76,22 @@ class ContainerSpec:
 
 @dataclass(frozen=True)
 class CodexCache:
-    """A Codex build kept on the VM at ``/var/cache/yeto-codex/<version>``, mounted at :data:`CODEX_MOUNT`."""
+    """A Codex build plus a Node build kept on the VM, mounted at :data:`CODEX_MOUNT`.
+
+    Layout: the Codex npm package at the root, the wrapper at ``bin/codex``,
+    Node (official linux-x64 tarball) under ``node/``.
+    """
 
     version: str
     url: str
     sha512: str
+    node_version: str
+    node_url: str
+    node_sha256: str
 
     @property
     def host_dir(self) -> str:
-        return f"{CODEX_CACHE_ROOT}/{self.version}"
+        return f"{CODEX_CACHE_ROOT}/{self.version}-node{self.node_version}"
 
     def fetch_command(self) -> str:
         """VM shell line: fetch, check and unpack the build once (atomic rename); exit 0 when ready."""
@@ -96,7 +103,10 @@ class CodexCache:
             f"[ \"$(uname -m)\" = x86_64 ] && {{ [ -x {d}/bin/codex ] || {{ "
             f"t=$(mktemp -d) && curl -fsSL --retry 3 -o $t/c.tgz {shlex.quote(self.url)} && "
             f"echo {shlex.quote(self.sha512)}\"  $t/c.tgz\" | sha512sum -c --quiet && "
-            f"sudo -n mkdir -p $t/x/bin && sudo -n tar -xzf $t/c.tgz -C $t/x --strip-components=1 && "
+            f"curl -fsSL --retry 3 -o $t/n.tgz {shlex.quote(self.node_url)} && "
+            f"echo {shlex.quote(self.node_sha256)}\"  $t/n.tgz\" | sha256sum -c --quiet && "
+            f"sudo -n mkdir -p $t/x/bin $t/x/node && sudo -n tar -xzf $t/c.tgz -C $t/x --strip-components=1 && "
+            f"sudo -n tar -xzf $t/n.tgz -C $t/x/node --strip-components=1 && "
             f"printf {shlex.quote(wrapper)} | sudo -n tee $t/x/bin/codex >/dev/null && "
             f"sudo -n chmod -R a+rX $t/x && sudo -n chmod 755 $t/x/bin/codex && "
             f"sudo -n mkdir -p {CODEX_CACHE_ROOT} && sudo -n mv -T $t/x {d}; "
@@ -105,20 +115,31 @@ class CodexCache:
 
 
 # Run as root in the task container on a cache hit.  Harbor's codex install
-# (agents/installed/codex.py) also leaves curl and ripgrep in the container,
-# and many TB2 verifiers call curl, so the tool set must match: rg comes from
-# the Codex bundle, curl is installed the way Harbor installs it when the
-# image lacks it.  On failure the codex link is removed, so Harbor falls back
-# to its own full install.
+# (agents/installed/codex.py) also leaves curl, ripgrep and node/npm in the
+# container, and TB2 verifiers call curl (84+ tests) and node (3+), so the
+# tool set must match:
+# * rg: from the Codex bundle;
+# * curl: installed the way Harbor installs it, when the image lacks it;
+# * node/npm: on musl (Alpine) ``apk add nodejs npm`` as Harbor does; else the
+#   cached Node 22 build (Harbor: ``nvm install 22``), when the image lacks it.
+# The codex link comes last; on any failure it is removed, so Harbor falls
+# back to its own full install.
 _MUSL = "/opt/yeto-codex/vendor/x86_64-unknown-linux-musl"
+_NODE = "/opt/yeto-codex/node/bin"
 CODEX_CACHE_SETUP = (
     "set -e; mkdir -p /usr/local/bin; "
+    "if ldd --version 2>&1 | grep -qi musl || [ -f /etc/alpine-release ]; then musl=1; else musl=0; fi; "
     "command -v rg >/dev/null 2>&1 || ln -sf " + _MUSL + "/codex-path/rg /usr/local/bin/rg; "
     "if ! command -v curl >/dev/null 2>&1; then "
-    "if ldd --version 2>&1 | grep -qi musl || [ -f /etc/alpine-release ]; then apk add --no-cache curl; "
+    "if [ $musl = 1 ]; then apk add --no-cache curl; "
     "elif command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y curl; "
     "elif command -v yum >/dev/null 2>&1; then yum install -y curl; fi; fi; "
-    "command -v curl >/dev/null 2>&1 && command -v rg >/dev/null 2>&1 && "
+    "if [ $musl = 1 ]; then { command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; } "
+    "|| apk add --no-cache nodejs npm; else "
+    "command -v node >/dev/null 2>&1 || ln -sf " + _NODE + "/node /usr/local/bin/node; "
+    "command -v npm >/dev/null 2>&1 || ln -sf " + _NODE + "/npm /usr/local/bin/npm; fi; "
+    "command -v curl >/dev/null 2>&1 && command -v rg >/dev/null 2>&1 && node --version >/dev/null 2>&1 && "
+    "command -v npm >/dev/null 2>&1 && "
     "ln -sf /opt/yeto-codex/bin/codex /usr/local/bin/codex || { rm -f /usr/local/bin/codex; exit 1; }"
 )
 
@@ -127,9 +148,17 @@ CODEX_MOUNT = "/opt/yeto-codex"
 
 
 def pinned_codex_cache() -> CodexCache:
-    from .pins import CODEX_LINUX_X64_SHA512, CODEX_LINUX_X64_URL, CODEX_VERSION
+    from .pins import (
+        CODEX_LINUX_X64_SHA512,
+        CODEX_LINUX_X64_URL,
+        CODEX_VERSION,
+        NODE_LINUX_X64_SHA256,
+        NODE_LINUX_X64_URL,
+        NODE_VERSION,
+    )
 
-    return CodexCache(version=CODEX_VERSION, url=CODEX_LINUX_X64_URL, sha512=CODEX_LINUX_X64_SHA512)
+    return CodexCache(version=CODEX_VERSION, url=CODEX_LINUX_X64_URL, sha512=CODEX_LINUX_X64_SHA512,
+                      node_version=NODE_VERSION, node_url=NODE_LINUX_X64_URL, node_sha256=NODE_LINUX_X64_SHA256)
 
 
 @dataclass(frozen=True)

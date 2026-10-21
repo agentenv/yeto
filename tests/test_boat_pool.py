@@ -467,7 +467,8 @@ def test_codex_cache_is_the_pinned_build_and_its_command_parses():
     assert cache.version == CODEX_VERSION == "0.145.0"
     assert cache.url.endswith(f"codex-{CODEX_VERSION}-linux-x64.tgz") and len(cache.sha512) == 128
     command = cache.fetch_command()
-    assert "sha512sum -c" in command and cache.sha512 in command and "/var/cache/yeto-codex/0.145.0" in command
+    assert cache.node_version == "22.23.3" and "sha256sum -c" in command and cache.node_sha256 in command
+    assert "sha512sum -c" in command and cache.sha512 in command and "/var/cache/yeto-codex/0.145.0-node22.23.3" in command
     assert subprocess.run(["bash", "-n", "-c", command], check=False).returncode == 0
 
 
@@ -499,7 +500,7 @@ def test_codex_cache_mounts_read_only_and_links_or_falls_back(cache_ok):
 
     box = asyncio.run(go())
     run = next(c for c in fake.commands if "docker run -d" in c)
-    assert "-v /var/cache/yeto-codex/0.145.0:/opt/yeto-codex:ro" in run and " $m " in run
+    assert "-v /var/cache/yeto-codex/0.145.0-node22.23.3:/opt/yeto-codex:ro" in run and " $m " in run
     assert run.index("wait $f") < run.index("docker run -d")  # fetch finished before the container starts
     linked = [c for c in fake.commands if "ln -sf /opt/yeto-codex/bin/codex /usr/local/bin/codex" in c]
     assert bool(linked) is cache_ok
@@ -536,7 +537,8 @@ def test_pool_reuse_applies_the_new_tasks_codex_cache_choice():
     assert sum("yeto-codex-fetch" in c for c in fake.commands) == 1
 
 
-def _run_cache_setup(tmp_path, *, apt_ok: bool, has_curl: bool, has_rg: bool):
+def _run_cache_setup(tmp_path, *, apt_ok: bool, has_curl: bool, has_rg: bool, has_node: bool = False,
+                     node_runs: bool = True):
     """Run CODEX_CACHE_SETUP with its absolute paths moved under tmp_path and a fake apt-get."""
     import os
     import shutil
@@ -548,9 +550,12 @@ def _run_cache_setup(tmp_path, *, apt_ok: bool, has_curl: bool, has_rg: bool):
     musl = mount / "vendor/x86_64-unknown-linux-musl"
     (musl / "codex-path").mkdir(parents=True)
     (mount / "bin").mkdir()
-    for path in (musl / "codex-path/rg", mount / "bin/codex"):
+    (mount / "node/bin").mkdir(parents=True)
+    for path in (musl / "codex-path/rg", mount / "bin/codex", mount / "node/bin/node", mount / "node/bin/npm"):
         path.write_text("#!/bin/sh\necho stub\n")
         path.chmod(0o755)
+    if not node_runs:  # e.g. the image's glibc is older than the Node build needs
+        (mount / "node/bin/node").write_text("#!/bin/sh\nexit 1\n")
     core.mkdir()
     for tool in ("mkdir", "ln", "rm", "grep", "ldd", "sh", "chmod"):
         os.symlink(shutil.which(tool), core / tool)
@@ -563,22 +568,27 @@ def _run_cache_setup(tmp_path, *, apt_ok: bool, has_curl: bool, has_rg: bool):
     if has_curl:
         (core / "curl").write_text("#!/bin/sh\n")
         (core / "curl").chmod(0o755)
-    if has_rg:
-        (core / "rg").write_text("#!/bin/sh\n")
-        (core / "rg").chmod(0o755)
+    for name, present in (("rg", has_rg), ("node", has_node), ("npm", has_node)):
+        if present:
+            (core / name).write_text("#!/bin/sh\n")
+            (core / name).chmod(0o755)
     script = CODEX_CACHE_SETUP.replace("/usr/local/bin", str(local_bin)).replace("/opt/yeto-codex", str(mount))
     proc = subprocess.run(["/bin/bash", "-c", script], env={"PATH": f"{local_bin}:{core}"},
                           capture_output=True, text=True, check=False)
-    tools = {name for name in ("codex", "curl", "rg") if (local_bin / name).exists() or (core / name).exists()}
+    tools = {name for name in ("codex", "curl", "rg", "node", "npm")
+             if (local_bin / name).exists() or (core / name).exists()}
     return proc.returncode, tools, calls.read_text() if calls.exists() else "", local_bin
 
 
-@pytest.mark.parametrize("has_curl,has_rg", [(False, False), (True, True), (True, False)])
-def test_codex_cache_setup_leaves_the_same_tools_as_harbors_install(tmp_path, has_curl, has_rg):
-    code, tools, apt_calls, local_bin = _run_cache_setup(tmp_path, apt_ok=True, has_curl=has_curl, has_rg=has_rg)
+@pytest.mark.parametrize("has_curl,has_rg,has_node", [(False, False, False), (True, True, True), (True, False, False)])
+def test_codex_cache_setup_leaves_the_same_tools_as_harbors_install(tmp_path, has_curl, has_rg, has_node):
+    code, tools, apt_calls, local_bin = _run_cache_setup(tmp_path, apt_ok=True, has_curl=has_curl, has_rg=has_rg,
+                                                         has_node=has_node)
     assert code == 0
-    # Harbor's codex install leaves codex, curl and ripgrep on PATH (agents/installed/codex.py).
-    assert tools == {"codex", "curl", "rg"}
+    # Harbor's codex install leaves codex, curl, ripgrep and node/npm on PATH (agents/installed/codex.py).
+    assert tools == {"codex", "curl", "rg", "node", "npm"}
+    if not has_node:
+        assert "opt-yeto-codex/node/bin" in str((local_bin / "node").resolve())
     assert ("install -y curl" in apt_calls) is (not has_curl)  # only when the image lacks it
     if not has_rg:
         assert (local_bin / "rg").resolve().name == "rg" and "codex-path" in str((local_bin / "rg").resolve())
@@ -586,4 +596,9 @@ def test_codex_cache_setup_leaves_the_same_tools_as_harbors_install(tmp_path, ha
 
 def test_codex_cache_setup_failure_leaves_no_codex_so_harbor_installs(tmp_path):
     code, tools, _, _ = _run_cache_setup(tmp_path, apt_ok=False, has_curl=False, has_rg=True)
+    assert code != 0 and "codex" not in tools
+
+
+def test_codex_cache_setup_node_that_cannot_run_falls_back(tmp_path):
+    code, tools, _, _ = _run_cache_setup(tmp_path, apt_ok=True, has_curl=True, has_rg=True, node_runs=False)
     assert code != 0 and "codex" not in tools
