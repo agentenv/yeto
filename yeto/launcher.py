@@ -1054,7 +1054,7 @@ def dry_run_plan(args) -> dict:
         "syncer": None if no_sync else ("head VM" if head else f"{args.cluster_prefix}-syncer"),
         # P0-D8: one syncer per trainable role (actor first); none without outer sync
         "role_syncers": [] if not rl or no_sync else _dry_run_role_syncers(
-            args, len(specs) + external),
+            args, sample_roles.syncer_learner_count(args, len(specs)) + external),
         "outer_sync": not no_sync,
         # rl-trainer-start-stop L5.3b/L5.4: the head's scheduler and the island it owns
         "trainer_scheduler": (None if not trainer_loop.enabled(args) else {
