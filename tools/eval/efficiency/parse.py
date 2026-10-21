@@ -381,7 +381,7 @@ def _driver_phase_durations(markers: list[dict[str, Any]]) -> dict[int, dict[str
 
 # ====================================================================== NVML
 def parse_nvml(text: str) -> list[dict[str, Any]]:
-    """Rows {t_unix, key (container:index), util, mem_mb, mem_total_mb, power_w}; header lines skipped."""
+    """Rows {t_unix, key (container:index), name, util, mem_mb, mem_total_mb, power_w}; header lines skipped."""
     rows = []
     for parts in csv.reader(io.StringIO(text)):
         parts = [x.strip() for x in parts]
@@ -399,7 +399,8 @@ def parse_nvml(text: str) -> list[dict[str, Any]]:
             index, util, mem, total, power = parts[1], num[3], num[4], num[5], num[6]
         else:  # timestamp,name,util,mem.used,power (T-EVAL format, no index)
             index, util, mem, total, power = "0", num[2], num[3], "", num[4] if len(num) > 4 else ""
-        rows.append({"t_unix": t, "key": f"{container}:{index}", "util": float(util) if util else None,
+        name = parts[2] if len(parts) >= 7 else parts[1]
+        rows.append({"t_unix": t, "key": f"{container}:{index}", "name": name, "util": float(util) if util else None,
                      "mem_mb": float(mem) if mem else None, "mem_total_mb": float(total) if total else None,
                      "power_w": float(power) if power else None})
     return rows
@@ -463,7 +464,10 @@ def parse_run(run_dir: Path) -> dict[str, Any]:
             "framework": plan["framework"], "system": plan["system"], "cards": c, "gpu": plan["gpu"],
             "spec": spec, "container_start_unix": start, "container_end_unix": end, "rc": meta.get("rc"),
             "framework_log": fw.to_dict() if plan["system"] == "yeto" else None,
-            "nvml": parse_nvml(nvml_text), "nvml_interval_s": 20.0 if plan["harness"] == "miles_local" else 1.0,
+            "nvml": (nvml := parse_nvml(nvml_text)),
+            # E1: Modal "A10G" containers are NVIDIA A10 or (sometimes) A10G, which train slower
+            "gpu_names": sorted({r["name"] for r in nvml if r.get("name")}),
+            "nvml_interval_s": 20.0 if plan["harness"] == "miles_local" else 1.0,
             **parsed.to_dict()}
 
 

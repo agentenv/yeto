@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -64,13 +65,19 @@ COMMAND_WRITER = (
 
 
 # ====================================================================== in-container helpers
+def gpu_name_matches(want: str, name: str) -> bool:
+    """``name`` is the model ``want`` names: "NVIDIA A10" accepts "NVIDIA A10", not "NVIDIA A10G"
+    (Modal "A10G" containers report either; the A10G trains slower, E1 e1a9)."""
+    return re.search(re.escape(want) + r"(?![\w-])", name) is not None
+
+
 def _gpu(out: Path, cfg: dict) -> list[str]:
     names = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
                            capture_output=True, text=True, timeout=60).stdout.split("\n")
     names = [n.strip() for n in names if n.strip()]
     (out / "nvidia-smi.txt").write_text(subprocess.run(["nvidia-smi"], capture_output=True, text=True).stdout)
     want = GPU_NAMES[cfg["gpu"]]
-    if not names or not all(want in n for n in names):
+    if not names or not all(gpu_name_matches(want, n) for n in names):
         raise RuntimeError(f"asked for {want}, got {names}")
     return names
 

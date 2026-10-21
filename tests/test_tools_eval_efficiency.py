@@ -338,6 +338,19 @@ def test_report_needs_two_repeats_and_one_spec(tmp_path):
     runs[1]["fingerprint"] = "other"
     with pytest.raises(ValueError, match="different specs"):
         report.markdown(runs, title="t")
+    runs = report.load(one)
+    assert runs[0]["gpu_names"]  # from the NVML samples
+    runs[1]["gpu_names"] = ["NVIDIA A10G"]
+    with pytest.raises(ValueError, match="different GPU models"):
+        report.markdown(runs, title="t")
+
+
+def test_gpu_name_check_tells_a10_from_a10g():
+    from tools.eval.modal_verl import gpu_name_matches
+
+    assert gpu_name_matches("NVIDIA A10", "NVIDIA A10")
+    assert not gpu_name_matches("NVIDIA A10", "NVIDIA A10G")
+    assert gpu_name_matches("H100", "NVIDIA H100 80GB HBM3") and gpu_name_matches("L4", "NVIDIA L4")
 
 
 def test_verdict_rules():
