@@ -111,6 +111,13 @@ PRESETS: dict[str, EffSpec] = {
         model_revision="cdbee75f17c01a7cc42f958dc650907174af0554", miles_model_args="qwen3-4B-Instruct-2507.py",
         gpu="H100!", rounds=20, groups_per_round=32, samples_per_group=8, max_prompt_len=512,
         max_response_len=1024, lora_r=64, mem_fraction=0.6, timeout_s=5400),
+    # E11 (whole cluster): the E0.2 spec on 4 cards; async (2 rollout + 2 trainer, or 2
+    # islands of 1 + 1), so the 2-island yeto arm and the single-island arms share one shape
+    "e11-qwen3-4b": EffSpec(
+        name="e11-qwen3-4b", model="Qwen/Qwen3-4B-Instruct-2507",
+        model_revision="cdbee75f17c01a7cc42f958dc650907174af0554", miles_model_args="qwen3-4B-Instruct-2507.py",
+        gpu="H100!", rounds=20, groups_per_round=32, samples_per_group=8, max_prompt_len=512,
+        max_response_len=1024, lora_r=64, mem_fraction=0.6, timeout_s=5400, cards=4),
 }
 
 
@@ -430,6 +437,55 @@ def yeto_miles_launcher_args(spec: EffSpec, mode: str, run_id: str) -> str:
     if spec.data != "zhuzilin/gsm8k" or spec.data_revision not in DATA:
         raise ValueError("the yeto+Miles arm reads tools.eval.miles.DATA; keep the spec's data equal to it")
     return args
+
+
+HEAD_REGION = "nebius/eu-north1"  # the multi-island syncer head: a CPU-only Nebius VM
+
+
+def yeto_miles_islands_launcher_args(spec: EffSpec, islands: int, run_id: str, *, data: str,
+                                     island_tasks: str) -> str:
+    """E11: the yeto+Miles arm split into ``islands`` async islands that sync through a
+    head syncer (LoRA strict-avg), with the card total and the prompts per round of the
+    single-island arm. ``data`` is a local JSONL of the spec's rows and ``island_tasks``
+    the ``--rl-island-tasks`` spec that gives each island its share of every round."""
+    c = cards("async", spec.cards)
+    if c["total"] % islands or (c["total"] // islands) % 2 or spec.groups_per_round % islands:
+        raise ValueError(f"{islands} islands need an even card share and an equal prompt share "
+                         f"({c['total']} cards, {spec.groups_per_round} prompts per round)")
+    per = c["total"] // islands
+    card = {"A10G": "a10g", "H100!": "h100", "L4": "l4"}[spec.gpu]
+    kwargs = json.dumps(spec.chat_template_kwargs) if spec.chat_template_kwargs else ""
+    args = (f"launch --controller head --syncer-region {HEAD_REGION} --on-demand --training-mode rl "
+            f"--rl-engine ports --preflight-threads wait --preflight-thread-start 2950 --modal-gpu-exact "
+            f"{gpu_name_arg(spec)}--modal-retries 0 --no-island-relaunch "
+            f"--modal-cpu {8 * per} --modal-memory-gib {48 * per} "
+            f"--cluster-prefix {run_id} --tuning lora --lora-r {spec.lora_r} --lora-targets all-linear "
+            f"--rl-observe-timeline --model {spec.model} --model-revision {spec.model_revision} "
+            f"--rl-allow-local-data --data {data} --rl-island-tasks {shlex.quote(island_tasks)} "
+            "--reward-function gsm8k_reward:score --fragments 1 --pipeline 1 "
+            f"--rollout-batch-size {spec.groups_per_round // islands} "
+            f"--n-samples-per-prompt {spec.samples_per_group} "
+            f"--rollout-max-response-len {spec.max_response_len} --seq-len {spec.seq_len} "
+            f"--inner-lr {spec.lr} --seed {spec.seed} --sglang-mem-fraction-static {spec.mem_fraction} "
+            f"--gpu {','.join([f'modal:{per}x{card}'] * islands)} --total-steps {spec.rounds} "
+            # the single-island arm's Miles recipe settings (yeto_miles_launcher_args)
+            "--no-sglang-deterministic-inference --rl-lr-schedule constant --rl-activation-recompute "
+            f"--rl-max-tokens-per-gpu {max_tokens_per_gpu(spec)} --rl-gradient-accumulation-fusion "
+            f"--trust-remote-code --rl-algorithm-spec {MILES_ALGORITHM_SPEC} "
+            f"--rl-placement fixed-partition --rl-rollout-gpus {per // 2} "
+            f"--rl-max-policy-age {spec.max_policy_age}")
+    if kwargs:
+        args += f" --apply-chat-template-kwargs {shlex.quote(kwargs)}"
+    return args
+
+
+def island_task_split(groups_per_round: int, rounds: int, islands: int) -> dict[str, list[str]]:
+    """Round-major split of the first ``rounds * groups_per_round`` rows (task ids
+    ``gsm<row+1>``): island k gets the k-th equal slice of every round's prompts, so the
+    islands together read the single-island arm's prompts of each round."""
+    share = groups_per_round // islands
+    return {f"l{k}": [f"gsm{r * groups_per_round + k * share + i + 1}" for r in range(rounds)
+                      for i in range(share)] for k in range(islands)}
 
 
 # ====================================================================== plans
