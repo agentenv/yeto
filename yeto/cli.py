@@ -438,6 +438,22 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "deltas (~4x less learner egress; broadcasts stay bf16)",
     )
     sync.add_argument("--wan-streams", type=int, default=4, help="parallel TCP streams per learner")
+    sync.add_argument(
+        "--wan-stream-schedule",
+        choices=("rr", "adaptive"),
+        default="rr",
+        help="full-parameter RL islands: rr = round-robin chunks over the streams; "
+        "adaptive = send each chunk to the stream with the earliest estimated "
+        "finish (backlog / measured rate), so slow streams carry less",
+    )
+    sync.add_argument(
+        "--wan-stall-timeout",
+        type=float,
+        default=0.0,
+        help="full-parameter RL islands: drop and redial the connection group when "
+        "one stream holds bytes with no progress for this many seconds (also sets "
+        "TCP_USER_TIMEOUT); the fragment is pushed again on the replayed PULL. 0 = off",
+    )
 
     infra = p.add_argument_group("infrastructure")
     infra.add_argument(

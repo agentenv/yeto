@@ -88,6 +88,10 @@ class RoleStreamConfig:
     # P0-4.8: the island's AlgorithmSpec hash; placement capabilities stay out.
     algorithm_spec_sha256: str
     wan_streams: int = 4
+    # S26 E3b transport options (yeto/wan_streams.py); not part of the session
+    # contract: they change how bytes travel, never which bytes.
+    wan_stream_schedule: str = "rr"
+    wan_stall_timeout: float = 0.0  # seconds; 0 = off
     wait_timeout: float = 900.0
     poll_seconds: float = 0.01
     max_fragment_bytes: int = 2 << 30
@@ -158,6 +162,10 @@ class RoleStreamConfig:
             value = getattr(self, name)
             if type(value) is not int or value < 1:
                 raise ValueError(f"role-stream {name} must be positive")
+        if self.wan_stream_schedule not in ("rr", "adaptive"):
+            raise ValueError("role-stream wan stream schedule must be rr or adaptive")
+        if not self.wan_stall_timeout >= 0:
+            raise ValueError("role-stream wan stall timeout must be >= 0")
         if self.push_dtype not in ("f32", "bf16", "int8"):
             raise ValueError("role-stream push dtype must be f32, bf16 or int8")
         if type(self.push_int8_block) is not int or not I8_BLOCK_MIN <= self.push_int8_block <= I8_BLOCK_MAX:
@@ -379,6 +387,8 @@ class MilesFullParameterRoleStream:
             dtype=self.config.session_dtype,
             push_i8_block=self.config.push_int8_block,
             num_streams=self.config.wan_streams,
+            stream_schedule=self.config.wan_stream_schedule,
+            stream_stall_timeout=self.config.wan_stall_timeout or None,
             max_reconnects=None,
             session_contract_hash=role_stream_session_contract_hash(
                 adapter.layout.layout_hash,

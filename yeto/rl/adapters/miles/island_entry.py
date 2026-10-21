@@ -838,6 +838,8 @@ def _dense_full_sync_config(
         pipeline_depth=1,
         algorithm_spec_sha256=algorithm_spec_sha256,
         wan_streams=args.wan_streams,
+        wan_stream_schedule=getattr(args, "wan_stream_schedule", "rr"),
+        wan_stall_timeout=float(getattr(args, "wan_stall_timeout", 0.0) or 0.0),
         push_dtype=getattr(args, "sweep_push_dtype", "f32"),
         push_int8_block=int(getattr(args, "sweep_push_int8_block", 128)),
         bcast_delta=bool(getattr(args, "bcast_delta", False)),

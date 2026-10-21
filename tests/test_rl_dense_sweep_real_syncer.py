@@ -13,6 +13,7 @@ import shlex
 import shutil
 import socket
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -537,3 +538,98 @@ def test_bf16_downlink_sends_each_fragments_final_version_exact(syncer_binary, t
     assert (1, 8) not in updates
     # Earlier versions still travel as bf16 deltas.
     assert any(updates[(0, v)] != finals[0] for v in (3, 5))
+
+
+class _StallingSocket:
+    """Proxy whose ``send`` stops making progress once ``armed`` is set,
+    until the socket is closed."""
+
+    def __init__(self, sock: socket.socket, armed: threading.Event) -> None:
+        self._sock = sock
+        self._armed = armed
+
+    def send(self, data) -> int:
+        if not self._armed.is_set():
+            return self._sock.send(data)
+        while self._sock.fileno() != -1:
+            time.sleep(0.02)
+        raise OSError("stalled stream closed")
+
+    def __getattr__(self, name):
+        return getattr(self._sock, name)
+
+
+class _StallOnceClient(SyncerClient):
+    """Data stream 1 of the first connection group stalls once ``armed``."""
+
+    stalled_generation: int | None = None
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.armed = threading.Event()
+
+    def _send_loop(self, gen, sock, q, meter):
+        if meter is self._meters[1] and self.stalled_generation in (None, gen):
+            self.stalled_generation = gen
+            sock = _StallingSocket(sock, self.armed)
+        return super()._send_loop(gen, sock, q, meter)
+
+
+def _sweep_until_final(client: SyncerClient, sweeps: int):
+    """Answer every PULL (also PULLs the syncer replays after a redial) with
+    the deterministic delta of its (fragment, global_step) until FINAL."""
+    answered: set[tuple[int, int, int]] = set()
+    deadline = time.monotonic() + 60
+    while not client.finalizing.is_set():
+        assert time.monotonic() < deadline, "sweeps did not finish"
+        client.check_health()
+        for permit in client.drain_pulls():
+            key = (client.connection_generation, permit.global_step, permit.round_attempt)
+            if key in answered:
+                continue
+            fid = permit.fragment_id
+            sweep = (permit.global_step - 1) // FRAGMENTS + 1
+            assert permit.global_step == (sweep - 1) * FRAGMENTS + fid + 1 and sweep <= sweeps
+            base = 0 if sweep == 1 else permit.global_step - FRAGMENTS
+            delta = [0.5 + fid + 0.03125 * sweep + 0.001 * i for i in range(NUMEL)]
+            client.push_fragment(fid, permit.global_step, permit.round_attempt,
+                                 base, sweep, 1, 7, _f32(delta))
+            answered.add(key)
+        time.sleep(0.01)
+    return client.wait_for_final_fragments(timeout=30)
+
+
+@pytest.mark.parametrize("schedule", ["rr", "adaptive"])
+def test_stalled_stream_redials_and_the_replayed_push_keeps_the_exact_result(
+        syncer_binary, tmp_path, schedule):
+    """E3b: a data stream that stops moving bytes (C32 first run) is dropped
+    after the stall timeout; the syncer replays its PULL on the new group and
+    the island pushes that fragment again, so versions and finals match a run
+    without the stall bit for bit."""
+    exact = _run_sweeps(syncer_binary, tmp_path, STREAMED, sweeps=3)
+    stall_dir = tmp_path / "stall"
+    stall_dir.mkdir()
+    process, port, profile_hash = _start_syncer(syncer_binary, stall_dir, *STREAMED, total_steps=3)
+    client = _StallOnceClient(("127.0.0.1", port), 0, _layout(), dtype=DTYPE_F32, num_streams=2,
+                              connect_timeout=10, max_reconnects=5, finalization_timeout=20,
+                              syncer_profile_hash=bytes.fromhex(profile_hash),
+                              stream_schedule=schedule, stream_stall_timeout=1.0)
+    try:
+        client.start()
+        for fid in range(FRAGMENTS):
+            client.send_init(fid, _f32([float(fid) + 0.125 * i for i in range(NUMEL)]))
+        # Stall only the pushes: INIT is sent once and not replayed after a redial.
+        _wait(lambda: client.send_progress().queued_chunks == 0 and client._bcasts.qsize() >= FRAGMENTS,
+              "initial broadcast")
+        client.armed.set()
+        manifest, finals = _sweep_until_final(client, sweeps=3)
+        result = {f.fragment_id: bytes(f.data) for f in finals}
+        client.acknowledge_finalization(manifest)
+        assert process.wait(timeout=15) == 0
+        progress = client.send_progress()
+    finally:
+        client.close()
+        _stop(process)
+    assert progress.stalls >= 1 and progress.reconnects >= 1
+    assert list(manifest.versions) == exact[1]
+    assert result == exact[2]

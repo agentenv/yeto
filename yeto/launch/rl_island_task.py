@@ -51,6 +51,20 @@ def submitted_unix() -> float:
     return time.time()
 
 
+def _wan_transport_flags(args) -> str:
+    """S26 E3b island transport options; emitted only when not the default."""
+    flags = ""
+    schedule = getattr(args, "wan_stream_schedule", "rr")
+    if schedule != "rr":
+        flags += f" --wan-stream-schedule {schedule}"
+    stall = float(getattr(args, "wan_stall_timeout", 0.0) or 0.0)
+    if stall < 0:
+        raise ValueError("--wan-stall-timeout must be >= 0 (0 = off)")
+    if stall > 0:
+        flags += f" --wan-stall-timeout {stall!r}"
+    return flags
+
+
 def _rl_trainable_island_flags(args, learner_id: int, num_learners: int) -> str:
     """LoRA rank/targets; for the full-parameter preset the sweep identity (the
     probed layout hash, the frozen roster size and the syncer profile hash);
@@ -166,7 +180,8 @@ def make_miles_island_task(
            if float(getattr(args, "rl_optimizer_offload_fraction", 0.0) or 0.0) > 0 else "")
         + f" --seed {args.seed}"
         f" --wan-streams {args.wan_streams}"
-        " --miles-root ~/miles"
+        + _wan_transport_flags(args)
+        + " --miles-root ~/miles"
     )
     if getattr(args, "wandb", False):
         flags += " --wandb"

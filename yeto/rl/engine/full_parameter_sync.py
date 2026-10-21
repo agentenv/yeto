@@ -33,9 +33,10 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from yeto.protocol import PartialMessageGenerationLost
 from yeto.rl.elastic_client import LeaveReason
+from yeto.wan_streams import upload_window
 
 from .driver import SyncBoundary, SyncStart
-from .sync_timing import SyncTiming, unix_now
+from .sync_timing import SyncTiming, unix_now, upload_fields
 
 if TYPE_CHECKING:
     from .driver import IslandDriver
@@ -529,6 +530,8 @@ class FullParameterSync:
         self._timing = SyncTiming(None, None)  # L5.6, set by each boundary
         # Overlap: fragment versions before the sweep still in flight.
         self._pending_sweep: tuple[int, ...] | None = None
+        # S26 E3b: actor data-stream counters at the previous boundary.
+        self._upload_before: tuple | None = None
 
     @property
     def actor(self) -> RoleStream:
@@ -537,6 +540,7 @@ class FullParameterSync:
     def start(self, driver: IslandDriver) -> SyncStart:
         self._driver = driver
         self.run(self.pairing.gather_roles(lambda role, stream: stream.initialize(self.groups[role])))
+        self._upload_before = self._stream_snapshots()
         return SyncStart(state=self.actor.resident_state(0), rollout_id=0)
 
     def boundary(self, driver: IslandDriver, *, rollout_id: int, stats: Any) -> SyncBoundary:
@@ -554,9 +558,28 @@ class FullParameterSync:
                 "sync/global_policy_hash": state.policy_tensor_hash(),
                 "sync/inflight_pairs": len(self.pairing.inflight),
                 **self._timing.fields(),
+                **self._upload_fields(),
             },
         )
         return SyncBoundary(state=state, stop=self.terminal)
+
+    def _stream_snapshots(self) -> tuple | None:
+        snapshots = getattr(getattr(self.actor, "client", None), "stream_snapshots", None)
+        return snapshots() if callable(snapshots) else None
+
+    def _upload_fields(self) -> dict[str, object]:
+        """Actor upload rates of this boundary and the wait after the upload."""
+        after = self._stream_snapshots()
+        before, self._upload_before = self._upload_before, after
+        if after is None or before is None:
+            return {}
+        client = self.actor.client
+        return upload_fields(
+            upload_window(before, after),
+            drained_ts=client.upload_drained_at,
+            timing=self._timing,
+            stalls=client.send_progress().stalls,
+        )
 
     async def _boundary(self, rollout_id: int) -> bool:
         if self.pairing.profile.overlap:

@@ -41,6 +41,7 @@ from .downlink import HEADER_LEN as DOWNLINK_HEADER_LEN
 from .downlink import DownlinkAnchors, DownlinkChunkSink
 from .downlink import tensor_nbytes as downlink_tensor_nbytes
 from .fragments import MERGE_ISO, FragmentLayout
+from .wan_streams import STREAM_SCHEDULES, StreamMeter, StreamSnapshot, StreamStalledError, pick_stream
 
 MAGIC = 0xD170C0DE
 PROTOCOL_VERSION = 4
@@ -571,6 +572,7 @@ class SendProgress:
     queued_chunks: int
     reconnects: int
     connected: bool
+    stalls: int = 0
 
 
 @dataclass
@@ -594,6 +596,10 @@ class SyncerClient:
     forever); once exhausted, check_health raises.
     """
 
+    # Transport defaults (S26 E3b); __init__ overrides them per client.
+    stream_schedule: str = "rr"
+    stream_stall_timeout: float | None = None
+
     def __init__(
         self,
         addr: tuple[str, int],
@@ -609,7 +615,13 @@ class SyncerClient:
         hmac_key: bytes | None = None,
         compat_group: str | None = None,
         push_i8_block: int = DEFAULT_I8_BLOCK,
+        stream_schedule: str = "rr",
+        stream_stall_timeout: float | None = None,
     ):
+        if stream_schedule not in STREAM_SCHEDULES:
+            raise ValueError(f"stream_schedule must be one of {STREAM_SCHEDULES}, got {stream_schedule!r}")
+        if stream_stall_timeout is not None and not stream_stall_timeout > 0:
+            raise ValueError("stream_stall_timeout must be positive or None")
         if not 0 <= learner_id <= 0xFFFF_FFFF:
             raise ValueError(f"learner_id must fit u32, got {learner_id}")
         if not valid_session_dtype(dtype):
@@ -638,6 +650,15 @@ class SyncerClient:
         self._downlink = DownlinkAnchors(layout.num_fragments) if bcast_delta(dtype) else None
         self._bcast_prefix = 12 + (DOWNLINK_HEADER_LEN if self._downlink is not None else 0)
         self.num_streams = num_streams
+        # S26 E3b: chunk placement over the data streams and the per-stream
+        # no-progress timeout (None = off, the historical behaviour).
+        self.stream_schedule = stream_schedule
+        self.stream_stall_timeout = stream_stall_timeout
+        # Index 0 is the control socket; the meters outlive connection groups
+        # so their counters are cumulative for the whole session.
+        self._meters = [StreamMeter() for _ in range(num_streams + 1)]
+        self._upload_drained_at: float | None = None
+        self._stalls = 0
         self.session_contract_hash = session_contract_hash
         self.syncer_profile_hash = syncer_profile_hash
         # secret-handling-hardening: HELLO carries an HMAC when the island has
@@ -682,6 +703,7 @@ class SyncerClient:
             | _StreamedReassembly,
         ] = {}
         self._reasm_lock = threading.Lock()
+        self._reasm_touched: dict[int, float] = {}  # msg_id -> last chunk (monotonic)
         self._inbound_chunk_sink: object | None = None
         self._msg_id = itertools.count()
         self._rr = itertools.count()
@@ -702,6 +724,7 @@ class SyncerClient:
         self._bytes_sent_lock = threading.Lock()
         self._reset_bcasts_on_reconnect = False
         self._supervisor: threading.Thread | None = None
+        self._watchdog: threading.Thread | None = None
 
     # -- lifecycle -------------------------------------------------------------
 
@@ -710,6 +733,8 @@ class SyncerClient:
         sock.settimeout(None)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         enable_tcp_keepalive(sock)
+        if self.stream_stall_timeout is not None:
+            set_tcp_user_timeout(sock, self.stream_stall_timeout)
         return sock
 
     def _connect_one(self) -> socket.socket:
@@ -740,6 +765,9 @@ class SyncerClient:
         self._connect_group(patient=True)
         self._supervisor = threading.Thread(target=self._supervise, name="yeto-supervisor", daemon=True)
         self._supervisor.start()
+        if self.stream_stall_timeout is not None:
+            self._watchdog = threading.Thread(target=self._watch_stalls, name="yeto-stall-watchdog", daemon=True)
+            self._watchdog.start()
 
     def _connect_group(self, patient: bool) -> None:
         """Dial control + data sockets, send HELLO/DATA_HELLO, start workers.
@@ -797,7 +825,7 @@ class SyncerClient:
                 q: queue.Queue[_Outbound | None] = queue.Queue(maxsize=256)
                 self._queues.append(q)
                 ts = threading.Thread(
-                    target=self._send_loop, args=(gen, s, q), name=f"yeto-send-{i}", daemon=True
+                    target=self._send_loop, args=(gen, s, q, self._meters[i]), name=f"yeto-send-{i}", daemon=True
                 )
                 tr = threading.Thread(target=self._recv_loop, args=(gen, s), name=f"yeto-recv-{i}", daemon=True)
                 self._threads += [ts, tr]
@@ -822,6 +850,8 @@ class SyncerClient:
                 pass
         for s in socks:
             _close_socket(s)
+        for meter in self._meters:
+            meter.drop_pending()
         self._clear_partial_reassemblies()
         self._drain(self._pulls)  # stale pull requests; answering them is pointless
         with self._lock:
@@ -914,7 +944,20 @@ class SyncerClient:
             queued_chunks=queued,
             reconnects=self._reconnects_used,
             connected=connected,
+            stalls=self._stalls,
         )
+
+    def stream_snapshots(self) -> tuple[StreamSnapshot, ...]:
+        """Cumulative counters of each data stream (control stream excluded;
+        with ``num_streams == 0`` the control stream carries the data)."""
+        meters = self._meters[1:] if self.num_streams else self._meters[:1]
+        return tuple(meter.snapshot() for meter in meters)
+
+    @property
+    def upload_drained_at(self) -> float | None:
+        """Unix time when the data streams last became idle with nothing
+        queued, i.e. when this island's latest upload left the host."""
+        return self._upload_drained_at
 
     # -- learner-facing API ------------------------------------------------------
 
@@ -1279,6 +1322,8 @@ class SyncerClient:
                 if gen is not None and gen != self._gen:
                     return False
                 q = self._queues[stream]
+            meter = self._meters[stream]
+            meter.enqueued(len(data))  # before put: the sender may drain it at once
             try:
                 q.put(
                     _Outbound(data, sent),
@@ -1286,7 +1331,15 @@ class SyncerClient:
                 )  # bounded wait, then re-check the group
                 return True
             except queue.Full:
+                meter.enqueued(-len(data))
                 continue
+
+    def _next_data_stream(self) -> int:
+        """Socket index (1-based; 0 only without data streams) for the next
+        CHUNK envelope, by ``stream_schedule``."""
+        if self.num_streams == 0:
+            return 0
+        return 1 + pick_stream(self.stream_schedule, self._meters[1:], next(self._rr))
 
     def _send_large(self, msg_type: int, payload: bytes) -> None:
         inner = self._frame(msg_type, payload)
@@ -1302,7 +1355,7 @@ class SyncerClient:
         for offset in range(0, total, CHUNK_SIZE):
             chunk = inner[offset : offset + CHUNK_SIZE]
             envelope = self._frame(MSG_CHUNK, _CHUNK_HEAD.pack(msg_id, total, offset) + chunk)
-            stream = 1 + next(self._rr) % self.num_streams
+            stream = self._next_data_stream()
             if not self._enqueue(stream, envelope, gen=gen):
                 return  # group died mid-message; drop the remainder
 
@@ -1423,11 +1476,7 @@ class SyncerClient:
                         before_last_enqueue = None
                         callback()
 
-                stream = (
-                    0
-                    if self.num_streams == 0
-                    else 1 + next(self._rr) % self.num_streams
-                )
+                stream = self._next_data_stream()
                 if not self._enqueue(stream, envelope, gen=gen):
                     if enqueued_chunks:
                         raise PartialMessageGenerationLost(
@@ -1487,19 +1536,84 @@ class SyncerClient:
         with self._final_cond:
             self._final_cond.notify_all()
 
-    def _send_loop(self, gen: int, sock: socket.socket, q: queue.Queue) -> None:
+    def _send_loop(
+        self,
+        gen: int,
+        sock: socket.socket,
+        q: queue.Queue,
+        meter: StreamMeter | None = None,
+    ) -> None:
+        if meter is None:  # a sender outside a connection group (tests)
+            meter = StreamMeter()
         try:
             while True:
                 item = q.get()
                 if item is None:
                     return
-                sock.sendall(item.data)
+                # send() instead of sendall() so the meter sees byte progress
+                # inside one 4 MiB envelope (stall watchdog, per-stream rate).
+                view = memoryview(item.data)
+                meter.begin()
+                try:
+                    while view:
+                        sent = sock.send(view)
+                        meter.progress(sent)
+                        view = view[sent:]
+                finally:
+                    meter.end()
+                    view.release()
                 with self._bytes_sent_lock:
                     self._bytes_sent += len(item.data)
+                if all(m.idle for m in self._meters):
+                    self._upload_drained_at = time.time()
                 if item.sent is not None:
                     item.sent.set()
         except BaseException as e:
             self._socket_failed(gen, e)
+
+    def _stalled_stream(self) -> str | None:
+        """Describe the first stream without progress for the stall timeout."""
+        limit = self.stream_stall_timeout
+        now = time.monotonic()
+        for index, meter in enumerate(self._meters):
+            idle_for = meter.stalled_for(now)
+            if idle_for > limit:
+                return f"outbound stream {index} made no progress for {idle_for:.0f}s"
+        with self._reasm_lock:
+            touched = dict(self._reasm_touched)
+        for msg_id, last in touched.items():
+            if now - last > limit:
+                return f"inbound message {msg_id} got no chunk for {now - last:.0f}s"
+        return None
+
+    def _watch_stalls(self) -> None:
+        """Fail the live group when one stream stops moving bytes.
+
+        A stalled TCP stream can sit for many minutes before the kernel gives
+        up (C32: 900 s with every socket still open). The failure goes
+        through the normal reconnect path, so the syncer replays its PULLs
+        and the island pushes the interrupted fragment again."""
+        period = min(1.0, self.stream_stall_timeout / 4)
+        while not self._closed.wait(period):
+            if self.shutdown.is_set():
+                return
+            with self._lock:
+                gen = self._gen
+                live = self._connected.is_set()
+            if not live:
+                continue
+            reason = self._stalled_stream()
+            if reason is None:
+                continue
+            with self._lock:
+                if gen != self._gen:
+                    continue
+                self._stalls += 1
+                socks = list(self._socks)
+            _connect_log(f"{reason} (learner {self.learner_id}); dropping the connection group")
+            self._socket_failed(gen, StreamStalledError(reason))
+            for sock in socks:  # unblock senders stuck in send()
+                _close_socket(sock)
 
     def _recv_loop(self, gen: int, sock: socket.socket) -> None:
         try:
@@ -1569,6 +1683,7 @@ class SyncerClient:
                         sink=sink,
                         transaction=sink.begin_message(msg_id, total),
                     )
+            self._reasm_touched[msg_id] = time.monotonic()
             partial = self._reasm[msg_id]
             if isinstance(partial, _StreamedReassembly):
                 if partial.total != total:
@@ -1588,6 +1703,7 @@ class SyncerClient:
                     raise
                 if completed is not None:
                     self._reasm.pop(msg_id, None)
+                    self._reasm_touched.pop(msg_id, None)
                 return completed
             buf, filled, ranges = partial
             if len(buf) != total:
@@ -1602,6 +1718,7 @@ class SyncerClient:
             if filled[0] != total:
                 raise ValueError("chunk byte count exceeds frame length")
             del self._reasm[msg_id]
+            self._reasm_touched.pop(msg_id, None)
         magic, msg_type, length = _HEADER.unpack_from(buf)
         if magic != MAGIC or length != total - _HEADER.size:
             raise ValueError("corrupt reassembled frame")
@@ -1769,6 +1886,7 @@ class SyncerClient:
         with self._reasm_lock:
             partials = list(self._reasm.values())
             self._reasm.clear()
+            self._reasm_touched.clear()
         for partial in partials:
             if isinstance(partial, _StreamedReassembly):
                 try:
@@ -2041,6 +2159,14 @@ def enable_tcp_keepalive(sock: socket.socket) -> None:
         option = getattr(socket, name, None)
         if option is not None:  # Linux; other platforms keep their defaults
             sock.setsockopt(socket.IPPROTO_TCP, option, value)
+
+
+def set_tcp_user_timeout(sock: socket.socket, seconds: float) -> None:
+    """Bound how long unacknowledged data may sit before the kernel resets
+    the connection (Linux TCP_USER_TIMEOUT); other platforms keep defaults."""
+    option = getattr(socket, "TCP_USER_TIMEOUT", None)
+    if option is not None:
+        sock.setsockopt(socket.IPPROTO_TCP, option, max(1, int(seconds * 1000)))
 
 
 def _close_socket(sock: socket.socket) -> None:
