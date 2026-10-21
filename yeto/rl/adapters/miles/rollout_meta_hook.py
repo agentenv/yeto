@@ -35,7 +35,9 @@ import math
 import os
 import statistics
 import tempfile
+import threading
 from collections.abc import Iterable, Mapping, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -151,7 +153,11 @@ def record_trained_groups(args: Any, data: Sequence[Sequence[Any]]) -> None:
     to its buffer (``sglang_rollout.py:505-510``); only samples aborted under
     ``--partial-rollout`` go back.
     """
+    with one_sink_view():
+        _record_trained_groups(args, data)
 
+
+def _record_trained_groups(args: Any, data: Sequence[Sequence[Any]]) -> None:
     import time
 
     from yeto.rl.algos.sample_filters import apply_sample_filters
@@ -811,9 +817,7 @@ def put_to_sink(payload: dict[str, Any], sink: str | None = None) -> None:
         os.replace(tmp, directory / name)
         return
     if kind == "ray":
-        import ray
-
-        ray.get(ray.get_actor(target or DEFAULT_SINK_ACTOR).put.remote(encoded))
+        _sink_call(target, "put", encoded)
         return
     raise ValueError(f"unknown rollout metadata sink {sink!r}")
 
@@ -825,9 +829,50 @@ def _sink_target(sink: str | None) -> tuple[str, str]:
     return kind, target
 
 
+# E1: inside one hook run (:func:`one_sink_view`) each sink value is read once and
+# the sink actor is looked up once (ray.get_actor is a GCS round trip per call)
+_SINK_VIEW = threading.local()
+
+
+def _sink_call(target: str, actor_method: str, *call_args: Any) -> Any:
+    import ray
+
+    name = target or DEFAULT_SINK_ACTOR
+    memo = getattr(_SINK_VIEW, "memo", None)
+    actor = None if memo is None else memo.get(("actor", name))
+    if actor is None:
+        actor = ray.get_actor(name)
+        if memo is not None:
+            memo[("actor", name)] = actor
+    return ray.get(getattr(actor, actor_method).remote(*call_args))
+
+
+@contextmanager
+def one_sink_view():
+    """Within this block every sink value (policy token, published map, policy-age
+    limit) is read at most once per (sink, value) and reused (E1: the metadata
+    hook read the limit from the sink actor once per sample, ~70 actor calls a
+    round). A value another process writes while a block runs is seen from the
+    next block on (before, two reads inside one hook run could see two values;
+    now one run sees one view). A write from this thread inside the block drops
+    that value from the view. The sink actor handle is looked up once per block.
+    Nested blocks share the outer view."""
+    if getattr(_SINK_VIEW, "memo", None) is not None:
+        yield
+        return
+    _SINK_VIEW.memo = {}
+    try:
+        yield
+    finally:
+        _SINK_VIEW.memo = None
+
+
 def _sink_write(sink: str | None, file_name: str, text: str, actor_method: str, value: Any) -> None:
     """Driver side: store one value (atomic file under ``dir:``, actor call under ``ray:``)."""
     kind, target = _sink_target(sink)
+    memo = getattr(_SINK_VIEW, "memo", None)
+    if memo is not None:
+        memo.pop((kind, target, file_name), None)
     if kind == "dir":
         directory = Path(target)
         directory.mkdir(parents=True, exist_ok=True)
@@ -836,21 +881,24 @@ def _sink_write(sink: str | None, file_name: str, text: str, actor_method: str, 
             handle.write(text)
         os.replace(tmp, directory / file_name)
         return
-    import ray
-
-    actor = ray.get_actor(target or DEFAULT_SINK_ACTOR)
-    ray.get(getattr(actor, actor_method).remote(value))
+    _sink_call(target, actor_method, value)
 
 
 def _sink_read(sink: str | None, file_name: str, actor_method: str) -> Any:
     """Rollout side: the stored value (file text under ``dir:``), None when unset."""
     kind, target = _sink_target(sink)
+    memo = getattr(_SINK_VIEW, "memo", None)
+    key = (kind, target, file_name)
+    if memo is not None and key in memo:
+        return memo[key]
     if kind == "dir":
         path = Path(target) / file_name
-        return path.read_text(encoding="utf-8") if path.exists() else None
-    import ray
-
-    return ray.get(getattr(ray.get_actor(target or DEFAULT_SINK_ACTOR), actor_method).remote())
+        value = path.read_text(encoding="utf-8") if path.exists() else None
+    else:
+        value = _sink_call(target, actor_method)
+    if memo is not None:
+        memo[key] = value
+    return value
 
 
 def put_policy_token(token: str, sink: str | None = None) -> None:
@@ -930,7 +978,11 @@ def policy_buffer_filter(args: Any, _rollout_id: Any, buffer: list, num_samples:
     Groups from any other policy (or incomplete ones) are dropped from the
     buffer, exactly as legacy filtered its completed-group queue.
     """
+    with one_sink_view():
+        return _policy_buffer_filter(args, _rollout_id, buffer, num_samples)
 
+
+def _policy_buffer_filter(args: Any, _rollout_id: Any, buffer: list, num_samples: int) -> list:
     token = current_policy_token()
     limit = _carry.max_policy_age(args)
     if limit > 0:
@@ -1035,6 +1087,12 @@ def extract_rollout_metadata(
     """``--rollout-all-samples-process-path`` hook (under fully_async: called by
     :func:`record_trained_groups` with the trained groups)."""
 
+    with one_sink_view():
+        _extract_rollout_metadata(args, all_samples, data_source, round_counts=round_counts)
+
+
+def _extract_rollout_metadata(args: Any, all_samples: Any, data_source: Any, *,
+                              round_counts: Mapping[str, Any] | None) -> None:
     try:
         # fully_async (round_counts): the trainer is waiting for this batch; the
         # cross-version estimate is read only after its train step (E1)
