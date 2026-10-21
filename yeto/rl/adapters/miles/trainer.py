@@ -868,6 +868,9 @@ class MilesTrainerGroup:
             if started:
                 summaries += [dict(s) for s in self._run(
                     self._actor.run_plugin(FINISH_CUT_SHARD, {"cut_id": cut_id}))]
+        # E1: where each rank's background shard was written (writer process, or this
+        # thread after a writer-process failure); reported with rl_cut_committed
+        self.last_cut_writer = [dict(s["writer"]) for s in summaries if isinstance(s.get("writer"), Mapping)]
         problems: list[str] = []
         refused = [f"[{s.get('refusal_kind', 'refused')}] {s['refused']}" for s in summaries if "refused" in s]
         if refused:

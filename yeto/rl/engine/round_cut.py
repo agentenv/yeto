@@ -437,6 +437,7 @@ class RoundCutCheckpoint:
         if callable(emit):
             emit("rl_cut_committed", **{k: result.get(k) for k in (
                 "cut_id", "rollout_id", "ok", "finish_s", "commit_s", "pruned", "seq", "cut_bytes")},
+                **({"writer": result["writer"]} if result.get("writer") else {}),
                 **({"error": result["error"]} if result.get("error") else {}))
 
     def _complete_deferred(self, deferred: dict[str, Any]) -> dict[str, Any]:
@@ -460,8 +461,9 @@ class RoundCutCheckpoint:
             return {"cut_id": info["cut_id"], "rollout_id": deferred["rollout_id"], "ok": False,
                     "error": repr(error)[:2000]}
         self._commit_in_background(deferred, commit_manifest)
+        writer = getattr(self.trainer, "last_cut_writer", None)
         return {"cut_id": info["cut_id"], "rollout_id": deferred["rollout_id"],
-                "collect_s": round(time.monotonic() - started, 3)}
+                "collect_s": round(time.monotonic() - started, 3), **({"writer": writer} if writer else {})}
 
     def _commit_in_background(self, deferred: dict[str, Any], commit_manifest: Any) -> None:
         """E1: off the round's critical path: the cut manifest (``commit_manifest``, None

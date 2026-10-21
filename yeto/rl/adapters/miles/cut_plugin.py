@@ -732,9 +732,10 @@ def save_cut_shard(actor: Any, *, directory: str, cut_id: str, background: bool 
     errored on any ``run_plugin`` exception (GPU run 2026-09-30, C1), which
     would turn a clean "no cut" into a dead trainer.
 
-    ``background`` (E1): take the state now (CPU copies, at this step boundary) and
-    write, hash and summarize it in a thread of this rank, so training goes on;
-    returns ``{"pending": cut_id}``. :func:`finish_cut_shard` returns the summary.
+    ``background`` (E1): take the state now (at this step boundary) and write, hash
+    and summarize it off the training thread (:func:`_write_background`), so
+    training goes on; returns ``{"pending": cut_id}``. :func:`finish_cut_shard`
+    returns the summary.
     """
     try:
         with trainer_resident(actor):
@@ -748,13 +749,14 @@ def save_cut_shard(actor: Any, *, directory: str, cut_id: str, background: bool 
     if cut_id in _PENDING_SHARDS:
         return {REFUSED: f"cut {cut_id} is already being written", REFUSAL_KIND: "refused"}
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"yeto-cut-{cut_id}")
-    _PENDING_SHARDS[cut_id] = (pool, pool.submit(_write_refusing, captured, directory=directory, cut_id=cut_id))
+    _PENDING_SHARDS[cut_id] = (pool, pool.submit(_write_background, captured, directory=directory, cut_id=cut_id))
     pool.shutdown(wait=False)
     return {"pending": cut_id, "coord": dict(captured["coord"]), "capture": dict(captured["capture"])}
 
 
 def finish_cut_shard(actor: Any, *, cut_id: str) -> dict[str, Any]:
-    """The summary of a background :func:`save_cut_shard` (waits for its thread)."""
+    """The summary of a background :func:`save_cut_shard` (waits for its thread).
+    Its ``writer`` key says where the shard was serialized and hashed."""
     pending = _PENDING_SHARDS.pop(cut_id, None)
     if pending is None:
         return {REFUSED: f"no background write of cut {cut_id} on this rank", REFUSAL_KIND: "failed_before_write"}
@@ -766,9 +768,102 @@ def finish_cut_shard(actor: Any, *, cut_id: str) -> dict[str, Any]:
 
 def _write_refusing(captured: dict[str, Any], *, directory: str, cut_id: str) -> dict[str, Any]:
     try:
-        return _write(_on_host(captured), directory=directory, cut_id=cut_id)
+        return _write(_with_resume(_on_host(captured)), directory=directory, cut_id=cut_id)
     except CutPluginError as error:
         return {REFUSED: str(error), REFUSAL_KIND: "refused"}
+
+
+# E1 phase 5: a background cut is serialized (torch.save), hashed and committed in a
+# writer process of this rank, not in a thread of the trainer process: the writer
+# thread competed with training (each trained token about 8 % slower while it ran,
+# GPU runs e1g/e1h). The trainer copies the state into shared memory and hands it
+# over; the writer process writes the same file and summary. "0" keeps the thread.
+WRITER_PROCESS_ENV = "YETO_RL_CUT_WRITER_PROCESS"
+_WRITER: list[Any] = []  # this rank's writer process pool (one worker), started lazily
+
+
+def _writer_enabled() -> bool:
+    return os.environ.get(WRITER_PROCESS_ENV, "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _writer_init() -> None:
+    """Writer process start: below training in CPU priority, one intra-op thread."""
+    import torch
+
+    try:
+        os.nice(10)
+    except OSError:
+        pass
+    torch.set_num_threads(1)
+
+
+def _writer_pool() -> Any:
+    if not _WRITER:
+        import multiprocessing
+        from concurrent.futures import ProcessPoolExecutor
+
+        import torch.multiprocessing  # noqa: F401 - registers the shared-memory tensor pickling
+
+        # spawn: the trainer has CUDA initialized (fork would copy it); the child never touches CUDA
+        _WRITER.append(ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn"),
+                                           initializer=_writer_init))
+        import atexit
+
+        atexit.register(_drop_writer_pool)  # stop it before interpreter teardown
+    return _WRITER[0]
+
+
+def _drop_writer_pool() -> None:
+    if _WRITER:
+        _WRITER.pop().shutdown(wait=False, cancel_futures=True)
+
+
+def _remove_partial(directory: str, coord: Mapping[str, int]) -> None:
+    """Remove what a dead writer process left of this rank's shard (no summary was
+    returned, so no manifest names it)."""
+    final = os.path.join(directory, shard_name(coord))
+    for path in (final + ".tmp", final):
+        if os.path.exists(path):
+            os.remove(path)
+
+
+def _write_background(captured: dict[str, Any], *, directory: str, cut_id: str) -> dict[str, Any]:
+    """Thread of the trainer process: device copies to shared host memory, then the
+    writer process serializes, hashes and summarizes them. When the writer process
+    fails (it died, the state did not pickle, ...) this thread writes the same shard
+    itself and the summary's ``writer`` says so (``mode=thread``, ``fallback``)."""
+    try:
+        host = _share(_on_host(captured))
+    except CutPluginError as error:
+        return {REFUSED: str(error), REFUSAL_KIND: "refused"}
+    fallback = "disabled"
+    if _writer_enabled():
+        try:
+            result = _writer_pool().submit(_write_refusing, host, directory=directory, cut_id=cut_id).result()
+            return {**result, "writer": {"mode": "process"}}
+        except Exception as error:  # noqa: BLE001 - fall back to this thread, say why
+            _drop_writer_pool()
+            fallback = f"writer process failed: {error!r}"[:500]
+            print("yeto cut writer fallback " + repr({"cut_id": cut_id, "reason": fallback}), flush=True)
+            _remove_partial(directory, host["coord"])
+    return {**_write_refusing(host, directory=directory, cut_id=cut_id),
+            "writer": {"mode": "thread", "fallback": fallback}}
+
+
+def _share(value: Any) -> Any:
+    """``value`` with every CPU tensor moved into shared memory (in place), so the
+    writer process maps it instead of receiving a copy through the pipe."""
+    import torch
+
+    if isinstance(value, torch.Tensor):
+        return value.share_memory_() if value.device.type == "cpu" else value
+    if isinstance(value, dict):
+        return {k: _share(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_share(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_share(v) for v in value)
+    return value
 
 
 def _capture(actor: Any, *, cut_id: str, device_copy: bool = False) -> dict[str, Any]:
@@ -826,16 +921,23 @@ def _capture(actor: Any, *, cut_id: str, device_copy: bool = False) -> dict[str,
 
 
 def _on_host(captured: dict[str, Any]) -> dict[str, Any]:
-    """``captured`` with its device copies on the host and the resume state it
-    defers (runs in the writer thread). Host captures are returned as they are."""
-    if "resume" in captured:
-        return captured
+    """``captured`` with its device copies on the host (runs off the training
+    thread). Host captures are returned as they are."""
     ready = captured.get("ready")
+    if ready is None and "resume" in captured:
+        return captured
     if ready is not None:
         ready.synchronize()  # the device copies are complete (whatever stream training uses)
-    snap = to_host(captured["snap"])
-    return {**captured, "snap": snap, "ready": None,
-            "resume": resume_rank_state(None, snap["optimizer_named"], **captured["resume_inputs"])}
+    return {**captured, "snap": to_host(captured["snap"]), "ready": None}
+
+
+def _with_resume(captured: dict[str, Any]) -> dict[str, Any]:
+    """``captured`` with the N7.6 resume state a device capture defers (computed from
+    the host snapshot and the step-boundary resume inputs)."""
+    if "resume" in captured:
+        return captured
+    return {**captured, "resume": resume_rank_state(None, captured["snap"]["optimizer_named"],
+                                                    **captured["resume_inputs"])}
 
 
 def _write(captured: dict[str, Any], *, directory: str, cut_id: str) -> dict[str, Any]:
@@ -857,13 +959,13 @@ def _write(captured: dict[str, Any], *, directory: str, cut_id: str) -> dict[str
             import io
 
             buffer = io.BytesIO()
-            torch.save(to_safe(shard), buffer)
+            torch.save(_interned(to_safe(shard)), buffer)
             data = buffer.getvalue()
             fh.write(data[: len(data) // 2])
             fh.flush()
             os.fsync(fh.fileno())
             cut_injection.kill_now(f"save_cut shard {name} half written")
-        torch.save(to_safe(shard), fh)
+        torch.save(_interned(to_safe(shard)), fh)
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, final)
@@ -886,6 +988,25 @@ def _write(captured: dict[str, Any], *, directory: str, cut_id: str) -> dict[str
         "optimizer_names": sorted((snap["optimizer_named"] or {}).get("entries", {})),
         "resume": captured["resume"],
     }
+
+
+def _interned(value: Any) -> Any:
+    """``value`` with every string interned. Pickle writes a string once per object
+    and back-references repeats of the same object; interning makes that depend on
+    the values only, so a shard serialized in the writer process (whose strings
+    arrived unpickled, as separate objects) has the same bytes as one serialized in
+    the trainer (E1 phase 5)."""
+    import sys
+
+    if isinstance(value, str):
+        return sys.intern(value)
+    if isinstance(value, dict):
+        return {_interned(k): _interned(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_interned(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_interned(v) for v in value)
+    return value
 
 
 def _load_verified(directory: str, entry: Mapping[str, Any], cut_id: str) -> dict[str, Any]:

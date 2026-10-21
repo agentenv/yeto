@@ -632,6 +632,8 @@ def test_prepared_cut_is_written_in_the_background_without_waking_the_trainer(tm
     done = cp.join_commit(driver)
     assert done["ok"] is True and done["cut_id"] == info["cut_id"] and trainer.calls[-1] == "collect_cut"
     assert driver.events[-1][0] == "rl_cut_committed" and driver.events[-1][1]["ok"] is True
+    # E1: the event says where the shard was written (the rank's writer process)
+    assert driver.events[-1][1]["writer"] == [{"mode": "process"}]
     assert cp.pointer()["cut_id"] == info["cut_id"]
     assert rs.read_latest(store.root)["cut_id"] == info["cut_id"]
     assert _resume_fresh(tmp_path, store, rank)["next_rollout_id"] == 2

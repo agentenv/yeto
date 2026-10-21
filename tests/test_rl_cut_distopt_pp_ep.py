@@ -414,7 +414,10 @@ def test_background_device_capture_writes_the_inline_shard(tmp_path, layout, mon
             leaf.train(2000 + 10 * r + k)
         rank.opt_param_scheduler.num_steps = 16
         device.append(cp.finish_cut_shard(rank, cut_id="c1"))
+    assert [d.pop("writer") for d in device] == [{"mode": "process"}] * len(ranks)
     assert device == inline
+    for name in sorted(p.name for p in (tmp_path / "inline").iterdir()):
+        assert (tmp_path / "device" / name).read_bytes() == (tmp_path / "inline" / name).read_bytes()
 
 
 def test_background_capture_falls_back_to_the_host_and_says_why(tmp_path, monkeypatch):
@@ -426,7 +429,7 @@ def test_background_capture_falls_back_to_the_host_and_says_why(tmp_path, monkey
     monkeypatch.setattr(cp, "_device_copy_plan", lambda actor, named: (False, "low_device_memory(free=1,need=2)"))
     started = cp.save_cut_shard(rank, directory=str(tmp_path / "low"), cut_id="c1", background=True)
     assert started["capture"] == {"mode": "host", "reason": "low_device_memory(free=1,need=2)"}
-    assert cp.finish_cut_shard(rank, cut_id="c1") == inline
+    assert _without_writer(cp.finish_cut_shard(rank, cut_id="c1")) == inline
 
     real = cp._snapshot
 
@@ -440,7 +443,75 @@ def test_background_capture_falls_back_to_the_host_and_says_why(tmp_path, monkey
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
     started = cp.save_cut_shard(rank, directory=str(tmp_path / "oom"), cut_id="c1", background=True)
     assert started["capture"] == {"mode": "host", "reason": "device_oom"}
-    assert cp.finish_cut_shard(rank, cut_id="c1") == inline
+    assert _without_writer(cp.finish_cut_shard(rank, cut_id="c1")) == inline
+
+
+def _without_writer(summary):
+    assert summary.pop("writer")["mode"] == "process", summary
+    return summary
+
+
+def _one_rank_cut(tmp_path, name, *, background):
+    import random
+
+    import numpy as np
+
+    from tests.rl_cut_fakes import make_rank, train_step
+
+    random.seed(5), np.random.seed(5), torch.manual_seed(5)  # the shard holds the global RNG state
+    rank = make_rank(0)
+    train_step(rank, torch.randn(3, 6, generator=torch.Generator().manual_seed(7)))
+    if not background:
+        return cp.save_cut_shard(rank, directory=str(tmp_path / name), cut_id="c1")
+    cp.save_cut_shard(rank, directory=str(tmp_path / name), cut_id="c1", background=True)
+    return cp.finish_cut_shard(rank, cut_id="c1")
+
+
+def test_a_dead_writer_process_falls_back_to_the_thread_and_says_why(tmp_path, monkeypatch):
+    """The writer process dies before it writes (its start fails): this rank's thread
+    writes the same shard and the summary records the fallback."""
+    import multiprocessing
+    import os
+    from concurrent.futures import ProcessPoolExecutor
+
+    inline = _one_rank_cut(tmp_path, "inline", background=False)
+    dead = ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("spawn"),
+                               initializer=os._exit, initargs=(3,))
+    monkeypatch.setattr(cp, "_WRITER", [dead])
+    got = _one_rank_cut(tmp_path, "dead", background=True)
+    writer = got.pop("writer")
+    assert writer["mode"] == "thread" and "writer process failed" in writer["fallback"], writer
+    assert got == inline
+    assert cp._WRITER == []  # the broken pool is dropped; the next cut starts a new one
+    assert (tmp_path / "dead" / got["path"]).read_bytes() == (tmp_path / "inline" / got["path"]).read_bytes()
+
+
+def test_a_partial_file_of_a_dead_writer_is_removed_before_the_fallback(tmp_path, monkeypatch):
+    inline = _one_rank_cut(tmp_path, "inline", background=False)
+    target = tmp_path / "partial"
+    target.mkdir()
+    (target / (inline["path"] + ".tmp")).write_bytes(b"half")
+    (target / inline["path"]).write_bytes(b"whole but unreported")
+
+    class Broken:
+        def submit(self, *a, **k):
+            raise RuntimeError("writer died")
+
+        def shutdown(self, **k):
+            pass
+
+    monkeypatch.setattr(cp, "_WRITER", [Broken()])
+    got = _one_rank_cut(tmp_path, "partial", background=True)
+    assert got.pop("writer") == {"mode": "thread", "fallback": "writer process failed: RuntimeError('writer died')"}
+    assert got == inline and not (target / (inline["path"] + ".tmp")).exists()
+
+
+def test_the_writer_process_can_be_turned_off(tmp_path, monkeypatch):
+    inline = _one_rank_cut(tmp_path, "inline", background=False)
+    monkeypatch.setenv(cp.WRITER_PROCESS_ENV, "0")
+    got = _one_rank_cut(tmp_path, "thread", background=True)
+    assert got.pop("writer") == {"mode": "thread", "fallback": "disabled"}
+    assert got == inline
 
 
 def test_device_copy_plan_needs_cuda_and_can_be_turned_off(monkeypatch):
