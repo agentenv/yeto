@@ -51,6 +51,29 @@ def submitted_unix() -> float:
     return time.time()
 
 
+def _wan_transport_flags(args) -> str:
+    """S26 E3b island transport options; emitted only when not the default."""
+    flags = ""
+    schedule = getattr(args, "wan_stream_schedule", "rr")
+    if schedule != "rr":
+        flags += f" --wan-stream-schedule {schedule}"
+    stall = float(getattr(args, "wan_stall_timeout", 0.0) or 0.0)
+    if stall < 0:
+        raise ValueError("--wan-stall-timeout must be >= 0 (0 = off)")
+    if stall > 0:
+        flags += f" --wan-stall-timeout {stall!r}"
+    min_up = float(getattr(args, "wan_probe_min_mbps", 0.0) or 0.0)
+    min_down = float(getattr(args, "wan_probe_min_down_mbps", 0.0) or 0.0)
+    if min_up < 0 or min_down < 0:
+        raise ValueError("--wan-probe-min-mbps / --wan-probe-min-down-mbps must be >= 0 (0 = off)")
+    if min_up > 0 or min_down > 0:
+        mib = int(getattr(args, "wan_probe_mib", 256))
+        if not 1 <= mib <= 1024:
+            raise ValueError("--wan-probe-mib must be between 1 and 1024")
+        flags += f" --wan-probe-min-mbps {min_up!r} --wan-probe-min-down-mbps {min_down!r} --wan-probe-mib {mib}"
+    return flags
+
+
 def _rl_trainable_island_flags(args, learner_id: int, num_learners: int) -> str:
     """LoRA rank/targets; for the full-parameter preset the sweep identity (the
     probed layout hash, the frozen roster size and the syncer profile hash);
@@ -72,6 +95,12 @@ def _rl_trainable_island_flags(args, learner_id: int, num_learners: int) -> str:
     sweep = (f" --parameter-layout-sha256 {args.rl_parameter_layout_sha256}"
              f" --num-learners {num_learners}"
              f" --syncer-profile-sha256 {rl_syncer_profile(args, num_learners).sha256}")
+    if getattr(args, "rl_sync_push_dtype", "f32") != "f32":
+        sweep += f" --sweep-push-dtype {args.rl_sync_push_dtype}"
+    if getattr(args, "rl_sync_overlap", False):
+        sweep += " --sweep-overlap"
+    if getattr(args, "rl_sync_push_dtype", "f32") == "int8":
+        sweep += f" --sweep-push-int8-block {int(getattr(args, 'rl_sync_push_int8_block', 128))}"
     if getattr(args, "expert_full_count", 0):
         return lora + sweep
     return " --parameter-mode full" + sweep
@@ -150,6 +179,7 @@ def make_miles_island_task(
         f" --rollout-num-gpus-per-engine {args.rollout_num_gpus_per_engine}"
         f" --sglang-mem-fraction-static {args.sglang_mem_fraction_static}"
         + _rl_trainable_island_flags(args, learner_id, num_learners)
+        + (" --bcast-delta" if int(getattr(args, "rl_sync_bcast_delta_full_every", 0) or 0) else "")
         + f" --inner-lr {args.inner_lr}"
         f" --seq-len {args.seq_len}"
         + (" --rl-activation-recompute" if getattr(args, "rl_activation_recompute", False) else "")
@@ -161,7 +191,8 @@ def make_miles_island_task(
            if float(getattr(args, "rl_optimizer_offload_fraction", 0.0) or 0.0) > 0 else "")
         + f" --seed {args.seed}"
         f" --wan-streams {args.wan_streams}"
-        " --miles-root ~/miles"
+        + _wan_transport_flags(args)
+        + " --miles-root ~/miles"
     )
     if getattr(args, "wandb", False):
         flags += " --wandb"

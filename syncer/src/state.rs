@@ -146,6 +146,8 @@ pub struct GlobalState {
     pub delta_correction: Option<merge::Heloco>,
     /// Spectrum flattener. Torch mode owns one persistent child process.
     iso_backend: IsoBackend,
+    /// bf16 downlink anchors (S26 E3); in memory only, never checkpointed.
+    pub downlink: Option<std::sync::Mutex<crate::downlink::DownlinkAnchors>>,
 }
 
 /// A merge whose deterministic learner reduction has completed but whose
@@ -344,6 +346,7 @@ impl GlobalState {
             wire_dtype,
             delta_correction: None,
             iso_backend: IsoBackend::start(iso_backend_config)?,
+            downlink: None,
         })
     }
 
@@ -628,6 +631,36 @@ pub fn remove_final_marker(path: &std::path::Path) -> Result<()> {
     }
 }
 
+/// Little-endian f32 values in 64 KiB blocks (same bytes as per-value
+/// `to_le_bytes`, without one writer call per element).
+fn write_f32s<W: std::io::Write>(f: &mut W, values: &[f32]) -> Result<()> {
+    let mut block = Vec::with_capacity(16 * 1024 * 4);
+    for chunk in values.chunks(16 * 1024) {
+        block.clear();
+        for v in chunk {
+            block.extend_from_slice(&v.to_le_bytes());
+        }
+        f.write_all(&block)?;
+    }
+    Ok(())
+}
+
+/// Atomically persist checkpoint bytes from `encode_checkpoint`: write a
+/// sibling temporary file, fsync it, rename it over `path`, fsync the
+/// directory. A failure at any point leaves the previous checkpoint intact.
+pub fn write_checkpoint_bytes(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let tmp = path.with_extension("tmp");
+    {
+        let mut f = std::fs::File::create(&tmp)
+            .with_context(|| format!("create checkpoint temporary {}", tmp.display()))?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)?;
+    sync_parent_directory(path)
+}
+
 fn sync_parent_directory(path: &std::path::Path) -> Result<()> {
     let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
     std::fs::File::open(parent)
@@ -660,51 +693,63 @@ impl GlobalState {
     /// Written to `<path>.tmp` then renamed, so a crash mid-write never
     /// corrupts the previous checkpoint.
     pub fn save_checkpoint(&self, path: &std::path::Path) -> Result<()> {
-        use std::io::Write;
-        let layout_fingerprint = self.layout_fingerprint;
         let tmp = path.with_extension("tmp");
         {
             let mut f = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
-            f.write_all(&CKPT_MAGIC_V3.to_le_bytes())?;
-            f.write_all(&[self.iso_backend_kind() as u8])?;
-            f.write_all(&layout_fingerprint)?;
-            f.write_all(&self.global_step.to_le_bytes())?;
-            f.write_all(&(self.params.len() as u32).to_le_bytes())?;
-            for p in 0..self.params.len() {
-                f.write_all(&self.versions[p].to_le_bytes())?;
-                f.write_all(&(self.params[p].len() as u64).to_le_bytes())?;
-                for v in &self.params[p] {
-                    f.write_all(&v.to_le_bytes())?;
-                }
-                for v in &self.momentum[p] {
-                    f.write_all(&v.to_le_bytes())?;
-                }
-            }
-            f.write_all(&(self.ledger.len() as u32).to_le_bytes())?;
-            for (id, l) in &self.ledger {
-                f.write_all(&id.to_le_bytes())?;
-                f.write_all(&l.merges.to_le_bytes())?;
-                f.write_all(&l.steps.to_le_bytes())?;
-                f.write_all(&l.tokens.to_le_bytes())?;
-            }
-            f.write_all(&self.layout_fingerprint)?;
-            if let Some(fragments) = self.policy_sweep_fragments {
-                f.write_all(&POLICY_SWEEP_CKPT_MAGIC.to_le_bytes())?;
-                f.write_all(&fragments.to_le_bytes())?;
-                f.write_all(
-                    &self
-                        .session_contract_hash
-                        .context("policy-sweep checkpoint requires a session contract hash")?,
-                )?;
-            } else if let Some(contract_hash) = self.session_contract_hash {
-                f.write_all(&SESSION_CONTRACT_CKPT_MAGIC.to_le_bytes())?;
-                f.write_all(&contract_hash)?;
-            }
-            f.flush()?;
+            self.write_checkpoint_to(&mut f)?;
+            std::io::Write::flush(&mut f)?;
             f.get_ref().sync_all()?;
         }
         std::fs::rename(&tmp, path)?;
         sync_parent_directory(path)?;
+        Ok(())
+    }
+
+    /// The exact bytes `save_checkpoint` writes, as an owned snapshot.
+    ///
+    /// The asynchronous checkpoint path encodes on the scheduler (one memory
+    /// copy of the consistent cut) and hands the bytes to a blocking writer,
+    /// so later commits may mutate `self` while the snapshot is persisted.
+    pub fn encode_checkpoint(&self) -> Result<Vec<u8>> {
+        let state_floats: usize = self.params.iter().map(Vec::len).sum::<usize>() * 2;
+        let mut bytes = Vec::with_capacity(state_floats * 4 + 4096);
+        self.write_checkpoint_to(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    fn write_checkpoint_to<W: std::io::Write>(&self, f: &mut W) -> Result<()> {
+        let layout_fingerprint = self.layout_fingerprint;
+        f.write_all(&CKPT_MAGIC_V3.to_le_bytes())?;
+        f.write_all(&[self.iso_backend_kind() as u8])?;
+        f.write_all(&layout_fingerprint)?;
+        f.write_all(&self.global_step.to_le_bytes())?;
+        f.write_all(&(self.params.len() as u32).to_le_bytes())?;
+        for p in 0..self.params.len() {
+            f.write_all(&self.versions[p].to_le_bytes())?;
+            f.write_all(&(self.params[p].len() as u64).to_le_bytes())?;
+            write_f32s(f, &self.params[p])?;
+            write_f32s(f, &self.momentum[p])?;
+        }
+        f.write_all(&(self.ledger.len() as u32).to_le_bytes())?;
+        for (id, l) in &self.ledger {
+            f.write_all(&id.to_le_bytes())?;
+            f.write_all(&l.merges.to_le_bytes())?;
+            f.write_all(&l.steps.to_le_bytes())?;
+            f.write_all(&l.tokens.to_le_bytes())?;
+        }
+        f.write_all(&self.layout_fingerprint)?;
+        if let Some(fragments) = self.policy_sweep_fragments {
+            f.write_all(&POLICY_SWEEP_CKPT_MAGIC.to_le_bytes())?;
+            f.write_all(&fragments.to_le_bytes())?;
+            f.write_all(
+                &self
+                    .session_contract_hash
+                    .context("policy-sweep checkpoint requires a session contract hash")?,
+            )?;
+        } else if let Some(contract_hash) = self.session_contract_hash {
+            f.write_all(&SESSION_CONTRACT_CKPT_MAGIC.to_le_bytes())?;
+            f.write_all(&contract_hash)?;
+        }
         Ok(())
     }
 
