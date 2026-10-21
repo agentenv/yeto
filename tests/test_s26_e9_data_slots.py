@@ -134,6 +134,18 @@ def test_miles_data_source_slots_are_disjoint(shuffle):
     assert not drawn[0] & drawn[1] and drawn[0] | drawn[1] == set(rows)
 
 
+@pytest.mark.parametrize("shuffle", [False, True])
+def test_miles_slot_rows_record_their_unsplit_row(shuffle):
+    """S26 E9 G4: the buffer payload shows which data row a sampler drew."""
+    from yeto.rl.adapters.miles.buffer_rollout import DATA_ROW_KEY, apply_data_slot
+
+    rows = [SimpleNamespace(prompt=f"q{r}", metadata={"label": r}) for r in range(9)]
+    source = _source(rows, shuffle)
+    assert apply_data_slot(source, DataSlot(1, 3), shuffle=shuffle) == 3
+    kept = sorted(s.metadata[DATA_ROW_KEY] for s in source.dataset.samples)
+    assert kept == [1, 4, 7] and all(s.metadata["label"] == s.metadata[DATA_ROW_KEY] for s in rows)
+
+
 def test_miles_data_slot_refuses_after_the_first_draw():
     from yeto.rl.adapters.miles.buffer_rollout import apply_data_slot
 
@@ -153,6 +165,18 @@ def test_island_env_exports_the_slot_for_a_sampler_only():
     assert env[br.DATA_SLOT_ENV] == "0/2"
     with pytest.raises(ValueError, match="only a sampler"):
         br.island_env("trainer", store_root="/s", max_policy_age=2, data_slot="0/2")
+
+
+def test_every_island_env_reaches_the_ray_workers():
+    """S26 E9 G4 (e9-g4-a): the slot env was set in the island process but not
+    forwarded to the Ray rollout worker, so both samplers drew the same prompts."""
+    from yeto.rl.adapters.miles import buffer_rollout as br
+
+    envs = [br.island_env("sampler", store_root="/s", sampler_id="island0", shards=["island0", "island1"],
+                          data_slot="0/2"),
+            br.island_env("trainer", store_root="/s", max_policy_age=2, wait_s=9.0, lane=br.BufferLane(1, 2),
+                          shards=["island0", "island1"])]
+    assert {k for env in envs for k in env} <= set(br.ISLAND_ENVS)
 
 
 # ------------------------------------------------------- exhausted buffer end

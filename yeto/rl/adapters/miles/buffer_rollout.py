@@ -89,7 +89,7 @@ INCARNATION_ENV = "YETO_SAMPLER_INCARNATION"  # set by the sampler island before
 # the rollout functions run in Ray workers, which inherit the raylet's environment:
 # connect_island_ray forwards these to every worker
 ISLAND_ENVS = (BUFFER_ROOT_ENV, SAMPLER_ID_ENV, WAIT_ENV, POLL_ENV, MAX_POLICY_AGE_ENV, SHARD_ENV,
-               SHARDS_ENV, INCARNATION_ENV, LANE_ENV)
+               SHARDS_ENV, INCARNATION_ENV, LANE_ENV, DATA_SLOT_ENV)
 
 DEFAULT_WAIT_S = 3600.0
 DEFAULT_POLL_S = 2.0
@@ -246,6 +246,9 @@ def renumber_group(samples: Sequence[dict[str, Any]], *, position: int,
 
 
 # ---------------------------------------------------------------------- sampler side
+DATA_ROW_KEY = "yeto_data_row"  # a sample's row index in the unsplit data (DataSlot)
+
+
 def apply_data_slot(data_source: Any, slot: DataSlot, *, shuffle: bool) -> int:
     """Keep only ``slot``'s rows in a Miles ``RolloutDataSource`` (S26 E9.3).
 
@@ -253,7 +256,10 @@ def apply_data_slot(data_source: Any, slot: DataSlot, *, shuffle: bool) -> int:
     original rows become the slot's rows, and the current epoch's order is made
     again from them (the same seeded shuffle, over the slot). The data cursor of
     a later round then counts in slot rows, so a replacement incarnation with
-    the same slot seeks to the same place. Returns the slot's row count."""
+    the same slot seeks to the same place. Each kept row records its index in
+    the unsplit data as ``metadata["yeto_data_row"]`` (it reaches the buffer with the
+    sample), so a run shows its samplers drew disjoint rows. Returns the slot's
+    row count."""
     source = getattr(data_source, "__self__", data_source)
     dataset = getattr(source, "dataset", None)
     if slot.whole or dataset is None:
@@ -265,6 +271,9 @@ def apply_data_slot(data_source: Any, slot: DataSlot, *, shuffle: bool) -> int:
             "(its dataset has no origin_samples)")
     if int(getattr(source, "sample_offset", 0) or 0) or int(getattr(source, "epoch_id", 0) or 0):
         raise SampleBufferRolloutError("the data slot is applied before the first draw")
+    for row, sample in enumerate(origin):
+        if isinstance(getattr(sample, "metadata", None), dict):
+            sample.metadata[DATA_ROW_KEY] = row
     dataset.origin_samples = slot.rows(origin)
     dataset.samples = list(dataset.origin_samples)
     if shuffle:
