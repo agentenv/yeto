@@ -398,14 +398,18 @@ def test_device_export_uses_the_fork_device_argument_when_it_has_one():
 
 
 @needs_dps
+@pytest.mark.parametrize("staged", [False, True], ids=["unstaged", "staged"])
 @pytest.mark.parametrize("layout", ["pp2dp2", "ep2"])
-def test_background_device_capture_writes_the_inline_shard(tmp_path, layout, monkeypatch):
+def test_background_device_capture_writes_the_inline_shard(tmp_path, layout, staged, monkeypatch):
     """Same shard (file bytes, digests, N7.6 resume state) from the device path as from the
     inline host path, although the trainer trains on before the writer copies to the host."""
     ranks = _world(layout)
     _train(ranks)
     inline = [cp.save_cut_shard(r, directory=str(tmp_path / "inline"), cut_id="c1") for r in ranks]
     monkeypatch.setattr(cp, "_device_copy_plan", lambda actor, named: (True, "ok"))
+    if staged:  # CPU stand-ins for device tensors go through the staging buffer too
+        real_stage = cp._stage
+        monkeypatch.setattr(cp, "_stage", lambda snap: real_stage(snap, include_cpu=True))
     device = []
     for r, rank in enumerate(ranks):  # one pending write per cut id per process: rank by rank
         started = cp.save_cut_shard(rank, directory=str(tmp_path / "device"), cut_id="c1", background=True)
@@ -415,6 +419,7 @@ def test_background_device_capture_writes_the_inline_shard(tmp_path, layout, mon
         rank.opt_param_scheduler.num_steps = 16
         device.append(cp.finish_cut_shard(rank, cut_id="c1"))
     assert [d.pop("writer") for d in device] == [{"mode": "process"}] * len(ranks)
+    assert cp._STAGING.free.is_set()
     assert device == inline
     for name in sorted(p.name for p in (tmp_path / "inline").iterdir()):
         assert (tmp_path / "device" / name).read_bytes() == (tmp_path / "inline" / name).read_bytes()
@@ -517,7 +522,7 @@ def test_the_writer_process_can_be_turned_off(tmp_path, monkeypatch):
 def test_device_copy_plan_needs_cuda_and_can_be_turned_off(monkeypatch):
     named = [("lora_a", torch.nn.Parameter(torch.zeros(2)))]
     assert cp._device_copy_plan(None, named) == (False, "not_cuda")
-    sleeper = SimpleNamespace(args=SimpleNamespace(offload_train=True))
-    assert cp._device_copy_plan(sleeper, named) == (False, "offload_train")
+    sleeper = SimpleNamespace(args=SimpleNamespace(offload_train=True))  # staged before the sleep
+    assert cp._device_copy_plan(sleeper, named) == (False, "not_cuda")
     monkeypatch.setenv(cp.DEVICE_COPY_ENV, "0")
     assert cp._device_copy_plan(None, named) == (False, "disabled")
