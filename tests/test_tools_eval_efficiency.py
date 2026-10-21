@@ -469,3 +469,17 @@ def test_e11_arms_read_one_row_set():
         spec.yeto_verl_argv(e11, "async", "/t")
     # the E0 presets keep their fingerprints (new fields at their defaults are left out)
     assert spec.control_fingerprint(spec.get_spec("qwen3-0.6b")).startswith("59ed2ab081afb9f9")
+
+
+def test_cluster_target_and_smoothing():
+    from tools.eval.efficiency import cluster as C
+
+    pts = [C.Point(100.0 + 10 * i, 128, r) for i, r in enumerate([0.1, 0.1, 0.3, 0.5, 0.5, 0.5])]
+    c = C.Curve("r", "yeto-miles-2islands", 4, 0.0, 200.0, pts)
+    sm = C.smoothed(pts, 256)
+    assert sm[0] == 0.1 and sm[2] == pytest.approx(0.2) and sm[4] == pytest.approx(0.5)
+    assert C.start_reward([c], 256) == pytest.approx(0.1)
+    m = C.metrics(c, target=0.4, window=256, usd_per_card_hour=5.0)
+    assert m["reached"] and m["to_target_s"] == 130.0 and m["to_target_samples"] == 4 * 128
+    assert m["to_target_gpu_h"] == pytest.approx(130 / 3600 * 4)
+    assert not C.metrics(c, target=0.9, window=256, usd_per_card_hour=5.0)["reached"]
