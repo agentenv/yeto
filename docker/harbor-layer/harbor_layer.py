@@ -75,17 +75,21 @@ def duplicate_names(text: str) -> set[str]:
     return {name for name, versions in seen.items() if len(versions) > 1}
 
 
-def resolve_duplicates(after: dict[str, str], names: set[str], version_of=None) -> dict[str, str]:
-    """For a name with two installed versions, the version the interpreter reports at start.
+def unpin_duplicates(lock: dict, names: set[str]) -> dict:
+    """A package installed twice is recorded, not pinned.
 
-    The start check reads ``importlib.metadata.version`` (the first ``.dist-info``
-    on ``sys.path``), and freeze order says nothing about which one that is
-    (the Miles base image carries peft 0.18.1 and 0.20.0, S26 agentic check)."""
-    if version_of is None:
-        import importlib.metadata
-
-        version_of = importlib.metadata.version
-    return {**after, **{name: version_of(name) for name in names}}
+    Which ``.dist-info`` ``importlib.metadata`` reports first follows the
+    directory listing order, and that order differed between the Modal build
+    and the running container (Miles base image, peft 0.18.1 and 0.20.0: the
+    build saw 0.18.1, the container 0.20.0; S26 agentic check). Neither
+    version can be asserted, so the start check only requires the package."""
+    packages = dict(lock["packages"])
+    for name in sorted(names):
+        if name in packages:
+            packages[name] = {k: v for k, v in packages[name].items() if k != "version"} | {"version": None}
+    return {**lock, "packages": packages,
+            "decisions": [*lock.get("decisions", []),
+                          *(f"{n}: installed twice in the base image; recorded, not pinned" for n in sorted(names))]}
 
 
 def load_spec(backend: str, spec_file: Path = SPEC_FILE) -> tuple[dict, dict]:
@@ -197,12 +201,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.out is None:
         ap.error("lock needs --out")
     dups = duplicate_names(args.freeze[-1].read_text())
-    after = resolve_duplicates(freezes[-1], dups)
     for name in sorted(dups):
-        print(f"[harbor-layer] note: {name} is installed twice; the lock takes the version Python reports, "
-              f"{after[name]}", file=sys.stderr)
+        print(f"[harbor-layer] note: {name} is installed twice; the lock records it without a version",
+              file=sys.stderr)
+    lock = unpin_duplicates(start_lock(freezes[-1], spec, args.backend), dups)
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(start_lock(after, spec, args.backend), indent=2) + "\n")
+    args.out.write_text(json.dumps(lock, indent=2) + "\n")
     return 0
 
 

@@ -238,14 +238,15 @@ def test_modal_harbor_layer_ships_the_layer_files_and_the_checker():
     assert any("check --backend verl" in c for c in calls[2][1])
 
 
-def test_lock_takes_the_version_python_reports_for_a_package_installed_twice(tmp_path):
-    # The Miles base image has peft-0.18.1.dist-info and peft-0.20.0.dist-info (S26 agentic check);
-    # uv freeze lists both and the start check reads the first on sys.path.
+def test_lock_records_a_package_installed_twice_without_a_version():
+    # The Miles base image has peft-0.18.1.dist-info and peft-0.20.0.dist-info; the build saw one
+    # first and the running container the other (S26 agentic check).
     text = MILES_BEFORE + "peft==0.18.1\npeft==0.20.0\n"
     assert layer.duplicate_names(text) == {"peft"}
-    after = layer.resolve_duplicates(layer.parse_freeze(text), {"peft"}, version_of={"peft": "0.18.1"}.get)
-    assert after["peft"] == "0.18.1"
     assert layer.duplicate_names(MILES_BEFORE) == set()
+    lock = layer.unpin_duplicates(layer.start_lock(layer.parse_freeze(text), SPEC, "miles"), {"peft"})
+    assert lock["packages"]["peft"] == {"version": None}
+    assert lock["packages"]["torch"]["version"] and any("peft" in d for d in lock["decisions"])
 
 
 def test_start_check_pins_a_local_build_and_accepts_any_build_without_one():
