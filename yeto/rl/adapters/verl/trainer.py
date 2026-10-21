@@ -186,7 +186,8 @@ def build_sync(plan: dict, specs, *, lora_hash: str, layout_hash: str, identity_
             expected_specs=tuple(specs), base_model_revision=plan["model_revision"],
             lora_config_hash=lora_hash, layout_hash=layout_hash, event_tape=plan["event_tape"],
             wan_streams=int(plan.get("wan_streams", 4)),
-            backend_identity_sha256=identity_sha256, compat_group=compat_group)
+            backend_identity_sha256=identity_sha256, compat_group=compat_group,
+            bcast_delta=bool(plan.get("bcast_delta", False)))
         if mode == "strict":
             sync = StrictAvgSync(bridge, progress=None)
         elif mode == "elastic":

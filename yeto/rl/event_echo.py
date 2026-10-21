@@ -133,6 +133,7 @@ class TapeCollector:
         self.discarded = 0
         self.finalized = False
         self.left_pool = False  # 0.27: elastic_left_pool seen (re-JOIN exhausted)
+        self.wan_rejects = 0  # S26 E3b: rl_wan_probe records with accepted=false
         self.closed = False
 
     @property
@@ -179,8 +180,11 @@ class TapeCollector:
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(raw + "\n")
         self.count += 1
-        event = json.loads(raw).get("event")
-        if event == FINALIZED_EVENT:
+        record = json.loads(raw)
+        event = record.get("event")
+        if event == "rl_wan_probe" and record.get("accepted") is False:
+            self.wan_rejects += 1
+        elif event == FINALIZED_EVENT:
             self.finalized = True
         elif event == "elastic_left_pool":
             self.left_pool = True
