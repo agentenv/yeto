@@ -596,6 +596,10 @@ class RoundCutCheckpoint:
                               else None))
         extra = {"prepared_before_offload": used_prepared, "trainer_onloaded_for_cut": offloaded,
                  "save_s": round(save_s, 3)}
+        capture = pending.get("capture") if isinstance(pending, Mapping) else None
+        if capture:
+            # E1: per rank, device copies or the host path (and why: e.g. low device memory)
+            extra["cut_capture"] = capture
         if defer:
             # the state dir (ledger, journal) as it is at this cut: its store sync runs
             # in the background after later rounds have changed it

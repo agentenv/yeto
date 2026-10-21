@@ -100,11 +100,17 @@ class MilesCutBackend:
 
         return dp_invariant_state
 
-    def export_optimizer(self, optimizer: Any, named: list) -> Any:
+    def export_optimizer(self, optimizer: Any, named: list, *, on_device: bool = False) -> Any:
+        """The fork-M5 named optimizer export. ``on_device`` (E1): the tensors are
+        device copies (same layout, not yet on the host); :func:`to_host` turns the
+        result into exactly the host export."""
+        export = self._dps().export_named_optimizer_state
+        if on_device:
+            export = _device_export(self._dps())
         if _UNSAFE_STATE_READS[0]:  # diagnostic only: verify the fork fix without the yeto guard
-            return self._dps().export_named_optimizer_state(optimizer, named)
+            return export(optimizer, named)
         with side_effect_free_state(optimizer):
-            return self._dps().export_named_optimizer_state(optimizer, named)
+            return export(optimizer, named)
 
     def check_optimizer(self, optimizer: Any, named: list, states: list) -> Any:
         """Merge the DP shards of one (tp, pp) (DistOpt ranges) and validate against ``optimizer``."""
@@ -139,6 +145,51 @@ class MilesCutBackend:
         margs = get_args()
         for key, value in counters.items():
             setattr(margs, key, int(value))
+
+
+def _device_export(dps: Any) -> Any:
+    """``export_named_optimizer_state`` keeping each tensor on its device (E1).
+
+    The Miles fork takes ``device=None`` for this (yeto/s26-e1-device-export); the
+    pinned image's fork does not yet, and then this module builds the same
+    entries from the fork's own ``optimizer_slots`` -- the fork function's body
+    without its ``.cpu()`` (tests pin the equality with the fork's host export)."""
+    import inspect
+
+    export = dps.export_named_optimizer_state
+    if "device" in inspect.signature(export).parameters:
+        return lambda optimizer, named: export(optimizer, named, device=None)
+
+    def export_on_device(optimizer: Any, named: list) -> dict[str, Any]:
+        import copy
+
+        entries = {}
+        for slot in dps.optimizer_slots(optimizer, named):
+            tensors, scalars = {}, {}
+            for key, value in slot.get().items():
+                value = value.detach()
+                if value.dim() == 0:
+                    scalars[key] = value.clone()
+                    continue
+                flat = value.reshape(-1).clone()
+                if flat.numel() != slot.end - slot.start:
+                    raise dps.DpInvariantStateError(
+                        f"{slot.name!r}: state {key!r} has {flat.numel()} elements but the owned range is "
+                        f"[{slot.start}, {slot.end})"
+                    )
+                tensors[key] = flat
+            entries[slot.name] = {
+                "numel": slot.model_param.numel(),
+                "shape": tuple(slot.model_param.shape),
+                "start": slot.start,
+                "end": slot.end,
+                "tensors": tensors,
+                "scalars": scalars,
+                "hyper": {k: copy.deepcopy(v) for k, v in slot.group.items() if k != "params"},
+            }
+        return {"format": dps.NAMED_STATE_FORMAT, "entries": entries}
+
+    return export_on_device
 
 
 def _expert_coord(ps: Any) -> dict[str, int]:
@@ -541,18 +592,33 @@ def _entry_step(entry: Mapping[str, Any]) -> Any:
     return None
 
 
-def resume_rank_state(actor: Any, optimizer_named: Any) -> dict[str, Any]:
-    """This rank's :class:`~yeto.rl.engine.resume_manifest.OptimizerResumeState` (as a dict),
-    read from the named optimizer export and the Megatron LR scheduler (S25 N7.6)."""
-    from yeto.rl.engine.resume_manifest import build_rank_state, scheduler_progress_of
+def resume_inputs(actor: Any) -> dict[str, Any]:
+    """What :func:`resume_rank_state` reads from the live trainer: the optimizer
+    group lrs and the Megatron LR scheduler progress."""
+    from yeto.rl.engine.resume_manifest import scheduler_progress_of
 
+    return {"lrs": [float(g["lr"]) for g in getattr(actor.optimizer, "param_groups", ()) if "lr" in g],
+            "scheduler_progress": scheduler_progress_of(actor.opt_param_scheduler)}
+
+
+def resume_rank_state(actor: Any, optimizer_named: Any, *, lrs: list[float] | None = None,
+                      scheduler_progress: int | None = None) -> dict[str, Any]:
+    """This rank's :class:`~yeto.rl.engine.resume_manifest.OptimizerResumeState` (as a dict),
+    read from the named optimizer export and the Megatron LR scheduler (S25 N7.6).
+    ``lrs`` / ``scheduler_progress`` (from :func:`resume_inputs`, taken at the step
+    boundary) replace the reads of ``actor`` (then ``None`` is allowed)."""
+    from yeto.rl.engine.resume_manifest import build_rank_state
+
+    if lrs is None or scheduler_progress is None:
+        live = resume_inputs(actor)
+        lrs = live["lrs"] if lrs is None else lrs
+        scheduler_progress = live["scheduler_progress"] if scheduler_progress is None else scheduler_progress
     entries = (optimizer_named or {}).get("entries") or {}
     steps = [s for s in (_entry_step(e) for e in entries.values()) if s is not None]
-    lrs = [float(g["lr"]) for g in getattr(actor.optimizer, "param_groups", ()) if "lr" in g]
     return build_rank_state(
         steps_by_group={"named": steps},
-        scheduler_progress=scheduler_progress_of(actor.opt_param_scheduler),
-        lrs=lrs,
+        scheduler_progress=int(scheduler_progress),
+        lrs=list(lrs),
         moments_by_name={n: _entry_moments(e) for n, e in entries.items()},
     ).to_dict()
 
@@ -576,14 +642,63 @@ def resume_state(actor: Any) -> dict[str, Any]:
 RESUME_STATE = f"{_MODULE}.resume_state"
 
 
-def _snapshot(actor: Any, backend: Any, named: list) -> dict[str, Any]:
+def _snapshot(actor: Any, backend: Any, named: list, *, on_device: bool = False) -> dict[str, Any]:
+    """The shard state at this step boundary. ``on_device`` (E1): the adapter and
+    optimizer tensors are device copies (device-to-device, no wait for the host);
+    :func:`to_host` later makes them exactly the host snapshot."""
+    if on_device:
+        adapter = {n: p.detach().clone() for n, p in named}
+        optimizer_named = backend.export_optimizer(actor.optimizer, named, on_device=True)
+    else:
+        adapter = {n: p.detach().to("cpu").clone() for n, p in named}
+        optimizer_named = backend.export_optimizer(actor.optimizer, named)
     return {
-        "adapter": {n: p.detach().to("cpu").clone() for n, p in named},
-        "optimizer_named": backend.export_optimizer(actor.optimizer, named),
+        "adapter": adapter,
+        "optimizer_named": optimizer_named,
         "scheduler": actor.opt_param_scheduler.state_dict(),
         "megatron_counters": backend.megatron_counters(),
         "miles_counters": miles_counters(actor),
     }
+
+
+def to_host(value: Any) -> Any:
+    """``value`` with every non-CPU tensor copied to the host (containers rebuilt,
+    everything else as it is). A CPU tensor is returned as it is."""
+    import torch
+
+    if isinstance(value, torch.Tensor):
+        return value if value.device.type == "cpu" else value.to("cpu")
+    if isinstance(value, dict):
+        return {k: to_host(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [to_host(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(to_host(v) for v in value)
+    return value
+
+
+# E1: device copies of a background cut need this much free device memory besides
+# their own size (twice the copies: the allocator's rounding and what training
+# allocates next); below it the capture stays on the host path
+DEVICE_COPY_ENV = "YETO_RL_CUT_DEVICE_COPY"
+DEVICE_COPY_HEADROOM_BYTES = 1 << 30
+
+
+def _device_copy_plan(actor: Any, named: list) -> tuple[bool, str]:
+    """(copy on the device?, why): the device path needs CUDA parameters and free
+    memory for the copies (adapter + FP32 master + two Adam moments, estimated)."""
+    import torch
+
+    if os.environ.get(DEVICE_COPY_ENV, "1").strip().lower() in {"0", "false", "no", "off"}:
+        return False, "disabled"
+    devices = {p.device for _, p in named}
+    if len(devices) != 1 or next(iter(devices)).type != "cuda":
+        return False, "not_cuda"
+    need = sum(p.numel() * (p.element_size() + 3 * 4) for _, p in named)
+    free, _total = torch.cuda.mem_get_info(next(iter(devices)))
+    if free < 2 * need + DEVICE_COPY_HEADROOM_BYTES:
+        return False, f"low_device_memory(free={free},need={need})"
+    return True, "ok"
 
 
 # --------------------------------------------------------------------------
@@ -617,7 +732,7 @@ def save_cut_shard(actor: Any, *, directory: str, cut_id: str, background: bool 
     """
     try:
         with trainer_resident(actor):
-            captured = _capture(actor, cut_id=cut_id)
+            captured = _capture(actor, cut_id=cut_id, device_copy=background)
     except CutPluginError as error:
         return {REFUSED: str(error), REFUSAL_KIND: "refused"}
     if not background:
@@ -629,7 +744,7 @@ def save_cut_shard(actor: Any, *, directory: str, cut_id: str, background: bool 
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"yeto-cut-{cut_id}")
     _PENDING_SHARDS[cut_id] = (pool, pool.submit(_write_refusing, captured, directory=directory, cut_id=cut_id))
     pool.shutdown(wait=False)
-    return {"pending": cut_id, "coord": dict(captured["coord"])}
+    return {"pending": cut_id, "coord": dict(captured["coord"]), "capture": dict(captured["capture"])}
 
 
 def finish_cut_shard(actor: Any, *, cut_id: str) -> dict[str, Any]:
@@ -645,13 +760,20 @@ def finish_cut_shard(actor: Any, *, cut_id: str) -> dict[str, Any]:
 
 def _write_refusing(captured: dict[str, Any], *, directory: str, cut_id: str) -> dict[str, Any]:
     try:
-        return _write(captured, directory=directory, cut_id=cut_id)
+        return _write(_on_host(captured), directory=directory, cut_id=cut_id)
     except CutPluginError as error:
         return {REFUSED: str(error), REFUSAL_KIND: "refused"}
 
 
-def _capture(actor: Any, *, cut_id: str) -> dict[str, Any]:
-    """Everything the shard and its summary need, read at the step boundary (CPU copies)."""
+def _capture(actor: Any, *, cut_id: str, device_copy: bool = False) -> dict[str, Any]:
+    """Everything the shard and its summary need, read at the step boundary.
+
+    Host path: CPU copies, taken here. ``device_copy`` (E1, background cuts): the
+    adapter and optimizer tensors are copied device-to-device here and reach the
+    host in the writer thread (:func:`_on_host`), so the trainer waits only for
+    the device copies. The device path is skipped (host path, reason in
+    ``capture``) without CUDA parameters, with too little free device memory, or
+    when a device copy runs out of memory; the shard is the same either way."""
     import torch
 
     backend = _backend(actor)
@@ -663,21 +785,51 @@ def _capture(actor: Any, *, cut_id: str) -> dict[str, Any]:
 
     marks = [time.monotonic()]
     named = _adapters(actor, backend)
+    on_device, reason = _device_copy_plan(actor, named) if device_copy else (False, "inline")
     with torch.no_grad():
-        snap = _snapshot(actor, backend, named)
+        snap = None
+        if on_device:
+            try:
+                snap = _snapshot(actor, backend, named, on_device=True)
+            except torch.cuda.OutOfMemoryError:
+                snap, on_device, reason = None, False, "device_oom"
+                torch.cuda.empty_cache()
+        if snap is None:
+            snap = _snapshot(actor, backend, named)
+        ready = None
+        if on_device and any(p.is_cuda for _, p in named):
+            ready = torch.cuda.Event()
+            ready.record()
         marks.append(time.monotonic())
         rng = backend.capture_rng()
-    captured = {"coord": coord, "snap": snap, "rng": rng,
+    capture = {"mode": "device" if on_device else "host", "reason": reason}
+    captured = {"coord": coord, "snap": snap, "rng": rng, "capture": capture, "ready": ready,
                 "scheduler_samples": int(actor.opt_param_scheduler.num_steps),
-                "tuning": _tuning(backend, named), "adapter_names": sorted(n for n, _ in named)}
+                "tuning": _tuning(backend, named), "adapter_names": sorted(n for n, _ in named),
+                # what resume_rank_state reads from the live trainer, as it is now
+                "resume_inputs": resume_inputs(actor)}
     marks.append(time.monotonic())
-    captured["resume"] = resume_rank_state(actor, snap["optimizer_named"])
+    if not on_device:
+        captured["resume"] = resume_rank_state(actor, snap["optimizer_named"], **captured["resume_inputs"])
     marks.append(time.monotonic())
     # E1 diagnosis: where the step-boundary capture of a cut goes (driver log only)
-    print("yeto cut capture timing " + json.dumps(dict(zip(
+    print("yeto cut capture timing " + json.dumps({**dict(zip(
         ("snapshot_s", "rng_tuning_s", "resume_state_s"),
-        (round(b - a, 3) for a, b in zip(marks, marks[1:]))))), flush=True)
+        (round(b - a, 3) for a, b in zip(marks, marks[1:])))), "capture": capture}), flush=True)
     return captured
+
+
+def _on_host(captured: dict[str, Any]) -> dict[str, Any]:
+    """``captured`` with its device copies on the host and the resume state it
+    defers (runs in the writer thread). Host captures are returned as they are."""
+    if "resume" in captured:
+        return captured
+    ready = captured.get("ready")
+    if ready is not None:
+        ready.synchronize()  # the device copies are complete (whatever stream training uses)
+    snap = to_host(captured["snap"])
+    return {**captured, "snap": snap, "ready": None,
+            "resume": resume_rank_state(None, snap["optimizer_named"], **captured["resume_inputs"])}
 
 
 def _write(captured: dict[str, Any], *, directory: str, cut_id: str) -> dict[str, Any]:

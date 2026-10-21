@@ -841,8 +841,11 @@ class MilesTrainerGroup:
         critic = self._save_critic_cut(directory / "critic", context.progress.policy_version)
         kwargs = {"directory": str(directory), "cut_id": cut_id, **({"background": True} if background else {})}
         results = [dict(s) for s in self._run(self._actor.run_plugin(SAVE_CUT_SHARD, kwargs))]
+        # E1: how each rank took its state (device copies or host path, and why)
+        capture = [dict(s["capture"]) for s in results if isinstance(s.get("capture"), Mapping)]
         return {"epoch": int(epoch), "context": context, "runtime": runtime, "directory": directory,
-                "background": background, "results": results, "critic": critic}
+                "background": background, "results": results, "critic": critic,
+                **({"capture": capture} if capture else {})}
 
     def finish_cut(self, pending: Mapping[str, Any]) -> str:
         """Collect the shards of :meth:`start_cut` and commit the manifest; returns the cut id."""
