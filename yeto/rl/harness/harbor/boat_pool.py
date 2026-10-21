@@ -97,7 +97,7 @@ class BoatSandboxPool:
         await self._expire()
         while (idle := self._take(spec.image, machine_type)) is not None:
             try:
-                await idle.reuse(spec, name=name)  # deletes the VM itself on failure
+                await idle.reuse(spec, name=name, codex_cache=sandbox_kwargs.get("codex_cache"))  # deletes the VM itself on failure
             except Exception:
                 logger.warning("boat pool: reuse of %s failed; trying another VM", idle.sandbox_id,
                                exc_info=True)

@@ -30,7 +30,7 @@ from typing import Any
 
 from yeto.rl.harness.harbor.boat_client import BoatQuota, process_client
 from yeto.rl.harness.harbor.boat_pool import BoatSandboxPool
-from yeto.rl.harness.harbor.boat_sandbox import BoatSandbox, ContainerSpec, machine_type_for
+from yeto.rl.harness.harbor.boat_sandbox import BoatSandbox, ContainerSpec, machine_type_for, pinned_codex_cache
 
 
 def task_spec(tasks_dir: Path, task_id: str) -> ContainerSpec:
@@ -50,6 +50,7 @@ class Bench:
         self.pool = BoatSandboxPool(self.client, self.quota, idle_ttl_s=args.idle_ttl_s,
                                     sandbox_factory=self.new_sandbox) if args.mode == "pool" else None
         self.out = args.out.open("a")
+        self.cache_kwargs = {"codex_cache": pinned_codex_cache()} if args.codex_cache else {}
 
     def new_sandbox(self, *args: Any, **kwargs: Any) -> BoatSandbox:
         sandbox = BoatSandbox(*args, **kwargs)
@@ -69,15 +70,20 @@ class Bench:
         started = time.monotonic()
         sandbox = None
         error = None
+        codex_version = None
         try:
             if self.pool is not None:
-                sandbox = await self.pool.acquire(spec, name=name, machine_type=machine)
+                sandbox = await self.pool.acquire(spec, name=name, machine_type=machine, **self.cache_kwargs)
             else:
-                sandbox = self.new_sandbox(self.client, self.quota, name=name, machine_type=machine)
+                sandbox = self.new_sandbox(self.client, self.quota, name=name, machine_type=machine,
+                                           **self.cache_kwargs)
                 await sandbox.start(spec)
             check = await sandbox.exec("echo ok", timeout_s=60)
             if check.stdout.strip() != "ok":
                 raise RuntimeError(f"exec check failed: {check.stdout!r} {check.stderr!r}")
+            if self.args.codex_cache:  # the task's default user must see the pinned build as `codex`
+                version = await sandbox.exec("codex --version", timeout_s=60)
+                codex_version = (version.stdout or version.stderr).strip()[-200:]
         except Exception as exc:  # measured, not raised: the failure rate is a result
             error = f"{type(exc).__name__}: {str(exc)[-300:]}"
             if sandbox is not None:
@@ -85,7 +91,7 @@ class Bench:
             sandbox = None
         done = time.monotonic()
         self.emit({"kind": "sandbox", "round": round_no, "slot": slot, "task_id": task_id,
-                   "machine_type": machine, "ok": error is None, "error": error,
+                   "machine_type": machine, "ok": error is None, "error": error, "codex_version": codex_version,
                    "start_s": round(done - started, 3), "ready_after_round_start_s": round(done - t0, 3),
                    "reused": bool(sandbox is not None and sandbox.timings.get("create_s") == 0.0),
                    "timings": {k: round(v, 3) for k, v in (sandbox.timings if sandbox else {}).items()}})
@@ -117,7 +123,8 @@ class Bench:
         # Provider kwargs must be JSON (Harbor writes them to the trial lock), so the
         # environment finds this run's client and pool as the process ones (see install_process_hooks).
         settings = HarborSettings(tasks_dir=self.args.tasks_dir, trials_dir=self.args.trials_dir,
-                                  provider_kwargs={"pool": self.pool is not None})
+                                  provider_kwargs={"pool": self.pool is not None,
+                                                   "codex_cache": self.args.codex_cache})
         task = AgentTask.from_mapping({"task_id": task_id, "agent": "codex", "provider": "boat",
                                        "model_name": "none", "wall_clock_s": 3600.0})
 
@@ -190,6 +197,7 @@ async def main() -> None:
     parser.add_argument("--trials-dir", type=Path, default=Path("/tmp/e8_boat_trials"))
     parser.add_argument("--mode", choices=("cold", "pool"), default="cold")
     parser.add_argument("--codex", action="store_true")
+    parser.add_argument("--codex-cache", action="store_true", help="mount the pinned Codex build from the VM cache")
     parser.add_argument("--rounds", type=int, default=2)
     parser.add_argument("--per-round", type=int, default=4)
     parser.add_argument("--max-active", type=int, default=20)

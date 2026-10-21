@@ -30,7 +30,9 @@ from harbor.environments.capabilities import EnvironmentCapabilities
 
 from .boat_client import BoatQuota, process_client, process_quota
 from .boat_pool import POOL_ENV, BoatSandboxPool, process_pool
-from .boat_sandbox import BoatSandbox, ContainerSpec, machine_type_for
+from .boat_sandbox import BoatSandbox, ContainerSpec, machine_type_for, pinned_codex_cache
+
+CODEX_CACHE_ENV = "YETO_BOAT_CODEX_CACHE"  # "1": pinned Codex build cached on the VM and mounted
 
 T = TypeVar("T")
 
@@ -50,15 +52,24 @@ class BoatEnvironment(BaseEnvironment):
     ``pool`` (S26 E8): ``True`` takes the process
     :class:`~.boat_pool.BoatSandboxPool`, a pool object takes that one,
     ``None`` (default) follows ``YETO_BOAT_POOL=1``, ``False`` never pools.
+
+    ``codex_cache`` (S26 E8): ``True`` mounts the pinned Codex build from the
+    VM cache (:class:`~.boat_sandbox.CodexCache`) so Harbor skips the Codex
+    install; ``None`` (default) follows ``YETO_BOAT_CODEX_CACHE=1``.
     """
 
     def __init__(self, *args: Any, machine_type: str | None = None, ttl_s: int | None = None,
                  client: Any = None, quota: BoatQuota | None = None,
-                 pool: bool | BoatSandboxPool | None = None, **kwargs: Any) -> None:
+                 pool: bool | BoatSandboxPool | None = None, codex_cache: bool | None = None,
+                 **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._sandbox_kwargs: dict[str, Any] = {}
         if ttl_s is not None:
             self._sandbox_kwargs["ttl_s"] = ttl_s
+        if codex_cache is None:
+            codex_cache = os.environ.get(CODEX_CACHE_ENV, "").strip() == "1"
+        if codex_cache:
+            self._sandbox_kwargs["codex_cache"] = pinned_codex_cache()
         self._machine_type = machine_type or machine_type_for(self._effective_memory_mb, self._effective_cpus)
         if pool is None:
             pool = os.environ.get(POOL_ENV, "").strip() == "1"

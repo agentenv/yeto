@@ -28,6 +28,15 @@ MILES_BINDINGS_COMMIT = "53a6e92a"
 # Harbor's codex agent drives it unchanged is not verified yet (N10.7).
 CODEX_VERSION = "0.145.0"
 
+# The linux-x64 build of that version as npm ships it (a static musl binary
+# plus its bundled rg), for the boat Codex cache (S26 E8).  sha512 = npm
+# ``dist.integrity`` of the tarball, in hex.
+CODEX_LINUX_X64_URL = "https://registry.npmjs.org/@openai/codex/-/codex-0.145.0-linux-x64.tgz"
+CODEX_LINUX_X64_SHA512 = (
+    "bbcc3c2cbbf70efb1fac30a8b302c87a66744a83445f28b9d755ac7c5b1289851"
+    "ace4f6a32c07f36d53c37dbe101f37b9990312c5a0c7b1e2feba2631ee656c0"
+)
+
 
 def install_spec(extra: str = "modal") -> str:
     """``uv pip install`` requirement for the pinned build (uv: the branch has a uv-workspace dependency)."""

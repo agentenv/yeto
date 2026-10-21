@@ -17,6 +17,10 @@ S26 E8: :attr:`BoatSandbox.timings` records how long each start phase took
 (``create_s``, ``ready_s``, ``pull_s``, ``run_s``), and a started VM can be
 reused for the next task (:meth:`BoatSandbox.recycle` then
 :meth:`BoatSandbox.reuse`, driven by :class:`~.boat_pool.BoatSandboxPool`).
+With a :class:`CodexCache`, the pinned Codex build is fetched once per VM
+(checksum-checked, in parallel with the image pull), mounted read-only into
+the task container and put on its PATH as ``codex``; Harbor's codex agent
+then finds the pinned version and skips its own install (apt + nvm + npm).
 
 The boat client is synchronous; calls run in a worker thread.
 """
@@ -71,6 +75,46 @@ class ContainerSpec:
 
 
 @dataclass(frozen=True)
+class CodexCache:
+    """A Codex build kept on the VM at ``/var/cache/yeto-codex/<version>``, mounted at :data:`CODEX_MOUNT`."""
+
+    version: str
+    url: str
+    sha512: str
+
+    @property
+    def host_dir(self) -> str:
+        return f"{CODEX_CACHE_ROOT}/{self.version}"
+
+    def fetch_command(self) -> str:
+        """VM shell line: fetch, check and unpack the build once (atomic rename); exit 0 when ready."""
+        d = shlex.quote(self.host_dir)
+        musl = f"{CODEX_MOUNT}/vendor/x86_64-unknown-linux-musl"
+        wrapper = (f"#!/bin/sh\nPATH=\"{musl}/codex-path:$PATH\"\nexport PATH\n"
+                   f"exec {musl}/bin/codex \"$@\"\n")
+        return (
+            f"[ \"$(uname -m)\" = x86_64 ] && {{ [ -x {d}/bin/codex ] || {{ "
+            f"t=$(mktemp -d) && curl -fsSL --retry 3 -o $t/c.tgz {shlex.quote(self.url)} && "
+            f"echo {shlex.quote(self.sha512)}\"  $t/c.tgz\" | sha512sum -c --quiet && "
+            f"sudo -n mkdir -p $t/x/bin && sudo -n tar -xzf $t/c.tgz -C $t/x --strip-components=1 && "
+            f"printf {shlex.quote(wrapper)} | sudo -n tee $t/x/bin/codex >/dev/null && "
+            f"sudo -n chmod -R a+rX $t/x && sudo -n chmod 755 $t/x/bin/codex && "
+            f"sudo -n mkdir -p {CODEX_CACHE_ROOT} && sudo -n mv -T $t/x {d}; "
+            f"rc=$?; sudo -n rm -rf $t; [ $rc = 0 ]; }}; }}"
+        )
+
+
+CODEX_CACHE_ROOT = "/var/cache/yeto-codex"  # outside the staging dir: recycle keeps it
+CODEX_MOUNT = "/opt/yeto-codex"
+
+
+def pinned_codex_cache() -> CodexCache:
+    from .pins import CODEX_LINUX_X64_SHA512, CODEX_LINUX_X64_URL, CODEX_VERSION
+
+    return CodexCache(version=CODEX_VERSION, url=CODEX_LINUX_X64_URL, sha512=CODEX_LINUX_X64_SHA512)
+
+
+@dataclass(frozen=True)
 class ExecOutput:
     stdout: str
     stderr: str
@@ -81,7 +125,9 @@ class BoatSandbox:
     def __init__(self, client: BoatClient, quota: BoatQuota, *, name: str,
                  machine_type: str = "small", ttl_s: int = DEFAULT_TTL_S,
                  ready_timeout_s: float = 300.0, pull_timeout_s: float = 1800.0,
-                 poll_interval_s: float = 1.0, ready_poll_s: float = 0.5, sleep: Callable[[float], object] = asyncio.sleep) -> None:
+                 poll_interval_s: float = 1.0, ready_poll_s: float = 0.5, codex_cache: CodexCache | None = None,
+                 sleep: Callable[[float], object] = asyncio.sleep) -> None:
+        self._codex_cache = codex_cache
         self._client = client
         self._quota = quota
         self._name = name
@@ -178,11 +224,21 @@ class BoatSandbox:
             run += ["-w", shlex.quote(spec.workdir)]
         for key, value in (spec.env or {}).items():
             run += ["-e", shlex.quote(f"{key}={value}")]
+        cache = self._codex_cache
+        if cache is None:
+            fetch, wait = "", "m= && c=0 && "
+        else:
+            # The fetch runs beside the pull; if it fails the task runs without the
+            # cache and Harbor installs Codex itself (slower, same version).
+            fetch = f"( {cache.fetch_command()} ) >/tmp/yeto-codex-fetch.log 2>&1 & f=$! ; "
+            wait = (f"if wait $f; then m={shlex.quote(f'-v {cache.host_dir}:{CODEX_MOUNT}:ro')}; c=1; "
+                    f"else m=; c=0; fi && ")
+            run += ["$m"]
         run += [image, "sh", "-c", shlex.quote("sleep infinity")]
-        # One VM command (one poll loop); the VM clock splits pull from run.
-        command = (f"s=$(date +%s%N) && {DOCKER} pull -q {image} >/dev/null && p=$(date +%s%N) && "
-                   f"{' '.join(run)} >/dev/null && e=$(date +%s%N) && "
-                   f"echo {_PHASE_MARK} $((p-s)) $((e-p))")
+        # One VM command (one poll loop); the VM clock splits the phases.
+        command = (f"{fetch}s=$(date +%s%N) && {DOCKER} pull -q {image} >/dev/null && p=$(date +%s%N) && "
+                   f"{wait}q=$(date +%s%N) && {' '.join(run)} >/dev/null && e=$(date +%s%N) && "
+                   f"echo {_PHASE_MARK} $((p-s)) $((e-q)) $((q-p)) $c")
         started = time.monotonic()
         result = await self.vm_exec(command, timeout_s=self._pull_timeout_s)
         if result.return_code != 0:
@@ -191,6 +247,15 @@ class BoatSandbox:
         self.timings["container_s"] = time.monotonic() - started
         self.timings.update(_parse_phase_mark(result.stdout))
         self.image = spec.image
+        if self.timings.get("codex_cache") == 1.0:
+            linked = await self.exec(f"mkdir -p /usr/local/bin && ln -sf {CODEX_MOUNT}/bin/codex /usr/local/bin/codex",
+                                     user="root", timeout_s=60)
+            if linked.return_code != 0:
+                logger.warning("boat Codex cache: link failed on %s; Harbor will install Codex", self.sandbox_id)
+                self.timings["codex_cache"] = 0.0
+        elif cache is not None:
+            logger.warning("boat Codex cache: fetch failed on %s (see /tmp/yeto-codex-fetch.log on the VM); "
+                           "Harbor will install Codex", self.sandbox_id)
         if spec.workdir:
             await self.exec(f"mkdir -p {shlex.quote(spec.workdir)}", user="root", timeout_s=60)
 
@@ -227,7 +292,7 @@ class BoatSandbox:
             raise BoatError(f"boat sandbox {self.sandbox_id} not clean after recycle: "
                             f"{(result.stdout or result.stderr)[-500:]!r}")
 
-    async def reuse(self, spec: ContainerSpec, *, name: str) -> None:
+    async def reuse(self, spec: ContainerSpec, *, name: str, codex_cache: CodexCache | None = None) -> None:
         """Run a fresh task container on this (recycled) VM for the task ``name``.
 
         The VM must have passed :meth:`recycle`.  The new container starts
@@ -236,6 +301,7 @@ class BoatSandbox:
         """
         self._require_started()
         self._name = name
+        self._codex_cache = codex_cache  # the new task's choice (a cached build stays on the VM either way)
         self.timings = {"create_s": 0.0, "ready_s": 0.0}
         try:
             await self._verify_clean()
@@ -393,9 +459,12 @@ def _parse_phase_mark(stdout: str) -> dict[str, float]:
     """``pull_s``/``run_s`` from the VM's phase line; empty when it is missing or garbled."""
     for line in reversed(stdout.splitlines()):
         fields = line.split()
-        if len(fields) == 3 and fields[0] == _PHASE_MARK:
+        if len(fields) in (3, 5) and fields[0] == _PHASE_MARK:
             try:
-                return {"pull_s": int(fields[1]) / 1e9, "run_s": int(fields[2]) / 1e9}
+                out = {"pull_s": int(fields[1]) / 1e9, "run_s": int(fields[2]) / 1e9}
+                if len(fields) == 5:  # codex_fetch_wait_s: fetch time not hidden behind the pull
+                    out.update(codex_fetch_wait_s=int(fields[3]) / 1e9, codex_cache=float(int(fields[4])))
+                return out
             except ValueError:
                 return {}
     return {}

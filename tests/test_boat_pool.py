@@ -453,3 +453,84 @@ def test_quota_hourly_from_env(monkeypatch):
     assert BoatQuota.from_env().starts_per_hour is None  # default: unchanged behaviour
     monkeypatch.setenv("YETO_BOAT_STARTS_PER_HOUR", "60")
     assert BoatQuota.from_env().starts_per_hour == 60
+
+
+# -- Codex cache ---------------------------------------------------------------
+
+def test_codex_cache_is_the_pinned_build_and_its_command_parses():
+    import subprocess
+
+    from yeto.rl.harness.harbor.boat_sandbox import pinned_codex_cache
+    from yeto.rl.harness.harbor.pins import CODEX_VERSION
+
+    cache = pinned_codex_cache()
+    assert cache.version == CODEX_VERSION == "0.145.0"
+    assert cache.url.endswith(f"codex-{CODEX_VERSION}-linux-x64.tgz") and len(cache.sha512) == 128
+    command = cache.fetch_command()
+    assert "sha512sum -c" in command and cache.sha512 in command and "/var/cache/yeto-codex/0.145.0" in command
+    assert subprocess.run(["bash", "-n", "-c", command], check=False).returncode == 0
+
+
+class CacheFake(VmFake):
+    def __init__(self, cache_ok: bool, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.cache_ok = cache_ok
+
+    def command_status(self, sandbox_id: str, process_id: int) -> CommandStatus:
+        command = self.commands[process_id - 1]
+        if "yeto-boat-phases" in command:
+            flag = int(self.cache_ok and "yeto-codex-fetch" in command)
+            return CommandStatus(running=False, exit_code=0,
+                                 stdout=f"yeto-boat-phases 2000000000 500000000 1000000000 {flag}\n", stderr="")
+        return super().command_status(sandbox_id, process_id)
+
+
+@pytest.mark.parametrize("cache_ok", [True, False])
+def test_codex_cache_mounts_read_only_and_links_or_falls_back(cache_ok):
+    from yeto.rl.harness.harbor.boat_sandbox import pinned_codex_cache
+
+    fake = CacheFake(cache_ok)
+
+    async def go():
+        box = _factory(fake, BoatQuota(2, 12), name="t", machine_type="small", codex_cache=pinned_codex_cache())
+        await box.start(SPEC_A)
+        await box.close()
+        return box
+
+    box = asyncio.run(go())
+    run = next(c for c in fake.commands if "docker run -d" in c)
+    assert "-v /var/cache/yeto-codex/0.145.0:/opt/yeto-codex:ro" in run and " $m " in run
+    assert run.index("wait $f") < run.index("docker run -d")  # fetch finished before the container starts
+    linked = [c for c in fake.commands if "ln -sf /opt/yeto-codex/bin/codex /usr/local/bin/codex" in c]
+    assert bool(linked) is cache_ok
+    assert box.timings["codex_cache"] == float(cache_ok) and box.timings["codex_fetch_wait_s"] == 1.0
+
+
+def test_no_codex_cache_by_default():
+    fake = CacheFake(True)
+
+    async def go():
+        box = _factory(fake, BoatQuota(2, 12), name="t", machine_type="small")
+        await box.start(SPEC_A)
+        await box.close()
+
+    asyncio.run(go())
+    assert not any("yeto-codex" in c for c in fake.commands)
+
+
+def test_pool_reuse_applies_the_new_tasks_codex_cache_choice():
+    from yeto.rl.harness.harbor.boat_sandbox import pinned_codex_cache
+
+    fake = CacheFake(True)
+
+    async def go():
+        pool = _pool(fake)
+        box = await pool.acquire(SPEC_A, name="a", machine_type="small")
+        await pool.release(box)
+        box = await pool.acquire(SPEC_A, name="b", machine_type="small", codex_cache=pinned_codex_cache())
+        assert box.reuse_count == 1 and box.timings["codex_cache"] == 1.0
+        await pool.release(box)
+        await pool.close()
+
+    asyncio.run(go())
+    assert sum("yeto-codex-fetch" in c for c in fake.commands) == 1
