@@ -48,10 +48,14 @@ from yeto.rl.engine.policy_release import (
     PolicyFollower,
     PolicyRelease,
     PolicyReleaseStore,
+    ReleaseNotLoaded,
 )
 from yeto.rl.engine.merged_release import MergedReleaseGuard, is_publisher, merged_version
 from yeto.rl.engine.policy_versions import engine_weight_version
 from yeto.rl.engine.sample_roles import CONVERTIBLE, SAMPLER, TRAINER
+from yeto.rl.quant.schemes import BF16, FP8_FFN_CHANNEL, release_dir_for
+from yeto.rl.quant.scope import QuantScopeError
+from yeto.rl.quant.tiers import TIER_TRAINER_FP8, check_release_scope, describe, release_scheme
 
 from .buffer_rollout import (
     SampleBufferRolloutError,
@@ -86,10 +90,48 @@ def _buffer_config(miles_args: Any, role: str) -> Any:
     return config if config is not None and config.role == role else None
 
 
-def release_store(config: Any, environ: Any = None) -> PolicyReleaseStore:
+def release_store(config: Any, environ: Any = None, *, scheme: str = BF16) -> PolicyReleaseStore:
     from yeto.rl.engine.resume import store_for
 
-    return PolicyReleaseStore(store_for(config.store, environ=environ))
+    if scheme == BF16:
+        return PolicyReleaseStore(store_for(config.store, environ=environ))
+    return PolicyReleaseStore(store_for(config.store, environ=environ), release_dir=release_dir_for(scheme))
+
+
+def _quant_tier(miles_args: Any) -> int:
+    return int(getattr(miles_args, "yeto_rollout_quant_tier", 0) or 0)
+
+
+def prepare_quantized_base(miles_args: Any, work_dir: Path) -> Path:
+    """S26 E6 tier 2, sampler side: the engines start on the FP8 conversion of the BF16
+    base (``miles_args.hf_checkpoint``), so later FP8 releases load into FP8 parameters
+    of the same layout. The conversion is checked against the scope rule. Returns the
+    converted directory, which replaces ``miles_args.hf_checkpoint``."""
+    from yeto.rl.quant.awq import AwqSmoothing
+    from yeto.rl.quant.requant import requantize_checkpoint, save_scoped_template
+
+    base = Path(miles_args.hf_checkpoint)
+    template, out = work_dir / "fp8-template", work_dir / "fp8-base"
+    save_scoped_template(base, template, FP8_FFN_CHANNEL)
+    stats = requantize_checkpoint(base, template, out, AwqSmoothing.none())
+    check_release_scope(out)
+    print(f"[rl] {describe(TIER_TRAINER_FP8)}: base {base} -> {out} {stats}", flush=True)
+    miles_args.hf_checkpoint = str(out)
+    return out
+
+
+def scope_checked(load: Callable[[PolicyRelease, Path], None]) -> Callable[[PolicyRelease, Path], None]:
+    """A ``PolicyFollower`` load hook that refuses an FP8 release outside the scope rule
+    before the engines are touched (S26 E6 tier 2 post-load check, step one)."""
+    def hook(release: PolicyRelease, directory: Path) -> None:
+        try:
+            check_release_scope(Path(directory))
+        except QuantScopeError as error:
+            raise ReleaseNotLoaded(f"r{release.seq}-v{release.version}: {error}",
+                                   reason="release_refused:quant_scope") from error
+        load(release, directory)
+
+    return hook
 
 
 # ---------------------------------------------------------------------- sampler side
@@ -310,6 +352,10 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
                                    incarnation, resume, emit)
     progress = {"rollout_id": None, "rounds": 0}  # the round in flight, rounds done here
 
+    if _quant_tier(miles_args) == TIER_TRAINER_FP8:
+        if lora_mode(miles_args):
+            raise SampleBufferRolloutError("rollout quant tier 2 needs full-parameter releases")
+        prepare_quantized_base(miles_args, Path(env.get("YETO_RL_WORK_DIR") or Path.home() / "yeto-rl"))
     connect_island_ray(miles_args=miles_args)
     # The rollout process's metadata hook pushes each round's group records to this
     # named actor (on a trainer island the driver creates it and consumes them).
@@ -355,8 +401,10 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
         loader = EngineReleaseLoader(controller, executor, runner.run, lora=lora)
         if not lora:  # LoRA: no adapter is served before the first release (require_release)
             loader.stamp(BASE_POLICY_VERSION)  # until the first release is loaded
-        follower = PolicyFollower(release_store(config, environ), loader,
-                                  version=BASE_POLICY_VERSION)
+        scheme = release_scheme(_quant_tier(miles_args))
+        follower = PolicyFollower(release_store(config, environ, scheme=scheme),
+                                  loader if scheme == BF16 else scope_checked(loader),
+                                  version=BASE_POLICY_VERSION, scheme=scheme)
         loop = SamplerLoop(
             follower=follower, buffer=buffer, emit=emit,
             generate=lambda rollout_id: runner.run(generate(rollout_id)),
@@ -554,4 +602,23 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
                                    read_shards=lambda: in_executor(executor_read_shards),
                                    emit=driver.emit, weights=LORA if lora else FULL, **synced)
     driver.publisher = publisher
+    if _quant_tier(miles_args) == TIER_TRAINER_FP8:
+        start_trainer_releaser(miles_args, config, environ)
     return publisher
+
+
+def start_trainer_releaser(miles_args: Any, config: Any, environ: Any = None) -> Any:
+    """S26 E6 tier 2, trainer side: a thread of this driver converts every BF16 release
+    into an FP8 release (``yeto.rl.quant.release.scoped_releaser``) for the sampler islands."""
+    import threading
+
+    from yeto.rl.engine.resume import store_for
+    from yeto.rl.quant.release import scoped_releaser, start_scoped_releaser
+
+    if lora_mode(miles_args):
+        raise SampleBufferRolloutError("rollout quant tier 2 needs full-parameter releases")
+    env = os.environ if environ is None else environ
+    template = Path(env.get("YETO_RL_WORK_DIR") or Path.home() / "yeto-rl") / "fp8-template"
+    releaser = scoped_releaser(store_for(config.store, environ=environ), Path(miles_args.hf_checkpoint),
+                               template, FP8_FFN_CHANNEL)
+    return start_scoped_releaser(releaser, threading.Event())

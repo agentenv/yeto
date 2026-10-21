@@ -697,11 +697,17 @@ def _full_parameter_identity(model_config_sha256: str) -> tuple[str, str]:
 
 
 def _buffer_island(args) -> bool:
-    """A no-sync sampler / trainer island (L4.6): it has no outer sync, so full
-    parameter mode runs without the full-parameter sync preset."""
+    """A no-sync island with no outer sync, so full parameter mode runs without the
+    full-parameter sync preset: a sampler / trainer island (L4.6), or one island
+    whose dedicated engine cards take Miles' own full-parameter weight update
+    (S26 E6; colocated is refused)."""
     from yeto.rl.engine.sample_roles import BOTH, sample_role
 
-    return bool(getattr(args, "rl_single_island_no_sync", False)) and sample_role(args) != BOTH
+    if not getattr(args, "rl_single_island_no_sync", False):
+        return False
+    if sample_role(args) != BOTH:
+        return True
+    return getattr(args, "rl_placement", "colocated") == "fixed-partition"
 
 
 def _full_parameter_mode(args, sync_preset: str) -> bool:

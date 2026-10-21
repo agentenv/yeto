@@ -143,6 +143,57 @@ def requantizer(template_dir: Path, smoothing: Any, frozen: tuple[Path, str] | N
     return run
 
 
+def scoped_releaser(store: Any, base_dir: Path, template_dir: Path, scheme: str, *, keep: int = 2,
+                    log: Callable[[str], None] = lambda m: print(m, flush=True)) -> RequantReleaser:
+    """A releaser for a scoped scheme (S26 E6 tier 2: FP8 on the in-scope linears only).
+
+    The template is derived from the BF16 base checkpoint ``base_dir``
+    (:func:`~.requant.save_scoped_template`) into ``template_dir``, checked against
+    the scope rule, and every BF16 release of ``store`` is converted with it. Both
+    trainer backends start it beside their BF16 releases (:func:`start_scoped_releaser`).
+    """
+    from .requant import check_layout_scope, save_scoped_template
+    from .scope import model_kind_of
+
+    layout = save_scoped_template(Path(base_dir), Path(template_dir), scheme)
+    check_layout_scope(layout, model_kind_of(Path(base_dir)))
+    return RequantReleaser(PolicyReleaseStore(store, keep=keep, release_dir=release_dir_for(BF16)),
+                           PolicyReleaseStore(store, keep=keep, release_dir=release_dir_for(scheme)),
+                           requantizer(Path(template_dir), _no_smoothing()), scheme=scheme,
+                           expert_matrices=routed_expert_matrices(layout.quantized_modules), log=log)
+
+
+def routed_expert_matrices(modules: Any) -> int:
+    """Per-expert routed matrices among ``modules``: the count the sampler's release
+    check compares with the index (``sampler_checks.EXPERT_WEIGHT_PATTERN``); 0 for a dense model."""
+    import re
+
+    return sum(1 for m in modules if re.search(r"\.experts\.\d+\.\w+_proj$", m))
+
+
+def start_scoped_releaser(releaser: RequantReleaser, stop: threading.Event,
+                          poll_s: float = 10.0) -> threading.Thread:
+    """Run ``releaser`` in a daemon thread until ``stop`` is set. A failed conversion
+    ends the thread with the error printed; the sampler then serves no newer version
+    and its policy age guard stops the run (never a silent BF16 fallback)."""
+    def body() -> None:
+        try:
+            releaser.run(stop, poll_s)
+        except BaseException as error:  # noqa: BLE001 - reported, the thread ends
+            releaser.log(f"[requant] scoped releaser stopped: {type(error).__name__}: {error}")
+            raise
+
+    thread = threading.Thread(target=body, name=f"requant-{releaser.scheme}", daemon=True)
+    thread.start()
+    return thread
+
+
+def _no_smoothing() -> Any:
+    from .awq import AwqSmoothing
+
+    return AwqSmoothing.none()
+
+
 def main(argv: list[str] | None = None) -> int:
     from yeto.rl.engine.resume import store_for
 

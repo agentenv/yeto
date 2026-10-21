@@ -11,10 +11,11 @@ Moved out of ``yeto/rl/engine/resume.py`` (the neutral core must not import
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from typing import Any
 
 from yeto.rl.engine.resume import CheckpointStore
@@ -22,6 +23,40 @@ from yeto.rl.engine.resume import CheckpointStore
 MODAL_VOLUME_ENV = "YETO_RL_STORE_MODAL_VOLUME"  # set by the launcher on a Modal island
 MODAL_VOLUME_SCHEME = "modal-volume"
 STORE_IMPL = "yeto.cloud.modal_ckpt_store:store_from_env"  # value of resume.STORE_IMPL_ENV
+
+
+GUARD_DIR_ENV = "YETO_MODAL_VOLUME_GUARD_DIR"  # tests; default /tmp (container-local, not the Volume)
+
+
+@contextlib.contextmanager
+def _volume_lock(volume: str, mode: int) -> Iterator[bool]:
+    """``flock`` on a container-local file per Volume, shared by every process of the
+    container (the trainer driver, its Ray actors and threads each open their own
+    descriptor). Yields whether the lock was taken (False only for a non-blocking try).
+
+    A reload remounts the Volume for the whole container and drops local files not
+    committed yet, so writers hold it shared and a reload tries it exclusive and is
+    skipped while any writer holds it (reload is best effort). Seen on Modal
+    (e6-t2-pair-a/-c, 2026-10-21): rollout actors' reloads removed the tier 2 releaser
+    thread's half-written FP8 release (FileNotFoundError on RELEASE.json.tmp / LATEST.json.tmp)."""
+    import fcntl
+    import re
+
+    root = os.environ.get(GUARD_DIR_ENV) or "/tmp"
+    path = os.path.join(root, "yeto-modal-volume-" + re.sub(r"[^A-Za-z0-9_.-]", "_", volume) + ".lock")
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o666)
+    try:
+        try:
+            fcntl.flock(fd, mode)
+        except BlockingIOError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 class ModalVolumeStore(CheckpointStore):
@@ -72,14 +107,28 @@ class ModalVolumeStore(CheckpointStore):
 
     commits = 0
 
+    @contextlib.contextmanager
+    def writing(self) -> Iterator[None]:
+        import fcntl
+
+        with _volume_lock(self.volume_name, fcntl.LOCK_SH):
+            yield
+
     def reload(self) -> None:
-        try:
-            if self._factory is None and os.environ.get("YETO_MODAL_PYTHON"):
-                self._runner_call("reload")
-            else:
-                self._volume().reload()
-        except Exception as exc:  # noqa: BLE001 - reload is best effort (open files block it)
-            logging.getLogger(__name__).warning("modal volume reload failed: %r", exc)
+        import fcntl
+
+        with _volume_lock(self.volume_name, fcntl.LOCK_EX | fcntl.LOCK_NB) as taken:
+            if not taken:  # a reload now would drop a writer's uncommitted files
+                logging.getLogger(__name__).info("modal volume reload skipped: a writer holds %s",
+                                                 self.volume_name)
+                return
+            try:
+                if self._factory is None and os.environ.get("YETO_MODAL_PYTHON"):
+                    self._runner_call("reload")
+                else:
+                    self._volume().reload()
+            except Exception as exc:  # noqa: BLE001 - reload is best effort (open files block it)
+                logging.getLogger(__name__).warning("modal volume reload failed: %r", exc)
 
     def describe(self) -> dict[str, Any]:
         return {**super().describe(), "volume": self.volume_name}

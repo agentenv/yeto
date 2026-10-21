@@ -265,6 +265,9 @@ def _prepare_rl_args(
             raise ValueError("--codex-reasoning-effort requires --training-mode rl")
         return
 
+    from yeto.rl.quant.tiers import validate_launch as _validate_quant_tier
+
+    _validate_quant_tier(args)  # S26 E6: refused before any cloud spend
     _prepare_node_inventory(args)
 
     from ..adapter_lifecycle import directory_sha256, selected_parent
@@ -319,10 +322,11 @@ def _prepare_rl_args(
         raise ValueError("RL v0 supports only causal language models")
     from ..rl.engine import sample_roles
 
-    if args.tuning != "lora" and not sample_roles.buffer_full_parameter(args):
+    if args.tuning != "lora" and not sample_roles.no_sync_full_parameter(args):
         raise ValueError("RL v0 requires --tuning lora (--tuning full: only sampler / trainer "
-                         "islands, --rl-sample-role or --rl-island-sample-role, with "
-                         "--rl-single-island-no-sync)")
+                         "islands, --rl-sample-role or --rl-island-sample-role, or one island "
+                         "with dedicated engine cards, --rl-placement fixed-partition; both "
+                         "with --rl-single-island-no-sync)")
     if args.lora_r <= 0:
         raise ValueError("RL v0 requires a positive LoRA rank")
     if args.total_steps <= 0:

@@ -173,7 +173,8 @@ def main() -> None:
     p.add_argument("--out", type=Path, required=True)
     a = p.parse_args()
 
-    check_pure_python(a.miles_src, a.miles_base_commit, a.miles_commit, ("miles/", "miles_plugins/"))
+    # tools/: stand-alone scripts run from the checkout (e.g. convert_hf_to_fp8.py), nothing built
+    check_pure_python(a.miles_src, a.miles_base_commit, a.miles_commit, ("miles/", "miles_plugins/", "tools/"))
     check_pure_python(a.sglang_src, a.sglang_base_commit, a.sglang_commit, ("python/sglang/",))
 
     entries: dict[str, tuple[str, bytes | None, int, str | None]] = {}
