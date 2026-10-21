@@ -54,6 +54,7 @@ from .state_plugin import (
 
 _MODULE = "yeto.rl.adapters.miles.cut_plugin"
 SAVE_CUT_SHARD = f"{_MODULE}.save_cut_shard"
+FINISH_CUT_SHARD = f"{_MODULE}.finish_cut_shard"
 RESTORE_CUT_SHARD = f"{_MODULE}.restore_cut_shard"
 SHARD_SCHEMA = "yeto.cut_shard/v1"
 # Opt-in: read the optimizer back right after the load and report where a mismatch arises.
@@ -596,22 +597,59 @@ REFUSED = "refused"  # key of a "nothing written" result (reason text)
 REFUSAL_KIND = "refusal_kind"  # "refused" (deliberate) | "failed_before_write"
 
 
-def save_cut_shard(actor: Any, *, directory: str, cut_id: str) -> dict[str, Any]:
+# E1: shards being written by a background thread of this rank, by cut id
+_PENDING_SHARDS: dict[str, Any] = {}
+
+
+def save_cut_shard(actor: Any, *, directory: str, cut_id: str, background: bool = False) -> dict[str, Any]:
     """Write this rank's shard (tmp + fsync + rename) and return its summary.
 
     A refusal (unsupported configuration, not at a step boundary, ...) is
     RETURNED as ``{"refused": reason}`` instead of raised: Miles marks a cell
     errored on any ``run_plugin`` exception (GPU run 2026-09-30, C1), which
     would turn a clean "no cut" into a dead trainer.
+
+    ``background`` (E1): take the state now (CPU copies, at this step boundary) and
+    write, hash and summarize it in a thread of this rank, so training goes on;
+    returns ``{"pending": cut_id}``. :func:`finish_cut_shard` returns the summary.
     """
     try:
         with trainer_resident(actor):
-            return _save(actor, directory=directory, cut_id=cut_id)
+            captured = _capture(actor, cut_id=cut_id)
+    except CutPluginError as error:
+        return {REFUSED: str(error), REFUSAL_KIND: "refused"}
+    if not background:
+        return _write_refusing(captured, directory=directory, cut_id=cut_id)
+    from concurrent.futures import ThreadPoolExecutor
+
+    if cut_id in _PENDING_SHARDS:
+        return {REFUSED: f"cut {cut_id} is already being written", REFUSAL_KIND: "refused"}
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"yeto-cut-{cut_id}")
+    _PENDING_SHARDS[cut_id] = (pool, pool.submit(_write_refusing, captured, directory=directory, cut_id=cut_id))
+    pool.shutdown(wait=False)
+    return {"pending": cut_id, "coord": dict(captured["coord"])}
+
+
+def finish_cut_shard(actor: Any, *, cut_id: str) -> dict[str, Any]:
+    """The summary of a background :func:`save_cut_shard` (waits for its thread)."""
+    pending = _PENDING_SHARDS.pop(cut_id, None)
+    if pending is None:
+        return {REFUSED: f"no background write of cut {cut_id} on this rank", REFUSAL_KIND: "failed_before_write"}
+    try:
+        return pending[1].result()
+    except Exception as error:  # noqa: BLE001 - reported like a refusal: the cut is not committed
+        return {REFUSED: f"background write of cut {cut_id} failed: {error!r}", REFUSAL_KIND: "failed"}
+
+
+def _write_refusing(captured: dict[str, Any], *, directory: str, cut_id: str) -> dict[str, Any]:
+    try:
+        return _write(captured, directory=directory, cut_id=cut_id)
     except CutPluginError as error:
         return {REFUSED: str(error), REFUSAL_KIND: "refused"}
 
 
-def _save(actor: Any, *, directory: str, cut_id: str) -> dict[str, Any]:
+def _capture(actor: Any, *, cut_id: str) -> dict[str, Any]:
+    """Everything the shard and its summary need, read at the step boundary (CPU copies)."""
     import torch
 
     backend = _backend(actor)
@@ -622,6 +660,16 @@ def _save(actor: Any, *, directory: str, cut_id: str) -> dict[str, Any]:
     with torch.no_grad():
         snap = _snapshot(actor, backend, named)
         rng = backend.capture_rng()
+    return {"coord": coord, "snap": snap, "rng": rng,
+            "scheduler_samples": int(actor.opt_param_scheduler.num_steps),
+            "tuning": _tuning(backend, named), "adapter_names": sorted(n for n, _ in named),
+            "resume": resume_rank_state(actor, snap["optimizer_named"])}
+
+
+def _write(captured: dict[str, Any], *, directory: str, cut_id: str) -> dict[str, Any]:
+    import torch
+
+    coord, snap, rng = captured["coord"], captured["snap"], captured["rng"]
     shard = {"schema": SHARD_SCHEMA, "cut_id": cut_id, "coord": dict(coord), **snap, "rng": rng}
     os.makedirs(directory, exist_ok=True)
     name = shard_name(coord)
@@ -652,7 +700,7 @@ def _save(actor: Any, *, directory: str, cut_id: str) -> dict[str, Any]:
         "sha256": _sha256(final),
         "bytes": os.path.getsize(final),
         "coord": dict(coord),
-        "scheduler_samples": int(actor.opt_param_scheduler.num_steps),
+        "scheduler_samples": captured["scheduler_samples"],
         "has_optimizer_state": snap["optimizer_named"] is not None,
         "has_rng": rng is not None,
         "state_digest": state_digest(snap),
@@ -660,11 +708,11 @@ def _save(actor: Any, *, directory: str, cut_id: str) -> dict[str, Any]:
         "weight_version": (snap.get("miles_counters") or {}).get("weight_version"),
         "rng_digest": state_digest(rng),
         "components": component_digests({"state": snap, "rng": rng}),
-        "tuning": _tuning(backend, named),
-        "adapter_tensors": len(named),
-        "adapter_names": sorted(n for n, _ in named),
+        "tuning": captured["tuning"],
+        "adapter_tensors": len(captured["adapter_names"]),
+        "adapter_names": captured["adapter_names"],
         "optimizer_names": sorted((snap["optimizer_named"] or {}).get("entries", {})),
-        "resume": resume_rank_state(actor, snap["optimizer_named"]),
+        "resume": captured["resume"],
     }
 
 

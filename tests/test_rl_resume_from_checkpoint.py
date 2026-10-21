@@ -193,12 +193,10 @@ def test_save_kill_resume_without_elastic_continues_bitwise(tmp_path):
     store = _store(tmp_path / "store", vol)
     rank_a, ctl_a, driver_a, cp_a = _trained_island(tmp_path, store, 2)
     info = cp_a.save(driver_a, rollout_id=2)
-    # E1: a periodic cut commits the store in the background; LATEST is written already
-    assert info["store_synced"] is None and info["store_commit"] == "background"
+    # E1: the store's first cut is complete inline (a store with cuts but no LATEST refuses to start)
+    assert info["store_synced"] is True and info["store_commit"] == "inline"
     assert info["cut_bytes"] > 0 and info["lr_at_next_round"] == [5e-6]
     assert info["run_fingerprint"] == FP and info["consumed_groups"] == 8 and info["incarnation_index"] == 0
-    assert cp_a.join_commit(driver_a)["ok"] is True
-    assert driver_a.events[-1][0] == "rl_cut_committed" and driver_a.events[-1][1]["cut_id"] == info["cut_id"]
     assert vol.commits >= 1 and rs.read_latest(store.root)["cut_id"] == info["cut_id"]
 
     rank_b = make_rank(9)
@@ -547,9 +545,9 @@ def test_resume_wiring_carries_the_runtime_fingerprint(tmp_path):
     assert w.controller.runtime_fingerprint == "miles@abc" and w.every == 2 and w.ledger is not None
 
 
-# ---------------------------------------------------------------- E1: cut before offload, background commit
+# ---------------------------------------------------------------- E1: cut before offload, background cut
 class _CountingTrainer:
-    """The real MilesTrainerGroup cut path, counting save/onload/offload calls."""
+    """The real MilesTrainerGroup cut path, counting the cut and onload/offload calls."""
 
     def __init__(self, inner):
         self.inner = inner
@@ -558,6 +556,14 @@ class _CountingTrainer:
     def save_cut(self, **kw):
         self.calls.append("save_cut")
         return self.inner.save_cut(**kw)
+
+    def start_cut(self, **kw):
+        self.calls.append("start_cut")
+        return self.inner.start_cut(**kw)
+
+    def finish_cut(self, pending):
+        self.calls.append("finish_cut")
+        return self.inner.finish_cut(pending)
 
     def onload(self):
         self.calls.append("onload")
@@ -577,61 +583,75 @@ def _publish(driver, version, policy_hash):
     driver.expected_token = policy_token(version, policy_hash)
 
 
-def _prepared_island(tmp_path, store, **kw):
-    """Two trained rounds, policy v1 published, v2 about to be published by an offloaded
-    colocated trainer."""
+def _island_with_first_cut(tmp_path, store, keep=2):
+    """One trained round, cut inline at v1 (the store's first cut); then a second
+    trained round whose cut (v2) is the periodic one under test."""
     rank = make_rank(0)
     g = torch.Generator().manual_seed(3)
-    for _ in range(2):
-        train_step(rank, torch.randn(3, 6, generator=g))
-    ctl = _rctl(tmp_path, "a", store)
-    driver = _Driver(rank, published=1, local_step=2)
+    train_step(rank, torch.randn(3, 6, generator=g))
+    ctl = _rctl(tmp_path, "a", store, keep=keep)
+    driver = _Driver(rank, published=None, local_step=1)
     driver.last_applied_lrs = [5e-6]
-    driver._trainer_offloaded = True
     trainer = _CountingTrainer(_trainer(rank))
-    return rank, driver, trainer, _cp(ctl, driver, trainer, _Ledger(2), **kw)
+    cp = _cp(ctl, driver, trainer, _Ledger(2))
+    _publish(driver, 1, _hash(rank))
+    first = cp.save(driver, rollout_id=1)
+    assert first["store_commit"] == "inline" and first["store_synced"] is True
+    train_step(rank, torch.randn(3, 6, generator=g))
+    driver.local_step = 2
+    trainer.calls.clear()
+    return rank, driver, trainer, cp, first
 
 
-def test_cut_prepared_before_offload_is_kept_without_waking_the_trainer(tmp_path):
+def _resume_fresh(tmp_path, store, rank):
+    rank_b = make_rank(9)
+    driver_b = _Driver(rank_b)
+    cp_b = _cp(_rctl(tmp_path, "b", store), driver_b, _trainer(rank_b), _Ledger(2))
+    got = cp_b.resume(driver_b)
+    for n, v in params(rank).items():
+        assert torch.equal(v, params(rank_b)[n])
+    return got
+
+
+def test_prepared_cut_is_written_in_the_background_without_waking_the_trainer(tmp_path):
     store = _store(tmp_path / "store", _Vol())
-    rank, driver, trainer, cp = _prepared_island(tmp_path, store)
+    rank, driver, trainer, cp, first = _island_with_first_cut(tmp_path, store)
+    driver._trainer_offloaded = True
     state = SimpleNamespace(policy_version=2, policy_tensor_hash=lambda: _hash(rank))
     assert cp.prepare(driver, rollout_id=2, state=state) is True
     _publish(driver, 2, _hash(rank))
     info = cp.save(driver, rollout_id=2)
-    assert trainer.calls == ["save_cut"]  # no wake/sleep for the cut
-    assert info["prepared_before_offload"] is True and info["trainer_onloaded_for_cut"] is False
-    assert cp.join_commit(driver)["ok"] is True
-    # the prepared cut is a complete cut: a fresh island resumes from it bitwise
-    rank_b = make_rank(9)
-    driver_b = _Driver(rank_b)
-    cp_b = _cp(_rctl(tmp_path, "b", store), driver_b, _trainer(rank_b), _Ledger(2))
-    assert cp_b.resume(driver_b)["next_rollout_id"] == 2
-    for n, v in params(rank).items():
-        assert torch.equal(v, params(rank_b)[n])
+    assert trainer.calls == ["start_cut"]  # captured before the offload: no wake/sleep
+    assert info["prepared_before_offload"] is True and info["store_commit"] == "deferred"
+    assert cp.pointer()["cut_id"] == first["cut_id"]  # not pointed at until complete
+    done = cp.join_commit(driver)
+    assert done["ok"] is True and done["cut_id"] == info["cut_id"] and trainer.calls[-1] == "finish_cut"
+    assert driver.events[-1][0] == "rl_cut_committed" and driver.events[-1][1]["ok"] is True
+    assert cp.pointer()["cut_id"] == info["cut_id"]
+    assert rs.read_latest(store.root)["cut_id"] == info["cut_id"]
+    assert _resume_fresh(tmp_path, store, rank)["next_rollout_id"] == 2
 
 
 def test_prepared_cut_for_another_policy_is_dropped_and_cut_again(tmp_path):
     store = _store(tmp_path / "store", _Vol())
-    rank, driver, trainer, cp = _prepared_island(tmp_path, store)
+    rank, driver, trainer, cp, _first = _island_with_first_cut(tmp_path, store)
+    driver._trainer_offloaded = True
     cp.prepare(driver, rollout_id=2, state=SimpleNamespace(policy_version=2, policy_tensor_hash=lambda: "f" * 64))
     _publish(driver, 2, _hash(rank))  # the publication names other weights
     info = cp.save(driver, rollout_id=2)
-    assert trainer.calls == ["save_cut", "onload", "save_cut", "offload"]
+    assert trainer.calls == ["start_cut", "finish_cut", "onload", "start_cut", "offload"]
     assert info["prepared_before_offload"] is False and info["policy_hash"] == _hash(rank)
-    cp.join_commit(driver)
-    rank_b = make_rank(9)
-    driver_b = _Driver(rank_b)
-    cp_b = _cp(_rctl(tmp_path, "b", store), driver_b, _trainer(rank_b), _Ledger(2))
-    assert cp_b.resume(driver_b)["policy_hash"] == _hash(rank)
+    assert cp.join_commit(driver)["ok"] is True
+    assert _resume_fresh(tmp_path, store, rank)["policy_hash"] == _hash(rank)
 
 
-def test_final_cut_commits_inline(tmp_path):
+def test_final_cut_completes_inline_after_the_pending_one(tmp_path):
     store = _store(tmp_path / "store", _Vol())
-    _rank, _ctl_a, driver, cp = _trained_island(tmp_path, store, 2)
+    rank, driver, trainer, cp, _first = _island_with_first_cut(tmp_path, store)
+    _publish(driver, 2, _hash(rank))
     info = cp.save(driver, rollout_id=2, final=True)
     assert info["store_commit"] == "inline" and info["store_synced"] is True
-    assert cp.join_commit(driver) is None
+    assert trainer.calls == ["save_cut"] and cp.join_commit(driver) is None
 
 
 def test_failed_background_commit_keeps_the_previous_cut(tmp_path):
@@ -645,18 +665,8 @@ def test_failed_background_commit_keeps_the_previous_cut(tmp_path):
 
     vol = _FailingVol()
     store = _store(tmp_path / "store", vol)
-    rank = make_rank(0)
-    g = torch.Generator().manual_seed(3)
-    ctl = _rctl(tmp_path, "a", store, keep=1)
-    driver = _Driver(rank, published=0, local_step=0)
-    driver.last_applied_lrs = [5e-6]
-    cp = _cp(ctl, driver, _trainer(rank), _Ledger(2))
-    train_step(rank, torch.randn(3, 6, generator=g))
-    driver.published_version, driver.local_step = 1, 1
-    first = cp.save(driver, rollout_id=1)
-    assert cp.join_commit(driver)["ok"] is True
-    train_step(rank, torch.randn(3, 6, generator=g))
-    driver.published_version, driver.local_step = 2, 2
+    rank, driver, _trainer_c, cp, first = _island_with_first_cut(tmp_path, store, keep=1)
+    _publish(driver, 2, _hash(rank))
     vol.fail = True
     cp.save(driver, rollout_id=2)
     result = cp.join_commit(driver)
@@ -666,12 +676,13 @@ def test_failed_background_commit_keeps_the_previous_cut(tmp_path):
     assert (store.root / rs.ROUND_CUTS / first["cut_id"]).is_dir()
 
 
-def test_background_commit_can_be_turned_off(tmp_path, monkeypatch):
+def test_background_cut_can_be_turned_off(tmp_path, monkeypatch):
     monkeypatch.setenv("YETO_RL_CUT_BACKGROUND_COMMIT", "0")
     store = _store(tmp_path / "store", _Vol())
-    _rank, _ctl_a, driver, cp = _trained_island(tmp_path, store, 2)
+    rank, driver, trainer, cp, _first = _island_with_first_cut(tmp_path, store)
+    _publish(driver, 2, _hash(rank))
     info = cp.save(driver, rollout_id=2)
-    assert info["store_commit"] == "inline" and info["store_synced"] is True
+    assert info["store_commit"] == "inline" and info["store_synced"] is True and trainer.calls == ["save_cut"]
 
 
 def test_cut_context_takes_the_cursor_read_with_the_in_flight_entries():
