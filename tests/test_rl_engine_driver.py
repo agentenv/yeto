@@ -964,3 +964,37 @@ def test_first_optimizer_step_records_the_last_start_phase_once(tmp_path):
     assert names == list(START_PHASES)
     [summary] = [f for e, f in emitted if e == "trainer_start_summary"]
     assert summary["total_s"] == 6.0 and summary["missing"] == []
+
+
+def test_colocated_publish_offloaded_prepares_a_due_cut_before_offloading(tmp_path):
+    """E1: with round cuts, the trainer part of a due cut is written while the trainer
+    is still resident (before the offload for the publication), not after it."""
+    engine = _engine()
+    engine.trainer.publish_offloaded = True
+    sync = LocalOnlySync(2)
+    order = []
+
+    class _Cuts:
+        def resume(self, driver):
+            return None
+
+        def due(self, rollout_id, *, final=False):
+            return True
+
+        def prepare(self, driver, *, rollout_id, state, final=False):
+            order.append(("prepare", rollout_id, state.policy_version, final, driver._trainer_offloaded))
+
+        def save(self, driver, *, rollout_id, final=False, **kw):
+            order.append(("save", rollout_id, final))
+            return None
+
+    sync.round_cuts = _Cuts()
+    driver = _driver(engine, sync, tmp_path)
+    driver.run()
+    if PROFILE == "ports-only":  # publish resident: nothing to prepare
+        assert not any(o[0] == "prepare" for o in order)
+        return
+    assert [o for o in order if o[1] >= 1][:2] == [("prepare", 1, 1, False, False), ("save", 1, False)]
+    assert ("prepare", 2, 2, True, False) in order
+    phases = [e["phase"] for e in _events(tmp_path / "events.jsonl") if e["event"] == "rl_driver_phase"]
+    assert phases[4:8] == ["train", "sync", "checkpoint", "offload"]

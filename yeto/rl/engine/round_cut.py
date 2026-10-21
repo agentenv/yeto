@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -92,14 +93,28 @@ class CutSource:
         ref = self.driver_ref
         return ref() if callable(ref) and not hasattr(ref, "published_state") else ref
 
-    def context(self, cut_id: str) -> Any:
+    def context(self, cut_id: str, *, pending: tuple[int, Any] | None = None) -> Any:
+        """The cut context at the safe point after the current publication.
+
+        ``pending`` = ``(version, state)``: build it before that publication, for
+        the state the driver is about to publish as ``version`` (the policy token
+        is the one the publication will set). Only valid when nothing but the
+        publication happens until the safe point (colocated, generation done);
+        :meth:`RoundCutCheckpoint.save` keeps such a cut only if the publication
+        then names the same policy."""
         from yeto.rl.engine.controller import RebuildRefused
         from yeto.rl.engine.cut import CutProgress
         from yeto.rl.engine.cut import CutContext
+        from yeto.rl.engine.driver import policy_token
 
         driver = self.driver
-        state = driver.published_state
-        if state is None or driver.published_version is None:
+        if pending is not None:
+            version, state = int(pending[0]), pending[1]
+            settled, token = True, policy_token(version, state.policy_tensor_hash())
+        else:
+            version, state = driver.published_version, driver.published_state
+            settled, token = bool(driver.at_safe_point), driver.expected_token
+        if state is None or version is None:
             raise RebuildRefused("no published policy to cut")
         cursor = (self.rollout.data_cursor()
                   if callable(getattr(self.rollout, "data_cursor", None)) else None)
@@ -129,7 +144,7 @@ class CutSource:
             local_step=int(driver.local_step),
             scheduler_samples=int(driver.local_step) * self.global_batch_size,
             global_batch_size=self.global_batch_size,
-            next_rollout_id=int(driver.published_version),
+            next_rollout_id=int(version),
             policy_version=int(state.policy_version),
             policy_hash=state.policy_tensor_hash(),
         )
@@ -138,8 +153,8 @@ class CutSource:
             progress=progress, algorithm=self.identity, data=data, ledger=summary,
             # The safe point is after boundary() returned non-stop and every
             # member acknowledged the policy: the outer commit is settled.
-            outer={"settled": bool(driver.at_safe_point), "policy_version": state.policy_version,
-                   "policy_token": driver.expected_token},
+            outer={"settled": settled, "policy_version": state.policy_version,
+                   "policy_token": token},
             shared_filesystem=self.shared_filesystem,
             in_flight=in_flight,
         )
@@ -155,6 +170,25 @@ class CutSource:
         )
 
 
+@dataclass(frozen=True)
+class _PreparedCut:
+    """The trainer part of a cut written before the publication (``prepare``)."""
+
+    rollout_id: int
+    context: Any  # CutContext the shards and manifest were written with
+    save_s: float
+
+    def matches(self, rollout_id: int, context: Any) -> bool:
+        """The safe point's own context names the same cut: same id, progress
+        (version, policy hash, steps), data cursor, ledger summary, outer commit
+        (settled, policy token) and in-flight entries."""
+        mine = self.context
+        return (self.rollout_id == rollout_id and mine.cut_id == context.cut_id
+                and mine.progress == context.progress and dict(mine.data) == dict(context.data)
+                and dict(mine.ledger) == dict(context.ledger) and dict(mine.outer) == dict(context.outer)
+                and tuple(mine.in_flight or ()) == tuple(context.in_flight or ()))
+
+
 class RoundCutCheckpoint:
     """``save`` at a safe point, ``resume`` at sync start (see the module doc).
 
@@ -166,7 +200,7 @@ class RoundCutCheckpoint:
 
     def __init__(self, *, controller: Any, source: Any, trainer: Any, every: int = 1,
                  fingerprint: dict[str, Any] | None = None, allow_config_change: bool = False,
-                 next_lr: Any = None) -> None:
+                 next_lr: Any = None, background_commit: bool | None = None) -> None:
         if getattr(controller, "checkpoint_store", None) is None:
             raise ValueError("round cuts need the checkpoint store")
         if int(every) < 1:
@@ -191,6 +225,17 @@ class RoundCutCheckpoint:
         # (buffer_rollout.wire_sample_buffer sets both).
         self.buffer_watermark: Any = None  # callable(int) -> int | None
         self.buffer_resume: Any = None  # callable(int) -> int
+        # E1: a cut prepared before the trainer offloads (see prepare()), consumed by save()
+        self._prepared: _PreparedCut | None = None
+        # E1: a periodic cut's store commit runs in the background (the controller must
+        # offer commit_checkpoint_store); joined before the next cut writes to the store
+        # and at the final cut. YETO_RL_CUT_BACKGROUND_COMMIT=0 commits inline.
+        if background_commit is None:
+            background_commit = os.environ.get("YETO_RL_CUT_BACKGROUND_COMMIT", "1").strip().lower() \
+                not in {"0", "false", "no", "off"}
+        self.background_commit = bool(background_commit) and callable(
+            getattr(controller, "commit_checkpoint_store", None))
+        self._commit: tuple[Any, dict[str, Any]] | None = None  # (thread, result box)
 
     # ---------------------------------------------------------------- pointer
     @property
@@ -228,6 +273,78 @@ class RoundCutCheckpoint:
 
         return should_cut(int(rollout_id), every=self.every, final=final)
 
+    def _skip(self, driver: Any, rollout_id: int, *, final: bool) -> bool:
+        """No cut at this safe point: not due, island RECOVERY_REQUIRED, or just
+        resumed from (or already cut at) this rollout."""
+        if self.controller.recovery_required or not self.due(rollout_id, final=final):
+            return True
+        current = self.pointer()
+        return current is not None and int(current["next_rollout_id"]) == int(rollout_id)
+
+    def _cut_id(self, rollout_id: int) -> str:
+        return f"r{int(rollout_id):06d}-{self.controller.incarnation['id']}"
+
+    def prepare(self, driver: Any, *, rollout_id: int, state: Any, final: bool = False) -> bool:
+        """E1: write the trainer part of the cut due at the safe point before rollout
+        ``rollout_id`` NOW, while the trainer is still resident, for the ``state`` the
+        driver is about to publish as ``rollout_id``. Saves the wake/sleep a cut of an
+        offloaded colocated trainer costs. The pointer and the store sync stay at the
+        safe point (:meth:`save`), which keeps the cut only if the publication names
+        the same policy; otherwise the prepared files are never pointed at (pruned).
+        Returns True when a cut was prepared. Raises like :meth:`save`."""
+        import time
+
+        self._prepared = None
+        if driver.published_version is None or self._skip(driver, rollout_id, final=final):
+            return False
+        if int(state.policy_version) != int(rollout_id):
+            raise RoundCutError(f"prepared cut {rollout_id} for policy v{state.policy_version}")
+        self.join_commit(driver)  # the shards go into the store: no commit may run
+        cut_id = self._cut_id(rollout_id)
+        self._drop_unpointed(cut_id)
+        started = time.monotonic()
+        context = self.source.context(cut_id, pending=(int(rollout_id), state))
+        self.trainer.save_cut(epoch=self._epoch(), context=context)
+        self._prepared = _PreparedCut(rollout_id=int(rollout_id), context=context,
+                                      save_s=time.monotonic() - started)
+        return True
+
+    def _drop_unpointed(self, cut_id: str) -> None:
+        import shutil
+
+        from yeto.rl.engine.cut import cut_dir
+
+        directory = cut_dir(self.root, cut_id)
+        if directory.exists():
+            shutil.rmtree(directory)
+
+    def join_commit(self, driver: Any = None) -> dict[str, Any] | None:
+        """Wait for a background store commit and report it (``rl_cut_committed``)."""
+        if self._commit is None:
+            return None
+        thread, box = self._commit
+        thread.join()
+        self._commit = None
+        result = dict(box.get("result") or {"ok": False, "error": "commit thread ended without a result"})
+        emit = getattr(driver, "emit", None)
+        if callable(emit):
+            emit("rl_cut_committed", cut_id=box.get("cut_id"), ok=bool(result.get("ok")),
+                 commit_s=result.get("commit_s"), pruned=result.get("pruned"),
+                 latest_seq=result.get("seq"), **({"error": result["error"]} if result.get("error") else {}))
+        return result
+
+    def _commit_in_background(self, cut_id: str) -> None:
+        import threading
+
+        box: dict[str, Any] = {"cut_id": cut_id}
+
+        def run() -> None:
+            box["result"] = self.controller.commit_checkpoint_store()
+
+        thread = threading.Thread(target=run, name=f"yeto-cut-commit-{cut_id}", daemon=True)
+        self._commit = (thread, box)
+        thread.start()
+
     def save(self, driver: Any, *, rollout_id: int, final: bool = False,
              trigger: str | None = None) -> dict[str, Any] | None:
         """Cut the trainer at the safe point before rollout ``rollout_id`` (= the published
@@ -244,30 +361,38 @@ class RoundCutCheckpoint:
         if trigger is not None and (not final or trigger not in FINAL_TRIGGERS):
             raise RoundCutError(f"cut trigger {trigger!r} needs final=True and one of {FINAL_TRIGGERS}")
         ctl = self.controller
-        if ctl.recovery_required or driver.published_version is None:
-            return None
-        if not self.due(rollout_id, final=final):
+        prepared, self._prepared = self._prepared, None
+        if driver.published_version is None or self._skip(driver, rollout_id, final=final):
             return None
         if int(driver.published_version) != int(rollout_id):
             raise RoundCutError(f"safe point {rollout_id} != published version {driver.published_version}")
-        current = self.pointer()
-        if current is not None and int(current["next_rollout_id"]) == int(rollout_id):
-            return None  # just resumed from (or already cut) this point
-        cut_id = f"r{int(rollout_id):06d}-{ctl.incarnation['id']}"
+        self.join_commit(driver)
         started = time.monotonic()
-        context = self.source.context(cut_id)
-        # colocated + offloaded trainer (1 GPU): its weights/optimizer are not on the
-        # device between publish and the next train step; wake it for the cut only.
-        offloaded = bool(getattr(driver, "_trainer_offloaded", False))
-        if offloaded:
-            self.trainer.onload()
-        try:
-            self.trainer.save_cut(epoch=self._epoch(), context=context)
-        finally:
-            if offloaded:
-                self.trainer.offload()
-        save_s = time.monotonic() - started
+        context = self.source.context(self._cut_id(rollout_id))
         progress = context.progress
+        offloaded = False
+        used_prepared = prepared is not None and prepared.matches(int(rollout_id), context)
+        if used_prepared:
+            save_s = prepared.save_s  # written before the trainer offloaded (prepare)
+        else:
+            # a prepared cut that does not match (or a failed prepare) left files under
+            # this id; no pointer names them (_skip), and cuts are immutable: drop them
+            self._drop_unpointed(context.cut_id)
+            # colocated + offloaded trainer (1 GPU): its weights/optimizer are not on the
+            # device between publish and the next train step; wake it for the cut only.
+            offloaded = bool(getattr(driver, "_trainer_offloaded", False))
+            if offloaded:
+                self.trainer.onload()
+            try:
+                self.trainer.save_cut(epoch=self._epoch(), context=context)
+            finally:
+                if offloaded:
+                    self.trainer.offload()
+            save_s = time.monotonic() - started
+        cut_id = context.cut_id
+        # inline at the end (the run leaves a committed cut) and when a sample buffer
+        # commits the same store during the round (no two commits at once)
+        background = self.background_commit and not final and self.buffer_watermark is None
         consumed_n, consumed_sha = self._consumed()
         next_lr = self.next_lr(driver) if callable(self.next_lr) else None
         info = {
@@ -291,13 +416,19 @@ class RoundCutCheckpoint:
             completed_groups=consumed_n, completed_groups_digest=consumed_sha,
             buffer_watermark=(self.buffer_watermark(int(rollout_id)) if callable(self.buffer_watermark)
                               else None))
-        saved = recovery.save(cut, store=ctl.store, write=lambda record: self._write_and_sync(info, record))
+        saved = recovery.save(cut, store=ctl.store,
+                              write=lambda record: self._write_and_sync(info, record, defer=background))
         info[CUT_KEY] = saved[CUT_KEY]
         synced = saved["synced"]
         sync = dict(getattr(ctl, "last_store_sync", None) or {})
         cut_bytes = directory_bytes(Path(self.root) / cut_id)
+        if background and synced:
+            self._commit_in_background(cut_id)  # after the last read of last_store_sync
         total_s = time.monotonic() - started
-        info["store_synced"] = bool(synced)
+        # background: written (LATEST) but not yet committed; rl_cut_committed reports it
+        info["store_synced"] = None if background and synced else bool(synced)
+        info["store_commit"] = "background" if background and synced else "inline"
+        info["prepared_before_offload"] = used_prepared
         info["cut_bytes"] = cut_bytes
         info["save_s"] = round(save_s, 3)
         info["store_copy_s"] = sync.get("copy_s")
@@ -311,11 +442,14 @@ class RoundCutCheckpoint:
             info["store_error"] = sync.get("error")
         return info
 
-    def _write_and_sync(self, info: dict[str, Any], cut_record: dict[str, Any]) -> dict[str, Any]:
+    def _write_and_sync(self, info: dict[str, Any], cut_record: dict[str, Any], *,
+                        defer: bool = False) -> dict[str, Any]:
         """The round cut's ``recovery.save`` writer: the pointer (with the cut record)
-        into the state dir, then the state dir into the store (which commits)."""
+        into the state dir, then the state dir into the store (which commits, unless
+        ``defer``: the caller commits in the background)."""
         self._write_pointer({**info, CUT_KEY: cut_record})
-        synced = self.controller.sync_checkpoint_store("round_cut", skip_if_recovery=True)
+        kwargs = {"defer_commit": True} if defer else {}
+        synced = self.controller.sync_checkpoint_store("round_cut", skip_if_recovery=True, **kwargs)
         # the store sync commits itself (snapshot layout: in write_snapshot; flat layout:
         # in the controller, outside its lock), also when it failed: recovery.save must not
         return {"synced": bool(synced), "committed": True}

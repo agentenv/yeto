@@ -122,6 +122,7 @@ _PHASE_ROLE = {
     "publish": "trainer+rollout",
     "eval": "rollout",
     "offload": "trainer",
+    "checkpoint": "trainer",
     "onload": "trainer",
 }
 _PHASE_TASK = {"sync": "outer_sync"}
@@ -1531,6 +1532,12 @@ class IslandDriver:
             self.ledger.outer_recorded(rollout_id, next_policy_version=rollout_id + 1)
         self._join_eval()
         if self.colocated and self.publish_offloaded:
+            # E1: a round cut due at the next safe point writes the trainer state now,
+            # while it is resident, instead of waking the offloaded trainer for it
+            cut_due = getattr(self.sync, "cut_due", None)
+            if callable(cut_due) and cut_due(rollout_id + 1):
+                self.phase("checkpoint", rollout_id=rollout_id)
+                self.sync.prepare_cut(self, rollout_id=rollout_id + 1, state=boundary.state)
             self._offload_trainer(rollout_id)
         self.publish(boundary.state, rollout_id=rollout_id + 1)
         self._close_span()

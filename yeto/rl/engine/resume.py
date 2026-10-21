@@ -210,10 +210,13 @@ def read_latest(store_root: Path) -> dict[str, Any] | None:
 
 
 def write_snapshot(store: CheckpointStore, state_dir: Path, info: Mapping[str, Any], *,
-                   skip: Iterable[str] = ()) -> dict[str, Any]:
+                   skip: Iterable[str] = (), commit: bool = True) -> dict[str, Any]:
     """Copy ``state_dir`` into a NEW snapshot dir (every file hash-checked after the
     copy), write its manifest, then ``LATEST``, then commit. Returns the LATEST record
-    plus timings/bytes."""
+    plus timings/bytes.
+
+    ``commit=False`` leaves the commit to the caller (``commit_s`` is None): until it
+    commits, a reader of a committing store still sees the previous LATEST."""
     root = store.root
     started = time.monotonic()
     latest = read_latest(root)
@@ -233,7 +236,7 @@ def write_snapshot(store: CheckpointStore, state_dir: Path, info: Mapping[str, A
     record = {"seq": seq, "manifest_sha256": manifest_sha, "bytes": total,
               **{k: info[k] for k in ("cut_id", "next_rollout_id", "incarnation", "reason") if k in info}}
     _write_json_atomic(root / LATEST, record)
-    commit_s = store.commit()
+    commit_s = store.commit() if commit else None
     return {**record, "copy_s": copied_s, "commit_s": commit_s}
 
 
@@ -509,10 +512,16 @@ class ResumeController:
         return record
 
     def sync_checkpoint_store(self, reason: str, *, skip_if_recovery: bool = False,
-                              extra: Mapping[str, Any] | None = None) -> bool:
+                              extra: Mapping[str, Any] | None = None,
+                              defer_commit: bool = False) -> bool:
         """Snapshot the state dir into the store, then ``LATEST``, commit, prune. A
         failure is remembered (``last_store_sync``) and returned False: the previous
-        LATEST stays valid."""
+        LATEST stays valid.
+
+        ``defer_commit``: stop after ``LATEST``; :meth:`commit_checkpoint_store` commits
+        and prunes later (the round cut runs it off the round's critical path). Until
+        then the store's committed LATEST is the previous one, so a crash in between
+        resumes from the previous cut."""
         if skip_if_recovery and self.recovery_required:
             return False
         info = {"incarnation": self.incarnation["id"], "incarnation_index": self.incarnation["index"],
@@ -526,16 +535,40 @@ class ResumeController:
             except ValueError:
                 pass
         try:
-            result = write_snapshot(self.store, self.state_dir, info)
-            deleted = prune(self.store.root, keep=self.keep, cut_ids_of=_snapshot_cut_id)
-            if deleted:
-                self.store.commit()
+            result = write_snapshot(self.store, self.state_dir, info, commit=not defer_commit)
+            if defer_commit:
+                self.last_store_sync = {**info, **result, "ok": True, "committed": False, "pruned": None}
+                return True
+            deleted = self._prune()
         except Exception as exc:  # noqa: BLE001
             self.last_store_sync = {**info, "ok": False, "error": repr(exc)}
             logging.getLogger(__name__).warning("checkpoint store sync (%s) failed: %r", reason, exc)
             return False
-        self.last_store_sync = {**info, **result, "ok": True, "pruned": deleted}
+        self.last_store_sync = {**info, **result, "ok": True, "committed": True, "pruned": deleted}
         return True
+
+    def commit_checkpoint_store(self) -> dict[str, Any]:
+        """Commit a ``defer_commit`` sync, then prune (pruning only after the new LATEST
+        is committed, so a failed commit never loses the previous cut). Thread-safe
+        against the caller as long as nothing else writes to the store meanwhile.
+        Returns (and remembers in ``last_store_sync``) the outcome; never raises."""
+        sync = dict(self.last_store_sync or {})
+        try:
+            sync["commit_s"] = self.store.commit()
+            sync["committed"] = True
+            sync["pruned"] = self._prune()
+        except Exception as exc:  # noqa: BLE001
+            sync.update(ok=False, error=repr(exc))
+            logging.getLogger(__name__).warning("checkpoint store commit (%s) failed: %r",
+                                                sync.get("reason"), exc)
+        self.last_store_sync = sync
+        return sync
+
+    def _prune(self) -> list[str]:
+        deleted = prune(self.store.root, keep=self.keep, cut_ids_of=_snapshot_cut_id)
+        if deleted:
+            self.store.commit()
+        return deleted
 
     def close(self) -> None:
         return None
