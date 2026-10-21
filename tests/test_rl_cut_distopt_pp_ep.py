@@ -446,5 +446,7 @@ def test_background_capture_falls_back_to_the_host_and_says_why(tmp_path, monkey
 def test_device_copy_plan_needs_cuda_and_can_be_turned_off(monkeypatch):
     named = [("lora_a", torch.nn.Parameter(torch.zeros(2)))]
     assert cp._device_copy_plan(None, named) == (False, "not_cuda")
+    sleeper = SimpleNamespace(args=SimpleNamespace(offload_train=True))
+    assert cp._device_copy_plan(sleeper, named) == (False, "offload_train")
     monkeypatch.setenv(cp.DEVICE_COPY_ENV, "0")
     assert cp._device_copy_plan(None, named) == (False, "disabled")

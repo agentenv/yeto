@@ -685,12 +685,18 @@ DEVICE_COPY_HEADROOM_BYTES = 1 << 30
 
 
 def _device_copy_plan(actor: Any, named: list) -> tuple[bool, str]:
-    """(copy on the device?, why): the device path needs CUDA parameters and free
-    memory for the copies (adapter + FP32 master + two Adam moments, estimated)."""
+    """(copy on the device?, why): the device path needs CUDA parameters, a trainer
+    that stays resident, and free memory for the copies (adapter + FP32 master +
+    two Adam moments, estimated)."""
     import torch
 
     if os.environ.get(DEVICE_COPY_ENV, "1").strip().lower() in {"0", "false", "no", "off"}:
         return False, "disabled"
+    if getattr(getattr(actor, "args", None), "offload_train", False):
+        # --offload-train: the trainer sleeps right after the cut (colocated) and the
+        # writer's reads of the device copies then fail ("CUDA error: invalid
+        # argument", 5 of 6 cuts of GPU run e1g-yeto-miles-sync-1)
+        return False, "offload_train"
     devices = {p.device for _, p in named}
     if len(devices) != 1 or next(iter(devices)).type != "cuda":
         return False, "not_cuda"
