@@ -700,3 +700,21 @@ def test_cut_context_takes_the_cursor_read_with_the_in_flight_entries():
                        backend_fingerprint="miles@0af62f4d", cut_root="", global_batch_size=ARGS.global_batch_size)
     data = source.context("r000002-abc").data
     assert data["sample_offset"] == 12 and data["buffer_length"] == 0
+
+
+def test_periodic_cut_is_skipped_while_the_previous_commit_runs(tmp_path):
+    import threading
+
+    store = _store(tmp_path / "store", _Vol())
+    rank, driver, trainer, cp, first = _island_with_first_cut(tmp_path, store)
+    gate = threading.Event()
+    busy = threading.Thread(target=gate.wait, daemon=True)
+    busy.start()
+    cp._commit = (busy, {"cut_id": first["cut_id"]})
+    _publish(driver, 2, _hash(rank))
+    assert cp.save(driver, rollout_id=2) is None and trainer.calls == []
+    assert driver.events[-1][0] == "rl_cut_skipped" and cp.skipped_busy == 1
+    gate.set()
+    busy.join()
+    info = cp.save(driver, rollout_id=2, final=True)  # the final cut waits and is taken
+    assert info["store_commit"] == "inline"

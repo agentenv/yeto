@@ -137,14 +137,19 @@ def record_trained_groups(args: Any, data: Sequence[Sequence[Any]]) -> None:
     ``--partial-rollout`` go back.
     """
 
+    import time
+
     from yeto.rl.algos.sample_filters import apply_sample_filters
     from yeto.rl.harness.reasoning_loss_mask import apply_from_args as apply_reasoning_loss_policy
 
+    marks = [("start", time.monotonic())]
     apply_sample_filters(args, data)
+    marks.append(("sample_filters", time.monotonic()))
     # Side effect beyond filtering (S17 WP6): with --codex-exclude-reasoning-from-loss
     # this sets loss_mask 1 -> 0 on generated reasoning tokens of the kept samples
     # (before Miles converts them to train data). Default: returns at once, no sample touched.
     apply_reasoning_loss_policy(args, data, tokenizer_loader=_load_miles_tokenizer)
+    marks.append(("reasoning_mask", time.monotonic()))
     # S19 #8: a stop token forced by the engine's grammar mask (SGLang returns
     # logprob exactly 0.0 under the masked distribution) is not a model choice:
     # loss_mask 1 -> 0 before Miles converts the samples to train data.
@@ -152,11 +157,13 @@ def record_trained_groups(args: Any, data: Sequence[Sequence[Any]]) -> None:
 
     setattr(args, _PLACEHOLDER_ATTR,
             mask_placeholder_logprobs(data, tokenizer_loader=_load_miles_tokenizer, args=args))
+    marks.append(("placeholder_mask", time.monotonic()))
     # CompactionRL: the masks above may drop optimised tokens; the per-segment
     # counts (tokens_after, gae_length) must follow the final masks.
     from yeto.rl.harness.codex.codex_openenv_generate import refresh_segment_counts
 
     refresh_segment_counts([s for group in data for s in _flat(group)])
+    marks.append(("segment_counts", time.monotonic()))
     setattr(args, _TRAINED_ATTR, {_group_key(group) for group in data})
     # Full-parameter islands (P0-D8): bind the exact accepted batch, after the
     # final loss masks, for the role streams to read at the round boundary.
@@ -176,7 +183,13 @@ def record_trained_groups(args: Any, data: Sequence[Sequence[Any]]) -> None:
         if ledger is None:
             raise RuntimeError("fully_async round without the yeto prompt ledger")
         ledger.mark_trained(data)
-        extract_rollout_metadata(args, data, round_counts=ledger.take_round_counts())
+        counts = ledger.take_round_counts()
+        marks.append(("ledger", time.monotonic()))
+        extract_rollout_metadata(args, data, round_counts=counts)
+        marks.append(("round_metadata", time.monotonic()))
+    # E1: where the hook's time goes (it runs on the rollout's critical path)
+    print(f"[rl] sample filter hook: total={marks[-1][1] - marks[0][1]:.3f}s "
+          + " ".join(f"{name}={t - prev:.3f}" for (_, prev), (name, t) in zip(marks, marks[1:])), flush=True)
 
 
 def _reward(args: Any, sample: Any) -> float:

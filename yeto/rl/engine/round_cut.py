@@ -243,6 +243,7 @@ class RoundCutCheckpoint:
         self._commit: tuple[Any, dict[str, Any]] | None = None  # (thread, result box)
         # E1: a periodic cut captured at its safe point, completed by join_commit()
         self._deferred: dict[str, Any] | None = None
+        self.skipped_busy = 0  # periodic cuts skipped while a commit was running
 
     # ---------------------------------------------------------------- pointer
     @property
@@ -313,6 +314,8 @@ class RoundCutCheckpoint:
         self._prepared = None
         if driver.published_version is None or self._skip(driver, rollout_id, final=final):
             return False
+        if not final and self._commit is not None and self._commit[0].is_alive():
+            return False  # save() skips this periodic cut (_commit_busy)
         if int(state.policy_version) != int(rollout_id):
             raise RoundCutError(f"prepared cut {rollout_id} for policy v{state.policy_version}")
         self.join_commit(driver)  # the previous cut is complete before this one starts
@@ -323,6 +326,19 @@ class RoundCutCheckpoint:
         pending = self._start(context, background=self._defer(final))
         self._prepared = _PreparedCut(rollout_id=int(rollout_id), context=context,
                                       save_s=time.monotonic() - started, pending=pending)
+        return True
+
+    def _commit_busy(self, driver: Any, rollout_id: int, *, final: bool) -> bool:
+        """E1: a periodic cut is skipped while the previous cut's store commit still
+        runs (a slow store, e.g. a Modal volume commit of 2-10 s, would otherwise hold
+        the round); the next safe point cuts again. The final cut waits for it."""
+        if final or self._commit is None or not self._commit[0].is_alive():
+            return False
+        self.skipped_busy += 1
+        emit = getattr(driver, "emit", None)
+        if callable(emit):
+            emit("rl_cut_skipped", rollout_id=int(rollout_id), reason="previous cut still committing",
+                 committing=self._commit[1].get("cut_id"), skipped_total=self.skipped_busy)
         return True
 
     def _defer(self, final: bool) -> bool:
@@ -427,6 +443,9 @@ class RoundCutCheckpoint:
         ctl = self.controller
         prepared, self._prepared = self._prepared, None
         if driver.published_version is None or self._skip(driver, rollout_id, final=final):
+            self._abandon(prepared)
+            return None
+        if self._commit_busy(driver, rollout_id, final=final):
             self._abandon(prepared)
             return None
         if int(driver.published_version) != int(rollout_id):
