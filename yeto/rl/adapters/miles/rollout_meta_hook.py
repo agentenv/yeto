@@ -41,6 +41,18 @@ from typing import Any
 
 META_SINK_ENV = "YETO_ROLLOUT_META_SINK"
 DEFAULT_SINK_ACTOR = "yeto_rollout_meta"
+# E1: per-step seconds of the last metadata hook run (printed by record_trained_groups)
+_HOOK_TIMES: dict[str, float] = {}
+
+
+def _timed(name: str, fn: Any, *args: Any, **kwargs: Any) -> Any:
+    import time
+
+    started = time.monotonic()
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        _HOOK_TIMES[name] = _HOOK_TIMES.get(name, 0.0) + time.monotonic() - started
 DEFAULT_SINK = f"ray:{DEFAULT_SINK_ACTOR}"
 METADATA_SCHEMA = "yeto-rollout-meta-v1"
 _TRAINED_ATTR = "_yeto_trained_group_keys"
@@ -188,8 +200,11 @@ def record_trained_groups(args: Any, data: Sequence[Sequence[Any]]) -> None:
         extract_rollout_metadata(args, data, round_counts=counts)
         marks.append(("round_metadata", time.monotonic()))
     # E1: where the hook's time goes (it runs on the rollout's critical path)
+    detail = " ".join(f"{k}={v:.3f}" for k, v in sorted(_HOOK_TIMES.items()))
+    _HOOK_TIMES.clear()
     print(f"[rl] sample filter hook: total={marks[-1][1] - marks[0][1]:.3f}s "
-          + " ".join(f"{name}={t - prev:.3f}" for (_, prev), (name, t) in zip(marks, marks[1:])), flush=True)
+          + " ".join(f"{name}={t - prev:.3f}" for (_, prev), (name, t) in zip(marks, marks[1:]))
+          + (f" [{detail}]" if detail else ""), flush=True)
 
 
 def _reward(args: Any, sample: Any) -> float:
@@ -392,8 +407,8 @@ def build_metadata(
         if not samples:
             continue
         if rollout_id is None:
-            rollout_id = current_round_id(samples, sink)
-        record = group_record(args, group)
+            rollout_id = _timed("round_id", current_round_id, samples, sink)
+        record = _timed("group_record", group_record, args, group)
         tool_wait += sum(float(getattr(x, "non_generation_time", 0.0) or 0.0) for x in samples)
         aborted += int(record.pop("aborted"))
         key = tuple(record.pop("_key"))
@@ -431,7 +446,7 @@ def build_metadata(
     if limit > 0:
         # agentic-rollout-utilization 4.1: carry-over accounting (limit > 0 only;
         # the default key set is unchanged).
-        payload.update(carry_over_fields(args, trained_samples, sink))
+        payload.update(_timed("carry_over", carry_over_fields, args, trained_samples, sink))
         # 5.1/5.3: agentic suspension between turns (absent when not in use)
         payload.update(_carry.suspend_fields(args, all_samples))
     if tool_wait > 0:
@@ -989,14 +1004,14 @@ def extract_rollout_metadata(
     :func:`record_trained_groups` with the trained groups)."""
 
     try:
-        payload = build_metadata(args, all_samples)
+        payload = _timed("build", build_metadata, args, all_samples)
         if elastic_metadata_enabled(args):
             cursor, buffer_length = data_cursor(data_source)
             if cursor is not None:
                 payload["data_cursor"] = cursor
             if buffer_length is not None:
                 payload["buffer_length"] = buffer_length
-        submitted = submitted_groups(args, data_source)
+        submitted = _timed("submitted", submitted_groups, args, data_source)
         if round_counts is not None:
             from yeto.rl.engine.overlap import ROLLOUT_OVERLAP_MODE
 
@@ -1039,7 +1054,7 @@ def extract_rollout_metadata(
             payload["over_sampling"] = over_sampling
         if hasattr(args, "rollout_over_sampling_stats"):
             args.rollout_over_sampling_stats = None
-        put_to_sink(payload)
+        _timed("put", put_to_sink, payload)
     finally:
         # Reset per-rollout state: the bounded filter keys its memo on
         # ``yeto_rl_policy_version`` which legacy advanced per round; here the
