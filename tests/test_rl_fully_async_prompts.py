@@ -180,7 +180,7 @@ def test_cut_without_the_ledger_is_refused():
 def test_overlap_round_report_carries_the_ledger_counts(monkeypatch):
     from yeto.rl.adapters.miles import rollout_meta_hook as hook
 
-    monkeypatch.setattr(hook, "build_metadata", lambda args, samples: {
+    monkeypatch.setattr(hook, "build_metadata", lambda args, samples, **_kw: {
         "completed": 2, "filtered": 0, "max_policy_age": 1})
     sent = []
     monkeypatch.setattr(hook, "put_to_sink", sent.append)
