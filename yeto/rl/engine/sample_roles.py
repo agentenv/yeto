@@ -248,6 +248,24 @@ def buffer_full_parameter(args: Any) -> bool:
             and (is_pair(args) or sample_role(args) != BOTH))
 
 
+def dedicated_engine_full_parameter(args: Any) -> bool:
+    """``--tuning full`` on one no-sync island with its own engine cards
+    (``--rl-placement fixed-partition``, role both): the backend's in-island
+    full-parameter weight update feeds the engines every round (S26 E6: Miles
+    block-quantizes each update for the tier-1 trainer FP8 source). A colocated
+    full-parameter island is not supported."""
+    return (getattr(args, "tuning", "lora") == "full"
+            and bool(getattr(args, "rl_single_island_no_sync", False))
+            and not is_pair(args) and sample_role(args) == BOTH
+            and getattr(args, "rl_placement", "colocated") == "fixed-partition")
+
+
+def no_sync_full_parameter(args: Any) -> bool:
+    """Full-parameter training without the full-parameter sync: a buffer island or
+    one island with dedicated engine cards."""
+    return buffer_full_parameter(args) or dedicated_engine_full_parameter(args)
+
+
 def check_pair(args: Any, num_islands: int) -> None:
     """Launch checks of a store-coupled pair (nothing outside a pair): every
     island has a role, exactly one trainer and at least one sampler,
