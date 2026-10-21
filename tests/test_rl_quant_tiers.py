@@ -370,11 +370,12 @@ def test_island_task_forwards_the_tier_only_when_set(monkeypatch, tier):
     _prepare_rl_args(args)
     task = make_miles_island_task(args, parse_gpu_spec(args.gpu)[0], 0, 1, "127.0.0.1:29400")
     assert ("--rl-rollout-quant-tier 1" in task.run) is (tier == 1)
-    assert "--rl-rollout-quant-fp8-source" not in task.run
+    # Miles tier 1 defaults to the trainer source; tier 0 always uses the engine.
+    assert ("--rl-rollout-quant-fp8-source trainer" in task.run) is (tier == 1)
     if tier == 1:
-        args.rl_rollout_quant_fp8_source = "trainer"
+        args.rl_rollout_quant_fp8_source = "engine"
         task = make_miles_island_task(args, parse_gpu_spec(args.gpu)[0], 0, 1, "127.0.0.1:29400")
-        assert "--rl-rollout-quant-fp8-source trainer" in task.run
+        assert "--rl-rollout-quant-fp8-source" not in task.run
 
 
 MILES_NEXT = Path("/home/michael/work/miles-next")
@@ -461,6 +462,19 @@ def test_tied_lm_head_in_an_export_is_dropped(tmp_path):
 
 
 # ---------------------------------------------------------------- tier 1, trainer FP8 source (Miles native)
+def test_tier_1_defaults_to_the_trainer_source_on_miles_only():
+    miles = _args(rl_rollout_quant_fp8_source=None, rl_backend="miles")
+    assert tiers.validate_launch(miles) == 1
+    assert miles.rl_rollout_quant_fp8_source == "trainer"
+    explicit = _args(rl_rollout_quant_fp8_source="engine", rl_backend="miles")
+    tiers.validate_launch(explicit)
+    assert explicit.rl_rollout_quant_fp8_source == "engine"
+    tier0 = _args(rl_rollout_quant_tier=0, rl_rollout_quant_fp8_source=None, rl_backend="miles")
+    tiers.validate_launch(tier0)
+    assert tier0.rl_rollout_quant_fp8_source == "engine"
+    assert tiers.default_fp8_source(_args(rl_backend="verl")) == "engine"
+
+
 def test_trainer_source_is_tier_1_only():
     assert tiers.validate_launch(_args(rl_rollout_quant_fp8_source="trainer")) == 1
     with pytest.raises(QuantTierError, match="needs --rl-rollout-quant-tier 1"):

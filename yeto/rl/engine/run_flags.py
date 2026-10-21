@@ -801,11 +801,11 @@ _ROLLOUT_ENGINE = (
                 "loads it (needs --rl-island-sample-role and --tuning full); 3 4-bit, interface "
                 "only (refused). Router, lm_head, embeddings, norms and attention stay BF16; the "
                 "KV cache stays BF16. Needs FP8 cards (H100, H200, L4)"),
-    shared_flag("--rl-rollout-quant-fp8-source", choices=("engine", "trainer"), default="engine",
-                help="tier 1 only: who quantizes. engine (default): the rollout engine quantizes at "
-                "load (online FP8). trainer (backends that support it): the engines start on a "
-                "128x128 block-FP8 conversion of the base and the trainer block-quantizes every "
-                "weight update; same ignore list"),
+    shared_flag("--rl-rollout-quant-fp8-source", choices=("engine", "trainer"), default=None,
+                help="tier 1 only: who quantizes (default: trainer on Miles, engine elsewhere). "
+                "trainer (Miles): the engines start on a 128x128 block-FP8 conversion of the base "
+                "and the trainer block-quantizes every weight update. engine: the rollout engine "
+                "quantizes at load (online FP8). Same ignore list"),
 )
 
 _AGENT = (

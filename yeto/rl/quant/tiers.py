@@ -116,13 +116,30 @@ VERL_TIER1_REFUSAL = (f"{FLAG} 1 is not available on verl: verl's FP8 rollout ne
                       "would generate garbage); use tier 0 on verl")
 
 
+# Backends whose tier 1 defaults to the trainer FP8 source (framework-native block FP8
+# with the ignore list): its H100 gate margin is larger than the engine's online FP8
+# (p99 |diff| 0.43 vs 0.46-0.49, limit 0.5; SESSION26 E6 round 2).
+TRAINER_SOURCE_BACKENDS = frozenset({"miles"})
+
+
+def default_fp8_source(args: Any) -> str:
+    """The FP8 source when ``--rl-rollout-quant-fp8-source`` is not given."""
+    backend = getattr(args, "rl_backend", None) or "miles"
+    if tier_of(args) == TIER_ONLINE_FP8 and backend in TRAINER_SOURCE_BACKENDS:
+        return FP8_SOURCE_TRAINER
+    return FP8_SOURCE_ENGINE
+
+
 def fp8_source(args: Any) -> str:
-    return getattr(args, "rl_rollout_quant_fp8_source", None) or FP8_SOURCE_ENGINE
+    return getattr(args, "rl_rollout_quant_fp8_source", None) or default_fp8_source(args)
 
 
 def validate_launch(args: Any) -> int:
     """Refuse a tier the launch cannot run (launcher side, no checkpoint needed); returns the tier."""
     tier = tier_of(args)
+    if getattr(args, "rl_rollout_quant_fp8_source", None) is None and hasattr(args, "__dict__"):
+        # Resolved once here so the island flags and the run config carry it explicitly.
+        args.rl_rollout_quant_fp8_source = default_fp8_source(args)
     if tier == TIER_BF16:
         if fp8_source(args) != FP8_SOURCE_ENGINE:
             raise QuantTierError(f"{SOURCE_FLAG} {fp8_source(args)} needs {FLAG} 1")

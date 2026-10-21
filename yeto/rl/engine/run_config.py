@@ -1038,7 +1038,7 @@ def resolve_rl_run_config(
             chunked_prefill_size=getattr(args, "sglang_chunked_prefill_size", None),
             sampler_snapshot=bool(getattr(args, "rl_sampler_snapshot", False)),
             rollout_quant_tier=int(getattr(args, "rl_rollout_quant_tier", 0) or 0),
-            rollout_quant_fp8_source=getattr(args, "rl_rollout_quant_fp8_source", None) or "engine",
+            rollout_quant_fp8_source=_fp8_source(args),
         ),
         ports=NetworkPorts(
             rollout_engine_base_port=getattr(args, "rollout_engine_base_port", None),
@@ -1084,6 +1084,12 @@ def resolve_rl_run_config(
         sample_buffer=sample_roles.resolve(args, groups_per_round=args.groups_per_round),
         train_memory=_train_memory(args),
     )
+
+
+def _fp8_source(args) -> str:
+    from ..quant.tiers import fp8_source
+
+    return fp8_source(args)
 
 
 def _train_memory(args) -> TrainMemoryConfig:
