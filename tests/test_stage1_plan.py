@@ -250,3 +250,13 @@ def test_memory_figure_that_disagrees_is_an_error(tmp_path):
         doc["trainer"]["miles"]["memory_estimate"]["host_optimizer_gib_per_node"] = 600
     out = _variant(tmp_path, edit)
     assert any("host_optimizer_gib_per_node = 600" in e for e in out.errors)
+
+
+def test_verl_backend_refuses_megatron_strategy(tmp_path):
+    # S26 E7: verl Megatron (the verl path with EP) is not wired; EP runs use Miles.
+    out = _variant(tmp_path, lambda d: d["trainer"].update(backend="verl")
+                   or d["trainer"]["verl"].update(strategy="megatron"))
+    assert any("verl.strategy 'megatron'" in e and "backend miles" in e for e in out.errors)
+    # The same strategy value is not checked for the Miles backend (its section is unused).
+    miles = _variant(tmp_path, lambda d: d["trainer"]["verl"].update(strategy="megatron"))
+    assert not any("verl.strategy" in e for e in miles.errors)

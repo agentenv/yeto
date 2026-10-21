@@ -65,6 +65,7 @@ from yeto.rl.quant.schemes import release_dir_for
 
 PLAN_SCHEMA = "yeto.stage1/v1"
 BACKENDS = ("miles", "verl")
+VERL_STRATEGY = "fsdp2"  # the only verl actor strategy the adapter runs (S26 E7)
 NEUTRAL_PENALTIES = {"repetition_penalty": 1.0, "frequency_penalty": 0.0, "presence_penalty": 0.0}
 RAY_PORT = 6379
 MEMORY_TOLERANCE = 0.02  # plan memory figures vs the estimator (both 推算)
@@ -819,6 +820,10 @@ def check(plan: Stage1Plan, out: Expanded) -> list[str]:
     if "fp8" in flat or "fp4" in flat:
         errors.append("trainer arguments enable FP8/FP4; training is bf16 only (user 10-19, report #1)")
     verl = _section(trainer_cfg, "verl")
+    if out.trainer["backend"] == "verl" and str(verl["strategy"]) != VERL_STRATEGY:
+        # S26 E7: the verl Megatron engine (EP) is not wired; EP runs use Miles.
+        errors.append(f"verl.strategy {verl['strategy']!r}: the yeto verl adapter runs {VERL_STRATEGY} "
+                      "only (verl Megatron/EP not supported, S26 E7); use trainer.backend miles for EP")
     if int(verl["fsdp_size"]) not in (0, out.trainer["cards"]) and out.trainer["cards"] % int(verl["fsdp_size"]):
         errors.append(f"verl.fsdp_size {verl['fsdp_size']} does not divide {out.trainer['cards']} cards")
 
