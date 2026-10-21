@@ -116,6 +116,10 @@
   "bridge",
   "--model-name",
   "SimpleNamespace",
+  "--attention-dropout",
+  "0.0",
+  "--hidden-dropout",
+  "0.0",
   "--num-layers",
   "2",
   "--hidden-size",
@@ -250,7 +254,7 @@
   "10",
   "--group-query-attention"
  ],
- "miles_argv_sha256": "8acfb1140db90c4d02fd4534526adcea04ca37a569125cee1952d3a697eb882d",
+ "miles_argv_sha256": "fd095a4b6d682aa8ba80b1953964b57575721859844217c78253847b7349a820",
  "name": "seq_adv_maxrl",
  "placement": {
   "allow_cross_node_engine_tp": false,

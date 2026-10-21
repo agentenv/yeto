@@ -91,6 +91,10 @@ def markdown(parsed_runs: list[dict[str, Any]], *, title: str) -> str:
     prints = {p["fingerprint"] for p in parsed_runs}
     if len(prints) > 1:
         raise ValueError(f"runs come from different specs (fingerprints {sorted(prints)}); report them separately")
+    models = {tuple(p.get("gpu_names") or ()) for p in parsed_runs if p.get("gpu_names")}
+    if len(models) > 1:
+        # E1: e1a9 ran on an NVIDIA A10G, the others on an A10; its train step was ~12 % slower
+        raise ValueError(f"runs ran on different GPU models {sorted(models)}; report them separately")
     spec = parsed_runs[0]["spec"]
     summaries = [summarize(p) for p in parsed_runs]
     by_arm: dict[str, list[dict]] = defaultdict(list)

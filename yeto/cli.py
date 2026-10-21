@@ -499,6 +499,14 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "nvidia-smi reports it; use for bitwise comparisons",
     )
     infra.add_argument(
+        "--modal-gpu-name",
+        default=None,
+        metavar="MODEL",
+        help="Modal islands: fail at container start unless every GPU nvidia-smi reports "
+        "is this model (e.g. 'NVIDIA A10': Modal A10G containers are an A10 or an A10G); "
+        "use when runs must compare on one GPU model",
+    )
+    infra.add_argument(
         "--modal-retries",
         type=int,
         default=None,

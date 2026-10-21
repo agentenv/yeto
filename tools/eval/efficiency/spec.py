@@ -80,6 +80,12 @@ class EffSpec:
     repeats: int = 2  # runs per arm (range verdicts need >= 2)
     timeout_s: int = 3000
     chat_template_kwargs: dict[str, Any] = field(default_factory=dict)
+    # yeto arms only (the bare arms keep no checkpoint): "final" cuts once at the end
+    # (fair control), "every-round" is the product default (a round cut every round).
+    # Not in the control fingerprint: it does not change what the bare arms run.
+    checkpoint: str = "final"
+    # yeto+Miles only, observation (E1): --rl-profile-trainer (not in the fingerprint)
+    profile_trainer: bool = False
 
     @property
     def samples_per_round(self) -> int:
@@ -145,7 +151,7 @@ def cards(mode: str) -> dict[str, int]:
 def control_fingerprint(spec: EffSpec) -> str:
     """sha256 over every shared value except the repeat count (a report refuses
     to compare runs whose fingerprints differ)."""
-    doc = {k: v for k, v in spec.to_dict().items() if k not in ("repeats", "timeout_s")}
+    doc = {k: v for k, v in spec.to_dict().items() if k not in ("repeats", "timeout_s", "checkpoint", "profile_trainer")}
     return hashlib.sha256(json.dumps(doc, sort_keys=True).encode()).hexdigest()
 
 
@@ -356,6 +362,29 @@ def yeto_verl_argv(spec: EffSpec, mode: str, tape: str) -> list[str]:
     return argv
 
 
+CHECKPOINT_MODES = ("final", "every-round")
+
+
+def cut_every(spec: EffSpec) -> int:
+    """Round-cut interval of the yeto+Miles arm: ``final`` cuts only at the end (the
+    bare arms keep no checkpoint), ``every-round`` is the product default.
+    The yeto+verl arm sets no checkpoint store and fully_async refuses cuts, so it
+    has no round cut in either mode."""
+    if spec.checkpoint not in CHECKPOINT_MODES:
+        raise ValueError(f"checkpoint must be one of {CHECKPOINT_MODES}, got {spec.checkpoint!r}")
+    return spec.rounds if spec.checkpoint == "final" else 1
+
+
+# E1: the GPU model every arm must run on, per spec.gpu (as tools/eval/modal_verl.GPU_NAMES:
+# Modal "A10G" containers are an NVIDIA A10 or an A10G, and the A10G trains slower)
+GPU_MODELS = {"A10G": "NVIDIA A10", "L4": "L4", "H100!": "H100"}
+
+
+def gpu_name_arg(spec: EffSpec) -> str:
+    """The launcher option that pins the yeto+Miles arm to the bare arms' GPU model."""
+    return f"--modal-gpu-name {shlex.quote(GPU_MODELS[spec.gpu])} "
+
+
 def yeto_miles_launcher_args(spec: EffSpec, mode: str, run_id: str) -> str:
     """The yeto launcher arguments of the yeto+Miles arm (``tools/eval/miles_local.sh`` ARGS)."""
     from ..miles import DATA, STORE_VOLUME, TAPE_VOLUME
@@ -364,10 +393,14 @@ def yeto_miles_launcher_args(spec: EffSpec, mode: str, run_id: str) -> str:
     c = cards(mode)
     kwargs = json.dumps(spec.chat_template_kwargs) if spec.chat_template_kwargs else ""
     args = (f"launch --training-mode rl --rl-engine ports --preflight-threads off --modal-gpu-exact "
-            f"--modal-retries 0 --modal-cpu 8 --modal-memory 64 --modal-tape-volume {TAPE_VOLUME} "
+            f"{gpu_name_arg(spec)}"
+            # container resources as the bare arms' (modal_eff: 8 CPU + 48 GiB per card)
+            f"--modal-retries 0 --modal-cpu {8 * c['total']} --modal-memory {48 * c['total']} "
+            f"--modal-tape-volume {TAPE_VOLUME} "
             f"--controller local --cluster-prefix {run_id} --tuning lora --lora-r {spec.lora_r} "
             f"--rl-observe-timeline --model {spec.model} --model-revision {spec.model_revision} {DATA} "
             f"--rl-checkpoint-store modal-volume://{STORE_VOLUME}/{run_id} "
+            f"--rl-cut-every {cut_every(spec)} "
             "--reward-function gsm8k_reward:score --fragments 1 --pipeline 1 "
             f"--rollout-batch-size {spec.groups_per_round} --n-samples-per-prompt {spec.samples_per_group} "
             f"--rollout-max-response-len {spec.max_response_len} --seq-len {spec.seq_len} "
@@ -380,6 +413,8 @@ def yeto_miles_launcher_args(spec: EffSpec, mode: str, run_id: str) -> str:
             f"--rl-max-tokens-per-gpu {max_tokens_per_gpu(spec)} --rl-gradient-accumulation-fusion "
             # TIS (upper 2.0) and eps_clip_high 0.28 as in the bare arms; staleness 2 >= max_policy_age
             f"--trust-remote-code --rl-algorithm-spec {MILES_ALGORITHM_SPEC}")
+    if spec.profile_trainer:
+        args += " --rl-profile-trainer"
     if kwargs:
         args += f" --apply-chat-template-kwargs {shlex.quote(kwargs)}"
     if mode == "async":

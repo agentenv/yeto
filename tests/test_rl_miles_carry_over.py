@@ -348,3 +348,47 @@ def test_trajectory_records_carry_start_round_and_segments(sink):
     for r in recs:
         assert not [p for p in validate_trajectory_reward({**r, "rollout_id": 4, "policy_version": 4})
                     if "started_rollout_id" in p or "policy_versions" in p]
+
+
+def test_deferred_cross_version_estimate_arrives_as_a_late_record(sink, tmp_path):
+    """E1 (fully_async): the estimate runs in the background and reaches the sink as
+    a late record of its rollout id; the round's fields only say it was deferred."""
+    import glob
+    import json
+    import time
+
+    engine = FakePartialEngine()
+    args = SimpleNamespace(yeto_rl_max_policy_age=1, tis_clip=2.0, tis_clip_low=0.0)
+    s = Sample(index=0, group_index=0)
+    engine.generate(s, 3, 4, finish=False)
+    engine.generate(s, 4, 2, finish=True, reward=1.0)
+    current = [0.5, -0.5, 0.0, 0.4, -0.5, -0.5]
+    hook.put_policy_token(tok(4), sink)
+    fields = hook.carry_over_fields(args, [s], sink, lambda _s: current, defer_estimate_for=4)
+    assert fields["cross_version_estimate"] == "deferred"
+    assert "cross_version_truncated_fraction" not in fields
+    handle = handle_from_metadata({**round_metadata(args, [[s]], sink), **fields}, rollout_id=4,
+                                  policy_version=4, policy_hash=HASHES[4], data_pack=None)
+    assert handle.cross_version_truncated_fraction is None
+    deadline = time.monotonic() + 5
+    late = []
+    while not late and time.monotonic() < deadline:
+        late = [json.loads(open(p).read()) for p in glob.glob(f"{tmp_path}/*.json")]
+        late = [r for r in late if r.get("schema") == hook.LATE_META_SCHEMA]
+        time.sleep(0.02)
+    assert late and late[0]["rollout_id"] == 4
+    assert math.isclose(late[0]["cross_version_truncated_fraction"], 0.5)
+
+
+def test_driver_governs_on_a_late_rollout_estimate(tmp_path):
+    """E1: a fully_async round's estimate arrives after its train step; the policy-age
+    governor still sees it."""
+    from tests.test_rl_policy_age import _driver
+
+    driver = _driver(tmp_path, 1)
+    calls, asked = [], []
+    driver.rollout.set_max_policy_age = calls.append
+    driver.rollout.late_cross_version_fraction = lambda rid: asked.append(rid) or 0.9
+    driver.run()
+    events = [json.loads(l) for l in (tmp_path / "e.jsonl").read_text().splitlines()]
+    assert asked and [e for e in events if e["event"] == "rl_policy_age_fallback"] and calls == [0]

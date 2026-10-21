@@ -9,11 +9,13 @@ data source. It serves two purposes:
 
 * round accounting: groups drawn since the last report and Miles' stale-group
   count (reported unknown, with a warning, when Miles does not expose it);
-* cuts (decision P0-S-Q3): :func:`requeue_untrained` stops the background
-  worker and puts every drawn, untrained group back into the data source
-  buffer, reset for a fresh generation. The cut then carries them like any
-  buffered group, so the resumed run generates them again; nothing in flight
-  is saved.
+* cuts (decision P0-S-Q3): background generation is never saved; every drawn,
+  untrained group goes into the cut reset for a fresh generation, so the
+  resumed run generates it again. :func:`snapshot_untrained` (E1, the cut path)
+  records them, the data source buffer and the data cursor in one step on the
+  worker's event loop and leaves the worker running: the live run keeps
+  generating ahead across the cut. :func:`requeue_untrained` (the older path)
+  stops the worker and puts the groups back into the live data source.
 
 Runs inside the rollout executor actor (``__ray_call__``). Import-light.
 """
@@ -117,6 +119,51 @@ def current() -> PromptLedger | None:
     return _LEDGER
 
 
+def _reset_copies(groups: Iterable[Sequence[Any]]) -> list[list[Any]]:
+    copies = [copy.deepcopy(list(group)) for group in groups]
+    for group in copies:
+        for sample in group:
+            sample.reset_for_retry()
+    return copies
+
+
+def snapshot_untrained(executor: Any, *, timeout_s: float = WORKER_STOP_TIMEOUT_S) -> dict[str, Any]:
+    """The cut's view of the fully_async prompts, taken without stopping the worker.
+
+    Returns ``groups`` (the data source buffer, then every drawn, untrained group
+    as a reset copy, in group order) and ``data_cursor`` (the data source position,
+    ``rollout_meta_hook.data_cursor``). Both are read in ONE step on the worker's
+    event loop, where the worker draws prompts, so no group is both behind the
+    cursor and missing from ``groups``, or counted twice. A resume restores the
+    cursor and puts ``groups`` into the buffer: exactly the prompts the run had
+    drawn but not trained are generated again. The live data source and the
+    worker are left untouched."""
+    from .rollout_meta_hook import data_cursor
+
+    source = getattr(executor, "data_source", None)
+    source = getattr(source, "__self__", source)
+    ledger = getattr(source, _LEDGER_ATTR, None)
+    if ledger is None:
+        raise PromptLedgerError("fully_async prompts were not tracked; the cut would lose them")
+
+    def read() -> dict[str, Any]:
+        cursor, _length = data_cursor(source)
+        buffered = [list(group) for group in (getattr(source, "buffer", None) or [])]
+        untrained = [group for _, group in sorted(ledger.untrained.items())]
+        return {"groups": _reset_copies(buffered + untrained), "data_cursor": cursor,
+                "untrained_groups": len(untrained)}
+
+    worker = getattr(getattr(executor, "generate_rollout", None), "_worker", None)
+    loop = None if worker is None or worker.done() else worker.get_loop()
+    if loop is None or not loop.is_running() or getattr(loop, "_thread_id", None) == threading.get_ident():
+        return read()  # no concurrent draw: nothing else runs this loop now
+
+    async def on_loop() -> dict[str, Any]:
+        return read()
+
+    return asyncio.run_coroutine_threadsafe(on_loop(), loop).result(timeout=timeout_s)
+
+
 def requeue_untrained(executor: Any, *, timeout_s: float = WORKER_STOP_TIMEOUT_S) -> int:
     """Stop the background worker and return every drawn, untrained group to
     the data source, reset for a fresh generation. Returns the group count.
@@ -134,10 +181,7 @@ def requeue_untrained(executor: Any, *, timeout_s: float = WORKER_STOP_TIMEOUT_S
         raise PromptLedgerError("fully_async prompts were not tracked; the cut would lose them")
     rollout_fn = getattr(executor, "generate_rollout", None)
     _stop_worker(rollout_fn, timeout_s)
-    groups = [copy.deepcopy(group) for _, group in sorted(ledger.untrained.items())]
-    for group in groups:
-        for sample in group:
-            sample.reset_for_retry()
+    groups = _reset_copies(group for _, group in sorted(ledger.untrained.items()))
     if groups:
         ledger.data_source.add_samples(groups)  # the ledger forgets them
     if rollout_fn is not None:

@@ -85,6 +85,18 @@ def test_yeto_arms_use_the_same_policy_age_and_partition():
     args = spec.yeto_miles_launcher_args(SPEC, "async", "r1")
     assert "--gpu modal:2xa10g" in args and "--rl-placement fixed-partition --rl-rollout-gpus 1" in args
     assert "--gpu modal:1xa10g" in spec.yeto_miles_launcher_args(SPEC, "sync", "r1")
+    # E1: on the bare arms' GPU model (an A10G container is refused)
+    assert "--modal-gpu-name 'NVIDIA A10' " in args
+    from tools.eval import modal_verl
+
+    assert spec.GPU_MODELS == modal_verl.GPU_NAMES
+    # only the final round cut, as the bare arms keep no periodic checkpoint (E1)
+    assert f"--rl-cut-every {SPEC.rounds} " in spec.yeto_miles_launcher_args(SPEC, "sync", "r1")
+    every = spec.get_spec(SPEC.name, checkpoint="every-round")
+    assert "--rl-cut-every 1 " in spec.yeto_miles_launcher_args(every, "async", "r1")
+    assert spec.control_fingerprint(every) == spec.control_fingerprint(SPEC)  # bare arms unchanged
+    with pytest.raises(ValueError):
+        spec.cut_every(spec.get_spec(SPEC.name, checkpoint="never"))
 
 
 # overrides yeto's verl translation sets and the bare recipe leaves at the default (or the reverse);
@@ -235,6 +247,22 @@ def test_parse_yeto_driver_phase_fallback():
     assert "rl_driver_phase" in p.sources["gen_s"]
 
 
+def test_parse_yeto_verl_async_generation_from_rollouter_timing():
+    ev = [{"event": "rl_publication_check", "policy_version": 0,
+           "rollouter_timing": {"fully_async/rollouter/active_time": 2.75}},
+          {"event": "rl_publication_check", "policy_version": 1,
+           "rollouter_timing": {"fully_async/rollouter/active_time": 10.8}},
+          {"event": "rl_round_wall", "rollout_id": 0, "time_unix": 21.3},
+          {"event": "rl_publication_check", "policy_version": 2,
+           "rollouter_timing": {"fully_async/rollouter/active_time": 1.86}},
+          {"event": "rl_round_wall", "rollout_id": 1, "time_unix": 26.5}]
+    p = parse.parse_yeto(ev, mode="async", skip=frozenset({"gen_s"}), rollouter_gen=True)
+    assert [r["gen_s"] for r in p.rounds] == [10.8, 1.86]
+    assert p.sources["gen_s"].startswith("rl_publication_check.rollouter_timing")
+    off = parse.parse_yeto(ev, mode="async", skip=frozenset({"gen_s"}))
+    assert off.rounds[0]["gen_s"] is None
+
+
 def test_parse_nvml_both_formats():
     own = ("timestamp, index, name, utilization.gpu [%], memory.used [MiB], memory.total [MiB], power.draw [W]\n"
            "2026/10/20 06:36:11.055, 0, NVIDIA A10, 45 %, 6077 MiB, 23028 MiB, 81.7 W\n"
@@ -315,6 +343,19 @@ def test_report_needs_two_repeats_and_one_spec(tmp_path):
     runs[1]["fingerprint"] = "other"
     with pytest.raises(ValueError, match="different specs"):
         report.markdown(runs, title="t")
+    runs = report.load(one)
+    assert runs[0]["gpu_names"]  # from the NVML samples
+    runs[1]["gpu_names"] = ["NVIDIA A10G"]
+    with pytest.raises(ValueError, match="different GPU models"):
+        report.markdown(runs, title="t")
+
+
+def test_gpu_name_check_tells_a10_from_a10g():
+    from tools.eval.modal_verl import gpu_name_matches
+
+    assert gpu_name_matches("NVIDIA A10", "NVIDIA A10")
+    assert not gpu_name_matches("NVIDIA A10", "NVIDIA A10G")
+    assert gpu_name_matches("H100", "NVIDIA H100 80GB HBM3") and gpu_name_matches("L4", "NVIDIA L4")
 
 
 def test_verdict_rules():

@@ -104,6 +104,7 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         envs={k: str(v) for k, v in envs.items() if v is not None},
         region=spec.region,
         gpu_exact=bool(getattr(args, "modal_gpu_exact", False)),
+        gpu_name=getattr(args, "modal_gpu_name", None) or None,
         registry_login=bool(registry_login),
         registry_creds=registry_login,
         image_ref=image_ref_from_rl_image(args.rl_image) if rl else None,
@@ -180,14 +181,13 @@ def pull_modal_tapes(modal_ops, modal_cfgs: dict, run_dir) -> dict[str, str]:
 
 
 def require_modal_for_gpu_exact(args, specs: list[ClusterSpec]) -> None:
-    """--modal-gpu-exact only means something on Modal islands; refuse it
+    """--modal-gpu-exact / --modal-gpu-name only mean something on Modal islands; refuse them
     rather than silently launching unpinned learners elsewhere."""
-    if getattr(args, "modal_gpu_exact", False):
-        other = sorted({s.cloud for s in specs if s.cloud != "modal"})
+    for flag, value in (("--modal-gpu-exact", getattr(args, "modal_gpu_exact", False)),
+                        ("--modal-gpu-name", getattr(args, "modal_gpu_name", None))):
+        other = sorted({s.cloud for s in specs if s.cloud != "modal"}) if value else []
         if other:
-            raise ValueError(
-                f"--modal-gpu-exact applies only to Modal islands; --gpu also has {other}"
-            )
+            raise ValueError(f"{flag} applies only to Modal islands; --gpu also has {other}")
 
 
 def _tail_modal(modal_ops, call_id: str, prefix: str, collector=None, guard=None) -> int:

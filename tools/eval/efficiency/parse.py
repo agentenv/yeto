@@ -285,12 +285,18 @@ YETO_SEGMENT = {"generate": "gen_s", "train": "train_s", "publish": "weight_sync
 
 
 def parse_yeto(events: list[dict[str, Any]], *, mode: str, framework_parsed: Parsed | None = None,
-               framework_round_offset: int = 0, skip: frozenset[str] = frozenset()) -> Parsed:
+               framework_round_offset: int = 0, skip: frozenset[str] = frozenset(),
+               rollouter_gen: bool = False) -> Parsed:
     """yeto tape -> rounds; ``framework_parsed`` (the framework's own log in the
     same run, e.g. Miles perf lines) fills fields the tape does not carry. Its
     round ``rollout_id + framework_round_offset`` is the tape's ``rollout_id``:
     0 for Miles (perf ids are rollout ids), 1 for verl (FileLogger step =
-    global step, 1-based; T-EVAL eval-e1-verl-c: steps 1..4, rollout ids 0..3)."""
+    global step, 1-based; T-EVAL eval-e1-verl-c: steps 1..4, rollout ids 0..3).
+
+    ``rollouter_gen`` (yeto+verl fully_async): ``gen_s`` is the rollouter's
+    ``fully_async/rollouter/active_time`` from ``rl_publication_check.rollouter_timing``;
+    the check of policy version v closes round v - 1, the same window as the bare
+    arm's per-step value."""
     p = Parsed()
     by = defaultdict(list)
     for e in events:
@@ -309,6 +315,7 @@ def parse_yeto(events: list[dict[str, Any]], *, mode: str, framework_parsed: Par
     for e in by["rl_rollout_carry_over"]:
         if e.get("rollout_id") is not None and e.get("over_age_discarded_groups") is not None:
             drops[int(e["rollout_id"])] += float(e["over_age_discarded_groups"])
+    rollouter = _rollouter_active(by["rl_publication_check"]) if rollouter_gen else {}
     rounds = sorted(set(walls) | set(trained))
     fw = {r["round"]: r for r in (framework_parsed.rounds if framework_parsed else [])}
     for i, rid in enumerate(rounds):
@@ -321,6 +328,8 @@ def parse_yeto(events: list[dict[str, Any]], *, mode: str, framework_parsed: Par
         for task, name in YETO_SEGMENT.items():
             if name not in skip:
                 _set(p, rec, name, seg.get(task), f"{src} {task}")
+        if rid in rollouter:
+            _set(p, rec, "gen_s", rollouter[rid], f"rl_publication_check.rollouter_timing {ROLLOUTER_ACTIVE}")
         if mode == "async":
             _set(p, rec, "wait_s", seg.get("wait"), f"{src} kind=wait")
         _set(p, rec, "gen_tokens", lr.get("action_tokens"), "rl_local_round.action_tokens")
@@ -343,6 +352,20 @@ def parse_yeto(events: list[dict[str, Any]], *, mode: str, framework_parsed: Par
     return _finish(p, na)
 
 
+ROLLOUTER_ACTIVE = "fully_async/rollouter/active_time"
+
+
+def _rollouter_active(checks: list[dict[str, Any]]) -> dict[int, float]:
+    """rl_publication_check events -> rollout id (policy version - 1) -> rollouter active s."""
+    out: dict[int, float] = {}
+    for e in checks:
+        value = (e.get("rollouter_timing") or {}).get(ROLLOUTER_ACTIVE)
+        version = e.get("policy_version")
+        if isinstance(value, (int, float)) and version is not None and int(version) >= 1:
+            out[int(version) - 1] = float(value)
+    return out
+
+
 def _driver_phase_durations(markers: list[dict[str, Any]]) -> dict[int, dict[str, float]]:
     """rl_driver_phase markers (one per phase start) -> rollout id -> phase -> seconds
     (marker to the next marker; a marker without rollout_id belongs to the round in progress)."""
@@ -358,7 +381,7 @@ def _driver_phase_durations(markers: list[dict[str, Any]]) -> dict[int, dict[str
 
 # ====================================================================== NVML
 def parse_nvml(text: str) -> list[dict[str, Any]]:
-    """Rows {t_unix, key (container:index), util, mem_mb, mem_total_mb, power_w}; header lines skipped."""
+    """Rows {t_unix, key (container:index), name, util, mem_mb, mem_total_mb, power_w}; header lines skipped."""
     rows = []
     for parts in csv.reader(io.StringIO(text)):
         parts = [x.strip() for x in parts]
@@ -376,7 +399,8 @@ def parse_nvml(text: str) -> list[dict[str, Any]]:
             index, util, mem, total, power = parts[1], num[3], num[4], num[5], num[6]
         else:  # timestamp,name,util,mem.used,power (T-EVAL format, no index)
             index, util, mem, total, power = "0", num[2], num[3], "", num[4] if len(num) > 4 else ""
-        rows.append({"t_unix": t, "key": f"{container}:{index}", "util": float(util) if util else None,
+        name = parts[2] if len(parts) >= 7 else parts[1]
+        rows.append({"t_unix": t, "key": f"{container}:{index}", "name": name, "util": float(util) if util else None,
                      "mem_mb": float(mem) if mem else None, "mem_total_mb": float(total) if total else None,
                      "power_w": float(power) if power else None})
     return rows
@@ -424,11 +448,13 @@ def parse_run(run_dir: Path) -> dict[str, Any]:
         log = _read(arm_dir / "main.log") or _read(raw / "launch.ts.log")
         fw = parse_miles(log, rollout_cards=c["rollout"], mode=mode)
     # yeto+verl fully_async: the driver's generate phase (and verl's timing_s/gen) only
-    # pull finished samples from the rollouter queue, and yeto logs no per-round
-    # rollouter time, so generation time stays missing
-    skip = frozenset({"gen_s"}) if plan["framework"] == "verl" and mode == "async" else frozenset()
+    # pull finished samples from the rollouter queue; generation time is the
+    # rollouter's own active time, carried by the tape's publication checks
+    verl_async = plan["framework"] == "verl" and mode == "async"
+    skip = frozenset({"gen_s"}) if verl_async else frozenset()
     parsed = parse_yeto(_tape_events(raw), mode=mode, framework_parsed=fw, skip=skip,
-                        framework_round_offset=1 if plan["framework"] == "verl" else 0) \
+                        framework_round_offset=1 if plan["framework"] == "verl" else 0,
+                        rollouter_gen=verl_async) \
         if plan["system"] == "yeto" else fw
     if meta.get("rc") is None and _read(raw / "rc").strip().lstrip("-").isdigit():
         meta["rc"] = int(_read(raw / "rc"))  # miles_local.sh: the launcher's exit code
@@ -438,7 +464,10 @@ def parse_run(run_dir: Path) -> dict[str, Any]:
             "framework": plan["framework"], "system": plan["system"], "cards": c, "gpu": plan["gpu"],
             "spec": spec, "container_start_unix": start, "container_end_unix": end, "rc": meta.get("rc"),
             "framework_log": fw.to_dict() if plan["system"] == "yeto" else None,
-            "nvml": parse_nvml(nvml_text), "nvml_interval_s": 20.0 if plan["harness"] == "miles_local" else 1.0,
+            "nvml": (nvml := parse_nvml(nvml_text)),
+            # E1: Modal "A10G" containers are NVIDIA A10 or (sometimes) A10G, which train slower
+            "gpu_names": sorted({r["name"] for r in nvml if r.get("name")}),
+            "nvml_interval_s": 20.0 if plan["harness"] == "miles_local" else 1.0,
             **parsed.to_dict()}
 
 

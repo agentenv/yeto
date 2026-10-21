@@ -465,11 +465,16 @@ class MilesPublisher:
         return tensor_hash
 
     def publish(self, state: TrainableState, *, token_rollout_id: int | None = None) -> PublicationResult:
+        started = time.monotonic()
         tensor_hash = self._check_trainer_holds(state)
         payload_hash, payload_bytes = _payload_of(state)
         version = state.policy_version if token_rollout_id is None else token_rollout_id
         token = policy_token(version, tensor_hash)
+        self.last_timing = {"check_s": time.monotonic() - started}
         members, checksums = self._runner.run(self._publish(version, token))
+        # E1 diagnosis: where a publication's wall time goes (driver log only)
+        print("yeto publish timing " + json.dumps(
+            {k: round(v, 3) for k, v in self.last_timing.items()}, sort_keys=True), flush=True)
         self.last_engine_checksums = checksums
         bodies = list((checksums or {}).values())
         self._reference = (
@@ -547,18 +552,24 @@ class MilesPublisher:
             # the first (engines start resident); KV comes back after it.
             if offload_rollout and self._published_once:
                 await self._controller.onload_weights()
+            mark = time.monotonic()
             await update_weights(self._args, self._actor, self._executor, self._controller)
+            self._time("update_weights_s", mark)
             if offload_rollout:
                 await self._controller.onload_kv()
         except Exception as exc:
             raise PublicationError(f"upstream update_weights failed: {exc}",
                                    cause=PublicationCause.UPDATE_FAILED) from exc
         self._published_once = True
+        mark = time.monotonic()
         engines, ids, members = await self._stamp_version(version, token)
+        self._time("stamp_s", mark)
 
         checksums = None
         if self._verify_checksums:
+            mark = time.monotonic()
             bodies = await read_engine_checksums(self._controller, self._flatten)
+            self._time("checksum_s", mark)
             if len(bodies) != len(engines):
                 raise PublicationError(
                     f"{len(engines) - len(bodies)} engines returned no weight checksum"
@@ -566,6 +577,11 @@ class MilesPublisher:
             checksums = {ids[i]: dict(sorted(b.items())) for i, b in enumerate(bodies)}
         return members, checksums
 
+
+    def _time(self, key: str, mark: float) -> None:
+        timing = getattr(self, "last_timing", None)
+        if timing is not None:
+            timing[key] = time.monotonic() - mark
 
     # -- convertible node (rl-trainer-start-stop L7.2) --------------------------
     @property

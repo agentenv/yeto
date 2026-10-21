@@ -631,3 +631,33 @@ def test_modal_public_image_config_has_no_login(monkeypatch, no_login):
     state = fake_modal(monkeypatch)
     mr.ModalOps("img-test").define(cfg)
     assert state["images"][0].calls[0] == ("from_registry", (cfg.image_ref,), {})
+
+
+def test_gpu_model_pin_refuses_an_a10g_for_an_a10():
+    """E1: Modal "A10G" containers are an NVIDIA A10 or an A10G; --modal-gpu-name pins one."""
+    from yeto.gpu_spec import parse_gpu_spec
+
+    mr.check_gpu_model("NVIDIA A10", ["NVIDIA A10"] * 2, 2)
+    for names, count in ((["NVIDIA A10G"], 1), (["NVIDIA A10", "NVIDIA A10G"], 2), (["NVIDIA A10"], 2)):
+        with pytest.raises(RuntimeError, match="--modal-gpu-name"):
+            mr.check_gpu_model("NVIDIA A10", names, count)
+    cfg = _cfg(gpu="A10G", gpus_per_node=1, gpu_name="NVIDIA A10")
+    assert mr.ModalIslandConfig.from_json(cfg.to_json()).gpu_name == "NVIDIA A10"
+    old = json.loads(_cfg().to_json())
+    old.pop("gpu_name")
+    assert mr.ModalIslandConfig.from_json(json.dumps(old)).gpu_name is None
+    args = _cli(("--modal-gpu-name", "NVIDIA A10"))
+    assert args.modal_gpu_name == "NVIDIA A10"
+    with pytest.raises(ValueError, match="--modal-gpu-name applies only to Modal"):
+        launcher.require_modal_for_gpu_exact(args, parse_gpu_spec("modal:1xa10g,aws:1xa100@us-east-1"))
+
+
+def test_the_island_config_carries_the_gpu_model_pin(monkeypatch, login):
+    from yeto.gpu_spec import parse_gpu_spec
+
+    args = _cli(("--modal-gpu-name", "NVIDIA A10"))
+    _prepare_rl_args(args)
+    task = _island_task(args, monkeypatch)
+    args.cluster_prefix = "img-test"
+    cfg = build_modal_island_config(args, parse_gpu_spec("modal:1xa10g")[0], 0, task, "1.2.3.4:5")
+    assert cfg.gpu_name == "NVIDIA A10"
