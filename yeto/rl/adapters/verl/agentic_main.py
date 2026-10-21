@@ -93,6 +93,9 @@ def runtime_env(environ: dict[str, str] | None = None) -> dict:
 
 
 def main(argv: list[str] | None = None) -> None:
+    from yeto.launch.image_check import check_image_at_start
+
+    check_image_at_start()  # before Ray: a mismatched image stops here with the failed checks
     import ray
     import verl.trainer.main_ppo as main_ppo
 

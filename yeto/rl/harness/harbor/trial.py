@@ -174,6 +174,9 @@ class HarborHarness:
 
     def _trial(self) -> Any:
         if self._trial_cls is None:
+            from yeto.launch.image_check import check_image_at_start
+
+            check_image_at_start()  # the image's Harbor layer must match docker/harbor-layer (S26 E0.4)
             from harbor.trial.trial import Trial
 
             self._trial_cls = Trial
