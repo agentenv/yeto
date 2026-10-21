@@ -132,27 +132,6 @@ def test_island_entry_accepts_the_dense_island_command():
     island_entry._check_dense_full_sweep(parsed, yeto_policy_sync=True)
 
 
-@pytest.mark.parametrize(
-    ("reward_function", "kind"),
-    (
-        ("yeto.rl.harness.codex.reward:reward_func", "secrlenv"),
-        ("yeto.rl.gsm8k_reward:score", "reward-function"),
-        ("yeto.rl.math_reward:reward_func", "reward-function"),
-    ),
-)
-def test_dense_island_evidence_kind_follows_its_reward_function(reward_function, kind):
-    from types import SimpleNamespace
-
-    from yeto.rl.adapters.miles import island_entry
-    from yeto.rl.trajectory_evidence import EVIDENCE_KINDS
-
-    chosen = island_entry._trajectory_evidence_kind(
-        SimpleNamespace(reward_function=reward_function)
-    )
-    assert chosen == kind
-    assert chosen in EVIDENCE_KINDS
-
-
 EXPERT_FULL = (
     "--rl-sync-preset", "full-parameter", "--rl-placement", "fixed-partition",
     "--rl-rollout-gpus", "8", "--rl-parameter-layout-sha256", LAYOUT, "--fragments", "4",

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 from yeto.rl.adapters.miles import rollout_meta_hook as hook
 from yeto.rl.adapters.miles.trainer import receipt_trajectory_ids
-from yeto.rl.harness.codex.codex_openenv_generate import refresh_segment_counts
+from yeto.rl.compaction import refresh_segment_counts
 
 
 def _batch():

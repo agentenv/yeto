@@ -17,8 +17,10 @@ Errors fail closed: an invalid trajectory answers 409, an unsupported request
 
 from __future__ import annotations
 
+import copy
 import json
 import secrets
+import time
 from contextvars import ContextVar
 from typing import Any
 
@@ -144,13 +146,66 @@ def _error(status: int, exc: Exception) -> Any:
 
 
 def _responses_sse(request: dict[str, Any], response: dict[str, Any], number: int) -> bytes:
-    # Reuse the Codex bridge's event sequence (created, item added/done, completed).
-    from yeto.rl.harness.codex.codex_harness_agent import _sse_response
+    """Responses API event stream: created, per-item added/(arguments)/done, completed.
 
-    return _sse_response(request={"model": request.get("model"), "tools": request.get("tools") or [],
-                                  "prompt_cache_key": request.get("prompt_cache_key")},
-                         output=response["output"], usage=response["usage"],
-                         response_number=number)
+    One event per output item, no token streaming.  ``instructions`` echoes the
+    request (the client owns its system prompt).
+    """
+    output = response["output"]
+    completed = {
+        "id": f"resp_yeto_{number}",
+        "object": "response",
+        "created_at": int(time.time()),
+        "status": "completed",
+        "error": None,
+        "incomplete_details": None,
+        "instructions": request.get("instructions"),
+        "max_output_tokens": None,
+        "max_tool_calls": None,
+        "model": request.get("model"),
+        "output": output,
+        "parallel_tool_calls": False,
+        "previous_response_id": None,
+        "prompt_cache_key": request.get("prompt_cache_key"),
+        "reasoning": {"effort": "xhigh", "summary": "none"},
+        "safety_identifier": None,
+        "service_tier": "default",
+        "store": False,
+        "temperature": None,
+        "text": {"format": {"type": "text"}},
+        "tool_choice": "auto",
+        "tools": request.get("tools") or [],
+        "top_logprobs": 0,
+        "top_p": None,
+        "truncation": "disabled",
+        "usage": response["usage"],
+        "user": None,
+        "metadata": {},
+    }
+    events: list[dict[str, Any]] = [
+        {"type": "response.created", "response": {**completed, "status": "in_progress", "output": []}}]
+    for index, item in enumerate(output):
+        added = copy.deepcopy(item)
+        added["status"] = "in_progress"
+        if item["type"] == "function_call":
+            added["arguments"] = ""
+        events.append({"type": "response.output_item.added", "output_index": index, "item": added})
+        if item["type"] == "function_call":
+            events.append({"type": "response.function_call_arguments.delta", "item_id": item["id"],
+                           "output_index": index, "delta": item["arguments"]})
+            events.append({"type": "response.function_call_arguments.done", "item_id": item["id"],
+                           "output_index": index, "arguments": item["arguments"]})
+        events.append({"type": "response.output_item.done", "output_index": index, "item": item})
+    events.append({"type": "response.completed", "response": completed})
+    chunks = [f"event: {event['type']}\n".encode() + b"data: " + _canonical_json(event) + b"\n\n"
+              for event in events]
+    chunks.append(b"data: [DONE]\n\n")
+    return b"".join(chunks)
+
+
+def _canonical_json(value: Any) -> bytes:
+    return json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True,
+                      separators=(",", ":")).encode("utf-8")
 
 
 def _chat_sse(completion: dict[str, Any]) -> bytes:

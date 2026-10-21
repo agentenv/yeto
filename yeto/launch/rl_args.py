@@ -343,16 +343,6 @@ def _prepare_rl_args(
     _rl_miles_function(args.custom_generate_function_path)
     custom_agent = getattr(args, "custom_agent_function_path", None)
     _rl_miles_function(custom_agent, "--custom-agent-function-path")
-    from ..rl import (
-        SECRLENV_AGENTS,
-        SECRLENV_GENERATE,
-        SECRLENV_GROUP_FILTER,
-        SECRLENV_INFRASTRUCTURE_REPLACEMENTS,
-        SECRLENV_REWARD,
-        SECRLENV_ZERO_VARIANCE_REPLACEMENTS,
-        SIGNED_CODEX_AGENTS,
-    )
-
     if custom_agent is not None:
         if args.custom_generate_function_path is None:
             raise ValueError(
@@ -367,120 +357,23 @@ def _prepare_rl_args(
             raise ValueError(
                 "--custom-agent-function-path requires --tito-model"
             )
-        if (
-            args.apply_chat_template_kwargs is not None
-            and custom_agent not in SIGNED_CODEX_AGENTS
-        ):
+        if args.apply_chat_template_kwargs is not None:
             raise ValueError(
                 "agentic session rollouts preserve raw messages and do not accept "
                 "--apply-chat-template-kwargs"
             )
 
-    codex_reasoning_effort = getattr(args, "codex_reasoning_effort", None)
-    codex_backend_profile = getattr(args, "codex_backend_profile", None)
-    if custom_agent in SIGNED_CODEX_AGENTS:
-        from ..rl.codex_backend import (
-            stock_codex_backend_profile,
-            validate_stock_codex_fields,
-        )
-
-        codex_backend_profile = codex_backend_profile or str(args.tito_model)
-        args.codex_backend_profile = codex_backend_profile
-        codex_profile = stock_codex_backend_profile(codex_backend_profile)
-        codex_chat_template_kwargs = codex_profile["chat_template_kwargs"]
-        if args.apply_chat_template_kwargs is None:
-            args.apply_chat_template_kwargs = codex_chat_template_kwargs
-        validate_stock_codex_fields(
-            tito_model=str(args.tito_model),
-            codex_backend_profile=codex_backend_profile,
-            rl_model_recipe=getattr(args, "rl_model_recipe", "generic"),
-            model=str(args.model),
-            model_revision=str(args.model_revision),
-            rollout_model=getattr(args, "rollout_model", None),
-            rollout_model_revision=getattr(args, "rollout_model_revision", None),
-            apply_chat_template_kwargs=args.apply_chat_template_kwargs,
-            tito_allowed_append_roles=list(
-                getattr(args, "tito_allowed_append_roles", None) or ()
-            ),
-            codex_reasoning_effort=codex_reasoning_effort,
-            lora_targets=str(args.lora_targets),
-            expert_full_count=int(getattr(args, "expert_full_count", 0)),
-            lora_expert_rank=int(getattr(args, "rl_lora_expert_rank", None) or 0),
-        )
-    elif codex_reasoning_effort is not None or codex_backend_profile is not None:
-        raise ValueError(
-            "--codex-reasoning-effort/--codex-backend-profile requires a signed Codex agent"
-        )
-    if getattr(args, "codex_exclude_reasoning_from_loss", False):
-        if custom_agent not in SIGNED_CODEX_AGENTS:
-            raise ValueError(
-                "--codex-exclude-reasoning-from-loss requires a signed Codex agent"
-            )
-        from ..rl.codex_backend import stock_codex_reasoning_markers
-
-        if stock_codex_reasoning_markers(codex_backend_profile) is None:
-            raise ValueError(
-                f"Codex profile {codex_backend_profile!r} declares no reasoning "
-                "markers; --codex-exclude-reasoning-from-loss is unavailable"
-            )
-    secrlenv_infrastructure_replacements = getattr(
-        args, "secrlenv_max_infrastructure_replacements", None
-    )
-    if custom_agent in SECRLENV_AGENTS:
-        if args.custom_generate_function_path != SECRLENV_GENERATE:
-            raise ValueError(
-                "the SecRLEnv agents require the signed SecRLEnv generate wrapper"
-            )
-        if args.reward_function != SECRLENV_REWARD:
-            raise ValueError(
-                "the SecRLEnv agents require the signed SecRLEnv reward function"
-            )
-        configured_filter = getattr(args, "dynamic_sampling_filter_path", None)
-        if configured_filter not in {None, SECRLENV_GROUP_FILTER}:
-            raise ValueError(
-                "the SecRLEnv agents require the exact signed group filter"
-            )
-        zero_variance_replacements = getattr(
-            args, "dynamic_sampling_max_replacements", None
-        )
-        if zero_variance_replacements not in {
-            None,
-            SECRLENV_ZERO_VARIANCE_REPLACEMENTS,
-        } or isinstance(zero_variance_replacements, bool):
-            raise ValueError(
-                "the SecRLEnv agents require zero variance replacements"
-            )
-        if secrlenv_infrastructure_replacements not in {
-            None,
-            SECRLENV_INFRASTRUCTURE_REPLACEMENTS,
-        } or isinstance(secrlenv_infrastructure_replacements, bool):
-            raise ValueError(
-                "the SecRLEnv agents require exactly one infrastructure replacement"
-            )
-        expected_oversampling = args.rollout_batch_size + 1
-        if args.over_sampling_batch_size == args.rollout_batch_size:
-            args.over_sampling_batch_size = expected_oversampling
-        elif args.over_sampling_batch_size != expected_oversampling:
-            # agentic-rollout-utilization 1.1 (10-09 ruling): the SecRLEnv +1
-            # is a reserved same-task retry slot (_SecRLEnvRetryDataSource), not
-            # over-sampling; over-sample/cut-off applies to the other agents.
-            raise ValueError(
-                "the SecRLEnv agents require oversampling equal to the training "
-                "batch plus one (a reserved same-task retry slot; over-sampling "
-                "with cut-off is not available to SecRLEnv agents)"
-            )
-        args.dynamic_sampling_filter_path = SECRLENV_GROUP_FILTER
-        args.dynamic_sampling_max_replacements = (
-            SECRLENV_ZERO_VARIANCE_REPLACEMENTS
-        )
-        args.secrlenv_max_infrastructure_replacements = (
-            SECRLENV_INFRASTRUCTURE_REPLACEMENTS
-        )
-    elif secrlenv_infrastructure_replacements is not None:
-        raise ValueError(
-            "--secrlenv-max-infrastructure-replacements requires a signed "
-            "SecRLEnv agent"
-        )
+    # The signed stock-Codex and SecRLEnv agents these flags configured were
+    # removed in S26 E0.5 (tag s26-pre-harness-removal); refuse them.
+    for flag, attr in (
+        ("--codex-reasoning-effort", "codex_reasoning_effort"),
+        ("--codex-backend-profile", "codex_backend_profile"),
+        ("--codex-exclude-reasoning-from-loss", "codex_exclude_reasoning_from_loss"),
+        ("--secrlenv-max-infrastructure-replacements", "secrlenv_max_infrastructure_replacements"),
+    ):
+        if getattr(args, attr, None) not in (None, False):
+            raise ValueError(f"{flag} requires a signed Codex agent; the signed Codex and "
+                             "SecRLEnv agents were removed (S26 E0.5)")
     agent_max_seq_len = getattr(args, "agent_max_seq_len", None)
     if agent_max_seq_len is not None:
         if custom_agent is None:
@@ -517,16 +410,13 @@ def _prepare_rl_args(
         bounded_filter = "yeto.rl.filters.bounded_nonzero_reward_std"
         if dynamic_filter == stock_filter:
             args.dynamic_sampling_filter_path = bounded_filter
-        elif dynamic_filter not in {
-            bounded_filter,
-            SECRLENV_GROUP_FILTER,
-        }:
+        elif dynamic_filter != bounded_filter:
             raise ValueError(
                 "--dynamic-sampling-max-replacements is only supported with "
                 "an approved bounded nonzero-variance filter"
             )
-    # After the agent contract binds its filter (SecRLEnv) and the over-sampling
-    # count: the expected spec hash must be the one the island computes.
+    # After the over-sampling count is final: the expected spec hash must be
+    # the one the island computes.
     _prepare_ports_algorithm(args)
     if not args.use_session_server and (
         args.session_server_ip is not None

@@ -104,32 +104,6 @@ def buffered_entries(buffer: Iterable[Sequence[Any]]) -> list[dict[str, Any]]:
     return entries
 
 
-def agentic_entries(gates: Mapping[str, Any], inflight: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """One entry per suspended agentic trajectory (reference only)."""
-    entries = []
-    for trajectory_id in sorted(gates):
-        stage = (inflight.get(trajectory_id) or {}).get("stage")
-        entry = InFlightTrajectory(
-            trajectory_id=str(trajectory_id), group_id=f"agentic:{trajectory_id}",
-            task_id=str(trajectory_id), provenance=TokenProvenance((), ()),
-            session_ref=f"{AGENTIC_SESSION_PREFIX}{trajectory_id}",
-        ).to_dict()
-        if stage:
-            entry["stage"] = str(stage)
-        entries.append(entry)
-    return entries
-
-
-def _codex_suspension() -> tuple[Mapping[str, Any], Mapping[str, Any]]:
-    import sys
-
-    module = sys.modules.get("yeto.rl.harness.codex.codex_openenv_subprocess_agent_function")
-    if module is None:
-        return {}, {}
-    state = getattr(module, "_SUSPEND_STATE", {}) or {}
-    return dict(state.get("gates") or {}), dict(getattr(module, "_INFLIGHT", {}) or {})
-
-
 def export_in_flight(executor: Any) -> dict[str, Any]:
     """Runs INSIDE the rollout executor actor: the in-flight entries and the
     data buffer length they account for."""
@@ -143,8 +117,7 @@ def export_in_flight(executor: Any) -> dict[str, Any]:
     source = getattr(executor, "data_source", None)
     source = getattr(source, "__self__", source)
     buffer = list(getattr(source, "buffer", None) or [])
-    gates, inflight = _codex_suspension()
-    entries = buffered_entries(buffer) + agentic_entries(gates, inflight)
+    entries = buffered_entries(buffer)
     return {"entries": entries, "buffer_groups": len(buffer)}
 
 

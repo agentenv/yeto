@@ -249,7 +249,7 @@ def test_miles_stage_two_support_and_single_turn_check():
     check_task(1)
     check_task(0, custom_agent="x.y", custom_generate="x.z")
     with pytest.raises(PolicyAgeError, match="stage 3"):
-        check_task(1, custom_generate="yeto.rl.harness.codex.codex_openenv_generate.generate")
+        check_task(1, custom_generate="yeto.rl.adapters.miles.records_generate.generate")
     with pytest.raises(PolicyAgeError, match="recompute"):
         check_task(1, recompute_prefill=True)
 
@@ -259,7 +259,7 @@ def test_launcher_refuses_agentic_carry_over_before_launch():
     from yeto.launcher import _prepare_rl_args
 
     args = _args(["--rl-max-policy-age", "1", "--custom-generate-function-path",
-                  "yeto.rl.harness.codex.codex_openenv_generate.generate"])
+                  "yeto.rl.adapters.miles.records_generate.generate"])
     with pytest.raises(PolicyAgeError, match="stage 3"):
         _prepare_rl_args(args)
 

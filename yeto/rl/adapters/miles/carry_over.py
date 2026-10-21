@@ -462,11 +462,11 @@ SUSPEND_STATS_ATTR = "rollout_suspend_stats"  # Miles fork, set at the cut-off
 RESUME_STATS_ATTR = "rollout_resume_stats"  # Miles fork, set at rollout start
 SUSPEND_EXPIRED_PREFIX = "CodexSuspendExpired"
 POLICY_AGE_EXCEEDED_PREFIX = "policy_age_exceeded"
+# Sample metadata key of an infrastructure failure reason (set by the agent function).
+INFRASTRUCTURE_KEY = "tbench_infrastructure_error"
 
 
 def _infrastructure_reason(sample: Any) -> str:
-    from yeto.rl.harness.codex.tbench_reward import INFRASTRUCTURE_KEY
-
     meta = getattr(sample, "metadata", None)
     reason = meta.get(INFRASTRUCTURE_KEY) if isinstance(meta, dict) else None
     return str(reason) if reason else ""

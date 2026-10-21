@@ -8,11 +8,6 @@ than unsigned defaults.
 
 from __future__ import annotations
 
-import os
-import subprocess
-import sys
-from pathlib import Path
-
 import pytest
 
 from yeto.rl import codex_backend as cb
@@ -25,8 +20,6 @@ from yeto.rl.codex_backend import (
     stock_codex_reasoning_markers,
     validate_stock_codex_fields,
 )
-from yeto.rl.harness.codex import codex_openenv_agent_function as adapter
-from yeto.rl.harness.codex import pins
 
 PROFILE = "qwen3_30b_a3b"
 
@@ -37,17 +30,7 @@ QWEN3_KWARGS = {
 }
 
 
-def test_profile_is_allowlisted_and_resolvable():
-    assert PROFILE in pins.OPENENV_BACKEND_PROFILES
-    assert adapter.profile_identity(PROFILE) == (
-        QWEN3_30B_A3B_MODEL,
-        QWEN3_30B_A3B_REVISION,
-    )
-    assert adapter.resolve_backend_profile(PROFILE, env={}) == PROFILE
-    assert (
-        adapter.resolve_backend_profile(env={adapter.RUNTIME_PROFILE_ENV: PROFILE})
-        == PROFILE
-    )
+def test_profile_chat_template_is_its_name():
     # every runtime profile's chat template equals its profile name
     assert stock_codex_backend_contract(PROFILE, 1)["chat_template"] == PROFILE
 
@@ -97,36 +80,6 @@ def test_validate_stock_codex_fields_accepts_then_rejects_drift():
         _validate_qwen3(model_revision="0" * 40)
     with pytest.raises(ValueError, match="Qwen3-30B-A3B model identity drifted"):
         _validate_qwen3(rollout_model="Qwen/Qwen3-32B")
-
-
-def _harness_tool_output_bytes(env_extra: dict[str, str]) -> int:
-    """Resolve MAX_TOOL_OUTPUT_BYTES in a child interpreter (it is bound at
-    import time from the profile named by YETO_CODEX_CHAT_TEMPLATE)."""
-    repo = Path(__file__).resolve().parents[1]
-    env = dict(os.environ)
-    env.pop("YETO_CODEX_CHAT_TEMPLATE", None)
-    env.update(env_extra)
-    env["PYTHONPATH"] = str(repo)
-    out = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "from yeto.rl.harness.codex import codex_harness_agent as h;"
-            " print(h.MAX_TOOL_OUTPUT_BYTES)",
-        ],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return int(out.stdout.strip())
-
-
-def test_tool_output_budget_is_profile_driven():
-    assert _harness_tool_output_bytes({"YETO_CODEX_CHAT_TEMPLATE": PROFILE}) == 8_192
-    # profiles without a declaration keep the signed 32 KiB default
-    assert _harness_tool_output_bytes({"YETO_CODEX_CHAT_TEMPLATE": "qwen35_08b"}) == 32_768
-    assert _harness_tool_output_bytes({}) == 32_768
 
 
 def test_existing_profiles_are_unchanged():

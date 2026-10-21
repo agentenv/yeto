@@ -20,7 +20,6 @@ import pytest
 
 from yeto.rl import codex_backend as cb
 from yeto.rl.harness import reasoning_loss_mask as rlm
-from yeto.rl.harness.codex.alignment import assert_sample_alignment
 
 OPEN, CLOSE = 900, 901
 IM_START, ASSISTANT, NL, IM_END, TOOL = 10, 11, 12, 13, 14
@@ -113,7 +112,6 @@ def test_masks_reasoning_keeps_close_answers_and_tool():
     assert changed == 3
     assert s.metadata == {"k": "v", "reasoning_in_loss": False, "reasoning_tokens_masked": 3}
     assert len(s.rollout_log_probs) == s.response_length  # nothing else changed
-    assert_sample_alignment(s)
 
 
 def test_generated_open_marker_is_masked_and_truncation_masks_to_end():
@@ -216,25 +214,7 @@ def test_miles_calls_hook_before_returning_train_samples(rel):
     assert "_convert_samples_to_train_data" in executor or "convert_samples_to_train_data" in executor
 
 
-# --- flag plumbing: CLI -> launcher -> learner argv; default argv unchanged ----
-from test_rl_launcher_codex_bundle import bundle  # noqa: E402,F401  (pytest fixture)
-
-def test_launcher_forwards_flag_only_when_set(bundle):
-    import test_rl_launcher_codex_bundle as tb  # noqa: PLC0415
-    from yeto.gpu_spec import parse_gpu_spec
-    from yeto.launcher import _prepare_rl_args, make_miles_island_task
-
-    args = tb._codex_args()
-    spec = parse_gpu_spec(args.gpu)[0]
-    default_run = make_miles_island_task(args, spec, 0, 1, "127.0.0.1:29400").run
-    assert "--codex-exclude-reasoning-from-loss" not in default_run
-
-    args.codex_exclude_reasoning_from_loss = True
-    _prepare_rl_args(args)
-    run = make_miles_island_task(args, spec, 0, 1, "127.0.0.1:29400").run
-    assert " --codex-exclude-reasoning-from-loss" in run
-    assert run.replace(" --codex-exclude-reasoning-from-loss", "") == default_run
-
+# --- flag plumbing: CLI -> launcher ----------------------------------------------
 
 def test_launcher_rejects_flag_without_signed_codex_agent():
     from test_rl_engine_selection import _cli  # noqa: PLC0415

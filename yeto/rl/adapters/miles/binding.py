@@ -16,8 +16,7 @@ mismatch fails the launch naming the item:
 3. call -- one fixed CPU input through the mapped loading path gives a result
    equal to the pre-rename path (skipped, and reported as skipped, when the
    implementation cannot be imported here, e.g. a ``miles.*`` built-in on a
-   machine without Miles; not run for a filter that needs environment
-   evidence the fixed input cannot carry, see ``EVIDENCE_FILTERS``).
+   machine without Miles).
 
 The result is a JSON-able dict for the runtime manifest.
 """
@@ -31,13 +30,10 @@ from collections.abc import Callable, Mapping
 from types import SimpleNamespace
 from typing import Any
 
-from yeto.rl import SECRLENV_GROUP_FILTER
 from yeto.rl.engine.algorithm import (
     BOUNDED_NONZERO_STD_FILTER,
     LEGACY_FILTER_NAMES,
-    SECRLENV_GROUP_CHECK_FILTER,
     STOCK_NONZERO_STD_FILTER,
-    TBENCH_GROUP_CHECK_FILTER,
 )
 
 BINDING_SCHEMA = "yeto-backend-binding-v1"
@@ -47,14 +43,7 @@ FILTER_PATHS: dict[str, str] = {
     BOUNDED_NONZERO_STD_FILTER: "yeto.rl.filters.bounded_nonzero_reward_std",
     STOCK_NONZERO_STD_FILTER:
         "miles.rollout.filter_hub.dynamic_sampling_filters.check_reward_nonzero_std",
-    SECRLENV_GROUP_CHECK_FILTER: SECRLENV_GROUP_FILTER,
-    TBENCH_GROUP_CHECK_FILTER: "yeto.rl.harness.codex.tbench_reward.check_group",
 }
-
-# Filters whose input must carry signed environment evidence (the SecRLEnv
-# group check refuses any group without it), so the fixed CPU input of check
-# ③ cannot exercise them; checks ① and ② still run.
-EVIDENCE_FILTERS = frozenset({SECRLENV_GROUP_CHECK_FILTER, TBENCH_GROUP_CHECK_FILTER})
 
 
 class BindingError(RuntimeError):
@@ -134,9 +123,6 @@ def check_filter(name: str, *, paths: Mapping[str, str] | None = None,
     if ident != ident_old:
         raise BindingError(f"{name!r} ② identity: {ident} != pre-rename {ident_old}")
     result["identity"] = ident
-    if name in EVIDENCE_FILTERS:
-        result["call"] = "skipped: needs environment evidence"
-        return result
     try:
         new_fn, old_fn = loader(mapped), loader(old)
     except ImportError as exc:

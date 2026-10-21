@@ -199,37 +199,6 @@ def test_secret_envs_are_split_out_of_plain_envs():
     assert secrets == {"HF_TOKEN": "h", "WANDB_API_KEY": "w", "YETO_SANDBOX_MODAL_TOKEN_SECRET": "s"}
 
 
-def test_main_modal_token_is_not_a_harness_passthrough():
-    from yeto import launcher
-
-    assert not set(launcher.HARNESS_PASSTHROUGH_ENV) & launcher.CLOUD_CREDENTIAL_ENV_NAMES
-    with pytest.raises(ValueError, match="YETO_SANDBOX_MODAL_TOKEN_ID"):
-        launcher.require_sandbox_modal_token({"MODAL_TOKEN_ID": "a", "MODAL_TOKEN_SECRET": "b"})
-    launcher.require_sandbox_modal_token(
-        {"YETO_SANDBOX_MODAL_TOKEN_ID": "a", "YETO_SANDBOX_MODAL_TOKEN_SECRET": "b"})
-
-
-def test_sandbox_client_uses_only_the_sandbox_token(monkeypatch):
-    from yeto.rl.harness.codex import tb2_provider
-
-    assert tb2_provider.sandbox_modal_client({"MODAL_TOKEN_ID": "a", "MODAL_TOKEN_SECRET": "b"}) is None
-    seen = {}
-
-    class FakeClient:
-        @staticmethod
-        def from_credentials(token_id, token_secret):
-            seen["args"] = (token_id, token_secret)
-            return "client"
-
-    import sys
-    import types
-
-    monkeypatch.setitem(sys.modules, "modal", types.SimpleNamespace(Client=FakeClient))
-    env = {"YETO_SANDBOX_MODAL_TOKEN_ID": "sid", "YETO_SANDBOX_MODAL_TOKEN_SECRET": "ssec"}
-    assert tb2_provider.sandbox_modal_client(env) == "client"
-    assert seen["args"] == ("sid", "ssec")
-
-
 # --------------------------------------------------------------------------- D4 island start-up check
 
 def test_guard_names_match_the_launcher_list():

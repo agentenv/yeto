@@ -30,7 +30,7 @@ REPO = Path(__file__).resolve().parents[1]
 ALLOWLIST = REPO / "tests" / "import_boundary_allowlist.txt"
 README = "yeto/rl/engine/README.md"
 # Upper bound of allowlist entries; may only go down (D4).
-ALLOWLIST_CAP = 8  # rl-code-quality-cleanup 1.10: legacy engine and launcher->overlay gone
+ALLOWLIST_CAP = 5  # S26 E0.5: Codex harness removed; rl-code-quality-cleanup 1.10: legacy engine and launcher->overlay gone
 
 FRAMEWORKS = ("miles", "miles_plugins", "megatron", "sglang", "verl", "vllm", "torch_npu")
 ADAPTERS = ("yeto.rl.adapters",)

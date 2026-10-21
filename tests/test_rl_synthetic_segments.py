@@ -27,8 +27,8 @@ def test_labels_alternate_and_keep_gsm8k_reward():
 
 
 def test_launcher_accepts_synthetic_only_with_per_sample_variant():
-    assert L.codex_harness_launch(_args("cross_segment_per_sample"), environ={}) is None
+    assert L.check_compaction_launch(_args("cross_segment_per_sample"), environ={}) is None
     with pytest.raises(ValueError, match="only valid"):
-        L.codex_harness_launch(_args("length_adaptive"), environ={})
+        L.check_compaction_launch(_args("length_adaptive"), environ={})
     with pytest.raises(ValueError, match="needs compacted rollouts"):
-        L.codex_harness_launch(_args("cross_segment_per_sample", "yeto.rl.gsm8k_reward:score"), environ={})
+        L.check_compaction_launch(_args("cross_segment_per_sample", "yeto.rl.gsm8k_reward:score"), environ={})

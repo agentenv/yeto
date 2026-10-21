@@ -49,7 +49,6 @@ class BackendEntry:
     #   publish       publisher (test-only fault injection env names)
     #   algorithm_flags  AlgorithmSpec -> backend argv (critic warmup)
     #   selection_argv   facts read from pass-through backend argv (--rl-engine matrix)
-    #   harness_glue  codex OpenEnv generate: upstream generate, aborted status, session collect
     #   launch_flags  island-entry flag spellings of the neutral layout (launcher)
     #   run_config_rules  backend-only checks of resolve_rl_run_config (ref-load format, divisibility)
     #   binding       neutral name -> backend binding check (4.4a)
@@ -74,7 +73,6 @@ _REGISTRY: dict[str, BackendEntry] = {
         "publish": f"{_MILES}.publish",
         "algorithm_flags": f"{_MILES}.algorithm_flags",
         "selection_argv": f"{_MILES}.selection_argv",
-        "harness_glue": f"{_MILES}.harness_glue.codex_openenv",
         "launch_flags": f"{_MILES}.launch_flags",
         "run_flags": f"{_MILES}.run_flags",
         "run_config_rules": f"{_MILES}.run_config_rules",

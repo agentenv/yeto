@@ -310,7 +310,7 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
                                    incarnation, resume, emit)
     progress = {"rollout_id": None, "rounds": 0}  # the round in flight, rounds done here
 
-    connect_island_ray(miles_args=miles_args)
+    connect_island_ray()
     # The rollout process's metadata hook pushes each round's group records to this
     # named actor (on a trainer island the driver creates it and consumes them).
     metadata = RayMetadataSink()

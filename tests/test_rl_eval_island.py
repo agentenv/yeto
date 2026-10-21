@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 from pathlib import Path
@@ -12,9 +11,8 @@ import pytest
 
 from yeto.rl.eval import guard, stats
 from yeto.rl.eval.export import StoreEvalExporter, is_eval_version
-from yeto.rl.eval.island import EvalIsland, EvalPlan, EvalSettingError, EvalTask, Preempted, jsonl_emitter
+from yeto.rl.eval.island import EvalIsland, EvalPlan, EvalSettingError, Preempted, jsonl_emitter
 from yeto.rl.eval.store import EvalIntegrityError, EvalStore
-from yeto.rl.eval.tb2_attempt import tb2_attempt, trajectory_id
 from yeto.rl.harness.reward_env.benchmark import HOLDOUT_SCHEMA, holdout_sha256
 
 REPO = Path(__file__).resolve().parents[1]
@@ -359,52 +357,6 @@ def test_driver_hook_emits_rl_eval_export(tmp_path):
     assert len(events) == 1
 
 
-# --- TB2 attempt over a fake provider -----------------------------------------------------------
-
-
-class _Verifier:
-    def __init__(self, passed):
-        self.passed = passed
-
-    async def evaluate(self, episode_id):
-        return {"passed": self.passed, "timed_out": False}
-
-
-class _Provider:
-    def __init__(self, passed=True, fail=False):
-        self.passed, self.fail, self.destroyed, self.ids = passed, fail, 0, []
-
-    async def acquire(self, task_id, tid):
-        if self.fail:
-            raise RuntimeError("no sandbox")
-        self.ids.append(tid)
-
-        async def destroy():
-            self.destroyed += 1
-        return SimpleNamespace(verifier=_Verifier(self.passed), destroy=destroy)
-
-
-def test_tb2_attempt_judges_and_always_destroys():
-    async def agent(lease, task, trial, *, policy_token):
-        return {"episode_id": "e", "end_reason": "max_turns", "turns": 30, "tokens": 900}
-
-    task = EvalTask("a", "tb2-easy")
-    prov = _Provider(passed=True)
-    out = tb2_attempt(prov, agent)(task, 1, policy_version=10, policy_token="t")
-    assert out["success"] and out["reward"] == 1.0 and out["end_reason"] == "max_turns"
-    assert prov.ids == [trajectory_id(10, "a", 1)] and prov.destroyed == 1
-
-    async def broken(lease, task, trial, *, policy_token):
-        raise Preempted("gone")
-
-    prov2 = _Provider()
-    with pytest.raises(Preempted):
-        tb2_attempt(prov2, broken)(task, 0, policy_version=10, policy_token="t")
-    assert prov2.destroyed == 1
-    with pytest.raises(RuntimeError, match="no sandbox"):
-        tb2_attempt(_Provider(fail=True), agent)(task, 0, policy_version=10, policy_token="t")
-
-
 # --- Modal launcher / store (fake client) ------------------------------------------------------
 
 
@@ -505,15 +457,6 @@ def test_island_main_with_dotted_fakes(tmp_path, monkeypatch):
     assert out == {"evaluated": [0], "loads": []}
     tape = [json.loads(x) for x in (tmp_path / "vol/events/eval-0.jsonl").read_text().splitlines()]
     assert tape[0]["event"] == "rl_eval" and tape[0]["eval/units"] == 2
-
-
-def test_asyncio_default_runner_is_used():
-    # tb2_attempt defaults to asyncio.run: works from sync code
-    async def agent(lease, task, trial, *, policy_token):
-        return {"end_reason": "completed"}
-
-    assert tb2_attempt(_Provider(passed=False), agent, run=asyncio.run)(
-        EvalTask("a", "x"), 0, policy_version=0, policy_token="t")["success"] is False
 
 
 def test_canonical_policy_files_round_trip_policy_tensor_hash(tmp_path):
