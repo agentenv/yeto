@@ -782,8 +782,9 @@ class IslandDriver:
             policy_version=rollout_id,
             **{
                 "rl/policy_token": self.expected_token,
-                # E1: False on a round whose policy content was not hashed
-                "sync/publication_verified": getattr(state, "verified", True) is not False,
+                # E1: only on a round whose policy content was not hashed (recorded tapes
+                # of verified rounds stay byte-identical)
+                **({"sync/publication_verified": False} if getattr(state, "verified", True) is False else {}),
                 "sync/publication_payload_bytes": manifest.payload_bytes,
                 "sync/publication_payload_hash": manifest.payload_hash,
                 "sync/publication_members": sorted(result.members),

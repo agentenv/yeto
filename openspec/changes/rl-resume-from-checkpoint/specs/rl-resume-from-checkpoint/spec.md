@@ -51,7 +51,7 @@ launcher SHALL 接受 `--rl-checkpoint-store modal-volume://<卷名>[/前缀]`�
 - **THEN** 第一次的第 4 轮记录仍在，`rl_resume.discarded_rounds` 含 4
 
 ### Requirement: Round-cut interval and publication checks (E1, 2026-10-21)
-The product default round-cut interval SHALL be 4 rounds (`--rl-cut-every 4`; `--rl-cut-every 1` cuts every round), plus the last round and our own stop. A publication SHALL hash the policy and read the engine weight checksums back on the first publication, on every round whose number is a multiple of the cut interval (which includes every round that keeps a round cut), and on every round with `--rl-verify-every-round`. Every other publication SHALL still check that the trainer holds the published policy (trainer weights version) and SHALL be recorded with `sync/publication_verified: false`. A publication that was not verified MUST NOT be committed as a round cut.
+The product default round-cut interval SHALL be 4 rounds (`--rl-cut-every 4`; `--rl-cut-every 1` cuts every round), plus the last round and our own stop. A publication SHALL hash the policy and read the engine weight checksums back on the first publication, on every round whose number is a multiple of the cut interval (which includes every round that keeps a round cut), and on every round with `--rl-verify-every-round`. Every other publication SHALL still check that the trainer holds the published policy (trainer weights version) and SHALL be recorded with `sync/publication_verified: false` (verified publications carry no such field). A publication that was not verified MUST NOT be committed as a round cut.
 
 #### Scenario: an unverified round at a cut
 - **WHEN** a cut is due at a safe point whose published policy was not verified
