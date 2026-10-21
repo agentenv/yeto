@@ -205,7 +205,8 @@ def _harness(task: Any) -> HarborHarness:
     if task.provider not in CUSTOM_PROVIDERS:
         raise HarnessConfigError(f"records_generate runs yeto's TrialConfig builder; provider {task.provider!r} "
                                  f"is not one of {sorted(CUSTOM_PROVIDERS)} (use Miles' example path)")
-    return HarborHarness(partial(build_trial_config, settings=HarborSettings.from_env()))
+    settings = HarborSettings.from_env()
+    return HarborHarness(partial(build_trial_config, settings=settings), setup_retries=settings.setup_retries)
 
 
 # ---------------------------------------------------------------------- generate

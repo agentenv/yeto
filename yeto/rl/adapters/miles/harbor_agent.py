@@ -44,7 +44,7 @@ from yeto.rl.agentic import (
 from yeto.rl.agentic.loop_local import LoopLocal
 from yeto.rl.agentic.trust import check_agent_env
 from yeto.rl.harness.harbor import CODEX_VERSION, HarborHarness, HarborSettings, build_trial_config
-from yeto.rl.harness.harbor.trial import CODEX_KWARGS, CUSTOM_PROVIDERS, TrialConfigBuilder
+from yeto.rl.harness.harbor.trial import CODEX_KWARGS, CUSTOM_PROVIDERS, TrialConfigBuilder, setup_retries_from_env
 
 EXAMPLE_MODULE = "harbor_agent_function"
 AGENT_FUNCTION = "yeto.rl.adapters.miles.harbor_agent.run"
@@ -130,7 +130,8 @@ async def run(base_url: str, prompt: Any = None, request_kwargs: dict[str, Any] 
     example = _example()
     example._ensure_provider_key()  # the example's credential contract (key file -> SDK env var); no-op for boat
     task = task_from_metadata(metadata)
-    harness = HarborHarness(trial_config_builder(task, example, metadata, request_kwargs or {}))
+    harness = HarborHarness(trial_config_builder(task, example, metadata, request_kwargs or {}),
+                            setup_retries=setup_retries_from_env())
     trajectory = await run_agent_task(task, harness, openai_session_url(base_url), gate())
     return trajectory.to_metadata()
 

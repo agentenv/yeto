@@ -146,7 +146,8 @@ def check_estimator(config: Any) -> None:
 
 
 def _harness_from_env() -> AgentHarness:
-    return HarborHarness(partial(build_trial_config, settings=HarborSettings.from_env()))
+    settings = HarborSettings.from_env()
+    return HarborHarness(partial(build_trial_config, settings=settings), setup_retries=settings.setup_retries)
 
 
 def task_from_row(kwargs: dict[str, Any]) -> AgentTask:

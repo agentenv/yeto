@@ -292,8 +292,8 @@ def test_miles_agent_function_wraps_the_example_with_the_outer_layer(miles_stubs
 
     Trial.result = _result({"reward": 1.0})
     monkeypatch.setattr(mod, "HarborHarness",
-                        lambda build: __import__("yeto.rl.harness.harbor", fromlist=["x"]).HarborHarness(
-                            build, trial_cls=Trial))
+                        lambda build, **kw: __import__("yeto.rl.harness.harbor", fromlist=["x"]).HarborHarness(
+                            build, trial_cls=Trial, **kw))
     out = _run(mod.run("http://ss:30000/sessions/s1", metadata={"instance_id": "fix-git"}))
     assert example.calls == ["key", ("codex", "http://ss:30000/sessions/s1/v1")]
     assert seen["version"] == "0.145.0"  # Harbor's default would be @latest
@@ -542,8 +542,8 @@ def test_miles_custom_provider_uses_the_yeto_builder(miles_stubs, monkeypatch, t
         result = _result({"reward": 1.0})
 
     monkeypatch.setattr(mod, "HarborHarness",
-                        lambda build: __import__("yeto.rl.harness.harbor", fromlist=["x"]).HarborHarness(
-                            build, trial_cls=Trial))
+                        lambda build, **kw: __import__("yeto.rl.harness.harbor", fromlist=["x"]).HarborHarness(
+                            build, trial_cls=Trial, **kw))
     out = _run(mod.run("http://ss", metadata={"instance_id": "fix-git", "agent_name": "oracle"}))
     assert built == [("oracle", "boat", 900.0, "http://ss/v1", tmp_path, {"ttl_s": 600})]
     assert example.calls == ["key"]  # the example's builder is not called
