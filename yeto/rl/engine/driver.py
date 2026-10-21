@@ -1178,20 +1178,35 @@ class IslandDriver:
             thread.join(timeout=self.load_sample_interval_s + 5)
             # S15 evidence-window lesson: one terminal probe after generate so a
             # round whose loads mostly land after the last tick still leaves a
-            # final ``rl_load_sample`` (``terminal=True``). Observe only.
-            try:
-                sample = probe()
-            except Exception as exc:  # noqa: BLE001 - observation must not kill the round
-                import logging
+            # final ``rl_load_sample`` (``terminal=True``). Observe only, so it runs
+            # off the round's critical path (E1: a synchronous probe cost ~0.1 s/round).
+            self._join_terminal_probe()
+            self._terminal_probe = threading.Thread(
+                target=self._terminal_load_sample, args=(probe, rollout_id),
+                name="yeto-load-sample-terminal", daemon=True)
+            self._terminal_probe.start()
 
-                logging.getLogger(__name__).warning(
-                    "yeto terminal load_sample probe raised %s: %s", type(exc).__name__, exc)
-                sample = None
-            if sample is not None:
-                self.emit("rl_load_sample", rollout_id=rollout_id, **dict(sample),
-                          t=self.clock(), profile_hash=self.profile_hash,
-                          epoch=self.config_epoch,
-                          weight_transport=self.weight_transport, terminal=True)
+    def _join_terminal_probe(self) -> None:
+        """Wait (bounded) for the previous round's terminal load probe: at most one runs."""
+        thread = getattr(self, "_terminal_probe", None)
+        if thread is not None:
+            thread.join(timeout=self.load_sample_interval_s + 5)
+            self._terminal_probe = None
+
+    def _terminal_load_sample(self, probe: Callable[[], Any], rollout_id: int) -> None:
+        try:
+            sample = probe()
+        except Exception as exc:  # noqa: BLE001 - observation must not kill the round
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "yeto terminal load_sample probe raised %s: %s", type(exc).__name__, exc)
+            return
+        if sample is not None:
+            self.emit("rl_load_sample", rollout_id=rollout_id, **dict(sample),
+                      t=self.clock(), profile_hash=self.profile_hash,
+                      epoch=self.config_epoch,
+                      weight_transport=self.weight_transport, terminal=True)
 
     def _emit_round_labels(self, rollout_id, batch, metrics) -> None:
         """A5: per-round algorithm metrics carry the same profile/epoch/transport labels."""
@@ -1911,6 +1926,7 @@ class IslandDriver:
             failure = error
             raise
         finally:
+            self._join_terminal_probe()  # its rl_load_sample lands before the tape closes
             if self.eval_overlap is not None:
                 self.eval_overlap.abort()  # no orphan eval task on error/cancel paths
             self._close_sync(failure)
