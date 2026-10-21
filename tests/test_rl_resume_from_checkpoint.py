@@ -718,3 +718,39 @@ def test_periodic_cut_is_skipped_while_the_previous_commit_runs(tmp_path):
     busy.join()
     info = cp.save(driver, rollout_id=2, final=True)  # the final cut waits and is taken
     assert info["store_commit"] == "inline"
+
+
+def test_a_periodic_cut_never_waits_for_the_commit_it_starts(tmp_path):
+    import threading
+
+    class _SlowVol(_Vol):
+        gate = threading.Event()
+        slow = False
+
+        def commit(self):
+            if self.slow:
+                self.gate.wait(10)
+            super().commit()
+
+    vol = _SlowVol()
+    store = _store(tmp_path / "store", vol)
+    rank, driver, _trainer_c, cp, _first = _island_with_first_cut(tmp_path, store)
+    g = torch.Generator().manual_seed(5)
+    _publish(driver, 2, _hash(rank))
+    assert cp.save(driver, rollout_id=2)["store_commit"] == "deferred"
+    vol.slow = True
+    train_step(rank, torch.randn(3, 6, generator=g))
+    driver.local_step = 3
+    _publish(driver, 3, _hash(rank))
+    info = cp.save(driver, rollout_id=3)  # completes v2 and starts its (slow) commit
+    assert info["store_commit"] == "deferred" and cp._commit[0].is_alive()
+    train_step(rank, torch.randn(3, 6, generator=g))
+    driver.local_step = 4
+    _publish(driver, 4, _hash(rank))
+    assert cp.save(driver, rollout_id=4) is None  # v2 still committing: skipped
+    assert driver.events[-1][0] == "rl_cut_skipped"
+    vol.gate.set()
+    final = cp.save(driver, rollout_id=4, final=True)
+    assert final["store_commit"] == "inline" and rs.read_latest(store.root)["cut_id"] == final["cut_id"]
+    committed = [f["cut_id"] for e, f in driver.events if e == "rl_cut_committed"]
+    assert committed == ["r000002-" + cp.controller.incarnation["id"], info["cut_id"]]  # v2, then v3

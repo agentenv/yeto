@@ -243,6 +243,7 @@ class RoundCutCheckpoint:
         self._commit: tuple[Any, dict[str, Any]] | None = None  # (thread, result box)
         # E1: a periodic cut captured at its safe point, completed by join_commit()
         self._deferred: dict[str, Any] | None = None
+        self._commit_info: dict[str, Any] | None = None  # the running commit's cut
         self.skipped_busy = 0  # periodic cuts skipped while a commit was running
 
     # ---------------------------------------------------------------- pointer
@@ -318,7 +319,7 @@ class RoundCutCheckpoint:
             return False  # save() skips this periodic cut (_commit_busy)
         if int(state.policy_version) != int(rollout_id):
             raise RoundCutError(f"prepared cut {rollout_id} for policy v{state.policy_version}")
-        self.join_commit(driver)  # the previous cut is complete before this one starts
+        self.join_commit(driver, wait=False)  # the previous cut is complete before this one starts
         cut_id = self._cut_id(rollout_id)
         self._drop_unpointed(cut_id)
         started = time.monotonic()
@@ -359,30 +360,44 @@ class RoundCutCheckpoint:
         if directory.exists():
             shutil.rmtree(directory)
 
-    def join_commit(self, driver: Any = None) -> dict[str, Any] | None:
-        """Complete the previous background cut: collect its shards, commit its
-        manifest, point the state dir at it and commit the store; then report it
-        (``rl_cut_committed``). On any failure the previous pointer stays the
-        committed one. Returns the outcome (None: nothing was pending)."""
+    def join_commit(self, driver: Any = None, *, wait: bool = True) -> dict[str, Any] | None:
+        """Complete the previous background cut: wait for a running store commit,
+        then collect the pending cut's shards, commit its manifest, point the state
+        dir at it and start its store commit (``wait``: and wait for that too). Each
+        finished commit is reported (``rl_cut_committed``); on any failure the
+        previous pointer stays the committed one. Returns the last outcome (None:
+        nothing was pending)."""
+        result = self._join_running(driver)
         deferred, self._deferred = self._deferred, None
-        result: dict[str, Any] | None = None
         if deferred is not None:
-            result = self._complete_deferred(deferred)
-        if self._commit is not None:
-            thread, box = self._commit
-            thread.join()
-            self._commit = None
-            result = {**(result or {}), **dict(box.get("result") or {
-                "ok": False, "error": "commit thread ended without a result"})}
-            result.setdefault("cut_id", box.get("cut_id"))
-        if result is None:
+            done = self._complete_deferred(deferred)
+            if not done.get("ok", True):
+                self._report(driver, done)
+                return done
+            self._commit_info = done
+            result = self._join_running(driver) if wait else done
+        return result
+
+    def _join_running(self, driver: Any) -> dict[str, Any] | None:
+        if self._commit is None:
             return None
+        thread, box = self._commit
+        thread.join()
+        self._commit = None
+        result = {**(self._commit_info or {}), **dict(box.get("result") or {
+            "ok": False, "error": "commit thread ended without a result"})}
+        self._commit_info = None
+        result.setdefault("cut_id", box.get("cut_id"))
+        self._report(driver, result)
+        return result
+
+    @staticmethod
+    def _report(driver: Any, result: Mapping[str, Any]) -> None:
         emit = getattr(driver, "emit", None)
         if callable(emit):
             emit("rl_cut_committed", **{k: result.get(k) for k in (
                 "cut_id", "rollout_id", "ok", "finish_s", "commit_s", "pruned", "seq", "cut_bytes")},
                 **({"error": result["error"]} if result.get("error") else {}))
-        return result
 
     def _complete_deferred(self, deferred: dict[str, Any]) -> dict[str, Any]:
         import time
@@ -451,7 +466,7 @@ class RoundCutCheckpoint:
         if int(driver.published_version) != int(rollout_id):
             self._abandon(prepared)
             raise RoundCutError(f"safe point {rollout_id} != published version {driver.published_version}")
-        self.join_commit(driver)
+        self.join_commit(driver, wait=final)  # the final cut leaves nothing running
         started = time.monotonic()
         context = self.source.context(self._cut_id(rollout_id))
         progress = context.progress
