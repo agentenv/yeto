@@ -36,6 +36,10 @@ post-load checks fail during the round sets :attr:`SamplerLoop.unchecked_in_flig
 (the round's caller drops its groups); an error other than
 :class:`~.policy_release.ReleaseNotLoaded` stops the island after the round.
 
+``rl_sampler_policy_loaded`` carries the latency fields of S26 E5: the trainer's
+``released_at``, the follower's ``seen_at`` (both wall clock, of two hosts) and
+``follower_timings`` (:attr:`~.policy_release.PolicyFollower.last_timings`).
+
 After the last round it marks the data end, so the trainer stops after reading
 the rest. The loop is engine-neutral: ``generate(rollout_id)`` runs one round.
 """
@@ -116,6 +120,8 @@ class SamplerLoop:
             self.emit("rl_sampler_policy_loaded", seq=loaded.seq, policy_version=loaded.version,
                       policy_hash=loaded.policy_hash, buffer_selected=loaded.buffer_selected,
                       weights=loaded.weights, sha256=loaded.sha256,
+                      released_at=loaded.released_at, seen_at=self.follower.seen_at,
+                      follower_timings=self.follower.last_timings,
                       **({"in_flight": True} if in_flight else {}), **self.loaded_fields())
 
     @contextmanager
@@ -205,9 +211,11 @@ class SamplerLoop:
             with self.follower.generating(), self._live_refresh():
                 self.generate(rollout_id)
             self.buffer.refresh()
+            generate_s = self.clock() - started
             self.emit("rl_sampler_round", rollout_id=rollout_id, policy_version=version,
                       version_lag=lag, releases=self.follower.counters.to_dict(),
-                      groups=len(self.buffer) - before, buffer_end=len(self.buffer))
+                      groups=len(self.buffer) - before, buffer_end=len(self.buffer),
+                      generate_s=round(generate_s, 3))
             done += 1
             self._throttle(started, last=rollout_id == self.num_rollouts - 1)
         self.buffer.mark_data_end()

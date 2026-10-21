@@ -50,6 +50,14 @@ other weights (a new lineage): that is a new release with a higher ``seq``.
 :class:`PolicyFollower` is the sampler side: it loads a release when its ``seq``
 differs from the one its engines serve. When the trainer stops, no new release
 appears and the sampler keeps the last version.
+
+Latency phases (S26 E5): the trainer side (:meth:`PolicyReleaseStore.release`)
+and the sampler side (:meth:`PolicyFollower.refresh`) time their phases with
+:class:`PhaseTimer` (``last_timings``, seconds); the islands write them in their
+release and load events. They only measure: no phase changes its order or work.
+A load hook that checks the weight files itself while it copies them
+(``verifies_files``, :func:`copy_with_digest`) reads a LoRA release once instead
+of twice; the follower then skips its own check.
 """
 
 from __future__ import annotations
@@ -135,19 +143,72 @@ def check_release_scheme(release: PolicyRelease, expected: str) -> None:
                              f"this reader serves {expected!r} (it follows the wrong release directory?)")
 
 
+class PhaseTimer:
+    """Wall seconds per named phase (``phase(name)`` adds to the name's total).
+    ``as_dict()``: the totals in milliseconds precision, in first-use order."""
+
+    def __init__(self, clock: Callable[[], float] = time.perf_counter) -> None:
+        self.clock = clock
+        self._totals: dict[str, float] = {}
+
+    @contextmanager
+    def phase(self, name: str) -> Iterator[None]:
+        started = self.clock()
+        try:
+            yield
+        finally:
+            self._totals[name] = self._totals.get(name, 0.0) + (self.clock() - started)
+
+    def add(self, name: str, seconds: float) -> None:
+        self._totals[name] = self._totals.get(name, 0.0) + float(seconds)
+
+    def as_dict(self) -> dict[str, float]:
+        return {name: round(value, 3) for name, value in self._totals.items()}
+
+
+def _digested_files(root: Path) -> list[Path]:
+    """The files :func:`directory_digest` covers, in its order (all but the record)."""
+    return sorted(p for p in root.rglob("*") if p.is_file() and p.relative_to(root) != Path(RECORD))
+
+
+def _digest_header(digest: Any, root: Path, path: Path) -> None:
+    relative = path.relative_to(root).as_posix().encode("utf-8")
+    digest.update(len(relative).to_bytes(8, "big") + relative)
+    digest.update(os.path.getsize(path).to_bytes(8, "big"))
+
+
 def directory_digest(directory: Path) -> str:
     """sha256 over every file under ``directory`` except the release record:
     relative path, size and bytes, in sorted path order."""
     digest = hashlib.sha256()
     root = Path(directory)
-    files = sorted(p for p in root.rglob("*") if p.is_file() and p.relative_to(root) != Path(RECORD))
-    for path in files:
-        relative = path.relative_to(root).as_posix().encode("utf-8")
-        digest.update(len(relative).to_bytes(8, "big") + relative)
-        digest.update(os.path.getsize(path).to_bytes(8, "big"))
+    for path in _digested_files(root):
+        _digest_header(digest, root, path)
         with path.open("rb") as handle:
             while chunk := handle.read(_DIGEST_CHUNK):
                 digest.update(chunk)
+    return digest.hexdigest()
+
+
+def copy_with_digest(source: Path, target: Path) -> str:
+    """Copy every file under ``source`` into ``target`` (created; existing files are
+    overwritten) and return :func:`directory_digest` of ``source``, reading each
+    file once. The release record is copied but not digested, as there."""
+    root, out = Path(source), Path(target)
+    out.mkdir(parents=True, exist_ok=True)
+    digested = set(_digested_files(root))
+    digest = hashlib.sha256()
+    for path in sorted(p for p in root.rglob("*") if p.is_file()):
+        destination = out / path.relative_to(root)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        hashed = path in digested
+        if hashed:
+            _digest_header(digest, root, path)
+        with path.open("rb") as reader, destination.open("wb") as writer:
+            while chunk := reader.read(_DIGEST_CHUNK):
+                if hashed:
+                    digest.update(chunk)
+                writer.write(chunk)
     return digest.hexdigest()
 
 
@@ -196,10 +257,14 @@ def check_complete(release: PolicyRelease, directory: Path) -> None:
 
 def check_release_files(release: PolicyRelease, directory: Path) -> None:
     """Raise when the weight files differ from the ones the trainer released."""
-    if release.sha256 is None:
-        return
-    actual = directory_digest(directory)
-    if actual != release.sha256:
+    if release.sha256 is not None:
+        check_release_digest(release, directory_digest(directory))
+
+
+def check_release_digest(release: PolicyRelease, actual: str) -> None:
+    """Raise when ``actual`` (a :func:`directory_digest`) is not the released one
+    (no check for a release without ``sha256``)."""
+    if release.sha256 is not None and actual != release.sha256:
         raise PolicyReleaseError(f"release r{release.seq}-v{release.version}: weight files "
                                  f"sha256 {actual} != released {release.sha256}")
 
@@ -213,7 +278,8 @@ class PolicyReleaseStore:
     def __init__(self, store: CheckpointStore, *, keep: int = 2,
                  clock: Callable[[], float] = time.time,
                  cache_dir: str | os.PathLike[str] = DEFAULT_CACHE_DIR,
-                 release_dir: str = RELEASE_DIR) -> None:
+                 release_dir: str = RELEASE_DIR,
+                 timer: Callable[[], float] = time.perf_counter) -> None:
         if int(keep) < 1:
             raise ValueError("keep must be >= 1")
         self.store = store
@@ -221,6 +287,9 @@ class PolicyReleaseStore:
         self.clock = clock
         self.release_dir = str(release_dir)
         self.root = Path(store.root) / self.release_dir
+        self.timer = timer
+        # seconds per phase of the last release() that wrote a release (module doc)
+        self.last_timings: dict[str, float] = {}
         self.cache_dir = Path(cache_dir).expanduser()
         if self.release_dir != RELEASE_DIR:  # its own cache: the prune below drops other directories
             self.cache_dir /= self.release_dir
@@ -319,30 +388,39 @@ class PolicyReleaseStore:
             raise ValueError("policy_hash must be non-empty")
         if weights not in WEIGHT_FORMATS:
             raise ValueError(f"weights must be one of {WEIGHT_FORMATS}, not {weights!r}")
-        latest = self.latest()
+        timer = PhaseTimer(self.timer)
+        with timer.phase("read_latest_s"):
+            latest = self.latest()
         if latest is not None and (latest.version, latest.policy_hash) == (version, policy_hash):
             return None
         seq = 1 if latest is None else latest.seq + 1
         name = f"r{seq}-v{version}"
         directory = self.root / name
-        if directory.exists():  # a partial release of an earlier attempt (no LATEST names it)
-            shutil.rmtree(directory)
-        directory.mkdir(parents=True)
-        write(directory)
+        with timer.phase("export_s"):
+            if directory.exists():  # a partial release of an earlier attempt (no LATEST names it)
+                shutil.rmtree(directory)
+            directory.mkdir(parents=True)
+            write(directory)
+        with timer.phase("digest_s"):
+            sha256 = directory_digest(directory) if weights == LORA else None
+            files = file_sizes(directory)
         record = PolicyRelease(seq=seq, version=version, policy_hash=str(policy_hash), path=name,
                                buffer_selected=None if buffer_selected is None else int(buffer_selected),
-                               released_at=round(self.clock(), 3), weights=weights,
-                               sha256=directory_digest(directory) if weights == LORA else None,
-                               engine_checksum=engine_checksum or None, files=file_sizes(directory),
+                               released_at=round(self.clock(), 3), weights=weights, sha256=sha256,
+                               engine_checksum=engine_checksum or None, files=files,
                                buffer_shards=None if buffer_shards is None else
                                {str(k): int(v) for k, v in sorted(buffer_shards.items())},
                                derived_from=None if derived_from is None else dict(derived_from),
                                origin=None if origin is None else dict(origin))
-        _write_json_atomic(directory / RECORD, asdict(record))
-        self.store.commit()  # the weights and the record are durable before LATEST names them
-        _write_json_atomic(self.root / LATEST, asdict(record))
-        self.store.commit()
-        self._prune()
+        with timer.phase("commit_weights_s"):
+            _write_json_atomic(directory / RECORD, asdict(record))
+            self.store.commit()  # the weights and the record are durable before LATEST names them
+        with timer.phase("commit_latest_s"):
+            _write_json_atomic(self.root / LATEST, asdict(record))
+            self.store.commit()
+        with timer.phase("prune_s"):
+            self._prune()
+        self.last_timings = timer.as_dict()
         return record
 
     def _prune(self) -> list[str]:
@@ -386,7 +464,9 @@ class PolicyFollower:
 
     ``load(release, directory)`` loads the weights and stamps ``release.version``
     on every engine (raises on any failure; the served release is then unchanged).
-    The weight files are checked against the record's ``sha256`` first.
+    The weight files are checked against the record's ``sha256`` first, unless
+    the hook has a true ``verifies_files`` attribute: it then checks them itself
+    (with :func:`check_release_digest`) before any engine sees them.
     ``version`` is the version the engines serve before any release (the base
     policy, 0). ``scheme``: the weight scheme the engines serve; a release of
     another scheme raises :class:`SchemeMismatch` before any file is read
@@ -401,11 +481,17 @@ class PolicyFollower:
     (:meth:`generating`), :meth:`refresh` loads nothing unless ``live_update``
     (the engines take new weights during a generation and stamp each sample with
     the version that produced it). A refused refresh is counted and the release
-    is loaded at the next refresh outside the round."""
+    is loaded at the next refresh outside the round.
+
+    ``last_timings``: seconds per phase of the last refresh that loaded a
+    release; ``seen_at``: the wall time this follower first read the newest
+    release (``last_seen``) in ``LATEST``."""
 
     def __init__(self, releases: PolicyReleaseStore,
                  load: Callable[[PolicyRelease, Path], None], *, version: int = 0,
-                 scheme: str | None = None, live_update: bool = False) -> None:
+                 scheme: str | None = None, live_update: bool = False,
+                 timer: Callable[[], float] = time.perf_counter,
+                 wall: Callable[[], float] = time.time) -> None:
         self.releases = releases
         self.scheme = scheme
         self._load = load
@@ -416,6 +502,10 @@ class PolicyFollower:
         self.incomplete: str | None = None  # why the newest release is not loaded yet
         self.counters = FollowerCounters()
         self._in_flight = False
+        self.timer = timer
+        self.wall = wall
+        self.seen_at: float | None = None
+        self.last_timings: dict[str, float] = {}
 
     @contextmanager
     def generating(self) -> Iterator[None]:
@@ -439,9 +529,13 @@ class PolicyFollower:
         """The release loaded by this call, or None when there is no new one, when
         the newest one is not complete yet (``incomplete`` says why; the engines
         keep the release they serve), or when the in-flight rule defers it."""
-        latest = self.releases.latest()
+        timer = PhaseTimer(self.timer)
+        with timer.phase("read_latest_s"):
+            latest = self.releases.latest()
         if latest is None:
             return None
+        if self.last_seen is None or latest.seq > self.last_seen.seq:
+            self.seen_at = round(self.wall(), 3)
         if self.last_seen is not None and latest.seq < self.last_seen.seq:
             self.counters.stale_reads += 1
             latest = self.last_seen
@@ -454,13 +548,17 @@ class PolicyFollower:
         if self.scheme is not None:
             check_release_scheme(latest, self.scheme)
         try:
-            directory = self.releases.resolve(latest)
+            with timer.phase("resolve_s"):
+                directory = self.releases.resolve(latest)
         except ReleaseIncomplete as error:
             self.incomplete = str(error)
             return None
         self.incomplete = None
-        check_release_files(latest, directory)
-        self._load(latest, directory)
+        if not getattr(self._load, "verifies_files", False):
+            with timer.phase("verify_s"):
+                check_release_files(latest, directory)
+        with timer.phase("load_s"):
+            self._load(latest, directory)
         previous = self.release
         self.counters.loaded += 1
         if previous is not None:
@@ -469,4 +567,5 @@ class PolicyFollower:
                 self.counters.lineage_resets += 1
         self.version = latest.version
         self.release = latest
+        self.last_timings = timer.as_dict()
         return latest
