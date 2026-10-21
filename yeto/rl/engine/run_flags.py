@@ -803,9 +803,9 @@ _ROLLOUT_ENGINE = (
                 "KV cache stays BF16. Needs FP8 cards (H100, H200, L4)"),
     shared_flag("--rl-rollout-quant-fp8-source", choices=("engine", "trainer"), default="engine",
                 help="tier 1 only: who quantizes. engine (default): the rollout engine quantizes at "
-                "load (SGLang/vLLM online FP8). trainer (Miles only): the engines start on Miles' "
+                "load (online FP8). trainer (backends that support it): the engines start on a "
                 "128x128 block-FP8 conversion of the base and the trainer block-quantizes every "
-                "weight update (Miles quantize_params_fp8); same ignore list"),
+                "weight update; same ignore list"),
 )
 
 _AGENT = (
