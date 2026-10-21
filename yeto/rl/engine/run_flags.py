@@ -799,8 +799,13 @@ _ROLLOUT_ENGINE = (
                 "(dense) or routed experts (MoE) to FP8 itself, FP8 KV cache; 2 the trainer side "
                 "converts each release to FP8 W8A8 on the same linears and the sampler island "
                 "loads it (needs --rl-island-sample-role and --tuning full); 3 4-bit, interface "
-                "only (refused). Router, lm_head, embeddings, norms and attention stay BF16. "
-                "Needs FP8 cards (H100, H200, L4)"),
+                "only (refused). Router, lm_head, embeddings, norms and attention stay BF16; the "
+                "KV cache stays BF16. Needs FP8 cards (H100, H200, L4)"),
+    shared_flag("--rl-rollout-quant-fp8-source", choices=("engine", "trainer"), default="engine",
+                help="tier 1 only: who quantizes. engine (default): the rollout engine quantizes at "
+                "load (SGLang/vLLM online FP8). trainer (Miles only): the engines start on Miles' "
+                "128x128 block-FP8 conversion of the base and the trainer block-quantizes every "
+                "weight update (Miles quantize_params_fp8); same ignore list"),
 )
 
 _AGENT = (

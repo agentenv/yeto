@@ -68,6 +68,13 @@ TIER_NAMES = {TIER_BF16: "bf16", TIER_ONLINE_FP8: "online-fp8", TIER_TRAINER_FP8
 TIERS = tuple(TIER_NAMES)
 
 FLAG = "--rl-rollout-quant-tier"
+SOURCE_FLAG = "--rl-rollout-quant-fp8-source"
+# Tier 1, who quantizes: the engine at load (online FP8), or the trainer on every weight
+# update (Miles quantize_params_fp8, 128x128 blocks) with the engines started on Miles'
+# block-FP8 conversion of the base. Both keep the scope rule's modules in BF16.
+FP8_SOURCE_ENGINE = "engine"
+FP8_SOURCE_TRAINER = "trainer"
+NATIVE_BLOCK = [128, 128]
 SGLANG_IGNORE_ENV = "SGLANG_FP8_IGNORED_LAYERS"
 # verl's own FP8 rollout config (fork acad9875 vllm_async_server.py:1373); the
 # ignore list is replaced by ours, which keeps verl's ``mlp.gate`` entries.
@@ -109,10 +116,16 @@ VERL_TIER1_REFUSAL = (f"{FLAG} 1 is not available on verl: verl's FP8 rollout ne
                       "would generate garbage); use tier 0 on verl")
 
 
+def fp8_source(args: Any) -> str:
+    return getattr(args, "rl_rollout_quant_fp8_source", None) or FP8_SOURCE_ENGINE
+
+
 def validate_launch(args: Any) -> int:
     """Refuse a tier the launch cannot run (launcher side, no checkpoint needed); returns the tier."""
     tier = tier_of(args)
     if tier == TIER_BF16:
+        if fp8_source(args) != FP8_SOURCE_ENGINE:
+            raise QuantTierError(f"{SOURCE_FLAG} {fp8_source(args)} needs {FLAG} 1")
         return tier
     if tier == TIER_4BIT:
         raise QuantTierError(f"{FLAG} 3 (4-bit) is an interface only in this version (large models; "
@@ -123,6 +136,8 @@ def validate_launch(args: Any) -> int:
                              f"{', '.join(sorted(FP8_CARDS))}); --gpu names {', '.join(lacking)}")
     if tier == TIER_ONLINE_FP8 and getattr(args, "rl_backend", None) == VERL_BACKEND:
         raise QuantTierError(VERL_TIER1_REFUSAL)
+    if fp8_source(args) == FP8_SOURCE_TRAINER and tier != TIER_ONLINE_FP8:
+        raise QuantTierError(f"{SOURCE_FLAG} trainer applies to tier 1 only (got {FLAG} {tier})")
     if tier == TIER_TRAINER_FP8:
         if not getattr(args, "rl_island_sample_role", None):
             raise QuantTierError(
@@ -191,6 +206,30 @@ def sglang_online_env(plan: OnlinePlan) -> dict[str, str]:
     if any("," in entry for entry in entries):
         raise scope.QuantScopeError("an ignore entry holds a comma; SGLANG_FP8_IGNORED_LAYERS splits on commas")
     return {SGLANG_IGNORE_ENV: ",".join(entries)}
+
+
+def native_ignore_list(plan: OnlinePlan) -> list[str]:
+    """Tier 1 trainer source: the modules Miles' converter and ``quantize_params_fp8``
+    keep in BF16 (the converter records them in ``modules_to_not_convert``, which
+    SGLang and Miles both read; SGLang path match, as the online ignore list)."""
+    return [*plan.explicit, *plan.segments]
+
+
+def check_native_base(directory: Path) -> int:
+    """Tier 1 trainer source: Miles' block-FP8 conversion must be ``quant_method fp8``
+    with 128x128 blocks and hold FP8 weights only in scope. Returns the FP8 module count."""
+    directory = Path(directory)
+    config = json.loads((directory / "config.json").read_text())
+    q = config.get("quantization_config") or {}
+    if q.get("quant_method") != "fp8" or list(q.get("weight_block_size") or ()) != NATIVE_BLOCK:
+        raise scope.QuantScopeError(f"{directory}: quantization_config is {q.get('quant_method')!r} "
+                                    f"blocks {q.get('weight_block_size')!r}, expected fp8 {NATIVE_BLOCK}")
+    dtypes = _checkpoint_dtypes(directory)
+    quantized = [n[: -len(".weight")] for n, d in dtypes.items() if d == "F8_E4M3" and n.endswith(".weight")]
+    if not quantized:
+        raise scope.QuantScopeError(f"{directory}: an FP8 base without FP8 weights")
+    scope.check_quantized(quantized, scope.model_kind(config), what=f"FP8 base {directory.name}")
+    return len(quantized)
 
 
 def vllm_online_overrides(plan: OnlinePlan, num_layers: int) -> list[str]:

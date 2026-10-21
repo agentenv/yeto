@@ -96,20 +96,29 @@ def gate(run: str, cfg: dict) -> dict:
         began = time.time()
         quant = quant_tier.apply(spec, work_dir=Path("/tmp/e6-quant"))
         meta["prepare_s"] = round(time.time() - began, 1)
-        if cfg.get("variant") == "miles-native-block":
-            # Miles' own FP8 path: every decoder linear (attention + FFN) block-quantized
-            # 128x128 by Miles' converter (the format quantize_params_fp8 sends)
+        if cfg.get("variant") in ("miles-native-block", "miles-native-block-ignore"):
+            # Miles' own FP8 path: decoder linears block-quantized 128x128 by Miles' converter
+            # (the format quantize_params_fp8 sends). "-ignore": the production tier 1 trainer
+            # source (entry.prepare_native_fp8_base): our ignore list stays BF16 (attention, ...)
             native = Path("/tmp/e6-quant/miles-fp8-block")
-            subprocess.run([sys.executable, "/root/miles/tools/convert_hf_to_fp8.py", "--model-dir", base,
-                            "--save-dir", str(native), "--strategy", "block", "--block-size", "128", "128"],
-                           check=True, cwd="/root/miles", stdout=subprocess.DEVNULL)
+            convert = [sys.executable, "/root/miles/tools/convert_hf_to_fp8.py", "--model-dir", base,
+                       "--save-dir", str(native), "--strategy", "block", "--block-size", "128", "128"]
+            if cfg["variant"] == "miles-native-block-ignore":
+                from yeto.rl.quant import tiers  # noqa: PLC0415
+
+                ignore_file = Path("/tmp/e6-quant/native-ignore.json")
+                ignore_file.write_text(json.dumps(tiers.native_ignore_list(tiers.online_plan(Path(base)))))
+                convert += ["--ignored-layers-file", str(ignore_file)]
+            subprocess.run(convert, check=True, cwd="/root/miles", stdout=subprocess.DEVNULL)
+            if cfg["variant"] == "miles-native-block-ignore":
+                meta["native_fp8_modules"] = tiers.check_native_base(native)
             from yeto.rl.engine.sampler_checks import release_quant_format  # noqa: PLC0415
 
             _method, fmt = release_quant_format(native)
             (out / "quant-config.json").write_text((native / "config.json").read_text())
             quant = {"engine": {**bf16, "server": {**server, "base_dir": str(native), "precision": "fp8",
                                                     "quant_scheme": "fp8-block-native", "expected_format": fmt}},
-                     "rollout_quant": {"variant": "miles-native-block"}}
+                     "rollout_quant": {"variant": cfg["variant"]}}
             meta["rollout_quant"] = quant["rollout_quant"]
         elif cfg.get("variant") == "sglang-online-all":  # SGLang online FP8 without an ignore list
             quant = {"engine": {**bf16, "server": {**server, "precision": "fp8",
@@ -157,7 +166,8 @@ def main() -> int:
     p.add_argument("--n", type=int, default=4)
     p.add_argument("--max-tokens", type=int, default=512)
     p.add_argument("--timeout-s", type=int, default=3000)
-    p.add_argument("--variant", choices=("miles-native-block", "sglang-online-all"), default=None,
+    p.add_argument("--variant", choices=("miles-native-block", "miles-native-block-ignore", "sglang-online-all"),
+                   default=None,
                    help="framework-native FP8 instead of the tier (with --tier 0)")
     p.add_argument("--bf16-kv", action="store_true", help="diagnosis: drop the tier 1 FP8 KV cache flag")
     p.add_argument("--sglang-cast-overlay", action="store_true",

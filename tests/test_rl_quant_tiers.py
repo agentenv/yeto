@@ -366,6 +366,11 @@ def test_island_task_forwards_the_tier_only_when_set(monkeypatch, tier):
     _prepare_rl_args(args)
     task = make_miles_island_task(args, parse_gpu_spec(args.gpu)[0], 0, 1, "127.0.0.1:29400")
     assert ("--rl-rollout-quant-tier 1" in task.run) is (tier == 1)
+    assert "--rl-rollout-quant-fp8-source" not in task.run
+    if tier == 1:
+        args.rl_rollout_quant_fp8_source = "trainer"
+        task = make_miles_island_task(args, parse_gpu_spec(args.gpu)[0], 0, 1, "127.0.0.1:29400")
+        assert "--rl-rollout-quant-fp8-source trainer" in task.run
 
 
 MILES_NEXT = Path("/home/michael/work/miles-next")
@@ -449,3 +454,90 @@ def test_tied_lm_head_in_an_export_is_dropped(tmp_path):
     save_scoped_template(untied, tmp_path / "t2", FP8_FFN_CHANNEL)
     with pytest.raises(LayoutError, match="1 extra"):
         requantize_checkpoint(export, tmp_path / "t2", tmp_path / "out2", AwqSmoothing.none())
+
+
+# ---------------------------------------------------------------- tier 1, trainer FP8 source (Miles native)
+def test_trainer_source_is_tier_1_only():
+    assert tiers.validate_launch(_args(rl_rollout_quant_fp8_source="trainer")) == 1
+    with pytest.raises(QuantTierError, match="needs --rl-rollout-quant-tier 1"):
+        tiers.validate_launch(_args(rl_rollout_quant_tier=0, rl_rollout_quant_fp8_source="trainer"))
+    with pytest.raises(QuantTierError, match="tier 1 only"):
+        tiers.validate_launch(_args(rl_rollout_quant_tier=2, rl_island_sample_role=["0:sampler"],
+                                    rl_rollout_quant_fp8_source="trainer"))
+
+
+def test_miles_translation_of_the_trainer_source_has_no_sglang_flag():
+    from tests.test_rl_miles_adapter_config import make_config, sub
+    from yeto.rl.adapters.miles import config as mc
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+
+    native = mc.translate_run_config(
+        sub(make_config(), "serving", rollout_quant_tier=1, rollout_quant_fp8_source="trainer"), AlgorithmSpec())
+    assert "--sglang-quantization" not in native.argv
+    assert native.runtime_attrs["yeto_rollout_quant_fp8_source"] == "trainer"
+    online = mc.translate_run_config(sub(make_config(), "serving", rollout_quant_tier=1), AlgorithmSpec())
+    assert "yeto_rollout_quant_fp8_source" not in online.runtime_attrs
+
+
+def _fake_converter(fp8_modules: list[str]):
+    """Stands in for Miles' convert_hf_to_fp8.py (needs CUDA): FP8 for ``fp8_modules``."""
+    calls = []
+
+    def run(argv, **_kw):
+        calls.append(argv)
+        src, out = Path(argv[argv.index("--model-dir") + 1]), Path(argv[argv.index("--save-dir") + 1])
+        tensors = _read(src)
+        for module in fp8_modules:
+            tensors[f"{module}.weight"] = tensors[f"{module}.weight"].to(torch.float8_e4m3fn)
+        out.mkdir(parents=True, exist_ok=True)
+        save_file(tensors, str(out / "model.safetensors"), metadata={"format": "pt"})
+        config = json.loads((src / "config.json").read_text())
+        ignored = json.loads(Path(argv[argv.index("--ignored-layers-file") + 1]).read_text())
+        config["quantization_config"] = {"quant_method": "fp8", "fmt": "e4m3", "activation_scheme": "dynamic",
+                                         "weight_block_size": [128, 128], "modules_to_not_convert": ignored}
+        (out / "config.json").write_text(json.dumps(config))
+    return run, calls
+
+
+def test_native_base_converts_with_our_ignore_list_and_points_the_engines_at_it(dense, tmp_path):
+    from yeto.rl.adapters.miles.entry import prepare_native_fp8_base
+
+    ffn = [f"model.layers.{i}.mlp.{p}" for i in range(2) for p in ("gate_proj", "up_proj", "down_proj")]
+    run, calls = _fake_converter(ffn)
+    args = SimpleNamespace(yeto_rollout_quant_tier=1, hf_checkpoint=str(dense), rollout_hf_checkpoint=None)
+    out = prepare_native_fp8_base(args, tiers.online_plan(dense), tmp_path / "work", run=run)
+    assert args.rollout_hf_checkpoint == str(out) and args.hf_checkpoint == str(dense)
+    argv = calls[0]
+    assert argv[argv.index("--strategy") + 1] == "block" and argv[argv.index("--block-size") + 1:][:2] == ["128", "128"]
+    ignored = json.loads((tmp_path / "work" / "fp8-native-ignore.json").read_text())
+    assert "model.layers.0.self_attn.q_proj" in ignored and "lm_head" in ignored
+    assert not any("mlp.gate_proj" in name for name in ignored)
+
+
+def test_native_base_with_fp8_attention_is_refused(dense, tmp_path):
+    from yeto.rl.adapters.miles.entry import prepare_native_fp8_base
+
+    run, _ = _fake_converter(["model.layers.0.mlp.up_proj", "model.layers.0.self_attn.q_proj"])
+    args = SimpleNamespace(yeto_rollout_quant_tier=1, hf_checkpoint=str(dense), rollout_hf_checkpoint=None)
+    with pytest.raises(QuantScopeError, match="attention"):
+        prepare_native_fp8_base(args, tiers.online_plan(dense), tmp_path / "work", run=run)
+    assert args.rollout_hf_checkpoint is None
+
+
+def test_native_base_needs_the_miles_rollout_checkpoint_flag(dense, tmp_path):
+    from yeto.rl.adapters.miles.entry import prepare_native_fp8_base
+
+    with pytest.raises(RuntimeError, match="--rollout-hf-checkpoint"):
+        prepare_native_fp8_base(SimpleNamespace(hf_checkpoint=str(dense)), tiers.online_plan(dense), tmp_path,
+                                run=_fake_converter([])[0])
+
+
+def test_miles_island_env_of_the_trainer_source_is_empty_after_the_conversion(dense, tmp_path, monkeypatch):
+    from yeto.rl.adapters.miles import entry
+
+    seen = []
+    monkeypatch.setattr(entry, "prepare_native_fp8_base", lambda args, plan, work: seen.append(work))
+    args = SimpleNamespace(yeto_rollout_quant_tier=1, yeto_rollout_quant_fp8_source="trainer",
+                           hf_checkpoint=str(dense))
+    assert entry.rollout_quant_env(args, {"YETO_RL_WORK_DIR": str(tmp_path)}) == {}
+    assert seen == [tmp_path]

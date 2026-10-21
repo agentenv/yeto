@@ -422,6 +422,8 @@ class ServingConfig:
     sampler_snapshot: bool = False
     # S26 E6: rollout quantization tier (yeto.rl.quant.tiers; 0 = BF16)
     rollout_quant_tier: int = 0
+    # tier 1: who quantizes ("engine" online FP8, or "trainer": Miles block FP8 updates)
+    rollout_quant_fp8_source: str = "engine"
 
 
 @dataclass(frozen=True)
@@ -1036,6 +1038,7 @@ def resolve_rl_run_config(
             chunked_prefill_size=getattr(args, "sglang_chunked_prefill_size", None),
             sampler_snapshot=bool(getattr(args, "rl_sampler_snapshot", False)),
             rollout_quant_tier=int(getattr(args, "rl_rollout_quant_tier", 0) or 0),
+            rollout_quant_fp8_source=getattr(args, "rl_rollout_quant_fp8_source", None) or "engine",
         ),
         ports=NetworkPorts(
             rollout_engine_base_port=getattr(args, "rollout_engine_base_port", None),
