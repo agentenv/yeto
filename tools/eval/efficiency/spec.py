@@ -540,7 +540,10 @@ def bare_script(spec: EffSpec, arm: Arm, run_id: str) -> str:
                   "exec python3 -m " + verl_bare_entry(arm.mode) + " " + shlex.join(
                       verl_bare_overrides(spec, arm.mode, run_id))]
     else:
+        # model scripts derived from another (qwen3-4B-Instruct-2507.py) import Miles'
+        # model_args_utils (miles/utils/external_utils), which is not on the scripts' path
         load = ("import importlib.util as u, sys; sys.path.insert(0, '{d}'); "
+                f"sys.path.insert(0, '{MILES_ROOT}/miles/utils/external_utils'); "
                 "s = u.spec_from_file_location('m', '{d}/{f}'); m = u.module_from_spec(s); "
                 "s.loader.exec_module(m); print(m.model_args())").format(d=f"{MILES_ROOT}/scripts/models",
                                                                          f=spec.miles_model_args)
@@ -567,7 +570,8 @@ def plan(spec: EffSpec, arm_name: str, run_id: str) -> dict[str, Any]:
     if arm.system == "bare":
         doc.update(harness="modal_eff", image=arm.framework, script=bare_script(spec, arm, run_id))
     elif arm.framework == "verl":
-        doc.update(harness="modal_eff", image="verl",
+        # island_entry reads the rollout memory fraction from YETO_VERL_GPU_MEM (default 0.5)
+        doc.update(harness="modal_eff", image="verl", env={"YETO_VERL_GPU_MEM": str(spec.mem_fraction)},
                    argv=yeto_verl_argv(spec, arm.mode, "/root/yeto-output/rl-island-0.jsonl"))
     else:
         doc.update(harness="miles_local", launcher_args=yeto_miles_launcher_args(spec, arm.mode, run_id))

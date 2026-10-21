@@ -82,7 +82,7 @@ def arm(run: str, plan: dict) -> dict:
             meta["rc"] = _run_logged(["bash", str(out / "script.sh")], log, budget)
         else:
             sys.path.insert(0, mv.WORKDIR)
-            env = mv._island_env({"gpu": plan["gpu"]}, 0)
+            env = {**mv._island_env({"gpu": plan["gpu"]}, 0), **plan.get("env", {})}
             ray = str(Path(mv.VERL_PY).with_name("ray"))
             _run_logged([ray, "start", "--head", "--node-ip-address=127.0.0.1", "--port=6379", "--num-cpus=32",
                          f"--num-gpus={plan['cards']['total']}", "--include-dashboard=false",
