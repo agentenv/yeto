@@ -1,9 +1,14 @@
 """ModalVolumeStore: a reload never runs while a writer of the same Volume holds
-``writing()`` (S26 E6: a reload dropped a half-written tier 2 release)."""
+``writing()``, in this process or another one of the container (S26 E6: rollout
+actors' reloads dropped a half-written tier 2 release)."""
 
 from __future__ import annotations
 
+import subprocess
+import sys
 import threading
+
+import pytest
 
 from yeto.cloud.modal_ckpt_store import ModalVolumeStore
 from yeto.rl.engine.policy_release import PolicyReleaseStore
@@ -19,6 +24,11 @@ class _Volume:
 
     def commit(self) -> None:
         self.commits += 1
+
+
+@pytest.fixture(autouse=True)
+def _guard_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("YETO_MODAL_VOLUME_GUARD_DIR", str(tmp_path))
 
 
 def _store(tmp_path, volume: _Volume, name: str = "v") -> ModalVolumeStore:
@@ -83,3 +93,21 @@ def test_a_writer_waits_for_a_reload_in_flight(tmp_path):
     reloader.join(5)
     assert entered.wait(5)
     t.join(5)
+
+
+def test_a_writer_in_another_process_blocks_the_reload(tmp_path):
+    volume = _Volume()
+    store = _store(tmp_path, volume)
+    code = ("import os, sys, time; from yeto.cloud.modal_ckpt_store import ModalVolumeStore\n"
+            "s = ModalVolumeStore(sys.argv[1], sys.argv[2], volume_factory=lambda n: None)\n"
+            "with s.writing():\n    print('held', flush=True); sys.stdin.readline()\n")
+    proc = subprocess.Popen([sys.executable, "-c", code, str(tmp_path), store.volume_name],
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        assert proc.stdout.readline().strip() == "held"
+        store.reload()
+        assert volume.reloads == 0
+    finally:
+        proc.communicate("\n", timeout=30)
+    store.reload()
+    assert volume.reloads == 1
