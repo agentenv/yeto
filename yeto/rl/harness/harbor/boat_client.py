@@ -78,6 +78,7 @@ class BoatClient(Protocol):
     def put_file(self, sandbox_id: str, path: str, data: bytes) -> None: ...
     def get_file(self, sandbox_id: str, path: str) -> bytes: ...
     def usage_seconds(self, sandbox_id: str) -> float | None: ...
+    def set_ttl(self, sandbox_id: str, ttl_seconds: int) -> None: ...
     def delete(self, sandbox_id: str) -> None: ...
 
 
@@ -166,6 +167,12 @@ class SdkBoatClient:
     def usage_seconds(self, sandbox_id: str) -> float | None:
         # Billable seconds, type multiplier applied (small = 0.5).
         return float(self._api.usage(sandbox_id).seconds)
+
+    def set_ttl(self, sandbox_id: str, ttl_seconds: int) -> None:
+        """Auto-stop deadline = now + ``ttl_seconds`` (boat extends or shortens a running sandbox)."""
+        from boat_sdk.models.update_sandbox_request import UpdateSandboxRequest
+
+        self._api.update(sandbox_id, UpdateSandboxRequest(ttl_seconds=int(ttl_seconds)))
 
     def delete(self, sandbox_id: str) -> None:
         self._api.delete_sandbox(x_ascii_confirm_delete=sandbox_id, sandbox_id=sandbox_id)

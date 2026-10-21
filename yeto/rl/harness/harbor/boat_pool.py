@@ -17,8 +17,18 @@ keeps VMs whose task has finished and hands them to the next task:
 
 Cost bounds: an idle VM is deleted after ``idle_ttl_s`` (checked on every
 pool call and by a background reaper), at most ``max_idle`` VMs are kept,
-a VM is reused at most ``max_reuses`` times, and every VM keeps its boat
-TTL as a backstop.  :meth:`BoatSandboxPool.close` deletes all idle VMs.
+a VM is reused at most ``max_reuses`` times.  :meth:`BoatSandboxPool.close`
+deletes all idle VMs.
+
+When the process ends, the reaper ends with it (S26 agentic run: 59 idle
+VMs left on the account, each with a 3 h boat TTL).  So:
+
+* an idle VM's boat TTL is cut to ``idle_vm_ttl_s`` (default 20 min) on
+  release and set back to the task TTL on reuse: a VM idle in a dead process
+  stops on its own soon;
+* :func:`process_pool` registers the pool for exit cleanup: ``atexit`` and
+  SIGTERM/SIGINT/SIGHUP handlers delete every idle and leased VM
+  (:meth:`BoatSandboxPool.close_now`).  SIGKILL leaves only the TTLs.
 
 Idle VMs keep their :class:`~.boat_client.BoatQuota` slot: on boat they are
 active sandboxes.  A reuse takes no start from the per-minute budget.
@@ -30,11 +40,18 @@ cache, and see each other only through those; reuse is off by default.
 from __future__ import annotations
 
 import asyncio
+import atexit
 import contextlib
+import functools
 import logging
+import os
+import signal
+import threading
 import time
+import weakref
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from yeto.rl.agentic.loop_local import LoopLocal
 
@@ -46,6 +63,8 @@ logger = logging.getLogger(__name__)
 POOL_ENV = "YETO_BOAT_POOL"  # "1" turns reuse on for BoatEnvironment
 POOL_IDLE_TTL_ENV = "YETO_BOAT_POOL_IDLE_TTL_S"
 POOL_MAX_IDLE_ENV = "YETO_BOAT_POOL_MAX_IDLE"
+POOL_IDLE_VM_TTL_ENV = "YETO_BOAT_POOL_IDLE_VM_TTL_S"
+DEFAULT_IDLE_VM_TTL_S = 20 * 60
 
 
 @dataclass
@@ -66,11 +85,15 @@ class PoolStats:
 
 class BoatSandboxPool:
     def __init__(self, client: BoatClient, quota: BoatQuota, *, idle_ttl_s: float = 300.0,
-                 max_idle: int = 64, max_reuses: int = 50,
+                 max_idle: int = 64, max_reuses: int = 50, idle_vm_ttl_s: int = DEFAULT_IDLE_VM_TTL_S,
                  sandbox_factory: Callable[..., BoatSandbox] = BoatSandbox,
                  clock: Callable[[], float] = time.monotonic) -> None:
         if idle_ttl_s <= 0 or max_idle < 0 or max_reuses < 0:
             raise ValueError("pool limits must be positive")
+        if idle_vm_ttl_s <= idle_ttl_s:
+            raise ValueError(f"idle VM boat TTL ({idle_vm_ttl_s} s) must exceed the pool's idle TTL ({idle_ttl_s} s)")
+        self._idle_vm_ttl_s = int(idle_vm_ttl_s)
+        self._leased: set[BoatSandbox] = set()
         self._client = client
         self._quota = quota
         self._idle_ttl_s = idle_ttl_s
@@ -97,17 +120,26 @@ class BoatSandboxPool:
         await self._expire()
         while (idle := self._take(spec.image, machine_type)) is not None:
             try:
+                await idle.set_ttl(idle.ttl_s)  # back to the task TTL before the task runs
                 await idle.reuse(spec, name=name, codex_cache=sandbox_kwargs.get("codex_cache"))  # deletes the VM itself on failure
             except Exception:
+                if idle.sandbox_id is not None:
+                    await idle.close()
                 logger.warning("boat pool: reuse of %s failed; trying another VM", idle.sandbox_id,
                                exc_info=True)
                 self._counts["discarded"] += 1
                 continue
             self._counts["reused"] += 1
+            self._leased.add(idle)
             return idle
         sandbox = self._factory(self._client, self._quota, name=name, machine_type=machine_type,
                                 **sandbox_kwargs)
-        await sandbox.start(spec)
+        self._leased.add(sandbox)  # before start: a VM being created is deleted at exit too
+        try:
+            await sandbox.start(spec)
+        except BaseException:
+            self._leased.discard(sandbox)
+            raise
         self._counts["created"] += 1
         return sandbox
 
@@ -122,6 +154,7 @@ class BoatSandboxPool:
 
     async def release(self, sandbox: BoatSandbox, *, reusable: bool = True) -> None:
         """Return ``sandbox`` after its task; it is recycled or deleted, never left running."""
+        self._leased.discard(sandbox)
         if sandbox.sandbox_id is None:
             return  # already deleted (a failed start or reuse)
         if (not reusable or self._closed or sandbox.reuse_count >= self._max_reuses
@@ -131,6 +164,7 @@ class BoatSandboxPool:
             return
         try:
             await asyncio.shield(sandbox.recycle())
+            await asyncio.shield(sandbox.set_ttl(self._idle_vm_ttl_s))
         except Exception:
             logger.warning("boat pool: recycle of %s failed; deleting it", sandbox.sandbox_id,
                            exc_info=True)
@@ -157,9 +191,11 @@ class BoatSandboxPool:
             name = f"{name_prefix}-{index}"
             sandbox = self._factory(self._client, self._quota, name=name, machine_type=machine_type)
             spec = ContainerSpec(image=image) if image else None
+            self._leased.add(sandbox)
             try:
                 await sandbox.start_vm(spec)
             except Exception:
+                self._leased.discard(sandbox)
                 logger.warning("boat pool: prewarm %s failed", name, exc_info=True)
                 return False
             self._counts["created"] += 1
@@ -200,13 +236,66 @@ class BoatSandboxPool:
                 await self._reaper
         await asyncio.gather(*(e.sandbox.close() for e in idle))
 
+    def close_now(self) -> int:
+        """Delete every idle and leased VM synchronously (process exit); return how many.
+
+        Runs outside the event loop (atexit, a signal handler): it uses the
+        client directly and does not wait for running tasks."""
+        self._closed = True
+        sandboxes = [e.sandbox for e in self._idle] + list(self._leased)
+        self._idle, self._leased = [], set()
+        for sandbox in sandboxes:
+            sandbox.delete_now()
+        return len(sandboxes)
+
+
+_exit_pools: weakref.WeakSet[BoatSandboxPool] = weakref.WeakSet()
+_hooks_installed = False
+EXIT_SIGNALS = ("SIGTERM", "SIGINT", "SIGHUP")
+
+
+def close_pools_now() -> int:
+    """Delete the VMs of every pool registered for exit cleanup."""
+    return sum(pool.close_now() for pool in list(_exit_pools))
+
+
+def _on_signal(signum: int, frame: Any, previous: Any) -> None:
+    deleted = close_pools_now()
+    if deleted:
+        logger.warning("boat pool: deleted %d VM(s) on signal %d", deleted, signum)
+    if callable(previous):
+        previous(signum, frame)
+    elif previous != signal.SIG_IGN:  # default action: die of the same signal
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+
+def register_for_exit(pool: BoatSandboxPool) -> None:
+    """Delete ``pool``'s VMs at interpreter exit and on SIGTERM/SIGINT/SIGHUP (chaining earlier handlers)."""
+    global _hooks_installed
+    _exit_pools.add(pool)
+    if _hooks_installed:
+        return
+    _hooks_installed = True
+    atexit.register(close_pools_now)
+    if threading.current_thread() is not threading.main_thread():
+        logger.warning("boat pool: not on the main thread; only atexit cleanup is installed")
+        return
+    for name in EXIT_SIGNALS:
+        signum = getattr(signal, name, None)
+        if signum is None:
+            continue
+        previous = signal.getsignal(signum)
+        signal.signal(signum, functools.partial(_on_signal, previous=previous))
+
 
 def _pool_from_env() -> BoatSandboxPool:
-    import os
-
-    return BoatSandboxPool(process_client(), process_quota(),
+    pool = BoatSandboxPool(process_client(), process_quota(),
                            idle_ttl_s=float(os.environ.get(POOL_IDLE_TTL_ENV, "") or 300.0),
-                           max_idle=int(os.environ.get(POOL_MAX_IDLE_ENV, "") or 64))
+                           max_idle=int(os.environ.get(POOL_MAX_IDLE_ENV, "") or 64),
+                           idle_vm_ttl_s=int(os.environ.get(POOL_IDLE_VM_TTL_ENV, "") or DEFAULT_IDLE_VM_TTL_S))
+    register_for_exit(pool)
+    return pool
 
 
 _process_pool: LoopLocal[BoatSandboxPool] = LoopLocal(_pool_from_env)

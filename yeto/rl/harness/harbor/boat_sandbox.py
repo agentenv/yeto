@@ -393,6 +393,26 @@ class BoatSandbox:
             raise
         self.reuse_count += 1
 
+    @property
+    def ttl_s(self) -> int:
+        """The auto-stop TTL a task on this VM runs under."""
+        return self._ttl_s
+
+    async def set_ttl(self, ttl_s: int) -> None:
+        """Move the VM's auto-stop deadline to now + ``ttl_s`` (no-op without a VM)."""
+        if self.sandbox_id is not None:
+            await asyncio.to_thread(self._client.set_ttl, self.sandbox_id, ttl_s)
+
+    def delete_now(self) -> None:
+        """Delete the VM from a synchronous context (process exit); errors are logged."""
+        sandbox_id, self.sandbox_id = self.sandbox_id, None
+        if sandbox_id is None:
+            return
+        try:
+            self._client.delete(sandbox_id)
+        except Exception:
+            logger.exception("boat sandbox %s delete at exit failed; its TTL stops it", sandbox_id)
+
     async def close(self) -> None:
         """Delete the VM (idempotent).  Errors are logged: the caller is often unwinding."""
         sandbox_id, self.sandbox_id = self.sandbox_id, None

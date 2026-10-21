@@ -631,3 +631,72 @@ def test_codex_cache_setup_node_that_cannot_run_falls_back(tmp_path):
     code, plain, nvm, _, _ = _run_cache_setup(tmp_path, apt_ok=True, has_curl=True, has_rg=True,
                                               node_runs=False)
     assert code != 0 and "codex" not in plain | nvm
+
+
+def test_idle_vm_gets_a_short_boat_ttl_and_the_task_ttl_back_on_reuse():
+    fake = VmFake()
+
+    async def go():
+        pool = _pool(fake, idle_vm_ttl_s=1200)
+        first = await pool.acquire(SPEC_A, name="t1", machine_type="small")
+        vm = first.sandbox_id
+        await pool.release(first)
+        assert fake.ttls == [(vm, 1200)]  # idle in a dead process: stops in 20 min, not 3 h
+        second = await pool.acquire(SPEC_A, name="t2", machine_type="small")
+        assert fake.ttls[-1] == (vm, second.ttl_s) and second.ttl_s > 1200
+        await pool.close()
+
+    asyncio.run(go())
+
+
+def test_idle_vm_ttl_must_outlive_the_pool_idle_ttl():
+    with pytest.raises(ValueError):
+        _pool(VmFake(), idle_ttl_s=300.0, idle_vm_ttl_s=300)
+
+
+def test_close_now_deletes_idle_and_leased_vms_without_the_loop():
+    fake = VmFake()
+
+    async def go():
+        pool = _pool(fake)
+        idle = await pool.acquire(SPEC_A, name="t1", machine_type="small")
+        leased = await pool.acquire(SPEC_B, name="t2", machine_type="small")
+        await pool.release(idle)
+        return pool, {idle.sandbox_id, leased.sandbox_id}
+
+    pool, vms = asyncio.run(go())
+    assert pool.close_now() == 2  # e.g. from atexit, after the loop is gone
+    assert vms <= set(fake.deleted) and not fake.live
+    assert pool.close_now() == 0
+
+
+def test_exit_signal_deletes_pool_vms_then_runs_the_previous_handler(monkeypatch):
+    import signal
+
+    from yeto.rl.harness.harbor import boat_pool
+
+    fake = VmFake()
+    seen = []
+    monkeypatch.setattr(boat_pool, "_exit_pools", __import__("weakref").WeakSet())
+    monkeypatch.setattr(boat_pool, "_hooks_installed", False)
+    monkeypatch.setattr(boat_pool.atexit, "register", lambda fn: seen.append(("atexit", fn)))
+    previous = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGTERM, lambda signum, frame: seen.append(("previous", signum)))
+    try:
+        async def go():
+            pool = _pool(fake)
+            boat_pool.register_for_exit(pool)
+            sandbox = await pool.acquire(SPEC_A, name="t1", machine_type="small")
+            return pool, sandbox.sandbox_id
+
+        pool, vm = asyncio.run(go())
+        signal.raise_signal(signal.SIGTERM)
+        assert vm in fake.deleted and ("previous", signal.SIGTERM) in seen
+        assert seen[0] == ("atexit", boat_pool.close_pools_now)
+    finally:
+        for name in boat_pool.EXIT_SIGNALS:
+            signum = getattr(signal, name)
+            handler = signal.getsignal(signum)
+            if isinstance(handler, __import__("functools").partial):
+                signal.signal(signum, handler.keywords["previous"])
+        signal.signal(signal.SIGTERM, previous)
