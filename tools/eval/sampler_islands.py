@@ -147,11 +147,28 @@ def sampler_summary(events: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def driver_phase_seconds(events: list[dict[str, Any]]) -> dict[str, float]:
+    """Seconds per driver phase: ``rl_driver_phase`` marks a phase start; a phase
+    lasts until the next mark (the last mark has no end and is not counted). On a
+    buffer trainer ``generate`` is the wait for a round from the buffer."""
+    marks = _of(events, "rl_driver_phase")
+    out: dict[str, float] = defaultdict(float)
+    for mark, following in zip(marks, marks[1:]):
+        out[str(mark.get("phase"))] += float(following["time_unix"]) - float(mark["time_unix"])
+    return {name: round(value, 3) for name, value in out.items()}
+
+
 def trainer_summary(events: list[dict[str, Any]]) -> dict[str, Any]:
     trained = _of(events, "rl_round_trained")
     groups = [int(e.get("trained_groups") or 0) for e in trained]
+    phases = driver_phase_seconds(events)
+    total = sum(phases.values())
     out: dict[str, Any] = {"rounds": len(trained), "groups": sum(groups),
-                           "steady_groups_per_s": None, "steady_window_s": None}
+                           "steady_groups_per_s": None, "steady_window_s": None,
+                           "phase_s": phases,
+                           # share of the driver's time spent waiting for samples
+                           "buffer_wait_share": round(phases.get("generate", 0.0) / total, 4)
+                           if total > 0 else None}
     if len(trained) >= 2:
         window = float(trained[-1]["time_unix"]) - float(trained[0]["time_unix"])
         if window > 0:

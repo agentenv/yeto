@@ -114,3 +114,13 @@ def test_cli_prints_json(tmp_path, capsys):
     assert tool.main(["scale", str(run), "--baseline", str(run)]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["compare"]["effective_ratio"] == 1.0
+
+
+def test_trainer_phase_seconds_and_buffer_wait_share(tmp_path):
+    run = tmp_path / "ph"
+    marks = [("publish", 0.0), ("generate", 1.0), ("train", 7.0), ("publish", 9.0), ("finish", 10.0)]
+    rows = [{"event": "rl_driver_phase", "phase": name, "time_unix": t} for name, t in marks]
+    _tape(run, 0, "t.jsonl", rows + [_trained(8.0), _trained(9.5)])
+    trainer = tool.scale_report(run)["trainer"]
+    assert trainer["phase_s"] == {"publish": 2.0, "generate": 6.0, "train": 2.0}
+    assert trainer["buffer_wait_share"] == 0.6
