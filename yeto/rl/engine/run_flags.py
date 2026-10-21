@@ -495,6 +495,13 @@ _RUNTIME = (
     # 1.7 observation: per-round timeline labels (entry observe=...), off by default.
     shared_flag("--rl-observe-timeline", action="store_true",
                 help="ports: record per-round timeline labels (rl-infra-spec 1.7); off by default"),
+    shared_flag("--rl-verify-every-round", action="store_true",
+                help="ports: hash the policy and read the engine weight checksums back at every "
+                "publication (default: on the first publication and on every --rl-cut-every-th "
+                "round, which includes every round that keeps a round cut)"),
+    shared_flag("--rl-profile-trainer", action="store_true",
+                help="ports, observation only (E1): per training step, print where the trainer "
+                "process spends its time (stack samples, GC pauses, CUDA allocator counters)"),
     shared_flag("--rl-resource-sample-interval", type=float, default=None, metavar="SECONDS",
                 help="ports: NVML rl_resource_sample period forwarded to the learner "
                 "(default: learner default, 60 s with --rl-observe-timeline; 0 = off)"),
@@ -551,7 +558,9 @@ _RESUME = (
     # rl-resume-from-checkpoint (S17 C4)
     shared_flag("--rl-cut-every", type=int, default=None,
                 help="with --rl-checkpoint-store: keep a round cut every N rounds (plus the "
-                "last round and our own stop); default 1"),
+                "last round and our own stop); default 4 (1: every round). The publication "
+                "checks (policy hash, engine weight read-back) run at the same interval and "
+                "on the first publication; see --rl-verify-every-round"),
     shared_flag("--rl-cut-keep", type=int, default=None,
                 help="with --rl-checkpoint-store and no --rl-elastic: keep the newest K cuts "
                 "(default 2); older ones are deleted only after the new LATEST is committed"),
@@ -627,6 +636,14 @@ _SCHEDULING = (
                 "trained sample may lag (0, default: deterministic, every sample from the "
                 "policy just published). Part of the island contract; a backend that does "
                 "not support the requested limit is refused before launch"),
+    # S26 E2: the overlap buffer bounds how far generation runs ahead, so it bounds the
+    # realised policy age (the backend maps K to its own buffer setting).
+    shared_flag("--rl-async-buffer-rounds", type=int, default=None, metavar="K",
+                help="--rl-max-policy-age N > 0 with generation that overlaps training "
+                "(partitioned island): the finished-group buffer holds K rounds of groups, "
+                "so generation runs at most about K rounds ahead and the realised policy "
+                "age stays near min(K, N). Default: K = N (a deeper buffer only adds groups "
+                "that are too old when trained). Refused without overlap"),
     # S17 N16: LR schedule choice (yeto.rl.engine.run_config.resolve_lr_schedule)
     shared_flag("--rl-lr-schedule", choices=("auto", "linear", "constant"), default="auto",
                 help="island optimizer LR schedule: auto (default) = constant for decoupled "
@@ -793,6 +810,19 @@ _ROLLOUT_ENGINE = (
     shared_flag("--use-rollout-routing-replay", action="store_true"),
     shared_flag("--rollout-max-response-len", type=int, default=32768,
                 island={"default": None, "required": True}),
+    # S26 E6: quantized rollout tiers (yeto.rl.quant.tiers)
+    shared_flag("--rl-rollout-quant-tier", type=int, choices=(0, 1, 2, 3), default=0,
+                help="sampler precision: 0 BF16 (default); 1 the engine quantizes FFN linears "
+                "(dense) or routed experts (MoE) to FP8 itself, FP8 KV cache; 2 the trainer side "
+                "converts each release to FP8 W8A8 on the same linears and the sampler island "
+                "loads it (needs --rl-island-sample-role and --tuning full); 3 4-bit, interface "
+                "only (refused). Router, lm_head, embeddings, norms and attention stay BF16; the "
+                "KV cache stays BF16. Needs FP8 cards (H100, H200, L4)"),
+    shared_flag("--rl-rollout-quant-fp8-source", choices=("engine", "trainer"), default=None,
+                help="tier 1 only: who quantizes (default: trainer where the backend supports it, else engine). "
+                "trainer: the engines start on a 128x128 block-FP8 conversion of the base "
+                "and the trainer block-quantizes every weight update. engine: the rollout engine "
+                "quantizes at load (online FP8). Same ignore list"),
 )
 
 _AGENT = (
@@ -840,6 +870,62 @@ _SYNC = (
         "with --expert-full-count the swept state is the DeepSeek V4 LoRA hybrid; "
         "sao-streaming-full: full-parameter SAO, actor and critic streams "
         "(ports engine, --rl-placement fixed-partition, --rl-sao-contracts)",
+    ),
+    cli_flag(
+        "--rl-sync-fragment-pipeline",
+        type=int,
+        default=1,
+        help="full-parameter only: fragment rounds the syncer gathers at once "
+        "(1..--fragments). Above 1, fragment k+1 uploads while fragment k merges "
+        "and downloads; merge results are unchanged (default 1 = serial)",
+    ),
+    cli_flag(
+        "--rl-sync-push-dtype",
+        choices=("f32", "bf16", "int8"),
+        default="f32",
+        help="full-parameter only: wire dtype of the islands' pushed outer deltas "
+        "(pseudo-gradients). bf16 halves upload bytes, int8 (block absmax scale, see "
+        "--rl-sync-push-int8-block) quarters them; the syncer keeps f32 masters, "
+        "momentum and f32 FINAL (default f32 = exact)",
+    ),
+    cli_flag(
+        "--rl-sync-overlap",
+        action="store_true",
+        help="full-parameter only (E2 option): train the next round while the "
+        "sweep syncs, then rebase the trainer onto the new global weights "
+        "(theta <- G_k + local progress). The local weights lag the global policy "
+        "by one outer step; rollouts stay on-policy, so --rl-max-policy-age stays 0. "
+        "Needs --rl-sync-fragment-pipeline equal to --fragments",
+    ),
+    cli_flag(
+        "--rl-sync-push-int8-block",
+        type=int,
+        default=128,
+        help="full-parameter only, with --rl-sync-push-dtype int8: values per f32 "
+        "scale (32..1048576; error <= block absmax / 254 per value)",
+    ),
+    cli_flag(
+        "--rl-sync-bcast-delta-full-every",
+        type=int,
+        default=0,
+        help="full-parameter only: above 0, the syncer sends each new fragment "
+        "version as a bf16 delta against the islands' shared f32 anchor, with an "
+        "exact f32 refresh every N-th version (N >= 2; digest-checked, a mismatch "
+        "reconnects for f32). 0 = always f32",
+    ),
+    cli_flag(
+        "--rl-sync-checkpoint-every",
+        type=int,
+        default=1,
+        help="full-parameter only: syncer checkpoint interval in fragment steps "
+        "(1, or a multiple of --fragments). Above 1, only checkpointed steps are "
+        "persisted before their broadcast; a crash resumes at the newest checkpoint",
+    ),
+    cli_flag(
+        "--rl-sync-async-checkpoint",
+        action="store_true",
+        help="full-parameter only: the syncer writes each per-round checkpoint off "
+        "its scheduler and broadcasts that round only once the checkpoint is durable",
     ),
     cli_flag(
         "--rl-initial-adapter",

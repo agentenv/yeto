@@ -5,6 +5,13 @@
     python -m tools.eval judge DIR/eval-e3-verl-a
     python -m tools.eval report DIR/* --out report.md [--html report.html]
 
+Efficiency evaluation (S26 E0.1, package :mod:`.efficiency`):
+
+    python -m tools.eval eff-plan qwen3-0.6b [--arm ARM]
+    python -m tools.eval eff-run qwen3-0.6b --arm bare-verl-sync --run-id eff-... [--out DIR] [--dry-run]
+    python -m tools.eval eff-parse DIR/eff-...
+    python -m tools.eval eff-report DIR/eff-* --out report.md
+
 ``run`` refuses a run id that is not pre-registered in the GPU ledger (the id
 must appear in ``gpu-spend.md``), checks the local thread count and Ray, writes
 ``cell.json``, runs the cell's harness (raw data into ``raw/``), then judges.
@@ -123,6 +130,72 @@ def cmd_report(args) -> int:
     return 0
 
 
+EFF_OUT = Path("/home/michael/work/infra-drafts/SESSION26/logs/E0")
+
+
+def cmd_eff_plan(args) -> int:
+    from .efficiency import spec
+
+    sp = spec.get_spec(args.preset)
+    arms = [args.arm] if args.arm else list(spec.ARMS)
+    doc = {"spec": sp.to_dict(), "fingerprint": spec.control_fingerprint(sp),
+           "arms": {a: spec.plan(sp, a, "<run id>") for a in arms},
+           "verl_knob_diff": {m: spec.verl_knob_diff(sp, m) for m in spec.MODES}}
+    print(json.dumps(doc, indent=1, default=str))
+    return 0
+
+
+def cmd_eff_run(args) -> int:
+    from .efficiency import modal_eff, spec
+
+    sp = spec.get_spec(args.preset, checkpoint=args.checkpoint,
+                       **({"profile_trainer": True} if getattr(args, "profile_trainer", False) else {}))
+    plan = spec.plan(sp, args.arm, args.run_id)
+    run_dir = Path(args.out) / args.run_id
+    if not args.dry_run:
+        if (run_dir / "arm.json").exists():
+            raise SystemExit(f"{run_dir} already used")
+        _preflight(args.run_id)
+    plan["code_sha"] = subprocess.run(["git", "-C", str(Path(__file__).resolve().parents[2]), "rev-parse", "HEAD"],
+                                      capture_output=True, text=True).stdout.strip()
+    plan["images"] = spec.images()
+    spec.write_plan(run_dir / "arm.json", plan)
+    if plan["harness"] == "miles_local":
+        summary = modal_eff.run_miles_launcher(plan, run_dir, dry_run=args.dry_run)
+        if args.dry_run:
+            print((run_dir / "dry-run.log").read_text())
+            return summary["rc"]
+    elif args.dry_run:
+        print(plan.get("script") or json.dumps(plan.get("argv")))
+        return 0
+    else:
+        summary = modal_eff.run(plan, run_dir)
+    (run_dir / "run.json").write_text(json.dumps(summary, indent=1, default=str))
+    return cmd_eff_parse(argparse.Namespace(run_dir=str(run_dir)))
+
+
+def cmd_eff_parse(args) -> int:
+    from .efficiency import metrics, parse
+
+    run_dir = Path(args.run_dir)
+    parsed = parse.parse_run(run_dir)
+    (run_dir / "parsed.json").write_text(json.dumps(parsed, indent=1, default=str))
+    summary = metrics.summarize(parsed)
+    (run_dir / "summary.json").write_text(json.dumps(summary, indent=1, default=str))
+    print(json.dumps({"run": parsed["run_id"], "arm": parsed["arm"], "rounds": summary["rounds"],
+                      "missing": summary["missing"]}))
+    return 0 if summary["rounds"] == summary["rounds_expected"] else 1
+
+
+def cmd_eff_report(args) -> int:
+    from .efficiency import report as eff_report
+
+    runs = eff_report.load([Path(d) for d in args.run_dirs])
+    Path(args.out).write_text(eff_report.markdown(runs, title=args.title))
+    print(f"{len(runs)} parsed run(s) -> {args.out}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="python -m tools.eval")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -143,6 +216,32 @@ def main(argv: list[str] | None = None) -> int:
     rep.add_argument("--html", default=None)
     rep.add_argument("--title", default="yeto RL capability evaluation")
     rep.set_defaults(fn=cmd_report)
+    from .efficiency.spec import ARMS, PRESETS
+
+    ep = sub.add_parser("eff-plan")
+    ep.add_argument("preset", choices=sorted(PRESETS))
+    ep.add_argument("--arm", choices=ARMS, default=None)
+    ep.set_defaults(fn=cmd_eff_plan)
+    er = sub.add_parser("eff-run")
+    er.add_argument("preset", choices=sorted(PRESETS))
+    er.add_argument("--arm", choices=ARMS, required=True)
+    er.add_argument("--run-id", required=True)
+    er.add_argument("--out", default=str(EFF_OUT))
+    er.add_argument("--dry-run", action="store_true")
+    er.add_argument("--checkpoint", choices=("final", "every-round", "default"), default="final",
+                    help="yeto+Miles round cuts: only at the end (fair control) or every round "
+                         "or the product default interval (no --rl-cut-every)")
+    er.add_argument("--profile-trainer", action="store_true",
+                    help="yeto+Miles arms: --rl-profile-trainer (observation only, E1)")
+    er.set_defaults(fn=cmd_eff_run)
+    eparse = sub.add_parser("eff-parse")
+    eparse.add_argument("run_dir")
+    eparse.set_defaults(fn=cmd_eff_parse)
+    erep = sub.add_parser("eff-report")
+    erep.add_argument("run_dirs", nargs="+")
+    erep.add_argument("--out", required=True)
+    erep.add_argument("--title", default="yeto RL efficiency evaluation")
+    erep.set_defaults(fn=cmd_eff_report)
     args = p.parse_args(argv)
     return args.fn(args)
 

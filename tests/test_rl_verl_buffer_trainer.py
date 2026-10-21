@@ -212,6 +212,12 @@ class FakeBufferActor:
     def yeto_export_lora(self):
         return {k: v.clone() for k, v in self.tensors.items()}, {"count": 2}
 
+    def yeto_export_digest(self, kwargs):
+        from yeto.rl.adapters.verl.ports_impl import digest_lora_tensors
+
+        self.digest_exports = getattr(self, "digest_exports", 0) + 1
+        return digest_lora_tensors(dict(self.tensors), **kwargs)
+
     def yeto_call_workers(self, fn, tensors, reset):
         for k in self.tensors:
             self.tensors[k] = tensors[k].clone().float()

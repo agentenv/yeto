@@ -46,15 +46,18 @@ def image_env() -> dict[str, str]:
     }
 
 
-def modal_image(modal, commit: str = VERL_COMMIT):
-    patch = Path(__file__).with_name("patch_verl.py")
-    return (
+def modal_image(modal, commit: str = VERL_COMMIT, patched: bool = True):
+    """The verl image; ``patched=False`` leaves the verl source as the fork ships it
+    (the bare-verl arms of the efficiency evaluation, which must not import yeto)."""
+    image = (
         modal.Image.from_registry(VERL_BASE_IMAGE, add_python=VERL_PYTHON)
         .apt_install("git", "build-essential", "curl", "libnuma1")
         .pip_install(f"uv=={VERL_UV_VERSION}")
         .run_commands(*build_commands(commit))
         .run_commands(*store_client_commands())
-        .add_local_file(str(patch), "/workspace/patch_verl.py", copy=True)
-        .run_commands(f"{VENV_BIN}/python /workspace/patch_verl.py {VERL_ROOT}")
-        .env(image_env())
     )
+    if patched:
+        patch = Path(__file__).with_name("patch_verl.py")
+        image = (image.add_local_file(str(patch), "/workspace/patch_verl.py", copy=True)
+                 .run_commands(f"{VENV_BIN}/python /workspace/patch_verl.py {VERL_ROOT}"))
+    return image.env(image_env())

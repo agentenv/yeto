@@ -18,6 +18,7 @@ from typing import Any
 
 from yeto.rl.bridge import BridgeConfig
 from yeto.rl.decoupled import DecoupledBridgeConfig
+from yeto.rl.engine.resume import DEFAULT_CUT_EVERY
 from yeto.rl.engine.run_flags import ISLAND, add_rl_flags, rl_option_pairs
 from yeto.rl.adapters.miles.models.deepseek_v4.expert_full import expert_full_specs
 from yeto.rl.export import adapter_targets, derive_peft_lora_specs
@@ -151,6 +152,7 @@ def build_ports_launch(args, run_config, extra_argv=()):
     )
     return translate_run_config(run_config, base_algorithm, extra_argv=tuple(extra_argv),
                                 max_policy_age=int(getattr(args, "rl_max_policy_age", 0) or 0),
+                                async_buffer_rounds=getattr(args, "rl_async_buffer_rounds", None),
                                 full_parameter_sync=not _buffer_island(args))
 
 
@@ -282,6 +284,13 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
 
     if getattr(args, "rl_overlap_eval", False):
         miles_args.yeto_rl_overlap_eval = True
+    if getattr(args, "rl_verify_every_round", False):  # E1: read by entry (driver.verify_every_round)
+        miles_args.yeto_rl_verify_every_round = True
+    if getattr(args, "rl_profile_trainer", False):  # E1: read by state_plugin.train_one_step
+        miles_args.yeto_rl_profile_trainer = True
+        from yeto.rl.engine import phase_profile
+
+        phase_profile.enable()  # samples the thread that drives the phases
     if getattr(args, "rl_debug_dump", False):
         out = os.path.dirname(os.path.abspath(os.path.expanduser(
             getattr(args, "event_tape", None) or "~/yeto-output/rl-island.jsonl")))
@@ -328,7 +337,7 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
         miles_args.yeto_rl_resume = {
             "store": str(args.rl_resume_store),
             "state_dir": str(getattr(args, "rl_resume_state_dir", None) or "~/yeto-rl/resume-state"),
-            "every": int(getattr(args, "rl_cut_every", None) or 1),
+            "every": int(getattr(args, "rl_cut_every", None) or DEFAULT_CUT_EVERY),
             "keep": int(getattr(args, "rl_cut_keep", None) or 2),
             "allow_config_change": bool(getattr(args, "rl_resume_allow_config_change", False)),
             "stop_after": (None if getattr(args, "rl_stop_after_rounds", None) is None
@@ -697,11 +706,17 @@ def _full_parameter_identity(model_config_sha256: str) -> tuple[str, str]:
 
 
 def _buffer_island(args) -> bool:
-    """A no-sync sampler / trainer island (L4.6): it has no outer sync, so full
-    parameter mode runs without the full-parameter sync preset."""
+    """A no-sync island with no outer sync, so full parameter mode runs without the
+    full-parameter sync preset: a sampler / trainer island (L4.6), or one island
+    whose dedicated engine cards take Miles' own full-parameter weight update
+    (S26 E6; colocated is refused)."""
     from yeto.rl.engine.sample_roles import BOTH, sample_role
 
-    return bool(getattr(args, "rl_single_island_no_sync", False)) and sample_role(args) != BOTH
+    if not getattr(args, "rl_single_island_no_sync", False):
+        return False
+    if sample_role(args) != BOTH:
+        return True
+    return getattr(args, "rl_placement", "colocated") == "fixed-partition"
 
 
 def _full_parameter_mode(args, sync_preset: str) -> bool:
@@ -838,6 +853,14 @@ def _dense_full_sync_config(
         pipeline_depth=1,
         algorithm_spec_sha256=algorithm_spec_sha256,
         wan_streams=args.wan_streams,
+        wan_stream_schedule=getattr(args, "wan_stream_schedule", "rr"),
+        wan_stall_timeout=float(getattr(args, "wan_stall_timeout", 0.0) or 0.0),
+        push_dtype=getattr(args, "sweep_push_dtype", "f32"),
+        push_int8_block=int(getattr(args, "sweep_push_int8_block", 128)),
+        bcast_delta=bool(getattr(args, "bcast_delta", False)),
+        # The rollout policy age stays 0 (``_check_dense_full_sweep``); the
+        # overlap's outer-step lag is bound into the session contract.
+        overlap=bool(getattr(args, "sweep_overlap", False)),
     )
     return FullParameterSyncConfig((actor,), sweep=True)
 
@@ -1625,6 +1648,40 @@ def probe_syncers(args, *, connect=None, attempts: int = 10, delay: float = 3.0,
     return addrs
 
 
+def probe_wan_link(args, *, probe=None) -> None:
+    """S26 E3b: measure this container's link to the actor syncer before any
+    model work; exit EXIT_SLOW_LINK below the configured rates so the launcher
+    can request another container. Off unless a minimum rate is set."""
+    min_up = float(getattr(args, "wan_probe_min_mbps", 0.0) or 0.0)
+    min_down = float(getattr(args, "wan_probe_min_down_mbps", 0.0) or 0.0)
+    if min_up <= 0 and min_down <= 0:
+        return
+    from yeto.protocol import island_hmac_key_from_env
+    from yeto.wan_probe import EXIT_SLOW_LINK, PROBE_EVENT, PROBE_MARKER, probe_link
+
+    result = (probe or probe_link)(
+        _syncer_address(args.syncer),
+        streams=max(1, int(args.wan_streams)),
+        bytes_per_direction=int(getattr(args, "wan_probe_mib", 256)) << 20,
+        key=island_hmac_key_from_env(),
+    )
+    accepted = result.accepted(min_up, min_down)
+    record = {"event": PROBE_EVENT, "accepted": accepted,
+              "wan_probe/min_upload_mbps": min_up, "wan_probe/min_download_mbps": min_down,
+              **result.fields()}
+    print(f"{PROBE_MARKER} {'accepted' if accepted else 'rejected'}: up {result.upload_mbps:.1f} MB/s "
+          f"(min {min_up}), down {result.download_mbps:.1f} MB/s (min {min_down}), "
+          f"{result.streams} stream(s){'' if result.error is None else '; ' + result.error}", flush=True)
+    if getattr(args, "event_tape", None):
+        from yeto.rl.engine.driver import EventTape
+
+        if getattr(args, "rl_echo_events", False):
+            install_event_echo()  # the launcher reads the verdict from the log stream
+        EventTape(args.event_tape, int(getattr(args, "learner_id", 0) or 0)).append(record)
+    if not accepted:
+        raise SystemExit(EXIT_SLOW_LINK)
+
+
 def require_ports_router_mode(miles_args) -> None:
     """Upstream Miles owns the SGLang router.
 
@@ -2098,6 +2155,7 @@ def run_miles(
                 algorithm_semantic_sha256=algorithm_semantic_sha256,
                 code_pack_digest=code_pack_digest,
                 compat_group=_island_compat_group(args),
+                bcast_delta=bool(getattr(args, "bcast_delta", False)),
             )
             if getattr(args, "rl_island_scheduling", "legacy") == "elastic":
                 # rl-inter-island-scheduling 0.15 (legacy sets nothing)
@@ -2385,6 +2443,7 @@ def main(argv=None) -> None:
         verify_miles_revision(miles_root, expected=pins)
     _preflight_codex_harness(args)
     probe_syncers(args)
+    probe_wan_link(args)
 
     from miles.utils.misc import load_function
 

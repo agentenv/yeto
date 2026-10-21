@@ -257,3 +257,164 @@ def test_resident_state_type_guards():
     d = PolicyDigest("a" * 64, "b" * 64, 8, ((NAMES[0], (2, 1)),))
     with pytest.raises(ValueError):
         TrainerResidentState("full", REV, CFG, "c" * 64, 0, d, lambda v: None)
+
+
+# E1: the digest path stages the tensors in one reusable host buffer
+def _mixed_tensors(seed=0):
+    g = torch.Generator().manual_seed(seed)
+    return {
+        "b.bf16": torch.randn(8, 3, generator=g).to(torch.bfloat16),
+        "a.f32_transposed": torch.randn(5, 7, generator=g).t(),
+        "c.f16": torch.randn(4, generator=g).to(torch.float16),
+        "d.scalar": torch.tensor(1.5),
+    }
+
+
+def test_staged_copies_are_the_per_tensor_copies_bit_for_bit():
+    from yeto.rl.engine.policy_digest import HostStaging, stage_f32_on_host
+
+    tensors = _mixed_tensors()
+    plain = stage_f32_on_host(tensors)
+    staging = HostStaging(pin=False)
+    staged = stage_f32_on_host(tensors, staging)
+    assert list(staged) == sorted(tensors) == list(plain)
+    for name, value in tensors.items():
+        want = value.detach().to("cpu", torch.float32).contiguous()
+        for got in (plain[name], staged[name]):
+            assert got.dtype == torch.float32 and got.is_contiguous() and got.shape == want.shape
+            assert torch.equal(got.view(torch.int32) if got.dim() else got, want.view(torch.int32) if want.dim() else want)
+    kw = dict(base_model_revision=REV, lora_config_hash=CFG, layout_hash="0" * 64)
+    a, b = digest_canonical_tensors(staged, **kw), digest_canonical_tensors(plain, **kw)
+    assert (a.policy_tensor_hash, a.payload_hash, a.payload_bytes, a.specs) == \
+        (b.policy_tensor_hash, b.payload_hash, b.payload_bytes, b.specs)
+    # the buffer is reused (and grown) by the next call; each call's values are its own
+    bigger = {**_mixed_tensors(1), "e.more": torch.randn(64)}
+    again = stage_f32_on_host(bigger, staging)
+    assert all(torch.equal(again[n], stage_f32_on_host(bigger)[n]) for n in bigger)
+
+
+@pytest.mark.parametrize("staged", [False, True])
+def test_staging_names_the_first_non_finite_tensor(staged):
+    from yeto.rl.engine.policy_digest import HostStaging, NonFiniteTensor, stage_f32_on_host
+
+    tensors = _mixed_tensors()
+    tensors["c.f16"][1] = float("inf")
+    tensors["b.bf16"][0, 0] = float("nan")
+    with pytest.raises(NonFiniteTensor, match="'b.bf16' contains NaN or Inf"):
+        stage_f32_on_host(tensors, HostStaging(pin=False) if staged else None)
+
+
+def test_export_digest_is_stable_across_rounds_with_the_reused_buffer():
+    ranks, group, ps = make()
+    for r in ranks:
+        r.train_step()
+    first = ps.export_digest(policy_version=2).policy_tensor_hash()
+    assert ps.export_digest(policy_version=2).policy_tensor_hash() == first == \
+        ps.export(policy_version=2).policy_tensor_hash()
+
+
+# E1: sync colocated mode hashes the staged policy while the trainer offloads
+def test_deferred_digest_is_the_eager_digest_and_is_collected_once():
+    ranks, group, ps = make()
+    for r in ranks:
+        r.train_step()
+    eager = ps.export_digest(policy_version=2)
+    group.calls.clear()
+    deferred = ps.export_digest(policy_version=2, deferred=True)
+    assert group.calls == [sp.EXPORT_DIGEST] and not deferred.digest.is_resolved
+    assert deferred.tensor_names == eager.tensor_names and deferred.layout_hash == eager.layout_hash
+    for r in ranks:  # the trainer trains on (or offloads): the staged copy is hashed
+        r.train_step()
+    assert deferred.policy_tensor_hash() == eager.policy_tensor_hash()
+    assert _payload_of(deferred) == _payload_of(eager)
+    assert deferred.digest.to_wire() == {**eager.digest.to_wire(), "hash_seconds": deferred.digest.hash_seconds}
+    assert group.calls == [sp.EXPORT_DIGEST, sp.COLLECT_DIGEST]
+    deferred.policy_tensor_hash()
+    assert group.calls == [sp.EXPORT_DIGEST, sp.COLLECT_DIGEST]  # resolved once
+
+
+def test_a_new_export_waits_for_the_deferred_hash_of_the_reused_buffer():
+    ranks, group, ps = make()
+    first = ps.export_digest(policy_version=1)
+    deferred = ps.export_digest(policy_version=1, deferred=True)
+    for r in ranks:
+        r.train_step()
+    other = ps.export_digest(policy_version=2)  # overwrites the staging buffer
+    assert other.policy_tensor_hash() != first.policy_tensor_hash()
+    assert deferred.policy_tensor_hash() == first.policy_tensor_hash()
+
+
+def test_collecting_another_version_is_refused():
+    ranks, group, ps = make()
+    ps.export_digest(policy_version=1, deferred=True)
+    with pytest.raises(Exception, match="v1, not v3"):
+        ps._collect_digest(3)
+
+
+def test_the_driver_defers_only_for_a_colocated_offloading_trainer(monkeypatch):
+    ranks, group, ps = make()
+    driver = _Driver(ps, fast=False)
+    from yeto.rl.engine.driver import defer_digest
+
+    assert defer_digest(driver) is False
+    driver.colocated = driver.publish_offloaded = True
+    state = IslandDriver.export_local_resident(driver, policy_version=0)
+    assert not state.digest.is_resolved
+    monkeypatch.setenv("YETO_RL_DEFERRED_DIGEST", "0")
+    assert defer_digest(driver) is False
+
+
+# E1: which publications are verified (policy hash + engine read-back)
+def _verify_driver(ps, *, every, published, cut_due=lambda v: False, all_rounds=False):
+    from yeto.rl.engine import driver as driver_mod
+
+    sync = SimpleNamespace(round_cuts=SimpleNamespace(every=every), cut_due=cut_due)
+    return SimpleNamespace(policy_state=ps, sync=sync, published_version=published,
+                           verify_every_round=all_rounds), driver_mod.verify_publication
+
+
+def test_cut_first_and_every_k_rounds_are_verified_and_the_switch_verifies_all():
+    ranks, group, ps = make()
+    d, verify = _verify_driver(ps, every=4, published=None)
+    assert verify(d, 1)  # the first publication
+    d, verify = _verify_driver(ps, every=4, published=1, cut_due=lambda v: v == 6)
+    assert [v for v in range(2, 10) if verify(d, v)] == [4, 6, 8]  # every 4th and a due cut
+    d, verify = _verify_driver(ps, every=4, published=1, all_rounds=True)
+    assert all(verify(d, v) for v in range(2, 10))  # --rl-verify-every-round
+    d, verify = _verify_driver(ps, every=1, published=1)
+    assert all(verify(d, v) for v in range(2, 10))  # --rl-cut-every 1: every round
+    d, verify = _verify_driver(SimpleNamespace(), every=4, published=1)
+    assert verify(d, 3)  # a policy state that cannot skip: every round
+
+
+def test_an_unverified_round_still_checks_the_trainer_holds_its_policy():
+    ranks, group, ps = make()
+    for r in ranks:
+        r.train_step()
+    verified = ps.export_digest(policy_version=2)
+    group.calls.clear()
+    unverified = ps.export_identity(policy_version=3)
+    assert sp.EXPORT_DIGEST not in group.calls  # no export, no hash
+    assert unverified.verified is False and unverified.tensor_names == verified.tensor_names
+    assert unverified.policy_tensor_hash() != verified.policy_tensor_hash()
+    assert len(unverified.policy_tensor_hash()) == 64
+    unverified.check_holds()
+    _step(ranks)
+    with pytest.raises(WeightsChanged):
+        unverified.check_holds()
+
+
+def test_an_unverified_publication_is_never_committed_as_a_cut():
+    from yeto.rl.engine.controller import RebuildRefused
+    from yeto.rl.engine.round_cut import CutSource
+
+    ranks, group, ps = make()
+    ps.export_digest(policy_version=1)
+    unverified = ps.export_identity(policy_version=2)
+    source = CutSource.__new__(CutSource)
+    source.driver_ref = SimpleNamespace(published_version=2, published_state=unverified, at_safe_point=True,
+                                        expected_token="yeto:2:" + "0" * 64)
+    with pytest.raises(RebuildRefused, match="not verified"):
+        source.context("r000002-x")
+    with pytest.raises(RebuildRefused, match="not verified"):
+        source.context("r000002-x", pending=(2, unverified))

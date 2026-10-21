@@ -533,6 +533,10 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         flags += " --rl-observe-timeline"
     if getattr(args, "rl_debug_dump", False):
         flags += " --rl-debug-dump"
+    if getattr(args, "rl_profile_trainer", False):
+        flags += " --rl-profile-trainer"
+    if getattr(args, "rl_verify_every_round", False):
+        flags += " --rl-verify-every-round"
     if getattr(args, "rl_resource_sample_interval", None) is not None:
         flags += f" --rl-resource-sample-interval {float(args.rl_resource_sample_interval)!r}"
     flags += _rl_backend_module(args, "elastic_hook").recommend_flags(args)
@@ -550,6 +554,8 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         flags += " --rl-boot-only"
     if getattr(args, "rl_max_policy_age", 0):  # 0 (default) adds nothing
         flags += f" --rl-max-policy-age {int(args.rl_max_policy_age)}"
+    if getattr(args, "rl_async_buffer_rounds", None) is not None:  # None adds nothing
+        flags += f" --rl-async-buffer-rounds {int(args.rl_async_buffer_rounds)}"
     from ..rl.engine.sample_roles import island_flags as sample_role_flags
     from ..rl.engine.sample_roles import is_synced_trainer as sample_role_is_synced_trainer
 

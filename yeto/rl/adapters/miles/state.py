@@ -20,6 +20,7 @@ from yeto.rl.engine.trainable_state import LAYOUT_LORA, TrainableState, require_
 from . import LoopRunner
 from .state_plugin import (
     APPLY_STATE,
+    COLLECT_DIGEST,
     EXPORT_DIGEST,
     EXPORT_FULL_DIGEST,
     EXPORT_STATE,
@@ -59,6 +60,10 @@ def require_run_plugin(controller_cls: Any = None) -> None:
 
 class MilesPolicyState:
     """Export/apply the LoRA trainable state of the single-cell actor group."""
+
+    # E1: export_digest(deferred=True) is supported (LoRA digest path)
+    supports_deferred_digest = True
+    supports_unverified_rounds = True  # E1: export_identity
 
     def __init__(
         self,
@@ -117,24 +122,58 @@ class MilesPolicyState:
         results = await self._aplugin(EXPORT_STATE, {"policy_version": version})
         return self._export_result(version, results)
 
-    def export_digest(self, *, policy_version: int | None = None):
+    def export_digest(self, *, policy_version: int | None = None, deferred: bool = False):
         """rl-publish-fastpath: the trainer exports and hashes; only the digests cross
         Ray.  Returns a :class:`TrainerResidentState` whose tensors stay in the trainer
-        (``materialize`` falls back to :meth:`export`)."""
+        (``materialize`` falls back to :meth:`export`).
+
+        ``deferred`` (E1): the trainer returns once the tensors are staged and hashes
+        them in the background (e.g. while it offloads); the state's digest is a
+        :class:`~yeto.rl.engine.policy_digest.DeferredDigest` collected on first read."""
 
         import time
 
         version = self._export_version(policy_version)
         started = time.monotonic()
-        results = self._plugin(EXPORT_DIGEST, self._digest_kwargs(version))
+        kwargs = {**self._digest_kwargs(version), **({"deferred": True} if deferred else {})}
+        results = self._plugin(EXPORT_DIGEST, kwargs)
         state = self._digest_result(version, results)
         export_s = next((r.get("export_seconds") for r in results if r is not None), None)
         # Timing for the next GPU run (log only; no tape field changes): total plugin
         # round trip vs the trainer-side hashing part.
+        hashed = "deferred" if deferred else f"{state.digest.hash_seconds:.1f}s"
         print(f"[rl] publish-fastpath digest export v{version}: "
               f"total={time.monotonic() - started:.1f}s trainer_export={export_s}s "
-              f"hash={state.digest.hash_seconds:.1f}s bytes={state.digest.payload_bytes}", flush=True)
+              f"hash={hashed} tensors={len(state.digest.specs)}", flush=True)
         return state
+
+    def export_identity(self, *, policy_version: int | None = None):
+        """E1: the resident state of a round whose publication is not verified: the
+        trainer reports only its weights version (no export, no hash); the identity is
+        :func:`~yeto.rl.engine.policy_digest.unverified_identity`. The layout is the last
+        verified digest's (None before any: the caller verifies that round)."""
+        from yeto.rl.engine.policy_digest import PolicyDigest, TrainerResidentState, unverified_identity
+
+        last = getattr(self, "_last_verified", None)
+        if last is None:
+            return None
+        version = self._export_version(policy_version)
+        mark = self.weights_version()
+        identity = unverified_identity(version, mark)
+        digest = PolicyDigest(identity, identity, last.payload_bytes, last.specs)
+        return TrainerResidentState(
+            layout=self.layout, base_model_revision=self._revision, config_hash=self._config_hash,
+            layout_hash=self._expected_layout_hash, policy_version=version, digest=digest,
+            materialize_fn=lambda v: self.export(policy_version=v), weights_mark=mark,
+            holds_fn=self.check_holds, verified=False)
+
+    def _collect_digest(self, version: int):
+        from yeto.rl.engine.policy_digest import PolicyDigest
+
+        results = [r for r in self._plugin(COLLECT_DIGEST, {"policy_version": version}) if r is not None]
+        if len(results) != 1 or results[0].get("policy_version") != version:
+            raise PolicyStateError(f"expected exactly one main-rank digest of v{version}, got {results!r:.300}")
+        return PolicyDigest.from_wire(results[0]["digest"])
 
     def weights_version(self) -> dict[str, Any]:
         """The main trainer rank's weights version ``{process_id, version}`` (D3)."""
@@ -194,7 +233,12 @@ class MilesPolicyState:
         (result,) = results
         if result.get("policy_version") != version:
             raise PolicyStateError("exported policy version mismatch")
-        digest = PolicyDigest.from_wire(result["digest"])
+        if result.get("deferred"):
+            from yeto.rl.engine.policy_digest import DeferredDigest
+
+            digest = DeferredDigest(result["specs"], lambda: self._collect_digest(version))
+        else:
+            digest = PolicyDigest.from_wire(result["digest"])
         layout_hash = layout_hash_of(digest.specs)
         if self._expected_layout_hash is not None and layout_hash != self._expected_layout_hash:
             raise ValueError(
@@ -204,6 +248,7 @@ class MilesPolicyState:
             self._expected_layout_hash = layout_hash
             print(f"[rl] learned LoRA layout from first digest export: {len(digest.specs)} tensors, "
                   f"hash={layout_hash}", flush=True)
+        self._last_verified = digest
         return TrainerResidentState(
             layout=self.layout,
             base_model_revision=self._revision,
@@ -303,6 +348,9 @@ class MilesFullParameterLocalPolicyState(MilesPolicyState):
     see ``state_plugin.export_full_digest``).  There is no LoRA export and no
     apply.  The layout hash is the full-parameter identity bound by run_miles.
     """
+
+    supports_deferred_digest = False  # its export_digest hashes every rank's shard eagerly
+    supports_unverified_rounds = False  # E1: every publication hashes the shards
 
     def __init__(self, *, actor_model: Any, base_model_revision: str, config_hash: str,
                  expected_layout_hash: str | None, policy_version: int = 0,

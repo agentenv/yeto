@@ -189,6 +189,11 @@ class _YetoTrainerMixin:
 
         return (await self.yeto_call_workers(remote_export_lora))[0]
 
+    async def yeto_export_digest(self, kwargs):
+        from .ports_impl import remote_export_digest
+
+        return next(r for r in await self.yeto_call_workers(remote_export_digest, kwargs) if r is not None)
+
 
 YetoFullyAsyncTrainer = ray.remote(num_cpus=10)(type("YetoFullyAsyncTrainer", (_YetoTrainerMixin, _TrainerBase), {}))
 

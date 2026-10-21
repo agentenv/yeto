@@ -63,6 +63,10 @@
   "bridge",
   "--model-name",
   "SimpleNamespace",
+  "--attention-dropout",
+  "0.0",
+  "--hidden-dropout",
+  "0.0",
   "--num-layers",
   "2",
   "--hidden-size",
@@ -195,7 +199,7 @@
   "10",
   "--group-query-attention"
  ],
- "miles_argv_sha256": "1108c08ed4e9ef28ec5ad2e37b3fe6ceb804db496824c9de4743b028a400a663",
+ "miles_argv_sha256": "6ff6da47c19cf9f9eac0ec0b9040e9e199220578244928625c5bec362379ccf6",
  "name": "decoupled",
  "placement": {
   "allow_cross_node_engine_tp": false,

@@ -438,6 +438,45 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         "deltas (~4x less learner egress; broadcasts stay bf16)",
     )
     sync.add_argument("--wan-streams", type=int, default=4, help="parallel TCP streams per learner")
+    sync.add_argument(
+        "--wan-stream-schedule",
+        choices=("rr", "adaptive"),
+        default="rr",
+        help="full-parameter RL islands: rr = round-robin chunks over the streams; "
+        "adaptive = send each chunk to the stream with the earliest estimated "
+        "finish (backlog / measured rate), so slow streams carry less",
+    )
+    sync.add_argument(
+        "--wan-stall-timeout",
+        type=float,
+        default=0.0,
+        help="full-parameter RL islands: drop and redial the connection group when "
+        "one stream holds bytes with no progress for this many seconds (also sets "
+        "TCP_USER_TIMEOUT); the fragment is pushed again on the replayed PULL. 0 = off",
+    )
+    sync.add_argument(
+        "--wan-probe-min-mbps",
+        type=float,
+        default=0.0,
+        help="Miles RL islands: before loading the model, measure the upload rate to the "
+        "actor syncer over --wan-streams connections; below this MB/s the island exits "
+        "(code 75) and the launcher requests another container (--wan-probe-relaunches). 0 = off",
+    )
+    sync.add_argument(
+        "--wan-probe-min-down-mbps",
+        type=float,
+        default=0.0,
+        help="like --wan-probe-min-mbps, for the download rate from the syncer. 0 = off",
+    )
+    sync.add_argument("--wan-probe-mib", type=int, default=256,
+                      help="bytes per direction of the link probe, in MiB")
+    sync.add_argument(
+        "--wan-probe-relaunches",
+        type=int,
+        default=2,
+        help="containers the launcher may request again per island after a rejected link "
+        "probe (also under --no-island-relaunch: the island never joined the session)",
+    )
 
     infra = p.add_argument_group("infrastructure")
     infra.add_argument(
@@ -458,6 +497,14 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="Modal islands: request the exact GPU type (H100! -- Modal otherwise "
         "may upgrade H100 to H200) and fail at container start unless "
         "nvidia-smi reports it; use for bitwise comparisons",
+    )
+    infra.add_argument(
+        "--modal-gpu-name",
+        default=None,
+        metavar="MODEL",
+        help="Modal islands: fail at container start unless every GPU nvidia-smi reports "
+        "is this model (e.g. 'NVIDIA A10': Modal A10G containers are an A10 or an A10G); "
+        "use when runs must compare on one GPU model",
     )
     infra.add_argument(
         "--modal-retries",

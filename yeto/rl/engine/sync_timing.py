@@ -44,3 +44,42 @@ class SyncTiming:
 
 def unix_now() -> float:
     return time.time()
+
+
+def upload_fields(
+    window,
+    *,
+    drained_ts: float | None,
+    timing: SyncTiming,
+    stalls: int,
+) -> dict[str, object]:
+    """Per-boundary upload diagnostics of one island (S26 E3b).
+
+    ``window`` is a :class:`yeto.wan_streams.UploadWindow` covering this
+    boundary. ``sync/upload_stream_mbps`` lists each data stream's rate over
+    the time it was busy; ``sync/upload_mbps`` is the bytes over the longest
+    busy stream (the streams run in parallel). ``sync/wait_after_upload_seconds``
+    is the time from this island's last byte leaving to the global policy
+    being ready: waiting for slower islands, the merge and the broadcast."""
+    rates = window.stream_mbps()
+    busy = max(window.busy_seconds_per_stream, default=0.0)
+    measured = [rate for rate in rates if rate is not None]
+    wait_after = None
+    if (
+        drained_ts is not None
+        and timing.submit_ts is not None
+        and timing.global_ready_ts is not None
+        and drained_ts <= timing.global_ready_ts
+    ):
+        wait_after = timing.global_ready_ts - max(drained_ts, timing.submit_ts)
+    return {
+        "sync/upload_bytes": window.total_bytes,
+        "sync/upload_busy_seconds": busy,
+        "sync/upload_mbps": (window.total_bytes / busy / 1e6) if busy > 0 else None,
+        "sync/upload_stream_mbps": [None if rate is None else round(rate, 3) for rate in rates],
+        "sync/upload_min_stream_mbps": min(measured) if measured else None,
+        "sync/upload_active_streams": len(measured),
+        "sync/upload_drained_ts": drained_ts,
+        "sync/wait_after_upload_seconds": wait_after,
+        "sync/stream_stalls": stalls,
+    }

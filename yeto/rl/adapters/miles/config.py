@@ -37,6 +37,7 @@ from yeto.rl.engine.algorithm import (
     normalize_filter_name,
     AlgorithmSpec,
 )
+from yeto.rl.quant.tiers import FP8_SOURCE_ENGINE, TIER_ONLINE_FP8, sglang_online_argv
 from .lr_schedule import LR_SCHEDULE_FLAGS
 from .algorithm_flags import (
     OBJECTIVE_FLAGS,
@@ -427,6 +428,8 @@ LEAF_POLICY: dict[str, _Check] = {
     "serving.max_running_requests": _ok,
     "serving.chunked_prefill_size": _ok,
     "serving.sampler_snapshot": _ok,  # gated in translate_run_config (sampler_snapshot)
+    "serving.rollout_quant_tier": _ok,  # S26 E6: SGLang flags in translate_run_config
+    "serving.rollout_quant_fp8_source": _ok,  # S26 E6: tier 1 engine vs trainer (Miles block FP8)
     "ports.rollout_engine_base_port": _must_be_none(
         "upstream Miles has no --rollout-engine-base-port (fork-only port isolation, task 1.4b)"
     ),
@@ -472,6 +475,7 @@ LEAF_POLICY: dict[str, _Check] = {
     # translated below (Megatron full recompute / Miles dynamic batching)
     "train_memory.activation_recompute": _ok,
     "train_memory.max_tokens_per_gpu": _ok,
+    "train_memory.gradient_accumulation_fusion": _ok,
     "train_memory.optimizer_offload_fraction": _ok,
     **{f"sample_buffer.{name}": _ok
        for name in ("role", "store", "max_backlog_groups", "wait_s", "min_round_s")},
@@ -717,6 +721,7 @@ def translate_run_config(
     extra_argv: Sequence[str] = (),
     tito_parser_resolver: Callable[[str], tuple[str | None, str | None]] | None = None,
     max_policy_age: int = 0,
+    async_buffer_rounds: int | None = None,
     full_parameter_sync: bool = True,
 ) -> MilesLaunchArgs:
     """Pure translation of an ``RLRunConfig`` into upstream Miles argv.
@@ -728,6 +733,12 @@ def translate_run_config(
     rollout with training through Miles' fully_async (P0-S), so the
     all-samples metadata hook and the carry-over buffer filter are not set:
     the trained-groups hook reports the round instead.
+
+    ``async_buffer_rounds`` (--rl-async-buffer-rounds, S26 E2): K >= 1 sets the
+    fully_async buffer to K rounds of groups (``--async-data-buffer-capacity-factor
+    K``); None (default) uses K = ``max_policy_age``, not Miles' own default 2,
+    which at age 1 dropped about half of the generated groups as too old
+    (SESSION26 E2). Only with overlap.
 
     ``full_parameter_sync`` (default True): a full-parameter trainer feeds the
     ports full-parameter sync, which needs whole FP32 masters; False for a
@@ -781,6 +792,7 @@ def translate_run_config(
 
     from yeto.rl.engine.run_config import (
         RECIPE_DEEPSEEK_V4_FLASH,
+        RECIPE_GENERIC,
         RECIPE_GLM5_NEXT,
         RECIPE_QWEN3_5,
         RECIPE_QWEN3_8_NEXT,
@@ -864,6 +876,10 @@ def translate_run_config(
         model_recipe_values = deepseek_v4.recipe_argv(trainable)
     else:
         model_name = recipe.provider_class
+        if recipe.name == RECIPE_GENERIC:
+            # Megatron's default dropout is 0.1; the Miles recipes train RL with
+            # none (the policy's train-time log-probs must match the rollout's)
+            model_recipe_values = ["--attention-dropout", "0.0", "--hidden-dropout", "0.0"]
 
     values: list[str] = [
         "train.py",
@@ -938,7 +954,7 @@ def translate_run_config(
         "--accumulate-allreduce-grads-in-fp32",
         "--attention-softmax-in-fp32",
         "--attention-backend", recipe.training_attention_backend,
-        "--no-gradient-accumulation-fusion",
+        *(() if config.train_memory.gradient_accumulation_fusion else ("--no-gradient-accumulation-fusion",)),
         "--bf16",
         "--no-load-optim",
         "--no-load-rng",
@@ -973,6 +989,19 @@ def translate_run_config(
         values.extend(policy_age_argv(
             max_policy_age, agentic=bool(getattr(config.agent, "custom_agent_function_path", None)),
             overlap=rollout_overlap))
+    if async_buffer_rounds is None and rollout_overlap:
+        async_buffer_rounds = max_policy_age  # S26 E2 default: buffer depth = A_hard
+    if async_buffer_rounds is not None:
+        if not rollout_overlap:
+            raise MilesConfigError(
+                "--rl-async-buffer-rounds needs generation that overlaps training "
+                "(--rl-max-policy-age > 0 on a partitioned island without a sample buffer)")
+        if int(async_buffer_rounds) < 1:
+            raise MilesConfigError(
+                f"--rl-async-buffer-rounds must be >= 1, got {async_buffer_rounds}")
+        from .offpolicy_correction import BUFFER_CAPACITY_FLAG
+
+        values.extend((BUFFER_CAPACITY_FLAG, str(int(async_buffer_rounds))))
     values.extend(critic_load_argv(config, algorithm))
     if sample_buffer is not None:
         values.extend(sample_buffer_argv(sample_buffer.role, max_policy_age=max_policy_age))
@@ -1004,6 +1033,12 @@ def translate_run_config(
                 values.extend((flag, str(value)))
     if serving.deterministic_inference:
         values.append("--sglang-enable-deterministic-inference")
+    if getattr(serving, "rollout_quant_tier", 0) == TIER_ONLINE_FP8 and \
+            getattr(serving, "rollout_quant_fp8_source", FP8_SOURCE_ENGINE) == FP8_SOURCE_ENGINE:
+        # S26 E6 tier 1: SGLang quantizes the in-scope linears itself; the ignore list
+        # travels in the workers' environment (entry.connect_island_ray). The trainer
+        # source needs no SGLang flag: the FP8 checkpoint's config carries the method.
+        values.extend(sglang_online_argv())
     if getattr(serving, "sampler_snapshot", False):
         try:
             values.extend(sampler_snapshot.snapshot_argv(request, extra_argv=extra_argv))
@@ -1174,6 +1209,11 @@ def translate_run_config(
         rollout_overlap=rollout_overlap,
         runtime_attrs={
             **algorithm.to_legacy_runtime_attrs(),
+            # S26 E6: only a quantized tier adds the attribute (tier 0 keeps the argv golden)
+            **({"yeto_rollout_quant_tier": int(serving.rollout_quant_tier)}
+               if getattr(serving, "rollout_quant_tier", 0) else {}),
+            **({"yeto_rollout_quant_fp8_source": serving.rollout_quant_fp8_source}
+               if getattr(serving, "rollout_quant_fp8_source", FP8_SOURCE_ENGINE) != FP8_SOURCE_ENGINE else {}),
             **_full_parameter_optimizer_attrs(trainable, config.train_memory,
                                               full_parameter_sync=full_parameter_sync),
             # rl-algo-critic-family 4.1: receipt init source (warm-up product)

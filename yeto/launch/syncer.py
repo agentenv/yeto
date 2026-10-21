@@ -145,6 +145,17 @@ def _syncer_quorum_timeout(args) -> str:
     return "" if value is None else f" --quorum-timeout-s {value}"
 
 
+def _syncer_checkpoint_every(args) -> int:
+    """Per-round checkpoints (1) unless the full-parameter preset sets an interval."""
+    return int(getattr(args, "rl_sync_checkpoint_every", 1)) if rl_dense_sweep(args) else 1
+
+
+def _syncer_bcast_delta(args) -> str:
+    """S26 E3 bf16 downlink deltas (checked by rl_args._check_bcast_delta)."""
+    full_every = int(getattr(args, "rl_sync_bcast_delta_full_every", 0) or 0)
+    return f" --bcast-delta-full-every {full_every}" if full_every else ""
+
+
 def rl_dense_sweep(args) -> bool:
     return (getattr(args, "training_mode", "sft") == "rl"
             and getattr(args, "rl_sync_preset", None) == FULL_PARAMETER_SYNC_PRESET)
@@ -161,7 +172,8 @@ def _syncer_profile_binding(args) -> str:
     full-parameter adds strict P-fragment policy sweeps; sao-streaming-full adds the
     frozen contract's timeouts and the publishable final checkpoint."""
     if rl_dense_sweep(args):
-        return f" --policy-sweep-fragments {args.fragments} --require-profile-binding"
+        async_checkpoint = " --async-checkpoint" if getattr(args, "rl_sync_async_checkpoint", False) else ""
+        return f" --policy-sweep-fragments {args.fragments} --require-profile-binding{async_checkpoint}"
     if rl_sao_streaming(args):
         profile = args.rl_sao_manifest.profile
         return (f" --quorum-timeout-s {profile.quorum_timeout_s}"
@@ -205,7 +217,7 @@ def rl_syncer_profile(args, num_learners: int):
         "outer_lr": args.outer_lr,
         "outer_momentum": args.outer_momentum,
         "checkpoint_enabled": True,
-        "checkpoint_every": 1,
+        "checkpoint_every": _syncer_checkpoint_every(args),
         "resume": False,  # not hashed (v2): fresh start and restart agree
         "mark_final_checkpoint": mark_final,
         "learner_budget_steps": None,
@@ -442,11 +454,12 @@ def _rl_role_syncer_command(args, num_learners: int, binary: str,
         f"{_syncer_island_scheduling(args)}"
         f"{_syncer_expected_contract(args)}"
         f"{_syncer_profile_binding(args)}"
+        f"{_syncer_bcast_delta(args)}"
         f" --outer-lr {args.outer_lr}"
         f" --outer-momentum {args.outer_momentum}"
         " --max-base-lag 0 --learner-weight equal"
         f" --checkpoint-path {syncer.checkpoint}"
-        " --checkpoint-every 1"
+        f" --checkpoint-every {_syncer_checkpoint_every(args)}"
         f" {_resume_if_exists(syncer.checkpoint)}"
         f" --event-tape {syncer.event_tape}"
     )
