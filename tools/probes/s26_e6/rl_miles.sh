@@ -1,0 +1,39 @@
+#!/bin/bash
+# S26 E6 step 3 (Miles): one RL run of a group on Modal H100!, Qwen3-4B-Instruct-2507 on GSM8K,
+# 10 rounds x 32 prompts x 4 samples, TIS token-level upper 2.0 (algo-tis2.json, as E0.1).
+# Review: infra-drafts/SESSION26/gpu-review/E6.md. usage: rl_miles.sh GROUP RUN_ID
+#   t0-lora / t1-lora   1 colocated island, LoRA r=32, tier 0 / tier 1 (SGLang online FP8 + ignore list)
+#   t1n-lora            1 colocated island, LoRA r=32, tier 1 trainer source (engines on Miles'
+#                       block-FP8 base + ignore list). Full parameters on one colocated island are
+#                       refused by the launcher ("RL v0 requires --tuning lora")
+#   t0-pair / t2-pair   trainer island + sampler island (1 H100 each), full parameters, tier 0 / tier 2
+# env: DRY=1 (launcher --dry-run only)
+set -u
+G=${1:?group}; P=${2:?run id}; case $P in e6-*) ;; *) echo "abort: run id must start with e6-"; exit 65;; esac
+HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/../../.." && pwd)
+R=/home/michael/work/s1-runs/s26-e6/$P
+STOREVOL=yeto-eval-store
+COMMON="launch --training-mode rl --rl-engine ports --preflight-threads off --modal-gpu-exact --modal-retries 0 \
+--modal-cpu 8 --modal-tape-volume yeto-event-tapes --controller local --rl-observe-timeline \
+--model Qwen/Qwen3-4B-Instruct-2507 --model-revision cdbee75f17c01a7cc42f958dc650907174af0554 \
+--data zhuzilin/gsm8k --data-revision 0cbd9f31d91ac21a7613dcbc7fef992adac459ae \
+--rl-checkpoint-store modal-volume://$STOREVOL/$P --reward-function gsm8k_reward:score --fragments 1 --pipeline 1 \
+--rollout-batch-size 32 --n-samples-per-prompt 4 --rollout-max-response-len 512 --seq-len 1024 --inner-lr 1e-5 \
+--seed 17 --total-steps 10 --trust-remote-code --rl-algorithm-spec tools/probes/s26_e6/algo-tis2.json"
+LORA="--tuning lora --lora-r 32 --modal-memory 64"
+ISLANDS=1
+case $G in
+  t0-lora)  ARGS="$COMMON --cluster-prefix $P --gpu modal:1xh100 --rl-single-island-no-sync $LORA" ;;
+  t1-lora)  ARGS="$COMMON --cluster-prefix $P --gpu modal:1xh100 --rl-single-island-no-sync $LORA --rl-rollout-quant-tier 1" ;;
+  t1n-lora) ARGS="$COMMON --cluster-prefix $P --gpu modal:1xh100 --rl-single-island-no-sync $LORA --rl-rollout-quant-tier 1 --rl-rollout-quant-fp8-source trainer" ;;
+  t0-pair|t2-pair)
+    PAIR="$COMMON --cluster-prefix $P --gpu modal:1xh100,modal:1xh100 --rl-single-island-no-sync \
+--rl-island-sample-role 0:sampler --rl-island-sample-role 1:trainer --tuning full --modal-memory 128 \
+--rl-max-policy-age 1 --rl-cut-every 1 --rl-code-pack git-patch --rl-sampler-max-backlog-rounds 2 --rl-sample-wait-s 900"
+    ISLANDS=2
+    if [ $G = t2-pair ]; then ARGS="$PAIR --rl-rollout-quant-tier 2"; else ARGS="$PAIR"; fi ;;
+  *) echo "abort: group $G"; exit 65 ;;
+esac
+mkdir -p "$(dirname $R)"
+export P R REPO ARGS STOREVOL ISLANDS HARD=${HARD:-3600} PY=/home/michael/work/gpu-head/venv/bin/python
+exec bash "$HERE/miles_local.sh"
