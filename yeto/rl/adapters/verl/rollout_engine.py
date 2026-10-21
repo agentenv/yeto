@@ -34,6 +34,17 @@ keeps them per trajectory (the records proxy's ``CURRENT_TRAJECTORY``) and
 :meth:`VerlRolloutEngine.served_version` returns None: the version is known
 only after a reply, not before it.
 
+Aborted calls (S26 E9.5): verl's fully-async rollouter aborts the requests in
+flight when it pauses for a weight update.  An aborted model call recorded
+no tokens and the agent has not seen it, so the engine sends it again after
+a back-off, sampled by the updated policy; the Harbor trial (sandbox, agent,
+recorded tokens) keeps running meanwhile.  This is the verl form of the
+suspension between rounds (:mod:`yeto.rl.agentic.suspend`): only for a
+trajectory ``HarborAgentLoop`` tracks (:meth:`VerlRolloutEngine.track`), at
+most ``YETO_VERL_ABORT_RETRY_S`` seconds (default 1800) per call; the waits
+count as suspended time, not as the policy's.  An untracked call, or one
+past the limit, fails as before (the trajectory is ABORTED).
+
 Finish reason: verl reports ``completed`` for both an end token and the token
 cap.  A reply that ends without a stop token and fills ``max_tokens`` is
 reported as ``length``; everything else as ``stop``.
@@ -42,13 +53,16 @@ reported as ``length``; everything else as ``stop``.
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import os
+import time
 import uuid
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from yeto.rl.agentic.suspend import SuspendLedger
 from yeto.rl.engine.sampler_engine import (
     FINISH_LENGTH,
     FINISH_STOP,
@@ -70,6 +84,9 @@ from yeto.rl.harness.gateway.records_env import (
 )
 
 CALL_TIMEOUT_S = 1800.0
+ABORT_RETRY_ENV = "YETO_VERL_ABORT_RETRY_S"
+DEFAULT_ABORT_RETRY_S = 1800.0
+ABORT_BACKOFF_S = (0.5, 1.0, 2.0, 5.0, 10.0)
 
 
 class VerlRolloutEngine:
@@ -81,7 +98,11 @@ class VerlRolloutEngine:
         self._client: Any = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._steps: dict[str, list[int]] = {}
+        self._ledgers: dict[str, SuspendLedger] = {}
+        self._aborts = itertools.count(1)
         self.last_global_steps: int | None = None
+        self.abort_retry_s = float(os.environ.get(ABORT_RETRY_ENV, "") or DEFAULT_ABORT_RETRY_S)
+        self.sleep = asyncio.sleep
 
     # ------------------------------------------------------------ binding
     def bind(self, client: Any, loop: asyncio.AbstractEventLoop) -> None:
@@ -97,6 +118,13 @@ class VerlRolloutEngine:
     def pop_steps(self, trajectory: str) -> list[int]:
         """The ``global_steps`` of every reply sampled for ``trajectory`` (and forget them)."""
         return self._steps.pop(trajectory, [])
+
+    def track(self, trajectory: str, ledger: SuspendLedger) -> None:
+        """Retry ``trajectory``'s aborted calls and count the waits on ``ledger`` (module doc)."""
+        self._ledgers[trajectory] = ledger
+
+    def untrack(self, trajectory: str) -> None:
+        self._ledgers.pop(trajectory, None)
 
     # ------------------------------------------------------------ engine port
     @property
@@ -138,10 +166,7 @@ class VerlRolloutEngine:
         }
         if stops:
             params["stop_token_ids"] = stops
-        output = await self._client.generate(request_id=uuid.uuid4().hex, prompt_ids=prompt,
-                                             sampling_params=params)
-        if getattr(output, "stop_reason", None) == "aborted":
-            raise SamplerEngineError("verl rollout aborted the request")
+        output = await self._generate_retrying(prompt, params, trajectory)
         steps = (getattr(output, "extra_fields", None) or {}).get("global_steps")
         if steps is not None:
             self.last_global_steps = int(steps)
@@ -155,6 +180,28 @@ class VerlRolloutEngine:
         return Completion(token_ids=tokens, logprobs=tuple(float(x) for x in logprobs), text="",
                           finish_reason=finish_reason(tokens, stops, int(sampling.max_tokens)),
                           prompt_token_ids=tuple(prompt))
+
+    async def _generate_retrying(self, prompt: list[int], params: dict[str, Any], trajectory: str | None) -> Any:
+        ledger = self._ledgers.get(trajectory) if trajectory is not None else None
+        started = time.monotonic()
+        for attempt in itertools.count():
+            output = await self._client.generate(request_id=uuid.uuid4().hex, prompt_ids=prompt,
+                                                 sampling_params=params)
+            if getattr(output, "stop_reason", None) != "aborted":
+                return output
+            if ledger is None or time.monotonic() - started >= self.abort_retry_s:
+                raise SamplerEngineError("verl rollout aborted the request")
+            if attempt == 0:
+                ledger.mark(next(self._aborts))
+            ledger.retried_turns += 1
+            delay = ABORT_BACKOFF_S[min(attempt, len(ABORT_BACKOFF_S) - 1)]
+            ledger.waiting += 1
+            try:
+                await self.sleep(delay)
+            finally:
+                ledger.waiting -= 1
+                ledger.suspended_seconds += delay
+        raise AssertionError("unreachable")
 
     # verl starts, updates and stops its own servers: the proxy never calls these.
     def start(self, release_dir: Path | None, version: int) -> LoadReport:
@@ -204,6 +251,21 @@ def weight_steps(recorder: Any, trajectory: str) -> tuple[int, int] | None:
         return None
     steps = engine.pop_steps(trajectory) or ([engine.last_global_steps] if engine.last_global_steps is not None else [])
     return (min(steps), max(steps)) if steps else (0, 0)
+
+
+def track_aborts(recorder: Any, trajectory: str, ledger: SuspendLedger) -> bool:
+    """Retry ``trajectory``'s aborted calls when the recorder runs over verl's rollout (module doc)."""
+    engine = _engine_of(recorder)
+    if engine is None:
+        return False
+    engine.track(trajectory, ledger)
+    return True
+
+
+def untrack_aborts(recorder: Any, trajectory: str) -> None:
+    engine = _engine_of(recorder)
+    if engine is not None:
+        engine.untrack(trajectory)
 
 
 def bind_rollout_client(recorder: Any, client: Any) -> None:

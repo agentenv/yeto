@@ -21,6 +21,20 @@ rejects them.  For these the ``TrialConfig`` comes from yeto's
 the example's harness bindings are not applied, so only agents that
 ``trial.agent_env`` wires (OpenAI base URL: codex, oracle, nop, ...) run there.
 
+Suspension between rounds (S26 E9.5, Miles stage 3,
+``--agentic-suspend-between-turns``): Miles calls this module's
+:func:`suspend` at a round's cut-off and :func:`resume` at the next round's
+start.  They close and open the loop's
+:class:`~yeto.rl.agentic.suspend.TurnGate`.  The agent dials a
+:class:`~yeto.rl.harness.gateway.gate_relay.GateRelay` in this process instead
+of the session server, so its next model call waits there while the trial
+(sandbox, agent process, session-server tokens) stays alive.  The relay is
+switched on by ``YETO_HARBOR_GATE_RELAY_PORT`` (:func:`relay_settings`); a
+suspend hook without it fails closed.  A trajectory suspended across a process
+restart is lost: the cut holds only its reference
+(:func:`yeto.rl.agentic.suspend.suspended_references`) and the restore
+discards it as ABORTED.
+
 The example module is imported by name (``harbor_agent_function``): the Miles
 launcher puts the example directory on the workers' PYTHONPATH
 (``launch_common.agentic_pythonpath_dirs``).
@@ -30,8 +44,13 @@ from __future__ import annotations
 
 import importlib
 import os
+import uuid
+import weakref
+from dataclasses import dataclass
 from functools import partial
+from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from yeto.rl.agentic import (
     OUTCOME_KEY,
@@ -42,7 +61,9 @@ from yeto.rl.agentic import (
     run_agent_task,
 )
 from yeto.rl.agentic.loop_local import LoopLocal
+from yeto.rl.agentic.suspend import TurnGate, after_suspension
 from yeto.rl.agentic.trust import check_agent_env
+from yeto.rl.harness.gateway.gate_relay import GateRelay
 from yeto.rl.harness.harbor import CODEX_VERSION, HarborHarness, HarborSettings, build_trial_config
 from yeto.rl.harness.harbor.trial import CODEX_KWARGS, CUSTOM_PROVIDERS, TrialConfigBuilder, setup_retries_from_env
 
@@ -69,6 +90,102 @@ def gate() -> AdmissionGate:
     process; it is kept per loop because it holds an ``asyncio.Semaphore``.
     """
     return _gates.get()
+
+
+# --------------------------------------------------------------- suspension
+
+RELAY_PORT_ENV = "YETO_HARBOR_GATE_RELAY_PORT"
+RELAY_HOST_ENV = "YETO_HARBOR_GATE_RELAY_HOST"
+RELAY_PUBLIC_HOST_ENV = "YETO_HARBOR_GATE_RELAY_PUBLIC_HOST"
+RELAY_PUBLIC_BASE_ENV = "YETO_HARBOR_GATE_RELAY_PUBLIC_BASE"
+RELAY_SECRET_FILE_ENV = "YETO_HARBOR_GATE_RELAY_SECRET_FILE"
+
+
+@dataclass(frozen=True)
+class RelaySettings:
+    """Where the gate relay listens and the address the sandbox dials.
+
+    ``ports``: ``YETO_HARBOR_GATE_RELAY_PORT`` as ``N`` (one port), ``N-M``
+    (a range: every rollout process on the machine binds the first free one)
+    or ``0`` (any free port; only when the sandboxes can reach any port).
+    ``public_host`` None: the host of the session-server URL the agent would
+    have dialed (the relay runs in the same process, so the same machine).
+    """
+
+    ports: tuple[int, ...]
+    host: str = "0.0.0.0"
+    public_host: str | None = None
+    public_base: str | None = None
+    path_secret: str | None = None
+
+
+def _ports(raw: str) -> tuple[int, ...]:
+    low, sep, high = raw.partition("-")
+    if not low.isdigit() or (sep and not high.isdigit()):
+        raise HarnessConfigError(f"{RELAY_PORT_ENV} must be N, N-M or 0, got {raw!r}")
+    first, last = int(low), int(high) if sep else int(low)
+    if last > 65535 or last < first or (sep and first == 0):
+        raise HarnessConfigError(f"{RELAY_PORT_ENV} is not a valid TCP port range: {raw!r}")
+    return tuple(range(first, last + 1))
+
+
+def relay_settings(environ: Any = None) -> RelaySettings | None:
+    """The relay settings, or None when ``YETO_HARBOR_GATE_RELAY_PORT`` is unset."""
+    environ = os.environ if environ is None else environ
+    raw = str(environ.get(RELAY_PORT_ENV, "") or "").strip()
+    if not raw:
+        return None
+    ports = _ports(raw)
+    public_base = environ.get(RELAY_PUBLIC_BASE_ENV) or None
+    if public_base and len(ports) > 1:
+        raise HarnessConfigError(f"{RELAY_PUBLIC_BASE_ENV} needs one fixed {RELAY_PORT_ENV}, not a range")
+    secret_file = str(environ.get(RELAY_SECRET_FILE_ENV, "") or "").strip()
+    return RelaySettings(
+        ports=ports, host=str(environ.get(RELAY_HOST_ENV) or "0.0.0.0"),
+        public_host=environ.get(RELAY_PUBLIC_HOST_ENV) or None, public_base=public_base,
+        path_secret=Path(secret_file).read_text().strip() if secret_file else None)
+
+
+def check_suspend_config(environ: Any = None) -> RelaySettings:
+    """Island start under ``--agentic-suspend-between-turns``: the relay must be configured."""
+    settings = relay_settings(environ)
+    if settings is None:
+        raise HarnessConfigError(f"suspension between turns needs the gate relay: set {RELAY_PORT_ENV} "
+                                 "(a port the sandboxes can reach on this machine)")
+    return settings
+
+
+_turn_gates: LoopLocal[TurnGate] = LoopLocal(TurnGate)
+_relays: weakref.WeakKeyDictionary[TurnGate, GateRelay] = weakref.WeakKeyDictionary()
+
+
+def turn_gate() -> TurnGate:
+    """The model-turn gate of the rollout loop."""
+    return _turn_gates.get()
+
+
+def _relay(settings: RelaySettings, session_url: str) -> GateRelay:
+    gate = turn_gate()
+    relay = _relays.get(gate)
+    if relay is None:
+        public_host = settings.public_host or urlsplit(session_url).hostname or "127.0.0.1"
+        relay = _relays[gate] = GateRelay(gate, host=settings.host, port=settings.ports,
+                                              public_host=public_host, public_base=settings.public_base,
+                                              path_secret=settings.path_secret)
+    return relay
+
+
+async def suspend(args: Any) -> None:
+    """Miles hook at the cut-off: close the gate (fail closed without the relay)."""
+    del args
+    check_suspend_config()
+    turn_gate().close()
+
+
+async def resume(args: Any) -> None:
+    """Miles hook at the start of the next round: open the gate."""
+    del args
+    turn_gate().open()
 
 
 def _example() -> Any:
@@ -132,8 +249,27 @@ async def run(base_url: str, prompt: Any = None, request_kwargs: dict[str, Any] 
     task = task_from_metadata(metadata)
     harness = HarborHarness(trial_config_builder(task, example, metadata, request_kwargs or {}),
                             setup_retries=setup_retries_from_env())
-    trajectory = await run_agent_task(task, harness, openai_session_url(base_url), gate())
-    return trajectory.to_metadata()
+    session_url = openai_session_url(base_url)
+    settings = relay_settings()
+    if settings is None:
+        trajectory = await run_agent_task(task, harness, session_url, gate())
+        return trajectory.to_metadata()
+    turns = turn_gate()
+    # Miles repeats a row n_samples_per_prompt times with the same metadata.
+    suffix = uuid.uuid4().hex[:12]
+    ledger = turns.register(f"{task.trajectory_id}-{suffix}" if task.trajectory_id else uuid.uuid4().hex,
+                            task_id=task.task_id)
+    relay = _relay(settings, session_url)
+    endpoint = await relay.open(session_url, ledger)
+    try:
+        trajectory = await run_agent_task(task, harness, endpoint, gate(), ledger=ledger)
+    finally:
+        relay.close(endpoint)
+        turns.unregister(ledger)
+    updated = after_suspension(trajectory, ledger)
+    if updated.outcome is not trajectory.outcome:
+        gate().metrics.reclassify(trajectory.outcome, updated.outcome)
+    return updated.to_metadata()
 
 
 def _mark_aborted(sample: Any) -> None:

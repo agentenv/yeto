@@ -3,9 +3,8 @@
 
     python tools/reward_env/holdout.py --swev-data swev-78f471bf.parquet --out-dir data/eval
 
-The TB2 lists (data/eval/tb2-holdout.json, tb2-train.json) were written by the
-TB2 task loader of the self-written Codex harness, removed in S26 E0.5 (git tag
-s26-pre-harness-removal has the generator).
+The TB2 lists (data/eval/tb2-holdout.json, tb2-train.json) are written by
+tools/reward_env/tb2_lists.py from the Harbor task directories (S26 E9.5).
 """
 
 from __future__ import annotations

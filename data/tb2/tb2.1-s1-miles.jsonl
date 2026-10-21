@@ -1,0 +1,15 @@
+{"metadata": {"agent_name": "codex", "benchmark_version": "tb2.1@7131e43", "difficulty": "easy", "eval_bucket": "tb2-easy", "instance_id": "fix-git"}, "prompt": "TB2.1 task fix-git"}
+{"metadata": {"agent_name": "codex", "benchmark_version": "tb2.1@7131e43", "difficulty": "easy", "eval_bucket": "tb2-easy", "instance_id": "cobol-modernization"}, "prompt": "TB2.1 task cobol-modernization"}
+{"metadata": {"agent_name": "codex", "benchmark_version": "tb2.1@7131e43", "difficulty": "medium", "eval_bucket": "tb2-medium", "instance_id": "mteb-leaderboard"}, "prompt": "TB2.1 task mteb-leaderboard"}
+{"metadata": {"agent_name": "codex", "benchmark_version": "tb2.1@7131e43", "difficulty": "medium", "eval_bucket": "tb2-medium", "instance_id": "merge-diff-arc-agi-task"}, "prompt": "TB2.1 task merge-diff-arc-agi-task"}
+{"metadata": {"agent_name": "codex", "benchmark_version": "tb2.1@7131e43", "difficulty": "medium", "eval_bucket": "tb2-medium", "instance_id": "openssl-selfsigned-cert"}, "prompt": "TB2.1 task openssl-selfsigned-cert"}
+{"metadata": {"agent_name": "codex", "benchmark_version": "tb2.1@7131e43", "difficulty": "medium", "eval_bucket": "tb2-medium", "instance_id": "polyglot-c-py"}, "prompt": "TB2.1 task polyglot-c-py"}
+{"metadata": {"agent_name": "codex", "benchmark_version": "tb2.1@7131e43", "difficulty": "medium", "eval_bucket": "tb2-medium", "instance_id": "vulnerable-secret"}, "prompt": "TB2.1 task vulnerable-secret"}
+{"metadata": {"agent_name": "codex", "benchmark_version": "tb2.1@7131e43", "difficulty": "medium", "eval_bucket": "tb2-medium", "instance_id": "code-from-image"}, "prompt": "TB2.1 task code-from-image"}
+{"metadata": {"agent_name": "codex", "benchmark_version": "tb2.1@7131e43", "difficulty": "medium", "eval_bucket": "tb2-medium", "instance_id": "count-dataset-tokens"}, "prompt": "TB2.1 task count-dataset-tokens"}
+{"metadata": {"agent_name": "codex", "benchmark_version": "tb2.1@7131e43", "difficulty": "medium", "eval_bucket": "tb2-medium", "instance_id": "extract-elf"}, "prompt": "TB2.1 task extract-elf"}
+{"metadata": {"agent_name": "codex", "benchmark_version": "tb2.1@7131e43", "difficulty": "medium", "eval_bucket": "tb2-medium", "instance_id": "financial-document-processor"}, "prompt": "TB2.1 task financial-document-processor"}
+{"metadata": {"agent_name": "codex", "benchmark_version": "tb2.1@7131e43", "difficulty": "medium", "eval_bucket": "tb2-medium", "instance_id": "git-leak-recovery"}, "prompt": "TB2.1 task git-leak-recovery"}
+{"metadata": {"agent_name": "codex", "benchmark_version": "tb2.1@7131e43", "difficulty": "medium", "eval_bucket": "tb2-medium", "instance_id": "multi-source-data-merger"}, "prompt": "TB2.1 task multi-source-data-merger"}
+{"metadata": {"agent_name": "codex", "benchmark_version": "tb2.1@7131e43", "difficulty": "medium", "eval_bucket": "tb2-medium", "instance_id": "pytorch-model-cli"}, "prompt": "TB2.1 task pytorch-model-cli"}
+{"metadata": {"agent_name": "codex", "benchmark_version": "tb2.1@7131e43", "difficulty": "medium", "eval_bucket": "tb2-medium", "instance_id": "tune-mjcf"}, "prompt": "TB2.1 task tune-mjcf"}

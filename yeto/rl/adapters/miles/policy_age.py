@@ -44,9 +44,9 @@ PARTIAL_ROLLOUT_FLAGS = ("--partial-rollout",)
 AGENTIC_GENERATE = "miles.rollout.generate_hub.agentic_tool_call.generate"
 # Agent functions whose module defines the suspend()/resume() hooks Miles calls
 # under --agentic-suspend-between-turns (model-turn gate, survival limit).
-# Empty since S26 E0.5: the only such agent was the removed self-written Codex
-# harness; the Harbor agent function does not implement the hooks.
-SUSPEND_CAPABLE_AGENTS: frozenset[str] = frozenset()
+# S26 E0.5 removed the self-written Codex harness; S26 E9.5 gave the Harbor
+# agent function the hooks (model calls held at its gate relay).
+SUSPEND_CAPABLE_AGENTS: frozenset[str] = frozenset({"yeto.rl.adapters.miles.harbor_agent.run"})
 
 
 def policy_age_argv(limit: int, *, agentic: bool = False, overlap: bool = False) -> tuple[str, ...]:
