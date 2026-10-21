@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import logging
 import json
 import os
 import time
@@ -84,6 +85,7 @@ from yeto.rl.harness.gateway.records_env import (
 )
 
 CALL_TIMEOUT_S = 1800.0
+logger = logging.getLogger(__name__)
 ABORT_RETRY_ENV = "YETO_VERL_ABORT_RETRY_S"
 DEFAULT_ABORT_RETRY_S = 1800.0
 ABORT_BACKOFF_S = (0.5, 1.0, 2.0, 5.0, 10.0)
@@ -193,6 +195,8 @@ class VerlRolloutEngine:
                 raise SamplerEngineError("verl rollout aborted the request")
             if attempt == 0:
                 ledger.mark(next(self._aborts))
+                logger.warning("yeto verl: model call of trajectory %s aborted by the rollout; sending it again",
+                               trajectory)
             ledger.retried_turns += 1
             delay = ABORT_BACKOFF_S[min(attempt, len(ABORT_BACKOFF_S) - 1)]
             ledger.waiting += 1

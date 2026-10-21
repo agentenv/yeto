@@ -60,6 +60,7 @@ worker they are per process.
 from __future__ import annotations
 
 import importlib
+import json
 import logging
 import os
 import uuid
@@ -240,6 +241,11 @@ class HarborAgentLoop(AgentLoopBase):
         if segments is None:
             segments = self._placeholder()
         metadata = trajectory.to_metadata()
+        # One line per trajectory: the only per-sample record of the outcome, the
+        # suspension counters and the weight versions outside verl's batch.
+        logger.warning("yeto harbor trajectory %s: outcome=%s reason=%s agent_metrics=%s global_steps=%s",
+                       trajectory.task.trajectory_id, metadata[OUTCOME_KEY], trajectory.reason,
+                       json.dumps(metadata["agent_metrics"], default=str, sort_keys=True), steps)
         return AgentLoopOutput(
             prompt_ids=list(segments.prompt_ids),
             response_ids=list(segments.response_ids),
