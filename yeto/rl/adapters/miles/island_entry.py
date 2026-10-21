@@ -75,11 +75,11 @@ def parse_args(argv=None):
     )
 
     if (args.parameter_mode == "full" and args.sync_preset not in FULL_PARAMETER_SYNC_PRESETS
-            and not _buffer_island(args)):
+            and not _no_sync_island(args)):
         parser.error(
             "--parameter-mode full requires a full-parameter --sync-preset "
-            f"({', '.join(sorted(FULL_PARAMETER_SYNC_PRESETS))}) or a no-sync "
-            "--rl-sample-role sampler / trainer island"
+            f"({', '.join(sorted(FULL_PARAMETER_SYNC_PRESETS))}) or "
+            "--rl-single-island-no-sync"
         )
     if args.sync_preset == FULL_PARAMETER_SYNC_PRESET and not _trains_base_parameters(args):
         parser.error(
@@ -151,7 +151,7 @@ def build_ports_launch(args, run_config, extra_argv=()):
     )
     return translate_run_config(run_config, base_algorithm, extra_argv=tuple(extra_argv),
                                 max_policy_age=int(getattr(args, "rl_max_policy_age", 0) or 0),
-                                full_parameter_sync=not _buffer_island(args))
+                                full_parameter_sync=not _no_sync_island(args))
 
 
 _ELASTIC_COMPANIONS = rl_option_pairs(
@@ -696,12 +696,11 @@ def _full_parameter_identity(model_config_sha256: str) -> tuple[str, str]:
     )
 
 
-def _buffer_island(args) -> bool:
-    """A no-sync sampler / trainer island (L4.6): it has no outer sync, so full
-    parameter mode runs without the full-parameter sync preset."""
-    from yeto.rl.engine.sample_roles import BOTH, sample_role
-
-    return bool(getattr(args, "rl_single_island_no_sync", False)) and sample_role(args) != BOTH
+def _no_sync_island(args) -> bool:
+    """A no-sync island (a sampler / trainer island, L4.6, or a single island
+    with both roles, S26 E11): it has no outer sync, so full parameter mode runs
+    without the full-parameter sync preset."""
+    return bool(getattr(args, "rl_single_island_no_sync", False))
 
 
 def _full_parameter_mode(args, sync_preset: str) -> bool:
@@ -716,9 +715,9 @@ def _full_parameter_mode(args, sync_preset: str) -> bool:
 
     full_mode = getattr(args, "parameter_mode", "lora") == "full"
     full_preset = sync_preset in FULL_PARAMETER_SYNC_PRESETS
-    if full_mode and not full_preset and not _buffer_island(args):
+    if full_mode and not full_preset and not _no_sync_island(args):
         raise ValueError("full parameter mode needs a full-parameter sync preset "
-                         "(or a no-sync --rl-sample-role sampler / trainer island)")
+                         "(or --rl-single-island-no-sync)")
     if full_preset and not _trains_base_parameters(args):
         raise ValueError(f"the {sync_preset} sync needs full parameter mode or expert-full tuning")
     if full_preset and not full_mode and sync_preset != FULL_PARAMETER_SYNC_PRESET:
@@ -1793,7 +1792,7 @@ def run_miles(
     # full-parameter strict sweep also carries DeepSeek V4 expert-full (P0 1.7b.2).
     full_parameter_sync = sync_preset in FULL_PARAMETER_SYNC_PRESETS
     dense_full = sync_preset == FULL_PARAMETER_SYNC_PRESET
-    if _trains_base_parameters(args) and not full_parameter_sync and not _buffer_island(args):
+    if _trains_base_parameters(args) and not full_parameter_sync and not _no_sync_island(args):
         raise ValueError(f"expert-full tuning needs the {FULL_PARAMETER_SYNC_PRESET} sync")
     sao_runtime = None
     if dense_full:

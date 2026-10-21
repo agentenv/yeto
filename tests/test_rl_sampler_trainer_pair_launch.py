@@ -109,10 +109,19 @@ def test_pair_island_commands_pass_the_island_parser_and_no_sync_checks():
         assert (config.role, config.store) == (role, "/root/yeto-checkpoint-store/run-a")
 
 
-def test_full_parameter_without_a_buffer_role_is_still_refused_on_the_island():
+def test_full_parameter_on_a_no_sync_island_with_both_roles_is_accepted():
+    """S26 E11: a single no-sync island with both roles trains every parameter."""
     from yeto.rl.adapters.miles import island_entry
 
     args = types.SimpleNamespace(parameter_mode="full", rl_single_island_no_sync=True,
+                                 rl_sample_role="both")
+    assert island_entry._full_parameter_mode(args, "strict-avg") is True
+
+
+def test_full_parameter_with_a_syncer_still_needs_the_full_parameter_preset():
+    from yeto.rl.adapters.miles import island_entry
+
+    args = types.SimpleNamespace(parameter_mode="full", rl_single_island_no_sync=False,
                                  rl_sample_role="both")
     with pytest.raises(ValueError, match="full-parameter sync preset"):
         island_entry._full_parameter_mode(args, "strict-avg")

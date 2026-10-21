@@ -89,6 +89,10 @@ class EffSpec:
     # cards per run: 0 keeps the E0 shape (sync 1, async 1 rollout + 1 trainer); E11
     # (whole-cluster comparison) sets the total, split evenly between rollout and trainer in async
     cards: int = 0
+    # "lora" or "full" (every parameter; E11 0.6B). Miles full-parameter islands with
+    # engines need DP=1, so a 2-card trainer runs tensor parallel 2 in every arm.
+    tuning: str = "lora"
+    tensor_parallel: int = 1
 
     @property
     def samples_per_round(self) -> int:
@@ -124,6 +128,16 @@ PRESETS: dict[str, EffSpec] = {
         data_file="dapo-math-17k.jsonl", train_rows=12 * 32,
         gpu="H100!", rounds=12, groups_per_round=32, samples_per_group=8, max_prompt_len=512,
         max_response_len=1024, lora_r=64, mem_fraction=0.6, timeout_s=5400, cards=4),
+    # E11 full parameter: the E11 data, rounds and lengths on Qwen3-0.6B, every parameter
+    # trained (lora_r is unused). 2 rollout + 2 trainer cards, trainer TP 2 (DP 1).
+    "e11-qwen3-0.6b-full": EffSpec(
+        name="e11-qwen3-0.6b-full", model="Qwen/Qwen3-0.6B", model_revision="c1899de289a04d12100db370d81485cdf75e47ca",
+        miles_model_args="qwen3-0.6B.py",
+        data="zhuzilin/dapo-math-17k", data_revision="2e65612930298bde4c5d58fd97b3f23a483aaff9",
+        data_file="dapo-math-17k.jsonl", train_rows=12 * 32,
+        gpu="H100!", rounds=12, groups_per_round=32, samples_per_group=8, max_prompt_len=512,
+        max_response_len=1024, mem_fraction=0.6, timeout_s=3600, cards=4, tuning="full",
+        tensor_parallel=2, chat_template_kwargs={"enable_thinking": False}),
 }
 
 
@@ -172,8 +186,10 @@ def control_fingerprint(spec: EffSpec) -> str:
     """sha256 over every shared value except the repeat count (a report refuses
     to compare runs whose fingerprints differ)."""
     doc = {k: v for k, v in spec.to_dict().items() if k not in ("repeats", "timeout_s", "checkpoint")}
-    for key in ("cards", "data_file", "train_rows"):  # fields added after E0.1: a default value
-        if not doc[key]:                               # keeps the fingerprints of earlier runs valid
+    # fields added after E0.1: a default value keeps the fingerprints of earlier runs valid
+    for key, default in (("cards", 0), ("data_file", ""), ("train_rows", 0), ("tuning", "lora"),
+                         ("tensor_parallel", 1)):
+        if doc[key] == default:
             doc.pop(key)
     return hashlib.sha256(json.dumps(doc, sort_keys=True).encode()).hexdigest()
 
@@ -320,13 +336,10 @@ def miles_bare_argv(spec: EffSpec, mode: str) -> list[str]:
         # optimizer
         "--optimizer", "adam", "--lr", str(spec.lr), "--lr-decay-style", "constant",
         "--seed", str(spec.seed),
-        # LoRA (Miles' own flags; the same set yeto's Miles adapter emits)
-        "--lora-rank", str(spec.lora_r), "--lora-alpha", str(spec.lora_r), "--lora-dropout", "0",
-        "--lora-type", "canonical_lora", "--target-modules", "all-linear",
-        "--sglang-max-lora-rank", str(spec.lora_r),
+        *_miles_lora_flags(spec),
         # Megatron (run_qwen3_4b.py, Megatron branch)
         "--train-backend", "megatron", "--seq-length", str(spec.seq_len),
-        "--tensor-model-parallel-size", "1", "--pipeline-model-parallel-size", "1",
+        "--tensor-model-parallel-size", str(spec.tensor_parallel), "--pipeline-model-parallel-size", "1",
         "--context-parallel-size", "1", "--expert-model-parallel-size", "1", "--expert-tensor-parallel-size", "1",
         "--recompute-granularity", "full", "--recompute-method", "uniform", "--recompute-num-layers", "1",
         "--use-dynamic-batch-size", "--max-tokens-per-gpu", str(max_tokens_per_gpu(spec)),
@@ -345,11 +358,29 @@ def miles_bare_argv(spec: EffSpec, mode: str) -> list[str]:
     if spec.chat_template_kwargs:
         argv += ["--apply-chat-template-kwargs", json.dumps(spec.chat_template_kwargs, separators=(",", ":"))]
     if mode == "sync":
-        argv += ["--colocate", "--offload-train", "--lora-base-cpu-backup"]
+        argv += ["--colocate", "--offload-train"]
+        if spec.tuning == "lora":
+            argv += ["--lora-base-cpu-backup"]
     else:
         argv += ["--rollout-num-gpus", str(c["rollout"]), "--fully-async",
                  "--max-weight-staleness", str(spec.max_policy_age)]
     return argv
+
+
+def _miles_lora_flags(spec: EffSpec) -> list[str]:
+    """Miles' own LoRA flags (the same set yeto's Miles adapter emits); none for full parameter."""
+    if spec.tuning == "full":
+        return []
+    return ["--lora-rank", str(spec.lora_r), "--lora-alpha", str(spec.lora_r), "--lora-dropout", "0",
+            "--lora-type", "canonical_lora", "--target-modules", "all-linear",
+            "--sglang-max-lora-rank", str(spec.lora_r)]
+
+
+def _yeto_tuning(spec: EffSpec) -> str:
+    """The yeto launcher's tuning options (full parameter: a no-sync single island)."""
+    if spec.tuning == "full":
+        return f"--tuning full --tensor-parallel {spec.tensor_parallel} "
+    return f"--tuning lora --lora-r {spec.lora_r} "
 
 
 def miles_bare_script(mode: str) -> str:
@@ -422,7 +453,7 @@ def yeto_miles_launcher_args(spec: EffSpec, mode: str, run_id: str) -> str:
             # container resources as the bare arms' (modal_eff: 8 CPU + 48 GiB per card)
             f"--modal-retries 0 --modal-cpu {8 * c['total']} --modal-memory {48 * c['total']} "
             f"--modal-tape-volume {TAPE_VOLUME} "
-            f"--controller local --cluster-prefix {run_id} --tuning lora --lora-r {spec.lora_r} "
+            f"--controller local --cluster-prefix {run_id} {_yeto_tuning(spec)}"
             f"--rl-observe-timeline --model {spec.model} --model-revision {spec.model_revision} {_yeto_data(spec)} "
             f"--rl-checkpoint-store modal-volume://{STORE_VOLUME}/{run_id} "
             f"--rl-cut-every {cut_every(spec)} "

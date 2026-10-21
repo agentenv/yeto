@@ -320,8 +320,7 @@ def _prepare_rl_args(
     from ..rl.engine import sample_roles
 
     if args.tuning != "lora" and not sample_roles.buffer_full_parameter(args):
-        raise ValueError("RL v0 requires --tuning lora (--tuning full: only sampler / trainer "
-                         "islands, --rl-sample-role or --rl-island-sample-role, with "
+        raise ValueError("RL v0 requires --tuning lora (--tuning full: only with "
                          "--rl-single-island-no-sync)")
     if args.lora_r <= 0:
         raise ValueError("RL v0 requires a positive LoRA rank")
