@@ -26,6 +26,7 @@ import importlib
 import importlib.abc
 import importlib.util
 import os
+import runpy
 import sys
 from typing import Any
 
@@ -113,13 +114,19 @@ def main(argv: list[str] | None = None) -> None:
     fully_async = FULLY_ASYNC_FLAG in args
     if fully_async:
         args.remove(FULLY_ASYNC_FLAG)
-    entry = importlib.import_module(FULLY_ASYNC_ENTRY if fully_async else SYNC_ENTRY)
+    entry = None if fully_async else importlib.import_module(SYNC_ENTRY)
 
     importlib.import_module(ESTIMATOR_MODULE)  # the driver validates algorithm.adv_estimator too
     if not ray.is_initialized():
         ray.init(runtime_env=runtime_env(fully_async=fully_async), namespace="yeto-verl-agentic")
     sys.argv = [sys.argv[0], *args]
-    entry.main()
+    if entry is not None:
+        entry.main()
+        return
+    # As ``python -m``: hydra resolves fully_async_main's config_path="config" from the file
+    # when the module runs as __main__; imported, it looks for a Python package
+    # ``...fully_async_policy.config`` that does not exist (agv-async-eff-a, exit after 30 s).
+    runpy.run_module(FULLY_ASYNC_ENTRY, run_name="__main__", alter_sys=True)
 
 
 if __name__ == "__main__":

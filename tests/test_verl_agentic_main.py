@@ -46,9 +46,11 @@ def test_main_selects_the_fully_async_entry_and_leaves_transfer_queue_to_it(monk
     monkeypatch.setattr("yeto.launch.image_check.check_image_at_start", lambda: ())
     monkeypatch.setattr(m.importlib, "import_module", entries.get)
     monkeypatch.setattr(sys, "argv", ["agentic_main"])
+    monkeypatch.setattr(m.runpy, "run_module", lambda name, run_name, alter_sys: calls.append(
+        ("main", name, run_name, list(sys.argv[1:]))))
 
     m.main(["--fully-async", "a=1"])
     m.main(["a=2"])
     assert calls == [("init", {"fully_async": True}),
-                     ("main", "verl.experimental.fully_async_policy.fully_async_main", ["a=1"]),
+                     ("main", "verl.experimental.fully_async_policy.fully_async_main", "__main__", ["a=1"]),
                      ("init", {"fully_async": False}), ("main", "verl.trainer.main_ppo", ["a=2"])]
