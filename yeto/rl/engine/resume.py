@@ -392,6 +392,19 @@ def _cut_rollout(cut_id: str) -> int | None:
     return int(head[1:])
 
 
+def stage_state_dir(state_dir: Path, staged: Path) -> Path:
+    """Copy the snapshot files of ``state_dir`` (as :func:`write_snapshot` would take
+    them) into a fresh ``staged`` directory; returns it."""
+    state_dir, staged = Path(state_dir), Path(staged)
+    if staged.exists():
+        shutil.rmtree(staged)
+    for rel in _tree_files(state_dir):
+        (staged / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(state_dir / rel, staged / rel)
+    staged.mkdir(parents=True, exist_ok=True)
+    return staged
+
+
 def directory_bytes(path: Path) -> int:
     return sum(p.stat().st_size for p in Path(path).rglob("*") if p.is_file())
 
@@ -527,7 +540,7 @@ class ResumeController:
 
     def sync_checkpoint_store(self, reason: str, *, skip_if_recovery: bool = False,
                               extra: Mapping[str, Any] | None = None,
-                              defer_commit: bool = False) -> bool:
+                              defer_commit: bool = False, source_dir: Path | None = None) -> bool:
         """Snapshot the state dir into the store, then ``LATEST``, commit, prune. A
         failure is remembered (``last_store_sync``) and returned False: the previous
         LATEST stays valid.
@@ -535,12 +548,16 @@ class ResumeController:
         ``defer_commit``: stop after ``LATEST``; :meth:`commit_checkpoint_store` commits
         and prunes later (the round cut runs it off the round's critical path). Until
         then the store's committed LATEST is the previous one, so a crash in between
-        resumes from the previous cut."""
+        resumes from the previous cut.
+
+        ``source_dir``: snapshot this copy of the state dir instead (a round cut whose
+        store sync runs later stages the state dir as it was at the cut)."""
         if skip_if_recovery and self.recovery_required:
             return False
+        source = Path(source_dir) if source_dir is not None else self.state_dir
         info = {"incarnation": self.incarnation["id"], "incarnation_index": self.incarnation["index"],
                 "reason": reason, "wall_time": self._wall(), **dict(extra or {})}
-        pointer = self.state_dir / "round-cut.json"
+        pointer = source / "round-cut.json"
         if pointer.is_file():  # LATEST names the cut the snapshot's pointer names
             try:
                 p = json.loads(pointer.read_text(encoding="utf-8"))
@@ -549,7 +566,7 @@ class ResumeController:
             except ValueError:
                 pass
         try:
-            result = write_snapshot(self.store, self.state_dir, info, commit=not defer_commit)
+            result = write_snapshot(self.store, source, info, commit=not defer_commit)
             if defer_commit:
                 self.last_store_sync = {**info, **result, "ok": True, "committed": False, "pruned": None}
                 return True

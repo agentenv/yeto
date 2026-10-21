@@ -261,12 +261,28 @@ class RoundCutCheckpoint:
             return None
         return dict(json.loads(path.read_text(encoding="utf-8")))
 
-    def _write_pointer(self, info: dict[str, Any]) -> None:
-        tmp = self.pointer_path.with_suffix(".json.tmp")
+    def _write_pointer(self, info: dict[str, Any], *, path: Path | None = None) -> None:
+        target = self.pointer_path if path is None else Path(path)
+        tmp = target.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(info, sort_keys=True), encoding="utf-8")
         with open(tmp, "rb") as fh:
             os.fsync(fh.fileno())
-        os.replace(tmp, self.pointer_path)
+        os.replace(tmp, target)
+
+    def _stage(self, cut_id: str) -> Path:
+        """E1: a copy of the state dir as it is now (small: ledger, journal, pointer),
+        next to it, for a store sync that runs after later rounds."""
+        from yeto.rl.engine.resume import stage_state_dir
+
+        state_dir = Path(self.controller.state_dir)
+        return stage_state_dir(state_dir, state_dir.parent / f".{state_dir.name}.stage-{cut_id}")
+
+    @staticmethod
+    def _unstage(staged: Path | None) -> None:
+        if staged is not None:
+            import shutil
+
+            shutil.rmtree(staged, ignore_errors=True)
 
     def _epoch(self) -> int:
         return int(self.controller.journal.epochs.config_epoch)
@@ -440,6 +456,7 @@ class RoundCutCheckpoint:
                 commit_manifest = None
         except Exception as error:  # noqa: BLE001 - the previous cut stays the pointed one
             self._drop_unpointed(info["cut_id"])
+            self._unstage(deferred.get("staged"))
             return {"cut_id": info["cut_id"], "rollout_id": deferred["rollout_id"], "ok": False,
                     "error": repr(error)[:2000]}
         self._commit_in_background(deferred, commit_manifest)
@@ -467,11 +484,14 @@ class RoundCutCheckpoint:
                 if commit_manifest is not None:
                     commit_manifest()
                 saved = recovery.save(cut, store=self.controller.store,
-                                      write=lambda record: self._write_and_sync(info, record, defer=True))
+                                      write=lambda record: self._write_and_sync(
+                                          info, record, defer=True, staged=deferred.get("staged")))
             except Exception as error:  # noqa: BLE001 - reported at the next join
                 self._drop_unpointed(cut_id)
                 box["result"] = {"ok": False, "error": repr(error)[:2000]}
                 return
+            finally:
+                self._unstage(deferred.get("staged"))
             done = {"finish_s": round(time.monotonic() - started, 3),
                     "cut_bytes": directory_bytes(Path(self.root) / cut_id)}
             if not saved["synced"]:
@@ -577,7 +597,11 @@ class RoundCutCheckpoint:
         extra = {"prepared_before_offload": used_prepared, "trainer_onloaded_for_cut": offloaded,
                  "save_s": round(save_s, 3)}
         if defer:
-            self._deferred = {"info": info, "cut": cut, "pending": pending, "rollout_id": int(rollout_id)}
+            # the state dir (ledger, journal) as it is at this cut: its store sync runs
+            # in the background after later rounds have changed it
+            staged = self._stage(cut_id)
+            self._deferred = {"info": info, "cut": cut, "pending": pending, "rollout_id": int(rollout_id),
+                              "staged": staged}
             return {**info, **extra, "store_commit": "deferred", "store_synced": None,
                     "total_s": round(time.monotonic() - started, 3)}
         if pending is not None:
@@ -618,12 +642,17 @@ class RoundCutCheckpoint:
         self._drop_unpointed(prepared.context.cut_id)
 
     def _write_and_sync(self, info: dict[str, Any], cut_record: dict[str, Any], *,
-                        defer: bool = False) -> dict[str, Any]:
+                        defer: bool = False, staged: Path | None = None) -> dict[str, Any]:
         """The round cut's ``recovery.save`` writer: the pointer (with the cut record)
         into the state dir, then the state dir into the store (which commits, unless
-        ``defer``: the caller commits in the background)."""
-        self._write_pointer({**info, CUT_KEY: cut_record})
-        kwargs = {"defer_commit": True} if defer else {}
+        ``defer``: the caller commits in the background). ``staged``: the state dir as
+        staged at the cut (:meth:`_stage`) is the one synced, with the same pointer."""
+        pointer = {**info, CUT_KEY: cut_record}
+        self._write_pointer(pointer)
+        kwargs: dict[str, Any] = {"defer_commit": True} if defer else {}
+        if staged is not None:
+            self._write_pointer(pointer, path=Path(staged) / POINTER)
+            kwargs["source_dir"] = Path(staged)
         synced = self.controller.sync_checkpoint_store("round_cut", skip_if_recovery=True, **kwargs)
         # the store sync commits itself (snapshot layout: in write_snapshot; flat layout:
         # in the controller, outside its lock), also when it failed: recovery.save must not

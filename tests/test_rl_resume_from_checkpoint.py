@@ -5,6 +5,7 @@ cut/restore on E2's CPU rank fakes), launcher/Modal wiring, tape continuity, das
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -830,3 +831,26 @@ def test_a_cut_declined_at_prepare_does_not_wake_the_offloaded_trainer(tmp_path)
     driver.local_step = 3
     _publish(driver, 3, _hash(rank))
     assert cp.save(driver, rollout_id=3)["trainer_onloaded_for_cut"] is True
+
+
+def test_a_deferred_cut_snapshots_the_state_dir_as_it_was_at_the_cut(tmp_path):
+    """E1 (Modal A10G resume e1c): a periodic cut is synced into the store after later
+    rounds changed the state dir (the ledger); the snapshot must hold the state dir as
+    it was at the cut, else a resume refuses the ledger (consumed groups differ)."""
+    store = _store(tmp_path / "store", _Vol())
+    rank, driver, _trainer_c, cp, _first = _island_with_first_cut(tmp_path, store)
+    marker = Path(cp.controller.state_dir) / "ledger-e1-marker.txt"
+    marker.write_text("at the cut")
+    _publish(driver, 2, _hash(rank))
+    info = cp.save(driver, rollout_id=2)
+    assert info["store_commit"] == "deferred"
+    marker.write_text("one round later")  # the next round trains before the commit runs
+    done = cp.join_commit(driver)
+    assert done["ok"] is True
+    latest = rs.read_latest(store.root)
+    assert latest["cut_id"] == info["cut_id"]
+    snap = store.root / rs.STATE_DIR / f"{int(latest['seq']):08d}"
+    assert (snap / marker.name).read_text() == "at the cut"
+    assert json.loads((snap / POINTER).read_text())["cut_id"] == info["cut_id"]
+    assert cp.pointer()["cut_id"] == info["cut_id"]
+    assert not list(Path(cp.controller.state_dir).parent.glob(".*.stage-*"))  # staging removed
