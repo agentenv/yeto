@@ -495,6 +495,10 @@ _RUNTIME = (
     # 1.7 observation: per-round timeline labels (entry observe=...), off by default.
     shared_flag("--rl-observe-timeline", action="store_true",
                 help="ports: record per-round timeline labels (rl-infra-spec 1.7); off by default"),
+    shared_flag("--rl-verify-every-round", action="store_true",
+                help="ports: hash the policy and read the engine weight checksums back at every "
+                "publication (default: at round-cut rounds, the first publication and every "
+                "--rl-cut-every rounds)"),
     shared_flag("--rl-profile-trainer", action="store_true",
                 help="ports, observation only (E1): per training step, print where the trainer "
                 "process spends its time (stack samples, GC pauses, CUDA allocator counters)"),

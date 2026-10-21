@@ -830,6 +830,8 @@ def compose_island(
         ),
         **({"evaluate_start": evaluate_start} if evaluate_start is not None else {}),
     )
+    # E1: publication checks on every round (default: cut, first and every-K rounds)
+    driver.verify_every_round = bool(getattr(miles_args, "yeto_rl_verify_every_round", False))
     if elastic is not None:
         from .elastic_placement import ElasticPlacement
 

@@ -381,6 +381,29 @@ def defer_digest(driver: Any) -> bool:
             and bool(getattr(driver.policy_state, "supports_deferred_digest", False)))
 
 
+def verify_publication(driver: Any, version: int) -> bool:
+    """E1: does the publication of policy ``version`` hash the policy and read the
+    engine weight checksums back? Yes on the first publication, on a round whose safe
+    point keeps a round cut (resume relies on its policy hash), on every K-th version
+    (K = the round-cut interval) and, with ``--rl-verify-every-round``, always. Without
+    round cuts, or with a policy state that cannot skip it, every round is verified.
+    The other rounds still check that the trainer holds the policy (weights version)."""
+    if bool(getattr(driver, "verify_every_round", False)):
+        return True
+    if not bool(getattr(getattr(driver, "policy_state", None), "supports_unverified_rounds", False)):
+        return True
+    cuts = getattr(getattr(driver, "sync", None), "round_cuts", None)
+    every = int(getattr(cuts, "every", 0) or 0)
+    if cuts is None or every <= 1:
+        return True
+    if getattr(driver, "published_version", None) is None:
+        return True
+    cut_due = getattr(driver.sync, "cut_due", None)
+    if callable(cut_due) and cut_due(int(version)):
+        return True
+    return int(version) % every == 0
+
+
 class IslandDriver:
     def __init__(
         self,
@@ -701,6 +724,10 @@ class IslandDriver:
         export_digest = getattr(self.policy_state, "export_digest", None)
         if not callable(export_digest):
             return None
+        if not verify_publication(self, int(policy_version)):
+            state = self.policy_state.export_identity(policy_version=int(policy_version))
+            if state is not None:
+                return state
         if defer_digest(self):
             return export_digest(policy_version=int(policy_version), deferred=True)
         return export_digest(policy_version=int(policy_version))

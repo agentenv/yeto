@@ -63,6 +63,7 @@ class MilesPolicyState:
 
     # E1: export_digest(deferred=True) is supported (LoRA digest path)
     supports_deferred_digest = True
+    supports_unverified_rounds = True  # E1: export_identity
 
     def __init__(
         self,
@@ -146,6 +147,26 @@ class MilesPolicyState:
               f"hash={hashed} tensors={len(state.digest.specs)}", flush=True)
         return state
 
+    def export_identity(self, *, policy_version: int | None = None):
+        """E1: the resident state of a round whose publication is not verified: the
+        trainer reports only its weights version (no export, no hash); the identity is
+        :func:`~yeto.rl.engine.policy_digest.unverified_identity`. The layout is the last
+        verified digest's (None before any: the caller verifies that round)."""
+        from yeto.rl.engine.policy_digest import PolicyDigest, TrainerResidentState, unverified_identity
+
+        last = getattr(self, "_last_verified", None)
+        if last is None:
+            return None
+        version = self._export_version(policy_version)
+        mark = self.weights_version()
+        identity = unverified_identity(version, mark)
+        digest = PolicyDigest(identity, identity, last.payload_bytes, last.specs)
+        return TrainerResidentState(
+            layout=self.layout, base_model_revision=self._revision, config_hash=self._config_hash,
+            layout_hash=self._expected_layout_hash, policy_version=version, digest=digest,
+            materialize_fn=lambda v: self.export(policy_version=v), weights_mark=mark,
+            holds_fn=self.check_holds, verified=False)
+
     def _collect_digest(self, version: int):
         from yeto.rl.engine.policy_digest import PolicyDigest
 
@@ -227,6 +248,7 @@ class MilesPolicyState:
             self._expected_layout_hash = layout_hash
             print(f"[rl] learned LoRA layout from first digest export: {len(digest.specs)} tensors, "
                   f"hash={layout_hash}", flush=True)
+        self._last_verified = digest
         return TrainerResidentState(
             layout=self.layout,
             base_model_revision=self._revision,
@@ -328,6 +350,7 @@ class MilesFullParameterLocalPolicyState(MilesPolicyState):
     """
 
     supports_deferred_digest = False  # its export_digest hashes every rank's shard eagerly
+    supports_unverified_rounds = False  # E1: every publication hashes the shards
 
     def __init__(self, *, actor_model: Any, base_model_revision: str, config_hash: str,
                  expected_layout_hash: str | None, policy_version: int = 0,

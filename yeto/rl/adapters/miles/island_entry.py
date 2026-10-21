@@ -282,6 +282,8 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
 
     if getattr(args, "rl_overlap_eval", False):
         miles_args.yeto_rl_overlap_eval = True
+    if getattr(args, "rl_verify_every_round", False):  # E1: read by entry (driver.verify_every_round)
+        miles_args.yeto_rl_verify_every_round = True
     if getattr(args, "rl_profile_trainer", False):  # E1: read by state_plugin.train_one_step
         miles_args.yeto_rl_profile_trainer = True
         from yeto.rl.engine import phase_profile
