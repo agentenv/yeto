@@ -96,6 +96,19 @@ def release_scheme(tier: int) -> str:
     return FP8_FFN_CHANNEL if tier == TIER_TRAINER_FP8 else BF16
 
 
+VERL_BACKEND = "verl"
+# H100 runs 2026-10-21 (SESSION26/logs/E6): vLLM 0.29 given verl's FP8 config
+# (hf_overrides, quant_method fp8) on a BF16 checkpoint treats the weights as FP8
+# serialized and generates garbage (512-token answers, NaN log-probs) until verl's
+# weight sync re-quantizes the base; yeto verl is LoRA-only and a LoRA sync never sends
+# the base (e6-t1-verl-a-r2, e6-vllm-fp8-probe). Plain vLLM online FP8 works with LoRA
+# but has no ignore list: it quantizes attention, which failed the gate as SGLang
+# online FP8 of every linear (p99 |diff| 0.60, limit 0.5).
+VERL_TIER1_REFUSAL = (f"{FLAG} 1 is not available on verl: verl's FP8 rollout needs a base-weight "
+                      "sync to quantize the base, and yeto verl islands are LoRA-only (the engine "
+                      "would generate garbage); use tier 0 on verl")
+
+
 def validate_launch(args: Any) -> int:
     """Refuse a tier the launch cannot run (launcher side, no checkpoint needed); returns the tier."""
     tier = tier_of(args)
@@ -108,6 +121,8 @@ def validate_launch(args: Any) -> int:
     if lacking := sorted(cards - FP8_CARDS):
         raise QuantTierError(f"{FLAG} {tier} needs FP8 tensor cores (compute capability >= 8.9: "
                              f"{', '.join(sorted(FP8_CARDS))}); --gpu names {', '.join(lacking)}")
+    if tier == TIER_ONLINE_FP8 and getattr(args, "rl_backend", None) == VERL_BACKEND:
+        raise QuantTierError(VERL_TIER1_REFUSAL)
     if tier == TIER_TRAINER_FP8:
         if not getattr(args, "rl_island_sample_role", None):
             raise QuantTierError(

@@ -184,14 +184,16 @@ def test_miles_connect_island_ray_forwards_the_ignore_list(dense):
     assert "SGLANG_FP8_IGNORED_LAYERS" in environ
 
 
-def test_verl_island_overrides_only_on_a_colocated_tier_1_island(dense):
+def test_verl_tier_1_is_refused_on_a_colocated_island_and_at_launch(dense):
     from yeto.rl.adapters.verl.island_entry import rollout_quant_overrides
 
     assert rollout_quant_overrides(0, dense, colocated=True) == ([], {"tier": 0, "name": "bf16"})
     assert rollout_quant_overrides(1, dense, colocated=False)[0] == []
-    overrides, summary = rollout_quant_overrides(1, dense, colocated=True)
-    assert overrides[0] == "actor_rollout_ref.rollout.quantization=fp8"
-    assert summary["quantized_modules"] == 6 and summary["kind"] == "dense"
+    with pytest.raises(SystemExit, match="not available on verl"):
+        rollout_quant_overrides(1, dense, colocated=True)
+    with pytest.raises(tiers.QuantTierError, match="not available on verl"):
+        tiers.validate_launch(_args(rl_backend="verl"))
+    assert tiers.validate_launch(_args(rl_backend="miles")) == 1
 
 
 # ---------------------------------------------------------------- tier 2 layout and conversion

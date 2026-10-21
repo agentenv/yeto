@@ -96,6 +96,26 @@ def gate(run: str, cfg: dict) -> dict:
         began = time.time()
         quant = quant_tier.apply(spec, work_dir=Path("/tmp/e6-quant"))
         meta["prepare_s"] = round(time.time() - began, 1)
+        if cfg.get("variant") == "miles-native-block":
+            # Miles' own FP8 path: every decoder linear (attention + FFN) block-quantized
+            # 128x128 by Miles' converter (the format quantize_params_fp8 sends)
+            native = Path("/tmp/e6-quant/miles-fp8-block")
+            subprocess.run([sys.executable, "/root/miles/tools/convert_hf_to_fp8.py", "--model-dir", base,
+                            "--save-dir", str(native), "--strategy", "block", "--block-size", "128", "128"],
+                           check=True, cwd="/root/miles", stdout=subprocess.DEVNULL)
+            from yeto.rl.engine.sampler_checks import release_quant_format  # noqa: PLC0415
+
+            _method, fmt = release_quant_format(native)
+            (out / "quant-config.json").write_text((native / "config.json").read_text())
+            quant = {"engine": {**bf16, "server": {**server, "base_dir": str(native), "precision": "fp8",
+                                                    "quant_scheme": "fp8-block-native", "expected_format": fmt}},
+                     "rollout_quant": {"variant": "miles-native-block"}}
+            meta["rollout_quant"] = quant["rollout_quant"]
+        elif cfg.get("variant") == "sglang-online-all":  # SGLang online FP8 without an ignore list
+            quant = {"engine": {**bf16, "server": {**server, "precision": "fp8",
+                                                    "extra_args": [*server["extra_args"], "--quantization", "fp8"]}},
+                     "rollout_quant": {"variant": "sglang-online-all"}}
+            meta["rollout_quant"] = quant["rollout_quant"]
         if cfg.get("bf16_kv"):  # diagnosis only: tier 1 without its FP8 KV cache
             args = list(quant["engine"]["server"]["extra_args"])
             i = args.index("--kv-cache-dtype")
@@ -137,6 +157,8 @@ def main() -> int:
     p.add_argument("--n", type=int, default=4)
     p.add_argument("--max-tokens", type=int, default=512)
     p.add_argument("--timeout-s", type=int, default=3000)
+    p.add_argument("--variant", choices=("miles-native-block", "sglang-online-all"), default=None,
+                   help="framework-native FP8 instead of the tier (with --tier 0)")
     p.add_argument("--bf16-kv", action="store_true", help="diagnosis: drop the tier 1 FP8 KV cache flag")
     p.add_argument("--sglang-cast-overlay", action="store_true",
                    help="patch the SGLang fork's FP8 activation cast in the image (sglang_fp8_cast_overlay.py)")
@@ -150,7 +172,7 @@ def main() -> int:
 
     cloudpickle.register_pickle_by_value(sys.modules[__name__])
     cfg = {"tier": a.tier, "prompts": a.prompts, "n": a.n, "max_tokens": a.max_tokens, "timeout_s": a.timeout_s,
-           "sglang_cast_overlay": a.sglang_cast_overlay, "bf16_kv": a.bf16_kv}
+           "sglang_cast_overlay": a.sglang_cast_overlay, "bf16_kv": a.bf16_kv, "variant": a.variant}
     image = (modal.Image.from_registry(MILES_NEXT_IMAGE.removeprefix("docker:"))
              .env({"HOME": "/root", "PYTHONUNBUFFERED": "1"}))
     if a.sglang_cast_overlay:  # sglang_fp8_cast_overlay.py (the fork casts BF16 activations to FP8)

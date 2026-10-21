@@ -323,6 +323,7 @@ def main(argv=None) -> int:
         # fully_async_plan (lower > 0 warns there, D3); the sync path keeps its check.
         tis_lower=0.0 if limit else algo.get("tis_lower", 0.0), tis_upper=algo["tis_upper"],
         gpu_memory_utilization=float(os.environ.get("YETO_VERL_GPU_MEM", "0.5")),
+        max_model_len=max_prompt + args.rollout_max_response_len,
         reward_path=str(Path(__file__).with_name("reward_fn.py")),
         reward_name=function_for(args.reward_function), chat_template_kwargs=chat,
         experiment_name=f"yeto-verl-{lid}")
@@ -348,8 +349,6 @@ def main(argv=None) -> int:
     quant_overrides, quant_summary = rollout_quant_overrides(
         args.rl_rollout_quant_tier, Path(model_path), colocated=buffer_section is None)
     overrides += quant_overrides
-    if quant_overrides:
-        asserted_keys = (*asserted_keys, "actor_rollout_ref.rollout.quantization")
     if limit:  # agentic-rollout-utilization 6.4b: fully_async path
         overrides, asserted_keys = fully_async_plan(limit, overrides, spec_dict, args, sync)
         append_correction_record(args, spec_dict)
@@ -415,23 +414,18 @@ def main(argv=None) -> int:
 
 
 def rollout_quant_overrides(tier: int, model_path: Path, *, colocated: bool) -> tuple[list[str], dict]:
-    """S26 E6: the vLLM overrides of rollout quantization tier 1 on a colocated island, and the
-    plan record. Tier 1 is checked against the checkpoint first (scope rule; refused with
-    SystemExit before verl starts). On a buffer trainer the rollout runs on the sampler
-    island, so no override is added; tier 2 starts the releaser instead."""
+    """S26 E6: rollout quantization on a verl island; returns the vLLM overrides (none) and
+    the plan record. Tier 1 on a colocated island is refused before verl starts
+    (``tiers.VERL_TIER1_REFUSAL``: LoRA syncs never re-quantize the base). On a buffer
+    trainer the rollout runs on the sampler island, so nothing is added; tier 2 starts
+    the releaser instead. ``model_path`` is kept for the tier 1 plan once a full-parameter
+    verl path exists (``tiers.vllm_online_overrides``)."""
     from yeto.rl.quant import tiers
-    from yeto.rl.quant.scope import QuantScopeError
 
     summary: dict = {"tier": tier, "name": tiers.TIER_NAMES[tier]}
-    if tier != tiers.TIER_ONLINE_FP8 or not colocated:
-        return [], summary
-    try:
-        plan = tiers.online_plan(model_path)
-    except QuantScopeError as error:
-        raise SystemExit(f"[yeto-verl] {error}") from None
-    summary.update(plan.summary())
-    print(f"[yeto-verl] {tiers.describe(tier)}: {json.dumps(plan.summary())}", flush=True)
-    return tiers.vllm_online_overrides(plan, tiers.num_hidden_layers(model_path)), summary
+    if tier == tiers.TIER_ONLINE_FP8 and colocated:
+        raise SystemExit(f"[yeto-verl] {tiers.VERL_TIER1_REFUSAL}")
+    return [], summary
 
 
 def start_trainer_releaser(buffer_section: dict | None, base_dir: Path, template_dir: Path,
