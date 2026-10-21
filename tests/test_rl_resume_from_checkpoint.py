@@ -774,3 +774,32 @@ def test_prune_keeps_a_cut_newer_than_every_kept_one(tmp_path):
     assert sorted(deleted) == [f"{rs.ROUND_CUTS}/r000001-aa", f"{rs.ROUND_CUTS}/r000002-aa",
                                f"{rs.STATE_DIR}/00000001"]
     assert sorted(p.name for p in (root / rs.ROUND_CUTS).iterdir()) == ["r000004-aa", "r000006-aa"]
+
+
+def test_a_prepared_cut_skipped_while_committing_is_collected_at_the_next_cut(tmp_path):
+    """E1: the safe point does not wait for the trainer writer of a prepared cut it
+    skips (busy commit); the next cut collects that writer and drops its files."""
+    import threading
+
+    from yeto.rl.engine.cut import cut_dir
+
+    store = _store(tmp_path / "store", _Vol())
+    rank, driver, trainer, cp, first = _island_with_first_cut(tmp_path, store)
+    driver._trainer_offloaded = True
+    state = SimpleNamespace(policy_version=2, policy_tensor_hash=lambda: _hash(rank))
+    assert cp.prepare(driver, rollout_id=2, state=state) is True
+    gate = threading.Event()
+    busy = threading.Thread(target=gate.wait, daemon=True)
+    busy.start()
+    cp._commit = (busy, {"cut_id": first["cut_id"]})
+    _publish(driver, 2, _hash(rank))
+    assert cp.save(driver, rollout_id=2) is None and driver.events[-1][0] == "rl_cut_skipped"
+    assert trainer.calls == ["start_cut"]  # the skipped cut's writer is not waited for
+    skipped = cut_dir(cp.root, cp._cut_id(2))
+    gate.set()
+    busy.join()
+    info = cp.save(driver, rollout_id=2, final=True)
+    # the skipped writer is collected first, then the final cut is taken afresh
+    assert trainer.calls[:2] == ["start_cut", "finish_cut"] and cp._abandoned == []
+    assert info["store_commit"] == "inline" and info["cut_id"] == skipped.name
+    assert rs.read_latest(store.root)["cut_id"] == info["cut_id"]

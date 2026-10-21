@@ -658,14 +658,26 @@ def _capture(actor: Any, *, cut_id: str) -> dict[str, Any]:
     coord = _require(actor, backend)
     if _STEP_GRAD_NORMS or _STEP_APPLIED_LRS or _STEP_LOSSES:
         raise CutPluginError("per-step records not drained: the cut is not at an optimizer-step boundary")
+    import json
+    import time
+
+    marks = [time.monotonic()]
     named = _adapters(actor, backend)
     with torch.no_grad():
         snap = _snapshot(actor, backend, named)
+        marks.append(time.monotonic())
         rng = backend.capture_rng()
-    return {"coord": coord, "snap": snap, "rng": rng,
-            "scheduler_samples": int(actor.opt_param_scheduler.num_steps),
-            "tuning": _tuning(backend, named), "adapter_names": sorted(n for n, _ in named),
-            "resume": resume_rank_state(actor, snap["optimizer_named"])}
+    captured = {"coord": coord, "snap": snap, "rng": rng,
+                "scheduler_samples": int(actor.opt_param_scheduler.num_steps),
+                "tuning": _tuning(backend, named), "adapter_names": sorted(n for n, _ in named)}
+    marks.append(time.monotonic())
+    captured["resume"] = resume_rank_state(actor, snap["optimizer_named"])
+    marks.append(time.monotonic())
+    # E1 diagnosis: where the step-boundary capture of a cut goes (driver log only)
+    print("yeto cut capture timing " + json.dumps(dict(zip(
+        ("snapshot_s", "rng_tuning_s", "resume_state_s"),
+        (round(b - a, 3) for a, b in zip(marks, marks[1:]))))), flush=True)
+    return captured
 
 
 def _write(captured: dict[str, Any], *, directory: str, cut_id: str) -> dict[str, Any]:

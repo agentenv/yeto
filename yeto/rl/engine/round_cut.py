@@ -245,6 +245,9 @@ class RoundCutCheckpoint:
         self._deferred: dict[str, Any] | None = None
         self._commit_info: dict[str, Any] | None = None  # the running commit's cut
         self.skipped_busy = 0  # periodic cuts skipped while a commit was running
+        # E1: prepared cuts a busy commit made the safe point skip; their trainer-side
+        # writers are collected (and their files dropped) at the next cut, when done
+        self._abandoned: list[_PreparedCut] = []
 
     # ---------------------------------------------------------------- pointer
     @property
@@ -313,6 +316,7 @@ class RoundCutCheckpoint:
         import time
 
         self._prepared = None
+        self._reap_abandoned()
         if driver.published_version is None or self._skip(driver, rollout_id, final=final):
             return False
         if not final and self._commit is not None and self._commit[0].is_alive():
@@ -487,8 +491,12 @@ class RoundCutCheckpoint:
             self._abandon(prepared)
             return None
         if self._commit_busy(driver, rollout_id, final=final):
-            self._abandon(prepared)
+            # its trainer may still be writing the shards: collect them at the next
+            # cut instead of waiting for the writer here (E1: up to ~0.9 s per round)
+            if prepared is not None:
+                self._abandoned.append(prepared)
             return None
+        self._reap_abandoned()
         if int(driver.published_version) != int(rollout_id):
             self._abandon(prepared)
             raise RoundCutError(f"safe point {rollout_id} != published version {driver.published_version}")
@@ -569,6 +577,11 @@ class RoundCutCheckpoint:
         if not synced:
             info["store_error"] = sync.get("error")
         return info
+
+    def _reap_abandoned(self) -> None:
+        abandoned, self._abandoned = self._abandoned, []
+        for prepared in abandoned:
+            self._abandon(prepared)
 
     def _abandon(self, prepared: "_PreparedCut | None") -> None:
         """A prepared cut the safe point does not keep: wait for its writer, drop its files."""
