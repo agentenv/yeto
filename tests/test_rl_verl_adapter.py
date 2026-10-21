@@ -447,3 +447,12 @@ def test_verl_data_cursor_refuses_what_it_cannot_honour():
         cur.seek({"sample_offset": 2})
     with pytest.raises(RuntimeError, match="twice"):
         VerlDataCursor(trainer)
+
+
+def test_verl_refuses_expert_parallel_with_e7_reason():
+    # S26 E7: verl+EP is refused with the reason and the backend to use instead.
+    from yeto.rl.adapters.verl import run_config_rules as rules
+
+    rules.check_expert_parallel(8, 1)
+    with pytest.raises(ValueError, match="E7.*Miles"):
+        rules.check_expert_parallel(8, 8)
