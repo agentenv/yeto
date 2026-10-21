@@ -19,7 +19,7 @@ HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(cd "$HERE/../../.." && pwd)
 D=tools/probes/s26_e03
 COMMON="launch --training-mode rl --rl-engine ports --modal-gpu-exact --modal-retries 0 --modal-cpu 8 \
 --modal-tape-volume yeto-event-tapes --model Qwen/Qwen3-0.6B --model-revision c1899de289a04d12100db370d81485cdf75e47ca \
---rl-allow-local-data --data $D/gsm8k-tasks512.jsonl --reward-function yeto.rl.gsm8k_reward:score --pipeline 1 \
+--rl-allow-local-data --data data/gsm8k/gsm8k-tasks512.jsonl --reward-function yeto.rl.gsm8k_reward:score --pipeline 1 \
 --n-samples-per-prompt 8 --rollout-max-response-len 1024 --seq-len 1536 --inner-lr 1e-5 --seed ${SEED:-17} \
 --total-steps 10 --apply-chat-template-kwargs '{\"enable_thinking\": false}' --trust-remote-code \
 --rl-algorithm-spec $D/algo-tis2.json --rl-placement fixed-partition --rl-rollout-gpus 1 --cluster-prefix $P"
