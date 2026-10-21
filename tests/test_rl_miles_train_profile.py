@@ -31,8 +31,14 @@ def test_the_flag_reaches_the_launcher_args_and_the_eval_spec():
     assert spec.control_fingerprint(sp) == spec.control_fingerprint(spec.get_spec("qwen3-0.6b"))
 
 
-def test_the_flag_is_forwarded_to_the_island_and_set_on_the_miles_args():
+def test_the_flag_is_forwarded_to_the_island_and_set_on_the_miles_args(monkeypatch):
     import argparse
+
+    from yeto.rl.engine import phase_profile
+
+    # the sampler would stay on for the rest of the test process and print on every
+    # driver phase (it broke the JSON output of test_rl_reconfig_e1 in the full suite)
+    monkeypatch.setattr(phase_profile, "enable", lambda: None)
     from types import SimpleNamespace
 
     from yeto.launch import rl_ports
@@ -74,4 +80,6 @@ def test_phase_profile_prints_each_finished_phase(capsys, monkeypatch):
     record = json.loads(line[len("yeto phase profile "):])
     assert record["phase"] == "train" and record["rollout_id"] == 1 and record["wall_s"] >= 0.05
     assert record["samples"] >= 1 and any("busy_driver" in label for label, _ in record["top"]), record
-    phase_profile._STATE["thread"].phase = None
+    sampler = phase_profile._STATE["thread"]
+    sampler.phase = None
+    monkeypatch.setitem(phase_profile._STATE, "thread", None)  # off for later tests
