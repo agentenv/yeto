@@ -75,3 +75,15 @@ def test_spec_maps_to_the_miles_custom_tis_path():
     assert argv[:1] == ["--use-tis"]
     assert argv[argv.index("--custom-tis-function-path") + 1] == ais.PATH
     assert argv[argv.index("--tis-clip") + 1] == "5.0"
+
+
+def test_named_mechanism_is_not_declared_on_miles_until_gpu_evidence():
+    from yeto.rl.adapters.miles.entry import MILES_DECLARED
+    from yeto.rl.algos.mismatch_correction import ADAPTIVE_TIS_PATH, selected_corrections
+    from yeto.rl.engine.algorithm import AlgorithmSpec
+
+    assert ADAPTIVE_TIS_PATH == ais.PATH
+    spec = AlgorithmSpec.from_dict({"schema": "yeto-rl-algorithm-spec-v2", "correction": {
+        "method": "custom", "function": {"path": ais.PATH}, "upper": 5.0, "lower": 0.0}})
+    assert selected_corrections(spec) == ("adaptive_tis",)
+    assert "corrections:adaptive_tis" not in MILES_DECLARED  # default off: GPU not verified
