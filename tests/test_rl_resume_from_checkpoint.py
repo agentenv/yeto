@@ -672,3 +672,20 @@ def test_background_commit_can_be_turned_off(tmp_path, monkeypatch):
     _rank, _ctl_a, driver, cp = _trained_island(tmp_path, store, 2)
     info = cp.save(driver, rollout_id=2)
     assert info["store_commit"] == "inline" and info["store_synced"] is True
+
+
+def test_cut_context_takes_the_cursor_read_with_the_in_flight_entries():
+    """E1: a rollout that keeps drawing during the cut (Miles fully_async) returns the
+    cursor read together with its entries; the context uses that one."""
+    rank = make_rank(0)
+    driver = _Driver(rank, published=2, local_step=2)
+    driver.profile = SimpleNamespace(max_policy_age=1)
+    live = {"sample_offset": 9, "epoch_id": 0, "sample_group_index": 9, "sample_index": 9}
+    with_entries = {**live, "sample_offset": 12, "sample_group_index": 12, "sample_index": 12}
+    pool = SimpleNamespace(data_cursor=lambda: dict(live), export_in_flight=lambda: {
+        "entries": [], "buffer_groups": 0, "data_cursor": dict(with_entries)})
+    source = CutSource(driver=lambda: driver, trainer=None, rollout=pool, ledger=_Ledger(2),
+                       algorithm=SimpleNamespace(sha256=lambda: "a" * 64, to_legacy_runtime_attrs=lambda: {}),
+                       backend_fingerprint="miles@0af62f4d", cut_root="", global_batch_size=ARGS.global_batch_size)
+    data = source.context("r000002-abc").data
+    assert data["sample_offset"] == 12 and data["buffer_length"] == 0

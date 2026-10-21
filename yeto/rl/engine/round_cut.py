@@ -137,6 +137,10 @@ class CutSource:
             if problems:
                 raise RebuildRefused("; ".join(problems))
             in_flight = tuple(exported["entries"])
+            if exported.get("data_cursor") is not None:
+                # read together with the entries (a rollout that draws while the
+                # cut is taken, e.g. Miles fully_async): keep cursor and entries consistent
+                data.update(exported["data_cursor"])
             data["buffer_length"] = int(exported["buffer_groups"])
             summary["carried_over"] = len(in_flight)
             summary["max_policy_age"] = limit

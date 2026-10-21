@@ -87,7 +87,7 @@ def test_an_unexposed_stale_count_is_reported_unknown(executor, caplog):
     assert "reported unknown" in caplog.text
 
 
-def test_cut_returns_every_untrained_prompt_and_stops_the_worker(executor):
+def test_cut_records_every_untrained_prompt_and_keeps_the_worker_running(executor):
     source, ledger = executor.data_source, prompts.current()
     drawn = source.get_samples(5)  # in flight / waiting in Miles' output buffer
     ledger.mark_trained(drawn[:2])  # trained this round
@@ -102,18 +102,65 @@ def test_cut_returns_every_untrained_prompt_and_stops_the_worker(executor):
         _task_of(worker), loop).result()
     try:
         exported = export_in_flight(executor)
+        # E1: the worker keeps generating ahead across the cut
+        assert executor.generate_rollout._worker is not None
+        assert not executor.generate_rollout._worker.done()
     finally:
         loop.call_soon_threadsafe(loop.stop)
 
-    assert executor.generate_rollout._worker is None  # the next call starts a fresh worker
-    assert source.offset == 5  # the cursor is not rewound: the prompts are in the buffer
-    assert sorted(g[0].group_index for g in source.buffer) == [2, 3, 4]
-    assert all(g[0].response == "" for g in source.buffer)  # reset for a fresh generation
-    assert drawn[3][0].response == "partial"  # a running task keeps its own sample
+    # the live run is untouched: same buffer, same in-flight samples
+    assert source.offset == 5 and [g[0].group_index for g in source.buffer] == [2]
+    assert drawn[3][0].response == "partial"
+    assert sorted(prompts.current().untrained) == [3, 4]
+    # the cut carries every drawn, untrained prompt, reset for a fresh generation
     assert exported["buffer_groups"] == 3
     assert sorted({e["group_id"] for e in exported["entries"]}) == ["g2", "g3", "g4"]
-    # the resumed run draws exactly the untrained prompts again
-    assert sorted(g[0].group_index for g in source.get_samples(3)) == [2, 3, 4]
+    assert all(e["engine_state"]["miles_sample"]["response"] == "" for e in exported["entries"])
+
+
+def test_cut_reads_cursor_and_prompts_on_the_worker_loop(executor):
+    """The cursor and the untrained prompts come from one read on the loop the worker
+    draws on: a draw can never fall between them."""
+    source = executor.data_source
+    for name in ("sample_offset", "epoch_id", "sample_group_index", "sample_index"):
+        setattr(source, name, 0)
+    real_get = prompts.current()._get_samples  # the unwrapped DataSource.get_samples
+
+    def get_samples(n):
+        groups = real_get(n)
+        source.sample_offset += n
+        source.sample_group_index += n
+        source.sample_index += n
+        return groups
+
+    prompts.current()._get_samples = get_samples
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    seen = []
+
+    async def drawing_worker():
+        while True:
+            source.get_samples(1)  # the ledger's wrapper (records the draw)
+            await asyncio.sleep(0)
+
+    executor.generate_rollout._worker = asyncio.run_coroutine_threadsafe(
+        _start(drawing_worker), loop).result()
+    try:
+        for _ in range(20):
+            exported = export_in_flight(executor)
+            seen.append((exported["data_cursor"]["sample_offset"], exported["buffer_groups"]))
+    finally:
+        executor.generate_rollout._worker.get_loop().call_soon_threadsafe(
+            executor.generate_rollout._worker.cancel)
+        loop.call_soon_threadsafe(loop.stop)
+    # nothing is trained: every drawn prompt is in the cut, and the cursor is just past it
+    assert all(offset == groups for offset, groups in seen)
+    assert seen[-1][0] > seen[0][0]  # the worker kept drawing between cuts
+
+
+async def _start(fn):
+    return asyncio.create_task(fn())
 
 
 async def _task_of(future):
