@@ -381,7 +381,9 @@ def yeto_miles_launcher_args(spec: EffSpec, mode: str, run_id: str) -> str:
     c = cards(mode)
     kwargs = json.dumps(spec.chat_template_kwargs) if spec.chat_template_kwargs else ""
     args = (f"launch --training-mode rl --rl-engine ports --preflight-threads off --modal-gpu-exact "
-            f"--modal-retries 0 --modal-cpu 8 --modal-memory 64 --modal-tape-volume {TAPE_VOLUME} "
+            # container resources as the bare arms' (modal_eff: 8 CPU + 48 GiB per card)
+            f"--modal-retries 0 --modal-cpu {8 * c['total']} --modal-memory {48 * c['total']} "
+            f"--modal-tape-volume {TAPE_VOLUME} "
             f"--controller local --cluster-prefix {run_id} --tuning lora --lora-r {spec.lora_r} "
             f"--rl-observe-timeline --model {spec.model} --model-revision {spec.model_revision} {DATA} "
             f"--rl-checkpoint-store modal-volume://{STORE_VOLUME}/{run_id} "
