@@ -236,3 +236,33 @@ def test_modal_harbor_layer_ships_the_layer_files_and_the_checker():
     assert calls[0][1] == (str(LAYER), image_layer.IMAGE_LAYER_DIR) and calls[0][2] == {"copy": True}
     assert calls[1][1][1] == f"{image_layer.IMAGE_DIR}/assert_image_versions.py"
     assert any("check --backend verl" in c for c in calls[2][1])
+
+
+def test_lock_takes_the_version_python_reports_for_a_package_installed_twice(tmp_path):
+    # The Miles base image has peft-0.18.1.dist-info and peft-0.20.0.dist-info (S26 agentic check);
+    # uv freeze lists both and the start check reads the first on sys.path.
+    text = MILES_BEFORE + "peft==0.18.1\npeft==0.20.0\n"
+    assert layer.duplicate_names(text) == {"peft"}
+    after = layer.resolve_duplicates(layer.parse_freeze(text), {"peft"}, version_of={"peft": "0.18.1"}.get)
+    assert after["peft"] == "0.18.1"
+    assert layer.duplicate_names(MILES_BEFORE) == set()
+
+
+def test_start_check_pins_a_local_build_and_accepts_any_build_without_one():
+    checker = _load(ASSERT_SCRIPT, "assert_image_versions")
+    import importlib.metadata as md
+
+    have = md.version("pytest")
+    for want, ok in ((have, True), (f"{have}+cu130", False)):
+        report = checker.Report()
+        checker.check_packages({"pytest": {"version": want}}, report)
+        assert (not report.failed) is ok, (want, report.rows)
+    # torch 2.13.0+cu130 against a lock of 2.13.0+cu130 (failed before: public "2.13.0" != "2.13.0+cu130")
+    report = checker.Report()
+    orig = checker.importlib.metadata.version
+    checker.importlib.metadata.version = lambda dist: "2.13.0+cu130"
+    try:
+        checker.check_packages({"torch": {"version": "2.13.0+cu130"}, "x": {"version": "2.13.0"}}, report)
+    finally:
+        checker.importlib.metadata.version = orig
+    assert not report.failed, report.rows
