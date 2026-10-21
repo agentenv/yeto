@@ -19,6 +19,7 @@ from yeto.cloud import modal_ckpt_store as mcs
 from yeto.rl.adapters.miles.rebuild_wiring import CutSource
 from yeto.rl.adapters.miles.round_cut import POINTER, RoundCutCheckpoint, RoundCutError
 from yeto.rl.engine.cut import CutError
+from yeto.rl.engine.recovery import CUT_KEY
 from yeto.rl.engine import resume as rs
 from yeto.rl.engine.bridges import LocalOnlySync
 from yeto.rl.engine.controller import STORE_MANIFEST
@@ -77,7 +78,9 @@ def _cut(cp, driver, **kw):
         return info
     done = cp.join_commit(driver)
     assert done["ok"] is True, done
-    return {**info, "store_synced": True, "cut_bytes": done["cut_bytes"]}
+    pointer = cp.pointer()
+    assert pointer["cut_id"] == info["cut_id"]
+    return {**info, "store_synced": True, "cut_bytes": done["cut_bytes"], CUT_KEY: pointer[CUT_KEY]}
 
 
 def _trained_island(tmp_path, store, rounds, *, name="a", seed=3):
