@@ -549,6 +549,51 @@ def yeto_miles_islands_launcher_args(spec: EffSpec, islands: int, run_id: str, *
     return args
 
 
+# E3 "C" sync configuration (s1-runs/s26-e3/run.sh GROUP=C): 2 fragments, fragment pipeline,
+# background checkpoint every 4 sweeps, bf16 upload, 8 adaptive WAN streams (E3d X4a/X4b)
+FULL_PARAMETER_FRAGMENTS = 2
+QWEN3_06B_LAYOUT_SHA256 = "3d5a0936038d8c9587afffc4bc043769d094695c8916ebef8696c0758d83a3b5"
+
+
+def yeto_miles_full_islands_launcher_args(spec: EffSpec, islands: int, run_id: str, *, data: str,
+                                          island_tasks: str) -> str:
+    """E11 full parameter: ``islands`` islands of 1 rollout + 1 trainer card that sync every
+    parameter through the head syncer with the E3 C configuration. The islands together
+    read the single-island arm's prompts of each round (``island_task_split``) and run its
+    Miles recipe settings; the full-parameter sweep needs policy age 0 (E3)."""
+    if spec.tuning != "full" or spec.model != "Qwen/Qwen3-0.6B":
+        raise ValueError("the full-parameter island arm is pinned to Qwen3-0.6B (layout hash)")
+    c = cards("async", spec.cards)
+    if c["total"] != 2 * islands or spec.groups_per_round % islands:
+        raise ValueError(f"{islands} islands of 2 cards need {2 * islands} cards and an equal prompt share")
+    card = {"A10G": "a10g", "H100!": "h100", "L4": "l4"}[spec.gpu]
+    frags = FULL_PARAMETER_FRAGMENTS
+    kwargs = json.dumps(spec.chat_template_kwargs) if spec.chat_template_kwargs else ""
+    args = (f"launch --controller head --syncer-region {HEAD_REGION} --on-demand --training-mode rl "
+            f"--rl-engine ports --preflight-threads wait --preflight-thread-start 2950 --modal-gpu-exact "
+            f"{gpu_name_arg(spec)}--modal-retries 0 --no-island-relaunch --modal-cpu 8 --modal-memory-gib 64 "
+            f"--cluster-prefix {run_id} --rl-observe-timeline "
+            f"--model {spec.model} --model-revision {spec.model_revision} "
+            f"--rl-allow-local-data --data {data} --rl-island-tasks {shlex.quote(island_tasks)} "
+            "--reward-function gsm8k_reward:score --pipeline 1 "
+            f"--rollout-batch-size {spec.groups_per_round // islands} "
+            f"--n-samples-per-prompt {spec.samples_per_group} "
+            f"--rollout-max-response-len {spec.max_response_len} --seq-len {spec.seq_len} "
+            f"--inner-lr {spec.lr} --seed {spec.seed} --sglang-mem-fraction-static {spec.mem_fraction} "
+            f"--gpu {','.join([f'modal:2x{card}'] * islands)} --total-steps {spec.rounds} "
+            "--no-sglang-deterministic-inference --rl-lr-schedule constant --rl-activation-recompute "
+            f"--rl-max-tokens-per-gpu {max_tokens_per_gpu(spec)} --rl-gradient-accumulation-fusion "
+            f"--trust-remote-code --rl-algorithm-spec {MILES_ALGORITHM_SPEC} "
+            f"--rl-sync-preset full-parameter --rl-parameter-layout-sha256 {QWEN3_06B_LAYOUT_SHA256} "
+            f"--fragments {frags} --rl-sync-fragment-pipeline {frags} --rl-sync-async-checkpoint "
+            f"--rl-sync-push-dtype bf16 --rl-sync-checkpoint-every {4 * frags} "
+            "--wan-streams 8 --wan-stream-schedule adaptive --wan-stall-timeout 90 "
+            "--rl-placement fixed-partition --rl-rollout-gpus 1 --rl-max-policy-age 0")
+    if kwargs:
+        args += f" --apply-chat-template-kwargs {shlex.quote(kwargs)}"
+    return args
+
+
 def island_task_split(groups_per_round: int, rounds: int, islands: int) -> dict[str, list[str]]:
     """Round-major split of the first ``rounds * groups_per_round`` rows (task ids
     ``gsm<row+1>``): island k gets the k-th equal slice of every round's prompts, so the

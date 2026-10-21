@@ -21,8 +21,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -37,24 +39,60 @@ NVML_QUERY = "timestamp,index,name,utilization.gpu,memory.used,memory.total,powe
 NVML_INTERVAL_MS = 1000
 
 
+# No-progress watchdog (E11: a hung bare verl run burned 52 min): a training step
+# line is progress; the run is killed when none arrives for STALL_S, or before the
+# first step for FIRST_STEP_S (cold start: model load, engine start, first rollout).
+# Miles logs "'train/step': N", verl "step:N -".
+PROGRESS = re.compile(r"'train/step'|\bstep:\d+ ")
+STALL_S = 900
+FIRST_STEP_S = 1800
+WATCH_POLL_S = 10
+
+
 # ====================================================================== in-container
 def _nvml(path: Path) -> subprocess.Popen:
     return subprocess.Popen(["bash", "-c", f"nvidia-smi --query-gpu={NVML_QUERY} --format=csv "
                              f"-lms {NVML_INTERVAL_MS} >> {path}"])
 
 
-def _run_logged(argv: list[str], log: Path, timeout: float, **kwargs) -> int:
+def _run_logged(argv: list[str], log: Path, timeout: float, *, watch_progress: bool = False,
+                **kwargs) -> int:
     """Run ``argv``; every output line is written to ``log`` behind ``<unix time> ``
-    (the step end times the parsers read). The process is killed at ``timeout``."""
-    deadline = time.time() + timeout
+    (the step end times the parsers read). The process is killed at ``timeout`` and,
+    with ``watch_progress``, when no step line arrives in time (``PROGRESS``)."""
+    started = time.time()
+    deadline = started + timeout
+    last_step: list[float] = []  # time of the latest step line (empty: none yet)
+    lock = threading.Lock()
     with log.open("a") as fh, subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                                errors="replace", **kwargs) as proc:
+        def note(text: str) -> None:
+            with lock:
+                fh.write(f"{time.time():.3f} [eff harness] {text}\n")
+                fh.flush()
+
+        def watch() -> None:
+            while proc.poll() is None:
+                time.sleep(WATCH_POLL_S)
+                quiet = time.time() - (last_step[-1] if last_step else started)
+                limit = STALL_S if last_step else FIRST_STEP_S
+                if quiet > limit and proc.poll() is None:
+                    note(f"killed: no training step for {quiet:.0f} s (limit {limit} s)")
+                    proc.kill()
+                    return
+
+        if watch_progress:
+            threading.Thread(target=watch, daemon=True).start()
         for line in proc.stdout:
-            fh.write(f"{time.time():.3f} {line}")
-            fh.flush()
+            if watch_progress and PROGRESS.search(line):
+                last_step.append(time.time())
+                del last_step[:-1]
+            with lock:
+                fh.write(f"{time.time():.3f} {line}")
+                fh.flush()
             if time.time() > deadline:
                 proc.kill()
-                fh.write(f"{time.time():.3f} [eff harness] killed at the {timeout:.0f} s timeout\n")
+                note(f"killed at the {timeout:.0f} s timeout")
                 break
         return proc.wait()
 
@@ -79,7 +117,7 @@ def arm(run: str, plan: dict) -> dict:
                 (eff / name).write_text(text)
             (eff / "spec.json").write_text(json.dumps(plan["spec"]))
             (out / "script.sh").write_text(plan["script"])
-            meta["rc"] = _run_logged(["bash", str(out / "script.sh")], log, budget)
+            meta["rc"] = _run_logged(["bash", str(out / "script.sh")], log, budget, watch_progress=True)
         else:
             sys.path.insert(0, mv.WORKDIR)
             env = {**mv._island_env({"gpu": plan["gpu"]}, 0), **plan.get("env", {})}
@@ -88,7 +126,7 @@ def arm(run: str, plan: dict) -> dict:
                          f"--num-gpus={plan['cards']['total']}", "--include-dashboard=false",
                          "--temp-dir=/root/eval-ray"], log, 300, env=env)
             meta["argv"] = [mv.VERL_PY, *plan["argv"]]
-            meta["rc"] = _run_logged(meta["argv"], log, budget, env=env, cwd="/root")
+            meta["rc"] = _run_logged(meta["argv"], log, budget, watch_progress=True, env=env, cwd="/root")
     except BaseException as exc:  # noqa: BLE001 - recorded, then re-raised
         meta["error"] = f"{type(exc).__name__}: {exc}"
         raise
@@ -172,6 +210,7 @@ def run_miles_launcher(plan: dict, run_dir: Path, *, dry_run: bool = False) -> d
 
     raw = run_dir / "raw"
     env = dict(os.environ, P=plan["run_id"], R=str(raw), REPO=str(miles.REPO), PY=miles.PY, SKY=miles.SKY,
+               STALL_S=str(STALL_S), FIRST_STEP_S=str(FIRST_STEP_S),
                STOREVOL=miles.STORE_VOLUME, TAPEVOL=miles.TAPE_VOLUME, HARD=str(plan["spec"]["timeout_s"]),
                HOME="/home/michael", ARGS=plan["launcher_args"], ISLANDS="1")
     if dry_run:

@@ -483,3 +483,55 @@ def test_cluster_target_and_smoothing():
     assert m["reached"] and m["to_target_s"] == 130.0 and m["to_target_samples"] == 4 * 128
     assert m["to_target_gpu_h"] == pytest.approx(130 / 3600 * 4)
     assert not C.metrics(c, target=0.9, window=256, usd_per_card_hour=5.0)["reached"]
+
+
+# ---------------------------------------------------------------- E11 full parameter
+def test_e11_full_preset_runs_every_parameter_with_trainer_tp2():
+    sp = spec.get_spec("e11-qwen3-0.6b-full")
+    argv = spec.miles_bare_argv(sp, "async")
+    assert not any(a.startswith(("--lora", "--sglang-max-lora", "--target-modules")) for a in argv)
+    assert argv[argv.index("--tensor-model-parallel-size") + 1] == "2"
+    assert argv[argv.index("--rollout-num-gpus") + 1] == "2"
+    args = spec.yeto_miles_launcher_args(sp, "async", "r")
+    assert "--tuning full --tensor-parallel 2 " in args and "--lora-r" not in args
+    assert sp.samples_per_round == 256 and sp.rounds * sp.groups_per_round == sp.train_rows
+
+
+def test_tuning_fields_keep_earlier_fingerprints():
+    sp = spec.get_spec("e11-qwen3-4b")
+    assert spec.control_fingerprint(sp) == spec.control_fingerprint(
+        spec.replace(sp, tuning="lora", tensor_parallel=1))
+    assert spec.control_fingerprint(sp) != spec.control_fingerprint(spec.replace(sp, tuning="full"))
+
+
+def test_full_islands_args_use_the_e3_c_sync_and_split_each_round():
+    sp = spec.get_spec("e11-qwen3-0.6b-full")
+    args = spec.yeto_miles_full_islands_launcher_args(sp, 2, "r", data="t.jsonl", island_tasks="s.json")
+    for flag in ("--rl-sync-preset full-parameter", "--fragments 2", "--rl-sync-fragment-pipeline 2",
+                 "--rl-sync-async-checkpoint", "--rl-sync-push-dtype bf16", "--rl-sync-checkpoint-every 8",
+                 "--wan-streams 8", "--rollout-batch-size 16", "--gpu modal:2xh100,modal:2xh100",
+                 "--rl-max-policy-age 0", "--total-steps 12"):
+        assert flag in args
+    with pytest.raises(ValueError):
+        spec.yeto_miles_full_islands_launcher_args(spec.get_spec("e11-qwen3-4b"), 2, "r", data="t", island_tasks="s")
+
+
+def test_run_logged_kills_a_run_without_training_steps(tmp_path, monkeypatch):
+    from tools.eval.efficiency import modal_eff
+
+    monkeypatch.setattr(modal_eff, "WATCH_POLL_S", 0.2)
+    monkeypatch.setattr(modal_eff, "FIRST_STEP_S", 1)
+    monkeypatch.setattr(modal_eff, "STALL_S", 1)
+    log = tmp_path / "main.log"
+    script = "echo \"step 1: {'train/step': 0}\"; sleep 0.5; echo \"{'train/step': 1}\"; sleep 30"
+    rc = modal_eff._run_logged(["bash", "-c", script], log, 60, watch_progress=True)
+    assert rc != 0
+    assert "killed: no training step" in log.read_text()
+
+
+def test_run_logged_without_the_watch_waits_for_the_process(tmp_path):
+    from tools.eval.efficiency import modal_eff
+
+    log = tmp_path / "main.log"
+    assert modal_eff._run_logged(["bash", "-c", "sleep 1; echo done"], log, 60) == 0
+    assert "killed" not in log.read_text()
