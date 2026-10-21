@@ -67,6 +67,11 @@ def _wan_transport_flags(args) -> str:
     if min_up < 0 or min_down < 0:
         raise ValueError("--wan-probe-min-mbps / --wan-probe-min-down-mbps must be >= 0 (0 = off)")
     if min_up > 0 or min_down > 0:
+        if getattr(args, "rl_elastic", False):
+            # Only the legacy syncer serves MSG_BW_PROBE; on the elastic server
+            # every probe would fail and every island would be rejected.
+            raise ValueError("--wan-probe-min-mbps / --wan-probe-min-down-mbps need the "
+                             "legacy syncer; the elastic syncer has no link probe")
         mib = int(getattr(args, "wan_probe_mib", 256))
         if not 1 <= mib <= 1024:
             raise ValueError("--wan-probe-mib must be between 1 and 1024")

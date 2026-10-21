@@ -124,3 +124,27 @@ def test_rejected_link_budget_is_bounded():
     with pytest.raises(FixedRosterIslandAbandoned):
         ctl.run()
     assert ops.relaunch_calls == []
+
+
+@pytest.mark.parametrize(
+    ("up_s", "down_s", "error", "min_up", "min_down", "accepted"),
+    [
+        (1.0, 1.0, None, 100.0, 100.0, True),    # 100 MB in 1 s each way: exactly at the minimum
+        (1.0, 1.0, None, 100.1, 0.0, False),     # upload just below the minimum
+        (1.0, 4.0, None, 50.0, 50.0, False),     # fast upload, slow download
+        (1.0, 4.0, None, 50.0, 0.0, True),       # download not checked when its minimum is 0
+        (0.1, 0.1, "OSError: x", 1.0, 1.0, False),  # any stream error rejects a fast link
+    ],
+)
+def test_slow_container_decision(up_s, down_s, error, min_up, min_down, accepted):
+    result = ProbeResult(streams=8, upload_bytes=100_000_000, download_bytes=100_000_000,
+                         upload_seconds=up_s, download_seconds=down_s, error=error)
+    assert result.accepted(min_up, min_down) is accepted
+
+
+def test_probe_is_refused_with_the_elastic_syncer():
+    from yeto.launch.rl_island_task import _wan_transport_flags
+
+    with pytest.raises(ValueError, match="elastic"):
+        _wan_transport_flags(Namespace(wan_probe_min_mbps=20.0, rl_elastic=True))
+    assert _wan_transport_flags(Namespace(rl_elastic=True)) == ""  # probe off: no error
