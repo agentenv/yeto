@@ -475,7 +475,8 @@ LEAF_POLICY: dict[str, _Check] = {
     "train_memory.gradient_accumulation_fusion": _ok,
     "train_memory.optimizer_offload_fraction": _ok,
     **{f"sample_buffer.{name}": _ok
-       for name in ("role", "store", "max_backlog_groups", "wait_s", "min_round_s")},
+       for name in ("role", "store", "max_backlog_groups", "wait_s", "min_round_s",
+                    "fused_stage")},
 }
 
 
