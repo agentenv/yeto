@@ -697,3 +697,49 @@ def test_init_interrupted_by_a_redial_is_replayed_and_the_result_stays_exact(syn
         _stop(process)
     assert list(manifest.versions) == exact[1]
     assert result == exact[2]
+
+
+def test_one_socket_lost_mid_init_is_redialed_and_the_result_stays_exact(syncer_binary, tmp_path):
+    """E3c: a single data socket of learner 0's group fails between INIT of
+    fragment 0 and fragment 1 (as in s26-e3b-p06-C32a, where one connection
+    reported BrokenPipe). The client replaces the whole group, replays INIT,
+    and the final versions and bytes equal an undisturbed run."""
+    exact = _run_sweeps(syncer_binary, tmp_path, STREAMED, sweeps=3)
+    run_dir = tmp_path / "one-socket"
+    run_dir.mkdir()
+    process, port, profile_hash = _start_syncer(syncer_binary, run_dir, *STREAMED, total_steps=3)
+    client = SyncerClient(("127.0.0.1", port), 0, _layout(), dtype=DTYPE_F32, num_streams=2,
+                          connect_timeout=10, max_reconnects=5, finalization_timeout=20,
+                          syncer_profile_hash=bytes.fromhex(profile_hash))
+    broken = []
+
+    def parts_for(fid: int):
+        if fid == 1 and not broken:
+            with client._lock:
+                sock = client._socks[-1]
+            broken.append(client.connection_generation)
+            sock.shutdown(socket.SHUT_RDWR)  # one real socket dies; the others stay open
+        return [_f32(_initial_values(fid))]
+
+    try:
+        client.start()
+        client.send_initial_fragments(parts_for)
+        replays = 0
+        deadline = time.monotonic() + 60
+        while client._bcasts.qsize() < FRAGMENTS:
+            assert time.monotonic() < deadline, "initial cut never arrived"
+            client.check_health()
+            if client.init_replay_due():
+                replays += client.send_initial_fragments(parts_for)
+            time.sleep(0.02)
+        client.mark_initial_cut_received()
+        assert broken and replays >= 1 and client.connection_generation != broken[0]
+        manifest, finals = _sweep_until_final(client, sweeps=3)
+        result = {f.fragment_id: bytes(f.data) for f in finals}
+        client.acknowledge_finalization(manifest)
+        assert process.wait(timeout=15) == 0
+    finally:
+        client.close()
+        _stop(process)
+    assert list(manifest.versions) == exact[1]
+    assert result == exact[2]
