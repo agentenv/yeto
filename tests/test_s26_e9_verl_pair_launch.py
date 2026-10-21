@@ -173,7 +173,7 @@ def test_trainer_buffer_merges_named_shards(tmp_path):
     assert not plain._merge and plain._expected_shards is None
 
 
-def _group(monkeypatch, gpus, samplers, total_steps=4):
+def _group(monkeypatch, gpus, samplers, total_steps=4, scheduling="elastic"):
     """One launch of synced trainers plus sampler islands (S26 E9.4 synced group)."""
     from tests.test_rl_launcher import _Resources, _Storage, _StorageMode, _Task
     from yeto import launcher
@@ -186,7 +186,7 @@ def _group(monkeypatch, gpus, samplers, total_steps=4):
     extra = ["--rl-backend", "verl", "--rl-checkpoint-store", STORE, "--rl-max-policy-age", "2",
              "--reward-function", "gsm8k_reward:score", "--total-steps", str(total_steps),
              "--gpu", ",".join(["modal:1xa10g"] * gpus), "--rl-sample-role", "trainer",
-             "--rl-island-scheduling", "elastic"]
+             "--rl-island-scheduling", scheduling]
     for m in samplers:
         extra += ["--rl-island-sample-role", f"{m}:sampler"]
     args = _cli(tuple(extra))
@@ -223,6 +223,13 @@ def test_one_launch_starts_synced_trainers_and_their_sampler(monkeypatch):
     spec = sampler_entry.sampler_spec(s, model_path="/m", prompts_path="/p", card_model="A10G",
                                       engine_version="v", event_tape="/t")
     assert spec["num_rollouts"] == 8  # the rounds of both trainers (2 x 4)
+
+
+@pytest.mark.parametrize("scheduling", ["elastic", "legacy"])
+def test_synced_group_quorum_counts_trainers_only(monkeypatch, scheduling):
+    """e9b-sync-b: quorum 3 (every island) over --learners 2 made the syncer exit."""
+    args, learners, _ = _group(monkeypatch, 3, [2], scheduling=scheduling)
+    assert learners == 2 and args.quorum == 2
 
 
 def test_synced_group_with_two_samplers_shards_and_slots(monkeypatch):
