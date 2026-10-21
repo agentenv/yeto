@@ -27,13 +27,14 @@ FP8="--rl-rollout-quant-tier 1 --rl-rollout-quant-fp8-source trainer"
 SINGLE="$COMMON --controller local --preflight-threads off --rl-observe-timeline --gpu modal:2xh100 \
 --rl-single-island-no-sync --tuning full --modal-memory 64 --rollout-batch-size 8"
 # E3 config C (E3-REPORT.md): fragment pipeline + background checkpoint + bf16 push +
-# checkpoint every 4P, 8 WAN streams
+# checkpoint every 4P, 8 WAN streams; link probe (E3b, 2509fdef): an island below 20 MB/s
+# either way is replaced (s26-e03-L2-a: the initial broadcast stalled at ~2.6 MB/s)
 MULTI="$COMMON --controller head --syncer-region nebius/eu-north1 --preflight-threads wait \
 --preflight-thread-start 2950 --rl-stall-timeout 2400 --on-demand --modal-memory-gib 64 --no-island-relaunch \
 --gpu modal:2xh100,modal:2xh100 --rl-sync-preset full-parameter \
 --rl-parameter-layout-sha256 3d5a0936038d8c9587afffc4bc043769d094695c8916ebef8696c0758d83a3b5 --fragments 2 \
 --rl-sync-fragment-pipeline 2 --rl-sync-async-checkpoint --rl-sync-push-dtype bf16 --rl-sync-checkpoint-every 8 \
---wan-streams 8 --rl-max-policy-age 0 --rollout-batch-size 4 --rl-island-tasks 'l0=gsm1-128;l1=gsm129-256'"
+--wan-streams 8 --wan-probe-min-mbps 20 --wan-probe-min-down-mbps 20 --wan-probe-mib 128 --rl-max-policy-age 0 --rollout-batch-size 4 --rl-island-tasks 'l0=gsm1-128;l1=gsm129-256'"
 case $L in
   L0)  ARGS="$SINGLE" ;;
   L1)  ARGS="$SINGLE --rl-max-policy-age 1" ;;
