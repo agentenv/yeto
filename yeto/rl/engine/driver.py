@@ -74,6 +74,7 @@ from yeto.rl.core import (
 )
 from yeto.rl.elastic_client import LeaveReason
 
+from . import phase_profile
 from .algorithm import AlgorithmSpec
 from .capabilities import BackendTraits, EngineCapabilities
 from .execution_profile import (
@@ -480,6 +481,7 @@ class IslandDriver:
 
     def phase(self, name: str, **fields: Any) -> None:
         self._last_phase = (name, fields.get("rollout_id"))
+        phase_profile.on_phase(name, fields.get("rollout_id"))  # no-op unless --rl-profile-trainer
         if self.observe:
             self._close_span()
             self._open_span = (name, self.clock(), fields.get("rollout_id"))

@@ -49,3 +49,19 @@ def test_the_flag_is_forwarded_to_the_island_and_set_on_the_miles_args():
     miles_args = SimpleNamespace()
     island_entry.apply_ports_infra_switches(island_args, miles_args)
     assert miles_args.yeto_rl_profile_trainer is True
+
+
+def test_phase_profile_prints_each_finished_phase(capsys, monkeypatch):
+    from yeto.rl.engine import phase_profile
+
+    monkeypatch.setitem(phase_profile._STATE, "thread", None)
+    phase_profile.on_phase("train", 0)  # disabled: nothing
+    phase_profile.enable()
+    phase_profile.on_phase("train", 1)
+    time.sleep(0.05)
+    phase_profile.on_phase("sync", 1)
+    (line,) = [l for l in capsys.readouterr().out.splitlines() if l.startswith("yeto phase profile ")]
+    record = json.loads(line[len("yeto phase profile "):])
+    assert record["phase"] == "train" and record["rollout_id"] == 1 and record["wall_s"] >= 0.05
+    assert record["samples"] >= 1
+    phase_profile._STATE["thread"].phase = None
