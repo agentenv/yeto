@@ -153,6 +153,8 @@ def make_miles_island_task(
         + f" --inner-lr {args.inner_lr}"
         f" --seq-len {args.seq_len}"
         + (" --rl-activation-recompute" if getattr(args, "rl_activation_recompute", False) else "")
+        + (" --rl-gradient-accumulation-fusion"
+           if getattr(args, "rl_gradient_accumulation_fusion", False) else "")
         + (f" --rl-max-tokens-per-gpu {int(args.rl_max_tokens_per_gpu)}"
            if getattr(args, "rl_max_tokens_per_gpu", None) is not None else "")
         + (f" --rl-optimizer-offload-fraction {float(args.rl_optimizer_offload_fraction)!r}"
