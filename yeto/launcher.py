@@ -60,7 +60,7 @@ from .launch.tapes import (
 )
 from .launch.modal_islands import (
     _modal_tape_run_dir, _tail_modal, _verify_modal_app_stopped, build_modal_island_config,
-    container_set_poller_for, effective_recover_timeout, pull_modal_tapes,
+    container_log_follower_for, container_set_poller_for, effective_recover_timeout, pull_modal_tapes,
     require_modal_for_gpu_exact,
 )
 from .launch.fleet import (
@@ -184,13 +184,27 @@ def _island_task(task_factory, args, spec, m, num_learners, syncer_addr, overrid
     iargs = droppable.role_args(io.island_args(rl_island_args(args, m), m, overrides), role)
     # L5.4 pair: the island's sample role; it runs as learner 0 of 1 (no syncer).
     iargs = sample_roles.island_args(iargs, m, rl_island_count(args))
-    learner_id, island_learners = sample_roles.island_learner(args, m, num_learners)
+    learner_id, island_learners = sample_roles.island_learner(args, m, num_learners, rl_island_count(args))
     task = task_factory(iargs, spec, learner_id, island_learners, syncer_addr)
     io.apply_to_task(task, {**io.island_env(args, m, overrides),
                             **(droppable.role_env(role, spec.cloud, spec.region) if role else {}),
                             **sample_roles.island_env(iargs),
-                            **_spot_sampler_cloud_env(iargs, getattr(spec, "cloud", None))})
+                            **_spot_sampler_cloud_env(iargs, getattr(spec, "cloud", None)),
+                            **_resume_marker_env(iargs, getattr(spec, "cloud", None))})
     return task
+
+
+def _resume_marker_env(iargs, cloud: str | None) -> dict[str, str]:
+    """A resumable island on Modal (``--rl-checkpoint-store`` without
+    ``--rl-elastic``: the island's ``--rl-resume-store``): the reclaim marker path
+    (S26 E9.1). Modal signals only the container's main process (the runner), so
+    the runner writes the marker and the driver's watcher thread -- in a Ray actor
+    on verl -- writes the store's preemption notice."""
+    if cloud != "modal" or not getattr(iargs, "rl_checkpoint_store", None) or getattr(iargs, "rl_elastic", False):
+        return {}
+    from .rl.engine.sampler_resume import DEFAULT_RECLAIM_MARKER, RECLAIM_MARKER_ENV
+
+    return {RECLAIM_MARKER_ENV: DEFAULT_RECLAIM_MARKER}
 
 
 def _spot_sampler_cloud_env(iargs, cloud: str | None) -> dict[str, str]:
@@ -304,7 +318,10 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
     # counts them in --learners and its port is already public, so they
     # simply dial in with the printed join command.
     external = max(0, getattr(args, "external_learners", 0) or 0)
-    num_learners = len(specs) + external
+    from .rl.engine import sample_roles
+
+    # S26 E9.4: the sampler islands of a synced group are no learners of the syncer
+    num_learners = sample_roles.syncer_learner_count(args, len(specs)) + external
     require_modal_for_gpu_exact(args, specs)
     warn_if_model_wont_fit(args, specs)
     prefix = args.cluster_prefix
@@ -617,6 +634,17 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         container_poller = container_set_poller_for(args, modal_ops, modal_cfgs, on_container_change)
         if container_poller is not None:
             container_guards.append(container_poller)
+
+        def route_container(learner_id: int):
+            # the island of a rescheduled container's lines (unique learner id only:
+            # the islands of a pair all run as learner 0)
+            names = [n for n, cfg in modal_cfgs.items() if int(cfg.learner_id) == int(learner_id)]
+            if len(names) != 1:
+                return None
+            return names[0], (event_collectors.get(names[0]) if names[0] in echo_names else None)
+
+        # daemon threads; each container's log ends when the app stops
+        container_log_follower_for(args, modal_ops, modal_cfgs, route_container, poller=container_poller)
 
         from . import runs
         from .modal_runner import RoutingOps
@@ -990,13 +1018,15 @@ def dry_run_plan(args) -> dict:
         if rl:
             role = _island_role(args, specs, learner_id)
             task = _island_task(make_miles_island_task, args, spec, learner_id,
-                                len(specs) + external, "$SYNCER_ADDR", island_overrides, role)
+                                sample_roles.syncer_learner_count(args, len(specs)) + external,
+                                "$SYNCER_ADDR", island_overrides, role)
             if role is not None:
                 from .cloud.droppable import billing, rejoin_source
 
                 entry["island_role"] = {"role": role, "billing": billing(role),
                                         "rejoin": rejoin_source(role)}
-            if sample_roles.is_store_coupled(args):  # L5.4/L7.5: per-island role, learner 0 of 1
+            if sample_roles.is_store_coupled(args) or sample_roles.is_synced_group(args):
+                # L5.4/L7.5: per-island role, learner 0 of 1; S26 E9.4: synced group
                 entry["sample_role"] = sample_roles.island_args(
                     args, learner_id, len(specs)).rl_sample_role
             if learner_id == trainer_loop.held_island(args):
@@ -1024,7 +1054,7 @@ def dry_run_plan(args) -> dict:
         "syncer": None if no_sync else ("head VM" if head else f"{args.cluster_prefix}-syncer"),
         # P0-D8: one syncer per trainable role (actor first); none without outer sync
         "role_syncers": [] if not rl or no_sync else _dry_run_role_syncers(
-            args, len(specs) + external),
+            args, sample_roles.syncer_learner_count(args, len(specs)) + external),
         "outer_sync": not no_sync,
         # rl-trainer-start-stop L5.3b/L5.4: the head's scheduler and the island it owns
         "trainer_scheduler": (None if not trainer_loop.enabled(args) else {

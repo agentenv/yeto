@@ -10,8 +10,12 @@ used: a rank file holds exactly the train state yeto resumes, so the CPU test
 
 Rank file ``rank<NNNNN>.pt`` (``torch.save``):
 
-* ``model`` -- trainable parameters (frozen base weights are skipped: LoRA), as
-  the rank's local FSDP2 shards (``DTensor.to_local``) on CPU;
+* ``model`` -- the parameters the optimizer holds, as the rank's local FSDP2
+  shards (``DTensor.to_local``) on CPU. Frozen base weights (LoRA) and any
+  parameter outside the optimizer are skipped: verl's state dict also carries a
+  ``requires_grad`` ``lm_head.weight`` that no optimizer steps (S25 T-C4: 156 M
+  parameters, 865 MB per rank file next to ~20 M LoRA parameters); it never
+  changes, so the freshly built trainer already has it (S26 E9.2);
 * ``optim`` -- the optimizer state dict keyed by parameter name, DTensor
   entries stored as local shards; ``dtensor`` lists which entries were DTensors;
 * ``scheduler`` -- ``lr_scheduler.state_dict()``; ``rng`` -- CPU (and CUDA) RNG.
@@ -114,11 +118,24 @@ def _to_local(value: Any) -> Any:
     return value.detach().to("cpu").clone() if isinstance(value, torch.Tensor) else value
 
 
+def optimizer_names(optim_sd: Mapping[str, Any]) -> set[str]:
+    """The parameter names the optimizer holds (``get_state_dict`` writes the
+    parameter FQNs into ``param_groups[*]["params"]``)."""
+    return {str(name) for group in optim_sd.get("param_groups", []) for name in group.get("params", [])}
+
+
+def _stepped_model_state(model_sd: Mapping[str, Any], optim_sd: Mapping[str, Any]) -> dict[str, Any]:
+    """The model state dict entries of the parameters the optimizer holds."""
+    held = optimizer_names(optim_sd)
+    return {k: v for k, v in model_sd.items() if k in held}
+
+
 def _local_state(handles: TrainHandles) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
-    """(model, optim, dtensor keys): the rank's local trainable state, CPU tensors only."""
+    """(model, optim, dtensor keys): the rank's local stepped state, CPU tensors only."""
     from torch.distributed.checkpoint.state_dict import get_state_dict
 
     model_sd, optim_sd = get_state_dict(handles.module, handles.optimizer, options=_state_options())
+    model_sd = _stepped_model_state(model_sd, optim_sd)
     dtensors = sorted(f"model/{k}" for k, v in model_sd.items() if _is_dtensor(v))
     model = {k: _to_local(v) for k, v in model_sd.items()}
     state = {}
@@ -261,7 +278,8 @@ def restore_rank(handles: TrainHandles, *, directory: str, files: Sequence[Mappi
     if saved.get("schema") != RANK_FILE_SCHEMA or saved.get("cut_id") != cut_id or saved.get("rank") != rank:
         raise CutError(f"rank {rank}: {entry.path} is not this rank's file of cut {cut_id!r}")
 
-    template, _ = get_state_dict(handles.module, handles.optimizer, options=_state_options())
+    template, template_optim = get_state_dict(handles.module, handles.optimizer, options=_state_options())
+    template = _stepped_model_state(template, template_optim)
     if set(template) != set(saved["model"]):
         raise CutError(f"rank {rank}: trainable parameters differ from the cut: "
                        f"{sorted(set(template) ^ set(saved['model']))[:4]}")
@@ -478,3 +496,56 @@ class VerlCutTrainer:
         now = ResumeManifest(saved.global_step + rounds, saved.data_watermark, saved.scheduler_increment,
                              _rank_states(results))
         require_first_step(saved, now, steps=rounds, optimizer_steps=rounds * self.optimizer_steps_per_round)
+
+
+class CutPorts:
+    """The cut verbs of a verl trainer port, over :class:`VerlCutTrainer` (shared by
+    the sync path's ``VerlTrainerGroup`` and the fully_async ``FullyAsyncTrainerGroup``).
+
+    The port gives ``_cut_calls()`` (``call_workers``: ``fn(worker, *args)`` on
+    every FSDP rank) and ``_optimizer_steps_per_round()``; it calls
+    :meth:`_check_first_step_after_resume` after a train step."""
+
+    _cut_trainer: VerlCutTrainer | None = None
+
+    def _cut_calls(self) -> Callable[..., list]:
+        raise NotImplementedError
+
+    def _optimizer_steps_per_round(self) -> int:
+        raise NotImplementedError
+
+    def _cuts(self) -> VerlCutTrainer:
+        if self._cut_trainer is None:
+            self._cut_trainer = VerlCutTrainer(self._cut_calls(),
+                                               optimizer_steps_per_round=self._optimizer_steps_per_round())
+        return self._cut_trainer
+
+    def layout(self) -> dict[str, int]:
+        return self.actual_layout()
+
+    def actual_layout(self) -> dict[str, int]:
+        return common_layout(self._cut_calls()(remote_rank_layout))
+
+    def save_cut(self, *, epoch: int, context: CutContext) -> str:
+        return self._cuts().save_cut(epoch=epoch, context=context)
+
+    def restore_cut(self, cut_id: str, *, epoch: int, root: str, expect: RestoreExpectation,
+                    shared_filesystem: bool = True) -> CutManifest:
+        return self._cuts().restore_cut(cut_id, epoch=epoch, root=root, expect=expect,
+                                        shared_filesystem=shared_filesystem)
+
+    def confirm_resumed_data_cursor(self, cursor: Mapping[str, int]) -> None:
+        self._cuts().confirm_resumed_data_cursor(cursor)
+
+    def reshard_problems(self, plan: Any, **_: object) -> list[str]:
+        return ["verl FSDP2 cuts restore at the same world size only (no DP change)"]
+
+    def _check_first_step_after_resume(self, rollout_id: int, emit: Callable[..., Any]) -> None:
+        """After a train step with a gradient: the first-step check of a pending restore."""
+        if self._cut_trainer is None:
+            return
+        pending = self._cut_trainer.resume_reference is not None
+        self._cut_trainer.check_first_step(1)  # no-op unless a restore is pending; raises on a problem
+        if pending:
+            emit("rl_resume_check", rollout_id=rollout_id, check="first_step", ok=True,
+                 optimizer_steps=self._cut_trainer.optimizer_steps_per_round)

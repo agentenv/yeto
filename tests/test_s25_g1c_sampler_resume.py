@@ -150,6 +150,8 @@ def test_reclaim_marker_stops_writes_and_leaves_preempted(tmp_path):
     [tape] = (tmp_path / "tape").glob("events.*.jsonl")
     leave = [e for e in _tape(tape) if e["event"] == "rl_sampler_leave"]
     assert len(leave) == 1 and leave[0]["reason"] == "PREEMPTED"
+    # the next incarnation continues: this tape is not complete (S26 E9)
+    assert not any(e["event"] == "rl_learner_finalized" for e in _tape(tape))
 
 
 def test_caller_stop_ends_the_island_finished_and_on_event_sees_the_tape(tmp_path):
@@ -166,6 +168,9 @@ def test_caller_stop_ends_the_island_finished_and_on_event_sees_the_tape(tmp_pat
     [tape] = (tmp_path / "tape").glob("events.*.jsonl")
     assert [e["event"] for e in _tape(tape)] == [e for e, _ in seen]
     assert [f["reason"] for e, f in seen if e == "rl_sampler_leave"] == ["FINISHED"]
+    # S26 E9 G1 (e9-g1-i, launcher exit 3): a finished island's tape ends with the
+    # record the launcher requires of every island tape
+    assert seen[-1] == ("rl_learner_finalized", {"rounds": 1})
 
 
 def test_hold_after_reclaim_only_when_the_marker_is_there(tmp_path):
@@ -176,3 +181,18 @@ def test_hold_after_reclaim_only_when_the_marker_is_there(tmp_path):
     assert entry.hold_after_reclaim(env, hold_s=5.0, sleep=slept.append) is False and slept == []
     (tmp_path / "marker").write_text("{}")
     assert entry.hold_after_reclaim(env, hold_s=5.0, sleep=slept.append) is True and slept == [5.0]
+
+
+def test_a_launcher_island_tape_is_recovered_complete(tmp_path):
+    """S26 E9 G1 (e9-g1-j, exit 3): with the spec's island_id every record carries
+    it, so the launcher's tape recovery accepts the file and sees the finalized
+    record; without it the records are discarded as not island tape lines."""
+    from yeto.rl.event_echo import TapeCollector
+
+    spec = {**_spec(tmp_path, rounds=1), "island_id": 0}
+    assert entry.run(spec, resource_sampler=lambda emit: None, incarnation="aaaa0001") == 1
+    [tape] = (tmp_path / "tape").glob("events.*.jsonl")
+    assert all(r["island_id"] == 0 for r in _tape(tape))
+    collector = TapeCollector(tmp_path / "events" / "l0.jsonl", fresh=False)
+    assert collector.recover_from_file(tape) is True
+    assert collector.discarded == 0 and collector.count == len(_tape(tape))

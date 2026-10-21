@@ -218,7 +218,7 @@ class FakeBufferActor:
         return [{"applied": len(tensors)}]
 
 
-def _trainer(tmp_path, store_dir, actor, *, rounds, required, base):
+def _trainer(tmp_path, store_dir, actor, *, rounds, required, base, buffer=None):
     from yeto.rl.adapters.verl.entry import verl_capabilities
     from yeto.rl.adapters.verl.fully_async_ports import FullyAsyncIsland, FullyAsyncTrainerGroup
     from yeto.rl.adapters.verl.ports_impl import VerlPolicyState
@@ -234,8 +234,10 @@ def _trainer(tmp_path, store_dir, actor, *, rounds, required, base):
     tape = EventTape(tmp_path / "tape.jsonl", 0)
     island.emit = lambda event, **f: tape.append({"event": event, **f})
     store = CheckpointStore(store_dir)
+    if buffer is None:  # not ``or``: an empty FileSampleBuffer is falsy (len 0)
+        buffer = FileSampleBuffer(store, batch_size=1, create_index=False)
     rollout, publisher, placement = install_buffer_ports(
-        island, buffer=FileSampleBuffer(store, batch_size=1, create_index=False),
+        island, buffer=buffer,
         releases=PolicyReleaseStore(store), shape=bf.RowShape(64, 16, 0), base_dir=base,
         tokenize=lambda text: [7, 8], poll_s=0.01, wait_s=30)
     profile = far.execution_profile_for(TOLERANT, 1, groups_per_round=required, samples_per_group=2, sync="none")
@@ -353,8 +355,10 @@ def test_island_entry_plans_a_buffer_trainer_and_refuses_other_roles():
                                                 "--rl-single-island-no-sync",
                                                 "--rl-max-policy-age", "1", "--rl-sample-wait-s", "60"))
     assert section == {"store": "/s", "wait_s": 60.0, "lane": None}
+    # S26 E9.4: a sampler island runs the engine sampler (no buffer section); other roles stop
+    assert sample_buffer_section(_entry_args("--rl-sample-role", "sampler", "--rl-resume-store", "/s")) is None
     with pytest.raises(SystemExit, match="engine sampler"):
-        sample_buffer_section(_entry_args("--rl-sample-role", "sampler", "--rl-resume-store", "/s"))
+        sample_buffer_section(_entry_args("--rl-sample-role", "convertible", "--rl-resume-store", "/s"))
     with pytest.raises(SystemExit, match="max-policy-age"):
         sample_buffer_section(_entry_args("--rl-sample-role", "trainer", "--rl-resume-store", "/s"))
 
@@ -469,3 +473,83 @@ def test_a_synced_feed_reads_its_lane_translates_merged_versions_and_logs_each_r
     # a restarted island continues after the recorded cursor
     again = _synced_publisher(tmp_path, store, 1, [])[2].feed
     assert again.buffer.read_cursor == 6
+
+
+def test_two_shard_samplers_drain_their_backlog_through_the_verl_release(tmp_path):
+    """S26 E9 G1 (e9-g1-f) root cause: the verl trainer released without the per-shard
+    read positions, so a shard sampler never saw its backlog drain (stuck at the cap).
+    Two shard samplers with a 2-group cap now feed three rounds of 2 groups."""
+    from yeto.rl.engine.engine_sampler_entry import build_stores
+    from yeto.rl.engine.sample_buffer import open_trainer_buffer
+
+    store_dir = tmp_path / "store"
+    store = CheckpointStore(store_dir)
+    base, _weights = _base(tmp_path, dtype=torch.float32)
+    done, threads, events = threading.Event(), [], []
+    for sid in ("island0", "island1"):
+        releases, buffer = build_stores({"store": str(store_dir), "sampler_id": sid,
+                                         "buffer_shards": ["island0", "island1"]})
+        config = EngineSamplerConfig(sampler_id=sid, num_rollouts=40, max_backlog_groups=2,
+                                     sampling=SamplingParams(max_tokens=6, n=2), max_prompt_tokens=32, poll_s=0.01)
+        sampler = build_engine_sampler(
+            config, engine=FakeEngine(max_model_len=64), releases=releases, buffer=buffer,
+            emit=lambda n, _sid=sid, **f: events.append((_sid, n, f)),
+            prompts=lambda r, _sid=sid: [PromptItem(f"{_sid}-p{r}", f"prompt {r}", label="x")],
+            reward=lambda item, c: float(len(c.token_ids) % 2),
+            checks=PostLoadChecks(expected_expert_matrices=None, fixed_prompts=(), probe_pairs=(("Q", " 7"),)),
+            should_stop=done.is_set, sleep=lambda s: time.sleep(0.005))
+        def run(_sampler=sampler, _sid=sid):
+            try:
+                _sampler.run()
+            except BaseException as error:  # noqa: BLE001 - surfaced by the assert below
+                events.append((_sid, "crashed", {"error": repr(error)}))
+                raise
+
+        threads.append(threading.Thread(target=run, daemon=True))
+        threads[-1].start()
+    trainer_buffer = open_trainer_buffer(store, batch_size=1, create_index=False, shards=["island0", "island1"])
+    driver, _island, _publisher = _trainer(tmp_path, store_dir, FakeBufferActor(), rounds=3, required=2,
+                                           base=base, buffer=trainer_buffer)
+    try:
+        driver.run()
+    except Exception:
+        listing = sorted(str(p.relative_to(store_dir)) for p in (store_dir / "sample-buffer").rglob("*.jsonl"))
+        raise AssertionError(f"buffer {len(trainer_buffer)} shards {trainer_buffer.index.shard_names()} "
+                             f"files {listing}; "
+                             f"sampler events: {[(sid, n) for sid, n, _f in events][-20:]}; "
+                             f"crashes: {[f for _sid, n, f in events if n == 'crashed']}")
+    finally:
+        done.set()
+        for t in threads:
+            t.join(timeout=10)
+    assert driver.rounds_completed == 3
+    releases = _lines(tmp_path / "out" / RELEASE_LOG.format(learner=0))
+    shards = [r["buffer_shards"] for r in releases if r["released"]]
+    assert all(set(s) <= {"island0", "island1"} and sum(s.values()) == r["buffer_selected"]
+               for s, r in zip(shards, [r for r in releases if r["released"]]))
+    assert PolicyReleaseStore(store).latest().buffer_shards == shards[-1]
+
+
+def test_verl_buffer_trainer_ends_finished_when_the_samplers_end_early(tmp_path):
+    """S26 E9 G1 (e9-g1-h): the buffer ended with groups passed over as too old, so
+    the trainer could not fill its last round. On verl that was "rollouter ended
+    the queue" (INFRA_FAILED); it is the buffer's end: the run ends FINISHED."""
+    store_dir = tmp_path / "store"
+    store = CheckpointStore(store_dir)
+    base, _weights = _base(tmp_path, dtype=torch.float32)
+    engine = FakeEngine(max_model_len=64)
+    config = EngineSamplerConfig(sampler_id="island0", num_rollouts=4, max_backlog_groups=8,
+                                 sampling=SamplingParams(max_tokens=6, n=2), max_prompt_tokens=32, poll_s=0.01)
+    sampler = build_engine_sampler(
+        config, engine=engine, releases=PolicyReleaseStore(store), buffer=FileSampleBuffer(store, batch_size=1),
+        emit=lambda n, **f: None,
+        prompts=lambda r: [PromptItem(f"p{r}", f"prompt {r}", label="x")], reward=lambda item, c: float(len(c.token_ids) % 2),
+        checks=PostLoadChecks(expected_expert_matrices=None, fixed_prompts=(), probe_pairs=(("Q", " 7"),)),
+        should_stop=lambda: False, sleep=lambda s: time.sleep(0.005))
+    sampler.run()  # 4 groups, then the data end
+    driver, _island, _publisher = _trainer(tmp_path, store_dir, FakeBufferActor(), rounds=3, required=2, base=base)
+    driver.run()
+    assert driver.rounds_completed == 2
+    events = _lines(tmp_path / "tape.jsonl")
+    exhausted = [e for e in events if e["event"] == "rl_buffer_exhausted"]
+    assert [e["rollout_id"] for e in exhausted] == [2] and "SampleBufferExhausted" in exhausted[0]["error"]

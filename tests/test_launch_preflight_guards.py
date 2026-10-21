@@ -143,7 +143,32 @@ def test_threads_off_skips_and_warns():
     out = io.StringIO()
     rec = lp.thread_preflight(_targs(preflight_threads="off"),
                               counter=lambda: pytest.fail("off must not read"), out=out)
-    assert rec == {"mode": "off", "disabled": True} and "OFF" in out.getvalue()
+    assert rec == {"mode": "off", "disabled": True, "relaxed": {"mode": ["off", "wait"]}}
+    assert "OFF" in out.getvalue() and "RELAXED" in out.getvalue()
+
+
+def test_threads_default_is_on_and_not_relaxed():
+    out = io.StringIO()
+    rec = lp.thread_preflight(_targs(), counter=_counter([100]), out=out)
+    assert rec["mode"] == "wait" and rec["relaxed"] == {} and "RELAXED" not in out.getvalue()
+
+
+def test_threads_loosened_values_are_logged_and_recorded():
+    out = io.StringIO()
+    rec = lp.thread_preflight(_targs(preflight_thread_start=2950, preflight_thread_hard=3200),
+                              counter=_counter([2900]), out=out)
+    assert rec["relaxed"] == {"start": [2950, 2800], "hard": [3200, 3000]}
+    assert "start 2950 (default 2800)" in out.getvalue() and "hard 3200 (default 3000)" in out.getvalue()
+    # a stricter setting is not a relaxation
+    assert lp.thread_relaxations(lp.ThreadConfig(mode="error", start=100, hard=200)) == {}
+
+
+def test_eval_launch_args_keep_the_thread_preflight_on():
+    from pathlib import Path
+    from tools.eval import miles
+    root = Path(__file__).resolve().parents[1]
+    assert "--preflight-threads off" not in (root / "tools/eval/miles_head.sh").read_text()
+    assert "--preflight-threads off" not in Path(miles.__file__).read_text()
 
 
 def test_thread_message_text():

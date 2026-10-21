@@ -289,6 +289,10 @@ class _PortsStrictRuntime:
 class StrictAvgSync:
     """Strict-avg at the safe boundary: export+PUSH, wait v+1, reset-apply."""
 
+    # a strict roster has every island train every round: one island cannot end on
+    # its own when its buffer is exhausted (S26 E9.3)
+    ends_on_data_end = False
+
     def __init__(
         self,
         config: BridgeConfig,
@@ -775,6 +779,10 @@ class DualStrictAvgSync:
     raised and the island stays at the last committed round v (in memory when
     ``keep_committed``; durably through the round cut, whose critic round must
     equal the actor round, 4.3)."""
+
+    # a strict roster has every island train every round: one island cannot end on
+    # its own when its buffer is exhausted (S26 E9.3)
+    ends_on_data_end = False
 
     OUTER_SYNC_KIND = "strict"
 

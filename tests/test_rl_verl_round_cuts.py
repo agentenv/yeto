@@ -223,8 +223,8 @@ def test_resume_config_from_flags():
         round_cuts.resume_config(_args(rl_cut_every=2))
     with pytest.raises(ValueError, match="--rl-single-island-no-sync"):
         round_cuts.resume_config(_args(rl_resume_store="/s", rl_single_island_no_sync=False))
-    with pytest.raises(ValueError, match="fully_async"):
-        round_cuts.resume_config(_args(rl_resume_store="/s", rl_max_policy_age=2))
+    # S26 E9.2: the fully_async path (--rl-max-policy-age > 0) cuts too
+    assert round_cuts.resume_config(_args(rl_resume_store="/s", rl_max_policy_age=2))["store"] == "/s"
     with pytest.raises(ValueError, match="must be >= 1"):
         round_cuts.resume_config(_args(rl_resume_store="/s", rl_cut_keep=0))
 

@@ -8,6 +8,9 @@
 set -u
 : "${P:?}" "${R:?}" "${REPO:?}" "${PY:?}" "${SKY:?}"
 HARD=${HARD:-2700}; WD=$(( HARD + 300 )); STEPS=${STEPS:-4}; SROUNDS=$(( 2 * STEPS + 6 )); GPU=${GPU:-a10g}
+# launcher thread preflight stays on; loosen only with explicit flags, e.g.
+# PREFLIGHT="--preflight-thread-start 2950" (the launcher logs and records the loosened values)
+PREFLIGHT=${PREFLIGHT:-}
 SHA=${SHA:-HEAD}; MODAL="$PY -m modal"
 APP=yeto-$P; SP=$P-s; SAPP=yeto-$SP; TAPEVOL=yeto-event-tapes; STOREVOL=${STOREVOL:-yeto-eval-store}; HEAD_REGION=nebius/eu-north1
 export CARGO_HOME=/home/michael/work/gpu-default-modal/cargo RUSTUP_HOME=/home/michael/work/gpu-default-modal/rustup
@@ -30,8 +33,8 @@ LORA="--tuning lora --lora-r 16"
 MODALX="--modal-gpu-exact --modal-retries 0 --modal-cpu 8 --modal-memory 64 --modal-tape-volume $TAPEVOL"
 STORE="--rl-checkpoint-store modal-volume://$STOREVOL/$P"
 COMMON="--training-mode rl --rl-engine ports $MODALX $MODEL $DATA $LORA $STORE --rl-algorithm-spec examples/rl_algorithms/decoupled-ppo-c2.json --rl-max-policy-age 2 --rl-observe-timeline --reward-function gsm8k_reward:score --fragments 1 --pipeline 1 --rollout-batch-size 32 --n-samples-per-prompt 4 --rollout-max-response-len 1024 --seq-len 2048 --inner-lr 1e-5 --seed 17 --apply-chat-template-kwargs '{\"enable_thinking\": false}' --trust-remote-code"
-TARGS="launch --controller head --syncer-region $HEAD_REGION --preflight-threads off --rl-stall-timeout 2400 --on-demand --no-island-relaunch --modal-timeout-s $HARD --cluster-prefix $P --gpu modal:1x$GPU,modal:1x$GPU --rl-island-scheduling elastic --rl-sample-role trainer --rl-sample-wait-s 900 $COMMON --total-steps $STEPS"
-SARGS="launch --preflight-threads off --controller local --cluster-prefix $SP --gpu modal:1x$GPU --rl-single-island-no-sync --rl-sample-role sampler --rl-sampler-max-backlog-rounds 4 $COMMON --total-steps $SROUNDS"
+TARGS="launch --controller head --syncer-region $HEAD_REGION $PREFLIGHT --rl-stall-timeout 2400 --on-demand --no-island-relaunch --modal-timeout-s $HARD --cluster-prefix $P --gpu modal:1x$GPU,modal:1x$GPU --rl-island-scheduling elastic --rl-sample-role trainer --rl-sample-wait-s 900 $COMMON --total-steps $STEPS"
+SARGS="launch $PREFLIGHT --controller local --cluster-prefix $SP --gpu modal:1x$GPU --rl-single-island-no-sync --rl-sample-role sampler --rl-sampler-max-backlog-rounds 4 $COMMON --total-steps $SROUNDS"
 git -C $REPO rev-parse $SHA > $R/yeto_sha.txt; echo "$TARGS" > $R/args.txt; echo "$SARGS" > $R/sargs.txt
 echo "$APP $SAPP $HEAD_CL" > $R/resources.txt
 eval "$(/usr/bin/python3 - <<'PYC'

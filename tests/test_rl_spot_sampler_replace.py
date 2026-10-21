@@ -339,7 +339,10 @@ def test_the_island_resolves_its_sampler_id_and_the_shards():
     assert (env[br.SAMPLER_ID_ENV], env[br.SHARDS_ENV]) == ("island1", "island0,island1")
 
 
-def test_only_sampler_islands_get_the_reclaim_marker():
+def test_sampler_and_resumable_trainer_islands_get_the_reclaim_marker():
+    """S25 C1: the sampler islands; S26 E9.1: also the trainer, a resumable island on
+    Modal (--rl-checkpoint-store), whose driver turns the marker into the preemption
+    notice."""
     from yeto.gpu_spec import parse_gpu_spec
     from yeto.launch.modal_islands import build_modal_island_config
     from yeto.launcher import _island_task, make_miles_island_task
@@ -348,7 +351,7 @@ def test_only_sampler_islands_get_the_reclaim_marker():
     for m, spec in enumerate(parse_gpu_spec(args.gpu)):
         task = _island_task(make_miles_island_task, args, spec, m, 3, "none", {})
         cfg = build_modal_island_config(args, spec, m, task, "none")
-        assert (RECLAIM_MARKER_ENV in cfg.envs) == (m < 2)
+        assert RECLAIM_MARKER_ENV in cfg.envs, m
 
 
 def test_two_samplers_refuse_the_trainer_scheduler():
