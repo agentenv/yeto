@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import modal_verl as mv
+from . import spec
 from .spec import EFF_DIR, OUT_DIR
 
 HERE = Path(__file__).resolve().parent
@@ -175,6 +176,10 @@ def run_miles_launcher(plan: dict, run_dir: Path, *, dry_run: bool = False) -> d
                HOME="/home/michael", ARGS=plan["launcher_args"], ISLANDS="1")
     if dry_run:
         env["DRY"] = "1"
+    sp = spec.EffSpec(**plan["spec"])
+    if spec.uses_task_file(sp):
+        run_dir.mkdir(parents=True, exist_ok=True)
+        env["EXTRA_FILES"] = str(spec.write_task_file(sp, run_dir / spec.YETO_TASK_FILE))
     log = run_dir / ("dry-run.log" if dry_run else "driver.log")
     with log.open("w") as fh:
         rc = subprocess.run(["bash", str(miles.HERE / "miles_local.sh")], env=env, stdout=fh,

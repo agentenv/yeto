@@ -9,7 +9,8 @@
 #      ARGS (launcher args; the store is modal-volume://$STOREVOL/$P), SARGS (optional),
 #      ISLANDS (containers before the GPU lock is released), HARD (s), STOREVOL, TAPEVOL,
 #      RECLAIM_LABEL (e.g. "l0") + RECLAIM_ROUND (rollout id written before the stop),
-#      PY (python with modal + the launcher deps), DRY (non-empty: --dry-run only)
+#      PY (python with modal + the launcher deps), DRY (non-empty: --dry-run only),
+#      EXTRA_FILES (optional: files copied into the checkout root and committed)
 set -u
 : "${P:?}" "${R:?}" "${REPO:?}" "${ARGS:?}" "${STOREVOL:?}" "${PY:?}"
 HARD=${HARD:-3000}; ISLANDS=${ISLANDS:-1}; TAPEVOL=${TAPEVOL:-yeto-event-tapes}
@@ -22,7 +23,9 @@ mkdir -p $R/tapes $R/store
 # a real clone: the code pack needs a git checkout
 git clone -q --no-local $REPO $CLONE && git -C $REPO rev-parse HEAD > $R/yeto_sha.txt
 cp $REPO/yeto/rl/gsm8k_reward.py $CLONE/gsm8k_reward.py
-(cd $CLONE && git add -f gsm8k_reward.py && git -c user.email=eval@yeto -c user.name=t-eval commit -qm 'run inputs')
+# EXTRA_FILES: run inputs the launcher reads from its checkout (e.g. a local task file)
+for f in ${EXTRA_FILES:-}; do cp "$f" $CLONE/; done
+(cd $CLONE && git add -f gsm8k_reward.py $(for f in ${EXTRA_FILES:-}; do basename "$f"; done) && git -c user.email=eval@yeto -c user.name=t-eval commit -qm 'run inputs')
 eval "$(/usr/bin/python3 - <<'PYC'
 import shlex, tomllib
 t = tomllib.load(open("/home/michael/.modal.toml", "rb"))

@@ -63,6 +63,8 @@ class EffSpec:
     miles_model_args: str  # file under <MILES_ROOT>/scripts/models/ (the official model flags)
     data: str = "zhuzilin/gsm8k"
     data_revision: str = "0cbd9f31d91ac21a7613dcbc7fef992adac459ae"
+    data_file: str = ""  # one JSONL file of the dataset repo (prompt, label); "" = train/test.parquet
+    train_rows: int = 0  # keep the first rows only (0 = all); needed with data_file
     gpu: str = "A10G"  # Modal GPU type, the same for every arm
     rounds: int = 8  # optimizer steps (= policy versions) per run
     groups_per_round: int = 8  # prompts per step
@@ -111,12 +113,16 @@ PRESETS: dict[str, EffSpec] = {
         model_revision="cdbee75f17c01a7cc42f958dc650907174af0554", miles_model_args="qwen3-4B-Instruct-2507.py",
         gpu="H100!", rounds=20, groups_per_round=32, samples_per_group=8, max_prompt_len=512,
         max_response_len=1024, lora_r=64, mem_fraction=0.6, timeout_s=5400),
-    # E11 (whole cluster): the E0.2 spec on 4 cards; async (2 rollout + 2 trainer, or 2
-    # islands of 1 + 1), so the 2-island yeto arm and the single-island arms share one shape
+    # E11 (whole cluster): the E0.2 model and hyperparameters on 4 cards; async (2 rollout +
+    # 2 trainer, or 2 islands of 1 + 1), so the 2-island yeto arm and the single-island arms
+    # share one shape. Data: DAPO-Math-17k (gsm8k is saturated for this model: reward 0.97
+    # in round 1 of e02-bare-verl-sync-1), the first rounds x groups rows (one epoch).
     "e11-qwen3-4b": EffSpec(
         name="e11-qwen3-4b", model="Qwen/Qwen3-4B-Instruct-2507",
         model_revision="cdbee75f17c01a7cc42f958dc650907174af0554", miles_model_args="qwen3-4B-Instruct-2507.py",
-        gpu="H100!", rounds=20, groups_per_round=32, samples_per_group=8, max_prompt_len=512,
+        data="zhuzilin/dapo-math-17k", data_revision="2e65612930298bde4c5d58fd97b3f23a483aaff9",
+        data_file="dapo-math-17k.jsonl", train_rows=12 * 32,
+        gpu="H100!", rounds=12, groups_per_round=32, samples_per_group=8, max_prompt_len=512,
         max_response_len=1024, lora_r=64, mem_fraction=0.6, timeout_s=5400, cards=4),
 }
 
@@ -166,8 +172,9 @@ def control_fingerprint(spec: EffSpec) -> str:
     """sha256 over every shared value except the repeat count (a report refuses
     to compare runs whose fingerprints differ)."""
     doc = {k: v for k, v in spec.to_dict().items() if k not in ("repeats", "timeout_s", "checkpoint")}
-    if not spec.cards:
-        doc.pop("cards")  # the E0 shape: fingerprints from before the field existed stay valid
+    for key in ("cards", "data_file", "train_rows"):  # fields added after E0.1: a default value
+        if not doc[key]:                               # keeps the fingerprints of earlier runs valid
+            doc.pop(key)
     return hashlib.sha256(json.dumps(doc, sort_keys=True).encode()).hexdigest()
 
 
@@ -361,6 +368,8 @@ ALGORITHM_SPEC = "examples/rl_algorithms/decoupled-ppo-c2.json"  # token TIS 2.0
 MILES_ALGORITHM_SPEC = "tools/eval/efficiency/algo-eff-miles.json"
 def yeto_verl_argv(spec: EffSpec, mode: str, tape: str) -> list[str]:
     """``island_entry`` arguments of the yeto+verl arm (the T-EVAL E1 shape)."""
+    if uses_task_file(spec):
+        raise ValueError("the yeto+verl arm reads --data from the Hub; it has no task-file path")
     argv = ["-m", "yeto.rl.adapters.verl.island_entry", "--model", spec.model, "--model-revision",
             spec.model_revision, "--data", spec.data, "--data-revision", spec.data_revision, "--learner-id", "0",
             "--reward-function", "gsm8k_reward:score", "--global-rounds", str(spec.rounds),
@@ -403,7 +412,7 @@ def gpu_name_arg(spec: EffSpec) -> str:
 
 def yeto_miles_launcher_args(spec: EffSpec, mode: str, run_id: str) -> str:
     """The yeto launcher arguments of the yeto+Miles arm (``tools/eval/miles_local.sh`` ARGS)."""
-    from ..miles import DATA, STORE_VOLUME, TAPE_VOLUME
+    from ..miles import STORE_VOLUME, TAPE_VOLUME
 
     card = {"A10G": "a10g", "H100!": "h100", "L4": "l4"}[spec.gpu]
     c = cards(mode, spec.cards)
@@ -414,7 +423,7 @@ def yeto_miles_launcher_args(spec: EffSpec, mode: str, run_id: str) -> str:
             f"--modal-retries 0 --modal-cpu {8 * c['total']} --modal-memory {48 * c['total']} "
             f"--modal-tape-volume {TAPE_VOLUME} "
             f"--controller local --cluster-prefix {run_id} --tuning lora --lora-r {spec.lora_r} "
-            f"--rl-observe-timeline --model {spec.model} --model-revision {spec.model_revision} {DATA} "
+            f"--rl-observe-timeline --model {spec.model} --model-revision {spec.model_revision} {_yeto_data(spec)} "
             f"--rl-checkpoint-store modal-volume://{STORE_VOLUME}/{run_id} "
             f"--rl-cut-every {cut_every(spec)} "
             "--reward-function gsm8k_reward:score --fragments 1 --pipeline 1 "
@@ -434,9 +443,36 @@ def yeto_miles_launcher_args(spec: EffSpec, mode: str, run_id: str) -> str:
     if mode == "async":
         args += (f" --rl-placement fixed-partition --rl-rollout-gpus {c['rollout']} "
                  f"--rl-max-policy-age {spec.max_policy_age}")
+    return args
+
+
+YETO_TASK_FILE = "eff-tasks.jsonl"  # the local task file in the launcher's checkout (local_task_file)
+
+
+def uses_task_file(spec: EffSpec) -> bool:
+    """The yeto+Miles arms read a local task file (eff_prep.yeto_task_rows) unless the
+    spec is the full gsm8k train split, which they read from the Hub as before."""
+    return bool(spec.data_file or spec.train_rows)
+
+
+def write_task_file(spec: EffSpec, path: Path) -> Path:
+    """Write the yeto arms' local task file (the bare arms' training rows, in order)."""
+    from huggingface_hub import hf_hub_download
+
+    from .eff_prep import yeto_task_rows
+
+    path.write_text("".join(json.dumps(r) + "\n" for r in yeto_task_rows(spec.to_dict(), hf_hub_download)))
+    return path
+
+
+def _yeto_data(spec: EffSpec) -> str:
+    from ..miles import DATA
+
+    if uses_task_file(spec):
+        return f"--rl-allow-local-data --data {YETO_TASK_FILE}"
     if spec.data != "zhuzilin/gsm8k" or spec.data_revision not in DATA:
         raise ValueError("the yeto+Miles arm reads tools.eval.miles.DATA; keep the spec's data equal to it")
-    return args
+    return DATA
 
 
 HEAD_REGION = "nebius/eu-north1"  # the multi-island syncer head: a CPU-only Nebius VM

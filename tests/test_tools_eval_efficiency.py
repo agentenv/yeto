@@ -435,3 +435,37 @@ def test_cards_whole_cluster_split():
     assert S.control_fingerprint(base) != S.control_fingerprint(S.get_spec("qwen3-4b-instruct-2507", cards=4))
     plan = S.plan(S.get_spec("qwen3-4b-instruct-2507", cards=4), "bare-miles-async", "e11-x")
     assert "--rollout-num-gpus 2" in plan["script"] and "--actor-num-gpus-per-node 2" in plan["script"]
+
+
+def test_jsonl_source_rows_and_yeto_task_file(tmp_path):
+    from tools.eval.efficiency import eff_prep
+
+    src = tmp_path / "d.jsonl"
+    src.write_text("".join(json.dumps({"prompt": [{"role": "user", "content": f"q{i}"}], "label": str(i)}) + "\n"
+                           for i in range(10)))
+    sp = spec.get_spec("e11-qwen3-4b", train_rows=4).to_dict()
+    rows = eff_prep.source_rows(sp, lambda *a, **k: str(src))
+    assert [lab for _, lab in rows["train"]] == ["0", "1", "2", "3"]
+    assert [lab for _, lab in rows["test"]] == [str(i) for i in range(4, 10)]
+    tasks = eff_prep.yeto_task_rows(sp, lambda *a, **k: str(src))
+    assert tasks[2] == {"messages": [{"role": "user", "content": "q2"}], "label": "2", "metadata": {"task_id": "gsm3"}}
+    with pytest.raises(ValueError):
+        eff_prep.source_rows({**sp, "train_rows": 0}, lambda *a, **k: str(src))
+
+
+def test_e11_arms_read_one_row_set():
+    e11 = spec.get_spec("e11-qwen3-4b")
+    assert e11.train_rows == e11.rounds * e11.groups_per_round
+    single = spec.yeto_miles_launcher_args(e11, "async", "e11-x")
+    assert f"--rl-allow-local-data --data {spec.YETO_TASK_FILE}" in single and "--gpu modal:4xh100" in single
+    multi = spec.yeto_miles_islands_launcher_args(e11, 2, "e11-y", data="t.jsonl", island_tasks="t.json")
+    assert "--gpu modal:2xh100,modal:2xh100" in multi and "--rollout-batch-size 16" in multi
+    assert "--rl-rollout-gpus 1" in multi and "--controller head" in multi
+    split = spec.island_task_split(e11.groups_per_round, e11.rounds, 2)
+    ids = sorted(int(t[3:]) for v in split.values() for t in v)
+    assert ids == list(range(1, e11.train_rows + 1))
+    assert split["l1"][:2] == ["gsm17", "gsm18"]
+    with pytest.raises(ValueError):
+        spec.yeto_verl_argv(e11, "async", "/t")
+    # the E0 presets keep their fingerprints (new fields at their defaults are left out)
+    assert spec.control_fingerprint(spec.get_spec("qwen3-0.6b")).startswith("59ed2ab081afb9f9")
