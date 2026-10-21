@@ -833,13 +833,15 @@ def _write_background(captured: dict[str, Any], *, directory: str, cut_id: str) 
     fails (it died, the state did not pickle, ...) this thread writes the same shard
     itself and the summary's ``writer`` says so (``mode=thread``, ``fallback``)."""
     try:
-        host = _share(_on_host(captured))
+        host = _on_host(captured)
     except CutPluginError as error:
         return {REFUSED: str(error), REFUSAL_KIND: "refused"}
     fallback = "disabled"
     if _writer_enabled():
         try:
-            result = _writer_pool().submit(_write_refusing, host, directory=directory, cut_id=cut_id).result()
+            skeleton, layout, flat = _pack(host)
+            result = _writer_pool().submit(_write_packed, skeleton, layout, flat,
+                                           directory=directory, cut_id=cut_id).result()
             return {**result, "writer": {"mode": "process"}}
         except Exception as error:  # noqa: BLE001 - fall back to this thread, say why
             _drop_writer_pool()
@@ -850,20 +852,100 @@ def _write_background(captured: dict[str, Any], *, directory: str, cut_id: str) 
             "writer": {"mode": "thread", "fallback": fallback}}
 
 
-def _share(value: Any) -> Any:
-    """``value`` with every CPU tensor moved into shared memory (in place), so the
-    writer process maps it instead of receiving a copy through the pipe."""
+_PACKED = "__yeto_packed__"
+
+
+def _pack(value: Any) -> tuple[Any, list, Any]:
+    """(skeleton, layout, flat): ``value`` with every packable CPU tensor replaced by
+    ``{_PACKED: index}`` and its bytes copied into ONE shared-memory buffer ``flat``
+    (``layout[index]`` = offset, dtype, shape). Packable: contiguous and the sole
+    owner of its whole storage, so :func:`_unpack` rebuilds a tensor that saves to
+    the same bytes. Other tensors stay in the skeleton, moved to shared memory one by
+    one. One buffer is one file descriptor to hand over: per-tensor sharing passed
+    about 400 descriptors per cut through the trainer process's resource sharer
+    while the next round trained (E1 profile run e1j-yeto-miles-async-a)."""
+    import torch
+
+    tensors: list = []
+    _collect(value, tensors)
+    owners: dict[int, int] = {}
+    for t in tensors:
+        key = t.untyped_storage().data_ptr()
+        owners[key] = owners.get(key, 0) + 1
+
+    def packable(t: Any) -> bool:
+        storage = t.untyped_storage()
+        return (t.device.type == "cpu" and t.is_contiguous() and t.storage_offset() == 0
+                and storage.nbytes() == t.numel() * t.element_size() and owners[storage.data_ptr()] == 1
+                and t.numel() > 0)
+
+    chosen = [t for t in tensors if packable(t)]
+    offsets, total = {}, 0
+    for t in chosen:
+        offsets[id(t)] = total
+        total += -(-t.numel() * t.element_size() // 64) * 64
+    flat = torch.empty(max(total, 1), dtype=torch.uint8).share_memory_()
+    layout: list = []
+
+    def walk(v: Any) -> Any:
+        if isinstance(v, torch.Tensor):
+            if id(v) not in offsets:
+                return v.share_memory_() if v.device.type == "cpu" else v
+            start, nbytes = offsets[id(v)], v.numel() * v.element_size()
+            flat[start:start + nbytes].copy_(v.reshape(-1).view(torch.uint8))
+            layout.append((start, v.dtype, tuple(v.shape)))
+            return {_PACKED: len(layout) - 1}
+        if isinstance(v, dict):
+            return {k: walk(x) for k, x in v.items()}
+        if isinstance(v, list):
+            return [walk(x) for x in v]
+        if isinstance(v, tuple):
+            return tuple(walk(x) for x in v)
+        return v
+
+    return walk(value), layout, flat
+
+
+def _collect(value: Any, out: list) -> None:
     import torch
 
     if isinstance(value, torch.Tensor):
-        return value.share_memory_() if value.device.type == "cpu" else value
-    if isinstance(value, dict):
-        return {k: _share(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_share(v) for v in value]
-    if isinstance(value, tuple):
-        return tuple(_share(v) for v in value)
-    return value
+        out.append(value)
+    elif isinstance(value, Mapping):
+        for v in value.values():
+            _collect(v, out)
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            _collect(v, out)
+
+
+def _unpack(skeleton: Any, layout: list, flat: Any) -> Any:
+    """The value :func:`_pack` packed: every packed tensor is a fresh tensor holding
+    its own copy of the bytes."""
+    import torch
+
+    def walk(v: Any) -> Any:
+        if isinstance(v, dict) and _PACKED in v and len(v) == 1:
+            start, dtype, shape = layout[v[_PACKED]]
+            numel = 1
+            for d in shape:
+                numel *= int(d)
+            nbytes = numel * torch.empty((), dtype=dtype).element_size()
+            return flat[start:start + nbytes].clone().view(dtype).view(shape)
+        if isinstance(v, dict):
+            return {k: walk(x) for k, x in v.items()}
+        if isinstance(v, list):
+            return [walk(x) for x in v]
+        if isinstance(v, tuple):
+            return tuple(walk(x) for x in v)
+        return v
+
+    return walk(skeleton)
+
+
+def _write_packed(skeleton: Any, layout: list, flat: Any, *, directory: str, cut_id: str) -> dict[str, Any]:
+    """Writer process: :func:`_write_refusing` of the unpacked state."""
+    return _write_refusing(_unpack(skeleton, layout, flat), directory=directory, cut_id=cut_id)
 
 
 def _capture(actor: Any, *, cut_id: str, device_copy: bool = False) -> dict[str, Any]:
