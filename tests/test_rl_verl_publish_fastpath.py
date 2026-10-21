@@ -107,9 +107,11 @@ def test_worker_digest_with_the_staged_export_equals_the_full_export():
     tensors, _info = pi.remote_export_lora(worker)
     specs = tuple(CanonicalTensorSpec(n, tuple(t.shape), "float32", t.numel()) for n, t in sorted(tensors.items()))
     kwargs = {**IDS, "layout_hash": canonical_layout_hash(specs), "expected_specs": specs}
-    want = digest_lora_tensors(tensors, **kwargs)
+    def untimed(raw):  # timings differ from call to call
+        return {**{k: v for k, v in raw.items() if k != "export_seconds"},
+                "digest": {k: v for k, v in raw["digest"].items() if k != "hash_seconds"}}
+
+    want = untimed(digest_lora_tensors(tensors, **kwargs))
     for _ in range(2):  # the second round reuses the worker's buffer
-        got = pi.remote_export_digest(worker, kwargs)
-        assert {k: v for k, v in got.items() if k != "export_seconds"} == \
-            {k: v for k, v in want.items() if k != "export_seconds"}
+        assert untimed(pi.remote_export_digest(worker, kwargs)) == want
     assert getattr(worker, "_yeto_digest_staging", None) is not None

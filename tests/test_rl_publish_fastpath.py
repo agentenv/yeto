@@ -284,7 +284,9 @@ def test_staged_copies_are_the_per_tensor_copies_bit_for_bit():
             assert got.dtype == torch.float32 and got.is_contiguous() and got.shape == want.shape
             assert torch.equal(got.view(torch.int32) if got.dim() else got, want.view(torch.int32) if want.dim() else want)
     kw = dict(base_model_revision=REV, lora_config_hash=CFG, layout_hash="0" * 64)
-    assert digest_canonical_tensors(staged, **kw) == digest_canonical_tensors(plain, **kw)
+    a, b = digest_canonical_tensors(staged, **kw), digest_canonical_tensors(plain, **kw)
+    assert (a.policy_tensor_hash, a.payload_hash, a.payload_bytes, a.specs) == \
+        (b.policy_tensor_hash, b.payload_hash, b.payload_bytes, b.specs)
     # the buffer is reused (and grown) by the next call; each call's values are its own
     bigger = {**_mixed_tensors(1), "e.more": torch.randn(64)}
     again = stage_f32_on_host(bigger, staging)
