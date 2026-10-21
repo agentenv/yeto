@@ -24,16 +24,18 @@ _MARKERS = ("/yeto/", "/miles/", "/ray/")
 _STATE: dict[str, Any] = {"thread": None}
 
 
-def _label(frame: Any) -> str:
-    inner = None
-    while frame is not None:
+def _label(frame: Any, depth: int = 4) -> str:
+    """The innermost ``depth`` yeto/miles/ray frames, innermost first (else the
+    innermost frame): enough of the call chain to tell who waits on what."""
+    inner, chain = None, []
+    while frame is not None and len(chain) < depth:
         name = frame.f_code.co_filename
         here = f"{name.rsplit('/', 1)[-1]}:{frame.f_code.co_name}"
         inner = inner or here
         if any(m in name for m in _MARKERS):
-            return here
+            chain.append(here)
         frame = frame.f_back
-    return inner or "?"
+    return " < ".join(chain) if chain else (inner or "?")
 
 
 class _PhaseSampler(threading.Thread):
