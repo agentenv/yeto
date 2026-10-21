@@ -361,6 +361,8 @@ class RayMetadataSink:
         self.timeout_s = timeout_s
         self._ray = ray
         self._actor = _sink_actor_class().options(name=name, get_if_exists=True).remote()
+        self._late: dict[int, dict[str, Any]] = {}
+        self._held: list[dict[str, Any]] = []
 
     @property
     def sink_spec(self) -> str:
@@ -379,10 +381,36 @@ class RayMetadataSink:
     def set_published_policies(self, policies: Mapping[str, str]) -> None:
         self._ray.get(self._actor.set_policies.remote(json.dumps(dict(policies), sort_keys=True)))
 
+    def _take_items(self) -> list[dict[str, Any]]:
+        """Every pushed record not yet taken; late round records (E1) are kept aside
+        by rollout id, the others are returned (and forgotten) in push order."""
+        from .rollout_meta_hook import LATE_META_SCHEMA
+
+        for raw in self._ray.get(self._actor.take_all.remote()):
+            item = json.loads(raw)
+            if item.get("schema") == LATE_META_SCHEMA:
+                self._late[int(item["rollout_id"])] = item
+            else:
+                self._held.append(item)
+        items, self._held = self._held, []
+        return items
+
+    def take_late(self, rollout_id: int, *, timeout_s: float | None = None) -> dict[str, Any] | None:
+        """The late record of ``rollout_id`` (the deferred cross-version estimate),
+        waiting up to ``timeout_s``; None when it did not arrive."""
+        deadline = time.monotonic() + (self.timeout_s if timeout_s is None else timeout_s)
+        while True:
+            self._held = self._take_items()  # a next round's records stay for take()
+            if rollout_id in self._late:
+                return self._late.pop(rollout_id)
+            if time.monotonic() > deadline:
+                return None
+            time.sleep(0.05)
+
     def take(self, rollout_id: int) -> dict[str, Any]:
         deadline = time.monotonic() + self.timeout_s
         while True:
-            items = [json.loads(i) for i in self._ray.get(self._actor.take_all.remote())]
+            items = self._take_items()
             main = [i for i in items if i.get("schema") != ROUND_META_SCHEMA]
             extra = [i for i in items if i.get("schema") == ROUND_META_SCHEMA]
             if items:
@@ -658,6 +686,7 @@ class MilesRolloutPool:
         self._controller = inference_controller
         self._executor = rollout_executor
         self._metadata = metadata
+        self._deferred_estimates: set[int] = set()  # E1: late cross-version estimates
         self._expected_policy = expected_policy
         self._run = (runner or LoopRunner()).run
         self._last_cursor: dict[str, int] | None = None
@@ -781,6 +810,17 @@ class MilesRolloutPool:
             raise RuntimeError("Ray actor handle %s has no __ray_call__" % type(target).__name__)
         return self._run(_awaited(remote(fn, *fn_args, **fn_kwargs)))
 
+    def late_cross_version_fraction(self, rollout_id: int) -> float | None:
+        """E1: the deferred cross-version IS estimate of ``rollout_id`` (fully_async),
+        None when the round deferred none or it did not arrive in time."""
+        take_late = getattr(self._metadata, "take_late", None)
+        if not callable(take_late) or rollout_id not in self._deferred_estimates:
+            return None
+        self._deferred_estimates.discard(rollout_id)
+        late = take_late(rollout_id)
+        value = (late or {}).get("cross_version_truncated_fraction")
+        return None if value is None else float(value)
+
     def export_in_flight(self) -> dict[str, Any]:
         """agentic-rollout-utilization 3.3 (limit > 0): the cut's in-flight
         entries (buffered groups, suspended agentic trajectories); raises when
@@ -838,6 +878,8 @@ class MilesRolloutPool:
             self._offload_after_rollout()
         try:
             payload = self._metadata.take(rollout_id)
+            if payload.get("cross_version_estimate") == "deferred":
+                self._deferred_estimates.add(int(rollout_id))
             handle = handle_from_metadata(
                 payload,
                 rollout_id=rollout_id,

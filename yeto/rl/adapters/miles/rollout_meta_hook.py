@@ -66,6 +66,9 @@ _BOUNDED_FILTER_STATE_ATTR = "_yeto_bounded_filter_state"
 # rollout's metadata by the driver-side reader, so they are never attributed
 # to the next round.
 ROUND_META_SCHEMA = "yeto-rl-round-metadata-v1"
+# E1: the cross-version IS estimate of a fully_async round, sent after the round's
+# metadata (the prefill scoring runs in the background, off the rollout's critical path)
+LATE_META_SCHEMA = "yeto-rl-late-round-metadata-v1"
 # buffer_stale_groups: groups the sample-buffer reader passed over this round
 # because they were older than max_policy_age (consumed, not trained)
 ROUND_METADATA_KEYS = frozenset({"nonzero_advantages", "buffer_stale_groups"})
@@ -385,7 +388,8 @@ def batch_summary_enabled(args: Any) -> bool:
 
 
 def build_metadata(
-    args: Any, all_samples: Iterable[Sequence[Any]], sink: str | None = None
+    args: Any, all_samples: Iterable[Sequence[Any]], sink: str | None = None, *,
+    defer_estimate: bool = False,
 ) -> dict[str, Any]:
     trained = getattr(args, _TRAINED_ATTR, None)
     if trained is None:
@@ -446,7 +450,9 @@ def build_metadata(
     if limit > 0:
         # agentic-rollout-utilization 4.1: carry-over accounting (limit > 0 only;
         # the default key set is unchanged).
-        payload.update(_timed("carry_over", carry_over_fields, args, trained_samples, sink))
+        payload.update(_timed("carry_over", carry_over_fields, args, trained_samples, sink,
+                              defer_estimate_for=rollout_id if defer_estimate and rollout_id is not None
+                              else None))
         # 5.1/5.3: agentic suspension between turns (absent when not in use)
         payload.update(_carry.suspend_fields(args, all_samples))
     if tool_wait > 0:
@@ -481,10 +487,17 @@ def build_metadata(
 
 
 def carry_over_fields(args: Any, trained_samples: Sequence[Any],
-                      sink: str | None = None, scorer: Any = None) -> dict[str, Any]:
+                      sink: str | None = None, scorer: Any = None, *,
+                      defer_estimate_for: int | None = None) -> dict[str, Any]:
     """4.1 rollout-metadata fields under a limit > 0: what the buffer filter carried
     in / discarded this round, the trained cross-version tokens and the estimated
-    cross-version IS truncated fraction (:mod:`.carry_over`)."""
+    cross-version IS truncated fraction (:mod:`.carry_over`).
+
+    ``defer_estimate_for`` (E1, a rollout id): the estimate (one prefill of every
+    cross-version sample, about 1 s on A10G) runs in a background thread and goes
+    to the sink as a :data:`LATE_META_SCHEMA` record; the fields here then say
+    ``cross_version_estimate: "deferred"``. Its only reader, the policy-age
+    governor, runs after the train step."""
     token = current_policy_token(sink)
     version = token_version(token) if token else None
     fields: dict[str, Any] = {"max_policy_age": _carry.max_policy_age(args)}
@@ -495,10 +508,29 @@ def carry_over_fields(args: Any, trained_samples: Sequence[Any],
     fields["cross_version_tokens"] = crossed
     fields["trained_response_tokens"] = total
     if crossed:
-        fields.update(_carry.estimate_cross_version_truncation(
-            args, trained_samples, version,
-            scorer if scorer is not None else _carry.router_prefill_scorer(args)))
+        scorer = scorer if scorer is not None else _carry.router_prefill_scorer(args)
+        if defer_estimate_for is None:
+            fields.update(_carry.estimate_cross_version_truncation(args, trained_samples, version, scorer))
+        else:
+            _estimate_in_background(args, list(trained_samples), version, scorer, sink,
+                                    rollout_id=int(defer_estimate_for))
+            fields["cross_version_estimate"] = "deferred"
     return fields
+
+
+def _estimate_in_background(args: Any, samples: list[Any], version: int, scorer: Any,
+                            sink: str | None, *, rollout_id: int) -> None:
+    import threading
+
+    def run() -> None:
+        try:
+            late = _carry.estimate_cross_version_truncation(args, samples, version, scorer)
+        except Exception as exc:  # noqa: BLE001 - an estimate: unknown, never guessed
+            late = {"cross_version_truncated_fraction": None,
+                    "cross_version_estimate_error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+        put_to_sink({"schema": LATE_META_SCHEMA, "rollout_id": rollout_id, **late}, sink)
+
+    threading.Thread(target=run, name=f"yeto-xv-estimate-{rollout_id}", daemon=True).start()
 
 
 # IR-3/IR-4 sample-metadata keys written by agentic generate code (codex-harness
@@ -1004,7 +1036,10 @@ def extract_rollout_metadata(
     :func:`record_trained_groups` with the trained groups)."""
 
     try:
-        payload = _timed("build", build_metadata, args, all_samples)
+        # fully_async (round_counts): the trainer is waiting for this batch; the
+        # cross-version estimate is read only after its train step (E1)
+        payload = _timed("build", build_metadata, args, all_samples,
+                         defer_estimate=round_counts is not None)
         if elastic_metadata_enabled(args):
             cursor, buffer_length = data_cursor(data_source)
             if cursor is not None:

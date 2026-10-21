@@ -1466,6 +1466,10 @@ class IslandDriver:
         raw = self.trainer.step_metrics()
         metrics = raw if isinstance(raw, TrainStepMetrics) else TrainStepMetrics(**dict(raw))
         rollout_fraction = getattr(batch, "cross_version_truncated_fraction", None)
+        late = getattr(self.rollout, "late_cross_version_fraction", None)
+        if rollout_fraction is None and callable(late):
+            # E1: estimated in the background while this step trained (Miles fully_async)
+            rollout_fraction = late(rollout_id)
         if metrics.cross_version_truncated_fraction is None and rollout_fraction is not None:
             # agentic-rollout-utilization 4.1: an engine that estimates the
             # cross-version truncation on the rollout side (Miles carry-over)
