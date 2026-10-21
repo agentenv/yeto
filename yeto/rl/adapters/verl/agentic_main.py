@@ -69,8 +69,24 @@ class _AfterImport(importlib.abc.MetaPathFinder):
         return spec
 
 
+def _log_to_stderr() -> None:
+    """yeto's warnings reach the worker log: the agentic workers had no handler that printed them
+    (agv-async-off-a: none of the per-trajectory lines appeared)."""
+    import logging
+
+    log = logging.getLogger("yeto")
+    if not any(getattr(h, "_yeto_worker", False) for h in log.handlers):
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+        handler._yeto_worker = True
+        log.addHandler(handler)
+        log.setLevel(logging.INFO)
+        log.propagate = False
+
+
 def setup_worker() -> None:
     """Ray ``worker_process_setup_hook``: register yeto_grpo once verl's core_algos loads (module doc)."""
+    _log_to_stderr()
     if ESTIMATOR_HOST in sys.modules:
         importlib.import_module(ESTIMATOR_MODULE)
         return
