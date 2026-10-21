@@ -85,6 +85,8 @@ def test_yeto_arms_use_the_same_policy_age_and_partition():
     args = spec.yeto_miles_launcher_args(SPEC, "async", "r1")
     assert "--gpu modal:2xa10g" in args and "--rl-placement fixed-partition --rl-rollout-gpus 1" in args
     assert "--gpu modal:1xa10g" in spec.yeto_miles_launcher_args(SPEC, "sync", "r1")
+    # only the final round cut, as the bare arms keep no periodic checkpoint (E1)
+    assert f"--rl-cut-every {SPEC.rounds} " in spec.yeto_miles_launcher_args(SPEC, "sync", "r1")
 
 
 # overrides yeto's verl translation sets and the bare recipe leaves at the default (or the reverse);
@@ -233,6 +235,22 @@ def test_parse_yeto_driver_phase_fallback():
     p = parse.parse_yeto(ev, mode="sync")
     assert p.rounds[0]["gen_s"] == 8.0 and p.rounds[0]["train_s"] == 3.0 and p.rounds[0]["weight_sync_s"] == 1.0
     assert "rl_driver_phase" in p.sources["gen_s"]
+
+
+def test_parse_yeto_verl_async_generation_from_rollouter_timing():
+    ev = [{"event": "rl_publication_check", "policy_version": 0,
+           "rollouter_timing": {"fully_async/rollouter/active_time": 2.75}},
+          {"event": "rl_publication_check", "policy_version": 1,
+           "rollouter_timing": {"fully_async/rollouter/active_time": 10.8}},
+          {"event": "rl_round_wall", "rollout_id": 0, "time_unix": 21.3},
+          {"event": "rl_publication_check", "policy_version": 2,
+           "rollouter_timing": {"fully_async/rollouter/active_time": 1.86}},
+          {"event": "rl_round_wall", "rollout_id": 1, "time_unix": 26.5}]
+    p = parse.parse_yeto(ev, mode="async", skip=frozenset({"gen_s"}), rollouter_gen=True)
+    assert [r["gen_s"] for r in p.rounds] == [10.8, 1.86]
+    assert p.sources["gen_s"].startswith("rl_publication_check.rollouter_timing")
+    off = parse.parse_yeto(ev, mode="async", skip=frozenset({"gen_s"}))
+    assert off.rounds[0]["gen_s"] is None
 
 
 def test_parse_nvml_both_formats():

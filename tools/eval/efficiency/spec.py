@@ -368,6 +368,10 @@ def yeto_miles_launcher_args(spec: EffSpec, mode: str, run_id: str) -> str:
             f"--controller local --cluster-prefix {run_id} --tuning lora --lora-r {spec.lora_r} "
             f"--rl-observe-timeline --model {spec.model} --model-revision {spec.model_revision} {DATA} "
             f"--rl-checkpoint-store modal-volume://{STORE_VOLUME}/{run_id} "
+            # Only the final round cut: the bare arms save no checkpoint. A periodic cut
+            # (default every round) is synchronous (~6-9 s on A10G) and stops Miles'
+            # fully_async worker, so the async arm would generate nothing ahead (E1).
+            f"--rl-cut-every {spec.rounds} "
             "--reward-function gsm8k_reward:score --fragments 1 --pipeline 1 "
             f"--rollout-batch-size {spec.groups_per_round} --n-samples-per-prompt {spec.samples_per_group} "
             f"--rollout-max-response-len {spec.max_response_len} --seq-len {spec.seq_len} "
