@@ -80,6 +80,10 @@ class EffSpec:
     repeats: int = 2  # runs per arm (range verdicts need >= 2)
     timeout_s: int = 3000
     chat_template_kwargs: dict[str, Any] = field(default_factory=dict)
+    # yeto arms only (the bare arms keep no checkpoint): "final" cuts once at the end
+    # (fair control), "every-round" is the product default (a round cut every round).
+    # Not in the control fingerprint: it does not change what the bare arms run.
+    checkpoint: str = "final"
 
     @property
     def samples_per_round(self) -> int:
@@ -145,7 +149,7 @@ def cards(mode: str) -> dict[str, int]:
 def control_fingerprint(spec: EffSpec) -> str:
     """sha256 over every shared value except the repeat count (a report refuses
     to compare runs whose fingerprints differ)."""
-    doc = {k: v for k, v in spec.to_dict().items() if k not in ("repeats", "timeout_s")}
+    doc = {k: v for k, v in spec.to_dict().items() if k not in ("repeats", "timeout_s", "checkpoint")}
     return hashlib.sha256(json.dumps(doc, sort_keys=True).encode()).hexdigest()
 
 
@@ -356,6 +360,19 @@ def yeto_verl_argv(spec: EffSpec, mode: str, tape: str) -> list[str]:
     return argv
 
 
+CHECKPOINT_MODES = ("final", "every-round")
+
+
+def cut_every(spec: EffSpec) -> int:
+    """Round-cut interval of the yeto+Miles arm: ``final`` cuts only at the end (the
+    bare arms keep no checkpoint), ``every-round`` is the product default.
+    The yeto+verl arm sets no checkpoint store and fully_async refuses cuts, so it
+    has no round cut in either mode."""
+    if spec.checkpoint not in CHECKPOINT_MODES:
+        raise ValueError(f"checkpoint must be one of {CHECKPOINT_MODES}, got {spec.checkpoint!r}")
+    return spec.rounds if spec.checkpoint == "final" else 1
+
+
 def yeto_miles_launcher_args(spec: EffSpec, mode: str, run_id: str) -> str:
     """The yeto launcher arguments of the yeto+Miles arm (``tools/eval/miles_local.sh`` ARGS)."""
     from ..miles import DATA, STORE_VOLUME, TAPE_VOLUME
@@ -368,10 +385,7 @@ def yeto_miles_launcher_args(spec: EffSpec, mode: str, run_id: str) -> str:
             f"--controller local --cluster-prefix {run_id} --tuning lora --lora-r {spec.lora_r} "
             f"--rl-observe-timeline --model {spec.model} --model-revision {spec.model_revision} {DATA} "
             f"--rl-checkpoint-store modal-volume://{STORE_VOLUME}/{run_id} "
-            # Only the final round cut: the bare arms save no checkpoint. A periodic cut
-            # (default every round) is synchronous (~6-9 s on A10G) and stops Miles'
-            # fully_async worker, so the async arm would generate nothing ahead (E1).
-            f"--rl-cut-every {spec.rounds} "
+            f"--rl-cut-every {cut_every(spec)} "
             "--reward-function gsm8k_reward:score --fragments 1 --pipeline 1 "
             f"--rollout-batch-size {spec.groups_per_round} --n-samples-per-prompt {spec.samples_per_group} "
             f"--rollout-max-response-len {spec.max_response_len} --seq-len {spec.seq_len} "

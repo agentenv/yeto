@@ -148,7 +148,7 @@ def cmd_eff_plan(args) -> int:
 def cmd_eff_run(args) -> int:
     from .efficiency import modal_eff, spec
 
-    sp = spec.get_spec(args.preset)
+    sp = spec.get_spec(args.preset, checkpoint=args.checkpoint)
     plan = spec.plan(sp, args.arm, args.run_id)
     run_dir = Path(args.out) / args.run_id
     if not args.dry_run:
@@ -227,6 +227,9 @@ def main(argv: list[str] | None = None) -> int:
     er.add_argument("--run-id", required=True)
     er.add_argument("--out", default=str(EFF_OUT))
     er.add_argument("--dry-run", action="store_true")
+    er.add_argument("--checkpoint", choices=("final", "every-round"), default="final",
+                    help="yeto+Miles round cuts: only at the end (fair control) or every round "
+                         "(product default)")
     er.set_defaults(fn=cmd_eff_run)
     eparse = sub.add_parser("eff-parse")
     eparse.add_argument("run_dir")
