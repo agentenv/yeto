@@ -20,6 +20,11 @@ session whose trainer sampling parameters differ from them is refused
 (:class:`~yeto.rl.agentic.HarnessConfigError`) instead of sampling with other
 settings than the trainer assumes.
 
+CompactionRL is refused here (S26 E9.5): a records backend built with a
+``compaction`` config writes one training sample per compaction segment, but
+a verl agent-loop sample is one token stream, so every compacted trajectory
+would be ABORTED by the join.  The recorder fails at construction instead.
+
 Miles does not use this recorder: its Harbor path records through Miles'
 own session server (GOAL §9).
 
@@ -101,6 +106,10 @@ class ProxyTokenRecorder:
                  path_secret: str | None = None) -> None:
         if path_secret is not None and len(path_secret) < MIN_SECRET_CHARS:
             raise HarnessConfigError(f"the path secret must have at least {MIN_SECRET_CHARS} characters")
+        if getattr(getattr(proxy, "backend", None), "compaction", None) is not None:
+            raise HarnessConfigError(
+                "the records proxy compacts contexts (CompactionRL segments), but a verl sample is one "
+                "token stream; CompactionRL is not supported on the Harbor path")
         self.proxy = proxy
         self.host = host
         self.port = int(port)

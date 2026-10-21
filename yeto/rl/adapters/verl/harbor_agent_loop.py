@@ -17,6 +17,10 @@ Per sample, ``run``:
    (``join_turns``: a call that does not extend the stream is ABORTED, so the
    trained tokens are always the generated ones).
 
+Calls aborted by verl's fully-async rollouter at a weight update are sent
+again after a back-off (``rollout_engine`` module doc, S26 E9.5); the trial
+keeps running, and a time limit hit after such a wait is ABORTED.
+
 ABORTED on verl: the batch has no per-sample drop, so an ABORTED sample is a
 one-token placeholder with mask 0 and reward 0, flagged in ``extra_fields``.
 It adds no policy-gradient tokens.  The ``yeto_grpo`` estimator
@@ -81,12 +85,13 @@ from yeto.rl.agentic import (
 )
 from yeto.rl.agentic.loop_local import LoopLocal
 from yeto.rl.agentic.outcome import policy_output_failure
+from yeto.rl.agentic.suspend import SuspendLedger, after_suspension
 from yeto.rl.agentic.types import TokenTurn
 from yeto.rl.engine.sampler_engine import FINISH_LENGTH
 from yeto.rl.harness.harbor import HarborHarness, HarborSettings, build_trial_config
 from yeto.rl.harness.harbor.boat_client import check_in_flight_cap
 
-from .rollout_engine import bind_rollout_client, weight_steps
+from .rollout_engine import bind_rollout_client, track_aborts, untrack_aborts, weight_steps
 from .run_config_rules import AGENTIC_ADV_ESTIMATOR as YETO_GRPO
 
 logger = logging.getLogger(__name__)
@@ -198,11 +203,18 @@ class HarborAgentLoop(AgentLoopBase):
             bind_rollout_client(recorder, client)
         session = recorder_session_id(task)
         endpoint = await recorder.open(session, sampling_params)
+        ledger = SuspendLedger(session, task_id=task.task_id)
+        tracked = track_aborts(recorder, session, ledger)
         try:
-            trajectory = await run_agent_task(task, self._harness, endpoint, _gate())
+            trajectory = await run_agent_task(task, self._harness, endpoint, _gate(),
+                                              ledger=ledger if tracked else None)
         except BaseException:
             await _close_after_error(recorder, session)
             raise
+        finally:
+            if tracked:
+                untrack_aborts(recorder, session)
+        trajectory = _after_suspension(trajectory, ledger)
         turns: Sequence[TokenTurn] = ()
         try:
             turns = await recorder.close(session)
@@ -258,6 +270,14 @@ class HarborAgentLoop(AgentLoopBase):
 def _policy_output_failure(trajectory: AgentTrajectory, turns: Sequence[TokenTurn]) -> AgentTrajectory:
     """A malformed model reply that ended the agent is a 0 reward, not ABORTED (N10.9)."""
     updated = policy_output_failure(trajectory, [t.policy_error for t in turns if t.policy_error])
+    if updated.outcome is not trajectory.outcome:
+        _gate().metrics.reclassify(trajectory.outcome, updated.outcome)
+    return updated
+
+
+def _after_suspension(trajectory: AgentTrajectory, ledger: SuspendLedger) -> AgentTrajectory:
+    """Suspension metrics; a time limit after an aborted-and-retried call is ABORTED (S26 E9.5)."""
+    updated = after_suspension(trajectory, ledger)
     if updated.outcome is not trajectory.outcome:
         _gate().metrics.reclassify(trajectory.outcome, updated.outcome)
     return updated

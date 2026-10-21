@@ -76,7 +76,13 @@ def check_compaction_launch(args, environ=None) -> None:
     """Refuse a CompactionRL launch that cannot work, before any cloud resource.
 
     No agent harness compacts rollouts (the Codex OpenEnv bridge was removed in
-    S26 E0.5).  TEST ONLY (task 6.4 G1): the synthetic two-segment reward stands
+    S26 E0.5).  The Harbor path does not produce compaction segments either
+    (S26 E9.5 decision): on Miles the session server records one stream per
+    agent session, and an agent-side compaction (Codex auto-compact) rewrites
+    the history, which the stream cannot extend; on verl the records proxy is
+    refused when it compacts (``gateway.recorder``).  So any custom agent
+    (``harbor_agent.run``) leaves ``harness_compacts`` False and a CompactionRL
+    spec is refused here, before any cloud resource.  TEST ONLY (task 6.4 G1): the synthetic two-segment reward stands
     in for a compacting harness; it is accepted only with
     ``cross_segment_per_sample`` and without a custom agent.
     """

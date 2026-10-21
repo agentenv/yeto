@@ -287,6 +287,7 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
         miles_args.save_debug_rollout_data = f"{out}/miles-rollout-{{rollout_id}}.pt"
         miles_args.save_debug_train_data = f"{out}/miles-train-{{rollout_id}}_{{rank}}.pt"
     if getattr(args, "rl_max_policy_age", 0):  # agentic-rollout-utilization 2.1
+        from .harbor_agent import AGENT_FUNCTION as HARBOR_AGENT_FUNCTION
         from .policy_age import SUPPORT, check_task
 
         SUPPORT.check(int(args.rl_max_policy_age))
@@ -294,6 +295,10 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
                    custom_generate=getattr(miles_args, "custom_generate_function_path", None),
                    custom_agent=getattr(miles_args, "custom_agent_function_path", None),
                    recompute_prefill=bool(getattr(miles_args, "recompute_logprobs_via_prefill", False)))
+        if getattr(miles_args, "custom_agent_function_path", None) == HARBOR_AGENT_FUNCTION:
+            from .harbor_agent import check_suspend_config
+
+            check_suspend_config(environ)  # S26 E9.5: stage 3 holds model calls at the gate relay
         miles_args.yeto_rl_max_policy_age = int(args.rl_max_policy_age)
     apply_sample_role(args, miles_args, environ)
     observe = bool(getattr(args, "rl_observe_timeline", False))

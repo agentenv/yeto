@@ -21,6 +21,7 @@ from typing import Protocol
 
 from .admission import AdmissionClosed, AdmissionGate
 from .outcome import WALL_CLOCK_REASON, classify
+from .suspend import SuspendLedger
 from .trust import TrustViolation
 from .types import AgentTask, AgentTrajectory, Outcome, TrialVerdict
 
@@ -38,10 +39,12 @@ class AgentHarness(Protocol):
 
 
 async def run_agent_task(task: AgentTask, harness: AgentHarness, endpoint: str,
-                         gate: AdmissionGate) -> AgentTrajectory:
+                         gate: AdmissionGate, *, ledger: SuspendLedger | None = None) -> AgentTrajectory:
+    """``ledger``: the trajectory's suspension bookkeeping (:mod:`.suspend`); the
+    wall-clock cap is extended by the time it was suspended."""
     try:
         async with gate.admit() as admission:
-            verdict, cap_reason = await _run_capped(task, harness, endpoint)
+            verdict, cap_reason = await _run_capped(task, harness, endpoint, ledger)
     except AdmissionClosed:
         trajectory = _aborted(task, "admission_draining", policy_version=None)
         gate.metrics.record_outcome(trajectory.outcome)
@@ -59,11 +62,11 @@ async def run_agent_task(task: AgentTask, harness: AgentHarness, endpoint: str,
     return trajectory
 
 
-async def _run_capped(task: AgentTask, harness: AgentHarness,
-                      endpoint: str) -> tuple[TrialVerdict | None, str]:
+async def _run_capped(task: AgentTask, harness: AgentHarness, endpoint: str,
+                      ledger: SuspendLedger | None = None) -> tuple[TrialVerdict | None, str]:
     """``(verdict, "")`` or ``(None, reason)`` for an infrastructure failure."""
     try:
-        return await asyncio.wait_for(harness.run(task, endpoint), timeout=task.budget.wall_clock_s), ""
+        return await _capped(harness.run(task, endpoint), task.budget.wall_clock_s, ledger), ""
     except asyncio.TimeoutError:
         # The harness's own agent timeout sits below this cap; reaching it means
         # the harness did not return (stuck teardown, lost sandbox), not a slow policy.
@@ -74,6 +77,32 @@ async def _run_capped(task: AgentTask, harness: AgentHarness,
     except Exception as exc:  # noqa: BLE001 - every other harness failure is infrastructure
         logger.error("agent task %s: harness failed: %r", task.task_id, exc, exc_info=True)
         return None, type(exc).__name__
+
+
+_SUSPENDED_RECHECK_S = 1.0
+
+
+async def _capped(coro, cap_s: float, ledger: SuspendLedger | None):
+    """``coro`` under a ``cap_s`` budget that does not count the ledger's suspended time."""
+    if ledger is None:
+        return await asyncio.wait_for(coro, timeout=cap_s)
+    run = asyncio.ensure_future(coro)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    try:
+        while True:
+            remaining = started + cap_s + ledger.suspended_seconds - loop.time()
+            if remaining <= 0:
+                if not ledger.waiting:
+                    raise asyncio.TimeoutError
+                remaining = _SUSPENDED_RECHECK_S  # the wait in progress is not counted yet
+            done, _ = await asyncio.wait({run}, timeout=remaining)
+            if done:
+                return run.result()
+    finally:
+        if not run.done():
+            run.cancel()
+            await asyncio.gather(run, return_exceptions=True)
 
 
 def _aborted(task: AgentTask, reason: str, *, policy_version: int | None) -> AgentTrajectory:
