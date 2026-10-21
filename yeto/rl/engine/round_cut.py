@@ -326,6 +326,12 @@ class RoundCutCheckpoint:
         the background (trainers with ``start_cut``), else the finished cut (``None``)."""
         start = getattr(self.trainer, "start_cut", None)
         if background and callable(start):
+            if self.pointer() is None:
+                # the store's first cut: until its LATEST is committed the store holds a
+                # cut and no LATEST; the mark lets a restart drop it and start at 0
+                from yeto.rl.engine.resume import mark_first_cut
+
+                mark_first_cut(self.controller.checkpoint_store, context.cut_id)
             return start(epoch=self._epoch(), context=context, background=True)
         self.trainer.save_cut(epoch=self._epoch(), context=context)
         return None
@@ -393,11 +399,11 @@ class RoundCutCheckpoint:
     def _defer(self, final: bool) -> bool:
         """Write the trainer shards and commit the store in the background: periodic
         cuts only (the final cut is complete when the run ends), and not when a sample
-        buffer commits the same store during the round (no two commits at once), and
-        not before the first cut of the store is committed (a store holding cuts but
-        no LATEST refuses to start)."""
-        return (self.background_commit and not final and self.buffer_watermark is None
-                and self.pointer() is not None)
+        buffer commits the same store during the round (no two commits at once). The
+        store's first cut is deferred too (E1: with ``--rl-cut-every`` N > 1 it falls in
+        the steady rounds); :meth:`_start` marks it first, since a store holding cuts but
+        no LATEST refuses to start unless they are all such marked first cuts."""
+        return self.background_commit and not final and self.buffer_watermark is None
 
     def _drop_unpointed(self, cut_id: str) -> None:
         import shutil
