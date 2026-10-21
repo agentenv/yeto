@@ -1,4 +1,4 @@
-"""S26 E0.3: per-round metrics of the bias-stacking ablation runs (run.sh).
+"""S26 E2 (copied from S26 E0.3 parse.py, plus fully_async staleness): per-round metrics of the bias-stacking ablation runs (run.sh).
 
 Reads YETO_RL_EVENT lines (rl_local_round, rl_round_trained) from a run's launcher log
 (single island: launch.ts.log; multi-island: launch.log pulled from the head) and prints one
@@ -98,6 +98,25 @@ def run_rounds(run: Path) -> list[dict]:
     return rounds
 
 
+STALE = re.compile(r"fully_async/(avg_staleness|max_staleness|token_weighted_staleness)'?: ([0-9.]+)")
+
+
+def staleness(run: Path) -> dict:
+    """Miles fully_async consumed-staleness metrics (one per round, in log order) and the
+    count of groups the buffer dropped as too old (generated, never trained)."""
+    out: dict = {"avg": [], "max": [], "token_weighted": [], "filtered_stale_groups": 0}
+    log = run / "launch.ts.log"
+    if not log.is_file():
+        return out
+    for line in log.read_text(errors="replace").splitlines():
+        if "Filtered stale group" in line:
+            out["filtered_stale_groups"] += 1
+        for key, value in STALE.findall(line):
+            out[{"avg_staleness": "avg", "max_staleness": "max",
+                 "token_weighted_staleness": "token_weighted"}[key]].append(float(value))
+    return out
+
+
 def layer_of(run: Path) -> str:
     m = re.match(r"s26-e(?:03|2)-(?:(v\d+)-)?(\w+?)-[a-z]$", run.name)
     return "-".join(g for g in m.groups() if g) if m else run.name
@@ -126,6 +145,7 @@ def summarize(runs: list[Path]) -> dict:
             "tis_clipfrac_max": max((r["tis_clipfrac"] or 0) for r in rounds),
             "truncated_frac_mean": _avg([r["truncated_frac"] for r in rounds]),
             "gen_tok_per_s_mean": _avg([r["gen_tok_per_s"] for r in steady]),
+            "staleness": staleness(run),
             "rounds": rounds,
         }
     for name, s in out["runs"].items():
