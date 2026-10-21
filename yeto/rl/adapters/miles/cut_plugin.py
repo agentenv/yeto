@@ -333,10 +333,12 @@ def _feed(digest: Any, value: Any) -> None:
         shape = tuple(value.shape)
         t = value.detach().to("cpu").contiguous().reshape(-1)
         digest.update(f"T{t.dtype}{shape}".encode())
-        digest.update(t.view(torch.uint8).numpy().tobytes() if t.numel() else b"")
+        # a buffer, not a bytes copy: same digest, and hashlib releases the GIL while it
+        # hashes (a background cut writer must not stall the training thread, E1)
+        digest.update(t.view(torch.uint8).numpy() if t.numel() else b"")
     elif isinstance(value, np.ndarray):
         digest.update(f"N{value.dtype}{value.shape}".encode())
-        digest.update(np.ascontiguousarray(value).tobytes())
+        digest.update(np.ascontiguousarray(value).view(np.uint8) if value.size else b"")
     elif isinstance(value, Mapping):
         digest.update(b"{")
         for key in sorted(value, key=repr):
