@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import secrets
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -59,7 +60,7 @@ def _is_stream(body: bytes) -> bool:
 class GateRelay:
     """Forwarding relay in front of the session server (module doc)."""
 
-    def __init__(self, gate: TurnGate, *, host: str = "127.0.0.1", port: int = 0,
+    def __init__(self, gate: TurnGate, *, host: str = "127.0.0.1", port: int | Sequence[int] = 0,
                  public_host: str | None = None, public_base: str | None = None,
                  path_secret: str | None = None, retry_statuses: tuple[int, ...] = (503,),
                  max_retries: int = 3, keepalive_s: float = 15.0, timeout_s: float = 3600.0) -> None:
@@ -68,7 +69,15 @@ class GateRelay:
         if max_retries < 0 or keepalive_s <= 0:
             raise RelayError("max_retries must be >= 0 and keepalive_s > 0")
         self.gate = gate
-        self.host, self.port = host, int(port)
+        # Several rollout processes on one machine share a port range: each binds
+        # the first free port of ``port`` (a sequence); 0 = any free port.
+        self.host = host
+        self.ports = (int(port),) if isinstance(port, int) else tuple(int(p) for p in port)
+        if not self.ports:
+            raise RelayError("no relay port given")
+        if public_base and len(self.ports) > 1:
+            raise RelayError("a fixed public base URL needs one fixed relay port, not a range")
+        self.port: int | None = None  # the bound port
         self.public_host = public_host or host
         self.public_base = public_base.rstrip("/") if public_base else None
         self._prefix = f"/k/{path_secret}" if path_secret else ""
@@ -93,13 +102,23 @@ class GateRelay:
                 app.router.add_route("*", self._prefix + "/r/{token}/{tail:.*}", self._handle)
                 runner = web.AppRunner(app, access_log=None)
                 await runner.setup()
-                site = web.TCPSite(runner, self.host, self.port)
-                await site.start()
+                await self._bind(web, runner)
                 self._runner = runner
                 self._client = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.timeout_s))
-                port = runner.addresses[0][1]
+                self.port = port = runner.addresses[0][1]
                 self._base_url = (self.public_base or f"http://{self.public_host}:{port}") + self._prefix
             return self._base_url
+
+    async def _bind(self, web: Any, runner: Any) -> None:
+        last: OSError | None = None
+        for port in self.ports:
+            try:
+                await web.TCPSite(runner, self.host, port).start()
+                return
+            except OSError as exc:  # in use by another rollout process
+                last = exc
+        await runner.cleanup()
+        raise RelayError(f"no free relay port in {self.ports[0]}..{self.ports[-1]} on {self.host}: {last}")
 
     async def open(self, upstream: str, ledger: SuspendLedger | None = None) -> str:
         """The URL the agent uses instead of ``upstream`` (the session server's OpenAI base)."""

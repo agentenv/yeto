@@ -310,7 +310,8 @@ def test_miles_reward_hook_marks_aborted_and_fails_closed(miles_stubs):
     ok = SimpleNamespace(metadata={OUTCOME_KEY: "ok", "reward": 1.0}, status="COMPLETED")
     aborted = SimpleNamespace(metadata={OUTCOME_KEY: "aborted", "reward": 0.0}, status="COMPLETED")
     assert _run(mod.reward_func(None, [ok, aborted])) == [1.0, 0.0]
-    assert aborted.status == "ABORTED" and ok.status == "COMPLETED"
+    # Miles installed (its image): the real Sample.Status enum; else the CPU-test string
+    assert getattr(aborted.status, "name", aborted.status) == "ABORTED" and ok.status == "COMPLETED"
     with pytest.raises(mod.UntrustedAgentOutcome):
         _run(mod.reward_func(None, SimpleNamespace(metadata={"reward": 1.0})))
 

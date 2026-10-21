@@ -105,15 +105,28 @@ RELAY_SECRET_FILE_ENV = "YETO_HARBOR_GATE_RELAY_SECRET_FILE"
 class RelaySettings:
     """Where the gate relay listens and the address the sandbox dials.
 
+    ``ports``: ``YETO_HARBOR_GATE_RELAY_PORT`` as ``N`` (one port), ``N-M``
+    (a range: every rollout process on the machine binds the first free one)
+    or ``0`` (any free port; only when the sandboxes can reach any port).
     ``public_host`` None: the host of the session-server URL the agent would
     have dialed (the relay runs in the same process, so the same machine).
     """
 
-    port: int
+    ports: tuple[int, ...]
     host: str = "0.0.0.0"
     public_host: str | None = None
     public_base: str | None = None
     path_secret: str | None = None
+
+
+def _ports(raw: str) -> tuple[int, ...]:
+    low, sep, high = raw.partition("-")
+    if not low.isdigit() or (sep and not high.isdigit()):
+        raise HarnessConfigError(f"{RELAY_PORT_ENV} must be N, N-M or 0, got {raw!r}")
+    first, last = int(low), int(high) if sep else int(low)
+    if last > 65535 or last < first or (sep and first == 0):
+        raise HarnessConfigError(f"{RELAY_PORT_ENV} is not a valid TCP port range: {raw!r}")
+    return tuple(range(first, last + 1))
 
 
 def relay_settings(environ: Any = None) -> RelaySettings | None:
@@ -122,13 +135,14 @@ def relay_settings(environ: Any = None) -> RelaySettings | None:
     raw = str(environ.get(RELAY_PORT_ENV, "") or "").strip()
     if not raw:
         return None
-    if not raw.isdigit() or int(raw) > 65535:
-        raise HarnessConfigError(f"{RELAY_PORT_ENV} must be a TCP port, got {raw!r}")
+    ports = _ports(raw)
+    public_base = environ.get(RELAY_PUBLIC_BASE_ENV) or None
+    if public_base and len(ports) > 1:
+        raise HarnessConfigError(f"{RELAY_PUBLIC_BASE_ENV} needs one fixed {RELAY_PORT_ENV}, not a range")
     secret_file = str(environ.get(RELAY_SECRET_FILE_ENV, "") or "").strip()
     return RelaySettings(
-        port=int(raw), host=str(environ.get(RELAY_HOST_ENV) or "0.0.0.0"),
-        public_host=environ.get(RELAY_PUBLIC_HOST_ENV) or None,
-        public_base=environ.get(RELAY_PUBLIC_BASE_ENV) or None,
+        ports=ports, host=str(environ.get(RELAY_HOST_ENV) or "0.0.0.0"),
+        public_host=environ.get(RELAY_PUBLIC_HOST_ENV) or None, public_base=public_base,
         path_secret=Path(secret_file).read_text().strip() if secret_file else None)
 
 
@@ -155,7 +169,7 @@ def _relay(settings: RelaySettings, session_url: str) -> GateRelay:
     relay = _relays.get(gate)
     if relay is None:
         public_host = settings.public_host or urlsplit(session_url).hostname or "127.0.0.1"
-        relay = _relays[gate] = GateRelay(gate, host=settings.host, port=settings.port,
+        relay = _relays[gate] = GateRelay(gate, host=settings.host, port=settings.ports,
                                               public_host=public_host, public_base=settings.public_base,
                                               path_secret=settings.path_secret)
     return relay

@@ -286,7 +286,8 @@ def _after_suspension(trajectory: AgentTrajectory, ledger: SuspendLedger) -> Age
 def _abort(trajectory: AgentTrajectory, reason: str) -> AgentTrajectory:
     _gate().metrics.reclassify(trajectory.outcome, Outcome.ABORTED)
     return AgentTrajectory(task=trajectory.task, outcome=Outcome.ABORTED, reward=0.0, reason=reason,
-                           verdict=trajectory.verdict, policy_version=trajectory.policy_version)
+                           verdict=trajectory.verdict, policy_version=trajectory.policy_version,
+                           extra_metrics=trajectory.extra_metrics)
 
 
 def turn_provenance(turns: Sequence[TokenTurn]) -> Mapping[str, str] | None:

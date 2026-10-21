@@ -169,10 +169,7 @@ def after_suspension(trajectory: AgentTrajectory, ledger: SuspendLedger) -> Agen
     metrics = ledger.metrics()
     if not metrics:
         return trajectory
-    verdict = trajectory.verdict
-    if verdict is not None:
-        verdict = replace(verdict, agent_metrics={**dict(verdict.agent_metrics), **metrics})
-    updated = replace(trajectory, verdict=verdict)
+    updated = replace(trajectory, extra_metrics={**dict(trajectory.extra_metrics), **metrics})
     if (ledger.suspensions and trajectory.outcome is Outcome.POLICY_LIMIT
             and trajectory.reason in TIME_LIMIT_EXCEPTIONS):
         updated = replace(updated, outcome=Outcome.ABORTED, reward=0.0,

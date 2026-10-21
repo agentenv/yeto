@@ -176,3 +176,69 @@ def test_cli_writes_identical_bytes_twice(tmp_path):
                          "--out", str(tmp_path / out / "cur.json"), "--version", "tb2.1@test"]) == 0
     for name in ("tb2-holdout.json", "tb2-train.json", "cur.json"):
         assert (tmp_path / "a" / name).read_bytes() == (tmp_path / "b" / name).read_bytes()
+
+
+def test_rows_are_what_the_two_adapters_read(tmp_path, monkeypatch):
+    import sys
+    import types
+
+    import test_agentic_harbor as agentic  # noqa: F401  (stubs for the verl agent-loop module)
+
+    tasks = tl.HarborTaskSet(_checkout(tmp_path), version="tb2.1@test")
+    ids = ["easy-0", "hard-03"]
+    monkeypatch.setenv("HARBOR_ENV_TYPE", "boat")
+    for name in ("miles", "miles.rollout", "miles.rollout.agentic"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    from yeto.rl.adapters.miles.harbor_agent import task_from_metadata
+
+    for row, tid in zip(tl.miles_rows(tasks, ids), ids):
+        task = task_from_metadata(row["metadata"])
+        assert (task.task_id, task.agent, task.provider) == (tid, "codex", "boat")
+        assert isinstance(row["prompt"], str)
+    loop_mod = types.ModuleType("verl.experimental.agent_loop.agent_loop")
+    loop_mod.AgentLoopBase = object
+    loop_mod.AgentLoopMetrics = loop_mod.AgentLoopOutput = object
+    loop_mod.register = lambda name: (lambda cls: cls)
+    for name in ("verl", "verl.experimental", "verl.experimental.agent_loop"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "verl.experimental.agent_loop.agent_loop", loop_mod)
+    monkeypatch.delitem(sys.modules, "yeto.rl.adapters.verl.harbor_agent_loop", raising=False)
+    import importlib
+
+    verl_loop = importlib.import_module("yeto.rl.adapters.verl.harbor_agent_loop")
+    try:
+        for row, tid in zip(tl.verl_rows(tasks, ids), ids):
+            assert row["agent_name"] == verl_loop.AGENT_LOOP_NAME
+            task = verl_loop.task_from_row(row)
+            assert (task.task_id, task.provider) == (tid, "boat")
+    finally:
+        sys.modules.pop("yeto.rl.adapters.verl.harbor_agent_loop", None)
+
+
+_TB21 = Path(os.environ.get("YETO_TB21_DIR", Path.home() / "work" / "tb21-data"))
+
+
+def test_committed_tb21_data_matches_its_manifest():
+    import hashlib
+
+    manifest = json.loads((REPO / "data/tb2/tb2.1-data.sha256.json").read_text())
+    for name, entry in manifest["files"].items():
+        path = REPO / ("data/tb2" if name.endswith(".jsonl") else "data/eval") / name
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == entry["sha256"], name
+    holdout = json.loads((REPO / "data/eval/tb2.1-holdout.json").read_text())
+    for name in ("tb2.1-train-miles.jsonl", "tb2.1-s1-miles.jsonl"):
+        ids = [json.loads(line)["metadata"]["instance_id"] for line in (REPO / "data/tb2" / name).read_text().splitlines()]
+        tl.assert_no_holdout(ids, holdout)
+
+
+@pytest.mark.skipif(not (_TB21 / "tasks").is_dir(), reason="TB2.1 checkout not present")
+def test_tb21_lists_regenerate_byte_identical():
+    tasks = tl.HarborTaskSet(_TB21)
+    if tasks.version != json.loads((REPO / "data/eval/tb2.1-holdout.json").read_text())["benchmark_version"]:
+        pytest.skip(f"checkout is {tasks.version}")
+    holdout, train = tl.build_tb2_lists(tasks, unusable=tl.load_unusable())
+    assert tl.dump_list(holdout) == (REPO / "data/eval/tb2.1-holdout.json").read_text()
+    assert tl.dump_list(train) == (REPO / "data/eval/tb2.1-train.json").read_text()
+    ids = [i["task_id"] for i in train["items"]]
+    assert tl.dump_jsonl(tl.miles_rows(tasks, ids)) == (REPO / "data/tb2/tb2.1-train-miles.jsonl").read_text()
+    assert tl.dump_jsonl(tl.verl_rows(tasks, ids)) == (REPO / "data/tb2/tb2.1-train-verl.jsonl").read_text()

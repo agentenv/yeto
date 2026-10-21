@@ -187,6 +187,8 @@ class AgentTrajectory:
     verdict: TrialVerdict | None
     policy_version: int | None = None
     tokens: TokenSegments | None = None
+    # Metrics the outer layer adds, also without a verdict (suspension counters).
+    extra_metrics: Mapping[str, Any] = field(default_factory=dict)
 
     def to_metadata(self) -> dict[str, Any]:
         """Flat, JSON-safe fields a backend sample can carry."""
@@ -198,7 +200,8 @@ class AgentTrajectory:
             "policy_version": self.policy_version,
             "eval_report": dict(verdict.rewards or {}) if verdict else {},
             "agent_metrics": {**(dict(verdict.agent_metrics) if verdict else {}),
-                              **(dict(verdict.timings_s) if verdict else {})},
+                              **(dict(verdict.timings_s) if verdict else {}),
+                              **dict(self.extra_metrics)},
             "trial_dir": verdict.trial_dir if verdict else None,
         }
 

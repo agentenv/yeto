@@ -256,7 +256,7 @@ def _reclassify(trajectory: AgentTrajectory, outcome: Outcome, reason: str) -> A
         gate().metrics.reclassify(trajectory.outcome, outcome)
     return AgentTrajectory(task=trajectory.task, outcome=outcome, reward=0.0 if outcome is Outcome.ABORTED
                            else trajectory.reward, reason=reason, verdict=trajectory.verdict,
-                           policy_version=trajectory.policy_version)
+                           policy_version=trajectory.policy_version, extra_metrics=trajectory.extra_metrics)
 
 
 def _verl_style_sampling(sampling_params: dict[str, Any]) -> dict[str, Any]:

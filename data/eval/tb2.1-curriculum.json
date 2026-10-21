@@ -1,0 +1,593 @@
+{
+ "schema": "yeto-curriculum/1",
+ "benchmark": "tb2",
+ "benchmark_version": "tb2.1@7131e43",
+ "train_split_sha256": "36bd722bc7a5b142658d86e7c9d1c495122f17a367aacfffcd7b35c38c9c811c",
+ "holdout_sha256": "adfddc9f2615dfdb3b3e2bc0ce04f1bb6dc4b6948735dd6ecb565d25163425a4",
+ "rule": "first stage whose rule admits the task; within a stage by official difficulty, expert time estimate, task id. Stage bounds are yeto choices, not data.",
+ "require_signal": false,
+ "source": {
+  "train": "tb2.1-train.json",
+  "reference": "pos-all.jsonl"
+ },
+ "stages": [
+  {
+   "name": "s1-short",
+   "difficulties": [
+    "easy",
+    "medium"
+   ],
+   "max_expert_min": 30.0,
+   "items": [
+    {
+     "task_id": "fix-git",
+     "difficulty": "easy",
+     "eval_bucket": "tb2-easy",
+     "expert_time_estimate_min": 5.0,
+     "junior_time_estimate_min": 20.0,
+     "category": "software-engineering",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 0.5
+     }
+    },
+    {
+     "task_id": "cobol-modernization",
+     "difficulty": "easy",
+     "eval_bucket": "tb2-easy",
+     "expert_time_estimate_min": 20.0,
+     "junior_time_estimate_min": 70.0,
+     "category": "software-engineering",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 3.2
+     }
+    },
+    {
+     "task_id": "mteb-leaderboard",
+     "difficulty": "medium",
+     "eval_bucket": "tb2-medium",
+     "expert_time_estimate_min": 5.0,
+     "junior_time_estimate_min": 10.0,
+     "category": "data-science",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 113.1
+     }
+    },
+    {
+     "task_id": "merge-diff-arc-agi-task",
+     "difficulty": "medium",
+     "eval_bucket": "tb2-medium",
+     "expert_time_estimate_min": 20.0,
+     "junior_time_estimate_min": 40.0,
+     "category": "debugging",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 4.0
+     }
+    },
+    {
+     "task_id": "openssl-selfsigned-cert",
+     "difficulty": "medium",
+     "eval_bucket": "tb2-medium",
+     "expert_time_estimate_min": 20.0,
+     "junior_time_estimate_min": 120.0,
+     "category": "security",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 1.0
+     }
+    },
+    {
+     "task_id": "polyglot-c-py",
+     "difficulty": "medium",
+     "eval_bucket": "tb2-medium",
+     "expert_time_estimate_min": 20.0,
+     "junior_time_estimate_min": 480.0,
+     "category": "software-engineering",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 0.4
+     }
+    },
+    {
+     "task_id": "vulnerable-secret",
+     "difficulty": "medium",
+     "eval_bucket": "tb2-medium",
+     "expert_time_estimate_min": 20.0,
+     "junior_time_estimate_min": 120.0,
+     "category": "security",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 0.6
+     }
+    },
+    {
+     "task_id": "code-from-image",
+     "difficulty": "medium",
+     "eval_bucket": "tb2-medium",
+     "expert_time_estimate_min": 30.0,
+     "junior_time_estimate_min": 120.0,
+     "category": "software-engineering",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 0.5
+     }
+    },
+    {
+     "task_id": "count-dataset-tokens",
+     "difficulty": "medium",
+     "eval_bucket": "tb2-medium",
+     "expert_time_estimate_min": 30.0,
+     "junior_time_estimate_min": 120.0,
+     "category": "model-training",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 37.6
+     }
+    },
+    {
+     "task_id": "extract-elf",
+     "difficulty": "medium",
+     "eval_bucket": "tb2-medium",
+     "expert_time_estimate_min": 30.0,
+     "junior_time_estimate_min": 240.0,
+     "category": "file-operations",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 0.4
+     }
+    },
+    {
+     "task_id": "financial-document-processor",
+     "difficulty": "medium",
+     "eval_bucket": "tb2-medium",
+     "expert_time_estimate_min": 30.0,
+     "junior_time_estimate_min": 60.0,
+     "category": "data-processing",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 39.0
+     }
+    },
+    {
+     "task_id": "git-leak-recovery",
+     "difficulty": "medium",
+     "eval_bucket": "tb2-medium",
+     "expert_time_estimate_min": 30.0,
+     "junior_time_estimate_min": 60.0,
+     "category": "software-engineering",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 0.8
+     }
+    },
+    {
+     "task_id": "multi-source-data-merger",
+     "difficulty": "medium",
+     "eval_bucket": "tb2-medium",
+     "expert_time_estimate_min": 30.0,
+     "junior_time_estimate_min": 120.0,
+     "category": "data-processing",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 1.3
+     }
+    },
+    {
+     "task_id": "pytorch-model-cli",
+     "difficulty": "medium",
+     "eval_bucket": "tb2-medium",
+     "expert_time_estimate_min": 30.0,
+     "junior_time_estimate_min": 120.0,
+     "category": "model-training",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 57.5
+     }
+    },
+    {
+     "task_id": "tune-mjcf",
+     "difficulty": "medium",
+     "eval_bucket": "tb2-medium",
+     "expert_time_estimate_min": 30.0,
+     "junior_time_estimate_min": 120.0,
+     "category": "scientific-computing",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 0.6
+     }
+    }
+   ]
+  },
+  {
+   "name": "s2-medium",
+   "difficulties": [
+    "easy",
+    "medium",
+    "hard"
+   ],
+   "max_expert_min": 120.0,
+   "items": [
+    {
+     "task_id": "large-scale-text-editing",
+     "difficulty": "medium",
+     "eval_bucket": "tb2-medium",
+     "expert_time_estimate_min": 40.0,
+     "junior_time_estimate_min": 90.0,
+     "category": "file-operations",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 0.4
+     }
+    },
+    {
+     "task_id": "chess-best-move",
+     "difficulty": "medium",
+     "eval_bucket": "tb2-medium",
+     "expert_time_estimate_min": 45.0,
+     "junior_time_estimate_min": 180.0,
+     "category": "games",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 10.9
+     }
+    },
+    {
+     "task_id": "db-wal-recovery",
+     "difficulty": "medium",
+     "eval_bucket": "tb2-medium",
+     "expert_time_estimate_min": 45.0,
+     "junior_time_estimate_min": 240.0,
+     "category": "file-operations",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 0.5
+     }
+    },
+    {
+     "task_id": "filter-js-from-html",
+     "difficulty": "medium",
+     "eval_bucket": "tb2-medium",
+     "expert_time_estimate_min": 45.0,
+     "junior_time_estimate_min": 480.0,
+     "category": "security",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 0.6
+     }
+    },
+    {
+     "task_id": "regex-log",
+     "difficulty": "medium",
+     "eval_bucket": "tb2-medium",
+     "expert_time_estimate_min": 45.0,
+     "junior_time_estimate_min": 180.0,
+     "category": "data-processing",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 0.5
+     }
+    },
+    {
+     "task_id": "mailman",
+     "difficulty": "medium",
+     "eval_bucket": "tb2-medium",
+     "expert_time_estimate_min": 60.0,
+     "junior_time_estimate_min": 180.0,
+     "category": "system-administration",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 14.5
+     }
+    },
+    {
+     "task_id": "pypi-server",
+     "difficulty": "medium",
+     "eval_bucket": "tb2-medium",
+     "expert_time_estimate_min": 60.0,
+     "junior_time_estimate_min": 180.0,
+     "category": "software-engineering",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 56.1
+     }
+    },
+    {
+     "task_id": "query-optimize",
+     "difficulty": "medium",
+     "eval_bucket": "tb2-medium",
+     "expert_time_estimate_min": 60.0,
+     "junior_time_estimate_min": 480.0,
+     "category": "data-science",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 0.5
+     }
+    },
+    {
+     "task_id": "sqlite-db-truncate",
+     "difficulty": "medium",
+     "eval_bucket": "tb2-medium",
+     "expert_time_estimate_min": 60.0,
+     "junior_time_estimate_min": 240.0,
+     "category": "debugging",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 0.5
+     }
+    },
+    {
+     "task_id": "log-summary-date-ranges",
+     "difficulty": "medium",
+     "eval_bucket": "tb2-medium",
+     "expert_time_estimate_min": 75.0,
+     "junior_time_estimate_min": 150.0,
+     "category": "data-processing",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 65.1
+     }
+    },
+    {
+     "task_id": "distribution-search",
+     "difficulty": "medium",
+     "eval_bucket": "tb2-medium",
+     "expert_time_estimate_min": 120.0,
+     "junior_time_estimate_min": 240.0,
+     "category": "machine-learning",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 0.8
+     }
+    },
+    {
+     "task_id": "modernize-scientific-stack",
+     "difficulty": "medium",
+     "eval_bucket": "tb2-medium",
+     "expert_time_estimate_min": 120.0,
+     "junior_time_estimate_min": 240.0,
+     "category": "scientific-computing",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 1.1
+     }
+    },
+    {
+     "task_id": "configure-git-webserver",
+     "difficulty": "hard",
+     "eval_bucket": "tb2-hard",
+     "expert_time_estimate_min": 15.0,
+     "junior_time_estimate_min": 60.0,
+     "category": "system-administration",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 43.5
+     }
+    },
+    {
+     "task_id": "llm-inference-batching-scheduler",
+     "difficulty": "hard",
+     "eval_bucket": "tb2-hard",
+     "expert_time_estimate_min": 45.0,
+     "junior_time_estimate_min": 450.0,
+     "category": "machine-learning",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 2.8
+     }
+    },
+    {
+     "task_id": "dna-assembly",
+     "difficulty": "hard",
+     "eval_bucket": "tb2-hard",
+     "expert_time_estimate_min": 60.0,
+     "junior_time_estimate_min": 180.0,
+     "category": "scientific-computing",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 21.2
+     }
+    },
+    {
+     "task_id": "password-recovery",
+     "difficulty": "hard",
+     "eval_bucket": "tb2-hard",
+     "expert_time_estimate_min": 100.0,
+     "junior_time_estimate_min": 300.0,
+     "category": "security",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 0.4
+     }
+    },
+    {
+     "task_id": "cancel-async-tasks",
+     "difficulty": "hard",
+     "eval_bucket": "tb2-hard",
+     "expert_time_estimate_min": 120.0,
+     "junior_time_estimate_min": 600.0,
+     "category": "software-engineering",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 0.6
+     }
+    },
+    {
+     "task_id": "path-tracing-reverse",
+     "difficulty": "hard",
+     "eval_bucket": "tb2-hard",
+     "expert_time_estimate_min": 120.0,
+     "junior_time_estimate_min": 1440.0,
+     "category": "software-engineering",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 0.4
+     }
+    }
+   ]
+  },
+  {
+   "name": "s3-long",
+   "difficulties": [
+    "easy",
+    "medium",
+    "hard"
+   ],
+   "max_expert_min": null,
+   "items": [
+    {
+     "task_id": "git-multibranch",
+     "difficulty": "medium",
+     "eval_bucket": "tb2-medium",
+     "expert_time_estimate_min": 180.0,
+     "junior_time_estimate_min": 360.0,
+     "category": "system-administration",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 0.9
+     }
+    },
+    {
+     "task_id": "torch-pipeline-parallelism",
+     "difficulty": "hard",
+     "eval_bucket": "tb2-hard",
+     "expert_time_estimate_min": 240.0,
+     "junior_time_estimate_min": 1200.0,
+     "category": "software-engineering",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 0.5
+     }
+    },
+    {
+     "task_id": "torch-tensor-parallelism",
+     "difficulty": "hard",
+     "eval_bucket": "tb2-hard",
+     "expert_time_estimate_min": 240.0,
+     "junior_time_estimate_min": 1200.0,
+     "category": "software-engineering",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 0.4
+     }
+    },
+    {
+     "task_id": "install-windows-3.11",
+     "difficulty": "hard",
+     "eval_bucket": "tb2-hard",
+     "expert_time_estimate_min": 300.0,
+     "junior_time_estimate_min": 600.0,
+     "category": "system-administration",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 359.3
+     }
+    },
+    {
+     "task_id": "bn-fit-modify",
+     "difficulty": "hard",
+     "eval_bucket": "tb2-hard",
+     "expert_time_estimate_min": 480.0,
+     "junior_time_estimate_min": 1000.0,
+     "category": "scientific-computing",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 31.4
+     }
+    },
+    {
+     "task_id": "feal-differential-cryptanalysis",
+     "difficulty": "hard",
+     "eval_bucket": "tb2-hard",
+     "expert_time_estimate_min": 480.0,
+     "junior_time_estimate_min": 19200.0,
+     "category": "mathematics",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 0.4
+     }
+    },
+    {
+     "task_id": "model-extraction-relu-logits",
+     "difficulty": "hard",
+     "eval_bucket": "tb2-hard",
+     "expert_time_estimate_min": 480.0,
+     "junior_time_estimate_min": 2400.0,
+     "category": "mathematics",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 0.4
+     }
+    },
+    {
+     "task_id": "sparql-university",
+     "difficulty": "hard",
+     "eval_bucket": "tb2-hard",
+     "expert_time_estimate_min": 800.0,
+     "junior_time_estimate_min": 10000.0,
+     "category": "data-querying",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 0.4
+     }
+    },
+    {
+     "task_id": "circuit-fibsqrt",
+     "difficulty": "hard",
+     "eval_bucket": "tb2-hard",
+     "expert_time_estimate_min": 960.0,
+     "junior_time_estimate_min": 2400.0,
+     "category": "software-engineering",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 0.5
+     }
+    },
+    {
+     "task_id": "feal-linear-cryptanalysis",
+     "difficulty": "hard",
+     "eval_bucket": "tb2-hard",
+     "expert_time_estimate_min": 960.0,
+     "junior_time_estimate_min": 19200.0,
+     "category": "mathematics",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 1.3
+     }
+    },
+    {
+     "task_id": "regex-chess",
+     "difficulty": "hard",
+     "eval_bucket": "tb2-hard",
+     "expert_time_estimate_min": 1440.0,
+     "junior_time_estimate_min": 4800.0,
+     "category": "software-engineering",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 0.6
+     }
+    },
+    {
+     "task_id": "write-compressor",
+     "difficulty": "hard",
+     "eval_bucket": "tb2-hard",
+     "expert_time_estimate_min": 1440.0,
+     "junior_time_estimate_min": 4800.0,
+     "category": "software-engineering",
+     "reference_solution": {
+      "passed": true,
+      "solve_s": 39.9
+     }
+    }
+   ]
+  }
+ ],
+ "dropped": [
+  {
+   "task_id": "train-fasttext",
+   "reason": "reference solution fails in the judge environment"
+  }
+ ]
+}

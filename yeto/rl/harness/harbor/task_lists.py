@@ -354,3 +354,50 @@ def curriculum_task_ids(curriculum: Mapping[str, Any], *, through: str | None = 
 
 def assert_no_holdout(task_ids: Iterable[str], holdout: Mapping[str, Any]) -> None:
     bm.assert_disjoint(task_ids, bm.holdout_ids(dict(holdout)))
+
+
+# --- dataset rows for the two backends ----------------------------------------------
+#
+# Formats read from the adapter code and the S25 T-N109 runs (verl and Miles on TB2.1):
+# * Miles (``--input-key prompt --metadata-key metadata``): ``metadata`` is the
+#   sample metadata ``harbor_agent.task_from_metadata`` reads (``instance_id`` is
+#   the Harbor task directory, ``agent_name`` the agent); Harbor reads the
+#   instruction from the task directory, so ``prompt`` is only a label.
+# * verl (``HarborAgentLoop``): ``agent_name: yeto_harbor`` selects the agent
+#   loop; ``extra_info.agent_task`` is the ``AgentTask`` mapping.
+# Model name, timeouts and the provider default are deployment facts and stay out
+# of the rows (worker environment: AGENT_MODEL_NAME, AGENT_TIMEOUT, HARBOR_ENV_TYPE).
+
+VERL_AGENT_LOOP = "yeto_harbor"
+
+
+def _label(tasks: HarborTaskSet, task_id: str) -> str:
+    return f"{tasks.version.split('@')[0].upper()} task {task_id}"
+
+
+def miles_rows(tasks: HarborTaskSet, task_ids: Sequence[str], *, agent: str = "codex") -> list[dict[str, Any]]:
+    out = []
+    for tid in task_ids:
+        f = tasks.facts(tid)
+        out.append({"prompt": _label(tasks, tid), "metadata": {
+            "instance_id": tid, "agent_name": agent, "difficulty": f.difficulty, "eval_bucket": f.eval_bucket,
+            "benchmark_version": tasks.version}})
+    return out
+
+
+def verl_rows(tasks: HarborTaskSet, task_ids: Sequence[str], *, agent: str = "codex",
+              data_source: str = BENCHMARK) -> list[dict[str, Any]]:
+    out = []
+    for index, tid in enumerate(task_ids):
+        f = tasks.facts(tid)
+        out.append({"data_source": data_source, "agent_name": VERL_AGENT_LOOP,
+                    "prompt": [{"role": "user", "content": _label(tasks, tid)}],
+                    "reward_model": {"style": "rule", "ground_truth": ""},
+                    "extra_info": {"index": index, "difficulty": f.difficulty, "eval_bucket": f.eval_bucket,
+                                   "benchmark_version": tasks.version,
+                                   "agent_task": {"task_id": tid, "agent": agent}}})
+    return out
+
+
+def dump_jsonl(rows: Iterable[Mapping[str, Any]]) -> str:
+    return "".join(json.dumps(row, sort_keys=True, ensure_ascii=False) + "\n" for row in rows)

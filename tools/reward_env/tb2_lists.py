@@ -9,6 +9,13 @@
         --train out/tb2-train.json --out out/tb2-curriculum.json \
         [--reference pos-all.jsonl] [--pass-rates baseline.json --require-signal]
 
+    # dataset rows (Miles jsonl + verl jsonl) of a training list or curriculum stages
+    python tools/reward_env/tb2_lists.py rows --tasks ~/work/tb21-data \
+        --list out/tb2-curriculum.json [--through s1-short] --out-prefix out/tb2.1-s1
+
+    # sha256 manifest of written files, with their sources
+    python tools/reward_env/tb2_lists.py manifest --out out/manifest.json --source k=v ... FILE...
+
 ``--tasks`` is the Terminal-Bench checkout (TB2 flat, or TB2.1 with ``tasks/``).
 The output is deterministic: same checkout and inputs, same bytes.
 """
@@ -58,6 +65,41 @@ def _curriculum(a: argparse.Namespace) -> int:
     return 0
 
 
+def _rows(a: argparse.Namespace) -> int:
+    tasks = tl.HarborTaskSet(a.tasks, version=a.version)
+    doc = json.loads(Path(a.list).read_text())
+    if doc.get("schema") == tl.CURRICULUM_SCHEMA:
+        ids = tl.curriculum_task_ids(doc, through=a.through)
+    elif doc.get("schema") == bm.TRAIN_SPLIT_SCHEMA:
+        if a.through:
+            raise SystemExit("--through needs a curriculum file")
+        ids = [item["task_id"] for item in doc["items"]]
+    else:
+        raise SystemExit(f"{a.list}: neither a training list nor a curriculum")
+    if a.holdout:
+        tl.assert_no_holdout(ids, json.loads(Path(a.holdout).read_text()))
+    for backend, rows in (("miles", tl.miles_rows(tasks, ids, agent=a.agent)),
+                          ("verl", tl.verl_rows(tasks, ids, agent=a.agent))):
+        path = Path(f"{a.out_prefix}-{backend}.jsonl")
+        path.write_text(tl.dump_jsonl(rows))
+        print(path.name, len(rows))
+    return 0
+
+
+def _manifest(a: argparse.Namespace) -> int:
+    import hashlib
+
+    sources = dict(item.split("=", 1) for item in a.source)
+    files = {}
+    for name in a.files:
+        body = Path(name).read_bytes()
+        files[Path(name).name] = {"sha256": hashlib.sha256(body).hexdigest(),
+                                  "rows": body.count(b"\n") if name.endswith(".jsonl") else None}
+    Path(a.out).write_text(json.dumps({"schema": "yeto-data-manifest/1", "sources": sources, "files": files},
+                                      indent=1, sort_keys=True) + "\n")
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = p.add_subparsers(dest="command", required=True)
@@ -78,6 +120,20 @@ def main(argv=None) -> int:
     c.add_argument("--pass-rates", help="baseline pass counts (json: {task_id: {n, passed}})")
     c.add_argument("--require-signal", action="store_true", help="drop tasks with pass rate 0 or 1")
     c.set_defaults(run=_curriculum)
+    r = sub.add_parser("rows", help="Miles and verl dataset rows of a list")
+    r.add_argument("--tasks", required=True)
+    r.add_argument("--list", required=True, help="training list or curriculum")
+    r.add_argument("--through", help="last curriculum stage to include")
+    r.add_argument("--holdout", help="hold-out list the rows must not touch")
+    r.add_argument("--agent", default="codex")
+    r.add_argument("--out-prefix", required=True)
+    r.add_argument("--version")
+    r.set_defaults(run=_rows)
+    m = sub.add_parser("manifest", help="sha256 manifest of files")
+    m.add_argument("--out", required=True)
+    m.add_argument("--source", action="append", default=[], help="key=value provenance line")
+    m.add_argument("files", nargs="+")
+    m.set_defaults(run=_manifest)
     a = p.parse_args(argv)
     return a.run(a)
 

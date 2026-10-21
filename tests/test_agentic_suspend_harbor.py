@@ -119,6 +119,9 @@ def test_a_time_limit_after_a_suspension_is_aborted_not_a_zero():
     ok = AgentTrajectory(task=_task(), outcome=Outcome.OK, reward=1.0, reason="verified",
                          verdict=TrialVerdict(rewards={"reward": 1.0}))
     assert after_suspension(ok, ledger).outcome is Outcome.OK
+    # an ABORTED trajectory without a verdict (wall-clock cap, lost sandbox) keeps the counters too
+    lost = AgentTrajectory(task=_task(), outcome=Outcome.ABORTED, reward=0.0, reason="wall_clock_cap", verdict=None)
+    assert after_suspension(lost, ledger).to_metadata()["agent_metrics"]["suspensions"] == 1
 
 
 # ------------------------------------------------------------------ gate relay
@@ -258,8 +261,14 @@ def test_miles_suspend_hook_fails_closed_without_the_relay(miles_stubs, monkeypa
         _run(mod.suspend(None))
     with pytest.raises(HarnessConfigError, match=mod.RELAY_PORT_ENV):
         mod.check_suspend_config({})
-    with pytest.raises(HarnessConfigError, match="TCP port"):
+    with pytest.raises(HarnessConfigError, match="N, N-M or 0"):
         mod.relay_settings({mod.RELAY_PORT_ENV: "http"})
+    with pytest.raises(HarnessConfigError, match="not a valid"):
+        mod.relay_settings({mod.RELAY_PORT_ENV: "31010-31000"})
+    with pytest.raises(HarnessConfigError, match="not a range"):
+        mod.relay_settings({mod.RELAY_PORT_ENV: "31000-31003", mod.RELAY_PUBLIC_BASE_ENV: "https://t"})
+    assert mod.relay_settings({mod.RELAY_PORT_ENV: "31000-31003"}).ports == (31000, 31001, 31002, 31003)
+    assert mod.relay_settings({mod.RELAY_PORT_ENV: "0"}).ports == (0,)
 
 
 def test_miles_trial_runs_through_the_relay_and_survives_a_round_boundary(miles_stubs, monkeypatch):
@@ -326,7 +335,7 @@ def test_miles_stage_three_accepts_the_harbor_agent_and_the_island_needs_the_rel
         "--agentic-suspend-between-turns", "--agentic-suspend-max-rounds", "1")
     with pytest.raises(PolicyAgeError):
         policy_age.check_task(1, custom_generate=policy_age.AGENTIC_GENERATE, custom_agent="other.agent.run")
-    assert harbor_agent.check_suspend_config({harbor_agent.RELAY_PORT_ENV: "31000"}).port == 31000
+    assert harbor_agent.check_suspend_config({harbor_agent.RELAY_PORT_ENV: "31000"}).ports == (31000,)
 
 
 # ------------------------------------------------------------------ cut export / restore (restart)
@@ -456,3 +465,68 @@ def test_compactionrl_is_refused_on_the_harbor_path():
     compacting = SimpleNamespace(backend=SimpleNamespace(compaction=CompactionConfig(context_budget=20_000)))
     with pytest.raises(HarnessConfigError, match="CompactionRL is not supported"):
         ProxyTokenRecorder(compacting)
+
+
+_CHILD = """
+import asyncio, socket, sys
+from yeto.rl.agentic.suspend import TurnGate
+from yeto.rl.harness.gateway.gate_relay import GateRelay
+async def main():
+    relay = GateRelay(TurnGate(), port=range({first}, {last} + 1))
+    await relay.open("http://127.0.0.1:1/v1")
+    print(relay.port, flush=True)
+    sys.stdin.readline()  # hold the port until the parent read every child's port
+    await relay.aclose()
+asyncio.run(main())
+"""
+
+
+def _free_range(n):
+    import socket
+
+    for start in range(39000, 60000, 97):
+        socks = []
+        try:
+            for p in range(start, start + n):
+                s = socket.socket()
+                s.bind(("127.0.0.1", p))
+                socks.append(s)
+            return start
+        except OSError:
+            continue
+        finally:
+            for s in socks:
+                s.close()
+    pytest.skip("no free port range")
+
+
+def test_rollout_processes_share_a_port_range_and_bind_distinct_ports():
+    import subprocess
+    import sys
+
+    first = _free_range(3)
+    code = _CHILD.format(first=first, last=first + 2)
+    procs = [subprocess.Popen([sys.executable, "-c", code], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                              text=True) for _ in range(3)]
+    try:
+        ports = [int(p.stdout.readline()) for p in procs]
+        assert sorted(ports) == [first, first + 1, first + 2]
+        extra = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, input="", timeout=60)
+        assert extra.returncode != 0 and "no free relay port" in extra.stderr
+    finally:
+        for p in procs:
+            p.communicate("\n", timeout=60)
+
+
+def test_relay_port_zero_binds_any_free_port():
+    from yeto.rl.harness.gateway.gate_relay import GateRelay, RelayError
+
+    async def go():
+        relay = GateRelay(TurnGate(), port=0)
+        url = await relay.open("http://127.0.0.1:1/v1")
+        assert relay.port and f":{relay.port}/r/" in url
+        await relay.aclose()
+
+    _run(go())
+    with pytest.raises(RelayError, match="fixed relay port"):
+        GateRelay(TurnGate(), port=(1, 2), public_base="https://t")

@@ -1,0 +1,39 @@
+{
+ "files": {
+  "tb2.1-curriculum.json": {
+   "rows": null,
+   "sha256": "f719a1b88f66df41128ea39c7a60002405c67f0453bc9a79da4d28997d5116e0"
+  },
+  "tb2.1-holdout.json": {
+   "rows": null,
+   "sha256": "ed377218d45e4c918a6a1cf81a2327b9ed9cdd928a5abb9abb08a7378b74fc1f"
+  },
+  "tb2.1-s1-miles.jsonl": {
+   "rows": 15,
+   "sha256": "cc4ad21da0fd535fcc1f58bac45e379870b0d0c5e34077de47a53539cd5f64bc"
+  },
+  "tb2.1-s1-verl.jsonl": {
+   "rows": 15,
+   "sha256": "d2b6fc307e23a49b226fa0cace9bd74aebf8351ae6d71dc245c453f9777170e8"
+  },
+  "tb2.1-train-miles.jsonl": {
+   "rows": 46,
+   "sha256": "238fd0bdfa520cd6c6cf03e501089c13c65d7e7b0c08fb5643e53149eabbe7c9"
+  },
+  "tb2.1-train-verl.jsonl": {
+   "rows": 46,
+   "sha256": "ad1dcbd81ca5bb086d03d704a397c9458dc8f40d435aa6e43d4ce3f249695c21"
+  },
+  "tb2.1-train.json": {
+   "rows": null,
+   "sha256": "8185812b4fa283c198ebb2d9df8765e044f9c3ad513ba762c32df203e836dcd8"
+  }
+ },
+ "schema": "yeto-data-manifest/1",
+ "sources": {
+  "generator": "tools/reward_env/tb2_lists.py (split, curriculum, rows)",
+  "reference": "s1-runs/s17-g3-reward-env/pos-all.jsonl (tb2@2fd12b8, not rerun on TB2.1)",
+  "tasks": "terminal-bench-2-1@7131e4375048a0e408a8fb404b5f499d726b695b",
+  "unusable": "data/eval/tb2-unusable.json (S17 positive control on tb2@2fd12b8, not rerun on TB2.1)"
+ }
+}
