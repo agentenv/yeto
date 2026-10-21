@@ -33,6 +33,7 @@ from yeto.rl.agentic.trust import check_agent_env, task_dir
 
 from ...agentic.outcome import POLICY_LIMIT_EXCEPTIONS
 from .pins import CODEX_VERSION
+from .codex_provider import use_yeto_codex
 
 logger = logging.getLogger(__name__)
 
@@ -109,8 +110,8 @@ def setup_retries_from_env() -> int:
 def agent_env(agent: str, endpoint: str) -> dict[str, str]:
     """Environment that points an installed agent at ``endpoint`` (OpenAI base URL).
 
-    Harbor's codex agent copies ``OPENAI_BASE_URL`` into ``$CODEX_HOME/config.toml``
-    (``openai_base_url``) itself.  Other OpenAI-protocol agents read one of the two
+    yeto's codex agent (:mod:`.codex_agent`) writes ``OPENAI_BASE_URL`` into the
+    ``yeto`` model provider in ``$CODEX_HOME/config.toml``.  Other OpenAI-protocol agents read one of the two
     names.  Agents with another protocol (claude-code) are not wired here yet.
     """
     if agent == "claude-code":
@@ -144,15 +145,18 @@ def build_trial_config(task: AgentTask, endpoint: str, settings: HarborSettings)
         kwargs.update(CODEX_KWARGS)
     if task.budget.max_seq_len is not None and task.agent.startswith("terminus"):
         kwargs["max_seq_len"] = task.budget.max_seq_len
+    agent = AgentConfig(
+        name=task.agent,
+        model_name=f"openai/{task.model_name}",
+        override_timeout_sec=task.budget.agent_timeout_s,
+        env=agent_env(task.agent, endpoint),
+        kwargs=kwargs,
+    )
+    if task.agent == "codex":
+        use_yeto_codex(agent)
     return TrialConfig(
         task=TaskConfig(path=path),
-        agent=AgentConfig(
-            name=task.agent,
-            model_name=f"openai/{task.model_name}",
-            override_timeout_sec=task.budget.agent_timeout_s,
-            env=agent_env(task.agent, endpoint),
-            kwargs=kwargs,
-        ),
+        agent=agent,
         environment=EnvironmentConfig(**env_target, delete=True, kwargs=dict(settings.provider_kwargs)),
         trials_dir=settings.trials_dir,
         timeout_multiplier=settings.timeout_multiplier,

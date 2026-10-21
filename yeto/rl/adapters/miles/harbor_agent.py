@@ -68,6 +68,7 @@ from yeto.rl.agentic.trust import check_agent_env
 from yeto.rl.harness.gateway.gate_relay import GateRelay
 from yeto.rl.harness.harbor import CODEX_VERSION, HarborHarness, HarborSettings, build_trial_config
 from yeto.rl.harness.harbor.trial import CODEX_KWARGS, CUSTOM_PROVIDERS, TrialConfigBuilder, setup_retries_from_env
+from yeto.rl.harness.harbor.codex_provider import use_yeto_codex
 
 logger = logging.getLogger(__name__)
 
@@ -248,6 +249,7 @@ def example_config_builder(example: Any, metadata: dict[str, Any], request_kwarg
             config.agent.kwargs.setdefault("version", task.agent_version or CODEX_VERSION)
             for key, value in CODEX_KWARGS.items():
                 config.agent.kwargs.setdefault(key, value)
+            use_yeto_codex(config.agent)  # R3: Codex idle timeout above the gate relay's hold
         return config
 
     return build

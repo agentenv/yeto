@@ -288,6 +288,8 @@ def test_miles_agent_function_wraps_the_example_with_the_outer_layer(miles_stubs
         async def create(cls, config):
             seen["version"] = config.agent.kwargs["version"]
             seen["summary"] = config.agent.kwargs["reasoning_summary"]
+            seen["import_path"] = config.agent.import_path
+            seen["idle"] = config.agent.kwargs["stream_idle_timeout_s"]
             return cls(config)
 
     Trial.result = _result({"reward": 1.0})
@@ -298,6 +300,8 @@ def test_miles_agent_function_wraps_the_example_with_the_outer_layer(miles_stubs
     assert example.calls == ["key", ("codex", "http://ss:30000/sessions/s1/v1")]
     assert seen["version"] == "0.145.0"  # Harbor's default would be @latest
     assert seen["summary"] == "none"  # the gateway refuses reasoning summaries
+    assert seen["import_path"] == "yeto.rl.harness.harbor.codex_agent:YetoCodex"  # R3
+    assert seen["idle"] == 1800
     assert (out[OUTCOME_KEY], out["reward"]) == ("ok", 1.0)
 
     Trial.result = _result(None, "EnvironmentStartTimeoutError")
