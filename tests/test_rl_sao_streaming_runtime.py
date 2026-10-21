@@ -279,7 +279,7 @@ def test_load_or_role_pairing_rejects_role_or_lockstep_drift(tmp_path, mutation,
         ("checkpoint_every", 2, "checkpointing every round"),
         ("resume", False, "checkpointing every round"),
         ("max_base_lag", 1, "max_base_lag=0"),
-        ("policy_sweep_fragments", 4, "policy sweep"),
+        ("policy_sweep_fragments", 4, "policy.sweep"),
         ("learner_budget_steps", 2, "learner-budget cutoff mode"),
     ),
 )

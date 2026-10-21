@@ -786,6 +786,96 @@ class MilesChunkedFullParameterAdapter:
         )
         return self.validate_cut(target, target_policy_version, 0)
 
+    def rebase_fragment(
+        self,
+        stored: StoredAuthoritativeFragment,
+        current: ReferencedPolicyCut,
+        base: ReferencedPolicyCut,
+        *,
+        ray_module=None,
+    ) -> StoredAuthoritativeFragment:
+        """Sync/train overlap: ``stored + (current - base)`` for one fragment.
+
+        The result is stored like an inbound authoritative fragment (same
+        id, version and provenance, fresh Ray refs) so ``assemble_mixed_target``
+        validates and applies it unchanged. The caller keeps ``stored`` as
+        the anchor and releases the result after the apply."""
+
+        import numpy as np
+        from miles.backends.megatron_utils.full_parameter_state import (
+            _resolve_ray_module,
+        )
+
+        from yeto.rl.engine.sync_overlap import rebase_values
+
+        fragment_id = stored.fragment_id
+        for cut in (current, base):
+            if cut.layout_hash != self.layout.layout_hash:
+                raise ValueError("Miles rebase cut layout changed")
+        owner = _fragment_owner_shard(current.transport_cut, fragment_id)
+        if (
+            stored.parameter_layout_hash != self.layout.layout_hash
+            or stored.topology != owner.topology
+            or stored.plan_hash != owner.plan_hash
+        ):
+            raise ValueError("authoritative fragment provenance changed")
+        ray = _resolve_ray_module(ray_module)
+        chunks = sorted(zip(stored.descriptor.chunks, stored.refs, strict=True),
+                        key=lambda row: row[0].flat_offset)
+        anchor_parts, offset = [], 0
+        for descriptor, reference in chunks:
+            if reference is None or descriptor.flat_offset != offset:
+                raise ValueError("authoritative fragment chunks are released or not contiguous")
+            value = ray.get(reference)
+            anchor_parts.append(value.detach().to("cpu").reshape(-1).numpy())
+            offset += descriptor.numel
+
+        def flat(cut: ReferencedPolicyCut) -> np.ndarray:
+            raw = b"".join(bytes(part) for part in self.fragment_parts(
+                cut, fragment_id, ray_module=ray_module)())
+            return np.frombuffer(raw, dtype="<f4")
+
+        values = rebase_values(np.concatenate(anchor_parts).astype("<f4", copy=False),
+                               flat(current), flat(base))
+        sink = AuthoritativeFragmentSink(current, ray_module=ray_module)
+        return sink(fragment_id, stored.version, values.tobytes())
+
+    def relabel_local_progress(
+        self,
+        cut: ReferencedPolicyCut,
+        *,
+        local_rounds: int,
+    ) -> ReferencedPolicyCut:
+        """Sync/train overlap: label a rebased cut with its local progress.
+
+        ``apply`` resets the local step generation to 0, but a rebased cut
+        (``G + (current - base)``) still holds ``local_rounds`` rounds of
+        progress over its anchor ``G``, and Miles pushes only cuts with
+        progress (generation >= 1). Values, chunk hashes and refs are shared
+        with ``cut`` (fresh ref lists, so releasing one leaves the other);
+        only the generation label changes."""
+
+        from dataclasses import replace
+
+        from miles.ray.full_parameter_transport import FullParameterChunkedCut
+
+        if isinstance(local_rounds, bool) or not isinstance(local_rounds, int) or local_rounds < 1:
+            raise ValueError("a rebased cut needs at least one local round")
+        if cut.layout_hash != self.layout.layout_hash or cut.local_step_generation != 0:
+            raise ValueError("only an applied (generation 0) cut is relabeled")
+        transport = cut.transport_cut
+        relabeled = FullParameterChunkedCut(
+            policy_version=transport.policy_version,
+            local_step_generation=local_rounds,
+            parameter_layout_hash=transport.parameter_layout_hash,
+            shards=tuple(
+                replace(shard, local_step_generation=local_rounds,
+                        chunk_refs=[list(references) for references in shard.chunk_refs])
+                for shard in transport.shards
+            ),
+        )
+        return self.validate_cut(relabeled, cut.policy_version, local_rounds)
+
     async def apply(
         self,
         group: MilesChunkedFullParameterGroup,

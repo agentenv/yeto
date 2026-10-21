@@ -256,6 +256,12 @@ class FakeTrainerActor:
     def yeto_export_lora(self):
         return {k: v.clone() for k, v in self.tensors.items()}, {"count": 2}
 
+    def yeto_export_digest(self, kwargs):
+        from yeto.rl.adapters.verl.ports_impl import digest_lora_tensors
+
+        self.digest_exports = getattr(self, "digest_exports", 0) + 1
+        return digest_lora_tensors(dict(self.tensors), **kwargs)
+
     def yeto_call_workers(self, fn, tensors, reset):
         for k in self.tensors:
             self.tensors[k] = tensors[k].clone().float()
@@ -335,6 +341,22 @@ def test_driver_runs_fully_async_rounds_with_carry_over_and_discard(tmp_path):
     checks = [e for e in events if e["event"] == "rl_publication_check"]
     assert all(e["status"] == "VERIFIED" for e in checks) and len(checks) == 4
     assert [e["param_version"] for e in events if e["event"] == "rl_verl_version_map"] == [0, 1, 2, 3]
+    # rl-publish-fastpath: LocalOnlySync takes digests from the trainer, no tensor export
+    assert actor.digest_exports == 4
+
+
+def test_fastpath_off_publishes_the_same_hashes(tmp_path, monkeypatch):
+    def run(sub):
+        actor = FakeTrainerActor(tmp_path / sub / "rb", [_sample("a", 0, 0, [(0, 4)])] * 2)
+        _driver(tmp_path / sub, actor, rounds=2, required=1)[0].run()
+        return [(e["policy_tensor_hash"], e["sent_checksum"]) for e in _events(tmp_path / sub / "tape.jsonl")
+                if e["event"] == "rl_publication_check"], getattr(actor, "digest_exports", 0)
+
+    fast, fast_digests = run("fast")
+    monkeypatch.setenv("YETO_RL_PUBLISH_FASTPATH", "0")
+    slow, slow_digests = run("slow")
+    assert fast == slow and len(fast) == 3
+    assert fast_digests == 3 and slow_digests == 0
 
 
 def test_publication_mismatch_on_the_rollouter_replica_fails(tmp_path):

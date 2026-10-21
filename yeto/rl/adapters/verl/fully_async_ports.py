@@ -15,8 +15,8 @@ is decided here and in :mod:`.fully_async_round`.
 * ``train_step`` -- old log-prob -> advantage -> actor update on the actor
   (verl's ``fit_step`` without ``_fit_update_weights``); mismatch criteria in
   the Miles convention on the trainer's DataProto.
-* policy state  -- ``ports_impl.VerlPolicyState`` unchanged: its two island hooks
-  (``export_tensors`` / ``call_workers``) run on the trainer actor's worker group.
+* policy state  -- ``ports_impl.VerlPolicyState`` unchanged: its island hooks
+  (``export_tensors`` / ``export_digest`` / ``call_workers``) run on the trainer actor's worker group.
 * ``publish``   -- the driver has applied the state; the actor pushes it
   through ``checkpoint_manager.update_weights(global_steps=param_version)``,
   resets the rollouter's staleness counter, and the pairing
@@ -41,6 +41,7 @@ from . import publish as pub
 from .fully_async_round import (DISCARD_MECHANISM, FULLY_ASYNC_PLACEMENT, RoundCollector,
                                 SampleMeta, group_metadata)
 from .fully_async_translate import VersionMap
+from .ports_impl import sent_checksum
 from .rollout_events import cutoff_fields
 
 MEMBER = "vllm-rollouter-0"
@@ -83,6 +84,10 @@ class FullyAsyncIsland:
     # hooks of ports_impl.VerlPolicyState (run on the trainer actor's worker group)
     def export_tensors(self) -> tuple[dict, dict]:
         return self.call("yeto_export_lora")
+
+    def export_digest(self, kwargs: dict) -> dict:
+        """rl-publish-fastpath: digests + send checksum computed on the trainer actor."""
+        return self.call("yeto_export_digest", kwargs)
 
     def call_workers(self, fn, *args):
         return self.call("yeto_call_workers", fn, *args)
@@ -251,8 +256,7 @@ class FullyAsyncPublisher:
 
         isl = self.island
         version = int(state.policy_version)
-        lora = state.to_lora()
-        sent = pub.lora_checksum(dict(lora.tensors))
+        sent, payload_bytes = sent_checksum(state)
         (isl.readback_dir / "expected_version").write_text(str(version))
         stale = isl.readback_dir / f"readback-v{version}.json"
         if stale.exists():
@@ -288,7 +292,6 @@ class FullyAsyncPublisher:
         digest = state.policy_tensor_hash()
         isl.published = (version, digest)
         isl.hashes[version] = digest
-        payload_bytes = sum(int(t.numel()) * 2 for t in lora.tensors.values())
         manifest = InferencePublicationManifest(
             publication_mode="full", base_policy_version=None, target_policy_version=version,
             target_policy_hash=digest, target_manifest_hash=_sha(f"{version}:{digest}"),

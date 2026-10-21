@@ -255,6 +255,9 @@ class TrainMemoryConfig:
     max_tokens_per_gpu: int | None = None
     # Share of the optimizer state kept and updated on the host (0 = none).
     optimizer_offload_fraction: float = 0.0
+    # Megatron gradient-accumulation fusion (fused wgrad into main_grad; needs
+    # APEX/TE fused kernels). Off keeps the historical argv.
+    gradient_accumulation_fusion: bool = False
 
 
 @dataclass(frozen=True)
@@ -420,6 +423,10 @@ class ServingConfig:
     # rl-trainer-cold-start-cost L8.2: opt-in SGLang snapshot flags on the
     # sampler (rollout) engines; refused without a recorded compatibility pass.
     sampler_snapshot: bool = False
+    # S26 E6: rollout quantization tier (yeto.rl.quant.tiers; 0 = BF16)
+    rollout_quant_tier: int = 0
+    # tier 1: who quantizes ("engine" online FP8, or "trainer": Miles block FP8 updates)
+    rollout_quant_fp8_source: str = "engine"
 
 
 @dataclass(frozen=True)
@@ -1033,6 +1040,8 @@ def resolve_rl_run_config(
             max_running_requests=getattr(args, "sglang_max_running_requests", None),
             chunked_prefill_size=getattr(args, "sglang_chunked_prefill_size", None),
             sampler_snapshot=bool(getattr(args, "rl_sampler_snapshot", False)),
+            rollout_quant_tier=int(getattr(args, "rl_rollout_quant_tier", 0) or 0),
+            rollout_quant_fp8_source=_fp8_source(args),
         ),
         ports=NetworkPorts(
             rollout_engine_base_port=getattr(args, "rollout_engine_base_port", None),
@@ -1080,6 +1089,12 @@ def resolve_rl_run_config(
     )
 
 
+def _fp8_source(args) -> str:
+    from ..quant.tiers import fp8_source
+
+    return fp8_source(args)
+
+
 def _train_memory(args) -> TrainMemoryConfig:
     max_tokens = getattr(args, "rl_max_tokens_per_gpu", None)
     if max_tokens is not None and int(max_tokens) < int(args.seq_len):
@@ -1094,6 +1109,7 @@ def _train_memory(args) -> TrainMemoryConfig:
         activation_recompute=bool(getattr(args, "rl_activation_recompute", False)),
         max_tokens_per_gpu=int(max_tokens) if max_tokens is not None else None,
         optimizer_offload_fraction=offload,
+        gradient_accumulation_fusion=bool(getattr(args, "rl_gradient_accumulation_fusion", False)),
     )
 
 

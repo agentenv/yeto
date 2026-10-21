@@ -33,6 +33,18 @@ Modules:
 * :mod:`.shards`: per-rank quantization into part files and their merge (R3).
 * :mod:`.release`: the side process that turns BF16 releases into quantized ones.
 
+S26 E6 (quantized rollout tiers) adds:
+
+* :mod:`.scope`: which linears a quantized rollout may quantize (dense FFN, MoE
+  routed experts; router, lm_head, embeddings, norms, attention stay BF16);
+* :mod:`.fp8`: per-channel FP8 E4M3 quantize / dequantize (W8A8, tier 2);
+* :mod:`.tiers`: the ``--rl-rollout-quant-tier`` setting, its launch checks and
+  the SGLang / vLLM online FP8 plans (tier 1);
+* :mod:`.gate`: the logprob / TIS / speed gate of a tier against BF16.
+
+The FP8 scheme derives its target layout from the BF16 checkpoint and the
+scope rule (:func:`.requant.scoped_layout`), not from a reference artefact.
+
 Trainer adapters: :mod:`yeto.rl.adapters.miles.quant_shards` (Megatron) and
 :mod:`yeto.rl.adapters.verl.quant_shards` (FSDP2).
 """

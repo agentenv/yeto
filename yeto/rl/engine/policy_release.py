@@ -297,6 +297,15 @@ class PolicyReleaseStore:
         if latest is not None and (latest.version, latest.policy_hash) == (version, policy_hash):
             return None
         seq = 1 if latest is None else latest.seq + 1
+        with self.store.writing():  # no reload drops the files before they are committed
+            return self._write_release(seq, version, policy_hash, write, buffer_selected=buffer_selected,
+                                       weights=weights, engine_checksum=engine_checksum,
+                                       buffer_shards=buffer_shards, derived_from=derived_from, origin=origin)
+
+    def _write_release(self, seq: int, version: int, policy_hash: str, write: Callable[[Path], None], *,
+                       buffer_selected: int | None, weights: str, engine_checksum: str | None,
+                       buffer_shards: dict[str, int] | None, derived_from: dict[str, Any] | None,
+                       origin: dict[str, Any] | None) -> PolicyRelease:
         name = f"r{seq}-v{version}"
         directory = self.root / name
         if directory.exists():  # a partial release of an earlier attempt (no LATEST names it)

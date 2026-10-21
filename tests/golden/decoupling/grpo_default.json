@@ -59,6 +59,10 @@
   "bridge",
   "--model-name",
   "SimpleNamespace",
+  "--attention-dropout",
+  "0.0",
+  "--hidden-dropout",
+  "0.0",
   "--num-layers",
   "2",
   "--hidden-size",
@@ -191,7 +195,7 @@
   "10",
   "--group-query-attention"
  ],
- "miles_argv_sha256": "cd9c51c2946a4e45bb63cd153ae64bc3ec0e3e998cf3d5e64fe6d4ed882c156b",
+ "miles_argv_sha256": "bb315aa0c82a03c2821899a3a376db84f09d30f1d32e2f6640833aec455d8634",
  "name": "grpo_default",
  "placement": {
   "allow_cross_node_engine_tp": false,
