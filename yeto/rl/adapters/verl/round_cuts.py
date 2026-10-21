@@ -31,6 +31,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from yeto.rl.engine.resume import DEFAULT_CUT_EVERY
+
 RESUME_FLAGS = ("rl_cut_every", "rl_cut_keep", "rl_stop_after_rounds")
 DEFAULT_STATE_DIR = "~/yeto-rl/resume-state"
 # VerlRunConfig fields that may change between a cut and the launch resuming it:
@@ -77,7 +79,7 @@ def resume_config(args: Any) -> dict[str, Any] | None:
     return {
         "store": str(store),
         "state_dir": str(getattr(args, "rl_resume_state_dir", None) or DEFAULT_STATE_DIR),
-        "every": int(getattr(args, "rl_cut_every", None) or 1),
+        "every": int(getattr(args, "rl_cut_every", None) or DEFAULT_CUT_EVERY),
         "keep": int(getattr(args, "rl_cut_keep", None) or 2),
         "allow_config_change": bool(getattr(args, "rl_resume_allow_config_change", False)),
         "stop_after": (None if getattr(args, "rl_stop_after_rounds", None) is None

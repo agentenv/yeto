@@ -453,6 +453,12 @@ def check_lr_continues(expected: list[float] | None, applied: list[float] | None
     return None
 
 
+# E1 (product default since 2026-10-21): a round cut every 4 rounds (and always at the
+# end); --rl-cut-every 1 cuts every round. The publication checks follow the same
+# interval (driver.verify_publication).
+DEFAULT_CUT_EVERY = 4
+
+
 def should_cut(rollout_id: int, *, every: int, final: bool = False, stop: bool = False) -> bool:
     """Cut at the safe point before ``rollout_id`` every ``every`` rounds, and always at
     the end (last round, our own stop)."""

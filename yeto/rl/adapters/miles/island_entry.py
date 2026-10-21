@@ -18,6 +18,7 @@ from typing import Any
 
 from yeto.rl.bridge import BridgeConfig
 from yeto.rl.decoupled import DecoupledBridgeConfig
+from yeto.rl.engine.resume import DEFAULT_CUT_EVERY
 from yeto.rl.engine.run_flags import ISLAND, add_rl_flags, rl_option_pairs
 from yeto.rl.adapters.miles.models.deepseek_v4.expert_full import expert_full_specs
 from yeto.rl.export import adapter_targets, derive_peft_lora_specs
@@ -335,7 +336,7 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
         miles_args.yeto_rl_resume = {
             "store": str(args.rl_resume_store),
             "state_dir": str(getattr(args, "rl_resume_state_dir", None) or "~/yeto-rl/resume-state"),
-            "every": int(getattr(args, "rl_cut_every", None) or 1),
+            "every": int(getattr(args, "rl_cut_every", None) or DEFAULT_CUT_EVERY),
             "keep": int(getattr(args, "rl_cut_keep", None) or 2),
             "allow_config_change": bool(getattr(args, "rl_resume_allow_config_change", False)),
             "stop_after": (None if getattr(args, "rl_stop_after_rounds", None) is None

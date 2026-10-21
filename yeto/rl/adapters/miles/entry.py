@@ -26,6 +26,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
+from yeto.rl.engine.resume import DEFAULT_CUT_EVERY
 from yeto.rl.engine.algorithm import (
     BOUNDED_NONZERO_STD_FILTER,
     SECRLENV_GROUP_CHECK_FILTER,
@@ -1042,7 +1043,7 @@ def _wire_round_cuts(driver, *, elastic, miles_args, algorithm, base_model_revis
     checkpoint = wire_round_cuts(
         driver, controller=controller, source=source,
         every=int(getattr(elastic, "every", None) or config.get("every")
-                  or getattr(miles_args, "yeto_rl_resume_every", None) or 1),
+                  or getattr(miles_args, "yeto_rl_resume_every", None) or DEFAULT_CUT_EVERY),
         fingerprint=run_fingerprint_of(miles_args, algorithm),
         allow_config_change=bool(getattr(elastic, "allow_config_change", False)
                                  or config.get("allow_config_change", False)),

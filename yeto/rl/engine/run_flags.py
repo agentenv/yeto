@@ -497,8 +497,8 @@ _RUNTIME = (
                 help="ports: record per-round timeline labels (rl-infra-spec 1.7); off by default"),
     shared_flag("--rl-verify-every-round", action="store_true",
                 help="ports: hash the policy and read the engine weight checksums back at every "
-                "publication (default: at round-cut rounds, the first publication and every "
-                "--rl-cut-every rounds)"),
+                "publication (default: on the first publication and on every --rl-cut-every-th "
+                "round, which includes every round that keeps a round cut)"),
     shared_flag("--rl-profile-trainer", action="store_true",
                 help="ports, observation only (E1): per training step, print where the trainer "
                 "process spends its time (stack samples, GC pauses, CUDA allocator counters)"),
@@ -558,7 +558,9 @@ _RESUME = (
     # rl-resume-from-checkpoint (S17 C4)
     shared_flag("--rl-cut-every", type=int, default=None,
                 help="with --rl-checkpoint-store: keep a round cut every N rounds (plus the "
-                "last round and our own stop); default 1"),
+                "last round and our own stop); default 4 (1: every round). The publication "
+                "checks (policy hash, engine weight read-back) run at the same interval and "
+                "on the first publication; see --rl-verify-every-round"),
     shared_flag("--rl-cut-keep", type=int, default=None,
                 help="with --rl-checkpoint-store and no --rl-elastic: keep the newest K cuts "
                 "(default 2); older ones are deleted only after the new LATEST is committed"),

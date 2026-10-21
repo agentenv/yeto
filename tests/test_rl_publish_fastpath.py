@@ -362,3 +362,59 @@ def test_the_driver_defers_only_for_a_colocated_offloading_trainer(monkeypatch):
     assert not state.digest.is_resolved
     monkeypatch.setenv("YETO_RL_DEFERRED_DIGEST", "0")
     assert defer_digest(driver) is False
+
+
+# E1: which publications are verified (policy hash + engine read-back)
+def _verify_driver(ps, *, every, published, cut_due=lambda v: False, all_rounds=False):
+    from yeto.rl.engine import driver as driver_mod
+
+    sync = SimpleNamespace(round_cuts=SimpleNamespace(every=every), cut_due=cut_due)
+    return SimpleNamespace(policy_state=ps, sync=sync, published_version=published,
+                           verify_every_round=all_rounds), driver_mod.verify_publication
+
+
+def test_cut_first_and_every_k_rounds_are_verified_and_the_switch_verifies_all():
+    ranks, group, ps = make()
+    d, verify = _verify_driver(ps, every=4, published=None)
+    assert verify(d, 1)  # the first publication
+    d, verify = _verify_driver(ps, every=4, published=1, cut_due=lambda v: v == 6)
+    assert [v for v in range(2, 10) if verify(d, v)] == [4, 6, 8]  # every 4th and a due cut
+    d, verify = _verify_driver(ps, every=4, published=1, all_rounds=True)
+    assert all(verify(d, v) for v in range(2, 10))  # --rl-verify-every-round
+    d, verify = _verify_driver(ps, every=1, published=1)
+    assert all(verify(d, v) for v in range(2, 10))  # --rl-cut-every 1: every round
+    d, verify = _verify_driver(SimpleNamespace(), every=4, published=1)
+    assert verify(d, 3)  # a policy state that cannot skip: every round
+
+
+def test_an_unverified_round_still_checks_the_trainer_holds_its_policy():
+    ranks, group, ps = make()
+    for r in ranks:
+        r.train_step()
+    verified = ps.export_digest(policy_version=2)
+    group.calls.clear()
+    unverified = ps.export_identity(policy_version=3)
+    assert sp.EXPORT_DIGEST not in group.calls  # no export, no hash
+    assert unverified.verified is False and unverified.tensor_names == verified.tensor_names
+    assert unverified.policy_tensor_hash() != verified.policy_tensor_hash()
+    assert len(unverified.policy_tensor_hash()) == 64
+    unverified.check_holds()
+    _step(ranks)
+    with pytest.raises(WeightsChanged):
+        unverified.check_holds()
+
+
+def test_an_unverified_publication_is_never_committed_as_a_cut():
+    from yeto.rl.engine.controller import RebuildRefused
+    from yeto.rl.engine.round_cut import CutSource
+
+    ranks, group, ps = make()
+    ps.export_digest(policy_version=1)
+    unverified = ps.export_identity(policy_version=2)
+    source = CutSource.__new__(CutSource)
+    source.driver_ref = SimpleNamespace(published_version=2, published_state=unverified, at_safe_point=True,
+                                        expected_token="yeto:2:" + "0" * 64)
+    with pytest.raises(RebuildRefused, match="not verified"):
+        source.context("r000002-x")
+    with pytest.raises(RebuildRefused, match="not verified"):
+        source.context("r000002-x", pending=(2, unverified))

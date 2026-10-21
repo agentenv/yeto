@@ -95,6 +95,8 @@ def test_yeto_arms_use_the_same_policy_age_and_partition():
     every = spec.get_spec(SPEC.name, checkpoint="every-round")
     assert "--rl-cut-every 1 " in spec.yeto_miles_launcher_args(every, "async", "r1")
     assert spec.control_fingerprint(every) == spec.control_fingerprint(SPEC)  # bare arms unchanged
+    default = spec.get_spec(SPEC.name, checkpoint="default")
+    assert "--rl-cut-every" not in spec.yeto_miles_launcher_args(default, "async", "r1")
     with pytest.raises(ValueError):
         spec.cut_every(spec.get_spec(SPEC.name, checkpoint="never"))
 
