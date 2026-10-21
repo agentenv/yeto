@@ -128,15 +128,15 @@ def test_online_plan_on_a_dense_checkpoint(dense):
     assert set(env) == {"SGLANG_FP8_IGNORED_LAYERS"}
     entries = env["SGLANG_FP8_IGNORED_LAYERS"].split(",")
     assert "model.layers.1.self_attn.o_proj" in entries and not any("mlp.up_proj" in e for e in entries)
-    assert tiers.sglang_online_argv() == ["--sglang-quantization", "fp8", "--sglang-kv-cache-dtype", "fp8_e4m3"]
+    assert tiers.sglang_online_argv() == ["--sglang-quantization", "fp8"]
 
 
 def test_vllm_overrides_carry_verl_fp8_config_with_our_ignore_list(dense):
     plan = tiers.online_plan(dense)
     overrides = tiers.vllm_online_overrides(plan, tiers.num_hidden_layers(dense))
     assert overrides[0] == "actor_rollout_ref.rollout.quantization=fp8"
-    assert overrides[1] == "++actor_rollout_ref.rollout.engine_kwargs.vllm.kv_cache_dtype=fp8"
-    key, value = overrides[2].split("=", 1)
+    assert not any("kv_cache_dtype" in o for o in overrides)  # KV cache stays BF16 (gate, 10-21)
+    key, value = overrides[1].split("=", 1)
     assert key == "++actor_rollout_ref.rollout.engine_kwargs.vllm.hf_overrides"
     assert value.startswith("'") and value.endswith("'")
     config = json.loads(value[1:-1])["quantization_config"]
@@ -208,6 +208,9 @@ def test_scoped_layout_quantizes_only_the_dense_ffn(dense, tmp_path):
     q = config["quantization_config"]
     assert (q["quant_method"], q["format"]) == ("compressed-tensors", "float-quantized")
     assert {"model.layers.0.self_attn.o_proj", "model.embed_tokens", "lm_head"} <= set(q["ignore"])  # lm_head tied, absent
+    # fused alias for engines without a packed_modules_mapping (SGLang Qwen3); FFN stays quantized
+    assert "model.layers.0.self_attn.qkv_proj" in q["ignore"]
+    assert not any(name.endswith("gate_up_proj") for name in q["ignore"])
     assert CheckpointLayout.load(tmp_path / "t").quantized_modules == layout.quantized_modules
     assert (tmp_path / "t" / "tokenizer.json").is_file()
 
@@ -219,7 +222,9 @@ def test_scoped_layout_quantizes_only_moe_routed_experts(moe):
                                                  for p in ("gate_proj", "up_proj", "down_proj"))
     ignore = set(layout.quantization_config["ignore"])
     assert {"model.layers.1.mlp.gate", "model.layers.1.mlp.shared_expert.up_proj", "lm_head",
-            "model.layers.0.mlp.up_proj"} <= ignore
+            "model.layers.0.mlp.up_proj", "model.layers.0.mlp.gate_up_proj",
+            "model.layers.1.mlp.shared_expert.gate_up_proj"} <= ignore
+    assert not any(".experts." in name for name in ignore)
 
 
 def test_scoped_layout_refuses_unknown_scheme_and_empty_scope(tmp_path):
@@ -335,7 +340,7 @@ def test_miles_translation_adds_sglang_flags_only_for_tier_1():
     tier1 = mc.translate_run_config(sub(make_config(), "serving", rollout_quant_tier=1), AlgorithmSpec())
     argv = list(tier1.argv)
     assert argv[argv.index("--sglang-quantization") + 1] == "fp8"
-    assert argv[argv.index("--sglang-kv-cache-dtype") + 1] == "fp8_e4m3"
+    assert "--sglang-kv-cache-dtype" not in argv
     assert tier1.runtime_attrs["yeto_rollout_quant_tier"] == 1
     tier2 = mc.translate_run_config(sub(make_config(), "serving", rollout_quant_tier=2), AlgorithmSpec())
     assert "--sglang-quantization" not in tier2.argv and tier2.runtime_attrs["yeto_rollout_quant_tier"] == 2

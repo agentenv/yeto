@@ -5,8 +5,7 @@ sampler spec (:func:`spec_section`); the engine sampler entry calls ``APPLY`` on
 the sampler node before it builds anything (the checkpoint is only there). The
 function returns a new spec with the engine settings of the tier filled in:
 
-* tier 1, ``sglang-server`` only: ``--quantization fp8 --kv-cache-dtype
-  fp8_e4m3`` and ``SGLANG_FP8_IGNORED_LAYERS`` from the checked online plan of
+* tier 1, ``sglang-server`` only: ``--quantization fp8`` (KV cache BF16) and ``SGLANG_FP8_IGNORED_LAYERS`` from the checked online plan of
   ``base_dir`` (:func:`yeto.rl.quant.tiers.online_plan`). ``vllm-server`` is
   refused: stand-alone vLLM online FP8 has no ignore list, so it would quantize
   attention (verl passes one through its own FP8 path instead);
@@ -68,8 +67,7 @@ def apply(spec: Mapping[str, Any], *, work_dir: Path | None = None) -> dict[str,
             raise QuantTierSpecError(f"{tiers.FLAG} 1 on {adapter}: stand-alone vLLM online FP8 has no ignore "
                                      "list and would quantize attention; use sglang-server or tier 2")
         plan = tiers.online_plan(base)
-        server["extra_args"] = [*(server.get("extra_args") or ()), "--quantization", "fp8",
-                                "--kv-cache-dtype", tiers.SGLANG_KV_CACHE_DTYPE]
+        server["extra_args"] = [*(server.get("extra_args") or ()), "--quantization", "fp8"]
         server["extra_env"] = {**(server.get("extra_env") or {}), **tiers.sglang_online_env(plan)}
         server["precision"] = "fp8"  # provenance of the samples; the release scheme stays bf16
         out["rollout_quant"] = {**out["rollout_quant"], "plan": plan.summary()}

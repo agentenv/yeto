@@ -190,7 +190,9 @@ def collect(quant: Any, bf16: Any, prompts: Sequence[str], sampling: Any,
         raw: list[dict[str, Any]] = []
         for prompt_index, (prompt, group) in enumerate(zip(prompts, generated)):
             for sample_index, completion in enumerate(group):
-                scores = list(bf16.score(prompt, completion.text))
+                # by token ids when the engine can (a trailing EOS has no text to re-tokenize)
+                scores = (list(bf16.score_tokens(prompt, completion.token_ids)) if hasattr(bf16, "score_tokens")
+                          else list(bf16.score(prompt, completion.text)))
                 pairs.append(Pair(tuple(completion.logprobs), tuple(scores)))
                 raw.append({"prompt_index": prompt_index, "sample": sample_index,
                             "token_ids": list(completion.token_ids), "quant_logprobs": list(completion.logprobs),

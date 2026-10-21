@@ -386,7 +386,8 @@ def scoped_layout(source_dir: Path, scheme_name: str) -> tuple[CheckpointLayout,
         tensors[module + SCALE_SUFFIX] = TensorSpec("F32", (data.shape[0], 1), data.shard)
     # ``lm_head`` is listed even when tied to the embeddings and absent from the
     # checkpoint (llm-compressor does the same): no loader may treat it as quantized.
-    config = _fp8_quantization_config(sorted(set(quant_scope.ignored_modules(shapes, kind)) | {"lm_head"}))
+    config = _fp8_quantization_config(
+        quant_scope.with_fused_aliases([*quant_scope.ignored_modules(shapes, kind), "lm_head"]))
     layout = CheckpointLayout(tensors, config)
     layout.validate()
     return layout, kind

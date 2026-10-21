@@ -144,3 +144,25 @@ def test_sglang_is_layer_skipped_keeps_out_of_scope_engine_modules(kind, shapes,
     ignore = scope.engine_ignore_list(shapes, kind)
     got = {prefix: bool(utils.is_layer_skipped(prefix, ignore)) for prefix in engine_modules}
     assert got == engine_modules
+
+
+def test_with_fused_aliases_adds_only_complete_groups():
+    got = scope.with_fused_aliases(["a.self_attn.q_proj", "a.self_attn.k_proj", "a.self_attn.v_proj",
+                                    "b.mlp.gate_proj", "lm_head"])
+    assert "a.self_attn.qkv_proj" in got and "b.mlp.gate_up_proj" not in got and "lm_head" in got
+
+
+@pytest.mark.parametrize("kind,shapes,engine_modules", [
+    (DENSE, dense_shapes(), {"model.layers.0.self_attn.qkv_proj": True, "model.layers.0.self_attn.o_proj": True,
+                             "model.layers.0.mlp.gate_up_proj": False, "model.layers.0.mlp.down_proj": False}),
+    (MOE, moe_shapes(), {"model.layers.1.self_attn.o_proj": True, "model.layers.1.mlp.gate": True,
+                         "model.layers.1.mlp.shared_expert.gate_up_proj": True,
+                         "model.layers.0.mlp.gate_up_proj": True}),
+])
+def test_sglang_compressed_tensors_ignore_without_packed_mapping(kind, shapes, engine_modules):
+    """Tier 2 checkpoint ignore list under SGLang's compressed-tensors rule with an empty
+    ``packed_modules_mapping`` (Qwen3ForCausalLM sets none; e6-gate-t2 on the card)."""
+    ct_utils = pytest.importorskip("sglang.srt.layers.quantization.compressed_tensors.utils")
+    ignore = scope.with_fused_aliases([*scope.ignored_modules(shapes, kind), "lm_head"])
+    got = {p: bool(ct_utils.should_ignore_layer(p, ignore=ignore, fused_mapping={})) for p in engine_modules}
+    assert got == engine_modules

@@ -136,6 +136,31 @@ def ignored_modules(tensors: Mapping[str, Sequence[int]], kind: str) -> list[str
     return [m for m in linear_modules(tensors) if not in_scope(m, kind)]
 
 
+# Fused engine modules and their checkpoint shards (SGLang / vLLM ``packed_modules_mapping``).
+FUSED_SHARDS: dict[str, tuple[str, ...]] = {
+    "qkv_proj": ("q_proj", "k_proj", "v_proj"),
+    "gate_up_proj": ("gate_proj", "up_proj"),
+}
+
+
+def with_fused_aliases(modules: Iterable[str]) -> list[str]:
+    """``modules`` plus the fused engine name of every group whose shards are all listed
+    (``...self_attn.q/k/v_proj`` -> ``...self_attn.qkv_proj``).
+
+    SGLang 2fa88018 compressed-tensors matches its ``ignore`` list against the fused
+    module name and falls back to the shards only through the model class's
+    ``packed_modules_mapping``, which Qwen3ForCausalLM does not set: without the
+    alias ``qkv_proj`` was given the FP8 scheme on the card (e6-gate-t2, 10-21)."""
+    listed = set(modules)
+    aliases = set()
+    for module in listed:
+        parent, _, leaf = module.rpartition(".")
+        for fused, shards in FUSED_SHARDS.items():
+            if leaf in shards and all(f"{parent}.{shard}" in listed for shard in shards):
+                aliases.add(f"{parent}.{fused}" if parent else fused)
+    return sorted(listed | aliases)
+
+
 def checkpoint_shapes(checkpoint: Path) -> dict[str, list[int]]:
     """Tensor name -> shape of a safetensors checkpoint, from the shard headers only."""
     checkpoint = Path(checkpoint)

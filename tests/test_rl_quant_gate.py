@@ -104,3 +104,39 @@ def test_records_cli_writes_the_report_and_sets_the_exit_code(tmp_path: Path):
     criteria.write_text(json.dumps({"max_mean_abs_diff": 0.001}))
     assert gate.main(["records", "--records", str(records), "--criteria", str(criteria), "--out", str(out)]) == 1
     assert not json.loads(out.read_text())["verdict"]["passed"]
+
+
+class TokenScoringStub(StubEngine):
+    """Text scoring drops the trailing EOS (one token short); token scoring does not."""
+
+    def score(self, prompt, continuation):
+        return [-0.5] * (self.tokens - 1)
+
+    def score_tokens(self, prompt, token_ids):
+        self.calls.append(("score_tokens", tuple(token_ids)))
+        return [-0.5] * len(token_ids)
+
+
+def test_collect_scores_by_token_ids_when_the_engine_can():
+    quant, bf16 = StubEngine(0.0), TokenScoringStub(0.0)
+    pairs, _speed, _raw = gate.collect(quant, bf16, ["a"], SamplingParams(max_tokens=8, n=1), clock=lambda: 1.0)
+    assert ("score_tokens", (0, 1, 2, 3)) in bf16.calls
+    assert gate.compare(pairs, GateCriteria())["unaligned_completions"] == 0
+
+
+def test_sglang_score_tokens_sends_the_exact_ids(monkeypatch):
+    from yeto.rl.adapters.sampler_engines.sglang_server import SGLangServerEngine
+
+    sent = []
+
+    def call(self, method, path, body):
+        sent.append(body)
+        if "text" in body:  # the prompt: two tokens
+            return {"meta_info": {"input_token_logprobs": [[None, 7, None], [-0.1, 8, None]]}}
+        return {"meta_info": {"input_token_logprobs": [[None, 7, None], [-0.1, 8, None],
+                                                       [-0.2, 5, None], [-0.3, 151645, None]]}}
+
+    monkeypatch.setattr(SGLangServerEngine, "call", call)
+    engine = SGLangServerEngine.__new__(SGLangServerEngine)
+    assert engine.score_tokens("p", [5, 151645]) == [-0.2, -0.3]
+    assert sent[1]["input_ids"] == [7, 8, 5, 151645]

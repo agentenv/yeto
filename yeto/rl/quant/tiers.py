@@ -9,10 +9,12 @@ tier    name             what changes
 ======  ===============  =====================================================
 0       ``bf16``         nothing (default)
 1       ``online-fp8``   the sampler engine quantizes the in-scope linears to
-                         FP8 itself at load and keeps the KV cache in FP8
-                         (SGLang ``--quantization fp8 --kv-cache-dtype
-                         fp8_e4m3``; vLLM ``quantization=fp8``,
-                         ``kv_cache_dtype=fp8``)
+                         FP8 itself at load (SGLang ``--quantization fp8``;
+                         vLLM ``quantization=fp8``); KV cache stays BF16:
+                         an FP8 KV cache without calibrated scales failed
+                         the gate on Qwen3-4B (p99 |diff| 0.82 against 0.46
+                         with a BF16 KV cache, limit 0.5; e6-gate-t1-r3 /
+                         e6-gate-t1-bf16kv, 2026-10-21)
 2       ``trainer-fp8``  the trainer side converts each BF16 release to FP8
                          W8A8 per channel on the in-scope linears
                          (:data:`~.schemes.FP8_FFN_CHANNEL`) and the sampler
@@ -67,8 +69,6 @@ TIERS = tuple(TIER_NAMES)
 
 FLAG = "--rl-rollout-quant-tier"
 SGLANG_IGNORE_ENV = "SGLANG_FP8_IGNORED_LAYERS"
-SGLANG_KV_CACHE_DTYPE = "fp8_e4m3"
-VLLM_KV_CACHE_DTYPE = "fp8"
 # verl's own FP8 rollout config (fork acad9875 vllm_async_server.py:1373); the
 # ignore list is replaced by ours, which keeps verl's ``mlp.gate`` entries.
 VLLM_FP8_CONFIG = {"activation_scheme": "dynamic", "fmt": "e4m3", "quant_method": "fp8",
@@ -167,7 +167,7 @@ def online_plan(checkpoint: Path) -> OnlinePlan:
 
 def sglang_online_argv() -> list[str]:
     """Miles spellings of the SGLang tier 1 server flags (Miles prefixes SGLang's own)."""
-    return ["--sglang-quantization", "fp8", "--sglang-kv-cache-dtype", SGLANG_KV_CACHE_DTYPE]
+    return ["--sglang-quantization", "fp8"]
 
 
 def sglang_online_env(plan: OnlinePlan) -> dict[str, str]:
@@ -195,7 +195,6 @@ def vllm_online_overrides(plan: OnlinePlan, num_layers: int) -> list[str]:
     if "'" in hf_overrides:
         raise scope.QuantScopeError("a module name holds a single quote; it cannot be a Hydra quoted value")
     return ["actor_rollout_ref.rollout.quantization=fp8",
-            f"++actor_rollout_ref.rollout.engine_kwargs.vllm.kv_cache_dtype={VLLM_KV_CACHE_DTYPE}",
             f"++actor_rollout_ref.rollout.engine_kwargs.vllm.hf_overrides='{hf_overrides}'"]
 
 

@@ -43,7 +43,7 @@ def test_spec_section_and_tier_0_is_unchanged(dense):
 def test_tier_1_fills_sglang_flags_and_ignore_list(dense):
     out = apply_rollout_quant(_spec(dense, 1))
     server = out["engine"]["server"]
-    assert server["extra_args"] == ["--quantization", "fp8", "--kv-cache-dtype", "fp8_e4m3"]
+    assert server["extra_args"] == ["--quantization", "fp8"]
     assert "model.layers.0.self_attn.q_proj" in server["extra_env"][tiers.SGLANG_IGNORE_ENV]
     assert server["quant_scheme"] == "bf16" and server["precision"] == "fp8"
     assert out["release_dir"] == "policy-releases" and out["rollout_quant"]["plan"]["quantized_modules"] == 6
