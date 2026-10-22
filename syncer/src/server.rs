@@ -20,6 +20,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+use crate::membership::{Admission, AdmitError, CapacityQuorum, Member, Membership};
 use crate::protocol::*;
 use crate::state::{
     remove_final_marker, write_final_marker, ComputedMerge, GlobalState, Layout, PreparedMerge,
@@ -135,6 +136,10 @@ pub struct Config {
     pub syncer_epoch: u64,
     /// elastic: final grace window after total_steps; None = soft deadline.
     pub elastic_final_grace_s: Option<u64>,
+    /// Dynamic membership of the fragment-round server (leases, re-JOIN,
+    /// fencing, capacity quorum, soft deadline, carry discount). The default
+    /// keeps the fixed-membership behavior.
+    pub membership: crate::membership::MembershipConfig,
 }
 
 // v2 drops `resume`: it is how a run (re)starts, not its semantics, so a
@@ -228,11 +233,6 @@ struct PartialMsg {
     ranges: Vec<(usize, usize)>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-struct Member {
-    learner_id: u32,
-    generation: u64,
-}
 
 struct Group {
     member: Member,
@@ -516,19 +516,63 @@ struct RegistryState {
     /// Every still-connected generation, including one retained solely for
     /// a round that captured it before a reconnect or duplicate HELLO.
     groups: HashMap<Member, Arc<Group>>,
+    /// Leases and fencing; admission runs under this registry lock.
+    membership: Membership,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum RegisterError {
+    /// This exact generation is still connected.
+    Duplicate,
+    Fenced(AdmitError),
 }
 
 impl RegistryState {
+    fn new(membership: Membership) -> Self {
+        Self { membership, ..Self::default() }
+    }
+
     /// Atomically register one control connection generation. Returning an
-    /// error leaves both maps untouched, so an identical concurrent HELLO
-    /// cannot replace a live group and later remove it on disconnect.
-    fn register_group(&mut self, group: Arc<Group>) -> std::result::Result<Option<Member>, ()> {
+    /// error leaves every map untouched, so an identical concurrent HELLO
+    /// cannot replace a live group and later remove it on disconnect, and a
+    /// retired generation cannot come back.
+    fn register_group(
+        &mut self,
+        group: Arc<Group>,
+        now: Instant,
+    ) -> std::result::Result<(Option<Member>, Admission), RegisterError> {
         let member = group.member;
         if self.groups.contains_key(&member) {
-            return Err(());
+            return Err(RegisterError::Duplicate);
         }
+        let admission = self.membership.admit(member, now).map_err(RegisterError::Fenced)?;
         self.groups.insert(member, group);
-        Ok(self.current.insert(member.learner_id, member))
+        Ok((self.current.insert(member.learner_id, member), admission))
+    }
+
+    /// The control connection of `member` closed.
+    fn unregister(&mut self, member: Member) {
+        self.groups.remove(&member);
+        if self.current.get(&member.learner_id) == Some(&member) {
+            self.current.remove(&member.learner_id);
+        }
+        self.membership.depart(member);
+    }
+
+    /// Remove members whose lease expired from future rounds. Their
+    /// connections stay registered until they close, so rounds that already
+    /// captured them keep a valid group, but they can no longer renew.
+    fn expire_leases(&mut self, now: Instant) -> Vec<(Member, Option<Arc<Group>>)> {
+        let expired = self.membership.expire(now);
+        expired
+            .into_iter()
+            .map(|member| {
+                if self.current.get(&member.learner_id) == Some(&member) {
+                    self.current.remove(&member.learner_id);
+                }
+                (member, self.groups.get(&member).cloned())
+            })
+            .collect()
     }
 }
 
@@ -704,6 +748,22 @@ fn validate_config(cfg: &Config) -> Result<()> {
     }
     if cfg.mark_final_checkpoint && cfg.checkpoint_path.is_none() {
         bail!("--mark-final-checkpoint requires --checkpoint-path");
+    }
+    cfg.membership.validate(cfg.learners, cfg.quorum)?;
+    if !cfg.membership.is_static() {
+        // Dynamic membership needs rounds that may merge without some island.
+        let fixed_roster =
+            cfg.max_base_lag == Some(0) && cfg.quorum == cfg.learners && cfg.grace_ms == 0;
+        if fixed_roster
+            || cfg.policy_sweep_fragments.is_some()
+            || cfg.learner_budget_steps.is_some()
+        {
+            bail!(
+                "dynamic membership options (lease, soft deadline, capacity quorum, carry \
+                 discount, max learners) need non-fixed rounds: not with a strict fixed roster, \
+                 --policy-sweep-fragments, or --learner-budget-steps"
+            );
+        }
     }
     if let Some(fragments) = cfg.policy_sweep_fragments {
         if fragments == 0 {
@@ -962,7 +1022,11 @@ pub async fn run(cfg: Config) -> Result<()> {
         "syncer listening"
     );
     let (event_tx, event_rx) = mpsc::channel::<Event>(1024);
-    let registry: Registry = Arc::new(Mutex::new(RegistryState::default()));
+    let expected_learners = cfg.membership.id_limit(cfg.learners);
+    let registry: Registry = Arc::new(Mutex::new(RegistryState::new(Membership::new(
+        cfg.membership.clone(),
+        expected_learners,
+    ))));
     let session: Session = Arc::new(Mutex::new(None));
     let budget_cutoff = Arc::new(BudgetCutoff::new(
         cfg.learner_budget_steps.is_some(),
@@ -972,7 +1036,6 @@ pub async fn run(cfg: Config) -> Result<()> {
     let accept_registry = registry.clone();
     let accept_session = session.clone();
     let accept_budget_cutoff = budget_cutoff.clone();
-    let expected_learners = cfg.learners;
     let require_profile_binding = cfg.require_profile_binding;
     let hello_auth = Arc::new(HelloAuth {
         key: cfg.island_hmac_key.clone(),
@@ -1373,13 +1436,24 @@ async fn handle_connection(
                 rr: AtomicUsize::new(0),
                 reasm: Mutex::new(HashMap::new()),
             });
-            let registration = { registry.lock().unwrap().register_group(group.clone()) };
+            let registration =
+                { registry.lock().unwrap().register_group(group.clone(), Instant::now()) };
             let replaced = match registration {
-                Ok(replaced) => replaced,
-                Err(()) => {
-                    let message = format!(
-                        "duplicate connection generation {generation} for learner {learner_id}"
-                    );
+                Ok((replaced, admission)) => {
+                    if admission == Admission::Rejoin {
+                        info!(learner_id, generation, "island re-joined after lease expiry");
+                    }
+                    replaced
+                }
+                Err(error) => {
+                    let message = match error {
+                        RegisterError::Duplicate => format!(
+                            "duplicate connection generation {generation} for learner {learner_id}"
+                        ),
+                        RegisterError::Fenced(reason) => format!(
+                            "refused generation {generation} for learner {learner_id}: {reason}"
+                        ),
+                    };
                     send_direct(&mut wr, MSG_ERROR, message.as_bytes()).await?;
                     bail!(message);
                 }
@@ -1404,13 +1478,7 @@ async fn handle_connection(
                 .await
                 .ok();
             let res = read_loop(&mut rd, &group, &event_tx, &budget_cutoff).await;
-            {
-                let mut registry = registry.lock().unwrap();
-                registry.groups.remove(&member);
-                if registry.current.get(&learner_id) == Some(&member) {
-                    registry.current.remove(&learner_id);
-                }
-            }
+            registry.lock().unwrap().unregister(member);
             event_tx.send(Event::Disconnected { member }).await.ok();
             res
         }
@@ -2266,6 +2334,7 @@ async fn scheduler(
             cutoff_established = true;
             break 'outer;
         }
+        expire_member_leases(&registry, &mut inflight, &mut step_rates).await;
         // Commit only the contiguous prefix.  A faster cuda:N worker can put
         // t+1 in `ready` first, but it cannot update Nesterov/version/tape or
         // broadcast until t has committed.
@@ -2380,6 +2449,9 @@ async fn scheduler(
                 quorum_deadline: Instant::now() + Duration::from_secs(cfg.quorum_timeout_s),
                 grace_deadline: None,
                 quorum_size: launch_quorum,
+                capacity_quorum: cfg.membership.round_quorum(),
+                soft_deadline: cfg.membership.soft_deadline.map(|soft| Instant::now() + soft),
+                soft_min: cfg.membership.soft_min_arrivals(),
                 quorum_ms: None,
                 grace_ms: None,
                 pushes: HashMap::new(),
@@ -2388,7 +2460,7 @@ async fn scheduler(
 
         // Arm the grace window of any round that just reached quorum.
         for r in inflight.iter_mut() {
-            if r.pushes.len() >= r.quorum_size && r.grace_deadline.is_none() {
+            if r.grace_deadline.is_none() && r.quorum_reached() {
                 let grace = adaptive_grace(
                     cfg.grace_tau,
                     cfg.grace_gamma,
@@ -2397,7 +2469,12 @@ async fn scheduler(
                     last_sync_secs,
                     Duration::from_millis(cfg.grace_ms),
                 );
-                r.grace_deadline = Some(Instant::now() + grace);
+                // The soft deadline is an upper bound on the grace window too.
+                let now = Instant::now();
+                let grace = r
+                    .soft_deadline
+                    .map_or(grace, |soft| grace.min(soft.saturating_duration_since(now)));
+                r.grace_deadline = Some(now + grace);
                 r.quorum_ms = Some(r.started.elapsed().as_millis() as u64);
                 r.grace_ms = Some(grace.as_millis() as u64);
             }
@@ -2471,11 +2548,12 @@ async fn scheduler(
                         quorum = r.quorum_size,
                         "quorum timeout below K; launching a new frozen-membership attempt"
                     );
-                    if groups.len() < cfg.quorum as usize {
+                    let required = cfg.membership.min_launch_members(cfg.quorum);
+                    if groups.len() < required {
                         warn!(
                             step = r.t,
                             connected = groups.len(),
-                            required = cfg.quorum,
+                            required,
                             "fixed quorum unavailable; deferring retry"
                         );
                         r.quorum_deadline = Instant::now() + Duration::from_secs(1);
@@ -2490,6 +2568,7 @@ async fn scheduler(
                     r.pull = encode_pull(r.p, r.t, r.attempt);
                     r.pushes.clear();
                     r.started = Instant::now();
+                    r.soft_deadline = cfg.membership.soft_deadline.map(|soft| r.started + soft);
                     r.grace_deadline = None;
                     r.quorum_ms = None;
                     r.grace_ms = None;
@@ -2514,9 +2593,13 @@ async fn scheduler(
         let mut earliest = inflight
             .iter()
             .filter_map(|r| {
-                (round_action(r, deadline_now) != RoundAction::Complete)
-                    .then_some(r.grace_deadline.unwrap_or(r.quorum_deadline))
+                (round_action(r, deadline_now) != RoundAction::Complete).then_some(
+                    r.soft_deadline.map_or(r.grace_deadline.unwrap_or(r.quorum_deadline), |soft| {
+                        soft.min(r.grace_deadline.unwrap_or(r.quorum_deadline))
+                    }),
+                )
             })
+            .chain(registry.lock().unwrap().membership.next_expiry())
             .min();
         let next_fragment_available = inflight.len() + computing.len() + ready.len() < depth
             && next_t <= cfg.total_steps
@@ -2619,6 +2702,25 @@ async fn scheduler(
                     let local_step = push.local_step;
                     let global_step = push.global_step;
                     let fragment_id = push.fragment_id;
+                    let fenced = {
+                        let mut registry = registry.lock().unwrap();
+                        registry.membership.renew(member, Instant::now());
+                        registry.membership.check_push_base(
+                            member,
+                            fragment_id as usize,
+                            push.base_version,
+                        )
+                    };
+                    if let Err(reason) = fenced {
+                        warn!(
+                            learner_id,
+                            generation,
+                            step = global_step,
+                            fragment = fragment_id,
+                            "push fenced: {reason:#}"
+                        );
+                        continue;
+                    }
                     let disposition =
                         route_push(&mut inflight, member, push, cfg.max_base_lag, fixed_roster);
                     match disposition {
@@ -2651,6 +2753,7 @@ async fn scheduler(
                     }
                 }
                 Event::Heartbeat { member, local_step } => {
+                    registry.lock().unwrap().membership.renew(member, Instant::now());
                     if is_current_member(&registry, member) {
                         step_rates.note(member, local_step, Instant::now());
                     }
@@ -2691,6 +2794,11 @@ async fn scheduler(
                     if st.global_step < cfg.total_steps {
                         send_all_fragments(&st, &group, &budget_cutoff).await;
                     }
+                    registry
+                        .lock()
+                        .unwrap()
+                        .membership
+                        .record_catch_up(group.member, &st.versions);
                     let repulls = if fixed_roster {
                         fixed_roster_repulls(&inflight, group.member)
                     } else {
@@ -3142,9 +3250,35 @@ struct Round {
     quorum_deadline: Instant,
     grace_deadline: Option<Instant>,
     quorum_size: usize,
+    /// Capacity quorum θ frozen at launch; None = count quorum `quorum_size`.
+    capacity_quorum: Option<CapacityQuorum>,
+    /// Soft deadline: merge what arrived (at least `soft_min`) even below
+    /// quorum once it passes. None = off.
+    soft_deadline: Option<Instant>,
+    soft_min: usize,
     quorum_ms: Option<u64>,
     grace_ms: Option<u64>,
     pushes: HashMap<Member, Push>,
+}
+
+impl Round {
+    fn quorum_reached(&self) -> bool {
+        match &self.capacity_quorum {
+            Some(quorum) => quorum.reached(&self.expected_members, self.pushes.keys()),
+            None => self.pushes.len() >= self.quorum_size,
+        }
+    }
+
+    /// Drop an expired member from the islands this round still waits for.
+    /// An accepted push is permanent and keeps its slot.
+    fn forget_unanswered(&mut self, member: Member) -> bool {
+        if self.pushes.contains_key(&member) {
+            return false;
+        }
+        let before = self.expected_members.len();
+        self.expected_members.retain(|expected| *expected != member);
+        before != self.expected_members.len()
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -3220,14 +3354,21 @@ enum RoundAction {
 }
 
 fn round_action(round: &Round, now: Instant) -> RoundAction {
-    if round.pushes.len() >= round.expected_members.len() {
+    // A round never merges nothing: if lease expiry emptied its expected
+    // set, it waits for the quorum timeout and relaunches.
+    if !round.pushes.is_empty() && round.pushes.len() >= round.expected_members.len() {
         return RoundAction::Complete;
     }
-    if round.pushes.len() >= round.quorum_size {
+    if round.quorum_reached() {
         return match round.grace_deadline {
             Some(deadline) if now >= deadline => RoundAction::Complete,
             _ => RoundAction::Wait,
         };
+    }
+    if round.soft_deadline.is_some_and(|deadline| now >= deadline)
+        && round.pushes.len() >= round.soft_min.max(1)
+    {
+        return RoundAction::Complete;
     }
     if now >= round.quorum_deadline {
         RoundAction::Restart
@@ -3419,12 +3560,14 @@ fn prepare_round_compute(cfg: &Config, st: &GlobalState, round: &Round) -> Resul
             );
         }
         outer_gradients.push(push.outer_gradient.as_slice());
-        weights.push(match cfg.learner_weight {
+        let weight = match cfg.learner_weight {
             LearnerWeight::Tokens2OverSteps => {
                 crate::merge::learner_weight(push.c_tokens, u64::from(push.c_steps))
             }
             LearnerWeight::Equal => 1.0,
-        });
+        };
+        // Carry discount γ^lag per fragment version (1 when off: exact).
+        weights.push(weight * cfg.membership.carry_discount(round.base_version - push.base_version));
     }
     st.prepare_merge(round.p, round.base_version, &outer_gradients, &weights)
 }
@@ -3864,6 +4007,34 @@ fn new_state_for(group: &Arc<Group>, cfg: &Config) -> Result<GlobalState> {
         "initialized global state"
     );
     Ok(st)
+}
+
+/// Apply lease expiry: expired members leave the pool, stop counting toward
+/// any round they have not answered, and are told to re-JOIN.
+async fn expire_member_leases(
+    registry: &Registry,
+    inflight: &mut [Round],
+    step_rates: &mut StepRates,
+) {
+    let expired = registry.lock().unwrap().expire_leases(Instant::now());
+    for (member, group) in expired {
+        let rounds = inflight
+            .iter_mut()
+            .map(|r| r.forget_unanswered(member))
+            .filter(|&forgot| forgot)
+            .count();
+        step_rates.remove(member);
+        warn!(
+            learner_id = member.learner_id,
+            generation = member.generation,
+            rounds,
+            "island lease expired; removed from membership"
+        );
+        if let Some(group) = group {
+            let message = bytes::Bytes::from_static(b"island lease expired: re-JOIN required");
+            let _ = group.send_small(MSG_ERROR, message).await;
+        }
+    }
 }
 
 fn current_groups(registry: &Registry) -> Vec<Arc<Group>> {
@@ -4836,7 +5007,7 @@ mod tests {
 
     fn registry_with_group(group: Arc<Group>) -> Registry {
         let registry = Arc::new(Mutex::new(RegistryState::default()));
-        registry.lock().unwrap().register_group(group).unwrap();
+        registry.lock().unwrap().register_group(group, Instant::now()).unwrap();
         registry
     }
 
@@ -4877,6 +5048,7 @@ mod tests {
             island_lease_s: 30.0,
             syncer_epoch: 0,
             elastic_final_grace_s: None,
+            membership: Default::default(),
         }
     }
 
@@ -5413,6 +5585,9 @@ mod tests {
             quorum_deadline: Instant::now(),
             grace_deadline: None,
             quorum_size: 1,
+            capacity_quorum: None,
+            soft_deadline: None,
+            soft_min: 1,
             quorum_ms: Some(0),
             grace_ms: Some(0),
             pushes: HashMap::from([(
@@ -5490,6 +5665,9 @@ mod tests {
             quorum_deadline: Instant::now(),
             grace_deadline: None,
             quorum_size: 1,
+            capacity_quorum: None,
+            soft_deadline: None,
+            soft_min: 1,
             quorum_ms: Some(0),
             grace_ms: Some(0),
             pushes: HashMap::from([(
@@ -5546,6 +5724,9 @@ mod tests {
             quorum_deadline: Instant::now(),
             grace_deadline: None,
             quorum_size: 2,
+            capacity_quorum: None,
+            soft_deadline: None,
+            soft_min: 1,
             quorum_ms: Some(0),
             grace_ms: Some(0),
             pushes,
@@ -6163,14 +6344,18 @@ mod tests {
         let first_group = test_group(first);
         let mut registry = RegistryState::default();
 
-        assert_eq!(registry.register_group(first_group.clone()), Ok(None));
-        assert_eq!(registry.register_group(test_group(first)), Err(()));
+        let now = Instant::now();
+        assert_eq!(registry.register_group(first_group.clone(), now).map(|r| r.0), Ok(None));
+        assert_eq!(
+            registry.register_group(test_group(first), now).map(|r| r.0),
+            Err(RegisterError::Duplicate)
+        );
         assert!(Arc::ptr_eq(
             registry.groups.get(&first).unwrap(),
             &first_group
         ));
         assert_eq!(
-            registry.register_group(test_group(replacement)),
+            registry.register_group(test_group(replacement), now).map(|r| r.0),
             Ok(Some(first))
         );
         assert_eq!(registry.current.get(&0), Some(&replacement));
@@ -6525,6 +6710,9 @@ mod tests {
             quorum_deadline: Instant::now() + Duration::from_secs(1),
             grace_deadline: None,
             quorum_size: 1,
+            capacity_quorum: None,
+            soft_deadline: None,
+            soft_min: 1,
             quorum_ms: None,
             grace_ms: None,
             pushes: HashMap::new(),
@@ -6595,8 +6783,8 @@ mod tests {
         let registry = Arc::new(Mutex::new(RegistryState::default()));
         {
             let mut registry = registry.lock().unwrap();
-            registry.register_group(test_group(old)).unwrap();
-            registry.register_group(test_group(replacement)).unwrap();
+            registry.register_group(test_group(old), Instant::now()).unwrap();
+            registry.register_group(test_group(replacement), Instant::now()).unwrap();
         }
         let mut rounds = vec![test_round(vec![old])];
 
@@ -7155,5 +7343,143 @@ mod tests {
         assert_eq!(text.matches("\"contribution\":0.5").count(), 2);
         assert_eq!(text.matches("\"accounted_c_steps\":1").count(), 2);
         std::fs::remove_file(&path).ok();
+    }
+
+    // ----- dynamic membership (S27 E-1/E-2) -----
+
+    fn capacity_round(expected: Vec<Member>, theta: f64, caps: &[(u32, f64)]) -> Round {
+        let cfg = crate::membership::MembershipConfig {
+            quorum_rule: crate::membership::QuorumRule::Capacity { theta, q_min: 1 },
+            capacities: caps.iter().copied().collect(),
+            ..Default::default()
+        };
+        let mut round = test_round(expected);
+        round.capacity_quorum = cfg.round_quorum();
+        round.quorum_deadline = Instant::now() + Duration::from_secs(3600);
+        round
+    }
+
+    #[test]
+    fn capacity_quorum_round_waits_for_theta_then_for_grace() {
+        let (big, small, other) = (member(0, 1), member(1, 1), member(2, 1));
+        let mut round = capacity_round(vec![big, small, other], 0.75, &[(0, 8.0)]);
+        round.pushes.insert(small, test_push(5));
+        round.pushes.insert(other, test_push(5));
+        assert!(!round.quorum_reached(), "2 of 10 capacity");
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Wait);
+        round.pushes.remove(&other);
+        round.pushes.insert(big, test_push(5));
+        assert!(round.quorum_reached(), "9 of 10 capacity");
+        round.grace_deadline = Some(Instant::now() + Duration::from_secs(3600));
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Wait, "grace still open");
+        round.grace_deadline = Some(Instant::now() - Duration::from_millis(1));
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Complete);
+    }
+
+    #[test]
+    fn soft_deadline_merges_below_quorum_but_never_merges_nothing() {
+        let (first, second) = (member(0, 10), member(1, 20));
+        let mut round = test_round(vec![first, second]);
+        round.quorum_size = 2;
+        round.quorum_deadline = Instant::now() + Duration::from_secs(3600);
+        round.soft_deadline = Some(Instant::now() - Duration::from_millis(1));
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Wait, "nothing arrived");
+        round.pushes.insert(first, test_push(5));
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Complete, "1 of K=2 at the soft deadline");
+        round.soft_min = 2;
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Wait, "q_min binds the soft merge");
+        round.soft_deadline = None;
+        round.soft_min = 1;
+        round.quorum_deadline = Instant::now() - Duration::from_millis(1);
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Restart, "off: unchanged");
+    }
+
+    #[test]
+    fn expired_member_leaves_an_empty_round_waiting() {
+        let only = member(0, 10);
+        let mut round = test_round(vec![only]);
+        assert!(round.forget_unanswered(only));
+        assert!(round.expected_members.is_empty());
+        assert_eq!(round_action(&round, Instant::now()), RoundAction::Wait);
+        let answered = member(1, 20);
+        let mut round = test_round(vec![answered]);
+        round.pushes.insert(answered, test_push(5));
+        assert!(!round.forget_unanswered(answered), "an accepted push keeps its slot");
+    }
+
+    fn leased_registry(lease_s: u64) -> Registry {
+        let cfg = crate::membership::MembershipConfig {
+            lease: Some(Duration::from_secs(lease_s)),
+            ..Default::default()
+        };
+        Arc::new(Mutex::new(RegistryState::new(Membership::new(cfg, 2))))
+    }
+
+    #[tokio::test]
+    async fn lease_drop_rejoin_and_stale_generation_fencing() {
+        let registry = leased_registry(1);
+        let (silent, alive) = (member(0, 10), member(1, 20));
+        let (tx, mut rx) = mpsc::channel(4);
+        let t0 = Instant::now() - Duration::from_secs(5);
+        {
+            let mut r = registry.lock().unwrap();
+            r.register_group(test_group_with_control(silent, tx), t0).unwrap();
+            r.register_group(test_group(alive), t0).unwrap();
+            assert!(r.membership.renew(alive, Instant::now()));
+        }
+        let mut rounds = vec![test_round(vec![silent, alive])];
+        let mut rates = StepRates::default();
+
+        // Drop: the silent island's lease ran out.
+        expire_member_leases(&registry, &mut rounds, &mut rates).await;
+        assert_eq!(rounds[0].expected_members, vec![alive]);
+        assert!(!is_current_member(&registry, silent));
+        assert!(is_current_member(&registry, alive));
+        let frame = rx.recv().await.expect("re-JOIN request");
+        assert_eq!(frame.msg_type, MSG_ERROR);
+        assert!(std::str::from_utf8(&frame.parts[0]).unwrap().contains("re-JOIN"));
+        // Its later push no longer fits the round.
+        assert_eq!(
+            route_push(&mut rounds, silent, test_push(5), None, false),
+            PushDisposition::UnexpectedMember
+        );
+
+        let mut r = registry.lock().unwrap();
+        r.unregister(silent);
+        // Stale id: the expired generation cannot come back.
+        assert_eq!(
+            r.register_group(test_group(silent), Instant::now()).map(|x| x.1),
+            Err(RegisterError::Fenced(AdmitError::RetiredGeneration))
+        );
+        assert_eq!(
+            r.register_group(test_group(member(2, 1)), Instant::now()).map(|x| x.1),
+            Err(RegisterError::Fenced(AdmitError::OutOfRange { limit: 2 }))
+        );
+        // Reconnect: a new generation is a re-JOIN with a per-fragment fence.
+        let back = member(0, 11);
+        assert_eq!(
+            r.register_group(test_group(back), Instant::now()).map(|x| x.1),
+            Ok(Admission::Rejoin)
+        );
+        r.membership.record_catch_up(back, &[3, 5]);
+        assert!(r.membership.check_push_base(back, 1, 4).is_err());
+        r.membership.check_push_base(back, 1, 5).unwrap();
+        assert!(r.current.get(&0) == Some(&back));
+    }
+
+    #[test]
+    fn membership_options_are_refused_with_a_fixed_roster() {
+        let mut cfg = round_test_config(4);
+        cfg.learners = 2;
+        cfg.quorum = 2;
+        cfg.membership.soft_deadline = Some(Duration::from_secs(5));
+        assert!(validate_config(&cfg).unwrap_err().to_string().contains("non-fixed rounds"));
+        cfg.max_base_lag = None;
+        validate_config(&cfg).unwrap();
+        cfg.membership.quorum_rule =
+            crate::membership::QuorumRule::Capacity { theta: 0.5, q_min: 1 };
+        assert!(validate_config(&cfg).is_err(), "θ with K=2");
+        cfg.quorum = 1;
+        validate_config(&cfg).unwrap();
     }
 }

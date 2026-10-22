@@ -1,6 +1,7 @@
 mod elastic;
 mod elastic_server;
 mod iso_worker;
+mod membership;
 mod merge;
 mod downlink;
 mod protocol;
@@ -136,18 +137,32 @@ struct Args {
     /// or elastic (change rl-inter-island-scheduling).
     #[arg(long, default_value = "legacy")]
     island_scheduling_mode: String,
-    /// elastic: capacity fraction that must arrive before an outer step (θ).
-    #[arg(long, default_value_t = elastic::DEFAULT_QUORUM_THETA)]
-    quorum_theta: f64,
-    /// elastic: per-step discount of a late (carried-over) delta (γ).
-    #[arg(long, default_value_t = elastic::DEFAULT_CARRY_GAMMA)]
-    carry_gamma: f64,
-    /// elastic: soft deadline in seconds; defaults to --quorum-timeout-s.
+    /// Capacity fraction that must arrive before a merge (θ). Fragment
+    /// rounds: unset keeps the count quorum K (--quorum); set replaces it.
+    /// elastic: defaults to 0.75.
+    #[arg(long)]
+    quorum_theta: Option<f64>,
+    /// Weight discount γ^lag of a late delta. Fragment rounds: lag in
+    /// fragment versions, unset = 1 (no discount).
+    /// elastic: carried-over deltas, defaults to 0.5.
+    #[arg(long)]
+    carry_gamma: Option<f64>,
+    /// Soft deadline in seconds: merge what arrived even below quorum.
+    /// Fragment rounds: unset = off (also caps the grace window).
+    /// elastic: defaults to --quorum-timeout-s.
     #[arg(long)]
     soft_deadline_s: Option<u64>,
-    /// elastic: minimum arrived islands for a step.
+    /// Minimum arrived islands for a capacity-quorum or soft-deadline merge.
     #[arg(long, default_value_t = elastic::DEFAULT_Q_MIN)]
     q_min: u32,
+    /// Fragment rounds: relative island capacity for --quorum-theta, as
+    /// comma-separated id=capacity (unlisted islands have capacity 1).
+    #[arg(long, value_delimiter = ',')]
+    island_capacity: Vec<String>,
+    /// Fragment rounds: admit island ids 0..N (islands may join after the
+    /// first --learners). Unset = 0..--learners.
+    #[arg(long)]
+    max_learners: Option<u32>,
     /// elastic: largest base lag still carried over; larger is rejected.
     #[arg(long, default_value_t = elastic::DEFAULT_MAX_CARRY_LAG)]
     max_carry_lag: u32,
@@ -166,10 +181,11 @@ struct Args {
     /// it, so the first island to connect no longer decides the contract.
     #[arg(long)]
     expected_island_contract: Option<String>,
-    /// elastic: membership lease in seconds (no heartbeat -> removed). Same
-    /// default as the launcher and `yeto --rl-island-lease-s` (150 s).
-    #[arg(long, default_value_t = 150.0)]
-    island_lease_s: f64,
+    /// Membership lease in seconds (no heartbeat -> removed; the island
+    /// must re-JOIN). Fragment rounds: unset = no lease. elastic: defaults
+    /// to 150 s, as the launcher and `yeto --rl-island-lease-s`.
+    #[arg(long)]
+    island_lease_s: Option<f64>,
     /// elastic: fencing token of this syncer incarnation; bump on every
     /// restart (D-S6 will persist it in the checkpoint).
     #[arg(long, default_value_t = 0)]
@@ -178,6 +194,50 @@ struct Args {
     /// seconds (or until every member left); defaults to the soft deadline.
     #[arg(long)]
     final_grace_s: Option<u64>,
+}
+
+const DEFAULT_ELASTIC_LEASE_S: f64 = 150.0;
+
+/// Membership options of the fragment-round server; every unset flag keeps
+/// the fixed-membership behavior. The elastic server reads its own defaults.
+fn parse_membership(args: &Args) -> anyhow::Result<membership::MembershipConfig> {
+    let mut capacities = std::collections::BTreeMap::new();
+    for entry in &args.island_capacity {
+        let (id, cap) = entry
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("--island-capacity entry {entry:?} is not id=capacity"))?;
+        let id: u32 = id.trim().parse()?;
+        let cap: f64 = cap.trim().parse()?;
+        if capacities.insert(id, cap).is_some() {
+            anyhow::bail!("--island-capacity lists island {id} twice");
+        }
+    }
+    let seconds = |s: f64, flag: &str| {
+        std::time::Duration::try_from_secs_f64(s)
+            .map_err(|e| anyhow::anyhow!("{flag} must be a non-negative number of seconds: {e}"))
+    };
+    Ok(membership::MembershipConfig {
+        quorum_rule: match args.quorum_theta {
+            None => membership::QuorumRule::Count,
+            Some(theta) => membership::QuorumRule::Capacity { theta, q_min: args.q_min },
+        },
+        lease: args.island_lease_s.map(|s| seconds(s, "--island-lease-s")).transpose()?,
+        soft_deadline: args.soft_deadline_s.map(std::time::Duration::from_secs),
+        carry_gamma: args.carry_gamma.unwrap_or(1.0),
+        capacities,
+        max_learners: args.max_learners,
+    })
+}
+
+fn parse_island_scheduling(args: &Args) -> anyhow::Result<elastic::IslandSchedulingMode> {
+    elastic::IslandSchedulingMode::parse(
+        &args.island_scheduling_mode,
+        args.quorum_theta.unwrap_or(elastic::DEFAULT_QUORUM_THETA),
+        args.carry_gamma.unwrap_or(elastic::DEFAULT_CARRY_GAMMA),
+        args.soft_deadline_s.unwrap_or(args.quorum_timeout_s),
+        args.q_min,
+        args.max_carry_lag,
+    )
 }
 
 impl Args {
@@ -210,6 +270,13 @@ fn main() -> anyhow::Result<()> {
         }
     };
     let final_ack_timeout_s = args.resolved_final_ack_timeout_s();
+    let island_scheduling = parse_island_scheduling(&args)?;
+    // The elastic server applies the same flags with its own defaults.
+    let membership = if args.island_scheduling_mode == elastic::MODE_ELASTIC {
+        membership::MembershipConfig::default()
+    } else {
+        parse_membership(&args)?
+    };
     let devices = if args.iso_worker_devices.is_empty() {
         vec![args.iso_worker_device.clone()]
     } else {
@@ -228,14 +295,6 @@ fn main() -> anyhow::Result<()> {
         device: args.iso_worker_device,
     }
     .with_pool(devices, args.iso_worker_queue_capacity)?;
-    let island_scheduling = elastic::IslandSchedulingMode::parse(
-        &args.island_scheduling_mode,
-        args.quorum_theta,
-        args.carry_gamma,
-        args.soft_deadline_s.unwrap_or(args.quorum_timeout_s),
-        args.q_min,
-        args.max_carry_lag,
-    )?;
     let island_hmac_key = args
         .island_hmac_key
         .clone()
@@ -295,9 +354,10 @@ fn main() -> anyhow::Result<()> {
         island_scheduling,
         island_hmac_key,
         expected_island_contract,
-        island_lease_s: args.island_lease_s,
+        island_lease_s: args.island_lease_s.unwrap_or(DEFAULT_ELASTIC_LEASE_S),
         syncer_epoch: args.syncer_epoch,
         elastic_final_grace_s: args.final_grace_s,
+        membership,
     };
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -376,7 +436,8 @@ mod tests {
         let a = Args::try_parse_from(["yeto-syncer", "--learners", "2", "--total-steps", "8"])
             .unwrap();
         assert_eq!(a.island_scheduling_mode, "legacy");
-        assert_eq!((a.quorum_theta, a.carry_gamma, a.q_min, a.max_carry_lag), (0.75, 0.5, 1, 2));
+        assert_eq!((a.quorum_theta, a.carry_gamma, a.q_min, a.max_carry_lag), (None, None, 1, 2));
+        assert!(parse_membership(&a).unwrap().is_static(), "fragment rounds stay fixed by default");
         assert_eq!(a.soft_deadline_s, None);
         let e = Args::try_parse_from([
             "yeto-syncer", "--learners", "2", "--total-steps", "8",
@@ -385,16 +446,52 @@ mod tests {
             "--max-carry-lag", "3",
         ])
         .unwrap();
-        let mode = elastic::IslandSchedulingMode::parse(
-            &e.island_scheduling_mode, e.quorum_theta, e.carry_gamma,
-            e.soft_deadline_s.unwrap_or(e.quorum_timeout_s), e.q_min, e.max_carry_lag,
-        )
-        .unwrap();
+        let mode = parse_island_scheduling(&e).unwrap();
         assert_eq!(
             mode,
             elastic::IslandSchedulingMode::Elastic(elastic::ElasticParams {
                 quorum_theta: 0.6, carry_gamma: 0.25, soft_deadline_s: 30, q_min: 2, max_carry_lag: 3,
             })
         );
+    }
+
+    #[test]
+    fn elastic_flag_defaults_are_unchanged() {
+        let e = Args::try_parse_from([
+            "yeto-syncer", "--learners", "2", "--total-steps", "8",
+            "--island-scheduling-mode", "elastic",
+        ])
+        .unwrap();
+        assert_eq!(
+            parse_island_scheduling(&e).unwrap(),
+            elastic::IslandSchedulingMode::Elastic(elastic::ElasticParams {
+                quorum_theta: 0.75, carry_gamma: 0.5, soft_deadline_s: 900, q_min: 1, max_carry_lag: 2,
+            })
+        );
+        assert_eq!(e.island_lease_s.unwrap_or(DEFAULT_ELASTIC_LEASE_S), 150.0);
+    }
+
+    #[test]
+    fn fragment_round_membership_flags_parse() {
+        let a = Args::try_parse_from([
+            "yeto-syncer", "--learners", "2", "--total-steps", "8",
+            "--quorum-theta", "0.5", "--q-min", "1", "--island-capacity", "0=8,1=4",
+            "--island-lease-s", "30", "--soft-deadline-s", "120", "--carry-gamma", "0.5",
+            "--max-learners", "4",
+        ])
+        .unwrap();
+        let m = parse_membership(&a).unwrap();
+        assert_eq!(m.quorum_rule, membership::QuorumRule::Capacity { theta: 0.5, q_min: 1 });
+        assert_eq!(m.capacity(0), 8.0);
+        assert_eq!(m.capacity(3), 1.0);
+        assert_eq!(m.lease, Some(std::time::Duration::from_secs(30)));
+        assert_eq!(m.soft_deadline, Some(std::time::Duration::from_secs(120)));
+        assert_eq!(m.carry_gamma, 0.5);
+        assert_eq!(m.id_limit(2), 4);
+        let dup = Args::try_parse_from([
+            "yeto-syncer", "--learners", "2", "--total-steps", "8", "--island-capacity", "0=1,0=2",
+        ])
+        .unwrap();
+        assert!(parse_membership(&dup).is_err());
     }
 }

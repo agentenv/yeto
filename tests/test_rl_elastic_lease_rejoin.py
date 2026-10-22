@@ -193,7 +193,7 @@ def test_island_lease_default_is_the_same_in_syncer_cli_and_launcher():
 
     repo = Path(__file__).resolve().parents[1]
     main_rs = (repo / "syncer/src/main.rs").read_text()
-    m = re.search(r"default_value_t = ([0-9.]+)\)\]\s*island_lease_s: f64", main_rs)
+    m = re.search(r"const DEFAULT_ELASTIC_LEASE_S: f64 = ([0-9.]+);", main_rs)
     assert m, "island_lease_s default not found in syncer/src/main.rs"
     from yeto.rl.elastic_client import DEFAULT_ISLAND_LEASE_S, ElasticClientConfig
     from yeto.rl.engine.run_flags import rl_flags
