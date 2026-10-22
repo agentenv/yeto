@@ -74,7 +74,8 @@ def test_copy_with_digest_copies_everything_and_equals_the_directory_digest(tmp_
 
 
 def test_release_records_the_trainer_phases(tmp_path):
-    releases = PolicyReleaseStore(CheckpointStore(tmp_path), clock=lambda: 7.0, timer=_ticks())
+    releases = PolicyReleaseStore(CheckpointStore(tmp_path), clock=lambda: 7.0, timer=_ticks(),
+                                  cached_latest=False)
     assert releases.last_timings == {}
     lora = releases.release(1, "h1", _write_adapter, weights=LORA)
     assert lora.released_at == 7.0
@@ -259,3 +260,89 @@ def test_fused_stage_flag_exists_on_both_layers():
                 parser.add_argument(*flag.options, **dict(flag.kwargs))
         assert parser.parse_args([]).rl_sampler_fused_stage is False
         assert parser.parse_args(["--rl-sampler-fused-stage"]).rl_sampler_fused_stage is True
+
+
+# ---------------------------------------------------------------- the writer's known LATEST
+class _CountingStore(CheckpointStore):
+    def __init__(self, root):
+        super().__init__(root)
+        self.reloads = self.commits = 0
+
+    def reload(self):
+        self.reloads += 1
+
+    def commit(self):
+        self.commits += 1
+        return 0.0
+
+
+def test_one_writer_reloads_only_for_its_first_release_and_commits_once(tmp_path):
+    store = _CountingStore(tmp_path)
+    releases = PolicyReleaseStore(store)
+    first = releases.release(1, "h1", _write_adapter, weights=LORA)
+    assert (releases.last_latest_source, store.reloads, store.commits) == ("reloaded", 1, 1)
+    second = releases.release(2, "h2", _write_adapter, weights=LORA)
+    assert (releases.last_latest_source, store.reloads, store.commits) == ("cached", 1, 2)
+    assert "commit_s" in releases.last_timings and "commit_weights_s" not in releases.last_timings
+    assert releases.release(2, "h2", _write_adapter, weights=LORA) is None  # republish: still known
+    assert store.reloads == 1
+    assert (first.seq, second.seq) == (1, 2) and PolicyReleaseStore(CheckpointStore(tmp_path)).latest() == second
+
+
+def test_a_resumed_writer_reads_latest_again_and_continues_the_seq(tmp_path):
+    PolicyReleaseStore(CheckpointStore(tmp_path)).release(1, "h1", _write_weights)
+    store = _CountingStore(tmp_path)
+    resumed = PolicyReleaseStore(store)  # a new process over the same store
+    assert resumed.release(1, "h1", _write_weights) is None  # same version and hash: nothing
+    assert (resumed.last_latest_source, store.reloads) == ("reloaded", 1)
+    nxt = resumed.release(2, "h2", _write_weights)
+    assert nxt.seq == 2 and resumed.last_latest_source == "cached"
+
+
+def test_another_writer_is_detected_and_latest_is_read_again(tmp_path):
+    store = _CountingStore(tmp_path)
+    mine = PolicyReleaseStore(store)
+    mine.release(1, "h1", _write_weights)
+    PolicyReleaseStore(CheckpointStore(tmp_path)).release(2, "other", _write_weights)  # seq 2
+    third = mine.release(3, "h3", _write_weights)
+    assert (mine.last_latest_source, store.reloads) == ("other_writer", 2)
+    assert third.seq == 3  # never reuses the other writer's seq
+
+
+def test_a_failed_release_makes_the_next_one_read_latest_again(tmp_path):
+    store = _CountingStore(tmp_path)
+    releases = PolicyReleaseStore(store)
+    releases.release(1, "h1", _write_weights)
+    with pytest.raises(RuntimeError):
+        releases.release(2, "h2", lambda d: (_ for _ in ()).throw(RuntimeError("export failed")))
+    releases.release(2, "h2", _write_weights)
+    assert releases.last_latest_source == "reloaded" and store.reloads == 2
+
+
+def test_cached_latest_off_is_the_earlier_behavior(tmp_path):
+    store = _CountingStore(tmp_path)
+    releases = PolicyReleaseStore(store, cached_latest=False)
+    releases.release(1, "h1", _write_weights)
+    releases.release(2, "h2", _write_weights)
+    assert (releases.last_latest_source, store.reloads, store.commits) == ("reloaded", 2, 4)
+
+
+def test_reload_latest_flag_is_trainer_only_and_reaches_the_release_store(tmp_path):
+    trainer = _launch_args(rl_sample_role="trainer", rl_max_policy_age=1, rl_release_reload_latest=True)
+    sample_roles.check_launch(trainer)
+    assert sample_roles.island_flags(trainer).endswith(" --rl-release-reload-latest")
+    with pytest.raises(ValueError, match="only a trainer writes"):
+        sample_roles.check_launch(_launch_args(rl_release_reload_latest=True))
+    island = SimpleNamespace(rl_sample_role="trainer", rl_resume_store=str(tmp_path),
+                             rl_release_reload_latest=True)
+    config = sample_roles.resolve(island, groups_per_round=8)
+    assert config.release_legacy is True
+    assert si.release_store(config).cached_latest is False
+    default = sample_roles.resolve(SimpleNamespace(rl_sample_role="trainer", rl_resume_store=str(tmp_path)),
+                                   groups_per_round=8)
+    assert si.release_store(default).cached_latest is True
+    pair = SimpleNamespace(rl_island_sample_role=["0:sampler", "1:trainer"], rl_release_reload_latest=True,
+                           rl_sampler_min_round_seconds=None, rl_sample_wait_s=None,
+                           rl_sampler_max_backlog_rounds=None)
+    assert sample_roles.island_args(pair, 0, 2).rl_release_reload_latest is False
+    assert sample_roles.island_args(pair, 1, 2).rl_release_reload_latest is True
