@@ -122,6 +122,14 @@ def _tree_files(root: Path, *, skip: Iterable[str] = ()) -> list[Path]:
 # the store interface + backends: local directory (this class), bucket mount,
 # Modal Volume (``yeto.cloud.modal_ckpt_store``), critic (``yeto.rl.critic_state``)
 # ---------------------------------------------------------------------------
+class StoreWriterGuard:
+    """A write in progress on a checkpoint store (``CheckpointStore.hold_writer``).
+    ``release`` is idempotent; the base guard holds nothing."""
+
+    def release(self) -> None:
+        return None
+
+
 class CheckpointStore:
     """The checkpoint store interface, and its local-directory backend.
 
@@ -150,6 +158,12 @@ class CheckpointStore:
 
     def reload(self) -> None:
         return None
+
+    def hold_writer(self) -> "StoreWriterGuard":
+        """Mark a write in progress until the returned guard is released. A
+        backend whose ``reload`` can drop uncommitted files (a Modal Volume)
+        skips reloads while any guard is held; locally it does nothing."""
+        return StoreWriterGuard()
 
     def describe(self) -> dict[str, Any]:
         return {"kind": self.kind, "root": str(self.root)}

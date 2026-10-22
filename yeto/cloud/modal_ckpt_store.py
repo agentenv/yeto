@@ -17,11 +17,42 @@ import time
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from yeto.rl.engine.resume import CheckpointStore
+from yeto.rl.engine.resume import CheckpointStore, StoreWriterGuard
 
 MODAL_VOLUME_ENV = "YETO_RL_STORE_MODAL_VOLUME"  # set by the launcher on a Modal island
 MODAL_VOLUME_SCHEME = "modal-volume"
 STORE_IMPL = "yeto.cloud.modal_ckpt_store:store_from_env"  # value of resume.STORE_IMPL_ENV
+GUARD_DIR_ENV = "YETO_RL_STORE_GUARD_DIR"  # where the per-Volume lock files live (default /tmp)
+
+
+def _guard_path(volume: str) -> str:
+    import re
+
+    root = os.environ.get(GUARD_DIR_ENV) or "/tmp"
+    return os.path.join(root, "yeto-modal-volume-" + re.sub(r"[^A-Za-z0-9_.-]", "_", volume) + ".lock")
+
+
+class _VolumeWriterGuard(StoreWriterGuard):
+    """A shared ``flock`` on a container-local file per Volume. Every process
+    and thread of the container opens its own descriptor, so writers share it
+    and a reload, which needs it exclusive, waits for none of them: it is
+    skipped while any writer holds the lock."""
+
+    def __init__(self, volume: str) -> None:
+        import fcntl
+
+        self._fd: int | None = os.open(_guard_path(volume), os.O_RDWR | os.O_CREAT, 0o666)
+        try:
+            fcntl.flock(self._fd, fcntl.LOCK_SH)
+        except BaseException:
+            os.close(self._fd)
+            self._fd = None
+            raise
+
+    def release(self) -> None:
+        fd, self._fd = self._fd, None
+        if fd is not None:
+            os.close(fd)  # closing the descriptor drops its lock
 
 
 class ModalVolumeStore(CheckpointStore):
@@ -72,14 +103,34 @@ class ModalVolumeStore(CheckpointStore):
 
     commits = 0
 
+    def hold_writer(self) -> StoreWriterGuard:
+        """A reload remounts the Volume for the whole container and drops local
+        files not committed yet: a cut's shards written meanwhile fail (EPERM on
+        makedirs of the store directory). Writers hold this until their commit."""
+        return _VolumeWriterGuard(self.volume_name)
+
     def reload(self) -> None:
+        import fcntl
+
+        log = logging.getLogger(__name__)
+        fd = os.open(_guard_path(self.volume_name), os.O_RDWR | os.O_CREAT, 0o666)
         try:
-            if self._factory is None and os.environ.get("YETO_MODAL_PYTHON"):
-                self._runner_call("reload")
-            else:
-                self._volume().reload()
-        except Exception as exc:  # noqa: BLE001 - reload is best effort (open files block it)
-            logging.getLogger(__name__).warning("modal volume reload failed: %r", exc)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:  # reload is best effort; a writer's files come first
+                log.info("modal volume reload skipped: a writer holds %s", self.volume_name)
+                return
+            try:
+                if self._factory is None and os.environ.get("YETO_MODAL_PYTHON"):
+                    self._runner_call("reload")
+                else:
+                    self._volume().reload()
+            except Exception as exc:  # noqa: BLE001 - reload is best effort (open files block it)
+                log.warning("modal volume reload failed: %r", exc)
+            else:  # logged so a remount can be lined up with a writer's failure
+                log.info("modal volume reloaded: %s", self.volume_name)
+        finally:
+            os.close(fd)
 
     def describe(self) -> dict[str, Any]:
         return {**super().describe(), "volume": self.volume_name}

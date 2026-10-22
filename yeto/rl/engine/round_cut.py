@@ -190,6 +190,7 @@ class _PreparedCut:
     context: Any  # CutContext the shards and manifest were written with
     save_s: float
     pending: Any = None  # the trainer's pending cut (start_cut); None: already written
+    guard: Any = None  # the store writer guard held since its first shard (_hold_writer)
 
     def matches(self, rollout_id: int, context: Any) -> bool:
         """The safe point's own context names the same cut: same id, progress
@@ -369,13 +370,30 @@ class RoundCutCheckpoint:
             raise RoundCutError(f"prepared cut {rollout_id} for policy v{state.policy_version}")
         self.join_commit(driver, wait=False)  # the previous cut is complete before this one starts
         cut_id = self._cut_id(rollout_id)
-        self._drop_unpointed(cut_id)
-        started = time.monotonic()
-        context = self.source.context(cut_id, pending=(int(rollout_id), state))
-        pending = self._start(context, background=self._defer(final))
+        guard = self._hold_writer()
+        try:
+            self._drop_unpointed(cut_id)
+            started = time.monotonic()
+            context = self.source.context(cut_id, pending=(int(rollout_id), state))
+            pending = self._start(context, background=self._defer(final))
+        except BaseException:
+            guard.release()
+            raise
         self._prepared = _PreparedCut(rollout_id=int(rollout_id), context=context,
-                                      save_s=time.monotonic() - started, pending=pending)
+                                      save_s=time.monotonic() - started, pending=pending, guard=guard)
         return True
+
+    def _hold_writer(self) -> Any:
+        """Hold the store's writer guard from a cut's first shard to its store
+        commit: on a Modal Volume a reload in between remounts the Volume and
+        drops the uncommitted files (seen as EPERM on makedirs of the store
+        directory, which killed the trainer cell)."""
+        hold = getattr(self.controller.store, "hold_writer", None)
+        if callable(hold):
+            return hold()
+        from yeto.rl.engine.resume import StoreWriterGuard
+
+        return StoreWriterGuard()
 
     def _commit_busy(self, driver: Any, rollout_id: int, *, final: bool) -> bool:
         """E1: a periodic cut is skipped while the previous cut's store commit still
@@ -484,6 +502,7 @@ class RoundCutCheckpoint:
         except Exception as error:  # noqa: BLE001 - the previous cut stays the pointed one
             self._drop_unpointed(info["cut_id"])
             self._unstage(deferred.get("staged"))
+            deferred["guard"].release()
             return {"cut_id": info["cut_id"], "rollout_id": deferred["rollout_id"], "ok": False,
                     "error": repr(error)[:2000]}
         self._commit_in_background(deferred, commit_manifest)
@@ -528,7 +547,13 @@ class RoundCutCheckpoint:
                 return
             box["result"] = {**done, **dict(self.controller.commit_checkpoint_store() or {})}
 
-        thread = threading.Thread(target=run, name=f"yeto-cut-commit-{cut_id}", daemon=True)
+        def run_held() -> None:
+            try:
+                run()
+            finally:  # committed, or failed and dropped: nothing uncommitted is left
+                deferred["guard"].release()
+
+        thread = threading.Thread(target=run_held, name=f"yeto-cut-commit-{cut_id}", daemon=True)
         self._commit = (thread, box)
         thread.start()
 
@@ -561,11 +586,8 @@ class RoundCutCheckpoint:
         a stop the trainer scheduler ordered); a periodic cut takes none."""
         import time
 
-        from yeto.rl.engine.resume import directory_bytes
-
         if trigger is not None and (not final or trigger not in FINAL_TRIGGERS):
             raise RoundCutError(f"cut trigger {trigger!r} needs final=True and one of {FINAL_TRIGGERS}")
-        ctl = self.controller
         prepared, self._prepared = self._prepared, None
         if driver.published_version is None or self._skip(driver, rollout_id, final=final):
             self._abandon(prepared)
@@ -586,14 +608,39 @@ class RoundCutCheckpoint:
         self.join_commit(driver, wait=final)  # the final cut leaves nothing running
         started = time.monotonic()
         context = self.source.context(self._cut_id(rollout_id))
-        progress = context.progress
-        offloaded = False
         defer = self._defer(final)
         used_prepared = prepared is not None and prepared.matches(int(rollout_id), context)
         if used_prepared:
-            save_s, pending = prepared.save_s, prepared.pending  # taken before the trainer offloaded
+            guard = prepared.guard
+            taken = (prepared.save_s, prepared.pending)  # taken before the trainer offloaded
         else:
             self._abandon(prepared)
+            guard, taken = self._hold_writer(), None
+        try:
+            return self._save_held(driver, rollout_id=rollout_id, final=final, trigger=trigger,
+                                   context=context, started=started, defer=defer, guard=guard,
+                                   prepared=taken)
+        except BaseException:
+            guard.release()
+            raise
+
+    def _save_held(self, driver: Any, *, rollout_id: int, final: bool, trigger: str | None,
+                   context: Any, started: float, defer: bool, guard: Any,
+                   prepared: tuple[float, Any] | None) -> dict[str, Any]:
+        """:meth:`_save` from the trainer cut on, under the store writer
+        ``guard``: released here for an inline cut, by the background commit for
+        a deferred one, and by the caller when this raises."""
+        import time
+
+        from yeto.rl.engine.resume import directory_bytes
+
+        ctl = self.controller
+        progress = context.progress
+        offloaded = False
+        used_prepared = prepared is not None
+        if used_prepared:
+            save_s, pending = prepared
+        else:
             # a failed prepare or an earlier attempt left files under this id; no pointer
             # names them (_skip), and cuts are immutable: drop them
             self._drop_unpointed(context.cut_id)
@@ -645,12 +692,13 @@ class RoundCutCheckpoint:
             # in the background after later rounds have changed it
             staged = self._stage(cut_id)
             self._deferred = {"info": info, "cut": cut, "pending": pending, "rollout_id": int(rollout_id),
-                              "staged": staged}
+                              "staged": staged, "guard": guard}
             return {**info, **extra, "store_commit": "deferred", "store_synced": None,
                     "total_s": round(time.monotonic() - started, 3)}
         if pending is not None:
             self.trainer.finish_cut(pending)
         saved = recovery.save(cut, store=ctl.store, write=lambda record: self._write_and_sync(info, record))
+        guard.release()  # the store sync committed (or failed): nothing uncommitted is left
         info[CUT_KEY] = saved[CUT_KEY]
         synced = saved["synced"]
         sync = dict(getattr(ctl, "last_store_sync", None) or {})
@@ -678,12 +726,16 @@ class RoundCutCheckpoint:
         """A prepared cut the safe point does not keep: wait for its writer, drop its files."""
         if prepared is None:
             return
-        if prepared.pending is not None:
-            try:
-                self.trainer.finish_cut(prepared.pending)
-            except Exception:  # noqa: BLE001 - dropped below either way
-                pass
-        self._drop_unpointed(prepared.context.cut_id)
+        try:
+            if prepared.pending is not None:
+                try:
+                    self.trainer.finish_cut(prepared.pending)
+                except Exception:  # noqa: BLE001 - dropped below either way
+                    pass
+            self._drop_unpointed(prepared.context.cut_id)
+        finally:
+            if prepared.guard is not None:
+                prepared.guard.release()
 
     def _write_and_sync(self, info: dict[str, Any], cut_record: dict[str, Any], *,
                         defer: bool = False, staged: Path | None = None) -> dict[str, Any]:

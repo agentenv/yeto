@@ -39,6 +39,13 @@ class _Ledger:
         return {"state": "outer_recorded"} if rid < self.recorded else None
 
 
+@pytest.fixture(autouse=True)
+def _private_volume_guards(tmp_path, monkeypatch):
+    """Each test's Modal writer guards live in its own directory: a cut a test
+    leaves uncommitted keeps its guard, which must not skip another test's reload."""
+    monkeypatch.setenv(mcs.GUARD_DIR_ENV, str(tmp_path))
+
+
 class _Vol:
     def __init__(self):
         self.commits = 0
@@ -966,3 +973,59 @@ def test_a_deferred_cut_snapshots_the_state_dir_as_it_was_at_the_cut(tmp_path):
     assert json.loads((snap / POINTER).read_text())["cut_id"] == info["cut_id"]
     assert cp.pointer()["cut_id"] == info["cut_id"]
     assert not list(Path(cp.controller.state_dir).parent.glob(".*.stage-*"))  # staging removed
+
+
+def test_volume_reload_is_skipped_while_a_cut_is_being_written(tmp_path):
+    """A Modal Volume reload remounts the Volume and drops uncommitted files, so a
+    reload from another thread or process of the container (sample buffer, release
+    polling) is skipped from a cut's first shard to its store commit."""
+    vol = _Vol()
+    store = _store(tmp_path / "store", vol)
+    other = _store(tmp_path / "store", vol)  # another reader of the same Volume
+    rank, driver, trainer, cp, _first = _island_with_first_cut(tmp_path, store)
+    base = vol.reloads
+    other.reload()
+    assert vol.reloads == base + 1  # no cut in progress
+    # background cut: the guard spans prepare, the safe point and the background commit
+    state = SimpleNamespace(policy_version=2, policy_tensor_hash=lambda: _hash(rank))
+    assert cp.prepare(driver, rollout_id=2, state=state) is True
+    other.reload()
+    _publish(driver, 2, _hash(rank))
+    assert cp.save(driver, rollout_id=2)["store_commit"] == "deferred"
+    other.reload()
+    assert vol.reloads == base + 1
+    assert cp.join_commit(driver)["ok"] is True
+    other.reload()
+    assert vol.reloads == base + 2  # released after the commit
+    # inline (final) cut: a reload while the trainer writes its shards is skipped
+    seen = []
+    save_cut = trainer.inner.save_cut
+
+    def save_and_reload(**kw):
+        other.reload()
+        seen.append(vol.reloads)
+        return save_cut(**kw)
+
+    trainer.inner.save_cut = save_and_reload
+    _publish(driver, 3, _hash(rank))
+    assert cp.save(driver, rollout_id=3, final=True)["store_synced"] is True
+    assert seen == [base + 2]
+    other.reload()
+    assert vol.reloads == base + 3
+
+
+def test_volume_writer_guard_is_released_when_the_cut_fails(tmp_path):
+    vol = _Vol()
+    store = _store(tmp_path / "store", vol)
+    rank, driver, trainer, cp, _first = _island_with_first_cut(tmp_path, store)
+
+    def broken(**kw):
+        raise OSError("shard write failed")
+
+    trainer.inner.save_cut = broken
+    _publish(driver, 2, _hash(rank))
+    with pytest.raises(OSError, match="shard write failed"):
+        cp.save(driver, rollout_id=2, final=True)
+    base = vol.reloads
+    store.reload()
+    assert vol.reloads == base + 1
