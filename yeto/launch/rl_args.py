@@ -236,6 +236,63 @@ def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
     args.rl_total_fragment_steps = args.total_steps * args.fragments
 
 
+# S27 P1: (dest, option, preset-keeping default) of the outer-merge options.
+_RL_OUTER_MERGE_OPTIONS = (
+    ("rl_sync_quorum", "--rl-sync-quorum", None),
+    ("rl_sync_grace_ms", "--rl-sync-grace-ms", None),
+    ("rl_sync_learner_weight", "--rl-sync-learner-weight", "equal"),
+    ("rl_sync_max_base_lag", "--rl-sync-max-base-lag", 0),
+    ("rl_sync_outer_lr", "--rl-sync-outer-lr", None),
+    ("rl_sync_outer_momentum", "--rl-sync-outer-momentum", None),
+    ("rl_sync_matrix_merge", "--rl-sync-matrix-merge", "avg"),
+)
+
+
+def _apply_rl_outer_merge_options(args, *, num_islands: int) -> None:
+    """S27 P1: override the outer-merge settings the preset just fixed.
+
+    Every option left at its default keeps the preset's value, so the syncer
+    command and semantic profile are unchanged. The full-parameter sweep keeps
+    its strict roster (P2 replaces it); SAO and --experimental-rl-sync take no
+    overrides, and the elastic scheduler has its own quorum and weights."""
+    changed = [option for dest, option, default in _RL_OUTER_MERGE_OPTIONS
+               if getattr(args, dest, default) != default]
+    if not changed:
+        return
+    where = ", ".join(changed)
+    if args.rl_sync_preset not in ("strict-avg", "decoupled"):
+        raise ValueError(f"{where} only apply to --rl-sync-preset strict-avg or decoupled")
+    if args.experimental_rl_sync:
+        raise ValueError(f"{where} do not apply with --experimental-rl-sync "
+                         "(it takes the generic syncer flags)")
+    if island_scheduling_mode(args) != "legacy":
+        raise ValueError(f"{where} need --rl-island-scheduling legacy")
+    quorum = args.rl_sync_quorum
+    if quorum is not None:
+        if not 1 <= quorum <= num_islands:
+            raise ValueError(f"--rl-sync-quorum must be between 1 and the {num_islands} islands")
+        args.quorum = quorum
+    grace_ms = args.rl_sync_grace_ms
+    if grace_ms is not None:
+        if grace_ms < 0:
+            raise ValueError("--rl-sync-grace-ms must be >= 0")
+        args.grace_ms = grace_ms
+    if args.rl_sync_max_base_lag < 0:
+        raise ValueError("--rl-sync-max-base-lag must be >= 0")
+    outer_lr = args.rl_sync_outer_lr
+    if outer_lr is not None:
+        if not outer_lr > 0.0:
+            raise ValueError("--rl-sync-outer-lr must be positive")
+        args.outer_lr = outer_lr
+    momentum = args.rl_sync_outer_momentum
+    if momentum is not None:
+        if not 0.0 <= momentum < 1.0:
+            raise ValueError("--rl-sync-outer-momentum must be in [0, 1)")
+        args.outer_momentum = momentum
+    if args.rl_sync_matrix_merge != "avg" and args.rl_sync_preset != "decoupled":
+        raise ValueError("--rl-sync-matrix-merge rda only applies to --rl-sync-preset decoupled")
+
+
 def _prepare_node_inventory(args) -> None:
     """Validate ``--rl-node-inventory`` before any cloud or SSH work and keep the
     parsed nodes on ``args`` (rl-ssh-node-pool: the launcher reads the nodes from
@@ -822,6 +879,7 @@ def _prepare_rl_args(
                 raise ValueError(
                     f"RL's one-fragment f32 bridge still requires {flag}"
                 )
+    _apply_rl_outer_merge_options(args, num_islands=len(specs))
     if args.spot:
         _rl_checkpoint_mount(args.rl_completed_groups_path)
 

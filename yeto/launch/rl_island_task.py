@@ -79,6 +79,13 @@ def _wan_transport_flags(args) -> str:
     return flags
 
 
+def _rl_matrix_merge_flag(args) -> str:
+    """S27 P1: decoupled islands build their fragment layout with the syncer's
+    merge modes; omitted at the default so the island command is unchanged."""
+    merge = getattr(args, "rl_sync_matrix_merge", "avg")
+    return "" if merge == "avg" else f" --rl-sync-matrix-merge {merge}"
+
+
 def _rl_trainable_island_flags(args, learner_id: int, num_learners: int) -> str:
     """LoRA rank/targets; for the full-parameter preset the sweep identity (the
     probed layout hash, the frozen roster size and the syncer profile hash);
@@ -185,6 +192,7 @@ def make_miles_island_task(
         f" --sglang-mem-fraction-static {args.sglang_mem_fraction_static}"
         + _rl_trainable_island_flags(args, learner_id, num_learners)
         + (" --bcast-delta" if int(getattr(args, "rl_sync_bcast_delta_full_every", 0) or 0) else "")
+        + _rl_matrix_merge_flag(args)
         + f" --inner-lr {args.inner_lr}"
         f" --seq-len {args.seq_len}"
         + (" --rl-activation-recompute" if getattr(args, "rl_activation_recompute", False) else "")

@@ -28,6 +28,8 @@ SAO_STREAMING_SYNC_PRESET = "sao-streaming-full"
 FULL_PARAMETER_SYNC_PRESETS = frozenset({FULL_PARAMETER_SYNC_PRESET, SAO_STREAMING_SYNC_PRESET})
 SYNC_PRESETS = ("strict-avg", "decoupled", FULL_PARAMETER_SYNC_PRESET, SAO_STREAMING_SYNC_PRESET)
 SYNC_PRESET_ALIASES = {"dense-full": FULL_PARAMETER_SYNC_PRESET}
+# S27 P1: the syncer merge of decoupled RL's matrix fragments (yeto.rl.core).
+RL_MATRIX_MERGES = ("avg", "rda")
 
 
 def canonical_sync_preset(value: str) -> str:

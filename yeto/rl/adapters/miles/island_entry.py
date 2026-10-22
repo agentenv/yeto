@@ -2086,7 +2086,10 @@ def run_miles(
                 raise ValueError(
                     "decoupled RL total fragment steps must equal sweeps*fragments"
                 )
-            layout = build_rl_fragment_layout(specs, args.fragments)
+            matrix_merge = getattr(args, "rl_sync_matrix_merge", "avg")
+            layout = build_rl_fragment_layout(
+                specs, args.fragments, matrix_merge=matrix_merge
+            )
             sync_fingerprint = layout_fingerprint(layout).hex()
             miles_args.yeto_rl_num_fragments = args.fragments
             miles_args.yeto_rl_pipeline = args.pipeline
@@ -2117,6 +2120,7 @@ def run_miles(
                 algorithm_semantic_sha256=algorithm_semantic_sha256,
                 code_pack_digest=code_pack_digest,
                 compat_group=_island_compat_group(args),
+                matrix_merge=matrix_merge,
             )
         else:
             miles_args.yeto_rl_bridge_config = BridgeConfig(

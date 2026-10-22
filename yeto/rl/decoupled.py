@@ -52,6 +52,8 @@ class DecoupledBridgeConfig:
     # 7.7c: "<vendor>-<card>" (yeto.hw.catalog); sent in HELLO / JOIN so the
     # syncer refuses another card type by name. None = not declared.
     compat_group: str | None = None
+    # S27 P1: --rl-sync-matrix-merge (yeto.rl.core.build_rl_fragment_layout).
+    matrix_merge: str = "avg"
 
     def __post_init__(self) -> None:
         if self.num_fragments < 2:
@@ -139,6 +141,7 @@ class DecoupledRlBridge:
         self.layout = build_rl_fragment_layout(
             self.initial.specs,
             config.num_fragments,
+            matrix_merge=config.matrix_merge,
         )
         self.client = SyncerClient(
             config.syncer_addr,

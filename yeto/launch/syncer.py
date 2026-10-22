@@ -221,8 +221,8 @@ def rl_syncer_profile(args, num_learners: int):
         "resume": False,  # not hashed (v2): fresh start and restart agree
         "mark_final_checkpoint": mark_final,
         "learner_budget_steps": None,
-        "max_base_lag": 0,
-        "learner_weight": "equal",
+        "max_base_lag": _rl_max_base_lag(args),
+        "learner_weight": _rl_learner_weight(args),
         "require_profile_binding": True,
     })
 
@@ -434,6 +434,16 @@ def _final_grace_s(args, soft_deadline_s: int) -> int:
     return value
 
 
+def _rl_max_base_lag(args) -> int:
+    """S27 P1 --rl-sync-max-base-lag (checked by rl_args); 0 refuses late pushes."""
+    return int(getattr(args, "rl_sync_max_base_lag", 0))
+
+
+def _rl_learner_weight(args) -> str:
+    """S27 P1 --rl-sync-learner-weight (checked by rl_args); RL defaults to equal."""
+    return getattr(args, "rl_sync_learner_weight", "equal")
+
+
 def _rl_role_syncer_command(args, num_learners: int, binary: str,
                             syncer: RoleSyncer) -> str:
     """One role's strict RL syncer; --resume only once its checkpoint exists."""
@@ -457,7 +467,8 @@ def _rl_role_syncer_command(args, num_learners: int, binary: str,
         f"{_syncer_bcast_delta(args)}"
         f" --outer-lr {args.outer_lr}"
         f" --outer-momentum {args.outer_momentum}"
-        " --max-base-lag 0 --learner-weight equal"
+        f" --max-base-lag {_rl_max_base_lag(args)}"
+        f" --learner-weight {_rl_learner_weight(args)}"
         f" --checkpoint-path {syncer.checkpoint}"
         f" --checkpoint-every {_syncer_checkpoint_every(args)}"
         f" {_resume_if_exists(syncer.checkpoint)}"
