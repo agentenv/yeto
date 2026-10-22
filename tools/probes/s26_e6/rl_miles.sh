@@ -45,7 +45,10 @@ case $G in
     # full-parameter Adam state of 4B does not fit next to activations on one H100
     # (e6-t0-pair-a: CUDA OOM in round 2), and with it on the host the worker was killed
     # (e6-t0-pair-c): 2 training cards shard it (distributed optimizer)
-    ARGS="$ROLE --cluster-prefix $P --gpu modal:2xh100 --rl-sample-role trainer --rl-sample-wait-s 900 $Q"
+    # 3c rerun (E6-5): a round cut is ~64 GB and ~4.7 min, so cut every 5 rounds; both tiers
+    # use the same cadence (a cut only reads the state, the training numbers do not change)
+    ARGS="$ROLE --cluster-prefix $P --gpu modal:2xh100 --rl-sample-role trainer --rl-sample-wait-s 900 \
+--rl-cut-every ${CUT_EVERY:-5} $Q"
     SARGS="$ROLE --cluster-prefix $P-s --gpu modal:2xh100 --rl-placement fixed-partition --rl-rollout-gpus 1 \
 --rl-sample-role sampler --rl-sampler-max-backlog-rounds 2 --total-steps 12 $Q"
     ISLANDS=2 ;;

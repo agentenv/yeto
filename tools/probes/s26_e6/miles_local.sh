@@ -59,6 +59,16 @@ if [ -n "${SARGS:-}" ]; then
   ( cd $CLONE && eval "PYTHONPATH=$CLONE YETO_RUNS_DIR=$R/sruns timeout $HARD $PY -m yeto.cli $SARGS" 2>&1 | awk '{ print strftime("%FT%TZ", systime(), 1) " " $0; fflush() }' > $R/slaunch.ts.log; echo ${PIPESTATUS[0]} > $R/src ) 9>&- &
   SSUB=$!
 fi
+# stall stop: no new trained round (trainer) or sampler round for STALL_S s -> stop both apps
+( last=$(date +%s); prev=-1
+  while kill -0 $SUB 2>/dev/null; do sleep 30
+    n=$(cat $R/launch.ts.log $R/slaunch.ts.log 2>/dev/null | grep -aEc '"event":"(rl_round_trained|rl_sampler_round)"')
+    [ "$n" != "$prev" ] && { prev=$n; last=$(date +%s); }
+    if [ $(( $(date +%s) - last )) -ge ${STALL_S:-900} ]; then
+      echo "$(date -u +%FT%TZ) no new step for ${STALL_S:-900} s (events=$n): stopping" >> $R/STALL_STOP
+      (cd /tmp && timeout 120 $MODAL app stop -y $APP; timeout 120 $MODAL app stop -y $SAPP) >> $R/STALL_STOP 2>&1; exit 0
+    fi
+  done ) 9>&- &
 # release the launch lock once every island has a container (or the launch ended)
 for i in $(seq 1 120); do
   n=$(cat $R/launch.ts.log $R/slaunch.ts.log 2>/dev/null | grep -ac 'rank 0 container')
