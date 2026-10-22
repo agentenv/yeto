@@ -41,6 +41,8 @@ pub struct ElasticServerConfig {
     pub tick: Duration,
     pub outer_lr: f32,
     pub outer_momentum: f32,
+    /// Delayed Nesterov period N >= 2; None = plain Nesterov.
+    pub outer_delayed_nesterov_period: Option<u32>,
     /// After total_steps: keep serving FINISHED for this long (or until
     /// every member has left) so late islands exit cleanly.
     pub final_grace: Duration,
@@ -130,8 +132,11 @@ struct Shared {
     key: Vec<u8>,
     outer_lr: f32,
     outer_momentum: f32,
+    outer_delayed_nesterov_period: Option<u32>,
     params: Option<Vec<f32>>,
     momentum_buf: Vec<f32>,
+    /// Delayed Nesterov step count and accumulator (empty when disabled).
+    delayed_nesterov: crate::merge::DelayedNesterovState,
     /// Updates (θ − base) keyed by (island, base_version) awaiting a step.
     stored: HashMap<(u32, u64), Vec<f32>>,
     outboxes: HashMap<u32, Outbox>,
@@ -220,6 +225,12 @@ impl Shared {
                 b.push(1);
                 put_f32s(&mut b, p);
                 put_f32s(&mut b, &self.momentum_buf);
+                // Only with Delayed Nesterov, so plain checkpoints keep their bytes.
+                if let Some(period) = self.outer_delayed_nesterov_period {
+                    b.extend_from_slice(&period.to_le_bytes());
+                    b.extend_from_slice(&self.delayed_nesterov.step.to_le_bytes());
+                    put_f32s(&mut b, &self.delayed_nesterov.accum);
+                }
             }
             None => b.push(0),
         }
@@ -262,6 +273,19 @@ impl Shared {
         if r.u8()? == 1 {
             self.params = Some(get_f32s(&mut r)?);
             self.momentum_buf = get_f32s(&mut r)?;
+            if let Some(period) = self.outer_delayed_nesterov_period {
+                ensure!(
+                    r.u32()? == period,
+                    "elastic checkpoint delayed Nesterov period does not match --outer-delayed-nesterov-period"
+                );
+                let step = r.u64()?;
+                let accum = get_f32s(&mut r)?;
+                ensure!(
+                    accum.len() == self.momentum_buf.len(),
+                    "elastic checkpoint has no matching delayed Nesterov state"
+                );
+                self.delayed_nesterov = crate::merge::DelayedNesterovState { step, accum: accum.into() };
+            }
         }
         for _ in 0..r.u32()? {
             let k = (r.u32()?, r.u64()?);
@@ -355,13 +379,24 @@ impl Shared {
             let mut merged = vec![0.0f32; params.len()];
             let refs: Vec<&[f32]> = grads.iter().map(Vec::as_slice).collect();
             crate::merge::merge_avg(&refs, &weights, &mut merged);
-            crate::merge::nesterov_step(
-                params,
-                &mut self.momentum_buf,
-                &merged,
-                self.outer_lr,
-                self.outer_momentum,
-            );
+            match self.outer_delayed_nesterov_period {
+                None => crate::merge::nesterov_step(
+                    params,
+                    &mut self.momentum_buf,
+                    &merged,
+                    self.outer_lr,
+                    self.outer_momentum,
+                ),
+                Some(period) => crate::merge::delayed_nesterov_step(
+                    params,
+                    &mut self.momentum_buf,
+                    &mut self.delayed_nesterov,
+                    &merged,
+                    self.outer_lr,
+                    self.outer_momentum,
+                    period,
+                ),
+            }
         }
         // Every pending/carried entry was consumed or dropped by the step.
         self.stored.clear();
@@ -396,6 +431,9 @@ impl Shared {
                 if self.params.is_none() {
                     ensure!(!params.is_empty(), "ELASTIC_INIT with empty parameters");
                     self.momentum_buf = vec![0.0; params.len()];
+                    if self.outer_delayed_nesterov_period.is_some() {
+                        self.delayed_nesterov.accum = vec![0.0; params.len()].into();
+                    }
                     self.params = Some(params.clone());
                     self.publish_hash();
                 }
@@ -611,8 +649,10 @@ pub async fn run(listener: TcpListener, cfg: ElasticServerConfig) -> Result<(u64
         key: cfg.key.clone(),
         outer_lr: cfg.outer_lr,
         outer_momentum: cfg.outer_momentum,
+        outer_delayed_nesterov_period: cfg.outer_delayed_nesterov_period,
         params: None,
         momentum_buf: Vec::new(),
+        delayed_nesterov: Default::default(),
         stored: HashMap::new(),
         outboxes: HashMap::new(),
         checkpoint_path: cfg.checkpoint_path.clone(),
@@ -835,6 +875,7 @@ mod tests {
                 tick: Duration::from_millis(20),
                 outer_lr: 1.0,
                 outer_momentum: 0.0,
+                outer_delayed_nesterov_period: None,
                 final_grace: Duration::ZERO,
                 checkpoint_path: None,
                 checkpoint_every: 0,
@@ -930,6 +971,7 @@ mod tests {
                 tick: Duration::from_millis(20),
                 outer_lr: 1.0,
                 outer_momentum: 0.0,
+                outer_delayed_nesterov_period: None,
                 final_grace: Duration::ZERO,
                 checkpoint_path: None,
                 checkpoint_every: 0,
@@ -1006,6 +1048,7 @@ mod tests {
                 tick: Duration::from_millis(20),
                 outer_lr: 1.0,
                 outer_momentum: 0.0,
+                outer_delayed_nesterov_period: None,
                 final_grace: Duration::ZERO,
                 checkpoint_path: None,
                 checkpoint_every: 0,
@@ -1102,6 +1145,7 @@ mod tests {
                 tick: Duration::from_millis(20),
                 outer_lr: 1.0,
                 outer_momentum: 0.0,
+                outer_delayed_nesterov_period: None,
                 final_grace: Duration::ZERO,
                 checkpoint_path: None,
                 checkpoint_every: 0,
@@ -1154,6 +1198,7 @@ mod tests {
                 tick: Duration::from_millis(20),
                 outer_lr: 1.0,
                 outer_momentum: 0.0,
+                outer_delayed_nesterov_period: None,
                 final_grace: Duration::ZERO,
                 checkpoint_path: None,
                 checkpoint_every: 0,
@@ -1248,6 +1293,7 @@ mod tests {
             tick: Duration::from_millis(20),
             outer_lr: 1.0,
             outer_momentum: 0.0,
+            outer_delayed_nesterov_period: None,
             final_grace: Duration::ZERO,
             checkpoint_path: Some(ckpt.clone()),
             checkpoint_every: 1,
@@ -1319,6 +1365,7 @@ mod tests {
                 tick: Duration::from_millis(20),
                 outer_lr: 1.0,
                 outer_momentum: 0.0,
+                outer_delayed_nesterov_period: None,
                 final_grace: Duration::ZERO,
                 checkpoint_path: None,
                 checkpoint_every: 0,
@@ -1399,6 +1446,7 @@ mod tests {
                 tick: Duration::from_millis(20),
                 outer_lr: 1.0,
                 outer_momentum: 0.0,
+                outer_delayed_nesterov_period: None,
                 final_grace: Duration::from_secs(30),
                 checkpoint_path: None,
                 checkpoint_every: 0,
@@ -1476,6 +1524,7 @@ mod tests {
             tick: Duration::from_millis(20),
             outer_lr: 1.0,
             outer_momentum: 0.0,
+            outer_delayed_nesterov_period: None,
             final_grace: Duration::ZERO,
             checkpoint_path: Some(ckpt.clone()),
             checkpoint_every: 1,
@@ -1548,6 +1597,7 @@ mod tests {
             tick: Duration::from_millis(20),
             outer_lr: 1.0,
             outer_momentum: 0.0,
+            outer_delayed_nesterov_period: None,
             final_grace: Duration::ZERO,
             checkpoint_path: None,
             checkpoint_every: 1,

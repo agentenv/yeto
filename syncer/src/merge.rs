@@ -21,7 +21,8 @@
 //! flattens the singular-value spectrum of the averaged matrix to its mean.
 //!
 //! Outer optimizer: SGD with Nesterov momentum, state held here on the
-//! syncer, with defaults lr=0.7 and μ=0.9.
+//! syncer, with defaults lr=0.7 and μ=0.9. Opt-in Delayed Nesterov
+//! (`delayed_nesterov_step`) refreshes that momentum only every N steps.
 
 /// w_m = c_tokens² / c_steps ("quantity × quality"). The only definition of the
 /// learner merge weight: strict pushes (server.rs) and elastic deltas
@@ -263,6 +264,70 @@ pub fn nesterov_step(params: &mut [f32], buf: &mut [f32], delta: &[f32], lr: f32
     for ((p, b), d) in params.iter_mut().zip(buf.iter_mut()).zip(delta) {
         *b = mu * *b + *d;
         *p -= lr * (*d + mu * *b);
+    }
+}
+
+/// Delayed Nesterov state of one parameter buffer, next to its momentum.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DelayedNesterovState {
+    /// Outer steps already applied to this buffer (t).
+    pub step: u64,
+    /// Δ: sum of the outer gradients since the last momentum update, shared
+    /// copy-on-write with a pending checkpoint snapshot.
+    pub accum: std::sync::Arc<Vec<f32>>,
+}
+
+/// Delayed Nesterov: momentum applied every N outer steps, treating `delta`
+/// as the outer gradient g_t:
+///
+/// Δ ← Δ + g_t; if (t+1) mod N = 0:
+///     m ← μ·m + Δ/N;  θ ← θ − lr·(μ·m + g_t/N);  Δ ← 0
+/// else (m unchanged):
+///     θ ← θ − lr·g_t/N
+///
+/// With N = 1 this is exactly `nesterov_step`; callers keep that path for
+/// N = 1 so the default stays bit-identical.
+pub fn delayed_nesterov_step(
+    params: &mut [f32],
+    buf: &mut [f32],
+    state: &mut DelayedNesterovState,
+    delta: &[f32],
+    lr: f32,
+    mu: f32,
+    period: u32,
+) {
+    let update = delayed_nesterov_update(state.step, period);
+    for (((p, b), a), d) in params.iter_mut().zip(buf.iter_mut()).zip(std::sync::Arc::make_mut(&mut state.accum).iter_mut()).zip(delta) {
+        (*p, *b, *a) = delayed_nesterov_elem(*p, *b, *a, *d, lr, mu, period, update);
+    }
+    state.step += 1;
+}
+
+/// Whether outer step `step` (0-based t) refreshes the momentum.
+pub fn delayed_nesterov_update(step: u64, period: u32) -> bool {
+    (step + 1) % u64::from(period) == 0
+}
+
+/// One element of `delayed_nesterov_step`: returns (θ, m, Δ) after the step.
+/// Shared with callers that validate the result before mutating state.
+#[allow(clippy::too_many_arguments)]
+pub fn delayed_nesterov_elem(
+    p: f32,
+    b: f32,
+    a: f32,
+    d: f32,
+    lr: f32,
+    mu: f32,
+    period: u32,
+    update: bool,
+) -> (f32, f32, f32) {
+    let n = period as f32;
+    let a = a + d;
+    if update {
+        let b = mu * b + a / n;
+        (p - lr * (mu * b + d / n), b, 0.0)
+    } else {
+        (p - lr * (d / n), b, a)
     }
 }
 
@@ -626,5 +691,44 @@ mod tests {
         nesterov_step(&mut p, &mut buf, &[0.5], 0.7, 0.9);
         assert!((p[0] - (1.0 - 0.7 * (0.5 + 0.9 * 0.5))).abs() < 1e-6);
         assert!((buf[0] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn delayed_nesterov_matches_numpy_reference() {
+        // Values from tests/test_delayed_nesterov_reference.py (N = 3).
+        let deltas = [
+            [0.5, -0.25],
+            [0.125, 0.75],
+            [-0.375, 0.5],
+            [1.0, -1.0],
+            [0.25, 0.0625],
+            [-0.5, 0.875],
+            [0.75, -0.125],
+        ];
+        let mut p = [1.0f32, -2.0];
+        let mut buf = [0.0f32; 2];
+        let mut state = DelayedNesterovState { step: 0, accum: vec![0.0; 2].into() };
+        for d in &deltas {
+            delayed_nesterov_step(&mut p, &mut buf, &mut state, d, 0.7, 0.9, 3);
+        }
+        let close = |a: &[f32], b: &[f32]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-6);
+        assert!(close(&p, &[0.334_416_7, -2.575_458_3]), "{p:?}");
+        assert!(close(&buf, &[0.325, 0.279_166_67]), "{buf:?}");
+        assert!(close(&state.accum, &[0.75, -0.125]), "{:?}", state.accum);
+        assert_eq!(state.step, 7);
+    }
+
+    #[test]
+    fn delayed_nesterov_period_one_is_bitwise_nesterov() {
+        let deltas = [[0.3f32, -1.7], [2.1, 0.01], [-0.9, 0.4]];
+        let (mut p1, mut b1) = ([0.2f32, 5.0], [0.0f32; 2]);
+        let (mut p2, mut b2) = (p1, b1);
+        let mut state = DelayedNesterovState { step: 0, accum: vec![0.0; 2].into() };
+        for d in &deltas {
+            nesterov_step(&mut p1, &mut b1, d, 0.7, 0.9);
+            delayed_nesterov_step(&mut p2, &mut b2, &mut state, d, 0.7, 0.9, 1);
+        }
+        assert_eq!(p1.map(f32::to_bits), p2.map(f32::to_bits));
+        assert_eq!(b1.map(f32::to_bits), b2.map(f32::to_bits));
     }
 }

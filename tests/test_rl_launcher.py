@@ -837,6 +837,24 @@ def test_experimental_rl_sync_preserves_generic_sync_settings():
         assert value in command
 
 
+@pytest.mark.parametrize(("period", "flag"), [
+    (None, None),
+    ("1", None),  # N = 1 is plain Nesterov: no flag, unchanged profile hash
+    ("4", "--outer-delayed-nesterov-period 4"),
+])
+def test_outer_delayed_nesterov_period_is_forwarded_only_when_set(period, flag):
+    extra = ("--experimental-rl-sync", "--fragments", "1", "--pipeline", "1", "--merge-alpha", "0",
+             "--wire-dtype", "f32")
+    if period is not None:
+        extra += ("--outer-delayed-nesterov-period", period)
+    args = _args(extra)
+    _prepare_rl_args(args)
+    command = syncer_command(args, 2, binary="syncer")
+    assert ("--outer-delayed-nesterov-period" in command) == (flag is not None)
+    if flag is not None:
+        assert flag in command
+
+
 @pytest.mark.parametrize(
     "extra,match",
     [

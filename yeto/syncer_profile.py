@@ -57,6 +57,10 @@ _ISLAND_SCHEDULING_FIELDS = {
     "max_carry_lag",
 }
 _ISLAND_SCHEDULING_DOMAIN = b"yeto-syncer-island-scheduling-v1\0"
+# Optional. Absent = plain Nesterov (byte-identical hash); a period N >= 2
+# appends the block that the syncer's server.rs::semantic_profile_hash appends.
+_DELAYED_NESTEROV_FIELD = "outer_delayed_nesterov_period"
+_DELAYED_NESTEROV_DOMAIN = b"yeto-syncer-delayed-nesterov-v1\0"
 
 
 def _integer(name: str, value: object, *, bits: int, minimum: int = 0) -> int:
@@ -143,11 +147,13 @@ class SyncerSemanticProfile:
     soft_deadline_s: int | None = None
     q_min: int | None = None
     max_carry_lag: int | None = None
+    outer_delayed_nesterov_period: int | None = None
 
     @classmethod
     def from_mapping(cls, raw: object) -> SyncerSemanticProfile:
         if not isinstance(raw, dict) or not (
-            _FIELDS <= set(raw) <= _FIELDS | _ISLAND_SCHEDULING_FIELDS
+            _FIELDS <= set(raw)
+            <= _FIELDS | _ISLAND_SCHEDULING_FIELDS | {_DELAYED_NESTEROV_FIELD}
         ):
             raise ValueError(
                 "syncer semantic profile fields do not match the v1 schema"
@@ -239,6 +245,9 @@ class SyncerSemanticProfile:
             require_profile_binding=_boolean(
                 "require_profile_binding", raw["require_profile_binding"]
             ),
+            outer_delayed_nesterov_period=_optional_integer(
+                _DELAYED_NESTEROV_FIELD, raw.get(_DELAYED_NESTEROV_FIELD), bits=32, minimum=2
+            ),
             **scheduling,
         )
         profile._validate_general()
@@ -326,6 +335,9 @@ class SyncerSemanticProfile:
             encoded.extend(struct.pack("<dd", self.quorum_theta, self.carry_gamma))
             encoded.extend(struct.pack("<QII", self.soft_deadline_s, self.q_min,
                                        self.max_carry_lag))
+        if self.outer_delayed_nesterov_period is not None:
+            encoded.extend(_DELAYED_NESTEROV_DOMAIN)
+            encoded.extend(struct.pack("<I", self.outer_delayed_nesterov_period))
         return bytes(encoded)
 
     @property

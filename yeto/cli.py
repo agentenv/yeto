@@ -417,6 +417,14 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     sync.add_argument("--outer-lr", type=float, default=0.7)
     sync.add_argument("--outer-momentum", type=float, default=0.9)
     sync.add_argument(
+        "--outer-delayed-nesterov-period",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Delayed Nesterov outer optimizer: update the outer momentum only every N syncs "
+        "with the mean of their outer gradients; unset or 1 = plain Nesterov",
+    )
+    sync.add_argument(
         "--fragment-pattern",
         choices=["binpack", "strided"],
         default="binpack",

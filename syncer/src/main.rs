@@ -77,6 +77,12 @@ struct Args {
     /// Outer Nesterov momentum.
     #[arg(long, default_value_t = 0.9)]
     outer_momentum: f32,
+    /// Delayed Nesterov outer optimizer: apply the outer gradient every
+    /// step, but update the
+    /// momentum only every N steps with the mean of the N gradients.
+    /// Unset or 1 = plain Nesterov.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    outer_delayed_nesterov_period: Option<u32>,
     /// Iso spectrum-flattening implementation: the scalar reference kernel,
     /// or a persistent exact f32 Torch SVD worker.
     #[arg(long, default_value = "scalar")]
@@ -341,6 +347,8 @@ fn main() -> anyhow::Result<()> {
         policy_sweep_fragments: args.policy_sweep_fragments,
         outer_lr: args.outer_lr,
         outer_momentum: args.outer_momentum,
+        // N = 1 is exactly plain Nesterov; keep its code path and hashes.
+        outer_delayed_nesterov_period: args.outer_delayed_nesterov_period.filter(|&n| n > 1),
         iso_backend,
         final_state: args.final_state,
         checkpoint_path: args.checkpoint_path,

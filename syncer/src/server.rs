@@ -86,6 +86,9 @@ pub struct Config {
     pub policy_sweep_fragments: Option<u32>,
     pub outer_lr: f32,
     pub outer_momentum: f32,
+    /// Delayed Nesterov period N >= 2 (momentum applied every N outer
+    /// steps); None keeps plain Nesterov and the old profile hash.
+    pub outer_delayed_nesterov_period: Option<u32>,
     /// Spectrum-flattening backend for MERGE_ISO tensors.
     pub iso_backend: crate::iso_worker::IsoBackendConfig,
     pub final_state: Option<std::path::PathBuf>,
@@ -146,6 +149,7 @@ pub struct Config {
 // v2 drops `resume`: it is how a run (re)starts, not its semantics, so a
 // restarted syncer keeps the hash every island already carries in HELLO.
 const SEMANTIC_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-semantic-profile-v2\0";
+const DELAYED_NESTEROV_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-delayed-nesterov-v1\0";
 
 impl Config {
     /// Canonical identity of every launch field that can affect merging,
@@ -180,6 +184,11 @@ impl Config {
         });
         encoded.push(u8::from(self.require_profile_binding));
         self.island_scheduling.encode_contract(&mut encoded);
+        // Appended only when set, so plain-Nesterov hashes stay unchanged.
+        if let Some(period) = self.outer_delayed_nesterov_period {
+            encoded.extend_from_slice(DELAYED_NESTEROV_PROFILE_DOMAIN);
+            encoded.extend_from_slice(&period.to_le_bytes());
+        }
         Sha256::digest(encoded).into()
     }
 }
@@ -794,6 +803,9 @@ fn validate_config(cfg: &Config) -> Result<()> {
         if cfg.outer_lr != 1.0 || cfg.outer_momentum != 0.0 {
             bail!("--policy-sweep-fragments requires --outer-lr 1 and --outer-momentum 0");
         }
+        if cfg.outer_delayed_nesterov_period.is_some() {
+            bail!("--policy-sweep-fragments does not support --outer-delayed-nesterov-period");
+        }
         if cfg.learner_weight != LearnerWeight::Equal {
             bail!("--policy-sweep-fragments requires --learner-weight equal");
         }
@@ -983,6 +995,7 @@ pub async fn run(cfg: Config) -> Result<()> {
                 tick: std::time::Duration::from_millis(50),
                 outer_lr: cfg.outer_lr,
                 outer_momentum: cfg.outer_momentum,
+                outer_delayed_nesterov_period: cfg.outer_delayed_nesterov_period,
                 final_grace: std::time::Duration::from_secs(
                     cfg.elastic_final_grace_s.unwrap_or(params.soft_deadline_s),
                 ),
@@ -4078,6 +4091,7 @@ fn new_state_for(group: &Arc<Group>, cfg: &Config) -> Result<GlobalState> {
     if cfg.delta_correction {
         st.delta_correction = Some(crate::merge::Heloco::default());
     }
+    st.set_delayed_nesterov_period(cfg.outer_delayed_nesterov_period)?;
     info!(
         iso_backend = %st.iso_backend_kind(),
         "initialized global state"
@@ -5105,6 +5119,7 @@ mod tests {
             policy_sweep_fragments: None,
             outer_lr: 1.0,
             outer_momentum: 0.0,
+            outer_delayed_nesterov_period: None,
             iso_backend: crate::iso_worker::IsoBackendConfig::default(),
             final_state: None,
             checkpoint_path: None,
@@ -5204,6 +5219,36 @@ mod tests {
         assert_eq!(
             digest,
             "c677c127b1ad3e1da179863ee02b6b2e1bc232edb03b088bad62251e5d8d9ba5"
+        );
+    }
+
+    #[test]
+    fn delayed_nesterov_profile_hash_matches_the_python_canonical_vector() {
+        // Python: tests/test_rl_inter_island_contract.py (DELAYED_NESTEROV_4).
+        let mut config = round_test_config(8);
+        config.learners = 2;
+        config.quorum = 2;
+        config.grace_gamma = 0.8;
+        config.grace_tau = 2.0;
+        config.pipeline = 2;
+        config.sync_interval_steps = 24.0;
+        config.quorum_timeout_s = 900;
+        config.final_ack_timeout_s = 900;
+        config.outer_lr = 0.7;
+        config.outer_momentum = 0.9;
+        config.checkpoint_path = Some(std::path::PathBuf::from("/ignored/actor.ckpt"));
+        config.checkpoint_every = 1;
+        config.mark_final_checkpoint = true;
+        config.require_profile_binding = true;
+        config.outer_delayed_nesterov_period = Some(4);
+        let digest = config
+            .semantic_profile_hash()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest,
+            "2bf20f25b4d40d6d3db1d91e38d199e0347f9dace3fc481a2948fa7f1c99f126"
         );
     }
 

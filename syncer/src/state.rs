@@ -134,6 +134,12 @@ pub struct GlobalState {
     pub params: Vec<Arc<Vec<f32>>>,
     /// Nesterov momentum buffers, same shape as params.
     momentum: Vec<Arc<Vec<f32>>>,
+    /// Delayed Nesterov period N (>= 2); None keeps plain Nesterov. Set it
+    /// with `set_delayed_nesterov_period` before INIT_PARAMS.
+    delayed_nesterov_period: Option<u32>,
+    /// Per-fragment Delayed Nesterov step count and accumulator; empty
+    /// unless the period is set.
+    delayed_nesterov: Vec<merge::DelayedNesterovState>,
     pub initialized: Vec<bool>,
     /// Global step at which each fragment was last merged (its version).
     pub versions: Vec<u64>,
@@ -340,6 +346,8 @@ impl GlobalState {
             session_contract_hash: None,
             params,
             momentum,
+            delayed_nesterov_period: None,
+            delayed_nesterov: Vec::new(),
             initialized,
             versions,
             global_step: 0,
@@ -355,6 +363,23 @@ impl GlobalState {
 
     pub fn iso_backend_kind(&self) -> IsoBackendKind {
         self.iso_backend.kind()
+    }
+
+    /// Enable Delayed Nesterov with period `period` (>= 2), or disable it.
+    /// Must be called before any fragment is initialized.
+    pub fn set_delayed_nesterov_period(&mut self, period: Option<u32>) -> Result<()> {
+        if period.is_some_and(|n| n < 2) {
+            bail!("delayed Nesterov period must be >= 2 (1 is plain Nesterov)");
+        }
+        if self.initialized.iter().any(|&b| b) {
+            bail!("delayed Nesterov period must be set before fragment initialization");
+        }
+        self.delayed_nesterov_period = period;
+        self.delayed_nesterov = match period {
+            Some(_) => vec![Default::default(); self.params.len()],
+            None => Vec::new(),
+        };
+        Ok(())
     }
 
     pub fn all_initialized(&self) -> bool {
@@ -380,6 +405,15 @@ impl GlobalState {
                 .try_reserve_exact(expected)
                 .context("cannot allocate fragment momentum")?;
             momentum.resize(expected, 0.0);
+            if self.delayed_nesterov_period.is_some() {
+                let mut accum = Vec::new();
+                accum
+                    .try_reserve_exact(expected)
+                    .context("cannot allocate fragment delayed Nesterov buffer")?;
+                accum.resize(expected, 0.0);
+                self.delayed_nesterov[fid] =
+                    merge::DelayedNesterovState { step: 0, accum: Arc::new(accum) };
+            }
             self.params[fid] = Arc::new(values);
             self.momentum[fid] = Arc::new(momentum);
             self.initialized[fid] = true;
@@ -600,6 +634,10 @@ impl GlobalState {
         if !gnorm.is_finite() || delta.iter().any(|value| !value.is_finite()) {
             bail!("fragment {fid}: merged outer gradient is non-finite");
         }
+        if let Some(period) = self.delayed_nesterov_period {
+            self.commit_delayed_nesterov(fid, &delta, period)?;
+            return Ok(gnorm);
+        }
         // Validate the complete optimizer result before mutating either
         // buffer. This keeps commit all-or-nothing without cloning a
         // model-sized fragment.
@@ -623,6 +661,43 @@ impl GlobalState {
         debug_assert!(self.params[fid].iter().all(|value| value.is_finite()));
         debug_assert!(self.momentum[fid].iter().all(|value| value.is_finite()));
         Ok(gnorm)
+    }
+
+    /// The Delayed Nesterov variant of the outer step in `commit_merge`,
+    /// with the same validate-then-mutate contract.
+    fn commit_delayed_nesterov(&mut self, fid: usize, delta: &[f32], period: u32) -> Result<()> {
+        let state = &mut self.delayed_nesterov[fid];
+        let update = merge::delayed_nesterov_update(state.step, period);
+        for (((param, momentum), accum), gradient) in self.params[fid]
+            .iter()
+            .zip(self.momentum[fid].iter())
+            .zip(state.accum.iter())
+            .zip(delta)
+        {
+            let (p, m, a) = merge::delayed_nesterov_elem(
+                *param,
+                *momentum,
+                *accum,
+                *gradient,
+                self.outer_lr,
+                self.outer_momentum,
+                period,
+                update,
+            );
+            if !p.is_finite() || !m.is_finite() || !a.is_finite() {
+                bail!("fragment {fid}: outer optimizer produced non-finite state");
+            }
+        }
+        merge::delayed_nesterov_step(
+            Arc::make_mut(&mut self.params[fid]).as_mut_slice(),
+            Arc::make_mut(&mut self.momentum[fid]).as_mut_slice(),
+            state,
+            delta,
+            self.outer_lr,
+            self.outer_momentum,
+            period,
+        );
+        Ok(())
     }
 
     /// Compatibility helper for scalar unit tests and non-Torch callers.
@@ -651,6 +726,11 @@ const CKPT_MAGIC_V3: u32 = 0xD170_5A80;
 const SESSION_CONTRACT_CKPT_MAGIC: u32 = 0x5254_4353;
 /// Policy-sweep checkpoint marker, followed by the configured fragment count.
 const POLICY_SWEEP_CKPT_MAGIC: u32 = 0x5053_5750;
+/// Last 4 bytes of a Delayed Nesterov checkpoint. The block before it is,
+/// per fragment, `step u64 || accum f32 × numel`, then `period u32`. It is
+/// appended after every other trailer, only when the period is set, so
+/// plain-Nesterov checkpoints keep their exact bytes.
+const DELAYED_NESTEROV_CKPT_MAGIC: u32 = 0x444E_5354;
 const FINAL_MARKER_MAGIC: &str = "YETO_FINAL_V1";
 
 pub fn final_marker_path(path: &std::path::Path) -> std::path::PathBuf {
@@ -687,6 +767,8 @@ struct CheckpointReader {
     inner: std::io::BufReader<std::fs::File>,
     len: u64,
     pos: u64,
+    /// Trailing bytes hidden by `reserve_tail`.
+    reserved: u64,
 }
 
 impl CheckpointReader {
@@ -697,6 +779,7 @@ impl CheckpointReader {
             inner: std::io::BufReader::with_capacity(1 << 20, file),
             len,
             pos: 0,
+            reserved: 0,
         })
     }
 
@@ -745,6 +828,21 @@ impl CheckpointReader {
         Ok(())
     }
 
+    /// Hide the last `bytes` of the file from reads until `release_tail`.
+    fn reserve_tail(&mut self, bytes: u64) -> Result<()> {
+        if self.len - self.pos < bytes {
+            bail!("checkpoint is shorter than its {bytes}-byte trailing block");
+        }
+        self.len -= bytes;
+        self.reserved = bytes;
+        Ok(())
+    }
+
+    /// Make the bytes hidden by `reserve_tail` readable again.
+    fn release_tail(&mut self) {
+        self.len += std::mem::take(&mut self.reserved);
+    }
+
     /// The rest of the file, refusing more than `max` bytes.
     fn tail(&mut self, max: u64) -> Result<Vec<u8>> {
         let remaining = self.len - self.pos;
@@ -775,6 +873,8 @@ pub struct CheckpointSnapshot {
     fragments: Vec<(u64, Arc<Vec<f32>>, Arc<Vec<f32>>)>,
     ledger: std::collections::BTreeMap<u32, LearnerLedger>,
     trailer: CheckpointTrailer,
+    /// Delayed Nesterov period and per-fragment state, shared like params.
+    delayed_nesterov: Option<(u32, Vec<merge::DelayedNesterovState>)>,
 }
 
 impl CheckpointSnapshot {
@@ -813,6 +913,16 @@ impl CheckpointSnapshot {
                 f.write_all(&fragments.to_le_bytes())?;
                 f.write_all(contract_hash)?;
             }
+        }
+        // Appended after every other trailer, only when the period is set,
+        // so plain-Nesterov checkpoints keep their exact bytes.
+        if let Some((period, states)) = &self.delayed_nesterov {
+            for state in states {
+                f.write_all(&state.step.to_le_bytes())?;
+                write_f32s(f, &state.accum)?;
+            }
+            f.write_all(&period.to_le_bytes())?;
+            f.write_all(&DELAYED_NESTEROV_CKPT_MAGIC.to_le_bytes())?;
         }
         Ok(())
     }
@@ -862,6 +972,53 @@ pub fn write_final_marker(path: &std::path::Path, global_step: u64) -> Result<()
 }
 
 impl GlobalState {
+    /// Byte length of the trailing Delayed Nesterov checkpoint block for
+    /// this layout (0 when the period is unset): per fragment
+    /// `step u64 || accum f32 × numel`, then `period u32 || magic u32`.
+    fn delayed_nesterov_block_bytes(&self) -> Result<u64> {
+        if self.delayed_nesterov_period.is_none() {
+            return Ok(0);
+        }
+        let mut len = 8u64;
+        for fragment in &self.layout.fragments {
+            len = u64::try_from(fragment.numel()?)
+                .ok()
+                .and_then(|numel| numel.checked_mul(4))
+                .and_then(|bytes| len.checked_add(8 + bytes))
+                .context("delayed Nesterov checkpoint block size overflows")?;
+        }
+        Ok(len)
+    }
+
+    /// Parse the Delayed Nesterov block that `r` is positioned at.
+    fn read_delayed_nesterov_block(
+        &self,
+        r: &mut CheckpointReader,
+    ) -> Result<Vec<merge::DelayedNesterovState>> {
+        let Some(period) = self.delayed_nesterov_period else {
+            return Ok(Vec::new());
+        };
+        let mut states = Vec::with_capacity(self.layout.fragments.len());
+        for fragment in &self.layout.fragments {
+            let step = r.u64()?;
+            let mut accum = Vec::new();
+            accum
+                .try_reserve_exact(fragment.numel()?)
+                .context("cannot allocate checkpoint delayed Nesterov buffer")?;
+            accum.resize(fragment.numel()?, 0.0);
+            r.f32s(&mut accum)?;
+            states.push(merge::DelayedNesterovState { step, accum: Arc::new(accum) });
+        }
+        let checkpoint_period = r.u32()?;
+        if r.u32()? != DELAYED_NESTEROV_CKPT_MAGIC {
+            bail!("checkpoint has no delayed Nesterov state");
+        }
+        if checkpoint_period != period {
+            bail!("checkpoint delayed Nesterov period {checkpoint_period} != configured {period}");
+        }
+        Ok(states)
+    }
+
     /// Persist a consistent snapshot. Called only at the quiescent cut
     /// between rounds (see docs/PROTOCOL.md "Consistent snapshots").
     /// Written to `<path>.tmp` then renamed, so a crash mid-write never
@@ -911,6 +1068,9 @@ impl GlobalState {
                 .collect(),
             ledger: self.ledger.clone(),
             trailer,
+            delayed_nesterov: self
+                .delayed_nesterov_period
+                .map(|period| (period, self.delayed_nesterov.clone())),
         })
     }
 
@@ -927,8 +1087,13 @@ impl GlobalState {
     /// mutated.
     pub fn load_checkpoint(&mut self, path: &std::path::Path) -> Result<()> {
         // Stream the file: only one fragment-sized decode block is held
-        // besides the restored state (no whole-file buffer).
+        // besides the restored state (no whole-file buffer). A Delayed
+        // Nesterov block sits after every other trailer; reserve it so the
+        // base parse ends where it begins.
         let mut r = CheckpointReader::open(path)?;
+        let delayed_nesterov_bytes = self.delayed_nesterov_block_bytes()?;
+        r.reserve_tail(delayed_nesterov_bytes)
+            .context("checkpoint has no delayed Nesterov state")?;
         let magic = r.u32()?;
         let (checkpoint_iso_backend, checkpoint_layout_fingerprint) = match magic {
             CKPT_MAGIC_V1 => bail!(
@@ -1005,6 +1170,8 @@ impl GlobalState {
         }
         // The trailer is at most 72 bytes; parse it from memory as before.
         let tail = r.tail(72)?;
+        r.release_tail();
+        let delayed_nesterov = self.read_delayed_nesterov_block(&mut r)?;
         let mut r = Reader(&tail);
         let expected_policy_sweep_fragments = self.policy_sweep_fragments;
         let header_layout_verified = checkpoint_layout_fingerprint.is_some();
@@ -1123,6 +1290,7 @@ impl GlobalState {
         self.versions = versions;
         self.params = params;
         self.momentum = momentum;
+        self.delayed_nesterov = delayed_nesterov;
         self.initialized.fill(true);
         self.ledger = ledger;
         Ok(())
@@ -1407,6 +1575,63 @@ mod tests {
             assert!(!fresh.all_initialized());
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn delayed_nesterov_commits_and_checkpoints_its_state() {
+        let dir = std::env::temp_dir().join(format!("yeto-dn-ckpt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (dn_path, plain_path) = (dir.join("dn.ckpt"), dir.join("plain.ckpt"));
+        let fresh = |period| {
+            let mut st = state_with_fingerprint(layout2(), 0x11);
+            st.set_delayed_nesterov_period(period).unwrap();
+            st
+        };
+        let mut st = fresh(Some(2));
+        st.init_fragment(0, vec![1.0; 4]).unwrap();
+        st.init_fragment(1, vec![-2.0; 4]).unwrap();
+        // Step t=0 of N=2: θ -= lr·g/N, momentum untouched, Δ holds g.
+        st.merge_and_step(0, &[&[2.0f32; 4]], &[1.0]).unwrap();
+        assert_eq!(*st.params[0], vec![1.0 - 0.7 * 1.0; 4]);
+        assert_eq!(*st.momentum[0], vec![0.0; 4]);
+        assert_eq!(*st.delayed_nesterov[0].accum, vec![2.0; 4]);
+        st.global_step = 1;
+        st.versions = vec![1, 0];
+        st.save_checkpoint(&dn_path).unwrap();
+
+        let mut resumed = fresh(Some(2));
+        resumed.load_checkpoint(&dn_path).unwrap();
+        assert_eq!(resumed.delayed_nesterov, st.delayed_nesterov);
+        // Step t=1 fires: m = Δ/N = 2, Δ cleared, on both states alike.
+        for state in [&mut st, &mut resumed] {
+            state.merge_and_step(0, &[&[2.0f32; 4]], &[1.0]).unwrap();
+            assert_eq!(*state.momentum[0], vec![2.0; 4]);
+            assert_eq!(*state.delayed_nesterov[0].accum, vec![0.0; 4]);
+        }
+        assert_eq!(resumed.params, st.params);
+
+        // A plain checkpoint keeps its bytes and cannot resume a DN run;
+        // a DN checkpoint cannot resume a plain or other-period run.
+        let mut plain = fresh(None);
+        plain.init_fragment(0, vec![1.0; 4]).unwrap();
+        plain.init_fragment(1, vec![-2.0; 4]).unwrap();
+        plain.save_checkpoint(&plain_path).unwrap();
+        let mut reference = state_with_fingerprint(layout2(), 0x11);
+        reference.init_fragment(0, vec![1.0; 4]).unwrap();
+        reference.init_fragment(1, vec![-2.0; 4]).unwrap();
+        assert_eq!(std::fs::read(&plain_path).unwrap(), reference.encode_checkpoint().unwrap());
+        assert!(fresh(Some(2)).load_checkpoint(&plain_path).is_err());
+        assert!(fresh(None).load_checkpoint(&dn_path).is_err());
+        assert!(fresh(Some(3)).load_checkpoint(&dn_path).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn delayed_nesterov_period_must_be_at_least_two_and_set_before_init() {
+        let mut st = state_with_fingerprint(layout2(), 0x11);
+        assert!(st.set_delayed_nesterov_period(Some(1)).is_err());
+        st.init_fragment(0, vec![1.0; 4]).unwrap();
+        assert!(st.set_delayed_nesterov_period(Some(2)).is_err());
     }
 
     #[test]

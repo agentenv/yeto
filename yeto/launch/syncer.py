@@ -150,6 +150,23 @@ def _syncer_checkpoint_every(args) -> int:
     return int(getattr(args, "rl_sync_checkpoint_every", 1)) if rl_dense_sweep(args) else 1
 
 
+def outer_delayed_nesterov_period(args) -> int | None:
+    """The syncer's Delayed Nesterov period; None (unset or 1) is plain Nesterov."""
+    period = getattr(args, "outer_delayed_nesterov_period", None)
+    if period is None:
+        return None
+    if period < 1:
+        raise ValueError("--outer-delayed-nesterov-period must be >= 1")
+    return period if period > 1 else None
+
+
+def _syncer_outer_optimizer(args) -> str:
+    period = outer_delayed_nesterov_period(args)
+    return (f" --outer-lr {args.outer_lr}"
+            f" --outer-momentum {args.outer_momentum}"
+            + (f" --outer-delayed-nesterov-period {period}" if period else ""))
+
+
 def _syncer_bcast_delta(args) -> str:
     """S26 E3 bf16 downlink deltas (checked by rl_args._check_bcast_delta)."""
     full_every = int(getattr(args, "rl_sync_bcast_delta_full_every", 0) or 0)
@@ -199,7 +216,9 @@ def rl_syncer_profile(args, num_learners: int):
         sweep_fragments, mark_final = None, True
     else:
         raise ValueError("only full-parameter syncers are bound to a semantic profile")
+    period = outer_delayed_nesterov_period(args)
     return SyncerSemanticProfile.from_mapping({
+        **({"outer_delayed_nesterov_period": period} if period else {}),
         "schema": SYNCER_SEMANTIC_PROFILE_SCHEMA,
         "learners": num_learners,
         "quorum": args.quorum,
@@ -465,8 +484,7 @@ def _rl_role_syncer_command(args, num_learners: int, binary: str,
         f"{_syncer_expected_contract(args)}"
         f"{_syncer_profile_binding(args)}"
         f"{_syncer_bcast_delta(args)}"
-        f" --outer-lr {args.outer_lr}"
-        f" --outer-momentum {args.outer_momentum}"
+        f"{_syncer_outer_optimizer(args)}"
         f" --max-base-lag {_rl_max_base_lag(args)}"
         f" --learner-weight {_rl_learner_weight(args)}"
         f" --checkpoint-path {syncer.checkpoint}"
@@ -507,8 +525,7 @@ def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> st
         f" --sync-interval-steps {getattr(args, 'sync_interval_steps', 24.0)}"
         f" --delta-correction {args.delta_correction}"
         f" --total-steps {args.total_steps}"
-        f" --outer-lr {args.outer_lr}"
-        f" --outer-momentum {args.outer_momentum}"
+        f"{_syncer_outer_optimizer(args)}"
         " --checkpoint-path ~/yeto-state.ckpt"
         f" {_resume_if_exists('~/yeto-state.ckpt')}"
         f" --mark-final-checkpoint"
