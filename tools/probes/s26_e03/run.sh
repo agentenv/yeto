@@ -54,5 +54,20 @@ case $L in
     [ -n "${DRY:-}" ] && R=/tmp/$P-plan && rm -rf $R
     # no checkpoint store: every round cut requeues fully_async background groups
     # (in_flight.export_in_flight -> requeue_untrained), which made staleness 0 in v1
+    if [ -z "${DRY:-}" ]; then
+      # stall stop: no new rl_local_round for STALL_S (default 900 s) after the first one -> stop
+      # this run's own Modal app (the driver then finishes its normal pull and teardown)
+      STALL_S=${STALL_S:-900}
+      setsid nohup bash -c '
+        R=$1; APP=$2; S=$3; PY=$4; last=$(date +%s); n=0
+        while [ ! -e $R/end_utc.txt ]; do
+          sleep 30; c=$(grep -ac "\"event\":\"rl_local_round\"" $R/launch.ts.log 2>/dev/null || echo 0)
+          [ "$c" != "$n" ] && { n=$c; last=$(date +%s); }
+          if [ "$n" -gt 0 ] && [ $(( $(date +%s) - last )) -ge $S ]; then
+            echo "$(date -u +%FT%TZ) no new round for ${S}s after round $n: stopping $APP" >> $R/stall-stop.log
+            (cd /tmp && timeout 120 $PY -m modal app stop -y $APP) >> $R/stall-stop.log 2>&1; exit 0
+          fi
+        done' _ "$R" "yeto-$P" "$STALL_S" "$PY" > /dev/null 2>&1 < /dev/null &
+    fi
     exec bash "$REPO/tools/probes/s26_e6/miles_local.sh" ;;
 esac
