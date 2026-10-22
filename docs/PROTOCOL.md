@@ -32,7 +32,7 @@ or allocation overflows are errors rather than panics.
 
 | type | name | direction | payload |
 |---:|---|---|---|
-| 1 | HELLO | learner → syncer | protocol_version:u16 (=4), learner_id:u32, connection_generation:u64, dtype:u8 (1=f32, 2=bf16, 3=q4, 4=f32 with bf16 pushes, 5=f32 with int8 pushes; flag 0x80 = bf16 downlink deltas), num_fragments:u32, per-fragment layout, layout_fingerprint:[u8;32], session_contract_hash:[u8;32], optional syncer_profile_hash:[u8;32], num_streams:u16, optional compat_group trailer (`b"YCG1"`, u32 length, 1–64 bytes utf-8) |
+| 1 | HELLO | learner → syncer | protocol_version:u16 (=4), learner_id:u32, connection_generation:u64, dtype:u8 (1=f32, 2=bf16, 3=q4, 4=f32 with bf16 pushes, 5=f32 with int8 pushes; flag 0x80 = bf16 downlink deltas), num_fragments:u32, per-fragment layout, layout_fingerprint:[u8;32], session_contract_hash:[u8;32], optional syncer_profile_hash:[u8;32], num_streams:u16, optional compat_group trailer (`b"YCG1"`, u32 length, 1–64 bytes utf-8), optional extension trailer (`b"YEX1"`, flags:u8, syncer_epoch:u64; see "Syncer epoch and peer recovery") |
 | 2 | INIT_PARAMS | learner → syncer | fragment_id:u32, full tensor bytes; only learner 0 may initialize |
 | 3 | PULL_REQ | syncer → learner | fragment_id:u32, global_step:u64, round_attempt:u32 |
 | 4 | PUSH_FRAGMENT | learner → syncer | learner_id:u32, fragment_id:u32, global_step:u64, round_attempt:u32, base_version:u64, local_step:u64, c_steps:u32, c_tokens:u64, base-relative learner-delta bytes |
@@ -46,6 +46,13 @@ or allocation overflows are errors rather than panics.
 | 12 | FINAL_ACK | learner → syncer | revision:u16 (=1), final_global_step:u64 |
 | 13 | FINAL_FRAGMENT | syncer → learner | fragment_id:u32, version:u64, authoritative full tensor bytes, always little-endian f32 |
 | 14 | BUDGET_DONE | learner → syncer | exact_local_steps:u64 |
+| 40 | RECOVERY_CLOCK | syncer → recovering learner | t_s:u64, n:u32, V_s:u64 × n, donor:u32 (0xFFFFFFFF = none) |
+| 41 | PEER_SNAPSHOT_REQ | syncer → donor | recovering_id:u32, recovering_generation:u64, t_s:u64, n:u32, V_s:u64 × n |
+| 42 | PEER_SNAPSHOT_READY | donor → syncer | recovering_id:u32, recovering_generation:u64, n:u32, V_d:u64 × n, sha256:[u8;32], len:u32, locator utf-8 |
+| 43 | RECOVERY_SOURCE | syncer → recovering learner | kind:u8 (1 peer, 2 degraded), donor:u32, n:u32, V_d:u64 × n, sha256:[u8;32], len:u32, text utf-8 (locator, or the degraded reason) |
+| 44 | RECOVERY_RESTORED | recovering learner → syncer | has_versions:u8, n:u32, held:u64 × n (has_versions 0 and n 0: resend every fragment) |
+| 45 | RECOVERY_FAILED | recovering learner → syncer | len:u32, reason utf-8 |
+| 46 | RECOVERY_DONE | syncer → recovering learner | t_s:u64, done_step:u64, replayed:u32, n:u32, versions:u64 × n |
 
 HELLO fragment layout is, for every fragment: `merge_mode:u8` (0=avg, 1=rda,
 2=iso), `num_tensors:u32`, then `numel:u64 × num_tensors`; iso additionally
@@ -196,6 +203,50 @@ attempt cannot enter its retry.
 Each client redial creates a fresh nonzero connection generation and repeats
 HELLO/DATA_HELLO. The syncer sends every initialized fragment at its current
 version to a valid new generation.
+
+## Syncer epoch and peer recovery
+
+The HELLO extension trailer is the last 13 bytes of the HELLO body (inside
+the HMAC): `b"YEX1"`, flags (bit 0: syncer_epoch is set, bit 1: recover),
+syncer_epoch:u64. A client that sets neither sends no trailer.
+
+Syncer epoch: a HELLO whose epoch is lower than `--syncer-epoch` is refused
+with an ERROR that starts with `fenced: syncer_epoch`; the client does not
+retry it. A HELLO without an epoch is admitted. The epoch and the retired
+connection generations are written to `<checkpoint>.membership` whenever they
+change and restored on `--resume`; the configured epoch only raises the
+restored one.
+
+Lease expiry: with `--island-lease-s`, a silent island gets the ERROR
+`island lease expired: re-JOIN required`. The client redials with a new
+generation (this first redial does not use `max_reconnects`); the syncer
+catches it up and fences its pushes whose base predates the catch-up.
+
+Peer recovery (an island that lost its trainer state, HELLO with the recover
+flag):
+
+1. The syncer registers the connection but sends it no pulls and no
+   broadcasts. After pending checkpoint publishes are durable it sends
+   RECOVERY_CLOCK `(t_s, V_s)` and PEER_SNAPSHOT_REQ to the current member
+   with the fewest unanswered pulls.
+2. The donor keeps training. Once every fragment version it holds is at least
+   `V_s[p]` it writes its parameters and inner optimizer state to the shared
+   snapshot store and answers PEER_SNAPSHOT_READY. The syncer relays only this
+   record (RECOVERY_SOURCE); it never carries the snapshot.
+3. The recovering island checks the sha256 and the trainer layout, restores,
+   and sends RECOVERY_RESTORED with the versions it holds. If it cannot use
+   the snapshot it sends RECOVERY_FAILED and the syncer asks the next donor.
+4. The syncer resends the current value of every fragment whose version is
+   newer than the held version (broadcasts overwrite, so this equals
+   replaying every update since the donor's snapshot; no update log is kept),
+   sends RECOVERY_DONE, puts the island on the roster and rebinds its
+   unanswered pulls. The `recovery` event-tape record holds the steps from
+   the clock to DONE and whether they exceeded `--recovery-bound-steps`.
+
+With no donor, after `--recovery-max-donor-tries` donors, or outside the
+training loop (initialization, budget cutoff, finalization) the island gets
+the degraded source: it restores on its own and receives every fragment.
+A donor that disconnects or misses `--recovery-donor-timeout-s` is replaced.
 
 ## Merge and broadcast
 

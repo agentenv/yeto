@@ -5,6 +5,7 @@ mod fold;
 mod head_memory;
 mod iso_worker;
 mod membership;
+mod recovery;
 mod merge;
 mod downlink;
 mod protocol;
@@ -195,10 +196,21 @@ struct Args {
     /// to 150 s, as the launcher and `yeto --rl-island-lease-s`.
     #[arg(long)]
     island_lease_s: Option<f64>,
-    /// elastic: fencing token of this syncer incarnation; bump on every
-    /// restart (D-S6 will persist it in the checkpoint).
+    /// Fencing token of this syncer incarnation; bump on every restart.
+    /// Fragment rounds: a HELLO with a lower epoch is refused (a HELLO
+    /// without one is admitted); persisted next to the checkpoint.
     #[arg(long, default_value_t = 0)]
     syncer_epoch: u64,
+    /// Fragment rounds: bound H on one peer recovery, in syncer steps. Unset:
+    /// recovery steps are measured and recorded but not checked.
+    #[arg(long)]
+    recovery_bound_steps: Option<u64>,
+    /// Fragment rounds: donors asked before the degraded recovery path.
+    #[arg(long, default_value_t = 3)]
+    recovery_max_donor_tries: u32,
+    /// Fragment rounds: wait for one donor snapshot before asking the next.
+    #[arg(long, default_value_t = 600)]
+    recovery_donor_timeout_s: u64,
     /// elastic: after total_steps keep answering FINISHED for this many
     /// seconds (or until every member left); defaults to the soft deadline.
     #[arg(long)]
@@ -286,6 +298,12 @@ fn main() -> anyhow::Result<()> {
     } else {
         parse_membership(&args)?
     };
+    let recovery = recovery::RecoveryConfig {
+        bound_steps: args.recovery_bound_steps,
+        max_donor_tries: args.recovery_max_donor_tries,
+        donor_timeout: std::time::Duration::from_secs(args.recovery_donor_timeout_s),
+    };
+    recovery.validate()?;
     let devices = if args.iso_worker_devices.is_empty() {
         vec![args.iso_worker_device.clone()]
     } else {
@@ -369,6 +387,7 @@ fn main() -> anyhow::Result<()> {
         syncer_epoch: args.syncer_epoch,
         elastic_final_grace_s: args.final_grace_s,
         membership,
+        recovery,
     };
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()

@@ -408,3 +408,35 @@ def test_syncer_sockets_use_tcp_keepalive():
     finally:
         client.close()
         listener.close()
+
+
+@pytest.mark.timeout(25)
+def test_lease_expired_error_redials_with_new_generation_even_without_reconnect_budget():
+    """The syncer expires a lease with MSG_ERROR "island lease expired: ...".
+    The client treats it as a re-JOIN request: it redials with a new
+    connection generation instead of failing, without using max_reconnects."""
+    listener = make_listener()
+    port = listener.getsockname()[1]
+    client = SyncerClient(
+        ("127.0.0.1", port), LEARNER_ID, make_layout(), dtype=DTYPE_F32, num_streams=1,
+        connect_timeout=10, max_reconnects=0,
+    )
+    try:
+        client.start()
+        _hello, first_generation, socks = accept_group(listener, 1)
+        write_frame(socks[0], MSG_ERROR, b"island lease expired: re-JOIN required")
+        _hello, second_generation, socks2 = accept_group(listener, 1)
+        assert second_generation != first_generation
+        assert client.lease_expiries == 1
+        drop_group(socks)
+        client.check_health()  # a re-JOIN is not a failure
+        # The re-joined connection works: a pull is answered on it.
+        write_frame(socks2[0], MSG_PULL_REQ, struct.pack("<IQI", 0, 1, 1))
+        deadline = time.monotonic() + 5
+        while not client.drain_pulls():
+            assert time.monotonic() < deadline, "pull on the re-joined generation not received"
+            time.sleep(0.01)
+        drop_group(socks2)
+    finally:
+        client.close()
+        listener.close()

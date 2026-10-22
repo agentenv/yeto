@@ -41,6 +41,7 @@ from .downlink import HEADER_LEN as DOWNLINK_HEADER_LEN
 from .downlink import DownlinkAnchors, DownlinkChunkSink
 from .downlink import tensor_nbytes as downlink_tensor_nbytes
 from .fragments import MERGE_ISO, FragmentLayout
+from . import recovery_protocol as rp
 from .wan_streams import STREAM_SCHEDULES, StreamMeter, StreamSnapshot, StreamStalledError, pick_stream
 
 MAGIC = 0xD170C0DE
@@ -317,7 +318,11 @@ def encode_hello(
     session_contract_hash: bytes | None = None,
     syncer_profile_hash: bytes | None = None,
     compat_group: str | None = None,
+    syncer_epoch: int | None = None,
+    recover: bool = False,
 ) -> bytes:
+    """HELLO body. ``syncer_epoch`` and ``recover`` add the extension trailer
+    (``yeto.recovery_protocol``); with neither the bytes are the legacy ones."""
     if session_contract_hash is None:
         # Generic/legacy callers still bind the session to the semantic tensor
         # layout. Restricted profiles may supply a stronger opaque contract.
@@ -358,6 +363,7 @@ def encode_hello(
         if not 0 < len(raw) <= 64:
             raise ValueError("compat_group must be 1..64 bytes")
         parts.append(HELLO_COMPAT_MAGIC + struct.pack("<I", len(raw)) + raw)
+    parts.append(rp.encode_hello_ext(syncer_epoch, recover))
     return b"".join(parts)
 
 
@@ -414,7 +420,14 @@ SESSION_REJECT_PREFIXES = (
     ("HELLO is missing the required syncer semantic profile", "syncer_profile_mismatch"),
     # secret-handling-hardening: wrong or missing island HMAC key.
     ("HELLO authentication failed", "island_auth_failed"),
+    # The island was launched for an older syncer incarnation.
+    (rp.SYNCER_EPOCH_FENCE_PREFIX, "syncer_epoch_fenced"),
 )
+
+
+class LeaseExpiredError(ConnectionError):
+    """The syncer expired this island's lease. The client redials with a new
+    connection generation (a re-JOIN); the syncer catches it up."""
 
 
 class SessionRejectedError(ProtocolError):
@@ -619,7 +632,13 @@ class SyncerClient:
         push_i8_block: int = DEFAULT_I8_BLOCK,
         stream_schedule: str = "rr",
         stream_stall_timeout: float | None = None,
+        syncer_epoch: int | None = None,
+        recover: bool = False,
     ):
+        """``syncer_epoch``: the syncer incarnation this island was launched
+        for; a syncer with a newer epoch refuses it (not retried). ``recover``:
+        this island lost its trainer state; every HELLO asks for peer recovery
+        until the syncer sends RECOVERY_DONE (see ``yeto.rl.peer_recovery``)."""
         if stream_schedule not in STREAM_SCHEDULES:
             raise ValueError(f"stream_schedule must be one of {STREAM_SCHEDULES}, got {stream_schedule!r}")
         if stream_stall_timeout is not None and not stream_stall_timeout > 0:
@@ -673,6 +692,15 @@ class SyncerClient:
         # the key (the launcher ships it as a secret env).
         self.hmac_key = hmac_key if hmac_key is not None else island_hmac_key_from_env()
         self.compat_group = compat_group
+        rp.encode_hello_ext(syncer_epoch, False)  # validates the epoch
+        self.syncer_epoch = syncer_epoch
+        # Set until RECOVERY_DONE: a redial during recovery asks again.
+        self._recover = threading.Event()
+        if recover:
+            self._recover.set()
+        self._recovery_events: queue.Queue = queue.Queue()
+        self._snapshot_requests: queue.Queue = queue.Queue()
+        self.lease_expiries = 0
         self.connect_timeout = connect_timeout
         self.max_reconnects = max_reconnects
         self.finalization_timeout = finalization_timeout
@@ -803,6 +831,8 @@ class SyncerClient:
                         self.session_contract_hash,
                         self.syncer_profile_hash,
                         self.compat_group,
+                        syncer_epoch=self.syncer_epoch,
+                        recover=self._recover.is_set(),
                     ),
                     self.hmac_key,
                 ),
@@ -885,16 +915,26 @@ class SyncerClient:
                          f"(learner {self.learner_id}): {self._last_err!r}; redialing")
             self._teardown_group()
             backoff = RECONNECT_BACKOFF_START
+            # A lease expiry is the syncer asking for a re-JOIN, not a link
+            # failure: its first redial does not use the reconnect budget.
+            rejoin = isinstance(self._last_err, LeaseExpiredError)
             while True:
                 if self._closed.is_set() or self.shutdown.is_set():
                     return
-                if self.max_reconnects is not None and self._reconnects_used >= self.max_reconnects:
+                if (
+                    not rejoin
+                    and self.max_reconnects is not None
+                    and self._reconnects_used >= self.max_reconnects
+                ):
                     with self._lock:
                         self._err = self._last_err or ConnectionError("syncer connection lost")
                     with self._final_cond:
                         self._final_cond.notify_all()
                     return
-                self._reconnects_used += 1
+                if rejoin:
+                    rejoin = False
+                else:
+                    self._reconnects_used += 1
                 if self._closed.wait(backoff):
                     return
                 backoff = min(backoff * 2.0, RECONNECT_BACKOFF_CAP)
@@ -1215,6 +1255,36 @@ class SyncerClient:
 
     def drain_updates(self) -> list[BcastFragment]:
         return self._drain(self._bcasts)
+
+    # -- peer recovery (yeto.rl.peer_recovery drives these) --------------------
+
+    @property
+    def recovering(self) -> bool:
+        return self._recover.is_set()
+
+    def next_recovery_event(self, timeout: float):
+        """Next RecoveryClock / RecoverySource / RecoveryDone, or None."""
+        try:
+            return self._recovery_events.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    def drain_snapshot_requests(self) -> list[rp.SnapshotRequest]:
+        """Donor side: snapshot requests the syncer sent this island."""
+        return self._drain(self._snapshot_requests)
+
+    def send_snapshot_ready(self, request: rp.SnapshotRequest, versions, sha256: bytes, locator: str) -> bool:
+        payload = rp.encode_snapshot_ready(request, versions, sha256, locator)
+        return self._enqueue(0, self._frame(rp.MSG_PEER_SNAPSHOT_READY, payload))
+
+    def send_recovery_restored(self, versions) -> bool:
+        """``versions`` held after the restore, or None: resend every fragment."""
+        if versions is not None and len(versions) != self.layout.num_fragments:
+            raise ValueError("restored versions must list every fragment")
+        return self._enqueue(0, self._frame(rp.MSG_RECOVERY_RESTORED, rp.encode_restored(versions)))
+
+    def send_recovery_failed(self, reason: str) -> bool:
+        return self._enqueue(0, self._frame(rp.MSG_RECOVERY_FAILED, rp.encode_failed(reason)))
 
     def install_inbound_chunk_sink(self, sink: object | None) -> None:
         """Select a transactional sink for future chunked fragment receives.
@@ -1700,6 +1770,10 @@ class SyncerClient:
             MSG_SHUTDOWN: 0,
             MSG_ERROR: MAX_ERROR_FRAME,
             MSG_CHUNK: _CHUNK_HEAD.size + CHUNK_SIZE,
+            rp.MSG_RECOVERY_CLOCK: rp.MAX_RECOVERY_FRAME,
+            rp.MSG_PEER_SNAPSHOT_REQ: rp.MAX_RECOVERY_FRAME,
+            rp.MSG_RECOVERY_SOURCE: rp.MAX_RECOVERY_FRAME,
+            rp.MSG_RECOVERY_DONE: rp.MAX_RECOVERY_FRAME,
         }
         try:
             return limits[msg_type]
@@ -2060,7 +2134,13 @@ class SyncerClient:
         self, gen: int, msg_type: int, payload: bytes | memoryview
     ) -> None:
         if msg_type == MSG_ERROR:
-            message = payload.decode("utf-8", errors="replace")
+            message = bytes(payload).decode("utf-8", errors="replace")
+            if message.startswith(rp.LEASE_EXPIRED_PREFIX):
+                # Not fatal: redial with a new generation; the syncer treats
+                # it as a re-JOIN and catches the island up.
+                self.lease_expiries += 1
+                self._socket_failed(gen, LeaseExpiredError(message))
+                return
             text = f"syncer rejected protocol session: {message}"
             metric = next(
                 (m for prefix, m in SESSION_REJECT_PREFIXES if message.startswith(prefix)),
@@ -2085,6 +2165,15 @@ class SyncerClient:
             self.shutdown.set()
             with self._final_cond:
                 self._final_cond.notify_all()
+            return
+        if msg_type in _RECOVERY_DECODERS:
+            event = _RECOVERY_DECODERS[msg_type](payload, self.layout.num_fragments)
+            if isinstance(event, rp.SnapshotRequest):
+                self._snapshot_requests.put(event)
+                return
+            if isinstance(event, rp.RecoveryDone):
+                self._recover.clear()
+            self._recovery_events.put(event)
             return
         if msg_type == MSG_PULL_REQ:
             if len(payload) != 16:
@@ -2192,6 +2281,14 @@ class SyncerClient:
 
     def _set_protocol_error(self, message: str) -> None:
         self._protocol_failed(self._gen, ProtocolError(message))
+
+
+_RECOVERY_DECODERS = {
+    rp.MSG_RECOVERY_CLOCK: rp.RecoveryClock.decode,
+    rp.MSG_PEER_SNAPSHOT_REQ: rp.SnapshotRequest.decode,
+    rp.MSG_RECOVERY_SOURCE: rp.RecoverySource.decode,
+    rp.MSG_RECOVERY_DONE: rp.RecoveryDone.decode,
+}
 
 
 # TCP keepalive for syncer connections (rl-infra-spec pause-audit: without it

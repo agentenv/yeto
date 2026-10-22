@@ -15,7 +15,8 @@
 //! - quorum is the learner count K (`QuorumRule::Count`);
 //! - no lease (a member leaves only when its connection closes);
 //! - no soft deadline (a round below quorum restarts at the quorum timeout);
-//! - no carry discount (γ = 1).
+//! - no carry discount (γ = 1);
+//! - no syncer-epoch fence (a HELLO without an epoch is always admitted).
 //!
 //! Concepts:
 //! - A *member* is one logical island (`learner_id`) bound to one connection
@@ -39,6 +40,13 @@ pub struct Member {
     pub learner_id: u32,
     pub generation: u64,
 }
+
+/// Start of the refusal text for a stale syncer epoch; the Python client
+/// maps it to a non-retried session rejection (`yeto/protocol.py`).
+pub const SYNCER_EPOCH_FENCE_PREFIX: &str = "fenced: syncer_epoch";
+
+/// Magic and version of the persisted membership record.
+const PERSIST_MAGIC: &[u8; 4] = b"YMB1";
 
 /// Retired generations remembered per island. Generations are random 64-bit
 /// values, so this only has to cover realistic reconnect storms.
@@ -215,6 +223,8 @@ pub enum AdmitError {
     /// This generation was superseded, disconnected, or expired before.
     RetiredGeneration,
     OutOfRange { limit: u32 },
+    /// The HELLO names an older syncer incarnation than this one.
+    StaleSyncerEpoch { offered: u64, current: u64 },
 }
 
 impl std::fmt::Display for AdmitError {
@@ -222,6 +232,9 @@ impl std::fmt::Display for AdmitError {
         match self {
             AdmitError::RetiredGeneration => write!(f, "connection generation is retired (fenced)"),
             AdmitError::OutOfRange { limit } => write!(f, "learner id is outside 0..{limit}"),
+            AdmitError::StaleSyncerEpoch { offered, current } => {
+                write!(f, "{SYNCER_EPOCH_FENCE_PREFIX} {offered} < {current}")
+            }
         }
     }
 }
@@ -255,6 +268,12 @@ pub struct Membership {
     expired: HashSet<u32>,
     /// Bumped on every join, leave, and expiry.
     pub epoch: u64,
+    /// Fencing token of this syncer incarnation. A HELLO that carries a
+    /// lower epoch is refused; a HELLO without one is admitted.
+    syncer_epoch: u64,
+    /// The persisted part (syncer epoch, retired generations) changed since
+    /// the last `take_dirty`.
+    dirty: bool,
 }
 
 impl Default for Membership {
@@ -272,7 +291,89 @@ impl Membership {
             retired: HashMap::new(),
             expired: HashSet::new(),
             epoch: 0,
+            syncer_epoch: 0,
+            dirty: false,
         }
+    }
+
+    pub fn syncer_epoch(&self) -> u64 {
+        self.syncer_epoch
+    }
+
+    /// Raise the syncer epoch (never lowers it: a restart launched with an
+    /// older epoch keeps the persisted fence).
+    pub fn raise_syncer_epoch(&mut self, epoch: u64) {
+        if epoch > self.syncer_epoch {
+            self.syncer_epoch = epoch;
+            self.dirty = true;
+        }
+    }
+
+    /// Fence a HELLO against this syncer incarnation. `None` (a client that
+    /// does not send an epoch) always passes.
+    pub fn check_syncer_epoch(&self, offered: Option<u64>) -> std::result::Result<(), AdmitError> {
+        match offered {
+            Some(offered) if offered < self.syncer_epoch => {
+                Err(AdmitError::StaleSyncerEpoch { offered, current: self.syncer_epoch })
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// True once after the persisted part changed.
+    pub fn take_dirty(&mut self) -> bool {
+        std::mem::take(&mut self.dirty)
+    }
+
+    /// Persisted record: magic | syncer_epoch u64 | islands u32 |
+    /// per island (id u32 | count u32 | count x generation u64, oldest first).
+    /// Islands are written in id order so equal state gives equal bytes.
+    pub fn encode_persisted(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(PERSIST_MAGIC);
+        out.extend_from_slice(&self.syncer_epoch.to_le_bytes());
+        let ids: BTreeMap<u32, &VecDeque<u64>> = self.retired.iter().map(|(&id, (order, _))| (id, order)).collect();
+        out.extend_from_slice(&(ids.len() as u32).to_le_bytes());
+        for (id, order) in ids {
+            out.extend_from_slice(&id.to_le_bytes());
+            out.extend_from_slice(&(order.len() as u32).to_le_bytes());
+            for generation in order {
+                out.extend_from_slice(&generation.to_le_bytes());
+            }
+        }
+        out
+    }
+
+    /// Restore a record written by `encode_persisted` into this (fresh)
+    /// membership: the syncer epoch is raised to the persisted one and every
+    /// persisted generation is retired again. Parsed fully before any state
+    /// changes.
+    pub fn restore_persisted(&mut self, bytes: &[u8]) -> Result<()> {
+        fn take<'a>(bytes: &mut &'a [u8], n: usize) -> Result<&'a [u8]> {
+            ensure!(bytes.len() >= n, "membership record is truncated");
+            let (head, tail) = bytes.split_at(n);
+            *bytes = tail;
+            Ok(head)
+        }
+        let mut r = bytes;
+        ensure!(take(&mut r, 4)? == PERSIST_MAGIC, "membership record has a bad magic");
+        let epoch = u64::from_le_bytes(take(&mut r, 8)?.try_into()?);
+        let islands = u32::from_le_bytes(take(&mut r, 4)?.try_into()?);
+        let mut retired = Vec::new();
+        for _ in 0..islands {
+            let id = u32::from_le_bytes(take(&mut r, 4)?.try_into()?);
+            let count = u32::from_le_bytes(take(&mut r, 4)?.try_into()?) as usize;
+            ensure!(count <= RETIRED_PER_ISLAND, "membership record retires {count} generations of island {id}");
+            for _ in 0..count {
+                retired.push(Member { learner_id: id, generation: u64::from_le_bytes(take(&mut r, 8)?.try_into()?) });
+            }
+        }
+        ensure!(r.is_empty(), "membership record has {} trailing bytes", r.len());
+        self.raise_syncer_epoch(epoch);
+        for member in retired {
+            self.retire(member);
+        }
+        Ok(())
     }
 
     pub fn config(&self) -> &MembershipConfig {
@@ -290,6 +391,7 @@ impl Membership {
     fn retire(&mut self, member: Member) {
         let (order, set) = self.retired.entry(member.learner_id).or_default();
         if set.insert(member.generation) {
+            self.dirty = true;
             order.push_back(member.generation);
             while order.len() > RETIRED_PER_ISLAND {
                 if let Some(old) = order.pop_front() {
@@ -535,5 +637,51 @@ mod tests {
         let caps = MembershipConfig { capacities: [(5, 1.0)].into_iter().collect(), ..Default::default() };
         assert!(caps.validate(2, 1).is_err());
         assert!(MembershipConfig { max_learners: Some(8), ..caps }.validate(2, 1).is_ok());
+    }
+
+    #[test]
+    fn syncer_epoch_fences_only_older_hellos() {
+        let mut ms = Membership::default();
+        ms.raise_syncer_epoch(5);
+        ms.raise_syncer_epoch(3);
+        assert_eq!(ms.syncer_epoch(), 5, "never lowered");
+        assert_eq!(ms.check_syncer_epoch(None), Ok(()), "a HELLO without an epoch is admitted");
+        assert_eq!(ms.check_syncer_epoch(Some(5)), Ok(()));
+        assert_eq!(ms.check_syncer_epoch(Some(6)), Ok(()));
+        let refused = ms.check_syncer_epoch(Some(4)).unwrap_err();
+        assert_eq!(refused, AdmitError::StaleSyncerEpoch { offered: 4, current: 5 });
+        assert!(refused.to_string().starts_with(SYNCER_EPOCH_FENCE_PREFIX));
+    }
+
+    #[test]
+    fn persisted_record_restores_epoch_and_retired_generations() {
+        let t0 = Instant::now();
+        let mut ms = leased(5);
+        assert!(!ms.take_dirty());
+        ms.raise_syncer_epoch(7);
+        ms.admit(m(0, 1), t0).unwrap();
+        ms.admit(m(0, 2), t0).unwrap(); // retires (0, 1)
+        ms.admit(m(2, 9), t0).unwrap();
+        ms.depart(m(2, 9));
+        assert!(ms.take_dirty() && !ms.take_dirty());
+        let bytes = ms.encode_persisted();
+
+        let mut back = leased(5);
+        back.restore_persisted(&bytes).unwrap();
+        assert_eq!(back.syncer_epoch(), 7);
+        assert_eq!(back.admit(m(0, 1), t0), Err(AdmitError::RetiredGeneration));
+        assert_eq!(back.admit(m(2, 9), t0), Err(AdmitError::RetiredGeneration));
+        assert!(back.admit(m(0, 2), t0).is_ok(), "the live generation was not retired");
+        assert_eq!(back.encode_persisted(), bytes, "admitting a live generation retires nothing");
+
+        assert!(leased(5).restore_persisted(&bytes[..bytes.len() - 1]).is_err());
+        let mut bad = bytes.clone();
+        bad[0] = b'X';
+        assert!(leased(5).restore_persisted(&bad).is_err());
+        let mut fresh = leased(5);
+        let mut long = bytes;
+        long.push(0);
+        assert!(fresh.restore_persisted(&long).is_err());
+        assert_eq!(fresh.syncer_epoch(), 0, "a refused record changes nothing");
     }
 }

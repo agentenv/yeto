@@ -19,6 +19,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+use crate::recovery::{self, HelloExt, PeerRecovery};
 use crate::membership::{Admission, AdmitError, CapacityQuorum, Member, Membership};
 use crate::protocol::*;
 use crate::fold::FragmentFold;
@@ -135,7 +136,9 @@ pub struct Config {
     pub expected_island_contract: Option<[u8; 32]>,
     /// elastic: membership lease (seconds without heartbeat before removal).
     pub island_lease_s: f64,
-    /// elastic: fencing token of this coordinator incarnation.
+    /// Fencing token of this syncer incarnation. elastic: every message.
+    /// Fragment rounds: a HELLO that carries a lower epoch is refused; the
+    /// epoch is persisted next to the checkpoint and never lowered on resume.
     pub syncer_epoch: u64,
     /// elastic: final grace window after total_steps; None = soft deadline.
     pub elastic_final_grace_s: Option<u64>,
@@ -143,6 +146,10 @@ pub struct Config {
     /// fencing, capacity quorum, soft deadline, carry discount). The default
     /// keeps the fixed-membership behavior.
     pub membership: crate::membership::MembershipConfig,
+    /// Peer recovery of an island that lost its trainer state (HELLO with
+    /// the recover flag). Bound, donor tries and donor timeout only: it never
+    /// changes a merge, so it is not in the semantic profile hash.
+    pub recovery: crate::recovery::RecoveryConfig,
 }
 
 // v2 drops `resume`: it is how a run (re)starts, not its semantics, so a
@@ -460,6 +467,20 @@ enum Event {
     Disconnected {
         member: Member,
     },
+    /// A peer-recovery control message (`recovery.rs`).
+    Recovery {
+        member: Member,
+        msg: RecoveryMsg,
+    },
+}
+
+enum RecoveryMsg {
+    /// Donor -> syncer.
+    SnapshotReady(recovery::SnapshotReady),
+    /// Recovering island -> syncer: versions held after the restore.
+    Restored(Option<Vec<u64>>),
+    /// Recovering island -> syncer: the named source did not work.
+    Failed(String),
 }
 
 struct Push {
@@ -516,6 +537,8 @@ struct ParsedHello {
     max_init_payload: u64,
     max_push_payload: u64,
     compat_group: String,
+    /// Optional trailer: syncer-epoch fence and the recover flag.
+    ext: HelloExt,
 }
 
 #[derive(Default)]
@@ -527,6 +550,12 @@ struct RegistryState {
     groups: HashMap<Member, Arc<Group>>,
     /// Leases and fencing; admission runs under this registry lock.
     membership: Membership,
+    /// Islands under peer recovery: registered (in `groups`) but kept out of
+    /// `current`, so they get no pulls and no broadcasts until READY.
+    recovering: HashMap<u32, Member>,
+    /// Where the membership record (syncer epoch, retired generations) is
+    /// persisted next to the checkpoint; None: not persisted.
+    membership_record: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -545,18 +574,40 @@ impl RegistryState {
     /// error leaves every map untouched, so an identical concurrent HELLO
     /// cannot replace a live group and later remove it on disconnect, and a
     /// retired generation cannot come back.
+    #[cfg(test)]
     fn register_group(
         &mut self,
         group: Arc<Group>,
         now: Instant,
     ) -> std::result::Result<(Option<Member>, Admission), RegisterError> {
+        self.register_group_with(group, now, HelloExt::default())
+    }
+
+    /// `register_group` for a HELLO with its extension: the syncer-epoch
+    /// fence runs first, and a recovering island is registered without
+    /// joining `current` (the previous generation still leaves it).
+    fn register_group_with(
+        &mut self,
+        group: Arc<Group>,
+        now: Instant,
+        ext: HelloExt,
+    ) -> std::result::Result<(Option<Member>, Admission), RegisterError> {
         let member = group.member;
         if self.groups.contains_key(&member) {
             return Err(RegisterError::Duplicate);
         }
+        self.membership.check_syncer_epoch(ext.syncer_epoch).map_err(RegisterError::Fenced)?;
         let admission = self.membership.admit(member, now).map_err(RegisterError::Fenced)?;
         self.groups.insert(member, group);
-        Ok((self.current.insert(member.learner_id, member), admission))
+        let replaced = if ext.recover {
+            self.recovering.insert(member.learner_id, member);
+            self.current.remove(&member.learner_id)
+        } else {
+            self.recovering.remove(&member.learner_id);
+            self.current.insert(member.learner_id, member)
+        };
+        self.persist_membership();
+        Ok((replaced, admission))
     }
 
     /// The control connection of `member` closed.
@@ -565,7 +616,39 @@ impl RegistryState {
         if self.current.get(&member.learner_id) == Some(&member) {
             self.current.remove(&member.learner_id);
         }
+        if self.recovering.get(&member.learner_id) == Some(&member) {
+            self.recovering.remove(&member.learner_id);
+        }
         self.membership.depart(member);
+        self.persist_membership();
+    }
+
+    fn is_recovering(&self, member: Member) -> bool {
+        self.recovering.get(&member.learner_id) == Some(&member)
+    }
+
+    /// Move a recovered island onto the roster. False if `member` is no
+    /// longer the recovering generation.
+    fn promote_recovered(&mut self, member: Member) -> bool {
+        if !self.is_recovering(member) {
+            return false;
+        }
+        self.recovering.remove(&member.learner_id);
+        self.current.insert(member.learner_id, member);
+        true
+    }
+
+    /// Write the membership record if its persisted part changed. A failed
+    /// write only weakens fencing across a restart, so it is logged.
+    fn persist_membership(&mut self) {
+        if !self.membership.take_dirty() {
+            return;
+        }
+        if let Some(path) = &self.membership_record {
+            if let Err(error) = write_membership_record(path, &self.membership.encode_persisted()) {
+                warn!(path = %path.display(), "membership record write failed: {error:#}");
+            }
+        }
     }
 
     /// Remove members whose lease expired from future rounds. Their
@@ -573,19 +656,58 @@ impl RegistryState {
     /// captured them keep a valid group, but they can no longer renew.
     fn expire_leases(&mut self, now: Instant) -> Vec<(Member, Option<Arc<Group>>)> {
         let expired = self.membership.expire(now);
-        expired
+        let expired = expired
             .into_iter()
             .map(|member| {
                 if self.current.get(&member.learner_id) == Some(&member) {
                     self.current.remove(&member.learner_id);
                 }
+                if self.recovering.get(&member.learner_id) == Some(&member) {
+                    self.recovering.remove(&member.learner_id);
+                }
                 (member, self.groups.get(&member).cloned())
             })
-            .collect()
+            .collect();
+        self.persist_membership();
+        expired
     }
 }
 
-/// Adaptive grace window: after quorum, wait for stragglers only within the slack the learners' compute
+/// The membership record lives next to the checkpoint.
+fn membership_record_path(checkpoint: &std::path::Path) -> std::path::PathBuf {
+    let mut name = checkpoint.as_os_str().to_owned();
+    name.push(".membership");
+    std::path::PathBuf::from(name)
+}
+
+fn write_membership_record(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = std::path::PathBuf::from(tmp);
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Registry membership for `cfg`: on resume the persisted record restores
+/// the syncer epoch and the retired generations; the configured epoch only
+/// raises the restored one.
+fn initial_membership(cfg: &Config, id_limit: u32) -> Result<(Membership, Option<std::path::PathBuf>)> {
+    let mut membership = Membership::new(cfg.membership.clone(), id_limit);
+    let record = cfg.checkpoint_path.as_deref().map(membership_record_path);
+    if let Some(path) = record.as_deref().filter(|p| cfg.resume && p.exists()) {
+        let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+        membership
+            .restore_persisted(&bytes)
+            .with_context(|| format!("restore membership record {}", path.display()))?;
+        info!(path = %path.display(), syncer_epoch = membership.syncer_epoch(), "membership record restored");
+    }
+    membership.raise_syncer_epoch(cfg.syncer_epoch);
+    Ok((membership, record))
+}
+
+/// Adaptive grace window: after quorum, wait for stragglers only within the
+/// slack the learners' compute
 /// overlap leaves free — γ · (τ·ξ_step − ξ_quorum − ξ_sync), clamped to
 /// [0, cap]. With no step-time estimate yet, fall back to the full cap.
 fn adaptive_grace(
@@ -1034,10 +1156,12 @@ pub async fn run(cfg: Config) -> Result<()> {
     );
     let (event_tx, event_rx) = mpsc::channel::<Event>(1024);
     let expected_learners = cfg.membership.id_limit(cfg.learners);
-    let registry: Registry = Arc::new(Mutex::new(RegistryState::new(Membership::new(
-        cfg.membership.clone(),
-        expected_learners,
-    ))));
+    let (membership, membership_record) = initial_membership(&cfg, expected_learners)?;
+    let registry: Registry = Arc::new(Mutex::new(RegistryState {
+        membership_record,
+        ..RegistryState::new(membership)
+    }));
+    registry.lock().unwrap().persist_membership();
     let session: Session = Arc::new(Mutex::new(None));
     let budget_cutoff = Arc::new(BudgetCutoff::new(
         cfg.learner_budget_steps.is_some(),
@@ -1226,7 +1350,18 @@ fn hello_compat_trailer_len(rest: &[u8]) -> usize {
     0
 }
 
+/// Parse a HELLO with its optional extension trailer. A body that only
+/// looks like it ends in a trailer is parsed whole as a legacy HELLO.
 fn parse_hello(payload: &[u8], expected_learners: u32) -> Result<ParsedHello> {
+    let (body, ext) = HelloExt::split(payload);
+    let Some(ext) = ext else { return parse_hello_body(payload, expected_learners) };
+    match parse_hello_body(body, expected_learners) {
+        Ok(parsed) => Ok(ParsedHello { ext, ..parsed }),
+        Err(error) => parse_hello_body(payload, expected_learners).map_err(|_| error),
+    }
+}
+
+fn parse_hello_body(payload: &[u8], expected_learners: u32) -> Result<ParsedHello> {
     let mut r = Reader(payload);
     let version = r.u16()?;
     if version != PROTOCOL_VERSION {
@@ -1297,6 +1432,7 @@ fn parse_hello(payload: &[u8], expected_learners: u32) -> Result<ParsedHello> {
         max_init_payload,
         max_push_payload,
         compat_group,
+        ext: HelloExt::default(),
     })
 }
 
@@ -1382,6 +1518,7 @@ async fn handle_connection(
                 max_init_payload,
                 max_push_payload,
                 compat_group,
+                ext,
             } = parsed;
             let profile_error = match syncer_profile_hash {
                 Some(offered) if offered != semantic_profile_hash => {
@@ -1448,11 +1585,14 @@ async fn handle_connection(
                 reasm: Mutex::new(HashMap::new()),
             });
             let registration =
-                { registry.lock().unwrap().register_group(group.clone(), Instant::now()) };
+                { registry.lock().unwrap().register_group_with(group.clone(), Instant::now(), ext) };
             let replaced = match registration {
                 Ok((replaced, admission)) => {
                     if admission == Admission::Rejoin {
                         info!(learner_id, generation, "island re-joined after lease expiry");
+                    }
+                    if ext.recover {
+                        info!(learner_id, generation, "island asks for peer recovery");
                     }
                     replaced
                 }
@@ -1460,6 +1600,11 @@ async fn handle_connection(
                     let message = match error {
                         RegisterError::Duplicate => format!(
                             "duplicate connection generation {generation} for learner {learner_id}"
+                        ),
+                        // Starts with the fence prefix so the client stops
+                        // instead of redialing the same stale epoch.
+                        RegisterError::Fenced(reason @ AdmitError::StaleSyncerEpoch { .. }) => format!(
+                            "{reason} (learner {learner_id} generation {generation}); relaunch the island for this syncer"
                         ),
                         RegisterError::Fenced(reason) => format!(
                             "refused generation {generation} for learner {learner_id}: {reason}"
@@ -1694,6 +1839,9 @@ async fn read_loop(
                 MSG_FINAL_ACK => Ok(10),
                 MSG_BUDGET_DONE => Ok(8),
                 MSG_CHUNK => Ok(CHUNK_HEADER_SIZE + CHUNK_SIZE as u64),
+                recovery::MSG_PEER_SNAPSHOT_READY
+                | recovery::MSG_RECOVERY_RESTORED
+                | recovery::MSG_RECOVERY_FAILED => Ok(recovery::MAX_RECOVERY_FRAME),
                 other => bail!(
                     "unexpected direct message type {other} from learner {} generation {}",
                     group.member.learner_id,
@@ -1990,6 +2138,19 @@ async fn dispatch_inner(
             .context("timed out queueing BUDGET_DONE")?
             .context("event channel closed while queueing BUDGET_DONE")?;
         }
+        recovery::MSG_PEER_SNAPSHOT_READY | recovery::MSG_RECOVERY_RESTORED | recovery::MSG_RECOVERY_FAILED => {
+            let fragments = group.layout.fragments.len();
+            let msg = match msg_type {
+                recovery::MSG_PEER_SNAPSHOT_READY => {
+                    RecoveryMsg::SnapshotReady(recovery::SnapshotReady::decode(payload, fragments)?)
+                }
+                recovery::MSG_RECOVERY_RESTORED => {
+                    RecoveryMsg::Restored(recovery::decode_restored(payload, fragments)?)
+                }
+                _ => RecoveryMsg::Failed(recovery::decode_failed(payload)?),
+            };
+            event_tx.send(Event::Recovery { member: group.member, msg }).await.ok();
+        }
         t => bail!(
             "unexpected message type {t} from learner {} generation {}",
             group.member.learner_id,
@@ -2165,6 +2326,7 @@ async fn scheduler(
                 bail!("RL strict failure {metric}: {message}");
             }
             Event::Hello { group } => {
+                admit_recovering_outside_training(&registry, &group, "initialization").await;
                 if state.is_none() {
                     // Layout comes from the HELLO of the first learner.
                     // (All learners must build identical layouts.)
@@ -2258,6 +2420,7 @@ async fn scheduler(
                 generation = member.generation,
                 "disconnected during init"
             ),
+            Event::Recovery { member, .. } => ignore_recovery_message(member, "initialization"),
         }
     }
     let mut st = state.unwrap();
@@ -2335,6 +2498,7 @@ async fn scheduler(
     let mut publishing: Option<PendingPublish> = None;
     let mut cutoff_established = false;
     let mut first_budget_report: Option<(Member, u64)> = None;
+    let mut recovery = PeerRecovery::new(cfg.recovery.clone());
     'outer: while next_t <= cfg.total_steps
         || !inflight.is_empty()
         || !computing.is_empty()
@@ -2345,7 +2509,17 @@ async fn scheduler(
             cutoff_established = true;
             break 'outer;
         }
-        expire_member_leases(&registry, &mut inflight, &mut step_rates).await;
+        let expired = expire_member_leases(&registry, &mut inflight, &mut step_rates).await;
+        if !recovery.is_empty() {
+            let now = Instant::now();
+            let candidates = recovery_candidates(&registry, &inflight);
+            let mut out = Vec::new();
+            for member in expired {
+                out.extend(recovery.on_gone(member, &candidates, now));
+            }
+            out.extend(recovery.on_tick(&candidates, now));
+            send_recovery(&registry, out).await;
+        }
         // Commit only the contiguous prefix.  A faster cuda:N worker can put
         // t+1 in `ready` first, but it cannot update Nesterov/version/tape or
         // broadcast until t has committed.
@@ -2614,6 +2788,7 @@ async fn scheduler(
                 )
             })
             .chain(registry.lock().unwrap().membership.next_expiry())
+            .chain(recovery.next_deadline())
             .min();
         let next_fragment_available = inflight.len() + computing.len() + ready.len() < depth
             && next_t <= cfg.total_steps
@@ -2773,6 +2948,31 @@ async fn scheduler(
                     }
                 }
                 Event::Hello { group } => {
+                    if registry.lock().unwrap().is_recovering(group.member) {
+                        // Peer recovery reads the clock only from durable rounds.
+                        if let Some(pending) = publishing.take() {
+                            settle_pending_publish(
+                                &cfg,
+                                &st,
+                                &registry,
+                                &mut last_sync_secs,
+                                pending,
+                                &budget_cutoff,
+                                &mut busy_fragments,
+                            )
+                            .await?;
+                        }
+                        let candidates = recovery_candidates(&registry, &inflight);
+                        let out = recovery.begin(group.member, st.global_step, &st.versions, &candidates, Instant::now());
+                        info!(
+                            learner_id = group.member.learner_id,
+                            generation = group.member.generation,
+                            t_s = st.global_step,
+                            "peer recovery started"
+                        );
+                        send_recovery(&registry, out).await;
+                        continue;
+                    }
                     // A queued HELLO may already have been superseded by a
                     // newer connection generation. Never catch up or rebind
                     // rounds to anything except the registry's current
@@ -2813,33 +3013,93 @@ async fn scheduler(
                         .unwrap()
                         .membership
                         .record_catch_up(group.member, &st.versions);
-                    let repulls = if fixed_roster {
-                        fixed_roster_repulls(&inflight, group.member)
-                    } else {
-                        rebind_current_unanswered_rounds(&registry, &mut inflight, group.member)
-                    };
-                    for repull in repulls {
-                        if !send_small_until_cutoff(
-                            &group,
-                            MSG_PULL_REQ,
-                            repull.pull,
-                            &budget_cutoff,
-                        )
-                        .await
-                        {
-                            cutoff_established = true;
-                            break 'outer;
+                    if !repull_rounds_for(&group, &registry, &mut inflight, fixed_roster, &budget_cutoff).await {
+                        cutoff_established = true;
+                        break 'outer;
+                    }
+                }
+                Event::Recovery { member, msg } => {
+                    let restored = match msg {
+                        RecoveryMsg::SnapshotReady(ready) => {
+                            let candidates = recovery_candidates(&registry, &inflight);
+                            let out = recovery.on_snapshot_ready(member, ready, &candidates, Instant::now());
+                            send_recovery(&registry, out).await;
+                            continue;
                         }
-                        info!(
-                            learner_id = group.member.learner_id,
-                            old_generation = repull.old_generation,
-                            generation = group.member.generation,
-                            step = repull.t,
-                            fragment = repull.p,
-                            attempt = repull.attempt,
-                            base_version = repull.base_version,
-                            "rebound outstanding pull to reconnected learner generation"
-                        );
+                        RecoveryMsg::Failed(reason) => {
+                            warn!(learner_id = member.learner_id, generation = member.generation, %reason, "recovery source refused by island");
+                            let candidates = recovery_candidates(&registry, &inflight);
+                            let out = recovery.on_failed(member, reason, &candidates, Instant::now());
+                            send_recovery(&registry, out).await;
+                            continue;
+                        }
+                        RecoveryMsg::Restored(held) => held,
+                    };
+                    if !recovery.is_pending(member) {
+                        // E.g. an island recovered on the degraded path during
+                        // initialization reports its restore late.
+                        ignore_recovery_message(member, "training");
+                        continue;
+                    }
+                    // Replay against durable versions only.
+                    if let Some(pending) = publishing.take() {
+                        settle_pending_publish(
+                            &cfg,
+                            &st,
+                            &registry,
+                            &mut last_sync_secs,
+                            pending,
+                            &budget_cutoff,
+                            &mut busy_fragments,
+                        )
+                        .await?;
+                    }
+                    let group = registry.lock().unwrap().groups.get(&member).cloned();
+                    let Some(group) = group else { continue };
+                    let replay = match recovery.on_restored(member, restored.as_deref(), &st.versions) {
+                        Ok(replay) => replay,
+                        Err(error) => {
+                            warn!(learner_id = member.learner_id, generation = member.generation, "recovery refused: {error:#}");
+                            let _ = group.send_small(MSG_ERROR, format!("recovery refused: {error:#}").into()).await;
+                            continue;
+                        }
+                    };
+                    // Resend the newest value of each newer fragment; no
+                    // broadcast can interleave until the island is promoted.
+                    for &p in &replay {
+                        match send_fragment_until_cutoff(&st, &group, p, MSG_BCAST_FRAGMENT, bulk_dtype(st.wire_dtype), &budget_cutoff).await {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                cutoff_established = true;
+                                break 'outer;
+                            }
+                            Err(error) => warn!(learner_id = member.learner_id, fragment = p, %error, "recovery replay encode failed"),
+                        }
+                    }
+                    let promoted = {
+                        let mut registry = registry.lock().unwrap();
+                        let promoted = registry.promote_recovered(member);
+                        if promoted {
+                            registry.membership.record_catch_up(member, &st.versions);
+                        }
+                        promoted
+                    };
+                    let Some((record, done)) = recovery.finish(member, st.global_step, &st.versions, replay.len(), Instant::now()) else {
+                        continue;
+                    };
+                    if !promoted {
+                        continue;
+                    }
+                    append_recovery_record(cfg.event_tape.as_deref(), &record);
+                    if record.missed {
+                        warn!(learner_id = member.learner_id, steps = record.steps, bound = ?record.bound_steps, "peer recovery missed its bound");
+                    } else {
+                        info!(learner_id = member.learner_id, steps = record.steps, path = ?record.source, "peer recovery done");
+                    }
+                    send_recovery(&registry, vec![done]).await;
+                    if !repull_rounds_for(&group, &registry, &mut inflight, fixed_roster, &budget_cutoff).await {
+                        cutoff_established = true;
+                        break 'outer;
                     }
                 }
                 Event::Init { .. } => {} // already initialized; ignore
@@ -2875,6 +3135,9 @@ async fn scheduler(
                         "learner connection generation disconnected"
                     );
                     step_rates.remove(member);
+                    let candidates = recovery_candidates(&registry, &inflight);
+                    let out = recovery.on_gone(member, &candidates, Instant::now());
+                    send_recovery(&registry, out).await;
 
                     let replacement = {
                         let registry = registry.lock().unwrap();
@@ -3034,6 +3297,15 @@ async fn scheduler(
     if let Some(path) = &cfg.final_state {
         dump_state(&st, path)?;
         info!(path = %path.display(), "final global state written");
+    }
+    // An island still under peer recovery takes the final cut like any
+    // member: it is promoted with the degraded source first.
+    let recovering: Vec<Arc<Group>> = {
+        let registry = registry.lock().unwrap();
+        registry.recovering.values().filter_map(|member| registry.groups.get(member).cloned()).collect()
+    };
+    for group in recovering {
+        admit_recovering_outside_training(&registry, &group, "finalization").await;
     }
     // Freeze terminal membership to the live groups at the final cut.
     // Learners already abandoned by fleet recovery are not valid artifact
@@ -3234,6 +3506,7 @@ async fn collect_budget_reports(
                 }
             }
             Event::Hello { group } => {
+                admit_recovering_outside_training(registry, &group, "the budget cutoff").await;
                 let learner_id = group.member.learner_id;
                 if is_current_member(registry, group.member) && !reports.contains(&learner_id) {
                     progress_deadlines
@@ -3246,6 +3519,7 @@ async fn collect_budget_reports(
                 "disconnected while waiting for learner-budget cutoff"
             ),
             Event::Init { .. } | Event::FinalAck { .. } => {}
+            Event::Recovery { member, .. } => ignore_recovery_message(member, "the budget cutoff"),
         }
     }
     Ok(())
@@ -4098,12 +4372,14 @@ fn new_state_for(group: &Arc<Group>, cfg: &Config) -> Result<GlobalState> {
 
 /// Apply lease expiry: expired members leave the pool, stop counting toward
 /// any round they have not answered, and are told to re-JOIN.
+/// Returns the expired members.
 async fn expire_member_leases(
     registry: &Registry,
     inflight: &mut [Round],
     step_rates: &mut StepRates,
-) {
+) -> Vec<Member> {
     let expired = registry.lock().unwrap().expire_leases(Instant::now());
+    let members = expired.iter().map(|(member, _)| *member).collect();
     for (member, group) in expired {
         let rounds = inflight
             .iter_mut()
@@ -4118,9 +4394,118 @@ async fn expire_member_leases(
             "island lease expired; removed from membership"
         );
         if let Some(group) = group {
-            let message = bytes::Bytes::from_static(b"island lease expired: re-JOIN required");
+            let message = bytes::Bytes::from_static(LEASE_EXPIRED_MESSAGE.as_bytes());
             let _ = group.send_small(MSG_ERROR, message).await;
         }
+    }
+    members
+}
+
+/// MSG_ERROR text of a lease expiry; the Python client redials with a new
+/// generation on it (`yeto/protocol.py` LEASE_EXPIRED_PREFIX).
+const LEASE_EXPIRED_MESSAGE: &str = "island lease expired: re-JOIN required";
+
+// --- peer recovery wiring (state machine in recovery.rs) -------------------
+
+/// Current members as donor candidates with their unanswered pull count.
+fn recovery_candidates(registry: &Registry, inflight: &[Round]) -> Vec<recovery::Candidate> {
+    let members: Vec<Member> = registry.lock().unwrap().current.values().copied().collect();
+    members
+        .into_iter()
+        .map(|member| recovery::Candidate {
+            member,
+            outstanding: inflight
+                .iter()
+                .filter(|r| r.expected_members.contains(&member) && !r.pushes.contains_key(&member))
+                .count(),
+        })
+        .collect()
+}
+
+/// Send recovery control messages. A target that is gone is skipped: its
+/// Disconnected event moves the recovery on.
+async fn send_recovery(registry: &Registry, out: Vec<recovery::Outbound>) {
+    for msg in out {
+        let group = registry.lock().unwrap().groups.get(&msg.to).cloned();
+        let sent = match group {
+            Some(group) => group.send_small(msg.msg_type, msg.payload.into()).await,
+            None => Err(anyhow::anyhow!("connection is gone")),
+        };
+        if let Err(error) = sent {
+            warn!(learner_id = msg.to.learner_id, generation = msg.to.generation, msg_type = msg.msg_type, "recovery message not sent: {error:#}");
+        }
+    }
+}
+
+/// Outside the training loop (init, budget cutoff, finalization) there is
+/// no round clock to recover against: the island is put on the roster at
+/// once with the degraded source, and the phase's own catch-up follows.
+async fn admit_recovering_outside_training(registry: &Registry, group: &Arc<Group>, phase: &str) {
+    if !registry.lock().unwrap().promote_recovered(group.member) {
+        return;
+    }
+    warn!(
+        learner_id = group.member.learner_id,
+        generation = group.member.generation,
+        "peer recovery is not available during {phase}; degraded path"
+    );
+    let reason = format!("syncer is in {phase}, not training");
+    let out = recovery::degraded_outside_training(group.member, group.layout.fragments.len(), &reason);
+    send_recovery(registry, out).await;
+}
+
+/// Rebind the unanswered pulls of existing rounds to `group` (a reconnected
+/// or recovered generation). False when the budget cutoff closed the gate.
+async fn repull_rounds_for(
+    group: &Arc<Group>,
+    registry: &Registry,
+    inflight: &mut [Round],
+    fixed_roster: bool,
+    budget_cutoff: &BudgetCutoff,
+) -> bool {
+    let repulls = if fixed_roster {
+        fixed_roster_repulls(inflight, group.member)
+    } else {
+        rebind_current_unanswered_rounds(registry, inflight, group.member)
+    };
+    for repull in repulls {
+        if !send_small_until_cutoff(group, MSG_PULL_REQ, repull.pull, budget_cutoff).await {
+            return false;
+        }
+        info!(
+            learner_id = group.member.learner_id,
+            old_generation = repull.old_generation,
+            generation = group.member.generation,
+            step = repull.t,
+            fragment = repull.p,
+            attempt = repull.attempt,
+            base_version = repull.base_version,
+            "rebound outstanding pull to reconnected learner generation"
+        );
+    }
+    true
+}
+
+fn ignore_recovery_message(member: Member, phase: &str) {
+    warn!(
+        learner_id = member.learner_id,
+        generation = member.generation,
+        "recovery message during {phase} dropped (no recovery in progress)"
+    );
+}
+
+fn append_recovery_record(path: Option<&std::path::Path>, record: &recovery::RecoveryRecord) {
+    use std::io::Write;
+
+    let Some(path) = path else { return };
+    let line = format!("{}\n", record.to_json());
+    let result = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| file.write_all(line.as_bytes()));
+    if let Err(error) = result {
+        warn!("event tape write failed: {error}");
     }
 }
 
@@ -4334,6 +4719,7 @@ async fn finalize_learners(
                 }
             }
             Event::Hello { group } => {
+                admit_recovering_outside_training(registry, &group, "finalization").await;
                 let member = group.member;
                 if expected.contains(&member.learner_id)
                     && !acknowledged.contains_key(&member.learner_id)
@@ -4373,6 +4759,7 @@ async fn finalize_learners(
             Event::Push { .. }
             | Event::Heartbeat { .. }
             | Event::Init { .. }
+            | Event::Recovery { .. }
             | Event::BudgetDone { .. } => {
                 // The authoritative cut is frozen; late training traffic is
                 // intentionally ignored while learners finalize.
@@ -5137,6 +5524,7 @@ mod tests {
             syncer_epoch: 0,
             elastic_final_grace_s: None,
             membership: Default::default(),
+            recovery: Default::default(),
         }
     }
 
@@ -7765,5 +8153,96 @@ mod tests {
         let mut leased = round_test_config(1);
         leased.membership.lease = Some(Duration::from_secs(5));
         assert!(round_fold(&leased, &st, 0, &members, 2).is_none(), "dynamic membership");
+    }
+
+    #[test]
+    fn recovering_hello_stays_off_the_roster_until_promoted() {
+        let mut r = RegistryState::new(Membership::default());
+        let t0 = Instant::now();
+        let old = Member { learner_id: 0, generation: 1 };
+        let back = Member { learner_id: 0, generation: 2 };
+        r.register_group(test_group(old), t0).unwrap();
+        let recover = HelloExt { syncer_epoch: None, recover: true };
+        let (replaced, _) = r.register_group_with(test_group(back), t0, recover).unwrap();
+        assert_eq!(replaced, Some(old), "the lost generation leaves the roster");
+        assert!(r.current.is_empty() && r.is_recovering(back) && r.groups.contains_key(&back));
+        assert!(!r.promote_recovered(old));
+        assert!(r.promote_recovered(back));
+        assert_eq!(r.current.get(&0), Some(&back));
+        assert!(!r.is_recovering(back));
+        // A recovering generation that disconnects is gone from both sets.
+        let again = Member { learner_id: 0, generation: 3 };
+        r.register_group_with(test_group(again), t0, recover).unwrap();
+        r.unregister(again);
+        assert!(r.current.is_empty() && !r.is_recovering(again));
+    }
+
+    #[test]
+    fn hello_epoch_fence_and_membership_record_survive_restart() {
+        let dir = std::env::temp_dir().join(format!("yeto-membership-record-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let checkpoint = dir.join("syncer.ckpt");
+        let record = membership_record_path(&checkpoint);
+        std::fs::remove_file(&record).ok();
+        let mut cfg = Config { checkpoint_path: Some(checkpoint.clone()), syncer_epoch: 4, ..round_test_config(1) };
+        let (membership, path) = initial_membership(&cfg, 2).unwrap();
+        let mut r = RegistryState { membership_record: path, ..RegistryState::new(membership) };
+        let t0 = Instant::now();
+        let stale = HelloExt { syncer_epoch: Some(3), recover: false };
+        let gone = Member { learner_id: 1, generation: 9 };
+        assert_eq!(
+            r.register_group_with(test_group(gone), t0, stale).unwrap_err(),
+            RegisterError::Fenced(AdmitError::StaleSyncerEpoch { offered: 3, current: 4 })
+        );
+        let current = HelloExt { syncer_epoch: Some(4), recover: false };
+        r.register_group_with(test_group(gone), t0, current).unwrap();
+        r.unregister(gone);
+        assert!(record.exists(), "a retirement is persisted at once");
+
+        // Restart with a lower configured epoch: the persisted fence holds.
+        cfg.syncer_epoch = 0;
+        cfg.resume = true;
+        let (membership, _) = initial_membership(&cfg, 2).unwrap();
+        assert_eq!(membership.syncer_epoch(), 4);
+        let mut r = RegistryState::new(membership);
+        assert_eq!(
+            r.register_group_with(test_group(gone), t0, HelloExt::default()).unwrap_err(),
+            RegisterError::Fenced(AdmitError::RetiredGeneration)
+        );
+        // Without --resume the record is not read.
+        cfg.resume = false;
+        assert_eq!(initial_membership(&cfg, 2).unwrap().0.syncer_epoch(), 0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Legacy HELLO body: one AVG fragment of one 4-element tensor.
+    fn test_hello_payload(member: Member) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&PROTOCOL_VERSION.to_le_bytes());
+        out.extend_from_slice(&member.learner_id.to_le_bytes());
+        out.extend_from_slice(&member.generation.to_le_bytes());
+        out.push(crate::protocol::DTYPE_F32);
+        out.extend_from_slice(&1u32.to_le_bytes());
+        out.push(crate::state::MERGE_AVG);
+        out.extend_from_slice(&1u32.to_le_bytes());
+        out.extend_from_slice(&4u64.to_le_bytes());
+        out.extend_from_slice(&[1; 32]); // layout fingerprint
+        out.extend_from_slice(&[2; 32]); // session contract
+        out.extend_from_slice(&2u16.to_le_bytes()); // num_streams
+        out
+    }
+
+    #[test]
+    fn hello_extension_trailer_is_parsed_after_the_legacy_body() {
+        let member = Member { learner_id: 0, generation: 5 };
+        let legacy = test_hello_payload(member);
+        let parsed = parse_hello(&legacy, 1).unwrap();
+        assert_eq!(parsed.ext, HelloExt::default());
+        let ext = HelloExt { syncer_epoch: Some(12), recover: true };
+        let mut extended = legacy.clone();
+        extended.extend_from_slice(&ext.encode());
+        let parsed = parse_hello(&extended, 1).unwrap();
+        assert_eq!(parsed.ext, ext);
+        assert_eq!(parsed.generation, 5);
     }
 }
