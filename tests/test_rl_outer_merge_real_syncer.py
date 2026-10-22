@@ -24,7 +24,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from test_rl_algorithm_provenance import _fake_sky, _launcher_args, _no_modal_listing  # noqa: F401
+from test_rl_algorithm_provenance import _fake_sky, _no_modal_listing  # noqa: F401
+from test_rl_algorithm_provenance import _launcher_args as _provenance_launcher_args
+
+
+def _launcher_args(engine, extra=(), gpu="aws:1xa100@us-east-1"):
+    """These tests pin the strict control (--rl-sync-mode strict); the async
+    defaults are covered in test_rl_sync_mode.py."""
+    return _provenance_launcher_args(engine, ("--rl-sync-mode", "strict", *extra), gpu=gpu)
 from yeto.fragments import MERGE_AVG, MERGE_RDA, Fragment, FragmentLayout
 from yeto.protocol import DTYPE_F32, SyncerClient
 from yeto.rl.core import CanonicalTensorSpec, build_rl_fragment_layout

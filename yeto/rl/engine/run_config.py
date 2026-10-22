@@ -353,14 +353,18 @@ def resolve_lr_schedule(
     global_batch: int,
     island_scheduling: str = "legacy",
     requested: str = "auto",
+    full_parameter_async: bool = False,
 ) -> LrSchedule | None:
     """The island's LR schedule (design D1-D3), ``--rl-lr-schedule`` (S17 N16).
 
-    ``auto`` (default) keeps the mode rule: decoupled and elastic islands run
-    until the syncer stops them (an elastic island that re-JOINs needs local
-    rounds past ``global_rounds``; S17 N5 a73ab1b2), so any finite linear
-    horizon can reach zero mid-run -> constant; strict-avg / full-parameter /
-    single island -> linear over ``global_rounds * optimizer_steps``.
+    ``auto`` (default) keeps the mode rule: decoupled, island-pool and
+    asynchronous full-parameter islands run until the syncer stops them (an
+    island that re-JOINs needs local rounds past ``global_rounds``; S17 N5
+    a73ab1b2; an asynchronous full-parameter island trains H local rounds per
+    fragment round and, with a partial quorum, as many rounds as it is fast),
+    so any finite linear horizon can reach zero mid-run -> constant;
+    strict-avg / full-parameter sweep / single island -> linear over
+    ``global_rounds * optimizer_steps``.
     ``constant`` holds the LR in every mode (e.g. a single island compared
     with a fixed-LR baseline; S17 N4 had to approximate it with a 20000-step
     linear horizon). ``linear`` is refused where the horizon is unknown.
@@ -373,11 +377,13 @@ def resolve_lr_schedule(
     if eval_only:
         return None
     horizon = global_rounds * optimizer_steps
-    run_until_stop = sync_preset == "decoupled" or island_scheduling == "elastic"
+    run_until_stop = (sync_preset == "decoupled" or island_scheduling == "elastic"
+                      or full_parameter_async)
     if requested == "linear" and run_until_stop:
         raise ValueError(
-            "--rl-lr-schedule linear needs a known local step count; decoupled and "
-            "elastic islands run until the syncer stops them (use auto or constant)")
+            "--rl-lr-schedule linear needs a known local step count; decoupled, "
+            "island-pool and asynchronous full-parameter islands run until the syncer "
+            "stops them (use auto or constant)")
     if requested == "constant" or (requested == "auto" and run_until_stop):
         # decay_iters only satisfies Megatron's ``lr_decay_steps > 0``; a
         # constant schedule never reads it.
@@ -1036,6 +1042,7 @@ def resolve_rl_run_config(
                 global_batch=global_batch,
                 island_scheduling="elastic" if getattr(args, "rl_island_pool", False) else "legacy",
                 requested=getattr(args, "rl_lr_schedule", None) or "auto",
+                full_parameter_async=getattr(args, "full_parameter_rounds", "sweep") == "async",
             ),
             seed=args.seed,
             critic=resolve_critic_run_config(args),

@@ -524,6 +524,46 @@ Every merge appends event-tape fields for protocol/delta semantics, attempt,
 launch base version, frozen members and generations, responders, staleness,
 weights, counters, quorum/grace timings, and sync latency.
 
+## RL sync modes (`--rl-sync-mode`)
+
+A launch with two or more islands on the strict-avg (LoRA), decoupled or
+full-parameter preset fills the sync options it leaves unset from the sync
+mode. An option given on the command line always wins. One island,
+`sao-streaming-full`, `--experimental-rl-sync` and algorithms with a critic
+always take the strict values.
+
+| Option | `async` (default) | `strict` (control) |
+| --- | --- | --- |
+| `--rl-sync-full-parameter-rounds` (full-parameter) | `async`, at most 2 fragment rounds in flight | `sweep` |
+| `--rl-sync-quorum` | 1 | every island |
+| `--rl-sync-grace-ms` | 300000: cap of the adaptive grace window | 0 (no grace) |
+| `--rl-sync-max-base-lag` | 1 round | 0 |
+| `--rl-sync-learner-weight` | `tokens2-over-steps` | `equal` |
+| `--rl-sync-matrix-merge` (decoupled, full-parameter) | `rda` (embedding fragments stay averaged) | `avg` |
+| `--rl-sync-outer-lr` / `--rl-sync-outer-momentum` | 1.0 / 0 below 4 local rounds per sync (H), 0.7 / 0.9 from H = 4 | the preset's |
+| `--rl-sync-push-dtype` (full-parameter) | `int4` (linear, block 128, blocks restart at tensor boundaries) | `f32` |
+| `--rl-peer-recovery` (full-parameter) | on with async rounds, a fixed roster, one syncer process, no broadcast deltas and a snapshot store; else off | off |
+
+The grace window adapts to the islands' measured step time through the
+syncer's `--grace-gamma` and `--grace-tau`, which keep their defaults; no
+value of gamma is prescribed, the cap only bounds a slow round. The
+broadcast overwrites the islands' fragments (merge alpha 0) in both modes.
+A quorum of 1 needs a base lag of at least 1 round: otherwise the push of an
+island that missed the quorum is a strict failure of a fixed roster.
+Asynchronous full-parameter islands train until the syncer stops them, so
+`--rl-lr-schedule auto` gives them a constant learning rate.
+
+`--rl-sync-mode strict` produces the syncer and island commands of the
+launcher before the modes existed (tested byte for byte).
+
+Resume: every syncer start with a checkpoint path writes the semantic
+profile hash to `<checkpoint>.profile`. The async mode passes
+`--require-profile-record`: `--resume` then refuses a checkpoint whose record
+differs from the syncer's profile, or a checkpoint without the record:
+such a checkpoint was written before the modes, under the strict values, and
+must be resumed with `--rl-sync-mode strict` (or the session's original
+explicit options). The strict-mode command does not pass the flag.
+
 ## Island pool (dynamic membership)
 
 The syncer has one round loop. Without membership options the roster is

@@ -37,8 +37,12 @@ from yeto.rl.engine.backends import DEFAULT_BACKEND, KNOWN_BACKENDS
 from yeto.rl.engine.selection import (
     FULL_PARAMETER_ROUNDS,
     RL_MATRIX_MERGES,
+    RL_SYNC_MODES,
     SYNC_PRESETS,
+    ASYNC_GRACE_CAP_MS,
+    ASYNC_NESTEROV_MIN_H,
     canonical_sync_preset,
+    sync_mode_default,
 )
 
 CLI = "cli"
@@ -644,10 +648,11 @@ _SCHEDULING = (
                 "not support the requested limit is refused before launch"),
     # S17 N16: LR schedule choice (yeto.rl.engine.run_config.resolve_lr_schedule)
     shared_flag("--rl-lr-schedule", choices=("auto", "linear", "constant"), default="auto",
-                help="island optimizer LR schedule: auto (default) = constant for decoupled "
-                "and island-pool islands, linear decay over global_rounds x optimizer_steps "
+                help="island optimizer LR schedule: auto (default) = constant for decoupled, "
+                "island-pool and asynchronous full-parameter islands (they train until the "
+                "syncer stops them), linear decay over global_rounds x optimizer_steps "
                 "otherwise; constant = fixed LR in every mode (single island included); "
-                "linear is refused for decoupled and island pools"),
+                "linear is refused where islands train until the syncer stops them"),
     cli_flag("--rl-sync-quorum-theta", type=float, default=None, metavar="F",
              help="membership: merge a round once the arrived islands hold F of the "
              "capacity the round expects (replaces --rl-sync-quorum). Any membership "
@@ -691,10 +696,13 @@ _SCHEDULING = (
                 "--syncer-epoch and to every island's HELLO (default: read from the running "
                 "syncer, else 0)",
                 island={"default": 0}),
-    cli_flag("--rl-peer-recovery", action="store_true", default=False,
+    cli_flag("--rl-peer-recovery", action=argparse.BooleanOptionalAction, default=None,
              help="full-parameter async: an island relaunched after it lost its trainer "
              "state restores the inner optimizer state from a peer island's snapshot, "
-             "then takes every fragment from the syncer"),
+             "then takes every fragment from the syncer. Default: on in --rl-sync-mode "
+             "async where it applies (full-parameter async rounds, a fixed island roster, "
+             "one syncer process, no broadcast deltas, a snapshot store from "
+             "--rl-peer-recovery-store or --rl-checkpoint-store), else off"),
     cli_flag("--rl-recovery-bound-steps", type=int, default=None, metavar="H",
              help="--rl-peer-recovery: bound on one recovery in syncer steps; the syncer "
              "records a recovery past it as missed (default: measured, not checked)"),
@@ -879,6 +887,27 @@ _AGENT = (
 _SYNC = (
     cli_flag("--local-rl-rounds-per-sync", type=int, default=1),
     cli_flag(
+        "--rl-sync-mode",
+        choices=RL_SYNC_MODES,
+        default="async",
+        help="how a run with two or more islands fills the sync options left unset "
+        "(strict-avg, decoupled and full-parameter; one island, SAO, a critic and "
+        "--experimental-rl-sync keep the strict values). async (default): "
+        "full-parameter asynchronous sharded rounds (--rl-sync-full-parameter-rounds "
+        "async, at most 2 fragment rounds in flight), --rl-sync-quorum 1 with the "
+        "adaptive grace window (--rl-sync-grace-ms %d cap; --grace-gamma/--grace-tau keep "
+        "their defaults, no gamma value is prescribed), --rl-sync-max-base-lag 1, "
+        "tokens2-over-steps island weights, rda matrix merge (decoupled, full-parameter), "
+        "outer step by local rounds per sync H: plain averaging (lr 1.0, momentum 0) "
+        "below H=%d, Nesterov lr 0.7 momentum 0.9 from H=%d on, broadcast overwrite "
+        "(merge alpha 0), "
+        "int4 push (full-parameter, block 128). strict: the control, every island "
+        "per round, equal weights, plain average, f32; its commands equal the "
+        "commands from before the modes. An option given explicitly always wins. A "
+        "session started in one mode resumes only with the same settings"
+        % (ASYNC_GRACE_CAP_MS, ASYNC_NESTEROV_MIN_H, ASYNC_NESTEROV_MIN_H),
+    ),
+    cli_flag(
         "--rl-sync-preset",
         choices=SYNC_PRESETS,
         type=canonical_sync_preset,
@@ -893,21 +922,23 @@ _SYNC = (
     cli_flag(
         "--rl-sync-fragment-pipeline",
         type=int,
-        default=1,
+        default=sync_mode_default(1),
         help="full-parameter only: fragment rounds the syncer gathers at once "
-        "(1..--fragments). Above 1, fragment k+1 uploads while fragment k merges "
-        "and downloads; merge results are unchanged (default 1 = serial)",
+        "(1..--fragments; asynchronous rounds: 1 or 2). Above 1, fragment k+1 uploads "
+        "while fragment k merges and downloads (default: min(2, --fragments) with "
+        "asynchronous rounds, else 1 = serial)",
     ),
     cli_flag(
         "--rl-sync-push-dtype",
         choices=("f32", "bf16", "int8", "int4", "int4-log"),
-        default="f32",
+        default=sync_mode_default("f32"),
         help="full-parameter only: wire dtype of the islands' pushed outer deltas "
         "(pseudo-gradients). bf16 halves upload bytes, int8 (block absmax scale, see "
         "--rl-sync-push-int8-block) quarters them, int4 (linear, 15 levels per block "
         "absmax scale, see --rl-sync-push-int4-block) and int4-log (the SFT q4 codec: "
         "256-value blocks, log2 levels) cut them to ~1/7.5-1/7.8; the syncer keeps "
-        "f32 masters, momentum and f32 FINAL (default f32 = exact)",
+        "f32 masters, momentum and f32 FINAL (default: int4 in --rl-sync-mode async, "
+        "f32 = exact in --rl-sync-mode strict)",
     ),
     cli_flag(
         "--rl-sync-overlap",
@@ -983,9 +1014,10 @@ _SYNC = (
     cli_flag(
         "--rl-sync-full-parameter-rounds",
         choices=FULL_PARAMETER_ROUNDS,
-        default="sweep",
+        default=sync_mode_default("sweep"),
         help="full-parameter only (S27 P2): sweep = strict policy sweeps (every "
-        "island per fragment round, plain average; the control, default); async = "
+        "island per fragment round, plain average; the control, default in "
+        "--rl-sync-mode strict); async = (default in --rl-sync-mode async) "
         "asynchronous fragment rounds: H = --local-rl-rounds-per-sync, at most "
         "--rl-sync-fragment-pipeline (1 or 2) fragment rounds in flight, the "
         "decoupled preset's outer Nesterov (0.7, 0.9), and the --rl-sync-quorum "
@@ -997,7 +1029,7 @@ _SYNC = (
         default=None,
         metavar="K",
         help="strict-avg / decoupled / full-parameter async: islands whose pushes close a round "
-        "(1..islands; default every island)",
+        "(1..islands; default 1 in --rl-sync-mode async, every island in strict)",
     ),
     cli_flag(
         "--rl-sync-grace-ms",
@@ -1005,14 +1037,17 @@ _SYNC = (
         default=None,
         metavar="MS",
         help="strict-avg / decoupled / full-parameter async: cap of the adaptive post-quorum grace window "
-        "(--grace-gamma, --grace-tau); default 0 = no grace",
+        "(--grace-gamma, --grace-tau; the window adapts to the islands' step time, "
+        "the cap only bounds it); default %d in --rl-sync-mode async, 0 = no grace in strict"
+        % ASYNC_GRACE_CAP_MS,
     ),
     cli_flag(
         "--rl-sync-learner-weight",
         choices=("equal", "tokens2-over-steps"),
-        default="equal",
+        default=sync_mode_default("equal"),
         help="strict-avg / decoupled / full-parameter async: island weight in the outer merge; "
-        "tokens2-over-steps weighs by c_tokens^2 / c_steps (default equal)",
+        "tokens2-over-steps weighs by c_tokens^2 / c_steps (default tokens2-over-steps in "
+        "--rl-sync-mode async, equal in strict)",
     ),
     cli_flag(
         "--rl-sync-expert-token-weights",
@@ -1026,10 +1061,12 @@ _SYNC = (
     cli_flag(
         "--rl-sync-max-base-lag",
         type=int,
-        default=0,
+        default=sync_mode_default(0),
         metavar="N",
         help="strict-avg / decoupled / full-parameter async: how many rounds a push's base "
-        "may lag the fragment being merged (default 0 = late pushes are refused). One round "
+        "may lag the fragment being merged (default 1 in --rl-sync-mode async, so a delta "
+        "that misses the quorum merges into the next round; 0 = late pushes are refused, "
+        "the strict default). One round "
         "merges every fragment once; the launcher passes N x fragments to the syncer, whose "
         "--max-base-lag counts versions",
     ),
@@ -1038,22 +1075,28 @@ _SYNC = (
         type=float,
         default=None,
         help="strict-avg / decoupled / full-parameter async: outer Nesterov learning rate "
-        "(default: the preset's, 1.0 strict-avg, 0.7 decoupled and full-parameter async)",
+        "(default in --rl-sync-mode async: 1.0 below %d local rounds per sync, 0.7 "
+        "from there; strict: the preset's, 1.0 strict-avg, 0.7 decoupled and "
+        "full-parameter async)" % ASYNC_NESTEROV_MIN_H,
     ),
     cli_flag(
         "--rl-sync-outer-momentum",
         type=float,
         default=None,
         help="strict-avg / decoupled / full-parameter async: outer Nesterov momentum in [0, 1) "
-        "(default: the preset's, 0.0 strict-avg, 0.9 decoupled and full-parameter async)",
+        "(default in --rl-sync-mode async: 0 below %d local rounds per sync, 0.9 "
+        "from there; strict: the preset's, 0.0 strict-avg, 0.9 decoupled and "
+        "full-parameter async)" % ASYNC_NESTEROV_MIN_H,
     ),
     shared_flag(
         "--rl-sync-matrix-merge",
         choices=RL_MATRIX_MERGES,
-        default="avg",
+        default=sync_mode_default("avg"),
+        island={"default": "avg"},
         help="decoupled and full-parameter async only: avg merges every fragment by weighted averaging "
-        "(default); rda merges fragments without embedding tensors by "
-        "radial-directional averaging, embedding fragments stay averaged",
+        "(default in --rl-sync-mode strict); rda (default in --rl-sync-mode async) merges "
+        "fragments without embedding tensors by radial-directional averaging, embedding "
+        "fragments stay averaged",
     ),
     cli_flag(
         "--rl-initial-adapter",

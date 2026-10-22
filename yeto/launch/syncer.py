@@ -549,6 +549,16 @@ def _rl_expert_token_weights(args) -> bool:
     return bool(getattr(args, "rl_sync_expert_token_weights", False))
 
 
+def _syncer_profile_record(args) -> str:
+    """--rl-sync-mode async: the syncer resumes a checkpoint only when the
+    checkpoint's recorded semantic profile matches its own, so a session
+    started with other sync settings (e.g. before the async defaults) is
+    refused with the flags to pass instead of resuming under new ones. The
+    strict mode omits the flag, which keeps its command unchanged."""
+    async_mode = getattr(args, "rl_sync_mode_effective", "strict") == "async"
+    return " --require-profile-record" if async_mode else ""
+
+
 def _rl_role_syncer_command(args, num_learners: int, binary: str,
                             syncer: RoleSyncer,
                             shard_plan: tuple[int, int] | None = None) -> str:
@@ -581,6 +591,7 @@ def _rl_role_syncer_command(args, num_learners: int, binary: str,
         f"{' --expert-token-weights' if _rl_expert_token_weights(args) else ''}"
         f" --checkpoint-path {syncer.checkpoint}"
         f" --checkpoint-every {_syncer_checkpoint_every(args)}"
+        f"{_syncer_profile_record(args)}"
         f" {_resume_if_exists(syncer.checkpoint)}"
         f" --event-tape {syncer.event_tape}"
         f"{_syncer_weighted_fold(args)}"

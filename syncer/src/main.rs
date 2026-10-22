@@ -126,6 +126,11 @@ struct Args {
     /// Mark the terminal checkpoint as publishable after all merges finish.
     #[arg(long, default_value_t = false)]
     mark_final_checkpoint: bool,
+    /// Resume only a checkpoint whose recorded semantic profile (the
+    /// `<checkpoint>.profile` file written at every start) matches this
+    /// syncer's; a checkpoint without the record is refused too.
+    #[arg(long, default_value_t = false)]
+    require_profile_record: bool,
     /// Exact local optimizer-step budget per learner (benchmark-only).
     #[arg(long)]
     learner_budget_steps: Option<u64>,
@@ -366,6 +371,7 @@ fn main() -> anyhow::Result<()> {
         bcast_delta_full_every: args.bcast_delta_full_every,
         resume: args.resume,
         mark_final_checkpoint: args.mark_final_checkpoint,
+        require_profile_record: args.require_profile_record,
         learner_budget_steps: args.learner_budget_steps,
         event_tape: args.event_tape,
         max_base_lag: args.max_base_lag,

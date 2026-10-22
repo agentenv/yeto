@@ -263,7 +263,7 @@ def test_launcher_runs_one_actor_syncer_per_shard():
 ])
 def test_launcher_refuses_shards_outside_asynchronous_rounds(extra, message, monkeypatch):
     from yeto.launcher import _prepare_rl_args
-    from test_rl_algorithm_provenance import _launcher_args
+    from test_rl_full_parameter_async import _launcher_args  # strict control
     from test_rl_full_parameter_async import TWO_ISLANDS
 
     monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "k3y")

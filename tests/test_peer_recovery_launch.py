@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from test_rl_algorithm_provenance import _fake_sky, _launcher_args, _no_modal_listing  # noqa: F401
-from test_rl_full_parameter_async import ASYNC, FULL, TWO_ISLANDS, _flag, _plan
+from test_rl_algorithm_provenance import _fake_sky, _no_modal_listing  # noqa: F401
+from test_rl_full_parameter_async import ASYNC, FULL, TWO_ISLANDS, _flag, _launcher_args, _plan
 from yeto.launch.fleet import FleetController
 from yeto.launch.peer_recovery import PEER_RECOVER_ENV, relaunch_envs
 

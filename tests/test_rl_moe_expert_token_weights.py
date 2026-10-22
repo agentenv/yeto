@@ -313,7 +313,7 @@ def test_launcher_turns_the_option_on_for_syncer_profile_and_islands():
 
 
 def test_launcher_and_island_refuse_the_option_on_the_sweep(monkeypatch):
-    from test_rl_algorithm_provenance import _launcher_args
+    from test_rl_full_parameter_async import _launcher_args  # strict control
     from test_rl_full_parameter_async import FULL, TWO_ISLANDS, _island_args
 
     from yeto.launcher import _prepare_rl_args

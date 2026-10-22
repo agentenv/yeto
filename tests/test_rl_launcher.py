@@ -73,6 +73,8 @@ def _args(extra=()):
             "--reward-function",
             "pkg.reward:score",
             "--trust-remote-code",
+            "--rl-sync-mode",  # these tests pin the strict control
+            "strict",
             *extra,
         ]
     )

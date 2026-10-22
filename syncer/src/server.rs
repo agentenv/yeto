@@ -119,6 +119,9 @@ pub struct Config {
     pub resume: bool,
     /// Create the adjacent final marker only for a completed terminal cut.
     pub mark_final_checkpoint: bool,
+    /// `--resume` refuses a checkpoint whose `.profile` record is missing or
+    /// differs from this syncer's semantic profile. Not in the profile hash.
+    pub require_profile_record: bool,
     /// Benchmark-only exact local optimizer-step target for every learner.
     pub learner_budget_steps: Option<u64>,
     /// JSONL event tape: merge records plus sweep ledger reconciliation cuts.
@@ -1140,10 +1143,63 @@ fn check_resume_checkpoint(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
+fn profile_record_path(checkpoint: &std::path::Path) -> std::path::PathBuf {
+    let mut name = checkpoint.as_os_str().to_owned();
+    name.push(".profile");
+    std::path::PathBuf::from(name)
+}
+
+/// Every start with a checkpoint path records this syncer's semantic profile
+/// hash next to the checkpoint. With `--require-profile-record`, `--resume`
+/// refuses a checkpoint whose record differs (the merge settings of a session
+/// may not change under it) or is missing (written before the record
+/// existed). Without the flag nothing is checked: some restarts change the
+/// profile on purpose (the learner-budget consolidation restart).
+fn check_and_record_profile(cfg: &Config, profile: &[u8; 32]) -> Result<()> {
+    let Some(checkpoint) = cfg.checkpoint_path.as_ref() else {
+        return Ok(());
+    };
+    let record = profile_record_path(checkpoint);
+    let ours = hex32(profile);
+    if cfg.resume {
+        match std::fs::read_to_string(&record) {
+            Ok(recorded) if recorded.trim() == ours || !cfg.require_profile_record => {}
+            Ok(recorded) => bail!(
+                "cannot resume {}: the session was started with other sync settings \
+                 (semantic profile {}, this syncer {ours}); relaunch with the session's \
+                 original sync options (a session started before the async defaults: \
+                 --rl-sync-mode strict)",
+                checkpoint.display(),
+                recorded.trim()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if cfg.require_profile_record {
+                    bail!(
+                        "cannot resume {}: the checkpoint has no semantic profile record, so it \
+                         was written by an older syncer under the strict defaults; relaunch \
+                         with --rl-sync-mode strict (or the session's original explicit sync \
+                         options)",
+                        checkpoint.display()
+                    );
+                }
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("read {}", record.display()));
+            }
+        }
+    }
+    let partial = profile_record_path(&checkpoint.with_extension("profile-tmp"));
+    std::fs::write(&partial, format!("{ours}\n"))
+        .with_context(|| format!("write {}", partial.display()))?;
+    std::fs::rename(&partial, &record).with_context(|| format!("write {}", record.display()))?;
+    Ok(())
+}
+
 pub async fn run(cfg: Config) -> Result<()> {
     validate_config(&cfg)?;
     check_resume_checkpoint(&cfg)?;
     let semantic_profile_hash = cfg.semantic_profile_hash();
+    check_and_record_profile(&cfg, &semantic_profile_hash)?;
     if let Some(steps) = cfg.learner_budget_steps {
         if !(1..=u32::MAX as u64).contains(&steps) {
             bail!("--learner-budget-steps must fit a positive u32");
@@ -5981,6 +6037,39 @@ mod tests {
         registry
     }
 
+    #[test]
+    fn resume_refuses_a_changed_or_missing_profile_record() {
+        let dir = std::env::temp_dir().join(format!("yeto-profile-record-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let checkpoint = dir.join("actor.ckpt");
+        std::fs::write(&checkpoint, b"x").unwrap();
+        let record = profile_record_path(&checkpoint);
+        let _ = std::fs::remove_file(&record);
+        let mut config = round_test_config(4);
+        config.checkpoint_path = Some(checkpoint.clone());
+        config.resume = true;
+        // No requirement: nothing is checked, the record is (re)written.
+        check_and_record_profile(&config, &[1; 32]).unwrap();
+        assert_eq!(std::fs::read_to_string(&record).unwrap().trim(), hex32(&[1; 32]));
+        check_and_record_profile(&config, &[2; 32]).unwrap();
+        check_and_record_profile(&config, &[1; 32]).unwrap();
+        // Required: the same profile resumes; another one is refused with the remedy.
+        config.require_profile_record = true;
+        check_and_record_profile(&config, &[1; 32]).unwrap();
+        let error = check_and_record_profile(&config, &[2; 32]).unwrap_err().to_string();
+        assert!(error.contains("other sync settings"), "{error}");
+        assert!(error.contains("--rl-sync-mode strict"), "{error}");
+        // A missing record is refused when the launcher requires one.
+        std::fs::remove_file(&record).unwrap();
+        let error = check_and_record_profile(&config, &[1; 32]).unwrap_err().to_string();
+        assert!(error.contains("no semantic profile record"), "{error}");
+        // A fresh start always (re)writes the record.
+        config.resume = false;
+        check_and_record_profile(&config, &[3; 32]).unwrap();
+        assert_eq!(std::fs::read_to_string(&record).unwrap().trim(), hex32(&[3; 32]));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     fn round_test_config(total_steps: u64) -> Config {
         Config {
             port: 0,
@@ -6008,6 +6097,7 @@ mod tests {
             bcast_delta_full_every: None,
             resume: false,
             mark_final_checkpoint: false,
+            require_profile_record: false,
             learner_budget_steps: None,
             event_tape: None,
             max_base_lag: Some(0),

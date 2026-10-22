@@ -96,6 +96,7 @@ def test_island_divergences_are_the_declared_ones():
         "--reward-function": {"required": True},
         "--over-sampling-batch-size": {"required": True},
         "--rl-syncer-epoch": {"default": 0},
+        "--rl-sync-matrix-merge": {"default": "avg"},
         "--rollout-max-response-len": {"default": None, "required": True},
     }
     aliases = {f.option: f.cli_aliases for f in rl_flags() if f.cli_aliases}
@@ -250,7 +251,7 @@ def test_forward_tables_name_flags_of_both_layers():
 # flag renamed in the schema but still spelled the old way in the launcher fails.
 _NON_RL_LITERALS = frozenset({
     "--abbrev-ref", "--adapter-dir", "--add", "--address", "--allow-unattested-legacy-adapter",
-    "--allow-unauthenticated-islands", "--async-checkpoint", "--bcast-delta-full-every", "--bind", "--cap-add", "--carry-gamma",
+    "--allow-unauthenticated-islands", "--require-profile-record", "--async-checkpoint", "--bcast-delta-full-every", "--bind", "--cap-add", "--carry-gamma",
     "--checkpoint-every", "--checkpoint-path", "--codex-harness-binary", "--config-json",
     "--create", "--dashboard-host", "--max-learners", "--dearmor", "--depth", "--detach", "--dtype",
     "--entrypoint", "--expected-island-contract", "--expert-token-weights", "--final-ack-timeout-s", "--final-grace-s", "--follow", "--force",

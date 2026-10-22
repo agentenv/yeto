@@ -684,6 +684,18 @@ def test_elastic_island_lr_schedule_is_constant():
                                   island_scheduling="legacy") == rc.LrSchedule("linear", 6)
 
 
+def test_async_full_parameter_island_lr_schedule_is_constant():
+    """An asynchronous full-parameter island trains until the syncer stops it
+    (H local rounds per fragment round, more when it is fast under a partial
+    quorum), so a linear horizon of global_rounds could decay the LR to 0
+    while it still trains. The strict sweep keeps the linear schedule."""
+    args = _schedule_args(sync_preset="full-parameter", global_rounds=6)
+    assert rc.resolve_lr_schedule(**args, full_parameter_async=True) == rc.LrSchedule("constant", 6)
+    assert rc.resolve_lr_schedule(**args) == rc.LrSchedule("linear", 6)
+    with pytest.raises(ValueError, match="asynchronous full-parameter"):
+        rc.resolve_lr_schedule(**args, full_parameter_async=True, requested="linear")
+
+
 @pytest.mark.parametrize("preset,scheduling", [("strict-avg", "legacy"), ("decoupled", "legacy"),
                                                ("strict-avg", "elastic")])
 def test_rl_lr_schedule_constant_in_every_mode(preset, scheduling):

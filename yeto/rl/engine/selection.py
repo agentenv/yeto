@@ -34,6 +34,64 @@ RL_MATRIX_MERGES = ("avg", "rda")
 # is the strict policy sweep (every island per round, plain average, the
 # control); "async" runs asynchronous sharded fragment rounds.
 FULL_PARAMETER_ROUNDS = ("sweep", "async")
+# How a multi-island RL run fills the sync options the command leaves unset.
+# "async" (default): asynchronous sharded rounds, quorum 1 with the adaptive
+# grace window, tokens^2/steps island weights, RDA matrix merge, outer
+# Nesterov, int4 push. "strict": the strict-roster control (every island per
+# round, plain average, f32), i.e. the values each option had before the
+# modes existed. An option given on the command line always wins.
+RL_SYNC_MODES = ("async", "strict")
+# The adaptive grace window's cap in the async mode. The window itself is
+# computed from the islands' measured step time (--grace-gamma, --grace-tau);
+# the cap only bounds a slow round, it does not fix the wait.
+ASYNC_GRACE_CAP_MS = 300_000
+# The async mode's outer step needs enough local progress per merge: with
+# fewer than this many local RL rounds per sync (H), the default outer step is
+# plain averaging (lr 1.0, momentum 0); from H on it is Nesterov (lr 0.7,
+# momentum 0.9). On GPU, 2 full-parameter islands with H = 1 diverged under
+# Nesterov 0.7/0.9 and trained normally with plain averaging.
+ASYNC_NESTEROV_MIN_H = 4
+
+
+class SyncModeDefault:
+    """Marks an argparse default that ``--rl-sync-mode`` may replace.
+
+    The marked value equals the strict-mode value, so code that reads the
+    option before the mode is resolved sees the strict default."""
+
+    __slots__ = ()
+
+
+class _SyncModeDefaultStr(SyncModeDefault, str):
+    __slots__ = ()
+
+
+class _SyncModeDefaultInt(SyncModeDefault, int):
+    __slots__ = ()
+
+
+def sync_mode_default(value: str | int) -> str | int:
+    """``value`` marked as a default the sync mode resolves."""
+
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise TypeError(f"no sync-mode default for {value!r}")
+    return (_SyncModeDefaultStr if isinstance(value, str) else _SyncModeDefaultInt)(value)
+
+
+def is_sync_mode_default(value: object) -> bool:
+    """True when ``value`` is still the unset (marked) default."""
+
+    return isinstance(value, SyncModeDefault)
+
+
+def plain(value: object) -> object:
+    """``value`` without its sync-mode mark."""
+
+    if isinstance(value, str):
+        return str(value)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return int(value)
+    return value
 
 
 def canonical_sync_preset(value: str) -> str:

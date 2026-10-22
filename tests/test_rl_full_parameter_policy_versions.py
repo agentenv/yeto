@@ -260,8 +260,10 @@ def test_full_parameter_synced_trainer_plan(monkeypatch):
     plan = dry_run_plan(_args(full + ("--rl-sync-full-parameter-rounds", "async"), gpu=gpu,
                               base=synced))
     assert plan["syncer"] is not None and len(plan["island_requests"]) == 2
+    # Unset rounds default to async in a multi-island run; the strict sweep refuses.
+    assert dry_run_plan(_args(full, gpu=gpu, base=synced))["syncer"] is not None
     with pytest.raises(ValueError, match="rounds async"):
-        _args(full, gpu=gpu, base=synced)
+        _args(full + ("--rl-sync-mode", "strict"), gpu=gpu, base=synced)
 
 
 # -- the real Rust syncer with a membership lease -------------------------------------

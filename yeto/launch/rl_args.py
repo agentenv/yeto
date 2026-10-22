@@ -9,7 +9,14 @@ import re
 from pathlib import Path
 
 from ..gpu_spec import parse_gpu_spec
-from ..rl.engine.selection import FULL_PARAMETER_SYNC_PRESET, SAO_STREAMING_SYNC_PRESET
+from ..rl.engine.selection import (
+    ASYNC_GRACE_CAP_MS,
+    ASYNC_NESTEROV_MIN_H,
+    FULL_PARAMETER_SYNC_PRESET,
+    SAO_STREAMING_SYNC_PRESET,
+    is_sync_mode_default,
+    plain,
+)
 from . import REPO_ROOT
 from .rl_backend import (
     _rl_backend_image_ok, _rl_backend_module, _rl_callable, _rl_miles_function,
@@ -278,7 +285,12 @@ def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
             max_policy_age=getattr(args, "rl_max_policy_age", 0) or 0,
             fragment_pipeline=fragment_pipeline, fragments=args.fragments)
     if problems:
-        raise ValueError(f"--rl-sync-preset {FULL_PARAMETER_SYNC_PRESET} requires " + "; ".join(problems))
+        hint = (" (a multi-island run defaults to asynchronous rounds; --rl-sync-mode strict "
+                "or --rl-sync-full-parameter-rounds sweep selects the strict sweep)"
+                if async_rounds and getattr(args, "rl_sync_mode_effective", "strict") == "async"
+                else "")
+        raise ValueError(f"--rl-sync-preset {FULL_PARAMETER_SYNC_PRESET} requires "
+                         + "; ".join(problems) + hint)
     args.quorum = num_islands
     args.grace_ms = 0
     args.pipeline = fragment_pipeline
@@ -299,6 +311,83 @@ def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
     args.outer_momentum = 0.0
 
 
+# The options --rl-sync-mode fills when the command leaves them unset: dest
+# -> the async-mode value. None-default options (quorum, grace, outer step)
+# are unset when None; the others carry a marked default (selection.py).
+_ASYNC_MODE_VALUES = {
+    "rl_sync_quorum": 1,
+    "rl_sync_grace_ms": ASYNC_GRACE_CAP_MS,
+    "rl_sync_max_base_lag": 1,
+    "rl_sync_learner_weight": "tokens2-over-steps",
+}
+_ASYNC_MODE_FULL_PARAMETER_VALUES = {
+    "rl_sync_full_parameter_rounds": "async",
+    "rl_sync_push_dtype": "int4",
+}
+# Marked defaults; the strict mode keeps their (strict) value.
+_SYNC_MODE_MARKED = (
+    "rl_sync_full_parameter_rounds", "rl_sync_fragment_pipeline", "rl_sync_push_dtype",
+    "rl_sync_learner_weight", "rl_sync_max_base_lag", "rl_sync_matrix_merge",
+)
+
+
+def rl_sync_mode_applies(args) -> bool:
+    """The async mode fills unset options only for a run with two or more
+    islands on strict-avg, decoupled or full-parameter, without a critic or
+    --experimental-rl-sync; every other run keeps the strict values."""
+    return (getattr(args, "rl_sync_preset", "strict-avg") in (
+                "strict-avg", "decoupled", FULL_PARAMETER_SYNC_PRESET)
+            and rl_island_count(args) >= 2
+            and not getattr(args, "experimental_rl_sync", False)
+            and not rl_needs_critic(args))
+
+
+def _apply_rl_sync_mode(args) -> None:
+    """Resolve ``--rl-sync-mode`` into concrete option values.
+
+    Only options the command left unset change; an explicit option always
+    wins. Afterwards ``args.rl_sync_mode_effective`` is the mode that took
+    effect ("strict" when the async mode does not apply) and no option keeps
+    its mark. Args never resolved (built in code, or parsed without the RL
+    checks) read as strict: every marked default equals its strict value."""
+    mode = getattr(args, "rl_sync_mode", "strict")
+    explicit_sweep = (getattr(args, "rl_sync_preset", None) == FULL_PARAMETER_SYNC_PRESET
+                      and getattr(args, "rl_sync_full_parameter_rounds", "sweep") == "sweep"
+                      and not is_sync_mode_default(args.rl_sync_full_parameter_rounds))
+    # An explicit full-parameter sweep is the strict control profile.
+    if mode == "async" and rl_sync_mode_applies(args) and not explicit_sweep:
+        values = dict(_ASYNC_MODE_VALUES)
+        nesterov = int(getattr(args, "local_rl_rounds_per_sync", 1)) >= ASYNC_NESTEROV_MIN_H
+        values["rl_sync_outer_lr"] = 0.7 if nesterov else 1.0
+        values["rl_sync_outer_momentum"] = 0.9 if nesterov else 0.0
+        if args.rl_sync_preset == FULL_PARAMETER_SYNC_PRESET:
+            values.update(_ASYNC_MODE_FULL_PARAMETER_VALUES)
+            # Quantization blocks restart at tensor boundaries by default
+            # (--rl-sync-push-no-tensor-blocks turns that off).
+        if args.rl_sync_preset in ("decoupled", FULL_PARAMETER_SYNC_PRESET):
+            values["rl_sync_matrix_merge"] = "rda"
+        # Peer recovery: _default_peer_recovery, right after this function.
+        if getattr(args, "rl_sync_quorum_theta", None) is not None:
+            values.pop("rl_sync_quorum")  # the capacity quorum replaces the count
+        for dest, value in values.items():
+            current = getattr(args, dest, None)
+            if current is None or is_sync_mode_default(current):
+                setattr(args, dest, value)
+        if (args.rl_sync_preset == FULL_PARAMETER_SYNC_PRESET
+                and args.rl_sync_full_parameter_rounds == "async"
+                and is_sync_mode_default(getattr(args, "rl_sync_fragment_pipeline", None))):
+            # At most two fragment rounds in flight; the fragment count is
+            # checked (and may be 1) in _prepare_dense_full_sweep.
+            args.rl_sync_fragment_pipeline = min(FULL_PARAMETER_ASYNC_MAX_PIPELINE,
+                                                 max(int(getattr(args, "fragments", 1) or 1), 1))
+    else:
+        mode = "strict"
+    for dest in _SYNC_MODE_MARKED:
+        if hasattr(args, dest):
+            setattr(args, dest, plain(getattr(args, dest)))
+    args.rl_sync_mode_effective = mode
+
+
 # S27 P1: (dest, option, preset-keeping default) of the outer-merge options.
 _RL_OUTER_MERGE_OPTIONS = (
     ("rl_sync_quorum", "--rl-sync-quorum", None),
@@ -309,6 +398,26 @@ _RL_OUTER_MERGE_OPTIONS = (
     ("rl_sync_outer_momentum", "--rl-sync-outer-momentum", None),
     ("rl_sync_matrix_merge", "--rl-sync-matrix-merge", "avg"),
 )
+
+
+def _default_peer_recovery(args) -> None:
+    """``--rl-peer-recovery`` left unset: on in the async mode where it applies
+    (full-parameter async rounds, a fixed roster, one syncer process, no
+    broadcast deltas, a snapshot store), off otherwise; the strict mode and
+    ``--no-rl-peer-recovery`` keep it off."""
+    if getattr(args, "rl_peer_recovery", None) is not None:
+        return
+    args.rl_peer_recovery = False
+    if (getattr(args, "rl_sync_mode_effective", "strict") != "async"
+            or not rl_full_parameter_async(args) or island_pool(args)
+            or syncer_shard_count(args) > 1
+            or getattr(args, "rl_sync_bcast_delta_full_every", 0)):
+        return
+    from .peer_recovery import peer_recovery_store
+
+    args.rl_peer_recovery = True
+    if peer_recovery_store(args) is None:
+        args.rl_peer_recovery = False
 
 
 def _apply_rl_outer_merge_options(args, *, num_islands: int) -> None:
@@ -435,6 +544,8 @@ def _prepare_rl_args(
         return
 
     _prepare_node_inventory(args)
+    _apply_rl_sync_mode(args)
+    _default_peer_recovery(args)
 
     from ..adapter_lifecycle import directory_sha256, selected_parent
 

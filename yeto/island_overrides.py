@@ -134,9 +134,10 @@ def _old_value(args, key: str):
     if key == "rl_lr_schedule":
         value = value or "auto"
         if value == "auto":  # resolved as run_config.resolve_lr_schedule does
-            from .launch.syncer import island_pool
+            from .launch.syncer import island_pool, rl_full_parameter_async
 
-            run_until_stop = getattr(args, "sync_preset", None) == "decoupled" or island_pool(args)
+            run_until_stop = (getattr(args, "sync_preset", None) == "decoupled"
+                              or island_pool(args) or rl_full_parameter_async(args))
             return "constant" if run_until_stop else "linear"
         return value
     if key == "rl_max_policy_age":
@@ -155,11 +156,13 @@ def check_island_args(args) -> None:
     sched = getattr(args, "rl_lr_schedule", None) or "auto"
     _lr(sched)
     if sched == "linear":
-        from .launcher import island_pool
+        from .launch.syncer import island_pool, rl_full_parameter_async
 
-        if getattr(args, "sync_preset", None) == "decoupled" or island_pool(args):
-            raise ValueError("--rl-lr-schedule linear needs a known local step count; decoupled and "
-                             "island pool islands run until the syncer stops them (use auto or constant)")
+        if (getattr(args, "sync_preset", None) == "decoupled" or island_pool(args)
+                or rl_full_parameter_async(args)):
+            raise ValueError("--rl-lr-schedule linear needs a known local step count; decoupled, "
+                             "island pool and asynchronous full-parameter islands run until the "
+                             "syncer stops them (use auto or constant)")
     from .launcher import _rl_backend_module
     from .rl.engine.policy_age import validate_limit
 
