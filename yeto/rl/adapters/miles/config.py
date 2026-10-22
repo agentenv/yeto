@@ -30,6 +30,11 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from yeto.rl.adapters.miles.pins import (
+    MILES_DISTOPT_FULL_PARAMETER_COMMIT,
+    MILES_NEXT_COMMIT,
+    miles_fork_lineage_from,
+)
 from yeto.rl.engine.algorithm import (
     AlgorithmSpecError,
     BOUNDED_NONZERO_STD_FILTER,
@@ -1242,16 +1247,25 @@ def sample_buffer_argv(role: str, *, max_policy_age: int) -> tuple[str, ...]:
 
 
 def _full_parameter_optimizer_attrs(trainable: Any, memory: Any, *, full_parameter_sync: bool) -> dict[str, Any]:
-    """Keep every FP32 master whole when the full-parameter sync reads them.
+    """Pick the optimizer layout the full-parameter sync reads its FP32 masters from.
 
     The ports full-parameter sync (presets ``full-parameter`` /
-    ``sao-streaming-full``) builds its shard manifest from whole masters (Miles
-    ``full_parameter_state._master_parameter`` refuses the flat owned-range
-    slice that ``param.main_param`` is under the distributed optimizer, even at
-    DP=1). Miles' ``set_default_megatron_args`` turns the distributed optimizer
-    on for Adam regardless of argv, so the attribute is applied in
-    ``preprocess_args``, after Miles' defaults and before Megatron's
-    ``validate_args``.
+    ``sao-streaming-full``) reads one whole FP32 master per parameter on each
+    rank (islands run DP=1).
+
+    * No optimizer offload: the non-distributed optimizer, whose masters are
+      whole tensors. Miles' ``set_default_megatron_args`` turns the
+      distributed optimizer on for Adam regardless of argv, so the attribute
+      is applied in ``preprocess_args``, after Miles' defaults and before
+      Megatron's ``validate_args``.
+    * ``--rl-optimizer-offload-fraction`` > 0: Megatron's distributed +
+      precision-aware optimizer with a HybridDeviceOptimizer
+      (``OPTIMIZER_OFFLOAD_ARGV``). At DP=1 each parameter's FP32 master is
+      the hybrid optimizer's whole FP32 copy (host-pinned when offloaded);
+      Miles reads it and, on a cut apply, writes both that copy and the BF16
+      model view (``full_parameter_state._propagate_master_writes``). Needs
+      a Miles image at or after :data:`MILES_DISTOPT_FULL_PARAMETER_COMMIT`;
+      DP>1 is still refused by Miles at the first manifest.
 
     A no-sync trainer island (samples from the store, L4.6) has no such reader:
     it keeps Miles' distributed optimizer, so DP replicas shard the optimizer
@@ -1261,10 +1275,20 @@ def _full_parameter_optimizer_attrs(trainable: Any, memory: Any, *, full_paramet
     if trainable.parameter_mode != "full" or not full_parameter_sync:
         return {}
     if float(getattr(memory, "optimizer_offload_fraction", 0.0) or 0.0) > 0:
-        raise MilesConfigError(
-            "--rl-optimizer-offload-fraction needs the distributed optimizer; the full-parameter sync "
-            "keeps whole FP32 masters (use a no-sync trainer island)")
+        if not _miles_reads_distributed_optimizer_masters():
+            raise MilesConfigError(
+                "--rl-optimizer-offload-fraction with the full-parameter sync needs Miles "
+                f"{MILES_DISTOPT_FULL_PARAMETER_COMMIT[:9]} or later (reads distributed-optimizer masters); "
+                f"the pinned image ships {MILES_NEXT_COMMIT[:9]} (or use a no-sync trainer island)")
+        return {}
     return {"use_distributed_optimizer": False}
+
+
+def _miles_reads_distributed_optimizer_masters() -> bool:
+    from yeto.rl.adapters.miles import pins
+
+    return (MILES_DISTOPT_FULL_PARAMETER_COMMIT in pins.MILES_FORK_LINEAGE
+            and MILES_NEXT_COMMIT in miles_fork_lineage_from(MILES_DISTOPT_FULL_PARAMETER_COMMIT))
 
 
 def _resolve_tito_parsers(model: str) -> tuple[str | None, str | None]:

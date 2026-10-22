@@ -114,6 +114,12 @@ MILES_FORK_LINEAGE: tuple[str, ...] = (
     "ed5f64fd7a183cccc8ab7ca3da90fba570108c2b",
 )
 
+# First Miles commit whose full-parameter sync reads distributed-optimizer
+# masters (and the HybridDeviceOptimizer's offloaded FP32 copies) at DP=1
+# (S27 G-B; local fork branch s27-distopt-fp on ed5f64fd7, no image yet).
+# Append it to MILES_FORK_LINEAGE together with the image re-pin.
+MILES_DISTOPT_FULL_PARAMETER_COMMIT = "56190a5a86d14f1eb96d592038d76a9ad8651b0c"
+
 
 def miles_fork_lineage_from(commit: str) -> frozenset[str]:
     """``commit`` and every later commit of :data:`MILES_FORK_LINEAGE`."""
