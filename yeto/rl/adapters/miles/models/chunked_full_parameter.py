@@ -351,6 +351,14 @@ class MilesChunkedFullParameterAdapter:
         if layout is None:
             raise RuntimeError("owner-affine layout did not fit the fragment byte bound")
 
+        if layout.has_split_parameters and "flat_ranges" not in getattr(
+            FullParameterFragmentPlan, "__dataclass_fields__", {}
+        ):
+            raise RuntimeError(
+                "a parameter exceeds the fragment byte bound and this Miles "
+                "cannot split it (needs FullParameterFragmentPlan.flat_ranges, "
+                "Miles s27-fragbound-split)"
+            )
         manifests_by_owner = {}
         for manifest in ordered:
             owners = {(spec.role, spec.shard_id) for spec in manifest.specs}
@@ -370,18 +378,20 @@ class MilesChunkedFullParameterAdapter:
                 if layout.fragment_owner(fragment_id) != owner:
                     continue
                 slices = layout.fragment_slices(fragment_id)
+                # Only a fragment holding part of a parameter names flat
+                # ranges (Miles s27-fragbound-split); unsplit plans keep
+                # their plan hash and install on older Miles images.
+                ranges = (
+                    {}
+                    if all(unit.is_whole for unit in slices)
+                    else {"flat_ranges": tuple(unit.flat_range for unit in slices)}
+                )
                 fragments.append(
                     FullParameterFragmentPlan(
                         fragment_id=fragment_id,
                         wire_names=tuple(unit.spec.wire_name for unit in slices),
                         numel=fragment.numel,
-                        # Only a fragment holding part of a parameter names
-                        # ranges, so unsplit plans keep their plan hash.
-                        flat_ranges=(
-                            ()
-                            if all(unit.is_whole for unit in slices)
-                            else tuple(unit.flat_range for unit in slices)
-                        ),
+                        **ranges,
                     )
                 )
             plans.append(
