@@ -786,16 +786,25 @@ const STEP_EMA_ALPHA: f64 = 0.5;
 impl StepRates {
     fn note(&mut self, member: Member, local_step: u64, now: Instant) {
         let entry = self.0.entry(member).or_insert((None, 0, None));
-        if let Some(prev) = entry.0 {
-            if local_step > entry.1 {
+        // One local step produces a push per fragment (and heartbeats): only
+        // the first report of a new step marks its start. Re-stamping on
+        // every report of the same step would measure only the gap between
+        // the last report of one step and the first of the next.
+        match entry.0 {
+            Some(prev) if local_step > entry.1 => {
                 let secs = now.duration_since(prev).as_secs_f64() / (local_step - entry.1) as f64;
                 entry.2 = Some(match entry.2 {
                     Some(ema) => STEP_EMA_ALPHA * secs + (1.0 - STEP_EMA_ALPHA) * ema,
                     None => secs, // first sample seeds the EMA
                 });
+                *entry = (Some(now), local_step, entry.2);
             }
+            // A step counter that went backwards (a restarted learner)
+            // starts a new baseline; a repeat of the current step keeps it.
+            Some(_) if local_step < entry.1 => *entry = (Some(now), local_step, entry.2),
+            Some(_) => {}
+            None => *entry = (Some(now), local_step, None),
         }
-        *entry = (Some(now), local_step, entry.2);
     }
 
     /// Slowest estimated step time among one frozen/current member set.
@@ -2645,6 +2654,7 @@ async fn scheduler(
     let mut computing = tokio::task::JoinSet::<Result<ComputedRound>>::new();
     let mut ready: BTreeMap<u64, ComputedRound> = BTreeMap::new();
     let mut busy_fragments: HashSet<usize> = HashSet::new();
+    let mut late_carry = LateCarry::new(cfg.max_base_lag, fixed_roster);
     // --async-checkpoint: the committed round whose checkpoint is in flight.
     let mut publishing: Option<PendingPublish> = None;
     let mut cutoff_established = false;
@@ -2809,20 +2819,40 @@ async fn scheduler(
                 grace_ms: None,
                 fold,
                 pushes: HashMap::new(),
+                carried: Vec::new(),
             });
+            if let Some(carry) = late_carry.as_mut() {
+                let round = inflight.last_mut().expect("round just launched");
+                for (member, missed, outcome) in carry.attach_queued(round) {
+                    log_carry(&cfg, dynamic, member, missed, t, outcome);
+                }
+            }
         }
 
         // Arm the grace window of any round that just reached quorum.
         for r in inflight.iter_mut() {
             if r.grace_deadline.is_none() && r.quorum_reached() {
+                let step_secs = step_rates.max_step_secs_for(&r.expected_members);
+                let quorum_secs = r.started.elapsed().as_secs_f64();
                 let grace = adaptive_grace(
                     cfg.grace_tau,
                     cfg.grace_gamma,
-                    step_rates.max_step_secs_for(&r.expected_members),
-                    r.started.elapsed().as_secs_f64(),
+                    step_secs,
+                    quorum_secs,
                     last_sync_secs,
                     Duration::from_millis(cfg.grace_ms),
                 );
+                if r.pushes.len() < r.expected_members.len() {
+                    info!(
+                        step = r.t,
+                        fragment = r.p,
+                        step_secs = ?step_secs,
+                        quorum_secs,
+                        sync_secs = last_sync_secs,
+                        grace_ms = grace.as_millis() as u64,
+                        "grace window armed"
+                    );
+                }
                 // The soft deadline is an upper bound on the grace window too.
                 let now = Instant::now();
                 let grace = r
@@ -2920,6 +2950,11 @@ async fn scheduler(
                     r.base_version = st.versions[r.p];
                     r.attempt += 1;
                     r.pull = encode_pull(r.p, r.t, r.attempt);
+                    if let Some(carry) = late_carry.as_mut() {
+                        for (member, push) in &r.pushes {
+                            carry.release_anchor(*member, push);
+                        }
+                    }
                     r.pushes.clear();
                     r.fold = round_fold(&cfg, &st, r.p, &r.expected_members, r.quorum_size);
                     r.started = Instant::now();
@@ -3097,7 +3132,59 @@ async fn scheduler(
                         rejected("fenced");
                         continue;
                     }
+                    // Pace from every unfenced push, refused ones included: a
+                    // peer whose pushes keep missing their round is exactly
+                    // the one the grace window must be sized for.
+                    step_rates.note(member, local_step, Instant::now());
                     let base_version = push.base_version;
+                    if let Some(carry) = late_carry.as_mut() {
+                        if carry.reuses_anchor(member, &push) {
+                            warn!(
+                                learner_id,
+                                generation,
+                                step = global_step,
+                                fragment = fragment_id,
+                                base = base_version,
+                                "push reuses an anchor whose delta was already taken"
+                            );
+                            rejected("anchor_reused");
+                            continue;
+                        }
+                        let open = inflight.iter().any(|round| {
+                            round.t == global_step
+                                && round.p == fragment_id as usize
+                                && round.attempt == push.round_attempt
+                        });
+                        if !open {
+                            let current = st.versions[fragment_id as usize];
+                            let outcome = carry.carry(&mut inflight, member, push, next_t, current);
+                            if !matches!(outcome, CarryOutcome::Rejected(_)) {
+                                carry.spend_anchor(member, fragment_id as usize, base_version);
+                            }
+                            match outcome {
+                                CarryOutcome::Attached { step, lag } => {
+                                    log_carry(&cfg, dynamic, member, global_step, step, Ok(lag))
+                                }
+                                CarryOutcome::Queued => info!(
+                                    learner_id,
+                                    generation,
+                                    step = global_step,
+                                    fragment = fragment_id,
+                                    base = base_version,
+                                    "late push queued for the fragment's next round"
+                                ),
+                                CarryOutcome::Rejected(disposition) => log_carry(
+                                    &cfg,
+                                    dynamic,
+                                    member,
+                                    global_step,
+                                    global_step,
+                                    Err(disposition),
+                                ),
+                            }
+                            continue;
+                        }
+                    }
                     let round_base = inflight
                         .iter()
                         .find(|round| round.t == global_step && round.p == fragment_id as usize)
@@ -3106,7 +3193,9 @@ async fn scheduler(
                         route_push(&mut inflight, member, push, cfg.max_base_lag, fixed_roster);
                     match disposition {
                         PushDisposition::Accepted => {
-                            step_rates.note(member, local_step, Instant::now());
+                            if let Some(carry) = late_carry.as_mut() {
+                                carry.note_gathered(member, fragment_id as usize, base_version);
+                            }
                             let lag = round_base.map_or(0, |base| base.saturating_sub(base_version));
                             if lag == 0 {
                                 pool("delta_accepted", format!("\"island_id\":{learner_id}"));
@@ -3812,6 +3901,10 @@ struct Round {
     /// keeps every push's gradient until the buffered merge.
     fold: Option<RoundFold>,
     pushes: HashMap<Member, Push>,
+    /// Late deltas of earlier rounds of this fragment (async rounds, see
+    /// `LateCarry`): merged here against their own base, in arrival order.
+    /// They never count toward quorum and stay buffered until the merge.
+    carried: Vec<(Member, Push)>,
 }
 
 impl Round {
@@ -4086,6 +4179,213 @@ fn route_push(
     PushDisposition::Accepted
 }
 
+/// Late-push carry for asynchronous rounds.
+///
+/// A push that reaches the syncer after its round closed still holds the
+/// island's work since its anchor (`local - raw anchor at base_version`).
+/// Instead of dropping it, the syncer merges it into the next round of the
+/// same fragment against its own base, weighted by its counters (and the
+/// carry discount), as long as its base lag stays within `--max-base-lag`.
+///
+/// A carried delta counts once: after the syncer carries a delta from an
+/// anchor (fragment version), a later push of that island connection from
+/// the same or an older anchor of that fragment is refused
+/// (`anchor_reused`), and a late push from an anchor whose delta was
+/// already merged is not carried. Pushes that never involve a carry keep
+/// the existing stale-base rules.
+struct LateCarry {
+    limit: u64,
+    /// Late pushes waiting for their fragment's next round.
+    queued: HashMap<usize, Vec<(Member, Push)>>,
+    /// Newest base version of a carried delta per island connection and
+    /// fragment.
+    anchors: HashMap<(Member, usize), u64>,
+    /// Newest base version of a delta gathered by its own round.
+    gathered: HashMap<(Member, usize), u64>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum CarryOutcome {
+    /// Added to the open round of this fragment launched at `step`.
+    Attached { step: u64, lag: u64 },
+    /// Held until the fragment's next round launches.
+    Queued,
+    Rejected(PushDisposition),
+}
+
+impl LateCarry {
+    /// Carry is on for asynchronous rounds only: a positive base-lag bound
+    /// and no fixed roster. Strict (`--max-base-lag 0`) and unbounded runs
+    /// keep refusing late pushes.
+    fn new(max_base_lag: Option<u64>, fixed_roster: bool) -> Option<Self> {
+        match max_base_lag {
+            Some(limit) if limit > 0 && !fixed_roster => Some(Self {
+                limit,
+                queued: HashMap::new(),
+                anchors: HashMap::new(),
+                gathered: HashMap::new(),
+            }),
+            _ => None,
+        }
+    }
+
+    /// True when `push` reuses an anchor this connection already spent.
+    fn reuses_anchor(&self, member: Member, push: &Push) -> bool {
+        self.anchors
+            .get(&(member, push.fragment_id as usize))
+            .is_some_and(|&spent| push.base_version <= spent)
+    }
+
+    fn spend_anchor(&mut self, member: Member, fragment: usize, base_version: u64) {
+        let spent = self.anchors.entry((member, fragment)).or_insert(0);
+        *spent = (*spent).max(base_version);
+    }
+
+    fn note_gathered(&mut self, member: Member, fragment: usize, base_version: u64) {
+        let taken = self.gathered.entry((member, fragment)).or_insert(0);
+        *taken = (*taken).max(base_version);
+    }
+
+    /// A restarted round drops its gathered pushes; their islands answer the
+    /// new attempt from the same anchor, so the anchor is free again.
+    fn release_anchor(&mut self, member: Member, push: &Push) {
+        let key = (member, push.fragment_id as usize);
+        if self.gathered.get(&key) == Some(&push.base_version) {
+            if push.base_version == 0 {
+                self.gathered.remove(&key);
+            } else {
+                self.gathered.insert(key, push.base_version - 1);
+            }
+        }
+    }
+
+    /// Route a push that `route_push` found no open round for.
+    /// `next_t` is the next step to launch; `current_version` the fragment's
+    /// committed version.
+    fn carry(
+        &mut self,
+        rounds: &mut [Round],
+        member: Member,
+        push: Push,
+        next_t: u64,
+        current_version: u64,
+    ) -> CarryOutcome {
+        let p = push.fragment_id as usize;
+        // A push for a round still open under another attempt, or for a
+        // round never launched, is not late.
+        if push.global_step >= next_t
+            || rounds.iter().any(|round| round.t == push.global_step && round.p == p)
+        {
+            return CarryOutcome::Rejected(PushDisposition::OutOfRound);
+        }
+        if push.base_version > current_version {
+            return CarryOutcome::Rejected(PushDisposition::FutureBase);
+        }
+        if self
+            .gathered
+            .get(&(member, p))
+            .is_some_and(|&taken| push.base_version <= taken)
+        {
+            return CarryOutcome::Rejected(PushDisposition::Duplicate);
+        }
+        if current_version - push.base_version > self.limit {
+            return CarryOutcome::Rejected(PushDisposition::StaleBase);
+        }
+        if let Some(round) = rounds
+            .iter_mut()
+            .find(|round| round.p == p && round.t > push.global_step)
+        {
+            return match attach_carry(round, member, push, self.limit) {
+                Ok(lag) => CarryOutcome::Attached { step: round.t, lag },
+                Err(disposition) => CarryOutcome::Rejected(disposition),
+            };
+        }
+        self.queued.entry(p).or_default().push((member, push));
+        CarryOutcome::Queued
+    }
+
+    /// Move the late pushes queued for `round`'s fragment into it.
+    fn attach_queued(&mut self, round: &mut Round) -> Vec<(Member, u64, Result<u64, PushDisposition>)> {
+        let Some(queued) = self.queued.remove(&round.p) else {
+            return Vec::new();
+        };
+        queued
+            .into_iter()
+            .map(|(member, push)| {
+                let missed = push.global_step;
+                (member, missed, attach_carry(round, member, push, self.limit))
+            })
+            .collect()
+    }
+}
+
+/// Log (and with dynamic membership, tape) the outcome of a late push.
+fn log_carry(
+    cfg: &Config,
+    dynamic: bool,
+    member: Member,
+    missed_step: u64,
+    into_step: u64,
+    outcome: Result<u64, PushDisposition>,
+) {
+    let island = member.learner_id;
+    match outcome {
+        Ok(lag) => {
+            info!(island, missed_step, into_step, lag, "late push carried into a later round");
+            if dynamic {
+                append_pool_record(
+                    cfg.event_tape.as_deref(),
+                    "delta_carried_over",
+                    cfg.syncer_epoch,
+                    &format!(
+                        "\"island_id\":{island},\"missed_step\":{missed_step},\"step\":{into_step},\"lag\":{lag},\"discount\":{:?}",
+                        cfg.membership.carry_discount(lag)
+                    ),
+                );
+            }
+        }
+        Err(disposition) => {
+            warn!(island, missed_step, reason = ?disposition, "late push not carried");
+            if dynamic {
+                let reason = match disposition {
+                    PushDisposition::StaleBase => "carry_lag_exceeded",
+                    PushDisposition::FutureBase => "future_base",
+                    PushDisposition::Duplicate => "anchor_reused",
+                    _ => "out_of_round",
+                };
+                append_pool_record(
+                    cfg.event_tape.as_deref(),
+                    "delta_rejected",
+                    cfg.syncer_epoch,
+                    &format!("\"island_id\":{island},\"reason\":\"{reason}\""),
+                );
+            }
+        }
+    }
+}
+
+/// Add a late delta to an open round; returns its base lag.
+fn attach_carry(
+    round: &mut Round,
+    member: Member,
+    push: Push,
+    limit: u64,
+) -> Result<u64, PushDisposition> {
+    // The exact fold reproduces a fixed responder set bit for bit.
+    if matches!(round.fold, Some(RoundFold::Exact(_))) {
+        return Err(PushDisposition::OutOfRound);
+    }
+    if push.base_version > round.base_version {
+        return Err(PushDisposition::FutureBase);
+    }
+    let lag = round.base_version - push.base_version;
+    if lag > limit {
+        return Err(PushDisposition::StaleBase);
+    }
+    round.carried.push((member, push));
+    Ok(lag)
+}
+
 /// The streaming reduction for a new round attempt, or `None` to keep every
 /// push's gradient until the buffered merge.
 ///
@@ -4181,6 +4481,9 @@ fn prepare_round_compute(
     }
     let mut ordered_pushes: Vec<_> = round.pushes.iter().collect();
     ordered_pushes.sort_unstable_by_key(|(member, _)| **member);
+    let responders = ordered_pushes.len();
+    // Carried late deltas follow this round's own pushes, in arrival order.
+    ordered_pushes.extend(round.carried.iter().map(|(member, push)| (member, push)));
     let mut outer_gradients = Vec::with_capacity(ordered_pushes.len());
     let mut weights = Vec::with_capacity(ordered_pushes.len());
     let mut tensor_scales = Vec::with_capacity(ordered_pushes.len());
@@ -4209,7 +4512,7 @@ fn prepare_round_compute(
     if !cfg.membership.is_static() {
         append_outer_step_record(cfg, round, &ordered_pushes, &weights);
     }
-    let Some(fold) = round.fold.take() else {
+    let Some(mut fold) = round.fold.take() else {
         let tensor_scales = cfg.expert_token_weights.then_some(tensor_scales.as_slice());
         return st.prepare_merge_scaled(
             round.p,
@@ -4222,7 +4525,8 @@ fn prepare_round_compute(
     // Every responder must have been folded exactly once.  The exact fold
     // reduced in learner-id order, which equals the buffered merge's Member
     // order when ids are unique; the streaming fold in arrival order.
-    let responders: Vec<u32> = ordered_pushes.iter().map(|(m, _)| m.learner_id).collect();
+    let responders: Vec<u32> =
+        ordered_pushes[..responders].iter().map(|(m, _)| m.learner_id).collect();
     let mut folded = fold.folded_learners().to_vec();
     folded.sort_unstable();
     if folded != responders {
@@ -4233,6 +4537,17 @@ fn prepare_round_compute(
             fold.folded_learners(),
             responders
         );
+    }
+    // Carried deltas stay buffered until now (only a streaming fold admits
+    // them, see `attach_carry`).
+    if !round.carried.is_empty() {
+        let RoundFold::Streaming(streaming) = &mut fold else {
+            bail!("round t={} fragment {}: carried deltas need a streaming fold", round.t, round.p);
+        };
+        for (index, (member, push)) in round.carried.iter_mut().enumerate() {
+            let weight = weights[responders.len() + index];
+            streaming.fold(member.learner_id, std::mem::take(&mut push.outer_gradient), weight)?;
+        }
     }
     let delta = fold
         .finish()
@@ -4253,6 +4568,7 @@ struct CommittedRound {
     quorum_ms: Option<u64>,
     grace_ms: Option<u64>,
     pushes: HashMap<Member, Push>,
+    carried: Vec<(Member, Push)>,
     gnorm: f64,
     compute_secs: f64,
     sync_start: Instant,
@@ -4305,6 +4621,7 @@ fn apply_round_commit(
         quorum_ms,
         grace_ms,
         pushes,
+        carried,
         ..
     } = round;
     let expected_t = st.schedule().step_after(st.global_step);
@@ -4323,7 +4640,9 @@ fn apply_round_commit(
     st.global_step = t;
     let mut ordered_pushes: Vec<_> = pushes.iter().collect();
     ordered_pushes.sort_unstable_by_key(|(member, _)| **member);
-    for (_, push) in ordered_pushes {
+    // A carried delta was never counted by the round it missed.
+    let merged = ordered_pushes.into_iter().chain(carried.iter().map(|(member, push)| (member, push)));
+    for (_, push) in merged {
         if let Some(fragments) = cfg.policy_sweep_fragments {
             st.record_fragment_merge(
                 push.learner_id,
@@ -4348,6 +4667,7 @@ fn apply_round_commit(
         quorum_ms,
         grace_ms,
         pushes,
+        carried,
         gnorm,
         compute_secs,
         sync_start,
@@ -4377,6 +4697,7 @@ async fn publish_round(
         quorum_ms,
         grace_ms,
         pushes,
+        carried,
         gnorm,
         compute_secs,
         sync_start,
@@ -4469,6 +4790,7 @@ async fn publish_round(
             sync_ms,
             checkpoint_ms,
             &pushes,
+            &carried,
             gnorm,
             ms,
             &st.layout_fingerprint,
@@ -5541,6 +5863,7 @@ fn append_tape(
     sync_ms: u64,
     checkpoint_ms: Option<u64>,
     pushes: &HashMap<Member, Push>,
+    carried: &[(Member, Push)],
     gnorm: f64,
     ms: u64,
     layout_fingerprint: &[u8; 32],
@@ -5575,7 +5898,37 @@ fn append_tape(
             crate::merge::learner_weight(push.c_tokens, u64::from(push.c_steps))
         }
     };
-    let weight_sum: f64 = pushes.values().map(event_weight).sum();
+    let weight_sum: f64 = pushes
+        .values()
+        .chain(carried.iter().map(|(_, push)| push))
+        .map(event_weight)
+        .sum();
+    // Late deltas of earlier rounds merged here (async rounds only; the field
+    // is absent when there are none).
+    let carried_field = if carried.is_empty() {
+        String::new()
+    } else {
+        let entries: Vec<String> = carried
+            .iter()
+            .map(|(member, p)| {
+                let weight = event_weight(p);
+                let contribution = if weight_sum > 0.0 { weight / weight_sum } else { 0.0 };
+                format!(
+                    "{{\"id\":{},\"generation\":{},\"missed_step\":{},\"base_version\":{},\"lag\":{},\"c_steps\":{},\"c_tokens\":{},\"weight\":{},\"contribution\":{}}}",
+                    p.learner_id,
+                    member.generation,
+                    p.global_step,
+                    p.base_version,
+                    launch_base_version.saturating_sub(p.base_version),
+                    p.c_steps,
+                    p.c_tokens,
+                    weight,
+                    contribution
+                )
+            })
+            .collect();
+        format!(",\"carried\":[{}]", entries.join(","))
+    };
     let mut responders: Vec<String> = pushes
         .iter()
         .map(|(member, p)| {
@@ -5619,7 +5972,7 @@ fn append_tape(
     let checkpoint_field = checkpoint_tape_field(checkpoint_ms);
     let sweep_fields = policy_sweep_event_fields(step, policy_sweep_fragments);
     let line = format!(
-        "{{\"protocol_version\":{PROTOCOL_VERSION},\"delta_semantics\":\"local_minus_raw_anchor\",\"sync/layout_hash\":\"{layout_hash}\",\"sync/base_version\":{launch_base_version},\"sync/responders\":{},\"sync/quorum\":{quorum},\"sync/rejected_stale_updates\":0,\"sync/merge_seconds\":{merge_seconds},\"sync/global_delta_norm\":{gnorm},\"step\":{step},\"fragment\":{fragment}{sweep_fields},\"launch_base_version\":{launch_base_version},\"attempt\":{attempt},\"gnorm\":{gnorm},\"ms\":{ms},\"quorum\":{quorum},\"expected\":{},\"expected_members\":{},\"responded\":{},\"responded_members\":{},\"missed_grace\":{},\"missed_members\":{},\"quorum_ms\":{quorum_ms},\"grace_ms\":{grace_ms},\"sync_ms\":{sync_ms}{checkpoint_field},\"time_unix\":{:?},\"responders\":[{}]}}\n",
+        "{{\"protocol_version\":{PROTOCOL_VERSION},\"delta_semantics\":\"local_minus_raw_anchor\",\"sync/layout_hash\":\"{layout_hash}\",\"sync/base_version\":{launch_base_version},\"sync/responders\":{},\"sync/quorum\":{quorum},\"sync/rejected_stale_updates\":0,\"sync/merge_seconds\":{merge_seconds},\"sync/global_delta_norm\":{gnorm},\"step\":{step},\"fragment\":{fragment}{sweep_fields},\"launch_base_version\":{launch_base_version},\"attempt\":{attempt},\"gnorm\":{gnorm},\"ms\":{ms},\"quorum\":{quorum},\"expected\":{},\"expected_members\":{},\"responded\":{},\"responded_members\":{},\"missed_grace\":{},\"missed_members\":{},\"quorum_ms\":{quorum_ms},\"grace_ms\":{grace_ms},\"sync_ms\":{sync_ms}{checkpoint_field}{carried_field},\"time_unix\":{:?},\"responders\":[{}]}}\n",
         responded.len(),
         json_ids(&expected_learners),
         json_members(expected_members),
@@ -6572,6 +6925,7 @@ mod tests {
             quorum_ms: Some(0),
             grace_ms: Some(0),
             fold: None,
+            carried: Vec::new(),
             pushes: HashMap::from([(
                 member,
                 Push {
@@ -6654,6 +7008,7 @@ mod tests {
             quorum_ms: Some(0),
             grace_ms: Some(0),
             fold: None,
+            carried: Vec::new(),
             pushes: HashMap::from([(
                 member,
                 Push {
@@ -6716,6 +7071,7 @@ mod tests {
             quorum_ms: Some(0),
             grace_ms: Some(0),
             fold: None,
+            carried: Vec::new(),
             pushes,
         }
     }
@@ -7786,6 +8142,174 @@ mod tests {
     }
 
     #[test]
+    fn late_carry_is_off_for_strict_unbounded_and_fixed_roster_runs() {
+        assert!(LateCarry::new(Some(0), false).is_none());
+        assert!(LateCarry::new(None, false).is_none());
+        assert!(LateCarry::new(Some(2), true).is_none());
+        assert!(LateCarry::new(Some(2), false).is_some());
+    }
+
+    #[test]
+    fn late_push_queues_then_joins_the_next_round_of_its_fragment() {
+        let mut carry = LateCarry::new(Some(2), false).unwrap();
+        let island = member(1, 10);
+        // Round t=7 of fragment 1 (base 5) closed without island 1; the
+        // fragment is now at version 7 and its next round is not open yet.
+        let mut late = test_push_for(1, 5);
+        late.global_step = 7;
+        let mut rounds: Vec<Round> = Vec::new();
+        assert_eq!(carry.carry(&mut rounds, island, late, 8, 7), CarryOutcome::Queued);
+        let mut next = test_round(vec![member(0, 10), island]);
+        next.t = 9;
+        next.base_version = 7;
+        let attached = carry.attach_queued(&mut next);
+        assert_eq!(attached.len(), 1);
+        assert_eq!(attached[0].2, Ok(2));
+        assert_eq!(next.carried.len(), 1);
+        assert!(next.pushes.is_empty(), "a carried delta takes no quorum slot");
+        // The island still answers the new round from its new anchor.
+        let mut fresh = test_push_for(1, 7);
+        fresh.global_step = 9;
+        assert_eq!(
+            route_push(&mut [next], island, fresh, Some(2), false),
+            PushDisposition::Accepted
+        );
+    }
+
+    #[test]
+    fn late_push_joins_an_already_open_later_round() {
+        let mut carry = LateCarry::new(Some(2), false).unwrap();
+        let mut open = test_round(vec![member(0, 10)]);
+        open.t = 9;
+        open.base_version = 7;
+        let mut late = test_push_for(1, 5);
+        late.global_step = 7;
+        let mut rounds = vec![open];
+        assert_eq!(
+            carry.carry(&mut rounds, member(1, 10), late, 10, 7),
+            CarryOutcome::Attached { step: 9, lag: 2 }
+        );
+        assert_eq!(rounds[0].carried.len(), 1);
+    }
+
+    #[test]
+    fn late_push_beyond_the_lag_bound_or_for_an_open_attempt_is_refused() {
+        let mut carry = LateCarry::new(Some(1), false).unwrap();
+        let mut late = test_push_for(1, 5);
+        late.global_step = 7;
+        assert_eq!(
+            carry.carry(&mut Vec::new(), member(1, 10), late, 8, 7),
+            CarryOutcome::Rejected(PushDisposition::StaleBase)
+        );
+        // Same step and fragment still open under attempt 2: not late.
+        let mut retried = test_round(vec![member(1, 10)]);
+        retried.attempt = 2;
+        let mut stale_attempt = test_push_for(1, 5);
+        stale_attempt.global_step = 7;
+        assert_eq!(
+            carry.carry(&mut vec![retried], member(1, 10), stale_attempt, 8, 5),
+            CarryOutcome::Rejected(PushDisposition::OutOfRound)
+        );
+        // A never-launched step is not late either.
+        let mut future = test_push_for(1, 5);
+        future.global_step = 9;
+        assert_eq!(
+            carry.carry(&mut Vec::new(), member(1, 10), future, 8, 7),
+            CarryOutcome::Rejected(PushDisposition::OutOfRound)
+        );
+        assert!(carry.queued.is_empty());
+    }
+
+    #[test]
+    fn a_carried_anchor_yields_one_delta() {
+        let mut carry = LateCarry::new(Some(2), false).unwrap();
+        let island = member(1, 10);
+        let push = test_push_for(1, 5);
+        assert!(!carry.reuses_anchor(island, &push));
+        carry.spend_anchor(island, 1, 5);
+        assert!(carry.reuses_anchor(island, &push));
+        assert!(carry.reuses_anchor(island, &test_push_for(1, 3)));
+        assert!(!carry.reuses_anchor(island, &test_push_for(1, 7)));
+        // Another connection or fragment is unaffected.
+        assert!(!carry.reuses_anchor(member(1, 11), &push));
+        // A late push from an anchor already merged by its own round is not
+        // carried; a restart clears the gathered push and frees the anchor.
+        let other = member(2, 10);
+        carry.note_gathered(other, 1, 5);
+        let mut late = test_push_for(2, 5);
+        late.global_step = 7;
+        assert_eq!(
+            carry.carry(&mut Vec::new(), other, late, 8, 7),
+            CarryOutcome::Rejected(PushDisposition::Duplicate)
+        );
+        carry.release_anchor(other, &test_push_for(2, 5));
+        let mut late = test_push_for(2, 5);
+        late.global_step = 7;
+        assert_eq!(carry.carry(&mut Vec::new(), other, late, 8, 7), CarryOutcome::Queued);
+    }
+
+    fn carried_merge(cfg: &Config) -> f32 {
+        let mut st = two_fragment_streaming_state();
+        st.versions[0] = 4;
+        let island = member(0, 1);
+        let late = member(1, 1);
+        let mut round = test_round(vec![island, late]);
+        round.p = 0;
+        round.t = 6;
+        round.base_version = 4;
+        round.fold = round_fold(cfg, &st, 0, &round.expected_members, 1);
+        let mut own = test_push_for(0, 4);
+        own.fragment_id = 0;
+        own.global_step = 6;
+        own.outer_gradient = vec![1.0];
+        assert_eq!(
+            route_push(std::slice::from_mut(&mut round), island, own, Some(2), false),
+            PushDisposition::Accepted
+        );
+        let mut carried = test_push_for(1, 2);
+        carried.fragment_id = 0;
+        carried.c_tokens = 40; // tokens^2/steps: 4x the own push's weight
+        carried.outer_gradient = vec![3.0];
+        assert_eq!(attach_carry(&mut round, late, carried, 2), Ok(2));
+        let merge = prepare_round_compute(cfg, &st, &mut round).unwrap().finish_inline().unwrap();
+        st.commit_merge(merge).unwrap();
+        st.params[0][0]
+    }
+
+    #[test]
+    fn carried_delta_merges_against_its_own_base_with_its_token_weight() {
+        // Outer lr 1, no momentum: the fragment moves by minus the weighted
+        // mean outer gradient, (1·1 + 4·3) / 5 = 2.6.
+        let mut cfg = round_test_config(1);
+        cfg.max_base_lag = Some(2);
+        cfg.learner_weight = LearnerWeight::Tokens2OverSteps;
+        assert!((carried_merge(&cfg) + 2.6).abs() < 1e-6);
+        let mut streaming = cfg.clone();
+        streaming.weighted_fold = WeightedFoldMode::Streaming;
+        assert!((carried_merge(&streaming) + 2.6).abs() < 1e-6);
+        // Carry discount 0.5 per version, lag 2: weight 4 · 0.25 = 1.
+        let mut discounted = cfg.clone();
+        discounted.membership.carry_gamma = 0.5;
+        assert!((carried_merge(&discounted) + 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn step_rates_time_a_step_from_its_first_fragment_push() {
+        // One local step pushes every fragment; the repeats must not move the
+        // step start, or the estimate shrinks to the gap between steps.
+        let mut rates = StepRates::default();
+        let t0 = Instant::now();
+        let island = member(1, 10);
+        for (step, start) in [(1u64, 0u64), (2, 10)] {
+            for fragment in 0..4 {
+                rates.note(island, step, t0 + Duration::from_secs(start + 2 * fragment));
+            }
+        }
+        let est = rates.max_step_secs_for(&[island]).unwrap();
+        assert!((est - 10.0).abs() < 1e-9, "step start to step start is 10 s, got {est}");
+    }
+
+    #[test]
     fn step_rates_smooth_with_ema() {
         let mut rates = StepRates::default();
         let t0 = Instant::now();
@@ -7832,6 +8356,7 @@ mod tests {
             quorum_ms: None,
             grace_ms: None,
             fold: None,
+            carried: Vec::new(),
             pushes: HashMap::new(),
         }
     }
@@ -8266,6 +8791,7 @@ mod tests {
             33,
             None,
             &pushes,
+            &[],
             0.5,
             44,
             &[7; 32],
@@ -8315,6 +8841,7 @@ mod tests {
             2,
             None,
             &pushes,
+            &[],
             0.5,
             3,
             &[7; 32],
@@ -8344,6 +8871,7 @@ mod tests {
             2,
             None,
             &pushes,
+            &[],
             0.5,
             3,
             &[7; 32],
@@ -8454,6 +8982,7 @@ mod tests {
             2,
             None,
             &pushes,
+            &[],
             0.5,
             3,
             &[7; 32],

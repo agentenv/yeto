@@ -184,7 +184,7 @@ def test_every_rust_tape_field_is_consumed_or_deliberately_skipped():
     consumed_top = {
         "step", "fragment", "attempt", "gnorm", "ms", "sync_ms", "quorum",
         "expected", "responded", "missed_grace", "launch_base_version",
-        "quorum_ms", "grace_ms", "responders", "checkpoint_ms",
+        "quorum_ms", "grace_ms", "responders", "checkpoint_ms", "carried",
     }
     # Constants and the member-identity mirrors of the id lists: nothing a
     # time series can be drawn from.
@@ -200,6 +200,7 @@ def test_every_rust_tape_field_is_consumed_or_deliberately_skipped():
         "id", "staleness", "contribution", "weight", "c_steps", "c_tokens",
         "accounted_c_steps", "accounted_c_tokens", "base_version",
         "recv_seconds",
+        "carried", "missed_step", "lag",  # the "carried" list, built before the record
     }
     # arrived_unix: wall clock of the push, for offline timing analysis.
     skipped_responder = {"generation", "arrived_unix"}
