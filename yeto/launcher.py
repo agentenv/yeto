@@ -94,7 +94,8 @@ from .launch.syncer import (  # noqa: F401
     RL_SYNCER_EVENT_TAPE, ROLE_SYNCERS, SYNCER_EVENT_TAPE, SYNCER_REMOTE_BUILD,
     _syncer_expected_contract, _syncer_quorum_timeout, build_syncer_binary, critic_syncer_address,
     elastic_debug_delay_env, elastic_debug_pause_env, island_hmac_secret, probe_listener_command,
-    rl_syncer_profile, syncer_command, syncer_ports, syncer_tape_sidecar, tcp_probe, ufw_setup,
+    rl_syncer_profile, syncer_command, syncer_disk_resources, syncer_ports, syncer_tape_sidecar, tcp_probe,
+    ufw_setup,
 )
 from .launch.loss import PICKLED_LOSS_PREFIX, pickled_loss_path, resolve_loss_function  # noqa: F401
 from .launch.credentials import (  # noqa: F401

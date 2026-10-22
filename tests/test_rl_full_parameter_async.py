@@ -369,11 +369,21 @@ def test_async_rounds_take_the_outer_merge_options():
                for island in plan["island_requests"])
 
 
+def test_async_checkpoint_interval_reaches_the_syncer(monkeypatch):
+    from yeto.launcher import _prepare_rl_args, syncer_command
+
+    monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "k3y")
+    args = _launcher_args("ports", ASYNC + ("--rl-sync-checkpoint-every", "4000"), gpu=TWO_ISLANDS)
+    _prepare_rl_args(args)
+    assert _flag(syncer_command(args, 2), "--checkpoint-every") == "4000"
+    assert "--async-checkpoint" not in syncer_command(args, 2).split()
+
+
 @pytest.mark.parametrize(
     ("extra", "message"),
     [
         (ASYNC + ("--rl-sync-fragment-pipeline", "3"), r"between 1 and min\(2, --fragments\)"),
-        (ASYNC + ("--rl-sync-checkpoint-every", "4"), "checkpoint-every 1"),
+        (ASYNC + ("--rl-sync-checkpoint-every", "0"), "checkpoint-every >= 1"),
         (ASYNC + ("--rl-sync-async-checkpoint",), "no --rl-sync-async-checkpoint"),
         (ASYNC + ("--rl-sync-overlap", "--rl-sync-fragment-pipeline", "2"), "no --rl-sync-overlap"),
         (FULL + ("--local-rl-rounds-per-sync", "2"), "local-rl-rounds-per-sync 1"),
@@ -679,3 +689,16 @@ def test_max_base_lag_bounds_a_stale_base(syncer_binary, tmp_path, max_base_lag)
         _drive(syncer_binary, tmp_path, extra, total_steps=2, push=push)
     tape = (tmp_path / "tape.jsonl").read_text()
     assert "rejected_stale_updates" in tape
+
+
+def test_async_streaming_weighted_fold_reaches_the_rl_syncer(monkeypatch):
+    from yeto.launcher import _prepare_rl_args, syncer_command
+
+    monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "k3y")
+    args = _launcher_args("ports", ASYNC + ("--rl-sync-quorum", "1", "--syncer-weighted-fold", "streaming"),
+                          gpu=TWO_ISLANDS)
+    _prepare_rl_args(args)
+    assert _flag(syncer_command(args, 2), "--weighted-fold") == "streaming"
+    default = _launcher_args("ports", ASYNC, gpu=TWO_ISLANDS)
+    _prepare_rl_args(default)
+    assert "--weighted-fold" not in syncer_command(default, 2).split()

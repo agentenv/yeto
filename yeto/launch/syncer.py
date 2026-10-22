@@ -179,6 +179,21 @@ def rl_dense_sweep(args) -> bool:
             and getattr(args, "rl_sync_preset", None) == FULL_PARAMETER_SYNC_PRESET)
 
 
+def syncer_disk_resources(args) -> dict:
+    """``sky.Resources`` keywords of the syncer/head VM set by ``--syncer-disk-gib``,
+    ``--syncer-disk-tier`` and ``--syncer-instance-type`` (unset keeps the default)."""
+    resources = {}
+    if getattr(args, "syncer_disk_gib", None) is not None:
+        if int(args.syncer_disk_gib) < 1:
+            raise ValueError("--syncer-disk-gib must be >= 1")
+        resources["disk_size"] = int(args.syncer_disk_gib)
+    if getattr(args, "syncer_disk_tier", None) is not None:
+        resources["disk_tier"] = args.syncer_disk_tier
+    if getattr(args, "syncer_instance_type", None):
+        resources["instance_type"] = args.syncer_instance_type
+    return resources
+
+
 def rl_full_parameter_async(args) -> bool:
     """S27 P2: the full-parameter preset runs asynchronous sharded rounds, not
     the strict policy sweep (``--rl-sync-full-parameter-rounds async``)."""
@@ -507,6 +522,7 @@ def _rl_role_syncer_command(args, num_learners: int, binary: str,
         f" --checkpoint-every {_syncer_checkpoint_every(args)}"
         f" {_resume_if_exists(syncer.checkpoint)}"
         f" --event-tape {syncer.event_tape}"
+        f"{_syncer_weighted_fold(args)}"
     )
 
 
@@ -845,6 +861,7 @@ def make_syncer_task(args, num_learners: int):
                 memory=f"{args.syncer_memory}+",
                 ports=syncer_ports(args),
                 use_spot=False,
+                **syncer_disk_resources(args),
             )
         )
         if syncer_ports(args) is None:
@@ -875,6 +892,7 @@ def make_syncer_task(args, num_learners: int):
             memory=f"{args.syncer_memory}+",
             ports=syncer_ports(args),
             use_spot=False,
+            **syncer_disk_resources(args),
         )
     )
     if syncer_ports(args) is None:

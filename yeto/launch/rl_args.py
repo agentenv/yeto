@@ -229,10 +229,13 @@ def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
                         else "--rl-sync-fragment-pipeline between 1 and --fragments")
     checkpoint_every = int(getattr(args, "rl_sync_checkpoint_every", 1))
     if async_rounds:
-        # The sweep-aligned checkpoint interval, the async checkpoint writer
-        # and the sync/train overlap are strict-sweep profiles of the syncer.
-        if checkpoint_every != 1:
-            problems.append("--rl-sync-checkpoint-every 1 (sweep only)")
+        # The async checkpoint writer and the sync/train overlap are
+        # strict-sweep profiles of the syncer. The checkpoint interval counts
+        # fragment rounds: 1 persists every round before its broadcast; N > 1
+        # writes after every N-th round and at the end (a crash resumes at the
+        # newest checkpoint; a model-sized f32 state per round is too slow).
+        if checkpoint_every < 1:
+            problems.append("--rl-sync-checkpoint-every >= 1")
         if getattr(args, "rl_sync_async_checkpoint", False):
             problems.append("no --rl-sync-async-checkpoint (sweep only)")
         if getattr(args, "rl_sync_overlap", False):

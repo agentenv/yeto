@@ -316,3 +316,20 @@ def test_verl_island_accepts_the_downlink_flag():
         "--samples-per-group", "1", "--rollout-max-response-len", "8", "--event-tape", "t",
         "--inner-lr", "1e-6", "--seq-len", "8", "--seed", "0", "--bcast-delta"])
     assert args[0].bcast_delta is True
+
+
+def test_syncer_disk_resources_only_carry_set_options():
+    from types import SimpleNamespace
+
+    import pytest
+
+    from yeto.launch.syncer import syncer_disk_resources
+
+    assert syncer_disk_resources(SimpleNamespace()) == {}
+    assert syncer_disk_resources(SimpleNamespace(syncer_disk_gib=None, syncer_disk_tier=None)) == {}
+    assert syncer_disk_resources(SimpleNamespace(syncer_disk_gib=600, syncer_disk_tier="ultra")) == {
+        "disk_size": 600, "disk_tier": "ultra"}
+    assert syncer_disk_resources(SimpleNamespace(syncer_instance_type="r6i.16xlarge")) == {
+        "instance_type": "r6i.16xlarge"}
+    with pytest.raises(ValueError, match="--syncer-disk-gib"):
+        syncer_disk_resources(SimpleNamespace(syncer_disk_gib=0))

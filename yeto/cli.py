@@ -628,6 +628,26 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     )
     infra.add_argument("--syncer-memory", type=int, default=32, help="syncer RAM (GB)")
     infra.add_argument(
+        "--syncer-disk-gib",
+        type=int,
+        default=None,
+        help="syncer/head VM disk size in GiB (default: the cloud default). A full-parameter "
+        "head writes checkpoints of params + momentum in f32 (8 bytes per parameter)",
+    )
+    infra.add_argument(
+        "--syncer-instance-type",
+        default=None,
+        help="syncer/head VM instance type (default: the cheapest that meets --syncer-memory; "
+        "on AWS that can be an arm64 type)",
+    )
+    infra.add_argument(
+        "--syncer-disk-tier",
+        choices=("low", "medium", "high", "ultra", "best"),
+        default=None,
+        help="syncer/head VM disk tier (default: the cloud default); higher tiers write "
+        "large checkpoints faster",
+    )
+    infra.add_argument(
         "--syncer-public-addr",
         default=None,
         help="HOST:PORT at which Modal islands can reach the syncer when its "
@@ -1372,6 +1392,7 @@ def _make_head_task(args, extra_mounts: dict | None = None):
             memory=f"{args.syncer_memory}+",
             ports=launcher.syncer_ports(args),
             use_spot=False,
+            **launcher.syncer_disk_resources(args),
         )
     )
     if launcher.syncer_ports(args) is None:
