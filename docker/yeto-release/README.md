@@ -47,7 +47,7 @@ the base image, the tag, the layer sha256 and (after a push) the image digest.
 
 | Date | Commit | Image | Layer |
 |---|---|---|---|
-| 2026-10-19 | eb516a2a | `ghcr.io/michaellchung/yeto-release@sha256:4681b4dce5ce8494101c5d4d116593572afd3fa46ca3087fa2685ff83e3d0220` | 25.96 MB, sha256 c9e2f69a… |
+| 2026-10-19 | eb516a2a | `ghcr.io/agentenv/yeto-release@sha256:4681b4dce5ce8494101c5d4d116593572afd3fa46ca3087fa2685ff83e3d0220` | 25.96 MB, sha256 c9e2f69a… |
 
 ## Not verified
 

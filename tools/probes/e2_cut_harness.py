@@ -54,7 +54,7 @@ def _current_miles_commit() -> str:
         raise RuntimeError("cannot find MILES_NEXT_COMMIT in yeto/rl/adapters/miles/pins.py")
     return m.group(1)
 
-IMAGE = f"ghcr.io/michaellchung/yeto-miles-ports@{IMAGE_DIGEST}"
+IMAGE = f"ghcr.io/agentenv/yeto-miles-ports@{IMAGE_DIGEST}"
 MILES_COMMIT = _current_miles_commit()
 IMAGE_TAG = f"{MILES_COMMIT[:7]}@{IMAGE_DIGEST[7:15]}"  # label only; the digest is the pin
 MODELS = {

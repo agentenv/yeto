@@ -389,11 +389,11 @@ claimed to be optimal for every model.
   either. A Modal island needs a syncer address reachable from Modal (head
   public IP, or `--syncer-public-addr` under `--controller local`).
 - **Images and pins** (`yeto/rl/__init__.py`). `--rl-engine ports` (default)
-  uses `MILES_NEXT_IMAGE` = `ghcr.io/michaellchung/yeto-miles-ports@sha256:37ac689e...`
+  uses `MILES_NEXT_IMAGE` = `ghcr.io/agentenv/yeto-miles-ports@sha256:37ac689e...`
   (tag `c35702e-4e4148f`, linux/amd64, **public** since 2026-10-07: pulled
   anonymously; a private `--rl-image` takes its login from `SKYPILOT_DOCKER_*`
   or `--rl-image-private`, see `launcher.registry_login_for`), which extends the public `radixark/miles` image with the
-  pinned forks: Miles `MILES_NEXT_COMMIT` = `c35702ee` (michaellchung/miles
+  pinned forks: Miles `MILES_NEXT_COMMIT` = `c35702ee` (agentenv/miles
   `yeto/ports` line) and SGLang `SGLANG_NEXT_COMMIT` = `4e4148f1`;
   `/opt/yeto/image-manifest.json` records every SHA. `--rl-image` overrides the
   digest. On Nebius a baked VM image holding these layers is used when the
@@ -782,7 +782,7 @@ launcher no longer forwards it.
 
 | engine source | who owns the island loop |
 | --- | --- |
-| `michaellchung/miles` at `MILES_NEXT_COMMIT` and `michaellchung/sglang` at `SGLANG_NEXT_COMMIT`, baked into `MILES_NEXT_IMAGE` (no bundle) | Yeto's `IslandDriver`; upstream Miles is used as a library through role ports |
+| `agentenv/miles` at `MILES_NEXT_COMMIT` and `agentenv/sglang` at `SGLANG_NEXT_COMMIT`, baked into `MILES_NEXT_IMAGE` (no bundle) | Yeto's `IslandDriver`; upstream Miles is used as a library through role ports |
 
 The learner verifies its source (repository, commit, clean detached checkout,
 import path) before any model is loaded
@@ -1321,7 +1321,7 @@ enters the algorithm hash. Each round emits `rl_advantage_transform`
 ### Policy-loss variants (`rl-algo-loss-variants`)
 
 > **Status: expressible, not opened.** Route B (user decision 2026-09-30):
-> the computation is a variant branch in the Miles fork (`michaellchung/miles`
+> the computation is a variant branch in the Miles fork (`agentenv/miles`
 > `yeto/ports`, `--policy-loss-variant`); yeto only describes, translates and
 > validates. The variants arrived in fork commit 5c1b49eb; the current
 > `MILES_NEXT_COMMIT` (ddce2099) descends from it and is listed in
@@ -1444,7 +1444,7 @@ and the image digest (this makes the single-island
 All four algorithms are the Miles shared actor/critic PPO (`--advantage-estimator
 ppo`; Miles derives `use_critic`) and differ only in the GAE variant, the value
 loss and a few loss terms. Yeto declares, validates, translates and orchestrates;
-the math lives in Miles or in the fork (`michaellchung/miles`).
+the math lives in Miles or in the fork (`agentenv/miles`).
 
 **Fork pin and overlay.** The GAE variants, the positive-example LM loss, the SAO
 math, the tied-embedding critic value head and `--critic-updates-per-step` exist
@@ -1716,7 +1716,7 @@ which loads `fn_path` and calls it with the actor on every rank. The
 trainable-state export/apply and grad-norm plugins live in Yeto. This and the
 other compatibility changes (elastic M1-M6 verbs, loss variants, Qwen3.8-Next
 LoRA layout, engine-failure propagation) are carried as commits on
-`michaellchung/miles` `yeto/ports`; they are **not** proposed upstream
+`agentenv/miles` `yeto/ports`; they are **not** proposed upstream
 (radixark/miles). `MILES_NEXT_COMMIT` must name a commit carrying them,
 otherwise `--rl-engine ports` refuses to start (before any Miles component or
 model is created) with an error naming the pin.

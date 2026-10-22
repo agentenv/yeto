@@ -1,6 +1,6 @@
 """Trainable-state export/apply executed *inside* every Megatron rank (task 3.4, D4).
 
-Loaded by upstream's generic entry point (``michaellchung/miles`` ``yeto/ports``):
+Loaded by upstream's generic entry point (``agentenv/miles`` ``yeto/ports``):
 ``TrainGroup.run_plugin(fn_path, kwargs)`` -> ``train_actor.run_plugin`` ->
 ``load_function(fn_path)(actor, **kwargs)`` on every rank of every cell (the
 ports path guarantees a single cell). Every function here is collective: all

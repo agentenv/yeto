@@ -7,7 +7,7 @@ dependencies from the fork's own ``uv.lock`` (``uv sync --frozen
 (``patch_verl``).  ``--rl-image verl-build:<commit>`` selects it; Modal caches
 the layers, so only the first run builds. yeto's object-store client (boto3,
 ``STORE_CLIENT_REQUIREMENTS``) is added to the same venv.  yeto's own image default
-(ghcr.io/michaellchung/yeto-miles-ports) is unchanged.
+(ghcr.io/agentenv/yeto-miles-ports) is unchanged.
 """
 
 from __future__ import annotations

@@ -1,7 +1,7 @@
 # Vendored copy of Miles examples/infra_features/train_infer_mismatch_helper/mis.py
 # (change rl-algo-mismatch-correction, design D6 / task 5.2).
 #
-#   source repository : https://github.com/radixark/miles (via michaellchung/miles yeto/ports)
+#   source repository : https://github.com/radixark/miles (via agentenv/miles yeto/ports)
 #   source commit     : 9e4260de047a704208535c0e90c531929879ab40 (upstream); identical at yeto/ports 0394715083c91182b5eb0c526eeee4196ac694b9
 #   original path     : examples/infra_features/train_infer_mismatch_helper/mis.py
 #   license           : Apache License 2.0 (Miles repository LICENSE)

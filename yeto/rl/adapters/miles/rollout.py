@@ -10,7 +10,7 @@ check (spec: mismatching groups are rejected before training).
 
 E1 membership verbs (rl-infra-spec 3.4, :class:`~..ports.ElasticRolloutPool`)
 map yeto member ids (``engine:<cell>``) onto the fork's explicit membership
-API (fork M2/M3, michaellchung/miles ``yeto/ports`` 0af62f4d):
+API (fork M2/M3, agentenv/miles ``yeto/ports`` 0af62f4d):
 ``InferenceController.start_cells/stop_cells(expected_epoch)``,
 ``wait_cells_tracked``, ``drain_cells``/``uncordon_cells``,
 ``get_membership_status`` and ``restore_membership_state``. Only cells declared

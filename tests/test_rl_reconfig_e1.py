@@ -1,6 +1,6 @@
 """rl-infra-spec 3.1-3.7 (E1) CPU tests: journal, ledger, controller, driver safe point.
 
-The fakes below model the fork's membership contract (michaellchung/miles
+The fakes below model the fork's membership contract (agentenv/miles
 yeto/ports 0af62f4d: epoch CAS, idempotent repeat right after commit,
 ``incomplete`` after a half-failed stop, cordon/in-flight drain, cordoned
 admission). They are CPU stand-ins for protocol tests only; the GPU

@@ -35,7 +35,7 @@ def test_legacy_pins_and_bundle_are_gone():
 
 def _assert_ports_checkout(script: str, path: str) -> None:
     lowered = script.lower()
-    assert "bundle" not in lowered and "agentenv" not in lowered
+    assert "bundle" not in lowered and "michaellchung" not in lowered
     for repository, commit, name in (
         (rl.MILES_NEXT_REPOSITORY, rl.MILES_NEXT_COMMIT, "miles"),
         (rl.SGLANG_NEXT_REPOSITORY, rl.SGLANG_NEXT_COMMIT, "sglang"),
@@ -114,10 +114,47 @@ def test_verify_miles_revision_ports_rejects_commit_mismatch(tmp_path, monkeypat
         verify(tmp_path, expected=rl.MILES_NEXT_PINS)
 
 
+def test_miles_fork_lives_on_agentenv():
+    from yeto.rl.adapters.miles import pins
+
+    assert rl.MILES_NEXT_REPOSITORY == "https://github.com/agentenv/miles"
+    assert rl.SGLANG_NEXT_REPOSITORY == "https://github.com/agentenv/sglang"
+    assert rl.MILES_NEXT_IMAGE.startswith("docker:ghcr.io/agentenv/yeto-miles-ports@sha256:")
+    assert rl.MILES_NEXT_PINS.former_repositories == pins.MILES_NEXT_FORMER_REPOSITORIES
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "https://github.com/agentenv/miles",
+        "https://github.com/agentenv/miles.git",
+        # Images built before the move keep the former origin in /root/miles.
+        "https://github.com/michaellchung/miles",
+        "https://github.com/michaellchung/miles.git/",
+    ],
+)
+def test_verify_miles_revision_accepts_current_and_former_origin(
+    tmp_path, monkeypatch, origin
+):
+    verify, _ = _fake_git(monkeypatch, tmp_path, commit=rl.MILES_NEXT_COMMIT, origin=origin)
+    assert verify(tmp_path, expected=rl.MILES_NEXT_PINS) == tmp_path.resolve()
+
+
+def test_island_commit_override_keeps_former_origins():
+    from types import SimpleNamespace
+
+    from yeto.rl.adapters.miles.island_entry import miles_revision_pins
+
+    pins = miles_revision_pins(SimpleNamespace(miles_commit="a" * 40))
+    assert pins.repository == rl.MILES_NEXT_REPOSITORY
+    assert pins.accepts_origin("https://github.com/michaellchung/miles.git")
+    assert not pins.accepts_origin("https://github.com/radixark/miles")
+
+
 def test_verify_miles_revision_ports_rejects_origin_mismatch(tmp_path, monkeypatch):
     verify, _ = _fake_git(
         monkeypatch, tmp_path, commit=rl.MILES_NEXT_COMMIT,
-        origin="https://github.com/agentenv/miles"
+        origin="https://github.com/radixark/miles"
     )
     with pytest.raises(RuntimeError, match="origin mismatch"):
         verify(tmp_path, expected=rl.MILES_NEXT_PINS)

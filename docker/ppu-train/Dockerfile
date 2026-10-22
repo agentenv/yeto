@@ -82,7 +82,7 @@ RUN git init -q /opt/miles && cd /opt/miles \
 # verl fork at the commit yeto pins (yeto/rl/adapters/verl/pins.py). Its
 # runtime deps are in requirements.txt; vllm is not installed (the PPU
 # sampler is SGLang).
-ARG VERL_REPOSITORY=https://github.com/michaellchung/verl
+ARG VERL_REPOSITORY=https://github.com/agentenv/verl
 ARG VERL_COMMIT=acad9875a8bdfc81afbcb0a50d146b2630f44093
 RUN git init -q /opt/verl && cd /opt/verl \
  && git remote add origin "${VERL_REPOSITORY}" \

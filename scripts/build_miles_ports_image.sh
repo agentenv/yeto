@@ -12,7 +12,7 @@
 #                            (default: shallow fetch into $OUT/megatron-lm)
 #   MILES_COMMIT / SGLANG_COMMIT  override the pinned fork commits
 #   CRANE                    crane binary (go-containerregistry >= 0.20)
-#   DEST_REPO                ghcr.io/michaellchung/yeto-miles-ports (private)
+#   DEST_REPO                ghcr.io/agentenv/yeto-miles-ports (private)
 # Registry auth: crane reads ~/.docker/config.json; nothing is printed.
 # Writes: $OUT/{layer.tar,image-manifest.json,build-record.json}
 set -euo pipefail
@@ -21,7 +21,7 @@ PUSH=0; [ "${1:-}" = "--push" ] && PUSH=1
 CRANE=${CRANE:-crane}
 MILES_SRC=${MILES_SRC:-$HOME/work/miles-next}
 SGLANG_SRC=${SGLANG_SRC:-$HOME/work/sglang-next}
-DEST_REPO=${DEST_REPO:-ghcr.io/michaellchung/yeto-miles-ports}
+DEST_REPO=${DEST_REPO:-ghcr.io/agentenv/yeto-miles-ports}
 OUT=${OUT:-$(mktemp -d /tmp/img-build-XXXXXX)}
 
 # radixark/miles multi-arch index (upstream docker/Dockerfile at radixark

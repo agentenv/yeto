@@ -1,6 +1,6 @@
 """``PolicyState`` port over the actor ``run_plugin`` entry point (task 3.4, D4).
 
-Assumes the ``michaellchung/miles`` ``yeto/ports`` patch (task 1.4)::
+Assumes the ``agentenv/miles`` ``yeto/ports`` patch (task 1.4)::
 
     TrainGroup.run_plugin(fn_path: str, kwargs: dict | None = None) -> list[Any]
 
@@ -52,7 +52,7 @@ def require_run_plugin(controller_cls: Any = None) -> None:
         raise PolicyStateError(
             "the pinned Miles (MILES_NEXT_COMMIT "
             f"{MILES_NEXT_COMMIT[:12]}) has no TrainerController.run_plugin; "
-            "the ports engine needs the michaellchung/miles yeto/ports patch "
+            "the ports engine needs the agentenv/miles yeto/ports patch "
             "(rl-engine-ports task 1.4)."
         )
 

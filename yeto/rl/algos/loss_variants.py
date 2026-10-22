@@ -1,7 +1,7 @@
 """Token-level policy-loss variants (change ``rl-algo-loss-variants``, route B).
 
 Registration module listed in :data:`yeto.rl.algos.EXTENSION_MODULES`. The
-computation lives in the Miles fork (``michaellchung/miles`` ``yeto/ports``,
+computation lives in the Miles fork (``agentenv/miles`` ``yeto/ports``,
 ``--policy-loss-variant``, design D1 route B); yeto only describes, translates
 and validates. Through the P0 registry (never by editing the shared files) it
 adds:
@@ -56,7 +56,7 @@ VARIANT_PARAMS: dict[str, tuple[tuple[str, float], ...]] = {
     "gmpo": (("gmpo_log_clip_low", 0.4), ("gmpo_log_clip_high", 0.4)),
 }
 
-# Fork CLI flags (FORK-2b, michaellchung/miles yeto-loss-variants); names
+# Fork CLI flags (FORK-2b, agentenv/miles yeto-loss-variants); names
 # checked against the fork diff before the pin moves.
 VARIANT_FLAG = "--policy-loss-variant"
 PARAM_FLAGS = {

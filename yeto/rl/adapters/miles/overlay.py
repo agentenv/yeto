@@ -3,7 +3,7 @@
 The ports image ships Miles c35702e (``yeto.rl.MILES_NEXT_COMMIT``) installed
 editable at ``/root/miles`` (= ``~/miles``) and records that commit in
 ``/opt/yeto/image-manifest.json``.  The critic-family flags live on the fork
-branch ``yeto-critic-c357`` (michaellchung/miles, local, NOT pushed): the
+branch ``yeto-critic-c357`` (agentenv/miles, local, NOT pushed): the
 critic-family commits rebased onto c35702e.  Instead of a push + new image,
 the island setup applies ``c35702e..CRITIC_C357_RESULT_COMMIT`` as a
 ``git apply`` patch shipped inside the frozen code snapshot (the workdir).

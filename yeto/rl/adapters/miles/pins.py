@@ -12,12 +12,24 @@ class MilesRevisionPins(NamedTuple):
 
     repository: str
     commit: str
+    # Origins that also identify ``repository`` (the fork's earlier homes).
+    # Images already built keep the origin they were built with.
+    former_repositories: tuple[str, ...] = ()
+
+    def accepts_origin(self, origin: str) -> bool:
+        """True when ``origin`` (``.git`` suffix and trailing ``/`` ignored) names this fork."""
+
+        normalized = origin.rstrip("/").removesuffix(".git").rstrip("/")
+        return normalized in (self.repository, *self.former_repositories)
 
 MILES_PEFT_VERSION = "0.20.0"
 
 # Ports engine (the only Miles engine): upstream Miles plus yeto compatibility
-# commits on michaellchung/miles ``yeto/ports``; fetched directly, no bundle.
-MILES_NEXT_REPOSITORY = "https://github.com/michaellchung/miles"
+# commits on agentenv/miles ``yeto/ports``; fetched directly, no bundle.
+MILES_NEXT_REPOSITORY = "https://github.com/agentenv/miles"
+# The fork moved from michaellchung to agentenv on 2026-10-22 (same SHAs);
+# images built before the move carry the old origin in /root/miles.
+MILES_NEXT_FORMER_REPOSITORIES = ("https://github.com/michaellchung/miles",)
 MILES_NEXT_UPSTREAM_COMMIT = "9e4260de047a704208535c0e90c531929879ab40"
 # yeto/ports (= yeto-elastic-m1-m6 after four review rounds): run_plugin,
 # --worker-dynamic-port-start, the elastic M1-M6 changes and the LoRA bridge
@@ -56,7 +68,7 @@ MILES_NEXT_UPSTREAM_COMMIT = "9e4260de047a704208535c0e90c531929879ab40"
 MILES_NEXT_COMMIT = "44d41efd0a0428cb12b4ee34422de6f5e1ccb9d9"
 # sgl-project/sglang ``sglang-miles`` head when radixark/miles@9e4260d was
 # committed (upstream's Dockerfile follows that branch unpinned).
-SGLANG_NEXT_REPOSITORY = "https://github.com/michaellchung/sglang"
+SGLANG_NEXT_REPOSITORY = "https://github.com/agentenv/sglang"
 SGLANG_NEXT_UPSTREAM_COMMIT = "571212b636baca45e10fa3b4da11a289123f3235"
 # yeto/lora-checksum (a1240c530 = 9f29303 + WeightChecker checksum covers LoRA adapter A/B);
 # yeto/ports 9f29303: the ported agentenv/sglang patches (see sglang-patch-port.md).
@@ -64,7 +76,7 @@ SGLANG_NEXT_UPSTREAM_COMMIT = "571212b636baca45e10fa3b4da11a289123f3235"
 # n17-qwen3coder-single-call (2fa880182 = 4e4148f1b + qwen3_coder honors
 # parallel_tool_calls=false under tool_choice=auto: at most one tool call; S17 N17).
 SGLANG_NEXT_COMMIT = "2fa880182eefdb31e64d8ea70317be27f9f32121"
-# Fork lineage on michaellchung/miles yeto/ports, oldest first; the single
+# Fork lineage on agentenv/miles yeto/ports, oldest first; the single
 # source for every "this fork commit carries X" set (rl-code-quality-cleanup
 # 0.7).  Each entry is the previous one plus the change named here; the newest
 # is MILES_NEXT_COMMIT.  Append a commit here and the loss-variant set
@@ -131,7 +143,9 @@ TMS_PRELOAD_PATCH_COMMIT = "d7a3a51bce723a80736dabf233017b927de03df8"
 TMS_PRELOAD_BASE_BINARY_SHA256 = (
     "c26551247616cabb0bb79dbd26abb61a688a4bb47c9b6a6f9873cfc98093640d"
 )
-MILES_NEXT_PINS = MilesRevisionPins(MILES_NEXT_REPOSITORY, MILES_NEXT_COMMIT)
+MILES_NEXT_PINS = MilesRevisionPins(
+    MILES_NEXT_REPOSITORY, MILES_NEXT_COMMIT, MILES_NEXT_FORMER_REPOSITORIES
+)
 # radixark/miles:dev multi-arch index (upstream docker/Dockerfile at
 # radixark 9e4260d, sglang v0.5.20 base): the base MILES_NEXT_IMAGE extends
 # (its linux/amd64 manifest).  Public.
@@ -143,7 +157,8 @@ MILES_NEXT_BASE_IMAGE = (
 # SGLANG_NEXT_COMMIT at /sgl-workspace/sglang, both the base's editable
 # installs (pure-Python overlay, scripts/build_miles_ports_image.sh;
 # docker/miles-ports/Dockerfile).  /opt/yeto/image-manifest.json records
-# every SHA.  PUBLIC on ghcr.io/michaellchung since 2026-10-07 (anonymous
+# every SHA.  Copied digest-for-digest to ghcr.io/agentenv on 2026-10-22
+# (earlier home ghcr.io/michaellchung, public since 2026-10-07) (anonymous
 # pull); a private image needs SKYPILOT_DOCKER_{USERNAME,PASSWORD,SERVER} or
 # --rl-image-private (yeto.launcher.registry_login_for; read:packages token).
 # Tag 44d41ef-2fa8801; (S24 L2.2: Miles s24-miles-import2 and the lazy-modelopt
@@ -154,7 +169,7 @@ MILES_NEXT_BASE_IMAGE = (
 # @sha256:bcd5ffd3...; build record openspec/changes/rl-infra-spec/evidence/
 # ports-image/2026-10-14-17aeb5c-2fa8801/). Earlier: tag 386ae3b-2fa8801; (S23 P0-1.11 GPU run: Miles s23-sao-streaming-roles; previous 64b591a-2fa8801 @sha256:fa2413be...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-14-386ae3b-2fa8801/). Earlier: (S19 #1: critic family + algo-supplement metrics baked in; previous ddce209-2fa8801 @sha256:9c252c38...) (S18 ARU-3: Miles s18-agentic-suspend = 2f7871fb2 + --agentic-suspend-between-turns; previous 2f7871f-2fa8801 @sha256:62b4f164..., efbbc63-2fa8801 @sha256:a7990076..., 8bc5223-4e4148f @sha256:4aeafd77...) ghcr.io/michaellchung (public package); linux/amd64 only.
 MILES_NEXT_IMAGE = (
-    "docker:ghcr.io/michaellchung/yeto-miles-ports@sha256:"
+    "docker:ghcr.io/agentenv/yeto-miles-ports@sha256:"
     "5b9dc2a9e6e315d73dabfbc6faae428b59cc01aabec6189645a5c8c80d6e3721"
 )
 MILES_NEXT_IMAGE_MANIFEST = "/opt/yeto/image-manifest.json"
@@ -179,8 +194,8 @@ MILES_NEXT_IMAGE_SGLANG_ROOT = "/sgl-workspace/sglang"
 def default_rl_image() -> str:
     """The digest-pinned ``--rl-image`` default.
 
-    MILES_NEXT_IMAGE: upstream Miles' image with the pinned michaellchung
-    forks preinstalled, public on ghcr.io/michaellchung (a registry login is
+    MILES_NEXT_IMAGE: upstream Miles' image with the pinned agentenv
+    forks preinstalled, on ghcr.io/agentenv (a registry login is
     injected only via SKYPILOT_DOCKER_* or --rl-image-private; see
     yeto.launcher.registry_login_for).
     """

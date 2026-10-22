@@ -44,7 +44,7 @@ def login(monkeypatch):
 def test_ports_image_is_the_private_digest_pinned_fork_image():
     assert rl.default_rl_image() == rl.MILES_NEXT_IMAGE
     assert re.fullmatch(
-        r"docker:ghcr\.io/(michaellchung|agentenv)/yeto-miles-ports@sha256:[0-9a-f]{64}",
+        r"docker:ghcr\.io/agentenv/yeto-miles-ports@sha256:[0-9a-f]{64}",
         rl.MILES_NEXT_IMAGE,
     )
     assert rl.MILES_NEXT_BASE_IMAGE.startswith("docker:docker.io/radixark/miles@sha256:")
