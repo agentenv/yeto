@@ -168,8 +168,9 @@ def resolve_syncer_for_modal(syncer_addr: str, public_override: str | None) -> s
     reachable from Modal and no `--syncer-public-addr` was given."""
     if public_override:
         return public_override
-    host = syncer_addr.rsplit(":", 1)[0].strip("[]")
-    if is_public_address(host):
+    # a sharded head (--syncer-shards N) is a comma-separated list, one address per shard
+    hosts = [addr.rsplit(":", 1)[0].strip("[]") for addr in syncer_addr.split(",")]
+    if all(is_public_address(host) for host in hosts):
         return syncer_addr
     raise ValueError(
         f"syncer at {syncer_addr} is not reachable from Modal (private or unresolvable "

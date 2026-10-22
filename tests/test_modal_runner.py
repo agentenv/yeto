@@ -635,3 +635,13 @@ def test_container_change_exit_code_is_registered_and_unique():
     codes = [launcher.ISLAND_FAILED_EXIT, launcher.TEARDOWN_UNVERIFIED_EXIT,
              launcher.RUN_STALLED_EXIT, launcher.NO_SYNC_INCOMPLETE_EXIT]
     assert launcher.CONTAINER_CHANGED_EXIT == 7 and 7 not in codes
+
+
+def test_resolve_syncer_for_modal_sharded_head_list():
+    from yeto.modal_runner import resolve_syncer_for_modal
+
+    assert resolve_syncer_for_modal("3.231.26.103:29400,3.231.26.103:29401", None) == \
+        "3.231.26.103:29400,3.231.26.103:29401"
+    import pytest
+    with pytest.raises(ValueError):
+        resolve_syncer_for_modal("3.231.26.103:29400,10.0.0.1:29401", None)
