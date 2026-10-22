@@ -831,3 +831,10 @@ def test_role_stream_reports_initial_cut_upload_progress_on_timeout(monkeypatch,
     assert lines[-1].endswith(
         "sent 3.0 MiB, 7 chunk(s) queued, 1 redial(s), connected=True"
     )
+
+
+def test_role_stream_matrix_merge_is_avg_or_rda():
+    assert _role_stream_config("actor", 30100).matrix_merge == "avg"
+    assert replace(_role_stream_config("actor", 30100), matrix_merge="rda").matrix_merge == "rda"
+    with pytest.raises(ValueError, match="matrix merge must be avg or rda"):
+        replace(_role_stream_config("actor", 30100), matrix_merge="iso")

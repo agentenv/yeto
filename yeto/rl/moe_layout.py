@@ -1,0 +1,166 @@
+"""Mixture-of-experts parameters at the full-parameter sync boundary.
+
+Each Megatron rank exports its own FP32 master shard (Miles
+``full_parameter_state``). With expert parallelism (EP) a rank holds only its
+local experts, and Miles names them by their global expert index
+(``decoder.layers.L.mlp.experts.linear_fc1.weightE``). Each rank therefore
+pushes its own experts and owner-affine fragments never gather experts
+across ranks: no extra collective, no extra device memory, and the bytes on
+the wire are exactly the local masters.
+
+This module checks that an island's manifests partition the experts exactly
+once. Expert tensor parallelism is pinned to 1, so with data parallelism 1
+the experts are replicated on ``TP x CP / EP`` ranks when EP is smaller than
+``TP x CP``. Replicated experts would be pushed once per replica and could
+drift apart under block-quantized pushes, so they are refused.
+"""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
+
+# Megatron global names (Miles ``named_params_and_buffers`` with
+# ``convert_to_global_name=True``, TE grouped GEMM experts):
+# ``decoder.layers.L.mlp.experts.linear_fc1.weightE`` with E the global expert
+# index. ``global_expert_name`` writes this form; ``_EXPERT`` reads it.
+_EXPERT = re.compile(
+    r"(?:^|\.)decoder\.layers\.(\d+)\.mlp\.experts\.(linear_fc1|linear_fc2)\.weight(\d+)\Z"
+)
+# Megatron SequentialMLP names its experts by local index; the global index is
+# ep_rank * num_local_experts + local index (megatron/core/transformer/moe/moe_layer.py,
+# ``local_expert_indices_offset``).
+_SEQUENTIAL_EXPERT = re.compile(r"^(.*\.mlp\.experts)\.local_experts\.(\d+)\.(linear_fc[12])\.weight\Z")
+_ROUTER = re.compile(r"(?:^|\.)decoder\.layers\.(\d+)\.mlp\.router\.weight\Z")
+_SHARD_SIZES = re.compile(r"([a-z]+)\d+-of-(\d+)")
+
+
+@dataclass(frozen=True)
+class ExpertPartition:
+    """How one island's experts are spread over its topology owners."""
+
+    num_experts: int
+    moe_layers: tuple[int, ...]
+    # Owner (role, shard ID) -> number of (layer, expert) pairs it holds.
+    experts_per_owner: tuple[tuple[tuple[str, str], int], ...]
+
+
+def global_expert_name(experts_prefix: str, projection: str, expert: int) -> str:
+    """The grouped-GEMM global name of one expert projection (see ``_EXPERT``)."""
+    return f"{experts_prefix}.{projection}.weight{expert}"
+
+
+def sequential_expert_global_name(name: str, *, ep_rank: int, num_local_experts: int) -> str:
+    """Rewrite a SequentialMLP local expert name to its global grouped-GEMM name,
+    the form the trainer's weight sync and the HF converters use. Other names
+    are returned unchanged."""
+    match = _SEQUENTIAL_EXPERT.match(name)
+    if match is None:
+        return name
+    prefix, local, projection = match.groups()
+    return global_expert_name(prefix, projection, ep_rank * num_local_experts + int(local))
+
+
+def is_expert_parameter(name: str) -> bool:
+    return _EXPERT.search(name) is not None
+
+
+def parallel_sizes(shard_id: str) -> dict[str, int]:
+    """Parallel sizes encoded in a Miles shard ID, e.g. ``tp0-of-2.ep1-of-2``."""
+
+    return {axis: int(size) for axis, size in _SHARD_SIZES.findall(shard_id)}
+
+
+def check_expert_partition(specs: Iterable) -> ExpertPartition | None:
+    """Check that every expert of every MoE layer has exactly one owner.
+
+    ``specs`` are objects with ``role``, ``shard_id``, ``name`` and ``shape``
+    (yeto ``ParameterSpec`` or Miles ``FullParameterShardSpec``). Returns
+    ``None`` for a dense model. Raises ``ValueError`` when an expert is
+    missing, is held by more than one owner, has its two projections on
+    different owners, or disagrees with its router or its peers in shape.
+    """
+
+    owners: dict[tuple[str, int, str, int], tuple[str, str]] = {}
+    shapes: dict[str, set[tuple[int, ...]]] = {"linear_fc1": set(), "linear_fc2": set()}
+    routers: dict[tuple[str, int], tuple[int, ...]] = {}
+    for spec in specs:
+        owner = (spec.role, spec.shard_id)
+        router = _ROUTER.search(spec.name)
+        if router is not None:
+            routers[(spec.role, int(router.group(1)))] = tuple(spec.shape)
+            continue
+        match = _EXPERT.search(spec.name)
+        if match is None:
+            continue
+        layer, projection, expert = int(match.group(1)), match.group(2), int(match.group(3))
+        key = (spec.role, layer, projection, expert)
+        if key in owners:
+            sizes = parallel_sizes(spec.shard_id)
+            raise ValueError(
+                f"expert {expert} of layer {layer} ({projection}) is held by both "
+                f"{owners[key][1]!r} and {spec.shard_id!r}: full-parameter sync needs "
+                "each expert on exactly one rank, i.e. expert-model-parallel size = "
+                "tensor-parallel x context-parallel size "
+                f"(this island: {sizes})"
+            )
+        owners[key] = owner
+        shapes[projection].add(tuple(spec.shape))
+    if not owners:
+        return None
+
+    for projection, seen in shapes.items():
+        if len(seen) != 1:
+            raise ValueError(f"expert {projection} shapes differ across experts: {sorted(seen)}")
+    (fc1,), (fc2,) = shapes["linear_fc1"], shapes["linear_fc2"]
+    if len(fc1) != 2 or len(fc2) != 2 or fc1[0] != 2 * fc2[1] or fc1[1] != fc2[0]:
+        raise ValueError(
+            f"expert shapes are not a gated MLP: linear_fc1 {fc1}, linear_fc2 {fc2}"
+        )
+
+    by_layer: dict[tuple[str, int], dict[int, tuple[str, str]]] = {}
+    for (role, layer, projection, expert), owner in owners.items():
+        experts = by_layer.setdefault((role, layer), {})
+        if experts.setdefault(expert, owner) != owner:
+            raise ValueError(
+                f"expert {expert} of layer {layer} has its projections on two owners"
+            )
+    num_experts = None
+    for (role, layer), experts in sorted(by_layer.items()):
+        count = len(experts)
+        for projection in ("linear_fc1", "linear_fc2"):
+            ids = {e for (r, lay, p, e) in owners if (r, lay, p) == (role, layer, projection)}
+            if ids != set(range(count)):
+                raise ValueError(
+                    f"layer {layer} {projection} experts are not 0..{count - 1}: {sorted(ids)}"
+                )
+        if num_experts is None:
+            num_experts = count
+        elif count != num_experts:
+            raise ValueError(f"layer {layer} has {count} experts, others have {num_experts}")
+        router = routers.get((role, layer))
+        if router is not None and (len(router) != 2 or router != (count, fc1[1])):
+            raise ValueError(
+                f"layer {layer} router shape {router} does not match {count} experts "
+                f"of hidden size {fc1[1]}"
+            )
+
+    per_owner: dict[tuple[str, str], int] = {}
+    for experts in by_layer.values():
+        for owner in experts.values():
+            per_owner[owner] = per_owner.get(owner, 0) + 1
+    return ExpertPartition(
+        num_experts=num_experts,
+        moe_layers=tuple(sorted({layer for _, layer in by_layer})),
+        experts_per_owner=tuple(sorted(per_owner.items())),
+    )
+
+
+def describe_topology(shard_ids: Sequence[str]) -> str:
+    """A short label of an island's parallel sizes for error messages."""
+
+    sizes = {tuple(sorted(parallel_sizes(shard).items())) for shard in shard_ids}
+    if len(sizes) != 1:
+        return f"mixed {sorted(sizes)}"
+    return ",".join(f"{axis}={size}" for axis, size in next(iter(sizes)))

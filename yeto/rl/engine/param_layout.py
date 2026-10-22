@@ -23,19 +23,14 @@ Import-light: torch only (lazily); no Miles or Megatron import.
 
 from __future__ import annotations
 
-import re
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
+from ..moe_layout import sequential_expert_global_name
+
 PARAM_LAYOUT_SCHEMA = "yeto.param_layout/v1"
 RANK_KEYS = ("tp_rank", "tp_size", "pp_rank", "pp_size", "ep_rank", "ep_size", "etp_rank", "etp_size")
-
-# Megatron SequentialMLP names its experts by local index; the global index is
-# ep_rank * num_local_experts + local index (megatron/core/transformer/moe/moe_layer.py,
-# ``local_expert_indices_offset``). Rewritten to the grouped-GEMM form the trainer's
-# weight sync and the HF converters use: ``mlp.experts.linear_fc1.weight<global>``.
-_SEQUENTIAL_EXPERT = re.compile(r"^(.*\.mlp\.experts)\.local_experts\.(\d+)\.(linear_fc[12])\.weight$")
 
 # (local name, parameter) -> (tensor_parallel, partition_dim, partition_stride)
 PartitionOf = Callable[[str, Any], tuple[bool, int, int]]
@@ -43,14 +38,6 @@ PartitionOf = Callable[[str, Any], tuple[bool, int, int]]
 
 class ParamLayoutError(RuntimeError):
     pass
-
-
-def sequential_expert_global_name(name: str, *, ep_rank: int, num_local_experts: int) -> str:
-    match = _SEQUENTIAL_EXPERT.match(name)
-    if match is None:
-        return name
-    prefix, local, proj = match.groups()
-    return f"{prefix}.{proj}.weight{ep_rank * num_local_experts + int(local)}"
 
 
 def build_param_layout(named: Sequence[tuple[str, Any]], *, global_names: Mapping[str, str],

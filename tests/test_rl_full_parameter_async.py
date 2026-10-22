@@ -290,7 +290,8 @@ def test_rda_layout_merges_only_non_embedding_fragments_and_changes_the_hash():
     specs = (ParameterSpec("actor", "embedding.word_embeddings.weight", (4, 2), "float32", 8, "tp0"),
              ParameterSpec("actor", "decoder.layers.0.mlp.linear_fc1.weight", (2, 2), "float32", 4, "tp0"))
     component = ComponentIdentity("actor", "a" * 40, "c" * 64)
-    kwargs = dict(algorithm="grpo", components=(component,), specs=specs, num_fragments=2)
+    kwargs = dict(algorithm="grpo", components=(component,), specs=specs, num_fragments=2,
+                  fragment_strategy="owner_affine")
     avg = ParameterLayout.create(**kwargs)
     rda = ParameterLayout.create(**kwargs, matrix_merge="rda")
     assert [f.merge_mode for f in avg.fragments.fragments] == [MERGE_AVG, MERGE_AVG]

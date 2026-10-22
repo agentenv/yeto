@@ -42,9 +42,8 @@ from yeto.rl.engine.policy_digest import (
     TrainerResidentState,
     WeightsChanged,
 )
-from yeto.rl.engine.selection import RL_MATRIX_MERGES
 from yeto.rl.engine.trainable_state import LAYOUT_FRAGMENTS, UnsupportedLayoutError
-from yeto.rl.local_learner import ComponentIdentity, layout_stream_role
+from yeto.rl.local_learner import MATRIX_MERGES, ComponentIdentity, layout_stream_role
 from yeto.rl.trajectory_evidence import TrajectoryBatchEvidence
 
 # Seconds between progress lines while an island waits for its initial cut.
@@ -111,8 +110,8 @@ class RoleStreamConfig:
     # without this island (quorum K below the island count); a newer PULL then
     # supersedes an unanswered older one and the broadcast overwrites.
     partial_quorum: bool = False
-    # S27 P2: "rda" merges fragments without embedding tensors by
-    # radial-directional averaging (yeto.rl.local_learner.ParameterLayout).
+    # Merge mode of every non-vocabulary fragment ("avg" or "rda"); the
+    # vocabulary tables always average. Bound through the layout hash.
     matrix_merge: str = "avg"
 
     @property
@@ -178,8 +177,8 @@ class RoleStreamConfig:
             raise ValueError("role-stream push dtype must be f32, bf16 or int8")
         if type(self.push_int8_block) is not int or not I8_BLOCK_MIN <= self.push_int8_block <= I8_BLOCK_MAX:
             raise ValueError("role-stream int8 block size is invalid")
-        if self.matrix_merge not in RL_MATRIX_MERGES:
-            raise ValueError(f"role-stream matrix merge must be one of {RL_MATRIX_MERGES}")
+        if self.matrix_merge not in MATRIX_MERGES:
+            raise ValueError("role-stream matrix merge must be avg or rda")
         if self.overlap and self.partial_quorum:
             raise ValueError("sync/train overlap needs the strict sweep roster")
         if self.wait_timeout <= 0 or not 0 < self.poll_seconds <= 1:

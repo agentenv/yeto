@@ -9,7 +9,13 @@ from dataclasses import asdict, dataclass, replace
 from typing import Any, Protocol
 
 from yeto.rl.contracts import LocalStepReceipt
-from yeto.rl.local_learner import ComponentIdentity, ParameterLayout, ParameterSpec
+from yeto.rl.local_learner import (
+    ComponentIdentity,
+    ParameterLayout,
+    ParameterSpec,
+    owner_affine_minimum_fragments,
+)
+from yeto.rl.moe_layout import check_expert_partition, describe_topology
 from yeto.rl.trajectory_evidence import TrajectoryBatchEvidence
 
 
@@ -260,6 +266,7 @@ class MilesChunkedFullParameterAdapter:
                 f"actual_fragments={actual_fragments}, "
                 f"expected_layout_hash={expected_layout_hash}, "
                 f"actual_layout_hash={adapter.layout.layout_hash}, "
+                f"topology={describe_topology([m.topology.shard_id for m in manifests])}, "
                 f"fragment_bytes={fragment_bytes}"
             )
         installed = await group.install_full_parameter_fragment_plans(adapter.plans)
@@ -314,7 +321,10 @@ class MilesChunkedFullParameterAdapter:
             or max_fragment_bytes % 4
         ):
             raise ValueError("Miles semantic fragment byte bound is invalid")
-        start = max(minimum_fragments, len(ordered))
+        # MoE: every expert must have exactly one owner (each EP rank pushes
+        # its own experts); a dense model passes through unchanged.
+        check_expert_partition(specs)
+        start = max(minimum_fragments, owner_affine_minimum_fragments(specs, matrix_merge))
         layout = None
         for count in range(start, len(specs) + 1):
             candidate = ParameterLayout.create(

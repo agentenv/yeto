@@ -13,7 +13,7 @@ from typing import Protocol
 
 import torch
 
-from ..fragments import MERGE_AVG, MERGE_RDA, Fragment, FragmentLayout, is_embedding_name
+from ..fragments import MERGE_AVG, MERGE_RDA, Fragment, FragmentLayout
 from .contracts import LocalStepReceipt, TrainerUpdateManifest
 
 _ROLES_BY_ALGORITHM = {
@@ -30,6 +30,32 @@ _PARAMETER_NAME = re.compile(r"[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,511}\Z")
 _SHARD_ID = re.compile(r"[a-z0-9][a-z0-9_.-]{0,127}\Z")
 _GIT_REVISION = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+
+# Merge mode of every tensor that is not an embedding-like table, keyed by the
+# public option name. "avg" keeps the established all-average RL layouts.
+MATRIX_MERGES = {"avg": MERGE_AVG, "rda": MERGE_RDA}
+# Megatron global names of the vocabulary tables (input embedding and the
+# untied output projection). Their outer gradients are row-sparse, so they
+# are always direct-averaged.
+_VOCABULARY_TABLE = re.compile(
+    r"(?:^|\.)(?:embedding\.word_embeddings|output_layer)\.weight\Z"
+)
+
+
+def parameter_merge_mode(name: str, matrix_merge: str) -> int:
+    """The syncer merge mode of one canonical parameter.
+
+    Vocabulary tables are direct-averaged; every other tensor (attention,
+    experts, router, norms) uses ``matrix_merge``.
+    """
+
+    if matrix_merge not in MATRIX_MERGES:
+        raise ValueError(
+            f"matrix_merge must be one of {tuple(MATRIX_MERGES)}, got {matrix_merge!r}"
+        )
+    if _VOCABULARY_TABLE.search(name):
+        return MERGE_AVG
+    return MATRIX_MERGES[matrix_merge]
 
 
 def layout_stream_role(algorithm: str, role: str) -> str | None:
@@ -126,10 +152,11 @@ class ParameterLayout:
         stream_role: str | None = None,
         matrix_merge: str = "avg",
     ) -> ParameterLayout:
-        """``matrix_merge="rda"`` (S27 P2) merges every fragment without an
-        embedding-like tensor by radial-directional averaging; the choice is
-        part of the layout hash. The default ``"avg"`` keeps every
-        established layout identity."""
+        """Lay ``specs`` out as ``num_fragments`` fragments.
+
+        ``matrix_merge`` other than "avg" requires the owner-affine strategy:
+        its fragments never mix merge modes, so each fragment carries one.
+        """
         if algorithm not in _ROLES_BY_ALGORITHM:
             raise ValueError(f"unsupported local RL algorithm: {algorithm!r}")
         if stream_role is not None and (
@@ -160,26 +187,29 @@ class ParameterLayout:
             raise ValueError("parameter layout must contain unique parameters")
         if fragment_strategy not in {"balanced", "owner_affine"}:
             raise ValueError("unsupported parameter fragment strategy")
-        if matrix_merge not in {"avg", "rda"}:
-            raise ValueError("unsupported parameter fragment matrix merge")
-        owners = sorted({(spec.role, spec.shard_id) for spec in ordered_specs})
-        minimum_fragments = 1 if fragment_strategy == "balanced" else len(owners)
+        if matrix_merge not in MATRIX_MERGES:
+            raise ValueError(
+                f"matrix_merge must be one of {tuple(MATRIX_MERGES)}, got {matrix_merge!r}"
+            )
+        if matrix_merge != "avg" and fragment_strategy != "owner_affine":
+            raise ValueError("a non-average matrix merge requires owner-affine fragments")
+        if fragment_strategy == "balanced":
+            minimum_fragments = 1
+        else:
+            minimum_fragments = owner_affine_minimum_fragments(ordered_specs, matrix_merge)
         if num_fragments < minimum_fragments or num_fragments > len(ordered_specs):
             raise ValueError("parameter fragment count is outside the layout")
 
         if fragment_strategy == "balanced":
             bins = _binpack_parameter_specs(ordered_specs, num_fragments)
         else:
-            bins = _owner_affine_parameter_bins(ordered_specs, num_fragments)
+            bins = _owner_affine_parameter_bins(ordered_specs, num_fragments, matrix_merge)
         fragments = FragmentLayout(
             [
                 Fragment(
-                    merge_mode=(
-                        MERGE_RDA
-                        if matrix_merge == "rda"
-                        and not any(is_embedding_name(spec.name) for spec in members)
-                        else MERGE_AVG
-                    ),
+                    # Owner-affine bins never mix merge modes (see
+                    # _merge_groups), so the first member decides.
+                    merge_mode=parameter_merge_mode(members[0].name, matrix_merge),
                     tensors=[(spec.wire_name, spec.numel) for spec in members],
                     identity_shapes={spec.wire_name: spec.shape for spec in members},
                 )
@@ -199,7 +229,10 @@ class ParameterLayout:
         if fragment_strategy != "balanced":
             payload["fragment_strategy"] = fragment_strategy
         if matrix_merge != "avg":
-            payload["merge_modes"] = [fragment.merge_mode for fragment in fragments.fragments]
+            # All-average layouts keep their established identities.
+            payload["merge_modes"] = [
+                fragment.merge_mode for fragment in fragments.fragments
+            ]
         if stream_role is not None:
             # A role lane must never collide with either the combined SAO layout
             # or a structurally identical actor-only GRPO layout.
@@ -274,35 +307,65 @@ def _binpack_parameter_specs(
     return bins
 
 
-def _owner_affine_parameter_bins(
+def _merge_groups(
     specs: Sequence[ParameterSpec],
-    num_fragments: int,
+    matrix_merge: str,
 ) -> list[list[ParameterSpec]]:
-    """Allocate deterministic balanced bins without crossing topology owners."""
+    """Split specs into owner-affine groups that each have one merge mode.
+
+    A group is a maximal run of one topology owner's canonical spec order with
+    one merge mode. Miles applies an owner's fragments in canonical order, so a
+    group must be contiguous; with "avg" every owner is exactly one group.
+    """
 
     by_owner: dict[tuple[str, str], list[ParameterSpec]] = {}
     for spec in specs:
         by_owner.setdefault((spec.role, spec.shard_id), []).append(spec)
-    owners = tuple(sorted(by_owner))
-    counts = {owner: 1 for owner in owners}
-    totals = {owner: sum(spec.numel for spec in by_owner[owner]) for owner in owners}
-    remaining = num_fragments - len(owners)
+    groups: list[list[ParameterSpec]] = []
+    for owner in sorted(by_owner):
+        previous = None
+        for spec in sorted(by_owner[owner]):
+            mode = parameter_merge_mode(spec.name, matrix_merge)
+            if mode != previous:
+                groups.append([])
+                previous = mode
+            groups[-1].append(spec)
+    return groups
+
+
+def owner_affine_minimum_fragments(
+    specs: Sequence[ParameterSpec],
+    matrix_merge: str = "avg",
+) -> int:
+    """The smallest owner-affine fragment count: one per merge group."""
+
+    return len(_merge_groups(specs, matrix_merge))
+
+
+def _owner_affine_parameter_bins(
+    specs: Sequence[ParameterSpec],
+    num_fragments: int,
+    matrix_merge: str = "avg",
+) -> list[list[ParameterSpec]]:
+    """Allocate deterministic balanced bins without crossing merge groups."""
+
+    groups = _merge_groups(specs, matrix_merge)
+    counts = [1] * len(groups)
+    totals = [sum(spec.numel for spec in group) for group in groups]
+    remaining = num_fragments - len(groups)
     while remaining:
-        eligible = [owner for owner in owners if counts[owner] < len(by_owner[owner])]
+        eligible = [index for index in range(len(groups)) if counts[index] < len(groups[index])]
         if not eligible:
             raise RuntimeError("owner-affine fragment allocation is incomplete")
-        # Split the owner with the largest current average bin. ``owners`` is
-        # already canonical, and max() retains the first item on an exact tie.
-        owner = max(
-            eligible,
-            key=lambda value: Fraction(totals[value], counts[value]),
-        )
-        counts[owner] += 1
+        # Split the group with the largest current average bin. Groups are in
+        # canonical order, and max() retains the first item on an exact tie.
+        index = max(eligible, key=lambda value: Fraction(totals[value], counts[value]))
+        counts[index] += 1
         remaining -= 1
 
     bins: list[list[ParameterSpec]] = []
-    for owner in owners:
-        bins.extend(_contiguous_parameter_bins(by_owner[owner], counts[owner]))
+    for group, count in zip(groups, counts, strict=True):
+        bins.extend(_contiguous_parameter_bins(group, count))
     if len(bins) != num_fragments or any(not members for members in bins):
         raise RuntimeError("owner-affine fragment allocation produced empty bins")
     return bins
