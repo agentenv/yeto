@@ -928,6 +928,14 @@ _SYNC = (
         "scale (even, 64..256; nearest rounding errs <= block absmax / 14 per value)",
     ),
     cli_flag(
+        "--rl-sync-push-no-tensor-blocks",
+        action="store_true",
+        help="full-parameter only, with --rl-sync-push-dtype int8, int4 or int4-log: let "
+        "quantization blocks run across a whole fragment (the layout before tensor blocks). "
+        "By default blocks restart at every tensor so a tensor replicated on several ranks "
+        "quantizes the same on each. A resumed run must repeat the choice it started with",
+    ),
+    cli_flag(
         "--rl-sync-push-int4-stochastic",
         action="store_true",
         help="full-parameter only, with --rl-sync-push-dtype int4: unbiased stochastic "

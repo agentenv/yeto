@@ -34,7 +34,7 @@ import socket
 import struct
 import threading
 import time
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -104,6 +104,12 @@ FULL_PARAMETER_PUSH_DTYPES = {
 # Session-dtype flag (S26 E3): BCAST_FRAGMENT carries bf16 downlink deltas
 # between f32 refreshes (yeto/downlink.py). Only on f32-bulk sessions.
 DTYPE_FLAG_BCAST_DELTA = 0x80
+# Session-dtype flag (S27): quantization blocks of PUSH_FRAGMENT deltas
+# restart at every tensor boundary of the fragment, so a tensor replicated on
+# several ranks quantizes the same whatever its neighbours are. Only on the
+# block-quantized push dtypes (int8, int4, int4-log). Sessions without it
+# keep blocks running across the whole fragment, byte for byte as before.
+DTYPE_FLAG_TENSOR_BLOCKS = 0x40
 I8_BLOCK_MIN = 32
 I8_BLOCK_MAX = 1 << 20
 DEFAULT_I8_BLOCK = 128
@@ -137,9 +143,17 @@ _F32_BULK_PUSH_DTYPES = (
 )
 
 
+_BLOCK_QUANT_PUSH_DTYPES = (DTYPE_F32_PUSH_I8, DTYPE_F32_PUSH_Q4, DTYPE_F32_PUSH_I4)
+
+
 def session_base(dtype: int) -> int:
     """The session dtype without its flags."""
-    return dtype & ~DTYPE_FLAG_BCAST_DELTA
+    return dtype & ~(DTYPE_FLAG_BCAST_DELTA | DTYPE_FLAG_TENSOR_BLOCKS)
+
+
+def tensor_blocks(dtype: int) -> bool:
+    """Whether push quantization blocks restart at each tensor boundary."""
+    return bool(dtype & DTYPE_FLAG_TENSOR_BLOCKS)
 
 
 def bcast_delta(dtype: int) -> bool:
@@ -149,6 +163,8 @@ def bcast_delta(dtype: int) -> bool:
 
 def valid_session_dtype(dtype: int) -> bool:
     base = session_base(dtype)
+    if tensor_blocks(dtype) and base not in _BLOCK_QUANT_PUSH_DTYPES:
+        return False
     if base in _F32_BULK_PUSH_DTYPES:
         return 0 <= dtype <= 0xFF
     return base in (DTYPE_BF16, DTYPE_Q4) and not bcast_delta(dtype)
@@ -175,25 +191,39 @@ def push_wire_dtype(dtype: int) -> int:
     return DTYPE_BF16 if base == DTYPE_F32_PUSH_BF16 else base
 
 
-def i8_nbytes(numel: int, block: int) -> int:
-    """Encoded size of an int8 push: u32 block, then per block f32 scale + i8s."""
+def i8_nbytes(numel: int, block: int, segments: Sequence[int] | None = None) -> int:
+    """Encoded size of an int8 push: u32 block, then per block f32 scale + i8s.
+
+    ``segments`` are the tensor sizes of a tensor-block session; blocks
+    restart at each one (``numel`` is then ignored).
+    """
     if not I8_BLOCK_MIN <= block <= I8_BLOCK_MAX:
         raise ValueError(f"int8 block size {block} outside {I8_BLOCK_MIN}..{I8_BLOCK_MAX}")
-    return 4 + 4 * -(-numel // block) + numel
+    return 4 + sum(4 * -(-n // block) + n for n in (segments if segments is not None else (numel,)))
 
 
-def f32_bytes_to_i8(data: bytes | bytearray | memoryview, block: int, *, header: bool = True) -> bytes:
+def f32_bytes_to_i8(
+    data: bytes | bytearray | memoryview,
+    block: int,
+    *,
+    header: bool = True,
+    segments: Sequence[int] | None = None,
+) -> bytes:
     """Quantize little-endian f32 values to block-scaled int8 (syncer ``decode_i8``).
 
     Per block of ``block`` values (the last may be shorter): f32 scale =
     absmax / 127, then ``round_half_even(x / scale)`` clipped to [-127, 127].
     Decoding ``q * scale`` errs by at most absmax / 254 per element (plus f32
     rounding). Blocks must start at multiples of ``block`` values; with
-    ``header`` the u32 block size is prepended.
+    ``header`` the u32 block size is prepended. With ``segments`` (tensor
+    sizes) the blocks restart at every segment instead.
     """
     import numpy as np
 
     i8_nbytes(0, block)  # validates the block size
+    if segments is not None:
+        head = struct.pack("<I", block) if header else b""
+        return head + _encode_segments(data, segments, lambda c: f32_bytes_to_i8(c, block, header=False))
     values = np.frombuffer(data, dtype="<f4")
     if not np.isfinite(values).all():
         raise ValueError("int8 push delta contains a non-finite value")
@@ -219,28 +249,71 @@ def f32_bytes_to_i8(data: bytes | bytearray | memoryview, block: int, *, header:
     return b"".join(parts)
 
 
-def _f32_parts_to_i8(parts: Iterable[bytes | bytearray | memoryview], block: int) -> Iterator[bytes]:
-    """Stream ``f32_bytes_to_i8`` over parts; blocks may span part boundaries."""
-    yield struct.pack("<I", block)
-    span = 4 * block
+def _encode_segments(data, segments: Sequence[int], encode: Callable[[memoryview], bytes]) -> bytes:
+    """Encode each tensor-sized segment of f32 ``data`` alone, so blocks restart at its start."""
+    view = memoryview(data).cast("B")
+    if view.nbytes != 4 * sum(segments):
+        raise ValueError(f"push delta has {view.nbytes} bytes for segments of {sum(segments)} values")
+    parts, at = [], 0
+    for n in segments:
+        parts.append(encode(view[at : at + 4 * n]))
+        at += 4 * n
+    return b"".join(parts)
+
+
+def _block_aligned_chunks(
+    parts: Iterable[bytes | bytearray | memoryview], block: int, segments: Sequence[int] | None
+) -> Iterator[bytes]:
+    """Regroup f32 byte parts into chunks that start on a block boundary of a segment.
+
+    A chunk ends on a block boundary or on the end of its segment, so each
+    chunk encodes alone and only a segment's last block is short. Without
+    ``segments`` the whole stream is one segment.
+    """
+    ahead = iter(segments) if segments is not None else None
+    left = next(ahead, 0) if ahead is not None else float("inf")
     carry = b""
     for part in parts:
         data = carry + bytes(part)
-        whole = len(data) - len(data) % span
-        carry = data[whole:]
-        if whole:
-            yield f32_bytes_to_i8(data[:whole], block, header=False)
+        while data:
+            if left == 0:
+                raise ValueError("f32 push delta is longer than its tensor segments")
+            take = min(len(data) // 4, left)
+            cut = take if take == left else take - take % block
+            if not cut:
+                break
+            yield data[: 4 * cut]
+            data = data[4 * cut :]
+            left -= cut
+            if left == 0 and ahead is not None:
+                left = next(ahead, 0)
+        carry = data
     if len(carry) % 4:
         raise ValueError("f32 push delta ends mid-value")
     if carry:
-        yield f32_bytes_to_i8(carry, block, header=False)
+        if left == 0:
+            raise ValueError("f32 push delta is longer than its tensor segments")
+        yield carry
 
 
-def i4_nbytes(numel: int, block: int) -> int:
-    """Encoded size of a linear int4 push: u32 block, per block f32 scale, 2 values/byte."""
+def _f32_parts_to_i8(
+    parts: Iterable[bytes | bytearray | memoryview], block: int, segments: Sequence[int] | None = None
+) -> Iterator[bytes]:
+    """Stream ``f32_bytes_to_i8`` over parts; blocks may span part boundaries."""
+    yield struct.pack("<I", block)
+    for chunk in _block_aligned_chunks(parts, block, segments):
+        yield f32_bytes_to_i8(chunk, block, header=False)
+
+
+def i4_nbytes(numel: int, block: int, segments: Sequence[int] | None = None) -> int:
+    """Encoded size of a linear int4 push: u32 block, per block f32 scale, 2 values/byte.
+
+    ``segments`` are the tensor sizes of a tensor-block session; blocks
+    restart at each one (``numel`` is then ignored), so each pads its own tail.
+    """
     if not (I4_BLOCK_MIN <= block <= I4_BLOCK_MAX and block % 2 == 0):
         raise ValueError(f"int4 block size {block} must be even and within {I4_BLOCK_MIN}..{I4_BLOCK_MAX}")
-    return 4 + 4 * -(-numel // block) + -(-numel // 2)
+    return 4 + sum(4 * -(-n // block) + -(-n // 2) for n in (segments if segments is not None else (numel,)))
 
 
 def f32_bytes_to_i4(
@@ -249,6 +322,7 @@ def f32_bytes_to_i4(
     *,
     header: bool = True,
     rng: np.random.Generator | None = None,
+    segments: Sequence[int] | None = None,
 ) -> bytes:
     """Quantize little-endian f32 values to linear symmetric int4 (syncer ``decode_i4``).
 
@@ -258,10 +332,14 @@ def f32_bytes_to_i4(
     rounding errs by at most absmax / 14 per value. With a numpy ``rng`` the
     rounding is stochastic (unbiased, error below one scale step). Blocks must
     start at multiples of ``block`` values; ``header`` prepends the u32 block.
+    With ``segments`` (tensor sizes) the blocks restart at every segment.
     """
     import numpy as np  # noqa: PLC0415 - keep the protocol import light
 
     i4_nbytes(0, block)  # validates the block size
+    if segments is not None:
+        head = struct.pack("<I", block) if header else b""
+        return head + _encode_segments(data, segments, lambda c: f32_bytes_to_i4(c, block, header=False, rng=rng))
     values = np.frombuffer(data, dtype="<f4")
     if not np.isfinite(values).all():
         raise ValueError("int4 push delta contains a non-finite value")
@@ -295,9 +373,27 @@ def f32_bytes_to_i4(
     return b"".join(parts)
 
 
-def i4_bytes_to_f32(data: bytes | bytearray | memoryview, numel: int) -> np.ndarray:
-    """Decode a linear int4 push (with its u32 block header) into f32 values."""
+def i4_bytes_to_f32(
+    data: bytes | bytearray | memoryview, numel: int, segments: Sequence[int] | None = None
+) -> np.ndarray:
+    """Decode a linear int4 push (with its u32 block header) into f32 values.
+
+    ``segments`` are the tensor sizes of a tensor-block push.
+    """
     import numpy as np  # noqa: PLC0415 - keep the protocol import light
+
+    if segments is not None:
+        if len(data) < 4:
+            raise ValueError("int4 payload is shorter than its block header")
+        block = struct.unpack_from("<I", data)[0]
+        view, out, at = memoryview(data), [], 4
+        for n in segments:
+            size = i4_nbytes(n, block) - 4
+            out.append(i4_bytes_to_f32(struct.pack("<I", block) + bytes(view[at : at + size]), n))
+            at += size
+        if at != len(data):
+            raise ValueError(f"int4 payload has {len(data)} bytes, expected {at}")
+        return np.concatenate(out) if out else np.empty(0, np.float32)
 
     if len(data) < 4:
         raise ValueError("int4 payload is shorter than its block header")
@@ -323,25 +419,18 @@ def i4_bytes_to_f32(data: bytes | bytearray | memoryview, numel: int) -> np.ndar
 
 
 def _f32_parts_to_i4(
-    parts: Iterable[bytes | bytearray | memoryview], block: int, rng: np.random.Generator | None = None
+    parts: Iterable[bytes | bytearray | memoryview],
+    block: int,
+    rng: np.random.Generator | None = None,
+    segments: Sequence[int] | None = None,
 ) -> Iterator[bytes]:
     """Stream ``f32_bytes_to_i4`` over parts; blocks may span part boundaries."""
     yield struct.pack("<I", block)
-    span = 4 * block
-    carry = b""
-    for part in parts:
-        data = carry + bytes(part)
-        whole = len(data) - len(data) % span
-        carry = data[whole:]
-        if whole:
-            yield f32_bytes_to_i4(data[:whole], block, header=False, rng=rng)
-    if len(carry) % 4:
-        raise ValueError("f32 push delta ends mid-value")
-    if carry:
-        yield f32_bytes_to_i4(carry, block, header=False, rng=rng)
+    for chunk in _block_aligned_chunks(parts, block, segments):
+        yield f32_bytes_to_i4(chunk, block, header=False, rng=rng)
 
 
-def f32_bytes_to_q4(data: bytes | bytearray | memoryview) -> bytes:
+def f32_bytes_to_q4(data: bytes | bytearray | memoryview, *, segments: Sequence[int] | None = None) -> bytes:
     """Quantize little-endian f32 values to the q4 wire codec (syncer ``decode_q4``).
 
     Per block of ``Q4_BLOCK`` values (the last is zero-padded): f32 absmax
@@ -349,9 +438,13 @@ def f32_bytes_to_q4(data: bytes | bytearray | memoryview) -> bytes:
     bit (bit 3) and a level L: 0 is exact zero, 1..7 decodes to
     ``2**(L-7) * scale``. L is the nearest level in log2 space, so values
     below ``scale * 2**-6.5`` become zero and others err by at most a factor
-    of ``sqrt(2)``. Shared by SFT dtype 3 and full-parameter dtype 6.
+    of ``sqrt(2)``. Shared by SFT dtype 3 and full-parameter dtype 6. With
+    ``segments`` (tensor sizes) the blocks restart, and pad, at every segment.
     """
     import numpy as np  # noqa: PLC0415 - keep the protocol import light
+
+    if segments is not None:
+        return _encode_segments(data, segments, f32_bytes_to_q4)
 
     values = np.frombuffer(data, dtype="<f4")
     if not np.isfinite(values).all():
@@ -375,20 +468,12 @@ def f32_bytes_to_q4(data: bytes | bytearray | memoryview) -> bytes:
     return rows.tobytes()
 
 
-def _f32_parts_to_q4(parts: Iterable[bytes | bytearray | memoryview]) -> Iterator[bytes]:
-    """Stream ``f32_bytes_to_q4`` over parts; only the final block is padded."""
-    span = 4 * Q4_BLOCK
-    carry = b""
-    for part in parts:
-        data = carry + bytes(part)
-        whole = len(data) - len(data) % span
-        carry = data[whole:]
-        if whole:
-            yield f32_bytes_to_q4(data[:whole])
-    if len(carry) % 4:
-        raise ValueError("f32 push delta ends mid-value")
-    if carry:
-        yield f32_bytes_to_q4(carry)
+def _f32_parts_to_q4(
+    parts: Iterable[bytes | bytearray | memoryview], segments: Sequence[int] | None = None
+) -> Iterator[bytes]:
+    """Stream ``f32_bytes_to_q4`` over parts; only a segment's final block is padded."""
+    for chunk in _block_aligned_chunks(parts, Q4_BLOCK, segments):
+        yield f32_bytes_to_q4(chunk)
 
 
 def f32_bytes_to_bf16(data: bytes | bytearray | memoryview) -> bytes:
@@ -566,8 +651,8 @@ def _tensor_nbytes(dtype: int, numel: int) -> int:
     return numel * width
 
 
-def _q4_nbytes(numel: int) -> int:
-    return -(-numel // Q4_BLOCK) * (4 + Q4_BLOCK // 2)
+def _q4_nbytes(numel: int, segments: Sequence[int] | None = None) -> int:
+    return sum(-(-n // Q4_BLOCK) * (4 + Q4_BLOCK // 2) for n in (segments if segments is not None else (numel,)))
 
 
 def _contiguous_bytes_view(
@@ -1306,6 +1391,12 @@ class SyncerClient:
             label=f"INIT_PARAMS fragment {fragment_id}",
         )
 
+    def push_segments(self, fragment_id: int) -> list[int] | None:
+        """Tensor sizes of a fragment on a tensor-block session, else ``None``."""
+        if not tensor_blocks(self.dtype):
+            return None
+        return [numel for _, numel in self.layout.fragments[fragment_id].tensors]
+
     def push_fragment(
         self,
         fragment_id: int,
@@ -1323,6 +1414,7 @@ class SyncerClient:
         if c_steps < 1:
             raise ValueError("c_steps must be positive")
         numel = self.layout.fragments[fragment_id].numel
+        segments = self.push_segments(fragment_id)
         expected = (
             _q4_nbytes(numel)
             if self._push_base == DTYPE_Q4
@@ -1348,11 +1440,13 @@ class SyncerClient:
         if self._push_base == DTYPE_F32_PUSH_BF16:
             tensor_bytes = f32_bytes_to_bf16(tensor_bytes)
         elif self._push_base == DTYPE_F32_PUSH_I8:
-            tensor_bytes = f32_bytes_to_i8(tensor_bytes, self.push_i8_block)
+            tensor_bytes = f32_bytes_to_i8(tensor_bytes, self.push_i8_block, segments=segments)
         elif self._push_base == DTYPE_F32_PUSH_Q4:
-            tensor_bytes = f32_bytes_to_q4(tensor_bytes)
+            tensor_bytes = f32_bytes_to_q4(tensor_bytes, segments=segments)
         elif self._push_base == DTYPE_F32_PUSH_I4:
-            tensor_bytes = f32_bytes_to_i4(tensor_bytes, self.push_i4_block, rng=self._push_i4_rng)
+            tensor_bytes = f32_bytes_to_i4(
+                tensor_bytes, self.push_i4_block, rng=self._push_i4_rng, segments=segments
+            )
         self._send_large(MSG_PUSH_FRAGMENT, head + tensor_bytes)
 
     def push_fragment_parts(
@@ -1383,17 +1477,18 @@ class SyncerClient:
         if c_steps < 1:
             raise ValueError("c_steps must be positive")
         numel = self.layout.fragments[fragment_id].numel
+        segments = self.push_segments(fragment_id)
         if self._push_base == DTYPE_Q4:
             expected = _q4_nbytes(numel)
         elif self._push_base == DTYPE_F32_PUSH_I8:
-            expected = i8_nbytes(numel, self.push_i8_block)
-            tensor_parts = _f32_parts_to_i8(tensor_parts, self.push_i8_block)
+            expected = i8_nbytes(numel, self.push_i8_block, segments)
+            tensor_parts = _f32_parts_to_i8(tensor_parts, self.push_i8_block, segments)
         elif self._push_base == DTYPE_F32_PUSH_Q4:
-            expected = _q4_nbytes(numel)
-            tensor_parts = _f32_parts_to_q4(tensor_parts)
+            expected = _q4_nbytes(numel, segments)
+            tensor_parts = _f32_parts_to_q4(tensor_parts, segments)
         elif self._push_base == DTYPE_F32_PUSH_I4:
-            expected = i4_nbytes(numel, self.push_i4_block)
-            tensor_parts = _f32_parts_to_i4(tensor_parts, self.push_i4_block, self._push_i4_rng)
+            expected = i4_nbytes(numel, self.push_i4_block, segments)
+            tensor_parts = _f32_parts_to_i4(tensor_parts, self.push_i4_block, self._push_i4_rng, segments)
         else:
             expected = _tensor_nbytes(push_wire_dtype(self.dtype), numel)
         if self._push_base == DTYPE_F32_PUSH_BF16:

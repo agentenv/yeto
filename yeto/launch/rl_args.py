@@ -159,6 +159,7 @@ _FULL_PARAMETER_SYNC_DEFAULTS = (
     ("rl_sync_push_int4_block", 128, "--rl-sync-push-int4-block"),
     ("rl_sync_push_int4_stochastic", False, "--rl-sync-push-int4-stochastic"),
     ("rl_sync_push_int4_error_feedback", "off", "--rl-sync-push-int4-error-feedback"),
+    ("rl_sync_push_no_tensor_blocks", False, "--rl-sync-push-no-tensor-blocks"),
     ("rl_sync_overlap", False, "--rl-sync-overlap"),
     ("rl_sync_full_parameter_rounds", "sweep", "--rl-sync-full-parameter-rounds"),
 )
@@ -254,6 +255,10 @@ def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
         problems.append("--rl-sync-push-int4-block even, between 64 and 256")
     elif int4_block != 128 and not int4:
         problems.append("--rl-sync-push-int4-block only with --rl-sync-push-dtype int4")
+    if getattr(args, "rl_sync_push_no_tensor_blocks", False) and getattr(
+        args, "rl_sync_push_dtype", "f32"
+    ) not in ("int8", "int4", "int4-log"):
+        problems.append("--rl-sync-push-no-tensor-blocks only with --rl-sync-push-dtype int8, int4 or int4-log")
     if getattr(args, "rl_sync_push_int4_stochastic", False) and not int4:
         problems.append("--rl-sync-push-int4-stochastic only with --rl-sync-push-dtype int4")
     if getattr(args, "rl_sync_push_int4_error_feedback", "off") != "off":

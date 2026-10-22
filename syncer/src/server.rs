@@ -1263,7 +1263,8 @@ fn negotiated_payload_limits(layout: &Layout, dtype: u8) -> Result<(u64, u64)> {
     for fragment in &layout.fragments {
         let numel = fragment.numel()?;
         let init_bytes = tensor_nbytes(bulk_dtype(dtype), numel)? as u64;
-        let delta_bytes = max_push_nbytes(dtype, numel)? as u64;
+        let segments = push_segments(dtype, numel, &fragment.tensor_numels)?;
+        let delta_bytes = max_push_nbytes_segments(dtype, &segments)? as u64;
         max_init = max_init.max(
             4u64.checked_add(init_bytes)
                 .context("INIT_PARAMS payload limit overflow")?,
@@ -2099,7 +2100,8 @@ async fn dispatch_inner(
             let numel = fragment.numel()?;
             let bytes = r.rest();
             let mut outer_gradient = Vec::new();
-            decode_push(group.dtype, bytes, numel, &mut outer_gradient)
+            let segments = push_segments(group.dtype, numel, &fragment.tensor_numels)?;
+            decode_push_segments(group.dtype, bytes, &segments, &mut outer_gradient)
                 .with_context(|| format!("PUSH_FRAGMENT fragment {fragment_id}"))?;
             // Every wire dtype carries learner_delta = local - raw_anchor.
             // Merge math consumes the corresponding outer gradient with the

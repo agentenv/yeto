@@ -23,6 +23,7 @@ from yeto.protocol import (
     DEFAULT_I4_BLOCK,
     DEFAULT_I8_BLOCK,
     DTYPE_FLAG_BCAST_DELTA,
+    DTYPE_FLAG_TENSOR_BLOCKS,
     FULL_PARAMETER_PUSH_DTYPES,
     I4_BLOCK_MAX,
     I4_BLOCK_MIN,
@@ -113,6 +114,14 @@ class RoleStreamConfig:
     # int4 pushes: island-side error feedback, off or the residual dtype
     # (bf16 or f32); see yeto.push_error_feedback for its lifetime.
     push_int4_error_feedback: str = "off"
+    # int8/int4/int4-log pushes: quantization blocks restart at every tensor
+    # boundary of a fragment (session dtype flag), so a tensor replicated on
+    # several ranks quantizes the same whatever its neighbours are. On by
+    # default for those dtypes (ignored for f32/bf16); False keeps blocks
+    # running across the fragment, the layout of sessions started before the
+    # flag existed. A resumed run must repeat the choice it started with: the
+    # syncer checkpoint binds the session contract, and a mismatch is refused.
+    push_tensor_blocks: bool = True
     bcast_delta: bool = False
     # S26 E3: train round k+1 while sweep k syncs, then rebase the trainer
     # (see FullParameterSync._overlap_boundary); the local weights lag the
@@ -137,9 +146,18 @@ class RoleStreamConfig:
     peer_recovery: PeerRecoveryOptions | None = None
 
     @property
+    def tensor_blocks_active(self) -> bool:
+        """Whether this session's block-quantized pushes restart blocks per tensor."""
+        return self.push_tensor_blocks and self.push_dtype in ("int8", "int4", "int4-log")
+
+    @property
     def session_dtype(self) -> int:
         base = FULL_PARAMETER_PUSH_DTYPES[self.push_dtype]
-        return base | (DTYPE_FLAG_BCAST_DELTA if self.bcast_delta else 0)
+        return (
+            base
+            | (DTYPE_FLAG_BCAST_DELTA if self.bcast_delta else 0)
+            | (DTYPE_FLAG_TENSOR_BLOCKS if self.tensor_blocks_active else 0)
+        )
 
     @property
     def wire_dtype_label(self) -> str:
@@ -151,6 +169,7 @@ class RoleStreamConfig:
                          + ("" if self.push_int4_error_feedback == "off"
                             else f"-ef-{self.push_int4_error_feedback}"),
                  "int4-log": "fp32-push-q4"}[self.push_dtype]
+        label += "-tb" if self.tensor_blocks_active else ""
         return label + ("+bcast-bf16-delta" if self.bcast_delta else "")
 
     def __post_init__(self) -> None:
@@ -1110,6 +1129,7 @@ class MilesFullParameterRoleStream:
                 self.config.expected_fragments,
                 self.adapter.layout.fragments.fragments[fragment_id].numel,
                 parts,
+                self.client.push_segments(fragment_id),
             )
         try:
             queued = self.client.push_fragment_parts(

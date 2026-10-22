@@ -919,6 +919,7 @@ def _dense_full_sync_config(
         push_dtype=getattr(args, "sweep_push_dtype", "f32"),
         push_int8_block=int(getattr(args, "sweep_push_int8_block", 128)),
         push_int4_block=int(getattr(args, "sweep_push_int4_block", 128)),
+        push_tensor_blocks=not getattr(args, "sweep_push_no_tensor_blocks", False),
         push_int4_stochastic=bool(getattr(args, "sweep_push_int4_stochastic", False)),
         push_int4_error_feedback=getattr(args, "sweep_push_int4_error_feedback", "off"),
         bcast_delta=bool(getattr(args, "bcast_delta", False)),

@@ -84,6 +84,12 @@ pub const DTYPE_F32_PUSH_I4: u8 = 7;
 /// anchor every learner holds (see `crate::downlink`). Valid only on f32-bulk
 /// sessions (dtypes 1, 4, 5, 6, 7).
 pub const DTYPE_FLAG_BCAST_DELTA: u8 = 0x80;
+/// Session-dtype flag (S27): quantization blocks of PUSH_FRAGMENT deltas
+/// restart at every tensor boundary of the fragment, so a replicated tensor
+/// quantizes identically whatever its neighbours are. Valid only on the
+/// block-quantized push dtypes 5, 6 and 7; without it the blocks run
+/// across the whole fragment.
+pub const DTYPE_FLAG_TENSOR_BLOCKS: u8 = 0x40;
 
 /// Values per q4 scale block (f32 absmax scale + 128 nibble bytes each).
 pub const Q4_BLOCK: usize = 256;
@@ -96,7 +102,12 @@ pub const I4_BLOCK_MAX: usize = 256;
 
 /// The session dtype without its flags.
 pub fn session_base(dtype: u8) -> u8 {
-    dtype & !DTYPE_FLAG_BCAST_DELTA
+    dtype & !(DTYPE_FLAG_BCAST_DELTA | DTYPE_FLAG_TENSOR_BLOCKS)
+}
+
+/// Whether push blocks restart at each tensor boundary of a fragment.
+pub fn tensor_blocks(dtype: u8) -> bool {
+    dtype & DTYPE_FLAG_TENSOR_BLOCKS != 0
 }
 
 /// Whether the session receives bf16 downlink deltas.
@@ -106,6 +117,14 @@ pub fn bcast_delta(dtype: u8) -> bool {
 
 /// Whether `dtype` is a session dtype this syncer accepts.
 pub fn valid_session_dtype(dtype: u8) -> bool {
+    if tensor_blocks(dtype)
+        && !matches!(
+            session_base(dtype),
+            DTYPE_F32_PUSH_I8 | DTYPE_F32_PUSH_Q4 | DTYPE_F32_PUSH_I4
+        )
+    {
+        return false;
+    }
     match session_base(dtype) {
         DTYPE_F32 | DTYPE_F32_PUSH_BF16 | DTYPE_F32_PUSH_I8 | DTYPE_F32_PUSH_Q4 | DTYPE_F32_PUSH_I4 => {
             true
@@ -136,21 +155,46 @@ pub fn push_dtype(dtype: u8) -> u8 {
 
 /// Largest PUSH_FRAGMENT delta payload a session dtype may carry.
 pub fn max_push_nbytes(dtype: u8, numel: usize) -> Result<usize> {
+    max_push_nbytes_segments(dtype, &[numel])
+}
+
+/// The value runs whose quantization blocks restart independently: one run
+/// per tensor on a tensor-block session, else the whole fragment.
+pub fn push_segments(dtype: u8, numel: usize, tensor_numels: &[u64]) -> Result<Vec<usize>> {
+    if !tensor_blocks(dtype) {
+        return Ok(vec![numel]);
+    }
+    tensor_numels
+        .iter()
+        .map(|n| usize::try_from(*n).map_err(|_| anyhow::anyhow!("tensor numel does not fit usize")))
+        .collect()
+}
+
+/// Largest PUSH_FRAGMENT delta payload for a fragment split into `segments`.
+pub fn max_push_nbytes_segments(dtype: u8, segments: &[usize]) -> Result<usize> {
+    let total: usize = segments.iter().sum();
     match session_base(dtype) {
-        DTYPE_Q4 | DTYPE_F32_PUSH_Q4 => q4_nbytes(numel),
-        DTYPE_F32_PUSH_I8 => i8_nbytes(numel, I8_BLOCK_MIN),
-        DTYPE_F32_PUSH_I4 => i4_nbytes(numel, I4_BLOCK_MIN),
-        other => tensor_nbytes(push_dtype(other), numel),
+        DTYPE_Q4 | DTYPE_F32_PUSH_Q4 => q4_nbytes_segments(segments),
+        DTYPE_F32_PUSH_I8 => i8_nbytes_segments(segments, I8_BLOCK_MIN),
+        DTYPE_F32_PUSH_I4 => i4_nbytes_segments(segments, I4_BLOCK_MIN),
+        other => tensor_nbytes(push_dtype(other), total),
     }
 }
 
 /// Decode a PUSH_FRAGMENT delta payload of any session dtype into f32s.
 pub fn decode_push(dtype: u8, bytes: &[u8], numel: usize, out: &mut Vec<f32>) -> Result<()> {
+    decode_push_segments(dtype, bytes, &[numel], out)
+}
+
+/// Decode a PUSH_FRAGMENT delta payload whose blocks restart at each of
+/// `segments` (see `push_segments`).
+pub fn decode_push_segments(dtype: u8, bytes: &[u8], segments: &[usize], out: &mut Vec<f32>) -> Result<()> {
     match session_base(dtype) {
-        DTYPE_Q4 | DTYPE_F32_PUSH_Q4 => decode_q4(bytes, numel, out),
-        DTYPE_F32_PUSH_I8 => decode_i8(bytes, numel, out),
-        DTYPE_F32_PUSH_I4 => decode_i4(bytes, numel, out),
+        DTYPE_Q4 | DTYPE_F32_PUSH_Q4 => decode_q4_segments(bytes, segments, out),
+        DTYPE_F32_PUSH_I8 => decode_i8_segments(bytes, segments, out),
+        DTYPE_F32_PUSH_I4 => decode_i4_segments(bytes, segments, out),
         other => {
+            let numel: usize = segments.iter().sum();
             let expected = tensor_nbytes(push_dtype(other), numel)?;
             if bytes.len() != expected {
                 bail!("push delta has {} bytes, expected {expected}", bytes.len());
@@ -253,6 +297,15 @@ pub fn q4_nbytes(numel: usize) -> Result<usize> {
         .ok_or_else(|| anyhow::anyhow!("q4 tensor byte length overflow"))
 }
 
+/// Exact encoded byte length of a q4 payload whose blocks restart at each of
+/// `segments` (every segment's last block is zero-padded).
+pub fn q4_nbytes_segments(segments: &[usize]) -> Result<usize> {
+    segments
+        .iter()
+        .try_fold(0usize, |sum, &n| sum.checked_add(q4_nbytes(n).ok()?))
+        .ok_or_else(|| anyhow::anyhow!("q4 tensor byte length overflow"))
+}
+
 /// Encode the authoritative final cut: the coordinator's global step and the
 /// exact expected version of every fragment, in layout order.
 pub fn encode_final_manifest(global_step: u64, versions: &[u64]) -> Vec<u8> {
@@ -348,14 +401,19 @@ pub fn encode_tensor(dtype: u8, vals: &[f32], out: &mut Vec<u8>) -> Result<()> {
 
 /// Exact encoded byte length of an int8 push payload with block size `block`.
 pub fn i8_nbytes(numel: usize, block: usize) -> Result<usize> {
+    i8_nbytes_segments(&[numel], block)
+}
+
+/// As `i8_nbytes` when blocks restart at each of `segments`.
+pub fn i8_nbytes_segments(segments: &[usize], block: usize) -> Result<usize> {
     if !(I8_BLOCK_MIN..=I8_BLOCK_MAX).contains(&block) {
         bail!("int8 block size {block} outside {I8_BLOCK_MIN}..={I8_BLOCK_MAX}");
     }
-    numel
-        .div_ceil(block)
-        .checked_mul(4)
-        .and_then(|scales| scales.checked_add(numel))
-        .and_then(|body| body.checked_add(4))
+    segments
+        .iter()
+        .try_fold(4usize, |sum, &n| {
+            n.div_ceil(block).checked_mul(4)?.checked_add(n)?.checked_add(sum)
+        })
         .ok_or_else(|| anyhow::anyhow!("int8 tensor byte length overflow"))
 }
 
@@ -366,11 +424,17 @@ pub fn i8_nbytes(numel: usize, block: usize) -> Result<usize> {
 /// decodes to `q as f32 * scale`, so |error| <= scale / 2 = absmax / 254 per
 /// element (plus one f32 rounding). The scale is non-negative and finite.
 pub fn decode_i8(bytes: &[u8], numel: usize, out: &mut Vec<f32>) -> Result<()> {
+    decode_i8_segments(bytes, &[numel], out)
+}
+
+/// As `decode_i8`; blocks restart at the start of every segment.
+pub fn decode_i8_segments(bytes: &[u8], segments: &[usize], out: &mut Vec<f32>) -> Result<()> {
     if bytes.len() < 4 {
         bail!("int8 payload is shorter than its block header");
     }
     let block = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
-    let expected = i8_nbytes(numel, block)?;
+    let expected = i8_nbytes_segments(segments, block)?;
+    let numel: usize = segments.iter().sum();
     if bytes.len() != expected {
         bail!(
             "int8 payload has {} bytes, expected {expected} for {numel} values in blocks of {block}",
@@ -381,25 +445,27 @@ pub fn decode_i8(bytes: &[u8], numel: usize, out: &mut Vec<f32>) -> Result<()> {
     out.try_reserve(numel)
         .map_err(|error| anyhow::anyhow!("cannot allocate int8 tensor: {error}"))?;
     let mut at = 4usize;
-    let mut remaining = numel;
     let mut b = 0usize;
-    while remaining > 0 {
-        let len = remaining.min(block);
-        let scale = f32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
-        if !scale.is_finite() || scale < 0.0 {
-            bail!("int8 block {b} has invalid scale {scale}");
-        }
-        at += 4;
-        for &q in &bytes[at..at + len] {
-            let q = q as i8;
-            if q == i8::MIN {
-                bail!("int8 block {b} uses the reserved value -128");
+    for &segment in segments {
+        let mut remaining = segment;
+        while remaining > 0 {
+            let len = remaining.min(block);
+            let scale = f32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+            if !scale.is_finite() || scale < 0.0 {
+                bail!("int8 block {b} has invalid scale {scale}");
             }
-            out.push(q as f32 * scale);
+            at += 4;
+            for &q in &bytes[at..at + len] {
+                let q = q as i8;
+                if q == i8::MIN {
+                    bail!("int8 block {b} uses the reserved value -128");
+                }
+                out.push(q as f32 * scale);
+            }
+            at += len;
+            remaining -= len;
+            b += 1;
         }
-        at += len;
-        remaining -= len;
-        b += 1;
     }
     Ok(())
 }
@@ -423,15 +489,25 @@ pub fn encode_i8(vals: &[f32], block: usize) -> Vec<u8> {
 /// Encoded size of a linear int4 push: u32 block, per block an f32 scale,
 /// then two values per byte (an odd last block pads one zero nibble).
 pub fn i4_nbytes(numel: usize, block: usize) -> Result<usize> {
+    i4_nbytes_segments(&[numel], block)
+}
+
+/// As `i4_nbytes` when blocks restart at each of `segments`.
+pub fn i4_nbytes_segments(segments: &[usize], block: usize) -> Result<usize> {
     if !(I4_BLOCK_MIN..=I4_BLOCK_MAX).contains(&block) || block % 2 != 0 {
         bail!("int4 block size {block} must be even and within {I4_BLOCK_MIN}..={I4_BLOCK_MAX}");
     }
-    numel
-        .div_ceil(block)
-        .checked_mul(4)
-        .and_then(|scales| scales.checked_add(numel.div_ceil(2)))
-        .and_then(|body| body.checked_add(4))
-        .ok_or_else(|| anyhow::anyhow!("int4 tensor byte length overflow"))
+    let mut total = 4usize;
+    for &n in segments {
+        // Blocks are even, so only a segment's last block can be odd.
+        let body = n.div_ceil(block).checked_mul(4).and_then(|s| s.checked_add(n / block * (block / 2)));
+        let tail = n % block;
+        total = body
+            .and_then(|b| b.checked_add(if tail > 0 { tail.div_ceil(2) } else { 0 }))
+            .and_then(|b| b.checked_add(total))
+            .ok_or_else(|| anyhow::anyhow!("int4 tensor byte length overflow"))?;
+    }
+    Ok(total)
 }
 
 /// Decode a linear int4 delta payload (yeto/protocol.py `f32_bytes_to_i4`).
@@ -442,11 +518,17 @@ pub fn i4_nbytes(numel: usize, block: usize) -> Result<usize> {
 /// `q as f32 * scale`; -8 is reserved and an odd block's pad nibble is 0.
 /// Round-to-nearest errs by at most scale / 2 = absmax / 14 per element.
 pub fn decode_i4(bytes: &[u8], numel: usize, out: &mut Vec<f32>) -> Result<()> {
+    decode_i4_segments(bytes, &[numel], out)
+}
+
+/// As `decode_i4`; blocks restart at the start of every segment.
+pub fn decode_i4_segments(bytes: &[u8], segments: &[usize], out: &mut Vec<f32>) -> Result<()> {
     if bytes.len() < 4 {
         bail!("int4 payload is shorter than its block header");
     }
     let block = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
-    let expected = i4_nbytes(numel, block)?;
+    let expected = i4_nbytes_segments(segments, block)?;
+    let numel: usize = segments.iter().sum();
     if bytes.len() != expected {
         bail!(
             "int4 payload has {} bytes, expected {expected} for {numel} values in blocks of {block}",
@@ -457,31 +539,33 @@ pub fn decode_i4(bytes: &[u8], numel: usize, out: &mut Vec<f32>) -> Result<()> {
     out.try_reserve(numel)
         .map_err(|error| anyhow::anyhow!("cannot allocate int4 tensor: {error}"))?;
     let mut at = 4usize;
-    let mut remaining = numel;
     let mut b = 0usize;
-    while remaining > 0 {
-        let len = remaining.min(block);
-        let scale = f32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
-        if !scale.is_finite() || scale < 0.0 {
-            bail!("int4 block {b} has invalid scale {scale}");
-        }
-        at += 4;
-        let body = &bytes[at..at + len.div_ceil(2)];
-        for i in 0..len {
-            let nibble = (body[i / 2] >> (4 * (i % 2))) & 0x0F;
-            if nibble == 0x08 {
-                bail!("int4 block {b} uses the reserved value -8");
+    for &segment in segments {
+        let mut remaining = segment;
+        while remaining > 0 {
+            let len = remaining.min(block);
+            let scale = f32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+            if !scale.is_finite() || scale < 0.0 {
+                bail!("int4 block {b} has invalid scale {scale}");
             }
-            // Sign-extend the 4-bit two's-complement value.
-            let q = ((nibble << 4) as i8) >> 4;
-            out.push(q as f32 * scale);
+            at += 4;
+            let body = &bytes[at..at + len.div_ceil(2)];
+            for i in 0..len {
+                let nibble = (body[i / 2] >> (4 * (i % 2))) & 0x0F;
+                if nibble == 0x08 {
+                    bail!("int4 block {b} uses the reserved value -8");
+                }
+                // Sign-extend the 4-bit two's-complement value.
+                let q = ((nibble << 4) as i8) >> 4;
+                out.push(q as f32 * scale);
+            }
+            if len % 2 == 1 && body[len / 2] >> 4 != 0 {
+                bail!("int4 block {b} has a non-zero pad nibble");
+            }
+            at += body.len();
+            remaining -= len;
+            b += 1;
         }
-        if len % 2 == 1 && body[len / 2] >> 4 != 0 {
-            bail!("int4 block {b} has a non-zero pad nibble");
-        }
-        at += body.len();
-        remaining -= len;
-        b += 1;
     }
     Ok(())
 }
@@ -516,15 +600,30 @@ pub fn encode_i4(vals: &[f32], block: usize) -> Vec<u8> {
 /// decodes to sign * 2^(L-7) * scale. The last block is zero-padded to
 /// `Q4_BLOCK`; `numel` truncates the tail.
 pub fn decode_q4(bytes: &[u8], numel: usize, out: &mut Vec<f32>) -> Result<()> {
-    let block_bytes = 4 + Q4_BLOCK / 2;
-    let expected = q4_nbytes(numel)?;
+    decode_q4_segments(bytes, &[numel], out)
+}
+
+/// As `decode_q4`; blocks restart at the start of every segment.
+pub fn decode_q4_segments(bytes: &[u8], segments: &[usize], out: &mut Vec<f32>) -> Result<()> {
+    let expected = q4_nbytes_segments(segments)?;
+    let numel: usize = segments.iter().sum();
     if bytes.len() != expected {
-        bail!(
-            "q4 payload has {} bytes, expected {} for {numel} values",
-            bytes.len(),
-            expected
-        );
+        bail!("q4 payload has {} bytes, expected {expected} for {numel} values", bytes.len());
     }
+    out.clear();
+    out.try_reserve(numel)
+        .map_err(|error| anyhow::anyhow!("cannot allocate q4 tensor: {error}"))?;
+    let mut at = 0usize;
+    for &segment in segments {
+        let len = q4_nbytes(segment)?;
+        decode_q4_append(&bytes[at..at + len], segment, out)?;
+        at += len;
+    }
+    Ok(())
+}
+
+fn decode_q4_append(bytes: &[u8], numel: usize, out: &mut Vec<f32>) -> Result<()> {
+    let block_bytes = 4 + Q4_BLOCK / 2;
     // 2^(level-7) for level 1..=7; level 0 handled as exact zero.
     const LUT: [f32; 8] = [
         0.0,
@@ -536,9 +635,6 @@ pub fn decode_q4(bytes: &[u8], numel: usize, out: &mut Vec<f32>) -> Result<()> {
         1.0 / 2.0,
         1.0,
     ];
-    out.clear();
-    out.try_reserve(numel)
-        .map_err(|error| anyhow::anyhow!("cannot allocate q4 tensor: {error}"))?;
     for (b, chunk) in bytes.chunks_exact(block_bytes).enumerate() {
         let scale = f32::from_le_bytes(chunk[..4].try_into().unwrap());
         if !scale.is_finite() || scale < 0.0 {
@@ -823,5 +919,97 @@ mod tests {
         assert_eq!(decode_budget_done(&report).unwrap(), 17);
         report.push(0);
         assert!(decode_budget_done(&report).is_err());
+    }
+
+    /// Encode `vals` so blocks restart at every segment (test counterpart of
+    /// the Python tensor-block codecs).
+    fn encode_segments(vals: &[f32], segments: &[usize], block: usize, encode: fn(&[f32], usize) -> Vec<u8>) -> Vec<u8> {
+        let mut out = (block as u32).to_le_bytes().to_vec();
+        let mut at = 0;
+        for &n in segments {
+            out.extend_from_slice(&encode(&vals[at..at + n], block)[4..]);
+            at += n;
+        }
+        out
+    }
+
+    #[test]
+    fn tensor_block_flag_is_valid_only_on_block_quantized_push_dtypes() {
+        for base in [DTYPE_F32_PUSH_I8, DTYPE_F32_PUSH_Q4, DTYPE_F32_PUSH_I4] {
+            assert!(valid_session_dtype(base | DTYPE_FLAG_TENSOR_BLOCKS));
+            assert!(valid_session_dtype(base | DTYPE_FLAG_TENSOR_BLOCKS | DTYPE_FLAG_BCAST_DELTA));
+            assert_eq!(session_base(base | DTYPE_FLAG_TENSOR_BLOCKS), base);
+            assert_eq!(bulk_dtype(base | DTYPE_FLAG_TENSOR_BLOCKS), DTYPE_F32);
+        }
+        for base in [DTYPE_F32, DTYPE_BF16, DTYPE_Q4, DTYPE_F32_PUSH_BF16] {
+            assert!(!valid_session_dtype(base | DTYPE_FLAG_TENSOR_BLOCKS));
+        }
+        assert!(!tensor_blocks(DTYPE_F32_PUSH_I8));
+    }
+
+    #[test]
+    fn tensor_blocks_restart_per_segment_for_int8_and_int4() {
+        let segments = [3usize, 130, 1, 257];
+        let vals: Vec<f32> = (0..391).map(|i| ((i as f32) * 0.37).sin() * (1.0 + (i % 7) as f32)).collect();
+        let dtype8 = DTYPE_F32_PUSH_I8 | DTYPE_FLAG_TENSOR_BLOCKS;
+        let dtype4 = DTYPE_F32_PUSH_I4 | DTYPE_FLAG_TENSOR_BLOCKS;
+        for (dtype, wire, bound) in [
+            (dtype8, encode_segments(&vals, &segments, 128, encode_i8), 1.0 / 254.0),
+            (dtype4, encode_segments(&vals, &segments, 64, encode_i4), 1.0 / 14.0),
+        ] {
+            assert!(wire.len() <= max_push_nbytes_segments(dtype, &segments).unwrap());
+            let mut out = Vec::new();
+            decode_push_segments(dtype, &wire, &segments, &mut out).unwrap();
+            assert_eq!(out.len(), vals.len());
+            let mut at = 0;
+            for &n in &segments {
+                let absmax = vals[at..at + n].iter().fold(0f32, |m, v| m.max(v.abs()));
+                for k in at..at + n {
+                    assert!((out[k] - vals[k]).abs() <= absmax * bound * 1.001 + 1e-6);
+                }
+                at += n;
+            }
+            // The whole-fragment layout has a different size, so it is refused.
+            assert!(decode_push_segments(dtype, &wire, &[vals.len()], &mut out).is_err());
+        }
+    }
+
+    #[test]
+    fn replicated_tensor_decodes_identically_next_to_different_neighbours() {
+        let tensor: Vec<f32> = (0..70).map(|i| 0.01 * (i as f32 - 30.0)).collect();
+        let loud = vec![50.0f32; 45];
+        let quiet = vec![1e-4f32; 91];
+        for (dtype, block, encode) in [
+            (DTYPE_F32_PUSH_I8, 128usize, encode_i8 as fn(&[f32], usize) -> Vec<u8>),
+            (DTYPE_F32_PUSH_I4, 64, encode_i4),
+        ] {
+            let dtype = dtype | DTYPE_FLAG_TENSOR_BLOCKS;
+            let decode_with = |before: &[f32], after: &[f32]| {
+                let vals: Vec<f32> = [before, &tensor, after].concat();
+                let segs = [before.len(), tensor.len(), after.len()];
+                let wire = encode_segments(&vals, &segs, block, encode);
+                let mut out = Vec::new();
+                decode_push_segments(dtype, &wire, &segs, &mut out).unwrap();
+                out[before.len()..before.len() + tensor.len()].to_vec()
+            };
+            assert_eq!(decode_with(&loud, &quiet), decode_with(&quiet, &loud));
+        }
+    }
+
+    #[test]
+    fn q4_tensor_blocks_pad_every_segment_and_reject_the_fragment_layout() {
+        let block: Vec<u8> = [1.0f32.to_le_bytes().to_vec(), vec![0x77; Q4_BLOCK / 2]].concat();
+        let segments = [3usize, 300];
+        let wire = block.repeat(3);
+        assert_eq!(wire.len(), q4_nbytes_segments(&segments).unwrap());
+        let mut out = Vec::new();
+        decode_push_segments(DTYPE_F32_PUSH_Q4 | DTYPE_FLAG_TENSOR_BLOCKS, &wire, &segments, &mut out).unwrap();
+        assert_eq!(out, vec![1.0f32; 303]);
+        assert!(decode_push_segments(DTYPE_F32_PUSH_Q4, &wire, &[303], &mut out).is_err());
+        assert_eq!(push_segments(DTYPE_F32_PUSH_Q4, 303, &[3, 300]).unwrap(), vec![303]);
+        assert_eq!(
+            push_segments(DTYPE_F32_PUSH_Q4 | DTYPE_FLAG_TENSOR_BLOCKS, 303, &[3, 300]).unwrap(),
+            vec![3, 300]
+        );
     }
 }

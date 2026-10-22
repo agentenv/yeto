@@ -205,6 +205,7 @@ def test_int8_and_downlink_options_are_bound_into_the_role_stream_contract():
     )
 
     exact = _role_stream_config("actor", 30100, sweep=True)
+    exact = replace(exact, push_tensor_blocks=False)  # the layout of sessions started before tensor blocks
     hashes = {role_stream_session_contract_hash("1" * 64, config) for config in (
         exact,
         replace(exact, push_dtype="int8"),

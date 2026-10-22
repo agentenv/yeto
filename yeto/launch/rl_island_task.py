@@ -114,6 +114,8 @@ def _rl_trainable_island_flags(args, learner_id: int, num_learners: int) -> str:
         sweep += f" --sweep-push-dtype {args.rl_sync_push_dtype}"
     if getattr(args, "rl_sync_overlap", False):
         sweep += " --sweep-overlap"
+    if getattr(args, "rl_sync_push_no_tensor_blocks", False):
+        sweep += " --sweep-push-no-tensor-blocks"
     if getattr(args, "rl_sync_push_dtype", "f32") == "int8":
         sweep += f" --sweep-push-int8-block {int(getattr(args, 'rl_sync_push_int8_block', 128))}"
     if getattr(args, "rl_sync_push_dtype", "f32") == "int4":

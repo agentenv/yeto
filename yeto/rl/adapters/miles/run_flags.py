@@ -351,6 +351,11 @@ _ISLAND = (
         help="full-parameter sweep, int4 pushes: values per f32 absmax scale",
     ),
     island_flag(
+        "--sweep-push-no-tensor-blocks",
+        action="store_true",
+        help="full-parameter sweep, int8/int4/int4-log pushes: blocks run across the whole fragment",
+    ),
+    island_flag(
         "--sweep-push-int4-stochastic",
         action="store_true",
         help="full-parameter sweep, int4 pushes: stochastic instead of nearest rounding",

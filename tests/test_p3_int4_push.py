@@ -318,6 +318,7 @@ def test_int4_options_are_bound_into_the_role_stream_contract_and_cli():
     from yeto.rl.engine.run_flags import rl_flags
 
     exact = _role_stream_config("actor", 30100, sweep=True)
+    exact = replace(exact, push_tensor_blocks=False)  # the layout of sessions started before tensor blocks
     linear = replace(exact, push_dtype="int4")
     log = replace(exact, push_dtype="int4-log")
     assert linear.wire_dtype_label == "fp32-push-int4-b128"
@@ -462,6 +463,9 @@ class _FakeClient:
     def __init__(self) -> None:
         self.outcomes: list[object] = []
         self.sent: list[np.ndarray] = []
+
+    def push_segments(self, fragment_id):
+        return None
 
     def push_fragment_parts(self, *args):
         parts = args[-1]

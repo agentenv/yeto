@@ -30,11 +30,11 @@ feedback therefore requires nearest rounding (no stochastic rounding).
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 
 import numpy as np
 
-from .protocol import f32_bytes_to_bf16, f32_bytes_to_i4, i4_bytes_to_f32, i4_nbytes
+from .protocol import _block_aligned_chunks, f32_bytes_to_bf16, f32_bytes_to_i4, i4_bytes_to_f32, i4_nbytes
 
 RESIDUAL_DTYPES = ("bf16", "f32")
 
@@ -75,8 +75,13 @@ class PushErrorFeedback:
         fragments_per_sweep: int,
         numel: int,
         f32_parts: Iterable[bytes | bytearray | memoryview],
+        segments: Sequence[int] | None = None,
     ) -> Iterator[bytes]:
-        """Yield ``delta + residual`` as f32 bytes and stage the new residual."""
+        """Yield ``delta + residual`` as f32 bytes and stage the new residual.
+
+        ``segments`` are the tensor sizes of a tensor-block session; the
+        residual then follows the same restarting blocks as the wire.
+        """
 
         carried = None
         previous = self._residuals.get(fragment_id)
@@ -87,8 +92,6 @@ class PushErrorFeedback:
                 del self._residuals[fragment_id]
         self._pending.pop(fragment_id, None)
         staged = np.empty(numel, np.float32 if self.residual_dtype == "f32" else np.uint16)
-        span = 4 * self.block
-        carry = b""
         offset = 0
 
         def emit(data: bytes) -> bytes:
@@ -105,16 +108,8 @@ class PushErrorFeedback:
             offset = end
             return raw
 
-        for part in f32_parts:
-            data = carry + bytes(part)
-            whole = len(data) - len(data) % span
-            carry = data[whole:]
-            if whole:
-                yield emit(data[:whole])
-        if len(carry) % 4:
-            raise ValueError("f32 push delta ends mid-value")
-        if carry:
-            yield emit(carry)
+        for chunk in _block_aligned_chunks(f32_parts, self.block, segments):
+            yield emit(chunk)
         if offset != numel:
             raise ValueError(f"push delta for fragment {fragment_id} has {offset} values, expected {numel}")
         self._pending[fragment_id] = (global_step, staged)
