@@ -19,6 +19,7 @@ from yeto.cloud import modal_ckpt_store as mcs
 from yeto.rl.adapters.miles.rebuild_wiring import CutSource
 from yeto.rl.adapters.miles.round_cut import POINTER, RoundCutCheckpoint, RoundCutError
 from yeto.rl.engine.cut import CutError
+from yeto.rl.engine.recovery import CUT_KEY
 from yeto.rl.engine import resume as rs
 from yeto.rl.engine.bridges import LocalOnlySync
 from yeto.rl.engine.controller import STORE_MANIFEST
@@ -67,6 +68,19 @@ def _cp(ctl, driver, trainer, ledger, *, backend_fingerprint="miles@0af62f4d", *
     kw.setdefault("fingerprint", dict(FP))
     kw.setdefault("next_lr", lambda d: getattr(d, "last_applied_lrs", None))
     return RoundCutCheckpoint(controller=ctl, source=source, trainer=trainer, **kw)
+
+
+def _cut(cp, driver, **kw):
+    """Save a cut and complete it: a periodic cut (also the store's first, E1) commits in
+    the background; the outcome of that commit is folded into the returned pointer."""
+    info = cp.save(driver, **kw)
+    if info is None or info["store_commit"] != "deferred":
+        return info
+    done = cp.join_commit(driver)
+    assert done["ok"] is True, done
+    pointer = cp.pointer()
+    assert pointer["cut_id"] == info["cut_id"]
+    return {**info, "store_synced": True, "cut_bytes": done["cut_bytes"], CUT_KEY: pointer[CUT_KEY]}
 
 
 def _trained_island(tmp_path, store, rounds, *, name="a", seed=3):
@@ -186,6 +200,101 @@ def test_cuts_without_latest_are_refused(tmp_path):
         _rctl(tmp_path, "a", store)
 
 
+@pytest.mark.parametrize("layout", ["unmarked", "one_marked_one_not", "stray_file", "mark_of_another_cut"])
+def test_cuts_without_latest_are_refused_unless_all_are_a_marked_first_cut(tmp_path, layout):
+    """E1: only a store whose every cut carries the first-cut mark (never committed)
+    is started over; any other store with cuts and no LATEST is refused, untouched."""
+    store = _store(tmp_path / "store")
+    cuts = store.root / rs.ROUND_CUTS
+    (cuts / "r000004-x").mkdir(parents=True)
+    if layout == "one_marked_one_not":
+        rs.mark_first_cut(store.root, "r000004-x")
+        (cuts / "r000008-x").mkdir()
+    elif layout == "stray_file":
+        rs.mark_first_cut(store.root, "r000004-x")
+        (cuts / "notes.txt").write_text("?")
+    elif layout == "mark_of_another_cut":
+        rs.mark_first_cut(store.root, "r000008-x")
+    before = sorted(p.name for p in cuts.iterdir())
+    with pytest.raises(rs.StoreIntegrityError, match="no LATEST"):
+        _rctl(tmp_path, "a", store)
+    assert sorted(p.name for p in cuts.iterdir()) == before
+
+
+def _first_cut_in_flight(tmp_path, store, every=4):
+    """An island at rollout ``every`` whose first (periodic) cut was captured, its
+    shards written, and then the process died before the store commit (no join)."""
+    rank, ctl, driver, cp = _trained_island(tmp_path, store, every)
+    cp.every = every
+    info = cp.save(driver, rollout_id=every)
+    assert info["store_commit"] == "deferred"
+    cp.trainer.finish_cut(cp._deferred["pending"])  # the writer finished; nothing committed
+    return rank, ctl, driver, cp, info
+
+
+def test_first_periodic_cut_with_interval_n_commits_in_the_background(tmp_path):
+    """E1: with --rl-cut-every 4 the store's first cut (rollout 4) is in the steady
+    rounds: it is deferred like the others, marked until its LATEST is committed."""
+    store = _store(tmp_path / "store", _Vol())
+    rank, ctl, driver, cp = _trained_island(tmp_path, store, 4)
+    cp.every = 4
+    calls = []
+    start = cp.trainer.start_cut
+    cp.trainer.start_cut = lambda **kw: (calls.append(rs.first_cut_mark(store.root, kw["context"].cut_id)
+                                                      .is_file()), start(**kw))[1]
+    info = cp.save(driver, rollout_id=4)
+    assert info["store_commit"] == "deferred" and info["total_s"] is not None
+    assert calls == [True]  # marked before the shards were started
+    assert rs.read_latest(store.root) is None and cp.pointer() is None
+    done = cp.join_commit(driver)
+    assert done["ok"] is True and rs.read_latest(store.root)["cut_id"] == info["cut_id"]
+    assert not list((store.root / rs.ROUND_CUTS).glob(f"*{rs.FIRST_CUT_MARK}"))
+    assert _rctl(tmp_path, "b", store).restored["latest"]["cut_id"] == info["cut_id"]
+
+
+def test_a_later_cut_is_not_marked(tmp_path):
+    store = _store(tmp_path / "store", _Vol())
+    rank, ctl, driver, cp = _trained_island(tmp_path, store, 2)
+    _cut(cp, driver, rollout_id=2)
+    train_step(rank, torch.randn(3, 6, generator=torch.Generator().manual_seed(4)))
+    driver.local_step = 3
+    driver.published_version = 3
+    cp.source.ledger = _Ledger(3)
+    info = cp.save(driver, rollout_id=3)
+    assert info["store_commit"] == "deferred"
+    assert not rs.first_cut_mark(store.root, info["cut_id"]).exists()
+    assert cp.join_commit(driver)["ok"] is True
+
+
+def test_a_run_dead_during_its_first_cut_commit_starts_over_at_zero(tmp_path):
+    store = _store(tmp_path / "store", _Vol())
+    _rank, _ctl, _driver, _cp_a, info = _first_cut_in_flight(tmp_path, store)
+    cuts = store.root / rs.ROUND_CUTS
+    assert (cuts / info["cut_id"]).is_dir() and rs.first_cut_mark(store.root, info["cut_id"]).is_file()
+    assert rs.read_latest(store.root) is None
+    ctl_b = _rctl(tmp_path, "b", store)  # a fresh machine
+    assert ctl_b.restored is None and sorted(ctl_b.discarded_first_cut) == sorted(
+        [f"{rs.ROUND_CUTS}/{info['cut_id']}", f"{rs.ROUND_CUTS}/{info['cut_id']}{rs.FIRST_CUT_MARK}"])
+    assert list(cuts.iterdir()) == []
+    journal = [json.loads(line) for line in (ctl_b.state_dir / rs.RESUME_JOURNAL).read_text().splitlines()]
+    assert journal[-1]["action"] == "discard_unfinished_first_cut"
+    rank_b = make_rank(9)
+    driver_b = _Driver(rank_b)
+    assert _cp(ctl_b, driver_b, _trainer(rank_b), _Ledger(0)).resume(driver_b) is None  # rollout 0
+
+
+def test_an_in_place_restart_after_a_dead_first_cut_moves_the_state_dir_aside(tmp_path):
+    """The dead run's background commit may have pointed its local state dir at the
+    cut before dying; a restart on the same disk must not resume from that pointer."""
+    store = _store(tmp_path / "store", _Vol())
+    _rank, ctl, _driver, _cp_a, info = _first_cut_in_flight(tmp_path, store)
+    (ctl.state_dir / POINTER).write_text(json.dumps({"cut_id": info["cut_id"], "next_rollout_id": 4}))
+    ctl_b = rs.ResumeController(state_dir=ctl.state_dir, store=store)
+    assert ctl_b.discarded_first_cut and not (ctl_b.state_dir / POINTER).exists()
+    assert list(ctl.state_dir.parent.glob(f"{ctl.state_dir.name}.prev-*"))
+    assert ctl_b.incarnation["index"] == 0  # the dead run's incarnations went aside too
+
+
 # ---------------------------------------------------------------- round cut: save -> kill -> resume
 def test_save_kill_resume_without_elastic_continues_bitwise(tmp_path):
     """tasks 5.2: fake trainer, save -> the machine is gone -> a fresh trainer with
@@ -193,9 +302,10 @@ def test_save_kill_resume_without_elastic_continues_bitwise(tmp_path):
     vol = _Vol()
     store = _store(tmp_path / "store", vol)
     rank_a, ctl_a, driver_a, cp_a = _trained_island(tmp_path, store, 2)
-    info = cp_a.save(driver_a, rollout_id=2)
-    # E1: the store's first cut is complete inline (a store with cuts but no LATEST refuses to start)
-    assert info["store_synced"] is True and info["store_commit"] == "inline"
+    info = _cut(cp_a, driver_a, rollout_id=2)
+    # E1: the store's first cut commits in the background too (marked until LATEST is committed)
+    assert info["store_synced"] is True and info["store_commit"] == "deferred"
+    assert not list((store.root / rs.ROUND_CUTS).glob(f"*{rs.FIRST_CUT_MARK}"))
     assert info["cut_bytes"] > 0 and info["lr_at_next_round"] == [5e-6]
     assert info["run_fingerprint"] == FP and info["consumed_groups"] == 8 and info["incarnation_index"] == 0
     assert vol.commits >= 1 and rs.read_latest(store.root)["cut_id"] == info["cut_id"]
@@ -223,7 +333,7 @@ def test_save_kill_resume_without_elastic_continues_bitwise(tmp_path):
 def test_resume_refuses_a_changed_config_unless_allowed(tmp_path):
     store = _store(tmp_path / "store")
     _r, _c, driver_a, cp_a = _trained_island(tmp_path, store, 2)
-    cp_a.save(driver_a, rollout_id=2)
+    _cut(cp_a, driver_a, rollout_id=2)
     rank_b = make_rank(9)
     ctl_b = _rctl(tmp_path, "b", store)
     cp_b = _cp(ctl_b, _Driver(rank_b), _trainer(rank_b), _Ledger(2), fingerprint={**FP, "seed": 1})
@@ -243,7 +353,7 @@ def test_longer_run_changes_backend_fingerprint_and_lr_only_when_allowed(tmp_pat
     --rl-resume-allow-config-change is given."""
     store = _store(tmp_path / "store")
     _r, _c, driver_a, cp_a = _trained_island(tmp_path, store, 2)
-    cp_a.save(driver_a, rollout_id=2)
+    _cut(cp_a, driver_a, rollout_id=2)
     rank_b = make_rank(9)
     cp_b = _cp(_rctl(tmp_path, "b", store), _Driver(rank_b), _trainer(rank_b), _Ledger(2),
                backend_fingerprint="miles@longer")
@@ -264,7 +374,7 @@ def test_longer_run_changes_backend_fingerprint_and_lr_only_when_allowed(tmp_pat
 def test_resume_refuses_lr_jump_and_ledger_drift(tmp_path):
     store = _store(tmp_path / "store")
     _r, _c, driver_a, cp_a = _trained_island(tmp_path, store, 2)
-    cp_a.save(driver_a, rollout_id=2)
+    _cut(cp_a, driver_a, rollout_id=2)
     rank_b = make_rank(9)
     driver_b = _Driver(rank_b)
     cp_b = _cp(_rctl(tmp_path, "b", store), driver_b, _trainer(rank_b), _Ledger(2))
@@ -293,7 +403,7 @@ def test_cut_every_two_keeps_the_newest_two(tmp_path):
         driver.local_step = rid
         driver.published_state = SimpleNamespace(policy_tensor_hash=lambda: _hash(rank), policy_version=rid)
         cp.source.ledger = _Ledger(rid)
-        if cp.save(driver, rollout_id=rid) is not None:
+        if _cut(cp, driver, rollout_id=rid) is not None:
             saved.append(rid)
     assert saved == [2, 4, 6]
     assert cp.save(driver, rollout_id=7, final=True)["final"] is True  # last round always cut
@@ -600,8 +710,8 @@ def _island_with_first_cut(tmp_path, store, keep=2):
     trainer = _CountingTrainer(_trainer(rank))
     cp = _cp(ctl, driver, trainer, _Ledger(2))
     _publish(driver, 1, _hash(rank))
-    first = cp.save(driver, rollout_id=1)
-    assert first["store_commit"] == "inline" and first["store_synced"] is True
+    first = _cut(cp, driver, rollout_id=1)
+    assert first["store_synced"] is True
     train_step(rank, torch.randn(3, 6, generator=g))
     driver.local_step = 2
     trainer.calls.clear()
@@ -759,7 +869,7 @@ def test_a_periodic_cut_never_waits_for_the_commit_it_starts(tmp_path):
     vol.gate.set()
     final = cp.save(driver, rollout_id=4, final=True)
     assert final["store_commit"] == "inline" and rs.read_latest(store.root)["cut_id"] == final["cut_id"]
-    committed = [f["cut_id"] for e, f in driver.events if e == "rl_cut_committed"]
+    committed = [f["cut_id"] for e, f in driver.events if e == "rl_cut_committed"][1:]  # after v1
     assert committed == ["r000002-" + cp.controller.incarnation["id"], info["cut_id"]]  # v2, then v3
 
 

@@ -18,6 +18,7 @@ from typing import Any
 
 from yeto.rl.bridge import BridgeConfig
 from yeto.rl.decoupled import DecoupledBridgeConfig
+from yeto.rl.engine.resume import DEFAULT_CUT_EVERY
 from yeto.rl.engine.run_flags import ISLAND, add_rl_flags, rl_option_pairs
 from yeto.rl.adapters.miles.models.deepseek_v4.expert_full import expert_full_specs
 from yeto.rl.export import adapter_targets, derive_peft_lora_specs
@@ -218,25 +219,39 @@ def _check_sample_store(args) -> None:
     check_sample_store(args)
 
 
+_CUT_FLAGS = (("rl_cut_every", "--rl-cut-every"), ("rl_cut_keep", "--rl-cut-keep"),
+              ("rl_stop_after_rounds", "--rl-stop-after-rounds"),
+              ("rl_cut_auto_mtbf_s", "--rl-cut-auto-mtbf-s"),
+              ("rl_cut_max_interval_s", "--rl-cut-max-interval-s"))
+
+
 def _check_resume_switches(args) -> None:
     """rl-resume-from-checkpoint: ``--rl-resume-store`` is single-island/no-sync;
-    the cut cadence flags need a store (elastic or resume)."""
+    ``--rl-island-cut-store`` (S27 R-2) is a synced island's; the cut cadence flags
+    need a store (elastic, resume or island cuts)."""
+    from yeto.rl.engine.cut_interval import cut_interval_for
+
     store = getattr(args, "rl_resume_store", None)
-    has_store = bool(store) or bool(getattr(args, "rl_elastic_checkpoint_store", None))
-    for name, flag in (("rl_cut_every", "--rl-cut-every"), ("rl_cut_keep", "--rl-cut-keep"),
-                       ("rl_stop_after_rounds", "--rl-stop-after-rounds")):
+    island_store = getattr(args, "rl_island_cut_store", None)
+    has_store = bool(store) or bool(island_store) or bool(getattr(args, "rl_elastic_checkpoint_store", None))
+    for name, flag in _CUT_FLAGS:
         value = getattr(args, name, None)
-        if value is not None and not int(value) >= 1:
-            raise ValueError(f"{flag} must be >= 1")
-    given = [f for n, f in (("rl_cut_every", "--rl-cut-every"), ("rl_cut_keep", "--rl-cut-keep"),
-                            ("rl_stop_after_rounds", "--rl-stop-after-rounds"))
-             if getattr(args, n, None) is not None]
+        if value is not None and not value > 0:
+            raise ValueError(f"{flag} must be positive" if isinstance(value, float) else f"{flag} must be >= 1")
+    cut_interval_for(every=getattr(args, "rl_cut_every", None),
+                     auto_mtbf_s=getattr(args, "rl_cut_auto_mtbf_s", None),
+                     max_interval_s=getattr(args, "rl_cut_max_interval_s", None))  # exclusive modes
+    given = [f for n, f in _CUT_FLAGS if getattr(args, n, None) is not None]
     if getattr(args, "rl_resume_allow_config_change", False):
         given.append("--rl-resume-allow-config-change")
     if given and not has_store:
-        raise ValueError(", ".join(given) + " need --rl-resume-store (or --rl-elastic-checkpoint-store)")
-    if getattr(args, "rl_cut_keep", None) is not None and not store:
-        raise ValueError("--rl-cut-keep applies to --rl-resume-store (the elastic store keeps every cut)")
+        raise ValueError(", ".join(given) + " need --rl-resume-store (or --rl-elastic-checkpoint-store "
+                         "or --rl-island-cut-store)")
+    if getattr(args, "rl_cut_keep", None) is not None and not (store or island_store):
+        raise ValueError("--rl-cut-keep applies to --rl-resume-store or --rl-island-cut-store "
+                         "(the elastic store keeps every cut)")
+    if island_store:
+        _check_island_cut_store(args)
     if getattr(args, "rl_stop_after_rounds", None) is not None and not store:
         raise ValueError("--rl-stop-after-rounds needs --rl-resume-store")
     if not store:
@@ -247,6 +262,21 @@ def _check_resume_switches(args) -> None:
     if not getattr(args, "rl_single_island_no_sync", False):
         raise ValueError("--rl-resume-store needs --rl-single-island-no-sync (multi-island resume "
                          "is not implemented yet: rl-resume-from-checkpoint 3.3)")
+
+
+def _check_island_cut_store(args) -> None:
+    """S27 R-2: island round cuts belong to a synced island (a syncer, no elastic store,
+    no resume store); its cuts are written only, so the resume switches do not apply."""
+    if getattr(args, "rl_single_island_no_sync", False) or getattr(args, "rl_elastic", False):
+        raise ValueError("--rl-island-cut-store is a synced island's (no --rl-single-island-no-sync, "
+                         "no --rl-elastic)")
+    if getattr(args, "rl_resume_store", None):
+        raise ValueError("--rl-island-cut-store and --rl-resume-store exclude each other")
+    for name, flag in (("rl_stop_after_rounds", "--rl-stop-after-rounds"),
+                       ("rl_resume_allow_config_change", "--rl-resume-allow-config-change")):
+        if getattr(args, name, None):
+            raise ValueError(f"{flag}: a synced island does not resume from its round cuts "
+                             "(the syncer is authoritative)")
 
 
 def _elastic_cells(value: str | None) -> tuple[str, ...]:
@@ -276,12 +306,28 @@ def apply_sample_role(args, miles_args, environ=None) -> None:
     miles_args.yeto_rl_sample_lane = sample_roles.buffer_lane(args)  # S25 C3: None off a synced trainer
 
 
+def _cut_auto(args) -> dict[str, float]:
+    """The timed cut interval flags (empty: every N rounds)."""
+    mtbf = getattr(args, "rl_cut_auto_mtbf_s", None)
+    if mtbf is None:
+        return {}
+    cap = getattr(args, "rl_cut_max_interval_s", None)
+    return {"auto_mtbf_s": float(mtbf), **({} if cap is None else {"max_interval_s": float(cap)})}
+
+
 def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
     """Carry the opt-in 2.3/3.x switches onto ``miles_args`` before any rollout
     process starts. Without them nothing is set (default path unchanged)."""
 
     if getattr(args, "rl_overlap_eval", False):
         miles_args.yeto_rl_overlap_eval = True
+    if getattr(args, "rl_verify_every_round", False):  # E1: read by entry (driver.verify_every_round)
+        miles_args.yeto_rl_verify_every_round = True
+    if getattr(args, "rl_profile_trainer", False):  # E1: read by state_plugin.train_one_step
+        miles_args.yeto_rl_profile_trainer = True
+        from yeto.rl.engine import phase_profile
+
+        phase_profile.enable()  # samples the thread that drives the phases
     if getattr(args, "rl_debug_dump", False):
         out = os.path.dirname(os.path.abspath(os.path.expanduser(
             getattr(args, "event_tape", None) or "~/yeto-output/rl-island.jsonl")))
@@ -324,15 +370,24 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
         miles_args.yeto_rl_allow_cross_node_engine_tp = True
     if getattr(args, "rl_allow_cross_node_tp", False):
         miles_args.yeto_rl_allow_cross_node_tp = True
-    if getattr(args, "rl_resume_store", None):
+    auto = _cut_auto(args)
+    if auto:
+        miles_args.yeto_rl_cut_auto = auto  # S27 R-2: a timed interval (any cut store)
+    island_store = getattr(args, "rl_island_cut_store", None)
+    if getattr(args, "rl_resume_store", None) or island_store:
+        every = getattr(args, "rl_cut_every", None)
         miles_args.yeto_rl_resume = {
-            "store": str(args.rl_resume_store),
+            "store": (str(args.rl_resume_store) if not island_store
+                      else f"{str(island_store).rstrip('/')}/island{int(args.learner_id)}"),
             "state_dir": str(getattr(args, "rl_resume_state_dir", None) or "~/yeto-rl/resume-state"),
-            "every": int(getattr(args, "rl_cut_every", None) or 1),
+            "every": None if auto else int(every or DEFAULT_CUT_EVERY),
+            **auto,
             "keep": int(getattr(args, "rl_cut_keep", None) or 2),
             "allow_config_change": bool(getattr(args, "rl_resume_allow_config_change", False)),
             "stop_after": (None if getattr(args, "rl_stop_after_rounds", None) is None
                            else int(args.rl_stop_after_rounds)),
+            # S27 R-2: a synced island writes its cuts only (no resume from them)
+            **({"write_only": True} if island_store else {}),
         }
         from yeto.rl.adapters.miles.rollout_meta_hook import ELASTIC_METADATA_ENV
 

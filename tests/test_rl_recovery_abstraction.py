@@ -12,7 +12,7 @@ import pytest
 import torch
 from test_rl_multinode_round_cut import _Driver, _trainer
 from test_rl_reconfig_recovery import _ctl
-from test_rl_resume_from_checkpoint import _cp, _Ledger, _rctl, _store, _trained_island, _Vol
+from test_rl_resume_from_checkpoint import _cp, _cut, _Ledger, _rctl, _store, _trained_island, _Vol
 
 from tests.rl_cut_fakes import make_rank, params, train_step
 from yeto.cloud import modal_ckpt_store as mcs
@@ -87,7 +87,7 @@ def test_preempt_periodic_and_manual_write_the_same_cut_format_and_resume(tmp_pa
     rank_a, ctl_a, driver_a, cp_a = _trained_island(tmp_path, store, 2)
     driver_a.sync = SimpleNamespace(outer_version=2)
 
-    periodic = cp_a.save(driver_a, rollout_id=2)
+    periodic = _cut(cp_a, driver_a, rollout_id=2)
 
     saver = s.InFlightSaver(lambda t: {"entries": [], "buffer_groups": 0}, str(tmp_path / "inflight"),
                             store=_store(tmp_path / "inflight", vol), printer=lambda line: None)
@@ -133,7 +133,7 @@ def test_resume_after_a_preemption_continues_from_the_last_periodic_cut(tmp_path
     the newest complete round cut (LATEST) with the same steps."""
     store = _store(tmp_path / "store")
     rank_a, ctl_a, driver_a, cp_a = _trained_island(tmp_path, store, 2)
-    periodic = rc.ConsistentCut.from_record(cp_a.save(driver_a, rollout_id=2)[rc.CUT_KEY])
+    periodic = rc.ConsistentCut.from_record(_cut(cp_a, driver_a, rollout_id=2)[rc.CUT_KEY])
     saver = s.InFlightSaver(lambda t: {"entries": []}, str(tmp_path / "inflight"), printer=lambda line: None)
     saver.rehearse(2)
     _reclaim_save(saver)
@@ -152,7 +152,7 @@ def test_same_save_code_on_another_backend_writes_the_same_cut(tmp_path):
     for name, vol in (("local", None), ("modal", _Vol())):
         store = _store(tmp_path / name / "store", vol)
         _, _, driver, cp = _trained_island(tmp_path / name, store, 2)
-        out = cp.save(driver, rollout_id=2)
+        out = _cut(cp, driver, rollout_id=2)
         record = dict(out[rc.CUT_KEY])
         record["checkpoint_id"] = record["checkpoint_id"].split("-")[0]  # incarnation differs
         records.append((out["store_synced"], record))

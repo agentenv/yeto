@@ -333,9 +333,26 @@ def test_synced_trainer_plan_forwards_the_sample_store_and_lanes():
         assert sample_roles.buffer_lane(parsed) == BufferLane(m, 2)
 
 
-def test_synced_trainer_launch_refuses_round_cuts():
-    with pytest.raises(ValueError, match="no round cuts"):
-        _synced_plan(("--rl-cut-every", "1"))
+def test_synced_trainer_launch_writes_island_round_cuts():
+    """S27 R-2: a cut interval gives every synced trainer its own write-only cuts."""
+    from types import SimpleNamespace as NS
+
+    from yeto.rl.adapters.miles import island_entry
+
+    with pytest.raises(ValueError, match="need --rl-island-scheduling legacy"):
+        _synced_plan(("--rl-cut-every", "2"))  # ElasticAvgSync takes no island cuts
+    _, plan = _synced_plan(("--rl-cut-every", "2", "--rl-island-scheduling", "legacy"))
+    for m, island in enumerate(plan["island_requests"]):
+        tokens = _island_tokens(island["learner_command"], str(m))
+        root = tokens[tokens.index("--rl-island-cut-store") + 1]
+        assert root.endswith("/island-cuts") and "--rl-resume-store" not in tokens
+        miles_args = NS()
+        island_entry.apply_ports_infra_switches(island_entry.parse_args(tokens), miles_args, {})
+        assert miles_args.yeto_rl_resume["store"] == f"{root}/island{m}"
+        assert miles_args.yeto_rl_resume["write_only"] is True
+    with pytest.raises(ValueError, match="does not resume from round cuts"):
+        _synced_plan(("--rl-cut-every", "1", "--rl-stop-after-rounds", "2",
+                      "--rl-island-scheduling", "legacy"))
 
 
 def test_island_refuses_a_sample_store_outside_a_synced_trainer():

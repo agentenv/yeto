@@ -495,6 +495,13 @@ _RUNTIME = (
     # 1.7 observation: per-round timeline labels (entry observe=...), off by default.
     shared_flag("--rl-observe-timeline", action="store_true",
                 help="ports: record per-round timeline labels (rl-infra-spec 1.7); off by default"),
+    shared_flag("--rl-verify-every-round", action="store_true",
+                help="ports: hash the policy and read the engine weight checksums back at every "
+                "publication (default: on the first publication and on every --rl-cut-every-th "
+                "round, which includes every round that keeps a round cut)"),
+    shared_flag("--rl-profile-trainer", action="store_true",
+                help="ports, observation only (E1): per training step, print where the trainer "
+                "process spends its time (stack samples, GC pauses, CUDA allocator counters)"),
     shared_flag("--rl-resource-sample-interval", type=float, default=None, metavar="SECONDS",
                 help="ports: NVML rl_resource_sample period forwarded to the learner "
                 "(default: learner default, 60 s with --rl-observe-timeline; 0 = off)"),
@@ -551,7 +558,17 @@ _RESUME = (
     # rl-resume-from-checkpoint (S17 C4)
     shared_flag("--rl-cut-every", type=int, default=None,
                 help="with --rl-checkpoint-store: keep a round cut every N rounds (plus the "
-                "last round and our own stop); default 1"),
+                "last round and our own stop); default 1 (every round). The publication "
+                "checks (policy hash, engine weight read-back) run at the same interval and "
+                "on the first publication; see --rl-verify-every-round"),
+    # S27 R-2: a timed cut interval
+    shared_flag("--rl-cut-auto-mtbf-s", type=float, default=None, metavar="S",
+                help="with --rl-checkpoint-store, instead of --rl-cut-every: keep a round cut "
+                "once sqrt(2 * C * S) seconds have passed since the previous one (C = "
+                "the measured seconds a cut costs the round, S = the expected seconds between "
+                "interruptions, e.g. 21600 for spot, 604800 on demand); off by default"),
+    shared_flag("--rl-cut-max-interval-s", type=float, default=None, metavar="S",
+                help="with --rl-cut-auto-mtbf-s: at most S seconds between cuts (default 3600)"),
     shared_flag("--rl-cut-keep", type=int, default=None,
                 help="with --rl-checkpoint-store and no --rl-elastic: keep the newest K cuts "
                 "(default 2); older ones are deleted only after the new LATEST is committed"),

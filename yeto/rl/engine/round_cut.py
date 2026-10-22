@@ -117,6 +117,11 @@ class CutSource:
             settled, token = bool(driver.at_safe_point), driver.expected_token
         if state is None or version is None:
             raise RebuildRefused("no published policy to cut")
+        if getattr(state, "verified", True) is False:
+            # E1: a cut carries the policy's content hash (resume checks it); a round
+            # whose publication was not hashed is never committed as a cut
+            raise RebuildRefused(f"the publication of policy v{version} was not verified "
+                                 "(no content hash); see --rl-verify-every-round")
         cursor = (self.rollout.data_cursor()
                   if callable(getattr(self.rollout, "data_cursor", None)) else None)
         if cursor is None:
@@ -208,18 +213,20 @@ class RoundCutCheckpoint:
 
     def __init__(self, *, controller: Any, source: Any, trainer: Any, every: int = 1,
                  fingerprint: dict[str, Any] | None = None, allow_config_change: bool = False,
-                 next_lr: Any = None, background_commit: bool | None = None) -> None:
+                 next_lr: Any = None, background_commit: bool | None = None,
+                 interval: Any = None) -> None:
+        from .cut_interval import FixedCutInterval
+
         if getattr(controller, "checkpoint_store", None) is None:
             raise ValueError("round cuts need the checkpoint store")
-        if int(every) < 1:
-            raise ValueError("--rl-cut-every must be >= 1")
+        # S27 R-2: when a cut is due (cut_interval: every N rounds, or by wall time)
+        self.interval = FixedCutInterval(every) if interval is None else interval
         self.controller = controller
         self.source = source  # rebuild_wiring.CutSource (cut_root is set here)
         self.trainer = trainer  # MilesTrainerGroup: save_cut / restore_cut / actual_layout
         self.root = str(Path(controller.checkpoint_store) / ROUND_CUTS)
         source.cut_root = self.root
         self.resumed: dict[str, Any] | None = None
-        self.every = int(every)
         self.fingerprint = dict(fingerprint) if fingerprint is not None else None
         self.allow_config_change = bool(allow_config_change)
         self.next_lr = next_lr  # callable(driver) -> list[float] | None
@@ -300,10 +307,20 @@ class RoundCutCheckpoint:
         return len(groups), consumed_digest(groups)
 
     # ---------------------------------------------------------------- save
-    def due(self, rollout_id: int, *, final: bool = False) -> bool:
-        from yeto.rl.engine.resume import should_cut
+    @property
+    def every(self) -> int:
+        """Rounds between cuts (fixed, or the last observed gap of a timed interval);
+        the publication checks follow it (``driver.verify_publication``)."""
+        return int(self.interval.every)
 
-        return should_cut(int(rollout_id), every=self.every, final=final)
+    @every.setter
+    def every(self, every: int) -> None:
+        from .cut_interval import FixedCutInterval
+
+        self.interval = FixedCutInterval(every)
+
+    def due(self, rollout_id: int, *, final: bool = False) -> bool:
+        return self.interval.due(int(rollout_id), final=final)
 
     def _skip(self, driver: Any, rollout_id: int, *, final: bool) -> bool:
         """No cut at this safe point: not due, island RECOVERY_REQUIRED, or just
@@ -321,6 +338,12 @@ class RoundCutCheckpoint:
         the background (trainers with ``start_cut``), else the finished cut (``None``)."""
         start = getattr(self.trainer, "start_cut", None)
         if background and callable(start):
+            if self.pointer() is None:
+                # the store's first cut: until its LATEST is committed the store holds a
+                # cut and no LATEST; the mark lets a restart drop it and start at 0
+                from yeto.rl.engine.resume import mark_first_cut
+
+                mark_first_cut(self.controller.checkpoint_store, context.cut_id)
             return start(epoch=self._epoch(), context=context, background=True)
         self.trainer.save_cut(epoch=self._epoch(), context=context)
         return None
@@ -388,11 +411,11 @@ class RoundCutCheckpoint:
     def _defer(self, final: bool) -> bool:
         """Write the trainer shards and commit the store in the background: periodic
         cuts only (the final cut is complete when the run ends), and not when a sample
-        buffer commits the same store during the round (no two commits at once), and
-        not before the first cut of the store is committed (a store holding cuts but
-        no LATEST refuses to start)."""
-        return (self.background_commit and not final and self.buffer_watermark is None
-                and self.pointer() is not None)
+        buffer commits the same store during the round (no two commits at once). The
+        store's first cut is deferred too (E1: with ``--rl-cut-every`` N > 1 it falls in
+        the steady rounds); :meth:`_start` marks it first, since a store holding cuts but
+        no LATEST refuses to start unless they are all such marked first cuts."""
+        return self.background_commit and not final and self.buffer_watermark is None
 
     def _drop_unpointed(self, cut_id: str) -> None:
         import shutil
@@ -511,6 +534,18 @@ class RoundCutCheckpoint:
 
     def save(self, driver: Any, *, rollout_id: int, final: bool = False,
              trigger: str | None = None) -> dict[str, Any] | None:
+        """:meth:`_save`, and the cut's critical-path seconds handed to the interval
+        (a timed interval sizes the next gap from them)."""
+        info = self._save(driver, rollout_id=rollout_id, final=final, trigger=trigger)
+        if info is not None:
+            cost = float(info.get("total_s") or 0.0)
+            if info.get("prepared_before_offload"):
+                cost += float(info.get("save_s") or 0.0)  # taken before the safe point
+            self.interval.record_cut(int(rollout_id), cost_s=cost)
+        return info
+
+    def _save(self, driver: Any, *, rollout_id: int, final: bool = False,
+              trigger: str | None = None) -> dict[str, Any] | None:
         """Cut the trainer at the safe point before rollout ``rollout_id`` (= the published
         version), point the state dir at it, sync the store. Returns the pointer, or None
         when nothing was cut (not due, no publication yet, already cut at this rollout,
@@ -830,11 +865,13 @@ def _cut_data_cursor(manifest: Any) -> dict[str, int] | None:
 
 
 def wire_round_cuts(driver: Any, *, controller: Any, source: Any, **options: Any) -> RoundCutCheckpoint | None:
-    """Give a :class:`~..bridges.LocalOnlySync` driver round cuts when a checkpoint store is
-    configured (other syncs own the policy: their syncer is authoritative)."""
-    from .bridges import LocalOnlySync
+    """Give a driver round cuts when a checkpoint store is configured and its sync
+    takes them (:class:`~.bridges.RoundCutHooks`): :class:`~.bridges.LocalOnlySync`
+    resumes from them; a synced island (S27 R-2) only writes them, its syncer stays
+    authoritative for the policy at start."""
+    from .bridges import RoundCutHooks
 
-    if getattr(controller, "checkpoint_store", None) is None or not isinstance(driver.sync, LocalOnlySync):
+    if getattr(controller, "checkpoint_store", None) is None or not isinstance(driver.sync, RoundCutHooks):
         return None
     checkpoint = RoundCutCheckpoint(controller=controller, source=source, trainer=driver.trainer, **options)
     driver.sync.round_cuts = checkpoint

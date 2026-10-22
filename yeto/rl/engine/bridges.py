@@ -94,9 +94,70 @@ def _local_state(driver: Any, version: int) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# Round cuts at the safe point (shared by the no-sync and the synced islands)
+# ---------------------------------------------------------------------------
+class RoundCutHooks:
+    """The driver's round-cut hooks (``at_safe_point`` / ``cut_due`` / ``prepare_cut``)
+    over ``self.round_cuts`` (:class:`~.round_cut.RoundCutCheckpoint`, wired when a
+    checkpoint store is configured; None: no cuts).
+
+    :class:`LocalOnlySync` resumes from its cuts. A synced island (S27 R-2:
+    ``--rl-checkpoint-store`` with a syncer) only writes them -- for offline
+    evaluation and as the island's own record; at start its syncer stays
+    authoritative for the policy -- and cuts periodically only (no final cut:
+    the syncer holds the final policy)."""
+
+    round_cuts: Any = None
+
+    def _cut_final(self, rollout_id: int) -> bool:
+        """Is the cut at the safe point before ``rollout_id`` the run's last one?"""
+        return False
+
+    def at_safe_point(self, driver: IslandDriver, *, rollout_id: int, final: bool = False) -> None:
+        """M4: keep a round cut at the safe point when one is due (``--rl-cut-every`` /
+        ``--rl-cut-auto-mtbf-s``, and at the end). A failed cut is reported, not fatal:
+        the previous pointer stays valid."""
+        if self.round_cuts is None:
+            return
+        try:
+            info = (self.round_cuts.save(driver, rollout_id=rollout_id, final=True,
+                                         **({"trigger": self.final_trigger} if self.final_trigger else {}))
+                    if final else self.round_cuts.save(driver, rollout_id=rollout_id))
+        except Exception as error:  # noqa: BLE001
+            driver.emit("rl_round_cut", rollout_id=rollout_id, ok=False, error=repr(error)[:2000])
+            return
+        if info is not None:
+            driver.emit("rl_round_cut", rollout_id=rollout_id, ok=True, **info)
+            driver.emit("rl_cut_saved", rollout_id=rollout_id, **{
+                k: info.get(k) for k in ("cut_id", "cut_bytes", "save_s", "store_copy_s",
+                                         "store_commit_s", "total_s", "write_bytes_per_s",
+                                         "policy_hash", "store_synced", "latest_seq", "pruned",
+                                         "incarnation_index", "final", "trainer_onloaded_for_cut",
+                                         "store_commit", "prepared_before_offload")})
+
+    def cut_due(self, rollout_id: int) -> bool:
+        """A round cut is due at the safe point before ``rollout_id``."""
+        return self.round_cuts is not None and self.round_cuts.due(
+            rollout_id, final=self._cut_final(rollout_id))
+
+    def prepare_cut(self, driver: IslandDriver, *, rollout_id: int, state: Any) -> None:
+        """E1: write the trainer part of the cut due at the next safe point while the
+        trainer is still resident (the driver calls this right before it offloads a
+        colocated trainer for the publication). A failure is reported, not fatal: the
+        safe point then cuts the usual way."""
+        if self.round_cuts is None:
+            return
+        try:
+            self.round_cuts.prepare(driver, rollout_id=rollout_id, state=state,
+                                    final=self._cut_final(rollout_id))
+        except Exception as error:  # noqa: BLE001
+            driver.emit("rl_cut_prepare_failed", rollout_id=rollout_id, error=repr(error)[:2000])
+
+
+# ---------------------------------------------------------------------------
 # No outer sync (single island smoke; task 4.1)
 # ---------------------------------------------------------------------------
-class LocalOnlySync:
+class LocalOnlySync(RoundCutHooks):
     """Train-only island: the local result is the next policy."""
 
     def __init__(self, num_rollout: int) -> None:
@@ -119,46 +180,6 @@ class LocalOnlySync:
         return SyncStart(_local_state(driver, rollout_id), rollout_id,
                          finished=rollout_id >= self._end())
 
-    def at_safe_point(self, driver: IslandDriver, *, rollout_id: int, final: bool = False) -> None:
-        """M4: keep a round cut at the safe point (every ``--rl-cut-every`` rounds, and
-        always at the end). A failed cut is reported, not fatal: the previous pointer
-        stays valid."""
-        if self.round_cuts is None:
-            return
-        try:
-            info = (self.round_cuts.save(driver, rollout_id=rollout_id, final=True,
-                                         **({"trigger": self.final_trigger} if self.final_trigger else {}))
-                    if final else self.round_cuts.save(driver, rollout_id=rollout_id))
-        except Exception as error:  # noqa: BLE001
-            driver.emit("rl_round_cut", rollout_id=rollout_id, ok=False, error=repr(error)[:2000])
-            return
-        if info is not None:
-            driver.emit("rl_round_cut", rollout_id=rollout_id, ok=True, **info)
-            driver.emit("rl_cut_saved", rollout_id=rollout_id, **{
-                k: info.get(k) for k in ("cut_id", "cut_bytes", "save_s", "store_copy_s",
-                                         "store_commit_s", "total_s", "write_bytes_per_s",
-                                         "policy_hash", "store_synced", "latest_seq", "pruned",
-                                         "incarnation_index", "final", "trainer_onloaded_for_cut",
-                                         "store_commit", "prepared_before_offload")})
-
-    def cut_due(self, rollout_id: int) -> bool:
-        """A round cut is due at the safe point before ``rollout_id``."""
-        return self.round_cuts is not None and self.round_cuts.due(
-            rollout_id, final=rollout_id >= self._end())
-
-    def prepare_cut(self, driver: IslandDriver, *, rollout_id: int, state: Any) -> None:
-        """E1: write the trainer part of the cut due at the next safe point while the
-        trainer is still resident (the driver calls this right before it offloads a
-        colocated trainer for the publication). A failure is reported, not fatal: the
-        safe point then cuts the usual way."""
-        if self.round_cuts is None:
-            return
-        try:
-            self.round_cuts.prepare(driver, rollout_id=rollout_id, state=state,
-                                    final=rollout_id >= self._end())
-        except Exception as error:  # noqa: BLE001
-            driver.emit("rl_cut_prepare_failed", rollout_id=rollout_id, error=repr(error)[:2000])
-
     def resume_data_cursor(self) -> dict[str, int] | None:
         """The data cursor recorded by the round cut this run resumed from (None:
         no resume, or the cut recorded none). The driver seeks to it first."""
@@ -167,6 +188,9 @@ class LocalOnlySync:
 
     def _end(self) -> int:
         return self.num_rollout if self.stop_after is None else min(self.num_rollout, int(self.stop_after))
+
+    def _cut_final(self, rollout_id: int) -> bool:
+        return rollout_id >= self._end()
 
     def is_final_round(self, driver, *, rollout_id: int) -> bool:
         return rollout_id + 1 >= self.num_rollout
@@ -305,7 +329,7 @@ class _PortsStrictRuntime:
             self.progress.commit_round(stats)
 
 
-class StrictAvgSync:
+class StrictAvgSync(RoundCutHooks):
     """Strict-avg at the safe boundary: export+PUSH, wait v+1, reset-apply."""
 
     def __init__(
@@ -955,7 +979,7 @@ class DecoupledIslandProgress:
         )
 
 
-class DecoupledSync:
+class DecoupledSync(RoundCutHooks):
     """Run-until-stop decoupled fragments through PolicyState/Publisher.
 
     Mirrors ``DecoupledMilesPolicySync`` step for step; ``_record_local_round``

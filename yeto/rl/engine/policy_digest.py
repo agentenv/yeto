@@ -314,6 +314,10 @@ class TrainerResidentState:
     weights_mark: Mapping[str, Any] | None = None
     # (state) -> None, raises when the trainer no longer holds this policy
     holds_fn: Callable[[Any], None] | None = field(default=None, repr=False, compare=False)
+    # E1: False for a round whose policy content is not hashed (see unverified_identity):
+    # ``digest`` then holds an identity of the trainer weights version, not a content hash,
+    # and the publisher skips the engine read-back
+    verified: bool = True
     _cache: dict = field(default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -349,7 +353,7 @@ class TrainerResidentState:
         state = self._cache.get("state")
         if state is None:
             state = self.materialize_fn(self.policy_version)
-            if state.policy_tensor_hash() != self.digest.policy_tensor_hash:
+            if self.verified and state.policy_tensor_hash() != self.digest.policy_tensor_hash:
                 raise PolicyDigestError(
                     "trainer weights changed after the resident digest was taken")
             self._cache["state"] = state
@@ -364,6 +368,18 @@ class TrainerResidentState:
 
     def policy_hash(self) -> str:
         return self.materialize().policy_hash()
+
+
+UNVERIFIED_PREFIX = b"yeto-unverified-policy-v1\0"
+
+
+def unverified_identity(policy_version: int, weights_mark: Mapping[str, Any]) -> str:
+    """The 64-hex policy identity of a publication whose content is not hashed (E1):
+    names the trainer process and its weights version, so two different weights never
+    share it; it is never equal to a content hash of the same weights."""
+    raw = json.dumps({"policy_version": int(policy_version), "weights": dict(weights_mark)},
+                     sort_keys=True).encode("utf-8")
+    return hashlib.sha256(UNVERIFIED_PREFIX + raw).hexdigest()
 
 
 def is_resident(state: Any) -> bool:

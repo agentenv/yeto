@@ -1252,7 +1252,12 @@ def install_grad_norm_recorder() -> bool:
         _EV_STATS.clear()
         _POLICY_STATS.clear()
         try:
-            result = original(*args, **kwargs)
+            if getattr(args[0] if args else kwargs.get("args"), "yeto_rl_profile_trainer", False):
+                from .train_profile import profiled  # E1 observation (--rl-profile-trainer)
+
+                result = profiled(original, *args, **kwargs)
+            else:
+                result = original(*args, **kwargs)
         finally:
             bump_weights_version()  # rl-publish-fastpath: any step may have written weights
         try:

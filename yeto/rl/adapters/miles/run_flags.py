@@ -402,6 +402,10 @@ _ISLAND = (
     # bucket mount or a shared path); round cuts + a hashed state snapshot + LATEST go there.
     island_flag("--rl-resume-store", default=None, metavar="PATH"),
     island_flag("--rl-resume-state-dir", default="~/yeto-rl/resume-state", metavar="PATH"),
+    # S27 R-2: round cuts of a synced island (strict / decoupled outer sync), written only
+    # (the syncer stays authoritative at start): the island's cuts go to
+    # <PATH>/island<learner id>; the launcher forwards it from --rl-checkpoint-store
+    island_flag("--rl-island-cut-store", default=None, metavar="PATH"),
     # S25 C3: a synced trainer island (--rl-sample-role trainer with a syncer): the
     # store of the sample buffer and the policy releases (no round cuts), and the
     # number of synced trainers (its buffer lane is learner id of that count)
