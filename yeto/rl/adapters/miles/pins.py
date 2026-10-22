@@ -53,7 +53,7 @@ MILES_NEXT_UPSTREAM_COMMIT = "9e4260de047a704208535c0e90c531929879ab40"
 # import stays light, so RayWorkerManager no longer loads megatron.bridge
 # (rl-trainer-cold-start-cost L2.2)).  17aeb5cb5 = 386ae3b07 + light Ray actors
 # stay off megatron_utils (L2.1) + the master port is held until use (S23 defect 9).
-MILES_NEXT_COMMIT = "44d41efd0a0428cb12b4ee34422de6f5e1ccb9d9"
+MILES_NEXT_COMMIT = "ed5f64fd7a183cccc8ab7ca3da90fba570108c2b"
 # sgl-project/sglang ``sglang-miles`` head when radixark/miles@9e4260d was
 # committed (upstream's Dockerfile follows that branch unpinned).
 SGLANG_NEXT_REPOSITORY = "https://github.com/michaellchung/sglang"
@@ -108,6 +108,10 @@ MILES_FORK_LINEAGE: tuple[str, ...] = (
     "17aeb5cb51635b9ba6ef4ca10db95762695c7e03",
     # 44d41efd0 = + megatron_utils runtime patches moved out of the package init (S24 L2.2); no loss path.
     "44d41efd0a0428cb12b4ee34422de6f5e1ccb9d9",
+    # 9462de532 = + FP8 rollout honors the FP8 ignore list, --rollout-hf-checkpoint (S26 E6); no loss path.
+    "9462de532f747cf688e090bbaf6b24f80e378fe8",
+    # ed5f64fd7 = + DP-invariant state export/restore carries the CPU-offload optimizer state (S26 E6 B8); no loss path.
+    "ed5f64fd7a183cccc8ab7ca3da90fba570108c2b",
 )
 
 
@@ -146,7 +150,7 @@ MILES_NEXT_BASE_IMAGE = (
 # every SHA.  PUBLIC on ghcr.io/michaellchung since 2026-10-07 (anonymous
 # pull); a private image needs SKYPILOT_DOCKER_{USERNAME,PASSWORD,SERVER} or
 # --rl-image-private (yeto.launcher.registry_login_for; read:packages token).
-# Tag 44d41ef-2fa8801; (S24 L2.2: Miles s24-miles-import2 and the lazy-modelopt
+# Tag ed5f64f-2fa8801; (S27 IMG: Miles ed5f64fd7, host-Adam round cuts (B8); previous 44d41ef-2fa8801 @sha256:5b9dc2a9...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-22-ed5f64f-2fa8801/). Earlier: tag 44d41ef-2fa8801; (S24 L2.2: Miles s24-miles-import2 and the lazy-modelopt
 # Megatron-LM patch in the layer; previous 17aeb5c-2fa8801 @sha256:b304f857...;
 # build record openspec/changes/rl-infra-spec/evidence/ports-image/
 # 2026-10-14-44d41ef-2fa8801/). Earlier: tag 17aeb5c-2fa8801; (S24 L2.1-L2.4: Miles s24-miles-import, peft 0.20.0 and the
@@ -155,7 +159,7 @@ MILES_NEXT_BASE_IMAGE = (
 # ports-image/2026-10-14-17aeb5c-2fa8801/). Earlier: tag 386ae3b-2fa8801; (S23 P0-1.11 GPU run: Miles s23-sao-streaming-roles; previous 64b591a-2fa8801 @sha256:fa2413be...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-14-386ae3b-2fa8801/). Earlier: (S19 #1: critic family + algo-supplement metrics baked in; previous ddce209-2fa8801 @sha256:9c252c38...) (S18 ARU-3: Miles s18-agentic-suspend = 2f7871fb2 + --agentic-suspend-between-turns; previous 2f7871f-2fa8801 @sha256:62b4f164..., efbbc63-2fa8801 @sha256:a7990076..., 8bc5223-4e4148f @sha256:4aeafd77...) ghcr.io/michaellchung (public package); linux/amd64 only.
 MILES_NEXT_IMAGE = (
     "docker:ghcr.io/michaellchung/yeto-miles-ports@sha256:"
-    "5b9dc2a9e6e315d73dabfbc6faae428b59cc01aabec6189645a5c8c80d6e3721"
+    "a476925466dad4df51db6955006a2230f9f88e800e44d529ac5d3f8820b19d58"
 )
 MILES_NEXT_IMAGE_MANIFEST = "/opt/yeto/image-manifest.json"
 # Nebius VM images whose /var/lib/docker already holds a docker image's

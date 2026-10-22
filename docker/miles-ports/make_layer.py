@@ -47,7 +47,10 @@ SITE = "opt/sglang/lib/python3.12/site-packages"
 # editable-installed packages (plus tests/docs).  Anything else -- setup.py,
 # pyproject.toml, setup.cfg, requirements*, sgl-kernel/**, rust/**, csrc,
 # .cu/.cpp -- changes what a real install builds and needs a docker build.
-EXEMPT_PREFIXES = ("test/", "tests/", "docs/")
+# Not installed and not imported by the package: tests, docs, and standalone
+# scripts under tools/ (e.g. Miles tools/convert_hf_to_fp8.py), which the
+# layer still ships as plain files in the archived tree.
+EXEMPT_PREFIXES = ("test/", "tests/", "docs/", "tools/")
 # Megatron-Bridge as the base installs it (pip, not editable) and the file the
 # layer writes over its package __init__ (see megatron_bridge_init.py).
 MEGATRON_BRIDGE_COMMIT = "8cd3466d14d2337c8492827b3712482c2b3e4866"
