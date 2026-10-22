@@ -42,6 +42,7 @@ from yeto.rl.engine.policy_digest import (
     TrainerResidentState,
     WeightsChanged,
 )
+from yeto.rl.engine.selection import RL_MATRIX_MERGES
 from yeto.rl.engine.trainable_state import LAYOUT_FRAGMENTS, UnsupportedLayoutError
 from yeto.rl.local_learner import ComponentIdentity, layout_stream_role
 from yeto.rl.trajectory_evidence import TrajectoryBatchEvidence
@@ -106,6 +107,13 @@ class RoleStreamConfig:
     # (see FullParameterSync._overlap_boundary); the local weights lag the
     # global policy by one outer step (yeto.rl.engine.sync_overlap).
     overlap: bool = False
+    # S27 P2 asynchronous rounds: the syncer may close a fragment round
+    # without this island (quorum K below the island count); a newer PULL then
+    # supersedes an unanswered older one and the broadcast overwrites.
+    partial_quorum: bool = False
+    # S27 P2: "rda" merges fragments without embedding tensors by
+    # radial-directional averaging (yeto.rl.local_learner.ParameterLayout).
+    matrix_merge: str = "avg"
 
     @property
     def session_dtype(self) -> int:
@@ -170,6 +178,10 @@ class RoleStreamConfig:
             raise ValueError("role-stream push dtype must be f32, bf16 or int8")
         if type(self.push_int8_block) is not int or not I8_BLOCK_MIN <= self.push_int8_block <= I8_BLOCK_MAX:
             raise ValueError("role-stream int8 block size is invalid")
+        if self.matrix_merge not in RL_MATRIX_MERGES:
+            raise ValueError(f"role-stream matrix merge must be one of {RL_MATRIX_MERGES}")
+        if self.overlap and self.partial_quorum:
+            raise ValueError("sync/train overlap needs the strict sweep roster")
         if self.wait_timeout <= 0 or not 0 < self.poll_seconds <= 1:
             raise ValueError("role-stream wait bounds are invalid")
         if (
@@ -265,6 +277,7 @@ def role_stream_session_contract_hash(
             "optimizer_steps_per_round": config.optimizer_steps_per_round,
             "wire_dtype": config.wire_dtype_label,
             **({"sync_train_overlap": True} if config.overlap else {}),
+            **({"partial_quorum": True} if config.partial_quorum else {}),
         },
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -379,6 +392,7 @@ class MilesFullParameterRoleStream:
             expected_layout_hash=self.config.expected_layout_hash,
             max_fragment_bytes=self.config.max_fragment_bytes,
             max_chunk_bytes=self.config.max_chunk_bytes,
+            matrix_merge=self.config.matrix_merge,
         )
         client = SyncerClient(
             self.config.syncer_addr,
@@ -664,6 +678,11 @@ class MilesFullParameterRoleStream:
             finally:
                 rebased.release()  # the applied target holds its own references
         self._staged.pop(key, None)
+        if self.config.partial_quorum:
+            # The round closed: an unanswered PULL of it can never commit.
+            permit = self._pending.get(fragment_id)
+            if permit is not None and permit.global_step <= version:
+                self._pending.pop(fragment_id)
         return (fragment_id,)
 
     def finish_rebase(self) -> None:
@@ -936,6 +955,18 @@ class MilesFullParameterRoleStream:
             if self._answered.get(key) == connection_generation:
                 continue
             previous = self._pending.get(permit.fragment_id)
+            if (
+                self.config.partial_quorum
+                and previous is not None
+                and previous.global_step != permit.global_step
+            ):
+                # The syncer permits a fragment's next round only after the
+                # previous one committed, so the newer permit supersedes; an
+                # older one is a closed round (its broadcast may still be on
+                # another WAN stream).
+                if permit.global_step > previous.global_step:
+                    self._pending[permit.fragment_id] = permit
+                continue
             if previous is not None and previous != permit:
                 raise RuntimeError("role-stream received conflicting PULLs")
             self._pending.setdefault(permit.fragment_id, permit)

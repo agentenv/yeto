@@ -34,7 +34,12 @@ from types import MappingProxyType
 from typing import Any, Protocol
 
 from yeto.rl.engine.backends import DEFAULT_BACKEND, KNOWN_BACKENDS
-from yeto.rl.engine.selection import RL_MATRIX_MERGES, SYNC_PRESETS, canonical_sync_preset
+from yeto.rl.engine.selection import (
+    FULL_PARAMETER_ROUNDS,
+    RL_MATRIX_MERGES,
+    SYNC_PRESETS,
+    canonical_sync_preset,
+)
 
 CLI = "cli"
 ISLAND = "island"
@@ -917,11 +922,22 @@ _SYNC = (
     # S27 P1: the outer-merge settings each RL preset used to fix. Unset keeps
     # the preset's value, so the syncer command and profile stay unchanged.
     cli_flag(
+        "--rl-sync-full-parameter-rounds",
+        choices=FULL_PARAMETER_ROUNDS,
+        default="sweep",
+        help="full-parameter only (S27 P2): sweep = strict policy sweeps (every "
+        "island per fragment round, plain average; the control, default); async = "
+        "asynchronous fragment rounds: H = --local-rl-rounds-per-sync, at most "
+        "--rl-sync-fragment-pipeline (1 or 2) fragment rounds in flight, the "
+        "decoupled preset's outer Nesterov (0.7, 0.9), and the --rl-sync-quorum "
+        "/ grace / learner-weight / max-base-lag / outer / matrix-merge options",
+    ),
+    cli_flag(
         "--rl-sync-quorum",
         type=int,
         default=None,
         metavar="K",
-        help="strict-avg / decoupled: islands whose pushes close a round "
+        help="strict-avg / decoupled / full-parameter async: islands whose pushes close a round "
         "(1..islands; default every island)",
     ),
     cli_flag(
@@ -929,45 +945,45 @@ _SYNC = (
         type=int,
         default=None,
         metavar="MS",
-        help="strict-avg / decoupled: cap of the adaptive post-quorum grace window "
+        help="strict-avg / decoupled / full-parameter async: cap of the adaptive post-quorum grace window "
         "(--grace-gamma, --grace-tau); default 0 = no grace",
     ),
     cli_flag(
         "--rl-sync-learner-weight",
         choices=("equal", "tokens2-over-steps"),
         default="equal",
-        help="strict-avg / decoupled: island weight in the outer merge; "
-        "tokens2-over-steps weights by c_tokens^2 / c_steps (default equal)",
+        help="strict-avg / decoupled / full-parameter async: island weight in the outer merge; "
+        "tokens2-over-steps weighs by c_tokens^2 / c_steps (default equal)",
     ),
     cli_flag(
         "--rl-sync-max-base-lag",
         type=int,
         default=0,
         metavar="N",
-        help="strict-avg / decoupled: how many rounds a push's base may lag the fragment "
-        "being merged (default 0 = late pushes are refused). One round merges every "
-        "fragment once; the launcher passes N x fragments to the syncer, whose "
+        help="strict-avg / decoupled / full-parameter async: how many rounds a push's base "
+        "may lag the fragment being merged (default 0 = late pushes are refused). One round "
+        "merges every fragment once; the launcher passes N x fragments to the syncer, whose "
         "--max-base-lag counts versions",
     ),
     cli_flag(
         "--rl-sync-outer-lr",
         type=float,
         default=None,
-        help="strict-avg / decoupled: outer Nesterov learning rate "
-        "(default: the preset's, 1.0 strict-avg, 0.7 decoupled)",
+        help="strict-avg / decoupled / full-parameter async: outer Nesterov learning rate "
+        "(default: the preset's, 1.0 strict-avg, 0.7 decoupled and full-parameter async)",
     ),
     cli_flag(
         "--rl-sync-outer-momentum",
         type=float,
         default=None,
-        help="strict-avg / decoupled: outer Nesterov momentum in [0, 1) "
-        "(default: the preset's, 0.0 strict-avg, 0.9 decoupled)",
+        help="strict-avg / decoupled / full-parameter async: outer Nesterov momentum in [0, 1) "
+        "(default: the preset's, 0.0 strict-avg, 0.9 decoupled and full-parameter async)",
     ),
     shared_flag(
         "--rl-sync-matrix-merge",
         choices=RL_MATRIX_MERGES,
         default="avg",
-        help="decoupled only: avg merges every fragment by weighted averaging "
+        help="decoupled and full-parameter async only: avg merges every fragment by weighted averaging "
         "(default); rda merges fragments without embedding tensors by "
         "radial-directional averaging, embedding fragments stay averaged",
     ),

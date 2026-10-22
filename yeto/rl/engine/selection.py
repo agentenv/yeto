@@ -30,6 +30,10 @@ SYNC_PRESETS = ("strict-avg", "decoupled", FULL_PARAMETER_SYNC_PRESET, SAO_STREA
 SYNC_PRESET_ALIASES = {"dense-full": FULL_PARAMETER_SYNC_PRESET}
 # S27 P1: the syncer merge of decoupled RL's matrix fragments (yeto.rl.core).
 RL_MATRIX_MERGES = ("avg", "rda")
+# S27 P2: how the full-parameter preset schedules its fragment rounds. "sweep"
+# is the strict policy sweep (every island per round, plain average, the
+# control); "async" runs asynchronous sharded fragment rounds.
+FULL_PARAMETER_ROUNDS = ("sweep", "async")
 
 
 def canonical_sync_preset(value: str) -> str:

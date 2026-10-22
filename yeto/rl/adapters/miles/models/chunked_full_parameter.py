@@ -214,6 +214,7 @@ class MilesChunkedFullParameterAdapter:
         max_fragment_bytes: int = 2 << 30,
         max_chunk_bytes: int = 256 << 20,
         stream_role: str | None = None,
+        matrix_merge: str = "avg",
     ) -> tuple[MilesChunkedFullParameterAdapter, ReferencedPolicyCut]:
         manifests = tuple(
             sorted(
@@ -229,6 +230,7 @@ class MilesChunkedFullParameterAdapter:
             max_fragment_bytes=max_fragment_bytes,
             max_chunk_bytes=max_chunk_bytes,
             stream_role=stream_role,
+            matrix_merge=matrix_merge,
         )
         actual_fragments = adapter.layout.fragments.num_fragments
         if (
@@ -281,6 +283,7 @@ class MilesChunkedFullParameterAdapter:
         max_fragment_bytes: int,
         max_chunk_bytes: int,
         stream_role: str | None = None,
+        matrix_merge: str = "avg",
     ) -> MilesChunkedFullParameterAdapter:
         from miles.backends.megatron_utils.full_parameter_state import (
             FullParameterFragmentPlan,
@@ -321,6 +324,7 @@ class MilesChunkedFullParameterAdapter:
                 num_fragments=count,
                 fragment_strategy="owner_affine",
                 stream_role=stream_role,
+                matrix_merge=matrix_merge,
             )
             if all(
                 fragment.numel * 4 <= max_fragment_bytes

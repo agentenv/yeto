@@ -146,7 +146,8 @@ def _syncer_quorum_timeout(args) -> str:
 
 
 def _syncer_checkpoint_every(args) -> int:
-    """Per-round checkpoints (1) unless the full-parameter preset sets an interval."""
+    """Per-round checkpoints (1) unless the full-parameter sweep sets an interval
+    (asynchronous rounds keep 1, checked by rl_args)."""
     return int(getattr(args, "rl_sync_checkpoint_every", 1)) if rl_dense_sweep(args) else 1
 
 
@@ -178,6 +179,12 @@ def rl_dense_sweep(args) -> bool:
             and getattr(args, "rl_sync_preset", None) == FULL_PARAMETER_SYNC_PRESET)
 
 
+def rl_full_parameter_async(args) -> bool:
+    """S27 P2: the full-parameter preset runs asynchronous sharded rounds, not
+    the strict policy sweep (``--rl-sync-full-parameter-rounds async``)."""
+    return rl_dense_sweep(args) and getattr(args, "rl_sync_full_parameter_rounds", "sweep") == "async"
+
+
 def rl_sao_streaming(args) -> bool:
     return (getattr(args, "training_mode", "sft") == "rl"
             and getattr(args, "rl_sync_preset", None) == SAO_STREAMING_SYNC_PRESET)
@@ -186,8 +193,11 @@ def rl_sao_streaming(args) -> bool:
 def _syncer_profile_binding(args) -> str:
     """Full-parameter presets bind every HELLO to the syncer's semantic profile.
 
-    full-parameter adds strict P-fragment policy sweeps; sao-streaming-full adds the
-    frozen contract's timeouts and the publishable final checkpoint."""
+    full-parameter adds strict P-fragment policy sweeps (asynchronous rounds,
+    S27 P2, add none); sao-streaming-full adds the frozen contract's timeouts and
+    the publishable final checkpoint."""
+    if rl_full_parameter_async(args):
+        return " --require-profile-binding"
     if rl_dense_sweep(args):
         async_checkpoint = " --async-checkpoint" if getattr(args, "rl_sync_async_checkpoint", False) else ""
         return f" --policy-sweep-fragments {args.fragments} --require-profile-binding{async_checkpoint}"
@@ -209,7 +219,8 @@ def rl_syncer_profile(args, num_learners: int):
     if rl_dense_sweep(args):
         quorum_timeout = _rl_quorum_timeout_s(args) or SYNCER_DEFAULT_QUORUM_TIMEOUT_S
         final_ack_timeout = quorum_timeout
-        sweep_fragments, mark_final = args.fragments, False
+        sweep_fragments = None if rl_full_parameter_async(args) else args.fragments
+        mark_final = False
     elif rl_sao_streaming(args):
         frozen = args.rl_sao_manifest.profile
         quorum_timeout, final_ack_timeout = frozen.quorum_timeout_s, frozen.final_ack_timeout_s

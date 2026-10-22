@@ -22,7 +22,7 @@ from .topology import (
 )
 from .syncer import (
     critic_syncer_address, elastic_debug_delay_env, elastic_debug_pause_env, island_hmac_secret,
-    rl_dense_sweep, rl_needs_critic, rl_sao_streaming, rl_syncer_profile,
+    rl_dense_sweep, rl_full_parameter_async, rl_needs_critic, rl_sao_streaming, rl_syncer_profile,
 )
 from .credentials import registry_login_for, split_secret_envs
 from .storage import (
@@ -107,6 +107,8 @@ def _rl_trainable_island_flags(args, learner_id: int, num_learners: int) -> str:
     sweep = (f" --parameter-layout-sha256 {args.rl_parameter_layout_sha256}"
              f" --num-learners {num_learners}"
              f" --syncer-profile-sha256 {rl_syncer_profile(args, num_learners).sha256}")
+    if rl_full_parameter_async(args):
+        sweep += " --full-parameter-rounds async"
     if getattr(args, "rl_sync_push_dtype", "f32") != "f32":
         sweep += f" --sweep-push-dtype {args.rl_sync_push_dtype}"
     if getattr(args, "rl_sync_overlap", False):

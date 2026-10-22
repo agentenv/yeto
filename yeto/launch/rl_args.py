@@ -20,7 +20,8 @@ from .topology import (
     rl_island_count, rl_island_placement_args, rl_island_spec, rl_min_nodes, rl_trainer_shape,
 )
 from .syncer import (
-    ROLE_SYNCERS, island_scheduling_mode, rl_needs_critic, rl_syncer_profile, rl_trainable_roles,
+    ROLE_SYNCERS, island_scheduling_mode, rl_full_parameter_async, rl_needs_critic,
+    rl_syncer_profile, rl_trainable_roles,
 )
 from .storage import _rl_checkpoint_mount
 from .rl_ports import _prepare_ports_algorithm
@@ -155,6 +156,7 @@ _FULL_PARAMETER_SYNC_DEFAULTS = (
     ("rl_sync_checkpoint_every", 1, "--rl-sync-checkpoint-every"),
     ("rl_sync_push_int8_block", 128, "--rl-sync-push-int8-block"),
     ("rl_sync_overlap", False, "--rl-sync-overlap"),
+    ("rl_sync_full_parameter_rounds", "sweep", "--rl-sync-full-parameter-rounds"),
 )
 
 
@@ -182,12 +184,21 @@ def _check_bcast_delta(args) -> None:
                          "and no --experimental-rl-sync")
 
 
-def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
-    """full-parameter preset (P0-D8): one actor role swept as whole-model fragments.
+# S27 P2: asynchronous rounds keep at most two fragment rounds in flight.
+FULL_PARAMETER_ASYNC_MAX_PIPELINE = 2
 
-    The syncer's strict policy-sweep profile fixes its merge semantics
-    (every island per round, no grace, serial rounds, plain averaging);
-    the fragment count P comes from the Miles layout probe."""
+
+def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
+    """full-parameter preset (P0-D8): one actor role synced as whole-model fragments.
+
+    ``--rl-sync-full-parameter-rounds sweep`` (default, the control) is the
+    syncer's strict policy-sweep profile: every island per round, no grace,
+    serial rounds, plain averaging. ``async`` (S27 P2) is asynchronous:
+    the syncer runs ordinary fragment rounds (H local RL rounds per fragment,
+    at most two rounds in flight, the decoupled preset's outer Nesterov), and
+    the outer-merge options (quorum K, grace, weights, base lag, RDA) apply.
+    The fragment count P comes from the Miles layout probe."""
+    async_rounds = rl_full_parameter_async(args)
     problems = []
     if getattr(args, "rl_placement", "colocated") != "fixed-partition":
         problems.append("--rl-placement fixed-partition (dedicated rollout GPUs)")
@@ -195,26 +206,42 @@ def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
         problems.append("--rl-parameter-layout-sha256 <64 lowercase hex>")
     if args.experimental_rl_sync:
         problems.append("no --experimental-rl-sync")
-    if args.local_rl_rounds_per_sync != 1 or int(getattr(args, "rl_optimizer_steps", 1) or 1) != 1:
-        problems.append("--local-rl-rounds-per-sync 1 and one optimizer step (strict sweep H=1)")
+    if int(getattr(args, "rl_optimizer_steps", 1) or 1) != 1:
+        problems.append("one optimizer step per local RL round")
+    if args.local_rl_rounds_per_sync < 1 or (not async_rounds and args.local_rl_rounds_per_sync != 1):
+        problems.append("--local-rl-rounds-per-sync 1 (strict sweep H=1)" if not async_rounds
+                        else "--local-rl-rounds-per-sync >= 1")
     if args.fragments < 1:
         problems.append("--fragments >= 1")
     if island_scheduling_mode(args) != "legacy":
         problems.append("--rl-island-scheduling legacy (no fragment frames in elastic mode)")
     if rl_needs_critic(args):
-        problems.append("a critic-free algorithm (the strict sweep trains the actor only)")
+        problems.append("a critic-free algorithm (the full-parameter preset trains the actor only)")
     fragment_pipeline = int(getattr(args, "rl_sync_fragment_pipeline", 1))
-    if not 1 <= fragment_pipeline <= max(args.fragments, 1):
-        problems.append("--rl-sync-fragment-pipeline between 1 and --fragments")
+    max_pipeline = max(args.fragments, 1)
+    if async_rounds:
+        max_pipeline = min(max_pipeline, FULL_PARAMETER_ASYNC_MAX_PIPELINE)
+    if not 1 <= fragment_pipeline <= max_pipeline:
+        problems.append("--rl-sync-fragment-pipeline between 1 and min(2, --fragments)" if async_rounds
+                        else "--rl-sync-fragment-pipeline between 1 and --fragments")
     checkpoint_every = int(getattr(args, "rl_sync_checkpoint_every", 1))
-    if checkpoint_every != 1 and (checkpoint_every < 1 or checkpoint_every % max(args.fragments, 1)):
+    if async_rounds:
+        # The sweep-aligned checkpoint interval, the async checkpoint writer
+        # and the sync/train overlap are strict-sweep profiles of the syncer.
+        if checkpoint_every != 1:
+            problems.append("--rl-sync-checkpoint-every 1 (sweep only)")
+        if getattr(args, "rl_sync_async_checkpoint", False):
+            problems.append("no --rl-sync-async-checkpoint (sweep only)")
+        if getattr(args, "rl_sync_overlap", False):
+            problems.append("no --rl-sync-overlap (sweep only)")
+    elif checkpoint_every != 1 and (checkpoint_every < 1 or checkpoint_every % max(args.fragments, 1)):
         problems.append("--rl-sync-checkpoint-every 1 or a multiple of --fragments")
     int8_block = int(getattr(args, "rl_sync_push_int8_block", 128))
     if not 32 <= int8_block <= 1 << 20:
         problems.append("--rl-sync-push-int8-block between 32 and 1048576")
     elif int8_block != 128 and getattr(args, "rl_sync_push_dtype", "f32") != "int8":
         problems.append("--rl-sync-push-int8-block only with --rl-sync-push-dtype int8")
-    if getattr(args, "rl_sync_overlap", False):
+    if getattr(args, "rl_sync_overlap", False) and not async_rounds:
         from ..rl.engine.sync_overlap import overlap_option_problems
 
         problems += overlap_option_problems(
@@ -224,16 +251,22 @@ def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
         raise ValueError(f"--rl-sync-preset {FULL_PARAMETER_SYNC_PRESET} requires " + "; ".join(problems))
     args.quorum = num_islands
     args.grace_ms = 0
-    # Fragment rounds of one sweep are independent (H=1, plain average), so the
-    # syncer may gather several at once; it still commits them in step order.
     args.pipeline = fragment_pipeline
-    args.sync_interval_steps = 0.0
     args.delta_correction = "none"
-    args.outer_lr = 1.0
-    args.outer_momentum = 0.0
     args.merge_alpha = 0.0
     args.wire_dtype = "f32"
     args.rl_total_fragment_steps = args.total_steps * args.fragments
+    if async_rounds:
+        # The decoupled preset's outer step; the outer-merge options override.
+        args.sync_interval_steps = float(args.local_rl_rounds_per_sync)
+        args.outer_lr = 0.7
+        args.outer_momentum = 0.9
+        return
+    # Fragment rounds of one sweep are independent (H=1, plain average), so the
+    # syncer may gather several at once; it still commits them in step order.
+    args.sync_interval_steps = 0.0
+    args.outer_lr = 1.0
+    args.outer_momentum = 0.0
 
 
 # S27 P1: (dest, option, preset-keeping default) of the outer-merge options.
@@ -252,16 +285,22 @@ def _apply_rl_outer_merge_options(args, *, num_islands: int) -> None:
     """S27 P1: override the outer-merge settings the preset just fixed.
 
     Every option left at its default keeps the preset's value, so the syncer
-    command and semantic profile are unchanged. The full-parameter sweep keeps
-    its strict roster (P2 replaces it); SAO and --experimental-rl-sync take no
-    overrides, and the elastic scheduler has its own quorum and weights."""
+    command and semantic profile are unchanged. The full-parameter preset takes
+    them only with asynchronous rounds (S27 P2; the sweep keeps its strict
+    roster); SAO and --experimental-rl-sync take no overrides, and the elastic
+    scheduler has its own quorum and weights."""
     changed = [option for dest, option, default in _RL_OUTER_MERGE_OPTIONS
                if getattr(args, dest, default) != default]
     if not changed:
         return
     where = ", ".join(changed)
-    if args.rl_sync_preset not in ("strict-avg", "decoupled"):
-        raise ValueError(f"{where} only apply to --rl-sync-preset strict-avg or decoupled")
+    full_parameter = args.rl_sync_preset == FULL_PARAMETER_SYNC_PRESET
+    if full_parameter and not rl_full_parameter_async(args):
+        raise ValueError(f"{where} need --rl-sync-full-parameter-rounds async "
+                         "(the full-parameter sweep keeps its strict roster)")
+    if args.rl_sync_preset not in ("strict-avg", "decoupled") and not full_parameter:
+        raise ValueError(f"{where} only apply to --rl-sync-preset strict-avg, decoupled "
+                         f"or {FULL_PARAMETER_SYNC_PRESET}")
     if args.experimental_rl_sync:
         raise ValueError(f"{where} do not apply with --experimental-rl-sync "
                          "(it takes the generic syncer flags)")
@@ -289,8 +328,10 @@ def _apply_rl_outer_merge_options(args, *, num_islands: int) -> None:
         if not 0.0 <= momentum < 1.0:
             raise ValueError("--rl-sync-outer-momentum must be in [0, 1)")
         args.outer_momentum = momentum
-    if args.rl_sync_matrix_merge != "avg" and args.rl_sync_preset != "decoupled":
-        raise ValueError("--rl-sync-matrix-merge rda only applies to --rl-sync-preset decoupled")
+    if args.rl_sync_matrix_merge != "avg" and args.rl_sync_preset not in (
+            "decoupled", FULL_PARAMETER_SYNC_PRESET):
+        raise ValueError("--rl-sync-matrix-merge rda only applies to --rl-sync-preset decoupled "
+                         f"or {FULL_PARAMETER_SYNC_PRESET} with asynchronous rounds")
 
 
 def _prepare_node_inventory(args) -> None:
@@ -412,7 +453,9 @@ def _prepare_rl_args(
         )
     if not args.inner_lr > 0:
         raise ValueError(f"RL requires --inner-lr > 0 (got {args.inner_lr})")
-    if args.rl_sync_preset in ("strict-avg", FULL_PARAMETER_SYNC_PRESET):
+    if args.rl_sync_preset == "strict-avg" or (
+        args.rl_sync_preset == FULL_PARAMETER_SYNC_PRESET and not rl_full_parameter_async(args)
+    ):
         if args.local_rl_rounds_per_sync != 1:
             raise ValueError(f"--rl-sync-preset {args.rl_sync_preset} requires "
                              "--local-rl-rounds-per-sync 1 (strict sweep H=1)")

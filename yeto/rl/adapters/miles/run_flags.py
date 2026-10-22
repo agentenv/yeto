@@ -15,7 +15,12 @@ from types import MappingProxyType
 
 from yeto.rl.adapters.miles.pins import MILES_NEXT_IMAGE
 from yeto.rl.engine.run_flags import RlFlag, cli_flag, island_flag, shared_flag
-from yeto.rl.engine.selection import RL_ENGINES, SYNC_PRESETS, canonical_sync_preset
+from yeto.rl.engine.selection import (
+    FULL_PARAMETER_ROUNDS,
+    RL_ENGINES,
+    SYNC_PRESETS,
+    canonical_sync_preset,
+)
 
 _MODE = (
     cli_flag("--rl-runtime", choices=["miles"], default="miles"),
@@ -319,6 +324,14 @@ _ISLAND = (
     ),
     island_flag("--fragments", type=int, default=1),
     island_flag("--parameter-layout-sha256", default=None),
+    island_flag(
+        "--full-parameter-rounds",
+        choices=FULL_PARAMETER_ROUNDS,
+        default="sweep",
+        help="full-parameter preset: sweep = strict policy sweeps; async = "
+        "asynchronous sharded rounds (H = --local-horizon, a quorum below the "
+        "island count may close a round without this island)",
+    ),
     island_flag(
         "--sweep-push-dtype",
         choices=("f32", "bf16", "int8"),

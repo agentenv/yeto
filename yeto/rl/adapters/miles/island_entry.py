@@ -799,8 +799,20 @@ def _check_dense_full_sweep(args, *, yeto_policy_sync: bool) -> None:
     """
 
     _check_full_parameter_sync(args, yeto_policy_sync=yeto_policy_sync)
-    if args.optimizer_steps != 1 or getattr(args, "local_horizon", 1) != 1:
+    if _full_parameter_async(args):
+        # S27 P2 asynchronous rounds: H local rounds per fragment push, at
+        # most two fragment rounds in flight; no sweep-only options.
+        if args.optimizer_steps != 1 or getattr(args, "local_horizon", 1) < 1:
+            raise ValueError("dense full-parameter asynchronous rounds need H >= 1 "
+                             "and one optimizer step")
+        if not 1 <= getattr(args, "pipeline", 1) <= min(2, args.fragments):
+            raise ValueError("dense full-parameter asynchronous rounds need --pipeline 1..min(2, P)")
+        if getattr(args, "sweep_overlap", False):
+            raise ValueError("--sweep-overlap needs the strict sweep")
+    elif args.optimizer_steps != 1 or getattr(args, "local_horizon", 1) != 1:
         raise ValueError("the dense full-parameter strict sweep requires H=1")
+    elif getattr(args, "rl_sync_matrix_merge", "avg") != "avg":
+        raise ValueError("the dense full-parameter strict sweep merges by plain averaging")
     if int(getattr(args, "rl_max_policy_age", 0) or 0) != 0:
         # The sweep publishes whole rounds in lockstep with the syncer; rollout
         # running ahead of training is a separate profile, not part of P0-S.
@@ -861,15 +873,22 @@ def _roster_generations(args) -> tuple[int, ...]:
     return tuple(generations)
 
 
+def _full_parameter_async(args) -> bool:
+    """S27 P2: ``--full-parameter-rounds async`` (asynchronous sharded rounds)."""
+    return getattr(args, "full_parameter_rounds", "sweep") == "async"
+
+
 def _dense_full_sync_config(
     args, *, model_config_sha256: str, training_contract_sha256: str, algorithm_spec_sha256: str
 ):
-    """The dense strict sweep as a one-role :class:`FullParameterSyncConfig`."""
+    """The dense full-parameter sync as a one-role :class:`FullParameterSyncConfig`:
+    the strict sweep, or (S27 P2) the streaming profile with a partial quorum."""
 
     from yeto.rl.adapters.miles.full_parameter.role_stream import RoleStreamConfig
     from yeto.rl.adapters.miles.full_parameter.session import FullParameterSyncConfig
     from yeto.rl.local_learner import ComponentIdentity
 
+    async_rounds = _full_parameter_async(args)
     actor = RoleStreamConfig(
         algorithm="grpo",
         role="actor",
@@ -885,11 +904,11 @@ def _dense_full_sync_config(
         total_fragment_steps=args.total_fragment_steps,
         expected_fragments=args.fragments,
         expected_layout_hash=args.parameter_layout_sha256,
-        local_horizon=1,
+        local_horizon=int(args.local_horizon) if async_rounds else 1,
         optimizer_steps_per_round=args.optimizer_steps,
         training_contract_hash=training_contract_sha256,
         syncer_profile_hash=args.syncer_profile_sha256,
-        pipeline_depth=1,
+        pipeline_depth=int(args.pipeline) if async_rounds else 1,
         algorithm_spec_sha256=algorithm_spec_sha256,
         wan_streams=args.wan_streams,
         wan_stream_schedule=getattr(args, "wan_stream_schedule", "rr"),
@@ -900,8 +919,10 @@ def _dense_full_sync_config(
         # The rollout policy age stays 0 (``_check_dense_full_sweep``); the
         # overlap's outer-step lag is bound into the session contract.
         overlap=bool(getattr(args, "sweep_overlap", False)),
+        partial_quorum=async_rounds,
+        matrix_merge=getattr(args, "rl_sync_matrix_merge", "avg"),
     )
-    return FullParameterSyncConfig((actor,), sweep=True)
+    return FullParameterSyncConfig((actor,), sweep=not async_rounds)
 
 
 def _load_sao_streaming_runtime(args):

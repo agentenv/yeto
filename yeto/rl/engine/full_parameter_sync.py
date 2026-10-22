@@ -20,7 +20,16 @@ one role needs no special case:
 The dense strict sweep is a restricted profile of the same rules
 (:attr:`FullParameterSyncProfile.sweep`): one role, H=1, every fragment of
 one local step in flight together, and broadcasts applied only as a complete
-sweep.  This module is engine-neutral; it never imports an engine adapter.
+sweep.
+
+The asynchronous full-parameter rounds (S27 P2) are the
+streaming profile with :attr:`FullParameterSyncProfile.partial_quorum`: the
+syncer may close a fragment round with a quorum K below the island count.
+Rule 3 then also covers broadcasts this island did not contribute to (late,
+absent, or a push the syncer refused): every role overwrites its fragment with
+the global value (alpha = 0) in version order, and a retained submission for
+that round is released.  This module is engine-neutral; it never imports an
+engine adapter.
 """
 
 from __future__ import annotations
@@ -107,6 +116,9 @@ class FullParameterSyncProfile:
     sweep: bool = False
     # S26 E3: train round k+1 while sweep k syncs; rebase at the next boundary.
     overlap: bool = False
+    # S27 P2: the syncer closes rounds with quorum K <= islands, so a fragment
+    # broadcast may arrive without this island's submission (overwrite it).
+    partial_quorum: bool = False
 
     def __post_init__(self) -> None:
         if not self.roles or len(set(self.roles)) != len(self.roles):
@@ -117,6 +129,8 @@ class FullParameterSyncProfile:
             raise ValueError("a dense strict sweep has one actor role and H=1")
         if self.overlap and not self.sweep:
             raise ValueError("sync/train overlap needs the dense strict sweep")
+        if self.partial_quorum and self.sweep:
+            raise ValueError("a partial quorum needs the streaming profile, not the strict sweep")
 
     @property
     def total_rounds(self) -> int:
@@ -147,6 +161,7 @@ class FullParameterSyncProfile:
             poll_seconds=min(config.poll_seconds for config in configs.values()),
             sweep=sweep,
             overlap=bool(getattr(first, "overlap", False)),
+            partial_quorum=bool(getattr(first, "partial_quorum", False)),
         )
 
 
@@ -157,7 +172,9 @@ def require_lockstep(configs: Sequence[Any]) -> None:
     if len({config.syncer_addr for config in configs}) != len(configs):
         raise ValueError("full-parameter roles require distinct syncer ports")
     for config in configs[1:]:
-        if any(getattr(config, name) != getattr(first, name) for name in LOCKSTEP_FIELDS):
+        if any(getattr(config, name) != getattr(first, name) for name in LOCKSTEP_FIELDS) or (
+            getattr(config, "partial_quorum", False) != getattr(first, "partial_quorum", False)
+        ):
             raise ValueError("full-parameter role streams must use one lockstep schedule")
 
 
@@ -205,6 +222,8 @@ class RolePairing:
         self.terminal_seen = False
         self.failure: BaseException | None = None
         self._pull_skew_since: dict[LogicalKey, float] = {}
+        # Partial quorum: broadcasts applied without this island's submission.
+        self.overwritten_rounds = 0
 
     # -- fail-stop ---------------------------------------------------------
 
@@ -280,6 +299,10 @@ class RolePairing:
                 self._push_once(pair, observed, produced)
             capacity = self.profile.effective_pipeline_depth - len(self.inflight)
             shared = sorted(set.intersection(*(set(keys) for keys in by_role.values())))
+            if self.profile.partial_quorum:
+                # A round whose broadcast is staged or applied closed without
+                # this island: pushing would only upload a refused delta.
+                shared = [key for key in shared if not self._round_closed(key[1], key[0])]
             for key in shared[: max(0, capacity)]:
                 pair = self._new_pair({role: by_role[role].pop(key) for role in self.streams})
                 self._retain(pair)
@@ -358,12 +381,23 @@ class RolePairing:
 
     # -- apply (rule 3) ------------------------------------------------------
 
+    def _round_closed(self, fragment_id: int, version: int) -> bool:
+        return all(
+            stream.fragment_versions[fragment_id] >= version
+            or stream.has_staged_broadcast(fragment_id, version)
+            for stream in self.streams.values()
+        )
+
     async def commit_staged_broadcasts(self) -> dict[str, RoleProgress]:
         """Apply matched role broadcasts without waiting for WAN I/O."""
 
         applied: dict[str, list[int]] = {role: [] for role in self.streams}
         try:
             await asyncio.gather(*(stream.stage_available_broadcasts() for stream in self.streams.values()))
+            if self.profile.partial_quorum:
+                await self._commit_partial_quorum(applied)
+                return {role: RoleProgress(applied_fragments=tuple(dict.fromkeys(v)))
+                        for role, v in applied.items()}
             known = {
                 (pair.logical_key[1], pair.logical_key[0]) for pair in self.inflight.values()
             }
@@ -384,6 +418,48 @@ class RolePairing:
             self.fail_stop(error)
             raise
         return {role: RoleProgress(applied_fragments=tuple(dict.fromkeys(v))) for role, v in applied.items()}
+
+    async def _commit_partial_quorum(self, applied: dict[str, list[int]]) -> None:
+        """Apply every broadcast all roles staged, oldest version first.
+
+        A broadcast with a complete retained submission is the normal paired
+        apply.  Any other broadcast closed its round without this island
+        (absent, late, a refused or lost push): every role overwrites the
+        fragment (alpha = 0) and a retained pair for that round is released.
+        A broadcast whose predecessor version is still on the wire waits.
+
+        Membership hook (S27 E-1): a re-JOIN catch-up delivers each fragment's
+        current version, which may skip several rounds; applying such a jump
+        needs the membership epoch to tell it from a reordered broadcast, so
+        it is not applied here yet: it stays staged, and this island stops
+        contributing to that fragment."""
+
+        fragments = self.profile.fragments
+        staged = set.intersection(
+            *(set(stream.staged_fragment_versions) for stream in self.streams.values())
+        )
+        pairs = {key[0]: (key, pair) for key, pair in self.inflight.items()}
+        for fragment_id, version in sorted(staged, key=lambda item: (item[1], item[0])):
+            if version == self.profile.total_fragment_steps:
+                continue  # the terminal cut arrives as FINAL
+            base = max(0, version - fragments)
+            if any(stream.fragment_versions[fragment_id] != base for stream in self.streams.values()):
+                continue
+            entry = pairs.pop(version, None)
+            if entry is not None and entry[1].complete:
+                await self._apply_pair(entry[0], entry[1], applied)
+                continue
+            results = await asyncio.gather(*(
+                stream.apply_staged_broadcast(fragment_id, version) for stream in self.streams.values()
+            ))
+            for role, fragment_ids in zip(self.streams, results, strict=True):
+                applied[role].extend(fragment_ids)
+                if self.streams[role].fragment_versions[fragment_id] != version:
+                    raise RuntimeError("overwrite committed mismatched versions")
+            if entry is not None:
+                self._release(entry[1])
+                self.inflight.pop(entry[0])
+            self.overwritten_rounds += 1
 
     def _is_whole_sweep(self, ready: list[LogicalKey]) -> bool:
         """Strict sweep: ``ready`` is all P fragments of one local step.
@@ -444,9 +520,12 @@ class RolePairing:
             await asyncio.gather(*(stream.wait_and_apply_final() for stream in self.streams.values()))
             self.fragment_versions()
             for key, pair in sorted(self.inflight.items()):
-                if not pair.complete:
+                if pair.complete:
+                    self._journal(pair)
+                elif self.profile.partial_quorum:
+                    self._release(pair)  # the final cut superseded it
+                else:
                     raise RuntimeError("finalization retained an incomplete paired submission")
-                self._journal(pair)
                 self.inflight.pop(key)
         except BaseException as error:
             self.fail_stop(error)
@@ -557,6 +636,8 @@ class FullParameterSync:
                 "sync/fragment_versions": list(versions),
                 "sync/global_policy_hash": state.policy_tensor_hash(),
                 "sync/inflight_pairs": len(self.pairing.inflight),
+                **({"sync/overwritten_rounds": self.pairing.overwritten_rounds}
+                   if self.pairing.profile.partial_quorum else {}),
                 **self._timing.fields(),
                 **self._upload_fields(),
             },
@@ -592,6 +673,10 @@ class FullParameterSync:
             )
         )
         before = pairing.fragment_versions()
+        if pairing.profile.partial_quorum:
+            # Rounds that closed while this island trained are applied first,
+            # so the island never uploads a delta the syncer would refuse.
+            await pairing.commit_staged_broadcasts()
         pairing.submit_ready()
         submit_ts = unix_now()
         await pairing.commit_staged_broadcasts()

@@ -13,7 +13,7 @@ from typing import Protocol
 
 import torch
 
-from ..fragments import MERGE_AVG, Fragment, FragmentLayout
+from ..fragments import MERGE_AVG, MERGE_RDA, Fragment, FragmentLayout, is_embedding_name
 from .contracts import LocalStepReceipt, TrainerUpdateManifest
 
 _ROLES_BY_ALGORITHM = {
@@ -124,7 +124,12 @@ class ParameterLayout:
         num_fragments: int,
         fragment_strategy: str = "balanced",
         stream_role: str | None = None,
+        matrix_merge: str = "avg",
     ) -> ParameterLayout:
+        """``matrix_merge="rda"`` (S27 P2) merges every fragment without an
+        embedding-like tensor by radial-directional averaging; the choice is
+        part of the layout hash. The default ``"avg"`` keeps every
+        established layout identity."""
         if algorithm not in _ROLES_BY_ALGORITHM:
             raise ValueError(f"unsupported local RL algorithm: {algorithm!r}")
         if stream_role is not None and (
@@ -155,6 +160,8 @@ class ParameterLayout:
             raise ValueError("parameter layout must contain unique parameters")
         if fragment_strategy not in {"balanced", "owner_affine"}:
             raise ValueError("unsupported parameter fragment strategy")
+        if matrix_merge not in {"avg", "rda"}:
+            raise ValueError("unsupported parameter fragment matrix merge")
         owners = sorted({(spec.role, spec.shard_id) for spec in ordered_specs})
         minimum_fragments = 1 if fragment_strategy == "balanced" else len(owners)
         if num_fragments < minimum_fragments or num_fragments > len(ordered_specs):
@@ -167,7 +174,12 @@ class ParameterLayout:
         fragments = FragmentLayout(
             [
                 Fragment(
-                    merge_mode=MERGE_AVG,
+                    merge_mode=(
+                        MERGE_RDA
+                        if matrix_merge == "rda"
+                        and not any(is_embedding_name(spec.name) for spec in members)
+                        else MERGE_AVG
+                    ),
                     tensors=[(spec.wire_name, spec.numel) for spec in members],
                     identity_shapes={spec.wire_name: spec.shape for spec in members},
                 )
@@ -186,6 +198,8 @@ class ParameterLayout:
         }
         if fragment_strategy != "balanced":
             payload["fragment_strategy"] = fragment_strategy
+        if matrix_merge != "avg":
+            payload["merge_modes"] = [fragment.merge_mode for fragment in fragments.fragments]
         if stream_role is not None:
             # A role lane must never collide with either the combined SAO layout
             # or a structurally identical actor-only GRPO layout.
