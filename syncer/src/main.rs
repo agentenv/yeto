@@ -37,8 +37,8 @@ struct Args {
     /// Compute-overlap budget for the grace window, in learner inner steps (τ).
     #[arg(long, default_value_t = 2.0)]
     grace_tau: f64,
-    /// Fragment rounds in flight at once ("two fragments in flight" at the
-    /// paper's τ=2); 1 = serial rounds. Clamped to the fragment count.
+    /// Fragment rounds in flight at once (two by default, matching the
+    /// default --grace-tau 2); 1 = serial rounds. Clamped to the fragment count.
     #[arg(long, default_value_t = 2)]
     pipeline: u32,
     /// Lower bound on time between consecutive round launches, in ms. WAN
@@ -49,7 +49,7 @@ struct Args {
     /// Target sync interval H (inner steps per fragment between merges):
     /// the launch floor adapts to the measured learner step time
     /// (H·ξ_step/P). Never binds where WAN round latency already exceeds
-    /// it. 0 disables. Default 24 — the paper's design point; measured to
+    /// it. 0 disables. Default 24; measured to
     /// match synchronous training where H≈2 costs ~+9%.
     #[arg(long, default_value_t = 24.0)]
     sync_interval_steps: f64,

@@ -16,8 +16,8 @@
 //! shrink as R/√M and force outer-lr retuning. Applied per tensor within a
 //! fragment. Degenerate mean direction falls back to direct averaging.
 //!
-//! A third opt-in mode, Iso-C-style isotropic aggregation ("iso", IsoLoCo,
-//! arXiv 2607.03011), direct-averages the per-tensor deltas and then
+//! A third opt-in mode, Iso-C-style isotropic aggregation ("iso"),
+//! direct-averages the per-tensor deltas and then
 //! flattens the singular-value spectrum of the averaged matrix to its mean.
 //!
 //! Outer optimizer: SGD with Nesterov momentum, state held here on the
@@ -116,8 +116,7 @@ pub(crate) fn rda_rescale(out: &mut [f32], radial: f64) -> bool {
 const ISO_SINGULAR_VALUE_RTOL: f64 = 1e-10;
 const ISO_JACOBI_MAX_SWEEPS: usize = 64;
 
-/// Iso-C-style isotropic aggregation over one tensor slice (IsoLoCo,
-/// arXiv 2607.03011, Alg. 2). Weighted direct average is applied first;
+/// Iso-C-style isotropic aggregation over one tensor slice. Weighted direct average is applied first;
 /// then the averaged pseudo-gradient, viewed as a row-major `rows` x `cols`
 /// matrix, has its singular-value spectrum flattened to the mean singular
 /// value. Shape/product mismatches leave the direct average untouched.
@@ -331,7 +330,7 @@ pub fn delayed_nesterov_elem(
     }
 }
 
-/// HeLoCo per-tensor directional correction (arXiv 2606.00271, Alg. 1).
+/// HeLoCo per-tensor directional correction.
 ///
 /// Applied server-side to each learner's outer delta, per tensor, before
 /// merging: a stale delta can carry components that oppose the current
@@ -359,7 +358,7 @@ pub struct Heloco {
 
 impl Default for Heloco {
     fn default() -> Self {
-        // Table 3 of the paper.
+        // Reference defaults for the correction thresholds.
         Self {
             c_ok: 0.2,
             k_s: 0.5,

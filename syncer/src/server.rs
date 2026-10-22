@@ -2,9 +2,8 @@
 //! per-learner connection groups (control stream + striped data streams),
 //! chunk reassembly, and the pull-driven quorum/grace merge scheduler
 //! at the core of the training loop. Rounds are pipelined: up to
-//! `Config::pipeline` fragments are in flight at once (arXiv 2604.21428's
-//! "two fragments in flight"), so a slow quorum on one fragment never
-//! delays pulling the next.
+//! `Config::pipeline` fragments are in flight at once (two by default), so
+//! a slow quorum on one fragment never delays pulling the next.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
@@ -51,8 +50,8 @@ pub struct Config {
     pub grace_gamma: f64,
     /// Compute-overlap budget τ, in learner inner steps.
     pub grace_tau: f64,
-    /// Fragment rounds in flight at once (the paper's "two fragments in
-    /// flight" at τ=2). While one round sits in its quorum/grace window,
+    /// Fragment rounds in flight at once (two by default, matching the
+    /// default overlap budget τ=2). While one round sits in its quorum/grace window,
     /// the next fragment's pull is already out — sync latency overlaps
     /// learner compute instead of serializing with it. 1 = serial rounds.
     /// Clamped to the fragment count so concurrent rounds always target
@@ -71,7 +70,7 @@ pub struct Config {
     /// the slowest learner. Inactive until a step-time estimate exists and
     /// wherever natural round latency already exceeds it (any real WAN);
     /// measured on gemma4/Lean: H≈2 costs ~+9% eval loss vs synchronous,
-    /// H≈24 (the paper's design point) matches it. 0 disables; the manual
+    /// H≈24 (the default) matches it. 0 disables; the manual
     /// min_round_interval_ms floor applies on top.
     pub sync_interval_steps: f64,
     /// HeLoCo per-tensor delta correction before merging.
@@ -586,8 +585,7 @@ impl RegistryState {
     }
 }
 
-/// Decoupled DiLoCo's adaptive grace window (arXiv 2604.21428 Eq. 3): after
-/// quorum, wait for stragglers only within the slack the learners' compute
+/// Adaptive grace window: after quorum, wait for stragglers only within the slack the learners' compute
 /// overlap leaves free — γ · (τ·ξ_step − ξ_quorum − ξ_sync), clamped to
 /// [0, cap]. With no step-time estimate yet, fall back to the full cap.
 fn adaptive_grace(
@@ -623,11 +621,9 @@ fn launch_interval(
 }
 
 /// Per-learner inner-step duration estimated from consecutive pushes
-/// (each push carries the learner's local_step), smoothed with an EMA as
-/// the paper prescribes for the grace-window inputs (arXiv 2604.21428,
-/// "ξ_step, ξ_quorum, ξ_sync can be tracked via exponential moving
-/// averages") — a single push interval is too noisy to size the grace
-/// window on its own.
+/// (each push carries the learner's local_step), smoothed with an EMA like
+/// the other grace-window inputs (ξ_quorum, ξ_sync) — a single push
+/// interval is too noisy to size the grace window on its own.
 #[derive(Default)]
 struct StepRates(HashMap<Member, (Option<Instant>, u64, Option<f64>)>);
 
