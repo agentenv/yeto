@@ -137,6 +137,41 @@ class MilesCutBackend:
         return {k: int(getattr(margs, k)) for k in ("iteration", "consumed_train_samples")
                 if getattr(margs, k, None) is not None}
 
+    def param_layout(self, actor: Any, named: list) -> dict[str, Any]:
+        """Where each local parameter sits in the whole model (offline cut -> HF merge).
+
+        Uses the trainer's own weight-sync rules: Miles global naming (pipeline-layer
+        and expert offsets) and its TP partition checks for GLU and grouped experts."""
+        from miles.backends.megatron_utils.named_weights import named_params_and_buffers
+        from miles.backends.megatron_utils.update_weight.hf_weight_iterator_direct import (
+            _check_and_fix_partition,
+            _is_unmarked_grouped_expert_weight,
+            is_routed_expert_param,
+        )
+        from miles.backends.training_utils.parallel import get_parallel_state
+
+        from yeto.rl.engine.param_layout import build_param_layout
+
+        args = actor.args
+        global_of = {id(p): n for n, p in named_params_and_buffers(args, actor.model)}
+        global_names = {local: global_of[id(p)] for local, p in named if id(p) in global_of}
+
+        def partition_of(global_name: str, param: Any) -> tuple[bool, int, int]:
+            tp = bool(getattr(param, "tensor_model_parallel", False)) or _is_unmarked_grouped_expert_weight(
+                global_name, param)
+            if not tp:
+                return False, -1, 1
+            stride, dim = _check_and_fix_partition(args, global_name, int(getattr(param, "partition_stride", 1)),
+                                                   int(getattr(param, "partition_dim", -1)))
+            return True, dim, stride
+
+        ps = get_parallel_state()
+        ranks = {"tp_rank": ps.tp.rank, "tp_size": ps.tp.size, "pp_rank": ps.pp.rank, "pp_size": ps.pp.size,
+                 "ep_rank": ps.ep.rank, "ep_size": ps.ep.size, "etp_rank": ps.etp.rank, "etp_size": ps.etp.size}
+        return build_param_layout(named, global_names=global_names, partition_of=partition_of,
+                                  is_expert=is_routed_expert_param, ranks=ranks,
+                                  num_experts=getattr(args, "num_experts", None))
+
     def set_megatron_counters(self, counters: Mapping[str, int]) -> None:
         if not counters:
             return
@@ -1088,6 +1123,12 @@ def _capture(actor: Any, *, cut_id: str, device_copy: bool = False) -> dict[str,
                 torch.cuda.empty_cache()
         if snap is None:
             snap = _snapshot(actor, backend, named)
+        layout = getattr(backend, "param_layout", None)
+        if _tuning(backend, named) == "full" and callable(layout):  # R-5: offline TP/PP/EP merge
+            try:
+                snap["param_layout"] = layout(actor, named)
+            except Exception as error:  # the cut stays valid for resume; only the offline merge refuses it
+                snap["param_layout"] = {"error": f"{type(error).__name__}: {error}"}
         ready = None
         if on_device and _sleeps_after_cut(actor):
             snap = _stage(snap)  # host views; the device copies are dropped here
