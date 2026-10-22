@@ -75,13 +75,21 @@ def test_every_option_reaches_the_syncer_command(preset):
         "--rl-sync-max-base-lag", "2", "--rl-sync-learner-weight", "tokens2-over-steps",
         "--rl-sync-outer-lr", "0.5", "--rl-sync-outer-momentum", "0.8",
     ), gpu=THREE_ISLANDS)
+    # --rl-sync-max-base-lag counts rounds; the syncer counts versions (P per round).
     assert _syncer_flags(plan) == {
-        "--quorum": "1", "--grace-ms": "750", "--max-base-lag": "2",
+        "--quorum": "1", "--grace-ms": "750", "--max-base-lag": str(2 * args.fragments),
         "--learner-weight": "tokens2-over-steps", "--outer-lr": "0.5", "--outer-momentum": "0.8",
     }
     assert (args.quorum, args.grace_ms, args.outer_lr, args.outer_momentum) == (1, 750, 0.5, 0.8)
     [actor] = plan["role_syncers"]
     assert "--learners 3" in actor["command"]
+
+
+@pytest.mark.parametrize(("preset", "versions"), [((), "3"), (DECOUPLED, "12")],
+                         ids=["strict-avg", "decoupled-4-fragments"])
+def test_max_base_lag_rounds_become_versions_for_the_syncer(preset, versions):
+    _, plan = _plan(preset + ("--rl-sync-max-base-lag", "3"), gpu=THREE_ISLANDS)
+    assert _syncer_flags(plan)["--max-base-lag"] == versions
 
 
 @pytest.mark.parametrize(

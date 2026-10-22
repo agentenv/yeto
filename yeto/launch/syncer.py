@@ -454,8 +454,13 @@ def _final_grace_s(args, soft_deadline_s: int) -> int:
 
 
 def _rl_max_base_lag(args) -> int:
-    """S27 P1 --rl-sync-max-base-lag (checked by rl_args); 0 refuses late pushes."""
-    return int(getattr(args, "rl_sync_max_base_lag", 0))
+    """The syncer's --max-base-lag for --rl-sync-max-base-lag (checked by rl_args).
+
+    The RL option counts fragment rounds; the syncer counts versions (global
+    steps), and one round of P fragments is P versions. 0 refuses late pushes.
+    """
+    rounds = int(getattr(args, "rl_sync_max_base_lag", 0))
+    return rounds * max(int(getattr(args, "fragments", 1)), 1)
 
 
 def _rl_learner_weight(args) -> str:

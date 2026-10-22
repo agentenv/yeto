@@ -8,8 +8,9 @@ then SGD with Nesterov momentum).
 
 Round numbering: with P fragments and pipeline 1, round ``t`` merges fragment
 ``(t - 1) % P``. A fragment's version is the number of the round that last
-merged it, so its base version at round ``t`` is ``max(t - P, 0)``, and
-``--rl-sync-max-base-lag`` counts versions (global steps), not fragment rounds.
+merged it, so its base version at round ``t`` is ``max(t - P, 0)``.
+``--rl-sync-max-base-lag`` counts fragment rounds; the launcher passes
+rounds x P to the syncer's ``--max-base-lag``, which counts versions.
 """
 
 from __future__ import annotations
@@ -289,8 +290,8 @@ def test_grace_ends_within_its_bound_and_drops_a_later_straggler(make_rig):
 
 def test_max_base_lag_accepts_a_push_within_the_lag_and_rejects_one_beyond_it(make_rig):
     # Two fragments: fragment 0 is merged in rounds 1, 3, 5, so its base versions
-    # are 0, 1, 3. Lag 2 is one fragment round behind; lag 3 is two.
-    rig = make_rig(2, "--rl-sync-max-base-lag", "2", total_steps=3)
+    # are 0, 1, 3. One round of lag is 2 versions; a lag of 3 versions is refused.
+    rig = make_rig(2, "--rl-sync-max-base-lag", "1", total_steps=3)
     assert "--max-base-lag 2" in rig.command
     initial = _initial(rig.layout)
     rig.start(initial)

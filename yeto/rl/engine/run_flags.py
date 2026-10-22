@@ -944,10 +944,10 @@ _SYNC = (
         type=int,
         default=0,
         metavar="N",
-        help="strict-avg / decoupled: oldest admitted base version, in versions behind "
-        "the fragment being merged (default 0 = late pushes are refused). A fragment's "
-        "version is the global step that last merged it, so with P fragments one "
-        "fragment round is P versions",
+        help="strict-avg / decoupled: how many rounds a push's base may lag the fragment "
+        "being merged (default 0 = late pushes are refused). One round merges every "
+        "fragment once; the launcher passes N x fragments to the syncer, whose "
+        "--max-base-lag counts versions",
     ),
     cli_flag(
         "--rl-sync-outer-lr",
