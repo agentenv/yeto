@@ -118,6 +118,8 @@ def _rl_trainable_island_flags(args, learner_id: int, num_learners: int) -> str:
         sweep += " --sweep-overlap"
     if getattr(args, "rl_sync_push_no_tensor_blocks", False):
         sweep += " --sweep-push-no-tensor-blocks"
+    if getattr(args, "rl_sync_fragment_max_bytes", 2 << 30) != 2 << 30:
+        sweep += f" --sweep-fragment-max-bytes {int(args.rl_sync_fragment_max_bytes)}"
     if getattr(args, "rl_sync_push_dtype", "f32") == "int8":
         sweep += f" --sweep-push-int8-block {int(getattr(args, 'rl_sync_push_int8_block', 128))}"
     if getattr(args, "rl_sync_push_dtype", "f32") == "int4":

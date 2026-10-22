@@ -950,6 +950,15 @@ _SYNC = (
         "Needs --rl-sync-fragment-pipeline equal to --fragments",
     ),
     cli_flag(
+        "--rl-sync-fragment-max-bytes",
+        type=int,
+        default=2 << 30,
+        help="full-parameter only: f32 byte bound of one sync fragment (multiple of 4, "
+        "4..2147483648). A parameter above the bound spans several fragments as "
+        "dimension-0 row slices, each merged as its own tensor (RDA per slice). "
+        "A smaller bound changes the layout hash, so the probe must use the same value",
+    ),
+    cli_flag(
         "--rl-sync-push-int8-block",
         type=int,
         default=128,

@@ -163,6 +163,7 @@ _FULL_PARAMETER_SYNC_DEFAULTS = (
     ("rl_sync_push_dtype", "f32", "--rl-sync-push-dtype"),
     ("rl_sync_checkpoint_every", 1, "--rl-sync-checkpoint-every"),
     ("rl_sync_push_int8_block", 128, "--rl-sync-push-int8-block"),
+    ("rl_sync_fragment_max_bytes", 2 << 30, "--rl-sync-fragment-max-bytes"),
     ("rl_sync_push_int4_block", 128, "--rl-sync-push-int4-block"),
     ("rl_sync_push_int4_stochastic", False, "--rl-sync-push-int4-stochastic"),
     ("rl_sync_push_int4_error_feedback", "off", "--rl-sync-push-int4-error-feedback"),
@@ -253,6 +254,9 @@ def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
             problems.append("no --rl-sync-overlap (sweep only)")
     elif checkpoint_every != 1 and (checkpoint_every < 1 or checkpoint_every % max(args.fragments, 1)):
         problems.append("--rl-sync-checkpoint-every 1 or a multiple of --fragments")
+    fragment_max_bytes = getattr(args, "rl_sync_fragment_max_bytes", 2 << 30)
+    if type(fragment_max_bytes) is not int or not 4 <= fragment_max_bytes <= 2 << 30 or fragment_max_bytes % 4:
+        problems.append("--rl-sync-fragment-max-bytes a multiple of 4 between 4 and 2147483648")
     int8_block = int(getattr(args, "rl_sync_push_int8_block", 128))
     if not 32 <= int8_block <= 1 << 20:
         problems.append("--rl-sync-push-int8-block between 32 and 1048576")

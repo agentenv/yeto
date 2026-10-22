@@ -84,9 +84,11 @@ static METER: meter::Meter = meter::Meter;
 const F32: f64 = 4.0;
 
 /// Shape of one strict full-parameter session.
+#[derive(Clone, Copy)]
 struct Session {
     params: f64,
-    /// Largest fragment (one canonical tensor per fragment in Miles).
+    /// Largest fragment: at most the fragment bound (a larger tensor is
+    /// split into dimension-0 row slices across several fragments).
     max_fragment: f64,
     islands: f64,
     /// Fragment rounds in flight (`--pipeline`).
@@ -316,6 +318,45 @@ fn head_memory_measured_scaled_down() {
     let read_buffers = (1 << 20) as f64 / frag_bytes + 0.05;
     assert!(load_peak <= 2.0 * FRAGMENTS as f64 + read_buffers, "{load_peak}");
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Qwen3.8-27B at TP2: each rank owns a 124160 x 5120 vocabulary shard
+/// (2.54 GB f32), above the 2 GiB fragment bound, so the layout splits it
+/// into two row slices.  Every fragment is then at most the bound, and the
+/// per-round head terms scale with the bound instead of the largest tensor.
+#[test]
+fn head_memory_model_for_27b_tp2_with_split_vocabulary() {
+    const FRAGMENT_BOUND_SCALARS: f64 = (2u64 << 30) as f64 / F32;
+    let vocabulary_shard = 124_160.0 * 5120.0;
+    assert!(vocabulary_shard > FRAGMENT_BOUND_SCALARS);
+    let slices = (vocabulary_shard / FRAGMENT_BOUND_SCALARS).ceil();
+    assert_eq!(slices, 2.0);
+    println!("islands | resident | rounds fold worst | async ckpt snapshot | peak  [GiB]");
+    for islands in [2.0, 4.0] {
+        let split = Session {
+            params: 27e9,
+            max_fragment: FRAGMENT_BOUND_SCALARS,
+            islands,
+            pipeline: 2.0,
+            rda: true,
+            downlink_anchor: true,
+        };
+        let whole = Session { max_fragment: 152_064.0 * 5120.0, ..split };
+        let (e, w) = (split.estimate(), whole.estimate());
+        let peak = e.resident + e.rounds_fold_worst + e.async_checkpoint_snapshot;
+        println!(
+            "{islands} | {:.1} | {:.1} | {:.1} | {:.1}",
+            gib(e.resident),
+            gib(e.rounds_fold_worst),
+            gib(e.async_checkpoint_snapshot),
+            gib(peak),
+        );
+        // Splitting leaves the resident state alone and bounds every
+        // per-round term by the fragment bound.
+        assert_eq!(e.resident, w.resident);
+        assert!(e.rounds_fold_worst < w.rounds_fold_worst);
+        assert!(gib(e.rounds_fold_worst) <= 2.0 * (islands + 1.0) * 2.0 + 1e-9);
+    }
 }
 
 /// S27 P4b: per-process head bytes for 27B with the streaming weighted fold

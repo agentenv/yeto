@@ -921,6 +921,7 @@ def _dense_full_sync_config(
         wan_stall_timeout=float(getattr(args, "wan_stall_timeout", 0.0) or 0.0),
         push_dtype=getattr(args, "sweep_push_dtype", "f32"),
         push_int8_block=int(getattr(args, "sweep_push_int8_block", 128)),
+        max_fragment_bytes=int(getattr(args, "sweep_fragment_max_bytes", 2 << 30)),
         push_int4_block=int(getattr(args, "sweep_push_int4_block", 128)),
         push_tensor_blocks=not getattr(args, "sweep_push_no_tensor_blocks", False),
         push_int4_stochastic=bool(getattr(args, "sweep_push_int4_stochastic", False)),

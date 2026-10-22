@@ -343,6 +343,13 @@ _ISLAND = (
         help="full-parameter sweep: wire dtype of pushed outer deltas (syncer masters stay f32)",
     ),
     island_flag(
+        "--sweep-fragment-max-bytes",
+        type=int,
+        default=2 << 30,
+        help="full-parameter: f32 byte bound of one sync fragment; a larger "
+        "parameter spans several fragments as dimension-0 row slices",
+    ),
+    island_flag(
         "--sweep-push-int8-block",
         type=int,
         default=128,

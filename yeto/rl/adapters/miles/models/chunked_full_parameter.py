@@ -14,6 +14,7 @@ from yeto.rl.local_learner import (
     ParameterLayout,
     ParameterSpec,
     owner_affine_minimum_fragments,
+    split_parameter_specs,
 )
 from yeto.rl.moe_layout import check_expert_partition, describe_topology
 from yeto.rl.trajectory_evidence import TrajectoryBatchEvidence
@@ -325,8 +326,12 @@ class MilesChunkedFullParameterAdapter:
         # its own experts); a dense model passes through unchanged.
         check_expert_partition(specs)
         start = max(minimum_fragments, owner_affine_minimum_fragments(specs, matrix_merge))
+        # A parameter above the bound spans several fragments as dimension-0
+        # row slices; with no such parameter the layout is unchanged.
+        max_fragment_numel = max_fragment_bytes // 4
+        units = split_parameter_specs(specs, max_fragment_numel)
         layout = None
-        for count in range(start, len(specs) + 1):
+        for count in range(start, len(units) + 1):
             candidate = ParameterLayout.create(
                 algorithm=algorithm,
                 components=components,
@@ -335,6 +340,7 @@ class MilesChunkedFullParameterAdapter:
                 fragment_strategy="owner_affine",
                 stream_role=stream_role,
                 matrix_merge=matrix_merge,
+                max_fragment_numel=max_fragment_numel,
             )
             if all(
                 fragment.numel * 4 <= max_fragment_bytes
@@ -343,9 +349,7 @@ class MilesChunkedFullParameterAdapter:
                 layout = candidate
                 break
         if layout is None:
-            raise ValueError(
-                "a single topology-owned parameter exceeds the fragment byte bound"
-            )
+            raise RuntimeError("owner-affine layout did not fit the fragment byte bound")
 
         manifests_by_owner = {}
         for manifest in ordered:
@@ -365,11 +369,19 @@ class MilesChunkedFullParameterAdapter:
             for fragment_id, fragment in enumerate(layout.fragments.fragments):
                 if layout.fragment_owner(fragment_id) != owner:
                     continue
+                slices = layout.fragment_slices(fragment_id)
                 fragments.append(
                     FullParameterFragmentPlan(
                         fragment_id=fragment_id,
-                        wire_names=tuple(name for name, _ in fragment.tensors),
+                        wire_names=tuple(unit.spec.wire_name for unit in slices),
                         numel=fragment.numel,
+                        # Only a fragment holding part of a parameter names
+                        # ranges, so unsplit plans keep their plan hash.
+                        flat_ranges=(
+                            ()
+                            if all(unit.is_whole for unit in slices)
+                            else tuple(unit.flat_range for unit in slices)
+                        ),
                     )
                 )
             plans.append(
