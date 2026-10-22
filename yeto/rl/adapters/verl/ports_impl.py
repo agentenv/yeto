@@ -30,13 +30,17 @@ import hashlib
 import json
 import os
 import time
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from math import prod
 from pathlib import Path
 from typing import Any
 
 from yeto.rl.contracts import InferencePublicationManifest, LocalStepReceipt
 from yeto.rl.engine import mismatch_criteria, offpolicy_source
+from yeto.rl.engine.policy_digest import PolicyDigest, TrainerResidentState, is_resident
 from yeto.rl.engine.ports import GroupMetadata, PlacementDescription, PublicationResult, RolloutBatchHandle
-from yeto.rl.engine.trainable_state import TrainableState
+from yeto.rl.engine.trainable_state import LAYOUT_LORA, TrainableState
 
 from . import publish as pub
 from .param_names import train_to_canonical
@@ -59,20 +63,86 @@ def _peft_module(worker):
     return getattr(module, "_fsdp_wrapped_module", module)
 
 
+def _lora_tensors(worker_dict) -> tuple[dict, set]:
+    """({canonical name: full LoRA tensor on its device}, parameter dtypes); collective
+    (``full_tensor``): every rank calls it."""
+    peft = _peft_module(_inner_worker(worker_dict))
+    out, dtypes = {}, set()
+    for name, param in peft.named_parameters():
+        if ".lora_" not in name:
+            continue
+        dtypes.add(str(param.dtype))
+        full = param.full_tensor() if hasattr(param, "full_tensor") else param
+        out[train_to_canonical(name)] = full.detach()
+    return out, dtypes
+
+
 def remote_export_lora(worker_dict):
     """(canonical f32 CPU tensors, info) from the actor's PEFT model."""
     import torch
 
-    peft = _peft_module(_inner_worker(worker_dict))
-    out, dtypes = {}, set()
     with torch.no_grad():
-        for name, param in peft.named_parameters():
-            if ".lora_" not in name:
-                continue
-            dtypes.add(str(param.dtype))
-            full = param.full_tensor() if hasattr(param, "full_tensor") else param
-            out[train_to_canonical(name)] = full.detach().to("cpu", torch.float32).clone()
+        tensors, dtypes = _lora_tensors(worker_dict)
+        out = {name: value.to("cpu", torch.float32).clone() for name, value in tensors.items()}
     return out, {"param_dtypes": sorted(dtypes), "count": len(out)}
+
+
+def digest_lora_tensors(tensors, *, base_model_revision: str, lora_config_hash: str,
+                        layout_hash: str, expected_specs) -> dict:
+    """rl-publish-fastpath, trainer side: validate ``tensors`` exactly as the driver's
+    ``canonical_state`` would and return only what the driver reads -- the policy
+    digests and the bf16 send checksum of :func:`publish.lora_checksum` (small dicts,
+    no tensors).  Same functions as the full-export path, so the values are equal
+    bit for bit."""
+
+    import time
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    from yeto.rl.core import canonical_state_from_owned_tensors
+    from yeto.rl.engine.policy_digest import digest_canonical_tensors
+
+    started = time.monotonic()
+    # E1: ``tensors`` are this call's own copies (the trainer's export), so the
+    # validation keeps them without a second clone; the values are the same
+    state = canonical_state_from_owned_tensors(
+        0, tensors, base_model_revision=base_model_revision, lora_config_hash=lora_config_hash,
+        layout_hash=layout_hash, expected_specs=expected_specs)
+    # E1: the bf16 send checksum runs in its own thread beside the two digest streams
+    # (hashlib releases the GIL); each function is unchanged, so the values are too
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="yeto-lora-checksum") as pool:
+        checksum = pool.submit(pub.lora_checksum, dict(state.tensors))
+        digest = digest_canonical_tensors(state.tensors, base_model_revision=state.base_model_revision,
+                                          lora_config_hash=state.lora_config_hash,
+                                          layout_hash=state.layout_hash)
+        lora_checksum = checksum.result()
+    return {"digest": digest.to_wire(), "layout_hash": state.layout_hash,
+            "lora_checksum": lora_checksum,
+            "export_seconds": round(time.monotonic() - started, 3)}
+
+
+def remote_export_digest(worker_dict, kwargs: dict):
+    """All ranks gather the LoRA (``full_tensor`` is collective); rank 0 hashes it.
+
+    E1: rank 0 stages the tensors in one reusable pinned buffer (one GPU
+    synchronization, :func:`~yeto.rl.engine.policy_digest.stage_f32_on_host`); they
+    are hashed here and dropped, never returned."""
+    import torch
+    import torch.distributed as dist
+
+    from yeto.rl.engine.policy_digest import HostStaging, stage_f32_on_host
+
+    with torch.no_grad():
+        tensors, _dtypes = _lora_tensors(worker_dict)
+        if dist.is_available() and dist.is_initialized() and dist.get_rank() != 0:
+            return None
+        worker = _inner_worker(worker_dict)
+        staging = getattr(worker, "_yeto_digest_staging", None)
+        if staging is None:
+            staging = HostStaging()
+            setattr(worker, "_yeto_digest_staging", staging)
+        tensors = stage_f32_on_host(tensors, staging)
+    return digest_lora_tensors(tensors, **kwargs)
 
 
 def remote_apply_lora(worker_dict, tensors, reset_optimizer: bool):
@@ -160,6 +230,10 @@ class VerlIsland:
     def export_tensors(self) -> tuple[dict, dict]:
         results = self.call_workers(remote_export_lora)
         return results[0]
+
+    def export_digest(self, kwargs: dict) -> dict:
+        """rl-publish-fastpath: digests + send checksum computed on the workers."""
+        return next(r for r in self.call_workers(remote_export_digest, kwargs) if r is not None)
 
     def append_jsonl(self, name: str, record: dict) -> None:
         with (self.out / name).open("a") as handle:
@@ -388,6 +462,25 @@ class VerlTrainerGroup:
         return out
 
 
+@dataclass(frozen=True)
+class VerlResidentState(TrainerResidentState):
+    """A verl policy kept in the trainer; carries the bf16 send checksum the
+    publisher compares with the vLLM read-back (no tensors on the driver)."""
+
+    lora_checksum: Mapping[str, Any] | None = field(default=None, compare=False)
+
+
+def sent_checksum(state) -> tuple[dict, int]:
+    """(send checksum, bf16 payload bytes) of the policy being published.  A resident
+    state brings both from the trainer; any other state is hashed here as before."""
+
+    if is_resident(state) and getattr(state, "lora_checksum", None) is not None:
+        payload_bytes = sum(prod(shape) * 2 for _name, shape in state.digest.specs)
+        return dict(state.lora_checksum), int(payload_bytes)
+    tensors = dict(state.to_lora().tensors)
+    return pub.lora_checksum(tensors), sum(int(t.numel()) * 2 for t in tensors.values())
+
+
 class VerlPolicyState:
     def __init__(self, island: VerlIsland):
         self.island = island
@@ -402,6 +495,36 @@ class VerlPolicyState:
                                 layout_hash=self.island.layout_hash,
                                 expected_specs=self.island.expected_specs)
         return TrainableState.from_lora(state)
+
+    def export_digest(self, *, policy_version: int) -> VerlResidentState | None:
+        """rl-publish-fastpath: the workers export and hash; only digests cross Ray.
+        None when the island has no digest hook (the driver then calls :meth:`export`)."""
+
+        hook = getattr(self.island, "export_digest", None)
+        if not callable(hook):
+            return None
+        isl, started = self.island, time.monotonic()
+        raw = hook({"base_model_revision": isl.base_model_revision,
+                    "lora_config_hash": isl.lora_config_hash, "layout_hash": isl.layout_hash,
+                    "expected_specs": tuple(isl.expected_specs)})
+        digest = PolicyDigest.from_wire(raw["digest"])
+        print(f"[rl] verl publish-fastpath digest export v{policy_version}: "
+              f"total={time.monotonic() - started:.2f}s trainer={raw.get('export_seconds')}s "
+              f"hash={digest.hash_seconds:.2f}s bytes={digest.payload_bytes}", flush=True)
+        return VerlResidentState(
+            layout=LAYOUT_LORA, base_model_revision=isl.base_model_revision,
+            config_hash=isl.lora_config_hash, layout_hash=str(raw["layout_hash"]),
+            policy_version=int(policy_version), digest=digest, materialize_fn=self._materialize,
+            lora_checksum=raw["lora_checksum"])
+
+    def _materialize(self, policy_version: int) -> TrainableState:
+        from yeto.rl.core import canonical_state
+
+        lora = self.export().to_lora()
+        return TrainableState.from_lora(canonical_state(
+            int(policy_version), lora.tensors, base_model_revision=lora.base_model_revision,
+            lora_config_hash=lora.lora_config_hash, layout_hash=lora.layout_hash,
+            expected_specs=lora.specs))
 
     def apply(self, state: TrainableState, *, optimizer: str, local_step: int) -> None:
         if optimizer not in ("reset", "preserve"):
@@ -443,8 +566,7 @@ class VerlPublisher:
 
         isl, t = self.island, self.island.trainer
         version = int(state.policy_version)
-        lora = state.to_lora()
-        sent = pub.lora_checksum(dict(lora.tensors))
+        sent, payload_bytes = sent_checksum(state)
         (isl.readback_dir / "expected_version").write_text(str(version))
         stale = isl.readback_dir / f"readback-v{version}.json"
         if stale.exists():
@@ -470,7 +592,6 @@ class VerlPublisher:
                                    f"{list(check.mismatched[:3])}", cause=cause)
         digest = state.policy_tensor_hash()
         isl.published = (version, digest)
-        payload_bytes = sum(int(t_.numel()) * 2 for t_ in lora.tensors.values())
         manifest = InferencePublicationManifest(
             publication_mode="full", base_policy_version=None, target_policy_version=version,
             target_policy_hash=digest, target_manifest_hash=_sha(f"{version}:{digest}"),

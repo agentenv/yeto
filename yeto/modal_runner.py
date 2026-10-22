@@ -204,6 +204,10 @@ class ModalIslandConfig:
     # Request exactly `gpu` ("H100!" -- no H200 upgrade) and fail the
     # container at start-up unless nvidia-smi reports that type.
     gpu_exact: bool = False
+    # E1: fail the container at start-up unless every GPU nvidia-smi reports is this
+    # model ("NVIDIA A10" refuses "NVIDIA A10G": Modal "A10G" containers are either,
+    # and the A10G trains about 12 % slower); None: any card of type `gpu`.
+    gpu_name: str | None = None
     # Pull image_ref with a private-registry login: ``registry_creds`` (the
     # SKYPILOT_DOCKER_* triple launcher.registry_login_for resolved) when
     # given, else -- with ``registry_login`` -- the launching process's
@@ -392,6 +396,19 @@ def check_gpu_names(gpu: str, names: list[str], count: int) -> None:
         raise RuntimeError(
             f"requested {count}x {gpu} (exact) but the container sees {names!r}"
         )
+
+
+def gpu_model_matches(want: str, name: str) -> bool:
+    """``name`` is the GPU model ``want`` names, not a longer model name that starts
+    with it ("NVIDIA A10" matches "NVIDIA A10", not "NVIDIA A10G")."""
+    return re.search(re.escape(want) + r"(?![\w-])", name) is not None
+
+
+def check_gpu_model(want: str, names: list[str], count: int) -> None:
+    """Raise unless exactly ``count`` GPUs of the model ``want`` are visible."""
+    wrong = [n for n in names if not gpu_model_matches(want, n)]
+    if wrong or len(names) != count:
+        raise RuntimeError(f"requested {count}x {want!r} (--modal-gpu-name) but the container sees {names!r}")
 
 
 def visible_gpu_names() -> list[str]:
@@ -883,7 +900,7 @@ def _island_body(cfg: ModalIslandConfig, rank: int, ips: list[str], all_ips: dic
     try:
         names = visible_gpu_names()
     except (OSError, subprocess.SubprocessError) as exc:
-        if cfg.gpu_exact:
+        if cfg.gpu_exact or cfg.gpu_name:
             raise RuntimeError(f"island {cfg.learner_id}: cannot read GPU names: {exc}") from exc
         names = []
     print(f"[modal-island {cfg.learner_id}] requested {cfg.gpu_request}, got {names}", flush=True)
@@ -896,6 +913,8 @@ def _island_body(cfg: ModalIslandConfig, rank: int, ips: list[str], all_ips: dic
         tape.start()
     if cfg.gpu_exact:
         check_gpu_names(cfg.gpu, names, cfg.gpus_per_node)
+    if cfg.gpu_name:
+        check_gpu_model(cfg.gpu_name, names, cfg.gpus_per_node)
     if cfg.setup_script:
         code = subprocess.call(container_command(cfg.setup_script), env=env)
         if code != 0:

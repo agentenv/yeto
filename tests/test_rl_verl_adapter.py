@@ -447,3 +447,27 @@ def test_verl_data_cursor_refuses_what_it_cannot_honour():
         cur.seek({"sample_offset": 2})
     with pytest.raises(RuntimeError, match="twice"):
         VerlDataCursor(trainer)
+
+
+def test_fully_async_runtime_env_keeps_nccl_host_buffers_on_shm(monkeypatch):
+    # S26 E0.1: a cuMem host-buffer sender and a /dev/shm receiver cannot attach on Modal
+    import sys
+    import types
+
+    pkg = types.ModuleType("verl.trainer.constants_ppo")
+    pkg.get_ppo_ray_runtime_env = lambda _x: {"env_vars": {}}
+    for name in ("verl", "verl.trainer"):
+        monkeypatch.setitem(sys.modules, name, sys.modules.get(name) or types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "verl.trainer.constants_ppo", pkg)
+    ray_stub = types.ModuleType("ray")
+    ray_stub.remote = lambda *a, **k: (lambda cls: cls)
+    monkeypatch.setitem(sys.modules, "ray", sys.modules.get("ray") or ray_stub)
+    monkeypatch.setitem(sys.modules, "yeto.rl.adapters.verl.verl_main", None)
+    monkeypatch.delitem(sys.modules, "yeto.rl.adapters.verl.verl_main")
+    from yeto.rl.adapters.verl import verl_main
+
+    monkeypatch.delenv(verl_main.CUMEM_HOST_ENV, raising=False)
+    assert verl_main._runtime_env(fully_async=True)["env_vars"][verl_main.CUMEM_HOST_ENV] == "0"
+    assert verl_main.CUMEM_HOST_ENV not in verl_main._runtime_env()["env_vars"]
+    monkeypatch.setenv(verl_main.CUMEM_HOST_ENV, "1")
+    assert verl_main._runtime_env(fully_async=True)["env_vars"][verl_main.CUMEM_HOST_ENV] == "1"

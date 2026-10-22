@@ -533,6 +533,10 @@ def _ports_infra_flags(args) -> tuple[str, str]:
         flags += " --rl-observe-timeline"
     if getattr(args, "rl_debug_dump", False):
         flags += " --rl-debug-dump"
+    if getattr(args, "rl_profile_trainer", False):
+        flags += " --rl-profile-trainer"
+    if getattr(args, "rl_verify_every_round", False):
+        flags += " --rl-verify-every-round"
     if getattr(args, "rl_resource_sample_interval", None) is not None:
         flags += f" --rl-resource-sample-interval {float(args.rl_resource_sample_interval)!r}"
     flags += _rl_backend_module(args, "elastic_hook").recommend_flags(args)

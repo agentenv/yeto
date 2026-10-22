@@ -74,6 +74,7 @@ from yeto.rl.core import (
 )
 from yeto.rl.elastic_client import LeaveReason
 
+from . import phase_profile
 from .algorithm import AlgorithmSpec
 from .capabilities import BackendTraits, EngineCapabilities
 from .execution_profile import (
@@ -122,6 +123,8 @@ _PHASE_ROLE = {
     "publish": "trainer+rollout",
     "eval": "rollout",
     "offload": "trainer",
+    "checkpoint": "trainer",
+    "rollout_offload": "rollout",
     "onload": "trainer",
 }
 _PHASE_TASK = {"sync": "outer_sync"}
@@ -366,6 +369,41 @@ def _pooled_reward(batch: RolloutBatchHandle) -> tuple[float, float]:
     return mean, math.sqrt(max(0.0, second - mean * mean))
 
 
+def defer_digest(driver: Any) -> bool:
+    """E1: a colocated trainer that offloads for the publication hashes the policy
+    while it offloads (``deferred`` digest, read at the publication). Needs a
+    policy state that supports it; ``YETO_RL_DEFERRED_DIGEST=0`` turns it off."""
+    import os
+
+    if os.environ.get("YETO_RL_DEFERRED_DIGEST", "1").strip().lower() in {"0", "false", "no", "off"}:
+        return False
+    return (bool(getattr(driver, "colocated", False)) and bool(getattr(driver, "publish_offloaded", False))
+            and bool(getattr(driver.policy_state, "supports_deferred_digest", False)))
+
+
+def verify_publication(driver: Any, version: int) -> bool:
+    """E1: does the publication of policy ``version`` hash the policy and read the
+    engine weight checksums back? Yes on the first publication, on a round whose safe
+    point keeps a round cut (resume relies on its policy hash), on every K-th version
+    (K = the round-cut interval) and, with ``--rl-verify-every-round``, always. Without
+    round cuts, or with a policy state that cannot skip it, every round is verified.
+    The other rounds still check that the trainer holds the policy (weights version)."""
+    if bool(getattr(driver, "verify_every_round", False)):
+        return True
+    if not bool(getattr(getattr(driver, "policy_state", None), "supports_unverified_rounds", False)):
+        return True
+    cuts = getattr(getattr(driver, "sync", None), "round_cuts", None)
+    every = int(getattr(cuts, "every", 0) or 0)
+    if cuts is None or every <= 1:
+        return True
+    if getattr(driver, "published_version", None) is None:
+        return True
+    cut_due = getattr(driver.sync, "cut_due", None)
+    if callable(cut_due) and cut_due(int(version)):
+        return True
+    return int(version) % every == 0
+
+
 class IslandDriver:
     def __init__(
         self,
@@ -466,6 +504,7 @@ class IslandDriver:
 
     def phase(self, name: str, **fields: Any) -> None:
         self._last_phase = (name, fields.get("rollout_id"))
+        phase_profile.on_phase(name, fields.get("rollout_id"))  # no-op unless --rl-profile-trainer
         if self.observe:
             self._close_span()
             self._open_span = (name, self.clock(), fields.get("rollout_id"))
@@ -685,6 +724,12 @@ class IslandDriver:
         export_digest = getattr(self.policy_state, "export_digest", None)
         if not callable(export_digest):
             return None
+        if not verify_publication(self, int(policy_version)):
+            state = self.policy_state.export_identity(policy_version=int(policy_version))
+            if state is not None:
+                return state
+        if defer_digest(self):
+            return export_digest(policy_version=int(policy_version), deferred=True)
         return export_digest(policy_version=int(policy_version))
 
     # -- per-round steps -------------------------------------------------
@@ -737,6 +782,9 @@ class IslandDriver:
             policy_version=rollout_id,
             **{
                 "rl/policy_token": self.expected_token,
+                # E1: only on a round whose policy content was not hashed (recorded tapes
+                # of verified rounds stay byte-identical)
+                **({"sync/publication_verified": False} if getattr(state, "verified", True) is False else {}),
                 "sync/publication_payload_bytes": manifest.payload_bytes,
                 "sync/publication_payload_hash": manifest.payload_hash,
                 "sync/publication_members": sorted(result.members),
@@ -889,11 +937,20 @@ class IslandDriver:
                 f"generation of rollout {rollout_id}",
             )
         self.phase("generate", rollout_id=rollout_id, policy_version=rollout_id)
+        offload_rollout = getattr(self.rollout, "offload_after_generate", None)
+        split_offload = callable(offload_rollout) and bool(getattr(self.rollout, "offloads_after_generate", False))
+        if split_offload:
+            self.rollout.defer_offload = True
         with self._load_sampler(rollout_id):
             # IR-3: the rollout side learns the target policy token up front.
             batch = self.rollout.generate(
                 rollout_id, expected_policy_version=self.expected_token
             )
+        # E1: a colocated rollout that frees its memory after generating (Miles
+        # --offload-rollout) does it in its own phase, not inside "generate"
+        if split_offload:
+            self.phase("rollout_offload", rollout_id=rollout_id)
+            offload_rollout()
         if batch.rollout_id != rollout_id or batch.policy_version != rollout_id:
             raise PolicyIdentityError(
                 f"rollout pool returned rollout {batch.rollout_id} "
@@ -1167,20 +1224,35 @@ class IslandDriver:
             thread.join(timeout=self.load_sample_interval_s + 5)
             # S15 evidence-window lesson: one terminal probe after generate so a
             # round whose loads mostly land after the last tick still leaves a
-            # final ``rl_load_sample`` (``terminal=True``). Observe only.
-            try:
-                sample = probe()
-            except Exception as exc:  # noqa: BLE001 - observation must not kill the round
-                import logging
+            # final ``rl_load_sample`` (``terminal=True``). Observe only, so it runs
+            # off the round's critical path (E1: a synchronous probe cost ~0.1 s/round).
+            self._join_terminal_probe()
+            self._terminal_probe = threading.Thread(
+                target=self._terminal_load_sample, args=(probe, rollout_id),
+                name="yeto-load-sample-terminal", daemon=True)
+            self._terminal_probe.start()
 
-                logging.getLogger(__name__).warning(
-                    "yeto terminal load_sample probe raised %s: %s", type(exc).__name__, exc)
-                sample = None
-            if sample is not None:
-                self.emit("rl_load_sample", rollout_id=rollout_id, **dict(sample),
-                          t=self.clock(), profile_hash=self.profile_hash,
-                          epoch=self.config_epoch,
-                          weight_transport=self.weight_transport, terminal=True)
+    def _join_terminal_probe(self) -> None:
+        """Wait (bounded) for the previous round's terminal load probe: at most one runs."""
+        thread = getattr(self, "_terminal_probe", None)
+        if thread is not None:
+            thread.join(timeout=self.load_sample_interval_s + 5)
+            self._terminal_probe = None
+
+    def _terminal_load_sample(self, probe: Callable[[], Any], rollout_id: int) -> None:
+        try:
+            sample = probe()
+        except Exception as exc:  # noqa: BLE001 - observation must not kill the round
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "yeto terminal load_sample probe raised %s: %s", type(exc).__name__, exc)
+            return
+        if sample is not None:
+            self.emit("rl_load_sample", rollout_id=rollout_id, **dict(sample),
+                      t=self.clock(), profile_hash=self.profile_hash,
+                      epoch=self.config_epoch,
+                      weight_transport=self.weight_transport, terminal=True)
 
     def _emit_round_labels(self, rollout_id, batch, metrics) -> None:
         """A5: per-round algorithm metrics carry the same profile/epoch/transport labels."""
@@ -1455,6 +1527,10 @@ class IslandDriver:
         raw = self.trainer.step_metrics()
         metrics = raw if isinstance(raw, TrainStepMetrics) else TrainStepMetrics(**dict(raw))
         rollout_fraction = getattr(batch, "cross_version_truncated_fraction", None)
+        late = getattr(self.rollout, "late_cross_version_fraction", None)
+        if rollout_fraction is None and callable(late):
+            # E1: estimated in the background while this step trained (Miles fully_async)
+            rollout_fraction = late(rollout_id)
         if metrics.cross_version_truncated_fraction is None and rollout_fraction is not None:
             # agentic-rollout-utilization 4.1: an engine that estimates the
             # cross-version truncation on the rollout side (Miles carry-over)
@@ -1531,6 +1607,12 @@ class IslandDriver:
             self.ledger.outer_recorded(rollout_id, next_policy_version=rollout_id + 1)
         self._join_eval()
         if self.colocated and self.publish_offloaded:
+            # E1: a round cut due at the next safe point writes the trainer state now,
+            # while it is resident, instead of waking the offloaded trainer for it
+            cut_due = getattr(self.sync, "cut_due", None)
+            if callable(cut_due) and cut_due(rollout_id + 1):
+                self.phase("checkpoint", rollout_id=rollout_id)
+                self.sync.prepare_cut(self, rollout_id=rollout_id + 1, state=boundary.state)
             self._offload_trainer(rollout_id)
         self.publish(boundary.state, rollout_id=rollout_id + 1)
         self._close_span()
@@ -1617,6 +1699,11 @@ class IslandDriver:
             self.elastic_hook.at_safe_point(self, rollout_id)
         if not self.controller.has_pending() and not self.controller.recovery_required:
             return None
+        # E1: a reconfiguration syncs the checkpoint store itself; no round cut may still
+        # be committing it in the background
+        join_commit = getattr(getattr(self.sync, "round_cuts", None), "join_commit", None)
+        if callable(join_commit):
+            join_commit(self)
         epoch_before = self.config_epoch
         self.phase("reconfigure", rollout_id=rollout_id, config_epoch=epoch_before)
         from .controller import RecoveryRequired
@@ -1885,6 +1972,7 @@ class IslandDriver:
             failure = error
             raise
         finally:
+            self._join_terminal_probe()  # its rl_load_sample lands before the tape closes
             if self.eval_overlap is not None:
                 self.eval_overlap.abort()  # no orphan eval task on error/cancel paths
             self._close_sync(failure)

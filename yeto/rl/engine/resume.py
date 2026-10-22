@@ -52,6 +52,9 @@ RESUME_JOURNAL = "resume-journal.jsonl"  # under the state dir
 SKIP_NAMES = frozenset({"journal.lock", STATE_MANIFEST, LATEST})
 DEFAULT_CUT_KEEP = 2
 DEFAULT_CUT_EVERY = 1
+# E1: next to a store's first round cut while it is written and committed in the
+# background (``round-cuts/<cut_id>`` + this suffix, a file); see discard_unfinished_first_cut
+FIRST_CUT_MARK = ".first-cut-in-progress"
 
 
 class StoreIntegrityError(RuntimeError):
@@ -210,10 +213,13 @@ def read_latest(store_root: Path) -> dict[str, Any] | None:
 
 
 def write_snapshot(store: CheckpointStore, state_dir: Path, info: Mapping[str, Any], *,
-                   skip: Iterable[str] = ()) -> dict[str, Any]:
+                   skip: Iterable[str] = (), commit: bool = True) -> dict[str, Any]:
     """Copy ``state_dir`` into a NEW snapshot dir (every file hash-checked after the
     copy), write its manifest, then ``LATEST``, then commit. Returns the LATEST record
-    plus timings/bytes."""
+    plus timings/bytes.
+
+    ``commit=False`` leaves the commit to the caller (``commit_s`` is None): until it
+    commits, a reader of a committing store still sees the previous LATEST."""
     root = store.root
     started = time.monotonic()
     latest = read_latest(root)
@@ -233,7 +239,7 @@ def write_snapshot(store: CheckpointStore, state_dir: Path, info: Mapping[str, A
     record = {"seq": seq, "manifest_sha256": manifest_sha, "bytes": total,
               **{k: info[k] for k in ("cut_id", "next_rollout_id", "incarnation", "reason") if k in info}}
     _write_json_atomic(root / LATEST, record)
-    commit_s = store.commit()
+    commit_s = store.commit() if commit else None
     return {**record, "copy_s": copied_s, "commit_s": commit_s}
 
 
@@ -366,13 +372,94 @@ def prune(store_root: Path, *, keep: int, cut_ids_of: Callable[[Path], str | Non
             shutil.rmtree(p, ignore_errors=True)
             deleted.append(f"{STATE_DIR}/{p.name}")
     wanted = {cid for cid in (cut_ids_of(p) for p in kept) if cid}
+    # E1: a cut newer than every kept one may be being written right now (a periodic
+    # cut is captured while the previous cut commits in the background): not pruned
+    newest = max((r for r in map(_cut_rollout, wanted) if r is not None), default=None)
     cuts = root / ROUND_CUTS
     if cuts.is_dir():
         for p in sorted(cuts.iterdir()):
+            rollout = _cut_rollout(p.name)
+            if newest is not None and rollout is not None and rollout > newest:
+                continue
             if p.is_dir() and p.name not in wanted:
                 shutil.rmtree(p, ignore_errors=True)
                 deleted.append(f"{ROUND_CUTS}/{p.name}")
     return deleted
+
+
+def _cut_rollout(cut_id: str) -> int | None:
+    """Rollout id of a round cut named ``r<rollout:06d>-<incarnation>`` (None: other name)."""
+    head, sep, _ = cut_id.partition("-")
+    if not sep or not head.startswith("r") or not head[1:].isdigit():
+        return None
+    return int(head[1:])
+
+
+def first_cut_mark(store_root: Path, cut_id: str) -> Path:
+    """The "first cut in progress" mark of round cut ``cut_id`` (a file in round-cuts/)."""
+    return Path(store_root) / ROUND_CUTS / f"{cut_id}{FIRST_CUT_MARK}"
+
+
+def mark_first_cut(store_root: Path, cut_id: str) -> Path:
+    """E1: written (fsynced) before the store's first round cut starts its shards, so a
+    run that dies before that cut's LATEST is committed can tell its files from the
+    cuts of an unfinished store (:func:`discard_unfinished_first_cut`)."""
+    mark = first_cut_mark(store_root, cut_id)
+    mark.parent.mkdir(parents=True, exist_ok=True)
+    with open(mark, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"cut_id": cut_id}))
+        fh.flush()
+        os.fsync(fh.fileno())
+    return mark
+
+
+def clear_first_cut_marks(store_root: Path) -> list[str]:
+    """Remove every first-cut mark (after a LATEST is committed they mean nothing)."""
+    cuts = Path(store_root) / ROUND_CUTS
+    removed = []
+    if cuts.is_dir():
+        for p in sorted(cuts.glob(f"*{FIRST_CUT_MARK}")):
+            p.unlink(missing_ok=True)
+            removed.append(p.name)
+    return removed
+
+
+def discard_unfinished_first_cut(store_root: Path) -> list[str] | None:
+    """For a store without LATEST that holds round-cut entries: when every cut directory
+    carries a first-cut mark (none was ever committed: the run died while writing its
+    first cut), delete them and the marks and return what was deleted (the run starts
+    at rollout 0). Any unmarked entry (a cut of an unfinished store, or an unknown
+    file) returns None: the caller refuses to start."""
+    root = Path(store_root)
+    if read_latest(root) is not None:
+        raise ValueError(f"{root} has {LATEST}: its first cut is committed")
+    cuts = root / ROUND_CUTS
+    entries = sorted(cuts.iterdir()) if cuts.is_dir() else []
+    marks = {p.name for p in entries if p.is_file() and p.name.endswith(FIRST_CUT_MARK)}
+    others = [p for p in entries if p.name not in marks]
+    if any(not p.is_dir() or f"{p.name}{FIRST_CUT_MARK}" not in marks for p in others):
+        return None
+    deleted = []
+    for p in others:
+        shutil.rmtree(p)
+        deleted.append(f"{ROUND_CUTS}/{p.name}")
+    for name in sorted(marks):
+        (cuts / name).unlink()
+        deleted.append(f"{ROUND_CUTS}/{name}")
+    return deleted
+
+
+def stage_state_dir(state_dir: Path, staged: Path) -> Path:
+    """Copy the snapshot files of ``state_dir`` (as :func:`write_snapshot` would take
+    them) into a fresh ``staged`` directory; returns it."""
+    state_dir, staged = Path(state_dir), Path(staged)
+    if staged.exists():
+        shutil.rmtree(staged)
+    for rel in _tree_files(state_dir):
+        (staged / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(state_dir / rel, staged / rel)
+    staged.mkdir(parents=True, exist_ok=True)
+    return staged
 
 
 def directory_bytes(path: Path) -> int:
@@ -423,6 +510,12 @@ def check_lr_continues(expected: list[float] | None, applied: list[float] | None
     return None
 
 
+# E1 (product default since 2026-10-21): a round cut every 4 rounds (and always at the
+# end); --rl-cut-every 1 cuts every round. The publication checks follow the same
+# interval (driver.verify_publication).
+DEFAULT_CUT_EVERY = 4
+
+
 def should_cut(rollout_id: int, *, every: int, final: bool = False, stop: bool = False) -> bool:
     """Cut at the safe point before ``rollout_id`` every ``every`` rounds, and always at
     the end (last round, our own stop)."""
@@ -455,7 +548,9 @@ class ResumeController:
     ``sync_checkpoint_store`` (snapshot + LATEST + commit + prune) and ``_record``.
 
     At construction, a store with ``LATEST`` is restored into the state dir (verified);
-    a store that holds cuts but no ``LATEST`` is refused (never a silent restart at 0)."""
+    a store that holds cuts but no ``LATEST`` is refused (never a silent restart at 0),
+    except when they are all the marked, never committed first cut
+    (:func:`discard_unfinished_first_cut`): those are deleted and the run starts at 0."""
 
     def __init__(self, *, state_dir: str | os.PathLike[str], store: CheckpointStore,
                  runtime_fingerprint: str = "", keep: int = DEFAULT_CUT_KEEP,
@@ -474,6 +569,8 @@ class ResumeController:
         store.root.mkdir(parents=True, exist_ok=True)
         store.reload()
         self.restored: dict[str, Any] | None = None
+        # E1: the files of a first round cut that never committed, deleted at start
+        self.discarded_first_cut: list[str] | None = None
         latest = read_latest(store.root)
         started = time.monotonic()
         if latest is not None:
@@ -481,8 +578,17 @@ class ResumeController:
             self.restored["latest"] = dict(latest)
             self.restored["seconds"] = time.monotonic() - started
         elif (store.root / ROUND_CUTS).is_dir() and any((store.root / ROUND_CUTS).iterdir()):
-            raise StoreIntegrityError(f"{store.root} holds round cuts but no {LATEST}: refusing to "
-                                      "start over at rollout 0 on top of an unfinished store")
+            discarded = discard_unfinished_first_cut(store.root)
+            if discarded is None:
+                raise StoreIntegrityError(f"{store.root} holds round cuts but no {LATEST}: refusing to "
+                                          "start over at rollout 0 on top of an unfinished store")
+            store.commit()
+            self.discarded_first_cut = discarded
+            # the run starts at 0: a local state dir of the dead run (its pointer may
+            # name the deleted cut) is moved aside, as a restore does
+            if self.state_dir.exists() and any(self.state_dir.iterdir()):
+                self.state_dir.rename(self.state_dir.with_name(
+                    f"{self.state_dir.name}.prev-{int(time.time())}"))
         self.state_dir.mkdir(parents=True, exist_ok=True)
         previous = self._incarnations()
         self.incarnation = {"id": uuid.uuid4().hex[:12], "index": len(previous), "pid": os.getpid(),
@@ -490,6 +596,9 @@ class ResumeController:
         with open(self.state_dir / INCARNATIONS, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(self.incarnation, sort_keys=True) + "\n")
         self.previous_incarnations = previous
+        if self.discarded_first_cut is not None:
+            self._record("checkpoint_store", tx_id=None, action="discard_unfinished_first_cut",
+                         deleted=self.discarded_first_cut, store=str(store.root))
         if self.restored is not None:
             self._record("checkpoint_store", tx_id=None, action="restore", **{
                 k: v for k, v in self.restored.items() if k != "latest"},
@@ -509,15 +618,25 @@ class ResumeController:
         return record
 
     def sync_checkpoint_store(self, reason: str, *, skip_if_recovery: bool = False,
-                              extra: Mapping[str, Any] | None = None) -> bool:
+                              extra: Mapping[str, Any] | None = None,
+                              defer_commit: bool = False, source_dir: Path | None = None) -> bool:
         """Snapshot the state dir into the store, then ``LATEST``, commit, prune. A
         failure is remembered (``last_store_sync``) and returned False: the previous
-        LATEST stays valid."""
+        LATEST stays valid.
+
+        ``defer_commit``: stop after ``LATEST``; :meth:`commit_checkpoint_store` commits
+        and prunes later (the round cut runs it off the round's critical path). Until
+        then the store's committed LATEST is the previous one, so a crash in between
+        resumes from the previous cut.
+
+        ``source_dir``: snapshot this copy of the state dir instead (a round cut whose
+        store sync runs later stages the state dir as it was at the cut)."""
         if skip_if_recovery and self.recovery_required:
             return False
+        source = Path(source_dir) if source_dir is not None else self.state_dir
         info = {"incarnation": self.incarnation["id"], "incarnation_index": self.incarnation["index"],
                 "reason": reason, "wall_time": self._wall(), **dict(extra or {})}
-        pointer = self.state_dir / "round-cut.json"
+        pointer = source / "round-cut.json"
         if pointer.is_file():  # LATEST names the cut the snapshot's pointer names
             try:
                 p = json.loads(pointer.read_text(encoding="utf-8"))
@@ -526,16 +645,43 @@ class ResumeController:
             except ValueError:
                 pass
         try:
-            result = write_snapshot(self.store, self.state_dir, info)
-            deleted = prune(self.store.root, keep=self.keep, cut_ids_of=_snapshot_cut_id)
-            if deleted:
-                self.store.commit()
+            result = write_snapshot(self.store, source, info, commit=not defer_commit)
+            if defer_commit:
+                self.last_store_sync = {**info, **result, "ok": True, "committed": False, "pruned": None}
+                return True
+            deleted = self._prune()
         except Exception as exc:  # noqa: BLE001
             self.last_store_sync = {**info, "ok": False, "error": repr(exc)}
             logging.getLogger(__name__).warning("checkpoint store sync (%s) failed: %r", reason, exc)
             return False
-        self.last_store_sync = {**info, **result, "ok": True, "pruned": deleted}
+        self.last_store_sync = {**info, **result, "ok": True, "committed": True, "pruned": deleted}
         return True
+
+    def commit_checkpoint_store(self) -> dict[str, Any]:
+        """Commit a ``defer_commit`` sync, then prune (pruning only after the new LATEST
+        is committed, so a failed commit never loses the previous cut). Thread-safe
+        against the caller as long as nothing else writes to the store meanwhile.
+        Returns (and remembers in ``last_store_sync``) the outcome; never raises."""
+        sync = dict(self.last_store_sync or {})
+        try:
+            sync["commit_s"] = self.store.commit()
+            sync["committed"] = True
+            sync["pruned"] = self._prune()
+        except Exception as exc:  # noqa: BLE001
+            sync.update(ok=False, error=repr(exc))
+            logging.getLogger(__name__).warning("checkpoint store commit (%s) failed: %r",
+                                                sync.get("reason"), exc)
+        self.last_store_sync = sync
+        return sync
+
+    def _prune(self) -> list[str]:
+        """Housekeeping once a new LATEST is committed: old snapshots and cuts, and the
+        first-cut marks (the first cut is committed now; the next commit drops them)."""
+        clear_first_cut_marks(self.store.root)
+        deleted = prune(self.store.root, keep=self.keep, cut_ids_of=_snapshot_cut_id)
+        if deleted:
+            self.store.commit()
+        return deleted
 
     def close(self) -> None:
         return None

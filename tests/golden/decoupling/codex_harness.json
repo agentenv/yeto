@@ -81,6 +81,10 @@
   "bridge",
   "--model-name",
   "SimpleNamespace",
+  "--attention-dropout",
+  "0.0",
+  "--hidden-dropout",
+  "0.0",
   "--num-layers",
   "2",
   "--hidden-size",
@@ -229,7 +233,7 @@
   "<MILES-RESOLVED-TOOL-CALL-PARSER>",
   "--group-query-attention"
  ],
- "miles_argv_sha256": "279d3bae4c7c8381c9dfbea4e0e83ffdbfcd0afbeabb0f8931d7c3312984f771",
+ "miles_argv_sha256": "8a2934f5ac2b11fae39d1374ed834d0ab5ed4eb6c1d74f515a2f64bc2505830c",
  "name": "codex_harness",
  "placement": {
   "allow_cross_node_engine_tp": false,

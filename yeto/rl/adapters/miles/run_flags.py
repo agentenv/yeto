@@ -176,6 +176,12 @@ _ROLLOUT_ENGINE = (
         "micro batches",
     ),
     shared_flag(
+        "--rl-gradient-accumulation-fusion",
+        action="store_true",
+        help="ports: Megatron gradient-accumulation fusion (the Miles recipes' "
+        "default). Off by default (--no-gradient-accumulation-fusion)",
+    ),
+    shared_flag(
         "--rl-optimizer-offload-fraction",
         type=float,
         default=0.0,

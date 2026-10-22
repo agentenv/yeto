@@ -255,6 +255,9 @@ class TrainMemoryConfig:
     max_tokens_per_gpu: int | None = None
     # Share of the optimizer state kept and updated on the host (0 = none).
     optimizer_offload_fraction: float = 0.0
+    # Megatron gradient-accumulation fusion (fused wgrad into main_grad; needs
+    # APEX/TE fused kernels). Off keeps the historical argv.
+    gradient_accumulation_fusion: bool = False
 
 
 @dataclass(frozen=True)
@@ -1094,6 +1097,7 @@ def _train_memory(args) -> TrainMemoryConfig:
         activation_recompute=bool(getattr(args, "rl_activation_recompute", False)),
         max_tokens_per_gpu=int(max_tokens) if max_tokens is not None else None,
         optimizer_offload_fraction=offload,
+        gradient_accumulation_fusion=bool(getattr(args, "rl_gradient_accumulation_fusion", False)),
     )
 
 
