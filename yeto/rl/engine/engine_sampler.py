@@ -52,6 +52,7 @@ from .sampler_engine import (
     SamplerEngine,
     SamplerEngineError,
     SamplingParams,
+    updates_during_generation,
 )
 from .sampler_loop import SamplerLoop
 from .sampler_resume import RoundGuard, SamplerResume, SamplerRound
@@ -91,6 +92,21 @@ def sample_record(item: PromptItem, completion: Completion, *, reward: float, ve
                      "finish_reason": completion.finish_reason,
                      "prompt_tokens_known": bool(prompt_ids), "provenance": dict(provenance)},
     }
+
+
+def _completion_version(completion: Completion, served: int, *, live: bool) -> int:
+    """The behavior version of one completion: the round's served version, or the
+    completion's own on an engine that updates during a generation (it must give
+    one)."""
+    if not live:
+        if completion.weight_version not in (None, served):
+            raise SamplerEngineError(f"completion of v{completion.weight_version} in a round served "
+                                     f"at v{served}; the engine does not update during a generation")
+        return served
+    if completion.weight_version is None:
+        raise SamplerEngineError("an engine that updates during a generation must give each "
+                                 "completion its weight_version")
+    return int(completion.weight_version)
 
 
 class EngineRound:
@@ -140,7 +156,8 @@ class EngineRound:
         groups = self.engine.generate([item.prompt for item in items], self.sampling)
         if len(groups) != len(items):
             raise SamplerEngineError(f"engine returned {len(groups)} groups for {len(items)} prompts")
-        if self.engine.served_version() != version:  # a reload during the round would mix versions
+        live = updates_during_generation(self.engine)
+        if not live and self.engine.served_version() != version:  # a reload would mix versions
             raise SamplerEngineError(f"served version changed from v{version} during round {rollout_id}")
         record = self.provenance.to_record()
         finish: Counter[str] = Counter()
@@ -157,7 +174,8 @@ class EngineRound:
                 finish[completion.finish_reason] += 1
                 tokens += len(completion.token_ids)
                 samples.append(sample_record(
-                    item, completion, reward=self.reward(item, completion), version=version,
+                    item, completion, reward=self.reward(item, completion),
+                    version=_completion_version(completion, version, live=live),
                     provenance=record, group_index=position,
                     index=position * self.sampling.n + j))
             scored.append((item, samples))
@@ -240,7 +258,8 @@ def build_engine_sampler(config: EngineSamplerConfig, *, engine: SamplerEngine,
         loader.start(config.base_dir, int(config.base_version))
     except ReleaseNotLoaded as error:  # no served version to fall back to
         raise SamplerLoadFatal(f"the engine failed its start checks: {error}") from error
-    follower = PolicyFollower(releases, loader, version=int(config.base_version))
+    follower = PolicyFollower(releases, loader, version=int(config.base_version),
+                              live_update=updates_during_generation(engine))
     engine_round = EngineRound(engine, GroupWriter(buffer, config.sampler_id), prompts=prompts,
                                reward=reward, sampling=sampling, provenance=provenance, emit=emit,
                                loop_guard=config.loop_guard, incarnation=incarnation,

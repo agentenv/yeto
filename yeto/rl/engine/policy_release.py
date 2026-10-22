@@ -60,7 +60,8 @@ import os
 import re
 import shutil
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -332,6 +333,29 @@ class PolicyReleaseStore:
         return removed
 
 
+@dataclass
+class FollowerCounters:
+    """What a sampler's follower did with the releases it read (staleness accounting).
+
+    ``loaded``: releases loaded into the engines; ``superseded``: releases the
+    engines never served because a newer one was already committed when the
+    follower read the store (seq gap); ``stale_reads``: reads of a ``LATEST.json``
+    older than one already seen (a store mount that serves an old copy; nothing
+    is loaded); ``lineage_resets``: loaded releases whose version is below the
+    served one (a trainer restored from an older cut); ``deferred_in_flight``:
+    refreshes refused because a round was generating on engines that cannot
+    update their weights mid-generation."""
+
+    loaded: int = 0
+    superseded: int = 0
+    stale_reads: int = 0
+    lineage_resets: int = 0
+    deferred_in_flight: int = 0
+
+    def to_dict(self) -> dict[str, int]:
+        return asdict(self)
+
+
 class PolicyFollower:
     """Sampler side: load each new release into the engines.
 
@@ -341,26 +365,66 @@ class PolicyFollower:
     ``version`` is the version the engines serve before any release (the base
     policy, 0). ``scheme``: the weight scheme the engines serve; a release of
     another scheme raises :class:`SchemeMismatch` before any file is read
-    (None: no check, for callers that check in ``load``)."""
+    (None: no check, for callers that check in ``load``).
+
+    Order: releases are loaded in increasing ``seq`` only. A read that returns a
+    release at or below the newest seq already seen loads nothing and keeps
+    ``last_seen`` (the backlog reference) at the newest one. The version may go
+    down with a higher seq (a new lineage); that release is loaded and counted.
+
+    In-flight rule: while the caller marks a round as generating
+    (:meth:`generating`), :meth:`refresh` loads nothing unless ``live_update``
+    (the engines take new weights during a generation and stamp each sample with
+    the version that produced it). A refused refresh is counted and the release
+    is loaded at the next refresh outside the round."""
 
     def __init__(self, releases: PolicyReleaseStore,
                  load: Callable[[PolicyRelease, Path], None], *, version: int = 0,
-                 scheme: str | None = None) -> None:
+                 scheme: str | None = None, live_update: bool = False) -> None:
         self.releases = releases
         self.scheme = scheme
         self._load = load
         self.version = int(version)
+        self.live_update = bool(live_update)
         self.release: PolicyRelease | None = None  # the release the engines serve
         self.last_seen: PolicyRelease | None = None  # the newest release read
         self.incomplete: str | None = None  # why the newest release is not loaded yet
+        self.counters = FollowerCounters()
+        self._in_flight = False
+
+    @contextmanager
+    def generating(self) -> Iterator[None]:
+        """Mark a round as generating on the engines (the in-flight rule, class doc)."""
+        if self._in_flight:
+            raise RuntimeError("a round is already generating")
+        self._in_flight = True
+        try:
+            yield
+        finally:
+            self._in_flight = False
+
+    def version_lag(self) -> int:
+        """Trainer versions between the newest release seen and the served version
+        (0 before any release, and when a new lineage is below the served one)."""
+        if self.last_seen is None:
+            return 0
+        return max(0, int(self.last_seen.version) - int(self.version))
 
     def refresh(self) -> PolicyRelease | None:
-        """The release loaded by this call, or None when there is no new one, or
-        when the newest one is not complete yet (``incomplete`` says why; the
-        engines keep the release they serve)."""
+        """The release loaded by this call, or None when there is no new one, when
+        the newest one is not complete yet (``incomplete`` says why; the engines
+        keep the release they serve), or when the in-flight rule defers it."""
         latest = self.releases.latest()
+        if latest is None:
+            return None
+        if self.last_seen is not None and latest.seq < self.last_seen.seq:
+            self.counters.stale_reads += 1
+            latest = self.last_seen
         self.last_seen = latest
-        if latest is None or (self.release is not None and latest.seq == self.release.seq):
+        if self.release is not None and latest.seq <= self.release.seq:
+            return None
+        if self._in_flight and not self.live_update:
+            self.counters.deferred_in_flight += 1
             return None
         if self.scheme is not None:
             check_release_scheme(latest, self.scheme)
@@ -372,6 +436,12 @@ class PolicyFollower:
         self.incomplete = None
         check_release_files(latest, directory)
         self._load(latest, directory)
+        previous = self.release
+        self.counters.loaded += 1
+        if previous is not None:
+            self.counters.superseded += latest.seq - previous.seq - 1
+            if latest.version < self.version:
+                self.counters.lineage_resets += 1
         self.version = latest.version
         self.release = latest
         return latest

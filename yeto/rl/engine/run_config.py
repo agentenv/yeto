@@ -546,12 +546,17 @@ def _rules():
 
 
 def full_parameter_layout_problem(*, data_parallel: int, actor_num_nodes: int, rollout_gpus: Any,
-                                  rollout_gpus_per_engine: Any, sample_role: str = sample_roles.BOTH
-                                  ) -> str | None:
+                                  rollout_gpus_per_engine: Any, sample_role: str = sample_roles.BOTH,
+                                  island_gpus: int | None = None) -> str | None:
     """Why the Miles full-parameter mode refuses this layout; None when it accepts it.
 
-    Two layouts are accepted:
+    Three layouts are accepted:
 
+    * a sampler island (``--rl-sample-role sampler``): its own engine partition.
+      It builds no trainer, so every island GPU (``island_gpus``) serves an
+      engine and it loads each full-weight release from the store. No
+      ``--rollout-num-gpus`` (the island size is the partition); the island GPUs
+      split evenly into engines of ``--rollout-num-gpus-per-engine``;
     * samples from the store (``--rl-sample-role trainer``): a trainer-only
       island. Any node count and any DP; the island starts no inference engine
       (``--rollout-num-gpus`` absent or 0), so no card is shared with one;
@@ -559,6 +564,16 @@ def full_parameter_layout_problem(*, data_parallel: int, actor_num_nodes: int, r
       partitioned engines. A full-parameter trainer never shares its cards with
       engines (no colocated placement).
     """
+    if sample_role == sample_roles.SAMPLER:
+        if rollout_gpus not in (None, 0):
+            return ("a full-parameter sampler island is its own engine partition: every island "
+                    "GPU serves an engine; drop --rollout-num-gpus and size the island with --gpu")
+        per_engine = 1 if rollout_gpus_per_engine is None else rollout_gpus_per_engine
+        if (type(per_engine) is not int or per_engine < 1
+                or (island_gpus is not None and int(island_gpus) % per_engine)):
+            return (f"a full-parameter sampler island splits its {island_gpus} GPU(s) evenly into "
+                    f"engines: --rollout-num-gpus-per-engine {rollout_gpus_per_engine} must divide it")
+        return None
     if sample_role == sample_roles.TRAINER:
         if rollout_gpus not in (None, 0):
             return ("a full-parameter trainer that reads samples from the store starts no "
@@ -705,7 +720,7 @@ def resolve_rl_run_config(
         if problem := full_parameter_layout_problem(
                 data_parallel=data_parallel, actor_num_nodes=args.actor_num_nodes,
                 rollout_gpus=rollout_gpus, rollout_gpus_per_engine=rollout_gpus_per_engine,
-                sample_role=role):
+                sample_role=role, island_gpus=actor_gpus):
             raise ValueError(problem)
         if role == sample_roles.TRAINER:
             rollout_gpus = 0  # trainer-only island (Miles --debug-train-only): no engine
@@ -714,8 +729,13 @@ def resolve_rl_run_config(
             or getattr(args, "sglang_tp_size", None) not in {None, 1}
         ):
             raise ValueError("pinned Qwen3.5 requires TP1 SGLang inference engines")
-        dedicated_rollout_gpus = rollout_gpus
-        visible_gpus_per_node = args.actor_num_gpus_per_node + rollout_gpus
+        if role == sample_roles.SAMPLER:
+            # Engines only (Miles --debug-rollout-only): the island GPUs are the
+            # engine partition, as on a LoRA sampler island; no trainer GPU.
+            visible_gpus_per_node = args.actor_num_gpus_per_node
+        else:
+            dedicated_rollout_gpus = rollout_gpus
+            visible_gpus_per_node = args.actor_num_gpus_per_node + rollout_gpus
     elif getattr(args, "rl_placement", "colocated") == "fixed-partition":
         # rl-infra-spec 2.1: a LoRA fixed partition (ports engine only; the
         # legacy CLI never sets rl_placement, so its layout is unchanged).

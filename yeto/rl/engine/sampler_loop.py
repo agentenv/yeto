@@ -19,6 +19,13 @@ goes on; with ``ready`` (the engine sampler: False while the engine holds
 weights that failed a check) it waits instead of generating, so no sample of
 unchecked weights reaches the buffer.
 
+Staleness: ``rl_sampler_round`` carries the version the round generated with,
+``version_lag`` (trainer versions between the newest release seen and that
+version, at the round start) and the follower's release counters
+(:class:`~.policy_release.FollowerCounters`). The round runs inside
+``follower.generating()``: a refresh during it loads nothing unless the engines
+update their weights mid-generation.
+
 After the last round it marks the data end, so the trainer stops after reading
 the rest. The loop is engine-neutral: ``generate(rollout_id)`` runs one round.
 """
@@ -148,10 +155,12 @@ class SamplerLoop:
                 return done
             before = len(self.buffer)
             started = self.clock()
-            self.generate(rollout_id)
+            version, lag = self.follower.version, self.follower.version_lag()
+            with self.follower.generating():
+                self.generate(rollout_id)
             self.buffer.refresh()
-            self.emit("rl_sampler_round", rollout_id=rollout_id,
-                      policy_version=self.follower.version,
+            self.emit("rl_sampler_round", rollout_id=rollout_id, policy_version=version,
+                      version_lag=lag, releases=self.follower.counters.to_dict(),
                       groups=len(self.buffer) - before, buffer_end=len(self.buffer))
             done += 1
             self._throttle(started, last=rollout_id == self.num_rollouts - 1)

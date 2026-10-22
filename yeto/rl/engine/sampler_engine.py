@@ -121,13 +121,18 @@ class Completion:
     """One completion: response tokens, the log-probability of each sampled
     token (same length), the response text and why it ended.
     ``prompt_token_ids``: the prompt as the engine tokenized it (empty when the
-    engine does not return it; the trainer then tokenizes the prompt text)."""
+    engine does not return it; the trainer then tokenizes the prompt text).
+    ``weight_version``: the oldest policy version that produced a token of this
+    completion. Only an engine that updates its weights during a generation
+    (:func:`updates_during_generation`) sets it; None: the version the engine
+    served for the whole round."""
 
     token_ids: tuple[int, ...]
     logprobs: tuple[float, ...]
     text: str
     finish_reason: str
     prompt_token_ids: tuple[int, ...] = ()
+    weight_version: int | None = None
 
     def __post_init__(self) -> None:
         if len(self.token_ids) != len(self.logprobs):
@@ -213,6 +218,15 @@ class SamplerEngine(Protocol):
     def stop(self) -> None:
         """Stop the engine (idempotent)."""
         ...
+
+
+def updates_during_generation(engine: Any) -> bool:
+    """Optional capability: the engine loads new weights while a generation runs
+    (attribute ``updates_during_generation``, default False). Such an engine sets
+    ``Completion.weight_version`` on every completion, so each sample carries the
+    version that produced it (the trainer's staleness gate and importance weights
+    use it). No adapter declares it yet."""
+    return getattr(engine, "updates_during_generation", False) is True
 
 
 @runtime_checkable
