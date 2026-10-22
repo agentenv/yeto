@@ -116,3 +116,41 @@ def test_a_restarted_island_catches_up_and_finishes(syncer_binary, tmp_path):
     assert min(restarted["catch_up"].values()) >= 2
     assert restarted["pushed_after"] > 0, "the restarted island never contributed"
     assert '"catch_up":true' in tape
+
+
+@needs_cargo
+@pytest.mark.usefixtures("_hmac_key")
+def test_heartbeats_keep_the_lease_while_the_pool_waits_for_init(syncer_binary, tmp_path):
+    """s27-x2-pause-a: an island that connected first lost its lease while
+    the other island was still starting (no INIT yet), because the syncer
+    ignored heartbeats before the initial cut. Here the INIT comes after
+    2.5 leases; the first island's heartbeats keep it in the pool."""
+    import time
+
+    from yeto.rl.pool_client import LeaseHeartbeat
+
+    lease_s = 3.0
+    log_file = tmp_path / "syncer.log"
+    process, port, profile_hash = _start_async_syncer(syncer_binary, tmp_path, *LEASE,
+                                                      total_steps=2, log_file=log_file)
+    early = _client(1, port, profile_hash)
+    late = _client(0, port, profile_hash)
+    heartbeat = LeaseHeartbeat(early, lease_s)
+    try:
+        early.start()
+        heartbeat.start()
+        time.sleep(2.5 * lease_s)  # island 0 warms up its engine
+        late.start()
+        for fid in range(P):
+            late.send_init(fid, _f32(_initial(fid)))
+        _wait(lambda: "global parameters initialized" in log_file.read_text(), "no INIT")
+        time.sleep(0.5)
+        log = log_file.read_text()
+        assert "lease expired" not in log, log
+        assert heartbeat.errors == []
+    finally:
+        heartbeat.stop()
+        early.close()
+        late.close()
+        process.terminate()
+        process.wait(timeout=10)

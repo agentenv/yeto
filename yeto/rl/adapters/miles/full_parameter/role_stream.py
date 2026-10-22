@@ -557,7 +557,7 @@ class MilesFullParameterRoleStream:
         sink = adapter.fragment_sink(initial, ray_module=self.ray_module)
         client.install_inbound_chunk_sink(MilesRayInboundChunkSink(sink))
         if self._recovering:
-            await self._initialize_recovering(group, adapter, initial, client, sink)
+            await self._initialize_recovering(group, adapter, initial, client, sink, heartbeat)
             return
         try:
             client.start()
@@ -668,7 +668,7 @@ class MilesFullParameterRoleStream:
         shards = MilesRankShards(group, adapter.layout.layout_hash)
         return MilesPeerRecoveryIsland(self, shards, asyncio.get_running_loop(), recovering=recovering)
 
-    async def _initialize_recovering(self, group, adapter, initial, client, sink) -> None:
+    async def _initialize_recovering(self, group, adapter, initial, client, sink, heartbeat) -> None:
         """S27 E-3: this trainer is fresh after the island lost its state.
 
         No INIT is sent (the syncer holds the run's fragments). A donor's
@@ -682,6 +682,8 @@ class MilesFullParameterRoleStream:
         count = adapter.layout.fragments.num_fragments
         try:
             client.start()
+            if heartbeat is not None:
+                heartbeat.start()  # a peer restore may take longer than the lease
             outcome = await asyncio.to_thread(
                 recover, client, island, self._snapshot_store(), timeout=options.timeout_s)
             client.mark_initial_cut_received()
@@ -690,6 +692,7 @@ class MilesFullParameterRoleStream:
             self.group = group
             self.adapter = adapter
             self.client = client
+            self.heartbeat = heartbeat
             self.sink = sink
             self.current = initial
             self._anchors = [None] * count
@@ -700,6 +703,8 @@ class MilesFullParameterRoleStream:
             resent, island.resent = dict(island.resent), {}
             await self._apply_authoritative(resent, optimizer_proof=False)
         except BaseException:
+            if heartbeat is not None:
+                heartbeat.stop()
             island.release()
             client.close()
             sink.release_all()

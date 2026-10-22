@@ -2552,7 +2552,12 @@ async fn scheduler(
                 }
             }
             Event::Push { .. } => warn!("push before initialization; dropped"),
-            Event::Heartbeat { .. } | Event::Leave { .. } => {}
+            // The lease runs from HELLO: an island that waits for the other
+            // islands' INIT (or warms up its engine) keeps it by heartbeat.
+            Event::Heartbeat { member, .. } => {
+                registry.lock().unwrap().membership.renew(member, Instant::now());
+            }
+            Event::Leave { .. } => {}
             Event::FinalAck { member, .. } => warn!(
                 learner_id = member.learner_id,
                 generation = member.generation,
