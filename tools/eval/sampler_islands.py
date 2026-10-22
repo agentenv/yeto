@@ -76,13 +76,40 @@ def _island_dirs(run: Path) -> dict[int, list[Path]]:
     return found
 
 
+_LOG_EVENT = re.compile(r"\[[^\]]*-l(\d+)-modal\] YETO_RL_EVENT (\{.*\})\s*$")
+
+
+def launch_log_events(run: Path) -> dict[int, list[dict[str, Any]]]:
+    """Events the launch log echoed (``<run>/launch.ts.log``), by island. A container
+    stopped right after an event may echo it here before its tape file is saved."""
+    out: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    log = Path(run) / "launch.ts.log"
+    if not log.is_file():
+        return out
+    for line in log.read_text(errors="replace").splitlines():
+        match = _LOG_EVENT.search(line)
+        if not match:
+            continue
+        try:
+            row = json.loads(match.group(2))
+        except ValueError:
+            continue
+        if isinstance(row, dict) and "event" in row:
+            out[int(match.group(1))].append(row)
+    return out
+
+
 def load_run(run: Path) -> dict[int, list[dict[str, Any]]]:
-    """{island: events sorted by time}, duplicates (same event and time) dropped."""
+    """{island: events sorted by time} from the tapes and the launch log,
+    duplicates (same event, time and incarnation) dropped."""
     out: dict[int, list[dict[str, Any]]] = {}
-    for island, files in _island_dirs(Path(run)).items():
+    echoed = launch_log_events(Path(run))
+    dirs = _island_dirs(Path(run))
+    for island in sorted(set(dirs) | set(echoed)):
+        files = dirs.get(island, [])
         seen, rows = set(), []
-        for path in files:
-            for row in read_jsonl(path):
+        for path in [*files, None]:
+            for row in (read_jsonl(path) if path is not None else echoed.get(island, [])):
                 key = (row.get("event"), row.get("time_unix"), row.get("incarnation"))
                 if key not in seen:
                     seen.add(key)
@@ -114,7 +141,9 @@ def _spread(values: list[float]) -> dict[str, float] | None:
 
 # ---------------------------------------------------------------- E4: scale
 def sampler_summary(events: list[dict[str, Any]]) -> dict[str, Any]:
-    rounds = _of(events, "rl_sampler_round")
+    # a round cut by a preemption ends with groups 0 (nothing written): not a round
+    every = _of(events, "rl_sampler_round")
+    rounds = [r for r in every if int(r.get("groups") or 0) > 0]
     generate = [r.get("generate_s") for r in rounds]
     starts = [float(r["time_unix"]) - float(r["generate_s"]) for r in rounds
               if r.get("generate_s") is not None]
@@ -123,7 +152,8 @@ def sampler_summary(events: list[dict[str, Any]]) -> dict[str, Any]:
     for leave in (x for x in leaves if x.get("reason") == "PREEMPTED"):
         t = float(leave["time_unix"])
         rejoin = next((j for j in joins if float(j["time_unix"]) > t), None)
-        first_round = next((r for r in rounds if float(r["time_unix"]) > t), None)
+        after = t if rejoin is None else float(rejoin["time_unix"])
+        first_round = next((r for r in rounds if float(r["time_unix"]) > after), None)
         preemptions.append({
             "leave_unix": round(t, 3), "incarnation": leave.get("incarnation"),
             "in_flight_rollout_id": leave.get("in_flight_rollout_id"),
@@ -133,6 +163,9 @@ def sampler_summary(events: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "incarnations": sorted({str(j.get("incarnation")) for j in joins}),
         "rounds": len(rounds),
+        "cut_rounds": len(every) - len(rounds),
+        "cut_generate_s": round(sum(float(r.get("generate_s") or 0.0) for r in every
+                                    if int(r.get("groups") or 0) == 0), 3),
         "groups": sum(int(r.get("groups") or 0) for r in rounds),
         "generate_s": None if any(g is None for g in generate) or not generate
         else round(sum(float(g) for g in generate), 3),
