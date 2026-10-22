@@ -369,6 +369,19 @@ def test_real_syncer_decodes_tensor_blocks_and_keeps_the_replica_identical(
                           finals[1][start[1]:start[1] + TENSOR.size])
 
 
+@pytest.mark.parametrize(("codec", "base"), (("int8", DTYPE_F32_PUSH_I8), ("int4", DTYPE_F32_PUSH_I4),
+                                             ("int4-log", DTYPE_F32_PUSH_Q4)))
+def test_real_syncer_without_tensor_blocks_lets_the_replica_drift(
+        syncer_binary, tmp_path, codec, base):  # noqa: F811
+    """Control for the test above: TENSOR (70 values, not a multiple of the
+    block) shares a block with different neighbours in each fragment, so
+    without the flag the syncer's two decoded copies differ."""
+    _, finals = _sweep_through_real_syncer(syncer_binary, tmp_path, base)
+    start = (LOUD.size, QUIET.size)
+    assert not np.array_equal(finals[0][start[0]:start[0] + TENSOR.size],
+                              finals[1][start[1]:start[1] + TENSOR.size])
+
+
 def test_real_syncer_refuses_the_flag_on_an_unquantized_session(syncer_binary, tmp_path):  # noqa: F811
     process, port, profile_hash = _start_syncer(syncer_binary, tmp_path)
     layout = FragmentLayout([Fragment(MERGE_RDA, [(f"w{i}", 3)]) for i in range(FRAGMENTS)])
