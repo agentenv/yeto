@@ -274,6 +274,45 @@ The coordinator is one sequential scheduler actor. Pipelined rounds target
 distinct fragments, and merge + version update + broadcast for a completion
 is serialized. No two completions mutate one fragment concurrently.
 
+## Streaming weighted fold (`--weighted-fold streaming`)
+
+Rounds whose responder set or weights are fixed at launch (quorum covers the
+roster, equal weights, no HeLoCo) always fold pushes in learner-id order,
+bit-identical to the buffered merge. Other rounds (quorum below the roster,
+grace window, tokens²/steps weights) buffer every push until the round
+closes by default. With `--weighted-fold streaming` they instead add each
+accepted push on arrival to unnormalised f32 sums (Σw·Δ; for RDA also
+Σw·Δ/‖Δ‖ per tensor and the f64 scalar Σw‖Δ‖) and divide by Σw at close.
+The push buffer is released immediately, so a round holds two accumulators
+plus the push being decoded. The result equals the buffered merge up to f32
+rounding and is deterministic for a given arrival order.
+
+## Fragment-sharded head (`--shard-index i --shard-count N`)
+
+One logical syncer may run as N processes. Shard `i` owns the fragments
+`[⌊i·P/N⌋, ⌊(i+1)·P/N⌋)`; it allocates, merges, broadcasts and checkpoints
+only those (other fragments are stored with numel 0 at version 0).
+
+- Global steps are interleaved: shard `i` runs `t ≡ i+1 (mod N)`; its k-th
+  round (k = ⌊(t−1)/N⌋) merges its fragment `start + k mod len`. Every step
+  has exactly one owner, computable from `t`.
+- A fragment's version is the step of its last merge. Each fragment has one
+  owner, so versions are globally unique and the union of the shards'
+  versions is the head's vector clock. Shards exchange no messages.
+- Shards advance independently: steps of different shards are not ordered
+  in wall time. Within a shard, commits stay in strict step order and the
+  checkpoint is a contiguous cut of that shard's steps.
+- An island connects to every shard (same learner id, HELLO and layout) and
+  sends INIT_PARAMS and PUSH_FRAGMENT for fragment `p` only to `p`'s owner.
+  PULL and BCAST from all shards are merged. A shard refuses INIT for a
+  fragment it does not own.
+- Each shard sends its own FINAL_FRAGMENTs and a FINAL_MANIFEST over all P
+  fragments in which only its own versions are meaningful. The island waits
+  for every shard, takes each version from its owner, and ACKs each shard's
+  manifest separately. The terminal cut is the union.
+- `N = 1` (default) is the unsharded syncer, unchanged. Strict policy
+  sweeps, elastic scheduling and learner-budget cutoff refuse `N > 1`.
+
 ## bf16 pushes over an f32 session (dtype 4)
 
 Dtype 4 keeps INIT, BCAST and FINAL exact f32 and sends only PUSH deltas as

@@ -6,6 +6,7 @@ use anyhow::{bail, Context, Result};
 use crate::iso_worker::{IsoBackend, IsoBackendConfig, IsoBackendKind};
 use crate::merge;
 use crate::protocol::Reader;
+use crate::shard::ShardPlan;
 use std::sync::Arc;
 
 pub const MERGE_AVG: u8 = 0;
@@ -157,6 +158,10 @@ pub struct GlobalState {
     iso_backend: IsoBackend,
     /// bf16 downlink anchors (S26 E3); in memory only, never checkpointed.
     pub downlink: Option<std::sync::Mutex<crate::downlink::DownlinkAnchors>>,
+    /// Head shard of this process and the fragments it owns (S27 P4b).
+    /// Unowned fragments are never allocated, initialized or checkpointed.
+    shard: ShardPlan,
+    owned: std::ops::Range<usize>,
 }
 
 /// A merge whose deterministic learner reduction has completed but whose
@@ -358,7 +363,33 @@ impl GlobalState {
             delta_correction: None,
             iso_backend: IsoBackend::start(iso_backend_config)?,
             downlink: None,
+            shard: ShardPlan::default(),
+            owned: 0..fragment_count,
         })
+    }
+
+    /// Restrict this state to `plan`'s fragment range.  Call before any
+    /// fragment is initialized or a checkpoint is loaded.
+    pub fn set_shard(&mut self, plan: ShardPlan) -> Result<()> {
+        if self.initialized.iter().any(|&b| b) {
+            bail!("head shard must be set before fragments are initialized");
+        }
+        self.owned = plan.owned_range(self.layout.fragments.len())?;
+        self.shard = plan;
+        Ok(())
+    }
+
+    pub fn shard(&self) -> ShardPlan {
+        self.shard
+    }
+
+    /// Fragments this process owns (all of them unsharded).
+    pub fn owned_fragments(&self) -> std::ops::Range<usize> {
+        self.owned.clone()
+    }
+
+    pub fn owns_fragment(&self, fid: usize) -> bool {
+        self.owned.contains(&fid)
     }
 
     pub fn iso_backend_kind(&self) -> IsoBackendKind {
@@ -383,7 +414,7 @@ impl GlobalState {
     }
 
     pub fn all_initialized(&self) -> bool {
-        self.initialized.iter().all(|&b| b)
+        self.initialized[self.owned.clone()].iter().all(|&b| b)
     }
 
     pub fn init_fragment(&mut self, fid: usize, values: Vec<f32>) -> Result<()> {
@@ -393,6 +424,14 @@ impl GlobalState {
             .get(fid)
             .with_context(|| format!("init for unknown fragment {fid}"))?
             .numel()?;
+        if !self.owns_fragment(fid) {
+            bail!(
+                "init for fragment {fid} not owned by syncer shard {}/{} (owns {:?})",
+                self.shard.index,
+                self.shard.count,
+                self.owned
+            );
+        }
         if values.len() != expected {
             bail!(
                 "init fragment {fid}: got {} values, expected {expected}",
@@ -1138,7 +1177,13 @@ impl GlobalState {
             versions.push(r.u64()?);
             let numel = usize::try_from(r.u64()?)
                 .context("checkpoint fragment numel does not fit usize")?;
-            let expected = self.layout.fragments[p].numel()?;
+            // A sharded head checkpoints only its own fragments; the others
+            // are stored empty (numel 0) at version 0.
+            let expected = if self.owns_fragment(p) {
+                self.layout.fragments[p].numel()?
+            } else {
+                0
+            };
             if numel != expected {
                 bail!("checkpoint fragment {p} numel {numel} != layout {expected}");
             }
@@ -1270,13 +1315,18 @@ impl GlobalState {
         // cursor, so round-robin fragment versions are fully determined by
         // it. Reject legacy completion-order snapshots with holes rather than
         // silently skipping an uncommitted low t on resume.
-        let fragments = versions.len() as u64;
+        if global_step != 0 && !self.shard.owns_step(global_step) {
+            bail!(
+                "checkpoint global_step {global_step} is not a step of syncer shard {}/{}",
+                self.shard.index,
+                self.shard.count
+            );
+        }
         for (fid, version) in versions.iter().copied().enumerate() {
-            let first = fid as u64 + 1;
-            let expected = if global_step < first {
-                0
+            let expected = if self.owns_fragment(fid) {
+                self.shard.expected_version(fid, global_step, &self.owned)
             } else {
-                first + ((global_step - first) / fragments) * fragments
+                0
             };
             if version != expected {
                 bail!(
@@ -1291,7 +1341,7 @@ impl GlobalState {
         self.params = params;
         self.momentum = momentum;
         self.delayed_nesterov = delayed_nesterov;
-        self.initialized.fill(true);
+        self.initialized[self.owned.clone()].fill(true);
         self.ledger = ledger;
         Ok(())
     }

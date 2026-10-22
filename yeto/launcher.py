@@ -42,7 +42,7 @@ from .launch.topology import rl_island_args, rl_island_count, rl_island_placemen
 from .launch.syncer import (
     SYNCER_PORT, island_scheduling_mode, island_syncer_addrs, make_syncer_task, probe_syncer_ports,
     resolve_island_syncer_epoch, rl_role_syncers, role_syncer_commands, syncer_event_tape,
-    syncer_status_reader,
+    syncer_shard_addrs, syncer_status_reader,
 )
 from .launch.storage import (
     droppable_rejoins_in_new_container, resumes_in_new_container,
@@ -333,7 +333,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             print("[launcher] --rl-single-island-no-sync: no syncer, no outer sync")
         elif head_mode:
             syncer_task = syncer_job = None
-            syncer_addr = f"{os.environ['SYNCER_PUBLIC_IP']}:{SYNCER_PORT}"
+            syncer_addr = syncer_shard_addrs(os.environ['SYNCER_PUBLIC_IP'], args)
             print(f"[launcher] syncer runs on this head node at {syncer_addr}")
         else:
             if getattr(args, "wandb", False):
@@ -346,7 +346,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             rid = sky.launch(syncer_task, cluster_name=syncer_cluster)
             syncer_job, syncer_handle = sky.stream_and_get(rid)
             clusters.append(syncer_cluster)
-            syncer_addr = f"{syncer_handle.head_ip}:{SYNCER_PORT}"
+            syncer_addr = syncer_shard_addrs(str(syncer_handle.head_ip), args)
             print(f"[launcher] syncer up at {syncer_addr}")
             probe_syncer_ports(args, str(syncer_handle.head_ip))
         if not no_sync and island_scheduling_mode(args) == "elastic" \

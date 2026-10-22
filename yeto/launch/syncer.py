@@ -510,6 +510,79 @@ def _rl_role_syncer_command(args, num_learners: int, binary: str,
     )
 
 
+def syncer_shard_count(args) -> int:
+    """``--syncer-shards`` (S27 P4b): syncer processes the head is split
+    into by fragment range. 1 (default) is the single unsharded syncer.
+
+    Sharding needs fragment-round scheduling and a learner that routes per
+    fragment, so it is limited to the torch causal-LM learner (yeto.learner)
+    in SFT; RL presets (strict policy sweeps, elastic) are refused."""
+    count = getattr(args, "syncer_shards", None)
+    count = 1 if count is None else int(count)
+    if count < 1:
+        raise ValueError("--syncer-shards must be >= 1")
+    if count == 1:
+        return 1
+    if getattr(args, "training_mode", "sft") == "rl":
+        raise ValueError("--syncer-shards > 1 is not supported with --training-mode rl yet")
+    if getattr(args, "island_backend", "torch") != "torch":
+        raise ValueError("--syncer-shards > 1 needs --island-backend torch")
+    from ..models import resolve_model_kind
+
+    if resolve_model_kind(args.model, getattr(args, "model_kind", "auto")) != "causal-lm":
+        raise ValueError("--syncer-shards > 1 supports causal-lm learners only")
+    fragments = int(getattr(args, "fragments", count))
+    if fragments < count:
+        raise ValueError(f"--syncer-shards {count} needs --fragments >= {count}")
+    return count
+
+
+def syncer_shard_ports(args) -> list[int]:
+    """One port per syncer shard, from SYNCER_PORT upward (shard order)."""
+    return [SYNCER_PORT + index for index in range(syncer_shard_count(args))]
+
+
+def syncer_shard_addrs(host: str, args) -> str:
+    """The island ``--syncer`` value: ``host:port`` unsharded, else the
+    comma-separated shard addresses in shard order."""
+    return ",".join(f"{host}:{port}" for port in syncer_shard_ports(args))
+
+
+def _shard_path(path: str, index: int) -> str:
+    """Shard 0 keeps the unsharded path (W&B tape forwarder, strict-failure
+    reader); shard i>0 writes ``<stem>.shard<i><suffix>``."""
+    if index == 0:
+        return path
+    stem, dot, suffix = path.rpartition(".")
+    return f"{stem}.shard{index}.{suffix}" if dot else f"{path}.shard{index}"
+
+
+def _syncer_weighted_fold(args) -> str:
+    """S27 P4b: "" keeps the buffered merge of partial-quorum / token-weighted
+    rounds (default, historical bits); streaming folds pushes on arrival."""
+    mode = getattr(args, "syncer_weighted_fold", None) or "buffered"
+    if mode not in ("buffered", "streaming"):
+        raise ValueError("--syncer-weighted-fold must be buffered or streaming")
+    return "" if mode == "buffered" else f" --weighted-fold {mode}"
+
+
+def _sharded_supervisor(commands: list[str]) -> str:
+    """Run every shard in the background and exit with the first failure.
+
+    The job stays alive until all shards exit 0; the first shard that fails
+    stops the others, so the job's exit status still reports head health."""
+    starts = "".join(f'{{ {command} & }} && pids="$pids $!" && ' for command in commands)
+    # Poll instead of `wait -n`: shards that exited before the loop are
+    # still reported (wait -n may return 127 for them on older bash).
+    return (
+        'pids="" && ' + starts
+        + 'while [ -n "$pids" ]; do left=""; for p in $pids; do '
+        + 'if kill -0 $p 2>/dev/null; then left="$left $p"; '
+        + 'else wait $p || { rc=$?; kill $pids 2>/dev/null; exit $rc; }; fi; done; '
+        + 'pids=$left; [ -z "$pids" ] || sleep 1; done'
+    )
+
+
 def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> str:
     """The syncer invocation shared by the syncer-cluster task (local
     controller mode) and the head-node subprocess (head controller mode).
@@ -529,9 +602,25 @@ def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> st
         )
     if island_scheduling_mode(args) != "legacy":
         raise ValueError("--rl-island-scheduling elastic only applies to --training-mode rl")
+    ports = syncer_shard_ports(args)
+    if len(ports) == 1:
+        return _sft_syncer_command(args, num_learners, binary)
+    return _sharded_supervisor([
+        _sft_syncer_command(args, num_learners, binary, shard=(index, len(ports)))
+        for index in range(len(ports))
+    ])
+
+
+def _sft_syncer_command(args, num_learners: int, binary: str,
+                        shard: tuple[int, int] | None = None) -> str:
+    """The generic (SFT) syncer; ``shard=(index, count)`` makes it one shard
+    of a fragment-sharded head with its own port, checkpoint and tape."""
+    index, count = shard or (0, 1)
+    checkpoint = _shard_path("~/yeto-state.ckpt", index)
+    shard_flags = f" --shard-index {index} --shard-count {count}" if shard else ""
     return (
         f"{binary}"
-        f" --port {SYNCER_PORT}"
+        f" --port {SYNCER_PORT + index}"
         f" --learners {num_learners}"
         f" --quorum {args.quorum}"
         f" --grace-ms {args.grace_ms}"
@@ -542,10 +631,12 @@ def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> st
         f" --delta-correction {args.delta_correction}"
         f" --total-steps {args.total_steps}"
         f"{_syncer_outer_optimizer(args)}"
-        " --checkpoint-path ~/yeto-state.ckpt"
-        f" {_resume_if_exists('~/yeto-state.ckpt')}"
+        f" --checkpoint-path {checkpoint}"
+        f" {_resume_if_exists(checkpoint)}"
         f" --mark-final-checkpoint"
-        f" --event-tape {SYNCER_EVENT_TAPE}"
+        f" --event-tape {_shard_path(SYNCER_EVENT_TAPE, index)}"
+        f"{_syncer_weighted_fold(args)}"
+        f"{shard_flags}"
         # secret-handling-hardening: SFT islands do not get the HMAC key yet
         # (known gap in design.md); the opt-out is explicit, never implicit.
         " --allow-unauthenticated-islands"
@@ -638,20 +729,27 @@ def syncer_ports(args) -> list[int] | None:
     """`ports=` for the syncer/head resources; None where sky can't open them."""
     if syncer_cloud(args) in NO_OPEN_PORTS_CLOUDS:
         return None
+    return _head_ports(args)
+
+
+def _head_ports(args) -> list[int]:
+    """Every port the head listens on: one per RL role, or one per shard."""
+    if syncer_shard_count(args) > 1:
+        return syncer_shard_ports(args)
     return [syncer.port for syncer in rl_role_syncers(args)]
 
 
-def ufw_setup(port: int = SYNCER_PORT) -> str:
+def ufw_setup(port: int = SYNCER_PORT, *more_ports: int) -> str:
     """In-VM firewall for a public syncer on a cloud without security
-    groups: deny inbound except SSH and the syncer port."""
+    groups: deny inbound except SSH and the syncer port(s)."""
     return (
         'SUDO=""; [ "$(id -u)" = 0 ] || SUDO=sudo\n'
         "command -v ufw >/dev/null || { $SUDO apt-get update -qq && $SUDO apt-get install -y -qq ufw; }\n"
         "$SUDO ufw default deny incoming\n"
         "$SUDO ufw default allow outgoing\n"
         "$SUDO ufw allow 22/tcp\n"
-        f"$SUDO ufw allow {int(port)}/tcp\n"
-        "$SUDO ufw --force enable\n"
+        + "".join(f"$SUDO ufw allow {int(p)}/tcp\n" for p in (port, *more_ports))
+        + "$SUDO ufw --force enable\n"
         "$SUDO ufw status verbose"
     )
 
@@ -708,7 +806,7 @@ def probe_syncer_ports(args, host: str, *, probe=None) -> list[str]:
     connection. A pass here does not prove the islands' egress (Modal), only
     that the head side is open."""
     probe = probe or tcp_probe
-    ports = [syncer.port for syncer in rl_role_syncers(args)]
+    ports = _head_ports(args)
     details = []
     for port in ports:
         ok, detail = probe(host, port)
@@ -750,7 +848,7 @@ def make_syncer_task(args, num_learners: int):
             )
         )
         if syncer_ports(args) is None:
-            task.setup = ufw_setup() + "\n" + (task.setup or "")
+            task.setup = ufw_setup(*syncer_shard_ports(args)) + "\n" + (task.setup or "")
         return task
 
     binary = build_syncer_binary()
@@ -780,5 +878,5 @@ def make_syncer_task(args, num_learners: int):
         )
     )
     if syncer_ports(args) is None:
-        task.setup = ufw_setup() + "\n" + (task.setup or "")
+        task.setup = ufw_setup(*syncer_shard_ports(args)) + "\n" + (task.setup or "")
     return task

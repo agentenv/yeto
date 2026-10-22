@@ -362,6 +362,24 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     sync.add_argument("--fragments", type=int, default=8, help="fragments P (= sync interval H)")
     sync.add_argument("--quorum", type=int, default=1, help="minimum learners per outer step (K)")
     sync.add_argument(
+        "--syncer-shards",
+        type=int,
+        default=1,
+        help="split the syncer head into N processes by fragment range "
+        "(each owns ~1/N of the parameters, momentum and checkpoint; "
+        "islands route each fragment to its owner). 1 = one syncer. "
+        "SFT torch causal-LM learners only",
+    )
+    sync.add_argument(
+        "--syncer-weighted-fold",
+        choices=("buffered", "streaming"),
+        default="buffered",
+        help="rounds with a quorum below all learners or token weights: "
+        "buffered keeps every push until the round closes; streaming adds "
+        "each push to a running weighted sum on arrival (less head memory, "
+        "equal to buffered up to f32 rounding)",
+    )
+    sync.add_argument(
         "--external-learners",
         type=int,
         default=0,

@@ -258,7 +258,7 @@ _NON_RL_LITERALS = frozenset({
     "--include-dashboard", "--index-url", "--ipc", "--island-lease-s",
     "--island-scheduling-mode", "--json", "--learner-weight", "--learners", "--level",
     "--manifest-path", "--mark-final-checkpoint", "--master", "--matrix-merge",
-    "--max-base-lag", "--max-carry-lag", "--name", "--net", "--nnodes",
+    "--max-base-lag", "--max-carry-lag", "--shard-count", "--shard-index", "--weighted-fold", "--name", "--net", "--nnodes",
     "--no-build-isolation", "--no-checkout", "--no-deps", "--no-follow", "--node",
     "--node-ip-address", "--nproc", "--num-gpus", "--num-inference-steps", "--output-dir",
     "--password-stdin", "--policy-sweep-fragments", "--porcelain", "--port", "--profile",

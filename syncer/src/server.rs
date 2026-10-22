@@ -22,7 +22,7 @@ use tracing::{info, warn};
 use crate::recovery::{self, HelloExt, PeerRecovery};
 use crate::membership::{Admission, AdmitError, CapacityQuorum, Member, Membership};
 use crate::protocol::*;
-use crate::fold::FragmentFold;
+use crate::fold::{FragmentFold, RoundFold, StreamingFold, WeightedFoldMode};
 use crate::state::{
     remove_final_marker, write_final_marker, ComputedMerge, GlobalState, Layout, PreparedMerge,
 };
@@ -37,6 +37,16 @@ const WRITER_QUEUE: usize = 128;
 pub enum LearnerWeight {
     Tokens2OverSteps,
     Equal,
+}
+
+impl LearnerWeight {
+    /// The merge weight as a function of a push's (c_tokens, c_steps).
+    pub fn function(self) -> fn(u64, u64) -> f64 {
+        match self {
+            Self::Tokens2OverSteps => crate::merge::learner_weight,
+            Self::Equal => |_, _| 1.0,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -150,6 +160,14 @@ pub struct Config {
     /// the recover flag). Bound, donor tries and donor timeout only: it never
     /// changes a merge, so it is not in the semantic profile hash.
     pub recovery: crate::recovery::RecoveryConfig,
+    /// S27 P4b: how rounds that the exact fold cannot reproduce (partial
+    /// quorum, token weights) reduce pushes.  Numerics only (the result is
+    /// within f32 rounding of the buffered merge), so not in the profile
+    /// hash; Buffered keeps the historical bits.
+    pub weighted_fold: crate::fold::WeightedFoldMode,
+    /// S27 P4b: this process's slice of a fragment-sharded head.  Default is
+    /// unsharded and changes nothing.
+    pub shard: crate::shard::ShardPlan,
 }
 
 // v2 drops `resume`: it is how a run (re)starts, not its semantics, so a
@@ -158,6 +176,12 @@ const SEMANTIC_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-semantic-profile-v2\0";
 const DELAYED_NESTEROV_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-delayed-nesterov-v1\0";
 
 impl Config {
+    /// The last global step this process commits: `total_steps` unsharded,
+    /// otherwise this shard's last step within it.
+    pub fn last_step(&self) -> u64 {
+        self.shard.last_step(self.total_steps)
+    }
+
     /// Canonical identity of every launch field that can affect merging,
     /// scheduling, or recovery. Listener ports and concrete output paths are
     /// deliberately excluded; checkpoint *enablement* remains included.
@@ -941,6 +965,7 @@ fn validate_config(cfg: &Config) -> Result<()> {
             );
         }
     }
+    validate_shard_config(cfg)?;
     if matches!(cfg.bcast_delta_full_every, Some(n) if n < 2) {
         bail!("--bcast-delta-full-every must be at least 2");
     }
@@ -951,6 +976,35 @@ fn validate_config(cfg: &Config) -> Result<()> {
         if cfg.learner_budget_steps.is_some() {
             bail!("--async-checkpoint does not support --learner-budget-steps");
         }
+    }
+    Ok(())
+}
+
+/// A sharded head runs independent generic fragment rounds per shard.  Modes
+/// whose semantics span all fragments (strict policy sweeps, the elastic
+/// whole-model loop) or all shards (learner-budget cutoff) are refused.
+fn validate_shard_config(cfg: &Config) -> Result<()> {
+    if !cfg.shard.is_sharded() {
+        return Ok(());
+    }
+    if cfg.policy_sweep_fragments.is_some() {
+        bail!("--shard-count > 1 does not support --policy-sweep-fragments");
+    }
+    if cfg.island_scheduling != crate::elastic::IslandSchedulingMode::Legacy {
+        bail!("--shard-count > 1 requires the fragment-round scheduler (--island-scheduling-mode legacy)");
+    }
+    if cfg.learner_budget_steps.is_some() {
+        bail!("--shard-count > 1 does not support --learner-budget-steps");
+    }
+    // Each shard would run its own leases and quorum over the same islands;
+    // one membership view across shards is not wired yet.
+    if !cfg.membership.is_static() {
+        bail!("--shard-count > 1 does not support dynamic membership options yet");
+    }
+    // The delayed Nesterov checkpoint block covers every fragment of the
+    // layout, a shard holds only its own.
+    if cfg.outer_delayed_nesterov_period.is_some() {
+        bail!("--shard-count > 1 does not support --outer-delayed-nesterov-period yet");
     }
     Ok(())
 }
@@ -2451,13 +2505,19 @@ async fn scheduler(
         save_budget_checkpoint(&cfg, &st)?;
         return Ok(());
     }
-    let num_fragments = st.layout.fragments.len() as u64;
+    // A sharded head schedules only its own fragments and global steps
+    // (crate::shard); unsharded, `owned` is every fragment and the steps
+    // are 1..=total_steps.
+    let shard = cfg.shard;
+    let owned = st.owned_fragments();
+    let num_fragments = owned.len() as u64;
+    let last_step = cfg.last_step();
     let mut step_rates = StepRates::default();
     let mut last_sync_secs = 0.0f64; // previous round's merge+broadcast time
 
     // Once a marked run is actually going to make more progress, the old
     // marker must stop being publishable before any new round can commit.
-    if cfg.mark_final_checkpoint && st.global_step < cfg.total_steps {
+    if cfg.mark_final_checkpoint && st.global_step < last_step {
         remove_final_marker(cfg.checkpoint_path.as_ref().unwrap())?;
     }
 
@@ -2475,7 +2535,7 @@ async fn scheduler(
     // learners start bit-identical (also serves recovery for late joiners).
     // A checkpoint already at the terminal cut goes straight to lossless
     // FINAL delivery; a redundant full BCAST would only inflate receiver RSS.
-    if st.global_step < cfg.total_steps {
+    if st.global_step < last_step {
         broadcast_all_fragments(&st, &registry, &budget_cutoff).await;
     }
 
@@ -2488,8 +2548,8 @@ async fn scheduler(
     let depth = (cfg.pipeline.max(1) as u64).min(num_fragments) as usize;
     let manual_floor = Duration::from_millis(cfg.min_round_interval_ms);
     let mut next_launch = Instant::now(); // earliest allowed next round launch
-    let mut next_t = st.global_step + 1;
-    let mut next_commit_t = st.global_step + 1;
+    let mut next_t = shard.step_after(st.global_step);
+    let mut next_commit_t = shard.step_after(st.global_step);
     let mut inflight: Vec<Round> = Vec::new();
     let mut computing = tokio::task::JoinSet::<Result<ComputedRound>>::new();
     let mut ready: BTreeMap<u64, ComputedRound> = BTreeMap::new();
@@ -2499,7 +2559,7 @@ async fn scheduler(
     let mut cutoff_established = false;
     let mut first_budget_report: Option<(Member, u64)> = None;
     let mut recovery = PeerRecovery::new(cfg.recovery.clone());
-    'outer: while next_t <= cfg.total_steps
+    'outer: while next_t <= last_step
         || !inflight.is_empty()
         || !computing.is_empty()
         || !ready.is_empty()
@@ -2579,21 +2639,19 @@ async fn scheduler(
                     bail!("fragment {p} lost its busy ownership at commit");
                 }
             }
-            next_commit_t = next_commit_t
-                .checked_add(1)
-                .context("commit step overflow")?;
+            next_commit_t = shard.step_after(next_commit_t);
         }
 
         // Keep the pipeline full (throttled by min_round_interval_ms).
         while inflight.len() + computing.len() + ready.len() < depth
-            && next_t <= cfg.total_steps
+            && next_t <= last_step
             && Instant::now() >= next_launch
         {
             if !budget_cutoff.try_linearize_work() {
                 cutoff_established = true;
                 break 'outer;
             }
-            let p = ((next_t - 1) % num_fragments) as usize;
+            let p = shard.fragment_for_step(next_t, &owned);
             if busy_fragments.contains(&p) {
                 break;
             }
@@ -2603,7 +2661,7 @@ async fn scheduler(
                 break;
             }
             let t = next_t;
-            next_t += 1;
+            next_t = shard.step_after(t);
             let pull = encode_pull(p, t, 1);
             let mut expected_members: Vec<Member> =
                 groups.iter().map(|group| group.member).collect();
@@ -2791,8 +2849,8 @@ async fn scheduler(
             .chain(recovery.next_deadline())
             .min();
         let next_fragment_available = inflight.len() + computing.len() + ready.len() < depth
-            && next_t <= cfg.total_steps
-            && !busy_fragments.contains(&(((next_t - 1) % num_fragments) as usize));
+            && next_t <= last_step
+            && !busy_fragments.contains(&shard.fragment_for_step(next_t, &owned));
         if next_fragment_available {
             earliest = Some(earliest.map_or(next_launch, |d| d.min(next_launch)));
         }
@@ -3005,7 +3063,7 @@ async fn scheduler(
                         )
                         .await?;
                     }
-                    if st.global_step < cfg.total_steps {
+                    if st.global_step < last_step {
                         send_all_fragments(&st, &group, &budget_cutoff).await;
                     }
                     registry
@@ -3169,7 +3227,7 @@ async fn scheduler(
                                     )
                                     .await?;
                                 }
-                                if st.global_step < cfg.total_steps {
+                                if st.global_step < last_step {
                                     send_all_fragments(&st, &group, &budget_cutoff).await;
                                 }
                                 let repulls = rebind_current_unanswered_rounds(
@@ -3253,8 +3311,8 @@ async fn scheduler(
         return Ok(());
     }
 
-    if next_commit_t != cfg.total_steps.saturating_add(1)
-        || st.global_step != cfg.total_steps
+    if next_commit_t != shard.step_after(last_step)
+        || st.global_step != last_step
         || !busy_fragments.is_empty()
         || publishing.is_some()
     {
@@ -3548,7 +3606,7 @@ struct Round {
     grace_ms: Option<u64>,
     /// Streaming reduction of accepted pushes (see `round_fold`); `None`
     /// keeps every push's gradient until the buffered merge.
-    fold: Option<FragmentFold>,
+    fold: Option<RoundFold>,
     pushes: HashMap<Member, Push>,
 }
 
@@ -3820,52 +3878,82 @@ fn route_push(
         return PushDisposition::Duplicate;
     }
     round.pushes.insert(member, push);
-    advance_fold(round);
+    advance_fold(round, member);
     PushDisposition::Accepted
 }
 
-/// A streaming fold for a round whose merge inputs are fixed at launch:
-/// every expected learner must answer (quorum covers the roster), weights
-/// are equal and no HeLoCo correction reads the momentum per push.  Only
-/// then is the fold bit-identical to the buffered merge (see `fold.rs`).
-/// Dynamic membership is excluded: a lease expiry or soft deadline can merge
-/// a subset of the roster, and a carry discount changes per-push weights.
+/// The streaming reduction for a new round attempt, or `None` to keep every
+/// push's gradient until the buffered merge.
+///
+/// * Exact (bit-identical, see `fold.rs`): every expected learner must
+///   answer (quorum covers the roster) and weights are equal.
+/// * Streaming (`--weighted-fold streaming`): any other quorum or weight;
+///   pushes fold in arrival order and normalise at close.
+///
+/// HeLoCo corrects each push against momentum and always stays buffered.
+///
+/// Dynamic membership stays buffered: a lease expiry or soft deadline can
+/// drop a push that was already folded, and a carry discount changes
+/// per-push weights.
 fn round_fold(
     cfg: &Config,
     st: &GlobalState,
     p: usize,
     expected_members: &[Member],
     quorum_size: usize,
-) -> Option<FragmentFold> {
-    if quorum_size < expected_members.len()
-        || cfg.learner_weight != LearnerWeight::Equal
-        || st.delta_correction.is_some()
-        || !cfg.membership.is_static()
-    {
+) -> Option<RoundFold> {
+    if st.delta_correction.is_some() || !cfg.membership.is_static() {
         return None;
     }
-    let roster: Vec<u32> = expected_members.iter().map(|m| m.learner_id).collect();
-    FragmentFold::for_equal_full_roster(st.layout.fragments.get(p)?, &roster)
+    let fragment = st.layout.fragments.get(p)?;
+    if quorum_size >= expected_members.len() && cfg.learner_weight == LearnerWeight::Equal {
+        let roster: Vec<u32> = expected_members.iter().map(|m| m.learner_id).collect();
+        if let Some(fold) = FragmentFold::for_equal_full_roster(fragment, &roster) {
+            return Some(RoundFold::Exact(fold));
+        }
+    }
+    match cfg.weighted_fold {
+        WeightedFoldMode::Buffered => None,
+        WeightedFoldMode::Streaming => {
+            StreamingFold::new(fragment, cfg.learner_weight.function()).map(RoundFold::Streaming)
+        }
+    }
 }
 
-/// Fold every accepted push whose turn in the canonical order has come and
-/// release its gradient buffer; later-order pushes wait in `round.pushes`.
-fn advance_fold(round: &mut Round) {
-    let Some(fold) = round.fold.as_mut() else {
-        return;
-    };
-    while let Some(next) = fold.next_learner() {
-        let Some(push) = round
-            .pushes
-            .iter_mut()
-            .find_map(|(member, push)| (member.learner_id == next).then_some(push))
-        else {
-            break;
-        };
-        let gradient = std::mem::take(&mut push.outer_gradient);
-        if let Err(error) = fold.fold_next(next, gradient) {
-            fold.poison(error);
-            break;
+/// Fold what the round's fold can take now and release those gradient
+/// buffers.  The exact fold takes pushes in canonical learner order (later
+/// ones wait in `round.pushes`); the streaming fold takes `member`'s push.
+fn advance_fold(round: &mut Round, member: Member) {
+    match round.fold.as_mut() {
+        None => {}
+        Some(RoundFold::Exact(fold)) => {
+            while let Some(next) = fold.next_learner() {
+                let Some(push) = round
+                    .pushes
+                    .iter_mut()
+                    .find_map(|(member, push)| (member.learner_id == next).then_some(push))
+                else {
+                    break;
+                };
+                let gradient = std::mem::take(&mut push.outer_gradient);
+                if let Err(error) = fold.fold_next(next, gradient) {
+                    fold.poison(error);
+                    break;
+                }
+            }
+        }
+        Some(RoundFold::Streaming(fold)) => {
+            if fold.is_poisoned() {
+                return;
+            }
+            let Some(push) = round.pushes.get_mut(&member) else {
+                return;
+            };
+            let weight = fold.weight_of(push.c_tokens, u64::from(push.c_steps));
+            let gradient = std::mem::take(&mut push.outer_gradient);
+            if let Err(error) = fold.fold(member.learner_id, gradient, weight) {
+                fold.poison(error);
+            }
         }
     }
 }
@@ -3902,23 +3990,20 @@ fn prepare_round_compute(
             );
         }
         outer_gradients.push(push.outer_gradient.as_slice());
-        let weight = match cfg.learner_weight {
-            LearnerWeight::Tokens2OverSteps => {
-                crate::merge::learner_weight(push.c_tokens, u64::from(push.c_steps))
-            }
-            LearnerWeight::Equal => 1.0,
-        };
+        let weight = cfg.learner_weight.function()(push.c_tokens, u64::from(push.c_steps));
         // Carry discount γ^lag per fragment version (1 when off: exact).
         weights.push(weight * cfg.membership.carry_discount(round.base_version - push.base_version));
     }
     let Some(fold) = round.fold.take() else {
         return st.prepare_merge(round.p, round.base_version, &outer_gradients, &weights);
     };
-    // The fold reduced in learner-id order; the buffered merge reduces in
-    // Member order.  They agree exactly when every responder was folded and
-    // ids are unique, which this check makes explicit.
+    // Every responder must have been folded exactly once.  The exact fold
+    // reduced in learner-id order, which equals the buffered merge's Member
+    // order when ids are unique; the streaming fold in arrival order.
     let responders: Vec<u32> = ordered_pushes.iter().map(|(m, _)| m.learner_id).collect();
-    if fold.folded_learners() != responders.as_slice() {
+    let mut folded = fold.folded_learners().to_vec();
+    folded.sort_unstable();
+    if folded != responders {
         bail!(
             "round t={} fragment {}: streaming fold covered learners {:?}, responders {:?}",
             round.t,
@@ -4000,10 +4085,7 @@ fn apply_round_commit(
         pushes,
         ..
     } = round;
-    let expected_t = st
-        .global_step
-        .checked_add(1)
-        .context("global step overflow before round commit")?;
+    let expected_t = st.shard().step_after(st.global_step);
     if t != expected_t {
         bail!("refusing non-contiguous round commit: got step {t}, expected {expected_t}");
     }
@@ -4084,7 +4166,7 @@ async fn publish_round(
     // instead of silently committing a cut that was never broadcastable.
     // The terminal round is the sole exception: finalize_learners publishes
     // its exact f32 cut immediately after the scheduler reaches quiescence.
-    if t < cfg.total_steps {
+    if t < cfg.last_step() {
         let dtype = bulk_dtype(st.wire_dtype);
         // bf16 downlink: encode this version once (advancing the shared
         // anchor) and send the same bytes to every learner.
@@ -4094,7 +4176,10 @@ async fn publish_round(
                 // Islands key stored fragments by (fragment, version) and
                 // refuse a second copy with other bytes, so that broadcast
                 // must carry the exact f32 masters (FULL), not a bf16 delta.
-                let last_version = t + st.params.len() as u64 > cfg.total_steps;
+                let last_version = cfg
+                    .shard
+                    .next_merge_of_fragment(t, &st.owned_fragments())
+                    > cfg.total_steps;
                 let mut anchors = anchors.lock().unwrap();
                 Some(if last_version {
                     anchors.publish_full(p, st.versions[p], &st.params[p])
@@ -4179,7 +4264,7 @@ async fn publish_round(
     // Policy sweeps persist only before broadcast (see persist_before_broadcast).
     if cfg.policy_sweep_fragments.is_none() && !checkpoint_before_broadcast(cfg) {
         if let Some(path) = &cfg.checkpoint_path {
-            if cfg.checkpoint_every > 0 && t % cfg.checkpoint_every == 0 {
+            if cfg.checkpoint_every > 0 && cfg.shard.round_number(t) % cfg.checkpoint_every == 0 {
                 st.save_checkpoint(path)?;
                 info!(step = t, path = %path.display(), "checkpoint written");
             }
@@ -4348,6 +4433,7 @@ fn new_state_for(group: &Arc<Group>, cfg: &Config) -> Result<GlobalState> {
     )?;
     st.policy_sweep_fragments = cfg.policy_sweep_fragments;
     st.session_contract_hash = Some(group.session_contract_hash);
+    st.set_shard(cfg.shard)?;
     match (bcast_delta(group.dtype), cfg.bcast_delta_full_every) {
         (true, Some(full_every)) => {
             st.downlink = Some(Mutex::new(crate::downlink::DownlinkAnchors::new(
@@ -4536,7 +4622,7 @@ async fn broadcast_all_fragments(
     // one full model transfer per learner (tens of GiB for large models).
     // The current streaming encoder keeps peak host memory bounded while the
     // per-learner socket queues provide link concurrency.
-    for p in 0..st.layout.fragments.len() {
+    for p in st.owned_fragments() {
         for group in &groups {
             match send_fragment_until_cutoff(
                 st,
@@ -4567,7 +4653,7 @@ async fn broadcast_all_fragments(
 /// terminal fragments and use the manifest to decide when the complete cut
 /// is locally available.
 async fn send_final_cut(st: &GlobalState, group: &Arc<Group>) -> Result<()> {
-    for p in 0..st.layout.fragments.len() {
+    for p in st.owned_fragments() {
         send_fragment(st, group, p, MSG_FINAL_FRAGMENT, DTYPE_F32).await?;
     }
     group
@@ -4785,7 +4871,7 @@ async fn finalize_learners(
 }
 
 async fn send_all_fragments(st: &GlobalState, group: &Arc<Group>, budget_cutoff: &BudgetCutoff) {
-    for p in 0..st.layout.fragments.len() {
+    for p in st.owned_fragments() {
         match send_fragment_until_cutoff(
             st,
             group,
@@ -5525,6 +5611,8 @@ mod tests {
             elastic_final_grace_s: None,
             membership: Default::default(),
             recovery: Default::default(),
+            weighted_fold: Default::default(),
+            shard: Default::default(),
         }
     }
 
@@ -8132,7 +8220,7 @@ mod tests {
         assert_eq!(held(&round), vec![2], "learner 0 is folded at once");
         route_one(&mut round, members[1], fold_test_push(1));
         assert!(held(&round).is_empty(), "1 then the held 2 are folded");
-        assert!(round.fold.as_ref().unwrap().is_complete());
+        assert!(matches!(round.fold.as_ref(), Some(RoundFold::Exact(fold)) if fold.is_complete()));
     }
 
     #[test]
@@ -8244,5 +8332,106 @@ mod tests {
         let parsed = parse_hello(&extended, 1).unwrap();
         assert_eq!(parsed.ext, ext);
         assert_eq!(parsed.generation, 5);
+    }
+
+    fn streaming_cfg() -> Config {
+        let mut cfg = round_test_config(1);
+        cfg.weighted_fold = WeightedFoldMode::Streaming;
+        cfg.learner_weight = LearnerWeight::Tokens2OverSteps;
+        cfg.max_base_lag = None;
+        cfg
+    }
+
+    #[test]
+    fn weighted_fold_mode_selects_the_reduction_per_round() {
+        let st = fold_test_state(crate::state::MERGE_RDA);
+        let members = [member(0, 1), member(1, 1), member(2, 1)];
+        let kind = |cfg: &Config, st: &GlobalState, members: &[Member], quorum| {
+            match round_fold(cfg, st, 0, members, quorum) {
+                None => "buffered",
+                Some(RoundFold::Exact(_)) => "exact",
+                Some(RoundFold::Streaming(_)) => "streaming",
+            }
+        };
+        let mut cfg = round_test_config(1);
+        cfg.weighted_fold = WeightedFoldMode::Streaming;
+        assert_eq!(kind(&cfg, &st, &members, 3), "exact");
+        assert_eq!(kind(&cfg, &st, &members, 1), "streaming");
+        assert_eq!(kind(&cfg, &st, &[member(0, 1), member(0, 2)], 2), "streaming");
+        let weighted = streaming_cfg();
+        assert_eq!(kind(&weighted, &st, &members, 3), "streaming");
+        let mut heloco = fold_test_state(crate::state::MERGE_RDA);
+        heloco.delta_correction = Some(crate::merge::Heloco::default());
+        assert_eq!(kind(&weighted, &heloco, &members, 1), "buffered");
+        let mut control = streaming_cfg();
+        control.weighted_fold = WeightedFoldMode::Buffered;
+        assert_eq!(kind(&control, &st, &members, 1), "buffered");
+    }
+
+    fn committed_params(cfg: &Config, mode: u8, members: &[Member], arrivals: &[usize]) -> Vec<f32> {
+        let mut st = fold_test_state(mode);
+        let mut round = test_round(members.to_vec());
+        round.t = 1;
+        round.p = 0;
+        round.base_version = 0;
+        round.quorum_size = 1;
+        round.fold = round_fold(cfg, &st, 0, members, 1);
+        for &index in arrivals {
+            let member = members[index];
+            let mut push = fold_test_push(member.learner_id);
+            push.c_steps = 1 + member.learner_id % 3;
+            assert_eq!(
+                super::route_push(std::slice::from_mut(&mut round), member, push, None, false),
+                PushDisposition::Accepted
+            );
+            if matches!(round.fold, Some(RoundFold::Streaming(_))) {
+                // The streaming fold releases every push on arrival.
+                assert!(round.pushes.values().all(|push| push.outer_gradient.is_empty()));
+            }
+        }
+        let merge = prepare_round_compute(cfg, &st, &mut round)
+            .unwrap()
+            .finish_inline()
+            .unwrap();
+        st.commit_merge(merge).unwrap();
+        st.params[0].to_vec()
+    }
+
+    #[test]
+    fn streaming_partial_quorum_round_commits_within_rounding_of_buffered() {
+        let streaming = streaming_cfg();
+        let mut buffered_cfg = streaming_cfg();
+        buffered_cfg.weighted_fold = WeightedFoldMode::Buffered;
+        let members = [member(0, 3), member(2, 1), member(5, 9), member(7, 2)];
+        for mode in [
+            crate::state::MERGE_AVG,
+            crate::state::MERGE_RDA,
+            crate::state::MERGE_ISO,
+        ] {
+            // Quorum 1 of 4: any subset may close the round.
+            for subset in [vec![2], vec![0, 3], vec![3, 1, 2], vec![0, 1, 2, 3]] {
+                let buffered = committed_params(&buffered_cfg, mode, &members, &subset);
+                let scale = buffered.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+                let first = committed_params(&streaming, mode, &members, &subset);
+                let mut sorted = subset.clone();
+                sorted.sort_unstable();
+                for order in permutations(subset.len()) {
+                    let arrivals: Vec<usize> = order.iter().map(|&i| subset[i]).collect();
+                    let out = committed_params(&streaming, mode, &members, &arrivals);
+                    let err = out
+                        .iter()
+                        .zip(&buffered)
+                        .map(|(a, b)| (a - b).abs())
+                        .fold(0.0f32, f32::max);
+                    assert!(
+                        err <= 32.0 * f32::EPSILON * scale,
+                        "mode {mode} arrivals {arrivals:?}: error {err:e}, scale {scale:e}"
+                    );
+                    if arrivals == subset {
+                        assert_eq!(out, first, "same arrival order must repeat exactly");
+                    }
+                }
+            }
+        }
     }
 }

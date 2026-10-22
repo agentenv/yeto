@@ -1,6 +1,7 @@
 mod elastic;
 mod elastic_server;
 mod fold;
+mod shard;
 #[cfg(test)]
 mod head_memory;
 mod iso_worker;
@@ -215,6 +216,18 @@ struct Args {
     /// seconds (or until every member left); defaults to the soft deadline.
     #[arg(long)]
     final_grace_s: Option<u64>,
+    /// Rounds the exact fold cannot reproduce (quorum below the roster or
+    /// token weights): buffered keeps every push until the round closes
+    /// (historical bits); streaming folds each push on arrival (S27 P4b).
+    #[arg(long, default_value = "buffered")]
+    weighted_fold: String,
+    /// Fragment-sharded head (S27 P4b): this process owns the fragment
+    /// range of shard --shard-index out of --shard-count and runs only the
+    /// global steps t ≡ shard-index+1 (mod shard-count).  Default unsharded.
+    #[arg(long, default_value_t = 0)]
+    shard_index: u32,
+    #[arg(long, default_value_t = 1)]
+    shard_count: u32,
 }
 
 const DEFAULT_ELASTIC_LEASE_S: f64 = 150.0;
@@ -262,6 +275,10 @@ fn parse_island_scheduling(args: &Args) -> anyhow::Result<elastic::IslandSchedul
 }
 
 impl Args {
+    fn shard_plan(&self) -> anyhow::Result<shard::ShardPlan> {
+        shard::ShardPlan::new(self.shard_index, self.shard_count)
+    }
+
     fn resolved_final_ack_timeout_s(&self) -> u64 {
         self.final_ack_timeout_s.unwrap_or(self.quorum_timeout_s)
     }
@@ -278,6 +295,7 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
     let args = Args::parse();
+    let shard = args.shard_plan()?;
     let delta_correction = match args.delta_correction.as_str() {
         "heloco" => true,
         "none" => false,
@@ -388,6 +406,8 @@ fn main() -> anyhow::Result<()> {
         elastic_final_grace_s: args.final_grace_s,
         membership,
         recovery,
+        weighted_fold: args.weighted_fold.parse()?,
+        shard,
     };
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()

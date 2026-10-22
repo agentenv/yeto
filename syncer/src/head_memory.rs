@@ -317,3 +317,118 @@ fn head_memory_measured_scaled_down() {
     assert!(load_peak <= 2.0 * FRAGMENTS as f64 + read_buffers, "{load_peak}");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// S27 P4b: per-process head bytes for 27B with the streaming weighted fold
+/// (any quorum, token weights) and the head split into N syncer shards.
+///
+/// A shard keeps params, momentum and the bf16-downlink anchor of its own
+/// fragments only (3·n/N) and runs its own pipeline of rounds; a streaming
+/// round holds its accumulators (2 for RDA) plus the push being folded,
+/// whatever the quorum, where the buffered merge holds every responder's
+/// push plus the reduced delta.  Checkpoint and resume stream as in P4.
+#[test]
+fn head_memory_model_for_27b_sharded_streaming_rounds() {
+    println!(
+        "islands | shards | resident/shard | rounds buffered | rounds streaming | \
+         peak/shard buffered | peak/shard streaming | total streaming  [GiB]"
+    );
+    let mut table = Vec::new();
+    for islands in [2.0, 4.0] {
+        for shards in [1.0, 2.0, 4.0] {
+            let session = Session {
+                params: 27e9,
+                max_fragment: 152_064.0 * 5120.0,
+                islands,
+                pipeline: 2.0,
+                rda: true,
+                downlink_anchor: true,
+            };
+            let e = session.estimate();
+            let f = session.max_fragment * F32;
+            let resident = e.resident / shards;
+            // Buffered weighted round: every push + the reduced delta.
+            let rounds_buffered = e.rounds_buffered;
+            // Streaming: avg + direction accumulators + the incoming push.
+            let rounds_streaming = session.pipeline * 3.0 * f;
+            let peak_buffered = resident + rounds_buffered + e.async_checkpoint_snapshot;
+            let peak_streaming = resident + rounds_streaming + e.async_checkpoint_snapshot;
+            println!(
+                "{islands} | {shards} | {:.1} | {:.1} | {:.1} | {:.1} | {:.1} | {:.1}",
+                gib(resident),
+                gib(rounds_buffered),
+                gib(rounds_streaming),
+                gib(peak_buffered),
+                gib(peak_streaming),
+                gib(peak_streaming * shards),
+            );
+            assert!(peak_streaming <= peak_buffered);
+            table.push((islands, shards, peak_streaming));
+        }
+    }
+    // Sharding divides the dominant resident term: with 4 islands, 4 shards
+    // bring a 27B head from ~331 to ~104 GiB per process.
+    let peak = |m: f64, n: f64| table.iter().find(|(a, b, _)| *a == m && *b == n).unwrap().2;
+    assert!(gib(peak(4.0, 4.0)) < 110.0, "{}", gib(peak(4.0, 4.0)));
+    assert!(peak(4.0, 4.0) < peak(4.0, 1.0) / 3.0);
+}
+
+/// Measured: a shard allocates params and momentum for its own fragments
+/// only, and its checkpoint stores the others empty.
+#[test]
+fn sharded_state_holds_only_owned_fragments_measured() {
+    const FRAGMENTS: usize = 6;
+    const NUMEL: usize = 1 << 18;
+    let frag_bytes = (NUMEL * 4) as f64;
+    let layout = |_: ()| Layout {
+        fragments: (0..FRAGMENTS)
+            .map(|_| FragmentInfo {
+                merge_mode: MERGE_RDA,
+                tensor_numels: vec![NUMEL as u64],
+                tensor_shapes: None,
+            })
+            .collect(),
+    };
+    let dir = std::env::temp_dir().join(format!("yeto-p4b-shard-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for shards in [1u32, 2, 3] {
+        let mut total = 0.0;
+        for index in 0..shards {
+            let plan = crate::shard::ShardPlan::new(index, shards).unwrap();
+            let before = meter::live();
+            let mut st = GlobalState::new(layout(()), 0.7, 0.9, DTYPE_F32).unwrap();
+            st.set_shard(plan).unwrap();
+            for fid in st.owned_fragments() {
+                st.init_fragment(fid, values(fid as u32, NUMEL)).unwrap();
+            }
+            assert!(st.all_initialized());
+            let foreign = (0..FRAGMENTS).find(|fid| !st.owns_fragment(*fid));
+            if let Some(fid) = foreign {
+                assert!(st.init_fragment(fid, values(0, NUMEL)).is_err());
+            }
+            let resident = (meter::live() - before) as f64 / frag_bytes;
+            let owned = st.owned_fragments().len() as f64;
+            assert!((resident - 2.0 * owned).abs() < 0.05, "{resident} vs {owned}");
+            total += resident;
+
+            let path = dir.join(format!("s{shards}-{index}.ckpt"));
+            st.save_checkpoint(&path).unwrap();
+            let file = std::fs::metadata(&path).unwrap().len() as f64 / frag_bytes;
+            assert!((file - 2.0 * owned).abs() < 0.01, "{file}");
+            let mut resumed = GlobalState::new(layout(()), 0.7, 0.9, DTYPE_F32).unwrap();
+            resumed.set_shard(plan).unwrap();
+            resumed.load_checkpoint(&path).unwrap();
+            assert!(resumed.all_initialized());
+            assert_eq!(resumed.owned_fragments(), st.owned_fragments());
+            if shards > 1 {
+                // Another shard's checkpoint is refused.
+                let other = crate::shard::ShardPlan::new((index + 1) % shards, shards).unwrap();
+                let mut wrong = GlobalState::new(layout(()), 0.7, 0.9, DTYPE_F32).unwrap();
+                wrong.set_shard(other).unwrap();
+                assert!(wrong.load_checkpoint(&path).is_err());
+            }
+        }
+        println!("{shards} shards: total resident {total:.2} fragments (2 per fragment)");
+        assert!((total - 2.0 * FRAGMENTS as f64).abs() < 0.1);
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}

@@ -634,6 +634,7 @@ class SyncerClient:
         stream_stall_timeout: float | None = None,
         syncer_epoch: int | None = None,
         recover: bool = False,
+        owned_fragments: range | None = None,
     ):
         """``syncer_epoch``: the syncer incarnation this island was launched
         for; a syncer with a newer epoch refuses it (not retried). ``recover``:
@@ -661,9 +662,23 @@ class SyncerClient:
             or len(syncer_profile_hash) != 32
         ):
             raise ValueError("syncer profile hash must be exactly 32 bytes")
+        if owned_fragments is None:
+            owned_fragments = range(layout.num_fragments)
+        elif (
+            owned_fragments.step != 1
+            or not 0 <= owned_fragments.start < owned_fragments.stop <= layout.num_fragments
+        ):
+            raise ValueError(
+                f"owned_fragments {owned_fragments} is not a non-empty slice of "
+                f"{layout.num_fragments} fragments"
+            )
         self.addr = addr
         self.learner_id = learner_id
         self.layout = layout
+        # S27 P4b: the fragments this connection's syncer shard owns (all of
+        # them unsharded). INIT and PUSH for other fragments are refused, and
+        # finalization waits only for these (yeto/syncer_shards.py).
+        self.owned_fragments = owned_fragments
         self.dtype = dtype
         self._push_base = session_base(dtype)
         self.push_i8_block = push_i8_block
@@ -1022,7 +1037,7 @@ class SyncerClient:
         partial INIT of a dead generation is dropped by the syncer)."""
         generation = self.connection_generation
         try:
-            for fragment_id in range(self.layout.num_fragments):
+            for fragment_id in self.owned_fragments:
                 if self.send_init_parts(fragment_id, parts_for(fragment_id)) is not True:
                     return False
         except PartialMessageGenerationLost:
@@ -1031,6 +1046,15 @@ class SyncerClient:
             return False
         self._init_generation = generation
         return True
+
+    def _check_owned(self, kind: str, fragment_id: int) -> None:
+        if not 0 <= fragment_id < self.layout.num_fragments:
+            raise ValueError(f"{kind} for unknown fragment {fragment_id}")
+        if fragment_id not in self.owned_fragments:
+            raise ValueError(
+                f"{kind} for fragment {fragment_id} sent to the syncer shard "
+                f"owning fragments {self.owned_fragments.start}..{self.owned_fragments.stop - 1}"
+            )
 
     def init_replay_due(self) -> bool:
         """True when the live group never carried a complete INIT and the
@@ -1059,8 +1083,7 @@ class SyncerClient:
                 pass  # a dying socket; the group is being replaced anyway
 
     def send_init(self, fragment_id: int, tensor_bytes: bytes) -> None:
-        if not 0 <= fragment_id < self.layout.num_fragments:
-            raise ValueError(f"INIT_PARAMS for unknown fragment {fragment_id}")
+        self._check_owned("INIT_PARAMS", fragment_id)
         expected = _tensor_nbytes(
             bulk_dtype(self.dtype), self.layout.fragments[fragment_id].numel
         )
@@ -1077,8 +1100,7 @@ class SyncerClient:
         tensor_parts: Iterable[bytes | bytearray | memoryview],
     ) -> bool:
         """Stream INIT_PARAMS without materializing its complete tensor."""
-        if not 0 <= fragment_id < self.layout.num_fragments:
-            raise ValueError(f"INIT_PARAMS for unknown fragment {fragment_id}")
+        self._check_owned("INIT_PARAMS", fragment_id)
         expected = _tensor_nbytes(
             bulk_dtype(self.dtype), self.layout.fragments[fragment_id].numel
         )
@@ -1101,8 +1123,7 @@ class SyncerClient:
         c_tokens: int,
         tensor_bytes: bytes,
     ) -> None:
-        if not 0 <= fragment_id < self.layout.num_fragments:
-            raise ValueError(f"PUSH_FRAGMENT for unknown fragment {fragment_id}")
+        self._check_owned("PUSH_FRAGMENT", fragment_id)
         if round_attempt < 1:
             raise ValueError("round_attempt must be positive")
         if c_steps < 1:
@@ -1158,8 +1179,7 @@ class SyncerClient:
         none could be queued. A failure after the first chunk poisons that
         connection generation and raises so callers cannot mark the push done.
         """
-        if not 0 <= fragment_id < self.layout.num_fragments:
-            raise ValueError(f"PUSH_FRAGMENT for unknown fragment {fragment_id}")
+        self._check_owned("PUSH_FRAGMENT", fragment_id)
         if round_attempt < 1:
             raise ValueError("round_attempt must be positive")
         if c_steps < 1:
@@ -1334,6 +1354,8 @@ class SyncerClient:
                     ready = []
                     missing = []
                     for fid, version in enumerate(manifest.versions):
+                        if fid not in self.owned_fragments:
+                            continue  # another syncer shard's fragment
                         cached = self._final_fragments.get(fid)
                         if cached is None or cached.version != version:
                             latest = None if cached is None else cached.version
