@@ -281,17 +281,14 @@ def test_optimizer_offload_with_the_full_parameter_sync_needs_the_distopt_reader
     # older pinned image is refused before launch.
     cfg = sub(make_config(), "trainable", parameter_mode="full", target_modules=())
     cfg = dataclasses.replace(cfg, train_memory=rc.TrainMemoryConfig(optimizer_offload_fraction=0.5))
+    monkeypatch.setattr(mc, "MILES_NEXT_COMMIT", "ed5f64fd7a183cccc8ab7ca3da90fba570108c2b")
     with pytest.raises(mc.MilesConfigError, match="56190a5a8 or later"):
         mc.translate_run_config(cfg, AlgorithmSpec())
 
 
-def test_optimizer_offload_with_the_full_parameter_sync_keeps_the_distributed_optimizer(monkeypatch):
+def test_optimizer_offload_with_the_full_parameter_sync_keeps_the_distributed_optimizer():
     cfg = sub(make_config(), "trainable", parameter_mode="full", target_modules=())
     cfg = dataclasses.replace(cfg, train_memory=rc.TrainMemoryConfig(optimizer_offload_fraction=1.0))
-    from yeto.rl.adapters.miles import pins
-
-    monkeypatch.setattr(pins, "MILES_FORK_LINEAGE", pins.MILES_FORK_LINEAGE + (mc.MILES_DISTOPT_FULL_PARAMETER_COMMIT,))
-    monkeypatch.setattr(mc, "MILES_NEXT_COMMIT", mc.MILES_DISTOPT_FULL_PARAMETER_COMMIT)
     launch = mc.translate_run_config(cfg, AlgorithmSpec())
     assert "use_distributed_optimizer" not in launch.runtime_attrs
     assert ("--use-distributed-optimizer --use-precision-aware-optimizer --optimizer-cpu-offload "
