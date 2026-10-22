@@ -2940,6 +2940,17 @@ async fn scheduler(
         if submitted_any {
             continue; // refill the pipeline before waiting again
         }
+        // The commit above may have drained the last round. Re-check the loop
+        // condition now: waiting here would sleep until the next lease expiry,
+        // and the leases of idle learners then lapse before the final cut.
+        if next_t > last_step
+            && inflight.is_empty()
+            && computing.is_empty()
+            && ready.is_empty()
+            && publishing.is_none()
+        {
+            continue;
+        }
         // Wait for the next event, the earliest in-flight deadline, or the
         // launch throttle opening (whichever comes first). Without the
         // throttle term an empty pipeline would spin; without in-flight
