@@ -873,12 +873,14 @@ _SYNC = (
     ),
     cli_flag(
         "--rl-sync-push-dtype",
-        choices=("f32", "bf16", "int8"),
+        choices=("f32", "bf16", "int8", "int4", "int4-log"),
         default="f32",
         help="full-parameter only: wire dtype of the islands' pushed outer deltas "
         "(pseudo-gradients). bf16 halves upload bytes, int8 (block absmax scale, see "
-        "--rl-sync-push-int8-block) quarters them; the syncer keeps f32 masters, "
-        "momentum and f32 FINAL (default f32 = exact)",
+        "--rl-sync-push-int8-block) quarters them, int4 (linear, 15 levels per block "
+        "absmax scale, see --rl-sync-push-int4-block) and int4-log (the SFT q4 codec: "
+        "256-value blocks, log2 levels) cut them to ~1/7.5-1/7.8; the syncer keeps "
+        "f32 masters, momentum and f32 FINAL (default f32 = exact)",
     ),
     cli_flag(
         "--rl-sync-overlap",
@@ -895,6 +897,28 @@ _SYNC = (
         default=128,
         help="full-parameter only, with --rl-sync-push-dtype int8: values per f32 "
         "scale (32..1048576; error <= block absmax / 254 per value)",
+    ),
+    cli_flag(
+        "--rl-sync-push-int4-block",
+        type=int,
+        default=128,
+        help="full-parameter only, with --rl-sync-push-dtype int4: values per f32 "
+        "scale (even, 64..256; nearest rounding errs <= block absmax / 14 per value)",
+    ),
+    cli_flag(
+        "--rl-sync-push-int4-stochastic",
+        action="store_true",
+        help="full-parameter only, with --rl-sync-push-dtype int4: unbiased stochastic "
+        "rounding instead of round-to-nearest (default off)",
+    ),
+    cli_flag(
+        "--rl-sync-push-int4-error-feedback",
+        choices=("off", "bf16", "f32"),
+        default="off",
+        help="full-parameter only, with --rl-sync-push-dtype int4 (nearest rounding): "
+        "each island adds the previous int4 rounding error of a fragment to its next "
+        "delta, kept in this dtype (bf16 = 2 bytes per pushed parameter on the island "
+        "host). Dropped after skipped rounds, re-JOIN and resume (default off)",
     ),
     cli_flag(
         "--rl-sync-bcast-delta-full-every",

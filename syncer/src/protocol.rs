@@ -69,10 +69,20 @@ pub const DTYPE_F32_PUSH_BF16: u8 = 4;
 /// Session dtype 5 (S26 E3): PUSH_FRAGMENT deltas travel as block-scaled
 /// int8 (see `decode_i8`); INIT_PARAMS, BCAST_FRAGMENT and FINAL stay f32.
 pub const DTYPE_F32_PUSH_I8: u8 = 5;
+
+/// Session dtype 6 (S27 P3): PUSH_FRAGMENT deltas travel in the dtype-3 q4
+/// block codec (see `decode_q4`); INIT_PARAMS, BCAST_FRAGMENT and FINAL stay
+/// f32, so only the learner's outer gradient is quantized.
+pub const DTYPE_F32_PUSH_Q4: u8 = 6;
+
+/// Session dtype 7 (S27 P3): PUSH_FRAGMENT deltas travel as linear symmetric
+/// int4 with one absmax scale per block (see `decode_i4`); INIT_PARAMS,
+/// BCAST_FRAGMENT and FINAL stay f32.
+pub const DTYPE_F32_PUSH_I4: u8 = 7;
 /// Session-dtype flag (S26 E3): BCAST_FRAGMENT carries a 41-byte downlink
 /// header and, between periodic f32 refreshes, a bf16 delta against the
 /// anchor every learner holds (see `crate::downlink`). Valid only on f32-bulk
-/// sessions (dtypes 1, 4, 5).
+/// sessions (dtypes 1, 4, 5, 6, 7).
 pub const DTYPE_FLAG_BCAST_DELTA: u8 = 0x80;
 
 /// Values per q4 scale block (f32 absmax scale + 128 nibble bytes each).
@@ -80,6 +90,9 @@ pub const Q4_BLOCK: usize = 256;
 /// Bounds of the int8 push block size the learner declares per payload.
 pub const I8_BLOCK_MIN: usize = 32;
 pub const I8_BLOCK_MAX: usize = 1 << 20;
+/// Bounds of the linear int4 push block size (even, so nibbles pair up).
+pub const I4_BLOCK_MIN: usize = 64;
+pub const I4_BLOCK_MAX: usize = 256;
 
 /// The session dtype without its flags.
 pub fn session_base(dtype: u8) -> u8 {
@@ -94,7 +107,9 @@ pub fn bcast_delta(dtype: u8) -> bool {
 /// Whether `dtype` is a session dtype this syncer accepts.
 pub fn valid_session_dtype(dtype: u8) -> bool {
     match session_base(dtype) {
-        DTYPE_F32 | DTYPE_F32_PUSH_BF16 | DTYPE_F32_PUSH_I8 => true,
+        DTYPE_F32 | DTYPE_F32_PUSH_BF16 | DTYPE_F32_PUSH_I8 | DTYPE_F32_PUSH_Q4 | DTYPE_F32_PUSH_I4 => {
+            true
+        }
         DTYPE_BF16 | DTYPE_Q4 => !bcast_delta(dtype),
         _ => false,
     }
@@ -105,7 +120,7 @@ pub fn valid_session_dtype(dtype: u8) -> bool {
 pub fn bulk_dtype(dtype: u8) -> u8 {
     match session_base(dtype) {
         DTYPE_Q4 => DTYPE_BF16,
-        DTYPE_F32_PUSH_BF16 | DTYPE_F32_PUSH_I8 => DTYPE_F32,
+        DTYPE_F32_PUSH_BF16 | DTYPE_F32_PUSH_I8 | DTYPE_F32_PUSH_Q4 | DTYPE_F32_PUSH_I4 => DTYPE_F32,
         other => other,
     }
 }
@@ -122,8 +137,9 @@ pub fn push_dtype(dtype: u8) -> u8 {
 /// Largest PUSH_FRAGMENT delta payload a session dtype may carry.
 pub fn max_push_nbytes(dtype: u8, numel: usize) -> Result<usize> {
     match session_base(dtype) {
-        DTYPE_Q4 => q4_nbytes(numel),
+        DTYPE_Q4 | DTYPE_F32_PUSH_Q4 => q4_nbytes(numel),
         DTYPE_F32_PUSH_I8 => i8_nbytes(numel, I8_BLOCK_MIN),
+        DTYPE_F32_PUSH_I4 => i4_nbytes(numel, I4_BLOCK_MIN),
         other => tensor_nbytes(push_dtype(other), numel),
     }
 }
@@ -131,8 +147,9 @@ pub fn max_push_nbytes(dtype: u8, numel: usize) -> Result<usize> {
 /// Decode a PUSH_FRAGMENT delta payload of any session dtype into f32s.
 pub fn decode_push(dtype: u8, bytes: &[u8], numel: usize, out: &mut Vec<f32>) -> Result<()> {
     match session_base(dtype) {
-        DTYPE_Q4 => decode_q4(bytes, numel, out),
+        DTYPE_Q4 | DTYPE_F32_PUSH_Q4 => decode_q4(bytes, numel, out),
         DTYPE_F32_PUSH_I8 => decode_i8(bytes, numel, out),
+        DTYPE_F32_PUSH_I4 => decode_i4(bytes, numel, out),
         other => {
             let expected = tensor_nbytes(push_dtype(other), numel)?;
             if bytes.len() != expected {
@@ -403,6 +420,94 @@ pub fn encode_i8(vals: &[f32], block: usize) -> Vec<u8> {
     out
 }
 
+/// Encoded size of a linear int4 push: u32 block, per block an f32 scale,
+/// then two values per byte (an odd last block pads one zero nibble).
+pub fn i4_nbytes(numel: usize, block: usize) -> Result<usize> {
+    if !(I4_BLOCK_MIN..=I4_BLOCK_MAX).contains(&block) || block % 2 != 0 {
+        bail!("int4 block size {block} must be even and within {I4_BLOCK_MIN}..={I4_BLOCK_MAX}");
+    }
+    numel
+        .div_ceil(block)
+        .checked_mul(4)
+        .and_then(|scales| scales.checked_add(numel.div_ceil(2)))
+        .and_then(|body| body.checked_add(4))
+        .ok_or_else(|| anyhow::anyhow!("int4 tensor byte length overflow"))
+}
+
+/// Decode a linear int4 delta payload (yeto/protocol.py `f32_bytes_to_i4`).
+///
+/// Layout: u32 block size B (even, 64..=256), then per block of B values (the
+/// last may be shorter): f32 scale (absmax / 7), then the values as signed
+/// 4-bit two's-complement nibbles, low nibble first. A value decodes to
+/// `q as f32 * scale`; -8 is reserved and an odd block's pad nibble is 0.
+/// Round-to-nearest errs by at most scale / 2 = absmax / 14 per element.
+pub fn decode_i4(bytes: &[u8], numel: usize, out: &mut Vec<f32>) -> Result<()> {
+    if bytes.len() < 4 {
+        bail!("int4 payload is shorter than its block header");
+    }
+    let block = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
+    let expected = i4_nbytes(numel, block)?;
+    if bytes.len() != expected {
+        bail!(
+            "int4 payload has {} bytes, expected {expected} for {numel} values in blocks of {block}",
+            bytes.len()
+        );
+    }
+    out.clear();
+    out.try_reserve(numel)
+        .map_err(|error| anyhow::anyhow!("cannot allocate int4 tensor: {error}"))?;
+    let mut at = 4usize;
+    let mut remaining = numel;
+    let mut b = 0usize;
+    while remaining > 0 {
+        let len = remaining.min(block);
+        let scale = f32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        if !scale.is_finite() || scale < 0.0 {
+            bail!("int4 block {b} has invalid scale {scale}");
+        }
+        at += 4;
+        let body = &bytes[at..at + len.div_ceil(2)];
+        for i in 0..len {
+            let nibble = (body[i / 2] >> (4 * (i % 2))) & 0x0F;
+            if nibble == 0x08 {
+                bail!("int4 block {b} uses the reserved value -8");
+            }
+            // Sign-extend the 4-bit two's-complement value.
+            let q = ((nibble << 4) as i8) >> 4;
+            out.push(q as f32 * scale);
+        }
+        if len % 2 == 1 && body[len / 2] >> 4 != 0 {
+            bail!("int4 block {b} has a non-zero pad nibble");
+        }
+        at += body.len();
+        remaining -= len;
+        b += 1;
+    }
+    Ok(())
+}
+
+/// Encode f32s as a linear int4 push payload (test counterpart of the Python codec).
+#[cfg(test)]
+pub fn encode_i4(vals: &[f32], block: usize) -> Vec<u8> {
+    let mut out = (block as u32).to_le_bytes().to_vec();
+    for chunk in vals.chunks(block) {
+        let absmax = chunk.iter().fold(0f32, |m, v| m.max(v.abs()));
+        let scale = absmax / 7.0;
+        out.extend_from_slice(&scale.to_le_bytes());
+        let q: Vec<u8> = chunk
+            .iter()
+            .map(|v| {
+                let q = if scale > 0.0 { (v / scale).round_ties_even().clamp(-7.0, 7.0) } else { 0.0 };
+                (q as i8 as u8) & 0x0F
+            })
+            .collect();
+        for pair in q.chunks(2) {
+            out.push(pair[0] | pair.get(1).map_or(0, |hi| hi << 4));
+        }
+    }
+    out
+}
+
 /// Decode a q4 delta payload (yeto/tensor_io.py `quantize_q4`) into f32s.
 ///
 /// Per block of `Q4_BLOCK` values: f32 absmax scale, then 128 bytes of
@@ -484,6 +589,65 @@ mod tests {
     }
 
     #[test]
+    fn q4_push_on_f32_session_uses_the_q4_codec() {
+        // Two blocks: 256 values then 4 (zero-padded). Every nibble is
+        // sign=1, level=7 (0xF), i.e. -scale; the second scale is 0.5.
+        let numel = Q4_BLOCK + 4;
+        let mut wire = Vec::new();
+        for scale in [2.0f32, 0.5] {
+            wire.extend_from_slice(&scale.to_le_bytes());
+            wire.extend(std::iter::repeat_n(0xFFu8, Q4_BLOCK / 2));
+        }
+        assert_eq!(wire.len(), max_push_nbytes(DTYPE_F32_PUSH_Q4, numel).unwrap());
+        assert_eq!(wire.len(), max_push_nbytes(DTYPE_Q4, numel).unwrap());
+        let mut out = Vec::new();
+        decode_push(DTYPE_F32_PUSH_Q4 | DTYPE_FLAG_BCAST_DELTA, &wire, numel, &mut out).unwrap();
+        assert_eq!(out.len(), numel);
+        assert!(out[..Q4_BLOCK].iter().all(|v| *v == -2.0));
+        assert!(out[Q4_BLOCK..].iter().all(|v| *v == -0.5));
+        assert!(decode_push(DTYPE_F32_PUSH_Q4, &wire[1..], numel, &mut out).is_err());
+    }
+
+    #[test]
+    fn int4_push_round_trips_within_half_a_scale_step() {
+        let vals: Vec<f32> = (0..1001)
+            .map(|i| ((i as f32) * 0.731).sin() * if i % 300 < 150 { 1e-3 } else { 2.5 })
+            .collect();
+        for block in [I4_BLOCK_MIN, 128, 250, I4_BLOCK_MAX] {
+            let wire = encode_i4(&vals, block);
+            assert_eq!(wire.len(), i4_nbytes(vals.len(), block).unwrap());
+            assert!(wire.len() <= max_push_nbytes(DTYPE_F32_PUSH_I4, vals.len()).unwrap());
+            let mut out = Vec::new();
+            decode_push(DTYPE_F32_PUSH_I4, &wire, vals.len(), &mut out).unwrap();
+            for (chunk, decoded) in vals.chunks(block).zip(out.chunks(block)) {
+                let absmax = chunk.iter().fold(0f32, |m, v| m.max(v.abs()));
+                for (v, d) in chunk.iter().zip(decoded) {
+                    assert!((v - d).abs() <= absmax / 14.0 * (1.0 + 1e-5), "{v} {d} {absmax}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn int4_push_rejects_malformed_payloads() {
+        let vals = vec![-1.0f32; 65];
+        let mut out = Vec::new();
+        let wire = encode_i4(&vals, 64);
+        decode_i4(&wire, 65, &mut out).unwrap();
+        assert!(out.iter().all(|v| *v == -1.0));
+        assert!(decode_i4(&wire[..wire.len() - 1], 65, &mut out).is_err());
+        assert!(decode_i4(&encode_i4(&vals, 62), 65, &mut out).is_err());
+        assert!(decode_i4(&encode_i4(&vals, 65), 65, &mut out).is_err());
+        let mut reserved = wire.clone();
+        reserved[8] = 0x08;
+        assert!(decode_i4(&reserved, 65, &mut out).is_err());
+        let mut pad = wire;
+        let last = pad.len() - 1;
+        pad[last] |= 0x10;
+        assert!(decode_i4(&pad, 65, &mut out).is_err());
+    }
+
+    #[test]
     fn int8_push_rejects_malformed_payloads() {
         let vals = vec![1.0f32; 64];
         let mut out = Vec::new();
@@ -506,7 +670,11 @@ mod tests {
         assert!(valid_session_dtype(DTYPE_F32_PUSH_I8 | DTYPE_FLAG_BCAST_DELTA));
         assert!(!valid_session_dtype(DTYPE_BF16 | DTYPE_FLAG_BCAST_DELTA));
         assert!(!valid_session_dtype(DTYPE_Q4 | DTYPE_FLAG_BCAST_DELTA));
-        assert!(!valid_session_dtype(6));
+        assert!(valid_session_dtype(DTYPE_F32_PUSH_Q4));
+        assert!(valid_session_dtype(DTYPE_F32_PUSH_Q4 | DTYPE_FLAG_BCAST_DELTA));
+        assert!(valid_session_dtype(DTYPE_F32_PUSH_I4 | DTYPE_FLAG_BCAST_DELTA));
+        assert!(!valid_session_dtype(8));
+        assert_eq!(bulk_dtype(DTYPE_F32_PUSH_Q4 | DTYPE_FLAG_BCAST_DELTA), DTYPE_F32);
         assert_eq!(bulk_dtype(DTYPE_F32_PUSH_I8 | DTYPE_FLAG_BCAST_DELTA), DTYPE_F32);
         assert_eq!(push_dtype(DTYPE_F32_PUSH_BF16 | DTYPE_FLAG_BCAST_DELTA), DTYPE_BF16);
     }

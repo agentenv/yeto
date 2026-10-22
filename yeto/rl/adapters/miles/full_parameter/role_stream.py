@@ -20,17 +20,19 @@ from dataclasses import asdict, dataclass, replace
 from typing import Any
 
 from yeto.protocol import (
+    DEFAULT_I4_BLOCK,
     DEFAULT_I8_BLOCK,
-    DTYPE_F32,
-    DTYPE_F32_PUSH_BF16,
-    DTYPE_F32_PUSH_I8,
     DTYPE_FLAG_BCAST_DELTA,
+    FULL_PARAMETER_PUSH_DTYPES,
+    I4_BLOCK_MAX,
+    I4_BLOCK_MIN,
     I8_BLOCK_MAX,
     I8_BLOCK_MIN,
     FinalManifest,
     PullRequest,
     SyncerClient,
 )
+from yeto.push_error_feedback import RESIDUAL_DTYPES, PushErrorFeedback
 from yeto.rl.adapters.miles.full_parameter.inbound_sink import MilesRayInboundChunkSink
 from yeto.rl.adapters.miles.models.chunked_full_parameter import (
     MilesChunkedFullParameterAdapter,
@@ -97,10 +99,18 @@ class RoleStreamConfig:
     max_fragment_bytes: int = 2 << 30
     max_chunk_bytes: int = 256 << 20
     # S26 E3 wire options (default exact f32): push outer deltas as bf16
-    # (session dtype 4) or block-scaled int8 (dtype 5); receive BCAST as bf16
+    # (session dtype 4), block-scaled int8 (dtype 5) or the q4 block codec
+    # (dtype 6, int4); receive BCAST as bf16
     # deltas against a shared f32 anchor. FINAL always stays f32.
     push_dtype: str = "f32"
     push_int8_block: int = DEFAULT_I8_BLOCK
+    # int4 pushes: values per absmax scale; stochastic rounding (seeded by
+    # the learner id) instead of round-to-nearest.
+    push_int4_block: int = DEFAULT_I4_BLOCK
+    push_int4_stochastic: bool = False
+    # int4 pushes: island-side error feedback, off or the residual dtype
+    # (bf16 or f32); see yeto.push_error_feedback for its lifetime.
+    push_int4_error_feedback: str = "off"
     bcast_delta: bool = False
     # S26 E3: train round k+1 while sweep k syncs, then rebase the trainer
     # (see FullParameterSync._overlap_boundary); the local weights lag the
@@ -116,14 +126,19 @@ class RoleStreamConfig:
 
     @property
     def session_dtype(self) -> int:
-        base = {"f32": DTYPE_F32, "bf16": DTYPE_F32_PUSH_BF16, "int8": DTYPE_F32_PUSH_I8}[self.push_dtype]
+        base = FULL_PARAMETER_PUSH_DTYPES[self.push_dtype]
         return base | (DTYPE_FLAG_BCAST_DELTA if self.bcast_delta else 0)
 
     @property
     def wire_dtype_label(self) -> str:
         """Session-contract label; plain f32 keeps the historical ``fp32``."""
         label = {"f32": "fp32", "bf16": "fp32-push-bf16",
-                 "int8": f"fp32-push-int8-b{self.push_int8_block}"}[self.push_dtype]
+                 "int8": f"fp32-push-int8-b{self.push_int8_block}",
+                 "int4": f"fp32-push-int4-b{self.push_int4_block}"
+                         + ("-sr" if self.push_int4_stochastic else "")
+                         + ("" if self.push_int4_error_feedback == "off"
+                            else f"-ef-{self.push_int4_error_feedback}"),
+                 "int4-log": "fp32-push-q4"}[self.push_dtype]
         return label + ("+bcast-bf16-delta" if self.bcast_delta else "")
 
     def __post_init__(self) -> None:
@@ -173,14 +188,28 @@ class RoleStreamConfig:
             raise ValueError("role-stream wan stream schedule must be rr or adaptive")
         if not self.wan_stall_timeout >= 0:
             raise ValueError("role-stream wan stall timeout must be >= 0")
-        if self.push_dtype not in ("f32", "bf16", "int8"):
-            raise ValueError("role-stream push dtype must be f32, bf16 or int8")
+        if self.push_dtype not in FULL_PARAMETER_PUSH_DTYPES:
+            raise ValueError("role-stream push dtype must be one of "
+                             + ", ".join(FULL_PARAMETER_PUSH_DTYPES))
         if type(self.push_int8_block) is not int or not I8_BLOCK_MIN <= self.push_int8_block <= I8_BLOCK_MAX:
             raise ValueError("role-stream int8 block size is invalid")
         if self.matrix_merge not in MATRIX_MERGES:
             raise ValueError("role-stream matrix merge must be avg or rda")
         if self.overlap and self.partial_quorum:
             raise ValueError("sync/train overlap needs the strict sweep roster")
+        if type(self.push_int4_block) is not int or (
+            not I4_BLOCK_MIN <= self.push_int4_block <= I4_BLOCK_MAX or self.push_int4_block % 2
+        ):
+            raise ValueError("role-stream int4 block size is invalid")
+        if self.push_int4_error_feedback not in ("off", *RESIDUAL_DTYPES):
+            raise ValueError("role-stream int4 error feedback must be off, bf16 or f32")
+        error_feedback = self.push_int4_error_feedback != "off"
+        if (
+            self.push_int4_block != DEFAULT_I4_BLOCK or self.push_int4_stochastic or error_feedback
+        ) and self.push_dtype != "int4":
+            raise ValueError("role-stream int4 options need push dtype int4")
+        if error_feedback and self.push_int4_stochastic:
+            raise ValueError("role-stream int4 error feedback needs nearest rounding")
         if self.wait_timeout <= 0 or not 0 < self.poll_seconds <= 1:
             raise ValueError("role-stream wait bounds are invalid")
         if (
@@ -326,6 +355,12 @@ class MilesFullParameterRoleStream:
         self.terminal_manifest: FinalManifest | None = None
         self.terminal_submitted = False
         self.final_applied = False
+        # int4 error feedback: per-fragment residuals, empty for every new
+        # stream (fresh start or cut resume); never checkpointed.
+        self.error_feedback = (
+            None if config.push_int4_error_feedback == "off"
+            else PushErrorFeedback(config.push_int4_block, config.push_int4_error_feedback)
+        )
         self.final_acknowledged = False
 
     @property
@@ -399,6 +434,8 @@ class MilesFullParameterRoleStream:
             adapter.layout.fragments,
             dtype=self.config.session_dtype,
             push_i8_block=self.config.push_int8_block,
+            push_i4_block=self.config.push_int4_block,
+            push_i4_stochastic_seed=self.config.learner_id if self.config.push_int4_stochastic else None,
             num_streams=self.config.wan_streams,
             stream_schedule=self.config.wan_stream_schedule,
             stream_stall_timeout=self.config.wan_stall_timeout or None,
@@ -907,21 +944,41 @@ class MilesFullParameterRoleStream:
         permit = self._pending.get(candidate.permit.fragment_id)
         if permit != candidate.permit:
             return None
-        queued = self.client.push_fragment_parts(
-            candidate.permit.fragment_id,
-            candidate.permit.global_step,
-            candidate.permit.round_attempt,
-            candidate.base_version,
-            candidate.local_step,
-            candidate.c_steps,
-            candidate.c_tokens,
-            self.adapter.delta_parts_from_authoritative(
-                candidate.anchor,
-                candidate.submission_cut,
-                candidate.permit.fragment_id,
-                ray_module=self.ray_module,
-            )(),
-        )
+        fragment_id = candidate.permit.fragment_id
+        parts = self.adapter.delta_parts_from_authoritative(
+            candidate.anchor,
+            candidate.submission_cut,
+            fragment_id,
+            ray_module=self.ray_module,
+        )()
+        if self.error_feedback is not None:
+            parts = self.error_feedback.parts(
+                fragment_id,
+                candidate.permit.global_step,
+                self.config.expected_fragments,
+                self.adapter.layout.fragments.fragments[fragment_id].numel,
+                parts,
+            )
+        try:
+            queued = self.client.push_fragment_parts(
+                fragment_id,
+                candidate.permit.global_step,
+                candidate.permit.round_attempt,
+                candidate.base_version,
+                candidate.local_step,
+                candidate.c_steps,
+                candidate.c_tokens,
+                parts,
+            )
+        except BaseException:
+            if self.error_feedback is not None:
+                self.error_feedback.discard(fragment_id)
+            raise
+        if self.error_feedback is not None:
+            if queued is True:
+                self.error_feedback.commit(fragment_id, candidate.permit.global_step)
+            else:
+                self.error_feedback.discard(fragment_id)
         if queued is not True:
             return None
         self._answered[

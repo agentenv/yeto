@@ -115,6 +115,13 @@ def _rl_trainable_island_flags(args, learner_id: int, num_learners: int) -> str:
         sweep += " --sweep-overlap"
     if getattr(args, "rl_sync_push_dtype", "f32") == "int8":
         sweep += f" --sweep-push-int8-block {int(getattr(args, 'rl_sync_push_int8_block', 128))}"
+    if getattr(args, "rl_sync_push_dtype", "f32") == "int4":
+        sweep += f" --sweep-push-int4-block {int(getattr(args, 'rl_sync_push_int4_block', 128))}"
+        if getattr(args, "rl_sync_push_int4_stochastic", False):
+            sweep += " --sweep-push-int4-stochastic"
+        error_feedback = getattr(args, "rl_sync_push_int4_error_feedback", "off")
+        if error_feedback != "off":
+            sweep += f" --sweep-push-int4-error-feedback {error_feedback}"
     if getattr(args, "expert_full_count", 0):
         return lora + sweep
     return " --parameter-mode full" + sweep

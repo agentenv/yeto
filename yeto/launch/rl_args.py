@@ -155,6 +155,9 @@ _FULL_PARAMETER_SYNC_DEFAULTS = (
     ("rl_sync_push_dtype", "f32", "--rl-sync-push-dtype"),
     ("rl_sync_checkpoint_every", 1, "--rl-sync-checkpoint-every"),
     ("rl_sync_push_int8_block", 128, "--rl-sync-push-int8-block"),
+    ("rl_sync_push_int4_block", 128, "--rl-sync-push-int4-block"),
+    ("rl_sync_push_int4_stochastic", False, "--rl-sync-push-int4-stochastic"),
+    ("rl_sync_push_int4_error_feedback", "off", "--rl-sync-push-int4-error-feedback"),
     ("rl_sync_overlap", False, "--rl-sync-overlap"),
     ("rl_sync_full_parameter_rounds", "sweep", "--rl-sync-full-parameter-rounds"),
 )
@@ -241,6 +244,19 @@ def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
         problems.append("--rl-sync-push-int8-block between 32 and 1048576")
     elif int8_block != 128 and getattr(args, "rl_sync_push_dtype", "f32") != "int8":
         problems.append("--rl-sync-push-int8-block only with --rl-sync-push-dtype int8")
+    int4_block = int(getattr(args, "rl_sync_push_int4_block", 128))
+    int4 = getattr(args, "rl_sync_push_dtype", "f32") == "int4"
+    if not 64 <= int4_block <= 256 or int4_block % 2:
+        problems.append("--rl-sync-push-int4-block even, between 64 and 256")
+    elif int4_block != 128 and not int4:
+        problems.append("--rl-sync-push-int4-block only with --rl-sync-push-dtype int4")
+    if getattr(args, "rl_sync_push_int4_stochastic", False) and not int4:
+        problems.append("--rl-sync-push-int4-stochastic only with --rl-sync-push-dtype int4")
+    if getattr(args, "rl_sync_push_int4_error_feedback", "off") != "off":
+        if not int4:
+            problems.append("--rl-sync-push-int4-error-feedback only with --rl-sync-push-dtype int4")
+        elif getattr(args, "rl_sync_push_int4_stochastic", False):
+            problems.append("--rl-sync-push-int4-error-feedback without --rl-sync-push-int4-stochastic")
     if getattr(args, "rl_sync_overlap", False) and not async_rounds:
         from ..rl.engine.sync_overlap import overlap_option_problems
 

@@ -36,6 +36,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from .downlink import HEADER_LEN as DOWNLINK_HEADER_LEN
 from .downlink import DownlinkAnchors, DownlinkChunkSink
@@ -43,6 +44,9 @@ from .downlink import tensor_nbytes as downlink_tensor_nbytes
 from .fragments import MERGE_ISO, FragmentLayout
 from . import recovery_protocol as rp
 from .wan_streams import STREAM_SCHEDULES, StreamMeter, StreamSnapshot, StreamStalledError, pick_stream
+
+if TYPE_CHECKING:
+    import numpy as np
 
 MAGIC = 0xD170C0DE
 PROTOCOL_VERSION = 4
@@ -81,12 +85,31 @@ DTYPE_F32_PUSH_BF16 = 4
 # Session dtype 5 (S26 E3): PUSH_FRAGMENT deltas travel as block-scaled int8
 # (``f32_bytes_to_i8``); INIT/BCAST/FINAL stay f32. Callers hand f32 bytes.
 DTYPE_F32_PUSH_I8 = 5
+# Session dtype 6 (S27 P3): PUSH_FRAGMENT deltas travel in the dtype-3 q4
+# block codec (``f32_bytes_to_q4``); INIT/BCAST/FINAL stay f32. Callers hand
+# f32 bytes; only the outer gradient is quantized.
+DTYPE_F32_PUSH_Q4 = 6
+# Session dtype 7 (S27 P3): PUSH_FRAGMENT deltas travel as linear symmetric
+# int4 with a per-block absmax scale (``f32_bytes_to_i4``); INIT/BCAST/FINAL
+# stay f32. Callers hand f32 bytes.
+DTYPE_F32_PUSH_I4 = 7
+# Full-parameter push options (CLI names) -> session dtype; f32 is exact.
+FULL_PARAMETER_PUSH_DTYPES = {
+    "f32": DTYPE_F32,
+    "bf16": DTYPE_F32_PUSH_BF16,
+    "int8": DTYPE_F32_PUSH_I8,
+    "int4": DTYPE_F32_PUSH_I4,
+    "int4-log": DTYPE_F32_PUSH_Q4,
+}
 # Session-dtype flag (S26 E3): BCAST_FRAGMENT carries bf16 downlink deltas
 # between f32 refreshes (yeto/downlink.py). Only on f32-bulk sessions.
 DTYPE_FLAG_BCAST_DELTA = 0x80
 I8_BLOCK_MIN = 32
 I8_BLOCK_MAX = 1 << 20
 DEFAULT_I8_BLOCK = 128
+I4_BLOCK_MIN = 64
+I4_BLOCK_MAX = 256
+DEFAULT_I4_BLOCK = 128
 
 CHUNK_SIZE = 4 * 1024 * 1024
 MAX_HANDSHAKE_FRAME = 16 * 1024 * 1024
@@ -108,6 +131,12 @@ _FINAL_ACK = struct.Struct("<HQ")  # revision, global_step
 _BUDGET_DONE = struct.Struct("<Q")  # local steps
 
 
+# Session dtypes whose INIT/BCAST/FINAL tensors are f32 (downlink deltas allowed).
+_F32_BULK_PUSH_DTYPES = (
+    DTYPE_F32, DTYPE_F32_PUSH_BF16, DTYPE_F32_PUSH_I8, DTYPE_F32_PUSH_Q4, DTYPE_F32_PUSH_I4,
+)
+
+
 def session_base(dtype: int) -> int:
     """The session dtype without its flags."""
     return dtype & ~DTYPE_FLAG_BCAST_DELTA
@@ -120,7 +149,7 @@ def bcast_delta(dtype: int) -> bool:
 
 def valid_session_dtype(dtype: int) -> bool:
     base = session_base(dtype)
-    if base in (DTYPE_F32, DTYPE_F32_PUSH_BF16, DTYPE_F32_PUSH_I8):
+    if base in _F32_BULK_PUSH_DTYPES:
         return 0 <= dtype <= 0xFF
     return base in (DTYPE_BF16, DTYPE_Q4) and not bcast_delta(dtype)
 
@@ -135,7 +164,7 @@ def bulk_dtype(dtype: int) -> int:
     base = session_base(dtype)
     if base == DTYPE_Q4:
         return DTYPE_BF16
-    if base in (DTYPE_F32_PUSH_BF16, DTYPE_F32_PUSH_I8):
+    if base in _F32_BULK_PUSH_DTYPES:
         return DTYPE_F32
     return base
 
@@ -205,6 +234,161 @@ def _f32_parts_to_i8(parts: Iterable[bytes | bytearray | memoryview], block: int
         raise ValueError("f32 push delta ends mid-value")
     if carry:
         yield f32_bytes_to_i8(carry, block, header=False)
+
+
+def i4_nbytes(numel: int, block: int) -> int:
+    """Encoded size of a linear int4 push: u32 block, per block f32 scale, 2 values/byte."""
+    if not (I4_BLOCK_MIN <= block <= I4_BLOCK_MAX and block % 2 == 0):
+        raise ValueError(f"int4 block size {block} must be even and within {I4_BLOCK_MIN}..{I4_BLOCK_MAX}")
+    return 4 + 4 * -(-numel // block) + -(-numel // 2)
+
+
+def f32_bytes_to_i4(
+    data: bytes | bytearray | memoryview,
+    block: int,
+    *,
+    header: bool = True,
+    rng: np.random.Generator | None = None,
+) -> bytes:
+    """Quantize little-endian f32 values to linear symmetric int4 (syncer ``decode_i4``).
+
+    Per block of ``block`` values (the last may be shorter): f32 scale =
+    absmax / 7, then ``q = round(x / scale)`` in [-7, 7] as two's-complement
+    nibbles, low nibble first; an odd last block pads a zero nibble. Nearest
+    rounding errs by at most absmax / 14 per value. With a numpy ``rng`` the
+    rounding is stochastic (unbiased, error below one scale step). Blocks must
+    start at multiples of ``block`` values; ``header`` prepends the u32 block.
+    """
+    import numpy as np  # noqa: PLC0415 - keep the protocol import light
+
+    i4_nbytes(0, block)  # validates the block size
+    values = np.frombuffer(data, dtype="<f4")
+    if not np.isfinite(values).all():
+        raise ValueError("int4 push delta contains a non-finite value")
+    count = values.size
+    full = count - count % block
+    parts = [struct.pack("<I", block)] if header else []
+
+    def encode(chunk: np.ndarray) -> None:  # chunk: (blocks, width)
+        absmax = np.abs(chunk).max(axis=1)
+        scale = (absmax / np.float32(7)).astype(np.float32)
+        safe = np.where(scale > 0, scale, np.float32(1))
+        scaled = chunk / safe[:, None]
+        if rng is None:
+            rounded = np.rint(scaled)
+        else:
+            rounded = np.floor(scaled + rng.random(scaled.shape, dtype=np.float32))
+        q = np.clip(rounded, -7, 7).astype(np.int8)
+        q[scale == 0] = 0
+        nibbles = q.view(np.uint8) & 0x0F
+        if nibbles.shape[1] % 2:
+            nibbles = np.concatenate([nibbles, np.zeros((nibbles.shape[0], 1), np.uint8)], axis=1)
+        rows = np.empty((chunk.shape[0], 4 + nibbles.shape[1] // 2), dtype=np.uint8)
+        rows[:, :4] = scale.astype("<f4").view(np.uint8).reshape(-1, 4)
+        rows[:, 4:] = nibbles[:, 0::2] | (nibbles[:, 1::2] << 4)
+        parts.append(rows.tobytes())
+
+    if full:
+        encode(values[:full].reshape(-1, block))
+    if count > full:
+        encode(values[full:].reshape(1, -1))
+    return b"".join(parts)
+
+
+def i4_bytes_to_f32(data: bytes | bytearray | memoryview, numel: int) -> np.ndarray:
+    """Decode a linear int4 push (with its u32 block header) into f32 values."""
+    import numpy as np  # noqa: PLC0415 - keep the protocol import light
+
+    if len(data) < 4:
+        raise ValueError("int4 payload is shorter than its block header")
+    block = struct.unpack_from("<I", data)[0]
+    if len(data) != i4_nbytes(numel, block):
+        raise ValueError(f"int4 payload has {len(data)} bytes, expected {i4_nbytes(numel, block)}")
+    raw = np.frombuffer(data, np.uint8)[4:]
+
+    def decode(rows: np.ndarray, width: int) -> np.ndarray:  # rows: (blocks, 4 + bytes)
+        scale = rows[:, :4].copy().view("<f4")
+        nibbles = np.empty((rows.shape[0], 2 * (rows.shape[1] - 4)), np.int8)
+        nibbles[:, 0::2] = rows[:, 4:] & 0x0F
+        nibbles[:, 1::2] = rows[:, 4:] >> 4
+        q = np.where(nibbles > 7, nibbles - 16, nibbles)[:, :width]
+        return (q.astype(np.float32) * scale).reshape(-1)
+
+    full = numel // block
+    row = 4 + block // 2
+    parts = [decode(raw[:full * row].reshape(full, row), block)] if full else []
+    if numel > full * block:
+        parts.append(decode(raw[full * row:].reshape(1, -1), numel - full * block))
+    return np.concatenate(parts) if parts else np.empty(0, np.float32)
+
+
+def _f32_parts_to_i4(
+    parts: Iterable[bytes | bytearray | memoryview], block: int, rng: np.random.Generator | None = None
+) -> Iterator[bytes]:
+    """Stream ``f32_bytes_to_i4`` over parts; blocks may span part boundaries."""
+    yield struct.pack("<I", block)
+    span = 4 * block
+    carry = b""
+    for part in parts:
+        data = carry + bytes(part)
+        whole = len(data) - len(data) % span
+        carry = data[whole:]
+        if whole:
+            yield f32_bytes_to_i4(data[:whole], block, header=False, rng=rng)
+    if len(carry) % 4:
+        raise ValueError("f32 push delta ends mid-value")
+    if carry:
+        yield f32_bytes_to_i4(carry, block, header=False, rng=rng)
+
+
+def f32_bytes_to_q4(data: bytes | bytearray | memoryview) -> bytes:
+    """Quantize little-endian f32 values to the q4 wire codec (syncer ``decode_q4``).
+
+    Per block of ``Q4_BLOCK`` values (the last is zero-padded): f32 absmax
+    scale, then 128 bytes of nibbles, low nibble first. A nibble is a sign
+    bit (bit 3) and a level L: 0 is exact zero, 1..7 decodes to
+    ``2**(L-7) * scale``. L is the nearest level in log2 space, so values
+    below ``scale * 2**-6.5`` become zero and others err by at most a factor
+    of ``sqrt(2)``. Shared by SFT dtype 3 and full-parameter dtype 6.
+    """
+    import numpy as np  # noqa: PLC0415 - keep the protocol import light
+
+    values = np.frombuffer(data, dtype="<f4")
+    if not np.isfinite(values).all():
+        raise ValueError("q4 push delta contains a non-finite value")
+    blocks = -(-values.size // Q4_BLOCK)
+    padded = np.zeros(blocks * Q4_BLOCK, dtype=np.float32)
+    padded[: values.size] = values
+    padded = padded.reshape(blocks, Q4_BLOCK)
+    magnitude = np.abs(padded)
+    scale = magnitude.max(axis=1, initial=np.float32(0))
+    safe = np.where(scale > 0, scale, np.float32(1))
+    normalized = magnitude / safe[:, None]
+    with np.errstate(divide="ignore"):
+        level = np.where(
+            normalized > 0, np.clip(np.rint(np.log2(normalized)) + 7, 0, 7), 0
+        ).astype(np.uint8)
+    nibbles = (((padded < 0) & (level > 0)).astype(np.uint8) << 3) | level
+    rows = np.empty((blocks, 4 + Q4_BLOCK // 2), dtype=np.uint8)
+    rows[:, :4] = scale.astype("<f4").view(np.uint8).reshape(-1, 4)
+    rows[:, 4:] = nibbles[:, 0::2] | (nibbles[:, 1::2] << 4)
+    return rows.tobytes()
+
+
+def _f32_parts_to_q4(parts: Iterable[bytes | bytearray | memoryview]) -> Iterator[bytes]:
+    """Stream ``f32_bytes_to_q4`` over parts; only the final block is padded."""
+    span = 4 * Q4_BLOCK
+    carry = b""
+    for part in parts:
+        data = carry + bytes(part)
+        whole = len(data) - len(data) % span
+        carry = data[whole:]
+        if whole:
+            yield f32_bytes_to_q4(data[:whole])
+    if len(carry) % 4:
+        raise ValueError("f32 push delta ends mid-value")
+    if carry:
+        yield f32_bytes_to_q4(carry)
 
 
 def f32_bytes_to_bf16(data: bytes | bytearray | memoryview) -> bytes:
@@ -630,6 +814,8 @@ class SyncerClient:
         hmac_key: bytes | None = None,
         compat_group: str | None = None,
         push_i8_block: int = DEFAULT_I8_BLOCK,
+        push_i4_block: int = DEFAULT_I4_BLOCK,
+        push_i4_stochastic_seed: int | None = None,
         stream_schedule: str = "rr",
         stream_stall_timeout: float | None = None,
         syncer_epoch: int | None = None,
@@ -649,6 +835,7 @@ class SyncerClient:
         if not valid_session_dtype(dtype):
             raise ValueError(f"unsupported session dtype {dtype}")
         i8_nbytes(0, push_i8_block)  # validates the int8 block size
+        i4_nbytes(0, push_i4_block)  # validates the int4 block size
         if layout.num_fragments < 1:
             raise ValueError("layout must contain at least one fragment")
         if not 0 <= num_streams <= 256:
@@ -682,6 +869,13 @@ class SyncerClient:
         self.dtype = dtype
         self._push_base = session_base(dtype)
         self.push_i8_block = push_i8_block
+        self.push_i4_block = push_i4_block
+        # Stochastic int4 rounding (off by default): one seeded stream per client.
+        self._push_i4_rng = None
+        if push_i4_stochastic_seed is not None:
+            import numpy as np  # noqa: PLC0415 - keep the protocol import light
+
+            self._push_i4_rng = np.random.default_rng(push_i4_stochastic_seed)
         # S26 E3: f32 anchors of a bf16-downlink session (yeto/downlink.py).
         self._downlink = DownlinkAnchors(layout.num_fragments) if bcast_delta(dtype) else None
         self._bcast_prefix = 12 + (DOWNLINK_HEADER_LEN if self._downlink is not None else 0)
@@ -1132,7 +1326,7 @@ class SyncerClient:
         expected = (
             _q4_nbytes(numel)
             if self._push_base == DTYPE_Q4
-            # dtypes 4/5 callers pass f32 bytes; the client encodes them below
+            # dtypes 4-7 callers pass f32 bytes; the client encodes them below
             else _tensor_nbytes(bulk_dtype(self.dtype), numel)
         )
         if len(tensor_bytes) != expected:
@@ -1155,6 +1349,10 @@ class SyncerClient:
             tensor_bytes = f32_bytes_to_bf16(tensor_bytes)
         elif self._push_base == DTYPE_F32_PUSH_I8:
             tensor_bytes = f32_bytes_to_i8(tensor_bytes, self.push_i8_block)
+        elif self._push_base == DTYPE_F32_PUSH_Q4:
+            tensor_bytes = f32_bytes_to_q4(tensor_bytes)
+        elif self._push_base == DTYPE_F32_PUSH_I4:
+            tensor_bytes = f32_bytes_to_i4(tensor_bytes, self.push_i4_block, rng=self._push_i4_rng)
         self._send_large(MSG_PUSH_FRAGMENT, head + tensor_bytes)
 
     def push_fragment_parts(
@@ -1190,6 +1388,12 @@ class SyncerClient:
         elif self._push_base == DTYPE_F32_PUSH_I8:
             expected = i8_nbytes(numel, self.push_i8_block)
             tensor_parts = _f32_parts_to_i8(tensor_parts, self.push_i8_block)
+        elif self._push_base == DTYPE_F32_PUSH_Q4:
+            expected = _q4_nbytes(numel)
+            tensor_parts = _f32_parts_to_q4(tensor_parts)
+        elif self._push_base == DTYPE_F32_PUSH_I4:
+            expected = i4_nbytes(numel, self.push_i4_block)
+            tensor_parts = _f32_parts_to_i4(tensor_parts, self.push_i4_block, self._push_i4_rng)
         else:
             expected = _tensor_nbytes(push_wire_dtype(self.dtype), numel)
         if self._push_base == DTYPE_F32_PUSH_BF16:

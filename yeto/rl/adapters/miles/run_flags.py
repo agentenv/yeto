@@ -334,7 +334,7 @@ _ISLAND = (
     ),
     island_flag(
         "--sweep-push-dtype",
-        choices=("f32", "bf16", "int8"),
+        choices=("f32", "bf16", "int8", "int4", "int4-log"),
         default="f32",
         help="full-parameter sweep: wire dtype of pushed outer deltas (syncer masters stay f32)",
     ),
@@ -343,6 +343,23 @@ _ISLAND = (
         type=int,
         default=128,
         help="full-parameter sweep, int8 pushes: values per f32 absmax scale",
+    ),
+    island_flag(
+        "--sweep-push-int4-block",
+        type=int,
+        default=128,
+        help="full-parameter sweep, int4 pushes: values per f32 absmax scale",
+    ),
+    island_flag(
+        "--sweep-push-int4-stochastic",
+        action="store_true",
+        help="full-parameter sweep, int4 pushes: stochastic instead of nearest rounding",
+    ),
+    island_flag(
+        "--sweep-push-int4-error-feedback",
+        choices=("off", "bf16", "f32"),
+        default="off",
+        help="full-parameter sweep, int4 pushes: residual dtype of island-side error feedback",
     ),
     island_flag(
         "--sweep-overlap",
