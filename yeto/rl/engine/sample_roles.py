@@ -342,7 +342,7 @@ def check_launch(args: Any) -> None:
                          "buffer and the policy releases live in it)")
     if getattr(args, "rl_elastic", False):
         # --rl-elastic is placement reconfiguration (T/R cells), not the island sync:
-        # synced trainers use --rl-island-scheduling elastic (or strict sync)
+        # synced trainers use an island pool (or strict sync)
         raise ValueError(f"--rl-sample-role {role} does not support --rl-elastic "
                          "(placement reconfiguration)")
     if role in (TRAINER, CONVERTIBLE) and not int(getattr(args, "rl_max_policy_age", 0) or 0) >= 1:

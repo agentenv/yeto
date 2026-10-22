@@ -42,7 +42,7 @@ def peer_recovery_store(args) -> str | None:
 def check_peer_recovery(args) -> None:
     """Refuse ``--rl-peer-recovery`` options that do not apply. Every recovery
     option without ``--rl-peer-recovery`` is refused too."""
-    from .syncer import island_scheduling_mode, rl_full_parameter_async, syncer_shard_count
+    from .syncer import island_pool, rl_full_parameter_async, syncer_shard_count
 
     options = [flag for dest, flag in (
         ("rl_recovery_bound_steps", "--rl-recovery-bound-steps"),
@@ -58,8 +58,9 @@ def check_peer_recovery(args) -> None:
     if not rl_full_parameter_async(args):
         raise ValueError("--rl-peer-recovery needs --rl-sync-preset full-parameter with "
                          "--rl-sync-full-parameter-rounds async")
-    if island_scheduling_mode(args) != "legacy":
-        raise ValueError("--rl-peer-recovery needs --rl-island-scheduling legacy")
+    if island_pool(args):
+        # Both set the syncer epoch; recovery is only wired for a fixed roster.
+        raise ValueError("--rl-peer-recovery does not take island pool options yet")
     if syncer_shard_count(args) > 1:
         # Recovery is one exchange with one syncer; shards would each need it.
         raise ValueError("--rl-peer-recovery needs one syncer process (--syncer-shards 1)")

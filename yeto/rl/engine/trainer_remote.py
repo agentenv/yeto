@@ -47,7 +47,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from yeto.rl.elastic_client import LeaveReason
+from yeto.rl.pool_client import LeaveReason
 
 from . import recovery
 from .resume import FLAT_MANIFEST, LATEST, STATE_DIR, CheckpointStore

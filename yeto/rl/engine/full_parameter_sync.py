@@ -64,7 +64,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
 from yeto.protocol import PartialMessageGenerationLost
-from yeto.rl.elastic_client import LeaveReason
+from yeto.rl.pool_client import LeaveReason
 from yeto.wan_streams import upload_window
 
 from .bridges import RoundCutHooks
@@ -129,6 +129,10 @@ class RoleStream(Protocol):
     def staged_fragment_versions(self) -> tuple[tuple[int, int], ...]: ...
     def has_staged_broadcast(self, fragment_id: int, version: int) -> bool: ...
     async def apply_staged_broadcast(self, fragment_id: int, version: int) -> tuple[int, ...]: ...
+    # Asynchronous rounds (profile.partial_quorum) only: monotonic_broadcasts
+    #   (the stream never delivers an older version of a fragment after a
+    #   newer one) lets apply_staged_broadcast(..., catch_up=True) overwrite a
+    #   fragment with a version that skips older ones (re-JOIN catch-up).
     # S26 E3 sync/train overlap (profile.overlap) only:
     #   complete_local_round(..., hold_submission=True) keeps the round base and
     #   the previous submission; apply_staged_broadcast(..., rebase=True) applies
@@ -269,6 +273,7 @@ class RolePairing:
         # (catch-ups included), and the rounds catch-up jumps skipped.
         self.overwritten_rounds = 0
         self.caught_up_rounds = 0
+        self.caught_up_fragments = 0  # catch-up jumps (one per fragment and jump)
 
     # -- fail-stop ---------------------------------------------------------
 
@@ -500,6 +505,7 @@ class RolePairing:
                 f == fragment_id and v < version for f, v in staged
             ):
                 await self._overwrite_or_apply_pair(fragment_id, version, applied, catch_up=True)
+                self.caught_up_fragments += 1
                 self.caught_up_rounds += fragment_rounds(fragment_id, base, fragments) - (
                     fragment_rounds(fragment_id, current, fragments))
 
@@ -744,6 +750,7 @@ class FullParameterSync(RoundCutHooks):
             "sync/overwritten_rounds": pairing.overwritten_rounds,
             "sync/overwritten_fragments": overwritten,
             "sync/caught_up_rounds": pairing.caught_up_rounds,
+            "sync/caught_up_fragments": pairing.caught_up_fragments,
             "sync/outer_version": merged_version(versions),
         }
 

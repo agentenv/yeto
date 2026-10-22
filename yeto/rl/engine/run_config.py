@@ -1034,7 +1034,7 @@ def resolve_rl_run_config(
                 rollout_batch_size=args.groups_per_round,
                 n_samples_per_prompt=args.samples_per_group,
                 global_batch=global_batch,
-                island_scheduling=getattr(args, "rl_island_scheduling", None) or "legacy",
+                island_scheduling="elastic" if getattr(args, "rl_island_pool", False) else "legacy",
                 requested=getattr(args, "rl_lr_schedule", None) or "auto",
             ),
             seed=args.seed,

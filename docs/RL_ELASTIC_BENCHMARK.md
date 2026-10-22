@@ -117,7 +117,7 @@ can get another value of a whitelisted parameter. This is for negative tests
 only.
 
 ```
-yeto launch ... --training-mode rl --rl-island-scheduling elastic \
+yeto launch ... --training-mode rl --rl-sync-quorum-theta 0.75 --rl-sync-max-base-lag 2 \
   --gpu modal:1xh100,modal:1xh100 \
   --rl-negative-test-run \
   --rl-island-override 1:identity_test_salt=n12
@@ -129,7 +129,7 @@ yeto launch ... --training-mode rl --rl-island-scheduling elastic \
 | `rl_max_policy_age` | another policy-age limit (落后上限); checked against the backend like the global flag |
 | `identity_test_salt` | TEST ONLY: mixed into `island_contract_sha256`, so the island declares a different identity |
 
-`--rl-max-carry-lag` is a syncer parameter and cannot be changed per island
+`--rl-sync-max-base-lag` is a syncer parameter and cannot be changed per island
 (10-09 ruling of the main agent for the user). Any other key, an island number
 out of range, or `--rl-island-override` without `--rl-negative-test-run` stops
 the launch before any cloud resource.

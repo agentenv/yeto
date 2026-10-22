@@ -17,7 +17,6 @@ from types import SimpleNamespace
 import pytest
 
 from yeto.rl.adapters.miles.identity import backend_identity
-from yeto.rl.elastic_client import ElasticClientConfig, ElasticIslandClient, ElasticProtocolError
 from yeto.rl.engine.algorithm import AlgorithmSpec, CorrectionSpec, PluginRef
 from yeto.rl.engine.backend_identity import (
     config_island_contract_sha256,
@@ -90,44 +89,50 @@ def _free_port() -> int:
 
 
 @pytest.mark.parametrize("bad", ["other_pack", "v2_island"])
-def test_real_syncer_refuses_a_join_with_another_contract(tmp_path, syncer_binary, bad):  # noqa: F811
-    """Island 1 joins with contract v3 (pack A) and seeds the base. Island 2 then
-    declares pack B, or the v2 contract of the same run; the syncer refuses the
-    JOIN and names both contracts."""
+def test_real_syncer_refuses_a_pool_island_with_another_contract(tmp_path, syncer_binary, bad):  # noqa: F811
+    """Island 1 joins an island pool with contract v3 (pack A) and seeds the base.
+    Island 2 then declares pack B, or the v2 contract of the same run; the syncer
+    refuses its HELLO (only that connection) and names both session contracts."""
+    import torch
+
+    from yeto.rl.bridge import _session_contract
+    from yeto.rl.core import CanonicalTensorSpec, build_avg_layout
+    from yeto.rl.pool_client import PoolClientConfig, PoolIslandClient
+
     port, key = _free_port(), "contract-v3"
     log = open(tmp_path / "syncer.log", "w")
     syncer = subprocess.Popen(
-        [str(syncer_binary), "--port", str(port), "--learners", "2",
+        [str(syncer_binary), "--port", str(port), "--learners", "1",
          "--total-steps", "1", "--event-tape", str(tmp_path / "tape.jsonl"),
-         "--island-scheduling-mode", "elastic", "--quorum-theta", "1.0", "--carry-gamma", "0.5",
-         "--soft-deadline-s", "30", "--q-min", "1", "--max-carry-lag", "2",
-         "--island-lease-s", "6", "--syncer-epoch", "0", "--outer-lr", "1.0",
-         "--outer-momentum", "0.0"],
+         "--max-learners", "2", "--quorum", "1", "--quorum-theta", "1.0", "--max-base-lag", "2",
+         "--island-lease-s", "6", "--outer-lr", "1.0", "--outer-momentum", "0.0"],
         env={"YETO_ISLAND_HMAC_KEY": key, "PATH": "/usr/bin:/bin"},
         stdout=log, stderr=subprocess.STDOUT)
     good = island_contract_sha256(IDENTITY, LR, SPEC.semantic_sha256(), PACK_A)
     other = (island_contract_sha256(IDENTITY, LR, SPEC.semantic_sha256(), PACK_B)
              if bad == "other_pack" else _v2_contract(IDENTITY, LR, SPEC.sha256()))
+    layout = build_avg_layout((CanonicalTensorSpec(
+        "base_model.model.layer.lora_A.weight", (2, 2), "float32", 4),))
 
-    def client(island: int, contract: str) -> ElasticIslandClient:
-        return ElasticIslandClient(ElasticClientConfig(
-            ("127.0.0.1", port), island, lease_s=6.0, join_timeout_s=5.0,
-            backend_identity_sha256=contract), key.encode())
+    def client(island: int, contract: str) -> PoolIslandClient:
+        return PoolIslandClient(PoolClientConfig(
+            ("127.0.0.1", port), island, lease_s=6.0,
+            session_contract_hash=_session_contract(layout, contract)), layout)
 
-    first, second = client(1, good), client(2, other)
+    import os
+
+    os.environ["YETO_ISLAND_HMAC_KEY"] = key
+    first, second = client(0, good), client(1, other)
     try:
-        for _ in range(100):
-            try:
-                first.join()
-                break
-            except OSError:
-                time.sleep(0.1)
-        first.elastic_init([0.0] * 4)
-        first.wait_base(newer_than=None, timeout_s=10.0)
-        with pytest.raises(ElasticProtocolError, match="backend identity mismatch") as exc:
+        first.join()
+        first.elastic_init(torch.zeros(4))
+        assert first.wait_base(newer_than=None, timeout_s=10.0) is not None
+        with pytest.raises(Exception, match="contract") as exc:
             second.join()
-        assert good in str(exc.value) and other in str(exc.value)
+            second.wait_base(newer_than=None, timeout_s=10.0)
+        assert _session_contract(layout, other).hex() in str(exc.value)
     finally:
+        os.environ.pop("YETO_ISLAND_HMAC_KEY", None)
         for c in (first, second):
             try:
                 c.close()

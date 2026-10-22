@@ -407,8 +407,8 @@ _PLACEMENT = (
              help="give island ISLAND its own placement value (repeatable); KEY is "
              "placement (colocated | fixed-partition), standby-gpus or use-gpus-per-node; "
              "other islands keep --rl-placement / --rl-standby-gpus / "
-             "--rl-island-use-gpus-per-node. Different placements need "
-             "--rl-island-scheduling elastic"),
+             "--rl-island-use-gpus-per-node. Different placements need island pool "
+             "options (e.g. --rl-sync-island-lease-s)"),
     cli_flag("--rl-island-use-gpus-per-node", type=int, default=None, metavar="M",
              help="rl-multinode-island: provision the --gpu machines (N GPUs/node, billed) but "
              "give the island only local GPUs 0..M-1 on every node (M <= N): ray start "
@@ -631,13 +631,6 @@ _SCHEDULING = (
                 help="--rl-elastic: declare the --rl-elastic-cells names to the fork as its "
                 "rollout engine cells (placement map rollout_cells: started on the rollout "
                 "GPUs, then stopped on standby GPUs, then stopped unbound; needs fork F-R1)"),
-    # rl-inter-island-scheduling 0.13: explicit old/new outer-scheduling choice.
-    # 3.8 strict pause budget inputs (defaults: syncer 900 s, margin 0.5).
-    # rl-inter-island-scheduling 0.13 (launcher forwards only "elastic")
-    shared_flag("--rl-island-scheduling", choices=("legacy", "elastic"), default="legacy",
-                help="legacy (default): existing syncer behaviour, fixed members, every "
-                "island must arrive; elastic: inter-island scheduling (capacity-weighted "
-                "stepping, late deltas carried over with a discount, join/leave)"),
     cli_flag("--rl-island-contract-sha256", default=None,
              type=sha256_hex_arg,
              help="secret-handling-hardening: island contract v3 (backend identity bound to "
@@ -652,37 +645,51 @@ _SCHEDULING = (
     # S17 N16: LR schedule choice (yeto.rl.engine.run_config.resolve_lr_schedule)
     shared_flag("--rl-lr-schedule", choices=("auto", "linear", "constant"), default="auto",
                 help="island optimizer LR schedule: auto (default) = constant for decoupled "
-                "and elastic islands, linear decay over global_rounds x optimizer_steps "
+                "and island-pool islands, linear decay over global_rounds x optimizer_steps "
                 "otherwise; constant = fixed LR in every mode (single island included); "
-                "linear is refused for decoupled/elastic"),
-    cli_flag("--rl-quorum-theta", type=float, default=None, metavar="F",
-             help="elastic: step when arrived capacity >= F x total (default 0.75)"),
-    cli_flag("--rl-carry-gamma", type=float, default=None, metavar="F",
-             help="elastic: discount per outer step for a late delta (default 0.5)"),
-    cli_flag("--rl-soft-deadline-s", type=int, default=None, metavar="S",
-             help="elastic: soft deadline of an outer round (default: the quorum "
-             "timeout, syncer default 900)"),
+                "linear is refused for decoupled and island pools"),
+    cli_flag("--rl-sync-quorum-theta", type=float, default=None, metavar="F",
+             help="membership: merge a round once the arrived islands hold F of the "
+             "capacity the round expects (replaces --rl-sync-quorum). Any membership "
+             "option (this, --rl-sync-q-min, --rl-sync-soft-deadline-s, "
+             "--rl-sync-carry-gamma, --rl-sync-island-lease-s, --rl-sync-max-learners, "
+             "--rl-sync-final-grace-s) puts the islands in a pool with dynamic membership; "
+             "unset ones stay off. strict-avg, decoupled and full-parameter with "
+             "--rl-sync-full-parameter-rounds async"),
+    cli_flag("--rl-sync-q-min", type=int, default=None, metavar="N",
+             help="membership: minimum arrived islands for a capacity-quorum or "
+             "soft-deadline merge (default 1)"),
+    cli_flag("--rl-sync-soft-deadline-s", type=int, default=None, metavar="S",
+             help="membership: merge what arrived after S seconds even below quorum "
+             "(default off)"),
+    cli_flag("--rl-sync-carry-gamma", type=float, default=None, metavar="F",
+             help="membership: weight discount F^lag of a delta whose base lags the round "
+             "(default 1: no discount); the largest lag is --rl-sync-max-base-lag"),
+    shared_flag("--rl-sync-island-lease-s", type=float, default=None, metavar="S",
+                help="membership: island lease on the syncer (--island-lease-s); an island "
+                "silent this long is removed and re-JOINs; islands heartbeat every S/3. "
+                "Default 150 in a pool"),
+    cli_flag("--rl-sync-max-learners", type=int, default=None, metavar="N",
+             help="membership: the syncer admits island ids 0..N-1, so islands may join "
+             "after the launch (default: the launched islands; not with the "
+             "full-parameter preset, whose session binds the roster)"),
+    cli_flag("--rl-sync-final-grace-s", type=int, default=None, metavar="S",
+             help="membership: after the last step the syncer waits this long for the "
+             "islands still connected to take the final cut, then finishes without the "
+             "missing ones (default: --rl-sync-soft-deadline-s; unset both: wait for all)"),
     cli_flag("--rl-elastic-debug-delay-s", default=None, metavar="ISLAND:S[,ISLAND:S]",
-             help="elastic TEST switch: the given island(s) wait S seconds before "
+             help="membership TEST switch: the given island(s) wait S seconds before "
              "submitting each round's delta (bare S = every island); used to trigger "
              "the soft deadline and carried_over on real hardware"),
     cli_flag("--rl-elastic-debug-pause", default=None, metavar="ISLAND:AFTER_V:S[,...]",
-             help="elastic TEST switch: after the island applied outer version >= AFTER_V "
-             "its link to the syncer goes silent for S seconds (no heartbeats, sends and "
-             "received frames held; training continues) to exercise lease expiry and "
-             "automatic re-JOIN on real hardware"),
-    cli_flag("--rl-final-grace-s", type=int, default=None, metavar="S",
-             help="elastic: after total steps the syncer keeps answering FINISHED for "
-             "this long so late islands end cleanly (default: the soft deadline)"),
-    shared_flag("--rl-island-lease-s", type=float, default=None, metavar="S",
-                help="elastic: island lease on the syncer (--island-lease-s); an island "
-                "silent this long is removed; islands heartbeat every S/3. Default 150"),
-    cli_flag("--rl-q-min", type=int, default=None, metavar="N",
-             help="elastic: minimum arrived islands for a step (default 1)"),
+             help="membership TEST switch: after the island applied outer version >= AFTER_V "
+             "it stops heartbeating and holds its pushes for S seconds (training continues) "
+             "to exercise lease expiry and automatic re-JOIN on real hardware"),
     shared_flag("--rl-syncer-epoch", type=int, default=None, metavar="N",
-                help="elastic, or full-parameter async with --rl-peer-recovery: syncer term "
-                "(incremented on each syncer restart); passed to the syncer as --syncer-epoch "
-                "and to every island, whose JOIN/HELLO an older term fences (default 0)",
+                help="island pool, or full-parameter async with --rl-peer-recovery: syncer "
+                "term (incremented on each syncer restart); passed to the syncer as "
+                "--syncer-epoch and to every island's HELLO (default: read from the running "
+                "syncer, else 0)",
                 island={"default": 0}),
     cli_flag("--rl-peer-recovery", action="store_true", default=False,
              help="full-parameter async: an island relaunched after it lost its trainer "
@@ -705,8 +712,6 @@ _SCHEDULING = (
     shared_flag("--rl-peer-recovery-ttl-s", type=float, default=None, metavar="S",
                 help="--rl-peer-recovery: snapshots older than this are removed (a donor "
                 "or recovering island died); longer than a snapshot transfer (default 3600)"),
-    cli_flag("--rl-max-carry-lag", type=int, default=None, metavar="N",
-             help="elastic: oldest late delta still carried over, in outer steps (default 2)"),
     shared_flag("--rl-elastic-quorum-timeout-s", type=float, default=None, metavar="S",
                 help="--rl-elastic: syncer --quorum-timeout-s (whole seconds), also the "
                 "island's strict pause budget input (default: syncer default 900)"),

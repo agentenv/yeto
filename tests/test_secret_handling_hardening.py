@@ -82,11 +82,11 @@ def _stop(process):
     return process.communicate(timeout=10)[0]
 
 
-def test_legacy_syncer_without_key_refuses_to_start(syncer_binary, tmp_path):
+def test_syncer_without_key_refuses_to_start(syncer_binary, tmp_path):
     process = _syncer(syncer_binary, _port(), tmp_path)
     out = process.communicate(timeout=30)[0]
     assert process.returncode != 0
-    assert "legacy mode requires an island HMAC key" in out
+    assert "the syncer requires an island HMAC key" in out
 
 
 def test_legacy_hello_with_right_key_is_admitted_wrong_key_refused(syncer_binary, tmp_path):
@@ -147,12 +147,12 @@ def test_bad_pinned_contract_value_is_refused(syncer_binary, tmp_path):
 def _rl_args(**kw):
     import argparse
 
-    base = dict(training_mode="rl", rl_island_scheduling="legacy", rl_island_contract_sha256=None)
+    base = dict(training_mode="rl", rl_island_contract_sha256=None)
     base.update(kw)
     return argparse.Namespace(**base)
 
 
-def test_launcher_generates_one_legacy_key_per_run(monkeypatch):
+def test_launcher_generates_one_key_per_run(monkeypatch):
     from yeto import launcher
 
     monkeypatch.delenv("YETO_ISLAND_HMAC_KEY", raising=False)
@@ -161,14 +161,6 @@ def test_launcher_generates_one_legacy_key_per_run(monkeypatch):
     key = first["YETO_ISLAND_HMAC_KEY"]
     assert len(key) == 64 and first == second
     assert launcher.island_hmac_secret(_rl_args(training_mode="sft")) == {}
-
-
-def test_launcher_elastic_still_needs_a_user_key(monkeypatch):
-    from yeto import launcher
-
-    monkeypatch.delenv("YETO_ISLAND_HMAC_KEY", raising=False)
-    with pytest.raises(ValueError, match="YETO_ISLAND_HMAC_KEY"):
-        launcher.island_hmac_secret(_rl_args(rl_island_scheduling="elastic"))
 
 
 def test_launcher_passes_the_pinned_contract_to_the_syncer():

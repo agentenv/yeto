@@ -10,11 +10,11 @@ from types import SimpleNamespace
 import torch
 
 from test_rl_engine_driver import _driver, _engine, _strict_config
-from yeto.rl.engine.bridges import ElasticAvgSync
+from yeto.rl.engine.bridges import PoolAvgSync
 
 
 class _Client:
-    """Scripted elastic client: the outer version returned after the n-th delta."""
+    """Scripted island-pool client: the outer version returned after the n-th delta."""
 
     def __init__(self, versions_after_delta):
         self.versions = list(versions_after_delta)
@@ -30,7 +30,7 @@ class _Client:
         return SimpleNamespace(catch_up=False, base_version=0)
 
     def _base(self, version):
-        self.latest_base = SimpleNamespace(params=tuple(self.params), outer_version=version)
+        self.latest_base = SimpleNamespace(params=self.params.clone(), outer_version=version, final=False)
         return self.latest_base
 
     def wait_base(self, *, newer_than, timeout_s):
@@ -41,7 +41,7 @@ class _Client:
         return self._base(self.versions[len(self.deltas) - 1])
 
     def elastic_init(self, params):
-        self.params = list(params)
+        self.params = params.clone()
 
     def raise_if_finished(self):
         pass
@@ -59,9 +59,9 @@ class _Client:
 def _run(tmp_path, versions, rounds=3):
     engine = _engine(torch.tensor([1.0, 3.0]))
     client = _Client(versions)
-    sync = ElasticAvgSync(_strict_config(tmp_path, engine, learner_id=1, rounds=rounds), client=client,
-                          base_wait_s=1.0)
-    _driver(engine, sync, tmp_path, learner_id=1).run()
+    sync = PoolAvgSync(_strict_config(tmp_path, engine, learner_id=0, rounds=rounds), client=client,
+                       base_wait_s=1.0)
+    _driver(engine, sync, tmp_path, learner_id=0).run()
     ev = [json.loads(l) for l in (tmp_path / "events.jsonl").read_text().splitlines()]
     return client, sync, ev
 

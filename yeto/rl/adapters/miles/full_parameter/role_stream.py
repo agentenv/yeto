@@ -54,6 +54,7 @@ from yeto.rl.adapters.miles.routing_plugin import (
 )
 from yeto.rl.local_learner import MATRIX_MERGES, ComponentIdentity, layout_stream_role
 from yeto.rl.moe_layout import RoutedTokens, check_expert_partition, fragment_expert_tags
+from yeto.rl.pool_client import LeaseHeartbeat
 from yeto.rl.trajectory_evidence import TrajectoryBatchEvidence
 
 # Seconds between progress lines while an island waits for its initial cut.
@@ -153,6 +154,12 @@ class RoleStreamConfig:
     # during the push's outer interval; the syncer (--expert-token-weights)
     # weights that expert's tensors by them. Needs a layout with experts.
     expert_token_weights: bool = False
+    # Island pool (--rl-sync-island-lease-s; asynchronous rounds only): the
+    # syncer's lease on this island. The stream heartbeats every lease/3; a
+    # lease expiry or a lost link redials (re-JOIN) and the syncer's catch-up
+    # may skip fragment versions. None = fixed roster. Not part of the
+    # session contract (membership is a syncer option).
+    island_lease_s: float | None = None
 
     @property
     def tensor_blocks_active(self) -> bool:
@@ -246,6 +253,9 @@ class RoleStreamConfig:
             raise ValueError("role-stream matrix merge must be avg or rda")
         if self.overlap and self.partial_quorum:
             raise ValueError("sync/train overlap needs the strict sweep roster")
+        if self.island_lease_s is not None and (
+                not self.partial_quorum or not self.island_lease_s > 0):
+            raise ValueError("role-stream island lease needs asynchronous rounds and a positive lease")
         if type(self.push_int4_block) is not int or (
             not I4_BLOCK_MIN <= self.push_int4_block <= I4_BLOCK_MAX or self.push_int4_block % 2
         ):
@@ -267,6 +277,8 @@ class RoleStreamConfig:
             raise ValueError("peer recovery needs asynchronous rounds without broadcast deltas")
         if self.peer_recovery is not None and self.syncer_shards:
             raise ValueError("peer recovery needs one syncer process, not a sharded head")
+        if self.peer_recovery is not None and self.island_lease_s is not None:
+            raise ValueError("peer recovery is wired for a fixed roster, not an island pool")
         if self.wait_timeout <= 0 or not 0 < self.poll_seconds <= 1:
             raise ValueError("role-stream wait bounds are invalid")
         if (
@@ -381,6 +393,7 @@ class MilesFullParameterRoleStream:
         self.group = None
         self.adapter: MilesChunkedFullParameterAdapter | None = None
         self.client = None
+        self.heartbeat: LeaseHeartbeat | None = None
         self.sink = None
         self.current: ReferencedPolicyCut | None = None
         # Keep the latest post-train/pre-broadcast cut until the next local
@@ -520,6 +533,12 @@ class MilesFullParameterRoleStream:
             recover=self._recovering,
             expert_tokens=self.config.expert_token_weights,
         )
+        heartbeat = (
+            LeaseHeartbeat(client, self.config.island_lease_s,
+                           progress=lambda: self.local_rounds,
+                           name=f"{self.config.role}-heartbeat")
+            if self.config.island_lease_s is not None else None
+        )
         sink = adapter.fragment_sink(initial, ray_module=self.ray_module)
         client.install_inbound_chunk_sink(MilesRayInboundChunkSink(sink))
         if self._recovering:
@@ -527,6 +546,8 @@ class MilesFullParameterRoleStream:
             return
         try:
             client.start()
+            if heartbeat is not None:
+                heartbeat.start()  # the initial cut may take longer than the lease
             init_parts = None
             if self.config.learner_id == 0:
                 def init_parts(fragment_id: int):
@@ -547,6 +568,8 @@ class MilesFullParameterRoleStream:
             )
             adapter.verify_initial_fragments(initial, authoritative)
         except BaseException:
+            if heartbeat is not None:
+                heartbeat.stop()
             client.close()
             sink.release_all()
             adapter.release(initial)
@@ -555,6 +578,7 @@ class MilesFullParameterRoleStream:
         self.group = group
         self.adapter = adapter
         self.client = client
+        self.heartbeat = heartbeat
         self.sink = sink
         self.current = initial
         self._anchors = list(authoritative)
@@ -698,6 +722,12 @@ class MilesFullParameterRoleStream:
             for update in client.drain_updates():
                 stored = self._stored_update(update)
                 if update.version != 0 or stored.fragment_id in observed:
+                    if self.config.island_lease_s is not None and update.version != 0:
+                        raise RuntimeError(
+                            f"{self.config.algorithm} {self.config.role}: the island pool is past "
+                            "its initial cut; a full-parameter island cannot join a running pool "
+                            "yet (it can re-JOIN after a lease expiry while its process runs)"
+                        )
                     raise RuntimeError(
                         f"{self.config.algorithm} {self.config.role} initial broadcast changed"
                     )
@@ -927,6 +957,8 @@ class MilesFullParameterRoleStream:
             finally:
                 rebased.release()  # the applied target holds its own references
         self._staged.pop(key, None)
+        for older in [k for k in self._staged if k[0] == fragment_id and k[1] < version]:
+            self._staged.pop(older).release()
         if self.config.partial_quorum:
             # The round closed: an unanswered PULL of it can never commit.
             permit = self._pending.get(fragment_id)
@@ -1363,6 +1395,8 @@ class MilesFullParameterRoleStream:
         self.submission_fragment_versions = None
 
     def close(self) -> None:
+        if self.heartbeat is not None:
+            self.heartbeat.stop()
         if self.client is not None:
             self.client.close()
         if self.sink is not None:

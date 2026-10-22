@@ -72,7 +72,7 @@ from yeto.rl.core import (
     StrictRlInvariantError,
     require_nonzero_learning_rate,
 )
-from yeto.rl.elastic_client import LeaveReason
+from yeto.rl.pool_client import LeaveReason
 
 from . import phase_profile
 from .algorithm import AlgorithmSpec

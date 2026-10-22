@@ -17,7 +17,7 @@ from yeto.rl.engine import island_placement as ip
 
 GPUS = ("--gpu", "aws:1xa100@us-east-1,aws:2xa100@us-west-2")
 MIXED = (*GPUS, "--rl-island-placement", "1:placement=fixed-partition", "--rl-rollout-gpus", "1")
-ELASTIC = ("--rl-island-scheduling", "elastic")
+ISLAND_POOL = ("--rl-sync-quorum-theta", "0.75", "--rl-sync-max-base-lag", "2")
 
 
 @pytest.fixture(autouse=True)
@@ -89,7 +89,7 @@ def test_without_overrides_every_island_uses_the_run_wide_flags():
 
 
 def test_a_colocated_island_drops_the_fixed_partition_only_values():
-    args = _cli((*MIXED, "--rl-standby-gpus", "0", *ELASTIC))
+    args = _cli((*MIXED, "--rl-standby-gpus", "0", *ISLAND_POOL))
     colocated, partitioned = launcher.rl_island_args(args, 0), launcher.rl_island_args(args, 1)
     assert (colocated.rl_placement, colocated.rollout_num_gpus) == ("colocated", None)
     assert (partitioned.rl_placement, partitioned.rollout_num_gpus) == ("fixed-partition", 1)
@@ -98,15 +98,15 @@ def test_a_colocated_island_drops_the_fixed_partition_only_values():
 
 # --- launch checks (before any cloud work) ------------------------------------------
 
-def test_mixed_placement_under_legacy_scheduling_is_refused():
+def test_mixed_placement_with_a_fixed_roster_is_refused():
     args = _cli(MIXED)
-    with pytest.raises(ValueError, match="needs --rl-island-scheduling elastic") as error:
+    with pytest.raises(ValueError, match="needs island pool options") as error:
         launcher._prepare_rl_args(args)
     assert "island 0 colocated, island 1 fixed-partition" in str(error.value)
 
 
-def test_mixed_placement_under_elastic_scheduling_passes():
-    args = _cli((*MIXED, *ELASTIC))
+def test_mixed_placement_in_an_island_pool_passes():
+    args = _cli((*MIXED, *ISLAND_POOL))
     launcher._prepare_rl_args(args)  # includes the per-island shape checks
     assert args.rl_expected_algorithm_sha256
 
@@ -114,14 +114,14 @@ def test_mixed_placement_under_elastic_scheduling_passes():
 @pytest.mark.parametrize("flag, dest", [("--rl-elastic", "rl_elastic"),
                                         ("--rl-overlap-eval", "rl_overlap_eval")])
 def test_fixed_partition_only_switches_name_the_colocated_island(flag, dest):
-    args = _cli((*MIXED, *ELASTIC))
+    args = _cli((*MIXED, *ISLAND_POOL))
     setattr(args, dest, True)
     with pytest.raises(ValueError, match=rf"{flag} needs .* colocated island\(s\): \[0\]"):
         launcher._check_ports_infra_switches(args)
 
 
 def test_a_colocated_island_cannot_reserve_standby_gpus():
-    args = _cli((*MIXED, *ELASTIC, "--rl-island-placement", "0:standby-gpus=1"))
+    args = _cli((*MIXED, *ISLAND_POOL, "--rl-island-placement", "0:standby-gpus=1"))
     with pytest.raises(ValueError, match="island 0 is colocated and cannot reserve standby"):
         launcher._check_ports_infra_switches(args)
 
@@ -131,14 +131,14 @@ def test_mixed_launch_refusals_create_no_cloud_resources(monkeypatch):
     import sys
 
     monkeypatch.setitem(sys.modules, "sky", None)  # any sky import would fail loudly
-    with pytest.raises(ValueError, match="needs --rl-island-scheduling elastic"):
+    with pytest.raises(ValueError, match="needs island pool options"):
         launcher._prepare_rl_args(_cli(MIXED))
 
 
 # --- per-island shapes and commands ------------------------------------------------
 
 def test_each_island_gets_its_own_shape_and_command(monkeypatch):
-    args = _cli((*MIXED, *ELASTIC))
+    args = _cli((*MIXED, *ISLAND_POOL))
     launcher._prepare_rl_args(args)
     colocated, partitioned = (_learner_flags(t) for t in _island_tasks(args, monkeypatch))
     assert "--rl-placement" not in colocated and "--rollout-num-gpus" not in colocated
@@ -151,7 +151,7 @@ def test_each_island_gets_its_own_shape_and_command(monkeypatch):
             == _value(partitioned, "--rl-expected-algorithm-sha256")
             == args.rl_expected_algorithm_sha256)
     for flags in (colocated, partitioned):
-        assert _value(flags, "--rl-island-scheduling") == "elastic"
+        assert "--rl-island-pool" in flags
         assert "--rl-per-island-placement" in flags
 
 
@@ -190,7 +190,7 @@ def test_policy_age_overlap_differs_by_island_placement():
 # --- records -----------------------------------------------------------------------
 
 def test_run_manifest_rows_record_every_island_placement():
-    args = _cli((*MIXED, *ELASTIC))
+    args = _cli((*MIXED, *ISLAND_POOL))
     launcher._prepare_rl_args(args)
     rows = launcher.rl_island_placement_records(args)
     assert [(r["island"], r["placement"], r["standby_gpus"]) for r in rows] == [

@@ -413,7 +413,7 @@ def apply_ports_infra_switches(args, miles_args, environ=None) -> None:
         miles_args.yeto_rl_elastic["accept_rebind"] = True
     if getattr(args, "rl_elastic_checkpoint_store", None):
         miles_args.yeto_rl_elastic["checkpoint_store"] = str(args.rl_elastic_checkpoint_store)
-    if getattr(args, "rl_island_scheduling", "legacy") == "elastic":
+    if getattr(args, "rl_island_pool", False):
         miles_args.yeto_rl_elastic["island_scheduling"] = "elastic"
     for name in _ELASTIC_PAUSE:
         if getattr(args, name, None) is not None:
@@ -611,7 +611,7 @@ def _require_ports_supported(args, extra_argv: Sequence[str] = ()) -> None:
         expert_full_count=getattr(args, "expert_full_count", 0) or 0,
         rollout_num_gpus=getattr(args, "rollout_num_gpus", None),
         placement=getattr(args, "rl_placement", "colocated"),
-        island_scheduling=getattr(args, "rl_island_scheduling", "legacy"),
+        island_scheduling="elastic" if getattr(args, "rl_island_pool", False) else "legacy",
         extra_argv=tuple(extra_argv),
     )
 
@@ -932,8 +932,9 @@ def _dense_full_sync_config(
         overlap=bool(getattr(args, "sweep_overlap", False)),
         partial_quorum=async_rounds,
         matrix_merge=getattr(args, "rl_sync_matrix_merge", "avg"),
-        syncer_epoch=_island_syncer_epoch(args),
         peer_recovery=peer_recovery_options(args),
+        # an island pool sets the epoch (and lease); else peer recovery may
+        **{"syncer_epoch": _island_syncer_epoch(args), **_island_pool_membership(args)},
     )
     return FullParameterSyncConfig((actor,), sweep=not async_rounds)
 
@@ -967,6 +968,19 @@ def peer_recovery_options(args, environ=None):
         ttl_s=3600.0 if ttl is None else float(ttl),
         staging=getattr(args, "rl_peer_recovery_staging", None),
     )
+
+
+def _island_pool_membership(args) -> dict:
+    """Island pool (``--rl-island-pool``, set by the launcher with any
+    --rl-sync-* membership option): the syncer lease the session heartbeats
+    for and the syncer epoch of its HELLO. {} for a fixed roster."""
+    if not getattr(args, "rl_island_pool", False):
+        return {}
+    from yeto.rl.pool_client import DEFAULT_ISLAND_LEASE_S
+
+    lease = getattr(args, "rl_sync_island_lease_s", None)
+    return {"island_lease_s": DEFAULT_ISLAND_LEASE_S if lease is None else float(lease),
+            "syncer_epoch": int(getattr(args, "rl_syncer_epoch", 0) or 0)}
 
 
 def _load_sao_streaming_runtime(args):
@@ -2251,6 +2265,7 @@ def run_miles(
                 code_pack_digest=code_pack_digest,
                 compat_group=_island_compat_group(args),
                 matrix_merge=matrix_merge,
+                **_island_pool_membership(args),
             )
         else:
             miles_args.yeto_rl_bridge_config = BridgeConfig(
@@ -2275,11 +2290,11 @@ def run_miles(
                 compat_group=_island_compat_group(args),
                 bcast_delta=bool(getattr(args, "bcast_delta", False)),
             )
-            if getattr(args, "rl_island_scheduling", "legacy") == "elastic":
-                # rl-inter-island-scheduling 0.15 (legacy sets nothing)
-                miles_args.yeto_rl_island_scheduling = "elastic"
+            if getattr(args, "rl_island_pool", False):
+                # a fixed roster sets nothing
+                miles_args.yeto_rl_island_pool = True
                 miles_args.yeto_rl_syncer_epoch = int(getattr(args, "rl_syncer_epoch", 0))
-                miles_args.yeto_rl_island_lease_s = getattr(args, "rl_island_lease_s", None)
+                miles_args.yeto_rl_island_lease_s = getattr(args, "rl_sync_island_lease_s", None)
             # 4.2.1: the critic syncer (second channel); its BridgeConfig needs
             # the critic specs/layout, built by build_sync once Miles created it.
             miles_args.yeto_rl_critic_syncer_addr = (
@@ -2657,7 +2672,7 @@ if __name__ == "__main__":
     except BaseException as error:  # noqa: BLE001
         if _rejoin_exhausted(error):
             # 0.22: the island gave up re-joining the elastic pool (not 4/6).
-            from yeto.rl.elastic_client import ELASTIC_REJOIN_FAILED_EXIT
+            from yeto.rl.pool_client import ELASTIC_REJOIN_FAILED_EXIT
 
             print(f"[yeto-island] elastic re-JOIN exhausted: {error}", file=sys.stderr)
             raise SystemExit(ELASTIC_REJOIN_FAILED_EXIT) from error

@@ -84,8 +84,8 @@ repeated inside PUSH and HEARTBEAT must match the connected group.
 
 ## HELLO authentication (secret-handling-hardening)
 
-When the syncer has an island HMAC key (`YETO_ISLAND_HMAC_KEY`; required in
-legacy mode unless `--allow-unauthenticated-islands`), the HELLO payload is:
+When the syncer has an island HMAC key (`YETO_ISLAND_HMAC_KEY`; required
+unless `--allow-unauthenticated-islands`), the HELLO payload is:
 
 ```
 body := version .. num_streams:u16 [ b"YCG1" | u32 n | n bytes utf-8 ]   # compat_group trailer optional
@@ -104,8 +104,7 @@ mac := HMAC-SHA256(key, b"yeto-hello-mac-v1\0" | body)
   not retry. DATA_HELLO carries no MAC; it can only join the 64-bit random
   connection generation of an authenticated HELLO.
 - `--expected-island-contract <hex32>`: the session contract must equal
-  `sha256(b"yeto-rl-session-contract-v2\0" | layout_fingerprint | pinned)`;
-  elastic pins the JOIN identity to the same value before the first JOIN.
+  `sha256(b"yeto-rl-session-contract-v2\0" | layout_fingerprint | pinned)`.
 
 ## Card-type compatibility group (yeto-framework-decoupling 7.7)
 
@@ -115,10 +114,9 @@ mac := HMAC-SHA256(key, b"yeto-hello-mac-v1\0" | body)
   card type (env `YETO_RL_COMPAT_GROUP`). An unknown card stops the launch; there
   is no default.
 - The group is a field of `BackendIdentity` (schema v2), so it is inside the
-  identity hash, the HELLO session contract and the elastic JOIN identity.
-- The group is also sent in clear text: as the HELLO trailer above, and as a
-  `u32 length + utf-8` field after `backend_identity` in JOIN. The syncer pins
-  the first admitted group. A HELLO or JOIN with another group gets ERROR
+  identity hash and the HELLO session contract.
+- The group is also sent in clear text as the HELLO trailer above. The syncer
+  pins the first admitted group. A HELLO with another group gets ERROR
   `兼容组不同：<a> 对 <b>，容差未标定` on that connection only. The syncer does not
   exit and the admitted islands keep running. H100 and H200 are different groups.
 - Phase 1 rule: groups must be identical. `CARD_PAIR_TOLERANCE` in the catalog is
@@ -342,7 +340,7 @@ only those (other fragments are stored with numel 0 at version 0).
   for every shard, takes each version from its owner, and ACKs each shard's
   manifest separately. The terminal cut is the union.
 - `N = 1` (default) is the unsharded syncer, unchanged. Strict policy
-  sweeps, elastic scheduling and learner-budget cutoff refuse `N > 1`.
+  sweeps, dynamic membership and learner-budget cutoff refuse `N > 1`.
 
 ## bf16 pushes over an f32 session (dtype 4)
 
@@ -526,15 +524,75 @@ Every merge appends event-tape fields for protocol/delta semantics, attempt,
 launch base version, frozen members and generations, responders, staleness,
 weights, counters, quorum/grace timings, and sync latency.
 
-## Elastic island departure (rl-island-graceful-leave)
+## Island pool (dynamic membership)
 
-Under `--rl-island-scheduling elastic` an island that stops sends one LEAVE
-frame with a one-byte reason code. Only the class of the departure goes on
+The syncer has one round loop. Without membership options the roster is
+fixed: every island answers every round (strict RL). Any of the options below
+makes the islands a dynamic pool; unset options keep the fixed-roster value,
+and the syncer and island command lines stay unchanged.
+
+The launcher takes the `--rl-sync-*` membership options for the strict-avg
+(LoRA), decoupled and full-parameter presets; the full-parameter preset needs
+`--rl-sync-full-parameter-rounds async`. The launcher refuses them for the
+full-parameter sweep, `sao-streaming-full`, `--experimental-rl-sync`,
+`--syncer-shards` > 1 and algorithms with a critic. The rounds must be able
+to merge without some island (`--rl-sync-quorum-theta`, `--rl-sync-quorum`
+below the island count, `--rl-sync-grace-ms` or `--rl-sync-max-base-lag` >= 1).
+
+| Syncer flag | Launcher option | Effect |
+|---|---|---|
+| `--quorum-theta F`, `--q-min N` | `--rl-sync-quorum-theta`, `--rl-sync-q-min` | merge once the arrived islands hold F of the capacity the round expects (at least N islands); replaces `--quorum` |
+| `--soft-deadline-s S` | `--rl-sync-soft-deadline-s` | merge what arrived after S seconds even below quorum; also caps the grace window |
+| `--carry-gamma G` | `--rl-sync-carry-gamma` | weight `G^lag` for a push whose base lags the round; the largest lag is `--max-base-lag` (`--rl-sync-max-base-lag`) |
+| `--island-lease-s L` | `--rl-sync-island-lease-s` | an island silent for L seconds leaves the pool and must re-JOIN |
+| `--syncer-epoch E` | `--rl-syncer-epoch` | a HELLO with a lower epoch is refused (fencing) |
+| `--final-grace-s S` | `--rl-sync-final-grace-s` | after the last step, wait S seconds for the connected islands to ACK the final cut, then finish without the missing ones |
+| `--max-learners N` | `--rl-sync-max-learners` | admit island ids 0..N-1 (islands may join late); not for full-parameter, whose island session binds the launched roster |
+
+Every island in a pool heartbeats every lease/3 (default lease 150 s,
+`yeto.rl.pool_client.LeaseHeartbeat`). A lease expiry gets
+`MSG_ERROR "island lease expired: re-JOIN required"`; the client redials with
+a new connection generation (outside its reconnect budget) and is caught up
+to the current versions. Per preset:
+
+- strict-avg (`PoolIslandClient`, session `PoolAvgSync`) syncs its LoRA vector
+  as one f32 fragment, answers the newest PULL it has not answered with
+  `local - base` against the base it holds, and applies the newest broadcast.
+- decoupled (`yeto.rl.decoupled.DecoupledRlBridge`) applies the newest
+  broadcast of each fragment, drops a PULL whose round closed without it (a
+  newer PULL of the fragment supersedes it), and answers the PULLs the syncer
+  replays on a new connection. A lost link redials up to 5 times.
+- full-parameter, asynchronous rounds (`MilesFullParameterRoleStream`,
+  `FullParameterSync`) overwrites a fragment with a broadcast that skips
+  versions (catch-up) and releases its retained pushes of the skipped rounds.
+  A fresh full-parameter island cannot join a pool after its initial cut yet. At the end the island ACKs the final cut like a strict
+island; a push that races the end ends the island normally (`elastic_finished`
+on its tape).
+
+With a pool the syncer also writes island-pool records on its event tape
+(`{"kind": ..., "syncer_epoch": ..., "time_unix": ...}`):
+
+| kind | When |
+|---|---|
+| `pool_join` | an island connected (`catch_up` true after the run started) |
+| `pool_leave` | an island left: `reason` from its LEAVE, `lease_expired`, or `disconnected` |
+| `delta_accepted` / `delta_carried_over` / `delta_rejected` | a push was merged on time, merged with `lag` and `discount`, or refused (`carry_lag_exceeded`, `fenced`, `out_of_round`, ...) |
+| `outer_step` | a round merged: `arrived`, capacities, `timed_out`, normalized `weights` `[island, base_version, weight]`, `absent` |
+| `final_grace_expired` | the final grace window ended with islands missing |
+
+It keeps `status.json` next to the tape (schema
+`yeto.syncer.elastic-status/v1`: state, syncer epoch, outer version, live
+islands with capacity and remaining lease).
+
+### Island departure (LEAVE)
+
+An island that leaves a pool sends LEAVE (type 27: `u32 learner_id | u8
+reason`) and closes its connection. Only the class of the departure goes on
 the wire; for a failed departure the exception type and text go to the
-island's event tape (`island_leave`; a finished run adds no record), and a
-failed send is recorded as `elastic_leave_failed`. The codes
-are defined in `yeto/rl/elastic_client.py` (`LeaveReason`) and
-`syncer/src/elastic.rs` (`LEAVE_REASON_*`); a test pins both.
+island's event tape (`island_leave`), and a failed send is recorded as
+`elastic_leave_failed`. The codes are defined in `yeto/rl/pool_client.py`
+(`LeaveReason`) and `syncer/src/protocol.rs` (`LEAVE_REASON_NAMES`); a test
+pins both.
 
 | Code | Name | Sent when |
 |---|---|---|
@@ -544,27 +602,19 @@ are defined in `yeto/rl/elastic_client.py` (`LeaveReason`) and
 | 3 | PREEMPTED | a droppable island received a cloud reclaim notice |
 | 4 | INFRA_FAILED | node or trainer lost, reconfiguration or storage failure, any unmapped error |
 | 5 | TRAINING_FAILED | a training check failed (publication, policy identity, optimizer step, non-finite values) |
-| 6 | CONFIG_MISMATCH | incompatible configuration; a refused first JOIN is recorded on the tape only |
+| 6 | CONFIG_MISMATCH | incompatible configuration |
 
 The exception table is `yeto/rl/engine/leave_reason.py`. An island sends at
 most one LEAVE: a reclaim listener's PREEMPTED is not overwritten by the
-driver's close. A SIGTERM that kills the process (`yeto down`, platform stop)
-sends nothing; the syncer removes the island after the lease. The syncer logs
-an unknown code as `unknown(<n>)` and removes the island as usual.
-
-The lease defaults to 150 s (`syncer --island-lease-s`, the launcher, `yeto
---rl-island-lease-s` and the island client). The launcher passes the same
-value to the syncer and to every elastic island (`--rl-island-lease-s`), and
-islands heartbeat every lease/3 (50 s at the default) on their own thread, so
-two lost heartbeats are tolerated.
+driver's close. A SIGTERM that kills the process sends nothing; the syncer
+records `disconnected` (or `lease_expired` after the lease).
 
 At the end of the run the launcher waives the missing `rl_learner_finalized`
 record only for islands whose last syncer `pool_leave` reason is `finished`,
 `stopped`, `preempted` or `lease_expired`; any other reason keeps the run
 failed.
 
-To add an island to a running elastic fleet there is no CLI: start another
-island process against the same syncer address with the same
-`--rl-syncer-epoch`, the same HMAC key and a compatible backend identity and
-compat group. It JOINs with `catch_up` and receives the current base; its
-weight is zero in the round it joins.
+To add an island to a running pool there is no CLI: start another island
+process against the same syncer address with the same `--rl-syncer-epoch`,
+the same HMAC key and a compatible backend identity and compat group (and an
+id below `--max-learners`). It is caught up to the current base.

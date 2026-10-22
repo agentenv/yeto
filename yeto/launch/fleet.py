@@ -7,16 +7,15 @@ import sys
 import threading
 from dataclasses import dataclass
 
-from .syncer import island_scheduling_mode
+from .syncer import island_pool
 from .sky_ops import SYNCER_REFUSAL_MARKERS
 
 
 def controller_fixed_roster(args) -> bool:
-    """FleetController ``fixed_roster``: RL runs whose island scheduling is NOT
-    elastic. Elastic membership is dynamic: an island that fails for good is
-    dropped and the pool goes on (10-09 ruling of the main agent for the user;
-    before, every RL run, elastic included, was a fixed roster)."""
-    return getattr(args, "training_mode", "sft") == "rl" and island_scheduling_mode(args) != "elastic"
+    """FleetController ``fixed_roster``: RL runs without island pool options.
+    A pool's membership is dynamic: an island that fails for good is dropped
+    and the pool goes on (10-09 ruling of the main agent for the user)."""
+    return getattr(args, "training_mode", "sft") == "rl" and not island_pool(args)
 
 
 # FleetController states.

@@ -258,7 +258,7 @@ def run(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
     **fields)`` sees every tape record after it is written."""
     import os  # noqa: PLC0415
 
-    from yeto.rl.elastic_client import LeaveReason  # noqa: PLC0415
+    from yeto.rl.pool_client import LeaveReason  # noqa: PLC0415
 
     from .sampler_resume import (  # noqa: PLC0415
         RECLAIM_MARKER_ENV,

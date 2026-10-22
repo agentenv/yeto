@@ -15,7 +15,7 @@ from ..rl.engine.run_flags import CLI, rl_forward_pairs, rl_option, rl_option_pa
 from .rl_backend import _rl_backend_module
 from .remote_setup import read_island_pre_run
 from .topology import rl_island_count, rl_island_placement_args
-from .syncer import island_lease_s, island_scheduling_mode, island_syncer_epoch
+from .syncer import island_lease_s, island_pool, island_syncer_epoch
 from .storage import ELASTIC_ISLAND_STATE_DIR, rl_checkpoint_store_plan
 from .island_tasks import _check_island_tasks
 
@@ -306,9 +306,6 @@ def _check_resume_launch_flags(args) -> bool:
         if island_cuts_requested(args) and (getattr(args, "rl_backend", None) or "miles") != "miles":
             raise ValueError("island round cuts (--rl-cut-every / --rl-cut-auto-mtbf-s on a synced "
                              "launch) are wired for --rl-backend miles only")
-        if island_cuts_requested(args) and island_scheduling_mode(args) == "elastic":
-            raise ValueError("island round cuts (--rl-cut-every / --rl-cut-auto-mtbf-s on a synced "
-                             "launch) need --rl-island-scheduling legacy (strict or decoupled)")
         rl_checkpoint_store_plan(args)  # validates the form
         return False
     if elastic:
@@ -393,7 +390,7 @@ def _check_ports_infra_switches(args) -> None:
     from ..rl.engine.execution_profile import UNKNOWN, check_elastic_placement, check_overlap_eval
 
     placements = island_placement.check(args, rl_island_count(args),
-                                        island_scheduling=island_scheduling_mode(args))
+                                        island_scheduling="elastic" if island_pool(args) else "legacy")
     # The checks below need a fixed partition; any colocated island fails them.
     placement = (island_placement.FIXED_PARTITION
                  if all(p.placement == island_placement.FIXED_PARTITION for p in placements)
@@ -601,10 +598,10 @@ def _ports_infra_flags(args) -> tuple[str, str]:
     flags += sample_role_flags(args)  # L4.6: role both (default) adds nothing
     if (getattr(args, "rl_lr_schedule", None) or "auto") != "auto":  # auto adds nothing
         flags += f" --rl-lr-schedule {args.rl_lr_schedule}"
-    if island_scheduling_mode(args) == "elastic":  # legacy adds nothing
-        flags += (" --rl-island-scheduling elastic"
+    if island_pool(args):  # a fixed roster adds nothing
+        flags += (" --rl-island-pool"
                   f" --rl-syncer-epoch {island_syncer_epoch(args)}"
-                  f" --rl-island-lease-s {island_lease_s(args)!r}")
+                  f" --rl-sync-island-lease-s {island_lease_s(args)!r}")
     resume_store = (rl_checkpoint_store_plan(args)
                     if getattr(args, "rl_checkpoint_store", None) and not getattr(args, "rl_elastic", False)
                     else None)

@@ -1,7 +1,7 @@
 """rl-island-graceful-leave: LEAVE reason codes (design D7).
 
 Parity with the Rust syncer, the exception -> code table, and the driver
-closing an elastic bridge with the code of its departure."""
+closing an island-pool session with the code of its departure."""
 
 from __future__ import annotations
 
@@ -12,10 +12,10 @@ from pathlib import Path
 import pytest
 import torch
 
-from test_rl_elastic_lease_rejoin import MultiConnSyncer, _client, _wait
+from pool_fakes import FakePoolSyncer
 from test_rl_engine_driver import _driver, _engine, _strict_config
-from yeto.rl.elastic_client import ElasticJoinRefused, ElasticRejoinError, Leave, LeaveReason
-from yeto.rl.engine.bridges import ElasticAvgSync
+from yeto.rl.engine.bridges import PoolAvgSync
+from yeto.rl.pool_client import LeaveReason
 from yeto.rl.engine.capabilities import CapabilityMismatch
 from yeto.rl.engine.controller import RecoveryRequired, TransactionFailed
 from yeto.rl.engine.cut import CutError
@@ -30,9 +30,10 @@ REPO = Path(__file__).resolve().parents[1]
 
 
 def test_reason_codes_match_the_rust_syncer():
-    src = (REPO / "syncer/src/elastic.rs").read_text()
-    rust = {m[0]: int(m[1]) for m in re.findall(r"pub const LEAVE_REASON_(\w+): u8 = (\d+);", src)}
-    assert rust == {r.name: r.value for r in LeaveReason}
+    src = (REPO / "syncer/src/protocol.rs").read_text()
+    block = re.search(r"LEAVE_REASON_NAMES: \[&str; \d+\] = \[(.*?)\];", src, re.S).group(1)
+    names = re.findall(r'"(\w+)"', block)
+    assert names == [r.name.lower() for r in sorted(LeaveReason, key=int)]
 
 
 @pytest.mark.parametrize("error, reason", [
@@ -43,7 +44,6 @@ def test_reason_codes_match_the_rust_syncer():
     (RecoveryRequired("x"), LeaveReason.INFRA_FAILED),
     (RebuildNotStarted("x"), LeaveReason.INFRA_FAILED),
     (TransactionFailed.__new__(TransactionFailed), LeaveReason.INFRA_FAILED),
-    (ElasticRejoinError("x"), LeaveReason.INFRA_FAILED),
     (CutError("x"), LeaveReason.INFRA_FAILED),
     (EpochConflict("x"), LeaveReason.INFRA_FAILED),
     (RuntimeError("CUDA out of memory"), LeaveReason.INFRA_FAILED),  # unmapped: D7 Q2
@@ -52,7 +52,6 @@ def test_reason_codes_match_the_rust_syncer():
     (PolicyIdentityError("x"), LeaveReason.TRAINING_FAILED),
     (RoundFailedError("x"), LeaveReason.TRAINING_FAILED),
     (CapabilityMismatch("x"), LeaveReason.CONFIG_MISMATCH),
-    (ElasticJoinRefused("x"), LeaveReason.CONFIG_MISMATCH),
 ])
 def test_exception_to_reason(error, reason):
     assert leave_reason_for(error) is reason
@@ -71,22 +70,12 @@ def test_an_island_never_sends_lease_expired_or_unknown_codes():
     assert sendable(LeaveReason.STOPPED) is LeaveReason.STOPPED
 
 
-def _elastic(tmp_path, fake, *, rounds=2):
-    """The fake syncer cannot decode LEAVE (island-side decoder), so the
-    client's sent LEAVE frames are recorded on ``fake.leaves`` instead."""
+def _pool(tmp_path, fake, *, rounds=2):
     engine = _engine(torch.tensor([1.0, 3.0]))
-    c = _client(fake, [])
-    fake.leaves = []
-    send = c._send
-
-    def recording_send(msg):
-        send(msg)
-        if isinstance(msg, Leave):
-            fake.leaves.append(msg.reason)
-    c._send = recording_send
-    sync = ElasticAvgSync(_strict_config(tmp_path, engine, learner_id=0, rounds=rounds), client=c,
-                          base_wait_s=5.0)
-    return engine, sync, c
+    client = fake.client(0)
+    sync = PoolAvgSync(_strict_config(tmp_path, engine, learner_id=0, rounds=rounds), client=client,
+                       base_wait_s=5.0)
+    return engine, sync, client
 
 
 def _leaves(fake):
@@ -98,8 +87,8 @@ def _tape(tmp_path):
 
 
 def test_a_finished_island_leaves_with_finished(tmp_path):
-    fake = MultiConnSyncer()
-    engine, sync, _ = _elastic(tmp_path, fake)
+    fake = FakePoolSyncer()
+    engine, sync, _ = _pool(tmp_path, fake)
     _driver(engine, sync, tmp_path).run()
     assert _leaves(fake) == [LeaveReason.FINISHED]
     assert not [e for e in _tape(tmp_path) if e["event"] == "island_leave"]  # golden tapes unchanged
@@ -113,8 +102,8 @@ def test_a_finished_island_leaves_with_finished(tmp_path):
     (RuntimeError("ray actor died"), LeaveReason.INFRA_FAILED),
 ])
 def test_a_failing_island_leaves_with_the_reason_of_its_error(tmp_path, error, reason):
-    fake = MultiConnSyncer()
-    engine, sync, _ = _elastic(tmp_path, fake)
+    fake = FakePoolSyncer()
+    engine, sync, _ = _pool(tmp_path, fake)
 
     def train_step(batch):
         raise error
@@ -127,8 +116,8 @@ def test_a_failing_island_leaves_with_the_reason_of_its_error(tmp_path, error, r
 
 
 def test_a_failed_leave_is_reported_and_the_original_error_still_propagates(tmp_path):
-    fake = MultiConnSyncer()
-    engine, sync, client = _elastic(tmp_path, fake)
+    fake = FakePoolSyncer()
+    engine, sync, client = _pool(tmp_path, fake)
 
     def train_step(batch):
         def broken(reason=0):
@@ -144,8 +133,8 @@ def test_a_failed_leave_is_reported_and_the_original_error_still_propagates(tmp_
 
 
 def test_a_reclaim_leave_is_sent_once_and_not_overwritten_by_close(tmp_path):
-    fake = MultiConnSyncer()
-    engine, sync, _ = _elastic(tmp_path, fake)
+    fake = FakePoolSyncer()
+    engine, sync, _ = _pool(tmp_path, fake)
 
     def train_step(batch):
         assert sync.leave(LeaveReason.PREEMPTED)  # reclaim listener thread in production
@@ -181,25 +170,25 @@ def test_the_miles_publication_error_is_a_training_failure():
 def test_the_bridge_gives_the_client_the_syncer_lease(tmp_path):
     """The island heartbeats every lease/3 of the syncer's --island-lease-s, not
     the client's own default."""
+    from yeto.rl.pool_client import DEFAULT_ISLAND_LEASE_S
+
     engine = _engine(torch.tensor([1.0, 3.0]))
     config = _strict_config(tmp_path, engine, learner_id=0, rounds=2)
-    assert ElasticAvgSync(config, lease_s=45.0)._client_config().lease_s == 45.0
-    from yeto.rl.elastic_client import DEFAULT_ISLAND_LEASE_S
-
-    assert ElasticAvgSync(config)._client_config().lease_s == DEFAULT_ISLAND_LEASE_S
+    assert PoolAvgSync(config, lease_s=45.0).lease_s == 45.0
+    assert PoolAvgSync(config).lease_s == DEFAULT_ISLAND_LEASE_S
 
 
-def test_the_launcher_passes_the_lease_to_every_elastic_island(monkeypatch):
+def test_the_launcher_passes_the_lease_to_every_pool_island(monkeypatch):
     from test_rl_launcher import _args
     from yeto import launcher
     from yeto.rl.adapters.miles.island_entry import parse_args
 
     monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "k3y")
-    flags = launcher._ports_infra_flags(_args(("--rl-island-scheduling", "elastic",
-                                                "--rl-island-lease-s", "90")))[1]
-    assert " --rl-island-lease-s 90.0" in flags
-    default = launcher._ports_infra_flags(_args(("--rl-island-scheduling", "elastic")))[1]
-    assert f" --rl-island-lease-s {launcher.DEFAULT_ISLAND_LEASE_S!r}" in default
+    flags = launcher._ports_infra_flags(_args(("--rl-sync-island-lease-s", "90")))[1]
+    assert " --rl-island-pool" in flags and " --rl-sync-island-lease-s 90.0" in flags
+    default = launcher._ports_infra_flags(_args(("--rl-sync-quorum-theta", "0.75")))[1]
+    assert f" --rl-sync-island-lease-s {launcher.DEFAULT_ISLAND_LEASE_S!r}" in default
+    assert " --rl-island-pool" not in launcher._ports_infra_flags(_args(()))[1]
     required = ["--model", "m", "--model-revision", "r", "--data", "d", "--learner-id", "0",
                 "--reward-function", "f", "--reward-sha256", "s", "--source-sha256", "s",
                 "--global-rounds", "1", "--groups-per-round", "1", "--samples-per-group", "1",
@@ -208,33 +197,14 @@ def test_the_launcher_passes_the_lease_to_every_elastic_island(monkeypatch):
                 "--event-tape", "t", "--actor-num-nodes", "1", "--actor-num-gpus-per-node", "1",
                 "--inner-lr", "1e-5", "--seq-len", "1", "--seed", "0", "--miles-root", "m",
                 "--lora-r", "8", "--lora-targets", "attention", "--rl-single-island-no-sync"]
-    assert parse_args(required + ["--rl-island-lease-s", "90"]).rl_island_lease_s == 90.0
-
-
-class _RefusingSyncer(MultiConnSyncer):
-    """Answers every JOIN with MSG_ERROR, like elastic_server.rs on a compat_group
-    or backend identity mismatch."""
-
-    def _serve(self, sock, idx):
-        from yeto.protocol import MSG_ERROR, read_frame, write_frame
-
-        read_frame(sock, 1 << 20)
-        write_frame(sock, MSG_ERROR, b"compat_group mismatch, JOIN refused")
-
-
-def test_a_refused_first_join_raises_elastic_join_refused():
-    c = _client(_RefusingSyncer(), [])
-    with pytest.raises(ElasticJoinRefused, match="compat_group mismatch"):
-        c.join()
-    c.close()
+    assert parse_args(required + ["--rl-sync-island-lease-s", "90"]).rl_sync_island_lease_s == 90.0
 
 
 def test_concurrent_leaves_send_one_frame(tmp_path):
     import threading
 
-    fake = MultiConnSyncer()
-    engine, sync, client = _elastic(tmp_path, fake)
-    client.join()
+    fake = FakePoolSyncer()
+    engine, sync, client = _pool(tmp_path, fake)
     barrier = threading.Barrier(8)
     results = []
 
@@ -251,7 +221,7 @@ def test_concurrent_leaves_send_one_frame(tmp_path):
     sync.close()
 
 
-def test_the_verl_elastic_island_command_carries_the_lease(monkeypatch):
+def test_the_verl_pool_island_command_carries_the_lease(monkeypatch):
     """verl islands are built by the same launcher task as Miles islands
     (make_miles_island_task with the verl ISLAND_ENTRY_MODULE)."""
     import sys
@@ -264,11 +234,11 @@ def test_the_verl_elastic_island_command_carries_the_lease(monkeypatch):
     monkeypatch.setitem(sys.modules, "sky", types.SimpleNamespace(
         Task=_Task, Resources=_Resources, Storage=_Storage, StorageMode=_StorageMode))
     monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "k3y")
-    args = _args(("--rl-backend", "verl", "--rl-engine", "ports", "--rl-island-scheduling", "elastic",
-                  "--rl-island-lease-s", "90"))
+    args = _args(("--rl-backend", "verl", "--rl-engine", "ports", "--rl-sync-island-lease-s", "90",
+                  "--rl-sync-max-base-lag", "1"))
     args.model_revision, args.data_revision = "a" * 40, "b" * 40
     args.source_sha256, args.reward_sha256 = "c" * 64, "d" * 64
     _prepare_rl_args(args)
     run = make_miles_island_task(args, parse_gpu_spec(args.gpu)[0], 0, 1, "127.0.0.1:1").run
     assert "yeto.rl.adapters.verl.island_entry" in run
-    assert " --rl-island-lease-s 90.0" in run
+    assert " --rl-sync-island-lease-s 90.0" in run and " --rl-island-pool" in run

@@ -270,6 +270,10 @@ _AGENT = (
 )
 
 _ISLAND = (
+    # Set by the launcher when any island pool option is given (dynamic membership).
+    island_flag("--rl-island-pool", action="store_true",
+                help="this island joins a dynamic island pool on the syncer: it heartbeats "
+                "its lease, re-JOINs after an expiry and may see the outer version jump"),
     island_flag("--model", required=True),
     island_flag("--model-revision", required=True),
     island_flag("--data", required=True),

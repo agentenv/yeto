@@ -265,7 +265,7 @@ def run_sampler_island(miles_args: Any, *, environ: Any = None,
     from miles.utils.async_utils import Disposer
     from miles.utils.orchestration_utils import init_orchestration_script
 
-    from yeto.rl.elastic_client import LeaveReason
+    from yeto.rl.pool_client import LeaveReason
     from yeto.rl.engine.events import append_tape_event
     from yeto.rl.engine.resume import store_for
     from yeto.rl.engine.sampler_loop import SamplerLoop

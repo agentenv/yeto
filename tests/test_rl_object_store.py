@@ -17,7 +17,7 @@ from yeto.rl.engine.object_store import DirectoryObjectStore, ObjectStore, Objec
 from yeto.rl.engine.policy_release import LORA, PolicyFollower, PolicyReleaseStore
 from yeto.rl.engine.resume import STORE_IMPL_ENV, CheckpointStore, store_for
 from yeto.rl.engine.sample_buffer import FileSampleBuffer, ObjectIndex, SampleBufferError
-from yeto.rl.elastic_client import LeaveReason
+from yeto.rl.pool_client import LeaveReason
 from yeto.rl.engine.trainer_lifecycle import SampleIndexEntry
 from yeto.rl.engine.trainer_remote import CommandReader, CommandWriter
 

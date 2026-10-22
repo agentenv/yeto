@@ -130,28 +130,19 @@ pub struct Config {
     /// Fail closed unless HELLO carries and matches this Config's canonical
     /// semantic profile hash. Disabled by default for legacy/non-SAO clients.
     pub require_profile_binding: bool,
-    /// Inter-island scheduling mode. Legacy (default) adds nothing to the
-    /// semantic profile hash and changes no server behavior.
-    pub island_scheduling: crate::elastic::IslandSchedulingMode,
-    /// HMAC-SHA256 key (never hashed into the profile). elastic: signs the
-    /// elastic message types. legacy (secret-handling-hardening): every HELLO
-    /// must carry a trailing HMAC under this key.
+    /// HMAC-SHA256 key (never hashed into the profile): every HELLO must
+    /// carry a trailing HMAC under this key.
     pub island_hmac_key: Option<Vec<u8>>,
     /// secret-handling-hardening: island contract (backend identity bound to
-    /// the LR schedule, 32 bytes) pinned by the head's launch config. legacy:
-    /// a HELLO whose session_contract_hash is not
+    /// the LR schedule, 32 bytes) pinned by the head's launch config.
+    /// A HELLO whose session_contract_hash is not
     /// sha256(domain || layout_fingerprint || pinned) is refused, so the first
-    /// island to connect no longer decides the contract. elastic: pins the
-    /// JOIN backend identity before the first JOIN. None keeps first-wins.
+    /// island to connect no longer decides the contract. None keeps first-wins.
     pub expected_island_contract: Option<[u8; 32]>,
-    /// elastic: membership lease (seconds without heartbeat before removal).
-    pub island_lease_s: f64,
-    /// Fencing token of this syncer incarnation. elastic: every message.
-    /// Fragment rounds: a HELLO that carries a lower epoch is refused; the
-    /// epoch is persisted next to the checkpoint and never lowered on resume.
+    /// Fencing token of this syncer incarnation: a HELLO that carries a
+    /// lower epoch is refused; the epoch is persisted next to the checkpoint
+    /// and never lowered on resume.
     pub syncer_epoch: u64,
-    /// elastic: final grace window after total_steps; None = soft deadline.
-    pub elastic_final_grace_s: Option<u64>,
     /// Dynamic membership of the fragment-round server (leases, re-JOIN,
     /// fencing, capacity quorum, soft deadline, carry discount). The default
     /// keeps the fixed-membership behavior.
@@ -213,7 +204,6 @@ impl Config {
             LearnerWeight::Equal => 1,
         });
         encoded.push(u8::from(self.require_profile_binding));
-        self.island_scheduling.encode_contract(&mut encoded);
         // Appended only when set, so plain-Nesterov hashes stay unchanged.
         if let Some(period) = self.outer_delayed_nesterov_period {
             encoded.extend_from_slice(DELAYED_NESTEROV_PROFILE_DOMAIN);
@@ -496,6 +486,11 @@ enum Event {
     },
     Disconnected {
         member: Member,
+    },
+    /// The island announced why it leaves; its disconnect follows.
+    Leave {
+        member: Member,
+        reason: u8,
     },
     /// A peer-recovery control message (`recovery.rs`).
     Recovery {
@@ -898,11 +893,6 @@ fn validate_config(cfg: &Config) -> Result<()> {
     if cfg.learners == 0 {
         bail!("--learners must be positive");
     }
-    if cfg.expert_token_weights
-        && matches!(cfg.island_scheduling, crate::elastic::IslandSchedulingMode::Elastic(_))
-    {
-        bail!("--expert-token-weights needs fragment rounds; the whole-vector elastic loop has no per-tensor weights");
-    }
     if cfg.quorum == 0 {
         bail!("--quorum must be positive");
     }
@@ -998,17 +988,13 @@ fn validate_config(cfg: &Config) -> Result<()> {
 }
 
 /// A sharded head runs independent generic fragment rounds per shard.  Modes
-/// whose semantics span all fragments (strict policy sweeps, the elastic
-/// whole-model loop) or all shards (learner-budget cutoff) are refused.
+/// whose semantics span all fragments (strict policy sweeps) or all shards (learner-budget cutoff) are refused.
 fn validate_shard_config(cfg: &Config) -> Result<()> {
     if !cfg.shard.is_sharded() {
         return Ok(());
     }
     if cfg.policy_sweep_fragments.is_some() {
         bail!("--shard-count > 1 does not support --policy-sweep-fragments");
-    }
-    if cfg.island_scheduling != crate::elastic::IslandSchedulingMode::Legacy {
-        bail!("--shard-count > 1 requires the fragment-round scheduler (--island-scheduling-mode legacy)");
     }
     if cfg.learner_budget_steps.is_some() {
         bail!("--shard-count > 1 does not support --learner-budget-steps");
@@ -1155,52 +1141,7 @@ fn check_resume_checkpoint(cfg: &Config) -> Result<()> {
 }
 
 pub async fn run(cfg: Config) -> Result<()> {
-    run_with_listener(cfg, None).await
-}
-
-/// `run` on a listener the caller already bound (tests bind port 0 so no
-/// other test can take the port between choosing and binding it). Only the
-/// fragment-round loop uses it; `None` binds `cfg.port`.
-async fn run_with_listener(cfg: Config, bound: Option<TcpListener>) -> Result<()> {
     validate_config(&cfg)?;
-    if let crate::elastic::IslandSchedulingMode::Elastic(params) = cfg.island_scheduling {
-        // Whole-vector service loop (elastic_server.rs): membership,
-        // capacity-weighted stepping, soft deadline, leases, carry, tensor
-        // merge with the outer optimizer, checkpoint and tape. The
-        // fragment-round loop below never reaches it.
-        let listener = TcpListener::bind(("0.0.0.0", cfg.port))
-            .await
-            .with_context(|| format!("bind elastic syncer port {}", cfg.port))?;
-        let version = crate::elastic_server::run(
-            listener,
-            crate::elastic_server::ElasticServerConfig {
-                params,
-                expected_backend_identity: cfg.expected_island_contract,
-                key: cfg
-                    .island_hmac_key
-                    .clone()
-                    .context("elastic mode requires an island HMAC key")?,
-                syncer_epoch: cfg.syncer_epoch,
-                lease_s: cfg.island_lease_s,
-                total_steps: cfg.total_steps,
-                event_tape: cfg.event_tape.clone(),
-                tick: std::time::Duration::from_millis(50),
-                outer_lr: cfg.outer_lr,
-                outer_momentum: cfg.outer_momentum,
-                outer_delayed_nesterov_period: cfg.outer_delayed_nesterov_period,
-                final_grace: std::time::Duration::from_secs(
-                    cfg.elastic_final_grace_s.unwrap_or(params.soft_deadline_s),
-                ),
-                checkpoint_path: cfg.checkpoint_path.clone(),
-                checkpoint_every: cfg.checkpoint_every,
-                resume: cfg.resume,
-            },
-        )
-        .await?
-        .0;
-        info!(outer_version = version, "elastic syncer finished");
-        return Ok(());
-    }
     check_resume_checkpoint(&cfg)?;
     let semantic_profile_hash = cfg.semantic_profile_hash();
     if let Some(steps) = cfg.learner_budget_steps {
@@ -1214,12 +1155,9 @@ async fn run_with_listener(cfg: Config, bound: Option<TcpListener>) -> Result<()
         // before accepting any learner so every early failure stays recovery-only.
         remove_final_marker(cfg.checkpoint_path.as_ref().unwrap())?;
     }
-    let listener = match bound {
-        Some(listener) => listener,
-        None => TcpListener::bind(("0.0.0.0", cfg.port))
-            .await
-            .with_context(|| format!("bind port {}", cfg.port))?,
-    };
+    let listener = TcpListener::bind(("0.0.0.0", cfg.port))
+        .await
+        .with_context(|| format!("bind port {}", cfg.port))?;
     let semantic_profile_sha256: String = semantic_profile_hash
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -1254,7 +1192,7 @@ async fn run_with_listener(cfg: Config, bound: Option<TcpListener>) -> Result<()
         expected_contract: cfg.expected_island_contract,
     });
     if hello_auth.key.is_none() {
-        warn!("legacy syncer runs WITHOUT island authentication (HELLO is not HMAC-checked)");
+        warn!("syncer runs WITHOUT island authentication (HELLO is not HMAC-checked)");
     }
     tokio::spawn(async move {
         loop {
@@ -1331,7 +1269,7 @@ pub struct HelloAuth {
     pub expected_contract: Option<[u8; 32]>,
 }
 
-/// Domain of the legacy HELLO MAC: HMAC-SHA256(key, domain || hello_body).
+/// Domain of the HELLO MAC: HMAC-SHA256(key, domain || hello_body).
 pub const HELLO_MAC_DOMAIN: &[u8] = b"yeto-hello-mac-v1\0";
 /// Domain of the RL session contract (yeto.rl.engine.backend_identity).
 pub const SESSION_CONTRACT_DOMAIN: &[u8] = b"yeto-rl-session-contract-v2\0";
@@ -1341,14 +1279,13 @@ pub const SESSION_CONTRACT_DOMAIN: &[u8] = b"yeto-rl-session-contract-v2\0";
 fn open_hello<'a>(key: Option<&[u8]>, payload: &'a [u8]) -> Result<&'a [u8]> {
     let Some(key) = key else { return Ok(payload) };
     let mut framed = Vec::with_capacity(payload.len() + 1);
-    // elastic::open MACs msg_type || body; HELLO uses its own domain instead.
-    if payload.len() < crate::elastic::HMAC_LEN {
+    if payload.len() < crate::hmac::HMAC_LEN {
         bail!("HELLO shorter than its HMAC (island has no YETO_ISLAND_HMAC_KEY?)");
     }
-    let (body, mac) = payload.split_at(payload.len() - crate::elastic::HMAC_LEN);
+    let (body, mac) = payload.split_at(payload.len() - crate::hmac::HMAC_LEN);
     framed.extend_from_slice(HELLO_MAC_DOMAIN);
     framed.extend_from_slice(body);
-    let expected = crate::elastic::hmac_sha256(key, &framed);
+    let expected = crate::hmac::hmac_sha256(key, &framed);
     let diff = expected.iter().zip(mac).fold(0u8, |acc, (x, y)| acc | (x ^ y));
     if diff != 0 {
         bail!("HELLO HMAC mismatch (wrong or missing island HMAC key)");
@@ -1636,7 +1573,7 @@ async fn handle_connection(
                 syncer_profile_hash,
                 compat_group,
             };
-            // Strict and elastic alike: a HELLO whose contract differs from the
+            // A HELLO whose contract differs from the
             // established session is refused on this connection only (MSG_ERROR
             // naming both hashes). The syncer and the islands already admitted
             // keep running; one mis-wired island (e.g. a Miles island in a verl
@@ -1929,6 +1866,7 @@ async fn read_loop(
                 MSG_INIT_PARAMS => Ok(group.max_init_payload),
                 MSG_PUSH_FRAGMENT => Ok(group.max_push_payload),
                 MSG_HEARTBEAT => Ok(12),
+                MSG_LEAVE => Ok(5),
                 MSG_FINAL_ACK => Ok(10),
                 MSG_BUDGET_DONE => Ok(8),
                 MSG_CHUNK => Ok(CHUNK_HEADER_SIZE + CHUNK_SIZE as u64),
@@ -2210,6 +2148,27 @@ async fn dispatch_inner(
                 .await
                 .ok();
         }
+        MSG_LEAVE => {
+            let mut r = Reader(payload);
+            let learner_id = r.u32()?;
+            let reason = r.u8()?;
+            if learner_id != group.member.learner_id {
+                bail!(
+                    "LEAVE learner id {learner_id} does not match connected group {}",
+                    group.member.learner_id
+                );
+            }
+            if r.remaining() != 0 {
+                bail!("trailing bytes in LEAVE");
+            }
+            event_tx
+                .send(Event::Leave {
+                    member: group.member,
+                    reason,
+                })
+                .await
+                .ok();
+        }
         MSG_FINAL_ACK => {
             let global_step = decode_final_ack(payload)?;
             event_tx
@@ -2408,6 +2367,11 @@ async fn scheduler(
     let mut budget_reports: HashSet<u32> = HashSet::new();
     let strict_exact = cfg.max_base_lag == Some(0);
     let fixed_roster = strict_exact && cfg.quorum == cfg.learners && cfg.grace_ms == 0;
+    // Dynamic membership writes island-pool records next to the merge records.
+    let dynamic = !cfg.membership.is_static();
+    let mut lease_expired: HashSet<Member> = HashSet::new();
+    // LEAVE reasons of islands whose disconnect has not arrived yet.
+    let mut leave_reasons: HashMap<Member, u8> = HashMap::new();
     let checkpoint_each_round = checkpoint_before_broadcast(&cfg);
 
     // Phase 1: wait until every fragment is initialized (via INIT_PARAMS or
@@ -2442,6 +2406,17 @@ async fn scheduler(
             }
             Event::Hello { group } => {
                 admit_recovering_outside_training(&registry, &group, "initialization").await;
+                if dynamic {
+                    append_pool_record(
+                        cfg.event_tape.as_deref(),
+                        "pool_join",
+                        cfg.syncer_epoch,
+                        &format!(
+                            "\"island_id\":{},\"generation\":{},\"catch_up\":false,\"base_version\":0",
+                            group.member.learner_id, group.member.generation
+                        ),
+                    );
+                }
                 if state.is_none() {
                     // Layout comes from the HELLO of the first learner.
                     // (All learners must build identical layouts.)
@@ -2512,7 +2487,7 @@ async fn scheduler(
                 }
             }
             Event::Push { .. } => warn!("push before initialization; dropped"),
-            Event::Heartbeat { .. } => {}
+            Event::Heartbeat { .. } | Event::Leave { .. } => {}
             Event::FinalAck { member, .. } => warn!(
                 learner_id = member.learner_id,
                 generation = member.generation,
@@ -2619,6 +2594,9 @@ async fn scheduler(
     let mut cutoff_established = false;
     let mut first_budget_report: Option<(Member, u64)> = None;
     let mut recovery = PeerRecovery::new(cfg.recovery.clone());
+    if dynamic {
+        write_pool_status(&cfg, &registry, st.global_step, "running");
+    }
     'outer: while next_t <= last_step
         || !inflight.is_empty()
         || !computing.is_empty()
@@ -2630,6 +2608,18 @@ async fn scheduler(
             break 'outer;
         }
         let expired = expire_member_leases(&registry, &mut inflight, &mut step_rates).await;
+        for member in &expired {
+            lease_expired.insert(*member);
+            append_pool_record(
+                cfg.event_tape.as_deref(),
+                "pool_leave",
+                cfg.syncer_epoch,
+                &format!(
+                    "\"island_id\":{},\"generation\":{},\"reason\":\"lease_expired\"",
+                    member.learner_id, member.generation
+                ),
+            );
+        }
         if !recovery.is_empty() {
             let now = Instant::now();
             let candidates = recovery_candidates(&registry, &inflight);
@@ -2700,6 +2690,9 @@ async fn scheduler(
                 }
             }
             next_commit_t = schedule.step_after(next_commit_t);
+            if dynamic {
+                write_pool_status(&cfg, &registry, st.global_step, "running");
+            }
         }
 
         // Keep the pipeline full (throttled by min_round_interval_ms).
@@ -3018,6 +3011,14 @@ async fn scheduler(
                             push.base_version,
                         )
                     };
+                    let pool = |kind: &str, fields: String| {
+                        if dynamic {
+                            append_pool_record(cfg.event_tape.as_deref(), kind, cfg.syncer_epoch, &fields);
+                        }
+                    };
+                    let rejected = |reason: &str| {
+                        pool("delta_rejected", format!("\"island_id\":{learner_id},\"reason\":\"{reason}\""));
+                    };
                     if let Err(reason) = fenced {
                         warn!(
                             learner_id,
@@ -3026,13 +3027,31 @@ async fn scheduler(
                             fragment = fragment_id,
                             "push fenced: {reason:#}"
                         );
+                        rejected("fenced");
                         continue;
                     }
+                    let base_version = push.base_version;
+                    let round_base = inflight
+                        .iter()
+                        .find(|round| round.t == global_step && round.p == fragment_id as usize)
+                        .map(|round| round.base_version);
                     let disposition =
                         route_push(&mut inflight, member, push, cfg.max_base_lag, fixed_roster);
                     match disposition {
                         PushDisposition::Accepted => {
                             step_rates.note(member, local_step, Instant::now());
+                            let lag = round_base.map_or(0, |base| base.saturating_sub(base_version));
+                            if lag == 0 {
+                                pool("delta_accepted", format!("\"island_id\":{learner_id}"));
+                            } else {
+                                pool(
+                                    "delta_carried_over",
+                                    format!(
+                                        "\"island_id\":{learner_id},\"base\":{base_version},\"lag\":{lag},\"discount\":{:?}",
+                                        cfg.membership.carry_discount(lag)
+                                    ),
+                                );
+                            }
                         }
                         PushDisposition::Duplicate => warn!(
                             learner_id,
@@ -3041,7 +3060,9 @@ async fn scheduler(
                             fragment = fragment_id,
                             "duplicate push rejected"
                         ),
-                        PushDisposition::StaleBase if strict_exact => {
+                        // Fixed roster: a stale base is a strict failure. In an island
+                        // pool a late island is only refused (delta_rejected record).
+                        PushDisposition::StaleBase if strict_exact && !dynamic => {
                             let metric = "rejected_stale_updates";
                             let message = format!(
                                 "learner {learner_id} generation {generation} step {global_step} fragment {fragment_id}: {disposition:?}"
@@ -3049,15 +3070,32 @@ async fn scheduler(
                             append_strict_failure(cfg.event_tape.as_deref(), metric, &message);
                             bail!("RL strict failure {metric}: {message}");
                         }
-                        disposition => warn!(
-                            learner_id,
-                            generation,
-                            step = global_step,
-                            fragment = fragment_id,
-                            reason = ?disposition,
-                            "push rejected"
-                        ),
+                        disposition => {
+                            warn!(
+                                learner_id,
+                                generation,
+                                step = global_step,
+                                fragment = fragment_id,
+                                reason = ?disposition,
+                                "push rejected"
+                            );
+                            rejected(match disposition {
+                                PushDisposition::StaleBase => "carry_lag_exceeded",
+                                PushDisposition::OutOfRound => "out_of_round",
+                                PushDisposition::FutureBase => "future_base",
+                                _ => "unexpected_member",
+                            });
+                        }
                     }
+                }
+                Event::Leave { member, reason } => {
+                    info!(
+                        learner_id = member.learner_id,
+                        generation = member.generation,
+                        reason = %leave_reason_name(reason),
+                        "island leaves the pool"
+                    );
+                    leave_reasons.insert(member, reason);
                 }
                 Event::Heartbeat { member, local_step } => {
                     registry.lock().unwrap().membership.renew(member, Instant::now());
@@ -3131,6 +3169,18 @@ async fn scheduler(
                         .unwrap()
                         .membership
                         .record_catch_up(group.member, &st.versions);
+                    if dynamic {
+                        append_pool_record(
+                            cfg.event_tape.as_deref(),
+                            "pool_join",
+                            cfg.syncer_epoch,
+                            &format!(
+                                "\"island_id\":{},\"generation\":{},\"catch_up\":true,\"base_version\":{}",
+                                group.member.learner_id, group.member.generation, st.global_step
+                            ),
+                        );
+                        write_pool_status(&cfg, &registry, st.global_step, "running");
+                    }
                     if !repull_rounds_for(&group, &registry, &mut inflight, fixed_roster, &budget_cutoff).await {
                         cutoff_established = true;
                         break 'outer;
@@ -3252,6 +3302,27 @@ async fn scheduler(
                         generation = member.generation,
                         "learner connection generation disconnected"
                     );
+                    if dynamic && !lease_expired.contains(&member) {
+                        // Only a departure without a newer generation leaves the
+                        // pool; an expired lease already wrote its pool_leave.
+                        let replaced = registry.lock().unwrap().current.contains_key(&member.learner_id);
+                        if !replaced {
+                            append_pool_record(
+                                cfg.event_tape.as_deref(),
+                                "pool_leave",
+                                cfg.syncer_epoch,
+                                &format!(
+                                    "\"island_id\":{},\"generation\":{},\"reason\":\"{}\"",
+                                    member.learner_id,
+                                    member.generation,
+                                    leave_reasons
+                                        .get(&member)
+                                        .map_or_else(|| "disconnected".to_string(), |r| leave_reason_name(*r))
+                                ),
+                            );
+                        }
+                    }
+                    leave_reasons.remove(&member);
                     step_rates.remove(member);
                     let candidates = recovery_candidates(&registry, &inflight);
                     let out = recovery.on_gone(member, &candidates, Instant::now());
@@ -3436,7 +3507,13 @@ async fn scheduler(
             .map(|group| group.member.learner_id)
             .collect()
     };
+    if dynamic {
+        write_pool_status(&cfg, &registry, st.global_step, "finishing");
+    }
     finalize_learners(&cfg, &st, &mut events, &registry, &final_members).await?;
+    if dynamic {
+        write_pool_status(&cfg, &registry, st.global_step, "finished");
+    }
     info!("training complete after {} outer steps", cfg.total_steps);
     // Give writer tasks a moment to flush the final control frames.
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -3636,7 +3713,7 @@ async fn collect_budget_reports(
                 generation = member.generation,
                 "disconnected while waiting for learner-budget cutoff"
             ),
-            Event::Init { .. } | Event::FinalAck { .. } => {}
+            Event::Init { .. } | Event::FinalAck { .. } | Event::Leave { .. } => {}
             Event::Recovery { member, .. } => ignore_recovery_message(member, "the budget cutoff"),
         }
     }
@@ -4061,6 +4138,9 @@ fn prepare_round_compute(
             })?;
             tensor_scales.push(scales);
         }
+    }
+    if !cfg.membership.is_static() {
+        append_outer_step_record(cfg, round, &ordered_pushes, &weights);
     }
     let Some(fold) = round.fold.take() else {
         let tensor_scales = cfg.expert_token_weights.then_some(tensor_scales.as_slice());
@@ -4789,6 +4869,12 @@ async fn finalize_learners(
     if expected.is_empty() {
         bail!("cannot finalize: no live learner groups at the final cut");
     }
+    // Dynamic membership: the final cut goes to every island that is (or
+    // becomes) connected, the wait is bounded by the final grace window and
+    // an island that left or never answered does not fail the run.
+    let final_grace = cfg.membership.final_grace;
+    let mut expected = expected.clone();
+    let expected = &mut expected;
     let mut eligible: HashMap<u32, HashSet<Member>> = HashMap::new();
     for group in current_groups(registry) {
         if expected.contains(&group.member.learner_id) {
@@ -4811,28 +4897,45 @@ async fn finalize_learners(
         }
     }
 
-    let deadline = Instant::now() + Duration::from_secs(cfg.final_ack_timeout_s);
+    let wait = final_grace.unwrap_or(Duration::from_secs(cfg.final_ack_timeout_s));
+    let deadline = Instant::now() + wait;
     let mut acknowledged: HashMap<u32, Member> = HashMap::new();
     // With dynamic membership, an island whose lease runs out during
     // finalization is absent: the final cut no longer waits for its ACK.
     let mut absence = FinalAbsence::new(cfg, expected, registry);
-    while !absence.pending(&acknowledged).is_empty() {
+    while !absence.pending(expected, &acknowledged).is_empty() {
         let now = Instant::now();
         let wake = absence.next_deadline(registry).map_or(deadline, |at| at.min(deadline));
         let event = match tokio::time::timeout(wake.saturating_duration_since(now), events.recv()).await {
             Ok(event) => event.context("event channel closed during finalization")?,
             Err(_) if Instant::now() < deadline => {
-                for learner_id in absence.drop_expired(registry, Instant::now()) {
+                for learner_id in absence.drop_expired(registry, expected, Instant::now()) {
                     warn!(learner_id, "lease expired during finalization; final ACK no longer required");
                 }
-                if absence.pending(&acknowledged).is_empty() && acknowledged.is_empty() {
+                if absence.pending(expected, &acknowledged).is_empty() && acknowledged.is_empty() {
                     bail!("cannot finalize: every learner's lease expired before it acknowledged the final cut");
                 }
                 continue;
             }
             Err(_) => {
-                let mut missing: Vec<u32> = absence.pending(&acknowledged).into_iter().collect();
+                let mut missing: Vec<u32> = absence.pending(expected, &acknowledged).into_iter().collect();
                 missing.sort_unstable();
+                if final_grace.is_some() {
+                    warn!(?missing, "final grace window ended; finishing without these islands");
+                    let acked: Vec<u32> = acknowledged.keys().copied().collect();
+                    append_pool_record(
+                        cfg.event_tape.as_deref(),
+                        "final_grace_expired",
+                        cfg.syncer_epoch,
+                        &format!(
+                            "\"final_step\":{},\"acknowledged\":{},\"missing\":{}",
+                            st.global_step,
+                            json_ids(&acked),
+                            json_ids(&missing)
+                        ),
+                    );
+                    break;
+                }
                 bail!(
                     "finalization timed out after {}s waiting for learner acknowledgements: {:?}",
                     cfg.final_ack_timeout_s,
@@ -4852,7 +4955,7 @@ async fn finalize_learners(
             } => {
                 let learner_id = member.learner_id;
                 match record_final_ack(
-                    expected,
+                    &*expected,
                     &eligible,
                     &mut acknowledged,
                     member,
@@ -4889,6 +4992,11 @@ async fn finalize_learners(
             Event::Hello { group } => {
                 admit_recovering_outside_training(registry, &group, "finalization").await;
                 let member = group.member;
+                if final_grace.is_some() && is_current_member(registry, member) {
+                    // A late (re-)JOIN still gets the final cut and may
+                    // acknowledge it within the grace window.
+                    expected.insert(member.learner_id);
+                }
                 if expected.contains(&member.learner_id)
                     && !acknowledged.contains_key(&member.learner_id)
                     && is_current_member(registry, member)
@@ -4918,6 +5026,20 @@ async fn finalize_learners(
                 }
             }
             Event::Disconnected { member } => {
+                if final_grace.is_some()
+                    && !acknowledged.contains_key(&member.learner_id)
+                    && !current_groups(registry)
+                        .iter()
+                        .any(|group| group.member.learner_id == member.learner_id)
+                {
+                    // The island left: stop waiting for it unless it re-JOINs.
+                    expected.remove(&member.learner_id);
+                    info!(
+                        learner_id = member.learner_id,
+                        "island left during the final grace window"
+                    );
+                    continue;
+                }
                 warn!(
                     learner_id = member.learner_id,
                     generation = member.generation,
@@ -4926,6 +5048,7 @@ async fn finalize_learners(
             }
             Event::Push { .. }
             | Event::Heartbeat { .. }
+            | Event::Leave { .. }
             | Event::Init { .. }
             | Event::Recovery { .. }
             | Event::BudgetDone { .. } => {
@@ -4959,7 +5082,6 @@ async fn finalize_learners(
 /// from the wait when its lease expires, or when it stays disconnected for one
 /// lease without a new generation saying HELLO.
 struct FinalAbsence {
-    expected: HashSet<u32>,
     lease: Option<Duration>,
     disconnected_since: HashMap<u32, Instant>,
     dropped: HashSet<u32>,
@@ -4976,11 +5098,12 @@ impl FinalAbsence {
                 disconnected_since.insert(*id, now);
             }
         }
-        Self { expected: expected.clone(), lease, disconnected_since, dropped: HashSet::new() }
+        Self { lease, disconnected_since, dropped: HashSet::new() }
     }
 
-    fn pending(&self, acknowledged: &HashMap<u32, Member>) -> HashSet<u32> {
-        self.expected
+    /// `expected` is the finalization's live set (a late JOIN adds to it).
+    fn pending(&self, expected: &HashSet<u32>, acknowledged: &HashMap<u32, Member>) -> HashSet<u32> {
+        expected
             .iter()
             .copied()
             .filter(|id| !acknowledged.contains_key(id) && !self.dropped.contains(id))
@@ -5017,7 +5140,7 @@ impl FinalAbsence {
     }
 
     /// Drop every pending learner whose lease expired; returns them in id order.
-    fn drop_expired(&mut self, registry: &Registry, now: Instant) -> Vec<u32> {
+    fn drop_expired(&mut self, registry: &Registry, expected: &HashSet<u32>, now: Instant) -> Vec<u32> {
         let Some(lease) = self.lease else { return Vec::new() };
         let mut gone: Vec<u32> = registry
             .lock()
@@ -5032,7 +5155,7 @@ impl FinalAbsence {
                 .filter(|(_, since)| now.saturating_duration_since(**since) >= lease)
                 .map(|(id, _)| *id),
         );
-        gone.retain(|id| self.expected.contains(id) && self.dropped.insert(*id));
+        gone.retain(|id| expected.contains(id) && self.dropped.insert(*id));
         for id in &gone {
             self.disconnected_since.remove(id);
         }
@@ -5110,6 +5233,119 @@ async fn send_fragment(
 }
 
 /// One JSONL record per merge: the event tape.
+/// One island-pool record on the event tape: `{"kind":..,"syncer_epoch":..,
+/// <fields>,"time_unix":..}`. Written only with dynamic membership; the
+/// kinds (`pool_join`, `pool_leave`, `delta_carried_over`, `delta_rejected`,
+/// `outer_step`, `final_grace_expired`) are what the merge-metrics folder
+/// and the launcher's pool reader consume.
+fn append_pool_record(path: Option<&std::path::Path>, kind: &str, syncer_epoch: u64, fields: &str) {
+    use std::io::Write;
+
+    let Some(path) = path else {
+        return;
+    };
+    let sep = if fields.is_empty() { "" } else { "," };
+    let line = format!(
+        "{{\"kind\":\"{kind}\",\"syncer_epoch\":{syncer_epoch}{sep}{fields},\"time_unix\":{:?}}}\n",
+        unix_now()
+    );
+    let result = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| file.write_all(line.as_bytes()));
+    if let Err(error) = result {
+        warn!("event tape write failed: {error}");
+    }
+}
+
+/// The `outer_step` pool record of one merged round: who arrived, each
+/// push's normalized merge weight (`[island, base_version, weight]`), and
+/// which expected islands are absent. `timed_out` marks a soft-deadline
+/// merge below quorum.
+fn append_outer_step_record(
+    cfg: &Config,
+    round: &Round,
+    ordered_pushes: &[(&Member, &Push)],
+    weights: &[f64],
+) {
+    let capacity = |members: &mut dyn Iterator<Item = &Member>| -> f64 {
+        members.map(|member| cfg.membership.capacity(member.learner_id)).sum()
+    };
+    let cap_arrived = capacity(&mut round.pushes.keys());
+    let cap_total = capacity(&mut round.expected_members.iter());
+    let total: f64 = weights.iter().sum();
+    let entry = |(member, push): &(&Member, &Push), weight: f64| {
+        format!("[{},{},{:?}]", member.learner_id, push.base_version, weight)
+    };
+    let raw: Vec<String> = ordered_pushes.iter().zip(weights).map(|(p, w)| entry(p, *w)).collect();
+    let normalized: Vec<String> = ordered_pushes
+        .iter()
+        .zip(weights)
+        .map(|(p, w)| entry(p, if total > 0.0 { w / total } else { 0.0 }))
+        .collect();
+    let absent: Vec<u32> = round
+        .expected_members
+        .iter()
+        .filter(|member| !round.pushes.contains_key(member))
+        .map(|member| member.learner_id)
+        .collect();
+    append_pool_record(
+        cfg.event_tape.as_deref(),
+        "outer_step",
+        cfg.syncer_epoch,
+        &format!(
+            "\"step\":{},\"fragment\":{},\"base_version\":{},\"arrived\":{},\"cap_arrived\":{:?},\"cap_total\":{:?},\"timed_out\":{},\"raw_weights\":[{}],\"weights\":[{}],\"absent\":{},\"step_seconds\":{:?}",
+            round.t,
+            round.p,
+            round.base_version,
+            round.pushes.len(),
+            cap_arrived,
+            cap_total,
+            !round.quorum_reached(),
+            raw.join(","),
+            normalized.join(","),
+            json_ids(&absent),
+            round.started.elapsed().as_secs_f64(),
+        ),
+    );
+}
+
+/// Schema of `status.json`, written next to the event tape with dynamic
+/// membership (read by `yeto.rl.engine.island_status`).
+const POOL_STATUS_SCHEMA: &str = "yeto.syncer.elastic-status/v1";
+
+/// Atomically rewrite `status.json` beside the event tape: run state, syncer
+/// epoch, committed step and the live islands. Best effort (a write failure
+/// is logged, never fatal).
+fn write_pool_status(cfg: &Config, registry: &Registry, outer_version: u64, state: &str) {
+    let Some(tape) = cfg.event_tape.as_deref() else {
+        return;
+    };
+    let (syncer_epoch, membership_epoch, live) = {
+        let registry = registry.lock().unwrap();
+        let membership = &registry.membership;
+        (membership.syncer_epoch(), membership.epoch, membership.live_status(Instant::now()))
+    };
+    let cap_total: f64 = live.iter().map(|(_, capacity, _)| capacity).sum();
+    let islands: Vec<String> = live
+        .iter()
+        .map(|(id, capacity, lease)| {
+            let lease = lease.map_or_else(|| "null".to_string(), |d| format!("{:?}", d.as_secs_f64()));
+            format!("\"{id}\":{{\"capacity\":{capacity:?},\"lease_remaining_s\":{lease}}}")
+        })
+        .collect();
+    let body = format!(
+        "{{\"schema\":\"{POOL_STATUS_SCHEMA}\",\"state\":\"{state}\",\"syncer_epoch\":{syncer_epoch},\"membership_epoch\":{membership_epoch},\"outer_version\":{outer_version},\"cap_total\":{cap_total:?},\"islands\":{{{}}}}}",
+        islands.join(",")
+    );
+    let path = tape.with_file_name("status.json");
+    let temporary = tape.with_file_name(".status.json.tmp");
+    if let Err(error) = std::fs::write(&temporary, body).and_then(|()| std::fs::rename(&temporary, &path)) {
+        warn!(path = %path.display(), "status write failed: {error}");
+    }
+}
+
 fn append_strict_failure(path: Option<&std::path::Path>, metric: &str, message: &str) {
     use std::io::Write;
 
@@ -5398,7 +5634,7 @@ mod hello_auth_tests {
         let mut input = HELLO_MAC_DOMAIN.to_vec();
         input.extend_from_slice(body);
         let mut out = body.to_vec();
-        out.extend_from_slice(&crate::elastic::hmac_sha256(key, &input));
+        out.extend_from_slice(&crate::hmac::hmac_sha256(key, &input));
         out
     }
 
@@ -5777,12 +6013,9 @@ mod tests {
             max_base_lag: Some(0),
             learner_weight: LearnerWeight::Equal,
             require_profile_binding: false,
-            island_scheduling: Default::default(),
             island_hmac_key: None,
             expected_island_contract: None,
-            island_lease_s: 30.0,
             syncer_epoch: 0,
-            elastic_final_grace_s: None,
             membership: Default::default(),
             recovery: Default::default(),
             weighted_fold: Default::default(),
@@ -5838,46 +6071,6 @@ mod tests {
     }
 
     #[test]
-    fn elastic_profile_hash_matches_the_python_canonical_vector() {
-        // Same inputs as semantic_profile_hash_matches_the_python_canonical_vector
-        // plus elastic defaults; Python: tests/test_rl_inter_island_contract.py.
-        let mut config = round_test_config(8);
-        config.learners = 2;
-        config.quorum = 2;
-        config.grace_gamma = 0.8;
-        config.grace_tau = 2.0;
-        config.pipeline = 2;
-        config.sync_interval_steps = 24.0;
-        config.quorum_timeout_s = 900;
-        config.final_ack_timeout_s = 900;
-        config.outer_lr = 0.7;
-        config.outer_momentum = 0.9;
-        config.checkpoint_path = Some(std::path::PathBuf::from("/ignored/actor.ckpt"));
-        config.checkpoint_every = 1;
-        config.resume = true;
-        config.mark_final_checkpoint = true;
-        config.require_profile_binding = true;
-        config.island_scheduling = crate::elastic::IslandSchedulingMode::Elastic(
-            crate::elastic::ElasticParams {
-                quorum_theta: 0.75,
-                carry_gamma: 0.5,
-                soft_deadline_s: 900,
-                q_min: 1,
-                max_carry_lag: 2,
-            },
-        );
-        let digest = config
-            .semantic_profile_hash()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        assert_eq!(
-            digest,
-            "c677c127b1ad3e1da179863ee02b6b2e1bc232edb03b088bad62251e5d8d9ba5"
-        );
-    }
-
-    #[test]
     fn delayed_nesterov_profile_hash_matches_the_python_canonical_vector() {
         // Python: tests/test_rl_inter_island_contract.py (DELAYED_NESTEROV_4).
         let mut config = round_test_config(8);
@@ -5908,53 +6101,8 @@ mod tests {
     }
 
     #[test]
-    fn island_scheduling_mode_is_bound_into_the_profile_hash() {
-        use crate::elastic::{ElasticParams, IslandSchedulingMode};
-        let mut config = round_test_config(8);
-        let legacy = config.semantic_profile_hash();
-        // An explicit legacy mode and an HMAC key leave the hash untouched.
-        config.island_scheduling = IslandSchedulingMode::Legacy;
-        config.island_hmac_key = Some(b"secret".to_vec());
-        assert_eq!(config.semantic_profile_hash(), legacy);
-        let base = ElasticParams {
-            quorum_theta: 0.75,
-            carry_gamma: 0.5,
-            soft_deadline_s: 900,
-            q_min: 1,
-            max_carry_lag: 2,
-        };
-        config.island_scheduling = IslandSchedulingMode::Elastic(base);
-        let elastic = config.semantic_profile_hash();
-        assert_ne!(elastic, legacy, "legacy HELLO must not match an elastic server");
-        let variants = [
-            ElasticParams { quorum_theta: 0.5, ..base },
-            ElasticParams { carry_gamma: 0.25, ..base },
-            ElasticParams { soft_deadline_s: 60, ..base },
-            ElasticParams { q_min: 2, ..base },
-            ElasticParams { max_carry_lag: 3, ..base },
-        ];
-        for v in variants {
-            config.island_scheduling = IslandSchedulingMode::Elastic(v);
-            assert_ne!(config.semantic_profile_hash(), elastic, "{v:?}");
-        }
-    }
-
-    // --- 0.8a: legacy equivalence (strict synchronous rounds) ---------------
-
-    #[test]
-    fn legacy_contract_encoding_appends_nothing() {
-        let mut encoded = vec![1, 2, 3];
-        crate::elastic::IslandSchedulingMode::Legacy.encode_contract(&mut encoded);
-        assert_eq!(encoded, vec![1, 2, 3]);
-        assert_eq!(
-            round_test_config(8).island_scheduling,
-            crate::elastic::IslandSchedulingMode::Legacy
-        );
-    }
-
-    #[test]
-    fn legacy_round_needs_every_learner_and_adds_no_extra_wait() {
-        // Strict legacy: quorum == learners, grace 0.
+    fn fixed_roster_round_needs_every_learner_and_adds_no_extra_wait() {
+        // Strict fixed roster: quorum == learners, grace 0.
         let first = member(0, 10);
         let second = member(1, 20);
         let mut round = test_round(vec![first, second]);
@@ -5969,7 +6117,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_round_timeout_never_merges_a_partial_quorum() {
+    fn fixed_roster_round_timeout_never_merges_a_partial_quorum() {
         let first = member(0, 10);
         let mut round = test_round(vec![first, member(1, 20)]);
         round.quorum_size = 2;
@@ -5980,7 +6128,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_strict_round_rejects_a_late_delta_without_carrying_it() {
+    fn fixed_roster_round_rejects_a_late_delta_without_carrying_it() {
         let only = member(0, 10);
         let mut rounds = vec![test_round(vec![only])];
         assert_eq!(
@@ -5988,72 +6136,6 @@ mod tests {
             PushDisposition::StaleBase
         );
         assert!(rounds[0].pushes.is_empty());
-    }
-
-    #[tokio::test]
-    async fn legacy_server_rejects_every_elastic_frame_type() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let key = b"k".to_vec();
-        for msg_type in [MSG_JOIN, MSG_LEAVE, MSG_LEASE_HEARTBEAT, MSG_SAMPLE_INDEX,
-                         MSG_DELTA_READY, MSG_ELASTIC_INIT, MSG_DELTA_TENSOR] {
-            // Bind here and hand the listener over: choosing a free port and
-            // binding it later lets a parallel test take it in between.
-            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let port = listener.local_addr().unwrap().port();
-            let mut config = round_test_config(1);
-            config.port = port;
-            config.island_hmac_key = Some(key.clone());
-            let server = tokio::spawn(run_with_listener(config, Some(listener)));
-            let mut stream = None;
-            for _ in 0..100 {
-                if let Ok(s) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
-                    stream = Some(s);
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-            let mut stream = stream.expect("legacy syncer did not start");
-            // A correctly sealed elastic payload (epoch 0) still must not be
-            // accepted: legacy only knows HELLO/DATA_HELLO/BW_PROBE as a first frame.
-            let payload = crate::elastic::seal(&key, msg_type, 0u64.to_le_bytes().to_vec());
-            let mut frame = MAGIC.to_le_bytes().to_vec();
-            frame.push(msg_type);
-            frame.extend_from_slice(&(payload.len() as u64).to_le_bytes());
-            frame.extend_from_slice(&payload);
-            stream.write_all(&frame).await.unwrap();
-            // Legacy answers with one MSG_ERROR naming the bad first frame
-            // and then closes the connection.
-            let mut reply = Vec::new();
-            tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut reply))
-                .await
-                .expect("legacy syncer kept the connection open")
-                .ok();
-            assert_eq!(reply.get(4), Some(&MSG_ERROR), "type {msg_type}");
-            let text = String::from_utf8_lossy(&reply[13..]);
-            assert!(
-                text.contains(&format!("first frame must be HELLO/DATA_HELLO/BW_PROBE, got {msg_type}")),
-                "type {msg_type}: {text}"
-            );
-            assert!(!server.is_finished(), "type {msg_type}: server exited");
-            server.abort();
-        }
-    }
-
-    #[tokio::test]
-    async fn elastic_mode_requires_an_hmac_key() {
-        let mut config = round_test_config(1);
-        config.port = 0;
-        config.island_scheduling = crate::elastic::IslandSchedulingMode::Elastic(
-            crate::elastic::ElasticParams {
-                quorum_theta: 0.75,
-                carry_gamma: 0.5,
-                soft_deadline_s: 900,
-                q_min: 1,
-                max_carry_lag: 2,
-            },
-        );
-        let err = run(config).await.unwrap_err();
-        assert!(format!("{err:#}").contains("HMAC key"));
     }
 
     fn sweep_test_config(fragments: u32, total_steps: u64) -> Config {
@@ -7411,6 +7493,54 @@ mod tests {
         );
         assert!(started.elapsed() >= Duration::from_millis(900));
         assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[tokio::test]
+    async fn final_grace_finishes_without_a_silent_island_and_tapes_it() {
+        let state = broadcast_test_state(DTYPE_F32);
+        let (group, _frames) = streaming_test_group(DTYPE_F32, false);
+        let registry = registry_with_group(group.clone());
+        let expected = HashSet::from([group.member.learner_id]);
+        let (_event_sender, mut events) = mpsc::channel(1);
+        let dir = std::env::temp_dir().join(format!("yeto-final-grace-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tape_path = dir.join("tape.jsonl");
+        let _ = std::fs::remove_file(&tape_path);
+        let mut cfg = round_test_config(0);
+        cfg.final_ack_timeout_s = 30;
+        cfg.membership.final_grace = Some(Duration::from_millis(300));
+        cfg.event_tape = Some(tape_path.clone());
+        let started = Instant::now();
+
+        finalize_learners(&cfg, &state, &mut events, &registry, &expected)
+            .await
+            .expect("the grace window ends the run without the silent island");
+
+        assert!(started.elapsed() >= Duration::from_millis(250));
+        assert!(started.elapsed() < Duration::from_secs(5), "bounded by the grace, not the ack timeout");
+        let tape = std::fs::read_to_string(&tape_path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(tape.contains("\"kind\":\"final_grace_expired\""), "{tape}");
+        assert!(tape.contains("\"missing\":[0]") && tape.contains("\"acknowledged\":[]"), "{tape}");
+    }
+
+    #[tokio::test]
+    async fn final_grace_stops_waiting_for_an_island_that_left() {
+        let state = broadcast_test_state(DTYPE_F32);
+        let (group, _frames) = streaming_test_group(DTYPE_F32, false);
+        let registry = registry_with_group(group.clone());
+        let expected = HashSet::from([group.member.learner_id]);
+        let (event_sender, mut events) = mpsc::channel(1);
+        let member = group.member;
+        registry.lock().unwrap().unregister(member);
+        event_sender.send(Event::Disconnected { member }).await.unwrap();
+        let mut cfg = round_test_config(0);
+        cfg.membership.final_grace = Some(Duration::from_secs(30));
+        let started = Instant::now();
+
+        finalize_learners(&cfg, &state, &mut events, &registry, &expected).await.unwrap();
+
+        assert!(started.elapsed() < Duration::from_secs(5), "a departed island is not waited for");
     }
 
     fn final_leased_registry(group: Arc<Group>, lease: Duration) -> (Registry, Config) {

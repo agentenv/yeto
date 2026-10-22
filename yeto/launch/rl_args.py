@@ -20,7 +20,7 @@ from .topology import (
     rl_island_count, rl_island_placement_args, rl_island_spec, rl_min_nodes, rl_trainer_shape,
 )
 from .syncer import (
-    ROLE_SYNCERS, island_scheduling_mode, rl_full_parameter_async, rl_needs_critic,
+    ROLE_SYNCERS, island_pool, rl_full_parameter_async, rl_needs_critic,
     rl_syncer_profile, rl_trainable_roles, syncer_shard_count,
 )
 from .storage import _rl_checkpoint_mount
@@ -99,8 +99,8 @@ def _prepare_sao_streaming(args, *, num_islands: int) -> None:
         problems.append("--rl-sao-contracts <final manifest>")
     if args.experimental_rl_sync:
         problems.append("no --experimental-rl-sync")
-    if island_scheduling_mode(args) != "legacy":
-        problems.append("--rl-island-scheduling legacy (no fragment frames in elastic mode)")
+    if island_pool(args):
+        problems.append("a fixed island roster (no island pool options)")
     if rl_trainable_roles(args) != ("actor", "critic"):
         problems.append("an algorithm with a critic (the SAO spec trains actor and critic)")
     if getattr(args, "rl_single_island_no_sync", False):
@@ -185,9 +185,9 @@ def _check_bcast_delta(args) -> None:
     if args.rl_sync_preset not in ("strict-avg", FULL_PARAMETER_SYNC_PRESET):
         raise ValueError("--rl-sync-bcast-delta-full-every only applies to --rl-sync-preset "
                          f"strict-avg or {FULL_PARAMETER_SYNC_PRESET}")
-    if island_scheduling_mode(args) != "legacy" or args.experimental_rl_sync:
-        raise ValueError("--rl-sync-bcast-delta-full-every needs --rl-island-scheduling legacy "
-                         "and no --experimental-rl-sync")
+    if island_pool(args) or args.experimental_rl_sync:
+        raise ValueError("--rl-sync-bcast-delta-full-every needs a fixed island roster (no island "
+                         "pool options) and no --experimental-rl-sync")
 
 
 # S27 P2: asynchronous rounds keep at most two fragment rounds in flight.
@@ -219,8 +219,9 @@ def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
                         else "--local-rl-rounds-per-sync >= 1")
     if args.fragments < 1:
         problems.append("--fragments >= 1")
-    if island_scheduling_mode(args) != "legacy":
-        problems.append("--rl-island-scheduling legacy (no fragment frames in elastic mode)")
+    if island_pool(args) and not async_rounds:
+        problems.append("a fixed island roster (membership options need "
+                        "--rl-sync-full-parameter-rounds async)")
     if rl_needs_critic(args):
         problems.append("a critic-free algorithm (the full-parameter preset trains the actor only)")
     fragment_pipeline = int(getattr(args, "rl_sync_fragment_pipeline", 1))
@@ -316,8 +317,7 @@ def _apply_rl_outer_merge_options(args, *, num_islands: int) -> None:
     Every option left at its default keeps the preset's value, so the syncer
     command and semantic profile are unchanged. The full-parameter preset takes
     them only with asynchronous rounds (S27 P2; the sweep keeps its strict
-    roster); SAO and --experimental-rl-sync take no overrides, and the elastic
-    scheduler has its own quorum and weights."""
+    roster); SAO and --experimental-rl-sync take no overrides."""
     changed = [option for dest, option, default in _RL_OUTER_MERGE_OPTIONS
                if getattr(args, dest, default) != default]
     if not changed:
@@ -333,8 +333,6 @@ def _apply_rl_outer_merge_options(args, *, num_islands: int) -> None:
     if args.experimental_rl_sync:
         raise ValueError(f"{where} do not apply with --experimental-rl-sync "
                          "(it takes the generic syncer flags)")
-    if island_scheduling_mode(args) != "legacy":
-        raise ValueError(f"{where} need --rl-island-scheduling legacy")
     quorum = args.rl_sync_quorum
     if quorum is not None:
         if not 1 <= quorum <= num_islands:
@@ -361,6 +359,50 @@ def _apply_rl_outer_merge_options(args, *, num_islands: int) -> None:
             "decoupled", FULL_PARAMETER_SYNC_PRESET):
         raise ValueError("--rl-sync-matrix-merge rda only applies to --rl-sync-preset decoupled "
                          f"or {FULL_PARAMETER_SYNC_PRESET} with asynchronous rounds")
+
+
+def _check_island_pool(args, *, num_islands: int) -> None:
+    """Membership options (--rl-sync-quorum-theta, ...; dynamic membership)
+    apply to the strict-avg, decoupled and asynchronous full-parameter
+    presets without a critic. The rounds must be able to merge without some
+    island: a capacity quorum (--rl-sync-quorum-theta), a count quorum below
+    the islands, a grace window or a carried base lag (the syncer refuses
+    membership options with a strict fixed roster).
+    --rl-sync-quorum-theta replaces the count quorum, so the syncer's
+    --quorum is 1."""
+    if not island_pool(args):
+        if getattr(args, "rl_syncer_epoch", None) is not None and not getattr(args, "rl_peer_recovery", False):
+            raise ValueError("--rl-syncer-epoch needs island pool options (e.g. --rl-sync-island-lease-s) "
+                             "or --rl-peer-recovery")
+        return
+    preset = args.rl_sync_preset
+    if args.experimental_rl_sync or not (
+            preset in ("strict-avg", "decoupled") or rl_full_parameter_async(args)):
+        raise ValueError("membership options (--rl-sync-quorum-theta, --rl-sync-island-lease-s, "
+                         "...) apply to --rl-sync-preset strict-avg, decoupled, or "
+                         f"{FULL_PARAMETER_SYNC_PRESET} with --rl-sync-full-parameter-rounds async")
+    if rl_needs_critic(args):
+        raise ValueError("membership options do not support a critic yet")
+    if int(getattr(args, "syncer_shards", None) or 1) > 1:
+        raise ValueError("membership options need one syncer (no --syncer-shards > 1)")
+    max_learners = getattr(args, "rl_sync_max_learners", None)
+    if max_learners is not None:
+        if preset == FULL_PARAMETER_SYNC_PRESET:
+            raise ValueError(f"--rl-sync-max-learners does not apply to {FULL_PARAMETER_SYNC_PRESET}: "
+                             "its island session binds the launched roster")
+        if int(max_learners) < num_islands:
+            raise ValueError(f"--rl-sync-max-learners must be at least the {num_islands} islands")
+    if getattr(args, "rl_sync_quorum_theta", None) is not None:
+        if getattr(args, "rl_sync_quorum", None) is not None:
+            raise ValueError("--rl-sync-quorum-theta replaces --rl-sync-quorum; give one of them")
+        args.quorum = 1
+    fixed = (args.rl_sync_max_base_lag == 0 and args.quorum == num_islands
+             and int(args.grace_ms) == 0)
+    if fixed:
+        raise ValueError(
+            "membership options need rounds that may merge without some island: set "
+            "--rl-sync-quorum-theta, --rl-sync-quorum below the island count, --rl-sync-grace-ms "
+            "or --rl-sync-max-base-lag >= 1")
 
 
 def _prepare_node_inventory(args) -> None:
@@ -440,7 +482,7 @@ def _prepare_rl_args(
             expert_full_count=getattr(args, "expert_full_count", 0) or 0,
             rollout_num_gpus=getattr(iargs, "rollout_num_gpus", None),
             placement=getattr(iargs, "rl_placement", "colocated"),
-            island_scheduling=getattr(args, "rl_island_scheduling", "legacy"),
+            island_scheduling="elastic" if island_pool(args) else "legacy",
         )
     if resolve_model_kind(args.model, args.model_kind) != "causal-lm":
         raise ValueError("RL v0 supports only causal language models")
@@ -953,6 +995,7 @@ def _prepare_rl_args(
                 )
     _apply_rl_outer_merge_options(args, num_islands=len(specs))
     syncer_shard_count(args)  # refuse --syncer-shards outside asynchronous rounds now
+    _check_island_pool(args, num_islands=len(specs))
     check_peer_recovery(args)
     if args.spot:
         _rl_checkpoint_mount(args.rl_completed_groups_path)

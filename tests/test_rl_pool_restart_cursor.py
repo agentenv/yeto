@@ -1,17 +1,16 @@
-"""0.21: an elastic island restart resumes its round id and data cursor. CPU, no Ray.
+"""0.21: an island-pool island restart resumes its round id and data cursor. CPU, no Ray.
 
-Before 0.21 ``ElasticAvgSync.start`` always returned round 0, so a restarted island
+Before 0.21 the pool session always started at round 0, so a restarted island
 re-drew the groups it had already trained (or the ledger refused them)."""
 
 from __future__ import annotations
 
 import pytest
 
-from yeto.rl.elastic_client import ElasticClientConfig, ElasticIslandClient
-from yeto.rl.engine.bridges import ElasticAvgSync
+from yeto.rl.engine.bridges import PoolAvgSync
 
+from pool_fakes import FakePoolSyncer as FakeSyncer
 from test_rl_engine_driver import _strict_config
-from test_rl_inter_island_elastic_client import FakeSyncer
 from test_rl_restart_data_cursor import (DataSourceState, MilesLikePool, _close, _events,
                                          _records)
 from test_rl_reconfig_e1 import _setup
@@ -19,10 +18,8 @@ from test_rl_reconfig_e1 import _setup
 
 def _island(tmp_path, fake, *, rounds, source, die_at=None, tape="a.jsonl", ledger=True):
     def factory(engine):
-        client = ElasticIslandClient(ElasticClientConfig(("x", 0), 0, lease_s=30.0, join_timeout_s=2),
-                                     fake.key, connect=fake.connect)
-        return ElasticAvgSync(_strict_config(tmp_path, engine, learner_id=0, rounds=rounds, tape=tape),
-                              client=client, base_wait_s=5.0)
+        return PoolAvgSync(_strict_config(tmp_path, engine, learner_id=0, rounds=rounds, tape=tape),
+                           client=fake.client(0), base_wait_s=5.0)
     driver, ctl, *_ = _setup(tmp_path, rounds=rounds, outer="strict-avg", sync_factory=factory,
                             ledger=ledger)
     pool = MilesLikePool(driver.rollout, source, die_at=die_at)
@@ -40,8 +37,7 @@ def test_restart_resumes_after_ledger_rounds_and_skips_trained_groups(tmp_path):
     assert first.version == 2
     cursor_after_1 = {r["rollout_id"]: r for r in _records(tmp_path) if r["kind"] == "prepared"}[1]["data_cursor"]
 
-    restarted = FakeSyncer(base=list(first.base))  # the syncer kept base_version 2
-    restarted.version = 2
+    restarted = FakeSyncer(base=first.base.tolist(), version=2)  # the syncer kept base_version 2
     driver, ctl, pool = _island(tmp_path, restarted, rounds=rounds, source=DataSourceState(), tape="b.jsonl")
     driver.run()
     assert pool.seeks == [cursor_after_1]  # ledger path (same as strict)
@@ -55,8 +51,7 @@ def test_restart_resumes_after_ledger_rounds_and_skips_trained_groups(tmp_path):
 
 def test_empty_ledger_joining_at_base_version_advances_cursor(tmp_path):
     rounds = 4
-    fake = FakeSyncer(base=[0.0, 0.0])
-    fake.version = 2
+    fake = FakeSyncer(base=[0.0, 0.0], version=2)
     driver, ctl, pool = _island(tmp_path, fake, rounds=rounds, source=DataSourceState())
     driver.run()
     g = driver.sync.groups_per_round
@@ -90,8 +85,7 @@ TAPE_1B = [
 
 def test_1b_regression_no_ledger_island_joining_at_base_3_advances_cursor(tmp_path):
     rounds = 5
-    fake = FakeSyncer(base=[0.0, 0.0], catch_up=True)
-    fake.version = 3
+    fake = FakeSyncer(base=[0.0, 0.0], version=3, catch_up=True)
     driver, ctl, pool = _island(tmp_path, fake, rounds=rounds, source=DataSourceState(), ledger=False)
     assert driver.ledger is None
     driver.run()

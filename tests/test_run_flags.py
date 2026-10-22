@@ -242,7 +242,7 @@ def test_forward_tables_name_flags_of_both_layers():
     with pytest.raises(KeyError):
         rl_forward_pairs("rl_island_bundle_map")  # island-only: the CLI cannot forward it
     with pytest.raises(KeyError):
-        rl_forward_pairs("rl_quorum_theta")  # CLI-only: goes to the syncer, not the island
+        rl_forward_pairs("rl_sync_quorum_theta")  # CLI-only: goes to the syncer, not the island
 
 
 # Flag literals in the launcher's command builders that are NOT island or launch
@@ -252,13 +252,13 @@ _NON_RL_LITERALS = frozenset({
     "--abbrev-ref", "--adapter-dir", "--add", "--address", "--allow-unattested-legacy-adapter",
     "--allow-unauthenticated-islands", "--async-checkpoint", "--bcast-delta-full-every", "--bind", "--cap-add", "--carry-gamma",
     "--checkpoint-every", "--checkpoint-path", "--codex-harness-binary", "--config-json",
-    "--create", "--dashboard-host", "--dearmor", "--depth", "--detach", "--dtype",
+    "--create", "--dashboard-host", "--max-learners", "--dearmor", "--depth", "--detach", "--dtype",
     "--entrypoint", "--expected-island-contract", "--expert-token-weights", "--final-ack-timeout-s", "--final-grace-s", "--follow", "--force",
     "--format", "--get", "--global", "--gpus", "--head", "--ignore-installed",
     "--include-dashboard", "--index-url", "--ipc", "--island-lease-s",
-    "--island-scheduling-mode", "--json", "--learner-weight", "--learners", "--level",
+    "--json", "--learner-weight", "--learners", "--level",
     "--manifest-path", "--mark-final-checkpoint", "--master", "--matrix-merge",
-    "--max-base-lag", "--max-carry-lag", "--shard-count", "--shard-index", "--weighted-fold", "--name", "--net", "--nnodes",
+    "--max-base-lag", "--shard-count", "--shard-index", "--weighted-fold", "--name", "--net", "--nnodes",
     "--no-build-isolation", "--no-checkout", "--no-deps", "--no-follow", "--node",
     "--node-ip-address", "--nproc", "--num-gpus", "--num-inference-steps", "--output-dir",
     "--password-stdin", "--policy-sweep-fragments", "--porcelain", "--port", "--profile",

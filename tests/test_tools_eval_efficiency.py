@@ -462,7 +462,7 @@ def test_e11_arms_read_one_row_set():
     assert f"--rl-allow-local-data --data {spec.YETO_TASK_FILE}" in single and "--gpu modal:4xh100" in single
     multi = spec.yeto_miles_islands_launcher_args(e11, 2, "e11-y", data="t.jsonl", island_tasks="t.json")
     assert "--gpu modal:2xh100,modal:2xh100" in multi and "--rollout-batch-size 16" in multi
-    assert "--rl-rollout-gpus 1" in multi and "--controller head" in multi and "--rl-island-scheduling elastic" in multi
+    assert "--rl-rollout-gpus 1" in multi and "--controller head" in multi and "--rl-sync-quorum-theta 0.75" in multi and "--rl-sync-island-lease-s 150" in multi
     split = spec.island_task_split(e11.groups_per_round, e11.rounds, 2)
     ids = sorted(int(t[3:]) for v in split.values() for t in v)
     assert ids == list(range(1, e11.train_rows + 1))

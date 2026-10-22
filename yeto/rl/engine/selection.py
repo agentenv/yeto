@@ -76,15 +76,11 @@ def ports_rejections(
     # The island loop, the LoRA layouts and the rollout engine are causal-LM only.
     if model_kind != "causal-lm":
         reasons.append(f"model kind {model_kind!r} (ports supports causal LMs only)")
-    full_parameter = (
-        tuning == "full"
-        or parameter_mode == "full"
-        or sync_preset in FULL_PARAMETER_SYNC_PRESETS
-    )
-    if full_parameter and island_scheduling == "elastic":
-        # P0-D7 follow-up (tasks 1.7b.6): the elastic syncer has no fragment frames yet.
-        reasons.append("full-parameter training with --rl-island-scheduling elastic")
-    elif tuning not in ("lora", "full") or parameter_mode not in ("lora", "full"):
+    if island_scheduling == "elastic" and sync_preset == SAO_STREAMING_SYNC_PRESET:
+        # The SAO island session has no pool membership (heartbeat, re-JOIN);
+        # the other presets' limits are checked by the launcher (rl_args).
+        reasons.append("the sao-streaming-full preset with membership options (island pool)")
+    if tuning not in ("lora", "full") or parameter_mode not in ("lora", "full"):
         # Input check: no other parameter mode exists.
         reasons.append(f"tuning {tuning!r} / parameter mode {parameter_mode!r}")
     if sync_preset not in SYNC_PRESETS:

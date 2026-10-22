@@ -21,7 +21,7 @@ from typing import Any
 
 import torch
 
-from yeto.rl.elastic_client import LeaveReason
+from yeto.rl.pool_client import LeaveReason
 
 from . import recovery
 from .fake import FakeEngine, FakeRolloutPool, FakeTrainerGroup

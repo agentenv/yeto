@@ -61,11 +61,9 @@ def test_ppo_is_not_routed_to_legacy():
 @pytest.mark.parametrize(
     "kwargs, reason",
     [
-        (dict(sync_preset="full-parameter", parameter_mode="full", island_scheduling="elastic"), "elastic"),
         (dict(sync_preset="sao-streaming-full", parameter_mode="full",
-              island_scheduling="elastic"), "elastic"),
+              island_scheduling="elastic"), "island pool"),
         (dict(expert_full_count=4), "expert-full"),
-        (dict(sync_preset="full-parameter", expert_full_count=4, island_scheduling="elastic"), "elastic"),
         (dict(use_critic=True), "critic"),
         (dict(extra_argv=("--use-critic",)), "critic"),
         (dict(extra_argv=("--advantage-estimator", "gspo")), "non-GRPO"),

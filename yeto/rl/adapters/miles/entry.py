@@ -644,13 +644,13 @@ def build_sync(
     if getattr(miles_args, "yeto_rl_sync_preset", "strict-avg") == "decoupled":
         return DecoupledSync(miles_args), DecoupledIslandProgress(miles_args)
     progress = StrictIslandProgress(miles_args)
-    if getattr(miles_args, "yeto_rl_island_scheduling", "legacy") == "elastic":
-        # rl-inter-island-scheduling 0.15: absent attribute = legacy (unchanged below).
-        from yeto.rl.engine.bridges import ElasticAvgSync
+    if getattr(miles_args, "yeto_rl_island_pool", False):
+        # Dynamic island pool; absent attribute = fixed roster (unchanged below).
+        from yeto.rl.engine.bridges import PoolAvgSync
 
         if getattr(miles_args, "use_critic", False):
-            raise ValueError("--rl-island-scheduling elastic does not support a critic yet")
-        return ElasticAvgSync(miles_args.yeto_rl_bridge_config, progress=progress,
+            raise ValueError("island pool options do not support a critic yet")
+        return PoolAvgSync(miles_args.yeto_rl_bridge_config, progress=progress,
                               syncer_epoch=int(getattr(miles_args, "yeto_rl_syncer_epoch", 0)),
                               lease_s=getattr(miles_args, "yeto_rl_island_lease_s", None),
                               groups_per_round=int(getattr(miles_args, "rollout_batch_size", 0) or 0) or None,
@@ -914,7 +914,7 @@ def _wire_droppable_reclaim(sync: Any, driver: Any, environ: Any = None) -> Any:
         return None
 
     def leave() -> bool:
-        from yeto.rl.elastic_client import LeaveReason
+        from yeto.rl.pool_client import LeaveReason
 
         return sync.leave(LeaveReason.PREEMPTED)  # once per process; the driver's close won't resend
 

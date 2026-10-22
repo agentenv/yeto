@@ -17,7 +17,7 @@ from test_rl_verl_cut import K, _handles, _model, _round
 
 from yeto.rl.adapters.verl import cut as vcut
 from yeto.rl.adapters.verl import round_cuts
-from yeto.rl.elastic_client import LeaveReason
+from yeto.rl.pool_client import LeaveReason
 from yeto.rl.engine import recovery, trainer_remote
 from yeto.rl.engine.algorithm import AlgorithmSpec
 from yeto.rl.engine.bridges import LocalOnlySync

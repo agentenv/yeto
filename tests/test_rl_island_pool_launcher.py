@@ -1,4 +1,4 @@
-"""--rl-island-scheduling launcher wiring (rl-inter-island-scheduling 0.13). No Ray."""
+"""Island pool launcher wiring: syncer membership flags and island flags. No Ray."""
 
 from __future__ import annotations
 
@@ -42,27 +42,30 @@ def _sft():
 HMAC_CHECK = ': "${YETO_ISLAND_HMAC_KEY:?island HMAC key secret missing}" && '
 
 
-def test_legacy_syncer_command_is_byte_identical(head_launcher):
-    """secret-handling-hardening: the only change to the legacy RL line is the
+POOL = ("--rl-sync-quorum-theta", "0.75", "--rl-sync-max-base-lag", "2")
+
+
+def test_fixed_roster_syncer_command_is_byte_identical(head_launcher):
+    """secret-handling-hardening: the only change to the fixed-roster RL line is the
     island HMAC key check in front (the key itself is a secret env); SFT only
     gains the explicit --allow-unauthenticated-islands."""
-    for extra in ((), ("--rl-island-scheduling", "legacy")):
-        args = _args(extra)
-        assert args.rl_island_scheduling == "legacy"
-        for n in (1, 2, 4):
-            assert launcher.syncer_command(args, n) == head_launcher.syncer_command(args, n).replace(
-                "mkdir -p ~/yeto-output && ", "mkdir -p ~/yeto-output && " + HMAC_CHECK, 1)
-            # P0-D8: one command per role; the HMAC check sits once in front.
-            commands = launcher.role_syncer_commands(args, n)
-            assert list(commands) == ["actor"]
-            assert launcher.syncer_command(args, n).endswith(HMAC_CHECK + commands["actor"])
+    args = _args()
+    assert not launcher.island_pool(args)
+    for n in (1, 2, 4):
+        assert launcher.syncer_command(args, n) == head_launcher.syncer_command(args, n).replace(
+            "mkdir -p ~/yeto-output && ", "mkdir -p ~/yeto-output && " + HMAC_CHECK, 1)
+        # P0-D8: one command per role; the HMAC check sits once in front.
+        commands = launcher.role_syncer_commands(args, n)
+        assert list(commands) == ["actor"]
+        assert launcher.syncer_command(args, n).endswith(HMAC_CHECK + commands["actor"])
     assert launcher.syncer_command(_sft(), 2) == (
         head_launcher.syncer_command(_sft(), 2) + " --allow-unauthenticated-islands")
 
 
-def test_legacy_learner_flags_unchanged():
+def test_fixed_roster_learner_flags_unchanged():
     args = _args()
-    assert "--rl-island-scheduling" not in launcher._ports_infra_flags(args)[1]
+    flags = launcher._ports_infra_flags(args)[1]
+    assert "--rl-island-pool" not in flags and "--rl-sync-island-lease-s" not in flags
 
 
 @pytest.fixture(autouse=True)
@@ -70,50 +73,56 @@ def _hmac_key(monkeypatch):
     monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "k3y")
 
 
-def test_elastic_needs_hmac_key(monkeypatch):
+def test_pool_and_fixed_roster_generate_a_key_when_none_is_set(monkeypatch):
     monkeypatch.delenv("YETO_ISLAND_HMAC_KEY")
-    with pytest.raises(ValueError, match="YETO_ISLAND_HMAC_KEY"):
-        launcher.syncer_command(_args(("--rl-island-scheduling", "elastic")), 2)
-    # secret-handling-hardening: legacy generates a per-run key instead.
-    assert launcher.syncer_command(_args(), 2).startswith("mkdir -p ~/yeto-output && " + HMAC_CHECK)
+    for extra in (POOL, ()):
+        assert launcher.syncer_command(_args(extra), 2).startswith(
+            "mkdir -p ~/yeto-output && " + HMAC_CHECK)
 
 
-def test_elastic_syncer_flags_and_defaults():
-    cmd = launcher.syncer_command(_args(("--rl-island-scheduling", "elastic")), 2)
+def test_pool_syncer_flags_and_defaults():
+    cmd = launcher.syncer_command(_args(POOL), 2)
     assert "k3y" not in cmd and "export YETO_ISLAND_HMAC_KEY" not in cmd  # 0.20: secret, not argv
     assert cmd.startswith('mkdir -p ~/yeto-output && : "${YETO_ISLAND_HMAC_KEY:?')
-    cmd = launcher.syncer_command(_args(("--rl-island-scheduling", "elastic")), 2)
-    assert (" --island-scheduling-mode elastic --quorum-theta 0.75 --carry-gamma 0.5"
-            " --soft-deadline-s 900 --q-min 1 --max-carry-lag 2 --syncer-epoch 0") in cmd
+    # only the given options reach the syncer; lease and syncer epoch always do
+    assert " --quorum-theta 0.75 --island-lease-s 150.0 --syncer-epoch 0" in cmd
+    for flag in ("--carry-gamma", "--soft-deadline-s", "--q-min", "--final-grace-s",
+                 "--island-scheduling-mode", "--max-carry-lag"):
+        assert flag not in cmd
     cmd = launcher.syncer_command(_args((
-        "--rl-island-scheduling", "elastic", "--rl-quorum-theta", "0.6", "--rl-carry-gamma",
-        "0.25", "--rl-soft-deadline-s", "300", "--rl-q-min", "2", "--rl-max-carry-lag", "1",
+        "--rl-sync-quorum-theta", "0.6", "--rl-sync-carry-gamma", "0.25", "--rl-sync-soft-deadline-s", "300",
+        "--rl-sync-q-min", "2", "--rl-sync-island-lease-s", "60", "--rl-sync-max-base-lag", "1",
         "--rl-syncer-epoch", "4")), 3)
-    assert (" --island-scheduling-mode elastic --quorum-theta 0.6 --carry-gamma 0.25"
-            " --soft-deadline-s 300 --q-min 2 --max-carry-lag 1 --syncer-epoch 4") in cmd
-    assert "--island-scheduling-mode elastic" in launcher.role_syncer_commands(
-        _args(("--rl-island-scheduling", "elastic")), 2)["actor"]
-    assert " --rl-island-scheduling elastic --rl-syncer-epoch 0" in launcher._ports_infra_flags(
-        _args(("--rl-island-scheduling", "elastic")))[1]
+    assert (" --quorum-theta 0.6 --q-min 2 --carry-gamma 0.25 --soft-deadline-s 300"
+            " --island-lease-s 60.0 --syncer-epoch 4 --final-grace-s 300") in cmd
+    assert "--island-lease-s 150.0" in launcher.role_syncer_commands(_args(POOL), 2)["actor"]
+    assert launcher._ports_infra_flags(_args(POOL))[1].endswith(
+        " --rl-island-pool --rl-syncer-epoch 0 --rl-sync-island-lease-s 150.0")
 
 
 def test_invalid_combinations_refused():
-    with pytest.raises(ValueError, match="need --rl-island-scheduling elastic"):
-        launcher.syncer_command(_args(("--rl-quorum-theta", "0.5")), 2)
-    with pytest.raises(ValueError, match="need --rl-island-scheduling elastic"):
+    with pytest.raises(ValueError, match="--rl-syncer-epoch needs island pool options"):
         launcher.syncer_command(_args(("--rl-syncer-epoch", "1")), 2)
-    with pytest.raises(ValueError):
-        launcher.syncer_command(_args(("--rl-island-scheduling", "elastic",
-                                       "--rl-quorum-theta", "1.5")), 2)
-    with pytest.raises(ValueError, match="only applies to --training-mode rl"):
-        launcher.syncer_command(SimpleNamespace(**vars(_sft()), rl_island_scheduling="elastic"), 2)
-    with pytest.raises(SystemExit):
-        _args(("--rl-island-scheduling", "auto"))
+    with pytest.raises(ValueError, match=r"quorum-theta must be in \(0, 1\]"):
+        launcher.syncer_command(_args(("--rl-sync-quorum-theta", "1.5")), 2)
+    with pytest.raises(ValueError, match="only apply to --training-mode rl"):
+        launcher.syncer_command(SimpleNamespace(**vars(_sft()), rl_sync_island_lease_s=30.0), 2)
+    for removed in ("--rl-island-scheduling", "--rl-max-carry-lag"):
+        with pytest.raises(SystemExit):
+            _args((removed, "1"))
 
 
-def test_learner_passes_mode_to_elastic_config():
+def test_pool_needs_rounds_that_may_merge_without_an_island():
+    from test_rl_launcher import _prepare_rl_args
+
+    with pytest.raises(ValueError, match="merge without some island"):
+        _prepare_rl_args(_prov(_args(("--gpu", "modal:8xh100,modal:8xh100", "--rl-engine", "ports",
+                                      "--rl-sync-island-lease-s", "30"))))
+
+
+def test_learner_passes_the_pool_switch_to_the_island_config():
     from yeto.rl.adapters.miles import island_entry as learner
-    assert "island_scheduling" in Path(learner.__file__).read_text()
+    assert "rl_island_pool" in Path(learner.__file__).read_text()
     from yeto.rl.adapters.miles import elastic_wiring
     import inspect
     assert inspect.signature(elastic_wiring.build_elastic).parameters[
@@ -137,7 +146,7 @@ def test_syncer_epoch_read_from_status_json(tmp_path):
     reads = iter([None, None])  # the syncer is still starting for two polls
     real = launcher.syncer_status_reader(local_tape=str(tmp_path / "yeto-tape.jsonl"))
     sleep, clock = _no_sleep_clock()
-    args = _args(("--rl-island-scheduling", "elastic"))
+    args = _args(POOL)
     assert launcher.resolve_island_syncer_epoch(
         args, lambda: next(reads, None) or real(), sleep=sleep, clock=clock) == 6
     assert args.rl_syncer_epoch == 6
@@ -149,21 +158,21 @@ def test_syncer_epoch_unreadable_falls_back_to_zero(tmp_path, capsys):
 
     (tmp_path / "status.json").write_text(json.dumps({"schema": "other", "syncer_epoch": 3}))
     sleep, clock = _no_sleep_clock()
-    args = _args(("--rl-island-scheduling", "elastic"))
+    args = _args(POOL)
     reader = launcher.syncer_status_reader(local_tape=str(tmp_path / "yeto-tape.jsonl"))
     assert launcher.resolve_island_syncer_epoch(args, reader, timeout_s=10, sleep=sleep, clock=clock) == 0
     assert args.rl_syncer_epoch is None and "WARN" in capsys.readouterr().out
     assert " --rl-syncer-epoch 0" in launcher._ports_infra_flags(args)[1]
 
 
-def test_syncer_epoch_explicit_or_legacy_never_reads():
+def test_syncer_epoch_explicit_or_fixed_roster_never_reads():
     def boom():
         raise AssertionError("status.json must not be read")
-    explicit = _args(("--rl-island-scheduling", "elastic", "--rl-syncer-epoch", "4"))
+    explicit = _args((*POOL, "--rl-syncer-epoch", "4"))
     assert launcher.resolve_island_syncer_epoch(explicit, boom) == 4
-    legacy = _args()
-    assert launcher.resolve_island_syncer_epoch(legacy, boom) == 0
-    assert "--rl-island-scheduling" not in launcher._ports_infra_flags(legacy)[1]
+    fixed = _args()
+    assert launcher.resolve_island_syncer_epoch(fixed, boom) == 0
+    assert "--rl-island-pool" not in launcher._ports_infra_flags(fixed)[1]
 
 
 # ----------------------------------------------------------------- 0.20 HMAC key as a secret
@@ -187,12 +196,12 @@ def test_hmac_key_is_secret_on_syncer_task(monkeypatch, tmp_path):
     import platform
     monkeypatch.setattr(platform, "system", lambda: "Linux")
     monkeypatch.setattr(platform, "machine", lambda: "x86_64")
-    task = launcher.make_syncer_task(_args(("--rl-island-scheduling", "elastic")), 2)
+    task = launcher.make_syncer_task(_args(POOL), 2)
     assert task.secrets == {"YETO_ISLAND_HMAC_KEY": "k3y"}
     assert "k3y" not in task.run and "k3y" not in json.dumps(task.envs or {})
-    legacy = launcher.make_syncer_task(_args(), 2)
-    assert legacy.secrets == {"YETO_ISLAND_HMAC_KEY": "k3y"}  # secret-handling-hardening
-    assert "k3y" not in legacy.run
+    fixed = launcher.make_syncer_task(_args(), 2)
+    assert fixed.secrets == {"YETO_ISLAND_HMAC_KEY": "k3y"}  # secret-handling-hardening
+    assert "k3y" not in fixed.run
 
 
 def test_hmac_key_in_modal_cfg_envs_and_island_secrets(monkeypatch, tmp_path):
@@ -201,7 +210,7 @@ def test_hmac_key_in_modal_cfg_envs_and_island_secrets(monkeypatch, tmp_path):
 
     _fake_sky(monkeypatch)
     monkeypatch.setenv("HOME", str(tmp_path))
-    args = _args(("--gpu", "modal:8xh100", "--rl-engine", "ports", "--rl-island-scheduling", "elastic"))
+    args = _args(("--gpu", "modal:8xh100", "--rl-engine", "ports", *POOL))
     _prepare_rl_args(_prov(args))
     (spec,) = parse_gpu_spec(args.gpu)
     task = launcher.make_miles_island_task(args, spec, 0, 1, "127.0.0.1:29400")
@@ -209,12 +218,12 @@ def test_hmac_key_in_modal_cfg_envs_and_island_secrets(monkeypatch, tmp_path):
     assert "k3y" not in task.run and "k3y" not in (task.setup or "")
     cfg = launcher.build_modal_island_config(args, spec, 0, task, "1.2.3.4:5000")
     assert cfg.envs["YETO_ISLAND_HMAC_KEY"] == "k3y" and "k3y" not in cfg.run_script
-    legacy = _args(("--gpu", "modal:8xh100", "--rl-engine", "ports"))
-    _prepare_rl_args(_prov(legacy))
-    lt = launcher.make_miles_island_task(legacy, spec, 0, 1, "127.0.0.1:29400")
-    # secret-handling-hardening: legacy islands carry the key too.
+    fixed = _args(("--gpu", "modal:8xh100", "--rl-engine", "ports"))
+    _prepare_rl_args(_prov(fixed))
+    lt = launcher.make_miles_island_task(fixed, spec, 0, 1, "127.0.0.1:29400")
+    # secret-handling-hardening: fixed-roster islands carry the key too.
     assert lt.secrets["YETO_ISLAND_HMAC_KEY"] == "k3y"
-    assert launcher.build_modal_island_config(legacy, spec, 0, lt, "1.2.3.4:5000").envs[
+    assert launcher.build_modal_island_config(fixed, spec, 0, lt, "1.2.3.4:5000").envs[
         "YETO_ISLAND_HMAC_KEY"] == "k3y"
 
 
@@ -223,5 +232,5 @@ def test_head_job_ships_hmac_secret():
     assert "secrets.update(launcher.island_hmac_secret(args))" in src
     assert launcher.island_hmac_secret(_args()) == {"YETO_ISLAND_HMAC_KEY": "k3y"}
     assert launcher.island_hmac_secret(_sft()) == {}
-    assert launcher.island_hmac_secret(_args(("--rl-island-scheduling", "elastic"))) == {
+    assert launcher.island_hmac_secret(_args(POOL)) == {
         "YETO_ISLAND_HMAC_KEY": "k3y"}

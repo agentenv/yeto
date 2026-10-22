@@ -25,7 +25,7 @@ def _rows(text: str) -> list[str]:
 def test_bridges_docstring_has_the_sync_mode_table():
     rows = _rows(bridges.__doc__)
     assert rows[0] == HEADER
-    assert [r.split("|")[1].split()[0] for r in rows[2:]] == ["strict", "decoupled", "elastic"]
+    assert [r.split("|")[1].split()[0] for r in rows[2:]] == ["strict", "decoupled", "island"]
 
 
 def test_spec_table_matches_the_docstring():

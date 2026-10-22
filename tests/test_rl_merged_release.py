@@ -294,7 +294,7 @@ def test_buffer_lane_of_island_args():
 # ---------------------------------------------------------------- launch and island flags
 SYNCED = ("--rl-sample-role", "trainer", "--rl-max-policy-age", "2",
           "--rl-checkpoint-store", "modal-volume://yeto-c3/run-a", "--rl-sample-wait-s", "900",
-          "--rl-island-scheduling", "elastic", "--cluster-prefix", "c3-synced",
+          "--rl-sync-quorum-theta", "0.75", "--rl-sync-max-base-lag", "2", "--cluster-prefix", "c3-synced",
           "--rl-algorithm-spec", "examples/rl_algorithms/decoupled-ppo-c2.json")
 
 
@@ -334,14 +334,13 @@ def test_synced_trainer_plan_forwards_the_sample_store_and_lanes():
 
 
 def test_synced_trainer_launch_writes_island_round_cuts():
-    """S27 R-2: a cut interval gives every synced trainer its own write-only cuts."""
+    """S27 R-2: a cut interval gives every synced trainer, in a fixed roster or an
+    island pool, its own write-only cuts."""
     from types import SimpleNamespace as NS
 
     from yeto.rl.adapters.miles import island_entry
 
-    with pytest.raises(ValueError, match="need --rl-island-scheduling legacy"):
-        _synced_plan(("--rl-cut-every", "2"))  # ElasticAvgSync takes no island cuts
-    _, plan = _synced_plan(("--rl-cut-every", "2", "--rl-island-scheduling", "legacy"))
+    _, plan = _synced_plan(("--rl-cut-every", "2"))
     for m, island in enumerate(plan["island_requests"]):
         tokens = _island_tokens(island["learner_command"], str(m))
         root = tokens[tokens.index("--rl-island-cut-store") + 1]
@@ -351,8 +350,7 @@ def test_synced_trainer_launch_writes_island_round_cuts():
         assert miles_args.yeto_rl_resume["store"] == f"{root}/island{m}"
         assert miles_args.yeto_rl_resume["write_only"] is True
     with pytest.raises(ValueError, match="does not resume from round cuts"):
-        _synced_plan(("--rl-cut-every", "1", "--rl-stop-after-rounds", "2",
-                      "--rl-island-scheduling", "legacy"))
+        _synced_plan(("--rl-cut-every", "1", "--rl-stop-after-rounds", "2"))
 
 
 def test_island_refuses_a_sample_store_outside_a_synced_trainer():

@@ -67,6 +67,8 @@ MSG_FINAL_FRAGMENT = 13
 MSG_BUDGET_DONE = 14
 # S26 E3b: link-bandwidth probe connection (yeto/wan_probe.py; syncer serve_bw_probe).
 MSG_BW_PROBE = 26
+# An island leaves the pool: u32 learner_id | u8 reason (yeto.rl.pool_client.LeaveReason).
+MSG_LEAVE = 27
 
 FINALIZATION_REVISION = 1
 FINALIZATION_TIMEOUT = 900.0
@@ -1568,6 +1570,13 @@ class SyncerClient:
 
     def heartbeat(self, local_step: int) -> None:
         self._enqueue(0, self._frame(MSG_HEARTBEAT, struct.pack("<IQ", self.learner_id, local_step)))
+
+    def send_leave(self, reason: int, timeout: float = 5.0) -> bool:
+        """Tell the syncer why this island leaves; True once the frame was
+        written. The caller closes the client afterwards."""
+        sent = threading.Event()
+        frame = self._frame(MSG_LEAVE, struct.pack("<IB", self.learner_id, int(reason)))
+        return self._enqueue(0, frame, sent=sent) and sent.wait(timeout)
 
     def send_budget_done(
         self, local_steps: int, timeout: float | None = None

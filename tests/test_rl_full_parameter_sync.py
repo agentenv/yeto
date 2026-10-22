@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from yeto.protocol import PartialMessageGenerationLost, PullRequest
-from yeto.rl.elastic_client import LeaveReason
+from yeto.rl.pool_client import LeaveReason
 from yeto.rl.adapters.miles.full_parameter.role_stream import (
     RoleRoundResult,
     RoleSubmissionCandidate,
@@ -70,6 +70,7 @@ class _PairedRole:
         self.terminal_submitted = False
         self._queued_steps = []
         self._staged_steps = []
+        self.caught_up = []
         self.local_boundaries = 0
         self.closed = False
         self.final_acknowledged = False
@@ -158,10 +159,14 @@ class _PairedRole:
     def has_staged_broadcast(self, fragment_id, version):
         return (fragment_id, version) in self.staged_fragment_versions
 
-    async def apply_staged_broadcast(self, fragment_id, version):
+    async def apply_staged_broadcast(self, fragment_id, version, *, catch_up=False):
         versions = list(self.fragment_versions)
         assert (fragment_id, version) in self.staged_fragment_versions
         self._staged_steps.remove(version)
+        if catch_up:
+            self.caught_up.append((fragment_id, version))
+            self._staged_steps[:] = [step for step in self._staged_steps
+                                     if (step - 1) % len(versions) != fragment_id or step > version]
         versions[fragment_id] = version
         self.fragment_versions = tuple(versions)
         return (fragment_id,)

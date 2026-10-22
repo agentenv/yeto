@@ -40,7 +40,7 @@ from .rl.event_echo import TapeCollector as EventCollector
 from .launch.rl_backend import _rl_backend_module
 from .launch.topology import rl_island_args, rl_island_count, rl_island_placement_records, rl_island_spec
 from .launch.syncer import (
-    SYNCER_PORT, island_scheduling_mode, island_syncer_addrs, make_syncer_task, probe_syncer_ports,
+    SYNCER_PORT, island_pool, island_syncer_addrs, make_syncer_task, probe_syncer_ports,
     resolve_island_syncer_epoch, rl_role_syncers, role_syncer_commands, role_syncer_shards,
     syncer_event_tape, syncer_shard_addrs, syncer_status_reader,
 )
@@ -351,7 +351,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             syncer_addr = syncer_shard_addrs(str(syncer_handle.head_ip), args)
             print(f"[launcher] syncer up at {syncer_addr}")
             probe_syncer_ports(args, str(syncer_handle.head_ip))
-        if not no_sync and island_scheduling_mode(args) == "elastic" \
+        if not no_sync and island_pool(args) \
                 and getattr(args, "rl_syncer_epoch", None) is None:
             # 0.17: the islands JOIN with the term the syncer actually runs.
             resolve_island_syncer_epoch(args, syncer_status_reader(
@@ -660,7 +660,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 (lambda name: name in event_collectors and event_collectors[name].left_pool)
                 if echo_names else None
             ),
-            elastic=island_scheduling_mode(args) == "elastic",
+            elastic=island_pool(args),
             no_island_relaunch=bool(getattr(args, "no_island_relaunch", False)),
             wan_reject_probe=(
                 (lambda name: event_collectors[name].wan_rejects if name in event_collectors else 0)
@@ -736,7 +736,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
         drain_tapes()
         if container_changed():
             return CONTAINER_CHANGED_EXIT
-        if (no_sync_incomplete and head_mode and island_scheduling_mode(args) == "elastic"):
+        if (no_sync_incomplete and head_mode and island_pool(args)):
             # S16 §6.6: an island the syncer removed from the pool for an excused
             # reason (finished, stopped, preempted, lease expiry) owes no
             # rl_learner_finalized; report it, do not exit 3. Failure codes still fail.

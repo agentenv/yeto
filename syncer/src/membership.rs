@@ -1,9 +1,8 @@
-//! Dynamic island membership for the sharded syncer (S27 E-1/E-2).
+//! Dynamic island membership of the fragment-round server.
 //!
-//! This ports the membership half of `elastic::ElasticCoordinator` (leases,
-//! heartbeats, re-JOIN with catch-up, fencing, capacity quorum θ, soft
-//! deadline, carry discount) into the fragment-round server in `server.rs`,
-//! so one syncer has both the fragment-round data plane (fragments, K +
+//! Leases, heartbeats, re-JOIN with catch-up, fencing, capacity quorum θ,
+//! soft deadline, carry discount and the final grace window live next to
+//! the fragment-round server in `server.rs`, so one syncer has both the fragment-round data plane (fragments, K +
 //! adaptive grace, tokens²/steps weights, RDA) and dynamic membership.
 //!
 //! The module is a pure state machine: it never touches sockets or tensors,
@@ -83,6 +82,10 @@ pub struct MembershipConfig {
     /// Admit island ids in `0..max_learners` (scale-up past the initial
     /// roster). None: only `0..learners`.
     pub max_learners: Option<u32>,
+    /// After the last step, wait at most this long for the islands still
+    /// connected to acknowledge the final cut, then finish without the
+    /// missing ones. None: every island at the final cut must acknowledge.
+    pub final_grace: Option<Duration>,
 }
 
 impl Default for MembershipConfig {
@@ -94,6 +97,7 @@ impl Default for MembershipConfig {
             carry_gamma: 1.0,
             capacities: BTreeMap::new(),
             max_learners: None,
+            final_grace: None,
         }
     }
 }
@@ -444,6 +448,18 @@ impl Membership {
             }
             _ => false,
         }
+    }
+
+    /// Live islands as `(id, capacity, lease remaining)`, in id order; the
+    /// lease is None without one.
+    pub fn live_status(&self, now: Instant) -> Vec<(u32, f64, Option<Duration>)> {
+        self.live
+            .iter()
+            .map(|(&id, m)| {
+                let remaining = self.cfg.lease.map(|lease| lease.saturating_sub(now.saturating_duration_since(m.last_seen)));
+                (id, self.cfg.capacity(id), remaining)
+            })
+            .collect()
     }
 
     /// The connection of `member` closed. Its generation is retired; the

@@ -59,7 +59,7 @@ def test_without_peer_recovery_commands_are_unchanged():
         (ASYNC + ("--rl-recovery-bound-steps", "4"), "need --rl-peer-recovery"),
         (ASYNC + ("--rl-peer-recovery-store", "/s"), "need --rl-peer-recovery"),
         (RECOVERY + ("--rl-recovery-max-donor-tries", "0"), "must be >= 1"),
-        (ASYNC + ("--rl-syncer-epoch", "2"), "need --rl-island-scheduling elastic"),
+        (ASYNC + ("--rl-syncer-epoch", "2"), "needs island pool options"),
         (RECOVERY + ("--syncer-shards", "2"), "one syncer process"),
     ],
 )

@@ -92,6 +92,17 @@ def test_max_base_lag_rounds_become_versions_for_the_syncer(preset, versions):
     assert _syncer_flags(plan)["--max-base-lag"] == versions
 
 
+def test_outer_merge_options_reach_an_island_pool_syncer(monkeypatch):
+    monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "k3y")
+    _, plan = _plan(("--rl-sync-island-lease-s", "30", "--rl-sync-quorum", "1",
+                     "--rl-sync-max-base-lag", "2", "--rl-sync-outer-lr", "0.5"),
+                    gpu=THREE_ISLANDS)
+    flags = _syncer_flags(plan)
+    assert (flags["--quorum"], flags["--max-base-lag"], flags["--outer-lr"]) == ("1", "2", "0.5")
+    [actor] = plan["role_syncers"]
+    assert "--island-lease-s 30" in actor["command"]
+
+
 @pytest.mark.parametrize(
     ("option", "value", "flag"),
     [
@@ -138,7 +149,6 @@ def test_rda_matrix_merge_reaches_the_decoupled_islands():
         (("--rl-sync-quorum", "1", "--experimental-rl-sync", "--fragments", "1",
           "--pipeline", "1", "--merge-alpha", "0", "--wire-dtype", "f32"),
          "experimental-rl-sync"),
-        (("--rl-sync-quorum", "1", "--rl-island-scheduling", "elastic"), "legacy"),
         (("--rl-sync-quorum", "0"), "between 1 and the 2 islands"),
         (("--rl-sync-quorum", "3"), "between 1 and the 2 islands"),
         (("--rl-sync-grace-ms", "-1"), "grace-ms must be >= 0"),

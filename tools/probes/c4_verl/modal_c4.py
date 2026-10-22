@@ -94,7 +94,7 @@ def island(run: str, phase: str, gpu: str) -> dict:
     if phase == "a":  # the head's commands for incarnation 0, written through yeto's own writer
         rc = _sh(f"{PY} -c " + shlex.quote(
             "import sys; from yeto.rl.engine import trainer_remote as t; "
-            "from yeto.rl.engine.resume import store_for; from yeto.rl.elastic_client import LeaveReason; "
+            "from yeto.rl.engine.resume import store_for; from yeto.rl.pool_client import LeaveReason; "
             "w = t.CommandWriter(t.LocalStoreFiles(store_for(sys.argv[1])), 0); "
             "w.send(t.RUN, rounds=2); w.send(t.STOP, reason=LeaveReason.STOPPED); "
             "print(t.island_env(0, None, poll_s=2.0))") + f" {store}", log)

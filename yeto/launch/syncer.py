@@ -303,9 +303,13 @@ def rl_syncer_profile(args, num_learners: int):
     })
 
 
-_ISLAND_SCHEDULING_PARAMS = rl_option_pairs(
-    "rl_quorum_theta", "rl_carry_gamma", "rl_soft_deadline_s", "rl_q_min", "rl_max_carry_lag",
-    "rl_syncer_epoch", "rl_island_lease_s", "rl_final_grace_s",
+# Membership options (--rl-sync-*): they put the RL islands in a pool with
+# dynamic fragment-round syncer membership (leases and re-JOIN, capacity
+# quorum, soft deadline, carry discount, admitted island ids, final grace
+# window). None set = fixed roster.
+_ISLAND_POOL_PARAMS = rl_option_pairs(
+    "rl_sync_quorum_theta", "rl_sync_carry_gamma", "rl_sync_soft_deadline_s", "rl_sync_q_min",
+    "rl_sync_island_lease_s", "rl_sync_max_learners", "rl_sync_final_grace_s",
     layer=CLI,
 )
 
@@ -313,14 +317,14 @@ ELASTIC_DEBUG_DELAY_ENV = "YETO_RL_ELASTIC_DEBUG_DELAY"
 
 
 def elastic_debug_delay_env(args) -> dict[str, str]:
-    """0.25 test switch: islands delay each DELTA_TENSOR (soft deadline / carried_over
-    on real hardware). Elastic only; {} by default."""
+    """0.25 test switch: islands delay each delta push (soft deadline / carried_over
+    on real hardware). Island pool only; {} by default."""
     spec = getattr(args, "rl_elastic_debug_delay_s", None)
     if not spec:
         return {}
-    if island_scheduling_mode(args) != "elastic":
-        raise ValueError("--rl-elastic-debug-delay-s needs --rl-island-scheduling elastic")
-    from ..rl.elastic_client import parse_elastic_debug_delay
+    if not island_pool(args):
+        raise ValueError("--rl-elastic-debug-delay-s needs island pool options (e.g. --rl-sync-island-lease-s)")
+    from ..rl.pool_client import parse_elastic_debug_delay
 
     parse_elastic_debug_delay(spec)
     return {ELASTIC_DEBUG_DELAY_ENV: str(spec)}
@@ -333,13 +337,13 @@ def elastic_debug_pause_env(args) -> dict[str, str]:
     """Test switch: the given island's link to the syncer goes silent (no heartbeat,
     sends/receives held) for S seconds after base AFTER_V; the process keeps running.
     Used to exercise lease expiry -> "rejoin required" -> automatic re-JOIN on real
-    hardware. Elastic only; {} by default."""
+    hardware. Island pool only; {} by default."""
     spec = getattr(args, "rl_elastic_debug_pause", None)
     if not spec:
         return {}
-    if island_scheduling_mode(args) != "elastic":
-        raise ValueError("--rl-elastic-debug-pause needs --rl-island-scheduling elastic")
-    from ..rl.elastic_client import parse_elastic_debug_pause
+    if not island_pool(args):
+        raise ValueError("--rl-elastic-debug-pause needs island pool options (e.g. --rl-sync-island-lease-s)")
+    from ..rl.pool_client import parse_elastic_debug_pause
 
     parse_elastic_debug_pause(spec)
     return {ELASTIC_DEBUG_PAUSE_ENV: str(spec)}
@@ -349,10 +353,10 @@ DEFAULT_ISLAND_LEASE_S = 150.0  # passed to the syncer and to every island (hear
 
 
 def island_lease_s(args) -> float:
-    value = getattr(args, "rl_island_lease_s", None)
+    value = getattr(args, "rl_sync_island_lease_s", None)
     value = DEFAULT_ISLAND_LEASE_S if value is None else float(value)
     if not value > 0:
-        raise ValueError("--rl-island-lease-s must be > 0")
+        raise ValueError("--rl-sync-island-lease-s must be > 0")
     return value
 
 
@@ -365,9 +369,9 @@ def island_syncer_epoch(args) -> int:
 
 
 def syncer_status_reader(*, local_tape: str | None = None, ssh_host: str | None = None):
-    """0.17: a zero-argument reader of the elastic syncer's status.json (next to its
-    --event-tape): a local file on a head node, else ``ssh <syncer cluster> cat``.
-    Returns the parsed snapshot, or None when absent / not the elastic schema."""
+    """0.17: a zero-argument reader of the syncer's island-pool status.json (next to
+    its --event-tape): a local file on a head node, else ``ssh <syncer cluster> cat``.
+    Returns the parsed snapshot, or None when absent / not the status schema."""
     from ..rl.engine.island_status import read_syncer_status, STATUS_SCHEMA
 
     if local_tape is not None:
@@ -388,11 +392,11 @@ def syncer_status_reader(*, local_tape: str | None = None, ssh_host: str | None 
 
 def resolve_island_syncer_epoch(args, read_status, *, timeout_s: float = 120.0,
                                 poll_s: float = 2.0, sleep=time.sleep, clock=time.monotonic) -> int:
-    """0.17: elastic without an explicit --rl-syncer-epoch takes the term the running
-    syncer reports in status.json (and records it on ``args`` so every island
-    command carries it). Unreadable within ``timeout_s``: keep 0 with a warning.
-    Legacy, or an explicit value: unchanged, nothing is read."""
-    if island_scheduling_mode(args) != "elastic" or getattr(args, "rl_syncer_epoch", None) is not None:
+    """0.17: an island pool without an explicit --rl-syncer-epoch takes the term the
+    running syncer reports in status.json (and records it on ``args`` so every
+    island command carries it). Unreadable within ``timeout_s``: keep 0 with a
+    warning. A fixed roster, or an explicit value: unchanged, nothing is read."""
+    if not island_pool(args) or getattr(args, "rl_syncer_epoch", None) is not None:
         return island_syncer_epoch(args)
     deadline = clock() + timeout_s
     while True:
@@ -409,19 +413,11 @@ def resolve_island_syncer_epoch(args, read_status, *, timeout_s: float = 120.0,
         sleep(poll_s)
 
 
-def island_scheduling_mode(args) -> str:
-    """``--rl-island-scheduling`` (rl-inter-island-scheduling 0.13); legacy unless
-    elastic is given explicitly. Elastic-only parameters with legacy are refused."""
-    mode = getattr(args, "rl_island_scheduling", None) or "legacy"
-    if mode not in ("legacy", "elastic"):
-        raise ValueError(f"--rl-island-scheduling must be legacy|elastic, got {mode!r}")
-    if mode == "legacy":
-        given = [f for n, f in _ISLAND_SCHEDULING_PARAMS if getattr(args, n, None) is not None
-                 # S27 E-3: peer recovery fences fragment-round HELLOs with the syncer epoch
-                 and not (n == "rl_syncer_epoch" and getattr(args, "rl_peer_recovery", False))]
-        if given:
-            raise ValueError(", ".join(given) + " need --rl-island-scheduling elastic")
-    return mode
+def island_pool(args) -> bool:
+    """True when any island pool option is set: the RL islands then join the
+    syncer's dynamic membership (leases and re-JOIN, capacity quorum, soft
+    deadline, carry discount, final grace); otherwise the roster is fixed."""
+    return any(getattr(args, name, None) is not None for name, _ in _ISLAND_POOL_PARAMS)
 
 
 ISLAND_HMAC_KEY_ENV = "YETO_ISLAND_HMAC_KEY"
@@ -432,19 +428,15 @@ def island_hmac_secret(args) -> dict[str, str]:
     ``secrets=``, Modal ``cfg.envs`` which becomes a ``modal.Secret``) -- never
     spliced into a command line, log or process list.
 
-    elastic: the key must come from the launching environment (unchanged).
-    legacy (secret-handling-hardening): the legacy syncer also requires the key
-    (HELLO HMAC). Without one in the environment the launcher generates a
-    random per-run key once and keeps it in ``os.environ`` so the syncer task,
-    the head job and every island receive the same value. SFT: ``{}`` (its
+    secret-handling-hardening: the syncer requires the key (HELLO HMAC).
+    Without one in the environment the launcher generates a random per-run key
+    once and keeps it in ``os.environ`` so the syncer task, the head job and
+    every island receive the same value. SFT: ``{}`` (its
     syncer runs with --allow-unauthenticated-islands, see design.md)."""
     if getattr(args, "training_mode", "sft") != "rl":
         return {}
     key = os.environ.get(ISLAND_HMAC_KEY_ENV, "")
     if not key:
-        if island_scheduling_mode(args) != "legacy":
-            raise ValueError(f"--rl-island-scheduling elastic needs {ISLAND_HMAC_KEY_ENV} "
-                             "in the launching environment (island message HMAC key)")
         import secrets as _secrets
 
         key = os.environ[ISLAND_HMAC_KEY_ENV] = _secrets.token_hex(32)
@@ -467,40 +459,46 @@ def _syncer_expected_contract(args) -> str:
     return f" --expected-island-contract {pinned}" if pinned else ""
 
 
-def _syncer_island_scheduling(args) -> str:
-    """Syncer flags for the island-scheduling mode: "" in legacy, so the legacy
-    command line is byte-for-byte the previous one. The syncer folds these into
-    its session contract hash (the Python side does not compute that hash)."""
-    if island_scheduling_mode(args) == "legacy":
+def _syncer_island_pool(args) -> str:
+    """Syncer membership flags of an island pool; "" for a fixed roster, so
+    that command line is byte-for-byte the previous one. Each option maps to
+    the syncer flag of the same name; unset options keep the syncer default."""
+    if not island_pool(args):
+        if getattr(args, "rl_syncer_epoch", None) is not None and not getattr(args, "rl_peer_recovery", False):
+            raise ValueError("--rl-syncer-epoch needs island pool options (e.g. --rl-sync-island-lease-s)")
         return ""
-    from ..rl.engine.island_ledger import (DEFAULT_GAMMA, DEFAULT_MAX_CARRY_LAG,
-                                          DEFAULT_QUORUM_MIN, DEFAULT_THETA)
-
-    theta = getattr(args, "rl_quorum_theta", None)
-    gamma = getattr(args, "rl_carry_gamma", None)
-    soft = getattr(args, "rl_soft_deadline_s", None)
-    if soft is None:
-        soft = getattr(args, "rl_elastic_quorum_timeout_s", None) or 900
-    q_min = getattr(args, "rl_q_min", None)
-    lag = getattr(args, "rl_max_carry_lag", None)
-    theta = DEFAULT_THETA if theta is None else float(theta)
-    gamma = DEFAULT_GAMMA if gamma is None else float(gamma)
-    q_min = DEFAULT_QUORUM_MIN if q_min is None else int(q_min)
-    lag = DEFAULT_MAX_CARRY_LAG if lag is None else int(lag)
-    if not 0.0 < theta <= 1.0 or not 0.0 <= gamma <= 1.0 or q_min < 1 or lag < 0:
-        raise ValueError("--rl-quorum-theta in (0,1], --rl-carry-gamma in [0,1], "
-                         "--rl-q-min >= 1, --rl-max-carry-lag >= 0")
-    if float(soft) != int(soft) or int(soft) <= 0:
-        raise ValueError("--rl-soft-deadline-s must be positive whole seconds")
-    return (" --island-scheduling-mode elastic"
-            f" --quorum-theta {theta!r}"
-            f" --carry-gamma {gamma!r}"
-            f" --soft-deadline-s {int(soft)}"
-            f" --q-min {q_min}"
-            f" --max-carry-lag {lag}"
-            f" --syncer-epoch {island_syncer_epoch(args)}"
-            f" --island-lease-s {island_lease_s(args)!r}"
-            f" --final-grace-s {_final_grace_s(args, int(soft))}")
+    theta = getattr(args, "rl_sync_quorum_theta", None)
+    gamma = getattr(args, "rl_sync_carry_gamma", None)
+    soft = getattr(args, "rl_sync_soft_deadline_s", None)
+    q_min = getattr(args, "rl_sync_q_min", None)
+    max_learners = getattr(args, "rl_sync_max_learners", None)
+    if theta is not None and not 0.0 < float(theta) <= 1.0:
+        raise ValueError("--rl-sync-quorum-theta must be in (0, 1]")
+    if gamma is not None and not 0.0 < float(gamma) <= 1.0:
+        raise ValueError("--rl-sync-carry-gamma must be in (0, 1]")
+    if q_min is not None and int(q_min) < 1:
+        raise ValueError("--rl-sync-q-min must be >= 1")
+    if soft is not None and (float(soft) != int(soft) or int(soft) <= 0):
+        raise ValueError("--rl-sync-soft-deadline-s must be positive whole seconds")
+    if max_learners is not None and int(max_learners) < 1:
+        raise ValueError("--rl-sync-max-learners must be >= 1")
+    flags = ""
+    if theta is not None:
+        flags += f" --quorum-theta {float(theta)!r}"
+    if q_min is not None:
+        flags += f" --q-min {int(q_min)}"
+    if gamma is not None:
+        flags += f" --carry-gamma {float(gamma)!r}"
+    if soft is not None:
+        flags += f" --soft-deadline-s {int(soft)}"
+    flags += f" --island-lease-s {island_lease_s(args)!r}"
+    if max_learners is not None:
+        flags += f" --max-learners {int(max_learners)}"
+    flags += f" --syncer-epoch {island_syncer_epoch(args)}"
+    grace = _final_grace_s(args)
+    if grace is not None:
+        flags += f" --final-grace-s {grace}"
+    return flags
 
 
 def peer_recovery_syncer_flags(args) -> str:
@@ -518,13 +516,17 @@ def peer_recovery_syncer_flags(args) -> str:
     return flags
 
 
-def _final_grace_s(args, soft_deadline_s: int) -> int:
-    """0.26: the syncer's FINISHED window (whole seconds); default the soft deadline."""
-    value = getattr(args, "rl_final_grace_s", None)
-    value = soft_deadline_s if value is None else int(value)
-    if value < 0:
-        raise ValueError("--rl-final-grace-s must be >= 0")
-    return value
+
+def _final_grace_s(args) -> int | None:
+    """0.26: the syncer's final grace window (whole seconds); default the soft deadline."""
+    value = getattr(args, "rl_sync_final_grace_s", None)
+    if value is None:
+        value = getattr(args, "rl_sync_soft_deadline_s", None)
+    if value is None:
+        return None
+    if int(value) < 0:
+        raise ValueError("--rl-sync-final-grace-s must be >= 0")
+    return int(value)
 
 
 def _rl_max_base_lag(args) -> int:
@@ -568,7 +570,7 @@ def _rl_role_syncer_command(args, num_learners: int, binary: str,
         f" --delta-correction {args.delta_correction}"
         f" --total-steps {total_steps}"
         f"{_syncer_quorum_timeout(args)}"
-        f"{_syncer_island_scheduling(args)}"
+        f"{_syncer_island_pool(args)}"
         f"{_syncer_expected_contract(args)}"
         f"{_syncer_profile_binding(args)}"
         f"{_syncer_bcast_delta(args)}"
@@ -593,8 +595,8 @@ def syncer_shard_count(args) -> int:
     Sharding needs fragment-round scheduling and a learner that routes per
     fragment: the torch causal-LM learner (yeto.learner) in SFT, and in RL
     the full-parameter preset with asynchronous rounds (the actor role
-    stream). Strict policy sweeps, the elastic scheduler, critics and the
-    other RL presets are refused."""
+    stream). Strict policy sweeps, island pools, critics and the other RL
+    presets are refused."""
     count = getattr(args, "syncer_shards", None)
     count = 1 if count is None else int(count)
     if count < 1:
@@ -608,8 +610,8 @@ def syncer_shard_count(args) -> int:
         if not rl_full_parameter_async(args):
             raise ValueError("--syncer-shards > 1 with --training-mode rl needs --rl-sync-preset "
                              f"{FULL_PARAMETER_SYNC_PRESET} --rl-sync-full-parameter-rounds async")
-        if island_scheduling_mode(args) != "legacy":
-            raise ValueError("--syncer-shards > 1 needs --rl-island-scheduling legacy")
+        if island_pool(args):
+            raise ValueError("--syncer-shards > 1 does not take island pool options yet")
         if rl_needs_critic(args):
             raise ValueError("--syncer-shards > 1 supports actor-only algorithms")
         return count
@@ -685,8 +687,8 @@ def syncer_command(args, num_learners: int, binary: str = "~/yeto-syncer") -> st
             + "".join(f"{{ {command} & }} && " for command in commands.values())
             + actor
         )
-    if island_scheduling_mode(args) != "legacy":
-        raise ValueError("--rl-island-scheduling elastic only applies to --training-mode rl")
+    if island_pool(args):
+        raise ValueError("island pool options only apply to --training-mode rl")
     ports = syncer_shard_ports(args)
     if len(ports) == 1:
         return _sft_syncer_command(args, num_learners, binary)

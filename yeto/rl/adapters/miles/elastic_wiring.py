@@ -91,7 +91,7 @@ def build_elastic(
         **({} if max_recovery_attempts is None else {"max_recovery_attempts": int(max_recovery_attempts)}),
         # rl-multinode-island Q4 (C5): --rl-elastic-checkpoint-store (None = node0-local)
         **({} if not checkpoint_store else {"checkpoint_store": checkpoint_store}),
-        # rl-inter-island-scheduling 0.13 (--rl-island-scheduling, default legacy)
+        # "elastic" = island pool options given, "legacy" = fixed roster (journal field)
         island_scheduling=island_scheduling,
         # 0.18: scheduling fields from the syncer's status.json (elastic only;
         # the controller never calls the probe under legacy)

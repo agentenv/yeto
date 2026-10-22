@@ -44,17 +44,16 @@ def test_strict_handshake_refuses_an_island_with_another_limit():
     assert session_contract_hash(fp, bind_policy_age(MILES, 1)) != syncer  # limit 1: refused
 
 
-def test_elastic_join_carries_the_bound_identity(monkeypatch):
-    """Elastic JOIN: the island identity bytes differ, so only that connection is refused."""
+def test_pool_hello_carries_the_bound_identity(monkeypatch):
+    """Island pool HELLO: the session contracts differ, so only that connection is refused."""
     from yeto.rl.adapters.miles import island_entry
-    from yeto.rl.elastic_client import ElasticClientConfig
+    from yeto.rl.engine.backend_identity import session_contract_hash
 
     zero = island_entry._backend_identity_sha256(SimpleNamespace(rl_engine="ports"))
     one = island_entry._backend_identity_sha256(SimpleNamespace(rl_engine="ports", rl_max_policy_age=1))
     assert zero == MILES and one == bind_policy_age(MILES, 1)
-    a = ElasticClientConfig(("x", 0), 1, backend_identity_sha256=zero).backend_identity_bytes()
-    b = ElasticClientConfig(("x", 0), 2, backend_identity_sha256=one).backend_identity_bytes()
-    assert a != b
+    fingerprint = bytes(32)
+    assert session_contract_hash(fingerprint, zero) != session_contract_hash(fingerprint, one)
 
 
 @pytest.mark.parametrize("backend,limit,stage", [("miles", 5, 3), ("verl", 5, 2)])

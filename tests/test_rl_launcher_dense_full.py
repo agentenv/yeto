@@ -88,7 +88,7 @@ def test_lora_island_command_is_unchanged():
         (("--rl-placement", "colocated"), "fixed-partition"),
         (("--rl-parameter-layout-sha256", "nope"), "rl-parameter-layout-sha256"),
         (("--local-rl-rounds-per-sync", "2"), "H=1"),
-        (("--rl-island-scheduling", "elastic"), "elastic"),
+        (("--rl-sync-island-lease-s", "30"), "membership options need --rl-sync-full-parameter-rounds async"),
     ],
 )
 def test_dense_full_refusals(extra, message, monkeypatch):

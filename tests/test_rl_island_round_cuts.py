@@ -118,7 +118,8 @@ class _Emitter:
 def test_synced_syncs_take_periodic_round_cuts_only():
     strict = bridges.StrictAvgSync.__new__(bridges.StrictAvgSync)
     decoupled = bridges.DecoupledSync.__new__(bridges.DecoupledSync)
-    for sync in (strict, decoupled):
+    pool = bridges.PoolAvgSync.__new__(bridges.PoolAvgSync)  # LoRA island pool (R-2)
+    for sync in (strict, decoupled, pool):
         assert isinstance(sync, bridges.RoundCutHooks)
         assert sync.round_cuts is None and sync.cut_due(4) is False  # off by default
         driver = _Emitter()
@@ -130,7 +131,6 @@ def test_synced_syncs_take_periodic_round_cuts_only():
         sync.at_safe_point(driver, rollout_id=4)
         assert sync.round_cuts.calls == [("due", 4, False), ("prepare", 4, False), ("save", 4, False)]
         assert [name for name, _ in driver.events] == ["rl_round_cut", "rl_cut_saved"]
-    assert not isinstance(bridges.ElasticAvgSync.__new__(bridges.ElasticAvgSync), bridges.RoundCutHooks)
 
 
 def test_local_only_sync_still_cuts_at_the_end():
@@ -161,8 +161,9 @@ def test_resume_wiring_write_only_needs_a_synced_sync(tmp_path):
     assert full.cut_due(4) is False  # no checkpoint wired yet: no cut
     with pytest.raises(ValueError, match="takes no island round cuts"):
         resume_wiring_for(miles_args, sync=bridges.LocalOnlySync(2), environ={})
-    with pytest.raises(ValueError, match="takes no island round cuts"):
-        resume_wiring_for(miles_args, sync=bridges.ElasticAvgSync.__new__(bridges.ElasticAvgSync), environ={})
+    pool = bridges.PoolAvgSync.__new__(bridges.PoolAvgSync)  # R-2: pool islands cut too
+    pool_args = SimpleNamespace(yeto_rl_resume={**config, "state_dir": str(tmp_path / "pool-state")})
+    assert resume_wiring_for(pool_args, sync=pool, environ={}).stop_after is None
     config.pop("write_only")
     with pytest.raises(ValueError, match="needs --rl-single-island-no-sync"):
         resume_wiring_for(miles_args, sync=strict, environ={})
@@ -190,6 +191,18 @@ def test_synced_launch_forwards_island_cut_store():
     assert " --rl-cut-auto-mtbf-s 21600.0 --rl-cut-max-interval-s 1800.0" in flags
 
 
+def test_pool_launch_forwards_island_cut_store():
+    """R-2: LoRA islands in an island pool write round cuts like strict islands."""
+    from yeto.launch import rl_ports
+
+    args = _cli("--rl-checkpoint-store", "/mnt/store", "--rl-cut-every", "4",
+                "--rl-sync-quorum-theta", "0.75", "--rl-sync-max-base-lag", "2")
+    assert rl_ports._check_resume_launch_flags(args) is False
+    flags = rl_ports._ports_infra_flags(args)[1]
+    assert " --rl-island-pool" in flags
+    assert " --rl-island-cut-store /mnt/store/island-cuts" in flags and " --rl-cut-every 4" in flags
+
+
 @pytest.mark.parametrize("extra, match", [
     (("--rl-checkpoint-store", "/s"), "needs --rl-single-island-no-sync, synced trainers, a cut interval"),
     (("--rl-checkpoint-store", "/s", "--rl-cut-every", "2", "--rl-stop-after-rounds", "3"),
@@ -197,8 +210,6 @@ def test_synced_launch_forwards_island_cut_store():
     (("--rl-checkpoint-store", "/s", "--rl-cut-keep", "2"), "a cut interval"),
     (("--rl-checkpoint-store", "/s", "--rl-cut-every", "2", "--rl-cut-auto-mtbf-s", "60"),
      "exclude each other"),
-    (("--rl-checkpoint-store", "/s", "--rl-cut-every", "2", "--rl-island-scheduling", "elastic"),
-     "need --rl-island-scheduling legacy"),
     (("--rl-cut-auto-mtbf-s", "60"), "needs --rl-checkpoint-store"),
 ])
 def test_synced_launch_refusals(extra, match):

@@ -126,20 +126,52 @@ async def test_closed_round_is_not_uploaded():
 
 
 @pytest.mark.asyncio
-async def test_out_of_order_broadcasts_apply_in_version_order():
+async def test_in_order_broadcasts_of_one_drain_apply_in_version_order():
     actor = _PairedRole("actor", [], [])
     pairing = _async_pairing(actor)
-    actor._staged_steps.append(3)  # fragment 0, version 3: its base 1 is still on the wire
+    actor._staged_steps.extend([3, 2, 1])
 
     committed = await pairing.commit_staged_broadcasts()
-    assert committed["actor"].applied_fragments == ()
-    assert actor.fragment_versions == (0, 0)
 
-    actor._staged_steps.extend([2, 1])
-    committed = await pairing.commit_staged_broadcasts()
-    assert actor.fragment_versions == (3, 2)
+    assert actor.fragment_versions == (3, 2) and actor.caught_up == []
     assert set(committed["actor"].applied_fragments) == {0, 1}
-    assert pairing.overwritten_rounds == 3
+    assert pairing.overwritten_rounds == 3 and pairing.caught_up_fragments == 0
+
+
+@pytest.mark.asyncio
+async def test_a_version_that_skips_rounds_is_a_catch_up():
+    # A re-JOIN catch-up (or a newer broadcast that overtook an older one,
+    # which the client then drops) skips versions: the island overwrites the
+    # fragment and releases the retained pairs of the skipped rounds.
+    actor = _PairedRole("actor", [_candidate("actor", 1)], [], release_broadcasts=False)
+    pairing = _async_pairing(actor)
+    assert _submitted(pairing.submit_ready()) == [1]
+    actor._queued_steps.clear()
+    actor._staged_steps.append(3)  # fragment 0, version 3: version 1 never arrives
+
+    committed = await pairing.commit_staged_broadcasts()
+
+    assert committed["actor"].applied_fragments == (0,)
+    assert actor.fragment_versions == (3, 0) and actor.caught_up == [(0, 3)]
+    assert pairing.inflight == {} and pairing.caught_up_fragments == 1
+
+    actor._staged_steps.append(2)  # fragment 1 continues in order
+    await pairing.commit_staged_broadcasts()
+    assert actor.fragment_versions == (3, 2) and pairing.caught_up_fragments == 1
+
+
+@pytest.mark.asyncio
+async def test_a_catch_up_waits_until_every_role_staged_it():
+    actor, critic = _PairedRole("actor", [], []), _PairedRole("critic", [], [])
+    pairing = _async_pairing(actor, critic)
+    actor._staged_steps.append(3)
+
+    await pairing.commit_staged_broadcasts()
+    assert actor.fragment_versions == critic.fragment_versions == (0, 0)
+
+    critic._staged_steps.append(3)
+    await pairing.commit_staged_broadcasts()
+    assert actor.fragment_versions == critic.fragment_versions == (3, 0)
 
 
 @pytest.mark.asyncio
