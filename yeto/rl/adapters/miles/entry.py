@@ -22,6 +22,8 @@ import json
 import logging
 from pathlib import Path
 import os
+import subprocess
+import sys
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
@@ -1300,8 +1302,10 @@ def connect_island_ray(*, environ=None, ray_module=None, miles_args=None) -> str
     """
 
     environ = os.environ if environ is None else environ
+    quant_env = rollout_quant_env(miles_args, environ)  # S26 E6 tier 1: checked before any engine starts
     address = environ.get("RAY_ADDRESS")
     if not address:
+        environ.update(quant_env)  # a Ray the driver starts inherits the driver's environment
         return None
     if ray_module is None:
         import ray as ray_module
@@ -1361,8 +1365,55 @@ def connect_island_ray(*, environ=None, ray_module=None, miles_args=None) -> str
         from yeto.rl.harness.codex.preflight import worker_runtime_env
 
         env_vars.update(worker_runtime_env(miles_args, environ))
+    env_vars.update(quant_env)
     ray_module.init(address=address, runtime_env={"env_vars": env_vars})
     return address
+
+
+def rollout_quant_env(miles_args: Any, environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """S26 E6 tier 1: the SGLang ignore list for ``miles_args.hf_checkpoint``, after the
+    scope check (:func:`yeto.rl.quant.tiers.online_plan` raises before any engine starts).
+    Empty for every other tier and for a trainer-only island (no rollout engine).
+
+    With the trainer FP8 source (``yeto_rollout_quant_fp8_source``) the engines start on
+    Miles' block-FP8 conversion instead (:func:`prepare_native_fp8_base`, which sets
+    ``miles_args.rollout_hf_checkpoint``); its config carries the ignore list, so no
+    environment entry is needed."""
+    from yeto.rl.quant import tiers
+
+    if miles_args is None or getattr(miles_args, "yeto_rollout_quant_tier", 0) != tiers.TIER_ONLINE_FP8:
+        return {}
+    plan = tiers.online_plan(Path(miles_args.hf_checkpoint))
+    print(f"[rl] {tiers.describe(tiers.TIER_ONLINE_FP8)}: {json.dumps(plan.summary())}", flush=True)
+    if getattr(miles_args, "yeto_rollout_quant_fp8_source", tiers.FP8_SOURCE_ENGINE) == tiers.FP8_SOURCE_TRAINER:
+        environ = os.environ if environ is None else environ
+        prepare_native_fp8_base(miles_args, plan, Path(environ.get("YETO_RL_WORK_DIR") or Path.home() / "yeto-rl"))
+        return {}
+    return tiers.sglang_online_env(plan)
+
+
+def prepare_native_fp8_base(miles_args: Any, plan: Any, work_dir: Path, *, run: Any = subprocess.run) -> Path:
+    """S26 E6 tier 1, trainer source: convert the BF16 base with Miles' own converter
+    (``tools/convert_hf_to_fp8.py``, 128x128 blocks) keeping the plan's ignore list in BF16,
+    check the result against the scope rule, and point the engines at it
+    (``--rollout-hf-checkpoint``). The trainer keeps ``hf_checkpoint`` (BF16) and Miles
+    block-quantizes each weight update by the converted config (``quantize_params_fp8``)."""
+    from yeto.rl.quant import tiers
+
+    if not hasattr(miles_args, "rollout_hf_checkpoint"):
+        raise RuntimeError("this Miles has no --rollout-hf-checkpoint (needs the S26 E6 fork commit)")
+    work_dir.mkdir(parents=True, exist_ok=True)
+    ignore_file, out = work_dir / "fp8-native-ignore.json", work_dir / "fp8-native-base"
+    ignore_file.write_text(json.dumps(tiers.native_ignore_list(plan)))
+    converter = Path.home() / "miles" / "tools" / "convert_hf_to_fp8.py"
+    run([sys.executable, str(converter), "--model-dir", str(miles_args.hf_checkpoint), "--save-dir", str(out),
+         "--strategy", "block", "--block-size", *map(str, tiers.NATIVE_BLOCK),
+         "--ignored-layers-file", str(ignore_file)], check=True, stdout=subprocess.DEVNULL)
+    count = tiers.check_native_base(out)
+    print(f"[rl] {tiers.describe(tiers.TIER_ONLINE_FP8)} trainer source: {miles_args.hf_checkpoint} -> {out} "
+          f"({count} FP8 modules)", flush=True)
+    miles_args.rollout_hf_checkpoint = str(out)
+    return out
 
 
 # E2 plan-v2 §0 determinism environment (with Megatron --deterministic-mode);

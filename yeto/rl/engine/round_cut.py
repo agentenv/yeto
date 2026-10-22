@@ -239,8 +239,6 @@ class RoundCutCheckpoint:
         a stop the trainer scheduler ordered); a periodic cut takes none."""
         import time
 
-        from yeto.rl.engine.resume import directory_bytes
-
         if trigger is not None and (not final or trigger not in FINAL_TRIGGERS):
             raise RoundCutError(f"cut trigger {trigger!r} needs final=True and one of {FINAL_TRIGGERS}")
         ctl = self.controller
@@ -259,6 +257,23 @@ class RoundCutCheckpoint:
         # colocated + offloaded trainer (1 GPU): its weights/optimizer are not on the
         # device between publish and the next train step; wake it for the cut only.
         offloaded = bool(getattr(driver, "_trainer_offloaded", False))
+        # Hold the store's writer guard from the first shard to the commit: a Modal
+        # Volume reload in between remounts the Volume and drops uncommitted files.
+        # Seen on Modal (e6-t2-pair-e, 2026-10-21): a reload during the shard
+        # snapshot made the rank's makedirs of the store dir fail with EPERM; the
+        # cell died and the island exited 134.
+        with ctl.store.writing():
+            return self._save_guarded(driver, cut_id=cut_id, context=context, rollout_id=rollout_id,
+                                      final=final, trigger=trigger, started=started, offloaded=offloaded)
+
+    def _save_guarded(self, driver: Any, *, cut_id: str, context: Any, rollout_id: int, final: bool,
+                      trigger: str | None, started: float, offloaded: bool) -> dict[str, Any]:
+        """:meth:`save` under the store's writer guard: the trainer cut, the pointer, the store sync."""
+        import time
+
+        from yeto.rl.engine.resume import directory_bytes
+
+        ctl = self.controller
         if offloaded:
             self.trainer.onload()
         try:

@@ -420,6 +420,10 @@ class ServingConfig:
     # rl-trainer-cold-start-cost L8.2: opt-in SGLang snapshot flags on the
     # sampler (rollout) engines; refused without a recorded compatibility pass.
     sampler_snapshot: bool = False
+    # S26 E6: rollout quantization tier (yeto.rl.quant.tiers; 0 = BF16)
+    rollout_quant_tier: int = 0
+    # tier 1: who quantizes ("engine" online FP8, or "trainer": Miles block FP8 updates)
+    rollout_quant_fp8_source: str = "engine"
 
 
 @dataclass(frozen=True)
@@ -1033,6 +1037,8 @@ def resolve_rl_run_config(
             max_running_requests=getattr(args, "sglang_max_running_requests", None),
             chunked_prefill_size=getattr(args, "sglang_chunked_prefill_size", None),
             sampler_snapshot=bool(getattr(args, "rl_sampler_snapshot", False)),
+            rollout_quant_tier=int(getattr(args, "rl_rollout_quant_tier", 0) or 0),
+            rollout_quant_fp8_source=_fp8_source(args),
         ),
         ports=NetworkPorts(
             rollout_engine_base_port=getattr(args, "rollout_engine_base_port", None),
@@ -1078,6 +1084,12 @@ def resolve_rl_run_config(
         sample_buffer=sample_roles.resolve(args, groups_per_round=args.groups_per_round),
         train_memory=_train_memory(args),
     )
+
+
+def _fp8_source(args) -> str:
+    from ..quant.tiers import fp8_source
+
+    return fp8_source(args)
 
 
 def _train_memory(args) -> TrainMemoryConfig:
