@@ -1132,6 +1132,13 @@ fn check_resume_checkpoint(cfg: &Config) -> Result<()> {
 }
 
 pub async fn run(cfg: Config) -> Result<()> {
+    run_with_listener(cfg, None).await
+}
+
+/// `run` on a listener the caller already bound (tests bind port 0 so no
+/// other test can take the port between choosing and binding it). Only the
+/// fragment-round loop uses it; `None` binds `cfg.port`.
+async fn run_with_listener(cfg: Config, bound: Option<TcpListener>) -> Result<()> {
     validate_config(&cfg)?;
     if let crate::elastic::IslandSchedulingMode::Elastic(params) = cfg.island_scheduling {
         // Whole-vector service loop (elastic_server.rs): membership,
@@ -1184,9 +1191,12 @@ pub async fn run(cfg: Config) -> Result<()> {
         // before accepting any learner so every early failure stays recovery-only.
         remove_final_marker(cfg.checkpoint_path.as_ref().unwrap())?;
     }
-    let listener = TcpListener::bind(("0.0.0.0", cfg.port))
-        .await
-        .with_context(|| format!("bind port {}", cfg.port))?;
+    let listener = match bound {
+        Some(listener) => listener,
+        None => TcpListener::bind(("0.0.0.0", cfg.port))
+            .await
+            .with_context(|| format!("bind port {}", cfg.port))?,
+    };
     let semantic_profile_sha256: String = semantic_profile_hash
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -5912,11 +5922,14 @@ mod tests {
         let key = b"k".to_vec();
         for msg_type in [MSG_JOIN, MSG_LEAVE, MSG_LEASE_HEARTBEAT, MSG_SAMPLE_INDEX,
                          MSG_DELTA_READY, MSG_ELASTIC_INIT, MSG_DELTA_TENSOR] {
-            let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+            // Bind here and hand the listener over: choosing a free port and
+            // binding it later lets a parallel test take it in between.
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
             let mut config = round_test_config(1);
             config.port = port;
             config.island_hmac_key = Some(key.clone());
-            let server = tokio::spawn(run(config));
+            let server = tokio::spawn(run_with_listener(config, Some(listener)));
             let mut stream = None;
             for _ in 0..100 {
                 if let Ok(s) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await {

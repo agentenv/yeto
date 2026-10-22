@@ -448,7 +448,9 @@ def _hmac_key(monkeypatch):
 
 
 def _start_async_syncer(binary: Path, tmp_path: Path, *extra: str, total_steps: int,
-                        syncer_args: tuple[str, ...] = ()):
+                        syncer_args: tuple[str, ...] = (), log_file: Path | None = None):
+    """Start the launcher's async syncer; its output goes to a pipe, or to
+    ``log_file`` when a test must read the log while the syncer runs."""
     from yeto import launcher
 
     args, _ = _plan(FULL[:-1] + (str(P), "--rl-sync-full-parameter-rounds", "async",
@@ -463,8 +465,13 @@ def _start_async_syncer(binary: Path, tmp_path: Path, *extra: str, total_steps: 
                .replace(launcher.RL_SYNCER_EVENT_TAPE, str(tmp_path / "tape.jsonl")))
     command = " ".join((command, *map(shlex.quote, syncer_args)))
     assert "--policy-sweep-fragments" not in command
-    process = subprocess.Popen(["bash", "-c", command], stdout=subprocess.PIPE,
-                               stderr=subprocess.STDOUT, text=True)
+    if log_file is None:
+        process = subprocess.Popen(["bash", "-c", command], stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, text=True)
+    else:
+        with log_file.open("w") as out:
+            process = subprocess.Popen(["bash", "-c", command], stdout=out,
+                                       stderr=subprocess.STDOUT, text=True)
     return process, port, launcher.rl_syncer_profile(args, 2).sha256
 
 
@@ -534,8 +541,9 @@ def _drive(binary, tmp_path, extra, *, total_steps, push, late=None):
     ``late(versions)`` is called every poll with learner 0's committed fragment
     versions and returns ``(learner, permit, answer)`` pushes to send now."""
 
+    log_file = tmp_path / "syncer.log"
     process, port, profile_hash = _start_async_syncer(binary, tmp_path, *extra,
-                                                      total_steps=total_steps)
+                                                      total_steps=total_steps, log_file=log_file)
     clients = [_client(learner, port, profile_hash) for learner in (0, 1)]
     seen: list[set] = [set(), set()]
     versions = [0] * P
@@ -580,7 +588,8 @@ def _drive(binary, tmp_path, extra, *, total_steps, push, late=None):
             client.close()
         if process.poll() is None:
             process.terminate()
-        log, _ = process.communicate(timeout=10)
+        process.wait(timeout=10)
+    log = log_file.read_text()
     assert finals[0].keys() == finals[1].keys() == set(range(P))
     for fid in range(P):
         assert np.array_equal(finals[0][fid], finals[1][fid])  # one global cut
@@ -643,6 +652,9 @@ def test_tokens_squared_over_steps_weights_match_the_reference(syncer_binary, tm
 def test_late_push_after_its_round_closed_is_refused_and_not_merged(syncer_binary, tmp_path):
     rounds: dict[int, dict] = {}
     held: dict[int, PullRequest] = {}
+    last = 2 * P  # the run's final outer step
+    held_last: list = []  # learner 0's answer for the final step
+    log_file = tmp_path / "syncer.log"
 
     def push(learner, permit):
         if learner == 1:
@@ -650,12 +662,20 @@ def test_late_push_after_its_round_closed_is_refused_and_not_merged(syncer_binar
             return None
         delta = _delta(0, permit.global_step)
         rounds[permit.global_step] = {0: (1.0, delta)}
-        return _base(permit.global_step), 1, 7, delta
+        answer = _base(permit.global_step), 1, 7, delta
+        if permit.global_step == last:
+            # Keep the run open until the syncer has handled the late push;
+            # otherwise it can finish first and never log the refusal.
+            held_last.append((0, permit, answer))
+            return None
+        return answer
 
     def late(versions):
         # Learner 1 answers PULL 1 only after round 1 committed without it.
         if versions[0] >= 1 and 1 in held:
             return [(1, held.pop(1), (0, 1, 7, _delta(1, 1)))]
+        if held_last and 1 not in held and "push rejected" in log_file.read_text():
+            return [held_last.pop()]
         return []
 
     finals, log = _drive(syncer_binary, tmp_path, ("--rl-sync-quorum", "1"),
