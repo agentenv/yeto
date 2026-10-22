@@ -124,3 +124,24 @@ def test_trainer_phase_seconds_and_buffer_wait_share(tmp_path):
     trainer = tool.scale_report(run)["trainer"]
     assert trainer["phase_s"] == {"publish": 2.0, "generate": 6.0, "train": 2.0}
     assert trainer["buffer_wait_share"] == 0.6
+
+
+def test_events_only_in_the_launch_log_are_merged(tmp_path):
+    run = _run(tmp_path, "log", samplers=1)
+    leave = {"event": "rl_sampler_leave", "time_unix": 121.0, "reason": "PREEMPTED",
+             "incarnation": "a0", "in_flight_rollout_id": 2}
+    rejoin = {"event": "rl_sampler_join", "time_unix": 150.0, "incarnation": "b0"}
+    dup = _sampler_round(110.0, 0)
+    (run / "launch.ts.log").write_text("\n".join(
+        f"2026-10-22T00:00:00Z [p-l0-modal] YETO_RL_EVENT {json.dumps(r)}" for r in (leave, rejoin, dup)))
+    s0 = tool.scale_report(run)["samplers"][0]
+    assert s0["rounds"] == 2  # the echoed round is not counted twice
+    assert s0["preemptions"][0]["rejoin_s"] == 29.0
+
+
+def test_a_round_cut_by_a_preemption_is_not_a_round(tmp_path):
+    run = _run(tmp_path, "cut", samplers=1)
+    cut = {"event": "rl_sampler_round", "time_unix": 122.0, "rollout_id": 2, "groups": 0, "generate_s": 3.0}
+    (run / "launch.ts.log").write_text(f"t [p-l0-modal] YETO_RL_EVENT {json.dumps(cut)}")
+    s0 = tool.scale_report(run)["samplers"][0]
+    assert (s0["rounds"], s0["cut_rounds"], s0["cut_generate_s"], s0["generate_s"]) == (2, 1, 3.0, 20.0)
