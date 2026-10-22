@@ -21,7 +21,7 @@ from .topology import (
 )
 from .syncer import (
     ROLE_SYNCERS, island_scheduling_mode, rl_full_parameter_async, rl_needs_critic,
-    rl_syncer_profile, rl_trainable_roles,
+    rl_syncer_profile, rl_trainable_roles, syncer_shard_count,
 )
 from .storage import _rl_checkpoint_mount
 from .rl_ports import _prepare_ports_algorithm
@@ -942,6 +942,7 @@ def _prepare_rl_args(
                     f"RL's one-fragment f32 bridge still requires {flag}"
                 )
     _apply_rl_outer_merge_options(args, num_islands=len(specs))
+    syncer_shard_count(args)  # refuse --syncer-shards outside asynchronous rounds now
     if args.spot:
         _rl_checkpoint_mount(args.rl_completed_groups_path)
 

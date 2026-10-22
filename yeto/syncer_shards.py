@@ -11,6 +11,10 @@ every fragment-addressed message to the fragment's owner:
 * finalization completes when every shard has delivered its final cut; the
   island's terminal cut is the union of the shards' manifests.
 
+Every shard runs the unsharded step schedule restricted to its fragments
+(step ``t`` merges fragment ``(t-1) mod P``), so PULL steps, fragment
+versions and the final manifest do not depend on the shard count.
+
 With one address this module is not used: the learner keeps a plain
 ``SyncerClient``.
 """
@@ -20,7 +24,15 @@ from __future__ import annotations
 import time
 from typing import Callable, Iterable
 
-from .protocol import BcastFragment, FinalFragment, FinalManifest, PullRequest, SyncerClient
+from .protocol import (
+    BcastFragment,
+    FinalFragment,
+    FinalManifest,
+    PullRequest,
+    SendProgress,
+    SyncerClient,
+)
+from .wan_streams import StreamSnapshot
 
 
 def owned_range(index: int, count: int, num_fragments: int) -> range:
@@ -77,7 +89,9 @@ class ShardedSyncerClient:
     """One island's connections to every shard of a sharded syncer head.
 
     Exposes the subset of the ``SyncerClient`` interface the torch learner
-    uses (yeto/learner.py, yeto/diloco_sync.py, yeto/finalization.py).
+    (yeto/learner.py, yeto/diloco_sync.py, yeto/finalization.py) and the RL
+    full-parameter role stream
+    (yeto/rl/adapters/miles/full_parameter/role_stream.py) use.
     """
 
     def __init__(self, addrs: list[tuple[str, int]], learner_id: int, layout, dtype: int,
@@ -101,6 +115,11 @@ class ShardedSyncerClient:
         self.shutdown = _AllSet(c.shutdown for c in self.shards)
         self._manifests: list[FinalManifest] | None = None
         self._merged: FinalManifest | None = None
+        self._init_sent = False
+
+    @property
+    def num_fragments(self) -> int:
+        return self.layout.num_fragments
 
     def _owner(self, fragment_id: int) -> SyncerClient:
         return self.shards[owner_of(fragment_id, len(self.shards), self.layout.num_fragments)]
@@ -127,7 +146,31 @@ class ShardedSyncerClient:
     def send_initial_fragments(
         self, parts_for: Callable[[int], Iterable[bytes | bytearray | memoryview]]
     ) -> bool:
-        return all([client.send_initial_fragments(parts_for) for client in self.shards])
+        """INIT of every fragment, each to its owner.
+
+        The first call sends to every shard; a later call (a replay after
+        :meth:`init_replay_due`) resends only to the shards whose live group
+        never carried a complete INIT, so one shard's outage does not resend
+        the whole model."""
+        targets = (self.shards if not self._init_sent
+                   else [client for client in self.shards if client.init_replay_due()])
+        self._init_sent = True
+        return all([client.send_initial_fragments(parts_for) for client in targets])
+
+    def init_replay_due(self) -> bool:
+        """True when some shard needs INIT again (see ``SyncerClient``)."""
+        return any(client.init_replay_due() for client in self.shards)
+
+    def mark_initial_cut_received(self) -> None:
+        for client in self.shards:
+            client.mark_initial_cut_received()
+
+    def install_inbound_chunk_sink(self, sink: object | None) -> None:
+        """One transactional sink for every shard. Each shard's receive
+        loop opens its own transactions; a fragment arrives from exactly
+        one shard, so transactions never overlap on a fragment."""
+        for client in self.shards:
+            client.install_inbound_chunk_sink(sink)
 
     def push_fragment(self, fragment_id: int, *args, **kwargs) -> None:
         self._owner(fragment_id).push_fragment(fragment_id, *args, **kwargs)
@@ -138,6 +181,35 @@ class ShardedSyncerClient:
     def heartbeat(self, local_step: int) -> None:
         for client in self.shards:
             client.heartbeat(local_step)
+
+    # -- links ----------------------------------------------------------------
+
+    def connection_generation_of(self, fragment_id: int) -> int:
+        """Connection generation of the shard that owns ``fragment_id``: a
+        PULL is answered on its owner's link, and only that shard's redial
+        invalidates it."""
+        return self._owner(fragment_id).connection_generation
+
+    def send_progress(self) -> SendProgress:
+        """Outbound progress summed over the shards; connected iff all are."""
+        progress = [client.send_progress() for client in self.shards]
+        return SendProgress(
+            bytes_sent=sum(p.bytes_sent for p in progress),
+            queued_chunks=sum(p.queued_chunks for p in progress),
+            reconnects=sum(p.reconnects for p in progress),
+            connected=all(p.connected for p in progress),
+            stalls=sum(p.stalls for p in progress),
+        )
+
+    def stream_snapshots(self) -> tuple[StreamSnapshot, ...]:
+        """Every shard's data streams, in shard order."""
+        return tuple(snapshot for client in self.shards for snapshot in client.stream_snapshots())
+
+    @property
+    def upload_drained_at(self) -> float | None:
+        """When the last shard's data streams became idle (None until one did)."""
+        drained = [client.upload_drained_at for client in self.shards]
+        return max((t for t in drained if t is not None), default=None)
 
     # -- merged receives ----------------------------------------------------
 

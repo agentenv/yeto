@@ -33,6 +33,7 @@ from yeto.protocol import (
     SyncerClient,
 )
 from yeto.push_error_feedback import RESIDUAL_DTYPES, PushErrorFeedback
+from yeto.syncer_shards import ShardedSyncerClient
 from yeto.rl.adapters.miles.full_parameter.inbound_sink import MilesRayInboundChunkSink
 from yeto.rl.adapters.miles.models.chunked_full_parameter import (
     MilesChunkedFullParameterAdapter,
@@ -123,6 +124,11 @@ class RoleStreamConfig:
     # Merge mode of every non-vocabulary fragment ("avg" or "rda"); the
     # vocabulary tables always average. Bound through the layout hash.
     matrix_merge: str = "avg"
+    # Fragment-sharded syncer head: every shard's address in shard order
+    # (the first is ``syncer_addr``); empty for one syncer process. Not part
+    # of the session contract: shards run the unsharded step schedule, so
+    # the shard count changes where bytes go, never which bytes.
+    syncer_shards: tuple[tuple[str, int], ...] = ()
 
     @property
     def session_dtype(self) -> int:
@@ -146,14 +152,23 @@ class RoleStreamConfig:
             raise ValueError("role-stream algorithm name is invalid")
         if self.role not in {"actor", "critic"} or self.component.role != self.role:
             raise ValueError("role-stream component identity changed")
-        host, port = self.syncer_addr
-        if (
-            not isinstance(host, str)
-            or not host
-            or type(port) is not int
-            or not 0 < port < 65536
-        ):
-            raise ValueError("role-stream syncer address is invalid")
+        for host, port in (self.syncer_addr, *self.syncer_shards):
+            if (
+                not isinstance(host, str)
+                or not host
+                or type(port) is not int
+                or not 0 < port < 65536
+            ):
+                raise ValueError("role-stream syncer address is invalid")
+        if self.syncer_shards:
+            if len(self.syncer_shards) < 2 or self.syncer_shards[0] != self.syncer_addr:
+                raise ValueError("role-stream syncer shards must list two or more "
+                                 "addresses, the first being the syncer address")
+            if len(set(self.syncer_shards)) != len(self.syncer_shards):
+                raise ValueError("role-stream syncer shards must be distinct")
+            if not self.partial_quorum:
+                raise ValueError("a sharded syncer head needs asynchronous rounds "
+                                 "(the strict sweep spans every fragment)")
         if (
             not self.learner_generations
             or type(self.learner_id) is not int
@@ -343,7 +358,8 @@ class MilesFullParameterRoleStream:
         self._tokens_at_anchor: list[int] = []
         self._pending: dict[int, PullRequest] = {}
         self._answered: dict[tuple[int, int], int] = {}
-        self._connection_generation: int | None = None
+        # Per fragment: the generation of the link its PULLs arrive on.
+        self._link_generations: dict[int, int] | None = None
         self._staged: dict[tuple[int, int], StoredAuthoritativeFragment] = {}
         self._pinned_cuts: dict[int, tuple[ReferencedPolicyCut, int]] = {}
         self._pinned_anchors: dict[int, tuple[StoredAuthoritativeFragment, int]] = {}
@@ -428,9 +444,7 @@ class MilesFullParameterRoleStream:
             max_chunk_bytes=self.config.max_chunk_bytes,
             matrix_merge=self.config.matrix_merge,
         )
-        client = SyncerClient(
-            self.config.syncer_addr,
-            self.config.learner_id,
+        client = self._new_client(
             adapter.layout.fragments,
             dtype=self.config.session_dtype,
             push_i8_block=self.config.push_int8_block,
@@ -484,6 +498,17 @@ class MilesFullParameterRoleStream:
         self._fragment_versions = [0] * count
         self._rounds_at_anchor = [0] * count
         self._tokens_at_anchor = [0] * count
+
+    def _new_client(self, layout, **kwargs):
+        """One ``SyncerClient``, or one per shard of a sharded head."""
+        if self.config.syncer_shards:
+            if len(self.config.syncer_shards) > layout.num_fragments:
+                raise ValueError(
+                    f"{len(self.config.syncer_shards)} syncer shards need at least as many "
+                    f"fragments, layout has {layout.num_fragments}")
+            return ShardedSyncerClient(
+                list(self.config.syncer_shards), self.config.learner_id, layout, **kwargs)
+        return SyncerClient(self.config.syncer_addr, self.config.learner_id, layout, **kwargs)
 
     def _wait_for_initial_fragments(
         self,
@@ -1002,7 +1027,7 @@ class MilesFullParameterRoleStream:
             return None
         self._answered[
             (candidate.permit.global_step, candidate.permit.round_attempt)
-        ] = int(getattr(self.client, "connection_generation", 0))
+        ] = self._link_generation(candidate.permit.fragment_id)
         self._pending.pop(candidate.permit.fragment_id)
         terminal = candidate.permit.global_step == self.config.total_fragment_steps
         self.terminal_submitted = self.terminal_submitted or terminal
@@ -1019,15 +1044,25 @@ class MilesFullParameterRoleStream:
         )
 
     def _queue_pulls(self) -> None:
-        connection_generation = int(getattr(self.client, "connection_generation", 0))
-        if self._connection_generation != connection_generation:
-            self._pending.clear()
-            self._answered.clear()
-            self._connection_generation = connection_generation
+        # A redial drops the permits and answers of that link only: the
+        # syncer resends PULLs of open rounds on the new group. With a
+        # sharded head each shard is its own link.
+        fragments = self.config.expected_fragments
+        links = {fid: self._link_generation(fid) for fid in range(fragments)}
+        if self._link_generations != links:
+            previous = self._link_generations or {}
+            stale = {fid for fid, generation in links.items() if previous.get(fid) != generation}
+            for fid in stale:
+                self._pending.pop(fid, None)
+            self._answered = {
+                key: generation for key, generation in self._answered.items()
+                if (key[0] - 1) % fragments not in stale
+            }
+            self._link_generations = links
         for permit in self.client.drain_pulls():
             self._validate_permit(permit)
             key = (permit.global_step, permit.round_attempt)
-            if self._answered.get(key) == connection_generation:
+            if self._answered.get(key) == links[permit.fragment_id]:
                 continue
             previous = self._pending.get(permit.fragment_id)
             if (
@@ -1045,6 +1080,13 @@ class MilesFullParameterRoleStream:
             if previous is not None and previous != permit:
                 raise RuntimeError("role-stream received conflicting PULLs")
             self._pending.setdefault(permit.fragment_id, permit)
+
+    def _link_generation(self, fragment_id: int) -> int:
+        """Connection generation of the link that carries ``fragment_id``."""
+        generation_of = getattr(self.client, "connection_generation_of", None)
+        if callable(generation_of):
+            return int(generation_of(fragment_id))
+        return int(getattr(self.client, "connection_generation", 0))
 
     def _validate_permit(self, permit: PullRequest) -> None:
         if (

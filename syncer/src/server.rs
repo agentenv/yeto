@@ -176,12 +176,6 @@ const SEMANTIC_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-semantic-profile-v2\0";
 const DELAYED_NESTEROV_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-delayed-nesterov-v1\0";
 
 impl Config {
-    /// The last global step this process commits: `total_steps` unsharded,
-    /// otherwise this shard's last step within it.
-    pub fn last_step(&self) -> u64 {
-        self.shard.last_step(self.total_steps)
-    }
-
     /// Canonical identity of every launch field that can affect merging,
     /// scheduling, or recovery. Listener ports and concrete output paths are
     /// deliberately excluded; checkpoint *enablement* remains included.
@@ -996,16 +990,11 @@ fn validate_shard_config(cfg: &Config) -> Result<()> {
     if cfg.learner_budget_steps.is_some() {
         bail!("--shard-count > 1 does not support --learner-budget-steps");
     }
-    // Each shard would run its own leases and quorum over the same islands;
-    // one membership view across shards is not wired yet.
-    if !cfg.membership.is_static() {
-        bail!("--shard-count > 1 does not support dynamic membership options yet");
-    }
-    // The delayed Nesterov checkpoint block covers every fragment of the
-    // layout, a shard holds only its own.
-    if cfg.outer_delayed_nesterov_period.is_some() {
-        bail!("--shard-count > 1 does not support --outer-delayed-nesterov-period yet");
-    }
+    // Membership (leases, re-JOIN, capacity quorum, soft deadline, carry
+    // discount) is per shard: every shard keeps its own view of the same
+    // islands, each island holds one connection per shard and re-JOINs each
+    // shard on its own.  No decision needs another shard's view, because a
+    // round touches one fragment and that fragment has one owner.
     Ok(())
 }
 
@@ -2520,10 +2509,9 @@ async fn scheduler(
     // A sharded head schedules only its own fragments and global steps
     // (crate::shard); unsharded, `owned` is every fragment and the steps
     // are 1..=total_steps.
-    let shard = cfg.shard;
-    let owned = st.owned_fragments();
-    let num_fragments = owned.len() as u64;
-    let last_step = cfg.last_step();
+    let schedule = st.schedule().clone();
+    let num_fragments = schedule.owned().len() as u64;
+    let last_step = schedule.last_step(cfg.total_steps);
     let mut step_rates = StepRates::default();
     let mut last_sync_secs = 0.0f64; // previous round's merge+broadcast time
 
@@ -2560,8 +2548,8 @@ async fn scheduler(
     let depth = (cfg.pipeline.max(1) as u64).min(num_fragments) as usize;
     let manual_floor = Duration::from_millis(cfg.min_round_interval_ms);
     let mut next_launch = Instant::now(); // earliest allowed next round launch
-    let mut next_t = shard.step_after(st.global_step);
-    let mut next_commit_t = shard.step_after(st.global_step);
+    let mut next_t = schedule.step_after(st.global_step);
+    let mut next_commit_t = schedule.step_after(st.global_step);
     let mut inflight: Vec<Round> = Vec::new();
     let mut computing = tokio::task::JoinSet::<Result<ComputedRound>>::new();
     let mut ready: BTreeMap<u64, ComputedRound> = BTreeMap::new();
@@ -2651,7 +2639,7 @@ async fn scheduler(
                     bail!("fragment {p} lost its busy ownership at commit");
                 }
             }
-            next_commit_t = shard.step_after(next_commit_t);
+            next_commit_t = schedule.step_after(next_commit_t);
         }
 
         // Keep the pipeline full (throttled by min_round_interval_ms).
@@ -2663,7 +2651,7 @@ async fn scheduler(
                 cutoff_established = true;
                 break 'outer;
             }
-            let p = shard.fragment_for_step(next_t, &owned);
+            let p = schedule.fragment_for_step(next_t);
             if busy_fragments.contains(&p) {
                 break;
             }
@@ -2673,7 +2661,7 @@ async fn scheduler(
                 break;
             }
             let t = next_t;
-            next_t = shard.step_after(t);
+            next_t = schedule.step_after(t);
             let pull = encode_pull(p, t, 1);
             let mut expected_members: Vec<Member> =
                 groups.iter().map(|group| group.member).collect();
@@ -2862,7 +2850,7 @@ async fn scheduler(
             .min();
         let next_fragment_available = inflight.len() + computing.len() + ready.len() < depth
             && next_t <= last_step
-            && !busy_fragments.contains(&shard.fragment_for_step(next_t, &owned));
+            && !busy_fragments.contains(&schedule.fragment_for_step(next_t));
         if next_fragment_available {
             earliest = Some(earliest.map_or(next_launch, |d| d.min(next_launch)));
         }
@@ -3323,7 +3311,7 @@ async fn scheduler(
         return Ok(());
     }
 
-    if next_commit_t != shard.step_after(last_step)
+    if next_commit_t != schedule.step_after(last_step)
         || st.global_step != last_step
         || !busy_fragments.is_empty()
         || publishing.is_some()
@@ -4097,7 +4085,7 @@ fn apply_round_commit(
         pushes,
         ..
     } = round;
-    let expected_t = st.shard().step_after(st.global_step);
+    let expected_t = st.schedule().step_after(st.global_step);
     if t != expected_t {
         bail!("refusing non-contiguous round commit: got step {t}, expected {expected_t}");
     }
@@ -4178,7 +4166,7 @@ async fn publish_round(
     // instead of silently committing a cut that was never broadcastable.
     // The terminal round is the sole exception: finalize_learners publishes
     // its exact f32 cut immediately after the scheduler reaches quiescence.
-    if t < cfg.last_step() {
+    if t < st.schedule().last_step(cfg.total_steps) {
         let dtype = bulk_dtype(st.wire_dtype);
         // bf16 downlink: encode this version once (advancing the shared
         // anchor) and send the same bytes to every learner.
@@ -4188,10 +4176,7 @@ async fn publish_round(
                 // Islands key stored fragments by (fragment, version) and
                 // refuse a second copy with other bytes, so that broadcast
                 // must carry the exact f32 masters (FULL), not a bf16 delta.
-                let last_version = cfg
-                    .shard
-                    .next_merge_of_fragment(t, &st.owned_fragments())
-                    > cfg.total_steps;
+                let last_version = st.schedule().next_merge_of_fragment(t) > cfg.total_steps;
                 let mut anchors = anchors.lock().unwrap();
                 Some(if last_version {
                     anchors.publish_full(p, st.versions[p], &st.params[p])
@@ -4276,7 +4261,7 @@ async fn publish_round(
     // Policy sweeps persist only before broadcast (see persist_before_broadcast).
     if cfg.policy_sweep_fragments.is_none() && !checkpoint_before_broadcast(cfg) {
         if let Some(path) = &cfg.checkpoint_path {
-            if cfg.checkpoint_every > 0 && cfg.shard.round_number(t) % cfg.checkpoint_every == 0 {
+            if cfg.checkpoint_every > 0 && st.schedule().round_number(t) % cfg.checkpoint_every == 0 {
                 st.save_checkpoint(path)?;
                 info!(step = t, path = %path.display(), "checkpoint written");
             }
@@ -5989,6 +5974,24 @@ mod tests {
         config.checkpoint_every = 1;
         config.resume = true;
         config
+    }
+
+    #[test]
+    fn sharded_head_takes_membership_and_delayed_nesterov_but_not_sweeps() {
+        let mut sharded = round_test_config(8);
+        sharded.shard = crate::shard::ShardPlan::new(1, 2).unwrap();
+        assert!(validate_config(&sharded).is_ok());
+        sharded.learners = 2;
+        sharded.membership.lease = Some(Duration::from_secs(5));
+        sharded.membership.soft_deadline = Some(Duration::from_secs(30));
+        sharded.membership.quorum_rule =
+            crate::membership::QuorumRule::Capacity { theta: 0.5, q_min: 1 };
+        sharded.outer_delayed_nesterov_period = Some(4);
+        assert!(validate_config(&sharded).is_ok());
+        let mut sweep = sweep_test_config(2, 4);
+        sweep.shard = sharded.shard;
+        assert!(format!("{:#}", validate_config(&sweep).unwrap_err())
+            .contains("does not support --policy-sweep-fragments"));
     }
 
     #[test]

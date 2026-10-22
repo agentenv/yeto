@@ -7,16 +7,16 @@
 //! `[⌊i·P/N⌋, ⌊(i+1)·P/N⌋)` and holds params, momentum, versions and its
 //! checkpoint for that range only, so resident head memory drops to ~1/N.
 //!
-//! Global steps are interleaved instead of coordinated: shard `i` runs the
-//! steps `t ≡ i+1 (mod N)`, i.e. `i+1, i+1+N, ...`, and its k-th round
-//! (k = ⌊(t−1)/N⌋) merges fragment `start + k mod len`.  So
+//! The step schedule is the unsharded one: global step `t` merges fragment
+//! `(t−1) mod P`, and shard `i` runs exactly the steps whose fragment it
+//! owns.  So
 //!
 //! * every global step has exactly one owner, computable from `t` alone;
-//! * a fragment version (the step of its last merge) is unique across the
-//!   whole head, and the union of the shards' per-fragment versions is the
-//!   head's vector clock — no cross-shard message is needed;
-//! * with `N = 1` every formula reduces to the unsharded scheduler
-//!   (`t = 1, 2, ...`, fragment `(t−1) mod P`).
+//! * a fragment version (the step of its last merge), every PULL and every
+//!   final manifest are the same as with one process: islands do not need
+//!   to know N beyond routing, and N = 1 is the unsharded scheduler;
+//! * the union of the shards' per-fragment versions is the head's vector
+//!   clock — no cross-shard message is needed.
 //!
 //! Shards advance independently, so steps of different shards are not
 //! ordered in wall time (step 7 of shard 0 may commit before step 6 of shard
@@ -69,69 +69,105 @@ impl ShardPlan {
         Ok(index * num_fragments / count..(index + 1) * num_fragments / count)
     }
 
-    fn stride(&self) -> u64 {
-        u64::from(self.count)
+    /// This shard's step schedule over a layout of `num_fragments`.
+    pub fn schedule(&self, num_fragments: usize) -> Result<ShardSchedule> {
+        Ok(ShardSchedule { owned: self.owned_range(num_fragments)?, fragments: num_fragments as u64 })
+    }
+}
+
+/// The global steps one shard runs: those whose round-robin fragment
+/// `(t−1) mod P` lies in its owned range.  Unsharded this is every step.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShardSchedule {
+    owned: Range<usize>,
+    fragments: u64,
+}
+
+impl ShardSchedule {
+    /// Every fragment of a `fragments`-fragment layout: the unsharded head.
+    pub fn unsharded(fragments: usize) -> Self {
+        Self { owned: 0..fragments, fragments: fragments as u64 }
+    }
+
+    fn first(&self) -> u64 {
+        self.owned.start as u64
+    }
+
+    /// One past the last owned fragment.
+    fn end(&self) -> u64 {
+        self.owned.end as u64
+    }
+
+    /// Fragments this shard owns.
+    pub fn owned(&self) -> Range<usize> {
+        self.owned.clone()
+    }
+
+    /// The fragment merged at global step `t` (t ≥ 1), on any shard.
+    pub fn fragment_for_step(&self, t: u64) -> usize {
+        ((t - 1) % self.fragments) as usize
     }
 
     /// Whether this shard runs global step `t` (t ≥ 1).
     pub fn owns_step(&self, t: u64) -> bool {
-        t >= 1 && (t - 1) % self.stride() == u64::from(self.index)
+        t >= 1 && self.owned.contains(&self.fragment_for_step(t))
     }
 
     /// The first step this shard runs after `step` (its last committed step,
     /// or 0 before the first).
     pub fn step_after(&self, step: u64) -> u64 {
-        let first = u64::from(self.index) + 1;
-        if step < first {
-            return first;
+        // Step `step + 1` merges fragment `step mod P`.
+        let position = step % self.fragments;
+        let next = step + 1;
+        if position < self.first() {
+            next + (self.first() - position)
+        } else if position < self.end() {
+            next
+        } else {
+            next + (self.fragments - position) + self.first()
         }
-        let k = (step - first) / self.stride() + 1;
-        first + k * self.stride()
     }
 
     /// The last step this shard runs within `total_steps` (0 if none).
     pub fn last_step(&self, total_steps: u64) -> u64 {
-        let first = u64::from(self.index) + 1;
-        if total_steps < first {
+        if total_steps == 0 {
             return 0;
         }
-        first + (total_steps - first) / self.stride() * self.stride()
+        let sweep = (total_steps - 1) / self.fragments;
+        let position = (total_steps - 1) % self.fragments;
+        if position >= self.first() {
+            sweep * self.fragments + position.min(self.end() - 1) + 1
+        } else if sweep == 0 {
+            0
+        } else {
+            (sweep - 1) * self.fragments + self.end()
+        }
     }
 
     /// The 1-based round count of this shard at its step `t`; equals `t`
     /// unsharded.  Periodic intervals (checkpoint_every) count these.
     pub fn round_number(&self, t: u64) -> u64 {
-        (t - 1) / self.stride() + 1
-    }
-
-    /// The fragment merged at this shard's step `t`.
-    pub fn fragment_for_step(&self, t: u64, owned: &Range<usize>) -> usize {
-        let k = (t - 1) / self.stride();
-        owned.start + (k % owned.len() as u64) as usize
+        let len = self.end() - self.first();
+        let sweep = (t - 1) / self.fragments;
+        let position = (t - 1) % self.fragments;
+        sweep * len + (position - self.first()) + 1
     }
 
     /// The version (step of last merge) of owned fragment `p` in a
     /// contiguous cut whose last committed step is `global_step`; 0 if `p`
-    /// has not been merged yet.  Unsharded this is the strict round-robin
-    /// version `p+1 + ⌊(g−p−1)/P⌋·P`.
-    pub fn expected_version(&self, p: usize, global_step: u64, owned: &Range<usize>) -> u64 {
-        let first = u64::from(self.index) + 1;
+    /// has not been merged yet.  This is the strict round-robin version
+    /// `p+1 + ⌊(g−p−1)/P⌋·P` on every shard.
+    pub fn expected_version(&self, p: usize, global_step: u64) -> u64 {
+        let first = p as u64 + 1;
         if global_step < first {
             return 0;
         }
-        let rounds = (global_step - first) / self.stride() + 1;
-        let j = (p - owned.start) as u64;
-        let len = owned.len() as u64;
-        if rounds <= j {
-            return 0;
-        }
-        let k = j + (rounds - 1 - j) / len * len;
-        first + k * self.stride()
+        first + (global_step - first) / self.fragments * self.fragments
     }
 
     /// The step at which the fragment merged at `t` is merged next.
-    pub fn next_merge_of_fragment(&self, t: u64, owned: &Range<usize>) -> u64 {
-        t + self.stride() * owned.len() as u64
+    pub fn next_merge_of_fragment(&self, t: u64) -> u64 {
+        t + self.fragments
     }
 }
 
@@ -141,33 +177,34 @@ mod tests {
 
     #[test]
     fn unsharded_plan_is_the_classic_schedule() {
-        let plan = ShardPlan::default();
-        let owned = plan.owned_range(5).unwrap();
-        assert_eq!(owned, 0..5);
+        let schedule = ShardPlan::default().schedule(5).unwrap();
+        assert_eq!(schedule.owned(), 0..5);
         for t in 1..=20 {
-            assert!(plan.owns_step(t));
-            assert_eq!(plan.step_after(t - 1), t);
-            assert_eq!(plan.round_number(t), t);
-            assert_eq!(plan.fragment_for_step(t, &owned), ((t - 1) % 5) as usize);
-            assert_eq!(plan.next_merge_of_fragment(t, &owned), t + 5);
+            assert!(schedule.owns_step(t));
+            assert_eq!(schedule.step_after(t - 1), t);
+            assert_eq!(schedule.round_number(t), t);
+            assert_eq!(schedule.fragment_for_step(t), ((t - 1) % 5) as usize);
+            assert_eq!(schedule.next_merge_of_fragment(t), t + 5);
         }
-        assert_eq!(plan.last_step(17), 17);
+        assert_eq!(schedule.last_step(17), 17);
         for p in 0..5 {
             for g in 0..30u64 {
                 let first = p as u64 + 1;
                 let classic = if g < first { 0 } else { first + (g - first) / 5 * 5 };
-                assert_eq!(plan.expected_version(p, g, &owned), classic);
+                assert_eq!(schedule.expected_version(p, g), classic);
             }
         }
-        assert_eq!(plan.last_step(0), 0);
+        assert_eq!(schedule.last_step(0), 0);
     }
 
     #[test]
-    fn shards_partition_steps_and_fragments() {
+    fn shards_partition_the_unsharded_steps() {
         for count in 1..=4u32 {
             for fragments in count as usize..=9 {
-                let plans: Vec<_> = (0..count).map(|i| ShardPlan::new(i, count).unwrap()).collect();
-                let ranges: Vec<_> = plans.iter().map(|p| p.owned_range(fragments).unwrap()).collect();
+                let schedules: Vec<_> = (0..count)
+                    .map(|i| ShardPlan::new(i, count).unwrap().schedule(fragments).unwrap())
+                    .collect();
+                let ranges: Vec<_> = schedules.iter().map(ShardSchedule::owned).collect();
                 // Disjoint, contiguous, covering, non-empty.
                 assert_eq!(ranges[0].start, 0);
                 assert_eq!(ranges.last().unwrap().end, fragments);
@@ -175,33 +212,31 @@ mod tests {
                     assert_eq!(w[0].end, w[1].start);
                 }
                 assert!(ranges.iter().all(|r| !r.is_empty()));
-                let total = 37u64;
-                let mut merges = vec![0u64; fragments];
-                for t in 1..=total {
-                    let owners: Vec<_> = plans.iter().filter(|p| p.owns_step(t)).collect();
-                    assert_eq!(owners.len(), 1, "step {t}");
-                    let plan = owners[0];
-                    let owned = &ranges[plan.index as usize];
-                    let p = plan.fragment_for_step(t, owned);
-                    assert!(owned.contains(&p));
-                    merges[p] += 1;
-                    assert!(t <= plan.last_step(total));
-                    let next = plan.step_after(t);
-                    assert!(plan.owns_step(next) && next == t + u64::from(count));
-                    let again = plan.next_merge_of_fragment(t, owned);
-                    assert_eq!(plan.fragment_for_step(again, owned), p);
-                    assert_eq!(plan.expected_version(p, t, owned), t);
-                    for q in owned.clone() {
-                        let v = plan.expected_version(q, t, owned);
-                        assert!(v == 0 || (plan.owns_step(v) && plan.fragment_for_step(v, owned) == q));
+                for total in 0..=(3 * fragments as u64 + 2) {
+                    let mut cursors = vec![0u64; count as usize];
+                    let mut rounds = vec![0u64; count as usize];
+                    for t in 1..=total {
+                        let owners: Vec<_> =
+                            (0..count as usize).filter(|&i| schedules[i].owns_step(t)).collect();
+                        assert_eq!(owners.len(), 1, "step {t}");
+                        let i = owners[0];
+                        let schedule = &schedules[i];
+                        let p = schedule.fragment_for_step(t);
+                        assert_eq!(p, ((t - 1) % fragments as u64) as usize);
+                        assert!(ranges[i].contains(&p));
+                        // Each shard walks its own steps in order, with no gaps.
+                        assert_eq!(schedule.step_after(cursors[i]), t);
+                        cursors[i] = t;
+                        rounds[i] += 1;
+                        assert_eq!(schedule.round_number(t), rounds[i]);
+                        assert_eq!(schedule.expected_version(p, t), t);
+                        assert_eq!(schedule.fragment_for_step(schedule.next_merge_of_fragment(t)), p);
+                    }
+                    for (i, schedule) in schedules.iter().enumerate() {
+                        assert_eq!(schedule.last_step(total), cursors[i], "shard {i} total {total}");
+                        assert!(schedule.step_after(cursors[i]) > total);
                     }
                 }
-                for plan in &plans {
-                    let last = plan.last_step(total);
-                    assert!(last == 0 || (plan.owns_step(last) && last + u64::from(count) > total));
-                }
-                // Each shard sweeps its own range round-robin.
-                assert!(merges.iter().all(|&m| m > 0));
             }
         }
     }

@@ -368,7 +368,8 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="split the syncer head into N processes by fragment range "
         "(each owns ~1/N of the parameters, momentum and checkpoint; "
         "islands route each fragment to its owner). 1 = one syncer. "
-        "SFT torch causal-LM learners only",
+        "SFT torch causal-LM learners, or RL --rl-sync-preset full-parameter "
+        "with --rl-sync-full-parameter-rounds async (actor only)",
     )
     sync.add_argument(
         "--syncer-weighted-fold",

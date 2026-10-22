@@ -890,6 +890,7 @@ def _dense_full_sync_config(
     from yeto.rl.local_learner import ComponentIdentity
 
     async_rounds = _full_parameter_async(args)
+    syncers = _syncer_addresses(args.syncer) if async_rounds else [_syncer_address(args.syncer)]
     actor = RoleStreamConfig(
         algorithm="grpo",
         role="actor",
@@ -898,7 +899,8 @@ def _dense_full_sync_config(
             model_revision=args.model_revision.lower(),
             config_hash=model_config_sha256,
         ),
-        syncer_addr=_syncer_address(args.syncer),
+        syncer_addr=syncers[0],
+        syncer_shards=tuple(syncers) if len(syncers) > 1 else (),
         learner_id=args.learner_id,
         learner_generation=int(getattr(args, "learner_generation", 0)),
         learner_generations=_roster_generations(args),
@@ -1678,10 +1680,20 @@ def _island_compat_group(args) -> str:
 
 
 def _syncer_address(value: str) -> tuple[str, int]:
+    """One ``HOST:PORT``; a sharded head's list is only for
+    :func:`_syncer_addresses` (asynchronous full-parameter rounds)."""
+    if "," in value:
+        raise ValueError("a sharded syncer head (comma-separated --syncer) needs "
+                         "--full-parameter-rounds async")
     host, separator, port = value.rpartition(":")
     if not separator or not host:
         raise ValueError("--syncer must be HOST:PORT")
     return host, int(port)
+
+
+def _syncer_addresses(value: str) -> list[tuple[str, int]]:
+    """``HOST:PORT[,HOST:PORT...]``: one syncer, or every shard in shard order."""
+    return [_syncer_address(item.strip()) for item in value.split(",")]
 
 
 def probe_syncers(args, *, connect=None, attempts: int = 10, delay: float = 3.0,
@@ -1693,8 +1705,8 @@ def probe_syncers(args, *, connect=None, attempts: int = 10, delay: float = 3.0,
     import socket
 
     connect = connect or socket.create_connection
-    addrs = [_syncer_address(v) for v in (getattr(args, "syncer", None),
-                                          getattr(args, "critic_syncer", None)) if v]
+    addrs = [addr for v in (getattr(args, "syncer", None), getattr(args, "critic_syncer", None))
+             if v for addr in _syncer_addresses(v)]
     for host, port in addrs:
         last = "not tried"
         for i in range(max(1, attempts)):
@@ -1724,7 +1736,7 @@ def probe_wan_link(args, *, probe=None) -> None:
     from yeto.wan_probe import EXIT_SLOW_LINK, PROBE_EVENT, PROBE_MARKER, probe_link
 
     result = (probe or probe_link)(
-        _syncer_address(args.syncer),
+        _syncer_addresses(args.syncer)[0],  # shard 0 of a sharded head
         streams=max(1, int(args.wan_streams)),
         bytes_per_direction=int(getattr(args, "wan_probe_mib", 256)) << 20,
         key=island_hmac_key_from_env(),

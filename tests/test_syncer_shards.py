@@ -279,11 +279,15 @@ def test_sharded_head_matches_numpy_replay(syncer_binary, tmp_path, shards, quor
     # Every step 1..T ran exactly once, on its owning shard, on the planned fragment.
     expected, records = replay(lay, [tmp_path / f"tape{i}.jsonl" for i in range(shards)])
     assert [r["step"] for r in records] == list(range(1, total_steps + 1)), logs
-    for record in records:
-        shard = (record["step"] - 1) % shards
-        owned = owned_range(shard, shards, lay.num_fragments)
-        k = (record["step"] - 1) // shards
-        assert record["fragment"] == owned.start + k % len(owned)
+    # Steps keep the unsharded round-robin fragment; the fragment's owner runs it.
+    for index in range(shards):
+        owned = owned_range(index, shards, lay.num_fragments)
+        tape = (tmp_path / f"tape{index}.jsonl").read_text().splitlines()
+        steps = [json.loads(line) for line in tape]
+        for record in steps:
+            if "fragment" in record and "responders" in record:
+                assert record["fragment"] == (record["step"] - 1) % lay.num_fragments
+                assert record["fragment"] in owned
 
     # Head state: each shard holds only its own fragments; together they
     # equal the numpy replay up to f32 rounding.

@@ -94,12 +94,42 @@ def rl_role_syncers(args) -> tuple[RoleSyncer, ...]:
     return tuple(ROLE_SYNCERS[role] for role in rl_trainable_roles(args))
 
 
+def role_syncer_shards(args, syncer: RoleSyncer) -> tuple[RoleSyncer, ...]:
+    """The processes of one role's syncer: itself, or one per head shard.
+
+    Shard 0 keeps the role's port, checkpoint and tape; shard i>0 listens on
+    ``port + i`` and writes ``<stem>.shard<i><suffix>``. Only the actor is
+    sharded (``syncer_shard_count`` refuses a critic), so the ports never
+    collide with the critic syncer."""
+    count = syncer_shard_count(args)
+    if count == 1:
+        return (syncer,)
+    return tuple(
+        RoleSyncer(syncer.role, syncer.port + index, syncer.address,
+                   _shard_path(syncer.checkpoint, index), _shard_path(syncer.event_tape, index))
+        for index in range(count)
+    )
+
+
 def role_syncer_commands(args, num_learners: int,
                          binary: str = "~/yeto-syncer") -> dict[str, str]:
     """One strict RL syncer invocation per trainable role (rounds, quorum and
-    outer optimizer shared), each on its own port, checkpoint and tape."""
-    return {syncer.role: _rl_role_syncer_command(args, num_learners, binary, syncer)
-            for syncer in rl_role_syncers(args)}
+    outer optimizer shared), each on its own port, checkpoint and tape.
+
+    With ``--syncer-shards N`` a role's command runs its N shard processes
+    under one supervisor that fails as soon as any shard fails."""
+    commands = {}
+    for syncer in rl_role_syncers(args):
+        shards = role_syncer_shards(args, syncer)
+        if len(shards) == 1:
+            commands[syncer.role] = _rl_role_syncer_command(args, num_learners, binary, syncer)
+        else:
+            commands[syncer.role] = _sharded_supervisor([
+                _rl_role_syncer_command(args, num_learners, binary, shard,
+                                        shard_plan=(index, len(shards)))
+                for index, shard in enumerate(shards)
+            ])
+    return commands
 
 
 def syncer_event_tape(args) -> str:
@@ -495,8 +525,12 @@ def _rl_learner_weight(args) -> str:
 
 
 def _rl_role_syncer_command(args, num_learners: int, binary: str,
-                            syncer: RoleSyncer) -> str:
-    """One role's strict RL syncer; --resume only once its checkpoint exists."""
+                            syncer: RoleSyncer,
+                            shard_plan: tuple[int, int] | None = None) -> str:
+    """One role's strict RL syncer; --resume only once its checkpoint exists.
+    ``shard_plan=(index, count)`` makes it one shard of a sharded head."""
+    shard_flags = (f" --shard-index {shard_plan[0]} --shard-count {shard_plan[1]}"
+                   if shard_plan else "")
     total_steps = getattr(args, "rl_total_fragment_steps", args.total_steps)
     return (
         f"{binary}"
@@ -523,6 +557,7 @@ def _rl_role_syncer_command(args, num_learners: int, binary: str,
         f" {_resume_if_exists(syncer.checkpoint)}"
         f" --event-tape {syncer.event_tape}"
         f"{_syncer_weighted_fold(args)}"
+        f"{shard_flags}"
     )
 
 
@@ -531,25 +566,34 @@ def syncer_shard_count(args) -> int:
     into by fragment range. 1 (default) is the single unsharded syncer.
 
     Sharding needs fragment-round scheduling and a learner that routes per
-    fragment, so it is limited to the torch causal-LM learner (yeto.learner)
-    in SFT; RL presets (strict policy sweeps, elastic) are refused."""
+    fragment: the torch causal-LM learner (yeto.learner) in SFT, and in RL
+    the full-parameter preset with asynchronous rounds (the actor role
+    stream). Strict policy sweeps, the elastic scheduler, critics and the
+    other RL presets are refused."""
     count = getattr(args, "syncer_shards", None)
     count = 1 if count is None else int(count)
     if count < 1:
         raise ValueError("--syncer-shards must be >= 1")
     if count == 1:
         return 1
+    fragments = int(getattr(args, "fragments", count))
+    if fragments < count:
+        raise ValueError(f"--syncer-shards {count} needs --fragments >= {count}")
     if getattr(args, "training_mode", "sft") == "rl":
-        raise ValueError("--syncer-shards > 1 is not supported with --training-mode rl yet")
+        if not rl_full_parameter_async(args):
+            raise ValueError("--syncer-shards > 1 with --training-mode rl needs --rl-sync-preset "
+                             f"{FULL_PARAMETER_SYNC_PRESET} --rl-sync-full-parameter-rounds async")
+        if island_scheduling_mode(args) != "legacy":
+            raise ValueError("--syncer-shards > 1 needs --rl-island-scheduling legacy")
+        if rl_needs_critic(args):
+            raise ValueError("--syncer-shards > 1 supports actor-only algorithms")
+        return count
     if getattr(args, "island_backend", "torch") != "torch":
         raise ValueError("--syncer-shards > 1 needs --island-backend torch")
     from ..models import resolve_model_kind
 
     if resolve_model_kind(args.model, getattr(args, "model_kind", "auto")) != "causal-lm":
         raise ValueError("--syncer-shards > 1 supports causal-lm learners only")
-    fragments = int(getattr(args, "fragments", count))
-    if fragments < count:
-        raise ValueError(f"--syncer-shards {count} needs --fragments >= {count}")
     return count
 
 

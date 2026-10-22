@@ -41,8 +41,8 @@ from .launch.rl_backend import _rl_backend_module
 from .launch.topology import rl_island_args, rl_island_count, rl_island_placement_records, rl_island_spec
 from .launch.syncer import (
     SYNCER_PORT, island_scheduling_mode, island_syncer_addrs, make_syncer_task, probe_syncer_ports,
-    resolve_island_syncer_epoch, rl_role_syncers, role_syncer_commands, syncer_event_tape,
-    syncer_shard_addrs, syncer_status_reader,
+    resolve_island_syncer_epoch, rl_role_syncers, role_syncer_commands, role_syncer_shards,
+    syncer_event_tape, syncer_shard_addrs, syncer_status_reader,
 )
 from .launch.storage import (
     droppable_rejoins_in_new_container, resumes_in_new_container,
@@ -933,8 +933,9 @@ NO_SYNC_INCOMPLETE_EXIT = 3
 
 def _dry_run_role_syncers(args, num_learners: int) -> list[dict]:
     commands = role_syncer_commands(args, num_learners)
-    return [
-        {
+    plans = []
+    for syncer in rl_role_syncers(args):
+        plan = {
             "role": syncer.role,
             "port": syncer.port,
             "address": syncer.address,
@@ -943,8 +944,12 @@ def _dry_run_role_syncers(args, num_learners: int) -> list[dict]:
             "checkpoint": syncer.checkpoint,
             "event_tape": syncer.event_tape,
         }
-        for syncer in rl_role_syncers(args)
-    ]
+        shards = role_syncer_shards(args, syncer)
+        if len(shards) > 1:
+            plan["shards"] = [{"port": shard.port, "checkpoint": shard.checkpoint,
+                               "event_tape": shard.event_tape} for shard in shards]
+        plans.append(plan)
+    return plans
 
 
 def dry_run_plan(args) -> dict:

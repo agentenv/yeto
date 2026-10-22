@@ -6,7 +6,7 @@ use anyhow::{bail, Context, Result};
 use crate::iso_worker::{IsoBackend, IsoBackendConfig, IsoBackendKind};
 use crate::merge;
 use crate::protocol::Reader;
-use crate::shard::ShardPlan;
+use crate::shard::{ShardPlan, ShardSchedule};
 use std::sync::Arc;
 
 pub const MERGE_AVG: u8 = 0;
@@ -161,7 +161,7 @@ pub struct GlobalState {
     /// Head shard of this process and the fragments it owns (S27 P4b).
     /// Unowned fragments are never allocated, initialized or checkpointed.
     shard: ShardPlan,
-    owned: std::ops::Range<usize>,
+    schedule: ShardSchedule,
 }
 
 /// A merge whose deterministic learner reduction has completed but whose
@@ -364,7 +364,7 @@ impl GlobalState {
             iso_backend: IsoBackend::start(iso_backend_config)?,
             downlink: None,
             shard: ShardPlan::default(),
-            owned: 0..fragment_count,
+            schedule: ShardSchedule::unsharded(fragment_count),
         })
     }
 
@@ -374,22 +374,23 @@ impl GlobalState {
         if self.initialized.iter().any(|&b| b) {
             bail!("head shard must be set before fragments are initialized");
         }
-        self.owned = plan.owned_range(self.layout.fragments.len())?;
+        self.schedule = plan.schedule(self.layout.fragments.len())?;
         self.shard = plan;
         Ok(())
     }
 
-    pub fn shard(&self) -> ShardPlan {
-        self.shard
+    /// The global steps this process runs (every step unsharded).
+    pub fn schedule(&self) -> &ShardSchedule {
+        &self.schedule
     }
 
     /// Fragments this process owns (all of them unsharded).
     pub fn owned_fragments(&self) -> std::ops::Range<usize> {
-        self.owned.clone()
+        self.schedule.owned()
     }
 
     pub fn owns_fragment(&self, fid: usize) -> bool {
-        self.owned.contains(&fid)
+        self.schedule.owned().contains(&fid)
     }
 
     pub fn iso_backend_kind(&self) -> IsoBackendKind {
@@ -414,7 +415,7 @@ impl GlobalState {
     }
 
     pub fn all_initialized(&self) -> bool {
-        self.initialized[self.owned.clone()].iter().all(|&b| b)
+        self.initialized[self.schedule.owned()].iter().all(|&b| b)
     }
 
     pub fn init_fragment(&mut self, fid: usize, values: Vec<f32>) -> Result<()> {
@@ -429,7 +430,7 @@ impl GlobalState {
                 "init for fragment {fid} not owned by syncer shard {}/{} (owns {:?})",
                 self.shard.index,
                 self.shard.count,
-                self.owned
+                self.schedule.owned()
             );
         }
         if values.len() != expected {
@@ -1019,14 +1020,25 @@ impl GlobalState {
             return Ok(0);
         }
         let mut len = 8u64;
-        for fragment in &self.layout.fragments {
-            len = u64::try_from(fragment.numel()?)
+        for p in 0..self.layout.fragments.len() {
+            len = u64::try_from(self.delayed_nesterov_numel(p)?)
                 .ok()
                 .and_then(|numel| numel.checked_mul(4))
                 .and_then(|bytes| len.checked_add(8 + bytes))
                 .context("delayed Nesterov checkpoint block size overflows")?;
         }
         Ok(len)
+    }
+
+    /// Accumulator length of fragment `p` in the Delayed Nesterov block: a
+    /// sharded head stores only its own fragments, the others are empty
+    /// (like their params and momentum).
+    fn delayed_nesterov_numel(&self, p: usize) -> Result<usize> {
+        if self.owns_fragment(p) {
+            self.layout.fragments[p].numel()
+        } else {
+            Ok(0)
+        }
     }
 
     /// Parse the Delayed Nesterov block that `r` is positioned at.
@@ -1038,13 +1050,14 @@ impl GlobalState {
             return Ok(Vec::new());
         };
         let mut states = Vec::with_capacity(self.layout.fragments.len());
-        for fragment in &self.layout.fragments {
+        for p in 0..self.layout.fragments.len() {
+            let numel = self.delayed_nesterov_numel(p)?;
             let step = r.u64()?;
             let mut accum = Vec::new();
             accum
-                .try_reserve_exact(fragment.numel()?)
+                .try_reserve_exact(numel)
                 .context("cannot allocate checkpoint delayed Nesterov buffer")?;
-            accum.resize(fragment.numel()?, 0.0);
+            accum.resize(numel, 0.0);
             r.f32s(&mut accum)?;
             states.push(merge::DelayedNesterovState { step, accum: Arc::new(accum) });
         }
@@ -1315,7 +1328,7 @@ impl GlobalState {
         // cursor, so round-robin fragment versions are fully determined by
         // it. Reject legacy completion-order snapshots with holes rather than
         // silently skipping an uncommitted low t on resume.
-        if global_step != 0 && !self.shard.owns_step(global_step) {
+        if global_step != 0 && !self.schedule.owns_step(global_step) {
             bail!(
                 "checkpoint global_step {global_step} is not a step of syncer shard {}/{}",
                 self.shard.index,
@@ -1324,7 +1337,7 @@ impl GlobalState {
         }
         for (fid, version) in versions.iter().copied().enumerate() {
             let expected = if self.owns_fragment(fid) {
-                self.shard.expected_version(fid, global_step, &self.owned)
+                self.schedule.expected_version(fid, global_step)
             } else {
                 0
             };
@@ -1341,7 +1354,7 @@ impl GlobalState {
         self.params = params;
         self.momentum = momentum;
         self.delayed_nesterov = delayed_nesterov;
-        self.initialized[self.owned.clone()].fill(true);
+        self.initialized[self.schedule.owned()].fill(true);
         self.ledger = ledger;
         Ok(())
     }
@@ -1624,6 +1637,38 @@ mod tests {
             assert!(error.contains(message), "{error}");
             assert!(!fresh.all_initialized());
         }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn sharded_delayed_nesterov_checkpoints_only_owned_fragments() {
+        let dir = std::env::temp_dir().join(format!("yeto-dn-shard-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("dn-shard1.ckpt");
+        let fresh = || {
+            let mut st = state_with_fingerprint(layout2(), 0x11);
+            st.set_shard(ShardPlan::new(1, 2).unwrap()).unwrap();
+            st.set_delayed_nesterov_period(Some(2)).unwrap();
+            st
+        };
+        let mut st = fresh();
+        assert!(st.init_fragment(0, vec![1.0; 4]).is_err());
+        st.init_fragment(1, vec![-2.0; 4]).unwrap();
+        // Fragment 1 is merged at step 2 (round robin over 2 fragments).
+        st.merge_and_step(1, &[&[2.0f32; 4]], &[1.0]).unwrap();
+        st.global_step = 2;
+        st.versions = vec![0, 2];
+        st.save_checkpoint(&path).unwrap();
+        let mut resumed = fresh();
+        resumed.load_checkpoint(&path).unwrap();
+        assert_eq!(resumed.delayed_nesterov, st.delayed_nesterov);
+        assert!(resumed.delayed_nesterov[0].accum.is_empty());
+        assert_eq!(resumed.delayed_nesterov[1].accum.len(), 4);
+        for state in [&mut st, &mut resumed] {
+            state.merge_and_step(1, &[&[2.0f32; 4]], &[1.0]).unwrap();
+        }
+        assert_eq!(resumed.params, st.params);
+        assert_eq!(resumed.momentum, st.momentum);
         std::fs::remove_dir_all(&dir).ok();
     }
 
