@@ -415,7 +415,9 @@ def island_scheduling_mode(args) -> str:
     if mode not in ("legacy", "elastic"):
         raise ValueError(f"--rl-island-scheduling must be legacy|elastic, got {mode!r}")
     if mode == "legacy":
-        given = [f for n, f in _ISLAND_SCHEDULING_PARAMS if getattr(args, n, None) is not None]
+        given = [f for n, f in _ISLAND_SCHEDULING_PARAMS if getattr(args, n, None) is not None
+                 # S27 E-3: peer recovery fences fragment-round HELLOs with the syncer epoch
+                 and not (n == "rl_syncer_epoch" and getattr(args, "rl_peer_recovery", False))]
         if given:
             raise ValueError(", ".join(given) + " need --rl-island-scheduling elastic")
     return mode
@@ -500,6 +502,21 @@ def _syncer_island_scheduling(args) -> str:
             f" --final-grace-s {_final_grace_s(args, int(soft))}")
 
 
+def peer_recovery_syncer_flags(args) -> str:
+    """S27 E-3 ``--rl-peer-recovery``: the role syncer's epoch and recovery
+    options (checked by ``launch.peer_recovery``); "" when recovery is off."""
+    if not getattr(args, "rl_peer_recovery", False):
+        return ""
+    flags = f" --syncer-epoch {island_syncer_epoch(args)}"
+    for dest, flag in (("rl_recovery_bound_steps", "--recovery-bound-steps"),
+                       ("rl_recovery_max_donor_tries", "--recovery-max-donor-tries"),
+                       ("rl_recovery_donor_timeout_s", "--recovery-donor-timeout-s")):
+        value = getattr(args, dest, None)
+        if value is not None:
+            flags += f" {flag} {int(value)}"
+    return flags
+
+
 def _final_grace_s(args, soft_deadline_s: int) -> int:
     """0.26: the syncer's FINISHED window (whole seconds); default the soft deadline."""
     value = getattr(args, "rl_final_grace_s", None)
@@ -550,6 +567,7 @@ def _rl_role_syncer_command(args, num_learners: int, binary: str,
         f"{_syncer_profile_binding(args)}"
         f"{_syncer_bcast_delta(args)}"
         f"{_syncer_outer_optimizer(args)}"
+        f"{peer_recovery_syncer_flags(args)}"
         f" --max-base-lag {_rl_max_base_lag(args)}"
         f" --learner-weight {_rl_learner_weight(args)}"
         f" --checkpoint-path {syncer.checkpoint}"

@@ -158,6 +158,7 @@ class FleetController:
         replacement_planner=None,
         wan_reject_probe=None,
         wan_probe_relaunches: int = 0,
+        island_relaunch_envs=None,
     ):
         """`learners` maps cluster name -> (task, job_id); `syncer` is
         (name, task, job_id) for a cluster syncer, or None with
@@ -185,6 +186,9 @@ class FleetController:
         # existing relaunch runs unchanged. On: its launch() result (a new job
         # id) replaces the same-place relaunch.
         self.replacement_planner = replacement_planner
+        # S27 E-3: environment added to an island task before its relaunch (peer
+        # recovery: the relaunched trainer restores from a peer, not from scratch).
+        self.island_relaunch_envs = dict(island_relaunch_envs or {})
         # B12: True (--keep-abandoned) leaves an abandoned learner's cluster up for
         # post-mortem instead of tearing it down; the final teardown still honors --keep.
         self.keep_abandoned = keep_abandoned
@@ -666,7 +670,19 @@ class FleetController:
                 if planned is not None:
                     rec["attempt"] = planned
                     return
+            if not is_syncer:
+                self._add_relaunch_envs(rec["task"])
             rec["attempt"] = self._start_relaunch(rec)
+
+    def _add_relaunch_envs(self, task) -> None:
+        if not self.island_relaunch_envs:
+            return
+        if callable(getattr(task, "update_envs", None)):  # sky.Task
+            task.update_envs(self.island_relaunch_envs)
+        elif isinstance(getattr(task, "envs", None), dict):  # ModalIslandConfig
+            task.envs.update(self.island_relaunch_envs)
+        else:
+            raise TypeError(f"cannot add relaunch envs to a {type(task).__name__}")
 
     def _plan_replacement(self, rec):
         try:

@@ -699,6 +699,12 @@ class FullParameterSync(RoundCutHooks):
         self._driver = driver
         self.run(self.pairing.gather_roles(lambda role, stream: stream.initialize(self.groups[role])))
         self._upload_before = self._stream_snapshots()
+        outcome = getattr(self.actor, "recovery_outcome", None)
+        if outcome is not None:
+            driver.emit("rl_peer_recovery", path=outcome.path, donor=outcome.donor, t_s=outcome.t_s,
+                        done_step=outcome.done_step, steps=outcome.steps, replayed=outcome.replayed,
+                        refused_sources=outcome.refused_sources, seconds=outcome.seconds,
+                        versions=list(outcome.versions))
         self._publish_outer_version(driver)
         return SyncStart(state=self.actor.resident_state(0), rollout_id=0)
 
@@ -777,6 +783,7 @@ class FullParameterSync(RoundCutHooks):
         pairing.submit_ready()
         submit_ts = unix_now()
         await pairing.commit_staged_broadcasts()
+        await self._serve_peer_snapshots()
         if pairing.profile.sweep:
             await self._wait_for_sweep(before)
             # Broadcasts are staged in the background, so the receive time
@@ -790,6 +797,18 @@ class FullParameterSync(RoundCutHooks):
         for stream in pairing.streams.values():
             stream.discard_detached_submission_cut()
         return False
+
+    async def _serve_peer_snapshots(self) -> None:
+        """S27 E-3: a donor answers snapshot requests here, after this
+        boundary's broadcasts are applied and before the next local round (a
+        safe point). Streams without peer recovery have no such method."""
+        served = 0
+        for stream in self.pairing.streams.values():
+            serve = getattr(stream, "serve_peer_snapshots", None)
+            if serve is not None:
+                served += await serve()
+        if served and self._driver is not None:
+            self._driver.emit("rl_peer_snapshot_served", count=served)
 
     async def _overlap_boundary(self, rollout_id: int) -> bool:
         """Streaming-DiLoCo overlap (S26 E3; one more outer step of staleness).

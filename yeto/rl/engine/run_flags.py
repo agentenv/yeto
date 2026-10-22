@@ -680,9 +680,31 @@ _SCHEDULING = (
     cli_flag("--rl-q-min", type=int, default=None, metavar="N",
              help="elastic: minimum arrived islands for a step (default 1)"),
     shared_flag("--rl-syncer-epoch", type=int, default=None, metavar="N",
-                help="elastic: syncer term (incremented on each syncer restart); passed to "
-                "the syncer as --syncer-epoch and to every island for JOIN (default 0)",
+                help="elastic, or full-parameter async with --rl-peer-recovery: syncer term "
+                "(incremented on each syncer restart); passed to the syncer as --syncer-epoch "
+                "and to every island, whose JOIN/HELLO an older term fences (default 0)",
                 island={"default": 0}),
+    cli_flag("--rl-peer-recovery", action="store_true", default=False,
+             help="full-parameter async: an island relaunched after it lost its trainer "
+             "state restores the inner optimizer state from a peer island's snapshot, "
+             "then takes every fragment from the syncer"),
+    cli_flag("--rl-recovery-bound-steps", type=int, default=None, metavar="H",
+             help="--rl-peer-recovery: bound on one recovery in syncer steps; the syncer "
+             "records a recovery past it as missed (default: measured, not checked)"),
+    cli_flag("--rl-recovery-max-donor-tries", type=int, default=None, metavar="N",
+             help="--rl-peer-recovery: donors the syncer asks before the island restarts "
+             "with fresh optimizer state (default 3)"),
+    cli_flag("--rl-recovery-donor-timeout-s", type=int, default=None, metavar="S",
+             help="--rl-peer-recovery: wait for one donor snapshot before asking the next "
+             "(default 600)"),
+    shared_flag("--rl-peer-recovery-store", default=None, metavar="PATH",
+                help="--rl-peer-recovery: checkpoint store of the peer snapshots, reached "
+                "by every island (a shared path, a Modal Volume or bucket mount, or an "
+                "object store through the store environment); default: the "
+                "--rl-checkpoint-store"),
+    shared_flag("--rl-peer-recovery-ttl-s", type=float, default=None, metavar="S",
+                help="--rl-peer-recovery: snapshots older than this are removed (a donor "
+                "or recovering island died); longer than a snapshot transfer (default 3600)"),
     cli_flag("--rl-max-carry-lag", type=int, default=None, metavar="N",
              help="elastic: oldest late delta still carried over, in outer steps (default 2)"),
     shared_flag("--rl-elastic-quorum-timeout-s", type=float, default=None, metavar="S",

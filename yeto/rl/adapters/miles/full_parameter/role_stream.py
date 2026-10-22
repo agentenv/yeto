@@ -35,6 +35,7 @@ from yeto.protocol import (
 from yeto.push_error_feedback import RESIDUAL_DTYPES, PushErrorFeedback
 from yeto.syncer_shards import ShardedSyncerClient
 from yeto.rl.adapters.miles.full_parameter.inbound_sink import MilesRayInboundChunkSink
+from yeto.rl.adapters.miles.full_parameter.peer_recovery import PeerRecoveryOptions
 from yeto.rl.adapters.miles.models.chunked_full_parameter import (
     MilesChunkedFullParameterAdapter,
     ReferencedPolicyCut,
@@ -129,6 +130,11 @@ class RoleStreamConfig:
     # of the session contract: shards run the unsharded step schedule, so
     # the shard count changes where bytes go, never which bytes.
     syncer_shards: tuple[tuple[str, int], ...] = ()
+    # S27 E-3: the syncer incarnation this island was launched for (a newer
+    # syncer refuses the HELLO), and peer recovery (donor snapshots, and
+    # recovery of a fresh trainer). Transport options, not session contract.
+    syncer_epoch: int | None = None
+    peer_recovery: PeerRecoveryOptions | None = None
 
     @property
     def session_dtype(self) -> int:
@@ -225,6 +231,14 @@ class RoleStreamConfig:
             raise ValueError("role-stream int4 options need push dtype int4")
         if error_feedback and self.push_int4_stochastic:
             raise ValueError("role-stream int4 error feedback needs nearest rounding")
+        if self.syncer_epoch is not None and (type(self.syncer_epoch) is not int or self.syncer_epoch < 0):
+            raise ValueError("role-stream syncer epoch must be a non-negative integer")
+        if self.peer_recovery is not None and (not self.partial_quorum or self.bcast_delta):
+            # A recovering island is off the roster until it is restored, and
+            # the replay resends whole fragments (broadcasts overwrite).
+            raise ValueError("peer recovery needs asynchronous rounds without broadcast deltas")
+        if self.peer_recovery is not None and self.syncer_shards:
+            raise ValueError("peer recovery needs one syncer process, not a sharded head")
         if self.wait_timeout <= 0 or not 0 < self.poll_seconds <= 1:
             raise ValueError("role-stream wait bounds are invalid")
         if (
@@ -368,6 +382,10 @@ class MilesFullParameterRoleStream:
         self._round_base: ReferencedPolicyCut | None = None
         self._rounds_at_base = 0
         self._tokens_at_base = 0
+        # S27 E-3 peer recovery: the donor service, and how this stream started.
+        self._donor = None
+        self._donor_refusals_reported = 0
+        self.recovery_outcome = None
         self.terminal_manifest: FinalManifest | None = None
         self.terminal_submitted = False
         self.final_applied = False
@@ -459,9 +477,14 @@ class MilesFullParameterRoleStream:
                 self.config,
             ),
             syncer_profile_hash=bytes.fromhex(self.config.syncer_profile_hash),
+            syncer_epoch=self.config.syncer_epoch,
+            recover=self._recovering,
         )
         sink = adapter.fragment_sink(initial, ray_module=self.ray_module)
         client.install_inbound_chunk_sink(MilesRayInboundChunkSink(sink))
+        if self._recovering:
+            await self._initialize_recovering(group, adapter, initial, client, sink)
+            return
         try:
             client.start()
             init_parts = None
@@ -509,6 +532,88 @@ class MilesFullParameterRoleStream:
             return ShardedSyncerClient(
                 list(self.config.syncer_shards), self.config.learner_id, layout, **kwargs)
         return SyncerClient(self.config.syncer_addr, self.config.learner_id, layout, **kwargs)
+
+    @property
+    def _recovering(self) -> bool:
+        options = self.config.peer_recovery
+        return options is not None and options.recover
+
+    def _snapshot_store(self):
+        from yeto.rl.peer_recovery import snapshot_store_for
+
+        options = self.config.peer_recovery
+        return snapshot_store_for(options.store, staging=options.staging)
+
+    def _recovery_island(self, group, adapter, *, recovering: bool):
+        from yeto.rl.adapters.miles.full_parameter.peer_recovery import (
+            MilesPeerRecoveryIsland,
+            MilesRankShards,
+        )
+
+        shards = MilesRankShards(group, adapter.layout.layout_hash)
+        return MilesPeerRecoveryIsland(self, shards, asyncio.get_running_loop(), recovering=recovering)
+
+    async def _initialize_recovering(self, group, adapter, initial, client, sink) -> None:
+        """S27 E-3: this trainer is fresh after the island lost its state.
+
+        No INIT is sent (the syncer holds the run's fragments). A donor's
+        snapshot restores the inner optimizer state on every rank, then the
+        syncer resends every fragment and they become this island's anchors
+        in one apply (``peer_recovery`` module doc)."""
+        from yeto.rl.peer_recovery import recover
+
+        options = self.config.peer_recovery
+        island = self._recovery_island(group, adapter, recovering=True)
+        count = adapter.layout.fragments.num_fragments
+        try:
+            client.start()
+            outcome = await asyncio.to_thread(
+                recover, client, island, self._snapshot_store(), timeout=options.timeout_s)
+            client.mark_initial_cut_received()
+            if sorted(island.resent) != list(range(count)):
+                raise RuntimeError(f"{self.config.role} recovery did not receive every fragment")
+            self.group = group
+            self.adapter = adapter
+            self.client = client
+            self.sink = sink
+            self.current = initial
+            self._anchors = [None] * count
+            self._fragment_versions = [0] * count
+            self._rounds_at_anchor = [0] * count
+            self._tokens_at_anchor = [0] * count
+            resent, island.resent = dict(island.resent), {}
+            await self._apply_authoritative(resent, recovered=True)
+        except BaseException:
+            island.release()
+            client.close()
+            sink.release_all()
+            adapter.release(initial)
+            self.group = self.adapter = self.client = self.sink = self.current = None
+            raise
+        self.recovery_outcome = outcome
+        print(f"[yeto-peer-recovery] {self.config.role} learner {self.config.learner_id}: "
+              f"{outcome.path} recovery (donor {outcome.donor}) in {outcome.steps} syncer step(s), "
+              f"{outcome.seconds:.1f}s; fragment versions {list(self.fragment_versions)}",
+              file=sys.stderr, flush=True)
+
+    async def serve_peer_snapshots(self) -> int:
+        """Donor side, at a safe point (no optimizer step running): answer the
+        syncer's snapshot requests this island is caught up for, and sweep
+        expired snapshots. Returns how many were served."""
+        if self.config.peer_recovery is None or self.client is None:
+            return 0
+        if self._donor is None:
+            from yeto.rl.peer_recovery import DonorService
+
+            island = self._recovery_island(self.group, self.adapter, recovering=False)
+            self._donor = DonorService(self.client, island, self._snapshot_store(),
+                                       ttl_s=self.config.peer_recovery.ttl_s)
+        served = await asyncio.to_thread(self._donor.poll)
+        for request, reason in self._donor.refused[self._donor_refusals_reported:]:
+            print(f"[yeto-peer-recovery] {self.config.role} donor refused a snapshot for learner "
+                  f"{request.recovering_id}: {reason}", file=sys.stderr, flush=True)
+        self._donor_refusals_reported = len(self._donor.refused)
+        return served
 
     def _wait_for_initial_fragments(
         self,
@@ -798,9 +903,12 @@ class MilesFullParameterRoleStream:
         *,
         anchors: Mapping[int, StoredAuthoritativeFragment] | None = None,
         counters: tuple[int, int] | None = None,
+        recovered: bool = False,
     ) -> None:
         """Apply ``selected`` fragments; ``anchors``/``counters`` override the
-        recorded anchor and its round/token counters (overlap rebase)."""
+        recorded anchor and its round/token counters (overlap rebase).
+        ``recovered``: the first apply after a peer snapshot restore, whose
+        optimizer records carry the donor's policy version and generation."""
         if self.adapter is None or self.current is None or self.group is None:
             raise RuntimeError(f"{self.config.algorithm} {self.config.role} stream is unavailable")
         target_version = self.transport_version + 1
@@ -820,8 +928,8 @@ class MilesFullParameterRoleStream:
             before,
             after,
             role=self.config.role,
-            base_policy_version=self.transport_version,
-            base_local_generation=self.local_generation,
+            base_policy_version=None if recovered else self.transport_version,
+            base_local_generation=None if recovered else self.local_generation,
             target_policy_version=target_version,
         )
         previous_cut = self.current
@@ -1256,12 +1364,13 @@ def validate_optimizer_apply_transition(
     after: tuple[Any, ...],
     *,
     role: str,
-    base_policy_version: int,
-    base_local_generation: int,
+    base_policy_version: int | None,
+    base_local_generation: int | None,
     target_policy_version: int,
 ) -> None:
     """A global apply may only move the policy version and reset the local
-    step generation; every other Adam field must be bit-identical."""
+    step generation; every other Adam field must be bit-identical. A base of
+    None is not checked (the first apply after a peer snapshot restore)."""
     if not before or len(before) != len(after):
         raise RuntimeError("global apply returned incomplete Adam evidence")
     volatile = {"installed_policy_version", "local_step_generation"}
@@ -1272,8 +1381,8 @@ def validate_optimizer_apply_transition(
             set(old_values) != set(new_values)
             or old.role != role
             or new.role != role
-            or old.installed_policy_version != base_policy_version
-            or old.local_step_generation != base_local_generation
+            or base_policy_version is not None and old.installed_policy_version != base_policy_version
+            or base_local_generation is not None and old.local_step_generation != base_local_generation
             or new.installed_policy_version != target_policy_version
             or new.local_step_generation != 0
             or any(

@@ -927,8 +927,41 @@ def _dense_full_sync_config(
         overlap=bool(getattr(args, "sweep_overlap", False)),
         partial_quorum=async_rounds,
         matrix_merge=getattr(args, "rl_sync_matrix_merge", "avg"),
+        syncer_epoch=_island_syncer_epoch(args),
+        peer_recovery=peer_recovery_options(args),
     )
     return FullParameterSyncConfig((actor,), sweep=not async_rounds)
+
+
+PEER_RECOVER_ENV = "YETO_RL_PEER_RECOVER"  # "1": the launcher relaunched this island (launch.peer_recovery)
+
+
+def _island_syncer_epoch(args) -> int | None:
+    """S27 E-3: the HELLO carries the syncer epoch only when the launcher sent one."""
+    value = getattr(args, "rl_syncer_epoch", None)
+    return None if value is None or getattr(args, "rl_peer_recovery_store", None) is None else int(value)
+
+
+def peer_recovery_options(args, environ=None):
+    """S27 E-3: peer recovery of a full-parameter island, or None without
+    ``--rl-peer-recovery-store``. The island recovers when ``--rl-peer-recover``
+    is given or the launcher relaunched it (:data:`PEER_RECOVER_ENV`)."""
+    from yeto.rl.adapters.miles.full_parameter.peer_recovery import PeerRecoveryOptions
+
+    store = getattr(args, "rl_peer_recovery_store", None)
+    env = os.environ if environ is None else environ
+    recover = bool(getattr(args, "rl_peer_recover", False)) or env.get(PEER_RECOVER_ENV) == "1"
+    if store is None:
+        if recover or getattr(args, "rl_peer_recovery_staging", None):
+            raise ValueError("--rl-peer-recover / --rl-peer-recovery-staging need --rl-peer-recovery-store")
+        return None
+    ttl = getattr(args, "rl_peer_recovery_ttl_s", None)
+    return PeerRecoveryOptions(
+        store=str(store),
+        recover=recover,
+        ttl_s=3600.0 if ttl is None else float(ttl),
+        staging=getattr(args, "rl_peer_recovery_staging", None),
+    )
 
 
 def _load_sao_streaming_runtime(args):

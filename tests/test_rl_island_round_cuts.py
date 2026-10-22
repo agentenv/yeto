@@ -191,10 +191,10 @@ def test_synced_launch_forwards_island_cut_store():
 
 
 @pytest.mark.parametrize("extra, match", [
-    (("--rl-checkpoint-store", "/s"), "needs --rl-single-island-no-sync, synced trainers, or a cut interval"),
+    (("--rl-checkpoint-store", "/s"), "needs --rl-single-island-no-sync, synced trainers, a cut interval"),
     (("--rl-checkpoint-store", "/s", "--rl-cut-every", "2", "--rl-stop-after-rounds", "3"),
      "does not resume from round cuts"),
-    (("--rl-checkpoint-store", "/s", "--rl-cut-keep", "2"), "or a cut interval"),
+    (("--rl-checkpoint-store", "/s", "--rl-cut-keep", "2"), "a cut interval"),
     (("--rl-checkpoint-store", "/s", "--rl-cut-every", "2", "--rl-cut-auto-mtbf-s", "60"),
      "exclude each other"),
     (("--rl-checkpoint-store", "/s", "--rl-cut-every", "2", "--rl-island-scheduling", "elastic"),

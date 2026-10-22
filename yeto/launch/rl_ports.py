@@ -295,10 +295,12 @@ def _check_resume_launch_flags(args) -> bool:
             if getattr(args, name, None):
                 raise ValueError(f"{flag}: a synced launch does not resume from round cuts (the "
                                  "syncer is authoritative; multi-island resume: rl-resume-from-checkpoint 3.3)")
-        if not (is_synced_trainer(args) or island_cuts_requested(args)):
+        # S27 E-3: --rl-peer-recovery keeps its peer snapshots in the store
+        if not (is_synced_trainer(args) or island_cuts_requested(args)
+                or getattr(args, "rl_peer_recovery", False)):
             raise ValueError("--rl-checkpoint-store without --rl-elastic needs --rl-single-island-no-sync, "
-                             "synced trainers, or a cut interval (--rl-cut-every / --rl-cut-auto-mtbf-s: "
-                             "island round cuts)")
+                             "synced trainers, a cut interval (--rl-cut-every / --rl-cut-auto-mtbf-s: "
+                             "island round cuts) or --rl-peer-recovery")
         if getattr(args, "rl_cut_keep", None) is not None and not island_cuts_requested(args):
             raise ValueError("--rl-cut-keep needs a cut interval on a synced launch")
         if island_cuts_requested(args) and (getattr(args, "rl_backend", None) or "miles") != "miles":
@@ -455,7 +457,8 @@ def _check_ports_infra_switches(args) -> None:
         given.append("--rl-elastic-accept-rebind")
     resume_store = _check_resume_launch_flags(args)
     if getattr(args, "rl_checkpoint_store", None) and not resume_store \
-            and not sample_roles.is_synced_trainer(args) and not island_cuts_requested(args):
+            and not sample_roles.is_synced_trainer(args) and not island_cuts_requested(args) \
+            and not getattr(args, "rl_peer_recovery", False):  # S27 E-3: peer snapshots
         given.append("--rl-checkpoint-store")
     if getattr(args, "rl_elastic_declare_cells", False):
         given.append("--rl-elastic-declare-cells")

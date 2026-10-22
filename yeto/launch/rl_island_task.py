@@ -11,6 +11,7 @@ import time
 from ..gpu_spec import ClusterSpec
 from ..hw.catalog import COMPAT_GROUP_ENV, compat_group
 from .code_pack import code_pack_island_flag, code_workdir
+from .peer_recovery import island_flags as peer_recovery_island_flags
 from .rl_backend import _miles_overlay, _rl_backend_module
 from .remote_setup import (
     HF_TOKEN_ENV, HF_TOKEN_PATH, PORTS_MEGATRON_PATH, WAN_TUNING, island_pre_run_block,
@@ -122,6 +123,7 @@ def _rl_trainable_island_flags(args, learner_id: int, num_learners: int) -> str:
         error_feedback = getattr(args, "rl_sync_push_int4_error_feedback", "off")
         if error_feedback != "off":
             sweep += f" --sweep-push-int4-error-feedback {error_feedback}"
+    sweep += peer_recovery_island_flags(args)
     if getattr(args, "expert_full_count", 0):
         return lora + sweep
     return " --parameter-mode full" + sweep

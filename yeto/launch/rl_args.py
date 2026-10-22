@@ -24,6 +24,7 @@ from .syncer import (
     rl_syncer_profile, rl_trainable_roles, syncer_shard_count,
 )
 from .storage import _rl_checkpoint_mount
+from .peer_recovery import check_peer_recovery
 from .rl_ports import _prepare_ports_algorithm
 
 
@@ -943,6 +944,7 @@ def _prepare_rl_args(
                 )
     _apply_rl_outer_merge_options(args, num_islands=len(specs))
     syncer_shard_count(args)  # refuse --syncer-shards outside asynchronous rounds now
+    check_peer_recovery(args)
     if args.spot:
         _rl_checkpoint_mount(args.rl_completed_groups_path)
 

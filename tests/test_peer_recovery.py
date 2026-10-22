@@ -24,7 +24,7 @@ import pytest
 from yeto import recovery_protocol as rp
 from yeto.fragments import MERGE_AVG, Fragment, FragmentLayout
 from yeto.protocol import DTYPE_F32, BcastFragment, SyncerClient, encode_hello, layout_fingerprint
-from yeto.rl.peer_recovery import DirectorySnapshotStore, DonorService, Snapshot, recover
+from yeto.rl.peer_recovery import DirectorySnapshotStore, DonorService, Snapshot, read_array_state, recover
 
 ROOT = Path(__file__).resolve().parent.parent
 NUMEL = 64
@@ -220,29 +220,31 @@ def recovery_records(tape: Path) -> list[dict]:
 
 
 class RecordingStore(DirectorySnapshotStore):
-    """Keeps every snapshot put, so the test can compare after the
-    recovering island removed the file."""
+    """Keeps every committed snapshot's array state, so the test can compare
+    after the recovering island removed it."""
 
-    def __init__(self, root) -> None:
+    def __init__(self, root, puts=None) -> None:
         super().__init__(root)
-        self.puts = {}
+        self.puts = {} if puts is None else puts
 
-    def put(self, snapshot, *, name=None):
-        locator, sha256 = super().put(snapshot, name=name)
-        self.puts[locator] = snapshot
-        return locator, sha256
+    def manifest(self, locator, sha256):
+        manifest = super().manifest(locator, sha256)
+        if locator not in self.puts:
+            files = self.root / self.snapshot_prefix(locator) / "files"
+            self.puts[locator] = Snapshot(manifest.versions, manifest.layout_tag, read_array_state(files))
+        return manifest
 
 
-class SlowStore(DirectorySnapshotStore):
+class SlowStore(RecordingStore):
     """Snapshot reads take ``delay`` seconds (a transfer over a slow link)."""
 
-    def __init__(self, root, delay: float) -> None:
-        super().__init__(root)
+    def __init__(self, root, delay: float, puts=None) -> None:
+        super().__init__(root, puts)
         self.delay = delay
 
-    def get(self, locator, sha256):
+    def fetch(self, locator, sha256, into):
         time.sleep(self.delay)
-        return super().get(locator, sha256)
+        return super().fetch(locator, sha256, into)
 
 
 @pytest.mark.timeout(240)
@@ -265,7 +267,7 @@ def test_killed_island_recovers_from_a_peer_within_bound(tmp_path, transfer_s, e
         islands[2].join(timeout=10)
         kill_versions = list(islands[0].versions)
         wait_until(lambda: sum(islands[0].versions) > sum(kill_versions) + 8, 60, "rounds stopped without island 2")
-        back = FakeIsland(2, port, targets[2], SlowStore(store.root, transfer_s), recover_on_start=True)
+        back = FakeIsland(2, port, targets[2], SlowStore(store.root, transfer_s, store.puts), recover_on_start=True)
         back.start()
         wait_until(lambda: back.outcome is not None or back.exc is not None, 60, "recovery did not finish")
         if back.exc:
@@ -286,7 +288,7 @@ def test_killed_island_recovers_from_a_peer_within_bound(tmp_path, transfer_s, e
     (request, locator), = donor.donor.served
     assert (request.recovering_id, request.recovering_generation) == (2, back.client.connection_generation)
     snapshot = store.puts[locator]
-    assert not (store.root / locator).exists(), "a restored snapshot is removed"
+    assert store.locators() == [], "a restored snapshot is removed"
     # Inner optimizer state equals the donor's at its snapshot, bitwise.
     for key in ("adam_m", "adam_v", "adam_step", "anchors", "params", "steps_at_anchor"):
         np.testing.assert_array_equal(back.imported[key], snapshot.state[key], err_msg=key)
@@ -526,6 +528,6 @@ def test_snapshot_store_rejects_path_locators(tmp_path):
     from yeto.rl.peer_recovery import SnapshotIntegrityError
 
     store = DirectorySnapshotStore(tmp_path)
-    for bad in ("../x.npz", "a/b.npz", ".hidden", ""):
+    for bad in ("../x.npz", "a/b.npz", ".hidden", "", "s123-abc"):
         with pytest.raises(SnapshotIntegrityError):
             store.get(bad, b"\0" * 32)

@@ -237,12 +237,20 @@ flag):
    RECOVERY_CLOCK `(t_s, V_s)` and PEER_SNAPSHOT_REQ to the current member
    with the fewest unanswered pulls.
 2. The donor keeps training. Once every fragment version it holds is at least
-   `V_s[p]` it writes its parameters and inner optimizer state to the shared
+   `V_s[p]` it writes its parameters and inner optimizer state to the
    snapshot store and answers PEER_SNAPSHOT_READY. The syncer relays only this
-   record (RECOVERY_SOURCE); it never carries the snapshot.
-3. The recovering island checks the sha256 and the trainer layout, restores,
-   and sends RECOVERY_RESTORED with the versions it holds. If it cannot use
-   the snapshot it sends RECOVERY_FAILED and the syncer asks the next donor.
+   record (RECOVERY_SOURCE); it never carries the snapshot, and islands never
+   stream it to each other. The store is a directory both islands see, or an
+   object store (`yeto.rl.peer_recovery.SnapshotStore`). A snapshot is a set
+   of files plus a manifest with the sha256 and size of every file; the
+   message sha256 is the manifest's, and the locator names the snapshot.
+3. The recovering island checks the sha256 (manifest and every file) and the
+   trainer layout, restores, and sends RECOVERY_RESTORED with the versions it
+   holds, or with none to receive every fragment (a sharded trainer). If it
+   cannot use the snapshot it sends RECOVERY_FAILED and the syncer asks the
+   next donor. A restored snapshot is removed; the locator starts with the
+   creation time, and snapshots older than a TTL (a donor or recovering
+   island died) are removed by the donors.
 4. The syncer resends the current value of every fragment whose version is
    newer than the held version (broadcasts overwrite, so this equals
    replaying every update since the donor's snapshot; no update log is kept),

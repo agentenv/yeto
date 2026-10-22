@@ -63,6 +63,7 @@ from .launch.modal_islands import (
     container_set_poller_for, effective_recover_timeout, pull_modal_tapes,
     require_modal_for_gpu_exact, wan_probe_relaunches,
 )
+from .launch.peer_recovery import relaunch_envs as peer_recovery_relaunch_envs
 from .launch.fleet import (
     CONTAINER_CHANGED_EXIT, DEFAULT_RL_STALL_TIMEOUT_S, FAILED_RUN_DRAIN_S, ISLAND_FAILED_EXIT,
     RUN_STALLED_EXIT, RUN_STOPPED_EXIT, TEARDOWN_UNVERIFIED_EXIT, TRAINER_GAVE_UP_EXIT,
@@ -666,6 +667,7 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
                 if echo_names else None
             ),
             wan_probe_relaunches=wan_probe_relaunches(args),
+            island_relaunch_envs=peer_recovery_relaunch_envs(args),
         )
         def drain_tapes(limit: float = NO_SYNC_EVENT_DRAIN_S) -> None:
             if echo_names:
