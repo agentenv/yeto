@@ -57,12 +57,21 @@ class YetoTaskRunner:
             tq.close()
 
 
-def _runtime_env() -> dict:
+# NCCL host buffers on /dev/shm in every process of the disaggregated weight sync.
+# On Modal one process could use cuMem host buffers while its peer fell back to
+# /dev/shm, and the peer then failed to attach (S26 E0.1 eff01-yeto-verl-async-e,
+# eff01-bare-verl-async-d with NCCL_DEBUG=INFO). The caller's own value wins.
+CUMEM_HOST_ENV = "NCCL_CUMEM_HOST_ENABLE"
+
+
+def _runtime_env(fully_async: bool = False) -> dict:
     from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 
     env = get_ppo_ray_runtime_env(None)
     env.setdefault("env_vars", {})
     env["env_vars"]["TRANSFER_QUEUE_ENABLE"] = "1"
+    if fully_async:
+        env["env_vars"][CUMEM_HOST_ENV] = os.environ.get(CUMEM_HOST_ENV, "0")
     for key, value in os.environ.items():
         # YETO_ covers YETO_ISLAND_HMAC_KEY (HELLO HMAC in the Ray actor that
         # opens the syncer client) and YETO_SANDBOX_MODAL_TOKEN_*; no cloud
@@ -90,7 +99,7 @@ def _keep_npu_visible_in_cpu_actors() -> None:
         os.environ.setdefault(NPU_NOSET_ENV, "1")
 
 
-def _plan_and_ray() -> dict:
+def _plan_and_ray(fully_async: bool = False) -> dict:
     from yeto.island_credential_guard import check_island_credentials
 
     check_island_credentials()  # secret-handling-hardening D4 (driver, both paths)
@@ -98,7 +107,7 @@ def _plan_and_ray() -> dict:
     if not ray.is_initialized():
         _keep_npu_visible_in_cpu_actors()
         address = os.environ.get("RAY_ADDRESS") or None
-        ray.init(address=address, runtime_env=_runtime_env(), namespace="yeto-verl")
+        ray.init(address=address, runtime_env=_runtime_env(fully_async), namespace="yeto-verl")
     return plan
 
 
@@ -125,7 +134,7 @@ def main_fully_async(argv: list[str] | None = None) -> None:
     import verl.trainer.main_ppo as main_ppo
     from verl.experimental.fully_async_policy import fully_async_main as fa_main
 
-    plan = _plan_and_ray()
+    plan = _plan_and_ray(fully_async=True)
 
     def run_ppo(config, task_runner_class=None):
         from yeto.rl.adapters.verl.fully_async_runner import YetoFullyAsyncTaskRunner
@@ -147,7 +156,7 @@ def main_buffer_trainer(argv: list[str] | None = None) -> None:
     import verl.trainer.main_ppo as main_ppo
     from verl.experimental.fully_async_policy import fully_async_main as fa_main
 
-    plan = _plan_and_ray()
+    plan = _plan_and_ray(fully_async=True)
 
     def run_ppo(config, task_runner_class=None):
         from yeto.rl.adapters.verl.buffer_trainer_runner import YetoBufferTaskRunner

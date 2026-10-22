@@ -60,6 +60,8 @@ def parse_args(argv):
     p.add_argument("--seq-len", type=int, required=True)
     p.add_argument("--seed", type=int, required=True)
     p.add_argument("--wan-streams", type=int, default=4)
+    # S26 E3: bf16 downlink deltas (yeto/downlink.py; the syncer runs --bcast-delta-full-every)
+    p.add_argument("--bcast-delta", action="store_true")
     p.add_argument("--apply-chat-template-kwargs", default=None)
     p.add_argument("--rl-algorithm-spec", default=None)
     p.add_argument("--rl-island-scheduling", default="legacy")
@@ -357,6 +359,7 @@ def main(argv=None) -> int:
         "model_path": model_path, "model_revision": args.model_revision, "lora_rank": args.lora_r,
         "lora_targets": args.lora_targets, "event_tape": os.path.expanduser(args.event_tape),
         "out_dir": str(OUTPUT), "tis_upper": algo["tis_upper"], "wan_streams": args.wan_streams,
+        "bcast_delta": bool(args.bcast_delta),
         "thresholds_key": ["verl", "fsdp2", "vllm-" + str(manifest["versions"].get("vllm")),
                            _threshold_card(manifest)],
         "algorithm_spec": spec_dict, "syncer_epoch": args.rl_syncer_epoch, "island_lease_s": args.rl_island_lease_s,

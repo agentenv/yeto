@@ -585,6 +585,14 @@ _RESUME = (
     shared_flag("--rl-sampler-min-round-seconds", type=float, default=None, metavar="S",
                 help="--rl-sample-role sampler: start one round at most every S seconds (a "
                 "throttle; a check run uses it to make the trainer idle); default no throttle"),
+    shared_flag("--rl-sampler-fused-stage", action="store_true", default=False,
+                help="--rl-sample-role sampler with --tuning lora: check each release's digest "
+                "while copying the adapter to local disk (one read of the store instead of "
+                "two); default off"),
+    shared_flag("--rl-release-reload-latest", action="store_true", default=False,
+                help="--rl-sample-role trainer: reload the store and read LATEST before every "
+                "policy release and commit LATEST in a second commit (the behavior before "
+                "S26 E5); default: the trainer keeps the LATEST it wrote and commits once"),
     shared_flag("--rl-sample-wait-s", type=float, default=None, metavar="S",
                 help="--rl-sample-role trainer: max seconds to wait for one full round from "
                 "the buffer (default 3600)"),
@@ -840,6 +848,62 @@ _SYNC = (
         "with --expert-full-count the swept state is the DeepSeek V4 LoRA hybrid; "
         "sao-streaming-full: full-parameter SAO, actor and critic streams "
         "(ports engine, --rl-placement fixed-partition, --rl-sao-contracts)",
+    ),
+    cli_flag(
+        "--rl-sync-fragment-pipeline",
+        type=int,
+        default=1,
+        help="full-parameter only: fragment rounds the syncer gathers at once "
+        "(1..--fragments). Above 1, fragment k+1 uploads while fragment k merges "
+        "and downloads; merge results are unchanged (default 1 = serial)",
+    ),
+    cli_flag(
+        "--rl-sync-push-dtype",
+        choices=("f32", "bf16", "int8"),
+        default="f32",
+        help="full-parameter only: wire dtype of the islands' pushed outer deltas "
+        "(pseudo-gradients). bf16 halves upload bytes, int8 (block absmax scale, see "
+        "--rl-sync-push-int8-block) quarters them; the syncer keeps f32 masters, "
+        "momentum and f32 FINAL (default f32 = exact)",
+    ),
+    cli_flag(
+        "--rl-sync-overlap",
+        action="store_true",
+        help="full-parameter only (E2 option): train the next round while the "
+        "sweep syncs, then rebase the trainer onto the new global weights "
+        "(theta <- G_k + local progress). The local weights lag the global policy "
+        "by one outer step; rollouts stay on-policy, so --rl-max-policy-age stays 0. "
+        "Needs --rl-sync-fragment-pipeline equal to --fragments",
+    ),
+    cli_flag(
+        "--rl-sync-push-int8-block",
+        type=int,
+        default=128,
+        help="full-parameter only, with --rl-sync-push-dtype int8: values per f32 "
+        "scale (32..1048576; error <= block absmax / 254 per value)",
+    ),
+    cli_flag(
+        "--rl-sync-bcast-delta-full-every",
+        type=int,
+        default=0,
+        help="full-parameter only: above 0, the syncer sends each new fragment "
+        "version as a bf16 delta against the islands' shared f32 anchor, with an "
+        "exact f32 refresh every N-th version (N >= 2; digest-checked, a mismatch "
+        "reconnects for f32). 0 = always f32",
+    ),
+    cli_flag(
+        "--rl-sync-checkpoint-every",
+        type=int,
+        default=1,
+        help="full-parameter only: syncer checkpoint interval in fragment steps "
+        "(1, or a multiple of --fragments). Above 1, only checkpointed steps are "
+        "persisted before their broadcast; a crash resumes at the newest checkpoint",
+    ),
+    cli_flag(
+        "--rl-sync-async-checkpoint",
+        action="store_true",
+        help="full-parameter only: the syncer writes each per-round checkpoint off "
+        "its scheduler and broadcasts that round only once the checkpoint is durable",
     ),
     cli_flag(
         "--rl-initial-adapter",

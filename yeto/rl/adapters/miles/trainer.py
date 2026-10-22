@@ -813,7 +813,15 @@ class MilesTrainerGroup:
         a non-zero ``carried_over``/ready-unconsumed ledger, an unsettled outer
         commit or a missing data cursor.
         """
-        from yeto.rl.engine.cut import CutError, CutFile, CutManifest, commit_manifest, context_problems, cut_dir
+        return self.finish_cut(self.start_cut(epoch=epoch, context=context, background=False))
+
+    def start_cut(self, *, epoch: int, context: "CutContext", background: bool = True) -> dict[str, Any]:
+        """E1: the part of :meth:`save_cut` that must run at the step boundary: the
+        context checks and every rank's state capture. With ``background`` the ranks
+        write and hash their shards in a thread while training goes on; :meth:`finish_cut`
+        (later, before the next cut) collects them and commits the manifest. Nothing
+        names the cut until the manifest is committed. Returns the pending cut."""
+        from yeto.rl.engine.cut import CutError, context_problems, cut_dir
         from .cut_plugin import SAVE_CUT_SHARD, config_problems
 
         cut_id = context.cut_id
@@ -828,11 +836,42 @@ class MilesTrainerGroup:
         if problems:
             raise CutError("refusing to save a cut: " + "; ".join(problems))
         directory = cut_dir(context.root, cut_id)
-        summaries = [
-            dict(s) for s in self._run(
-                self._actor.run_plugin(SAVE_CUT_SHARD, {"directory": str(directory), "cut_id": cut_id})
-            )
-        ]
+        # the critic cut runs in finish_cut and reads the critic as it is then: inline only
+        background = bool(background) and self._critic is None
+        critic = self._save_critic_cut(directory / "critic", context.progress.policy_version)
+        kwargs = {"directory": str(directory), "cut_id": cut_id, **({"background": True} if background else {})}
+        results = [dict(s) for s in self._run(self._actor.run_plugin(SAVE_CUT_SHARD, kwargs))]
+        # E1: how each rank took its state (device copies or host path, and why)
+        capture = [dict(s["capture"]) for s in results if isinstance(s.get("capture"), Mapping)]
+        return {"epoch": int(epoch), "context": context, "runtime": runtime, "directory": directory,
+                "background": background, "results": results, "critic": critic,
+                **({"capture": capture} if capture else {})}
+
+    def finish_cut(self, pending: Mapping[str, Any]) -> str:
+        """Collect the shards of :meth:`start_cut` and commit the manifest; returns the cut id."""
+        return self.collect_cut(pending)()
+
+    def collect_cut(self, pending: Mapping[str, Any]) -> Callable[[], str]:
+        """E1: the trainer part of :meth:`finish_cut` (collect and check every rank's
+        shard summary, build the manifest). Returns the commit of that manifest: plain
+        filesystem work (no trainer call), so the caller may run it on another thread.
+        Raises like :meth:`finish_cut` before anything is committed."""
+        from yeto.rl.engine.cut import CutError, CutFile, CutManifest, commit_manifest
+        from .cut_plugin import FINISH_CUT_SHARD
+
+        epoch, context, runtime = pending["epoch"], pending["context"], pending["runtime"]
+        cut_id = context.cut_id
+        summaries = list(pending["results"])
+        if pending["background"]:
+            started = [s for s in summaries if "refused" not in s]
+            summaries = [s for s in summaries if "refused" in s]
+            if started:
+                summaries += [dict(s) for s in self._run(
+                    self._actor.run_plugin(FINISH_CUT_SHARD, {"cut_id": cut_id}))]
+        # E1: where each rank's background shard was written (writer process, or this
+        # thread after a writer-process failure); reported with rl_cut_committed
+        self.last_cut_writer = [dict(s["writer"]) for s in summaries if isinstance(s.get("writer"), Mapping)]
+        problems: list[str] = []
         refused = [f"[{s.get('refusal_kind', 'refused')}] {s['refused']}" for s in summaries if "refused" in s]
         if refused:
             raise CutError("rank refused the cut: " + "; ".join(sorted(set(refused))))
@@ -843,7 +882,7 @@ class MilesTrainerGroup:
         if problems:
             raise CutError("refusing an incomplete cut: " + "; ".join(problems))
         resume = self._resume_manifest(context, summaries)
-        critic = self._save_critic_cut(directory / "critic", context.progress.policy_version)
+        critic = pending.get("critic")
         if critic is not None:  # 4.3; absent for every critic-free trainer (manifest unchanged)
             runtime = {**runtime, "critic": critic}
         manifest = CutManifest(
@@ -869,8 +908,13 @@ class MilesTrainerGroup:
         )
         if problems:
             raise CutError("refusing an incomplete cut: " + "; ".join(problems))
-        commit_manifest(context.root, manifest, check_files=context.shared_filesystem)
-        return cut_id
+        root, check_files = context.root, context.shared_filesystem
+
+        def commit() -> str:
+            commit_manifest(root, manifest, check_files=check_files)
+            return cut_id
+
+        return commit
 
     def _resume_manifest(self, context: "CutContext", summaries: list[Mapping[str, Any]]) -> Any:
         """Resume manifest of this cut: run counters plus every rank's optimizer state (S25 N7.6)."""

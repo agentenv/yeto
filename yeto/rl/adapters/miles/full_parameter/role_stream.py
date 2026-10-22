@@ -20,18 +20,28 @@ from dataclasses import asdict, dataclass, replace
 from typing import Any
 
 from yeto.protocol import (
+    DEFAULT_I8_BLOCK,
     DTYPE_F32,
+    DTYPE_F32_PUSH_BF16,
+    DTYPE_F32_PUSH_I8,
+    DTYPE_FLAG_BCAST_DELTA,
+    I8_BLOCK_MAX,
+    I8_BLOCK_MIN,
     FinalManifest,
     PullRequest,
     SyncerClient,
 )
+from yeto.rl.adapters.miles.full_parameter.inbound_sink import MilesRayInboundChunkSink
 from yeto.rl.adapters.miles.models.chunked_full_parameter import (
     MilesChunkedFullParameterAdapter,
     ReferencedPolicyCut,
     StoredAuthoritativeFragment,
 )
-from yeto.rl.adapters.miles.full_parameter.inbound_sink import MilesRayInboundChunkSink
-from yeto.rl.engine.policy_digest import PolicyDigest, TrainerResidentState, WeightsChanged
+from yeto.rl.engine.policy_digest import (
+    PolicyDigest,
+    TrainerResidentState,
+    WeightsChanged,
+)
 from yeto.rl.engine.trainable_state import LAYOUT_FRAGMENTS, UnsupportedLayoutError
 from yeto.rl.local_learner import ComponentIdentity, layout_stream_role
 from yeto.rl.trajectory_evidence import TrajectoryBatchEvidence
@@ -78,10 +88,36 @@ class RoleStreamConfig:
     # P0-4.8: the island's AlgorithmSpec hash; placement capabilities stay out.
     algorithm_spec_sha256: str
     wan_streams: int = 4
+    # S26 E3b transport options (yeto/wan_streams.py); not part of the session
+    # contract: they change how bytes travel, never which bytes.
+    wan_stream_schedule: str = "rr"
+    wan_stall_timeout: float = 0.0  # seconds; 0 = off
     wait_timeout: float = 900.0
     poll_seconds: float = 0.01
     max_fragment_bytes: int = 2 << 30
     max_chunk_bytes: int = 256 << 20
+    # S26 E3 wire options (default exact f32): push outer deltas as bf16
+    # (session dtype 4) or block-scaled int8 (dtype 5); receive BCAST as bf16
+    # deltas against a shared f32 anchor. FINAL always stays f32.
+    push_dtype: str = "f32"
+    push_int8_block: int = DEFAULT_I8_BLOCK
+    bcast_delta: bool = False
+    # S26 E3: train round k+1 while sweep k syncs, then rebase the trainer
+    # (see FullParameterSync._overlap_boundary); the local weights lag the
+    # global policy by one outer step (yeto.rl.engine.sync_overlap).
+    overlap: bool = False
+
+    @property
+    def session_dtype(self) -> int:
+        base = {"f32": DTYPE_F32, "bf16": DTYPE_F32_PUSH_BF16, "int8": DTYPE_F32_PUSH_I8}[self.push_dtype]
+        return base | (DTYPE_FLAG_BCAST_DELTA if self.bcast_delta else 0)
+
+    @property
+    def wire_dtype_label(self) -> str:
+        """Session-contract label; plain f32 keeps the historical ``fp32``."""
+        label = {"f32": "fp32", "bf16": "fp32-push-bf16",
+                 "int8": f"fp32-push-int8-b{self.push_int8_block}"}[self.push_dtype]
+        return label + ("+bcast-bf16-delta" if self.bcast_delta else "")
 
     def __post_init__(self) -> None:
         if not self.algorithm.isidentifier():
@@ -126,6 +162,14 @@ class RoleStreamConfig:
             value = getattr(self, name)
             if type(value) is not int or value < 1:
                 raise ValueError(f"role-stream {name} must be positive")
+        if self.wan_stream_schedule not in ("rr", "adaptive"):
+            raise ValueError("role-stream wan stream schedule must be rr or adaptive")
+        if not self.wan_stall_timeout >= 0:
+            raise ValueError("role-stream wan stall timeout must be >= 0")
+        if self.push_dtype not in ("f32", "bf16", "int8"):
+            raise ValueError("role-stream push dtype must be f32, bf16 or int8")
+        if type(self.push_int8_block) is not int or not I8_BLOCK_MIN <= self.push_int8_block <= I8_BLOCK_MAX:
+            raise ValueError("role-stream int8 block size is invalid")
         if self.wait_timeout <= 0 or not 0 < self.poll_seconds <= 1:
             raise ValueError("role-stream wait bounds are invalid")
         if (
@@ -219,7 +263,8 @@ def role_stream_session_contract_hash(
             "pipeline_depth": config.pipeline_depth,
             "local_horizon": config.local_horizon,
             "optimizer_steps_per_round": config.optimizer_steps_per_round,
-            "wire_dtype": "fp32",
+            "wire_dtype": config.wire_dtype_label,
+            **({"sync_train_overlap": True} if config.overlap else {}),
         },
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -261,6 +306,11 @@ class MilesFullParameterRoleStream:
         self._staged: dict[tuple[int, int], StoredAuthoritativeFragment] = {}
         self._pinned_cuts: dict[int, tuple[ReferencedPolicyCut, int]] = {}
         self._pinned_anchors: dict[int, tuple[StoredAuthoritativeFragment, int]] = {}
+        # Overlap: the cut the current local round started from, and the
+        # round/token counters at that point (the next push's c_steps base).
+        self._round_base: ReferencedPolicyCut | None = None
+        self._rounds_at_base = 0
+        self._tokens_at_base = 0
         self.terminal_manifest: FinalManifest | None = None
         self.terminal_submitted = False
         self.final_applied = False
@@ -334,8 +384,11 @@ class MilesFullParameterRoleStream:
             self.config.syncer_addr,
             self.config.learner_id,
             adapter.layout.fragments,
-            dtype=DTYPE_F32,
+            dtype=self.config.session_dtype,
+            push_i8_block=self.config.push_int8_block,
             num_streams=self.config.wan_streams,
+            stream_schedule=self.config.wan_stream_schedule,
+            stream_stall_timeout=self.config.wan_stall_timeout or None,
             max_reconnects=None,
             session_contract_hash=role_stream_session_contract_hash(
                 adapter.layout.layout_hash,
@@ -347,27 +400,23 @@ class MilesFullParameterRoleStream:
         client.install_inbound_chunk_sink(MilesRayInboundChunkSink(sink))
         try:
             client.start()
+            init_parts = None
             if self.config.learner_id == 0:
-                for fragment_id in range(adapter.layout.fragments.num_fragments):
-                    queued = client.send_init_parts(
-                        fragment_id,
-                        adapter.fragment_parts(
-                            initial,
-                            fragment_id,
-                            ray_module=self.ray_module,
-                        )(),
-                    )
-                    if queued is not True:
-                        raise RuntimeError(
-                            f"{self.config.algorithm} {self.config.role} initial fragment was not queued"
-                        )
+                def init_parts(fragment_id: int):
+                    return adapter.fragment_parts(
+                        initial, fragment_id, ray_module=self.ray_module
+                    )()
+
+                # An outage here is not fatal: the wait below replays INIT on
+                # the next connection group until the initial cut arrives.
+                client.send_initial_fragments(init_parts)
             # Wait off the event loop: an island initializes its roles
             # concurrently, and each role's initial cut needs every island's
             # INIT for that role. A blocking wait here would stop this
             # island's other role from connecting, and two islands blocked
             # on different roles deadlock (s23-g3-sao-main-20261014a).
             authoritative = await asyncio.to_thread(
-                self._wait_for_initial_fragments, client, adapter
+                self._wait_for_initial_fragments, client, adapter, init_parts
             )
             adapter.verify_initial_fragments(initial, authoritative)
         except BaseException:
@@ -390,6 +439,7 @@ class MilesFullParameterRoleStream:
         self,
         client,
         adapter: MilesChunkedFullParameterAdapter,
+        init_parts=None,
     ) -> tuple[StoredAuthoritativeFragment, ...]:
         started = time.monotonic()
         deadline = started + self.config.wait_timeout
@@ -399,6 +449,11 @@ class MilesFullParameterRoleStream:
         self._report_initial_cut(client, observed, count, started, "waiting")
         while len(observed) < count:
             client.check_health()
+            if init_parts is not None and client.init_replay_due():
+                # S26 E3b (s26-e3b-p06-C32a): the group carrying INIT died
+                # before the syncer applied it; send it again on this group.
+                self._report_initial_cut(client, observed, count, started, "replaying INIT")
+                client.send_initial_fragments(init_parts)
             for update in client.drain_updates():
                 stored = self._stored_update(update)
                 if update.version != 0 or stored.fragment_id in observed:
@@ -418,6 +473,7 @@ class MilesFullParameterRoleStream:
                     )
                 time.sleep(self.config.poll_seconds)
         self._report_initial_cut(client, observed, count, started, "received")
+        client.mark_initial_cut_received()
         return tuple(observed[index] for index in range(count))
 
     def _report_initial_cut(
@@ -471,7 +527,14 @@ class MilesFullParameterRoleStream:
         *,
         rollout_id: int,
         trajectories: TrajectoryBatchEvidence,
+        hold_submission: bool = False,
     ) -> RoleRoundResult:
+        """Record one trained round and capture its cut.
+
+        ``hold_submission`` (overlap): the previous sweep is still in flight,
+        so the new cut is not yet submittable; it becomes the submission only
+        after :meth:`apply_staged_broadcast` rebased it and
+        :meth:`finish_rebase`. The round base stays pinned until then."""
         if (
             self.adapter is None
             or self.current is None
@@ -500,14 +563,19 @@ class MilesFullParameterRoleStream:
         previous = self.current
         previous_submission = self.submission_cut
         self.current = local
-        self.submission_cut = local
-        self.submission_fragment_versions = self.fragment_versions
         self.local_generation = expected_generation
         self.local_rounds += 1
         self.action_tokens += trajectories.trained_tokens
-        self.submission_rounds = self.local_rounds
-        self.submission_tokens = self.action_tokens
-        self._release_cuts(previous, previous_submission, keep=(local,))
+        if hold_submission:
+            if not self.config.overlap or self._round_base is None:
+                raise RuntimeError(f"{self.config.role} holds a submission without an overlap round base")
+            self._release_cuts(previous, keep=(local, self._round_base, previous_submission))
+        else:
+            self.submission_cut = local
+            self.submission_fragment_versions = self.fragment_versions
+            self.submission_rounds = self.local_rounds
+            self.submission_tokens = self.action_tokens
+            self._release_cuts(previous, previous_submission, keep=(local, self._round_base))
 
         # The policy-level coordinator owns permit matching and release.  A
         # role must never answer a PULL here: the peer role may not yet have
@@ -559,8 +627,15 @@ class MilesFullParameterRoleStream:
         self,
         fragment_id: int,
         version: int,
+        *,
+        rebase: bool = False,
     ) -> tuple[int, ...]:
-        """Apply one coordinator-approved staged fragment at a safe boundary."""
+        """Apply one coordinator-approved staged fragment at a safe boundary.
+
+        ``rebase`` (overlap): the trainer keeps its progress since the round
+        base, ``theta_f <- G_f + (current_f - base_f)``; ``G_f`` becomes the
+        anchor, and the counters at the round base become the anchor's, so
+        the next push carries exactly that progress."""
 
         key = (fragment_id, version)
         stored = self._staged.get(key)
@@ -573,14 +648,60 @@ class MilesFullParameterRoleStream:
             raise RuntimeError(
                 f"{self.config.algorithm} {self.config.role} staged fragment skipped its base version"
             )
-        await self._apply_authoritative({fragment_id: stored})
+        if not rebase:
+            await self._apply_authoritative({fragment_id: stored})
+        else:
+            if not self.config.overlap or self._round_base is None or self.current is None:
+                raise RuntimeError(f"{self.config.role} rebase without an overlap round base")
+            rebased = self.adapter.rebase_fragment(
+                stored, self.current, self._round_base, ray_module=self.ray_module)
+            try:
+                await self._apply_authoritative(
+                    {fragment_id: rebased},
+                    anchors={fragment_id: stored},
+                    counters=(self._rounds_at_base, self._tokens_at_base),
+                )
+            finally:
+                rebased.release()  # the applied target holds its own references
         self._staged.pop(key, None)
         return (fragment_id,)
+
+    def finish_rebase(self) -> None:
+        """Overlap: the rebased cut is the next submission (``G + progress``).
+
+        The applied cut has generation 0; the submission is the same weights
+        labeled with the rounds trained since the round base."""
+
+        if not self.config.overlap or self.current is None or self.adapter is None:
+            raise RuntimeError(f"{self.config.role} finish_rebase outside overlap")
+        previous_submission = self.submission_cut
+        self.submission_cut = self.adapter.relabel_local_progress(
+            self.current, local_rounds=self.local_rounds - self._rounds_at_base)
+        self.submission_fragment_versions = self.fragment_versions
+        self.submission_rounds = self.local_rounds
+        self.submission_tokens = self.action_tokens
+        self._release_cuts(previous_submission, keep=(self.current, self.submission_cut, self._round_base))
+
+    def mark_round_base(self) -> None:
+        """Overlap: pin the cut the next local round starts from."""
+
+        if not self.config.overlap or self.current is None:
+            raise RuntimeError(f"{self.config.role} mark_round_base outside overlap")
+        previous = self._round_base
+        self._round_base = self.current
+        self._rounds_at_base = self.local_rounds
+        self._tokens_at_base = self.action_tokens
+        self._release_cuts(previous, keep=(self.current, self.submission_cut))
 
     async def _apply_authoritative(
         self,
         selected: Mapping[int, StoredAuthoritativeFragment],
+        *,
+        anchors: Mapping[int, StoredAuthoritativeFragment] | None = None,
+        counters: tuple[int, int] | None = None,
     ) -> None:
+        """Apply ``selected`` fragments; ``anchors``/``counters`` override the
+        recorded anchor and its round/token counters (overlap rebase)."""
         if self.adapter is None or self.current is None or self.group is None:
             raise RuntimeError(f"{self.config.algorithm} {self.config.role} stream is unavailable")
         target_version = self.transport_version + 1
@@ -610,16 +731,18 @@ class MilesFullParameterRoleStream:
         self.local_generation = 0
         self._release_cuts(
             previous_cut,
-            keep=(self.current, self.submission_cut),
+            keep=(self.current, self.submission_cut, self._round_base),
         )
-        for fragment_id, stored in selected.items():
+        rounds, tokens = counters if counters is not None else (self.local_rounds, self.action_tokens)
+        for fragment_id, applied in selected.items():
+            stored = applied if anchors is None else anchors[fragment_id]
             previous_anchor = self._anchors[fragment_id]
             if previous_anchor is not None and previous_anchor is not stored:
                 self._release_anchor(previous_anchor)
             self._anchors[fragment_id] = stored
             self._fragment_versions[fragment_id] = stored.version
-            self._rounds_at_anchor[fragment_id] = self.local_rounds
-            self._tokens_at_anchor[fragment_id] = self.action_tokens
+            self._rounds_at_anchor[fragment_id] = rounds
+            self._tokens_at_anchor[fragment_id] = tokens
 
     def _apply_token(
         self,
@@ -911,8 +1034,9 @@ class MilesFullParameterRoleStream:
         retained_cuts = tuple(value for value, _count in self._pinned_cuts.values())
         self._pinned_cuts.clear()
         self._pinned_anchors.clear()
-        self._release_cuts(self.current, self.submission_cut, *retained_cuts)
+        self._release_cuts(self.current, self.submission_cut, self._round_base, *retained_cuts)
         self._staged.clear()
+        self._round_base = None
         self.current = None
         self.submission_cut = None
         self.submission_fragment_versions = None
@@ -934,6 +1058,7 @@ class MilesFullParameterRoleStream:
             remaining == 0
             and cut is not self.current
             and cut is not self.submission_cut
+            and cut is not self._round_base
             and self.adapter is not None
         ):
             self.adapter.release(cut)

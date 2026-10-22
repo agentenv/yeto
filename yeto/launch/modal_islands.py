@@ -104,6 +104,7 @@ def build_modal_island_config(args, spec: ClusterSpec, learner_id: int, task, sy
         envs={k: str(v) for k, v in envs.items() if v is not None},
         region=spec.region,
         gpu_exact=bool(getattr(args, "modal_gpu_exact", False)),
+        gpu_name=getattr(args, "modal_gpu_name", None) or None,
         registry_login=bool(registry_login),
         registry_creds=registry_login,
         image_ref=image_ref_from_rl_image(args.rl_image) if rl else None,
@@ -180,14 +181,13 @@ def pull_modal_tapes(modal_ops, modal_cfgs: dict, run_dir) -> dict[str, str]:
 
 
 def require_modal_for_gpu_exact(args, specs: list[ClusterSpec]) -> None:
-    """--modal-gpu-exact only means something on Modal islands; refuse it
+    """--modal-gpu-exact / --modal-gpu-name only mean something on Modal islands; refuse them
     rather than silently launching unpinned learners elsewhere."""
-    if getattr(args, "modal_gpu_exact", False):
-        other = sorted({s.cloud for s in specs if s.cloud != "modal"})
+    for flag, value in (("--modal-gpu-exact", getattr(args, "modal_gpu_exact", False)),
+                        ("--modal-gpu-name", getattr(args, "modal_gpu_name", None))):
+        other = sorted({s.cloud for s in specs if s.cloud != "modal"}) if value else []
         if other:
-            raise ValueError(
-                f"--modal-gpu-exact applies only to Modal islands; --gpu also has {other}"
-            )
+            raise ValueError(f"{flag} applies only to Modal islands; --gpu also has {other}")
 
 
 def _tail_modal(modal_ops, call_id: str, prefix: str, collector=None, guard=None) -> int:
@@ -315,3 +315,15 @@ def effective_recover_timeout(args) -> float:
     if getattr(args, "modal_retries", None) == 0 and not getattr(args, "modal_launcher_relaunch", False):
         return 0
     return args.recover_timeout
+
+
+def wan_probe_relaunches(args) -> int:
+    """New containers per island after a rejected link probe (S26 E3b);
+    0 when no island runs the probe."""
+    if not (float(getattr(args, "wan_probe_min_mbps", 0.0) or 0.0) > 0
+            or float(getattr(args, "wan_probe_min_down_mbps", 0.0) or 0.0) > 0):
+        return 0
+    count = int(getattr(args, "wan_probe_relaunches", 2))
+    if count < 0:
+        raise ValueError("--wan-probe-relaunches must be >= 0")
+    return count

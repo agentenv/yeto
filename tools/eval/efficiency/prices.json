@@ -1,0 +1,6 @@
+{
+  "_note": "USD per card-hour, all-in container estimate (GPU + the CPU and memory the harness requests). Modal list prices read 2026-10-20 for the GPU part; CPU/memory added as in tools/eval/cells.py. Estimates, not a bill: replace with the ledger's rate (infra-drafts/gpu-spend.md) when it differs.",
+  "A10G": {"usd_per_card_hour": 2.0, "gpu_list_usd_per_hour": 1.10},
+  "L4": {"usd_per_card_hour": 1.6, "gpu_list_usd_per_hour": 0.80},
+  "H100!": {"usd_per_card_hour": 5.3, "gpu_list_usd_per_hour": 3.95}
+}

@@ -48,6 +48,8 @@ class _RelaunchAttempt:
 # time spent recovering in the window.
 FIXED_ROSTER_MAX_RELAUNCHES = 2
 RECOVERY_STABLE_S = 300.0
+# S26 E3b: how long one rejected-link relaunch may take to get a new container.
+WAN_RECOVERY_S = 900.0
 # How long a failed-looking island is given for its rl_learner_finalized record
 # to arrive over the log stream before recovery starts.
 FINALIZE_GRACE_S = 60.0
@@ -154,6 +156,8 @@ class FleetController:
         elastic: bool = False,
         no_island_relaunch: bool = False,
         replacement_planner=None,
+        wan_reject_probe=None,
+        wan_probe_relaunches: int = 0,
     ):
         """`learners` maps cluster name -> (task, job_id); `syncer` is
         (name, task, job_id) for a cluster syncer, or None with
@@ -169,6 +173,12 @@ class FleetController:
         self.left_pool_probe = left_pool_probe
         self.elastic = elastic
         self.no_island_relaunch = no_island_relaunch
+        # S26 E3b: name -> number of rejected link probes the island logged
+        # (rl_wan_probe accepted=false, exit 75). Such an island never joined
+        # the syncer session, so it is relaunched in a fresh container up to
+        # wan_probe_relaunches times, also under --no-island-relaunch.
+        self.wan_reject_probe = wan_reject_probe
+        self.wan_probe_relaunches = wan_probe_relaunches
         # rl-spot-cost-saving 2.3: yeto.cloud.replace.ReplacementPlanner or None.
         # Asked once per recovery window before the same-place relaunch. Auto
         # launch off (default): it only writes spot_replace_advice and the
@@ -372,6 +382,8 @@ class FleetController:
                 self._fleet("island_done", rec["name"], reason="syncer finished")
                 print(f"[launcher] {rec['name']}: {verdict} after the syncer finished; "
                       "counted as a normal end, not relaunched", file=sys.stderr)
+            elif not is_syncer and self._rejected_link(rec):
+                self._relaunch_rejected_link(rec)
             elif not is_syncer and self.elastic and self._left_pool(rec):
                 # 0.27: re-JOIN exhausted (exit 7): the island left the elastic pool.
                 # Not the fixed-roster abandon path (exit 4): relaunch unless
@@ -417,6 +429,36 @@ class FleetController:
             return bool(self.syncer_finished_probe())
         except Exception:
             return False
+
+    def _rejected_link(self, rec) -> bool:
+        """A new rejected link probe since the island's last (re)launch."""
+        if self.wan_reject_probe is None:
+            return False
+        try:
+            seen = int(self.wan_reject_probe(rec["name"]))
+        except Exception:
+            return False
+        return seen > rec.get("wan_rejects_handled", 0)
+
+    def _relaunch_rejected_link(self, rec) -> None:
+        rec["wan_rejects_handled"] = rec.get("wan_rejects_handled", 0) + 1
+        used = rec.get("wan_relaunches", 0)
+        if used >= self.wan_probe_relaunches:
+            self._fleet("island_lost", rec["name"], reason="link probe rejected; relaunch budget used")
+            print(f"[launcher] {rec['name']}: link probe rejected again after {used} new "
+                  "container(s); not relaunched", file=sys.stderr)
+            self._abandon(rec, 0.0, reason="link probe rejected")
+            return
+        rec["wan_relaunches"] = used + 1
+        self._fleet("island_lost", rec["name"],
+                    reason=f"link probe rejected; new container {used + 1}/{self.wan_probe_relaunches}")
+        print(f"[launcher] {rec['name']}: link probe rejected; requesting a new container "
+              f"({used + 1}/{self.wan_probe_relaunches})", file=sys.stderr)
+        rec["state"] = RECOVERING
+        rec["failed_at"] = self.ops.now()
+        rec["wan_recovery"] = True
+        rec.pop("recovered_at", None)
+        self._drive_recovery(rec, False)
 
     def _left_pool(self, rec) -> bool:
         if self.left_pool_probe is None:
@@ -577,6 +619,7 @@ class FleetController:
                     self.ops.now() - rec["failed_at"])
                 rec["failed_at"] = None
                 rec["replace_planned"] = False
+                rec.pop("wan_recovery", None)
                 rec["recovered_at"] = self.ops.now()
                 print(
                     f"[launcher] {rec['name']} recovered: relaunched as job "
@@ -597,7 +640,9 @@ class FleetController:
             if rec.get("failures", 0) > FIXED_ROSTER_MAX_RELAUNCHES:
                 self._abandon(rec, elapsed)
                 return
-        if self.recover_timeout <= 0 or elapsed > self.recover_timeout:
+        # A rejected-link relaunch has its own budget (the island never joined).
+        timeout = WAN_RECOVERY_S if rec.get("wan_recovery") else self.recover_timeout
+        if timeout <= 0 or elapsed > timeout:
             if is_syncer:
                 # The syncer is never abandoned: without it no learner can
                 # make outer progress, so keep trying and complain loudly.

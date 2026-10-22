@@ -148,6 +148,40 @@ def sao_contract_mounts(args, learner_id: int) -> dict[str, str]:
             for shipped in (island.runtime, island.layout_attestation)}
 
 
+_FULL_PARAMETER_SYNC_DEFAULTS = (
+    ("rl_sync_fragment_pipeline", 1, "--rl-sync-fragment-pipeline"),
+    ("rl_sync_async_checkpoint", False, "--rl-sync-async-checkpoint"),
+    ("rl_sync_push_dtype", "f32", "--rl-sync-push-dtype"),
+    ("rl_sync_checkpoint_every", 1, "--rl-sync-checkpoint-every"),
+    ("rl_sync_push_int8_block", 128, "--rl-sync-push-int8-block"),
+    ("rl_sync_overlap", False, "--rl-sync-overlap"),
+)
+
+
+def _refuse_full_parameter_sync_options(args) -> None:
+    """The S26 E3 sync options exist only for the full-parameter preset
+    (the bf16 downlink also for strict-avg, see ``_check_bcast_delta``)."""
+    for dest, default, option in _FULL_PARAMETER_SYNC_DEFAULTS:
+        if getattr(args, dest, default) != default:
+            raise ValueError(f"{option} only applies to --rl-sync-preset {FULL_PARAMETER_SYNC_PRESET}")
+
+
+def _check_bcast_delta(args) -> None:
+    """S26 E3 bf16 downlink: a legacy-scheduled strict-avg or full-parameter
+    syncer only (the elastic server and SAO have no downlink anchors)."""
+    full_every = int(getattr(args, "rl_sync_bcast_delta_full_every", 0) or 0)
+    if full_every == 0:
+        return
+    if full_every < 2:
+        raise ValueError("--rl-sync-bcast-delta-full-every 0 (off) or >= 2")
+    if args.rl_sync_preset not in ("strict-avg", FULL_PARAMETER_SYNC_PRESET):
+        raise ValueError("--rl-sync-bcast-delta-full-every only applies to --rl-sync-preset "
+                         f"strict-avg or {FULL_PARAMETER_SYNC_PRESET}")
+    if island_scheduling_mode(args) != "legacy" or args.experimental_rl_sync:
+        raise ValueError("--rl-sync-bcast-delta-full-every needs --rl-island-scheduling legacy "
+                         "and no --experimental-rl-sync")
+
+
 def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
     """full-parameter preset (P0-D8): one actor role swept as whole-model fragments.
 
@@ -169,11 +203,30 @@ def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
         problems.append("--rl-island-scheduling legacy (no fragment frames in elastic mode)")
     if rl_needs_critic(args):
         problems.append("a critic-free algorithm (the strict sweep trains the actor only)")
+    fragment_pipeline = int(getattr(args, "rl_sync_fragment_pipeline", 1))
+    if not 1 <= fragment_pipeline <= max(args.fragments, 1):
+        problems.append("--rl-sync-fragment-pipeline between 1 and --fragments")
+    checkpoint_every = int(getattr(args, "rl_sync_checkpoint_every", 1))
+    if checkpoint_every != 1 and (checkpoint_every < 1 or checkpoint_every % max(args.fragments, 1)):
+        problems.append("--rl-sync-checkpoint-every 1 or a multiple of --fragments")
+    int8_block = int(getattr(args, "rl_sync_push_int8_block", 128))
+    if not 32 <= int8_block <= 1 << 20:
+        problems.append("--rl-sync-push-int8-block between 32 and 1048576")
+    elif int8_block != 128 and getattr(args, "rl_sync_push_dtype", "f32") != "int8":
+        problems.append("--rl-sync-push-int8-block only with --rl-sync-push-dtype int8")
+    if getattr(args, "rl_sync_overlap", False):
+        from ..rl.engine.sync_overlap import overlap_option_problems
+
+        problems += overlap_option_problems(
+            max_policy_age=getattr(args, "rl_max_policy_age", 0) or 0,
+            fragment_pipeline=fragment_pipeline, fragments=args.fragments)
     if problems:
         raise ValueError(f"--rl-sync-preset {FULL_PARAMETER_SYNC_PRESET} requires " + "; ".join(problems))
     args.quorum = num_islands
     args.grace_ms = 0
-    args.pipeline = 1
+    # Fragment rounds of one sweep are independent (H=1, plain average), so the
+    # syncer may gather several at once; it still commits them in step order.
+    args.pipeline = fragment_pipeline
     args.sync_interval_steps = 0.0
     args.delta_correction = "none"
     args.outer_lr = 1.0
@@ -267,8 +320,7 @@ def _prepare_rl_args(
     from ..rl.engine import sample_roles
 
     if args.tuning != "lora" and not sample_roles.buffer_full_parameter(args):
-        raise ValueError("RL v0 requires --tuning lora (--tuning full: only sampler / trainer "
-                         "islands, --rl-sample-role or --rl-island-sample-role, with "
+        raise ValueError("RL v0 requires --tuning lora (--tuning full: only with "
                          "--rl-single-island-no-sync)")
     if args.lora_r <= 0:
         raise ValueError("RL v0 requires a positive LoRA rank")
@@ -723,6 +775,9 @@ def _prepare_rl_args(
                          f"--rl-sync-preset {FULL_PARAMETER_SYNC_PRESET}")
     if args.rl_sync_preset != SAO_STREAMING_SYNC_PRESET and getattr(args, "rl_sao_contracts", None):
         raise ValueError("--rl-sao-contracts only applies to --rl-sync-preset sao-streaming-full")
+    if args.rl_sync_preset != FULL_PARAMETER_SYNC_PRESET:
+        _refuse_full_parameter_sync_options(args)
+    _check_bcast_delta(args)
     if args.rl_sync_preset == "decoupled":
         if args.experimental_rl_sync:
             raise ValueError("decoupled RL does not accept --experimental-rl-sync")

@@ -34,10 +34,14 @@ import socket
 import struct
 import threading
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 
+from .downlink import HEADER_LEN as DOWNLINK_HEADER_LEN
+from .downlink import DownlinkAnchors, DownlinkChunkSink
+from .downlink import tensor_nbytes as downlink_tensor_nbytes
 from .fragments import MERGE_ISO, FragmentLayout
+from .wan_streams import STREAM_SCHEDULES, StreamMeter, StreamSnapshot, StreamStalledError, pick_stream
 
 MAGIC = 0xD170C0DE
 PROTOCOL_VERSION = 4
@@ -56,6 +60,8 @@ MSG_FINAL_MANIFEST = 11
 MSG_FINAL_ACK = 12
 MSG_FINAL_FRAGMENT = 13
 MSG_BUDGET_DONE = 14
+# S26 E3b: link-bandwidth probe connection (yeto/wan_probe.py; syncer serve_bw_probe).
+MSG_BW_PROBE = 26
 
 FINALIZATION_REVISION = 1
 FINALIZATION_TIMEOUT = 900.0
@@ -66,6 +72,20 @@ DTYPE_BF16 = 2
 # base-relative learner deltas; INIT_PARAMS and BCAST_FRAGMENT stay bf16
 # (see bulk_dtype and docs/PROTOCOL.md v4).
 DTYPE_Q4 = 3
+# Session dtype 4 (S26 E3): PUSH_FRAGMENT deltas travel as bf16; INIT_PARAMS,
+# BCAST_FRAGMENT and FINAL stay exact f32. Callers still hand the client f32
+# delta bytes; the client rounds them (round-to-nearest-even, as the syncer's
+# ``half::bf16::from_f32``) on the way out.
+DTYPE_F32_PUSH_BF16 = 4
+# Session dtype 5 (S26 E3): PUSH_FRAGMENT deltas travel as block-scaled int8
+# (``f32_bytes_to_i8``); INIT/BCAST/FINAL stay f32. Callers hand f32 bytes.
+DTYPE_F32_PUSH_I8 = 5
+# Session-dtype flag (S26 E3): BCAST_FRAGMENT carries bf16 downlink deltas
+# between f32 refreshes (yeto/downlink.py). Only on f32-bulk sessions.
+DTYPE_FLAG_BCAST_DELTA = 0x80
+I8_BLOCK_MIN = 32
+I8_BLOCK_MAX = 1 << 20
+DEFAULT_I8_BLOCK = 128
 
 CHUNK_SIZE = 4 * 1024 * 1024
 MAX_HANDSHAKE_FRAME = 16 * 1024 * 1024
@@ -87,13 +107,127 @@ _FINAL_ACK = struct.Struct("<HQ")  # revision, global_step
 _BUDGET_DONE = struct.Struct("<Q")  # local steps
 
 
+def session_base(dtype: int) -> int:
+    """The session dtype without its flags."""
+    return dtype & ~DTYPE_FLAG_BCAST_DELTA
+
+
+def bcast_delta(dtype: int) -> bool:
+    """Whether the session receives bf16 downlink deltas."""
+    return bool(dtype & DTYPE_FLAG_BCAST_DELTA)
+
+
+def valid_session_dtype(dtype: int) -> bool:
+    base = session_base(dtype)
+    if base in (DTYPE_F32, DTYPE_F32_PUSH_BF16, DTYPE_F32_PUSH_I8):
+        return 0 <= dtype <= 0xFF
+    return base in (DTYPE_BF16, DTYPE_Q4) and not bcast_delta(dtype)
+
+
 def bulk_dtype(dtype: int) -> int:
     """Dtype of INIT_PARAMS/BCAST_FRAGMENT tensors for a session dtype.
 
     Q4 applies only to push deltas (small dynamic range); full parameter
-    payloads would not survive 4 bits, so they travel as bf16.
+    payloads would not survive 4 bits, so they travel as bf16. A downlink
+    session's BCAST is reconstructed to f32 before callers see it.
     """
-    return DTYPE_BF16 if dtype == DTYPE_Q4 else dtype
+    base = session_base(dtype)
+    if base == DTYPE_Q4:
+        return DTYPE_BF16
+    if base in (DTYPE_F32_PUSH_BF16, DTYPE_F32_PUSH_I8):
+        return DTYPE_F32
+    return base
+
+
+def push_wire_dtype(dtype: int) -> int:
+    """Dtype of unquantized PUSH_FRAGMENT deltas on the wire for a session dtype."""
+    base = session_base(dtype)
+    return DTYPE_BF16 if base == DTYPE_F32_PUSH_BF16 else base
+
+
+def i8_nbytes(numel: int, block: int) -> int:
+    """Encoded size of an int8 push: u32 block, then per block f32 scale + i8s."""
+    if not I8_BLOCK_MIN <= block <= I8_BLOCK_MAX:
+        raise ValueError(f"int8 block size {block} outside {I8_BLOCK_MIN}..{I8_BLOCK_MAX}")
+    return 4 + 4 * -(-numel // block) + numel
+
+
+def f32_bytes_to_i8(data: bytes | bytearray | memoryview, block: int, *, header: bool = True) -> bytes:
+    """Quantize little-endian f32 values to block-scaled int8 (syncer ``decode_i8``).
+
+    Per block of ``block`` values (the last may be shorter): f32 scale =
+    absmax / 127, then ``round_half_even(x / scale)`` clipped to [-127, 127].
+    Decoding ``q * scale`` errs by at most absmax / 254 per element (plus f32
+    rounding). Blocks must start at multiples of ``block`` values; with
+    ``header`` the u32 block size is prepended.
+    """
+    import numpy as np
+
+    i8_nbytes(0, block)  # validates the block size
+    values = np.frombuffer(data, dtype="<f4")
+    if not np.isfinite(values).all():
+        raise ValueError("int8 push delta contains a non-finite value")
+    count = values.size
+    full = count - count % block
+    parts = [struct.pack("<I", block)] if header else []
+
+    def encode(chunk: np.ndarray) -> None:  # chunk: (blocks, width)
+        absmax = np.abs(chunk).max(axis=1)
+        scale = (absmax / np.float32(127)).astype(np.float32)
+        safe = np.where(scale > 0, scale, np.float32(1))
+        q = np.clip(np.rint(chunk / safe[:, None]), -127, 127).astype(np.int8)
+        q[scale == 0] = 0
+        rows = np.empty((chunk.shape[0], 4 + chunk.shape[1]), dtype=np.uint8)
+        rows[:, :4] = scale.astype("<f4").view(np.uint8).reshape(-1, 4)
+        rows[:, 4:] = q.view(np.uint8)
+        parts.append(rows.tobytes())
+
+    if full:
+        encode(values[:full].reshape(-1, block))
+    if count > full:
+        encode(values[full:].reshape(1, -1))
+    return b"".join(parts)
+
+
+def _f32_parts_to_i8(parts: Iterable[bytes | bytearray | memoryview], block: int) -> Iterator[bytes]:
+    """Stream ``f32_bytes_to_i8`` over parts; blocks may span part boundaries."""
+    yield struct.pack("<I", block)
+    span = 4 * block
+    carry = b""
+    for part in parts:
+        data = carry + bytes(part)
+        whole = len(data) - len(data) % span
+        carry = data[whole:]
+        if whole:
+            yield f32_bytes_to_i8(data[:whole], block, header=False)
+    if len(carry) % 4:
+        raise ValueError("f32 push delta ends mid-value")
+    if carry:
+        yield f32_bytes_to_i8(carry, block, header=False)
+
+
+def f32_bytes_to_bf16(data: bytes | bytearray | memoryview) -> bytes:
+    """Round little-endian f32 values to bf16 (nearest, ties to even)."""
+    import numpy as np  # noqa: PLC0415 - keep the protocol import light
+
+    bits = np.frombuffer(data, dtype="<u4").astype(np.uint64)
+    rounded = (bits + 0x7FFF + ((bits >> 16) & 1)) >> 16
+    nan = (bits & 0x7FFF_FFFF) > 0x7F80_0000
+    rounded[nan] = (bits[nan] >> 16) | 0x40  # keep NaN quiet, never round to inf
+    return rounded.astype("<u2").tobytes()
+
+
+def _f32_parts_to_bf16(parts: Iterable[bytes | bytearray | memoryview]) -> Iterator[bytes]:
+    """Stream ``f32_bytes_to_bf16`` over parts whose boundaries may split a value."""
+    carry = b""
+    for part in parts:
+        data = carry + bytes(part)
+        whole = len(data) - len(data) % 4
+        carry = data[whole:]
+        if whole:
+            yield f32_bytes_to_bf16(data[:whole])
+    if carry:
+        raise ValueError("f32 push delta ends mid-value")
 
 
 def layout_fingerprint(layout: FragmentLayout) -> bytes:
@@ -168,8 +302,8 @@ def seal_hello(body: bytes, key: bytes | None) -> bytes:
     The legacy syncer with a key refuses a HELLO without this trailer."""
     if not key:
         return body
-    import hmac
     import hashlib
+    import hmac
 
     return body + hmac.new(key, HELLO_MAC_DOMAIN + body, hashlib.sha256).digest()
 
@@ -440,6 +574,7 @@ class SendProgress:
     queued_chunks: int
     reconnects: int
     connected: bool
+    stalls: int = 0
 
 
 @dataclass
@@ -463,6 +598,10 @@ class SyncerClient:
     forever); once exhausted, check_health raises.
     """
 
+    # Transport defaults (S26 E3b); __init__ overrides them per client.
+    stream_schedule: str = "rr"
+    stream_stall_timeout: float | None = None
+
     def __init__(
         self,
         addr: tuple[str, int],
@@ -477,11 +616,19 @@ class SyncerClient:
         syncer_profile_hash: bytes | None = None,
         hmac_key: bytes | None = None,
         compat_group: str | None = None,
+        push_i8_block: int = DEFAULT_I8_BLOCK,
+        stream_schedule: str = "rr",
+        stream_stall_timeout: float | None = None,
     ):
+        if stream_schedule not in STREAM_SCHEDULES:
+            raise ValueError(f"stream_schedule must be one of {STREAM_SCHEDULES}, got {stream_schedule!r}")
+        if stream_stall_timeout is not None and not stream_stall_timeout > 0:
+            raise ValueError("stream_stall_timeout must be positive or None")
         if not 0 <= learner_id <= 0xFFFF_FFFF:
             raise ValueError(f"learner_id must fit u32, got {learner_id}")
-        if dtype not in (DTYPE_F32, DTYPE_BF16, DTYPE_Q4):
+        if not valid_session_dtype(dtype):
             raise ValueError(f"unsupported session dtype {dtype}")
+        i8_nbytes(0, push_i8_block)  # validates the int8 block size
         if layout.num_fragments < 1:
             raise ValueError("layout must contain at least one fragment")
         if not 0 <= num_streams <= 256:
@@ -499,7 +646,27 @@ class SyncerClient:
         self.learner_id = learner_id
         self.layout = layout
         self.dtype = dtype
+        self._push_base = session_base(dtype)
+        self.push_i8_block = push_i8_block
+        # S26 E3: f32 anchors of a bf16-downlink session (yeto/downlink.py).
+        self._downlink = DownlinkAnchors(layout.num_fragments) if bcast_delta(dtype) else None
+        self._bcast_prefix = 12 + (DOWNLINK_HEADER_LEN if self._downlink is not None else 0)
         self.num_streams = num_streams
+        # S26 E3b: chunk placement over the data streams and the per-stream
+        # no-progress timeout (None = off, the historical behaviour).
+        self.stream_schedule = stream_schedule
+        self.stream_stall_timeout = stream_stall_timeout
+        # Index 0 is the control socket; the meters outlive connection groups
+        # so their counters are cumulative for the whole session.
+        self._meters = [StreamMeter() for _ in range(num_streams + 1)]
+        self._upload_drained_at: float | None = None
+        self._stalls = 0
+        # S26 E3b: set once the initial cut arrived. Before that a redial must
+        # replay INIT_PARAMS (learner 0), and TCP_USER_TIMEOUT stays unset:
+        # the multi-GB INIT upload and initial broadcast must not be reset by
+        # the kernel on a slow link (s26-e3b-p06-C32a).
+        self._initial_cut_received = threading.Event()
+        self._init_generation: int | None = None
         self.session_contract_hash = session_contract_hash
         self.syncer_profile_hash = syncer_profile_hash
         # secret-handling-hardening: HELLO carries an HMAC when the island has
@@ -510,7 +677,7 @@ class SyncerClient:
         self.max_reconnects = max_reconnects
         self.finalization_timeout = finalization_timeout
         self._max_bcast_payload = max(
-            12 + _tensor_nbytes(bulk_dtype(dtype), fragment.numel)
+            self._bcast_prefix + _tensor_nbytes(bulk_dtype(dtype), fragment.numel)
             for fragment in layout.fragments
         )
         self._max_final_payload = max(
@@ -544,6 +711,7 @@ class SyncerClient:
             | _StreamedReassembly,
         ] = {}
         self._reasm_lock = threading.Lock()
+        self._reasm_touched: dict[int, float] = {}  # msg_id -> last chunk (monotonic)
         self._inbound_chunk_sink: object | None = None
         self._msg_id = itertools.count()
         self._rr = itertools.count()
@@ -564,6 +732,7 @@ class SyncerClient:
         self._bytes_sent_lock = threading.Lock()
         self._reset_bcasts_on_reconnect = False
         self._supervisor: threading.Thread | None = None
+        self._watchdog: threading.Thread | None = None
 
     # -- lifecycle -------------------------------------------------------------
 
@@ -572,6 +741,8 @@ class SyncerClient:
         sock.settimeout(None)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         enable_tcp_keepalive(sock)
+        if self.stream_stall_timeout is not None and self._initial_cut_received.is_set():
+            set_tcp_user_timeout(sock, self.stream_stall_timeout)
         return sock
 
     def _connect_one(self) -> socket.socket:
@@ -602,6 +773,9 @@ class SyncerClient:
         self._connect_group(patient=True)
         self._supervisor = threading.Thread(target=self._supervise, name="yeto-supervisor", daemon=True)
         self._supervisor.start()
+        if self.stream_stall_timeout is not None:
+            self._watchdog = threading.Thread(target=self._watch_stalls, name="yeto-stall-watchdog", daemon=True)
+            self._watchdog.start()
 
     def _connect_group(self, patient: bool) -> None:
         """Dial control + data sockets, send HELLO/DATA_HELLO, start workers.
@@ -659,7 +833,7 @@ class SyncerClient:
                 q: queue.Queue[_Outbound | None] = queue.Queue(maxsize=256)
                 self._queues.append(q)
                 ts = threading.Thread(
-                    target=self._send_loop, args=(gen, s, q), name=f"yeto-send-{i}", daemon=True
+                    target=self._send_loop, args=(gen, s, q, self._meters[i]), name=f"yeto-send-{i}", daemon=True
                 )
                 tr = threading.Thread(target=self._recv_loop, args=(gen, s), name=f"yeto-recv-{i}", daemon=True)
                 self._threads += [ts, tr]
@@ -684,6 +858,8 @@ class SyncerClient:
                 pass
         for s in socks:
             _close_socket(s)
+        for meter in self._meters:
+            meter.drop_pending()
         self._clear_partial_reassemblies()
         self._drain(self._pulls)  # stale pull requests; answering them is pointless
         with self._lock:
@@ -776,9 +952,71 @@ class SyncerClient:
             queued_chunks=queued,
             reconnects=self._reconnects_used,
             connected=connected,
+            stalls=self._stalls,
         )
 
+    def stream_snapshots(self) -> tuple[StreamSnapshot, ...]:
+        """Cumulative counters of each data stream (control stream excluded;
+        with ``num_streams == 0`` the control stream carries the data)."""
+        meters = self._meters[1:] if self.num_streams else self._meters[:1]
+        return tuple(meter.snapshot() for meter in meters)
+
+    @property
+    def upload_drained_at(self) -> float | None:
+        """Unix time when the data streams last became idle with nothing
+        queued, i.e. when this island's latest upload left the host."""
+        return self._upload_drained_at
+
     # -- learner-facing API ------------------------------------------------------
+
+    def send_initial_fragments(
+        self,
+        parts_for: Callable[[int], Iterable[bytes | bytearray | memoryview]],
+    ) -> bool:
+        """Learner 0: stream INIT_PARAMS of every fragment on the live group.
+
+        ``parts_for(fragment_id)`` returns a fresh part iterable each call, so
+        the same INIT can be replayed after a redial. Returns True when every
+        fragment was queued on one connection generation; False on an outage
+        (nothing to undo: the syncer ignores INIT it already applied, and a
+        partial INIT of a dead generation is dropped by the syncer)."""
+        generation = self.connection_generation
+        try:
+            for fragment_id in range(self.layout.num_fragments):
+                if self.send_init_parts(fragment_id, parts_for(fragment_id)) is not True:
+                    return False
+        except PartialMessageGenerationLost:
+            return False
+        if generation != self.connection_generation:
+            return False
+        self._init_generation = generation
+        return True
+
+    def init_replay_due(self) -> bool:
+        """True when the live group never carried a complete INIT and the
+        initial cut has not arrived yet (learner 0 must send INIT again)."""
+        with self._lock:
+            live = self._connected.is_set()
+            generation = self.connection_generation
+        return (
+            live
+            and not self._initial_cut_received.is_set()
+            and generation != self._init_generation
+        )
+
+    def mark_initial_cut_received(self) -> None:
+        """The initial cut arrived: INIT is no longer replayed, and the stall
+        timeout now also bounds unacknowledged data in the kernel."""
+        self._initial_cut_received.set()
+        if self.stream_stall_timeout is None:
+            return
+        with self._lock:
+            socks = list(self._socks)
+        for sock in socks:
+            try:
+                set_tcp_user_timeout(sock, self.stream_stall_timeout)
+            except OSError:
+                pass  # a dying socket; the group is being replaced anyway
 
     def send_init(self, fragment_id: int, tensor_bytes: bytes) -> None:
         if not 0 <= fragment_id < self.layout.num_fragments:
@@ -832,8 +1070,9 @@ class SyncerClient:
         numel = self.layout.fragments[fragment_id].numel
         expected = (
             _q4_nbytes(numel)
-            if self.dtype == DTYPE_Q4
-            else _tensor_nbytes(self.dtype, numel)
+            if self._push_base == DTYPE_Q4
+            # dtypes 4/5 callers pass f32 bytes; the client encodes them below
+            else _tensor_nbytes(bulk_dtype(self.dtype), numel)
         )
         if len(tensor_bytes) != expected:
             raise ValueError(
@@ -851,6 +1090,10 @@ class SyncerClient:
             c_steps,
             c_tokens,
         )
+        if self._push_base == DTYPE_F32_PUSH_BF16:
+            tensor_bytes = f32_bytes_to_bf16(tensor_bytes)
+        elif self._push_base == DTYPE_F32_PUSH_I8:
+            tensor_bytes = f32_bytes_to_i8(tensor_bytes, self.push_i8_block)
         self._send_large(MSG_PUSH_FRAGMENT, head + tensor_bytes)
 
     def push_fragment_parts(
@@ -882,11 +1125,15 @@ class SyncerClient:
         if c_steps < 1:
             raise ValueError("c_steps must be positive")
         numel = self.layout.fragments[fragment_id].numel
-        expected = (
-            _q4_nbytes(numel)
-            if self.dtype == DTYPE_Q4
-            else _tensor_nbytes(self.dtype, numel)
-        )
+        if self._push_base == DTYPE_Q4:
+            expected = _q4_nbytes(numel)
+        elif self._push_base == DTYPE_F32_PUSH_I8:
+            expected = i8_nbytes(numel, self.push_i8_block)
+            tensor_parts = _f32_parts_to_i8(tensor_parts, self.push_i8_block)
+        else:
+            expected = _tensor_nbytes(push_wire_dtype(self.dtype), numel)
+        if self._push_base == DTYPE_F32_PUSH_BF16:
+            tensor_parts = _f32_parts_to_bf16(tensor_parts)
         head = struct.pack(
             "<IIQIQQIQ",
             self.learner_id,
@@ -990,6 +1237,9 @@ class SyncerClient:
                 raise TypeError(
                     "inbound chunk sink does not implement the transaction API"
                 )
+        if sink is not None and self._downlink is not None:
+            sink = DownlinkChunkSink(
+                sink, self._downlink, [f.numel for f in self.layout.fragments], MSG_BCAST_FRAGMENT)
         with self._reasm_lock:
             if self._reasm:
                 raise RuntimeError("cannot replace inbound chunk sink mid-message")
@@ -1129,6 +1379,8 @@ class SyncerClient:
                 if gen is not None and gen != self._gen:
                     return False
                 q = self._queues[stream]
+            meter = self._meters[stream]
+            meter.enqueued(len(data))  # before put: the sender may drain it at once
             try:
                 q.put(
                     _Outbound(data, sent),
@@ -1136,7 +1388,15 @@ class SyncerClient:
                 )  # bounded wait, then re-check the group
                 return True
             except queue.Full:
+                meter.enqueued(-len(data))
                 continue
+
+    def _next_data_stream(self) -> int:
+        """Socket index (1-based; 0 only without data streams) for the next
+        CHUNK envelope, by ``stream_schedule``."""
+        if self.num_streams == 0:
+            return 0
+        return 1 + pick_stream(self.stream_schedule, self._meters[1:], next(self._rr))
 
     def _send_large(self, msg_type: int, payload: bytes) -> None:
         inner = self._frame(msg_type, payload)
@@ -1152,7 +1412,7 @@ class SyncerClient:
         for offset in range(0, total, CHUNK_SIZE):
             chunk = inner[offset : offset + CHUNK_SIZE]
             envelope = self._frame(MSG_CHUNK, _CHUNK_HEAD.pack(msg_id, total, offset) + chunk)
-            stream = 1 + next(self._rr) % self.num_streams
+            stream = self._next_data_stream()
             if not self._enqueue(stream, envelope, gen=gen):
                 return  # group died mid-message; drop the remainder
 
@@ -1273,11 +1533,7 @@ class SyncerClient:
                         before_last_enqueue = None
                         callback()
 
-                stream = (
-                    0
-                    if self.num_streams == 0
-                    else 1 + next(self._rr) % self.num_streams
-                )
+                stream = self._next_data_stream()
                 if not self._enqueue(stream, envelope, gen=gen):
                     if enqueued_chunks:
                         raise PartialMessageGenerationLost(
@@ -1337,19 +1593,84 @@ class SyncerClient:
         with self._final_cond:
             self._final_cond.notify_all()
 
-    def _send_loop(self, gen: int, sock: socket.socket, q: queue.Queue) -> None:
+    def _send_loop(
+        self,
+        gen: int,
+        sock: socket.socket,
+        q: queue.Queue,
+        meter: StreamMeter | None = None,
+    ) -> None:
+        if meter is None:  # a sender outside a connection group (tests)
+            meter = StreamMeter()
         try:
             while True:
                 item = q.get()
                 if item is None:
                     return
-                sock.sendall(item.data)
+                # send() instead of sendall() so the meter sees byte progress
+                # inside one 4 MiB envelope (stall watchdog, per-stream rate).
+                view = memoryview(item.data)
+                meter.begin()
+                try:
+                    while view:
+                        sent = sock.send(view)
+                        meter.progress(sent)
+                        view = view[sent:]
+                finally:
+                    meter.end()
+                    view.release()
                 with self._bytes_sent_lock:
                     self._bytes_sent += len(item.data)
+                if all(m.idle for m in self._meters):
+                    self._upload_drained_at = time.time()
                 if item.sent is not None:
                     item.sent.set()
         except BaseException as e:
             self._socket_failed(gen, e)
+
+    def _stalled_stream(self) -> str | None:
+        """Describe the first stream without progress for the stall timeout."""
+        limit = self.stream_stall_timeout
+        now = time.monotonic()
+        for index, meter in enumerate(self._meters):
+            idle_for = meter.stalled_for(now)
+            if idle_for > limit:
+                return f"outbound stream {index} made no progress for {idle_for:.0f}s"
+        with self._reasm_lock:
+            touched = dict(self._reasm_touched)
+        for msg_id, last in touched.items():
+            if now - last > limit:
+                return f"inbound message {msg_id} got no chunk for {now - last:.0f}s"
+        return None
+
+    def _watch_stalls(self) -> None:
+        """Fail the live group when one stream stops moving bytes.
+
+        A stalled TCP stream can sit for many minutes before the kernel gives
+        up (C32: 900 s with every socket still open). The failure goes
+        through the normal reconnect path, so the syncer replays its PULLs
+        and the island pushes the interrupted fragment again."""
+        period = min(1.0, self.stream_stall_timeout / 4)
+        while not self._closed.wait(period):
+            if self.shutdown.is_set():
+                return
+            with self._lock:
+                gen = self._gen
+                live = self._connected.is_set()
+            if not live:
+                continue
+            reason = self._stalled_stream()
+            if reason is None:
+                continue
+            with self._lock:
+                if gen != self._gen:
+                    continue
+                self._stalls += 1
+                socks = list(self._socks)
+            _connect_log(f"{reason} (learner {self.learner_id}); dropping the connection group")
+            self._socket_failed(gen, StreamStalledError(reason))
+            for sock in socks:  # unblock senders stuck in send()
+                _close_socket(sock)
 
     def _recv_loop(self, gen: int, sock: socket.socket) -> None:
         try:
@@ -1419,6 +1740,7 @@ class SyncerClient:
                         sink=sink,
                         transaction=sink.begin_message(msg_id, total),
                     )
+            self._reasm_touched[msg_id] = time.monotonic()
             partial = self._reasm[msg_id]
             if isinstance(partial, _StreamedReassembly):
                 if partial.total != total:
@@ -1438,6 +1760,7 @@ class SyncerClient:
                     raise
                 if completed is not None:
                     self._reasm.pop(msg_id, None)
+                    self._reasm_touched.pop(msg_id, None)
                 return completed
             buf, filled, ranges = partial
             if len(buf) != total:
@@ -1452,6 +1775,7 @@ class SyncerClient:
             if filled[0] != total:
                 raise ValueError("chunk byte count exceeds frame length")
             del self._reasm[msg_id]
+            self._reasm_touched.pop(msg_id, None)
         magic, msg_type, length = _HEADER.unpack_from(buf)
         if magic != MAGIC or length != total - _HEADER.size:
             raise ValueError("corrupt reassembled frame")
@@ -1499,6 +1823,13 @@ class SyncerClient:
                 dtype,
                 self.layout.fragments[fragment_id].numel,
             )
+            if msg_type == MSG_BCAST_FRAGMENT and self._downlink is not None:
+                # The downlink header (kind, base version, digest) is part of
+                # the payload the wrapping sink decodes; its kind fixes the size.
+                if len(data) < tensor_start + DOWNLINK_HEADER_LEN:
+                    raise ValueError("first downlink fragment chunk is header-truncated")
+                expected_payload = DOWNLINK_HEADER_LEN + downlink_tensor_nbytes(
+                    data[tensor_start], self.layout.fragments[fragment_id].numel)
             if length != 12 + expected_payload:
                 raise ValueError(
                     f"streamed fragment {fragment_id} has {length - 12} tensor "
@@ -1612,6 +1943,7 @@ class SyncerClient:
         with self._reasm_lock:
             partials = list(self._reasm.values())
             self._reasm.clear()
+            self._reasm_touched.clear()
         for partial in partials:
             if isinstance(partial, _StreamedReassembly):
                 try:
@@ -1767,15 +2099,19 @@ class SyncerClient:
             fid, version = struct.unpack_from("<IQ", payload)
             if fid >= self.layout.num_fragments:
                 raise ValueError(f"BCAST_FRAGMENT for unknown fragment {fid}")
-            expected = _tensor_nbytes(
-                bulk_dtype(self.dtype), self.layout.fragments[fid].numel
-            )
-            if len(payload) - 12 != expected:
-                raise ValueError(
-                    f"BCAST_FRAGMENT {fid} has {len(payload) - 12} tensor bytes, "
-                    f"expected {expected}"
+            if self._downlink is not None:
+                data = self._downlink.decode_whole(
+                    fid, version, payload[12:], self.layout.fragments[fid].numel)
+            else:
+                expected = _tensor_nbytes(
+                    bulk_dtype(self.dtype), self.layout.fragments[fid].numel
                 )
-            data = payload[12:]
+                if len(payload) - 12 != expected:
+                    raise ValueError(
+                        f"BCAST_FRAGMENT {fid} has {len(payload) - 12} tensor bytes, "
+                        f"expected {expected}"
+                    )
+                data = payload[12:]
             digest = hashlib.sha256(data).digest()
             with self._bcast_lock:
                 seen = self._bcast_seen[fid]
@@ -1880,6 +2216,14 @@ def enable_tcp_keepalive(sock: socket.socket) -> None:
         option = getattr(socket, name, None)
         if option is not None:  # Linux; other platforms keep their defaults
             sock.setsockopt(socket.IPPROTO_TCP, option, value)
+
+
+def set_tcp_user_timeout(sock: socket.socket, seconds: float) -> None:
+    """Bound how long unacknowledged data may sit before the kernel resets
+    the connection (Linux TCP_USER_TIMEOUT); other platforms keep defaults."""
+    option = getattr(socket, "TCP_USER_TIMEOUT", None)
+    if option is not None:
+        sock.setsockopt(socket.IPPROTO_TCP, option, max(1, int(seconds * 1000)))
 
 
 def _close_socket(sock: socket.socket) -> None:

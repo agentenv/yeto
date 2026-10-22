@@ -472,9 +472,11 @@ LEAF_POLICY: dict[str, _Check] = {
     # translated below (Megatron full recompute / Miles dynamic batching)
     "train_memory.activation_recompute": _ok,
     "train_memory.max_tokens_per_gpu": _ok,
+    "train_memory.gradient_accumulation_fusion": _ok,
     "train_memory.optimizer_offload_fraction": _ok,
     **{f"sample_buffer.{name}": _ok
-       for name in ("role", "store", "max_backlog_groups", "wait_s", "min_round_s")},
+       for name in ("role", "store", "max_backlog_groups", "wait_s", "min_round_s",
+                    "fused_stage", "release_legacy")},
 }
 
 
@@ -781,6 +783,7 @@ def translate_run_config(
 
     from yeto.rl.engine.run_config import (
         RECIPE_DEEPSEEK_V4_FLASH,
+        RECIPE_GENERIC,
         RECIPE_GLM5_NEXT,
         RECIPE_QWEN3_5,
         RECIPE_QWEN3_8_NEXT,
@@ -864,6 +867,10 @@ def translate_run_config(
         model_recipe_values = deepseek_v4.recipe_argv(trainable)
     else:
         model_name = recipe.provider_class
+        if recipe.name == RECIPE_GENERIC:
+            # Megatron's default dropout is 0.1; the Miles recipes train RL with
+            # none (the policy's train-time log-probs must match the rollout's)
+            model_recipe_values = ["--attention-dropout", "0.0", "--hidden-dropout", "0.0"]
 
     values: list[str] = [
         "train.py",
@@ -938,7 +945,7 @@ def translate_run_config(
         "--accumulate-allreduce-grads-in-fp32",
         "--attention-softmax-in-fp32",
         "--attention-backend", recipe.training_attention_backend,
-        "--no-gradient-accumulation-fusion",
+        *(() if config.train_memory.gradient_accumulation_fusion else ("--no-gradient-accumulation-fusion",)),
         "--bf16",
         "--no-load-optim",
         "--no-load-rng",

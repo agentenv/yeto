@@ -19,6 +19,10 @@ goes on; with ``ready`` (the engine sampler: False while the engine holds
 weights that failed a check) it waits instead of generating, so no sample of
 unchecked weights reaches the buffer.
 
+``rl_sampler_policy_loaded`` carries the latency fields of S26 E5: the trainer's
+``released_at``, the follower's ``seen_at`` (both wall clock, of two hosts) and
+``follower_timings`` (:attr:`~.policy_release.PolicyFollower.last_timings`).
+
 After the last round it marks the data end, so the trainer stops after reading
 the rest. The loop is engine-neutral: ``generate(rollout_id)`` runs one round.
 """
@@ -93,7 +97,9 @@ class SamplerLoop:
         if loaded is not None:
             self.emit("rl_sampler_policy_loaded", seq=loaded.seq, policy_version=loaded.version,
                       policy_hash=loaded.policy_hash, buffer_selected=loaded.buffer_selected,
-                      weights=loaded.weights, sha256=loaded.sha256, **self.loaded_fields())
+                      weights=loaded.weights, sha256=loaded.sha256,
+                      released_at=loaded.released_at, seen_at=self.follower.seen_at,
+                      follower_timings=self.follower.last_timings, **self.loaded_fields())
 
     def _admit(self, rollout_id: int) -> bool:
         """True when the round may start; False when asked to stop while waiting."""
@@ -150,9 +156,11 @@ class SamplerLoop:
             started = self.clock()
             self.generate(rollout_id)
             self.buffer.refresh()
+            generate_s = self.clock() - started
             self.emit("rl_sampler_round", rollout_id=rollout_id,
                       policy_version=self.follower.version,
-                      groups=len(self.buffer) - before, buffer_end=len(self.buffer))
+                      groups=len(self.buffer) - before, buffer_end=len(self.buffer),
+                      generate_s=round(generate_s, 3))
             done += 1
             self._throttle(started, last=rollout_id == self.num_rollouts - 1)
         self.buffer.mark_data_end()
