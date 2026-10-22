@@ -813,9 +813,10 @@ def _check_dense_full_sweep(args, *, yeto_policy_sync: bool) -> None:
         raise ValueError("the dense full-parameter strict sweep requires H=1")
     elif getattr(args, "rl_sync_matrix_merge", "avg") != "avg":
         raise ValueError("the dense full-parameter strict sweep merges by plain averaging")
-    if int(getattr(args, "rl_max_policy_age", 0) or 0) != 0:
-        # The sweep publishes whole rounds in lockstep with the syncer; rollout
-        # running ahead of training is a separate profile, not part of P0-S.
+    elif int(getattr(args, "rl_max_policy_age", 0) or 0) != 0:
+        # The sweep publishes whole rounds in lockstep with the syncer. The
+        # asynchronous rounds take a policy-age limit counted in local
+        # publications (yeto.rl.engine.full_parameter_sync module doc).
         raise ValueError("the dense full-parameter strict sweep requires --rl-max-policy-age 0")
     if (
         type(args.global_rounds) is not int

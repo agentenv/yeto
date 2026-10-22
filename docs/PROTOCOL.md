@@ -220,7 +220,14 @@ restored one.
 Lease expiry: with `--island-lease-s`, a silent island gets the ERROR
 `island lease expired: re-JOIN required`. The client redials with a new
 generation (this first redial does not use `max_reconnects`); the syncer
-catches it up and fences its pushes whose base predates the catch-up.
+catches it up and fences its pushes whose base predates the catch-up. The
+catch-up is one BCAST_FRAGMENT per fragment at its newest version, which may
+skip rounds; the client keeps at most the newest version per fragment, so an
+island applies such a jump at once (alpha = 0).
+
+With any membership option the fragment-round server starts its first round
+once the launch quorum (K, or `q_min` of a capacity quorum) is connected and
+initialized; without one it waits for all `--learners`.
 
 Peer recovery (an island that lost its trainer state, HELLO with the recover
 flag):
@@ -379,7 +386,10 @@ pending logical learner may reconnect, receive the full cut on its new current
 generation, and ACK from that generation. Once a valid ACK is accepted it is
 never erased by a later disconnect. SHUTDOWN is sent only to still-connected
 generations whose ACK was accepted. A missing cut or ACK fails after a bounded
-wait rather than falling back to a locally blended save.
+wait rather than falling back to a locally blended save. With
+`--island-lease-s`, the final cut stops waiting for a learner whose lease
+expires during finalization, or that stays disconnected for one lease; the run
+finalizes when every other learner acknowledged, and fails if none did.
 
 FINAL_MANIFEST and FINAL_ACK carry `FINALIZATION_REVISION=1`; mismatches are
 fatal. A learner also rejects SHUTDOWN before it has applied and initiated the

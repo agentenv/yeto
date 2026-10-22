@@ -28,8 +28,31 @@ syncer may close a fragment round with a quorum K below the island count.
 Rule 3 then also covers broadcasts this island did not contribute to (late,
 absent, or a push the syncer refused): every role overwrites its fragment with
 the global value (alpha = 0) in version order, and a retained submission for
-that round is released.  This module is engine-neutral; it never imports an
-engine adapter.
+that round is released.  A re-JOIN catch-up (or any broadcast after which
+an older version of that fragment can no longer arrive) jumps the fragment
+straight to the delivered version (also alpha = 0).
+
+Policy versions under the asynchronous rounds:
+
+* the island's *policy version* stays its local round counter: boundary r
+  publishes version r + 1, and the published hash covers every fragment the
+  island overwrote at that boundary.  Every sample is stamped with the local
+  version (and hash) of the policy that generated it, so the behaviour
+  log-probabilities that truncated importance sampling divides by always come
+  from the exact weights that sampled, whether or not a merged broadcast
+  overwrote a fragment between two local versions;
+* ``--rl-max-policy-age N`` counts local publications: a sample may lag at
+  most N local versions.  One local version may contain merged broadcasts as
+  well as the island's own step; the round event reports how many fragments
+  the island took from the syncer since its previous boundary
+  (``sync/overwritten_fragments``);
+* the *merged version* (:func:`merged_version`) is the number of merges every
+  fragment has received: one per outer round of all P fragments, the same
+  unit as the outer version of the LoRA syncer.  The session exposes it as
+  ``outer_version`` (and sets ``IslandDriver.outer_version``), so synced
+  trainers release it to sampler islands and gate buffered samples on it.
+
+This module is engine-neutral; it never imports an engine adapter.
 """
 
 from __future__ import annotations
@@ -66,6 +89,20 @@ LOCKSTEP_FIELDS = (
 LogicalKey = tuple[int, int, int]  # (global step, fragment id, base version)
 
 
+def fragment_rounds(fragment_id: int, version: int, fragments: int) -> int:
+    """Merged rounds behind ``version`` of ``fragment_id``: its versions are the
+    global steps ``fragment_id + 1``, ``fragment_id + 1 + P``, ..."""
+
+    return 0 if version <= 0 else (version - 1 - fragment_id) // fragments + 1
+
+
+def merged_version(versions: Sequence[int]) -> int:
+    """Merges every fragment of ``versions`` (one per fragment) has received."""
+
+    fragments = len(versions)
+    return min(fragment_rounds(f, v, fragments) for f, v in enumerate(versions)) if versions else 0
+
+
 class RoleStream(Protocol):
     """One trainable role's streaming session (implemented per engine)."""
 
@@ -97,6 +134,11 @@ class RoleStream(Protocol):
     #   the previous submission; apply_staged_broadcast(..., rebase=True) applies
     #   G + (current - base) with G as the anchor; finish_rebase() makes the
     #   rebased cut the submission; mark_round_base() pins the next round base.
+    # Partial quorum only: apply_staged_broadcast(..., catch_up=True) jumps a
+    # fragment to a version whose base it never held (a re-JOIN catch-up).
+    # ``monotonic_broadcasts`` (optional, default False): the stream never
+    # delivers a version of a fragment older than one it already delivered,
+    # so a staged jump with no older staged version is final.
     async def wait_and_apply_final(self) -> None: ...
     def acknowledge_final(self) -> None: ...
     def discard_detached_submission_cut(self) -> None: ...
@@ -223,8 +265,10 @@ class RolePairing:
         self.terminal_seen = False
         self.failure: BaseException | None = None
         self._pull_skew_since: dict[LogicalKey, float] = {}
-        # Partial quorum: broadcasts applied without this island's submission.
+        # Partial quorum: broadcasts applied without this island's submission
+        # (catch-ups included), and the rounds catch-up jumps skipped.
         self.overwritten_rounds = 0
+        self.caught_up_rounds = 0
 
     # -- fail-stop ---------------------------------------------------------
 
@@ -427,40 +471,61 @@ class RolePairing:
         apply.  Any other broadcast closed its round without this island
         (absent, late, a refused or lost push): every role overwrites the
         fragment (alpha = 0) and a retained pair for that round is released.
-        A broadcast whose predecessor version is still on the wire waits.
 
-        Membership hook (S27 E-1): a re-JOIN catch-up delivers each fragment's
-        current version, which may skip several rounds; applying such a jump
-        needs the membership epoch to tell it from a reordered broadcast, so
-        it is not applied here yet: it stays staged, and this island stops
-        contributing to that fragment."""
+        A broadcast whose base version this island does not hold waits while
+        an older version may still arrive.  When no older version can arrive
+        (every role's stream delivers broadcasts in version order per
+        fragment, and none is staged), it is a catch-up: the syncer re-sends
+        each fragment's newest value after a re-JOIN or reconnect, and the
+        stream already dropped any older version.  Every role then jumps the
+        fragment to that version, and every retained pair of that fragment up
+        to it is released."""
 
         fragments = self.profile.fragments
         staged = set.intersection(
             *(set(stream.staged_fragment_versions) for stream in self.streams.values())
         )
-        pairs = {key[0]: (key, pair) for key, pair in self.inflight.items()}
+        monotonic = all(getattr(stream, "monotonic_broadcasts", False) for stream in self.streams.values())
         for fragment_id, version in sorted(staged, key=lambda item: (item[1], item[0])):
             if version == self.profile.total_fragment_steps:
                 continue  # the terminal cut arrives as FINAL
             base = max(0, version - fragments)
-            if any(stream.fragment_versions[fragment_id] != base for stream in self.streams.values()):
+            held = {stream.fragment_versions[fragment_id] for stream in self.streams.values()}
+            if len(held) != 1:
                 continue
-            entry = pairs.pop(version, None)
-            if entry is not None and entry[1].complete:
-                await self._apply_pair(entry[0], entry[1], applied)
-                continue
-            results = await asyncio.gather(*(
-                stream.apply_staged_broadcast(fragment_id, version) for stream in self.streams.values()
-            ))
-            for role, fragment_ids in zip(self.streams, results, strict=True):
-                applied[role].extend(fragment_ids)
-                if self.streams[role].fragment_versions[fragment_id] != version:
-                    raise RuntimeError("overwrite committed mismatched versions")
-            if entry is not None:
-                self._release(entry[1])
-                self.inflight.pop(entry[0])
-            self.overwritten_rounds += 1
+            (current,) = held
+            if current == base:
+                await self._overwrite_or_apply_pair(fragment_id, version, applied, catch_up=False)
+            elif current < base and monotonic and not any(
+                f == fragment_id and v < version for f, v in staged
+            ):
+                await self._overwrite_or_apply_pair(fragment_id, version, applied, catch_up=True)
+                self.caught_up_rounds += fragment_rounds(fragment_id, base, fragments) - (
+                    fragment_rounds(fragment_id, current, fragments))
+
+    async def _overwrite_or_apply_pair(
+        self, fragment_id: int, version: int, applied: dict[str, list[int]], *, catch_up: bool
+    ) -> None:
+        closed = [(key, pair) for key, pair in sorted(self.inflight.items())
+                  if key[1] == fragment_id and key[0] <= version]
+        exact = next((entry for entry in closed if entry[0][0] == version), None)
+        if not catch_up and exact is not None and exact[1].complete:
+            await self._apply_pair(exact[0], exact[1], applied)
+            return
+        if catch_up:
+            calls = (stream.apply_staged_broadcast(fragment_id, version, catch_up=True)
+                     for stream in self.streams.values())
+        else:
+            calls = (stream.apply_staged_broadcast(fragment_id, version) for stream in self.streams.values())
+        results = await asyncio.gather(*calls)
+        for role, fragment_ids in zip(self.streams, results, strict=True):
+            applied[role].extend(fragment_ids)
+            if self.streams[role].fragment_versions[fragment_id] != version:
+                raise RuntimeError("overwrite committed mismatched versions")
+        for key, pair in closed:
+            self._release(pair)
+            self.inflight.pop(key)
+        self.overwritten_rounds += 1
 
     def _is_whole_sweep(self, ready: list[LogicalKey]) -> bool:
         """Strict sweep: ``ready`` is all P fragments of one local step.
@@ -614,6 +679,17 @@ class FullParameterSync(RoundCutHooks):
         self._pending_sweep: tuple[int, ...] | None = None
         # S26 E3b: actor data-stream counters at the previous boundary.
         self._upload_before: tuple | None = None
+        # Partial quorum: overwritten rounds at the previous boundary.
+        self._overwritten_before = 0
+
+    @property
+    def outer_version(self) -> int | None:
+        """The merged version (module doc) of the asynchronous rounds; None
+        for the strict sweep, whose policy version is already global."""
+
+        if not self.pairing.profile.partial_quorum:
+            return None
+        return merged_version(self.pairing.fragment_versions())
 
     @property
     def actor(self) -> RoleStream:
@@ -623,7 +699,14 @@ class FullParameterSync(RoundCutHooks):
         self._driver = driver
         self.run(self.pairing.gather_roles(lambda role, stream: stream.initialize(self.groups[role])))
         self._upload_before = self._stream_snapshots()
+        self._publish_outer_version(driver)
         return SyncStart(state=self.actor.resident_state(0), rollout_id=0)
+
+    def _publish_outer_version(self, driver: IslandDriver) -> None:
+        """The driver's publish event and the synced-trainer releases read it."""
+
+        if self.pairing.profile.partial_quorum:
+            driver.outer_version = self.outer_version
 
     def boundary(self, driver: IslandDriver, *, rollout_id: int, stats: Any) -> SyncBoundary:
         del stats
@@ -631,6 +714,7 @@ class FullParameterSync(RoundCutHooks):
         self.terminal = self.run(self._boundary(rollout_id))
         versions = self.pairing.fragment_versions()
         state = self.actor.resident_state(rollout_id + 1)
+        self._publish_outer_version(driver)
         driver.emit(
             "rl_full_parameter_round",
             policy_version=rollout_id + 1,
@@ -639,13 +723,23 @@ class FullParameterSync(RoundCutHooks):
                 "sync/fragment_versions": list(versions),
                 "sync/global_policy_hash": state.policy_tensor_hash(),
                 "sync/inflight_pairs": len(self.pairing.inflight),
-                **({"sync/overwritten_rounds": self.pairing.overwritten_rounds}
-                   if self.pairing.profile.partial_quorum else {}),
+                **(self._partial_quorum_fields(versions) if self.pairing.profile.partial_quorum else {}),
                 **self._timing.fields(),
                 **self._upload_fields(),
             },
         )
         return SyncBoundary(state=state, stop=self.terminal)
+
+    def _partial_quorum_fields(self, versions: tuple[int, ...]) -> dict[str, int]:
+        pairing = self.pairing
+        overwritten = pairing.overwritten_rounds - self._overwritten_before
+        self._overwritten_before = pairing.overwritten_rounds
+        return {
+            "sync/overwritten_rounds": pairing.overwritten_rounds,
+            "sync/overwritten_fragments": overwritten,
+            "sync/caught_up_rounds": pairing.caught_up_rounds,
+            "sync/outer_version": merged_version(versions),
+        }
 
     def _stream_snapshots(self) -> tuple | None:
         snapshots = getattr(getattr(self.actor, "client", None), "stream_snapshots", None)

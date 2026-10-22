@@ -2339,6 +2339,16 @@ async fn recv_init_event(
     event.context("event channel closed")
 }
 
+/// Connected learners the scheduler waits for before the first round: every
+/// learner with static membership, the launch quorum with dynamic membership.
+fn startup_members(cfg: &Config) -> u32 {
+    if cfg.membership.is_static() {
+        cfg.learners
+    } else {
+        (cfg.membership.min_launch_members(cfg.quorum) as u32).clamp(1, cfg.learners)
+    }
+}
+
 async fn scheduler(
     cfg: Config,
     mut events: mpsc::Receiver<Event>,
@@ -2352,18 +2362,20 @@ async fn scheduler(
     let checkpoint_each_round = checkpoint_before_broadcast(&cfg);
 
     // Phase 1: wait until every fragment is initialized (via INIT_PARAMS or
-    // a resumed checkpoint) and all expected learners have connected (late
-    // joiners are still served afterwards).
+    // a resumed checkpoint) and the expected learners have connected (late
+    // joiners are still served afterwards). Static membership waits for all
+    // learners; dynamic membership starts once a round could launch.
+    let start_members = startup_members(&cfg);
     info!(
         expected = cfg.learners,
-        "waiting for learners and INIT_PARAMS"
+        start_members, "waiting for learners and INIT_PARAMS"
     );
     loop {
         let connected = registry.lock().unwrap().current.len() as u32;
         if let Some(st) = &state {
             let budget_ready =
                 budget_reports.is_empty() || budget_reports.len() == cfg.learners as usize;
-            if st.all_initialized() && connected >= cfg.learners && budget_ready {
+            if st.all_initialized() && connected >= start_members && budget_ready {
                 break;
             }
         }
@@ -4741,24 +4753,34 @@ async fn finalize_learners(
 
     let deadline = Instant::now() + Duration::from_secs(cfg.final_ack_timeout_s);
     let mut acknowledged: HashMap<u32, Member> = HashMap::new();
-    while acknowledged.len() < expected.len() {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let event = tokio::time::timeout(remaining, events.recv())
-            .await
-            .map_err(|_| {
-                let mut missing: Vec<u32> = expected
-                    .iter()
-                    .copied()
-                    .filter(|id| !acknowledged.contains_key(id))
-                    .collect();
+    // With dynamic membership, an island whose lease runs out during
+    // finalization is absent: the final cut no longer waits for its ACK.
+    let mut absence = FinalAbsence::new(cfg, expected, registry);
+    while !absence.pending(&acknowledged).is_empty() {
+        let now = Instant::now();
+        let wake = absence.next_deadline(registry).map_or(deadline, |at| at.min(deadline));
+        let event = match tokio::time::timeout(wake.saturating_duration_since(now), events.recv()).await {
+            Ok(event) => event.context("event channel closed during finalization")?,
+            Err(_) if Instant::now() < deadline => {
+                for learner_id in absence.drop_expired(registry, Instant::now()) {
+                    warn!(learner_id, "lease expired during finalization; final ACK no longer required");
+                }
+                if absence.pending(&acknowledged).is_empty() && acknowledged.is_empty() {
+                    bail!("cannot finalize: every learner's lease expired before it acknowledged the final cut");
+                }
+                continue;
+            }
+            Err(_) => {
+                let mut missing: Vec<u32> = absence.pending(&acknowledged).into_iter().collect();
                 missing.sort_unstable();
-                anyhow::anyhow!(
+                bail!(
                     "finalization timed out after {}s waiting for learner acknowledgements: {:?}",
                     cfg.final_ack_timeout_s,
                     missing
-                )
-            })?
-            .context("event channel closed during finalization")?;
+                );
+            }
+        };
+        absence.observe(registry, &event);
         match event {
             Event::Fatal { metric, message } => {
                 append_strict_failure(cfg.event_tape.as_deref(), metric, &message);
@@ -4865,9 +4887,98 @@ async fn finalize_learners(
     }
     info!(
         learners = acknowledged.len(),
+        absent = absence.dropped.len(),
         "all learners acknowledged final cut"
     );
     Ok(())
+}
+
+/// Which expected learners the final cut still waits for. With static
+/// membership (or no lease) it waits for every expected learner until the
+/// final ACK timeout, as before. With a membership lease, a learner is dropped
+/// from the wait when its lease expires, or when it stays disconnected for one
+/// lease without a new generation saying HELLO.
+struct FinalAbsence {
+    expected: HashSet<u32>,
+    lease: Option<Duration>,
+    disconnected_since: HashMap<u32, Instant>,
+    dropped: HashSet<u32>,
+}
+
+impl FinalAbsence {
+    fn new(cfg: &Config, expected: &HashSet<u32>, registry: &Registry) -> Self {
+        let lease = if cfg.membership.is_static() { None } else { cfg.membership.lease };
+        let mut disconnected_since = HashMap::new();
+        if lease.is_some() {
+            let now = Instant::now();
+            let registry = registry.lock().unwrap();
+            for id in expected.iter().filter(|id| !registry.current.contains_key(*id)) {
+                disconnected_since.insert(*id, now);
+            }
+        }
+        Self { expected: expected.clone(), lease, disconnected_since, dropped: HashSet::new() }
+    }
+
+    fn pending(&self, acknowledged: &HashMap<u32, Member>) -> HashSet<u32> {
+        self.expected
+            .iter()
+            .copied()
+            .filter(|id| !acknowledged.contains_key(id) && !self.dropped.contains(id))
+            .collect()
+    }
+
+    /// Renew leases on traffic and track disconnects of the current generation.
+    fn observe(&mut self, registry: &Registry, event: &Event) {
+        if self.lease.is_none() {
+            return;
+        }
+        let now = Instant::now();
+        match event {
+            Event::Heartbeat { member, .. } | Event::Push { member, .. } | Event::FinalAck { member, .. } => {
+                registry.lock().unwrap().membership.renew(*member, now);
+            }
+            Event::Hello { group } => {
+                self.disconnected_since.remove(&group.member.learner_id);
+            }
+            Event::Disconnected { member } => {
+                let current = registry.lock().unwrap().current.get(&member.learner_id).copied();
+                if current.is_none() || current == Some(*member) {
+                    self.disconnected_since.entry(member.learner_id).or_insert(now);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn next_deadline(&self, registry: &Registry) -> Option<Instant> {
+        let lease = self.lease?;
+        let expiry = registry.lock().unwrap().membership.next_expiry();
+        self.disconnected_since.values().map(|since| *since + lease).chain(expiry).min()
+    }
+
+    /// Drop every pending learner whose lease expired; returns them in id order.
+    fn drop_expired(&mut self, registry: &Registry, now: Instant) -> Vec<u32> {
+        let Some(lease) = self.lease else { return Vec::new() };
+        let mut gone: Vec<u32> = registry
+            .lock()
+            .unwrap()
+            .expire_leases(now)
+            .into_iter()
+            .map(|(member, _)| member.learner_id)
+            .collect();
+        gone.extend(
+            self.disconnected_since
+                .iter()
+                .filter(|(_, since)| now.saturating_duration_since(**since) >= lease)
+                .map(|(id, _)| *id),
+        );
+        gone.retain(|id| self.expected.contains(id) && self.dropped.insert(*id));
+        for id in &gone {
+            self.disconnected_since.remove(id);
+        }
+        gone.sort_unstable();
+        gone
+    }
 }
 
 async fn send_all_fragments(st: &GlobalState, group: &Arc<Group>, budget_cutoff: &BudgetCutoff) {
@@ -7204,6 +7315,87 @@ mod tests {
         );
         assert!(started.elapsed() >= Duration::from_millis(900));
         assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    fn final_leased_registry(group: Arc<Group>, lease: Duration) -> (Registry, Config) {
+        let mut cfg = round_test_config(0);
+        cfg.learners = 2;
+        cfg.membership.lease = Some(lease);
+        let membership = Membership::new(cfg.membership.clone(), 2);
+        let registry = Arc::new(Mutex::new(RegistryState::new(membership)));
+        registry.lock().unwrap().register_group(group, Instant::now()).unwrap();
+        (registry, cfg)
+    }
+
+    #[tokio::test]
+    async fn final_cut_does_not_wait_for_an_absent_leased_learner() {
+        let state = broadcast_test_state(DTYPE_F32);
+        let (group, _frames) = streaming_test_group(DTYPE_F32, false);
+        let (registry, mut cfg) = final_leased_registry(group.clone(), Duration::from_millis(300));
+        cfg.final_ack_timeout_s = 5;
+        // Learner 1 is expected but never connects; learner 0 acknowledges.
+        let expected = HashSet::from([0, 1]);
+        let (event_sender, mut events) = mpsc::channel(4);
+        event_sender
+            .send(Event::FinalAck { member: group.member, global_step: state.global_step })
+            .await
+            .unwrap();
+        let started = Instant::now();
+
+        finalize_learners(&cfg, &state, &mut events, &registry, &expected).await.unwrap();
+
+        assert!(started.elapsed() >= Duration::from_millis(250));
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[tokio::test]
+    async fn final_cut_drops_a_learner_whose_lease_expires() {
+        let state = broadcast_test_state(DTYPE_F32);
+        let (group, _frames) = streaming_test_group(DTYPE_F32, false);
+        let (registry, mut cfg) = final_leased_registry(group.clone(), Duration::from_millis(300));
+        cfg.final_ack_timeout_s = 5;
+        let expected = HashSet::from([0]);
+        let (_event_sender, mut events) = mpsc::channel(1);
+
+        let error = finalize_learners(&cfg, &state, &mut events, &registry, &expected)
+            .await
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("every learner's lease expired"), "{error:#}");
+    }
+
+    #[tokio::test]
+    async fn final_cut_heartbeats_keep_a_slow_learner_expected() {
+        let state = broadcast_test_state(DTYPE_F32);
+        let (group, _frames) = streaming_test_group(DTYPE_F32, false);
+        let (registry, mut cfg) = final_leased_registry(group.clone(), Duration::from_millis(300));
+        cfg.final_ack_timeout_s = 5;
+        let expected = HashSet::from([0]);
+        let (event_sender, mut events) = mpsc::channel(4);
+        let member = group.member;
+        let step = state.global_step;
+        let sender = tokio::spawn(async move {
+            for _ in 0..4 {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                event_sender.send(Event::Heartbeat { member, local_step: 0 }).await.unwrap();
+            }
+            event_sender.send(Event::FinalAck { member, global_step: step }).await.unwrap();
+        });
+
+        finalize_learners(&cfg, &state, &mut events, &registry, &expected).await.unwrap();
+        sender.await.unwrap();
+    }
+
+    #[test]
+    fn startup_waits_for_all_learners_only_with_static_membership() {
+        let mut cfg = round_test_config(0);
+        cfg.learners = 4;
+        cfg.quorum = 2;
+        assert_eq!(startup_members(&cfg), 4);
+        cfg.membership.lease = Some(Duration::from_secs(30));
+        assert_eq!(startup_members(&cfg), 2);
+        cfg.membership.quorum_rule = crate::membership::QuorumRule::Capacity { theta: 0.5, q_min: 3 };
+        assert_eq!(startup_members(&cfg), 3);
     }
 
     #[test]

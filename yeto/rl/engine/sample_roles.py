@@ -29,7 +29,10 @@ reads lane m of the buffer; the island with learner id 0 releases the merged
 policy. The store reaches the island as ``--rl-sample-store`` (buffer and
 releases only: multi-island round cuts do not exist), the trainer count as
 ``--rl-sample-lanes``. The samplers are separate
-no-sync launches over the same store.
+no-sync launches over the same store. With the full-parameter preset (its
+asynchronous rounds only) the publisher releases full weights at the merged
+version of the fragments (``full_parameter_sync.merged_version``), and the
+samplers run ``--tuning full``.
 
 This module is engine-neutral; the Miles mapping is in
 ``adapters.miles.buffer_rollout``.
@@ -40,6 +43,8 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass
 from typing import Any
+
+from .selection import FULL_PARAMETER_SYNC_PRESET
 
 BOTH, SAMPLER, TRAINER, CONVERTIBLE = "both", "sampler", "trainer", "convertible"
 SAMPLE_ROLES = (BOTH, SAMPLER, TRAINER, CONVERTIBLE)
@@ -102,7 +107,14 @@ def check_synced_trainers(args: Any, num_islands: int) -> None:
         raise ValueError("synced trainers do not combine with --rl-island-sample-role or "
                          "convertible nodes")
     if getattr(args, "tuning", "lora") != "lora":
-        raise ValueError("synced trainers merge LoRA deltas: they need --tuning lora")
+        raise ValueError("synced trainers merge LoRA deltas or run the full-parameter preset: "
+                         "they need --tuning lora")
+    if getattr(args, "rl_sync_preset", None) == FULL_PARAMETER_SYNC_PRESET and \
+            getattr(args, "rl_sync_full_parameter_rounds", "sweep") != "async":
+        # The strict sweep publishes in lockstep (policy age 0); a synced trainer
+        # trains on buffered samples of earlier versions.
+        raise ValueError("full-parameter synced trainers need --rl-sync-full-parameter-rounds "
+                         "async (the strict sweep takes no --rl-max-policy-age)")
 
 
 def check_sample_store(args: Any) -> None:

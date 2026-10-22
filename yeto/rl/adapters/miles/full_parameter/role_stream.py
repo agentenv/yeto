@@ -667,6 +667,13 @@ class MilesFullParameterRoleStream:
         return tuple(staged)
 
     @property
+    def monotonic_broadcasts(self) -> bool:
+        """The syncer client drops a broadcast older than one it already
+        delivered for that fragment, so a staged version jump is final."""
+
+        return True
+
+    @property
     def staged_fragment_versions(self) -> tuple[tuple[int, int], ...]:
         return tuple(sorted(self._staged))
 
@@ -679,13 +686,18 @@ class MilesFullParameterRoleStream:
         version: int,
         *,
         rebase: bool = False,
+        catch_up: bool = False,
     ) -> tuple[int, ...]:
         """Apply one coordinator-approved staged fragment at a safe boundary.
 
         ``rebase`` (overlap): the trainer keeps its progress since the round
         base, ``theta_f <- G_f + (current_f - base_f)``; ``G_f`` becomes the
         anchor, and the counters at the round base become the anchor's, so
-        the next push carries exactly that progress."""
+        the next push carries exactly that progress.
+
+        ``catch_up`` (partial quorum): the fragment jumps over rounds this
+        island never received (a re-JOIN catch-up); the global value
+        overwrites it like any closed round."""
 
         key = (fragment_id, version)
         stored = self._staged.get(key)
@@ -694,7 +706,14 @@ class MilesFullParameterRoleStream:
                 f"{self.config.algorithm} {self.config.role} matching staged fragment disappeared"
             )
         expected_base = max(0, version - self.config.expected_fragments)
-        if self.fragment_versions[fragment_id] != expected_base:
+        held = self.fragment_versions[fragment_id]
+        if catch_up:
+            if not self.config.partial_quorum or rebase or held >= expected_base:
+                raise RuntimeError(
+                    f"{self.config.algorithm} {self.config.role} catch-up needs a partial quorum "
+                    "and a version past the next round"
+                )
+        elif held != expected_base:
             raise RuntimeError(
                 f"{self.config.algorithm} {self.config.role} staged fragment skipped its base version"
             )

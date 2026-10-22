@@ -447,7 +447,8 @@ def _hmac_key(monkeypatch):
     monkeypatch.setenv("YETO_ISLAND_HMAC_KEY", "async-rounds-test-key")
 
 
-def _start_async_syncer(binary: Path, tmp_path: Path, *extra: str, total_steps: int):
+def _start_async_syncer(binary: Path, tmp_path: Path, *extra: str, total_steps: int,
+                        syncer_args: tuple[str, ...] = ()):
     from yeto import launcher
 
     args, _ = _plan(FULL[:-1] + (str(P), "--rl-sync-full-parameter-rounds", "async",
@@ -460,6 +461,7 @@ def _start_async_syncer(binary: Path, tmp_path: Path, *extra: str, total_steps: 
                .replace(f"--port {launcher.SYNCER_PORT}", f"--port {port}")
                .replace(launcher.RL_SYNCER_CHECKPOINT, str(tmp_path / "state.ckpt"))
                .replace(launcher.RL_SYNCER_EVENT_TAPE, str(tmp_path / "tape.jsonl")))
+    command = " ".join((command, *map(shlex.quote, syncer_args)))
     assert "--policy-sweep-fragments" not in command
     process = subprocess.Popen(["bash", "-c", command], stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT, text=True)

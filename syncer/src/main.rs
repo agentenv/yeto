@@ -23,7 +23,8 @@ struct Args {
     /// TCP port to listen on.
     #[arg(long, default_value_t = 29400)]
     port: u16,
-    /// Number of learners expected before training starts (M).
+    /// Number of learners (M). Training starts when all M are connected; with
+    /// membership options it starts once the launch quorum is connected.
     #[arg(long)]
     learners: u32,
     /// Minimum quorum of learners per outer step (K).
