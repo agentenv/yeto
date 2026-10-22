@@ -100,7 +100,8 @@ def _buffer_config(miles_args: Any, role: str) -> Any:
 def release_store(config: Any, environ: Any = None) -> PolicyReleaseStore:
     from yeto.rl.engine.resume import store_for
 
-    return PolicyReleaseStore(store_for(config.store, environ=environ))
+    return PolicyReleaseStore(store_for(config.store, environ=environ),
+                              cached_latest=not config.release_legacy)
 
 
 # ---------------------------------------------------------------------- sampler side
@@ -544,6 +545,7 @@ class ReleasingPublisher:
                       weights=release.weights, sha256=release.sha256,
                       engine_checksum=release.engine_checksum, released_at=release.released_at,
                       publish_s=publish_s, release_timings=self.releases.last_timings,
+                      latest_source=self.releases.last_latest_source,
                       release_bytes=sum((release.files or {}).values()))
         return result
 

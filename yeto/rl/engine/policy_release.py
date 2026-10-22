@@ -55,6 +55,20 @@ Latency phases (S26 E5): the trainer side (:meth:`PolicyReleaseStore.release`)
 and the sampler side (:meth:`PolicyFollower.refresh`) time their phases with
 :class:`PhaseTimer` (``last_timings``, seconds); the islands write them in their
 release and load events. They only measure: no phase changes its order or work.
+Writing with a known LATEST (``cached_latest``, default on): the store has one
+writer per release directory (one trainer, or the publisher of synced trainers,
+:mod:`.merged_release`; a re-quantizer writes its own directory), so the writer
+remembers the release it wrote last and does not reload the store (a Modal
+Volume reload takes seconds) to read LATEST again. It still reloads and reads
+LATEST for its first release in a process (a resumed trainer continues the
+store's ``seq``), after a failed release, and when the LATEST it sees without a
+reload is not the one it wrote (another writer). The weights, the record and
+LATEST then go to the store in one commit: a reader never loads a release
+whose files are not all there with their recorded sizes (``check_complete``),
+so LATEST becoming visible with or before the weights only delays the load.
+``cached_latest=False`` is the earlier behavior (reload before every release,
+one commit for the weights and record, a second one for LATEST).
+
 A load hook that checks the weight files itself while it copies them
 (``verifies_files``, :func:`copy_with_digest`) reads a LoRA release once instead
 of twice; the follower then skips its own check.
@@ -279,7 +293,8 @@ class PolicyReleaseStore:
                  clock: Callable[[], float] = time.time,
                  cache_dir: str | os.PathLike[str] = DEFAULT_CACHE_DIR,
                  release_dir: str = RELEASE_DIR,
-                 timer: Callable[[], float] = time.perf_counter) -> None:
+                 timer: Callable[[], float] = time.perf_counter,
+                 cached_latest: bool = True) -> None:
         if int(keep) < 1:
             raise ValueError("keep must be >= 1")
         self.store = store
@@ -288,6 +303,11 @@ class PolicyReleaseStore:
         self.release_dir = str(release_dir)
         self.root = Path(store.root) / self.release_dir
         self.timer = timer
+        self.cached_latest = bool(cached_latest)
+        self._written: PolicyRelease | None = None  # the release this process wrote last
+        # how the last release() found LATEST: "cached", "reloaded" (first release,
+        # after a failure, or cached_latest off) or "other_writer"
+        self.last_latest_source: str | None = None
         # seconds per phase of the last release() that wrote a release (module doc)
         self.last_timings: dict[str, float] = {}
         self.cache_dir = Path(cache_dir).expanduser()
@@ -365,9 +385,43 @@ class PolicyReleaseStore:
             raise ValueError(f"weights must be one of {WEIGHT_FORMATS}, not {weights!r}")
         timer = PhaseTimer(self.timer)
         with timer.phase("read_latest_s"):
-            latest = self.latest()
+            latest = self._latest_for_release()
         if latest is not None and (latest.version, latest.policy_hash) == (version, policy_hash):
+            self._written = latest  # LATEST is known: the next release need not read it again
             return None
+        self._written = None  # until this release is committed
+        record = self._write_release(timer, latest, version, policy_hash, write, weights=weights,
+                                     buffer_selected=buffer_selected, engine_checksum=engine_checksum,
+                                     buffer_shards=buffer_shards, derived_from=derived_from,
+                                     origin=origin)
+        self._written = record
+        self.last_timings = timer.as_dict()
+        return record
+
+    def _latest_without_reload(self) -> PolicyRelease | None:
+        path = self.root / LATEST
+        if not path.is_file():
+            return None
+        return PolicyRelease.from_record(json.loads(path.read_text(encoding="utf-8")))
+
+    def _latest_for_release(self) -> PolicyRelease | None:
+        """LATEST as the writer needs it (module doc, ``cached_latest``)."""
+        known = self._written
+        if not self.cached_latest or known is None or self.store.objects is not None:
+            self.last_latest_source = "reloaded"
+            return self.latest()
+        seen = self._latest_without_reload()
+        if seen is None or (seen.seq, seen.path, seen.policy_hash) != (known.seq, known.path, known.policy_hash):
+            self.last_latest_source = "other_writer"
+            return self.latest()
+        self.last_latest_source = "cached"
+        return known
+
+    def _write_release(self, timer: PhaseTimer, latest: PolicyRelease | None, version: int,
+                       policy_hash: str, write: Callable[[Path], None], *, weights: str,
+                       buffer_selected: int | None, engine_checksum: str | None,
+                       buffer_shards: dict[str, int] | None, derived_from: dict[str, Any] | None,
+                       origin: dict[str, Any] | None) -> PolicyRelease:
         seq = 1 if latest is None else latest.seq + 1
         name = f"r{seq}-v{version}"
         directory = self.root / name
@@ -387,15 +441,20 @@ class PolicyReleaseStore:
                                {str(k): int(v) for k, v in sorted(buffer_shards.items())},
                                derived_from=None if derived_from is None else dict(derived_from),
                                origin=None if origin is None else dict(origin))
-        with timer.phase("commit_weights_s"):
-            _write_json_atomic(directory / RECORD, asdict(record))
-            self.store.commit()  # the weights and the record are durable before LATEST names them
-        with timer.phase("commit_latest_s"):
-            _write_json_atomic(self.root / LATEST, asdict(record))
-            self.store.commit()
+        if self.cached_latest:  # one commit (module doc)
+            with timer.phase("commit_s"):
+                _write_json_atomic(directory / RECORD, asdict(record))
+                _write_json_atomic(self.root / LATEST, asdict(record))
+                self.store.commit()
+        else:
+            with timer.phase("commit_weights_s"):
+                _write_json_atomic(directory / RECORD, asdict(record))
+                self.store.commit()  # the weights and the record are durable before LATEST names them
+            with timer.phase("commit_latest_s"):
+                _write_json_atomic(self.root / LATEST, asdict(record))
+                self.store.commit()
         with timer.phase("prune_s"):
             self._prune()
-        self.last_timings = timer.as_dict()
         return record
 
     def _prune(self) -> list[str]:
