@@ -41,9 +41,12 @@ def test_fixed_roster_refused_with_spec_reason():
         dr.admit(_args(rl_sync_island_lease_s=None), ["nebius", "aws", "aws"])
 
 
-def test_full_parameter_islands_cannot_be_droppable():
-    with pytest.raises(ValueError, match="full-parameter island cannot join a running pool"):
+def test_full_parameter_islands_are_droppable_only_with_async_rounds():
+    with pytest.raises(ValueError, match="joins a running pool only"):
         dr.admit(_args(rl_sync_preset="full-parameter"), ["nebius", "aws", "aws"])
+    roles = dr.admit(_args(rl_sync_preset="full-parameter", rl_sync_full_parameter_rounds="async"),
+                     ["nebius", "aws", "aws"])
+    assert roles == {0: "anchor", 1: "droppable", 2: "droppable"}
 
 
 def test_needs_an_anchor():

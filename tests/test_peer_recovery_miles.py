@@ -87,6 +87,14 @@ class FakeGroup:
                      for s in self.states)
 
 
+class FreshGroup(FakeGroup):
+    """Like Megatron in a fresh process: no optimizer-state proof before the
+    island's first local step, even after a snapshot restore (s27-gd-rec-a)."""
+
+    async def full_parameter_optimizer_states(self):
+        raise RuntimeError("full-parameter last rollout ID is unavailable")
+
+
 class FakeAdapter:
     def __init__(self):
         self.layout = SimpleNamespace(layout_hash=LAYOUT_HASH, fragments=SimpleNamespace(num_fragments=P))
@@ -209,7 +217,8 @@ def donor_stream(store_root, group, client):
     return stream
 
 
-def test_donor_snapshot_and_recovering_restore_through_the_role_stream(tmp_path, stubs):
+@pytest.mark.parametrize("group_type", [FakeGroup, FreshGroup])
+def test_donor_snapshot_and_recovering_restore_through_the_role_stream(tmp_path, stubs, group_type):
     store_root = tmp_path / "store"
     donor_group = FakeGroup(adam_step=17)
     request = rp.SnapshotRequest(1, 9, 5, (3, 4))
@@ -226,7 +235,7 @@ def test_donor_snapshot_and_recovering_restore_through_the_role_stream(tmp_path,
                                 rp.RecoverySource(rp.SOURCE_PEER, 0, versions, sha256, locator),
                                 rp.RecoveryDone(5, 6, 1, (5, 6))], updates=resent)
     stubs.clients.append(client)
-    group = FakeGroup(adam_step=0)
+    group = group_type(adam_step=0)
     stream = MilesFullParameterRoleStream(config(store_root, recover=True))
     asyncio.run(stream.initialize(group))
 

@@ -449,7 +449,7 @@ class TapeSync:
         # names its copies "<stem>.inc<k><suffix>" (k = 0 keeps the old names).
         self.incarnation: int | None = None
 
-    def _claim_incarnation(self) -> int:
+    def claim_incarnation(self) -> int:
         if self.incarnation is None:
             self.dst.mkdir(parents=True, exist_ok=True)
             taken = sorted(self.dst.glob("INCARNATION-*.txt"))
@@ -462,7 +462,7 @@ class TapeSync:
         return self.incarnation
 
     def _target_name(self, name: str) -> str:
-        k = self._claim_incarnation()
+        k = self.claim_incarnation()
         if k == 0:
             return name
         for suffix in TAPE_SUFFIXES:
@@ -472,7 +472,7 @@ class TapeSync:
 
     def sync_once(self) -> int:
         self.dst.mkdir(parents=True, exist_ok=True)
-        self._claim_incarnation()
+        self.claim_incarnation()
         for name, text in list(self.extra.items()):
             (self.dst / self._target_name(name)).write_text(text, encoding="utf-8")
             del self.extra[name]
@@ -872,6 +872,9 @@ def island_main(cfg_json: str) -> int:
             TAPE_SOURCE_DIR, f"{TAPE_MOUNT}/{cfg.tape_subdir}/rank{rank}",
             _volume_commit(cfg.tape_volume_name), mirror_globs=TAPE_MIRROR_GLOBS,
         )
+        # 0 for the island's first container, k for its k-th re-run (test-only
+        # fault injection exits only in the first one).
+        env["YETO_MODAL_INCARNATION"] = str(tape.claim_incarnation())
     hostmem = None
     interval = hostmem_interval_s(cfg)
     if interval is not None:

@@ -61,6 +61,7 @@ import dataclasses
 import json
 from contextlib import contextmanager
 import math
+import sys
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -132,6 +133,8 @@ _PHASE_TASK = {"sync": "outer_sync"}
 
 FAULT_INJECTION_ENV = "YETO_RL_FAULT_INJECTION"
 FAULT_INJECTION_FILE = "yeto-rl-fault-injection.json"  # at the repo root
+# Set by the Modal runner: 0 for an island's first container, k for its k-th re-run.
+MODAL_INCARNATION_ENV = "YETO_MODAL_INCARNATION"
 
 
 def load_fault_injection(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
@@ -142,6 +145,9 @@ def load_fault_injection(environ: Mapping[str, str] | None = None) -> dict[str, 
     frozen code snapshot). Keys: ``publish_delay_s``; ``round_delay_s`` (sleep
     before each round's rollout, to emulate a slow island) with optional
     ``round_delay_islands`` (learner ids it applies to; default every island).
+    ``exit_at_round`` and ``exit_islands`` (the island process exits with
+    code 137 before that rollout, only in its first Modal container, so a
+    re-run of the island is a fresh process that rejoins).
     """
     import os
 
@@ -151,7 +157,8 @@ def load_fault_injection(environ: Mapping[str, str] | None = None) -> dict[str, 
     if not candidate.is_file():
         return {}
     raw = json.loads(candidate.read_text(encoding="utf-8"))
-    unknown = sorted(set(raw) - {"publish_delay_s", "round_delay_s", "round_delay_islands"})
+    unknown = sorted(set(raw) - {"publish_delay_s", "round_delay_s", "round_delay_islands",
+                              "exit_at_round", "exit_islands"})
     if unknown:
         raise ValueError(f"unknown fault injection keys {unknown}")
     out: dict[str, Any] = {}
@@ -167,6 +174,16 @@ def load_fault_injection(environ: Mapping[str, str] | None = None) -> dict[str, 
             raise ValueError("round_delay_islands must be a list of learner ids")
         if "round_delay_s" in out:
             out["round_delay_islands"] = sorted(set(islands))
+    if "exit_at_round" in raw:
+        round_id, islands = raw["exit_at_round"], raw.get("exit_islands")
+        if type(round_id) is not int or round_id < 1:
+            raise ValueError("exit_at_round must be a positive rollout id")
+        if not isinstance(islands, list) or not islands or not all(type(i) is int for i in islands):
+            raise ValueError("exit_at_round needs exit_islands, a list of learner ids")
+        out["exit_at_round"] = round_id
+        out["exit_islands"] = sorted(set(islands))
+    elif "exit_islands" in raw:
+        raise ValueError("exit_islands needs exit_at_round")
     return out
 
 
@@ -833,6 +850,19 @@ class IslandDriver:
             for label, g in zip(labels, batch.groups)
         )
         return dataclasses.replace(batch, groups=groups)
+
+    def _inject_exit(self, rollout_id: int) -> None:
+        """Test-only: kill this island process (first Modal container only)."""
+        import os
+
+        if (self.fault_injection.get("exit_at_round") != rollout_id
+                or self.learner_id not in self.fault_injection.get("exit_islands", ())
+                or os.environ.get(MODAL_INCARNATION_ENV, "0") != "0"):
+            return
+        self.emit("rl_fault_injected", kind="process_exit", rollout_id=rollout_id)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(137)
 
     def _refuse_if_recovery_required(self) -> None:
         """3.7 (recovery-design.md F13): an island that opened in RECOVERY_REQUIRED
@@ -1972,6 +2002,7 @@ class IslandDriver:
                     if self.max_rollouts is not None and rollout_id >= self.max_rollouts:
                         raise DriverError("run reached max_rollouts without a stop")
                     self.safe_point(rollout_id)
+                    self._inject_exit(rollout_id)
                     boundary = self.run_round(rollout_id)
                     state = boundary.state
                     rollout_id += 1

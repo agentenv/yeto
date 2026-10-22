@@ -605,7 +605,16 @@ to the current versions. Per preset:
 - full-parameter, asynchronous rounds (`MilesFullParameterRoleStream`,
   `FullParameterSync`) overwrites a fragment with a broadcast that skips
   versions (catch-up) and releases its retained pushes of the skipped rounds.
-  A fresh full-parameter island cannot join a pool after its initial cut yet. At the end the island ACKs the final cut like a strict
+  A restarted island process (new connection generation, same island id)
+  joins a running pool: the syncer admits it (it supersedes a live older
+  generation, or re-JOINs after a lease expiry) and resends every fragment at
+  its current version. The island takes the newest version of each fragment
+  as its initial cut: the trainer weights are overwritten with it and it
+  becomes the anchor of the island's next push. Only island 0 sends INIT; a
+  restarted island 0 sends it again and the running syncer ignores it. The
+  restarted island starts with a fresh optimizer state (peer recovery,
+  `--rl-peer-recovery`, restores it where available). At the end the island
+  ACKs the final cut like a strict
 island; a push that races the end ends the island normally (`elastic_finished`
 on its tape).
 

@@ -684,8 +684,14 @@ class MilesChunkedFullParameterAdapter:
         self,
         reference: ReferencedPolicyCut,
         fragments: Sequence[StoredAuthoritativeFragment],
+        *,
+        allow_newer: bool = False,
     ) -> None:
-        """Require the syncer's authoritative v0 bytes to equal the checkpoint."""
+        """Require the syncer's authoritative v0 bytes to equal the checkpoint.
+
+        ``allow_newer``: an island joining a running pool receives some
+        fragments at newer versions; those must match the layout, topology and
+        plan, but their content is the pool's, not the checkpoint's."""
 
         expected = {
             descriptor.fragment_id: (shard, descriptor)
@@ -698,11 +704,11 @@ class MilesChunkedFullParameterAdapter:
             if (
                 row is None
                 or stored.fragment_id in observed
-                or stored.version != 0
+                or (stored.version != 0 and not allow_newer)
                 or stored.parameter_layout_hash != self.layout.layout_hash
                 or stored.topology != row[0].topology
                 or stored.plan_hash != row[0].plan_hash
-                or stored.descriptor != row[1]
+                or (stored.version == 0 and stored.descriptor != row[1])
             ):
                 raise RuntimeError("dense syncer version-zero fragment changed")
             observed[stored.fragment_id] = stored

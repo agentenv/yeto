@@ -384,6 +384,14 @@ def role_stream_session_contract_hash(
     return hashlib.sha256(b"yeto-role-stream-session-v3\0" + encoded).digest()
 
 
+class PoolFinishedBeforeJoin(RuntimeError):
+    """A (re)started island reached the pool after its final cut."""
+
+
+def _is_set(event) -> bool:
+    return bool(event is not None and callable(getattr(event, "is_set", None)) and event.is_set())
+
+
 class MilesFullParameterRoleStream:
     """Reference-backed full-parameter transport for one trainable role."""
 
@@ -488,6 +496,13 @@ class MilesFullParameterRoleStream:
             raise WeightsChanged(f"{self.config.role} trainer no longer holds the published cut")
 
     @property
+    def may_rejoin(self) -> bool:
+        """An island pool with asynchronous rounds: a (re)started island may
+        join a running pool, whose initial cut is the current one."""
+
+        return self.config.island_lease_s is not None and self.config.partial_quorum
+
+    @property
     def finalizing(self) -> bool:
         event = getattr(self.client, "finalizing", None)
         return bool(
@@ -566,7 +581,7 @@ class MilesFullParameterRoleStream:
             authoritative = await asyncio.to_thread(
                 self._wait_for_initial_fragments, client, adapter, init_parts
             )
-            adapter.verify_initial_fragments(initial, authoritative)
+            adapter.verify_initial_fragments(initial, authoritative, allow_newer=self.may_rejoin)
         except BaseException:
             if heartbeat is not None:
                 heartbeat.stop()
@@ -586,6 +601,22 @@ class MilesFullParameterRoleStream:
         self._rounds_at_anchor = [0] * count
         self._tokens_at_anchor = [0] * count
         self._routed_at_anchor = [RoutedTokens()] * count
+        newer = {stored.fragment_id: stored for stored in authoritative if stored.version > 0}
+        if newer:
+            # A restarted island joined a running pool: the syncer resent
+            # every fragment at its current version. Those values replace the
+            # checkpoint weights and become this island's anchors, so its
+            # first push is measured from the pool's current cut.
+            # Before the first local step Megatron has no optimizer-state
+            # proof (no rollout trained yet), so none is compared.
+            await self._apply_authoritative(newer, optimizer_proof=False)
+            print(
+                f"[yeto-initial-cut] learner {self.config.learner_id} caught up to a running "
+                f"pool: {len(newer)}/{count} fragment(s) newer than version 0, "
+                f"versions {list(self.fragment_versions)}",
+                file=sys.stderr,
+                flush=True,
+            )
 
     async def _install_routed_token_counter(self, group, adapter) -> None:
         if check_expert_partition(adapter.layout.specs) is None:
@@ -667,7 +698,7 @@ class MilesFullParameterRoleStream:
             self._tokens_at_anchor = [0] * count
             self._routed_at_anchor = [RoutedTokens()] * count
             resent, island.resent = dict(island.resent), {}
-            await self._apply_authoritative(resent, recovered=True)
+            await self._apply_authoritative(resent, optimizer_proof=False)
         except BaseException:
             island.release()
             client.close()
@@ -714,6 +745,14 @@ class MilesFullParameterRoleStream:
         self._report_initial_cut(client, observed, count, started, "waiting")
         while len(observed) < count:
             client.check_health()
+            if self.may_rejoin and _is_set(getattr(client, "finalizing", None)):
+                # The pool reached its final cut before this island caught up;
+                # waiting for broadcasts would only run into the timeout.
+                self._report_initial_cut(client, observed, count, started, "pool finished")
+                raise PoolFinishedBeforeJoin(
+                    f"{self.config.algorithm} {self.config.role}: the island pool reached "
+                    "its final cut before this island caught up"
+                )
             if init_parts is not None and client.init_replay_due():
                 # S26 E3b (s26-e3b-p06-C32a): the group carrying INIT died
                 # before the syncer applied it; send it again on this group.
@@ -721,13 +760,25 @@ class MilesFullParameterRoleStream:
                 client.send_initial_fragments(init_parts)
             for update in client.drain_updates():
                 stored = self._stored_update(update)
-                if update.version != 0 or stored.fragment_id in observed:
-                    if self.config.island_lease_s is not None and update.version != 0:
-                        raise RuntimeError(
-                            f"{self.config.algorithm} {self.config.role}: the island pool is past "
-                            "its initial cut; a full-parameter island cannot join a running pool "
-                            "yet (it can re-JOIN after a lease expiry while its process runs)"
-                        )
+                previous = observed.get(stored.fragment_id)
+                if self.may_rejoin:
+                    # A running pool sends its catch-up (every fragment at its
+                    # current version) and may broadcast newer rounds before
+                    # the catch-up completes: keep the newest version.
+                    if previous is not None and stored.version <= previous.version:
+                        if (
+                            stored.version == previous.version
+                            and stored.wire_payload_hash != previous.wire_payload_hash
+                        ):
+                            raise RuntimeError(
+                                f"{self.config.algorithm} {self.config.role} catch-up fragment "
+                                f"{stored.fragment_id} version {stored.version} changed bytes"
+                            )
+                        stored.release()
+                        continue
+                    if previous is not None:
+                        previous.release()
+                elif update.version != 0 or previous is not None:
                     raise RuntimeError(
                         f"{self.config.algorithm} {self.config.role} initial broadcast changed"
                     )
@@ -1001,12 +1052,16 @@ class MilesFullParameterRoleStream:
         *,
         anchors: Mapping[int, StoredAuthoritativeFragment] | None = None,
         counters: tuple[int, int, RoutedTokens] | None = None,
-        recovered: bool = False,
+        optimizer_proof: bool = True,
     ) -> None:
         """Apply ``selected`` fragments; ``anchors``/``counters`` override the
         recorded anchor and its round/token counters (overlap rebase).
-        ``recovered``: the first apply after a peer snapshot restore, whose
-        optimizer records carry the donor's policy version and generation."""
+
+        ``optimizer_proof=False``: the trainer has not trained yet (an initial
+        catch-up, or the first apply after a peer snapshot restore), so Megatron
+        has no optimizer-state proof to compare: it records the last rollout ID
+        only at a local step. A restore is checked against the donor's snapshot
+        digest instead."""
         if self.adapter is None or self.current is None or self.group is None:
             raise RuntimeError(f"{self.config.algorithm} {self.config.role} stream is unavailable")
         target_version = self.transport_version + 1
@@ -1015,21 +1070,23 @@ class MilesFullParameterRoleStream:
             target_policy_version=target_version,
             authoritative_fragments=tuple(selected.values()),
         )
-        before = tuple(await self.group.full_parameter_optimizer_states())
+        before = (tuple(await self.group.full_parameter_optimizer_states())
+                  if optimizer_proof else None)
         await self.adapter.apply(
             self.group,
             target,
             commit_token=self._apply_token(target_version, selected),
         )
-        after = tuple(await self.group.full_parameter_optimizer_states())
-        validate_optimizer_apply_transition(
-            before,
-            after,
-            role=self.config.role,
-            base_policy_version=None if recovered else self.transport_version,
-            base_local_generation=None if recovered else self.local_generation,
-            target_policy_version=target_version,
-        )
+        if before is not None:
+            after = tuple(await self.group.full_parameter_optimizer_states())
+            validate_optimizer_apply_transition(
+                before,
+                after,
+                role=self.config.role,
+                base_policy_version=self.transport_version,
+                base_local_generation=self.local_generation,
+                target_policy_version=target_version,
+            )
         previous_cut = self.current
         self.current = target
         self.transport_version = target_version

@@ -73,10 +73,12 @@ def admit(args, clouds: list[str]) -> dict[int, str]:
 
     if not island_pool(args):
         raise ValueError(LEGACY_REFUSED)
-    if getattr(args, "rl_sync_preset", None) == "full-parameter":
-        # A droppable island comes back as a fresh process after a reclaim.
-        raise ValueError("--rl-island-role: a full-parameter island cannot join a running pool "
-                         "after the initial cut yet, so it cannot be droppable")
+    if (getattr(args, "rl_sync_preset", None) == "full-parameter"
+            and getattr(args, "rl_sync_full_parameter_rounds", "sweep") != "async"):
+        # A droppable island comes back as a fresh process after a reclaim;
+        # only asynchronous rounds let a fresh process catch up and join.
+        raise ValueError("--rl-island-role: a full-parameter island joins a running pool only "
+                         "with --rl-sync-full-parameter-rounds async, so it cannot be droppable")
     roles = parse_roles(items, len(clouds))
     anchors = [i for i, r in roles.items() if r == ANCHOR]
     if not anchors:
