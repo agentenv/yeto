@@ -33,9 +33,10 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from yeto.protocol import PartialMessageGenerationLost
 from yeto.rl.elastic_client import LeaveReason
+from yeto.wan_streams import upload_window
 
 from .driver import SyncBoundary, SyncStart
-from .sync_timing import SyncTiming, unix_now
+from .sync_timing import SyncTiming, unix_now, upload_fields
 
 if TYPE_CHECKING:
     from .driver import IslandDriver
@@ -81,6 +82,11 @@ class RoleStream(Protocol):
     def staged_fragment_versions(self) -> tuple[tuple[int, int], ...]: ...
     def has_staged_broadcast(self, fragment_id: int, version: int) -> bool: ...
     async def apply_staged_broadcast(self, fragment_id: int, version: int) -> tuple[int, ...]: ...
+    # S26 E3 sync/train overlap (profile.overlap) only:
+    #   complete_local_round(..., hold_submission=True) keeps the round base and
+    #   the previous submission; apply_staged_broadcast(..., rebase=True) applies
+    #   G + (current - base) with G as the anchor; finish_rebase() makes the
+    #   rebased cut the submission; mark_round_base() pins the next round base.
     async def wait_and_apply_final(self) -> None: ...
     def acknowledge_final(self) -> None: ...
     def discard_detached_submission_cut(self) -> None: ...
@@ -99,6 +105,8 @@ class FullParameterSyncProfile:
     wait_timeout: float
     poll_seconds: float
     sweep: bool = False
+    # S26 E3: train round k+1 while sweep k syncs; rebase at the next boundary.
+    overlap: bool = False
 
     def __post_init__(self) -> None:
         if not self.roles or len(set(self.roles)) != len(self.roles):
@@ -107,6 +115,13 @@ class FullParameterSyncProfile:
             raise ValueError("the actor is the published role and must come first")
         if self.sweep and (self.roles != ("actor",) or self.local_horizon != 1):
             raise ValueError("a dense strict sweep has one actor role and H=1")
+        if self.overlap and not self.sweep:
+            raise ValueError("sync/train overlap needs the dense strict sweep")
+
+    @property
+    def total_rounds(self) -> int:
+        """Local rounds of a sweep profile (one sweep per round)."""
+        return self.total_fragment_steps // self.fragments
 
     @property
     def effective_pipeline_depth(self) -> int:
@@ -131,6 +146,7 @@ class FullParameterSyncProfile:
             wait_timeout=min(config.wait_timeout for config in configs.values()),
             poll_seconds=min(config.poll_seconds for config in configs.values()),
             sweep=sweep,
+            overlap=bool(getattr(first, "overlap", False)),
         )
 
 
@@ -389,9 +405,12 @@ class RolePairing:
         step, fragment_id, _base = key
         if not pair.complete:
             raise RuntimeError("broadcast arrived before every paired PUSH was retained")
-        results = await asyncio.gather(
-            *(stream.apply_staged_broadcast(fragment_id, step) for stream in self.streams.values())
-        )
+        if self.profile.overlap:
+            calls = (stream.apply_staged_broadcast(fragment_id, step, rebase=True)
+                     for stream in self.streams.values())
+        else:
+            calls = (stream.apply_staged_broadcast(fragment_id, step) for stream in self.streams.values())
+        results = await asyncio.gather(*calls)
         for role, fragments in zip(self.streams, results, strict=True):
             applied[role].extend(fragments)
             if self.streams[role].fragment_versions[fragment_id] != step:
@@ -509,6 +528,10 @@ class FullParameterSync:
         self.closed = False
         self._driver: IslandDriver | None = None
         self._timing = SyncTiming(None, None)  # L5.6, set by each boundary
+        # Overlap: fragment versions before the sweep still in flight.
+        self._pending_sweep: tuple[int, ...] | None = None
+        # S26 E3b: actor data-stream counters at the previous boundary.
+        self._upload_before: tuple | None = None
 
     @property
     def actor(self) -> RoleStream:
@@ -517,6 +540,7 @@ class FullParameterSync:
     def start(self, driver: IslandDriver) -> SyncStart:
         self._driver = driver
         self.run(self.pairing.gather_roles(lambda role, stream: stream.initialize(self.groups[role])))
+        self._upload_before = self._stream_snapshots()
         return SyncStart(state=self.actor.resident_state(0), rollout_id=0)
 
     def boundary(self, driver: IslandDriver, *, rollout_id: int, stats: Any) -> SyncBoundary:
@@ -534,11 +558,32 @@ class FullParameterSync:
                 "sync/global_policy_hash": state.policy_tensor_hash(),
                 "sync/inflight_pairs": len(self.pairing.inflight),
                 **self._timing.fields(),
+                **self._upload_fields(),
             },
         )
         return SyncBoundary(state=state, stop=self.terminal)
 
+    def _stream_snapshots(self) -> tuple | None:
+        snapshots = getattr(getattr(self.actor, "client", None), "stream_snapshots", None)
+        return snapshots() if callable(snapshots) else None
+
+    def _upload_fields(self) -> dict[str, object]:
+        """Actor upload rates of this boundary and the wait after the upload."""
+        after = self._stream_snapshots()
+        before, self._upload_before = self._upload_before, after
+        if after is None or before is None:
+            return {}
+        client = self.actor.client
+        return upload_fields(
+            upload_window(before, after),
+            drained_ts=client.upload_drained_at,
+            timing=self._timing,
+            stalls=client.send_progress().stalls,
+        )
+
     async def _boundary(self, rollout_id: int) -> bool:
+        if self.pairing.profile.overlap:
+            return await self._overlap_boundary(rollout_id)
         pairing = self.pairing
         trajectories = self.trajectories(rollout_id)
         await pairing.gather_roles(
@@ -563,6 +608,79 @@ class FullParameterSync:
         for stream in pairing.streams.values():
             stream.discard_detached_submission_cut()
         return False
+
+    async def _overlap_boundary(self, rollout_id: int) -> bool:
+        """Streaming-DiLoCo overlap (S26 E3; one more outer step of staleness).
+
+        Round k's delta (``current - base``) is pushed at boundary k and the
+        island trains round k+1 at once. At boundary k+1 the island first
+        waits for sweep k (``G_k``), then rebases its trainer in place:
+        ``theta <- G_k + (theta_local_{k+1} - base_k)`` with ``G_k`` as the
+        anchor, so the next push is exactly round k+1's progress and round
+        k's delta is never counted twice. The terminal round waits for the
+        final cut like the strict sweep."""
+
+        pairing = self.pairing
+        trajectories = self.trajectories(rollout_id)
+        hold = self._pending_sweep is not None
+        await pairing.gather_roles(
+            lambda _role, stream: stream.complete_local_round(
+                rollout_id=rollout_id, trajectories=trajectories, hold_submission=hold
+            )
+        )
+        wait_ts = unix_now()
+        if hold:
+            await self._wait_for_sweep(self._pending_sweep)
+            self._pending_sweep = None
+            if not pairing.any_finalizing:
+                for stream in pairing.streams.values():
+                    stream.finish_rebase()
+        if pairing.any_finalizing:
+            await pairing.finish_without_more_training()
+            return True
+        before = pairing.fragment_versions()
+        if rollout_id + 1 >= pairing.profile.total_rounds:
+            # Terminal round: nothing trains after it, so wait for the cut.
+            pairing.submit_ready()
+            submit_ts = unix_now()
+            await pairing.commit_staged_broadcasts()
+            await self._wait_for_sweep(before)
+            self._timing = SyncTiming(submit_ts, unix_now())
+            await pairing.finish_without_more_training()
+            return True
+        await self._push_whole_sweep(before)
+        self._pending_sweep = before
+        for stream in pairing.streams.values():
+            stream.mark_round_base()
+        # This boundary blocked on the previous sweep (wait + rebase) and on
+        # handing every fragment of this sweep to the wire.
+        self._timing = SyncTiming(wait_ts, unix_now())
+        return False
+
+    async def _push_whole_sweep(self, before: tuple[int, ...]) -> None:
+        """Overlap: submit every fragment of the sweep after ``before`` before
+        training on. A PULL that arrives later would otherwise wait for the
+        next boundary, a whole local round, and stall the sweep. The syncer
+        sends all P PULLs at once with ``--pipeline P`` (required by the
+        launcher), so this waits only for their arrival."""
+
+        pairing = self.pairing
+        fragments = pairing.profile.fragments
+        steps = {version + fragments if version else fragment_id + 1
+                 for fragment_id, version in enumerate(before)}
+        deadline = time.monotonic() + pairing.profile.wait_timeout
+
+        def pushed() -> bool:
+            return steps <= {key[0] for key, pair in pairing.inflight.items() if pair.complete}
+
+        pairing.submit_ready()
+        while not pushed():
+            if time.monotonic() >= deadline:
+                error = TimeoutError("overlap could not submit the whole sweep before the wait timeout")
+                pairing.fail_stop(error)
+                raise error
+            await asyncio.sleep(pairing.profile.poll_seconds)
+            pairing.submit_ready()
 
     async def _wait_for_sweep(self, before: tuple[int, ...]) -> None:
         """Strict sweep: block until all P fragments of this local step are

@@ -61,7 +61,7 @@ from .launch.tapes import (
 from .launch.modal_islands import (
     _modal_tape_run_dir, _tail_modal, _verify_modal_app_stopped, build_modal_island_config,
     container_set_poller_for, effective_recover_timeout, pull_modal_tapes,
-    require_modal_for_gpu_exact,
+    require_modal_for_gpu_exact, wan_probe_relaunches,
 )
 from .launch.fleet import (
     CONTAINER_CHANGED_EXIT, DEFAULT_RL_STALL_TIMEOUT_S, FAILED_RUN_DRAIN_S, ISLAND_FAILED_EXIT,
@@ -660,6 +660,11 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             ),
             elastic=island_scheduling_mode(args) == "elastic",
             no_island_relaunch=bool(getattr(args, "no_island_relaunch", False)),
+            wan_reject_probe=(
+                (lambda name: event_collectors[name].wan_rejects if name in event_collectors else 0)
+                if echo_names else None
+            ),
+            wan_probe_relaunches=wan_probe_relaunches(args),
         )
         def drain_tapes(limit: float = NO_SYNC_EVENT_DRAIN_S) -> None:
             if echo_names:

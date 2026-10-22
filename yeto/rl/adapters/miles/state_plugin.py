@@ -39,6 +39,7 @@ _PLUGIN_MODULE = "yeto.rl.adapters.miles.state_plugin"
 EXPORT_STATE = f"{_PLUGIN_MODULE}.export_state"
 # rl-publish-fastpath: export + hash on the trainer, return only the digests.
 EXPORT_DIGEST = f"{_PLUGIN_MODULE}.export_digest"
+COLLECT_DIGEST = f"{_PLUGIN_MODULE}.collect_digest"
 WEIGHTS_VERSION = f"{_PLUGIN_MODULE}.weights_version"
 # A no-sync full-parameter island (L4.6): per-rank digest of every model parameter.
 EXPORT_FULL_DIGEST = f"{_PLUGIN_MODULE}.export_full_digest"
@@ -648,33 +649,92 @@ def export_state(actor: Any, *, policy_version: int) -> dict[str, Any] | None:
         return _export_state(actor, policy_version=policy_version)
 
 
+def _digest_staging(actor: Any) -> Any:
+    """The pinned host buffer this trainer's digests reuse every round (E1). A
+    deferred digest still hashing it is waited for first."""
+    from yeto.rl.engine.policy_digest import HostStaging
+
+    _wait_deferred_digest(actor)
+    staging = getattr(actor, "_yeto_digest_staging", None)
+    if staging is None:
+        staging = actor._yeto_digest_staging = HostStaging()
+    return staging
+
+
 def export_digest(
     actor: Any, *, policy_version: int, base_model_revision: str, lora_config_hash: str,
+    deferred: bool = False,
 ) -> dict[str, Any] | None:
     """rl-publish-fastpath: :func:`export_state` on the trainer, but return only the
     publication digests (policy tensor hash, payload hash/bytes, specs) instead of
     the tensors.  The hash definitions are those of ``yeto.rl.core.policy_tensor_hash``
-    and ``publish.payload_digest`` (see ``policy_digest``); only where they run moves."""
+    and ``publish.payload_digest`` (see ``policy_digest``); only where they run moves.
+
+    ``deferred`` (E1, sync colocated mode): return once the tensors are staged on the
+    host (layout only, ``"deferred": True``) and hash them in a thread of this
+    process, so the trainer can offload meanwhile; :func:`collect_digest` returns
+    the digest (the same values)."""
 
     from yeto.rl.engine.policy_digest import digest_canonical_tensors, layout_hash_of
 
     import time
 
     started = time.monotonic()
-    exported = export_state(actor, policy_version=policy_version)
+    install_grad_norm_recorder()
+    with trainer_resident(actor):
+        # E1: the tensors are only hashed here, so they may be staged in one pinned buffer
+        exported = _export_state(actor, policy_version=policy_version, staging=_digest_staging(actor))
     export_seconds = round(time.monotonic() - started, 3)
     if exported is None:
         return None
     tensors = exported["tensors"]
     specs = [(name, tuple(int(d) for d in value.shape)) for name, value in sorted(tensors.items())]
-    digest = digest_canonical_tensors(
-        tensors,
-        base_model_revision=base_model_revision,
-        lora_config_hash=lora_config_hash,
-        layout_hash=layout_hash_of(specs),
-    )
-    return {"policy_version": int(policy_version), "digest": digest.to_wire(),
-            "export_seconds": export_seconds, "weights": current_weights_version()}
+
+    def digest() -> Any:
+        return digest_canonical_tensors(
+            tensors,
+            base_model_revision=base_model_revision,
+            lora_config_hash=lora_config_hash,
+            layout_hash=layout_hash_of(specs),
+        )
+
+    out = {"policy_version": int(policy_version), "export_seconds": export_seconds,
+           "weights": current_weights_version()}
+    if not deferred:
+        return {**out, "digest": digest().to_wire()}
+    from concurrent.futures import ThreadPoolExecutor
+
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="yeto-digest-deferred")
+    actor._yeto_deferred_digest = (int(policy_version), pool.submit(digest))
+    pool.shutdown(wait=False)
+    return {**out, "deferred": True, "specs": [[n, list(shape)] for n, shape in specs]}
+
+
+def collect_digest(actor: Any, *, policy_version: int) -> dict[str, Any] | None:
+    """The digest of the deferred :func:`export_digest` of ``policy_version`` (waits
+    for its hashing thread). Reads no trainer state (the trainer may be offloaded);
+    ``None`` on ranks that export nothing."""
+    pending = getattr(actor, "_yeto_deferred_digest", None)
+    if pending is None:
+        if not _is_main_rank(actor):
+            return None
+        raise StatePluginError(f"no deferred digest of policy v{policy_version} on this rank")
+    version, future = pending
+    actor._yeto_deferred_digest = None
+    if version != int(policy_version):
+        raise StatePluginError(f"the deferred digest is of policy v{version}, not v{policy_version}")
+    return {"policy_version": version, "digest": future.result().to_wire()}
+
+
+def _wait_deferred_digest(actor: Any) -> None:
+    """The staged tensors of a deferred digest are views of the reused buffer: let an
+    uncollected hashing finish before the buffer is written again."""
+    pending = getattr(actor, "_yeto_deferred_digest", None)
+    if pending is not None:
+        try:
+            pending[1].result()
+        except Exception:  # noqa: BLE001 - collect_digest reports it; only the buffer matters here
+            pass
 
 
 FULL_SHARD_PREFIX = b"yeto-rl-full-parameter-shard-v1\0"
@@ -912,9 +972,14 @@ def _tp_ep_leader(actor: Any) -> bool:
     )
 
 
-def _export_state(actor: Any, *, policy_version: int) -> dict[str, Any] | None:
+def _export_state(actor: Any, *, policy_version: int, staging: Any = None) -> dict[str, Any] | None:
+    """``staging`` (a :class:`~yeto.rl.engine.policy_digest.HostStaging`): copy the
+    tensors into its pinned buffer with one GPU synchronization; the result is then
+    only valid until the next call with it (digest path, E1). Same values either way."""
 
     import torch
+
+    from yeto.rl.engine.policy_digest import NonFiniteTensor, stage_f32_on_host
 
     if is_native_flash_next(actor):
         return _export_flash_next(actor, policy_version=policy_version)
@@ -931,12 +996,10 @@ def _export_state(actor: Any, *, policy_version: int) -> dict[str, Any] | None:
                 tensors[b.name] = b.to_hf(master)
         if not _is_main_rank(actor):
             return None
-        out = {}
-        for name, value in sorted(tensors.items()):
-            value = value.detach().to(device="cpu", dtype=torch.float32).contiguous().clone()
-            if not torch.isfinite(value).all().item():
-                raise StatePluginError(f"{name!r} contains NaN or Inf")
-            out[name] = value
+        try:
+            out = stage_f32_on_host(tensors, staging)
+        except NonFiniteTensor as error:
+            raise StatePluginError(str(error)) from None
     assert_grad_flow_intact(actor.model, params)
     return {"policy_version": int(policy_version), "tensors": out}
 

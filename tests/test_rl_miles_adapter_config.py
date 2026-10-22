@@ -795,3 +795,21 @@ def test_dynamic_batching_refused_for_bshd_gated_delta_net_models():
     recompute_only = dataclasses.replace(
         cfg, model_recipe=recipe, train_memory=rc.TrainMemoryConfig(activation_recompute=True))
     assert "--recompute-granularity" in mc.translate_run_config(recompute_only, AlgorithmSpec()).argv
+
+
+def test_gradient_accumulation_fusion_is_opt_in():
+    # S26 E0.1: the Miles recipes train with the fusion on; yeto keeps it off by default
+    off = " ".join(mc.translate_run_config(make_config(), AlgorithmSpec()).argv)
+    assert "--no-gradient-accumulation-fusion" in off
+    cfg = dataclasses.replace(make_config(), train_memory=rc.TrainMemoryConfig(gradient_accumulation_fusion=True))
+    assert "--no-gradient-accumulation-fusion" not in mc.translate_run_config(cfg, AlgorithmSpec()).argv
+    assert rc._train_memory(SimpleNamespace(seq_len=8, rl_gradient_accumulation_fusion=True)) \
+        .gradient_accumulation_fusion
+
+
+def test_generic_recipe_trains_without_dropout():
+    cfg = make_config()
+    if cfg.model_recipe.name != rc.RECIPE_GENERIC:
+        cfg = sub(cfg, "model_recipe", name=rc.RECIPE_GENERIC)
+    joined = " ".join(mc.translate_run_config(cfg, AlgorithmSpec()).argv)
+    assert "--attention-dropout 0.0 --hidden-dropout 0.0" in joined

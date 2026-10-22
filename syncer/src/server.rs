@@ -91,6 +91,16 @@ pub struct Config {
     /// the quiescent cut between rounds, resumed from when `resume` is set.
     pub checkpoint_path: Option<std::path::PathBuf>,
     pub checkpoint_every: u64,
+    /// Policy-sweep only: persist each per-round checkpoint on a blocking
+    /// writer instead of the scheduler, and broadcast that round only after
+    /// the write is durable. Merge results, versions, and checkpoint bytes
+    /// are unchanged, so this is deliberately not part of the semantic
+    /// profile hash.
+    pub async_checkpoint: bool,
+    /// S26 E3: full-f32 refresh period of bf16 downlink deltas (sessions
+    /// with `DTYPE_FLAG_BCAST_DELTA`). Wire encoding only: merges, versions
+    /// and checkpoints are unchanged, so it is not in the profile hash.
+    pub bcast_delta_full_every: Option<u64>,
     pub resume: bool,
     /// Create the adjacent final marker only for a completed terminal cut.
     pub mark_final_checkpoint: bool,
@@ -702,8 +712,11 @@ fn validate_config(cfg: &Config) -> Result<()> {
         if cfg.total_steps == 0 {
             bail!("--policy-sweep-fragments requires positive --total-steps");
         }
-        if cfg.pipeline != 1 {
-            bail!("--policy-sweep-fragments requires --pipeline 1");
+        // Fragment rounds of one sweep are independent (H=1, plain average,
+        // no momentum), so up to P of them may gather concurrently; commits
+        // stay in strict step order.
+        if cfg.pipeline == 0 || cfg.pipeline > fragments {
+            bail!("--policy-sweep-fragments requires --pipeline between 1 and the fragment count");
         }
         if !cfg.total_steps.is_multiple_of(u64::from(fragments)) {
             bail!("--total-steps must be divisible by --policy-sweep-fragments");
@@ -726,11 +739,26 @@ fn validate_config(cfg: &Config) -> Result<()> {
         // --resume is not required here: a fresh sweep has no checkpoint yet and
         // --resume refuses a missing file (see check_resume_checkpoint). The
         // launcher adds --resume only when the checkpoint exists.
-        if cfg.checkpoint_path.is_none() || cfg.checkpoint_every != 1 {
+        if cfg.checkpoint_path.is_none()
+            || cfg.checkpoint_every == 0
+            || (cfg.checkpoint_every != 1
+                && !cfg.checkpoint_every.is_multiple_of(u64::from(fragments)))
+        {
             bail!(
                 "--policy-sweep-fragments requires --checkpoint-path and \
-                 --checkpoint-every 1 for crash-safe sweeps"
+                 --checkpoint-every 1 or a multiple of the fragment count"
             );
+        }
+    }
+    if matches!(cfg.bcast_delta_full_every, Some(n) if n < 2) {
+        bail!("--bcast-delta-full-every must be at least 2");
+    }
+    if cfg.async_checkpoint {
+        if cfg.policy_sweep_fragments.is_none() {
+            bail!("--async-checkpoint requires --policy-sweep-fragments");
+        }
+        if cfg.learner_budget_steps.is_some() {
+            bail!("--async-checkpoint does not support --learner-budget-steps");
         }
     }
     Ok(())
@@ -741,6 +769,20 @@ fn validate_config(cfg: &Config) -> Result<()> {
 /// profile; otherwise a process crash can expose version t and resume at t-1.
 fn checkpoint_before_broadcast(cfg: &Config) -> bool {
     cfg.checkpoint_path.is_some() && cfg.checkpoint_every == 1
+}
+
+/// Whether step `t` must be durable before its BCAST. Per-round checkpoints
+/// always are; a policy sweep with `--checkpoint-every N` (N a multiple of
+/// the fragment count) persists only every N-th step, at sweep boundaries,
+/// and broadcasts the other steps without a durable record (a crash resumes
+/// at the newest checkpoint; islands ahead of it fail closed on their next
+/// push's local-step check).
+fn persist_before_broadcast(cfg: &Config, t: u64) -> bool {
+    checkpoint_before_broadcast(cfg)
+        || (cfg.policy_sweep_fragments.is_some()
+            && cfg.checkpoint_path.is_some()
+            && cfg.checkpoint_every > 0
+            && t.is_multiple_of(cfg.checkpoint_every))
 }
 
 fn validate_policy_sweep_push(push: &Push, fragments: u32) -> Result<()> {
@@ -980,11 +1022,7 @@ fn negotiated_payload_limits(layout: &Layout, dtype: u8) -> Result<(u64, u64)> {
     for fragment in &layout.fragments {
         let numel = fragment.numel()?;
         let init_bytes = tensor_nbytes(bulk_dtype(dtype), numel)? as u64;
-        let delta_bytes = if dtype == DTYPE_Q4 {
-            q4_nbytes(numel)?
-        } else {
-            tensor_nbytes(dtype, numel)?
-        } as u64;
+        let delta_bytes = max_push_nbytes(dtype, numel)? as u64;
         max_init = max_init.max(
             4u64.checked_add(init_bytes)
                 .context("INIT_PARAMS payload limit overflow")?,
@@ -1129,7 +1167,7 @@ fn parse_hello(payload: &[u8], expected_learners: u32) -> Result<ParsedHello> {
         bail!("connection generation must be nonzero");
     }
     let dtype = r.u8()?;
-    if !matches!(dtype, DTYPE_F32 | DTYPE_BF16 | DTYPE_Q4) {
+    if !valid_session_dtype(dtype) {
         bail!("unsupported session dtype {dtype}");
     }
     let num_fragments = r.u32()?;
@@ -1222,8 +1260,8 @@ async fn handle_connection(
     stream.set_nodelay(true)?;
     let (mut rd, mut wr) = stream.into_split();
     let first = match read_frame_limited(&mut rd, |msg_type| match msg_type {
-        MSG_HELLO | MSG_DATA_HELLO => Ok(MAX_HELLO_FRAME),
-        other => bail!("first frame must be HELLO/DATA_HELLO, got {other}"),
+        MSG_HELLO | MSG_DATA_HELLO | MSG_BW_PROBE => Ok(MAX_HELLO_FRAME),
+        other => bail!("first frame must be HELLO/DATA_HELLO/BW_PROBE, got {other}"),
     })
     .await
     {
@@ -1428,8 +1466,98 @@ async fn handle_connection(
             tokio::spawn(writer_task(wr, rx));
             read_loop(&mut rd, &group, &event_tx, &budget_cutoff).await
         }
-        t => bail!("first frame must be HELLO/DATA_HELLO, got {t}"),
+        MSG_BW_PROBE => {
+            let request = open_hello(hello_auth.key.as_deref(), &first.payload)
+                .and_then(parse_bw_probe);
+            let (upload, download) = match request {
+                Ok(sizes) => sizes,
+                Err(error) => {
+                    let message = format!("invalid BW_PROBE: {error:#}");
+                    let _ = send_direct(&mut wr, MSG_ERROR, message.as_bytes()).await;
+                    return Err(error);
+                }
+            };
+            let Some(_slot) = BwProbeSlot::acquire() else {
+                let message = "too many concurrent BW_PROBE connections";
+                send_direct(&mut wr, MSG_ERROR, message.as_bytes()).await?;
+                bail!(message);
+            };
+            tokio::time::timeout(BW_PROBE_TIMEOUT, serve_bw_probe(&mut rd, &mut wr, upload, download))
+                .await
+                .context("BW_PROBE timed out")?
+        }
+        t => bail!("first frame must be HELLO/DATA_HELLO/BW_PROBE, got {t}"),
     }
+}
+
+/// Largest upload or download one BW_PROBE connection may ask for.
+const BW_PROBE_MAX_BYTES: u64 = 1 << 30;
+const BW_PROBE_MAX_CONNECTIONS: usize = 64;
+const BW_PROBE_TIMEOUT: Duration = Duration::from_secs(300);
+static BW_PROBE_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+
+/// One of at most BW_PROBE_MAX_CONNECTIONS concurrent probe connections.
+struct BwProbeSlot;
+
+impl BwProbeSlot {
+    fn acquire() -> Option<Self> {
+        let previous = BW_PROBE_ACTIVE.fetch_add(1, Ordering::AcqRel);
+        if previous >= BW_PROBE_MAX_CONNECTIONS {
+            BW_PROBE_ACTIVE.fetch_sub(1, Ordering::AcqRel);
+            return None;
+        }
+        Some(BwProbeSlot)
+    }
+}
+
+impl Drop for BwProbeSlot {
+    fn drop(&mut self) {
+        BW_PROBE_ACTIVE.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// BW_PROBE body (after the HELLO-style HMAC trailer is removed):
+/// u64 upload bytes, u64 download bytes, both at most BW_PROBE_MAX_BYTES.
+fn parse_bw_probe(body: &[u8]) -> Result<(u64, u64)> {
+    if body.len() != 16 {
+        bail!("BW_PROBE body has {} bytes, expected 16", body.len());
+    }
+    let upload = u64::from_le_bytes(body[0..8].try_into().unwrap());
+    let download = u64::from_le_bytes(body[8..16].try_into().unwrap());
+    if upload > BW_PROBE_MAX_BYTES || download > BW_PROBE_MAX_BYTES {
+        bail!("BW_PROBE asks for more than {BW_PROBE_MAX_BYTES} bytes per direction");
+    }
+    Ok((upload, download))
+}
+
+/// Read and discard `upload` raw bytes, acknowledge with their count, then
+/// write `download` zero bytes and close. Nothing touches session state.
+async fn serve_bw_probe(
+    rd: &mut (impl tokio::io::AsyncReadExt + Unpin),
+    wr: &mut OwnedWriteHalf,
+    upload: u64,
+    download: u64,
+) -> Result<()> {
+    let mut buf = vec![0u8; 1 << 20];
+    let mut remaining = upload;
+    while remaining > 0 {
+        let want = remaining.min(buf.len() as u64) as usize;
+        let got = rd.read(&mut buf[..want]).await?;
+        if got == 0 {
+            bail!("BW_PROBE upload ended after {} of {upload} bytes", upload - remaining);
+        }
+        remaining -= got as u64;
+    }
+    wr.write_all(&upload.to_le_bytes()).await?;
+    buf.fill(0);
+    let mut remaining = download;
+    while remaining > 0 {
+        let take = remaining.min(buf.len() as u64) as usize;
+        wr.write_all(&buf[..take]).await?;
+        remaining -= take as u64;
+    }
+    wr.shutdown().await?;
+    Ok(())
 }
 
 async fn send_direct(wr: &mut OwnedWriteHalf, msg_type: u8, payload: &[u8]) -> Result<()> {
@@ -1700,23 +1828,9 @@ async fn dispatch_inner(
                 .with_context(|| format!("PUSH_FRAGMENT for unknown fragment {fragment_id}"))?;
             let numel = fragment.numel()?;
             let bytes = r.rest();
-            let expected = if group.dtype == DTYPE_Q4 {
-                q4_nbytes(numel)?
-            } else {
-                tensor_nbytes(group.dtype, numel)?
-            };
-            if bytes.len() != expected {
-                bail!(
-                    "PUSH_FRAGMENT fragment {fragment_id} has {} delta bytes, expected {expected}",
-                    bytes.len()
-                );
-            }
             let mut outer_gradient = Vec::new();
-            if group.dtype == DTYPE_Q4 {
-                decode_q4(bytes, numel, &mut outer_gradient)?;
-            } else {
-                decode_tensor(group.dtype, bytes, &mut outer_gradient)?;
-            }
+            decode_push(group.dtype, bytes, numel, &mut outer_gradient)
+                .with_context(|| format!("PUSH_FRAGMENT fragment {fragment_id}"))?;
             // Every wire dtype carries learner_delta = local - raw_anchor.
             // Merge math consumes the corresponding outer gradient with the
             // opposite sign and never reconstructs a full learner parameter.
@@ -1862,6 +1976,17 @@ async fn send_fragment_until_cutoff(
     dtype: u8,
     budget_cutoff: &BudgetCutoff,
 ) -> Result<bool> {
+    if let Some(encoded) = recovery_bcast(st, p, msg_type) {
+        return send_tensor_until_cutoff(
+            group,
+            msg_type,
+            &encoded.prefix,
+            encoded.dtype,
+            &encoded.values,
+            budget_cutoff,
+        )
+        .await;
+    }
     let mut prefix = [0u8; 12];
     prefix[..4].copy_from_slice(&(p as u32).to_le_bytes());
     prefix[4..].copy_from_slice(&st.versions[p].to_le_bytes());
@@ -1874,6 +1999,17 @@ async fn send_fragment_until_cutoff(
         budget_cutoff,
     )
     .await
+}
+
+/// A BCAST outside publication (initial cut, HELLO/reconnect recovery) on a
+/// bf16-downlink session: always FULL, carrying the shared anchor.
+fn recovery_bcast(st: &GlobalState, p: usize, msg_type: u8) -> Option<crate::downlink::EncodedBcast> {
+    if msg_type != MSG_BCAST_FRAGMENT {
+        return None;
+    }
+    st.downlink
+        .as_ref()
+        .map(|anchors| anchors.lock().unwrap().resend(p, st.versions[p], &st.params[p]))
 }
 
 async fn send_pull_until_cutoff(
@@ -2085,7 +2221,7 @@ async fn scheduler(
 
     // Persist a fresh version zero before its first BCAST. A resumed cut is
     // already committed and only needs to be rebroadcast.
-    if checkpoint_each_round {
+    if checkpoint_each_round || cfg.policy_sweep_fragments.is_some() {
         if let Some(path) = cfg.checkpoint_path.as_ref() {
             if !cfg.resume || !path.exists() {
                 st.save_checkpoint(path)?;
@@ -2116,12 +2252,15 @@ async fn scheduler(
     let mut computing = tokio::task::JoinSet::<Result<ComputedRound>>::new();
     let mut ready: BTreeMap<u64, ComputedRound> = BTreeMap::new();
     let mut busy_fragments: HashSet<usize> = HashSet::new();
+    // --async-checkpoint: the committed round whose checkpoint is in flight.
+    let mut publishing: Option<PendingPublish> = None;
     let mut cutoff_established = false;
     let mut first_budget_report: Option<(Member, u64)> = None;
     'outer: while next_t <= cfg.total_steps
         || !inflight.is_empty()
         || !computing.is_empty()
         || !ready.is_empty()
+        || publishing.is_some()
     {
         if budget_cutoff.deadline().is_some() {
             cutoff_established = true;
@@ -2138,17 +2277,53 @@ async fn scheduler(
             let completed = take_next_commit(&mut ready, next_commit_t)
                 .context("ready commit disappeared after linearization")?;
             let p = completed.round.p;
-            commit_round(
-                &cfg,
-                &mut st,
-                &registry,
-                &mut last_sync_secs,
-                completed,
-                &budget_cutoff,
-            )
-            .await?;
-            if !busy_fragments.remove(&p) {
-                bail!("fragment {p} lost its busy ownership at commit");
+            if cfg.async_checkpoint {
+                // At most one checkpoint write is outstanding: the snapshot
+                // of t must be durable before t+1 is snapshotted, which also
+                // bounds host memory to one extra copy of the state.
+                if let Some(pending) = publishing.take() {
+                    settle_pending_publish(
+                        &cfg,
+                        &st,
+                        &registry,
+                        &mut last_sync_secs,
+                        pending,
+                        &budget_cutoff,
+                        &mut busy_fragments,
+                    )
+                    .await?;
+                }
+                let committed = apply_round_commit(&cfg, &mut st, completed)?;
+                if persist_before_broadcast(&cfg, committed.t) {
+                    publishing = Some(start_async_checkpoint(&cfg, &st, committed)?);
+                } else {
+                    publish_round(
+                        &cfg,
+                        &st,
+                        &registry,
+                        &mut last_sync_secs,
+                        committed,
+                        None,
+                        &budget_cutoff,
+                    )
+                    .await?;
+                    if !busy_fragments.remove(&p) {
+                        bail!("fragment {p} lost its busy ownership at commit");
+                    }
+                }
+            } else {
+                commit_round(
+                    &cfg,
+                    &mut st,
+                    &registry,
+                    &mut last_sync_secs,
+                    completed,
+                    &budget_cutoff,
+                )
+                .await?;
+                if !busy_fragments.remove(&p) {
+                    bail!("fragment {p} lost its busy ownership at commit");
+                }
             }
             next_commit_t = next_commit_t
                 .checked_add(1)
@@ -2349,7 +2524,19 @@ async fn scheduler(
         if next_fragment_available {
             earliest = Some(earliest.map_or(next_launch, |d| d.min(next_launch)));
         }
-        let wake = match earliest {
+        let wake = if let Some(pending) = publishing.as_mut() {
+            // Same event-first bias; a durable checkpoint outranks compute
+            // so the oldest committed round is exposed first.
+            let sleep_until = earliest.map(tokio::time::Instant::from_std);
+            tokio::select! {
+                biased;
+                event = events.recv() => SchedulerWake::Event(event),
+                written = &mut pending.write => SchedulerWake::Durable(written),
+                result = computing.join_next(), if !computing.is_empty() => SchedulerWake::Computed(result),
+                _ = sleep_until_opt(sleep_until) => SchedulerWake::Deadline,
+            }
+        } else {
+            match earliest {
             Some(deadline) if !computing.is_empty() => tokio::select! {
                 biased;
                 wake = prefer_event_over_compute(events.recv(), computing.join_next()) => wake,
@@ -2364,9 +2551,27 @@ async fn scheduler(
                 prefer_event_over_compute(events.recv(), computing.join_next()).await
             }
             None => continue,
+            }
         };
         match wake {
             SchedulerWake::Deadline => continue,
+            SchedulerWake::Durable(written) => {
+                let pending = publishing
+                    .take()
+                    .context("durable checkpoint without a pending publish")?;
+                finish_pending_publish(
+                    &cfg,
+                    &st,
+                    &registry,
+                    &mut last_sync_secs,
+                    pending.committed,
+                    pending.write_started,
+                    written,
+                    &budget_cutoff,
+                    &mut busy_fragments,
+                )
+                .await?;
+            }
             SchedulerWake::Computed(Some(result)) => {
                 let completed = result.context("iso compute task panicked")??;
                 let t = completed.round.t;
@@ -2469,6 +2674,20 @@ async fn scheduler(
                     // slots in existing rounds. The helper revalidates the
                     // generation because catch-up awaits socket writers and
                     // a newer HELLO may supersede this one meanwhile.
+                    // Catch-up must never expose a round whose checkpoint
+                    // is not yet durable.
+                    if let Some(pending) = publishing.take() {
+                        settle_pending_publish(
+                            &cfg,
+                            &st,
+                            &registry,
+                            &mut last_sync_secs,
+                            pending,
+                            &budget_cutoff,
+                            &mut busy_fragments,
+                        )
+                        .await?;
+                    }
                     if st.global_step < cfg.total_steps {
                         send_all_fragments(&st, &group, &budget_cutoff).await;
                     }
@@ -2553,6 +2772,18 @@ async fn scheduler(
                                 // Catch-up must precede a replay even when the
                                 // disconnect event wins the race with the queued
                                 // replacement HELLO.
+                                if let Some(pending) = publishing.take() {
+                                    settle_pending_publish(
+                                        &cfg,
+                                        &st,
+                                        &registry,
+                                        &mut last_sync_secs,
+                                        pending,
+                                        &budget_cutoff,
+                                        &mut busy_fragments,
+                                    )
+                                    .await?;
+                                }
                                 if st.global_step < cfg.total_steps {
                                     send_all_fragments(&st, &group, &budget_cutoff).await;
                                 }
@@ -2640,6 +2871,7 @@ async fn scheduler(
     if next_commit_t != cfg.total_steps.saturating_add(1)
         || st.global_step != cfg.total_steps
         || !busy_fragments.is_empty()
+        || publishing.is_some()
     {
         bail!(
             "non-quiescent terminal cut: next_commit_t={next_commit_t} global_step={} busy={:?}",
@@ -2935,6 +3167,14 @@ enum SchedulerWake {
     Deadline,
     Event(Option<Event>),
     Computed(Option<std::result::Result<Result<ComputedRound>, tokio::task::JoinError>>),
+    Durable(std::result::Result<Result<()>, tokio::task::JoinError>),
+}
+
+async fn sleep_until_opt(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
 }
 
 type ComputeJoin = Option<std::result::Result<Result<ComputedRound>, tokio::task::JoinError>>;
@@ -3189,6 +3429,24 @@ fn prepare_round_compute(cfg: &Config, st: &GlobalState, round: &Round) -> Resul
     st.prepare_merge(round.p, round.base_version, &outer_gradients, &weights)
 }
 
+/// A round whose merge is applied to `GlobalState` but not yet externally
+/// visible: no BCAST, no tape record, no log line.
+struct CommittedRound {
+    t: u64,
+    p: usize,
+    base_version: u64,
+    attempt: u32,
+    started: Instant,
+    expected_members: Vec<Member>,
+    quorum_size: usize,
+    quorum_ms: Option<u64>,
+    grace_ms: Option<u64>,
+    pushes: HashMap<Member, Push>,
+    gnorm: f64,
+    compute_secs: f64,
+    sync_start: Instant,
+}
+
 /// Commit an already-computed round. Called only for the contiguous t prefix,
 /// so Nesterov, versions, ledger, event tape, checkpoint, and broadcast all
 /// share one deterministic order even when SVD completion is out of order.
@@ -3200,6 +3458,26 @@ async fn commit_round(
     completed: ComputedRound,
     budget_cutoff: &BudgetCutoff,
 ) -> Result<()> {
+    let committed = apply_round_commit(cfg, st, completed)?;
+    let mut checkpoint_ms = None;
+    if persist_before_broadcast(cfg, committed.t) {
+        if let Some(path) = cfg.checkpoint_path.as_ref() {
+            let checkpoint_start = Instant::now();
+            st.save_checkpoint(path)?;
+            checkpoint_ms = Some(checkpoint_start.elapsed().as_millis() as u64);
+            info!(step = committed.t, path = %path.display(), "checkpoint committed");
+        }
+    }
+    publish_round(cfg, st, registry, last_sync_secs, committed, checkpoint_ms, budget_cutoff).await
+}
+
+/// Apply the merge, version, step, and ledger updates of the next contiguous
+/// round. Nothing leaves the process here.
+fn apply_round_commit(
+    cfg: &Config,
+    st: &mut GlobalState,
+    completed: ComputedRound,
+) -> Result<CommittedRound> {
     let ComputedRound {
         round,
         merge,
@@ -3237,7 +3515,6 @@ async fn commit_round(
     st.global_step = t;
     let mut ordered_pushes: Vec<_> = pushes.iter().collect();
     ordered_pushes.sort_unstable_by_key(|(member, _)| **member);
-    let responders: Vec<Member> = ordered_pushes.iter().map(|(member, _)| **member).collect();
     for (_, push) in ordered_pushes {
         if let Some(fragments) = cfg.policy_sweep_fragments {
             st.record_fragment_merge(
@@ -3252,15 +3529,52 @@ async fn commit_round(
             st.record_merge(push.learner_id, push.c_steps, push.c_tokens);
         }
     }
+    Ok(CommittedRound {
+        t,
+        p,
+        base_version,
+        attempt,
+        started,
+        expected_members,
+        quorum_size,
+        quorum_ms,
+        grace_ms,
+        pushes,
+        gnorm,
+        compute_secs,
+        sync_start,
+    })
+}
 
-    let checkpoint_each_round = checkpoint_before_broadcast(cfg);
-    if checkpoint_each_round {
-        if let Some(path) = cfg.checkpoint_path.as_ref() {
-            st.save_checkpoint(path)?;
-            info!(step = t, path = %path.display(), "checkpoint committed");
-        }
-    }
-
+/// Expose a committed round: BCAST its fragment, log it, append its tape
+/// record, and write the periodic (non-per-round) checkpoint. A per-round
+/// checkpoint must already be durable when this is called.
+async fn publish_round(
+    cfg: &Config,
+    st: &GlobalState,
+    registry: &Registry,
+    last_sync_secs: &mut f64,
+    committed: CommittedRound,
+    checkpoint_ms: Option<u64>,
+    budget_cutoff: &BudgetCutoff,
+) -> Result<()> {
+    let CommittedRound {
+        t,
+        p,
+        base_version,
+        attempt,
+        started,
+        expected_members,
+        quorum_size,
+        quorum_ms,
+        grace_ms,
+        pushes,
+        gnorm,
+        compute_secs,
+        sync_start,
+    } = committed;
+    let mut responders: Vec<Member> = pushes.keys().copied().collect();
+    responders.sort_unstable();
     // A disconnected learner can catch up after reconnecting. Deterministic
     // local encoding/allocation failures must terminate the coordinator
     // instead of silently committing a cut that was never broadcastable.
@@ -3268,16 +3582,43 @@ async fn commit_round(
     // its exact f32 cut immediately after the scheduler reaches quiescence.
     if t < cfg.total_steps {
         let dtype = bulk_dtype(st.wire_dtype);
+        // bf16 downlink: encode this version once (advancing the shared
+        // anchor) and send the same bytes to every learner.
+        let published = match &st.downlink {
+            Some(anchors) => {
+                // The last version of each fragment is also its FINAL version.
+                // Islands key stored fragments by (fragment, version) and
+                // refuse a second copy with other bytes, so that broadcast
+                // must carry the exact f32 masters (FULL), not a bf16 delta.
+                let last_version = t + st.params.len() as u64 > cfg.total_steps;
+                let mut anchors = anchors.lock().unwrap();
+                Some(if last_version {
+                    anchors.publish_full(p, st.versions[p], &st.params[p])
+                } else {
+                    anchors.publish(p, st.versions[p], &st.params[p])?
+                })
+            }
+            None => None,
+        };
         for group in current_groups(registry) {
-            match send_fragment_until_cutoff(
-                st,
-                &group,
-                p,
-                MSG_BCAST_FRAGMENT,
-                dtype,
-                budget_cutoff,
-            )
-            .await
+            let sent = match &published {
+                Some(encoded) => {
+                    send_tensor_until_cutoff(
+                        &group,
+                        MSG_BCAST_FRAGMENT,
+                        &encoded.prefix,
+                        encoded.dtype,
+                        &encoded.values,
+                        budget_cutoff,
+                    )
+                    .await
+                }
+                None => {
+                    send_fragment_until_cutoff(st, &group, p, MSG_BCAST_FRAGMENT, dtype, budget_cutoff)
+                        .await
+                }
+            };
+            match sent
             {
                 Ok(true) => {}
                 Ok(false) => break,
@@ -3318,6 +3659,7 @@ async fn commit_round(
             quorum_ms,
             grace_ms,
             sync_ms,
+            checkpoint_ms,
             &pushes,
             gnorm,
             ms,
@@ -3330,13 +3672,105 @@ async fn commit_round(
     // have also been broadcast; the terminal cut is delivered by FINAL.
     // A crash-resume loses those gathers; their fragments simply merge on
     // a later cycle, which the quorum design already tolerates.
-    if !checkpoint_each_round {
+    // Policy sweeps persist only before broadcast (see persist_before_broadcast).
+    if cfg.policy_sweep_fragments.is_none() && !checkpoint_before_broadcast(cfg) {
         if let Some(path) = &cfg.checkpoint_path {
             if cfg.checkpoint_every > 0 && t % cfg.checkpoint_every == 0 {
                 st.save_checkpoint(path)?;
                 info!(step = t, path = %path.display(), "checkpoint written");
             }
         }
+    }
+    Ok(())
+}
+
+/// A committed round whose per-round checkpoint is being written by a
+/// blocking task (`--async-checkpoint`). Its fragment stays busy and its
+/// BCAST is withheld until the write is durable, so no learner can observe
+/// a version a crash could lose.
+struct PendingPublish {
+    committed: CommittedRound,
+    write_started: Instant,
+    write: tokio::task::JoinHandle<Result<()>>,
+}
+
+/// Snapshot the just-committed state and start persisting it off the
+/// scheduler thread.
+fn start_async_checkpoint(
+    cfg: &Config,
+    st: &GlobalState,
+    committed: CommittedRound,
+) -> Result<PendingPublish> {
+    let path = cfg
+        .checkpoint_path
+        .clone()
+        .context("--async-checkpoint requires --checkpoint-path")?;
+    let write_started = Instant::now();
+    let bytes = st.encode_checkpoint()?;
+    let write = tokio::task::spawn_blocking(move || {
+        crate::state::write_checkpoint_bytes(&path, &bytes)
+    });
+    Ok(PendingPublish {
+        committed,
+        write_started,
+        write,
+    })
+}
+
+/// Wait for a pending per-round checkpoint, then publish its round. A failed
+/// write fails the coordinator before the round becomes visible; the
+/// previous checkpoint stays the resume point.
+async fn settle_pending_publish(
+    cfg: &Config,
+    st: &GlobalState,
+    registry: &Registry,
+    last_sync_secs: &mut f64,
+    pending: PendingPublish,
+    budget_cutoff: &BudgetCutoff,
+    busy_fragments: &mut HashSet<usize>,
+) -> Result<()> {
+    let PendingPublish {
+        committed,
+        write_started,
+        write,
+    } = pending;
+    finish_pending_publish(
+        cfg,
+        st,
+        registry,
+        last_sync_secs,
+        committed,
+        write_started,
+        write.await,
+        budget_cutoff,
+        busy_fragments,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn finish_pending_publish(
+    cfg: &Config,
+    st: &GlobalState,
+    registry: &Registry,
+    last_sync_secs: &mut f64,
+    committed: CommittedRound,
+    write_started: Instant,
+    written: std::result::Result<Result<()>, tokio::task::JoinError>,
+    budget_cutoff: &BudgetCutoff,
+    busy_fragments: &mut HashSet<usize>,
+) -> Result<()> {
+    let (t, p) = (committed.t, committed.p);
+    written
+        .context("async checkpoint task panicked")?
+        .with_context(|| format!("async checkpoint for step {t} failed; step {t} not broadcast"))?;
+    let checkpoint_ms = Some(write_started.elapsed().as_millis() as u64);
+    if let Some(path) = cfg.checkpoint_path.as_ref() {
+        info!(step = t, path = %path.display(), "checkpoint committed");
+    }
+    publish_round(cfg, st, registry, last_sync_secs, committed, checkpoint_ms, budget_cutoff).await?;
+    if !busy_fragments.remove(&p) {
+        bail!("fragment {p} lost its busy ownership at publish");
     }
     Ok(())
 }
@@ -3361,10 +3795,38 @@ async fn complete_round(
     commit_round(cfg, st, registry, last_sync_secs, completed, &cutoff).await
 }
 
+/// Test twin of `complete_round` through the `--async-checkpoint` path.
+#[cfg(test)]
+async fn complete_round_async(
+    cfg: &Config,
+    st: &mut GlobalState,
+    registry: &Registry,
+    last_sync_secs: &mut f64,
+    round: Round,
+) -> Result<()> {
+    let prepared = prepare_round_compute(cfg, st, &round)?;
+    let compute_start = Instant::now();
+    let merge = prepared.compute().await?;
+    let completed = ComputedRound {
+        round,
+        merge,
+        compute_secs: compute_start.elapsed().as_secs_f64(),
+    };
+    let cutoff = BudgetCutoff::new(false, Duration::ZERO);
+    let mut busy = HashSet::from([completed.round.p]);
+    let committed = apply_round_commit(cfg, st, completed)?;
+    if !persist_before_broadcast(cfg, committed.t) {
+        return publish_round(cfg, st, registry, last_sync_secs, committed, None, &cutoff).await;
+    }
+    let pending = start_async_checkpoint(cfg, st, committed)?;
+    settle_pending_publish(cfg, st, registry, last_sync_secs, pending, &cutoff, &mut busy).await
+}
+
 fn new_state_for(group: &Arc<Group>, cfg: &Config) -> Result<GlobalState> {
     if let Some(fragments) = cfg.policy_sweep_fragments {
-        if group.dtype != DTYPE_F32 {
-            bail!("--policy-sweep-fragments requires an FP32 HELLO session");
+        // Masters and every BCAST/FINAL stay f32; only push deltas may be bf16.
+        if bulk_dtype(group.dtype) != DTYPE_F32 {
+            bail!("--policy-sweep-fragments requires an FP32 HELLO session (optionally with bf16/int8 pushes)");
         }
         if group.layout.fragments.len() != fragments as usize {
             bail!(
@@ -3383,6 +3845,17 @@ fn new_state_for(group: &Arc<Group>, cfg: &Config) -> Result<GlobalState> {
     )?;
     st.policy_sweep_fragments = cfg.policy_sweep_fragments;
     st.session_contract_hash = Some(group.session_contract_hash);
+    match (bcast_delta(group.dtype), cfg.bcast_delta_full_every) {
+        (true, Some(full_every)) => {
+            st.downlink = Some(Mutex::new(crate::downlink::DownlinkAnchors::new(
+                group.layout.fragments.len(),
+                full_every,
+            )?));
+        }
+        (true, None) => bail!("session asks for bf16 downlink deltas, but --bcast-delta-full-every is unset"),
+        (false, Some(_)) => bail!("--bcast-delta-full-every is set, but the session has no bf16 downlink deltas"),
+        (false, None) => {}
+    }
     if cfg.delta_correction {
         st.delta_correction = Some(crate::merge::Heloco::default());
     }
@@ -3721,6 +4194,11 @@ async fn send_fragment(
     msg_type: u8,
     dtype: u8,
 ) -> Result<()> {
+    if let Some(encoded) = recovery_bcast(st, p, msg_type) {
+        return group
+            .send_tensor_large(msg_type, &encoded.prefix, encoded.dtype, &encoded.values)
+            .await;
+    }
     let mut prefix = [0u8; 12];
     prefix[..4].copy_from_slice(&(p as u32).to_le_bytes());
     prefix[4..].copy_from_slice(&st.versions[p].to_le_bytes());
@@ -3856,6 +4334,7 @@ fn append_tape(
     quorum_ms: Option<u64>,
     grace_ms: Option<u64>,
     sync_ms: u64,
+    checkpoint_ms: Option<u64>,
     pushes: &HashMap<Member, Push>,
     gnorm: f64,
     ms: u64,
@@ -3932,9 +4411,10 @@ fn append_tape(
         .map(|byte| format!("{byte:02x}"))
         .collect();
     let merge_seconds = sync_ms as f64 / 1000.0;
+    let checkpoint_field = checkpoint_tape_field(checkpoint_ms);
     let sweep_fields = policy_sweep_event_fields(step, policy_sweep_fragments);
     let line = format!(
-        "{{\"protocol_version\":{PROTOCOL_VERSION},\"delta_semantics\":\"local_minus_raw_anchor\",\"sync/layout_hash\":\"{layout_hash}\",\"sync/base_version\":{launch_base_version},\"sync/responders\":{},\"sync/quorum\":{quorum},\"sync/rejected_stale_updates\":0,\"sync/merge_seconds\":{merge_seconds},\"sync/global_delta_norm\":{gnorm},\"step\":{step},\"fragment\":{fragment}{sweep_fields},\"launch_base_version\":{launch_base_version},\"attempt\":{attempt},\"gnorm\":{gnorm},\"ms\":{ms},\"quorum\":{quorum},\"expected\":{},\"expected_members\":{},\"responded\":{},\"responded_members\":{},\"missed_grace\":{},\"missed_members\":{},\"quorum_ms\":{quorum_ms},\"grace_ms\":{grace_ms},\"sync_ms\":{sync_ms},\"time_unix\":{:?},\"responders\":[{}]}}\n",
+        "{{\"protocol_version\":{PROTOCOL_VERSION},\"delta_semantics\":\"local_minus_raw_anchor\",\"sync/layout_hash\":\"{layout_hash}\",\"sync/base_version\":{launch_base_version},\"sync/responders\":{},\"sync/quorum\":{quorum},\"sync/rejected_stale_updates\":0,\"sync/merge_seconds\":{merge_seconds},\"sync/global_delta_norm\":{gnorm},\"step\":{step},\"fragment\":{fragment}{sweep_fields},\"launch_base_version\":{launch_base_version},\"attempt\":{attempt},\"gnorm\":{gnorm},\"ms\":{ms},\"quorum\":{quorum},\"expected\":{},\"expected_members\":{},\"responded\":{},\"responded_members\":{},\"missed_grace\":{},\"missed_members\":{},\"quorum_ms\":{quorum_ms},\"grace_ms\":{grace_ms},\"sync_ms\":{sync_ms}{checkpoint_field},\"time_unix\":{:?},\"responders\":[{}]}}\n",
         responded.len(),
         json_ids(&expected_learners),
         json_members(expected_members),
@@ -3952,6 +4432,12 @@ fn append_tape(
         .and_then(|mut f| f.write_all(line.as_bytes()))
         .with_context(|| format!("append event tape {}", path.display()))?;
     Ok(())
+}
+
+/// Optional top-level tape field: wall time of the per-round checkpoint
+/// (synchronous save, or snapshot + async write until durable).
+fn checkpoint_tape_field(checkpoint_ms: Option<u64>) -> String {
+    checkpoint_ms.map_or_else(String::new, |ms| format!(",\"checkpoint_ms\":{ms}"))
 }
 
 fn json_ids(ids: &[u32]) -> String {
@@ -4012,6 +4498,28 @@ mod hello_auth_tests {
         let mut out = body.to_vec();
         out.extend_from_slice(&crate::elastic::hmac_sha256(key, &input));
         out
+    }
+
+    #[test]
+    fn bw_probe_body_is_two_bounded_sizes() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&5u64.to_le_bytes());
+        body.extend_from_slice(&7u64.to_le_bytes());
+        assert_eq!(parse_bw_probe(&body).unwrap(), (5, 7));
+        assert!(parse_bw_probe(&body[..15]).is_err());
+        let mut too_big = Vec::new();
+        too_big.extend_from_slice(&(BW_PROBE_MAX_BYTES + 1).to_le_bytes());
+        too_big.extend_from_slice(&0u64.to_le_bytes());
+        assert!(parse_bw_probe(&too_big).is_err());
+    }
+
+    #[test]
+    fn bw_probe_slots_are_bounded() {
+        let slots: Vec<_> = (0..BW_PROBE_MAX_CONNECTIONS).map(|_| BwProbeSlot::acquire()).collect();
+        assert!(slots.iter().all(Option::is_some));
+        assert!(BwProbeSlot::acquire().is_none());
+        drop(slots);
+        assert!(BwProbeSlot::acquire().is_some());
     }
 
     #[test]
@@ -4354,6 +4862,8 @@ mod tests {
             final_state: None,
             checkpoint_path: None,
             checkpoint_every: 0,
+            async_checkpoint: false,
+            bcast_delta_full_every: None,
             resume: false,
             mark_final_checkpoint: false,
             learner_budget_steps: None,
@@ -4553,7 +5063,7 @@ mod tests {
             }
             let mut stream = stream.expect("legacy syncer did not start");
             // A correctly sealed elastic payload (epoch 0) still must not be
-            // accepted: legacy only knows HELLO/DATA_HELLO as a first frame.
+            // accepted: legacy only knows HELLO/DATA_HELLO/BW_PROBE as a first frame.
             let payload = crate::elastic::seal(&key, msg_type, 0u64.to_le_bytes().to_vec());
             let mut frame = MAGIC.to_le_bytes().to_vec();
             frame.push(msg_type);
@@ -4570,7 +5080,7 @@ mod tests {
             assert_eq!(reply.get(4), Some(&MSG_ERROR), "type {msg_type}");
             let text = String::from_utf8_lossy(&reply[13..]);
             assert!(
-                text.contains(&format!("first frame must be HELLO/DATA_HELLO, got {msg_type}")),
+                text.contains(&format!("first frame must be HELLO/DATA_HELLO/BW_PROBE, got {msg_type}")),
                 "type {msg_type}: {text}"
             );
             assert!(!server.is_finished(), "type {msg_type}: server exited");
@@ -4618,10 +5128,30 @@ mod tests {
         assert!(format!("{:#}", validate_config(&invalid).unwrap_err())
             .contains("requires positive --total-steps"));
 
+        let mut streamed = sweep_test_config(2, 4);
+        streamed.pipeline = 2;
+        streamed.async_checkpoint = true;
+        assert!(validate_config(&streamed).is_ok());
+        for pipeline in [0, 3] {
+            invalid = sweep_test_config(2, 4);
+            invalid.pipeline = pipeline;
+            assert!(format!("{:#}", validate_config(&invalid).unwrap_err())
+                .contains("requires --pipeline between 1 and the fragment count"));
+        }
+        let mut legacy_async = round_test_config(3);
+        legacy_async.async_checkpoint = true;
+        assert!(format!("{:#}", validate_config(&legacy_async).unwrap_err())
+            .contains("--async-checkpoint requires --policy-sweep-fragments"));
         invalid = sweep_test_config(2, 4);
-        invalid.pipeline = 2;
+        invalid.async_checkpoint = true;
+        invalid.learner_budget_steps = Some(1);
         assert!(format!("{:#}", validate_config(&invalid).unwrap_err())
-            .contains("requires --pipeline 1"));
+            .contains("does not support --learner-budget-steps"));
+        // Async persistence is not semantic: the profile hash ignores it.
+        let mut hashed = sweep_test_config(2, 4);
+        let before = hashed.semantic_profile_hash();
+        hashed.async_checkpoint = true;
+        assert_eq!(before, hashed.semantic_profile_hash());
 
         invalid = sweep_test_config(3, 4);
         assert!(
@@ -4654,13 +5184,21 @@ mod tests {
 
         for mutate in [
             |config: &mut Config| config.checkpoint_path = None,
-            |config: &mut Config| config.checkpoint_every = 2,
+            |config: &mut Config| config.checkpoint_every = 0,
+            |config: &mut Config| config.checkpoint_every = 3,
         ] {
             invalid = sweep_test_config(2, 4);
             mutate(&mut invalid);
             assert!(format!("{:#}", validate_config(&invalid).unwrap_err())
                 .contains("requires --checkpoint-path"));
         }
+        // Sweep-aligned checkpoint intervals are accepted.
+        let mut interval = sweep_test_config(2, 4);
+        interval.checkpoint_every = 4;
+        assert!(validate_config(&interval).is_ok());
+        assert!(persist_before_broadcast(&interval, 4));
+        assert!(!persist_before_broadcast(&interval, 2));
+        assert!(persist_before_broadcast(&sweep_test_config(2, 4), 1));
     }
 
     #[test]
@@ -5244,6 +5782,197 @@ mod tests {
         std::fs::remove_dir_all(&directory).ok();
     }
 
+    fn unique_test_directory(tag: &str) -> std::path::PathBuf {
+        let directory = std::env::temp_dir().join(format!(
+            "yeto-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    #[test]
+    fn bf16_push_session_rounds_only_the_delta_within_bf16_error() {
+        // dtype 4 decodes pushes as bf16 and keeps every bulk payload f32.
+        assert_eq!(bulk_dtype(DTYPE_F32_PUSH_BF16), DTYPE_F32);
+        let delta: Vec<f32> = (0..4096)
+            .map(|i| ((i as f32) * 0.37).sin() * 10f32.powi((i % 9) - 4))
+            .collect();
+        let mut wire = Vec::new();
+        encode_tensor(push_dtype(DTYPE_F32_PUSH_BF16), &delta, &mut wire).unwrap();
+        assert_eq!(wire.len(), delta.len() * 2);
+        let mut decoded = Vec::new();
+        decode_tensor(push_dtype(DTYPE_F32_PUSH_BF16), &wire, &mut decoded).unwrap();
+        for (exact, rounded) in delta.iter().zip(&decoded) {
+            // bf16 keeps 8 significant bits: round-to-nearest error <= 2^-8 relative.
+            assert!((exact - rounded).abs() <= exact.abs() * (1.0 / 256.0));
+        }
+        // A merge of bf16 deltas into f32 masters stays within the same bound
+        // per learner, so a two-learner average is off by at most that much.
+        let master = 1.0f32;
+        for (exact, rounded) in delta.iter().zip(&decoded) {
+            let merged_exact = master + exact;
+            let merged = master + rounded;
+            assert!((merged_exact - merged).abs() <= exact.abs() / 256.0 + f32::EPSILON * 2.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn sweep_checkpoint_interval_persists_only_sweep_aligned_steps() {
+        let directory = unique_test_directory("sweep-checkpoint-interval");
+        let learner = member(0, 30);
+        for asynchronous in [false, true] {
+            let checkpoint = directory.join(format!("state-{asynchronous}.ckpt"));
+            let (group, mut frames) = streaming_test_group(DTYPE_F32, false);
+            let registry = registry_with_group(group);
+            let mut config = sweep_test_config(2, 8);
+            config.checkpoint_path = Some(checkpoint.clone());
+            config.checkpoint_every = 4;
+            config.async_checkpoint = asynchronous;
+            let mut state = two_fragment_sweep_state();
+            state.save_checkpoint(&checkpoint).unwrap(); // version zero
+            let mut sync_seconds = 0.0;
+            for step in 1..=6u64 {
+                let fragment = ((step - 1) % 2) as usize;
+                let mut round = sweep_test_round(step, fragment, step.div_ceil(2), 1, learner);
+                let base = state.versions[fragment];
+                round.base_version = base;
+                for push in round.pushes.values_mut() {
+                    push.base_version = base;
+                }
+                if asynchronous {
+                    complete_round_async(&config, &mut state, &registry, &mut sync_seconds, round)
+                        .await
+                        .unwrap();
+                } else {
+                    complete_round(&config, &mut state, &registry, &mut sync_seconds, round)
+                        .await
+                        .unwrap();
+                }
+                assert_eq!(
+                    chunked_inner_type(&frames.try_recv().unwrap()),
+                    MSG_BCAST_FRAGMENT
+                );
+                let mut on_disk = two_fragment_sweep_state();
+                on_disk.load_checkpoint(&checkpoint).unwrap();
+                // Only step 4 (a sweep boundary and a multiple of 4) is durable.
+                let expected = if step >= 4 { 4 } else { 0 };
+                assert_eq!(on_disk.global_step, expected, "step {step}");
+            }
+            // The newest checkpoint resumes exactly at its sweep boundary.
+            let mut resumed = two_fragment_sweep_state();
+            resumed.load_checkpoint(&checkpoint).unwrap();
+            validate_resumed_policy_sweep(&config, &resumed).unwrap();
+            assert_eq!(resumed.versions, vec![3, 4]);
+        }
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[tokio::test]
+    async fn async_checkpoint_matches_the_synchronous_path_bit_for_bit() {
+        let directory = unique_test_directory("async-checkpoint-equal");
+        let learner = member(0, 30);
+        let mut outputs = Vec::new();
+        for asynchronous in [false, true] {
+            let checkpoint = directory.join(format!("state-{asynchronous}.ckpt"));
+            let tape = directory.join(format!("tape-{asynchronous}.jsonl"));
+            let (group, mut frames) = streaming_test_group(DTYPE_F32, false);
+            let registry = registry_with_group(group);
+            let mut config = round_test_config(4);
+            config.pipeline = 2;
+            config.checkpoint_path = Some(checkpoint.clone());
+            config.checkpoint_every = 1;
+            config.async_checkpoint = asynchronous;
+            config.event_tape = Some(tape.clone());
+            let mut state = two_fragment_streaming_state();
+            let mut sync_seconds = 0.0;
+            for step in 1..=2u64 {
+                let round = sweep_test_round(step, (step - 1) as usize, 1, step, learner);
+                if asynchronous {
+                    complete_round_async(&config, &mut state, &registry, &mut sync_seconds, round)
+                        .await
+                        .unwrap();
+                } else {
+                    complete_round(&config, &mut state, &registry, &mut sync_seconds, round)
+                        .await
+                        .unwrap();
+                }
+                // Every non-terminal round is broadcast exactly once.
+                assert_eq!(
+                    chunked_inner_type(&frames.try_recv().unwrap()),
+                    MSG_BCAST_FRAGMENT
+                );
+            }
+            let tape_text = std::fs::read_to_string(&tape).unwrap();
+            assert_eq!(tape_text.lines().count(), 2);
+            assert!(tape_text.lines().all(|line| line.contains("\"checkpoint_ms\":")));
+            outputs.push((state.params.clone(), std::fs::read(&checkpoint).unwrap()));
+            // The snapshot encoder writes exactly the streaming file format.
+            let mut on_disk = two_fragment_streaming_state();
+            on_disk.load_checkpoint(&checkpoint).unwrap();
+            assert_eq!(on_disk.encode_checkpoint().unwrap(), std::fs::read(&checkpoint).unwrap());
+        }
+        assert_eq!(outputs[0].0, outputs[1].0);
+        assert_eq!(outputs[0].1, outputs[1].1);
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[tokio::test]
+    async fn async_checkpoint_failure_withholds_broadcast_and_keeps_previous_checkpoint() {
+        let directory = unique_test_directory("async-checkpoint-failure");
+        let checkpoint = directory.join("state.ckpt");
+        let learner = member(0, 30);
+        let (group, mut frames) = streaming_test_group(DTYPE_F32, false);
+        let registry = registry_with_group(group);
+        let mut config = round_test_config(4);
+        config.pipeline = 2;
+        config.checkpoint_path = Some(checkpoint.clone());
+        config.checkpoint_every = 1;
+        config.async_checkpoint = true;
+        let mut state = two_fragment_streaming_state();
+        let mut sync_seconds = 0.0;
+        complete_round_async(
+            &config,
+            &mut state,
+            &registry,
+            &mut sync_seconds,
+            sweep_test_round(1, 0, 1, 1, learner),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            chunked_inner_type(&frames.try_recv().unwrap()),
+            MSG_BCAST_FRAGMENT
+        );
+        // The atomic writer creates this exact temporary path; a directory
+        // there makes the next write fail deterministically.
+        std::fs::create_dir(checkpoint.with_extension("tmp")).unwrap();
+        let error = complete_round_async(
+            &config,
+            &mut state,
+            &registry,
+            &mut sync_seconds,
+            sweep_test_round(2, 1, 1, 1, learner),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("step 2 not broadcast"));
+        assert!(matches!(
+            frames.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        // The resume point is still the last durable, broadcast cut.
+        let mut recovered = two_fragment_streaming_state();
+        recovered.load_checkpoint(&checkpoint).unwrap();
+        assert_eq!(recovered.global_step, 1);
+        assert_eq!(recovered.versions, vec![1, 0]);
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
     #[tokio::test]
     async fn policy_sweep_checkpoint_resume_mid_sweep_does_not_double_account() {
         let directory = std::env::temp_dir().join(format!(
@@ -5410,13 +6139,13 @@ mod tests {
 
     #[tokio::test]
     async fn updated_broadcast_propagates_local_errors_but_tolerates_closed_streams() {
-        let invalid_state = broadcast_test_state(255);
+        let invalid_state = broadcast_test_state(9);
         let (connected, _receiver) = streaming_test_group(DTYPE_F32, false);
         let error = broadcast_updated_fragment(&invalid_state, &registry_with_group(connected), 0)
             .await
             .unwrap_err();
         assert!(
-            format!("{error:#}").contains("unknown tensor dtype 255"),
+            format!("{error:#}").contains("unknown tensor dtype 9"),
             "unexpected error: {error:#}"
         );
 
@@ -6227,6 +6956,7 @@ mod tests {
             Some(11),
             Some(22),
             33,
+            None,
             &pushes,
             0.5,
             44,
@@ -6275,6 +7005,7 @@ mod tests {
             Some(1),
             Some(0),
             2,
+            None,
             &pushes,
             0.5,
             3,
@@ -6303,6 +7034,7 @@ mod tests {
             Some(1),
             Some(0),
             2,
+            None,
             &pushes,
             0.5,
             3,
@@ -6410,6 +7142,7 @@ mod tests {
             Some(1),
             Some(0),
             2,
+            None,
             &pushes,
             0.5,
             3,

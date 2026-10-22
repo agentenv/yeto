@@ -27,7 +27,7 @@ class TorchCutBackend:
     def is_adapter(self, name):
         return "lora" in name
 
-    def export_optimizer(self, optimizer, named):
+    def export_optimizer(self, optimizer, named, *, on_device=False):  # clones stay on their device
         by_id = {id(p): n for n, p in named}
         entries = {}
         for group in optimizer.param_groups:
@@ -170,7 +170,7 @@ class LazyStateDistOptBackend(TorchCutBackend):
         super().__init__(coord)
         self.side_effect_free = side_effect_free
 
-    def export_optimizer(self, optimizer, named):
+    def export_optimizer(self, optimizer, named, *, on_device=False):  # clones stay on their device
         from collections import defaultdict
 
         from yeto.rl.adapters.miles.cut_plugin import side_effect_free_state

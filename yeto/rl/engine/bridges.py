@@ -138,7 +138,26 @@ class LocalOnlySync:
                 k: info.get(k) for k in ("cut_id", "cut_bytes", "save_s", "store_copy_s",
                                          "store_commit_s", "total_s", "write_bytes_per_s",
                                          "policy_hash", "store_synced", "latest_seq", "pruned",
-                                         "incarnation_index", "final", "trainer_onloaded_for_cut")})
+                                         "incarnation_index", "final", "trainer_onloaded_for_cut",
+                                         "store_commit", "prepared_before_offload")})
+
+    def cut_due(self, rollout_id: int) -> bool:
+        """A round cut is due at the safe point before ``rollout_id``."""
+        return self.round_cuts is not None and self.round_cuts.due(
+            rollout_id, final=rollout_id >= self._end())
+
+    def prepare_cut(self, driver: IslandDriver, *, rollout_id: int, state: Any) -> None:
+        """E1: write the trainer part of the cut due at the next safe point while the
+        trainer is still resident (the driver calls this right before it offloads a
+        colocated trainer for the publication). A failure is reported, not fatal: the
+        safe point then cuts the usual way."""
+        if self.round_cuts is None:
+            return
+        try:
+            self.round_cuts.prepare(driver, rollout_id=rollout_id, state=state,
+                                    final=rollout_id >= self._end())
+        except Exception as error:  # noqa: BLE001
+            driver.emit("rl_cut_prepare_failed", rollout_id=rollout_id, error=repr(error)[:2000])
 
     def resume_data_cursor(self) -> dict[str, int] | None:
         """The data cursor recorded by the round cut this run resumed from (None:

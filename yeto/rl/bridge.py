@@ -13,8 +13,13 @@ from typing import Protocol
 
 import torch
 
-from .engine.backend_identity import config_island_contract_sha256
-from ..protocol import DTYPE_F32, FinalManifest, PullRequest, SyncerClient
+from ..protocol import (
+    DTYPE_F32,
+    DTYPE_FLAG_BCAST_DELTA,
+    FinalManifest,
+    PullRequest,
+    SyncerClient,
+)
 from ..tensor_io import pack_tensor, unpack_fragment
 from .core import (
     CanonicalLoraState,
@@ -29,6 +34,7 @@ from .core import (
     policy_delta,
     tensors_from_flat_owned,
 )
+from .engine.backend_identity import config_island_contract_sha256
 
 
 class IslandRuntime(Protocol):
@@ -77,6 +83,12 @@ class BridgeConfig:
     # 7.7c: "<vendor>-<card>" (yeto.hw.catalog); sent in HELLO / JOIN so the
     # syncer refuses another card type by name. None = not declared.
     compat_group: str | None = None
+    # S26 E3: receive BCAST as bf16 deltas against the shared f32 anchor
+    # (session flag; the syncer runs --bcast-delta-full-every). The client
+    # hands this bridge the reconstructed f32 anchor, so nothing else changes.
+    # An anchor mismatch drops the connection; with max_reconnects=0 the
+    # island exits and its restart re-reads the committed cut as f32.
+    bcast_delta: bool = False
 
 
 def _write_round_audit(
@@ -278,7 +290,7 @@ class StrictRlBridge:
             config.syncer_addr,
             config.learner_id,
             self.layout,
-            dtype=DTYPE_F32,
+            dtype=DTYPE_F32 | (DTYPE_FLAG_BCAST_DELTA if config.bcast_delta else 0),
             num_streams=config.wan_streams,
             session_contract_hash=_session_contract(
                 self.layout, config_island_contract_sha256(config)),
