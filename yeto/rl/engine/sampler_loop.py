@@ -26,14 +26,26 @@ version, at the round start) and the follower's release counters
 ``follower.generating()``: a refresh during it loads nothing unless the engines
 update their weights mid-generation.
 
+Updates during a generation (``follower.live_update``): while a round
+generates, a background thread polls the store every ``live_poll_s`` and
+loads each new release into the running engine (the adapter pauses the
+generation, loads the weights and continues). Only that thread calls the
+follower during the round; it stops before the round's events are written.
+``rl_sampler_policy_loaded`` then carries ``in_flight`` True. A load whose
+post-load checks fail during the round sets :attr:`SamplerLoop.unchecked_in_flight`
+(the round's caller drops its groups); an error other than
+:class:`~.policy_release.ReleaseNotLoaded` stops the island after the round.
+
 After the last round it marks the data end, so the trainer stops after reading
 the rest. The loop is engine-neutral: ``generate(rollout_id)`` runs one round.
 """
 
 from __future__ import annotations
 
+import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import Any
 
 from .policy_release import PolicyFollower, ReleaseNotLoaded
@@ -51,7 +63,8 @@ class SamplerLoop:
                  clock: Callable[[], float] = time.monotonic,
                  require_release: bool = False,
                  loaded_fields: Callable[[], dict[str, Any]] = dict,
-                 ready: Callable[[], bool] = lambda: True) -> None:
+                 ready: Callable[[], bool] = lambda: True,
+                 live_poll_s: float | None = None) -> None:
         if int(max_backlog_groups) < 1:
             raise ValueError("max_backlog_groups must be >= 1")
         self.follower = follower
@@ -69,6 +82,8 @@ class SamplerLoop:
         self.loaded_fields = loaded_fields  # extra fields of rl_sampler_policy_loaded
         self.ready = ready  # False: the engine may not generate (failed post-load check)
         self._not_loaded: tuple[int, str] | None = None  # (seq, reason) last reported
+        self.live_poll_s = self.poll_s if live_poll_s is None else float(live_poll_s)
+        self.unchecked_in_flight = False  # this round generated on weights that failed a check
 
     def backlog(self) -> int:
         """Groups in the buffer after the trainer's read position of its last release
@@ -86,7 +101,7 @@ class SamplerLoop:
             read = 0 if seen.buffer_selected is None else int(seen.buffer_selected)
         return max(0, len(self.buffer) - read)
 
-    def _load_newest(self) -> None:
+    def _load_newest(self, *, in_flight: bool = False) -> None:
         try:
             loaded = self.follower.refresh()
         except ReleaseNotLoaded as error:
@@ -100,7 +115,38 @@ class SamplerLoop:
         if loaded is not None:
             self.emit("rl_sampler_policy_loaded", seq=loaded.seq, policy_version=loaded.version,
                       policy_hash=loaded.policy_hash, buffer_selected=loaded.buffer_selected,
-                      weights=loaded.weights, sha256=loaded.sha256, **self.loaded_fields())
+                      weights=loaded.weights, sha256=loaded.sha256,
+                      **({"in_flight": True} if in_flight else {}), **self.loaded_fields())
+
+    @contextmanager
+    def _live_refresh(self) -> Iterator[None]:
+        """Load new releases while the round generates (module doc)."""
+        self.unchecked_in_flight = False
+        if not self.follower.live_update:
+            yield
+            return
+        done = threading.Event()
+        errors: list[BaseException] = []
+
+        def poll() -> None:
+            while not done.wait(self.live_poll_s):
+                try:
+                    self._load_newest(in_flight=True)
+                except BaseException as error:  # noqa: BLE001 - re-raised on the loop thread
+                    errors.append(error)
+                    return
+                if not self.ready():
+                    self.unchecked_in_flight = True
+
+        thread = threading.Thread(target=poll, name="sampler-live-refresh", daemon=True)
+        thread.start()
+        try:
+            yield
+        finally:
+            done.set()
+            thread.join()
+        if errors:
+            raise errors[0]
 
     def _admit(self, rollout_id: int) -> bool:
         """True when the round may start; False when asked to stop while waiting."""
@@ -156,7 +202,7 @@ class SamplerLoop:
             before = len(self.buffer)
             started = self.clock()
             version, lag = self.follower.version, self.follower.version_lag()
-            with self.follower.generating():
+            with self.follower.generating(), self._live_refresh():
                 self.generate(rollout_id)
             self.buffer.refresh()
             self.emit("rl_sampler_round", rollout_id=rollout_id, policy_version=version,

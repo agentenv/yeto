@@ -173,7 +173,8 @@ class ServerEngine:
         """Refuse a release or configuration the engine would serve wrongly."""
         self.check_format(model_dir)
 
-    def reload_in_place(self, model_dir: Path, version: int) -> None:
+    def reload_in_place(self, model_dir: Path, version: int) -> Mapping[str, Any] | None:
+        """Load ``model_dir`` into the running server; may return LoadReport detail."""
         raise SamplerEngineError(f"{self.ENGINE}: in-place reload is not implemented")
 
     def after_ready(self) -> dict[str, Any]:
@@ -243,10 +244,10 @@ class ServerEngine:
             return self.start(release_dir, version)
         self.preflight(Path(release_dir))
         began = self._clock()
-        self.reload_in_place(Path(release_dir), int(version))
+        detail = self.reload_in_place(Path(release_dir), int(version)) or {}
         self._version = int(version)
         return LoadReport(reload_mode=RELOAD_IN_PLACE, pause_s=self._clock() - began,
-                          detail={"model_dir": str(release_dir)})
+                          detail={"model_dir": str(release_dir), **detail})
 
     def _wait_ready(self) -> None:
         deadline = self._clock() + float(self.config.start_timeout_s)
