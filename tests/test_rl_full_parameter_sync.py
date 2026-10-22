@@ -49,6 +49,10 @@ def _steps(progress, role):
 
 
 class _PairedRole:
+    # Like the Miles role stream: never delivers an older version of a
+    # fragment after a newer one, so a version jump is a catch-up.
+    monotonic_broadcasts = True
+
     def __init__(
         self,
         role: str,

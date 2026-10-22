@@ -92,7 +92,8 @@ async def test_rejoin_catch_up_jumps_a_fragment_over_missed_rounds():
 
 @pytest.mark.asyncio
 async def test_catch_up_waits_without_a_monotonic_stream():
-    actor = _PairedRole("actor", [], [])  # no ordering promise: version 1 may still arrive
+    actor = _PairedRole("actor", [], [])
+    actor.monotonic_broadcasts = False  # no ordering promise: version 1 may still arrive
     pairing = _async_pairing(actor)
     actor._staged_steps.append(5)
 
