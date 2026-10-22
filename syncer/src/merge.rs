@@ -37,7 +37,7 @@ pub fn learner_weight(c_tokens: u64, c_steps: u64) -> f64 {
     }
 }
 
-fn l2_norm(delta: &[f32]) -> f64 {
+pub(crate) fn l2_norm(delta: &[f32]) -> f64 {
     delta
         .iter()
         .map(|d| (*d as f64) * (*d as f64))
@@ -69,7 +69,7 @@ pub fn merge_rda(deltas: &[&[f32]], weights: &[f64], out: &mut [f32]) {
         return;
     }
     let norms: Vec<f64> = deltas.iter().map(|d| l2_norm(d)).collect();
-    let radial: f64 = norms.iter().zip(weights).map(|(n, w)| n * w).sum::<f64>() / wsum;
+    let radial = rda_radial(&norms, weights, wsum);
 
     // Weighted mean of unit directions, φ(0) := 0.
     out.fill(0.0);
@@ -82,20 +82,34 @@ pub fn merge_rda(deltas: &[&[f32]], weights: &[f64], out: &mut [f32]) {
             *o += coef * *d;
         }
     }
+    if !rda_rescale(out, radial) {
+        // Degenerate (all-zero or cancelling directions): fall back to Avg.
+        merge_avg(deltas, weights, out);
+    }
+}
+
+/// RDA radial part: Σ w_m ‖v_m‖ / Σ w_m.
+pub(crate) fn rda_radial(norms: &[f64], weights: &[f64], wsum: f64) -> f64 {
+    norms.iter().zip(weights).map(|(n, w)| n * w).sum::<f64>() / wsum
+}
+
+/// Rescale the weighted unit-direction sum in `out` to norm `radial`.
+/// Returns false, leaving `out` untouched, when the mean direction is
+/// degenerate and the caller must fall back to direct averaging.
+pub(crate) fn rda_rescale(out: &mut [f32], radial: f64) -> bool {
     let mean_dir_norm = out
         .iter()
         .map(|v| (*v as f64) * (*v as f64))
         .sum::<f64>()
         .sqrt();
     if mean_dir_norm < 1e-12 {
-        // Degenerate (all-zero or cancelling directions): fall back to Avg.
-        merge_avg(deltas, weights, out);
-        return;
+        return false;
     }
     let scale = (radial / mean_dir_norm) as f32;
     for o in out.iter_mut() {
         *o *= scale;
     }
+    true
 }
 
 const ISO_SINGULAR_VALUE_RTOL: f64 = 1e-10;

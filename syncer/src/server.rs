@@ -22,6 +22,7 @@ use tracing::{info, warn};
 
 use crate::membership::{Admission, AdmitError, CapacityQuorum, Member, Membership};
 use crate::protocol::*;
+use crate::fold::FragmentFold;
 use crate::state::{
     remove_final_marker, write_final_marker, ComputedMerge, GlobalState, Layout, PreparedMerge,
 };
@@ -2438,6 +2439,7 @@ async fn scheduler(
             if !busy_fragments.insert(p) {
                 bail!("fragment {p} acquired twice");
             }
+            let fold = round_fold(&cfg, &st, p, &expected_members, launch_quorum);
             inflight.push(Round {
                 t,
                 p,
@@ -2454,6 +2456,7 @@ async fn scheduler(
                 soft_min: cfg.membership.soft_min_arrivals(),
                 quorum_ms: None,
                 grace_ms: None,
+                fold,
                 pushes: HashMap::new(),
             });
         }
@@ -2489,8 +2492,8 @@ async fn scheduler(
         while i < inflight.len() {
             match round_action(&inflight[i], now) {
                 RoundAction::Complete => {
-                    let round = inflight.remove(i);
-                    let prepared = prepare_round_compute(&cfg, &st, &round)?;
+                    let mut round = inflight.remove(i);
+                    let prepared = prepare_round_compute(&cfg, &st, &mut round)?;
                     if !budget_cutoff.try_linearize_work() {
                         cutoff_established = true;
                         break 'outer;
@@ -2567,6 +2570,7 @@ async fn scheduler(
                     r.attempt += 1;
                     r.pull = encode_pull(r.p, r.t, r.attempt);
                     r.pushes.clear();
+                    r.fold = round_fold(&cfg, &st, r.p, &r.expected_members, r.quorum_size);
                     r.started = Instant::now();
                     r.soft_deadline = cfg.membership.soft_deadline.map(|soft| r.started + soft);
                     r.grace_deadline = None;
@@ -3258,6 +3262,9 @@ struct Round {
     soft_min: usize,
     quorum_ms: Option<u64>,
     grace_ms: Option<u64>,
+    /// Streaming reduction of accepted pushes (see `round_fold`); `None`
+    /// keeps every push's gradient until the buffered merge.
+    fold: Option<FragmentFold>,
     pushes: HashMap<Member, Push>,
 }
 
@@ -3529,12 +3536,63 @@ fn route_push(
         return PushDisposition::Duplicate;
     }
     round.pushes.insert(member, push);
+    advance_fold(round);
     PushDisposition::Accepted
+}
+
+/// A streaming fold for a round whose merge inputs are fixed at launch:
+/// every expected learner must answer (quorum covers the roster), weights
+/// are equal and no HeLoCo correction reads the momentum per push.  Only
+/// then is the fold bit-identical to the buffered merge (see `fold.rs`).
+/// Dynamic membership is excluded: a lease expiry or soft deadline can merge
+/// a subset of the roster, and a carry discount changes per-push weights.
+fn round_fold(
+    cfg: &Config,
+    st: &GlobalState,
+    p: usize,
+    expected_members: &[Member],
+    quorum_size: usize,
+) -> Option<FragmentFold> {
+    if quorum_size < expected_members.len()
+        || cfg.learner_weight != LearnerWeight::Equal
+        || st.delta_correction.is_some()
+        || !cfg.membership.is_static()
+    {
+        return None;
+    }
+    let roster: Vec<u32> = expected_members.iter().map(|m| m.learner_id).collect();
+    FragmentFold::for_equal_full_roster(st.layout.fragments.get(p)?, &roster)
+}
+
+/// Fold every accepted push whose turn in the canonical order has come and
+/// release its gradient buffer; later-order pushes wait in `round.pushes`.
+fn advance_fold(round: &mut Round) {
+    let Some(fold) = round.fold.as_mut() else {
+        return;
+    };
+    while let Some(next) = fold.next_learner() {
+        let Some(push) = round
+            .pushes
+            .iter_mut()
+            .find_map(|(member, push)| (member.learner_id == next).then_some(push))
+        else {
+            break;
+        };
+        let gradient = std::mem::take(&mut push.outer_gradient);
+        if let Err(error) = fold.fold_next(next, gradient) {
+            fold.poison(error);
+            break;
+        }
+    }
 }
 
 /// Fix learner order and prepare owned matrix jobs without mutating global
 /// optimizer state. This exact order is the reduction order on every run.
-fn prepare_round_compute(cfg: &Config, st: &GlobalState, round: &Round) -> Result<PreparedMerge> {
+fn prepare_round_compute(
+    cfg: &Config,
+    st: &GlobalState,
+    round: &mut Round,
+) -> Result<PreparedMerge> {
     if st.versions.get(round.p).copied() != Some(round.base_version) {
         bail!(
             "round t={} fragment {} base version {} != current {:?}",
@@ -3548,7 +3606,7 @@ fn prepare_round_compute(cfg: &Config, st: &GlobalState, round: &Round) -> Resul
     ordered_pushes.sort_unstable_by_key(|(member, _)| **member);
     let mut outer_gradients = Vec::with_capacity(ordered_pushes.len());
     let mut weights = Vec::with_capacity(ordered_pushes.len());
-    for (member, push) in ordered_pushes {
+    for (member, push) in &ordered_pushes {
         if push.base_version < round.base_version {
             warn!(
                 learner_id = member.learner_id,
@@ -3569,7 +3627,26 @@ fn prepare_round_compute(cfg: &Config, st: &GlobalState, round: &Round) -> Resul
         // Carry discount γ^lag per fragment version (1 when off: exact).
         weights.push(weight * cfg.membership.carry_discount(round.base_version - push.base_version));
     }
-    st.prepare_merge(round.p, round.base_version, &outer_gradients, &weights)
+    let Some(fold) = round.fold.take() else {
+        return st.prepare_merge(round.p, round.base_version, &outer_gradients, &weights);
+    };
+    // The fold reduced in learner-id order; the buffered merge reduces in
+    // Member order.  They agree exactly when every responder was folded and
+    // ids are unique, which this check makes explicit.
+    let responders: Vec<u32> = ordered_pushes.iter().map(|(m, _)| m.learner_id).collect();
+    if fold.folded_learners() != responders.as_slice() {
+        bail!(
+            "round t={} fragment {}: streaming fold covered learners {:?}, responders {:?}",
+            round.t,
+            round.p,
+            fold.folded_learners(),
+            responders
+        );
+    }
+    let delta = fold
+        .finish()
+        .with_context(|| format!("round t={} fragment {}", round.t, round.p))?;
+    st.prepare_reduced_merge(round.p, round.base_version, delta)
 }
 
 /// A round whose merge is applied to `GlobalState` but not yet externally
@@ -3849,10 +3926,9 @@ fn start_async_checkpoint(
         .clone()
         .context("--async-checkpoint requires --checkpoint-path")?;
     let write_started = Instant::now();
-    let bytes = st.encode_checkpoint()?;
-    let write = tokio::task::spawn_blocking(move || {
-        crate::state::write_checkpoint_bytes(&path, &bytes)
-    });
+    // Shares fragment buffers with `st`; no model-sized copy is made here.
+    let snapshot = st.checkpoint_snapshot()?;
+    let write = tokio::task::spawn_blocking(move || snapshot.save(&path));
     Ok(PendingPublish {
         committed,
         write_started,
@@ -3924,9 +4000,9 @@ async fn complete_round(
     st: &mut GlobalState,
     registry: &Registry,
     last_sync_secs: &mut f64,
-    round: Round,
+    mut round: Round,
 ) -> Result<()> {
-    let prepared = prepare_round_compute(cfg, st, &round)?;
+    let prepared = prepare_round_compute(cfg, st, &mut round)?;
     let compute_start = Instant::now();
     let merge = prepared.compute().await?;
     let completed = ComputedRound {
@@ -3945,9 +4021,9 @@ async fn complete_round_async(
     st: &mut GlobalState,
     registry: &Registry,
     last_sync_secs: &mut f64,
-    round: Round,
+    mut round: Round,
 ) -> Result<()> {
-    let prepared = prepare_round_compute(cfg, st, &round)?;
+    let prepared = prepare_round_compute(cfg, st, &mut round)?;
     let compute_start = Instant::now();
     let merge = prepared.compute().await?;
     let completed = ComputedRound {
@@ -4652,7 +4728,7 @@ fn dump_state(st: &GlobalState, path: &std::path::Path) -> Result<()> {
     f.write_all(&(st.layout.fragments.len() as u32).to_le_bytes())?;
     for p in &st.params {
         f.write_all(&(p.len() as u64).to_le_bytes())?;
-        for v in p {
+        for v in p.iter() {
             f.write_all(&v.to_le_bytes())?;
         }
     }
@@ -5590,6 +5666,7 @@ mod tests {
             soft_min: 1,
             quorum_ms: Some(0),
             grace_ms: Some(0),
+            fold: None,
             pushes: HashMap::from([(
                 member,
                 Push {
@@ -5670,6 +5747,7 @@ mod tests {
             soft_min: 1,
             quorum_ms: Some(0),
             grace_ms: Some(0),
+            fold: None,
             pushes: HashMap::from([(
                 member,
                 Push {
@@ -5729,6 +5807,7 @@ mod tests {
             soft_min: 1,
             quorum_ms: Some(0),
             grace_ms: Some(0),
+            fold: None,
             pushes,
         }
     }
@@ -6264,7 +6343,7 @@ mod tests {
             .unwrap();
         }
         assert_eq!(uninterrupted.versions, vec![4, 5, 6]);
-        assert_eq!(uninterrupted.params, vec![vec![-5.0]; 3]);
+        assert!(uninterrupted.params.iter().all(|p| p.as_slice() == [-5.0]));
         for learner_id in 0..2 {
             let ledger = uninterrupted.ledger.get(&learner_id).unwrap();
             assert_eq!(ledger.merges, 6);
@@ -6715,6 +6794,7 @@ mod tests {
             soft_min: 1,
             quorum_ms: None,
             grace_ms: None,
+            fold: None,
             pushes: HashMap::new(),
         }
     }
@@ -7481,5 +7561,167 @@ mod tests {
         assert!(validate_config(&cfg).is_err(), "θ with K=2");
         cfg.quorum = 1;
         validate_config(&cfg).unwrap();
+    }
+
+    fn fold_test_state(mode: u8) -> GlobalState {
+        let layout = Layout {
+            fragments: vec![crate::state::FragmentInfo {
+                merge_mode: mode,
+                tensor_numels: vec![5, 3, 8],
+                tensor_shapes: (mode == crate::state::MERGE_ISO)
+                    .then(|| vec![(5, 1), (1, 3), (2, 4)]),
+            }],
+        };
+        let mut state = GlobalState::new(layout, 0.7, 0.9, DTYPE_F32).unwrap();
+        state.init_fragment(0, (0..16).map(|i| i as f32 * 0.125).collect()).unwrap();
+        state
+    }
+
+    fn fold_test_push(learner_id: u32) -> Push {
+        let gradient = (0..16u32)
+            .map(|i| {
+                let x = (learner_id * 31 + i * 17) % 23;
+                if i % 7 == 0 {
+                    0.0
+                } else {
+                    (x as f32 - 11.0) * 0.37f32.powi((learner_id + i) as i32 % 5)
+                }
+            })
+            .collect();
+        Push {
+            learner_id,
+            fragment_id: 0,
+            global_step: 1,
+            round_attempt: 1,
+            base_version: 0,
+            local_step: 1,
+            c_steps: 1,
+            c_tokens: 1 + u64::from(learner_id),
+            outer_gradient: gradient,
+            transfer: PushTransfer::default(),
+        }
+    }
+
+    fn fold_test_round(cfg: &Config, st: &GlobalState, members: &[Member], fold: bool) -> Round {
+        let mut round = test_round(members.to_vec());
+        round.t = 1;
+        round.p = 0;
+        round.base_version = 0;
+        round.quorum_size = members.len();
+        round.fold = if fold {
+            round_fold(cfg, st, 0, members, members.len())
+        } else {
+            None
+        };
+        round
+    }
+
+    fn committed_bits(
+        cfg: &Config,
+        mode: u8,
+        members: &[Member],
+        order: &[usize],
+        fold: bool,
+    ) -> Vec<u32> {
+        let mut st = fold_test_state(mode);
+        let mut round = fold_test_round(cfg, &st, members, fold);
+        assert_eq!(round.fold.is_some(), fold);
+        for &index in order {
+            let member = members[index];
+            assert_eq!(
+                route_one(&mut round, member, fold_test_push(member.learner_id)),
+                PushDisposition::Accepted
+            );
+        }
+        let merge = prepare_round_compute(cfg, &st, &mut round)
+            .unwrap()
+            .finish_inline()
+            .unwrap();
+        st.commit_merge(merge).unwrap();
+        st.params[0].iter().map(|v| v.to_bits()).collect()
+    }
+
+    fn route_one(round: &mut Round, member: Member, push: Push) -> PushDisposition {
+        super::route_push(std::slice::from_mut(round), member, push, None, false)
+    }
+
+    fn permutations(n: usize) -> Vec<Vec<usize>> {
+        if n == 0 {
+            return vec![Vec::new()];
+        }
+        let mut out = Vec::new();
+        for rest in permutations(n - 1) {
+            for at in 0..=rest.len() {
+                let mut order = rest.clone();
+                order.insert(at, n - 1);
+                out.push(order);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn streaming_fold_commits_bit_identically_in_every_arrival_order() {
+        let cfg = round_test_config(1);
+        let members = [member(0, 3), member(2, 1), member(5, 9), member(7, 2)];
+        for mode in [
+            crate::state::MERGE_AVG,
+            crate::state::MERGE_RDA,
+            crate::state::MERGE_ISO,
+        ] {
+            let buffered = committed_bits(&cfg, mode, &members, &[3, 1, 0, 2], false);
+            for order in permutations(members.len()) {
+                assert_eq!(
+                    committed_bits(&cfg, mode, &members, &order, true),
+                    buffered,
+                    "mode {mode} arrival order {order:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_fold_releases_in_order_pushes_and_holds_early_ones() {
+        let cfg = round_test_config(1);
+        let st = fold_test_state(crate::state::MERGE_RDA);
+        let members = [member(0, 1), member(1, 1), member(2, 1)];
+        let mut round = fold_test_round(&cfg, &st, &members, true);
+        let held = |round: &Round| -> Vec<u32> {
+            let mut ids: Vec<u32> = round
+                .pushes
+                .iter()
+                .filter(|(_, push)| !push.outer_gradient.is_empty())
+                .map(|(member, _)| member.learner_id)
+                .collect();
+            ids.sort_unstable();
+            ids
+        };
+        route_one(&mut round, members[2], fold_test_push(2));
+        assert_eq!(held(&round), vec![2], "learner 2 waits for 0 and 1");
+        route_one(&mut round, members[0], fold_test_push(0));
+        assert_eq!(held(&round), vec![2], "learner 0 is folded at once");
+        route_one(&mut round, members[1], fold_test_push(1));
+        assert!(held(&round).is_empty(), "1 then the held 2 are folded");
+        assert!(round.fold.as_ref().unwrap().is_complete());
+    }
+
+    #[test]
+    fn streaming_fold_is_used_only_when_merge_inputs_are_fixed_at_launch() {
+        let st = fold_test_state(crate::state::MERGE_AVG);
+        let members = [member(0, 1), member(1, 1)];
+        let cfg = round_test_config(1);
+        assert!(round_fold(&cfg, &st, 0, &members, 2).is_some());
+        assert!(round_fold(&cfg, &st, 0, &members, 1).is_none(), "partial quorum");
+        let mut weighted = round_test_config(1);
+        weighted.learner_weight = LearnerWeight::Tokens2OverSteps;
+        assert!(round_fold(&weighted, &st, 0, &members, 2).is_none());
+        let mut heloco = fold_test_state(crate::state::MERGE_AVG);
+        heloco.delta_correction = Some(crate::merge::Heloco::default());
+        assert!(round_fold(&cfg, &heloco, 0, &members, 2).is_none());
+        let duplicate = [member(0, 1), member(0, 2)];
+        assert!(round_fold(&cfg, &st, 0, &duplicate, 2).is_none());
+        let mut leased = round_test_config(1);
+        leased.membership.lease = Some(Duration::from_secs(5));
+        assert!(round_fold(&leased, &st, 0, &members, 2).is_none(), "dynamic membership");
     }
 }

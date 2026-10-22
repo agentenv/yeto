@@ -1,5 +1,8 @@
 mod elastic;
 mod elastic_server;
+mod fold;
+#[cfg(test)]
+mod head_memory;
 mod iso_worker;
 mod membership;
 mod merge;

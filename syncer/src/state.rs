@@ -6,6 +6,7 @@ use anyhow::{bail, Context, Result};
 use crate::iso_worker::{IsoBackend, IsoBackendConfig, IsoBackendKind};
 use crate::merge;
 use crate::protocol::Reader;
+use std::sync::Arc;
 
 pub const MERGE_AVG: u8 = 0;
 pub const MERGE_RDA: u8 = 1;
@@ -128,9 +129,11 @@ pub struct GlobalState {
     /// callers may leave it unset only to read or write the legacy format.
     pub session_contract_hash: Option<[u8; 32]>,
     /// Θ_p, flat f32 per fragment (concatenated tensors in layout order).
-    pub params: Vec<Vec<f32>>,
+    /// Shared copy-on-write so a checkpoint snapshot costs no copy: a commit
+    /// clones only a fragment a pending snapshot still references.
+    pub params: Vec<Arc<Vec<f32>>>,
     /// Nesterov momentum buffers, same shape as params.
-    momentum: Vec<Vec<f32>>,
+    momentum: Vec<Arc<Vec<f32>>>,
     pub initialized: Vec<bool>,
     /// Global step at which each fragment was last merged (its version).
     pub versions: Vec<u64>,
@@ -240,7 +243,7 @@ impl PreparedMerge {
         })
     }
 
-    fn finish_inline(self) -> Result<ComputedMerge> {
+    pub(crate) fn finish_inline(self) -> Result<ComputedMerge> {
         if !self.iso_jobs.is_empty() {
             bail!("torch-svd prepared merge requires asynchronous compute");
         }
@@ -313,12 +316,12 @@ impl GlobalState {
         params
             .try_reserve_exact(fragment_count)
             .context("cannot allocate parameter fragment table")?;
-        params.resize_with(fragment_count, Vec::new);
+        params.resize_with(fragment_count, Default::default);
         let mut momentum = Vec::new();
         momentum
             .try_reserve_exact(fragment_count)
             .context("cannot allocate momentum fragment table")?;
-        momentum.resize_with(fragment_count, Vec::new);
+        momentum.resize_with(fragment_count, Default::default);
         let mut initialized = Vec::new();
         initialized
             .try_reserve_exact(fragment_count)
@@ -377,8 +380,8 @@ impl GlobalState {
                 .try_reserve_exact(expected)
                 .context("cannot allocate fragment momentum")?;
             momentum.resize(expected, 0.0);
-            self.params[fid] = values;
-            self.momentum[fid] = momentum;
+            self.params[fid] = Arc::new(values);
+            self.momentum[fid] = Arc::new(momentum);
             self.initialized[fid] = true;
         }
         Ok(())
@@ -467,10 +470,9 @@ impl GlobalState {
         };
         let outer_gradients = outer_gradients.as_slice();
         let mut delta = vec![0.0f32; numel];
-        let mut iso_jobs = Vec::new();
         // Merge per tensor slice within the fragment.
         let mut off = 0usize;
-        for (tensor_index, &tn) in frag.tensor_numels.iter().enumerate() {
+        for &tn in &frag.tensor_numels {
             let tn = tn as usize;
             let slices: Vec<&[f32]> = outer_gradients
                 .iter()
@@ -478,39 +480,74 @@ impl GlobalState {
                 .collect();
             let out = &mut delta[off..off + tn];
             match frag.merge_mode {
-                MERGE_AVG => merge::merge_avg(&slices, weights, out),
+                // ISO reduces by direct average; the spectrum is flattened
+                // by `prepare_reduced_merge`.
+                MERGE_AVG | MERGE_ISO => merge::merge_avg(&slices, weights, out),
                 MERGE_RDA => merge::merge_rda(&slices, weights, out),
-                MERGE_ISO => {
-                    let (rows, cols) = frag
-                        .tensor_shapes
-                        .as_ref()
-                        .and_then(|shapes| shapes.get(tensor_index))
-                        .copied()
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "fragment {fid}: iso merge missing shape for tensor {tensor_index}"
-                            )
-                        })?;
-                    // The syncer owns the deterministic weighted reduction;
-                    // the selected backend receives exactly one complete
-                    // canonical matrix, never learner or TP shards.
-                    merge::merge_avg(&slices, weights, out);
-                    match self.iso_backend.kind() {
-                        IsoBackendKind::Scalar => {
-                            merge::iso_flatten_spectrum(out, rows as usize, cols as usize)
-                        }
-                        IsoBackendKind::TorchSvd => iso_jobs.push(IsoJob {
-                            tensor_index,
-                            offset: off,
-                            rows: rows as usize,
-                            cols: cols as usize,
-                            matrix: out.to_vec(),
-                        }),
-                    }
-                }
                 mode => bail!("fragment {fid}: unsupported merge mode {mode}"),
             }
             off += tn;
+        }
+        self.prepare_reduced_merge(fid, base_version, delta)
+    }
+
+    /// Prepare a merge from an already reduced fragment: the output of the
+    /// learner reduction in `prepare_merge`, or of a streaming
+    /// `crate::fold::FragmentFold` that produced the same values in place.
+    pub fn prepare_reduced_merge(
+        &self,
+        fid: usize,
+        base_version: u64,
+        mut delta: Vec<f32>,
+    ) -> Result<PreparedMerge> {
+        let current_version = *self
+            .versions
+            .get(fid)
+            .with_context(|| format!("merge for unknown fragment {fid}"))?;
+        if current_version != base_version {
+            bail!("fragment {fid}: prepare version {base_version} != current {current_version}");
+        }
+        let frag = &self.layout.fragments[fid];
+        let numel = frag.numel()?;
+        if delta.len() != numel {
+            bail!(
+                "fragment {fid}: reduced merge has {} values, expected {numel}",
+                delta.len()
+            );
+        }
+        let mut iso_jobs = Vec::new();
+        if frag.merge_mode == MERGE_ISO {
+            let mut off = 0usize;
+            for (tensor_index, &tn) in frag.tensor_numels.iter().enumerate() {
+                let tn = tn as usize;
+                let out = &mut delta[off..off + tn];
+                let (rows, cols) = frag
+                    .tensor_shapes
+                    .as_ref()
+                    .and_then(|shapes| shapes.get(tensor_index))
+                    .copied()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "fragment {fid}: iso merge missing shape for tensor {tensor_index}"
+                        )
+                    })?;
+                // The syncer owns the deterministic weighted reduction;
+                // the selected backend receives exactly one complete
+                // canonical matrix, never learner or TP shards.
+                match self.iso_backend.kind() {
+                    IsoBackendKind::Scalar => {
+                        merge::iso_flatten_spectrum(out, rows as usize, cols as usize)
+                    }
+                    IsoBackendKind::TorchSvd => iso_jobs.push(IsoJob {
+                        tensor_index,
+                        offset: off,
+                        rows: rows as usize,
+                        cols: cols as usize,
+                        matrix: out.to_vec(),
+                    }),
+                }
+                off += tn;
+            }
         }
         // Miles uses one canonical tensor per fragment. Move that complete
         // averaged matrix into its worker job instead of retaining a second
@@ -567,7 +604,7 @@ impl GlobalState {
         // buffer. This keeps commit all-or-nothing without cloning a
         // model-sized fragment.
         for ((param, momentum), gradient) in
-            self.params[fid].iter().zip(&self.momentum[fid]).zip(&delta)
+            self.params[fid].iter().zip(self.momentum[fid].iter()).zip(&delta)
         {
             let next_momentum = self.outer_momentum * *momentum + *gradient;
             let next_param =
@@ -577,8 +614,8 @@ impl GlobalState {
             }
         }
         merge::nesterov_step(
-            &mut self.params[fid],
-            &mut self.momentum[fid],
+            Arc::make_mut(&mut self.params[fid]).as_mut_slice(),
+            Arc::make_mut(&mut self.momentum[fid]).as_mut_slice(),
             &delta,
             self.outer_lr,
             self.outer_momentum,
@@ -645,20 +682,157 @@ fn write_f32s<W: std::io::Write>(f: &mut W, values: &[f32]) -> Result<()> {
     Ok(())
 }
 
-/// Atomically persist checkpoint bytes from `encode_checkpoint`: write a
-/// sibling temporary file, fsync it, rename it over `path`, fsync the
-/// directory. A failure at any point leaves the previous checkpoint intact.
-pub fn write_checkpoint_bytes(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write;
-    let tmp = path.with_extension("tmp");
-    {
-        let mut f = std::fs::File::create(&tmp)
-            .with_context(|| format!("create checkpoint temporary {}", tmp.display()))?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
+/// Buffered little-endian reader over a checkpoint file.
+struct CheckpointReader {
+    inner: std::io::BufReader<std::fs::File>,
+    len: u64,
+    pos: u64,
+}
+
+impl CheckpointReader {
+    fn open(path: &std::path::Path) -> Result<Self> {
+        let file = std::fs::File::open(path)?;
+        let len = file.metadata()?.len();
+        Ok(Self {
+            inner: std::io::BufReader::with_capacity(1 << 20, file),
+            len,
+            pos: 0,
+        })
     }
-    std::fs::rename(&tmp, path)?;
-    sync_parent_directory(path)
+
+    fn fill(&mut self, out: &mut [u8]) -> Result<()> {
+        use std::io::Read;
+        if self.len - self.pos < out.len() as u64 {
+            bail!("payload truncated");
+        }
+        self.inner.read_exact(out)?;
+        self.pos += out.len() as u64;
+        Ok(())
+    }
+
+    fn array<const N: usize>(&mut self) -> Result<[u8; N]> {
+        let mut out = [0u8; N];
+        self.fill(&mut out)?;
+        Ok(out)
+    }
+
+    fn u8(&mut self) -> Result<u8> {
+        Ok(self.array::<1>()?[0])
+    }
+
+    fn u32(&mut self) -> Result<u32> {
+        Ok(u32::from_le_bytes(self.array()?))
+    }
+
+    fn u64(&mut self) -> Result<u64> {
+        Ok(u64::from_le_bytes(self.array()?))
+    }
+
+    fn array32(&mut self) -> Result<[u8; 32]> {
+        self.array()
+    }
+
+    /// Decode `out.len()` little-endian f32 values in 64 KiB blocks.
+    fn f32s(&mut self, out: &mut [f32]) -> Result<()> {
+        let mut block = vec![0u8; 16 * 1024 * 4];
+        for chunk in out.chunks_mut(16 * 1024) {
+            let bytes = &mut block[..chunk.len() * 4];
+            self.fill(bytes)?;
+            for (v, b) in chunk.iter_mut().zip(bytes.chunks_exact(4)) {
+                *v = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+            }
+        }
+        Ok(())
+    }
+
+    /// The rest of the file, refusing more than `max` bytes.
+    fn tail(&mut self, max: u64) -> Result<Vec<u8>> {
+        let remaining = self.len - self.pos;
+        if remaining > max {
+            bail!("checkpoint has {remaining} trailing bytes");
+        }
+        let mut out = vec![0u8; remaining as usize];
+        self.fill(&mut out)?;
+        Ok(out)
+    }
+}
+
+enum CheckpointTrailer {
+    LayoutOnly,
+    SessionContract([u8; 32]),
+    PolicySweep {
+        fragments: u32,
+        contract_hash: [u8; 32],
+    },
+}
+
+/// Owned, immutable checkpoint cut; see `GlobalState::checkpoint_snapshot`.
+pub struct CheckpointSnapshot {
+    iso_backend: u8,
+    layout_fingerprint: [u8; 32],
+    global_step: u64,
+    /// (version, params, momentum) per fragment, shared with the live state.
+    fragments: Vec<(u64, Arc<Vec<f32>>, Arc<Vec<f32>>)>,
+    ledger: std::collections::BTreeMap<u32, LearnerLedger>,
+    trailer: CheckpointTrailer,
+}
+
+impl CheckpointSnapshot {
+    /// Stream the V3 checkpoint encoding, one fragment at a time.
+    fn write_to<W: std::io::Write>(&self, f: &mut W) -> Result<()> {
+        f.write_all(&CKPT_MAGIC_V3.to_le_bytes())?;
+        f.write_all(&[self.iso_backend])?;
+        f.write_all(&self.layout_fingerprint)?;
+        f.write_all(&self.global_step.to_le_bytes())?;
+        f.write_all(&(self.fragments.len() as u32).to_le_bytes())?;
+        for (version, params, momentum) in &self.fragments {
+            f.write_all(&version.to_le_bytes())?;
+            f.write_all(&(params.len() as u64).to_le_bytes())?;
+            write_f32s(f, params)?;
+            write_f32s(f, momentum)?;
+        }
+        f.write_all(&(self.ledger.len() as u32).to_le_bytes())?;
+        for (id, l) in &self.ledger {
+            f.write_all(&id.to_le_bytes())?;
+            f.write_all(&l.merges.to_le_bytes())?;
+            f.write_all(&l.steps.to_le_bytes())?;
+            f.write_all(&l.tokens.to_le_bytes())?;
+        }
+        f.write_all(&self.layout_fingerprint)?;
+        match &self.trailer {
+            CheckpointTrailer::LayoutOnly => {}
+            CheckpointTrailer::SessionContract(contract_hash) => {
+                f.write_all(&SESSION_CONTRACT_CKPT_MAGIC.to_le_bytes())?;
+                f.write_all(contract_hash)?;
+            }
+            CheckpointTrailer::PolicySweep {
+                fragments,
+                contract_hash,
+            } => {
+                f.write_all(&POLICY_SWEEP_CKPT_MAGIC.to_le_bytes())?;
+                f.write_all(&fragments.to_le_bytes())?;
+                f.write_all(contract_hash)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Atomically persist the snapshot: stream it into a sibling temporary
+    /// file, fsync, rename over `path`, fsync the directory.  A failure at
+    /// any point leaves the previous checkpoint intact.
+    pub fn save(&self, path: &std::path::Path) -> Result<()> {
+        let tmp = path.with_extension("tmp");
+        {
+            let file = std::fs::File::create(&tmp)
+                .with_context(|| format!("create checkpoint temporary {}", tmp.display()))?;
+            let mut f = std::io::BufWriter::with_capacity(1 << 20, file);
+            self.write_to(&mut f)?;
+            std::io::Write::flush(&mut f)?;
+            f.get_ref().sync_all()?;
+        }
+        std::fs::rename(&tmp, path)?;
+        sync_parent_directory(path)
+    }
 }
 
 fn sync_parent_directory(path: &std::path::Path) -> Result<()> {
@@ -693,64 +867,55 @@ impl GlobalState {
     /// Written to `<path>.tmp` then renamed, so a crash mid-write never
     /// corrupts the previous checkpoint.
     pub fn save_checkpoint(&self, path: &std::path::Path) -> Result<()> {
-        let tmp = path.with_extension("tmp");
-        {
-            let mut f = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
-            self.write_checkpoint_to(&mut f)?;
-            std::io::Write::flush(&mut f)?;
-            f.get_ref().sync_all()?;
-        }
-        std::fs::rename(&tmp, path)?;
-        sync_parent_directory(path)?;
-        Ok(())
+        self.checkpoint_snapshot()?.save(path)
     }
 
-    /// The exact bytes `save_checkpoint` writes, as an owned snapshot.
-    ///
-    /// The asynchronous checkpoint path encodes on the scheduler (one memory
-    /// copy of the consistent cut) and hands the bytes to a blocking writer,
-    /// so later commits may mutate `self` while the snapshot is persisted.
+    /// The exact bytes `save_checkpoint` writes (tests and small states).
     pub fn encode_checkpoint(&self) -> Result<Vec<u8>> {
-        let state_floats: usize = self.params.iter().map(Vec::len).sum::<usize>() * 2;
+        let state_floats: usize = self.params.iter().map(|p| p.len()).sum::<usize>() * 2;
         let mut bytes = Vec::with_capacity(state_floats * 4 + 4096);
         self.write_checkpoint_to(&mut bytes)?;
         Ok(bytes)
     }
 
-    fn write_checkpoint_to<W: std::io::Write>(&self, f: &mut W) -> Result<()> {
-        let layout_fingerprint = self.layout_fingerprint;
-        f.write_all(&CKPT_MAGIC_V3.to_le_bytes())?;
-        f.write_all(&[self.iso_backend_kind() as u8])?;
-        f.write_all(&layout_fingerprint)?;
-        f.write_all(&self.global_step.to_le_bytes())?;
-        f.write_all(&(self.params.len() as u32).to_le_bytes())?;
-        for p in 0..self.params.len() {
-            f.write_all(&self.versions[p].to_le_bytes())?;
-            f.write_all(&(self.params[p].len() as u64).to_le_bytes())?;
-            write_f32s(f, &self.params[p])?;
-            write_f32s(f, &self.momentum[p])?;
-        }
-        f.write_all(&(self.ledger.len() as u32).to_le_bytes())?;
-        for (id, l) in &self.ledger {
-            f.write_all(&id.to_le_bytes())?;
-            f.write_all(&l.merges.to_le_bytes())?;
-            f.write_all(&l.steps.to_le_bytes())?;
-            f.write_all(&l.tokens.to_le_bytes())?;
-        }
-        f.write_all(&self.layout_fingerprint)?;
-        if let Some(fragments) = self.policy_sweep_fragments {
-            f.write_all(&POLICY_SWEEP_CKPT_MAGIC.to_le_bytes())?;
-            f.write_all(&fragments.to_le_bytes())?;
-            f.write_all(
-                &self
+    /// A consistent cut that the asynchronous checkpoint writer persists
+    /// fragment by fragment while later commits mutate `self`.  It shares
+    /// the fragment buffers instead of encoding them: taking it copies no
+    /// model data, and a later commit clones only the fragments it touches
+    /// before the write finishes (bounded by the merge pipeline depth).
+    pub fn checkpoint_snapshot(&self) -> Result<CheckpointSnapshot> {
+        let trailer = if let Some(fragments) = self.policy_sweep_fragments {
+            CheckpointTrailer::PolicySweep {
+                fragments,
+                contract_hash: self
                     .session_contract_hash
                     .context("policy-sweep checkpoint requires a session contract hash")?,
-            )?;
+            }
         } else if let Some(contract_hash) = self.session_contract_hash {
-            f.write_all(&SESSION_CONTRACT_CKPT_MAGIC.to_le_bytes())?;
-            f.write_all(&contract_hash)?;
-        }
-        Ok(())
+            CheckpointTrailer::SessionContract(contract_hash)
+        } else {
+            CheckpointTrailer::LayoutOnly
+        };
+        Ok(CheckpointSnapshot {
+            iso_backend: self.iso_backend_kind() as u8,
+            layout_fingerprint: self.layout_fingerprint,
+            global_step: self.global_step,
+            fragments: self
+                .versions
+                .iter()
+                .zip(&self.params)
+                .zip(&self.momentum)
+                .map(|((&version, params), momentum)| {
+                    (version, Arc::clone(params), Arc::clone(momentum))
+                })
+                .collect(),
+            ledger: self.ledger.clone(),
+            trailer,
+        })
+    }
+
+    fn write_checkpoint_to<W: std::io::Write>(&self, f: &mut W) -> Result<()> {
+        self.checkpoint_snapshot()?.write_to(f)
     }
 
     /// Restore params/momentum/versions/step/ledger from a snapshot.
@@ -761,10 +926,9 @@ impl GlobalState {
     /// complete checkpoint is parsed and validated before any live state is
     /// mutated.
     pub fn load_checkpoint(&mut self, path: &std::path::Path) -> Result<()> {
-        use std::io::Read;
-        let mut buf = Vec::new();
-        std::fs::File::open(path)?.read_to_end(&mut buf)?;
-        let mut r = Reader(&buf);
+        // Stream the file: only one fragment-sized decode block is held
+        // besides the restored state (no whole-file buffer).
+        let mut r = CheckpointReader::open(path)?;
         let magic = r.u32()?;
         let (checkpoint_iso_backend, checkpoint_layout_fingerprint) = match magic {
             CKPT_MAGIC_V1 => bail!(
@@ -773,11 +937,7 @@ impl GlobalState {
             CKPT_MAGIC_V2 => (Some(IsoBackendKind::from_checkpoint(r.u8()?)?), None),
             CKPT_MAGIC_V3 => {
                 let backend = IsoBackendKind::from_checkpoint(r.u8()?)?;
-                let fingerprint: [u8; 32] = r
-                    .take(32)?
-                    .try_into()
-                    .context("checkpoint V3 layout fingerprint must be 32 bytes")?;
-                (Some(backend), Some(fingerprint))
+                (Some(backend), Some(r.array32()?))
             }
             _ => bail!("bad checkpoint magic"),
         };
@@ -825,12 +985,10 @@ impl GlobalState {
                 slot.resize(numel, 0.0);
             }
             for slot in [&mut restored_params, &mut restored_momentum] {
-                for v in slot.iter_mut() {
-                    *v = f32::from_le_bytes(r.take(4)?.try_into()?);
-                }
+                r.f32s(slot)?;
             }
-            params.push(restored_params);
-            momentum.push(restored_momentum);
+            params.push(Arc::new(restored_params));
+            momentum.push(Arc::new(restored_momentum));
         }
         let nl = r.u32()? as usize;
         let mut ledger = std::collections::BTreeMap::new();
@@ -845,6 +1003,9 @@ impl GlobalState {
                 bail!("checkpoint contains duplicate ledger entry for learner {id}");
             }
         }
+        // The trailer is at most 72 bytes; parse it from memory as before.
+        let tail = r.tail(72)?;
+        let mut r = Reader(&tail);
         let expected_policy_sweep_fragments = self.policy_sweep_fragments;
         let header_layout_verified = checkpoint_layout_fingerprint.is_some();
         let (checkpoint_policy_sweep_fragments, checkpoint_session_contract_hash) =
@@ -1000,10 +1161,10 @@ mod tests {
             f.write_all(&st.versions[p].to_le_bytes()).unwrap();
             f.write_all(&(st.params[p].len() as u64).to_le_bytes())
                 .unwrap();
-            for value in &st.params[p] {
+            for value in st.params[p].iter() {
                 f.write_all(&value.to_le_bytes()).unwrap();
             }
-            for value in &st.momentum[p] {
+            for value in st.momentum[p].iter() {
                 f.write_all(&value.to_le_bytes()).unwrap();
             }
         }
@@ -1040,7 +1201,7 @@ mod tests {
         let mut st = GlobalState::new(layout2(), 0.7, 0.9, crate::protocol::DTYPE_F32).unwrap();
         st.init_fragment(0, vec![1.0; 4]).unwrap();
         st.init_fragment(0, vec![2.0; 4]).unwrap(); // ignored
-        assert_eq!(st.params[0], vec![1.0; 4]);
+        assert_eq!(*st.params[0], vec![1.0; 4]);
         assert!(!st.all_initialized());
         st.init_fragment(1, vec![0.0; 4]).unwrap();
         assert!(st.all_initialized());
@@ -1069,7 +1230,7 @@ mod tests {
         let g = st.merge_and_step(0, &[&outer_gradient], &[1.0]).unwrap();
         assert!(g > 0.0);
         // Θ − 1.0·(Θ − θ) = θ
-        assert_eq!(st.params[0], vec![0.0; 4]);
+        assert_eq!(*st.params[0], vec![0.0; 4]);
     }
 
     #[test]
@@ -1087,7 +1248,7 @@ mod tests {
             .unwrap();
         st.versions = vec![7, 6];
         assert!(st.commit_merge(computed).is_err());
-        assert_eq!(st.params[0], vec![1.0; 4]);
+        assert_eq!(*st.params[0], vec![1.0; 4]);
     }
 
     #[test]
@@ -1199,6 +1360,53 @@ mod tests {
         assert!(st2.checkpoint_layout_verified);
         assert_eq!(st2.ledger.get(&3).unwrap().tokens, 4096);
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn checkpoint_snapshot_is_a_copy_free_consistent_cut() {
+        let dir = std::env::temp_dir().join(format!("yeto-ckpt-snapshot-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.ckpt");
+        let mut st = state_with_fingerprint(layout2(), 0x22);
+        st.session_contract_hash = Some([5; 32]);
+        st.init_fragment(0, vec![1.5; 4]).unwrap();
+        st.init_fragment(1, vec![-2.0; 4]).unwrap();
+        st.record_merge(1, 2, 30);
+        let cut = st.encode_checkpoint().unwrap();
+
+        let snapshot = st.checkpoint_snapshot().unwrap();
+        assert!(Arc::ptr_eq(&snapshot.fragments[0].1, &st.params[0]));
+        // A commit while the snapshot is pending clones only its fragment.
+        st.merge_and_step(0, &[&[1.0f32; 4][..]], &[1.0]).unwrap();
+        st.record_merge(1, 2, 30);
+        assert!(!Arc::ptr_eq(&snapshot.fragments[0].1, &st.params[0]));
+        assert!(Arc::ptr_eq(&snapshot.fragments[1].1, &st.params[1]));
+        snapshot.save(&path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), cut);
+        assert_ne!(st.encode_checkpoint().unwrap(), cut);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn streamed_load_rejects_truncated_and_oversized_files() {
+        let dir = std::env::temp_dir().join(format!("yeto-ckpt-stream-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.ckpt");
+        let mut st = state_with_fingerprint(layout2(), 0x33);
+        st.init_fragment(0, vec![1.0; 4]).unwrap();
+        st.init_fragment(1, vec![2.0; 4]).unwrap();
+        let bytes = st.encode_checkpoint().unwrap();
+        for (bad, message) in [
+            (bytes[..bytes.len() - 40].to_vec(), "truncated"),
+            ([bytes.as_slice(), &[0u8; 100]].concat(), "trailing bytes"),
+        ] {
+            std::fs::write(&path, &bad).unwrap();
+            let mut fresh = state_with_fingerprint(layout2(), 0x33);
+            let error = format!("{:#}", fresh.load_checkpoint(&path).unwrap_err());
+            assert!(error.contains(message), "{error}");
+            assert!(!fresh.all_initialized());
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
