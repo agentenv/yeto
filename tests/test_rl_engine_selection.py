@@ -171,7 +171,7 @@ def test_rl_image_default_is_the_ports_image(monkeypatch):
     ports = _cli(("--rl-engine", "ports"))
     _prepare_rl_args(ports)
     assert ports.rl_image == MILES_NEXT_IMAGE
-    assert "ghcr.io/agentenv" not in ports.rl_image
+    assert "/yeto-miles-ports@sha256:" in ports.rl_image  # not the legacy agentenv/miles image
     assert _island_task(ports, monkeypatch).resources.image_id == MILES_NEXT_IMAGE
     explicit = "docker:example/miles@sha256:" + "e" * 64
     pinned = _cli(("--rl-engine", "ports", "--rl-image", explicit))
