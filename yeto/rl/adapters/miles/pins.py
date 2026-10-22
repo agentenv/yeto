@@ -53,7 +53,10 @@ MILES_NEXT_UPSTREAM_COMMIT = "9e4260de047a704208535c0e90c531929879ab40"
 # import stays light, so RayWorkerManager no longer loads megatron.bridge
 # (rl-trainer-cold-start-cost L2.2)).  17aeb5cb5 = 386ae3b07 + light Ray actors
 # stay off megatron_utils (L2.1) + the master port is held until use (S23 defect 9).
-MILES_NEXT_COMMIT = "ed5f64fd7a183cccc8ab7ca3da90fba570108c2b"
+# s27-distopt-fp (56190a5a8 = ed5f64fd7 + full-parameter sync reads DP=1
+# distributed-optimizer masters, incl. CPU offload; S27 G-B); cc693c693 = + the
+# Adam proof leaves the hybrid optimizer's master_param mirror out (S27 IMG2).
+MILES_NEXT_COMMIT = "cc693c6930be178f411f711f55c3d334a087c097"
 # sgl-project/sglang ``sglang-miles`` head when radixark/miles@9e4260d was
 # committed (upstream's Dockerfile follows that branch unpinned).
 SGLANG_NEXT_REPOSITORY = "https://github.com/michaellchung/sglang"
@@ -112,12 +115,18 @@ MILES_FORK_LINEAGE: tuple[str, ...] = (
     "9462de532f747cf688e090bbaf6b24f80e378fe8",
     # ed5f64fd7 = + DP-invariant state export/restore carries the CPU-offload optimizer state (S26 E6 B8); no loss path.
     "ed5f64fd7a183cccc8ab7ca3da90fba570108c2b",
+    # 56190a5a8 = + full-parameter sync reads DP=1 distributed-optimizer masters,
+    # incl. the HybridDeviceOptimizer's offloaded FP32 copies (S27 G-B); no loss path.
+    "56190a5a86d14f1eb96d592038d76a9ad8651b0c",
+    # cc693c693 = + the optimizer-state proof skips the HybridDeviceOptimizer's
+    # master_param mirror, which a global apply overwrites (S27 IMG2); no loss path.
+    "cc693c6930be178f411f711f55c3d334a087c097",
 )
 
 # First Miles commit whose full-parameter sync reads distributed-optimizer
 # masters (and the HybridDeviceOptimizer's offloaded FP32 copies) at DP=1
-# (S27 G-B; local fork branch s27-distopt-fp on ed5f64fd7, no image yet).
-# Append it to MILES_FORK_LINEAGE together with the image re-pin.
+# (S27 G-B; fork branch yeto/s27-distopt-fp on ed5f64fd7, in the image since
+# 56190a5-2fa8801; the image pin is cc693c6-2fa8801).
 MILES_DISTOPT_FULL_PARAMETER_COMMIT = "56190a5a86d14f1eb96d592038d76a9ad8651b0c"
 
 
@@ -156,7 +165,7 @@ MILES_NEXT_BASE_IMAGE = (
 # every SHA.  PUBLIC on ghcr.io/michaellchung since 2026-10-07 (anonymous
 # pull); a private image needs SKYPILOT_DOCKER_{USERNAME,PASSWORD,SERVER} or
 # --rl-image-private (yeto.launcher.registry_login_for; read:packages token).
-# Tag ed5f64f-2fa8801; (S27 IMG: Miles ed5f64fd7, host-Adam round cuts (B8); previous 44d41ef-2fa8801 @sha256:5b9dc2a9...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-22-ed5f64f-2fa8801/). Earlier: tag 44d41ef-2fa8801; (S24 L2.2: Miles s24-miles-import2 and the lazy-modelopt
+# Tag cc693c6-2fa8801; (S27 IMG2: Miles cc693c693 = 56190a5a8 (full-parameter sync with distributed optimizer + CPU offload, G-B) + Adam proof without the hybrid master mirror; previous 56190a5-2fa8801 @sha256:5254e34e... (failed on GPU: global apply changed local Adam state), ed5f64f-2fa8801 @sha256:a4769254...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-22-cc693c6-2fa8801/). Earlier: tag ed5f64f-2fa8801; (S27 IMG: Miles ed5f64fd7, host-Adam round cuts (B8); previous 44d41ef-2fa8801 @sha256:5b9dc2a9...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-22-ed5f64f-2fa8801/). Earlier: tag 44d41ef-2fa8801; (S24 L2.2: Miles s24-miles-import2 and the lazy-modelopt
 # Megatron-LM patch in the layer; previous 17aeb5c-2fa8801 @sha256:b304f857...;
 # build record openspec/changes/rl-infra-spec/evidence/ports-image/
 # 2026-10-14-44d41ef-2fa8801/). Earlier: tag 17aeb5c-2fa8801; (S24 L2.1-L2.4: Miles s24-miles-import, peft 0.20.0 and the
@@ -165,7 +174,7 @@ MILES_NEXT_BASE_IMAGE = (
 # ports-image/2026-10-14-17aeb5c-2fa8801/). Earlier: tag 386ae3b-2fa8801; (S23 P0-1.11 GPU run: Miles s23-sao-streaming-roles; previous 64b591a-2fa8801 @sha256:fa2413be...; build record openspec/changes/rl-infra-spec/evidence/ports-image/2026-10-14-386ae3b-2fa8801/). Earlier: (S19 #1: critic family + algo-supplement metrics baked in; previous ddce209-2fa8801 @sha256:9c252c38...) (S18 ARU-3: Miles s18-agentic-suspend = 2f7871fb2 + --agentic-suspend-between-turns; previous 2f7871f-2fa8801 @sha256:62b4f164..., efbbc63-2fa8801 @sha256:a7990076..., 8bc5223-4e4148f @sha256:4aeafd77...) ghcr.io/michaellchung (public package); linux/amd64 only.
 MILES_NEXT_IMAGE = (
     "docker:ghcr.io/michaellchung/yeto-miles-ports@sha256:"
-    "a476925466dad4df51db6955006a2230f9f88e800e44d529ac5d3f8820b19d58"
+    "2011cbf9bf6e2f472a0819d77685d6cec56f4941957ae5652f09f3ccb7604e08"
 )
 MILES_NEXT_IMAGE_MANIFEST = "/opt/yeto/image-manifest.json"
 # Nebius VM images whose /var/lib/docker already holds a docker image's
