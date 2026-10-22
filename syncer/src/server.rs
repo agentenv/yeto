@@ -973,9 +973,10 @@ fn check_resume_checkpoint(cfg: &Config) -> Result<()> {
 pub async fn run(cfg: Config) -> Result<()> {
     validate_config(&cfg)?;
     if let crate::elastic::IslandSchedulingMode::Elastic(params) = cfg.island_scheduling {
-        // Elastic control plane (membership, capacity-weighted stepping,
-        // soft deadline, leases, tape). Tensor merge for elastic rounds is
-        // not wired yet; legacy never reaches this branch.
+        // Whole-vector service loop (elastic_server.rs): membership,
+        // capacity-weighted stepping, soft deadline, leases, carry, tensor
+        // merge with the outer optimizer, checkpoint and tape. The
+        // fragment-round loop below never reaches it.
         let listener = TcpListener::bind(("0.0.0.0", cfg.port))
             .await
             .with_context(|| format!("bind elastic syncer port {}", cfg.port))?;

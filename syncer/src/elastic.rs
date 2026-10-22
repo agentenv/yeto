@@ -6,9 +6,10 @@
 //! Reference implementation mirrored here: Python
 //! `yeto/rl/engine/island_ledger.CrossIslandLedger` (elastic branch).
 //!
-//! Status: frames, HMAC, fencing and the coordinator state machine are
-//! implemented and unit-tested; wiring them into the live TCP server loop is
-//! not done yet (the server refuses to start in elastic mode).
+//! The coordinator runs behind the whole-vector service loop in
+//! `elastic_server.rs` (frames, HMAC, fencing, leases, carry, checkpoint).
+//! Its membership half is also ported to the fragment-round server as
+//! `membership.rs`; this module is kept until the LoRA path runs there.
 
 use std::collections::BTreeMap;
 
