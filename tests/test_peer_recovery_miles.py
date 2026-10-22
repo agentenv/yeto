@@ -12,7 +12,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import sys
 import threading
+import types
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -50,7 +52,14 @@ class FakeGroup:
     def __init__(self, *, tp=2, dp=1, adam_step=0, missing_rank=None):
         self.coords = [{"tp": r % tp, "pp": 0, "dp": r // tp, "tp_size": tp, "pp_size": 1, "cp_size": 1,
                         "ep_size": 1, "dp_size": dp} for r in range(tp * dp)]
-        self.states = [{"adam_step": adam_step, "m": [0.25 * r] * 3} for r in range(tp * dp)]
+        self.states = [{"adam_step": adam_step, "scheduler_steps": adam_step, "m": [0.25 * r] * 3}
+                       for r in range(tp * dp)]
+        # Miles' full-parameter tracking on the trainer (one actor stands for every rank).
+        self.actor = SimpleNamespace(
+            opt_param_scheduler=SimpleNamespace(num_steps=adam_step),
+            _external_full_policy_version=0, _external_full_local_step_generation=0,
+            _external_full_exported_local_step_generation=0, _external_full_scheduler_anchor_steps=adam_step,
+            _external_full_last_local_rollout_id=None, _external_full_last_local_step_receipt=None)
         self.missing_rank = missing_rank
         self.installed = 0
         self.generation = 0
@@ -78,6 +87,9 @@ class FakeGroup:
                 data = (Path(kwargs["directory"]) / entry["path"]).read_bytes()
                 assert hashlib.sha256(data).hexdigest() == entry["sha256"]
                 self.states[rank] = json.loads(data)
+            # The real restore loads the donor's LR scheduler, then rebases Miles' anchor.
+            self.actor.opt_param_scheduler.num_steps = self.states[0]["scheduler_steps"]
+            cut_plugin.rebase_full_parameter_tracking(self.actor)
             return [{"ok": True} for _ in self.coords]
         raise AssertionError(name)
 
@@ -109,6 +121,9 @@ class FakeAdapter:
 
     async def apply(self, group, target, *, commit_token):
         assert commit_token
+        actor = group.actor  # Miles prepare_full_parameter_chunked_shard checks scheduler congruence
+        if actor.opt_param_scheduler.num_steps != actor._external_full_scheduler_anchor_steps:
+            raise RuntimeError("full-parameter scheduler progress has no local-step receipt")
         group.applied.append(dict(target.fragments))
         group.installed = target.policy_version
         group.generation = 0
@@ -190,6 +205,26 @@ def config(store, *, recover, timeout_s=10.0):
         peer_recovery=PeerRecoveryOptions(store=str(store), recover=recover, timeout_s=timeout_s))
 
 
+def _install_miles_rebase_stub(monkeypatch):
+    """Without Miles, stand in for its scheduler-anchor rebase (same rule, no checks)."""
+    try:
+        import miles.backends.megatron_utils.full_parameter_state  # noqa: F401
+        return
+    except ImportError:
+        pass
+
+    def rebase(actor, *, reason):
+        assert reason
+        actor._external_full_scheduler_anchor_steps = actor.opt_param_scheduler.num_steps
+        return actor._external_full_scheduler_anchor_steps
+
+    for name in ("miles", "miles.backends", "miles.backends.megatron_utils"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    module = types.ModuleType("miles.backends.megatron_utils.full_parameter_state")
+    module.rebase_full_parameter_scheduler_anchor = rebase
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+
+
 @pytest.fixture
 def stubs(monkeypatch):
     clients = []
@@ -203,6 +238,7 @@ def stubs(monkeypatch):
         return FakeAdapter(), SimpleNamespace(policy_version=0, policy_hash="p0")
 
     monkeypatch.setattr(MilesChunkedFullParameterAdapter, "initialize", classmethod(initialize))
+    _install_miles_rebase_stub(monkeypatch)
     monkeypatch.setattr(role_stream_module, "SyncerClient", make_client)
     monkeypatch.setattr(role_stream_module, "MilesRayInboundChunkSink", lambda sink: sink)
     monkeypatch.setattr(role_stream_module, "role_stream_session_contract_hash", lambda *_a: b"\0" * 32)
@@ -294,3 +330,19 @@ def test_streams_without_peer_recovery_serve_nothing(tmp_path, stubs):
     stream = MilesFullParameterRoleStream(RoleStreamConfig(**{**config(tmp_path, recover=False).__dict__,
                                                               "peer_recovery": None}))
     assert asyncio.run(stream.serve_peer_snapshots()) == 0
+
+
+def test_restore_without_scheduler_rebase_fails_the_first_apply(tmp_path, stubs, monkeypatch):
+    """G-D2 rec-c: restore OK and digests equal, but Miles refused the first apply."""
+    store_root = tmp_path / "store"
+    donor_client = FakeClient(requests=[rp.SnapshotRequest(1, 9, 5, (3, 4))])
+    asyncio.run(donor_stream(store_root, FakeGroup(adam_step=17), donor_client).serve_peer_snapshots())
+    (_, versions, sha256, locator), = donor_client.sent
+    resent = [BcastFragment(0, 5, stored(0, 5, "g0"), stored=True),
+              BcastFragment(1, 6, stored(1, 6, "g1"), stored=True)]
+    stubs.clients.append(FakeClient(events=[rp.RecoveryClock(5, (3, 4), 1),
+                                            rp.RecoverySource(rp.SOURCE_PEER, 0, versions, sha256, locator),
+                                            rp.RecoveryDone(5, 6, 1, (5, 6))], updates=resent))
+    monkeypatch.setattr(cut_plugin, "rebase_full_parameter_tracking", lambda actor: None)
+    with pytest.raises(Exception, match="no local-step receipt"):
+        asyncio.run(MilesFullParameterRoleStream(config(store_root, recover=True)).initialize(FakeGroup()))

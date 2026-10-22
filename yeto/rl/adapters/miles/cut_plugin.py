@@ -1362,6 +1362,21 @@ def rank_coords(actor: Any) -> dict[str, int]:
 RANK_COORDS = f"{_MODULE}.rank_coords"
 
 
+def rebase_full_parameter_tracking(actor: Any) -> None:
+    """After a restore loads the donor's LR scheduler, move Miles' full-parameter
+    scheduler anchor to it. Without this the island's first global apply fails
+    with "scheduler progress has no local-step receipt" (G-D2 rec-c): the
+    restored progress has no local step behind it on this trainer. A trainer
+    without full-parameter tracking (LoRA cut path) is left alone."""
+    if getattr(actor, "_external_full_policy_version", None) is None:
+        return
+    try:
+        from miles.backends.megatron_utils.full_parameter_state import rebase_full_parameter_scheduler_anchor
+    except ImportError as exc:
+        raise CutPluginError("this Miles cannot rebase full-parameter scheduler tracking after a restore") from exc
+    rebase_full_parameter_scheduler_anchor(actor, reason="peer snapshot restore")
+
+
 def restore_cut_shard(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_id: str) -> dict[str, Any]:
     """Verify and load this rank's shard; return the post-restore summary (identical digests expected)."""
     install_grad_norm_recorder()  # a rebuilt trainer process has no recorder yet
@@ -1462,6 +1477,7 @@ def _restore(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_
     actor.opt_param_scheduler.load_state_dict(shard["scheduler"])
     if int(actor.opt_param_scheduler.num_steps) != _scheduler_steps(shard["scheduler"]):
         raise CutPluginError("LR scheduler progress after restore differs from the cut")
+    rebase_full_parameter_tracking(actor)
     backend.set_megatron_counters(shard.get("megatron_counters") or {})
     set_miles_counters(actor, shard.get("miles_counters") or {})
     refresh_actor_backup(actor)  # colocated update_weights may read the CPU backup
@@ -1611,6 +1627,7 @@ def _restore_resharded(actor, *, directory, files, cut_id, source_dp, rng_policy
     actor.opt_param_scheduler.load_state_dict(first["scheduler"])
     if int(actor.opt_param_scheduler.num_steps) != _scheduler_steps(first["scheduler"]):
         raise CutPluginError("LR scheduler progress after restore differs from the cut")
+    rebase_full_parameter_tracking(actor)
     backend.set_megatron_counters(first.get("megatron_counters") or {})
     set_miles_counters(actor, first.get("miles_counters") or {})  # same counter on the resharded (E3) path
     refresh_actor_backup(actor)
