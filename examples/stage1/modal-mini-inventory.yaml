@@ -13,7 +13,7 @@ nodes:
     hbm_gib: 80
     host_memory_gib: 400
     mounts: {/data: /data}
-    image: ghcr.io/michaellchung/yeto-miles-ports@sha256:5b9dc2a9e6e315d73dabfbc6faae428b59cc01aabec6189645a5c8c80d6e3721
+    image: ghcr.io/agentenv/yeto-miles-ports@sha256:5b9dc2a9e6e315d73dabfbc6faae428b59cc01aabec6189645a5c8c80d6e3721
     runtime: docker
     roles: [trainer]
   - name: modal-sampler
@@ -26,6 +26,6 @@ nodes:
     hbm_gib: 80
     host_memory_gib: 100
     mounts: {/data: /data}
-    image: ghcr.io/michaellchung/yeto-miles-ports@sha256:5b9dc2a9e6e315d73dabfbc6faae428b59cc01aabec6189645a5c8c80d6e3721
+    image: ghcr.io/agentenv/yeto-miles-ports@sha256:5b9dc2a9e6e315d73dabfbc6faae428b59cc01aabec6189645a5c8c80d6e3721
     runtime: docker
     roles: [sampler]

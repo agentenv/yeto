@@ -62,8 +62,8 @@ store_access:
   head: direct
 
 images:
-  sampler: ghcr.io/michaellchung/yeto-miles-ports@sha256:5b9dc2a9e6e315d73dabfbc6faae428b59cc01aabec6189645a5c8c80d6e3721
-  trainer: ghcr.io/michaellchung/yeto-miles-ports@sha256:5b9dc2a9e6e315d73dabfbc6faae428b59cc01aabec6189645a5c8c80d6e3721
+  sampler: ghcr.io/agentenv/yeto-miles-ports@sha256:5b9dc2a9e6e315d73dabfbc6faae428b59cc01aabec6189645a5c8c80d6e3721
+  trainer: ghcr.io/agentenv/yeto-miles-ports@sha256:5b9dc2a9e6e315d73dabfbc6faae428b59cc01aabec6189645a5c8c80d6e3721
   docker_device_args: [--gpus, all]    # unused on Modal; the containers get the GPUs
 
 trainer:

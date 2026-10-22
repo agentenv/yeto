@@ -1,7 +1,7 @@
 """Independent reference formulas for rl-algo-loss-variants (design D3, task 2.1).
 
 Written from the papers with plain torch on small tensors; imports neither
-yeto nor miles, so it can check the Miles fork (``michaellchung/miles``
+yeto nor miles, so it can check the Miles fork (``agentenv/miles``
 ``--policy-loss-variant``) and yeto's translation without sharing code.
 
 Notation: rho_t = exp(logp_t - old_logp_t), A_t the advantage, mask the loss

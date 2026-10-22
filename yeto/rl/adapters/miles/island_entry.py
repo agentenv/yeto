@@ -1108,14 +1108,20 @@ def miles_revision_pins(args: Any) -> Any:
     """The Miles commit the island checks for ``--miles-commit`` (full SHA); None
     without it (``verify_miles_revision`` then checks the pinned MILES_NEXT_PINS)."""
     from yeto.provenance import is_immutable_commit
-    from yeto.rl.adapters.miles.pins import MILES_NEXT_REPOSITORY, MilesRevisionPins
+    from yeto.rl.adapters.miles.pins import (
+        MILES_NEXT_FORMER_REPOSITORIES,
+        MILES_NEXT_REPOSITORY,
+        MilesRevisionPins,
+    )
 
     commit = getattr(args, "miles_commit", None)
     if not commit:
         return None
     if not is_immutable_commit(commit) or len(str(commit)) != 40:
         raise ValueError(f"--miles-commit must be a full 40-hex commit, got {commit!r}")
-    return MilesRevisionPins(MILES_NEXT_REPOSITORY, str(commit).lower())
+    return MilesRevisionPins(
+        MILES_NEXT_REPOSITORY, str(commit).lower(), MILES_NEXT_FORMER_REPOSITORIES
+    )
 
 
 def _preflight_codex_harness(args) -> None:

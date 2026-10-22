@@ -21,7 +21,7 @@ What is declared here:
   (two roles with separate layouts, one syncer per role, lockstep paired
   fragments, critic optimizer steps = actor steps x num_critic_epochs);
 * :func:`sao_fork_argv` -- the Miles fork flags (``yeto-sao`` branch,
-  michaellchung/miles 6b5bd88c + ce96fc06 GAE variants) a spec translates to;
+  agentenv/miles 6b5bd88c + ce96fc06 GAE variants) a spec translates to;
 * rejections: SAO DIS fields without ``policy_objective='sao_dis'``, sao_dis
   without explicit bounds, sao_dis combined with another policy-loss variant,
   and sao_dis at the current ports pin (the fork commit carrying it is local
@@ -63,7 +63,7 @@ SAO_HL_GAUSS_BINS = 51
 HL_GAUSS_SIGMA_RATIO = 0.75
 VALUE_REWARD_RANGE = (0.0, 1.0)
 
-# Commits of michaellchung/miles carrying --policy-objective sao_dis and the
+# Commits of agentenv/miles carrying --policy-objective sao_dis and the
 # classification value loss: the critic-family fork pin (yeto-critic-family
 # e07e51c07 = yeto-sao 6b5bd88c merged with GAE variants, VAPO and
 # --num-critic-epochs). Local, not pushed, not in an image (critic_fork.py).

@@ -58,7 +58,7 @@ VLLM_ASCEND_BRANCH="releases/v0.23.0"
 MINDSPEED_BRANCH="core_r0.18.0"
 MEGATRON_TAG="core_v0.18.0"
 TRANSFORMERS_VERSION="5.10.4"
-VERL_REPOSITORY="https://github.com/michaellchung/verl"
+VERL_REPOSITORY="https://github.com/agentenv/verl"
 VERL_COMMIT="acad9875a8bdfc81afbcb0a50d146b2630f44093"
 
 mkdir -p "$OUT_DIR"

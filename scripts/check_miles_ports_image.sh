@@ -40,8 +40,11 @@ chk sglang_version "$(sed -n 's/^__version__ = version = .\([^"'"'"']*\).*/\1/p'
 chk sglang_dist_info "$(ls opt/sglang/lib/python3.12/site-packages/ | grep -c "^sglang-${SGLANG_VERSION//+/_}.*dist-info$\|^sglang-${SGLANG_VERSION}.dist-info$")" 1
 chk manifest_miles "$(python3 -c 'import json;print(json.load(open("opt/yeto/image-manifest.json"))["miles"]["commit"])')" "$MILES_SHA"
 chk manifest_sglang "$(python3 -c 'import json;print(json.load(open("opt/yeto/image-manifest.json"))["sglang"]["commit"])')" "$SGLANG_SHA"
-chk miles_origin "$(git config -f root/miles/.git/config remote.origin.url)" "https://github.com/michaellchung/miles"
-chk sglang_origin "$(git config -f sgl-workspace/sglang/.git/config remote.origin.url)" "https://github.com/michaellchung/sglang"
+# Images built before 2026-10-22 carry the forks' former home (michaellchung);
+# the SHAs are the same on agentenv.
+chk_origin() { case "$2" in "https://github.com/agentenv/$3"|"https://github.com/michaellchung/$3") chk "$1" "$2" "$2" ;; *) chk "$1" "$2" "https://github.com/agentenv/$3" ;; esac; }
+chk_origin miles_origin "$(git config -f root/miles/.git/config remote.origin.url)" miles
+chk_origin sglang_origin "$(git config -f sgl-workspace/sglang/.git/config remote.origin.url)" sglang
 chk m3_lora_plugin_present "$(test -f root/miles/miles_plugins/models/qwen3_8_next/lora.py && echo yes)" yes
 chk qwen4exp_lora_hooks "$(grep -c supported_lora_modules sgl-workspace/sglang/python/sglang/srt/models/qwen4_exp.py | awk '{print ($1>0)?"yes":"no"}')" yes
 chk a27_workers_lost "$(grep -c workers_lost root/miles/miles/utils/workers/ray_worker_manager.py | awk '{print ($1>0)?"yes":"no"}')" yes

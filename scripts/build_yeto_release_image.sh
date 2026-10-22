@@ -9,7 +9,7 @@
 #
 # Inputs (env):
 #   CRANE      crane binary (go-containerregistry >= 0.20)
-#   DEST_REPO  ghcr.io/michaellchung/yeto-release
+#   DEST_REPO  ghcr.io/agentenv/yeto-release
 #   OUT        output directory (default: a new /tmp/yeto-release-XXXXXX)
 # Registry auth: crane reads ~/.docker/config.json; nothing is printed.
 # Writes: $OUT/{layer.tar,release-manifest.json,build-record.json[,image.tar]}
@@ -18,7 +18,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 PUSH=0; [ "${1:-}" = "--push" ] && PUSH=1
 CRANE=${CRANE:-crane}
-DEST_REPO=${DEST_REPO:-ghcr.io/michaellchung/yeto-release}
+DEST_REPO=${DEST_REPO:-ghcr.io/agentenv/yeto-release}
 OUT=${OUT:-$(mktemp -d /tmp/yeto-release-XXXXXX)}
 PREFIX=opt/yeto/src
 

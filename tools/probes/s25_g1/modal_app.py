@@ -39,7 +39,7 @@ from run_limits import Deadline, wait_until  # noqa: E402
 # T-G1B: YETO_G1_PLAN=examples/stage1/glm5next-mini-modal-dense.yaml (set at deploy time;
 # the image env carries it into every container, so all of them plan the same file)
 PLAN = os.environ.get("YETO_G1_PLAN", "examples/stage1/glm5next-mini-modal.yaml")
-IMAGE = ("ghcr.io/michaellchung/yeto-miles-ports@sha256:"
+IMAGE = ("ghcr.io/agentenv/yeto-miles-ports@sha256:"
          "5b9dc2a9e6e315d73dabfbc6faae428b59cc01aabec6189645a5c8c80d6e3721")
 MILES_COMMIT = "1618b5c38db80e17ec928cfa47fe832cb18565fc"  # s25-distopt
 MODELS_VOLUME, STORE_VOLUME = "yeto-s25-g1-models", "yeto-s25-g1-store"

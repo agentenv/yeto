@@ -5,7 +5,7 @@ modal run tools/probes/s25_g1/image_probe.py   (no GPU; prints one JSON report)
 import modal
 
 # Same digest as yeto.rl.adapters.miles.pins.MILES_NEXT_IMAGE (the container has no yeto).
-MILES_NEXT_IMAGE = ("docker:ghcr.io/michaellchung/yeto-miles-ports@sha256:"
+MILES_NEXT_IMAGE = ("docker:ghcr.io/agentenv/yeto-miles-ports@sha256:"
                     "5b9dc2a9e6e315d73dabfbc6faae428b59cc01aabec6189645a5c8c80d6e3721")
 
 app = modal.App("yeto-s25-g1-probe")

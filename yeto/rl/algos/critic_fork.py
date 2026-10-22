@@ -1,6 +1,6 @@
 """Miles fork pin for the critic family (rl-algo-critic-family, S13 fork merge).
 
-``yeto-critic-family`` on michaellchung/miles (local commit, not pushed, not in an
+``yeto-critic-family`` on agentenv/miles (local commit, not pushed, not in an
 image) merges the critic-family fork branches onto yeto/ports 039471508:
 
 * yeto-gae-variant ce96fc060 -- ``--gae-variant`` / ``--gae-lambd-mode`` /

@@ -30,7 +30,7 @@ import time
 import modal
 
 IMAGE = (
-    "ghcr.io/michaellchung/yeto-miles-ports:c35702e-4e4148f"
+    "ghcr.io/agentenv/yeto-miles-ports:c35702e-4e4148f"
     "@sha256:37ac689e29caeecf9faf8587a3ad58c154ecffc7798711d5bd59d792d002b9f9"
 )
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
