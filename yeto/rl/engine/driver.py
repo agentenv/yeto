@@ -134,12 +134,14 @@ FAULT_INJECTION_ENV = "YETO_RL_FAULT_INJECTION"
 FAULT_INJECTION_FILE = "yeto-rl-fault-injection.json"  # at the repo root
 
 
-def load_fault_injection(environ: Mapping[str, str] | None = None) -> dict[str, float]:
+def load_fault_injection(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
     """Test-only fault injection (rl-infra-spec 2.3 X9); empty = off (default).
 
     Source: the JSON file named by ``YETO_RL_FAULT_INJECTION``, else
     ``<repo>/yeto-rl-fault-injection.json`` (present only in an experiment's
-    frozen code snapshot). Keys: ``publish_delay_s``.
+    frozen code snapshot). Keys: ``publish_delay_s``; ``round_delay_s`` (sleep
+    before each round's rollout, to emulate a slow island) with optional
+    ``round_delay_islands`` (learner ids it applies to; default every island).
     """
     import os
 
@@ -149,13 +151,23 @@ def load_fault_injection(environ: Mapping[str, str] | None = None) -> dict[str, 
     if not candidate.is_file():
         return {}
     raw = json.loads(candidate.read_text(encoding="utf-8"))
-    unknown = sorted(set(raw) - {"publish_delay_s"})
+    unknown = sorted(set(raw) - {"publish_delay_s", "round_delay_s", "round_delay_islands"})
     if unknown:
         raise ValueError(f"unknown fault injection keys {unknown}")
-    delay = float(raw.get("publish_delay_s", 0.0))
-    if not math.isfinite(delay) or delay < 0:
-        raise ValueError("publish_delay_s must be a non-negative number")
-    return {"publish_delay_s": delay} if delay else {}
+    out: dict[str, Any] = {}
+    for key in ("publish_delay_s", "round_delay_s"):
+        delay = float(raw.get(key, 0.0))
+        if not math.isfinite(delay) or delay < 0:
+            raise ValueError(f"{key} must be a non-negative number")
+        if delay:
+            out[key] = delay
+    if "round_delay_islands" in raw:
+        islands = raw["round_delay_islands"]
+        if not isinstance(islands, list) or not all(isinstance(i, int) and not isinstance(i, bool) for i in islands):
+            raise ValueError("round_delay_islands must be a list of learner ids")
+        if "round_delay_s" in out:
+            out["round_delay_islands"] = sorted(set(islands))
+    return out
 
 
 class DriverError(RuntimeError):
@@ -1474,6 +1486,7 @@ class IslandDriver:
             raise IslandRecoveryRequired(f"island is RECOVERY_REQUIRED: {self.controller.recovery_required}")
         self._probe_nodes(rollout_id)
         started = time.monotonic()
+        self._inject_round_delay(rollout_id)
         batch = self._generate(rollout_id)
         rollout_seconds = time.monotonic() - started
         if self.ledger is not None:
@@ -1490,6 +1503,15 @@ class IslandDriver:
         self.emit("rl_round_wall", rollout_id=rollout_id, placement=self.placement_kind,
                   round_seconds=time.monotonic() - started, rollout_seconds=rollout_seconds)
         return boundary
+
+    def _inject_round_delay(self, rollout_id: int) -> None:
+        """Test-only slow island: sleep before the rollout, inside the round wall time."""
+        delay = self.fault_injection.get("round_delay_s")
+        islands = self.fault_injection.get("round_delay_islands")
+        if not delay or (islands is not None and self.learner_id not in islands):
+            return
+        self.emit("rl_fault_injected", kind="round_delay", seconds=delay, rollout_id=rollout_id)
+        time.sleep(delay)
 
     def _train_round(self, rollout_id: int, batch: RolloutBatchHandle,
                      rollout_seconds: float) -> SyncBoundary:

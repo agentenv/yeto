@@ -153,6 +153,12 @@ def test_resume_wiring_write_only_needs_a_synced_sync(tmp_path):
     strict = bridges.StrictAvgSync.__new__(bridges.StrictAvgSync)
     wiring = resume_wiring_for(miles_args, sync=strict, environ={})
     assert isinstance(wiring.interval, AutoCutInterval) and wiring.stop_after is None
+    from yeto.rl.engine.full_parameter_sync import FullParameterSync
+
+    full = FullParameterSync.__new__(FullParameterSync)
+    full_args = SimpleNamespace(yeto_rl_resume={**config, "state_dir": str(tmp_path / "state-full")})
+    assert resume_wiring_for(full_args, sync=full, environ={}) is not None
+    assert full.cut_due(4) is False  # no checkpoint wired yet: no cut
     with pytest.raises(ValueError, match="takes no island round cuts"):
         resume_wiring_for(miles_args, sync=bridges.LocalOnlySync(2), environ={})
     with pytest.raises(ValueError, match="takes no island round cuts"):

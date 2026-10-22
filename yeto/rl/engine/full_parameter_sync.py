@@ -44,6 +44,7 @@ from yeto.protocol import PartialMessageGenerationLost
 from yeto.rl.elastic_client import LeaveReason
 from yeto.wan_streams import upload_window
 
+from .bridges import RoundCutHooks
 from .driver import SyncBoundary, SyncStart
 from .sync_timing import SyncTiming, unix_now, upload_fields
 
@@ -573,13 +574,15 @@ def _retained_replay(retained: Any, observed: Any | None) -> Any | None:
 
 
 
-class FullParameterSync:
+class FullParameterSync(RoundCutHooks):
     """The ports ``SyncSession`` for full-parameter training (every algorithm).
 
     The driver trains one local round, then :meth:`boundary` records it on
     every role, submits and applies through :class:`RolePairing`, and returns
     the actor's cut as a trainer-resident handle that the driver publishes
-    with its normal publication check.  A strict sweep profile blocks in the
+    with its normal publication check.  With ``--rl-checkpoint-store`` the island
+    also writes periodic round cuts (:class:`RoundCutHooks`) for offline
+    evaluation; the syncer stays authoritative for the policy.  A strict sweep profile blocks in the
     boundary until the whole sweep is applied; a streaming profile never waits
     for WAN I/O.
 

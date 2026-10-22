@@ -1013,7 +1013,7 @@ def resume_wiring_for(miles_args: Any, *, sync: Any, environ: Any = None) -> Res
         # S27 R-2: a synced island writes round cuts; its syncer stays authoritative
         if isinstance(sync, LocalOnlySync) or not isinstance(sync, RoundCutHooks):
             raise ValueError(f"--rl-island-cut-store: {type(sync).__name__} takes no island round cuts "
-                             "(strict or decoupled outer sync only)")
+                             "(strict, decoupled or full-parameter outer sync only)")
     elif not isinstance(sync, LocalOnlySync):
         raise ValueError("--rl-resume-store needs --rl-single-island-no-sync (multi-island resume "
                          "goes through the syncer checkpoint; see rl-resume-from-checkpoint 3.3)")

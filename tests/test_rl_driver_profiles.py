@@ -318,3 +318,26 @@ def test_observed_events_carry_labels_and_feed_load_windows(tmp_path):
                          profile=_profile("colocated-serial"), observe=False)
     driver2.run()
     assert load_windows(_events(tmp_path / "off.jsonl"), 1.0) == []
+
+
+def test_round_delay_applies_only_to_named_islands(tmp_path, monkeypatch):
+    from yeto.rl.engine import driver as drv
+
+    cfg = tmp_path / "fi.json"
+    cfg.write_text('{"round_delay_s": 0.01, "round_delay_islands": [1]}')
+    assert drv.load_fault_injection({drv.FAULT_INJECTION_ENV: str(cfg)}) == {
+        "round_delay_s": 0.01, "round_delay_islands": [1]}
+    monkeypatch.setenv(drv.FAULT_INJECTION_ENV, str(cfg))
+    engine = _engine(placement_kind="fixed-partition")
+    driver, _ = _driver(engine, tmp_path, profile=_profile("partitioned-serial"))
+    driver.run()  # learner 0: not named, no delay
+    kinds = [e.get("kind") for e in _events(tmp_path / "events.jsonl") if e["event"] == "rl_fault_injected"]
+    assert "round_delay" not in kinds
+    driver.fault_injection = {"round_delay_s": 0.01}  # every island
+    driver._inject_round_delay(7)
+    kinds = [e.get("kind") for e in _events(tmp_path / "events.jsonl") if e["event"] == "rl_fault_injected"]
+    assert kinds.count("round_delay") == 1
+    bad = tmp_path / "bad.json"
+    bad.write_text('{"round_delay_s": 1, "round_delay_islands": "1"}')
+    with pytest.raises(ValueError):
+        drv.load_fault_injection({drv.FAULT_INJECTION_ENV: str(bad)})
