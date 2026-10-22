@@ -99,7 +99,7 @@ def run_rounds(run: Path) -> list[dict]:
 
 
 def layer_of(run: Path) -> str:
-    m = re.match(r"s26-e03-(?:(v\d+)-)?(L\w+?)-", run.name)
+    m = re.match(r"s26-e03-(?:(v\d+\w*)-)?(L\w+?)-", run.name)
     return "-".join(g for g in m.groups() if g) if m else run.name
 
 
