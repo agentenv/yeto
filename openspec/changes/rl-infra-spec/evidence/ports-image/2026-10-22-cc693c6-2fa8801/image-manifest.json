@@ -24,7 +24,7 @@
     "repository": "https://github.com/radixark/Megatron-LM"
   },
   "miles": {
-    "commit": "56190a5a86d14f1eb96d592038d76a9ad8651b0c",
+    "commit": "cc693c6930be178f411f711f55c3d334a087c097",
     "install": "base's editable install (pip install -e /root/miles --no-deps) kept (same path); /root is on the base's sys.path, so without PYTHONPATH import miles is a namespace package over the /root/miles checkout -- yeto runs with PYTHONPATH=$HOME/miles (regular package)",
     "path": "/root/miles",
     "repository": "https://github.com/michaellchung/miles",
@@ -46,5 +46,5 @@
     "upstream_commit": "571212b636baca45e10fa3b4da11a289123f3235",
     "version": "0.5.21.dev70+g2fa8801"
   },
-  "tag": "56190a5-2fa8801"
+  "tag": "cc693c6-2fa8801"
 }
