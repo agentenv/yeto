@@ -882,6 +882,14 @@ def _full_parameter_async(args) -> bool:
     return getattr(args, "full_parameter_rounds", "sweep") == "async"
 
 
+def _local_init(args, async_rounds: bool) -> bool:
+    """Local init (S27): every island launched by one run loads the same base
+    checkpoint, so async rounds keep it as version 0 by default; the syncer
+    refuses the run if the islands' fragment digests disagree."""
+    mode = getattr(args, "init_mode", "auto")
+    return mode == "local" or (mode == "auto" and async_rounds)
+
+
 def _dense_full_sync_config(
     args, *, model_config_sha256: str, training_contract_sha256: str, algorithm_spec_sha256: str
 ):
@@ -932,6 +940,7 @@ def _dense_full_sync_config(
         # overlap's outer-step lag is bound into the session contract.
         overlap=bool(getattr(args, "sweep_overlap", False)),
         partial_quorum=async_rounds,
+        local_init=_local_init(args, async_rounds),
         matrix_merge=getattr(args, "rl_sync_matrix_merge", "avg"),
         peer_recovery=peer_recovery_options(args),
         # an island pool sets the epoch (and lease); else peer recovery may

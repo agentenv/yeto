@@ -69,6 +69,11 @@ MSG_BUDGET_DONE = 14
 MSG_BW_PROBE = 26
 # An island leaves the pool: u32 learner_id | u8 reason (yeto.rl.pool_client.LeaveReason).
 MSG_LEAVE = 27
+# Local-init startup (S27): the island's per-fragment INIT digests, and the
+# syncer's confirmation that every island holds the same version 0 (see
+# syncer/src/local_init.rs).
+MSG_INIT_DIGEST = 28
+MSG_INIT_CONFIRM = 29
 
 FINALIZATION_REVISION = 1
 FINALIZATION_TIMEOUT = 900.0
@@ -722,6 +727,8 @@ SESSION_REJECT_PREFIXES = (
     ("HELLO authentication failed", "island_auth_failed"),
     # The island was launched for an older syncer incarnation.
     (rp.SYNCER_EPOCH_FENCE_PREFIX, "syncer_epoch_fenced"),
+    # Local init: the islands did not load the same base weights.
+    ("init digest mismatch", "init_digest_mismatch"),
 )
 
 
@@ -1014,6 +1021,11 @@ class SyncerClient:
         # the kernel on a slow link (s26-e3b-p06-C32a).
         self._initial_cut_received = threading.Event()
         self._init_generation: int | None = None
+        # Local init: the INIT_DIGEST frame sent after every HELLO until the
+        # initial cut arrives, and the INIT_CONFIRM digest it must earn.
+        self._init_digest_frame: bytes | None = None
+        self._init_combined: bytes | None = None
+        self._init_confirmed = threading.Event()
         self.session_contract_hash = session_contract_hash
         self.syncer_profile_hash = syncer_profile_hash
         # secret-handling-hardening: HELLO carries an HMAC when the island has
@@ -1167,6 +1179,8 @@ class SyncerClient:
                     self.hmac_key,
                 ),
             )
+            if self._init_digest_frame is not None and not self._initial_cut_received.is_set():
+                control.sendall(self._init_digest_frame)
             socks.append(control)
             for idx in range(self.num_streams):
                 s = self._connect_one() if patient else self._dial(RECONNECT_DIAL_TIMEOUT)
@@ -1382,6 +1396,29 @@ class SyncerClient:
             and not self._initial_cut_received.is_set()
             and generation != self._init_generation
         )
+
+    def set_init_digests(self, layout_hash: bytes, digests: Sequence[bytes]) -> None:
+        """Local init: report the SHA-256 of every fragment's INIT_PARAMS
+        tensor bytes (one per layout fragment). Call before :meth:`start`;
+        the digests then follow every HELLO until the initial cut arrives,
+        and :meth:`initial_cut_confirmed` turns true when the syncer agrees."""
+        if len(layout_hash) != 32 or len(digests) != self.layout.num_fragments:
+            raise ValueError("local init needs a 32-byte layout hash and one digest per fragment")
+        if bulk_dtype(self.dtype) != DTYPE_F32:
+            raise ValueError("local init needs an f32-bulk session")
+        owned = [bytes(digests[index]) for index in self.owned_fragments]
+        if any(len(digest) != 32 for digest in owned):
+            raise ValueError("fragment digests must be 32-byte SHA-256 values")
+        if self._connected.is_set():
+            raise RuntimeError("set_init_digests must be called before start()")
+        payload = (struct.pack("<I", self.learner_id) + bytes(layout_hash)
+                   + struct.pack("<II", self.owned_fragments.start, len(owned)) + b"".join(owned))
+        self._init_combined = hashlib.sha256(b"".join(owned)).digest()
+        self._init_digest_frame = self._frame(MSG_INIT_DIGEST, payload)
+
+    def initial_cut_confirmed(self) -> bool:
+        """True once the syncer confirmed this island's local version 0."""
+        return self._init_confirmed.is_set()
 
     def mark_initial_cut_received(self) -> None:
         """The initial cut arrived: INIT is no longer replayed, and the stall
@@ -2151,6 +2188,7 @@ class SyncerClient:
             MSG_FINAL_MANIFEST: _FINAL_MANIFEST_HEAD.size
             + 8 * self.layout.num_fragments,
             MSG_SHUTDOWN: 0,
+            MSG_INIT_CONFIRM: 32,
             MSG_ERROR: MAX_ERROR_FRAME,
             MSG_CHUNK: _CHUNK_HEAD.size + CHUNK_SIZE,
             rp.MSG_RECOVERY_CLOCK: rp.MAX_RECOVERY_FRAME,
@@ -2557,6 +2595,13 @@ class SyncerClient:
             if isinstance(event, rp.RecoveryDone):
                 self._recover.clear()
             self._recovery_events.put(event)
+            return
+        if msg_type == MSG_INIT_CONFIRM:
+            if self._init_combined is None:
+                raise ProtocolError("INIT_CONFIRM for an island that sent no INIT_DIGEST")
+            if bytes(payload) != self._init_combined:
+                raise ProtocolError("INIT_CONFIRM digest differs from this island's fragments")
+            self._init_confirmed.set()
             return
         if msg_type == MSG_PULL_REQ:
             if len(payload) != 16:

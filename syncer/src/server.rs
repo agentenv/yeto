@@ -19,6 +19,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+use crate::local_init::{InitDigests, LocalInit};
 use crate::recovery::{self, HelloExt, PeerRecovery};
 use crate::membership::{Admission, AdmitError, CapacityQuorum, Member, Membership};
 use crate::protocol::*;
@@ -470,6 +471,13 @@ enum Event {
         member: Member,
         fragment_id: u32,
         values: Vec<f32>,
+        /// SHA-256 of the INIT_PARAMS tensor bytes as received.
+        sha256: [u8; 32],
+    },
+    /// Local-init startup: the island's per-fragment INIT digests.
+    InitDigest {
+        member: Member,
+        digests: InitDigests,
     },
     Push {
         member: Member,
@@ -1929,6 +1937,7 @@ async fn read_loop(
             header_at = Some(Instant::now());
             match msg_type {
                 MSG_INIT_PARAMS => Ok(group.max_init_payload),
+                MSG_INIT_DIGEST => Ok(init_digest_payload_len(group.layout.fragments.len())),
                 MSG_PUSH_FRAGMENT => Ok(group.max_push_payload),
                 MSG_HEARTBEAT => Ok(12),
                 MSG_LEAVE => Ok(5),
@@ -2111,6 +2120,7 @@ async fn dispatch_inner(
                     bytes.len()
                 );
             }
+            let sha256: [u8; 32] = Sha256::digest(bytes).into();
             let mut values = Vec::new();
             decode_tensor(bulk_dtype(group.dtype), bytes, &mut values)?;
             event_tx
@@ -2118,6 +2128,28 @@ async fn dispatch_inner(
                     member: group.member,
                     fragment_id,
                     values,
+                    sha256,
+                })
+                .await
+                .ok();
+        }
+        MSG_INIT_DIGEST => {
+            if bulk_dtype(group.dtype) != DTYPE_F32 {
+                bail!("INIT_DIGEST needs an f32-bulk session (dtype {})", group.dtype);
+            }
+            let digests = InitDigests::decode(payload, group.member.learner_id)?;
+            if digests.first as usize + digests.digests.len() > group.layout.fragments.len() {
+                bail!(
+                    "INIT_DIGEST covers fragments {}..{}, layout has {}",
+                    digests.first,
+                    digests.first as usize + digests.digests.len(),
+                    group.layout.fragments.len()
+                );
+            }
+            event_tx
+                .send(Event::InitDigest {
+                    member: group.member,
+                    digests,
                 })
                 .await
                 .ok();
@@ -2412,6 +2444,17 @@ async fn recv_init_event(
     event.context("event channel closed")
 }
 
+/// The islands did not start from the same weights: record the strict
+/// failure, tell every connected island why, and stop the syncer.
+async fn refuse_local_init(cfg: &Config, registry: &Registry, error: anyhow::Error) -> Result<()> {
+    let message = format!("{error:#}");
+    append_strict_failure(cfg.event_tape.as_deref(), "init_digest_mismatch", &message);
+    for group in current_groups(registry) {
+        let _ = group.send_small(MSG_ERROR, message.clone().into()).await;
+    }
+    bail!("RL strict failure init_digest_mismatch: {message}");
+}
+
 /// Connected learners the scheduler waits for before the first round: every
 /// learner with static membership, the launch quorum with dynamic membership.
 fn startup_members(cfg: &Config) -> u32 {
@@ -2438,6 +2481,9 @@ async fn scheduler(
     // LEAVE reasons of islands whose disconnect has not arrived yet.
     let mut leave_reasons: HashMap<Member, u8> = HashMap::new();
     let checkpoint_each_round = checkpoint_before_broadcast(&cfg);
+    // Local-init digests (`local_init`); created with the state.
+    let mut local_init: Option<LocalInit> = None;
+    let mut resumed = false;
 
     // Phase 1: wait until every fragment is initialized (via INIT_PARAMS or
     // a resumed checkpoint) and the expected learners have connected (late
@@ -2527,15 +2573,33 @@ async fn scheduler(
                                 }
                             }
                             info!(step = st.global_step, "resumed from checkpoint");
+                            resumed = true;
                         }
                     }
+                    local_init = Some(LocalInit::new(
+                        st.owned_fragments(),
+                        st.layout.fragments.len(),
+                    ));
                     state = Some(st);
+                }
+            }
+            Event::InitDigest { member, digests } => {
+                if !is_current_member(&registry, member) {
+                    continue;
+                }
+                let checked = local_init
+                    .as_mut()
+                    .context("INIT_DIGEST before HELLO")?
+                    .on_digests(digests);
+                if let Err(error) = checked {
+                    refuse_local_init(&cfg, &registry, error).await?;
                 }
             }
             Event::Init {
                 member,
                 fragment_id,
                 values,
+                sha256,
             } => {
                 if !is_current_member(&registry, member) {
                     warn!(
@@ -2546,6 +2610,16 @@ async fn scheduler(
                     continue;
                 }
                 let st = state.as_mut().context("INIT before HELLO")?;
+                if !st.initialized[fragment_id as usize] {
+                    let checked = local_init.as_mut().unwrap().on_init(
+                        fragment_id as usize,
+                        member.learner_id,
+                        sha256,
+                    );
+                    if let Err(error) = checked {
+                        refuse_local_init(&cfg, &registry, error).await?;
+                    }
+                }
                 st.init_fragment(fragment_id as usize, values)?;
                 if st.all_initialized() {
                     info!("global parameters initialized");
@@ -2640,8 +2714,32 @@ async fn scheduler(
     // learners start bit-identical (also serves recovery for late joiners).
     // A checkpoint already at the terminal cut goes straight to lossless
     // FINAL delivery; a redundant full BCAST would only inflate receiver RSS.
+    // Local init: islands whose digests agree with the applied INIT already
+    // hold version 0 and only get INIT_CONFIRM. A resumed cut is not the
+    // base checkpoint, so it is always broadcast.
     if st.global_step < last_step {
-        broadcast_all_fragments(&st, &registry, &budget_cutoff).await;
+        let confirm = local_init
+            .as_ref()
+            .filter(|_| !resumed)
+            .and_then(|init| init.confirm().map(|digest| (init, digest)));
+        let groups = current_groups(&registry);
+        let (confirmed, rest): (Vec<_>, Vec<_>) = groups.into_iter().partition(|group| {
+            confirm.is_some_and(|(init, _)| init.holds(group.member.learner_id))
+        });
+        if let Some((_, digest)) = confirm {
+            for group in &confirmed {
+                let payload = bytes::Bytes::copy_from_slice(&digest);
+                if !send_small_until_cutoff(group, MSG_INIT_CONFIRM, payload, &budget_cutoff).await {
+                    break;
+                }
+            }
+            info!(
+                confirmed = confirmed.len(),
+                broadcast = rest.len(),
+                "local init: islands kept their own version-0 weights"
+            );
+        }
+        broadcast_all_fragments(&st, &rest, &budget_cutoff).await;
     }
 
     // Phase 2: gather, compute, and commit are separate stages.  Torch SVD
@@ -3431,7 +3529,7 @@ async fn scheduler(
                         break 'outer;
                     }
                 }
-                Event::Init { .. } => {} // already initialized; ignore
+                Event::Init { .. } | Event::InitDigest { .. } => {} // already initialized; ignore
                 Event::FinalAck { member, .. } => {
                     warn!(
                         learner_id = member.learner_id,
@@ -3874,7 +3972,7 @@ async fn collect_budget_reports(
                 generation = member.generation,
                 "disconnected while waiting for learner-budget cutoff"
             ),
-            Event::Init { .. } | Event::FinalAck { .. } | Event::Leave { .. } => {}
+            Event::Init { .. } | Event::InitDigest { .. } | Event::FinalAck { .. } | Event::Leave { .. } => {}
             Event::Recovery { member, .. } => ignore_recovery_message(member, "the budget cutoff"),
         }
     }
@@ -5158,10 +5256,9 @@ fn is_current_member(registry: &Registry, member: Member) -> bool {
 
 async fn broadcast_all_fragments(
     st: &GlobalState,
-    registry: &Registry,
+    groups: &[Arc<Group>],
     budget_cutoff: &BudgetCutoff,
 ) {
-    let groups = current_groups(registry);
     // Fan each fragment out to every learner before moving to the next one.
     // Each learner has independent socket-writer queues, so this keeps all
     // links busy concurrently.  Iterating learner-by-learner here serializes
@@ -5169,7 +5266,7 @@ async fn broadcast_all_fragments(
     // The current streaming encoder keeps peak host memory bounded while the
     // per-learner socket queues provide link concurrency.
     for p in st.owned_fragments() {
-        for group in &groups {
+        for group in groups {
             match send_fragment_until_cutoff(
                 st,
                 group,
@@ -5444,6 +5541,7 @@ async fn finalize_learners(
             | Event::Heartbeat { .. }
             | Event::Leave { .. }
             | Event::Init { .. }
+            | Event::InitDigest { .. }
             | Event::Recovery { .. }
             | Event::BudgetDone { .. } => {
                 // The authoritative cut is frozen; late training traffic is

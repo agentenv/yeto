@@ -3,6 +3,7 @@ mod hmac;
 mod shard;
 #[cfg(test)]
 mod head_memory;
+mod local_init;
 mod iso_worker;
 mod membership;
 mod recovery;

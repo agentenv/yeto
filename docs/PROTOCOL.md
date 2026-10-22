@@ -633,6 +633,28 @@ It keeps `status.json` next to the tape (schema
 `yeto.syncer.elastic-status/v1`: state, syncer epoch, outer version, live
 islands with capacity and remaining lease).
 
+### Local init (INIT_DIGEST / INIT_CONFIRM)
+
+When every island loads the same base checkpoint (`--rl-sync-init-mode
+local`, the default with `--rl-sync-full-parameter-rounds async`), each island
+sends INIT_DIGEST (type 28) on its control socket right after every HELLO
+until its initial cut arrives: `u32 learner_id | [32] layout_hash | u32
+first_fragment | u32 count | count x [32] sha256`. Each digest is the SHA-256
+of the fragment's INIT_PARAMS tensor bytes; the list covers exactly the
+fragments the receiving syncer (shard) owns. Only f32-bulk sessions accept it.
+
+Learner 0 still sends INIT_PARAMS, so the syncer's f32 masters, merges,
+checkpoints and resume are unchanged. The syncer checks that every island's
+layout hash and digests agree and that each applied INIT hashes to the agreed
+digest. Any difference stops the run as the strict failure
+`init_digest_mismatch`; every connected island first receives MSG_ERROR
+`init digest mismatch: ...` and fails with the same metric.
+
+When the checks pass on a fresh start, an island that sent digests receives
+INIT_CONFIRM (type 29: `[32]` SHA-256 over the concatenated digests) instead
+of the version-0 broadcast and keeps its own weights as version 0. An island
+without digests, a resumed syncer, and late joiners still get the broadcast.
+
 ### Island departure (LEAVE)
 
 An island that leaves a pool sends LEAVE (type 27: `u32 learner_id | u8

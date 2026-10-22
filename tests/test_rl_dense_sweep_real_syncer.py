@@ -292,6 +292,14 @@ def test_bf16_push_flag_reaches_the_island_command():
     assert "--sweep-push-dtype" not in _rl_trainable_island_flags(_dense_args(), 0, 1)
 
 
+def test_init_mode_flag_reaches_the_island_command():
+    from yeto.launch.rl_island_task import _rl_trainable_island_flags
+
+    args = _dense_args("--rl-sync-init-mode", "upload")
+    assert "--init-mode upload" in _rl_trainable_island_flags(args, 0, 1)
+    assert "--init-mode" not in _rl_trainable_island_flags(_dense_args(), 0, 1)
+
+
 def _tail(data: bytes) -> torch.Tensor:
     return torch.frombuffer(bytearray(data), dtype=torch.float32)
 

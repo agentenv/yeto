@@ -171,6 +171,7 @@ _FULL_PARAMETER_SYNC_DEFAULTS = (
     ("rl_sync_overlap", False, "--rl-sync-overlap"),
     ("rl_sync_full_parameter_rounds", "sweep", "--rl-sync-full-parameter-rounds"),
     ("rl_sync_expert_token_weights", False, "--rl-sync-expert-token-weights"),
+    ("rl_sync_init_mode", "auto", "--rl-sync-init-mode"),
 )
 
 

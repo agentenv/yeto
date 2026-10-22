@@ -112,6 +112,8 @@ def _rl_trainable_island_flags(args, learner_id: int, num_learners: int) -> str:
         sweep += " --full-parameter-rounds async"
     if getattr(args, "rl_sync_expert_token_weights", False):
         sweep += " --sweep-expert-token-weights"
+    if getattr(args, "rl_sync_init_mode", "auto") != "auto":
+        sweep += f" --init-mode {args.rl_sync_init_mode}"
     if getattr(args, "rl_sync_push_dtype", "f32") != "f32":
         sweep += f" --sweep-push-dtype {args.rl_sync_push_dtype}"
     if getattr(args, "rl_sync_overlap", False):

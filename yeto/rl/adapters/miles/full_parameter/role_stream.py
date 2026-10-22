@@ -59,6 +59,21 @@ from yeto.rl.trajectory_evidence import TrajectoryBatchEvidence
 
 # Seconds between progress lines while an island waits for its initial cut.
 INITIAL_CUT_REPORT_SECONDS = 30.0
+# The initial-cut wait grows with the model: long enough to move the cut at
+# an assumed worst-case 32 MiB/s head link (X6: 116.5 GB of f32 timed out the
+# flat 900 s default, which stays the floor).
+INITIAL_CUT_MIN_BYTES_PER_SECOND = 32 << 20
+
+
+def initial_cut_timeout(configured: float, model_bytes: int, islands: int, *, local_init: bool) -> float:
+    """Seconds an island waits for its initial cut.
+
+    Learner 0 uploads ``model_bytes`` of INIT. Without local init the syncer
+    then broadcasts them to every island over the head's one link, so the cut
+    moves ``(1 + islands) * model_bytes``; with local init only the upload.
+    The configured timeout is the floor."""
+    moved = model_bytes * (1 if local_init else 1 + islands)
+    return max(configured, moved / INITIAL_CUT_MIN_BYTES_PER_SECOND)
 
 _LOWER_HEX = frozenset("0123456789abcdef")
 
@@ -160,6 +175,12 @@ class RoleStreamConfig:
     # may skip fragment versions. None = fixed roster. Not part of the
     # session contract (membership is a syncer option).
     island_lease_s: float | None = None
+    # Local init (S27): this island loaded the run's base checkpoint and keeps
+    # it as version 0 once the syncer confirms every island's fragment digests
+    # agree (MSG_INIT_CONFIRM); no initial broadcast is needed. False waits for
+    # the broadcast of learner 0's INIT. Not part of the session contract: it
+    # changes which bytes travel at startup, never the version-0 values.
+    local_init: bool = False
 
     @property
     def tensor_blocks_active(self) -> bool:
@@ -559,7 +580,13 @@ class MilesFullParameterRoleStream:
         if self._recovering:
             await self._initialize_recovering(group, adapter, initial, client, sink, heartbeat)
             return
+        local: tuple[StoredAuthoritativeFragment, ...] | None = None
         try:
+            if self.config.local_init:
+                local, digests = await asyncio.to_thread(
+                    self._local_version_zero, adapter, initial, sink)
+                client.set_init_digests(
+                    hashlib.sha256(adapter.layout.layout_hash.encode()).digest(), digests)
             client.start()
             if heartbeat is not None:
                 heartbeat.start()  # the initial cut may take longer than the lease
@@ -579,9 +606,14 @@ class MilesFullParameterRoleStream:
             # island's other role from connecting, and two islands blocked
             # on different roles deadlock (s23-g3-sao-main-20261014a).
             authoritative = await asyncio.to_thread(
-                self._wait_for_initial_fragments, client, adapter, init_parts
+                self._wait_for_initial_fragments, client, adapter, init_parts, local
             )
             adapter.verify_initial_fragments(initial, authoritative, allow_newer=self.may_rejoin)
+            if local is not None:  # a rejoin's newer fragments replace version 0
+                kept = {id(stored) for stored in authoritative}
+                for stored in local:
+                    if id(stored) not in kept:
+                        stored.release()
         except BaseException:
             if heartbeat is not None:
                 heartbeat.stop()
@@ -736,20 +768,46 @@ class MilesFullParameterRoleStream:
         self._donor_refusals_reported = len(self._donor.refused)
         return served
 
+    def _local_version_zero(self, adapter, initial, sink):
+        """Local init: store this island's own INIT bytes as its version-0
+        anchors and hash them exactly as the syncer hashes INIT_PARAMS."""
+        stored, digests = [], []
+        for fragment_id in range(adapter.layout.fragments.num_fragments):
+            payload = bytearray()
+            for part in adapter.fragment_parts(initial, fragment_id, ray_module=self.ray_module)():
+                payload += part
+            digests.append(hashlib.sha256(payload).digest())
+            stored.append(sink(fragment_id, 0, payload))
+        return tuple(stored), digests
+
     def _wait_for_initial_fragments(
         self,
         client,
         adapter: MilesChunkedFullParameterAdapter,
         init_parts=None,
+        local: Sequence[StoredAuthoritativeFragment] | None = None,
     ) -> tuple[StoredAuthoritativeFragment, ...]:
+        """The version-0 cut: the syncer's broadcast, or with ``local`` this
+        island's own fragments once the syncer confirms the digests agree."""
         started = time.monotonic()
-        deadline = started + self.config.wait_timeout
+        count = adapter.layout.fragments.num_fragments
+        fragments = getattr(adapter.layout.fragments, "fragments", ())
+        model_bytes = sum(4 * fragment.numel for fragment in fragments)
+        deadline = started + initial_cut_timeout(
+            self.config.wait_timeout, model_bytes, len(self.config.learner_generations),
+            local_init=local is not None)
         next_report = started + INITIAL_CUT_REPORT_SECONDS
         observed: dict[int, StoredAuthoritativeFragment] = {}
-        count = adapter.layout.fragments.num_fragments
         self._report_initial_cut(client, observed, count, started, "waiting")
         while len(observed) < count:
             client.check_health()
+            if local is not None and client.initial_cut_confirmed():
+                for stored in observed.values():
+                    if all(stored is not mine for mine in local):
+                        stored.release()
+                self._report_initial_cut(client, observed, count, started, "confirmed local")
+                client.mark_initial_cut_received()
+                return tuple(local)
             if self.may_rejoin and _is_set(getattr(client, "finalizing", None)):
                 # The pool reached its final cut before this island caught up;
                 # waiting for broadcasts would only run into the timeout.

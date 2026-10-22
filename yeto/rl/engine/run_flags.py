@@ -1021,6 +1021,17 @@ _SYNC = (
     # S27 P1: the outer-merge settings each RL preset used to fix. Unset keeps
     # the preset's value, so the syncer command and profile stay unchanged.
     cli_flag(
+        "--rl-sync-init-mode",
+        choices=("auto", "local", "upload"),
+        default="auto",
+        help="full-parameter only (S27): how islands get the version-0 weights. "
+        "local = every island keeps the base checkpoint it loaded and reports "
+        "per-fragment digests; the syncer checks they agree and sends no initial "
+        "broadcast (learner 0 still uploads INIT for the syncer's f32 masters). "
+        "upload = learner 0 uploads INIT and the syncer broadcasts it to every "
+        "island. auto (default) = local with --rl-sync-full-parameter-rounds async",
+    ),
+    cli_flag(
         "--rl-sync-full-parameter-rounds",
         choices=FULL_PARAMETER_ROUNDS,
         default=sync_mode_default("sweep"),

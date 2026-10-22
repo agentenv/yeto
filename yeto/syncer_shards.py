@@ -161,6 +161,14 @@ class ShardedSyncerClient:
         """True when some shard needs INIT again (see ``SyncerClient``)."""
         return any(client.init_replay_due() for client in self.shards)
 
+    def set_init_digests(self, layout_hash: bytes, digests) -> None:
+        """Local init: each shard gets the digests of the fragments it owns."""
+        for client in self.shards:
+            client.set_init_digests(layout_hash, digests)
+
+    def initial_cut_confirmed(self) -> bool:
+        return all(client.initial_cut_confirmed() for client in self.shards)
+
     def mark_initial_cut_received(self) -> None:
         for client in self.shards:
             client.mark_initial_cut_received()

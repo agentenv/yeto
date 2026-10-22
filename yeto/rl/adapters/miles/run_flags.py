@@ -337,6 +337,14 @@ _ISLAND = (
         "island count may close a round without this island)",
     ),
     island_flag(
+        "--init-mode",
+        choices=("auto", "local", "upload"),
+        default="auto",
+        help="full-parameter: local = keep the loaded base weights as version 0 "
+        "after the syncer confirms every island's fragment digests agree; upload "
+        "= wait for the syncer's initial broadcast; auto = local for async rounds",
+    ),
+    island_flag(
         "--sweep-push-dtype",
         choices=("f32", "bf16", "int8", "int4", "int4-log"),
         default="f32",

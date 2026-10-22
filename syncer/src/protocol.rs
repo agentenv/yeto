@@ -29,6 +29,19 @@ pub const MSG_BUDGET_DONE: u8 = 14;
 /// Sent before the island closes its connection; the reason goes on the
 /// `pool_leave` tape record.
 pub const MSG_LEAVE: u8 = 27;
+/// Local-init startup (S27): every island loaded the same base checkpoint and
+/// reports the SHA-256 of each owned fragment's INIT_PARAMS tensor bytes:
+/// `u32 learner_id | [32] layout_hash | u32 first_fragment | u32 count |
+/// count x [32] digest`. Valid only on f32-bulk sessions.
+pub const MSG_INIT_DIGEST: u8 = 28;
+/// Syncer -> island: every island's digests and the applied INIT agree, so
+/// the island adopts its local weights as version 0 and no initial BCAST
+/// follows. Payload: `[32]` SHA-256 over the concatenated fragment digests.
+pub const MSG_INIT_CONFIRM: u8 = 29;
+/// Largest INIT_DIGEST payload for a layout of `fragments` fragments.
+pub fn init_digest_payload_len(fragments: usize) -> u64 {
+    4 + 32 + 4 + 4 + 32 * fragments as u64
+}
 pub const LEAVE_REASON_NAMES: [&str; 7] = [
     "finished",
     "lease_expired",
