@@ -110,6 +110,8 @@ def _rl_trainable_island_flags(args, learner_id: int, num_learners: int) -> str:
              f" --syncer-profile-sha256 {rl_syncer_profile(args, num_learners).sha256}")
     if rl_full_parameter_async(args):
         sweep += " --full-parameter-rounds async"
+    if getattr(args, "rl_sync_expert_token_weights", False):
+        sweep += " --sweep-expert-token-weights"
     if getattr(args, "rl_sync_push_dtype", "f32") != "f32":
         sweep += f" --sweep-push-dtype {args.rl_sync_push_dtype}"
     if getattr(args, "rl_sync_overlap", False):

@@ -367,6 +367,12 @@ _ISLAND = (
         help="full-parameter sweep, int4 pushes: residual dtype of island-side error feedback",
     ),
     island_flag(
+        "--sweep-expert-token-weights",
+        action="store_true",
+        help="full-parameter async, MoE: count the tokens each router sends to each "
+        "expert and send them with every push (the syncer runs --expert-token-weights)",
+    ),
+    island_flag(
         "--sweep-overlap",
         action="store_true",
         help="full-parameter sweep: train the next round while the sweep syncs, then "

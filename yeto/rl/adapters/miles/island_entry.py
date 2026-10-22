@@ -813,6 +813,9 @@ def _check_dense_full_sweep(args, *, yeto_policy_sync: bool) -> None:
         raise ValueError("the dense full-parameter strict sweep requires H=1")
     elif getattr(args, "rl_sync_matrix_merge", "avg") != "avg":
         raise ValueError("the dense full-parameter strict sweep merges by plain averaging")
+    elif getattr(args, "sweep_expert_token_weights", False):
+        raise ValueError("--sweep-expert-token-weights needs asynchronous rounds "
+                         "(the strict sweep merges with equal weights)")
     elif int(getattr(args, "rl_max_policy_age", 0) or 0) != 0:
         # The sweep publishes whole rounds in lockstep with the syncer. The
         # asynchronous rounds take a policy-age limit counted in local
@@ -922,6 +925,7 @@ def _dense_full_sync_config(
         push_tensor_blocks=not getattr(args, "sweep_push_no_tensor_blocks", False),
         push_int4_stochastic=bool(getattr(args, "sweep_push_int4_stochastic", False)),
         push_int4_error_feedback=getattr(args, "sweep_push_int4_error_feedback", "off"),
+        expert_token_weights=bool(getattr(args, "sweep_expert_token_weights", False)),
         bcast_delta=bool(getattr(args, "bcast_delta", False)),
         # The rollout policy age stays 0 (``_check_dense_full_sweep``); the
         # overlap's outer-step lag is bound into the session contract.

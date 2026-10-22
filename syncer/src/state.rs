@@ -492,6 +492,20 @@ impl GlobalState {
         outer_gradients: &[&[f32]],
         weights: &[f64],
     ) -> Result<PreparedMerge> {
+        self.prepare_merge_scaled(fid, base_version, outer_gradients, weights, None)
+    }
+
+    /// `prepare_merge` with an optional per-tensor scale of every learner's
+    /// weight (expert token weights): tensor `t` of learner `m` merges with
+    /// weight `weights[m] * tensor_scales[m][t]`. `None` is `prepare_merge`.
+    pub fn prepare_merge_scaled(
+        &self,
+        fid: usize,
+        base_version: u64,
+        outer_gradients: &[&[f32]],
+        weights: &[f64],
+        tensor_scales: Option<&[&[f64]]>,
+    ) -> Result<PreparedMerge> {
         let current_version = *self
             .versions
             .get(fid)
@@ -543,15 +557,32 @@ impl GlobalState {
             outer_gradients.to_vec()
         };
         let outer_gradients = outer_gradients.as_slice();
+        if let Some(scales) = tensor_scales {
+            if scales.len() != weights.len()
+                || scales.iter().any(|s| s.len() != frag.tensor_numels.len())
+            {
+                bail!("fragment {fid}: tensor scales do not match the learners and tensors");
+            }
+        }
+        let mut tensor_weights = weights.to_vec();
         let mut delta = vec![0.0f32; numel];
         // Merge per tensor slice within the fragment.
         let mut off = 0usize;
-        for &tn in &frag.tensor_numels {
+        for (tensor_index, &tn) in frag.tensor_numels.iter().enumerate() {
             let tn = tn as usize;
             let slices: Vec<&[f32]> = outer_gradients
                 .iter()
                 .map(|gradient| &gradient[off..off + tn])
                 .collect();
+            let weights = match tensor_scales {
+                None => weights,
+                Some(scales) => {
+                    for ((w, &base), s) in tensor_weights.iter_mut().zip(weights).zip(scales) {
+                        *w = base * s[tensor_index];
+                    }
+                    tensor_weights.as_slice()
+                }
+            };
             let out = &mut delta[off..off + tn];
             match frag.merge_mode {
                 // ISO reduces by direct average; the spectrum is flattened
@@ -1462,6 +1493,35 @@ mod tests {
         assert!(g > 0.0);
         // Θ − 1.0·(Θ − θ) = θ
         assert_eq!(*st.params[0], vec![0.0; 4]);
+    }
+
+    #[test]
+    fn tensor_scales_weight_each_tensor_separately() {
+        let merged = |scales: Option<&[&[f64]]>| {
+            let mut st = GlobalState::new(layout2(), 1.0, 0.0, crate::protocol::DTYPE_F32).unwrap();
+            st.init_fragment(0, vec![0.0; 4]).unwrap();
+            st.init_fragment(1, vec![0.0; 4]).unwrap();
+            let a = [1.0f32, 0.0, 3.0, 0.0];
+            let b = [0.0f32, 2.0, 0.0, 5.0];
+            let computed = st
+                .prepare_merge_scaled(1, 0, &[&a, &b], &[1.0, 3.0], scales)
+                .unwrap()
+                .finish_inline()
+                .unwrap();
+            st.commit_merge(computed).unwrap();
+            st.params[1].iter().map(|v| -v).collect::<Vec<f32>>()
+        };
+        let plain = merged(None);
+        assert_eq!(merged(Some(&[&[1.0, 1.0], &[1.0, 1.0]])), plain);
+        // Tensor 1: learner a routed nothing, so only b's update remains
+        // (RDA of a single learner is that learner's update).
+        let scaled = merged(Some(&[&[1.0, 0.0], &[1.0, 2.0]]));
+        assert_eq!(scaled[..2], plain[..2]);
+        assert_eq!(scaled[2..], [0.0, 5.0]);
+        let mut st = GlobalState::new(layout2(), 1.0, 0.0, crate::protocol::DTYPE_F32).unwrap();
+        st.init_fragment(1, vec![0.0; 4]).unwrap();
+        let g = [0.0f32; 4];
+        assert!(st.prepare_merge_scaled(1, 0, &[&g, &g], &[1.0, 1.0], Some(&[&[1.0]])).is_err());
     }
 
     #[test]

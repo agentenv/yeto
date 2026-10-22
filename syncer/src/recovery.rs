@@ -80,10 +80,14 @@ const MAX_TEXT: usize = 4096;
 /// Magic of the optional HELLO extension trailer, always the last
 /// `HELLO_EXT_LEN` bytes of the HELLO body:
 /// `b"YEX1" | flags u8 | syncer_epoch u64`. Legacy clients send none.
+/// Flags: 1 epoch present, 2 recover, 4 per-expert routed-token tags on
+/// every PUSH_FRAGMENT of the session (see `protocol::decode_expert_tags`).
 pub const HELLO_EXT_MAGIC: &[u8; 4] = b"YEX1";
 pub const HELLO_EXT_LEN: usize = 13;
 const FLAG_HAS_EPOCH: u8 = 1;
 const FLAG_RECOVER: u8 = 2;
+const FLAG_EXPERT_TOKENS: u8 = 4;
+const KNOWN_FLAGS: u8 = FLAG_HAS_EPOCH | FLAG_RECOVER | FLAG_EXPERT_TOKENS;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct HelloExt {
@@ -91,6 +95,9 @@ pub struct HelloExt {
     pub syncer_epoch: Option<u64>,
     /// The island lost its trainer state and asks for peer recovery.
     pub recover: bool,
+    /// Every PUSH_FRAGMENT of this session carries per-expert routed-token
+    /// tags (the syncer must run with expert token weights, and vice versa).
+    pub expert_tokens: bool,
 }
 
 impl HelloExt {
@@ -105,6 +112,9 @@ impl HelloExt {
         if self.recover {
             flags |= FLAG_RECOVER;
         }
+        if self.expert_tokens {
+            flags |= FLAG_EXPERT_TOKENS;
+        }
         out[4] = flags;
         out[5..].copy_from_slice(&self.syncer_epoch.unwrap_or(0).to_le_bytes());
         out
@@ -118,7 +128,7 @@ impl HelloExt {
             return (body, None);
         }
         let (head, tail) = body.split_at(body.len() - HELLO_EXT_LEN);
-        if &tail[..4] != HELLO_EXT_MAGIC || tail[4] & !(FLAG_HAS_EPOCH | FLAG_RECOVER) != 0 {
+        if &tail[..4] != HELLO_EXT_MAGIC || tail[4] & !KNOWN_FLAGS != 0 {
             return (body, None);
         }
         let flags = tail[4];
@@ -129,6 +139,7 @@ impl HelloExt {
         let ext = HelloExt {
             syncer_epoch: (flags & FLAG_HAS_EPOCH != 0).then_some(epoch),
             recover: flags & FLAG_RECOVER != 0,
+            expert_tokens: flags & FLAG_EXPERT_TOKENS != 0,
         };
         (head, Some(ext))
     }
@@ -695,9 +706,10 @@ mod tests {
     fn hello_ext_round_trips_and_legacy_bodies_pass_through() {
         for ext in [
             HelloExt::default(),
-            HelloExt { syncer_epoch: Some(9), recover: false },
-            HelloExt { syncer_epoch: None, recover: true },
-            HelloExt { syncer_epoch: Some(u64::MAX), recover: true },
+            HelloExt { syncer_epoch: Some(9), recover: false, expert_tokens: false },
+            HelloExt { syncer_epoch: None, recover: true, expert_tokens: false },
+            HelloExt { syncer_epoch: Some(u64::MAX), recover: true, expert_tokens: false },
+            HelloExt { syncer_epoch: None, recover: false, expert_tokens: true },
         ] {
             let mut body = b"legacy-hello".to_vec();
             body.extend_from_slice(&ext.encode());

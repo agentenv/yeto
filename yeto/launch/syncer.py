@@ -275,6 +275,7 @@ def rl_syncer_profile(args, num_learners: int):
     period = outer_delayed_nesterov_period(args)
     return SyncerSemanticProfile.from_mapping({
         **({"outer_delayed_nesterov_period": period} if period else {}),
+        **({"expert_token_weights": True} if _rl_expert_token_weights(args) else {}),
         "schema": SYNCER_SEMANTIC_PROFILE_SCHEMA,
         "learners": num_learners,
         "quorum": args.quorum,
@@ -541,6 +542,11 @@ def _rl_learner_weight(args) -> str:
     return getattr(args, "rl_sync_learner_weight", "equal")
 
 
+def _rl_expert_token_weights(args) -> bool:
+    """--rl-sync-expert-token-weights (full-parameter async, checked by rl_args)."""
+    return bool(getattr(args, "rl_sync_expert_token_weights", False))
+
+
 def _rl_role_syncer_command(args, num_learners: int, binary: str,
                             syncer: RoleSyncer,
                             shard_plan: tuple[int, int] | None = None) -> str:
@@ -570,6 +576,7 @@ def _rl_role_syncer_command(args, num_learners: int, binary: str,
         f"{peer_recovery_syncer_flags(args)}"
         f" --max-base-lag {_rl_max_base_lag(args)}"
         f" --learner-weight {_rl_learner_weight(args)}"
+        f"{' --expert-token-weights' if _rl_expert_token_weights(args) else ''}"
         f" --checkpoint-path {syncer.checkpoint}"
         f" --checkpoint-every {_syncer_checkpoint_every(args)}"
         f" {_resume_if_exists(syncer.checkpoint)}"

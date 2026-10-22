@@ -222,6 +222,12 @@ struct Args {
     /// (historical bits); streaming folds each push on arrival (S27 P4b).
     #[arg(long, default_value = "buffered")]
     weighted_fold: String,
+    /// MoE: weight each expert tensor of a push by the tokens the island
+    /// routed to that expert during the outer interval, relative to an even
+    /// split over the layer's experts (an expert the island never routed to
+    /// gets weight 0). Islands must send the counts. Off by default.
+    #[arg(long)]
+    expert_token_weights: bool,
     /// Fragment-sharded head (S27 P4b): this process owns the fragment
     /// range of shard --shard-index out of --shard-count and runs only the
     /// global steps t ≡ shard-index+1 (mod shard-count).  Default unsharded.
@@ -409,6 +415,7 @@ fn main() -> anyhow::Result<()> {
         recovery,
         weighted_fold: args.weighted_fold.parse()?,
         shard,
+        expert_token_weights: args.expert_token_weights,
     };
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()

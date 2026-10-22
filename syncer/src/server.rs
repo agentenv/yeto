@@ -168,12 +168,18 @@ pub struct Config {
     /// S27 P4b: this process's slice of a fragment-sharded head.  Default is
     /// unsharded and changes nothing.
     pub shard: crate::shard::ShardPlan,
+    /// MoE: weight each expert tensor of a push by the tokens the island
+    /// routed to that expert during the outer interval (see
+    /// `protocol::decode_expert_tags`). Every HELLO must declare the matching
+    /// session flag. Off keeps the wire bytes and the merge unchanged.
+    pub expert_token_weights: bool,
 }
 
 // v2 drops `resume`: it is how a run (re)starts, not its semantics, so a
 // restarted syncer keeps the hash every island already carries in HELLO.
 const SEMANTIC_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-semantic-profile-v2\0";
 const DELAYED_NESTEROV_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-delayed-nesterov-v1\0";
+const EXPERT_TOKEN_WEIGHTS_PROFILE_DOMAIN: &[u8] = b"yeto-syncer-expert-token-weights-v1\0";
 
 impl Config {
     /// Canonical identity of every launch field that can affect merging,
@@ -212,6 +218,10 @@ impl Config {
         if let Some(period) = self.outer_delayed_nesterov_period {
             encoded.extend_from_slice(DELAYED_NESTEROV_PROFILE_DOMAIN);
             encoded.extend_from_slice(&period.to_le_bytes());
+        }
+        // Appended only when on, so every existing hash stays unchanged.
+        if self.expert_token_weights {
+            encoded.extend_from_slice(EXPERT_TOKEN_WEIGHTS_PROFILE_DOMAIN);
         }
         Sha256::digest(encoded).into()
     }
@@ -271,6 +281,8 @@ struct PartialMsg {
 struct Group {
     member: Member,
     dtype: u8,
+    /// PUSH_FRAGMENT carries the routed-token tag block (HELLO flag).
+    expert_tokens: bool,
     layout: Layout,
     layout_fingerprint: [u8; 32],
     session_contract_hash: [u8; 32],
@@ -513,6 +525,9 @@ struct Push {
     /// Signed outer gradient `raw_anchor - local`, converted exactly once
     /// from the learner's wire delta `local - raw_anchor`.
     outer_gradient: Vec<f32>,
+    /// Expert token weights: the per-tensor merge scale of this push (see
+    /// `protocol::decode_expert_tags`); `None` when the option is off.
+    tensor_scales: Option<Vec<f64>>,
     transfer: PushTransfer,
 }
 
@@ -883,6 +898,11 @@ fn validate_config(cfg: &Config) -> Result<()> {
     if cfg.learners == 0 {
         bail!("--learners must be positive");
     }
+    if cfg.expert_token_weights
+        && matches!(cfg.island_scheduling, crate::elastic::IslandSchedulingMode::Elastic(_))
+    {
+        bail!("--expert-token-weights needs fragment rounds; the whole-vector elastic loop has no per-tensor weights");
+    }
     if cfg.quorum == 0 {
         bail!("--quorum must be positive");
     }
@@ -944,6 +964,9 @@ fn validate_config(cfg: &Config) -> Result<()> {
         }
         if cfg.learner_weight != LearnerWeight::Equal {
             bail!("--policy-sweep-fragments requires --learner-weight equal");
+        }
+        if cfg.expert_token_weights {
+            bail!("--policy-sweep-fragments does not support --expert-token-weights");
         }
         // --resume is not required here: a fresh sweep has no checkpoint yet and
         // --resume refuses a missing file (see check_resume_checkpoint). The
@@ -1225,6 +1248,7 @@ async fn run_with_listener(cfg: Config, bound: Option<TcpListener>) -> Result<()
     let accept_session = session.clone();
     let accept_budget_cutoff = budget_cutoff.clone();
     let require_profile_binding = cfg.require_profile_binding;
+    let expert_token_weights = cfg.expert_token_weights;
     let hello_auth = Arc::new(HelloAuth {
         key: cfg.island_hmac_key.clone(),
         expected_contract: cfg.expected_island_contract,
@@ -1249,6 +1273,7 @@ async fn run_with_listener(cfg: Config, bound: Option<TcpListener>) -> Result<()
                             expected_learners,
                             semantic_profile_hash,
                             require_profile_binding,
+                            expert_token_weights,
                             tx,
                             budget_cutoff,
                             hello_auth,
@@ -1267,14 +1292,17 @@ async fn run_with_listener(cfg: Config, bound: Option<TcpListener>) -> Result<()
     scheduler(cfg, event_rx, registry, budget_cutoff).await
 }
 
-fn negotiated_payload_limits(layout: &Layout, dtype: u8) -> Result<(u64, u64)> {
+fn negotiated_payload_limits(layout: &Layout, dtype: u8, expert_tags: bool) -> Result<(u64, u64)> {
     let mut max_init = 0u64;
     let mut max_push = 0u64;
     for fragment in &layout.fragments {
         let numel = fragment.numel()?;
         let init_bytes = tensor_nbytes(bulk_dtype(dtype), numel)? as u64;
         let segments = push_segments(dtype, numel, &fragment.tensor_numels)?;
-        let delta_bytes = max_push_nbytes_segments(dtype, &segments)? as u64;
+        let mut delta_bytes = max_push_nbytes_segments(dtype, &segments)? as u64;
+        if expert_tags {
+            delta_bytes += expert_tags_nbytes(fragment.tensor_numels.len())? as u64;
+        }
         max_init = max_init.max(
             4u64.checked_add(init_bytes)
                 .context("INIT_PARAMS payload limit overflow")?,
@@ -1410,6 +1438,10 @@ fn parse_hello(payload: &[u8], expected_learners: u32) -> Result<ParsedHello> {
     let (body, ext) = HelloExt::split(payload);
     let Some(ext) = ext else { return parse_hello_body(payload, expected_learners) };
     match parse_hello_body(body, expected_learners) {
+        Ok(parsed) if ext.expert_tokens => {
+            let (_, max_push_payload) = negotiated_payload_limits(&parsed.layout, parsed.dtype, true)?;
+            Ok(ParsedHello { ext, max_push_payload, ..parsed })
+        }
         Ok(parsed) => Ok(ParsedHello { ext, ..parsed }),
         Err(error) => parse_hello_body(payload, expected_learners).map_err(|_| error),
     }
@@ -1473,7 +1505,7 @@ fn parse_hello_body(payload: &[u8], expected_learners: u32) -> Result<ParsedHell
     if num_streams > 256 {
         bail!("num_streams {num_streams} exceeds limit 256");
     }
-    let (max_init_payload, max_push_payload) = negotiated_payload_limits(&layout, dtype)?;
+    let (max_init_payload, max_push_payload) = negotiated_payload_limits(&layout, dtype, false)?;
     Ok(ParsedHello {
         learner_id,
         generation,
@@ -1517,6 +1549,7 @@ async fn handle_connection(
     expected_learners: u32,
     semantic_profile_hash: [u8; 32],
     require_profile_binding: bool,
+    expert_token_weights: bool,
     event_tx: mpsc::Sender<Event>,
     budget_cutoff: Arc<BudgetCutoff>,
     hello_auth: Arc<HelloAuth>,
@@ -1581,6 +1614,11 @@ async fn handle_connection(
                 None if require_profile_binding => {
                     Some("HELLO is missing the required syncer semantic profile binding")
                 }
+                _ if ext.expert_tokens != expert_token_weights => Some(if expert_token_weights {
+                    "the syncer weights experts by routed tokens; this HELLO does not send expert token counts"
+                } else {
+                    "this HELLO sends expert token counts; the syncer runs without expert token weights"
+                }),
                 _ => None,
             };
             if let Some(message) = profile_error {
@@ -1625,6 +1663,7 @@ async fn handle_connection(
             let group = Arc::new(Group {
                 member,
                 dtype,
+                expert_tokens: ext.expert_tokens,
                 layout,
                 layout_fingerprint,
                 session_contract_hash,
@@ -2108,6 +2147,14 @@ async fn dispatch_inner(
                 .get(fragment_id as usize)
                 .with_context(|| format!("PUSH_FRAGMENT for unknown fragment {fragment_id}"))?;
             let numel = fragment.numel()?;
+            let tensor_scales = if group.expert_tokens {
+                Some(
+                    decode_expert_tags(&mut r, fragment.tensor_numels.len())
+                        .with_context(|| format!("PUSH_FRAGMENT fragment {fragment_id}"))?,
+                )
+            } else {
+                None
+            };
             let bytes = r.rest();
             let mut outer_gradient = Vec::new();
             let segments = push_segments(group.dtype, numel, &fragment.tensor_numels)?;
@@ -2132,6 +2179,7 @@ async fn dispatch_inner(
                         c_steps,
                         c_tokens,
                         outer_gradient,
+                        tensor_scales,
                         transfer: PushTransfer {
                             recv_seconds,
                             arrived_unix: unix_now(),
@@ -3902,7 +3950,8 @@ fn route_push(
 /// * Streaming (`--weighted-fold streaming`): any other quorum or weight;
 ///   pushes fold in arrival order and normalise at close.
 ///
-/// HeLoCo corrects each push against momentum and always stays buffered.
+/// HeLoCo corrects each push against momentum and always stays buffered;
+/// so do expert token weights, which weight each tensor separately.
 ///
 /// Dynamic membership stays buffered: a lease expiry or soft deadline can
 /// drop a push that was already folded, and a carry discount changes
@@ -3914,7 +3963,7 @@ fn round_fold(
     expected_members: &[Member],
     quorum_size: usize,
 ) -> Option<RoundFold> {
-    if st.delta_correction.is_some() || !cfg.membership.is_static() {
+    if st.delta_correction.is_some() || !cfg.membership.is_static() || cfg.expert_token_weights {
         return None;
     }
     let fragment = st.layout.fragments.get(p)?;
@@ -3990,6 +4039,7 @@ fn prepare_round_compute(
     ordered_pushes.sort_unstable_by_key(|(member, _)| **member);
     let mut outer_gradients = Vec::with_capacity(ordered_pushes.len());
     let mut weights = Vec::with_capacity(ordered_pushes.len());
+    let mut tensor_scales = Vec::with_capacity(ordered_pushes.len());
     for (member, push) in &ordered_pushes {
         if push.base_version < round.base_version {
             warn!(
@@ -4005,9 +4055,22 @@ fn prepare_round_compute(
         let weight = cfg.learner_weight.function()(push.c_tokens, u64::from(push.c_steps));
         // Carry discount γ^lag per fragment version (1 when off: exact).
         weights.push(weight * cfg.membership.carry_discount(round.base_version - push.base_version));
+        if cfg.expert_token_weights {
+            let scales = push.tensor_scales.as_deref().with_context(|| {
+                format!("round t={} fragment {}: push without expert token tags", round.t, round.p)
+            })?;
+            tensor_scales.push(scales);
+        }
     }
     let Some(fold) = round.fold.take() else {
-        return st.prepare_merge(round.p, round.base_version, &outer_gradients, &weights);
+        let tensor_scales = cfg.expert_token_weights.then_some(tensor_scales.as_slice());
+        return st.prepare_merge_scaled(
+            round.p,
+            round.base_version,
+            &outer_gradients,
+            &weights,
+            tensor_scales,
+        );
     };
     // Every responder must have been folded exactly once.  The exact fold
     // reduced in learner-id order, which equals the buffered merge's Member
@@ -5520,6 +5583,7 @@ mod tests {
             num_streams: 0,
             max_init_payload: 0,
             max_push_payload: 0,
+            expert_tokens: false,
             max_chunked_inner: 13,
             control,
             data: Mutex::new(HashMap::new()),
@@ -5541,6 +5605,7 @@ mod tests {
             num_streams: 0,
             max_init_payload: 0,
             max_push_payload: 0,
+            expert_tokens: false,
             max_chunked_inner: 13,
             control,
             data: Mutex::new(HashMap::new()),
@@ -5571,6 +5636,7 @@ mod tests {
             num_streams: u16::from(data_stream),
             max_init_payload: 0,
             max_push_payload: 0,
+            expert_tokens: false,
             max_chunked_inner: u64::MAX,
             control,
             data: Mutex::new(streams),
@@ -5720,6 +5786,7 @@ mod tests {
             membership: Default::default(),
             recovery: Default::default(),
             weighted_fold: Default::default(),
+            expert_token_weights: false,
             shard: Default::default(),
         }
     }
@@ -5761,6 +5828,13 @@ mod tests {
         assert_eq!(config.semantic_profile_hash(), original);
         config.pipeline = 3;
         assert_ne!(config.semantic_profile_hash(), original);
+        // Expert token weights append a domain; Python vector in
+        // tests/test_rl_moe_expert_token_weights.py.
+        config.pipeline = 2;
+        config.expert_token_weights = true;
+        let digest: String =
+            config.semantic_profile_hash().iter().map(|byte| format!("{byte:02x}")).collect();
+        assert_eq!(digest, "f51de8a095c0fa428c5483c7921da805bb8b3cd2736fe19fdd03f47e4f733913");
     }
 
     #[test]
@@ -6218,6 +6292,7 @@ mod tests {
                 c_steps: 1,
                 c_tokens: 99,
                 outer_gradient: vec![1.0],
+                tensor_scales: None,
                 transfer: PushTransfer::default(),
             };
             validate_policy_sweep_push(&push, 3).unwrap();
@@ -6326,6 +6401,7 @@ mod tests {
                     c_steps: 1,
                     c_tokens: 1,
                     outer_gradient: vec![0.25; 4],
+                    tensor_scales: None,
                     transfer: PushTransfer::default(),
                 },
             )]),
@@ -6407,6 +6483,7 @@ mod tests {
                     c_steps: 1,
                     c_tokens,
                     outer_gradient: vec![0.25],
+                    tensor_scales: None,
                     transfer: PushTransfer::default(),
                 },
             )]),
@@ -6433,6 +6510,7 @@ mod tests {
                         c_steps: 1,
                         c_tokens: u64::from(member.learner_id + 1) * policy_round * 100,
                         outer_gradient: vec![policy_round as f32 + 2.0 * member.learner_id as f32],
+                        tensor_scales: None,
                         transfer: PushTransfer::default(),
                     },
                 )
@@ -7538,6 +7616,7 @@ mod tests {
             c_steps: 2,
             c_tokens: 20,
             outer_gradient: vec![1.0],
+            tensor_scales: None,
             transfer: PushTransfer::default(),
         }
     }
@@ -7855,6 +7934,7 @@ mod tests {
             c_steps: 1,
             c_tokens: 1,
             outer_gradient: vec![1.0],
+            tensor_scales: None,
             transfer: PushTransfer::default(),
         }
     }
@@ -7935,6 +8015,7 @@ mod tests {
                 c_steps: 4,
                 c_tokens: 40,
                 outer_gradient: vec![1.0],
+                tensor_scales: None,
                 transfer: PushTransfer {
                     recv_seconds: 1.5,
                     arrived_unix: 1792000000.25,
@@ -8108,6 +8189,7 @@ mod tests {
                     c_steps: 1,
                     c_tokens: 10,
                     outer_gradient: vec![1.0],
+                    tensor_scales: None,
                     transfer: PushTransfer::default(),
                 },
             ),
@@ -8123,6 +8205,7 @@ mod tests {
                     c_steps: 1,
                     c_tokens: 1_000,
                     outer_gradient: vec![2.0],
+                    tensor_scales: None,
                     transfer: PushTransfer::default(),
                 },
             ),
@@ -8326,6 +8409,7 @@ mod tests {
             c_steps: 1,
             c_tokens: 1 + u64::from(learner_id),
             outer_gradient: gradient,
+            tensor_scales: None,
             transfer: PushTransfer::default(),
         }
     }
@@ -8460,7 +8544,7 @@ mod tests {
         let old = Member { learner_id: 0, generation: 1 };
         let back = Member { learner_id: 0, generation: 2 };
         r.register_group(test_group(old), t0).unwrap();
-        let recover = HelloExt { syncer_epoch: None, recover: true };
+        let recover = HelloExt { syncer_epoch: None, recover: true, expert_tokens: false };
         let (replaced, _) = r.register_group_with(test_group(back), t0, recover).unwrap();
         assert_eq!(replaced, Some(old), "the lost generation leaves the roster");
         assert!(r.current.is_empty() && r.is_recovering(back) && r.groups.contains_key(&back));
@@ -8486,13 +8570,13 @@ mod tests {
         let (membership, path) = initial_membership(&cfg, 2).unwrap();
         let mut r = RegistryState { membership_record: path, ..RegistryState::new(membership) };
         let t0 = Instant::now();
-        let stale = HelloExt { syncer_epoch: Some(3), recover: false };
+        let stale = HelloExt { syncer_epoch: Some(3), recover: false, expert_tokens: false };
         let gone = Member { learner_id: 1, generation: 9 };
         assert_eq!(
             r.register_group_with(test_group(gone), t0, stale).unwrap_err(),
             RegisterError::Fenced(AdmitError::StaleSyncerEpoch { offered: 3, current: 4 })
         );
-        let current = HelloExt { syncer_epoch: Some(4), recover: false };
+        let current = HelloExt { syncer_epoch: Some(4), recover: false, expert_tokens: false };
         r.register_group_with(test_group(gone), t0, current).unwrap();
         r.unregister(gone);
         assert!(record.exists(), "a retirement is persisted at once");
@@ -8536,7 +8620,7 @@ mod tests {
         let legacy = test_hello_payload(member);
         let parsed = parse_hello(&legacy, 1).unwrap();
         assert_eq!(parsed.ext, HelloExt::default());
-        let ext = HelloExt { syncer_epoch: Some(12), recover: true };
+        let ext = HelloExt { syncer_epoch: Some(12), recover: true, expert_tokens: false };
         let mut extended = legacy.clone();
         extended.extend_from_slice(&ext.encode());
         let parsed = parse_hello(&extended, 1).unwrap();

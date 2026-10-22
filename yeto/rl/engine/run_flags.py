@@ -1010,6 +1010,15 @@ _SYNC = (
         "tokens2-over-steps weighs by c_tokens^2 / c_steps (default equal)",
     ),
     cli_flag(
+        "--rl-sync-expert-token-weights",
+        action="store_true",
+        help="full-parameter async, MoE models only: weight each expert's tensors in the "
+        "outer merge by the tokens the island routed to that expert during the outer "
+        "interval, relative to an even split over the layer's experts (an expert an island "
+        "never routed to gets weight 0 from that island); multiplies the island weight of "
+        "--rl-sync-learner-weight. Islands count routed tokens with a router hook (default off)",
+    ),
+    cli_flag(
         "--rl-sync-max-base-lag",
         type=int,
         default=0,

@@ -35,7 +35,7 @@ or allocation overflows are errors rather than panics.
 | 1 | HELLO | learner → syncer | protocol_version:u16 (=4), learner_id:u32, connection_generation:u64, dtype:u8 (1=f32, 2=bf16, 3=q4, 4=f32 with bf16 pushes, 5=f32 with int8 pushes; flag 0x80 = bf16 downlink deltas), num_fragments:u32, per-fragment layout, layout_fingerprint:[u8;32], session_contract_hash:[u8;32], optional syncer_profile_hash:[u8;32], num_streams:u16, optional compat_group trailer (`b"YCG1"`, u32 length, 1–64 bytes utf-8), optional extension trailer (`b"YEX1"`, flags:u8, syncer_epoch:u64; see "Syncer epoch and peer recovery") |
 | 2 | INIT_PARAMS | learner → syncer | fragment_id:u32, full tensor bytes; only learner 0 may initialize |
 | 3 | PULL_REQ | syncer → learner | fragment_id:u32, global_step:u64, round_attempt:u32 |
-| 4 | PUSH_FRAGMENT | learner → syncer | learner_id:u32, fragment_id:u32, global_step:u64, round_attempt:u32, base_version:u64, local_step:u64, c_steps:u32, c_tokens:u64, base-relative learner-delta bytes |
+| 4 | PUSH_FRAGMENT | learner → syncer | learner_id:u32, fragment_id:u32, global_step:u64, round_attempt:u32, base_version:u64, local_step:u64, c_steps:u32, c_tokens:u64, routed-token tag block (only when HELLO flag bit 2 is set; see "Expert token weights"), base-relative learner-delta bytes |
 | 5 | BCAST_FRAGMENT | syncer → learner | fragment_id:u32, version:u64, full global tensor bytes |
 | 6 | HEARTBEAT | learner → syncer | learner_id:u32, local_step:u64 |
 | 7 | SHUTDOWN | syncer → learner | empty; sent only to a generation whose final ACK was accepted |
@@ -204,11 +204,27 @@ Each client redial creates a fresh nonzero connection generation and repeats
 HELLO/DATA_HELLO. The syncer sends every initialized fragment at its current
 version to a valid new generation.
 
+## Expert token weights
+
+With `--expert-token-weights` the syncer weights each expert tensor of a
+mixture-of-experts layout by the tokens the island routed to that expert
+during the push's outer interval. Every HELLO must set flag bit 2 of the
+extension trailer, and a HELLO with that bit is refused by a syncer without
+the option. Each PUSH_FRAGMENT then carries, after c_tokens:
+`n:u32` (the fragment's tensor count) and per tensor in layout order
+`routed:u64, layer_routed:u64, layer_experts:u32`. A dense tensor sends
+`(0, 0, 0)`. Tensor `t` of island `m` merges with weight
+`w_m · routed · layer_experts / layer_routed`, where `w_m` is the
+`--learner-weight` weight; the scale is 1 under even routing and 0 for an
+expert the island never routed to (or a layer without tokens). Without the
+option the HELLO and PUSH_FRAGMENT bytes are unchanged.
+
 ## Syncer epoch and peer recovery
 
 The HELLO extension trailer is the last 13 bytes of the HELLO body (inside
-the HMAC): `b"YEX1"`, flags (bit 0: syncer_epoch is set, bit 1: recover),
-syncer_epoch:u64. A client that sets neither sends no trailer.
+the HMAC): `b"YEX1"`, flags (bit 0: syncer_epoch is set, bit 1: recover, bit 2:
+expert token tags), syncer_epoch:u64. A client that sets no flag sends no
+trailer.
 
 Syncer epoch: a HELLO whose epoch is lower than `--syncer-epoch` is refused
 with an ERROR that starts with `fenced: syncer_epoch`; the client does not

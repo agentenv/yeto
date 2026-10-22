@@ -48,7 +48,12 @@ from yeto.rl.engine.policy_digest import (
     WeightsChanged,
 )
 from yeto.rl.engine.trainable_state import LAYOUT_FRAGMENTS, UnsupportedLayoutError
+from yeto.rl.adapters.miles.routing_plugin import (
+    DRAIN_ROUTED_TOKEN_COUNTS,
+    INSTALL_ROUTED_TOKEN_COUNTER,
+)
 from yeto.rl.local_learner import MATRIX_MERGES, ComponentIdentity, layout_stream_role
+from yeto.rl.moe_layout import RoutedTokens, check_expert_partition, fragment_expert_tags
 from yeto.rl.trajectory_evidence import TrajectoryBatchEvidence
 
 # Seconds between progress lines while an island waits for its initial cut.
@@ -144,6 +149,10 @@ class RoleStreamConfig:
     # recovery of a fresh trainer). Transport options, not session contract.
     syncer_epoch: int | None = None
     peer_recovery: PeerRecoveryOptions | None = None
+    # MoE: every push carries the tokens this island routed to each expert
+    # during the push's outer interval; the syncer (--expert-token-weights)
+    # weights that expert's tensors by them. Needs a layout with experts.
+    expert_token_weights: bool = False
 
     @property
     def tensor_blocks_active(self) -> bool:
@@ -307,6 +316,8 @@ class RoleSubmissionCandidate:
     payload_bytes: int
     submission_cut: ReferencedPolicyCut
     anchor: StoredAuthoritativeFragment
+    # Expert token weights: per-tensor routed-token tags of this push.
+    expert_tags: tuple[tuple[int, int, int], ...] | None = None
 
     @property
     def logical_key(self) -> tuple[int, int, int]:
@@ -354,6 +365,7 @@ def role_stream_session_contract_hash(
             "wire_dtype": config.wire_dtype_label,
             **({"sync_train_overlap": True} if config.overlap else {}),
             **({"partial_quorum": True} if config.partial_quorum else {}),
+            **({"expert_token_weights": True} if config.expert_token_weights else {}),
         },
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -389,6 +401,11 @@ class MilesFullParameterRoleStream:
         self._fragment_versions: list[int | None] = []
         self._rounds_at_anchor: list[int] = []
         self._tokens_at_anchor: list[int] = []
+        # Expert token weights: cumulative routed-token counts, kept like the
+        # token counters above (empty when the option is off).
+        self.action_routed = RoutedTokens()
+        self.submission_routed = RoutedTokens()
+        self._routed_at_anchor: list[RoutedTokens] = []
         self._pending: dict[int, PullRequest] = {}
         self._answered: dict[tuple[int, int], int] = {}
         # Per fragment: the generation of the link its PULLs arrive on.
@@ -405,6 +422,7 @@ class MilesFullParameterRoleStream:
         self._donor = None
         self._donor_refusals_reported = 0
         self.recovery_outcome = None
+        self._routed_at_base = RoutedTokens()
         self.terminal_manifest: FinalManifest | None = None
         self.terminal_submitted = False
         self.final_applied = False
@@ -481,6 +499,8 @@ class MilesFullParameterRoleStream:
             max_chunk_bytes=self.config.max_chunk_bytes,
             matrix_merge=self.config.matrix_merge,
         )
+        if self.config.expert_token_weights:
+            await self._install_routed_token_counter(group, adapter)
         client = self._new_client(
             adapter.layout.fragments,
             dtype=self.config.session_dtype,
@@ -498,6 +518,7 @@ class MilesFullParameterRoleStream:
             syncer_profile_hash=bytes.fromhex(self.config.syncer_profile_hash),
             syncer_epoch=self.config.syncer_epoch,
             recover=self._recovering,
+            expert_tokens=self.config.expert_token_weights,
         )
         sink = adapter.fragment_sink(initial, ray_module=self.ray_module)
         client.install_inbound_chunk_sink(MilesRayInboundChunkSink(sink))
@@ -540,6 +561,26 @@ class MilesFullParameterRoleStream:
         self._fragment_versions = [0] * count
         self._rounds_at_anchor = [0] * count
         self._tokens_at_anchor = [0] * count
+        self._routed_at_anchor = [RoutedTokens()] * count
+
+    async def _install_routed_token_counter(self, group, adapter) -> None:
+        if check_expert_partition(adapter.layout.specs) is None:
+            raise ValueError(
+                f"{self.config.role}: expert token weights need a mixture-of-experts layout"
+            )
+        hooked = await group.run_plugin(INSTALL_ROUTED_TOKEN_COUNTER)
+        if not any(hooked):
+            raise RuntimeError(f"{self.config.role}: no rank holds a top-k MoE router to count")
+
+    async def _drain_routed_tokens(self) -> RoutedTokens:
+        """Tokens every rank routed since the previous drain, summed."""
+
+        total = RoutedTokens()
+        for per_rank in await self.group.run_plugin(DRAIN_ROUTED_TOKEN_COUNTS):
+            total = total + RoutedTokens.from_mapping(
+                {int(layer): row for layer, row in per_rank.items()}
+            )
+        return total
 
     def _new_client(self, layout, **kwargs):
         """One ``SyncerClient``, or one per shard of a sharded head."""
@@ -600,6 +641,7 @@ class MilesFullParameterRoleStream:
             self._fragment_versions = [0] * count
             self._rounds_at_anchor = [0] * count
             self._tokens_at_anchor = [0] * count
+            self._routed_at_anchor = [RoutedTokens()] * count
             resent, island.resent = dict(island.resent), {}
             await self._apply_authoritative(resent, recovered=True)
         except BaseException:
@@ -765,6 +807,8 @@ class MilesFullParameterRoleStream:
         self.local_generation = expected_generation
         self.local_rounds += 1
         self.action_tokens += trajectories.trained_tokens
+        if self.config.expert_token_weights:
+            self.action_routed = self.action_routed + await self._drain_routed_tokens()
         if hold_submission:
             if not self.config.overlap or self._round_base is None:
                 raise RuntimeError(f"{self.config.role} holds a submission without an overlap round base")
@@ -774,6 +818,7 @@ class MilesFullParameterRoleStream:
             self.submission_fragment_versions = self.fragment_versions
             self.submission_rounds = self.local_rounds
             self.submission_tokens = self.action_tokens
+            self.submission_routed = self.action_routed
             self._release_cuts(previous, previous_submission, keep=(local, self._round_base))
 
         # The policy-level coordinator owns permit matching and release.  A
@@ -877,7 +922,7 @@ class MilesFullParameterRoleStream:
                 await self._apply_authoritative(
                     {fragment_id: rebased},
                     anchors={fragment_id: stored},
-                    counters=(self._rounds_at_base, self._tokens_at_base),
+                    counters=(self._rounds_at_base, self._tokens_at_base, self._routed_at_base),
                 )
             finally:
                 rebased.release()  # the applied target holds its own references
@@ -903,6 +948,7 @@ class MilesFullParameterRoleStream:
         self.submission_fragment_versions = self.fragment_versions
         self.submission_rounds = self.local_rounds
         self.submission_tokens = self.action_tokens
+        self.submission_routed = self.action_routed
         self._release_cuts(previous_submission, keep=(self.current, self.submission_cut, self._round_base))
 
     def mark_round_base(self) -> None:
@@ -914,6 +960,7 @@ class MilesFullParameterRoleStream:
         self._round_base = self.current
         self._rounds_at_base = self.local_rounds
         self._tokens_at_base = self.action_tokens
+        self._routed_at_base = self.action_routed
         self._release_cuts(previous, keep=(self.current, self.submission_cut))
 
     async def _apply_authoritative(
@@ -921,7 +968,7 @@ class MilesFullParameterRoleStream:
         selected: Mapping[int, StoredAuthoritativeFragment],
         *,
         anchors: Mapping[int, StoredAuthoritativeFragment] | None = None,
-        counters: tuple[int, int] | None = None,
+        counters: tuple[int, int, RoutedTokens] | None = None,
         recovered: bool = False,
     ) -> None:
         """Apply ``selected`` fragments; ``anchors``/``counters`` override the
@@ -959,7 +1006,10 @@ class MilesFullParameterRoleStream:
             previous_cut,
             keep=(self.current, self.submission_cut, self._round_base),
         )
-        rounds, tokens = counters if counters is not None else (self.local_rounds, self.action_tokens)
+        rounds, tokens, routed = (
+            counters if counters is not None
+            else (self.local_rounds, self.action_tokens, self.action_routed)
+        )
         for fragment_id, applied in selected.items():
             stored = applied if anchors is None else anchors[fragment_id]
             previous_anchor = self._anchors[fragment_id]
@@ -969,6 +1019,7 @@ class MilesFullParameterRoleStream:
             self._fragment_versions[fragment_id] = stored.version
             self._rounds_at_anchor[fragment_id] = rounds
             self._tokens_at_anchor[fragment_id] = tokens
+            self._routed_at_anchor[fragment_id] = routed
 
     def _apply_token(
         self,
@@ -1031,6 +1082,13 @@ class MilesFullParameterRoleStream:
                 raise RuntimeError(
                     "role-stream fragment has no authoritative anchor"
                 )
+            fragment = self.adapter.layout.fragments.fragments[fragment_id]
+            expert_tags = None
+            if self.config.expert_token_weights:
+                expert_tags = fragment_expert_tags(
+                    [name for name, _ in fragment.tensors],
+                    self.submission_routed - self._routed_at_anchor[fragment_id],
+                )
             candidates.append(
                 RoleSubmissionCandidate(
                     self.config.role,
@@ -1039,9 +1097,10 @@ class MilesFullParameterRoleStream:
                     self.submission_rounds,
                     c_steps,
                     c_tokens,
-                    self.adapter.layout.fragments.fragments[fragment_id].numel * 4,
+                    fragment.numel * 4,
                     self.submission_cut,
                     anchor,
+                    expert_tags,
                 )
             )
         return tuple(candidates)
@@ -1141,6 +1200,7 @@ class MilesFullParameterRoleStream:
                 candidate.c_steps,
                 candidate.c_tokens,
                 parts,
+                **({} if candidate.expert_tags is None else {"expert_tags": candidate.expert_tags}),
             )
         except BaseException:
             if self.error_feedback is not None:

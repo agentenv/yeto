@@ -162,6 +162,7 @@ _FULL_PARAMETER_SYNC_DEFAULTS = (
     ("rl_sync_push_no_tensor_blocks", False, "--rl-sync-push-no-tensor-blocks"),
     ("rl_sync_overlap", False, "--rl-sync-overlap"),
     ("rl_sync_full_parameter_rounds", "sweep", "--rl-sync-full-parameter-rounds"),
+    ("rl_sync_expert_token_weights", False, "--rl-sync-expert-token-weights"),
 )
 
 
@@ -266,6 +267,9 @@ def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
             problems.append("--rl-sync-push-int4-error-feedback only with --rl-sync-push-dtype int4")
         elif getattr(args, "rl_sync_push_int4_stochastic", False):
             problems.append("--rl-sync-push-int4-error-feedback without --rl-sync-push-int4-stochastic")
+    if getattr(args, "rl_sync_expert_token_weights", False) and not async_rounds:
+        # The sweep is the strict equal-weight control.
+        problems.append("--rl-sync-expert-token-weights only with --rl-sync-full-parameter-rounds async")
     if getattr(args, "rl_sync_overlap", False) and not async_rounds:
         from ..rl.engine.sync_overlap import overlap_option_problems
 

@@ -32,19 +32,27 @@ HELLO_EXT_MAGIC = b"YEX1"
 _HELLO_EXT = struct.Struct("<4sBQ")
 _FLAG_HAS_EPOCH = 1
 _FLAG_RECOVER = 2
+# Every PUSH_FRAGMENT of the session carries per-expert routed-token tags
+# (yeto.protocol.encode_expert_tags); the syncer must run with expert token
+# weights.
+_FLAG_EXPERT_TOKENS = 4
 
 # MSG_ERROR texts the client acts on (syncer/src/server.rs, membership.rs).
 LEASE_EXPIRED_PREFIX = "island lease expired"
 SYNCER_EPOCH_FENCE_PREFIX = "fenced: syncer_epoch"
 
 
-def encode_hello_ext(syncer_epoch: int | None, recover: bool) -> bytes:
-    """The trailer, or b"" when neither field is set (legacy bytes)."""
-    if syncer_epoch is None and not recover:
+def encode_hello_ext(syncer_epoch: int | None, recover: bool, expert_tokens: bool = False) -> bytes:
+    """The trailer, or b"" when no field is set (legacy bytes)."""
+    if syncer_epoch is None and not recover and not expert_tokens:
         return b""
     if syncer_epoch is not None and not 0 <= syncer_epoch <= 0xFFFF_FFFF_FFFF_FFFF:
         raise ValueError(f"syncer_epoch must fit u64, got {syncer_epoch}")
-    flags = (_FLAG_HAS_EPOCH if syncer_epoch is not None else 0) | (_FLAG_RECOVER if recover else 0)
+    flags = (
+        (_FLAG_HAS_EPOCH if syncer_epoch is not None else 0)
+        | (_FLAG_RECOVER if recover else 0)
+        | (_FLAG_EXPERT_TOKENS if expert_tokens else 0)
+    )
     return _HELLO_EXT.pack(HELLO_EXT_MAGIC, flags, syncer_epoch or 0)
 
 

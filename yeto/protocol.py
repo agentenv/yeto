@@ -589,9 +589,11 @@ def encode_hello(
     compat_group: str | None = None,
     syncer_epoch: int | None = None,
     recover: bool = False,
+    expert_tokens: bool = False,
 ) -> bytes:
-    """HELLO body. ``syncer_epoch`` and ``recover`` add the extension trailer
-    (``yeto.recovery_protocol``); with neither the bytes are the legacy ones."""
+    """HELLO body. ``syncer_epoch``, ``recover`` and ``expert_tokens`` add the
+    extension trailer (``yeto.recovery_protocol``); with none of them the
+    bytes are the legacy ones."""
     if session_contract_hash is None:
         # Generic/legacy callers still bind the session to the semantic tensor
         # layout. Restricted profiles may supply a stronger opaque contract.
@@ -632,7 +634,34 @@ def encode_hello(
         if not 0 < len(raw) <= 64:
             raise ValueError("compat_group must be 1..64 bytes")
         parts.append(HELLO_COMPAT_MAGIC + struct.pack("<I", len(raw)) + raw)
-    parts.append(rp.encode_hello_ext(syncer_epoch, recover))
+    parts.append(rp.encode_hello_ext(syncer_epoch, recover, expert_tokens))
+    return b"".join(parts)
+
+
+# One routed-token tag per fragment tensor (syncer protocol.rs
+# decode_expert_tags): routed u64 | layer_routed u64 | layer_experts u32.
+_EXPERT_TAG = struct.Struct("<QQI")
+DENSE_TENSOR_TAG = (0, 0, 0)
+
+
+def encode_expert_tags(tags: Sequence[tuple[int, int, int]], tensors: int) -> bytes:
+    """The routed-token tag block of one PUSH_FRAGMENT.
+
+    ``tags[i]`` belongs to fragment tensor ``i``: ``DENSE_TENSOR_TAG`` for a
+    dense tensor, else ``(tokens routed to this expert, tokens routed in its
+    layer, experts in its layer)`` over the outer interval of the push. The
+    syncer scales the island's weight for that tensor by
+    ``routed * layer_experts / layer_routed`` (0 when the layer saw no token).
+    """
+    if len(tags) != tensors:
+        raise ValueError(f"expert tags cover {len(tags)} tensors, fragment has {tensors}")
+    parts = [struct.pack("<I", tensors)]
+    for index, (routed, layer_routed, experts) in enumerate(tags):
+        if experts == 0 and (routed or layer_routed):
+            raise ValueError(f"dense tensor {index} carries routed tokens")
+        if not 0 <= routed <= layer_routed:
+            raise ValueError(f"tensor {index}: routed {routed} of {layer_routed} layer tokens")
+        parts.append(_EXPERT_TAG.pack(routed, layer_routed, experts))
     return b"".join(parts)
 
 
@@ -906,11 +935,14 @@ class SyncerClient:
         syncer_epoch: int | None = None,
         recover: bool = False,
         owned_fragments: range | None = None,
+        expert_tokens: bool = False,
     ):
         """``syncer_epoch``: the syncer incarnation this island was launched
         for; a syncer with a newer epoch refuses it (not retried). ``recover``:
         this island lost its trainer state; every HELLO asks for peer recovery
-        until the syncer sends RECOVERY_DONE (see ``yeto.rl.peer_recovery``)."""
+        until the syncer sends RECOVERY_DONE (see ``yeto.rl.peer_recovery``).
+        ``expert_tokens``: every push carries per-expert routed-token tags
+        (``encode_expert_tags``) for a syncer run with expert token weights."""
         if stream_schedule not in STREAM_SCHEDULES:
             raise ValueError(f"stream_schedule must be one of {STREAM_SCHEDULES}, got {stream_schedule!r}")
         if stream_stall_timeout is not None and not stream_stall_timeout > 0:
@@ -988,6 +1020,7 @@ class SyncerClient:
         self.compat_group = compat_group
         rp.encode_hello_ext(syncer_epoch, False)  # validates the epoch
         self.syncer_epoch = syncer_epoch
+        self.expert_tokens = expert_tokens
         # Set until RECOVERY_DONE: a redial during recovery asks again.
         self._recover = threading.Event()
         if recover:
@@ -1127,6 +1160,7 @@ class SyncerClient:
                         self.compat_group,
                         syncer_epoch=self.syncer_epoch,
                         recover=self._recover.is_set(),
+                        expert_tokens=self.expert_tokens,
                     ),
                     self.hmac_key,
                 ),
@@ -1407,7 +1441,11 @@ class SyncerClient:
         c_steps: int,
         c_tokens: int,
         tensor_bytes: bytes,
+        *,
+        expert_tags: Sequence[tuple[int, int, int]] | None = None,
     ) -> None:
+        """``expert_tags``: required exactly when the session sends expert
+        token counts (see ``encode_expert_tags``)."""
         self._check_owned("PUSH_FRAGMENT", fragment_id)
         if round_attempt < 1:
             raise ValueError("round_attempt must be positive")
@@ -1447,6 +1485,7 @@ class SyncerClient:
             tensor_bytes = f32_bytes_to_i4(
                 tensor_bytes, self.push_i4_block, rng=self._push_i4_rng, segments=segments
             )
+        head += self._expert_tag_block(fragment_id, expert_tags)
         self._send_large(MSG_PUSH_FRAGMENT, head + tensor_bytes)
 
     def push_fragment_parts(
@@ -1461,6 +1500,7 @@ class SyncerClient:
         tensor_parts: Iterable[bytes | bytearray | memoryview],
         *,
         before_last_enqueue: Callable[[], None] | None = None,
+        expert_tags: Sequence[tuple[int, int, int]] | None = None,
     ) -> bool:
         """Stream one PUSH_FRAGMENT from bounded contiguous byte parts.
 
@@ -1504,6 +1544,7 @@ class SyncerClient:
             c_steps,
             c_tokens,
         )
+        head += self._expert_tag_block(fragment_id, expert_tags)
         return self._send_large_parts(
             MSG_PUSH_FRAGMENT,
             head,
@@ -1512,6 +1553,18 @@ class SyncerClient:
             label=f"PUSH_FRAGMENT fragment {fragment_id}",
             before_last_enqueue=before_last_enqueue,
         )
+
+    def _expert_tag_block(
+        self, fragment_id: int, expert_tags: Sequence[tuple[int, int, int]] | None
+    ) -> bytes:
+        if (expert_tags is not None) != self.expert_tokens:
+            raise ValueError(
+                "PUSH_FRAGMENT expert tags are required exactly when the session "
+                "sends expert token counts"
+            )
+        if expert_tags is None:
+            return b""
+        return encode_expert_tags(expert_tags, len(self.layout.fragments[fragment_id].tensors))
 
     def heartbeat(self, local_step: int) -> None:
         self._enqueue(0, self._frame(MSG_HEARTBEAT, struct.pack("<IQ", self.learner_id, local_step)))

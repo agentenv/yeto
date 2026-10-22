@@ -61,6 +61,10 @@ _ISLAND_SCHEDULING_DOMAIN = b"yeto-syncer-island-scheduling-v1\0"
 # appends the block that the syncer's server.rs::semantic_profile_hash appends.
 _DELAYED_NESTEROV_FIELD = "outer_delayed_nesterov_period"
 _DELAYED_NESTEROV_DOMAIN = b"yeto-syncer-delayed-nesterov-v1\0"
+# Optional. Absent or false = no expert token weights (byte-identical hash);
+# true appends the domain that server.rs::semantic_profile_hash appends.
+_EXPERT_TOKEN_WEIGHTS_FIELD = "expert_token_weights"
+_EXPERT_TOKEN_WEIGHTS_DOMAIN = b"yeto-syncer-expert-token-weights-v1\0"
 
 
 def _integer(name: str, value: object, *, bits: int, minimum: int = 0) -> int:
@@ -148,12 +152,14 @@ class SyncerSemanticProfile:
     q_min: int | None = None
     max_carry_lag: int | None = None
     outer_delayed_nesterov_period: int | None = None
+    expert_token_weights: bool = False
 
     @classmethod
     def from_mapping(cls, raw: object) -> SyncerSemanticProfile:
         if not isinstance(raw, dict) or not (
             _FIELDS <= set(raw)
-            <= _FIELDS | _ISLAND_SCHEDULING_FIELDS | {_DELAYED_NESTEROV_FIELD}
+            <= _FIELDS | _ISLAND_SCHEDULING_FIELDS
+            | {_DELAYED_NESTEROV_FIELD, _EXPERT_TOKEN_WEIGHTS_FIELD}
         ):
             raise ValueError(
                 "syncer semantic profile fields do not match the v1 schema"
@@ -248,6 +254,9 @@ class SyncerSemanticProfile:
             outer_delayed_nesterov_period=_optional_integer(
                 _DELAYED_NESTEROV_FIELD, raw.get(_DELAYED_NESTEROV_FIELD), bits=32, minimum=2
             ),
+            expert_token_weights=_boolean(
+                _EXPERT_TOKEN_WEIGHTS_FIELD, raw.get(_EXPERT_TOKEN_WEIGHTS_FIELD, False)
+            ),
             **scheduling,
         )
         profile._validate_general()
@@ -338,6 +347,8 @@ class SyncerSemanticProfile:
         if self.outer_delayed_nesterov_period is not None:
             encoded.extend(_DELAYED_NESTEROV_DOMAIN)
             encoded.extend(struct.pack("<I", self.outer_delayed_nesterov_period))
+        if self.expert_token_weights:
+            encoded.extend(_EXPERT_TOKEN_WEIGHTS_DOMAIN)
         return bytes(encoded)
 
     @property

@@ -277,6 +277,59 @@ impl<'a> Reader<'a> {
     }
 }
 
+/// Bytes of one per-tensor routed-token tag: `routed u64 | layer_routed u64 |
+/// layer_experts u32`.
+pub const EXPERT_TAG_BYTES: usize = 20;
+
+/// Bytes of the routed-token tag block of a fragment with `tensors` tensors.
+pub fn expert_tags_nbytes(tensors: usize) -> Result<usize> {
+    tensors
+        .checked_mul(EXPERT_TAG_BYTES)
+        .and_then(|n| n.checked_add(4))
+        .ok_or_else(|| anyhow::anyhow!("expert tag block length overflow"))
+}
+
+/// Read the routed-token tag block that a session with expert token weights
+/// puts between a PUSH_FRAGMENT header and its delta bytes:
+/// `n u32 | n x (routed u64 | layer_routed u64 | layer_experts u32)`, one
+/// entry per fragment tensor in layout order.
+///
+/// Returns the per-tensor merge scale. A dense tensor is tagged `(0, 0, 0)`
+/// and keeps scale 1. An expert tensor gets `routed * layer_experts /
+/// layer_routed`: the tokens this island routed to the expert during the
+/// outer interval relative to an even split over the layer's experts. The
+/// scale is 1 under even routing and 0 for an expert the island never
+/// routed to (or a layer that saw no token).
+pub fn decode_expert_tags(r: &mut Reader<'_>, tensors: usize) -> Result<Vec<f64>> {
+    let n = r.u32()? as usize;
+    if n != tensors {
+        bail!("expert tag block has {n} entries, fragment has {tensors} tensors");
+    }
+    if r.remaining() < expert_tags_nbytes(n)? - 4 {
+        bail!("expert tag block truncated");
+    }
+    (0..n)
+        .map(|i| {
+            let routed = r.u64()?;
+            let layer_routed = r.u64()?;
+            let experts = r.u32()?;
+            if experts == 0 {
+                if routed != 0 || layer_routed != 0 {
+                    bail!("dense tensor {i} carries routed tokens");
+                }
+                return Ok(1.0);
+            }
+            if routed > layer_routed {
+                bail!("tensor {i}: expert routed {routed} tokens of only {layer_routed} in its layer");
+            }
+            if layer_routed == 0 {
+                return Ok(0.0);
+            }
+            Ok(routed as f64 * f64::from(experts) / layer_routed as f64)
+        })
+        .collect()
+}
+
 /// Exact encoded byte length for an unquantized tensor payload.
 pub fn tensor_nbytes(dtype: u8, numel: usize) -> Result<usize> {
     let width = match dtype {
@@ -1011,5 +1064,38 @@ mod tests {
             push_segments(DTYPE_F32_PUSH_Q4 | DTYPE_FLAG_TENSOR_BLOCKS, 303, &[3, 300]).unwrap(),
             vec![3, 300]
         );
+    }
+
+    fn expert_tag_block(tags: &[(u64, u64, u32)]) -> Vec<u8> {
+        let mut out = (tags.len() as u32).to_le_bytes().to_vec();
+        for &(routed, layer, experts) in tags {
+            out.extend_from_slice(&routed.to_le_bytes());
+            out.extend_from_slice(&layer.to_le_bytes());
+            out.extend_from_slice(&experts.to_le_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn expert_tags_scale_by_share_of_an_even_split() {
+        let mut bytes = expert_tag_block(&[(0, 0, 0), (30, 40, 4), (0, 40, 4), (10, 40, 4), (5, 0, 0)]);
+        bytes.extend_from_slice(b"rest");
+        // The dense tag with tokens is refused.
+        assert!(decode_expert_tags(&mut Reader(&bytes), 5).is_err());
+        let mut bytes = expert_tag_block(&[(0, 0, 0), (30, 40, 4), (0, 40, 4), (10, 40, 4), (0, 0, 2)]);
+        bytes.extend_from_slice(b"rest");
+        let mut r = Reader(&bytes);
+        assert_eq!(decode_expert_tags(&mut r, 5).unwrap(), vec![1.0, 3.0, 0.0, 1.0, 0.0]);
+        assert_eq!(r.rest(), b"rest");
+        assert_eq!(expert_tags_nbytes(5).unwrap(), bytes.len() - 4);
+    }
+
+    #[test]
+    fn expert_tags_refuse_bad_blocks() {
+        let block = expert_tag_block(&[(1, 2, 4)]);
+        assert!(decode_expert_tags(&mut Reader(&block), 2).is_err());
+        assert!(decode_expert_tags(&mut Reader(&block[..block.len() - 1]), 1).is_err());
+        let over = expert_tag_block(&[(3, 2, 4)]);
+        assert!(decode_expert_tags(&mut Reader(&over), 1).is_err());
     }
 }

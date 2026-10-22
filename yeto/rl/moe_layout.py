@@ -18,15 +18,16 @@ drift apart under block-quantized pushes, so they are refused.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 # Megatron global names (Miles ``named_params_and_buffers`` with
 # ``convert_to_global_name=True``, TE grouped GEMM experts):
 # ``decoder.layers.L.mlp.experts.linear_fc1.weightE`` with E the global expert
-# index. ``global_expert_name`` writes this form; ``_EXPERT`` reads it.
+# index. ``global_expert_name`` writes this form; ``_EXPERT`` reads it, also
+# inside a wire name (``role::shard::name``).
 _EXPERT = re.compile(
-    r"(?:^|\.)decoder\.layers\.(\d+)\.mlp\.experts\.(linear_fc1|linear_fc2)\.weight(\d+)\Z"
+    r"(?:^|[.:])decoder\.layers\.(\d+)\.mlp\.experts\.(linear_fc1|linear_fc2)\.weight(\d+)\Z"
 )
 # Megatron SequentialMLP names its experts by local index; the global index is
 # ep_rank * num_local_experts + local index (megatron/core/transformer/moe/moe_layer.py,
@@ -164,3 +165,95 @@ def describe_topology(shard_ids: Sequence[str]) -> str:
     if len(sizes) != 1:
         return f"mixed {sorted(sizes)}"
     return ",".join(f"{axis}={size}" for axis, size in next(iter(sizes)))
+
+
+# --- routed-token counts for expert token weights ---------------------------
+
+
+def expert_of(name: str) -> tuple[int, int] | None:
+    """``(layer, expert)`` of an expert projection (global or wire name), else
+    ``None``."""
+
+    match = _EXPERT.search(name)
+    return None if match is None else (int(match.group(1)), int(match.group(3)))
+
+
+@dataclass(frozen=True)
+class RoutedTokens:
+    """Tokens routed to each expert of each MoE layer, summed over the
+    island's ranks.
+
+    Island ranks that see the same tokens (tensor parallelism without
+    sequence parallelism) count them more than once, but every expert of a
+    layer by the same factor, so the share of an expert within its layer, the
+    only quantity the syncer uses, is exact.
+    """
+
+    # layer -> per-expert counts; every layer has the same number of experts.
+    counts: tuple[tuple[int, tuple[int, ...]], ...] = ()
+
+    @classmethod
+    def from_mapping(cls, counts: Mapping[int, Sequence[int]]) -> RoutedTokens:
+        rows = []
+        for layer, row in sorted(counts.items()):
+            row = tuple(int(value) for value in row)
+            if int(layer) < 0 or not row or any(value < 0 for value in row):
+                raise ValueError(f"invalid routed-token counts for layer {layer}")
+            rows.append((int(layer), row))
+        if len({len(row) for _, row in rows}) > 1:
+            raise ValueError("MoE layers report different expert counts")
+        return cls(tuple(rows))
+
+    def as_dict(self) -> dict[int, tuple[int, ...]]:
+        return dict(self.counts)
+
+    def __add__(self, other: RoutedTokens) -> RoutedTokens:
+        merged = self.as_dict()
+        for layer, row in other.counts:
+            mine = merged.get(layer)
+            if mine is not None and len(mine) != len(row):
+                raise ValueError(f"layer {layer} changed its expert count")
+            merged[layer] = row if mine is None else tuple(a + b for a, b in zip(mine, row))
+        return RoutedTokens.from_mapping(merged)
+
+    def __sub__(self, earlier: RoutedTokens) -> RoutedTokens:
+        """Counts since ``earlier`` (a snapshot of the same cumulative counter)."""
+
+        before = earlier.as_dict()
+        rows = {}
+        for layer, row in self.counts:
+            old = before.pop(layer, (0,) * len(row))
+            if len(old) != len(row) or any(b > a for a, b in zip(row, old)):
+                raise ValueError(f"routed-token counter of layer {layer} moved backwards")
+            rows[layer] = tuple(a - b for a, b in zip(row, old))
+        if before:
+            raise ValueError(f"routed-token counts lost layers {sorted(before)}")
+        return RoutedTokens.from_mapping(rows)
+
+
+def fragment_expert_tags(
+    tensor_names: Sequence[str], interval: RoutedTokens
+) -> tuple[tuple[int, int, int], ...]:
+    """Per-tensor routed-token tags of one push (``yeto.protocol.encode_expert_tags``).
+
+    ``interval`` holds the tokens routed during the push's outer interval. A
+    dense tensor is tagged ``(0, 0, 0)``; an expert tensor
+    ``(routed to the expert, routed in its layer, experts in its layer)``.
+    """
+
+    counts = interval.as_dict()
+    tags = []
+    for name in tensor_names:
+        owner = expert_of(name)
+        if owner is None:
+            tags.append((0, 0, 0))
+            continue
+        layer, expert = owner
+        row = counts.get(layer)
+        if row is None or expert >= len(row):
+            raise ValueError(
+                f"no routed-token count for expert {expert} of MoE layer {layer}; "
+                "is the router counter installed on every rank?"
+            )
+        tags.append((row[expert], sum(row), len(row)))
+    return tuple(tags)
