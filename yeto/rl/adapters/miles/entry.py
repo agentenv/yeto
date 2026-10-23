@@ -1061,8 +1061,22 @@ def _wire_round_cuts(driver, *, elastic, miles_args, algorithm, base_model_revis
                                  or config.get("allow_config_change", False)),
         next_lr=next_lr_for(miles_args), interval=_cut_interval_of(elastic, miles_args))
     if config.get("write_only"):
-        return  # S27 R-2: a synced trainer's buffer lane keeps its own position (S25 C3)
+        # S27 R-2: a synced trainer's buffer lane keeps its own position (S25 C3)
+        _commit_cuts_inline_for_buffer_reader(checkpoint, miles_args=miles_args)
+        return
     _wire_sample_buffer(checkpoint, driver=driver, miles_args=miles_args)
+
+
+def _commit_cuts_inline_for_buffer_reader(checkpoint: Any, *, miles_args: Any) -> None:
+    """A write-only cut store on a trainer that reads the sample buffer: commit
+    each cut inline. A deferred cut holds the store writer guard until the next
+    cut, so the buffer reader skips every Volume reload in between, never sees
+    the sampler's new groups and fails the round (S27 L11 s27-gle9-b: "0/32
+    groups after 900 s")."""
+    from .buffer_rollout import READER_FUNCTION_PATHS
+
+    if checkpoint is not None and getattr(miles_args, "rollout_function_path", None) in READER_FUNCTION_PATHS:
+        checkpoint.background_commit = False
 
 
 def _cut_interval_of(wiring: Any, miles_args: Any) -> Any:

@@ -259,3 +259,18 @@ def test_verl_refuses_the_timed_interval():
 
     with pytest.raises(ValueError, match="not wired for verl"):
         resume_config(SimpleNamespace(rl_cut_auto_mtbf_s=60.0))
+
+
+def test_write_only_cuts_commit_inline_for_a_buffer_reader():
+    from yeto.rl.adapters.miles.buffer_rollout import READER_FUNCTION_PATHS
+    from yeto.rl.adapters.miles.entry import _commit_cuts_inline_for_buffer_reader
+
+    reader = SimpleNamespace(background_commit=True)
+    _commit_cuts_inline_for_buffer_reader(
+        reader, miles_args=SimpleNamespace(rollout_function_path=READER_FUNCTION_PATHS[0]))
+    assert reader.background_commit is False
+    other = SimpleNamespace(background_commit=True)
+    _commit_cuts_inline_for_buffer_reader(
+        other, miles_args=SimpleNamespace(rollout_function_path="miles.rollout.sglang_rollout.generate_rollout"))
+    assert other.background_commit is True
+    _commit_cuts_inline_for_buffer_reader(None, miles_args=SimpleNamespace())
