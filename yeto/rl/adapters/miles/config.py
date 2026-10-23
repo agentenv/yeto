@@ -351,6 +351,7 @@ LEAF_POLICY: dict[str, _Check] = {
     "parallel.tensor_parallel": _ok,
     "parallel.pipeline_parallel": _ok,
     "parallel.expert_parallel": _ok,
+    "parallel.context_parallel": _ok,  # S27 G-AC: --context-parallel-size (translate_run_config)
     # Derived by Megatron from world size / TP / PP; consumed, not passed.
     "parallel.data_parallel": _ok,
     "parallel.rollout_num_gpus_per_engine": _ok,
