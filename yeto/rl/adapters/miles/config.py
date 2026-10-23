@@ -334,6 +334,7 @@ LEAF_POLICY: dict[str, _Check] = {
     "model_recipe.gdn.gated_delta_net": _ok,
     "model_recipe.gdn.qkv_format": _ok,
     "model_recipe.transformer_impl": _ok,
+    "model_recipe.model_flags": _ok,
     **{f"geometry.{name}": _ok for name in _GEOMETRY_FIELDS},
     **{
         f"geometry.moe.{name}": _ok
@@ -1141,6 +1142,8 @@ def translate_run_config(
             values.extend(
                 ("--moe-shared-expert-intermediate-size", str(moe.shared_expert_intermediate_size))
             )
+    # recipe-owned model flags read from the provider (nemotron_h: router, latent MoE)
+    values.extend(getattr(recipe, "model_flags", ()))
     if geometry.multi_latent_attention:
         values.append("--multi-latent-attention")
         for name, value in geometry.mla_dims:

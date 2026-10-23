@@ -40,6 +40,12 @@ RECIPE_QWEN3_8_NEXT = "qwen3_8_next"
 # GLM5.3-Flash (glm5_next): KDA + DSA MLA + 288-expert MoE through the Miles
 # plugin spec (adapters/miles/models/glm5_next.py), full-parameter.
 RECIPE_GLM5_NEXT = "glm5_next"
+# NVIDIA Nemotron-H family (Nemotron-3 Nano / Super, Nemotron-3.5 Super VL text
+# model): Mamba-2 + MoE + attention hybrid built by the Megatron-Bridge
+# HybridModelProvider from the HF checkpoint (Miles --megatron-to-hf-mode
+# bridge). The recipe is driven by the provider's layer pattern and router
+# fields, not by one checkpoint (adapters/miles/models/nemotron_h.py).
+RECIPE_NEMOTRON_H = "nemotron_h"
 TRANSFORMER_IMPLS = ("transformer_engine", "local")
 GATED_DELTA_NET = "gated_delta_net"
 
@@ -143,6 +149,9 @@ class ModelRecipe:
     # Megatron --transformer-impl of a recipe that chooses it (glm5_next: the
     # N7.5 TE-free fallback is "local"); the other recipes keep their own.
     transformer_impl: str = "transformer_engine"
+    # Recipe-owned Miles model flags read from the provider (nemotron_h router,
+    # latent MoE); empty for the other recipes.
+    model_flags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -535,6 +544,20 @@ def qwen3_8_next_variant(args, provider) -> str | None:
     return None
 
 
+def _is_nemotron_h(provider) -> bool:
+    """A Megatron-Bridge hybrid (Mamba) provider built from a Nemotron-H checkpoint."""
+    return bool(getattr(provider, "is_hybrid_model", False)) and bool(
+        getattr(provider, "hybrid_layer_pattern", None))
+
+
+def _recipe_model_flags(recipe_name: str, provider) -> tuple[str, ...]:
+    if recipe_name != RECIPE_NEMOTRON_H:
+        return ()
+    from ..adapters.miles.models.nemotron_h import model_flags
+
+    return model_flags(provider)
+
+
 def select_gdn_recipe(provider) -> GdnRecipe:
     return GdnRecipe(
         gated_delta_net=(
@@ -836,6 +859,12 @@ def resolve_rl_run_config(
                 "the Qwen3.8-Flash-Next recipe needs --no-sglang-deterministic-inference "
                 "(FlashInfer GDN prefill is not supported with deterministic inference)"
             )
+    elif _is_nemotron_h(provider):
+        from ..adapters.miles.models.nemotron_h import check_provider
+
+        check_provider(provider, parameter_mode=parameter_mode)
+        # Miles run_nemotron_3_nano.py: --attention-backend auto
+        recipe_name, attention_backend = RECIPE_NEMOTRON_H, "auto"
     elif qwen35_recipe:
         recipe_name, attention_backend = RECIPE_QWEN3_5, "flash"
     else:
@@ -973,6 +1002,7 @@ def resolve_rl_run_config(
             training_attention_backend=attention_backend,
             gdn=gdn,
             transformer_impl=transformer_impl,
+            model_flags=_recipe_model_flags(recipe_name, provider),
         ),
         geometry=geometry,
         parallel=ParallelLayout(
