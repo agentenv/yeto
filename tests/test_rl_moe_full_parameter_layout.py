@@ -153,6 +153,24 @@ def test_missing_expert_and_router_mismatch_are_refused():
         check_expert_partition(wrong_router)
 
 
+def test_ungated_experts_are_accepted_and_bad_shapes_refused():
+    # Nemotron-H experts are squared ReLU: fc1 holds only up, (ffn, hidden).
+    specs = qwen3_moe_specs(**TINY, tp=2, ep=2)
+    ungated = [
+        ParameterSpec(s.role, s.name, (6, 16), s.dtype, 96, s.shard_id)
+        if ".linear_fc1." in s.name else s
+        for s in specs
+    ]
+    assert check_expert_partition(ungated).num_experts == 4
+    odd = [
+        ParameterSpec(s.role, s.name, (9, 16), s.dtype, 144, s.shard_id)
+        if ".linear_fc1." in s.name else s
+        for s in specs
+    ]
+    with pytest.raises(ValueError, match="not a gated or ungated MLP"):
+        check_expert_partition(odd)
+
+
 def owner_names_in_plan_order(lay: ParameterLayout) -> dict[str, list[str]]:
     names: dict[str, list[str]] = {}
     for fid in range(lay.fragments.num_fragments):

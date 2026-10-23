@@ -115,9 +115,14 @@ def check_expert_partition(specs: Iterable) -> ExpertPartition | None:
         if len(seen) != 1:
             raise ValueError(f"expert {projection} shapes differ across experts: {sorted(seen)}")
     (fc1,), (fc2,) = shapes["linear_fc1"], shapes["linear_fc2"]
-    if len(fc1) != 2 or len(fc2) != 2 or fc1[0] != 2 * fc2[1] or fc1[1] != fc2[0]:
+    # Gated experts (SwiGLU) stack gate and up in fc1; ungated ones (Nemotron-H
+    # squared ReLU) hold only up.
+    if (
+        len(fc1) != 2 or len(fc2) != 2
+        or fc1[0] not in (fc2[1], 2 * fc2[1]) or fc1[1] != fc2[0]
+    ):
         raise ValueError(
-            f"expert shapes are not a gated MLP: linear_fc1 {fc1}, linear_fc2 {fc2}"
+            f"expert shapes are not a gated or ungated MLP: linear_fc1 {fc1}, linear_fc2 {fc2}"
         )
 
     by_layer: dict[tuple[str, int], dict[int, tuple[str, str]]] = {}
