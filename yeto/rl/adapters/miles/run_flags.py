@@ -443,6 +443,7 @@ _ISLAND = (
     island_flag("--tensor-parallel", type=int, default=1),
     island_flag("--pipeline-parallel", type=int, default=1),
     island_flag("--expert-parallel", type=int, default=None),
+    island_flag("--context-parallel", type=int, default=1),
     island_flag("--rollout-num-gpus", type=int, default=None),
     # fleet-dashboard 2.1/2.2 (ports only): rl_heartbeat / rl_resource_sample
     # periods in seconds; default None = 30 / 60 with --rl-observe-timeline,

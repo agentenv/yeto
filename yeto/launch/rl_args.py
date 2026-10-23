@@ -930,7 +930,9 @@ def _prepare_rl_args(
         raise ValueError("RL v0 does not support external learner slots")
     if args.tensor_parallel <= 0 or args.pipeline_parallel <= 0:
         raise ValueError("RL tensor and pipeline parallelism must be positive")
-    model_parallel = args.tensor_parallel * args.pipeline_parallel
+    if int(getattr(args, "context_parallel", 1) or 1) <= 0:
+        raise ValueError("RL context parallelism must be positive")
+    model_parallel = args.tensor_parallel * args.pipeline_parallel * int(getattr(args, "context_parallel", 1) or 1)
     if args.expert_parallel is not None:
         if args.expert_parallel <= 0:
             raise ValueError("RL expert parallelism must be positive")

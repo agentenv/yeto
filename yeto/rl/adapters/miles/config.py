@@ -351,6 +351,7 @@ LEAF_POLICY: dict[str, _Check] = {
     "parallel.tensor_parallel": _ok,
     "parallel.pipeline_parallel": _ok,
     "parallel.expert_parallel": _ok,
+    "parallel.context_parallel": _ok,  # S27 G-AC: --context-parallel-size (translate_run_config)
     # Derived by Megatron from world size / TP / PP; consumed, not passed.
     "parallel.data_parallel": _ok,
     "parallel.rollout_num_gpus_per_engine": _ok,
@@ -754,7 +755,7 @@ def translate_run_config(
     problems = launch_problems(algorithm, {
         "rollout_batch_size": config.batch.groups_per_round,
         "rollout_max_response_len": config.batch.rollout_max_response_len,
-        "context_parallel_size": 1,  # ports emits --context-parallel-size 1
+        "context_parallel_size": int(getattr(config.parallel, "context_parallel", 1) or 1),
         "multi_lora": any(t.split("=", 1)[0] == "--multi-lora" for t in extra_argv),
         # rl-algo-critic-family 2.3: critic GPU counts / deploy-component / indep-dp
         "extra_argv": tuple(extra_argv),
@@ -919,7 +920,7 @@ def translate_run_config(
         "--sglang-mem-fraction-static", str(serving.mem_fraction_static),
         "--tensor-model-parallel-size", str(parallel.tensor_parallel),
         "--pipeline-model-parallel-size", str(parallel.pipeline_parallel),
-        "--context-parallel-size", "1",
+        "--context-parallel-size", str(int(getattr(parallel, "context_parallel", 1) or 1)),
         "--expert-model-parallel-size", str(parallel.expert_parallel),
         "--expert-tensor-parallel-size", "1",
         # data

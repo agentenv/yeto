@@ -64,7 +64,7 @@ def _prepare_ports_algorithm(args) -> None:
         problems += launch_problems(spec, {
             "rollout_batch_size": getattr(args, "rollout_batch_size", None),
             "rollout_max_response_len": getattr(args, "rollout_max_response_len", None),
-            "context_parallel_size": 1,  # ports emits --context-parallel-size 1
+            "context_parallel_size": int(getattr(args, "context_parallel", 1) or 1),
             "multi_lora": False,
             # rl-algo-critic-family 2.3 (critic run-level rejections)
             "sync_preset": getattr(args, "rl_sync_preset", "strict-avg"),
