@@ -193,8 +193,9 @@ class FakeClient:
         self.closed = True
 
 
-def config(store, *, recover, timeout_s=10.0):
+def config(store, *, recover, timeout_s=10.0, island_lease_s=None):
     return RoleStreamConfig(
+        island_lease_s=island_lease_s,
         algorithm="grpo", role="actor",
         component=ComponentIdentity(role="actor", model_revision="a" * 40, config_hash="c" * 64),
         syncer_addr=("127.0.0.1", 30100), learner_id=0, learner_generation=0, learner_generations=(0, 0),
@@ -283,6 +284,30 @@ def test_donor_snapshot_and_recovering_restore_through_the_role_stream(tmp_path,
     assert [a.version for a in stream._anchors] == [5, 6]
     assert client.marked and stream.recovery_outcome.path == "peer"
     assert DirectorySnapshotStore(store_root).locators() == [], "a restored snapshot is removed"
+
+
+def test_island_pool_member_recovers_from_a_peer_while_it_heartbeats(tmp_path, stubs):
+    """An island pool fills a slot; the island's state still comes from a peer."""
+    store_root = tmp_path / "store"
+    donor_client = FakeClient(requests=[rp.SnapshotRequest(1, 9, 5, (3, 4))])
+    donor = donor_stream(store_root, FakeGroup(adam_step=17), donor_client)
+    assert asyncio.run(donor.serve_peer_snapshots()) == 1
+    (_, versions, sha256, locator), = donor_client.sent
+    client = FakeClient(events=[rp.RecoveryClock(5, (3, 4), 1),
+                                rp.RecoverySource(rp.SOURCE_PEER, 0, versions, sha256, locator),
+                                rp.RecoveryDone(5, 6, 1, (5, 6))],
+                        updates=[BcastFragment(0, 5, stored(0, 5, "g0"), stored=True),
+                                 BcastFragment(1, 6, stored(1, 6, "g1"), stored=True)])
+    stubs.clients.append(client)
+    stream = MilesFullParameterRoleStream(config(store_root, recover=True, island_lease_s=30.0))
+    asyncio.run(stream.initialize(FakeGroup(adam_step=0)))
+    try:
+        assert stubs.kwargs[0]["recover"] is True
+        assert stream.heartbeat is not None, "the lease is renewed during and after the restore"
+        assert stream.recovery_outcome.path == "peer"
+        assert stream.fragment_versions == (5, 6)
+    finally:
+        stream.heartbeat.stop()
 
 
 def test_other_tensor_parallel_layout_is_refused(tmp_path, stubs):

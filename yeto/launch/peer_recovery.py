@@ -1,6 +1,10 @@
 """Launcher side of peer recovery (S27 E-3, ``--rl-peer-recovery``).
 
-Full-parameter asynchronous rounds only. With the option on:
+Full-parameter asynchronous rounds only, with a fixed roster or an island
+pool. The pool decides which island fills a slot; this option decides the
+state source of that island (``--rl-island-state-source peer``; off is
+``catch-up``: every fragment from the syncer, fresh optimizer state). With the
+option on:
 
 * every role syncer gets ``--syncer-epoch`` and the recovery options
   (:func:`yeto.launch.syncer.peer_recovery_syncer_flags`);
@@ -28,8 +32,11 @@ def peer_recovery_enabled(args) -> bool:
 
 def peer_recovery_store(args) -> str | None:
     """The snapshot store path on the island, or None when recovery is off."""
-    if not peer_recovery_enabled(args):
-        return None
+    return snapshot_store_path(args) if peer_recovery_enabled(args) else None
+
+
+def snapshot_store_path(args) -> str | None:
+    """The snapshot store path the island would use, whether or not recovery is on."""
     explicit = getattr(args, "rl_peer_recovery_store", None)
     if explicit:
         return str(explicit)
@@ -42,7 +49,7 @@ def peer_recovery_store(args) -> str | None:
 def check_peer_recovery(args) -> None:
     """Refuse ``--rl-peer-recovery`` options that do not apply. Every recovery
     option without ``--rl-peer-recovery`` is refused too."""
-    from .syncer import island_pool, rl_full_parameter_async, syncer_shard_count
+    from .syncer import rl_full_parameter_async, syncer_shard_count
 
     options = [flag for dest, flag in (
         ("rl_recovery_bound_steps", "--rl-recovery-bound-steps"),
@@ -58,9 +65,6 @@ def check_peer_recovery(args) -> None:
     if not rl_full_parameter_async(args):
         raise ValueError("--rl-peer-recovery needs --rl-sync-preset full-parameter with "
                          "--rl-sync-full-parameter-rounds async")
-    if island_pool(args):
-        # Both set the syncer epoch; recovery is only wired for a fixed roster.
-        raise ValueError("--rl-peer-recovery does not take island pool options yet")
     if syncer_shard_count(args) > 1:
         # Recovery is one exchange with one syncer; shards would each need it.
         raise ValueError("--rl-peer-recovery needs one syncer process (--syncer-shards 1)")
@@ -87,9 +91,11 @@ def island_flags(args) -> str:
     store = peer_recovery_store(args)
     if store is None:
         return ""
-    from .syncer import island_syncer_epoch
+    from .syncer import island_pool, island_syncer_epoch
 
-    flags = f" --rl-syncer-epoch {island_syncer_epoch(args)} --rl-peer-recovery-store {shlex.quote(store)}"
+    # An island pool already sends the epoch with its membership flags.
+    flags = "" if island_pool(args) else f" --rl-syncer-epoch {island_syncer_epoch(args)}"
+    flags += f" --rl-peer-recovery-store {shlex.quote(store)}"
     ttl = getattr(args, "rl_peer_recovery_ttl_s", None)
     if ttl is not None:
         flags += f" --rl-peer-recovery-ttl-s {float(ttl)!r}"

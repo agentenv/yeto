@@ -298,8 +298,6 @@ class RoleStreamConfig:
             raise ValueError("peer recovery needs asynchronous rounds without broadcast deltas")
         if self.peer_recovery is not None and self.syncer_shards:
             raise ValueError("peer recovery needs one syncer process, not a sharded head")
-        if self.peer_recovery is not None and self.island_lease_s is not None:
-            raise ValueError("peer recovery is wired for a fixed roster, not an island pool")
         if self.wait_timeout <= 0 or not 0 < self.poll_seconds <= 1:
             raise ValueError("role-stream wait bounds are invalid")
         if (

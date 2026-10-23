@@ -700,9 +700,18 @@ _SCHEDULING = (
              help="full-parameter async: an island relaunched after it lost its trainer "
              "state restores the inner optimizer state from a peer island's snapshot, "
              "then takes every fragment from the syncer. Default: on in --rl-sync-mode "
-             "async where it applies (full-parameter async rounds, a fixed island roster, "
-             "one syncer process, no broadcast deltas, a snapshot store from "
-             "--rl-peer-recovery-store or --rl-checkpoint-store), else off"),
+             "async where it applies (full-parameter async rounds, one syncer process, "
+             "no broadcast deltas, a snapshot store from --rl-peer-recovery-store or "
+             "--rl-checkpoint-store; a fixed roster or an island pool), else off. Same as "
+             "--rl-island-state-source peer (on) or catch-up (off)"),
+    cli_flag("--rl-island-state-source", choices=("peer", "catch-up", "cut"), default=None,
+             help="full-parameter async: where an island that replaces a lost island (a "
+             "relaunch, or a new member of an island pool) takes its trainer state. peer: "
+             "parameters and inner optimizer state from a healthy peer, then the newer "
+             "fragments from the syncer (--rl-peer-recovery); catch-up: every fragment "
+             "from the syncer, fresh optimizer state; cut: the island's own latest round "
+             "cut (not implemented for synced islands yet, refused). Default: peer where "
+             "--rl-peer-recovery applies, else catch-up"),
     cli_flag("--rl-recovery-bound-steps", type=int, default=None, metavar="H",
              help="--rl-peer-recovery: bound on one recovery in syncer steps; the syncer "
              "records a recovery past it as missed (default: measured, not checked)"),
