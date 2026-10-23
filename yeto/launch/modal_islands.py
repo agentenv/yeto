@@ -322,10 +322,12 @@ def _verify_modal_app_stopped(modal_ops, args, *, run_started_unix: float | None
     return confirmed
 
 
-def container_set_poller_for(args, modal_ops, modal_cfgs, on_change, *, start: bool = True):
+def container_set_poller_for(args, modal_ops, modal_cfgs, on_change, *, start: bool = True,
+                             attributed=None):
     """The log-independent container guard (modal_runner.ContainerSetPoller), only when
     a new container is never expected: no launcher relaunch, no checkpoint-store resume
-    and no droppable island. None otherwise."""
+    and no droppable island. None otherwise. ``attributed()`` returns the container ids
+    the islands printed (container id -> (island, rank))."""
     if modal_ops is None or not modal_cfgs or not callable(getattr(modal_ops, "list_container_ids", None)):
         return None
     if effective_recover_timeout(args) != 0 or resumes_in_new_container(args):
@@ -335,7 +337,8 @@ def container_set_poller_for(args, modal_ops, modal_cfgs, on_change, *, start: b
     from ..modal_runner import ContainerSetPoller
 
     expected = sum(max(1, int(getattr(cfg, "num_nodes", 1) or 1)) for cfg in modal_cfgs.values())
-    poller = ContainerSetPoller(modal_ops.list_container_ids, expected, on_change)
+    poller = ContainerSetPoller(modal_ops.list_container_ids, expected, on_change,
+                                attributed=attributed)
     return poller.start() if start else poller
 
 

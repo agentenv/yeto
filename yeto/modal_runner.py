@@ -1173,15 +1173,19 @@ class ModalOps:
         return None
 
     def list_container_ids(self) -> set[str] | None:
-        """Running container ids of this run's app (``modal container list --json``);
-        None when the list cannot be read."""
+        """Started container ids of this run's app (``modal container list --json``);
+        None when the list cannot be read.
+
+        A row whose start time is "Pending" (a task queued for a GPU, no code runs and
+        nothing is billed yet) is left out; a row without a start-time field counts."""
         proc = subprocess.run([sys.executable, "-m", "modal", "container", "list", "--json"],
                               capture_output=True, text=True, timeout=60)
         if proc.returncode != 0:
             return None
         rows = json.loads(proc.stdout or "[]")
         return {str(r.get("Container ID") or r.get("container_id")) for r in rows
-                if (r.get("App Name") or r.get("app_name")) == self.app_name}
+                if (r.get("App Name") or r.get("app_name")) == self.app_name
+                and not _pending_start(r)}
 
     def stop_app(self) -> None:
         """Stop every function of this run's app (used by `yeto down`).
@@ -1223,6 +1227,16 @@ class ModalOps:
         modal = self._modal()
         for entry in modal.FunctionCall.from_id(call_id).logs.stream():
             yield getattr(entry, "message", str(entry))
+
+
+def _pending_start(row: dict) -> bool:
+    """True when a ``modal container list --json`` row has a start-time field that is
+    empty or "Pending" (the task was not started)."""
+    for key in ("Start Time", "start_time"):
+        if key in row:
+            value = row[key]
+            return value is None or str(value).strip().lower() in ("", "pending")
+    return False
 
 
 CONTAINER_LINE_RE = re.compile(r"\[modal-island (\d+)\] rank (\d+) container (\S+)")
@@ -1267,15 +1281,25 @@ class ContainerSetPoller:
     and the function-call log stream never delivered the new container's lines, so
     :class:`ContainerIdGuard` did not trip and the island re-ran from scratch).
 
-    Every ``interval_s`` it lists the app's running containers. Once ``expected``
-    distinct ids were seen (all islands up), that set is the baseline; any later id
-    outside it trips the guard and calls ``on_change(message)`` once. A failed list
-    is skipped (never trips)."""
+    ``modal container list`` does not say which function (island) a container runs.
+    The island itself says so: its first log line ``[modal-island N] rank R container
+    ta-...`` (``attributed()`` returns those first ids, container id -> (island, rank)).
 
-    def __init__(self, list_ids, expected: int, on_change=None, *, interval_s: float = 30.0) -> None:
+    Every ``interval_s`` it lists the app's started containers. ``expected`` is the
+    number of (island, rank) slots. A slot is taken once a container printed its line
+    for it. A listed container that no island claimed yet may be the late first
+    container of a free slot (S27 s27-gr-i: island 1 waited ~40 min for an H200);
+    that is not a change. The guard trips (``on_change(message)`` once) when the
+    listed unclaimed containers outnumber the free slots, so at least one of them
+    must be a second container of a taken slot. An unclaimed container that left the
+    list never ran island code (as far as the logs show) and is not counted. A failed
+    list is skipped (never trips)."""
+
+    def __init__(self, list_ids, expected: int, on_change=None, *, interval_s: float = 30.0,
+                 attributed=None) -> None:
         self.list_ids, self.expected_count, self.on_change = list_ids, max(1, int(expected)), on_change
         self.interval_s = interval_s
-        self.baseline: set[str] | None = None
+        self.attributed = attributed if attributed is not None else dict
         self.seen: set[str] = set()
         self.changes: list[str] = []
         self.expected = False  # launcher.container_changed(): a change here is never expected
@@ -1294,15 +1318,21 @@ class ContainerSetPoller:
         if ids is None:
             return
         ids = set(ids)
-        if self.baseline is None:
-            self.seen |= ids
-            if len(self.seen) >= self.expected_count:
-                self.baseline = set(self.seen)
-            return
-        new = sorted(ids - self.baseline)
-        if new and not self.changes:
-            msg = (f"Modal app has a new container {', '.join(new)} besides "
-                   f"{', '.join(sorted(self.baseline))} (an island was rescheduled)")
+        self.seen |= ids
+        try:
+            claimed = dict(self.attributed() or {})
+        except Exception as exc:  # noqa: BLE001 - no attribution: every slot stays free
+            print(f"[launcher] container attribution failed: {exc}", flush=True)
+            claimed = {}
+        taken = set(claimed.values())
+        free = max(0, self.expected_count - len(taken))
+        unclaimed = sorted(ids - set(claimed))
+        if len(unclaimed) > free and not self.changes:
+            owners = ", ".join(f"island {k[0]} rank {k[1]} = {cid}"
+                               for cid, k in sorted(claimed.items(), key=lambda kv: kv[1])) or "none"
+            msg = (f"Modal app has a new container {', '.join(unclaimed)} that no island "
+                   f"claimed, with {free} of {self.expected_count} island slot(s) still free "
+                   f"(claimed: {owners}) (an island was rescheduled)")
             self.changes.append(msg)
             if self.on_change is not None:
                 self.on_change(msg)

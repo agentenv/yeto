@@ -616,7 +616,13 @@ def run(args, on_clusters=None, local_syncer=None, on_instance_ids=None) -> int:
             spawn_tail(syncer_cluster, syncer_job)
         for name, (job_id, _handle) in results.items():
             spawn_tail(name, job_id)
-        container_poller = container_set_poller_for(args, modal_ops, modal_cfgs, on_container_change)
+        def attributed_containers() -> dict:
+            # container id -> (island, rank) from each island's first container line
+            return {cid: key for g in list(container_guards)
+                    for key, cid in dict(getattr(g, "first", None) or {}).items()}
+
+        container_poller = container_set_poller_for(args, modal_ops, modal_cfgs, on_container_change,
+                                                    attributed=attributed_containers)
         if container_poller is not None:
             container_guards.append(container_poller)
 
