@@ -16,9 +16,9 @@
 set -u
 : "${P:?}" "${R:?}" "${REPO:?}" "${ARGS:?}" "${STOREVOL:?}" "${PY:?}"
 HARD=${HARD:-3000}; ISLANDS=${ISLANDS:-1}; TAPEVOL=${TAPEVOL:-yeto-event-tapes}
-MODAL="$PY -m modal"; APP=yeto-$P; SAPP=yeto-$P-s; LOCK=/home/michael/work/infra-drafts/GPU-LAUNCH.lock
+MODAL="$PY -m modal"; APP=yeto-$P; SAPP=yeto-$P-s; LOCK=${LOCK:-/tmp/GPU-LAUNCH-2.lock}
 CLONE=$R/yeto
-T=$(ps -u michael -L --no-headers | wc -l); [ -n "${DRY:-}" ] || [ "$T" -lt 3000 ] || { echo "abort: $T threads"; exit 3; }
+T=$(ps -u michael -L --no-headers | wc -l); [ -n "${DRY:-}" ] || [ "$T" -lt 2500 ] || { echo "abort: $T threads"; exit 3; }
 pgrep -x raylet >/dev/null && { echo "abort: local Ray"; exit 3; }
 [ -e $R/start_utc.txt ] && { echo "abort: $R used"; exit 67; }
 mkdir -p $R/tapes $R/store
@@ -116,6 +116,6 @@ for a in $APP $SAPP; do
   AID=$(/usr/bin/python3 -c "import json,sys;print(next((a['app_id'] for a in json.load(open(sys.argv[1])) if a.get('description')==sys.argv[2]),''))" $R/final-applist.json $a 2>/dev/null)
   [ -n "$AID" ] && (cd /tmp && timeout 180 $MODAL app logs --timestamps $AID > $R/modal-app-logs-$a.txt 2>&1)
 done
-(cd /tmp && for d in sample-buffer policy-releases round-cuts trainer-control; do timeout 900 $MODAL volume get --force $STOREVOL $P/$d $R/store; done
+(cd /tmp && for d in sample-buffer policy-releases trainer-control; do timeout 900 $MODAL volume get --force $STOREVOL $P/$d $R/store; done
  timeout 300 $MODAL volume ls --json $STOREVOL $P) > $R/store.out 2>&1
 echo "$P rc=$(cat $R/rc) src=$(cat $R/src 2>/dev/null)"
