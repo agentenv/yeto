@@ -272,6 +272,8 @@ def make_miles_island_task(
     flags += algorithm_flags
     if args.expert_parallel is not None:
         flags += f" --expert-parallel {args.expert_parallel}"
+    if int(getattr(args, "context_parallel", 1) or 1) > 1:
+        flags += f" --context-parallel {int(args.context_parallel)}"
     for flag, name in (
         ("--rl-prompt-column", "rl_prompt_column"),
         ("--rl-label-column", "rl_label_column"),

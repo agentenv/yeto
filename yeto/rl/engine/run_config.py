@@ -185,6 +185,9 @@ class ParallelLayout:
     # --rl-allow-cross-node-engine-tp); default False = TP stays inside a node.
     allow_cross_node_tp: bool = False
     allow_cross_node_engine_tp: bool = False
+    # S27 G-AC: Megatron context parallelism of the trainer (Miles splits each
+    # packed micro batch of max_tokens_per_gpu * CP tokens across the CP ranks).
+    context_parallel: int = 1
 
     @property
     def colocated(self) -> bool:
@@ -707,9 +710,12 @@ def resolve_rl_run_config(
     actor_gpus = args.actor_num_nodes * args.actor_num_gpus_per_node
     tensor_parallel = getattr(args, "tensor_parallel", 1)
     pipeline_parallel = getattr(args, "pipeline_parallel", 1)
-    model_parallel = tensor_parallel * pipeline_parallel
+    context_parallel = int(getattr(args, "context_parallel", 1) or 1)
+    model_parallel = tensor_parallel * pipeline_parallel * context_parallel
     rules = _rules()
     rules.check_trainer_parallel(actor_gpus, tensor_parallel, pipeline_parallel)
+    if context_parallel < 1 or actor_gpus % model_parallel:
+        raise ValueError("Miles actor world must be divisible by TP*PP*CP")
     is_moe = getattr(provider, "num_moe_experts", None) is not None
     expert_parallel = getattr(args, "expert_parallel", None) or (
         actor_gpus if is_moe else 1
@@ -1025,6 +1031,7 @@ def resolve_rl_run_config(
             bundle_map=_island_bundle_map(args, dedicated_rollout_gpus),
             allow_cross_node_tp=bool(getattr(args, "rl_allow_cross_node_tp", False)),
             allow_cross_node_engine_tp=bool(getattr(args, "rl_allow_cross_node_engine_tp", False)),
+            context_parallel=context_parallel,
         ),
         trainable=TrainableConfig(
             parameter_mode=parameter_mode,
@@ -1142,10 +1149,12 @@ def resolve_rl_run_config(
 
 def _train_memory(args) -> TrainMemoryConfig:
     max_tokens = getattr(args, "rl_max_tokens_per_gpu", None)
-    if max_tokens is not None and int(max_tokens) < int(args.seq_len):
+    cp = int(getattr(args, "context_parallel", 1) or 1)
+    if max_tokens is not None and int(max_tokens) * cp < int(args.seq_len):
         # a sample longer than the budget would not fit in any micro batch
+        # (Miles packs max_tokens_per_gpu * CP tokens per micro batch: dp_schedule.py)
         raise ValueError(
-            f"--rl-max-tokens-per-gpu {max_tokens} is below --seq-len {args.seq_len}"
+            f"--rl-max-tokens-per-gpu {max_tokens} x CP {cp} is below --seq-len {args.seq_len}"
         )
     offload = float(getattr(args, "rl_optimizer_offload_fraction", 0.0) or 0.0)
     if not 0.0 <= offload <= 1.0:

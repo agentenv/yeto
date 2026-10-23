@@ -190,6 +190,9 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
     )
     tune.add_argument("--tensor-parallel", type=int, default=1, help="megatron backend: TP degree")
     tune.add_argument("--pipeline-parallel", type=int, default=1, help="megatron backend: PP degree")
+    tune.add_argument("--context-parallel", type=int, default=1,
+                      help="RL ports (Miles) trainer: context-parallel degree (S27 G-AC long sequences); "
+                           "the trainer world is TP x PP x CP x DP")
     tune.add_argument(
         "--train-on",
         choices=["assistant", "all"],
