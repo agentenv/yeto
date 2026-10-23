@@ -8,7 +8,7 @@
 #      PY, SKY, PLAN_ONLY=1 (dry-run only)
 set -u
 : "${P:?}" "${R:?}" "${REPO:?}" "${PY:?}" "${SKY:?}"
-HARD=${HARD:-2700}; WD=$(( HARD + 300 )); STEPS=${STEPS:-6}; SROUNDS=$(( 2 * STEPS + 6 )); GPU=${GPU:-a10g}
+HARD=${HARD:-3300}; WD=$(( HARD + 300 )); STEPS=${STEPS:-6}; SROUNDS=$(( 2 * STEPS + 6 )); GPU=${GPU:-a10g}
 SHA=${SHA:-HEAD}; MODAL="$PY -m modal"
 APP=yeto-$P; SP=$P-s; SAPP=yeto-$SP; TAPEVOL=yeto-event-tapes; STOREVOL=${STOREVOL:-yeto-eval-store}; HEAD_REGION=nebius/eu-north1
 export CARGO_HOME=/home/michael/work/gpu-default-modal/cargo RUSTUP_HOME=/home/michael/work/gpu-default-modal/rustup
@@ -81,7 +81,7 @@ PULLER=$!
     (cd /tmp && HOME=/home/michael timeout 60 $MODAL volume ls $STOREVOL $P/policy-releases 2>/dev/null) > $R/.rel.txt
     grep -qE -- '-v([2-9]|[1-9][0-9])' $R/.rel.txt || continue
     for x in $(cd /tmp && HOME=/home/michael timeout 60 $MODAL container list --json 2>/dev/null | python3 -c "import json,sys; print(' '.join(x['container_id'] for x in json.load(sys.stdin) if x.get('app_name')=='$APP'))" 2>/dev/null); do
-      grep -q '"learner_id":0' $R/tapes/$x.jsonl 2>/dev/null || continue
+      python3 -I $REPO/tools/probes/s27_gl_e9/is_island0.py $R/tapes/$x.jsonl 2>/dev/null || continue
       echo "$(date -u +%FT%TZ) stop $x (learner 0); releases: $(tr '\n' ' ' < $R/.rel.txt)" > $R/KILLED
       (cd /tmp && HOME=/home/michael timeout 120 $MODAL container stop --yes $x) >> $R/KILLED 2>&1; break
     done; done ) 9>&- &
