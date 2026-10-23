@@ -83,7 +83,7 @@ PULLER=$!
     for x in $(cd /tmp && HOME=/home/michael timeout 60 $MODAL container list --json 2>/dev/null | python3 -c "import json,sys; print(' '.join(x['container_id'] for x in json.load(sys.stdin) if x.get('app_name')=='$APP'))" 2>/dev/null); do
       grep -q '"learner_id":0' $R/tapes/$x.jsonl 2>/dev/null || continue
       echo "$(date -u +%FT%TZ) stop $x (learner 0); releases: $(tr '\n' ' ' < $R/.rel.txt)" > $R/KILLED
-      (cd /tmp && HOME=/home/michael timeout 120 $MODAL container stop $x) >> $R/KILLED 2>&1; break
+      (cd /tmp && HOME=/home/michael timeout 120 $MODAL container stop --yes $x) >> $R/KILLED 2>&1; break
     done; done ) 9>&- &
 KILLER=$!
 cd $R/yeto
