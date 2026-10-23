@@ -677,6 +677,19 @@ def resume_state(actor: Any) -> dict[str, Any]:
 RESUME_STATE = f"{_MODULE}.resume_state"
 
 
+def _add_param_layout(snap: dict[str, Any], actor: Any, backend: Any, named: list) -> None:
+    """R-5: a full-parameter shard records its ``param_layout`` for the offline TP/PP/EP
+    merge. Save and restore both call this, so the restored state digest covers the same
+    keys as the saved one."""
+    layout = getattr(backend, "param_layout", None)
+    if _tuning(backend, named) != "full" or not callable(layout):
+        return
+    try:
+        snap["param_layout"] = layout(actor, named)
+    except Exception as error:  # the cut stays valid for resume; only the offline merge refuses it
+        snap["param_layout"] = {"error": f"{type(error).__name__}: {error}"}
+
+
 def _snapshot(actor: Any, backend: Any, named: list, *, on_device: bool = False) -> dict[str, Any]:
     """The shard state at this step boundary. ``on_device`` (E1): the adapter and
     optimizer tensors are device copies (device-to-device, no wait for the host);
@@ -1123,12 +1136,7 @@ def _capture(actor: Any, *, cut_id: str, device_copy: bool = False) -> dict[str,
                 torch.cuda.empty_cache()
         if snap is None:
             snap = _snapshot(actor, backend, named)
-        layout = getattr(backend, "param_layout", None)
-        if _tuning(backend, named) == "full" and callable(layout):  # R-5: offline TP/PP/EP merge
-            try:
-                snap["param_layout"] = layout(actor, named)
-            except Exception as error:  # the cut stays valid for resume; only the offline merge refuses it
-                snap["param_layout"] = {"error": f"{type(error).__name__}: {error}"}
+        _add_param_layout(snap, actor, backend, named)
         ready = None
         if on_device and _sleeps_after_cut(actor):
             snap = _stage(snap)  # host views; the device copies are dropped here
@@ -1487,6 +1495,7 @@ def _restore(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_
     backend.restore_rng(shard["rng"])  # last: nothing below may consume randomness
     with torch.no_grad():
         snap = _snapshot(actor, backend, named)
+        _add_param_layout(snap, actor, backend, named)  # the save digests include it
     rng_now = backend.capture_rng()
     summary = {
         "path": name,

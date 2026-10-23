@@ -357,3 +357,24 @@ def test_rewound_trained_trainer_restores_the_cut_like_a_fresh_one(tmp_path):
     for p_r, p_l in zip(reference.optimizer.param_groups[0]["params"], live.optimizer.param_groups[0]["params"]):
         for key in ("exp_avg", "exp_avg_sq", "step"):
             assert torch.equal(reference.optimizer.state[p_r][key], live.optimizer.state[p_l][key])
+
+
+class _LayoutBackend(type(make_rank(0, full=True)._yeto_cut_backend)):
+    """A backend that records a ``param_layout`` like MilesCutBackend (R-5)."""
+
+    def param_layout(self, actor, named):
+        return {"schema": "test", "params": {n: {"shape": list(p.shape)} for n, p in named}}
+
+
+def test_full_parameter_restore_with_param_layout_matches_the_saved_digest(tmp_path):
+    # GPU s27-glf-l9-a-pb: the save added param_layout to the digested state, the
+    # restore re-snapshot did not, so every full-parameter resume was refused.
+    run = make_rank(seed=0, full=True)
+    run._yeto_cut_backend = _LayoutBackend(None)
+    train_step(run, _batches(1)[0])
+    summary = save_cut_shard(run, directory=str(tmp_path), cut_id="c1")
+    fresh = make_rank(seed=5, full=True)
+    fresh._yeto_cut_backend = _LayoutBackend(None)
+    restored = restore_cut_shard(fresh, directory=str(tmp_path), files=[summary], cut_id="c1")
+    assert restored["state_digest"] == summary["state_digest"]
+    assert restored["components"] == summary["components"]
