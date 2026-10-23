@@ -59,10 +59,11 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, Self
 
 from yeto.protocol import PartialMessageGenerationLost
 from yeto.rl.pool_client import LeaveReason
@@ -167,6 +168,10 @@ class FullParameterSyncProfile:
     # S27 P2: the syncer closes rounds with quorum K <= islands, so a fragment
     # broadcast may arrive without this island's submission (overwrite it).
     partial_quorum: bool = False
+    # S27 G-AG lead cap K (streaming only; None = off, the old behaviour): an
+    # island trains at most K - 1 local rounds on top of an unmerged push of
+    # its own; K = 1 starts no round while one is unmerged (RolePairing.wait_for_lead).
+    max_local_rounds_ahead: int | None = None
 
     def __post_init__(self) -> None:
         if not self.roles or len(set(self.roles)) != len(self.roles):
@@ -179,6 +184,11 @@ class FullParameterSyncProfile:
             raise ValueError("sync/train overlap needs the dense strict sweep")
         if self.partial_quorum and self.sweep:
             raise ValueError("a partial quorum needs the streaming profile, not the strict sweep")
+        if self.max_local_rounds_ahead is not None:
+            if type(self.max_local_rounds_ahead) is not int or self.max_local_rounds_ahead < 1:
+                raise ValueError("max_local_rounds_ahead must be an integer >= 1")
+            if self.sweep or self.overlap:
+                raise ValueError("a local-round lead cap needs the streaming profile (no sweep, no overlap)")
 
     @property
     def total_rounds(self) -> int:
@@ -193,7 +203,8 @@ class FullParameterSyncProfile:
 
     @classmethod
     def from_configs(
-        cls, configs: Mapping[str, Any], *, sweep: bool = False
+        cls, configs: Mapping[str, Any], *, sweep: bool = False,
+        max_local_rounds_ahead: int | None = None,
     ) -> FullParameterSyncProfile:
         """Profile of role-stream configs that pass :func:`require_lockstep`."""
 
@@ -210,6 +221,7 @@ class FullParameterSyncProfile:
             sweep=sweep,
             overlap=bool(getattr(first, "overlap", False)),
             partial_quorum=bool(getattr(first, "partial_quorum", False)),
+            max_local_rounds_ahead=max_local_rounds_ahead,
         )
 
 
@@ -233,6 +245,9 @@ class PairedSubmission:
     candidates: dict[str, Any]
     submissions: dict[str, Any] = field(default_factory=dict)
     retained_at: float = field(default_factory=time.monotonic)
+    # The island's local round (RolePairing.local_round) when it retained the
+    # pair: the round whose cut the pair pushes (lead cap).
+    local_round: int = 0
 
     @property
     def logical_key(self) -> LogicalKey:
@@ -280,6 +295,12 @@ class RolePairing:
         self.caught_up_fragments = 0  # catch-up jumps (one per fragment and jump)
         # Terminal phase: last rounds closed without a trainer apply (_retires).
         self.retired_rounds = 0
+        # Lead cap: local rounds this island completed (set by the session at
+        # each boundary) and what its waits did.
+        self.local_round = 0
+        self.lead_waits = 0
+        self.lead_wait_seconds = 0.0
+        self.lead_wait_escapes = 0
 
     # -- fail-stop ---------------------------------------------------------
 
@@ -358,11 +379,14 @@ class RolePairing:
                 # A round whose broadcast is staged or applied closed without
                 # this island: pushing would only upload a refused delta.
                 shared = [key for key in shared if not self._round_closed(key[1], key[0])]
-            for key in shared[: max(0, capacity)]:
-                pair = self._new_pair({role: by_role[role].pop(key) for role in self.streams})
-                self._retain(pair)
-                self.inflight[key] = pair
-                self._push_once(pair, dict(pair.candidates), produced)
+            planned = [(key, {role: by_role[role].pop(key) for role in self.streams})
+                       for key in shared[: max(0, capacity)]]
+            with _PushPrefetch(self.streams, planned) as prefetch:
+                for key, candidates in planned:
+                    pair = self._new_pair(candidates)
+                    self._retain(pair)
+                    self.inflight[key] = pair
+                    self._push_once(pair, dict(pair.candidates), produced, prepared=prefetch.take(key))
             self._check_timeouts(by_role, now)
         except BaseException as error:
             self.fail_stop(error)
@@ -435,7 +459,7 @@ class RolePairing:
                 or candidate.c_steps < self.profile.local_horizon
             ):
                 raise RuntimeError("role retained cuts are not one H-qualified round")
-        return PairedSubmission(candidates)
+        return PairedSubmission(candidates, local_round=self.local_round)
 
     def _retain(self, pair: PairedSubmission) -> None:
         retained: list[str] = []
@@ -457,6 +481,7 @@ class RolePairing:
         pair: PairedSubmission,
         observed: Mapping[str, Any | None],
         produced: dict[str, list[Any]],
+        prepared: Mapping[str, Any] | None = None,
     ) -> None:
         for role, stream in self.streams.items():
             replayed = _retained_replay(pair.candidates[role], observed.get(role))
@@ -466,8 +491,10 @@ class RolePairing:
             # A PULL visible after a successful enqueue proves that generation
             # did not commit it: replay the exact retained bytes.
             pair.submissions.pop(role, None)
+            ahead = None if prepared is None else prepared.get(role)
             try:
-                submission = stream.push_candidate(replayed)
+                submission = (stream.push_candidate(replayed) if ahead is None
+                              else stream.push_candidate(replayed, ahead))
             except PartialMessageGenerationLost:
                 submission = None
             if submission is not None:
@@ -724,6 +751,79 @@ class RolePairing:
         self.journal.append(dict(pair.submissions))
         self._release(pair)
 
+    # -- local-round lead cap (S27 G-AG) -----------------------------------------
+
+    def lead_blockers(self) -> list[PairedSubmission]:
+        """In-flight pairs that stop the next local round under the lead cap K.
+
+        At a boundary after local round ``r`` the next round is ``r + 1``.  A
+        pair retained at local round ``p`` (its cut is round ``p``) blocks when
+        ``p <= r + 1 - K``: training round ``r + 1`` would put ``K`` or more
+        rounds on top of that unmerged push.  With a fixed roster a merge needs
+        every island's push, so with K = 1 an island starts a round only after
+        every island pushed everything it pushed: it stays at most one local
+        round ahead of the slowest island.  A larger K allows K - 1 rounds on
+        top of an unmerged push; that bounds the island's c_steps per push,
+        not its absolute lead (pushes made one boundary late can repeat)."""
+
+        limit = self.profile.max_local_rounds_ahead
+        if limit is None:
+            return []
+        return [pair for pair in self.inflight.values() if pair.local_round <= self.local_round + 1 - limit]
+
+    async def wait_for_lead(self, serve: Any = None) -> float:
+        """Lead cap: block at this boundary until :meth:`lead_blockers` is empty.
+
+        The wait keeps the island's sync duties: every poll materializes and
+        pushes PULLs it has candidates for (from this boundary's cut), applies
+        arrived broadcasts, and runs ``serve`` (peer snapshots).  It stops at
+        once when the terminal phase starts (``any_finalizing``): the terminal
+        barrier then waits instead.
+
+        No new timer: each pair's wait timeout keeps running inside
+        :meth:`submit_ready`, so a broadcast that never comes still fails
+        there.  The lead wait gives up (and the island trains on, the old
+        behaviour) once the oldest blocking pair has waited half of
+        ``wait_timeout`` since its last push, before that pair could time out.
+        This also breaks a theoretical deadlock where each island waits for a
+        push the other can make only after training (possible only when two
+        broadcasts reach the two islands in different orders).
+
+        Returns the seconds this boundary waited."""
+
+        blockers = self.lead_blockers()
+        if not blockers or self.any_finalizing or self.failure is not None:
+            return 0.0
+        started = time.monotonic()
+        poll = max(self.profile.poll_seconds, LEAD_WAIT_POLL_S)
+        escaped = False
+        oldest = min(pair.local_round for pair in blockers)
+        print(f"[yeto-full-parameter] lead wait: local round {self.local_round}, "
+              f"{len(blockers)} pair(s) pushed at local round {oldest}.. are unmerged "
+              f"(lead cap {self.profile.max_local_rounds_ahead})", file=sys.stderr, flush=True)
+        while True:
+            await asyncio.sleep(poll)
+            await self.prepare_submissions()
+            self.submit_ready()
+            await self.commit_staged_broadcasts()
+            if serve is not None:
+                await serve()
+            blockers = self.lead_blockers()
+            if not blockers or self.any_finalizing:
+                break
+            give_up = min(pair.retained_at for pair in blockers) + self.profile.wait_timeout / 2
+            if time.monotonic() >= give_up:
+                escaped = True
+                break
+        waited = time.monotonic() - started
+        self.lead_waits += 1
+        self.lead_wait_seconds += waited
+        self.lead_wait_escapes += int(escaped)
+        print(f"[yeto-full-parameter] lead wait: local round {self.local_round} waited {waited:.1f}s"
+              + (" and gave up at half the wait timeout (trains on)" if escaped else ""),
+              file=sys.stderr, flush=True)
+        return waited
+
     # -- terminal barrier ------------------------------------------------------
 
     async def finish_without_more_training(self) -> dict[str, RoleProgress]:
@@ -786,6 +886,90 @@ def _candidate_map(candidates: Sequence[Any], *, role: str) -> dict[LogicalKey, 
 
 
 BATCH_APPLY_ENV = "YETO_FULL_PARAMETER_BATCH_APPLY"
+# S27 G-AG: threads that compute the next pushes' deltas and wire encodings
+# while the current one is enqueued (1 = compute each push in turn, as before).
+PUSH_WORKERS_ENV = "YETO_FULL_PARAMETER_PUSH_WORKERS"
+DEFAULT_PUSH_WORKERS = 3
+_PUSH_POOL: list[Any] = []  # (workers, ThreadPoolExecutor), created on first use
+
+
+def push_workers() -> int:
+    try:
+        return max(1, int(os.environ.get(PUSH_WORKERS_ENV, DEFAULT_PUSH_WORKERS)))
+    except ValueError:
+        return 1
+
+
+def _push_pool(workers: int) -> Any:
+    if not _PUSH_POOL or _PUSH_POOL[0][0] != workers:
+        from concurrent.futures import ThreadPoolExecutor
+
+        _PUSH_POOL[:] = [(workers, ThreadPoolExecutor(max_workers=workers,
+                                                      thread_name_prefix="yeto-push-prepare"))]
+    return _PUSH_POOL[0][1]
+
+
+class _PushPrefetch:
+    """Compute the deltas and wire encodings of the next planned pushes on
+    worker threads (S27 G-AG) while the pushing thread enqueues them in plan
+    order.
+
+    Only when every role can (``encodes_ahead``) and
+    ``YETO_FULL_PARAMETER_PUSH_WORKERS`` > 1; otherwise :meth:`take` returns
+    None and each push computes its bytes itself, as before.  The bytes are
+    the same either way: a prepared push reads the same retained cut and
+    anchor, and the codec is deterministic (no stochastic rounding, no error
+    feedback).  At most ``workers`` pushes are computed ahead; on exit every
+    unfinished computation is cancelled or awaited, so no worker outlives the
+    submit call."""
+
+    def __init__(self, streams: Mapping[str, Any], planned: Sequence[tuple[LogicalKey, Mapping[str, Any]]]):
+        self.streams = streams
+        self.workers = push_workers()
+        self.enabled = len(planned) > 1 and self.workers > 1 and all(
+            getattr(stream, "encodes_ahead", False) and callable(getattr(stream, "prepare_push", None))
+            for stream in streams.values())
+        self.queue = list(planned)
+        self.futures: dict[LogicalKey, dict[str, Any]] = {}
+
+    def __enter__(self) -> Self:
+        if self.enabled:
+            self._fill()
+        return self
+
+    def _fill(self) -> None:
+        pool = _push_pool(self.workers)
+        while self.queue and len(self.futures) < self.workers:
+            key, candidates = self.queue.pop(0)
+            self.futures[key] = {role: pool.submit(self.streams[role].prepare_push, candidate)
+                                 for role, candidate in candidates.items()}
+
+    def take(self, key: LogicalKey) -> dict[str, Any] | None:
+        if not self.enabled:
+            return None
+        futures = self.futures.pop(key, None)
+        if futures is None:
+            return None
+        try:
+            return {role: future.result() for role, future in futures.items()}
+        finally:
+            self._fill()
+
+    def __exit__(self, *exc: object) -> None:
+        for futures in self.futures.values():
+            for future in futures.values():
+                future.cancel()
+        for futures in self.futures.values():
+            for future in futures.values():
+                if not future.cancelled():
+                    try:
+                        future.result()
+                    except BaseException:  # noqa: BLE001, S110 - the push that needed it already failed
+                        pass
+        self.futures.clear()
+        self.queue.clear()
+# Lead cap: poll interval of the boundary wait (the wait lasts a peer's round).
+LEAD_WAIT_POLL_S = 0.05
 
 
 @dataclass(frozen=True)
@@ -859,6 +1043,8 @@ class FullParameterSync(RoundCutHooks):
         self._upload_before: tuple | None = None
         # Partial quorum: overwritten rounds at the previous boundary.
         self._overwritten_before = 0
+        self._lead_wait_s = 0.0  # lead cap: this boundary's wait
+        self._push_timing_before: dict[str, float] | None = None
 
     @property
     def outer_version(self) -> int | None:
@@ -895,6 +1081,8 @@ class FullParameterSync(RoundCutHooks):
     def boundary(self, driver: IslandDriver, *, rollout_id: int, stats: Any) -> SyncBoundary:
         del stats
         self._timing = SyncTiming(None, None)
+        self._lead_wait_s = 0.0
+        self.pairing.local_round = rollout_id + 1
         self.terminal = self.run(self._boundary(rollout_id))
         versions = self.pairing.fragment_versions()
         state = self.actor.resident_state(rollout_id + 1)
@@ -908,6 +1096,8 @@ class FullParameterSync(RoundCutHooks):
                 "sync/global_policy_hash": state.policy_tensor_hash(),
                 "sync/inflight_pairs": len(self.pairing.inflight),
                 **(self._partial_quorum_fields(versions) if self.pairing.profile.partial_quorum else {}),
+                **self._lead_fields(),
+                **self._push_timing_fields(),
                 **self._timing.fields(),
                 **self._upload_fields(),
             },
@@ -926,6 +1116,28 @@ class FullParameterSync(RoundCutHooks):
             "sync/retired_rounds": pairing.retired_rounds,
             "sync/outer_version": merged_version(versions),
         }
+
+    def _lead_fields(self) -> dict[str, object]:
+        pairing = self.pairing
+        if pairing.profile.max_local_rounds_ahead is None:
+            return {}
+        return {
+            "sync/max_local_rounds_ahead": pairing.profile.max_local_rounds_ahead,
+            "sync/lead_wait_s": round(self._lead_wait_s, 3),
+            "sync/lead_waits": pairing.lead_waits,
+            "sync/lead_wait_escapes": pairing.lead_wait_escapes,
+        }
+
+    def _push_timing_fields(self) -> dict[str, object]:
+        """The actor's push time split of this boundary (S27 G-AG): delta
+        computation, error feedback, wire encoding and enqueue, summed over
+        the fragments it pushed; streams without the counters add nothing."""
+        totals = getattr(self.actor, "push_timing_totals", None)
+        if not isinstance(totals, dict):
+            return {}
+        before, self._push_timing_before = self._push_timing_before or {}, dict(totals)
+        return {f"sync/push_{name}": round(value - before.get(name, 0.0), 3) if name != "count"
+                else int(value - before.get(name, 0)) for name, value in totals.items()}
 
     def _stream_snapshots(self) -> tuple | None:
         snapshots = getattr(getattr(self.actor, "client", None), "stream_snapshots", None)
@@ -965,6 +1177,8 @@ class FullParameterSync(RoundCutHooks):
         submit_ts = unix_now()
         await pairing.commit_staged_broadcasts()
         await self._serve_peer_snapshots()
+        if pairing.profile.max_local_rounds_ahead is not None:
+            self._lead_wait_s = await pairing.wait_for_lead(self._serve_peer_snapshots)
         if pairing.profile.sweep:
             await self._wait_for_sweep(before)
             # Broadcasts are staged in the background, so the receive time

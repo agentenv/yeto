@@ -37,10 +37,16 @@ class FullParameterSyncConfig:
 
     roles: tuple[RoleStreamConfig, ...]
     sweep: bool = False
+    # S27 G-AG lead cap (``--sweep-max-local-rounds-ahead``); None = off.
+    # Island-local: not part of the session contract or the syncer profile.
+    max_local_rounds_ahead: int | None = None
 
     def __post_init__(self) -> None:
-        names = tuple(config.role for config in self.roles)
-        FullParameterSyncProfile.from_configs(dict(zip(names, self.roles, strict=True)), sweep=self.sweep)
+        self.profile()
+
+    def profile(self) -> FullParameterSyncProfile:
+        return FullParameterSyncProfile.from_configs(
+            self.by_role(), sweep=self.sweep, max_local_rounds_ahead=self.max_local_rounds_ahead)
 
     def by_role(self) -> dict[str, RoleStreamConfig]:
         return {config.role: config for config in self.roles}
@@ -69,7 +75,7 @@ def build_full_parameter_sync(
         raise TypeError("Miles full-parameter sync configuration is missing")
     configs = config.by_role()
     streams = {role: MilesFullParameterRoleStream(stream) for role, stream in configs.items()}
-    pairing = RolePairing(streams, FullParameterSyncProfile.from_configs(configs, sweep=config.sweep))
+    pairing = RolePairing(streams, config.profile())
     return FullParameterSync(
         pairing,
         groups=groups,

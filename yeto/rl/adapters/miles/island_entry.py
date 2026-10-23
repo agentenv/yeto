@@ -21,6 +21,7 @@ from yeto.rl.decoupled import DecoupledBridgeConfig
 from yeto.rl.engine.resume import DEFAULT_CUT_EVERY
 from yeto.rl.engine.run_flags import (
     FULL_PARAMETER_ASYNC_MAX_PIPELINE,
+    FULL_PARAMETER_MAX_LOCAL_ROUNDS_AHEAD as MAX_LOCAL_ROUNDS_AHEAD,
     ISLAND,
     add_rl_flags,
     rl_option_pairs,
@@ -954,7 +955,21 @@ def _dense_full_sync_config(
         # an island pool sets the epoch (and lease); else peer recovery may
         **{"syncer_epoch": _island_syncer_epoch(args), **_island_pool_membership(args)},
     )
-    return FullParameterSyncConfig((actor,), sweep=not async_rounds)
+    return FullParameterSyncConfig((actor,), sweep=not async_rounds,
+                                   max_local_rounds_ahead=_max_local_rounds_ahead(args, async_rounds))
+
+
+def _max_local_rounds_ahead(args, async_rounds: bool) -> int | None:
+    """``--sweep-max-local-rounds-ahead`` (launcher ``--rl-sync-max-local-rounds-ahead``):
+    the S27 G-AG lead cap of the asynchronous rounds; None (off) by default."""
+    value = getattr(args, "sweep_max_local_rounds_ahead", None)
+    if value is None:
+        return None
+    if not async_rounds:
+        raise ValueError("--sweep-max-local-rounds-ahead needs --full-parameter-rounds async")
+    if type(value) is not int or not 1 <= value <= MAX_LOCAL_ROUNDS_AHEAD:
+        raise ValueError(f"--sweep-max-local-rounds-ahead must be an integer within 1..{MAX_LOCAL_ROUNDS_AHEAD}")
+    return value
 
 
 def _sweep_wait_timeout_s(args) -> float:

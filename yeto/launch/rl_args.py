@@ -9,7 +9,11 @@ import re
 from pathlib import Path
 
 from ..gpu_spec import parse_gpu_spec
-from ..rl.engine.run_flags import FULL_PARAMETER_ASYNC_DEFAULT_PIPELINE, FULL_PARAMETER_ASYNC_MAX_PIPELINE
+from ..rl.engine.run_flags import (
+    FULL_PARAMETER_ASYNC_DEFAULT_PIPELINE,
+    FULL_PARAMETER_ASYNC_MAX_PIPELINE,
+    FULL_PARAMETER_MAX_LOCAL_ROUNDS_AHEAD,
+)
 from ..rl.engine.selection import (
     ASYNC_GRACE_CAP_MS,
     ASYNC_NESTEROV_MIN_H,
@@ -174,6 +178,7 @@ _FULL_PARAMETER_SYNC_DEFAULTS = (
     ("rl_sync_expert_token_weights", False, "--rl-sync-expert-token-weights"),
     ("rl_sync_init_mode", "auto", "--rl-sync-init-mode"),
     ("rl_sync_wait_timeout_s", 900.0, "--rl-sync-wait-timeout-s"),
+    ("rl_sync_max_local_rounds_ahead", None, "--rl-sync-max-local-rounds-ahead"),
 )
 
 
@@ -247,6 +252,12 @@ def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
     wait_timeout = float(getattr(args, "rl_sync_wait_timeout_s", 900.0))
     if not 0 < wait_timeout <= 7 * 86400 or wait_timeout != int(wait_timeout):
         problems.append("--rl-sync-wait-timeout-s in whole seconds within 1..604800")
+    lead = getattr(args, "rl_sync_max_local_rounds_ahead", None)
+    if lead is not None:
+        if not async_rounds:
+            problems.append("--rl-sync-max-local-rounds-ahead only with --rl-sync-full-parameter-rounds async")
+        elif not 1 <= lead <= FULL_PARAMETER_MAX_LOCAL_ROUNDS_AHEAD:
+            problems.append(f"--rl-sync-max-local-rounds-ahead within 1..{FULL_PARAMETER_MAX_LOCAL_ROUNDS_AHEAD}")
     checkpoint_every = int(getattr(args, "rl_sync_checkpoint_every", 1))
     if async_rounds:
         # The async checkpoint writer and the sync/train overlap are

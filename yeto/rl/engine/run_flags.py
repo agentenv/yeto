@@ -58,6 +58,9 @@ FULL_PARAMETER_ASYNC_MAX_PIPELINE = 60
 # The island's wait for a paired broadcast, the terminal barrier and the FINAL
 # cut (--rl-sync-wait-timeout-s / island --sweep-wait-timeout-s).
 FULL_PARAMETER_DEFAULT_WAIT_TIMEOUT_S = 900.0
+# S27 G-AG lead cap of the asynchronous rounds (--rl-sync-max-local-rounds-ahead
+# / island --sweep-max-local-rounds-ahead): the largest accepted K.
+FULL_PARAMETER_MAX_LOCAL_ROUNDS_AHEAD = 1000
 
 ISLAND = "island"
 LAYERS = (CLI, ISLAND)
@@ -1002,6 +1005,18 @@ _SYNC = (
         "4..2147483648). A parameter above the bound spans several fragments as "
         "dimension-0 row slices, each merged as its own tensor (RDA per slice). "
         "A smaller bound changes the layout hash, so the probe must use the same value",
+    ),
+    cli_flag(
+        "--rl-sync-max-local-rounds-ahead",
+        type=int,
+        default=None,
+        help="full-parameter async rounds only: lead cap K >= 1 (default off). At a "
+        "boundary an island waits, still pushing and applying, instead of training a "
+        "K-th local round on top of an unmerged push of its own. K=1 starts no round "
+        "while one of its pushes is unmerged: with a fixed roster a fast island stays "
+        "at most one local round ahead of the slowest island. The wait gives up (and "
+        "trains on) after half of --rl-sync-wait-timeout-s since that push. Island-local: "
+        "the layout, syncer profile and training contract hashes do not change",
     ),
     cli_flag(
         "--rl-sync-wait-timeout-s",

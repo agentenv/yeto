@@ -1257,3 +1257,86 @@ def _metadata_only_reference(reference: ReferencedPolicyCut) -> ReferencedPolicy
         content_hash=reference.content_hash,
         transport_cut=metadata,
     )
+
+
+# -- S27 G-AG diagnostics: one line per Miles trainer-group call ---------------
+
+OP_TIMING_ENV = "YETO_FULL_PARAMETER_OP_TIMING"
+
+
+class TimedGroup:
+    """Forward every attribute of a Miles trainer group; log each method call.
+
+    The production group is a ``RayWorkerHandle`` around the TrainerController
+    actor, whose ``run_plugin`` log lines carry no operation name.  Each call
+    through this wrapper prints ``[yeto-full-parameter] miles op=<method>
+    role=<role> elapsed_s=<s> ok=<bool>`` on the driver once it returns, so
+    the controller's ``run_plugin`` lines of that interval belong to it (one
+    group method may run several plugins, e.g. apply: topology, prepare,
+    commit, finalize).  ``functools.wraps`` keeps each method's signature, so
+    the feature checks above see the wrapped method unchanged."""
+
+    def __init__(self, group: Any, label: str) -> None:
+        object.__setattr__(self, "_timed_group", group)
+        object.__setattr__(self, "_timed_label", label)
+
+    def __getattr__(self, name: str) -> Any:
+        value = getattr(self._timed_group, name)
+        if name.startswith("_") or not callable(value):
+            return value
+        import functools
+        import inspect
+        import time
+
+        label = self._timed_label
+
+        @functools.wraps(value)
+        def call(*args: Any, **kwargs: Any) -> Any:
+            started = time.monotonic()
+            try:
+                result = value(*args, **kwargs)
+            except BaseException:
+                _log_group_call(name, label, started, ok=False)
+                raise
+            if not inspect.isawaitable(result):
+                _log_group_call(name, label, started, ok=True)
+                return result
+            return _timed_await(result, name, label, started)
+
+        return call
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        setattr(self._timed_group, name, value)
+
+    def __repr__(self) -> str:
+        return f"TimedGroup({self._timed_group!r})"
+
+
+async def _timed_await(awaitable: Any, name: str, label: str, started: float) -> Any:
+    try:
+        result = await awaitable
+    except BaseException:
+        _log_group_call(name, label, started, ok=False)
+        raise
+    _log_group_call(name, label, started, ok=True)
+    return result
+
+
+def _log_group_call(name: str, label: str, started: float, *, ok: bool) -> None:
+    import sys
+    import time
+
+    print(f"[yeto-full-parameter] miles op={name} role={label} "
+          f"elapsed_s={time.monotonic() - started:.3f} ok={'true' if ok else 'false'}",
+          file=sys.stderr, flush=True)
+
+
+def timed_group(group: Any, label: str) -> Any:
+    """``group`` wrapped in :class:`TimedGroup` (``YETO_FULL_PARAMETER_OP_TIMING=0``:
+    unchanged)."""
+
+    import os
+
+    if group is None or isinstance(group, TimedGroup) or os.environ.get(OP_TIMING_ENV, "1") == "0":
+        return group
+    return TimedGroup(group, label)
