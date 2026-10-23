@@ -1011,24 +1011,66 @@ class MilesChunkedFullParameterAdapter:
 SKIP_RESIDENT_ENV = "YETO_FULL_PARAMETER_SKIP_RESIDENT"
 
 
+_SKIP_RESIDENT_REPORTED: set[str] = set()
+
+
+def _takes_skip_resident(function: Any) -> bool | None:
+    """True/False when ``function``'s signature names or lacks the
+    parameter; None when it only forwards ``*args, **kwargs``."""
+
+    import inspect
+
+    try:
+        parameters = inspect.signature(function).parameters
+    except (TypeError, ValueError):
+        return False
+    if "skip_resident_fragments" in parameters:
+        return True
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
+        return None
+    return False
+
+
 def skip_resident_supported(group: Any) -> bool:
     """Whether ``group``'s apply takes ``skip_resident_fragments`` (and it is not disabled).
 
+    The production group is Miles' ``RayWorkerHandle`` around the
+    TrainerController actor: its ``__getattr__`` returns a generic
+    ``call(*args, **kwargs)`` that forwards to the remote method, so its
+    signature says nothing (s27-gr-c ran the whole-model apply for this
+    reason). A forwarding signature is then decided by the Miles installed in
+    this process, which is the trainer's Miles (same image):
+    ``full_parameter_transport.apply_chunked_cut`` must name the parameter.
+
     ``YETO_FULL_PARAMETER_SKIP_RESIDENT=0`` keeps the whole-model apply."""
 
-    import inspect
     import os
 
     if os.environ.get(SKIP_RESIDENT_ENV, "1") == "0":
-        return False
+        return _report_skip_resident(False, f"{SKIP_RESIDENT_ENV}=0")
     apply = getattr(group, "apply_full_parameter_chunked_cut", None)
     if apply is None:
-        return False
+        return _report_skip_resident(False, "group has no chunked apply")
+    takes = _takes_skip_resident(apply)
+    if takes is not None:
+        return _report_skip_resident(takes, "group apply signature")
     try:
-        parameters = inspect.signature(apply).parameters
-    except (TypeError, ValueError):
-        return False
-    return "skip_resident_fragments" in parameters
+        from miles.ray import full_parameter_transport
+    except ImportError:
+        return _report_skip_resident(False, "forwarding group and no local Miles transport")
+    local = _takes_skip_resident(full_parameter_transport.apply_chunked_cut) is True
+    return _report_skip_resident(local, "forwarding group; local Miles transport")
+
+
+def _report_skip_resident(enabled: bool, reason: str) -> bool:
+    key = f"{enabled}:{reason}"
+    if key not in _SKIP_RESIDENT_REPORTED:
+        _SKIP_RESIDENT_REPORTED.add(key)
+        import sys
+
+        print(f"[yeto-full-parameter] skip resident fragments: "
+              f"{'enabled' if enabled else 'disabled'} ({reason})", file=sys.stderr, flush=True)
+    return enabled
 
 
 def _fragment_owner_shard(cut: Any, fragment_id: int) -> Any:

@@ -588,3 +588,56 @@ async def _one_fragment_mixed_target():
     assert (trainer.read, trainer.skipped) == (1, P - 1)
     assert torch.equal(trainer.values[0].view(torch.int32), replacement.view(torch.int32))
     assert torch.equal(trainer.values[1], initial[1])
+
+
+class _ForwardingHandle:
+    """Like Miles' RayWorkerHandle: every method is a generic ``call(*args, **kwargs)``."""
+
+    def __init__(self, target) -> None:
+        self._target = target
+
+    def __getattr__(self, name):
+        async def call(*args, **kwargs):
+            return await getattr(self._target, name)(*args, **kwargs)
+        return call
+
+
+def _local_miles_skips() -> bool:
+    import inspect
+
+    from miles.ray import full_parameter_transport
+
+    return "skip_resident_fragments" in inspect.signature(full_parameter_transport.apply_chunked_cut).parameters
+
+
+def test_a_forwarding_group_uses_the_local_miles_to_decide_the_skip(monkeypatch):
+    """s27-gr-c: the production group forwards ``*args, **kwargs``, so the
+    signature check alone kept the whole-model apply on every rank."""
+    from yeto.rl.adapters.miles.models.chunked_full_parameter import SKIP_RESIDENT_ENV, skip_resident_supported
+
+    trainer = _ResidentTrainer(_adapter(), FakeRay(), {f: torch.zeros(n) for f, n in enumerate(SIZES)},
+                               lambda _k: {})
+    handle = _ForwardingHandle(trainer)
+    assert skip_resident_supported(handle) is _local_miles_skips()
+    monkeypatch.setenv(SKIP_RESIDENT_ENV, "0")
+    assert not skip_resident_supported(handle)
+
+
+def test_one_fragment_apply_through_a_forwarding_group_reads_one_fragment():
+    if not _local_miles_skips():
+        pytest.skip("this Miles has no skip_resident_fragments")
+
+    async def body():
+        adapter = _adapter()
+        ray = FakeRay()
+        initial = {f: torch.arange(n, dtype=torch.float32) + 10 * f for f, n in enumerate(SIZES)}
+        trainer = _ResidentTrainer(adapter, ray, initial, lambda _k: {})
+        handle = _ForwardingHandle(trainer)
+        current = adapter.validate_cut(
+            await handle.export_full_parameter_chunked_cut(0, 0, max_chunk_bytes=adapter.max_chunk_bytes), 0, 0)
+        stored = adapter.fragment_sink(current, ray_module=ray)(1, 2, torch.tensor([4.0, -2.0]).numpy().tobytes())
+        target = adapter.assemble_mixed_target(current, target_policy_version=1, authoritative_fragments=(stored,))
+        await adapter.apply(handle, target, commit_token="t")
+        assert (trainer.read, trainer.skipped) == (1, P - 1)
+
+    asyncio.run(body())
