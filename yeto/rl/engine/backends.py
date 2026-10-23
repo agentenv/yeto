@@ -52,6 +52,7 @@ class BackendEntry:
     #   harness_glue  codex OpenEnv generate: upstream generate, aborted status, session collect
     #   launch_flags  island-entry flag spellings of the neutral layout (launcher)
     #   run_config_rules  backend-only checks of resolve_rl_run_config (ref-load format, divisibility)
+    #   nemotron_h_recipe  check_provider / model_flags of a Nemotron-H (hybrid Mamba) provider
     #   binding       neutral name -> backend binding check (4.4a)
     #   identity      BackendIdentity of this adapter (phase 5)
     #   image         Modal-built engine image recipe (verl: ``verl-build:<commit>``)
@@ -78,6 +79,7 @@ _REGISTRY: dict[str, BackendEntry] = {
         "launch_flags": f"{_MILES}.launch_flags",
         "run_flags": f"{_MILES}.run_flags",
         "run_config_rules": f"{_MILES}.run_config_rules",
+        "nemotron_h_recipe": f"{_MILES}.models.nemotron_h",
         "binding": f"{_MILES}.binding",
         "identity": f"{_MILES}.identity",
         "policy_age": f"{_MILES}.policy_age",

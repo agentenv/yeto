@@ -560,9 +560,7 @@ def _is_nemotron_h(provider) -> bool:
 def _recipe_model_flags(recipe_name: str, provider) -> tuple[str, ...]:
     if recipe_name != RECIPE_NEMOTRON_H:
         return ()
-    from ..adapters.miles.models.nemotron_h import model_flags
-
-    return model_flags(provider)
+    return _nemotron_h_recipe().model_flags(provider)
 
 
 def select_gdn_recipe(provider) -> GdnRecipe:
@@ -572,6 +570,13 @@ def select_gdn_recipe(provider) -> GdnRecipe:
             == GATED_DELTA_NET
         )
     )
+
+
+def _nemotron_h_recipe():
+    """The backend's Nemotron-H recipe (Miles -> adapters/miles/models/nemotron_h)."""
+    from . import backends
+
+    return backends.module("nemotron_h_recipe", backends.DEFAULT_BACKEND)
 
 
 def _rules():
@@ -870,9 +875,7 @@ def resolve_rl_run_config(
                 "(FlashInfer GDN prefill is not supported with deterministic inference)"
             )
     elif _is_nemotron_h(provider):
-        from ..adapters.miles.models.nemotron_h import check_provider
-
-        check_provider(provider, parameter_mode=parameter_mode)
+        _nemotron_h_recipe().check_provider(provider, parameter_mode=parameter_mode)
         # Miles run_nemotron_3_nano.py: --attention-backend auto
         recipe_name, attention_backend = RECIPE_NEMOTRON_H, "auto"
     elif qwen35_recipe:
