@@ -418,6 +418,15 @@ _PLACEMENT = (
              "give the island only local GPUs 0..M-1 on every node (M <= N): ray start "
              "--num-gpus=M, CUDA_VISIBLE_DEVICES=0..M-1, and every layout/placement/gpu_pool "
              "rule uses M (e.g. m5 TP8 over 2x4 on 2x8xH100 machines); unset = all N"),
+    cli_flag("--rl-island-ray-object-store-gib", type=int, default=None, metavar="GIB",
+             help="RL island: Ray object store size per node in GiB (ray start "
+             "--object-store-memory); unset = Ray's default (30%% of memory, capped by "
+             "/dev/shm). Full-parameter islands keep whole-model f32 cuts there; what does "
+             "not fit spills to disk (see --rl-island-ray-spill-dir)"),
+    cli_flag("--rl-island-ray-spill-dir", default=None, metavar="PATH",
+             help="RL island: directory for Ray object spilling (default: the island's Ray "
+             "temp dir on the container/VM disk). Point it at the largest local disk; on "
+             "Modal size the disk with --modal-ephemeral-disk-gib"),
     cli_flag("--rl-node-inventory", default=None, metavar="PATH",
              help="rl-ssh-node-pool: YAML inventory of the nodes yeto reaches by SSH "
              "(per node: ssh target, optional jump host, device family, card, card count, "

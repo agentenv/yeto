@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import dataclasses
+import json
+import shlex
 
 from ..gpu_spec import DEVICE_FAMILIES, parse_gpu_spec
 from .rl_backend import _rl_backend_module
@@ -192,6 +194,30 @@ def rl_island_gpu_env(args, spec) -> str:
             f"YETO_ISLAND_USE_GPUS_PER_NODE={m}\n"
             f'echo "[yeto-island] GPUs: physical {spec.gpus_per_node}/node, allocated {m}/node '
             f'(CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES)"\n')
+
+
+def rl_island_ray_storage(args, *, head: bool) -> str:
+    """``ray start`` flags for the island's object store size and spill dir.
+
+    The spill directory is a cluster setting, so only the head gets it (its
+    raylets read it from the GCS); every node gets the store size."""
+    flags = ""
+    store_gib = getattr(args, "rl_island_ray_object_store_gib", None)
+    if store_gib is not None:
+        if int(store_gib) < 1:
+            raise ValueError("--rl-island-ray-object-store-gib must be >= 1")
+        flags += f" --object-store-memory={int(store_gib) << 30}"
+    spill_dir = getattr(args, "rl_island_ray_spill_dir", None)
+    if head and spill_dir:
+        spilling = json.dumps({"type": "filesystem", "params": {"directory_path": spill_dir}})
+        flags += " --system-config=" + shlex.quote(json.dumps({"object_spilling_config": spilling}))
+    return flags
+
+
+def rl_island_ray_spill_dir_prelude(args) -> str:
+    """Create the spill dir before ``ray start`` ("" when unset)."""
+    spill_dir = getattr(args, "rl_island_ray_spill_dir", None)
+    return f"mkdir -p {shlex.quote(spill_dir)}\n" if spill_dir else ""
 
 
 def rl_island_ray_gpus(args, spec) -> str:
