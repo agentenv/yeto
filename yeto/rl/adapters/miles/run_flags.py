@@ -358,6 +358,13 @@ _ISLAND = (
         "parameter spans several fragments as dimension-0 row slices",
     ),
     island_flag(
+        "--sweep-max-local-rounds-ahead",
+        type=int,
+        default=None,
+        help="full-parameter async rounds: lead cap K >= 1, wait at a boundary instead of "
+        "training a K-th local round on top of an unmerged push (default off)",
+    ),
+    island_flag(
         "--sweep-wait-timeout-s",
         type=float,
         default=900.0,

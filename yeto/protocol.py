@@ -36,7 +36,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .downlink import HEADER_LEN as DOWNLINK_HEADER_LEN
 from .downlink import DownlinkAnchors, DownlinkChunkSink
@@ -915,6 +915,32 @@ def _connect_log(message: str) -> None:
     print(f"[yeto-syncer-client] {message}", file=sys.stderr, flush=True)
 
 
+@dataclass(frozen=True)
+class EncodedPush:
+    """Wire parts of one PUSH_FRAGMENT payload (``SyncerClient.encode_push_parts``)."""
+
+    fragment_id: int
+    push_base: int
+    nbytes: int
+    parts: tuple[bytes, ...]
+
+
+def timed_parts(parts: Iterable[Any], timings: dict[str, float], key: str) -> Iterator[Any]:
+    """Yield ``parts`` unchanged; add the seconds spent producing each one
+    (inside the upstream iterator) to ``timings[key]``."""
+    iterator = iter(parts)
+    timings.setdefault(key, 0.0)
+    while True:
+        started = time.monotonic()
+        try:
+            part = next(iterator)
+        except StopIteration:
+            timings[key] += time.monotonic() - started
+            return
+        timings[key] += time.monotonic() - started
+        yield part
+
+
 class SyncerClient:
     """Non-blocking striped syncer connection owned by one learner process.
 
@@ -922,6 +948,9 @@ class SyncerClient:
     ``max_reconnects`` bounds the number of redial attempts (None = retry
     forever); once exhausted, check_health raises.
     """
+
+    # push_fragment_parts takes ``timings`` (S27 G-AG push time split).
+    push_timings_supported = True
 
     # Transport defaults (S26 E3b); __init__ overrides them per client.
     stream_schedule: str = "rr"
@@ -1545,8 +1574,19 @@ class SyncerClient:
         *,
         before_last_enqueue: Callable[[], None] | None = None,
         expert_tags: Sequence[tuple[int, int, int]] | None = None,
+        timings: dict[str, float] | None = None,
+        encoded: EncodedPush | None = None,
     ) -> bool:
         """Stream one PUSH_FRAGMENT from bounded contiguous byte parts.
+
+        ``timings`` (S27 G-AG diagnostics): when given, ``produce_s`` gets the
+        seconds spent producing the wire parts (the caller's ``tensor_parts``
+        plus the wire encoding) and ``push_s`` the whole call; the rest of
+        ``push_s`` is framing and enqueueing.  The bytes do not change.
+
+        ``encoded`` (S27 G-AG): wire parts :meth:`encode_push_parts` already
+        produced for this fragment (``tensor_parts`` must then be empty); the
+        frame is byte-identical to streaming the same deltas.
 
         The syncer observes the same logical inner frame as ``push_fragment``.
         Only one CHUNK-sized envelope is assembled at a time; neither the
@@ -1560,6 +1600,50 @@ class SyncerClient:
             raise ValueError("round_attempt must be positive")
         if c_steps < 1:
             raise ValueError("c_steps must be positive")
+        if encoded is None:
+            expected, tensor_parts = self._push_wire_parts(fragment_id, tensor_parts)
+        else:
+            if encoded.fragment_id != fragment_id or encoded.push_base != self._push_base:
+                raise ValueError("encoded PUSH_FRAGMENT parts belong to another fragment or codec")
+            expected, tensor_parts = encoded.nbytes, encoded.parts
+        head = struct.pack(
+            "<IIQIQQIQ",
+            self.learner_id,
+            fragment_id,
+            global_step,
+            round_attempt,
+            base_version,
+            local_step,
+            c_steps,
+            c_tokens,
+        )
+        head += self._expert_tag_block(fragment_id, expert_tags)
+        if timings is None:
+            return self._send_large_parts(
+                MSG_PUSH_FRAGMENT,
+                head,
+                tensor_parts,
+                expected,
+                label=f"PUSH_FRAGMENT fragment {fragment_id}",
+                before_last_enqueue=before_last_enqueue,
+            )
+        started = time.monotonic()
+        try:
+            return self._send_large_parts(
+                MSG_PUSH_FRAGMENT,
+                head,
+                timed_parts(tensor_parts, timings, "produce_s"),
+                expected,
+                label=f"PUSH_FRAGMENT fragment {fragment_id}",
+                before_last_enqueue=before_last_enqueue,
+            )
+        finally:
+            timings["push_s"] = timings.get("push_s", 0.0) + time.monotonic() - started
+
+    def _push_wire_parts(
+        self, fragment_id: int, tensor_parts: Iterable[bytes | bytearray | memoryview]
+    ) -> tuple[int, Iterable[bytes | bytearray | memoryview]]:
+        """The wire size and wire parts of one PUSH_FRAGMENT's f32 deltas."""
         numel = self.layout.fragments[fragment_id].numel
         segments = self.push_segments(fragment_id)
         if self._push_base == DTYPE_Q4:
@@ -1577,26 +1661,38 @@ class SyncerClient:
             expected = _tensor_nbytes(push_wire_dtype(self.dtype), numel)
         if self._push_base == DTYPE_F32_PUSH_BF16:
             tensor_parts = _f32_parts_to_bf16(tensor_parts)
-        head = struct.pack(
-            "<IIQIQQIQ",
-            self.learner_id,
-            fragment_id,
-            global_step,
-            round_attempt,
-            base_version,
-            local_step,
-            c_steps,
-            c_tokens,
-        )
-        head += self._expert_tag_block(fragment_id, expert_tags)
-        return self._send_large_parts(
-            MSG_PUSH_FRAGMENT,
-            head,
-            tensor_parts,
-            expected,
-            label=f"PUSH_FRAGMENT fragment {fragment_id}",
-            before_last_enqueue=before_last_enqueue,
-        )
+        return expected, tensor_parts
+
+    @property
+    def can_encode_ahead(self) -> bool:
+        """Whether :meth:`encode_push_parts` may run off the sending thread
+        and ahead of the push: a deterministic block codec (int8, q4, int4
+        without stochastic rounding) whose output parts are fresh bytes."""
+        return self._push_base in (DTYPE_F32_PUSH_I8, DTYPE_F32_PUSH_Q4) or (
+            self._push_base == DTYPE_F32_PUSH_I4 and self._push_i4_rng is None)
+
+    def encode_push_parts(
+        self,
+        fragment_id: int,
+        tensor_parts: Iterable[bytes | bytearray | memoryview],
+        *,
+        timings: dict[str, float] | None = None,
+    ) -> EncodedPush:
+        """Encode one fragment's f32 deltas to wire parts now (S27 G-AG).
+
+        Pure: reads only the layout and codec settings, so another thread may
+        encode the next fragments while this one sends.  ``timings`` gets
+        ``produce_s``, as in :meth:`push_fragment_parts`."""
+        if not self.can_encode_ahead:
+            raise ValueError("this push codec cannot be encoded ahead of its push")
+        self._check_owned("PUSH_FRAGMENT", fragment_id)
+        expected, parts = self._push_wire_parts(fragment_id, tensor_parts)
+        if timings is not None:
+            parts = timed_parts(parts, timings, "produce_s")
+        materialized = tuple(bytes(part) if not isinstance(part, bytes) else part for part in parts)
+        if sum(len(part) for part in materialized) != expected:
+            raise ValueError(f"PUSH_FRAGMENT fragment {fragment_id} encoded to the wrong size")
+        return EncodedPush(fragment_id, self._push_base, expected, materialized)
 
     def _expert_tag_block(
         self, fragment_id: int, expert_tags: Sequence[tuple[int, int, int]] | None

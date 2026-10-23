@@ -183,6 +183,15 @@ class ShardedSyncerClient:
     def push_fragment(self, fragment_id: int, *args, **kwargs) -> None:
         self._owner(fragment_id).push_fragment(fragment_id, *args, **kwargs)
 
+    push_timings_supported = True  # forwarded to the owner shard's SyncerClient
+
+    @property
+    def can_encode_ahead(self) -> bool:
+        return all(client.can_encode_ahead for client in self.shards)
+
+    def encode_push_parts(self, fragment_id: int, *args, **kwargs):
+        return self._owner(fragment_id).encode_push_parts(fragment_id, *args, **kwargs)
+
     def push_fragment_parts(self, fragment_id: int, *args, **kwargs) -> bool:
         return self._owner(fragment_id).push_fragment_parts(fragment_id, *args, **kwargs)
 

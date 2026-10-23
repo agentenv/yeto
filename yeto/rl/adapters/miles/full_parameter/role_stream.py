@@ -33,6 +33,7 @@ from yeto.protocol import (
     FinalManifest,
     PullRequest,
     SyncerClient,
+    timed_parts,
 )
 from yeto.push_error_feedback import RESIDUAL_DTYPES, PushErrorFeedback
 from yeto.syncer_shards import ShardedSyncerClient
@@ -44,7 +45,9 @@ from yeto.rl.adapters.miles.models.chunked_full_parameter import (
     StoredAuthoritativeFragment,
     defer_capture_supported,
     optimizer_proof_without_model_check_supported,
+    timed_group,
 )
+from yeto.rl.host_info import print_host_report, report_rank_hosts
 from yeto.rl.engine.policy_digest import (
     PolicyDigest,
     TrainerResidentState,
@@ -341,6 +344,16 @@ class RoleFragmentSubmission:
 
 
 @dataclass(frozen=True)
+class PreparedPush:
+    """One candidate's wire bytes computed ahead (``prepare_push``)."""
+
+    submission_cut: Any
+    anchor: Any
+    encoded: Any  # yeto.protocol.EncodedPush
+    timings: dict[str, float]
+
+
+@dataclass(frozen=True)
 class RoleSubmissionCandidate:
     """One immutable answer to a role syncer's retained PULL permit."""
 
@@ -426,6 +439,9 @@ class MilesFullParameterRoleStream:
         self.group = None
         self.adapter: MilesChunkedFullParameterAdapter | None = None
         self.client = None
+        # S27 G-AG: summed push time split (_note_push_timing), read by the
+        # session's round event.
+        self.push_timing_totals: dict[str, float] = {}
         self.heartbeat: LeaseHeartbeat | None = None
         self.sink = None
         self.current: ReferencedPolicyCut | None = None
@@ -546,6 +562,11 @@ class MilesFullParameterRoleStream:
     async def initialize(self, group) -> None:
         if self.group is not None:
             raise RuntimeError(f"{self.config.algorithm} {self.config.role} stream initialized twice")
+        # S27 G-AG diagnostics: host facts of the driver and of every trainer
+        # rank, then one timed line per Miles group call.
+        print_host_report(f"{self.config.role} driver learner {self.config.learner_id}")
+        await report_rank_hosts(group, f"{self.config.role} learner {self.config.learner_id}")
+        group = timed_group(group, self.config.role)
         adapter, initial = await MilesChunkedFullParameterAdapter.initialize(
             group,
             policy_version=0,
@@ -1457,15 +1478,45 @@ class MilesFullParameterRoleStream:
             raise RuntimeError("role-stream reconnect replay changed a retained candidate")
         return replace(candidate, permit=permit)
 
+    @property
+    def encodes_ahead(self) -> bool:
+        """Whether :meth:`prepare_push` may compute a push's wire bytes ahead
+        of it and off the event-loop thread (S27 G-AG): no int4 error
+        feedback (its residual state is committed per push, in push order)
+        and a deterministic codec (``SyncerClient.can_encode_ahead``)."""
+        return (self.error_feedback is None and self.client is not None and self.adapter is not None
+                and bool(getattr(self.client, "can_encode_ahead", False))
+                and callable(getattr(self.client, "encode_push_parts", None)))
+
+    def prepare_push(self, candidate: RoleSubmissionCandidate) -> PreparedPush:
+        """Compute one candidate's delta and wire encoding now (thread-safe:
+        reads the retained cut and anchor, writes nothing shared).  The bytes
+        equal what :meth:`push_candidate` streams for the same candidate."""
+
+        if not self.encodes_ahead:
+            raise RuntimeError("role stream cannot encode a push ahead")
+        fragment_id = candidate.permit.fragment_id
+        timings: dict[str, float] = {}
+        started = time.monotonic()
+        parts = timed_parts(self.adapter.delta_parts_from_authoritative(
+            candidate.anchor, candidate.submission_cut, fragment_id, ray_module=self.ray_module,
+        )(), timings, "delta_s")
+        encoded = self.client.encode_push_parts(fragment_id, parts, timings=timings)
+        timings["prepare_s"] = time.monotonic() - started
+        return PreparedPush(candidate.submission_cut, candidate.anchor, encoded, timings)
+
     def push_candidate(
         self,
         candidate: RoleSubmissionCandidate,
+        prepared: PreparedPush | None = None,
     ) -> RoleFragmentSubmission | None:
         """Release one coordinator-approved candidate on its exact permit.
 
         A zero-chunk outage returns ``None``.  A partial-generation loss is
         allowed to escape to the paired coordinator, which retains both cuts
         and waits for this exact logical PULL to be replayed after reconnect.
+        ``prepared`` (:meth:`prepare_push` of this candidate's cut and anchor)
+        sends bytes computed ahead instead of streaming them now.
         """
 
         if (
@@ -1481,21 +1532,29 @@ class MilesFullParameterRoleStream:
         if permit != candidate.permit:
             return None
         fragment_id = candidate.permit.fragment_id
-        parts = self.adapter.delta_parts_from_authoritative(
+        if prepared is not None:
+            return self._push_prepared(candidate, prepared)
+        # S27 G-AG: split this push's time (the parts are yielded unchanged).
+        timings: dict[str, float] = {}
+        started = time.monotonic()
+        parts = timed_parts(self.adapter.delta_parts_from_authoritative(
             candidate.anchor,
             candidate.submission_cut,
             fragment_id,
             ray_module=self.ray_module,
-        )()
+        )(), timings, "delta_s")
         if self.error_feedback is not None:
-            parts = self.error_feedback.parts(
+            parts = timed_parts(self.error_feedback.parts(
                 fragment_id,
                 candidate.permit.global_step,
                 self.config.expected_fragments,
                 self.adapter.layout.fragments.fragments[fragment_id].numel,
                 parts,
                 self.client.push_segments(fragment_id),
-            )
+            ), timings, "feedback_incl_s")
+        extra: dict[str, Any] = {} if candidate.expert_tags is None else {"expert_tags": candidate.expert_tags}
+        if getattr(self.client, "push_timings_supported", False):
+            extra["timings"] = timings
         try:
             queued = self.client.push_fragment_parts(
                 fragment_id,
@@ -1506,12 +1565,14 @@ class MilesFullParameterRoleStream:
                 candidate.c_steps,
                 candidate.c_tokens,
                 parts,
-                **({} if candidate.expert_tags is None else {"expert_tags": candidate.expert_tags}),
+                **extra,
             )
         except BaseException:
             if self.error_feedback is not None:
                 self.error_feedback.discard(fragment_id)
             raise
+        finally:
+            self._note_push_timing(candidate, timings, time.monotonic() - started)
         if self.error_feedback is not None:
             if queued is True:
                 self.error_feedback.commit(fragment_id, candidate.permit.global_step)
@@ -1519,6 +1580,37 @@ class MilesFullParameterRoleStream:
                 self.error_feedback.discard(fragment_id)
         if queued is not True:
             return None
+        return self._pushed(candidate)
+
+    def _push_prepared(self, candidate: RoleSubmissionCandidate,
+                       prepared: PreparedPush) -> RoleFragmentSubmission | None:
+        if (prepared.submission_cut is not candidate.submission_cut or prepared.anchor is not candidate.anchor
+                or prepared.encoded.fragment_id != candidate.permit.fragment_id):
+            raise RuntimeError("prepared push belongs to another candidate")
+        extra: dict[str, Any] = {} if candidate.expert_tags is None else {"expert_tags": candidate.expert_tags}
+        timings = dict(prepared.timings)
+        started = time.monotonic()
+        try:
+            queued = self.client.push_fragment_parts(
+                candidate.permit.fragment_id,
+                candidate.permit.global_step,
+                candidate.permit.round_attempt,
+                candidate.base_version,
+                candidate.local_step,
+                candidate.c_steps,
+                candidate.c_tokens,
+                (),
+                encoded=prepared.encoded,
+                **extra,
+            )
+        finally:
+            timings["push_s"] = time.monotonic() - started
+            self._note_push_timing(candidate, timings, timings["push_s"], prepared=True)
+        if queued is not True:
+            return None
+        return self._pushed(candidate)
+
+    def _pushed(self, candidate: RoleSubmissionCandidate) -> RoleFragmentSubmission:
         self._answered[
             (candidate.permit.global_step, candidate.permit.round_attempt)
         ] = self._link_generation(candidate.permit.fragment_id)
@@ -1536,6 +1628,38 @@ class MilesFullParameterRoleStream:
             candidate.payload_bytes,
             max(0.0, time.monotonic() - candidate.permit.received_at),
         )
+
+    def _note_push_timing(self, candidate: RoleSubmissionCandidate, timings: dict[str, float],
+                          total: float, *, prepared: bool = False) -> None:
+        """Print one push's time split and add it to :attr:`push_timing_totals`.
+
+        ``delta_s``: the delta from the cut and the anchor (Ray get, checks,
+        subtraction); ``feedback_s``: int4 error feedback; ``encode_s``: the
+        wire encoding; ``enqueue_s``: framing and enqueueing (it waits only
+        when the send queue is full; the upload itself is asynchronous);
+        ``total_s``: time on the pushing thread.  A prepared push
+        (``prepared=1``) computed delta and encoding ahead on a worker
+        thread (``prepare_s``), so its ``total_s`` is the enqueue only."""
+
+        delta = timings.get("delta_s", 0.0)
+        feedback = max(0.0, timings.get("feedback_incl_s", delta) - delta)
+        produced = timings.get("produce_s")
+        encode = None if produced is None else max(0.0, produced - delta - feedback)
+        if prepared:
+            enqueue = timings.get("push_s", total)
+        else:
+            enqueue = None if produced is None else max(0.0, timings.get("push_s", total) - produced)
+        split = {"delta_s": delta, "feedback_s": feedback, "encode_s": encode, "enqueue_s": enqueue,
+                 "prepare_s": timings.get("prepare_s") if prepared else None, "total_s": total}
+        totals = self.push_timing_totals
+        totals["count"] = totals.get("count", 0) + 1
+        for name, value in split.items():
+            if value is not None:
+                totals[name] = totals.get(name, 0.0) + value
+        text = " ".join(f"{name}={value:.3f}" for name, value in split.items() if value is not None)
+        print(f"[yeto-full-parameter] push role={self.config.role} fragment={candidate.permit.fragment_id} "
+              f"step={candidate.permit.global_step} c_steps={candidate.c_steps} prepared={int(prepared)} {text}",
+              file=sys.stderr, flush=True)
 
     def _queue_pulls(self) -> None:
         # A redial drops the permits and answers of that link only: the
