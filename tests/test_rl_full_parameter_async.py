@@ -617,7 +617,7 @@ def _nesterov_reference(rounds, *, lr: float, mu: float) -> dict[int, np.ndarray
     return params
 
 
-def _drive(binary, tmp_path, extra, *, total_steps, push, late=None):
+def _drive(binary, tmp_path, extra, *, total_steps, push, late=None, syncer_args=()):
     """Run the launcher's async syncer with two learners; return (finals, log).
 
     ``push(learner, permit)`` is called once per PULL a learner sees and returns
@@ -626,8 +626,8 @@ def _drive(binary, tmp_path, extra, *, total_steps, push, late=None):
     versions and returns ``(learner, permit, answer)`` pushes to send now."""
 
     log_file = tmp_path / "syncer.log"
-    process, port, profile_hash = _start_async_syncer(binary, tmp_path, *extra,
-                                                      total_steps=total_steps, log_file=log_file)
+    process, port, profile_hash = _start_async_syncer(binary, tmp_path, *extra, total_steps=total_steps,
+                                                      syncer_args=tuple(syncer_args), log_file=log_file)
     clients = [_client(learner, port, profile_hash) for learner in (0, 1)]
     seen: list[set] = [set(), set()]
     versions = [0] * P
@@ -1117,3 +1117,45 @@ def test_real_fixed_roster_syncer_merges_a_whole_60_fragment_round_at_once(synce
     _assert_matches(finals, _nesterov_reference(rounds, lr=1.0, mu=0.0))
     assert "push rejected" not in log and "OutOfRound" not in log
     assert "new frozen-membership attempt" not in log
+
+
+@needs_cargo
+@pytest.mark.usefixtures("_hmac_key")
+def test_real_fixed_roster_quorum_timeout_keeps_the_pushes_and_the_attempt(syncer_binary, tmp_path, monkeypatch):
+    """With a fixed roster the quorum timeout only re-sends the PULL to the
+    missing learner: the pushes that arrived stay, the attempt stays 1, and
+    the late learner's push (same attempt) completes the round."""
+
+    from yeto.launch import syncer as launch_syncer
+
+    monkeypatch.setattr(launch_syncer, "SYNCER_DEFAULT_QUORUM_TIMEOUT_S", 1)  # profile hash of the 1 s syncer
+    rounds: dict[int, dict] = {}
+    held: list = []
+    started = time.monotonic()
+
+    def push(learner, permit):
+        assert permit.round_attempt == 1
+        delta = _delta(learner, permit.global_step)
+        rounds.setdefault(permit.global_step, {})[learner] = (1.0, delta)
+        answer = (0, 1, 7, delta)
+        if learner == 1:
+            held.append((learner, permit, answer))  # late: past the 1 s quorum timeout
+            return None
+        return answer
+
+    def late(_versions):
+        if held and time.monotonic() - started > 3.5:
+            out = list(held)
+            held.clear()
+            return out
+        return []
+
+    extra = ("--rl-sync-fragment-pipeline", str(P), "--rl-sync-quorum", "2", "--rl-sync-grace-ms", "0",
+             "--rl-sync-max-base-lag", "0", "--rl-sync-learner-weight", "equal",
+             "--rl-sync-outer-lr", "1.0", "--rl-sync-outer-momentum", "0")
+    finals, log = _drive(syncer_binary, tmp_path, extra, total_steps=1, push=push, late=late,
+                         syncer_args=("--quorum-timeout-s", "1"))
+    assert "fixed roster incomplete" in log
+    assert "new frozen-membership attempt" not in log and "push rejected" not in log
+    assert all(sorted(contributions) == [0, 1] for contributions in rounds.values())
+    _assert_matches(finals, _nesterov_reference(rounds, lr=1.0, mu=0.0))
