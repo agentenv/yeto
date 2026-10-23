@@ -882,15 +882,15 @@ _ROLLOUT_ENGINE = (
     shared_flag(
         "--observe-training-entropy",
         action="store_true",
-        help="log the training-side policy entropy (Miles --observe-training-entropy); "
-        "metrics only, the loss is unchanged while the entropy coefficient is 0",
+        help="log the training-side policy entropy; metrics only, the loss is "
+        "unchanged while the entropy coefficient is 0",
     ),
     shared_flag(
         "--mamba-training-ssm-states-dtype",
         choices=("fp32", "bf16"),
         default=None,
         help="Mamba/hybrid models: dtype of the inter-chunk SSM states in training "
-        "(Megatron default: the params dtype, bf16; SGLang rollouts keep fp32 states). "
+        "(default: the params dtype, bf16; rollouts keep fp32 states). "
         "Changes the training numerics, so it is part of the training contract",
     ),
     shared_flag("--rollout-max-response-len", type=int, default=32768,
