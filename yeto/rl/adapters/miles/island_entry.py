@@ -931,6 +931,7 @@ def _dense_full_sync_config(
         syncer_profile_hash=args.syncer_profile_sha256,
         pipeline_depth=int(args.pipeline) if async_rounds else 1,
         algorithm_spec_sha256=algorithm_spec_sha256,
+        wait_timeout=_sweep_wait_timeout_s(args),
         wan_streams=args.wan_streams,
         wan_stream_schedule=getattr(args, "wan_stream_schedule", "rr"),
         wan_stall_timeout=float(getattr(args, "wan_stall_timeout", 0.0) or 0.0),
@@ -954,6 +955,14 @@ def _dense_full_sync_config(
         **{"syncer_epoch": _island_syncer_epoch(args), **_island_pool_membership(args)},
     )
     return FullParameterSyncConfig((actor,), sweep=not async_rounds)
+
+
+def _sweep_wait_timeout_s(args) -> float:
+    """``--sweep-wait-timeout-s`` (launcher ``--rl-sync-wait-timeout-s``); 900 s by default."""
+    value = float(getattr(args, "sweep_wait_timeout_s", 900.0) or 900.0)
+    if not 0 < value <= 7 * 86400:
+        raise ValueError("--sweep-wait-timeout-s must be within (0, 604800] seconds")
+    return value
 
 
 PEER_RECOVER_ENV = "YETO_RL_PEER_RECOVER"  # "1": the launcher relaunched this island (launch.peer_recovery)

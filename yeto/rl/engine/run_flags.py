@@ -50,9 +50,14 @@ CLI = "cli"
 # of fragment rounds in flight (--rl-sync-fragment-pipeline / island
 # --pipeline).  The syncer and the island pairing take any depth up to P; the
 # bound limits the retained submissions and staged broadcasts (one fragment
-# each) an island holds at once.
+# each) an island holds at once.  60 lets the probed P=60 layouts push a whole
+# model round at once (``--total-steps 1``: one boundary submits every
+# fragment).
 FULL_PARAMETER_ASYNC_DEFAULT_PIPELINE = 2
-FULL_PARAMETER_ASYNC_MAX_PIPELINE = 8
+FULL_PARAMETER_ASYNC_MAX_PIPELINE = 60
+# The island's wait for a paired broadcast, the terminal barrier and the FINAL
+# cut (--rl-sync-wait-timeout-s / island --sweep-wait-timeout-s).
+FULL_PARAMETER_DEFAULT_WAIT_TIMEOUT_S = 900.0
 
 ISLAND = "island"
 LAYERS = (CLI, ISLAND)
@@ -950,7 +955,7 @@ _SYNC = (
         type=int,
         default=sync_mode_default(1),
         help="full-parameter only: fragment rounds the syncer gathers at once "
-        "(1..--fragments; asynchronous rounds: 1..min(8, --fragments)). Above 1, fragment k+1 uploads "
+        "(1..--fragments; asynchronous rounds: 1..min(60, --fragments)). Above 1, fragment k+1 uploads "
         "while fragment k merges and downloads (default: min(2, --fragments) with "
         "asynchronous rounds, else 1 = serial)",
     ),
@@ -983,6 +988,15 @@ _SYNC = (
         "4..2147483648). A parameter above the bound spans several fragments as "
         "dimension-0 row slices, each merged as its own tensor (RDA per slice). "
         "A smaller bound changes the layout hash, so the probe must use the same value",
+    ),
+    cli_flag(
+        "--rl-sync-wait-timeout-s",
+        type=float,
+        default=FULL_PARAMETER_DEFAULT_WAIT_TIMEOUT_S,
+        help="full-parameter only: seconds an island waits for a paired broadcast "
+        "after its last push of that round, for the terminal barrier and for the "
+        "FINAL cut; a value other than 900 also sets the syncer's final-ACK "
+        "timeout (which changes the syncer profile hash, not the layout hash)",
     ),
     cli_flag(
         "--rl-sync-push-int8-block",

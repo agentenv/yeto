@@ -358,6 +358,13 @@ _ISLAND = (
         "parameter spans several fragments as dimension-0 row slices",
     ),
     island_flag(
+        "--sweep-wait-timeout-s",
+        type=float,
+        default=900.0,
+        help="full-parameter sync: seconds to wait for a paired broadcast after its "
+        "last push, for the terminal barrier and for the FINAL cut",
+    ),
+    island_flag(
         "--sweep-push-int8-block",
         type=int,
         default=128,

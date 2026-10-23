@@ -170,9 +170,26 @@ def _rl_quorum_timeout_s(args) -> int | None:
 
 def _syncer_quorum_timeout(args) -> str:
     """The syncer's --quorum-timeout-s, the same value the island's pause
-    budget uses; "" by default (syncer 900 s)."""
+    budget uses; "" by default (syncer 900 s).  A full-parameter
+    ``--rl-sync-wait-timeout-s`` other than 900 also sets --final-ack-timeout-s."""
     value = _rl_quorum_timeout_s(args)
-    return "" if value is None else f" --quorum-timeout-s {value}"
+    final_ack = _rl_final_ack_timeout_s(args)
+    return (("" if value is None else f" --quorum-timeout-s {value}")
+            + ("" if final_ack is None else f" --final-ack-timeout-s {final_ack}"))
+
+
+def _rl_final_ack_timeout_s(args) -> int | None:
+    """The full-parameter syncer's final-ACK wait: ``--rl-sync-wait-timeout-s``
+    when set (the islands wait as long for FINAL and apply it before they ACK);
+    None keeps the syncer default (its quorum timeout)."""
+    if not rl_dense_sweep(args):
+        return None
+    value = float(getattr(args, "rl_sync_wait_timeout_s", SYNCER_DEFAULT_QUORUM_TIMEOUT_S))
+    if value == SYNCER_DEFAULT_QUORUM_TIMEOUT_S:
+        return None
+    if value != int(value):
+        raise ValueError("--rl-sync-wait-timeout-s must be whole seconds (syncer u64)")
+    return int(value)
 
 
 def _syncer_checkpoint_every(args) -> int:
@@ -263,7 +280,7 @@ def rl_syncer_profile(args, num_learners: int):
 
     if rl_dense_sweep(args):
         quorum_timeout = _rl_quorum_timeout_s(args) or SYNCER_DEFAULT_QUORUM_TIMEOUT_S
-        final_ack_timeout = quorum_timeout
+        final_ack_timeout = _rl_final_ack_timeout_s(args) or quorum_timeout
         sweep_fragments = None if rl_full_parameter_async(args) else args.fragments
         mark_final = False
     elif rl_sao_streaming(args):

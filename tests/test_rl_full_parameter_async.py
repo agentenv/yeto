@@ -23,6 +23,7 @@ import subprocess
 import time
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -453,7 +454,10 @@ def test_async_checkpoint_interval_reaches_the_syncer(monkeypatch):
 @pytest.mark.parametrize(
     ("extra", "message"),
     [
-        (ASYNC + ("--rl-sync-fragment-pipeline", "5"), r"between 1 and min\(8, --fragments\)"),
+        (ASYNC + ("--rl-sync-fragment-pipeline", "5"), r"between 1 and min\(60, --fragments\)"),
+        (ASYNC + ("--rl-sync-wait-timeout-s", "0"), "wait-timeout-s in whole seconds"),
+        (ASYNC + ("--rl-sync-wait-timeout-s", "12.5"), "wait-timeout-s in whole seconds"),
+        (("--rl-sync-wait-timeout-s", "3600"), "only applies to --rl-sync-preset full-parameter"),
         (ASYNC + ("--rl-sync-checkpoint-every", "0"), "checkpoint-every >= 1"),
         (ASYNC + ("--rl-sync-async-checkpoint",), "no --rl-sync-async-checkpoint"),
         (ASYNC + ("--rl-sync-overlap", "--rl-sync-fragment-pipeline", "2"), "no --rl-sync-overlap"),
@@ -491,9 +495,11 @@ def test_island_checks_the_async_profile():
     with pytest.raises(ValueError, match="--pipeline 1..min"):
         _check_dense_full_sweep(_island_args(pipeline=5, fragments=4, total_fragment_steps=12),
                                 yeto_policy_sync=True)
-    with pytest.raises(ValueError, match=r"--pipeline 1..min\(8, P\)"):
-        _check_dense_full_sweep(_island_args(pipeline=9, fragments=60, total_fragment_steps=60, global_rounds=1),
+    with pytest.raises(ValueError, match=r"--pipeline 1..min\(60, P\)"):
+        _check_dense_full_sweep(_island_args(pipeline=61, fragments=64, total_fragment_steps=64, global_rounds=1),
                                 yeto_policy_sync=True)
+    _check_dense_full_sweep(_island_args(pipeline=60, fragments=60, total_fragment_steps=60, global_rounds=1),
+                            yeto_policy_sync=True)
     _check_dense_full_sweep(_island_args(pipeline=4, fragments=4, total_fragment_steps=12),
                             yeto_policy_sync=True)
     _check_dense_full_sweep(_island_args(pipeline=8, fragments=60, total_fragment_steps=60, global_rounds=1),
@@ -901,3 +907,213 @@ def test_real_syncer_keeps_depth_rounds_open_and_merges_like_the_reference(
     assert widest == [depth, depth]
     _assert_matches(finals, _nesterov_reference(rounds, lr=0.7, mu=0.9))
     assert "push rejected" not in log
+
+
+# -- S27 G-AA: island wait timeouts, pipeline 60, terminal retire ---------------
+
+
+def _timed_pairing(*streams, wait_timeout, total=6, fragments=2, depth=2):
+    profile = FullParameterSyncProfile(roles=tuple(stream.role for stream in streams), total_fragment_steps=total,
+                                       fragments=fragments, local_horizon=2, pipeline_depth=depth,
+                                       wait_timeout=wait_timeout, poll_seconds=0.001, partial_quorum=True)
+    return RolePairing({stream.role: stream for stream in streams}, profile)
+
+
+class _ArrivingRole(_PairedRole):
+    """Broadcasts arrive on the client (``arrived``) before the pairing stages them."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, release_broadcasts=False, **kwargs)
+        self.arrived: list[int] = []
+
+    def stage_available_broadcasts_now(self):
+        self._staged_steps.extend(self.arrived)
+        self.arrived.clear()
+
+    async def stage_available_broadcasts(self):
+        self.stage_available_broadcasts_now()
+        return await super().stage_available_broadcasts()
+
+
+def test_a_broadcast_that_arrived_before_the_check_is_not_a_timeout():
+    # s27-gr-d island 0: step 8's broadcast arrived while the island pushed
+    # its next round; the check ran before the apply and failed the island.
+    actor = _ArrivingRole("actor", [_candidate("actor", 1)], [])
+    pairing = _timed_pairing(actor, wait_timeout=1.0)
+    assert _submitted(pairing.submit_ready()) == [1]
+    (pair,) = pairing.inflight.values()
+    pair.retained_at -= 5.0  # the island spent longer than the wait on local work
+    actor.arrived.append(1)
+
+    pairing.submit_ready()  # no TimeoutError: the round closed
+
+    assert actor.staged_fragment_versions == ((0, 1),)
+    assert len(pairing.inflight) == 1  # applied at the next commit, not here
+
+
+def test_a_missing_broadcast_still_times_out():
+    actor = _ArrivingRole("actor", [_candidate("actor", 1)], [])
+    pairing = _timed_pairing(actor, wait_timeout=1.0)
+    pairing.submit_ready()
+    next(iter(pairing.inflight.values())).retained_at -= 5.0
+    with pytest.raises(TimeoutError, match="paired WAN broadcast"):
+        pairing.submit_ready()
+    assert actor.closed
+
+
+def test_a_replayed_push_restarts_the_wait():
+    # The syncer reopened the round under a new attempt (OutOfRound for the
+    # old push); the replay is a new push and the wait starts again.
+    actor = _ArrivingRole("actor", [_candidate("actor", 1)], [])
+    pairing = _timed_pairing(actor, wait_timeout=1.0)
+    pairing.submit_ready()
+    (pair,) = pairing.inflight.values()
+    pair.retained_at -= 5.0
+    newer = _candidate("actor", 1)
+    actor.candidates.append(replace(newer, permit=replace(newer.permit, round_attempt=2)))
+
+    produced = pairing.submit_ready()
+
+    assert _submitted(produced) == [1]
+    assert pair.candidates["actor"].permit.round_attempt == 2
+    assert time.monotonic() - pair.retained_at < 1.0
+
+
+class _RetiringRole(_PairedRole):
+    retires_terminal_broadcasts = True
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.retired: list[tuple[int, int]] = []
+        self.applied: list[tuple[int, int]] = []
+
+    async def apply_staged_broadcast(self, fragment_id, version, *, catch_up=False):
+        self.applied.append((fragment_id, version))
+        return await super().apply_staged_broadcast(fragment_id, version, catch_up=catch_up)
+
+    async def retire_staged_broadcast(self, fragment_id, version, *, catch_up=False):
+        self.retired.append((fragment_id, version))
+        return await super().apply_staged_broadcast(fragment_id, version, catch_up=catch_up)
+
+
+@pytest.mark.asyncio
+async def test_the_terminal_phase_retires_last_rounds_instead_of_applying_them():
+    # total 6, P 2: steps 5 and 6 are the last rounds; 6 arrives as FINAL.
+    actor = _RetiringRole("actor", [], [])
+    actor.fragment_versions = (3, 2)
+    pairing = _timed_pairing(actor, wait_timeout=900.0)
+    actor._staged_steps.extend([4, 5])
+    await pairing.commit_staged_broadcasts()
+    assert actor.applied == [(1, 4), (0, 5)] and actor.retired == []  # still training: apply
+
+    actor.fragment_versions = (3, 2)
+    actor.applied.clear()
+    pairing.terminal_seen = True  # no more training on this island
+    actor._staged_steps.extend([4, 5])
+    await pairing.commit_staged_broadcasts()
+    assert actor.applied == [(1, 4)]  # not a last round: applied as before
+    assert actor.retired == [(0, 5)]
+    assert actor.fragment_versions == (5, 4) and pairing.retired_rounds == 1
+
+
+@pytest.mark.asyncio
+async def test_no_retire_unless_every_role_supports_it():
+    actor, critic = _RetiringRole("actor", [], []), _PairedRole("critic", [], [])
+    for role in (actor, critic):
+        role.fragment_versions = (3, 4)
+        role._staged_steps.append(5)
+    pairing = _timed_pairing(actor, critic, wait_timeout=900.0)
+    pairing.terminal_seen = True
+    await pairing.commit_staged_broadcasts()
+    assert actor.retired == [] and actor.applied == [(0, 5)]
+
+
+def test_wait_timeout_reaches_the_island_and_the_final_ack():
+    from yeto import launcher
+
+    base = ASYNC + ("--rl-sync-fragment-pipeline", "2")
+    args, plan = _plan(base)
+    _, longer = _plan(base + ("--rl-sync-wait-timeout-s", "3600"))
+    island = longer["island_requests"][0]["learner_command"]
+    assert _flag(island, "--sweep-wait-timeout-s") == "3600"
+    assert "--sweep-wait-timeout-s" not in plan["island_requests"][0]["learner_command"]
+    syncer = longer["role_syncers"][0]["command"]
+    assert _flag(syncer, "--final-ack-timeout-s") == "3600"
+    assert "--quorum-timeout-s" not in syncer  # the quorum timeout keeps its default
+    assert "--final-ack-timeout-s" not in plan["role_syncers"][0]["command"]
+    # The final-ACK timeout is part of the syncer profile, so its hash moves.
+    assert _flag(island, "--syncer-profile-sha256") != _flag(
+        plan["island_requests"][0]["learner_command"], "--syncer-profile-sha256")
+    assert launcher.rl_syncer_profile(args, 2).sha256 == _flag(
+        plan["island_requests"][0]["learner_command"], "--syncer-profile-sha256")
+
+
+def test_the_island_passes_the_wait_timeout_to_its_role_stream():
+    from yeto.rl.adapters.miles.island_entry import _sweep_wait_timeout_s
+
+    assert _sweep_wait_timeout_s(SimpleNamespace()) == 900.0
+    assert _sweep_wait_timeout_s(SimpleNamespace(sweep_wait_timeout_s=3600.0)) == 3600.0
+    with pytest.raises(ValueError, match="sweep-wait-timeout-s"):
+        _sweep_wait_timeout_s(SimpleNamespace(sweep_wait_timeout_s=-1.0))
+
+
+def test_whole_round_fixed_roster_plan_is_accepted():
+    """The s27-gr-f options: one boundary pushes all 60 fragments to a fixed
+    roster syncer (quorum 2 of 2, no grace, exact base)."""
+    extra = ("--fragments", "60", "--rl-sync-full-parameter-rounds", "async", "--total-steps", "1",
+             "--rl-sync-fragment-pipeline", "60", "--rl-sync-quorum", "2", "--rl-sync-grace-ms", "0",
+             "--rl-sync-max-base-lag", "0", "--rl-sync-wait-timeout-s", "3600")
+    args, plan = _plan(FULL[:-2] + extra)
+    syncer = plan["role_syncers"][0]["command"]
+    for flag, value in (("--pipeline", "60"), ("--quorum", "2"), ("--grace-ms", "0"), ("--max-base-lag", "0"),
+                        ("--total-steps", "60"), ("--final-ack-timeout-s", "3600")):
+        assert _flag(syncer, flag) == value, flag
+    for island in plan["island_requests"]:
+        command = island["learner_command"]
+        assert _flag(command, "--pipeline") == "60"
+        assert _flag(command, "--sweep-wait-timeout-s") == "3600"
+    assert args.rl_total_fragment_steps == 60
+
+
+@needs_cargo
+@pytest.mark.usefixtures("_hmac_key")
+def test_real_fixed_roster_syncer_merges_a_whole_60_fragment_round_at_once(syncer_binary, tmp_path, monkeypatch):
+    """s27-gr-f: ``--total-steps 1 --rl-sync-fragment-pipeline 60`` with a fixed
+    roster (quorum 2 of 2, grace 0, max base lag 0). Both learners hold every
+    push until all 60 PULLs are open, so the run finishes only if the syncer
+    opens the whole round at once; then every step merges both learners, no
+    push is refused and no round is reopened."""
+
+    import sys
+
+    fragments = 60
+    monkeypatch.setattr(sys.modules[__name__], "P", fragments)
+    rounds: dict[int, dict] = {}
+    held: dict[int, list] = {0: [], 1: []}
+    widest = [0, 0]
+
+    def push(learner, permit):
+        assert permit.round_attempt == 1
+        delta = _delta(learner, permit.global_step)
+        rounds.setdefault(permit.global_step, {})[learner] = (1.0, delta)
+        held[learner].append((learner, permit, (0, 1, 7, delta)))
+
+    def late(_versions):
+        out = []
+        for learner in (0, 1):
+            if len(held[learner]) == fragments:
+                widest[learner] = fragments
+                out.extend(held[learner])
+                held[learner].clear()
+        return out
+
+    extra = ("--rl-sync-fragment-pipeline", "60", "--rl-sync-quorum", "2", "--rl-sync-grace-ms", "0",
+             "--rl-sync-max-base-lag", "0", "--rl-sync-learner-weight", "equal",
+             "--rl-sync-outer-lr", "1.0", "--rl-sync-outer-momentum", "0", "--rl-sync-wait-timeout-s", "3600")
+    finals, log = _drive(syncer_binary, tmp_path, extra, total_steps=1, push=push, late=late)
+    assert sorted(rounds) == list(range(1, fragments + 1))
+    assert all(sorted(contributions) == [0, 1] for contributions in rounds.values())
+    assert widest == [fragments, fragments]
+    _assert_matches(finals, _nesterov_reference(rounds, lr=1.0, mu=0.0))
+    assert "push rejected" not in log and "OutOfRound" not in log
+    assert "new frozen-membership attempt" not in log

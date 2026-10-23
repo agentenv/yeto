@@ -277,6 +277,8 @@ class RolePairing:
         self.overwritten_rounds = 0
         self.caught_up_rounds = 0
         self.caught_up_fragments = 0  # catch-up jumps (one per fragment and jump)
+        # Terminal phase: last rounds closed without a trainer apply (_retires).
+        self.retired_rounds = 0
 
     # -- fail-stop ---------------------------------------------------------
 
@@ -440,6 +442,9 @@ class RolePairing:
             if submission is not None:
                 pair.submissions[role] = submission
                 produced[role].append(submission)
+                # The wait for this round's broadcast starts at its last push:
+                # a replay answers a reopened round (new attempt).
+                pair.retained_at = time.monotonic()
 
     def _check_timeouts(self, by_role: Mapping[str, Mapping[LogicalKey, Any]], now: float) -> None:
         seen = set().union(*(set(keys) for keys in by_role.values()))
@@ -449,12 +454,27 @@ class RolePairing:
         timeout = self.profile.wait_timeout
         if any(now - started >= timeout for started in self._pull_skew_since.values()):
             raise TimeoutError("timed out waiting for a peer role's matching PULL")
-        for pair in self.inflight.values():
-            if now - pair.retained_at < timeout:
+        expired = [(key, pair) for key, pair in self.inflight.items() if now - pair.retained_at >= timeout]
+        if not expired:
+            return
+        # A broadcast that arrived while this island trained, captured or
+        # pushed closes its round; it is applied at the next commit, so it
+        # is not a missing broadcast.  Stage what has arrived, then decide.
+        self._stage_arrived_broadcasts()
+        for (step, fragment_id, _base), pair in expired:
+            if self._round_closed(fragment_id, step):
                 continue
             if pair.complete:
                 raise TimeoutError("timed out waiting for a paired WAN broadcast")
             raise TimeoutError("timed out with a one-sided paired submission in flight")
+
+    def _stage_arrived_broadcasts(self) -> None:
+        """Stage arrived broadcasts now (no apply) on streams that can do it
+        synchronously (``stage_available_broadcasts_now``)."""
+        for stream in self.streams.values():
+            stage = getattr(stream, "stage_available_broadcasts_now", None)
+            if stage is not None:
+                stage()
 
     # -- apply (rule 3) ------------------------------------------------------
 
@@ -536,16 +556,39 @@ class RolePairing:
                 self.caught_up_rounds += fragment_rounds(fragment_id, base, fragments) - (
                     fragment_rounds(fragment_id, current, fragments))
 
+    def _retires(self, version: int) -> bool:
+        """Terminal phase: close ``version`` without a trainer apply.
+
+        Once ``any_finalizing`` holds the island trains no more, and a
+        fragment's last round (``version >= total - P + 1``) is followed only
+        by the FINAL cut, which overwrites every fragment.  Nothing reads the
+        trainer's value of that fragment in between, so its apply cannot
+        change the final parameters; streams record the round as closed
+        (``retire_staged_broadcast``) instead.  Every role must support it."""
+
+        return (
+            self.profile.partial_quorum
+            and self.any_finalizing
+            and version >= self.profile.total_fragment_steps - self.profile.fragments + 1
+            and all(getattr(stream, "retires_terminal_broadcasts", False)
+                    for stream in self.streams.values())
+        )
+
     async def _overwrite_or_apply_pair(
         self, fragment_id: int, version: int, applied: dict[str, list[int]], *, catch_up: bool
     ) -> None:
         closed = [(key, pair) for key, pair in sorted(self.inflight.items())
                   if key[1] == fragment_id and key[0] <= version]
         exact = next((entry for entry in closed if entry[0][0] == version), None)
+        retire = self._retires(version)
         if not catch_up and exact is not None and exact[1].complete:
-            await self._apply_pair(exact[0], exact[1], applied)
+            await self._apply_pair(exact[0], exact[1], applied, retire=retire)
             return
-        if catch_up:
+        if retire:
+            self.retired_rounds += 1
+            calls = (stream.retire_staged_broadcast(fragment_id, version, catch_up=catch_up)
+                     for stream in self.streams.values())
+        elif catch_up:
             calls = (stream.apply_staged_broadcast(fragment_id, version, catch_up=True)
                      for stream in self.streams.values())
         else:
@@ -575,12 +618,16 @@ class RolePairing:
                 and {key[1] for key in sweep} == set(range(self.profile.fragments)))
 
     async def _apply_pair(
-        self, key: LogicalKey, pair: PairedSubmission, applied: dict[str, list[int]]
+        self, key: LogicalKey, pair: PairedSubmission, applied: dict[str, list[int]],
+        *, retire: bool = False,
     ) -> None:
         step, fragment_id, _base = key
         if not pair.complete:
             raise RuntimeError("broadcast arrived before every paired PUSH was retained")
-        if self.profile.overlap:
+        if retire:
+            self.retired_rounds += 1
+            calls = (stream.retire_staged_broadcast(fragment_id, step) for stream in self.streams.values())
+        elif self.profile.overlap:
             calls = (stream.apply_staged_broadcast(fragment_id, step, rebase=True)
                      for stream in self.streams.values())
         else:
@@ -778,6 +825,7 @@ class FullParameterSync(RoundCutHooks):
             "sync/overwritten_fragments": overwritten,
             "sync/caught_up_rounds": pairing.caught_up_rounds,
             "sync/caught_up_fragments": pairing.caught_up_fragments,
+            "sync/retired_rounds": pairing.retired_rounds,
             "sync/outer_version": merged_version(versions),
         }
 

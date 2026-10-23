@@ -173,6 +173,7 @@ _FULL_PARAMETER_SYNC_DEFAULTS = (
     ("rl_sync_full_parameter_rounds", "sweep", "--rl-sync-full-parameter-rounds"),
     ("rl_sync_expert_token_weights", False, "--rl-sync-expert-token-weights"),
     ("rl_sync_init_mode", "auto", "--rl-sync-init-mode"),
+    ("rl_sync_wait_timeout_s", 900.0, "--rl-sync-wait-timeout-s"),
 )
 
 
@@ -202,7 +203,7 @@ def _check_bcast_delta(args) -> None:
 
 # S27 P2: asynchronous rounds keep FULL_PARAMETER_ASYNC_DEFAULT_PIPELINE (2)
 # fragment rounds in flight by default and at most
-# FULL_PARAMETER_ASYNC_MAX_PIPELINE (8); both live in rl.engine.run_flags.
+# FULL_PARAMETER_ASYNC_MAX_PIPELINE (60); both live in rl.engine.run_flags.
 
 
 def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
@@ -243,6 +244,9 @@ def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
         problems.append(f"--rl-sync-fragment-pipeline between 1 and min({FULL_PARAMETER_ASYNC_MAX_PIPELINE}, "
                         "--fragments)" if async_rounds
                         else "--rl-sync-fragment-pipeline between 1 and --fragments")
+    wait_timeout = float(getattr(args, "rl_sync_wait_timeout_s", 900.0))
+    if not 0 < wait_timeout <= 7 * 86400 or wait_timeout != int(wait_timeout):
+        problems.append("--rl-sync-wait-timeout-s in whole seconds within 1..604800")
     checkpoint_every = int(getattr(args, "rl_sync_checkpoint_every", 1))
     if async_rounds:
         # The async checkpoint writer and the sync/train overlap are

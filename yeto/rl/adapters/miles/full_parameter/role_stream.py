@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import sys
 import time
 from collections.abc import Mapping, Sequence
@@ -80,6 +81,9 @@ _LOWER_HEX = frozenset("0123456789abcdef")
 
 def _never_materialize(_policy_version: int):
     raise UnsupportedLayoutError(LAYOUT_FRAGMENTS)
+
+
+TERMINAL_RETIRE_ENV = "YETO_FULL_PARAMETER_TERMINAL_RETIRE"
 
 
 def require_sha256(name: str, value: object) -> str:
@@ -434,6 +438,9 @@ class MilesFullParameterRoleStream:
         self.submission_rounds = 0
         self.submission_tokens = 0
         self.transport_version = 0
+        # Terminal phase: fragments whose last round closed without a trainer
+        # apply (``retire_staged_broadcast``); the FINAL apply covers them.
+        self.retired_fragments: set[int] = set()
         self.local_generation = 0
         self.local_rounds = 0
         self.action_tokens = 0
@@ -978,6 +985,12 @@ class MilesFullParameterRoleStream:
     async def stage_available_broadcasts(self) -> tuple[tuple[int, int], ...]:
         """Drain complete broadcasts without mutating the trainable model."""
 
+        return self.stage_available_broadcasts_now()
+
+    def stage_available_broadcasts_now(self) -> tuple[tuple[int, int], ...]:
+        """:meth:`stage_available_broadcasts` without the event loop (the
+        pairing's timeout check stages arrived broadcasts before it judges)."""
+
         if self.client is None:
             raise RuntimeError(f"{self.config.algorithm} {self.config.role} client is unavailable")
         self.client.check_health()
@@ -1036,8 +1049,31 @@ class MilesFullParameterRoleStream:
         island never received (a re-JOIN catch-up); the global value
         overwrites it like any closed round."""
 
-        key = (fragment_id, version)
-        stored = self._staged.get(key)
+        stored = self._staged_for_apply(fragment_id, version, rebase=rebase, catch_up=catch_up)
+        if not rebase:
+            await self._apply_authoritative({fragment_id: stored})
+        else:
+            if not self.config.overlap or self._round_base is None or self.current is None:
+                raise RuntimeError(f"{self.config.role} rebase without an overlap round base")
+            rebased = self.adapter.rebase_fragment(
+                stored, self.current, self._round_base, ray_module=self.ray_module)
+            try:
+                await self._apply_authoritative(
+                    {fragment_id: rebased},
+                    anchors={fragment_id: stored},
+                    counters=(self._rounds_at_base, self._tokens_at_base, self._routed_at_base),
+                )
+            finally:
+                rebased.release()  # the applied target holds its own references
+        self._close_staged_round(fragment_id, version)
+        return (fragment_id,)
+
+    def _staged_for_apply(
+        self, fragment_id: int, version: int, *, rebase: bool, catch_up: bool
+    ) -> StoredAuthoritativeFragment:
+        """The staged broadcast ``(fragment_id, version)`` once its base checks pass."""
+
+        stored = self._staged.get((fragment_id, version))
         if stored is None:
             raise RuntimeError(
                 f"{self.config.algorithm} {self.config.role} matching staged fragment disappeared"
@@ -1054,22 +1090,10 @@ class MilesFullParameterRoleStream:
             raise RuntimeError(
                 f"{self.config.algorithm} {self.config.role} staged fragment skipped its base version"
             )
-        if not rebase:
-            await self._apply_authoritative({fragment_id: stored})
-        else:
-            if not self.config.overlap or self._round_base is None or self.current is None:
-                raise RuntimeError(f"{self.config.role} rebase without an overlap round base")
-            rebased = self.adapter.rebase_fragment(
-                stored, self.current, self._round_base, ray_module=self.ray_module)
-            try:
-                await self._apply_authoritative(
-                    {fragment_id: rebased},
-                    anchors={fragment_id: stored},
-                    counters=(self._rounds_at_base, self._tokens_at_base, self._routed_at_base),
-                )
-            finally:
-                rebased.release()  # the applied target holds its own references
-        self._staged.pop(key, None)
+        return stored
+
+    def _close_staged_round(self, fragment_id: int, version: int) -> None:
+        self._staged.pop((fragment_id, version), None)
         for older in [k for k in self._staged if k[0] == fragment_id and k[1] < version]:
             self._staged.pop(older).release()
         if self.config.partial_quorum:
@@ -1077,6 +1101,56 @@ class MilesFullParameterRoleStream:
             permit = self._pending.get(fragment_id)
             if permit is not None and permit.global_step <= version:
                 self._pending.pop(fragment_id)
+
+    @property
+    def retires_terminal_broadcasts(self) -> bool:
+        """Whether :meth:`retire_staged_broadcast` may skip a terminal apply.
+
+        Only for a partial quorum without overlap and without peer recovery
+        (a donor would serve trainer state behind its fragment versions);
+        ``YETO_FULL_PARAMETER_TERMINAL_RETIRE=0`` keeps every apply."""
+
+        return (
+            self.config.partial_quorum
+            and not self.config.overlap
+            and self.config.peer_recovery is None
+            and os.environ.get(TERMINAL_RETIRE_ENV, "1") != "0"
+        )
+
+    async def retire_staged_broadcast(
+        self,
+        fragment_id: int,
+        version: int,
+        *,
+        catch_up: bool = False,
+    ) -> tuple[int, ...]:
+        """Terminal phase (partial quorum): close a fragment's last round
+        without writing it into the trainer.
+
+        The pairing calls this only after the island stopped training and
+        only for a round with no later round of that fragment: nothing reads
+        the trainer's value of the fragment again before the FINAL cut, and
+        the FINAL apply overwrites every fragment.  The broadcast becomes the
+        fragment's anchor and version exactly as an apply would record them,
+        so pushes, closed-round checks and the FINAL manifest see the same
+        state; only the trainer apply (whole-model costs per fragment) is
+        left out.  The final parameters are the FINAL bytes either way."""
+
+        if not self.retires_terminal_broadcasts:
+            raise RuntimeError(f"{self.config.role} cannot retire a broadcast without applying it")
+        if version < self.config.total_fragment_steps - self.config.expected_fragments + 1:
+            raise RuntimeError(f"{self.config.role} retires only a fragment's last round")
+        stored = self._staged_for_apply(fragment_id, version, rebase=False, catch_up=catch_up)
+        previous_anchor = self._anchors[fragment_id]
+        if previous_anchor is not None and previous_anchor is not stored:
+            self._release_anchor(previous_anchor)
+        self._anchors[fragment_id] = stored
+        self._fragment_versions[fragment_id] = stored.version
+        self._rounds_at_anchor[fragment_id] = self.local_rounds
+        self._tokens_at_anchor[fragment_id] = self.action_tokens
+        self._routed_at_anchor[fragment_id] = self.action_routed
+        self.retired_fragments.add(fragment_id)
+        self._close_staged_round(fragment_id, version)
         return (fragment_id,)
 
     def finish_rebase(self) -> None:
