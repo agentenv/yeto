@@ -150,3 +150,26 @@ def test_image_commands_pin_mamba_kernels():
     cmds = mr.image_commands()
     assert any("--extra megatron" in c for c in cmds)
     assert any("causal-conv1d==" in c for c in cmds) and any("mamba-ssm==" in c for c in cmds)
+
+
+# Nemotron-3 Nano 30B-A3B config.json (HF, fields the FLOPs formula reads).
+NANO = {"hybrid_override_pattern": "MEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEMEM*EMEMEMEME", "hidden_size": 2688,
+        "vocab_size": 131072, "head_dim": 128, "num_attention_heads": 32, "num_key_value_heads": 2,
+        "mamba_num_heads": 64, "mamba_head_dim": 64, "n_groups": 8, "ssm_state_size": 128, "conv_kernel": 4,
+        "n_routed_experts": 128, "num_experts_per_tok": 6, "moe_intermediate_size": 1856,
+        "moe_shared_expert_intermediate_size": 3712, "n_shared_experts": 1, "moe_latent_size": None,
+        "intermediate_size": 1856}
+
+
+def test_hybrid_flops_matches_active_params():
+    from yeto.rl import hybrid_flops as hf
+    per_token = hf.forward_flops(NANO, [1])
+    # 2 x active parameters (model card: ~3.5B active incl. embeddings, ~0.35B of them)
+    assert 3.0e9 < per_token / 2 < 3.5e9
+    assert hf.train_flops(NANO, [10, 20]) == 3 * hf.forward_flops(NANO, [10, 20])
+    # attention adds an s^2 term only for the 6 attention layers
+    extra = hf.forward_flops(NANO, [4096]) - 4096 * per_token
+    assert extra == pytest.approx(6 * 2 * 32 * 128 * (4096 ** 2 - 4096))
+    assert hf.mfu(NANO, [1000], 1.0, 1) == pytest.approx(hf.train_flops(NANO, [1000]) / 989.4e12)
+    latent = {**NANO, "moe_latent_size": 1024}
+    assert hf.forward_flops(latent, [1]) < per_token  # experts run at the latent width
