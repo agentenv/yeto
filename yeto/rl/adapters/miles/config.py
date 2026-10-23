@@ -1230,12 +1230,12 @@ TRAIN_EXTRA_FLAGS = frozenset({
 
 
 def train_extra_argv(recipe_name: str, raw: str) -> tuple[str, ...]:
-    """Parse ``YETO_MILES_TRAIN_EXTRA_ARGV``; empty unless set. Nemotron-H only."""
+    """Parse ``YETO_MILES_TRAIN_EXTRA_ARGV`` (space- or comma-separated); empty unless set. Nemotron-H only."""
     import shlex
 
     from yeto.rl.engine.run_config import RECIPE_NEMOTRON_H
 
-    tokens = shlex.split(raw or "")
+    tokens = shlex.split((raw or "").replace(",", " "))  # commas: one shell word
     if not tokens:
         return ()
     if recipe_name != RECIPE_NEMOTRON_H:

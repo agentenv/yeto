@@ -25,3 +25,8 @@ def test_layout_or_unknown_flags_are_refused(raw):
 def test_other_recipes_refuse_a_set_value():
     with pytest.raises(MilesConfigError):
         train_extra_argv("generic", "--moe-permute-fusion")
+
+
+def test_commas_split_like_spaces():
+    assert train_extra_argv("nemotron_h", "--recompute-modules,moe,layernorm") == (
+        "--recompute-modules", "moe", "layernorm")
