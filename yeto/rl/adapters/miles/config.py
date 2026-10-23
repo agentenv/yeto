@@ -1181,6 +1181,7 @@ def translate_run_config(
         values = glm5_next.apply_recipe(values, glm5_next.model_argv(
             **shape, transformer_impl=recipe.transformer_impl))
     values.extend(extra_argv)
+    values.extend(train_extra_argv(recipe.name, os.environ.get(TRAIN_EXTRA_ENV, "")))
     reject_fault_tolerance_flags(values[1:])  # generated argv never carries FT flags
     _refuse_decoupled_ppo_breakers(values)  # also when the spec emitted the flag
     # IR-1: the final argv never pairs the session server with partial rollout
@@ -1221,6 +1222,34 @@ SAMPLER_ONLY_FLAG = "--debug-rollout-only"
 # default dtypes), which the cut's name-keyed optimizer export carries.
 OPTIMIZER_OFFLOAD_ARGV = ("--use-distributed-optimizer", "--use-precision-aware-optimizer",
                           "--optimizer-cpu-offload", "--overlap-cpu-optimizer-d2h-h2d")
+
+
+# S27 G-Y: trainer-speed flags for MFU measurement on the Nemotron-H recipe, from the
+# island environment (launcher --modal-env). Only allow-listed Megatron flags pass;
+# none of them changes the parallel layout (TP/EP/PP/CP/DP).
+TRAIN_EXTRA_ENV = "YETO_MILES_TRAIN_EXTRA_ARGV"
+TRAIN_EXTRA_FLAGS = frozenset({
+    "--recompute-granularity", "--recompute-modules", "--recompute-method",
+    "--recompute-num-layers", "--moe-token-dispatcher-type", "--moe-permute-fusion",
+    "--cross-entropy-loss-fusion", "--timing-log-level", "--timing-log-option",
+})
+
+
+def train_extra_argv(recipe_name: str, raw: str) -> tuple[str, ...]:
+    """Parse ``YETO_MILES_TRAIN_EXTRA_ARGV`` (space- or comma-separated); empty unless set. Nemotron-H only."""
+    import shlex
+
+    from yeto.rl.engine.run_config import RECIPE_NEMOTRON_H
+
+    tokens = shlex.split((raw or "").replace(",", " "))  # commas: one shell word
+    if not tokens:
+        return ()
+    if recipe_name != RECIPE_NEMOTRON_H:
+        raise MilesConfigError(f"{TRAIN_EXTRA_ENV} is only for the {RECIPE_NEMOTRON_H} recipe")
+    bad = [t for t in tokens if t.startswith("--") and t not in TRAIN_EXTRA_FLAGS]
+    if bad or not tokens[0].startswith("--"):
+        raise MilesConfigError(f"{TRAIN_EXTRA_ENV}: flags not allowed: {bad or tokens[:1]}")
+    return tuple(tokens)
 
 
 def train_memory_argv(memory: Any) -> tuple[str, ...]:
