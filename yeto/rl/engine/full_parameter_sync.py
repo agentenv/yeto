@@ -266,6 +266,9 @@ class RolePairing:
         self.profile = profile
         self.inflight: dict[LogicalKey, PairedSubmission] = {}
         self.journal: list[dict[str, Any]] = []
+        # Fragments whose last round this island can submit (or that closed
+        # without it); the island stops training once it covers all of them.
+        self._final_rounds_ready: set[int] = set()
         self.terminal_seen = False
         self.failure: BaseException | None = None
         self._pull_skew_since: dict[LogicalKey, float] = {}
@@ -342,8 +345,7 @@ class RolePairing:
                 for role, stream in self.streams.items()
             }
             now = time.monotonic()
-            if any(key[0] == self.profile.total_fragment_steps for keys in by_role.values() for key in keys):
-                self.terminal_seen = True
+            self._note_final_rounds(by_role)
             for key, pair in tuple(self.inflight.items()):
                 observed = {role: by_role[role].pop(key, None) for role in self.streams}
                 self._push_once(pair, observed, produced)
@@ -363,6 +365,31 @@ class RolePairing:
             self.fail_stop(error)
             raise
         return {role: RoleProgress(submissions=tuple(values)) for role, values in produced.items()}
+
+    def _note_final_rounds(self, by_role: Mapping[str, Mapping[LogicalKey, Any]]) -> None:
+        """Set ``terminal_seen`` once every fragment's last round is ready.
+
+        Fragment ``f`` is last merged at step ``total - P + 1 + f``. With one
+        syncer process PULLs arrive in step order, so a ready terminal-step
+        PULL implied every other last round was ready too. A sharded head
+        runs each shard's steps independently: the terminal PULL of one shard
+        can arrive while another shard still has to ask for an earlier last
+        round. Stopping local training then leaves no round to answer that
+        PULL and both sides wait on each other. So training stops only when
+        each fragment's last round is ready here or already closed.
+        """
+
+        total, fragments = self.profile.total_fragment_steps, self.profile.fragments
+        first_last = total - fragments + 1
+        for keys in by_role.values():
+            self._final_rounds_ready.update(key[1] for key in keys if key[0] >= first_last)
+        for fragment_id in range(fragments):
+            if fragment_id not in self._final_rounds_ready and self._round_closed(
+                fragment_id, first_last + fragment_id
+            ):
+                self._final_rounds_ready.add(fragment_id)
+        if len(self._final_rounds_ready) == fragments:
+            self.terminal_seen = True
 
     def _new_pair(self, candidates: dict[str, Any]) -> PairedSubmission:
         first = next(iter(candidates.values()))

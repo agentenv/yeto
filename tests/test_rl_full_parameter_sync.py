@@ -386,6 +386,36 @@ async def test_terminal_final_manifest_drains_all_retained_pipeline_pairs():
     assert pairing.acknowledge_final()
 
 
+def test_terminal_pull_of_one_shard_does_not_stop_training_before_other_last_rounds():
+    # Sharded head: shard 1 (fragment 1) asks for the terminal step 4 while
+    # shard 0 has not yet asked for step 3, fragment 0's last round. The
+    # island must keep training so it can still answer step 3.
+    events = []
+    actor = _PairedRole("actor", [_candidate("actor", 4, base_version=2)], events,
+                        release_broadcasts=False)
+    actor.fragment_versions = (1, 2)
+    pairing = _pairing(actor)
+
+    pairing.submit_ready()
+    assert ("actor", 4, True) in events
+    assert not pairing.terminal_seen and not pairing.any_finalizing
+
+    actor.candidates.append(_candidate("actor", 3, base_version=1))
+    pairing.submit_ready()
+    assert ("actor", 3, True) in events
+    assert pairing.terminal_seen
+
+
+def test_terminal_pull_stops_training_when_other_last_rounds_already_closed():
+    events = []
+    actor = _PairedRole("actor", [_candidate("actor", 4, base_version=2)], events)
+    actor.fragment_versions = (3, 2)  # fragment 0's last round (step 3) closed
+    pairing = _pairing(actor)
+
+    pairing.submit_ready()
+    assert pairing.terminal_seen
+
+
 @pytest.mark.asyncio
 async def test_one_role_is_the_same_rule_without_a_peer():
     events = []
