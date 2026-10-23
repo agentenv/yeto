@@ -71,6 +71,11 @@ class StreamMeter:
 
     def enqueued(self, nbytes: int) -> None:
         with self._lock:
+            if nbytes > 0 and self._item_started is None and self.queued_bytes <= 0:
+                # An idle stream starts its stall clock at the enqueue, not
+                # at the last byte it sent minutes ago (s27-gh-a: a stream
+                # idle for 2206 s was dropped as stalled on its next chunk).
+                self._last_progress = self._clock()
             self.queued_bytes += nbytes
 
     def begin(self) -> None:
