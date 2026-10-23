@@ -719,7 +719,7 @@ def resolve_rl_run_config(
     rules = _rules()
     rules.check_trainer_parallel(actor_gpus, tensor_parallel, pipeline_parallel)
     if context_parallel < 1 or actor_gpus % model_parallel:
-        raise ValueError("Miles actor world must be divisible by TP*PP*CP")
+        raise ValueError("trainer world must be divisible by TP*PP*CP")
     is_moe = getattr(provider, "num_moe_experts", None) is not None
     expert_parallel = getattr(args, "expert_parallel", None) or (
         actor_gpus if is_moe else 1
