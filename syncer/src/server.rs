@@ -2763,6 +2763,7 @@ async fn scheduler(
     let mut cutoff_established = false;
     let mut first_budget_report: Option<(Member, u64)> = None;
     let mut recovery = PeerRecovery::new(cfg.recovery.clone());
+    let mut catch_ups: CatchUps<Arc<Group>> = CatchUps::new();
     if dynamic {
         write_pool_status(&cfg, &registry, st.global_step, "running");
     }
@@ -2877,7 +2878,8 @@ async fn scheduler(
             if busy_fragments.contains(&p) {
                 break;
             }
-            let groups = current_groups(&registry);
+            let mut groups = current_groups(&registry);
+            groups.retain(|group| !catch_ups.holds(group.member));
             if groups.is_empty() || (fixed_roster && groups.len() < cfg.quorum as usize) {
                 next_launch = Instant::now() + Duration::from_millis(100);
                 break;
@@ -3075,6 +3077,100 @@ async fn scheduler(
             }
             i += 1;
         }
+        // Advance one rejoin catch-up by one fragment (or run its tail).
+        // The round deadlines above were served first, so a long catch-up
+        // never holds a grace window open.
+        for member in catch_ups.drop_superseded(|member| is_current_member(&registry, member)) {
+            warn!(
+                learner_id = member.learner_id,
+                generation = member.generation,
+                "superseded learner catch-up dropped"
+            );
+        }
+        match catch_ups.next_step() {
+            None => {}
+            Some(CatchUpStep::Send(member, group, p)) => {
+                // Catch-up must never expose a round whose checkpoint is not
+                // yet durable.
+                if let Some(pending) = publishing.take() {
+                    settle_pending_publish(
+                        &cfg,
+                        &st,
+                        &registry,
+                        &mut last_sync_secs,
+                        pending,
+                        &budget_cutoff,
+                        &mut busy_fragments,
+                    )
+                    .await?;
+                }
+                let dtype = bulk_dtype(st.wire_dtype);
+                match send_fragment_until_cutoff(&st, &group, p, MSG_BCAST_FRAGMENT, dtype, &budget_cutoff)
+                    .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        cutoff_established = true;
+                        break 'outer;
+                    }
+                    Err(error) => {
+                        warn!(
+                            learner_id = member.learner_id,
+                            generation = member.generation,
+                            fragment = p,
+                            %error,
+                            "recovery fragment encode failed"
+                        );
+                        catch_ups.abandon(member);
+                    }
+                }
+            }
+            Some(CatchUpStep::Done(done)) => {
+                let group = done.group;
+                if done.tail.rejoin {
+                    registry
+                        .lock()
+                        .unwrap()
+                        .membership
+                        .record_catch_up(group.member, &st.versions);
+                    if dynamic {
+                        append_pool_record(
+                            cfg.event_tape.as_deref(),
+                            "pool_join",
+                            cfg.syncer_epoch,
+                            &format!(
+                                "\"island_id\":{},\"generation\":{},\"catch_up\":true,\"base_version\":{}",
+                                group.member.learner_id, group.member.generation, st.global_step
+                            ),
+                        );
+                        write_pool_status(&cfg, &registry, st.global_step, "running");
+                    }
+                    if !repull_rounds_for(&group, &registry, &mut inflight, fixed_roster, &budget_cutoff).await {
+                        cutoff_established = true;
+                        break 'outer;
+                    }
+                }
+                if done.tail.rebind {
+                    let repulls = rebind_current_unanswered_rounds(&registry, &mut inflight, group.member);
+                    for repull in repulls {
+                        if !send_small_until_cutoff(&group, MSG_PULL_REQ, repull.pull, &budget_cutoff).await {
+                            cutoff_established = true;
+                            break 'outer;
+                        }
+                        info!(
+                            learner_id = group.member.learner_id,
+                            old_generation = repull.old_generation,
+                            generation = group.member.generation,
+                            step = repull.t,
+                            fragment = repull.p,
+                            attempt = repull.attempt,
+                            base_version = repull.base_version,
+                            "rebound outstanding pull after captured generation disconnected"
+                        );
+                    }
+                }
+            }
+        }
         if submitted_any {
             continue; // refill the pipeline before waiting again
         }
@@ -3111,6 +3207,10 @@ async fn scheduler(
             && !busy_fragments.contains(&schedule.fragment_for_step(next_t));
         if next_fragment_available {
             earliest = Some(earliest.map_or(next_launch, |d| d.min(next_launch)));
+        }
+        if !catch_ups.is_empty() {
+            // Poll events without sleeping, then send the next fragment.
+            earliest = Some(deadline_now);
         }
         let wake = if let Some(pending) = publishing.as_mut() {
             // Same event-first bias; a durable checkpoint outranks compute
@@ -3401,49 +3501,14 @@ async fn scheduler(
                         continue;
                     }
 
-                    // Rejoining learner: first catch it up to the current
+                    // Rejoining learner: catch it up to the current
                     // parameters, then atomically rebind only its unanswered
-                    // slots in existing rounds. The helper revalidates the
-                    // generation because catch-up awaits socket writers and
-                    // a newer HELLO may supersede this one meanwhile.
-                    // Catch-up must never expose a round whose checkpoint
-                    // is not yet durable.
-                    if let Some(pending) = publishing.take() {
-                        settle_pending_publish(
-                            &cfg,
-                            &st,
-                            &registry,
-                            &mut last_sync_secs,
-                            pending,
-                            &budget_cutoff,
-                            &mut busy_fragments,
-                        )
-                        .await?;
-                    }
-                    if st.global_step < last_step {
-                        send_all_fragments(&st, &group, &budget_cutoff).await;
-                    }
-                    registry
-                        .lock()
-                        .unwrap()
-                        .membership
-                        .record_catch_up(group.member, &st.versions);
-                    if dynamic {
-                        append_pool_record(
-                            cfg.event_tape.as_deref(),
-                            "pool_join",
-                            cfg.syncer_epoch,
-                            &format!(
-                                "\"island_id\":{},\"generation\":{},\"catch_up\":true,\"base_version\":{}",
-                                group.member.learner_id, group.member.generation, st.global_step
-                            ),
-                        );
-                        write_pool_status(&cfg, &registry, st.global_step, "running");
-                    }
-                    if !repull_rounds_for(&group, &registry, &mut inflight, fixed_roster, &budget_cutoff).await {
-                        cutoff_established = true;
-                        break 'outer;
-                    }
+                    // slots in existing rounds. The scheduler sends the
+                    // catch-up one fragment per pass (see `CatchUps`) and
+                    // revalidates the generation before each send, because a
+                    // newer HELLO may supersede this one meanwhile.
+                    let fragments = if st.global_step < last_step { st.owned_fragments() } else { 0..0 };
+                    catch_ups.enqueue(group.member, group, fragments, CatchUpTail::REJOIN);
                 }
                 Event::Recovery { member, msg } => {
                     let restored = match msg {
@@ -3604,50 +3669,11 @@ async fn scheduler(
                             if let Some(group) = group {
                                 // Catch-up must precede a replay even when the
                                 // disconnect event wins the race with the queued
-                                // replacement HELLO.
-                                if let Some(pending) = publishing.take() {
-                                    settle_pending_publish(
-                                        &cfg,
-                                        &st,
-                                        &registry,
-                                        &mut last_sync_secs,
-                                        pending,
-                                        &budget_cutoff,
-                                        &mut busy_fragments,
-                                    )
-                                    .await?;
-                                }
-                                if st.global_step < last_step {
-                                    send_all_fragments(&st, &group, &budget_cutoff).await;
-                                }
-                                let repulls = rebind_current_unanswered_rounds(
-                                    &registry,
-                                    &mut inflight,
-                                    replacement,
-                                );
-                                for repull in repulls {
-                                    if !send_small_until_cutoff(
-                                        &group,
-                                        MSG_PULL_REQ,
-                                        repull.pull,
-                                        &budget_cutoff,
-                                    )
-                                    .await
-                                    {
-                                        cutoff_established = true;
-                                        break 'outer;
-                                    }
-                                    info!(
-                                        learner_id = replacement.learner_id,
-                                        old_generation = repull.old_generation,
-                                        generation = replacement.generation,
-                                        step = repull.t,
-                                        fragment = repull.p,
-                                        attempt = repull.attempt,
-                                        base_version = repull.base_version,
-                                        "rebound outstanding pull after captured generation disconnected"
-                                    );
-                                }
+                                // replacement HELLO: the rebind runs only once
+                                // the catch-up has finished.
+                                let fragments =
+                                    if st.global_step < last_step { st.owned_fragments() } else { 0..0 };
+                                catch_ups.enqueue(replacement, group, fragments, CatchUpTail::REBIND);
                             }
                         }
                     }
@@ -5656,30 +5682,109 @@ impl FinalAbsence {
     }
 }
 
-async fn send_all_fragments(st: &GlobalState, group: &Arc<Group>, budget_cutoff: &BudgetCutoff) {
-    for p in st.owned_fragments() {
-        match send_fragment_until_cutoff(
-            st,
-            group,
-            p,
-            MSG_BCAST_FRAGMENT,
-            bulk_dtype(st.wire_dtype),
-            budget_cutoff,
-        )
-        .await
-        {
-            Ok(true) => {}
-            Ok(false) => return,
-            Err(error) => {
-                warn!(
-                    learner_id = group.member.learner_id,
-                    generation = group.member.generation,
-                    fragment = p,
-                    %error,
-                    "recovery fragment encode failed"
-                );
-                return;
+/// What a finished catch-up still owes its learner.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CatchUpTail {
+    /// HELLO path: record the catch-up and repull the learner's open rounds.
+    rejoin: bool,
+    /// Disconnect path: move the captured generation's unanswered slots to
+    /// the already-current replacement.
+    rebind: bool,
+}
+
+impl CatchUpTail {
+    const REJOIN: Self = Self { rejoin: true, rebind: false };
+    const REBIND: Self = Self { rejoin: false, rebind: true };
+}
+
+/// One rejoined learner's catch-up: the current value of every owned fragment.
+struct CatchUp<G> {
+    member: Member,
+    group: G,
+    remaining: std::collections::VecDeque<usize>,
+    tail: CatchUpTail,
+}
+
+enum CatchUpStep<G> {
+    /// Send this fragment's current value to the learner.
+    Send(Member, G, usize),
+    /// Every fragment went out (or the stream failed); run the tail.
+    Done(CatchUp<G>),
+}
+
+/// Rejoin catch-ups owned by the scheduler.
+///
+/// A catch-up is the whole model (about 110 GB of f32 for a 27B model). The
+/// scheduler sends one fragment per pass and then serves events and round
+/// deadlines again, so a catch-up delays a grace or quorum deadline by at
+/// most one fragment transfer instead of by the whole model (s27-gh-a: a
+/// 300 s grace window committed after 14 min). A learner does not join new
+/// rounds before its catch-up is done: its pushes would be against stale
+/// bases.
+struct CatchUps<G> {
+    queue: std::collections::VecDeque<CatchUp<G>>,
+}
+
+impl<G: Clone> CatchUps<G> {
+    fn new() -> Self {
+        Self { queue: std::collections::VecDeque::new() }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
+    fn holds(&self, member: Member) -> bool {
+        self.queue.iter().any(|catch_up| catch_up.member == member)
+    }
+
+    /// Queue a catch-up; a second request for the same generation only adds
+    /// its tail, because the fragments already sent are current.
+    fn enqueue(
+        &mut self,
+        member: Member,
+        group: G,
+        fragments: impl IntoIterator<Item = usize>,
+        tail: CatchUpTail,
+    ) {
+        if let Some(existing) = self.queue.iter_mut().find(|catch_up| catch_up.member == member) {
+            existing.tail.rejoin |= tail.rejoin;
+            existing.tail.rebind |= tail.rebind;
+            return;
+        }
+        self.queue.push_back(CatchUp { member, group, remaining: fragments.into_iter().collect(), tail });
+    }
+
+    /// Remove catch-ups whose generation is no longer current.
+    fn drop_superseded(&mut self, is_current: impl Fn(Member) -> bool) -> Vec<Member> {
+        let mut dropped = Vec::new();
+        self.queue.retain(|catch_up| {
+            let keep = is_current(catch_up.member);
+            if !keep {
+                dropped.push(catch_up.member);
             }
+            keep
+        });
+        dropped
+    }
+
+    /// Stop sending to `member` (its stream failed); the tail still runs.
+    fn abandon(&mut self, member: Member) {
+        if let Some(catch_up) = self.queue.iter_mut().find(|catch_up| catch_up.member == member) {
+            catch_up.remaining.clear();
+        }
+    }
+
+    /// The next step, round-robin over the queued learners.
+    fn next_step(&mut self) -> Option<CatchUpStep<G>> {
+        let mut catch_up = self.queue.pop_front()?;
+        match catch_up.remaining.pop_front() {
+            Some(p) => {
+                let step = CatchUpStep::Send(catch_up.member, catch_up.group.clone(), p);
+                self.queue.push_back(catch_up);
+                Some(step)
+            }
+            None => Some(CatchUpStep::Done(catch_up)),
         }
     }
 }
@@ -9167,6 +9272,75 @@ mod tests {
             ..Default::default()
         };
         Arc::new(Mutex::new(RegistryState::new(Membership::new(cfg, 2))))
+    }
+
+    fn catch_up_sends(catch_ups: &mut CatchUps<()>) -> Vec<(u32, usize)> {
+        let mut sent = Vec::new();
+        while let Some(step) = catch_ups.next_step() {
+            match step {
+                CatchUpStep::Send(member, (), p) => sent.push((member.learner_id, p)),
+                CatchUpStep::Done(_) => {}
+            }
+        }
+        sent
+    }
+
+    #[test]
+    fn catch_up_yields_one_fragment_per_step_then_its_tail() {
+        let rejoined = member(1, 7);
+        let mut catch_ups = CatchUps::new();
+        catch_ups.enqueue(rejoined, (), 0..3, CatchUpTail::REJOIN);
+        assert!(catch_ups.holds(rejoined));
+        for expected in 0..3 {
+            match catch_ups.next_step() {
+                Some(CatchUpStep::Send(who, (), p)) => assert_eq!((who, p), (rejoined, expected)),
+                _ => panic!("fragment {expected} was not the next step"),
+            }
+        }
+        match catch_ups.next_step() {
+            Some(CatchUpStep::Done(done)) => {
+                assert_eq!(done.member, rejoined);
+                assert_eq!(done.tail, CatchUpTail::REJOIN);
+            }
+            _ => panic!("finished catch-up did not yield its tail"),
+        }
+        assert!(catch_ups.is_empty() && !catch_ups.holds(rejoined));
+    }
+
+    #[test]
+    fn catch_up_interleaves_learners_and_merges_duplicate_requests() {
+        let (a, b) = (member(1, 7), member(2, 9));
+        let mut catch_ups = CatchUps::new();
+        catch_ups.enqueue(a, (), 0..2, CatchUpTail::REJOIN);
+        catch_ups.enqueue(b, (), 0..2, CatchUpTail::REJOIN);
+        // The disconnect of a's old generation asks again: no second copy.
+        catch_ups.enqueue(a, (), 0..2, CatchUpTail::REBIND);
+        assert_eq!(catch_up_sends(&mut catch_ups), vec![(1, 0), (2, 0), (1, 1), (2, 1)]);
+
+        catch_ups.enqueue(a, (), 0..1, CatchUpTail::REJOIN);
+        catch_ups.enqueue(a, (), 0..1, CatchUpTail::REBIND);
+        let _ = catch_ups.next_step();
+        match catch_ups.next_step() {
+            Some(CatchUpStep::Done(done)) => {
+                assert_eq!(done.tail, CatchUpTail { rejoin: true, rebind: true })
+            }
+            _ => panic!("merged catch-up lost its tail"),
+        }
+    }
+
+    #[test]
+    fn catch_up_drops_superseded_generations_and_abandons_failed_streams() {
+        let (old, current) = (member(1, 7), member(2, 9));
+        let mut catch_ups = CatchUps::new();
+        catch_ups.enqueue(old, (), 0..4, CatchUpTail::REJOIN);
+        catch_ups.enqueue(current, (), 0..4, CatchUpTail::REJOIN);
+        assert_eq!(catch_ups.drop_superseded(|m| m == current), vec![old]);
+        assert!(!catch_ups.holds(old));
+
+        // A failed stream stops the sends; the tail still runs.
+        catch_ups.abandon(current);
+        assert!(matches!(catch_ups.next_step(), Some(CatchUpStep::Done(done)) if done.member == current));
+        assert!(catch_ups.next_step().is_none());
     }
 
     #[tokio::test]
