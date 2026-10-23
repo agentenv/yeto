@@ -839,3 +839,21 @@ def test_generic_recipe_trains_without_dropout():
         cfg = sub(cfg, "model_recipe", name=rc.RECIPE_GENERIC)
     joined = " ".join(mc.translate_run_config(cfg, AlgorithmSpec()).argv)
     assert "--attention-dropout 0.0 --hidden-dropout 0.0" in joined
+
+
+def test_observe_training_entropy_reaches_the_miles_argv():
+    plain = list(mc.translate_run_config(make_config(), AlgorithmSpec()).argv)
+    assert "--observe-training-entropy" not in plain
+    cfg = sub(make_config(), "algorithm", observe_training_entropy=True)
+    argv = list(mc.translate_run_config(cfg, AlgorithmSpec()).argv)
+    assert argv.count("--observe-training-entropy") == 1
+    assert [value for value in argv if value != "--observe-training-entropy"] == plain
+
+
+def test_mamba_training_ssm_state_dtype_reaches_the_miles_argv():
+    plain = list(mc.translate_run_config(make_config(), AlgorithmSpec()).argv)
+    assert "--mamba-training-ssm-states-dtype" not in plain
+    cfg = sub(make_config(), "algorithm", mamba_training_ssm_states_dtype="fp32")
+    argv = list(mc.translate_run_config(cfg, AlgorithmSpec()).argv)
+    at = argv.index("--mamba-training-ssm-states-dtype")
+    assert argv[at + 1] == "fp32" and argv[:at] + argv[at + 2:] == plain

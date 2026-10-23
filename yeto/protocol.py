@@ -281,20 +281,25 @@ def _block_aligned_chunks(
     left = next(ahead, 0) if ahead is not None else float("inf")
     carry = b""
     for part in parts:
-        data = carry + bytes(part)
-        while data:
+        # Zero-copy: chunks are read-only views of the part (a carried
+        # partial block is joined once).  Slicing bytes here copied the rest
+        # of the part at every segment cut, quadratic in the segments per
+        # part (S27 G-AA: ~14 s/GiB with 10 MiB tensors).
+        data = memoryview(carry + bytes(part) if carry else part).cast("B")
+        start = 0
+        while start < len(data):
             if left == 0:
                 raise ValueError("f32 push delta is longer than its tensor segments")
-            take = min(len(data) // 4, left)
+            take = min((len(data) - start) // 4, left)
             cut = take if take == left else take - take % block
             if not cut:
                 break
-            yield data[: 4 * cut]
-            data = data[4 * cut :]
+            yield data[start : start + 4 * cut]
+            start += 4 * cut
             left -= cut
             if left == 0 and ahead is not None:
                 left = next(ahead, 0)
-        carry = data
+        carry = bytes(data[start:])
     if len(carry) % 4:
         raise ValueError("f32 push delta ends mid-value")
     if carry:

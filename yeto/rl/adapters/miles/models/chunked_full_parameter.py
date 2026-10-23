@@ -471,13 +471,66 @@ class MilesChunkedFullParameterAdapter:
         *,
         policy_version: int,
         local_step_generation: int,
+        defer_payload: bool = False,
     ) -> ReferencedPolicyCut:
+        """``defer_payload``: Miles hashes every fragment (same descriptors,
+        same cut identity) but stores none in Ray; :meth:`materialize` stores
+        the fragments a push needs while the masters still hold them."""
+
         cut = await group.export_full_parameter_chunked_cut(
             policy_version,
             local_step_generation,
             max_chunk_bytes=self.max_chunk_bytes,
+            **({"defer_payload": True} if defer_payload else {}),
         )
         return self.validate_cut(cut, policy_version, local_step_generation)
+
+    @staticmethod
+    def deferred_fragment_ids(cut: ReferencedPolicyCut) -> frozenset[int]:
+        """Fragments of ``cut`` whose chunk refs are deferred-export markers."""
+
+        try:
+            from miles.backends.megatron_utils.full_parameter_state import (
+                is_deferred_full_parameter_chunk,
+            )
+        except ImportError:  # an old Miles never defers
+            return frozenset()
+        return frozenset(
+            descriptor.fragment_id
+            for shard in cut.transport_cut.shards
+            for descriptor, references in zip(shard.fragments, shard.chunk_refs, strict=True)
+            if any(is_deferred_full_parameter_chunk(reference) for reference in references)
+        )
+
+    async def materialize(
+        self,
+        group: MilesChunkedFullParameterGroup,
+        cut: ReferencedPolicyCut,
+        fragment_ids: Sequence[int],
+    ) -> tuple[int, ...]:
+        """Store the deferred fragments ``fragment_ids`` of ``cut`` in Ray.
+
+        The owner ranks export them again from their masters, refuse when the
+        masters changed since the cut, and check the bytes against the cut's
+        descriptors; the refs then replace the markers in ``cut``'s rows (the
+        cut identity does not change).  Returns the fragments stored."""
+
+        deferred = self.deferred_fragment_ids(cut)
+        wanted = tuple(sorted({fragment_id for fragment_id in fragment_ids if fragment_id in deferred}))
+        if not wanted:
+            return ()
+        stored = await group.materialize_full_parameter_fragments(cut.transport_cut, wanted)
+        if set(stored) != set(wanted):
+            raise RuntimeError("Miles materialized the wrong full-parameter fragments")
+        for shard in cut.transport_cut.shards:
+            for descriptor, references in zip(shard.fragments, shard.chunk_refs, strict=True):
+                refs = stored.get(descriptor.fragment_id)
+                if refs is None:
+                    continue
+                if len(refs) != len(references):
+                    raise RuntimeError("Miles materialized a fragment with the wrong chunk count")
+                references[:] = refs
+        return wanted
 
     def validate_cut(
         self,
@@ -1015,6 +1068,10 @@ _SKIP_RESIDENT_REPORTED: set[str] = set()
 
 
 def _takes_skip_resident(function: Any) -> bool | None:
+    return _takes_parameter(function, "skip_resident_fragments")
+
+
+def _takes_parameter(function: Any, name: str) -> bool | None:
     """True/False when ``function``'s signature names or lacks the
     parameter; None when it only forwards ``*args, **kwargs``."""
 
@@ -1024,11 +1081,76 @@ def _takes_skip_resident(function: Any) -> bool | None:
         parameters = inspect.signature(function).parameters
     except (TypeError, ValueError):
         return False
-    if "skip_resident_fragments" in parameters:
+    if name in parameters:
         return True
     if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
         return None
     return False
+
+
+def _local_transport_features() -> frozenset[str]:
+    try:
+        from miles.ray import full_parameter_transport
+    except ImportError:
+        return frozenset()
+    return frozenset(getattr(full_parameter_transport, "FULL_PARAMETER_TRANSPORT_FEATURES", ()))
+
+
+def transport_supports(group: Any, method: str, parameter: str, feature: str) -> bool:
+    """Whether ``group.<method>`` takes ``parameter`` (Miles transport ``feature``).
+
+    A signature that names or lacks the parameter decides; a forwarding
+    handle (``*args, **kwargs``, Miles' ``RayWorkerHandle``) is decided by the
+    Miles in this process, which is the trainer's Miles (same image)."""
+
+    function = getattr(group, method, None)
+    if function is None:
+        return False
+    takes = _takes_parameter(function, parameter)
+    if takes is not None:
+        return takes
+    return feature in _local_transport_features()
+
+
+DEFER_CAPTURE_ENV = "YETO_FULL_PARAMETER_DEFER_CAPTURE"
+
+
+def defer_capture_supported(group: Any) -> bool:
+    """Deferred capture needs the deferred export, on-demand materialization
+    and the skip-resident apply (a deferred row is only ever skipped).
+    ``YETO_FULL_PARAMETER_DEFER_CAPTURE=0`` keeps the full capture."""
+
+    import os
+
+    if os.environ.get(DEFER_CAPTURE_ENV, "1") == "0":
+        return _report_feature("deferred capture", False, f"{DEFER_CAPTURE_ENV}=0")
+    enabled = (
+        skip_resident_supported(group)
+        and transport_supports(group, "export_full_parameter_chunked_cut", "defer_payload", "deferred_export")
+        and getattr(group, "materialize_full_parameter_fragments", None) is not None
+        and ("deferred_export" in _local_transport_features()
+             or _takes_parameter(group.materialize_full_parameter_fragments, "fragment_ids") is True)
+    )
+    return _report_feature("deferred capture", enabled, "group and local Miles transport")
+
+
+def optimizer_proof_without_model_check_supported(group: Any) -> bool:
+    return transport_supports(group, "full_parameter_optimizer_states", "check_model",
+                              "optimizer_state_check_model")
+
+
+_FEATURES_REPORTED: set[str] = set()
+
+
+def _report_feature(name: str, enabled: bool, reason: str) -> bool:
+    key = f"{name}:{enabled}:{reason}"
+    if key not in _FEATURES_REPORTED:
+        _FEATURES_REPORTED.add(key)
+        import sys
+
+        print(f"[yeto-full-parameter] {name}: {'enabled' if enabled else 'disabled'} ({reason})",
+              file=sys.stderr, flush=True)
+    return enabled
 
 
 def skip_resident_supported(group: Any) -> bool:

@@ -402,6 +402,8 @@ LEAF_POLICY: dict[str, _Check] = {
     "algorithm.lr_schedule.decay_style": _ok,
     "algorithm.lr_schedule.decay_iters": _ok,
     "algorithm.seed": _ok,
+    "algorithm.observe_training_entropy": _ok,
+    "algorithm.mamba_training_ssm_states_dtype": _ok,
     "algorithm.rollout_seed": _ok,
     # rl-algo-critic-family 2.4: translated with the AlgorithmSpec (critic_load_argv)
     "algorithm.critic": _ok,
@@ -963,6 +965,10 @@ def translate_run_config(
     # Explicit LR schedule: Miles' default horizon is --num-rollout (global
     # rounds), which under decoupled is not the island's local step count.
     values.extend(lr_schedule_argv(config.algorithm.lr_schedule))
+    if config.algorithm.observe_training_entropy:
+        values.append("--observe-training-entropy")
+    if config.algorithm.mamba_training_ssm_states_dtype is not None:
+        values.extend(("--mamba-training-ssm-states-dtype", config.algorithm.mamba_training_ssm_states_dtype))
     if algorithm.kl_coef is not None:
         values.extend(("--kl-coef", str(algorithm.kl_coef)))
     if dynamic_filter is not None:

@@ -290,6 +290,10 @@ def make_miles_island_task(
             flags += f" {flag} {shlex.quote(str(value))}"
     if args.use_rollout_routing_replay:
         flags += " --use-rollout-routing-replay"
+    if getattr(args, "observe_training_entropy", False):
+        flags += " --observe-training-entropy"
+    if getattr(args, "mamba_training_ssm_states_dtype", None):
+        flags += f" --mamba-training-ssm-states-dtype {args.mamba_training_ssm_states_dtype}"
     if getattr(args, "apply_chat_template_kwargs", None):
         chat_kwargs = json.dumps(
             args.apply_chat_template_kwargs, sort_keys=True, separators=(",", ":")

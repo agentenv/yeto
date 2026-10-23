@@ -284,6 +284,10 @@ class AlgorithmConfig:
     # state given). The algorithm itself (gamma, value_clip, init ...) is the
     # AlgorithmSpec; this carries only what one run resolves.
     critic: "CriticRunConfig | None" = None
+    # Log the training-side entropy (metrics only while entropy_coef is 0).
+    observe_training_entropy: bool = False
+    # Mamba training inter-chunk SSM state dtype ("fp32"/"bf16"; None = Megatron default).
+    mamba_training_ssm_states_dtype: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1074,6 +1078,8 @@ def resolve_rl_run_config(
                 requested=getattr(args, "rl_lr_schedule", None) or "auto",
                 full_parameter_async=getattr(args, "full_parameter_rounds", "sweep") == "async",
             ),
+            observe_training_entropy=bool(getattr(args, "observe_training_entropy", False)),
+            mamba_training_ssm_states_dtype=getattr(args, "mamba_training_ssm_states_dtype", None) or None,
             seed=args.seed,
             critic=resolve_critic_run_config(args),
             rollout_seed=getattr(args, "rollout_seed", args.seed + args.learner_id),

@@ -42,6 +42,8 @@ from yeto.rl.adapters.miles.models.chunked_full_parameter import (
     MilesChunkedFullParameterAdapter,
     ReferencedPolicyCut,
     StoredAuthoritativeFragment,
+    defer_capture_supported,
+    optimizer_proof_without_model_check_supported,
 )
 from yeto.rl.engine.policy_digest import (
     PolicyDigest,
@@ -441,6 +443,10 @@ class MilesFullParameterRoleStream:
         # Terminal phase: fragments whose last round closed without a trainer
         # apply (``retire_staged_broadcast``); the FINAL apply covers them.
         self.retired_fragments: set[int] = set()
+        # Decided once the trainer group is known (``_defers_capture``,
+        # ``_proof_kwargs``).
+        self._defer_capture: bool | None = None
+        self._proof_without_model_check: bool | None = None
         self.local_generation = 0
         self.local_rounds = 0
         self.action_tokens = 0
@@ -950,6 +956,7 @@ class MilesFullParameterRoleStream:
             self.group,
             policy_version=self.transport_version,
             local_step_generation=expected_generation,
+            defer_payload=self._defers_capture(),
         )
         previous = self.current
         previous_submission = self.submission_cut
@@ -981,6 +988,45 @@ class MilesFullParameterRoleStream:
             (),
             False,
         )
+
+    def _defers_capture(self) -> bool:
+        """S27 G-AA deferred capture: a local round's capture hashes every
+        fragment but stores none in Ray; :meth:`materialize_submission` stores
+        the fragments a push needs.  Only for asynchronous rounds without
+        overlap (every reader of the cut bytes is then a push of a
+        materialized fragment or a skip-resident apply that never reads a
+        deferred row) and only when the trainer's Miles supports it."""
+
+        if self._defer_capture is None:
+            self._defer_capture = bool(
+                self.config.partial_quorum
+                and not self.config.overlap
+                and self.group is not None
+                and defer_capture_supported(self.group)
+            )
+        return self._defer_capture
+
+    async def materialize_submission(self, fragment_ids: Sequence[int]) -> tuple[int, ...]:
+        """Store the deferred fragments ``fragment_ids`` of the submission cut.
+
+        Called by the pairing before it pushes them, while the trainer still
+        holds their bytes (no local step since the capture, and an apply
+        never writes a fragment this island still has to push from this
+        cut: such a fragment's version would move past the submission's)."""
+
+        if self.adapter is None or self.group is None or self.submission_cut is None:
+            return ()
+        return await self.adapter.materialize(self.group, self.submission_cut, fragment_ids)
+
+    def _proof_kwargs(self) -> dict[str, bool]:
+        """The optimizer proofs around an apply skip their whole-model
+        model/master comparison when Miles supports it: the commit itself
+        copies every master into the model and ends with that comparison."""
+
+        if self._proof_without_model_check is None:
+            self._proof_without_model_check = bool(
+                self.group is not None and optimizer_proof_without_model_check_supported(self.group))
+        return {"check_model": False} if self._proof_without_model_check else {}
 
     async def stage_available_broadcasts(self) -> tuple[tuple[int, int], ...]:
         """Drain complete broadcasts without mutating the trainable model."""
@@ -1067,6 +1113,32 @@ class MilesFullParameterRoleStream:
                 rebased.release()  # the applied target holds its own references
         self._close_staged_round(fragment_id, version)
         return (fragment_id,)
+
+    async def apply_staged_broadcasts(
+        self, items: Sequence[tuple[int, int, bool]]
+    ) -> tuple[int, ...]:
+        """Apply several staged broadcasts ``(fragment_id, version, catch_up)``
+        of distinct fragments in one trainer apply (partial quorum).
+
+        Same checks and bookkeeping as one :meth:`apply_staged_broadcast` per
+        item; the fragments occupy disjoint master ranges, so one apply of all
+        of them writes the same bytes as one apply each, and the whole-model
+        costs of an apply (optimizer proofs, master-to-model copy, checks) are
+        paid once."""
+
+        if self.config.overlap:
+            raise RuntimeError(f"{self.config.role} batches applies only without overlap")
+        fragment_ids = [fragment_id for fragment_id, _version, _catch_up in items]
+        if not items or len(set(fragment_ids)) != len(fragment_ids):
+            raise RuntimeError(f"{self.config.role} batched apply needs distinct fragments")
+        selected = {
+            fragment_id: self._staged_for_apply(fragment_id, version, rebase=False, catch_up=catch_up)
+            for fragment_id, version, catch_up in items
+        }
+        await self._apply_authoritative(selected)
+        for fragment_id, version, _catch_up in items:
+            self._close_staged_round(fragment_id, version)
+        return tuple(fragment_ids)
 
     def _staged_for_apply(
         self, fragment_id: int, version: int, *, rebase: bool, catch_up: bool
@@ -1206,7 +1278,7 @@ class MilesFullParameterRoleStream:
             target_policy_version=target_version,
             authoritative_fragments=tuple(selected.values()),
         )
-        before = (tuple(await self.group.full_parameter_optimizer_states())
+        before = (tuple(await self.group.full_parameter_optimizer_states(**self._proof_kwargs()))
                   if optimizer_proof else None)
         await self.adapter.apply(
             self.group,
@@ -1214,7 +1286,7 @@ class MilesFullParameterRoleStream:
             commit_token=self._apply_token(target_version, selected),
         )
         if before is not None:
-            after = tuple(await self.group.full_parameter_optimizer_states())
+            after = tuple(await self.group.full_parameter_optimizer_states(**self._proof_kwargs()))
             validate_optimizer_apply_transition(
                 before,
                 after,
@@ -1270,8 +1342,13 @@ class MilesFullParameterRoleStream:
         ).encode()
         return f"{self.config.algorithm}-{self.config.role}:{hashlib.sha256(payload).hexdigest()}"
 
-    def ready_submission_candidates(self) -> tuple[RoleSubmissionCandidate, ...]:
-        """Return H-qualified retained permits without releasing any bytes."""
+    def ready_submission_candidates(
+        self, *, include_deferred: bool = False
+    ) -> tuple[RoleSubmissionCandidate, ...]:
+        """Return H-qualified retained permits without releasing any bytes.
+
+        A fragment of a deferred capture is a candidate only once it is
+        materialized (``include_deferred``: also before, to plan which)."""
 
         if (
             self.client is None
@@ -1283,8 +1360,12 @@ class MilesFullParameterRoleStream:
             return ()
         self.client.check_health()
         self._queue_pulls()
+        deferred = (self.adapter.deferred_fragment_ids(self.submission_cut)
+                    if self._defer_capture and not include_deferred else frozenset())
         candidates = []
         for fragment_id in sorted(self._pending):
+            if fragment_id in deferred:
+                continue
             permit = self._pending[fragment_id]
             version = self.fragment_versions[fragment_id]
             expected_base = max(

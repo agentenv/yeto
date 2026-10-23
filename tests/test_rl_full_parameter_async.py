@@ -1159,3 +1159,18 @@ def test_real_fixed_roster_quorum_timeout_keeps_the_pushes_and_the_attempt(synce
     assert "new frozen-membership attempt" not in log and "push rejected" not in log
     assert all(sorted(contributions) == [0, 1] for contributions in rounds.values())
     _assert_matches(finals, _nesterov_reference(rounds, lr=1.0, mu=0.0))
+
+
+def test_observe_training_entropy_reaches_every_island():
+    _, plain = _plan(ASYNC)
+    _, observed = _plan(ASYNC + ("--observe-training-entropy",))
+    for island in plain["island_requests"]:
+        assert "--observe-training-entropy" not in island["learner_command"]
+    for island in observed["island_requests"]:
+        assert " --observe-training-entropy" in island["learner_command"]
+
+
+def test_mamba_ssm_state_dtype_reaches_every_island():
+    _, plan = _plan(ASYNC + ("--mamba-training-ssm-states-dtype", "fp32"))
+    for island in plan["island_requests"]:
+        assert _flag(island["learner_command"], "--mamba-training-ssm-states-dtype") == "fp32"

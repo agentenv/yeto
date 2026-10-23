@@ -58,6 +58,7 @@ This module is engine-neutral; it never imports an engine adapter.
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -368,6 +369,36 @@ class RolePairing:
             raise
         return {role: RoleProgress(submissions=tuple(values)) for role, values in produced.items()}
 
+    async def prepare_submissions(self) -> None:
+        """Materialize the deferred fragments the next :meth:`submit_ready`
+        would push (S27 G-AA deferred capture).
+
+        The plan repeats ``submit_ready``'s choice (shared, not closed, within
+        the free pipeline capacity) over candidates that include deferred
+        fragments.  A PULL that arrives after this plan stays pending until a
+        later call, exactly as if it had arrived after ``submit_ready``."""
+
+        if self.failure is not None or not all(
+            callable(getattr(stream, "materialize_submission", None)) for stream in self.streams.values()
+        ):
+            return
+        try:
+            by_role = {
+                role: _candidate_map(stream.ready_submission_candidates(include_deferred=True), role=role)
+                for role, stream in self.streams.items()
+            }
+            capacity = self.profile.effective_pipeline_depth - len(self.inflight)
+            shared = sorted(set.intersection(*(set(keys) for keys in by_role.values())) - set(self.inflight))
+            if self.profile.partial_quorum:
+                shared = [key for key in shared if not self._round_closed(key[1], key[0])]
+            fragment_ids = [key[1] for key in shared[: max(0, capacity)]]
+            if fragment_ids:
+                await asyncio.gather(*(stream.materialize_submission(fragment_ids)
+                                       for stream in self.streams.values()))
+        except BaseException as error:
+            self.fail_stop(error)
+            raise
+
     def _note_final_rounds(self, by_role: Mapping[str, Mapping[LogicalKey, Any]]) -> None:
         """Set ``terminal_seen`` once every fragment's last round is ready.
 
@@ -538,23 +569,63 @@ class RolePairing:
             *(set(stream.staged_fragment_versions) for stream in self.streams.values())
         )
         monotonic = all(getattr(stream, "monotonic_broadcasts", False) for stream in self.streams.values())
+        # One trainer apply per batch of distinct fragments (S27 G-AA).  The
+        # order of decisions is unchanged: a fragment seen twice first flushes
+        # the batch, so its second version is judged against the applied one.
+        batch: list[_PlannedApply] | None = [] if self._batches_applies() else None
         for fragment_id, version in sorted(staged, key=lambda item: (item[1], item[0])):
             if version == self.profile.total_fragment_steps:
                 continue  # the terminal cut arrives as FINAL
+            if batch and any(planned.fragment_id == fragment_id for planned in batch):
+                await self._flush_applies(batch, applied)
             base = max(0, version - fragments)
             held = {stream.fragment_versions[fragment_id] for stream in self.streams.values()}
             if len(held) != 1:
                 continue
             (current,) = held
             if current == base:
-                await self._overwrite_or_apply_pair(fragment_id, version, applied, catch_up=False)
+                await self._overwrite_or_apply_pair(fragment_id, version, applied, catch_up=False, batch=batch)
             elif current < base and monotonic and not any(
                 f == fragment_id and v < version for f, v in staged
             ):
-                await self._overwrite_or_apply_pair(fragment_id, version, applied, catch_up=True)
+                await self._overwrite_or_apply_pair(fragment_id, version, applied, catch_up=True, batch=batch)
                 self.caught_up_fragments += 1
                 self.caught_up_rounds += fragment_rounds(fragment_id, base, fragments) - (
                     fragment_rounds(fragment_id, current, fragments))
+        if batch:
+            await self._flush_applies(batch, applied)
+
+    def _batches_applies(self) -> bool:
+        """Every role applies several fragments at once
+        (``apply_staged_broadcasts``); ``YETO_FULL_PARAMETER_BATCH_APPLY=0``
+        keeps one apply per fragment."""
+
+        return (not self.profile.overlap
+                and os.environ.get(BATCH_APPLY_ENV, "1") != "0"
+                and all(callable(getattr(stream, "apply_staged_broadcasts", None))
+                        for stream in self.streams.values()))
+
+    async def _flush_applies(self, batch: list[_PlannedApply], applied: dict[str, list[int]]) -> None:
+        """Apply every planned fragment in one call per role, then do each
+        fragment's bookkeeping exactly as its own apply would."""
+
+        items = [(planned.fragment_id, planned.version, planned.catch_up) for planned in batch]
+        results = await asyncio.gather(*(stream.apply_staged_broadcasts(items) for stream in self.streams.values()))
+        for role, fragment_ids in zip(self.streams, results, strict=True):
+            applied[role].extend(fragment_ids)
+        for planned in batch:
+            for role in self.streams:
+                if self.streams[role].fragment_versions[planned.fragment_id] != planned.version:
+                    raise RuntimeError("batched apply committed mismatched versions")
+            if planned.pair is not None:
+                self._journal(planned.pair)
+                self.inflight.pop(planned.key)
+                continue
+            for key, pair in planned.closed:
+                self._release(pair)
+                self.inflight.pop(key)
+            self.overwritten_rounds += 1
+        batch.clear()
 
     def _retires(self, version: int) -> bool:
         """Terminal phase: close ``version`` without a trainer apply.
@@ -575,13 +646,22 @@ class RolePairing:
         )
 
     async def _overwrite_or_apply_pair(
-        self, fragment_id: int, version: int, applied: dict[str, list[int]], *, catch_up: bool
+        self, fragment_id: int, version: int, applied: dict[str, list[int]], *, catch_up: bool,
+        batch: list[_PlannedApply] | None = None,
     ) -> None:
         closed = [(key, pair) for key, pair in sorted(self.inflight.items())
                   if key[1] == fragment_id and key[0] <= version]
         exact = next((entry for entry in closed if entry[0][0] == version), None)
         retire = self._retires(version)
-        if not catch_up and exact is not None and exact[1].complete:
+        paired = not catch_up and exact is not None and exact[1].complete
+        if batch is not None and not retire:
+            # The paired apply and the overwrite differ only in bookkeeping.
+            batch.append(_PlannedApply(fragment_id, version, catch_up,
+                                       key=exact[0] if paired else None,
+                                       pair=exact[1] if paired else None,
+                                       closed=() if paired else tuple(closed)))
+            return
+        if paired:
             await self._apply_pair(exact[0], exact[1], applied, retire=retire)
             return
         if retire:
@@ -652,6 +732,7 @@ class RolePairing:
         progress = {role: RoleProgress() for role in self.streams}
         deadline = time.monotonic() + self.profile.wait_timeout
         while not self.finalizing:
+            await self.prepare_submissions()
             submitted = self.submit_ready()
             committed = await self.commit_staged_broadcasts()
             progress = {
@@ -702,6 +783,23 @@ def _candidate_map(candidates: Sequence[Any], *, role: str) -> dict[LogicalKey, 
             raise RuntimeError(f"{role} returned duplicate logical PULLs")
         result[candidate.logical_key] = candidate
     return result
+
+
+BATCH_APPLY_ENV = "YETO_FULL_PARAMETER_BATCH_APPLY"
+
+
+@dataclass(frozen=True)
+class _PlannedApply:
+    """One broadcast of a batched partial-quorum apply and its bookkeeping:
+    a paired round (``key``/``pair``, journaled) or an overwrite (``closed``
+    pairs released)."""
+
+    fragment_id: int
+    version: int
+    catch_up: bool
+    key: LogicalKey | None = None
+    pair: PairedSubmission | None = None
+    closed: tuple[tuple[LogicalKey, PairedSubmission], ...] = ()
 
 
 def _retained_replay(retained: Any, observed: Any | None) -> Any | None:
@@ -862,6 +960,7 @@ class FullParameterSync(RoundCutHooks):
             # Rounds that closed while this island trained are applied first,
             # so the island never uploads a delta the syncer would refuse.
             await pairing.commit_staged_broadcasts()
+        await pairing.prepare_submissions()
         pairing.submit_ready()
         submit_ts = unix_now()
         await pairing.commit_staged_broadcasts()
