@@ -3524,6 +3524,20 @@ async fn scheduler(
                         info!(learner_id = member.learner_id, steps = record.steps, path = ?record.source, "peer recovery done");
                     }
                     send_recovery(&registry, vec![done]).await;
+                    if dynamic {
+                        // The pool took the island back with recovered state; its
+                        // pushes are fenced at the versions it now holds.
+                        append_pool_record(
+                            cfg.event_tape.as_deref(),
+                            "pool_join",
+                            cfg.syncer_epoch,
+                            &format!(
+                                "\"island_id\":{},\"generation\":{},\"catch_up\":true,\"recovered\":true,\"base_version\":{}",
+                                member.learner_id, member.generation, st.global_step
+                            ),
+                        );
+                        write_pool_status(&cfg, &registry, st.global_step, "running");
+                    }
                     if !repull_rounds_for(&group, &registry, &mut inflight, fixed_roster, &budget_cutoff).await {
                         cutoff_established = true;
                         break 'outer;
@@ -9219,6 +9233,49 @@ mod tests {
         assert!(r.membership.check_push_base(back, 1, 4).is_err());
         r.membership.check_push_base(back, 1, 5).unwrap();
         assert!(r.current.get(&0) == Some(&back));
+    }
+
+    #[tokio::test]
+    async fn pool_member_under_peer_recovery_has_weight_zero_until_promoted() {
+        let registry = leased_registry(1);
+        let recover = HelloExt { syncer_epoch: Some(0), recover: true, ..Default::default() };
+        let (donor, lost) = (member(1, 20), member(0, 10));
+        let t0 = Instant::now() - Duration::from_secs(5);
+        {
+            let mut r = registry.lock().unwrap();
+            r.register_group(test_group(donor), Instant::now()).unwrap();
+            // A pool slot filled by an island that asks for peer recovery:
+            // admitted to the pool, kept off the round roster and donors.
+            r.register_group_with(test_group(lost), t0, recover).unwrap();
+            assert!(r.is_recovering(lost));
+            assert!(r.membership.is_live(lost));
+        }
+        assert!(!is_current_member(&registry, lost));
+        let candidates = recovery_candidates(&registry, &[]);
+        assert_eq!(candidates.iter().map(|c| c.member).collect::<Vec<_>>(), vec![donor]);
+
+        // Its lease runs out during the restore: it leaves the pool and the
+        // recovery; the next generation asks again (re-JOIN).
+        let mut rounds = vec![test_round(vec![donor])];
+        let mut rates = StepRates::default();
+        assert_eq!(expire_member_leases(&registry, &mut rounds, &mut rates).await, vec![lost]);
+        assert_eq!(rounds[0].expected_members, vec![donor]);
+        let mut r = registry.lock().unwrap();
+        assert!(!r.is_recovering(lost));
+        r.unregister(lost);
+        let back = member(0, 11);
+        assert_eq!(r.register_group_with(test_group(back), Instant::now(), recover).map(|x| x.1),
+                   Ok(Admission::Rejoin));
+        assert!(r.is_recovering(back) && !r.current.contains_key(&0));
+
+        // Promoted with the versions it holds after the replay: pushes based
+        // on older versions are fenced.
+        assert!(r.promote_recovered(back));
+        r.membership.record_catch_up(back, &[7, 8]);
+        assert_eq!(r.current.get(&0), Some(&back));
+        assert!(r.membership.check_push_base(back, 0, 6).is_err());
+        r.membership.check_push_base(back, 0, 7).unwrap();
+        assert!(!r.promote_recovered(back), "promotion happens once per generation");
     }
 
     #[test]

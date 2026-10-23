@@ -405,24 +405,43 @@ _RL_OUTER_MERGE_OPTIONS = (
 )
 
 
+ISLAND_STATE_SOURCES = ("peer", "catch-up", "cut")
+
+
 def _default_peer_recovery(args) -> None:
-    """``--rl-peer-recovery`` left unset: on in the async mode where it applies
-    (full-parameter async rounds, a fixed roster, one syncer process, no
-    broadcast deltas, a snapshot store), off otherwise; the strict mode and
-    ``--no-rl-peer-recovery`` keep it off."""
-    if getattr(args, "rl_peer_recovery", None) is not None:
-        return
-    args.rl_peer_recovery = False
+    """Resolve the state source of a replacement island (``--rl-island-state-source``)
+    and ``--rl-peer-recovery`` together; the two always agree afterwards.
+
+    Who fills a slot (a relaunch, an island pool member) is not decided here; this
+    only picks where that island takes its trainer state. ``--rl-peer-recovery``
+    left unset: on in the async mode where it applies (full-parameter async rounds,
+    one syncer process, no broadcast deltas, a snapshot store; a fixed roster or an
+    island pool), off otherwise; the strict mode and ``--no-rl-peer-recovery`` keep
+    it off. Peer recovery on is source ``peer``, off is ``catch-up``."""
+    source = getattr(args, "rl_island_state_source", None)
+    explicit = getattr(args, "rl_peer_recovery", None)
+    if source == "cut":
+        raise ValueError("--rl-island-state-source cut: a synced island does not resume from its "
+                         "own round cuts yet (the syncer is authoritative); use peer or catch-up")
+    if source is not None and explicit is not None and explicit != (source == "peer"):
+        flag = "--rl-peer-recovery" if explicit else "--no-rl-peer-recovery"
+        raise ValueError(f"--rl-island-state-source {source} contradicts {flag}")
+    if source is not None:
+        args.rl_peer_recovery = source == "peer"
+    elif explicit is None:
+        args.rl_peer_recovery = _peer_recovery_applies(args)
+    args.rl_island_state_source = "peer" if args.rl_peer_recovery else "catch-up"
+
+
+def _peer_recovery_applies(args) -> bool:
     if (getattr(args, "rl_sync_mode_effective", "strict") != "async"
-            or not rl_full_parameter_async(args) or island_pool(args)
+            or not rl_full_parameter_async(args)
             or syncer_shard_count(args) > 1
             or getattr(args, "rl_sync_bcast_delta_full_every", 0)):
-        return
-    from .peer_recovery import peer_recovery_store
+        return False
+    from .peer_recovery import snapshot_store_path
 
-    args.rl_peer_recovery = True
-    if peer_recovery_store(args) is None:
-        args.rl_peer_recovery = False
+    return snapshot_store_path(args) is not None
 
 
 def _apply_rl_outer_merge_options(args, *, num_islands: int) -> None:

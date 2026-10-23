@@ -220,8 +220,16 @@ def test_peer_recovery_defaults_on_where_it_applies():
     args, _ = _plan(FULL)  # no snapshot store: off
     assert args.rl_peer_recovery is False
     # Off: the store alone is then refused, which shows recovery stayed off.
-    for extra in (("--no-rl-peer-recovery",), ("--rl-sync-mode", "strict"), POOL):
+    for extra in (("--no-rl-peer-recovery",), ("--rl-island-state-source", "catch-up"),
+                  ("--rl-sync-mode", "strict")):
         args = _launcher_args("ports", FULL + store + extra, gpu=TWO_ISLANDS)
         with pytest.raises(ValueError, match="or --rl-peer-recovery"):
             _prepare_rl_args(args)
         assert args.rl_peer_recovery is False
+
+
+def test_peer_recovery_defaults_on_in_an_island_pool():
+    args, _ = _plan(FULL + ("--rl-checkpoint-store", "/shared/run-store") + POOL)
+    assert args.rl_peer_recovery is True and args.rl_island_state_source == "peer"
+    args, _ = _plan(FULL + POOL)  # no snapshot store: the syncer catch-up
+    assert args.rl_peer_recovery is False and args.rl_island_state_source == "catch-up"

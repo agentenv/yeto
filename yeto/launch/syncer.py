@@ -506,7 +506,8 @@ def peer_recovery_syncer_flags(args) -> str:
     options (checked by ``launch.peer_recovery``); "" when recovery is off."""
     if not getattr(args, "rl_peer_recovery", False):
         return ""
-    flags = f" --syncer-epoch {island_syncer_epoch(args)}"
+    # An island pool already passes the epoch with its membership flags.
+    flags = "" if island_pool(args) else f" --syncer-epoch {island_syncer_epoch(args)}"
     for dest, flag in (("rl_recovery_bound_steps", "--recovery-bound-steps"),
                        ("rl_recovery_max_donor_tries", "--recovery-max-donor-tries"),
                        ("rl_recovery_donor_timeout_s", "--recovery-donor-timeout-s")):

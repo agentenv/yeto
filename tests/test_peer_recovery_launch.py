@@ -45,6 +45,35 @@ def test_explicit_store_and_ttl():
     assert _flag(plan["role_syncers"][0]["command"], "--syncer-epoch") == "0"
 
 
+POOL = ("--rl-sync-quorum-theta", "0.75", "--rl-sync-max-base-lag", "2", "--rl-sync-island-lease-s", "45")
+
+
+def test_island_pool_takes_peer_recovery_with_one_epoch_flag():
+    """The pool decides who fills a slot; peer recovery is that island's state source."""
+    args, plan = _plan(RECOVERY + POOL)
+    assert args.rl_island_state_source == "peer"
+    command = plan["role_syncers"][0]["command"].split()
+    assert command.count("--syncer-epoch") == 1, "pool and recovery share one syncer epoch"
+    assert command[command.index("--syncer-epoch") + 1] == "4"
+    assert command[command.index("--island-lease-s") + 1] == "45.0"
+    assert command[command.index("--recovery-bound-steps") + 1] == "8"
+    for island in plan["island_requests"]:
+        words = island["learner_command"].split()
+        assert words.count("--rl-syncer-epoch") == 1
+        assert words[words.index("--rl-syncer-epoch") + 1] == "4"
+        assert "--rl-island-pool" in words
+        assert _flag(island["learner_command"], "--rl-peer-recovery-store") == "/shared/run-store"
+    assert relaunch_envs(args) == {PEER_RECOVER_ENV: "1"}
+
+
+def test_island_pool_with_catch_up_source_has_no_recovery():
+    args, plan = _plan(ASYNC + POOL + ("--rl-island-state-source", "catch-up"))
+    assert args.rl_peer_recovery is False
+    assert "--recovery-bound-steps" not in plan["role_syncers"][0]["command"]
+    assert "--rl-peer-recovery-store" not in plan["island_requests"][0]["learner_command"]
+    assert relaunch_envs(args) == {}
+
+
 def test_without_peer_recovery_commands_are_unchanged():
     _, plan = _plan(ASYNC)
     assert "--syncer-epoch" not in plan["role_syncers"][0]["command"]
@@ -61,6 +90,11 @@ def test_without_peer_recovery_commands_are_unchanged():
         (RECOVERY + ("--rl-recovery-max-donor-tries", "0"), "must be >= 1"),
         (ASYNC + ("--rl-syncer-epoch", "2"), "needs island pool options"),
         (RECOVERY + ("--syncer-shards", "2"), "one syncer process"),
+        (RECOVERY + ("--rl-island-state-source", "catch-up"), "contradicts --rl-peer-recovery"),
+        (ASYNC + ("--no-rl-peer-recovery", "--rl-island-state-source", "peer"),
+         "contradicts --no-rl-peer-recovery"),
+        (ASYNC + ("--rl-island-state-source", "cut"), "own round cuts"),
+        (ASYNC + ("--rl-island-state-source", "peer"), "--rl-peer-recovery-store or --rl-checkpoint-store"),
     ],
 )
 def test_refusals(extra, message):

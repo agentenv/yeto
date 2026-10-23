@@ -24,6 +24,7 @@ import pytest
 from yeto import recovery_protocol as rp
 from yeto.fragments import MERGE_AVG, Fragment, FragmentLayout
 from yeto.protocol import DTYPE_F32, BcastFragment, SyncerClient, encode_hello, layout_fingerprint
+from yeto.rl.pool_client import LeaseHeartbeat
 from yeto.rl.peer_recovery import DirectorySnapshotStore, DonorService, Snapshot, read_array_state, recover
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -53,7 +54,8 @@ class FakeIsland(threading.Thread):
     serves donor snapshots, and finalizes. Implements RecoverableIsland."""
 
     def __init__(self, learner_id: int, port: int, target: np.ndarray, store: DirectorySnapshotStore,
-                 *, recover_on_start: bool = False, syncer_epoch: int | None = None) -> None:
+                 *, recover_on_start: bool = False, syncer_epoch: int | None = None,
+                 lease_s: float | None = None) -> None:
         super().__init__(daemon=True)
         self.learner_id = learner_id
         self.layout = make_layout()
@@ -72,6 +74,9 @@ class FakeIsland(threading.Thread):
         self.client = SyncerClient(("127.0.0.1", port), learner_id, self.layout, DTYPE_F32, num_streams=1,
                                    syncer_epoch=syncer_epoch, recover=recover_on_start)
         self.donor = DonorService(self.client, self, store)
+        # Island pool member: heartbeats keep its lease (also during a restore).
+        self.heartbeat = (None if lease_s is None
+                          else LeaseHeartbeat(self.client, lease_s, progress=lambda: self.steps_total))
         self.killed = threading.Event()
         self.outcome = None
         self.imported: dict[str, np.ndarray] | None = None
@@ -131,6 +136,8 @@ class FakeIsland(threading.Thread):
         except BaseException as exc:  # surfaced by the test
             self.exc = exc
         finally:
+            if self.heartbeat is not None:
+                self.heartbeat.stop()
             self.client.close()
 
     def _adam(self) -> None:
@@ -145,6 +152,8 @@ class FakeIsland(threading.Thread):
 
     def _run(self) -> None:
         self.client.start()
+        if self.heartbeat is not None:
+            self.heartbeat.start()
         if self.recover_on_start:
             self.outcome = recover(self.client, self, self.store, timeout=60)
             self.after_recovery = self.export_recovery_state()
@@ -183,10 +192,11 @@ class FakeIsland(threading.Thread):
             time.sleep(0.004)
 
 
-def start_syncer(binary: Path, port: int, learners: int, quorum: int, tape: Path, *extra: str) -> subprocess.Popen:
+def start_syncer(binary: Path, port: int, learners: int, quorum: int, tape: Path, *extra: str,
+                 total_steps: int = 80) -> subprocess.Popen:
     return subprocess.Popen(
         [str(binary), "--port", str(port), "--learners", str(learners), "--quorum", str(quorum),
-         "--grace-ms", "50", "--total-steps", "80", "--outer-lr", "0.7", "--outer-momentum", "0.0",
+         "--grace-ms", "50", "--total-steps", str(total_steps), "--outer-lr", "0.7", "--outer-momentum", "0.0",
          "--min-round-interval-ms", "40", "--quorum-timeout-s", "30", "--event-tape", str(tape),
          "--recovery-bound-steps", str(BOUND_H), *extra],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
@@ -309,6 +319,61 @@ def test_killed_island_recovers_from_a_peer_within_bound(tmp_path, transfer_s, e
     assert back.pushes_after_recovery > 0
     assert back.final_manifest is not None and back.final_manifest == islands[0].final_manifest
     assert ("peer recovery missed its bound" in out) == expect_missed
+
+
+@pytest.mark.timeout(240)
+def test_island_pool_slot_filled_by_peer_recovery(tmp_path):
+    """Island pool and peer recovery together: the pool admits a new
+    generation for a lost island; its state comes from a peer. The restore
+    takes longer than the lease, so only heartbeats keep the island in the
+    pool; it has weight 0 (no pushes) until RECOVERY_DONE."""
+    lease_s = 1.5
+    binary = build_syncer()
+    port = free_port()
+    tape = tmp_path / "tape.jsonl"
+    store = RecordingStore(tmp_path / "store")
+    rng = np.random.default_rng(1)
+    targets = [rng.standard_normal(FRAGMENTS * NUMEL).astype(np.float32) for _ in range(3)]
+    proc = start_syncer(binary, port, 3, 2, tape, "--island-lease-s", str(lease_s), "--syncer-epoch", "5",
+                        "--max-base-lag", "2", total_steps=120)
+    pool = {"syncer_epoch": 5, "lease_s": lease_s}
+    try:
+        islands = [FakeIsland(i, port, targets[i], store, **pool) for i in range(3)]
+        for island in islands:
+            island.start()
+        wait_until(lambda: min(islands[0].versions) >= 8, 60, "no early rounds")
+        islands[2].kill()
+        islands[2].join(timeout=10)
+        kill_versions = list(islands[0].versions)
+        wait_until(lambda: sum(islands[0].versions) > sum(kill_versions) + 8, 60, "rounds stopped without island 2")
+        back = FakeIsland(2, port, targets[2], SlowStore(store.root, 2 * lease_s, store.puts),
+                          recover_on_start=True, **pool)
+        back.start()
+        wait_until(lambda: back.outcome is not None or back.exc is not None, 60, "recovery did not finish")
+        if back.exc:
+            raise back.exc
+        finish(proc, [islands[0], islands[1], back])
+    except BaseException:
+        if proc.poll() is None:
+            proc.kill()
+        print((proc.stdout.read() if proc.stdout else "")[-4000:])
+        raise
+    outcome = back.outcome
+    assert outcome.path == "peer" and outcome.donor in (0, 1), outcome
+    assert outcome.seconds > lease_s, "the restore outlasted the lease"
+    snapshot = store.puts[islands[outcome.donor].donor.served[0][1]]
+    for key in ("adam_m", "adam_v", "adam_step"):
+        np.testing.assert_array_equal(back.imported[key], snapshot.state[key], err_msg=key)
+    records = [json.loads(line) for line in tape.read_text().splitlines()]
+    generation = back.client.connection_generation
+    left = [r for r in records if r.get("kind") == "pool_leave" and r.get("island_id") == 2
+            and r.get("generation") == generation]
+    assert not left, "heartbeats kept the recovering island's lease"
+    joined = [r for r in records if r.get("kind") == "pool_join" and r.get("recovered")]
+    assert [(r["island_id"], r["generation"]) for r in joined] == [(2, generation)]
+    assert back.heartbeat.errors == []
+    assert back.pushes_after_recovery > 0
+    assert back.final_manifest is not None and back.final_manifest == islands[0].final_manifest
 
 
 @pytest.mark.timeout(240)
