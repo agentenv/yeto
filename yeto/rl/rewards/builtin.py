@@ -54,6 +54,112 @@ def gsm8k_reward(traj: Trajectory) -> RewardResult:
     return RewardResult(value=value, metadata={SUCCESS_KEY: value == 1.0})
 
 
+# -- numeric final answer (DAPO-Math-17k style "Answer: \boxed{N}") ------------
+#
+# ``gsm8k_grade`` above stays byte-identical (golden samples, bare-arm copy in
+# tools/eval/efficiency/eff_reward.py).  This grader is for rows whose label is
+# one number and whose prompt asks for "Answer: \boxed{...}" on the last line.
+# Differences from gsm8k_grade:
+#   * grades only the text after the last ``</think>``;
+#   * reads the last ``\boxed{...}`` with balanced braces (``\boxed{\frac{1}{2}}``);
+#   * if there is no ``\boxed``, reads the last "Answer: ..." line; there is no
+#     "last number in the last 200 characters" fallback, so a response cut off
+#     mid-derivation scores 0 instead of matching a stray number;
+#   * the answer must be one number after LaTeX clean-up (thousands separators
+#     ``1\,007`` / ``1{,}440`` / ``1,440``, ``\text{}``, ``$``, units, ``x = ``,
+#     ``^\circ``, ``\%``), or a simple ``\frac{a}{b}`` / ``a^{b}``; it never takes
+#     the last number of an expression (``\boxed{2\sqrt{3}}`` is not 3).
+
+_BOXED = re.compile(r"\\(?:boxed|fbox)\s*\{")
+_ANSWER_LINE = re.compile(r"answer\s*[:：]\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
+_NUMBER = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)"
+_TEXT_CMD = re.compile(r"\\(?:text|textbf|textrm|textit|mathrm|mathbf|mathit|bf|mbox|operatorname|answer)"
+                       r"\s*\{([^{}]*)\}")
+_FRAC = re.compile(rf"^({_NUMBER})?\\[dt]?frac\{{({_NUMBER})\}}\{{({_NUMBER})\}}$")
+_POWER = re.compile(rf"^({_NUMBER})\^\{{?({_NUMBER})\}}?$")
+_UNIT_TAIL = re.compile(rf"^({_NUMBER})[a-zA-Z]*\.?$")
+_THOUSANDS = re.compile(r"(?<=\d)(?:\{,\}|,|\\,|\\!|\\ |~|\s)(?=\d{3}(?!\d))")
+# spacing / delimiter / markup tokens removed before reading the number ("\\$" before "$")
+_DROP_TOKENS = ("\\displaystyle", "\\left", "\\right", "\\!", "\\,", "\\;", "\\:", "\\ ", "~",
+                "\\(", "\\)", "\\[", "\\]", "*", "\\$", "$", "\\%", "%")
+
+
+def last_boxed(text: str) -> str | None:
+    """Content of the last ``\\boxed{...}`` / ``\\fbox{...}`` with balanced braces;
+    None if there is none or its braces never close (a cut-off response)."""
+    starts = [m.end() for m in _BOXED.finditer(text)]
+    for start in reversed(starts):
+        depth = 1
+        for i in range(start, len(text)):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start:i]
+    return None
+
+
+def answer_number(answer: str | None) -> float | None:
+    """The number an extracted final answer states, or None (see section notes)."""
+    if answer is None:
+        return None
+    s = str(answer)
+    for _ in range(3):  # nested \text{\textbf{..}}
+        s = _TEXT_CMD.sub(r"\1", s)
+    # thousands separators only between digit groups: "1,2,3" stays a list (no match)
+    s = _THOUSANDS.sub("", s)
+    for token in _DROP_TOKENS:
+        s = s.replace(token, "")
+    s = re.sub(r"\^\s*\{?\\circ\}?|°", "", s)
+    s = re.sub(r"\s+", "", s)
+    s = s.split("=")[-1]  # "x=5", "n = 12"
+    s = s.rstrip(".")
+    while s.startswith("{") and s.endswith("}"):
+        s = s[1:-1]
+    if re.fullmatch(_NUMBER, s):
+        return float(s)
+    m = _UNIT_TAIL.match(s)
+    if m:
+        return float(m.group(1))
+    m = _FRAC.match(s)
+    if m and float(m.group(3)) != 0:
+        whole = float(m.group(1)) if m.group(1) else 0.0
+        frac = float(m.group(2)) / float(m.group(3))
+        return whole - frac if whole < 0 else whole + frac
+    m = _POWER.match(s)
+    if m:
+        try:
+            return float(m.group(1)) ** float(m.group(2))
+        except OverflowError:
+            return None
+    return None
+
+
+def final_answer(response: str) -> str | None:
+    """The final answer text of a response: last ``\\boxed{}`` after the last
+    ``</think>``, else the last "Answer: ..." line, else None."""
+    text = (response or "").split("</think>")[-1]
+    boxed = last_boxed(text)
+    if boxed is not None:
+        return boxed
+    lines = _ANSWER_LINE.findall(text)
+    return lines[-1] if lines else None
+
+
+def numeric_answer_grade(response: str, label) -> float:
+    if label is None:
+        return 0.0
+    gold = answer_number(str(label).split("####")[-1])
+    pred = answer_number(final_answer(response))
+    return 1.0 if (gold is not None and pred is not None and abs(pred - gold) < 1e-6) else 0.0
+
+
+def numeric_answer_reward(traj: Trajectory) -> RewardResult:
+    value = numeric_answer_grade(traj.response or "", traj.label)
+    return RewardResult(value=value, metadata={SUCCESS_KEY: value == 1.0})
+
+
 # -- dense length / termination test reward -----------------------------------
 
 def length_score(response: str, finished: float) -> float:
