@@ -16,7 +16,7 @@ base="launch --training-mode rl --rl-engine ports --preflight-threads off --moda
 --seed 17 --total-steps 4 --trust-remote-code --gpu modal:2xh100 --rl-placement fixed-partition --rl-rollout-gpus 1 \
 --rl-single-island-no-sync --tuning full --rl-optimizer-offload-fraction 1.0 --rl-cut-every 1"
 export REPO STOREVOL STORE_P=$B ISLANDS=1 HARD=${HARD:-1500} STALL_S=600 PY=/home/michael/work/gpu-head/venv/bin/python TOKIO_WORKER_THREADS=4
-for ph in pa pb; do
+for ph in ${PHASES:-pa pb}; do
   P=$B-$ph; R=/home/michael/work/s1-runs/s27-glf/$P; mkdir -p "$(dirname $R)"
   extra=""; [ $ph = pa ] && extra=" --rl-stop-after-rounds 2"
   ARGS="$base --cluster-prefix $P$extra" P=$P R=$R bash "$HERE/miles_local.sh"
