@@ -565,6 +565,15 @@ def _add_launch_args(p: argparse.ArgumentParser) -> None:
         help="Modal islands: container memory request = limit in GiB (default 32 GiB per GPU)",
     )
     infra.add_argument(
+        "--modal-ephemeral-disk-gib",
+        type=int,
+        default=None,
+        metavar="GIB",
+        help="Modal islands: container disk in GiB (Ray spills its object store here). "
+        "Default: full-parameter RL sizes it from the model (5 f32 model copies + the "
+        "bf16 snapshot + 64 GiB, 512..3072 GiB); other runs keep Modal's default",
+    )
+    infra.add_argument(
         "--modal-cpu",
         type=int,
         default=None,

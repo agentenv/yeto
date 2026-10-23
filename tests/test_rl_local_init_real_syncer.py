@@ -231,7 +231,13 @@ def test_role_stream_keeps_local_version_zero_after_the_confirm(monkeypatch):
     adapter = _fake_adapter(payloads)
     stream = module.MilesFullParameterRoleStream(
         replace(_role_stream_config("actor", 30100), local_init=True))
-    local, digests = stream._local_version_zero(adapter, object(), lambda fid, v, p: _Stored(fid, bytes(p)))
+    class AdoptingSink:
+        def adopt(self, cut, fragment_id, version, wire_payload_hash):
+            assert version == 0
+            assert wire_payload_hash == hashlib.sha256(payloads[fragment_id]).hexdigest()
+            return _Stored(fragment_id, cut[fragment_id])
+
+    local, digests = stream._local_version_zero(adapter, payloads, AdoptingSink())
     assert [s.payload for s in local] == payloads
     assert digests == [hashlib.sha256(p).digest() for p in payloads]
 

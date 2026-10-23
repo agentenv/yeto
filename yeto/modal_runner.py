@@ -249,6 +249,9 @@ class ModalIslandConfig:
     # Host resource overrides (None = per-GPU defaults below).
     cpu_override: int | None = None
     memory_gib_override: int | None = None
+    # Container disk in GiB (None = Modal's default). Ray spills its object
+    # store here (see yeto.launch.modal_islands.modal_ephemeral_disk_gib).
+    ephemeral_disk_gib: int | None = None
 
     @property
     def function_name(self) -> str:
@@ -273,6 +276,8 @@ class ModalIslandConfig:
 
     def validate(self) -> None:
         validate_modal_shape(self.gpu, self.gpus_per_node, self.num_nodes)
+        if self.ephemeral_disk_gib is not None and self.ephemeral_disk_gib < 1:
+            raise ValueError("ephemeral_disk_gib must be >= 1")
         if self.training_mode == "rl":
             if not self.image_ref or not (re.fullmatch(r"[^\s@]+@sha256:[0-9a-fA-F]{64}", self.image_ref)
                                           or ENGINE_BUILT_IMAGE_RE.fullmatch(self.image_ref)):
@@ -1083,6 +1088,8 @@ class ModalOps:
         )
         if cfg.region:
             kwargs["region"] = cfg.region
+        if cfg.ephemeral_disk_gib is not None:
+            kwargs["ephemeral_disk"] = cfg.ephemeral_disk_gib * 1024  # MiB
         volumes = {}
         if cfg.volume_name and cfg.volume_mount:
             volumes[cfg.volume_mount] = modal.Volume.from_name(cfg.volume_name, create_if_missing=True)

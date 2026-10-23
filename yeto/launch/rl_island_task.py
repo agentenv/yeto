@@ -19,7 +19,8 @@ from .remote_setup import (
 )
 from .topology import (
     multinode_env_prelude, multinode_network_tier, rl_cross_node_flags, rl_island_bundle_map_flag,
-    rl_island_cpus, rl_island_gpu_env, rl_island_ray_gpus, rl_island_spec, rl_trainer_shape,
+    rl_island_cpus, rl_island_gpu_env, rl_island_ray_gpus, rl_island_ray_spill_dir_prelude,
+    rl_island_ray_storage, rl_island_spec, rl_trainer_shape,
 )
 from .syncer import (
     critic_syncer_address, elastic_debug_delay_env, elastic_debug_pause_env, island_hmac_secret,
@@ -528,6 +529,7 @@ def make_miles_island_task(
             # command line, so pkill by that path never touches sky's.
             f"{rl_island_gpu_env(args, spec)}"
             'MILES_RAY_DIR="$HOME/miles-ray"\n'
+            f"{rl_island_ray_spill_dir_prelude(args)}"
             # Same escalation as `ray stop --force` (TERM, short grace, KILL)
             # but scoped to this dir: gcs_server, raylet and the autoscaler
             # monitor ignore a bare SIGTERM for 30 s or more.
@@ -551,6 +553,7 @@ def make_miles_island_task(
             # 2026-10-03: ServerUnavailable in compute_ray_pin_head_options).
             '--port=6379 --include-dashboard=true --temp-dir="$MILES_RAY_DIR"'
             + rl_island_ray_gpus(args, spec)
+            + rl_island_ray_storage(args, head=True)
             + (" --dashboard-host=0.0.0.0" if spec.num_nodes > 1 else "") + "\n"
             f"  {shell_mark('ray_ready')}\n"
             "  trap stop_miles_ray EXIT\n"
@@ -579,7 +582,7 @@ def make_miles_island_task(
             "  for _ in $(seq 1 150); do "
             'ray start --address="$MASTER_ADDR:6379" --temp-dir="$MILES_RAY_DIR"'
             f"{_worker_node_ip_flag(spec.cloud)}"
-            f"{rl_island_ray_gpus(args, spec)} && break; "
+            f"{rl_island_ray_gpus(args, spec)}{rl_island_ray_storage(args, head=False)} && break; "
             "sleep 2; done\n"
             "  ray status --address=\"$MASTER_ADDR:6379\" >/dev/null 2>&1 "
             "|| { echo '[yeto-island] worker could not join the Ray head' >&2; exit 1; }\n"

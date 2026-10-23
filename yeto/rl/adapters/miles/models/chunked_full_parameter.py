@@ -139,6 +139,58 @@ class AuthoritativeFragmentSink:
         self._stored[key] = stored
         return stored
 
+    def adopt(
+        self,
+        cut: ReferencedPolicyCut,
+        fragment_id: int,
+        version: int,
+        wire_payload_hash: str,
+    ) -> StoredAuthoritativeFragment:
+        """Register ``cut``'s own chunks of one fragment without copying them.
+
+        Local init: the island's version-0 anchors are exactly its exported
+        version-0 cut. Sharing the cut's Ray refs keeps one model-sized copy
+        in the object store instead of two (s27-gh-a: 27B spilled ~165 GB
+        before the first round and later filled the container disk). The
+        anchor holds its own ref list, so releasing either side leaves the
+        other intact."""
+
+        if cut.layout_hash != self.reference.layout_hash:
+            raise ValueError("adopted cut layout changed")
+        key = (fragment_id, version)
+        previous = self._stored.get(key)
+        if previous is not None:
+            if previous.wire_payload_hash != wire_payload_hash:
+                raise RuntimeError("authoritative fragment replay changed bytes")
+            return previous
+        shard = _fragment_owner_shard(cut.transport_cut, fragment_id)
+        ((descriptor, refs),) = [
+            (descriptor, refs)
+            for descriptor, refs in zip(shard.fragments, shard.chunk_refs, strict=True)
+            if descriptor.fragment_id == fragment_id
+        ]
+        expected = next(
+            descriptor
+            for descriptor in _fragment_owner_shard(self.reference.transport_cut, fragment_id).fragments
+            if descriptor.fragment_id == fragment_id
+        )
+        if not _same_fragment_geometry(expected, descriptor):
+            raise ValueError("adopted fragment geometry changed")
+        if any(reference is None for reference in refs):
+            raise ValueError("adopted fragment chunks are released")
+        stored = StoredAuthoritativeFragment(
+            fragment_id=fragment_id,
+            version=version,
+            parameter_layout_hash=shard.parameter_layout_hash,
+            topology=shard.topology,
+            plan_hash=shard.plan_hash,
+            descriptor=descriptor,
+            refs=list(refs),
+            wire_payload_hash=wire_payload_hash,
+        )
+        self._stored[key] = stored
+        return stored
+
     def release_all(self) -> int:
         return sum(fragment.release() for fragment in self._stored.values())
 

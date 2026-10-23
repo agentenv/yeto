@@ -767,15 +767,16 @@ class MilesFullParameterRoleStream:
         return served
 
     def _local_version_zero(self, adapter, initial, sink):
-        """Local init: store this island's own INIT bytes as its version-0
-        anchors and hash them exactly as the syncer hashes INIT_PARAMS."""
+        """Local init: this island's own version-0 cut is its version-0
+        anchors (shared, not copied), hashed exactly as the syncer hashes
+        INIT_PARAMS."""
         stored, digests = [], []
         for fragment_id in range(adapter.layout.fragments.num_fragments):
-            payload = bytearray()
+            digest = hashlib.sha256()
             for part in adapter.fragment_parts(initial, fragment_id, ray_module=self.ray_module)():
-                payload += part
-            digests.append(hashlib.sha256(payload).digest())
-            stored.append(sink(fragment_id, 0, payload))
+                digest.update(part)
+            digests.append(digest.digest())
+            stored.append(sink.adopt(initial, fragment_id, 0, digest.hexdigest()))
         return tuple(stored), digests
 
     def _wait_for_initial_fragments(
