@@ -102,7 +102,7 @@ def build_overrides(p: NemotronMegatronPlan) -> list[str]:
         f"data.max_response_length={p.max_response_len}",
         f"data.train_batch_size={p.groups_per_round}",
         f"actor_rollout_ref.model.path={p.model_path}",
-        "actor_rollout_ref.model.trust_remote_code=True",
+        "actor_rollout_ref.model.trust_remote_code=False",
         "actor_rollout_ref.model.use_fused_kernels=False",
         "actor_rollout_ref.actor.use_kl_loss=False",
         "actor_rollout_ref.actor.clip_ratio_low=0.2",
@@ -176,17 +176,21 @@ def build_overrides(p: NemotronMegatronPlan) -> list[str]:
 def image_commands(max_jobs: int = 16) -> list[str]:
     """Extra image layers on top of the verl uv venv: the megatron extra plus the
     Mamba training kernels the extra does not list (the example installs them by
-    hand: causal-conv1d and mamba-ssm). Hopper only; mamba-ssm's own CUDA
-    selective-scan is skipped (Mamba-2 training uses its Triton kernels)."""
+    hand: causal-conv1d and mamba-ssm). Hopper only; mamba-ssm builds its CUDA
+    loads its CUDA selective-scan module, so that build cannot be skipped."""
     from .image import VENV_BIN
     from .pins import VERL_PYTHON, VERL_ROOT
-    env = f"MAX_JOBS={max_jobs} TORCH_CUDA_ARCH_LIST=9.0"
+    env = f"MAX_JOBS={max_jobs} TORCH_CUDA_ARCH_LIST=9.0 CC=gcc CXX=g++"
     return [
         f"cd {VERL_ROOT} && UV_PYTHON=/usr/local/bin/python{VERL_PYTHON} uv sync --frozen --all-packages"
         " --extra vllm --extra megatron",
         f"uv pip install --python {VENV_BIN}/python ninja packaging wheel setuptools",
         f"{env} CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --python {VENV_BIN}/python --no-build-isolation"
         " 'causal-conv1d==1.6.2.post1'",
-        f"{env} MAMBA_SKIP_CUDA_BUILD=TRUE MAMBA_FORCE_BUILD=TRUE uv pip install --python {VENV_BIN}/python"
+        f"{env} MAMBA_FORCE_BUILD=TRUE uv pip install --python {VENV_BIN}/python"
         " --no-build-isolation --no-deps 'mamba-ssm==2.3.2.post1'",
+        # flash-attn 2.8.3's flash_attn.cute (FA4 preview) raises AttributeError (not
+        # ImportError) against the locked nvidia-cutlass-dsl 4.6.2, and Megatron-Core's
+        # attention.py only catches ImportError. FA4 targets Blackwell; Hopper does not use it.
+        f"rm -rf {VERL_ROOT}/.venv/lib/python{VERL_PYTHON}/site-packages/flash_attn/cute",
     ]

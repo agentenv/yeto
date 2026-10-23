@@ -49,8 +49,8 @@ def prep(run: str) -> dict:
     model_dir = Path(MNT) / "models" / MODEL_ID.split("/")[1]
     rc = {}
     if not (model_dir / "config.json").exists():
-        from huggingface_hub import snapshot_download
-        snapshot_download(MODEL_ID, local_dir=str(model_dir), max_workers=16)
+        rc["download"] = _sh(f"{VERL_PY} -c 'from huggingface_hub import snapshot_download as d;"
+                             f"d(\"{MODEL_ID}\", local_dir=\"{model_dir}\", max_workers=16)'", log)
     rc["model_files"] = len(list(model_dir.glob("*.safetensors")))
     data = Path(MNT) / "data" / "gsm8k"
     if not (data / "train.parquet").exists():
@@ -60,7 +60,7 @@ def prep(run: str) -> dict:
         f"{VERL_PY} -c 'import mamba_ssm, causal_conv1d, megatron.core, megatron.bridge, vllm, torch;"
         "from megatron.bridge import AutoBridge;"
         f"print(torch.__version__, vllm.__version__, mamba_ssm.__version__, causal_conv1d.__version__);"
-        f"print(AutoBridge.can_handle(\"{model_dir}\", trust_remote_code=True))'", log)
+        f"print(AutoBridge.can_handle(\"{model_dir}\", trust_remote_code=False))'", log)
     modal.Volume.from_name(VOLUME).commit()
     return rc
 
@@ -110,15 +110,14 @@ def build_app(run: str, n_gpus: int):
     ignore = [".git", ".venv", ".claude", "**/__pycache__", "syncer/target", "evidence*", "openspec", "docs",
               "tutorial", "data", "s1-runs"]
     image = (modal_image(modal, patched=False).run_commands(*image_commands())
-             .pip_install("huggingface_hub[hf_transfer]==0.36.0")
-             .env({"PYTHONUNBUFFERED": "1", "HF_HUB_ENABLE_HF_TRANSFER": "1", "PYTHONPATH": "/root/yeto"})
+             .env({"PYTHONUNBUFFERED": "1", "PYTHONPATH": "/root/yeto"})
              .add_local_dir(str(REPO / "yeto"), "/root/yeto/yeto", copy=False))
     vol = modal.Volume.from_name(VOLUME, create_if_missing=True, version=2)
     app = modal.App(APP + run)
     fns = {
         "prep": app.function(image=image, cpu=16.0, memory=65536, timeout=7200, volumes={MNT: vol},
                              ephemeral_disk=600 * 1024, name="prep", serialized=True)(prep),
-        "smoke": app.function(image=image, gpu=f"H200!:{n_gpus}", cpu=32.0, memory=786432, timeout=7200,
+        "smoke": app.function(image=image, gpu=f"H200:{n_gpus}", cpu=32.0, memory=786432, timeout=7200,
                               retries=0, volumes={MNT: vol}, ephemeral_disk=1024 * 1024, name="smoke",
                               serialized=True)(smoke),
     }
