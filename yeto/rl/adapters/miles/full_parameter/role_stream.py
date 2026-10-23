@@ -1417,6 +1417,18 @@ class MilesFullParameterRoleStream:
                 if permit.global_step > previous.global_step:
                     self._pending[permit.fragment_id] = permit
                 continue
+            if (
+                previous is not None
+                and previous.global_step == permit.global_step
+                and previous.round_attempt != permit.round_attempt
+            ):
+                # The syncer retries a round (same step and base) under a new
+                # attempt after a quorum timeout and refuses pushes of the old
+                # attempt. The newest attempt supersedes; a retained pair
+                # rebinds its exact operands to it (``retained_replay_candidate``).
+                if permit.round_attempt > previous.round_attempt:
+                    self._pending[permit.fragment_id] = permit
+                continue
             if previous is not None and previous != permit:
                 raise RuntimeError("role-stream received conflicting PULLs")
             self._pending.setdefault(permit.fragment_id, permit)

@@ -291,6 +291,37 @@ def test_newer_pull_supersedes_a_closed_round_only_with_a_partial_quorum():
         strict._queue_pulls()
 
 
+@pytest.mark.parametrize("partial_quorum", [True, False])
+def test_retried_round_attempt_supersedes_the_older_permit(partial_quorum):
+    # A quorum timeout makes the syncer resend the same round under a new
+    # attempt; it refuses pushes of the old one.
+    stream = _stream(partial_quorum)
+    stream.client.pulls = [PullRequest(0, 1, 1)]
+    stream._queue_pulls()
+    stream.client.pulls = [PullRequest(0, 1, 2)]
+    stream._queue_pulls()
+    assert stream._pending == {0: PullRequest(0, 1, 2)}
+    # A late duplicate of the old attempt never wins back.
+    stream.client.pulls = [PullRequest(0, 1, 1), PullRequest(0, 1, 2)]
+    stream._queue_pulls()
+    assert stream._pending == {0: PullRequest(0, 1, 2)}
+    # Several attempts in one drain keep the newest.
+    stream.client.pulls = [PullRequest(1, 2, 3), PullRequest(1, 2, 5), PullRequest(1, 2, 4)]
+    stream._queue_pulls()
+    assert stream._pending == {0: PullRequest(0, 1, 2), 1: PullRequest(1, 2, 5)}
+
+
+@pytest.mark.parametrize("partial_quorum", [True, False])
+def test_retried_attempt_reopens_a_round_answered_under_the_old_attempt(partial_quorum):
+    stream = _stream(partial_quorum)
+    # Attempt 1 was pushed (answered, permit consumed); the retry asks again.
+    stream._queue_pulls()  # records the link generations
+    stream._answered = {(1, 1): stream._link_generation(0)}
+    stream.client.pulls = [PullRequest(0, 1, 1), PullRequest(0, 1, 2)]
+    stream._queue_pulls()
+    assert stream._pending == {0: PullRequest(0, 1, 2)}
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("partial_quorum", [True, False])
 async def test_applying_a_round_drops_its_unanswered_pull(partial_quorum):
