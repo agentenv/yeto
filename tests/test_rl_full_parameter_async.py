@@ -37,6 +37,7 @@ def _launcher_args(engine, extra=(), gpu="aws:1xa100@us-east-1"):
     return _provenance_launcher_args(engine, ("--rl-sync-mode", "strict", *extra), gpu=gpu)
 from test_rl_full_parameter_sync import _candidate, _PairedRole, _role_stream_config
 from yeto.protocol import PullRequest
+from yeto.rl.adapters.miles.full_parameter.role_stream import RoleSubmissionCandidate
 from yeto.rl.engine.full_parameter_sync import FullParameterSyncProfile, RolePairing
 
 LAYOUT = "e" * 64
@@ -452,7 +453,7 @@ def test_async_checkpoint_interval_reaches_the_syncer(monkeypatch):
 @pytest.mark.parametrize(
     ("extra", "message"),
     [
-        (ASYNC + ("--rl-sync-fragment-pipeline", "3"), r"between 1 and min\(2, --fragments\)"),
+        (ASYNC + ("--rl-sync-fragment-pipeline", "5"), r"between 1 and min\(8, --fragments\)"),
         (ASYNC + ("--rl-sync-checkpoint-every", "0"), "checkpoint-every >= 1"),
         (ASYNC + ("--rl-sync-async-checkpoint",), "no --rl-sync-async-checkpoint"),
         (ASYNC + ("--rl-sync-overlap", "--rl-sync-fragment-pipeline", "2"), "no --rl-sync-overlap"),
@@ -488,8 +489,15 @@ def test_island_checks_the_async_profile():
     _check_dense_full_sweep(_island_args(), yeto_policy_sync=True)
     _check_dense_full_sweep(_island_args(rl_sync_matrix_merge="rda"), yeto_policy_sync=True)
     with pytest.raises(ValueError, match="--pipeline 1..min"):
-        _check_dense_full_sweep(_island_args(pipeline=3, fragments=4, total_fragment_steps=12),
+        _check_dense_full_sweep(_island_args(pipeline=5, fragments=4, total_fragment_steps=12),
                                 yeto_policy_sync=True)
+    with pytest.raises(ValueError, match=r"--pipeline 1..min\(8, P\)"):
+        _check_dense_full_sweep(_island_args(pipeline=9, fragments=60, total_fragment_steps=60, global_rounds=1),
+                                yeto_policy_sync=True)
+    _check_dense_full_sweep(_island_args(pipeline=4, fragments=4, total_fragment_steps=12),
+                            yeto_policy_sync=True)
+    _check_dense_full_sweep(_island_args(pipeline=8, fragments=60, total_fragment_steps=60, global_rounds=1),
+                            yeto_policy_sync=True)
     with pytest.raises(ValueError, match="strict sweep requires H=1"):
         _check_dense_full_sweep(_island_args(full_parameter_rounds="sweep"), yeto_policy_sync=True)
     with pytest.raises(ValueError, match="plain averaging"):
@@ -794,3 +802,102 @@ def test_async_streaming_weighted_fold_reaches_the_rl_syncer(monkeypatch):
     default = _launcher_args("ports", ASYNC, gpu=TWO_ISLANDS)
     _prepare_rl_args(default)
     assert "--weighted-fold" not in syncer_command(default, 2).split()
+
+
+# -- deeper asynchronous pipelines (up to 8 fragment rounds in flight) --------
+
+
+def test_async_pipeline_default_stays_two_and_accepts_up_to_eight():
+    _, plan = _plan(ASYNC)
+    assert _flag(plan["role_syncers"][0]["command"], "--pipeline") == "1"  # strict-mode control: serial
+    _, deep = _plan(ASYNC + ("--rl-sync-fragment-pipeline", "4"))
+    assert _flag(deep["role_syncers"][0]["command"], "--pipeline") == "4"
+    for island in deep["island_requests"]:
+        assert _flag(island["learner_command"], "--pipeline") == "4"
+
+
+def _deep_candidate(global_step: int, fragments: int):
+    return RoleSubmissionCandidate(role="actor", permit=PullRequest((global_step - 1) % fragments, global_step, 1),
+                                   base_version=max(0, global_step - fragments), local_step=2, c_steps=2,
+                                   c_tokens=11, payload_bytes=8, submission_cut=object(), anchor=object())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("depth", [3, 4, 8])
+async def test_deep_pipeline_submits_depth_rounds_and_applies_in_version_order(depth):
+    fragments = 8
+    actor = _PairedRole("actor", [_deep_candidate(step, fragments) for step in range(1, fragments + 1)], [],
+                        release_broadcasts=False)
+    actor.fragment_versions = (0,) * fragments
+    profile = FullParameterSyncProfile(roles=("actor",), total_fragment_steps=2 * fragments, fragments=fragments,
+                                       local_horizon=2, pipeline_depth=depth, wait_timeout=900.0,
+                                       poll_seconds=0.001, partial_quorum=True)
+    pairing = RolePairing({"actor": actor}, profile)
+
+    first = _submitted(pairing.submit_ready())
+    assert first == list(range(1, depth + 1))
+    assert len(pairing.inflight) == depth
+    assert _submitted(pairing.submit_ready()) == []  # the pipeline is full
+    # The rounds close out of order; one closes without this island's push
+    # (a round it never pushed to is overwritten, never double-applied).
+    closed = list(reversed(first))
+    actor._staged_steps.extend(closed)
+    actor._queued_steps.clear()
+    committed = await pairing.commit_staged_broadcasts()
+    assert committed["actor"].applied_fragments == tuple(range(depth))
+    assert actor.fragment_versions[:depth] == tuple(range(1, depth + 1))
+    assert actor.fragment_versions[depth:] == (0,) * (fragments - depth)
+    assert pairing.inflight == {} and len(pairing.journal) == depth and pairing.overwritten_rounds == 0
+    # The next window opens with the following rounds.
+    assert _submitted(pairing.submit_ready()) == list(range(depth + 1, min(2 * depth, fragments) + 1))
+    # A round this island never pushed (absent) is an overwrite in the deep window too.
+    absent = 2 * depth + 1
+    if absent <= fragments:
+        actor.candidates = [c for c in actor.candidates if c.permit.global_step != absent]
+        actor._staged_steps.append(absent)
+        actor._staged_steps.extend(step for step in range(depth + 1, min(2 * depth, fragments) + 1))
+        actor._queued_steps.clear()
+        await pairing.commit_staged_broadcasts()
+        assert actor.fragment_versions[absent - 1] == absent
+        assert pairing.overwritten_rounds == 1
+
+
+@needs_cargo
+@pytest.mark.usefixtures("_hmac_key")
+@pytest.mark.parametrize(("fragments", "depth"), [(4, 4), (8, 8), (8, 3)])
+def test_real_syncer_keeps_depth_rounds_open_and_merges_like_the_reference(
+        syncer_binary, tmp_path, monkeypatch, fragments, depth):
+    """Both learners hold their pushes until ``depth`` PULLs are open at once,
+    so the run only finishes if the syncer really keeps ``depth`` rounds in
+    flight; the merged weights match the outer Nesterov reference."""
+
+    import sys
+
+    monkeypatch.setattr(sys.modules[__name__], "P", fragments)
+    rounds: dict[int, dict] = {}
+    held: dict[int, list] = {0: [], 1: []}
+    widest = [0, 0]
+    total = 2 * fragments
+
+    def push(learner, permit):
+        delta = _delta(learner, permit.global_step)
+        rounds.setdefault(permit.global_step, {})[learner] = (1.0, delta)
+        held[learner].append((learner, permit, (_base(permit.global_step), 1, 7, delta)))
+
+    def late(_versions):
+        out = []
+        for learner in (0, 1):
+            rows = held[learner]
+            remaining = total - max((p.global_step for _l, p, _a in rows), default=0)
+            if rows and (len(rows) >= depth or remaining == 0):
+                widest[learner] = max(widest[learner], len(rows))
+                out.extend(rows)
+                rows.clear()
+        return out
+
+    finals, log = _drive(syncer_binary, tmp_path, ("--rl-sync-fragment-pipeline", str(depth)),
+                         total_steps=2, push=push, late=late)
+    assert sorted(rounds) == list(range(1, total + 1))
+    assert widest == [depth, depth]
+    _assert_matches(finals, _nesterov_reference(rounds, lr=0.7, mu=0.9))
+    assert "push rejected" not in log

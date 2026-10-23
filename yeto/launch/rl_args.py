@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 
 from ..gpu_spec import parse_gpu_spec
+from ..rl.engine.run_flags import FULL_PARAMETER_ASYNC_DEFAULT_PIPELINE, FULL_PARAMETER_ASYNC_MAX_PIPELINE
 from ..rl.engine.selection import (
     ASYNC_GRACE_CAP_MS,
     ASYNC_NESTEROV_MIN_H,
@@ -199,8 +200,9 @@ def _check_bcast_delta(args) -> None:
                          "pool options) and no --experimental-rl-sync")
 
 
-# S27 P2: asynchronous rounds keep at most two fragment rounds in flight.
-FULL_PARAMETER_ASYNC_MAX_PIPELINE = 2
+# S27 P2: asynchronous rounds keep FULL_PARAMETER_ASYNC_DEFAULT_PIPELINE (2)
+# fragment rounds in flight by default and at most
+# FULL_PARAMETER_ASYNC_MAX_PIPELINE (8); both live in rl.engine.run_flags.
 
 
 def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
@@ -238,7 +240,8 @@ def _prepare_dense_full_sweep(args, *, num_islands: int) -> None:
     if async_rounds:
         max_pipeline = min(max_pipeline, FULL_PARAMETER_ASYNC_MAX_PIPELINE)
     if not 1 <= fragment_pipeline <= max_pipeline:
-        problems.append("--rl-sync-fragment-pipeline between 1 and min(2, --fragments)" if async_rounds
+        problems.append(f"--rl-sync-fragment-pipeline between 1 and min({FULL_PARAMETER_ASYNC_MAX_PIPELINE}, "
+                        "--fragments)" if async_rounds
                         else "--rl-sync-fragment-pipeline between 1 and --fragments")
     checkpoint_every = int(getattr(args, "rl_sync_checkpoint_every", 1))
     if async_rounds:
@@ -381,9 +384,9 @@ def _apply_rl_sync_mode(args) -> None:
         if (args.rl_sync_preset == FULL_PARAMETER_SYNC_PRESET
                 and args.rl_sync_full_parameter_rounds == "async"
                 and is_sync_mode_default(getattr(args, "rl_sync_fragment_pipeline", None))):
-            # At most two fragment rounds in flight; the fragment count is
+            # Two fragment rounds in flight by default; the fragment count is
             # checked (and may be 1) in _prepare_dense_full_sweep.
-            args.rl_sync_fragment_pipeline = min(FULL_PARAMETER_ASYNC_MAX_PIPELINE,
+            args.rl_sync_fragment_pipeline = min(FULL_PARAMETER_ASYNC_DEFAULT_PIPELINE,
                                                  max(int(getattr(args, "fragments", 1) or 1), 1))
     else:
         mode = "strict"

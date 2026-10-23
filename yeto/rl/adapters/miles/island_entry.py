@@ -19,7 +19,12 @@ from typing import Any
 from yeto.rl.bridge import BridgeConfig
 from yeto.rl.decoupled import DecoupledBridgeConfig
 from yeto.rl.engine.resume import DEFAULT_CUT_EVERY
-from yeto.rl.engine.run_flags import ISLAND, add_rl_flags, rl_option_pairs
+from yeto.rl.engine.run_flags import (
+    FULL_PARAMETER_ASYNC_MAX_PIPELINE,
+    ISLAND,
+    add_rl_flags,
+    rl_option_pairs,
+)
 from yeto.rl.adapters.miles.models.deepseek_v4.expert_full import expert_full_specs
 from yeto.rl.export import adapter_targets, derive_peft_lora_specs
 from yeto.rl.adapters.miles.revision import verify_miles_revision
@@ -801,12 +806,14 @@ def _check_dense_full_sweep(args, *, yeto_policy_sync: bool) -> None:
     _check_full_parameter_sync(args, yeto_policy_sync=yeto_policy_sync)
     if _full_parameter_async(args):
         # S27 P2 asynchronous rounds: H local rounds per fragment push, at
-        # most two fragment rounds in flight; no sweep-only options.
+        # most FULL_PARAMETER_ASYNC_MAX_PIPELINE fragment rounds in flight;
+        # no sweep-only options.
         if args.optimizer_steps != 1 or getattr(args, "local_horizon", 1) < 1:
             raise ValueError("dense full-parameter asynchronous rounds need H >= 1 "
                              "and one optimizer step")
-        if not 1 <= getattr(args, "pipeline", 1) <= min(2, args.fragments):
-            raise ValueError("dense full-parameter asynchronous rounds need --pipeline 1..min(2, P)")
+        if not 1 <= getattr(args, "pipeline", 1) <= min(FULL_PARAMETER_ASYNC_MAX_PIPELINE, args.fragments):
+            raise ValueError("dense full-parameter asynchronous rounds need --pipeline "
+                             f"1..min({FULL_PARAMETER_ASYNC_MAX_PIPELINE}, P)")
         if getattr(args, "sweep_overlap", False):
             raise ValueError("--sweep-overlap needs the strict sweep")
     elif args.optimizer_steps != 1 or getattr(args, "local_horizon", 1) != 1:

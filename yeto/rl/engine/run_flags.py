@@ -46,6 +46,14 @@ from yeto.rl.engine.selection import (
 )
 
 CLI = "cli"
+# S27 asynchronous full-parameter rounds: the default and the largest number
+# of fragment rounds in flight (--rl-sync-fragment-pipeline / island
+# --pipeline).  The syncer and the island pairing take any depth up to P; the
+# bound limits the retained submissions and staged broadcasts (one fragment
+# each) an island holds at once.
+FULL_PARAMETER_ASYNC_DEFAULT_PIPELINE = 2
+FULL_PARAMETER_ASYNC_MAX_PIPELINE = 8
+
 ISLAND = "island"
 LAYERS = (CLI, ISLAND)
 
@@ -942,7 +950,7 @@ _SYNC = (
         type=int,
         default=sync_mode_default(1),
         help="full-parameter only: fragment rounds the syncer gathers at once "
-        "(1..--fragments; asynchronous rounds: 1 or 2). Above 1, fragment k+1 uploads "
+        "(1..--fragments; asynchronous rounds: 1..min(8, --fragments)). Above 1, fragment k+1 uploads "
         "while fragment k merges and downloads (default: min(2, --fragments) with "
         "asynchronous rounds, else 1 = serial)",
     ),

@@ -1385,10 +1385,24 @@ def rebase_full_parameter_tracking(actor: Any) -> None:
     rebase_full_parameter_scheduler_anchor(actor, reason="peer snapshot restore")
 
 
+def forget_full_parameter_resident(actor: Any) -> None:
+    """A restore writes the optimizer masters: Miles must not treat any
+    fragment as already held by them (the resident-fragment apply skip).
+    A Miles without that skip has nothing to forget."""
+    try:
+        from miles.backends.megatron_utils import full_parameter_state
+    except ImportError:
+        return
+    forget = getattr(full_parameter_state, "forget_full_parameter_resident_fragments", None)
+    if forget is not None:
+        forget(actor)
+
+
 def restore_cut_shard(actor: Any, *, directory: str, files: list[Mapping[str, Any]], cut_id: str) -> dict[str, Any]:
     """Verify and load this rank's shard; return the post-restore summary (identical digests expected)."""
     install_grad_norm_recorder()  # a rebuilt trainer process has no recorder yet
     bump_weights_version()  # rl-publish-fastpath: restore writes trainable weights
+    forget_full_parameter_resident(actor)
     _inject_restore_sleep(actor)
     progress = {"written": False}
     try:
@@ -1579,6 +1593,7 @@ def restore_resharded_shard(
     """
     install_grad_norm_recorder()
     bump_weights_version()  # rl-publish-fastpath: restore writes trainable weights
+    forget_full_parameter_resident(actor)
     with trainer_resident(actor):
         return _restore_resharded(actor, directory=directory, files=files, cut_id=cut_id,
                                   source_dp=int(source_dp), rng_policy=rng_policy)

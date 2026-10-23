@@ -979,9 +979,15 @@ class MilesChunkedFullParameterAdapter:
     ) -> int:
         if target.layout_hash != self.layout.layout_hash:
             raise ValueError("Miles target layout changed")
+        # The role stream builds every target from its current cut, which is
+        # the cut the trainer last exported or committed.  A Miles that can
+        # skip resident fragments then reads and copies only the fragments
+        # this apply replaces; the applied values are the same.
+        extra = {"skip_resident_fragments": True} if skip_resident_supported(group) else {}
         applied = await group.apply_full_parameter_chunked_cut(
             target.transport_cut,
             commit_token=commit_token,
+            **extra,
         )
         if applied != self.expected_parameter_tensor_count:
             raise RuntimeError("Miles applied an incomplete reference-backed cut")
@@ -1000,6 +1006,29 @@ class MilesChunkedFullParameterAdapter:
         return (
             (policy_version - 1) * self.layout.fragments.num_fragments + fragment_id + 1
         )
+
+
+SKIP_RESIDENT_ENV = "YETO_FULL_PARAMETER_SKIP_RESIDENT"
+
+
+def skip_resident_supported(group: Any) -> bool:
+    """Whether ``group``'s apply takes ``skip_resident_fragments`` (and it is not disabled).
+
+    ``YETO_FULL_PARAMETER_SKIP_RESIDENT=0`` keeps the whole-model apply."""
+
+    import inspect
+    import os
+
+    if os.environ.get(SKIP_RESIDENT_ENV, "1") == "0":
+        return False
+    apply = getattr(group, "apply_full_parameter_chunked_cut", None)
+    if apply is None:
+        return False
+    try:
+        parameters = inspect.signature(apply).parameters
+    except (TypeError, ValueError):
+        return False
+    return "skip_resident_fragments" in parameters
 
 
 def _fragment_owner_shard(cut: Any, fragment_id: int) -> Any:
