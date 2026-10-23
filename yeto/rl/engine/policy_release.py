@@ -279,6 +279,31 @@ class PolicyReleaseStore:
             return None
         return PolicyRelease.from_record(json.loads(path.read_text(encoding="utf-8")))
 
+    def records(self) -> list[PolicyRelease]:
+        """The release records still in the store (pruning keeps the newest
+        ``keep``) and LATEST, in ``seq`` order. A restarted trainer restores its
+        published versions from them (S27 L11)."""
+        found: dict[int, PolicyRelease] = {}
+        raws: list[bytes | str] = []
+        objects = self.store.objects
+        if objects is not None:
+            keys = [k for k in objects.list(f"{self.release_dir}/")
+                    if k.endswith(f"/{RECORD}") or k == f"{self.release_dir}/{LATEST}"]
+            raws = [raw for raw in (objects.read(k) for k in keys) if raw is not None]
+        else:
+            self.store.reload()
+            if self.root.is_dir():
+                paths = [p / RECORD for p in self.root.iterdir()
+                         if p.is_dir() and _RELEASE_NAME.fullmatch(p.name)] + [self.root / LATEST]
+                raws = [p.read_bytes() for p in paths if p.is_file()]
+        for raw in raws:
+            try:
+                record = PolicyRelease.from_record(json.loads(raw))
+            except (ValueError, TypeError, PolicyReleaseError):
+                continue  # a torn or foreign record: not a release this trainer made
+            found[record.seq] = record
+        return [found[seq] for seq in sorted(found)]
+
     def release(self, version: int, policy_hash: str, write: Callable[[Path], None], *,
                 buffer_selected: int | None = None, weights: str = FULL,
                 engine_checksum: str | None = None,

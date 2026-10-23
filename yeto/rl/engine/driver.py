@@ -63,7 +63,7 @@ from contextlib import contextmanager
 import math
 import sys
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -517,6 +517,13 @@ class IslandDriver:
         self.published_state: TrainableState | None = None
         # P0-S: published versions within the policy-age window (version -> hash)
         self.published_policies = PublishedPolicies()
+        # S27 L11: where a restarted island's data position comes from when it is not
+        # the rollout data source (e.g. "buffer_lane": a synced trainer's lane cursor
+        # log); None: the data source cursor is restored (_restore_data_cursor).
+        self.data_position_owner: str | None = None
+        # S27 L11: () -> ((version, policy hash), ...) published before this process
+        # started (e.g. the store's policy releases); None: none to restore.
+        self.published_policy_history: Callable[[], Iterable[tuple[int, str]]] | None = None
         self.at_safe_point = False
         self.last_applied_lrs: list[float] | None = None
         self.eval_overlap: EvalOverlap | None = None
@@ -833,6 +840,30 @@ class IslandDriver:
         setter = getattr(self.rollout, "set_published_policies", None)
         if callable(setter):
             setter(self.published_policies)
+
+    def _restore_published_policies(self, start_rollout_id: int) -> None:
+        """S27 L11: a restarted island learns the versions published before it
+        started, so groups the samplers generated with them pass the policy-age
+        check. Only versions below the start version within the policy-age window
+        are restored; the start version and later ones are published again."""
+        history = getattr(self, "published_policy_history", None)
+        if start_rollout_id <= 0 or not callable(history):
+            return
+        oldest = start_rollout_id - self._max_policy_age()
+        restored = {}
+        for version, policy_hash in history():
+            version = int(version)
+            if oldest <= version < start_rollout_id and policy_hash:
+                restored[version] = str(policy_hash)
+        if not restored:
+            return
+        for version, policy_hash in sorted(restored.items()):
+            self.published_policies.record(version, policy_hash)
+        setter = getattr(self.rollout, "set_published_policies", None)
+        if callable(setter):
+            setter(self.published_policies)
+        self.emit("rl_published_policies_restored", rollout_id=start_rollout_id,
+                  versions=sorted(restored))
 
     def _with_policy_labels(self, batch: RolloutBatchHandle) -> RolloutBatchHandle:
         """P0-S: name every group's generating policy by its label.
@@ -1878,6 +1909,12 @@ class IslandDriver:
         pool that reports cursors -> DriverError (no silent re-training)."""
         if start_rollout_id <= 0:
             return
+        owner = getattr(self, "data_position_owner", None)
+        if owner is not None:
+            # S27 L11: the island reads no data source (a synced trainer reads its
+            # buffer lane, whose cursor log resumes it); no data cursor to restore.
+            self.emit("rl_data_cursor_restored", rollout_id=start_rollout_id, source=owner)
+            return
         seek = getattr(self.rollout, "seek_data_cursor", None)
         from_cut = getattr(self.sync, "resume_data_cursor", None)
         cut_cursor = from_cut() if callable(from_cut) else None
@@ -1978,6 +2015,7 @@ class IslandDriver:
                 start = None
                 try:
                     start = self.sync.start(self)
+                    self._restore_published_policies(start.rollout_id)
                     if self.ledger is not None:
                         self.ledger.rebase(start.rollout_id)
                         self._restore_data_cursor(start.rollout_id)

@@ -532,6 +532,13 @@ def wire_policy_releases(driver: Any, *, miles_args: Any, actor_model: Any, runn
         def on_gap(previous: int, version: int) -> None:
             driver.emit("rl_policy_release_gap", previous_version=previous, policy_version=version)
 
+        # S27 L11: the lane cursor log resumes a relaunched synced trainer, not
+        # the data source; and it accepts groups made with the versions the
+        # store's releases name (a publisher of an earlier process released them).
+        driver.data_position_owner = "buffer_lane"
+        releases = release_store(config, environ)
+        driver.published_policy_history = lambda: [
+            (r.version, r.policy_hash) for r in releases.records() if r.derived_from is None]
         driver.publisher = GateVersionPublisher(
             driver.publisher, lambda v: in_executor(executor_set_gate_version, int(v)), version_of)
         publisher_island = is_publisher(lane.index, lane.count)
