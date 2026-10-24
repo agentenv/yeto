@@ -30,6 +30,13 @@ class _RlStrictFailure:
     reason: str
 
 
+class RelaunchBlocked(Exception):
+    """Raised by ``sky_ops.relaunch`` when the island must not be relaunched at all
+    (not now, not on a later poll): e.g. its Modal app was stopped by a teardown.
+    The message is the reason; the controller abandons the island instead of
+    retrying until the recovery timeout."""
+
+
 class _RelaunchAttempt:
     """Result slot for one background relaunch attempt."""
 
@@ -735,7 +742,11 @@ class FleetController:
                 if self._stop_requested(rec, "relaunch"):  # set after the check in the poll loop
                     attempt.result = None
                     return
-                attempt.result = self.ops.relaunch(task, target)
+                try:
+                    attempt.result = self.ops.relaunch(task, target)
+                except RelaunchBlocked as blocked:
+                    attempt.blocked, attempt.result = str(blocked), None
+                    return
                 if attempt.result is not None and self.instance_guard is not None:
                     after = getattr(self.instance_guard, "after_relaunch", None)
                     if after is not None:

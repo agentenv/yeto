@@ -45,8 +45,11 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor, wait
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -338,20 +341,25 @@ class SamplerRoundWriter:
     def write_round(self, rollout_id: int, groups: Sequence[tuple[str, list[dict[str, Any]]]],
                     data_cursor: Mapping[str, int] | None) -> int:
         """Write ``groups`` (``(group key, samples)``, aborted groups already left
-        out) of round ``rollout_id``; returns the groups written."""
+        out) of round ``rollout_id``, with one store commit at the end; returns the
+        groups written."""
         from yeto.rl.engine.sampler_resume import SamplerRound
 
         if self.guard is not None:
             self.guard.check(rollout_id)
         written = 0
-        for i, (key, samples) in enumerate(groups):
-            if self.reclaimed():
-                self.dropped_groups += len(groups) - i
-                break
-            record = SamplerRound(self.sampler_id, self.incarnation, int(rollout_id),
-                                  data_cursor=data_cursor, last=i == len(groups) - 1)
-            self._writer.write(samples, group_key=key, sampler_round=record.record())
-            written += 1
+        # one store commit for the round, not one per group (S27 G-AO: 64 groups of a
+        # 30B round took ~170 s of per-group Modal Volume commits)
+        hold = getattr(self.buffer, "one_commit", None)
+        with hold() if callable(hold) else nullcontext():
+            for i, (key, samples) in enumerate(groups):
+                if self.reclaimed():
+                    self.dropped_groups += len(groups) - i
+                    break
+                record = SamplerRound(self.sampler_id, self.incarnation, int(rollout_id),
+                                      data_cursor=data_cursor, last=i == len(groups) - 1)
+                self._writer.write(samples, group_key=key, sampler_round=record.record())
+                written += 1
         if written and self.guard is not None:
             self.guard.written(rollout_id)
         return written
@@ -367,24 +375,50 @@ class TakeReport:
     end: int  # buffer position after the last selected entry
     behavior_versions: dict[int, int] = field(default_factory=dict)
     wait_s: float = 0.0
+    # seconds of the take's phases: index refresh and selection (a store reload, the
+    # shard merge), waiting for the payload reads, decoding; and the groups whose
+    # payload was read ahead of the take (BatchReader prefetch)
+    select_s: float = 0.0
+    read_s: float = 0.0
+    decode_s: float = 0.0
+    prefetched: int = 0
 
     def metrics(self) -> dict[str, float]:
         return {"sample_buffer/groups": float(self.groups),
                 "sample_buffer/stale_groups": float(self.stale_groups),
                 "sample_buffer/start": float(self.start), "sample_buffer/end": float(self.end),
-                "sample_buffer/wait_s": float(self.wait_s)}
+                "sample_buffer/wait_s": float(self.wait_s),
+                "sample_buffer/select_s": float(self.select_s),
+                "sample_buffer/read_s": float(self.read_s),
+                "sample_buffer/decode_s": float(self.decode_s),
+                "sample_buffer/prefetched_groups": float(self.prefetched)}
+
+
+DEFAULT_READ_WORKERS = 8  # payload reads in flight (one Modal Volume file each)
 
 
 class BatchReader:
-    """Selects the trainer's rounds from the buffer (single consumer)."""
+    """Selects the trainer's rounds from the buffer (single consumer).
+
+    Payload reads: the payloads of a take are read by ``read_workers`` threads at
+    once (decoded in buffer order on the caller's thread). With ``prefetch``, after
+    a take returns a background thread watches the index for the next round's
+    entries and reads their payloads while the trainer trains; the next take uses
+    the bytes read ahead (``TakeReport.prefetched``). The read cursor only moves in
+    :meth:`take`: prefetching selects nothing. No store refresh (a Modal Volume
+    reload) runs while a payload read of this reader is open: the reload of a
+    Volume with open files fails."""
 
     def __init__(self, buffer: Any, *, max_policy_age: int, wait_s: float = DEFAULT_WAIT_S,
                  poll_s: float = DEFAULT_POLL_S, consumer: str = TRAINER_CONSUMER,
                  clock: Callable[[], float] = time.monotonic,
                  sleep: Callable[[float], None] = time.sleep,
-                 cursor_log: LaneCursorLog | ObjectLaneCursorLog | None = None) -> None:
+                 cursor_log: LaneCursorLog | ObjectLaneCursorLog | None = None,
+                 read_workers: int = DEFAULT_READ_WORKERS, prefetch: bool = True) -> None:
         """``cursor_log``: a synced trainer's lane cursor (:mod:`yeto.rl.engine.merged_release`):
-        the reader continues after its last line and appends one per round."""
+        the reader continues after its last line and appends one per round.
+        ``read_workers`` < 2 reads the payloads one by one; ``prefetch`` needs a
+        buffer with ``peek`` (the class doc)."""
         if int(max_policy_age) < 1:
             raise ValueError("max_policy_age must be >= 1")
         self.buffer = buffer
@@ -398,8 +432,24 @@ class BatchReader:
         # a synced trainer gates on the merged version it last published (set_gate_version)
         self.gate_version: int | None = None
         self.cursor_log = cursor_log
+        self._pool = (ThreadPoolExecutor(int(read_workers), thread_name_prefix="buffer-read")
+                      if int(read_workers) > 1 else None)
+        self.prefetch = bool(prefetch) and callable(getattr(buffer, "peek", None))
+        self._reads: dict[str, Future] = {}  # payload ref -> its read (ahead of a take)
+        self._prefetcher: threading.Thread | None = None
+        self._stop_prefetch = threading.Event()
         if cursor_log is not None:
             self.buffer.reset_to(cursor_log.last_cursor())
+
+    def _read(self, ref: str) -> Future:
+        if self._pool is None:
+            done: Future = Future()
+            try:
+                done.set_result(self.buffer.read_payload(ref))
+            except BaseException as error:  # noqa: BLE001 - raised by result()
+                done.set_exception(error)
+            return done
+        return self._pool.submit(self.buffer.read_payload, ref)
 
     def take(self, rollout_id: int, groups: int, *, current_version: int | None
              ) -> tuple[list[tuple[int, list[dict[str, Any]]]], TakeReport]:
@@ -410,30 +460,43 @@ class BatchReader:
             raise ValueError("groups must be positive")
         rollout_id = int(rollout_id)
         started = self.clock()
+        self._stop_prefetching()
+        ahead = dict(self._reads)
+        self._reads.clear()
         start = self.buffer.read_cursor
-        out: list[tuple[int, list[dict[str, Any]]]] = []
+        chosen: list[tuple[int, Future, bool]] = []  # (position, read, read ahead)
         versions: dict[int, int] = {}
         stale = 0
+        select_s = read_s = 0.0
         current_version = gate_version(current_version, self.gate_version)
         floor = None if current_version is None else int(current_version) - self.max_policy_age
-        while len(out) < groups:
-            selected = self.buffer.select(self.consumer, groups - len(out))
+        while len(chosen) < groups:
+            # the reads of the last selection end before the next refresh (a reload)
+            read_s += self._settle([read for _, read, _ in chosen])
+            begun = self.clock()
+            selected = self.buffer.select(self.consumer, groups - len(chosen))
+            select_s += self.clock() - begun
             for item in selected:
                 if floor is not None and item.entry.behavior_version < floor:
                     stale += 1
                     continue
-                out.append((item.position,
-                            decode_group(self.buffer.read_payload(item.entry.payload_ref))))
+                ref = item.entry.payload_ref
+                read = ahead.pop(ref, None)
+                chosen.append((item.position, read or self._read(ref), read is not None))
                 versions[item.entry.behavior_version] = versions.get(item.entry.behavior_version, 0) + 1
-            if len(out) >= groups or selected:
+            if len(chosen) >= groups or selected:
                 continue
             if self.buffer.data_ended:
                 break
             if self.clock() - started > self.wait_s:
                 raise SampleBufferRolloutError(
-                    f"rollout {rollout_id}: {len(out)}/{groups} groups after {self.wait_s:g} s "
+                    f"rollout {rollout_id}: {len(chosen)}/{groups} groups after {self.wait_s:g} s "
                     f"(buffer position {self.buffer.read_cursor})")
             self.sleep(self.poll_s)
+        read_s += self._settle([read for _, read, _ in chosen])
+        begun = self.clock()
+        out = [(position, decode_group(read.result())) for position, read, _ in chosen]
+        decode_s = self.clock() - begun
         end = self.buffer.read_cursor
         if not out:
             raise SampleBufferExhausted(f"rollout {rollout_id}: the sample buffer ended "
@@ -442,9 +505,60 @@ class BatchReader:
         self._ends[rollout_id] = end
         if self.cursor_log is not None:
             self.cursor_log.append(rollout_id, [position for position, _ in out], end)
+        if self.prefetch and not self.buffer.data_ended:
+            next_floor = None if current_version is None else floor + 1  # the next take's
+            self._start_prefetching(int(groups), next_floor)
         return out, TakeReport(rollout_id=rollout_id, groups=len(out), stale_groups=stale,
                                start=start, end=end, behavior_versions=dict(sorted(versions.items())),
-                               wait_s=round(self.clock() - started, 3))
+                               wait_s=round(self.clock() - started, 3), select_s=round(select_s, 3),
+                               read_s=round(read_s, 3), decode_s=round(decode_s, 3),
+                               prefetched=sum(1 for _, _, early in chosen if early))
+
+    def _settle(self, reads: list[Future]) -> float:
+        """Wait for ``reads`` (their errors surface at ``result()``); the seconds waited."""
+        pending = [read for read in reads if not read.done()]
+        if not pending:
+            return 0.0
+        begun = self.clock()
+        wait(pending)
+        return self.clock() - begun
+
+    # ------------------------------------------------------------ prefetch
+    def _start_prefetching(self, groups: int, floor: int | None) -> None:
+        self._stop_prefetch.clear()
+        self._prefetcher = threading.Thread(target=self._prefetch_loop, args=(groups, floor),
+                                            name="buffer-prefetch", daemon=True)
+        self._prefetcher.start()
+
+    def _stop_prefetching(self) -> None:
+        """Stop the prefetch thread and wait for its reads (so a refresh may reload)."""
+        if self._prefetcher is not None:
+            self._stop_prefetch.set()
+            self._prefetcher.join()
+            self._prefetcher = None
+        self._settle(list(self._reads.values()))
+
+    def _prefetch_loop(self, groups: int, floor: int | None) -> None:
+        """Read the payloads of the next ``groups`` trainable entries as they appear
+        (the floor is the next take's stale bound). Best effort: an error here only
+        ends the prefetch; the take reads what is missing and raises its own errors."""
+        deadline = self.clock() + self.wait_s
+        try:
+            while not self._stop_prefetch.is_set() and self.clock() < deadline:
+                self._settle(list(self._reads.values()))  # no open reads during the refresh
+                if self._stop_prefetch.is_set():
+                    return
+                wanted = [item for item in self.buffer.peek(groups)
+                          if floor is None or item.entry.behavior_version >= floor]
+                for item in wanted:
+                    ref = item.entry.payload_ref
+                    if ref not in self._reads:
+                        self._reads[ref] = self._read(ref)
+                if len(wanted) >= groups or self.buffer.data_ended:
+                    return
+                self._stop_prefetch.wait(self.poll_s)
+        except Exception as error:  # noqa: BLE001 - the take reads (and reports) on its own
+            print(f"[sample-buffer] prefetch stopped: {type(error).__name__}: {error}", flush=True)
 
     def watermark_before(self, rollout_id: int) -> int:
         """Commit and return the position after the last round below ``rollout_id``

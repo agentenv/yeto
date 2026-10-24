@@ -396,6 +396,61 @@ def test_preempted_island_is_relaunched_with_the_same_learner_id_then_abandoned(
     assert "ABANDONED" in capsys.readouterr().err
 
 
+def test_a_relaunch_into_a_stopped_app_abandons_the_island_at_once(monkeypatch, capsys):
+    """S27 G-AO: after a teardown stopped the app, the launcher kept relaunching the
+    trainer island for the whole recovery timeout ("App ... not found"). A relaunch
+    that fails because the app is stopped (or no longer listed) is not retried."""
+    from yeto.launcher import ABANDONED, FleetController
+
+    state = fake_modal(monkeypatch)
+    ops = mr.ModalOps("yeto-run")
+    cfg = _cfg(learner_id=2)
+    ops.define(cfg)
+    island_ops = mr.ModalIslandOps(ops)
+    name = mr.modal_island_name("run", 2)
+    first = island_ops.relaunch(cfg, name)
+    clock = types.SimpleNamespace(t=0.0)
+    routing = mr.RoutingOps(types.SimpleNamespace(now=lambda: clock.t, sleep=lambda s: None), island_ops)
+    controller = FleetController(
+        learners={name: (cfg, first)}, syncer=None, sky_ops=routing, poll_interval=1,
+        recover_timeout=600, thread_cls=_ImmediateThread,
+        syncer_probe=lambda: None, syncer_restart=lambda: None,
+    )
+    rec = controller.learners[name]
+    state["calls"][first].outcome = "failed"
+    lookups = []
+    monkeypatch.setattr(ops, "spawn", lambda c: (_ for _ in ()).throw(RuntimeError(
+        "Lookup failed for Function 'island-2' from the 'yeto-run' app: App 'yeto-run' not found")))
+    monkeypatch.setattr(ops, "app_status", lambda: lookups.append(1) or ("stopped", 0))
+    controller._poll(rec, is_syncer=False)  # -> recovering, the relaunch is refused
+    controller._poll(rec, is_syncer=False)
+    assert rec["state"] == ABANDONED and clock.t == 0.0 and lookups == [1]
+    assert "NOT relaunching" in capsys.readouterr().err
+    # a transient refusal while the app runs is retried, and the app list is not asked
+    monkeypatch.setattr(ops, "spawn", lambda c: (_ for _ in ()).throw(RuntimeError("no capacity")))
+    assert island_ops.relaunch(cfg, name) is None and lookups == [1]
+    monkeypatch.setattr(ops, "spawn", lambda c: (_ for _ in ()).throw(RuntimeError("App not found")))
+    monkeypatch.setattr(ops, "app_status", lambda: ("deployed", 3))
+    assert island_ops.relaunch(cfg, name) is None
+
+
+def test_the_island_container_moves_ephemeral_ports_off_the_miles_port_range(tmp_path):
+    """gVisor starts with ephemeral ports 16000-65535 (Modal CPU probe, S27 G-AT);
+    the island narrows them to Linux's default before Ray and Miles start."""
+    proc = tmp_path / "ip_local_port_range"
+    proc.write_text("16000\t65535\n")
+    assert mr.narrow_ephemeral_ports(str(proc)) == "ephemeral ports 16000-65535 -> 32768-60999"
+    assert proc.read_text().split() == ["32768", "60999"]
+    assert mr.narrow_ephemeral_ports(str(proc)) == "ephemeral ports 32768-60999: kept"
+    assert "unreadable" in mr.narrow_ephemeral_ports(str(tmp_path / "missing"))
+    proc.write_text("1024 65535")
+    proc.chmod(0o444)
+    try:
+        assert "not narrowed" in mr.narrow_ephemeral_ports(str(proc))
+    finally:
+        proc.chmod(0o644)
+
+
 def test_manual_cli_builds_a_config(tmp_path, monkeypatch):
     script = tmp_path / "run.sh"
     script.write_text("torchrun -m yeto.learner\n")

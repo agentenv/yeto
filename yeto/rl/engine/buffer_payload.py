@@ -7,6 +7,14 @@ these names): the Miles sampler and the engine sampler island
 both. A sample carries ``response_length``, per-token ``rollout_log_probs`` and
 its engine weight version (``weight_versions`` spans or
 ``metadata.weight_version``); the entry's ``behavior_version`` is the oldest.
+
+Arrays (``numpy.ndarray`` fields, e.g. the R3 routed-expert ids
+``rollout_routed_experts``: tokens x layers x top-k) are stored as base64 bytes
+with their dtype and shape. An integer array is stored in the narrowest integer
+dtype that holds all its values (expert ids of 128 experts fit ``uint8``: a
+quarter of ``int32``), and ``cast`` names the dtype the reader returns (the
+array's original one), so a reader gets the same values in the same dtype. A
+payload written before ``cast`` existed decodes as before.
 """
 
 from __future__ import annotations
@@ -51,14 +59,41 @@ def is_buffer_exhausted(error: BaseException | None) -> bool:
     return False
 
 
+_CAST = "cast"  # the dtype the reader returns when the stored one is narrower
+_NARROW_INTS = ("uint8", "int8", "uint16", "int16", "uint32", "int32")
+
+
+def _narrowest_int(array: Any) -> Any:
+    """The narrowest integer dtype that holds every value of the integer ``array``
+    (its own dtype when none is narrower)."""
+    import numpy
+
+    if array.size == 0:
+        return array.dtype
+    low, high = int(array.min()), int(array.max())
+    for name in _NARROW_INTS:
+        candidate = numpy.dtype(name)
+        if candidate.itemsize >= array.dtype.itemsize:
+            break
+        info = numpy.iinfo(candidate)
+        if info.min <= low and high <= info.max:
+            return candidate
+    return array.dtype
+
+
 def _encode_value(value: Any) -> Any:
     tolist = getattr(value, "tolist", None)
     if callable(tolist) and hasattr(value, "dtype") and hasattr(value, "shape"):
         import numpy
 
         array = numpy.ascontiguousarray(value)
-        return {_NDARRAY: base64.b64encode(array.tobytes()).decode("ascii"),
-                "dtype": str(array.dtype), "shape": list(array.shape)}
+        record: dict[str, Any] = {"dtype": str(array.dtype), "shape": list(array.shape)}
+        if array.dtype.kind in "iu":
+            stored = _narrowest_int(array)
+            if stored != array.dtype:
+                record = {"dtype": str(stored), _CAST: str(array.dtype), "shape": list(array.shape)}
+                array = array.astype(stored)
+        return {_NDARRAY: base64.b64encode(array.tobytes()).decode("ascii"), **record}
     if hasattr(value, "value") and type(value).__module__ != "builtins":  # enum
         return value.value
     raise TypeError(f"sample field of type {type(value).__name__} is not serializable")
@@ -69,7 +104,9 @@ def _decode_hook(obj: dict[str, Any]) -> Any:
         import numpy
 
         data = base64.b64decode(obj[_NDARRAY])
-        return numpy.frombuffer(data, dtype=obj["dtype"]).reshape(obj["shape"]).copy()
+        array = numpy.frombuffer(data, dtype=obj["dtype"]).reshape(obj["shape"])
+        cast = obj.get(_CAST)
+        return array.astype(cast) if cast else array.copy()
     return obj
 
 

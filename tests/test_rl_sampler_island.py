@@ -668,15 +668,92 @@ def test_wire_policy_releases_only_on_a_trainer_island(tmp_path):
     assert si.wire_policy_releases(driver, miles_args=SimpleNamespace(), actor_model=None,
                                    runner=None) is None
     args = SimpleNamespace(yeto_rl_sample_buffer=sample_roles.SampleBufferConfig(
-        role="trainer", store=str(tmp_path)))
+        role="trainer", store=str(tmp_path), release_inline=True))
     calls = []
     actor = SimpleNamespace(export_hf=lambda rollout_id, path: calls.append((rollout_id, path)))
     runner = SimpleNamespace(run=lambda value: value)
     wired = si.wire_policy_releases(driver, miles_args=args, actor_model=actor, runner=runner)
-    assert driver.publisher is wired
+    assert driver.publisher is wired and wired.staging is None
     br._ACTIVE.pop(br.TRAINER, None)
-    wired.publish(_State(0, "h0"))
-    assert calls == [(0, str(tmp_path / RELEASE_DIR / "r1-v0"))]
+    wired.publish(_State(0, "h0"))  # the base policy: the samplers' engines start with it
+    assert calls == []
+    wired.publish(_State(1, "h1"))
+    assert calls == [(1, str(tmp_path / RELEASE_DIR / "r1-v1"))]
+
+
+def test_a_trainer_island_stages_full_releases_and_uploads_them_in_the_background(tmp_path):
+    """Default trainer island: every rank writes the export into a local staging
+    directory (the release plugin); a background thread puts it into the store,
+    then LATEST; the staging directory is removed; the driver drains the last one."""
+    import threading
+
+    events = []
+    driver = SimpleNamespace(publisher=SimpleNamespace(publish=lambda s: None),
+                             emit=lambda event, **fields: events.append((event, fields)),
+                             rollout=SimpleNamespace(_in_executor=lambda fn, *a: fn(None, *a)))
+    store = tmp_path / "store"
+    args = SimpleNamespace(yeto_rl_sample_buffer=sample_roles.SampleBufferConfig(
+        role="trainer", store=str(store)))
+    plugin_calls, gate = [], threading.Event()
+
+    def run_plugin(fn_path, kwargs):
+        plugin_calls.append((fn_path, kwargs["rollout_id"]))
+        Path(kwargs["path"], "model.safetensors").write_bytes(b"w" * (kwargs["rollout_id"] + 1))
+        return [{"writers": "all"}]
+
+    actor = SimpleNamespace(run_plugin=run_plugin)
+    runner = SimpleNamespace(run=lambda value: value)
+    staging = tmp_path / "staging"
+    wired = si.wire_policy_releases(driver, miles_args=args, actor_model=actor, runner=runner,
+                                    environ={si.STAGING_ENV: str(staging)})
+    br._ACTIVE.pop(br.TRAINER, None)
+    original = wired.releases.release_staged
+
+    def slow_release(*a, **k):
+        assert gate.wait(10)  # the upload runs after publish returned
+        return original(*a, **k)
+
+    wired.releases.release_staged = slow_release
+    wired.publish(_State(1, "h1"))
+    assert plugin_calls == [(si.WRITE_FULL_CHECKPOINT, 1)]
+    assert wired.releaser.busy and not (store / RELEASE_DIR / "LATEST.json").exists()
+    read_from_thread = []
+    wired.read_position_from_thread = lambda: read_from_thread.append(1) or 64
+    gate.set()
+    wired.publish(_State(2, "h2"))  # waits for v1's upload, then stages v2
+    wired.drain_releases()
+    latest = PolicyReleaseStore(CheckpointStore(store)).latest()
+    assert (latest.seq, latest.version, latest.files) == (2, 2, {"model.safetensors": 3})
+    assert latest.buffer_selected == 64 and read_from_thread == [1, 1]  # read on the upload thread
+    assert sorted(p.name for p in (store / RELEASE_DIR).iterdir()) == ["LATEST.json", "r1-v1", "r2-v2"]
+    assert list(staging.iterdir()) == []
+    released = [f for e, f in events if e == "rl_policy_released"]
+    assert [f["policy_version"] for f in released] == [1, 2] and all(f["staged"] for f in released)
+    assert {"stage_export_s", "wait_previous_s", "upload_s", "latest_s"} <= set(released[1]["release_timings"])
+    assert released[1]["visible_at"] >= released[1]["released_at"]
+    exported = []
+    driver.publisher = SimpleNamespace(publish=lambda s: None)
+    fallback = si.wire_policy_releases(
+        driver, miles_args=args, runner=runner,
+        actor_model=SimpleNamespace(export_hf=lambda rollout_id, path: exported.append(rollout_id)),
+        environ={si.STAGING_ENV: str(staging), si.STAGED_EXPORT_ENV: "miles"})
+    br._ACTIVE.pop(br.TRAINER, None)
+    fallback.export(3, staging)
+    assert exported == [3] and fallback.staging == staging  # still staged, Miles writes
+
+
+def test_a_failed_background_upload_fails_the_next_publish(tmp_path):
+    from yeto.rl.engine.policy_release import BackgroundReleaser, PolicyReleaseError
+
+    releaser = BackgroundReleaser()
+
+    def fail():
+        raise OSError("disk gone")
+
+    releaser.submit(fail)
+    with pytest.raises(PolicyReleaseError, match="disk gone"):
+        releaser.submit(lambda: None)
+    assert releaser.drain() >= 0.0  # the error is reported once
 
 
 # ---------------------------------------------------------------- group identity
@@ -792,3 +869,30 @@ def test_convertible_nodes_get_a_backlog_cap_at_least_one_start_wave():
         sample_roles.check_launch(launch)
     launch.rl_sampler_max_backlog_rounds = 3
     sample_roles.check_launch(launch)
+
+
+def test_the_rollout_executor_is_called_from_the_upload_thread_without_the_event_loop(monkeypatch):
+    """The staged-release upload thread reads the trainer's buffer position through
+    the Ray reference itself: the driver's event loop may be running meanwhile."""
+    import sys
+    import threading
+
+    from yeto.rl.adapters.miles.rollout import MilesRolloutPool
+
+    class ActorHandle:  # the Ray actor handle type name _executor_target looks for
+        __ray_call__ = SimpleNamespace(remote=lambda fn, *a: ("ref", fn, a))
+
+    got = []
+    monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(
+        get=lambda ref: got.append(threading.current_thread().name) or ref[1](None, *ref[2])))
+    pool = MilesRolloutPool.__new__(MilesRolloutPool)
+    pool._executor = ActorHandle()
+    pool._run = lambda value: (_ for _ in ()).throw(AssertionError("the event loop was driven"))
+    worker = threading.Thread(target=lambda: got.append(pool._in_executor_from_thread(
+        lambda executor, x: x + 1, 41)), name="upload")
+    worker.start()
+    worker.join()
+    assert got == ["upload", 42]
+    local = MilesRolloutPool.__new__(MilesRolloutPool)
+    local._executor = SimpleNamespace(data_source="source")
+    assert local._in_executor_from_thread(lambda executor: executor.data_source) == "source"

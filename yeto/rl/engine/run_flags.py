@@ -593,9 +593,12 @@ _RESUME = (
     # rl-resume-from-checkpoint (S17 C4)
     shared_flag("--rl-cut-every", type=int, default=None,
                 help="with --rl-checkpoint-store: keep a round cut every N rounds (plus the "
-                "last round and our own stop); default 1 (every round). The publication "
-                "checks (policy hash, engine weight read-back) run at the same interval and "
-                "on the first publication; see --rl-verify-every-round"),
+                "last round and our own stop). Default: a timed interval, at most 5%% of the "
+                "wall time in cuts and sqrt(2 * C * 21600) s between them (C = the measured "
+                "cost of a cut), where the engine wires timed cuts; else every round. The "
+                "publication checks (policy "
+                "hash, engine weight read-back) run at the same interval and on the first "
+                "publication; see --rl-verify-every-round"),
     # S27 R-2: a timed cut interval
     shared_flag("--rl-cut-auto-mtbf-s", type=float, default=None, metavar="S",
                 help="with --rl-checkpoint-store, instead of --rl-cut-every: keep a round cut "
@@ -645,6 +648,11 @@ _RESUME = (
                 help="--rl-sample-role trainer: reload the store and read LATEST before every "
                 "policy release and commit LATEST in a second commit (the behavior before "
                 "S26 E5); default: the trainer keeps the LATEST it wrote and commits once"),
+    shared_flag("--rl-release-inline", action="store_true", default=False,
+                help="--rl-sample-role trainer: write each full-weight policy release into the "
+                "store before the next training step (the behavior before S27 G-AT); default: "
+                "stage it on local disk (every rank writes a share) and upload it while the "
+                "next step trains"),
     shared_flag("--rl-sample-wait-s", type=float, default=None, metavar="S",
                 help="--rl-sample-role trainer: max seconds to wait for one full round from "
                 "the buffer (default 3600)"),

@@ -11,6 +11,7 @@ Moved out of ``yeto/rl/engine/resume.py`` (the neutral core must not import
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -23,6 +24,24 @@ MODAL_VOLUME_ENV = "YETO_RL_STORE_MODAL_VOLUME"  # set by the launcher on a Moda
 MODAL_VOLUME_SCHEME = "modal-volume"
 STORE_IMPL = "yeto.cloud.modal_ckpt_store:store_from_env"  # value of resume.STORE_IMPL_ENV
 GUARD_DIR_ENV = "YETO_RL_STORE_GUARD_DIR"  # where the per-Volume lock files live (default /tmp)
+# where the island mounts the store Volume (yeto.launch.storage.MODAL_CHECKPOINT_STORE_MOUNT)
+MOUNT_ENV = "YETO_RL_STORE_MODAL_MOUNT"
+DEFAULT_MOUNT = "/root/yeto-checkpoint-store"
+_UPLOAD_SCRIPT = """
+import json, sys, modal
+volume = modal.Volume.from_name(sys.argv[1])
+with volume.batch_upload(force=True) as batch:
+    for kind, local, remote in json.loads(sys.argv[2]):
+        (batch.put_directory if kind == "dir" else batch.put_file)(local, remote)
+"""
+_REMOVE_SCRIPT = """
+import sys, modal
+try:
+    modal.Volume.from_name(sys.argv[1]).remove_file(sys.argv[2], recursive=True)
+except Exception as error:  # a missing path is not an error
+    if not (isinstance(error, FileNotFoundError) or "not found" in str(error).lower()):
+        raise
+"""
 
 
 def _guard_path(volume: str) -> str:
@@ -64,10 +83,14 @@ class ModalVolumeStore(CheckpointStore):
     kind = "modal-volume"
 
     def __init__(self, root: str | os.PathLike[str], volume_name: str,
-                 volume_factory: Callable[[str], Any] | None = None) -> None:
+                 volume_factory: Callable[[str], Any] | None = None,
+                 mount: str | os.PathLike[str] | None = None) -> None:
+        """``mount``: where the Volume root is mounted (the store root lies under it);
+        None: no direct upload, :meth:`put_directory` writes through the mount."""
         super().__init__(root)
         self.volume_name = volume_name
         self._factory = volume_factory
+        self.mount = None if mount is None else os.fspath(mount)
 
     def _volume(self) -> Any:
         if self._factory is not None:
@@ -90,16 +113,83 @@ class ModalVolumeStore(CheckpointStore):
         return time.monotonic() - started
 
     def _runner_call(self, verb: str) -> None:
+        self._runner_script("import sys, modal; modal.Volume.from_name(sys.argv[1])." + verb + "()",
+                            verb=verb)
+
+    def _runner_script(self, code: str, *argv: str, verb: str, timeout_s: float = 600.0) -> None:
+        """Run ``code`` in the Modal runner's interpreter (it has the Modal client)."""
         import subprocess
 
         env = dict(os.environ)
         env["PYTHONPATH"] = os.environ.get("YETO_MODAL_SYSPATH", "")
-        code = ("import sys, modal; modal.Volume.from_name(sys.argv[1])." + verb + "()")
-        done = subprocess.run([os.environ["YETO_MODAL_PYTHON"], "-c", code, self.volume_name],
-                              env=env, capture_output=True, text=True, timeout=600)
+        done = subprocess.run([os.environ["YETO_MODAL_PYTHON"], "-c", code, self.volume_name, *argv],
+                              env=env, capture_output=True, text=True, timeout=timeout_s)
         if done.returncode != 0:
             raise RuntimeError(f"modal volume {verb} via the runner interpreter failed "
                                f"(rc {done.returncode}): {done.stderr[-2000:]}")
+
+    # -- direct upload (policy releases staged on local disk) -------------------
+    def _volume_path(self, relative: str) -> str | None:
+        """``relative`` (under the store root) as a path in the Volume; None when the
+        store root is not under the known mount (then the mount is written)."""
+        if self.mount is None:
+            return None
+        try:
+            inside = self.root.relative_to(self.mount)
+        except ValueError:
+            return None
+        return "/" + (inside / relative).as_posix().lstrip("/")
+
+    @property
+    def puts_bypass_mount(self) -> bool:
+        return self.mount is not None and self._volume_path("") is not None
+
+    def _direct(self) -> bool:
+        return self._factory is not None or bool(os.environ.get("YETO_MODAL_PYTHON"))
+
+    def _upload(self, ops: list[tuple[str, str, str]]) -> None:
+        """One ``batch_upload`` (all or nothing): the files are durable and visible
+        to a reload elsewhere when it returns; this host's mount does not change."""
+        if self._factory is not None:
+            with self._volume().batch_upload(force=True) as batch:
+                for kind, local, remote in ops:
+                    (batch.put_directory if kind == "dir" else batch.put_file)(local, remote)
+            return
+        self._runner_script(_UPLOAD_SCRIPT, json.dumps(ops), verb="batch_upload", timeout_s=3600.0)
+
+    def put_directory(self, local: str | os.PathLike[str], relative: str) -> None:
+        remote = self._volume_path(relative)
+        if remote is None or not self._direct():
+            return super().put_directory(local, relative)
+        self._upload([("dir", os.fspath(local), remote)])
+
+    def put_files(self, files: Mapping[str, bytes]) -> None:
+        """All of ``files`` in one upload (a reader sees all or none of them)."""
+        remotes = {relative: self._volume_path(relative) for relative in files}
+        if None in remotes.values() or not self._direct():
+            return super().put_files(files)
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="yeto-put-") as tmp:
+            ops = []
+            for index, (relative, data) in enumerate(files.items()):
+                local = os.path.join(tmp, str(index))
+                with open(local, "wb") as handle:
+                    handle.write(data)
+                ops.append(("file", local, remotes[relative]))
+            self._upload(ops)
+
+    def remove_tree(self, relative: str) -> None:
+        remote = self._volume_path(relative)
+        if remote is None or not self._direct():
+            return super().remove_tree(relative)
+        if self._factory is not None:
+            try:
+                self._volume().remove_file(remote, recursive=True)
+            except FileNotFoundError:
+                pass
+            return
+        self._runner_script(_REMOVE_SCRIPT, remote, verb="remove_file")
 
     commits = 0
 
@@ -142,7 +232,8 @@ def store_from_env(path: str | os.PathLike[str], *, environ: Mapping[str, str],
     volume = environ.get(MODAL_VOLUME_ENV)
     if not volume:
         raise ValueError(f"modal-volume checkpoint store selected but {MODAL_VOLUME_ENV} is not set")
-    return ModalVolumeStore(path, volume, volume_factory=volume_factory)
+    return ModalVolumeStore(path, volume, volume_factory=volume_factory,
+                            mount=environ.get(MOUNT_ENV) or DEFAULT_MOUNT)
 
 
 def parse_modal_volume_uri(value: str) -> tuple[str, str]:

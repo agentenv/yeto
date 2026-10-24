@@ -72,6 +72,17 @@ one commit for the weights and record, a second one for LATEST).
 A load hook that checks the weight files itself while it copies them
 (``verifies_files``, :func:`copy_with_digest`) reads a LoRA release once instead
 of twice; the follower then skips its own check.
+
+Staged releases (S27 G-AT): the trainer exports a full checkpoint into a
+directory on its local disk, and :meth:`PolicyReleaseStore.release_staged`
+publishes that directory: the weight files in one store upload
+(``CheckpointStore.put_directory``; a Modal Volume takes it in one
+``batch_upload``, without the trainer's mount), then the record and LATEST in
+one more (``put_files``). A reader still sees a release only once LATEST names
+it and its files are complete. The upload runs
+on a :class:`BackgroundReleaser` thread, so the trainer trains its next step
+while the samplers' release is written; releases stay in version order (the next
+one waits for the upload of the previous one).
 """
 
 from __future__ import annotations
@@ -81,6 +92,7 @@ import json
 import os
 import re
 import shutil
+import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -305,11 +317,15 @@ class PolicyReleaseStore:
         self.timer = timer
         self.cached_latest = bool(cached_latest)
         self._written: PolicyRelease | None = None  # the release this process wrote last
+        # release directory names in the store, oldest first (staged releases prune by it:
+        # the mount of a store that bypasses it does not list them); None: not read yet
+        self._names: list[str] | None = None
         # how the last release() found LATEST: "cached", "reloaded" (first release,
         # after a failure, or cached_latest off) or "other_writer"
         self.last_latest_source: str | None = None
         # seconds per phase of the last release() that wrote a release (module doc)
         self.last_timings: dict[str, float] = {}
+        self.last_visible_at: float | None = None  # wall time LATEST named the last staged release
         self.cache_dir = Path(cache_dir).expanduser()
         if self.release_dir != RELEASE_DIR:  # its own cache: the prune below drops other directories
             self.cache_dir /= self.release_dir
@@ -428,6 +444,71 @@ class PolicyReleaseStore:
         self.last_timings = timer.as_dict()
         return record
 
+    def release_staged(self, version: int, policy_hash: str, staged: Path, *,
+                       position: Callable[[], tuple[int | None, dict[str, int] | None]],
+                       weights: str = FULL, engine_checksum: str | None = None,
+                       origin: dict[str, Any] | None = None) -> PolicyRelease | None:
+        """Publish the weights already written into the local directory ``staged``
+        (module doc, staged releases): the weight files go into the store first;
+        then the record, in the release directory and as LATEST, in one put.
+        ``position()`` is called between the two: ``(buffer_selected,
+        buffer_shards)`` then include the rounds the trainer took while the weights
+        uploaded, so a sampler's backlog cap lifts with this release. ``staged``
+        keeps its files.
+
+        Returns None (puts nothing) when the latest release is this version and hash."""
+        version = int(version)
+        if not policy_hash:
+            raise ValueError("policy_hash must be non-empty")
+        if weights not in WEIGHT_FORMATS:
+            raise ValueError(f"weights must be one of {WEIGHT_FORMATS}, not {weights!r}")
+        staged = Path(staged)
+        timer = PhaseTimer(self.timer)
+        with timer.phase("read_latest_s"):
+            latest = self._latest_for_release()
+        if latest is not None and (latest.version, latest.policy_hash) == (version, policy_hash):
+            self._written = latest
+            return None
+        self._written = None  # until this release is in the store
+        if self._names is None:  # the mount was just reloaded (first release of this process)
+            self._names = self._listed_names()
+        seq = 1 if latest is None else latest.seq + 1
+        name = f"r{seq}-v{version}"
+        with timer.phase("digest_s"):
+            sha256 = directory_digest(staged) if weights == LORA else None
+            files = file_sizes(staged)
+        with timer.phase("upload_s"):
+            self.store.put_directory(staged, f"{self.release_dir}/{name}")
+        buffer_selected, buffer_shards = position()
+        record = PolicyRelease(seq=seq, version=version, policy_hash=str(policy_hash), path=name,
+                               buffer_selected=None if buffer_selected is None else int(buffer_selected),
+                               released_at=round(self.clock(), 3), weights=weights, sha256=sha256,
+                               engine_checksum=engine_checksum or None, files=files,
+                               buffer_shards=None if buffer_shards is None else
+                               {str(k): int(v) for k, v in sorted(buffer_shards.items())},
+                               origin=None if origin is None else dict(origin))
+        text = json.dumps(asdict(record), sort_keys=True).encode("utf-8")
+        with timer.phase("latest_s"):
+            self.store.put_files({f"{self.release_dir}/{name}/{RECORD}": text,
+                                  f"{self.release_dir}/{LATEST}": text})
+        self._names = [n for n in self._names if n != name] + [name]
+        with timer.phase("prune_s"):
+            for old in self._names[:-self.keep]:
+                self.store.remove_tree(f"{self.release_dir}/{old}")
+            self._names = self._names[-self.keep:]
+        self._written = record
+        self.last_timings = timer.as_dict()
+        self.last_visible_at = round(self.clock(), 3)  # LATEST names it
+        return record
+
+    def _listed_names(self) -> list[str]:
+        """The release directories under the root, in ``seq`` order."""
+        if not self.root.is_dir():
+            return []
+        named = sorted((int(m.group(1)), p.name) for p in self.root.iterdir()
+                       if p.is_dir() and (m := _RELEASE_NAME.fullmatch(p.name)))
+        return [name for _, name in named]
+
     def _latest_without_reload(self) -> PolicyRelease | None:
         path = self.root / LATEST
         if not path.is_file():
@@ -440,6 +521,9 @@ class PolicyReleaseStore:
         if not self.cached_latest or known is None or self.store.objects is not None:
             self.last_latest_source = "reloaded"
             return self.latest()
+        if self.store.puts_bypass_mount:  # the mount does not show what this process put
+            self.last_latest_source = "cached"
+            return known
         seen = self._latest_without_reload()
         if seen is None or (seen.seq, seen.path, seen.policy_hash) != (known.seq, known.path, known.policy_hash):
             self.last_latest_source = "other_writer"
@@ -498,6 +582,59 @@ class PolicyReleaseStore:
         if removed:
             self.store.commit()
         return removed
+
+
+class BackgroundReleaser:
+    """Runs release uploads on one background thread, one at a time and in order.
+
+    :meth:`submit` waits for the previous upload first (at most one in flight),
+    so releases reach the store in submission order and the caller's local
+    staging holds at most two releases (the one uploading and the next one).
+    An upload's error is raised by the next :meth:`wait`, :meth:`submit` or
+    :meth:`drain` on the caller's thread: a failed release stops the trainer as
+    an inline one does."""
+
+    def __init__(self, name: str = "policy-release-upload",
+                 timer: Callable[[], float] = time.perf_counter) -> None:
+        self.name = name
+        self.timer = timer
+        self._thread: threading.Thread | None = None
+        self._error: BaseException | None = None
+
+    @property
+    def busy(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def wait(self) -> float:
+        """Wait for the upload in flight; returns the seconds waited. Raises its error."""
+        started = self.timer()
+        if self._thread is not None:
+            self._thread.join()
+            self._thread = None
+        waited = self.timer() - started
+        error, self._error = self._error, None
+        if error is not None:
+            raise PolicyReleaseError(f"background policy release failed: {type(error).__name__}: "
+                                     f"{error}") from error
+        return waited
+
+    def submit(self, job: Callable[[], None]) -> float:
+        """Start ``job`` once the previous one ended; returns the seconds waited for it."""
+        waited = self.wait()
+
+        def run() -> None:
+            try:
+                job()
+            except BaseException as error:  # noqa: BLE001 - re-raised on the caller's thread
+                self._error = error
+
+        self._thread = threading.Thread(target=run, name=self.name, daemon=True)
+        self._thread.start()
+        return waited
+
+    def drain(self) -> float:
+        """Wait for the last upload (the end of a run); raises its error."""
+        return self.wait()
 
 
 @dataclass

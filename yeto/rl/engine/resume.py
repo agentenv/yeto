@@ -52,9 +52,10 @@ INCARNATIONS = "incarnations.jsonl"  # under the state dir: one line per launch
 RESUME_JOURNAL = "resume-journal.jsonl"  # under the state dir
 SKIP_NAMES = frozenset({"journal.lock", STATE_MANIFEST, LATEST})
 DEFAULT_CUT_KEEP = 2
-# a round cut every round (and always at the end) unless --rl-cut-every or
-# --rl-cut-interval-auto says otherwise; the publication checks follow the same
-# interval (driver.verify_publication). E1 proposed 4 (S27 L14: pending user decision).
+# rounds between cuts where a fixed interval has no --rl-cut-every (verl; a direct
+# RoundCutCheckpoint). The Miles flags default to a timed interval instead
+# (cut_interval.cut_interval_for, S27 G-AT); the publication checks follow the
+# interval in use (driver.verify_publication).
 DEFAULT_CUT_EVERY = 1
 # E1: next to a store's first round cut while it is written and committed in the
 # background (``round-cuts/<cut_id>`` + this suffix, a file); see discard_unfinished_first_cut
@@ -172,6 +173,56 @@ class CheckpointStore:
     def list(self, sub: str = "") -> list[str]:
         base = self.root / sub
         return sorted(p.name for p in base.iterdir()) if base.is_dir() else []
+
+    # -- publishing whole local directories (policy releases staged on local disk)
+    @property
+    def puts_bypass_mount(self) -> bool:
+        """True when :meth:`put_directory` and :meth:`put_files` write the store
+        without this host's mount: the mount shows them only after a reload."""
+        return False
+
+    def put_directory(self, local: str | os.PathLike[str], relative: str) -> None:
+        """Copy the local directory ``local`` to ``relative`` under the root (an
+        existing directory there is replaced) and make it visible to readers: one
+        commit, under the writer guard. The files in ``local`` stay."""
+        source, target = Path(local), self.root / relative
+        guard = self.hold_writer()
+        try:
+            if target.exists():
+                shutil.rmtree(target)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(source, target)
+            self.commit()
+        finally:
+            guard.release()
+
+    def put_files(self, files: Mapping[str, bytes]) -> None:
+        """Write each ``{relative path: data}`` (tmp + rename, in the given order),
+        then commit once."""
+        guard = self.hold_writer()
+        try:
+            for relative, data in files.items():
+                target = self.root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                tmp = target.with_name(target.name + ".tmp")
+                tmp.write_bytes(data)
+                _fsync(tmp)
+                os.replace(tmp, target)
+            self.commit()
+        finally:
+            guard.release()
+
+    def remove_tree(self, relative: str) -> None:
+        """Delete the directory ``relative`` (no error when it is missing) and commit."""
+        target = self.root / relative
+        if not target.exists():
+            return
+        guard = self.hold_writer()
+        try:
+            shutil.rmtree(target, ignore_errors=True)
+            self.commit()
+        finally:
+            guard.release()
 
 
 class BucketMountStore(CheckpointStore):
