@@ -5,6 +5,7 @@ provider is a stand-in carrying the fields Megatron-Bridge 0.6.2
 
 from __future__ import annotations
 
+import ast
 import json
 from types import SimpleNamespace
 
@@ -152,8 +153,9 @@ def test_120b_vl_multinode_island_reaches_the_miles_argv(tmp_path):
                         ("--rollout-num-gpus-per-engine", 4), ("--rl-island-gpus-per-node", 8)):
         _set(argv, flag, value)
     args = parse_args(argv)
-    provider = _provider(hybrid_layer_pattern="MEMEMEM*EMEMEMEM*EMEMEMEM*EMEMEMEMEM*EMEMEMEMEM*EMEMEMEMEM*"
-                                              "EMEMEMEMEM*EMEMEMEM*EMEMEMEME",
+    pattern = "MEMEMEM*EMEMEMEM*EMEMEMEM*EMEMEMEMEM*EMEMEMEMEM*EMEMEMEMEM*EMEMEMEMEM*EMEMEMEM*EMEMEMEME"
+    # Miles' bridge (MilesNemotronHBridge) gives the provider a per-layer MoE mask.
+    provider = _provider(hybrid_layer_pattern=pattern, moe_layer_freq=[int(c == "E") for c in pattern],
                          num_layers=88, hidden_size=4096, ffn_hidden_size=2688, num_moe_experts=512,
                          moe_ffn_hidden_size=2688, moe_router_topk=22, moe_shared_expert_intermediate_size=5376,
                          moe_latent_size=1024, moe_router_topk_scaling_factor=5.0, mtp_num_layers=None,
@@ -169,3 +171,5 @@ def test_120b_vl_multinode_island_reaches_the_miles_argv(tmp_path):
                         ("--num-layers", "88"), ("--num-gpus-per-node", "8")):
         assert _flag(miles, flag) == value, flag
     assert "--colocate" not in miles and "--optimizer-cpu-offload" not in miles
+    # Megatron's moe_freq_type evaluates a bracketed pattern: one mask entry per layer
+    assert ast.literal_eval(_flag(miles, "--moe-layer-freq")) == [int(c == "E") for c in pattern]
