@@ -173,3 +173,43 @@ def test_hybrid_flops_matches_active_params():
     assert hf.mfu(NANO, [1000], 1.0, 1) == pytest.approx(hf.train_flops(NANO, [1000]) / 989.4e12)
     latent = {**NANO, "moe_latent_size": 1024}
     assert hf.forward_flops(latent, [1]) < per_token  # experts run at the latent width
+
+
+def _vl_config():
+    import json
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent / "fixtures" / "nemotron_h" / "nemotron35_super_vl_120b_fb0ee0bc_config.json"
+    return json.loads(path.read_text())
+
+
+def test_vl_config_reads_as_its_language_model():
+    vl = _vl_config()
+    llm = hp.language_model_config(vl)
+    assert hp.is_vl_config(vl) and not hp.is_vl_config(NANO)
+    assert llm is vl["llm_config"] and hp.language_model_config(NANO) is NANO
+    pattern = hp.hybrid_pattern(vl)
+    assert len(pattern) == 88 and hp.layer_counts(pattern) == {"mamba": 40, "moe": 40, "attention": 8, "mlp": 0}
+    assert hp.hybrid_pattern({"layers_block_type": ["linear_attention", "moe", "full_attention", "mlp"]}) == "ME*-"
+    assert hp.hybrid_pattern(NANO) == NANO["hybrid_override_pattern"]
+    with pytest.raises(hp.HybridParamError, match="llm_config"):
+        hp.language_model_config({"architectures": [hp.VL_ARCHITECTURE]})
+    with pytest.raises(hp.HybridParamError, match="layer kinds"):
+        hp.hybrid_pattern({"layers_block_type": ["mamba", "conv"]})
+
+
+def test_vl_projector_and_sound_names_are_frozen():
+    # HF Nemotron-3.5 Super VL index and Megatron-Bridge Omni names
+    assert hp.is_frozen_vision("vision_projector.vision_final_layernorm.weight")
+    assert hp.is_frozen_vision("module.module.sound_model.encoder.layers.0.weight")
+    assert not hp.is_frozen_vision("language_model.mtp.layers.0.eh_proj.weight")
+
+
+def test_hybrid_flops_of_the_vl_config_counts_the_language_model():
+    from yeto.rl import hybrid_flops as hf
+
+    vl = _vl_config()
+    llm = {**vl["llm_config"], "hybrid_override_pattern": hp.hybrid_pattern(vl)}
+    assert hf.forward_flops(vl, [512, 7]) == hf.forward_flops(llm, [512, 7])
+    # ~12B active parameters per token (model card: 120B total, 12B active)
+    assert 11e9 < hf.forward_flops(vl, [1]) / 2 < 14e9
