@@ -31,6 +31,7 @@ class FakeHConfig(PretrainedConfig):
         super().__init__(**kwargs)
 '''
 HELPERS_PY = "HIDDEN = 7\n"
+PARSER_PY = "import vllm_not_installed_for_this_test\n"  # like ultra_v3_reasoning_parser.py (vllm)
 IMAGE_PY = '''
 from transformers.image_processing_utils import BaseImageProcessor
 
@@ -51,6 +52,7 @@ def _model_dir(root: Path, *, processor: bool = False, auto_map: bool = True) ->
     (model / "config.json").write_text(json.dumps(config))
     (model / "configuration_fake_h.py").write_text(CONFIG_PY)
     (model / "helpers_fake.py").write_text(HELPERS_PY)
+    (model / "ultra_v3_reasoning_parser.py").write_text(PARSER_PY)
     if processor:
         (model / "image_processing_fake_omni.py").write_text(IMAGE_PY)
         (model / "processor_config.json").write_text(json.dumps(
@@ -73,6 +75,17 @@ def test_loader_plan_covers_config_processor_and_image_processor(tmp_path):
 
     (vl / "tokenizer_config.json").write_text(json.dumps({"auto_map": ["tokenization_x.T", None]}))
     assert rcp.loader_plan(vl) == ("AutoConfig", "AutoTokenizer", "AutoProcessor", "AutoImageProcessor")
+
+
+def test_auto_map_names_the_engine_module_files(tmp_path):
+    vl = _model_dir(tmp_path, processor=True)
+    (vl / "tokenizer_config.json").write_text(json.dumps(
+        {"auto_map": {"AutoTokenizer": ["tokenization_x.Slow", None], "AutoModel": "other/repo--m.C"}}))
+    assert rcp.auto_map(vl)["AutoTokenizer"] == {"tokenization_x.py"}
+    assert rcp.auto_map(vl)["AutoModel"] == frozenset()  # another repository: no local file
+    assert rcp.engine_module_files(vl) == {
+        "configuration_fake_h.py", "tokenization_x.py", "processing_fake_omni.py",
+        "image_processing_fake_omni.py"}  # not modeling_*.py, not the reasoning parser
 
 
 def test_no_auto_map_means_no_prewarm(tmp_path):
@@ -102,8 +115,11 @@ def test_warm_model_dir_caches_every_module_and_keeps_going_after_a_failure(tmp_
         @staticmethod
         def get_cached_module_file(path, name):
             calls.append(("cache", name))
-            if name == "helpers_fake.py":
-                raise ImportError("needs a package")
+            if name == "ultra_v3_reasoning_parser.py":
+                raise ImportError("This modeling file requires the following packages that were "
+                                  "not found in your environment: vllm")
+            if name == "image_processing_fake_omni.py":
+                raise OSError("disk full")
 
     class Loader:
         def __init__(self, name):
@@ -119,10 +135,13 @@ def test_warm_model_dir_caches_every_module_and_keeps_going_after_a_failure(tmp_
     out = rcp.warm_model_dir(str(model), transformers_module=tf, dynamic_module_utils=Dmu)
     assert [c for c in calls if c[0] == "cache"] == [
         ("cache", "configuration_fake_h.py"), ("cache", "helpers_fake.py"),
-        ("cache", "image_processing_fake_omni.py")]
-    assert out["cached"] == ["configuration_fake_h.py", "image_processing_fake_omni.py"]
+        ("cache", "image_processing_fake_omni.py"), ("cache", "ultra_v3_reasoning_parser.py")]
+    assert out["cached"] == ["configuration_fake_h.py", "helpers_fake.py"]
+    assert out["loaders"] == ["AutoConfig", "AutoProcessor", "AutoImageProcessor"]
     assert out["loaded"] == ["AutoConfig", "AutoImageProcessor"]
-    assert [e["step"] for e in out["errors"]] == ["cache helpers_fake.py", "AutoProcessor"]
+    # an engine entry's file and a loader: WARNING; a file no engine loader names: info
+    assert [e["step"] for e in out["errors"]] == ["cache image_processing_fake_omni.py", "AutoProcessor"]
+    assert [e["step"] for e in out["skipped"]] == ["cache ultra_v3_reasoning_parser.py"]
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +185,9 @@ def test_real_transformers_engine_start_writes_nothing_after_the_prewarm(tmp_pat
     (result,) = report["models"]
     assert result["cached"] == ["configuration_fake_h.py", "helpers_fake.py",
                                 "image_processing_fake_omni.py"]
+    (skipped,) = result["skipped"]  # transformers' check_imports: the parser needs a missing package
+    assert skipped["step"] == "cache ultra_v3_reasoning_parser.py"
+    assert skipped["error"].startswith("ImportError") and "vllm_not_installed_for_this_test" in skipped["error"]
     assert {"AutoConfig", "AutoProcessor"} <= set(result["loaded"])
     # transformers' AutoImageProcessor needs torchvision, which a CPU test venv may lack
     assert {e["step"] for e in result["errors"]} <= {"AutoImageProcessor"}
@@ -307,6 +329,37 @@ def test_prewarm_failure_only_warns(tmp_path):
     text = out.getvalue()
     assert text.count("[rl] WARNING: remote-code prewarm on") == 2
     assert "timed out after 300 s" in text and "GetTimeoutError" in text
+
+
+def _node_report(models):
+    return {"host": "h", "ok": not any(m["errors"] for m in models), "report": {"models": models}}
+
+
+def test_prewarm_lines_name_the_loaders_and_keep_skipped_files_at_info(tmp_path, capsys):
+    model = _model_dir(tmp_path)
+    skipped = {"step": "cache ultra_v3_reasoning_parser.py",
+               "error": "ImportError: This modeling file requires ... vllm"}
+    clean = _node_report([{"loaders": ["AutoConfig", "AutoProcessor", "AutoImageProcessor"],
+                           "loaded": ["AutoConfig", "AutoProcessor", "AutoImageProcessor"],
+                           "cached": ["a.py", "b.py"], "skipped": [skipped], "errors": []}])
+    broken = _node_report([{"loaders": ["AutoConfig", "AutoProcessor", "AutoImageProcessor"],
+                            "loaded": ["AutoConfig", "AutoImageProcessor"], "cached": ["a.py"],
+                            "skipped": [], "errors": [{"step": "AutoProcessor", "error": "ValueError: x"}]}])
+    ray = FakeRay([_node("head", "10.100.0.1"), _node("eng", "10.100.0.2")],
+                  results={"head": clean, "eng": broken})
+    out = io.StringIO()
+    events = []
+    rcp.prewarm_remote_code(SimpleNamespace(hf_checkpoint=str(model)), ray_module=ray,
+                            affinity=_affinity, emit=events.append, out=out)
+    info = capsys.readouterr().out
+    assert ("[rl] remote-code prewarm on 10.100.0.1 (h): loaders ok "
+            "AutoConfig,AutoImageProcessor,AutoProcessor; failed none; 2 module file(s) cached; "
+            "skipped (no engine loader names them): ultra_v3_reasoning_parser.py (ImportError") in info
+    (warning,) = out.getvalue().splitlines()  # only the node with a failed loader warns
+    assert warning.startswith("[rl] WARNING: remote-code prewarm on 10.100.0.2 (h): loaders ok "
+                              "AutoConfig,AutoImageProcessor, failed AutoProcessor; AutoProcessor: ValueError: x")
+    assert [(n["node"], n["ok"], n["loaders_failed"]) for n in events[0]["nodes"]] == [
+        ("10.100.0.1", True, []), ("10.100.0.2", False, ["AutoProcessor"])]
 
 
 def test_prewarm_never_raises(tmp_path):
