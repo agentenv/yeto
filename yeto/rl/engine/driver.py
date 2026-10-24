@@ -1995,7 +1995,7 @@ class IslandDriver:
             return
         read = getattr(self.rollout, "data_cursor", None)
         if not getattr(self.sync, "joined_running_pool", False):
-            log.start(read() if callable(read) else None)
+            self._write_data_position(log.start, read() if callable(read) else None)
             return
         record = log.last()
         if record is None or record.cursor is None:
@@ -2021,7 +2021,15 @@ class IslandDriver:
         read = getattr(self.rollout, "data_cursor", None)
         if log is None or not callable(read):
             return
-        log.record(rollout_id, read())
+        self._write_data_position(log.record, rollout_id, read())
+
+    def _write_data_position(self, write: Callable[..., None], *fields: Any) -> None:
+        """A record the store refuses costs a relaunch some rows read again, never
+        the round: the failure goes on the tape and the island trains on."""
+        try:
+            write(*fields)
+        except OSError as error:
+            self.emit("rl_data_position_write_failed", error=f"{type(error).__name__}: {error}")
 
     def _emit_critic_round(self, rollout_id: int) -> None:
         """rl-algo-critic-family 4.4: per-round critic record on the tape (layout
@@ -2135,8 +2143,19 @@ class IslandDriver:
         if failure is not None:
             self._record_leave(reason, failure)
         if self.data_positions is not None:
-            self.data_positions.close()  # the last record reaches the store
+            self._close_data_positions()
         self.sync.close(reason)
+
+    def _close_data_positions(self) -> None:
+        """Wait for the last data position commit; a commit that failed or did not
+        end goes on the tape (the tape must not mask the run's own error)."""
+        log = self.data_positions
+        try:
+            ended = log.close()
+            if log.commit_errors or not ended:
+                self.emit("rl_data_position_commit", ended=ended, errors=log.commit_errors[-5:])
+        except Exception:  # noqa: BLE001 - closing the session comes first
+            pass
 
     def _record_leave(self, reason: LeaveReason, failure: BaseException) -> None:
         try:

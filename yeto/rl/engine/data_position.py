@@ -31,12 +31,11 @@ What a relaunch draws again (until a central dispenser replaces this, P2):
   version 0) cannot tell a relaunch from the start of the run: it starts at
   the first row.
 
-Layout, one writer per island (the island's current process):
-
-* directory store: ``data-positions/island<id>.jsonl``, one JSON line per record;
-* object store (``CheckpointStore.objects``: S3, OSS):
-  ``data-positions/island<id>/<seq>.json``, one object per record (an object
-  store cannot append).
+Layout: one writer per island (the island's current process), one new file or
+object per record, never an append (a bucket mount and an object store cannot
+append): ``data-positions/island<id>/<seq>.json`` under the store directory, or
+under the same key prefix in the store's object API (``CheckpointStore.objects``:
+S3, OSS). A record that cannot be read (a write cut short) is skipped.
 
 The store commit (a Modal Volume commit takes seconds) runs in a background
 thread, so the round does not wait for it; a record written while a commit
@@ -131,21 +130,19 @@ class _BackgroundCommit:
 
 
 class DataPositionLog:
-    """The data position records of one island (module doc), in a directory store
-    (``lines``) or an object store (``objects``)."""
+    """The data position records of one island (module doc), as files under a
+    store directory (``root``) or as objects (``objects``)."""
 
     def __init__(self, *, learner_id: int, slot: str | None, root: str | Path | None = None,
-                 objects: Any = None, prefix: str = DATA_POSITIONS_DIR,
-                 commit: Callable[[], Any] = lambda: None) -> None:
+                 objects: Any = None, commit: Callable[[], Any] = lambda: None) -> None:
         if (root is None) == (objects is None):
             raise ValueError("a data position log needs a store directory or an object store")
         self.learner_id = int(learner_id)
         self.slot = slot or None
         self.objects = objects
-        name = f"island{self.learner_id}"
-        self.path = None if root is None else Path(root) / DATA_POSITIONS_DIR / f"{name}.jsonl"
-        self.prefix = f"{prefix.rstrip('/')}/{name}/"
-        self._keys: list[str] | None = None
+        self.prefix = f"{DATA_POSITIONS_DIR}/island{self.learner_id}/"
+        self.dir = None if root is None else Path(root) / self.prefix
+        self._names: list[str] | None = None
         self._commit = _BackgroundCommit(commit)
 
     # -- read ------------------------------------------------------------------
@@ -160,27 +157,26 @@ class DataPositionLog:
         return record
 
     def _last_record(self) -> DataPosition | None:
-        if self.objects is not None:
-            for key in reversed(self._listed()):
-                try:
-                    return DataPosition.decode(self.objects.read(key))
-                except (TypeError, ValueError, KeyError):
-                    continue  # unreadable object: an older one is the position
-            return None
-        if self.path is None or not self.path.is_file():
-            return None
-        record = None
-        for line in self.path.read_text(encoding="utf-8").splitlines():
+        for name in reversed(self._listed()):
             try:
-                record = DataPosition.decode(line)
-            except (TypeError, ValueError, KeyError):
-                continue  # a torn last line (the process stopped during the write)
-        return record
+                return DataPosition.decode(self._read(name))
+            except (OSError, TypeError, ValueError, KeyError):
+                continue  # a write cut short: an older record is the position
+        return None
 
     def _listed(self) -> list[str]:
-        if self._keys is None:
-            self._keys = sorted(self.objects.list(self.prefix))
-        return self._keys
+        if self._names is None:
+            if self.objects is not None:
+                names = [key[len(self.prefix):] for key in self.objects.list(self.prefix)]
+            else:
+                names = [p.name for p in self.dir.iterdir()] if self.dir.is_dir() else []
+            self._names = sorted(n for n in names if n.endswith(".json"))
+        return self._names
+
+    def _read(self, name: str) -> str | bytes:
+        if self.objects is not None:
+            return self.objects.read(self.prefix + name)
+        return (self.dir / name).read_text(encoding="utf-8")
 
     # -- write -----------------------------------------------------------------
     def start(self, cursor: Mapping[str, int] | None) -> None:
@@ -192,16 +188,15 @@ class DataPositionLog:
         self._append(DataPosition(int(round_id), _plain(cursor), self.slot))
 
     def _append(self, record: DataPosition) -> None:
+        names = self._listed()
+        name = f"{len(names):010d}.json"
         if self.objects is not None:
-            keys = self._listed()
-            key = f"{self.prefix}{len(keys):010d}.json"
-            self.objects.write(key, record.encode().encode())
-            keys.append(key)
-            return
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(record.encode() + "\n")
-        self._commit.request()
+            self.objects.write(self.prefix + name, record.encode().encode())
+        else:
+            self.dir.mkdir(parents=True, exist_ok=True)
+            (self.dir / name).write_text(record.encode(), encoding="utf-8")
+            self._commit.request()
+        names.append(name)
 
     @property
     def commit_errors(self) -> list[str]:
@@ -220,8 +215,8 @@ def data_position_log(store_path: str, *, learner_id: int, slot: str | None,
                       environ: Mapping[str, str] | None = None) -> DataPositionLog:
     """The island's log in the run's checkpoint store at ``store_path`` (the
     island's ``--rl-data-position-store``): by object key when the store has an
-    object API, else as files under the store directory (committed after each
-    record)."""
+    object API, else as files under the store directory (committed in the
+    background after each record)."""
     from .resume import store_for
 
     store = store_for(store_path, environ=environ)

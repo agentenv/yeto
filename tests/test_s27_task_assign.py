@@ -274,10 +274,12 @@ def test_data_position_log_reads_the_last_record_and_refuses_another_slot(tmp_pa
     log.start({"sample_offset": 0})
     log.record(0, {"sample_offset": 4})
     log.record(1, {"sample_offset": 8})
-    path = tmp_path / "data-positions" / "island1.jsonl"
-    path.write_text(path.read_text() + '{"round": 2, "cur')  # torn by a stop during the write
+    records = tmp_path / "data-positions" / "island1"
+    assert sorted(p.name for p in records.iterdir()) == [f"{n:010d}.json" for n in range(3)]
+    (records / "0000000003.json").write_text('{"round": 2, "cur')  # cut short by a stop
     assert log.close() and commits
-    assert log.last() == DataPosition(1, {"sample_offset": 8}, "1/2")
+    assert DataPositionLog(learner_id=1, slot="1/2", root=tmp_path).last() == \
+        DataPosition(1, {"sample_offset": 8}, "1/2")
     other = DataPositionLog(learner_id=1, slot="1/3", root=tmp_path)
     with pytest.raises(DataPositionError, match="data slot 1/2"):
         other.last()
@@ -415,6 +417,20 @@ def test_a_process_that_starts_the_run_ignores_older_records(tmp_path):
     again, pool = _process(tmp_path, name="b.jsonl", rows=rows, rounds=1, joined=True)
     again.run()
     assert pool.seeks == [{"sample_offset": 2}]
+
+
+def test_a_store_that_refuses_a_record_never_stops_the_round(tmp_path):
+    rows = list(range(20))
+    driver, pool = _process(tmp_path, name="a.jsonl", rows=rows, rounds=2, joined=False)
+
+    def refuse(*_args):
+        raise OSError("read-only file system")
+
+    driver.data_positions.record = refuse
+    driver.run()
+    assert pool.drawn == [[0, 1], [2, 3]]
+    failed = [e for e in _events(tmp_path / "a.jsonl") if e["event"] == "rl_data_position_write_failed"]
+    assert len(failed) == 2 and "read-only" in failed[0]["error"]
 
 
 def test_a_joined_process_without_a_record_says_so_and_a_bad_seek_fails_closed(tmp_path):
