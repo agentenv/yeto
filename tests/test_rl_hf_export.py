@@ -79,7 +79,7 @@ def test_export_puts_the_round_into_the_store_and_times_it(tmp_path):
     record = exports.export(1, policy_version=2, final=False)
     assert record == {"round": 2, "final": False, "policy_version": 2, "path": str(store.root / "round-2"),
                       "store_kind": "local", "ok": True, "files": 2, "bytes": 13, "write_s": 2.0,
-                      "upload_s": 3.0, "seconds": 5.0}
+                      "upload_s": 3.0, "seconds": 5.0, "upload_attempts": 1}
     assert sorted(p.name for p in (store.root / "round-2").iterdir()) == [
         COMPLETE_MARKER, "config.json", "model-00001.safetensors"]
     assert json.loads((store.root / "round-2" / COMPLETE_MARKER).read_text()) == {
@@ -122,22 +122,168 @@ def test_a_failed_export_is_taped_and_the_island_goes_on(tmp_path):
         def put_directory(self, local, relative):
             raise OSError("volume full")
 
+    waits = []
     exports = HfRoundExports(ExportRounds((1,)), BrokenStore(tmp_path / "store"), _write_shards,
-                             staging=tmp_path / "staging")
+                             staging=tmp_path / "staging", sleep=waits.append)
     record = exports.export(0, policy_version=1, final=True)
     assert (record["ok"], record["error"], record["bytes"]) == (False, "upload: OSError: volume full", 12)
-    assert not (tmp_path / "staging" / "round-1").exists()
+    assert (record["upload_attempts"], record["upload_errors"], waits) == (
+        3, ["OSError: volume full"] * 2, [10.0, 30.0])
+    # the model stays on local disk, its marker put back: one upload restores the export
+    kept = tmp_path / "staging" / "round-1"
+    assert record["staging_kept"] == str(kept)
+    assert sorted(p.name for p in kept.iterdir()) == [COMPLETE_MARKER, "config.json", "model-00001.safetensors"]
+    assert json.loads((kept / COMPLETE_MARKER).read_text()) == {
+        "round": 1, "final": True, "policy_version": 1, "files": 2, "bytes": 12}
 
     def broken_write(rollout_id, directory):
         directory.mkdir(parents=True)
         raise RuntimeError("rank 3 died")
 
     failing = HfRoundExports(ExportRounds((1,)), CheckpointStore(tmp_path / "store"), broken_write,
-                             staging=tmp_path / "staging")
+                             staging=tmp_path / "staging2", sleep=waits.append)
     record = failing.export(0, policy_version=1, final=False)
-    assert (record["ok"], record["error"], record["bytes"], record["upload_s"]) == (
-        False, "write: RuntimeError: rank 3 died", 0, 0.0)
-    assert not (tmp_path / "staging" / "round-1").exists()
+    assert (record["ok"], record["error"], record["bytes"], record["upload_s"], record["upload_attempts"]) == (
+        False, "write: RuntimeError: rank 3 died", 0, 0.0, 0)
+    assert "staging_kept" not in record and not (tmp_path / "staging2" / "round-1").exists()
+
+
+def test_an_upload_that_fails_once_is_retried(tmp_path):
+    class FlakyStore(CommitViewStore):
+        failures = 1
+
+        def put_directory(self, local, relative):
+            if self.failures:
+                self.failures -= 1
+                raise OSError("transient")
+            super().put_directory(local, relative)
+
+    waits = []
+    store = FlakyStore(tmp_path / "hf")
+    record = HfRoundExports(ExportRounds((1,)), store, _write_shards, staging=tmp_path / "staging",
+                            sleep=waits.append).export(0, policy_version=1, final=False)
+    assert (record["ok"], record["upload_attempts"], record["upload_errors"], waits) == (
+        True, 2, ["OSError: transient"], [10.0])
+    assert (store.root / "round-1" / COMPLETE_MARKER).is_file()
+    assert "staging_kept" not in record and not (tmp_path / "staging" / "round-1").exists()
+
+
+def test_at_most_keep_failed_staging_copies_stay(tmp_path):
+    class BrokenStore(CheckpointStore):
+        def put_directory(self, local, relative):
+            raise OSError("volume full")
+
+    exports = HfRoundExports(ExportRounds((1, 2, 3)), BrokenStore(tmp_path / "store"), _write_shards,
+                             staging=tmp_path / "staging", sleep=lambda s: None, keep_failed=2)
+    records = [exports.export(r, policy_version=r + 1, final=False) for r in range(3)]
+    assert [r["staging_kept"].rsplit("/", 1)[1] for r in records] == ["round-1", "round-2", "round-3"]
+    assert records[2]["staging_dropped"] == [str(tmp_path / "staging" / "round-1")]
+    assert sorted(p.name for p in (tmp_path / "staging").iterdir()) == ["round-2", "round-3"]
+
+
+# ---------------------------------------------------------------- Modal Volume store
+class _MissingPathVolume:
+    """A Modal Volume fake that reports a missing path as Modal's server does for
+    ``remove_file``: ``InvalidError("No such file or directory")``. ``backend`` is
+    the Volume; ``listdir`` lists an existing directory; ``refuse`` paths fail to
+    be removed although they exist."""
+
+    class InvalidError(Exception):
+        pass
+
+    def __init__(self, backend, refuse=()):
+        self.backend = backend
+        backend.mkdir(parents=True, exist_ok=True)  # the Volume root always exists
+        self.refuse = set(refuse)
+        self.removed = []
+
+    def _path(self, remote):
+        return self.backend / remote.lstrip("/")
+
+    def listdir(self, path, recursive=False):
+        target = self._path(path)
+        if not target.is_dir():
+            raise self.InvalidError(f"No such file or directory: {path}")
+        return [SimpleNamespace(path=str(child.relative_to(self.backend))) for child in target.iterdir()]
+
+    def remove_file(self, path, recursive=False):
+        import shutil
+
+        if not self._path(path).exists() or path in self.refuse:
+            raise self.InvalidError(f"No such file or directory: {path}")
+        self.removed.append(path)
+        shutil.rmtree(self._path(path))
+
+    def batch_upload(self, force=False):
+        import contextlib
+        import shutil
+
+        volume = self
+
+        @contextlib.contextmanager
+        def batch():
+            ops = []
+            yield SimpleNamespace(put_directory=lambda local, remote: ops.append(("dir", local, remote)),
+                                  put_file=lambda local, remote: ops.append(("file", local, remote)))
+            for kind, local, remote in ops:
+                target = volume._path(remote)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if kind == "dir":
+                    shutil.copytree(local, target, dirs_exist_ok=force)
+                else:
+                    shutil.copyfile(local, target)
+
+        return batch()
+
+
+def _modal_store(tmp_path, volume):
+    from yeto.cloud.modal_ckpt_store import ModalVolumeStore
+
+    mount = tmp_path / "mount"
+    return ModalVolumeStore(mount / "run-a" / "hf" / "island0", "vol", volume_factory=lambda name: volume,
+                            mount=mount)
+
+
+def test_the_first_export_to_a_modal_volume_succeeds(tmp_path):
+    # S27 s27-bb-b1 round 56: removing the not yet existing round directory raised
+    # InvalidError "No such file or directory", so every first export failed
+    volume = _MissingPathVolume(tmp_path / "volume")
+    store = _modal_store(tmp_path, volume)
+    record = HfRoundExports(ExportRounds((1,)), store, _write_shards, staging=tmp_path / "staging",
+                            sleep=lambda s: None).export(0, policy_version=1, final=False)
+    assert (record["ok"], record["upload_attempts"]) == (True, 1), record
+    exported = tmp_path / "volume" / "run-a" / "hf" / "island0" / "round-1"
+    assert sorted(p.name for p in exported.iterdir()) == [COMPLETE_MARKER, "config.json", "model-00001.safetensors"]
+    # a relaunch exports the round again: the older directory is removed first
+    record = HfRoundExports(ExportRounds((1,)), store, _write_shards, staging=tmp_path / "staging",
+                            sleep=lambda s: None).export(0, policy_version=1, final=False)
+    assert record["ok"] and volume.removed == ["/run-a/hf/island0/round-1"]
+
+
+def test_a_modal_removal_fails_only_when_the_path_stays(tmp_path):
+    from yeto.cloud.modal_ckpt_store import _volume_has
+
+    volume = _MissingPathVolume(tmp_path / "volume", refuse={"/run-a/hf/island0/round-1"})
+    store = _modal_store(tmp_path, volume)
+    store.remove_tree("round-1")  # missing, and its parents are missing too: no error
+    (tmp_path / "volume" / "run-a" / "hf" / "island0" / "round-1").mkdir(parents=True)
+    assert _volume_has(volume, "/run-a/hf/island0/round-1") and not _volume_has(volume, "/run-a/hf/x")
+    with pytest.raises(_MissingPathVolume.InvalidError):
+        store.remove_tree("round-1")  # there, but the removal failed
+
+
+def test_the_runner_script_removes_the_same_way(tmp_path, monkeypatch):
+    import sys
+
+    from yeto.cloud.modal_ckpt_store import _REMOVE_SCRIPT
+
+    volume = _MissingPathVolume(tmp_path / "volume")
+    monkeypatch.setitem(sys.modules, "modal", SimpleNamespace(Volume=SimpleNamespace(from_name=lambda name: volume)))
+    for remote in ("/run-a/hf/island0/round-1", "/run-a/hf/island0/round-1"):
+        monkeypatch.setattr(sys, "argv", ["-c", "vol", remote])
+        exec(compile(_REMOVE_SCRIPT, "<remove>", "exec"), {"__name__": "__main__"})
+        (tmp_path / "volume" / "run-a" / "hf" / "island0" / "round-1").mkdir(parents=True, exist_ok=True)
+    assert volume.removed == ["/run-a/hf/island0/round-1"]
 
 
 # ---------------------------------------------------------------- the driver
