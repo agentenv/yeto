@@ -189,6 +189,17 @@ def test_a_delta_of_another_base_size_is_refused(tmp_path):
     assert error.value.file == "a.safetensors" and other.resident.path is None
 
 
+def test_a_foreign_delta_file_is_refused_with_its_name(tmp_path):
+    versions = _versions(2)
+    v0, v1 = (_release_dir(tmp_path / f"v{k}", f) for k, f in enumerate(versions))
+    entries = rd.encode_directory(v0, v1, tmp_path / "d").entries
+    (tmp_path / "d" / ("a.safetensors" + rd.DELTA_SUFFIX)).write_bytes(b"not a delta file at all")
+    engine = rd.DeltaEngine(workers=2, chunk_words=CHUNK)
+    with pytest.raises(rd.ReleaseDeltaError, match="not a delta file") as error:
+        engine.rebuild(v0, "r1-v0", [(tmp_path / "d", entries)], tmp_path / "o", "r2-v1")
+    assert error.value.file == "a.safetensors"
+
+
 def test_an_encode_error_leaves_no_resident_release(tmp_path, monkeypatch):
     versions = _versions(2)
     v0, v1 = (_release_dir(tmp_path / f"v{k}", f) for k, f in enumerate(versions))

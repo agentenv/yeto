@@ -848,8 +848,9 @@ class DeltaEngine:
                     raise ReleaseDeltaError(f"{name}: no base copy to rebuild from", file=name)
                 else:
                     start_size = os.path.getsize(start)
-                piece = _RebuildFile(name, entry, resident._array(name, entry.size), self.chunk_words, stack,
-                                     start=start, start_size=start_size, deltas=deltas, out=destination)
+                piece = _named(name, lambda: _RebuildFile(
+                    name, entry, resident._array(name, entry.size), self.chunk_words, stack,
+                    start=start, start_size=start_size, deltas=deltas, out=destination))
                 files.append(piece)
             _run_tasks(_interleaved([piece.tasks() for piece in files]) + small, self.workers, self.chunk_words)
         resident._settle(target_path, {piece.name: piece.tail_byte for piece in files})
