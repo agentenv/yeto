@@ -69,7 +69,12 @@ _FOOTER = struct.Struct("<Q")
 
 class ReleaseDeltaError(RuntimeError):
     """A delta that cannot be applied: a malformed file, another base, or a
-    rebuilt file whose digest is not the recorded one."""
+    rebuilt file whose digest is not the recorded one. ``file``: the release
+    file it is about, when known."""
+
+    def __init__(self, message: str, *, file: str | None = None) -> None:
+        super().__init__(message)
+        self.file = file
 
 
 @dataclass(frozen=True)
@@ -275,12 +280,20 @@ def apply_directory(base: Path, links: Sequence[tuple[Path, Mapping[str, FileEnt
     """Rebuild into ``out`` every file of the last of ``links`` (delta directory,
     entries; oldest first), starting from ``base``: a file starts from the newest
     link that holds it whole (else from ``base``) and takes the later deltas in
-    one pass. Raises :class:`ReleaseDeltaError` on a digest mismatch."""
+    one pass. Raises :class:`ReleaseDeltaError` (with the file's name) on a
+    digest mismatch or a delta that cannot be applied."""
     base, out = Path(base), Path(out)
     links = [(Path(directory), entries) for directory, entries in links]
 
     def one(item: tuple[str, FileEntry]) -> None:
-        name, entry = item
+        try:
+            rebuild(*item)
+        except ReleaseDeltaError as error:
+            if error.file is not None:
+                raise
+            raise ReleaseDeltaError(f"{item[0]}: {error}", file=item[0]) from error
+
+    def rebuild(name: str, entry: FileEntry) -> None:
         start, deltas = base / name, []
         for directory, entries in links:
             if name not in entries or entries[name].mode != DELTA:
@@ -295,7 +308,8 @@ def apply_directory(base: Path, links: Sequence[tuple[Path, Mapping[str, FileEnt
             shutil.copyfile(start, destination)
             actual = file_sha256(destination)
         if actual != entry.sha256 or destination.stat().st_size != entry.size:
-            raise ReleaseDeltaError(f"{name}: rebuilt sha256 {actual} != released {entry.sha256}")
+            raise ReleaseDeltaError(f"{name}: rebuilt sha256 {actual} != released {entry.sha256}",
+                                    file=name)
 
     with ThreadPoolExecutor(max_workers=max(1, int(workers))) as pool:
         list(pool.map(one, links[-1][1].items()))
@@ -315,7 +329,9 @@ class DeltaMirror:
     :meth:`materialize` rebuilds a delta release: it follows the release's bases
     (``record_of(path)``) back to one in the mirror or to a full release in the
     store, then applies all the deltas after it in one pass per file. ``weights_dir(release)`` is a
-    release's directory in the store (mount or download). The newest ``keep``
+    release's directory in the store (mount or download). ``from_store``: do not
+    start from a rebuilt copy, follow the bases back to a full release in the
+    store (a retry after a rebuild failed its digest check). The newest ``keep``
     rebuilt releases stay (the engines may still read the one they serve)."""
 
     def __init__(self, root: str | os.PathLike[str], *, keep: int = 2,
@@ -328,13 +344,16 @@ class DeltaMirror:
         return (self.root / path).is_dir()
 
     def materialize(self, release: Any, *, record_of: Callable[[str], Any],
-                    weights_dir: Callable[[Any], Path]) -> Path:
+                    weights_dir: Callable[[Any], Path], from_store: bool = False) -> Path:
+        def held(path: str) -> bool:
+            return not from_store and self.holds(path)
+
         chain = []
         link = release
-        while link.delta is not None and not self.holds(link.path):
+        while link.delta is not None and not held(link.path):
             chain.append(link)
             link = record_of(str(link.delta["base_path"]))
-        base = self.root / link.path if self.holds(link.path) else weights_dir(link)
+        base = self.root / link.path if held(link.path) else weights_dir(link)
         if not chain:
             return base
         self.root.mkdir(parents=True, exist_ok=True)

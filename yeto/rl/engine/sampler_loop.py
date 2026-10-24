@@ -14,8 +14,9 @@ the first release is loaded) step 2 also waits until a release is loaded.
 
 A load hook may refuse a release without stopping the island
 (:class:`~.policy_release.ReleaseNotLoaded`: a scheme the engine does not serve,
-a failed post-load check). The loop writes ``rl_sampler_release_not_loaded`` and
-goes on; with ``ready`` (the engine sampler: False while the engine holds
+a failed post-load check, a delta release whose rebuilt files fail their digest
+check). The loop writes ``rl_sampler_release_not_loaded`` and goes on; with
+``ready`` (the engine sampler: False while the engine holds
 weights that failed a check) it waits instead of generating, so no sample of
 unchecked weights reaches the buffer.
 
@@ -89,7 +90,7 @@ class SamplerLoop:
         self.require_release = bool(require_release)
         self.loaded_fields = loaded_fields  # extra fields of rl_sampler_policy_loaded
         self.ready = ready  # False: the engine may not generate (failed post-load check)
-        self._not_loaded: tuple[int, str] | None = None  # (seq, reason) last reported
+        self._not_loaded: tuple[Any, ...] | None = None  # (seq, reason, fields) last reported
         self.live_poll_s = self.poll_s if live_poll_s is None else float(live_poll_s)
         self.unchecked_in_flight = False  # this round generated on weights that failed a check
 
@@ -114,11 +115,12 @@ class SamplerLoop:
             loaded = self.follower.refresh()
         except ReleaseNotLoaded as error:
             seen = self.follower.last_seen
-            mark = (None if seen is None else seen.seq, error.reason)
-            if mark != self._not_loaded:  # one event per release and cause, not per poll
+            mark = (None if seen is None else seen.seq, error.reason, tuple(sorted(error.fields.items())))
+            if mark != self._not_loaded:  # one event per release, cause and fields, not per poll
                 self._not_loaded = mark
                 self.emit("rl_sampler_release_not_loaded", seq=mark[0], reason=error.reason,
-                          detail=str(error)[:300], policy_version=self.follower.version)
+                          detail=str(error)[:300], policy_version=self.follower.version,
+                          **error.fields)
             return
         if loaded is not None:
             self.emit("rl_sampler_policy_loaded", seq=loaded.seq, policy_version=loaded.version,

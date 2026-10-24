@@ -403,3 +403,144 @@ def test_a_sampler_two_versions_behind_rebuilds_once(tmp_path, monkeypatch):
     assert calls == [3]  # v1..v3 on the full v0, one pass
     assert (rebuilt / "model.safetensors").read_bytes() == words[3].astype("<u2").tobytes()
     assert [p.name for p in (tmp_path / "mirror").iterdir()] == [sampler.latest().path]
+
+
+# ---------------------------------------------------------------- rebuild failures (S27 G-CD)
+def _flip_first_word(path: Path) -> None:
+    """Change the file's bytes, not its size (size checks pass, the digest does not)."""
+    data = bytearray(path.read_bytes())
+    data[0] ^= 0xFF
+    path.write_bytes(bytes(data))
+
+
+def _delta_releases(tmp_path: Path, versions: int):
+    """A store with the full v0 and delta releases v1..``versions``; returns (trainer, words)."""
+    trainer = PolicyReleaseStore(CheckpointStore(tmp_path / "store"), keep=8)
+    chain = DeltaChain(full_every=16)
+    words = [_words(30_000)]
+    _release(trainer, chain, _stage(tmp_path / "s", 0, words[0]), 0)
+    for version in range(1, versions + 1):
+        words.append(_changed(words[-1], 0.01, seed=version))
+        _release(trainer, chain, _stage(tmp_path / "s", version, words[-1]), version)
+    return trainer, chain, words
+
+
+def _follower(tmp_path: Path, loads: list, **kw):
+    from yeto.rl.engine.policy_release import PolicyFollower
+
+    return PolicyFollower(PolicyReleaseStore(CheckpointStore(tmp_path / "store"),
+                                             mirror=rd.DeltaMirror(tmp_path / "mirror", keep=4)),
+                          lambda release, directory: loads.append(
+                              (release.version, (directory / "model.safetensors").read_bytes())), **kw)
+
+
+def test_a_failed_rebuild_keeps_the_served_weights_and_the_retry_starts_from_the_store(
+        tmp_path, monkeypatch):
+    from yeto.rl.engine.policy_release import ReleaseNotLoaded
+
+    monkeypatch.setattr(rd, "MIN_DELTA_BYTES", 1024)
+    trainer, chain, words = _delta_releases(tmp_path, 1)
+    loads = []
+    follower = _follower(tmp_path, loads)
+    assert follower.refresh().version == 1  # rebuilt in the mirror from the full v0
+    # the mirror's copy of v1 goes bad (same size): v2 rebuilt on it fails its digest
+    _flip_first_word(tmp_path / "mirror" / follower.release.path / "model.safetensors")
+    words.append(_changed(words[-1], 0.01, seed=9))
+    _release(trainer, chain, _stage(tmp_path / "s", 2, words[-1]), 2)
+    with pytest.raises(ReleaseNotLoaded) as caught:
+        follower.refresh()
+    assert caught.value.reason == "delta_rebuild_failed"
+    assert caught.value.fields == {"release_version": 2, "file": "model.safetensors",
+                                   "rebuild_failures": 1, "max_rebuild_failures": 3}
+    assert follower.version == 1 and [v for v, _ in loads] == [1]  # the engines keep v1
+    # the next try ignores the mirror: v0 from the store, deltas v1 and v2 in one pass
+    applied = []
+    real_apply = rd.apply_directory
+    monkeypatch.setattr(rd, "apply_directory", lambda base, links, *a, **k: (
+        applied.append((Path(base).parent.name, len(links))), real_apply(base, links, *a, **k))[1])
+    assert follower.refresh().version == 2
+    assert applied == [("policy-releases", 2)]
+    assert loads[-1] == (2, words[2].astype("<u2").tobytes())
+    assert follower.rebuild_failures == 0 and follower.counters.rebuild_failures == 1
+
+
+def test_rebuild_failures_in_a_row_stop_the_sampler(tmp_path, monkeypatch):
+    from yeto.rl.engine.policy_release import ReleaseNotLoaded
+
+    monkeypatch.setattr(rd, "MIN_DELTA_BYTES", 1024)
+    _delta_releases(tmp_path, 1)
+    # the full v0 in the store goes bad: every rebuild of v1 fails
+    v0 = sorted((tmp_path / "store" / "policy-releases").glob("r*-v0"))[0]
+    _flip_first_word(v0 / "model.safetensors")
+    loads = []
+    follower = _follower(tmp_path, loads, max_rebuild_failures=2)
+    with pytest.raises(ReleaseNotLoaded, match="rebuilds from the full release"):
+        follower.refresh()
+    with pytest.raises(rd.ReleaseDeltaError, match="2 delta rebuilds in a row failed") as caught:
+        follower.refresh()
+    assert caught.value.file == "model.safetensors" and loads == [] and follower.version == 0
+    with pytest.raises(ValueError, match="max_rebuild_failures"):
+        _follower(tmp_path, loads, max_rebuild_failures=0)
+
+
+def test_a_retry_downloads_the_chain_again(tmp_path, monkeypatch):
+    from yeto.rl.engine.object_store import DirectoryObjectStore
+
+    monkeypatch.setattr(rd, "MIN_DELTA_BYTES", 1024)
+    trainer, chain, words = _delta_releases(tmp_path, 1)
+    store = CheckpointStore(tmp_path / "store")
+    store.objects = DirectoryObjectStore(tmp_path / "store")
+    reader = PolicyReleaseStore(store, cache_dir=tmp_path / "cache",
+                                mirror=rd.DeltaMirror(tmp_path / "mirror"))
+    latest = reader.latest()
+    v0 = next((tmp_path / "store" / "policy-releases").glob("r*-v0")) / "model.safetensors"
+    good = v0.read_bytes()
+    _flip_first_word(v0)  # a bad copy is downloaded, the rebuild fails, the download stays
+    with pytest.raises(rd.ReleaseDeltaError):
+        reader.resolve(latest)
+    v0.write_bytes(good)
+    with pytest.raises(rd.ReleaseDeltaError):
+        reader.resolve(latest)  # the cached bad download again
+    rebuilt = reader.resolve(latest, from_store=True)
+    assert (rebuilt / "model.safetensors").read_bytes() == words[1].astype("<u2").tobytes()
+
+
+def test_the_sampler_loop_reports_a_failed_rebuild_and_generates_on(tmp_path, monkeypatch):
+    from yeto.rl.engine.sampler_loop import SamplerLoop
+
+    monkeypatch.setattr(rd, "MIN_DELTA_BYTES", 1024)
+    trainer, chain, words = _delta_releases(tmp_path, 1)
+    loads = []
+    follower = _follower(tmp_path, loads)
+    follower.refresh()
+    _flip_first_word(tmp_path / "mirror" / follower.release.path / "model.safetensors")
+    words.append(_changed(words[-1], 0.01, seed=9))
+    _release(trainer, chain, _stage(tmp_path / "s", 2, words[-1]), 2)
+
+    class _Buffer:
+        def refresh(self):
+            return 0
+
+        def __len__(self):
+            return 0
+
+        def mark_data_end(self):
+            pass
+
+    # the retry fails too (the store's copy of v1's delta is changed in place)
+    delta_file = next((tmp_path / "store" / "policy-releases").glob("r*-v1")) / "model.safetensors.ydelta"
+    original = delta_file.read_bytes()
+    _flip_first_word(delta_file)
+    events, generated = [], []
+    loop = SamplerLoop(follower=follower, buffer=_Buffer(), num_rollouts=3, max_backlog_groups=1,
+                       generate=lambda rid: (generated.append((rid, follower.version)),
+                                             rid == 1 and delta_file.write_bytes(original)),
+                       emit=lambda event, **f: events.append((event, f)), poll_s=0.0)
+    assert loop.run() == 3
+    not_loaded = [f for e, f in events if e == "rl_sampler_release_not_loaded"]
+    assert [(f["seq"], f["release_version"], f["rebuild_failures"], f["reason"]) for f in not_loaded] == [
+        (3, 2, 1, "delta_rebuild_failed"), (3, 2, 2, "delta_rebuild_failed")]
+    assert all(f["file"] == "model.safetensors" and f["policy_version"] == 1 for f in not_loaded)
+    assert generated == [(0, 1), (1, 1), (2, 2)]  # v1 served until the store copy is good again
+    rounds = [f for e, f in events if e == "rl_sampler_round"]
+    assert rounds[-1]["releases"]["rebuild_failures"] == 2

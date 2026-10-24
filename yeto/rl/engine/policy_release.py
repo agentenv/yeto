@@ -112,7 +112,7 @@ from typing import Any
 from yeto.rl.quant.schemes import BF16, RELEASE_DIR, W4A8_INT4_CHANNEL, release_dir_for
 
 from .object_store import ObjectStore, download_file, object_size
-from .release_delta import DeltaMirror, encode_directory
+from .release_delta import DeltaMirror, ReleaseDeltaError, encode_directory
 from .resume import CheckpointStore, _write_json_atomic
 
 SCHEMA = "yeto.rl.policy-release/v1"
@@ -129,6 +129,10 @@ _DIGEST_CHUNK = 1 << 20
 DEFAULT_CACHE_DIR = "~/.cache/yeto/policy-releases"
 # a delta larger than this share of the full release is not worth it: release in full
 MAX_DELTA_RATIO = 0.5
+# a sampler stops after this many delta rebuilds in a row fail their digest check
+# (PolicyFollower): the first from its mirror, the next ones from the full release
+# in the store, downloaded again
+MAX_REBUILD_FAILURES = 3
 
 
 class PolicyReleaseError(RuntimeError):
@@ -263,11 +267,12 @@ class ReleaseNotLoaded(PolicyReleaseError):
     release scheme is not the one the engine serves, or a post-load check
     failed (``yeto.rl.engine.sampler_checks``). The follower keeps its served
     release and tries the newest one again on the next refresh. ``reason`` is
-    a short machine-readable cause."""
+    a short machine-readable cause; ``fields``: more event fields (hashable values)."""
 
-    def __init__(self, message: str, *, reason: str) -> None:
+    def __init__(self, message: str, *, reason: str, fields: dict[str, Any] | None = None) -> None:
         super().__init__(message)
         self.reason = reason
+        self.fields = dict(fields or {})
 
 
 def file_sizes(directory: Path) -> dict[str, int]:
@@ -390,17 +395,22 @@ class PolicyReleaseStore:
         if self.release_dir != RELEASE_DIR:  # its own cache: the prune below drops other directories
             self.cache_dir /= self.release_dir
 
-    def resolve(self, release: PolicyRelease) -> Path:
+    def resolve(self, release: PolicyRelease, *, from_store: bool = False) -> Path:
         """The release's weight directory on this island: in the store mount, or
         downloaded from the store's object API; a delta release is rebuilt in the
         mirror (``release_delta.DeltaMirror``). Raises :class:`ReleaseIncomplete`
-        when a recorded file (or a base record) is missing or of another size."""
+        when a recorded file (or a base record) is missing or of another size, and
+        ``ReleaseDeltaError`` when a rebuilt file is not the released one.
+        ``from_store``: rebuild a delta release from the full release in the store,
+        downloaded again (not from a rebuilt copy or an earlier download)."""
         if release.delta is None:
             return self._stored(release)
         if self.mirror is None:
             raise PolicyReleaseError(f"release r{release.seq}-v{release.version} is a delta "
                                      "release: this reader has no mirror to rebuild it in")
-        directory = self.mirror.materialize(release, record_of=self._record_at,
+        if from_store and self.store.objects is not None:
+            self._prune_cache(keep=())
+        directory = self.mirror.materialize(release, record_of=self._record_at, from_store=from_store,
                                             weights_dir=lambda r: self._stored(r, prune_cache=False))
         if self.store.objects is not None:
             self._prune_cache(keep=())
@@ -790,13 +800,15 @@ class FollowerCounters:
     is loaded); ``lineage_resets``: loaded releases whose version is below the
     served one (a trainer restored from an older cut); ``deferred_in_flight``:
     refreshes refused because a round was generating on engines that cannot
-    update their weights mid-generation."""
+    update their weights mid-generation; ``rebuild_failures``: delta releases
+    whose rebuilt files were not the released ones (nothing is loaded)."""
 
     loaded: int = 0
     superseded: int = 0
     stale_reads: int = 0
     lineage_resets: int = 0
     deferred_in_flight: int = 0
+    rebuild_failures: int = 0
 
     def to_dict(self) -> dict[str, int]:
         return asdict(self)
@@ -826,6 +838,14 @@ class PolicyFollower:
     the version that produced it). A refused refresh is counted and the release
     is loaded at the next refresh outside the round.
 
+    Rebuild failures: a delta release whose rebuilt files fail their digest
+    check (``ReleaseDeltaError``) is not loaded; the engines keep the release
+    they serve and :meth:`refresh` raises :class:`ReleaseNotLoaded` (reason
+    ``delta_rebuild_failed``). Each later try rebuilds from the full release in
+    the store (``resolve(from_store=True)``) until one release is resolved.
+    The ``max_rebuild_failures``-th failure in a row raises the
+    ``ReleaseDeltaError`` (the island stops).
+
     ``last_timings``: seconds per phase of the last refresh that loaded a
     release; ``seen_at``: the wall time this follower first read the newest
     release (``last_seen``) in ``LATEST``."""
@@ -834,7 +854,12 @@ class PolicyFollower:
                  load: Callable[[PolicyRelease, Path], None], *, version: int = 0,
                  scheme: str | None = None, live_update: bool = False,
                  timer: Callable[[], float] = time.perf_counter,
-                 wall: Callable[[], float] = time.time) -> None:
+                 wall: Callable[[], float] = time.time,
+                 max_rebuild_failures: int = MAX_REBUILD_FAILURES) -> None:
+        if int(max_rebuild_failures) < 1:
+            raise ValueError("max_rebuild_failures must be >= 1")
+        self.max_rebuild_failures = int(max_rebuild_failures)
+        self.rebuild_failures = 0  # in a row, since a release was last resolved
         self.releases = releases
         self.scheme = scheme
         self._load = load
@@ -892,10 +917,13 @@ class PolicyFollower:
             check_release_scheme(latest, self.scheme)
         try:
             with timer.phase("resolve_s"):
-                directory = self.releases.resolve(latest)
+                directory = self.releases.resolve(latest, from_store=self.rebuild_failures > 0)
         except ReleaseIncomplete as error:
             self.incomplete = str(error)
             return None
+        except ReleaseDeltaError as error:
+            self._rebuild_failed(latest, error)
+        self.rebuild_failures = 0
         self.incomplete = None
         if not getattr(self._load, "verifies_files", False):
             with timer.phase("verify_s"):
@@ -912,3 +940,19 @@ class PolicyFollower:
         self.release = latest
         self.last_timings = timer.as_dict()
         return latest
+
+    def _rebuild_failed(self, release: PolicyRelease, error: ReleaseDeltaError) -> None:
+        """Count a failed rebuild of ``release`` and raise (class doc)."""
+        self.rebuild_failures += 1
+        self.counters.rebuild_failures += 1
+        failures = self.rebuild_failures
+        if failures >= self.max_rebuild_failures:
+            raise ReleaseDeltaError(f"r{release.seq}-v{release.version}: {failures} delta rebuilds "
+                                    f"in a row failed (last: {error})", file=error.file) from error
+        raise ReleaseNotLoaded(
+            f"r{release.seq}-v{release.version}: delta rebuild failed ({error}); the engines keep "
+            f"v{self.version}, the next try rebuilds from the full release in the store",
+            reason="delta_rebuild_failed",
+            fields={"release_version": release.version, "file": error.file,
+                    "rebuild_failures": failures, "max_rebuild_failures": self.max_rebuild_failures},
+        ) from error
