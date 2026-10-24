@@ -670,6 +670,7 @@ def translate_run_config(
     max_policy_age: int = 0,
     async_buffer_rounds: int | None = None,
     full_parameter_sync: bool = True,
+    rollout_ahead: int = 0,
 ) -> MilesLaunchArgs:
     """Pure translation of an ``RLRunConfig`` into upstream Miles argv.
 
@@ -689,7 +690,12 @@ def translate_run_config(
 
     ``full_parameter_sync`` (default True): a full-parameter trainer feeds the
     ports full-parameter sync, which needs whole FP32 masters; False for a
-    no-sync trainer island (``_full_parameter_optimizer_attrs``)."""
+    no-sync trainer island (``_full_parameter_optimizer_attrs``).
+
+    ``rollout_ahead`` (--rl-rollout-ahead, ``yeto.rl.engine.rollout_ahead``):
+    the driver generates whole batches ahead; Miles then sees one on-policy
+    batch per publication, so neither fully_async nor partial rollout is set
+    and the argv is the limit-0 argv (the limit binds only the driver)."""
 
     if not isinstance(algorithm, AlgorithmSpec):
         raise TypeError("algorithm must be an AlgorithmSpec")
@@ -775,7 +781,8 @@ def translate_run_config(
         raise MilesConfigError("--rl-sample-role trainer with LoRA and a colocated placement "
                                "supports one trainer GPU only; use --rl-placement fixed-partition")
     # a buffer island selects its own rollout function, so never Miles' fully_async
-    rollout_overlap = max_policy_age > 0 and request.kind != "colocated" and sample_buffer is None
+    rollout_overlap = (max_policy_age > 0 and request.kind != "colocated" and sample_buffer is None
+                       and not rollout_ahead)
 
     if request.kind == "colocated":
         placement_values = ["--colocate"]
@@ -938,9 +945,10 @@ def translate_run_config(
                 f"--rl-max-policy-age {max_policy_age} needs an algorithm spec with "
                 f"execution.max_policy_staleness >= {max_policy_age} (and a TIS correction); "
                 f"the run's spec tolerates {tolerated}")
-        values.extend(policy_age_argv(
-            max_policy_age, agentic=bool(getattr(config.agent, "custom_agent_function_path", None)),
-            overlap=rollout_overlap))
+        if not rollout_ahead:
+            values.extend(policy_age_argv(
+                max_policy_age, agentic=bool(getattr(config.agent, "custom_agent_function_path", None)),
+                overlap=rollout_overlap))
     if async_buffer_rounds is None and rollout_overlap:
         async_buffer_rounds = max_policy_age  # S26 E2 default: buffer depth = A_hard
     if async_buffer_rounds is not None:

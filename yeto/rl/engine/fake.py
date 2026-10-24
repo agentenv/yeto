@@ -156,6 +156,8 @@ class FakeEngine:
     dual_clipfrac: float | None = None
 
     def __post_init__(self) -> None:
+        # rollout ahead: rounds whose batch the engines are generating now
+        self.generating: set[int] = set()
         self.tensors = {k: v.detach().clone().float() for k, v in self.tensors.items()}
         self.moments = {k: torch.ones_like(v) for k, v in self.tensors.items()}
         self.scheduler_step = 0
@@ -284,6 +286,24 @@ class FakeRolloutPool:
                 "resumed_groups": 0, "failed_groups": 0,
             },
         )
+
+    def start_generate(
+        self, rollout_id: int, *, expected_policy_version: str | None = None
+    ) -> RolloutBatchHandle:
+        """Rollout ahead: the batch comes from the publication served now; the
+        engines count as generating until :meth:`finish_generate`."""
+        batch = self.generate(rollout_id, expected_policy_version=expected_policy_version)
+        self.engine.generating.add(rollout_id)
+        return batch
+
+    def finish_generate(self, pending: RolloutBatchHandle) -> RolloutBatchHandle:
+        self.engine.calls.append(("generate_done", pending.rollout_id))
+        self.engine.generating.discard(pending.rollout_id)
+        return pending
+
+    def cancel_generate(self, pending: RolloutBatchHandle) -> None:
+        self.engine.calls.append(("generate_cancel", pending.rollout_id))
+        self.engine.generating.discard(pending.rollout_id)
 
     def abort(self) -> None:
         self.engine.calls.append(("abort",))
@@ -484,6 +504,8 @@ class FakePublisher:
     def publish(self, state: TrainableState) -> PublicationResult:
         e = self.engine
         e.calls.append(("publish", state.policy_version))
+        if e.generating:
+            raise RuntimeError(f"weight update while the engines generate rollouts {sorted(e.generating)}")
         if not e.trainer_resident and not getattr(e.trainer, "publish_offloaded", False):
             raise RuntimeError("publish reads weights from an offloaded trainer")
         digest = state.policy_tensor_hash()

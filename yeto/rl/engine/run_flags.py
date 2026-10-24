@@ -699,6 +699,15 @@ _SCHEDULING = (
                 "trained sample may lag (0, default: deterministic, every sample from the "
                 "policy just published). Part of the island contract; a backend that does "
                 "not support the requested limit is refused before launch"),
+    # S27 rollout ahead (yeto.rl.engine.rollout_ahead): whole batches, weight writes
+    # between them; the age limit must cover the lag.
+    shared_flag("--rl-rollout-ahead", type=int, choices=(0, 1), default=0, metavar="N",
+                help="fixed-partition island: the engines generate the next round's batch "
+                "with the published policy while the trainer trains this round and runs "
+                "its sync boundary; the weight update runs between two batches, so every "
+                "sample lags exactly N versions (round 0: none). Needs "
+                "--rl-max-policy-age >= N and a TIS correction; replaces the backend's own "
+                "in-batch overlap (fully_async). 0 (default): serial rounds"),
     # S26 E2: the overlap buffer bounds how far generation runs ahead, so it bounds the
     # realised policy age (the backend maps K to its own buffer setting).
     shared_flag("--rl-async-buffer-rounds", type=int, default=None, metavar="K",

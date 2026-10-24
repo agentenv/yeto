@@ -151,9 +151,12 @@ def test_generate_returns_handle_with_opaque_payload(tmp_path):
     assert handle.completed == 2 and len(handle.groups) == 2
     assert "REF" not in repr(handle)  # payload excluded from repr
     require_policy_tokens(handle, TOKEN)
-    # metadata consumed; only the policy token for the rollout-side filter stays
-    assert [f.name for f in tmp_path.iterdir()] == [hook.POLICY_TOKEN_FILE]
+    # metadata consumed; only the policy token for the rollout-side filter and the
+    # round being generated stay
+    assert sorted(f.name for f in tmp_path.iterdir()) == sorted(
+        [hook.POLICY_TOKEN_FILE, hook.ROLLOUT_ROUND_FILE])
     assert (tmp_path / hook.POLICY_TOKEN_FILE).read_text() == TOKEN
+    assert (tmp_path / hook.ROLLOUT_ROUND_FILE).read_text() == "3"
 
 
 def test_injected_token_mismatch_rejected_before_training(tmp_path):

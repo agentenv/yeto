@@ -861,6 +861,8 @@ def compose_island(
     )
     # E1: publication checks on every round (default: cut, first and every-K rounds)
     driver.verify_every_round = bool(getattr(miles_args, "yeto_rl_verify_every_round", False))
+    # S27: the engines generate the next round's batch while the trainer trains
+    driver.rollout_ahead = int(getattr(miles_args, "yeto_rl_rollout_ahead", 0) or 0)
     if elastic is not None:
         from .elastic_placement import ElasticPlacement
 
