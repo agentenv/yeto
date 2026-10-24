@@ -66,17 +66,24 @@ def _checkpoint_config(model_path: str | Path) -> dict[str, Any]:
     return json.loads(path.read_text()) if path.is_file() else {}
 
 
+def _is_vl(config: dict[str, Any]) -> bool:
+    return VL_ARCHITECTURE in (config.get("architectures") or ())
+
+
+def _needs_miles_bridge(config: dict[str, Any]) -> bool:
+    if _is_vl(config):
+        return True
+    return ("NemotronHForCausalLM" in (config.get("architectures") or ())
+            and bool(config.get("num_nextn_predict_layers")))
+
+
 def needs_miles_bridge(model_path: str | Path) -> bool:
     """A Nemotron-H checkpoint that the upstream Megatron-Bridge reads differently
     from the Miles trainer: a VL checkpoint (upstream ``AutoBridge`` refuses
     ``NemotronH_Omni_Reasoning_V3``) or one with an MTP block (upstream builds it,
     Miles drops it). Other Nemotron-H checkpoints (Nemotron-3 Nano) keep the
     upstream provider their GPU runs were validated with."""
-    config = _checkpoint_config(model_path)
-    architectures = set(config.get("architectures") or ())
-    if VL_ARCHITECTURE in architectures:
-        return True
-    return "NemotronHForCausalLM" in architectures and bool(config.get("num_nextn_predict_layers"))
+    return _needs_miles_bridge(_checkpoint_config(model_path))
 
 
 def register_miles_bridges(model_path: str | Path) -> bool:
@@ -84,10 +91,11 @@ def register_miles_bridges(model_path: str | Path) -> bool:
     :func:`needs_miles_bridge`, so the recipe checks the model Miles builds (MTP
     dropped, a VL checkpoint read as its language model). Returns whether it did.
     Refuses a VL checkpoint when the image's Miles has no language-only VL bridge."""
-    if not needs_miles_bridge(model_path):
+    config = _checkpoint_config(model_path)
+    if not _needs_miles_bridge(config):
         return False
     importlib.import_module(MILES_BRIDGE_PLUGINS)
-    if VL_ARCHITECTURE in (_checkpoint_config(model_path).get("architectures") or ()):
+    if _is_vl(config):
         plugin = importlib.import_module(f"{MILES_BRIDGE_PLUGINS}.nemotron_h")
         if getattr(plugin, "NEMOTRON_H_OMNI_ARCHITECTURE", None) != VL_ARCHITECTURE:
             raise NemotronHRecipeError(
@@ -110,7 +118,7 @@ def check_provider(provider: Any, *, parameter_mode: str) -> None:
     if int(_value(provider, "mtp_num_layers", 0) or 0) and parameter_mode == "full":
         raise NemotronHRecipeError(
             "the Nemotron-H provider still has its MTP block: full-parameter RL would train it "
-            f"without an MTP loss and sync it. Build the provider through Miles' bridge "
+            "without an MTP loss and sync it. Build the provider through Miles' bridge "
             f"({MILES_BRIDGE_PLUGINS}, see register_miles_bridges) and leave {KEEP_MTP_ENV} unset")
 
 

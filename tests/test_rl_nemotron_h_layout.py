@@ -90,9 +90,9 @@ def test_vl_offline_layout(tp, pp, fragments, layout_hash):
 
 
 @pytest.mark.parametrize(("kw", "match"), [
-    (dict(tp=4, ep=2), "EP .* must equal TP"),
-    (dict(tp=16, ep=16), "Mamba groups"),
-    (dict(tp=8, ep=8, pp=3), "layers"),
+    ({"tp": 4, "ep": 2}, "EP .* must equal TP"),
+    ({"tp": 16, "ep": 16}, "Mamba groups"),
+    ({"tp": 8, "ep": 8, "pp": 3}, "layers"),
 ])
 def test_out_of_scope_parallelism_is_refused(kw, match):
     with pytest.raises(L.NemotronHLayoutError, match=match):
