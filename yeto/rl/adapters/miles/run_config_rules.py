@@ -46,6 +46,15 @@ def check_global_batch(global_batch: int, data_parallel: int) -> None:
         raise ValueError("Miles global batch must divide evenly across DP ranks")
 
 
+def _miles_pin_gap(first: str, feature: str) -> str | None:
+    """Why the pinned Miles lacks ``feature``, first in fork commit ``first``; None when it has it."""
+    from yeto.rl.adapters.miles import pins
+
+    if first in pins.MILES_FORK_LINEAGE and pins.MILES_NEXT_COMMIT in pins.miles_fork_lineage_from(first):
+        return None
+    return f"Miles {first[:9]} or later ({feature}); the pinned image ships {pins.MILES_NEXT_COMMIT[:9]}"
+
+
 def full_parameter_dp_replica_gap() -> str | None:
     """Why the pinned Miles cannot run the full-parameter sync at DP>1; None when it can.
 
@@ -54,8 +63,17 @@ def full_parameter_dp_replica_gap() -> str | None:
     and apply the owner's bytes on the other replicas."""
     from yeto.rl.adapters.miles import pins
 
-    first = pins.MILES_DP_REPLICA_FULL_PARAMETER_COMMIT
-    if first in pins.MILES_FORK_LINEAGE and pins.MILES_NEXT_COMMIT in pins.miles_fork_lineage_from(first):
-        return None
-    return (f"Miles {first[:9]} or later (data-parallel replicas); "
-            f"the pinned image ships {pins.MILES_NEXT_COMMIT[:9]}")
+    return _miles_pin_gap(pins.MILES_DP_REPLICA_FULL_PARAMETER_COMMIT, "data-parallel replicas")
+
+
+def full_parameter_dp_sharded_master_gap() -> str | None:
+    """Why the pinned Miles cannot run the full-parameter sync at DP>1 on
+    Megatron's distributed optimizer; None when it can.
+
+    Miles :data:`~yeto.rl.adapters.miles.pins.MILES_DP_SHARDED_MASTER_COMMIT`
+    and later read each rank's FP32 master range: the replicas contribute
+    their ranges to the owner's export and an apply writes the whole model
+    and the local range. Without it DP>1 needs the non-distributed optimizer."""
+    from yeto.rl.adapters.miles import pins
+
+    return _miles_pin_gap(pins.MILES_DP_SHARDED_MASTER_COMMIT, "distributed optimizer at DP>1")

@@ -212,6 +212,16 @@ MILES_DISTOPT_FULL_PARAMETER_COMMIT = "56190a5a86d14f1eb96d592038d76a9ad8651b0c"
 MILES_DP_REPLICA_FULL_PARAMETER_COMMIT = "921cde8c7fe7657471bb2be255a4af9bf3653c3d"
 
 
+# First Miles commit whose full-parameter sync at DP>1 runs on Megatron's
+# distributed optimizer (each rank keeps one FP32 range of each parameter):
+# the replicas contribute their ranges to the owner's export, an apply writes
+# the whole model and the local range; same layout and bytes as the replica
+# path (S27 G-BE; fork branch yeto/s27-dp-distopt on 59aea07f9).  No image
+# carries it yet: until the pin does, ``--rl-dp-optimizer auto`` keeps the
+# non-distributed optimizer at DP>1.
+MILES_DP_SHARDED_MASTER_COMMIT = "d50fb04dd2111f4a7c6022e82ef256a0dee0d696"
+
+
 def miles_fork_lineage_from(commit: str) -> frozenset[str]:
     """``commit`` and every later commit of :data:`MILES_FORK_LINEAGE`."""
     return frozenset(MILES_FORK_LINEAGE[MILES_FORK_LINEAGE.index(commit):])
