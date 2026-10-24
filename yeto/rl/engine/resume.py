@@ -535,6 +535,16 @@ def directory_bytes(path: Path) -> int:
     return sum(p.stat().st_size for p in Path(path).rglob("*") if p.is_file())
 
 
+def commit_budget(store: Any, pending_bytes: int | None) -> Any:
+    """A context in which the commits of ``store`` on this thread may take as long as
+    ``pending_bytes`` uncommitted bytes need (a store whose commit has a timeout, the
+    Modal Volume, offers ``commit_budget``); a no-op for other stores."""
+    from contextlib import nullcontext
+
+    budget = getattr(store, "commit_budget", None)
+    return budget(pending_bytes) if callable(budget) else nullcontext()
+
+
 # ---------------------------------------------------------------------------
 # run fingerprint (design §3): what must not change between the cut and the resume
 # ---------------------------------------------------------------------------

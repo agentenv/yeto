@@ -15,8 +15,10 @@ import inspect
 import json
 import logging
 import os
+import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from typing import Any
 
 from yeto.rl.engine.resume import CheckpointStore, StoreWriterGuard
@@ -77,6 +79,17 @@ def _guard_path(volume: str) -> str:
     return os.path.join(root, "yeto-modal-volume-" + re.sub(r"[^A-Za-z0-9_.-]", "_", volume) + ".lock")
 
 
+# A store commit through the runner interpreter is cut off after this many seconds,
+# or after the uncommitted bytes of a commit_budget at COMMIT_MIN_BYTES_PER_S when that
+# is longer (S27 G-CD: the commit of a 473 GB round cut timed out at 600 s, s27-bb-b1).
+COMMIT_TIMEOUT_S = 600.0
+COMMIT_MIN_BYTES_PER_S = 100e6
+
+
+def commit_timeout_s(pending_bytes: int | None) -> float:
+    return max(COMMIT_TIMEOUT_S, float(pending_bytes or 0) / COMMIT_MIN_BYTES_PER_S)
+
+
 class _VolumeWriterGuard(StoreWriterGuard):
     """A shared ``flock`` on a container-local file per Volume. Every process
     and thread of the container opens its own descriptor, so writers share it
@@ -132,17 +145,37 @@ class ModalVolumeStore(CheckpointStore):
         (``YETO_MODAL_PYTHON`` / ``YETO_MODAL_SYSPATH``, exported by modal_runner)."""
         started = time.monotonic()
         if self._factory is None and os.environ.get("YETO_MODAL_PYTHON"):
-            self._runner_call("commit")
+            pending = self._commit_budgets().get(threading.get_ident())
+            self._runner_call("commit", timeout_s=commit_timeout_s(pending))
         else:
             self._volume().commit()
         self.commits += 1
         return time.monotonic() - started
 
-    def _runner_call(self, verb: str) -> None:
-        self._runner_script("import sys, modal; modal.Volume.from_name(sys.argv[1])." + verb + "()",
-                            verb=verb)
+    def _commit_budgets(self) -> dict[int, int]:
+        """{thread id: uncommitted bytes} of the open :meth:`commit_budget` contexts."""
+        return self.__dict__.setdefault("_budgets", {})
 
-    def _runner_script(self, code: str, *argv: str, verb: str, timeout_s: float = 600.0) -> None:
+    @contextmanager
+    def commit_budget(self, pending_bytes: int | None) -> Iterator[None]:
+        """Commits on this thread may take :func:`commit_timeout_s` of ``pending_bytes``
+        (``resume.commit_budget``: a round cut knows the bytes it wrote)."""
+        budgets, key = self._commit_budgets(), threading.get_ident()
+        previous = budgets.get(key)
+        budgets[key] = int(pending_bytes or 0)
+        try:
+            yield
+        finally:
+            if previous is None:
+                budgets.pop(key, None)
+            else:
+                budgets[key] = previous
+
+    def _runner_call(self, verb: str, *, timeout_s: float = COMMIT_TIMEOUT_S) -> None:
+        self._runner_script("import sys, modal; modal.Volume.from_name(sys.argv[1])." + verb + "()",
+                            verb=verb, timeout_s=timeout_s)
+
+    def _runner_script(self, code: str, *argv: str, verb: str, timeout_s: float = COMMIT_TIMEOUT_S) -> None:
         """Run ``code`` in the Modal runner's interpreter (it has the Modal client)."""
         import subprocess
 
