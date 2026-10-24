@@ -162,6 +162,43 @@ def test_tuning_full_outside_buffer_islands_is_refused():
         _args(("--tuning", "full"), gpu="modal:1xh100", base=())
 
 
+DEDICATED_ENGINE = ("--tuning", "full", "--rl-single-island-no-sync",
+                    "--rl-placement", "fixed-partition", "--rl-rollout-gpus", "1")
+
+
+def test_tuning_full_on_one_island_with_a_dedicated_engine_card_is_accepted():
+    """S26 E6: one no-sync island, 1 training card + 1 engine card; the island takes
+    full parameter mode and the placement (Miles' own full-parameter update)."""
+    from yeto.launcher import dry_run_plan
+    from yeto.rl.engine import sample_roles
+
+    args = _args(DEDICATED_ENGINE, gpu="modal:2xh100", base=())
+    assert sample_roles.buffer_full_parameter(args)
+    tokens = _island_tokens(dry_run_plan(args)["island_requests"][0]["learner_command"])
+    assert _flag(tokens, "--parameter-mode") == "full"
+    assert _flag(tokens, "--rl-placement") == "fixed-partition"
+    assert "--rl-single-island-no-sync" in tokens
+
+
+def test_dedicated_engine_island_command_passes_the_island_checks():
+    from yeto.launcher import dry_run_plan
+    from yeto.rl.adapters.miles import island_entry
+
+    args = _args(DEDICATED_ENGINE, gpu="modal:2xh100", base=())
+    tokens = _island_tokens(dry_run_plan(args)["island_requests"][0]["learner_command"])
+    parsed = island_entry.parse_args(tokens)
+    island_entry._check_single_island_no_sync(parsed)
+    assert island_entry._full_parameter_mode(parsed, parsed.sync_preset) is True
+    assert (parsed.rl_placement, parsed.rollout_num_gpus) == ("fixed-partition", 1)
+
+
+def test_tuning_full_on_one_island_needs_no_sync():
+    # a colocated single no-sync island also trains every parameter (S26 E11)
+    with pytest.raises(ValueError, match="requires --tuning lora"):
+        _args(_replace(DEDICATED_ENGINE, ("--rl-single-island-no-sync",), ()),
+              gpu="modal:2xh100", base=())
+
+
 def test_held_trainer_drains_the_buffer_after_the_fleet_ended(tmp_path, monkeypatch):
     """When run() returns (the sampler ended), the loop sees data_ended and keeps
     ticking until it finished; then run_with_trainer_loop returns."""

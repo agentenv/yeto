@@ -333,13 +333,18 @@ class SGLangServerEngine(ServerEngine):
             out.append(group)
         return out
 
-    def _input_logprobs(self, text: str) -> list[float | None]:
+    def _input_token_logprobs(self, prompt: dict[str, Any]) -> list[tuple[float | None, int]]:
+        """``(logprob, token id)`` of every input token; ``prompt`` is ``{"text": ...}`` or
+        ``{"input_ids": [...]}``."""
         body = self.call("POST", "/generate", {
-            "text": text, "sampling_params": {"max_new_tokens": 0, "temperature": 0.0},
+            **prompt, "sampling_params": {"max_new_tokens": 0, "temperature": 0.0},
             "return_logprob": True, "logprob_start_len": 0})
         body = body[0] if isinstance(body, list) else body
-        return [None if t[0] is None else float(t[0])
+        return [(None if t[0] is None else float(t[0]), int(t[1]))
                 for t in (body.get("meta_info") or {}).get("input_token_logprobs") or []]
+
+    def _input_logprobs(self, text: str) -> list[float | None]:
+        return [lp for lp, _ in self._input_token_logprobs({"text": text})]
 
     def score(self, prompt: str, continuation: str) -> list[float]:
         prompt_len = len(self._input_logprobs(prompt))
@@ -347,4 +352,14 @@ class SGLangServerEngine(ServerEngine):
         tail = full[prompt_len:]
         if not tail or any(x is None for x in tail):
             raise SamplerEngineError(f"sglang gave no input log-probs for continuation {continuation!r}")
+        return [float(x) for x in tail]
+
+    def score_tokens(self, prompt: str, token_ids: Sequence[int]) -> list[float]:
+        """Teacher-forced log-probs of exactly ``token_ids`` after ``prompt`` (no re-tokenizing
+        of the continuation, so a trailing EOS that has no text is scored too)."""
+        prompt_ids = [tid for _, tid in self._input_token_logprobs({"text": prompt})]
+        full = self._input_token_logprobs({"input_ids": [*prompt_ids, *map(int, token_ids)]})
+        tail = [lp for lp, _ in full[len(prompt_ids):]]
+        if len(tail) != len(token_ids) or any(x is None for x in tail):
+            raise SamplerEngineError(f"sglang scored {len(tail)} of {len(token_ids)} continuation tokens")
         return [float(x) for x in tail]

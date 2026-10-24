@@ -630,7 +630,16 @@ def sampler_spec(plan: Stage1Plan, node: Node, engine: Any) -> dict[str, Any]:
         "checks": {**dict(plan.section("sampler").get("checks") or {}),
                    "expected_expert_matrices": int(quant["expected_expert_matrices"])},
         "event_tape": f"{state_dir}/sampler-{node.name}/events.jsonl",
+        # S26 E6: the rollout quant tier, applied on the node (sampler_engines.quant_tier)
+        **({"rollout_quant": section} if (section := quant_spec_section(plan)) else {}),
     }
+
+
+def quant_spec_section(plan: Stage1Plan) -> dict[str, Any] | None:
+    """``rollout_quant_tier`` of the plan as the sampler spec section (None for tier 0)."""
+    from yeto.rl.adapters.sampler_engines.quant_tier import spec_section  # noqa: PLC0415
+
+    return spec_section(int(plan.doc.get("rollout_quant_tier", 0) or 0))
 
 
 def head_store_access(plan: Stage1Plan) -> dict[str, Any]:
@@ -779,6 +788,13 @@ def check(plan: Stage1Plan, out: Expanded) -> list[str]:
     """Contradictions inside the expanded plan. Empty list = consistent."""
     errors: list[str] = []
     model, quant, sampling = plan.section("model"), plan.section("quant"), plan.section("sampling")
+    tier = int(plan.doc.get("rollout_quant_tier", 0) or 0)
+    if tier and quant.get("scheme") != "bf16":
+        # S26 E6: stage 1 serves the quant section's scheme; a tier on top would quantize twice
+        errors.append(f"rollout_quant_tier {tier} needs quant.scheme bf16 (got {quant.get('scheme')!r})")
+    if tier == 2:
+        errors.append("rollout_quant_tier 2 is not wired into the stage-1 re-quantizer "
+                      "(its requant side process is template-based); use quant.scheme instead")
     sampler_cfg, trainer_cfg = plan.section("sampler"), plan.section("trainer")
     trainers, samplers = plan.nodes_of("trainer"), plan.nodes_of("sampler")
     miles = _section(trainer_cfg, "miles")

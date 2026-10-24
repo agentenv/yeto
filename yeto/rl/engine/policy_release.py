@@ -415,10 +415,15 @@ class PolicyReleaseStore:
             self._written = latest  # LATEST is known: the next release need not read it again
             return None
         self._written = None  # until this release is committed
-        record = self._write_release(timer, latest, version, policy_hash, write, weights=weights,
-                                     buffer_selected=buffer_selected, engine_checksum=engine_checksum,
-                                     buffer_shards=buffer_shards, derived_from=derived_from,
-                                     origin=origin)
+        guard = self.store.hold_writer()  # no Volume reload drops the files before the commit
+        try:
+            record = self._write_release(timer, latest, version, policy_hash, write, weights=weights,
+                                         buffer_selected=buffer_selected,
+                                         engine_checksum=engine_checksum,
+                                         buffer_shards=buffer_shards, derived_from=derived_from,
+                                         origin=origin)
+        finally:
+            guard.release()
         self._written = record
         self.last_timings = timer.as_dict()
         return record

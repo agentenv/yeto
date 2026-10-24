@@ -31,6 +31,8 @@ The spec (:class:`SamplerSpec`, every key below is required unless marked):
   ``reward_kind`` is ``"miles"``;
 * ``checks``: :class:`~.sampler_checks.PostLoadChecks` keyword overrides
   (optional; e.g. ``expected_expert_matrices``);
+* ``rollout_quant``: optional ``{"tier", "apply"}`` (S26 E6), applied first
+  (:func:`apply_rollout_quant`);
 * ``event_tape``: the JSONL tape file of the island's events; each
   incarnation writes its own file next to it (``events.<incarnation>.jsonl``),
   so a replacement container never overwrites an earlier one's tape.
@@ -97,6 +99,19 @@ def build_engine(spec: Mapping[str, Any]) -> SamplerEngine:
         return factory(engine)
     except (KeyError, TypeError, ValueError) as error:
         raise SamplerSpecError(f"engine: {error}") from None
+
+
+def apply_rollout_quant(spec: Mapping[str, Any]) -> Mapping[str, Any]:
+    """S26 E6: ``spec["rollout_quant"] = {"tier", "apply": "module:function"}`` (written by
+    the launch layer) fills the tier's engine settings on this node; the adapter-layer
+    function returns the new spec. No section: the spec is used as written."""
+    section = spec.get("rollout_quant")
+    if not section:
+        return spec
+    try:
+        return _import(_require(section, "apply", "rollout_quant"))(spec)
+    except ValueError as error:
+        raise SamplerSpecError(f"rollout_quant: {error}") from None
 
 
 # ------------------------------------------------------------------ prompts
@@ -272,6 +287,7 @@ def run(spec: Mapping[str, Any], *, environ: Mapping[str, str] | None = None,
     )
 
     env = os.environ if environ is None else environ
+    spec = apply_rollout_quant(spec)
     config = island_config(spec)
     incarnation = incarnation or new_incarnation()
     tape = incarnation_tape(_require(spec, "event_tape"), incarnation)

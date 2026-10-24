@@ -34,6 +34,8 @@ DPS_SOURCES = {
     # E1: + export_named_optimizer_state(device=None) on the image pin 44d41efd (not pushed)
     "e1-device-export": (os.environ.get("YETO_MILES_DISTOPT_CHECKOUT", "/home/michael/work/miles-next"),
                          "yeto/s26-e1-device-export"),
+    # S26 E6 fork branch: side-effect-free reads plus the ported CPU-offload state
+    "s26-e6-fp8": (os.environ.get("YETO_MILES_E6_CHECKOUT", "/home/michael/work/miles-s26-e6-fp8"), "ed5f64fd7"),
 }
 
 
