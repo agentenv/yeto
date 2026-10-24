@@ -566,3 +566,36 @@ def test_trajectory_reward_records_carry_the_data_row():
         args, [[sample({DATA_ROW_KEY: 7, "task_id": "t7"})], [sample({"task_id": "t8"})]], limit=8)
     assert split["data_row"] == 7 and split["task_id"] == "t7" and "data_row" not in whole
     assert TRAJECTORY_REWARD_OPTIONAL["data_row"] == (int,)
+
+
+def test_data_split_check_reads_the_island_tapes(tmp_path):
+    from tools.eval.data_split_check import check, read_records
+
+    def tape(name, island, records):
+        path = tmp_path / name
+        path.write_text("".join(json.dumps({"island_id": island, "time_unix": t, **r}) + "\n"
+                                for t, r in records))
+        return path
+
+    def rewards(t, rollout_id, rows):
+        return [(t, {"event": "rl_trajectory_reward", "rollout_id": rollout_id, "data_row": row,
+                     "task_id": f"t{row}"}) for row in rows]
+
+    start = {"event": "rl_driver_start", "data_slot": "0/2"}
+    island0 = tape("i0.jsonl", 0, [(1, start), *rewards(2, 0, [0, 2]),
+                                   (3, {"event": "rl_full_parameter_round", "policy_version": 1}),
+                                   *rewards(4, 1, [4, 6]),  # killed before this round's boundary
+                                   (10, start), (11, {"event": "rl_data_position_restored"}),
+                                   *rewards(12, 0, [4, 6, 8, 10])])
+    island1 = tape("i1.jsonl", 1, [(1, {"event": "rl_driver_start", "data_slot": "1/2"}),
+                                   *rewards(2, 0, [1, 3, 5, 7])])
+    report = check(read_records([island0, island1]))
+    assert report["ok"], report["problems"]
+    assert report["relaunches"] == [{"island": 0, "process": 1, "restored": True, "unknown": False,
+                                     "first_row": 4}]
+    bad = tape("bad.jsonl", 1, [(1, {"event": "rl_driver_start", "data_slot": "1/2"}),
+                                *rewards(2, 0, [1, 2])])
+    report = check(read_records([island0, bad]))
+    assert not report["ok"]
+    assert any(p.startswith("disjoint") for p in report["problems"])
+    assert any(p.startswith("own_slot: island 1") for p in report["problems"])
